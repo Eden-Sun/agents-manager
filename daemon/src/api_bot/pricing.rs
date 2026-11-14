@@ -108,6 +108,25 @@ fn reserve_microusd(
     Ok(to_micro(total_with_factor))
 }
 
+/// 串流中的「目前為止」估價（µUSD，只給畫面顯示，不進帳）：已回報的 input／cache 用量照單價算，
+/// 輸出取「usage 回報值」與「已收字元／位元組粗估（約 3 字元 1 token）」較大者。
+/// 不含壓縮 iteration（要等 message_delta 才知道）。模型不認得回 None。
+pub(super) fn running_cost_microusd(model: &str, fast: bool, p: &super::sse::StreamProgress) -> Option<i64> {
+    let rates = rates(model).ok()?;
+    let speed = match p.speed.as_deref() {
+        Some("fast") => 2,
+        Some(_) => 1,
+        None => if fast { 2 } else { 1 },
+    };
+    let est_out = (p.generated_chars as u64 + p.other_bytes as u64) / 3;
+    let output = p.output_tokens.max(est_out);
+    let tenths = [(p.input_tokens, rates.input), (p.cache_read_tokens, rates.read), (p.cache_creation_tokens, rates.write_5m), (output, rates.output)]
+        .into_iter()
+        .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))?
+        .checked_mul(speed)?;
+    Some(to_micro(tenths))
+}
+
 impl QuoteProvider for DirectGlobal {
     fn reserve(&self, request: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
         let body = request.body();
@@ -472,5 +491,21 @@ mod tests {
             expected_legacy,
             "must fall back to first-turn legacy formula when previous response was compacted"
         );
+    }
+
+    #[test]
+    fn running_cost_uses_reported_usage_and_char_estimate() {
+        use crate::api_bot::sse::StreamProgress;
+        let model = crate::config::API_BOT_MODEL;
+        let p = StreamProgress { input_tokens: 1000, cache_read_tokens: 2000, cache_creation_tokens: 500, output_tokens: 10, generated_chars: 3000, ..Default::default() };
+        // output 取 max(10, 3000/3=1000)=1000：1000×40 + 2000×4 + 500×50 + 1000×200 = 273000 tenths。
+        assert_eq!(running_cost_microusd(model, false, &p), Some(27_300));
+        assert_eq!(running_cost_microusd(model, true, &p), Some(54_600));
+        let fast = StreamProgress { speed: Some("fast".into()), ..p.clone() };
+        assert_eq!(running_cost_microusd(model, false, &fast), Some(54_600));
+        // 回報的 output_tokens 較大時用回報值。
+        let big = StreamProgress { output_tokens: 5000, ..p };
+        assert_eq!(running_cost_microusd(model, false, &big), Some((1000 * 40 + 2000 * 4 + 500 * 50 + 5000 * 200 + 9) / 10));
+        assert_eq!(running_cost_microusd("unknown-model", false, &StreamProgress::default()), None);
     }
 }

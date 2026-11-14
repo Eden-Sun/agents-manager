@@ -964,3 +964,148 @@ async fn turn_that_ends_early_never_sees_the_warning() {
         );
     }
 }
+
+/// 回 text/event-stream 的測試伺服器：每個元素一個 chunk，chunk 之間可延遲。
+async fn sse_fixture(chunks: Vec<Vec<u8>>, delay: Duration) -> (String, Arc<Mutex<Vec<Value>>>, CancellationToken) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let chunks = Arc::new(chunks);
+    let route = axum::Router::new().route(
+        "/v1/messages",
+        axum::routing::post({
+            let seen = seen.clone();
+            move |axum::Json(body): axum::Json<Value>| {
+                let seen = seen.clone();
+                let chunks = chunks.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    let stream = futures::stream::unfold(0usize, move |i| {
+                        let chunks = chunks.clone();
+                        async move {
+                            let chunk = chunks.get(i)?.clone();
+                            if i > 0 {
+                                tokio::time::sleep(delay).await;
+                            }
+                            Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk)), i + 1))
+                        }
+                    });
+                    axum::response::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from_stream(stream))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+    let shutdown = CancellationToken::new();
+    let signal = shutdown.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, route).with_graceful_shutdown(signal.cancelled_owned()).await.unwrap();
+    });
+    (endpoint, seen, shutdown)
+}
+
+fn sse_body(content: &[Value], reason: &str) -> Vec<u8> {
+    // 把一個完整訊息拆成 SSE 事件：每個文字區塊切成兩段 delta，tool_use 的 input 切成兩段 partial_json。
+    let mut out = String::new();
+    let mut ev = |name: &str, data: Value| out.push_str(&format!("event: {name}\ndata: {data}\n\n"));
+    ev("message_start", json!({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,
+        "usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":30,"speed":"fast"}}}));
+    for (i, block) in content.iter().enumerate() {
+        match block["type"].as_str().unwrap() {
+            "text" => {
+                let t = block["text"].as_str().unwrap();
+                let mid = t.chars().count() / 2;
+                let (a, b): (String, String) = (t.chars().take(mid).collect(), t.chars().skip(mid).collect());
+                ev("content_block_start", json!({"type":"content_block_start","index":i,"content_block":{"type":"text","text":""}}));
+                ev("content_block_delta", json!({"type":"content_block_delta","index":i,"delta":{"type":"text_delta","text":a}}));
+                ev("ping", json!({"type":"ping"}));
+                ev("content_block_delta", json!({"type":"content_block_delta","index":i,"delta":{"type":"text_delta","text":b}}));
+            }
+            "tool_use" => {
+                let input = block["input"].to_string();
+                let mid = input.len() / 2;
+                ev("content_block_start", json!({"type":"content_block_start","index":i,"content_block":{"type":"tool_use","id":block["id"],"name":block["name"],"input":{}}}));
+                ev("content_block_delta", json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":&input[..mid]}}));
+                ev("content_block_delta", json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":&input[mid..]}}));
+            }
+            other => panic!("unsupported fixture block {other}"),
+        }
+        ev("content_block_stop", json!({"type":"content_block_stop","index":i}));
+    }
+    ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":reason,"stop_sequence":null},"usage":{"output_tokens":20}}));
+    ev("message_stop", json!({"type":"message_stop"}));
+    out.into_bytes()
+}
+
+#[tokio::test]
+async fn streamed_response_equals_the_nonstreaming_response() {
+    let content = vec![
+        json!({"type":"text","text":"先看一下目錄，再執行。"}),
+        json!({"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"ls -la /tmp"}}),
+    ];
+    let plain = fixture(200, vec![response(content.clone(), "tool_use")]).await;
+    let options = options();
+    let messages = initial().messages;
+    let system = json!("fixture");
+    let req = |endpoint| http::FullMessagesRequest { endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(5), max_response_bytes: 64 * 1024 };
+    let expected = http::complete(&req(&plain.endpoint), &CancellationToken::new()).await.unwrap();
+
+    // 把整段 SSE 切成 7 位元組的小 chunk（含切在 UTF-8 字元中間）。
+    let body = sse_body(&content, "tool_use");
+    let chunks: Vec<Vec<u8>> = body.chunks(7).map(|c| c.to_vec()).collect();
+    let (endpoint, seen, shutdown) = sse_fixture(chunks, Duration::from_millis(0)).await;
+    let got = http::complete(&req(&endpoint), &CancellationToken::new()).await.unwrap();
+    shutdown.cancel();
+
+    assert_eq!(serde_json::to_value(&got).unwrap(), serde_json::to_value(&expected).unwrap());
+    assert_eq!(seen.lock().unwrap()[0]["stream"], true);
+    assert_eq!(plain.seen.lock().unwrap()[0]["stream"], true);
+}
+
+#[tokio::test]
+async fn stream_error_event_maps_to_the_same_http_error_kinds() {
+    let mut body = sse_body(&[json!({"type":"text","text":"partial"})], "end_turn");
+    // 把結尾的 message_delta／message_stop 換成 error 事件。
+    let text = String::from_utf8(body.clone()).unwrap();
+    let cut = text.find("event: message_delta").unwrap();
+    body = text[..cut].as_bytes().to_vec();
+    body.extend_from_slice(b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n");
+    let (endpoint, _seen, shutdown) = sse_fixture(vec![body.clone()], Duration::from_millis(0)).await;
+    let options = options();
+    let messages = initial().messages;
+    let system = json!("fixture");
+    let req = http::FullMessagesRequest { endpoint: &endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(5), max_response_bytes: 64 * 1024 };
+    let err = http::complete(&req, &CancellationToken::new()).await.unwrap_err();
+    assert_eq!(err, http::Error::Http { status: 529, kind: Some("overloaded_error".into()), message: Some("Overloaded".into()), request_id: None });
+    shutdown.cancel();
+
+    let rl = String::from_utf8(body).unwrap().replace("overloaded_error", "rate_limit_error");
+    let (endpoint, _seen, shutdown) = sse_fixture(vec![rl.into_bytes()], Duration::from_millis(0)).await;
+    let req = http::FullMessagesRequest { endpoint: &endpoint, ..req };
+    assert_eq!(http::complete(&req, &CancellationToken::new()).await.unwrap_err(), http::Error::RateLimited { retry_after_secs: None });
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn truncated_stream_is_an_invalid_response_and_progress_is_throttled() {
+    let full = sse_body(&[json!({"type":"text","text":"live progress text"})], "end_turn");
+    let cut = String::from_utf8(full.clone()).unwrap().find("event: message_stop").unwrap();
+    // 兩個 chunk 之間隔 1.2 秒，第二個 chunk 到達後應該回報一次進度。
+    let first = full[..cut / 2].to_vec();
+    let rest = full[cut / 2..cut].to_vec();
+    let (endpoint, _seen, shutdown) = sse_fixture(vec![first, rest], Duration::from_millis(1200)).await;
+    let options = options();
+    let messages = initial().messages;
+    let system = json!("fixture");
+    let req = http::FullMessagesRequest { endpoint: &endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(10), max_response_bytes: 64 * 1024 };
+    let reports = Mutex::new(Vec::new());
+    let sink = |p: &super::sse::StreamProgress| reports.lock().unwrap().push(p.clone());
+    let err = http::complete_with_progress(&req, &CancellationToken::new(), Some(&sink)).await.unwrap_err();
+    assert_eq!(err, http::Error::InvalidResponse);
+    let reports = reports.lock().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].text_tail.contains("live"));
+    shutdown.cancel();
+}

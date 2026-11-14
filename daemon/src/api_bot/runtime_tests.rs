@@ -6247,3 +6247,87 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
     shutdown.cancel();
     server.await.unwrap();
 }
+
+/// 串流回應：兩段文字 delta 之間隔 1.2 秒（讓 1 秒節流的進度幀有機會送出）。
+async fn sse_runtime_server(hit: Arc<Notify>) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    fn ev(name: &str, data: Value) -> String {
+        format!("event: {name}\ndata: {data}\n\n")
+    }
+    async fn complete(axum::extract::State(hit): axum::extract::State<Arc<Notify>>, Json(body): Json<Value>) -> axum::response::Response {
+        assert_eq!(body["stream"], true, "request must ask for a stream");
+        hit.notify_one();
+        let first = [
+            ev("message_start", json!({"type":"message_start","message":{"id":"msg_s","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":1000,"output_tokens":1}}})),
+            ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
+            ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"streamed "}})),
+        ].concat();
+        let rest = [
+            ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}})),
+            ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
+            ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}})),
+            ev("message_stop", json!({"type":"message_stop"})),
+        ].concat();
+        let stream = futures::stream::unfold(0usize, move |i| {
+            let (first, rest) = (first.clone(), rest.clone());
+            async move {
+                match i {
+                    0 => Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(first)), 1)),
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                        Some((Ok(axum::body::Bytes::from(rest)), 2))
+                    }
+                    _ => None,
+                }
+            }
+        });
+        axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap()
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route("/v1/messages", post(complete)).with_state(hit);
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(async move { shutdown_task.cancelled().await }).await.unwrap();
+    });
+    (format!("http://{address}/v1/messages"), shutdown, task)
+}
+
+#[tokio::test]
+async fn api_bot_streamed_turn_publishes_progress_and_stores_the_same_message() {
+    let env = crate::testing::env().await;
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = sse_runtime_server(hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+    let mut rx = env.app.subscribe();
+
+    let (bot, run, turn, conv) = (crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid());
+    insert_bot_and_turn(&env.app, &bot, &run, &turn, &conv, &env.project_id, "stream please").await;
+    let key = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn.clone() };
+    env.app.api_turn_spawn(&key).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    wait_until_completed(&env.app, &key).await;
+
+    // 組出來的訊息與非串流回應相同：assistant 訊息內容就是兩段 delta 接起來。
+    let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+        .bind(&turn).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(reply, "streamed answer");
+
+    // 進度幀：同 turn、帶目前為止的文字與估價。
+    let mut frames = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if ev.kind == "turn_progress" { frames.push(ev.data); }
+    }
+    let frame = frames.iter().find(|f| f["turn_id"] == turn.as_str()).expect("a turn_progress frame for the streaming turn");
+    assert_eq!(frame["bot_id"], bot.as_str());
+    assert_eq!(frame["run_id"], run.as_str());
+    assert!(frame["text"].as_str().unwrap().starts_with("streamed"));
+    assert!(frame["est_cost_microusd"].as_i64().unwrap() > 0);
+    assert!(frame["revision"].as_u64().unwrap() >= 1);
+
+    shutdown.cancel();
+    server.await.unwrap();
+}

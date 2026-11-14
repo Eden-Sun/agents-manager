@@ -544,7 +544,7 @@ impl ApiBotRuntime {
                     return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
                 }
             };
-            (Arc::new(adapter), state)
+            (Arc::new(adapter.with_progress_sink(progress_sink(app))), state)
         } else {
             let adapter = super::adapter::ApiBotAdapter::new(
                 app.db.clone(),
@@ -559,7 +559,7 @@ impl ApiBotRuntime {
             .await
             .map_err(|_| ApiBotError::Upstream)?;
             (
-                Arc::new(adapter),
+                Arc::new(adapter.with_progress_sink(progress_sink(app))),
                 super::runner::State {
                     system: Some(fresh_system_text.clone()),
                     ..Default::default()
@@ -1601,6 +1601,16 @@ struct ApiBotDependencies {
     quote: Arc<dyn super::quote::QuoteProvider>,
     tools: Arc<dyn super::runner::Tools>,
     shutdown_join_timeout: Option<Duration>,
+}
+
+/// 串流進度 → WS `turn_progress` 幀（即時廣播、不寫 DB；採 spawn 因為回呼是同步的）。
+fn progress_sink(app: &crate::state::App) -> super::adapter::ProgressSink {
+    let weak = Arc::downgrade(&app.shared());
+    Arc::new(move |frame| {
+        if let Some(app) = weak.upgrade() {
+            tokio::spawn(async move { app.emit("turn_progress", frame).await; });
+        }
+    })
 }
 
 struct ConfigKeySource(std::sync::Weak<crate::state::App>);

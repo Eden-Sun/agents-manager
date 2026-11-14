@@ -94,7 +94,13 @@ pub(crate) struct ApiBotAdapter {
     cursor: Mutex<CursorState>,
     /// 預留被拒絕（還沒送請求）的原因，給 runtime 寫進失敗通知；只存固定代碼。
     refusal: std::sync::Mutex<Option<String>>,
+    /// 串流進度（`turn_progress` 幀）的出口；沒設就不回報。
+    progress_sink: Option<ProgressSink>,
+    progress_seq: std::sync::atomic::AtomicU64,
 }
+
+/// 收 `turn_progress` 幀的 JSON（`bot_id`／`run_id`／`turn_id`／`text`／`activity`／`alert`／`revision`／`est_cost_microusd`）。
+pub(crate) type ProgressSink = Arc<dyn Fn(Value) + Send + Sync>;
 
 struct CursorState {
     revision: i64,
@@ -133,6 +139,26 @@ pub(super) fn definitive_rejection(err: &http::Error) -> bool {
 }
 
 impl ApiBotAdapter {
+    /// 接上串流進度出口（runtime 在建好 adapter 後呼叫）。
+    pub(crate) fn with_progress_sink(mut self, sink: ProgressSink) -> Self {
+        self.progress_sink = Some(sink);
+        self
+    }
+
+    fn progress_frame(&self, p: &super::sse::StreamProgress) -> Value {
+        let est = super::pricing::running_cost_microusd(&self.options.model, self.options.fast, p);
+        serde_json::json!({
+            "bot_id": self.identity.bot_id,
+            "run_id": self.identity.run_id,
+            "turn_id": self.identity.turn_id,
+            "text": p.text_tail,
+            "activity": "",
+            "alert": "",
+            "revision": self.progress_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
+            "est_cost_microusd": est,
+        })
+    }
+
     fn refuse(&self, reason: impl Into<String>) {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.into());
     }
@@ -205,6 +231,8 @@ impl ApiBotAdapter {
             http_cfg,
             tools,
             refusal: std::sync::Mutex::new(None),
+            progress_sink: None,
+            progress_seq: std::sync::atomic::AtomicU64::new(0),
             cursor: Mutex::new(CursorState {
                 revision: 0,
                 last_api_pending: false,
@@ -314,6 +342,8 @@ impl ApiBotAdapter {
             http_cfg,
             tools,
             refusal: std::sync::Mutex::new(None),
+            progress_sink: None,
+            progress_seq: std::sync::atomic::AtomicU64::new(0),
             cursor: Mutex::new(CursorState {
                 revision: new_rev,
                 last_api_pending: false,
@@ -379,7 +409,13 @@ impl Model for ApiBotAdapter {
                 max_response_bytes: self.http_cfg.max_response_bytes,
             };
 
-            let res = http::complete(&req, cancel).await;
+            let res = match &self.progress_sink {
+                Some(sink) => {
+                    let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
+                    http::complete_with_progress(&req, cancel, Some(&report)).await
+                }
+                None => http::complete(&req, cancel).await,
+            };
             drop(key);
 
             let mut cursor = self.cursor.lock().await;

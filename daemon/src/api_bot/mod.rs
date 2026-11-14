@@ -10,6 +10,7 @@ pub(crate) mod protocol;
 pub(crate) mod quote;
 mod pricing;
 pub(crate) mod runner;
+pub(crate) mod sse;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;

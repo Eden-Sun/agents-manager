@@ -156,6 +156,8 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
     if options.fast {
         body["speed"] = json!("fast");
     }
+    // 串流：長回合才看得到進度；回應由 sse.rs 組回與非串流相同的 Response。
+    body["stream"] = Value::Bool(true);
     if options.compact_at_input_tokens > 0 {
         body["context_management"] = json!({
             "edits": [
