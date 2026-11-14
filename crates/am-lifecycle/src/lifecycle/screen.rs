@@ -362,8 +362,28 @@ fn is_codex_status_row(s: &str) -> bool {
     if warning(s) {
         return true;
     }
-    if let Some(rest) = s.strip_prefix("? for shortcuts") {
-        return rest.is_empty() || (rest.starts_with(char::is_whitespace) && warning(rest.trim()));
+    let shortcut_row = |row: &str| {
+        let r = row.trim();
+        if let Some(rest) = r.strip_prefix("? for shortcuts") {
+            return rest.is_empty() || (rest.starts_with(char::is_whitespace) && warning(rest.trim()));
+        }
+        if let Some(rest) = r.strip_prefix("← for agents") {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return true;
+            }
+            if let Some(after) = rest.strip_prefix("·") {
+                let after = after.trim();
+                if let Some(rem) = after.strip_prefix("? for shortcuts") {
+                    return rem.is_empty() || (rem.starts_with(char::is_whitespace) && warning(rem.trim()));
+                }
+            }
+            return warning(rest);
+        }
+        false
+    };
+    if shortcut_row(s) {
+        return true;
     }
     let Some((head, rest)) = s.split_once('·') else { return false };
     let model = head.split_whitespace().next().unwrap_or("");
@@ -532,11 +552,11 @@ fn is_codex_done_time(w: &str) -> bool {
 fn drop_codex_completion_tail(out: &mut Vec<String>) {
     loop {
         match out.last() {
-            Some(l) if l.trim().is_empty() || is_codex_completion_line(l) => {
+            Some(l) if l.trim().is_empty() || is_codex_completion_line(l) || is_codex_status_row(l) => {
                 let done = !l.trim().is_empty();
                 out.pop();
                 if done {
-                    while out.last().is_some_and(|l| l.trim().is_empty()) {
+                    while out.last().is_some_and(|l| l.trim().is_empty() || is_codex_completion_line(l) || is_codex_status_row(l)) {
                         out.pop();
                     }
                     return;
@@ -1106,15 +1126,6 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
                 continue;
             }
         }
-        // `is_activity_shape` catches spinner glyphs `is_noise` doesn't know.
-        if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
-            continue;
-        }
-        // Codex 0.156 keeps the streamed body when a turn fails or is interrupted, then draws a
-        // terminal status row after it. Do not save that UI row as part of the assistant reply.
-        if kind == "codex" && codex_non_reply_row(s) {
-            break;
-        }
         // Prompt box means the transcript ended. Codex's composer is unboxed `› …`（佔位字不是空的 `›`）。
         // claude 的輸入框／回音都是第 0 欄的 `❯`；縮排的 `  ❯ cmd` 是回覆或貼上內文裡引的，不是輸入框，不能在這裡收尾（issue #762）。
         let at_prompt = if kind == "claude" {
@@ -1123,6 +1134,15 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
             s == "❯" || s == "›" || s.starts_with("❯ ") || s.starts_with("› ")
         };
         if at_prompt || (kind == "claude" && (s == "›" || s.starts_with("› "))) {
+            break;
+        }
+        // `is_activity_shape` catches spinner glyphs `is_noise` doesn't know.
+        if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
+            continue;
+        }
+        // Codex 0.156 keeps the streamed body when a turn fails or is interrupted, then draws a
+        // terminal status row after it. Do not save that UI row as part of the assistant reply.
+        if kind == "codex" && codex_non_reply_row(s) {
             break;
         }
         let s = s.strip_prefix("⎿ ").or_else(|| s.strip_prefix("⎿")).unwrap_or(s).trim();
@@ -1139,6 +1159,12 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     }
     if kind == "codex" {
         drop_codex_completion_tail(&mut out);
+        if out.iter().all(|l| {
+            let t = l.trim();
+            t.is_empty() || is_codex_completion_line(t) || is_codex_status_row(t) || is_noise(t)
+        }) {
+            return None;
+        }
     }
     let joined = out.join("\n").trim().to_string();
     if joined.is_empty() {
@@ -1226,6 +1252,12 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     }
     if kind == "codex" {
         drop_codex_completion_tail(&mut out);
+        if out.iter().all(|l| {
+            let t = l.trim();
+            t.is_empty() || is_codex_completion_line(t) || is_codex_status_row(t) || is_noise(t)
+        }) {
+            return None;
+        }
     }
     while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         out.pop();
@@ -3050,6 +3082,19 @@ mod issue_1664_screenshot_tests {
         let reply = format!("› fix\n• 修復完成。\n\n{screenshot}");
         assert_eq!(extract_reply("codex", &reply).as_deref(), Some("修復完成。"));
         assert_eq!(crate::lifecycle::poller::live_reply("codex", &reply).as_deref(), Some("修復完成。"));
+    }
+
+    #[test]
+    fn codex_worked_for_and_agent_shortcuts_footer_is_not_a_reply() {
+        let snap = "› [lead 通知，不需回覆] 共用規則已新增（使用者 2026-11-14）：在 shell 解析 JSON 一律用 jq，不要用 python3。\n\n  Worked for 11s • 5:04 AM\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol low Fast · ~/project/agents-manager · 試用 Blaze 看是否更快\n  ← for agents · ? for shortcuts";
+        assert_eq!(clean_screen("codex", snap), None);
+        assert_eq!(extract_reply("codex", snap), None);
+        assert_eq!(crate::lifecycle::poller::live_reply("codex", snap), None);
+
+        // 帶警告記號之快捷鍵列亦能正常辨識為 chrome
+        let snap_with_warning = "  Worked for 11s • 5:04 AM\n\n  ← for agents · ? for shortcuts  ⚠ 1 warning · f2 to view";
+        assert_eq!(clean_screen("codex", snap_with_warning), None);
+        assert_eq!(extract_reply("codex", snap_with_warning), None);
     }
 }
 

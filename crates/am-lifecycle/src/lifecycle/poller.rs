@@ -1332,8 +1332,12 @@ async fn fail_stalled_turn(
     // Codex: 判失敗前先看 rollout 是否已完成回覆（例如 task_complete）。
     // 若已有回覆，走 try_fallback 補收，不寫 stall 誤報。
     let bot_for_check = db::bot(app.db(), bot_id).await?;
+    let sent = turn_echo_texts(app, turn_id).await.unwrap_or_default();
+    let is_quiet = turn.prompt_text.as_deref().map_or(false, is_no_reply_notice)
+        || sent.iter().any(|s| is_no_reply_notice(s));
+    // Codex: 判失敗前先看 rollout 是否已完成回覆（例如 task_complete）。
+    // 若已有回覆，走 try_fallback 補收，不寫 stall 誤報。
     if bot_for_check.as_ref().is_some_and(|b| b.kind == "codex") {
-        let sent = turn_echo_texts(app, turn_id).await.unwrap_or_default();
         let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
         let rollout_done = if let Some(bot) = bot_for_check.as_ref() {
             super::codex_rollout::codex_rollout_outcome_for_in_flight(app, bot, &run, &sent, &since_iso).await.is_some()
@@ -1362,7 +1366,20 @@ async fn fail_stalled_turn(
             }
         }
     }
-    let mut reason = stall_reason(&hints, nudged, stall_deadline_for(app, bot_id).await);
+    let has_echo = snapshot.as_deref().map_or(false, |s| {
+        bot_for_check.as_ref().map_or(false, |b| slice_after_sent_echo(&b.kind, s, &sent).is_some())
+    });
+    if is_quiet && (has_echo || run.agent_status == "idle") {
+        tracing::info!(turn = %turn_id, bot = %bot_id, is_quiet, has_echo, "prompt stall watchdog saw idle terminal for no-reply notice; attempting try_fallback");
+        if try_fallback(app, run_id, Some(turn_id)).await.unwrap_or(false) {
+            return Ok(());
+        }
+    }
+    let mut reason = if is_quiet {
+        format!("「不需回覆」通知尚未確認送達終端。請查看終端分頁。")
+    } else {
+        stall_reason(&hints, nudged, stall_deadline_for(app, bot_id).await)
+    };
     if resent {
         reason.push_str(&format!("\n（第一次送出後畫面上完全沒有這則訊息，已自動重送 {MAX_PROMPT_RESENDS} 次，仍沒有反應。）"));
     } else if let Some(why) = resend_blocked {
@@ -1407,6 +1424,19 @@ fn stall_hint_lines(screen: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// 判斷 prompt 是否為明確標記不需回覆的通知（例如 lead 通知、daemon 通知）。
+pub fn is_no_reply_notice(prompt: &str) -> bool {
+    let p = prompt.trim();
+    p.contains("不需回覆")
+        || p.contains("不用回覆")
+        || p.contains("不用回复")
+        || p.contains("不需回复")
+        || p.contains("不需要回覆")
+        || p.contains("不需要回复")
+        || p.contains("no reply needed")
+        || p.contains("do not reply")
 }
 
 /// Neutral wording: symptom + quoted screen + keychain caveat; never claim "not logged in".
@@ -1643,20 +1673,24 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
     let reply_screen = compact_tail.unwrap_or(&fresh);
 
+    let sent = turn_echo_texts(app, &turn.id).await?;
+    let anchored = if compact_tail.is_none() { slice_after_sent_echo(&bot.kind, &read.text, &sent) } else { None };
+    let has_echo = anchored.is_some();
+
     let codex_rollout_outcome = if bot.kind == "codex" && codex_hit.is_none() && !compact_turn {
-        let sent = turn_echo_texts(app, &turn.id).await?;
         let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
         super::codex_rollout::codex_rollout_outcome_for_in_flight(app, &bot, &run, &sent, &since_iso).await
     } else {
         None
     };
-    let (codex_rollout_reply, codex_rollout_error) = match codex_rollout_outcome {
-        Some(super::codex_rollout::NativeOutcome::Reply(reply)) => (Some(reply), None),
+    let (codex_rollout_reply, codex_rollout_empty, codex_rollout_error) = match codex_rollout_outcome {
+        Some(super::codex_rollout::NativeOutcome::Reply(reply)) => (Some(reply), None, None),
+        Some(super::codex_rollout::NativeOutcome::Empty { native_id }) => (None, Some(native_id), None),
         Some(super::codex_rollout::NativeOutcome::Error { native_id, message, reply })
             if turn.native_turn_id.as_deref().is_none_or(|id| id == native_id)
-                && turn.native_session_id.as_deref().is_none_or(|id| Some(id) == run.native_session_id.as_deref()) => (None, Some((native_id, message, reply))),
-        Some(super::codex_rollout::NativeOutcome::Error { .. }) => (None, None),
-        None => (None, None),
+                && turn.native_session_id.as_deref().is_none_or(|id| Some(id) == run.native_session_id.as_deref()) => (None, None, Some((native_id, message, reply))),
+        Some(super::codex_rollout::NativeOutcome::Error { .. }) => (None, None, None),
+        None => (None, None, None),
     };
 
     // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
@@ -1665,13 +1699,8 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     } else if let Some(r) = codex_rollout_reply.clone() {
         Some(r)
     } else {
-    // Only the `❯` row counts as echo; lines 2..n would be stored as the answer. 讀不到送了什麼就不收（#193），
-    // 回合留在飛、下一次再來：當成什麼都沒送，我們自己的 prompt 就被當成 agent 的回覆存下來。
-        let sent = turn_echo_texts(app, &turn.id).await?;
         #[cfg(all(test, feature = "daemon-test-harness"))]
         super::race_point::hit("fallback_after_echo", &turn.id).await;
-        // 回音看得到就以它為準（#1977）：游標可能停在回覆中途，切掉前面的字。compact 尾段照舊。
-        let anchored = if compact_tail.is_none() { slice_after_sent_echo(&bot.kind, &read.text, &sent) } else { None };
         let screen = anchored.as_deref().unwrap_or(reply_screen);
         tracing::debug!(turn = %turn.id, branch = if anchored.is_some() { "echo" } else { "cursor" }, screen_len = screen.len(), fingerprint = %fingerprint(screen), "terminal fallback: reply window");
         match screen_reply(&bot.kind, screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
@@ -1734,6 +1763,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
 
     // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let is_codex_rollout_reply = codex_rollout_reply.is_some();
+    let is_codex_rollout_done = is_codex_rollout_reply || codex_rollout_empty.is_some();
     let mut tx = app.db().begin().await?;
     // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
     let res = if codex_hit.is_some() || codex_rollout_error.is_some() {
@@ -1749,6 +1779,15 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     tracing::info!(turn = %turn.id, "terminal fallback engaged");
+
+    if let Some(native_id) = codex_rollout_empty.as_deref().filter(|s| !s.is_empty()) {
+        sqlx::query("UPDATE turns SET native_session_id=COALESCE(native_session_id, ?), native_turn_id=COALESCE(native_turn_id, ?), delivery_verified=1 WHERE id=? AND run_id=?")
+            .bind(&run.native_session_id).bind(native_id).bind(&turn.id).bind(run_id).execute(&mut *tx).await?;
+    }
+    if has_echo || is_codex_rollout_done {
+        sqlx::query("UPDATE turns SET delivery_verified=1 WHERE id=? AND delivery_verified=0")
+            .bind(&turn.id).execute(&mut *tx).await?;
+    }
 
     if let Some((native_id, error, partial_reply)) = codex_rollout_error {
         sqlx::query("UPDATE turns SET native_session_id=COALESCE(native_session_id, ?), native_turn_id=COALESCE(native_turn_id, ?) WHERE id=? AND run_id=?")
@@ -2216,3 +2255,17 @@ pub trait FallbackTimers: Send + Sync {
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/reply_window_tests.rs"]
 mod reply_window_tests;
+
+#[cfg(test)]
+mod no_reply_notice_tests {
+    use super::*;
+
+    #[test]
+    fn identifies_no_reply_notices() {
+        assert!(is_no_reply_notice("[lead 通知，不需回覆] 共用規則已新增（使用者 2026-11-14）... 照做即可，不用回覆。"));
+        assert!(is_no_reply_notice("這則是 daemon 的通知，不用回覆 daemon；看完照回報接著做你的事"));
+        assert!(is_no_reply_notice("（只記錄，不需回覆）"));
+        assert!(is_no_reply_notice("Notice: no reply needed"));
+        assert!(!is_no_reply_notice("請修正第 4、5 號問題"));
+    }
+}

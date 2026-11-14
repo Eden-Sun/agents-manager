@@ -2,6 +2,7 @@
 use chrono::{DateTime, FixedOffset};
 use serde_json::Value;
 
+#[derive(Debug)]
 pub(super) enum Proof {
     /// Historical logs without task_started retain the existing strict parser.
     Legacy,
@@ -9,7 +10,11 @@ pub(super) enum Proof {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::lifecycle) enum NativeOutcome { Reply(String), Error { native_id: String, message: String, reply: Option<String> } }
+pub(in crate::lifecycle) enum NativeOutcome {
+    Reply(String),
+    Empty { native_id: String },
+    Error { native_id: String, message: String, reply: Option<String> },
+}
 
 fn row(line: &str) -> Option<Value> {
     serde_json::from_str(line).ok()
@@ -167,9 +172,9 @@ pub(super) fn for_prompt(
                 let error = v.pointer("/payload/error").filter(|e| !e.is_null());
                 return match (reply, error) {
                     (Some(text), None) => Some(NativeOutcome::Reply(text.to_owned())),
+                    (None, None) => Some(NativeOutcome::Empty { native_id: native.to_owned() }),
                     (reply, Some(error)) => error.get("message").and_then(Value::as_str)
                         .filter(|s| !s.trim().is_empty()).map(|s| NativeOutcome::Error { native_id: native.to_owned(), message: s.to_owned(), reply: reply.map(str::to_owned) }),
-                    _ => None,
                 };
             }
         }
@@ -314,6 +319,32 @@ mod tests {
             ]);
             assert_eq!(recover(&l, "原問題"), None);
         }
+    }
+    #[test]
+    fn task_complete_with_null_message_yields_native_empty_outcome() {
+        let complete_null = json!({
+            "type": "event_msg",
+            "timestamp": "2026-10-25T10:01:03Z",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-null-msg",
+                "last_agent_message": null
+            }
+        }).to_string();
+        let l = log(vec![
+            event("01:00", "task_started", Some("turn-null-msg")),
+            user("01:01", "不需回覆通知"),
+            complete_null,
+        ]);
+        let lines: Vec<&str> = l.lines().collect();
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-25T10:00:00Z").unwrap();
+        match super::for_prompt(&lines, 1, &["不需回覆通知".into()], &since) {
+            super::Proof::Native(Some(super::NativeOutcome::Empty { native_id })) => {
+                assert_eq!(native_id, "turn-null-msg");
+            }
+            other => panic!("expected Native(Some(Empty)), got {other:?}"),
+        }
+        assert_eq!(recover(&l, "不需回覆通知"), None);
     }
     #[test]
     fn repeated_prompt_is_ambiguous_until_the_new_turns_time_window() {

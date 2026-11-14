@@ -51,6 +51,7 @@ pub fn codex_reply_for_turn(log: &str, sent: &[String], since_iso: &str) -> Opti
     match codex_outcome_for_turn(log, sent, since_iso)? {
         NativeOutcome::Reply(reply) => Some(reply),
         NativeOutcome::Error { reply, .. } => reply,
+        NativeOutcome::Empty { .. } => None,
     }
 }
 
@@ -112,6 +113,13 @@ fn codex_outcome_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option
             }
         }
         return Some(NativeOutcome::Reply(r));
+    } else if let Some(idx) = tc_offset {
+        for line in &lines[start + 1 + idx + 1..] {
+            if crate::lifecycle::delivery::codex_user_text(line).is_some() {
+                return None;
+            }
+        }
+        return Some(NativeOutcome::Empty { native_id: String::new() });
     }
 
     None
@@ -145,7 +153,7 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
     let pos = lines.iter().rposition(|l| is_task_complete_candidate(l, &since))?;
 
     match turn_boundary::for_latest(&lines, pos, &since) {
-        turn_boundary::Proof::Native(reply) => return reply.and_then(|r| match r { NativeOutcome::Reply(s) => Some(s), NativeOutcome::Error { reply, .. } => reply }),
+        turn_boundary::Proof::Native(reply) => return reply.and_then(|r| match r { NativeOutcome::Reply(s) => Some(s), NativeOutcome::Error { reply, .. } => reply, NativeOutcome::Empty { .. } => None }),
         turn_boundary::Proof::Legacy => {}
     }
 
