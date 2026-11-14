@@ -212,12 +212,12 @@ async function mount_with_identities() {
 it('新增身份表單選 agy：預填 HOME=$HOME/.agy-、說明副作用，送出的是 kind agy＋HOME', async () => {
   const requests = await open()
   const form = () => document.querySelector('.identities-panel form, form')!
-  const select = form().querySelector<HTMLSelectElement>('select')!
-  assert.ok([...select.options].some((o) => o.value === 'agy'), 'kind 選單有 agy')
+  const radios = [...form().querySelectorAll<HTMLInputElement>('input[type=radio][name=identity-kind]')]
+  assert.deepEqual(radios.map((r) => r.value), ['claude', 'codex', 'grok', 'agy'], 'kind 是四個 radio')
+  assert.ok(form().querySelector('[role=radiogroup][aria-label=kind]'), 'kind 有 radiogroup 無障礙標記')
   assert.equal(form().querySelector('[data-k="agy-home-hint"]'), null, '其他 kind 不顯示 agy 說明')
   await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, 'agy')
-    select.dispatchEvent(new Event('change', { bubbles: true }))
+    radios.find((r) => r.value === 'agy')!.click()
   })
   const envBox = form().querySelector<HTMLTextAreaElement>('textarea')!
   assert.equal(envBox.value, 'HOME=$HOME/.agy-')

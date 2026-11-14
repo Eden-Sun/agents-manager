@@ -1111,6 +1111,26 @@ button:disabled {
   color: var(--text-dim);
 }
 
+.kind-radios {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.kind-radios > legend {
+  padding: 0;
+  margin-bottom: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.kind-radio-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
 .field input[type='text'],
 .field select,
 .field textarea {

@@ -360,28 +360,32 @@ function NewIdentityForm() {
           <span className="hint">{t('小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字。')}</span>
         ) : null}
       </label>
-      <label className="field">
-        <span>kind</span>
-        <select
-          value={kind}
-          onChange={(e) => {
-            const next = e.target.value as BotKind
-            // 使用者沒改過那一行才跟著換 kind 的設定目錄變數，免得蓋掉打好的。
-            setEnvText((cur) => (cur === ENV_PREFILL[kind] ? ENV_PREFILL[next] : cur))
-            setKind(next)
-          }}
-        >
-          <option value="claude">claude</option>
-          <option value="codex">codex</option>
-          <option value="grok">grok</option>
-          <option value="agy">agy</option>
-        </select>
+      <fieldset className="field kind-radios">
+        <legend>kind</legend>
+        <div className="kind-radio-choices" role="radiogroup" aria-label="kind">
+          {(['claude', 'codex', 'grok', 'agy'] as const).map((k) => (
+            <label key={k}>
+              <input
+                type="radio"
+                name="identity-kind"
+                value={k}
+                checked={kind === k}
+                onChange={() => {
+                  // 使用者沒改過那一行才跟著換 kind 的設定目錄變數，免得蓋掉打好的。
+                  setEnvText((cur) => (cur === ENV_PREFILL[kind] ? ENV_PREFILL[k] : cur))
+                  setKind(k)
+                }}
+              />
+              {k}
+            </label>
+          ))}
+        </div>
         {kind === 'agy' ? (
           <span className="hint" data-k="agy-home-hint">
             {t.x('agy 沒有設定目錄變數，所以這個身份是換一個 {home}：daemon 會建那個目錄，{gemini} 與 agy 的憑證各自獨立（建好是未登入，登入請按身份列上的「登入」），其餘（git／ssh／PATH 等）用連結指回真家目錄。副作用：用這個身份的 agy 看到的 {homeVar} 是那個目錄。', { home: 'HOME', gemini: '.gemini', homeVar: '$HOME' })}
           </span>
         ) : null}
-      </label>
+      </fieldset>
       <label className="field">
         <span>{t.x('env（每行 KEY=VALUE；{home} 與開頭 {tilde} 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）', { home: '$HOME', tilde: '~' })}</span>
         <textarea rows={3} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
