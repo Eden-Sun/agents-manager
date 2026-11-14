@@ -57,7 +57,7 @@ pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
-        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>"
+        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>\n現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"
     );
     ClaudeRequest {
         use_case: USE_CASE,
@@ -829,6 +829,8 @@ mod tests {
         let sys = r.system.unwrap();
         assert!(sys.contains("Traditional Chinese") && sys.contains("fenced code blocks") && sys.contains("commit hashes") && sys.contains("translation only"));
         assert!(r.prompt.contains("<source>\nRun `cargo test` in /tmp\n</source>"));
+        let tail = r.prompt.split("\n</source>\n").nth(1).expect("prompt 有結尾的 </source> 行");
+        assert!(tail.trim_start().starts_with("現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"), "提醒要接在 </source> 之後");
         assert!(r.prompt.contains("Traditional Chinese (zh-TW"));
         assert!(r.prompt.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
         assert!(sys.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
