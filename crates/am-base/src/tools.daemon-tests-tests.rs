@@ -917,6 +917,20 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(dir.join(".config/gh").is_symlink(), ".config 其餘連回去");
         assert!(dir.join(".gitconfig").is_symlink() && dir.join(".ssh").is_symlink(), "git／ssh 設定照常可用");
         assert!(!dir.join(".agy-b").exists(), "不把自己連進自己");
+        // macOS：Library 不能整包連回去，否則身份讀得到真家目錄的 login Keychain（預設帳號的 token）。
+        std::fs::create_dir_all(real.join("Library/Keychains")).unwrap();
+        std::fs::create_dir_all(real.join("Library/Preferences")).unwrap();
+        std::fs::write(real.join("Library/Keychains/login.keychain-db"), "secret").unwrap();
+        // 舊版留下的整包連結要換成真目錄（只移連結，不碰目標）。
+        std::os::unix::fs::symlink(real.join("Library"), dir.join("Library")).unwrap();
+        for _ in 0..2 {
+            let ok = std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap();
+            assert!(ok.success());
+        }
+        assert!(dir.join("Library").is_dir() && !dir.join("Library").is_symlink(), "Library 獨立成真目錄");
+        assert!(dir.join("Library/Preferences").is_symlink(), "Library 其餘照樣連回去");
+        assert!(!dir.join("Library/Keychains").exists(), "login Keychain 不可見");
+        assert!(real.join("Library/Keychains/login.keychain-db").exists(), "真的 Keychain 不被動到");
         // 家目錄就是真家目錄：什麼都不做。
         let same = agy_shadow_home_sh(real.to_str().unwrap(), real.to_str().unwrap());
         assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());

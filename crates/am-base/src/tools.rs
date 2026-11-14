@@ -824,6 +824,19 @@ for p in "$real"/.[!.]* "$real"/..?* "$real"/*; do
   [ "$p" != "$dir" ] || continue
   n=${{p##*/}}
   case "$n" in .gemini|.config) continue ;; esac
+  if [ "$n" = Library ] && [ -d "$p" ]; then
+    # macOS：login Keychain 的位置是 `$HOME/Library/Keychains`，整個 Library 連回去＝身份照樣讀到預設帳號的 token。
+    # 所以 Library 自己建成真目錄，裡面的每一項連回真的 Library，唯獨 Keychains 不連（只移掉舊的整包連結，不碰目標）。
+    [ -L "$dir/Library" ] && rm -f "$dir/Library"
+    mkdir -p "$dir/Library" || exit 1
+    for c in "$p"/.[!.]* "$p"/..?* "$p"/*; do
+      [ -e "$c" ] || [ -L "$c" ] || continue
+      cn=${{c##*/}}
+      case "$cn" in Keychains) continue ;; esac
+      [ -e "$dir/Library/$cn" ] || [ -L "$dir/Library/$cn" ] || ln -s "$c" "$dir/Library/$cn"
+    done
+    continue
+  fi
   [ -e "$dir/$n" ] || [ -L "$dir/$n" ] || ln -s "$p" "$dir/$n"
 done
 for p in "$real"/.config/* "$real"/.config/.[!.]*; do
