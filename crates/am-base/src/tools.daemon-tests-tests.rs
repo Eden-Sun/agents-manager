@@ -922,3 +922,22 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());
         let _ = std::fs::remove_dir_all(&root);
     }
+
+#[cfg(test)]
+mod agy_login_recheck_tests {
+    use super::*;
+
+    /// agy 登入 pane 還開著（TUI 不退出）時，要每隔一段時間重驗；已登入、退出中、非 agy、登出都不重驗。
+    #[test]
+    fn agy_login_rechecks_while_the_tui_stays_open_until_it_answers_logged_in() {
+        let t0 = tokio::time::Instant::now();
+        let due = t0;
+        let later = t0 + Duration::from_secs(1);
+        assert!(agy_login_recheck_due("agy", false, false, true, due, due));
+        assert!(!agy_login_recheck_due("agy", false, false, true, later, t0 + Duration::from_secs(10)), "還沒到間隔");
+        assert!(!agy_login_recheck_due("agy", false, true, true, due, due), "已問到已登入就停");
+        assert!(!agy_login_recheck_due("agy", false, false, false, due, due), "CLI 已結束就交給收尾重驗");
+        assert!(!agy_login_recheck_due("agy", true, false, true, due, due), "登出不做登入重驗");
+        assert!(!agy_login_recheck_due("claude", false, false, true, due, due), "其他 kind 照舊只在收尾重驗");
+    }
+}

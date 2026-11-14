@@ -612,11 +612,10 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         let mut saw_cli = false;
-        let close = || async {
-            if app.hosts().is_current(&fence).await {
-                H::close_login_shell(&app, &host, &pane_id).await;
-            }
-        };
+        // agy 是互動 TUI：登完常常不退出（只是回到主畫面），CLI 不結束就永遠等不到收尾重驗。
+        // 所以 agy 登入中每隔一段時間重驗一次，一旦問到已登入就停（之後只等 pane 收尾）。
+        let mut agy_logged_in_seen = false;
+        let mut next_agy_check = tokio::time::Instant::now() + AGY_LOGIN_RECHECK_EVERY;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if !app.hosts().is_current(&fence).await {
@@ -624,41 +623,65 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
                 return;
             }
             let client = fence.conn().client.clone();
-            let Ok(processes) = client.pane_process_info(&pane_id).await else {
-                if tokio::time::Instant::now() >= deadline {
-                    close().await;
-                    return;
-                }
-                continue;
+            let now = tokio::time::Instant::now();
+            let cli_active = match client.pane_process_info(&pane_id).await {
+                Ok(processes) => processes.iter().any(|p| {
+                    p.argv.iter().chain(p.argv0.iter()).any(|arg| {
+                        std::path::Path::new(arg).file_name().and_then(|v| v.to_str()) == Some(kind.as_str())
+                    })
+                }),
+                // 探不到 pane：不算 CLI 已結束，等到 deadline 再收。
+                Err(_) => saw_cli,
             };
-            let cli_active = processes.iter().any(|p| {
-                p.argv.iter().chain(p.argv0.iter()).any(|arg| {
-                    std::path::Path::new(arg).file_name().and_then(|v| v.to_str()) == Some(kind.as_str())
-                })
-            });
             saw_cli |= cli_active;
-            if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
-                let after = recheck_identity_login_fenced(&app, &host, &name, &fence).await;
-                // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
-                if !logout && after == Some(true) {
-                    H::clear_login_prompt_and_push(&app, &host, &name).await;
-                }
-                if logout && logout_result(after) == Some(false) {
-                    let changed =
-                        record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
-                    if changed {
-                        H::host_changed(&app, &fence).await;
-                    }
-                }
-                close().await;
+            let ended = (saw_cli && !cli_active) || (!saw_cli && now >= startup_deadline);
+            if ended || now >= deadline {
+                // 不論是 CLI 結束、從未出現、或撐到 deadline，都重驗一次再收 pane（deadline 以前是直接關、不重驗）。
+                finish_identity_login_pane(&app, &host, &name, &fence, &pane_id, logout).await;
                 return;
             }
-            if tokio::time::Instant::now() >= deadline {
-                close().await;
-                return;
+            if agy_login_recheck_due(&kind, logout, agy_logged_in_seen, cli_active, now, next_agy_check) {
+                next_agy_check = now + AGY_LOGIN_RECHECK_EVERY;
+                if recheck_identity_login_fenced(&app, &host, &name, &fence).await == Some(true) {
+                    agy_logged_in_seen = true;
+                    H::clear_login_prompt_and_push(&app, &host, &name).await;
+                }
             }
         }
     });
+}
+
+/// agy 登入中重驗的間隔（每次是一支 `agy models`，本機約 2 秒）。
+const AGY_LOGIN_RECHECK_EVERY: Duration = Duration::from_secs(10);
+
+/// 這一拍要不要在 CLI 還開著時重驗（只有 agy 登入、還沒問到已登入、到了間隔）。
+pub fn agy_login_recheck_due(kind: &str, logout: bool, already_logged_in: bool, cli_active: bool, now: tokio::time::Instant, next: tokio::time::Instant) -> bool {
+    kind == "agy" && !logout && !already_logged_in && cli_active && now >= next
+}
+
+/// 登入／登出 pane 收尾：重驗一次（登出問不出來時照未登入算），寫回快取，然後關掉 pane（仍是這條連線才關）。
+async fn finish_identity_login_pane<H: ToolsEnv>(
+    app: &Arc<H>,
+    host: &str,
+    name: &str,
+    fence: &crate::hosts::HostFence,
+    pane_id: &str,
+    logout: bool,
+) {
+    let after = recheck_identity_login_fenced(app, host, name, fence).await;
+    // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
+    if !logout && after == Some(true) {
+        H::clear_login_prompt_and_push(app, host, name).await;
+    }
+    if logout && logout_result(after) == Some(false) {
+        let changed = record_identity_logged_out(app, host, name, "剛剛在這台主機登出（重驗問不出來時照登出算）", fence).await;
+        if changed {
+            H::host_changed(app, fence).await;
+        }
+    }
+    if app.hosts().is_current(fence).await {
+        H::close_login_shell(app, host, pane_id).await;
+    }
 }
 
 /// Headless `claude auth login` never marks onboarding done, so interactive `claude` opens on
