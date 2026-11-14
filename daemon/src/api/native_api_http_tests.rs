@@ -66,6 +66,8 @@ async fn api_usage_sums_attempts_and_is_user_only() {
         sqlx::query("INSERT INTO api_bot_attempts(id,bot_id,turn_id,generation,ordinal,request_hash,requested_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,?,1,?,'h','standard',?,?,?,?,'v',?)")
             .bind(crate::db::ulid()).bind(&bot2).bind(turn).bind(n).bind(state).bind(usage).bind(reserved).bind(est).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     }
+    // t2（進行中）是 fast 回合：turns[].speed 要如實回報這一回合送出請求用的速度。
+    sqlx::query("UPDATE api_bot_attempts SET requested_speed='fast' WHERE turn_id='t2'").execute(&env.app.db).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
     let shutdown = CancellationToken::new(); let stop = shutdown.clone();
     let router = super::router(env.app.clone());
@@ -93,6 +95,7 @@ async fn api_usage_sums_attempts_and_is_user_only() {
     assert_eq!((t1["input_tokens"].as_i64(), t1["output_tokens"].as_i64(), t1["cache_read_tokens"].as_i64(), t1["cache_write_tokens"].as_i64()), (Some(11), Some(7), Some(20), Some(7)));
     let t2 = turns.iter().find(|t| t["turn_id"] == "t2").unwrap();
     assert_eq!((t2["in_flight"].as_bool(), t2["reserved_usd"].as_f64(), t2["cost_usd"].as_f64()), (Some(true), Some(0.5), Some(0.0)));
+    assert_eq!((t1["speed"].as_str(), t2["speed"].as_str()), (Some("standard"), Some("fast")));
     assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
     assert!(cli_resp.starts_with("HTTP/1.1 400"), "{cli_resp}");
 }

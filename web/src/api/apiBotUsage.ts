@@ -12,6 +12,8 @@ export interface ApiTurnCost {
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
+  /** 這一回合送出請求用的速度（`standard`／`fast`）；每回合開始讀一次設定、整回合固定。舊 daemon 沒給＝null。 */
+  speed: string | null
 }
 
 export interface ApiBotUsage {
@@ -45,6 +47,7 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     output_tokens: n(x, 'output_tokens'),
     cache_read_tokens: n(x, 'cache_read_tokens'),
     cache_write_tokens: n(x, 'cache_write_tokens'),
+    speed: optStr(pick(x, 'speed')),
   }))
   return {
     turns,

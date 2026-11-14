@@ -30,14 +30,33 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
   })
   const turns = useApiTurnCosts(botId, true)
   const turn = turnSig ? turns.find((x) => x.turn_id === turnSig) : undefined
+  // 速度每回合開始時讀一次設定、整回合固定：設定在回合中途改了，這一回合仍是舊速度，下一回合才換。
+  const configured = useStore((s) => {
+    const b = s.bots.find((x) => x.id === botId)
+    return b ? (b.fast ? 'fast' : 'standard') : null
+  })
+  const speedNote =
+    turn?.speed && configured && turn.speed !== configured ? (
+      <span className="msg-cost mono api-speed-note" role="status">
+        {t('本回合仍是 {cur}，下一回合起改為 {next}', { cur: turn.speed, next: configured })}
+      </span>
+    ) : null
   if (est !== null) {
     const x = (turn?.cost_usd ?? 0) + est / 1_000_000
-    return <span className="msg-cost mono">{t('第 {n} 次請求 · ≈ ${x} 目前為止', { n: turn?.requests ?? 1, x: x.toFixed(3) })}</span>
+    return (
+      <>
+        <span className="msg-cost mono">{t('第 {n} 次請求 · ≈ ${x} 目前為止', { n: turn?.requests ?? 1, x: x.toFixed(3) })}</span>
+        {speedNote}
+      </>
+    )
   }
   if (!turn) return null
   return (
-    <span className="msg-cost mono">
-      {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: (turn.cost_usd + turn.reserved_usd).toFixed(3), y: turn.reserved_usd.toFixed(3) })}
-    </span>
+    <>
+      <span className="msg-cost mono">
+        {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: (turn.cost_usd + turn.reserved_usd).toFixed(3), y: turn.reserved_usd.toFixed(3) })}
+      </span>
+      {speedNote}
+    </>
   )
 }

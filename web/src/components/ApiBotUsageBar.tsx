@@ -205,8 +205,8 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         <span className="sl-k">{t('快取命中')}</span>
         <span className="sl-v">{rate === null ? '—' : `${Math.round(rate * 100)}%`}</span>
       </span>
-      <span className={`sl-item${usage.last?.speed === 'fast' ? ' api-usage-fast' : ''}`} data-k="speed" title={t('最近一次回覆的 usage.speed')}>
-        <span className="sl-k">speed</span>
+      <span className={`sl-item${usage.last?.speed === 'fast' ? ' api-usage-fast' : ''}`} data-k="speed" title={t('上一次呼叫實際用的 speed（不是目前設定；speed 設定改了要下一回合才生效）')}>
+        <span className="sl-k">{t('上一次 speed')}</span>
         <span className="sl-v">{usage.last?.speed ?? '—'}</span>
       </span>
       <span className="sl-item" data-k="calls" title={t('已結算 {rec} 次、預留中 {res} 次、結果不明 {unk} 次、失敗 {fail} 次', { rec: usage.attempts.recorded, res: usage.attempts.reserved, unk: usage.attempts.unknown, fail: usage.attempts.failed })}>

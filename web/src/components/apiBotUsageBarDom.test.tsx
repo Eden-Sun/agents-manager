@@ -136,3 +136,34 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
     rawTransport.request = origRequest
   }
 })
+
+test('ApiBotUsageBar 的 speed 標成「上一次 speed」，tooltip 說明不是目前設定', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 1, recorded: 1, reserved: 0, unknown: 0, failed: 0 },
+        cost_microusd: { recorded: 1000, reserved: 0, unknown: 0 },
+        tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null,
+        last: { speed: 'fast', at: null, input_tokens: 1, output_tokens: 1 },
+        turns: [],
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') return { cap_usd: null, since: null, spent_usd: 0 }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const item = document.querySelector('[data-k="speed"]')!
+    assert.ok(item, 'speed 項目要在')
+    assert.match(item.querySelector('.sl-k')!.textContent ?? '', /上一次/)
+    assert.equal(item.querySelector('.sl-v')!.textContent, 'fast')
+    assert.match(item.getAttribute('title') ?? '', /不是目前設定/)
+  } finally {
+    rawTransport.request = orig
+  }
+})

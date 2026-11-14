@@ -224,6 +224,8 @@ export function ApiModelFields({
             </span>
             {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
             {liveFast(kind) ? <span className="field-note live-note">{t('執行中改會即時套用，不用重啟')}</span> : null}
+            {/* claude-api 每回合開始讀一次設定：進行中的回合維持原速度，下一回合起才換（單價與預留都綁回合）。 */}
+            {kind === 'claude-api' ? <span className="field-note live-note">{t('下一回合起生效；進行中的回合維持原速度')}</span> : null}
           </span>
         </label>
       ) : null}
@@ -496,7 +498,7 @@ export function ModelQuickPicker({
           </div>
         ) : null}
         <span className="hint" id={hintId} aria-hidden="true">
-          {liveFast(kind) ? t('執行中改模型、強度或 fast 都會即時套用') : t('執行中改模型或強度會即時套用')}
+          {kind === 'claude-api' ? t('改模型、強度或 fast 下一回合起生效；進行中的回合維持原設定') : liveFast(kind) ? t('執行中改模型、強度或 fast 都會即時套用') : t('執行中改模型或強度會即時套用')}
         </span>
       </div>
     ) : null

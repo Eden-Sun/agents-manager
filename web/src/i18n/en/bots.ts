@@ -282,6 +282,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '選擇模型': 'Choose a model',
   '載入模型清單…': 'Loading model list…',
   '執行中改模型、強度或 fast 都會即時套用': 'Model, effort, and Fast changes apply immediately while running',
+  '下一回合起生效；進行中的回合維持原速度': 'Takes effect from the next turn; the turn in progress keeps its speed',
+  '改模型、強度或 fast 下一回合起生效；進行中的回合維持原設定': 'Model, effort and fast changes take effect from the next turn; the turn in progress keeps its settings',
   '執行中改模型或強度會即時套用': 'Model and effort changes apply immediately while running',
   '預設帳號': 'Default account',
   '子 agent 還在跑（{n}）': { one: 'Sub-agent still running ({n})', other: 'Sub-agents still running ({n})' },

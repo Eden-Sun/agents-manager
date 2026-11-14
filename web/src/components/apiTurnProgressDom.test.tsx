@@ -51,3 +51,28 @@ test('串流估價存在時顯示「≈ $x 目前為止」（已結算＋這次�
     rawTransport.request = orig
   }
 })
+
+test('進行中回合的速度與目前設定不一致時，標出「本回合仍是 … 下一回合起改為 …」；一致時不出現', async () => {
+  const orig = rawTransport.request.bind(rawTransport)
+  let speed = 'fast'
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) return { ...usage, turns: [{ ...usage.turns[0], speed }] }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    useStore.setState({
+      bots: [{ id: 'b1', name: 'api', kind: 'claude-api', fast: false, project_id: 'p' }],
+      turns: { b1: { t1: { id: 't1', status: 'in_flight' } as never } },
+      liveReply: {},
+    } as never)
+    await mount(<ApiTurnProgress botId="b1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    const note = () => document.querySelector('.api-speed-note')?.textContent ?? ''
+    assert.match(note(), /本回合仍是 fast，下一回合起改為 standard/)
+    // 設定與本回合速度一致：不提示。
+    await act(async () => { useStore.setState({ bots: [{ id: 'b1', name: 'api', kind: 'claude-api', fast: true, project_id: 'p' }] } as never) })
+    assert.equal(note(), '')
+  } finally {
+    rawTransport.request = orig
+  }
+})
