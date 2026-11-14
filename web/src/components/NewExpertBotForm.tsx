@@ -252,7 +252,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       model,
       effort: effectiveEffort,
       fast: kind === 'codex' || apiKind ? fast : undefined,
-      persona: apiKind ? null : persona.trim() || null,
+      persona: persona.trim() || null,
       autostart: false,
       identity: apiKind ? null : identity || null,
       ...(apiKind ? {} : shareCreateFields(shareProfile, folderIn)),
@@ -500,7 +500,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       </label>
 
       {/* 人設保留 */}
-      {apiKind ? null : <PersonaField value={persona} onChange={setPersona} collapsible />}
+      <PersonaField value={persona} onChange={setPersona} collapsible />
       {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />}
 
       {errorMsg ? <div className="hint warn" role="alert">{errorMsg}</div> : null}

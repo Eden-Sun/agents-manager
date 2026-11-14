@@ -426,7 +426,7 @@ test('專家模式：建 claude-api 顧問只送 daemon 收的欄位，PATCH 帶
   assert.equal(body.autostart, false)
   assert.ok(!body.identity, '不送 identity')
   for (const k of ['share_profile', 'share_folder', 'confirm_trusted', 'args', 'env']) assert.ok(!(k in body) || !body[k] || (Array.isArray(body[k]) && !(body[k] as unknown[]).length), `不送 ${k}`)
-  assert.ok(!body.persona, '不送人設')
+  assert.equal(body.persona ?? null, null, '沒填人設送 null（claude-api 的 system prompt 也吃人設，欄位照常顯示）')
 
   const patch = requests.find((r) => r.method === 'PATCH' && /\/bots\/new-b1$/.test(r.path))!
   const patchBody = patch.body as Record<string, unknown>
