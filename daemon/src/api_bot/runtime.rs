@@ -94,6 +94,8 @@ struct RuntimeInner {
     fail_reasons: Mutex<HashMap<FullKey, String>>,
     /// 達到 API 呼叫上限的回合（記錄該回合的上限值 N，由 completion owner 取走後寫進系統提示）。
     cap_reached: Mutex<HashMap<FullKey, usize>>,
+    /// 對話壓縮的提示訊息（runner 結束時寫入、completion owner 取走後寫進對話的系統訊息）。
+    compaction_notes: Mutex<HashMap<FullKey, String>>,
 }
 
 /// Runtime storage is initialized without tasks, sockets, or database work.
@@ -124,6 +126,7 @@ impl ApiBotRuntime {
                 explicit_quarantine: Mutex::new(HashMap::new()),
                 fail_reasons: Mutex::new(HashMap::new()),
                 cap_reached: Mutex::new(HashMap::new()),
+                compaction_notes: Mutex::new(HashMap::new()),
             }),
             dependencies: Mutex::new(None),
         }
@@ -496,6 +499,7 @@ impl ApiBotRuntime {
             effort,
             fast: bot.fast != 0,
             max_tokens: limits.max_output_tokens,
+            compact_at_input_tokens: limits.compact_at_input_tokens,
         };
         options.validate().map_err(|_| ApiBotError::Upstream)?;
 
@@ -645,6 +649,7 @@ impl ApiBotRuntime {
                 #[cfg(all(test, feature = "daemon-test-harness"))]
                 crate::lifecycle::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
+                let responses_before = state.responses.len();
                 let execution = super::runner::run(
                     adapter.as_ref(),
                     &tools,
@@ -656,6 +661,33 @@ impl ApiBotRuntime {
                 let (result, deadline_elapsed) =
                     await_runner_deadline(execution, &cancel, turn_timeout).await;
                 let refusal = adapter.take_refusal();
+                let compaction_note = state.responses[responses_before..].iter().rev().find_map(|r| {
+                    let has_compaction_block = r.content.iter().any(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("compaction"));
+                    let iterations = r.usage.get("iterations").and_then(serde_json::Value::as_array);
+                    let comp_it = iterations.and_then(|arr| arr.iter().find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some("compaction")));
+                    if has_compaction_block || comp_it.is_some() {
+                        let n = comp_it.and_then(|it| it.get("input_tokens")).and_then(serde_json::Value::as_u64);
+                        let m = iterations
+                            .and_then(|arr| arr.iter().find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some("message")))
+                            .and_then(|it| it.get("input_tokens"))
+                            .and_then(serde_json::Value::as_u64)
+                            .or_else(|| r.usage.get("input_tokens").and_then(serde_json::Value::as_u64));
+                        if let (Some(n), Some(m)) = (n, m) {
+                            Some(format!("對話已由 API 壓縮（約 {n} tokens → {m} tokens）"))
+                        } else {
+                            Some("對話已由 API 壓縮".to_string())
+                        }
+                    } else {
+                        None
+                    }
+                });
+                if let Some(note) = compaction_note {
+                    fail_inner
+                        .compaction_notes
+                        .lock()
+                        .expect("compaction note mutex poisoned")
+                        .insert(fail_key.clone(), note);
+                }
                 let outcome = if deadline_elapsed {
                     TurnOutcome::Failed("turn_timeout".into())
                 } else {
@@ -1109,11 +1141,15 @@ async fn own_ticket_inner(
             } else { None };
             let fail_reason = owner.app.api_bot_runtime.inner.fail_reasons.lock().expect("fail reason mutex poisoned").remove(&FullKey::from(&owner.key));
             let cap_reached = owner.app.api_bot_runtime.inner.cap_reached.lock().expect("cap reached mutex poisoned").remove(&FullKey::from(&owner.key));
+            let compaction_note = owner.app.api_bot_runtime.inner.compaction_notes.lock().expect("compaction note mutex poisoned").remove(&FullKey::from(&owner.key));
             if let Some((committed, payload, published)) = settle_joined_completion(
                 &owner, joined, final_text, &shutdown, session_commit.as_ref(),
             ).await {
                 let revision = committed.session_revision;
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
+                if let Some(note) = compaction_note {
+                    super::completion::post_compaction_notice(&owner.app, &owner.key, &note).await;
+                }
                 if joined == Completion::Failed {
                     super::completion::post_failure_notice(&owner.app, &owner.key, fail_reason.as_deref().unwrap_or("unknown")).await;
                 } else if let Some(n) = cap_reached {

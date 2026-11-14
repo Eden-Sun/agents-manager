@@ -5998,3 +5998,252 @@ async fn spawn_retrying_busy(app: &crate::state::App, key: &ApiTurnKey) {
     .await
     .unwrap();
 }
+
+async fn compaction_test_server(
+    requests: Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Value)>>>,
+    replies: Arc<std::sync::Mutex<std::collections::VecDeque<Value>>>,
+    hit: Arc<Notify>,
+) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    async fn complete(
+        axum::extract::State((reqs, replies, hit)): axum::extract::State<(
+            Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Value)>>>,
+            Arc<std::sync::Mutex<std::collections::VecDeque<Value>>>,
+            Arc<Notify>,
+        )>,
+        headers: axum::http::HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        reqs.lock().unwrap().push((headers, body));
+        hit.notify_one();
+        let resp = replies.lock().unwrap().pop_front().unwrap_or_else(|| {
+            json!({
+                "id": "fixture-message",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "fixture answer"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1, "speed": "standard"}
+            })
+        });
+        Json(resp)
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/v1/messages", post(complete))
+        .with_state((requests, replies, hit));
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
+            .await
+            .unwrap();
+    });
+    (format!("http://{address}/v1/messages"), shutdown, task)
+}
+
+#[tokio::test]
+async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() {
+    let env = crate::testing::env().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let replies = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = compaction_test_server(requests.clone(), replies.clone(), hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    // Config: compact_at_input_tokens = 150_000 by default; set turn cost cap to allow turns
+    env.app
+        .cfg
+        .update(|c| {
+            c.claude_api.api_bot.max_turn_cost_microusd = Some(5_000_000);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let turn1 = crate::db::ulid();
+    let turn2 = crate::db::ulid();
+    let turn3 = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    // Turn 1 response: contains thinking block, compaction block, text, and iterations in usage
+    replies.lock().unwrap().push_back(json!({
+        "id": "msg_turn1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5-5",
+        "content": [
+            {"type": "thinking", "thinking": "deep thoughts in turn 1", "signature": "sig1"},
+            {"type": "compaction", "content": "Summary of previous turns"},
+            {"type": "text", "text": "Turn 1 finished"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 200,
+            "output_tokens": 200,
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "iterations": [
+                {"type": "compaction", "input_tokens": 180000, "output_tokens": 3000},
+                {"type": "message", "input_tokens": 200, "output_tokens": 200}
+            ]
+        }
+    }));
+
+    // Start turn 1
+    insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "first prompt").await;
+    let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
+    env.app.api_turn_spawn(&key1).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=? AND run_id=?")
+                .bind(&key1.turn_id).bind(&key1.run_id).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(ref s) = status {
+                if s != "in_flight" {
+                    assert_eq!(s, "completed");
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+
+    // Verify Request 1:
+    // 1. Beta header contains compact-2026-01-12
+    // 2. context_management present with trigger 150000
+    {
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let (ref headers, ref body) = reqs[0];
+        let beta = headers["anthropic-beta"].to_str().unwrap();
+        assert!(beta.contains("compact-2026-01-12"));
+        assert!(beta.contains("thinking-binding-controls-2026-08-01"));
+        let cm = body.get("context_management").expect("context_management in request 1");
+        assert_eq!(cm["edits"][0]["type"], "compact_20260112");
+        assert_eq!(cm["edits"][0]["trigger"]["value"], 150_000);
+    }
+
+    // 3. Verify system note written for Turn 1 with exact numbers
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
+                .bind(&turn1).fetch_one(&env.app.db).await.unwrap();
+            if n > 0 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let sys_note1: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+        .bind(&turn1).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(sys_note1, "對話已由 API 壓縮（約 180000 tokens → 200 tokens）");
+
+    // Turn 2 response: plain message
+    replies.lock().unwrap().push_back(json!({
+        "id": "msg_turn2",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5-5",
+        "content": [{"type": "text", "text": "Turn 2 finished"}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 250,
+            "output_tokens": 100,
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        }
+    }));
+
+    // Start turn 2
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second prompt',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
+    spawn_retrying_busy(&env.app, &key2).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    wait_until_completed(&env.app, &key2).await;
+
+    // Verify Request 2:
+    // - compaction block is resent
+    // - thinking block before it is NOT resent
+    {
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        let (_, ref body2) = reqs[1];
+        let sent_msgs = body2["messages"].as_array().unwrap();
+        let turn1_assistant = sent_msgs[1]["content"].as_array().unwrap();
+        assert!(!turn1_assistant.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("thinking")), "thinking blocks before compaction must NOT be resent");
+        assert!(turn1_assistant.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")), "compaction block must be resent");
+    }
+
+    // Now test: 0 disables both beta header and context_management
+    env.app
+        .cfg
+        .update(|c| {
+            c.claude_api.api_bot.compact_at_input_tokens = 0;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    replies.lock().unwrap().push_back(json!({
+        "id": "msg_turn3",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-5-5",
+        "content": [
+            {"type": "compaction", "content": "Compacted without iterations numbers"},
+            {"type": "text", "text": "Turn 3 finished"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 1000,
+            "output_tokens": 50,
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+        }
+    }));
+
+    // Start turn 3
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','third prompt',?)")
+        .bind(&turn3).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key3 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn3.clone() };
+    spawn_retrying_busy(&env.app, &key3).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
+    wait_until_completed(&env.app, &key3).await;
+
+    // Verify Request 3:
+    // - 0 disables both: beta header does not have compact-2026-01-12, context_management is None
+    {
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3);
+        let (ref headers, ref body3) = reqs[2];
+        let beta = headers["anthropic-beta"].to_str().unwrap();
+        assert!(!beta.contains("compact-2026-01-12"), "0 must disable compact beta header");
+        assert!(body3.get("context_management").is_none(), "0 must disable context_management in body");
+    }
+
+    // Verify system note for Turn 3 without numbers: 「對話已由 API 壓縮」
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
+                .bind(&turn3).fetch_one(&env.app.db).await.unwrap();
+            if n > 0 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let sys_note3: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'")
+        .bind(&turn3).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(sys_note3, "對話已由 API 壓縮");
+
+    shutdown.cancel();
+    server.await.unwrap();
+}

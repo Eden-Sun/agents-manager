@@ -24,6 +24,7 @@ fn options() -> Options {
         effort: "medium".into(),
         fast: true,
         max_tokens: 4096,
+        compact_at_input_tokens: 0,
     }
 }
 fn initial() -> State {
@@ -38,6 +39,7 @@ fn initial() -> State {
 struct Fixture {
     endpoint: String,
     seen: Arc<Mutex<Vec<Value>>>,
+    seen_headers: Arc<Mutex<Vec<axum::http::HeaderMap>>>,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -51,18 +53,27 @@ async fn fixture(status: u16, replies: Vec<Value>) -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_headers = Arc::new(Mutex::new(Vec::new()));
     let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(replies)));
     let route = axum::Router::new().route(
         "/v1/messages",
         axum::routing::post({
             let seen = seen.clone();
+            let seen_headers = seen_headers.clone();
             move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
                 let seen = seen.clone();
+                let seen_headers = seen_headers.clone();
                 let queue = queue.clone();
                 async move {
                     assert_eq!(headers["x-api-key"], "fixture-not-a-real-key");
                     assert_eq!(headers["anthropic-version"], "2023-06-01");
-                    assert_eq!(headers["anthropic-beta"], super::protocol::THINKING_BINDING_BETA, "只帶 thinking 綁定那一個 beta");
+                    let beta = headers["anthropic-beta"].to_str().unwrap();
+                    assert!(
+                        beta == super::protocol::THINKING_BINDING_BETA
+                            || beta == format!("{},{}", super::protocol::THINKING_BINDING_BETA, super::protocol::COMPACT_BETA),
+                        "unexpected anthropic-beta: {beta}"
+                    );
+                    seen_headers.lock().unwrap().push(headers);
                     seen.lock().unwrap().push(body);
                     let value = queue.lock().unwrap().pop_front().unwrap_or(Value::Null);
                     (
@@ -85,6 +96,7 @@ async fn fixture(status: u16, replies: Vec<Value>) -> Fixture {
     Fixture {
         endpoint,
         seen,
+        seen_headers,
         shutdown,
         task,
     }
@@ -99,6 +111,22 @@ impl Model for HttpModel<'_> {
         Box::pin(async move {
             crate::api_bot::http::complete(&http::FullMessagesRequest {
                 endpoint:&self.0.endpoint,key:"fixture-not-a-real-key",options:&options(),
+                system:&json!([{"type":"text","text":"stable rules","cache_control":{"type":"ephemeral"}}]),
+                messages,timeout:Duration::from_secs(2),max_response_bytes:64*1024,
+            },cancel).await
+        })
+    }
+}
+struct HttpModelWithOptions<'a>(&'a Fixture, Options);
+impl Model for HttpModelWithOptions<'_> {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Response, http::Error>> {
+        Box::pin(async move {
+            crate::api_bot::http::complete(&http::FullMessagesRequest {
+                endpoint:&self.0.endpoint,key:"fixture-not-a-real-key",options:&self.1,
                 system:&json!([{"type":"text","text":"stable rules","cache_control":{"type":"ephemeral"}}]),
                 messages,timeout:Duration::from_secs(2),max_response_bytes:64*1024,
             },cancel).await
@@ -179,6 +207,52 @@ async fn full_http_loop_preserves_thinking_and_pairs_all_tools_before_next_reque
         .iter()
         .any(|s| s.tool_pending.as_deref() == Some("t1")));
     assert!(!state.api_pending && state.tool_pending.is_none());
+}
+#[tokio::test]
+async fn http_loop_compaction_headers_context_management_and_thinking_strip() {
+    let thinking = json!({"type":"thinking","thinking":"secret thought","signature":"sig1"});
+    let f = fixture(200, vec![
+        response(vec![
+            thinking.clone(),
+            json!({"type":"compaction","content":"compacted history"}),
+            json!({"type":"tool_use","id":"t1","name":"bash","input":{"command":"echo 1"}}),
+        ], "tool_use"),
+        response(vec![json!({"type":"text","text":"done"})], "end_turn"),
+    ]).await;
+
+    let mut state = initial();
+    let tools = FakeTools::default();
+    let journal = MemoryJournal::default();
+    let opts = Options {
+        compact_at_input_tokens: 150_000,
+        ..options()
+    };
+    let model = HttpModelWithOptions(&f, opts);
+    let halt = runner::run(&model, &tools, &journal, &mut state, &CancellationToken::new(), 3).await;
+    assert_eq!(halt, Ok(runner::Halt::EndTurn));
+
+    let headers = f.seen_headers.lock().unwrap();
+    assert_eq!(headers.len(), 2);
+    // 1. Beta header has both thinking-binding and compact
+    let expected_beta = format!("{},{}", super::protocol::THINKING_BINDING_BETA, super::protocol::COMPACT_BETA);
+    assert_eq!(headers[0]["anthropic-beta"], expected_beta);
+    assert_eq!(headers[1]["anthropic-beta"], expected_beta);
+
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    // 2. Request 1 carries context_management with 150000
+    assert_eq!(seen[0]["context_management"]["edits"][0]["type"], "compact_20260112");
+    assert_eq!(seen[0]["context_management"]["edits"][0]["trigger"]["value"], 150_000);
+
+    // 3. Request 2: response 1 contained compaction block.
+    // In request 2, thinking block before compaction block is NOT resent!
+    let req2_msgs = seen[1]["messages"].as_array().unwrap();
+    let assistant_msg_blocks = req2_msgs[1]["content"].as_array().unwrap();
+    assert!(!assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("thinking")));
+    assert!(assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")));
+
+    // 4. Session checkpoint in state.messages persists the compaction block
+    assert!(state.messages.iter().any(|m| m.content.as_array().is_some_and(|blocks| blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")))));
 }
 #[tokio::test]
 async fn pending_recovery_and_checkpoint_failure_never_execute_or_send() {
@@ -676,6 +750,7 @@ async fn raw_http_fixture(status: u16, headers: Vec<(&'static str, &'static str)
     Fixture {
         endpoint,
         seen: Arc::new(Mutex::new(Vec::new())),
+        seen_headers: Arc::new(Mutex::new(Vec::new())),
         shutdown,
         task,
     }

@@ -72,11 +72,16 @@ pub async fn complete(
     let builder = builder.no_proxy();
     let client = builder.build().map_err(|_| Error::InvalidRequest)?;
     let operation = async {
+        let beta_header = if req.options.compact_at_input_tokens > 0 {
+            format!("{},{}", protocol::THINKING_BINDING_BETA, protocol::COMPACT_BETA)
+        } else {
+            protocol::THINKING_BINDING_BETA.to_string()
+        };
         let mut response = client
             .post(url)
             .header("x-api-key", req.key)
             .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", protocol::THINKING_BINDING_BETA)
+            .header("anthropic-beta", beta_header)
             .json(&protocol::request(req.options, req.system, req.messages))
             .send()
             .await

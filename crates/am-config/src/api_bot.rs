@@ -20,6 +20,8 @@ pub struct ApiBotCfg {
     pub command_timeout_secs: u64,
     #[serde(default = "default_max_tool_output_bytes")]
     pub max_tool_output_bytes: usize,
+    #[serde(default = "default_compact_at_input_tokens")]
+    pub compact_at_input_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turn_cost_microusd: Option<u64>,
     /// 總花費上限（美元），從 total_cap_since 起算，所有 claude-api bot 合計。
@@ -58,6 +60,10 @@ pub fn default_max_tool_output_bytes() -> usize {
     65536
 }
 
+pub fn default_compact_at_input_tokens() -> u32 {
+    150_000
+}
+
 impl Default for ApiBotCfg {
     fn default() -> Self {
         Self {
@@ -69,6 +75,7 @@ impl Default for ApiBotCfg {
             max_checkpoint_bytes: default_max_checkpoint_bytes(),
             command_timeout_secs: default_command_timeout_secs(),
             max_tool_output_bytes: default_max_tool_output_bytes(),
+            compact_at_input_tokens: default_compact_at_input_tokens(),
             max_turn_cost_microusd: None,
             total_cap_usd: None,
             total_cap_since: None,
@@ -145,6 +152,15 @@ impl ApiBotCfg {
             ));
         }
 
+        if self.compact_at_input_tokens != 0
+            && !(50_000..=900_000).contains(&self.compact_at_input_tokens)
+        {
+            return Err(format!(
+                "compact_at_input_tokens must be 0 or in 50000..=900000, got {}",
+                self.compact_at_input_tokens
+            ));
+        }
+
         let max_turn_cost_microusd = match self.max_turn_cost_microusd {
             Some(cost) if cost >= 1 && cost <= i64::MAX as u64 => cost as i64,
             Some(0) => return Err("max_turn_cost_microusd must be greater than 0".to_string()),
@@ -168,6 +184,7 @@ impl ApiBotCfg {
             command_timeout_secs: self.command_timeout_secs,
             max_tool_output_bytes: self.max_tool_output_bytes,
             max_turn_cost_microusd,
+            compact_at_input_tokens: self.compact_at_input_tokens,
         }))
     }
 }
@@ -183,6 +200,7 @@ pub struct ValidatedLimits {
     pub command_timeout_secs: u64,
     pub max_tool_output_bytes: usize,
     pub max_turn_cost_microusd: i64,
+    pub compact_at_input_tokens: u32,
 }
 
 #[cfg(test)]
@@ -201,6 +219,7 @@ mod tests {
         assert_eq!(def.max_checkpoint_bytes, 8_388_608);
         assert_eq!(def.command_timeout_secs, 60);
         assert_eq!(def.max_tool_output_bytes, 65536);
+        assert_eq!(def.compact_at_input_tokens, 150_000);
         assert_eq!(def.max_turn_cost_microusd, None);
         assert!(def.is_default());
     }
@@ -237,6 +256,7 @@ max_turn_cost_microusd = 500000
         assert_eq!(api_bot.max_checkpoint_bytes, 8_388_608);
         assert_eq!(api_bot.command_timeout_secs, 60);
         assert_eq!(api_bot.max_tool_output_bytes, 65536);
+        assert_eq!(api_bot.compact_at_input_tokens, 150_000);
         assert_eq!(api_bot.max_turn_cost_microusd, Some(500000));
     }
 
@@ -386,6 +406,19 @@ max_turn_cost_microusd = 500000
         cfg.max_tool_output_bytes = 1_048_577;
         assert!(cfg.validated(true).is_err());
         cfg.max_tool_output_bytes = 65536;
+
+        // compact_at_input_tokens boundaries (0 or 50000..=900000)
+        cfg.compact_at_input_tokens = 0;
+        assert!(cfg.validated(true).is_ok());
+        cfg.compact_at_input_tokens = 49_999;
+        assert!(cfg.validated(true).is_err());
+        cfg.compact_at_input_tokens = 50_000;
+        assert!(cfg.validated(true).is_ok());
+        cfg.compact_at_input_tokens = 900_000;
+        assert!(cfg.validated(true).is_ok());
+        cfg.compact_at_input_tokens = 900_001;
+        assert!(cfg.validated(true).is_err());
+        cfg.compact_at_input_tokens = 150_000;
     }
 
     #[test]

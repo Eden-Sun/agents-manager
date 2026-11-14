@@ -266,6 +266,7 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
+            compact_at_input_tokens: 0,
         }
     }
 

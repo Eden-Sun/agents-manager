@@ -55,6 +55,11 @@ pub(super) fn input_token_bound(request: &RequestEnvelope) -> Result<u64, QuoteE
 }
 
 fn previous_usage_prefix(response: &Response) -> Option<u64> {
+    if response.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction"))
+        || response.usage.as_object().and_then(|u| u.get("iterations")).and_then(Value::as_array).is_some_and(|arr| arr.iter().any(|it| it.get("type").and_then(Value::as_str) == Some("compaction")))
+    {
+        return None;
+    }
     let usage = response.usage.as_object()?;
     let input = usage.get("input_tokens").and_then(Value::as_u64)?;
     let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -128,7 +133,7 @@ impl QuoteProvider for DirectGlobal {
         let rates = rates(&request.options().model)?;
         if response.model != request.options().model { return Err(QuoteError::UntrustedUsage); }
         let usage = response.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
-        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo")) { return Err(QuoteError::UntrustedUsage); }
+        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo" | "iterations")) { return Err(QuoteError::UntrustedUsage); }
         let input = usage.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let output = usage.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let speed = usage.get("speed").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
@@ -158,6 +163,11 @@ impl QuoteProvider for DirectGlobal {
             Some(Value::Object(m)) => m.len() == 1 && m.get("thinking_tokens").and_then(Value::as_u64).is_some_and(|n| n <= output),
             _ => false,
         };
+        let iterations_ok = match usage.get("iterations") {
+            None | Some(Value::Null) => true,
+            Some(Value::Array(items)) => items.iter().all(|it| it.is_object()),
+            _ => false,
+        };
         let neutral_metadata = |key: &str, accepted: &str| match usage.get(key) {
             None | Some(Value::Null) => true,
             Some(Value::String(v)) => v == accepted,
@@ -167,10 +177,18 @@ impl QuoteProvider for DirectGlobal {
         if total_input > input_token_bound(request)? || output > u64::from(request.options().max_tokens)
             || (request.speed() == "standard" && speed != "standard")
             || !zero_fields(usage.get("server_tool_use"), &["web_fetch_requests", "web_search_requests"])
-            || !details_ok || !neutral_metadata("service_tier", "standard") || !neutral_metadata("inference_geo", "global")
+            || !details_ok || !iterations_ok || !neutral_metadata("service_tier", "standard") || !neutral_metadata("inference_geo", "global")
         { return Err(QuoteError::UntrustedUsage); }
         let actual_speed = match speed { "standard" => "standard", "fast" => "fast", _ => return Err(QuoteError::UntrustedUsage) };
-        let tenths = [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output)]
+        // 頂層 input/output 不含壓縮那一輪；壓縮 iteration 的用量要另外加進費用（官方：加總 iterations 才是實際計費）。
+        let (mut comp_in, mut comp_out) = (0_u64, 0_u64);
+        if let Some(Value::Array(items)) = usage.get("iterations") {
+            for it in items.iter().filter(|it| it.get("type").and_then(Value::as_str) == Some("compaction")) {
+                comp_in = comp_in.checked_add(it.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
+                comp_out = comp_out.checked_add(it.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
+            }
+        }
+        let tenths = [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output), (comp_in, rates.write_5m), (comp_out, rates.output)]
             .into_iter()
             .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))
             .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
@@ -188,7 +206,7 @@ mod tests {
     use serde_json::json;
 
     fn request(fast: bool, system: Value) -> RequestEnvelope {
-        RequestEnvelope::new(Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024 }, system,
+        RequestEnvelope::new(Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0 }, system,
             vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
     }
     fn response(usage: Value) -> Response {
@@ -272,7 +290,7 @@ mod tests {
 
     #[test]
     fn the_wire_body_marks_at_most_three_cache_breakpoints_and_never_changes_the_checkpoint_messages() {
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024 };
+        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0 };
         let messages = vec![
             Message { role: "user".into(), content: json!("one") },
             Message { role: "assistant".into(), content: json!([{"type":"thinking","thinking":"t","signature":"s"}]) },
@@ -287,7 +305,7 @@ mod tests {
     #[test]
     fn fable_quotes_cover_standard_fast_and_its_distinct_cache_read_rate() {
         for fast in [false, true] {
-            let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024 };
+            let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0 };
             let req = RequestEnvelope::new(options, json!("fixture"), vec![Message { role:"user".into(),content:json!("fixture") }]).unwrap();
             let q = DirectGlobal.reserve(&req).unwrap();
             assert_eq!(q.pricing_version, "claude-fable-5-2-global-2026-11-13");
@@ -366,7 +384,7 @@ mod tests {
             Message { role: "assistant".into(), content: json!("reply") },
             Message { role: "user".into(), content: json!("next question") },
         ];
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024 };
+        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0 };
         let mut req = RequestEnvelope::new(options, json!("system"), long_messages).unwrap();
 
         let bound = input_token_bound(&req).unwrap() as i64;
@@ -403,4 +421,50 @@ mod tests {
         assert!(settled.estimated_microusd < new_reserve);
     }
 
+    #[test]
+    fn compaction_usage_shape_is_accepted_by_settle_and_falls_back_to_first_turn_reserve() {
+        let mut req = request(false, json!("fixture"));
+        let bound = input_token_bound(&req).unwrap() as i64;
+        let expected_legacy = (bound * 50 + 1024 * 200 + 9) / 10;
+
+        // 1. Response containing a compaction block and iterations in usage
+        let mut compact_resp = response(json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "speed": "standard",
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "service_tier": "standard",
+            "inference_geo": "global",
+            "iterations": [
+                {
+                    "type": "compaction",
+                    "input_tokens": 4000,
+                    "output_tokens": 300
+                },
+                {
+                    "type": "message",
+                    "input_tokens": 100,
+                    "output_tokens": 50
+                }
+            ]
+        }));
+        compact_resp.content = vec![
+            json!({"type": "compaction", "content": "Summary of previous turns"}),
+            json!({"type": "text", "text": "Continuing after compaction"}),
+        ];
+
+        // Settle accepts the compaction usage shape
+        let settled = DirectGlobal.settle(&req, &compact_resp).unwrap();
+        assert!(settled.estimated_microusd > 0);
+
+        // 2. Next turn's reserve: previous response had compaction, so prefix no longer applies
+        req.set_previous_response(Some(compact_resp));
+        let quote_after_compact = DirectGlobal.reserve(&req).unwrap();
+        assert_eq!(
+            quote_after_compact.reserved_microusd,
+            expected_legacy,
+            "must fall back to first-turn legacy formula when previous response was compacted"
+        );
+    }
 }

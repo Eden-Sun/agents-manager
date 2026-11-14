@@ -573,3 +573,21 @@ pub(super) async fn post_cap_notice(app: &Arc<App>, key: &ApiTurnKey, max_calls:
         Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot cap notice could not be stored"),
     }
 }
+
+/// 對話由 API 壓縮時在對話中留一則可見的系統訊息。
+pub(super) async fn post_compaction_notice(app: &Arc<App>, key: &ApiTurnKey, text: &str) {
+    let posted: Result<Option<crate::db::Message>> = async {
+        let mut tx = crate::db::begin_write(&app.db).await?;
+        let conversation: Option<String> = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=? AND run_id=?")
+            .bind(&key.turn_id).bind(&key.run_id).fetch_optional(&mut *tx).await?;
+        let Some(conversation) = conversation else { return Ok(None) };
+        let message = crate::lifecycle::insert_message_tx(&mut tx, &conversation, Some(&key.turn_id), "system", text, "system", false, None).await?;
+        tx.commit().await?;
+        Ok(Some(message))
+    }.await;
+    match posted {
+        Ok(Some(message)) => crate::lifecycle::emit_message_added(app, &key.bot_id, message).await,
+        Ok(None) => {}
+        Err(_) => tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "API bot compaction notice could not be stored"),
+    }
+}
