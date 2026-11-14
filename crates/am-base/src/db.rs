@@ -647,6 +647,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (92, "e31b0a1f55e8ed41"),
     // kind 啟用開關（2026-11-14）：`kind_prefs`（CREATE TABLE IF NOT EXISTS，identity_prefs 的 migrate 裡建）。
     (93, "7f4b8aaaa990df4d"),
+    // claude-api 每回合快取保留（2026-11-14）：`turns.cache_ttl_secs`（ALTER ADD，預設 300）。
+    (94, "7ee64d1c638b0801"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -944,6 +946,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 專家模式專家（specialist）角色與政策（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`。
         ("bots", "track", "ALTER TABLE bots ADD COLUMN track TEXT"),
         ("bots", "runtime_override_json", "ALTER TABLE bots ADD COLUMN runtime_override_json TEXT"),
+        // claude-api 每回合送出時選的快取保留秒數（300＝5 分鐘預設、3600＝1 小時）：記在 turn 上，該回合所有請求用同一個 TTL。
+        ("turns", "cache_ttl_secs", "ALTER TABLE turns ADD COLUMN cache_ttl_secs INTEGER NOT NULL DEFAULT 300"),
         ("projects", "role_policy_json", "ALTER TABLE projects ADD COLUMN role_policy_json TEXT NOT NULL DEFAULT '{}'"),
         // 專家模式副管理者：專案設定與改派紀錄（不進 CREATE TABLE，指紋欄序不動）。
         ("projects", "deputy_bot_id", "ALTER TABLE projects ADD COLUMN deputy_bot_id TEXT"),

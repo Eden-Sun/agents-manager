@@ -843,7 +843,8 @@ function Composer({
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
   }, [text, ref, phone])
 
-  const submit = () => {
+  // `cacheTtl`：claude-api 這一回合的快取保留。Enter 一律走 5 分鐘（最便宜、不會因為上次點過 1 小時就默默多付）；要 1 小時按旁邊那顆。
+  const submit = (cacheTtl?: '5m' | '1h') => {
     const body = text.trim()
     if (!body && files.ids.length === 0) return
     // 打字沒鎖，Enter 可能送不出：說一聲，別默默吃掉。
@@ -864,7 +865,7 @@ function Composer({
     // 「編輯後送出」：框裡那段已放進輸入框改過，先清掉終端那段（token 綁原本的完整草稿）再送改過的字。
     const editing = useStore.getState().composerDrafts[botId]
     const editRequest = editing?.editing && editing.token && editing.actions.includes('clear') ? ({ action: 'clear', token: editing.token } as const) : undefined
-    void sendPrompt(botId, body, sent, false, editRequest ? false : Boolean(state.autoStart), editRequest, editRequest ? false : true).then((ok) => {
+    void sendPrompt(botId, body, sent, false, editRequest ? false : Boolean(state.autoStart), editRequest, editRequest ? false : true, botKind === 'claude-api' ? (cacheTtl ?? '5m') : undefined).then((ok) => {
       setSending(false)
       if (ok) {
         if (edits.untouched()) setText('')
@@ -1093,17 +1094,41 @@ function Composer({
           }}
           {...enterToSend.props}
         />
-        <button
-          type="button"
-          className="send-btn"
-          disabled={state.disabled || sending || files.uploading || files.failed || nothingToSend}
-          title={sendButtonTitle(state, files.uploading, files.failed)}
-          /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={submit}
-        >
-          {sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })}
-        </button>
+        {botKind === 'claude-api' ? (
+          // claude-api：每回合送出時選快取保留（5 分鐘＝預設、寫入便宜；1 小時＝寫入貴 60%，適合下一次提問隔 5–60 分鐘）。
+          <div className="send-btns" role="group" aria-label={t('送出')}>
+            {(['5m', '1h'] as const).map((ttl) => {
+              const idle = !sending && !files.uploading && !files.failed
+              const label = idle ? (phone ? (ttl === '5m' ? t('送出（5 分）') : t('送出（1 小時）')) : ttl === '5m' ? t('送出（快取 5 分）') : t('送出（快取 1 小時）')) : sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })
+              return (
+                <button
+                  key={ttl}
+                  type="button"
+                  className={`send-btn${ttl === '1h' ? ' long' : ''}`}
+                  data-ttl={ttl}
+                  disabled={state.disabled || sending || files.uploading || files.failed || nothingToSend}
+                  title={ttl === '5m' ? t('快取保留 5 分鐘（Enter 也是這個）：寫入較便宜') : t('快取保留 1 小時：寫入貴 60%，適合下一次提問隔 5–60 分鐘；問完就走選 5 分鐘')}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => submit(ttl)}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="send-btn"
+            disabled={state.disabled || sending || files.uploading || files.failed || nothingToSend}
+            title={sendButtonTitle(state, files.uploading, files.failed)}
+            /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => submit()}
+          >
+            {sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })}
+          </button>
+        )}
       </div>
     </div>
   )

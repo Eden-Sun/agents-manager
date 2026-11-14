@@ -51,7 +51,7 @@ async fn send_raw_token(app: &Arc<App>, to: &str, relay_from: &str, raw: &[u8], 
         submit_draft: false,
         expect_draft_token: None,
         share_reply_visible: false,
-        track: None, cluster: None,
+        track: None, cluster: None, cache_ttl: None,
     };
     let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
         Ok(r) => r,
@@ -82,7 +82,7 @@ async fn send(app: &Arc<App>, to: &str, relay_from: &str, token: Option<&str>, c
         submit_draft: false,
         expect_draft_token: None,
         share_reply_visible: false,
-        track: None, cluster: None,
+        track: None, cluster: None, cache_ttl: None,
     };
     let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Extension(RequestPrincipal::User), Json(body)).await {
         Ok(r) => r,
@@ -169,7 +169,7 @@ async fn the_start_if_stopped_path_refuses_an_unsigned_relay_too() {
         submit_draft: false,
         expect_draft_token: None,
         share_reply_visible: false,
-        track: None, cluster: None,
+        track: None, cluster: None, cache_ttl: None,
     };
     let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await.expect_err("unsigned relay");
     assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
@@ -200,7 +200,7 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
             submit_draft: submit,
             expect_draft_token: expect.map(str::to_string),
             share_reply_visible: false,
-            track: None, cluster: None,
+            track: None, cluster: None, cache_ttl: None,
         };
         // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
         let mut headers = HeaderMap::new();

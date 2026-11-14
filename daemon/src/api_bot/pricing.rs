@@ -5,16 +5,17 @@ use serde_json::Value;
 
 pub(super) struct DirectGlobal;
 
-fn forbidden(value: &Value) -> bool {
+fn forbidden(value: &Value, allow_1h: bool) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
-            // cache_control 只接受 5 分鐘 ephemeral（其餘 TTL 另有單價，未核准）。
-            (key == "cache_control" && value != &serde_json::json!({"type": "ephemeral"}))
+            // cache_control 只接受 5 分鐘 ephemeral；這顆 bot 選了 1 小時才另放行 `ttl:"1h"`（其餘 TTL 仍拒絕）。
+            (key == "cache_control" && value != &serde_json::json!({"type": "ephemeral"})
+                    && !(allow_1h && value == &serde_json::json!({"type": "ephemeral", "ttl": "1h"})))
                 || matches!(key.as_str(), "service_tier" | "inference_geo" | "container")
                 || (key == "type" && value.as_str().is_some_and(|v| v.starts_with("server_") || v == "web_search" || v == "web_fetch"))
-                || forbidden(value)
+                || forbidden(value, allow_1h)
         }),
-        Value::Array(items) => items.iter().any(forbidden),
+        Value::Array(items) => items.iter().any(|v| forbidden(v, allow_1h)),
         _ => false,
     }
 }
@@ -24,7 +25,7 @@ fn forbidden(value: &Value) -> bool {
 struct Rates { input: i64, write_5m: i64, write_1h: i64, read: i64, output: i64, version: &'static str }
 fn rates(model: &str) -> Result<Rates, QuoteError> {
     match model {
-        "claude-opus-5-5" => Ok(Rates { input: 40, write_5m: 50, write_1h: 80, read: 4, output: 200, version: "claude-opus-5-5-global-2026-11-01" }),
+        "claude-opus-5-5" => Ok(Rates { input: 40, write_5m: 50, write_1h: 80, read: 2, output: 200, version: "claude-opus-5-5-global-2026-11-14" }),
         // https://platform.claude.com/docs/en/models/fable-5-2/overview — checked 2026-11-13.
         "claude-fable-5-2" => Ok(Rates { input: 80, write_5m: 100, write_1h: 160, read: 2, output: 400, version: "claude-fable-5-2-global-2026-11-13" }),
         _ => Err(QuoteError::InvalidRequest),
@@ -75,7 +76,10 @@ fn reserve_microusd(
     speed: &str,
     rates: &Rates,
     previous_prefix: Option<u64>,
+    ttl_1h: bool,
 ) -> Result<i64, QuoteError> {
+    // 沒命中時整段輸入按快取寫入價算；這顆 bot 選了 1 小時就按 1 小時寫入價（2×）。
+    let write = if ttl_1h { rates.write_1h } else { rates.write_5m };
     let factor = speed_factor(speed)?;
     let input_tenths = if let Some(prefix) = previous_prefix {
         let prefix_tokens = prefix.min(input_bound);
@@ -86,7 +90,7 @@ fn reserve_microusd(
             .ok_or(QuoteError::InvalidRequest)?;
         let tail_cost = i64::try_from(tail_tokens)
             .map_err(|_| QuoteError::InvalidRequest)?
-            .checked_mul(rates.write_5m)
+            .checked_mul(write)
             .ok_or(QuoteError::InvalidRequest)?;
         let input_base = prefix_cost
             .checked_add(tail_cost)
@@ -94,7 +98,7 @@ fn reserve_microusd(
         (input_base.checked_mul(120).ok_or(QuoteError::InvalidRequest)? + 99) / 100
     } else {
         let input = i64::try_from(input_bound).map_err(|_| QuoteError::InvalidRequest)?;
-        input.checked_mul(rates.write_5m).ok_or(QuoteError::InvalidRequest)?
+        input.checked_mul(write).ok_or(QuoteError::InvalidRequest)?
     };
     let output_tenths = i64::from(max_tokens)
         .checked_mul(rates.output)
@@ -111,7 +115,7 @@ fn reserve_microusd(
 /// 串流中的「目前為止」估價（µUSD，只給畫面顯示，不進帳）：已回報的 input／cache 用量照單價算，
 /// 輸出取「usage 回報值」與「已收字元／位元組粗估（約 3 字元 1 token）」較大者。
 /// 不含壓縮 iteration（要等 message_delta 才知道）。模型不認得回 None。
-pub(super) fn running_cost_microusd(model: &str, fast: bool, p: &super::sse::StreamProgress) -> Option<i64> {
+pub(super) fn running_cost_microusd(model: &str, fast: bool, ttl_1h: bool, p: &super::sse::StreamProgress) -> Option<i64> {
     let rates = rates(model).ok()?;
     let speed = match p.speed.as_deref() {
         Some("fast") => 2,
@@ -120,7 +124,7 @@ pub(super) fn running_cost_microusd(model: &str, fast: bool, p: &super::sse::Str
     };
     let est_out = (p.generated_chars as u64 + p.other_bytes as u64) / 3;
     let output = p.output_tokens.max(est_out);
-    let tenths = [(p.input_tokens, rates.input), (p.cache_read_tokens, rates.read), (p.cache_creation_tokens, rates.write_5m), (output, rates.output)]
+    let tenths = [(p.input_tokens, rates.input), (p.cache_read_tokens, rates.read), (p.cache_creation_tokens, if ttl_1h { rates.write_1h } else { rates.write_5m }), (output, rates.output)]
         .into_iter()
         .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))?
         .checked_mul(speed)?;
@@ -130,7 +134,7 @@ pub(super) fn running_cost_microusd(model: &str, fast: bool, p: &super::sse::Str
 impl QuoteProvider for DirectGlobal {
     fn reserve(&self, request: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
         let body = request.body();
-        if forbidden(&body) {
+        if forbidden(&body, request.options().cache_ttl_1h) {
             return Err(QuoteError::InvalidRequest);
         }
         let rates = rates(&request.options().model)?;
@@ -142,6 +146,7 @@ impl QuoteProvider for DirectGlobal {
                 request.speed(),
                 &rates,
                 prev_prefix,
+                request.options().cache_ttl_1h,
             )?,
             pricing_version: rates.version.into(),
         })
@@ -228,7 +233,7 @@ mod tests {
     use serde_json::json;
 
     fn request(fast: bool, system: Value) -> RequestEnvelope {
-        RequestEnvelope::new(Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0 }, system,
+        RequestEnvelope::new(Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false }, system,
             vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
     }
     fn response(usage: Value) -> Response {
@@ -287,10 +292,10 @@ mod tests {
             if !detail.is_null() { u["cache_creation"] = detail; }
             response(u)
         };
-        // 100×$4 + 1000×$5（5 分鐘寫入）+ 2000×$0.4（讀取）+ 10×$20 = 400+5000+800+200 = 6400 µUSD
-        assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, Value::Null)).unwrap().estimated_microusd, 6400);
+        // 100×$4 + 1000×$5（5 分鐘寫入）+ 2000×$0.2（讀取，Opus 5.5 是 0.05×）+ 10×$20 = 400+5000+400+200 = 6000 µUSD
+        assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, Value::Null)).unwrap().estimated_microusd, 6000);
         let detailed = json!({"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":1000});
-        assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, detailed)).unwrap().estimated_microusd, 6400);
+        assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, detailed)).unwrap().estimated_microusd, 6000);
         // 1 小時寫入 2×：500×$8 = 4000
         let hour = json!({"ephemeral_1h_input_tokens":500,"ephemeral_5m_input_tokens":500});
         assert_eq!(DirectGlobal.settle(&standard, &with(1000, 0, hour)).unwrap().estimated_microusd, 400 + 2500 + 4000 + 200);
@@ -299,7 +304,7 @@ mod tests {
         // fast 實際單價 2×
         let mut f = with(0, 2000, Value::Null);
         f.usage["speed"] = json!("fast");
-        assert_eq!(DirectGlobal.settle(&fast, &f).unwrap().estimated_microusd, (100 * 40 + 2000 * 4 + 10 * 200) * 2 / 10);
+        assert_eq!(DirectGlobal.settle(&fast, &f).unwrap().estimated_microusd, (100 * 40 + 2000 * 2 + 10 * 200) * 2 / 10);
     }
 
     #[test]
@@ -312,7 +317,7 @@ mod tests {
 
     #[test]
     fn the_wire_body_marks_at_most_three_cache_breakpoints_and_never_changes_the_checkpoint_messages() {
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0 };
+        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
         let messages = vec![
             Message { role: "user".into(), content: json!("one") },
             Message { role: "assistant".into(), content: json!([{"type":"thinking","thinking":"t","signature":"s"}]) },
@@ -327,7 +332,7 @@ mod tests {
     #[test]
     fn fable_quotes_cover_standard_fast_and_its_distinct_cache_read_rate() {
         for fast in [false, true] {
-            let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0 };
+            let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
             let req = RequestEnvelope::new(options, json!("fixture"), vec![Message { role:"user".into(),content:json!("fixture") }]).unwrap();
             let q = DirectGlobal.reserve(&req).unwrap();
             assert_eq!(q.pricing_version, "claude-fable-5-2-global-2026-11-13");
@@ -375,7 +380,7 @@ mod tests {
         assert!(bound > prefix);
         let prefix_tokens = prefix;
         let tail_tokens = bound - prefix;
-        let prefix_cost = prefix_tokens * 4; // claude-opus-5-5 read rate = 4
+        let prefix_cost = prefix_tokens * 2; // claude-opus-5-5 read rate = 2（$0.20/M）
         let tail_cost = tail_tokens * 50;   // claude-opus-5-5 write_5m rate = 50
         let input_base = prefix_cost + tail_cost;
         let input_with_margin = (input_base * 120 + 99) / 100;
@@ -406,7 +411,7 @@ mod tests {
             Message { role: "assistant".into(), content: json!("reply") },
             Message { role: "user".into(), content: json!("next question") },
         ];
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0 };
+        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
         let mut req = RequestEnvelope::new(options, json!("system"), long_messages).unwrap();
 
         let bound = input_token_bound(&req).unwrap() as i64;
@@ -481,7 +486,7 @@ mod tests {
         // Settle accepts the compaction usage shape
         let settled = DirectGlobal.settle(&req, &compact_resp).unwrap();
         // 頂層 100×40+50×200，壓縮 iteration 4000×40(input)+1000×4(read)+500×50(write)+300×200(output)，單位 0.1 µUSD。
-        assert_eq!(settled.estimated_microusd, (14_000 + 160_000 + 4_000 + 25_000 + 60_000 + 9) / 10);
+        assert_eq!(settled.estimated_microusd, (14_000 + 160_000 + 2_000 + 25_000 + 60_000 + 9) / 10);
 
         // 2. Next turn's reserve: previous response had compaction, so prefix no longer applies
         req.set_previous_response(Some(compact_resp));
@@ -498,14 +503,51 @@ mod tests {
         use crate::api_bot::sse::StreamProgress;
         let model = crate::config::API_BOT_MODEL;
         let p = StreamProgress { input_tokens: 1000, cache_read_tokens: 2000, cache_creation_tokens: 500, output_tokens: 10, generated_chars: 3000, ..Default::default() };
-        // output 取 max(10, 3000/3=1000)=1000：1000×40 + 2000×4 + 500×50 + 1000×200 = 273000 tenths。
-        assert_eq!(running_cost_microusd(model, false, &p), Some(27_300));
-        assert_eq!(running_cost_microusd(model, true, &p), Some(54_600));
+        // output 取 max(10, 3000/3=1000)=1000：1000×40 + 2000×2 + 500×50 + 1000×200 = 269000 tenths。
+        assert_eq!(running_cost_microusd(model, false, false, &p), Some(26_900));
+        assert_eq!(running_cost_microusd(model, true, false, &p), Some(53_800));
         let fast = StreamProgress { speed: Some("fast".into()), ..p.clone() };
-        assert_eq!(running_cost_microusd(model, false, &fast), Some(54_600));
+        assert_eq!(running_cost_microusd(model, false, false, &fast), Some(53_800));
         // 回報的 output_tokens 較大時用回報值。
         let big = StreamProgress { output_tokens: 5000, ..p };
-        assert_eq!(running_cost_microusd(model, false, &big), Some((1000 * 40 + 2000 * 4 + 500 * 50 + 5000 * 200 + 9) / 10));
-        assert_eq!(running_cost_microusd("unknown-model", false, &StreamProgress::default()), None);
+        assert_eq!(running_cost_microusd(model, false, false, &big), Some((1000 * 40 + 2000 * 2 + 500 * 50 + 5000 * 200 + 9) / 10));
+        assert_eq!(running_cost_microusd("unknown-model", false, false, &StreamProgress::default()), None);
+    }
+
+    #[test]
+    fn opus_cache_read_is_twenty_cents_per_million_and_the_version_moved() {
+        let req = request(false, json!("fixture"));
+        // 1000 讀取 × $0.20/M = 200 µUSD（舊價 $0.40 會是 400）；另 100 input×$4 + 10 output×$20。
+        let usage = json!({"input_tokens":100,"output_tokens":10,"speed":"standard","cache_creation_input_tokens":0,"cache_read_input_tokens":1000,"service_tier":"standard","inference_geo":"global"});
+        assert_eq!(DirectGlobal.settle(&req, &response(usage)).unwrap().estimated_microusd, 400 + 200 + 200);
+        assert_eq!(DirectGlobal.reserve(&req).unwrap().pricing_version, "claude-opus-5-5-global-2026-11-14");
+    }
+
+    #[test]
+    fn one_hour_bots_may_carry_the_1h_cache_control_and_reserve_at_the_1h_write_rate() {
+        let mk = |ttl_1h: bool| {
+            let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: ttl_1h };
+            RequestEnvelope::new(options, json!("fixture"), vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
+        };
+        let (five, hour) = (mk(false), mk(true));
+        // 請求體：1 小時才帶 ttl。
+        assert!(five.body().to_string().contains(r#""cache_control":{"type":"ephemeral"}"#) && !five.body().to_string().contains(r#""ttl""#));
+        assert!(hour.body().to_string().contains(r#""cache_control":{"ttl":"1h","type":"ephemeral"}"#));
+        // 兩種都放行；1 小時預留用 1 小時寫入價（$8 對 $5），輸出部分相同。
+        let (q5, q1) = (DirectGlobal.reserve(&five).unwrap(), DirectGlobal.reserve(&hour).unwrap());
+        // 1 小時的 body 多了 `"ttl":"1h"` 幾個位元組，輸入上界各算各的。
+        let (b5, b1) = (input_token_bound(&five).unwrap() as i64, input_token_bound(&hour).unwrap() as i64);
+        assert!(b1 > b5);
+        assert_eq!(q5.reserved_microusd, (b5 * 50 + 1024 * 200 + 9) / 10);
+        assert_eq!(q1.reserved_microusd, (b1 * 80 + 1024 * 200 + 9) / 10);
+        // 5 分鐘 bot 的 body 不准出現 1h（沿用既有規則）；1 小時 bot 也不准別的 TTL。
+        let sneaky_1h = RequestEnvelope::new(
+            Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false },
+            json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
+        assert!(DirectGlobal.reserve(&sneaky_1h).is_err());
+        let other_ttl = RequestEnvelope::new(
+            Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: true },
+            json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"24h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
+        assert!(DirectGlobal.reserve(&other_ttl).is_err());
     }
 }

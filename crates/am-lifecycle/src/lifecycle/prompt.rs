@@ -431,19 +431,27 @@ pub struct RelaySrc<'a> {
     /// 這則派工的可信依據（daemon `relay_policy::relay_prompt_basis`：`specialist:<專案>`／`deputy:<專案>`），寫進
     /// `messages.relay_auth`；turn 變成可送出的那一句依它正向確認（`relay_grant`）。原本就不靠依據的派工是 `None`。
     pub auth: Option<&'a str>,
+    /// claude-api 這一回合送出時選的快取保留秒數（300／3600）；`None`＝預設 5 分鐘。其他 kind 忽略。
+    pub cache_ttl_secs: Option<i64>,
 }
 
 impl<'a> RelaySrc<'a> {
     pub fn trusted(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User }, auth: None }
+        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User }, auth: None, cache_ttl_secs: None }
     }
 
     pub fn user(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::User, auth: None }
+        Self { from, unverified: false, queue_class: QueueClass::User, auth: None, cache_ttl_secs: None }
     }
 
     pub fn daemon_notice(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice, auth: None }
+        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice, auth: None, cache_ttl_secs: None }
+    }
+
+    /// 帶上 claude-api 這一回合的快取保留秒數（見 [`RelaySrc::cache_ttl_secs`]）。
+    pub fn with_cache_ttl(mut self, secs: Option<i64>) -> Self {
+        self.cache_ttl_secs = secs;
+        self
     }
 
     /// 帶上授權依據（見 [`RelaySrc::auth`]）。
@@ -559,7 +567,7 @@ pub async fn prompt_relayed_queueable(
         text,
         client_request_id,
         &[],
-        RelaySrc { from: relay_from, unverified: false, queue_class, auth: None },
+        RelaySrc { from: relay_from, unverified: false, queue_class, auth: None, cache_ttl_secs: None },
         true,
         false,
         Admission::Gated,
@@ -993,7 +1001,7 @@ async fn prompt_inner(
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
         if text.trim().is_empty() || client_request_id.trim().is_empty() { return Err(LcError::Bad("api_native_prompt_invalid".into())); }
-        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt(app, bot_id, text, client_request_id)
+        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt_ttl(app, bot_id, text, client_request_id, relay.cache_ttl_secs.unwrap_or(300))
             .await.map_err(|error| match error {
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),

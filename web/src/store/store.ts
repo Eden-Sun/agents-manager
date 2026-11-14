@@ -538,6 +538,8 @@ export interface StoreState {
     startIfStopped?: boolean,
     draft?: DraftRequest,
     queueIfBusy?: boolean,
+    /** claude-api 這一回合的快取保留（`5m` 預設／`1h`）；其他 kind 不要帶。 */
+    cacheTtl?: '5m' | '1h',
   ) => Promise<boolean>
   /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
   composerDrafts: Record<string, ComposerDraftBlock>
@@ -1572,7 +1574,7 @@ export const useStore = create<StoreState>((set, get) => {
     })
   },
 
-  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false) {
+  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false, cacheTtl) {
     // claude-api（#1944）：daemon 只收純文字 prompt，插隊／排隊／草稿／附件／停著自動啟動等旗標一律 400
     // `api_native_prompt_unsupported`。停著就先 start 再送；其餘旗標拿掉，附件直接告知不支援。
     if (get().bots.find((b) => b.id === botId)?.kind === 'claude-api') {
@@ -1603,7 +1605,7 @@ export const useStore = create<StoreState>((set, get) => {
     // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
     const draftKey = draft ? `:${draft.action}:${draft.token}` : ''
-    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${startIfStopped ? 1 : 0}:${queueIfBusy ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
+    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${startIfStopped ? 1 : 0}:${queueIfBusy ? 1 : 0}:${cacheTtl ?? ''}:${text}\u0000${attachments.join(',')}${draftKey}`
     // 留著的 crid 只在「剛失敗、馬上重試」時有意義：本機已經看到那一回合是終態（daemon 其實收下過、之後送完或撤回），或留太久了，
     // 這一次就是新的動作——沿用舊 crid 會被 daemon 當成重送、回舊結果，新的這一則沒送出去，輸入框卻清空了。
     const held = peekRequestId(reqKey)
@@ -1611,7 +1613,7 @@ export const useStore = create<StoreState>((set, get) => {
     const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
     if (draft) set((s) => markDraftBusy(s, botId, draft.action))
     try {
-      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft, queueIfBusy)
+      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft, queueIfBusy, cacheTtl)
       settleCreateRequest(reqKey)
       set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
       // 送出鍵沒生效（not_sent）／不知道生效沒有（unknown）：這一則已是 failed、沒有照一般方式送出（#120）。

@@ -1426,7 +1426,7 @@
         sqlx::query("DROP TABLE relay_requests").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE pane_aliases").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE bot_base_snapshots").execute(&mut *tx).await.unwrap();
-        for (table, col) in [("projects", "mode"), ("projects", "executor_pool_json"), ("projects", "role_policy_json"), ("projects", "deputy_bot_id"), ("projects", "deputy_after_sec"), ("projects", "executor_grants_json"), ("projects", "specialist_dispatch"), ("messages", "relay_auth"), ("bots", "role"), ("bots", "manager_use"), ("bots", "track"), ("bots", "runtime_override_json"), ("runs", "policy_rev"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
+        for (table, col) in [("projects", "mode"), ("projects", "executor_pool_json"), ("projects", "role_policy_json"), ("projects", "deputy_bot_id"), ("projects", "deputy_after_sec"), ("projects", "executor_grants_json"), ("projects", "specialist_dispatch"), ("messages", "relay_auth"), ("bots", "role"), ("bots", "manager_use"), ("bots", "track"), ("bots", "runtime_override_json"), ("turns", "cache_ttl_secs"), ("runs", "policy_rev"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&mut *tx).await.unwrap();
         }
         sqlx::query("DROP TABLE child_done_sources").execute(&mut *tx).await.unwrap();
@@ -1576,7 +1576,7 @@
         sqlx::query("DROP TABLE relay_requests").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE pane_aliases").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE bot_base_snapshots").execute(&pool).await.unwrap();
-        for (table, col) in [("projects", "mode"), ("projects", "executor_pool_json"), ("projects", "role_policy_json"), ("projects", "deputy_bot_id"), ("projects", "deputy_after_sec"), ("projects", "executor_grants_json"), ("projects", "specialist_dispatch"), ("messages", "relay_auth"), ("bots", "role"), ("bots", "manager_use"), ("bots", "track"), ("bots", "runtime_override_json"), ("runs", "policy_rev"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
+        for (table, col) in [("projects", "mode"), ("projects", "executor_pool_json"), ("projects", "role_policy_json"), ("projects", "deputy_bot_id"), ("projects", "deputy_after_sec"), ("projects", "executor_grants_json"), ("projects", "specialist_dispatch"), ("messages", "relay_auth"), ("bots", "role"), ("bots", "manager_use"), ("bots", "track"), ("bots", "runtime_override_json"), ("turns", "cache_ttl_secs"), ("runs", "policy_rev"), ("runs", "runtime_role_policy"), ("runs", "daemon_url_injected")] {
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
         sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();

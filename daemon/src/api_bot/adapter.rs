@@ -164,7 +164,7 @@ impl ApiBotAdapter {
     }
 
     fn progress_frame(&self, p: &super::sse::StreamProgress) -> Value {
-        let est = super::pricing::running_cost_microusd(&self.options.model, self.options.fast, p);
+        let est = super::pricing::running_cost_microusd(&self.options.model, self.options.fast, self.options.cache_ttl_1h, p);
         serde_json::json!({
             "bot_id": self.identity.bot_id,
             "run_id": self.identity.run_id,

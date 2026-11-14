@@ -6399,6 +6399,52 @@ async fn api_bot_next_turn_after_a_mid_stream_abort_resends_and_completes() {
     server.await.unwrap();
 }
 
+/// 每回合送出時選快取保留：turn 上記 3600 → 這一回合的請求每個 cache_control 都帶 ttl 1h；下一回合預設 5 分鐘就不帶。
+/// 快取時鐘的 TTL 取最後一回合的。
+#[tokio::test]
+async fn api_bot_cache_ttl_is_chosen_per_turn_and_drives_the_request_and_the_clock() {
+    let env = crate::testing::env().await;
+    let requests: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    async fn complete(axum::extract::State(r): axum::extract::State<Arc<std::sync::Mutex<Vec<Value>>>>, Json(body): Json<Value>) -> Json<Value> {
+        r.lock().unwrap().push(body);
+        Json(json!({"id":"m","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}))
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let app = Router::new().route("/v1/messages", post(complete)).with_state(requests.clone());
+    let server = tokio::spawn(async move { let _ = axum::serve(listener, app).await; });
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let (bot, run, turn1, turn2, conv) = (crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid(), crate::db::ulid());
+    insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "one hour please").await;
+    sqlx::query("UPDATE turns SET cache_ttl_secs=3600 WHERE id=?").bind(&turn1).execute(&env.app.db).await.unwrap();
+    let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
+    env.app.api_turn_spawn(&key1).await.unwrap();
+    wait_until_completed(&env.app, &key1).await;
+    let last = crate::cache_clock::last_turn_for_bot(&env.app.db, &bot).await.unwrap().unwrap();
+    assert_eq!(last.cache_ttl_secs, Some(3600));
+    let mut run_json = json!({"agent_status": "idle"});
+    crate::cache_clock::annotate(&mut run_json, "claude-api", Some(&last));
+    assert_eq!(run_json["cache_ttl_secs"], 3600, "快取時鐘用最後一回合的 TTL");
+
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','five minutes',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
+    spawn_retrying_busy(&env.app, &key2).await;
+    wait_until_completed(&env.app, &key2).await;
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let (one, two) = (reqs[0].to_string(), reqs[1].to_string());
+    assert!(one.matches("cache_control").count() >= 2);
+    assert_eq!(one.matches(r#""cache_control":{"ttl":"1h","type":"ephemeral"}"#).count(), one.matches("cache_control").count(), "1 小時回合：每個斷點都帶 ttl");
+    assert!(!two.contains(r#""ttl""#), "預設 5 分鐘回合不帶 ttl：{two}");
+    drop(reqs);
+    let last = crate::cache_clock::last_turn_for_bot(&env.app.db, &bot).await.unwrap().unwrap();
+    assert_eq!(last.cache_ttl_secs, Some(300), "最後一回合是 5 分鐘");
+    server.abort();
+}
+
 /// 第一個請求：回 message_start 後停住不動（模擬模型正在長時間串流）；之後的請求照常回完整訊息。
 async fn stalling_stream_server(hit: Arc<Notify>) -> (String, tokio::task::JoinHandle<()>) {
     #[derive(Clone)]

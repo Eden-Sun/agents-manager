@@ -6091,6 +6091,24 @@ pub(crate) struct PromptIn {
     /// 自動／群集派工（shim 解析 `bot:cluster:<名稱>` 或 `bot:auto:<tier>[:<track>]` 後帶來）：只對 `expect_result` 有意義。
     #[serde(default)]
     cluster: Option<String>,
+    /// claude-api 這一回合的 prompt cache 保留：`"5m"`（預設，不帶＝5m）或 `"1h"`（寫入貴 60%）。只對 claude-api 有意義，其他 kind 帶了回 400。
+    #[serde(default)]
+    cache_ttl: Option<String>,
+}
+
+/// `cache_ttl`（`"5m"`／`"1h"`）→ 秒數；不帶＝`None`（預設 5 分鐘）。只有 claude-api 收；其他值或其他 kind → 400。
+async fn parse_cache_ttl(app: &Arc<App>, bot_id: &str, raw: Option<&str>) -> Result<Option<i64>, LcError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let secs = match raw {
+        "5m" => 300,
+        "1h" => 3600,
+        _ => return Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_invalid","allowed":["5m","1h"]}))),
+    };
+    let kind = db::bot(&app.db, bot_id).await.map_err(any_err)?.map(|b| b.kind);
+    if kind.as_deref() != Some(crate::config::API_BOT_KIND) {
+        return Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_api_bot_only"})));
+    }
+    Ok(Some(secs))
 }
 
 #[derive(Deserialize)]
@@ -6514,7 +6532,7 @@ pub(crate) async fn prompt_bot(
             if has_inflight {
                 return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending"}))).into_response());
             }
-            match ApiBotPort::api_native_prompt(&app, &id, &b.text, &delivery_key).await {
+            match ApiBotPort::api_native_prompt_ttl(&app, &id, &b.text, &delivery_key, parse_cache_ttl(&app, &id, b.cache_ttl.as_deref()).await?.unwrap_or(300)).await {
                 Ok(out) => out,
                 Err(e) => {
                     tracing::warn!(request = %request_id, error = ?e, "claude-api relay prompt unconfirmed, keeping pending for reconciliation");
@@ -6553,7 +6571,8 @@ pub(crate) async fn prompt_bot(
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str())).with_auth(relay_auth.as_deref());
+    let cache_ttl_secs = parse_cache_ttl(&app, &id, b.cache_ttl.as_deref()).await?;
+    let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str())).with_auth(relay_auth.as_deref()).with_cache_ttl(cache_ttl_secs);
     // 框裡的草稿只有使用者自己在畫面上處理：bot 轉送的 prompt 不能替人送出或清掉別人的字。
     if (b.clear_draft || b.submit_draft) && relay.is_some() {
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));

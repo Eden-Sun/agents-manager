@@ -3123,7 +3123,7 @@ export class MockTransport implements Transport {
       run.native_session_id = ulid('sess')
       if (this.bot(botId).kind !== 'grok') {
         // codex 的 cache 不因閒置冷掉：同 daemon，帶 last_api_at 不帶 TTL。
-        run.cache_ttl_secs = this.bot(botId).kind === 'claude' ? 3600 : null
+        run.cache_ttl_secs = this.bot(botId).kind === 'claude' ? 3600 : this.bot(botId).kind === 'claude-api' ? 300 : null
         const age = MOCK_CACHE_AGE_MIN[this.runs.indexOf(run) % MOCK_CACHE_AGE_MIN.length]
         run.last_api_at = new Date(Date.now() - age * 60_000).toISOString()
       }
@@ -3374,6 +3374,13 @@ export class MockTransport implements Transport {
 
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
     this.refuseHandedOff(botId)
+    // 照 daemon：`cache_ttl` 只收 "5m"／"1h"，只限 claude-api；快取時鐘跟著最後一回合的 TTL。
+    if (b.cache_ttl !== undefined) {
+      if (b.cache_ttl !== '5m' && b.cache_ttl !== '1h') throw new ApiError(400, { error: 'bad_request', reason: 'cache_ttl_invalid' }, 'bad request')
+      if (this.bot(botId).kind !== 'claude-api') throw new ApiError(400, { error: 'bad_request', reason: 'cache_ttl_api_bot_only' }, 'bad request')
+      const run = this.activeRun(botId)
+      if (run) run.cache_ttl_secs = b.cache_ttl === '1h' ? 3600 : 300
+    }
     const run = this.activeRun(botId)
     // API.md §5：沒有 active run，或 run 還在 starting，都算「沒在跑」：先收下排隊（awaits_start），不 409。
     if (b.start_if_stopped === true && (!run || run.state === 'starting')) return this.promptStarting(botId, b)

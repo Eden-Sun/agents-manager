@@ -3,6 +3,7 @@ import { useStore, composerState } from '../store/store'
 import { useCacheTick } from './useCacheTick'
 import type { CacheInput } from '../lib/composerCost'
 import { effectiveModelOf } from '../lib/codexContextWindow'
+import { useApiLastCall } from './useApiTurnCosts'
 
 /** 一顆 bot 的快取狀態輸入（`lib/composerCost`）：run 的欄位＋每 15 秒換一次的「現在」。 */
 export function useCacheInput(botId: string): CacheInput {
@@ -23,6 +24,9 @@ export function useCacheInput(botId: string): CacheInput {
       }
     }),
   )
+  // claude-api：冷掉時估「下一則要重寫多少」用最近一次呼叫讀到的整段 context（input＋cache_read＋cache_creation）。
+  const last = useApiLastCall(run.kind === 'claude-api' ? botId : undefined)
+  const apiLastTokens = last ? last.input_tokens + last.cache_read_tokens + last.cache_creation_tokens : null
   const now = useCacheTick(Boolean(run.ttlSecs || run.promptCache))
-  return { ...run, nowMs: now }
+  return { ...run, apiLastTokens, nowMs: now }
 }

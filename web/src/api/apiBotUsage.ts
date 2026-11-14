@@ -24,7 +24,8 @@ export interface ApiBotUsage {
   cache_hit_rate: number | null
   /** 最近 50 個 turn 各自的花費（美元；cost_usd＝recorded，reserved_usd＝進行中的預留）。 */
   turns: ApiTurnCost[]
-  last: { speed: string; at: string | null; input_tokens: number; output_tokens: number } | null
+  /** 最近一次 recorded 呼叫：speed 是**上一次呼叫**實際用的（不是目前設定）；三種 input 加起來是它讀到的整段 context。 */
+  last: { speed: string; at: string | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number } | null
 }
 
 const rec = (v: unknown): Record<string, unknown> => (isRec(v) ? v : {})
@@ -55,7 +56,7 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     cost_microusd: { recorded: n(c, 'recorded'), reserved: n(c, 'reserved'), unknown: n(c, 'unknown') },
     tokens: { input: n(tk, 'input'), output: n(tk, 'output'), cache_read: n(tk, 'cache_read'), cache_creation: n(tk, 'cache_creation') },
     cache_hit_rate: typeof rate === 'number' && Number.isFinite(rate) ? rate : null,
-    last: last ? { speed: optStr(pick(last, 'speed')) ?? 'standard', at: optStr(pick(last, 'at')), input_tokens: n(last, 'input_tokens'), output_tokens: n(last, 'output_tokens') } : null,
+    last: last ? { speed: optStr(pick(last, 'speed')) ?? 'standard', at: optStr(pick(last, 'at')), input_tokens: n(last, 'input_tokens'), output_tokens: n(last, 'output_tokens'), cache_read_tokens: n(last, 'cache_read_input_tokens'), cache_creation_tokens: n(last, 'cache_creation_input_tokens') } : null,
   }
 }
 

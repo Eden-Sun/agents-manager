@@ -27,6 +27,8 @@ export interface CacheInput {
   /** 主力 cache 保溫讓 cache 變熱的時間（`run.cache_kept_warm_at`）；只影響退回 `last_api_at` 推算的那條路。 */
   keptWarmAt?: string | null
   ttlSecs: number | null | undefined
+  /** claude-api：最近一次呼叫讀到的整段 context token 數（冷掉時估重寫量）；沒有就 null。 */
+  apiLastTokens?: number | null
   nowMs: number
   working: boolean
 }
@@ -125,9 +127,10 @@ function fromPromptCache(pc: PromptCacheInfo, input: CacheInput, fallbackTokens:
 /** 這顆 bot 現在的快取狀態；grok、沒有任何資料回 null。 */
 export function cacheView(input: CacheInput): CacheView | null {
   const { kind, status, lastApiAt, ttlSecs, nowMs, working } = input
-  if (kind !== 'claude') return null
+  if (kind !== 'claude' && kind !== 'claude-api') return null
   const pc = input.promptCache ?? status?.prompt_cache ?? null
-  const tokens = contextTokens(status, pc)
+  // claude-api 沒有 statusLine：重寫量用最近一次呼叫的整段 context。
+  const tokens = kind === 'claude-api' ? (input.apiLastTokens ?? null) : contextTokens(status, pc)
   const viaPc = pc ? fromPromptCache(pc, input, tokens) : undefined
   if (viaPc !== undefined) return markUnknown(viaPc, status)
   const cs = cacheState(lastApiAt, ttlSecs, nowMs, working, input.keptWarmAt)
@@ -158,4 +161,28 @@ export function coldWarning(v: CacheView | null): string | null {
     : v.contextUnknown
       ? t('快取已過期；剛壓縮或接回過，context 大小下一回合才知道')
       : t('快取已過期，送出這則會重寫整段 context')
+}
+
+/** claude-api 各模型的快取寫入單價（美元／百萬 token；5 分鐘與 1 小時）。官方價目表：5 分鐘 1.25×、1 小時 2× 基本輸入價。 */
+const API_WRITE_USD_PER_M: Record<string, { m5: number; h1: number }> = {
+  'claude-opus-5-5': { m5: 5, h1: 8 },
+  'claude-fable-5-2': { m5: 10, h1: 16 },
+}
+
+/**
+ * claude-api 的快取冷提示（只提示、不擋送出）：已冷，或剩不到 1 分鐘時，講下一則約重寫多少 token、約多少錢。
+ * 單價用這顆 bot 目前的 TTL 對應的 write 單價（fast 2×）；不認得的模型只講 token 數。
+ */
+export function apiColdWarning(v: CacheView | null, model: string | null | undefined, ttlSecs: number | null | undefined, fast: boolean, lastTokens?: number | null): string | null {
+  if (!v || v.working) return null
+  const cold = v.state === 'cold'
+  if (!cold && v.mins !== 1) return null
+  const rate = model ? API_WRITE_USD_PER_M[model] : undefined
+  // 已冷的 view 自帶重寫量；還熱（剩不到 1 分鐘）的 view 沒有，退回最近一次呼叫的整段 context。
+  const tokens = v.rewriteTokens ?? lastTokens ?? null
+  const lead = cold ? t('快取已冷') : t('快取剩不到 1 分鐘')
+  if (tokens === null) return t('{lead}：下一則會重寫整段 context', { lead })
+  if (!rate) return t('{lead}：下一則約重寫 {tokens} token', { lead, tokens: tokensK(tokens) })
+  const usd = (tokens / 1_000_000) * (ttlSecs === 3600 ? rate.h1 : rate.m5) * (fast ? 2 : 1)
+  return t('{lead}：下一則約重寫 {tokens} token（約 ${cost}）', { lead, tokens: tokensK(tokens), cost: usd.toFixed(2) })
 }

@@ -24,7 +24,7 @@ fn options() -> Options {
         effort: "medium".into(),
         fast: true,
         max_tokens: 4096,
-        compact_at_input_tokens: 0,
+        compact_at_input_tokens: 0, cache_ttl_1h: false,
     }
 }
 fn initial() -> State {
@@ -224,7 +224,7 @@ async fn http_loop_compaction_headers_context_management_and_thinking_strip() {
     let tools = FakeTools::default();
     let journal = MemoryJournal::default();
     let opts = Options {
-        compact_at_input_tokens: 150_000,
+        compact_at_input_tokens: 150_000, cache_ttl_1h: false,
         ..options()
     };
     let model = HttpModelWithOptions(&f, opts);

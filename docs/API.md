@@ -684,6 +684,8 @@ API bot 在送入結果確認時的 `delivery: "ok"` 表示受管 harness owner 
 
 `share_reply_visible`（只對分享用 bot 有意義，其他 bot 忽略）：擁有者送的訊息分享頁本來就看不到，這一回合 bot 的回覆預設也不給看；帶 `true`＝這一則觸發的回覆照樣出現在分享頁（SPEC §20.3）。只有使用者（UI token）能帶；Bot／Service 帶 `true` 回 403 `user_only`，不會送出。
 
+`cache_ttl`（`"5m"`／`"1h"`，只對 claude-api）：這一回合的 prompt cache 保留；不帶＝`5m`（舊客戶端相容）。`1h` 的寫入單價是 5 分鐘的 1.6 倍（Opus 5.5 $8 對 $5／百萬 token），適合下一次提問隔 5–60 分鐘；整個回合所有請求用同一個 TTL，存在 `turns.cache_ttl_secs`，快取時鐘（`run.cache_ttl_secs`）取最後一回合的。其他值回 `400 cache_ttl_invalid`，非 claude-api 帶了回 `400 cache_ttl_api_bot_only`。
+
 收件 bot 與所屬 project 都必須存在且未刪除，否則回 `404`；project 狀態會在 bot lock 內重驗，避免刪除中的孤兒 bot 收到 prompt。
 
 `client_request_id` 去頭尾空白後須為 1..=200 個 `[A-Za-z0-9._:-]`（#923，同 fork／交辦的規則），否則 `400`、不建回合；沒帶或空白＝daemon 自己生一個。
@@ -2702,7 +2704,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `prompt_suggestion` | claude 輸入框裡那句灰字「建議下一句」（字串），可以用 `POST /api/bots/{id}/suggestion/accept` 一鍵送出（Tab＋Enter）。**只在 run 現在 `agent_status:"idle"`、輸入框裡只有那句灰字時有值，其餘一律 `null`**（回合開始、使用者在終端打了字、不是 claude、讀不到樣式畫面、超過 500 字、daemon 還沒讀到）；idle 邊之後 1.5／3.5／7／14 秒補讀、之後跟著 30 秒的畫面巡邏，內容變了或消失才推 `bot_status`。記憶體帳、不在 DB；舊前端忽略這個欄位 |
 | `compacting_since` | claude 正在壓縮對話的開始時間（ISO 8601，`db::iso_at` 格式）：`PreCompact` hook 來的（手動 `/compact`、閒置壓縮、自動壓縮都送），或終端畫面上 `Compacting conversation…` spinner 看到的（備援）。壓縮做完的 `SessionStart`（source=compact）、`Stop`／`StopFailure` 收掉；超過 10 分鐘沒收也不帶，超時後的新 hook／spinner 會開始新一輪計時，未超時的重複訊號保留原時間。**沒有在壓縮、舊 daemon 一律 `null`**。網頁在側欄與對話區顯示「壓縮中…」，燈號照舊（`working`／`idle`）。記憶體帳、不在 DB；舊前端忽略這個欄位 |
 | `last_api_at` | 這顆 bot 最後一次 API 活動（ISO 8601，`db::iso_at` 格式），推算 prompt cache 還熱不熱（SPEC §6.5j）：最近一筆送出去的回合 `completed_at`、claude statusLine 的用量欄位（`cost.total_api_duration_ms`／`context_window`）真的變了的那一刻、`blocked` 的 `agent_status_since`，取最晚；回合進行中（`agent_status:"working"` 或有 in-flight 回合）＝投影當下的時間。沒有任何紀錄或 grok 為 `null`。回合收尾會另推一次 `bot_status` 讓它跟上 |
-| `cache_ttl_secs` | 這種 kind 的 prompt cache 存活秒數：claude `3600`；codex `null`（cache 不因閒置冷掉）、grok `null`（不知道），網頁都不畫倒數。舊前端忽略這兩個欄位 |
+| `cache_ttl_secs` | 這種 kind 的 prompt cache 存活秒數：claude `3600`；claude-api 是**最後一回合**送出時選的（`300` 預設或 `3600`，見 `POST /api/bots/{id}/prompt` 的 `cache_ttl`；`last_api_at`＝最近回合完成時間、進行中＝現在）；codex `null`（cache 不因閒置冷掉）、grok `null`（不知道），網頁都不畫倒數。舊前端忽略這兩個欄位 |
 | `cache_compacted` | 壓縮過後 cache 已作廢：最後一次壓縮（任何一種，含熱壓；以聊天室的壓縮系統訊息為準）不早於最後一次真的活動（容許 30 秒誤差，壓縮收尾的回合不算新活動）才是 `true`。回合進行中、codex／grok、壓縮後又有新回合都是 `false`。網頁見 `true` 就不畫倒數（同冷掉的樣式），daemon 也不為它保溫 |
 | `cache_kept_warm_at` | 主力 bot 的 prompt cache 保溫（`primary_keep_warm`，SPEC §6.5k）讓 cache 實際變熱的時間（ISO 8601）：最近一次成功的保溫回合（`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`；完成時間，在飛中用建立時間）；沒做過是 `null`。**熱壓不算、比最近一次熱壓早的保溫也不算**（熱壓之後視為涼掉，要等真的活動後的新保溫才又有值）。保溫回合**不算活動**，`last_api_at` 不因它重置（仍是真實年齡）；網頁用 `max(last_api_at, cache_kept_warm_at)` 算顏色。舊名 `cache_kept_alive_at` 已改名（語意不變） |
 | `keep_warm_skip` | boolean。使用者按了「不用保溫」（`POST /api/bots/{id}/keep-warm/skip`）且之後還沒有真的活動：true。持久；有真的活動時 daemon 清掉並推 `bot_status` |
@@ -2767,7 +2769,7 @@ User-only（Bot、AGM role、Service 皆 403 `user_only`）。body `{"questions"
 
 User-only。把一則 **assistant** 訊息翻成繁體中文（zh-TW），走共用的 Claude API client（用途 `message_translate`，預設 Haiku／low，受 `[claude_api]` 總開關管；這個用途沒寫設定時預設開，`[claude_api.uses.message_translate] enabled = false` 才關）。`[claude_api.uses.message_translate] auto`（預設 true）決定網頁要不要對新到／最後 10 則英文訊息自動呼叫這個端點；`GET/PUT /api/claude-api/settings` 的 `uses[].auto` 讀寫它（其他用途為 null，PUT 帶 auto 會 400）。`auto` 開著時 daemon 也會在訊息落地當下預先翻（2026-11-10，SPEC §6.9e），寫進同一份快取：之後這支端點對那則是 `cached:true`、不扣費；預先翻失敗冷卻 120 秒，不影響這支端點的手動呼叫。
 prompt 要求保留 markdown 結構，程式碼區塊、行內 code、路徑、指令、識別字、commit hash 原樣不翻，只回譯文。
-`200 {"translation", "model", "cached", "cost_usd", "usage"?}`：`cost_usd` 是這次翻譯依牌價算的美元（Haiku 5.5 0.10／0.50、Sonnet 5.5 2／10、Opus 5.5 4／20 每百萬 token，快取寫 ×1.25、讀 ×0.1；不認得的模型為 null），快取命中時回當初那次的花費。快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
+`200 {"translation", "model", "cached", "cost_usd", "usage"?}`：`cost_usd` 是這次翻譯依牌價算的美元（Haiku 5.5 0.10／0.50、Sonnet 5.5 2／10、Opus 5.5 4／20 每百萬 token，快取寫 ×1.25、讀依官方倍率〔Fable 5.1／5.2 ×0.025、Opus 5.5／Sonnet 5.5 ×0.05、其餘 ×0.1〕；不認得的模型為 null），快取命中時回當初那次的花費。快取放 `{data_dir}/message-translate/`（0600；鍵＝訊息 id＋內容雜湊），翻過就 `cached:true`、不再扣費、不帶 `usage`。
 簡體中文（2026-11-11）：`model` 為 `opencc-s2twp`、`cost_usd` 為 `0`、不帶 `usage`，本地 OpenCC `s2twp` 轉換（程式碼區塊、行內 code、網址原樣），不呼叫 API、不計入保險絲與每小時上限；寫同一份快取，之後 `cached:true`。判斷規則見 SPEC §6.9e。
 錯誤：404 `not_found`（沒這則訊息）；400（不是 assistant 或空訊息）；422 `message_too_long`（超過 20000 字）；409 `claude_api_not_configured`（沒開或沒 key）；502（`translate_failed: …`，API 失敗、被限流、逾時）。
 

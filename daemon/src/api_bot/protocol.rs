@@ -24,6 +24,8 @@ pub struct Options {
     pub fast: bool,
     pub max_tokens: u32,
     pub compact_at_input_tokens: u32,
+    /// 這顆 bot 的快取保留：true＝1 小時（`cache_control.ttl="1h"`，寫入 2×），false＝預設 5 分鐘。
+    pub cache_ttl_1h: bool,
 }
 
 impl Options {
@@ -47,21 +49,25 @@ impl Options {
 
 /// Prompt caching（5 分鐘 ephemeral）：斷點放在 system 末尾（涵蓋 tools＋system）、最後一則訊息與其前一則的最後一個 block，
 /// 共 3 個（上限 4）。下一次呼叫時前一次的「最後一則」就是前綴，因此讀得到快取。斷點只加在送出的 body，不進 checkpoint。
-fn ephemeral() -> Value {
-    json!({"type": "ephemeral"})
+fn ephemeral(ttl_1h: bool) -> Value {
+    if ttl_1h {
+        json!({"type": "ephemeral", "ttl": "1h"})
+    } else {
+        json!({"type": "ephemeral"})
+    }
 }
 
-fn mark_last_block(content: &Value) -> Value {
+fn mark_last_block(content: &Value, ttl_1h: bool) -> Value {
     match content {
         Value::String(text) if !text.is_empty() => {
-            json!([{"type": "text", "text": text, "cache_control": ephemeral()}])
+            json!([{"type": "text", "text": text, "cache_control": ephemeral(ttl_1h)}])
         }
         Value::Array(blocks) => {
             let mut blocks = blocks.clone();
             if let Some(Value::Object(last)) = blocks.last_mut() {
                 // thinking 區塊不能帶 cache_control。
                 if !matches!(last.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking")) {
-                    last.insert("cache_control".into(), ephemeral());
+                    last.insert("cache_control".into(), ephemeral(ttl_1h));
                 }
             }
             Value::Array(blocks)
@@ -127,14 +133,14 @@ fn strip_thinking_before_compaction(messages: &[Message]) -> Vec<Message> {
 
 pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value {
     let stripped_messages = strip_thinking_before_compaction(messages);
-    let system = mark_last_block(system);
+    let system = mark_last_block(system, options.cache_ttl_1h);
     let last = stripped_messages.len().saturating_sub(1);
     let messages: Vec<Message> = stripped_messages
         .iter()
         .enumerate()
         .map(|(i, m)| {
             if i == last || (i + 2 == stripped_messages.len()) {
-                Message { role: m.role.clone(), content: mark_last_block(&m.content) }
+                Message { role: m.role.clone(), content: mark_last_block(&m.content, options.cache_ttl_1h) }
             } else {
                 m.clone()
             }
@@ -239,7 +245,7 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 0,
+            compact_at_input_tokens: 0, cache_ttl_1h: false,
         };
         assert!(opts.validate().is_ok());
         opts.compact_at_input_tokens = 50_000;
@@ -266,7 +272,7 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 0,
+            compact_at_input_tokens: 0, cache_ttl_1h: false,
         };
         let body_no_compact = request(&opts, &system, &messages);
         assert!(body_no_compact.get("context_management").is_none());
@@ -320,7 +326,7 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 150_000,
+            compact_at_input_tokens: 150_000, cache_ttl_1h: false,
         };
         let body = request(&opts, &system, &messages);
         let sent_msgs = body["messages"].as_array().unwrap();
@@ -341,5 +347,18 @@ mod tests {
         assert_eq!(turn2_blocks[1]["thinking"], "fresh reasoning after compaction");
         assert_eq!(turn2_blocks[2]["type"], "text");
         assert_eq!(turn2_blocks[2]["text"], "fresh reply");
+    }
+
+    #[test]
+    fn one_hour_cache_ttl_marks_every_breakpoint_with_ttl_1h() {
+        let messages = vec![Message { role: "user".into(), content: json!("hello") }];
+        let mut opts = Options { model: crate::config::API_BOT_MODEL.into(), effort: "medium".into(), fast: false, max_tokens: 4096, compact_at_input_tokens: 0, cache_ttl_1h: false };
+        let five = request(&opts, &json!("system"), &messages).to_string();
+        assert!(five.contains(r#""cache_control":{"type":"ephemeral"}"#) && !five.contains("1h"));
+        opts.cache_ttl_1h = true;
+        let hour = request(&opts, &json!("system"), &messages);
+        let text = hour.to_string();
+        assert_eq!(text.matches(r#""cache_control":{"ttl":"1h","type":"ephemeral"}"#).count(), text.matches("cache_control").count(), "每個斷點都帶 1h：{text}");
+        assert!(text.matches("cache_control").count() >= 2);
     }
 }

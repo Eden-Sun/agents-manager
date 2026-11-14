@@ -25,7 +25,7 @@ async fn typed_bot_named(e: &crate::testing::Env, kind: &str, name: &str, pane: 
 }
 
 async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-    let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false, track: None, cluster: None };
+    let body = PromptIn { text, expect_result: false, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false, track: None, cluster: None, cache_ttl: None };
     let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await {
         Ok(r) => r,
         Err(err) => err.into_response(),
@@ -491,4 +491,23 @@ async fn composer_draft_read_without_a_run_is_404() {
     let bot = crate::testing::claude_bot(&e.app, &e.project_id, "no-run-bot").await;
     let (status, _) = get_draft(&e, &bot.id).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// `cache_ttl`：只收 "5m"／"1h"，只限 claude-api；不帶＝預設（None）。
+#[tokio::test]
+async fn cache_ttl_is_validated_and_api_bot_only() {
+    let e = crate::testing::env().await;
+    let cli = typed_bot(&e, "claude").await;
+    let api = typed_bot_named(&e, "claude-api", "route-api", "pane-api").await;
+    assert_eq!(parse_cache_ttl(&e.app, &api, None).await.unwrap(), None);
+    assert_eq!(parse_cache_ttl(&e.app, &api, Some("5m")).await.unwrap(), Some(300));
+    assert_eq!(parse_cache_ttl(&e.app, &api, Some("1h")).await.unwrap(), Some(3600));
+    for bad in ["2h", "", "3600", "1H"] {
+        let r = parse_cache_ttl(&e.app, &api, Some(bad)).await;
+        assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_invalid"), "{bad}: {r:?}");
+    }
+    let r = parse_cache_ttl(&e.app, &cli, Some("1h")).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_api_bot_only"), "{r:?}");
+    // 不帶的時候其他 kind 照舊（舊客戶端相容）。
+    assert_eq!(parse_cache_ttl(&e.app, &cli, None).await.unwrap(), None);
 }

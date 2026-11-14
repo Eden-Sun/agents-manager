@@ -80,6 +80,8 @@ pub enum ApiNativeStartError {
 pub trait ApiBotPort: Send + Sync {
     fn api_native_start(&self, _bot_id: &str, _mode: ApiNativeStartMode) -> impl Future<Output = Result<ApiNativeStartResult, ApiNativeStartError>> + Send { async { Err(ApiNativeStartError::Unconfirmed) } }
     fn api_native_prompt(&self, _bot_id: &str, _text: &str, _crid: &str) -> impl Future<Output = Result<crate::lc_error::PromptOut, ApiNativePromptError>> + Send { async { Err(ApiNativePromptError::Unconfirmed) } }
+    /// 同 `api_native_prompt`，另帶這一回合的快取保留秒數（300／3600）；預設實作忽略它（只有真的 runtime 認得）。
+    fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, _cache_ttl_secs: i64) -> impl Future<Output = Result<crate::lc_error::PromptOut, ApiNativePromptError>> + Send { self.api_native_prompt(bot_id, text, crid) }
     fn api_fresh_target(&self, _bot_id: &str) -> impl Future<Output = ApiFreshAvailability> + Send { async { ApiFreshAvailability::Unavailable } }
     fn api_recovery_ready(&self) -> bool { false }
     fn api_explicit_retire(&self, _bot_id: &str, _target: &ApiFreshTarget) -> impl Future<Output = Result<ApiFreshResult, ApiFreshError>> + Send { async { Err(ApiFreshError::Unconfirmed) } }

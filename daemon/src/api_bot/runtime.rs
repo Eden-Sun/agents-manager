@@ -486,6 +486,8 @@ impl ApiBotRuntime {
         }
 
         let (bot, project, run, prompt) = validated_turn(app, key).await?;
+        // 這一回合送出時選的快取保留（300／3600，預設 300）：整回合所有請求用同一個，費用預留與報價跟著它。
+        let turn_cache_ttl: i64 = sqlx::query_scalar("SELECT cache_ttl_secs FROM turns WHERE id=?").bind(&key.turn_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?.unwrap_or(300);
         if let Some((_, _, proof)) = &prior {
             let same_conversation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns old JOIN turns next ON next.conversation_id=old.conversation_id WHERE old.id=? AND old.run_id=? AND next.id=? AND next.run_id=? AND next.status='in_flight' AND (next.delivery='ok' OR (? AND next.delivery='pending')))")
                 .bind(&proof.identity.turn_id).bind(&key.run_id).bind(&key.turn_id).bind(&key.run_id).bind(native_pending)
@@ -510,6 +512,8 @@ impl ApiBotRuntime {
             fast: bot.fast != 0,
             max_tokens: limits.max_output_tokens,
             compact_at_input_tokens: limits.compact_at_input_tokens,
+            // 每顆 bot 可選快取保留（300／3600，預設 5 分鐘）；跟 fast 一樣，每回合開始讀一次、下一回合起生效。
+            cache_ttl_1h: turn_cache_ttl == 3600,
         };
         options.validate().map_err(|_| ApiBotError::Upstream)?;
 
@@ -1095,7 +1099,10 @@ impl Default for ApiBotRuntime {
 
 impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     fn api_native_prompt(&self, bot_id: &str, text: &str, crid: &str) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
-        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid).await }
+        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, 300).await }
+    }
+    fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, cache_ttl_secs: i64) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
+        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, cache_ttl_secs).await }
     }
     fn api_native_start(&self, bot_id: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError>> + Send {
         async move { super::native_start::start(&self.shared(), bot_id, mode).await }

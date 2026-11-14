@@ -452,7 +452,7 @@ const SPEND_FILE: &str = "spend.jsonl";
 const SPEND_TRIM_BYTES: u64 = 512 * 1024;
 const SPEND_KEEP_DAYS: i64 = 90;
 
-/// 每百萬 token 的美元：(輸入, 輸出)。快取寫入＝輸入 ×1.25（5 分鐘），快取讀＝輸入 ×0.1。
+/// 每百萬 token 的美元：(輸入, 輸出)。快取寫入＝輸入 ×1.25（5 分鐘），快取讀＝輸入 ×[`cache_read_multiplier`]（官方：多數模型 0.1×，Opus 5.5／Sonnet 5.5 是 0.05×，Fable 5.1／5.2 是 0.025×）。
 /// 價格取自 Anthropic 一方 API 牌價（2026-10）；Haiku 5.5 是 ≤100K 輸入的價。
 /// 不認得的模型回 None，不猜一個數字。
 pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
@@ -473,12 +473,25 @@ pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
     }
 }
 
+/// 快取命中（讀取）相對輸入價的倍率（官方牌價頁，查證 2026-11-14）：
+/// Fable／Mythos 5.1 與 5.2＝0.025×，Opus 5.5／Sonnet 5.5＝0.05×，其餘 0.1×。
+pub(crate) fn cache_read_multiplier(model: &str) -> f64 {
+    let m = model.trim();
+    if m.starts_with("claude-fable-5-1") || m.starts_with("claude-fable-5-2") {
+        0.025
+    } else if m.starts_with("claude-opus-5-5") || m.starts_with("claude-sonnet-5-5") {
+        0.05
+    } else {
+        0.1
+    }
+}
+
 /// 這次請求的微美元成本（四捨五入）；模型價格不明回 None。
 pub(crate) fn cost_microusd(model: &str, u: &Usage) -> Option<i64> {
     let (inp, out) = price_per_mtok(model)?;
     let n = |v: Option<i64>| v.unwrap_or(0).max(0) as f64;
     // 每百萬 token 的美元 ＝ 每 token 的微美元，所以不必再除。
-    let total = n(u.input_tokens) * inp + n(u.output_tokens) * out + n(u.cache_creation_input_tokens) * inp * 1.25 + n(u.cache_read_input_tokens) * inp * 0.1;
+    let total = n(u.input_tokens) * inp + n(u.output_tokens) * out + n(u.cache_creation_input_tokens) * inp * 1.25 + n(u.cache_read_input_tokens) * inp * cache_read_multiplier(model);
     Some(total.round() as i64)
 }
 
@@ -976,8 +989,8 @@ mod tests {
     fn microusd_pricing_and_bad_spend_lines_are_skipped() {
         let u = Usage { input_tokens: Some(1_000_000), output_tokens: Some(1_000_000), cache_creation_input_tokens: Some(1_000_000), cache_read_input_tokens: Some(1_000_000) };
         assert_eq!(cost_microusd("claude-haiku-5-5", &u), Some(735_000));
-        assert_eq!(cost_microusd("claude-opus-5-5", &u), Some(29_400_000));
-        assert_eq!(cost_microusd("claude-fable-5-1", &u), Some(73_500_000));
+        assert_eq!(cost_microusd("claude-opus-5-5", &u), Some(29_200_000)); // 4＋20＋5（寫）＋0.2（讀，0.05×）
+        assert_eq!(cost_microusd("claude-fable-5-1", &u), Some(72_750_000)); // 10＋50＋12.5＋0.25（讀，0.025×）
         assert_eq!(cost_microusd("gpt-x", &u), None);
 
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-spend-{}", crate::db::ulid())));
@@ -1150,6 +1163,19 @@ mod tests {
         assert_eq!(price_per_mtok("claude-fable-5"), Some((10.0, 50.0)));
         assert_eq!(price_per_mtok("claude-fable-5-1"), Some((10.0, 50.0)));
         assert_eq!(price_per_mtok("claude-opus-5-5"), Some((4.0, 20.0)));
+    }
+
+    /// 官方牌價：cache hit 是輸入價的 0.025×（Fable 5.1／5.2）、0.05×（Opus 5.5、Sonnet 5.5），其餘 0.1×。
+    #[test]
+    fn cache_read_uses_each_models_official_multiplier() {
+        let read = |model: &str| cost_microusd(model, &Usage { input_tokens: None, output_tokens: None, cache_creation_input_tokens: None, cache_read_input_tokens: Some(1_000_000) }).unwrap();
+        assert_eq!(read("claude-fable-5-2"), 200_000, "$0.20/M");
+        assert_eq!(read("claude-fable-5-1"), 250_000, "$0.25/M（輸入 $10）");
+        assert_eq!(read("claude-fable-5"), 1_000_000, "Fable 5 仍是 0.1×");
+        assert_eq!(read("claude-opus-5-5"), 200_000, "$0.20/M，不是 $0.40");
+        assert_eq!(read("claude-sonnet-5-5"), 100_000, "$0.10/M");
+        assert_eq!(read("claude-sonnet-5"), 200_000, "Sonnet 5 是 0.1×＝$0.20");
+        assert_eq!(read("claude-haiku-5-5"), 10_000, "$0.01/M");
     }
 
     #[tokio::test]

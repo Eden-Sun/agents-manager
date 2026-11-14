@@ -11,7 +11,7 @@ fn pending_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<St
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub(super) fn arm_pending_lost_ack_for_test(crid: &str) { assert!(pending_lost_acks().lock().unwrap().insert(crid.to_owned())); }
 
-pub(super) fn prompt<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str)
+pub(super) fn prompt<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str, cache_ttl_secs: i64)
     -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
     let app = app.clone();
     let bot = bot.to_owned();
@@ -19,15 +19,17 @@ pub(super) fn prompt<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'
     let crid = crid.to_owned();
     let tasks = app.background_tasks.clone();
     Box::pin(async move {
-        let task = tasks.spawn(Box::pin(async move { prompt_body(&app, &bot, &text, &crid).await }));
+        let task = tasks.spawn(Box::pin(async move { prompt_body(&app, &bot, &text, &crid, cache_ttl_secs).await }));
         task.await.unwrap_or(Err(E::Unconfirmed))
     })
 }
 
-fn prompt_body<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str) -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
-    Box::pin(prompt_body_inner(app, bot, text, crid))
+fn prompt_body<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str, cache_ttl_secs: i64) -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
+    Box::pin(prompt_body_inner(app, bot, text, crid, cache_ttl_secs))
 }
-async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, crid: &str) -> Result<PromptOut, E> {
+async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, crid: &str, cache_ttl_secs: i64) -> Result<PromptOut, E> {
+    // 只認 300（5 分鐘）／3600（1 小時）；其他值當預設，不讓不合法的 TTL 進到請求。
+    let cache_ttl_secs = if cache_ttl_secs == 3600 { 3600 } else { 300 };
     use crate::lifecycle::send_now::ports::MaintenancePort;
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() || text.trim().is_empty() || crid.trim().is_empty() { return Err(E::Unconfirmed); }
     let _lock = super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot).await.map_err(|_| E::Unconfirmed)?;
@@ -87,8 +89,8 @@ async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, 
     }
     let turn = crate::db::ulid();
     let message = crate::db::ulid();
-    let changed = sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,client_request_id,created_at,prompt_text,auto_resend) SELECT ?,?,?,'web','in_flight','pending',?,?,?,0 WHERE EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id JOIN runs r ON r.bot_id=b.id JOIN conversations c ON c.bot_id=b.id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.id=? AND r.state='running' AND c.id=?)")
-        .bind(&turn).bind(&conversation).bind(&run).bind(crid).bind(&now).bind(text).bind(bot).bind(&run).bind(&conversation)
+    let changed = sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,client_request_id,created_at,prompt_text,auto_resend,cache_ttl_secs) SELECT ?,?,?,'web','in_flight','pending',?,?,?,0,? WHERE EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id JOIN runs r ON r.bot_id=b.id JOIN conversations c ON c.bot_id=b.id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.id=? AND r.state='running' AND c.id=?)")
+        .bind(&turn).bind(&conversation).bind(&run).bind(crid).bind(&now).bind(text).bind(cache_ttl_secs).bind(bot).bind(&run).bind(&conversation)
         .execute(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     if changed.rows_affected()!=1 { return Err(E::Unconfirmed); }
     sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'user',?,'web',?)")

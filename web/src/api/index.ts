@@ -662,6 +662,8 @@ export async function sendPrompt(
   draft?: { action: 'submit' | 'clear'; token: string },
   /** issue #733：忙碌時請 daemon 建 queued turn，未提供時維持舊有 409 行為。 */
   queueIfBusy = false,
+  /** claude-api 這一回合的 prompt cache 保留：`5m`（預設，不帶）或 `1h`（寫入貴 60%，適合下一次提問隔 5–60 分鐘）。 */
+  cacheTtl?: '5m' | '1h',
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     ...(draft?.action === 'submit' ? {} : { text }),
@@ -670,6 +672,7 @@ export async function sendPrompt(
     ...(sendNow ? { send_now: true } : {}),
     ...(startIfStopped ? { start_if_stopped: true } : {}),
     ...(queueIfBusy ? { queue_if_busy: true } : {}),
+    ...(cacheTtl ? { cache_ttl: cacheTtl } : {}),
     ...(draft ? { [draft.action === 'submit' ? 'submit_draft' : 'clear_draft']: true, expect_draft_token: draft.token } : {}),
   })
   const o = isRec(raw) ? raw : {}

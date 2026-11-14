@@ -1859,6 +1859,19 @@ button.pane-toggle:hover:not(:disabled) {
   filter: brightness(1.08);
 }
 
+/* claude-api：兩顆送出鍵（快取 5 分／1 小時）；1 小時那顆做成次要樣式，Enter 與主要鍵＝5 分鐘。 */
+.send-btns {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.send-btn.long {
+  background: transparent;
+  color: var(--accent);
+}
+
 .attach-pick {
   flex: none;
   align-self: flex-end;
