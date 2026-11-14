@@ -141,13 +141,13 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       const claudeKey = `claude@${host || 'local'}@`
       const list = modelsCache[claudeKey] ?? []
       const found = pickLatestRoleModel(/opus/i, list)
-      return { kind: 'claude', model: found ? found.id : 'claude-opus-5-5', effort: 'high' }
+      return { kind: 'claude', model: found ? found.id : 'opus', effort: 'high' }
     }
     if (r === 'advisor') {
       const codexKey = `codex@${host || 'local'}@`
       const list = modelsCache[codexKey] ?? []
       const found = pickLatestRoleModel(/astra/i, list)
-      return { kind: 'codex', model: found ? found.id : 'astra', effort: 'high' }
+      return { kind: 'codex', model: found ? found.id : null, effort: 'high' }
     }
     if (r === 'specialist') {
       // claude sonnet medium 或 codex 最新 sol medium
@@ -389,6 +389,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                   disabled={missing || roleBlocked}
                   title={title}
                   onClick={() => {
+                    modelTouched.current = true
                     setKind(k)
                     setModel(null)
                     if (!effortTouched.current) {
