@@ -634,6 +634,82 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// 回固定 HTTP 狀態碼與錯誤 body 的上游（給明確拒絕／未知結果的分流測試）。
+    async fn spawn_status_server(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || async move {
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    Json(serde_json::json!({"type":"error","error":{"type":"invalid_request_error","message":"fixture rejection"},"request_id":"req_fixture"})),
+                )
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://127.0.0.1:{port}/v1/messages"), handle)
+    }
+
+    /// 400 是 API 明確拒絕（沒處理、不計費）：attempt 收成 `failed`、費用 0，checkpoint 的 api_pending 收掉，
+    /// 下一回合能接著送（以前停在 `unknown`＋api_pending，這顆 bot 之後每一則都被拒收、重啟還讓整個 API 啟動閘隔離）。
+    /// 500 仍不知道上游有沒有處理：維持 `unknown`＋api_pending。
+    #[tokio::test]
+    async fn test_definitive_http_rejection_settles_pending_marker_but_5xx_stays_unknown() {
+        for (status, want_state, want_estimate, want_pending) in [(400_u16, "failed", Some(0_i64), false), (500, "unknown", None, true)] {
+            let (endpoint, server) = spawn_status_server(status).await;
+            let (pool, bot, run, turn, session) = setup_test_db().await;
+            let adapter = ApiBotAdapter::new(
+                pool.clone(),
+                AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 },
+                test_options(),
+                serde_json::json!("System"),
+                test_limits(),
+                Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+                AdapterHttpConfig {
+                    endpoint,
+                    key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                    timeout: std::time::Duration::from_secs(5),
+                    max_response_bytes: 1024 * 1024,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+            let cancel = CancellationToken::new();
+            let mut state = State::default();
+            state.messages = vec![Message { role: "user".into(), content: serde_json::json!("rejected run") }];
+            let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 2).await;
+            assert!(res.is_err(), "status {status}");
+
+            let row: (String, Option<i64>, i64) = sqlx::query_as("SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?")
+                .bind(&turn).fetch_one(&pool).await.unwrap();
+            assert_eq!((row.0.as_str(), row.1, row.2), (want_state, want_estimate, 10_000), "status {status}");
+            let raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&pool).await.unwrap();
+            let checkpoint: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(checkpoint["api_pending"], want_pending, "status {status}");
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn definitive_rejection_covers_4xx_429_529_but_not_timeouts_or_5xx() {
+        use super::super::adapter::definitive_rejection;
+        let http = |status| crate::api_bot::http::Error::Http { status, kind: None, message: None, request_id: None };
+        assert!(definitive_rejection(&http(400)));
+        assert!(definitive_rejection(&http(413)));
+        assert!(definitive_rejection(&http(529)));
+        assert!(definitive_rejection(&crate::api_bot::http::Error::RateLimited { retry_after_secs: None }));
+        assert!(!definitive_rejection(&http(408)));
+        assert!(!definitive_rejection(&http(500)));
+        assert!(!definitive_rejection(&crate::api_bot::http::Error::Timeout));
+        assert!(!definitive_rejection(&crate::api_bot::http::Error::TransportUnknown));
+        assert!(!definitive_rejection(&crate::api_bot::http::Error::InvalidResponse));
+    }
+
     #[tokio::test]
     async fn test_checkpoint_bytes_limit_enforced_fail_closed() {
         let (pool, bot, run, turn, session) = setup_test_db().await;

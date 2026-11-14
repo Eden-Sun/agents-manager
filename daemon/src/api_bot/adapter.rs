@@ -122,6 +122,16 @@ pub(super) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
         && !(state.responses.is_empty() && state.messages.iter().any(|m| m.content.as_array().is_some_and(|blocks| blocks.iter().any(|b| matches!(b.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking"))))))
 }
 
+/// API 明確拒絕、確定沒有處理（也不計費）的錯誤：4xx（408 逾時除外）、429、529 過載。
+/// 逾時、連線中斷、回應過大或讀壞都不算：那些不知道上游有沒有處理。
+pub(super) fn definitive_rejection(err: &http::Error) -> bool {
+    match err {
+        http::Error::RateLimited { .. } => true,
+        http::Error::Http { status, .. } => (400..500).contains(status) && *status != 408 || *status == 529,
+        _ => false,
+    }
+}
+
 impl ApiBotAdapter {
     fn refuse(&self, reason: impl Into<String>) {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.into());
@@ -441,24 +451,29 @@ impl Model for ApiBotAdapter {
                         generation: self.identity.generation,
                         revision: cursor.revision,
                     };
-                    let mut unknown_state = cursor.last_durable_state.clone();
-                    unknown_state.api_pending = true;
+                    // 明確被 API 拒絕（4xx、429、529）＝這次請求沒有被處理、不計費：結果是已知的，
+                    // 照 `record` 的規則要把 pending 標記收掉（receipt `failed`、費用 0）。否則 checkpoint 永遠停在
+                    // api_pending，這顆 bot 之後的每一則都被當成「上一次還沒結算」拒收，重啟時還會讓整個 API 啟動閘隔離。
+                    // 逾時、連線中斷、回應讀壞才是真的不知道有沒有處理，維持 `unknown`。
+                    let rejected = definitive_rejection(&err);
+                    let mut next_state = cursor.last_durable_state.clone();
+                    next_state.api_pending = !rejected;
 
-                    if let Ok(val) = serde_json::to_value(&unknown_state) {
+                    if let Ok(val) = serde_json::to_value(&next_state) {
                         if let Ok(chk) = Checkpoint::new(&val) {
                             let receipt = db_api::Receipt {
-                                state: "unknown",
+                                state: if rejected { "failed" } else { "unknown" },
                                 actual_speed: None,
                                 usage: None,
-                                estimated_microusd: None,
+                                estimated_microusd: rejected.then_some(0),
                             };
                             if let Ok(next_rev) =
                                 db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
                                     .await
                             {
                                 cursor.revision = next_rev;
-                                cursor.last_api_pending = true;
-                                cursor.last_durable_state = unknown_state;
+                                cursor.last_api_pending = !rejected;
+                                cursor.last_durable_state = next_state;
                             }
                         }
                     }
