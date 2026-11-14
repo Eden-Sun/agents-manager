@@ -1706,3 +1706,27 @@ async fn a_leftover_instruction_files_key_in_config_toml_is_ignored() {
     lifecycle::start_bot(&e.app, &id).await.unwrap();
     assert!(settings_of_last_start(&e).get("pluginConfigs").is_none());
 }
+
+/// 專家模式新增表單建 claude-api 顧問的實際流程：POST 只帶 daemon 收的欄位（kind、model、effort、fast、autostart:false），
+/// 接著 PATCH `role=advisor`＋`manager_use`（不帶 runtime_override）要成功；帶 CLI 欄位的 POST 照舊 400。
+#[tokio::test]
+async fn claude_api_advisor_can_be_created_then_patched_with_role_and_manager_use() {
+    let e = env().await;
+    crate::testing::seed_project_config(&e).await;
+    let id = add(&e, json!({"name": "api-adv", "kind": "claude-api", "model": "claude-opus-5-5", "effort": "high", "fast": false, "autostart": false})).await.unwrap();
+    patch(&e, &id, json!({"role": "advisor", "track": null, "manager_use": false})).await.unwrap();
+    let bot = db::bot(&e.app.db, &id).await.unwrap().unwrap();
+    assert_eq!(bot.kind, "claude-api");
+    assert_eq!(bot.role.as_deref(), Some("advisor"));
+    assert_eq!(bot.manager_use, 0);
+    patch(&e, &id, json!({"role": "advisor", "manager_use": true})).await.unwrap();
+    assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().manager_use, 1);
+
+    for body in [
+        json!({"name": "api-bad1", "kind": "claude-api", "identity": "cc1"}),
+        json!({"name": "api-bad2", "kind": "claude-api", "share_profile": "restricted"}),
+    ] {
+        let r = add(&e, body.clone()).await;
+        assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_cli_fields_unsupported"), "{body}: {r:?}");
+    }
+}

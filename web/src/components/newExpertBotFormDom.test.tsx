@@ -357,3 +357,80 @@ test('專家模式：選專家 → 強度預選 medium；手動改 high 後切�
   )
   assert.equal(advHighBtn?.getAttribute('aria-checked'), 'true', '改選顧問後強度應預選 high')
 })
+
+test('專家模式：claude-api 只在顧問可選；其他角色 disabled 並說明原因；切離顧問時改回建議 kind', async () => {
+  useStore.setState({
+    projects: [project('p-expert', 'expert')],
+    bots: [],
+    selectedProjectId: 'p-expert',
+    selectedBotId: null,
+  } as never)
+  await openAddBot()
+  const apiBtn = () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.includes('claude-api'))!
+  const card = (label: string) => [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes(label))!
+
+  // 預設是執行者：顯示但 disabled，title 講原因。
+  assert.ok(apiBtn(), 'claude-api 要列出來')
+  assert.equal(apiBtn().disabled, true)
+  assert.match(apiBtn().title, /只能當顧問/)
+  for (const label of ['管理者', '專家']) {
+    await click(card(label))
+    await settle()
+    assert.equal(apiBtn().disabled, true, `${label} 不能選 claude-api`)
+  }
+
+  await click(card('顧問'))
+  await settle()
+  assert.equal(apiBtn().disabled, false, '顧問可選 claude-api')
+  assert.match(document.querySelector('.field-note')?.textContent ?? '', /Codex Astra \(high\) \/ Claude API Opus \(high\)/)
+  await click(apiBtn())
+  await settle()
+  assert.equal(apiBtn().getAttribute('aria-checked'), 'true')
+
+  // 選了 claude-api：不出 context／保溫、身份、分享用途、人設。
+  const text = document.querySelector('form')!.textContent ?? ''
+  assert.doesNotMatch(text, /context 與保溫/)
+  assert.doesNotMatch(text, /分享/)
+
+  // 切到執行者：kind 改回建議（claude），claude-api 不再被選。
+  await click(card('執行者'))
+  await settle()
+  assert.equal(apiBtn().getAttribute('aria-checked'), 'false')
+  assert.equal(apiBtn().disabled, true)
+  const claudeBtn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.trim() === 'claude')!
+  assert.equal(claudeBtn.getAttribute('aria-checked'), 'true')
+})
+
+test('專家模式：建 claude-api 顧問只送 daemon 收的欄位，PATCH 帶 role／manager_use、不帶 runtime_override', async () => {
+  useStore.setState({
+    projects: [project('p-expert', 'expert')],
+    bots: [],
+    selectedProjectId: 'p-expert',
+    selectedBotId: null,
+  } as never)
+  await openAddBot()
+  const card = (label: string) => [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes(label))!
+  await click(card('顧問'))
+  await settle()
+  const apiBtn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.includes('claude-api'))!
+  await click(apiBtn)
+  await settle()
+  const submit = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!
+  assert.equal(submit.disabled, false, 'claude-api 不看 CLI 安裝，可送出')
+  await click(submit)
+  await settle(50)
+
+  const post = requests.find((r) => r.method === 'POST' && /\/projects\/p-expert\/bots$/.test(r.path))!
+  const body = post.body as Record<string, unknown>
+  assert.equal(body.kind, 'claude-api')
+  assert.equal(body.autostart, false)
+  assert.ok(!body.identity, '不送 identity')
+  for (const k of ['share_profile', 'share_folder', 'confirm_trusted', 'args', 'env']) assert.ok(!(k in body) || !body[k] || (Array.isArray(body[k]) && !(body[k] as unknown[]).length), `不送 ${k}`)
+  assert.ok(!body.persona, '不送人設')
+
+  const patch = requests.find((r) => r.method === 'PATCH' && /\/bots\/new-b1$/.test(r.path))!
+  const patchBody = patch.body as Record<string, unknown>
+  assert.equal(patchBody.role, 'advisor')
+  assert.equal(patchBody.manager_use, true)
+  assert.ok(!('runtime_override' in patchBody), 'claude-api 不送 runtime_override')
+})

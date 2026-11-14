@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
-  BOT_KINDS,
+  CREATABLE_KINDS,
   type BotKind,
   type ModelInfo,
   type Project,
@@ -20,6 +20,7 @@ import { IdentityOptions, PersonaField } from './BotSettingsPanel'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
 import type { ShareProfile } from '../api/types'
 import { ShareProfileField } from './ShareProfileField'
+import { KindTag } from './KindTag'
 import { EMPTY_SHARE_FOLDER, shareCreateFields, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 
 export type ExpertRoleChoice = 'manager' | 'advisor' | 'executor' | 'specialist'
@@ -120,7 +121,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // 預載各 kind 模型清單
   useEffect(() => {
-    for (const k of BOT_KINDS) {
+    for (const k of CREATABLE_KINDS) {
       void loadModels(k, host)
     }
   }, [host, loadModels])
@@ -213,10 +214,12 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   // 驗證
   const nameOk = isValidBotName(name.trim())
-  const cliOk = Boolean(tools[kind]?.installed)
+  // claude-api 沒有 CLI 要裝（同一般新增表單）；只能當顧問：沒有 pane／終端工具，也不接派工。
+  const apiKind = kind === 'claude-api'
+  const cliOk = apiKind || Boolean(tools[kind]?.installed)
   const trackOk = role !== 'specialist' || Boolean(track.trim())
   const rangeError = customizeRuntime ? firstRangeError(runtimeDraft) : null
-  const shareOn = shareProfile !== null && !shareProfileBlocked(kind)
+  const shareOn = !apiKind && shareProfile !== null && !shareProfileBlocked(kind)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
   const canSubmit = nameOk && cliOk && trackOk && !rangeError && !busy && !(folderIn && 'error' in folderIn)
 
@@ -227,7 +230,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     setBusy(true)
     setErrorMsg(null)
 
-    const finalOverride = customizeRuntime && Object.keys(cleanSettings(runtimeDraft)).length > 0
+    // claude-api：daemon 沒有 context／保溫可調，也不收 CLI 欄位（identity、分享…，400 api_bot_cli_fields_unsupported）。
+    const finalOverride = !apiKind && customizeRuntime && Object.keys(cleanSettings(runtimeDraft)).length > 0
       ? cleanSettings(runtimeDraft)
       : null
 
@@ -247,11 +251,11 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       kind,
       model,
       effort: effectiveEffort,
-      fast: kind === 'codex' ? fast : undefined,
-      persona: persona.trim() || null,
+      fast: kind === 'codex' || apiKind ? fast : undefined,
+      persona: apiKind ? null : persona.trim() || null,
       autostart: false,
-      identity: identity || null,
-      ...shareCreateFields(shareProfile, folderIn),
+      identity: apiKind ? null : identity || null,
+      ...(apiKind ? {} : shareCreateFields(shareProfile, folderIn)),
     })
 
     if (!createdBotId) {
@@ -265,7 +269,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         role,
         track: role === 'specialist' ? track.trim() : null,
         manager_use: role === 'manager' ? true : managerUse,
-        runtime_override: finalOverride,
+        ...(apiKind ? {} : { runtime_override: finalOverride }),
       })
       setBusy(false)
       onCreated?.(createdBotId)
@@ -289,7 +293,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   // 角色建議提示
   const roleRecommendation = (r: ExpertRoleChoice): string | null => {
     if (r === 'manager') return 'Claude Opus (high)'
-    if (r === 'advisor') return 'Codex Astra (high)'
+    if (r === 'advisor') return 'Codex Astra (high) / Claude API Opus (high)'
     if (r === 'executor') return 'Claude Haiku (low)'
     if (r === 'specialist') return 'Claude Sonnet (medium) / Codex Sol (medium)'
     return null
@@ -365,8 +369,12 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
           ) : null}
         </span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
-          {BOT_KINDS.map((k) => {
-            const missing = !tools[k]?.installed
+          {CREATABLE_KINDS.map((k) => {
+            const isApi = k === 'claude-api'
+            const missing = isApi ? false : !tools[k]?.installed
+            // claude-api 只能當顧問：不能接派工、不能用終端工具，其他角色顯示但不能選。
+            const roleBlocked = isApi && role !== 'advisor'
+            const title = roleBlocked ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -374,7 +382,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                   role="radio"
                   aria-checked={kind === k}
                   className={`opt${kind === k ? ' on' : ''}`}
-                  disabled={missing}
+                  disabled={missing || roleBlocked}
+                  title={title}
                   onClick={() => {
                     setKind(k)
                     setModel(null)
@@ -382,8 +391,11 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                       setEffort(null)
                     }
                     setFast(false)
+                    setIdentity('')
+                    if (isApi) setShareProfile(null)
                   }}
                 >
+                  <KindTag kind={k} />
                   <span className="opt-label">{k}</span>
                 </button>
               </span>
@@ -410,10 +422,10 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         />
       </div>
 
-      <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />
+      {apiKind ? null : <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />}
 
-      {/* 3. context 與保溫 */}
-      <div className="field">
+      {/* 3. context 與保溫（claude-api 沒有，BotSettingsPanel 也不出） */}
+      {apiKind ? null : <div className="field">
         <span>{t('context 與保溫')}</span>
         <div className="expert-runtime-summary">
           <div className="expert-runtime-summary-row">
@@ -454,7 +466,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
             </div>
           ) : null}
         </div>
-      </div>
+      </div>}
 
       {/* 4. 可被管理者使用 */}
       {role !== 'manager' ? (
@@ -488,8 +500,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       </label>
 
       {/* 人設保留 */}
-      <PersonaField value={persona} onChange={setPersona} collapsible />
-      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />
+      {apiKind ? null : <PersonaField value={persona} onChange={setPersona} collapsible />}
+      {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />}
 
       {errorMsg ? <div className="hint warn" role="alert">{errorMsg}</div> : null}
 

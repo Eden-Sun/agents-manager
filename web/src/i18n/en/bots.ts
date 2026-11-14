@@ -418,4 +418,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '專家派工': 'Specialist dispatch',
   '專家可直接派工給執行者': 'Specialists can dispatch to workers directly',
   '開著時專家可直接派工給本專案的執行者並驗收結果（同時派給同一顆照佇列排隊）；關掉就只有管理者能派。': "When on, specialists can dispatch work to this project's workers directly and review the results (simultaneous dispatches to one worker queue up); when off, only the manager can dispatch.",
+  // 專家模式新增表單：claude-api 只能當顧問
+  'claude-api 只能當顧問：不能接派工、不能用終端工具': 'claude-api can only be an advisor: it cannot take dispatched work or use terminal tools',
 } satisfies Dict
