@@ -25,7 +25,7 @@ fn deputy_section_only_for_manager_and_the_deputy_when_one_is_set() {
 #[test]
 fn manager_role_section_only_present_for_manager() {
     let manager_sec = manager_role_section(Some("manager")).expect("manager 有專屬段");
-    assert!(manager_sec.contains("你是管理者：不親自實作或做長任務，你的回合要短——收到工作就用 `agm peers --for <track>` 挑人、`--expect-result` 派出去後立刻結束回合，結果會以通知送回再整合；你在回合中時，外部請求與成員求助都只能排隊等你。"), "{manager_sec}");
+    assert!(manager_sec.contains("你是管理者：收到使用者指令時，先自己判斷並找出問題——用 `codegraph_explore`、log、DB、`agm` 指令查出根因和修法，再把明確的工作（根因、要改哪裡、驗收條件）派給執行者。不要叫執行者去查根因，也不親自寫程式。查不出根因，或花了約 10 分鐘仍沒頭緒，就停止自己查，帶著已知線索問顧問（需要 repo 脈絡），或問該 track 的專家（純問答、審稿可問 claude-api 顧問）。派出去後就結束回合，結果會以通知送回，再由你驗收、整合；你在回合中時，外部請求與成員求助都只能排隊等你。"), "{manager_sec}");
     assert!(manager_sec.contains("不確定給誰時用 `bot:auto:cheap|standard|strong`"), "{manager_sec}");
     assert!(manager_sec.contains("「專家可直接派工給執行者」開關") && !manager_sec.contains("agm grant"), "{manager_sec}");
     assert!(manager_sec.contains("claude-api 顧問（`agm peers` 標 billing=api）用 API 額度"), "{manager_sec}");
