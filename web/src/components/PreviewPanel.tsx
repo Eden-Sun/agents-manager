@@ -140,12 +140,19 @@ function OthersList({
   const t = useT()
   const [showAll, setShowAll] = useState(false)
   if (others.length === 0) return null
+  const hasSameDir = others.some((o) => o.relation === 'same_dir')
   const groups = groupOthers(others).map((g) => ({ relation: g.relation, ...orderRows(g.items, root) }))
-  const hidden = groups.reduce((n, g) => n + g.unknown.length, 0)
+  const hidden = groups.reduce((n, g) => {
+    if (hasSameDir && !showAll && g.relation !== 'same_dir') {
+      return n + g.known.length + g.unknown.length
+    }
+    return n + g.unknown.length
+  }, 0)
   return (
     <div className="preview-others">
       <p className="preview-body">{t('本機已開的 dev server，點一列直接接上：')}</p>
       {groups.map((g) => {
+        if (hasSameDir && !showAll && g.relation !== 'same_dir') return null
         const rows = showAll ? [...g.known, ...g.unknown] : g.known
         if (rows.length === 0) return null
         return (
@@ -408,20 +415,44 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
           <>
             <h2 className="preview-title">{t('預覽')}</h2>
             {p.others.length > 0 ? (
-              // 本機已有 dev server 在跑：直接接上是主角，自己起放次要（偵測不到設定檔時只有這條路）。
-              <>
-                <OthersList
-                  others={p.others}
-                  root={root}
-                  busy={busy || !connected}
-                  onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })}
-                />
-                {err ? <ErrNote err={err} /> : null}
-                <details className="preview-spawn">
-                  <summary>{t('或由 AG Man 替 {bot} 另起一顆', { bot: bot?.name ?? t('這顆 bot') })}</summary>
+              p.others.some((o) => o.relation === 'same_dir') ? (
+                // 本機已有同目錄的 dev server 在跑：直接接上是主角，自己起放次要。
+                <>
+                  <OthersList
+                    others={p.others}
+                    root={root}
+                    busy={busy || !connected}
+                    onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })}
+                  />
+                  {err ? <ErrNote err={err} /> : null}
+                  <details className="preview-spawn">
+                    <summary>{t('或由 AG Man 替 {bot} 另起一顆', { bot: bot?.name ?? t('這顆 bot') })}</summary>
+                    {startBlock}
+                  </details>
+                </>
+              ) : (
+                // 本 bot 目錄沒有 dev server（全是其他 worktree 或專案）：預設讓使用者啟動預覽，其他 servers 收進摺疊。
+                <>
+                  <p className="preview-body">
+                    {t.x('替 {bot} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在 {directory} 底下找 {viteConfig} 或帶 {dev} script 的 {packageJson}。', {
+                      bot: bot ? <b>{bot.name}</b> : t('這顆 bot'),
+                      directory: <code>{bot?.cwd ?? t('專案目錄')}</code>,
+                      viteConfig: <code>vite.config.*</code>, packageJson: <code>package.json</code>, dev: <code>dev</code>,
+                    })}
+                  </p>
                   {startBlock}
-                </details>
-              </>
+                  {err ? <ErrNote err={err} /> : null}
+                  <details className="preview-spawn">
+                    <summary>{t('或接上其他既有的 dev server（共 {n} 個）', { n: p.others.length })}</summary>
+                    <OthersList
+                      others={p.others}
+                      root={root}
+                      busy={busy || !connected}
+                      onAttach={(o) => void start({ mode: 'attach', port: o.port, pid: o.pid ?? undefined, dir: o.dir })}
+                    />
+                  </details>
+                </>
+              )
             ) : (
               <>
                 <p className="preview-body">

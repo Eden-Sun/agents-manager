@@ -579,8 +579,8 @@
     min-width: 0;
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 4px;
-    padding: 4px 8px;
+    gap: 3px;
+    padding: 3px 6px;
     background: var(--bg-sunken);
   }
 

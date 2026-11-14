@@ -2197,6 +2197,8 @@ button.pane-toggle:hover:not(:disabled) {
 .term-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 10px;
   font-size: 11px;
   color: var(--text-dim);

@@ -149,7 +149,14 @@ export function TerminalTab({ botId }: { botId: string }) {
             {snap.columns ? `・${snap.columns}×${snap.rows ?? '?'}` : ''}
           </span>
         ) : null}
-        {snap?.truncated ? <span className="hint">{t('已截斷')}</span> : null}
+        {snap?.truncated ? (
+          <span
+            className="hint term-truncated-chip"
+            title={t('輸出超過 {n} 行，僅顯示最新 {n} 行', { n: lines })}
+          >
+            {t('（超過 {n} 行已截斷）', { n: lines })}
+          </span>
+        ) : null}
         <label className="conn">
           <input type="checkbox" checked={tight} onChange={(e) => setTight(e.target.checked)} />
           {t('壓縮空行')}

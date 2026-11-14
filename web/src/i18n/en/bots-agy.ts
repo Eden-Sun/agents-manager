@@ -156,6 +156,7 @@ export default {
   '自己開的 pane {id}': 'Custom pane {id}',
   '再按一次才真的停止（會中斷它正在跑的回合）': 'Click again to confirm stop (will abort the current turn)',
   '走正規的停止流程，daemon 會收掉這個 run；要按兩下確認': 'Graceful stop via daemon; double-click to confirm',
+  '{name}（子程序）': '{name} (child)',
   '再按一次確定停止': 'Click again to confirm stop',
   '停止 bot': 'Stop Bot',
   'SIGKILL：立刻結束，還沒存的東西會一起沒了': 'SIGKILL: terminate immediately, unsaved data will be lost',

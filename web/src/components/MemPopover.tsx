@@ -20,8 +20,23 @@ import './memPopover.css'
 const REFRESH_MS = 15_000
 const LOAD_TIMEOUT_MS = 15_000
 
+const CHILD_EXES = new Set(['bash', 'sh', 'zsh', 'fish', 'node'])
+
+function isChildProcess(p: MemProcess): boolean {
+  if (p.owner !== 'bot') return false
+  // daemon 撈取的行程清單中，bot pane 內的子行程為 bash, sh, zsh, fish, node 等
+  const exe = p.exe?.toLowerCase()
+  return Boolean(exe && CHILD_EXES.has(exe))
+}
+
 function ownerLabel(p: MemProcess, t: TFn): string {
-  if (p.owner === 'bot') return p.bot_name ?? `bot ${p.bot_id ?? ''}`.trim()
+  if (p.owner === 'bot') {
+    const name = p.bot_name ?? `bot ${p.bot_id ?? ''}`.trim()
+    if (isChildProcess(p)) {
+      return t('{name}（子程序）', { name })
+    }
+    return name
+  }
   if (p.owner === 'pane') return t('自己開的 pane {id}', { id: p.pane_id ?? '' }).trim()
   if (p.owner === 'herdr') return 'herdr'
   return '?'
@@ -60,6 +75,10 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
 
   if (p.owner === 'bot') {
     const id = p.bot_id
+    // 子行程歸屬該 bot 但不由按鈕單獨終止，且不顯示重複的 Stop Bot 避免誤觸（issue review #10）
+    if (isChildProcess(p)) {
+      return null
+    }
     return (
       <div className="mem-pop-act">
         {/* 停掉一顆正在跑的 bot 會中斷它的回合：跟旁邊 TERM → 強制 一樣兩段式，第一下只武裝，3 秒內再按才執行；放著不動自己解除。 */}

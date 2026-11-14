@@ -121,7 +121,10 @@ export function PreviewColumn() {
           title={t('展開預覽')}
           aria-label={t('展開預覽')}
           aria-expanded={false}
-          onClick={() => setPreviewColOpen(bot.id, true)}
+          onClick={() => {
+            setPreviewColOpen(bot.id, true)
+            window.dispatchEvent(new CustomEvent('am:shelf-collapse'))
+          }}
         >
           ◧
         </button>

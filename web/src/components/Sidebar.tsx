@@ -1058,15 +1058,17 @@ function ProjectTitle({
         ⌗
       </span>
       <ProjectNameField projectId={projectId} label={label} variant="row" armed={false} editing={editing} onEditing={setEditing} />
-      {isExpert ? <ExpertBadge /> : null}
-      {foldedUnread > 0 ? (
-        <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
-          !{foldedUnread > 99 ? '99+' : foldedUnread}
-        </span>
-      ) : null}
-      <HostBadge host={host} connected={hostUp} />
-      <HandedOffBadge projectId={projectId} />
-      <ProjectMemBadge projectId={projectId} />
+      <span className="project-badges">
+        {isExpert ? <ExpertBadge /> : null}
+        {foldedUnread > 0 ? (
+          <span className="unread-turns" title={t('收合的 Bot 裡有 {n} 個回合已完成，還沒看過', { n: foldedUnread })}>
+            !{foldedUnread > 99 ? '99+' : foldedUnread}
+          </span>
+        ) : null}
+        <HostBadge host={host} connected={hostUp} />
+        <HandedOffBadge projectId={projectId} />
+        <ProjectMemBadge projectId={projectId} />
+      </span>
       <span className="project-path" title={path}>
         {shortPath(path, 36)}
       </span>

@@ -38,6 +38,7 @@ export function HeadMemBadges() {
         return (
           <div key={host} className="head-mem-row">
             <span className="pane-badge head-host-panes" title={t('{host}：{n} 個 herdr pane', { host: host === LOCAL_HOST ? t('本機') : host, n: panes })}>
+              <span className="pane-k">pane</span>
               <span className="pane-v">{panes}</span>
             </span>
             <MemBadge host={host} />

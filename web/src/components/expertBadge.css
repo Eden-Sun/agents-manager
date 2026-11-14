@@ -341,8 +341,9 @@
 .bot-cluster-head {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 4px 6px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .bot-cluster-name {
@@ -426,13 +427,13 @@
 .bot-cluster-pause {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   height: 18px;
-  padding: 0 6px;
-  border-radius: 6px;
+  padding: 0 4px;
+  border-radius: 5px;
   background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
   color: var(--danger);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;

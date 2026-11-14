@@ -3,9 +3,18 @@ body:has(.preview-col) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto auto;
 }
 
+/* 預覽欄展開時，中欄保留至少 360px 寬度，避免標題列與工具列被壓扁（issue review #6）。 */
+body:has(.preview-col:not(.rail)) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(360px, 1fr) auto auto;
+}
+
 /* 手機預覽也開著時，第三欄仍是它固定的 213px。 */
 body:has(.preview-col):has(.mobile-preview) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 213px auto;
+}
+
+body:has(.preview-col:not(.rail)):has(.mobile-preview) .app {
+  grid-template-columns: clamp(288px, 18vw, 344px) minmax(360px, 1fr) 213px auto;
 }
 
 .preview-col {

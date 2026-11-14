@@ -338,6 +338,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '重試': 'Retry',
   '預覽': 'Preview',
   '或由 AG Man 替 {bot} 另起一顆': 'Or start a dev server for {bot} with AG Man',
+  '或接上其他既有的 dev server（共 {n} 個）': 'Or attach another running dev server ({n} total)',
+  '替 {bot} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在 {directory} 底下找 {viteConfig} 或帶 {dev} script 的 {packageJson}。': 'Start a dev server (Vite, Next, etc.) for {bot}’s Project and view it here. AG Man looks in {directory} for {viteConfig} or a {packageJson} with a {dev} script.',
   '這顆 bot': 'this Bot',
   '替 {bot} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在 {directory} 底下找 {viteConfig} 或帶 {dev} script 的 {packageJson}。本機目前沒有偵測到在跑的 dev server。': 'Start a dev server (Vite, Next, etc.) for {bot}’s Project and view it here. AG Man looks in {directory} for {viteConfig} or a {packageJson} with a {dev} script. No dev servers are currently running on this machine.',
   '專案目錄': 'Project directory',

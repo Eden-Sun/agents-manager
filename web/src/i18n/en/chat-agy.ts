@@ -278,6 +278,8 @@ const dict: Dict = {
   "行數": "Lines",
   "抓法 recent_unwrapped": "Method recent_unwrapped",
   "已截斷": "Truncated",
+  "（超過 {n} 行已截斷）": " (over {n} lines, truncated)",
+  "輸出超過 {n} 行，僅顯示最新 {n} 行": "Output exceeds {n} lines; showing latest {n} lines only",
   "壓縮空行": "Collapse blank lines",
   "折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。": "With wrapping on, TUI borders and alignment break, but every line stays readable. With it off, lines stay as they are and you scroll sideways to see the right half.",
   "換行": "Wrap",

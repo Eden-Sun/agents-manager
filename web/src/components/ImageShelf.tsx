@@ -172,6 +172,12 @@ export function ImageShelf() {
     }
   }
 
+  useEffect(() => {
+    const onCollapse = () => setOpenPersisted(false)
+    window.addEventListener('am:shelf-collapse', onCollapse)
+    return () => window.removeEventListener('am:shelf-collapse', onCollapse)
+  }, [])
+
   /** Report whatever was refused — a silently dropped image reads as a bug. */
   const take = (files: File[]) => {
     if (files.length === 0) return

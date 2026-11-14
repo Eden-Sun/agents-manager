@@ -80,7 +80,7 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
           title={t('{n} 顆停派，共 {total} 顆。管理者不能派工給它們；Bot 本身不會停。', { n: off, total })}
         >
           <NoDispatchIcon />
-          <span>{t('{n} 停派', { n: off })}</span>
+          <span className="bot-cluster-pause-label">{t('{n} 停派', { n: off })}</span>
         </span>
       ) : null}
       <button
