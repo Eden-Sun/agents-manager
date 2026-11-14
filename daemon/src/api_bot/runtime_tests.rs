@@ -5511,3 +5511,490 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
     shutdown.cancel();
     server.await.unwrap();
 }
+
+async fn recording_server(
+    requests: Arc<std::sync::Mutex<Vec<Value>>>,
+    hit: Arc<Notify>,
+) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    async fn complete(
+        axum::extract::State((reqs, hit)): axum::extract::State<(
+            Arc<std::sync::Mutex<Vec<Value>>>,
+            Arc<Notify>,
+        )>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        reqs.lock().unwrap().push(body);
+        hit.notify_one();
+        Json(json!({
+            "id": "fixture-message",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "fixture answer"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }))
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/v1/messages", post(complete))
+        .with_state((requests, hit));
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
+            .await
+            .unwrap();
+    });
+    (format!("http://{address}/v1/messages"), shutdown, task)
+}
+
+#[tokio::test]
+async fn two_turns_with_unchanged_agent_md_send_identical_system_field() {
+    let env = crate::testing::env().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = recording_server(requests.clone(), hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let turn1 = crate::db::ulid();
+    let turn2 = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    insert_bot_and_turn(
+        &env.app,
+        &bot,
+        &run,
+        &turn1,
+        &conv,
+        &env.project_id,
+        "first prompt",
+    )
+    .await;
+    let one = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn1.clone(),
+    };
+    env.app.api_turn_spawn(&one).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn1)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second prompt',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let two = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn2.clone(),
+    };
+    spawn_retrying_busy(&env.app, &two).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn2)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(reqs[0]["system"], reqs[1]["system"]);
+
+    let msgs2 = reqs[1]["messages"].as_array().unwrap();
+    let last_user_turn = msgs2.iter().rfind(|m| m["role"] == "user").unwrap();
+    assert_eq!(last_user_turn["content"][0]["text"], "second prompt");
+}
+
+#[tokio::test]
+async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
+    let env = crate::testing::env().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = recording_server(requests.clone(), hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let dir = crate::testing::track(
+        std::env::temp_dir().join(format!("am-test-agent-md-{}", crate::db::ulid())),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let instructions_file = dir.join("AGENT.md");
+    std::fs::write(&instructions_file, "V1 INSTRUCTIONS").unwrap();
+    let instr_path = instructions_file.to_str().unwrap().to_string();
+
+    env.app
+        .cfg
+        .update(|c| {
+            c.agents.instructions_file = Some(instr_path.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let turn1 = crate::db::ulid();
+    let turn2 = crate::db::ulid();
+    let turn3 = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    insert_bot_and_turn(
+        &env.app,
+        &bot,
+        &run,
+        &turn1,
+        &conv,
+        &env.project_id,
+        "turn 1 prompt",
+    )
+    .await;
+    let one = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn1.clone(),
+    };
+    env.app.api_turn_spawn(&one).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn1)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Now change agent_md
+    std::fs::write(&instructions_file, "V2 UPDATED INSTRUCTIONS").unwrap();
+
+    // Turn 2
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 2 prompt',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let two = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn2.clone(),
+    };
+    spawn_retrying_busy(&env.app, &two).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn2)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Turn 3 (still with V2)
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 3 prompt',?)")
+        .bind(&turn3).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let three = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn3.clone(),
+    };
+    spawn_retrying_busy(&env.app, &three).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn3)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 3);
+    // 1. System field remains identical across turns 1, 2, and 3
+    assert_eq!(reqs[0]["system"], reqs[1]["system"]);
+    assert_eq!(reqs[0]["system"], reqs[2]["system"]);
+
+    // 2. Turn 2 user message has update block prepended
+    let msgs2 = reqs[1]["messages"].as_array().unwrap();
+    let turn2_user = msgs2.iter().rfind(|m| m["role"] == "user").unwrap();
+    let blocks2 = turn2_user["content"].as_array().unwrap();
+    assert_eq!(blocks2.len(), 2);
+    let update_block = blocks2[0]["text"].as_str().unwrap();
+    assert!(update_block.starts_with("[Instructions updated by AG Man]\n\n"));
+    assert!(update_block.contains("V2 UPDATED INSTRUCTIONS"));
+    assert_eq!(blocks2[1]["text"], "turn 2 prompt");
+
+    // 3. Turn 3 user message does NOT have update block (added only once)
+    let msgs3 = reqs[2]["messages"].as_array().unwrap();
+    let turn3_user = msgs3.iter().rfind(|m| m["role"] == "user").unwrap();
+    let blocks3 = turn3_user["content"].as_array().unwrap();
+    assert_eq!(blocks3[0]["text"], "turn 3 prompt");
+}
+
+#[tokio::test]
+async fn new_session_picks_up_new_system_text() {
+    let env = crate::testing::env().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = recording_server(requests.clone(), hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let dir = crate::testing::track(
+        std::env::temp_dir().join(format!("am-test-agent-md-{}", crate::db::ulid())),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let instructions_file = dir.join("AGENT.md");
+    std::fs::write(&instructions_file, "NEW SYSTEM TEXT FOR FRESH SESSION").unwrap();
+    let instr_path = instructions_file.to_str().unwrap().to_string();
+
+    env.app
+        .cfg
+        .update(|c| {
+            c.agents.instructions_file = Some(instr_path.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let turn1 = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    insert_bot_and_turn(
+        &env.app,
+        &bot,
+        &run,
+        &turn1,
+        &conv,
+        &env.project_id,
+        "hello new session",
+    )
+    .await;
+    let one = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn1.clone(),
+    };
+    env.app.api_turn_spawn(&one).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn1)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let system_text = reqs[0]["system"][0]["text"].as_str().unwrap();
+    assert!(system_text.contains("NEW SYSTEM TEXT FOR FRESH SESSION"));
+    let user_msg = &reqs[0]["messages"][0];
+    assert_eq!(user_msg["role"], "user");
+    assert_eq!(user_msg["content"][0]["text"], "hello new session");
+}
+
+#[tokio::test]
+async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
+    let env = crate::testing::env().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hit = Arc::new(Notify::new());
+    let (endpoint, shutdown, server) = recording_server(requests.clone(), hit.clone()).await;
+    enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
+
+    let bot = crate::db::ulid();
+    let run = crate::db::ulid();
+    let turn1 = crate::db::ulid();
+    let turn2 = crate::db::ulid();
+    let conv = crate::db::ulid();
+
+    insert_bot_and_turn(
+        &env.app,
+        &bot,
+        &run,
+        &turn1,
+        &conv,
+        &env.project_id,
+        "turn 1 prompt",
+    )
+    .await;
+    let one = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn1.clone(),
+    };
+    env.app.api_turn_spawn(&one).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn1)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Remove "system" field from checkpoint_json in DB
+    let old_chk_json: String =
+        sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?")
+            .bind(&bot)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+    let mut val: Value = serde_json::from_str(&old_chk_json).unwrap();
+    val.as_object_mut().unwrap().remove("system");
+    let stripped_json = serde_json::to_string(&val).unwrap();
+    assert!(!stripped_json.contains("\"system\""));
+
+    sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE bot_id=?")
+        .bind(&stripped_json)
+        .bind(&bot)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+    // Turn 2 loads the old checkpoint without "system"
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 2 prompt',?)")
+        .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let two = ApiTurnKey {
+        bot_id: bot.clone(),
+        run_id: run.clone(),
+        turn_id: turn2.clone(),
+    };
+    spawn_retrying_busy(&env.app, &two).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(&turn2)
+                .fetch_optional(&env.app.db)
+                .await
+                .unwrap();
+            if matches!(s.as_deref(), Some("completed")) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    assert!(!reqs[1]["system"].as_array().unwrap().is_empty());
+
+    // Verify checkpoint now has "system" stored in DB
+    let new_chk_json: String =
+        sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?")
+            .bind(&bot)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+    let new_val: Value = serde_json::from_str(&new_chk_json).unwrap();
+    assert!(new_val.get("system").is_some());
+    assert!(new_val["system"].is_string());
+}
+
+async fn spawn_retrying_busy(app: &crate::state::App, key: &ApiTurnKey) {
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            match app.api_turn_spawn(key).await {
+                Ok(()) => break,
+                Err(ApiBotError::Busy) => tokio::task::yield_now().await,
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}

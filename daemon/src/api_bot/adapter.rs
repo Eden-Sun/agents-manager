@@ -131,6 +131,11 @@ impl ApiBotAdapter {
         self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
+    #[cfg(test)]
+    pub(crate) fn system(&self) -> &Value {
+        &self.system
+    }
+
     /// Create adapter for the first turn (generation 1, fresh session at revision 0).
     pub(crate) async fn new(
         pool: SqlitePool,
@@ -164,7 +169,14 @@ impl ApiBotAdapter {
             revision: 0,
         };
 
-        let initial_state = State::default();
+        let system_str = match &system {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let initial_state = State {
+            system: Some(system_str),
+            ..Default::default()
+        };
         let state_val =
             serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
         let checkpoint = Checkpoint::new(&state_val).map_err(|_| http::Error::InvalidRequest)?;
@@ -268,14 +280,25 @@ impl ApiBotAdapter {
         let loaded_chk = db_api::load(&pool, &current_fence)
             .await
             .map_err(|_| http::Error::InvalidRequest)?;
-        let loaded_state: State =
+        let mut loaded_state: State =
             serde_json::from_value(loaded_chk.value()).map_err(|_| http::Error::InvalidRequest)?;
+
+        let effective_system = if let Some(ref stored) = loaded_state.system {
+            Value::String(stored.clone())
+        } else {
+            let system_str = match &system {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            loaded_state.system = Some(system_str);
+            system
+        };
 
         let adapter = Self {
             pool,
             identity: new_identity,
             options,
-            system,
+            system: effective_system,
             limits,
             quote_provider,
             http_cfg,

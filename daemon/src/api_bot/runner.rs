@@ -32,6 +32,8 @@ pub struct State {
     /// A tool with no saved result may already have performed its side effect. Never replay.
     pub tool_pending: Option<String>,
     pub completed_tool_ids: std::collections::HashSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Halt {

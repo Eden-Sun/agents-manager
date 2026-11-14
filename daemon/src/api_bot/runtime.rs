@@ -501,13 +501,14 @@ impl ApiBotRuntime {
 
         let agent_name = run.agent_name.as_deref().unwrap_or(&bot.name);
         let agent_md = crate::lifecycle::agent_md::load(app, &project).await;
-        let system = serde_json::Value::String(super::prompt::compose_api_bot_system_prompt(
+        let fresh_system_text = super::prompt::compose_api_bot_system_prompt(
             &bot,
             agent_name,
             crate::lifecycle::start::bot_cwd(&bot, &project),
             (project.host != crate::config::LOCAL_HOST).then_some(project.host.as_str()),
             Some(&agent_md.text),
-        ));
+        );
+        let system = serde_json::Value::String(fresh_system_text.clone());
         let adapter_limits = super::adapter::AdapterLimits {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
@@ -553,16 +554,47 @@ impl ApiBotRuntime {
             )
             .await
             .map_err(|_| ApiBotError::Upstream)?;
-            (Arc::new(adapter), super::runner::State::default())
+            (
+                Arc::new(adapter),
+                super::runner::State {
+                    system: Some(fresh_system_text.clone()),
+                    ..Default::default()
+                },
+            )
         };
 
         drop(resume_old_admission);
         if state.api_pending || state.tool_pending.is_some() {
             return Err(if prior.is_some() { ApiBotError::Busy } else { ApiBotError::Unconfirmed });
         }
+
+        let needs_instruction_update = match &state.system {
+            Some(stored) => {
+                stored != &fresh_system_text
+                    && !already_updated_with(&state.messages, &fresh_system_text)
+            }
+            None => false,
+        };
+
+        let user_content = if needs_instruction_update {
+            let update_text = format!("[Instructions updated by AG Man]\n\n{fresh_system_text}");
+            if prompt.is_empty() {
+                serde_json::json!([
+                    {"type": "text", "text": update_text}
+                ])
+            } else {
+                serde_json::json!([
+                    {"type": "text", "text": update_text},
+                    {"type": "text", "text": prompt}
+                ])
+            }
+        } else {
+            serde_json::Value::String(prompt)
+        };
+
         state.messages.push(super::protocol::Message {
             role: "user".into(),
-            content: serde_json::Value::String(prompt),
+            content: user_content,
         });
         if state.messages.is_empty() {
             return Err(ApiBotError::Upstream);
@@ -2221,6 +2253,36 @@ async fn cleanup_terminal_controls(pool: &sqlx::SqlitePool, inner: &RuntimeInner
             controls.remove(&key);
         }
     }
+}
+
+fn already_updated_with(messages: &[super::protocol::Message], fresh: &str) -> bool {
+    let expected_prefix = format!("[Instructions updated by AG Man]\n\n{fresh}");
+    for m in messages.iter().rev() {
+        if m.role == "user" {
+            if let Some(blocks) = m.content.as_array() {
+                for b in blocks {
+                    if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                        if let Some(text) = b.get("text").and_then(serde_json::Value::as_str) {
+                            if text == expected_prefix {
+                                return true;
+                            }
+                            if text.starts_with("[Instructions updated by AG Man]\n\n") {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            } else if let Some(text) = m.content.as_str() {
+                if text == expected_prefix {
+                    return true;
+                }
+                if text.starts_with("[Instructions updated by AG Man]\n\n") {
+                    return false;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

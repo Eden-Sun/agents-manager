@@ -958,6 +958,168 @@ mod tests {
         server.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn test_adapter_rebind_freezes_system_and_migrates_old_checkpoints() {
+        let (pool, bot, run, turn1, session) = setup_test_db().await;
+        let wire_calls = Arc::new(AtomicUsize::new(0));
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            }),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let identity = AdapterIdentity {
+            session_id: session.clone(),
+            bot_id: bot.clone(),
+            run_id: run.clone(),
+            turn_id: turn1.clone(),
+            generation: 1,
+        };
+
+        // Create adapter with initial frozen system
+        let _adapter = ApiBotAdapter::new(
+            pool.clone(),
+            identity.clone(),
+            test_options(),
+            serde_json::json!("FrozenOriginalSystem"),
+            test_limits(),
+            Arc::new(TestQuoteProvider {
+                reserved_amount: 10_000,
+                estimated_amount: 5_000,
+            }),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey(
+                    "sk-ant-test-key".into(),
+                )),
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // 1. Rebind with a different system: effective system remains FrozenOriginalSystem
+        let turn2 = "t2";
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?")
+            .bind(&turn1)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at) VALUES(?,'c',?,'web','in_flight',?)")
+            .bind(turn2).bind(&run).bind(am_base::db::now()).execute(&pool).await.unwrap();
+        let identity2 = AdapterIdentity {
+            session_id: session.clone(),
+            bot_id: bot.clone(),
+            run_id: run.clone(),
+            turn_id: turn2.into(),
+            generation: 1,
+        };
+        let (rebound_adapter, rebound_state) = ApiBotAdapter::rebind(
+            pool.clone(),
+            &identity,
+            0,
+            identity2.clone(),
+            test_options(),
+            serde_json::json!("NewlyComposedSystemThatShouldBeIgnored"),
+            test_limits(),
+            Arc::new(TestQuoteProvider {
+                reserved_amount: 10_000,
+                estimated_amount: 5_000,
+            }),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey(
+                    "sk-ant-test-key".into(),
+                )),
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *rebound_adapter.system(),
+            serde_json::json!("FrozenOriginalSystem")
+        );
+        assert_eq!(rebound_state.system, Some("FrozenOriginalSystem".into()));
+
+        // 2. Old checkpoint without stored system: rebind falls back to composing once
+        // Strip system from checkpoint in DB
+        let old_chk_val = serde_json::json!({
+            "messages": [], "responses": [],
+            "api_pending": false, "tool_pending": null, "completed_tool_ids": []
+        });
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?")
+            .bind(serde_json::to_string(&old_chk_val).unwrap())
+            .bind(&session)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let turn3 = "t3";
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?")
+            .bind(turn2)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at) VALUES(?,'c',?,'web','in_flight',?)")
+            .bind(turn3).bind(&run).bind(am_base::db::now()).execute(&pool).await.unwrap();
+        let identity3 = AdapterIdentity {
+            session_id: session.clone(),
+            bot_id: bot.clone(),
+            run_id: run.clone(),
+            turn_id: turn3.into(),
+            generation: 1,
+        };
+        let (rebound_adapter3, rebound_state3) = ApiBotAdapter::rebind(
+            pool.clone(),
+            &identity2,
+            1,
+            identity3,
+            test_options(),
+            serde_json::json!("FallbackComposedSystem"),
+            test_limits(),
+            Arc::new(TestQuoteProvider {
+                reserved_amount: 10_000,
+                estimated_amount: 5_000,
+            }),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey(
+                    "sk-ant-test-key".into(),
+                )),
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *rebound_adapter3.system(),
+            serde_json::json!("FallbackComposedSystem")
+        );
+        assert_eq!(rebound_state3.system, Some("FallbackComposedSystem".into()));
+
+        server.shutdown().await;
+    }
+
     // =========================================================================
     // 32-Round Interleaving Stress Test (Registry + Adapter + Stop Race)
     // =========================================================================

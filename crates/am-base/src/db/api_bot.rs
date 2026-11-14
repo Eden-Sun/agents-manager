@@ -20,7 +20,12 @@ impl Checkpoint {
         ensure!(
             object.keys().all(|k| matches!(
                 k.as_str(),
-                "messages" | "responses" | "api_pending" | "tool_pending" | "completed_tool_ids"
+                "messages"
+                    | "responses"
+                    | "api_pending"
+                    | "tool_pending"
+                    | "completed_tool_ids"
+                    | "system"
             )),
             "unsupported checkpoint field"
         );
@@ -29,7 +34,10 @@ impl Checkpoint {
                 && value["responses"].is_array()
                 && value["api_pending"].is_boolean()
                 && (value["tool_pending"].is_null() || value["tool_pending"].is_string())
-                && value["completed_tool_ids"].is_array(),
+                && value["completed_tool_ids"].is_array()
+                && (value.get("system").is_none()
+                    || value["system"].is_null()
+                    || value["system"].is_string()),
             "invalid checkpoint shape"
         );
         let encoded = serde_json::to_string(value)?;
