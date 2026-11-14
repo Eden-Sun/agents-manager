@@ -63,15 +63,19 @@ pub struct DisableIn {
     host: Option<String>,
 }
 
+/// 預設帳號（每個 kind 不換設定目錄的那個）在 `identity_prefs` 裡的身份名；不是合法的身份名（身份名是小寫 slug），不會跟真的身份撞名。
+/// 「停用」它＝在 AG Man 隱藏這個 kind 的預設帳號（額度條不列、設定頁標已隱藏），不動 CLI 的登入、不刪任何檔案。
+pub const DEFAULT_ACCOUNT: &str = "@default";
+
 /// 身份停用搬進 daemon（原本只在瀏覽器 localStorage），挑身份時才看得到。
 pub async fn put_identity_disabled(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Json(b): Json<DisableIn>,
 ) -> Result<Json<Value>, LcError> {
-    if !["claude", "codex", "grok"].contains(&b.kind.as_str()) {
+    if !["claude", "codex", "grok", "agy"].contains(&b.kind.as_str()) {
         return Err(LcError::Bad(
-            "kind must be one of claude | codex | grok".into(),
+            "kind must be one of claude | codex | grok | agy".into(),
         ));
     }
     if name.trim().is_empty() {
@@ -112,6 +116,32 @@ pub async fn get_identity_prefs(State(app): State<Arc<App>>) -> Result<Json<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 預設帳號（`@default`）與 agy 都能存「隱藏」；回來看得到、能復原。
+    #[tokio::test]
+    async fn the_default_account_of_any_kind_can_be_hidden_and_shown_again() {
+        let e = crate::testing::env().await;
+        for kind in ["grok", "agy"] {
+            let put = |disabled: bool| {
+                put_identity_disabled(
+                    State(e.app.clone()),
+                    Path(DEFAULT_ACCOUNT.to_string()),
+                    Json(DisableIn { kind: kind.into(), disabled, host: None }),
+                )
+            };
+            put(true).await.unwrap();
+            let got = get_identity_prefs(State(e.app.clone())).await.unwrap().0;
+            assert!(
+                got["disabled"].as_array().unwrap().iter().any(|r| r["kind"] == kind && r["identity"] == DEFAULT_ACCOUNT && r["host"] == "local"),
+                "{got}"
+            );
+            put(false).await.unwrap();
+            let got = get_identity_prefs(State(e.app.clone())).await.unwrap().0;
+            assert!(!got["disabled"].as_array().unwrap().iter().any(|r| r["kind"] == kind), "{got}");
+        }
+        let bad = put_identity_disabled(State(e.app.clone()), Path("x".into()), Json(DisableIn { kind: "nope".into(), disabled: true, host: None })).await;
+        assert!(matches!(bad, Err(LcError::Bad(_))));
+    }
 
     #[tokio::test]
     async fn migration_drops_missions_and_preserves_identity_preferences() {

@@ -281,6 +281,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/build-slots/acquire", Expect::Allow, None),
         rule("POST", "/api/hosts/{name}/identities/{identity}/logout", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/agy/logout", Expect::Forbidden, None),
+        rule("POST", "/api/hosts/{name}/kinds/{kind}/logout", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/agy/install", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/responder/persona", Expect::RoleRequired, None),
         deny_rule("PUT", "/api/supervisor/responder/persona", Expect::RoleRequired, "Responder persona is supervisory configuration; only User or a registered AGM role may change it."),

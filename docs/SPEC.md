@@ -4435,6 +4435,20 @@ agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-to
 - **子 agent**：`herdr agent start --kind agy --identity <名>` 由 shim 帶該身份的 `HOME`；`AM_IDENTITIES` 只有 agy 身份才列 `HOME`。收編的 agy 子 agent 以 pane 行程的 `HOME` 對身份（等於真家目錄＝預設帳號）。
 - **限制**：用這個身份的 agy 看到的 `$HOME` 就是影子目錄；agy 的額度（quota）探測仍只讀預設帳號；在該身份底下新增的 dotfile 不會回寫到真家目錄。
 
+### 16.9 登入、登出、刪除：每種身份來源能做什麼（使用者 2026-11-14：「例如現在 grok 已不訂閱」）
+身份有三種來源，設定頁 → 身份各有一個區塊。動作表（✓＝有；每台主機各自一份）：
+
+| 來源 | 登入 | 登出 | 刪除／移除 | 備註 |
+|---|---|---|---|---|
+| 自訂身份（config `[[identities]]`） | ✓ 臨時 pane、帶身份 env | ✓ 該 CLI 登出指令、帶身份 env | ✓ 移除 config 那段（`DELETE /api/identities/{name}`）；仍有同一台 bot 綁著就 409 擋下；**預設不刪設定目錄裡的檔案**（登入資料、`CLAUDE_CONFIG_DIR` 等都留著，要清請先登出） | 另有「停用」（挑身份時不出現） |
+| Shell 偵測身份（登入 shell 的 `ccN` alias，只有 claude） | ✓ | ✓ | ✓＝「隱藏」：不刪 alias 檔，在 `identity_prefs` 持久標停用、可「啟用」復原（alias 還在，下次偵測仍會認出，但被隱藏的不進選單與額度條） | 唯讀來源，改 alias 要去那台主機 |
+| 各 kind 的預設帳號（claude／codex／grok／agy 不換設定目錄的那個） | ✓（`<cli> login`，不開瀏覽器，agy 走 TUI） | ✓ `POST /api/hosts/{name}/kinds/{kind}/logout` | ✓＝「隱藏」：`identity_prefs` 的 `@default` 列（`PUT /api/identities/@default/disabled {kind, disabled, host}`），額度條不再列它、設定頁標「已隱藏」，隨時可顯示回來 | 登出＋隱藏就是「不訂閱了」的完整動作；不刪家目錄任何檔案 |
+
+- **登出指令**（2026-11-14 用 `--help` 確認）：claude `claude auth logout`、codex `codex logout`、grok `grok logout`，都由該 CLI 自己清憑證；**agy 沒有登出子命令**，作法是刪那個 HOME 底下的 `~/.gemini/antigravity-cli/antigravity-oauth-token`（macOS 另刪 Keychain 項目 `gemini`／`antigravity`；§16.8 的 agy 身份是刪它自己 HOME 底下的 token）。登入一律不開瀏覽器（claude 貼 code、codex 裝置碼、grok `grok login` 在 pane 裡印網址、agy TUI）。
+- **確認**：登出與隱藏都先跳確認框；框裡寫明用到這個身份的 bot 數。**已在用該身份的 bot**：config 身份刪除直接 409 擋；登出／隱藏預設帳號不擋但在確認框提示「正在跑的不受影響，之後重新啟動會用別的帳號或停在登入畫面」——不會默默把 bot 換到別的帳號。
+- **預設帳號登出的收尾**：pane 的 CLI 結束後 daemon 重做一次那台主機的偵測，`tools.<kind>.logged_in` 才會跟著變。
+- **「隱藏」的作用範圍**：額度條（`QuotaStrip` 不列該 kind 的預設帳號那格）與設定頁。沒做：Bot 設定／新增 Bot 的「不指定身份」選項仍可選（標示該 kind 預設帳號的選項不會被偷偷拿掉，避免 bot 靜默換帳號）；自動挑選（claude `ccN`）本來就只看停用的具名身份。
+
 ### 16.5 alias 定期重讀
 每 60 秒對每台可達主機只跑 alias 那半段 probe（一個登入 shell，不碰 CLI），與快取的 `shell_identities` 比對；**名單或 `CLAUDE_CONFIG_DIR` 變了**才做完整偵測（含登入探測）並推 `host_changed`。
 還沒做過第一次偵測的主機不在此列。

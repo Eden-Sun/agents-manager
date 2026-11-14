@@ -2,7 +2,9 @@ import { useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useT } from '../lib/i18n'
 import { identityDisabled, useStore } from '../store/store'
-import { findIdentity, hostLabel, identityHost, identityRowKey, identityUseCount, shadowedByConfig } from '../store/identityRows'
+import { DEFAULT_ACCOUNT, defaultAccountUseCount, findIdentity, hostLabel, identityHost, identityRowKey, identityUseCount, shadowedByConfig } from '../store/identityRows'
+import { loginKindOnHost } from '../lib/onboardingActions'
+import { BOT_KINDS } from '../api/types'
 import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import './identitiesPanel.css'
@@ -466,6 +468,142 @@ function ShellIdentities() {
   )
 }
 
+/**
+ * 每個 kind 的**預設帳號**（不換設定目錄的那個）：登入／登出／從 AG Man 隱藏（使用者 2026-11-14：「例如現在 grok 已不訂閱」）。
+ * 登出＝該 CLI 自己的登出指令（claude／codex／grok 開臨時 pane，agy 刪憑證檔），不刪家目錄的檔案；
+ * 隱藏＝額度條與這裡不再把它當可用帳號（`identity_prefs` 的 `@default`），可以隨時顯示回來，CLI 的登入不動。
+ */
+function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind }) {
+  const t = useT()
+  const tool = useStore((s) => (host === 'local' ? s.localTools : s.hosts.find((h) => h.name === host)?.tools)?.[kind])
+  const connected = useStore((s) => host === 'local' || s.hosts.find((h) => h.name === host)?.connected === true)
+  const used = useStore((s) => defaultAccountUseCount(s.bots, s.projects, host, kind))
+  const hidden = useStore((s) => identityDisabled(s, host, kind, DEFAULT_ACCOUNT))
+  const setIdentityDisabled = useStore((s) => s.setIdentityDisabled)
+  const logout = useStore((s) => s.logoutKindDefault)
+  const notify = useStore((s) => s.notify)
+  const [confirmLogout, setConfirmLogout] = useState(false)
+  const [confirmHide, setConfirmHide] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  if (!tool?.installed) return null
+  const state = tool.logged_in
+  const where = hostLabel(host)
+  const usedNote =
+    used > 0 ? (
+      <>
+        <br />
+        <strong>{t('{host}有 {n} 顆 Bot 沒指定身份、用的就是這個預設帳號', { host: where, n: used })}</strong>
+        {t('：正在跑的不受影響，之後重新啟動會用別的帳號或停在登入畫面。')}
+      </>
+    ) : null
+  return (
+    <div className="identity-row is-default" data-k={`default-${host}-${kind}`}>
+      <span className="identity-main">
+        <span className="identity-name">
+          <KindTag kind={kind} />
+          <span className="host-count">{where}</span>
+          <span className="host-count">{used > 0 ? t('{n} 個 Bot', { n: used }) : t('未使用')}</span>
+          {hidden ? (
+            <span className="identity-disabled-chip" title={t('已從 AG Man 隱藏：額度條不列它；CLI 的登入沒動')}>
+              {t('已隱藏')}
+            </span>
+          ) : null}
+        </span>
+        <span className="identity-detail">{t('預設帳號（不指定身份的 Bot 用它）')}</span>
+        <span className="identity-logins">
+          <span className="identity-login-wrap">
+            <span className={`identity-login is-${state === true ? 'ok' : state === false ? 'out' : 'unknown'}`}>
+              {where} {state === true ? t('已登入') : state === false ? t('未登入') : t('未知')}
+            </span>
+            {connected ? (
+              <>
+                <button
+                  type="button"
+                  className="mini-btn identity-login-btn"
+                  onClick={() => void loginKindOnHost(host, kind, null)}
+                  title={t('在{host}開臨時終端登入預設帳號（不開瀏覽器）', { host: where })}
+                >
+                  {state === true ? t('重新登入') : t('登入')}
+                </button>
+                {state === true ? (
+                  <button ref={btnRef} type="button" className="mini-btn identity-login-btn" disabled={busy} onClick={() => setConfirmLogout(true)}>
+                    {busy ? t('登出中…') : t('登出')}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={`mini-btn identity-login-btn${hidden ? ' is-off' : ''}`}
+                  onClick={() => (hidden ? void setIdentityDisabled(host, kind, DEFAULT_ACCOUNT, false) : setConfirmHide(true))}
+                  title={hidden ? t('顯示回來：額度條會再列出{host}的預設帳號', { host: where }) : t('隱藏：額度條不再列{host}的預設帳號（登入沒動，隨時可復原）', { host: where })}
+                >
+                  {hidden ? t('顯示') : t('隱藏')}
+                </button>
+              </>
+            ) : null}
+          </span>
+        </span>
+      </span>
+      <ConfirmDialog
+        open={confirmLogout}
+        title={t('登出 {kind} 預設帳號', { kind })}
+        body={
+          <>
+            {t.x('會在{host}開一個臨時 pane 執行 {kind} 自己的登出指令，清掉預設帳號的憑證；家目錄裡的其他檔案不會刪。', { host: where, kind: <code>{kind}</code> })}
+            {usedNote}
+          </>
+        }
+        confirmLabel={t('登出')}
+        danger
+        onCancel={() => setConfirmLogout(false)}
+        onConfirm={() => {
+          setConfirmLogout(false)
+          setBusy(true)
+          const btn = btnRef.current
+          void logout(host, kind)
+            .then((ok) => {
+              if (ok && btn) closeEnclosingPopup(btn)
+            })
+            .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
+            .finally(() => setBusy(false))
+        }}
+      />
+      <ConfirmDialog
+        open={confirmHide}
+        title={t('隱藏 {kind} 預設帳號', { kind })}
+        body={
+          <>
+            {t.x('隱藏之後{host}的額度條不再列 {kind} 的預設帳號。登入狀態與家目錄的檔案都不動，之後可以按「顯示」復原。', { host: where, kind: <code>{kind}</code> })}
+            {usedNote}
+          </>
+        }
+        confirmLabel={t('隱藏')}
+        danger={used > 0}
+        onCancel={() => setConfirmHide(false)}
+        onConfirm={() => {
+          setConfirmHide(false)
+          void setIdentityDisabled(host, kind, DEFAULT_ACCOUNT, true)
+        }}
+      />
+    </div>
+  )
+}
+
+function DefaultAccounts() {
+  const t = useT()
+  const hosts = useStore((s) => s.hosts)
+  const hostNames = ['local', ...hosts.map((h) => h.name)]
+  return (
+    <div className="identity-section identity-default-block">
+      <h3 className="identity-section-title">{t('預設帳號')}</h3>
+      <p className="hint">
+        {t('每個 CLI 不換設定目錄的那個帳號。不訂閱了就「登出」（CLI 自己清憑證，不刪家目錄的檔案）並「隱藏」（額度條不再列它）；隱藏隨時可以顯示回來。')}
+      </p>
+      {hostNames.flatMap((host) => BOT_KINDS.map((kind) => <DefaultAccountRow key={`${host}:${kind}`} host={host} kind={kind} />))}
+    </div>
+  )
+}
+
 export function IdentitiesPanel() {
   const t = useT()
   const identities = useStore((s) => s.identities)
@@ -479,6 +617,7 @@ export function IdentitiesPanel() {
         ))}
       </div>
       <ShellIdentities />
+      <DefaultAccounts />
       <div className="identity-section">
         <h3 className="identity-section-title">{t('新增身份')}</h3>
         <NewIdentityForm />

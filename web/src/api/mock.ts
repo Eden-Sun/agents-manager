@@ -1274,6 +1274,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'logout' && seg.length === 4) return this.logoutAgy(decodeURIComponent(seg[1]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'kinds' && seg[4] === 'logout' && seg.length === 5) return this.logoutKindDefault(decodeURIComponent(seg[1]), decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'install' && seg.length === 4) return this.installAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'outbox' && seg.length === 3) {
@@ -1965,6 +1966,21 @@ export class MockTransport implements Transport {
     st.logged_in = false
     st.account = undefined
     this.emit('host_changed', { name: host || 'local', connected: true, identities })
+    return shell
+  }
+
+  /** 預設帳號登出（`POST /api/hosts/{name}/kinds/{kind}/logout`）：開臨時 pane 跑 `<cli> logout`，CLI 結束後該 kind 變未登入。 */
+  private logoutKindDefault(host: string, kind: string) {
+    if (kind === 'agy') return this.logoutAgy(host)
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    const k = kind as keyof typeof tools
+    if (!tools[k]) throw new ApiError(400, { error: 'bad_request', message: 'kind' }, 'bad kind')
+    const shell = this.openShell(host, '')
+    const pane = this.shell(host, shell.pane_id)
+    pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${kind === 'claude' ? 'claude auth logout' : `${kind} logout`}`, '已登出，憑證已清除。', '')
+    tools[k] = { ...tools[k], logged_in: false }
+    this.emit('host_changed', { name: host || 'local', connected: true, tools })
     return shell
   }
 

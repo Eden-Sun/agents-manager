@@ -277,6 +277,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/agy/logout", post(logout_agy))
+        .route("/hosts/{name}/kinds/{kind}/logout", post(logout_kind_default))
         .route("/hosts/{name}/agy/install", post(install_agy))
         .route("/hosts/{name}/gh", get(get_gh_status))
         .route("/hosts/{name}/gh/login", post(login_gh))
@@ -948,6 +949,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/kinds/{kind}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/install", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/cancel", BotRoutePolicy::UserOrAgm),
@@ -4469,6 +4471,66 @@ async fn logout_agy(
     }
 }
 
+/// 每個 kind 的**預設帳號**（不換設定目錄的那個，SPEC §16.9）登出：claude／codex／grok 開臨時 pane 下該 CLI 自己的登出指令
+/// （`claude auth logout`／`codex logout`／`grok logout`，2026-11-14 用 `--help` 確認都存在），不帶任何身份 env；agy 沒有登出子命令，
+/// 走既有的刪憑證檔（`quota_agy::logout`）。pane 的 CLI 結束後重做一次主機偵測，網頁上的「已登入」就跟著變。
+/// 不刪家目錄的任何檔案（只是 CLI 清掉自己的憑證）。
+async fn logout_kind_default(
+    State(app): State<Arc<App>>,
+    Path((name, kind)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    if kind == "agy" {
+        return logout_agy(State(app), Path(name), Extension(principal)).await.map(|j| j.into_response());
+    }
+    if !matches!(kind.as_str(), "claude" | "codex" | "grok") {
+        return Err(LcError::Bad("kind must be one of claude | codex | grok | agy".into()));
+    }
+    let Some(fence) = app.hosts.fence(&name).await else {
+        return Err(LcError::NotFound("host".into()));
+    };
+    if crate::tools::cached_path(&app, &name, &kind).await.is_none() {
+        return Err(LcError::conflict(
+            "identity_login_unavailable",
+            json!({"host": name, "kind": kind, "message": "CLI 不在 PATH，無法登出"}),
+        ));
+    }
+    let command = crate::tools::identity_logout_command(&kind, &BTreeMap::new())
+        .ok_or_else(|| LcError::Bad(format!("kind {kind} 沒有登出指令")))?;
+    let (app_for_open, name_for_open) = (app.clone(), name.clone());
+    let opened = app.hosts.run_if_current(&fence, async move {
+        let shell = shell::open(&app_for_open, &name_for_open, None).await?;
+        if let Err(e) = shell::send_text(&app_for_open, &name_for_open, &shell.pane_id, &command, true).await {
+            let _ = shell::close(&app_for_open, &name_for_open, &shell.pane_id).await;
+            return Err(e);
+        }
+        Ok::<_, LcError>(shell)
+    }).await;
+    let shell = opened
+        .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before logout started")))??;
+    // 預設帳號沒有身份名可重驗：watcher 只負責收 pane；登出完成後這裡重新偵測整台主機。
+    crate::tools::spawn_identity_login_watch(app.clone(), name.clone(), shell.pane_id.clone(), String::new(), kind.clone(), true, fence);
+    let pane = shell.pane_id.clone();
+    let host = name.clone();
+    let app_for_detect = app.clone();
+    tokio::spawn(async move {
+        // CLI 結束（pane 被 watcher 收掉）之後才重偵測；最多等 3 分鐘。
+        for _ in 0..180 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let gone = match app_for_detect.hosts.get(&host).await {
+                Some(c) => c.client.pane_process_info(&pane).await.is_err(),
+                None => true,
+            };
+            if gone {
+                break;
+            }
+        }
+        crate::tools::spawn_detect(app_for_detect, host);
+    });
+    Ok((StatusCode::OK, Json(json!(shell))).into_response())
+}
+
 /// 裝／更新那台主機的 agy（官方 manifest ＋ sha512，不跑官方 `install.sh`；`agy_install::install`）。
 async fn install_agy(
     State(app): State<Arc<App>>,
@@ -4558,6 +4620,9 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
 
 #[cfg(test)]
 mod agy_logout_route_tests;
+
+#[cfg(test)]
+mod kind_logout_route_tests;
 
 #[cfg(test)]
 mod install_tool_route_tests;

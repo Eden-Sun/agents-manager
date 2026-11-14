@@ -34,6 +34,20 @@ export function identityUseCount(
   return bots.filter((b) => b.identity === name && (projects.find((p) => p.id === b.project_id)?.host || LOCAL) === want).length
 }
 
+/** 預設帳號（每個 kind 不換設定目錄的那個）在停用表裡的身份名；跟 daemon `identity_prefs::DEFAULT_ACCOUNT` 同一個（不是合法的身份 slug，不會撞名）。 */
+export const DEFAULT_ACCOUNT = '@default'
+
+/** 還在用這台主機這個 kind 預設帳號的 bot（沒指定身份的）。 */
+export function defaultAccountUseCount(
+  bots: readonly Pick<Bot, 'identity' | 'project_id' | 'kind'>[],
+  projects: readonly Pick<Project, 'id' | 'host'>[],
+  host: string,
+  kind: string,
+): number {
+  const want = host || LOCAL
+  return bots.filter((b) => b.kind === kind && !b.identity && (projects.find((p) => p.id === b.project_id)?.host || LOCAL) === want).length
+}
+
 /** 那台主機的 shell `ccN` 被 config 同名的蓋掉了嗎——只有同一台的 config 才蓋得掉。 */
 export function shadowedByConfig(configured: readonly Identity[], host: string, name: string): boolean {
   return findIdentity(configured, host, name) !== undefined

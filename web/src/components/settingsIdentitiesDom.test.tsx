@@ -230,3 +230,33 @@ it('新增身份表單選 agy：預填 HOME=$HOME/.agy-、說明副作用，送�
   const post = requests.find((r) => r.method === 'POST' && r.path === '/api/identities')!
   assert.deepEqual(post.body, { name: 'agb', kind: 'agy', env: { HOME: '$HOME/.agy-agb' } })
 })
+
+const defaultRow = (host: string, kind: string) => document.querySelector(`[data-k="default-${host}-${kind}"]`)!
+
+it('預設帳號：每個已安裝 kind 一列；登出先確認、確認後打 kinds/{kind}/logout 並切到那個 shell', async () => {
+  const requests = await open()
+  const row = defaultRow('local', 'claude')
+  assert.ok(row, 'claude 預設帳號那一列')
+  assert.match(row.textContent ?? '', /預設帳號/)
+  await click(btn(row, '登出')!)
+  assert.equal(calls(requests, /\/kinds\/claude\/logout/).length, 0, '確認前不送')
+  await click(btn(document.querySelector('[role=alertdialog]')!, '登出')!)
+  await until(() => calls(requests, /\/hosts\/local\/kinds\/claude\/logout/).length === 1, '送出預設帳號登出')
+  await until(() => useStore.getState().shellView !== null, '切到登出用的 shell')
+  await until(() => /未登入/.test(defaultRow('local', 'claude').textContent ?? ''), '登出後變未登入')
+})
+
+it('預設帳號：隱藏要先確認、存成 @default 的停用；隱藏後顯示「已隱藏」，按「顯示」復原', async () => {
+  const requests = await open()
+  const put = () => requests.filter((r) => r.method === 'PUT' && /\/identities\/%40default\/disabled/.test(r.path))
+  await click(btn(defaultRow('local', 'claude'), '隱藏')!)
+  assert.equal(put().length, 0, '確認前不送')
+  await click(btn(document.querySelector('[role=alertdialog]')!, '隱藏')!)
+  await until(() => put().length === 1, '送出隱藏')
+  assert.deepEqual(put()[0]!.body, { kind: 'claude', disabled: true, host: 'local' })
+  await until(() => /已隱藏/.test(defaultRow('local', 'claude').textContent ?? ''), '列上標已隱藏')
+  assert.ok(useStore.getState().disabledIdentities.includes('local|claude|@default'))
+  await click(btn(defaultRow('local', 'claude'), '顯示')!)
+  await until(() => put().length === 2 && !/已隱藏/.test(defaultRow('local', 'claude').textContent ?? ''), '復原')
+  assert.deepEqual(put()[1]!.body, { kind: 'claude', disabled: false, host: 'local' })
+})

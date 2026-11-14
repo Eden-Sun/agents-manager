@@ -644,6 +644,8 @@ export interface StoreState {
   logoutIdentity: (host: string, identity: string) => Promise<boolean>
   /** 額度欄 agy 那格的登出：刪該主機的 agy 憑證，成功後那格改顯示未登入。 */
   logoutAgy: (host: string) => Promise<boolean>
+  /** 某個 kind 的預設帳號登出（claude／codex／grok 開臨時 pane、agy 直接刪憑證）；回「做了」。 */
+  logoutKindDefault: (host: string, kind: BotKind) => Promise<boolean>
   /** 裝／更新該主機的 agy（官方 manifest ＋ sha512，不跑官方 install.sh）；裝好後 daemon 重新偵測並推 `host_changed`。 */
   installAgy: (host: string) => Promise<boolean>
   loadIdentityPrefs: () => Promise<void>
@@ -2490,6 +2492,17 @@ export const useStore = create<StoreState>((set, get) => {
 
   async logoutIdentity(host, identity) {
     return identityAuth(set, get, host, identity, 'logout')
+  },
+
+  async logoutKindDefault(host, kind) {
+    if (kind === 'agy') return get().logoutAgy(host)
+    let ok = false
+    await guarded(set, get, `kind-logout:${host || 'local'}:${kind}`, async () => {
+      const shell = await api.logoutKindDefault(host, kind)
+      if (shell) set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+      ok = true
+    })
+    return ok
   },
 
   async logoutAgy(host) {

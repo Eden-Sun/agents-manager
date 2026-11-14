@@ -13,6 +13,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
+import { DEFAULT_ACCOUNT } from '../store/identityRows'
 import { disableUntil } from '../lib/quotaDisableUntil'
 import { KindIcon } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
@@ -1020,7 +1021,8 @@ export function QuotaStrip({
     // 落點的認領清單跟側欄同一支（`quotaClaimantsOf`）。
     const live = quotaClaimantsOf(configured, idStatus, disabledIdentities, host)
     return collectEntries(quota, live, host).filter(
-      (e) => !e.identity || !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity)),
+      // 沒有身份名的是該 kind 的預設帳號那格：預設帳號被隱藏（設定 → 身份 → 預設帳號）就不列（使用者 2026-11-14：grok 已不訂閱）。
+      (e) => !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity || DEFAULT_ACCOUNT)),
     )
   }, [quota, configured, idStatus, host, disabledIdentities])
 

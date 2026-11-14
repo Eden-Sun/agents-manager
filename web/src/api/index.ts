@@ -973,6 +973,16 @@ export async function logoutIdentity(host: string, identity: string): Promise<Ho
 }
 
 /**
+ * 登出某個 kind 的**預設帳號**（不換設定目錄的那個）：claude／codex／grok 開臨時 pane 跑該 CLI 的登出指令（回 shell），
+ * agy 走直接刪憑證檔（回 `{removed}`，不開 pane）。不刪家目錄的任何檔案。
+ */
+export async function logoutKindDefault(host: string, kind: BotKind): Promise<HostShell | null> {
+  const name = host || 'local'
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/kinds/${encodeURIComponent(kind)}/logout`)
+  return kind === 'agy' ? null : toHostShell(raw, name)
+}
+
+/**
  * 登出該主機的 agy 帳號：daemon 直接刪掉 agy 的 OAuth 憑證檔（不開 pane、不跑 TUI）。
  * `removed:false`＝本來就沒有憑證，不算錯。正在跑的 agy bot 不會被停。
  */
