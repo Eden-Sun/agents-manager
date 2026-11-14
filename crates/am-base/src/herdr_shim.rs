@@ -172,11 +172,14 @@ am_spawn_begin() {
         printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
         return 75
     fi
+    _spawn_purpose=${1:-agent}
+    _spawn_kind=${2:-${_kind:-${AM_KIND:-}}}
     _out=$(am_curl_bot -s --connect-timeout 2 -m 5 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/begin" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" \
-        --data-urlencode "purpose=${1:-agent}" \
-        --data-urlencode "pane_id=${_pane:-}" --data-urlencode "child_name=${_child_name:-}" 2>/dev/null)
+        --data-urlencode "purpose=${_spawn_purpose}" \
+        --data-urlencode "pane_id=${_pane:-}" --data-urlencode "child_name=${_child_name:-}" \
+        --data-urlencode "kind=${_spawn_kind:-}" 2>/dev/null)
     _rc=$?
     _code=$(printf '%s\n' "$_out" | tail -n 1)
     _body=$(printf '%s\n' "$_out" | sed '$d')
@@ -728,7 +731,7 @@ am_agent_start() {
         [ -z "$_idkv" ] || _hd=$(am_kv_get "$_idkv" CLAUDE_CONFIG_DIR)
         am_ensure_claude_hook "$_hd"
     fi
-    am_spawn_begin agent || exit $?
+    am_spawn_begin agent "${_kind:-${AM_KIND:-}}" || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane" "$_idkv" "$_idacct" "$_child_name" "${_kind:-${AM_KIND:-}}" || { am_spawn_abort; exit 75; }
     if [ -z "${AM_BOT_ID:-}" ]; then

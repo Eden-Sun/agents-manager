@@ -764,6 +764,38 @@ esac"#, calls.display()));
         }
     }
 
+    /// `agent start` 的 `--kind`（或退回母 bot 的 `AM_KIND`）要帶給 begin（`kind`），以供 agy 預先信任。
+    #[test]
+    fn begin_carries_the_agent_start_kind() {
+        for (args, env_kind, want) in [
+            (vec!["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p3"], "codex", "kind=agy"),
+            (vec!["agent", "start", "kid", "--kind=agy", "--pane", "w1:p3"], "codex", "kind=agy"),
+            (vec!["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p3"], "agy", "kind=codex"),
+            (vec!["agent", "start", "kid", "--pane", "w1:p3"], "agy", "kind=agy"),
+        ] {
+            let s = Sandbox::new();
+            let log = s.dir.join("curl.log");
+            write_script(
+                &s.dir.join("real").join("curl"),
+                &format!(
+                    "printf '%s\\n' \"$@\" >> '{}'\n\
+                     case \"$*\" in\n\
+                       */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
+                       */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                       */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
+                       */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+                     esac\n",
+                    log.display()
+                ),
+            );
+            let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_AGENT_NAME", "p-1"), ("AM_KIND", env_kind)];
+            let (_, err, rc) = s.run_full(&env, &args);
+            assert_eq!(rc, 0, "{err}");
+            let sent = std::fs::read_to_string(&log).unwrap();
+            assert!(sent.lines().any(|l| l == want), "{args:?} with AM_KIND={env_kind} → {sent}");
+        }
+    }
+
     /// 2026-09-08：沒帶 `--model` 的子 agent 跑 CLI 預設；同 kind 才補母 bot 的，自己有寫的不動。
     #[test]
     fn a_child_without_a_model_inherits_the_parents() {

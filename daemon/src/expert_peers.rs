@@ -529,7 +529,7 @@ mod spawn_gate_tests {
         sqlx::query("UPDATE bots SET role='executor' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("X-AM-Bot-Token", bot.hook_token.parse().unwrap());
-        let body = crate::runners::credential_spawn::SpawnBegin { bot_id: bot.id, timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() };
+        let body = crate::runners::credential_spawn::SpawnBegin { bot_id: bot.id, timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new(), kind: String::new() };
         let (status, _) = crate::runners::credential_spawn::begin(State(env.app.clone()), headers, axum::extract::Form(body)).await;
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
     }

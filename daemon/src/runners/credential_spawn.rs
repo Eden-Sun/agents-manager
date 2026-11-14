@@ -156,6 +156,8 @@ pub struct SpawnBegin {
     pub pane_id: String,
     #[serde(default)]
     pub child_name: String,
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Deserialize)]
@@ -270,6 +272,27 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
         if !body.child_name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-')) {
             release(&app, &body.bot_id, &permit_id);
             return fail(StatusCode::BAD_REQUEST, "invalid_child_name", "child name contains invalid characters");
+        }
+        if body.kind == "agy" {
+            let pane_info = match observed {
+                Ok(Ok((Some(ref pane), _))) => Some(pane),
+                _ => None,
+            };
+            let pane_cwd = pane_info
+                .and_then(|p| p.foreground_cwd.as_deref().or(p.cwd.as_deref()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(target_cwd) = pane_cwd {
+                let mut child_bot = bot.clone();
+                child_bot.kind = "agy".to_string();
+                child_bot.identity = crate::identity_kind::child_identity(bot.identity.as_deref(), &bot.kind, "agy");
+                child_bot.cwd = Some(target_cwd.to_string());
+                for w in crate::trust::pretrust_for_start(&app, &child_bot, &authority.host, target_cwd).await {
+                    tracing::warn!(parent = %bot.name, host = %authority.host, target_cwd, warning = %w, "could not pre-trust child agy workspace");
+                }
+            } else {
+                tracing::warn!(parent = %bot.name, host = %authority.host, pane = %body.pane_id, "child pane has no cwd; cannot pre-trust agy workspace");
+            }
         }
         let spawn_id = crate::db::ulid();
         let child_token = crate::projection::new_token();
@@ -465,7 +488,7 @@ mod tests {
         let (status, Json(body)) = begin(
             State(app.clone()),
             bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new() }),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new(), kind: String::new() }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "spawn begin should reserve the parent credential: {body}");
@@ -495,7 +518,7 @@ mod tests {
         e.herdr.set_agent("existing-agent", "w1:p-busy", false);
         let (status, _) = begin(State(e.app.clone()), bot_headers(&parent.hook_token), Form(SpawnBegin {
             bot_id: parent.id, timeout_ms: String::new(), purpose: "agent".into(),
-            pane_id: "w1:p-busy".into(), child_name: "other-child".into(),
+            pane_id: "w1:p-busy".into(), child_name: "other-child".into(), kind: String::new(),
         })).await;
         assert_eq!(status, StatusCode::CONFLICT);
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM child_credentials").fetch_one(&e.app.db).await.unwrap();
@@ -542,5 +565,198 @@ mod tests {
         let (status, Json(body)) = finish_for(&e.app, &parent, &permit_id, pane_id).await;
         assert_eq!(status, StatusCode::OK, "a transiently unknown pane can be retried: {body}");
         assert_eq!(body["registered"], true);
+    }
+
+    #[tokio::test]
+    async fn starting_an_agy_child_pretrusts_the_panes_cwd() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "agy-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+
+        let pane_id = "w1:p-agy-child";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        let worktree_dir = e.dir.join("child-worktree");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        let worktree_str = worktree_dir.to_string_lossy().into_owned();
+        e.herdr.set_pane_foreground_cwd(pane_id, &worktree_str);
+
+        let (status, Json(body)) = begin(
+            State(e.app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin {
+                bot_id: parent.id.clone(),
+                timeout_ms: String::new(),
+                purpose: "agent".into(),
+                pane_id: pane_id.into(),
+                child_name: "agy-kid".into(),
+                kind: "agy".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["permit_id"].is_string());
+        assert!(body["spawn_id"].is_string());
+
+        let home = crate::home::dir().unwrap();
+        let settings_path = crate::agy_support::settings_path(&home);
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let trusted = settings["trustedWorkspaces"].as_array().expect("trustedWorkspaces array");
+        let canonical_worktree = crate::trust::canonical(&worktree_str);
+        assert!(
+            trusted.iter().any(|v| v.as_str() == Some(&canonical_worktree) || v.as_str() == Some(&worktree_str)),
+            "trustedWorkspaces must include child worktree: {settings}"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_an_agy_child_on_a_remote_host_pretrusts_remote_workspace() {
+        let e = crate::testing::env().await;
+        let host = "m4p-test-host";
+        let remote_home = e.dir.join("m4p-home");
+        std::fs::create_dir_all(&remote_home).unwrap();
+
+        let cfg = crate::config::HostCfg {
+            daemon_url: None,
+            shared_session: false,
+            name: host.into(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
+        let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some(remote_home.to_string_lossy().into_owned());
+
+        let fake_remote = remote_home.clone();
+        crate::hosts::set_ssh_fake(host, move |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &fake_remote).output()?;
+            if !out.status.success() {
+                anyhow::bail!("ssh fake failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "remote-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+
+        let pane_id = "w1:p-remote-child";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_pane_foreground_cwd(pane_id, "/remote/project/worktree");
+
+        let (status, Json(body)) = begin(
+            State(e.app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin {
+                bot_id: parent.id.clone(),
+                timeout_ms: String::new(),
+                purpose: "agent".into(),
+                pane_id: pane_id.into(),
+                child_name: "remote-agy-kid".into(),
+                kind: "agy".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let settings_path = remote_home.join(".gemini/antigravity-cli/settings.json");
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let trusted = settings["trustedWorkspaces"].as_array().expect("trustedWorkspaces array");
+        assert!(
+            trusted.iter().any(|v| v.as_str() == Some("/remote/project/worktree")),
+            "remote trustedWorkspaces must include child worktree: {settings}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pretrust_failure_still_starts_agy_child() {
+        let e = crate::testing::env().await;
+        let host = "broken-ssh-host";
+        let cfg = crate::config::HostCfg {
+            daemon_url: None,
+            shared_session: false,
+            name: host.into(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
+        let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some("/unreachable/home".into());
+        crate::hosts::set_ssh_fake(host, |_| anyhow::bail!("ssh: connect timed out"));
+
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "broken-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+
+        let pane_id = "w1:p-broken-child";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_pane_foreground_cwd(pane_id, "/some/worktree");
+
+        let (status, Json(body)) = begin(
+            State(e.app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin {
+                bot_id: parent.id.clone(),
+                timeout_ms: String::new(),
+                purpose: "agent".into(),
+                pane_id: pane_id.into(),
+                child_name: "broken-kid".into(),
+                kind: "agy".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "pretrust failure must not block the start: {body}");
+        assert!(body["permit_id"].is_string());
+        assert!(body["spawn_id"].is_string());
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM child_credentials WHERE child_name='broken-kid'")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn non_agy_child_does_not_call_agy_pretrust() {
+        let e = crate::testing::env().await;
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "codex-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+
+        let pane_id = "w1:p-codex-child";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_pane_foreground_cwd(pane_id, "/tmp/codex-worktree");
+
+        let (status, Json(body)) = begin(
+            State(e.app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin {
+                bot_id: parent.id.clone(),
+                timeout_ms: String::new(),
+                purpose: "agent".into(),
+                pane_id: pane_id.into(),
+                child_name: "codex-kid".into(),
+                kind: "codex".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let home = crate::home::dir().unwrap();
+        let settings_path = crate::agy_support::settings_path(&home);
+        if settings_path.exists() {
+            let settings: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+            let trusted = settings.get("trustedWorkspaces").and_then(Value::as_array);
+            assert!(
+                trusted.map_or(true, |arr| !arr.iter().any(|v| v.as_str() == Some("/tmp/codex-worktree"))),
+                "non-agy child must not affect agy trustedWorkspaces: {settings}"
+            );
+        }
     }
 }

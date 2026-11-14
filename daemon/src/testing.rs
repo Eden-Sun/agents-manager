@@ -54,6 +54,8 @@ pub struct MockHerdr {
     pub labels: Arc<StdMutex<BTreeMap<String, String>>>,
     /// `events.subscribe` 回 ack 並把連線留著（不吐事件）。預設關：沒開時訂閱照舊回 `unsupported`，既有測試依賴它「訂閱不起來」。
     pub allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
+    pub cwds: Arc<StdMutex<BTreeMap<String, String>>>,
+    pub foreground_cwds: Arc<StdMutex<BTreeMap<String, String>>>,
     /// `ping` 的回答 `(version, protocol)`；測 live-handoff 後版本變了（#254）。
     pub pong: Arc<StdMutex<(String, u32)>>,
     handle: tokio::task::JoinHandle<()>,
@@ -277,6 +279,8 @@ struct MockState {
     hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
     labels: Arc<StdMutex<BTreeMap<String, String>>>,
     allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
+    cwds: Arc<StdMutex<BTreeMap<String, String>>>,
+    foreground_cwds: Arc<StdMutex<BTreeMap<String, String>>>,
     pong: Arc<StdMutex<(String, u32)>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -313,8 +317,15 @@ impl MockState {
             .iter()
             .find(|a| !is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(pane_id))
             .cloned();
-        let mut v = json!({"pane_id": pane_id, "workspace_id": tab.workspace_id, "tab_id": tab.tab_id,
-               "cwd": cwd.cloned().unwrap_or(Value::Null)});
+        let pane_cwd = self.cwds.lock().unwrap().get(pane_id).cloned();
+        let fg_cwd = self.foreground_cwds.lock().unwrap().get(pane_id).cloned();
+        let mut v = json!({
+            "pane_id": pane_id,
+            "workspace_id": tab.workspace_id,
+            "tab_id": tab.tab_id,
+            "cwd": cwd.cloned().or_else(|| pane_cwd.map(Value::String)).unwrap_or(Value::Null),
+            "foreground_cwd": fg_cwd.map(Value::String).unwrap_or(Value::Null),
+        });
         // 真 herdr 0.9.3：空的 shell pane 沒有 `agent` 這個 key，`agent_status` 是 "unknown"（不是 null）。
         match occupant {
             Some(a) => {
@@ -385,6 +396,8 @@ impl MockHerdr {
             hide_agent_list: Default::default(),
             labels: Default::default(),
             allow_subscribe: Default::default(),
+            cwds: Default::default(),
+            foreground_cwds: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
             // 每顆 MockHerdr 各佔一段 id 空間：以前每顆都從 1 起算，每條測試拿到同一組 `ws-N:pM`，
             // 以 pane id 當 key 的 `race_point` 就在不同測試之間互相吃動作（issue #949）。
@@ -399,6 +412,7 @@ impl MockHerdr {
             state.pids.clone(),
             state.shell_pids.clone(),
         );
+        let (cwds, foreground_cwds) = (state.cwds.clone(), state.foreground_cwds.clone());
         let live = state.live.clone();
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
@@ -538,6 +552,9 @@ impl MockHerdr {
                                 Some(t) => {
                                     let pane = format!("{}:p{}", t.workspace_id, st.next());
                                     t.panes.push(pane.clone());
+                                    if let Some(c) = params.get("cwd").and_then(Value::as_str) {
+                                        st.cwds.lock().unwrap().insert(pane.clone(), c.to_string());
+                                    }
                                     json!({"id": id, "result": {"type": "pane_info", "pane": st.pane_json(&pane, t, params.get("cwd"))}})
                                 }
                             }
@@ -937,7 +954,15 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, labels, allow_subscribe, pong, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, labels, allow_subscribe, cwds, foreground_cwds, pong, handle }
+    }
+
+    pub fn set_pane_cwd(&self, pane_id: &str, cwd: &str) {
+        self.cwds.lock().unwrap().insert(pane_id.to_string(), cwd.to_string());
+    }
+
+    pub fn set_pane_foreground_cwd(&self, pane_id: &str, cwd: &str) {
+        self.foreground_cwds.lock().unwrap().insert(pane_id.to_string(), cwd.to_string());
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。
