@@ -42,6 +42,16 @@
   color: var(--warn, #b26a00);
   font-weight: 650;
 }
+.api-overview-btn {
+  padding: 1px 6px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.api-overview-btn.active {
+  border-color: var(--accent, #2563eb);
+  background: color-mix(in srgb, var(--accent, #2563eb) 12%, var(--bg-hover));
+}
 .api-balance-form {
   display: inline-flex;
   align-items: center;

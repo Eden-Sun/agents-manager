@@ -1,7 +1,7 @@
 import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
-import { ApiTurnTimeline } from './ApiTurnTimeline'
+import { ApiBotCostOverview } from './ApiBotCostOverview'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
@@ -217,7 +217,6 @@ const PlainBubble = memo(function PlainBubble({
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const translation = useMessageTranslation(msg, { recent })
   const [expanded, setExpanded] = useState(false)
-  const [showTimeline, setShowTimeline] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
@@ -225,8 +224,12 @@ const PlainBubble = memo(function PlainBubble({
   })
 
   return (
-    /* `data-msg-id`：從清單外（浮窗）指回這則訊息的把手。 */
-    <article className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}${msg.rewound_at ? ' rewound' : ''}`} data-msg-id={msg.id}>
+    /* `data-msg-id`：從清單外（浮窗）指回這則訊息的把手；`data-turn-id` 供花費概覽跳轉。 */
+    <article
+      className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}${msg.rewound_at ? ' rewound' : ''}`}
+      data-msg-id={msg.id}
+      data-turn-id={msg.turn_id ?? undefined}
+    >
       <div className="msg-meta msg-meta-above">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
@@ -267,8 +270,6 @@ const PlainBubble = memo(function PlainBubble({
           <ApiTurnCostTag
             botId={msg.bot_id}
             turnId={msg.turn_id}
-            expanded={showTimeline}
-            onToggle={() => setShowTimeline((v) => !v)}
           />
         ) : null}
         {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
@@ -302,13 +303,6 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
-      {showTimeline && msg.bot_id && msg.turn_id ? (
-        <ApiTurnTimeline
-          botId={msg.bot_id}
-          turnId={msg.turn_id}
-          onClose={() => setShowTimeline(false)}
-        />
-      ) : null}
       <SupplementSendNow msg={msg} />
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
@@ -1415,6 +1409,15 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const mobileContextAnchor = useRef<HTMLButtonElement>(null)
   const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
+  const [costOverviewOpen, setCostOverviewOpen] = useState(false)
+  const jumpToTurn = (turnId: string) => {
+    const el = document.querySelector(`article[data-turn-id="${turnId}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('flash')
+      setTimeout(() => el.classList.remove('flash'), 2000)
+    }
+  }
   const statusInfo = useStore(
     useShallow((s): StatusInfo | null => {
       const b = s.bots.find((x) => x.id === s.selectedBotId)
@@ -1772,7 +1775,17 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </>
           ) : null
         }
-        status={apiBot ? <ApiBotUsageBar botId={botId} /> : <StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />}
+        status={
+          apiBot ? (
+            <ApiBotUsageBar
+              botId={botId}
+              onToggleOverview={() => setCostOverviewOpen((v) => !v)}
+              overviewOpen={costOverviewOpen}
+            />
+          ) : (
+            <StatusLineBar botId={botId} status={statusInfo} text={run?.status_line ?? null} />
+          )
+        }
         hasStatus={apiBot || bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
       />
 
@@ -1822,6 +1835,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             />
           ) : null}
           <HostOfflineChatNotice botId={botId} />
+          {costOverviewOpen && apiBot ? (
+            <ApiBotCostOverview
+              botId={botId}
+              onClose={() => setCostOverviewOpen(false)}
+              onJumpToTurn={jumpToTurn}
+            />
+          ) : null}
           <MessageList botId={botId} />
           {!active && !waitingForStart && bot.kind !== 'claude-api' ? (
             <div className="bot-stopped-bar" role="status">

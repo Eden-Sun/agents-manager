@@ -14,7 +14,15 @@ const POLL_MS = 10_000
  * 若配置了 Anthropic 預付餘額（ClaudeApiBalance.configured），亦顯示預估剩餘餘額（唯讀）。
  * 若設定了總上限，顯示「上限 $Y / $X」，點擊可修改或清除；未設定時顯示「設定上限」。
  */
-export function ApiBotUsageBar({ botId }: { botId: string }) {
+export function ApiBotUsageBar({
+  botId,
+  onToggleOverview,
+  overviewOpen,
+}: {
+  botId: string
+  onToggleOverview?: () => void
+  overviewOpen?: boolean
+}) {
   const t = useT()
   const [mobileExpanded, setMobileExpanded] = useState(false)
   const [usage, setUsage] = useState<ApiBotUsage | null>(null)
@@ -308,6 +316,19 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
           <span className="sl-k">{t('快取')}</span>
           <span className="sl-v">{cacheChip.label}</span>
         </span>
+      ) : null}
+      {onToggleOverview ? (
+        <button
+          type="button"
+          className={`sl-item api-balance-chip api-overview-btn${overviewOpen ? ' active' : ''}`}
+          data-k="cost-overview"
+          title={t('查看 Claude API 花費概覽、分類拆分與最貴回合')}
+          onClick={onToggleOverview}
+          aria-expanded={overviewOpen}
+        >
+          <span className="sl-k">{t('花費概覽')}</span>
+          <span className="sl-v">${spend.toFixed(2)}</span>
+        </button>
       ) : null}
       {showFullDetails ? (
         <>
