@@ -1431,6 +1431,7 @@
         }
         sqlx::query("DROP TABLE child_done_sources").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
@@ -1554,7 +1555,7 @@
         assert!(open(&path).await.is_err());
         let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap(),67);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM sqlite_master WHERE name IN('api_bot_sessions','api_bot_attempts','api_bot_join_receipts')").fetch_one(&raw).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM sqlite_master WHERE name IN('api_bot_sessions','api_bot_attempts','api_bot_join_receipts','api_bot_rejected_responses')").fetch_one(&raw).await.unwrap(),0);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*)FROM bots WHERE id='old-b'").fetch_one(&raw).await.unwrap(),1);
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA writable_schema").fetch_one(&raw).await.unwrap(),0);
         raw.close().await;std::fs::remove_dir_all(dir).unwrap();
@@ -1581,6 +1582,7 @@
         }
         sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&pool).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&pool).await.unwrap();

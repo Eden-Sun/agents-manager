@@ -442,6 +442,8 @@ pub async fn close_reserved_unknown_on(
 async fn prune_in(conn: &mut SqliteConnection, at: &str) -> Result<u64> {
     sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE state='reserved' AND (session_id IS NULL OR session_id IN(SELECT s.id FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.expires_at<=? OR b.deleted_at IS NOT NULL))")
         .bind(at).bind(at).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM api_bot_rejected_responses WHERE bot_id IN (SELECT id FROM bots WHERE deleted_at IS NOT NULL)")
+        .execute(&mut *conn).await?;
     Ok(sqlx::query("DELETE FROM api_bot_sessions WHERE expires_at<=? OR bot_id IN(SELECT id FROM bots WHERE deleted_at IS NOT NULL)").bind(at).execute(conn).await?.rows_affected())
 }
 /// C must schedule this at boot/hourly and on delete; B adds no production task.
@@ -570,6 +572,136 @@ pub async fn retire(pool: &SqlitePool, f: &Fence<'_>) -> Result<()> {
         .bind(&at).bind(f.session).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// 把 Claude API response 的 content 區塊序列化成只留 `type` 與 `name`（工具名稱）的結構。
+/// 絕對不存任何 text、input、output、thinking 等內容。
+pub fn sanitize_content_blocks(blocks: &[Value]) -> Value {
+    let list: Vec<Value> = blocks
+        .iter()
+        .map(|b| {
+            let mut obj = serde_json::Map::new();
+            if let Some(t) = b.get("type").and_then(|v| v.as_str()) {
+                obj.insert("type".to_string(), Value::String(t.to_string()));
+            }
+            if let Some(name) = b.get("name").and_then(|v| v.as_str()) {
+                obj.insert("name".to_string(), Value::String(name.to_string()));
+            }
+            Value::Object(obj)
+        })
+        .collect();
+    Value::Array(list)
+}
+
+pub const MAX_REJECTED_RESPONSES_PER_BOT: i64 = 200;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RejectedResponseRecord<'a> {
+    pub bot_id: &'a str,
+    pub turn_id: &'a str,
+    pub attempt_id: &'a str,
+    pub created_at: &'a str,
+    pub reason: &'a str,
+    pub response_model: &'a str,
+    pub stop_reason: &'a str,
+    pub usage: &'a Value,
+    pub content_blocks: &'a [Value],
+}
+
+#[derive(Clone, Debug, FromRow, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RejectedResponseRow {
+    pub id: i64,
+    pub bot_id: String,
+    pub turn_id: String,
+    pub attempt_id: String,
+    pub created_at: String,
+    pub reason: String,
+    pub response_model: String,
+    pub stop_reason: String,
+    pub usage_json: String,
+    pub content_blocks_json: String,
+}
+
+/// 記錄被拒回應（用於 fixture 迴歸與事故追蹤），嚴格過濾 content 僅保留 type/name，並維持每 bot 200 筆上限。
+pub async fn record_rejected_response(
+    pool: &SqlitePool,
+    record: &RejectedResponseRecord<'_>,
+) -> Result<i64> {
+    let sanitized_blocks = sanitize_content_blocks(record.content_blocks);
+    let content_blocks_json = serde_json::to_string(&sanitized_blocks)?;
+    let usage_json = serde_json::to_string(record.usage)?;
+
+    let mut tx = super::begin_write(pool).await?;
+    let id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO api_bot_rejected_responses
+            (bot_id, turn_id, attempt_id, created_at, reason, response_model, stop_reason, usage_json, content_blocks_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id"#,
+    )
+    .bind(record.bot_id)
+    .bind(record.turn_id)
+    .bind(record.attempt_id)
+    .bind(record.created_at)
+    .bind(record.reason)
+    .bind(record.response_model)
+    .bind(record.stop_reason)
+    .bind(&usage_json)
+    .bind(&content_blocks_json)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"DELETE FROM api_bot_rejected_responses
+           WHERE bot_id = ? AND id NOT IN (
+               SELECT id FROM api_bot_rejected_responses
+               WHERE bot_id = ?
+               ORDER BY id DESC
+               LIMIT ?
+           )"#,
+    )
+    .bind(record.bot_id)
+    .bind(record.bot_id)
+    .bind(MAX_REJECTED_RESPONSES_PER_BOT)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// 查詢被拒回應記錄（可按 bot 篩選，用於匯出 fixture 或檢查）。
+pub async fn list_rejected_responses(
+    pool: &SqlitePool,
+    bot_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<RejectedResponseRow>> {
+    let rows = match bot_id {
+        Some(bid) => {
+            sqlx::query_as::<_, RejectedResponseRow>(
+                r#"SELECT id, bot_id, turn_id, attempt_id, created_at, reason, response_model, stop_reason, usage_json, content_blocks_json
+                   FROM api_bot_rejected_responses
+                   WHERE bot_id = ?
+                   ORDER BY id ASC
+                   LIMIT ?"#,
+            )
+            .bind(bid)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, RejectedResponseRow>(
+                r#"SELECT id, bot_id, turn_id, attempt_id, created_at, reason, response_model, stop_reason, usage_json, content_blocks_json
+                   FROM api_bot_rejected_responses
+                   ORDER BY id ASC
+                   LIMIT ?"#,
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -1093,6 +1225,74 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(row, (None, None, Some(12)));
+    }
+    #[test]
+    fn test_sanitize_content_blocks_strips_all_text_inputs_outputs() {
+        let input = vec![
+            json!({
+                "type": "text",
+                "text": "Secret user prompt text that must never be saved",
+                "extra": 123
+            }),
+            json!({
+                "type": "tool_use",
+                "id": "toolu_abc123",
+                "name": "bash",
+                "input": { "command": "rm -rf /private/data" }
+            }),
+            json!({
+                "type": "thinking",
+                "thinking": "Sensitive reasoning process",
+                "signature": "sig_xyz"
+            }),
+        ];
+        let sanitized = sanitize_content_blocks(&input);
+        assert_eq!(
+            sanitized,
+            json!([
+                { "type": "text" },
+                { "type": "tool_use", "name": "bash" },
+                { "type": "thinking" }
+            ])
+        );
+    }
+    #[tokio::test]
+    async fn test_rejected_responses_retention_and_prune() {
+        let pool = pool().await;
+        let usage = json!({"input_tokens": 10, "output_tokens": 20, "speed": "standard"});
+        let blocks = vec![json!({"type": "text", "text": "secret"})];
+
+        for i in 1..=205 {
+            let record = RejectedResponseRecord {
+                bot_id: "a",
+                turn_id: &format!("turn_{i}"),
+                attempt_id: &format!("att_{i}"),
+                created_at: "2026-11-15T00:00:00Z",
+                reason: "untrusted_usage",
+                response_model: "claude-3-5-sonnet",
+                stop_reason: "end_turn",
+                usage: &usage,
+                content_blocks: &blocks,
+            };
+            record_rejected_response(&pool, &record).await.unwrap();
+        }
+
+        let rows = list_rejected_responses(&pool, Some("a"), 500).await.unwrap();
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows[0].turn_id, "turn_6");
+        assert_eq!(rows.last().unwrap().turn_id, "turn_205");
+
+        assert!(!rows[0].content_blocks_json.contains("secret"));
+        assert_eq!(rows[0].content_blocks_json, "[{\"type\":\"text\"}]");
+
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id='a'")
+            .bind(super::super::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(prune(&pool).await.unwrap(), 0);
+        let rows_after = list_rejected_responses(&pool, Some("a"), 500).await.unwrap();
+        assert_eq!(rows_after.len(), 0);
     }
 }
 

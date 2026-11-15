@@ -519,6 +519,15 @@ pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str
         }
         return "Anthropic API 回了錯誤狀態碼。".into();
     }
+    if let Some(rest) = reason.strip_prefix("api_invalid_response:") {
+        if let Some(sub) = rest.strip_prefix("untrusted_usage: ") {
+            return format!("API 回應的用量欄位無法驗證：{sub}，已停止。").into();
+        } else if let Some(sub) = rest.strip_prefix("content: ") {
+            return format!("API 回應的內容無法驗證：{sub}，已停止。").into();
+        } else {
+            return format!("API 回應無法驗證：{rest}，已停止。").into();
+        }
+    }
     match reason {
         "api_total_cap_reached" => "已達總花費上限。".into(),
         "api_bot_turn_cost_cap_exceeded" => "這一回合累計花費加上下一次請求的預留額，會超過單回合成本上限（max_turn_cost_microusd），所以沒有送出請求。".into(),
@@ -558,6 +567,8 @@ pub(super) async fn post_failure_notice(app: &Arc<App>, key: &ApiTurnKey, reason
     } else if let Some(rest) = reason.strip_prefix("api_http_") {
         let status = rest.split(':').next().unwrap_or(rest);
         format!("⚠ 這一回合失敗（api_http_{status}）：{}", failure_explanation(reason))
+    } else if reason.starts_with("api_invalid_response:") {
+        format!("⚠ 這一回合失敗（api_invalid_response）：{}", failure_explanation(reason))
     } else {
         format!("⚠ 這一回合失敗（{reason}）：{}", failure_explanation(reason))
     };

@@ -34,6 +34,7 @@ scripts/*.md|ops|-|@default
 docs/goals/agm-supervisor-persona.md|daemon|supervisor::persona::,supervisor::setup::|@default
 docs/goals/agm-responder-persona.md|daemon|supervisor::persona::,supervisor::responder::|@default
 docs/API.md|daemon|api_route_methods_match_documented_inventory,ws_event_docs_tests::|@default
+daemon/tests/fixtures/api_bot/*|daemon|api_bot::|@default
 daemon/*|daemon|@rust|@default
 AGENTS.md|ops|-|scripts/lint_scope_test.sh
 crates/*.md|daemon|@rust|@default

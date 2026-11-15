@@ -1121,3 +1121,34 @@ fn stream_abort_reason_is_distinct_from_http_status_and_explained() {
     assert!(expl.contains("串流中途") && expl.contains("overloaded_error") && expl.contains("Overloaded") && expl.contains("計費"), "{expl}");
     assert!(super::completion::failure_explanation("api_stream_aborted").contains("串流中途"));
 }
+
+#[test]
+fn invalid_response_detail_is_explained_to_user() {
+    let usage_reason = "api_invalid_response:untrusted_usage: cache_creation 細項總和 (50+40) 與 cache_creation_input_tokens (100) 不符";
+    let expl1 = super::completion::failure_explanation(usage_reason);
+    assert_eq!(
+        expl1,
+        "API 回應的用量欄位無法驗證：cache_creation 細項總和 (50+40) 與 cache_creation_input_tokens (100) 不符，已停止。"
+    );
+
+    let content_reason = "api_invalid_response:content: too many tool calls: 35";
+    let expl2 = super::completion::failure_explanation(content_reason);
+    assert_eq!(
+        expl2,
+        "API 回應的內容無法驗證：too many tool calls: 35，已停止。"
+    );
+
+    let generic_reason = "api_invalid_response:something_unexpected";
+    let expl3 = super::completion::failure_explanation(generic_reason);
+    assert_eq!(
+        expl3,
+        "API 回應無法驗證：something_unexpected，已停止。"
+    );
+
+    let plain_reason = "api_invalid_response";
+    let expl4 = super::completion::failure_explanation(plain_reason);
+    assert_eq!(
+        expl4,
+        "收到無法驗證的回應（用量或內容不合規則），已停止。"
+    );
+}

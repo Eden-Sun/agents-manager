@@ -1,0 +1,51 @@
+{
+  "name": "real_compaction_usage",
+  "expected": "accepted",
+  "model": "claude-fable-5-2",
+  "request_options": {
+    "model": "claude-fable-5-2",
+    "effort": "high",
+    "fast": false,
+    "max_tokens": 32000,
+    "compact_at_input_tokens": 150000,
+    "cache_ttl_1h": false
+  },
+  "response": {
+    "id": "msg_real_compaction",
+    "model": "claude-fable-5-2",
+    "stop_reason": "end_turn",
+    "content": [
+      {
+        "type": "text"
+      }
+    ],
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 130581
+      },
+      "cache_creation_input_tokens": 4332,
+      "cache_read_input_tokens": 20653,
+      "inference_geo": "global",
+      "input_tokens": 2,
+      "iterations": [
+        {
+          "cache_creation_input_tokens": 130581,
+          "input_tokens": 38,
+          "output_tokens": 8192,
+          "type": "compaction"
+        },
+        {
+          "cache_creation_input_tokens": 4332,
+          "cache_read_input_tokens": 20653,
+          "input_tokens": 2,
+          "output_tokens": 533,
+          "type": "message"
+        }
+      ],
+      "output_tokens": 533,
+      "service_tier": "standard",
+      "speed": "standard"
+    }
+  }
+}

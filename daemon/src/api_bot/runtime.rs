@@ -1882,6 +1882,7 @@ fn map_runner_result(
             H::Timeout => "api_timeout".into(),
             H::TransportUnknown => "api_transport_unknown".into(),
             H::TooLarge | H::InvalidResponse => "api_invalid_response".into(),
+            H::InvalidResponseDetail(d) => format!("api_invalid_response:{d}"),
             H::InvalidRequest | H::Cancelled => "api_invalid_request".into(),
         }),
     }

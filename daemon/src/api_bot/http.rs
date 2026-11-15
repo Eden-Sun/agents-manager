@@ -33,6 +33,7 @@ pub enum Error {
     StreamAborted { kind: Option<String>, message: Option<String> },
     TooLarge,
     InvalidResponse,
+    InvalidResponseDetail(String),
 }
 
 /// 串流進度回呼的最短間隔。

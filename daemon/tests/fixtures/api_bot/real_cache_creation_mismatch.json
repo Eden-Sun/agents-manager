@@ -1,0 +1,37 @@
+{
+  "name": "real_cache_creation_mismatch",
+  "expected": "rejected",
+  "expected_reason_contains": "cache_creation 細項總和",
+  "model": "claude-opus-5-5",
+  "request_options": {
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "fast": false,
+    "max_tokens": 1024,
+    "compact_at_input_tokens": 0,
+    "cache_ttl_1h": false
+  },
+  "response": {
+    "id": "msg_real_cache_mismatch",
+    "model": "claude-opus-5-5",
+    "stop_reason": "end_turn",
+    "content": [
+      {
+        "type": "text"
+      }
+    ],
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 50,
+        "ephemeral_5m_input_tokens": 40
+      },
+      "cache_creation_input_tokens": 100,
+      "cache_read_input_tokens": 0,
+      "inference_geo": "global",
+      "input_tokens": 10,
+      "output_tokens": 20,
+      "service_tier": "standard",
+      "speed": "standard"
+    }
+  }
+}

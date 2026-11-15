@@ -289,6 +289,203 @@ impl QuoteProvider for DirectGlobal {
     }
 }
 
+/// 分析 API 回應中用量（usage）或結構不合法的原因；合法或非用量問題時回 `None`。
+pub(crate) fn classify_usage_problem(request: &RequestEnvelope, response: &Response) -> Option<String> {
+    if response.model != request.options().model {
+        return Some(format!("回應模型與請求不符：{} != {}", response.model, request.options().model));
+    }
+    if rates(&request.options().model).is_err() {
+        return Some(format!("不支援的模型：{}", request.options().model));
+    }
+    let Some(usage) = response.usage.as_object() else {
+        return Some("用量欄位不是 JSON 物件".into());
+    };
+    for k in usage.keys() {
+        if !matches!(
+            k.as_str(),
+            "input_tokens"
+                | "output_tokens"
+                | "speed"
+                | "cache_creation_input_tokens"
+                | "cache_read_input_tokens"
+                | "cache_creation"
+                | "server_tool_use"
+                | "output_tokens_details"
+                | "service_tier"
+                | "inference_geo"
+                | "iterations"
+        ) {
+            return Some(format!("用量包含未支援的欄位：{k}"));
+        }
+    }
+    let input = match usage.get("input_tokens").and_then(Value::as_u64) {
+        Some(n) => n,
+        None => return Some("用量缺少或無效的 input_tokens".into()),
+    };
+    let output = match usage.get("output_tokens").and_then(Value::as_u64) {
+        Some(n) => n,
+        None => return Some("用量缺少或無效的 output_tokens".into()),
+    };
+    let speed = match usage.get("speed").and_then(Value::as_str) {
+        Some(s) => s,
+        None => return Some("用量缺少或無效的 speed".into()),
+    };
+    if !matches!(speed, "standard" | "fast") {
+        return Some(format!("未知的 speed 設定：{speed}"));
+    }
+    if request.speed() == "standard" && speed != "standard" {
+        return Some("請求為 standard 但回應 speed 非 standard".into());
+    }
+
+    let iter_items: Option<&Vec<Value>> = match usage.get("iterations") {
+        Some(Value::Array(a)) if !a.is_empty() => Some(a),
+        _ => None,
+    };
+    let count = |key: &str| match usage.get(key).and_then(Value::as_u64) {
+        Some(n) => Ok(n),
+        None if iter_items.is_some() => Ok(0),
+        None => Err(()),
+    };
+    let cache_creation = match count("cache_creation_input_tokens") {
+        Ok(n) => n,
+        Err(_) => return Some("用量缺少 cache_creation_input_tokens".into()),
+    };
+    let cache_read = match count("cache_read_input_tokens") {
+        Ok(n) => n,
+        Err(_) => return Some("用量缺少 cache_read_input_tokens".into()),
+    };
+
+    if iter_items.is_none() {
+        if let Some(cc) = usage.get("cache_creation") {
+            if !cc.is_null() {
+                let Some(m) = cc.as_object() else {
+                    return Some("cache_creation 細項不是 JSON 物件".into());
+                };
+                if !m.keys().all(|k| matches!(k.as_str(), "ephemeral_1h_input_tokens" | "ephemeral_5m_input_tokens")) {
+                    return Some("cache_creation 細項包含未支援的鍵".into());
+                }
+                let h = match m.get("ephemeral_1h_input_tokens").and_then(Value::as_u64) {
+                    Some(n) => n,
+                    None => return Some("cache_creation 細項缺少 ephemeral_1h_input_tokens".into()),
+                };
+                let f = match m.get("ephemeral_5m_input_tokens").and_then(Value::as_u64) {
+                    Some(n) => n,
+                    None => return Some("cache_creation 細項缺少 ephemeral_5m_input_tokens".into()),
+                };
+                if h.checked_add(f) != Some(cache_creation) {
+                    return Some(format!("cache_creation 細項總和 ({}+{}) 與 cache_creation_input_tokens ({}) 不符", h, f, cache_creation));
+                }
+            }
+        }
+    }
+
+    if let Some(stu) = usage.get("server_tool_use") {
+        if !stu.is_null() {
+            let Some(m) = stu.as_object() else {
+                return Some("server_tool_use 不是物件".into());
+            };
+            for name in &["web_fetch_requests", "web_search_requests"] {
+                if m.get(*name).and_then(Value::as_u64) != Some(0) {
+                    return Some(format!("server_tool_use.{name} 非 0 或不存在"));
+                }
+            }
+            if m.len() != 2 {
+                return Some("server_tool_use 包含額外欄位".into());
+            }
+        }
+    }
+
+    if let Some(otd) = usage.get("output_tokens_details") {
+        if !otd.is_null() {
+            let Some(m) = otd.as_object() else {
+                return Some("output_tokens_details 不是物件".into());
+            };
+            if m.len() != 1 {
+                return Some("output_tokens_details 包含未預期的鍵".into());
+            }
+            let Some(thinking) = m.get("thinking_tokens").and_then(Value::as_u64) else {
+                return Some("output_tokens_details 缺少 thinking_tokens".into());
+            };
+            if thinking > output {
+                return Some(format!("thinking_tokens ({thinking}) 超出 output_tokens ({output})"));
+            }
+        }
+    }
+
+    if let Some(st) = usage.get("service_tier") {
+        if !st.is_null() && st.as_str() != Some("standard") {
+            return Some(format!("service_tier 不是 standard: {:?}", st));
+        }
+    }
+    if let Some(ig) = usage.get("inference_geo") {
+        if !ig.is_null() && ig.as_str() != Some("global") {
+            return Some(format!("inference_geo 不是 global: {:?}", ig));
+        }
+    }
+
+    let Ok(bound) = input_token_bound(request) else {
+        return Some("無法計算請求 token 上限".into());
+    };
+
+    if let Some(items) = iter_items {
+        for (idx, it) in items.iter().enumerate() {
+            let Some(it_obj) = it.as_object() else {
+                return Some(format!("iteration [{idx}] 不是物件"));
+            };
+            let Some(kind) = it_obj.get("type").and_then(Value::as_str) else {
+                return Some(format!("iteration [{idx}] 缺少 type"));
+            };
+            if !matches!(kind, "message" | "compaction") {
+                return Some(format!("iteration [{idx}] 類型不支援：{kind}"));
+            }
+            let Some(i_in) = it_obj.get("input_tokens").and_then(Value::as_u64) else {
+                return Some(format!("iteration [{idx}] 缺少 input_tokens"));
+            };
+            let Some(i_out) = it_obj.get("output_tokens").and_then(Value::as_u64) else {
+                return Some(format!("iteration [{idx}] 缺少 output_tokens"));
+            };
+            let i_read = it_obj.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let i_write = it_obj.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let Some(total) = i_in.checked_add(i_read).and_then(|n| n.checked_add(i_write)) else {
+                return Some(format!("iteration [{idx}] token 總和溢位"));
+            };
+            if total > bound {
+                return Some(format!("iteration [{idx}] 輸入 token 總和 ({total}) 超出上限 ({bound})"));
+            }
+            if kind == "message" && i_out > u64::from(request.options().max_tokens) {
+                return Some(format!("iteration [{idx}] 輸出 token ({i_out}) 超出 max_tokens ({})", request.options().max_tokens));
+            }
+            if let Some(cc) = it_obj.get("cache_creation") {
+                if !cc.is_null() {
+                    let Some(m) = cc.as_object() else {
+                        return Some(format!("iteration [{idx}] cache_creation 不是物件"));
+                    };
+                    if !m.keys().all(|k| matches!(k.as_str(), "ephemeral_1h_input_tokens" | "ephemeral_5m_input_tokens")) {
+                        return Some(format!("iteration [{idx}] cache_creation 包含未支援的鍵"));
+                    }
+                    let h = m.get("ephemeral_1h_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    let f = m.get("ephemeral_5m_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    if h.checked_add(f) != Some(i_write) {
+                        return Some(format!("iteration [{idx}] cache_creation 細項總和 ({}+{}) 與 cache_creation_input_tokens ({}) 不符", h, f, i_write));
+                    }
+                }
+            }
+        }
+    } else {
+        let Some(total_input) = input.checked_add(cache_creation).and_then(|n| n.checked_add(cache_read)) else {
+            return Some("輸入 token 總和溢位".into());
+        };
+        if total_input > bound {
+            return Some(format!("輸入 token 總和 ({total_input}) 超出上限 ({bound})"));
+        }
+        if output > u64::from(request.options().max_tokens) {
+            return Some(format!("輸出 token ({output}) 超出 max_tokens ({})", request.options().max_tokens));
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,5 +917,76 @@ mod tests {
             Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: true },
             json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"24h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
         assert!(DirectGlobal.reserve(&other_ttl).is_err());
+    }
+
+    #[test]
+    fn fixtures_regression_test() {
+        let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/api_bot");
+        assert!(fixture_dir.exists(), "fixture dir exists: {fixture_dir:?}");
+        let entries = std::fs::read_dir(&fixture_dir).unwrap();
+        let mut count = 0;
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap();
+            let fixture: Value = serde_json::from_str(&content).unwrap();
+            let name = fixture["name"].as_str().unwrap_or("unnamed");
+            let expected = fixture["expected"].as_str().expect("fixture must have expected");
+            let model = fixture["model"].as_str().expect("fixture must have model");
+            let opt_val = &fixture["request_options"];
+            let req_opts = Options {
+                model: opt_val.get("model").and_then(Value::as_str).unwrap_or(model).into(),
+                effort: opt_val.get("effort").and_then(Value::as_str).unwrap_or("high").into(),
+                fast: opt_val.get("fast").and_then(Value::as_bool).unwrap_or(false),
+                max_tokens: opt_val.get("max_tokens").and_then(Value::as_u64).unwrap_or(32000) as u32,
+                compact_at_input_tokens: opt_val.get("compact_at_input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+                cache_ttl_1h: opt_val.get("cache_ttl_1h").and_then(Value::as_bool).unwrap_or(false),
+            };
+            let resp: Response = serde_json::from_value(fixture["response"].clone()).unwrap();
+            let messages: Vec<Message> = if let Some(msgs) = fixture.get("request_messages") {
+                serde_json::from_value(msgs.clone()).unwrap()
+            } else {
+                let max_iter_tokens = resp.usage.get("iterations")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter().map(|it| {
+                            let i_in = it.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let i_read = it.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            let i_write = it.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                            i_in + i_read + i_write
+                        }).max().unwrap_or(0)
+                    }).unwrap_or(0);
+                let top_tokens = resp.usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                    + resp.usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0)
+                    + resp.usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let needed = max_iter_tokens.max(top_tokens);
+                let prompt_len = (needed as usize * 3).max(100);
+                vec![Message { role: "user".into(), content: json!("x".repeat(prompt_len)) }]
+            };
+            let envelope = RequestEnvelope::new(req_opts, json!("fixture system"), messages).unwrap();
+
+            let quote = DirectGlobal.settle(&envelope, &resp);
+            let classified = classify_usage_problem(&envelope, &resp);
+
+            match expected {
+                "accepted" => {
+                    assert!(quote.is_ok(), "fixture {name} expected accepted, got quote err: {:?}", quote.err());
+                    assert!(classified.is_none(), "fixture {name} expected accepted, got classified problem: {:?}", classified);
+                }
+                "rejected" => {
+                    assert!(quote.is_err() || classified.is_some(), "fixture {name} expected rejected, but quote and classified succeeded");
+                    if let Some(expected_sub) = fixture.get("expected_reason_contains").and_then(Value::as_str) {
+                        let problem = classified.unwrap_or_default();
+                        assert!(problem.contains(expected_sub), "fixture {name} expected reason to contain {:?}, got {:?}", expected_sub, problem);
+                    }
+                }
+                other => panic!("unknown expected outcome: {other}"),
+            }
+            count += 1;
+        }
+        assert!(count >= 2, "expected at least 2 fixtures tested, found {count}");
     }
 }

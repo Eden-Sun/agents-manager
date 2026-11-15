@@ -483,9 +483,28 @@ impl Model for ApiBotAdapter {
                         });
                         Ok(resp)
                     } else {
-                        let reason = content_problem
-                            .clone()
-                            .unwrap_or_else(|| format!("untrusted usage or quote: {:?}", quote_res.as_ref().err()));
+                        let reason = match &content_problem {
+                            Some(cp) => format!("content: {cp}"),
+                            None => {
+                                let problem = super::pricing::classify_usage_problem(&envelope, &resp);
+                                match problem {
+                                    Some(p) => format!("untrusted_usage: {p}"),
+                                    None => format!("untrusted_usage: {:?}", quote_res.as_ref().err()),
+                                }
+                            }
+                        };
+                        let record = am_base::db::api_bot::RejectedResponseRecord {
+                            bot_id: &self.identity.bot_id,
+                            turn_id: &self.identity.turn_id,
+                            attempt_id: &attempt_id,
+                            created_at: &crate::db::now(),
+                            reason: &reason,
+                            response_model: &resp.model,
+                            stop_reason: &resp.stop_reason,
+                            usage: &resp.usage,
+                            content_blocks: &resp.content,
+                        };
+                        let _ = am_base::db::api_bot::record_rejected_response(&self.pool, &record).await;
                         // 有可信用量就照實算；用量本身不可信時費用不明，按預留額（上限）計，usage 不存。
                         let (receipt_speed, receipt_usage, estimated) = match &valid_quote {
                             Some(uq) => (uq.actual_speed, Some(&resp.usage), uq.estimated_microusd),
@@ -514,9 +533,9 @@ impl Model for ApiBotAdapter {
                         let mut next_state = cursor.last_durable_state.clone();
                         next_state.api_pending = false;
                         let val = serde_json::to_value(&next_state)
-                            .map_err(|_| http::Error::InvalidResponse)?;
+                            .map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
                         let chk =
-                            Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponse)?;
+                            Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
                         let receipt = db_api::Receipt {
                             state: "recorded",
                             actual_speed: receipt_speed,
@@ -526,14 +545,14 @@ impl Model for ApiBotAdapter {
                         let next_rev =
                             db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
                                 .await
-                                .map_err(|_| http::Error::InvalidResponse)?;
+                                .map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
 
                         cursor.revision = next_rev;
                         cursor.last_api_pending = false;
                         cursor.last_durable_state = next_state;
                         cursor.active_attempt = None;
 
-                        Err(http::Error::InvalidResponse)
+                        Err(http::Error::InvalidResponseDetail(reason))
                     }
                 }
                 Err(err) => {

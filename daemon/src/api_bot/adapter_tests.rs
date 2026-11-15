@@ -674,8 +674,14 @@ mod tests {
             let mut state = State::default();
             state.messages = vec![Message { role: "user".into(), content: serde_json::json!("go") }];
             let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 3).await;
-            assert!(matches!(res, Err(runner::Error::Model(crate::api_bot::http::Error::InvalidResponse))), "{label}: {res:?}");
+            assert!(matches!(res, Err(runner::Error::Model(crate::api_bot::http::Error::InvalidResponseDetail(_)))), "{label}: {res:?}");
             assert_eq!(wire_calls.load(Ordering::SeqCst), 1, "{label}");
+
+            let rej_row: (String, String, String) = sqlx::query_as("SELECT reason, stop_reason, content_blocks_json FROM api_bot_rejected_responses WHERE turn_id=?")
+                .bind(&turn).fetch_one(&pool).await.unwrap();
+            assert!(rej_row.0.starts_with("content: "), "{label}: {}", rej_row.0);
+            assert_eq!(rej_row.1, stop, "{label}");
+            assert!(!rej_row.2.contains("go"), "{label}: no prompt text in content_blocks");
 
             let row: (String, Option<i64>, Option<String>) = sqlx::query_as("SELECT state, estimated_microusd, usage_json FROM api_bot_attempts WHERE turn_id=?")
                 .bind(&turn).fetch_one(&pool).await.unwrap();
@@ -689,6 +695,77 @@ mod tests {
             assert!(checkpoint["tool_pending"].is_null(), "{label}");
             server.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_untrusted_usage_response_after_http_success_is_recorded_with_detailed_reason() {
+        let wire_calls = Arc::new(AtomicUsize::new(0));
+        let bad_usage = serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "speed": "standard",
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 100,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 50,
+                "ephemeral_5m_input_tokens": 40
+            }
+        });
+        let server = spawn_mock_server(
+            wire_calls.clone(),
+            serde_json::json!({
+                "id": "msg_bad_usage",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "secret output text"}],
+                "stop_reason": "end_turn",
+                "usage": bad_usage
+            }),
+            None, None, None,
+        ).await;
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let mut limits = test_limits();
+        limits.max_turn_microusd = 500_000;
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 },
+            test_options(),
+            serde_json::json!("System"),
+            limits,
+            Arc::new(super::super::pricing::DirectGlobal),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                timeout: std::time::Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        ).await.unwrap();
+        let cancel = CancellationToken::new();
+        let mut state = State::default();
+        state.messages = vec![Message { role: "user".into(), content: serde_json::json!("secret input text") }];
+        let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 3).await;
+        match res {
+            Err(runner::Error::Model(crate::api_bot::http::Error::InvalidResponseDetail(reason))) => {
+                assert!(reason.contains("cache_creation 細項總和"), "reason: {reason}");
+                let explanation = super::super::completion::failure_explanation(&format!("api_invalid_response:{reason}"));
+                assert!(explanation.contains("API 回應的用量欄位無法驗證：cache_creation 細項總和"), "explanation: {explanation}");
+            }
+            other => panic!("expected InvalidResponseDetail, got: {other:?}"),
+        }
+        assert_eq!(wire_calls.load(Ordering::SeqCst), 1);
+
+        let rej_row: (String, String, String, String) = sqlx::query_as(
+            "SELECT reason, stop_reason, usage_json, content_blocks_json FROM api_bot_rejected_responses WHERE turn_id=?"
+        ).bind(&turn).fetch_one(&pool).await.unwrap();
+        assert!(rej_row.0.starts_with("untrusted_usage: cache_creation 細項總和"), "reason: {}", rej_row.0);
+        assert_eq!(rej_row.1, "end_turn");
+        assert!(rej_row.2.contains("ephemeral_1h_input_tokens"));
+        assert_eq!(rej_row.3, "[{\"type\":\"text\"}]");
+        assert!(!rej_row.3.contains("secret"));
+
+        server.shutdown().await;
     }
 
     /// 回固定 HTTP 狀態碼與錯誤 body 的上游（給明確拒絕／未知結果的分流測試）。

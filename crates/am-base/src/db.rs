@@ -449,6 +449,20 @@ CREATE TABLE IF NOT EXISTS api_bot_join_receipts (
   CHECK((state = 'pending' AND processed_at IS NULL) OR (state != 'pending' AND processed_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS api_bot_join_receipts_pending ON api_bot_join_receipts(created_at, session_id, turn_id) WHERE state = 'pending';
+-- 被拒回應記錄（fixture 迴歸庫與事故追蹤）：只存原始 usage 與 content 類型序列，不存任何訊息內容。
+CREATE TABLE IF NOT EXISTS api_bot_rejected_responses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  response_model TEXT NOT NULL,
+  stop_reason TEXT NOT NULL,
+  usage_json TEXT NOT NULL,
+  content_blocks_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_bot_rejected_responses_bot ON api_bot_rejected_responses(bot_id, id);
 
 "#;
 
@@ -649,6 +663,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (93, "7f4b8aaaa990df4d"),
     // claude-api 每回合快取保留（2026-11-14）：`turns.cache_ttl_secs`（ALTER ADD，預設 300）。
     (94, "7ee64d1c638b0801"),
+    // 被拒回應記錄（2026-11-15）：`api_bot_rejected_responses`（CREATE TABLE）。
+    (95, "9823d73c31741f77"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
