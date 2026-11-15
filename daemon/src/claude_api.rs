@@ -454,6 +454,10 @@ const SPEND_KEEP_DAYS: i64 = 90;
 
 /// 每百萬 token 的美元：(輸入, 輸出)。快取寫入＝輸入 ×1.25（5 分鐘），快取讀＝輸入 ×[`cache_read_multiplier`]（官方：多數模型 0.1×，Opus 5.5／Sonnet 5.5 是 0.05×，Fable 5.1／5.2 是 0.025×）。
 /// 價格取自 Anthropic 一方 API 牌價（2026-10）；Haiku 5.5 是 ≤100K 輸入的價。
+/// 對照來源（claude-api skill，2026-11-15 逐項核對）：`shared/model-migration.md`（Opus 5.5 約 L2055、Sonnet 5.5 L2103、Haiku 5.5 L2256、Fable 5.2 L2420、Fable 5.1 L1710）與 `shared/prompt-caching.md` L144。
+/// 每百萬 token（輸入／輸出／5 分鐘寫／1 小時寫／快取讀）：Haiku 5.5 $0.10／$0.50／0.125／0.20／0.01（≤100K）；
+/// Sonnet 5.5 $2／$10／2.50／4／**0.10**（官方：「cache reads, at $0.10, half Claude Sonnet 5's rate」，0.05×；Sonnet 5 才是 $0.20）；
+/// Opus 5.5 $4／$20／5／8／0.20；Fable 5.2 $8／$40／10／16／0.20；Fable 5.1 $10／$50／12.5／20／0.25。
 /// 不認得的模型回 None，不猜一個數字。
 pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
     let m = model.trim();
