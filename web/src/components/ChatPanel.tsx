@@ -1096,10 +1096,10 @@ function Composer({
         />
         {botKind === 'claude-api' ? (
           // claude-api：每回合送出時選快取保留（5 分鐘＝預設、寫入便宜；1 小時＝寫入貴 60%，適合下一次提問隔 5–60 分鐘）。
+          // 桌面上下排（維持寬度、高度合計不超過輸入框太多）；手機左右並排（換行縮小寬度、不擠壓輸入框）。
           <div className="send-btns" role="group" aria-label={t('送出')}>
             {(['5m', '1h'] as const).map((ttl) => {
               const idle = !sending && !files.uploading && !files.failed
-              const label = idle ? (phone ? (ttl === '5m' ? t('送出（5 分）') : t('送出（1 小時）')) : ttl === '5m' ? t('送出（快取 5 分）') : t('送出（快取 1 小時）')) : sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })
               return (
                 <button
                   key={ttl}
@@ -1111,7 +1111,18 @@ function Composer({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => submit(ttl)}
                 >
-                  {label}
+                  {idle ? (
+                    phone ? (
+                      <span className="send-btn-label">
+                        <span className="send-btn-action">{t('送出')}</span>
+                        <span className="send-btn-ttl">{ttl === '5m' ? t('(5 分)') : t('(1 小時)')}</span>
+                      </span>
+                    ) : (
+                      ttl === '5m' ? t('送出（快取 5 分）') : t('送出（快取 1 小時）')
+                    )
+                  ) : (
+                    sendButtonLabel(state, { phone, sending, uploading: files.uploading, failed: files.failed })
+                  )}
                 </button>
               )
             })}

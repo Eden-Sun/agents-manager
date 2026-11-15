@@ -1860,11 +1860,21 @@ button.pane-toggle:hover:not(:disabled) {
 }
 
 /* claude-api：兩顆送出鍵（快取 5 分／1 小時）；1 小時那顆做成次要樣式，Enter 與主要鍵＝5 分鐘。 */
+/* 桌面（一般寬度）：兩顆上下排，維持寬度，高度合計與輸入框相近。 */
 .send-btns {
   display: flex;
+  flex-direction: column;
   flex: none;
-  gap: 6px;
-  align-items: stretch;
+  gap: 4px;
+  align-self: flex-end;
+}
+
+.send-btns .send-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+  text-align: center;
 }
 
 .send-btn.long {
@@ -3773,6 +3783,40 @@ button.model-tag:hover:not(:disabled) {
   .bot-composer textarea {
     min-width: 0;
     padding: 8px;
+  }
+
+  /* claude-api：手機維持左右並排，縮小寬度，文字換行（例如「送出」換行「(5 分)」），不擠壓輸入框。 */
+  .send-btns {
+    flex-direction: row;
+    align-self: flex-end;
+    gap: 4px;
+  }
+
+  .send-btns .send-btn {
+    padding: 3px 6px;
+    font-size: 11px;
+    line-height: 1.2;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .send-btns .send-btn-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    line-height: 1.15;
+  }
+
+  .send-btns .send-btn-action {
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .send-btns .send-btn-ttl {
+    font-size: 10px;
+    font-weight: 500;
+    opacity: 0.9;
   }
 }
 

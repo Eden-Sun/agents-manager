@@ -1,6 +1,7 @@
 /** claude-api 的快取時間：狀態列剩餘、冷提示（含重寫量與估價）、設定面板的 5 分鐘／1 小時。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
@@ -144,4 +145,84 @@ test('其他 kind 只有一顆送出鍵、不帶 cache_ttl', async () => {
   await click(btn)
   await settle(50)
   assert.ok(!('cache_ttl' in (promptBody(requests)[0] ?? {})))
+})
+
+test('手機版（393×852 / PHONE_QUERY）：claude-api 兩顆按鈕左右並排、DOM 結構分拆「送出」與「(分/時)」換行縮小寬度，各自帶 cache_ttl', async () => {
+  const origMatch = window.matchMedia
+  window.matchMedia = ((q: string) => ({
+    matches: q.includes('max-width: 640px'),
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  })) as unknown as typeof window.matchMedia
+
+  try {
+    seedChat('claude-api')
+    const requests = fakeApi((req) => (req.method === 'POST' && /prompt$/.test(req.path) ? { turn_id: 't1', message_id: 'm1', delivery: 'ok' } : undefined))
+    await mount(<ChatPanel onOpenSidebar={() => {}} />)
+
+    const sendBtnsGroup = document.querySelector<HTMLElement>('.send-btns')!
+    assert.ok(sendBtnsGroup)
+    assert.equal(sendBtnsGroup.getAttribute('role'), 'group')
+
+    const btns = [...document.querySelectorAll<HTMLButtonElement>('.send-btns .send-btn')]
+    assert.equal(btns.length, 2)
+
+    // DOM 結構與 class 檢查：每顆包含 .send-btn-label，內有 .send-btn-action ("送出") 與 .send-btn-ttl ("(5 分)" / "(1 小時)")
+    const labelWraps = [...document.querySelectorAll<HTMLElement>('.send-btns .send-btn-label')]
+    assert.equal(labelWraps.length, 2)
+
+    const actions = [...document.querySelectorAll<HTMLElement>('.send-btns .send-btn-action')]
+    assert.deepEqual(actions.map((a) => a.textContent), ['送出', '送出'])
+
+    const ttls = [...document.querySelectorAll<HTMLElement>('.send-btns .send-btn-ttl')]
+    assert.deepEqual(ttls.map((t) => t.textContent), ['(5 分)', '(1 小時)'])
+
+    assert.deepEqual(btns.map((b) => b.textContent), ['送出(5 分)', '送出(1 小時)'])
+    assert.equal(btns[0]!.getAttribute('data-ttl'), '5m')
+    assert.equal(btns[1]!.getAttribute('data-ttl'), '1h')
+    assert.ok(btns[1]!.classList.contains('long'))
+
+    // 點擊手機版 1 小時按鈕
+    await click(btns[1]!)
+    await settle(50)
+    assert.equal(promptBody(requests)[0]?.cache_ttl, '1h')
+
+    // 點擊手機版 5 分鐘按鈕
+    useStore.setState({ drafts: { 'bot:c1': 'mobile-again' }, turns: { c1: {} } } as never)
+    await settle(20)
+    await click(btns[0]!)
+    await settle(50)
+    assert.equal(promptBody(requests)[1]?.cache_ttl, '5m')
+  } finally {
+    window.matchMedia = origMatch
+  }
+})
+
+test('styles.css：桌面 .send-btns 上下排（column），手機 ≤640px 左右並排（row）且文字換行', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
+  // 桌面規則：上下排
+  const desktopIdx = css.indexOf('.send-btns {')
+  assert.ok(desktopIdx > 0, '需有桌面 .send-btns 規則')
+  const desktopBlock = css.slice(desktopIdx, css.indexOf('}', desktopIdx))
+  assert.match(desktopBlock, /flex-direction:\s*column/)
+  assert.match(desktopBlock, /align-self:\s*flex-end/)
+
+  // 手機規則（≤640px）：左右並排、換行、字級與結構
+  const mobileStart = css.indexOf('claude-api：手機維持左右並排')
+  assert.ok(mobileStart > 0)
+  const mobileIdx = css.indexOf('.send-btns {', mobileStart)
+  assert.ok(mobileIdx > 0, '需有手機 .send-btns 規則')
+  const mobileBlock = css.slice(mobileIdx, css.indexOf('}', mobileIdx))
+  assert.match(mobileBlock, /flex-direction:\s*row/)
+
+  const mobileBtnIdx = css.indexOf('.send-btns .send-btn {', mobileStart)
+  assert.ok(mobileBtnIdx > 0)
+  const mobileBtnBlock = css.slice(mobileBtnIdx, css.indexOf('}', mobileBtnIdx))
+  assert.match(mobileBtnBlock, /white-space:\s*normal/)
+
+  const mobileLabelIdx = css.indexOf('.send-btns .send-btn-label {', mobileStart)
+  assert.ok(mobileLabelIdx > 0)
+  const mobileLabelBlock = css.slice(mobileLabelIdx, css.indexOf('}', mobileLabelIdx))
+  assert.match(mobileLabelBlock, /flex-direction:\s*column/)
 })
