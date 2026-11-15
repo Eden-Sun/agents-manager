@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CACHE_RED_TICK_MS, CACHE_TICK_MS, cacheLevel, cacheState, chipCache } from './cacheClock.ts'
+import { CACHE_RED_TICK_MS, CACHE_TICK_MS, apiChipCache, cacheLevel, cacheState, chipCache } from './cacheClock.ts'
 
 const T0 = Date.parse('2026-10-04T12:00:00.000Z')
 const at = (minAgo: number) => new Date(T0 - minAgo * 60_000).toISOString()
@@ -133,4 +133,58 @@ test('綠、黃仍是剩餘／TTL（不因紅色的改法而變）', () => {
 test('紅色重算間隔 5 秒、其他 15 秒', () => {
   assert.equal(CACHE_RED_TICK_MS, 5_000)
   assert.equal(CACHE_TICK_MS, 15_000)
+})
+
+test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比例與等級、過期顯示冷', () => {
+  assert.equal(apiChipCache(null, T0), null)
+  assert.equal(apiChipCache(undefined, T0), null)
+  assert.equal(apiChipCache({ working: false, last_request_at: null, ttl_secs: null, expires_at: null }, T0), null)
+
+  // 回合進行中＝滿條、fresh
+  const working = apiChipCache({ working: true, ttl_secs: 300, last_request_at: at(5) }, T0)
+  assert.ok(working)
+  assert.equal(working.level, 'fresh')
+  assert.equal(working.frac, 1)
+  assert.equal(working.remainingSecs, 300)
+  assert.match(working.title, /回合進行中，快取是熱的/)
+
+  // 1 小時 TTL：剩 45 分（綠，fresh，75%）
+  const fresh1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 45 * 60_000).toISOString(), last_request_at: at(15) }, T0)
+  assert.ok(fresh1h)
+  assert.equal(fresh1h.level, 'fresh')
+  assert.equal(fresh1h.frac, 0.75)
+  assert.equal(fresh1h.remainingSecs, 2700)
+  assert.match(fresh1h.title, /快取約 45 分後到期/)
+
+  // 1 小時 TTL：剩 10 分（黃，warn，10/60）
+  const warn1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 10 * 60_000).toISOString(), last_request_at: at(50) }, T0)
+  assert.ok(warn1h)
+  assert.equal(warn1h.level, 'warn')
+  assert.equal(warn1h.frac, 600 / 3600)
+  assert.equal(warn1h.remainingSecs, 600)
+  assert.match(warn1h.title, /快取約 10 分後到期/)
+
+  // 1 小時 TTL：剩 3 分（紅，low，以 5 分為滿刻度＝3/5）
+  const low1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 3 * 60_000).toISOString(), last_request_at: at(57) }, T0)
+  assert.ok(low1h)
+  assert.equal(low1h.level, 'low')
+  assert.equal(low1h.frac, 180 / 300)
+  assert.equal(low1h.remainingSecs, 180)
+  assert.match(low1h.title, /快取約 3 分後到期/)
+
+  // 5 分鐘 TTL：剩 2 分（紅，low，2/5）
+  const low5m = apiChipCache({ working: false, ttl_secs: 300, expires_at: new Date(T0 + 2 * 60_000).toISOString(), last_request_at: at(3) }, T0)
+  assert.ok(low5m)
+  assert.equal(low5m.level, 'low')
+  assert.equal(low5m.frac, 120 / 300)
+  assert.equal(low5m.remainingSecs, 120)
+  assert.match(low5m.title, /快取約 2 分後到期/)
+
+  // 到期：已涼（冷），frac＝0，remainingSecs＝0
+  const cold = apiChipCache({ working: false, ttl_secs: 300, expires_at: new Date(T0 - 10_000).toISOString(), last_request_at: at(6) }, T0)
+  assert.ok(cold)
+  assert.equal(cold.level, 'cold')
+  assert.equal(cold.frac, 0)
+  assert.equal(cold.remainingSecs, 0)
+  assert.match(cold.title, /快取已涼/)
 })

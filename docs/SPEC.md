@@ -2843,6 +2843,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 - **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算（有主力在紅色時每 5 秒，紅色那段以 5 分為刻度，見 UI-DECISIONS）。整顆晶片一層淡的等級色調，剩餘那段（由左往右）再疊深一層，
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
+  **claude-api 主力膠囊**（`apiChipCache`）：倒數樣式與 CLI bot 完全一致（綠／黃／紅三級與已涼回到一般底色，回合中滿條）；資料來源為 `GET /api/bots/{id}/api-usage` 的 `cache`（`last_request_at`、`ttl_secs`、`expires_at`、`working`），以 `expires_at` 與 `ttl_secs` 計算剩餘比例。膠囊列多顆 api bot 沿用 `useApiTurnCosts` 共用訂閱（idle 15 秒、in-flight 3 秒輪詢，同 bot 複數訂閱不重複打 API），倒數本身每 15s／5s 只做純前端計算、不每秒發請求。
 - **Codex 快取提示（使用者 2026-10-24）**：狀態列固定顯示「codex 必快取」，不再以舊 rollout TTL 顯示倒數、已冷或輸入框重寫警示；沒有讀數與工作中均一致。rollout 的 context token 資料仍使用。以下熱冷顯示規則僅適用 Claude。
   Codex 沒有 context 讀數時仍提供手動「壓縮」入口；按鈕只在正在執行且閒置時可用，後端維持既有送出守門。
 - **快取狀態的顯示（`prompt_cache.rs`、`StatusCache`、`ComposerCostHint`；使用者 2026-10-04）**：送出之前就讓人看到代價——狀態列常駐「快取 熱（剩 N 分）／已冷」，輸入框只在冷時警示（UI-DECISIONS）。只做 claude 與 codex，grok 完全不顯示。

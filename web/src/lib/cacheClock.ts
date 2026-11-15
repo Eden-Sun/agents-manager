@@ -104,3 +104,48 @@ export function chipCache(
   if (run?.cache_compacted === true && !working) return null
   return cacheState(run?.last_api_at, run?.cache_ttl_secs, nowMs, working, run?.cache_kept_warm_at)
 }
+
+export interface ApiChipCacheInfo {
+  last_request_at?: string | null
+  ttl_secs?: number | null
+  expires_at?: string | null
+  working?: boolean
+}
+
+/**
+ * claude-api 主力膠囊的快取倒數（SPEC §6.5j，樣式與 CLI bot 完全一致）：
+ * 資料來自 GET /api/bots/{id}/api-usage 的 cache{last_request_at, ttl_secs, expires_at, working}。
+ * 回合進行中＝熱（滿條）；過期＝已涼（冷）；其餘依 expires_at 與 ttl_secs 算比例與等級。
+ */
+export function apiChipCache(
+  cache: ApiChipCacheInfo | null | undefined,
+  nowMs: number,
+  working = false,
+): CacheState | null {
+  if (!cache) return null
+  const isWorking = working || cache.working === true
+  const ttlSecs = cache.ttl_secs && cache.ttl_secs > 0 ? cache.ttl_secs : 300
+  const at = cache.last_request_at ? Date.parse(cache.last_request_at) : NaN
+  if (isWorking) {
+    const when = Number.isFinite(at) ? t('（上次活動 {time}）', { time: clock(new Date(at), nowMs) }) : ''
+    return { level: 'fresh', remainingSecs: ttlSecs, frac: 1, title: t('回合進行中，快取是熱的{when}', { when }) }
+  }
+  if (!cache.expires_at || !cache.ttl_secs || cache.ttl_secs <= 0) return null
+  const exp = Date.parse(cache.expires_at)
+  if (!Number.isFinite(exp)) return null
+  const remainingSecs = Math.max(0, Math.min(cache.ttl_secs, Math.round((exp - nowMs) / 1000)))
+  const level = cacheLevel(remainingSecs)
+  const lastTime = Number.isFinite(at) ? clock(new Date(at), nowMs) : clock(new Date(exp - cache.ttl_secs * 1000), nowMs)
+  const last = t('上次活動 {time}', { time: lastTime })
+  if (level === 'cold') {
+    return {
+      level: 'cold',
+      remainingSecs: 0,
+      frac: 0,
+      title: t('快取已涼（{last}）', { last }),
+    }
+  }
+  const frac = remainingSecs <= LOW_SECS ? Math.min(1, remainingSecs / LOW_SECS) : remainingSecs / cache.ttl_secs
+  const title = t('快取約 {n} 分後到期（{last}）', { n: Math.max(1, Math.ceil(remainingSecs / 60)), last })
+  return { level, remainingSecs, frac, title }
+}

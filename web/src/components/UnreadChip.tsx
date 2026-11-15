@@ -33,7 +33,8 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { StatusLamp } from './StatusLamp'
 import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
-import { chipCache, NO_WARM_TEXT, type CacheState } from '../lib/cacheClock'
+import { apiChipCache, chipCache, NO_WARM_TEXT, type CacheState } from '../lib/cacheClock'
+import { getApiBotCache, refreshApiBotUsage, useApiBotCacheSub } from '../hooks/useApiTurnCosts'
 import { useCacheTick } from '../hooks/useCacheTick'
 import { ChipLegend } from './ChipLegend'
 import './unreadChip.css'
@@ -238,11 +239,35 @@ export function UnreadChip() {
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
   const narrow = useMediaQuery(NARROW_QUERY)
+  const pinnedApiBotIds = useMemo(
+    () => bots.filter((b) => b.primary && b.kind === 'claude-api').map((b) => b.id),
+    [bots],
+  )
+  const apiCacheVer = useApiBotCacheSub(pinnedApiBotIds)
+
+  const prevLamps = useRef<Record<string, Lamp>>({})
+  useEffect(() => {
+    for (const id of pinnedApiBotIds) {
+      const cur = lamps[id]
+      const prev = prevLamps.current[id]
+      if (prev !== undefined && prev !== cur) {
+        refreshApiBotUsage(id)
+      }
+    }
+    prevLamps.current = { ...lamps }
+  }, [lamps, pinnedApiBotIds])
+
   // 快取倒數每 15 秒重算；沒有主力就不跑計時器。有主力在紅色（< 5 分）時改每 5 秒（使用者 2026-10-14）：
   // 紅色的重算頻率看上一拍算出來的結果，下一拍就換頻率，所以從黃轉紅最多慢一拍（15 秒）。
   const [primaryRed, setPrimaryRed] = useState(false)
   const now = useCacheTick(bots.some((b) => b.primary), primaryRed)
-  const redNow = bots.some((b) => b.primary && chipCache(runs[b.id], now)?.level === 'low')
+  const redNow = bots.some((b) => {
+    if (!b.primary) return false
+    const c = b.kind === 'claude-api'
+      ? apiChipCache(getApiBotCache(b.id), now, lamps[b.id] === 'working')
+      : chipCache(runs[b.id], now)
+    return c?.level === 'low'
+  })
   if (redNow !== primaryRed) setPrimaryRed(redNow)
 
   const items = useMemo(() => {
@@ -290,7 +315,11 @@ export function UnreadChip() {
         working,
         title: botTitle(b.name, pinned, n, needsReply, kids, current, t, atCapacity) + (nKids > 0 ? t('（{kids}）', { kids: kidsText(nKids) }) : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
-        cache: pinned ? chipCache(runs[b.id], now, working) : null,
+        cache: pinned
+          ? b.kind === 'claude-api'
+            ? apiChipCache(getApiBotCache(b.id), now, working)
+            : chipCache(runs[b.id], now, working)
+          : null,
         codexPrimary: pinned && b.kind === 'codex',
         codexUsage,
         codexUsageTitle,
@@ -299,7 +328,7 @@ export function UnreadChip() {
       })
     }
     return out
-  }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now, t])
+  }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now, t, apiCacheVer])
 
   // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
