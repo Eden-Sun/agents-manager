@@ -849,4 +849,37 @@ mod tests {
         let total: f64 = rows.iter().flat_map(|b| &b.results).map(|r| cents_str_to_usd(r.amount.as_deref().unwrap()).unwrap()).sum();
         assert!((total - (10.30235030 + 0.015 + 3.2566693)).abs() < 1e-9);
     }
+
+    /// 2026-11-15 pt-hub：錨點是 11/02 的 $98.14、之後官方小時桶＋本機尾端加總超過錨點（−$2.77），被懷疑重複計算。
+    /// 逐段拆開驗證：官方桶（跨兩頁）每個小時只算一次、本機帳只算官方涵蓋之後，總和＝各段相加，沒有重疊；
+    /// 沒有資料的小時（空桶沒有列）算 0、不會回頭用本機帳補。
+    #[test]
+    fn a_long_old_anchor_is_the_sum_of_disjoint_segments_with_no_double_counting() {
+        let anchor = DateTime::parse_from_rfc3339("2026-11-02T05:52:10Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-11-15T12:16:00Z").unwrap().with_timezone(&Utc);
+        let refreshed = DateTime::parse_from_rfc3339("2026-11-15T11:36:21Z").unwrap().with_timezone(&Utc);
+        // 11/02 06:00 起每小時 $1 到 11/15 09:00（空桶不列的小時：10:00 沒有列）；分兩批餵進來模擬分頁。
+        let mut buckets = Vec::new();
+        let mut t = DateTime::parse_from_rfc3339("2026-11-02T06:00:00Z").unwrap().with_timezone(&Utc);
+        let last = DateTime::parse_from_rfc3339("2026-11-15T09:00:00Z").unwrap().with_timezone(&Utc);
+        let mut hours = 0;
+        while t <= last {
+            let next = t + chrono::Duration::hours(1);
+            buckets.push(bucket(&am_base::db::iso_at(t), &am_base::db::iso_at(next), &["100"]));
+            t = next;
+            hours += 1;
+        }
+        let local = vec![
+            AttemptSpent { created_at: "2026-11-02T05:55:00Z".into(), microusd: 100_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-15T09:30:00Z".into(), microusd: 6_880_000, uncertain: false }, // 官方（到 11:00）涵蓋的小時：不重複算
+            AttemptSpent { created_at: "2026-11-15T11:10:00Z".into(), microusd: 19_740_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-15T12:05:00Z".into(), microusd: 9_150_000, uncertain: false },
+        ];
+        let r = compute_balance_hourly(98.14, anchor, &buckets, Some(refreshed), &local, now).unwrap();
+        assert!((r.breakdown.report_usd - hours as f64).abs() < 1e-9, "官方：每個小時桶只算一次");
+        assert!((r.breakdown.t_day_local_usd - 0.1).abs() < 1e-9, "錨點那一小時本機");
+        assert!((r.breakdown.recent_local_usd - (19.74 + 9.15)).abs() < 1e-9, "本機只算官方涵蓋（11:00）之後");
+        assert!((r.spent_usd - (hours as f64 + 0.1 + 28.89)).abs() < 1e-9, "各段相加、沒有重疊");
+        assert_eq!(r.report_through.as_deref(), Some("2026-11-15T11:00:00.000Z"));
+    }
 }

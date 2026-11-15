@@ -41,7 +41,7 @@ export function balanceTooltipLines(balance: ClaudeApiBalance | null | undefined
     if (balance.uncertain_usd !== undefined && balance.uncertain_usd > 0) {
       lines.push(t('另有結果不明的請求最多 ${unk}（以預留上限計，實際多半低很多），最壞情況餘額 ${floor}', { unk: balance.uncertain_usd.toFixed(2), floor: (balance.remaining_floor_usd ?? 0).toFixed(2) }))
     }
-    lines.push(t('這是估算：官方數字有數小時延遲、金額是折扣後但**扣 credits 之前**，儲值與贈送額度查不到；跟 Console 對不上時以 Console 為準，並點這裡用 Console 目前餘額校正'))
+    lines.push(t('這是估算：官方數字有數小時延遲、金額是折扣後但「扣 credits 之前」，儲值與贈送額度查不到；跟 Console 對不上時以 Console 為準，並點這裡用 Console 目前餘額校正'))
     if (balance.report_through) lines.push(balance.source === 'analytics' ? t('官方數字（小時粒度）涵蓋至：{dt}，之後用本機帳', { dt: balance.report_through }) : t('官方報表涵蓋至：{dt}', { dt: balance.report_through }))
     if (balance.local_since) lines.push(t('本機帳計算自：{dt}', { dt: balance.local_since }))
     if (balance.error) lines.push(t('警告：{err}', { err: balance.error }))

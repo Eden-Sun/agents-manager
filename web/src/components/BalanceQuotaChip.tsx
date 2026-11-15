@@ -34,18 +34,24 @@ export function BalanceQuotaChip() {
   if (view.usd === undefined) return null
   const exact = view.source === 'console'
   const usd = view.usd
-  const text = phone ? `$${usd.toFixed(1)}` : `${exact ? '' : '≈'}$${usd.toFixed(2)}`
+  // 估算成負數＝錨點已經過舊（期間有儲值或贈送額度：官方查得到花費、查不到儲值）：顯示「需校正」，不要把一個必錯的負數當餘額。
+  const stale = !exact && usd < 0
+  const text = stale ? t('需校正') : phone ? `$${usd.toFixed(1)}` : `${exact ? '' : '≈'}$${usd.toFixed(2)}`
   const lines = balanceTooltipLines(balance, view, t)
   const stamp = exact ? balance?.console?.fetched_at : balance?.as_of
   const title = [
-    exact ? t('Anthropic API 餘額（Console 實際值）') : t('Anthropic API 餘額（估算）'),
+    stale
+      ? t('餘額估算成負數：錨點已過舊（之後有儲值或贈送額度，官方查不到）。點一下用 Console 目前餘額校正')
+      : exact
+        ? t('Anthropic API 餘額（Console 實際值）')
+        : t('Anthropic API 餘額（估算）'),
     ...lines,
     t('更新於 {time}', { time: hhmm(stamp) }),
     t('點一下：用 Console 目前餘額校正，或到 claude-api bot'),
   ]
     .filter(Boolean)
     .join('\n')
-  const warn = view.loggedOut || view.expiringSoon || (balance?.uncertain_usd ?? 0) > 0
+  const warn = stale || view.loggedOut || view.expiringSoon || (balance?.uncertain_usd ?? 0) > 0
   const cls = `quota-balance${exact ? ' exact' : ' estimate'}${warn ? ' warn' : ''}`
   const body = (
     <>
@@ -76,6 +82,11 @@ export function BalanceQuotaChip() {
       </button>
       <Modal open={open} title={t('Anthropic API 餘額')} width={420} onClose={() => setOpen(false)}>
         <div className="quota-balance-dialog" data-k="quota-balance-dialog">
+          {stale ? (
+            <p className="hint warn" data-k="stale-note">
+              {t('估算出來是負的（{usd}）：從錨點以來官方記到的花費已經超過錨點金額，表示期間有儲值或贈送額度。請用 Console 目前餘額校正。', { usd: `$${usd.toFixed(2)}` })}
+            </p>
+          ) : null}
           {lines.map((l) => (
             <p key={l} className="hint">{l}</p>
           ))}

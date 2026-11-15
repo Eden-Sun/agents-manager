@@ -170,3 +170,23 @@ test('樣式：膠囊 CSS 不用 absolute／fixed 定位，也不是會被壓縮
   assert.match(css, /\.quota-balance\s*\{[^}]*flex:\s*none/)
   assert.match(css, /\.quota-balance\s*\{[^}]*flex-direction:\s*column/, '桌機兩行堆疊')
 })
+
+/**
+ * 2026-11-15：錨點還是 11/02 的 $98.14，官方記到的花費已超過它（$71.4 官方＋$28.9 本機）→ 估算 −$2.77。
+ * 逐段拆過（官方小時桶總和、本機帳只算官方涵蓋之後）沒有重複計算：負數是因為期間有儲值，錨點過舊。膠囊不顯示負數，改提示需校正。
+ */
+test('估算成負數：膠囊顯示「需校正」而不是負的金額，視窗說明原因；tooltip 沒有 markdown 星號', async () => {
+  useStore.setState({ bots: [] } as never)
+  await withBalance({ ...estimate, remaining_usd: -2.12, remaining_floor_usd: -2.77, spent_usd: 100.2575 }, async () => {
+    await mount(<BalanceQuotaChip />)
+    await settle()
+    assert.equal(chip()!.textContent, 'API需校正')
+    assert.ok(chip()!.classList.contains('warn'))
+    const tip = chip()!.getAttribute('title') ?? ''
+    assert.match(tip, /錨點已過舊/)
+    assert.doesNotMatch(tip, /-\$?2\.12|\*\*/)
+    await click(chip()!)
+    assert.match(document.querySelector('[data-k="stale-note"]')?.textContent ?? '', /估算出來是負的（\$-2\.12）.*校正/)
+    assert.doesNotMatch(document.querySelector('[data-k="quota-balance-dialog"]')?.textContent ?? '', /\*\*/, '視窗文字沒有未渲染的 markdown')
+  })
+})
