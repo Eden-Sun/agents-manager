@@ -3,8 +3,18 @@ import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { useApiTurnCosts } from '../hooks/useApiTurnCosts'
 
-/** 每則 assistant 回覆時間旁的單價。 */
-export function ApiTurnCostTag({ botId, turnId }: { botId: string; turnId: string | null }) {
+/** 每則 assistant 回覆時間旁的單價。可展開看時間軸與拆分。 */
+export function ApiTurnCostTag({
+  botId,
+  turnId,
+  expanded,
+  onToggle,
+}: {
+  botId: string
+  turnId: string | null
+  expanded?: boolean
+  onToggle?: () => void
+}) {
   const t = useT()
   const isApi = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude-api')
   const turns = useApiTurnCosts(isApi ? botId : undefined)
@@ -13,6 +23,21 @@ export function ApiTurnCostTag({ botId, turnId }: { botId: string; turnId: strin
   const tip = t('{n} 次請求 · 輸入 {i} · 輸出 {o} · 快取讀 {r} · 快取寫 {w}', {
     n: turn.requests, i: turn.input_tokens, o: turn.output_tokens, r: turn.cache_read_tokens, w: turn.cache_write_tokens,
   })
+  if (onToggle) {
+    return (
+      <button
+        type="button"
+        className={`msg-cost mono api-turn-cost-btn${expanded ? ' expanded' : ''}`}
+        onClick={onToggle}
+        title={t('{tip}（點擊展開時間軸）', { tip })}
+        aria-expanded={expanded}
+        aria-label={t('花費 {cost}，展開查看時間軸', { cost: `$${turn.cost_usd.toFixed(3)}` })}
+      >
+        <span>${turn.cost_usd.toFixed(3)}</span>
+        <span className="api-cost-arrow" aria-hidden="true">{expanded ? ' ▾' : ' ▸'}</span>
+      </button>
+    )
+  }
   return <span className="msg-cost mono" title={tip}>${turn.cost_usd.toFixed(3)}</span>
 }
 

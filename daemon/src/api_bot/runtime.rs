@@ -667,7 +667,12 @@ impl ApiBotRuntime {
         let (joined_tx, joined_rx) = watch::channel(JoinState::Pending);
         let identity_tag = Arc::new(());
         let adapter = Arc::clone(&adapter);
-        let tools = SharedTools(Arc::clone(&dependencies.tools));
+        let tools = TimedSharedTools {
+            inner: Arc::clone(&dependencies.tools),
+            pool: app.db.clone(),
+            bot_id: key.bot_id.clone(),
+            turn_id: key.turn_id.clone(),
+        };
         let max_calls = limits.max_api_calls_per_turn as usize;
         let fail_inner = self.inner.clone();
         let fail_key = full.clone();
@@ -1737,6 +1742,78 @@ impl super::runner::Tools for SharedTools {
         cancel: &'a CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<String, String>> {
         self.0.execute(call, cancel)
+    }
+}
+
+struct TimedSharedTools {
+    inner: Arc<dyn super::runner::Tools>,
+    pool: sqlx::SqlitePool,
+    bot_id: String,
+    turn_id: String,
+}
+
+impl super::runner::Tools for TimedSharedTools {
+    fn execute<'a>(
+        &'a self,
+        call: &'a super::protocol::ToolCall,
+        cancel: &'a CancellationToken,
+    ) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let start = std::time::Instant::now();
+            let res = self.inner.execute(call, cancel).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let is_error = res.is_err();
+
+            // 異步記錄工具耗時與錯誤至該 attempt 的 usage_json["tools"]
+            let pool = self.pool.clone();
+            let bot_id = self.bot_id.clone();
+            let turn_id = self.turn_id.clone();
+            let tool_name = call.name.clone();
+
+            tokio::spawn(async move {
+                let latest_attempt: Option<(String, Option<String>)> = sqlx::query_as(
+                    "SELECT id, usage_json FROM api_bot_attempts \
+                     WHERE bot_id = ? AND turn_id = ? AND state = 'recorded' \
+                     ORDER BY ordinal DESC, created_at DESC LIMIT 1",
+                )
+                .bind(&bot_id)
+                .bind(&turn_id)
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten();
+
+                if let Some((att_id, usage_raw)) = latest_attempt {
+                    if let Some(raw) = usage_raw {
+                        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(obj) = val.as_object_mut() {
+                                let tools_arr = obj
+                                    .entry("tools")
+                                    .or_insert_with(|| serde_json::json!([]));
+                                if let Some(arr) = tools_arr.as_array_mut() {
+                                    arr.push(serde_json::json!({
+                                        "name": tool_name,
+                                        "duration_ms": duration_ms,
+                                        "is_error": is_error,
+                                    }));
+                                    if let Ok(new_usage) = serde_json::to_string(&val) {
+                                        let _ = sqlx::query(
+                                            "UPDATE api_bot_attempts SET usage_json = ? WHERE id = ?",
+                                        )
+                                        .bind(new_usage)
+                                        .bind(att_id)
+                                        .execute(&pool)
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            res
+        })
     }
 }
 

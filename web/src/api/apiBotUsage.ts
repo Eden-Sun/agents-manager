@@ -90,3 +90,81 @@ export function formatTokensK(n: number): string {
 export function apiBotSpendUsd(u: ApiBotUsage): number {
   return (u.cost_microusd.recorded + u.cost_microusd.reserved + u.cost_microusd.unknown) / 1e6
 }
+
+export interface TimelineRequestItem {
+  type: 'request'
+  ordinal: number
+  timestamp: string
+  iteration_type: string
+  input_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  output_tokens: number
+  cost_usd: number
+  stop_reason: string | null
+  duration_ms: number | null
+  speed: string | null
+}
+
+export interface TimelineToolItem {
+  type: 'tool'
+  name: string
+  duration_ms: number | null
+  is_error: boolean
+}
+
+export interface TimelineTurnEndItem {
+  type: 'turn_end'
+  timestamp: string | null
+  status: string
+  halt_reason: string
+}
+
+export type TimelineItem = TimelineRequestItem | TimelineToolItem | TimelineTurnEndItem
+
+export interface CategoryBreakdown {
+  tokens: number
+  cost_usd: number
+  percentage: number
+}
+
+export interface ApiTurnBreakdown {
+  input: CategoryBreakdown
+  cache_read: CategoryBreakdown
+  cache_write: CategoryBreakdown
+  output: CategoryBreakdown
+  compaction: CategoryBreakdown
+  server_tool: CategoryBreakdown
+}
+
+export interface ApiTurnLargestItem {
+  category: string
+  label: string
+  cost_usd: number
+  percentage: number
+}
+
+export interface ApiTurnSummary {
+  total_cost_usd: number
+  breakdown: ApiTurnBreakdown
+  largest_item: ApiTurnLargestItem
+  suggestions: string[]
+}
+
+export interface ApiTurnTimelineData {
+  bot_id: string
+  turn_id: string
+  status: string
+  halt_reason: string
+  total_cost_usd: number
+  duration_ms: number | null
+  created_at: string
+  completed_at: string | null
+  summary: ApiTurnSummary
+  timeline: TimelineItem[]
+}
+
+export async function fetchApiTurnTimeline(botId: string, turnId: string): Promise<ApiTurnTimelineData> {
+  const res = await rawTransport.request('GET', `/bots/${encodeURIComponent(botId)}/turns/${encodeURIComponent(turnId)}/api-timeline`)
+  return res as ApiTurnTimelineData
+}

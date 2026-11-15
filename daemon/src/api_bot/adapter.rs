@@ -114,6 +114,7 @@ struct SettledResponse {
     response: Response,
     estimated_microusd: i64,
     actual_speed: Option<&'static str>,
+    duration_ms: u64,
 }
 
 struct ActiveAttempt {
@@ -446,6 +447,7 @@ impl Model for ApiBotAdapter {
                 max_response_bytes: self.http_cfg.max_response_bytes,
             };
 
+            let req_start = std::time::Instant::now();
             let res = match &self.progress_sink {
                 Some(sink) => {
                     let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
@@ -453,6 +455,7 @@ impl Model for ApiBotAdapter {
                 }
                 None => http::complete(&req, cancel).await,
             };
+            let duration_ms = req_start.elapsed().as_millis() as u64;
             drop(key);
 
             let mut cursor = self.cursor.lock().await;
@@ -480,6 +483,7 @@ impl Model for ApiBotAdapter {
                             response: resp.clone(),
                             estimated_microusd: uq.estimated_microusd,
                             actual_speed: uq.actual_speed,
+                            duration_ms,
                         });
                         Ok(resp)
                     } else {
@@ -723,7 +727,7 @@ impl Journal for ApiBotAdapter {
                     }
                 }
                 (true, false) => {
-                    let (active_id, resp, estimated_microusd, actual_speed) = {
+                    let (active_id, resp, estimated_microusd, actual_speed, duration_ms) = {
                         let active = cursor.active_attempt.as_ref().ok_or(())?;
                         let settled = cursor.settled_response.as_ref().ok_or(())?;
 
@@ -778,13 +782,20 @@ impl Journal for ApiBotAdapter {
                             settled.response.clone(),
                             settled.estimated_microusd,
                             settled.actual_speed,
+                            settled.duration_ms,
                         )
                     };
+
+                    let mut usage_with_meta = resp.usage.clone();
+                    if let Some(obj) = usage_with_meta.as_object_mut() {
+                        obj.insert("duration_ms".into(), serde_json::json!(duration_ms));
+                        obj.insert("stop_reason".into(), serde_json::json!(resp.stop_reason));
+                    }
 
                     let receipt = db_api::Receipt {
                         state: "recorded",
                         actual_speed,
-                        usage: Some(&resp.usage),
+                        usage: Some(&usage_with_meta),
                         estimated_microusd: Some(estimated_microusd),
                     };
 

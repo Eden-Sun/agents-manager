@@ -11,6 +11,7 @@ pub(crate) mod quote;
 mod pricing;
 pub(crate) mod runner;
 pub(crate) mod sse;
+pub(crate) mod timeline;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tools;

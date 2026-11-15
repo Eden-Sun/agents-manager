@@ -1,6 +1,7 @@
 import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
+import { ApiTurnTimeline } from './ApiTurnTimeline'
 import { CodexTerminalFooterItems } from './CodexTerminalFooter'
 import { parseCodexModelLine, splitCodexTerminalFooter } from '../lib/codexTerminalFooter'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
@@ -216,6 +217,7 @@ const PlainBubble = memo(function PlainBubble({
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const translation = useMessageTranslation(msg, { recent })
   const [expanded, setExpanded] = useState(false)
+  const [showTimeline, setShowTimeline] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
   // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
@@ -261,7 +263,14 @@ const PlainBubble = memo(function PlainBubble({
         </div>
         {msg.role === 'user' ? <RewindButton msg={msg} /> : null}
         {translation.button}
-        {msg.role === 'assistant' && msg.bot_id ? <ApiTurnCostTag botId={msg.bot_id} turnId={msg.turn_id} /> : null}
+        {msg.role === 'assistant' && msg.bot_id ? (
+          <ApiTurnCostTag
+            botId={msg.bot_id}
+            turnId={msg.turn_id}
+            expanded={showTimeline}
+            onToggle={() => setShowTimeline((v) => !v)}
+          />
+        ) : null}
         {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
         {system ? null : (
           <time
@@ -293,6 +302,13 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
+      {showTimeline && msg.bot_id && msg.turn_id ? (
+        <ApiTurnTimeline
+          botId={msg.bot_id}
+          turnId={msg.turn_id}
+          onClose={() => setShowTimeline(false)}
+        />
+      ) : null}
       <SupplementSendNow msg={msg} />
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>

@@ -874,6 +874,16 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
     - `GET /api/bots/{id}/api-usage` 回傳新增 `stuck: { reason: string, message?: string } | null`；前端 `ApiBotUsageBar` 於卡住時顯示 `卡住` 徽章與原因提示。
     - `GET /api/supervisor/health`（`agm health`）回傳新增 `api_bots_stuck: [{ bot_id, name, reason }]`。
   - **Startup Gate 行為**：單一 bot 的未解 receipt 維持全域 fail-closed 隔離（`api_startup_unresolved`），因為 startup recovery 與 run abandonment 在架構上是一致性全域屏障（D3b），任何未決 receipt 若不全域阻擋將可能導致 live host 重連時領養孤兒 run、破壞 durable receipt 不變量；sweeper 在線上先一步收斂卡死狀態，避免重啟時留存未解 receipt。
+- **claude-api 可觀測性與時間軸（強化 #5，2026-11-15）**：
+  - 每回合時間軸 API：`GET /api/bots/{id}/turns/{turn_id}/api-timeline`（User-only），讀取該回合的所有 `api_bot_attempts` 與工具執行，輸出包含：
+    1. 每次 API 請求：時間、iterations 類型（`message` 或 `compaction`）、input / cache read / cache write / output token、費用、`stop_reason`、耗時（`duration_ms`）。
+    2. 每次工具執行：工具名、耗時、是否錯誤（遵循安全邊界：不顯示工具輸入與輸出全文）。
+    3. 回合結束原因：`halt_reason` 與狀態。
+  - 『這回合為什麼花了 $X』拆分與建議：
+    1. 6 大類別費用拆分：一般輸入、快取讀取、快取寫入、輸出（含深度思考）、對話壓縮、伺服器工具，附帶 token 數、美元費用與佔比。
+    2. 標出最大項（`largest_item`）。
+    3. 智慧可省建議（`suggestions`）：精確計算快取冷掉重寫費用 vs 快取命中費用差額（「快取冷掉重寫花費 $Y；若在快取保留期內送出，快取讀取僅需 $Z，可省約 $W」）、fast 模式 2× 費率節省提示、輸出佔比過高調低思考強度提示、對話累積壓縮提示等。
+  - 網頁 UI：在 claude-api bot 的 assistant 回合訊息費用標籤（`ApiTurnCostTag`）提供展開/收合按鈕，展開時於訊息下方顯示 `ApiTurnTimeline`；響應式排版支援手機版（`PHONE_QUERY`）。
 - **claude-api 遠端主機專案（使用者 2026-11-02 裁示：遠端不隔離）**：專案在遠端主機時，bot 工具走 `api_bot/tools/remote.rs` 的 `RemoteTools`，經該主機的 ssh 連線（`HostConn`）以 ssh 帳號的完整權限執行，**不做沙箱、不需要 bwrap**，與遠端的 claude／codex bot 一樣；本機專案仍是 bwrap，行為不變。`bash`：每次呼叫獨立一次 ssh，腳本是 `cd <專案目錄> || exit 97` 後接指令（帶該主機的登入 PATH），stdin 是 `/dev/null`，stdout／stderr 合併後最多留 `max_tool_output_bytes`（超過截斷並註明），exit code 另外回報（非 0 回 `command failed (exit N): …`）；逾時用 `command_timeout_secs`，取消時中止 ssh；也套用 #1884 的 kill guard。`str_replace_based_edit_tool` 的 `view`／`create`／`str_replace`／`insert` 經 ssh 讀寫（`create` 不覆蓋既有檔、父目錄須存在，1 MiB 上限、二進位拒絕），路徑限專案目錄底下：相對路徑、專案目錄本身開頭的絕對路徑、`/workspace/…`（專案根目錄的別名，兩邊 prompt 寫法一致）可用，含 `..` 或其他絕對路徑拒絕——這只防編輯器誤用，不是安全邊界（bash 本來就有該帳號全部權限）。system prompt 改用遠端版說明：在主機 X 以該帳號權限執行、沒有沙箱、cwd 是專案目錄（`/workspace` 也代表它）、每次 bash 獨立、可連網、HOME 是該帳號家目錄且保留、沒有 herdr 不能開子 agent、這是使用者真實機器所以破壞性操作要先說明。start 前置檢查：主機沒連線（或設定裡沒有）回 409 `api_bot_host_offline`，不建 run；之後的 turn 若連線中斷，工具回 `host … is not connected`。已知限制：逾時或取消只殺本機的 ssh，遠端行程是否跟著結束取決於該主機的 sshd／shell（不保證）。
 - 核准報價快照（2026-10-29）：[官方價格](https://platform.claude.com/docs/en/about-claude/pricing)、[Opus 模型](https://platform.claude.com/docs/en/models/opus-5-5/overview)、[fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode)。Opus 為 `claude-opus-5-5`（standard 每百萬 input $4／output $20，fast 2 倍），另已加入上方 Fable 5.2 快照；限 global／direct HTTPS，cache_control 僅接受 5 分鐘 ephemeral，拒絕 server tools 與其他計價修飾。reserve 沿用 request 序列化 bytes 加固定餘裕的保守 input token 上界（最多 100 萬），全按 5 分鐘 cache write 費率，加 max_tokens output，以整數 microUSD 向上取整；hold 是保守上界，不是實際費用。缺失／未知或超上界 usage 保持 unknown hold；thinking 細分已包含在 output total，不重計。每次 HTTP 前重新讀 helper key，該次 request 保持快照；讀錯在 reservation 前拒絕。真 API 驗收須另核，只用 standard、max_tokens 至多 1024、總預算 $10，累計 $8 停止。
 - **沙箱網路（使用者 2026-11-02 裁示全部開放）**：bwrap 用 `--unshare-all --share-net`，只共用 net namespace；`/etc` 只唯讀掛 resolv.conf、hosts、nsswitch.conf、host.conf、gai.conf、ssl、ca-certificates、passwd、group（`--ro-bind-try`），讓 DNS／TLS 可用。bot 可讀寫 workspace 又能連網＝可外送檔案內容，風險與 CLI bot 相同。

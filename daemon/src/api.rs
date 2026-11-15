@@ -219,6 +219,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
         .route("/bots/{id}/api-session/retire", post(crate::api_bot_retire_route::retire_api_session))
         .route("/bots/{id}/api-usage", get(api_bot_usage))
+        .route("/bots/{id}/turns/{turn_id}/api-timeline", get(api_bot_turn_timeline))
         .route("/bots/{id}/start", post(start_bot_http))
         .route("/bots/{id}/restart", post(restart_bot))
         .route("/bots/{id}/credential/rotate", post(rotate_bot_credential))
@@ -848,6 +849,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/bots/{id}/api_fresh_target", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/api-session/retire", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/api-usage", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/turns/{turn_id}/api-timeline", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
@@ -5432,6 +5434,30 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
         "stuck": stuck.map(|s| json!({"reason": s.reason, "message": s.message})),
     })))
+}
+
+/// `GET /api/bots/{id}/turns/{turn_id}/api-timeline`：claude-api bot 單次回合的時間軸與「這回合為什麼花了 $X」拆分。
+async fn api_bot_turn_timeline(
+    State(app): State<Arc<App>>,
+    Path((id, turn_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    if principal != RequestPrincipal::User {
+        return Err(bot_user_only());
+    }
+    let bot = db::bot(&app.db, &id)
+        .await
+        .map_err(any_err)?
+        .filter(|b| b.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if bot.kind != "claude-api" {
+        return Err(LcError::Bad("only claude-api bots have api timeline".into()));
+    }
+    let timeline = crate::api_bot::timeline::get_turn_timeline(&app.db, &id, &turn_id)
+        .await
+        .map_err(any_err)?
+        .ok_or_else(|| LcError::NotFound("turn".into()))?;
+    Ok(Json(timeline))
 }
 
 async fn api_fresh_target(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
