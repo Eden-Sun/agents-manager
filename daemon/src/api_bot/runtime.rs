@@ -380,6 +380,16 @@ impl ApiBotRuntime {
         self.inner.explicit_quarantine.lock().expect("quarantine mutex poisoned").contains_key(bot)
     }
 
+    /// 這顆 bot 現在有沒有回合在跑（登記了 control、還沒收尾）。sweeper 絕不能動有回合在跑的 session。
+    pub(crate) fn has_live_turn(&self, bot: &str) -> bool {
+        self.inner
+            .controls
+            .lock()
+            .expect("control mutex poisoned")
+            .iter()
+            .any(|(k, r)| k.bot_id == bot && r.finalized.is_none() && !r.owner_exited)
+    }
+
     pub(crate) fn remove_session_cursor(&self, bot: &str, session_id: &str) {
         let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
         if sessions.get(bot).is_some_and(|c| c.identity.session_id == session_id) {

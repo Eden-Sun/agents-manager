@@ -114,7 +114,7 @@ async fn sweep_abandoned_pending_checkpoints(
             false
         };
 
-        if is_active {
+        if is_active || app.api_bot_runtime.has_live_turn(&bot_id) {
             continue;
         }
 
@@ -258,15 +258,15 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
 ) -> anyhow::Result<()> {
     let hard_deadline_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs + 120;
     let cutoff = crate::db::iso_in(-(hard_deadline_secs as i64));
-    let stale_reserved: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+    let stale_reserved: Vec<(String, Option<String>, Option<String>, Option<String>, String)> =
         sqlx::query_as(
-            "SELECT id, bot_id, session_id, turn_id FROM api_bot_attempts WHERE state = 'reserved' AND created_at < ?",
+            "SELECT id, bot_id, session_id, turn_id, created_at FROM api_bot_attempts WHERE state = 'reserved' AND created_at < ?",
         )
         .bind(&cutoff)
         .fetch_all(&app.db)
         .await?;
 
-    for (att_id, bot_id, session_id, turn_id) in stale_reserved {
+    for (att_id, bot_id, session_id, turn_id, att_created_at) in stale_reserved {
         let mut tx = crate::db::begin_write(&app.db).await?;
         let has_response = if let Some(t_id) = &turn_id {
             sqlx::query_scalar::<_, bool>(
@@ -293,33 +293,41 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
 
         if changed == 1 {
             if let Some(s_id) = &session_id {
-                let session_row: Option<(i64, String)> = sqlx::query_as(
-                    "SELECT revision, checkpoint_json FROM api_bot_sessions WHERE id = ? AND retired_at IS NULL",
+                let session_row: Option<(i64, i64, String, String)> = sqlx::query_as(
+                    "SELECT revision, generation, checkpoint_json, updated_at FROM api_bot_sessions WHERE id = ? AND retired_at IS NULL",
                 )
                 .bind(s_id)
                 .fetch_optional(&mut *tx)
                 .await?;
 
-                if let Some((rev, chk_raw)) = session_row {
-                    if let Ok(mut val) = serde_json::from_str::<Value>(&chk_raw) {
+                if let Some((rev, generation, chk_raw, updated_at)) = session_row {
+                    // 過期的 reserved 只結清帳（上面已做）；session 現在有人在用（回合在跑、更新的 attempt）就不動 checkpoint。
+                    let busy = session_busy(app, s_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &updated_at).await?;
+                    if let (false, Ok(mut val)) = (busy, serde_json::from_str::<Value>(&chk_raw)) {
                         if val["api_pending"] == true {
                             val["api_pending"] = json!(false);
                             if let Ok(chk) = Checkpoint::new(&val) {
                                 let next_rev = rev + 1;
                                 let encoded = serde_json::to_string(&chk.value())?;
-                                sqlx::query(
-                                    "UPDATE api_bot_sessions SET checkpoint_json = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?",
+                                let wrote = sqlx::query(
+                                    "UPDATE api_bot_sessions SET checkpoint_json = ?, revision = ?, updated_at = ? \
+                                     WHERE id = ? AND revision = ? AND generation = ? AND updated_at = ?",
                                 )
                                 .bind(&encoded)
                                 .bind(next_rev)
                                 .bind(&now)
                                 .bind(s_id)
                                 .bind(rev)
+                                .bind(generation)
+                                .bind(&updated_at)
                                 .execute(&mut *tx)
-                                .await?;
+                                .await?
+                                .rows_affected();
 
-                                if let Some(b_id) = &bot_id {
-                                    app.api_bot_runtime.remove_session_cursor(b_id, s_id);
+                                if wrote == 1 {
+                                    if let Some(b_id) = &bot_id {
+                                        app.api_bot_runtime.remove_session_cursor(b_id, s_id);
+                                    }
                                 }
                             }
                         }
@@ -347,8 +355,8 @@ async fn sweep_stale_unknown_attempts(
     report: &mut SweepReport,
 ) -> anyhow::Result<()> {
     let cutoff = crate::db::iso_in(-UNKNOWN_STALE_SECS);
-    let stale_unknowns: Vec<(String, String, Option<String>, i64, String)> = sqlx::query_as(
-        "SELECT DISTINCT a.id, s.id, s.bot_id, s.revision, s.checkpoint_json \
+    let stale_unknowns: Vec<(String, String, Option<String>, i64, i64, String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT a.id, s.id, s.bot_id, s.revision, s.generation, s.checkpoint_json, s.updated_at, a.created_at \
          FROM api_bot_attempts a \
          JOIN api_bot_sessions s ON s.id = a.session_id \
          WHERE a.state = 'unknown' \
@@ -359,7 +367,14 @@ async fn sweep_stale_unknown_attempts(
     .fetch_all(&app.db)
     .await?;
 
-    for (att_id, session_id, bot_id, revision, checkpoint_json) in stale_unknowns {
+    for (att_id, session_id, bot_id, revision, generation, checkpoint_json, session_updated_at, att_created_at) in stale_unknowns {
+        // 一筆舊的 unknown 只是帳務未知（保守計入花費），跟**目前**的 checkpoint 無關：只有整個 session 真的靜止才碰 checkpoint。
+        // 2026-11-15 事故：舊回合的 ordinal 55 unknown 讓 sweeper 在新回合的請求進行中把 api_pending 清掉，回合 journal 因此寫失敗。
+        // 判斷一律看**目前**狀態：這顆 bot 有沒有回合在跑、session 有沒有還在進行的 reserved、有沒有比這筆更新的 attempt、
+        // session 最近有沒有被寫過。任何一個成立就放著不動。
+        if session_busy(app, &session_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &session_updated_at).await? {
+            continue;
+        }
         let Ok(mut val) = serde_json::from_str::<Value>(&checkpoint_json) else { continue };
         if val["api_pending"] != true {
             continue;
@@ -370,14 +385,18 @@ async fn sweep_stale_unknown_attempts(
         let next_rev = revision + 1;
         let now = crate::db::now();
         let encoded = serde_json::to_string(&chk.value())?;
+        // 與 runtime 同一道圍欄：revision＋generation 都要對得上，而且 session 還沒被別人寫過（updated_at 不變）；對不上就放棄。
         let changed = sqlx::query(
-            "UPDATE api_bot_sessions SET checkpoint_json = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?",
+            "UPDATE api_bot_sessions SET checkpoint_json = ?, revision = ?, updated_at = ? \
+             WHERE id = ? AND revision = ? AND generation = ? AND updated_at = ? AND retired_at IS NULL",
         )
         .bind(&encoded)
         .bind(next_rev)
         .bind(&now)
         .bind(&session_id)
         .bind(revision)
+        .bind(generation)
+        .bind(&session_updated_at)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -400,6 +419,47 @@ async fn sweep_stale_unknown_attempts(
     }
 
     Ok(())
+}
+
+/// session 現在是不是「有人在用」：只要其中一個成立，sweeper 就不准改它的 checkpoint。
+/// - 這顆 bot 的 runtime 有回合在跑；
+/// - session 上有還沒過硬期限的 reserved attempt（請求進行中）；
+/// - 有比 `unknown_att` 更新的 attempt（那筆 unknown 已經不是這個 session 的現況）；
+/// - session 最近 [`UNKNOWN_STALE_SECS`] 內被寫過（回合在推進 checkpoint）。
+async fn session_busy(
+    app: &crate::state::App,
+    session_id: &str,
+    bot_id: Option<&str>,
+    unknown_att: Option<&str>,
+    unknown_created_at: &str,
+    session_updated_at: &str,
+) -> anyhow::Result<bool> {
+    if bot_id.is_some_and(|b| app.api_bot_runtime.has_live_turn(b)) {
+        return Ok(true);
+    }
+    if crate::db::cmp_ts(session_updated_at, &crate::db::iso_in(-UNKNOWN_STALE_SECS)).is_ge() {
+        return Ok(true);
+    }
+    let hard = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs as i64 + 120;
+    let fresh_reserved: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE session_id = ? AND state = 'reserved' AND created_at >= ?)",
+    )
+    .bind(session_id)
+    .bind(crate::db::iso_in(-hard))
+    .fetch_one(&app.db)
+    .await?;
+    if fresh_reserved {
+        return Ok(true);
+    }
+    let newer: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE session_id = ? AND id != ? AND created_at > ?)",
+    )
+    .bind(session_id)
+    .bind(unknown_att.unwrap_or(""))
+    .bind(unknown_created_at)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(newer)
 }
 
 pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Option<StuckInfo> {
@@ -435,8 +495,8 @@ pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Optio
     }
 
     let cutoff_5m = crate::db::iso_in(-UNKNOWN_STALE_SECS);
-    let session: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT s.checkpoint_json, s.owner_turn_id \
+    let session: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT s.checkpoint_json, s.owner_turn_id, s.updated_at \
          FROM api_bot_sessions s \
          WHERE s.bot_id = ? AND s.retired_at IS NULL \
          ORDER BY s.updated_at DESC LIMIT 1",
@@ -446,7 +506,7 @@ pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Optio
     .await
     .unwrap_or(None);
 
-    if let Some((raw_chk, owner_turn_id)) = session {
+    if let Some((raw_chk, owner_turn_id, session_updated_at)) = session {
         if let Ok(val) = serde_json::from_str::<Value>(&raw_chk) {
             let api_pending = val["api_pending"] == true;
             let tool_pending = !val["tool_pending"].is_null();
@@ -477,7 +537,9 @@ pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Optio
                 .fetch_one(&app.db)
                 .await
                 .unwrap_or(false);
-                if has_stale_unknown {
+                // 回合在跑、或 session 最近才被寫過＝不是卡住（跟 sweeper 的 `session_busy` 同一條）：舊的 unknown 只是帳務未知。
+                let moving = app.api_bot_runtime.has_live_turn(bot_id) || crate::db::cmp_ts(&session_updated_at, &cutoff_5m).is_ge();
+                if has_stale_unknown && !moving {
                     return Some(StuckInfo {
                         reason: "unknown_attempt_stuck",
                         message: "未知結果請求卡住未結清",

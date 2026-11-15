@@ -132,7 +132,7 @@ async fn sweeper_settles_reserved_attempt_exceeding_hard_deadline() {
          VALUES(?,?,?,?,1,1,?,?,?,?)"
     )
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(initial_chk.to_string())
-    .bind(&now).bind(&now).bind(crate::db::iso_in(3600))
+    .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
     .execute(&env.app.db).await.unwrap();
 
     // Insert reserved attempt created 2500 seconds ago (hard deadline is 1800 + 120 = 1920s)
@@ -204,7 +204,7 @@ async fn sweeper_clears_api_pending_for_stale_unknown_attempt() {
          VALUES(?,?,?,?,1,1,?,?,?,?)"
     )
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(initial_chk.to_string())
-    .bind(&now).bind(&now).bind(crate::db::iso_in(3600))
+    .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
     .execute(&env.app.db).await.unwrap();
 
     // Insert unknown attempt finished 400s ago (> 300s = 5min)
@@ -244,4 +244,91 @@ async fn sweeper_clears_api_pending_for_stale_unknown_attempt() {
     // Verify it is no longer stuck:
     let after_stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(after_stuck, None);
+}
+
+
+/// 2026-11-15 事故重現：舊回合留下的 unknown attempt（ordinal 55）＋新回合進行中（owner turn in_flight、runtime 有回合、
+/// 有還在進行的 reserved attempt、checkpoint 剛被寫過）。sweeper 絕不能動這個 session 的 checkpoint，否則回合的 journal 存檔會失敗。
+#[tokio::test]
+async fn sweeper_never_touches_a_session_with_a_turn_in_flight_because_of_an_old_unknown_attempt() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    let (bot_id, run_id, conv_id, old_turn, new_turn, session_id) = ("sw-bot-9", "sw-run-9", "sw-conv-9", "sw-turn-9-old", "sw-turn-9-new", "sw-sess-9");
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,'sw-bot-9','claude-api','fake',?)")
+        .bind(bot_id).bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)")
+        .bind(run_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)")
+        .bind(conv_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    for (t, st) in [(old_turn, "failed"), (new_turn, "in_flight")] {
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web',?,'ok',?)")
+            .bind(t).bind(conv_id).bind(run_id).bind(st).bind(&now).execute(&env.app.db).await.unwrap();
+    }
+    let chk = json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}], "responses": [], "api_pending": true, "tool_pending": null, "completed_tool_ids": []});
+    sqlx::query(
+        "INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,1,812,?,?,?,?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(new_turn).bind(chk.to_string()).bind(&now).bind(&now).bind(crate::db::iso_in(3600))
+    .execute(&env.app.db).await.unwrap();
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let old = crate::db::iso_in(-20 * 3600);
+    sqlx::query(
+        "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at,finished_at) \
+         VALUES('att-old-unknown',?,?,?,?,1,55,?,'standard','unknown',400,'v1',?,?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(old_turn).bind(hash).bind(&old).bind(&old)
+    .execute(&env.app.db).await.unwrap();
+    sqlx::query(
+        "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) \
+         VALUES('att-live',?,?,?,?,1,144,?,'standard','reserved',500,'v1',?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(new_turn).bind(hash).bind(&now)
+    .execute(&env.app.db).await.unwrap();
+
+    let report = sweep_once(&env.app).await.unwrap();
+    assert_eq!((report.stale_unknowns, report.abandoned_checkpoints, report.reserved_timeouts), (0, 0, 0), "{report:?}");
+    let (raw, rev, upd): (String, i64, String) =
+        sqlx::query_as("SELECT checkpoint_json, revision, updated_at FROM api_bot_sessions WHERE id=?").bind(session_id).fetch_one(&env.app.db).await.unwrap();
+    let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!((val["api_pending"].clone(), rev, upd), (json!(true), 812, now), "checkpoint 一個字都不能動");
+    let live: String = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE id='att-live'").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(live, "reserved", "進行中的 attempt 不被結清");
+    assert_eq!(detect_stuck(&env.app, bot_id).await, None, "進行中的回合不是卡住");
+}
+
+/// 舊 unknown 只是帳務未知：就算 session 很久沒動，只要後面已經有更新的 attempt，sweeper 也不為那筆舊 unknown 改 checkpoint。
+#[tokio::test]
+async fn an_old_unknown_attempt_does_not_rewrite_a_checkpoint_when_a_newer_attempt_exists() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    let (bot_id, run_id, conv_id, turn_id, session_id) = ("sw-bot-10", "sw-run-10", "sw-conv-10", "sw-turn-10", "sw-sess-10");
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,'sw-bot-10','claude-api','fake',?)")
+        .bind(bot_id).bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)")
+        .bind(run_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)")
+        .bind(conv_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+        .bind(turn_id).bind(conv_id).bind(run_id).bind(&now).execute(&env.app.db).await.unwrap();
+    let chk = json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}], "responses": [], "api_pending": true, "tool_pending": null, "completed_tool_ids": []});
+    let quiet = crate::db::iso_in(-900);
+    sqlx::query(
+        "INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,1,7,?,?,?,?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(chk.to_string()).bind(&now).bind(&quiet).bind(crate::db::iso_in(3600))
+    .execute(&env.app.db).await.unwrap();
+    let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let (t1, t2) = (crate::db::iso_in(-3000), crate::db::iso_in(-2000));
+    for (id, ord, state, at) in [("att-a", 1, "unknown", &t1), ("att-b", 2, "recorded", &t2)] {
+        sqlx::query(
+            "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at,finished_at) \
+             VALUES(?,?,?,?,?,1,?,?,'standard',?,400,'v1',?,?)",
+        )
+        .bind(id).bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(ord).bind(hash).bind(state).bind(at).bind(at)
+        .execute(&env.app.db).await.unwrap();
+    }
+    let report = sweep_once(&env.app).await.unwrap();
+    assert_eq!(report.stale_unknowns, 0);
+    let (raw, rev): (String, i64) = sqlx::query_as("SELECT checkpoint_json, revision FROM api_bot_sessions WHERE id=?").bind(session_id).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!((serde_json::from_str::<serde_json::Value>(&raw).unwrap()["api_pending"].clone(), rev), (json!(true), 7));
 }
