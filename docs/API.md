@@ -2327,7 +2327,7 @@ Codex 清單排除上述改派值；app-server 的預設若是被排除的模型
     （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。
     每個有獨立 `CLAUDE_CONFIG_DIR` 的身份各探一次（該主機清單，含 shell `ccN`）；60 秒內剛被 statusLine 更新**且**登入狀態已知的跳過；沒登入的 park 30 分鐘、其他失敗 5 分鐘。
   - `grok-usage`：`am-quota` session 的 TUI `/usage` 探測，只有週額度（`seven_day`），`plan` 取 `Weekly limit (SuperGrok)` 括號。
-  - `agy-usage`：`agy -p "/usage" --output-format json`（唯讀、不開對話、不耗額度；拋棄式暫存 cwd、關自動更新、40 秒逾時、每 5 分鐘，失敗冷卻 15 分鐘），只讀 Gemini 組並寫唯一的 `agy` key，填 `five_hour` 與 `seven_day` 窗口；Claude/GPT 組略過。新版讀 `command.data.groups[].buckets[]` 的 `remaining_fraction`／`reset_time`；舊版 tab 分隔 `response` 相容，只填 Gemini 的 `seven_day`。`plan`／`fable` 為 `null`。撞限畫面／Stop hook 有 `Individual quota reached … Resets in …` 時，也會在 `agy` 記 `limit_hit` 與滿額 5h 窗。`?refresh=1` 也會探測 agy。沒裝 agy 的主機（含遠端）不探測、不報錯，`agy` 為 `null`；探測失敗不覆蓋舊讀數（`stale` 自己會亮）。舊版 `agy:claude-gpt` 快照在載入 cache 時刪除。SPEC §12a.7。
+  - `agy-usage`：`agy -p "/usage" --output-format json`（唯讀、不開對話、不耗額度；拋棄式暫存 cwd、關自動更新、40 秒逾時、每 5 分鐘，失敗冷卻 15 分鐘），只讀 Gemini 組並寫唯一的 `agy` key，填 `five_hour` 與 `seven_day` 窗口；Claude/GPT 組略過。新版讀 `command.data.groups[].buckets[]` 的 `remaining_fraction`／`reset_time`；舊版 tab 分隔 `response` 相容，只填 Gemini 的 `seven_day`。`plan`／`fable` 為 `null`。撞限畫面／Stop hook 有 `Individual quota reached … Resets in …` 時，也會在 `agy` 記 `limit_hit` 與滿額 5h 窗。`?refresh=1` 也會探測 agy。沒裝 agy 的主機（含遠端）不探測、不報錯，`agy` 為 `null`；探測失敗不覆蓋舊讀數（`stale` 自己會亮）。舊版 `agy:claude-gpt` 快照在載入 cache 時刪除。SPEC §12a.7。**agy 身份**（`[[identities]] kind = "agy"`，各自 `HOME`，SPEC §16.8）：每個可用身份另有一把 `agy:<名>`（共用預設帳號的身份寫裸 `agy`），同樣是 `agy-usage`、同一條探測與節奏（每 5 分鐘），`HOME` 換成身份目錄；停用的身份、停用的 kind 與登出的身份不探測（登出會清掉那把）。探測失敗不報錯、保留上次讀數。
 
 ### 12.5 WS `quota_updated`
 

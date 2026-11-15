@@ -4435,8 +4435,9 @@ agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-to
 - **登入／登出**：登入在該 HOME 下不帶參數啟動 `agy`，由它的 TUI 引導（沒有不開瀏覽器的獨立子命令；登完離開，watcher 重驗）；登出＝刪該 HOME 的 token 檔（agy 沒有登出子命令）。macOS 的 Keychain 項目只屬於真家目錄（見上），身份看不到，不會被登出誤傷。
 - **子 agent**：`herdr agent start --kind agy --identity <名>` 由 shim 帶該身份的 `HOME`；`AM_IDENTITIES` 只有 agy 身份才列 `HOME`。收編的 agy 子 agent 以 pane 行程的 `HOME` 對身份（等於真家目錄＝預設帳號）。
 - **重驗（何時更新快取）**：(1) 登入 pane 收尾（CLI 結束、從未出現、或 15 分鐘 deadline，一律先重驗再關）；(2) agy 登入中 CLI 還開著時每 10 秒重驗、問到已登入就停（TUI 不退出也能及時翻過來）；(3) 每 10 分鐘對每台可達主機（離線跳過）的 config agy 身份跑一次 `agy models`（`quota_agy::spawn_agy_identity_poller`；一輪跑完才排下一輪，不重疊；不是每 20 秒）。三者都只在狀態真的變了才寫快取、推 `host_changed`。
-- **預設帳號那一格（`tools.agy`）**：`quota_agy::login_watch_once`（每 20 秒）只看**預設家目錄**的憑證檔、只探預設帳號的 `/usage`，代表的是「預設帳號」，不是各身份。網頁主機列的 agy 標成「agy（預設帳號）」；有 `HOME` 覆寫的身份各自在身份列上判斷，兩者可以不同。
-- **限制**：用這個身份的 agy 看到的 `$HOME` 就是影子目錄；agy 的額度（quota）探測仍只讀預設帳號；在該身份底下新增的 dotfile 不會回寫到真家目錄。
+- **預設帳號那一格（`tools.agy`）**：`quota_agy::login_watch_once`（每 20 秒）只看**預設家目錄**的憑證檔、只探預設帳號的 `/usage`，代表的是「預設帳號」，不是各身份。有 `HOME` 覆寫的身份各自在身份列上判斷，兩者可以不同。
+- **身份額度（quota）**（2026-11-15）：每台主機、每個 `kind = "agy"` 身份，用**身份的 env**（`HOME=<身份目錄>`，`expand_home` 展開）跑 `agy -p /usage`，與預設帳號同一個探測指令、同一把 `#agy` 探測鎖、同一個節奏（每 5 分鐘，跟在預設帳號探測之後），本機與遠端（pane）都一樣。讀數寫進 `agy:<名>`（共用預設帳號的身份寫裸 `agy`，同 claude 規則）；網頁額度列每個身份一格，標 `agy · <名>`，還沒有讀數就顯示「背景查詢中」。略過：停用的身份、停用的 kind、identity 的登入答案是未登入（同時清掉那格的舊讀數）、主機沒裝 agy。探測失敗（逾時、無法讀取、未登入）不推錯誤、不洗版：只記 debug log，保留上次讀數，15 分鐘內不重試；身份的登入狀態仍由 §16.8 的重驗判定。
+- **限制**：用這個身份的 agy 看到的 `$HOME` 就是影子目錄；在該身份底下新增的 dotfile 不會回寫到真家目錄。
 - **未驗證（macOS）**：Keychain 隔離已在 m4p 實測；身份登入後 token 實際寫到哪裡（影子 HOME 的 `.gemini`，或 agy 寫 Keychain 失敗後退回檔案）尚未在 m4p 實際登入過，要以一次真登入確認。
 
 ### 16.9 登入、登出、刪除：每種身份來源能做什麼（使用者 2026-11-14：「例如現在 grok 已不訂閱」）

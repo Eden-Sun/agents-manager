@@ -4,19 +4,21 @@ use crate::quota::Quota;
 use crate::quota_agy::*;
 use crate::state::App;
 use anyhow::{anyhow, Result};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(15 * 60);
 
-async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, exe: &str) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
+/// `env`＝身份的 HOME 等（已展開）；預設帳號傳空的。
+async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, exe: &str, env: &BTreeMap<String, String>) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
     let client = crate::quota_claude::client_for_fence(host, fence).await.map_err(|e| ProbeFail::other("not_connected", format!("{e:#}")))?;
     let home = crate::hosts::home_for_fence(fence).await.map_err(|e| ProbeFail::other("pane", format!("{e:#}")))?;
     if !app.hosts.is_current(fence).await {
         return Err(ProbeFail::other("superseded", format!("host `{host}` changed before its agy quota probe")));
     }
     let label = crate::quota_claude::tagged_probe_label(app, host, PROBE_LABEL_PREFIX.to_string()).await;
-    let cmd = pane_probe_command(Some(exe));
+    let cmd = pane_probe_command_with_env(Some(exe), env);
     let run = crate::quota_claude::run_marked_pane(
         &client,
         &home,
@@ -132,7 +134,75 @@ impl From<anyhow::Error> for RefreshFail {
 
 /// `Ok(false)` ＝這台主機沒裝 agy（不探測、不報錯）。失敗時錯誤訊息就是原因（同時記在 [`tools_json`] 的 `quota_error`）。
 pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
-    refresh_agy_fenced(app, host).await.1.map_err(|f| f.error)
+    let out = refresh_agy_fenced(app, host).await.1.map_err(|f| f.error);
+    refresh_agy_identities(app, host).await;
+    out
+}
+
+/// agy 身份（`[[identities]] kind = "agy"`，每個有自己的 `HOME`）的額度探測。跟預設帳號同一個鎖、同一個探測指令與 pane，
+/// 只是 `HOME` 換成身份的目錄（[`crate::config::expand_home`] 展開，與登入、重驗同一套）。
+/// 結果寫進 `agy:<名>`（共用預設帳號的身份寫裸 `agy`，同 claude 那套），網頁額度列每個身份一格。
+/// 節奏與預設帳號相同（[`spawn_agy_poller`]）；失敗只記 debug 與 15 分鐘冷卻、保留上次讀數，不推錯誤、不洗版。
+/// 略過：停用的身份、停用的 kind、登入答案是未登入（那一格的舊讀數同時清掉）、主機沒裝 agy。
+pub async fn refresh_agy_identities(app: &Arc<App>, host: &str) {
+    let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
+    let Some(fence) = app.hosts.fence(host).await else { return };
+    if crate::identity_prefs::kind_disabled(&app.db, host, "agy").await {
+        return;
+    }
+    let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return };
+    let Ok(home) = crate::hosts::home_for_fence(&fence).await else { return };
+    let off = crate::db::disabled_identities(&app.db, host, "agy").await.unwrap_or_default();
+    let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+    let identities = crate::tools::identities_for_host(app, host).await;
+    for idn in identities.iter().filter(|i| i.kind == "agy") {
+        if !app.hosts.is_current(&fence).await {
+            return;
+        }
+        if off.contains(&idn.name) {
+            continue;
+        }
+        let shares = crate::quota::identity_shares_default("agy", &idn.env);
+        let base = crate::quota::quota_base_default_aware("agy", Some(&idn.name), shares);
+        let full = crate::quota::quota_key(host, &base);
+        if logins.get(&idn.name).and_then(|i| i.logged_in) == Some(false) {
+            // 已登出（憑證被刪）：那一格的舊讀數不能再顯示。
+            crate::quota::forget(app, &full).await;
+            continue;
+        }
+        let backoff_key = format!("{host}#{base}");
+        if backoff_active(&backoff_key, &fence) {
+            continue;
+        }
+        let env: BTreeMap<String, String> = idn
+            .env
+            .iter()
+            .filter(|(k, _)| crate::tools::valid_env_name(k))
+            .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
+            .collect();
+        let parsed = if fence.conn().is_local() {
+            match crate::hosts::sh_local_capture(&probe_script_with_env(Some(&exe), &env), PROBE_TIMEOUT).await {
+                Ok(run) => read_local_run(host, run.timed_out, &String::from_utf8_lossy(&run.stdout), &String::from_utf8_lossy(&run.stderr), PROBE_TIMEOUT.as_secs()),
+                Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
+            }
+        } else {
+            pane_probe(app, host, &fence, &exe, &env).await
+        };
+        match parsed {
+            Ok(rows) => {
+                if let Some((_, q)) = rows.into_iter().next() {
+                    if crate::quota::set_fenced(app, host, &base, q, &fence).await.is_err() {
+                        return;
+                    }
+                }
+                backoff().lock().unwrap().remove(&backoff_key);
+            }
+            Err(fail) => {
+                tracing::debug!(host, identity = %idn.name, reason = ?fail, "agy identity quota probe failed; keeping the last reading");
+                backoff().lock().unwrap().insert(backoff_key, BackoffEntry { until: std::time::Instant::now() + RETRY_AFTER_FAILURE, authority: fence.authority_key() });
+            }
+        }
+    }
 }
 
 /// 同 [`refresh_agy`]，另外回傳這一輪真正用到的 fence（`None` ＝主機不存在），讓呼叫端把冷卻綁在同一個世代上（#873）。
@@ -163,7 +233,7 @@ async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::Ho
             Err(e) => Err(ProbeFail::other("timeout", format!("{e:#}"))),
         }
     } else {
-        pane_probe(app, host, fence, &exe).await
+        pane_probe(app, host, fence, &exe, &BTreeMap::new()).await
     };
     let buckets = match parsed {
         Ok(b) => b,
@@ -411,6 +481,7 @@ pub fn spawn_agy_poller(app: Arc<App>) {
                     Ok(Some(false)) => tracing::debug!(host = %host, "agy not installed; agy quota stays null"),
                     Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "agy quota refresh failed; keeping the last reading"),
                 }
+                refresh_agy_identities(&app, &host).await;
             }
         })
         .await;

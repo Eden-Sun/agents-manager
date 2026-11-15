@@ -9,6 +9,7 @@ use crate::config::LOCAL_HOST;
 use crate::quota::{Quota, Window};
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// 每次探測要起一個約 200 MB 的執行檔。
 pub const AGY_POLL: std::time::Duration = std::time::Duration::from_secs(300);
@@ -17,11 +18,25 @@ pub const PROBE_TIMEOUT: std::time::Duration = if cfg!(any(test, feature = "test
 
 /// 探測指令（本機與遠端同一份）：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄。`exe` 是偵測到的絕對路徑，沒有就用 PATH 上的 `agy`。
 pub fn probe_script(exe: Option<&str>) -> String {
+    probe_script_with_env(exe, &BTreeMap::new())
+}
+
+/// 同 [`probe_script`]，但 agy 前面帶身份的環境變數（`HOME=<身份目錄>`，已展開）。登入、登出、身份重驗、探測都用同一個 env 產生方式（[`env_assignments`]）。
+pub fn probe_script_with_env(exe: Option<&str>, env: &BTreeMap<String, String>) -> String {
     let exe = crate::hosts::sh_quote(exe.unwrap_or("agy"));
+    let assign = env_assignments(env);
     format!(
         "d=$(mktemp -d 2>/dev/null) || exit 1; cd \"$d\" || exit 1; \
-         AGY_CLI_DISABLE_AUTO_UPDATE=true {exe} -p /usage --output-format json </dev/null; rc=$?; cd / ; rm -rf \"$d\"; exit $rc"
+         AGY_CLI_DISABLE_AUTO_UPDATE=true {assign}{exe} -p /usage --output-format json </dev/null; rc=$?; cd / ; rm -rf \"$d\"; exit $rc"
     )
+}
+
+/// 身份的 env 變成 shell 前綴：`K='v' K2='v2' `（名字不合法的略過，值用 sh_quote）。空 map＝空字串。
+pub fn env_assignments(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .filter(|(k, _)| crate::tools::valid_env_name(k))
+        .map(|(k, v)| format!("{k}={} ", crate::hosts::sh_quote(v)))
+        .collect()
 }
 
 fn bucket_key(name: &str) -> Option<&'static str> {
@@ -169,10 +184,16 @@ pub fn is_probe_label(l: &str) -> bool {
 
 /// 在 pane 的 shell 裡打的那一行：拋棄式 cwd、不讀 stdin、關自動更新，stdout 與 stderr 都留在畫面上（`Authentication required` 在那裡）。
 pub fn pane_probe_command(exe: Option<&str>) -> String {
+    pane_probe_command_with_env(exe, &BTreeMap::new())
+}
+
+/// 同 [`pane_probe_command`]，帶身份的 env 前綴（見 [`probe_script_with_env`]）。
+pub fn pane_probe_command_with_env(exe: Option<&str>, env: &BTreeMap<String, String>) -> String {
     let exe = crate::hosts::sh_quote(exe.unwrap_or("agy"));
+    let assign = env_assignments(env);
     format!(
         "d=$(mktemp -d 2>/dev/null) && cd \"$d\" && {{ printf '\\nAM_AGY_%s\\n' BEGIN; \
-         AGY_CLI_DISABLE_AUTO_UPDATE=true {exe} -p /usage --output-format json </dev/null 2>&1; rc=$?; cd /; rm -rf \"$d\"; \
+         AGY_CLI_DISABLE_AUTO_UPDATE=true {assign}{exe} -p /usage --output-format json </dev/null 2>&1; rc=$?; cd /; rm -rf \"$d\"; \
          printf '\\nAM_AGY_%s=%s\\n' DONE \"$rc\"; }} || printf '\\nAM_AGY_%s=%s\\n' DONE 1"
     )
 }

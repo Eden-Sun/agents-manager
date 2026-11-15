@@ -234,6 +234,10 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     if (kind in quota) push({ key: kind, kind, identity: null })
   }
 
+  // agy 身份（每個有自己的 HOME）：一格一個，落點規則同 claude（`quotaBaseKey`）；還沒有讀數也列出來（「背景查詢中」）。
+  const agyIds = identities.filter((i) => i.kind === 'agy')
+  for (const idn of agyIds) push({ key: quotaBaseKey(quotaAll, host, 'agy', idn.name, agyIds), kind: 'agy', identity: idn.name })
+
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
     // agy 只認 Gemini 的裸 key；忽略舊版 Claude/GPT 子 key 快照。
@@ -943,7 +947,7 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
       ) : null}
       {entry.kind === 'codex' ? <CodexResetHint now={now} detail /> : null}
       {/* agy 沒有 CLI 登出，daemon 直接清憑證；已經未登入就沒東西可清。 */}
-      {entry.kind === 'agy' && !loggedOut ? (
+      {entry.kind === 'agy' && !entry.identity && !loggedOut ? (
         <div className="quota-pop-actions">
           <AgyLogoutButton host={host} onOpen={onAgyLogout} busy={agyLogoutBusy} />
         </div>

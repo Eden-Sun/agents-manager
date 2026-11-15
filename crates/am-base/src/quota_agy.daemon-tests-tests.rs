@@ -256,3 +256,32 @@
             .unwrap();
         assert_eq!(old_rows, 0, "legacy callers cannot restore it");
     }
+
+    /// agy 身份（HOME 換成身份目錄）：探測指令在 agy 前面帶 `HOME=…`（已展開的值，quote 過）；沒有身份時與預設探測一字不差。
+    #[test]
+    fn an_identity_probe_puts_its_home_in_front_of_agy_and_the_default_is_unchanged() {
+        let env = std::collections::BTreeMap::from([("HOME".to_string(), "/home/u/.agy-ag1".to_string())]);
+        let s = probe_script_with_env(Some("/home/u/.local/bin/agy"), &env);
+        assert!(s.contains("AGY_CLI_DISABLE_AUTO_UPDATE=true HOME='/home/u/.agy-ag1' '/home/u/.local/bin/agy' -p /usage"), "{s}");
+        assert_eq!(probe_script(Some("/a/agy")), probe_script_with_env(Some("/a/agy"), &Default::default()));
+        let p = pane_probe_command_with_env(Some("/a/agy"), &env);
+        assert!(p.contains("HOME='/home/u/.agy-ag1' '/a/agy' -p /usage"), "{p}");
+        assert_eq!(pane_probe_command(Some("/a/agy")), pane_probe_command_with_env(Some("/a/agy"), &Default::default()));
+        // 名字不合法的 env 略過，不讓它變成 shell 指令。
+        let bad = std::collections::BTreeMap::from([("A;rm".to_string(), "x".to_string())]);
+        assert_eq!(env_assignments(&bad), "");
+    }
+
+    /// 真的跑：假 agy 把收到的 `HOME` 寫出來，確認身份的 HOME 真的帶到 agy 行程，而且探測結束後仍是呼叫端的 HOME。
+    #[test]
+    fn the_identity_probe_runs_agy_with_the_identity_home() {
+        let dir = crate::testing::scratch_dir("am-agy-identity");
+        let fake = dir.join("agy");
+        let seen = dir.join("home.txt");
+        crate::testing::write_exec(&fake, format!("#!/bin/sh\necho \"$HOME\" > {s}\nprintf '%s' '{j}'\n", s = seen.display(), j = real()));
+        let env = std::collections::BTreeMap::from([("HOME".to_string(), dir.join("ag1-home").display().to_string())]);
+        let out = crate::exec_retry::output(std::process::Command::new("/bin/sh").arg("-c").arg(probe_script_with_env(fake.to_str(), &env))).unwrap();
+        assert!(out.status.success());
+        assert!(parse_usage(&String::from_utf8_lossy(&out.stdout)).is_some());
+        assert_eq!(std::fs::read_to_string(&seen).unwrap().trim(), dir.join("ag1-home").display().to_string());
+    }
