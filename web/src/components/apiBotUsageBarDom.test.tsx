@@ -337,3 +337,51 @@ test('ApiBotUsageBar 顯示目前 context 與壓縮門檻（例：148k / 壓縮 
     rawTransport.request = orig
   }
 })
+
+test('ApiBotUsageBar 的快取倒數：熱剩 m:ss、回合中「熱」、過期「已冷」', async () => {
+  const { apiCacheChip, clockText } = await import('../lib/composerCost')
+  assert.equal(clockText(222), '3:42')
+  assert.equal(clockText(3725), '1:02:05')
+  const base = { last_request_at: '2026-11-15T03:00:00.000Z', ttl_secs: 300, expires_at: '2026-11-15T03:05:00.000Z', working: false }
+  const at = (iso: string) => Date.parse(iso)
+  const hot = apiCacheChip(base, at('2026-11-15T03:01:18.000Z'), 148_000, 'claude-opus-5-5', false)!
+  assert.match(hot.label, /3:42/)
+  assert.equal(hot.level, 'low') // 剩不到 5 分鐘＝紅
+  assert.equal(apiCacheChip({ ...base, working: true }, at('2026-11-15T03:30:00.000Z'), null, null, false)!.level, 'hot')
+  const cold = apiCacheChip(base, at('2026-11-15T03:06:00.000Z'), 100_000, 'claude-opus-5-5', false)!
+  assert.equal(cold.level, 'cold')
+  assert.match(cold.label, /\$0\.50/, '10 萬 token × $5/M 的 5 分鐘寫入價')
+  assert.equal(apiCacheChip({ ...base, last_request_at: null, expires_at: null, ttl_secs: null }, Date.now(), null, null, false), null)
+  // 1 小時 TTL 用 1h 寫入單價；未知模型只講已冷。
+  assert.match(apiCacheChip({ ...base, ttl_secs: 3600, expires_at: '2026-11-15T04:00:00.000Z' }, at('2026-11-15T05:00:00.000Z'), 100_000, 'claude-opus-5-5', false)!.label, /\$0\.80/)
+  assert.equal(apiCacheChip(base, at('2026-11-15T04:00:00.000Z'), 100_000, 'mystery', false)!.label, '已冷')
+})
+
+test('ApiBotUsageBar 畫出快取倒數項目', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  const expires = new Date(Date.now() + 222_000).toISOString()
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 1, recorded: 1, reserved: 0, unknown: 0, failed: 0 },
+        cost_microusd: { recorded: 1000, reserved: 0, unknown: 0 },
+        tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null, last: null, turns: [], context: { tokens: 1000, compact_at: 150000 },
+        cache: { last_request_at: new Date(Date.now() - 78_000).toISOString(), ttl_secs: 300, expires_at: expires, working: false },
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') return { cap_usd: null, since: null, spent_usd: 0 }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const item = document.querySelector('[data-k="cache-countdown"]')!
+    assert.ok(item, '快取倒數項目要在')
+    assert.match(item.querySelector('.sl-v')!.textContent ?? '', /3:4\d|3:3\d/)
+  } finally {
+    rawTransport.request = orig
+  }
+})

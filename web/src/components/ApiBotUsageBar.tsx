@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
+import { apiCacheChip } from '../lib/composerCost'
 import { apiBotSpendUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
 import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 import { balanceTooltipLines } from './balanceTooltip'
@@ -32,6 +33,14 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const [newCalls, setNewCalls] = useState('')
   const [savingLimits, setSavingLimits] = useState(false)
   const [limitsError, setLimitsError] = useState('')
+
+  // 快取倒數每秒重算（時間點是 daemon 給的精確值，這裡只減「現在」）。
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const botModel = useStore((s) => s.bots.find((b) => b.id === botId))
 
   // 最後一個回合的狀態改變（in_flight → completed）＝該重抓了。
   const turnSig = useStore((s) => {
@@ -148,6 +157,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
     cap.cap_usd > 0 &&
     cap.spent_usd >= cap.cap_usd * 0.9
 
+  const cacheChip = apiCacheChip(usage.cache, nowMs, usage.context.tokens, botModel?.model ?? null, botModel?.fast === true)
   const showFullDetails = !phone || mobileExpanded || editingCap || editingLimits
 
   return (
@@ -277,6 +287,12 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
                 {formatTokensK(usage.context.tokens)}
                 {usage.context.compact_at !== null ? ` / ${t('壓縮門檻 {n}', { n: formatTokensK(usage.context.compact_at) })}` : ''}
               </span>
+            </span>
+          ) : null}
+          {cacheChip ? (
+            <span className={`sl-item api-cache-${cacheChip.level}`} data-k="cache-countdown" title={cacheChip.title}>
+              <span className="sl-k">{t('快取')}</span>
+              <span className="sl-v">{cacheChip.label}</span>
             </span>
           ) : null}
           <span className="sl-item" data-k="cache" title={t('快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合')}>

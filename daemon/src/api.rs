@@ -5427,6 +5427,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "cache_hit_rate": hit_rate,
         "last": last_json,
         "context": context,
+        "cache": crate::api_bot_turn_cost::cache_info(&app.db, &id).await.map_err(any_err)?,
         "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
     })))
 }

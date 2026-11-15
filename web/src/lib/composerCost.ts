@@ -2,7 +2,7 @@
  * 快取代價提示：Claude 依讀數／TTL 顯示熱冷；Codex 固定提示由 StatusCache 顯示，
  * 不再用 rollout 的舊 TTL 推算過期或重寫警示。context 仍可使用 rollout token 讀數。
  */
-import { cacheState } from './cacheClock'
+import { cacheLevel, cacheState } from './cacheClock'
 import { solWindowApplies } from './codexContextWindow'
 import type { PromptCacheInfo } from '../api/types'
 import { t } from './i18n'
@@ -169,6 +169,43 @@ const API_WRITE_USD_PER_M: Record<string, { m5: number; h1: number }> = {
   'claude-fable-5-2': { m5: 10, h1: 16 },
 }
 
+/** 冷掉後重寫 `tokens` 個 token 約多少美元（目前 TTL 的 write 單價，fast 2×）；不認得的模型 null。 */
+export function apiRewriteUsd(tokens: number, model: string | null | undefined, ttlSecs: number | null | undefined, fast: boolean): number | null {
+  const rate = model ? API_WRITE_USD_PER_M[model] : undefined
+  return rate ? (tokens / 1_000_000) * (ttlSecs === 3600 ? rate.h1 : rate.m5) * (fast ? 2 : 1) : null
+}
+
+/** `3:42`／`1:02:05`：快取倒數的剩餘時間。 */
+export function clockText(secs: number): string {
+  const s = Math.max(0, Math.floor(secs))
+  const p = (n: number) => String(n).padStart(2, '0')
+  const h = Math.floor(s / 3600)
+  return h > 0 ? `${h}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}` : `${Math.floor(s / 60)}:${p(s % 60)}`
+}
+
+export interface ApiCacheInfo { last_request_at: string | null; ttl_secs: number | null; expires_at: string | null; working: boolean }
+
+/**
+ * claude-api 狀態列的快取倒數（daemon 的 `api-usage.cache` 給精確時間，這裡只減「現在」）：
+ * 回合進行中＝`熱`；熱＝`剩 3:42`（顏色門檻同 `cacheLevel`）；冷＝`已冷`，認得模型時附重寫成本（目前 context token × 寫入單價）。
+ * 狀態判定走 `cacheView`，跟 claude CLI bot 的快取欄同一套。沒有任何已完成請求回 null。
+ */
+export function apiCacheChip(cache: ApiCacheInfo, nowMs: number, ctxTokens: number | null, model: string | null | undefined, fast: boolean): { label: string; level: 'fresh' | 'warn' | 'low' | 'cold' | 'hot'; title: string } | null {
+  if (cache.working) return { label: t('熱'), level: 'hot', title: t('回合進行中，快取是熱的{when}', { when: '' }) }
+  if (!cache.last_request_at || !cache.ttl_secs || !cache.expires_at) return null
+  const view = cacheView({ kind: 'claude-api', status: null, lastApiAt: cache.last_request_at, ttlSecs: cache.ttl_secs, nowMs, working: false, apiLastTokens: ctxTokens })
+  const remaining = Math.ceil((Date.parse(cache.expires_at) - nowMs) / 1000)
+  if (!view || view.state === 'cold' || !(remaining > 0)) {
+    const usd = ctxTokens !== null ? apiRewriteUsd(ctxTokens, model, cache.ttl_secs, fast) : null
+    return {
+      label: usd === null ? t('已冷') : t('已冷（重寫約 ${cost}）', { cost: usd.toFixed(2) }),
+      level: 'cold',
+      title: apiColdWarning(view ?? { state: 'cold', mins: null, working: false, approx: false, rewriteTokens: ctxTokens }, model, cache.ttl_secs, fast, ctxTokens) ?? t('快取已冷'),
+    }
+  }
+  return { label: t('剩 {time}', { time: clockText(remaining) }), level: cacheLevel(remaining), title: t('快取 {ttl} 保留，倒數至最近一次請求完成後 {ttl}', { ttl: cache.ttl_secs === 3600 ? '1h' : '5m' }) }
+}
+
 /**
  * claude-api 的快取冷提示（只提示、不擋送出）：已冷，或剩不到 1 分鐘時，講下一則約重寫多少 token、約多少錢。
  * 單價用這顆 bot 目前的 TTL 對應的 write 單價（fast 2×）；不認得的模型只講 token 數。
@@ -183,6 +220,6 @@ export function apiColdWarning(v: CacheView | null, model: string | null | undef
   const lead = cold ? t('快取已冷') : t('快取剩不到 1 分鐘')
   if (tokens === null) return t('{lead}：下一則會重寫整段 context', { lead })
   if (!rate) return t('{lead}：下一則約重寫 {tokens} token', { lead, tokens: tokensK(tokens) })
-  const usd = (tokens / 1_000_000) * (ttlSecs === 3600 ? rate.h1 : rate.m5) * (fast ? 2 : 1)
+  const usd = apiRewriteUsd(tokens, model, ttlSecs, fast)!
   return t('{lead}：下一則約重寫 {tokens} token（約 ${cost}）', { lead, tokens: tokensK(tokens), cost: usd.toFixed(2) })
 }

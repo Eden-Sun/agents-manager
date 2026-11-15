@@ -53,3 +53,36 @@ mod context_tests {
         assert_eq!(context_tokens(&json!({})), 0);
     }
 }
+
+/// prompt cache 倒數的精確依據（`api-usage` 的 `cache`）：最近一次**已收到回應**（recorded）的請求完成時間＋那一回合選的 TTL。
+/// 有 reserved（請求進行中）＝`working`，網頁顯示「熱」。沒有 recorded 請求＝全 null（沒有 cache 可倒數）。
+pub(crate) async fn cache_info(db: &SqlitePool, bot_id: &str) -> Result<Value, sqlx::Error> {
+    let last: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT a.finished_at, t.cache_ttl_secs FROM api_bot_attempts a LEFT JOIN turns t ON t.id=a.turn_id \
+         WHERE a.bot_id=? AND a.state='recorded' AND a.finished_at IS NOT NULL ORDER BY a.finished_at DESC, a.ordinal DESC LIMIT 1",
+    ).bind(bot_id).fetch_optional(db).await?;
+    let working: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved')").bind(bot_id).fetch_one(db).await?;
+    Ok(cache_json(last, working))
+}
+
+fn cache_json(last: Option<(String, Option<i64>)>, working: bool) -> Value {
+    let Some((at, ttl)) = last else { return json!({"last_request_at": null, "ttl_secs": null, "expires_at": null, "working": working}) };
+    let ttl = crate::cache_clock::ttl_secs_for("claude-api", ttl).unwrap_or(crate::cache_clock::API_TTL_DEFAULT_SECS);
+    let expires = crate::db::parse_ts(&at).map(|t| crate::db::iso_at(t + chrono::Duration::seconds(ttl)));
+    json!({"last_request_at": at, "ttl_secs": ttl, "expires_at": expires, "working": working})
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_expiry_is_last_request_plus_the_turns_ttl() {
+        let v = cache_json(Some(("2026-11-15T03:00:00.000Z".into(), Some(3600))), false);
+        assert_eq!((v["ttl_secs"].as_i64(), v["expires_at"].as_str()), (Some(3600), Some("2026-11-15T04:00:00.000Z")));
+        // 沒記 TTL（舊回合）或不是 3600：5 分鐘。
+        let d = cache_json(Some(("2026-11-15T03:00:00.000Z".into(), None)), true);
+        assert_eq!((d["ttl_secs"].as_i64(), d["expires_at"].as_str(), d["working"].as_bool()), (Some(300), Some("2026-11-15T03:05:00.000Z"), Some(true)));
+        assert!(cache_json(None, false)["expires_at"].is_null());
+    }
+}

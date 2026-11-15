@@ -86,6 +86,7 @@ async fn api_usage_sums_attempts_and_is_user_only() {
     assert_eq!(body["tokens"], json!({"input":100,"output":50,"cache_read":300,"cache_creation":100}));
     assert_eq!(body["cache_hit_rate"], json!(0.6));
     assert_eq!(body["last"]["speed"], "standard");
+    assert!(body["cache"].is_object() && body["cache"].get("expires_at").is_some() && body["cache"].get("working").is_some(), "{body}");
     assert!(body["context"].is_object() && body["context"].get("tokens").is_some() && body["context"].get("compact_at").is_some(), "{body}");
     assert_eq!(body["turns"], json!([]), "沒有 turn_id 的 attempt 不算 turn");
     let body2: Value = serde_json::from_str(turns_resp.split("\r\n\r\n").nth(1).unwrap().trim()).unwrap();

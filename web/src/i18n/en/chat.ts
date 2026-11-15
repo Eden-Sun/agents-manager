@@ -60,6 +60,9 @@ export default {
   // lib/composerCost.ts
   '已冷（約）': 'Cold (estimated)',
   '已冷': 'Cold',
+  '剩 {time}': '{time} left',
+  '已冷（重寫約 ${cost}）': 'Cold (rewrite ≈ ${cost})',
+  '快取 {ttl} 保留，倒數至最近一次請求完成後 {ttl}': 'Prompt cache TTL {ttl}; counts down from the completion of the latest request',
   '熱': 'Warm',
   '熱（約剩 {n} 分）': 'Warm (about {n} min left)',
   '熱（剩 {n} 分）': 'Warm ({n} min left)',

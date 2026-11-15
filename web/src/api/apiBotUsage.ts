@@ -24,6 +24,8 @@ export interface ApiBotUsage {
   cache_hit_rate: number | null
   /** 最近 50 個 turn 各自的花費（美元；cost_usd＝recorded，reserved_usd＝進行中的預留）。 */
   turns: ApiTurnCost[]
+  /** prompt cache 倒數依據（daemon 精確給；最近一次已收到回應的請求完成時間＋該回合的 TTL）。 */
+  cache: { last_request_at: string | null; ttl_secs: number | null; expires_at: string | null; working: boolean }
   /** 目前 context 大小（最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；壓縮後會下降）與壓縮門檻；沒有資料／關閉＝null。 */
   context: { tokens: number | null; compact_at: number | null }
   /** 最近一次 recorded 呼叫：speed 是**上一次呼叫**實際用的（不是目前設定）；三種 input 加起來是它讀到的整段 context。 */
@@ -56,6 +58,7 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
   const nn = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
   return {
     turns,
+    cache: { last_request_at: optStr(pick(rec(r.cache), 'last_request_at')), ttl_secs: nn(rec(r.cache).ttl_secs), expires_at: optStr(pick(rec(r.cache), 'expires_at')), working: rec(r.cache).working === true },
     context: { tokens: nn(ctx.tokens), compact_at: nn(ctx.compact_at) },
     attempts: { total: n(a, 'total'), recorded: n(a, 'recorded'), reserved: n(a, 'reserved'), unknown: n(a, 'unknown'), failed: n(a, 'failed') },
     cost_microusd: { recorded: n(c, 'recorded'), reserved: n(c, 'reserved'), unknown: n(c, 'unknown') },

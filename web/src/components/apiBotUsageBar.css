@@ -127,3 +127,9 @@
   color: var(--warn, #b26a00);
   font-weight: 650;
 }
+
+/* 快取倒數：顏色門檻同 cacheLevel（>15 分綠、5–15 黃、<5 紅；冷＝暗）；回合中的「熱」用綠。 */
+.api-usage-bar .api-cache-fresh .sl-v, .api-usage-bar .api-cache-hot .sl-v { color: var(--ok, #3fb950); }
+.api-usage-bar .api-cache-warn .sl-v { color: var(--warn, #d29922); }
+.api-usage-bar .api-cache-low .sl-v { color: var(--err, #f85149); }
+.api-usage-bar .api-cache-cold .sl-v { opacity: 0.7; }
