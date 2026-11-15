@@ -522,7 +522,7 @@ pub(super) fn failure_explanation(reason: &str) -> std::borrow::Cow<'static, str
     match reason {
         "api_total_cap_reached" => "已達總花費上限。".into(),
         "api_bot_turn_cost_cap_exceeded" => "這一回合累計花費加上下一次請求的預留額，會超過單回合成本上限（max_turn_cost_microusd），所以沒有送出請求。".into(),
-        "api_bot_hourly_limit_reached" => "過去一小時的請求數已達上限（max_requests_per_hour），所以沒有送出請求。".into(),
+        "api_bot_hourly_limit_reached" => "過去一小時的請求數已達上限（max_requests_per_hour，只限非使用者發起的回合），所以沒有送出請求。".into(),
         "api_bot_key_unavailable" => "讀不到 API key（[claude_api] key_file），所以沒有送出請求。".into(),
         "api_bot_quote_refused" => "請求無法估價（超過上下文上限或含未核准的欄位），所以沒有送出請求。".into(),
         "api_bot_max_calls_reached" => "這一回合的 API 呼叫次數已達上限（max_api_calls_per_turn）。".into(),

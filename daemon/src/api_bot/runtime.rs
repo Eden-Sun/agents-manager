@@ -527,10 +527,13 @@ impl ApiBotRuntime {
             Some(&agent_md.text),
         );
         let system = serde_json::Value::String(fresh_system_text.clone());
+        // 每小時請求數只是「非使用者發起的回合」（relay 派工、排程、daemon 通知）的保險絲；使用者本人的回合（queue_class='user'）完全不受限（使用者 2026-11-15）。
+        let queue_class: Option<String> = sqlx::query_scalar("SELECT queue_class FROM turns WHERE id=?").bind(&key.turn_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?;
+        let hourly_fuse = hourly_fuse_for(queue_class.as_deref(), limits.max_requests_per_hour);
         let adapter_limits = super::adapter::AdapterLimits {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
-            max_requests_per_hour: i64::from(limits.max_requests_per_hour),
+            max_requests_per_hour: hourly_fuse,
             total_cap_usd: cfg.claude_api.api_bot.total_cap_usd,
             total_cap_since: cfg.claude_api.api_bot.total_cap_since.clone(),
         };
@@ -1877,6 +1880,11 @@ fn map_runner_result(
     }
 }
 
+/// 這一回合適用的每小時請求數上限：使用者發起的回合（`queue_class='user'`）一律不限（0）；其餘（relay、daemon、查不到來源）照設定，設定 0＝不限。
+pub(crate) fn hourly_fuse_for(queue_class: Option<&str>, configured: u32) -> i64 {
+    if queue_class == Some("user") { 0 } else { i64::from(configured) }
+}
+
 /// 回合時限 `turn_timeout_secs` 的兩道期限：軟期限＝時限的 85%（到了不再開始新動作，送一次收尾請求要摘要；
 /// 進行中的請求與工具讓它跑完，避免請求中途被砍造成計費不明）；硬期限＝時限＋120 秒（收尾也沒完成才取消、回合失敗）。
 pub(crate) fn turn_deadlines(turn_timeout_secs: u64) -> (Duration, Duration) {
@@ -2470,3 +2478,17 @@ fn already_updated_with(messages: &[super::protocol::Message], fresh: &str) -> b
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod hourly_fuse_tests {
+    use super::hourly_fuse_for;
+
+    #[test]
+    fn user_turns_are_never_rate_limited_and_others_follow_the_config() {
+        assert_eq!(hourly_fuse_for(Some("user"), 60), 0, "使用者回合完全不限，即使設定了 60");
+        assert_eq!(hourly_fuse_for(Some("relay"), 60), 60);
+        assert_eq!(hourly_fuse_for(Some("daemon"), 60), 60);
+        assert_eq!(hourly_fuse_for(None, 60), 60, "查不到來源保守照設定");
+        assert_eq!(hourly_fuse_for(Some("relay"), 0), 0, "0＝不限");
+    }
+}

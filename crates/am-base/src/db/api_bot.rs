@@ -244,7 +244,7 @@ pub async fn reserve(
             && a.reserved_microusd > 0
             && !a.pricing_version.is_empty()
             && max_turn_microusd > 0
-            && max_per_hour > 0,
+            && max_per_hour >= 0,
         "invalid attempt limits"
     );
     ensure!(
@@ -273,7 +273,8 @@ pub async fn reserve(
             .bind(super::iso_in(-3600))
             .fetch_one(&mut *tx)
             .await?;
-    if count >= max_per_hour {
+    // max_per_hour <= 0＝不限（使用者發起的回合、或設定為 0）。
+    if max_per_hour > 0 && count >= max_per_hour {
         return Err(anyhow::Error::new(ReserveRefused::HourlyLimit));
     }
     let revision = cas(&mut tx, f, checkpoint, &at).await?;
@@ -766,6 +767,25 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), usage);
         assert!(!stored.contains("PRIVATE"));
     }
+    /// 每小時請求數：>0 才擋；0＝不限（只給非使用者發起的回合當保險絲，使用者回合一律傳 0）。
+    #[tokio::test]
+    async fn hourly_limit_blocks_only_when_positive() {
+        let pool = pool().await;
+        let f = fence();
+        create(&pool, &f, &checkpoint(false)).await.unwrap();
+        let a = attempt_data();
+        reserve(&pool, &f, &a, &checkpoint(true), 1000, 1).await.unwrap();
+        let f1 = Fence { revision: 1, ..f };
+        let receipt = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(1) };
+        let revision = record(&pool, &f1, a.id, &receipt, &checkpoint(false)).await.unwrap();
+        let f2 = Fence { revision, ..f1 };
+        let next = Attempt { id: "next", ordinal: 1, ..a.clone() };
+        let blocked = reserve(&pool, &f2, &next, &checkpoint(true), 1000, 1).await.unwrap_err();
+        assert!(matches!(blocked.downcast_ref::<ReserveRefused>(), Some(ReserveRefused::HourlyLimit)), "{blocked:?}");
+        assert_eq!(count(&pool).await, 1, "被擋的預留不留列");
+        reserve(&pool, &f2, &next, &checkpoint(true), 1000, 0).await.expect("0＝不限");
+        assert_eq!(count(&pool).await, 2);
+    }
     #[tokio::test]
     async fn budget_rate_and_unknown_reservations_remain_conservative() {
         let pool = pool().await;
@@ -776,9 +796,6 @@ mod tests {
             .await
             .is_err());
         assert_eq!(count(&pool).await, 0);
-        assert!(reserve(&pool, &f, &a, &checkpoint(true), 100, 0)
-            .await
-            .is_err());
         reserve(&pool, &f, &a, &checkpoint(true), 100, 1)
             .await
             .unwrap();

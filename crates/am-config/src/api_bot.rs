@@ -36,8 +36,10 @@ pub fn default_max_api_calls_per_turn() -> u32 {
     20
 }
 
+/// 0＝不限（預設，使用者 2026-11-15）。這個保險絲只管**非使用者發起**的回合（relay 派工、排程、daemon 通知）；
+/// 使用者本人發起的回合（網頁、使用者 prompt）完全不受限。
 pub fn default_max_requests_per_hour() -> u32 {
-    60
+    0
 }
 
 pub fn default_turn_timeout_secs() -> u64 {
@@ -103,9 +105,9 @@ impl ApiBotCfg {
             ));
         }
 
-        if !(1..=10000).contains(&self.max_requests_per_hour) {
+        if self.max_requests_per_hour > 10000 {
             return Err(format!(
-                "max_requests_per_hour must be in 1..=10000, got {}",
+                "max_requests_per_hour must be 0 (unlimited) or in 1..=10000, got {}",
                 self.max_requests_per_hour
             ));
         }
@@ -213,7 +215,7 @@ mod tests {
         let def = ApiBotCfg::default();
         assert!(!def.enabled);
         assert_eq!(def.max_api_calls_per_turn, 20);
-        assert_eq!(def.max_requests_per_hour, 60);
+        assert_eq!(def.max_requests_per_hour, 0, "預設不限");
         assert_eq!(def.turn_timeout_secs, 1800);
         assert_eq!(def.max_output_tokens, 8192);
         assert_eq!(def.max_checkpoint_bytes, 8_388_608);
@@ -250,7 +252,7 @@ max_turn_cost_microusd = 500000
         let api_bot = parsed.claude_api.api_bot;
         assert!(api_bot.enabled);
         assert_eq!(api_bot.max_api_calls_per_turn, 20);
-        assert_eq!(api_bot.max_requests_per_hour, 60);
+        assert_eq!(api_bot.max_requests_per_hour, 0);
         assert_eq!(api_bot.turn_timeout_secs, 1800);
         assert_eq!(api_bot.max_output_tokens, 8192);
         assert_eq!(api_bot.max_checkpoint_bytes, 8_388_608);
@@ -315,7 +317,7 @@ max_turn_cost_microusd = 500000
         // Default valid check
         let limits = cfg.validated(true).unwrap().unwrap();
         assert_eq!(limits.max_api_calls_per_turn, 20);
-        assert_eq!(limits.max_requests_per_hour, 60);
+        assert_eq!(limits.max_requests_per_hour, 0);
         assert_eq!(limits.turn_timeout_secs, 1800);
         assert_eq!(limits.max_output_tokens, 8192);
         assert_eq!(limits.max_checkpoint_bytes, 8_388_608);
@@ -334,9 +336,9 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_api_calls_per_turn = 20;
 
-        // max_requests_per_hour boundaries (1..=10000)
+        // max_requests_per_hour boundaries (0＝不限, 1..=10000)
         cfg.max_requests_per_hour = 0;
-        assert!(cfg.validated(true).is_err());
+        assert!(cfg.validated(true).is_ok());
         cfg.max_requests_per_hour = 1;
         assert!(cfg.validated(true).is_ok());
         cfg.max_requests_per_hour = 10000;

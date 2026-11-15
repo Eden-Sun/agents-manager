@@ -44,7 +44,7 @@ impl AdapterLimits {
         if self.max_checkpoint_bytes == 0 || self.max_checkpoint_bytes > 8 * 1024 * 1024 {
             return Err(http::Error::InvalidRequest);
         }
-        if self.max_turn_microusd <= 0 || self.max_requests_per_hour <= 0 {
+        if self.max_turn_microusd <= 0 || self.max_requests_per_hour < 0 {
             return Err(http::Error::InvalidRequest);
         }
         Ok(())
