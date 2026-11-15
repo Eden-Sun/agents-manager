@@ -35,8 +35,10 @@ export interface ClaudeApiBalance {
   uncertain_usd?: number
   /** 最壞情況下限餘額＝remaining_usd − uncertain_usd。 */
   remaining_floor_usd?: number
-  /** 推算值（官方只給到前一個 UTC 日）。 */
+  /** 推算值（官方數字只到 report_through，之後靠本機帳）。 */
   estimate?: boolean
+  /** 官方數字來源：analytics＝小時粒度（今天也有）；cost_report＝每日；local＝沒有官方資料。 */
+  source?: 'analytics' | 'cost_report' | 'local'
   report_through?: string | null
   local_since?: string | null
   as_of?: string | null
@@ -98,6 +100,7 @@ export function toClaudeApiBalance(raw: unknown): ClaudeApiBalance {
     uncertain_usd: typeof r.uncertain_usd === 'number' ? r.uncertain_usd : undefined,
     remaining_floor_usd: typeof r.remaining_floor_usd === 'number' ? r.remaining_floor_usd : undefined,
     estimate: r.estimate === true,
+    source: r.source === 'analytics' || r.source === 'cost_report' || r.source === 'local' ? r.source : undefined,
     report_through: optStr(r.report_through),
     local_since: optStr(r.local_since),
     as_of: optStr(r.as_of),

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -25,6 +25,8 @@ use crate::state::App;
 
 /// 快取過期時間：10 分鐘
 const CACHE_TTL: Duration = Duration::from_secs(600);
+/// 小時粒度的 `analytics/cost` 快取 3 分鐘（官方資料本身有 4 小時以內的延遲，更新不會比這更快）。
+const ANALYTICS_TTL: Duration = Duration::from_secs(180);
 
 /// cost_report 單日桶資料
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,8 @@ pub struct CostReportResponse {
 #[derive(Default)]
 pub struct BalanceCache {
     inner: Mutex<Option<CachedReport>>,
+    /// 小時粒度的 `analytics/cost`：（抓取時間, 請求起點, 桶, data_refreshed_at）。
+    analytics: Mutex<Option<(Instant, String, Vec<CostReportBucket>, Option<String>)>>,
 }
 
 struct CachedReport {
@@ -61,7 +65,19 @@ struct CachedReport {
 
 impl BalanceCache {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(None) }
+        Self { inner: Mutex::new(None), analytics: Mutex::new(None) }
+    }
+
+    async fn get_analytics(&self, starting_at: &str) -> Option<(Vec<CostReportBucket>, Option<String>)> {
+        let guard = self.analytics.lock().await;
+        match &*guard {
+            Some((at, req, buckets, refreshed)) if req == starting_at && at.elapsed() < ANALYTICS_TTL => Some((buckets.clone(), refreshed.clone())),
+            _ => None,
+        }
+    }
+
+    async fn set_analytics(&self, starting_at: String, buckets: Vec<CostReportBucket>, refreshed: Option<String>) {
+        *self.analytics.lock().await = Some((Instant::now(), starting_at, buckets, refreshed));
     }
 
     async fn get(&self, starting_at: &str) -> Option<Vec<CostReportBucket>> {
@@ -86,6 +102,7 @@ impl BalanceCache {
     pub async fn invalidate(&self) {
         let mut guard = self.inner.lock().await;
         *guard = None;
+        *self.analytics.lock().await = None;
     }
 }
 
@@ -105,6 +122,16 @@ fn start_of_day(dt: DateTime<Utc>) -> DateTime<Utc> {
 fn start_of_next_day(dt: DateTime<Utc>) -> DateTime<Utc> {
     let next_date = dt.date_naive().succ_opt().unwrap_or(dt.date_naive());
     Utc.with_ymd_and_hms(next_date.year(), next_date.month(), next_date.day(), 0, 0, 0).unwrap()
+}
+
+/// 往上取到整點（`anchor` 剛好在整點就是它自己）。官方小時桶不能切開，錨點那一小時整個不用官方、改用本機帳。
+fn ceil_to_hour(dt: DateTime<Utc>) -> DateTime<Utc> {
+    let floor = Utc.with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), 0, 0).unwrap();
+    if floor == dt { floor } else { floor + chrono::Duration::hours(1) }
+}
+
+fn floor_to_hour(dt: DateTime<Utc>) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), 0, 0).unwrap()
 }
 
 /// 將微美元轉為美元（微美元＝10^-6 USD）
@@ -211,6 +238,67 @@ pub fn compute_balance_spent(
     })
 }
 
+/// 小時粒度版（`analytics/cost`，今天也有官方數字，只差 `data_refreshed_at` 之後的空窗）：
+/// 1. 錨點到下一個整點：本機帳（小時桶切不開錨點那一小時）；
+/// 2. 下一個整點起、到 `data_refreshed_at`（往下取整點）為止：官方小時桶（`amount` 單位是美分字串）；
+/// 3. 官方資料之後到現在：本機帳。
+/// 不確定的 attempt 只在 1、3 兩段列出（2 段已被官方數字取代）。`report_through`＝官方涵蓋到的整點。
+pub fn compute_balance_hourly(
+    anchor_usd: f64,
+    anchor_at_dt: DateTime<Utc>,
+    hour_buckets: &[CostReportBucket],
+    data_refreshed_at: Option<DateTime<Utc>>,
+    local_attempts: &[AttemptSpent],
+    now: DateTime<Utc>,
+) -> Result<BalanceCalculation> {
+    let t_hour = ceil_to_hour(anchor_at_dt);
+    let limit = data_refreshed_at.map(|r| floor_to_hour(r.min(now))).unwrap_or(t_hour);
+    let official_through = limit.max(t_hour);
+
+    let (mut head_local, mut tail_local, mut uncertain) = (0.0, 0.0, 0.0);
+    for att in local_attempts {
+        let Ok(ts) = parse_rfc3339(&att.created_at) else { continue };
+        let in_head = ts >= anchor_at_dt && ts < t_hour;
+        let in_tail = ts >= official_through;
+        if !(in_head || in_tail) {
+            continue;
+        }
+        if att.uncertain {
+            uncertain += microusd_to_usd(att.microusd);
+        } else if in_head {
+            head_local += microusd_to_usd(att.microusd);
+        } else {
+            tail_local += microusd_to_usd(att.microusd);
+        }
+    }
+
+    let mut official = 0.0;
+    for b in hour_buckets {
+        let (b_start, b_end) = (parse_rfc3339(&b.starting_at)?, parse_rfc3339(&b.ending_at)?);
+        if b_start >= t_hour && b_end <= official_through {
+            for r in &b.results {
+                if let Some(amt) = &r.amount {
+                    official += cents_str_to_usd(amt)?;
+                }
+            }
+        }
+    }
+
+    let total_spent = head_local + official + tail_local;
+    let remaining_usd = anchor_usd - total_spent;
+    Ok(BalanceCalculation {
+        anchor_usd,
+        anchor_at: am_base::db::iso_at(anchor_at_dt),
+        spent_usd: total_spent,
+        remaining_usd,
+        uncertain_usd: uncertain,
+        remaining_floor_usd: remaining_usd - uncertain,
+        report_through: (official_through > t_hour).then(|| am_base::db::iso_at(official_through)),
+        local_since: am_base::db::iso_at(official_through),
+        breakdown: BalanceBreakdown { t_day_local_usd: head_local, report_usd: official, recent_local_usd: tail_local },
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceBreakdown {
     pub t_day_local_usd: f64,
@@ -297,6 +385,66 @@ pub async fn fetch_cost_report(
 }
 
 /// 查詢 DB 中 created_at >= anchor_at 的 recorded 與 unknown 帳
+/// 小時粒度的 `GET /v1/organizations/analytics/cost`（2026-08 新端點，要 beta header；今天也有數字，延遲約 4 小時以內）。
+/// 回傳（轉成跟 cost_report 同形狀的小時桶, `data_refreshed_at`）。`amount` 的單位跟 cost_report 一樣是美分字串。
+/// 唯讀；admin key 只放在 header、不進 log。範圍最多 31 天，錨點更早的話只取最近 31 天（餘額估算本來就該重新校正）。
+pub async fn fetch_analytics_cost(
+    admin_key: &str,
+    starting_at: &str,
+    ending_at: &str,
+) -> Result<(Vec<CostReportBucket>, Option<String>)> {
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build()?;
+    let mut buckets = Vec::new();
+    let mut refreshed: Option<String> = None;
+    let mut page: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "https://api.anthropic.com/v1/organizations/analytics/cost?starting_at={}&ending_at={}&time_bucket_width=1h&order_by=time&order=asc&limit=200",
+            url_encode(starting_at),
+            url_encode(ending_at)
+        );
+        if let Some(ref p) = page {
+            url.push_str("&page=");
+            url.push_str(&url_encode(p));
+        }
+        let resp = client
+            .get(&url)
+            .header("x-api-key", admin_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "analytics-usage-cost-2026-08-24")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic analytics/cost returned {status}: {}", body.chars().take(200).collect::<String>()));
+        }
+        let v: Value = resp.json().await?;
+        buckets.extend(parse_analytics_rows(&v));
+        refreshed = v.get("data_refreshed_at").and_then(Value::as_str).map(str::to_string).or(refreshed);
+        match (v.get("has_more").and_then(Value::as_bool), v.get("next_page").and_then(Value::as_str)) {
+            (Some(true), Some(next)) => page = Some(next.to_string()),
+            _ => break,
+        }
+    }
+    Ok((buckets, refreshed))
+}
+
+/// `analytics/cost` 的 `data[]` → 同一小時多列（有 group）加總成一個桶。純函式，測試用。
+pub fn parse_analytics_rows(v: &Value) -> Vec<CostReportBucket> {
+    let mut out: Vec<CostReportBucket> = Vec::new();
+    for row in v.get("data").and_then(Value::as_array).into_iter().flatten() {
+        let (Some(start), Some(end)) = (row.get("starting_at").and_then(Value::as_str), row.get("ending_at").and_then(Value::as_str)) else { continue };
+        let Some(amount) = row.pointer("/cost/amount").and_then(Value::as_str) else { continue };
+        let currency = row.pointer("/cost/currency").and_then(Value::as_str).map(str::to_string);
+        match out.iter_mut().find(|b| b.starting_at == start) {
+            Some(b) => b.results.push(CostReportResult { currency, amount: Some(amount.to_string()) }),
+            None => out.push(CostReportBucket { starting_at: start.into(), ending_at: end.into(), results: vec![CostReportResult { currency, amount: Some(amount.to_string()) }] }),
+        }
+    }
+    out
+}
+
 pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> Result<Vec<AttemptSpent>> {
     let rows: Vec<(String, i64, bool)> = sqlx::query_as(
         "SELECT created_at,
@@ -376,41 +524,70 @@ pub async fn get_claude_api_balance(
         }
     };
 
-    // 嘗試抓取 cost_report
+    // 官方數字：先用小時粒度的 analytics/cost（今天也有，只差 data_refreshed_at 之後的空窗）；
+    // 這個端點不給（beta、組織不支援）才退回每日的 legacy cost_report（只到前一個 UTC 日）。
     let mut api_error: Option<String> = None;
-    // 錨點隔天 0 點還沒過完一整天時，cost_report 不會有任何可用的日子；這時去查會被回 400（ending 必須晚於 starting）。
-    let report_buckets = if start_of_next_day(anchor_dt) >= start_of_day(now) {
-        Vec::new()
-    } else if let Some(ref key) = admin_key {
-        let starting_at_req = am_base::db::iso_at(start_of_next_day(anchor_dt));
-        if let Some(cached) = cache.get(&starting_at_req).await {
-            cached
-        } else {
-            match fetch_cost_report(key, &starting_at_req).await {
-                Ok(buckets) => {
-                    cache.set(starting_at_req, buckets.clone()).await;
-                    buckets
+    let mut source = "local";
+    let mut analytics: Option<(Vec<CostReportBucket>, Option<DateTime<Utc>>)> = None;
+    if let Some(ref key) = admin_key {
+        let hourly_start = am_base::db::iso_at(ceil_to_hour(anchor_dt).max(floor_to_hour(now) - chrono::Duration::days(30)));
+        let hourly_end = am_base::db::iso_at(floor_to_hour(now) + chrono::Duration::hours(1));
+        let got = match cache.get_analytics(&hourly_start).await {
+            Some(c) => Ok(c),
+            None => match fetch_analytics_cost(key, &hourly_start, &hourly_end).await {
+                Ok((buckets, refreshed)) => {
+                    cache.set_analytics(hourly_start.clone(), buckets.clone(), refreshed.clone()).await;
+                    Ok((buckets, refreshed))
                 }
-                Err(e) => {
-                    tracing::warn!("fetch_cost_report failed: {e}");
-                    api_error = Some(e.to_string());
-                    Vec::new()
-                }
+                Err(e) => Err(e),
+            },
+        };
+        match got {
+            Ok((buckets, refreshed)) => {
+                source = "analytics";
+                analytics = Some((buckets, refreshed.as_deref().and_then(|r| parse_rfc3339(r).ok())));
+            }
+            Err(e) => {
+                tracing::warn!("fetch_analytics_cost failed, falling back to cost_report: {e}");
+                api_error = Some(e.to_string());
             }
         }
     } else {
         api_error = Some("admin key unavailable".into());
-        Vec::new()
-    };
+    }
 
-    // 計算
-    let calc = compute_balance_spent(
-        anchor_usd,
-        anchor_dt,
-        &report_buckets,
-        &local_attempts,
-        now,
-    ).map_err(|e| LcError::Bad(format!("calculation error: {e}")))?;
+    let calc = if let Some((buckets, refreshed)) = analytics {
+        compute_balance_hourly(anchor_usd, anchor_dt, &buckets, refreshed, &local_attempts, now)
+            .map_err(|e| LcError::Bad(format!("calculation error: {e}")))?
+    } else {
+        // 錨點隔天 0 點還沒過完一整天時，cost_report 不會有任何可用的日子；這時去查會被回 400（ending 必須晚於 starting）。
+        let report_buckets = if start_of_next_day(anchor_dt) >= start_of_day(now) {
+            Vec::new()
+        } else if let Some(ref key) = admin_key {
+            let starting_at_req = am_base::db::iso_at(start_of_next_day(anchor_dt));
+            if let Some(cached) = cache.get(&starting_at_req).await {
+                source = "cost_report";
+                cached
+            } else {
+                match fetch_cost_report(key, &starting_at_req).await {
+                    Ok(buckets) => {
+                        cache.set(starting_at_req, buckets.clone()).await;
+                        source = "cost_report";
+                        buckets
+                    }
+                    Err(e) => {
+                        tracing::warn!("fetch_cost_report failed: {e}");
+                        api_error = Some(e.to_string());
+                        Vec::new()
+                    }
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        compute_balance_spent(anchor_usd, anchor_dt, &report_buckets, &local_attempts, now)
+            .map_err(|e| LcError::Bad(format!("calculation error: {e}")))?
+    };
 
     let mut resp = json!({
         "configured": true,
@@ -607,5 +784,69 @@ mod tests {
         assert!((r.uncertain_usd - 19.59).abs() < 1e-6, "只列今天的不確定（19.59），11/14 的被官方取代");
         assert!((r.remaining_usd - (100.0 - 15.9278 - 35.898529)).abs() < 1e-3, "餘額不扣不確定的");
         assert!((r.remaining_floor_usd - (r.remaining_usd - 19.59)).abs() < 1e-6, "最壞下限才扣");
+    }
+
+    fn bucket(start: &str, end: &str, cents: &[&str]) -> CostReportBucket {
+        CostReportBucket {
+            starting_at: start.into(),
+            ending_at: end.into(),
+            results: cents.iter().map(|c| CostReportResult { currency: Some("USD".into()), amount: Some((*c).into()) }).collect(),
+        }
+    }
+
+    /// 2026-11-15 實測形狀：`analytics/cost` 小時粒度連今天都有，到 `data_refreshed_at` 為止（約 4 小時延遲）。
+    /// 官方段取代本機帳；錨點那一小時與官方資料之後的空窗才用本機帳；不確定的只在本機段列。
+    #[test]
+    fn hourly_official_numbers_cover_today_and_local_ledger_fills_only_the_edges() {
+        let anchor = DateTime::parse_from_rfc3339("2026-11-15T05:52:10Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-11-15T11:20:00Z").unwrap().with_timezone(&Utc);
+        let refreshed = DateTime::parse_from_rfc3339("2026-11-15T10:39:59Z").unwrap().with_timezone(&Utc);
+        let buckets = vec![
+            bucket("2026-11-15T05:00:00Z", "2026-11-15T06:00:00Z", &["52.26"]),   // 錨點那一小時：不用官方
+            bucket("2026-11-15T07:00:00Z", "2026-11-15T08:00:00Z", &["125.02"]),  // $1.2502
+            bucket("2026-11-15T08:00:00Z", "2026-11-15T09:00:00Z", &["300.00", "329.80"]), // 同一小時兩列（有 group）＝$6.298
+        ];
+        let at = |h: &str, microusd: i64, uncertain: bool| AttemptSpent { created_at: format!("2026-11-15T{h}Z"), microusd, uncertain };
+        let local = vec![
+            at("05:30:00", 999_999_999, false),  // 錨點之前：不算
+            at("05:55:00", 400_000, false),      // 錨點那一小時：本機 $0.40
+            at("07:10:00", 50_000_000, false),   // 官方段內：被官方取代
+            at("08:30:00", 9_000_000, true),     // 官方段內的不確定：被官方取代，不列
+            at("10:50:00", 6_880_000, false),    // 官方資料（10:00）之後：本機 $6.88
+            at("11:00:00", 6_530_000, true),     // 空窗內的不確定：列出
+        ];
+        let r = compute_balance_hourly(98.14, anchor, &buckets, Some(refreshed), &local, now).unwrap();
+        assert!((r.breakdown.t_day_local_usd - 0.40).abs() < 1e-9, "錨點那一小時用本機");
+        assert!((r.breakdown.report_usd - (1.2502 + 6.298)).abs() < 1e-6, "官方小時桶（美分字串÷100，同小時多列加總）");
+        assert!((r.breakdown.recent_local_usd - 6.88).abs() < 1e-9, "官方資料之後的空窗用本機");
+        assert!((r.uncertain_usd - 6.53).abs() < 1e-9);
+        assert_eq!(r.report_through.as_deref(), Some("2026-11-15T10:00:00.000Z"), "官方涵蓋到 data_refreshed_at 往下取整點");
+        assert!((r.remaining_usd - (98.14 - 0.40 - 7.5482 - 6.88)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn without_a_refresh_time_the_hourly_path_falls_back_to_local_only() {
+        let anchor = DateTime::parse_from_rfc3339("2026-11-15T05:52:10Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-11-15T07:00:00Z").unwrap().with_timezone(&Utc);
+        let local = vec![AttemptSpent { created_at: "2026-11-15T06:30:00Z".into(), microusd: 1_000_000, uncertain: false }];
+        let r = compute_balance_hourly(10.0, anchor, &[], None, &local, now).unwrap();
+        assert_eq!(r.report_through, None);
+        assert!((r.remaining_usd - 9.0).abs() < 1e-9);
+    }
+
+    /// 真實回應的形狀（欄位取自 2026-11-15 的呼叫；金額與請求數是假的）：每小時一列、group 全 null、amount 是美分字串。
+    #[test]
+    fn analytics_rows_are_parsed_and_same_hour_rows_are_summed() {
+        let v = json!({"data": [
+            {"starting_at": "2026-11-15T02:00:00Z", "ending_at": "2026-11-15T03:00:00Z", "group": {"model": null}, "cost": {"currency": "USD", "amount": "1030.235030", "list_amount": "1030.235030", "requests": 44}},
+            {"starting_at": "2026-11-15T02:00:00Z", "ending_at": "2026-11-15T03:00:00Z", "group": {"model": "x"}, "cost": {"currency": "USD", "amount": "1.5", "list_amount": "1.5", "requests": 1}},
+            {"starting_at": "2026-11-15T03:00:00Z", "ending_at": "2026-11-15T04:00:00Z", "cost": {"currency": "USD", "amount": "325.66693"}},
+            {"starting_at": "bad"}
+        ], "has_more": false, "data_refreshed_at": "2026-11-15T10:39:59Z"});
+        let rows = parse_analytics_rows(&v);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].results.len(), 2);
+        let total: f64 = rows.iter().flat_map(|b| &b.results).map(|r| cents_str_to_usd(r.amount.as_deref().unwrap()).unwrap()).sum();
+        assert!((total - (10.30235030 + 0.015 + 3.2566693)).abs() < 1e-9);
     }
 }

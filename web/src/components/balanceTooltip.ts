@@ -10,6 +10,16 @@ const hhmm = (iso: string | null | undefined): string => {
 }
 
 /** Balance 晶片 tooltip 的逐行文字。`t` 由元件的 `useT()` 傳進來（模組層不呼叫 msg()）。 */
+/** 距上次校正多久：不到 1 小時／N 小時（兩天內）／N 天。 */
+export function anchorAge(iso: string | null | undefined, now: Date, t: Translate): string {
+  const ms = iso ? now.getTime() - new Date(iso).getTime() : Number.NaN
+  if (!Number.isFinite(ms) || ms < 0) return '—'
+  const h = Math.floor(ms / 3_600_000)
+  if (h < 1) return t('不到 1 小時')
+  if (h < 48) return t('{n} 小時', { n: h })
+  return t('{n} 天', { n: Math.floor(h / 24) })
+}
+
 export function balanceTooltipLines(balance: ClaudeApiBalance | null | undefined, view: BalanceView, t: Translate): string[] {
   const c = balance?.console
   const lines: string[] = []
@@ -26,13 +36,13 @@ export function balanceTooltipLines(balance: ClaudeApiBalance | null | undefined
   }
   if (view.loggedOut) lines.push(t('Console 登入已過期，需重新匯出'))
   if (balance?.configured && balance.anchor) {
-    lines.push(t('錨點：${usd}（{at}）', { usd: balance.anchor.usd.toFixed(2), at: balance.anchor.at }))
+    lines.push(t('錨點：${usd}（{at}，距上次校正 {age}）', { usd: balance.anchor.usd.toFixed(2), at: balance.anchor.at, age: anchorAge(balance.anchor.at, new Date(), t) }))
     if (balance.spent_usd !== undefined) lines.push(t('錨點以來已確定花費：${spent}（官方報表＋本機已結算帳）', { spent: balance.spent_usd.toFixed(4) }))
     if (balance.uncertain_usd !== undefined && balance.uncertain_usd > 0) {
       lines.push(t('另有結果不明的請求最多 ${unk}（以預留上限計，實際多半低很多），最壞情況餘額 ${floor}', { unk: balance.uncertain_usd.toFixed(2), floor: (balance.remaining_floor_usd ?? 0).toFixed(2) }))
     }
-    lines.push(t('這是估算：官方報表只到前一個 UTC 日，今天的用本機帳；跟 Console 對不上時以 Console 為準'))
-    if (balance.report_through) lines.push(t('官方報表涵蓋至：{dt}', { dt: balance.report_through }))
+    lines.push(t('這是估算：官方數字有數小時延遲、金額是折扣後但**扣 credits 之前**，儲值與贈送額度查不到；跟 Console 對不上時以 Console 為準，並點這裡用 Console 目前餘額校正'))
+    if (balance.report_through) lines.push(balance.source === 'analytics' ? t('官方數字（小時粒度）涵蓋至：{dt}，之後用本機帳', { dt: balance.report_through }) : t('官方報表涵蓋至：{dt}', { dt: balance.report_through }))
     if (balance.local_since) lines.push(t('本機帳計算自：{dt}', { dt: balance.local_since }))
     if (balance.error) lines.push(t('警告：{err}', { err: balance.error }))
   }

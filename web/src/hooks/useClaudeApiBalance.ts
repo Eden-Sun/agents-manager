@@ -24,6 +24,11 @@ async function load() {
   }
 }
 
+/** 校正錨點後立刻重讀。 */
+export function reloadClaudeApiBalance() {
+  return load()
+}
+
 export function useClaudeApiBalance(): ClaudeApiBalance | null {
   const [b, setB] = useState<ClaudeApiBalance | null>(latest)
   useEffect(() => {

@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
 import { resetClaudeApiBalanceForTest } from '../hooks/useClaudeApiBalance'
@@ -64,7 +64,6 @@ test('估算：顯示 API ≈$23.29；tooltip 標示估算、已確定花費、�
     assert.match(tip, /已確定花費/)
     assert.match(tip, /最多 \$19\.59.*最壞情況餘額 \$3\.70/)
     assert.match(tip, /更新於 \d\d:\d\d/)
-    assert.equal(chip()!.tagName, 'SPAN', '沒有 claude-api bot 時不可點')
   })
 })
 
@@ -86,7 +85,7 @@ test('沒設定（沒有錨點、讀不到 Console）：整格不畫', async () 
   })
 })
 
-test('點一下切到第一顆 claude-api bot', async () => {
+test('點一下開校正視窗：顯示距上次校正多久；輸入 Console 餘額送出 PUT balance-anchor；可以到 claude-api bot', async () => {
   useStore.setState({
     bots: [
       { id: 'cli-1', name: 'cli', kind: 'claude', project_id: 'p' },
@@ -94,13 +93,40 @@ test('點一下切到第一顆 claude-api bot', async () => {
     ],
     selectedBotId: 'cli-1',
   } as never)
-  await withBalance(estimate, async () => {
+  const puts: unknown[] = []
+  let current: Record<string, unknown> = { ...estimate, anchor: { usd: 98.14, at: new Date(Date.now() - 13 * 86_400_000).toISOString() } }
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path === '/claude-api/balance-anchor' && method === 'PUT') {
+      puts.push(body)
+      current = { ...current, anchor: { usd: (body as { usd: number }).usd, at: new Date().toISOString() }, remaining_usd: (body as { usd: number }).usd }
+      return { ok: true }
+    }
+    if (path === '/claude-api/balance') return current
+    return orig(method as never, path, body)
+  }) as typeof rawTransport.request
+  try {
     await mount(<BalanceQuotaChip />)
     await settle()
     assert.equal(chip()!.tagName, 'BUTTON')
+    assert.equal(document.querySelector('[data-k="quota-balance-dialog"]'), null, '點之前沒有視窗')
     await click(chip()!)
+    assert.match(document.querySelector('[data-k="anchor-age"]')?.textContent ?? '', /距上次校正：13 天/)
+    const input = document.querySelector<HTMLInputElement>('[data-k="quota-balance-dialog"] input[type="number"]')!
+    const save = document.querySelector<HTMLButtonElement>('[data-k="anchor-save"]')!
+    assert.equal(save.disabled, true, '沒填數字不能送')
+    await typeInto(input, '65.67')
+    await click(save)
+    await settle()
+    assert.deepEqual(puts, [{ usd: 65.67 }], '送出 Console 目前餘額當新錨點')
+    assert.equal(document.querySelector('[data-k="quota-balance-dialog"]'), null, '校正完關視窗')
+    assert.equal(chip()!.textContent, 'API≈$65.67', '重讀後顯示新數字')
+    await click(chip()!)
+    await click(document.querySelector<HTMLButtonElement>('[data-k="goto-api-bot"]')!)
     assert.equal(useStore.getState().selectedBotId, 'api-1')
-  })
+  } finally {
+    rawTransport.request = orig
+  }
 })
 
 test('手機：縮成短格式 $23.3', async () => {
