@@ -61,12 +61,13 @@ test('1 小時 TTL 用 1 小時寫入價、fast 2 倍；70 分鐘前才算冷', 
   })
 })
 
-test('剩不到 1 分鐘也提示；還熱、或回合進行中不提示', async () => {
+test('快取快過期也提示並提供壓縮按鈕；還熱、或回合進行中不提示', async () => {
   seed({ ttl: 300, last: minAgo(4.5) })
   await withLast(async () => {
     await mount(<ComposerCostHint botId="a1" />)
     await settle(50)
-    assert.match(warn() ?? '', /^快取剩不到 1 分鐘：下一則約重寫 100K token/)
+    assert.match(warn() ?? '', /^快取快過期，繼續工作就送出／可先壓縮：下一則約重寫 100K token/)
+    assert.ok(document.querySelector('.composer-cost .compact-btn'), '提供手動壓縮按鈕')
     await unmountAll()
     seed({ ttl: 300, last: minAgo(1) })
     await mount(<ComposerCostHint botId="a1" />)

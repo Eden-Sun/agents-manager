@@ -153,9 +153,13 @@ export function cacheLabel(v: CacheView): string {
     : t('熱（剩 {n} 分）', { n: v.mins })
 }
 
-/** 輸入框警示：只有已冷且不在回合中才有；數字是冷了這次要重寫的 token（codex 為近似，同樣寫「約」）。 */
+/** 輸入框警示：已冷或快取快過期（剩不到 2 分鐘）且不在回合中才有。 */
 export function coldWarning(v: CacheView | null): string | null {
-  if (!v || v.state !== 'cold' || v.working) return null
+  if (!v || v.working) return null
+  if (v.state === 'hot' && v.mins !== null && v.mins <= 2) {
+    return t('快取快過期，繼續工作就送出／可先壓縮')
+  }
+  if (v.state !== 'cold') return null
   return v.rewriteTokens !== null
     ? t('快取已過期，送出這則會重寫約 {tokens}', { tokens: tokensK(v.rewriteTokens) })
     : v.contextUnknown
@@ -207,17 +211,18 @@ export function apiCacheChip(cache: ApiCacheInfo, nowMs: number, ctxTokens: numb
 }
 
 /**
- * claude-api 的快取冷提示（只提示、不擋送出）：已冷，或剩不到 1 分鐘時，講下一則約重寫多少 token、約多少錢。
+ * claude-api 的快取冷提示（只提示、不擋送出）：已冷，或剩不到 2 分鐘時，講下一則約重寫多少 token、約多少錢。
  * 單價用這顆 bot 目前的 TTL 對應的 write 單價（fast 2×）；不認得的模型只講 token 數。
  */
 export function apiColdWarning(v: CacheView | null, model: string | null | undefined, ttlSecs: number | null | undefined, fast: boolean, lastTokens?: number | null): string | null {
   if (!v || v.working) return null
   const cold = v.state === 'cold'
-  if (!cold && v.mins !== 1) return null
+  const expiring = v.state === 'hot' && v.mins !== null && v.mins <= 2
+  if (!cold && !expiring) return null
   const rate = model ? API_WRITE_USD_PER_M[model] : undefined
-  // 已冷的 view 自帶重寫量；還熱（剩不到 1 分鐘）的 view 沒有，退回最近一次呼叫的整段 context。
+  // 已冷的 view 自帶重寫量；還熱（剩不到 2 分鐘）的 view 沒有，退回最近一次呼叫的整段 context。
   const tokens = v.rewriteTokens ?? lastTokens ?? null
-  const lead = cold ? t('快取已冷') : t('快取剩不到 1 分鐘')
+  const lead = cold ? t('快取已冷') : t('快取快過期，繼續工作就送出／可先壓縮')
   if (tokens === null) return t('{lead}：下一則會重寫整段 context', { lead })
   if (!rate) return t('{lead}：下一則約重寫 {tokens} token', { lead, tokens: tokensK(tokens) })
   const usd = apiRewriteUsd(tokens, model, ttlSecs, fast)!

@@ -22,8 +22,17 @@ pub struct ApiBotCfg {
     pub max_tool_output_bytes: usize,
     #[serde(default = "default_compact_at_input_tokens")]
     pub compact_at_input_tokens: u32,
+    #[serde(default = "default_clear_tool_uses_at_input_tokens")]
+    pub clear_tool_uses_at_input_tokens: u32,
+    #[serde(default = "default_clear_tool_uses_keep")]
+    pub clear_tool_uses_keep: u32,
+    #[serde(default = "default_clear_tool_uses_clear_at_least")]
+    pub clear_tool_uses_clear_at_least: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turn_cost_microusd: Option<u64>,
+    /// 依回合成本自動降一級 effort 門檻（微美元；None＝關閉，預設 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_lower_effort_turn_cost_microusd: Option<u64>,
     /// 總花費上限（美元），從 total_cap_since 起算，所有 claude-api bot 合計。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cap_usd: Option<f64>,
@@ -66,6 +75,18 @@ pub fn default_compact_at_input_tokens() -> u32 {
     150_000
 }
 
+pub fn default_clear_tool_uses_at_input_tokens() -> u32 {
+    100_000
+}
+
+pub fn default_clear_tool_uses_keep() -> u32 {
+    3
+}
+
+pub fn default_clear_tool_uses_clear_at_least() -> u32 {
+    5000
+}
+
 impl Default for ApiBotCfg {
     fn default() -> Self {
         Self {
@@ -78,7 +99,11 @@ impl Default for ApiBotCfg {
             command_timeout_secs: default_command_timeout_secs(),
             max_tool_output_bytes: default_max_tool_output_bytes(),
             compact_at_input_tokens: default_compact_at_input_tokens(),
+            clear_tool_uses_at_input_tokens: default_clear_tool_uses_at_input_tokens(),
+            clear_tool_uses_keep: default_clear_tool_uses_keep(),
+            clear_tool_uses_clear_at_least: default_clear_tool_uses_clear_at_least(),
             max_turn_cost_microusd: None,
+            auto_lower_effort_turn_cost_microusd: None,
             total_cap_usd: None,
             total_cap_since: None,
         }
@@ -163,6 +188,29 @@ impl ApiBotCfg {
             ));
         }
 
+        if self.clear_tool_uses_at_input_tokens != 0
+            && !(20_000..=900_000).contains(&self.clear_tool_uses_at_input_tokens)
+        {
+            return Err(format!(
+                "clear_tool_uses_at_input_tokens must be 0 or in 20000..=900000, got {}",
+                self.clear_tool_uses_at_input_tokens
+            ));
+        }
+
+        if !(1..=50).contains(&self.clear_tool_uses_keep) {
+            return Err(format!(
+                "clear_tool_uses_keep must be in 1..=50, got {}",
+                self.clear_tool_uses_keep
+            ));
+        }
+
+        if !(1000..=100_000).contains(&self.clear_tool_uses_clear_at_least) {
+            return Err(format!(
+                "clear_tool_uses_clear_at_least must be in 1000..=100000, got {}",
+                self.clear_tool_uses_clear_at_least
+            ));
+        }
+
         let max_turn_cost_microusd = match self.max_turn_cost_microusd {
             Some(cost) if cost >= 1 && cost <= i64::MAX as u64 => cost as i64,
             Some(0) => return Err("max_turn_cost_microusd must be greater than 0".to_string()),
@@ -177,6 +225,18 @@ impl ApiBotCfg {
             }
         };
 
+        let auto_lower_effort_turn_cost_microusd = match self.auto_lower_effort_turn_cost_microusd {
+            Some(cost) if cost >= 1 && cost <= i64::MAX as u64 => Some(cost as i64),
+            Some(0) => None,
+            Some(cost) => {
+                return Err(format!(
+                    "auto_lower_effort_turn_cost_microusd exceeds maximum allowable limit (i64::MAX): {}",
+                    cost
+                ))
+            }
+            None => None,
+        };
+
         Ok(Some(ValidatedLimits {
             max_api_calls_per_turn: self.max_api_calls_per_turn,
             max_requests_per_hour: self.max_requests_per_hour,
@@ -187,6 +247,10 @@ impl ApiBotCfg {
             max_tool_output_bytes: self.max_tool_output_bytes,
             max_turn_cost_microusd,
             compact_at_input_tokens: self.compact_at_input_tokens,
+            clear_tool_uses_at_input_tokens: self.clear_tool_uses_at_input_tokens,
+            clear_tool_uses_keep: self.clear_tool_uses_keep,
+            clear_tool_uses_clear_at_least: self.clear_tool_uses_clear_at_least,
+            auto_lower_effort_turn_cost_microusd,
         }))
     }
 }
@@ -203,6 +267,10 @@ pub struct ValidatedLimits {
     pub max_tool_output_bytes: usize,
     pub max_turn_cost_microusd: i64,
     pub compact_at_input_tokens: u32,
+    pub clear_tool_uses_at_input_tokens: u32,
+    pub clear_tool_uses_keep: u32,
+    pub clear_tool_uses_clear_at_least: u32,
+    pub auto_lower_effort_turn_cost_microusd: Option<i64>,
 }
 
 #[cfg(test)]
@@ -222,7 +290,11 @@ mod tests {
         assert_eq!(def.command_timeout_secs, 60);
         assert_eq!(def.max_tool_output_bytes, 65536);
         assert_eq!(def.compact_at_input_tokens, 150_000);
+        assert_eq!(def.clear_tool_uses_at_input_tokens, 100_000);
+        assert_eq!(def.clear_tool_uses_keep, 3);
+        assert_eq!(def.clear_tool_uses_clear_at_least, 5000);
         assert_eq!(def.max_turn_cost_microusd, None);
+        assert_eq!(def.auto_lower_effort_turn_cost_microusd, None);
         assert!(def.is_default());
     }
 
@@ -421,6 +493,42 @@ max_turn_cost_microusd = 500000
         cfg.compact_at_input_tokens = 900_001;
         assert!(cfg.validated(true).is_err());
         cfg.compact_at_input_tokens = 150_000;
+
+        // clear_tool_uses_at_input_tokens boundaries (0 or 20000..=900000)
+        cfg.clear_tool_uses_at_input_tokens = 0;
+        assert!(cfg.validated(true).is_ok());
+        cfg.clear_tool_uses_at_input_tokens = 19_999;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_at_input_tokens = 20_000;
+        assert!(cfg.validated(true).is_ok());
+        cfg.clear_tool_uses_at_input_tokens = 900_000;
+        assert!(cfg.validated(true).is_ok());
+        cfg.clear_tool_uses_at_input_tokens = 900_001;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_at_input_tokens = 100_000;
+
+        // clear_tool_uses_keep (1..=50)
+        cfg.clear_tool_uses_keep = 0;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_keep = 51;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_keep = 3;
+
+        // clear_tool_uses_clear_at_least (1000..=100000)
+        cfg.clear_tool_uses_clear_at_least = 999;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_clear_at_least = 100_001;
+        assert!(cfg.validated(true).is_err());
+        cfg.clear_tool_uses_clear_at_least = 5000;
+
+        // auto_lower_effort_turn_cost_microusd (0=None, 1..=i64::MAX)
+        cfg.auto_lower_effort_turn_cost_microusd = Some(0);
+        assert_eq!(cfg.validated(true).unwrap().unwrap().auto_lower_effort_turn_cost_microusd, None);
+        cfg.auto_lower_effort_turn_cost_microusd = Some(500_000);
+        assert_eq!(cfg.validated(true).unwrap().unwrap().auto_lower_effort_turn_cost_microusd, Some(500_000));
+        cfg.auto_lower_effort_turn_cost_microusd = Some(i64::MAX as u64 + 1);
+        assert!(cfg.validated(true).is_err());
+        cfg.auto_lower_effort_turn_cost_microusd = None;
     }
 
     #[test]

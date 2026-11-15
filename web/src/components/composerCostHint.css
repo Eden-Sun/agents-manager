@@ -6,6 +6,13 @@
   line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.composer-cost > span {
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 /* 警示色：--warn 深淺兩種模式都已量過對比。 */

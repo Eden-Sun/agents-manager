@@ -19,6 +19,8 @@ export interface ApiTurnCost {
   /** 這顆 bot 的每回合呼叫次數上限與時間上限（秒）；舊 daemon 沒給＝null。 */
   max_calls: number | null
   turn_timeout_secs: number | null
+  effort?: string | null
+  auto_lowered_effort?: boolean
 }
 
 export interface ApiBotUsage {
@@ -34,7 +36,7 @@ export interface ApiBotUsage {
   /** 目前 context 大小（最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；壓縮後會下降）與壓縮門檻；沒有資料／關閉＝null。 */
   context: { tokens: number | null; compact_at: number | null }
   /** 最近一次 recorded 呼叫：speed 是**上一次呼叫**實際用的（不是目前設定）；三種 input 加起來是它讀到的整段 context。 */
-  last: { speed: string; at: string | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number } | null
+  last: { speed: string; at: string | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; effort?: string | null; auto_lowered_effort?: boolean } | null
   /** 卡住狀態（checkpoint 未結算、attempt 逾時、啟動閘或 bot 隔離等）；正常時 null。 */
   stuck: { reason: string; message?: string } | null
 }
@@ -69,6 +71,8 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     started_at: optStr(pick(x, 'started_at')),
     max_calls: typeof x.max_calls === 'number' ? x.max_calls : null,
     turn_timeout_secs: typeof x.turn_timeout_secs === 'number' ? x.turn_timeout_secs : null,
+    effort: optStr(pick(x, 'effort')) ?? null,
+    auto_lowered_effort: x.auto_lowered_effort === true,
   }))
   const ctx = rec(r.context)
   const nn = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -80,7 +84,16 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     cost_microusd: { recorded: n(c, 'recorded'), reserved: n(c, 'reserved'), unknown: n(c, 'unknown') },
     tokens: { input: n(tk, 'input'), output: n(tk, 'output'), cache_read: n(tk, 'cache_read'), cache_creation: n(tk, 'cache_creation') },
     cache_hit_rate: typeof rate === 'number' && Number.isFinite(rate) ? rate : null,
-    last: last ? { speed: optStr(pick(last, 'speed')) ?? 'standard', at: optStr(pick(last, 'at')), input_tokens: n(last, 'input_tokens'), output_tokens: n(last, 'output_tokens'), cache_read_tokens: n(last, 'cache_read_input_tokens'), cache_creation_tokens: n(last, 'cache_creation_input_tokens') } : null,
+    last: last ? {
+      speed: optStr(pick(last, 'speed')) ?? 'standard',
+      at: optStr(pick(last, 'at')),
+      input_tokens: n(last, 'input_tokens'),
+      output_tokens: n(last, 'output_tokens'),
+      cache_read_tokens: n(last, 'cache_read_input_tokens'),
+      cache_creation_tokens: n(last, 'cache_creation_input_tokens'),
+      effort: optStr(pick(last, 'effort')) ?? null,
+      auto_lowered_effort: last.auto_lowered_effort === true,
+    } : null,
     stuck,
   }
 }

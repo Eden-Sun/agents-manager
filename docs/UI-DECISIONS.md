@@ -1198,7 +1198,8 @@ Codex 即使沒有 context 讀數，狀態列仍顯示手動「壓縮」按鈕�
     codex 是 rollout 推估，字面加「約」（`熱（約剩 23 分）`、`已冷（約）`），tooltip 說明依 rollout 推估；codex 沒有 statusLine，context 也在這裡補成同一段格式（`context 6.8% · 18k/258k`）。
   - **輸入框**（`ComposerCostHint`）：平常完全不顯示；**只有快取已冷、而且不在回合中**才在輸入框上方出一行警示色（`--warn`、粗體）：
     `快取已過期，送出這則會重寫約 811K`（N＝`recache_tokens_if_cold`，codex 用最近一次 `input_tokens` 近似；沒有數字寫「整段 context」）。
-    不擋送出、不跳確認框、不加按鈕；窄視窗單行截尾，完整句在 `title`。
+    不擋送出、不跳確認框；窄視窗單行截尾，完整句在 `title`。
+    - **快取即將冷掉提示與手動壓縮按鈕（2026-11-15）**：快取剩不到 2 分鐘（`v.state === 'hot' && v.mins <= 2`）時，在輸入框上方出警示提示『快取快過期，繼續工作就送出／可先壓縮』；支援壓縮的 bot（`claude`、`codex`、`claude-api`）在右側渲染手動「壓縮」按鈕（點擊發送 `/compact`，claude-api 經 `api_native_prompt` 啟動 trigger=1 的伺服器端 compaction）；已冷（`v.state === 'cold'`）時維持既有重寫警示且不放按鈕。
 - 只做 claude 與 codex，grok 完全不顯示。
 - 資料以 daemon 的 `run.prompt_cache` 為準（claude＝statusLine 的 `prompt_cache`，codex＝rollout 最近一筆 `token_count` 推算）；`warm`＋`expires_at` 判熱冷，
   閒置時 `warm:true` 過了 `expires_at` 也算冷。舊 daemon／舊版 claude／codex 還沒讀到 rollout 才退回 `last_api_at`＋`cache_ttl_secs` 推算（`lib/cacheClock.ts`）。

@@ -266,7 +266,11 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 0, cache_ttl_1h: false,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
         }
     }
 
@@ -277,6 +281,7 @@ mod tests {
             max_requests_per_hour: 100,
             total_cap_usd: None,
             total_cap_since: None,
+            auto_lower_effort_turn_cost_microusd: None,
         }
     }
 

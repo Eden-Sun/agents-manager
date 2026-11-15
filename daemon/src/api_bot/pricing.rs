@@ -180,7 +180,7 @@ impl QuoteProvider for DirectGlobal {
         let rates = rates(&request.options().model)?;
         if response.model != request.options().model { return Err(QuoteError::UntrustedUsage); }
         let usage = response.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
-        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo" | "iterations")) { return Err(QuoteError::UntrustedUsage); }
+        if usage.keys().any(|k| !matches!(k.as_str(), "input_tokens" | "output_tokens" | "speed" | "cache_creation_input_tokens" | "cache_read_input_tokens" | "cache_creation" | "server_tool_use" | "output_tokens_details" | "service_tier" | "inference_geo" | "iterations" | "effort" | "auto_lowered_effort")) { return Err(QuoteError::UntrustedUsage); }
         let input = usage.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let output = usage.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let speed = usage.get("speed").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
@@ -492,8 +492,22 @@ mod tests {
     use crate::api_bot::protocol::{Message, Options};
     use serde_json::json;
 
+    fn opt(model: &str, fast: bool, max_tokens: u32, compact_at: u32, cache_ttl_1h: bool) -> Options {
+        Options {
+            model: model.into(),
+            effort: "high".into(),
+            fast,
+            max_tokens,
+            compact_at_input_tokens: compact_at,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h,
+        }
+    }
+
     fn request(fast: bool, system: Value) -> RequestEnvelope {
-        RequestEnvelope::new(Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false }, system,
+        RequestEnvelope::new(opt(crate::config::API_BOT_MODEL, fast, 1024, 0, false), system,
             vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
     }
     fn response(usage: Value) -> Response {
@@ -577,7 +591,7 @@ mod tests {
 
     #[test]
     fn the_wire_body_marks_at_most_three_cache_breakpoints_and_never_changes_the_checkpoint_messages() {
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
+        let options = opt(crate::config::API_BOT_MODEL, false, 1024, 0, false);
         let messages = vec![
             Message { role: "user".into(), content: json!("one") },
             Message { role: "assistant".into(), content: json!([{"type":"thinking","thinking":"t","signature":"s"}]) },
@@ -592,7 +606,7 @@ mod tests {
     #[test]
     fn fable_quotes_cover_standard_fast_and_its_distinct_cache_read_rate() {
         for fast in [false, true] {
-            let options = Options { model: crate::config::API_BOT_FABLE_MODEL.into(), effort: "high".into(), fast, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
+            let options = opt(crate::config::API_BOT_FABLE_MODEL, fast, 1024, 0, false);
             let req = RequestEnvelope::new(options, json!("fixture"), vec![Message { role:"user".into(),content:json!("fixture") }]).unwrap();
             let q = DirectGlobal.reserve(&req).unwrap();
             assert_eq!(q.pricing_version, "claude-fable-5-2-global-2026-11-13");
@@ -671,7 +685,7 @@ mod tests {
             Message { role: "assistant".into(), content: json!("reply") },
             Message { role: "user".into(), content: json!("next question") },
         ];
-        let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false };
+        let options = opt(crate::config::API_BOT_MODEL, false, 1024, 0, false);
         let mut req = RequestEnvelope::new(options, json!("system"), long_messages).unwrap();
 
         let bound = input_token_bound(&req).unwrap() as i64;
@@ -776,7 +790,7 @@ mod tests {
     fn real_compaction_usage_with_mismatched_top_level_breakdown_is_priced_from_iterations() {
         let fable = crate::config::API_BOT_FABLE_MODEL;
         let req = RequestEnvelope::new(
-            Options { model: fable.into(), effort: "high".into(), fast: false, max_tokens: 32000, compact_at_input_tokens: 150_000, cache_ttl_1h: false },
+            opt(fable, false, 32000, 150_000, false),
             json!("s"),
             // 大 request：位元組上界要涵蓋 130k token 的壓縮輸入。
             vec![Message { role: "user".into(), content: json!("x".repeat(400_000)) }],
@@ -795,7 +809,7 @@ mod tests {
     fn iteration_entries_are_each_validated() {
         let fable = crate::config::API_BOT_FABLE_MODEL;
         let req = RequestEnvelope::new(
-            Options { model: fable.into(), effort: "high".into(), fast: false, max_tokens: 32000, compact_at_input_tokens: 150_000, cache_ttl_1h: false },
+            opt(fable, false, 32000, 150_000, false),
             json!("s"), vec![Message { role: "user".into(), content: json!("x".repeat(400_000)) }],
         ).unwrap();
         for bad in [json!({"type": "mystery", "input_tokens": 1, "output_tokens": 1}), json!({"type": "message", "input_tokens": 1}), json!({"type": "message", "input_tokens": 1, "output_tokens": 99_999}), json!({"type": "compaction", "input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 1}})] {
@@ -863,14 +877,7 @@ mod tests {
             content: json!("What should we do next?"),
         });
 
-        let opts = Options {
-            model: fable.into(),
-            effort: "high".into(),
-            fast: false,
-            max_tokens: 32000,
-            compact_at_input_tokens: 150_000,
-            cache_ttl_1h: false,
-        };
+        let opts = opt(fable, false, 32000, 150_000, false);
 
         // 以前：RequestEnvelope 序列化整個未修剪 messages（> 1.5MB），input_token_bound 直接失敗拒絕估價。
         // 現在：修剪最新 compaction 區塊之前的內容，body 遠小於 1MB，估價成功。
@@ -894,7 +901,7 @@ mod tests {
     #[test]
     fn one_hour_bots_may_carry_the_1h_cache_control_and_reserve_at_the_1h_write_rate() {
         let mk = |ttl_1h: bool| {
-            let options = Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: ttl_1h };
+            let options = opt(crate::config::API_BOT_MODEL, false, 1024, 0, ttl_1h);
             RequestEnvelope::new(options, json!("fixture"), vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
         };
         let (five, hour) = (mk(false), mk(true));
@@ -910,11 +917,11 @@ mod tests {
         assert_eq!(q1.reserved_microusd, (b1 * 80 + 1024 * 200 + 9) / 10);
         // 5 分鐘 bot 的 body 不准出現 1h（沿用既有規則）；1 小時 bot 也不准別的 TTL。
         let sneaky_1h = RequestEnvelope::new(
-            Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: false },
+            opt(crate::config::API_BOT_MODEL, false, 1024, 0, false),
             json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
         assert!(DirectGlobal.reserve(&sneaky_1h).is_err());
         let other_ttl = RequestEnvelope::new(
-            Options { model: crate::config::API_BOT_MODEL.into(), effort: "high".into(), fast: false, max_tokens: 1024, compact_at_input_tokens: 0, cache_ttl_1h: true },
+            opt(crate::config::API_BOT_MODEL, false, 1024, 0, true),
             json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"24h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
         assert!(DirectGlobal.reserve(&other_ttl).is_err());
     }
@@ -943,6 +950,9 @@ mod tests {
                 fast: opt_val.get("fast").and_then(Value::as_bool).unwrap_or(false),
                 max_tokens: opt_val.get("max_tokens").and_then(Value::as_u64).unwrap_or(32000) as u32,
                 compact_at_input_tokens: opt_val.get("compact_at_input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+                clear_tool_uses_at_input_tokens: opt_val.get("clear_tool_uses_at_input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+                clear_tool_uses_keep: opt_val.get("clear_tool_uses_keep").and_then(Value::as_u64).unwrap_or(3) as u32,
+                clear_tool_uses_clear_at_least: opt_val.get("clear_tool_uses_clear_at_least").and_then(Value::as_u64).unwrap_or(5000) as u32,
                 cache_ttl_1h: opt_val.get("cache_ttl_1h").and_then(Value::as_bool).unwrap_or(false),
             };
             let resp: Response = serde_json::from_value(fixture["response"].clone()).unwrap();

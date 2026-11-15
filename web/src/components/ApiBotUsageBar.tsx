@@ -31,6 +31,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const [editingLimits, setEditingLimits] = useState(false)
   const [newTimeout, setNewTimeout] = useState('')
   const [newCalls, setNewCalls] = useState('')
+  const [newAutoLowerCost, setNewAutoLowerCost] = useState('')
   const [savingLimits, setSavingLimits] = useState(false)
   const [limitsError, setLimitsError] = useState('')
 
@@ -105,6 +106,11 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const handleStartEditLimits = () => {
     setNewTimeout(String(cap?.turn_timeout_secs ?? ''))
     setNewCalls(String(cap?.max_api_calls_per_turn ?? ''))
+    setNewAutoLowerCost(
+      cap?.auto_lower_effort_turn_cost_microusd !== null && cap?.auto_lower_effort_turn_cost_microusd !== undefined
+        ? (cap.auto_lower_effort_turn_cost_microusd / 1e6).toString()
+        : '',
+    )
     setLimitsError('')
     setEditingLimits(true)
   }
@@ -117,9 +123,23 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
       setLimitsError(t('時間要在 1–3600 秒，呼叫次數要在 1–64'))
       return
     }
+    const payload: {
+      turn_timeout_secs: number
+      max_api_calls_per_turn: number
+      auto_lower_effort_turn_cost_microusd?: number | null
+    } = {
+      turn_timeout_secs: secs,
+      max_api_calls_per_turn: calls,
+    }
+    const costVal = parseFloat(newAutoLowerCost)
+    if (!Number.isNaN(costVal) && costVal > 0) {
+      payload.auto_lower_effort_turn_cost_microusd = Math.round(costVal * 1e6)
+    } else if (cap?.auto_lower_effort_turn_cost_microusd) {
+      payload.auto_lower_effort_turn_cost_microusd = null
+    }
     setSavingLimits(true)
     try {
-      setCap(await putClaudeApiTurnLimits({ turn_timeout_secs: secs, max_api_calls_per_turn: calls }))
+      setCap(await putClaudeApiTurnLimits(payload))
       setEditingLimits(false)
     } catch (err) {
       // 保持編輯狀態讓使用者改正（例如時間小於單一指令逾時）
@@ -260,6 +280,18 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
             <input id="turn-timeout-input" className="api-balance-input" type="number" min="1" max="3600" step="1" autoFocus value={newTimeout} disabled={savingLimits} onChange={(e) => setNewTimeout(e.target.value)} />
             <label className="sl-k" htmlFor="turn-calls-input">{t('呼叫次數（1–64）')}</label>
             <input id="turn-calls-input" className="api-balance-input" type="number" min="1" max="64" step="1" value={newCalls} disabled={savingLimits} onChange={(e) => setNewCalls(e.target.value)} />
+            <label className="sl-k" htmlFor="turn-auto-lower-input">{t('降級門檻（美元，空＝關閉）')}</label>
+            <input
+              id="turn-auto-lower-input"
+              className="api-balance-input"
+              type="number"
+              min="0"
+              step="0.01"
+              value={newAutoLowerCost}
+              disabled={savingLimits}
+              onChange={(e) => setNewAutoLowerCost(e.target.value)}
+              placeholder="0.00"
+            />
             <span className="api-limits-hint" title={t('下一回合起生效；時間到會先請模型收尾寫摘要，不是直接中止')}>{t('下一回合起生效')}</span>
             <button className="api-balance-btn" type="submit" disabled={savingLimits}>{t('儲存')}</button>
             <button className="api-balance-btn cancel" type="button" disabled={savingLimits} onClick={() => setEditingLimits(false)}>{t('取消')}</button>
@@ -270,11 +302,18 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
             type="button"
             className="sl-item api-balance-chip"
             data-k="turn-limits"
-            title={t('每回合上限：時間 {secs} 秒、API 呼叫 {calls} 次。時間到會先請模型收尾寫摘要，不是直接中止；點擊可修改（下一回合起生效）', { secs: cap.turn_timeout_secs, calls: cap.max_api_calls_per_turn })}
+            title={t('每回合上限：時間 {secs} 秒、API 呼叫 {calls} 次{lower}。時間到會先請模型收尾寫摘要，不是直接中止；點擊可修改（下一回合起生效）', {
+              secs: cap.turn_timeout_secs,
+              calls: cap.max_api_calls_per_turn,
+              lower: cap.auto_lower_effort_turn_cost_microusd ? t('、回合成本滿 ${cost} 降 effort', { cost: (cap.auto_lower_effort_turn_cost_microusd / 1e6).toFixed(2) }) : '',
+            })}
             onClick={handleStartEditLimits}
           >
             <span className="sl-k">{t('回合')}</span>
-            <span className="sl-v">{Math.round(cap.turn_timeout_secs / 60)}m · {cap.max_api_calls_per_turn} calls</span>
+            <span className="sl-v">
+              {Math.round(cap.turn_timeout_secs / 60)}m · {cap.max_api_calls_per_turn} calls
+              {cap.auto_lower_effort_turn_cost_microusd ? ` · ↓$${(cap.auto_lower_effort_turn_cost_microusd / 1e6).toFixed(2)}` : ''}
+            </span>
           </button>
         )
       ) : null}
@@ -313,6 +352,23 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
             <span className="sl-k">{t('上一次 speed')}</span>
             <span className="sl-v">{usage.last?.speed ?? '—'}</span>
           </span>
+          {usage.last?.effort ? (
+            <span
+              className={`sl-item${usage.last.auto_lowered_effort ? ' warn' : ''}`}
+              data-k="last-effort"
+              title={
+                usage.last.auto_lowered_effort
+                  ? t('回合花費超過門檻，已自動降一級 effort')
+                  : t('上一次呼叫使用的 effort')
+              }
+            >
+              <span className="sl-k">{t('上一次 effort')}</span>
+              <span className="sl-v">
+                {usage.last.effort}
+                {usage.last.auto_lowered_effort ? ` (${t('降級')})` : ''}
+              </span>
+            </span>
+          ) : null}
           <span className="sl-item" data-k="calls" title={t('已結算 {rec} 次、預留中 {res} 次、結果不明 {unk} 次、失敗 {fail} 次', { rec: usage.attempts.recorded, res: usage.attempts.reserved, unk: usage.attempts.unknown, fail: usage.attempts.failed })}>
             <span className="sl-k">{t('請求')}</span>
             <span className="sl-v">{usage.attempts.total}</span>

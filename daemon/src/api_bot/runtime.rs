@@ -529,6 +529,9 @@ impl ApiBotRuntime {
             fast: bot.fast != 0,
             max_tokens: limits.max_output_tokens,
             compact_at_input_tokens: limits.compact_at_input_tokens,
+            clear_tool_uses_at_input_tokens: limits.clear_tool_uses_at_input_tokens,
+            clear_tool_uses_keep: limits.clear_tool_uses_keep,
+            clear_tool_uses_clear_at_least: limits.clear_tool_uses_clear_at_least,
             // 每顆 bot 可選快取保留（300／3600，預設 5 分鐘）；跟 fast 一樣，每回合開始讀一次、下一回合起生效。
             cache_ttl_1h: turn_cache_ttl == 3600,
         };
@@ -553,6 +556,7 @@ impl ApiBotRuntime {
             max_requests_per_hour: hourly_fuse,
             total_cap_usd: cfg.claude_api.api_bot.total_cap_usd,
             total_cap_since: cfg.claude_api.api_bot.total_cap_since.clone(),
+            auto_lower_effort_turn_cost_microusd: limits.auto_lower_effort_turn_cost_microusd,
         };
         let (identity, expected_cursor, resume_old_admission) = self.identity_for_turn(app, &full).await?;
         let session_cursor = expected_cursor.clone();

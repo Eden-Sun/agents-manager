@@ -2,7 +2,7 @@
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
-type Row = (String, i64, i64, i64, i64, i64, i64, i64, i64, Option<String>, Option<String>);
+type Row = (String, i64, i64, i64, i64, i64, i64, i64, i64, Option<String>, Option<String>, Option<String>, Option<i64>);
 
 /// 金額換成美元（微美元 ÷ 1e6）；`recorded`＝cost_usd，`reserved` 狀態的預留額＝reserved_usd。
 pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Value>, sqlx::Error> {
@@ -15,7 +15,9 @@ pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Va
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.output_tokens'),0) END),0),
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),0) END),0),
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),0) END),0),
-                MAX(requested_speed), MIN(created_at)
+                MAX(requested_speed), MIN(created_at),
+                MAX(json_extract(usage_json,'$.effort')),
+                MAX(json_extract(usage_json,'$.auto_lowered_effort'))
          FROM api_bot_attempts WHERE bot_id=? AND turn_id IS NOT NULL AND turn_id<>''
          GROUP BY turn_id ORDER BY MAX(created_at) DESC, MAX(ordinal) DESC LIMIT 50",
     )
@@ -28,6 +30,8 @@ pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Va
         "speed": r.9,
         // 回合第一個請求送出的時間：網頁進行中的回合用它算「已進行多久」。
         "started_at": r.10,
+        "effort": r.11,
+        "auto_lowered_effort": r.12.map(|v| v != 0).unwrap_or(false),
     })).collect())
 }
 

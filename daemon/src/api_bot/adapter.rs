@@ -37,6 +37,7 @@ pub(crate) struct AdapterLimits {
     pub(crate) max_requests_per_hour: i64,
     pub(crate) total_cap_usd: Option<f64>,
     pub(crate) total_cap_since: Option<String>,
+    pub(crate) auto_lower_effort_turn_cost_microusd: Option<i64>,
 }
 
 impl AdapterLimits {
@@ -45,6 +46,9 @@ impl AdapterLimits {
             return Err(http::Error::InvalidRequest);
         }
         if self.max_turn_microusd <= 0 || self.max_requests_per_hour < 0 {
+            return Err(http::Error::InvalidRequest);
+        }
+        if self.auto_lower_effort_turn_cost_microusd.is_some_and(|t| t < 0) {
             return Err(http::Error::InvalidRequest);
         }
         Ok(())
@@ -108,6 +112,8 @@ struct CursorState {
     last_durable_state: State,
     active_attempt: Option<ActiveAttempt>,
     settled_response: Option<SettledResponse>,
+    effective_effort: String,
+    effort_auto_lowered: bool,
 }
 
 struct SettledResponse {
@@ -258,6 +264,7 @@ impl ApiBotAdapter {
             .await
             .map_err(|_| http::Error::InvalidRequest)?;
 
+        let effective_effort = options.effort.clone();
         Ok(Self {
             pool,
             identity,
@@ -276,6 +283,8 @@ impl ApiBotAdapter {
                 last_durable_state: initial_state,
                 active_attempt: None,
                 settled_response: None,
+                effective_effort,
+                effort_auto_lowered: false,
             }),
         })
     }
@@ -370,6 +379,7 @@ impl ApiBotAdapter {
             system
         };
 
+        let effective_effort = options.effort.clone();
         let adapter = Self {
             pool,
             identity: new_identity,
@@ -388,6 +398,8 @@ impl ApiBotAdapter {
                 last_durable_state: loaded_state.clone(),
                 active_attempt: None,
                 settled_response: None,
+                effective_effort,
+                effort_auto_lowered: false,
             }),
         };
 
@@ -409,8 +421,10 @@ impl Model for ApiBotAdapter {
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Response, http::Error>> {
         Box::pin(async move {
-            let (envelope, attempt_id, key) = {
+            let (envelope, attempt_id, key, effective_effort, effort_auto_lowered) = {
                 let mut cursor = self.cursor.lock().await;
+                let effective_effort = cursor.effective_effort.clone();
+                let effort_auto_lowered = cursor.effort_auto_lowered;
                 let active = cursor
                     .active_attempt
                     .as_mut()
@@ -419,8 +433,10 @@ impl Model for ApiBotAdapter {
                     return Err(http::Error::InvalidRequest);
                 }
 
+                let mut eff_options = self.options.clone();
+                eff_options.effort = effective_effort.clone();
                 let reconstructed = RequestEnvelope::new(
-                    self.options.clone(),
+                    eff_options,
                     self.system.clone(),
                     messages.to_vec(),
                 )
@@ -434,7 +450,13 @@ impl Model for ApiBotAdapter {
                 let key = active.key.take().ok_or(http::Error::InvalidRequest)?;
                 active.permit_available = false;
 
-                (active.envelope.clone(), active.id.clone(), key)
+                (
+                    active.envelope.clone(),
+                    active.id.clone(),
+                    key,
+                    effective_effort,
+                    effort_auto_lowered,
+                )
             };
 
             let req = http::FullMessagesRequest {
@@ -479,6 +501,13 @@ impl Model for ApiBotAdapter {
                     };
 
                     if let (Some(uq), None) = (&valid_quote, &content_problem) {
+                        let mut resp = resp;
+                        if let Some(obj) = resp.usage.as_object_mut() {
+                            obj.insert("effort".to_string(), Value::String(effective_effort));
+                            if effort_auto_lowered {
+                                obj.insert("auto_lowered_effort".to_string(), Value::Bool(true));
+                            }
+                        }
                         cursor.settled_response = Some(SettledResponse {
                             response: resp.clone(),
                             estimated_microusd: uq.estimated_microusd,
@@ -636,8 +665,43 @@ impl Journal for ApiBotAdapter {
                     Ok(())
                 }
                 (false, true) => {
+                    if let Some(threshold) = self.limits.auto_lower_effort_turn_cost_microusd {
+                        if threshold > 0 {
+                            let spent: i64 = sqlx::query_scalar(
+                                "SELECT COALESCE(SUM(COALESCE(estimated_microusd, reserved_microusd)), 0)
+                                 FROM api_bot_attempts WHERE turn_id=? AND state IN ('recorded', 'reserved')",
+                            )
+                            .bind(&self.identity.turn_id)
+                            .fetch_one(&self.pool)
+                            .await
+                            .unwrap_or(0);
+
+                            if spent >= threshold {
+                                let lowered = super::protocol::lower_effort_level(&self.options.effort);
+                                if lowered != self.options.effort && cursor.effective_effort != lowered {
+                                    tracing::info!(
+                                        bot_id = %self.identity.bot_id,
+                                        turn_id = %self.identity.turn_id,
+                                        from = %self.options.effort,
+                                        to = %lowered,
+                                        spent_microusd = spent,
+                                        threshold_microusd = threshold,
+                                        "auto lowered effort due to turn cost threshold"
+                                    );
+                                }
+                                cursor.effective_effort = lowered.to_string();
+                                cursor.effort_auto_lowered = lowered != self.options.effort;
+                            } else {
+                                cursor.effective_effort = self.options.effort.clone();
+                                cursor.effort_auto_lowered = false;
+                            }
+                        }
+                    }
+
+                    let mut eff_options = self.options.clone();
+                    eff_options.effort = cursor.effective_effort.clone();
                     let mut envelope = RequestEnvelope::new(
-                        self.options.clone(),
+                        eff_options,
                         self.system.clone(),
                         state.messages.clone(),
                     )

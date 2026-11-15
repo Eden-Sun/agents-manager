@@ -31,7 +31,7 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
 /// 定案之後的工作脫離請求生命週期（#1065）：工作在自己的 task 裡跑完，handler 只等它的結果。
 /// client 斷線（handler future 被 drop）時工作照樣跑完、照常 complete／record_failure，intent 不會停在 running 沒人補。
 pub(crate) async fn detach<T: Send + 'static>(
-    key: &str,
+    #[cfg_attr(not(test), allow(unused_variables))] key: &str,
     work: impl std::future::Future<Output = Result<T, LcError>> + Send + 'static,
 ) -> Result<T, LcError> {
     // 呼叫端是 task-local（config 寫入的稽核 `http=` 欄位讀它）：脫離之後要帶過去，不然工作裡寫的稽核都會變成 `-`。
@@ -5418,8 +5418,11 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
     let last_json = last.map(|(actual, requested, usage, at)| {
         let u: Value = usage.and_then(|u| serde_json::from_str(&u).ok()).unwrap_or(Value::Null);
         let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let effort = u.get("effort").and_then(Value::as_str);
+        let auto_lowered = u.get("auto_lowered_effort").and_then(Value::as_bool).unwrap_or(false);
         json!({"speed": actual.unwrap_or(requested), "at": at, "input_tokens": g("input_tokens"), "output_tokens": g("output_tokens"),
-               "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens")})
+               "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens"),
+               "effort": effort, "auto_lowered_effort": auto_lowered})
     });
     let stuck = crate::api_bot::sweeper::detect_stuck(&app, &id).await;
     // 進行中的回合要讓使用者看到「第幾次／上限、跑多久／時限」：把這顆設定的每回合上限附在每個 turn 上（回合開始時讀一次，跟 runtime 同一組數字）。

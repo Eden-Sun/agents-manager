@@ -30,4 +30,5 @@ pub trait LcHost:
     + crate::lifecycle::send_now::ports::ShareSendRepo
     + crate::login_prompt::LoginNeeded
     + crate::models::ModelsCache
+    + crate::lifecycle::api_bot_port::ApiBotPort
 {}

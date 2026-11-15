@@ -24,7 +24,11 @@ fn options() -> Options {
         effort: "medium".into(),
         fast: true,
         max_tokens: 4096,
-        compact_at_input_tokens: 0, cache_ttl_1h: false,
+        compact_at_input_tokens: 0,
+        clear_tool_uses_at_input_tokens: 0,
+        clear_tool_uses_keep: 3,
+        clear_tool_uses_clear_at_least: 5000,
+        cache_ttl_1h: false,
     }
 }
 fn initial() -> State {

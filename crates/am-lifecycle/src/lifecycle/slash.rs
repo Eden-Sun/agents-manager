@@ -768,7 +768,7 @@ pub async fn login(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
 /// grok 沒有同名指令，不猜。
 pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
     match kind {
-        "claude" | "codex" => Some("/compact"),
+        "claude" | "codex" | "claude-api" => Some("/compact"),
         _ => None,
     }
 }
@@ -788,6 +788,37 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
             "message": format!("{} has no /compact command", bot.kind),
         })));
     };
+    if bot.kind == "claude-api" {
+        let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
+            LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
+        })?;
+        if let Some(want) = expected_run_id {
+            if run.id != want || run.agent_status != "idle" {
+                return Err(LcError::conflict(
+                    "superseded_run",
+                    json!({"expected_run_id": want, "run_id": run.id, "agent_status": run.agent_status}),
+                ));
+            }
+        } else if run.agent_status != "idle" {
+            return Err(LcError::conflict(
+                "busy",
+                json!({"bot_id": bot_id, "run_id": run.id, "agent_status": run.agent_status}),
+            ));
+        }
+        let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some();
+        if in_flight {
+            return Err(LcError::conflict("turn_in_flight", json!({"bot_id": bot_id, "run_id": run.id})));
+        }
+        let crid = am_base::db::ulid();
+        app.api_native_prompt(bot_id, line, &crid).await.map_err(|e| {
+            LcError::conflict(
+                "prompt_failed",
+                json!({"bot_id": bot_id, "error": format!("{e:?}")}),
+            )
+        })?;
+        tracing::info!(bot_id, kind = %bot.kind, "sent /compact via api_native_prompt");
+        return Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() });
+    }
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
     })?;
@@ -829,6 +860,7 @@ mod compact_tests {
     fn compact_is_offered_for_claude_and_codex_only() {
         assert_eq!(compact_slash_command("claude"), Some("/compact"));
         assert_eq!(compact_slash_command("codex"), Some("/compact"));
+        assert_eq!(compact_slash_command("claude-api"), Some("/compact"));
         assert_eq!(compact_slash_command("grok"), None);
     }
 }
@@ -888,6 +920,18 @@ mod live_slash_tests {
         let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
             .bind(&turn.id).fetch_all(&app.db).await.unwrap();
         assert_eq!(messages, vec![("system".into(), "Codex 已壓縮對話。".into())]);
+    }
+
+    #[tokio::test]
+    async fn claude_api_compact_verifies_idle_and_active_run() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "api-compact-proof").await;
+        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        assert!(super::compact(&app, &bot.id, None).await.is_err());
+        let run = tt::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run).execute(&app.db).await.unwrap();
+        assert!(super::compact(&app, &bot.id, None).await.is_err());
     }
 
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";

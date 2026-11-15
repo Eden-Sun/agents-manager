@@ -6187,6 +6187,7 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         .cfg
         .update(|c| {
             c.claude_api.api_bot.compact_at_input_tokens = 0;
+            c.claude_api.api_bot.clear_tool_uses_at_input_tokens = 0;
             Ok(())
         })
         .await

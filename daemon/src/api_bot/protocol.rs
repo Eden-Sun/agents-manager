@@ -24,6 +24,9 @@ pub struct Options {
     pub fast: bool,
     pub max_tokens: u32,
     pub compact_at_input_tokens: u32,
+    pub clear_tool_uses_at_input_tokens: u32,
+    pub clear_tool_uses_keep: u32,
+    pub clear_tool_uses_clear_at_least: u32,
     /// 這顆 bot 的快取保留：true＝1 小時（`cache_control.ttl="1h"`，寫入 2×），false＝預設 5 分鐘。
     pub cache_ttl_1h: bool,
 }
@@ -43,7 +46,30 @@ impl Options {
         if self.compact_at_input_tokens != 0 && !(50_000..=900_000).contains(&self.compact_at_input_tokens) {
             return Err("invalid compaction threshold");
         }
+        if self.clear_tool_uses_at_input_tokens != 0 && !(20_000..=900_000).contains(&self.clear_tool_uses_at_input_tokens) {
+            return Err("invalid clear_tool_uses threshold");
+        }
+        if self.clear_tool_uses_at_input_tokens != 0 {
+            if !(1..=50).contains(&self.clear_tool_uses_keep) {
+                return Err("invalid clear_tool_uses keep count");
+            }
+            if !(1000..=100_000).contains(&self.clear_tool_uses_clear_at_least) {
+                return Err("invalid clear_tool_uses clear_at_least tokens");
+            }
+        }
         Ok(())
+    }
+}
+
+/// 降一級 effort（max → xhigh → high → medium → low；low 維持 low）。
+pub fn lower_effort_level(effort: &str) -> &'static str {
+    match effort.to_ascii_lowercase().as_str() {
+        "max" => "xhigh",
+        "xhigh" => "high",
+        "high" => "medium",
+        "medium" => "low",
+        "low" => "low",
+        _ => "medium",
     }
 }
 
@@ -80,8 +106,24 @@ fn mark_last_block(content: &Value, ttl_1h: bool) -> Value {
 pub const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// Server-side compaction beta header 值。
 pub const COMPACT_BETA: &str = "compact-2026-01-12";
+/// Server-side context editing（clear_tool_uses）beta header 值。
+pub const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 /// Compaction 自訂摘要指示詞。
 pub const COMPACT_INSTRUCTIONS: &str = "Keep the user's goal, decisions made, files and findings so far, open questions, and what remains to do.";
+
+/// 檢查最後一則使用者訊息是否為主動要求壓縮（`/compact`）。
+pub fn is_compact_request(messages: &[Message]) -> bool {
+    messages.last().is_some_and(|m| {
+        m.role == "user" && match &m.content {
+            Value::String(s) => s.trim() == "/compact",
+            Value::Array(blocks) => blocks.iter().any(|b| {
+                b.get("type").and_then(Value::as_str) == Some("text")
+                    && b.get("text").and_then(Value::as_str).is_some_and(|t| t.trim() == "/compact")
+            }),
+            _ => false,
+        }
+    })
+}
 
 /// 修剪訊息歷史：依 Anthropic compaction（beta compact-2026-01-12）語意，
 /// 最新 compaction 區塊之前的訊息伺服器不再使用。
@@ -150,18 +192,38 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
     }
     // 串流：長回合才看得到進度；回應由 sse.rs 組回與非串流相同的 Response。
     body["stream"] = Value::Bool(true);
-    if options.compact_at_input_tokens > 0 {
+    let mut edits = Vec::new();
+    if options.compact_at_input_tokens > 0 || is_compact_request(&messages) {
+        let trigger_val = if is_compact_request(&messages) { 1 } else { options.compact_at_input_tokens };
+        edits.push(json!({
+            "type": "compact_20260112",
+            "trigger": {
+                "type": "input_tokens",
+                "value": trigger_val,
+            },
+            "instructions": COMPACT_INSTRUCTIONS,
+        }));
+    }
+    if options.clear_tool_uses_at_input_tokens > 0 {
+        edits.push(json!({
+            "type": "clear_tool_uses_20250919",
+            "trigger": {
+                "type": "input_tokens",
+                "value": options.clear_tool_uses_at_input_tokens,
+            },
+            "keep": {
+                "type": "tool_uses",
+                "value": options.clear_tool_uses_keep,
+            },
+            "clear_at_least": {
+                "type": "input_tokens",
+                "value": options.clear_tool_uses_clear_at_least,
+            },
+        }));
+    }
+    if !edits.is_empty() {
         body["context_management"] = json!({
-            "edits": [
-                {
-                    "type": "compact_20260112",
-                    "trigger": {
-                        "type": "input_tokens",
-                        "value": options.compact_at_input_tokens,
-                    },
-                    "instructions": COMPACT_INSTRUCTIONS,
-                }
-            ]
+            "edits": edits,
         });
     }
     body
@@ -231,7 +293,11 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 0, cache_ttl_1h: false,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
         };
         assert!(opts.validate().is_ok());
         opts.compact_at_input_tokens = 50_000;
@@ -244,10 +310,27 @@ mod tests {
         assert!(opts.validate().is_err());
         opts.compact_at_input_tokens = 900_001;
         assert!(opts.validate().is_err());
+        opts.compact_at_input_tokens = 0;
+
+        // clear_tool_uses validation
+        opts.clear_tool_uses_at_input_tokens = 20_000;
+        assert!(opts.validate().is_ok());
+        opts.clear_tool_uses_at_input_tokens = 19_999;
+        assert!(opts.validate().is_err());
+        opts.clear_tool_uses_at_input_tokens = 900_001;
+        assert!(opts.validate().is_err());
+        opts.clear_tool_uses_at_input_tokens = 100_000;
+        opts.clear_tool_uses_keep = 0;
+        assert!(opts.validate().is_err());
+        opts.clear_tool_uses_keep = 3;
+        opts.clear_tool_uses_clear_at_least = 500;
+        assert!(opts.validate().is_err());
+        opts.clear_tool_uses_clear_at_least = 5000;
+        assert!(opts.validate().is_ok());
     }
 
     #[test]
-    fn context_management_included_only_when_compaction_enabled() {
+    fn context_management_included_only_when_compaction_or_clear_enabled() {
         let system = json!("system");
         let messages = vec![Message {
             role: "user".into(),
@@ -258,11 +341,16 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 0, cache_ttl_1h: false,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
         };
-        let body_no_compact = request(&opts, &system, &messages);
-        assert!(body_no_compact.get("context_management").is_none());
+        let body_none = request(&opts, &system, &messages);
+        assert!(body_none.get("context_management").is_none());
 
+        // Compaction only
         opts.compact_at_input_tokens = 150_000;
         let body_compact = request(&opts, &system, &messages);
         let cm = body_compact.get("context_management").expect("context_management should be present");
@@ -272,6 +360,38 @@ mod tests {
         assert_eq!(edits[0]["trigger"]["type"], "input_tokens");
         assert_eq!(edits[0]["trigger"]["value"], 150_000);
         assert_eq!(edits[0]["instructions"], COMPACT_INSTRUCTIONS);
+
+        // Clear tool uses only
+        opts.compact_at_input_tokens = 0;
+        opts.clear_tool_uses_at_input_tokens = 100_000;
+        let body_clear = request(&opts, &system, &messages);
+        let cm = body_clear.get("context_management").expect("context_management present");
+        let edits = cm["edits"].as_array().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["type"], "clear_tool_uses_20250919");
+        assert_eq!(edits[0]["trigger"]["value"], 100_000);
+        assert_eq!(edits[0]["keep"]["value"], 3);
+        assert_eq!(edits[0]["clear_at_least"]["value"], 5000);
+
+        // Co-existence of both compaction and clear_tool_uses
+        opts.compact_at_input_tokens = 150_000;
+        let body_both = request(&opts, &system, &messages);
+        let cm = body_both.get("context_management").expect("context_management present");
+        let edits = cm["edits"].as_array().unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0]["type"], "compact_20260112");
+        assert_eq!(edits[1]["type"], "clear_tool_uses_20250919");
+
+        // /compact user prompt forces compaction trigger value 1 even when threshold is 0
+        opts.compact_at_input_tokens = 0;
+        opts.clear_tool_uses_at_input_tokens = 0;
+        let compact_msgs = vec![Message { role: "user".into(), content: json!("/compact") }];
+        let body_manual_compact = request(&opts, &system, &compact_msgs);
+        let cm = body_manual_compact.get("context_management").expect("context_management present");
+        let edits = cm["edits"].as_array().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["type"], "compact_20260112");
+        assert_eq!(edits[0]["trigger"]["value"], 1);
     }
 
     #[test]
@@ -312,7 +432,11 @@ mod tests {
             effort: "medium".into(),
             fast: false,
             max_tokens: 4096,
-            compact_at_input_tokens: 150_000, cache_ttl_1h: false,
+            compact_at_input_tokens: 150_000,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
         };
         let body = request(&opts, &system, &messages);
         let sent_msgs = body["messages"].as_array().unwrap();
@@ -373,7 +497,17 @@ mod tests {
     #[test]
     fn one_hour_cache_ttl_marks_every_breakpoint_with_ttl_1h() {
         let messages = vec![Message { role: "user".into(), content: json!("hello") }];
-        let mut opts = Options { model: crate::config::API_BOT_MODEL.into(), effort: "medium".into(), fast: false, max_tokens: 4096, compact_at_input_tokens: 0, cache_ttl_1h: false };
+        let mut opts = Options {
+            model: crate::config::API_BOT_MODEL.into(),
+            effort: "medium".into(),
+            fast: false,
+            max_tokens: 4096,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
+        };
         let five = request(&opts, &json!("system"), &messages).to_string();
         assert!(five.contains(r#""cache_control":{"type":"ephemeral"}"#) && !five.contains("1h"));
         opts.cache_ttl_1h = true;
@@ -381,5 +515,16 @@ mod tests {
         let text = hour.to_string();
         assert_eq!(text.matches(r#""cache_control":{"ttl":"1h","type":"ephemeral"}"#).count(), text.matches("cache_control").count(), "每個斷點都帶 1h：{text}");
         assert!(text.matches("cache_control").count() >= 2);
+    }
+
+    #[test]
+    fn effort_levels_downgrade_correctly() {
+        assert_eq!(lower_effort_level("max"), "xhigh");
+        assert_eq!(lower_effort_level("xhigh"), "high");
+        assert_eq!(lower_effort_level("high"), "medium");
+        assert_eq!(lower_effort_level("medium"), "low");
+        assert_eq!(lower_effort_level("low"), "low");
+        assert_eq!(lower_effort_level("HIGH"), "medium");
+        assert_eq!(lower_effort_level("unknown"), "medium");
     }
 }

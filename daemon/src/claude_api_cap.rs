@@ -95,6 +95,8 @@ pub async fn get_claude_api_cap(app: Arc<App>) -> Result<Value, LcError> {
         "spent_usd": spent_usd,
         "turn_timeout_secs": cfg.claude_api.api_bot.turn_timeout_secs,
         "max_api_calls_per_turn": cfg.claude_api.api_bot.max_api_calls_per_turn,
+        "auto_lower_effort_turn_cost_microusd": cfg.claude_api.api_bot.auto_lower_effort_turn_cost_microusd,
+        "clear_tool_uses_at_input_tokens": cfg.claude_api.api_bot.clear_tool_uses_at_input_tokens,
     }))
 }
 
@@ -110,6 +112,9 @@ pub struct PutCapRequest {
     /// 每回合 API 呼叫次數上限（1..=64）。沒帶＝不動。
     #[serde(default)]
     pub max_api_calls_per_turn: Option<u32>,
+    /// 回合成本門檻（微美元），超過時下一個 API 呼叫降一級 effort。沒帶＝不動；帶 null 或 0＝關閉（None）；帶數字＝設定。
+    #[serde(default, deserialize_with = "present")]
+    pub auto_lower_effort_turn_cost_microusd: Option<Option<u64>>,
 }
 
 fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -140,9 +145,18 @@ pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Va
     if body.max_api_calls_per_turn.is_some_and(|n| !(1..=64).contains(&n)) {
         return Err(bad("invalid_max_api_calls_per_turn"));
     }
+    if let Some(Some(threshold)) = body.auto_lower_effort_turn_cost_microusd {
+        if threshold > i64::MAX as u64 {
+            return Err(bad("invalid_auto_lower_effort_turn_cost_microusd"));
+        }
+    }
 
     let cap_change = body.cap_usd;
-    let (timeout, calls) = (body.turn_timeout_secs, body.max_api_calls_per_turn);
+    let (timeout, calls, auto_lower) = (
+        body.turn_timeout_secs,
+        body.max_api_calls_per_turn,
+        body.auto_lower_effort_turn_cost_microusd,
+    );
     let now = am_base::db::now();
     app.cfg
         .update(move |cfg| {
@@ -163,6 +177,12 @@ pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Va
             }
             if let Some(n) = calls {
                 b.max_api_calls_per_turn = n;
+            }
+            if let Some(opt) = auto_lower {
+                b.auto_lower_effort_turn_cost_microusd = match opt {
+                    Some(0) | None => None,
+                    Some(n) => Some(n),
+                };
             }
             Ok(())
         })
@@ -186,6 +206,8 @@ pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Va
         "spent_usd": spent_usd,
         "turn_timeout_secs": after.turn_timeout_secs,
         "max_api_calls_per_turn": after.max_api_calls_per_turn,
+        "auto_lower_effort_turn_cost_microusd": after.auto_lower_effort_turn_cost_microusd,
+        "clear_tool_uses_at_input_tokens": after.clear_tool_uses_at_input_tokens,
     }))
 }
 
@@ -232,5 +254,17 @@ mod turn_limit_tests {
         let r = put_claude_api_cap(app.clone(), req(json!({"turn_timeout_secs": cmd - 1}))).await;
         assert!(matches!(r, Err(LcError::BadValue(v)) if v["reason"] == "turn_timeout_below_command_timeout"));
         assert_eq!(app.cfg.get().await.claude_api.api_bot.turn_timeout_secs, am_config::api_bot::default_turn_timeout_secs(), "被拒絕不改設定");
+    }
+
+    #[tokio::test]
+    async fn put_and_get_auto_lower_effort_turn_cost_microusd() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let out = put_claude_api_cap(app.clone(), req(json!({"auto_lower_effort_turn_cost_microusd": 500_000}))).await.unwrap();
+        assert_eq!(out["auto_lower_effort_turn_cost_microusd"], json!(500_000));
+        let got = get_claude_api_cap(app.clone()).await.unwrap();
+        assert_eq!(got["auto_lower_effort_turn_cost_microusd"], json!(500_000));
+        let cleared = put_claude_api_cap(app.clone(), req(json!({"auto_lower_effort_turn_cost_microusd": null}))).await.unwrap();
+        assert_eq!(cleared["auto_lower_effort_turn_cost_microusd"], Value::Null);
     }
 }

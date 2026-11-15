@@ -102,11 +102,14 @@ pub async fn complete_with_progress(
     let builder = builder.no_proxy();
     let client = builder.build().map_err(|_| Error::InvalidRequest)?;
     let operation = async {
-        let beta_header = if req.options.compact_at_input_tokens > 0 {
-            format!("{},{}", protocol::THINKING_BINDING_BETA, protocol::COMPACT_BETA)
-        } else {
-            protocol::THINKING_BINDING_BETA.to_string()
-        };
+        let mut betas = vec![protocol::THINKING_BINDING_BETA];
+        if req.options.compact_at_input_tokens > 0 || protocol::is_compact_request(req.messages) {
+            betas.push(protocol::COMPACT_BETA);
+        }
+        if req.options.clear_tool_uses_at_input_tokens > 0 {
+            betas.push(protocol::CONTEXT_MANAGEMENT_BETA);
+        }
+        let beta_header = betas.join(",");
         let mut response = client
             .post(url)
             .header("x-api-key", req.key)
