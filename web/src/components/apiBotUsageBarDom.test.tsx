@@ -385,3 +385,33 @@ test('ApiBotUsageBar 畫出快取倒數項目', async () => {
     rawTransport.request = orig
   }
 })
+
+test('ApiBotUsageBar 畫出卡住徽章與原因', async () => {
+  useStore.setState({ turns: { 'bot-stuck': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 1, recorded: 0, reserved: 0, unknown: 1, failed: 0 },
+        cost_microusd: { recorded: 0, reserved: 0, unknown: 1000 },
+        tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null, last: null, turns: [], context: { tokens: null, compact_at: null },
+        cache: { last_request_at: null, ttl_secs: null, expires_at: null, working: false },
+        stuck: { reason: 'checkpoint_pending_after_owner_exit', message: '回合結束但仍有未結算標記' },
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') return { cap_usd: null, since: null, spent_usd: 0 }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ApiBotUsageBar botId="bot-stuck" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const stuckChip = document.querySelector('[data-k="stuck"]')
+    assert.ok(stuckChip, '卡住徽章要在')
+    assert.equal(stuckChip.querySelector('.sl-k')?.textContent, '卡住')
+    assert.equal(stuckChip.querySelector('.sl-v')?.textContent, 'checkpoint_pending_after_owner_exit')
+  } finally {
+    rawTransport.request = orig
+  }
+})

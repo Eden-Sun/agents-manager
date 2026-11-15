@@ -376,8 +376,15 @@ impl ApiBotRuntime {
         Ok(ExplicitRetireGuard { _bot: bot, _run: admission, key, cursor, control })
     }
 
-    pub(super) fn explicit_retire_quarantined(&self, bot: &str) -> bool {
+    pub(crate) fn explicit_retire_quarantined(&self, bot: &str) -> bool {
         self.inner.explicit_quarantine.lock().expect("quarantine mutex poisoned").contains_key(bot)
+    }
+
+    pub(crate) fn remove_session_cursor(&self, bot: &str, session_id: &str) {
+        let mut sessions = self.inner.sessions.lock().expect("session mutex poisoned");
+        if sessions.get(bot).is_some_and(|c| c.identity.session_id == session_id) {
+            sessions.remove(bot);
+        }
     }
 
     pub(super) fn begin_explicit_retire(&self, guard: &ExplicitRetireGuard) -> Option<Arc<()>> {

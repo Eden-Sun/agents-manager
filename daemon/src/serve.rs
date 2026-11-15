@@ -323,6 +323,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::runners::supervisor::health::spawn(app.clone());
     crate::webpush::spawn_incident_notifier(app.clone());
     crate::api_bot::spawn_retention_ticker(app.clone());
+    crate::api_bot::spawn_sweeper(app.clone());
     // Agent titles have no herdr event, so they are polled.
     crate::runners::events::spawn_title_poller(app.clone());
     // 主力 bot 回合做完／需要回應 → 網頁推播。

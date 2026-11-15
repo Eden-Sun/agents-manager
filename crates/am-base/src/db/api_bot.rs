@@ -1102,3 +1102,66 @@ pub async fn abandon_run_reserved_on(conn: &mut SqliteConnection, bot: &str, run
     Ok(sqlx::query("UPDATE api_bot_attempts SET state='unknown', estimated_microusd=NULL, finished_at=? WHERE bot_id=? AND run_id=? AND state='reserved'")
         .bind(at).bind(bot).bind(run).execute(conn).await?.rows_affected())
 }
+
+/// Query stuck claude-api bots from SQLite database.
+/// A bot is considered stuck in the database if:
+/// 1. Its live session checkpoint has api_pending or tool_pending while its owner turn is not active.
+/// 2. It has an attempt in 'reserved' state created before `reserved_cutoff`.
+/// 3. It has an attempt in 'unknown' state before `stale_unknown_cutoff` while its live session has api_pending.
+pub async fn stuck_claude_api_bots_in_db(
+    pool: &SqlitePool,
+    reserved_cutoff: &str,
+    stale_unknown_cutoff: &str,
+) -> Result<Vec<(String, String, &'static str)>> {
+    let bots: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, name FROM bots WHERE kind='claude-api' AND deleted_at IS NULL"
+    ).fetch_all(pool).await?;
+
+    let mut stuck = Vec::new();
+    for (bot_id, name) in bots {
+        // 1. Reserved timeout
+        let has_stalled_reserved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved' AND created_at < ?)"
+        ).bind(&bot_id).bind(reserved_cutoff).fetch_one(pool).await.unwrap_or(false);
+        if has_stalled_reserved {
+            stuck.push((bot_id, name, "reserved_attempt_timeout"));
+            continue;
+        }
+
+        // 2. Checkpoint pending
+        let session: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT checkpoint_json, owner_turn_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+        ).bind(&bot_id).fetch_optional(pool).await.unwrap_or(None);
+
+        if let Some((raw_chk, owner_turn_id)) = session {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw_chk) {
+                let api_pending = val["api_pending"] == true;
+                let tool_pending = !val["tool_pending"].is_null();
+                if api_pending || tool_pending {
+                    let owner_ended = if let Some(t_id) = &owner_turn_id {
+                        let status: Option<String> = sqlx::query_scalar(
+                            "SELECT status FROM turns WHERE id=?"
+                        ).bind(t_id).fetch_optional(pool).await.unwrap_or(None);
+                        status.map_or(true, |s| s != "queued" && s != "in_flight")
+                    } else {
+                        true
+                    };
+                    if owner_ended {
+                        stuck.push((bot_id, name, "checkpoint_pending_after_owner_exit"));
+                        continue;
+                    }
+
+                    // 3. Stale unknown attempt while checkpoint is api_pending
+                    let has_stale_unknown: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='unknown' AND COALESCE(finished_at, created_at) < ?)"
+                    ).bind(&bot_id).bind(stale_unknown_cutoff).fetch_one(pool).await.unwrap_or(false);
+                    if has_stale_unknown {
+                        stuck.push((bot_id, name, "unknown_attempt_stuck"));
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    Ok(stuck)
+}

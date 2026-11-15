@@ -323,6 +323,19 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
     // 「兩個問題兩個答案」的分格照舊留著，頂層只是不再漏掉這一半。
     let core = crate::supervisor::incidents::worst(manager_severity, system_severity);
     let severity = crate::supervisor::incidents::worst(&core, responder_severity);
+    let api_bots_stuck_rows = am_base::db::api_bot::stuck_claude_api_bots_in_db(
+        app.db(),
+        &crate::db::iso_in(-1920),
+        &crate::db::iso_in(-300),
+    ).await.unwrap_or_default();
+    let api_bots_stuck: Vec<Value> = api_bots_stuck_rows
+        .into_iter()
+        .map(|(bot_id, name, reason)| json!({
+            "bot_id": bot_id,
+            "name": name,
+            "reason": reason,
+        }))
+        .collect();
     Ok(json!({
         "status": severity,
         "checked_at": crate::db::now(),
@@ -349,6 +362,7 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
         // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
         // 不進 `status`、不自動殺：可能是正常的長工作，要人或 AGM 去看。
         "background_stuck": background_stuck,
+        "api_bots_stuck": api_bots_stuck,
         "quota": app.quota_snapshot_json().await,
         // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
         // 只是以前要看得翻六張表；issue #75 驗收第 5 條。

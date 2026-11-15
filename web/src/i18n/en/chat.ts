@@ -397,6 +397,8 @@ export default {
   '終端原文與更多按鍵': 'Raw terminal output and more controls',
   '此專案尚無 Bot': 'This Project has no Bots yet',
   '讀不到 API 用量': 'Cannot read API usage',
+  '卡住': 'Stuck',
+  'Bot 卡住：{reason}': 'Bot stuck: {reason}',
   '累計花費＝已結算 ${rec}＋預留 ${res}＋結果不明 ${unk}（預留與不明先當花掉算）': 'Total spend = settled ${rec} + reserved ${res} + unknown ${unk} (reserved and unknown count as spent)',
   '累計': 'Spent',
   '含預留': 'incl. reserved',

@@ -30,6 +30,8 @@ export interface ApiBotUsage {
   context: { tokens: number | null; compact_at: number | null }
   /** 最近一次 recorded 呼叫：speed 是**上一次呼叫**實際用的（不是目前設定）；三種 input 加起來是它讀到的整段 context。 */
   last: { speed: string; at: string | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number } | null
+  /** 卡住狀態（checkpoint 未結算、attempt 逾時、啟動閘或 bot 隔離等）；正常時 null。 */
+  stuck: { reason: string; message?: string } | null
 }
 
 const rec = (v: unknown): Record<string, unknown> => (isRec(v) ? v : {})
@@ -41,6 +43,12 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
   const c = rec(r.cost_microusd)
   const tk = rec(r.tokens)
   const last = isRec(r.last) ? r.last : null
+  const stuck = isRec(r.stuck)
+    ? {
+        reason: optStr(pick(r.stuck as Record<string, unknown>, 'reason')) ?? 'stuck',
+        message: optStr(pick(r.stuck as Record<string, unknown>, 'message')) ?? undefined,
+      }
+    : null
   const rate = r.cache_hit_rate
   const turns = (Array.isArray(r.turns) ? r.turns : []).filter(isRec).map((x): ApiTurnCost => ({
     turn_id: optStr(pick(x, 'turn_id')) ?? '',
@@ -65,6 +73,7 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     tokens: { input: n(tk, 'input'), output: n(tk, 'output'), cache_read: n(tk, 'cache_read'), cache_creation: n(tk, 'cache_creation') },
     cache_hit_rate: typeof rate === 'number' && Number.isFinite(rate) ? rate : null,
     last: last ? { speed: optStr(pick(last, 'speed')) ?? 'standard', at: optStr(pick(last, 'at')), input_tokens: n(last, 'input_tokens'), output_tokens: n(last, 'output_tokens'), cache_read_tokens: n(last, 'cache_read_input_tokens'), cache_creation_tokens: n(last, 'cache_creation_input_tokens') } : null,
+    stuck,
   }
 }
 

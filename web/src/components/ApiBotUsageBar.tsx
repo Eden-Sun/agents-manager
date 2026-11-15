@@ -162,6 +162,16 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
 
   return (
     <span className="api-usage-bar" data-testid="api-usage-bar">
+      {usage.stuck ? (
+        <span
+          className="sl-item warn api-stuck-chip"
+          data-k="stuck"
+          title={t('Bot 卡住：{reason}', { reason: usage.stuck.message || usage.stuck.reason })}
+        >
+          <span className="sl-k">{t('卡住')}</span>
+          <span className="sl-v">{usage.stuck.reason}</span>
+        </span>
+      ) : null}
       {showFullDetails && (bal.usd !== undefined || bal.loggedOut) ? (
         <span
           className={`sl-item api-balance-chip readonly${bal.expiringSoon || bal.loggedOut ? ' warn' : ''}`}

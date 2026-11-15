@@ -5419,6 +5419,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         json!({"speed": actual.unwrap_or(requested), "at": at, "input_tokens": g("input_tokens"), "output_tokens": g("output_tokens"),
                "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens")})
     });
+    let stuck = crate::api_bot::sweeper::detect_stuck(&app, &id).await;
     Ok(Json(json!({
         "bot_id": id,
         "attempts": {"total": t.0, "recorded": t.1, "reserved": t.2, "unknown": t.3, "failed": t.4},
@@ -5429,6 +5430,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "context": context,
         "cache": crate::api_bot_turn_cost::cache_info(&app.db, &id).await.map_err(any_err)?,
         "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
+        "stuck": stuck.map(|s| json!({"reason": s.reason, "message": s.message})),
     })))
 }
 
