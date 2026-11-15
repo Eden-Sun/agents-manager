@@ -293,6 +293,35 @@
     }
 
     #[tokio::test]
+    async fn statusline_model_does_not_overwrite_context_1m_variants_of_same_family() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ctx1m").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let runtime = || async { db::run(&app.db, &run_id).await.unwrap().unwrap().runtime_model };
+        let send = |model: serde_json::Value| {
+            let mut body = statusline(model);
+            body.bot_id = bot.id.clone();
+            let app = app.clone();
+            Box::pin(async move { crate::hookrecv::process(&app, &body).await.unwrap() })
+        };
+
+        // 啟動時帶 [1m]（500k context 變體）：同家族的完整 id 也不算分歧。
+        sqlx::query("UPDATE runs SET runtime_model = 'sonnet[1m]' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        send(serde_json::json!({"id": "claude-sonnet-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("sonnet[1m]"), "500k context 的 [1m] 變體不被同家族完整 id 覆寫");
+
+        // 啟動時記完整 id 帶 [1m]：同家族同版本的 statusLine 也不覆寫。
+        sqlx::query("UPDATE runs SET runtime_model = 'claude-sonnet-5-5[1m]' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        send(serde_json::json!({"id": "claude-sonnet-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-sonnet-5-5[1m]"));
+
+        // 啟動時帶 [1m] 但 statusLine 是別的家族：真的換了。
+        send(serde_json::json!({"id": "claude-opus-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-opus-5-5"), "不同家族的 statusLine 會覆寫 [1m] 變體");
+    }
+
+    #[tokio::test]
     async fn a_stale_statusline_cannot_overwrite_the_current_run_and_a_db_error_keeps_the_old_value() {
         let env = crate::testing::env().await;
         let app = env.app.clone();

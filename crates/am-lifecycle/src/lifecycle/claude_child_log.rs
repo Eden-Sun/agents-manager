@@ -235,9 +235,14 @@ pub(crate) fn parse_runtime(text: &str) -> RuntimeSeen {
     seen
 }
 
-/// `claude-sonnet-5-5` 與別名 `sonnet` 算同一家族（別名由 server 決定指到哪一版，不是分歧）。
+/// `claude-sonnet-5-5` 與別名 `sonnet` 算同一家族（別名由 server 決定指到哪一版，不是分歧；帶 `[1m]` context 變體亦同）。
 fn same_family_alias(alias: &str, id: &str) -> bool {
-    matches!(alias, "opus" | "sonnet" | "haiku" | "fable") && id.to_ascii_lowercase().starts_with(&format!("claude-{alias}-"))
+    let base_alias = alias.split('[').next().unwrap_or("").trim().to_ascii_lowercase();
+    let base_id = id.split('[').next().unwrap_or("").trim().to_ascii_lowercase();
+    let is_family = |a: &str, f: &str| {
+        matches!(a, "opus" | "sonnet" | "haiku" | "fable") && f.starts_with(&format!("claude-{a}-"))
+    };
+    base_alias == base_id || is_family(&base_alias, &base_id) || is_family(&base_id, &base_alias)
 }
 
 /// 把對話檔回報的實際 model／effort 記進 `runs.runtime_*`；變了才寫、才推 `bot_status`。

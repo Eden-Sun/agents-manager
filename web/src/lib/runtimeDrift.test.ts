@@ -113,6 +113,40 @@ test('#712：codex 0.157 狀態列印顯示名 GPT-6-Luna，跟設定 gpt-6-luna
   assert.deepEqual(runtimeDrift(bot({ model: 'gpt-6-luna' }), run({ runtime_model: 'GPT-6-Sol' })).map((x) => x.field), ['model'])
 })
 
+test('claude 等價別名與 context 變體不觸發模型 drift；真正不符才標', () => {
+  // sonnet 設定與 claude-sonnet-5-5 runtime 等價（常見於 statusLine 回報）
+  assert.deepEqual(
+    runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'claude-sonnet-5-5' })),
+    [],
+  )
+  // 設定為完整 id、runtime 為別名
+  assert.deepEqual(
+    runtimeDrift(bot({ kind: 'claude', model: 'claude-sonnet-5-5' }), run({ runtime_model: 'sonnet' })),
+    [],
+  )
+  // 500k context（>200k 啟動後綴 [1m]）不誤判為模型落差
+  assert.deepEqual(
+    runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'sonnet[1m]' })),
+    [],
+  )
+  assert.deepEqual(
+    runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'claude-sonnet-5-5[1m]' })),
+    [],
+  )
+  assert.deepEqual(
+    runtimeDrift(bot({ kind: 'claude', model: 'claude-sonnet-5-5' }), run({ runtime_model: 'sonnet[1m]' })),
+    [],
+  )
+  // 真的不同家族或不同指定版號照樣標 drift
+  const diffFamily = runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'claude-opus-5-5' }))
+  assert.deepEqual(diffFamily.map((x) => x.field), ['model'])
+  assert.equal(diffFamily[0].running, 'claude-opus-5-5')
+  assert.equal(diffFamily[0].configured, 'sonnet')
+
+  const diffVer = runtimeDrift(bot({ kind: 'claude', model: 'claude-opus-4-6' }), run({ runtime_model: 'claude-opus-5-5' }))
+  assert.deepEqual(diffVer.map((x) => x.field), ['model'])
+})
+
 test('#541：查額度用 run 實際起來的身份，沒有 active run 才退回設定值', () => {
   // 改成 cc2、還沒重啟：燒的仍是 cc1 的額度。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: 'cc1' })), 'cc1')

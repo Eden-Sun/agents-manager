@@ -126,8 +126,14 @@ pub async fn adopt_statusline_model(app: &(impl crate::capabilities::BotStatusEm
         return;
     };
     if let Some(cur) = run.runtime_model.as_deref() {
-        let alias_of_same_family = matches!(cur, "opus" | "sonnet" | "haiku" | "fable") && id.to_ascii_lowercase().starts_with(&format!("claude-{cur}-"));
-        if cur.eq_ignore_ascii_case(id) || alias_of_same_family {
+        let cur_base = cur.split('[').next().unwrap_or("").trim();
+        let id_base = id.split('[').next().unwrap_or("").trim();
+        let is_family = |alias: &str, full: &str| {
+            matches!(alias.to_ascii_lowercase().as_str(), "opus" | "sonnet" | "haiku" | "fable")
+                && full.to_ascii_lowercase().starts_with(&format!("claude-{}-", alias.to_ascii_lowercase()))
+        };
+        let alias_of_same_family = is_family(cur_base, id_base) || is_family(id_base, cur_base);
+        if cur_base.eq_ignore_ascii_case(id_base) || alias_of_same_family {
             return;
         }
     }

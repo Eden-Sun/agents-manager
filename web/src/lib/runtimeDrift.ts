@@ -1,6 +1,7 @@
 // `.ts` 副檔名：node --experimental-strip-types 的 resolver 不補副檔名。
 import { effortLabel } from '../api/types.ts'
 import type { Bot, Run } from '../api/types.ts'
+import { modelMatches } from './modelMatches.ts'
 
 /**
  * 設定與實際在跑的不一致（SPEC §4.4a）。2026-09-09：codex 改設定沒重啟，模型／強度只在啟動時吃，
@@ -76,11 +77,12 @@ export function runtimeKnown(run: Run | null): boolean {
 }
 
 /**
- * 模型不分大小寫比：codex 0.157 的狀態列印顯示名（`GPT-6-Luna`），daemon 讀回的 runtime 在修正前原樣記下，
- * 跟設定的 id `gpt-6-luna` 逐字比就多出一行假的「模型」差異，fast 也因此不算「只有 fast」而走重啟（#712）。
+ * 模型比對：忽略大小寫、context 視窗變體（如 `[1m]`），並允許 claude 等價別名（如 `sonnet` 與 `claude-sonnet-5-5`）。
+ * 只有真的不同家族或不同指定版號時才視為落差（#712、#939）。
  */
 function sameModel(running: string | null | undefined, configured: string | null | undefined): boolean {
-  return (running ?? '').toLowerCase() === (configured ?? '').toLowerCase()
+  if (!running && !configured) return true
+  return modelMatches(running, configured)
 }
 
 /**
