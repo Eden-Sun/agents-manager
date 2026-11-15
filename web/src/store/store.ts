@@ -6,6 +6,7 @@ import type { TerminalFooterView } from '../lib/codexTerminalFooter'
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { DraftSync } from './draftSync'
+import { resetAttachmentDraftsForTest } from './composerAttachmentDrafts'
 import { useDraftNotice } from './draftNotice'
 import { pruneDeadKeys } from './prune'
 import { forgetBlockedExcept } from '../lib/blockedPrefetch'
@@ -2869,6 +2870,7 @@ function turnStillOpen(status: Turn['status']): boolean {
  * 把「只做一次」的旗標與 seq 歸零、state 換回初始值，下一個測試檔才拿到乾淨的 store。
  */
 export function resetStoreForTest(): void {
+  resetAttachmentDraftsForTest()
   for (const timer of noticeTimers.values()) clearTimeout(timer)
   noticeTimers.clear()
   for (const slot of liveThrottle.values()) clearTimeout(slot.timer)

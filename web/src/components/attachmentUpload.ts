@@ -84,7 +84,7 @@ export function pendingReducer(items: Pending[], action: PendingAction): Pending
     case 'add':
       return [...items, action.item]
     case 'restore':
-      return items.some((it) => it.id === action.item.id) ? items : [...items, action.item]
+      return items.some((it) => (action.item.id && it.id === action.item.id) || it.key === action.item.key) ? items : [...items, action.item]
     case 'compressed':
       return patch(action.key, (it) => ({ ...it, name: action.name, originalSize: it.size, size: action.size }))
     case 'uploading':

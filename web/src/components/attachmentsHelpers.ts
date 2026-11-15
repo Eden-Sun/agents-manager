@@ -6,6 +6,16 @@ import type { Attachment } from '../api/types'
 import { compressible, compressImage } from '../lib/imageCompress'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
+import {
+  clearAttachmentDrafts,
+  getAttachmentDrafts,
+  onAttachmentDraftsLoaded,
+  removeAttachmentDraft,
+  removeSentAttachmentDrafts,
+  saveAttachmentDraft,
+  updateAttachmentDraftId,
+  type DraftAttachmentItem,
+} from '../store/composerAttachmentDrafts'
 import { admitFile, pendingReducer, restoredAttachment, runUpload } from './attachmentUpload'
 import type { Pending, UploadDeps } from './attachmentUpload'
 
@@ -72,15 +82,6 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     itemsRef.current = items
   }, [items])
 
-  // Attachments belong to the conversation, not necessarily the bot that received the upload.
-  useLayoutEffect(() => {
-    abortAll()
-    for (const it of itemsRef.current) revokePreview(it.previewUrl)
-    // 指紋一起清，否則換回原對話時同一張會被誤判重複。
-    seen.current.clear()
-    dispatch({ type: 'clear' })
-  }, [abortAll, revokePreview, resetKey])
-
   const start = useCallback(
     (to: string, key: string, file: File, compress: boolean) => {
       const ctl = new AbortController()
@@ -88,7 +89,12 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
       const deps: UploadDeps = {
         compress: compressImage,
         upload: (f, opts) => api.uploadAttachment(to, f, opts),
-        dispatch,
+        dispatch: (action) => {
+          if (action.type === 'uploaded' && resetKey) {
+            updateAttachmentDraftId(resetKey, action.key, action.id)
+          }
+          dispatch(action)
+        },
         onPrepared: (f) => {
           if (!ctl.signal.aborted) sources.current.set(key, { file: f, prepared: true })
         },
@@ -99,8 +105,93 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         if (inflight.current.get(key) === ctl) inflight.current.delete(key)
       })
     },
-    [notify],
+    [notify, resetKey],
   )
+
+  const restoreDrafts = useCallback(
+    (drafts: DraftAttachmentItem[]) => {
+      const knownKeys = new Set(itemsRef.current.map((it) => it.key))
+      const knownIds = new Set(itemsRef.current.map((it) => it.id).filter(Boolean))
+      for (const draft of drafts) {
+        if (knownKeys.has(draft.key)) continue
+        if (draft.id && knownIds.has(draft.id)) continue
+        knownKeys.add(draft.key)
+        if (draft.id) knownIds.add(draft.id)
+
+        const match = draft.key.match(/^a(\d+)$/)
+        if (match) seq.current = Math.max(seq.current, parseInt(match[1], 10))
+
+        const file = draft.file as File | undefined
+        const previewUrl = draft.isImage && file ? URL.createObjectURL(file) : ''
+        if (previewUrl) urls.current.add(previewUrl)
+        seen.current.add(draft.fp)
+
+        if (draft.id) {
+          if (file) sources.current.set(draft.key, { file, prepared: true })
+          const item: Pending = {
+            key: draft.key,
+            fp: draft.fp,
+            name: draft.name,
+            size: draft.size,
+            originalSize: draft.originalSize,
+            isImage: Boolean(previewUrl || draft.isImage),
+            previewUrl,
+            compressing: false,
+            loaded: draft.size,
+            id: draft.id,
+            error: null,
+            retryable: false,
+          }
+          dispatch({ type: 'restore', item })
+        } else if (file) {
+          sources.current.set(draft.key, { file, prepared: false })
+          const item: Pending = {
+            key: draft.key,
+            fp: draft.fp,
+            name: draft.name,
+            size: draft.size,
+            originalSize: draft.originalSize,
+            isImage: draft.isImage,
+            previewUrl,
+            compressing: false,
+            loaded: 0,
+            id: null,
+            error: null,
+            retryable: true,
+          }
+          dispatch({ type: 'add', item })
+          if (uploadTo) start(uploadTo, draft.key, file, false)
+        }
+      }
+    },
+    [start, uploadTo],
+  )
+
+  // Attachments belong to the conversation, not necessarily the bot that received the upload.
+  useLayoutEffect(() => {
+    abortAll()
+    for (const it of itemsRef.current) revokePreview(it.previewUrl)
+    // 指紋一起清，否則換回原對話時同一張會被誤判重複。
+    seen.current.clear()
+    dispatch({ type: 'clear' })
+
+    if (resetKey) {
+      const saved = getAttachmentDrafts(resetKey)
+      if (saved.length) {
+        restoreDrafts(saved)
+      }
+    }
+  }, [abortAll, resetKey, restoreDrafts, revokePreview])
+
+  useEffect(() => {
+    if (!resetKey) return
+    return onAttachmentDraftsLoaded(() => {
+      const saved = getAttachmentDrafts(resetKey)
+      if (saved.length) {
+        restoreDrafts(saved)
+      }
+    })
+  }, [resetKey, restoreDrafts])
 
   const add = useCallback(
     (files: File[]) => {
@@ -129,10 +220,22 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
         }
         dispatch({ type: 'add', item })
         sources.current.set(key, { file, prepared: !compress })
+        if (resetKey) {
+          saveAttachmentDraft(resetKey, {
+            key,
+            fp,
+            name: item.name,
+            size: item.size,
+            isImage,
+            id: null,
+            file,
+            addedAt: Date.now(),
+          })
+        }
         start(uploadTo, key, file, compress)
       }
     },
-    [notify, start, uploadTo],
+    [notify, resetKey, start, uploadTo],
   )
 
   /** 失敗的卡片再傳一次：壓過的直接傳壓好的那份。 */
@@ -154,19 +257,22 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
       revokePreview(removed.previewUrl)
       seen.current.delete(removed.fp)
     }
+    if (resetKey) removeAttachmentDraft(resetKey, key)
     dispatch({ type: 'remove', key })
-  }, [abortOne, items, revokePreview])
+  }, [abortOne, items, resetKey, revokePreview])
 
   const clear = useCallback(() => {
     abortAll()
     for (const it of items) revokePreview(it.previewUrl)
     seen.current.clear()
+    if (resetKey) clearAttachmentDrafts(resetKey)
     dispatch({ type: 'clear' })
-  }, [abortAll, items, revokePreview])
+  }, [abortAll, items, resetKey, revokePreview])
 
   /** 送出成功後只收掉這一則帶走的附件；送出期間新加的卡片留給下一則。 */
   const clearSent = useCallback((sentIds: readonly string[]) => {
     const sent = new Set(sentIds)
+    if (resetKey) removeSentAttachmentDrafts(resetKey, sentIds)
     for (const it of itemsRef.current) {
       if (!it.id || !sent.has(it.id)) continue
       revokePreview(it.previewUrl)
@@ -174,7 +280,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
       sources.current.delete(it.key)
       dispatch({ type: 'remove', key: it.key })
     }
-  }, [revokePreview])
+  }, [resetKey, revokePreview])
 
   /** 撤回 daemon 已收下的 prompt：同一批已上傳附件直接回 composer，不再傳一次。 */
   const restoreAttachments = useCallback((attachments: Attachment[]) => {
@@ -184,9 +290,20 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
       known.add(attachment.id)
       const item = restoredAttachment(attachment, `restored:${attachment.id}`)
       seen.current.add(item.fp)
+      if (resetKey) {
+        saveAttachmentDraft(resetKey, {
+          key: item.key,
+          fp: item.fp,
+          name: item.name,
+          size: item.size,
+          isImage: false,
+          id: item.id,
+          addedAt: Date.now(),
+        })
+      }
       dispatch({ type: 'restore', item })
     }
-  }, [])
+  }, [resetKey])
 
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
