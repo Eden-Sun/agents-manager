@@ -48,9 +48,32 @@ fn to_micro(tenths: i64) -> i64 {
 }
 
 /// 這個 request 輸入 token 的保守上界（不低估）；估不出來（超過 1M context）就拒絕。
+/// 位元組上界過度保守（中文、多層轉義下 1 token 遠多於 1 byte，導致數十萬 token 即超過百萬 bytes）；
+/// 若有前次回覆真實用量，則以前次 input token 加上新增內容的位元組數（1 token 至少 1 byte，新增位元組數
+/// 是新增 token 數的嚴格上界）推估增量上界，兩者取較小值，既防止位元組誤殺，又絕不低估使成本保險絲失效。
 pub(super) fn input_token_bound(request: &RequestEnvelope) -> Result<u64, QuoteError> {
     let bytes = serde_json::to_vec(&request.body()).map_err(|_| QuoteError::InvalidRequest)?.len() as u64;
-    let bound = bytes.checked_add(INPUT_MARGIN_TOKENS).ok_or(QuoteError::InvalidRequest)?;
+    let body_bound = bytes.checked_add(INPUT_MARGIN_TOKENS).ok_or(QuoteError::InvalidRequest)?;
+
+    let bound = if let Some(prev) = request.previous_response() {
+        if let Some(prev_tokens) = previous_usage_prefix(prev) {
+            let prev_content_bytes = serde_json::to_vec(&prev.content).map(|v| v.len() as u64).unwrap_or(0);
+            let last_msg_bytes = request.messages().last()
+                .and_then(|m| serde_json::to_vec(&m.content).ok())
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+            let delta_bytes = prev_content_bytes.saturating_add(last_msg_bytes);
+            let incremental_bound = prev_tokens
+                .saturating_add(delta_bytes)
+                .saturating_add(INPUT_MARGIN_TOKENS);
+            body_bound.min(incremental_bound)
+        } else {
+            body_bound
+        }
+    } else {
+        body_bound
+    };
+
     if bound > MAX_CONTEXT_TOKENS { return Err(QuoteError::InvalidRequest); }
     Ok(bound)
 }
@@ -601,6 +624,65 @@ mod tests {
         let big = StreamProgress { output_tokens: 5000, ..p };
         assert_eq!(running_cost_microusd(model, false, false, &big), Some((1000 * 40 + 2000 * 2 + 500 * 50 + 5000 * 200 + 9) / 10));
         assert_eq!(running_cost_microusd("unknown-model", false, false, &StreamProgress::default()), None);
+    }
+
+    #[test]
+    fn oversized_transcript_over_1m_bytes_with_compaction_is_pruned_and_quoted() {
+        let fable = crate::config::API_BOT_FABLE_MODEL;
+        // 模擬故障 bot 01M7AKSKXMB1A6RRQZFJFPMVKK：歷史訊息超過 1.5M bytes，
+        // 中間觸發過 compaction，其後有新的對話。
+        let mut messages = Vec::new();
+        // 前面累積超過 1.5MB 的舊歷史
+        for i in 0..15 {
+            messages.push(Message {
+                role: "user".into(),
+                content: json!(format!("old user prompt {i}: {}", "A".repeat(100_000))),
+            });
+            messages.push(Message {
+                role: "assistant".into(),
+                content: json!([
+                    {"type": "thinking", "thinking": "old thinking", "signature": format!("sig_{i}")},
+                    {"type": "text", "text": format!("old reply {i}: {}", "B".repeat(5_000))}
+                ]),
+            });
+        }
+        let total_old_bytes: usize = messages.iter().map(|m| serde_json::to_vec(&m.content).unwrap().len()).sum();
+        assert!(total_old_bytes > 1_500_000, "舊歷史總 bytes 必須大於 1.5MB：{total_old_bytes}");
+
+        // 伺服器端 compaction 區塊
+        messages.push(Message {
+            role: "assistant".into(),
+            content: json!([
+                {"type": "thinking", "thinking": "pre-compact reasoning", "signature": "sig_pre"},
+                {"type": "compaction", "content": "Summary of 15 rounds of conversation"},
+                {"type": "thinking", "thinking": "post-compact reasoning", "signature": "sig_post"},
+                {"type": "text", "text": "Ready for next instruction."}
+            ]),
+        });
+
+        // 壓縮後的新對話
+        messages.push(Message {
+            role: "user".into(),
+            content: json!("What should we do next?"),
+        });
+
+        let opts = Options {
+            model: fable.into(),
+            effort: "high".into(),
+            fast: false,
+            max_tokens: 32000,
+            compact_at_input_tokens: 150_000,
+            cache_ttl_1h: false,
+        };
+
+        // 以前：RequestEnvelope 序列化整個未修剪 messages（> 1.5MB），input_token_bound 直接失敗拒絕估價。
+        // 現在：修剪最新 compaction 區塊之前的內容，body 遠小於 1MB，估價成功。
+        let req = RequestEnvelope::new(opts, json!("system"), messages).expect("envelope accepted");
+        let bound = input_token_bound(&req).expect("input token bound calculated");
+        assert!(bound < 50_000, "修剪後的 input token bound 應遠小於 1M tokens：{bound}");
+
+        let quote = DirectGlobal.reserve(&req).expect("reservation quote succeeds");
+        assert!(quote.reserved_microusd > 0);
     }
 
     #[test]

@@ -83,7 +83,10 @@ pub const COMPACT_BETA: &str = "compact-2026-01-12";
 /// Compaction 自訂摘要指示詞。
 pub const COMPACT_INSTRUCTIONS: &str = "Keep the user's goal, decisions made, files and findings so far, open questions, and what remains to do.";
 
-fn strip_thinking_before_compaction(messages: &[Message]) -> Vec<Message> {
+/// 修剪訊息歷史：依 Anthropic compaction（beta compact-2026-01-12）語意，
+/// 最新 compaction 區塊之前的訊息伺服器不再使用。
+/// 送出與 checkpoint 只保留最新 compaction 區塊（含）之後的內容。
+pub fn prune_messages_for_compaction(messages: &[Message]) -> Vec<Message> {
     let mut last_compaction = None;
     for (m_idx, m) in messages.iter().enumerate() {
         if let Value::Array(blocks) = &m.content {
@@ -97,49 +100,32 @@ fn strip_thinking_before_compaction(messages: &[Message]) -> Vec<Message> {
     let Some((comp_m_idx, comp_b_idx)) = last_compaction else {
         return messages.to_vec();
     };
-    messages
-        .iter()
-        .enumerate()
-        .map(|(m_idx, m)| {
-            if m_idx > comp_m_idx {
-                m.clone()
-            } else if let Value::Array(blocks) = &m.content {
-                let filtered: Vec<Value> = blocks
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(b_idx, b)| {
-                        let is_before = m_idx < comp_m_idx || b_idx < comp_b_idx;
-                        let is_thinking = matches!(
-                            b.get("type").and_then(Value::as_str),
-                            Some("thinking" | "redacted_thinking")
-                        );
-                        if is_before && is_thinking {
-                            None
-                        } else {
-                            Some(b.clone())
-                        }
-                    })
-                    .collect();
-                Message {
-                    role: m.role.clone(),
-                    content: Value::Array(filtered),
-                }
-            } else {
-                m.clone()
-            }
-        })
-        .collect()
+
+    let mut pruned = Vec::new();
+    if let Some(m) = messages.get(comp_m_idx) {
+        if let Value::Array(blocks) = &m.content {
+            let kept_blocks: Vec<Value> = blocks[comp_b_idx..].to_vec();
+            pruned.push(Message {
+                role: m.role.clone(),
+                content: Value::Array(kept_blocks),
+            });
+        } else {
+            pruned.push(m.clone());
+        }
+    }
+    pruned.extend_from_slice(&messages[comp_m_idx + 1..]);
+    pruned
 }
 
 pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value {
-    let stripped_messages = strip_thinking_before_compaction(messages);
+    let pruned_messages = prune_messages_for_compaction(messages);
     let system = mark_last_block(system, options.cache_ttl_1h);
-    let last = stripped_messages.len().saturating_sub(1);
-    let messages: Vec<Message> = stripped_messages
+    let last = pruned_messages.len().saturating_sub(1);
+    let messages: Vec<Message> = pruned_messages
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            if i == last || (i + 2 == stripped_messages.len()) {
+            if i == last || (i + 2 == pruned_messages.len()) {
                 Message { role: m.role.clone(), content: mark_last_block(&m.content, options.cache_ttl_1h) }
             } else {
                 m.clone()
@@ -331,15 +317,12 @@ mod tests {
         let body = request(&opts, &system, &messages);
         let sent_msgs = body["messages"].as_array().unwrap();
 
-        // Turn 1 assistant message: thinking block is stripped, text block remains
-        let turn1_blocks = sent_msgs[1]["content"].as_array().unwrap();
-        assert_eq!(turn1_blocks.len(), 1);
-        assert_eq!(turn1_blocks[0]["type"], "text");
-        assert_eq!(turn1_blocks[0]["text"], "early reply");
-
-        // Turn 2 assistant message: thinking before compaction is stripped,
-        // compaction block and subsequent thinking/text are kept
-        let turn2_blocks = sent_msgs[3]["content"].as_array().unwrap();
+        // Compaction 之前的訊息全丟棄；只保留最新 compaction 區塊（含）之後的內容。
+        // 原本 5 則訊息，修剪後只剩 2 則：
+        // 第 0 則：Turn 2 assistant message 修剪掉 compaction 前的 thinking，保留 compaction 及其後 blocks
+        // 第 1 則：Turn 3 user message
+        assert_eq!(sent_msgs.len(), 2);
+        let turn2_blocks = sent_msgs[0]["content"].as_array().unwrap();
         assert_eq!(turn2_blocks.len(), 3);
         assert_eq!(turn2_blocks[0]["type"], "compaction");
         assert_eq!(turn2_blocks[0]["content"], "summary of conversation");
@@ -347,6 +330,44 @@ mod tests {
         assert_eq!(turn2_blocks[1]["thinking"], "fresh reasoning after compaction");
         assert_eq!(turn2_blocks[2]["type"], "text");
         assert_eq!(turn2_blocks[2]["text"], "fresh reply");
+
+        assert_eq!(sent_msgs[1]["role"], "user");
+        let turn3_blocks = sent_msgs[1]["content"].as_array().unwrap();
+        assert_eq!(turn3_blocks[0]["type"], "text");
+        assert_eq!(turn3_blocks[0]["text"], "third question");
+    }
+
+    #[test]
+    fn prune_messages_keeps_only_latest_compaction_and_preserves_tool_pairs() {
+        let messages = vec![
+            Message { role: "user".into(), content: json!("q1") },
+            Message { role: "assistant".into(), content: json!([
+                {"type": "compaction", "content": "summary 1"},
+                {"type": "text", "text": "a1"}
+            ])},
+            Message { role: "user".into(), content: json!("q2") },
+            Message { role: "assistant".into(), content: json!([
+                {"type": "thinking", "thinking": "old thinking", "signature": "sig_old"},
+                {"type": "compaction", "content": "summary 2"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+            ])},
+            Message { role: "user".into(), content: json!([
+                {"type": "tool_result", "tool_use_id": "t1", "content": "file.txt", "is_error": false}
+            ])},
+        ];
+        let pruned = prune_messages_for_compaction(&messages);
+        assert_eq!(pruned.len(), 2, "只有最新 compaction 及之後的 tool_result：{pruned:?}");
+        assert_eq!(pruned[0].role, "assistant");
+        let asst_blocks = pruned[0].content.as_array().unwrap();
+        assert_eq!(asst_blocks.len(), 2);
+        assert_eq!(asst_blocks[0]["type"], "compaction");
+        assert_eq!(asst_blocks[0]["content"], "summary 2");
+        assert_eq!(asst_blocks[1]["type"], "tool_use");
+        assert_eq!(asst_blocks[1]["id"], "t1");
+        assert_eq!(pruned[1].role, "user");
+        let user_blocks = pruned[1].content.as_array().unwrap();
+        assert_eq!(user_blocks[0]["type"], "tool_result");
+        assert_eq!(user_blocks[0]["tool_use_id"], "t1");
     }
 
     #[test]

@@ -356,6 +356,7 @@ impl ApiBotAdapter {
             .map_err(|_| http::Error::InvalidRequest)?;
         let mut loaded_state: State =
             serde_json::from_value(loaded_chk.value()).map_err(|_| http::Error::InvalidRequest)?;
+        loaded_state.messages = super::protocol::prune_messages_for_compaction(&loaded_state.messages);
 
         let effective_system = if let Some(ref stored) = loaded_state.system {
             Value::String(stored.clone())

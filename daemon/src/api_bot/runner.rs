@@ -196,6 +196,13 @@ pub async fn run_with_wrap_up(
         // durably committed. Crash recovery must not send an incomplete assistant tool batch.
         state.tool_pending = calls.first().map(|c| c.id.clone());
         checkpoint(journal, state).await?;
+        let has_compaction = state.responses.last().is_some_and(|r| {
+            r.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction"))
+        });
+        if has_compaction {
+            state.messages = super::protocol::prune_messages_for_compaction(&state.messages);
+            checkpoint(journal, state).await?;
+        }
         if wrapping_up && !calls.is_empty() {
             // 收尾請求還是要工具：不執行，結清後結束（對話維持合法）。
             let mut results: Vec<Value> = Vec::new();

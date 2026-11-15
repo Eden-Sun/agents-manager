@@ -245,9 +245,9 @@ async fn http_loop_compaction_headers_context_management_and_thinking_strip() {
     assert_eq!(seen[0]["context_management"]["edits"][0]["trigger"]["value"], 150_000);
 
     // 3. Request 2: response 1 contained compaction block.
-    // In request 2, thinking block before compaction block is NOT resent!
+    // In request 2, older messages before compaction are pruned, and thinking before compaction is NOT resent!
     let req2_msgs = seen[1]["messages"].as_array().unwrap();
-    let assistant_msg_blocks = req2_msgs[1]["content"].as_array().unwrap();
+    let assistant_msg_blocks = req2_msgs[0]["content"].as_array().unwrap();
     assert!(!assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("thinking")));
     assert!(assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")));
 

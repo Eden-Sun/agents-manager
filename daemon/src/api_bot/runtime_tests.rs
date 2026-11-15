@@ -6177,7 +6177,7 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         assert_eq!(reqs.len(), 2);
         let (_, ref body2) = reqs[1];
         let sent_msgs = body2["messages"].as_array().unwrap();
-        let turn1_assistant = sent_msgs[1]["content"].as_array().unwrap();
+        let turn1_assistant = sent_msgs[0]["content"].as_array().unwrap();
         assert!(!turn1_assistant.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("thinking")), "thinking blocks before compaction must NOT be resent");
         assert!(turn1_assistant.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")), "compaction block must be resent");
     }
