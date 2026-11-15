@@ -8,6 +8,8 @@ async fn active_remote_run_without_daemon_url_is_pending_until_restarted() {
     let state = state_json(&env.app).await.unwrap();
     assert_eq!(state["projects"][0]["bots"][0]["daemon_url_pending"], true);
     assert_eq!(state["projects"][0]["bots"][0]["role_pending"], true);
+    // 狀態列 context 分母只看 policy_pending：daemon_url／shim 過期讓 role_pending 亮時，policy 沒變就不能跟著退回模型視窗（2026-11-15 回歸）。
+    assert_eq!(state["projects"][0]["bots"][0]["policy_pending"], false);
     sqlx::query("UPDATE runs SET daemon_url_injected=1 WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
     let state = state_json(&env.app).await.unwrap();
     assert_eq!(state["projects"][0]["bots"][0]["daemon_url_pending"], false);

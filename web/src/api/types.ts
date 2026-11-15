@@ -315,6 +315,8 @@ export interface Bot {
   /** 執行期覆蓋（B 期才用）；null＝跟角色 */
   runtime_override?: RuntimeSettings | null
   role_pending?: boolean
+  /** 角色 policy 改了、還沒重啟（不含 shim 過期等）；舊 daemon 沒給＝undefined，退回 role_pending。 */
+  policy_pending?: boolean
   daemon_url_pending?: boolean
   runtime_role_policy?: string | null
   /** 專家模式下是否可被管理者使用（預設 true） */

@@ -1513,6 +1513,10 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
             let limit_hit = crate::state::limit_hit_value(b, limit_hits.get(&b.id));
+            // 「角色 policy 改了、還沒重啟」：只有這個才影響狀態列的 context 分母（`context_tokens`）。`role_pending` 另外含 shim 過期、
+            // daemon_url 還沒注入——每次部署 herdr shim 一換、所有 bot 的 `role_pending` 都亮，不能拿來決定要不要套 context 門檻
+            // （2026-11-15 lead／L2 的分母因此回到 1M）。
+            let policy_pending = policy_drift || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref()));
             let mut bot_v = json!({
                 "id": b.id,
                 "project_id": b.project_id,
@@ -1573,6 +1577,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "read_mark": read_marks.get(&b.id).map(crate::read_marks::json_value),
             });
             // 專家模式群集名（同專案同設定執行者 ≥2 顆）；不在群集內＝null（json! 巨集已到遞迴上限，所以在外面補）。
+            bot_v["policy_pending"] = json!(policy_pending);
             bot_v["cluster"] = json!(cluster_names.get(&b.id));
             bot_v["scheduled"] = json!(scheduled_bots.contains(&b.id));
             bl.push(bot_v);

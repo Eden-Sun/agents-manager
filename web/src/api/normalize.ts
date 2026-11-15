@@ -319,6 +319,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     manager_use: v.manager_use === undefined ? true : Boolean(v.manager_use),
     cluster: optStr(v.cluster),
     role_pending: bool(v.role_pending),
+    policy_pending: typeof v.policy_pending === 'boolean' ? v.policy_pending : undefined,
     daemon_url_pending: bool(v.daemon_url_pending),
     runtime_role_policy: optStr(v.runtime_role_policy),
     kind: oneOf<BotKind>(v.kind, CREATABLE_KINDS, 'claude'),
