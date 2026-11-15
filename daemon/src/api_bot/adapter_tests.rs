@@ -618,7 +618,7 @@ mod tests {
         let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 2).await;
         assert!(res.is_err());
 
-        // Check DB: attempt must be marked unknown, estimated is NULL, reserved intact
+        // 回應已成功收到：用量不可信時費用不明，按預留額（上限）記成 recorded，pending 收掉（不再卡成 unknown）。
         let row: (String, Option<i64>, i64) = sqlx::query_as(
             "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
         )
@@ -627,11 +627,68 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(row.0, "unknown");
-        assert_eq!(row.1, None);
+        assert_eq!(row.0, "recorded");
+        assert_eq!(row.1, Some(10_000));
         assert_eq!(row.2, 10_000);
 
         server.shutdown().await;
+    }
+
+    /// 回 200 但內容不合法（stop_reason=tool_use 卻沒有工具／工具名不支援／重複 id）：帳是確定的，
+    /// attempt 用實際用量記成 recorded、api_pending 清掉，transcript 不留半截 assistant tool batch。
+    #[tokio::test]
+    async fn test_invalid_response_content_after_http_success_is_recorded_and_clears_pending() {
+        let bodies = [
+            ("tool_use_without_tools", serde_json::json!([{"type": "text", "text": "x"}]), "tool_use"),
+            ("unsupported_tool", serde_json::json!([{"type": "tool_use", "id": "t1", "name": "nope", "input": {}}]), "tool_use"),
+            ("duplicate_ids", serde_json::json!([
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]), "tool_use"),
+            ("end_turn_with_tool", serde_json::json!([{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]), "end_turn"),
+        ];
+        for (label, content, stop) in bodies {
+            let wire_calls = Arc::new(AtomicUsize::new(0));
+            let server = spawn_mock_server(
+                wire_calls.clone(),
+                serde_json::json!({"id": "msg_bad", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+                    "content": content, "stop_reason": stop, "usage": {"input_tokens": 10, "output_tokens": 10}}),
+                None, None, None,
+            ).await;
+            let (pool, bot, run, turn, session) = setup_test_db().await;
+            let adapter = ApiBotAdapter::new(
+                pool.clone(),
+                AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 },
+                test_options(),
+                serde_json::json!("System"),
+                test_limits(),
+                Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+                AdapterHttpConfig {
+                    endpoint: server.endpoint.clone(),
+                    key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                    timeout: std::time::Duration::from_secs(5),
+                    max_response_bytes: 1024 * 1024,
+                },
+                None,
+            ).await.unwrap();
+            let cancel = CancellationToken::new();
+            let mut state = State::default();
+            state.messages = vec![Message { role: "user".into(), content: serde_json::json!("go") }];
+            let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 3).await;
+            assert!(matches!(res, Err(runner::Error::Model(crate::api_bot::http::Error::InvalidResponse))), "{label}: {res:?}");
+            assert_eq!(wire_calls.load(Ordering::SeqCst), 1, "{label}");
+
+            let row: (String, Option<i64>, Option<String>) = sqlx::query_as("SELECT state, estimated_microusd, usage_json FROM api_bot_attempts WHERE turn_id=?")
+                .bind(&turn).fetch_one(&pool).await.unwrap();
+            assert_eq!((row.0.as_str(), row.1), ("recorded", Some(5_000)), "{label}");
+            assert!(row.2.is_some(), "{label}: 實際 usage 要存下來");
+            let raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?").bind(&session).fetch_one(&pool).await.unwrap();
+            let checkpoint: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(checkpoint["api_pending"], false, "{label}");
+            assert_eq!(checkpoint["messages"].as_array().unwrap().len(), 1, "{label}: 不留 assistant 訊息");
+            assert_eq!(checkpoint["responses"].as_array().unwrap().len(), 0, "{label}");
+            assert!(checkpoint["tool_pending"].is_null(), "{label}");
+            server.shutdown().await;
+        }
     }
 
     /// 回固定 HTTP 狀態碼與錯誤 body 的上游（給明確拒絕／未知結果的分流測試）。

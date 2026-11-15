@@ -96,6 +96,7 @@ pub(crate) struct ReservationQuote {
     pub(crate) reserved_microusd: i64,
     pub(crate) pricing_version: String,
 }
+#[derive(Clone)]
 pub(crate) struct UsageQuote {
     pub(crate) estimated_microusd: i64,
     pub(crate) actual_speed: Option<&'static str>,

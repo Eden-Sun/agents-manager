@@ -156,6 +156,24 @@ pub(super) fn definitive_rejection(err: &http::Error) -> bool {
     }
 }
 
+/// 已成功收到的回應內容不合法的原因（`None`＝合法）；規則與 runner 收到回應後的檢查相同。
+fn invalid_content_reason(resp: &Response, durable: &State, model: &str) -> Option<String> {
+    if resp.model != model {
+        return Some(format!("response model {} != requested {model}", resp.model));
+    }
+    let calls = match resp.tools() {
+        Ok(calls) => calls,
+        Err(why) => return Some(format!("tools(): {why}")),
+    };
+    if calls.len() > 32 {
+        return Some(format!("too many tool calls: {}", calls.len()));
+    }
+    if let Some(c) = calls.iter().find(|c| durable.completed_tool_ids.contains(&c.id)) {
+        return Some(format!("tool id already completed: {}", c.id));
+    }
+    None
+}
+
 impl ApiBotAdapter {
     /// 接上串流進度出口（runtime 在建好 adapter 後呼叫）。
     pub(crate) fn with_progress_sink(mut self, sink: ProgressSink) -> Self {
@@ -439,20 +457,24 @@ impl Model for ApiBotAdapter {
             let mut cursor = self.cursor.lock().await;
             match res {
                 Ok(resp) => {
+                    // HTTP 已成功收到完整回應：帳是確定的。內容不合法（工具解析失敗、一批超過 32 個、
+                    // 工具 id 重複、模型不符）或用量不合規則時，也要把這次 attempt 結成 `recorded`、收掉 api_pending，
+                    // 之後的 prompt 才送得出去；transcript 維持送出前的 durable 狀態（不留半截 assistant tool batch）。
+                    let content_problem = invalid_content_reason(&resp, &cursor.last_durable_state, &envelope.options().model);
                     let quote_res = self.quote_provider.settle(&envelope, &resp);
-                    let valid_quote = match quote_res {
+                    let valid_quote = match &quote_res {
                         Ok(uq)
                             if uq.estimated_microusd >= 0
                                 && uq
                                     .actual_speed
                                     .is_none_or(|s| matches!(s, "fast" | "standard")) =>
                         {
-                            Some(uq)
+                            Some(uq.clone())
                         }
                         _ => None,
                     };
 
-                    if let Some(uq) = valid_quote {
+                    if let (Some(uq), None) = (&valid_quote, &content_problem) {
                         cursor.settled_response = Some(SettledResponse {
                             response: resp.clone(),
                             estimated_microusd: uq.estimated_microusd,
@@ -460,7 +482,26 @@ impl Model for ApiBotAdapter {
                         });
                         Ok(resp)
                     } else {
-                        // Untrusted usage, unapproved quote, or invalid negative/speed: record unknown failclosed
+                        let reason = content_problem
+                            .clone()
+                            .unwrap_or_else(|| format!("untrusted usage or quote: {:?}", quote_res.as_ref().err()));
+                        // 有可信用量就照實算；用量本身不可信時費用不明，按預留額（上限）計，usage 不存。
+                        let (receipt_speed, receipt_usage, estimated) = match &valid_quote {
+                            Some(uq) => (uq.actual_speed, Some(&resp.usage), uq.estimated_microusd),
+                            None => (
+                                None,
+                                None,
+                                self.quote_provider.reserve(&envelope).map(|q| q.reserved_microusd).unwrap_or(0).max(0),
+                            ),
+                        };
+                        tracing::warn!(
+                            reason = %reason,
+                            stop_reason = %resp.stop_reason,
+                            response_model = %resp.model,
+                            estimated_microusd = estimated,
+                            usage = %resp.usage,
+                            "api bot response rejected after HTTP success; attempt recorded"
+                        );
                         let fence = Fence {
                             session: &self.identity.session_id,
                             bot: &self.identity.bot_id,
@@ -469,29 +510,27 @@ impl Model for ApiBotAdapter {
                             generation: self.identity.generation,
                             revision: cursor.revision,
                         };
-                        let mut unknown_state = cursor.last_durable_state.clone();
-                        unknown_state.api_pending = true;
-
-                        let val = serde_json::to_value(&unknown_state)
+                        let mut next_state = cursor.last_durable_state.clone();
+                        next_state.api_pending = false;
+                        let val = serde_json::to_value(&next_state)
                             .map_err(|_| http::Error::InvalidResponse)?;
                         let chk =
                             Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponse)?;
-
                         let receipt = db_api::Receipt {
-                            state: "unknown",
-                            actual_speed: None,
-                            usage: None,
-                            estimated_microusd: None,
+                            state: "recorded",
+                            actual_speed: receipt_speed,
+                            usage: receipt_usage,
+                            estimated_microusd: Some(estimated),
                         };
-
                         let next_rev =
                             db_api::record(&self.pool, &fence, &attempt_id, &receipt, &chk)
                                 .await
                                 .map_err(|_| http::Error::InvalidResponse)?;
 
                         cursor.revision = next_rev;
-                        cursor.last_api_pending = true;
-                        cursor.last_durable_state = unknown_state;
+                        cursor.last_api_pending = false;
+                        cursor.last_durable_state = next_state;
+                        cursor.active_attempt = None;
 
                         Err(http::Error::InvalidResponse)
                     }

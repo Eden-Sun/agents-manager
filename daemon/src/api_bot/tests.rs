@@ -712,7 +712,9 @@ async fn fable_requests_use_the_selected_model_and_reject_a_different_response_m
     let req = http::FullMessagesRequest { endpoint: &f.endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(2), max_response_bytes: 64 * 1024 };
     let r = http::complete(&req, &CancellationToken::new()).await.unwrap();
     assert_eq!(r.model, crate::config::API_BOT_FABLE_MODEL);
-    assert!(matches!(http::complete(&req, &CancellationToken::new()).await, Err(http::Error::InvalidResponse)));
+    // 模型不符改由 adapter 驗證（才能用已收到的 usage 結帳）；http 層照實回傳。
+    let other = http::complete(&req, &CancellationToken::new()).await.unwrap();
+    assert_ne!(other.model, crate::config::API_BOT_FABLE_MODEL);
     let seen = f.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
     assert!(seen.iter().all(|v| v["model"] == crate::config::API_BOT_FABLE_MODEL && v["thinking"]["type"] == "adaptive"));

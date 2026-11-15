@@ -205,8 +205,7 @@ pub async fn complete_with_progress(
                 }
             }
             let parsed = assembler.finish().map_err(stream_error)?;
-            if parsed.model != req.options.model { return Err(Error::InvalidResponse); }
-            parsed.tools().map_err(|_| Error::InvalidResponse)?;
+            // 模型與工具內容的驗證交給 adapter：這裡拒絕會丟掉已收到的 usage，attempt 只能留成 unknown。
             return Ok(parsed);
         }
         let mut bytes = Vec::new();
@@ -224,8 +223,6 @@ pub async fn complete_with_progress(
         }
         let parsed: Response =
             serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
-        if parsed.model != req.options.model { return Err(Error::InvalidResponse); }
-        parsed.tools().map_err(|_| Error::InvalidResponse)?;
         Ok(parsed)
     };
     tokio::select! {

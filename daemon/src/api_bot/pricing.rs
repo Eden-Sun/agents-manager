@@ -153,7 +153,7 @@ impl QuoteProvider for DirectGlobal {
     }
 
     fn settle(&self, request: &RequestEnvelope, response: &Response) -> Result<UsageQuote, QuoteError> {
-        let reservation = self.reserve(request)?;
+        self.reserve(request)?;
         let rates = rates(&request.options().model)?;
         if response.model != request.options().model { return Err(QuoteError::UntrustedUsage); }
         let usage = response.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
@@ -221,7 +221,7 @@ impl QuoteProvider for DirectGlobal {
             .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
             .ok_or(QuoteError::UntrustedUsage)?;
         let estimated_microusd = to_micro(tenths);
-        if estimated_microusd > reservation.reserved_microusd { return Err(QuoteError::UntrustedUsage); }
+        // 實際費用超過預留（例如回合中途快取過期、整段按寫入價）仍是真實花費：照實記帳，不當成不可信用量。
         Ok(UsageQuote { estimated_microusd, actual_speed: Some(actual_speed) })
     }
 }
