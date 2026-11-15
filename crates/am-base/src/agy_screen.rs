@@ -76,6 +76,20 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
             r == t || r.strip_suffix(t).is_some_and(|pre| pre.chars().all(|c| !c.is_alphanumeric() && !"●⏺⎿•>*-\"'`".contains(c)))
         })
     };
+    // 1.5.9 的首次精靈（色彩預覽頁、Terms 頁）比 `TAIL_LINES` 高，標題被擠出視窗；頁尾操作列是結構性的指紋：
+    // 色彩頁 `[Next]`＋`↑/↓ Navigate · enter Confirm`、Terms 頁 `[Done]`＋`↑/↓ Navigate · enter Toggle`，都在畫面最底下幾列。
+    // 回覆的引文不會剛好在最底下又沒有輸入列。
+    let footer = |text: &str, button: &dyn Fn(&str) -> bool| {
+        let n = rows.len();
+        let last = &rows[n.saturating_sub(5)..];
+        last.iter().any(|r| r.starts_with("↑/↓ navigate · enter") && r.contains(text)) && last.iter().any(|r| button(r))
+    };
+    if footer("confirm", &|r| r == "[next]") && !tail.iter().any(|l| is_composer_row(l)) {
+        return Some(AgyDialog::ColorScheme);
+    }
+    if footer("toggle", &|r| r.contains("[done]")) && !tail.iter().any(|l| is_composer_row(l)) {
+        return Some(AgyDialog::Terms);
+    }
     let (at, dialog) = if let Some(i) = title("select login method:")
         .or_else(|| rows.iter().position(|r| r.starts_with("welcome to the antigravity cli") && r.contains("not signed in")))
     {
@@ -233,5 +247,71 @@ esc to cancel
     fn trust_dialog_with_ansi_styling_is_recognised() {
         let ansi = "Accessing workspace:\n/home/user/project\n\n\x1b[1mDo you trust the contents of this project?\x1b[0m\n\n\x1b[36m> Yes, I trust this folder\x1b[0m\n\x1b[2m  No, exit\x1b[0m\n";
         assert_eq!(blocking_dialog(ansi), Some(AgyDialog::Trust));
+    }
+
+    /// 2026-11-15 真機（agy 1.5.9，影子家目錄第一次啟動，120×40）：色彩預覽頁很高，標題 `Choose your color scheme:` 被擠出最後 24 列，
+    /// 以前判成 idle、派工送進去卡一小時。現在靠頁尾 `[Next]`＋`↑/↓ Navigate · enter Confirm` 認。
+    const REAL_COLOR_WIZARD_159: &str = r#"
+    ▄▀▀▄
+   ▀▀▀▀▀▀
+  ▀▀▀▀▀▀▀▀
+ ▄▀▀    ▀▀▄
+▄▀▀      ▀▀▄
+
+Welcome to Antigravity CLI!
+
+Choose your color scheme:        ╭─────────────────────────────────────────────────────────────╮
+                                 │ > you: add a greeting function                              │
+  > terminal                     │                                                             │
+    light                        │   Here's the change:                                        │
+    solarized light              │                                                             │
+    colorblind-friendly light    │   3     import "fmt"                                        │
+    dark                         │   4                                                         │
+    solarized dark               │   5  -  func main() {                                       │
+    colorblind-friendly dark     │   5  +  func greet(name string) {                           │
+    tokyo night                  │   6  +      fmt.Printf("Hello, %s!\n", name)                │
+                                 │   7     }                                                   │
+                                 │                                                             │
+                                 │   ▾ Thought Process                                         │
+                                 │     I need to add a greeting function. I'll use fmt.Printf. │
+                                 │   ⚙ tool: write_file main.go                                │
+                                 │   ◉ task: Implementing greeting                             │
+                                 │   ✗ error: compilation failed                               │
+                                 │   ⚠ warning: deprecation warning                            │
+                                 │   → link: file:///path/to/main.go                           │
+                                 │   ★ accent: highlighted text                                │
+                                 │   · dim: press Enter to continue                            │
+                                 ╰─────────────────────────────────────────────────────────────╯
+
+    [Next]
+
+  ↑/↓ Navigate · enter Confirm
+                                                                                                 Gemini 3.8 Flash · high"#;
+    /// 同一次啟動按一個 Enter 後的 Terms 頁（預設勾選同意；人處理，我們不代按）。
+    const REAL_TERMS_159: &str = r#"Terms of Service & Data Use
+
+Antigravity CLI can make mistakes and is vulnerable to prompt injection and supply chain risks. Ensure that you monitor and verify all actions taken by the agent.
+--------------------------------------------------------------------------------------------------------------
+  > [x] Yes, I agree to help improve Antigravity CLI by allowing
+      Google to collect and use my Interactions data,
+      subject to the Google Antigravity CLI Terms of Service
+      and Google Privacy Policy. I understand I can
+      choose to opt out later whenever I want via my
+      settings.
+      Links:
+      - Terms of Service: https://antigravity.google/terms
+      - Privacy Policy: https://policies.google.com/privacy
+    [Previous]      [Done]
+  ↑/↓ Navigate · enter Toggle
+                                                                                                 Gemini 3.8 Flash · high"#;
+
+    #[test]
+    fn the_159_first_run_wizard_pages_are_blocked_not_idle() {
+        assert_eq!(blocking_dialog(REAL_COLOR_WIZARD_159), Some(AgyDialog::ColorScheme));
+        assert_eq!(blocking_dialog(REAL_TERMS_159), Some(AgyDialog::Terms));
+        // 輸入列出現（精靈已過）就不是對話框；回覆裡引文也不誤判。
+        assert_eq!(blocking_dialog(&format!("{REAL_COLOR_WIZARD_159}\n>\n")), None);
+        assert_eq!(blocking_dialog(REAL_IDLE), None);
+        assert_eq!(blocking_dialog("● 步驟說明：按 [Next] 之後看到 ↑/↓ Navigate · enter Confirm\n\n>\n? for shortcuts\n"), None);
     }
 }

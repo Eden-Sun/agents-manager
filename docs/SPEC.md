@@ -4428,6 +4428,8 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 主機上的 alias 不動、登入狀態不動，隨時可以按「啟用」放回來。偵測到但不打算用的 `ccN`（例如只是 zshrc 裡留著）就用這個標掉。
 
 ### 16.8 agy 多身份（使用者 2026-11-14；2026-11-14 實測）
+
+**影子家目錄與首次精靈（2026-11-15，agy 1.5.9 實測）**：影子家目錄的 `.gemini` 是空的，agy 以為第一次執行，開機停在「色彩預覽頁（`[Next]`）→ Terms 頁」。完成旗標在 `.gemini/antigravity-cli/cache/onboarding.json`（`onboardingComplete`／`consumerOnboardingComplete`）；有這個檔就直接進輸入框（工作資料夾信任框另由 `trustedWorkspaces` 處理）。`agy_shadow_home_sh` 每次啟動補齊時，真家目錄的 `onboarding.json` 已完成、影子那份還沒完成就**複製**過去（連同 `nux_state.json`；複製不連結，agy 會改寫它；不碰 `antigravity-oauth-token`、`credential-user-scope`、Keychain）；影子已完成的不覆蓋。畫面辨識：1.5.9 的色彩頁比 24 列高、標題被擠出視窗，`agy_screen::blocking_dialog` 另認頁尾（`[Next]`＋`↑/↓ Navigate · enter Confirm` → 色彩頁；`[Done]`＋`↑/↓ Navigate · enter Toggle` → Terms 頁），判 blocked、不送 prompt、通知擁有者。
 agy 1.5.9 的登入資料在 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`（macOS 是 Keychain 項目 `gemini`/`antigravity`），另有 `$HOME/.config/antigravity/credential-user-scope`。**沒有專用的設定目錄環境變數**：實測 `XDG_CONFIG_HOME`／`XDG_DATA_HOME`／`XDG_STATE_HOME`／`XDG_CACHE_HOME` 全指到別處，`agy models` 仍讀到原本的登入（`~/.gemini` 寫死在 `$HOME`）；只有 `HOME=<別的目錄>` 有效（`agy models` 回 `Please sign in…`、exit 1，原本的檔案沒被動到）。
 所以 **agy 身份＝換 `HOME`**，`[[identities]] kind = "agy"` 的 `env` 只能是 `HOME = "$HOME/.agy-<名>"`（`pane_identity::config_dir_var("agy")` 是 `HOME`，沒換 HOME＝預設帳號的那個空 env 身份）。
 - **影子家目錄**（`tools::agy_shadow_home_sh`）：換 HOME 會讓 git／ssh／npm／cargo／PATH 一起找不到東西，所以那個目錄裡只有 `.gemini` 與 `.config/antigravity` 是各身份獨立的（一開始是空的＝未登入），真家目錄的其餘每一項都用 symlink 指回去。建立身份、登入／登出、bot 啟動時補齊（只補缺的連結，不動已存在的檔案，可重複執行）；本機與遠端（ssh）一樣。

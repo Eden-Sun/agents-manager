@@ -933,6 +933,31 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(dir.join("Library/Preferences").is_symlink(), "Library 其餘照樣連回去");
         assert!(!dir.join("Library/Keychains").exists(), "login Keychain 不可見");
         assert!(real.join("Library/Keychains/login.keychain-db").exists(), "真的 Keychain 不被動到");
+        // 首次精靈旗標：真家目錄已完成 → 影子補上（複製，不帶憑證）；影子已完成的不覆蓋；真家目錄沒完成就不補。
+        let cache = real.join(".gemini/antigravity-cli/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(real.join(".gemini/antigravity-cli/antigravity-oauth-token"), "REAL-TOKEN").unwrap();
+        std::fs::write(real.join(".config/antigravity/credential-user-scope"), "REAL-SCOPE").unwrap();
+        let shadow_flag = dir.join(".gemini/antigravity-cli/cache/onboarding.json");
+        std::fs::create_dir_all(shadow_flag.parent().unwrap()).unwrap();
+        std::fs::write(&shadow_flag, r#"{"onboardingComplete": false}"#).unwrap();
+        std::fs::write(cache.join("onboarding.json"), r#"{"onboardingComplete": false}"#).unwrap();
+        assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        assert!(std::fs::read_to_string(&shadow_flag).unwrap().contains("false"), "真家目錄沒完成就不補");
+        std::fs::write(cache.join("onboarding.json"), r#"{"consumerOnboardingComplete": true, "onboardingComplete": true}"#).unwrap();
+        std::fs::write(cache.join("nux_state.json"), r#"{"dismissed":[1]}"#).unwrap();
+        for _ in 0..2 {
+            assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        }
+        assert!(std::fs::read_to_string(&shadow_flag).unwrap().contains(r#""onboardingComplete": true"#), "既有影子家目錄也補上完成旗標");
+        assert!(dir.join(".gemini/antigravity-cli/cache/nux_state.json").exists());
+        assert!(!shadow_flag.is_symlink(), "複製不連結");
+        assert!(!dir.join(".gemini/antigravity-cli/antigravity-oauth-token").exists(), "不帶 OAuth token");
+        assert!(!dir.join(".config/antigravity/credential-user-scope").exists(), "不帶憑證範圍檔");
+        // 影子已經完成：不覆蓋（agy 之後改寫的內容留著）。
+        std::fs::write(&shadow_flag, r#"{"onboardingComplete": true, "mine": 1}"#).unwrap();
+        assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        assert!(std::fs::read_to_string(&shadow_flag).unwrap().contains("mine"));
         // 家目錄就是真家目錄：什麼都不做。
         let same = agy_shadow_home_sh(real.to_str().unwrap(), real.to_str().unwrap());
         assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());

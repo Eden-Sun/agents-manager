@@ -857,6 +857,16 @@ for p in "$real"/.config/* "$real"/.config/.[!.]*; do
   [ "$n" != antigravity ] || continue
   [ -e "$dir/.config/$n" ] || [ -L "$dir/.config/$n" ] || ln -s "$p" "$dir/.config/$n"
 done
+# 首次啟動精靈（agy 1.5.9 實測：色彩頁→Terms 頁）的完成旗標在 `.gemini/antigravity-cli/cache/onboarding.json`；
+# 影子家目錄是空的所以每個身份第一次都會卡在精靈（AG Man 不代按）。真家目錄已完成的話把旗標檔**複製**過去
+# （複製不連結：agy 會改寫它，各身份各一份；不動憑證 antigravity-oauth-token 與 credential-user-scope，也沒有 Keychain）。
+# 影子那份已經完成就不動；還沒完成（或沒有）才補，所以既有的影子家目錄下次啟動也會補上。
+src="$real/.gemini/antigravity-cli/cache"; dst="$dir/.gemini/antigravity-cli/cache"
+if grep -q '"onboardingComplete": *true' "$src/onboarding.json" 2>/dev/null \
+   && ! grep -q '"onboardingComplete": *true' "$dst/onboarding.json" 2>/dev/null; then
+  mkdir -p "$dst" && cp "$src/onboarding.json" "$dst/onboarding.json"
+  [ -f "$src/nux_state.json" ] && [ ! -e "$dst/nux_state.json" ] && cp "$src/nux_state.json" "$dst/nux_state.json"
+fi
 exit 0
 "#,
         real = sh_quote(real_home),
