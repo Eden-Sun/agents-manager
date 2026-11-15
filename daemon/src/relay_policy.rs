@@ -36,6 +36,9 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
     let to = crate::db::bot(&app.db, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("target_missing".into()))?;
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
+    // 分享助理（shared_bots）是給外部使用者用的對話助理，不是執行者：任何 bot（含管理者、AGM）都不能派工給它。
+    // 使用者本人從網頁對它說話、分享使用者的對話不經 relay，不受影響。
+    if is_shared_bot(&app.db, &to.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Err(RelayDenied::Denied(SHARED_BOT_NOT_DISPATCHABLE.into())); }
     // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
     let is_agm = crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some();
     if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) && to.manager_use == 0 {
@@ -82,6 +85,14 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
     Ok(None)
 }
 
+/// 分享助理不能被當成派工對象的穩定原因碼（relay 403 的 `reason`，peers 的 `dispatch_reason`）。
+pub const SHARED_BOT_NOT_DISPATCHABLE: &str = "shared_bot_not_dispatchable";
+
+/// 這顆 bot 是不是分享助理（`shared_bots` 表有它）。
+pub async fn is_shared_bot(db: &sqlx::SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM shared_bots WHERE bot_id=?)").bind(bot_id).fetch_one(db).await
+}
+
 /// 專家派工總開關（`projects.specialist_dispatch`）：專案是 expert 且開關開著、送件者是同專案存活頂層 specialist、
 /// 目標是同專案存活頂層 executor。child、刪除與角色都看 DB 當下；送達時 `lifecycle::relay_grant` 再以同樣條件正向確認。
 pub(crate) fn specialist_dispatch_allows(project: &crate::db::Project, from: &crate::db::Bot, to: &crate::db::Bot) -> bool {
@@ -96,6 +107,23 @@ pub(crate) fn specialist_dispatch_allows(project: &crate::db::Project, from: &cr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分享助理（shared_bots）不是執行者：一般 bot 與 AGM 角色點名都擋（403 reason），結果通知不受影響。
+    #[tokio::test]
+    async fn a_shared_bot_cannot_be_a_relay_target() {
+        let env = crate::testing::env().await;
+        let from = crate::testing::claude_bot(&env.app, &env.project_id, "policy-shared-from").await;
+        let shared = crate::testing::claude_bot(&env.app, &env.project_id, "policy-shared-to").await;
+        assert!(relay_prompt_allowed(&env.app, &from.id, &shared.id, Admission::NewRequest).await.is_ok(), "不是分享助理時照舊放行");
+        sqlx::query("INSERT INTO shared_bots(bot_id,profile,workspace,created_at) VALUES (?,'restricted','/tmp/shared-ws',?)")
+            .bind(&shared.id).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+        for kind in [Admission::NewRequest, Admission::Deliver] {
+            let r = relay_prompt_allowed(&env.app, &from.id, &shared.id, kind).await;
+            assert!(matches!(r, Err(RelayDenied::Denied(ref m)) if m == SHARED_BOT_NOT_DISPATCHABLE), "{kind:?}: {r:?}");
+        }
+        // 分享助理自己當寄件者／回結果通知不受影響。
+        assert!(relay_prompt_allowed(&env.app, &shared.id, &from.id, Admission::ResultNotice).await.is_ok());
+    }
 
     #[tokio::test]
     async fn delivery_and_result_notice_allow_offline_requester() {

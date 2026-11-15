@@ -49,6 +49,7 @@ pub(crate) async fn list(
     };
     let caller_id = caller.as_ref().map(|c| c.id.clone());
     let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let shared_ids: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>("SELECT bot_id FROM shared_bots").fetch_all(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.into_iter().collect();
     let mut peers = Vec::new();
     // 排程專屬 bot 不是同事：不列、不派工。
     for bot in bots.iter().filter(|b| b.project_id == project_id && b.role.as_deref() != Some("scheduler")) {
@@ -71,13 +72,19 @@ pub(crate) async fn list(
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
         let is_api_advisor = bot.kind == "claude-api" && bot.role.as_deref() == Some("advisor");
-        let dispatchable = bot.kind != "claude-api" || is_api_advisor;
+        let is_shared = shared_ids.contains(&bot.id);
+        let dispatchable = (bot.kind != "claude-api" || is_api_advisor) && !is_shared;
         let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
         if bot.kind == "claude-api" {
             peer["billing"] = json!("api");
             if !is_api_advisor {
                 peer["dispatch_reason"] = json!("純 API 模型，不能接受 bot 派工");
             }
+        }
+        if is_shared {
+            // 分享助理是給外部使用者用的對話助理，不是執行者：不可派工（relay 也擋，403 shared_bot_not_dispatchable）。
+            peer["dispatch_reason"] = json!(crate::relay_policy::SHARED_BOT_NOT_DISPATCHABLE);
+            peer["shared"] = json!(true);
         }
         if bot.role.as_deref() == Some("executor") {
             peer["tier"] = json!(crate::expert_cluster::tier_of(&bot.kind, bot.model.as_deref()));
@@ -361,6 +368,23 @@ mod tests {
         let other = crate::db::ulid();
         sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES (?,?,?,?)").bind(&other).bind(format!("/tmp/{other}")).bind("other").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert!(matches!(list(State(app), Path(other), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(bot.id))).await, Err(LcError::Forbidden(_))));
+    }
+
+    #[tokio::test]
+    async fn a_shared_bot_is_listed_but_not_dispatchable() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let caller = crate::testing::claude_bot(&app, &env.project_id, "peer-caller").await;
+        let shared = crate::testing::claude_bot(&app, &env.project_id, "peer-shared").await;
+        sqlx::query("INSERT INTO shared_bots(bot_id,profile,workspace,created_at) VALUES (?,'restricted','/tmp/shared-ws',?)")
+            .bind(&shared.id).bind(crate::db::now()).execute(&app.db).await.unwrap();
+        let value = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(caller.id.clone()))).await.unwrap().0;
+        let peers = value["peers"].as_array().unwrap();
+        let p = peers.iter().find(|p| p["id"] == shared.id).unwrap();
+        assert_eq!((p["dispatchable"].clone(), p["dispatch_reason"].clone(), p["shared"].clone()), (json!(false), json!("shared_bot_not_dispatchable"), json!(true)));
+        let c = peers.iter().find(|p| p["id"] == caller.id).unwrap();
+        assert_eq!(c["dispatchable"], true);
+        assert!(c.get("shared").is_none());
     }
 
     #[tokio::test]
