@@ -83,6 +83,11 @@ fn default_dir(kind: &str) -> Option<&'static str> {
 
 /// Unset var or the CLI's default dir (`CLAUDE_CONFIG_DIR=~/.claude`) = the empty-env identity
 /// (`cc0`, §16.1); otherwise such a child kept its parent's `cc1` forever.
+///
+/// 沒有任何身份認領、而且跑在 CLI 自己的預設目錄上（或沒覆寫）＝**預設帳號**，回 `Some("")`：
+/// 跟 `runs.runtime_identity` 既有的約定一樣（`Run::started_identity`：空字串＝沒有身份）。
+/// 不是身份名，呼叫端只記在 run 上、不寫回 `bots.identity`（不清空、不送給 CLI）。
+/// `None` 仍只表示「不認得這個目錄」，保留繼承值。
 pub fn child_identity(
     identities: &[crate::config::IdentityCfg],
     kind: &str,
@@ -100,7 +105,7 @@ pub fn child_identity(
             return None;
         }
     }
-    identities.iter().find(|i| i.kind == kind && !i.env.contains_key(var)).map(|i| i.name.clone())
+    Some(identities.iter().find(|i| i.kind == kind && !i.env.contains_key(var)).map(|i| i.name.clone()).unwrap_or_default())
 }
 
 /// Ask once per pane: a reconnect's reconcile burst would otherwise be a `ps`/ssh storm

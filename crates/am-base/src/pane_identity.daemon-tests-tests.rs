@@ -72,7 +72,8 @@
         assert_eq!(child_identity(&ids, "claude", var, h, None), Some("cc0".into()));
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/me/.claude-ccompany")), Some("cc1".into()));
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/me/.claude-other")), None);
-        assert_eq!(child_identity(&ids[1..], "claude", var, h, None), None);
+        // 沒有空 env 身份（只剩 cc1）時，預設目錄／沒覆寫＝預設帳號（空字串），不是「不認得」。
+        assert_eq!(child_identity(&ids[1..], "claude", var, h, None), Some(String::new()));
     }
 
     #[tokio::test]
@@ -348,4 +349,20 @@
         assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/home/u/.agy-ag2")).as_deref(), Some("ag2"));
         assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/home/u")).as_deref(), Some("ag0"), "真家目錄＝預設帳號");
         assert_eq!(child_identity(&ids, "agy", "HOME", "/home/u", Some("/elsewhere")), None);
+    }
+
+    /// m4p 實際情況（2026-11-15）：agy 只有 `ag1`（帶 HOME），子 agent 跑在真家目錄（`/Users/m4p`）上＝預設帳號。
+    /// 以前回 None、run 的 runtime_identity 留 NULL，網頁就顯示「未知」；現在是空字串（預設）。
+    /// codex（`~/.codex`）與 grok（沒有預設目錄，沒覆寫 `GROK_HOME` 就是預設）一樣。
+    #[test]
+    fn a_child_on_its_kinds_default_directory_is_the_default_account_not_unknown() {
+        let agy_only = vec![crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: None, env: [("HOME".to_string(), "$HOME/.agy-".to_string())].into(), args: vec![] }];
+        assert_eq!(child_identity(&agy_only, "agy", "HOME", "/Users/m4p", Some("/Users/m4p")).as_deref(), Some(""));
+        assert_eq!(child_identity(&agy_only, "agy", "HOME", "/Users/m4p", Some("/Users/m4p/.agy-")).as_deref(), Some("ag1"));
+        assert_eq!(child_identity(&agy_only, "agy", "HOME", "/Users/m4p", Some("/Users/m4p/.agy-ag9")), None, "不認得的目錄仍保留繼承值");
+        let codex = vec![crate::config::IdentityCfg { name: "cx1".into(), kind: "codex".into(), host: None, env: [("CODEX_HOME".to_string(), "$HOME/.codex-cx1".to_string())].into(), args: vec![] }];
+        assert_eq!(child_identity(&codex, "codex", "CODEX_HOME", "/home/u", Some("/home/u/.codex")).as_deref(), Some(""));
+        assert_eq!(child_identity(&codex, "codex", "CODEX_HOME", "/home/u", None).as_deref(), Some(""));
+        assert_eq!(child_identity(&[], "grok", "GROK_HOME", "/home/u", None).as_deref(), Some(""), "grok 沒有預設目錄：沒覆寫就是預設");
+        assert_eq!(child_identity(&[], "grok", "GROK_HOME", "/home/u", Some("/home/u/.grok-x")), None);
     }

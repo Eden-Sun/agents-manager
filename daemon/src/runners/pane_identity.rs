@@ -149,7 +149,8 @@ pub async fn sync_child_identity(
         if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
             return false;
         }
-        if bot.identity.as_deref() == Some(name.as_str()) {
+        // 預設帳號（空字串）只記在 run 上：`bots.identity` 是使用者的設定，不因一次偵測清掉或改成空值。
+        if name.is_empty() || bot.identity.as_deref() == Some(name.as_str()) {
             return true;
         }
         // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
@@ -170,7 +171,7 @@ pub async fn sync_child_identity(
         return;
     }
     probe.complete();
-    if bot.identity.as_deref() == Some(name.as_str()) {
+    if name.is_empty() || bot.identity.as_deref() == Some(name.as_str()) {
         return;
     }
     tracing::info!(host, bot = %bot.name, pane = %pane_id, was = ?bot.identity, now = %name, %dir,
