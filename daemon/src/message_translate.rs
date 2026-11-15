@@ -810,8 +810,8 @@ mod cost_tests {
         let u = claude_api::Usage { input_tokens: Some(1_000_000), output_tokens: Some(1_000_000), cache_creation_input_tokens: Some(1_000_000), cache_read_input_tokens: Some(1_000_000) };
         // Haiku 5.5：0.10 + 0.50 + 0.125 + 0.01
         assert!((cost_usd("claude-haiku-5-5", &u).unwrap() - 0.735).abs() < 1e-9);
-        // Sonnet 5.5：2 + 10 + 2.5 + 0.2
-        assert!((cost_usd("claude-sonnet-5-5", &u).unwrap() - 14.7).abs() < 1e-9);
+        // Sonnet 5.5：2 + 10 + 2.5 + 0.1（快取讀取 $0.10/MTok＝輸入價 0.05×，a7d53148e）
+        assert!((cost_usd("claude-sonnet-5-5", &u).unwrap() - 14.6).abs() < 1e-9);
         assert_eq!(cost_usd("gpt-x", &u), None);
     }
 }
