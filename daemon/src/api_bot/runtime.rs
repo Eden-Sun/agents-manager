@@ -879,6 +879,9 @@ impl ApiBotRuntime {
         (run_ticket, cancel)
         };
 
+        // claude-api 沒有 pane／hook，`runs.agent_status` 要由回合狀態推：回合開始＝working（跟 CLI bot 同一個欄位、同一個事件，
+        // 前端的膠囊燈號、側欄、手機晶片不用分支）；結束時在 `own_ticket_inner` 回 idle。
+        super::completion::set_run_agent_status(&app.shared(), &key.bot_id, &key.run_id, "working").await;
         let shutdown = app.shutdown.clone();
         let session_commit = SessionCommit {
             pool: app.db.clone(),
@@ -1350,11 +1353,13 @@ async fn own_ticket_inner(
             let time_limited = owner.app.api_bot_runtime.inner.time_limited.lock().expect("time limited mutex poisoned").remove(&FullKey::from(&owner.key));
             let compaction_note = owner.app.api_bot_runtime.inner.compaction_notes.lock().expect("compaction note mutex poisoned").remove(&FullKey::from(&owner.key));
             let model_switch_note = owner.app.api_bot_runtime.inner.model_switch_notes.lock().expect("model switch note mutex poisoned").remove(&FullKey::from(&owner.key));
-            if let Some((committed, payload, published)) = settle_joined_completion(
-                &owner, joined, final_text, &shutdown, session_commit.as_ref(),
-            ).await {
+            let settled = settle_joined_completion(&owner, joined, final_text, &shutdown, session_commit.as_ref()).await;
+            if let Some((committed, payload, published)) = settled {
                 let revision = committed.session_revision;
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
+                // 回合結束（完成、失敗、取消都一樣）：run 的 agent_status 回 idle，主力膠囊的「進行中」燈號才會熄、已回答的未讀才亮。
+                // 排在訊息與回合事件之後（前端先拿到回覆再看到 idle）。
+                super::completion::set_run_agent_status(&owner.app, &owner.key.bot_id, &owner.key.run_id, "idle").await;
                 if let Some(note) = compaction_note {
                     super::completion::post_compaction_notice(&owner.app, &owner.key, &note).await;
                 }
@@ -1377,6 +1382,11 @@ async fn own_ticket_inner(
                     crate::lifecycle::race_point::hit("api_same_run_owner_before_exit", &owner.key.run_id).await;
                     if shutdown.is_cancelled() { return None; }
                     return Some(super::same_run::Finalized { identity: owner.identity, revision, payload });
+                }
+            } else {
+                // 沒結算成功（儲存失敗、被擋）：回合還是結束了，燈號不能卡在 working。關機中途不算結束（回合仍是 in_flight、pending），不動。
+                if !shutdown.is_cancelled() {
+                    super::completion::set_run_agent_status(&owner.app, &owner.key.bot_id, &owner.key.run_id, "idle").await;
                 }
             }
         }

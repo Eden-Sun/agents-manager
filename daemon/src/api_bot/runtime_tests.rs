@@ -4420,8 +4420,11 @@ async fn ambiguous_store_with_exact_uncommitted_owner_retries_once() {
     );
     assert_eq!(turn_events[0].data["turn"]["status"], "completed");
     assert!(message_events[0].seq < turn_events[0].seq);
-    assert_eq!(status_events.len(), 1, "one bot_status for this exact bot/run");
-    assert!(turn_events[0].seq < status_events[0].seq);
+    // 這個 fixture 直接掛 own_ticket（不經 spawn），所以沒有回合開始的 working；結束時 idle 是 claude-api 的 run 狀態由回合推的那一則
+    // （見 `completion::set_run_agent_status`），排在回覆事件之後。
+    assert_eq!(status_events.len(), 2, "the pre-existing status frame plus the idle at turn end");
+    assert_eq!(status_events[1].data["run"]["agent_status"], "idle");
+    assert!(turn_events[0].seq < status_events[1].seq);
 }
 
 #[tokio::test]
@@ -5013,6 +5016,7 @@ async fn shutdown_interrupts_backoff_and_keeps_durable_pending_without_fake_comp
         .unwrap(),
         0
     );
+    // 關機不會假裝完成：回合還是 in_flight，所以也不會推 idle。
     assert!(events.try_recv().is_err());
     assert!(f
         .env

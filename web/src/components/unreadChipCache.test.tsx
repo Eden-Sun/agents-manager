@@ -213,3 +213,30 @@ test('claude-api 主力晶片：底色依 expires_at 與 ttl 倒數填色、綠�
   assert.equal(shape(chip('api-fresh')), shape(chip('fresh')))
   assert.equal(shape(chip('api-cold')), shape(chip('cold')))
 })
+
+/**
+ * claude-api 沒有 pane／hook，daemon 用回合狀態寫 `run.agent_status`（開始 working、結束 idle）；前端膠囊跟 CLI bot 走同一條：
+ * working＝轉圈，已回答的未讀＝數字徽章。沒有 pane_id 也一樣（不分支）。
+ */
+test('claude-api 主力膠囊：回合進行中（agent_status working、無 pane）轉圈；回答完（idle、未讀 1）有未讀徽章、沒有轉圈', async () => {
+  const bot = (id: string) => ({
+    id, name: id, project_id: 'p1', kind: 'claude-api', identity: null, model: null, effort: null, args: [], env: {}, autostart: false,
+    inject_hooks: false, auto_approve: false, managed_by: 'user', parent_bot_id: null, primary: true, primary_position: 0, cwd: null,
+  })
+  const run = (id: string, status: string) => ({ id: `r-${id}`, bot_id: id, state: 'running', agent_status: status, pane_id: null, started_at: minAgo(60), agent_status_since: minAgo(1) })
+  useStore.setState({
+    projects: [{ id: 'p1', label: 'proj', path: '/p', host: 'local' }],
+    bots: [bot('api-run'), bot('api-done')],
+    runs: { 'api-run': run('api-run', 'working'), 'api-done': run('api-done', 'idle') },
+    botOrder: {}, projectOrder: [], botUnread: { 'api-done': 1 }, hiddenBotIds: [], selectedBotId: null, supervisorProjectId: null, connected: true, socket: 'open',
+  } as never)
+  await mount(<UnreadChip />)
+  const ring = (id: string) => chip(id).querySelector('.unread-chip-working-ring')
+  assert.ok(ring('api-run'), '進行中：轉圈')
+  assert.equal(ring('api-done'), null, '回答完：不轉')
+  assert.equal(chip('api-done').querySelector('.unread-chip-n')?.textContent, '1', '已回答未讀：徽章')
+  assert.equal(chip('api-run').querySelector('.unread-chip-n'), null)
+  // 使用者點進去看過就清掉（跟 CLI bot 同一個帳）。
+  await act(async () => { useStore.setState({ botUnread: {} } as never) })
+  assert.equal(chip('api-done').querySelector('.unread-chip-n'), null)
+})

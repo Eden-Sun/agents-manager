@@ -332,3 +332,43 @@ async fn an_old_unknown_attempt_does_not_rewrite_a_checkpoint_when_a_newer_attem
     let (raw, rev): (String, i64) = sqlx::query_as("SELECT checkpoint_json, revision FROM api_bot_sessions WHERE id=?").bind(session_id).fetch_one(&env.app.db).await.unwrap();
     assert_eq!((serde_json::from_str::<serde_json::Value>(&raw).unwrap()["api_pending"].clone(), rev), (json!(true), 7));
 }
+
+/// claude-api 沒有 pane／hook：主力膠囊的「進行中」要靠 `runs.agent_status`。回合開始 working、結束 idle，同欄位同事件
+/// （`bot_status`），值沒變不重推，已結束的 run 不碰。
+#[tokio::test]
+async fn api_turn_state_drives_the_same_run_agent_status_field_cli_bots_use() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    for (bot, run, state) in [("st-bot", "st-run", "running"), ("st-bot-x", "st-run-x", "exited")] {
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api','fake',?)")
+            .bind(bot).bind(&env.project_id).bind(bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,?,?)")
+            .bind(run).bind(bot).bind(state).bind(&now).execute(&env.app.db).await.unwrap();
+    }
+    let status = |run: &'static str| {
+        let db = env.app.db.clone();
+        async move { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE id=?").bind(run).fetch_one(&db).await.unwrap() }
+    };
+    let mut rx = env.app.subscribe();
+    // 回傳這顆 bot 收到的 bot_status 事件裡 run.agent_status 的序列。
+    let drain = |rx: &mut tokio::sync::broadcast::Receiver<am_base::ws_event::WsEvent>| {
+        let mut seen = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "bot_status" && ev.data["bot_id"] == "st-bot" {
+                seen.push(ev.data["run"]["agent_status"].as_str().unwrap_or("").to_string());
+            }
+        }
+        seen
+    };
+    let _ = drain(&mut rx);
+    super::completion::set_run_agent_status(&env.app, "st-bot", "st-run", "working").await;
+    assert_eq!(status("st-run").await, "working", "回合開始");
+    assert_eq!(drain(&mut rx), vec!["working"], "推 bot_status，前端的燈號才會轉");
+    super::completion::set_run_agent_status(&env.app, "st-bot", "st-run", "working").await;
+    assert!(drain(&mut rx).is_empty(), "值沒變不重推");
+    super::completion::set_run_agent_status(&env.app, "st-bot", "st-run", "idle").await;
+    assert_eq!(status("st-run").await, "idle", "回合結束");
+    assert_eq!(drain(&mut rx), vec!["idle"]);
+    super::completion::set_run_agent_status(&env.app, "st-bot-x", "st-run-x", "working").await;
+    assert_eq!(status("st-run-x").await, "unknown", "已結束的 run 不碰（預設值不變）");
+}

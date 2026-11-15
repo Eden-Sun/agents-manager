@@ -607,6 +607,25 @@ pub(super) async fn post_cap_notice(app: &Arc<App>, key: &ApiTurnKey, max_calls:
     }
 }
 
+/// claude-api 的 run 沒有 pane 與 hook，`agent_status` 由回合狀態寫：回合開始 `working`、結束 `idle`（同欄位同事件，`emit_bot_status`
+/// 推 `bot_status`）。只改還活著的 run；值沒變就不寫、不推。
+pub(super) async fn set_run_agent_status(app: &Arc<App>, bot_id: &str, run_id: &str, status: &str) {
+    let changed = sqlx::query(
+        "UPDATE runs SET agent_status=? WHERE id=? AND bot_id=? AND state IN ('starting','running') AND agent_status!=?",
+    )
+    .bind(status)
+    .bind(run_id)
+    .bind(bot_id)
+    .bind(status)
+    .execute(&app.db)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+    if changed > 0 {
+        app.emit_bot_status(bot_id).await;
+    }
+}
+
 /// 一個 `usage.iterations` 項目讀到的整段 context：input＋cache_read＋cache_creation（Anthropic 的 `input_tokens` 只是**沒進快取**的那一小段，
 /// 單看它會得到「36 → 2 tokens」這種錯數字）。三欄都沒有就是 `None`。
 fn iteration_context_tokens(it: &serde_json::Value) -> Option<u64> {
