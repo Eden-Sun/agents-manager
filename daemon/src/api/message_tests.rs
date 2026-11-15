@@ -522,3 +522,53 @@ async fn messages_for_an_unknown_bot_are_not_found() {
     assert_eq!(body["bot_id"], gone);
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
 }
+
+/// 同一段回覆在 DB 裡若同時存在 hook 完整版（`incomplete = 0`）與終端備援刮下來的殘缺版（`source = "terminal_fallback", incomplete = 1`），
+/// `get_messages` 應剔除殘缺版，確保網頁不顯示殘缺重複。
+#[tokio::test]
+async fn get_messages_prunes_duplicate_incomplete_fallback_message() {
+    let e = crate::testing::env().await;
+    let app = e.app.clone();
+    let bot_id = "prune-dup-test-bot";
+    sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES (?,?,?,'claude','tok',?)")
+        .bind(bot_id)
+        .bind(&e.project_id)
+        .bind(bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+
+    let hook_content = "Fake balance report is ready in `1a2b3c4d` with full details.\n\n- item: done";
+    let fallback_content = "Fake balance report is ready in 1a2b3c4d with full details.\n\nitem: done";
+
+    // 1. Hook 收下的完整訊息
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, role, content, source, incomplete, created_at) VALUES ('m-hook', ?, 'assistant', ?, 'hook', 0, '2026-10-25T01:00:00Z')",
+    )
+    .bind(&conv)
+    .bind(hook_content)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // 2. 備援刮下的重複且 incomplete 的訊息
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, role, content, source, incomplete, created_at) VALUES ('m-fallback', ?, 'assistant', ?, 'terminal_fallback', 1, '2026-10-25T01:00:05Z')",
+    )
+    .bind(&conv)
+    .bind(fallback_content)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let Json(body) = get_messages(State(app), Path(bot_id.into()), Query(HashMap::new())).await.unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+
+    // 驗證只回傳了 1 則 assistant 訊息，且是完整的那則 'm-hook'，殘缺的 'm-fallback' 被過濾剔除
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["id"], "m-hook");
+    assert_eq!(msgs[0]["incomplete"], 0);
+    assert_eq!(msgs[0]["source"], "hook");
+}

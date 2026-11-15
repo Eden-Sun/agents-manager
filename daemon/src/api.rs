@@ -6916,6 +6916,7 @@ async fn get_messages(
     let has_more = rows.len() as i64 > limit;
     let mut msgs: Vec<db::Message> = rows.into_iter().take(limit as usize).collect();
     msgs.reverse();
+    prune_duplicate_incomplete_fallback_messages(&mut msgs);
     // `turns`：這一頁訊息所屬的回合（送達警示與撤回鈕要查得到，翻到更早的頁也一樣）∪ 這段對話還沒結束的回合
     // （判斷還在不在跑）。以前是「最新 limit+1 筆」，翻頁或帶 `turn_id=` 時跟頁上的訊息對不上（#954）。
     // 一頁最多 500 則訊息，`?` 佔位符低於 SQLite 的 999 個參數上限。第二排序鍵 `rowid`：同毫秒的回合順序要穩定。
@@ -6935,6 +6936,36 @@ async fn get_messages(
     }
     let turns = turns_query.fetch_all(&app.db).await.map_err(any_err)?;
     Ok(Json(json!({"bot_id": id, "conversation_id": conv, "messages": msgs, "turns": turns, "has_more": has_more})))
+}
+
+/// 當同對話中已存在完整的 assistant 回覆（例如由 hook 收下，`incomplete == 0`）時，
+/// 剔除同內容因備援重複刮取產生的殘缺訊息（`source == "terminal_fallback" && incomplete != 0`），
+/// 避免網頁重複顯示且顯示不完整。
+pub(crate) fn prune_duplicate_incomplete_fallback_messages(msgs: &mut Vec<db::Message>) {
+    let complete_replies: Vec<(String, String)> = msgs
+        .iter()
+        .filter(|m| m.role == "assistant" && m.incomplete == 0)
+        .map(|m| (m.id.clone(), m.content.clone()))
+        .collect();
+    if complete_replies.is_empty() {
+        return;
+    }
+    msgs.retain(|msg| {
+        if msg.role == "assistant" && msg.source == "terminal_fallback" && msg.incomplete != 0 {
+            let has_complete_duplicate = complete_replies.iter().any(|(id, content)| {
+                id != &msg.id && lifecycle::is_same_or_nearly_same_reply(content, &msg.content)
+            });
+            if has_complete_duplicate {
+                tracing::info!(
+                    message_id = %msg.id,
+                    turn_id = ?msg.turn_id,
+                    "pruning duplicate incomplete terminal_fallback message in favor of complete reply"
+                );
+                return false;
+            }
+        }
+        true
+    });
 }
 
 /// `id → (名字, 已收掉)`。不濾 `deleted_at`：已收掉的 child 也要認得出名字。`?` 數量受一頁 500 則限制，低於 SQLite 的 999。

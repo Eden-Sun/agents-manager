@@ -132,6 +132,68 @@ pub async fn last_assistant_content(app: &impl crate::capabilities::Db, conversa
     .await?)
 }
 
+#[derive(Debug, Clone)]
+pub struct LastAssistantMessage {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub incomplete: bool,
+    pub turn_id: Option<String>,
+}
+
+/// 取得對話中最新的一筆 assistant 訊息與其來源、完整性狀態。
+pub async fn last_assistant_message(app: &impl crate::capabilities::Db, conversation_id: &str) -> anyhow::Result<Option<LastAssistantMessage>> {
+    let row: Option<(String, String, String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, content, source, incomplete, turn_id FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(app.db())
+    .await?;
+    Ok(row.map(|(id, content, source, incomplete, turn_id)| LastAssistantMessage {
+        id,
+        content,
+        source,
+        incomplete: incomplete != 0,
+        turn_id,
+    }))
+}
+
+/// 判斷兩段 assistant 回覆是否實質為同一段內容（包含終端擷取掉 markdown 或格式微調的情況）。
+pub fn is_same_or_nearly_same_reply(a: &str, b: &str) -> bool {
+    let a_trim = a.trim();
+    let b_trim = b.trim();
+    if a_trim.is_empty() || b_trim.is_empty() {
+        return false;
+    }
+    if a_trim == b_trim {
+        return true;
+    }
+    if a.split_whitespace().eq(b.split_whitespace()) {
+        return true;
+    }
+    let norm_a: String = a_trim.chars().flat_map(char::to_lowercase).filter(|c| c.is_alphanumeric()).collect();
+    let norm_b: String = b_trim.chars().flat_map(char::to_lowercase).filter(|c| c.is_alphanumeric()).collect();
+    if norm_a.is_empty() || norm_b.is_empty() {
+        return false;
+    }
+    if norm_a == norm_b {
+        return true;
+    }
+    let min_len = norm_a.len().min(norm_b.len());
+    let max_len = norm_a.len().max(norm_b.len());
+    if min_len >= 20 && min_len * 10 >= max_len * 6 && (norm_a.contains(&norm_b) || norm_b.contains(&norm_a)) {
+        return true;
+    }
+    if max_len <= 1000 {
+        crate::child_done::nearly_same_reply(a, b)
+    } else {
+        crate::child_done::nearly_same_reply(
+            &a.chars().take(crate::child_done::NEAR_DUPLICATE_MAX_CHARS).collect::<String>(),
+            &b.chars().take(crate::child_done::NEAR_DUPLICATE_MAX_CHARS).collect::<String>(),
+        )
+    }
+}
+
 /// Record how far into the pane we have read, so the next capture starts after it.
 pub async fn remember_pane_cursor(app: &impl crate::capabilities::Db, run_id: &str, read: &crate::herdr::PaneRead) -> anyhow::Result<()> {
     sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
@@ -3326,5 +3388,39 @@ mod feedback_survey_reply_tests {
         assert!(!crate::tui_prompts::is_feedback_survey(SURVEY_QUOTED));
         let got = extract_reply("claude", SURVEY_QUOTED).expect("引文是回覆的一部分");
         assert!(got.contains("How is Claude doing this session?"), "{got}");
+    }
+}
+
+#[cfg(test)]
+mod same_or_nearly_same_reply_tests {
+    use super::*;
+
+    #[test]
+    fn exact_and_whitespace_matches() {
+        assert!(is_same_or_nearly_same_reply("hello world", "hello world"));
+        assert!(is_same_or_nearly_same_reply("hello   world\n", "hello world"));
+        assert!(!is_same_or_nearly_same_reply("hello", "world"));
+        assert!(!is_same_or_nearly_same_reply("", ""));
+    }
+
+    #[test]
+    fn markdown_stripped_matches() {
+        let hook_reply = "The summary is complete, pushed to `1a2b3c4d`.\n\n- **Item 1**: Done\n- **Item 2**: Fixed";
+        let scraped_reply = "The summary is complete, pushed to 1a2b3c4d.\n\nItem 1: Done\nItem 2: Fixed";
+        assert!(is_same_or_nearly_same_reply(hook_reply, scraped_reply));
+    }
+
+    #[test]
+    fn partial_scroll_substring_matches() {
+        let long_hook = "Paragraph one with detailed findings and explanations.\nParagraph two with verification numbers.\nParagraph three wrapping up the task successfully.";
+        let scrolled_terminal = "Paragraph two with verification numbers.\nParagraph three wrapping up the task successfully.";
+        assert!(is_same_or_nearly_same_reply(long_hook, scrolled_terminal));
+    }
+
+    #[test]
+    fn completely_different_replies_do_not_match() {
+        let reply_a = "Finished refactoring the storage adapter module with passing tests.";
+        let reply_b = "Found three unexpected network errors during downstream verification.";
+        assert!(!is_same_or_nearly_same_reply(reply_a, reply_b));
     }
 }

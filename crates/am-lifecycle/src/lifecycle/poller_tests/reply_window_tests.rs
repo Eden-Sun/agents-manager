@@ -286,3 +286,64 @@ async fn codex_fallback_falls_back_to_screen_when_rollout_missing() {
     assert_eq!(msgs[0].1, "terminal_fallback");
     assert_eq!(msgs[0].2, 1);
 }
+
+/// 當前 turn 執行 terminal fallback 時，若畫面上殘留的回覆與上一回合由 hook 收下的回覆實質相同（掉 markdown），
+/// 不得重複存入殘缺的 assistant 回覆。
+#[tokio::test]
+async fn terminal_fallback_ignores_duplicate_reply_already_stored_by_hook() {
+    let env = tt::env().await;
+    let app = env.app.clone();
+    let bot = tt::claude_bot(&app, &env.project_id, "cl-dedup").await;
+    let run = tt::fake_run(&app, &bot.id).await;
+    let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+    // Turn 1: 已經由 hook 完成並收下完整回覆
+    let turn1 = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "completed").await;
+    let hook_reply = "The fake task is completed on `branch-fake` with 42 passing tests.\n\n- Detailed findings: all green";
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, created_at) VALUES (?, ?, ?, 'assistant', ?, 'hook', 0, ?)",
+    )
+    .bind(db::ulid())
+    .bind(&conv)
+    .bind(&turn1)
+    .bind(hook_reply)
+    .bind("2026-10-25T01:00:00Z")
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // Turn 2: daemon 通知或交錯的 prompt，目前處於 in_flight
+    let turn2 = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
+    sqlx::query("UPDATE turns SET origin='web', prompt_text='[daemon fake notice] some results ready', created_at='2026-10-25T01:00:05Z' WHERE id=?")
+        .bind(&turn2)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    // 終端畫面上殘留著上一回合的回覆（markdown 標記掉落）
+    let screen = "⏺ The fake task is completed on branch-fake with 42 passing tests.\n\nDetailed findings: all green\n";
+    env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
+
+    assert!(try_fallback(&app, &run, Some(&turn2)).await.unwrap());
+
+    // 驗證 Turn 2 的狀態是 completed_fallback，但 messages 表裡沒有為 Turn 2 存入重複的 assistant 訊息
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn2).fetch_one(&app.db).await.unwrap();
+    assert_eq!(status, "completed_fallback");
+
+    let turn2_msgs: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE turn_id=? AND role='assistant'")
+        .bind(&turn2)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+    assert!(turn2_msgs.is_empty(), "Turn 2 must not store duplicate scraped assistant reply when hook already received it");
+
+    // 全對話中依然只有 Turn 1 那唯一一筆完整回覆
+    let all_replies: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE conversation_id=? AND role='assistant'")
+        .bind(&conv)
+        .fetch_all(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(all_replies.len(), 1);
+    assert_eq!(all_replies[0].1, "hook");
+    assert_eq!(all_replies[0].2, 0);
+}

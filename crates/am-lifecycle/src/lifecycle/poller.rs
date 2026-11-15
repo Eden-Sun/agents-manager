@@ -1729,28 +1729,42 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
 
     // 沒有人送 prompt 的 external 回合（herdr 的 working→idle 抖一下就會開一個）：畫面上還是上一段回覆，游標又對不上
     // （尾端含 codex 狀態列的額度數字，一變就找不到）時，整個畫面被當成新內容，同一段回覆存第二次（am-lead 2026-09-25 10:36／11:27）。
-    // 跟上一則 assistant 一樣就是同一段回覆，只收回合不存訊息；有人送過 prompt 的回合照舊（真的可能回一樣的話）。
+    // 若上一則回覆已由 hook 收下、或畫面上根本沒有當前 prompt 的 echo，刮出來的又是同一段回覆（含 markdown 掉落），
+    // 同樣是終端殘留的上一段回覆，不存第二次。
     let reply = match reply {
-        Some(r)
-            if turn.origin == "external"
-                && turn_echo_texts(app, &turn.id).await?.is_empty()
-                && last_assistant_content(app, &turn.conversation_id).await?.is_some_and(|previous| {
-                    if bot.kind == "codex" {
-                        previous.split_whitespace().eq(r.split_whitespace())
+        Some(r) => {
+            if let Some(prev) = last_assistant_message(app, &turn.conversation_id).await? {
+                if is_same_or_nearly_same_reply(&prev.content, &r) {
+                    let is_promptless_external = turn.origin == "external" && turn_echo_texts(app, &turn.id).await?.is_empty();
+                    let missing_echo = !has_echo;
+                    let already_received_by_hook = prev.source == "hook" || !prev.incomplete;
+
+                    if is_promptless_external || missing_echo || already_received_by_hook {
+                        tracing::info!(
+                            turn = %turn.id,
+                            prev_turn = ?prev.turn_id,
+                            prev_source = %prev.source,
+                            missing_echo,
+                            "terminal fallback re-read previous reply; storing no duplicate reply"
+                        );
+                        None
                     } else {
-                        previous.trim() == r.trim()
+                        Some(r)
                     }
-                }) =>
-        {
-            tracing::info!(turn = %turn.id, "terminal fallback of a prompt-less external turn re-read the previous reply; not storing it again");
-            None
+                } else if turn.origin == "external" && bot.kind == "claude" && crate::compaction::is_screen_notice(&r) && turn_echo_texts(app, &turn.id).await?.is_empty() {
+                    tracing::info!(turn = %turn.id, "terminal fallback saw only a compaction notice; storing no reply");
+                    None
+                } else {
+                    Some(r)
+                }
+            } else if turn.origin == "external" && bot.kind == "claude" && crate::compaction::is_screen_notice(&r) && turn_echo_texts(app, &turn.id).await?.is_empty() {
+                tracing::info!(turn = %turn.id, "terminal fallback saw only a compaction notice; storing no reply");
+                None
+            } else {
+                Some(r)
+            }
         }
-        // claude 自己壓縮對話（#1759）：畫面只剩「Compacted while idle…」，不是回覆；說明由 SessionStart(compact) 寫。
-        Some(r) if turn.origin == "external" && bot.kind == "claude" && crate::compaction::is_screen_notice(&r) && turn_echo_texts(app, &turn.id).await?.is_empty() => {
-            tracing::info!(turn = %turn.id, "terminal fallback saw only a compaction notice; storing no reply");
-            None
-        }
-        r => r,
+        None => None,
     };
 
     let compact_note = if compact_turn {
@@ -2065,7 +2079,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         return Ok(false);
     }
     // herdr reports `working -> idle` more than once per answer: an identical reply is the same reply.
-    if last_assistant_content(app, &conv).await?.as_deref().map(str::trim) == Some(reply.trim()) {
+    if last_assistant_content(app, &conv).await?.as_deref().is_some_and(|prev| is_same_or_nearly_same_reply(prev, &reply)) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
