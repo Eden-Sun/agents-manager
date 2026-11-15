@@ -89,3 +89,27 @@ test('列裡的非量表項目（餘額膠囊）算固定寬含外距，不被�
     row.remove()
   }
 })
+
+test('餘額膠囊改兩行後變窄，列寬跟著用新寬度（量到多寬就算多寬，不寫死）', () => {
+  const widthWith = (chip: number) => {
+    const row = document.createElement('div')
+    document.body.append(row)
+    const make = (cls: string, width: number, margin = '') => {
+      const el = document.createElement('span')
+      el.className = cls
+      if (margin) el.style.cssText = margin
+      el.getClientRects = () => [new DOMRect(0, 0, width, 20)] as unknown as DOMRectList
+      el.getBoundingClientRect = () => new DOMRect(0, 0, width, 20)
+      row.append(el)
+    }
+    make('quota-hp', 100)
+    make('quota-balance', chip, 'margin:0 4px')
+    try {
+      return measureQuotaRow(row).width
+    } finally {
+      row.remove()
+    }
+  }
+  assert.equal(widthWith(70), 100 + 70 + 8)
+  assert.equal(widthWith(46), 100 + 46 + 8, '兩行的窄膠囊讓出 24px')
+})

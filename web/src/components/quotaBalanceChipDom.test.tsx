@@ -59,6 +59,7 @@ test('估算：顯示 API ≈$23.29；tooltip 標示估算、已確定花費、�
     await settle()
     assert.ok(chip(), '有設定錨點就畫')
     assert.equal(chip()!.textContent, 'API≈$23.29')
+    assert.deepEqual([...chip()!.children].map((c) => [c.className, c.textContent]), [['quota-balance-k', 'API'], ['quota-balance-v', '≈$23.29']], '桌機兩行：上行小字 API、下行數字')
     const tip = chip()!.getAttribute('title') ?? ''
     assert.match(tip, /估算/)
     assert.match(tip, /已確定花費/)
@@ -138,6 +139,7 @@ test('手機：縮成短格式 $23.3', async () => {
       await mount(<BalanceQuotaChip />)
       await settle()
       assert.equal(chip()!.textContent, '$23.3')
+      assert.equal(chip()!.querySelector('.quota-balance-k'), null, '手機只有數字一行')
     })
   } finally {
     window.matchMedia = origMatch
@@ -166,4 +168,5 @@ test('樣式：膠囊 CSS 不用 absolute／fixed 定位，也不是會被壓縮
   const css = readFileSync(new URL('./balanceQuotaChip.css', import.meta.url), 'utf8')
   assert.doesNotMatch(css, /position\s*:\s*(absolute|fixed)/)
   assert.match(css, /\.quota-balance\s*\{[^}]*flex:\s*none/)
+  assert.match(css, /\.quota-balance\s*\{[^}]*flex-direction:\s*column/, '桌機兩行堆疊')
 })
