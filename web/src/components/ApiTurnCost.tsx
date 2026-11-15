@@ -1,4 +1,6 @@
 /** claude-api bot 每則回覆的單價與進行中的進度。 */
+import { useEffect, useState } from 'react'
+import type { ApiTurnCost } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { useApiTurnCosts } from '../hooks/useApiTurnCosts'
@@ -46,6 +48,35 @@ export function ApiTurnCostTag({
  * 串流中（`turn_progress.est_cost_microusd`）改顯示「≈ $X 目前為止」：已結算的請求＋這一次請求到目前為止的估價，取代預留；
  * 估價只是畫面用的，結算後回到帳上的真實數字。
  */
+/**
+ * 進行中回合的時鐘：已進行多久／時限、第幾次／呼叫上限。回合可能一口氣跑好幾分鐘、十幾次呼叫都沒有文字輸出，
+ * 沒有這行使用者只看到「等待回覆」，分不出是在跑還是被吞掉（2026-11-15 pt-hub）。到軟期限（時限的 85%）模型會先收尾寫摘要。
+ */
+function ApiTurnClock({ turn }: { turn: ApiTurnCost }) {
+  const t = useT()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const started = turn.started_at ? Date.parse(turn.started_at) : NaN
+  if (!Number.isFinite(started)) return null
+  const secs = Math.max(0, Math.floor((now - started) / 1000))
+  const mmss = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  const limit = turn.turn_timeout_secs
+  return (
+    <span
+      className="msg-cost mono"
+      data-k="api-turn-clock"
+      title={t('這一回合最多 {calls} 次呼叫、{limit} 秒；時間到會先請模型收尾寫摘要，不是直接中止', { calls: turn.max_calls ?? '?', limit: limit ?? '?' })}
+    >
+      {t('已進行 {t}', { t: mmss(secs) })}
+      {limit ? ` / ${mmss(limit)}` : ''}
+      {turn.max_calls ? t('（第 {n}/{m} 次呼叫）', { n: turn.requests, m: turn.max_calls }) : ''}
+    </span>
+  )
+}
+
 export function ApiTurnProgress({ botId }: { botId: string }) {
   const t = useT()
   const turnSig = useStore((s) => Object.values(s.turns[botId] ?? {}).find((x) => x.status === 'in_flight')?.id ?? null)
@@ -81,6 +112,7 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
       <span className="msg-cost mono">
         {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: (turn.cost_usd + turn.reserved_usd).toFixed(3), y: turn.reserved_usd.toFixed(3) })}
       </span>
+      <ApiTurnClock turn={turn} />
       {speedNote}
     </>
   )

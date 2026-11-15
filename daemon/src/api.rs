@@ -5422,6 +5422,13 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
                "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens")})
     });
     let stuck = crate::api_bot::sweeper::detect_stuck(&app, &id).await;
+    // 進行中的回合要讓使用者看到「第幾次／上限、跑多久／時限」：把這顆設定的每回合上限附在每個 turn 上（回合開始時讀一次，跟 runtime 同一組數字）。
+    let limits = app.cfg.get().await.claude_api.api_bot.clone();
+    let mut turns = crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?;
+    for t in &mut turns {
+        t["max_calls"] = json!(limits.max_api_calls_per_turn);
+        t["turn_timeout_secs"] = json!(limits.turn_timeout_secs);
+    }
     Ok(Json(json!({
         "bot_id": id,
         "attempts": {"total": t.0, "recorded": t.1, "reserved": t.2, "unknown": t.3, "failed": t.4},
@@ -5431,7 +5438,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "last": last_json,
         "context": context,
         "cache": crate::api_bot_turn_cost::cache_info(&app.db, &id).await.map_err(any_err)?,
-        "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
+        "turns": turns,
         "stuck": stuck.map(|s| json!({"reason": s.reason, "message": s.message})),
     })))
 }

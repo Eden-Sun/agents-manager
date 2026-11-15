@@ -710,8 +710,24 @@ impl ApiBotRuntime {
                     let (inner, key) = (fail_inner.clone(), fail_key.clone());
                     move || inner.user_interrupts.lock().expect("interrupt mutex poisoned").contains(&key)
                 };
-                let soft_at = tokio::time::Instant::now() + soft_limit;
-                let wrap_up = move || tokio::time::Instant::now() >= soft_at;
+                let started = tokio::time::Instant::now();
+                let soft_at = started + soft_limit;
+                // 回合開始、軟期限到、回合結束都留 log：以前整個回合（可能跑好幾分鐘、十幾次呼叫）在 log 裡完全看不到，
+                // 使用者說「沒反應」時查不到它到底有沒有在跑（2026-11-15 pt-hub）。
+                tracing::info!(
+                    bot = %fail_key.bot_id, run = %fail_key.run_id, turn = %fail_key.turn_id,
+                    max_calls, turn_timeout_secs, soft_limit_secs = soft_limit.as_secs(), hard_limit_secs = hard_limit.as_secs(),
+                    "API bot turn started"
+                );
+                let soft_logged = std::sync::atomic::AtomicBool::new(false);
+                let (soft_bot, soft_turn) = (fail_key.bot_id.clone(), fail_key.turn_id.clone());
+                let wrap_up = move || {
+                    let reached = tokio::time::Instant::now() >= soft_at;
+                    if reached && !soft_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::warn!(bot = %soft_bot, turn = %soft_turn, "API bot turn reached its soft time limit; wrapping up");
+                    }
+                    reached
+                };
                 let execution = super::runner::run_with_wrap_up(
                     adapter.as_ref(),
                     &tools,
@@ -725,6 +741,14 @@ impl ApiBotRuntime {
                 let (result, deadline_elapsed) =
                     await_runner_deadline(execution, &cancel, hard_limit).await;
                 let refusal = adapter.take_refusal();
+                tracing::info!(
+                    bot = %fail_key.bot_id, run = %fail_key.run_id, turn = %fail_key.turn_id,
+                    elapsed_secs = started.elapsed().as_secs(),
+                    calls = state.responses.len().saturating_sub(responses_before),
+                    deadline_elapsed,
+                    halt = ?result.as_ref().map_err(|e| format!("{e:?}")),
+                    "API bot turn finished"
+                );
                 let compaction_note = state.responses[responses_before..].iter().rev().find_map(|r| {
                     let has_compaction_block = r.content.iter().any(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("compaction"));
                     let iterations = r.usage.get("iterations").and_then(serde_json::Value::as_array);

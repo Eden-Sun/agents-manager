@@ -14,6 +14,11 @@ export interface ApiTurnCost {
   cache_write_tokens: number
   /** 這一回合送出請求用的速度（`standard`／`fast`）；每回合開始讀一次設定、整回合固定。舊 daemon 沒給＝null。 */
   speed: string | null
+  /** 回合第一個請求送出的時間（進行中的回合算「已進行多久」）；舊 daemon 沒給＝null。 */
+  started_at: string | null
+  /** 這顆 bot 的每回合呼叫次數上限與時間上限（秒）；舊 daemon 沒給＝null。 */
+  max_calls: number | null
+  turn_timeout_secs: number | null
 }
 
 export interface ApiBotUsage {
@@ -61,6 +66,9 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     cache_read_tokens: n(x, 'cache_read_tokens'),
     cache_write_tokens: n(x, 'cache_write_tokens'),
     speed: optStr(pick(x, 'speed')),
+    started_at: optStr(pick(x, 'started_at')),
+    max_calls: typeof x.max_calls === 'number' ? x.max_calls : null,
+    turn_timeout_secs: typeof x.turn_timeout_secs === 'number' ? x.turn_timeout_secs : null,
   }))
   const ctx = rec(r.context)
   const nn = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)

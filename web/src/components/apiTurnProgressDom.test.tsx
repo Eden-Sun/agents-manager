@@ -76,3 +76,23 @@ test('進行中回合的速度與目前設定不一致時，標出「本回合�
     rawTransport.request = orig
   }
 })
+
+test('進行中回合顯示時鐘：已進行多久／時限、第幾次／呼叫上限（回合安靜地跑很久時，使用者看得出它還在跑）', async () => {
+  const orig = rawTransport.request.bind(rawTransport)
+  const started = new Date(Date.now() - 150_000).toISOString()
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) return { ...usage, turns: [{ ...usage.turns[0], started_at: started, max_calls: 20, turn_timeout_secs: 300 }] }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    useStore.setState({ turns: { b1: { t1: { id: 't1', status: 'in_flight' } as never } }, liveReply: {} } as never)
+    await mount(<ApiTurnProgress botId="b1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    const clock = document.querySelector('[data-k="api-turn-clock"]')
+    assert.ok(clock, '時鐘要在')
+    assert.match(clock.textContent ?? '', /已進行 2:[3-4]\d \/ 5:00（第 2\/20 次呼叫）/)
+    assert.match(clock.getAttribute('title') ?? '', /最多 20 次呼叫、300 秒.*收尾/)
+  } finally {
+    rawTransport.request = orig
+  }
+})
