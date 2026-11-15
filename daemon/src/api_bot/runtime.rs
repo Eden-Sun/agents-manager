@@ -804,23 +804,7 @@ impl ApiBotRuntime {
                 );
                 let compaction_note = state.responses[responses_before..].iter().rev().find_map(|r| {
                     let has_compaction_block = r.content.iter().any(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("compaction"));
-                    let iterations = r.usage.get("iterations").and_then(serde_json::Value::as_array);
-                    let comp_it = iterations.and_then(|arr| arr.iter().find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some("compaction")));
-                    if has_compaction_block || comp_it.is_some() {
-                        let n = comp_it.and_then(|it| it.get("input_tokens")).and_then(serde_json::Value::as_u64);
-                        let m = iterations
-                            .and_then(|arr| arr.iter().find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some("message")))
-                            .and_then(|it| it.get("input_tokens"))
-                            .and_then(serde_json::Value::as_u64)
-                            .or_else(|| r.usage.get("input_tokens").and_then(serde_json::Value::as_u64));
-                        if let (Some(n), Some(m)) = (n, m) {
-                            Some(format!("對話已由 API 壓縮（約 {n} tokens → {m} tokens）"))
-                        } else {
-                            Some("對話已由 API 壓縮".to_string())
-                        }
-                    } else {
-                        None
-                    }
+                    super::completion::compaction_note(&r.usage, has_compaction_block)
                 });
                 if let Some(note) = compaction_note {
                     fail_inner

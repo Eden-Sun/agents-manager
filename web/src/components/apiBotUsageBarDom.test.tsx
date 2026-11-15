@@ -76,10 +76,8 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
     assert.ok(bar, 'api-usage-bar should render')
 
     // Balance 晶片唯讀渲染
-    const balanceChip = bar.querySelector<HTMLElement>('.api-balance-chip[data-k="balance"]')
-    assert.ok(balanceChip, 'balance chip should render when configured')
-    assert.ok(balanceChip.classList.contains('readonly'), 'balance chip must be readonly')
-    assert.ok(balanceChip.textContent?.includes('≈ $98.50'), 'shows remaining balance')
+    // 餘額只放頂部額度列（BalanceQuotaChip），狀態列不重複。
+    assert.equal(bar.querySelector('[data-k="balance"]'), null, '狀態列不重複餘額')
 
     // 未設定上限時應顯示「設定上限」
     const capSetupBtn = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap-setup"]')
@@ -158,6 +156,8 @@ test('ApiBotUsageBar 的 speed 標成「上一次 speed」，tooltip 說明不�
   try {
     await mount(<ApiBotUsageBar botId="bot-1" />)
     await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.api-usage-expand-btn')!.click() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
     const item = document.querySelector('[data-k="speed"]')!
     assert.ok(item, 'speed 項目要在')
     assert.match(item.querySelector('.sl-k')!.textContent ?? '', /上一次/)
@@ -282,7 +282,7 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     // 手機預設：有 Cap、Turn、Spent 與展開鈕 ▾；Cache、Speed、Calls 收合
     assert.ok(document.querySelector('[data-k="cap"]'), 'Cap 晶片要在')
     assert.ok(document.querySelector('[data-k="turn-limits"]'), '回合晶片要在')
-    assert.ok(document.querySelector('[data-k="cost"]'), '累計花費要在')
+    assert.equal(document.querySelector('[data-k="cost"]'), null, '累計收進展開區')
     assert.equal(document.querySelector('[data-k="cache"]'), null, '快取晶片預設收合')
     assert.equal(document.querySelector('[data-k="speed"]'), null, 'speed 晶片預設收合')
 
@@ -294,6 +294,7 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     await act(async () => { expandBtn.click() })
     await settleUi()
 
+    assert.ok(document.querySelector('[data-k="cost"]'), '展開後累計要在')
     assert.ok(document.querySelector('[data-k="cache"]'), '展開後快取晶片要在')
     assert.ok(document.querySelector('[data-k="speed"]'), '展開後 speed 晶片要在')
     assert.ok(document.querySelector('[data-k="calls"]'), '展開後 requests 晶片要在')
@@ -438,6 +439,8 @@ test('累計只放已結算的估算花費；預留與結果不明另外標在�
   try {
     await mount(<ApiBotUsageBar botId="bot-1" />)
     await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.api-usage-expand-btn')!.click() })
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
     const cost = document.querySelector('[data-k="cost"]')!
     assert.equal(cost.querySelector('.sl-v')!.textContent, '$35.90', '累計＝已結算，不含預留與不明')
     assert.equal(cost.querySelector('[data-k="cost-reserved"]')!.textContent, '＋預留 $1.00')

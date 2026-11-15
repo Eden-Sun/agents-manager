@@ -46,7 +46,8 @@ test('串流估價存在時顯示「≈ $x 目前為止」（已結算＋這次�
     await act(async () => {
       useStore.setState({ liveReply: { b1: { turnId: 'other', text: '', activity: '', alert: '', revision: 1, estCostMicrousd: 5 } } })
     })
-    assert.match(text(), /已花 \$0\.110（含預留 \$0\.090）/)
+    assert.match(text(), /已花 \$0\.020/)
+    assert.match(document.querySelector('[data-k="turn-reserved"]')?.textContent ?? '', /＋預留 \$0\.090/)
   } finally {
     rawTransport.request = orig
   }

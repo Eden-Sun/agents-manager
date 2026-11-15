@@ -607,6 +607,55 @@ pub(super) async fn post_cap_notice(app: &Arc<App>, key: &ApiTurnKey, max_calls:
     }
 }
 
+/// 一個 `usage.iterations` 項目讀到的整段 context：input＋cache_read＋cache_creation（Anthropic 的 `input_tokens` 只是**沒進快取**的那一小段，
+/// 單看它會得到「36 → 2 tokens」這種錯數字）。三欄都沒有就是 `None`。
+fn iteration_context_tokens(it: &serde_json::Value) -> Option<u64> {
+    let get = |k: &str| it.get(k).and_then(serde_json::Value::as_u64);
+    if get("input_tokens").is_none() && get("cache_read_input_tokens").is_none() && get("cache_creation_input_tokens").is_none() {
+        return None;
+    }
+    Some(["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().filter_map(|k| get(k)).sum())
+}
+
+/// 「對話已由 API 壓縮」的系統通知文字。壓縮前後的數字取 `iterations` 裡 compaction 與 message 兩個項目各自讀到的整段 context
+/// （2026-11-15 pt-hub：context 約 141k → 26k，以前只加 `input_tokens` 顯示成「36 → 2」）；任一邊拿不到可靠數字就不顯示數字。
+pub(super) fn compaction_note(usage: &serde_json::Value, has_compaction_block: bool) -> Option<String> {
+    let iterations = usage.get("iterations").and_then(serde_json::Value::as_array);
+    let find = |kind: &str| iterations.and_then(|a| a.iter().find(|it| it.get("type").and_then(serde_json::Value::as_str) == Some(kind)));
+    let comp = find("compaction");
+    if !has_compaction_block && comp.is_none() {
+        return None;
+    }
+    let before = comp.and_then(iteration_context_tokens);
+    let after = find("message").and_then(iteration_context_tokens);
+    Some(match (before, after) {
+        (Some(n), Some(m)) if n > 0 && m > 0 => format!("對話已由 API 壓縮（約 {n} tokens → {m} tokens）"),
+        _ => "對話已由 API 壓縮".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod compaction_note_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_note_uses_the_whole_context_before_and_after_not_just_uncached_input() {
+        // 2026-11-15 09:43Z P.api 的真實 usage：壓縮前 36＋20653＋120964，壓縮後 2＋20653＋5522。
+        let usage = json!({"input_tokens": 2, "iterations": [
+            {"type": "compaction", "input_tokens": 36, "cache_read_input_tokens": 20653, "cache_creation_input_tokens": 120964},
+            {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 20653, "cache_creation_input_tokens": 5522}]});
+        assert_eq!(compaction_note(&usage, true).unwrap(), "對話已由 API 壓縮（約 141653 tokens → 26177 tokens）");
+    }
+
+    #[test]
+    fn without_reliable_numbers_the_note_has_no_numbers_and_no_compaction_means_no_note() {
+        assert_eq!(compaction_note(&json!({"iterations": [{"type": "compaction"}]}), true).unwrap(), "對話已由 API 壓縮");
+        assert_eq!(compaction_note(&json!({}), true).unwrap(), "對話已由 API 壓縮", "有 compaction 區塊但沒有 iterations");
+        assert!(compaction_note(&json!({"iterations": [{"type": "message", "input_tokens": 5}]}), false).is_none());
+    }
+}
+
 /// 回合到軟期限、已請模型收尾：在對話中留一則系統訊息。
 pub(super) async fn post_time_limit_notice(app: &Arc<App>, key: &ApiTurnKey, secs: u64) {
     let text = format!("已達本回合時間上限（{secs} 秒），模型已停止動作並寫出摘要；回覆 continue 可接著做。時間上限可在 claude-api 設定調整。");

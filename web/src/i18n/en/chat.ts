@@ -4,7 +4,7 @@ export default {
   // components/ApiTurnCost.tsx
   '{n} 次請求 · 輸入 {i} · 輸出 {o} · 快取讀 {r} · 快取寫 {w}': '{n} requests · input {i} · output {o} · cache read {r} · cache write {w}',
   '第 {n} 次請求 · ≈ ${x} 目前為止': 'Request #{n} · ≈ ${x} so far',
-  '第 {n} 次請求 · 已花 ${x}（含預留 ${y}）': 'Request #{n} · spent ${x} (incl. reserved ${y})',
+  '第 {n} 次請求 · 已花 ${x}': 'Request #{n} · spent ${x}',
   '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
   // components/PhoneOutboxTray.tsx
   'bot 給的檔案（{n}）': 'Files from bot ({n})',

@@ -44,7 +44,7 @@ export function ApiTurnCostTag({
 }
 
 /**
- * live bubble 的進度列：第 N 次請求 · 已花 $X（含預留 $Y）；同 ApiBotUsageBar，預留先當花掉算進 X。
+ * live bubble 的進度列：第 N 次請求 · 已花 $X（已結算）＋預留 $Y（進行中請求的上限，不算進 X）。
  * 串流中（`turn_progress.est_cost_microusd`）改顯示「≈ $X 目前為止」：已結算的請求＋這一次請求到目前為止的估價，取代預留；
  * 估價只是畫面用的，結算後回到帳上的真實數字。
  */
@@ -110,7 +110,8 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
   return (
     <>
       <span className="msg-cost mono">
-        {t('第 {n} 次請求 · 已花 ${x}（含預留 ${y}）', { n: turn.requests, x: (turn.cost_usd + turn.reserved_usd).toFixed(3), y: turn.reserved_usd.toFixed(3) })}
+        {t('第 {n} 次請求 · 已花 ${x}', { n: turn.requests, x: turn.cost_usd.toFixed(3) })}
+        {turn.reserved_usd > 0 ? <span className="api-usage-hold" data-k="turn-reserved"> {t('＋預留 ${x}', { x: turn.reserved_usd.toFixed(3) })}</span> : null}
       </span>
       <ApiTurnClock turn={turn} />
       {speedNote}

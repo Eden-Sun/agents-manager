@@ -1,9 +1,6 @@
 import { useEffect, useState } from 'react'
-import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { apiCacheChip } from '../lib/composerCost'
 import { apiBotConfirmedUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
-import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
-import { balanceTooltipLines } from './balanceTooltip'
 import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -19,10 +16,8 @@ const POLL_MS = 10_000
  */
 export function ApiBotUsageBar({ botId }: { botId: string }) {
   const t = useT()
-  const phone = useMediaQuery(PHONE_QUERY)
   const [mobileExpanded, setMobileExpanded] = useState(false)
   const [usage, setUsage] = useState<ApiBotUsage | null>(null)
-  const [balance, setBalance] = useState<ClaudeApiBalance | null>(null)
   const [cap, setCap] = useState<ClaudeApiCap | null>(null)
   const [failed, setFailed] = useState(false)
   const [editingCap, setEditingCap] = useState(false)
@@ -56,11 +51,6 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         (u) => alive && (setUsage(u), setFailed(false)),
         () => alive && setFailed(true),
       )
-    const loadBalance = () =>
-      fetchClaudeApiBalance().then(
-        (b) => alive && setBalance(b),
-        () => alive && setBalance(null),
-      )
     const loadCap = () =>
       fetchClaudeApiCap().then(
         (c) => alive && setCap(c),
@@ -68,12 +58,10 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
       )
 
     void loadUsage()
-    void loadBalance()
     void loadCap()
 
     const id = setInterval(() => {
       void loadUsage()
-      void loadBalance()
       void loadCap()
     }, POLL_MS)
     return () => {
@@ -167,17 +155,15 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   const u = usage.cost_microusd
   const rate = usage.cache_hit_rate
 
-  const bal = balanceView(balance)
-  const balanceTooltip = balanceTooltipLines(balance, bal, t).join('\n')
-
-  const isCapExceededOrClose =
+    const isCapExceededOrClose =
     cap?.cap_usd !== null &&
     cap?.cap_usd !== undefined &&
     cap.cap_usd > 0 &&
     cap.spent_usd >= cap.cap_usd * 0.9
 
   const cacheChip = apiCacheChip(usage.cache, nowMs, usage.context.tokens, botModel?.model ?? null, botModel?.fast === true)
-  const showFullDetails = !phone || mobileExpanded || editingCap || editingLimits
+  // 常駐：上限、回合上限、context、快取倒數；累計／快取命中／speed／effort／請求數收進展開區（▴▾，桌機手機都有）。
+  const showFullDetails = mobileExpanded || editingCap || editingLimits
 
   return (
     <span className="api-usage-bar" data-testid="api-usage-bar">
@@ -191,20 +177,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
           <span className="sl-v">{usage.stuck.reason}</span>
         </span>
       ) : null}
-      {showFullDetails && (bal.usd !== undefined || bal.loggedOut) ? (
-        <span
-          className={`sl-item api-balance-chip readonly${bal.expiringSoon || bal.loggedOut ? ' warn' : ''}`}
-          data-k="balance"
-          data-source={bal.source}
-          title={balanceTooltip}
-        >
-          <span className="sl-k">Balance</span>
-          <span className="sl-v">
-            {bal.usd === undefined ? '—' : `${bal.source === 'console' ? '' : '≈ '}$${bal.usd.toFixed(2)}`}
-            {bal.loggedOut ? ' ⚠' : ''}
-          </span>
-        </span>
-      ) : null}
+      {/* 餘額只在頂部額度列（BalanceQuotaChip）放一份，狀態列不重複（使用者 2026-11-15：二擇一）。 */}
 
       {cap ? (
         editingCap ? (
@@ -317,33 +290,33 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         )
       ) : null}
 
-      <span className="sl-item" data-k="cost" title={t('累計＝已結算的估算花費 ${rec}（依牌價算，跟 Console 對帳以 Console 為準）；預留 ${res} 是進行中請求的上限、結果不明 ${unk} 是以預留上限計的最壞情況，兩者不算進這個數字', { rec: (u.recorded / 1e6).toFixed(4), res: (u.reserved / 1e6).toFixed(2), unk: (u.unknown / 1e6).toFixed(2) })}>
-        <span className="sl-k">{t('累計')}</span>
-        <span className="sl-v">${spend.toFixed(2)}</span>
-        {u.reserved > 0 ? <span className="api-usage-hold" data-k="cost-reserved">{t('＋預留 ${x}', { x: (u.reserved / 1e6).toFixed(2) })}</span> : null}
-        {u.unknown > 0 ? <span className="api-usage-hold warn" data-k="cost-unknown">{t('＋不確定 ≤${x}', { x: (u.unknown / 1e6).toFixed(2) })}</span> : null}
-      </span>
+      {usage.context.tokens !== null ? (
+        <span
+          className={`sl-item${usage.context.compact_at !== null && usage.context.tokens >= usage.context.compact_at * 0.9 ? ' warn' : ''}`}
+          data-k="context"
+          title={t('目前 context＝最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；到壓縮門檻會觸發伺服器端壓縮，壓縮後下降')}
+        >
+          <span className="sl-k">context</span>
+          <span className="sl-v">
+            {formatTokensK(usage.context.tokens)}
+            {usage.context.compact_at !== null ? ` / ${t('壓縮門檻 {n}', { n: formatTokensK(usage.context.compact_at) })}` : ''}
+          </span>
+        </span>
+      ) : null}
+      {cacheChip ? (
+        <span className={`sl-item api-cache-${cacheChip.level}`} data-k="cache-countdown" title={cacheChip.title}>
+          <span className="sl-k">{t('快取')}</span>
+          <span className="sl-v">{cacheChip.label}</span>
+        </span>
+      ) : null}
       {showFullDetails ? (
         <>
-          {usage.context.tokens !== null ? (
-            <span
-              className={`sl-item${usage.context.compact_at !== null && usage.context.tokens >= usage.context.compact_at * 0.9 ? ' warn' : ''}`}
-              data-k="context"
-              title={t('目前 context＝最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；到壓縮門檻會觸發伺服器端壓縮，壓縮後下降')}
-            >
-              <span className="sl-k">context</span>
-              <span className="sl-v">
-                {formatTokensK(usage.context.tokens)}
-                {usage.context.compact_at !== null ? ` / ${t('壓縮門檻 {n}', { n: formatTokensK(usage.context.compact_at) })}` : ''}
-              </span>
-            </span>
-          ) : null}
-          {cacheChip ? (
-            <span className={`sl-item api-cache-${cacheChip.level}`} data-k="cache-countdown" title={cacheChip.title}>
-              <span className="sl-k">{t('快取')}</span>
-              <span className="sl-v">{cacheChip.label}</span>
-            </span>
-          ) : null}
+        <span className="sl-item" data-k="cost" title={t('累計＝已結算的估算花費 ${rec}（依牌價算，跟 Console 對帳以 Console 為準）；預留 ${res} 是進行中請求的上限、結果不明 ${unk} 是以預留上限計的最壞情況，兩者不算進這個數字', { rec: (u.recorded / 1e6).toFixed(4), res: (u.reserved / 1e6).toFixed(2), unk: (u.unknown / 1e6).toFixed(2) })}>
+          <span className="sl-k">{t('累計')}</span>
+          <span className="sl-v">${spend.toFixed(2)}</span>
+          {u.reserved > 0 ? <span className="api-usage-hold" data-k="cost-reserved">{t('＋預留 ${x}', { x: (u.reserved / 1e6).toFixed(2) })}</span> : null}
+          {u.unknown > 0 ? <span className="api-usage-hold warn" data-k="cost-unknown">{t('＋不確定 ≤${x}', { x: (u.unknown / 1e6).toFixed(2) })}</span> : null}
+        </span>
           <span className="sl-item" data-k="cache" title={t('快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合')}>
             <span className="sl-k">{t('快取命中')}</span>
             <span className="sl-v">{rate === null ? '—' : `${Math.round(rate * 100)}%`}</span>
@@ -375,8 +348,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
           </span>
         </>
       ) : null}
-      {phone ? (
-        <button
+      <button
           type="button"
           className="sl-item api-usage-expand-btn"
           aria-label={mobileExpanded ? t('收合用量') : t('展開用量')}
@@ -385,7 +357,6 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         >
           {mobileExpanded ? '▴' : '▾'}
         </button>
-      ) : null}
     </span>
   )
 }
