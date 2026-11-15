@@ -34,12 +34,21 @@
         assert!(store_path("shell", &env(&[]), "/home/u").is_none());
     }
 
-    /// agy 的設定目錄只認 `$HOME`：身份／bot env 的任何變數都改不了它。
+    /// agy 的設定目錄只認 `$HOME`：身份／bot env 除了 `HOME` 以外的變數都改不了它。
     #[test]
-    fn agy_store_is_the_settings_json_under_home_and_ignores_env() {
+    fn agy_store_is_the_settings_json_under_home_and_ignores_other_env() {
         let want = PathBuf::from("/home/u/.gemini/antigravity-cli/settings.json");
         assert_eq!(store_path("agy", &env(&[]), "/home/u").unwrap(), want);
         assert_eq!(store_path("agy", &env(&[("GROK_HOME", "/x"), ("XDG_CONFIG_HOME", "/y")]), "/home/u").unwrap(), want);
+    }
+
+    /// agy 身份是換 `HOME`（SPEC §16.8）：信任要寫進那個身份的 HOME，新身份第一次進專案才不會跳信任框。
+    #[test]
+    fn an_agy_identity_trusts_inside_its_own_home() {
+        assert_eq!(
+            store_path("agy", &env(&[("HOME", "$HOME/.agy-b")]), "/home/u").unwrap(),
+            PathBuf::from("/home/u/.agy-b/.gemini/antigravity-cli/settings.json"),
+        );
     }
 
     #[test]

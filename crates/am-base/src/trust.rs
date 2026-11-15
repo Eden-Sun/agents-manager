@@ -61,8 +61,9 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
             let dir = var("GROK_HOME").unwrap_or_else(|| format!("{home}/.grok"));
             Some(PathBuf::from(dir).join("trusted_folders.toml"))
         }
-        // agy 的設定目錄只認 `$HOME`（沒有任何環境變數能改，設計 A.3），所以不看 identity env。
-        "agy" => Some(crate::agy_support::settings_path(Path::new(home))),
+        // agy 的設定目錄只認 `$HOME`（沒有專用變數）；agy 身份是換 `HOME`（SPEC §16.8），信任要寫進那個身份的 HOME 底下，
+        // 不然新身份第一次進專案還是會跳信任框。沒有 HOME 就是預設帳號。
+        "agy" => Some(crate::agy_support::settings_path(Path::new(&var("HOME").unwrap_or_else(|| home.to_string())))),
         _ => None,
     }
 }

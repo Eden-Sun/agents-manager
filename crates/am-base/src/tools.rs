@@ -867,6 +867,22 @@ if grep -q '"onboardingComplete": *true' "$src/onboarding.json" 2>/dev/null \
   mkdir -p "$dst" && cp "$src/onboarding.json" "$dst/onboarding.json"
   [ -f "$src/nux_state.json" ] && [ ! -e "$dst/nux_state.json" ] && cp "$src/nux_state.json" "$dst/nux_state.json"
 fi
+# 首次精靈（色彩主題、資料蒐集同意、進專案的信任框）：agy 走完精靈時寫 `cache/onboarding.json`（2026-11-15 實測：精靈期間
+# 只動 credential-user-scope、settings.json 與這個檔，帳號端的同意設定在伺服器）。新的影子家目錄預先寫好完成旗標＝不跳精靈。
+# 不替使用者同意：沒有走資料蒐集同意頁，就沒有送出任何同意（預設勾選的「Yes, I agree…」不會被按下）。
+cfg="$dir/.gemini/antigravity-cli"
+mkdir -p "$cfg/cache" "$dir/.gemini/config" || exit 1
+ob="$cfg/cache/onboarding.json"
+[ -e "$ob" ] || (umask 077; printf '{{\n  "consumerOnboardingComplete": true,\n  "enterpriseOnboardingComplete": false,\n  "onboardingComplete": true\n}}\n' > "$ob")
+# settings.json：**複製**（不連結：agy 寫它是原子取代，連結會被換成一般檔）。帶著 AG Man 的 statusLine（狀態讀取）與 trustedWorkspaces。
+st="$cfg/settings.json"
+[ -e "$st" ] || [ ! -f "$real/.gemini/antigravity-cli/settings.json" ] || cp "$real/.gemini/antigravity-cli/settings.json" "$st"
+# AG Man 的狀態 hook（hooks.json 與 hooks/）：缺了的話 AG Man 讀不到這個身份的 agy 狀態（精靈畫面也因此被判 idle）。
+for n in hooks.json hooks; do
+  src="$real/.gemini/config/$n"
+  [ -e "$src" ] || [ -L "$src" ] || continue
+  [ -e "$dir/.gemini/config/$n" ] || [ -L "$dir/.gemini/config/$n" ] || ln -s "$src" "$dir/.gemini/config/$n"
+done
 exit 0
 "#,
         real = sh_quote(real_home),

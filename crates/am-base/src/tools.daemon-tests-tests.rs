@@ -964,6 +964,47 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 2026-11-15：新的 agy 影子家目錄第一次啟動會跳首次精靈（主題、資料蒐集同意、信任框），要自動繞過且**不替使用者同意**：
+    /// 預先寫完成旗標 `cache/onboarding.json`（不經過同意頁＝沒有送出同意）、複製（不連結）settings.json、
+    /// 連上 AG Man 的狀態 hook（hooks.json、hooks/）。已存在的檔案一律不覆寫。
+    #[test]
+    fn a_new_shadow_home_skips_the_first_run_wizard_without_consenting_and_wires_the_state_hooks() {
+        let root = crate::testing::scratch_dir("am-agy-wizard");
+        let real = root.join("home");
+        std::fs::create_dir_all(real.join(".gemini/config/hooks")).unwrap();
+        std::fs::create_dir_all(real.join(".gemini/antigravity-cli")).unwrap();
+        std::fs::write(real.join(".gemini/config/hooks.json"), "{}").unwrap();
+        std::fs::write(real.join(".gemini/antigravity-cli/settings.json"), r#"{"statusLine":{"type":"command","command":"x state"},"trustedWorkspaces":["/w"]}"#).unwrap();
+        let dir = real.join(".agy-new");
+        let sh = agy_shadow_home_sh(dir.to_str().unwrap(), real.to_str().unwrap());
+        let run = || assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        run();
+        let ob = dir.join(".gemini/antigravity-cli/cache/onboarding.json");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&ob).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"consumerOnboardingComplete": true, "enterpriseOnboardingComplete": false, "onboardingComplete": true}));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&ob).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!dir.join(".config/antigravity/credential-user-scope").exists(), "帳號範圍檔讓 agy 自己建，不預寫");
+        let st = dir.join(".gemini/antigravity-cli/settings.json");
+        assert!(st.is_file() && !st.is_symlink(), "settings.json 是複製，不是連結");
+        assert!(std::fs::read_to_string(&st).unwrap().contains("x state"), "帶著 statusLine");
+        assert!(dir.join(".gemini/config/hooks.json").is_symlink() && dir.join(".gemini/config/hooks").is_symlink(), "狀態 hook 一定接上");
+        // 之後 agy 改過的檔案不被蓋掉；重跑不壞東西。
+        std::fs::write(&st, "mine").unwrap();
+        std::fs::write(&ob, r#"{"onboardingComplete":true}"#).unwrap();
+        run();
+        assert_eq!(std::fs::read_to_string(&st).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(&ob).unwrap(), r#"{"onboardingComplete":true}"#);
+        // 真家目錄沒有 hooks／settings（還沒裝）：不報錯、也不亂連。
+        let bare = root.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let dir2 = bare.join(".agy-b");
+        let sh2 = agy_shadow_home_sh(dir2.to_str().unwrap(), bare.to_str().unwrap());
+        assert!(std::process::Command::new("sh").arg("-c").arg(&sh2).status().unwrap().success());
+        assert!(dir2.join(".gemini/antigravity-cli/cache/onboarding.json").is_file());
+        assert!(!dir2.join(".gemini/config/hooks.json").exists() && !dir2.join(".gemini/antigravity-cli/settings.json").exists());
+    }
+
 #[cfg(test)]
 mod agy_login_recheck_tests {
     use super::*;
