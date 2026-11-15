@@ -5,17 +5,27 @@ use serde_json::Value;
 
 pub(super) struct DirectGlobal;
 
-fn forbidden(value: &Value, allow_1h: bool) -> bool {
+fn forbidden(value: &Value, allow_1h: bool, allow_search: bool, allow_fetch: bool) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
             // cache_control 只接受 5 分鐘 ephemeral；這顆 bot 選了 1 小時才另放行 `ttl:"1h"`（其餘 TTL 仍拒絕）。
             (key == "cache_control" && value != &serde_json::json!({"type": "ephemeral"})
                     && !(allow_1h && value == &serde_json::json!({"type": "ephemeral", "ttl": "1h"})))
                 || matches!(key.as_str(), "service_tier" | "inference_geo" | "container")
-                || (key == "type" && value.as_str().is_some_and(|v| v.starts_with("server_") || v == "web_search" || v == "web_fetch"))
-                || forbidden(value, allow_1h)
+                || (key == "type" && value.as_str().is_some_and(|v| {
+                    if v.starts_with("server_") {
+                        !(allow_search || allow_fetch)
+                    } else if v.starts_with("web_search") {
+                        !allow_search
+                    } else if v.starts_with("web_fetch") {
+                        !allow_fetch
+                    } else {
+                        false
+                    }
+                }))
+                || forbidden(value, allow_1h, allow_search, allow_fetch)
         }),
-        Value::Array(items) => items.iter().any(|v| forbidden(v, allow_1h)),
+        Value::Array(items) => items.iter().any(|v| forbidden(v, allow_1h, allow_search, allow_fetch)),
         _ => false,
     }
 }
@@ -47,20 +57,62 @@ fn to_micro(tenths: i64) -> i64 {
     (tenths + 9) / 10
 }
 
+fn media_adjusted_bytes(val: &Value) -> Result<u64, QuoteError> {
+    let mut media_tokens: u64 = 0;
+    let mut stripped = val.clone();
+    strip_media_and_count(&mut stripped, &mut media_tokens)?;
+    let text_bytes = serde_json::to_vec(&stripped)
+        .map_err(|_| QuoteError::InvalidRequest)?
+        .len() as u64;
+    text_bytes.checked_add(media_tokens).ok_or(QuoteError::InvalidRequest)
+}
+
+fn strip_media_and_count(v: &mut Value, media_tokens: &mut u64) -> Result<(), QuoteError> {
+    match v {
+        Value::Object(map) => {
+            let is_image = map.get("type").and_then(Value::as_str) == Some("image");
+            let is_doc = map.get("type").and_then(Value::as_str) == Some("document");
+            if is_image || is_doc {
+                if let Some(source) = map.get_mut("source").and_then(Value::as_object_mut) {
+                    if source.get("type").and_then(Value::as_str) == Some("base64") {
+                        let data_len = source.get("data").and_then(Value::as_str).map(|s| s.len()).unwrap_or(0) as u64;
+                        source.insert("data".into(), Value::String(String::new()));
+                        let token_allowance = if is_image {
+                            8_000
+                        } else {
+                            (data_len / 20).clamp(2_000, 300_000)
+                        };
+                        *media_tokens = media_tokens.checked_add(token_allowance).ok_or(QuoteError::InvalidRequest)?;
+                    }
+                }
+            }
+            for val in map.values_mut() {
+                strip_media_and_count(val, media_tokens)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_media_and_count(item, media_tokens)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// 這個 request 輸入 token 的保守上界（不低估）；估不出來（超過 1M context）就拒絕。
 /// 位元組上界過度保守（中文、多層轉義下 1 token 遠多於 1 byte，導致數十萬 token 即超過百萬 bytes）；
 /// 若有前次回覆真實用量，則以前次 input token 加上新增內容的位元組數（1 token 至少 1 byte，新增位元組數
 /// 是新增 token 數的嚴格上界）推估增量上界，兩者取較小值，既防止位元組誤殺，又絕不低估使成本保險絲失效。
 pub(super) fn input_token_bound(request: &RequestEnvelope) -> Result<u64, QuoteError> {
-    let bytes = serde_json::to_vec(&request.body()).map_err(|_| QuoteError::InvalidRequest)?.len() as u64;
+    let bytes = media_adjusted_bytes(&request.body())?;
     let body_bound = bytes.checked_add(INPUT_MARGIN_TOKENS).ok_or(QuoteError::InvalidRequest)?;
 
     let bound = if let Some(prev) = request.previous_response() {
         if let Some(prev_tokens) = previous_usage_prefix(prev) {
             let prev_content_bytes = serde_json::to_vec(&prev.content).map(|v| v.len() as u64).unwrap_or(0);
             let last_msg_bytes = request.messages().last()
-                .and_then(|m| serde_json::to_vec(&m.content).ok())
-                .map(|v| v.len() as u64)
+                .map(|m| media_adjusted_bytes(&m.content).unwrap_or(0))
                 .unwrap_or(0);
             let delta_bytes = prev_content_bytes.saturating_add(last_msg_bytes);
             let incremental_bound = prev_tokens
@@ -100,6 +152,7 @@ fn reserve_microusd(
     rates: &Rates,
     previous_prefix: Option<u64>,
     ttl_1h: bool,
+    web_search: bool,
 ) -> Result<i64, QuoteError> {
     // 沒命中時整段輸入按快取寫入價算；這顆 bot 選了 1 小時就按 1 小時寫入價（2×）。
     let write = if ttl_1h { rates.write_1h } else { rates.write_5m };
@@ -132,7 +185,8 @@ fn reserve_microusd(
     let total_with_factor = total_tenths
         .checked_mul(factor)
         .ok_or(QuoteError::InvalidRequest)?;
-    Ok(to_micro(total_with_factor))
+    let search_reserve = if web_search { 50_000 } else { 0 };
+    to_micro(total_with_factor).checked_add(search_reserve).ok_or(QuoteError::InvalidRequest)
 }
 
 /// 串流中的「目前為止」估價（µUSD，只給畫面顯示，不進帳）：已回報的 input／cache 用量照單價算，
@@ -157,7 +211,7 @@ pub(super) fn running_cost_microusd(model: &str, fast: bool, ttl_1h: bool, p: &s
 impl QuoteProvider for DirectGlobal {
     fn reserve(&self, request: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
         let body = request.body();
-        if forbidden(&body, request.options().cache_ttl_1h) {
+        if forbidden(&body, request.options().cache_ttl_1h, request.options().web_search, request.options().web_fetch) {
             return Err(QuoteError::InvalidRequest);
         }
         let rates = rates(&request.options().model)?;
@@ -170,6 +224,7 @@ impl QuoteProvider for DirectGlobal {
                 &rates,
                 prev_prefix,
                 request.options().cache_ttl_1h,
+                request.options().web_search,
             )?,
             pricing_version: rates.version.into(),
         })
@@ -210,12 +265,14 @@ impl QuoteProvider for DirectGlobal {
             }
             _ => return Err(QuoteError::UntrustedUsage),
         };
-        let zero_fields = |value: Option<&Value>, names: &[&str]| -> bool {
-            match value {
-                None | Some(Value::Null) => true,
-                Some(Value::Object(m)) => m.len() == names.len() && names.iter().all(|name| m.get(*name).and_then(Value::as_u64) == Some(0)),
-                _ => false,
+        let server_tool_use_ok = match usage.get("server_tool_use") {
+            None | Some(Value::Null) => true,
+            Some(Value::Object(m)) => {
+                m.keys().all(|k| matches!(k.as_str(), "web_fetch_requests" | "web_search_requests"))
+                    && m.get("web_search_requests").and_then(Value::as_u64).is_some_and(|n| n == 0 || request.options().web_search)
+                    && m.get("web_fetch_requests").and_then(Value::as_u64).is_some_and(|n| n == 0 || request.options().web_fetch)
             }
+            _ => false,
         };
         let details_ok = match usage.get("output_tokens_details") {
             None | Some(Value::Null) => true,
@@ -232,7 +289,7 @@ impl QuoteProvider for DirectGlobal {
             Some(Value::String(v)) => v == accepted,
             _ => false,
         };
-        let metadata_ok = zero_fields(usage.get("server_tool_use"), &["web_fetch_requests", "web_search_requests"])
+        let metadata_ok = server_tool_use_ok
             && details_ok && iterations_ok && neutral_metadata("service_tier", "standard") && neutral_metadata("inference_geo", "global")
             && !(request.speed() == "standard" && speed != "standard");
         let actual_speed = match speed { "standard" => "standard", "fast" => "fast", _ => return Err(QuoteError::UntrustedUsage) };
@@ -283,7 +340,14 @@ impl QuoteProvider for DirectGlobal {
                 .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
                 .ok_or(QuoteError::UntrustedUsage)?
         };
-        let estimated_microusd = to_micro(tenths);
+        let search_fee_microusd = usage.get("server_tool_use")
+            .and_then(|v| v.get("web_search_requests"))
+            .and_then(Value::as_u64)
+            .map(|count| count as i64 * 10_000)
+            .unwrap_or(0);
+        let estimated_microusd = to_micro(tenths)
+            .checked_add(search_fee_microusd)
+            .ok_or(QuoteError::UntrustedUsage)?;
         // 實際費用超過預留（例如回合中途快取過期、整段按寫入價）仍是真實花費：照實記帳，不當成不可信用量。
         Ok(UsageQuote { estimated_microusd, actual_speed: Some(actual_speed) })
     }
@@ -384,13 +448,32 @@ pub(crate) fn classify_usage_problem(request: &RequestEnvelope, response: &Respo
             let Some(m) = stu.as_object() else {
                 return Some("server_tool_use 不是物件".into());
             };
-            for name in &["web_fetch_requests", "web_search_requests"] {
-                if m.get(*name).and_then(Value::as_u64) != Some(0) {
-                    return Some(format!("server_tool_use.{name} 非 0 或不存在"));
+            for k in m.keys() {
+                if !matches!(k.as_str(), "web_fetch_requests" | "web_search_requests") {
+                    return Some(format!("server_tool_use 包含額外欄位：{k}"));
                 }
             }
-            if m.len() != 2 {
-                return Some("server_tool_use 包含額外欄位".into());
+            if let Some(n) = m.get("web_search_requests") {
+                match n.as_u64() {
+                    Some(count) if count > 0 && !request.options().web_search => {
+                        return Some(format!("未啟用 web_search 但回報 web_search_requests: {count}"));
+                    }
+                    Some(_) => {}
+                    None => return Some("server_tool_use.web_search_requests 不是非負整數".into()),
+                }
+            } else {
+                return Some("server_tool_use 缺少 web_search_requests".into());
+            }
+            if let Some(n) = m.get("web_fetch_requests") {
+                match n.as_u64() {
+                    Some(count) if count > 0 && !request.options().web_fetch => {
+                        return Some(format!("未啟用 web_fetch 但回報 web_fetch_requests: {count}"));
+                    }
+                    Some(_) => {}
+                    None => return Some("server_tool_use.web_fetch_requests 不是非負整數".into()),
+                }
+            } else {
+                return Some("server_tool_use 缺少 web_fetch_requests".into());
             }
         }
     }
@@ -503,6 +586,8 @@ mod tests {
             clear_tool_uses_keep: 3,
             clear_tool_uses_clear_at_least: 5000,
             cache_ttl_1h,
+            web_search: false,
+            web_fetch: false,
         }
     }
 
@@ -954,6 +1039,8 @@ mod tests {
                 clear_tool_uses_keep: opt_val.get("clear_tool_uses_keep").and_then(Value::as_u64).unwrap_or(3) as u32,
                 clear_tool_uses_clear_at_least: opt_val.get("clear_tool_uses_clear_at_least").and_then(Value::as_u64).unwrap_or(5000) as u32,
                 cache_ttl_1h: opt_val.get("cache_ttl_1h").and_then(Value::as_bool).unwrap_or(false),
+                web_search: opt_val.get("web_search").and_then(Value::as_bool).unwrap_or(false),
+                web_fetch: opt_val.get("web_fetch").and_then(Value::as_bool).unwrap_or(false),
             };
             let resp: Response = serde_json::from_value(fixture["response"].clone()).unwrap();
             let messages: Vec<Message> = if let Some(msgs) = fixture.get("request_messages") {
@@ -998,5 +1085,104 @@ mod tests {
             count += 1;
         }
         assert!(count >= 2, "expected at least 2 fixtures tested, found {count}");
+    }
+
+    #[test]
+    fn server_tool_use_pricing_and_authorization() {
+        let mut opts = Options {
+            model: crate::config::API_BOT_MODEL.into(),
+            effort: "high".into(),
+            fast: false,
+            max_tokens: 1024,
+            compact_at_input_tokens: 0,
+            cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
+            ..Default::default()
+        };
+        let messages = vec![Message { role: "user".into(), content: json!("search something") }];
+        let unauth_req = RequestEnvelope::new(opts.clone(), json!("sys"), messages.clone()).unwrap();
+
+        // 1. web_search 未開：若 usage 帶 web_search_requests: 1 則報 UntrustedUsage
+        let resp_search_1 = response(json!({
+            "input_tokens": 10, "output_tokens": 10, "speed": "standard",
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 0},
+            "service_tier": "standard", "inference_geo": "global"
+        }));
+        assert!(DirectGlobal.settle(&unauth_req, &resp_search_1).is_err());
+        let problem = classify_usage_problem(&unauth_req, &resp_search_1).unwrap();
+        assert!(problem.contains("未啟用 web_search"));
+
+        // 2. web_fetch 未開：若 usage 帶 web_fetch_requests: 1 則報 UntrustedUsage
+        let resp_fetch_1 = response(json!({
+            "input_tokens": 10, "output_tokens": 10, "speed": "standard",
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 1},
+            "service_tier": "standard", "inference_geo": "global"
+        }));
+        assert!(DirectGlobal.settle(&unauth_req, &resp_fetch_1).is_err());
+        let problem_fetch = classify_usage_problem(&unauth_req, &resp_fetch_1).unwrap();
+        assert!(problem_fetch.contains("未啟用 web_fetch"));
+
+        // 3. 兩者皆開：正確計入 web search 費用（每次 10,000 µUSD），web fetch 不加收
+        opts.web_search = true;
+        opts.web_fetch = true;
+        let auth_req = RequestEnvelope::new(opts, json!("sys"), messages).unwrap();
+        let resp_auth = response(json!({
+            "input_tokens": 100, "output_tokens": 20, "speed": "standard",
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "server_tool_use": {"web_search_requests": 3, "web_fetch_requests": 2},
+            "service_tier": "standard", "inference_geo": "global"
+        }));
+        let quote = DirectGlobal.settle(&auth_req, &resp_auth).expect("settle ok");
+        // Opus: 100 * $4 + 20 * $20 = 400 + 400 = 800 µUSD token 費用
+        // 3 次 web_search = 3 * 10,000 = 30,000 µUSD
+        // 總共 30,800 µUSD
+        assert_eq!(quote.estimated_microusd, 30_800);
+        assert!(classify_usage_problem(&auth_req, &resp_auth).is_none());
+    }
+
+    #[test]
+    fn attachment_media_token_bound_calculation() {
+        let opts = Options {
+            model: crate::config::API_BOT_MODEL.into(),
+            effort: "high".into(),
+            fast: false,
+            max_tokens: 1024,
+            compact_at_input_tokens: 0,
+            cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
+            ..Default::default()
+        };
+        // 模擬 3MB 圖片附件（base64 約 400 萬字元）
+        let img_b64 = "A".repeat(4_000_000);
+        let messages = vec![Message {
+            role: "user".into(),
+            content: json!([
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                {"type": "text", "text": "請看這張圖片"}
+            ]),
+        }];
+        let req = RequestEnvelope::new(opts.clone(), json!("sys"), messages).expect("envelope ok");
+        let bound = input_token_bound(&req).expect("bound calculated");
+        // 若以位元組直算會爆 400 萬（> 1M token 被拒）；調整後應在 8000 + margin 約 16,000 左右
+        assert!(bound < 50_000, "圖片 token bound 應遠小於 1M context：{bound}");
+        assert!(bound >= 8_000 + INPUT_MARGIN_TOKENS);
+
+        // 模擬 4MB PDF 附件（base64 約 530 萬字元）
+        let pdf_b64 = "B".repeat(5_300_000);
+        let pdf_messages = vec![Message {
+            role: "user".into(),
+            content: json!([
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": pdf_b64}},
+                {"type": "text", "text": "請總結這份 PDF"}
+            ]),
+        }];
+        let pdf_req = RequestEnvelope::new(opts, json!("sys"), pdf_messages).expect("envelope ok");
+        let pdf_bound = input_token_bound(&pdf_req).expect("pdf bound calculated");
+        assert!(pdf_bound < MAX_CONTEXT_TOKENS, "PDF token bound 應小於 1M context：{pdf_bound}");
+        assert!(pdf_bound >= 200_000, "PDF token bound 有保守估計：{pdf_bound}");
     }
 }

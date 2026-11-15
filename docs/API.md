@@ -2692,7 +2692,8 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 ### prompt 帶附件
 `POST /api/bots/{id}/prompt` 可帶 `"attachments": ["01M1…"]`：
 - id 以 **project** 為範圍；跨專案或還沒 `ready` 一律 `400 unknown attachment`。
-- agent 收到「文字 + 附加圖片／附加檔案（請讀取這些檔案來查看）：<絕對路徑>」（全是圖片才說「圖片」）；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
+- `claude-api` bot 支援圖片（`image/jpeg`、`image/png`、`image/gif`、`image/webp`）與 PDF（`application/pdf`）附件（單檔與每回合總計上限 5MB，超過回 409 `attachment too large`；格式不支援回 409 `unsupported attachment format`）；內容以 base64 content block 傳入回合。
+- CLI bot 收到「文字 + 附加圖片／附加檔案（請讀取這些檔案來查看）：<絕對路徑>」（全是圖片才說「圖片」）；時間軸存使用者原本打的字，並把附件物件陣列記在該則 user message 的 `attachments`。
 - 綁定（`attach::bind`，把 `messages.attachments_json` 與每筆 `attachments.message_id` 一起寫）是單一 SQLite
   transaction：任何一步失敗（含 `UPDATE` 沒打中任何 row）整批 rollback，不會有 message 指向沒綁成功的附件。
 

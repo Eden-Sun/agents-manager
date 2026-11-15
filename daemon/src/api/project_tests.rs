@@ -213,7 +213,8 @@ async fn a_non_delete_mutation_the_bulk_guard_would_reject_leaves_the_file_and_t
                         herdr_session: None,
                         create_request_id: None,
                         create_fingerprint: None,
-                                    })
+                        ..Default::default()
+                    })
                     .collect(),
             });
             Ok(())

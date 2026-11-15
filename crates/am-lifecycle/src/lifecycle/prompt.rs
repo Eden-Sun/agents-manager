@@ -997,11 +997,11 @@ async fn prompt_inner(
 ) -> LcResult<PromptOut> {
     let bot_kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
     if bot_kind == "claude-api" {
-        if !attachment_ids.is_empty() || relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
+        if relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
         if text.trim().is_empty() || client_request_id.trim().is_empty() { return Err(LcError::Bad("api_native_prompt_invalid".into())); }
-        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt_ttl(app, bot_id, text, client_request_id, relay.cache_ttl_secs.unwrap_or(300))
+        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt_ttl(app, bot_id, text, client_request_id, relay.cache_ttl_secs.unwrap_or(300), attachment_ids)
             .await.map_err(|error| match error {
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),

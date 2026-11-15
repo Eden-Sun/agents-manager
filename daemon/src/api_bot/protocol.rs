@@ -29,6 +29,28 @@ pub struct Options {
     pub clear_tool_uses_clear_at_least: u32,
     /// 這顆 bot 的快取保留：true＝1 小時（`cache_control.ttl="1h"`，寫入 2×），false＝預設 5 分鐘。
     pub cache_ttl_1h: bool,
+    /// 開啟 Anthropic 伺服器端工具 web_search（預設關）。
+    pub web_search: bool,
+    /// 開啟 Anthropic 伺服器端工具 web_fetch（預設關）。
+    pub web_fetch: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            model: crate::config::API_BOT_MODEL.into(),
+            effort: "high".into(),
+            fast: false,
+            max_tokens: 32_000,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
+        }
+    }
 }
 
 impl Options {
@@ -174,14 +196,21 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
             }
         })
         .collect();
+    let mut tools = vec![
+        json!({"type": "bash_20250124", "name": "bash"}),
+        json!({"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}),
+    ];
+    if options.web_search {
+        tools.push(json!({"type": "web_search_20260209", "name": "web_search"}));
+    }
+    if options.web_fetch {
+        tools.push(json!({"type": "web_fetch_20260209", "name": "web_fetch"}));
+    }
     let mut body = json!({
         "model": options.model, "max_tokens": options.max_tokens,
         "output_config": {"effort": options.effort},
         "system": system, "messages": messages,
-        "tools": [
-            {"type": "bash_20250124", "name": "bash"},
-            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}
-        ], "tool_choice": {"type": "auto"}
+        "tools": tools, "tool_choice": {"type": "auto"}
     });
     // Opus 5.5／Fable 5.2 的 thinking 區塊綁定產生它的那段對話（system＋前文）。system 每回合重組
     // （agent md 從設定檔、遠端主機重讀），只要一個位元組不同，下一回合整段歷史就被 API 以 400 拒絕、bot 從此卡死。
@@ -298,6 +327,8 @@ mod tests {
             clear_tool_uses_keep: 3,
             clear_tool_uses_clear_at_least: 5000,
             cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
         };
         assert!(opts.validate().is_ok());
         opts.compact_at_input_tokens = 50_000;
@@ -346,6 +377,8 @@ mod tests {
             clear_tool_uses_keep: 3,
             clear_tool_uses_clear_at_least: 5000,
             cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
         };
         let body_none = request(&opts, &system, &messages);
         assert!(body_none.get("context_management").is_none());
@@ -437,6 +470,8 @@ mod tests {
             clear_tool_uses_keep: 3,
             clear_tool_uses_clear_at_least: 5000,
             cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
         };
         let body = request(&opts, &system, &messages);
         let sent_msgs = body["messages"].as_array().unwrap();
@@ -507,6 +542,8 @@ mod tests {
             clear_tool_uses_keep: 3,
             clear_tool_uses_clear_at_least: 5000,
             cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
         };
         let five = request(&opts, &json!("system"), &messages).to_string();
         assert!(five.contains(r#""cache_control":{"type":"ephemeral"}"#) && !five.contains("1h"));
@@ -526,5 +563,39 @@ mod tests {
         assert_eq!(lower_effort_level("low"), "low");
         assert_eq!(lower_effort_level("HIGH"), "medium");
         assert_eq!(lower_effort_level("unknown"), "medium");
+    }
+
+    #[test]
+    fn web_tools_included_when_enabled() {
+        let messages = vec![Message { role: "user".into(), content: json!("hello") }];
+        let mut opts = Options {
+            model: crate::config::API_BOT_MODEL.into(),
+            effort: "medium".into(),
+            fast: false,
+            max_tokens: 4096,
+            compact_at_input_tokens: 0,
+            clear_tool_uses_at_input_tokens: 0,
+            clear_tool_uses_keep: 3,
+            clear_tool_uses_clear_at_least: 5000,
+            cache_ttl_1h: false,
+            web_search: false,
+            web_fetch: false,
+        };
+        let b1 = request(&opts, &json!("system"), &messages);
+        let tools1 = b1["tools"].as_array().unwrap();
+        assert_eq!(tools1.len(), 2);
+        assert!(!tools1.iter().any(|t| t["name"] == "web_search" || t["name"] == "web_fetch"));
+
+        opts.web_search = true;
+        let b2 = request(&opts, &json!("system"), &messages);
+        let tools2 = b2["tools"].as_array().unwrap();
+        assert_eq!(tools2.len(), 3);
+        assert!(tools2.iter().any(|t| t["type"] == "web_search_20260209" && t["name"] == "web_search"));
+
+        opts.web_fetch = true;
+        let b3 = request(&opts, &json!("system"), &messages);
+        let tools3 = b3["tools"].as_array().unwrap();
+        assert_eq!(tools3.len(), 4);
+        assert!(tools3.iter().any(|t| t["type"] == "web_fetch_20260209" && t["name"] == "web_fetch"));
     }
 }

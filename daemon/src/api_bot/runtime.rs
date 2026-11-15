@@ -523,6 +523,19 @@ impl ApiBotRuntime {
             None => production_dependencies(app, &bot, &project, &limits).await?,
         };
         let effort = bot.effort.clone().ok_or(ApiBotError::Upstream)?;
+        let (web_search, web_fetch) = {
+            let bot_override = bot.runtime_override_json.as_deref()
+                .and_then(|s| serde_json::from_str::<am_base::runtime_policy::RuntimeSettings>(s).ok());
+            let role_settings = bot.role.as_deref()
+                .and_then(|r| project.role_policy().get(r).and_then(|v| serde_json::from_value::<am_base::runtime_policy::RuntimeSettings>(v.clone()).ok()));
+            let eff = am_base::runtime_policy::effective(bot_override.as_ref(), role_settings.as_ref());
+            let bot_cfg = cfg.projects.iter()
+                .flat_map(|p| &p.bots)
+                .find(|b| b.id.as_deref() == Some(&bot.id) || b.name == bot.name);
+            let search = eff.web_search.unwrap_or_else(|| bot_cfg.map(|b| b.web_search).unwrap_or(false));
+            let fetch = eff.web_fetch.unwrap_or_else(|| bot_cfg.map(|b| b.web_fetch).unwrap_or(false));
+            (search, fetch)
+        };
         let options = super::protocol::Options {
             model: bot.model.clone().unwrap_or_else(|| crate::config::API_BOT_MODEL.into()),
             effort,
@@ -534,6 +547,8 @@ impl ApiBotRuntime {
             clear_tool_uses_clear_at_least: limits.clear_tool_uses_clear_at_least,
             // 每顆 bot 可選快取保留（300／3600，預設 5 分鐘）；跟 fast 一樣，每回合開始讀一次、下一回合起生效。
             cache_ttl_1h: turn_cache_ttl == 3600,
+            web_search,
+            web_fetch,
         };
         options.validate().map_err(|_| ApiBotError::Upstream)?;
 
@@ -633,18 +648,52 @@ impl ApiBotRuntime {
             None => false,
         };
 
-        let user_content = if needs_instruction_update {
-            let update_text = format!("[Instructions updated by AG Man]\n\n{fresh_system_text}");
-            if prompt.is_empty() {
-                serde_json::json!([
-                    {"type": "text", "text": update_text}
-                ])
-            } else {
-                serde_json::json!([
-                    {"type": "text", "text": update_text},
-                    {"type": "text", "text": prompt}
-                ])
+        let att_json: Option<String> = sqlx::query_scalar("SELECT attachments_json FROM messages WHERE turn_id=? AND role='user' ORDER BY id ASC LIMIT 1")
+            .bind(&key.turn_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|_| ApiBotError::Upstream)?
+            .flatten();
+        let attachments: Vec<am_base::attach::Attachment> = att_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
+        let user_content = if !attachments.is_empty() || needs_instruction_update {
+            let mut content_blocks = Vec::new();
+            if needs_instruction_update {
+                let update_text = format!("[Instructions updated by AG Man]\n\n{fresh_system_text}");
+                content_blocks.push(serde_json::json!({"type": "text", "text": update_text}));
             }
+            for att in attachments {
+                let (mime, bytes) = am_base::attach::read(app, &att.id).await.map_err(|_| ApiBotError::Upstream)?;
+                use base64::engine::general_purpose::STANDARD;
+                use base64::Engine as _;
+                let b64 = STANDARD.encode(&bytes);
+                if mime == "application/pdf" {
+                    content_blocks.push(serde_json::json!({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64
+                        }
+                    }));
+                } else {
+                    content_blocks.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime,
+                            "data": b64
+                        }
+                    }));
+                }
+            }
+            if !prompt.is_empty() {
+                content_blocks.push(serde_json::json!({"type": "text", "text": prompt}));
+            }
+            serde_json::Value::Array(content_blocks)
         } else {
             serde_json::Value::String(prompt)
         };
@@ -1152,10 +1201,11 @@ impl Default for ApiBotRuntime {
 
 impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     fn api_native_prompt(&self, bot_id: &str, text: &str, crid: &str) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
-        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, 300).await }
+        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, 300, &[]).await }
     }
-    fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, cache_ttl_secs: i64) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
-        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, cache_ttl_secs).await }
+    fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, cache_ttl_secs: i64, attachments: &[String]) -> impl Future<Output = Result<crate::lifecycle::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
+        let attachments = attachments.to_vec();
+        async move { super::native_prompt::prompt(&self.shared(), bot_id, text, crid, cache_ttl_secs, &attachments).await }
     }
     fn api_native_start(&self, bot_id: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError>> + Send {
         async move { super::native_start::start(&self.shared(), bot_id, mode).await }

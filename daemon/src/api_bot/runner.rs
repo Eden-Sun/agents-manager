@@ -214,6 +214,14 @@ pub async fn run_with_wrap_up(
             if wrapping_up && reason == "end_turn" {
                 return Ok(Halt::TimeLimit);
             }
+            let has_server_tool = state.responses.last().is_some_and(|r| {
+                r.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("server_tool_use"))
+            });
+            if reason == "pause_turn" && has_server_tool && call_idx < max_calls && !wrapping_up {
+                // Anthropic 伺服器端工具（web_search、web_fetch 等）執行滿 server-side iterations 時，
+                // 以 stop_reason: "pause_turn" 暫停；自動重送延續，直到 end_turn 或預算用完。
+                continue;
+            }
             return Ok(match reason.as_str() {
                 "end_turn" => Halt::EndTurn,
                 "refusal" => Halt::Refusal,

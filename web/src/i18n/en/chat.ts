@@ -316,7 +316,6 @@ export default {
   '清除對話': 'Clear conversation',
   '停止後再送訊息會接回同一段對話；清除對話會刪掉這段對話的上下文，下一則從頭開始（帳目保留）。': 'After stopping, the next message resumes the same conversation. Clearing deletes its context and the next message starts over (the usage ledger is kept).',
   '要清除 {name} 目前的對話嗎？它會忘記之前的內容，無法復原。': 'Clear the current conversation of {name}? It forgets everything so far; this cannot be undone.',
-  'Claude API bot 還不支援附件': 'Claude API bots do not support attachments yet',
   '啟動失敗：{reason}': 'Start failed: {reason}',
   '版本': 'Version',
   '開啟側邊欄': 'Open sidebar',

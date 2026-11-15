@@ -1367,8 +1367,8 @@ mod arc_port_api_bot {
         fn api_native_start(&self, bot_id: &str, mode: crate::lifecycle::api_bot_port::ApiNativeStartMode) -> impl Future<Output = Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, crate::lifecycle::api_bot_port::ApiNativeStartError>> + Send {
             <T as ApiBotPort>::api_native_start(self.as_ref(), bot_id, mode)
         }
-        fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, cache_ttl_secs: i64) -> impl Future<Output = Result<crate::lc_error::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
-            <T as ApiBotPort>::api_native_prompt_ttl(self.as_ref(), bot_id, text, crid, cache_ttl_secs)
+        fn api_native_prompt_ttl(&self, bot_id: &str, text: &str, crid: &str, cache_ttl_secs: i64, attachments: &[String]) -> impl Future<Output = Result<crate::lc_error::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
+            <T as ApiBotPort>::api_native_prompt_ttl(self.as_ref(), bot_id, text, crid, cache_ttl_secs, attachments)
         }
         fn api_native_prompt(&self, bot_id: &str, text: &str, crid: &str) -> impl Future<Output = Result<crate::lc_error::PromptOut, crate::lifecycle::api_bot_port::ApiNativePromptError>> + Send {
             <T as ApiBotPort>::api_native_prompt(self.as_ref(), bot_id, text, crid)

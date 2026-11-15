@@ -223,7 +223,8 @@ async fn patrol_and_responder_keep_their_scoped_agm_cli_management_routes() {
             herdr_session: bot.herdr_session.clone(),
             create_request_id: None,
             create_fingerprint: None,
-            })
+            ..Default::default()
+        })
         .collect();
     let (project_id, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
     e.app

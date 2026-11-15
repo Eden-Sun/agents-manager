@@ -25,7 +25,7 @@ export function composerPlaceholder(state: ComposerLabelState, o: { phone: boole
       ? t('先打下一則…（bot 起來、前一則送出後才輪到它）')
       : t('這回合還在跑，先打下一則…（送出會排隊）')
   }
-  // claude-api（#1944）不收附件，不提示拖放檔案。
+  // noFiles（或 phone）：不提示拖放檔案。
   return o.phone || o.noFiles ? t('輸入訊息…') : t('輸入訊息…（檔案可直接拖放或貼上）')
 }
 

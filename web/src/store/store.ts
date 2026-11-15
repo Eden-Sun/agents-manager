@@ -1575,13 +1575,9 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false, cacheTtl) {
-    // claude-api（#1944）：daemon 只收純文字 prompt，插隊／排隊／草稿／附件／停著自動啟動等旗標一律 400
-    // `api_native_prompt_unsupported`。停著就先 start 再送；其餘旗標拿掉，附件直接告知不支援。
+    // claude-api（#1944）：daemon 只收 prompt 與附件，插隊／排隊／草稿／停著自動啟動等旗標一律 400
+    // `api_native_prompt_unsupported`。停著就先 start 再送；其餘旗標拿掉。
     if (get().bots.find((b) => b.id === botId)?.kind === 'claude-api') {
-      if (attachments.length > 0) {
-        get().notify('error', t('Claude API bot 還不支援附件'))
-        return false
-      }
       const r = get().runs[botId]
       if (startIfStopped && !(r && (r.state === 'running' || r.state === 'starting'))) {
         try {

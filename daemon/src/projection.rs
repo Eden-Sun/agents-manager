@@ -969,7 +969,8 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
-                }
+                ..Default::default()
+            }
         }
         fn proj(id: Option<&str>, label: &str, bots: Vec<crate::config::BotCfg>) -> crate::config::ProjectCfg {
             crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
@@ -1648,7 +1649,8 @@ mod tests {
                 herdr_session: None,
                 create_request_id: None,
                 create_fingerprint: None,
-                }],
+                ..Default::default()
+            }],
             handed_off_to: None,
         });
         assert!(validate(&cfg).is_err(), "BotCfg env 也必須套用 API 的保留鍵驗證");

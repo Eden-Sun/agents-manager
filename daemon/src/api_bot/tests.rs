@@ -29,6 +29,8 @@ fn options() -> Options {
         clear_tool_uses_keep: 3,
         clear_tool_uses_clear_at_least: 5000,
         cache_ttl_1h: false,
+        web_search: false,
+        web_fetch: false,
     }
 }
 fn initial() -> State {

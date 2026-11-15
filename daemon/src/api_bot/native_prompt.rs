@@ -11,27 +11,74 @@ fn pending_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<St
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub(super) fn arm_pending_lost_ack_for_test(crid: &str) { assert!(pending_lost_acks().lock().unwrap().insert(crid.to_owned())); }
 
-pub(super) fn prompt<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str, cache_ttl_secs: i64)
-    -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
+pub(super) fn prompt<'a>(
+    app: &'a Arc<crate::state::App>,
+    bot: &'a str,
+    text: &'a str,
+    crid: &'a str,
+    cache_ttl_secs: i64,
+    attachments: &'a [String],
+) -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
     let app = app.clone();
     let bot = bot.to_owned();
     let text = text.to_owned();
     let crid = crid.to_owned();
+    let attachments = attachments.to_vec();
     let tasks = app.background_tasks.clone();
     Box::pin(async move {
-        let task = tasks.spawn(Box::pin(async move { prompt_body(&app, &bot, &text, &crid, cache_ttl_secs).await }));
+        let task = tasks.spawn(Box::pin(async move {
+            prompt_body(&app, &bot, &text, &crid, cache_ttl_secs, &attachments).await
+        }));
         task.await.unwrap_or(Err(E::Unconfirmed))
     })
 }
 
-fn prompt_body<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, text: &'a str, crid: &'a str, cache_ttl_secs: i64) -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
-    Box::pin(prompt_body_inner(app, bot, text, crid, cache_ttl_secs))
+fn prompt_body<'a>(
+    app: &'a Arc<crate::state::App>,
+    bot: &'a str,
+    text: &'a str,
+    crid: &'a str,
+    cache_ttl_secs: i64,
+    attachments: &'a [String],
+) -> impl Future<Output = Result<PromptOut, E>> + Send + 'a {
+    Box::pin(prompt_body_inner(app, bot, text, crid, cache_ttl_secs, attachments))
 }
-async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, crid: &str, cache_ttl_secs: i64) -> Result<PromptOut, E> {
+async fn prompt_body_inner(
+    app: &Arc<crate::state::App>,
+    bot: &str,
+    text: &str,
+    crid: &str,
+    cache_ttl_secs: i64,
+    attachments: &[String],
+) -> Result<PromptOut, E> {
     // 只認 300（5 分鐘）／3600（1 小時）；其他值當預設，不讓不合法的 TTL 進到請求。
     let cache_ttl_secs = if cache_ttl_secs == 3600 { 3600 } else { 300 };
     use crate::lifecycle::send_now::ports::MaintenancePort;
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() || text.trim().is_empty() || crid.trim().is_empty() { return Err(E::Unconfirmed); }
+    let resolved = if !attachments.is_empty() {
+        let items = am_base::attach::resolve(&**app, bot, attachments)
+            .await
+            .map_err(|_| E::Refused("unknown attachment"))?;
+        let mut total_size: i64 = 0;
+        const MAX_ATTACHMENT_BYTES: i64 = 5 * 1024 * 1024; // 5 MiB
+        for item in &items {
+            let mime = item.mime.as_str();
+            let is_supported = matches!(mime, "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf");
+            if !is_supported {
+                return Err(E::Refused("unsupported attachment format"));
+            }
+            if item.size > MAX_ATTACHMENT_BYTES {
+                return Err(E::Refused("attachment too large"));
+            }
+            total_size += item.size;
+            if total_size > MAX_ATTACHMENT_BYTES {
+                return Err(E::Refused("attachment too large"));
+            }
+        }
+        items
+    } else {
+        Vec::new()
+    };
     let _lock = super::explicit_retirement::ApiOwnedBotLock::acquire(app, bot).await.map_err(|_| E::Unconfirmed)?;
     if app.api_bot_runtime.explicit_retire_quarantined(bot) { return Err(E::Unconfirmed); }
     let maintenance_open = matches!(app.window_held().await, Ok(None));
@@ -51,10 +98,15 @@ async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, 
     };
     let existing: Option<(String,String,Option<String>,Option<String>,String)> = sqlx::query_as("SELECT id,delivery,prompt_text,run_id,status FROM turns WHERE conversation_id=? AND client_request_id=?").bind(&conversation).bind(crid).fetch_optional(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     if let Some((turn, delivery, prompt_text, old_run, status)) = existing {
-        let rows: Vec<(String,String,String)> = sqlx::query_as("SELECT id,content,source FROM messages WHERE turn_id=? AND role='user' LIMIT 2").bind(&turn).fetch_all(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
+        let rows: Vec<(String,String,String,Option<String>)> = sqlx::query_as("SELECT id,content,source,attachments_json FROM messages WHERE turn_id=? AND role='user' LIMIT 2").bind(&turn).fetch_all(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
         if rows.len()!=1 { return Err(E::Unconfirmed); }
         if rows[0].1 != text { return Err(E::Unconfirmed); }
         if prompt_text.as_deref() != Some(text) || rows[0].2 != "web" { return Err(E::Unconfirmed); }
+        let existing_att_ids: Vec<String> = rows[0].3.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<am_base::attach::Attachment>>(s).ok())
+            .map(|list| list.into_iter().map(|a| a.id).collect())
+            .unwrap_or_default();
+        if existing_att_ids != attachments { return Err(E::Unconfirmed); }
         if delivery != "ok" { return Err(E::Unconfirmed); }
         if status != "completed" { return Err(E::Unconfirmed); }
         let old_run = old_run.ok_or(E::Unconfirmed)?;
@@ -95,6 +147,9 @@ async fn prompt_body_inner(app: &Arc<crate::state::App>, bot: &str, text: &str, 
     if changed.rows_affected()!=1 { return Err(E::Unconfirmed); }
     sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'user',?,'web',?)")
         .bind(&message).bind(&conversation).bind(&turn).bind(text).bind(&now).execute(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
+    if !resolved.is_empty() {
+        am_base::attach::bind_tx(&mut tx, &message, &resolved).await.map_err(|_| E::Unconfirmed)?;
+    }
     if app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| E::Unconfirmed)?; return Err(E::Unconfirmed); }
     let mut committed = tx.commit().await.is_ok();
     #[cfg(all(test, feature = "daemon-test-harness"))]

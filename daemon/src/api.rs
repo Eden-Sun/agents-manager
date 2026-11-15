@@ -2684,6 +2684,7 @@ async fn create_bot(
             herdr_session: None,
             create_request_id: create_request_id.clone(),
             create_fingerprint: create_fingerprint.clone(),
+            ..Default::default()
         });
         Ok(())
     })
@@ -3899,6 +3900,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             herdr_session: bot.herdr_session.clone(),
             create_request_id: None,
             create_fingerprint: None,
+            ..Default::default()
         };
         let pid = bot.project_id.clone();
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
@@ -6582,7 +6584,7 @@ pub(crate) async fn prompt_bot(
             if has_inflight {
                 return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending"}))).into_response());
             }
-            match ApiBotPort::api_native_prompt_ttl(&app, &id, &b.text, &delivery_key, parse_cache_ttl(&app, &id, b.cache_ttl.as_deref()).await?.unwrap_or(300)).await {
+            match ApiBotPort::api_native_prompt_ttl(&app, &id, &b.text, &delivery_key, parse_cache_ttl(&app, &id, b.cache_ttl.as_deref()).await?.unwrap_or(300), &b.attachments).await {
                 Ok(out) => out,
                 Err(e) => {
                     tracing::warn!(request = %request_id, error = ?e, "claude-api relay prompt unconfirmed, keeping pending for reconciliation");

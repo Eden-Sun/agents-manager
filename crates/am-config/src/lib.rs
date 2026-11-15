@@ -231,6 +231,12 @@ pub struct BotCfg {
     /// 增聘時 `--fork-from` 指定的來源 codex bot：這顆第一次啟動時用 `codex fork <來源的 session>` 分岔（之後走它自己的 session）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
+    /// claude-api 專用：開啟 Anthropic 伺服器端工具 web_search（預設關）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web_search: bool,
+    /// claude-api 專用：開啟 Anthropic 伺服器端工具 web_fetch（預設關）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web_fetch: bool,
 }
 
 impl Default for BotCfg {
@@ -243,6 +249,8 @@ impl Default for BotCfg {
             track: None,
             runtime_override: None,
             fork_from: None,
+            web_search: false,
+            web_fetch: false,
             manager_use: true,
             model: None,
             effort: None,

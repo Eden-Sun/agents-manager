@@ -24,6 +24,12 @@ pub struct RuntimeSettings {
     /// context 用量超過幾 % 才熱壓（0..=100）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hot_compact_min_pct: Option<i64>,
+    /// claude-api 專用：開啟 Anthropic 伺服器端工具 web_search。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<bool>,
+    /// claude-api 專用：開啟 Anthropic 伺服器端工具 web_fetch。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch: Option<bool>,
 }
 
 /// 合併後的結果：每個欄位 `None`＝沒有任何一層設定它（用預設）。
@@ -34,6 +40,8 @@ pub struct Effective {
     pub keep_warm_after_min: Option<i64>,
     pub hot_compact_after_min: Option<i64>,
     pub hot_compact_min_pct: Option<i64>,
+    pub web_search: Option<bool>,
+    pub web_fetch: Option<bool>,
 }
 
 /// 合併 bot 覆寫與角色 policy，每個欄位取第一個有值的。
@@ -47,6 +55,8 @@ pub fn effective(bot_override: Option<&RuntimeSettings>, role: Option<&RuntimeSe
         keep_warm_after_min: pick(|s| s.keep_warm_after_min, bot_override, role),
         hot_compact_after_min: pick(|s| s.hot_compact_after_min, bot_override, role),
         hot_compact_min_pct: pick(|s| s.hot_compact_min_pct, bot_override, role),
+        web_search: pick(|s| s.web_search, bot_override, role),
+        web_fetch: pick(|s| s.web_fetch, bot_override, role),
     }
 }
 
@@ -81,7 +91,15 @@ impl Effective {
 
 /// 生效結果的指紋（啟動時記在 run 上；之後 policy 變了 bot 的 role_pending 就亮）。
 pub fn policy_rev(eff: &Effective) -> String {
-    let canon = serde_json::json!([eff.context_tokens, eff.keep_warm, eff.keep_warm_after_min, eff.hot_compact_after_min, eff.hot_compact_min_pct]);
+    let canon = serde_json::json!([
+        eff.context_tokens,
+        eff.keep_warm,
+        eff.keep_warm_after_min,
+        eff.hot_compact_after_min,
+        eff.hot_compact_min_pct,
+        eff.web_search,
+        eff.web_fetch,
+    ]);
     format!("{:016x}", crate::launch_rev::fnv1a64(&canon.to_string()))
 }
 
