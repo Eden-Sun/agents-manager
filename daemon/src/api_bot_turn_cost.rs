@@ -28,3 +28,28 @@ pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Va
         "speed": r.9,
     })).collect())
 }
+
+/// 最近一次請求的 context 大小（token）：最後一個 iteration 的 input＋cache_read＋cache_creation。
+/// 伺服器端壓縮時 `iterations` 是 [compaction（壓縮前整段）, message（壓縮後的請求）]，所以壓縮後數字會掉下來；
+/// 沒有 `iterations`（沒壓縮）就用頂層欄位。
+pub(crate) fn context_tokens(usage: &Value) -> i64 {
+    let src = usage.get("iterations").and_then(Value::as_array).and_then(|a| a.last()).filter(|v| v.is_object()).unwrap_or(usage);
+    ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().map(|k| src.get(*k).and_then(Value::as_i64).unwrap_or(0)).sum()
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn context_is_the_last_iteration_after_compaction_and_top_level_otherwise() {
+        // 2026-11-15 pt-hub 實際回應：壓縮後的請求只有 25k，不是壓縮前的 130k。
+        let real = json!({"cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533,
+            "iterations": [{"type": "compaction", "cache_creation_input_tokens": 130581, "input_tokens": 38, "output_tokens": 8192},
+                           {"type": "message", "cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533}]});
+        assert_eq!(context_tokens(&real), 24_987);
+        let plain = json!({"input_tokens": 2, "cache_read_input_tokens": 146_154, "cache_creation_input_tokens": 1856, "output_tokens": 828});
+        assert_eq!(context_tokens(&plain), 148_012);
+        assert_eq!(context_tokens(&json!({})), 0);
+    }
+}

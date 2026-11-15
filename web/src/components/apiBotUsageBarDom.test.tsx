@@ -308,3 +308,32 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     rawTransport.request = origReq
   }
 })
+
+test('ApiBotUsageBar 顯示目前 context 與壓縮門檻（例：148k / 壓縮 150k），沒有資料時不顯示', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  let context: unknown = { tokens: 148_012, compact_at: 150_000 }
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 1, recorded: 1, reserved: 0, unknown: 0, failed: 0 },
+        cost_microusd: { recorded: 1000, reserved: 0, unknown: 0 },
+        tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null, last: null, turns: [], context,
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') return { cap_usd: null, since: null, spent_usd: 0 }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const item = document.querySelector('[data-k="context"]')!
+    assert.ok(item, 'context 項目要在')
+    assert.match(item.querySelector('.sl-v')!.textContent ?? '', /^148k \/ .*150k$/)
+    assert.ok(item.classList.contains('warn'), '接近門檻（≥90%）要標警示')
+  } finally {
+    rawTransport.request = orig
+  }
+})

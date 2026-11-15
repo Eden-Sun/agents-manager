@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
-import { apiBotSpendUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
+import { apiBotSpendUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
 import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 import { balanceTooltipLines } from './balanceTooltip'
 import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
@@ -266,6 +266,19 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
       </span>
       {showFullDetails ? (
         <>
+          {usage.context.tokens !== null ? (
+            <span
+              className={`sl-item${usage.context.compact_at !== null && usage.context.tokens >= usage.context.compact_at * 0.9 ? ' warn' : ''}`}
+              data-k="context"
+              title={t('目前 context＝最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；到壓縮門檻會觸發伺服器端壓縮，壓縮後下降')}
+            >
+              <span className="sl-k">context</span>
+              <span className="sl-v">
+                {formatTokensK(usage.context.tokens)}
+                {usage.context.compact_at !== null ? ` / ${t('壓縮門檻 {n}', { n: formatTokensK(usage.context.compact_at) })}` : ''}
+              </span>
+            </span>
+          ) : null}
           <span className="sl-item" data-k="cache" title={t('快取命中率＝cache_read ÷ (input＋cache_read＋cache_creation)，只算已結算的回合')}>
             <span className="sl-k">{t('快取命中')}</span>
             <span className="sl-v">{rate === null ? '—' : `${Math.round(rate * 100)}%`}</span>

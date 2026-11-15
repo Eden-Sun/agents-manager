@@ -161,11 +161,23 @@ impl QuoteProvider for DirectGlobal {
         let input = usage.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let output = usage.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let speed = usage.get("speed").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
-        let count = |key: &str| usage.get(key).and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage);
+        // 有 iterations 時以 iterations 為準（見下方「iterations 計價」）：頂層的快取欄位與 `cache_creation` 細項
+        // 在壓縮那一輪會跟頂層數字對不上（實測：頂層 cache_creation_input_tokens=4332，細項 ephemeral_5m=130581＝壓縮那一輪的寫入），
+        // 所以不拿它們驗證，也不拿來計價。
+        let iter_items: Option<&Vec<Value>> = match usage.get("iterations") {
+            Some(Value::Array(a)) if !a.is_empty() => Some(a),
+            _ => None,
+        };
+        let count = |key: &str| match usage.get(key).and_then(Value::as_u64) {
+            Some(n) => Ok(n),
+            None if iter_items.is_some() => Ok(0),
+            None => Err(QuoteError::UntrustedUsage),
+        };
         let cache_creation = count("cache_creation_input_tokens")?;
         let cache_read = count("cache_read_input_tokens")?;
         // `cache_creation` 細項（若有）必須只含兩個 TTL 欄位且總和等於 cache_creation_input_tokens；沒有細項就全部當 5 分鐘寫入。
         let (write_5m, write_1h) = match usage.get("cache_creation") {
+            _ if iter_items.is_some() => (0, 0),
             None | Some(Value::Null) => (cache_creation, 0),
             Some(Value::Object(m)) if m.keys().all(|k| matches!(k.as_str(), "ephemeral_1h_input_tokens" | "ephemeral_5m_input_tokens")) => {
                 let part = |k: &str| m.get(k).and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage);
@@ -197,29 +209,57 @@ impl QuoteProvider for DirectGlobal {
             Some(Value::String(v)) => v == accepted,
             _ => false,
         };
-        let total_input = input.checked_add(cache_creation).and_then(|n| n.checked_add(cache_read)).ok_or(QuoteError::UntrustedUsage)?;
-        if total_input > input_token_bound(request)? || output > u64::from(request.options().max_tokens)
-            || (request.speed() == "standard" && speed != "standard")
-            || !zero_fields(usage.get("server_tool_use"), &["web_fetch_requests", "web_search_requests"])
-            || !details_ok || !iterations_ok || !neutral_metadata("service_tier", "standard") || !neutral_metadata("inference_geo", "global")
-        { return Err(QuoteError::UntrustedUsage); }
+        let metadata_ok = zero_fields(usage.get("server_tool_use"), &["web_fetch_requests", "web_search_requests"])
+            && details_ok && iterations_ok && neutral_metadata("service_tier", "standard") && neutral_metadata("inference_geo", "global")
+            && !(request.speed() == "standard" && speed != "standard");
         let actual_speed = match speed { "standard" => "standard", "fast" => "fast", _ => return Err(QuoteError::UntrustedUsage) };
-        // 頂層 input/output 不含壓縮那一輪；壓縮 iteration 的用量要另外加進費用（官方：加總 iterations 才是實際計費）。
-        let (mut comp_in, mut comp_out, mut comp_read, mut comp_write) = (0_u64, 0_u64, 0_u64, 0_u64);
-        if let Some(Value::Array(items)) = usage.get("iterations") {
-            for it in items.iter().filter(|it| it.get("type").and_then(Value::as_str) == Some("compaction")) {
-                comp_in = comp_in.checked_add(it.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
-                comp_out = comp_out.checked_add(it.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?).ok_or(QuoteError::UntrustedUsage)?;
-                for (key, acc) in [("cache_read_input_tokens", &mut comp_read), ("cache_creation_input_tokens", &mut comp_write)] {
-                    if let Some(n) = it.get(key).and_then(Value::as_u64) { *acc = acc.checked_add(n).ok_or(QuoteError::UntrustedUsage)?; }
-                }
+        let tenths = if let Some(items) = iter_items {
+            // iterations 計價：每個 iteration 各自驗證、各自依類型計價後加總（官方：加總 iterations 才是實際計費；
+            // 頂層 usage 不含壓縮那一輪）。`message` 是正常請求；`compaction` 是伺服器端壓縮的摘要輪，單價與一般請求相同
+            // （input／快取讀寫／output），a2ce1e3f5 起如此計。快取寫入沒有細項時依這顆 bot 的 TTL 選擇計價。
+            if !metadata_ok { return Err(QuoteError::UntrustedUsage); }
+            let bound = input_token_bound(request)?;
+            let mut acc = 0_i64;
+            for it in items {
+                let kind = it.get("type").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
+                if !matches!(kind, "message" | "compaction") { return Err(QuoteError::UntrustedUsage); }
+                let field = |k: &str, required: bool| match it.get(k) {
+                    None | Some(Value::Null) if !required => Ok(0),
+                    v => v.and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage),
+                };
+                let (i_in, i_out) = (field("input_tokens", true)?, field("output_tokens", true)?);
+                let (i_read, i_write) = (field("cache_read_input_tokens", false)?, field("cache_creation_input_tokens", false)?);
+                let total = i_in.checked_add(i_read).and_then(|n| n.checked_add(i_write)).ok_or(QuoteError::UntrustedUsage)?;
+                if total > bound || (kind == "message" && i_out > u64::from(request.options().max_tokens)) { return Err(QuoteError::UntrustedUsage); }
+                // 細項（若有）必須只含兩個 TTL 欄位且總和等於該 iteration 的 cache_creation_input_tokens。
+                let (w5, w1) = match it.get("cache_creation") {
+                    None | Some(Value::Null) => if request.options().cache_ttl_1h { (0, i_write) } else { (i_write, 0) },
+                    Some(Value::Object(m)) if m.keys().all(|k| matches!(k.as_str(), "ephemeral_1h_input_tokens" | "ephemeral_5m_input_tokens")) => {
+                        let part = |k: &str| m.get(k).and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage);
+                        let (h, f) = (part("ephemeral_1h_input_tokens")?, part("ephemeral_5m_input_tokens")?);
+                        if h.checked_add(f) != Some(i_write) { return Err(QuoteError::UntrustedUsage); }
+                        (f, h)
+                    }
+                    _ => return Err(QuoteError::UntrustedUsage),
+                };
+                let part_cost = [(i_in, rates.input), (w5, rates.write_5m), (w1, rates.write_1h), (i_read, rates.read), (i_out, rates.output)]
+                    .into_iter()
+                    .try_fold(0_i64, |a, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| a.checked_add(n)))
+                    .ok_or(QuoteError::UntrustedUsage)?;
+                acc = acc.checked_add(part_cost).ok_or(QuoteError::UntrustedUsage)?;
             }
-        }
-        let tenths = [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output), (comp_in, rates.input), (comp_read, rates.read), (comp_write, rates.write_5m), (comp_out, rates.output)]
-            .into_iter()
-            .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))
-            .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
-            .ok_or(QuoteError::UntrustedUsage)?;
+            acc.checked_mul(speed_factor(actual_speed)?).ok_or(QuoteError::UntrustedUsage)?
+        } else {
+            let total_input = input.checked_add(cache_creation).and_then(|n| n.checked_add(cache_read)).ok_or(QuoteError::UntrustedUsage)?;
+            if total_input > input_token_bound(request)? || output > u64::from(request.options().max_tokens) || !metadata_ok {
+                return Err(QuoteError::UntrustedUsage);
+            }
+            [(input, rates.input), (write_5m, rates.write_5m), (write_1h, rates.write_1h), (cache_read, rates.read), (output, rates.output)]
+                .into_iter()
+                .try_fold(0_i64, |acc, (n, rate)| i64::try_from(n).ok().and_then(|n| n.checked_mul(rate)).and_then(|n| acc.checked_add(n)))
+                .and_then(|n| n.checked_mul(speed_factor(actual_speed).ok()?))
+                .ok_or(QuoteError::UntrustedUsage)?
+        };
         let estimated_microusd = to_micro(tenths);
         // 實際費用超過預留（例如回合中途快取過期、整段按寫入價）仍是真實花費：照實記帳，不當成不可信用量。
         Ok(UsageQuote { estimated_microusd, actual_speed: Some(actual_speed) })
@@ -496,6 +536,55 @@ mod tests {
             expected_legacy,
             "must fall back to first-turn legacy formula when previous response was compacted"
         );
+    }
+
+    /// 2026-11-15 pt-hub 實際回應（context 到 150k 觸發伺服器端壓縮）：頂層 cache_creation 細項（130581）跟
+    /// cache_creation_input_tokens（4332）對不上，以前被判不可信用量；現在以 iterations 為準。
+    fn real_compaction_usage() -> Value {
+        json!({
+            "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 130581},
+            "cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533,
+            "inference_geo": "global", "service_tier": "standard", "speed": "standard",
+            "iterations": [
+                {"type": "compaction", "cache_creation_input_tokens": 130581, "input_tokens": 38, "output_tokens": 8192},
+                {"type": "message", "cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533}
+            ]
+        })
+    }
+
+    #[test]
+    fn real_compaction_usage_with_mismatched_top_level_breakdown_is_priced_from_iterations() {
+        let fable = crate::config::API_BOT_FABLE_MODEL;
+        let req = RequestEnvelope::new(
+            Options { model: fable.into(), effort: "high".into(), fast: false, max_tokens: 32000, compact_at_input_tokens: 150_000, cache_ttl_1h: false },
+            json!("s"),
+            // 大 request：位元組上界要涵蓋 130k token 的壓縮輸入。
+            vec![Message { role: "user".into(), content: json!("x".repeat(400_000)) }],
+        ).unwrap();
+        let mut resp = response(real_compaction_usage());
+        resp.model = fable.into();
+        let q = DirectGlobal.settle(&req, &resp).expect("accepted");
+        // Fable：input 80、5m 寫入 100、讀取 2、output 400（0.1µUSD/token）。
+        // 壓縮：38×80 + 130581×100 + 8192×400；message：2×80 + 4332×100 + 20653×2 + 533×400。
+        let tenths = 38 * 80 + 130_581 * 100 + 8192 * 400 + 2 * 80 + 4332 * 100 + 20_653 * 2 + 533 * 400;
+        assert_eq!(q.estimated_microusd, (tenths + 9) / 10);
+        assert!((1_600_000..1_800_000).contains(&q.estimated_microusd), "約 $1.7，不是預留上限 $6.53：{}", q.estimated_microusd);
+    }
+
+    #[test]
+    fn iteration_entries_are_each_validated() {
+        let fable = crate::config::API_BOT_FABLE_MODEL;
+        let req = RequestEnvelope::new(
+            Options { model: fable.into(), effort: "high".into(), fast: false, max_tokens: 32000, compact_at_input_tokens: 150_000, cache_ttl_1h: false },
+            json!("s"), vec![Message { role: "user".into(), content: json!("x".repeat(400_000)) }],
+        ).unwrap();
+        for bad in [json!({"type": "mystery", "input_tokens": 1, "output_tokens": 1}), json!({"type": "message", "input_tokens": 1}), json!({"type": "message", "input_tokens": 1, "output_tokens": 99_999}), json!({"type": "compaction", "input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 1}})] {
+            let mut usage = real_compaction_usage();
+            usage["iterations"] = json!([bad]);
+            let mut resp = response(usage);
+            resp.model = fable.into();
+            assert!(DirectGlobal.settle(&req, &resp).is_err());
+        }
     }
 
     #[test]

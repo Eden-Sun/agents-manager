@@ -5401,6 +5401,16 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
     )
     .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
     let (input, cache_read, cache_creation) = (t.8, t.9, t.10);
+    // 目前 context 大小（最近一次 recorded 請求最後一個 iteration 的 input＋cache_read＋cache_creation）與壓縮門檻（0＝關閉→null）。
+    let last_usage: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT usage_json FROM api_bot_attempts WHERE bot_id=? AND state='recorded' ORDER BY created_at DESC, ordinal DESC LIMIT 1",
+    )
+    .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
+    let compact_at = app.cfg.get().await.claude_api.api_bot.compact_at_input_tokens;
+    let context = json!({
+        "tokens": last_usage.flatten().and_then(|u| serde_json::from_str::<Value>(&u).ok()).map(|u| crate::api_bot_turn_cost::context_tokens(&u)),
+        "compact_at": (compact_at > 0).then_some(compact_at),
+    });
     let denom = input + cache_read + cache_creation;
     let hit_rate = if denom > 0 { json!(cache_read as f64 / denom as f64) } else { Value::Null };
     let last_json = last.map(|(actual, requested, usage, at)| {
@@ -5416,6 +5426,7 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "tokens": {"input": input, "output": output, "cache_read": cache_read, "cache_creation": cache_creation},
         "cache_hit_rate": hit_rate,
         "last": last_json,
+        "context": context,
         "turns": crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?,
     })))
 }

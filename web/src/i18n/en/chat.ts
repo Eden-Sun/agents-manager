@@ -412,6 +412,8 @@ export default {
   'Console 登入已過期，需重新匯出': 'Console login expired; re-export the login state',
   '上一次呼叫實際用的 speed（不是目前設定；speed 設定改了要下一回合才生效）': 'speed of the latest call (not the current setting; a changed speed setting applies from the next turn)',
   '上一次 speed': 'Last speed',
+  '壓縮門檻 {n}': 'compact at {n}',
+  '目前 context＝最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；到壓縮門檻會觸發伺服器端壓縮，壓縮後下降': 'Current context = input + cache_read + cache_creation of the last iteration of the latest request; server-side compaction triggers at the threshold and the number drops afterwards',
   '本回合仍是 {cur}，下一回合起改為 {next}': 'This turn is still {cur}; from the next turn it is {next}',
   '已結算 {rec} 次、預留中 {res} 次、結果不明 {unk} 次、失敗 {fail} 次': 'Settled {rec}, reserved {res}, unknown {unk}, failed {fail}',
   '請求': 'Calls',

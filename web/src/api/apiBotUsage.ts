@@ -24,6 +24,8 @@ export interface ApiBotUsage {
   cache_hit_rate: number | null
   /** 最近 50 個 turn 各自的花費（美元；cost_usd＝recorded，reserved_usd＝進行中的預留）。 */
   turns: ApiTurnCost[]
+  /** 目前 context 大小（最近一次請求最後一個 iteration 的 input＋cache_read＋cache_creation；壓縮後會下降）與壓縮門檻；沒有資料／關閉＝null。 */
+  context: { tokens: number | null; compact_at: number | null }
   /** 最近一次 recorded 呼叫：speed 是**上一次呼叫**實際用的（不是目前設定）；三種 input 加起來是它讀到的整段 context。 */
   last: { speed: string; at: string | null; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number } | null
 }
@@ -50,8 +52,11 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     cache_write_tokens: n(x, 'cache_write_tokens'),
     speed: optStr(pick(x, 'speed')),
   }))
+  const ctx = rec(r.context)
+  const nn = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
   return {
     turns,
+    context: { tokens: nn(ctx.tokens), compact_at: nn(ctx.compact_at) },
     attempts: { total: n(a, 'total'), recorded: n(a, 'recorded'), reserved: n(a, 'reserved'), unknown: n(a, 'unknown'), failed: n(a, 'failed') },
     cost_microusd: { recorded: n(c, 'recorded'), reserved: n(c, 'reserved'), unknown: n(c, 'unknown') },
     tokens: { input: n(tk, 'input'), output: n(tk, 'output'), cache_read: n(tk, 'cache_read'), cache_creation: n(tk, 'cache_creation') },
@@ -62,6 +67,11 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
 
 export async function fetchApiBotUsage(botId: string): Promise<ApiBotUsage> {
   return toApiBotUsage(await rawTransport.request('GET', `/bots/${encodeURIComponent(botId)}/api-usage`))
+}
+
+/** 5 位數以上用 k：148012 → `148k`。 */
+export function formatTokensK(n: number): string {
+  return n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
 /** 累計花費（美元）＝(recorded＋reserved＋unknown)／1e6：預留與結果不明的都先當花掉算，跟驗收停線同一個口徑。 */
