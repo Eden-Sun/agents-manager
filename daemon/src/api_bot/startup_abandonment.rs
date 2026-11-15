@@ -38,6 +38,7 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
             .bind(&bot).bind(&run).bind(&bot).bind(&run).bind(&run).bind(&bot)
             .fetch_one(&mut *tx).await.map_err(|_| Error::Storage)?;
             if !valid {
+                tracing::warn!(bot = %bot, run = %run, why = "run_not_abandonable", "API bot startup recovery: run unresolved");
                 return Err(Error::Unresolved);
             }
             let now = crate::db::now();
@@ -50,6 +51,7 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
             let unsettled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns WHERE run_id=? AND status IN ('in_flight','queued')) OR EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND run_id=? AND state='reserved')")
                 .bind(&run).bind(&bot).bind(&run).fetch_one(&mut *tx).await.map_err(|_| Error::Storage)?;
             if unsettled {
+                tracing::warn!(bot = %bot, run = %run, why = "turn_or_reserved_attempt_unsettled", "API bot startup recovery: run unresolved");
                 return Err(Error::Unresolved);
             }
             let changed = sqlx::query("UPDATE runs SET state='exited', ended_at=COALESCE(ended_at,?), exit_reason='api_restart_abandoned' WHERE id=? AND bot_id=? AND state IN ('starting','running','stopping')")

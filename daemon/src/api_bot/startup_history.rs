@@ -117,4 +117,45 @@ mod tests {
         assert!(super::super::native_resume::prove_on(&mut tx, &bot, &run, super::super::native_resume::ProofMode::StartBeforeRun).await.is_ok(), "失敗的 owner turn 也要能 resume");
         tx.rollback().await.unwrap();
     }
+
+    /// 2026-11-15 pt-hub 事故的狀態：run 還在 `running`（重啟前的行程當掉，DB 沒來得及收），session 的 owner turn 是失敗的
+    /// （journal 寫失敗，receipt 已 applied），checkpoint 已無 pending，只剩帳務上的 unknown attempt；更早還有已完成與失敗的舊 turn。
+    /// 這種狀態不能讓整個 API 被隔離（api_startup_unresolved）。
+    #[tokio::test]
+    async fn a_running_run_with_a_failed_owner_and_only_unknown_accounting_attempts_does_not_quarantine() {
+        let env=crate::testing::env().await;
+        let bot=crate::db::ulid(); let run=crate::db::ulid(); let conv=crate::db::ulid(); let session=crate::db::ulid();
+        let (a,b,c)=(crate::db::ulid(),crate::db::ulid(),crate::db::ulid());
+        let now=crate::db::now();
+        // 長 session：`responses` 累積了 3 筆各帶一個工具，但 API 壓縮之後 `messages` 只剩最近一組 tool_use／tool_result。
+        let resp = |n: u32| serde_json::json!({"id": format!("msg_{n}"), "model": crate::config::API_BOT_MODEL, "content": [{"type":"tool_use","id": format!("t{n}"),"name":"bash","input":{}}], "stop_reason":"tool_use", "usage": {"input_tokens":1,"output_tokens":1}});
+        let checkpoint = serde_json::json!({
+            "messages": [
+                {"role":"user","content":[{"type":"text","text":"hi"}]},
+                {"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"bash","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"ok","is_error":false}]}
+            ],
+            "responses": [resp(1), resp(2), resp(3)],
+            "api_pending": false, "tool_pending": null, "completed_tool_ids": ["t1","t2","t3"]
+        }).to_string();
+        let checkpoint = checkpoint.as_str();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude-api','fake',?)").bind(&bot).bind(&env.project_id).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)").bind(&run).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)").bind(&conv).bind(&bot).bind(&now).execute(&env.app.db).await.unwrap();
+        for (turn, status) in [(&a,"completed"),(&b,"failed"),(&c,"failed")] {
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web',?,'ok',?)").bind(turn).bind(&conv).bind(&run).bind(status).bind(&now).execute(&env.app.db).await.unwrap();
+        }
+        sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,11,812,?,?,?,?)").bind(&session).bind(&bot).bind(&run).bind(&c).bind(checkpoint).bind(&now).bind(&now).bind(crate::db::iso_in(3600)).execute(&env.app.db).await.unwrap();
+        for (turn, rev, outcome, text) in [(&a,800_i64,"completed",Some("first")),(&b,805_i64,"failed",None),(&c,812_i64,"failed",None)] {
+            sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,?,?,?,11,?,?,?,'applied',?,?)").bind(&session).bind(&bot).bind(&run).bind(turn).bind(rev).bind(outcome).bind(text).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        }
+        sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES(?,?,?,'assistant','first','transcript',?)").bind(crate::db::ulid()).bind(&conv).bind(&a).bind(&now).execute(&env.app.db).await.unwrap();
+        for (ord, turn) in [(55_i64,&a),(82,&b),(144,&c)] {
+            sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at,finished_at) VALUES(?,?,?,?,?,11,?,'fixture','standard','unknown',123,'fixture',?,?)").bind(crate::db::ulid()).bind(&session).bind(&bot).bind(&run).bind(turn).bind(ord).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
+        }
+        let app=crate::testing::restart_app(&env).await;
+        app.set_startup_ready(false);
+        let r = super::super::startup_recovery::recover_all(&app).await;
+        assert!(r.is_ok(), "{:?}", r.as_ref().err().map(|e| e.code()));
+    }
 }

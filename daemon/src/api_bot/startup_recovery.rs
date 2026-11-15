@@ -62,6 +62,7 @@ pub(super) async fn recover_page_body(
             Ok(guard) => guard,
             Err(StartupError::Busy) => {
                 counts.unresolved += 1;
+                note_unresolved(&item, "startup_guard_busy");
                 continue;
             }
             Err(StartupError::NotStartup) => return Err(Error::NotStartup),
@@ -71,7 +72,7 @@ pub(super) async fn recover_page_body(
         if !restore && matches!(stored.state, receipt::State::Applied) {
             match super::startup_history::classify(&app.db, &item).await? {
                 super::startup_history::StartupHistoricalApplied::Skip => continue,
-                super::startup_history::StartupHistoricalApplied::Unresolved => { counts.unresolved += 1; continue; },
+                super::startup_history::StartupHistoricalApplied::Unresolved => { counts.unresolved += 1; note_unresolved(&item, "applied_history_unresolved"); continue; },
                 super::startup_history::StartupHistoricalApplied::Live => {},
             }
         }
@@ -83,11 +84,13 @@ pub(super) async fn recover_page_body(
         {
             StartupCheckpoint::Unresolved => {
                 counts.unresolved += 1;
+                note_unresolved(&item, "checkpoint_not_settled");
                 continue;
             }
             StartupCheckpoint::Fenced => {
                 if !restore {
                     counts.unresolved += 1;
+                    note_unresolved(&item, "checkpoint_fenced");
                     continue;
                 }
                 if matches!(stored.state, receipt::State::Pending) {
@@ -171,6 +174,20 @@ async fn confirm_applied(
             Ok(false)
         }
     }
+}
+
+/// 隔離的具體原因寫進 log（只寫 id 與判定條件，不含對話內容）：只有 `api_startup_unresolved` 這個代碼的話，
+/// 事後根本不知道是哪一顆 bot、哪一筆 receipt、哪個條件。
+fn note_unresolved(item: &receipt::Pending, why: &str) {
+    tracing::warn!(
+        bot = %item.identity.bot_id,
+        run = %item.identity.run_id,
+        turn = %item.identity.turn_id,
+        generation = item.identity.generation,
+        revision = item.revision,
+        why,
+        "API bot startup recovery: receipt unresolved"
+    );
 }
 
 /// Inert boot candidate: receipt processing without installing a runtime cursor.

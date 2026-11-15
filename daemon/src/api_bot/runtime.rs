@@ -2385,18 +2385,22 @@ pub(super) fn startup_context_settled(state: &super::runner::State, owner_failed
             }
         }
     }
+    // `responses` 是這個 session 累積的**全部**回覆，`messages` 卻會被 API 壓縮（compaction）縮短：長 session 裡舊回覆的 tool_use
+    // 早就不在 `messages` 了，也就沒有對應的 tool_result 在裡面。所以回覆裡宣告的工具只要求「已完成」（`completed_tool_ids` 有它），
+    // 不要求 tool_result 還留在 `messages`；對話線上看得到的（`messages` 內）才要求宣告／回傳成對。
+    // 2026-11-15 pt-hub：144 筆回覆、170 個工具、messages 只剩 22 組 tool_result，舊規則把它判成未結清，重啟時整個 API 被隔離。
+    let mut declared_in_responses = std::collections::HashSet::new();
     for response in &state.responses {
         let Ok(calls) = response.tools() else {
             return false;
         };
         for call in calls {
-            declared.insert(call.id);
+            declared_in_responses.insert(call.id);
         }
     }
-    declared
-        .iter()
-        .all(|id| state.completed_tool_ids.contains(id) && returned.contains(id))
-        && returned.iter().all(|id| declared.contains(id))
+    declared.iter().all(|id| state.completed_tool_ids.contains(id) && returned.contains(id))
+        && declared_in_responses.iter().all(|id| state.completed_tool_ids.contains(id))
+        && returned.iter().all(|id| declared.contains(id) || declared_in_responses.contains(id))
 }
 
 async fn startup_message_matches_on(
