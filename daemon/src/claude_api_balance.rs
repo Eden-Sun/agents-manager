@@ -124,6 +124,10 @@ pub fn cents_str_to_usd(cents_str: &str) -> Result<f64> {
 pub struct AttemptSpent {
     pub created_at: String,
     pub microusd: i64,
+    /// true＝不是確定的花費：結果不明（`unknown`）又沒有估價的 attempt，金額是**預留上限**（最壞情況，實際多半低很多：
+    /// 2026-11-15 P.api 三筆各以 $6.53 記、實際約 $1.70）。確定的（recorded、翻譯／分診帳本）才算進「已花」，
+    /// 不確定的另外列出，餘額另給「最壞情況」下限。
+    pub uncertain: bool,
 }
 
 /// 純計算核心：輸入錨點、cost_report 桶資料、本機 attempts，回傳花費與計算明細
@@ -138,10 +142,11 @@ pub fn compute_balance_spent(
 
     // 1. (a) T 當天花費：只取 local attempts 中 created_at >= T 且 created_at < T_next_day
     let mut spent_t_day_usd = 0.0;
+    let mut uncertain_usd = 0.0;
     for att in local_attempts {
         if let Ok(ts) = parse_rfc3339(&att.created_at) {
             if ts >= anchor_at_dt && ts < t_next_day {
-                spent_t_day_usd += microusd_to_usd(att.microusd);
+                if att.uncertain { uncertain_usd += microusd_to_usd(att.microusd); } else { spent_t_day_usd += microusd_to_usd(att.microusd); }
             }
         }
     }
@@ -180,7 +185,8 @@ pub fn compute_balance_spent(
     for att in local_attempts {
         if let Ok(ts) = parse_rfc3339(&att.created_at) {
             if ts >= local_since {
-                spent_recent_local_usd += microusd_to_usd(att.microusd);
+                // 官方報表涵蓋到的日子之後才用本機帳；其間不確定的 attempt（已被官方數字取代的日子）不再列。
+                if att.uncertain { uncertain_usd += microusd_to_usd(att.microusd); } else { spent_recent_local_usd += microusd_to_usd(att.microusd); }
             }
         }
     }
@@ -193,6 +199,8 @@ pub fn compute_balance_spent(
         anchor_at: am_base::db::iso_at(anchor_at_dt),
         spent_usd: total_spent,
         remaining_usd,
+        uncertain_usd,
+        remaining_floor_usd: remaining_usd - uncertain_usd,
         report_through: report_through.map(am_base::db::iso_at),
         local_since: am_base::db::iso_at(local_since),
         breakdown: BalanceBreakdown {
@@ -214,8 +222,14 @@ pub struct BalanceBreakdown {
 pub struct BalanceCalculation {
     pub anchor_usd: f64,
     pub anchor_at: String,
+    /// 已確定的花費（官方報表＋本機已結算帳）；**不含**不確定的 attempt。
     pub spent_usd: f64,
+    /// 錨點－已確定花費：估算的餘額（不確定的不扣）。
     pub remaining_usd: f64,
+    /// 還沒被官方報表取代的不確定 attempt 以預留上限計的合計（最壞情況）。
+    pub uncertain_usd: f64,
+    /// 最壞情況下限：`remaining_usd - uncertain_usd`。
+    pub remaining_floor_usd: f64,
     pub report_through: Option<String>,
     pub local_since: String,
     pub breakdown: BalanceBreakdown,
@@ -284,11 +298,12 @@ pub async fn fetch_cost_report(
 
 /// 查詢 DB 中 created_at >= anchor_at 的 recorded 與 unknown 帳
 pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> Result<Vec<AttemptSpent>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
+    let rows: Vec<(String, i64, bool)> = sqlx::query_as(
         "SELECT created_at,
                 COALESCE(CASE WHEN state='recorded' THEN estimated_microusd
                               WHEN state='unknown' THEN COALESCE(estimated_microusd, reserved_microusd)
-                              ELSE 0 END, 0)
+                              ELSE 0 END, 0),
+                (state='unknown' AND estimated_microusd IS NULL)
          FROM api_bot_attempts
          WHERE created_at >= ? AND state IN ('recorded', 'unknown')
          ORDER BY created_at ASC"
@@ -297,10 +312,10 @@ pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> 
     .fetch_all(&app.db)
     .await?;
 
-    let mut out: Vec<AttemptSpent> = rows.into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd }).collect();
+    let mut out: Vec<AttemptSpent> = rows.into_iter().map(|(created_at, microusd, uncertain)| AttemptSpent { created_at, microusd, uncertain }).collect();
     // 同一把 key 的其他用途（翻譯、changelog、分診）記在 spend.jsonl，不在 api_bot_attempts。
     if let Ok(since) = parse_rfc3339(since_rfc3339) {
-        out.extend(crate::claude_api::read_spend_since(&app.data_dir, since).into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd }));
+        out.extend(crate::claude_api::read_spend_since(&app.data_dir, since).into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd, uncertain: false }));
     }
     Ok(out)
 }
@@ -405,6 +420,10 @@ pub async fn get_claude_api_balance(
         },
         "spent_usd": calc.spent_usd,
         "remaining_usd": calc.remaining_usd,
+        // 這是估算：官方只給到前一個 UTC 日的帳（`report_through`），今天的靠本機帳；不確定的另列、餘額另給最壞下限。
+        "estimate": true,
+        "uncertain_usd": calc.uncertain_usd,
+        "remaining_floor_usd": calc.remaining_floor_usd,
         "report_through": calc.report_through,
         "local_since": calc.local_since,
         "breakdown": calc.breakdown,
@@ -497,10 +516,10 @@ mod tests {
         // 3. 2026-11-02T10:00:00Z (此日有 report，不應從 local 計入)
         // 4. 2026-11-04T08:00:00Z (今天尚未有 report，計入 tier c，200,000 µUSD = $0.20)
         let local_attempts = vec![
-            AttemptSpent { created_at: "2026-11-01T10:00:00Z".into(), microusd: 500_000 },
-            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000 },
-            AttemptSpent { created_at: "2026-11-02T10:00:00Z".into(), microusd: 300_000 },
-            AttemptSpent { created_at: "2026-11-04T08:00:00Z".into(), microusd: 200_000 },
+            AttemptSpent { created_at: "2026-11-01T10:00:00Z".into(), microusd: 500_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-02T10:00:00Z".into(), microusd: 300_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-04T08:00:00Z".into(), microusd: 200_000, uncertain: false },
         ];
 
         // cost_report：
@@ -545,8 +564,8 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-11-02T15:00:00Z").unwrap().with_timezone(&Utc);
 
         let local_attempts = vec![
-            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000 }, // $0.10
-            AttemptSpent { created_at: "2026-11-02T05:00:00Z".into(), microusd: 400_000 }, // $0.40
+            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000, uncertain: false }, // $0.10
+            AttemptSpent { created_at: "2026-11-02T05:00:00Z".into(), microusd: 400_000, uncertain: false }, // $0.40
         ];
 
         let res = compute_balance_spent(anchor_usd, anchor_at, &[], &local_attempts, now).unwrap();
@@ -557,5 +576,36 @@ mod tests {
         assert_eq!(res.local_since, "2026-11-02T00:00:00.000Z");
         assert!((res.spent_usd - 0.50).abs() < 1e-6);
         assert!((res.remaining_usd - 49.50).abs() < 1e-6);
+    }
+
+    /// 2026-11-15：不確定（結果不明、無估價）的 attempt 以預留上限計（P.api 三筆各 $6.53，實際約 $1.70），
+    /// 以前整筆扣進餘額，跟官網對不起來。現在：不扣進「已確定花費」，另列 `uncertain_usd`，餘額另給最壞下限；
+    /// 被官方報表涵蓋的日子裡的不確定 attempt 由官方數字取代，不再列。
+    #[test]
+    fn uncertain_attempts_are_listed_separately_and_replaced_by_the_official_report() {
+        let anchor_at = DateTime::parse_from_rfc3339("2026-11-02T05:52:10Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-11-15T09:00:00Z").unwrap().with_timezone(&Utc);
+        let bucket = |d: &str, next: &str, cents: &str| CostReportBucket {
+            starting_at: format!("{d}T00:00:00Z"),
+            ending_at: format!("{next}T00:00:00Z"),
+            results: vec![CostReportResult { currency: Some("USD".into()), amount: Some(cents.into()) }],
+        };
+        let buckets = vec![bucket("2026-11-14", "2026-11-15", "1592.78")];
+        let atts = vec![
+            // 11/14 的不確定 attempt：官方 11/14 的帳已涵蓋（15.93），不再另計。
+            AttemptSpent { created_at: "2026-11-14T10:00:00Z".into(), microusd: 5_278_119, uncertain: true },
+            AttemptSpent { created_at: "2026-11-14T11:00:00Z".into(), microusd: 15_000_000, uncertain: false },
+            // 今天（官方還沒有）：確定 $35.90、不確定三筆 $6.53。
+            AttemptSpent { created_at: "2026-11-15T01:00:00Z".into(), microusd: 35_898_529, uncertain: false },
+            AttemptSpent { created_at: "2026-11-15T02:00:00Z".into(), microusd: 6_530_000, uncertain: true },
+            AttemptSpent { created_at: "2026-11-15T03:00:00Z".into(), microusd: 6_530_000, uncertain: true },
+            AttemptSpent { created_at: "2026-11-15T04:00:00Z".into(), microusd: 6_530_000, uncertain: true },
+        ];
+        let r = compute_balance_spent(100.0, anchor_at, &buckets, &atts, now).unwrap();
+        assert!((r.breakdown.report_usd - 15.9278).abs() < 1e-3, "11/14 用官方");
+        assert!((r.breakdown.recent_local_usd - 35.898529).abs() < 1e-6, "今天只算確定的");
+        assert!((r.uncertain_usd - 19.59).abs() < 1e-6, "只列今天的不確定（19.59），11/14 的被官方取代");
+        assert!((r.remaining_usd - (100.0 - 15.9278 - 35.898529)).abs() < 1e-3, "餘額不扣不確定的");
+        assert!((r.remaining_floor_usd - (r.remaining_usd - 19.59)).abs() < 1e-6, "最壞下限才扣");
     }
 }

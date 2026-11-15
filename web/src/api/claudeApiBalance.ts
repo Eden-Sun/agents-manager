@@ -31,6 +31,12 @@ export interface ClaudeApiBalance {
   anchor?: ClaudeApiBalanceAnchor
   spent_usd?: number
   remaining_usd?: number
+  /** 還沒被官方報表取代的不確定 attempt（以預留上限計的最壞情況）合計。 */
+  uncertain_usd?: number
+  /** 最壞情況下限餘額＝remaining_usd − uncertain_usd。 */
+  remaining_floor_usd?: number
+  /** 推算值（官方只給到前一個 UTC 日）。 */
+  estimate?: boolean
   report_through?: string | null
   local_since?: string | null
   as_of?: string | null
@@ -89,6 +95,9 @@ export function toClaudeApiBalance(raw: unknown): ClaudeApiBalance {
     anchor,
     spent_usd: typeof r.spent_usd === 'number' ? r.spent_usd : undefined,
     remaining_usd: typeof r.remaining_usd === 'number' ? r.remaining_usd : undefined,
+    uncertain_usd: typeof r.uncertain_usd === 'number' ? r.uncertain_usd : undefined,
+    remaining_floor_usd: typeof r.remaining_floor_usd === 'number' ? r.remaining_floor_usd : undefined,
+    estimate: r.estimate === true,
     report_through: optStr(r.report_through),
     local_since: optStr(r.local_since),
     as_of: optStr(r.as_of),

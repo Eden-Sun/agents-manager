@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
-import { apiBotSpendUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
+import { apiBotConfirmedUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import './claudeApiBotLimits.css'
@@ -134,7 +134,7 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
         <div className="claude-api-bot-usage-stats" data-testid="bot-usage-stats">
           <div className="stat-item">
             <span className="stat-k">{t('本 Bot 累計花費：')}</span>
-            <span className="stat-v">${apiBotSpendUsd(usage).toFixed(2)}</span>
+            <span className="stat-v" title={t('已結算的估算花費；預留與結果不明的另外顯示在狀態列')}>${apiBotConfirmedUsd(usage).toFixed(2)}</span>
           </div>
           <div className="stat-item">
             <span className="stat-k">{t('快取命中率：')}</span>

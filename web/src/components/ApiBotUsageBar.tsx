@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { apiCacheChip } from '../lib/composerCost'
-import { apiBotSpendUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
+import { apiBotConfirmedUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
 import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 import { balanceTooltipLines } from './balanceTooltip'
 import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
@@ -163,9 +163,8 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
   }
 
   if (!usage) return failed ? <span className="api-usage-bar warn">{t('讀不到 API 用量')}</span> : null
-  const spend = apiBotSpendUsd(usage)
+  const spend = apiBotConfirmedUsd(usage)
   const u = usage.cost_microusd
-  const pending = u.reserved + u.unknown
   const rate = usage.cache_hit_rate
 
   const bal = balanceView(balance)
@@ -260,7 +259,7 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
             type="button"
             className={`sl-item api-balance-chip${isCapExceededOrClose ? ' warn' : ''}`}
             data-k="cap"
-            title={t('總花費上限：從 {since} 起算已花 ${spent}，上限 ${cap}', {
+            title={t('總花費上限：從 {since} 起算已花 ${spent}（含預留與結果不明，保守估計，用來擋超支；實際花費通常較低），上限 ${cap}', {
               since: cap.since ?? '—',
               spent: cap.spent_usd.toFixed(2),
               cap: cap.cap_usd.toFixed(2),
@@ -318,10 +317,11 @@ export function ApiBotUsageBar({ botId }: { botId: string }) {
         )
       ) : null}
 
-      <span className="sl-item" data-k="cost" title={t('累計花費＝已結算 ${rec}＋預留 ${res}＋結果不明 ${unk}（預留與不明先當花掉算）', { rec: (u.recorded / 1e6).toFixed(4), res: (u.reserved / 1e6).toFixed(2), unk: (u.unknown / 1e6).toFixed(2) })}>
+      <span className="sl-item" data-k="cost" title={t('累計＝已結算的估算花費 ${rec}（依牌價算，跟 Console 對帳以 Console 為準）；預留 ${res} 是進行中請求的上限、結果不明 ${unk} 是以預留上限計的最壞情況，兩者不算進這個數字', { rec: (u.recorded / 1e6).toFixed(4), res: (u.reserved / 1e6).toFixed(2), unk: (u.unknown / 1e6).toFixed(2) })}>
         <span className="sl-k">{t('累計')}</span>
         <span className="sl-v">${spend.toFixed(2)}</span>
-        {pending > 0 ? <span className="api-usage-hold">{t('含預留')}</span> : null}
+        {u.reserved > 0 ? <span className="api-usage-hold" data-k="cost-reserved">{t('＋預留 ${x}', { x: (u.reserved / 1e6).toFixed(2) })}</span> : null}
+        {u.unknown > 0 ? <span className="api-usage-hold warn" data-k="cost-unknown">{t('＋不確定 ≤${x}', { x: (u.unknown / 1e6).toFixed(2) })}</span> : null}
       </span>
       {showFullDetails ? (
         <>

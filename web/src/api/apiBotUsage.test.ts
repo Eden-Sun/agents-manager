@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { apiBotSpendUsd, toApiBotUsage } from './apiBotUsage'
+import { apiBotConfirmedUsd, apiBotSpendUsd, toApiBotUsage } from './apiBotUsage'
 
 test('累計花費＝(recorded+reserved+unknown)/1e6；預留與不明先當花掉算', () => {
   const u = toApiBotUsage({
@@ -21,4 +21,10 @@ test('空回應與缺欄位不炸：全部歸零、命中率 null、last null', 
   assert.equal(u.cache_hit_rate, null)
   assert.equal(u.last, null)
   assert.equal(u.attempts.total, 0)
+})
+
+test('已確定花費只算 recorded；保守花費才含預留與結果不明', () => {
+  const u = toApiBotUsage({ cost_microusd: { recorded: 35_898_529, reserved: 1_000_000, unknown: 13_060_000 } })
+  assert.equal(apiBotConfirmedUsd(u), 35.898529)
+  assert.equal(apiBotSpendUsd(u), 49.958529)
 })

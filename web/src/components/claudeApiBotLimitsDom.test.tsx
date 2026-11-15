@@ -145,7 +145,7 @@ test('ClaudeApiBotLimits: 指定 botId 時顯示該 bot 的累計花費與快取
 
     const stats = root.querySelector('[data-testid=bot-usage-stats]')
     assert.ok(stats, 'bot-usage-stats 存在')
-    assert.match(stats.textContent ?? '', /本 Bot 累計花費：.*\$12\.30/)
+    assert.match(stats.textContent ?? '', /本 Bot 累計花費：.*\$12\.00/)
     assert.match(stats.textContent ?? '', /快取命中率：.*80%/)
     assert.match(stats.textContent ?? '', /請求次數：.*15/)
   } finally {

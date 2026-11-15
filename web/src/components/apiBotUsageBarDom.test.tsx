@@ -415,3 +415,35 @@ test('ApiBotUsageBar 畫出卡住徽章與原因', async () => {
     rawTransport.request = orig
   }
 })
+
+test('累計只放已結算的估算花費；預留與結果不明另外標在旁邊，不混進累計', async () => {
+  useStore.setState({ turns: { 'bot-1': {} } })
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (method: string, path: string, body?: unknown) => {
+    if (path.includes('/api-usage')) {
+      return {
+        attempts: { total: 6, recorded: 3, reserved: 1, unknown: 2, failed: 0 },
+        // 2026-11-15 P.api 的形狀：已結算 $35.90、進行中預留 $1.00、結果不明兩筆各以預留上限 $6.53 記。
+        cost_microusd: { recorded: 35_898_529, reserved: 1_000_000, unknown: 13_060_000 },
+        tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
+        cache_hit_rate: null,
+        last: null,
+        turns: [],
+      }
+    }
+    if (path === '/claude-api/balance') return { configured: false }
+    if (path === '/claude-api/cap') return { cap_usd: null, since: null, spent_usd: 0 }
+    return orig(method as any, path, body)
+  }) as typeof rawTransport.request
+  try {
+    await mount(<ApiBotUsageBar botId="bot-1" />)
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const cost = document.querySelector('[data-k="cost"]')!
+    assert.equal(cost.querySelector('.sl-v')!.textContent, '$35.90', '累計＝已結算，不含預留與不明')
+    assert.equal(cost.querySelector('[data-k="cost-reserved"]')!.textContent, '＋預留 $1.00')
+    assert.equal(cost.querySelector('[data-k="cost-unknown"]')!.textContent, '＋不確定 ≤$13.06')
+    assert.doesNotMatch(cost.textContent ?? '', /含預留/)
+  } finally {
+    rawTransport.request = orig
+  }
+})

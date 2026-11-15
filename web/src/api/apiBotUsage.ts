@@ -107,7 +107,12 @@ export function formatTokensK(n: number): string {
   return n >= 10_000 ? `${Math.round(n / 1000)}k` : String(n)
 }
 
-/** 累計花費（美元）＝(recorded＋reserved＋unknown)／1e6：預留與結果不明的都先當花掉算，跟驗收停線同一個口徑。 */
+/** 已確定的花費（美元）＝recorded／1e6：只有已結算的估價；預留（進行中）與結果不明的另外顯示，不混進這個數字。 */
+export function apiBotConfirmedUsd(u: ApiBotUsage): number {
+  return u.cost_microusd.recorded / 1e6
+}
+
+/** 保守花費（美元）＝(recorded＋reserved＋unknown)／1e6（不是帳面實際花費）：預留與結果不明的都先當花掉算，跟驗收停線同一個口徑。 */
 export function apiBotSpendUsd(u: ApiBotUsage): number {
   return (u.cost_microusd.recorded + u.cost_microusd.reserved + u.cost_microusd.unknown) / 1e6
 }

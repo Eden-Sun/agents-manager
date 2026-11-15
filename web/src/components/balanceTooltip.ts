@@ -27,7 +27,11 @@ export function balanceTooltipLines(balance: ClaudeApiBalance | null | undefined
   if (view.loggedOut) lines.push(t('Console 登入已過期，需重新匯出'))
   if (balance?.configured && balance.anchor) {
     lines.push(t('錨點：${usd}（{at}）', { usd: balance.anchor.usd.toFixed(2), at: balance.anchor.at }))
-    if (balance.spent_usd !== undefined) lines.push(t('錨點以來花費：${spent}', { spent: balance.spent_usd.toFixed(4) }))
+    if (balance.spent_usd !== undefined) lines.push(t('錨點以來已確定花費：${spent}（官方報表＋本機已結算帳）', { spent: balance.spent_usd.toFixed(4) }))
+    if (balance.uncertain_usd !== undefined && balance.uncertain_usd > 0) {
+      lines.push(t('另有結果不明的請求最多 ${unk}（以預留上限計，實際多半低很多），最壞情況餘額 ${floor}', { unk: balance.uncertain_usd.toFixed(2), floor: (balance.remaining_floor_usd ?? 0).toFixed(2) }))
+    }
+    lines.push(t('這是估算：官方報表只到前一個 UTC 日，今天的用本機帳；跟 Console 對不上時以 Console 為準'))
     if (balance.report_through) lines.push(t('官方報表涵蓋至：{dt}', { dt: balance.report_through }))
     if (balance.local_since) lines.push(t('本機帳計算自：{dt}', { dt: balance.local_since }))
     if (balance.error) lines.push(t('警告：{err}', { err: balance.error }))
