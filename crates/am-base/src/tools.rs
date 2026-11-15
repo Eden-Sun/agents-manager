@@ -859,7 +859,7 @@ for p in "$real"/.config/* "$real"/.config/.[!.]*; do
 done
 # 首次啟動精靈（agy 1.5.9 實測：色彩頁→Terms 頁）的完成旗標在 `.gemini/antigravity-cli/cache/onboarding.json`；
 # 影子家目錄是空的所以每個身份第一次都會卡在精靈（AG Man 不代按）。真家目錄已完成的話把旗標檔**複製**過去
-# （複製不連結：agy 會改寫它，各身份各一份；不動憑證 antigravity-oauth-token 與 credential-user-scope，也沒有 Keychain）。
+# （複製不連結：agy 會改寫它，各身份各一份；同意頁的選擇**不存在本機**（實測只有 onboarding.json 變 true），所以複製旗標不代任何人同意；不動憑證 antigravity-oauth-token 與 credential-user-scope，也沒有 Keychain）。
 # 影子那份已經完成就不動；還沒完成（或沒有）才補，所以既有的影子家目錄下次啟動也會補上。
 src="$real/.gemini/antigravity-cli/cache"; dst="$dir/.gemini/antigravity-cli/cache"
 if grep -q '"onboardingComplete": *true' "$src/onboarding.json" 2>/dev/null \
@@ -883,6 +883,19 @@ for n in hooks.json hooks; do
   [ -e "$src" ] || [ -L "$src" ] || continue
   [ -e "$dir/.gemini/config/$n" ] || [ -L "$dir/.gemini/config/$n" ] || ln -s "$src" "$dir/.gemini/config/$n"
 done
+# AG Man 的狀態 hook（`.gemini/config/hooks.json`＋`hooks/`）與 `settings.json` 的 statusLine／trustedWorkspaces 只裝在真家目錄；
+# 影子的 `.gemini` 是空的，AG Man 就讀不到 agy 的狀態（精靈畫面被判 idle 的原因之一）。hooks 連結回去（AG Man 換版會跟著更新）；
+# settings.json 是 agy 會原子改寫的檔（symlink 會被換成一般檔），所以只在影子沒有（或只有空物件）時**複製**真的當種子。
+# 這也讓真家目錄已信任的工作資料夾不再跳「Do you trust」框；之後新的信任由 trust.rs 寫進影子自己的檔。
+mkdir -p "$dir/.gemini/config" || exit 1
+for f in hooks.json hooks; do
+  [ -e "$real/.gemini/config/$f" ] || continue
+  [ -e "$dir/.gemini/config/$f" ] || [ -L "$dir/.gemini/config/$f" ] || ln -s "$real/.gemini/config/$f" "$dir/.gemini/config/$f"
+done
+rs="$real/.gemini/antigravity-cli/settings.json"; ds="$dir/.gemini/antigravity-cli/settings.json"
+if [ -s "$rs" ] && {{ [ ! -e "$ds" ] || [ "$(tr -d ' \n\t' < "$ds" 2>/dev/null)" = "{{}}" ]; }}; then
+  mkdir -p "$dir/.gemini/antigravity-cli" && [ ! -L "$ds" ] && cp "$rs" "$ds"
+fi
 exit 0
 "#,
         real = sh_quote(real_home),

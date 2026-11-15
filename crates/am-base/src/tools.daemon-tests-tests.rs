@@ -958,6 +958,22 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         std::fs::write(&shadow_flag, r#"{"onboardingComplete": true, "mine": 1}"#).unwrap();
         assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
         assert!(std::fs::read_to_string(&shadow_flag).unwrap().contains("mine"));
+        // 狀態 hook 連回真家目錄、settings.json（statusLine＋信任）複製成種子；影子已有內容的不覆蓋。
+        std::fs::create_dir_all(real.join(".gemini/config/hooks")).unwrap();
+        std::fs::write(real.join(".gemini/config/hooks.json"), r#"{"agents-manager":{}}"#).unwrap();
+        std::fs::write(real.join(".gemini/antigravity-cli/settings.json"), r#"{"statusLine":{"command":"x state"},"trustedWorkspaces":["/w"]}"#).unwrap();
+        for _ in 0..2 {
+            assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        }
+        assert!(dir.join(".gemini/config/hooks.json").is_symlink() && dir.join(".gemini/config/hooks").is_symlink(), "狀態 hook 接上");
+        let seeded = dir.join(".gemini/antigravity-cli/settings.json");
+        assert!(!seeded.is_symlink() && std::fs::read_to_string(&seeded).unwrap().contains("trustedWorkspaces"), "settings 複製成種子");
+        std::fs::write(&seeded, r#"{"mine":1}"#).unwrap();
+        assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&seeded).unwrap(), r#"{"mine":1}"#, "已有內容不覆蓋");
+        std::fs::write(&seeded, "{}\n").unwrap();
+        assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
+        assert!(std::fs::read_to_string(&seeded).unwrap().contains("statusLine"), "只有空物件視為沒有");
         // 家目錄就是真家目錄：什麼都不做。
         let same = agy_shadow_home_sh(real.to_str().unwrap(), real.to_str().unwrap());
         assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());
