@@ -8,7 +8,10 @@ import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing
 import { resetStoreForTest, useStore } from '../store/store'
 import { rawTransport } from '../api'
 import { resetClaudeApiBalanceForTest } from '../hooks/useClaudeApiBalance'
+import { mockApi } from '../testing/domHarness'
+import { sharedMock } from '../testing/sharedMock'
 import { BalanceQuotaChip } from './BalanceQuotaChip'
+import { QuotaStrip } from './QuotaStrip'
 
 before(setupDom)
 afterEach(async () => {
@@ -113,4 +116,28 @@ test('手機：縮成短格式 $23.3', async () => {
   } finally {
     window.matchMedia = origMatch
   }
+})
+
+test('版面：膠囊是額度列（.quota-open）裡的一格，不是列外的兄弟、也不是 absolute 疊在量表上（寬度量測才算得到它）', async () => {
+  mockApi(sharedMock)
+  await useStore.getState().refreshState()
+  await useStore.getState().loadQuota()
+  await withBalance(estimate, async () => {
+    await mount(<QuotaStrip />)
+    await settle()
+    await settle()
+    const c = chip()
+    assert.ok(c, '額度列要畫出膠囊')
+    assert.ok(c.parentElement?.classList.contains('quota-open'), '在 .quota-open 裡，fit 量測（measureQuotaRow）才把它算成固定寬')
+    assert.equal(c.closest('.quota-strip')?.querySelector(':scope > [data-k="quota-balance"]'), null, '不是 .quota-strip 的直接子項（那裡的寬度沒人量）')
+    assert.notEqual(c.style.position, 'absolute')
+    assert.ok(c.parentElement!.querySelector('.quota-hp'), '跟量表同一列')
+  })
+})
+
+test('樣式：膠囊 CSS 不用 absolute／fixed 定位，也不是會被壓縮的 flex 項目', async () => {
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(new URL('./balanceQuotaChip.css', import.meta.url), 'utf8')
+  assert.doesNotMatch(css, /position\s*:\s*(absolute|fixed)/)
+  assert.match(css, /\.quota-balance\s*\{[^}]*flex:\s*none/)
 })

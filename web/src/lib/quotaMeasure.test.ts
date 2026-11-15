@@ -66,3 +66,26 @@ test('可用寬扣掉實際記憶體徽章與分頁，隱藏 spacer 不佔寬也
     head.remove()
   }
 })
+
+/** 2026-11-15：API 餘額膠囊以前放在 `.quota-open` 外面，量測量不到它，額度多時疊在最後一格上。放進列裡之後，它跟更新 chip 一樣算固定寬（含左右外距）。 */
+test('列裡的非量表項目（餘額膠囊）算固定寬含外距，不被均分、也不被漏掉', () => {
+  const row = document.createElement('div')
+  row.style.cssText = 'padding:0 2px;column-gap:0'
+  document.body.append(row)
+  const make = (cls: string, width: number, margin = '') => {
+    const el = document.createElement('span')
+    el.className = cls
+    if (margin) el.style.cssText = margin
+    el.getClientRects = () => [new DOMRect(0, 0, width, 20)] as unknown as DOMRectList
+    el.getBoundingClientRect = () => new DOMRect(0, 0, width, 20)
+    row.append(el)
+  }
+  for (const w of [96, 101, 109]) make('quota-hp', w)
+  make('quota-balance', 70, 'margin:0 4px')
+  try {
+    // 啟用格取最寬 109 × 3；固定＝列內距 4 ＋ 膠囊 70 ＋ 外距 8。
+    assert.deepEqual(measureQuotaRow(row), { cellMin: 109, width: 109 * 3 + 4 + 70 + 8 })
+  } finally {
+    row.remove()
+  }
+})

@@ -1143,9 +1143,10 @@ export function QuotaStrip({
             </Fragment>
           )
         })}
+        {/* Anthropic API 餘額：全域（不分主機）。放在 `.quota-open` 最後一格、不是它的兄弟——寬度由 fit 量測（`measureQuotaRow` 把非量表的子項算成固定寬），
+            放在外面時量不到它，額度多的時候膠囊會疊在最後一格上（2026-11-15 使用者截圖）。 */}
+        <BalanceQuotaChip />
       </div>
-      {/* Anthropic API 餘額：全域（不分主機）、不是 kind 的量表，放在量表右邊、不進 `.quota-open`（那裡的寬度由 fit 量測）。 */}
-      <BalanceQuotaChip />
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host, t)}</div>
