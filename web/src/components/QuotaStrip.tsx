@@ -13,6 +13,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
+import { BalanceQuotaChip } from './BalanceQuotaChip'
 import { DEFAULT_ACCOUNT } from '../store/identityRows'
 import { disableUntil } from '../lib/quotaDisableUntil'
 import { KindIcon } from './KindTag'
@@ -1143,6 +1144,8 @@ export function QuotaStrip({
           )
         })}
       </div>
+      {/* Anthropic API 餘額：全域（不分主機）、不是 kind 的量表，放在量表右邊、不進 `.quota-open`（那裡的寬度由 fit 量測）。 */}
+      <BalanceQuotaChip />
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host, t)}</div>

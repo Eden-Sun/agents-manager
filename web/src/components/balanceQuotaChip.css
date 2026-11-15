@@ -1,0 +1,45 @@
+/* 額度列的 Anthropic API 餘額（BalanceQuotaChip.tsx）：跟量表同一排、不搶寬度；手機只放短數字。 */
+.quota-balance {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin: 0 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+button.quota-balance {
+  cursor: pointer;
+}
+
+.quota-balance-k {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.quota-balance-v {
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-balance.estimate .quota-balance-v {
+  color: var(--text-dim);
+}
+
+.quota-balance.warn {
+  border-color: var(--warn, #c98a00);
+}
+
+@media (width <= 640px) {
+  .quota-balance {
+    margin: 0 2px;
+    padding: 1px 5px;
+  }
+}
