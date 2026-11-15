@@ -467,3 +467,78 @@ async fn post_failure_notice_shows_http_error_details_or_falls_back_to_status() 
         .unwrap();
     assert_eq!(msg2, "⚠ 這一回合失敗（api_http_502）：Anthropic API 回了錯誤狀態碼（HTTP 502）。");
 }
+
+#[tokio::test]
+async fn api_bot_turn_survives_idle_reconcile_and_writes_reply() {
+    let f = fixture(true).await;
+
+    // 1. 測試 agent_status='working' 時（4115c9dd7 回合開始時寫 working）：
+    // 即使超過 5 分鐘門檻、沒有 hook 活動，stuck_turns sweep 絕不可誤收
+    let long_ago = crate::db::iso_in(-600);
+    sqlx::query("UPDATE turns SET created_at=?, delivered_at=? WHERE id=?")
+        .bind(&long_ago)
+        .bind(&long_ago)
+        .bind(&f.key.turn_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
+        .bind(&f.key.run_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+
+    let t0 = std::time::Instant::now();
+    let swept_working = crate::lifecycle::stuck_turns::sweep_at(
+        &f.env.app,
+        None,
+        t0 + std::time::Duration::from_secs(360),
+        std::time::Duration::from_secs(300),
+    )
+    .await;
+    assert!(swept_working.is_empty(), "working 狀態的 claude-api turn 絕不可被 sweep 收尾");
+
+    // 2. 測試 agent_status='idle' 時（舊狀態或回合間隙）：
+    // 即使已閒置超過 5 分鐘，stuck_turns sweep 也同樣絕不可誤收
+    sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?")
+        .bind(&f.key.run_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    crate::lifecycle::stuck_turns::observe_at(&f.key.run_id, "idle", t0);
+
+    let swept_idle = crate::lifecycle::stuck_turns::sweep_at(
+        &f.env.app,
+        None,
+        t0 + std::time::Duration::from_secs(360),
+        std::time::Duration::from_secs(300),
+    )
+    .await;
+    assert!(swept_idle.is_empty(), "idle 狀態的 claude-api turn 同樣絕不可被 sweep 收尾");
+
+    let status_before: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+        .bind(&f.key.turn_id)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status_before, "in_flight", "turn 必須依然保持 in_flight");
+
+    // 3. 長回合最終正常完成並提交回覆
+    let item = durable_item(&f).await;
+    let outcome = completion::store_durable_after_join(&f.env.app, &f.key, &f.identity, &item.payload)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, Outcome::Committed(_)), "outcome 必須成功 Committed 而非 Fenced");
+
+    let status_after: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+        .bind(&f.key.turn_id)
+        .fetch_one(&f.env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status_after, "completed", "commit 成功將 turn 改為 completed");
+
+    let msgs = messages(&f.env.app, &f.key.turn_id).await;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0], ("assistant".into(), "final answer".into(), "transcript".into()));
+}

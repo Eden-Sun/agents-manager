@@ -90,6 +90,9 @@ pub async fn before_idle_close(app: &impl StuckTurnContext, run: &db::Run, turn:
         return Ok(Recovery::Proceed);
     }
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(Recovery::Proceed) };
+    if bot.kind == "claude-api" {
+        return Ok(Recovery::Proceed);
+    }
     let screen = match read_screen(app, run).await {
         Ok(screen) => screen,
         Err(e) => {

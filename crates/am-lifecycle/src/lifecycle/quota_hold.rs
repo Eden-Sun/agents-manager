@@ -102,6 +102,9 @@ fn unverified(bot: &db::Bot, e: &anyhow::Error) -> crate::quota::LimitHit {
 /// 而這一列帶著**上一輪開機**的憑據、這台主機的開機回填還沒跑完（重啟後記憶體是空的）時不算數，改看憑據。
 /// 任何一步讀不到都照擋（[`unverified`]），不當作「沒撞限」。
 pub async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &str) -> Option<crate::quota::LimitHit> {
+    if bot.kind == "claude-api" {
+        return None;
+    }
     match app.try_limit_hit_for_bot(bot).await {
         Ok(Some(hit)) => {
             // 這一輪靠記憶體擋著，憑據卻沒落地：圍籬還沒做完，很快再寫一次（`arm_queue_retry` 留較早的那個 timer）。

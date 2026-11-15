@@ -156,6 +156,7 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
            JOIN projects p ON p.id = b.project_id
           WHERE t.status = 'in_flight' AND r.state = 'running' AND (? IS NULL OR p.host = ?)
             AND p.handed_off_to IS NULL
+            AND b.kind != 'claude-api'
           ORDER BY t.rowid",
     )
     .bind(host)
@@ -252,6 +253,10 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
     if run.state != "running" || run.agent_status != "idle" {
         return None;
     }
+    let bot = db::bot(app.db(), &run.bot_id).await.ok()??;
+    if bot.kind == "claude-api" {
+        return None;
+    }
     let turn = db::in_flight_turn(app.db(), run_id).await.ok()??;
     if turn.id != expected_turn_id {
         return None;
@@ -275,6 +280,11 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
 /// 不能收成 `completed_fallback`（那等於說「agent 做完了」），收成 failed 請使用者重送（#903）。
 /// `unknown` 若仍未驗證，收成 failed 並保留 unknown；已確認送達才可走完成備援。
 async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
+    if let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await {
+        if bot.kind == "claude-api" {
+            return Ok(false);
+        }
+    }
     if turn.delivery == "pending" {
         return fail_never_sent(app, run, turn).await;
     }
@@ -292,6 +302,9 @@ async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn
 /// 從未送出的 in_flight 回合：failed＋`delivery='failed'`＋一則系統訊息，同一個交易。`Ok(false)`：別的路先收掉了。
 async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    if bot.kind == "claude-api" {
+        return Ok(false);
+    }
     let mut tx = app.db().begin().await?;
     let out = super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Failed, "送出前就卡住").await?;
     if out != super::turn_controller::Outcome::Applied {
@@ -308,6 +321,9 @@ async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::
 
 async fn fail_unconfirmed(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    if bot.kind == "claude-api" {
+        return Ok(false);
+    }
     let mut tx = app.db().begin().await?;
     let out = super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "送出未確認").await?;
     if out != super::turn_controller::Outcome::Applied { return Ok(false) }
@@ -321,6 +337,9 @@ async fn fail_unconfirmed(app: &impl StuckTurnContext, run: &db::Run, turn: &db:
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
 async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    if bot.kind == "claude-api" {
+        return Ok(false);
+    }
     let reply = proven_reply(app, &bot, run, turn).await?;
     // An idle screen is not evidence that an unconfirmed submission ran. Preserve
     // unknown delivery so an operator can inspect the composer without resending.
@@ -1219,5 +1238,74 @@ mod tests {
         observe_at(&f.run_id, "idle", t0);
         assert!(sweep_at(&app, Some("box"), t0 + 6 * MIN, 5 * MIN).await.is_empty());
         assert_eq!(sweep_at(&app, Some(LOCAL_HOST), t0 + 6 * MIN, 5 * MIN).await.len(), 1);
+    }
+
+    /// claude-api bot 沒有 pane／hook，其回合由 api_bot 自己的 turn_timeout／sweeper 管；
+    /// stuck_turn 巡邏即便看到 run 閒置超過門檻，也絕不可將其 in_flight turn 關閉。
+    #[tokio::test]
+    async fn a_claude_api_bot_turn_is_never_closed_by_stuck_turn_sweep() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, effort, fast, hook_token, created_at)
+             VALUES (?, ?, 'api-stuck-test', 'claude-api', 'high', 0, 'tok', ?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(&now)
+        .execute(app.db())
+        .await
+        .unwrap();
+
+        let conv_id = db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?, ?, ?)")
+            .bind(&conv_id)
+            .bind(&bot_id)
+            .bind(&now)
+            .execute(app.db())
+            .await
+            .unwrap();
+
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, started_at)
+             VALUES (?, ?, 'running', 'idle', ?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(&now)
+        .execute(app.db())
+        .await
+        .unwrap();
+
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?, ?, ?, 'web', 'in_flight', 'ok', 'API bot prompt', ?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv_id)
+        .bind(&run_id)
+        .bind(db::iso_in(-600))
+        .execute(app.db())
+        .await
+        .unwrap();
+
+        // 1. 測試 agent_status='working' 狀態下（4115c9dd7 回合開始），即使超時且無 hook 活動，sweep 也絕不收尾
+        sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run_id).execute(app.db()).await.unwrap();
+        let t0 = Instant::now();
+        let closed_working = sweep_at(&app, None, t0 + 10 * MIN, 5 * MIN).await;
+        assert!(closed_working.is_empty(), "working 狀態的 claude-api bot 絕不應被 stuck_turn sweep 收尾");
+        assert_eq!(turn(&app, &turn_id).await.status, "in_flight");
+
+        // 2. 測試 agent_status='idle' 狀態下（舊狀態或結束後殘留），即使閒置超過 5 分鐘，sweep 也絕不收尾
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(app.db()).await.unwrap();
+        observe_at(&run_id, "idle", t0);
+
+        let closed = sweep_at(&app, None, t0 + 10 * MIN, 5 * MIN).await;
+        assert!(closed.is_empty(), "claude-api bot 不應被 stuck_turn sweep 收尾");
+        assert_eq!(turn(&app, &turn_id).await.status, "in_flight", "turn 必須保持 in_flight");
     }
 }

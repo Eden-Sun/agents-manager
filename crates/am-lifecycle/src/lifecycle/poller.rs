@@ -140,6 +140,11 @@ fn poll_unreadable(turn_id: &str, failures: u32, e: &anyhow::Error) -> u32 {
 /// While a turn is in flight, poll the pane and push partial replies as `turn_progress`. Also the
 /// idle-prompt safety net that calls `try_fallback` (see below). Stops once the turn leaves `in_flight`.
 pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
+    if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
+        if bot.kind == "claude-api" {
+            return;
+        }
+    }
     // A new turn is starting: whatever cut the *previous* one short is history (§4.3a). 清不掉就在 poller 裡
     // 再清：留著的話，這一回合斷在同一句錯誤上會被「同一則只記一次」吞掉（#193）。
     let mut error_cleared = crate::turn_error::clear(app, run_id, bot_id).await.is_ok();
@@ -293,6 +298,10 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
 /// gets the same live bubble / progress as a web prompt. `delivery='ok'` so the §4.3 fallback
 /// (which ignores other values) can still close it if the Stop hook never comes.
 pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
+    let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return };
+    if bot.kind == "claude-api" {
+        return;
+    }
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     // Re-read under the lock: `prompt()` may have opened a turn, and the watcher is armed before
@@ -1129,6 +1138,11 @@ async fn resend_with_retry(
 /// The agent must leave `idle` within the stall deadline (`stall_deadline_secs`) after delivery, or the Turn sits `in_flight`
 /// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
+    if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
+        if bot.kind == "claude-api" {
+            return;
+        }
+    }
     let deadline = stall_deadline_for(app, bot_id).await;
     let mut timers = app.stall_timers().lock().await;
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -1209,6 +1223,11 @@ async fn stall_round(
     st: &mut Stall,
     grace: Duration,
 ) -> StallRound {
+    if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
+        if bot.kind == "claude-api" {
+            return StallRound::Done;
+        }
+    }
     let mut unsure = false;
     // Deadline: if the text is still there, press Enter and grant a grace period first.
     {
@@ -1505,6 +1524,11 @@ pub async fn arm_fallback(app: &impl LcHost, run_id: &str, bot_id: &str) {
 }
 
 async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
+    if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
+        if bot.kind == "claude-api" {
+            return;
+        }
+    }
     // 讀不到就不排：排了也不知道要收哪一回合，收錯比不收糟（這一回合有 poller 的閒置備援與 stuck watchdog 兜著）。
     let armed_for = match db::in_flight_turn(app.db(), run_id).await {
         Ok(turn) => turn.map(|t| t.id),
@@ -1588,6 +1612,9 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
+    if bot.kind == "claude-api" {
+        return Ok(false);
+    }
     let run = codex_session_refresh::refresh(app, &run, &bot, &turn.id).await.unwrap_or(run);
     // §12.5：沒有 hook 的 grok 先問它自己的對話檔，畫面只是備援。
     if let Some(done) = super::grok_transcript::settle_in_flight(app, &bot, &run, &turn).await {
