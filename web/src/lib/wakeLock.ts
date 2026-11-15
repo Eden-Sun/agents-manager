@@ -4,6 +4,9 @@
  * 用瀏覽器內建的 Screen Wake Lock：**只有安全來源（HTTPS 或 localhost）才有**——手機用
  * `http://<區網 IP>:7788` 開的話 `navigator.wakeLock` 是 undefined，這時要明說原因，不要靜靜失效。
  * 本機走 `https://<機器>.<tailnet>.ts.net:8443`（tailscale serve）就有。
+ *
+ * 另外 WebKit（iOS Safari / PWA）要求 transient user activation（手勢）才能 request 成功，
+ * 否則拋出 NotAllowedError；手勢與重試由 `hooks/useWakeLock.ts` 負責。
  */
 import { t } from './i18n'
 

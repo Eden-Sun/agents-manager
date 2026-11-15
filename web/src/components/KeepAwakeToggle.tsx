@@ -12,6 +12,9 @@ export function KeepAwakeToggle() {
       <label className="keep-awake-row">
         <input type="checkbox" checked={on && usable} disabled={!usable} onChange={(e) => setOn(e.target.checked)} />
         <span>{t('螢幕保持亮著（這台裝置）')}</span>
+        {on && usable && !active && (
+          <span className="keep-awake-status">{t('（已開啟但目前未生效：點一下畫面恢復）')}</span>
+        )}
       </label>
       <p className="keep-awake-note">
         {!usable

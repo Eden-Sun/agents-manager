@@ -50,6 +50,7 @@ export default {
   '這個網址不是 HTTPS，瀏覽器不給用（改用 https:// 的網址開就會出現）': 'This address is not HTTPS, so the browser blocks it (open the https:// address instead)',
   '這個瀏覽器沒有 Screen Wake Lock（iOS 要 16.4 以上）': 'This browser has no Screen Wake Lock (iOS needs 16.4 or later)',
   '螢幕保持亮著（這台裝置）': 'Keep the screen on (this device)',
+  '（已開啟但目前未生效：點一下畫面恢復）': '(Enabled but not active yet: tap anywhere to resume)',
   '開著：這個分頁在前景時螢幕不會自己睡著；很耗電，不用時請關掉。': 'On: the screen will not sleep while this tab is in the foreground. It drains battery — turn it off when not needed.',
   '已開啟，但現在沒握住鎖（分頁在背景，或系統省電模式不給）。回到這個分頁會自動再拿一次。': 'On, but the lock is not held right now (tab in background, or battery saver denies it). It is requested again when you return to this tab.',
   '關著：螢幕照系統設定自動鎖屏。': 'Off: the screen locks automatically per system settings.',

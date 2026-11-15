@@ -182,3 +182,142 @@ it('正常關閉：系統收回目前握著的鎖，狀態變回沒握住', asyn
   await settle()
   assert.equal(active(), 'false', '目前這顆被收回，要寫沒握住')
 })
+
+it('WebKit 無手勢被拒：第一次 request reject → 觸控後成功；release 後再觸控重拿；關掉開關移除監聽並 release', async () => {
+  let allowRequest = false
+  let requestErrors = 0
+  Object.defineProperty(navigator, 'wakeLock', {
+    configurable: true,
+    value: {
+      request: async () => {
+        requests += 1
+        if (!allowRequest) {
+          requestErrors += 1
+          throw new DOMException('user gesture required', 'NotAllowedError')
+        }
+        return sentinel()
+      },
+    },
+  })
+
+  // 1. 偏好已開啟，第一次掛載時因為沒有手勢被 reject
+  setKeepAwake(true)
+  await mount(
+    <>
+      <Holder />
+      <Status />
+      <KeepAwakeToggle />
+    </>,
+  )
+  await settle()
+
+  assert.equal(requests, 1, '嘗試要過一次鎖')
+  assert.equal(requestErrors, 1, '第一次無手勢被拒絕')
+  assert.equal(active(), 'false', '未握住鎖')
+  const statusEl = document.querySelector('.keep-awake-status')
+  assert.ok(statusEl, '開關旁應顯示未生效提示')
+  assert.match(statusEl?.textContent ?? '', /已開啟但目前未生效：點一下畫面恢復/)
+
+  // 2. 模擬觸控（touchend），手勢啟動允許成功拿鎖
+  allowRequest = true
+  await act(async () => {
+    window.dispatchEvent(new Event('touchend'))
+  })
+  await settle()
+
+  assert.equal(requests, 2, '手勢觸發第二次 request')
+  assert.equal(active(), 'true', '拿到鎖，狀態變為 active')
+  assert.equal(document.querySelector('.keep-awake-status'), null, '生效後提示消失')
+
+  // 拿到鎖後，手勢監聽應已被移除：再點擊不應再送 request
+  await act(async () => {
+    window.dispatchEvent(new Event('pointerdown'))
+  })
+  await settle()
+  assert.equal(requests, 2, '拿鎖後手勢監聽已移除，不重複 request')
+
+  // 3. 系統收回（release 事件）
+  const [currentLock] = locks
+  assert.ok(currentLock, '有當前鎖')
+  await act(async () => {
+    currentLock.released = true
+    currentLock.fireRelease()
+  })
+  await settle()
+
+  assert.equal(active(), 'false', '系統收回後狀態變為 false')
+  const statusAfterRelease = document.querySelector('.keep-awake-status')
+  assert.ok(statusAfterRelease, '收回後重新顯示未生效提示')
+  assert.match(statusAfterRelease?.textContent ?? '', /已開啟但目前未生效：點一下畫面恢復/)
+
+  // 4. release 後再觸控，會重新要鎖並成功
+  await act(async () => {
+    window.dispatchEvent(new Event('pointerdown'))
+  })
+  await settle()
+
+  assert.equal(requests, 3, 'release 後觸控重新要鎖')
+  assert.equal(active(), 'true', '重新拿到鎖')
+  assert.equal(document.querySelector('.keep-awake-status'), null)
+
+  // 5. 關掉開關：會 release 鎖並移除監聽
+  const [, secondLock] = locks
+  assert.ok(secondLock, '有第二顆鎖')
+  assert.equal(secondLock.released, false)
+
+  await act(async () => {
+    setKeepAwake(false)
+  })
+  await settle()
+
+  assert.equal(secondLock.released, true, '關閉開關後 release 鎖')
+  assert.equal(active(), 'false')
+
+  // 關閉後再觸控，監聽器已移除，不會再要鎖
+  await act(async () => {
+    window.dispatchEvent(new Event('touchend'))
+    window.dispatchEvent(new Event('keydown'))
+  })
+  await settle()
+  assert.equal(requests, 3, '關閉後手勢監聽已被移除，不再發送 request')
+})
+
+it('等待手勢期間關掉開關：移除手勢監聽，後續觸摸不發起 request', async () => {
+  Object.defineProperty(navigator, 'wakeLock', {
+    configurable: true,
+    value: {
+      request: async () => {
+        requests += 1
+        throw new DOMException('user gesture required', 'NotAllowedError')
+      },
+    },
+  })
+
+  setKeepAwake(true)
+  await mount(
+    <>
+      <Holder />
+      <Status />
+    </>,
+  )
+  await settle()
+
+  assert.equal(requests, 1, '初次嘗試被 reject')
+  assert.equal(active(), 'false')
+
+  // 在等待手勢期間直接關閉開關
+  await act(async () => {
+    setKeepAwake(false)
+  })
+  await settle()
+
+  // 關閉後再觸發手勢事件
+  await act(async () => {
+    window.dispatchEvent(new Event('pointerdown'))
+    window.dispatchEvent(new Event('touchend'))
+    window.dispatchEvent(new Event('keydown'))
+  })
+  await settle()
+
+  assert.equal(requests, 1, '關閉後手勢監聽已被卸載，不再送 request')
+})
