@@ -85,7 +85,7 @@ function PhoneOutboxTrayInner() {
           {images.length > 0 ? (
             <ul className={`phone-outbox-thumbs${peek ? ' peeking' : ''}`} role="list">
               {images.map((f) => (
-                <li key={f.name}>
+                <li key={`${f.owner ?? ''}/${f.name}`}>
                   <button
                     type="button"
                     className={`phone-outbox-thumb${peek?.name === f.name ? ' peeking' : ''}`}
@@ -117,7 +117,7 @@ function PhoneOutboxTrayInner() {
                     // 長按不要跳出系統的圖片選單。
                     onContextMenu={(e) => e.preventDefault()}
                   >
-                    <OutboxThumb botId={botId} file={f} />
+                    <OutboxThumb botId={f.owner ?? botId} file={f} />
                   </button>
                 </li>
               ))}
@@ -129,16 +129,16 @@ function PhoneOutboxTrayInner() {
             {others.map((f) => {
               const left = remainingNow(f, fetchedAt, now)
               const { dir: folder, base } = splitOutboxName(f.name)
-              const isBusy = busy?.bot === botId && busy.name === f.name
+              const isBusy = busy?.bot === (f.owner ?? botId) && busy.name === f.name
               return (
-                <li key={f.name} className="phone-outbox-item">
+                <li key={`${f.owner ?? ''}/${f.name}`} className="phone-outbox-item">
                   <button
                     type="button"
                     className="outbox-file"
                     disabled={isBusy}
                     // 手機不給下載（使用者 2026-11-03）：圖檔點名字開放大預覽，其他檔在新分頁打開。
                     title={t('預覽 {name}', { name: f.name })}
-                    onClick={() => void openPreview(f.name)}
+                    onClick={() => void openPreview(f.name, f.owner)}
                   >
                     <span className="outbox-name">
                       {folder ? <span className="outbox-dir">{folder}</span> : null}
@@ -146,6 +146,7 @@ function PhoneOutboxTrayInner() {
                     </span>
                     <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                       {fileSize(f.size)}
+                      {f.ownerName ? t(' · 來自 {name}', { name: f.ownerName }) : ''}
                       {left === null ? '' : ` · ${remainingLabel(left)}`}
                       {isBusy ? t(' · 開啟中…') : ''}
                     </span>
@@ -159,7 +160,7 @@ function PhoneOutboxTrayInner() {
       ) : null}
       {peek && botId ? (
         <div className="phone-outbox-peek" aria-live="polite">
-          <OutboxThumb botId={botId} file={peek} full />
+          <OutboxThumb botId={peek.owner ?? botId} file={peek} full />
         </div>
       ) : null}
     </section>

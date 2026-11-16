@@ -113,6 +113,34 @@ export function splitOutboxName(name: string): { dir: string; base: string } {
   return i < 0 ? { dir: '', base: name } : { dir: name.slice(0, i + 1), base: name.slice(i + 1) }
 }
 
+/** outbox 路徑裡的 bot id（ULID）與相對檔名。 */
+const OUTBOX_REF = /outbox\/([0-9A-HJKMNP-TV-Z]{26})\/([^\s`'"<>()[\]|*]+)/g
+
+/**
+ * 這顆 bot 的訊息裡提到的**別顆 bot** 的 outbox 檔案：`{ 那顆的 id: [相對檔名…] }`。
+ *
+ * 管理者轉交子 agent／執行者的產出時，回覆裡寫的是對方 outbox 的路徑，檔案不在自己的 outbox；
+ * 以前右側「bot 給你的檔案」只列自己那一份，使用者在管理者頁面找不到（2026-11-16 使用者：「我看就沒有」）。
+ */
+export function relayedOutboxRefs(messages: ReadonlyArray<{ content: string }> | undefined, selfId: string): Record<string, string[]> {
+  const out: Record<string, Set<string>> = {}
+  for (const m of messages ?? []) {
+    for (const hit of (m.content ?? '').matchAll(OUTBOX_REF)) {
+      const [, bot, raw] = hit
+      if (bot === selfId) continue
+      let name = raw.replace(/[.,;:!?，。；：！？、]+$/u, '')
+      try {
+        if (name.includes('%')) name = decodeURIComponent(name)
+      } catch {
+        /* 不是合法的 % 編碼：照原樣 */
+      }
+      if (!name || name.endsWith('/')) continue
+      ;(out[bot] ??= new Set()).add(name)
+    }
+  }
+  return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v].sort()]))
+}
+
 /** 新的排前面；同一秒的依名字排，避免每次重整順序在跳。 */
 export function orderFiles(files: OutboxFile[]): OutboxFile[] {
   return [...files].sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name))

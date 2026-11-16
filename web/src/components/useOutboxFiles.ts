@@ -2,7 +2,7 @@ import { useT } from '../lib/i18n'
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
-import { downloadFailure, lastSettledTurnKey, readOutbox, splitOutboxName } from '../lib/outboxList'
+import { downloadFailure, lastSettledTurnKey, orderFiles, readOutbox, relayedOutboxRefs, splitOutboxName } from '../lib/outboxList'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { useStore } from '../store/store'
 
@@ -17,6 +17,8 @@ export function useOutboxFiles() {
   const notify = useStore((s) => s.notify)
   // 回合一結束就重讀：bot 說「放好了」的同時清單就該出現，不必切頁或按 ↻（字串比較，回合沒結束不會重跑）。
   const settledTurn = useStore((s) => (botId ? lastSettledTurnKey(s.turns[botId]) : ''))
+  // 訊息裡轉述的別顆 bot 的 outbox 檔（管理者轉交子 agent 的產出）：序列化成字串，訊息沒變就不重讀。
+  const relayKey = useStore((s) => (botId ? JSON.stringify(relayedOutboxRefs(s.messages[botId], botId)) : '{}'))
   const [files, setFiles] = useState<OutboxFile[]>([])
   const [reason, setReason] = useState<string | null>(null)
   const [dir, setDir] = useState('')
@@ -66,8 +68,9 @@ export function useOutboxFiles() {
     void (async () => {
       // 讀不到不跳紅字（這一段是附加資訊，每個回合結束都重讀），但也不能說成「還沒有檔案」：`readOutbox` 回 `load_failed`（#234）。
       const out = await readOutbox(() => api.fetchOutbox(botId))
+      const relayed = await relayedFiles(botId, JSON.parse(relayKey) as Record<string, string[]>)
       if (!alive) return
-      setFiles(out.files)
+      setFiles(orderFiles([...out.files, ...relayed]))
       setReason(out.reason)
       setDir(out.dir)
       setKept(out.kept === true)
@@ -78,17 +81,22 @@ export function useOutboxFiles() {
     return () => {
       alive = false
     }
-  }, [botId, nonce, settledTurn])
+  }, [botId, nonce, settledTurn, relayKey])
 
-  const download = async (name: string) => {
+  /** 從清單上拿掉一個（過期被清掉）：同名但別顆 bot 的不動。 */
+  const dropFile = (name: string, owner: string | undefined) =>
+    setFiles((fs) => fs.filter((f) => f.name !== name || f.owner !== owner))
+
+  const download = async (name: string, owner?: string) => {
     if (!botId) return
+    const from = owner ?? botId
     // 這一趟是哪顆 bot 的：回來時 bot 可能已經換了。舊的只能把檔案交給使用者，不能動現在這顆的清單與下載狀態。
-    const mine = { bot: botId, name, mode: 'download' as const }
+    const mine = { bot: from, name, mode: 'download' as const }
     const kept0 = kept
     setBusy(mine)
     try {
       // token 帶不進 `<a href>`，所以先抓成 blob 再按下去；抓完就釋放，不然大檔會一直佔記憶體。
-      const url = await api.outboxFileUrl(botId, name)
+      const url = await api.outboxFileUrl(from, name)
       const a = document.createElement('a')
       a.href = url
       a.download = splitOutboxName(name).base // 子資料夾裡的檔：存檔名只取最後一段
@@ -101,7 +109,7 @@ export function useOutboxFiles() {
       if (botRef.current === botId) {
         // 過期被清掉的那一列留在畫面上沒有意義：當場拿掉並重讀一次清單（issue #547）。
         if (gone) {
-          setFiles((fs) => fs.filter((f) => f.name !== name))
+          dropFile(name, owner)
           setLoadedFor(null)
           setNonce((n) => n + 1)
         }
@@ -117,8 +125,9 @@ export function useOutboxFiles() {
     }
   }
 
-  const openPreview = async (name: string) => {
+  const openPreview = async (name: string, owner?: string) => {
     if (!botId) return
+    const from = owner ?? botId
     // 點擊當下同步開空白頁，保留 transient activation；不帶 noopener 以便取得 Window handle
     const w = window.open('', '_blank')
     if (!w) {
@@ -130,13 +139,13 @@ export function useOutboxFiles() {
       w.opener = null
     } catch {}
 
-    const mine = { bot: botId, name, mode: 'preview' as const }
+    const mine = { bot: from, name, mode: 'preview' as const }
     const kept0 = kept
     setBusy(mine)
     try {
       // 預覽走帶 token 的 blobUrl（避免 URL 洩漏 token 或新分頁認證缺失）
       // 注意：預覽安全性靠後端與前端嚴格的 MIME 白名單，Blob URL 本身不繼承 HTTP 回應的 CSP
-      const url = await api.outboxFileUrl(botId, name, true)
+      const url = await api.outboxFileUrl(from, name, true)
       try {
         w.location.href = url
       } catch {
@@ -162,7 +171,7 @@ export function useOutboxFiles() {
       const { text, gone } = downloadFailure(name, e, kept0)
       if (botRef.current === botId) {
         if (gone) {
-          setFiles((fs) => fs.filter((f) => f.name !== name))
+          dropFile(name, owner)
           setLoadedFor(null)
           setNonce((n) => n + 1)
         }
@@ -183,4 +192,26 @@ export function useOutboxFiles() {
   }
 
   return { botId, files, reason, dir, kept, fetchedAt, now, loadedFor, busy, refresh, download, openPreview }
+}
+
+/**
+ * 訊息裡轉述的別顆 bot 的 outbox 檔：只列被點名、而且還在的那幾個（別顆其他的檔不是交給這裡的）。
+ * 讀不到（那顆已收掉、遠端連不上）就略過，不影響自己的清單。
+ */
+async function relayedFiles(selfId: string, refs: Record<string, string[]>): Promise<OutboxFile[]> {
+  const bots = useStore.getState().bots
+  const lists = await Promise.all(
+    Object.entries(refs).map(async ([owner, names]) => {
+      const bot = bots.find((b) => b.id === owner)
+      if (!bot || owner === selfId) return []
+      try {
+        const out = await api.fetchOutbox(owner)
+        const want = new Set(names)
+        return out.files.filter((f) => want.has(f.name)).map((f) => ({ ...f, owner, ownerName: bot.name }))
+      } catch {
+        return []
+      }
+    }),
+  )
+  return lists.flat()
 }

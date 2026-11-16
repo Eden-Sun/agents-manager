@@ -363,7 +363,15 @@ export async function setIdentityDisabled(host: string, kind: string, name: stri
 
 /** bot 放進 `$AM_OUTBOX` 交給使用者的檔案（SPEC §6.5f）。`reason` 有值＝這顆沒有可列的（遠端）。
  *  `remainingSecs`：daemon 讀清單那一刻離被清掉還剩幾秒（放進去 1 小時後清）；null＝不會被清（分享用 bot，SPEC §20）。 */
-export type OutboxFile = { name: string; size: number; modified: number; remainingSecs: number | null }
+export type OutboxFile = {
+  name: string
+  size: number
+  modified: number
+  remainingSecs: number | null
+  /** 檔案其實在另一顆 bot 的 outbox：這顆 bot 的訊息轉述了它的路徑（例如管理者轉交子 agent 的產出）。沒有＝自己的。 */
+  owner?: string
+  ownerName?: string
+}
 
 export async function fetchOutbox(
   botId: string,

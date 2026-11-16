@@ -19,13 +19,13 @@ export function OutboxFiles() {
   const t = useT()
   const { botId, files, reason, dir, kept, fetchedAt, now, loadedFor, busy, refresh, download, openPreview } = useOutboxFiles()
   /** 滑過（或鍵盤聚焦）的圖檔：浮出預覽。 */
-  const [peek, setPeek] = useState<{ name: string; modified: number; anchor: DOMRect } | null>(null)
+  const [peek, setPeek] = useState<{ name: string; owner?: string; modified: number; anchor: DOMRect } | null>(null)
   const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showPeek = (f: OutboxFile, el: HTMLElement) => {
     if (!isPreviewableImage(f.name)) return
     if (peekTimer.current) clearTimeout(peekTimer.current)
     // 滑鼠只是劃過清單不該每張都抓一次：停 150ms 才算要看。
-    peekTimer.current = setTimeout(() => setPeek({ name: f.name, modified: f.modified, anchor: el.getBoundingClientRect() }), 150)
+    peekTimer.current = setTimeout(() => setPeek({ name: f.name, owner: f.owner, modified: f.modified, anchor: el.getBoundingClientRect() }), 150)
   }
   const hidePeek = () => {
     if (peekTimer.current) clearTimeout(peekTimer.current)
@@ -74,17 +74,17 @@ export function OutboxFiles() {
           {files.map((f) => {
             const left = remainingNow(f, fetchedAt, now)
             const { dir: folder, base } = splitOutboxName(f.name)
-            const itemBusy = busy?.bot === botId && busy.name === f.name ? busy.mode : null
+            const itemBusy = busy?.bot === (f.owner ?? botId) && busy.name === f.name ? busy.mode : null
             const isBusy = itemBusy !== null
             const canPreview = isBrowserPreviewable(f.name)
             return (
-              <li key={f.name} className="outbox-item">
+              <li key={`${f.owner ?? ''}/${f.name}`} className="outbox-item">
                 <button
                   type="button"
                   className="outbox-file"
                   disabled={isBusy}
                   title={t("下載 {name}", { name: f.name })}
-                  onClick={() => void download(f.name)}
+                  onClick={() => void download(f.name, f.owner)}
                   onMouseEnter={(e) => showPeek(f, e.currentTarget)}
                   onMouseLeave={hidePeek}
                   onFocus={(e) => showPeek(f, e.currentTarget)}
@@ -96,6 +96,7 @@ export function OutboxFiles() {
                   </span>
                   <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
                     {fileSize(f.size)}
+                    {f.ownerName ? t(' · 來自 {name}', { name: f.ownerName }) : ''}
                     {left === null ? '' : ` · ${remainingLabel(left)}`}
                     {itemBusy === 'preview' ? t(' · 開啟中…') : itemBusy === 'download' ? t(' · 下載中…') : ''}
                   </span>
@@ -109,7 +110,7 @@ export function OutboxFiles() {
                     title={t("開新分頁預覽（不下載）")}
                     onClick={(e) => {
                       e.stopPropagation()
-                      void openPreview(f.name)
+                      void openPreview(f.name, f.owner)
                     }}
                   >
                     ↗
@@ -120,7 +121,7 @@ export function OutboxFiles() {
           })}
         </ul>
       )}
-      {peek && botId ? <OutboxImagePreview botId={botId} name={peek.name} modified={peek.modified} anchor={peek.anchor} /> : null}
+      {peek && botId ? <OutboxImagePreview botId={peek.owner ?? botId} name={peek.name} modified={peek.modified} anchor={peek.anchor} /> : null}
     </section>
   )
 }

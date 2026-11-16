@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadFailure, emptyReason, fileSize, INLINE_PREVIEW_EXTENSIONS, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
+import { downloadFailure, emptyReason, fileSize, INLINE_PREVIEW_EXTENSIONS, isBrowserPreviewable, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, relayedOutboxRefs, remainingLabel, remainingNow, splitOutboxName } from './outboxList'
 import { ApiError } from '../api/types'
 
 const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
@@ -196,4 +196,20 @@ test('fileSize 進位到 1 GB 要寫成 GB，不印「1024 MB」「10199 MB」�
   assert.equal(fileSize(1024 ** 3 * 10.7), '11 GB', '≥10 的 GB 寫整數，不寫 10199 MB')
   assert.equal(fileSize(1024 ** 3 * 9.96), '10 GB', '9.96 進位到 10，不寫 10.0 GB')
   assert.equal(fileSize(1024 ** 2 * 1023), '1023 MB', 'MB 還沒進位就照舊')
+})
+
+test('relayedOutboxRefs: picks other bots’ outbox files from relayed paths, not its own', () => {
+  const self = '01M2P8XW354JXMMMYS6DBF3XQ3'
+  const other = '01M6WN4N1Z7H10CQ122W4G8JKV'
+  const refs = relayedOutboxRefs(
+    [
+      { content: `- **Download:** \`~/.config/agents-manager/outbox/${other}/錠嵂車險_手機版.pdf\`` },
+      { content: `[PDF](/Users/m4p/.config/agents-manager/outbox/${other}/報價/Q-1.pdf)。` },
+      { content: `mine: ~/.config/agents-manager/outbox/${self}/x.pdf` },
+      { content: `dir only: outbox/${other}/` },
+      { content: `encoded: outbox/${other}/a%20b.pdf.` },
+    ],
+    self,
+  )
+  assert.deepEqual(refs, { [other]: ['a b.pdf', '報價/Q-1.pdf', '錠嵂車險_手機版.pdf'] })
 })

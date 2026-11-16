@@ -15,6 +15,7 @@ const dict: Dict = {
   "（點擊複製）": " (click to copy)",
   " · 下載中…": " · Downloading…",
   " · 開啟中…": " · Opening…",
+  " · 來自 {name}": " · from {name}",
   "Codex 警告數；在終端按 F2 查看內容": "Codex warnings count; press F2 in terminal to inspect",
   "agent 停在一個要你回答的提示上，點一下開全畫面終端回答": "Agent is waiting for your response; click to open full-screen terminal",
   "需要回應": "Needs response",
