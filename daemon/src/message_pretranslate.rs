@@ -90,7 +90,8 @@ pub(crate) async fn pretranslate(app: &App, id: &str) {
         Ok(_) => {}
         // 這則品質檢查沒過（已寫負面標記）：服務是好的，不冷卻，後面的訊息照翻。
         Err(e) if mt::is_quality_rejection(&e) => {
-            tracing::info!(message = %id, "message pretranslate rejected by quality check; not cooling down");
+            let check = match &e { crate::lifecycle::LcError::Unprocessable(v) => v["reason"].as_str().unwrap_or("unknown").to_string(), _ => String::new() };
+            tracing::info!(message = %id, check = %check, "message pretranslate rejected by quality check; not cooling down");
         }
         Err(e) => {
             COOLDOWN_UNTIL_MS.store(chrono::Utc::now().timestamp_millis() + FAILURE_COOLDOWN.as_millis() as i64, Ordering::Relaxed);

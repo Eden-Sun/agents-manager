@@ -243,3 +243,24 @@ test('真失敗連續到上限仍停手；中間成功一次就歸零', async ()
   await run('blocked')
   assert.equal(translateCalls(reqs), n2, '連續真失敗到上限就停手')
 })
+
+test('手動翻譯被品質檢查擋下：提示寫出原因、可「仍然顯示譯文」；再按翻譯重試', async () => {
+  const base = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
+    if (String(input).includes('/translate')) {
+      calls++
+      return new Response(JSON.stringify({ error: 'translate_rejected', reason: 'untranslated', translation: '被擋下的譯文（測試用假文字）' }), { status: 422 })
+    }
+    return base(input, init as never)
+  }) as unknown as typeof fetch
+  await mount(<Probe m={msg(EN, { id: 'rej-manual' })} />)
+  await click(document.querySelector('.msg-translate') as HTMLButtonElement)
+  await until(() => document.querySelector('[data-k="translate-rejected"]') !== null, '顯示被擋的原因')
+  assert.match(document.querySelector('[data-k="translate-rejected"]')!.textContent ?? '', /跟原文幾乎一樣/)
+  assert.equal(document.querySelector('.msg-translation'), null, '預設不顯示被擋的譯文')
+  const before = calls
+  await click(document.querySelector('[data-k="translate-show-anyway"]') as HTMLButtonElement)
+  await until(() => (document.querySelector('.msg-translation')?.textContent ?? '').includes('被擋下的譯文'), '仍然顯示譯文')
+  assert.equal(calls, before, '顯示被擋譯文不再打 API')
+})

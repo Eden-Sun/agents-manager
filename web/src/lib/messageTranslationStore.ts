@@ -8,7 +8,7 @@
 export type TranslationEntry =
   | { status: 'idle' | 'loading' | 'error' }
   /** 品質檢查沒過（daemon 422 translate_rejected）：這則翻不好，不是服務壞掉；顯示原文＋小提示，手動鈕照常。 */
-  | { status: 'rejected' }
+  | { status: 'rejected'; reason?: string; text?: string }
   | { status: 'done'; text: string; show: boolean; cost: number | null; cached: boolean; model: string; lowConfidence?: boolean; jevProb?: number | null }
 
 const IDLE: TranslationEntry = { status: 'idle' }

@@ -43,8 +43,11 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
       (e: unknown) => {
         // 品質檢查沒過：服務是好的，只是這則翻不好。不算失敗（不累計、不重置就緒狀態），顯示原文＋小提示。
         if (e instanceof ApiError && e.status === 422 && e.body.error === 'translate_rejected') {
-          setTranslation(msg.id, { status: 'rejected' })
-          if (kind === 'manual') useStore.getState().notify('info', t('這則沒有自動翻譯（品質檢查未通過），可以手動再試'))
+          const reason = typeof e.body.reason === 'string' ? e.body.reason : undefined
+          const text = typeof e.body.translation === 'string' && e.body.translation.trim() ? e.body.translation : undefined
+          setTranslation(msg.id, { status: 'rejected', reason, text })
+          // 手動按的要看到原因（不是靜默失敗）：提示列會寫檢查名稱，重試就再按「翻譯」，被擋的譯文可用「仍然顯示譯文」看。
+          if (kind === 'manual') useStore.getState().notify('info', reason === 'japanese_output' ? t('譯文含日文，品質檢查未通過') : reason === 'untranslated' ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過') : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試'))
           return
         }
         setTranslation(msg.id, { status: 'error' })
@@ -89,6 +92,10 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
       show: st.status === 'done' ? st.show : undefined,
       onFlip: flipFace,
       onManual: () => { setWanted(msg.id, true); setDeclined(msg.id, false); run('manual') },
+      rejectedReason: st.status === 'rejected' ? st.reason : undefined,
+      onShowAnyway: st.status === 'rejected' && st.text
+        ? () => { setWanted(msg.id, true); setTranslation(msg.id, { status: 'done', text: st.text!, show: true, cost: null, cached: true, model: '', lowConfidence: true, jevProb: null }) }
+        : undefined,
     }),
     content:
       st.status === 'done' && st.show

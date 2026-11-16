@@ -24,6 +24,8 @@ export function MessageTranslationButton({
   show,
   onFlip,
   onManual,
+  rejectedReason,
+  onShowAnyway,
 }: {
   eligible: boolean
   off: { reason: string } | null
@@ -31,6 +33,9 @@ export function MessageTranslationButton({
   show?: boolean
   onFlip: () => void
   onManual: () => void
+  /** 品質檢查沒過時的原因（檢查名稱）與「仍然顯示譯文」（daemon 有帶被擋的譯文才有）。 */
+  rejectedReason?: string
+  onShowAnyway?: () => void
 }) {
   const t = useT()
   if (!eligible) return null
@@ -47,7 +52,14 @@ export function MessageTranslationButton({
   return (
     <>
       {button}
-      <span className="msg-translate-hint">{t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}</span>
+      <span className="msg-translate-hint" data-k="translate-rejected">
+        {rejectedReason === 'japanese_output'
+          ? t('譯文含日文，品質檢查未通過')
+          : rejectedReason === 'untranslated'
+            ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過')
+            : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}
+        {onShowAnyway ? <> · <button type="button" className="msg-translate" data-k="translate-show-anyway" onClick={onShowAnyway}>{t('仍然顯示譯文')}</button></> : null}
+      </span>
     </>
   )
 }

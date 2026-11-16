@@ -52,6 +52,9 @@ struct CacheEntry {
     rejected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejected_at: Option<String>,
+    /// 品質沒過的那份譯文（最後一次嘗試）：使用者按「仍然顯示譯文」時用，不自動顯示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected_translation: Option<String>,
     /// 品質沒過後重試時用的 effort（往上提一階）；沒重試就沒有，照設定的 effort 翻。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
@@ -70,6 +73,18 @@ pub(crate) fn build_request(content: &str) -> ClaudeRequest {
         max_tokens: MAX_OUT_TOKENS,
         format: None,
     }
+}
+
+/// 重試用的請求：上一次被擋時，在 prompt 裡直說錯在哪（2026-11-16：Haiku 對一則夾少量中文專有名詞的長英文回覆，兩次都原樣回傳原文；
+/// 同樣的請求只提高 effort 不會改變結果，明確點出「上次回的跟原文一樣」才會翻）。
+pub(crate) fn build_retry_request(content: &str, prev_reason: &str) -> ClaudeRequest {
+    let mut req = build_request(content);
+    let note = match prev_reason {
+        "japanese_output" => "IMPORTANT: a previous attempt contained Japanese. Reply in Traditional Chinese (zh-TW) only. 前一次回覆含日文，請只用繁體中文。",
+        _ => "IMPORTANT: a previous attempt returned the source unchanged (or still in English), which is wrong. Every English sentence, list item and table cell of prose must be rewritten in Traditional Chinese; only code, identifiers, paths and product names stay in English. 前一次回覆與原文相同，這是錯的：每一句英文都必須改寫成繁體中文。",
+    };
+    req.prompt = format!("{note}\n{}", req.prompt);
+    req
 }
 
 pub(crate) fn clean_reply(text: &str) -> String {
@@ -111,10 +126,11 @@ fn load(path: &Path) -> Option<CacheEntry> {
 }
 
 /// 讀負面標記；沒有或不是標記回 None。
-fn load_rejection(path: &Path) -> Option<String> {
+fn load_rejection(path: &Path) -> Option<(String, Option<String>)> {
     let e: CacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     // `low_fidelity` 是舊版 Jev 門檻下的標記；現在低分也照顯示（`low_confidence`），舊標記不再擋，會自動重翻。
-    e.rejected.filter(|r| r.as_str() != "low_fidelity" && e.translation.trim().is_empty())
+    let reason = e.rejected.filter(|r| r.as_str() != "low_fidelity" && e.translation.trim().is_empty())?;
+    Some((reason, e.rejected_translation))
 }
 
 /// 命中快取的回傳內容。
@@ -134,8 +150,38 @@ pub(crate) fn is_quality_rejection(e: &LcError) -> bool {
     matches!(e, LcError::Unprocessable(v) if v["error"] == "translate_rejected")
 }
 
-fn rejection_error(reason: &str) -> LcError {
-    LcError::Unprocessable(json!({"error": "translate_rejected", "reason": reason}))
+/// 422 本體：`reason` 是檢查名稱，`translation` 是被擋的那份譯文（網頁「仍然顯示譯文」用；舊標記沒有）。
+fn rejection_error(reason: &str, translation: Option<&str>) -> LcError {
+    let mut v = json!({"error": "translate_rejected", "reason": reason});
+    if let Some(t) = translation.filter(|t| !t.trim().is_empty()) {
+        v["translation"] = json!(t);
+    }
+    LcError::Unprocessable(v)
+}
+
+/// 「主要是英文」判斷用的字數（Latin 字母數、CJK 字數；跟 [`is_mostly_english`] 同一套去程式碼的規則）。只有數字，不含內容，可進 log。
+pub(crate) fn prose_stats(text: &str) -> (usize, usize) {
+    let mut prose = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("```") {
+        prose.push_str(&rest[..i]);
+        prose.push(' ');
+        rest = match rest[i + 3..].find("```") { Some(j) => &rest[i + 3 + j + 3..], None => "" };
+    }
+    prose.push_str(rest);
+    let (mut latin, mut cjk) = (0usize, 0usize);
+    for line in prose.split('\n') {
+        for (n, tok) in line.split('`').enumerate() {
+            if n % 2 == 1 { continue }
+            for w in tok.split_whitespace().filter(|w| !w.starts_with("http://") && !w.starts_with("https://")) {
+                for c in w.chars() {
+                    if c.is_ascii_alphabetic() { latin += 1 }
+                    else if matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') { cjk += 1 }
+                }
+            }
+        }
+    }
+    (latin, cjk)
 }
 
 fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
@@ -185,8 +231,8 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
         return Ok(local_convert(content, &path));
     }
     if !force {
-        if let Some(reason) = load_rejection(&path) {
-            return Err(rejection_error(&reason));
+        if let Some((reason, tr)) = load_rejection(&path) {
+            return Err(rejection_error(&reason, tr.as_deref()));
         }
     }
     let slot = flight_slot(&path);
@@ -198,10 +244,10 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
         return Ok(hit_body(&hit));
     }
     if !force {
-        if let Some(reason) = load_rejection(&path) {
+        if let Some((reason, tr)) = load_rejection(&path) {
             drop(guard);
             flight_forget(&path, slot);
-            return Err(rejection_error(&reason));
+            return Err(rejection_error(&reason, tr.as_deref()));
         }
     }
     let out = translate_upstream(app, id, content, &path).await;
@@ -317,17 +363,22 @@ async fn check_jev(app: &App, id: &str, source: &str, translation: &str) -> Opti
 }
 
 /// 品質沒過：寫負面標記（覆蓋同鍵的舊檔），回 422。
-fn mark_rejected(path: &Path, reason: &str) -> LcError {
+fn mark_rejected(path: &Path, reason: &str, source: &str, reply: &str) -> LcError {
     let entry = CacheEntry {
         prompt_version: PROMPT_VERSION.into(),
         rejected: Some(reason.into()),
         rejected_at: Some(crate::db::now()),
+        rejected_translation: Some(reply.to_string()).filter(|r| !r.trim().is_empty()),
         ..Default::default()
     };
+    // 只寫檢查名稱與數字（不含內容）：Latin／CJK 是去掉程式碼後的字母數，`identical` 是譯文與原文完全相同。
+    let (sl, sc) = prose_stats(source);
+    let (rl, rc) = prose_stats(reply);
+    tracing::info!(check = reason, src_latin = sl, src_cjk = sc, reply_latin = rl, reply_cjk = rc, identical = (reply.trim() == source.trim()), src_chars = source.chars().count(), reply_chars = reply.chars().count(), "message translate rejected by quality check");
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate rejection marker write failed: {e}");
     }
-    rejection_error(reason)
+    rejection_error(reason, Some(reply))
 }
 
 /// 品質沒過重試時的 effort：沿 [`CLAUDE_API_EFFORTS`] 往上一階（low → medium → high → xhigh → max）。
@@ -353,8 +404,11 @@ struct Attempt {
     jev: Option<f64>,
 }
 
-async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>) -> Result<Attempt, LcError> {
-    let req = build_request(content);
+async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_reason: Option<&str>) -> Result<Attempt, LcError> {
+    let req = match prev_reason {
+        Some(r) => build_retry_request(content, r),
+        None => build_request(content),
+    };
     let reply = match effort {
         Some(e) => claude_api::complete_with_effort(app, req, e).await,
         None => claude_api::complete(app, req).await,
@@ -386,17 +440,19 @@ fn score(p: Option<f64>) -> f64 {
 
 async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
     let min_prob = app.cfg.get().await.judge.translate_min_probability;
-    let mut attempts = vec![attempt(app, id, content, None).await?];
+    let mut attempts = vec![attempt(app, id, content, None, None).await?];
     if needs_retry(&attempts[0], min_prob) {
         // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
         let configured = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
-        attempts.push(attempt(app, id, content, Some(next_effort(&configured))).await?);
+        let prev = attempts[0].reason;
+        attempts.push(attempt(app, id, content, Some(next_effort(&configured)), prev).await?);
     }
 
     // 通過本地檢查的嘗試裡，挑 Jev 分數最高的（同分取後一次）。都沒過本地檢查＝這則翻不好，回 422。
     let Some(best) = attempts.iter().filter(|a| a.reason.is_none()).max_by(|a, b| score(a.jev).total_cmp(&score(b.jev))) else {
-        let reason = attempts.last().and_then(|a| a.reason).unwrap_or("untranslated");
-        return Err(mark_rejected(path, reason));
+        let last = attempts.last().expect("at least one attempt");
+        let reason = last.reason.unwrap_or("untranslated");
+        return Err(mark_rejected(path, reason, content, &last.translation));
     };
 
     // 費用是兩次嘗試的合計（重試也是真的扣費）。
@@ -959,6 +1015,27 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中快取不調用 API");
     }
 
+    /// 2026-11-16 回歸：一則夾少量中文專有名詞的長英文回覆，模型兩次都原樣回傳原文。重試的請求必須直說「上次回的跟原文一樣」，
+    /// 不能只把 effort 往上提（同樣的請求得到同樣的結果）；第一次請求維持原樣。
+    #[tokio::test]
+    async fn retry_prompt_names_the_previous_failure_when_the_source_was_echoed() {
+        let (app, _dir) = app(true).await;
+        let content = "The inventory sync finished for the warehouse and every pending return was moved to the new queue without errors today.";
+        let f = fake_seq(&app, vec![content.to_string(), "庫存同步已完成，所有待處理的退貨都已順利移到新的佇列，沒有任何錯誤發生。".to_string()]);
+        let ok = translate(&app, "m_echo_retry", content).await.unwrap();
+        assert!(ok["translation"].as_str().unwrap().contains("庫存"));
+        let bodies = f.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(!bodies[0].to_string().contains("previous attempt"), "第一次請求不帶更正說明");
+        assert!(bodies[1].to_string().contains("previous attempt returned the source unchanged"), "重試的請求點出上次原樣回傳");
+    }
+
+    #[test]
+    fn prose_stats_counts_only_prose_letters_and_cjk() {
+        let t = "Hello world `ignored_identifier` 掃碼移庫\n```\ncode block words\n```\nhttps://example.com/xx done";
+        assert_eq!(prose_stats(t), (14, 4), "Hello world done＝14 個 Latin，4 個 CJK；行內 code、區塊、網址不算");
+    }
+
     #[tokio::test]
     async fn echo_twice_fails_and_does_not_cache() {
         let (app, _dir) = app(true).await;
@@ -973,7 +1050,9 @@ mod tests {
         assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "untranslated"), "品質沒過回 422 untranslated: {err:?}");
         let key = cache_key("m_fail", content);
         let path = cache_path(&app.data_dir, &key);
-        assert_eq!(load_rejection(&path).as_deref(), Some("untranslated"), "寫入負面標記");
+        assert_eq!(load_rejection(&path).map(|(r, _)| r).as_deref(), Some("untranslated"), "寫入負面標記");
+        assert_eq!(load_rejection(&path).and_then(|(_, t)| t).as_deref(), Some(content), "標記帶著被擋的譯文，給網頁「仍然顯示譯文」");
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["translation"] == content), "422 本體也帶被擋的譯文");
         assert!(load(&path).is_none(), "標記不是譯文");
         // 第二次同一則：直接回標記，不打 API。
         let err2 = translate(&app, "m_fail", content).await.unwrap_err();
@@ -1231,7 +1310,7 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "兩次都有假名");
         assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "japanese_output"), "{err:?}");
         let path = cache_path(&app.data_dir, &cache_key("m_ja_twice", content));
-        assert_eq!(load_rejection(&path).as_deref(), Some("japanese_output"));
+        assert_eq!(load_rejection(&path).map(|(r, _)| r).as_deref(), Some("japanese_output"));
         assert!(load(&path).is_none());
     }
 
