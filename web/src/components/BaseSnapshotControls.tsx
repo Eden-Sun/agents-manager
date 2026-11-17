@@ -1,3 +1,4 @@
+import { fmtDateTime } from '../lib/userTime'
 import { useCallback, useEffect, useState } from 'react'
 import { clearBaseSnapshot, getBaseSnapshot, lockBaseSnapshot, type BaseSnapshot } from '../api/baseSnapshot'
 import { useT } from '../lib/i18n'
@@ -50,7 +51,7 @@ export function BaseSnapshotControls({ botId, name }: { botId: string; name: str
         </button>
       </div>
       <p className="hint base-snapshot-status">
-        {snap?.locked ? t('已鎖定於 {time}', { time: snap.locked_at ? new Date(snap.locked_at).toLocaleString() : '' }) : t('尚未鎖定基準')}
+        {snap?.locked ? t('已鎖定於 {time}', { time: snap.locked_at ? fmtDateTime(new Date(snap.locked_at)) : '' }) : t('尚未鎖定基準')}
       </p>
       <p className="hint">{t('排程可選「每次從基準快照開始」：每次觸發都從這個基準 fork 一份新對話執行。鎖定後請先別再跟這顆 Bot 手動對話，否則基準會跟著變長。')}</p>
     </div>

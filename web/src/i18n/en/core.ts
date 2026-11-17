@@ -326,4 +326,9 @@ export default {
   '執行失敗': 'Execution failed',
   '回合結束': 'Turn finished',
   '原因：{reason}': 'Reason: {reason}',
+  // web/src/components/TimeZoneSettings.tsx（#2047）
+  '目前 UTC{offset}': 'Current UTC{offset}',
+  '時區名稱無效': 'Invalid time zone name',
+  '已儲存': 'Saved',
+  'bot 對話用的時區在新啟動的 bot 生效': 'The time zone for bot conversations takes effect for newly started bots',
 } satisfies Dict

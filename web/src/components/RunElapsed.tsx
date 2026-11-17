@@ -1,3 +1,4 @@
+import { fmtTime } from '../lib/userTime'
 import { useEffect, useRef, useState } from 'react'
 import { useT } from '../lib/i18n'
 import { botLamp, useStore } from '../store/store'
@@ -43,7 +44,7 @@ export function RunElapsed({ botId }: { botId: string }) {
   return (
     <span
       className="run-elapsed"
-      title={startedAt ? t('從 {time} 開始一直在跑（daemon 觀察到的時間）', { time: new Date(startedAt).toLocaleTimeString() }) : t('從這個網頁看到它開始跑算起（daemon 還沒有這筆紀錄）')}
+      title={startedAt ? t('從 {time} 開始一直在跑（daemon 觀察到的時間）', { time: fmtTime(new Date(startedAt)) }) : t('從這個網頁看到它開始跑算起（daemon 還沒有這筆紀錄）')}
     >
       {fmtElapsed(ms)}
     </span>

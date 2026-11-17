@@ -4,10 +4,11 @@ import { copyText } from '../lib/copyText'
 import { useShareRequests } from '../hooks/useShareRequests'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
-import { fmtDate, useT } from '../lib/i18n'
+import { useT } from '../lib/i18n'
+import { fmtDateTime } from '../lib/userTime'
 import './botShare.css'
 
-const fmt = (iso: string | null) => (iso ? fmtDate(new Date(iso), { dateStyle: 'short', timeStyle: 'short' }) : '—')
+const fmt = (iso: string | null) => (iso ? fmtDateTime(new Date(iso), { dateStyle: 'short', timeStyle: 'short' }) : '—')
 
 /**
  * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用的 bot（受限或信任分享）才畫。

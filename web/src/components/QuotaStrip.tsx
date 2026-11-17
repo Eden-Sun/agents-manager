@@ -1,3 +1,4 @@
+import { fmtDateTime } from '../lib/userTime'
 import { CodexResetHint } from './CodexResetHint'
 import { leftPct } from '../lib/quotaLeft'
 import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from '../lib/quotaLayout'
@@ -119,7 +120,7 @@ function fmtTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+  return fmtDateTime(d, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 function staleAge(iso: string, now: number, t: ReturnType<typeof useT>): string {

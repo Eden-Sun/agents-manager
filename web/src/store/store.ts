@@ -45,6 +45,8 @@ import {
   arr,
 } from '../api/normalize'
 import { ApiError } from '../api/types'
+import { getTimeZone } from '../api/timeZone'
+import { DEFAULT_USER_TIME_ZONE } from '../lib/timeZone'
 import { DRAFT_REASON_TEXT, draftBlockFrom, draftBlockFromSnapshot, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalFormat, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
@@ -643,6 +645,10 @@ export interface StoreState {
 
   loadQuota: () => Promise<void>
   loadMem: () => Promise<void>
+  /** 使用者顯示時區（#2047）；`lib/userTime.ts` 的 helper 讀它。 */
+  userTimeZone: string
+  loadUserTimeZone: () => Promise<void>
+  setUserTimeZone: (zone: string) => void
   loadModels: (kind: BotKind, host: string, identity?: string | null) => Promise<ModelInfo[] | null>
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
@@ -936,6 +942,7 @@ export const useStore = create<StoreState>((set, get) => {
   boundGet = get
   return {
   ready: false,
+  userTimeZone: DEFAULT_USER_TIME_ZONE,
   bootError: null,
   socket: 'connecting',
   connected: true,
@@ -1046,6 +1053,7 @@ export const useStore = create<StoreState>((set, get) => {
     reloadUpstreamUpdates(set, get)
     void get().loadQuota()
     void get().loadMem()
+    void get().loadUserTimeZone()
     void draftSync.load().catch(() => {})
     // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身份），WS 不會說。
     // 每 5 分鐘整份換一次，最慢 5 分鐘內消失；GET /api/quota 很便宜。
@@ -2286,6 +2294,20 @@ export const useStore = create<StoreState>((set, get) => {
     } catch {
       /* keep what it had */
     }
+  },
+
+  /** #2047：啟動時抓一次使用者顯示時區；抓不到維持預設（Asia/Taipei）。 */
+  async loadUserTimeZone() {
+    try {
+      const r = await getTimeZone()
+      if (r.time_zone) set({ userTimeZone: r.time_zone })
+    } catch {
+      // 舊 daemon 沒有這條路由或暫時連不上：維持預設。
+    }
+  },
+
+  setUserTimeZone(zone: string) {
+    set({ userTimeZone: zone })
   },
 
   async loadMem() {

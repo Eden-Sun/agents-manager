@@ -22,6 +22,7 @@ import { MockIntegrationUpdates } from './mockIntegrationUpdates'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
 import { L } from './mockText'
+import { DEFAULT_USER_TIME_ZONE, isValidTimeZone, utcOffsetLabel } from '../lib/timeZone'
 
 /** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
 /** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
@@ -632,6 +633,8 @@ export class MockTransport implements Transport {
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private baseSnapshots = new Map<string, string>()
+  /** 使用者顯示時區（`/settings/time-zone`）。 */
+  private timeZone = DEFAULT_USER_TIME_ZONE
   /** 軟刪的 bot（daemon `bots.deleted_at`）：刪除通知的「復原」走 `POST /bots/{id}/restore` 救回。 */
   private deletedBots: { bot: MockBot; deleted_at: string }[] = []
   private runs: MockRun[] = []
@@ -1222,6 +1225,14 @@ export class MockTransport implements Transport {
       return at ? { locked: true, session_id: `mock-base-${id}`, locked_at: at } : { locked: false }
     }
     if (method === 'GET' && rawPath === '/state') return this.state()
+    if (rawPath === '/settings/time-zone' && (method === 'GET' || method === 'PUT')) {
+      if (method === 'PUT') {
+        const z = typeof b.time_zone === 'string' ? b.time_zone : ''
+        if (!isValidTimeZone(z)) throw new ApiError(400, { error: 'bad_time_zone' }, 'bad time zone')
+        this.timeZone = z
+      }
+      return { time_zone: this.timeZone, utc_offset: utcOffsetLabel(this.timeZone) }
+    }
     if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }

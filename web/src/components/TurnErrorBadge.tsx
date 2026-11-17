@@ -1,3 +1,4 @@
+import { fmtDateTime } from '../lib/userTime'
 import { useT } from '../lib/i18n'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -145,7 +146,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
           {resetsAt
             ? t('這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——等 {time} 重置，或先換一個模型繼續。', {
                 quotaName,
-                time: new Date(resetsAt).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
+                time: fmtDateTime(new Date(resetsAt), { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
               })
             : t('這一回合根本沒跑：{quotaName} 額度已用盡，claude 直接拒絕。重送沒有用——等額度重置，或先換一個模型繼續。', { quotaName })}
         </p>

@@ -2,9 +2,10 @@
  * 環境設定 → Jev 建議 底下的「帳本」（SPEC §4.3c，issue #1327）：四個場景各一列的計數，加最近 20 筆。
  * 只讀；不顯示遮罩後的命中行（那是給 daemon 對帳用的）。舊 daemon 沒有這個端點 → 說明，不報錯。
  */
+import { fmtDateTime } from '../lib/userTime'
 import { useEffect, useState } from 'react'
 import { fetchJudgeShadow, type JudgeShadow } from '../api/judge'
-import { intlLocale, tr, useT } from '../lib/i18n'
+import { tr, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { JevLabel } from './JevLabel'
 import { botLabel, JUDGE_SCENES, JUDGE_WINDOWS, overThreshold, probabilityText, recentRows, sceneStats, type JudgeWindow } from '../lib/judgeStats'
@@ -21,7 +22,7 @@ const sceneName = (id: string) => {
 
 function when(at: string): string {
   const t = Date.parse(at)
-  return Number.isNaN(t) ? at : new Date(t).toLocaleString(intlLocale(), { hour12: false })
+  return Number.isNaN(t) ? at : fmtDateTime(new Date(t), { hour12: false })
 }
 
 export function JudgeLedger() {

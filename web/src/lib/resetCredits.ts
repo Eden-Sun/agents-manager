@@ -1,3 +1,4 @@
+import { fmtDateTime } from './userTime'
 import type { QuotaResetCredit, QuotaResetCredits } from '../api/types'
 import { t } from './i18n'
 
@@ -47,7 +48,7 @@ export function fmtCreditDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+  return fmtDateTime(d, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 /** 倒數：`24 天後`／`5 小時後`／`不到 1 小時`。48 小時內改用小時，讓警示色那一格看得出急迫度。 */

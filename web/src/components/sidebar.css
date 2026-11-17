@@ -1024,3 +1024,9 @@ p.project-quota-hidden {
 .push-settings-note { margin: 4px 0; font-size: 12px; opacity: 0.8; }
 .push-settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .push-settings-actions .btn { min-height: 36px; }
+
+.time-zone-settings { margin-top: 12px; }
+.time-zone-settings-title { font-weight: 600; margin-bottom: 4px; }
+.time-zone-settings-note { margin: 4px 0; font-size: 12px; opacity: 0.8; }
+.time-zone-settings-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.time-zone-settings-row input { min-width: 0; flex: 1 1 200px; }

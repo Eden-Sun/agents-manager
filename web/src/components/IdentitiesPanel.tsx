@@ -1,3 +1,5 @@
+import { fmtDateTime, userTimeZone } from '../lib/userTime'
+import { utcOffsetLabel } from '../lib/timeZone'
 import { useRef, useState } from 'react'
 import type { BotKind, IdentityStatus, IdentityStatusMap } from '../api/types'
 import { useT } from '../lib/i18n'
@@ -642,13 +644,13 @@ function KindSwitches() {
   )
 }
 
-/** 上次檢查時間（UTC+8 顯示，daemon 給的是 UTC）。沒問過就說沒問過。 */
+/** 上次檢查時間（使用者時區顯示，daemon 給的是 UTC）。沒問過就說沒問過。 */
 function checkedAtText(iso: string | null | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return t('尚未檢查')
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  const s = d.toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-  return `${s} (+8)`
+  const s = fmtDateTime(d, { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return `${s} (${utcOffsetLabel(userTimeZone())})`
 }
 
 export function IdentitiesPanel() {

@@ -24,6 +24,7 @@ import { KindDisplayToggle } from './KindTag'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { LanguageToggle } from './LanguageToggle'
 import { PushSettings } from './PushSettings'
+import { TimeZoneSettings } from './TimeZoneSettings'
 import './envShell.css'
 
 export function EnvShell() {
@@ -252,6 +253,7 @@ export function EnvShell() {
           <LanguageToggle />
           <KindDisplayToggle />
           <KeepAwakeToggle />
+          <TimeZoneSettings />
           <PushSettings />
         </section>
       </div>
