@@ -51,7 +51,12 @@ teardown() {
   for p in $SLEEPERS; do kill "$p" 2>/dev/null; done; SLEEPERS=""
   rm -rf "$ROOT"
 }
-old() { touch -d '30 days ago' "$@"; }
+# BSD touch（macOS）沒有 `-d '30 days ago'`（#1964：夜間 macos-latest 全是 illegal time specification），改用 date -v 算出 -t。
+if touch -d '30 days ago' "$(mktemp)" 2>/dev/null; then
+  old() { touch -d '30 days ago' "$@"; }
+else
+  old() { touch -t "$(date -v-30d +%Y%m%d%H%M)" "$@"; }
+fi
 # 一棵有 target/debug/incremental/{old,new} 與 .fingerprint 的樹
 mk_target() { # mk_target <樹> [舊 fingerprint?yes]
   local t="$1"
@@ -61,6 +66,23 @@ mk_target() { # mk_target <樹> [舊 fingerprint?yes]
   if [ "${2:-no}" = yes ]; then old "$t/target/debug/.fingerprint"; fi
 }
 run() { PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" AGM_REPO="$REPO" DF_BIN="$BIN/df" AGM_BIN="$BIN/agm" DISK_GC_LOG="$LOG" bash "$AGM_DIR/bin/disk-gc.sh" >/dev/null 2>&1; echo $?; }
+
+# 沒有 /proc（macOS）：disk-gc.sh 按設計一律不刪（無法證明沒人在用，見腳本開頭），底下依賴「真的刪得掉」的案例在那種環境
+# 不可能成立（#1964），所以只在這裡驗那個不依賴環境的行為——舊檔都在、log 記下原因、exit 0——然後收尾。有 /proc 的環境照舊跑完整套。
+if [ ! -r /proc/self/cwd ] && [ ! -L /proc/self/cwd ]; then
+  echo "skip - 此環境沒有 /proc：刪除類案例略過（disk-gc.sh 在這裡不刪任何東西），只驗拒絕行為"
+  setup
+  mkdir -p "$RC/oldproj/x"; echo x > "$RC/oldproj/x/f"; old "$RC/oldproj"
+  mk_target "$REPO" yes
+  equals "沒有 /proc：exit 0" "$(run)" "0"
+  exists "沒有 /proc：舊的 remote-cargo 目錄不刪" "$RC/oldproj"
+  exists "沒有 /proc：主樹舊的 incremental 不刪" "$REPO/target/debug/incremental/oldcrate-aaa"
+  check  "沒有 /proc：log 記下原因" "沒有 /proc" "$LOG"
+  teardown
+  echo "$PASS passed, $FAIL failed"
+  [ "$FAIL" -eq 0 ]
+  exit $?
+fi
 
 # 1. remote-cargo：舊的刪、新的留。
 setup
