@@ -1437,8 +1437,16 @@ mod tests {
             fs::set_permissions(home.0.join(part), fs::Permissions::from_mode(0o700)).unwrap();
         }
         let xattr = |path: &std::path::Path, remove: bool| {
-            let script = "import os,sys; name='com.agm.test' if sys.platform=='darwin' else 'user.agm.test'; os.removexattr(sys.argv[1],name) if sys.argv[2]=='remove' else os.setxattr(sys.argv[1],name,b'temp-test')";
-            assert!(Command::new("python3").arg("-c").arg(script).arg(path).arg(if remove { "remove" } else { "set" }).status().unwrap().success());
+            // macOS 的 python3 沒有 os.setxattr／removexattr（#1964：夜間 macos-latest AttributeError），改用系統的 /usr/bin/xattr；
+            // Linux 維持原本的 python 寫法（user.* 命名空間），兩邊設的都是同一種「多出來的 xattr」。
+            let status = if cfg!(target_os = "macos") {
+                let mut c = Command::new("/usr/bin/xattr");
+                if remove { c.args(["-d", "com.agm.test"]) } else { c.args(["-w", "com.agm.test", "temp-test"]) }.arg(path).status()
+            } else {
+                let script = "import os,sys; name='user.agm.test'; os.removexattr(sys.argv[1],name) if sys.argv[2]=='remove' else os.setxattr(sys.argv[1],name,b'temp-test')";
+                Command::new("python3").arg("-c").arg(script).arg(path).arg(if remove { "remove" } else { "set" }).status()
+            };
+            assert!(status.unwrap().success());
         };
         let unsafe_home = TempHome::new();
         unsafe_home.write("bashrc", original);

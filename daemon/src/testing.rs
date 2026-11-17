@@ -377,7 +377,8 @@ impl MockState {
 impl MockHerdr {
     pub fn start(socket: std::path::PathBuf) -> MockHerdr {
         let _ = std::fs::remove_file(&socket);
-        let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock herdr socket");
+        let listener = tokio::net::UnixListener::bind(&socket)
+            .unwrap_or_else(|e| panic!("bind mock herdr socket {} ({} 位元組；macOS 上限 104): {e}", socket.display(), socket.as_os_str().len()));
         let state = MockState {
             workspaces: Default::default(),
             tabs: Default::default(),
@@ -1163,12 +1164,19 @@ pub fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
     }
 }
 
-/// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。除了 `App` 掉了就刪（見上），測試行程結束時也一定會掃掉（[`remove_at_exit`]）：
+/// ULID 的尾端 10 個隨機字元（50 bit）：測試暫存目錄名用它，不用整條 26 字元的 ULID。macOS 的 unix socket 路徑上限是 104 位元組
+/// （`SUN_LEN`），`/private/var/folders/…/T/` 本身就佔 50 多個，目錄名再帶整條 ULID 加上 `/h.sock` 就超過、bind 回 InvalidInput
+/// （#1964：夜間 macos-latest 一次紅 19 條 mock herdr 相關測試）。Linux 的 `/tmp` 短，一直沒碰到。
+pub fn short_id() -> String {
+    db::ulid()[16..].to_string()
+}
+
+/// `$TMPDIR/<prefix>-<short_id>`，已建好並註冊。除了 `App` 掉了就刪（見上），測試行程結束時也一定會掃掉（[`remove_at_exit`]）：
 /// 只回一個 `PathBuf` 的輔助函式（沒有地方放 guard）靠這一條不留殘骸，測試 panic 也一樣。
 /// 基底先 canonicalize（macOS 的 TMPDIR 在 `/var/…` → `/private/var/…`）：生產端回的路徑是 canonical 的，
 /// 測試拿原始路徑比對會只在 macOS 紅（#1964）。Linux 的 /tmp 不是符號連結，canonicalize 是 no-op。
 pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("{prefix}-{}", db::ulid()));
+    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("{prefix}-{}", short_id()));
     std::fs::create_dir_all(&dir).unwrap();
     scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.clone());
     remove_at_exit(&dir);
@@ -1207,7 +1215,7 @@ pub(crate) fn release_scratch(dir: &std::path::Path) -> bool {
 
 /// The data directory is a **sibling** of the repo, so nothing the daemon writes lands in the checkout.
 pub async fn env() -> Env {
-    let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));
+    let dir = std::env::temp_dir().join(format!("am-test-{}", short_id()));
     let repo = dir.join("repo");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
