@@ -2808,6 +2808,8 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 
 ### 6.5i bot 的指示檔：`[agents]` 指定的 agent md（使用者 2026-10-01）
 
+使用者時區（#2047，2026-11-17）：`[agents] user_time_zone`（IANA 名稱，沒寫＝`Asia/Taipei`）可在設定改，`PUT /api/settings/time-zone` 寫入。agent md 最前面會注入「使用者時區」一段（對話時間換算成該時區並標 UTC 偏移，如 `(+8)`）；CLI 的 `timeZone` 也跟著同一值。新啟動的 bot 套用，已在跑的 bot 不重讀。
+
 以前 claude bot 讀帳號層的 `~/.claude*/CLAUDE.md` 加 repo 的 CLAUDE.md，codex 讀 AGENTS.md：cc0／cc1／cc2 各一份、早就不同步（cc1 是舊版、cc2 沒有），
 codex 讀到的又是另一份。現在指示只有一個來源——config 指定的 agent md：
 

@@ -137,6 +137,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| GET | `/api/settings/time-zone` | Bot 與 User 皆可讀；回 `{"time_zone","utc_offset"}`（如 `Asia/Taipei`、`+8`） |
+| HEAD | `/api/settings/time-zone` | 同 GET |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | POST | `/api/push/presence` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -406,6 +408,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/claim` | Bot per-bot `X-AM-Bot-Token`；body `bot_id` 需和驗證憑證一致 |
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身份／permit 需和驗證憑證一致 |
 | PUT | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
+| PUT | `/api/settings/time-zone` | User-only；Bot 與 AGM role 均 403 `user_only`；body `{"time_zone":"America/New_York"}`，寫入 `[agents] user_time_zone`；不合法的 IANA 名稱回 400 `{"error":"bad_time_zone"}`；回同 GET 形狀。新啟動的 bot 套用 |
 | PUT | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |

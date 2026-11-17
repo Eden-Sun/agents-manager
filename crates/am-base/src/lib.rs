@@ -86,6 +86,7 @@ pub mod prompt_suggestion;
 pub mod quota;
 pub mod quota_agy;
 pub mod quota_claude;
+pub mod user_time_zone;
 pub mod quota_grok;
 pub mod release_triage;
 pub mod remote_event;

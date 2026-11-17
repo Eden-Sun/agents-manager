@@ -41,6 +41,30 @@ impl AgentMd {
 /// 專案那份跟 repo 放在一起，在專案所在的主機上讀（遠端走 ssh）。
 pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAccess), project: &db::Project) -> AgentMd {
     let agents = app.cfg().agents_fresh().await;
+    let mut out = load_documents(app, project, &agents).await;
+    out.text = match out.text.trim() {
+        "" => time_zone_section(agents.time_zone()),
+        body => format!("{}\n\n{body}", time_zone_section(agents.time_zone())),
+    };
+    out
+}
+
+/// 使用者時區那一段（每顆 bot 都先讀到）。設定值解析不了時退回預設時區（設定檔是手改成壞值時才會走到）。
+fn time_zone_section(tz: &str) -> String {
+    let now = chrono::Utc::now();
+    let (tz, offset) = match am_base::user_time_zone::utc_offset_label(tz, now) {
+        Some(offset) => (tz.trim().to_string(), offset),
+        None => {
+            let fallback = am_config::DEFAULT_USER_TIME_ZONE;
+            (fallback.to_string(), am_base::user_time_zone::utc_offset_label(fallback, now).unwrap_or_else(|| "+8".into()))
+        }
+    };
+    format!(
+        "## 使用者時區\n使用者時區：{tz}（目前 UTC{offset}）。跟使用者對話時，時間一律換算成這個時區並標 `({offset})`，例如 `10:28 ({offset})`；跨日寫日期。log、DB、API 的 UTC 時間轉述前先換算。"
+    )
+}
+
+async fn load_documents(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAccess), project: &db::Project, agents: &am_config::AgentsCfg) -> AgentMd {
     let mut reads: Vec<Result<String, String>> = Vec::new();
     if let Some(f) = agents.global_file() {
         reads.push(read_local(f).await.map(|text| source_document(f, LOCAL_HOST, text)));
@@ -456,6 +480,17 @@ fn remote_script_mode(path: &str, text: &str, mode: Option<&str>) -> String {
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_zone_section_leads_with_the_configured_zone_and_its_offset() {
+        let s = time_zone_section("Asia/Taipei");
+        assert!(s.starts_with("## 使用者時區\n"), "{s}");
+        assert!(s.contains("使用者時區：Asia/Taipei（目前 UTC+8）"), "{s}");
+        assert!(s.contains("`(+8)`"), "{s}");
+        // 設定壞掉（手改成不認得的名稱）就退回預設時區，不讓 bot 沒有時區段。
+        let bad = time_zone_section("Mars/Olympus");
+        assert!(bad.contains("使用者時區：Asia/Taipei（目前 UTC+8）"), "{bad}");
+    }
 
     #[test]
     fn source_fingerprints_identify_the_loaded_snapshot_without_volatile_timestamps() {

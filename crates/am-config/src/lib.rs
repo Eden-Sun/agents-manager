@@ -767,7 +767,13 @@ pub struct AgentsCfg {
     pub instructions_file: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub projects: std::collections::BTreeMap<String, AgentMdFiles>,
+    /// 使用者時區（IANA 名稱，例如 `Asia/Taipei`）。沒寫＝`Asia/Taipei`。新啟動的 bot 套用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_time_zone: Option<String>,
 }
+
+/// 沒設定時的使用者時區。
+pub const DEFAULT_USER_TIME_ZONE: &str = "Asia/Taipei";
 
 /// `[agents.projects]` 的值：一個路徑或路徑陣列。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -790,6 +796,11 @@ impl AgentMdFiles {
 impl AgentsCfg {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    /// 使用者時區（IANA 名稱）。空白或未設＝`Asia/Taipei`。
+    pub fn time_zone(&self) -> &str {
+        self.user_time_zone.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(DEFAULT_USER_TIME_ZONE)
     }
 
     /// 全域那份（在 daemon 這台機器上讀）。

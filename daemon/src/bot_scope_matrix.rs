@@ -127,6 +127,8 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/abort", Expect::Forbidden, None),
         rule("GET", "/api/model-mode", Expect::UserOnly, None),
         rule("PUT", "/api/model-mode", Expect::UserOnly, None),
+        allow_rule("GET", "/api/settings/time-zone", "使用者時區是唯讀資訊（bot 的指示與 CLI 時區用），bot 可讀。"),
+        rule("PUT", "/api/settings/time-zone", Expect::UserOnly, None),
         rule("GET", "/api/push/vapid-key", Expect::UserOnly, None),
         rule("GET", "/api/push/subscriptions", Expect::UserOnly, None),
         rule("POST", "/api/push/subscriptions", Expect::UserOnly, None),

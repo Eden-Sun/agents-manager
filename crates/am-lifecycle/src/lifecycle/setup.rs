@@ -1173,7 +1173,7 @@ pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<
 
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 /// 遠端 claude bot 的 settings：hook 指令指向遠端的 `hook.sh`。受限 bot 再由 `cage_settings` 蓋一次（見 `injected_args`）。
-fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot) -> Value {
+fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot, time_zone: &str) -> Value {
     // Token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it and the real key opens
     // `/relay/announce` + `/hook/*`. Kept positional for older agents.
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
@@ -1181,12 +1181,12 @@ fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot) -> Value {
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
     // 決定要不要開手機入口（見 `claude_settings`）。
-    claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0)
+    claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0, time_zone)
 }
 
-async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>) -> anyhow::Result<RemoteHookPaths> {
+async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&str>, time_zone: &str) -> anyhow::Result<RemoteHookPaths> {
     let p = remote_bot_dir_for(conn, &bot.id, instance).await?;
-    let settings = remote_claude_settings(&p, bot);
+    let settings = remote_claude_settings(&p, bot, time_zone);
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
         // issue #494：目錄 0700、腳本 0700、設定 0600。`umask 077` 管新建的，`chmod` 管舊版留下的
@@ -1275,7 +1275,7 @@ pub fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
 }
 
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
-pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + ShareSessionRepo + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
+pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + ShareSessionRepo + SetupShareServices), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
@@ -1297,12 +1297,13 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-        let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
+        let time_zone = app.cfg().agents_fresh().await.time_zone().to_string();
+        let paths = install_remote_hook(&conn, bot, app.instance().as_deref(), &time_zone).await?;
         if let Some(ws) = &restricted {
             // 受限：settings 換成籠子那一版寫回遠端；寫完比對 sha256，不符就不啟動（R-S2 §4.2）。
             // 寫入綁在同一代的主機權威上：中途改指就寫不進去（#1026）。
             let fence = app.hosts().fence(&project.host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-            let mut settings = remote_claude_settings(&paths, bot);
+            let mut settings = remote_claude_settings(&paths, bot, &time_zone);
             app.cage_settings(&mut settings, ws, env);
             let bytes = serde_json::to_vec_pretty(&settings)?;
             app.write_remote_private_file(&fence, &paths.dir, "claude-settings.json", &bytes).await?;
@@ -1344,7 +1345,8 @@ pub async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::cap
             let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
-            let mut settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0);
+            let time_zone = app.cfg().agents_fresh().await.time_zone().to_string();
+            let mut settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0, &time_zone);
             with_kill_guard(&mut settings, &cmd);
             if let Some(ws) = &restricted {
                 if bot.inject_hooks == 0 {
@@ -1392,7 +1394,7 @@ fn with_kill_guard(settings: &mut Value, hook_cmd: &str) {
 /// `remoteControlAtStartup` 明講而不是省略：使用者帳號的全域 `settings.json` 只要開了它，
 /// **每一顆** bot 起來都會多開一個手機入口（SPEC §18.15 說入口只有巡檢一個，背景 worker 一律
 /// rc off）。判準是這顆 bot 自己有沒有要求——argv 帶了 `--remote-control` 才是 true。
-fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_approve: bool) -> Value {
+fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_approve: bool, time_zone: &str) -> Value {
     json!({
         // issue #722：claude 2.1.283 的 fullscreen 渲染。`tui` 沒設時，回合結束會跳「Try the new fullscreen renderer?」
         // 選單（herdr 判 blocked、daemon 認不出，AGM 切到 agm-host 當天就卡在這裡），使用者在同一個設定目錄試過一次
@@ -1445,7 +1447,7 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
         "skipDangerousModePermissionPrompt": true,
         // 使用者 2026-09-15：每顆 bot 的 CLI 時間統一台北時間 24 小時制（claude 2.1.257 起的設定；本機、遠端都一樣）。
         "timeFormat": "24-hour",
-        "timeZone": "Asia/Taipei",
+        "timeZone": time_zone,
         // issue #78：撞到用量上限時 claude 自己排一個「continuing automatically at HH:MM」，daemon 完全
         // 不知道，而且那個自動續跑被取消時（畫面變 `Automatic continue cancelled`）沒有人接手，整顆卡死
         // 到有人手動 `/rate-limit-options` 重新掛上。managed pane 的 Turn 該由誰接回去是 daemon 的
@@ -2088,7 +2090,7 @@ mod hook_cmd_parts_tests {
     /// issue #1770：`PreCompact` 也訂，壓縮中的標記才有來源。
     #[test]
     fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
-        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, true);
+        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, true, "Asia/Taipei");
         let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
         let mut names: Vec<&String> = hooks.keys().collect();
         names.sort();
@@ -2105,7 +2107,7 @@ mod hook_cmd_parts_tests {
 
     #[test]
     fn every_claude_command_hook_has_a_five_second_timeout() {
-        let v = claude_settings("hook", "sl", false, true);
+        let v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         for (event, groups) in v["hooks"].as_object().expect("hooks") {
             for group in groups.as_array().expect("hook groups") {
                 for hook in group["hooks"].as_array().expect("hooks in group") {
@@ -4043,9 +4045,9 @@ mod claude_settings_tests {
     /// 現在每顆 bot 的設定檔都明講，且只有自己 argv 要求過才是 true。
     #[test]
     fn remote_control_is_stated_per_bot_not_inherited_from_the_account() {
-        let off = claude_settings("hook", "sl", false, true);
+        let off = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         assert_eq!(off["remoteControlAtStartup"], json!(false));
-        let on = claude_settings("hook", "sl", true, true);
+        let on = claude_settings("hook", "sl", true, true, "Asia/Taipei");
         assert_eq!(on["remoteControlAtStartup"], json!(true));
         for v in [&off, &on] {
             assert_eq!(v["statusLine"]["command"], "sl");
@@ -4064,7 +4066,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_let_claude_auto_continue_past_a_usage_limit() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote, true);
+            let v = claude_settings("hook", "sl", wants_remote, true, "Asia/Taipei");
             assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
         }
     }
@@ -4075,7 +4077,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_sync_skills_or_plugins_from_the_claude_ai_account() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote, true);
+            let v = claude_settings("hook", "sl", wants_remote, true, "Asia/Taipei");
             assert_eq!(v["syncClaudeAiSkills"], json!(false), "wants_remote={wants_remote}");
             assert_eq!(v["syncClaudeAiPlugins"], json!(false), "wants_remote={wants_remote}");
         }
@@ -4086,7 +4088,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_pin_the_agents_md_plugin() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote, true);
+            let v = claude_settings("hook", "sl", wants_remote, true, "Asia/Taipei");
             assert!(v.get("pluginConfigs").is_none(), "wants_remote={wants_remote}");
         }
     }
@@ -4095,7 +4097,7 @@ mod claude_settings_tests {
     /// 一樣——`hook_cmd.rs` 是通用轉發，不分事件名字（`payload comes from stdin`），不需要另外的旗標。
     #[test]
     fn subagent_lifecycle_hooks_are_registered_on_the_same_command() {
-        let v = claude_settings("hook", "sl", false, true);
+        let v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         for event in ["SubagentStart", "SubagentStop"] {
             assert_eq!(v["hooks"][event][0]["hooks"][0]["command"], "hook", "{event}");
         }
@@ -4105,7 +4107,7 @@ mod claude_settings_tests {
     /// Read／Edit／Grep 這些跟子 pane 完全無關的呼叫也送進 daemon，白白增加流量。
     #[test]
     fn post_tool_use_only_matches_the_bash_tool_and_ask_user_question() {
-        let v = claude_settings("hook", "sl", false, true);
+        let v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
         // 2026-10-02：使用者答完提問當下就記進對話（`ask_answers.rs`）；只多這一個工具，其餘工具照舊不送。
@@ -4118,7 +4120,7 @@ mod claude_settings_tests {
     /// 遠端用的 `claude_settings` 本身不帶，因為遠端的 `hook.sh` 沒有守門邏輯。
     #[test]
     fn a_local_claude_bot_gets_a_bash_pre_tool_use_kill_guard_on_the_same_hook_command() {
-        let mut v = claude_settings("hook", "sl", false, true);
+        let mut v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         assert!(v["hooks"].get("PreToolUse").is_none(), "遠端那份不帶");
         with_kill_guard(&mut v, "hook");
         let groups = v["hooks"]["PreToolUse"].as_array().unwrap();
@@ -4133,10 +4135,10 @@ mod claude_settings_tests {
     /// bot 一律釘一般渲染，權限模式照 auto_approve 寫、不放大。
     #[test]
     fn bots_pin_the_default_renderer_and_state_their_permission_mode() {
-        let yolo = claude_settings("hook", "sl", false, true);
+        let yolo = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         assert_eq!(yolo["tui"], json!("default"));
         assert_eq!(yolo["permissions"]["defaultMode"], json!("bypassPermissions"));
-        let asks = claude_settings("hook", "sl", false, false);
+        let asks = claude_settings("hook", "sl", false, false, "Asia/Taipei");
         assert_eq!(asks["tui"], json!("default"));
         assert_eq!(asks["permissions"]["defaultMode"], json!("default"));
     }
@@ -4146,7 +4148,7 @@ mod claude_settings_tests {
     fn bots_turn_off_upstream_idle_compaction() {
         for auto in [false, true] {
             for remote in [false, true] {
-                assert_eq!(claude_settings("hook", "sl", remote, auto)["idleCompaction"], json!(false));
+                assert_eq!(claude_settings("hook", "sl", remote, auto, "Asia/Taipei")["idleCompaction"], json!(false));
             }
         }
     }
@@ -4234,7 +4236,7 @@ mod remote_install_permission_tests {
         std::fs::write(&spool, "{}\n").unwrap();
         std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let p = super::install_remote_hook(&conn, &bot, None).await.unwrap();
+        let p = super::install_remote_hook(&conn, &bot, None, "Asia/Taipei").await.unwrap();
         assert_eq!(p.dir, dir.to_string_lossy());
         assert_eq!(mode_of(&dir), 0o700, "目錄要收回來");
         assert_eq!(mode_of(std::path::Path::new(&p.hook_sh)), 0o700, "hook.sh 自己跑得起來就好");
