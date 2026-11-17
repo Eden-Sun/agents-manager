@@ -524,7 +524,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     }
                     // 背景工作還在跑（`fullyIdle:false`）＝回合還沒真的結束，等最後那一個 Stop。
                     if p.get("fullyIdle").and_then(Value::as_bool) == Some(false) {
-                        return HookKind::Ignore("agy stop with background work still running".into());
+                        return HookKind::Ignore(lifecycle::agy_busy::NOT_IDLE_REASON.into());
                     }
                     // issue #1950: agy 1.4.7 hook stdin 新增 lastUserInput 當額外證據；
                     // lastUserMessage 優先，缺席或空白才退回 lastUserInput
@@ -1448,6 +1448,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
 
     // claude ≥ 2.1.287 的 Stop 自己報背景工作（`background_tasks`）：以它為準，不用等畫面巡邏（`background_hook.rs`）。
     // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
+    // #2146：agy 的完整閒置 Stop（`fullyIdle:true`）到了，之前記的「尚未閒置」證據解除。
+    if provider == "agy" && matches!(&kind, HookKind::TurnComplete { .. }) {
+        if let Some(r) = &run {
+            lifecycle::agy_busy::clear(&r.id);
+        }
+    }
     if provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
             app.background_stop(r, &body.payload).await;
@@ -1496,7 +1502,15 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     }
 
     match kind {
-        HookKind::Ignore(_) => {
+        HookKind::Ignore(why) => {
+            // #2146：agy 的 `fullyIdle:false` Stop——記下「這個 run 的當前 in-flight turn 還沒完全閒置」，終端備援與閒置收尾看這份證據。
+            if provider == "agy" && why == lifecycle::agy_busy::NOT_IDLE_REASON {
+                if let Some(r) = &run {
+                    if let Some(t) = db::in_flight_turn(app.db(), &r.id).await? {
+                        lifecycle::agy_busy::mark_not_idle(&r.id, &t.id);
+                    }
+                }
+            }
             tracing::debug!("hook ignored");
             Ok(())
         }

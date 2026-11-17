@@ -1636,6 +1636,11 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         tracing::debug!(run_id, "pane still shows a spinner; not completing the turn from it");
         return Ok(false);
     }
+    // agy（#2146）：Stop 帶 `fullyIdle:false`、或畫面結構上還有前景／背景工作時，herdr 報 idle 也不收（2026-11-17 agi1 誤收）。
+    if bot.kind == "agy" && super::agy_busy::should_hold(&run.id, &turn.id, &read.text) {
+        tracing::debug!(run_id, "agy is not fully idle; not completing the turn from the pane");
+        return Ok(false);
+    }
     // 停在等人選的編號選單（權限框、Session paused…）：回合沒結束，選單那幾行也不是回覆（2026-09-25 cf-ox-fork-fork
     // 把 `2. Edit prompt and retry with …` 存成了回覆）。留在飛，等使用者選完由 hook／下一次 edge 收。
     if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
@@ -2263,6 +2268,9 @@ mod lost_prompt_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/fallback_binding_tests.rs"]
 mod fallback_binding_tests;
+#[cfg(all(test, feature = "daemon-test-harness"))]
+#[path = "poller_tests/agy_not_idle_tests.rs"]
+mod agy_not_idle_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/grok_limit_screen_tests.rs"]

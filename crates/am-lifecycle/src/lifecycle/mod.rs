@@ -54,6 +54,7 @@ pub mod pane_identities;
 pub mod agent_md;
 pub mod grok_hook;
 pub mod agy_hook;
+pub mod agy_busy;
 pub mod agy_session;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod agy_tests;

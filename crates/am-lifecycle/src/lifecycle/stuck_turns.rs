@@ -54,6 +54,7 @@ pub fn observe(run_id: &str, agent_status: &str) {
 }
 
 pub fn observe_at(run_id: &str, agent_status: &str, at: Instant) {
+    super::agy_busy::note_status(run_id, agent_status);
     let mut m = idle_since().lock().unwrap_or_else(|e| e.into_inner());
     if agent_status == "idle" {
         m.entry(run_id.to_string()).or_insert(at);
@@ -64,6 +65,7 @@ pub fn observe_at(run_id: &str, agent_status: &str, at: Instant) {
 
 /// 不在 `active` 裡的 run（結束了）不留計時：run 多半是 idle 時結束，只在「看到非 idle」才清的表會只增不減。
 pub fn retain_runs(active: &[String]) {
+    super::agy_busy::retain_runs(active);
     prune(&mut idle_since().lock().unwrap_or_else(|e| e.into_inner()), active);
 }
 
@@ -198,6 +200,14 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
         if hook_active_within(app, &bot_id, threshold).await {
             observe_at(&run_id, "working", now);
             continue;
+        }
+        // agy（#2146）：Stop 帶 `fullyIdle:false`、或畫面上還有前景／背景工作，herdr 報 idle 也不是做完。不重設計時（證據解除或畫面不忙就照收）。
+        if db::bot(app.db(), &bot_id).await.ok().flatten().is_some_and(|b| b.kind == "agy") {
+            let screen = super::unsent_draft::read_screen(app, &run).await.unwrap_or_default();
+            if super::agy_busy::should_hold(&run_id, &turn.id, &screen) {
+                tracing::debug!(turn = %turn.id, "agy is not fully idle; stuck-turn sweep leaves the turn in flight");
+                continue;
+            }
         }
         // run 閒置夠久還不算：這筆也要送出夠久（見 [`stuck_for`]）。
         let stuck = stuck_for(idle, turn_age(&turn, wall_at(now)));

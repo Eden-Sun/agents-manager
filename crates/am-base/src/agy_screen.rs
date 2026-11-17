@@ -122,6 +122,49 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
     Some(dialog)
 }
 
+/// 一行是不是輸入框的上下框線（整行都是 `─`，至少 20 格）。
+fn is_rule(line: &str) -> bool {
+    let t = crate::composer_parse::strip_ansi(line);
+    let t = t.trim();
+    t.chars().count() >= 20 && t.chars().all(|c| c == '─' || c == '━')
+}
+
+/// `● [09:18:37] … running`：輸入框下方的背景工作列。
+fn is_task_running_row(line: &str) -> bool {
+    let cleaned = crate::composer_parse::strip_ansi(line);
+    let t = cleaned.trim();
+    let Some(rest) = t.strip_prefix('●') else { return false };
+    let rest = rest.trim_start();
+    let Some(inner) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) else { return false };
+    let b = inner.0.as_bytes();
+    b.len() == 8 && b[2] == b':' && b[5] == b':' && b.iter().enumerate().all(|(i, c)| i == 2 || i == 5 || c.is_ascii_digit()) && inner.1.trim_end().ends_with("running")
+}
+
+/// agy 這一刻是不是還在工作（#2146）：herdr 報 idle、Stop hook 也來過，agy 仍可能在跑前景工具或背景工作。
+/// 只認結構，不全畫面搜尋 `Running`、也不看 `N task(s)`（常駐 daemon task 會永遠擋住）：
+/// 1. 輸入框（最後兩條框線之間）下方的 footer 有 `esc to cancel`；
+/// 2. 輸入框下方有 `● [HH:MM:SS] … running` 的背景工作列；
+/// 3. 輸入框上方，最後一行 `○ Running (` 之後沒有新的 assistant 正文（只有 `●`／`○`／`└`／spinner 的進度列）。
+/// 找不到輸入框就判不忙（維持原本行為）。
+pub fn is_busy(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let rules: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_rule(l)).map(|(i, _)| i).collect();
+    let [.., top, bottom] = rules[..] else { return false };
+    let below = &lines[bottom + 1..];
+    if below.iter().any(|l| crate::composer_parse::strip_ansi(l).to_lowercase().contains("esc to cancel")) {
+        return true;
+    }
+    if below.iter().any(|l| is_task_running_row(l)) {
+        return true;
+    }
+    let above: Vec<String> = lines[..top].iter().map(|l| crate::composer_parse::strip_ansi(l)).filter(|l| !l.trim().is_empty()).collect();
+    let Some(at) = above.iter().rposition(|l| l.trim_start().starts_with("○ Running (")) else { return false };
+    above[at + 1..].iter().all(|l| {
+        let t = l.trim_start();
+        t.starts_with('●') || t.starts_with('○') || t.starts_with('└') || t.starts_with('…') || t.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +404,19 @@ Antigravity CLI can make mistakes and is vulnerable to prompt injection and supp
         assert_eq!(blocking_dialog(&format!("{REAL_COLOR_WIZARD_159}\n>\n")), None);
         assert_eq!(blocking_dialog(REAL_IDLE), None);
         assert_eq!(blocking_dialog("● 步驟說明：按 [Next] 之後看到 ↑/↓ Navigate · enter Confirm\n\n>\n? for shortcuts\n"), None);
+    }
+
+    const BUSY_FG: &str = "● Edited 1 file (a.rs)\n○ Running (wait-log.py --timeout 540 · 12s)\n────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────\n  Gemini 3.8 Flash · high\n";
+    const BUSY_BG: &str = "  正在等待。\n────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────\n● [09:18:37] check.sh changed running\nesc to cancel      Gemini 3.8 Flash · high · 1 task(s) · /tasks\n";
+    const IDLE_QUOTE: &str = "  我看到輸出裡有 ○ Running (x) 與 Running 字樣，已完成。\n────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────\n  Gemini 3.8 Flash · high · 1 task(s) · /tasks\n";
+    const IDLE_AFTER_RUNNING: &str = "○ Running (wait-log.py · 12s)\n  做完了，結果如下。\n────────────────────────────────────────────────────────\n>\n────────────────────────────────────────────────────────\n  Gemini 3.8 Flash · high\n";
+
+    #[test]
+    fn busy_screen_is_recognised_by_structure() {
+        assert!(is_busy(BUSY_FG), "前景 Running 在輸入框上方、其後沒有正文");
+        assert!(is_busy(BUSY_BG), "背景 task running + esc to cancel");
+        assert!(!is_busy(IDLE_QUOTE), "正文引用 Running、只剩常駐 daemon task 且無 esc to cancel");
+        assert!(!is_busy(IDLE_AFTER_RUNNING), "Running 之後已有新的正文");
+        assert!(!is_busy("no composer here\n○ Running (x)\n"), "找不到輸入框不判忙");
     }
 }

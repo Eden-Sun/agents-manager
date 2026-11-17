@@ -211,7 +211,7 @@ pub(super) fn diagnose_box_once(episode: &str, kind: &str, screen: &str, sent: &
     }
 }
 
-async fn read_screen(app: &impl StuckTurnContext, run: &db::Run) -> anyhow::Result<String> {
+pub(super) async fn read_screen(app: &impl StuckTurnContext, run: &db::Run) -> anyhow::Result<String> {
     let pane = run.pane_id.as_deref().ok_or_else(|| anyhow::anyhow!("the run has no pane"))?;
     let client = client_for_run(app, run).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     super::delivery::read_composer(&client, pane).await
