@@ -2820,21 +2820,23 @@ fn a_shared_wait_is_capped_under_test() {
 #[test]
 fn time_spent_queueing_does_not_count_toward_the_overall_limit() {
     let base = base();
-    let (mut remote, cwd, data) = fake_remote(&base, 3, "sleep 1\nexit 0\n");
+    // #1990：上限與排隊時間都要留裕度。負載高時「跑 1 秒」的 sleep 會被拉長，
+    // 上限若只比實際執行多一點點就會偶發 rc=124；這裡上限 8 秒、排隊 10 秒，只算後面那段。
+    let (mut remote, cwd, data) = fake_remote(&base, 8, "sleep 1\nexit 0\n");
     remote.max_concurrent = 1;
-    // #1853：名額只等 3 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
+    // #1853：名額只等 8 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
     let hash = cache_hash(&cwd);
     let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, ..QUICK });
     let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(4));
+        std::thread::sleep(Duration::from_secs(10));
         holder.finish();
     });
     let t0 = Instant::now();
     let rc = with_fake_transport(&base, || run_offload(&remote, &data, &cwd, &["test".to_string()], &Deadline::new(remote.timeout_secs)));
     let took = t0.elapsed();
     release.join().unwrap();
-    assert!(took >= Duration::from_secs(4), "真的有排隊：{took:?}");
-    assert_eq!(rc, 0, "排隊 4 秒＋跑 1 秒，上限 3 秒只算後面那段");
+    assert!(took >= Duration::from_secs(10), "真的有排隊：{took:?}");
+    assert_eq!(rc, 0, "排隊 10 秒＋跑 1 秒，上限 8 秒只算後面那段");
     let _ = std::fs::remove_dir_all(base);
 }
 
