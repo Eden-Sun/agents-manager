@@ -112,7 +112,7 @@ fn grok_session_end_stop_is_ignored() {
 fn grok_session_start_is_identity() {
     let v = json!({"hookEventName":"session_start","sessionId":"s1","source":"new"});
     match classify("grok", &v) {
-        HookKind::Identity { session_id, transcript_path } => {
+        HookKind::Identity { session_id, transcript_path, .. } => {
             assert_eq!(session_id.as_deref(), Some("s1"));
             assert!(transcript_path.is_none());
         }

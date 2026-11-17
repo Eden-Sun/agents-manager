@@ -100,7 +100,12 @@ async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>
 
 pub enum HookKind {
     /// Never creates a Turn.
-    Identity { session_id: Option<String>, transcript_path: Option<String> },
+    Identity {
+        session_id: Option<String>,
+        transcript_path: Option<String>,
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+    },
     TurnComplete {
         session_id: Option<String>,
         turn_id: Option<String>,
@@ -119,9 +124,18 @@ pub enum HookKind {
     },
     /// Claude Code statusLine input — never a Turn.
     StatusLine,
-    /// claude 的 `PreCompact`（issue #1770）：這顆 run 開始壓縮對話（手動、閒置、自動都會送）。只標記「壓縮中」
-    /// （`compacting.rs`），不建立、不動 Turn——閒置壓縮的空回合是 pane 轉 working 時開出來的。
-    CompactStarting,
+    /// claude 的 `PreCompact`（issue #1770、#2107）：這顆 run 開始壓縮對話（手動、閒置、自動都會送）。
+    /// 子 agent 壓縮時會帶 `agent_id` 與 `agent_type`。只標記「壓縮中」（`compacting.rs`），不建立、不動 Turn——閒置壓縮的空回合是 pane 轉 working 時開出來的。
+    CompactStarting {
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+    },
+    /// claude 的 `PostCompact`（issue #2107）：壓縮結束。
+    /// 子 agent 壓縮時會帶 `agent_id` 與 `agent_type`。
+    CompactEnding {
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+    },
     /// claude 原生 `SubagentStart`／`SubagentStop`（issue #82）：純可見性快照，從不建立或動 Turn，
     /// 也從不影響 §6.5a 的血緣認領——只覆蓋這顆 run 的 `subagent_json`。`event` 是 `"start"` 或
     /// `"stop"`；`SubagentStart` 沒有 transcript path，`SubagentStop` 才有。
@@ -156,7 +170,8 @@ impl std::fmt::Debug for HookKind {
             HookKind::TurnComplete { .. } => "TurnComplete",
             HookKind::TurnFailed { .. } => "TurnFailed",
             HookKind::StatusLine => "StatusLine",
-            HookKind::CompactStarting => "CompactStarting",
+            HookKind::CompactStarting { .. } => "CompactStarting",
+            HookKind::CompactEnding { .. } => "CompactEnding",
             HookKind::SubagentEvent { .. } => "SubagentEvent",
             HookKind::SpawnHint { .. } => "SpawnHint",
             HookKind::AskAnswered(_) => "AskAnswered",
@@ -339,8 +354,20 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 .unwrap_or_else(|| if p.get("prompt_id").is_some() { "Stop".into() } else { "SessionStart".into() });
             match ev.as_str() {
                 "StatusLine" => HookKind::StatusLine,
-                "PreCompact" => HookKind::CompactStarting,
-                "SessionStart" => HookKind::Identity { session_id: s("session_id"), transcript_path: s("transcript_path") },
+                "PreCompact" => HookKind::CompactStarting {
+                    agent_id: s("agent_id"),
+                    agent_type: s("agent_type"),
+                },
+                "PostCompact" => HookKind::CompactEnding {
+                    agent_id: s("agent_id"),
+                    agent_type: s("agent_type"),
+                },
+                "SessionStart" => HookKind::Identity {
+                    session_id: s("session_id"),
+                    transcript_path: s("transcript_path"),
+                    agent_id: s("agent_id"),
+                    agent_type: s("agent_type"),
+                },
                 // 回合失敗收尾的原生訊號（issue #79）：以前只有 `Stop`，失敗的回合要等 §4.3 備援或
                 // stuck watchdog 才被發現，中間一直掛在 in_flight。
                 "StopFailure" => {
@@ -439,6 +466,8 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 "session_start" | "sessionstart" => HookKind::Identity {
                     session_id: either("sessionId", "session_id"),
                     transcript_path: either("transcriptPath", "transcript_path"),
+                    agent_id: None,
+                    agent_type: None,
                 },
                 "stop" => {
                     // A second, observe-only Stop fires at session end (`reason: shutdown`).
@@ -474,7 +503,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
             let path = either("transcriptPath", "transcript_path");
             match s("hookEventName").unwrap_or_default().to_ascii_lowercase().as_str() {
                 // 對話是第一則 prompt 才建立：`SessionStart` 沒文件、不一定來，第一個 `PreInvocation` 補身份。
-                "sessionstart" | "preinvocation" => HookKind::Identity { session_id: conv, transcript_path: path },
+                "sessionstart" | "preinvocation" => HookKind::Identity { session_id: conv, transcript_path: path, agent_id: None, agent_type: None },
                 // statusLine：每次 agent 狀態改變一則，單槽、最新的贏（不進收件匣）。
                 "state" => HookKind::StatusLine,
                 "stop" => {
@@ -1342,10 +1371,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         record_limit_hit_only(app, body, &bot, run.as_ref(), &kind).await?;
         return Err(e.context("could not tell whether the hook's project was handed off; retrying"));
     }
-    // 壓縮中的標記（`compacting.rs`，#1770）收掉的時機：壓縮做完的 SessionStart（source=compact）、回合收尾的 Stop／StopFailure。
+    // 壓縮中的標記（`compacting.rs`，#1770、#2107）收掉的時機：主 session 的 PostCompact、壓縮做完的 SessionStart（source=compact）、回合收尾的 Stop／StopFailure。
     let compact_ends = match &kind {
         HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. } => true,
-        HookKind::Identity { .. } => body.payload.get("source").and_then(Value::as_str) == Some("compact"),
+        HookKind::CompactEnding { agent_id, agent_type } => agent_id.is_none() && agent_type.is_none(),
+        HookKind::Identity { agent_id, agent_type, .. } => {
+            agent_id.is_none() && agent_type.is_none() && body.payload.get("source").and_then(Value::as_str) == Some("compact")
+        }
         _ => false,
     };
     if let (true, Some(r)) = (compact_ends, &run) {
@@ -1657,10 +1689,26 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #1770：壓縮開始。只標記這顆 run「壓縮中」，不建立、不動任何 Turn；沒有活著的 run 就沒地方標。
-        HookKind::CompactStarting => {
+        // issue #1770、#2107：壓縮開始。只標記這顆 run「壓縮中」，不建立、不動任何 Turn；沒有活著的 run 就沒地方標。
+        // 子 agent 壓縮（agent_id／agent_type 有值）不標記母 bot 為壓縮中。
+        HookKind::CompactStarting { agent_id, agent_type } => {
+            if agent_id.is_some() || agent_type.is_some() {
+                return Ok(());
+            }
             if let Some(r) = &run {
                 if am_base::compacting::begin(&r.id, chrono::Utc::now()) {
+                    app.emit_bot_status(&bot.id).await;
+                }
+            }
+            Ok(())
+        }
+        // issue #2107：壓縮結束。收掉壓縮中標記；子 agent 壓縮不影響母 bot。
+        HookKind::CompactEnding { agent_id, agent_type } => {
+            if agent_id.is_some() || agent_type.is_some() {
+                return Ok(());
+            }
+            if let Some(r) = &run {
+                if am_base::compacting::end(&r.id) {
                     app.emit_bot_status(&bot.id).await;
                 }
             }
@@ -1744,7 +1792,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             .await?;
             Ok(())
         }
-        HookKind::Identity { session_id, transcript_path } => {
+        HookKind::Identity { session_id, transcript_path, agent_id, agent_type } => {
+            // issue #2107：子 agent 壓縮後的 post-compaction SessionStart 帶有 agent_id 與 agent_type，
+            // 這是子 agent 自己的 session，不覆蓋母 bot 的 native_session_id，也不收掉母 bot 的回合。
+            if agent_id.is_some() || agent_type.is_some() {
+                return Ok(());
+            }
             if let Some(r) = &run {
                 // Codex/Grok are checked on their first completed turn; don't consume the request early.
                 // agy 的對話是第一則 prompt 才建立，`SessionStart`／`PreInvocation` 帶的 conversationId 就是真正在用的那段：

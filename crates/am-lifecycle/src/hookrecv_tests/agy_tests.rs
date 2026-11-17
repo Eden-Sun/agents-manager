@@ -82,7 +82,7 @@ fn session_start_and_the_first_pre_invocation_both_give_the_identity_and_state_i
     for ev in ["SessionStart", "PreInvocation"] {
         let v = json!({"hookEventName": ev, "conversationId": "c-9", "transcriptPath": "/t/transcript_full.jsonl", "invocationNum": 0});
         match classify("agy", &v) {
-            HookKind::Identity { session_id, transcript_path } => {
+            HookKind::Identity { session_id, transcript_path, .. } => {
                 assert_eq!(session_id.as_deref(), Some("c-9"), "{ev}");
                 assert_eq!(transcript_path.as_deref(), Some("/t/transcript_full.jsonl"));
             }

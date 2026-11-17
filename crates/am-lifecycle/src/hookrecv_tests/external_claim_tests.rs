@@ -2399,15 +2399,71 @@ async fn subagent_events_update_the_runs_snapshot_without_touching_any_turn() {
     assert_eq!(t.status, "in_flight", "subagent 事件不該動到任何 turn");
 }
 
-/// issue #1770：`PreCompact` 分類成 `CompactStarting`，不認得的 `PostCompact` 照舊被 `Ignore`。
+/// issue #1770、#2107：`PreCompact` 與 `PostCompact` 分類成 `CompactStarting` 與 `CompactEnding`。
+/// 支援解析子 agent 壓縮事件所帶的 `agent_id` 與 `agent_type`，無欄位時相容主 session。
 #[test]
 fn pre_compact_classifies_as_a_pure_compacting_marker() {
-    assert!(matches!(classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})), HookKind::CompactStarting));
-    assert!(matches!(classify("claude", &json!({"hook_event_name": "PostCompact"})), HookKind::Ignore(_)));
+    // 主 session 壓縮：無 agent_id / agent_type
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})),
+        HookKind::CompactStarting { agent_id: None, agent_type: None }
+    ));
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "PostCompact"})),
+        HookKind::CompactEnding { agent_id: None, agent_type: None }
+    ));
+    assert!(matches!(
+        classify("claude", &json!({"hook_event_name": "SessionStart", "session_id": "s-main"})),
+        HookKind::Identity { session_id: Some(ref s), agent_id: None, agent_type: None, .. } if s == "s-main"
+    ));
+
+    // 子 agent 壓縮：帶有 agent_id 與 agent_type（issue #2107）
+    let sub_pre = json!({
+        "hook_event_name": "PreCompact",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose",
+        "trigger": "auto"
+    });
+    match classify("claude", &sub_pre) {
+        HookKind::CompactStarting { agent_id, agent_type } => {
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected CompactStarting with agent_id/agent_type, got {other:?}"),
+    }
+
+    let sub_post = json!({
+        "hook_event_name": "PostCompact",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose"
+    });
+    match classify("claude", &sub_post) {
+        HookKind::CompactEnding { agent_id, agent_type } => {
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected CompactEnding with agent_id/agent_type, got {other:?}"),
+    }
+
+    let sub_start = json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "sub-session-123",
+        "agent_id": "subagent-xyz",
+        "agent_type": "general-purpose"
+    });
+    match classify("claude", &sub_start) {
+        HookKind::Identity { session_id, agent_id, agent_type, .. } => {
+            assert_eq!(session_id.as_deref(), Some("sub-session-123"));
+            assert_eq!(agent_id.as_deref(), Some("subagent-xyz"));
+            assert_eq!(agent_type.as_deref(), Some("general-purpose"));
+        }
+        other => panic!("expected Identity with agent_id/agent_type, got {other:?}"),
+    }
 }
 
-/// issue #1770：`PreCompact` 把這顆 run 標成「壓縮中」，投影帶出 `compacting_since`；turn 不被碰。
-/// 壓縮做完的 `SessionStart`（source=compact）收掉標記；回合失敗收尾（`StopFailure`）也收。
+/// issue #1770、#2107：`PreCompact` 把這顆 run 標成「壓縮中」，投影帶出 `compacting_since`；turn 不被碰。
+/// 壓縮做完的 `SessionStart`（source=compact）或 `PostCompact` 收掉標記；回合失敗收尾（`StopFailure`）也收。
+/// 子 agent 的壓縮事件（帶 agent_id）不干擾母 bot 的壓縮狀態與 session id。
 #[tokio::test]
 async fn pre_compact_marks_the_run_until_the_compaction_session_or_the_turn_ends() {
     let env = tt::env().await;
@@ -2416,10 +2472,27 @@ async fn pre_compact_marks_the_run_until_the_compaction_session_or_the_turn_ends
     let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
     let marked = |now| am_base::compacting::json_at(&run_id, now) != Value::Null;
 
+    // 子 agent 壓縮開始不標記母 bot
+    process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "agent_id": "sub-1", "agent_type": "general-purpose"}))).await.unwrap();
+    assert!(!marked(chrono::Utc::now()), "子 agent 的 PreCompact 不標記母 bot 為壓縮中");
+
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "trigger": "manual"}))).await.unwrap();
-    assert!(marked(chrono::Utc::now()), "PreCompact 標成壓縮中");
+    assert!(marked(chrono::Utc::now()), "主 session 的 PreCompact 標成壓縮中");
     assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "PreCompact 不收、不開 turn");
 
+    // 子 agent 壓縮後的 SessionStart 不影響母 bot 的 session 與 compact 狀態
+    process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-sub", "agent_id": "sub-1", "agent_type": "general-purpose"}))).await.unwrap();
+    assert!(marked(chrono::Utc::now()), "子 agent 的 SessionStart 不收母 bot 標記");
+    let native_sid: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id = ?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+    assert_ne!(native_sid.as_deref(), Some("s-sub"), "子 agent 的 SessionStart 不得覆蓋母 bot 的 native_session_id");
+
+    // PostCompact 收掉標記
+    process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PostCompact"}))).await.unwrap();
+    assert!(!marked(chrono::Utc::now()), "主 session 的 PostCompact 收掉標記");
+
+    // 再次標記並用 SessionStart 收掉
+    process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "trigger": "auto"}))).await.unwrap();
+    assert!(marked(chrono::Utc::now()));
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-cmp"}))).await.unwrap();
     assert!(!marked(chrono::Utc::now()), "壓縮做完的 SessionStart 收掉標記");
 
