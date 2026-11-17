@@ -18,8 +18,22 @@ test('讀不到草稿時常駐提示，取消不會送出或清除', async () =>
   const bar = document.querySelector<HTMLElement>('.composer-draft')!
   assert.match(bar.textContent ?? '', /讀不到終端內容.*目前訊息保留/)
   const buttons = [...bar.querySelectorAll('button')]
-  assert.deepEqual(buttons.map(b => b.textContent), ['取消'])
-  await act(async () => buttons[0].click())
+  assert.deepEqual(buttons.map(b => b.textContent), ['前往終端', '取消'])
+  await act(async () => buttons[1].click())
   assert.equal(document.querySelector('.composer-draft'), null)
   assert.equal(sends, 0)
+})
+
+test('讀不到草稿時「前往終端」切到終端分頁，不清草稿', async () => {
+  useStore.setState({
+    rightTab: 'chat',
+    composerDrafts: { b1: { draft: '', token: '', truncated: false, actions: [] } },
+  } as never)
+  await mount(<ComposerDraftBar botId="b1" text="" attachments={[]} onSent={() => {}} onEdit={() => {}} />)
+  const buttons = [...document.querySelectorAll<HTMLElement>('.composer-draft button')]
+  assert.deepEqual(buttons.map(b => b.textContent), ['前往終端', '取消'])
+  await act(async () => buttons[0].click())
+  assert.equal(useStore.getState().rightTab, 'terminal')
+  assert.ok(useStore.getState().composerDrafts.b1, 'composer draft must stay')
+  assert.ok(document.querySelector('.composer-draft'), 'notice must stay')
 })

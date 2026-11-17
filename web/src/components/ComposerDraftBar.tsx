@@ -32,6 +32,7 @@ export function ComposerDraftBar({
   const dismiss = useStore((s) => s.dismissComposerDraft)
   const loadDraft = useStore((s) => s.loadComposerDraft)
   const setEditing = useStore((s) => s.setComposerEditing)
+  const setRightTab = useStore((s) => s.setRightTab)
   const t = useT()
   // Session paused 選了「Edit prompt and retry」：草稿一出現就自動進編輯，不必再按一次。
   const editNow = Boolean(block?.editNow && block.draft && block.token)
@@ -52,6 +53,7 @@ export function ComposerDraftBar({
       <div className="composer-draft" role="status">
         <span className="composer-draft-label">{t('讀不到終端內容，請到終端檢查；目前訊息保留')}</span>
         <div className="composer-draft-actions">
+          <button type="button" className="mini-btn" onClick={() => setRightTab('terminal')}>{t('前往終端')}</button>
           <button type="button" className="mini-btn" onClick={() => dismiss(botId)}>{t('取消')}</button>
         </div>
       </div>

@@ -265,6 +265,7 @@ export default {
   '重新啟動': 'Restart',
   '不送了，把訊息放回輸入框': 'Cancel sending and return the message to the input',
   '取消': 'Cancel',
+  '前往終端': 'Go to terminal',
   '已排隊，Bot 這回合結束後會自動送出：': 'Queued. The message will send automatically when this Bot’s turn ends:',
   '{text}（附 {n} 個檔案）': { one: '{text} (with {n} file)', other: '{text} (with {n} files)' },
   '撤回這則訊息並放回輸入框': 'Withdraw this message and return it to the input',
