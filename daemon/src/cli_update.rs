@@ -87,8 +87,10 @@ fn lock_owner_check() -> &'static str {
   ') || return 2
   [ -n "$members" ] || return 1
   for member in $members; do
-    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || return 2
-    [ -n "$cmd" ] || return 2
+    # 列出來之後、查指令之前就結束的成員：ps 回非 0／空字串（macOS 夜間 #1964 因此把「已結束」判成 unknown）。
+    # 行程還在卻讀不到指令才是真的不確定；已經不在了就不可能是 owner，略過。
+    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || cmd=""
+    if [ -z "$cmd" ]; then kill -0 "$member" 2>/dev/null && return 2; continue; fi
     case "$cmd" in *"AM_CODEX_INSTALL_OWNER=$nonce"*) return 0 ;; esac
   done
   return 1
