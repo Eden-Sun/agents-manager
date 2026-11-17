@@ -253,6 +253,11 @@ pub fn is_agy_placeholder(text: &str) -> bool {
     t.ends_with("(shift+tab to cycle)") && t.to_ascii_lowercase().contains("mode:")
 }
 
+pub fn is_claude_placeholder(text: &str) -> bool {
+    let t = text.trim().to_ascii_lowercase();
+    t.contains("try ") || t.contains("retry") || t.contains("what to do") || t.contains("/help")
+}
+
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
@@ -304,7 +309,8 @@ pub(crate) fn marker_row_content(kind: &str, c: &ComposerRow, particles: bool) -
 
 pub(crate) fn hint_rows(kind: &str, c: &ComposerRow, content: &[(char, bool)], lines: &[&str], particles: bool) -> Option<usize> {
     let text: String = content.iter().map(|(ch, _)| *ch).collect();
-    let text_is_placeholder = kind == "agy" && is_agy_placeholder(&text);
+    let text_is_placeholder = (kind == "agy" && is_agy_placeholder(&text))
+        || (kind == "claude" && is_claude_placeholder(&text));
     let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, hint)| *hint).collect();
     if visible.is_empty() || (!visible.iter().all(|hint| *hint) && !text_is_placeholder) {
         return None;
@@ -338,7 +344,8 @@ pub fn plain_without_hints(kind: &str, screen: &str) -> String {
             let glyph = composer_glyph(kind);
             let at = cells.iter().position(|x| Some(x.ch) == glyph).unwrap_or(0);
             let text: String = content.iter().map(|(ch, _)| *ch).collect();
-            let is_ph = kind == "agy" && is_agy_placeholder(&text);
+            let is_ph = (kind == "agy" && is_agy_placeholder(&text))
+                || (kind == "claude" && is_claude_placeholder(&text));
             let row: String = cells
                 .iter()
                 .enumerate()

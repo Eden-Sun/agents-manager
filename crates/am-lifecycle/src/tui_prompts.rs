@@ -72,7 +72,7 @@ fn norm_line(line: &str) -> String {
         .map(|c| if c.is_whitespace() || "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔".contains(c) { ' ' } else { c.to_ascii_lowercase() })
         .collect();
     let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    joined.trim_start_matches(|c| "❯›»>*●•⏺⎿✻-— ".contains(c)).trim().to_string()
+    joined.trim_start_matches(|c| "❯›»>*●•⏺⎿✻-— ✘⚠✔".contains(c)).trim().to_string()
 }
 
 /// 有沒有哪一行（照 [`norm_line`] 正規化後）以這段字開頭。
@@ -91,6 +91,10 @@ fn line_starts_with(lines: &[String], prefix: &str) -> bool {
 /// 擋不住刻意排成一行一句的引文，見 issue #114）。
 pub fn composer_is_idle(lines: &[&str]) -> bool {
     lines.iter().any(|l| {
+        let s = l.trim().trim_matches(|c| "│┃╭╮╰╯─━▔".contains(c)).trim();
+        if s.starts_with('❯') && am_base::composer_parse::is_claude_placeholder(s.strip_prefix('❯').unwrap_or("")) {
+            return true;
+        }
         let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
         matches!(chars.next(), Some('❯') | Some('›')) && chars.next().is_none()
     })
@@ -277,11 +281,11 @@ const ANSWERABLE_TAIL_LINES: usize = 30;
 
 /// 這一行（照 [`norm_line`] 壓過）有沒有「等人回答」的提示字樣：`(y/n)`、`Do you want to …`、`Enter to select`、`Esc to cancel`…
 fn has_prompt_cue(norm: &str) -> bool {
-    const CUES: [&str; 17] = [
+    const CUES: [&str; 20] = [
         "(y/n", "[y/n", "(yes/no", "[yes/no", "y/n)", "y/n]",
-        "do you want to", "would you like to", "do you trust",
+        "do you want to", "would you like to", "do you trust", "trust this folder", "trust the contents",
         "enter to select", "enter to confirm", "enter/esc", "press enter to", "enter to continue",
-        "esc to cancel", "esc to go back", "to navigate",
+        "esc to cancel", "esc to go back", "to navigate", "use arrow keys",
     ];
     CUES.iter().any(|c| norm.contains(c))
 }
@@ -306,6 +310,7 @@ pub fn screen_has_answerable_prompt(screen: &str) -> bool {
         || dangerous_rm_prompt(screen).is_some()
         || is_login_menu(screen)
         || is_switch_model_dialog(screen)
+        || is_plan_approval_dialog(screen)
         || is_auto_mode_offer(screen)
         || is_onboarding_theme(screen)
         || cold_resume_choice(screen).is_some()
@@ -361,6 +366,19 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     let titled = tail.iter().any(|l| l.starts_with("switch model?") || l.starts_with("change effort level?"));
     titled && line_starts_with(&tail, "1. yes, switch to") && line_starts_with(&tail, "2. no, go back")
+}
+
+/// Claude 2.1.326 的子 agent 計畫批准卡片（"Yes, and switch to default (ask each time) for this session" 和 "No"）。
+pub fn is_plan_approval_dialog(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
+    if composer_is_idle(tail_raw) {
+        return false;
+    }
+    let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
+    let has_plan_choice = line_starts_with(&tail, "yes, and switch to default (ask each time) for this session");
+    let has_no = tail.iter().any(|l| l == "no" || l.starts_with("no, ") || l.starts_with("no "));
+    has_plan_choice && has_no
 }
 
 /// Codex 0.157.0's startup upgrade screen for legacy models (including `gpt-5.6-*`).
@@ -622,6 +640,9 @@ pub fn is_session_paused_menu(screen: &str) -> bool {
 pub fn permission_prompt(screen: &str) -> Option<String> {
     if is_held_message_prompt(screen) {
         return Some("Held message".to_string());
+    }
+    if is_plan_approval_dialog(screen) {
+        return Some("Plan".to_string());
     }
     if !awaits_menu_choice(screen)
         || dangerous_rm_prompt(screen).is_some()
@@ -2359,5 +2380,81 @@ mod answerable_prompt_tests {
     fn a_cursor_numbered_menu_counts_even_with_an_empty_composer_line_elsewhere() {
         assert!(has("設定\n❯ 1. 繼續\n  2. 取消\n"));
         assert!(has("Proceed?\n[y/n]\n"));
+    }
+
+    /// issue #2123: claude 2.1.326 新畫面分類測試（empty prompt hint, Queued, trust prompt, plan card, ✘/⚠/✔）。
+    #[test]
+    fn claude_2_1_326_screens_classification_snapshots() {
+        use am_base::capture::Capture;
+        use am_base::composer_parse::{box_state, BoxState};
+
+        // 1. Empty prompt hint (classified as idle)
+        const EMPTY_PROMPT_HINT: &str = "\
+⏺ Request failed: 500 Internal Server Error
+  ⎿  Error: server overloaded, try again later
+
+─────────────────────────────────────────────────────────────
+❯ Try again or type /help for assistance
+─────────────────────────────────────────────────────────────
+  main | my-bot | claude-3-7-sonnet | 100% left
+  ⏵⏵ bypass permissions on
+";
+        assert!(!has(EMPTY_PROMPT_HINT), "empty prompt hint 畫面不該有 answerable prompt");
+        assert_eq!(box_state("claude", EMPTY_PROMPT_HINT), BoxState::Empty, "帶提示的空輸入列分類為 Empty");
+        assert!(!am_base::capture::claude::PARSER.still_busy(EMPTY_PROMPT_HINT), "帶提示的空輸入列不是 busy");
+        assert!(am_base::capture::claude::PARSER.awaits_input(EMPTY_PROMPT_HINT), "帶提示的空輸入列分類為等待輸入 (idle)");
+
+        // 2. Queued prompt (classified as busy)
+        const QUEUED_PROMPT: &str = "\
+⏺ Searching codebase...
+  ⎿  Found 12 files
+
+* Thinking… (4s · 1.2k tokens)
+
+─────────────────────────────────────────────────────────────
+❯ Fix the broken test
+  Queued · ctrl+x ctrl+s to send now
+─────────────────────────────────────────────────────────────
+  main | my-bot | claude-3-7-sonnet | 98% left
+  ⏵⏵ bypass permissions on
+";
+        assert!(am_base::capture::claude::PARSER.still_busy(QUEUED_PROMPT), "排隊中的任務畫面分類為 busy");
+        assert!(!has(QUEUED_PROMPT), "Queued 提示不是 answerable confirmation prompt");
+
+        // 3. Trust prompt listing settings files and ⚠ (classified as awaiting confirmation)
+        const TRUST_PROMPT: &str = "\
+Do you trust the contents of this project?
+/home/ubuntu/project
+
+Settings files that will be loaded:
+  ⚠ .claude/settings.json (runs commands)
+  ✔ .claude.json
+
+❯ 1. Yes, I trust this folder
+  2. No, exit
+
+Enter to select · Esc to cancel
+";
+        assert!(has(TRUST_PROMPT), "信任提示（含設定檔清單與 ⚠）分類為 awaiting confirmation");
+
+        // 4. Two-choice plan approval card (classified as awaiting confirmation)
+        const PLAN_CARD: &str = "\
+─────────────────────────────────────────────────────────────
+Approve subagent plan?
+The subagent wants to edit files and run commands.
+
+❯ Yes, and switch to default (ask each time) for this session
+  No
+
+Use arrow keys to navigate · Enter to select
+";
+        assert!(has(PLAN_CARD), "二選一 plan approval card 分類為 awaiting confirmation");
+        assert_eq!(super::permission_prompt(PLAN_CARD).as_deref(), Some("Plan"), "plan card 權限分類為 Plan");
+        assert!(super::is_plan_approval_dialog(PLAN_CARD));
+
+        // 5. Dialogs with ✘/⚠/✔ prefix symbols
+        let switch_model_symbols = format!("⚠ Switch {}\n❯ 1. Yes, switch to Opus 4.8\n  2. No, go back\n", "model?");
+        assert!(has(&switch_model_symbols), "帶 ⚠ 前綴的 switch model 分類為 awaiting confirmation");
+        assert!(super::is_switch_model_dialog(&switch_model_symbols));
     }
 }

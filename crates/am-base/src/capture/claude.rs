@@ -20,6 +20,10 @@ impl Capture for ClaudeCapture {
 
     fn awaits_input(&self, screen: &str) -> bool {
         screen.lines().rev().take(12).any(|l| {
+            let s = l.trim().trim_matches(|c| "│┃╭╮╰╯─━".contains(c)).trim();
+            if s.starts_with('❯') && super::super::composer_parse::is_claude_placeholder(s.strip_prefix('❯').unwrap_or("")) {
+                return true;
+            }
             // claude 2.1.285 的空框是 `❯` 接 U+00A0（2026-10-01 cf-ox-2）：空白一律 `is_whitespace`，不只空格與 tab。
             let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━".contains(*c));
             chars.next() == Some('❯') && chars.next().is_none()
@@ -286,6 +290,8 @@ pub fn is_status_chrome(s: &str) -> bool {
         || is_done_row(s)
         || is_update_banner(s)
         || is_mode_row(s)
+        || s.starts_with("Queued")
+        || s.starts_with("queued")
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("Auto-update failed")
