@@ -291,6 +291,13 @@ pub(super) fn claim(bot_id: &str, name: &str, version: &str) -> bool {
     true
 }
 
+/// 測試接縫：`claim` 在 `share` 之外（daemon 的 `share_tests`）不可見，這裡只轉呼叫它；正式 build 不編。
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn claim_for_test(bot_id: &str, name: &str, version: &str) -> bool {
+    claim(bot_id, name, version)
+}
+
 fn forget(bot_id: &str, name: &str) {
     let key = (bot_id.to_string(), name.to_string());
     checked().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);

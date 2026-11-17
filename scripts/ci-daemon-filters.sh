@@ -165,7 +165,6 @@ while IFS= read -r f; do
         crates/am-lifecycle/src/session_ports.rs) printf 'lifecycle::start::ports::\n' ;;
         crates/am-lifecycle/src/send_ports.rs) printf 'lifecycle::send_now::ports::\n' ;;
         crates/am-lifecycle/src/lifecycle/force_abort_tests.rs) printf 'lifecycle::stop::force_abort_tests::\n' ;;
-        crates/am-share/src/share/trusted_tests.rs) printf 'share::tests::trusted::\n' ;;
         daemon/src/*)
             rel="${f#daemon/src/}"
             case "$rel" in

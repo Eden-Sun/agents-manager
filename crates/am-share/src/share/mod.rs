@@ -38,9 +38,6 @@ use am_base::test_dirs;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub(crate) mod test_env;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod tests;
-
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod budget_remote_tests;
 

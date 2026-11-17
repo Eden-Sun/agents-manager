@@ -294,6 +294,8 @@ mod herdr_integration;
 mod herdr_recovery;
 mod gone_burst;
 mod swap_window;
+#[cfg(test)]
+mod share_tests;
 pub mod identity_prefs;
 mod preview;
 mod primary_order;

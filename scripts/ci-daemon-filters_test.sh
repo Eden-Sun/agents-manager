@@ -44,7 +44,10 @@ check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifec
 check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: testing::scratch_leak_guard::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
-check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
+# #1862 C1：share 的 tests.rs／trusted_tests.rs 搬成 daemon 自己的測試檔（daemon/src/share_tests/），不再靠 share 的 #[path] 掛載編譯；
+# 照 daemon 模組路徑推（share_tests::、share_tests::trusted::），並帶 daemon/src 底下一律會加選的跨檔守門。
+check "share_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/mod.rs"
+check "share_tests::trusted:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/trusted.rs"
 # #1862 遷移 B：portal_upload_tests（整檔）與 budget_remote_tests（整檔）搬到 am-share 自己跑，daemon 不再有這兩組；
 # portal_remote_tests 留 1 條要 daemon prompt 路徑的測試（壞 SVG 提醒），改它仍要選到 daemon 的過濾字串。test_env.rs 是 crate-only 的測試環境。
 check "" "crates/am-share/src/share/portal_upload_tests.rs"

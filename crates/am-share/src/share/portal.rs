@@ -1236,10 +1236,10 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
     }
     let Some(dir) = crate::outbox::dir_for(&st.app.data_dir(), &bot_id) else { return not_found() };
     let data_dir = st.app.data_dir().to_path_buf();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     let fail_scan = take_fail_files_scan_task_for_test(&bot_id);
     let listed = tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         if fail_scan {
             panic!("injected share outbox scan task failure");
         }
@@ -1275,15 +1275,17 @@ fn files_response<H: PortalEnv>(app: &Arc<H>, bot_id: &str, listed: &[Value]) ->
     Json(json!({"files": out})).into_response()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 static FAIL_NEXT_FILES_SCAN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
 
-#[cfg(test)]
-pub(super) fn fail_next_files_scan_task_for_test(bot_id: &str) {
+#[cfg(any(test, feature = "test-hooks"))]
+/// 測試接縫（下一次這顆 bot 的清單掃描 task 會 panic）：只給 daemon 的 `share_tests` 用，正式 build 不編。
+#[doc(hidden)]
+pub fn fail_next_files_scan_task_for_test(bot_id: &str) {
     FAIL_NEXT_FILES_SCAN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string());
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn take_fail_files_scan_task_for_test(bot_id: &str) -> bool {
     FAIL_NEXT_FILES_SCAN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id)
 }

@@ -1,11 +1,14 @@
 //! 分享 bot 的安全規則，每一條一個測試（SPEC「分享 bot」）。
+//!
+//! #1862 C1：原本是 `crates/am-share/src/share/tests.rs`（靠 share 的 `#[path]` 掛載在 daemon 裡重編一份）；現在是 daemon 自己的測試檔，
+//! 用 `crate::share::*` 的公開項（測試要的私有項由 share 以 `#[doc(hidden)] pub` 的測試接縫提供）。
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::*;
+use crate::share::*;
 use crate::db;
 use crate::state::App;
 use crate::testing as tt;
@@ -619,7 +622,7 @@ async fn a_broken_svg_in_the_outbox_gets_one_backstage_reminder() {
     assert_eq!(listed.status(), 200, "讀清單照常");
     // 背景那一輪不等，直接查兩次：只送一則。
     for _ in 0..2 {
-        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        let err = crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
         assert_eq!((err.line, err.col), (2, 22));
     }
     let reminders: Vec<(String, Option<String>)> = sqlx::query_as("SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'").fetch_all(&e.app.db).await.unwrap();
@@ -630,7 +633,7 @@ async fn a_broken_svg_in_the_outbox_gets_one_backstage_reminder() {
     assert!(!page.to_string().contains("card.svg"), "分享頁看不到這則後台訊息：{page}");
 
     std::fs::write(outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"540\" y=\"380\" font-size=\"100\">嗨</text></svg>").unwrap();
-    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了就不再提醒");
+    assert_eq!(crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了就不再提醒");
 }
 
 #[tokio::test]
@@ -648,7 +651,7 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
 
     // 2. 跑 checker 兩次 → 剛好一則 reminder
     for _ in 0..2 {
-        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        let err = crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
         assert_eq!((err.line, err.col), (2, 22));
     }
     let count_v1: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'")
@@ -659,7 +662,7 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
 
     // 3. 寫入 valid V2 → 不送提醒
     std::fs::write(outbox.join("card.svg"), valid_svg).unwrap();
-    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了無錯誤");
+    assert_eq!(crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了無錯誤");
     let count_v2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'")
         .fetch_one(&e.app.db)
         .await
@@ -674,7 +677,7 @@ async fn svg_checker_reminds_again_on_regression_after_repair() {
 
     // 5. 跑 checker 兩次
     for _ in 0..2 {
-        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        let err = crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
         assert_eq!((err.line, err.col), (2, 22));
     }
 
@@ -705,7 +708,7 @@ async fn svg_with_invalid_utf8_bytes_is_reminded_even_though_lossy_text_is_well_
 
     std::fs::write(outbox.join("raw.svg"), bad).unwrap();
     for _ in 0..2 {
-        let err = super::svg_check::check_file(&e.app, &b.id, "raw.svg").await.expect("非法 UTF-8 要報錯");
+        let err = crate::share::svg_check::check_file(&e.app, &b.id, "raw.svg").await.expect("非法 UTF-8 要報錯");
         assert_eq!(err.line, 1, "{err:?}");
         assert!(err.message.contains("不是合法 UTF-8 SVG"), "{err:?}");
     }
@@ -715,13 +718,13 @@ async fn svg_with_invalid_utf8_bytes_is_reminded_even_though_lossy_text_is_well_
     assert_eq!(reminders().await, 1, "同一版同一錯誤只提醒一次");
 
     std::fs::write(outbox.join("raw.svg"), good).unwrap();
-    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "raw.svg").await, None, "修成合法 UTF-8 就健康");
+    assert_eq!(crate::share::svg_check::check_file(&e.app, &b.id, "raw.svg").await, None, "修成合法 UTF-8 就健康");
     assert_eq!(reminders().await, 1, "修好後不新增提醒");
 
     // 模擬 bot 結束了修復的那一回合（隊列清空），才送得出下一則提醒。
     sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'").execute(&e.app.db).await.unwrap();
     std::fs::write(outbox.join("raw.svg"), bad).unwrap();
-    assert!(super::svg_check::check_file(&e.app, &b.id, "raw.svg").await.is_some(), "再度改壞要報錯");
+    assert!(crate::share::svg_check::check_file(&e.app, &b.id, "raw.svg").await.is_some(), "再度改壞要報錯");
     assert_eq!(reminders().await, 2, "新 episode 重新提醒");
 }
 
@@ -752,15 +755,15 @@ async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() 
     std::fs::write(&valid_file, "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"1\" y=\"1\">ok</text></svg>").unwrap();
 
     // check_file 對超過 4 MiB 的檔案：因 fstat 大小直接略過不讀，回傳 None（若有讀取內容則會被 XML 解析器判定為壞檔）
-    let huge_res = super::svg_check::check_file(&e.app, &b.id, "huge_broken.svg").await;
+    let huge_res = crate::share::svg_check::check_file(&e.app, &b.id, "huge_broken.svg").await;
     assert_eq!(huge_res, None, "超過 4 MiB 的 SVG 直接略過不讀");
 
     // check_file 對上限內的壞檔：照常讀取並回報語法錯誤
-    let small_res = super::svg_check::check_file(&e.app, &b.id, "small_broken.svg").await;
+    let small_res = crate::share::svg_check::check_file(&e.app, &b.id, "small_broken.svg").await;
     assert!(small_res.is_some(), "上限內的壞檔照常回報錯誤");
 
     // check_file 對上限內的合法檔：照常讀取且無錯誤
-    let valid_res = super::svg_check::check_file(&e.app, &b.id, "valid.svg").await;
+    let valid_res = crate::share::svg_check::check_file(&e.app, &b.id, "valid.svg").await;
     assert_eq!(valid_res, None, "上限內合法檔無錯誤");
 
     // 驗證提醒訊息只發送給了 small_broken.svg，huge_broken.svg 未被提醒
@@ -2410,7 +2413,7 @@ async fn compose_waits_for_the_global_slot() {
     std::fs::write(outbox.join("poster.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/p.jpg"/></svg>"#).unwrap();
     let base = serve(portal::router(e.app.clone())).await;
     let c = client();
-    let permit = super::compose::slots().acquire_owned().await.unwrap();
+    let permit = crate::share::compose::slots().acquire_owned().await.unwrap();
     let r = c.get(format!("{base}/s/{token}/api/files/poster.svg")).send().await.unwrap();
     assert_eq!(r.status(), 503, "名額被占走時不解碼");
     assert_eq!(r.headers()["retry-after"], "5");
@@ -2442,7 +2445,7 @@ async fn a_same_second_same_size_rewrite_gets_a_new_version() {
     let get = || async { c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap().json::<Value>().await.unwrap()["files"][0].clone() };
     let before = get().await;
     assert!(before["version"].as_str().is_some_and(|v| !v.is_empty()), "{before}");
-    assert!(!super::svg_check::claim(&b.id, "card.svg", before["version"].as_str().unwrap()), "第一次讀清單已經領過這一版");
+    assert!(!crate::share::svg_check::claim_for_test(&b.id, "card.svg", before["version"].as_str().unwrap()), "第一次讀清單已經領過這一版");
 
     std::fs::write(outbox.join("card.svg"), valid).unwrap();
     pin(200);
@@ -2450,9 +2453,8 @@ async fn a_same_second_same_size_rewrite_gets_a_new_version() {
     assert_eq!(after["size"], before["size"]);
     assert_eq!(after["modified_at"], before["modified_at"], "秒數相同：{before} / {after}");
     assert_ne!(after["version"], before["version"], "{before} / {after}");
-    assert!(!super::svg_check::claim(&b.id, "card.svg", after["version"].as_str().unwrap()), "第二次讀清單把新版領走了（背景重查）");
-    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了");
+    assert!(!crate::share::svg_check::claim_for_test(&b.id, "card.svg", after["version"].as_str().unwrap()), "第二次讀清單把新版領走了（背景重查）");
+    assert_eq!(crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了");
 }
 
-#[path = "trusted_tests.rs"]
 mod trusted;
