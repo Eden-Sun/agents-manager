@@ -2457,4 +2457,6 @@ async fn a_same_second_same_size_rewrite_gets_a_new_version() {
     assert_eq!(crate::share::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了");
 }
 
+mod remote_cage;
+mod remote_svg;
 mod trusted;

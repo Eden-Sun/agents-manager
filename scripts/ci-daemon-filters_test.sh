@@ -48,10 +48,13 @@ check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_d
 # 照 daemon 模組路徑推（share_tests::、share_tests::trusted::），並帶 daemon/src 底下一律會加選的跨檔守門。
 check "share_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/mod.rs"
 check "share_tests::trusted:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/trusted.rs"
+# #1862 C2：remote_cage_tests 搬成 daemon/src/share_tests/remote_cage.rs；portal_remote_tests 整檔 crate-only，只留 1 條要 daemon 的搬成 remote_svg.rs。
+check "share_tests::remote_cage:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/remote_cage.rs"
+check "share_tests::remote_svg:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/remote_svg.rs"
+check "" "crates/am-share/src/share/portal_remote_tests.rs"
 # #1862 遷移 B：portal_upload_tests（整檔）與 budget_remote_tests（整檔）搬到 am-share 自己跑，daemon 不再有這兩組；
 # portal_remote_tests 留 1 條要 daemon prompt 路徑的測試（壞 SVG 提醒），改它仍要選到 daemon 的過濾字串。test_env.rs 是 crate-only 的測試環境。
 check "" "crates/am-share/src/share/portal_upload_tests.rs"
-check "share::portal_remote_tests::" "crates/am-share/src/share/portal_remote_tests.rs"
 check "" "crates/am-share/src/share/test_env.rs"
 # 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
 check "share::" "crates/am-share/src/share/store.rs"

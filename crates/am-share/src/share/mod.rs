@@ -25,11 +25,8 @@ pub mod svg_check;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod remote_fs_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod portal_remote_tests;
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod remote_cage_tests;
 
 #[cfg(test)]
 use am_base::test_dirs;

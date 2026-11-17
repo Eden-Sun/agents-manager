@@ -2,7 +2,6 @@
 //!
 //! 遠端用 `remote_fs::test_support::local_sh_fake`：把 ssh 腳本交給本機 `/bin/sh` 跑，`HOME` 指到 scratch 目錄——
 //! 腳本的每一條擋法都真的被執行，而且不碰真實 HOME。本機路徑的行為由 `tests.rs` 既有的案例釘住，這裡不重複。
-#![cfg_attr(feature = "daemon-test-harness", allow(dead_code, unused_imports))]
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -15,15 +14,9 @@ use serde_json::{json, Value};
 use super::*;
 use crate::config::HostCfg;
 use crate::db;
-#[cfg(feature = "daemon-test-harness")]
-use crate::state::App;
-#[cfg(not(feature = "daemon-test-harness"))]
 use tt::App;
-// #1862 遷移 B：除了「壞 SVG 提醒」（要 daemon 的 prompt／turns 路徑）以外都不需要 daemon `App`，用 am-share 自己的窄環境
-// （同名同形的 env／claude_bot／scratch_dir）。daemon harness 只編譯並執行那一個測試，其餘輔助函式在那邊用不到。
-#[cfg(feature = "daemon-test-harness")]
-use crate::testing as tt;
-#[cfg(not(feature = "daemon-test-harness"))]
+// #1862 遷移 B：不需要 daemon `App`，用 am-share 自己的窄環境（同名同形的 env／claude_bot／scratch_dir）。
+// （要 daemon prompt／turns 路徑的「壞 SVG 提醒」在 daemon/src/share_tests/remote_svg.rs。）
 use crate::share::test_env as tt;
 
 fn client() -> reqwest::Client {
@@ -110,7 +103,6 @@ fn jpeg(w: u32, h: u32) -> Vec<u8> {
 
 // ───────────────────────── 上傳 ─────────────────────────
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_upload_lands_in_the_remote_inbox() {
     let e = tt::env().await;
@@ -135,7 +127,6 @@ async fn an_upload_lands_in_the_remote_inbox() {
 }
 
 /// 配額數字同本機：inbox 已經 300 個檔就 507 `inbox_full`，而且沒有多寫一個檔。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_full_remote_inbox_is_507_and_writes_nothing() {
     let e = tt::env().await;
@@ -150,7 +141,6 @@ async fn a_full_remote_inbox_is_507_and_writes_nothing() {
 }
 
 /// inbox 只剩 1 個空位：第 300 個進得去，第 301 個 507（跟本機的「>= 300 就滿」同一條線）。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn the_remote_inbox_quota_line_matches_the_local_one() {
     let e = tt::env().await;
@@ -163,7 +153,6 @@ async fn the_remote_inbox_quota_line_matches_the_local_one() {
 }
 
 /// 目標名是懸空符號連結：`set -C`（O_EXCL）不寫穿，連結外面不會多出檔案。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_dangling_symlink_name_is_not_written_through() {
     let e = tt::env().await;
@@ -176,7 +165,6 @@ async fn a_dangling_symlink_name_is_not_written_through() {
     assert!(!outside.exists(), "沒有寫穿符號連結");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn the_per_minute_upload_limit_is_the_same_as_local() {
     let e = tt::env().await;
@@ -190,7 +178,6 @@ async fn the_per_minute_upload_limit_is_the_same_as_local() {
 // ───────────────────────── 主機斷線 ─────────────────────────
 
 /// 主機斷線：上傳、列表、下載、附件檢查都是一般 503（不洩漏主機名），不是 404 也不是空清單。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_disconnected_host_is_a_plain_503_everywhere() {
     let e = tt::env().await;
@@ -210,7 +197,6 @@ async fn a_disconnected_host_is_a_plain_503_everywhere() {
     assert_eq!(n, 0, "沒有一則進到對話");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_attachment_that_is_not_in_the_remote_inbox_is_a_400() {
     let e = tt::env().await;
@@ -223,7 +209,6 @@ async fn an_attachment_that_is_not_in_the_remote_inbox_is_a_400() {
 
 // ───────────────────────── 列表 ─────────────────────────
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn listing_an_outbox_that_does_not_exist_yet_is_empty_not_an_error() {
     let e = tt::env().await;
@@ -234,7 +219,6 @@ async fn listing_an_outbox_that_does_not_exist_yet_is_empty_not_an_error() {
     assert_eq!(resp.json::<Value>().await.unwrap()["files"], json!([]));
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_untrusted_remote_outbox_is_503_not_an_empty_list() {
     let e = tt::env().await;
@@ -249,7 +233,6 @@ async fn an_untrusted_remote_outbox_is_503_not_an_empty_list() {
 }
 
 /// 分享用 bot 的遠端 outbox 不照 1 小時清：兩小時前的檔列得出來、列表之後還在。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn files_older_than_an_hour_are_listed_and_never_deleted() {
     let e = tt::env().await;
@@ -269,7 +252,6 @@ async fn files_older_than_an_hour_are_listed_and_never_deleted() {
     assert!(old.exists(), "列表沒有刪任何檔");
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn the_remote_listing_hides_what_the_local_one_hides() {
     let e = tt::env().await;
@@ -286,7 +268,6 @@ async fn the_remote_listing_hides_what_the_local_one_hides() {
 
 // ───────────────────────── 下載 ─────────────────────────
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_remote_download_streams_the_whole_file_with_a_content_length() {
     let e = tt::env().await;
@@ -302,7 +283,6 @@ async fn a_remote_download_streams_the_whole_file_with_a_content_length() {
     assert_eq!(resp.bytes().await.unwrap().len() as u64, crate::outbox::MAX_BYTES);
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_file_over_the_cap_is_413_and_a_blacklisted_head_is_404() {
     let e = tt::env().await;
@@ -319,7 +299,6 @@ async fn a_file_over_the_cap_is_413_and_a_blacklisted_head_is_404() {
     }
 }
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn inline_images_follow_the_local_rules() {
     let e = tt::env().await;
@@ -336,7 +315,6 @@ async fn inline_images_follow_the_local_rules() {
 }
 
 /// 檔案在傳輸中被截短（宣告的長度對不上）：中斷連線，不補零。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_truncated_remote_file_aborts_the_connection() {
     let e = tt::env().await;
@@ -383,7 +361,6 @@ async fn wait_until(mut ok: impl FnMut() -> bool) -> bool {
 }
 
 /// client 讀了一點就斷線：主機名額（4）與下載名額都回收，之後又能下載。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_client_that_hangs_up_gives_the_download_slots_back() {
     let e = tt::env().await;
@@ -405,7 +382,6 @@ async fn a_client_that_hangs_up_gives_the_download_slots_back() {
 }
 
 /// 主機的分享 ssh 名額用完：下載立刻 429 `what=download`，不排隊。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_exhausted_host_slot_pool_is_a_429_for_downloads() {
     let e = tt::env().await;
@@ -421,7 +397,6 @@ async fn an_exhausted_host_slot_pool_is_a_429_for_downloads() {
 }
 
 /// 下載專屬名額用完：下載立刻 429 `what=download`，不排隊。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_exhausted_download_slot_pool_is_a_429_for_downloads() {
     let e = tt::env().await;
@@ -438,7 +413,6 @@ async fn an_exhausted_download_slot_pool_is_a_429_for_downloads() {
 
 // ───────────────────────── SVG 嵌照片 ─────────────────────────
 
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_remote_svg_gets_its_inbox_photos_embedded() {
     let e = tt::env().await;
@@ -460,7 +434,6 @@ async fn a_remote_svg_gets_its_inbox_photos_embedded() {
 }
 
 /// 照片路徑上有符號連結（指到工作目錄外）：不嵌，標 not_found。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_symlinked_photo_is_not_embedded() {
     let e = tt::env().await;
@@ -476,7 +449,6 @@ async fn a_symlinked_photo_is_not_embedded() {
 }
 
 /// 一次嵌圖從遠端抓回來的照片合計 ≤ 64 MiB：超過的那幾張 `source_too_large`。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn the_remote_photo_fetch_has_a_total_cap() {
     let e = tt::env().await;
@@ -496,7 +468,6 @@ async fn the_remote_photo_fetch_has_a_total_cap() {
 }
 
 /// 快取鍵含主機：兩台主機同一條路徑、同樣的 inode／大小／mtime，不會串到對方的縮圖。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[test]
 fn the_photo_cache_does_not_mix_two_hosts() {
     use super::compose::{embed_with, PhotoMeta, PrefetchedSource};
@@ -517,7 +488,6 @@ fn the_photo_cache_does_not_mix_two_hosts() {
 }
 
 /// `embed_with` 的本機來源與預先抓好的來源，同樣的照片給同樣的結果。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[test]
 fn a_prefetched_source_embeds_the_same_as_the_local_folder() {
     use super::compose::{embed, embed_with, PhotoMeta, PrefetchedSource};
@@ -540,26 +510,7 @@ fn a_prefetched_source_embeds_the_same_as_the_local_folder() {
 // ───────────────────────── 壞 SVG 提醒 ─────────────────────────
 
 /// 遠端 outbox 的壞 SVG：分享頁讀清單時查到，提醒 bot 一次；同一版本不重送。
-#[cfg(feature = "daemon-test-harness")]
-#[tokio::test]
-async fn a_broken_remote_svg_gets_one_reminder() {
-    let e = tt::env().await;
-    let r = setup(&e, "svg-bad").await;
-    std::fs::write(r.outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"540\" y=\"380\"font-size=\"100\">嗨</text>\n</svg>").unwrap();
-    let listed = client().get(r.url("files")).send().await.unwrap();
-    assert_eq!(listed.status(), 200);
-    for _ in 0..2 {
-        let err = super::svg_check::check_file(&e.app, &r.bot.id, "card.svg").await.expect("壞掉的檔");
-        assert_eq!((err.line, err.col), (2, 22));
-    }
-    let reminders: Vec<(String,)> = sqlx::query_as("SELECT content FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'").fetch_all(&e.app.db).await.unwrap();
-    assert_eq!(reminders.len(), 1, "同一個檔同一個錯誤只提醒一次：{reminders:?}");
-    std::fs::write(r.outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"540\" y=\"380\" font-size=\"100\">嗨</text></svg>").unwrap();
-    assert_eq!(super::svg_check::check_file(&e.app, &r.bot.id, "card.svg").await, None, "修好了就不再提醒");
-}
-
 /// 讀不到（主機斷線）不提醒、也不記成「查過了」：下次還會再查。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn an_unreadable_remote_svg_is_not_checked_and_not_remembered() {
     let e = tt::env().await;
@@ -592,7 +543,6 @@ async fn repoint(e: &tt::Env, r: &Remote) {
 }
 
 /// 解析（綁 A）→ 寫入之前改指到 B → 寫入：舊主機不收、回 503；新請求重新解析到 B 才寫得進去。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_repoint_between_resolve_and_write_refuses_the_stale_upload() {
     let e = tt::env().await;
@@ -613,7 +563,6 @@ async fn a_repoint_between_resolve_and_write_refuses_the_stale_upload() {
 }
 
 /// 解析之後改指：列表、串流下載、整份讀取都拿不到權威；重新解析之後就能列。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_stale_site_cannot_list_or_stream_after_the_repoint() {
     let e = tt::env().await;
@@ -632,7 +581,6 @@ async fn a_stale_site_cannot_list_or_stream_after_the_repoint() {
 }
 
 /// 同一條 HostConn、重連只加世代：重連之前解析的分享位置不能再寫，重連之後重新解析就能寫。
-#[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_reconnect_refuses_the_site_resolved_before_it() {
     let e = tt::env().await;

@@ -297,7 +297,7 @@ grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fai
 # #1862 遷移 B：resume_context.rs／codex_history.rs 也一樣（兩檔仍留 daemon 測試）。
 for pair in crates/am-lifecycle/src/lifecycle/screen.rs:lifecycle::screen:: crates/am-lifecycle/src/lifecycle/setup.rs:lifecycle::setup:: \
     crates/am-lifecycle/src/lifecycle/resume_context.rs:lifecycle::resume_context:: crates/am-lifecycle/src/codex_history.rs:codex_history:: \
-    crates/am-share/src/share/portal_remote_tests.rs:share::portal_remote_tests:: \
+    crates/am-share/src/share/portal_remote_tests.rs: \
     crates/am-share/src/share/portal_upload_tests.rs: crates/am-share/src/share/budget_remote_tests.rs:; do
     path="${pair%%:*}"; filter="${pair#*:}"; crate="${path#crates/}"; crate="${crate%%/*}"
     : >"$AM_TEST_CARGO_LOG"
