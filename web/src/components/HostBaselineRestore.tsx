@@ -145,7 +145,7 @@ export function HostBaselineRestore({ host }: HostBaselineRestoreProps) {
                   ))}
                 </ul>
                 <button type="button" className="mini-btn" disabled={loading || restoring} onClick={() => startRestore(backup)}>
-                  {t('還原')}
+                  {t('還原備份')}
                 </button>
               </li>
             ))}
