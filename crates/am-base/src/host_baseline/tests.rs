@@ -231,8 +231,7 @@ fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::O
 fn fake_login_shell(bin: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     let shell = bin.join("test-login-sh");
-    fs::write(&shell, "#!/bin/sh\n[ \"$1\" = -lic ] && shift\nexec /bin/sh -c \"$1\"\n").unwrap();
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_dirs::write_exec(&shell, "#!/bin/sh\n[ \"$1\" = -lic ] && shift\nexec /bin/sh -c \"$1\"\n");
     shell
 }
 
@@ -467,11 +466,7 @@ fn the_tools_are_looked_up_with_one_login_shell_not_six() {
     let h = home.path();
     let counter = h.join("shell-calls");
     let wrapper = h.join("fake-shell");
-    fs::write(&wrapper, format!("#!/bin/sh\necho x >> {}\nexec /bin/sh \"$@\"\n", counter.display())).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    crate::test_dirs::write_exec(&wrapper, format!("#!/bin/sh\necho x >> {}\nexec /bin/sh \"$@\"\n", counter.display()));
     let out = run_probe_env(h, "/usr/bin:/bin", &[("SHELL", wrapper.as_os_str())]);
     assert!(out.contains("AM_BL end"), "{out}");
     let calls = fs::read_to_string(&counter).map_or(0, |c| c.lines().count());

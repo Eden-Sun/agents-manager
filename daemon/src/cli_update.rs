@@ -2827,13 +2827,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
         let captured = dir.join("args");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&bin, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n");
 
         let command =
             claude_install_command("2.1.284").expect("valid version has a pinned command");

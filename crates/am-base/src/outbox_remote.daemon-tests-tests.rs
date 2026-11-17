@@ -311,9 +311,7 @@
         let bin = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-bsd-stat-{}", crate::db::ulid())));
         std::fs::create_dir_all(&bin).unwrap();
         let stat = bin.join("stat");
-        std::fs::write(
-            &stat,
-            format!(
+        crate::test_dirs::write_exec(&stat, format!(
                 r#"#!/bin/sh
 if [ "$1" = "-c" ]; then exit 1; fi
 if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
@@ -337,16 +335,10 @@ exec /usr/bin/stat "$@"
                 path_device = path_device,
                 fd_device = fd_device,
                 nlink = nlink,
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ));
 
         let lsof = bin.join("lsof");
-        std::fs::write(
-            &lsof,
-            format!(
+        crate::test_dirs::write_exec(&lsof, format!(
                 r#"#!/bin/sh
 pid=
 while [ "$#" -gt 0 ]; do
@@ -359,19 +351,14 @@ printf 'p%s\nf3r\nD0x{fd_device:x}\ni{fd_inode}\nn%s\nf4r\nD0x{path_device:x}\ni
                 path_inode = path_inode,
                 fd_device = fd_device,
                 fd_inode = fd_inode,
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ));
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         (bin, path)
     }
 
     fn install_lsof(bin: &std::path::Path, script: &str) {
         let lsof = bin.join("lsof");
-        std::fs::write(&lsof, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&lsof, script);
     }
 
     fn run_download_with_bsd_stat_devices(
@@ -450,9 +437,7 @@ exit 1
 "#
             )
         };
-        std::fs::write(&stat, stat_body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&stat, stat_body);
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         let stat_log = bin.join("stat.log");
         let script = format!(
@@ -587,12 +572,7 @@ exit 1
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let find = bin.join("find");
-        std::fs::write(
-            &find,
-            "#!/bin/sh\nexec /usr/bin/find \"$1\" -maxdepth 1 -type f -mmin +0 -exec rm -f {} +\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&find, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&find, "#!/bin/sh\nexec /usr/bin/find \"$1\" -maxdepth 1 -type f -mmin +0 -exec rm -f {} +\n");
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -876,8 +856,7 @@ exit 1
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("lsof");
         let rec = format!("D0x{dev:x}\ni{ino}\nn{escaped}", dev = meta.dev(), ino = meta.ino());
-        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' p1 f3 '{rec}' f4 '{rec}'\n", rec = rec.replace('\n', "' '"))).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&fake, format!("#!/bin/sh\nprintf '%s\\n' p1 f3 '{rec}' f4 '{rec}'\n", rec = rec.replace('\n', "' '")));
         let helpers = file_identity_helpers_with_paths(&fake.to_string_lossy(), "/missing/fallback-lsof");
         let script = format!(
             "LC_ALL=C; export LC_ALL\nD={};\n{}\nam_enter_dir || exit 1\nF=./{name}; G=;\n{}\nexec 3< \"$F\"\nif am_same; then echo same; else echo unverified; fi\n",

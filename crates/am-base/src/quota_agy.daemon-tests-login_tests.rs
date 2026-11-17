@@ -83,8 +83,7 @@
         std::fs::create_dir_all(dir).unwrap();
         let calls = dir.join(format!("{name}.calls"));
         let exe = dir.join(name);
-        std::fs::write(&exe, format!("#!/bin/sh\necho call >> '{}'\n{body}\n", calls.display())).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_dirs::write_exec(&exe, format!("#!/bin/sh\necho call >> '{}'\n{body}\n", calls.display()));
         (exe, calls)
     }
 

@@ -874,14 +874,9 @@ mod tests {
     /// 控制組（不依賴 kernel 的 ETXTBSY）：binary 寫完、fd 已關，版本檢查一次就讀到版本。
     #[tokio::test]
     async fn the_version_check_reads_a_binary_that_is_already_written() {
-        use std::io::Write as _;
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = crate::testing::scratch_dir("am-herdr-plain");
         let bin = dir.join("herdr");
-        let mut f = std::fs::File::create(&bin).unwrap();
-        f.write_all(b"#!/bin/sh\necho 'herdr 0.9.3'\n").unwrap();
-        drop(f);
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&bin, "#!/bin/sh\necho 'herdr 0.9.3'\n");
         let got = Real::local().binary_version(&bin).await;
         assert_eq!(got.as_deref(), Ok("0.9.3"));
         let _ = std::fs::remove_dir_all(&dir);

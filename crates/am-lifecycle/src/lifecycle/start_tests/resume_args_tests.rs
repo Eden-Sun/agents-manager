@@ -1794,14 +1794,9 @@ mod remote_cross_identity_transcript_tests {
                 let source_q = crate::hosts::sh_quote(&source.to_string_lossy());
                 let secret_q = crate::hosts::sh_quote(&secret.to_string_lossy());
                 let shim = shim_dir.join("stat");
-                std::fs::write(
-                    &shim,
-                    format!(
+                crate::test_dirs::write_exec(&shim, format!(
                         "#!/bin/sh\nif [ \"$1\" = \"-c\" ] && [ \"$2\" = \"%Y\" ]; then\n  if [ \"$3\" = sid.jsonl ]; then rm -f {source_q}; ln -s {secret_q} {source_q}; fi\n  printf '0\\n'; exit 0\nfi\nexec /usr/bin/stat \"$@\"\n"
-                    ),
-                )
-                .unwrap();
-                std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+                    ));
                 let new = base.join("new");
                 let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
                 let path = format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap_or_default());
@@ -1973,9 +1968,7 @@ mod remote_cross_identity_transcript_tests {
         let dir = tmp().join("bsd-bin");
         std::fs::create_dir_all(&dir).unwrap();
         let shim = dir.join("stat");
-        std::fs::write(
-            &shim,
-            r#"#!/bin/sh
+        crate::test_dirs::write_exec(&shim, r#"#!/bin/sh
 fmt=; path=
 while [ $# -gt 0 ]; do
   case "$1" in -c) exit 1;; -L) ;; -f) fmt=$2; shift;; *) path=$1;; esac
@@ -1986,10 +1979,7 @@ case "$path" in
   /dev/fd/*) out=$(/usr/bin/stat -L -c "$gfmt" "$path") || exit 1; printf '%s\n' "$out" | sed 's/^[0-9]* /1318745794 /' ;;
   *) /usr/bin/stat -L -c "$gfmt" "$path" ;;
 esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+"#);
         dir
     }
 

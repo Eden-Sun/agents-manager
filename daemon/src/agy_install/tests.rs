@@ -86,8 +86,7 @@ fn fixture(version: &str, member: &str) -> Fixture {
     let pack = root.join("pack");
     std::fs::create_dir_all(&pack).unwrap();
     let bin = pack.join(member);
-    std::fs::write(&bin, format!("#!/bin/sh\necho \"$AGY_CLI_DISABLE_AUTO_UPDATE\" >> \"{}\"\necho {version}\n", root.join("seen").display())).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testing::write_exec(&bin, format!("#!/bin/sh\necho \"$AGY_CLI_DISABLE_AUTO_UPDATE\" >> \"{}\"\necho {version}\n", root.join("seen").display()));
     let tgz = root.join("agy.tgz");
     let st = std::process::Command::new("tar").arg("-czf").arg(&tgz).arg("-C").arg(&pack).arg(member).status().unwrap();
     assert!(st.success());
@@ -200,8 +199,7 @@ fn macos_local_a_copy_that_fails_halfway_leaves_no_partial_binary_behind() {
     let fakebin = f.home.join("fakebin");
     std::fs::create_dir_all(&fakebin).unwrap();
     let cp = fakebin.join("cp");
-    std::fs::write(&cp, "#!/bin/sh\nprintf partial > \"$2\"\nexit 1\n").unwrap();
-    std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testing::write_exec(&cp, "#!/bin/sh\nprintf partial > \"$2\"\nexit 1\n");
     let script = format!("PATH='{}':\"$PATH\"; export PATH\n{}", fakebin.display(), install_body(&manifest_for(&f, "1.3.0")));
     let (code, out) = run_sh(&f.home, &script);
     assert_ne!(code, 0, "{out}");

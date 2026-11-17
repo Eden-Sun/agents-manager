@@ -280,8 +280,7 @@ mod tests {
     async fn a_hung_login_shell_probe_times_out_and_is_reaped() {
         let dir = crate::testing::scratch_dir("am-models-probe");
         let fake = dir.join("fake-sh");
-        std::fs::write(&fake, "#!/bin/sh\necho $$ > \"$PIDFILE\"\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&fake, "#!/bin/sh\necho $$ > \"$PIDFILE\"\nsleep 30\n");
         let pidfile = dir.join("pid");
         let prefix = format!(
             "SHELL={} PIDFILE={}; export SHELL PIDFILE\n",
