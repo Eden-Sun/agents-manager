@@ -809,6 +809,7 @@ echo '999999 1' > "$AGM_DIR/release-triage.lock/owner"
 cat > "$ROOT/bin/rm" <<'STUB'
 #!/bin/bash
 is_lock=0
+echo "rm role=${RACE_ROLE:-} agm_dir=${AGM_DIR:-} args=$*" >> "${AGM_DIR:-/tmp}/rm-stub.log" 2>/dev/null
 for arg in "$@"; do [ "$arg" = "$AGM_DIR/release-triage.lock" ] && is_lock=1; done
 if [ "$is_lock" = 1 ] && [ "${RACE_ROLE:-}" = a ] && [ ! -e "$AGM_DIR/race-a-entered" ]; then
   : > "$AGM_DIR/race-a-entered"
@@ -836,7 +837,7 @@ equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "
 equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
 # 診斷（#1964：macOS 夜間派了兩次，原因未定）：不一致時把兩輪的 log 與呼叫紀錄印出來，下一輪 macOS 就看得到是 guard 沒擋住還是 rm stub 沒攔到。
 if [ "$(assigns)" != "1" ]; then
-  for f in "$ROOT/race-a.log" "$ROOT/race-b.log" "$AGM_DIR/calls.log" "$AGM_DIR/release-triage.log"; do echo "--- $f"; sed 's/^/    /' "$f" 2>/dev/null | head -20; done
+  for f in "$ROOT/race-a.log" "$ROOT/race-b.log" "$AGM_DIR/calls.log" "$AGM_DIR/release-triage.log" "$AGM_DIR/rm-stub.log"; do echo "--- $f"; sed 's/^/    /' "$f" 2>/dev/null | head -20; done
   ls "$AGM_DIR" | sed 's/^/    ls: /'
 fi
 teardown
