@@ -182,7 +182,10 @@ pub async fn put_kind_disabled(
     .await
     .map_err(up)?;
     app.emit("kind_prefs_changed", json!({"host": host, "kind": kind, "disabled": b.disabled})).await;
-    crate::runners::upstream_update::refresh_now(&app).await;
+    let app_bg = app.clone();
+    tokio::spawn(Box::pin(async move {
+        crate::runners::upstream_update::refresh_now(&app_bg).await;
+    }));
     Ok(Json(json!({"host": host, "kind": kind, "disabled": b.disabled})))
 }
 
@@ -311,5 +314,25 @@ mod tests {
         assert!(!kind_disabled(&app.db, "local", "grok").await);
         assert!(put_kind_disabled(State(app.clone()), Path("claude-api".into()), Json(KindDisableIn { host: None, disabled: true })).await.is_err());
         assert!(put_kind_disabled(State(app.clone()), Path("nope".into()), Json(KindDisableIn { host: None, disabled: true })).await.is_err());
+    }
+
+    /// put_kind_disabled 在背景執行 refresh_now，不等待 upstream refresh 就立即回應。
+    #[tokio::test]
+    async fn put_kind_disabled_responds_without_waiting_for_refresh() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        // 持有 tick_mutex 鎖：若 put_kind_disabled 是同步等待 refresh_now，將會卡住或死鎖。
+        let guard = crate::runners::upstream_update::tick_mutex().lock().await;
+        let res = put_kind_disabled(
+            State(app.clone()),
+            Path("grok".into()),
+            Json(KindDisableIn {
+                host: Some("local".into()),
+                disabled: true,
+            }),
+        )
+        .await;
+        assert!(res.is_ok(), "handler 應立即回應 Ok，不等待 tick_mutex 釋放");
+        drop(guard);
     }
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -7,6 +7,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::changelog;
 use crate::state::App;
@@ -130,9 +131,45 @@ mod herdr_installed_tests {
     }
 }
 
+static TICK_MUTEX: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+pub(crate) fn tick_mutex() -> &'static AsyncMutex<()> {
+    TICK_MUTEX.get_or_init(|| AsyncMutex::new(()))
+}
+
+/// 重算快照用的來源：沿用 Watch 既有的快取上游版本，避免重新抓取網路。
+pub struct CachedLive(pub Live);
+
+impl Sources for CachedLive {
+    fn upstream<'a>(&'a self, kind: &'a str) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            // 看 Watch 有沒有快取的 upstream：若有，直接沿用（不重抓網路）
+            if let Some((_, v, _)) = self.0.0.upstream_watch.upstream.lock().await.get(kind) {
+                return Ok(v.clone());
+            }
+            // 若快取無紀錄但既有快照有 latest_version，沿用快照版本
+            if let Some(status) = self.0.0.upstream_watch.snapshot().await.into_iter().find(|s| s.kind == kind) {
+                if let Some(latest) = status.latest_version {
+                    return Ok(latest);
+                }
+            }
+            Err(anyhow!("{kind} 尚未快取上游版本"))
+        })
+    }
+
+    fn hosts<'a>(&'a self, kind: &'a str) -> BoxFuture<'a, Vec<String>> {
+        self.0.hosts(kind)
+    }
+
+    fn installed<'a>(&'a self, host: &'a str, kind: &'a str) -> BoxFuture<'a, Result<String>> {
+        self.0.installed(host, kind)
+    }
+}
+
 pub fn spawn(app: Arc<App>) {
     // 開機先等工具探測跑完（第一輪延後 60 秒），不然第一輪一台主機都沒有。
     crate::background_loop::spawn_periodic(&app, "upstream update watcher", SWEEP, Duration::from_secs(60), |app| async move {
+        let _guard = tick_mutex().lock().await;
         let src = Live(app.clone());
         let path = last_path(&app);
         // 新版偵測到的那一筆，背景送一次翻譯（#1948）；不 await，不擋偵測迴圈。
@@ -144,7 +181,8 @@ pub fn spawn(app: Arc<App>) {
 
 /// 停用／啟用 kind 後手動重算一次 upstream update 快照並廣播。
 pub async fn refresh_now(app: &Arc<App>) {
-    let src = Live(app.clone());
+    let _guard = tick_mutex().lock().await;
+    let src = CachedLive(Live(app.clone()));
     let path = last_path(app.as_ref());
     for ev in tick(app.as_ref(), &app.upstream_watch, &src, &path).await {
         crate::changelog_translate::kick_detected(app, &ev);
@@ -227,5 +265,28 @@ mod disabled_kind_tests {
         // 啟用後：grok 重新出現
         let grok_hosts = live.hosts("grok").await;
         assert!(grok_hosts.contains(&"local".to_string()), "啟用後重新含 local: {grok_hosts:?}");
+    }
+
+    /// CachedLive 沿用 Watch 快取的上游版本，避免重新抓取網路。
+    #[tokio::test]
+    async fn cached_live_sources_uses_watch_upstream_without_network() {
+        let env = crate::testing::env().await;
+        // Watch.upstream 有快取時，CachedLive 直接回傳快取版本
+        env.app.upstream_watch.upstream.lock().await.insert(
+            "grok".into(),
+            (std::time::Instant::now(), "1.0.88".into(), crate::db::now()),
+        );
+        let src = CachedLive(Live(env.app.clone()));
+        let ver = src.upstream("grok").await.unwrap();
+        assert_eq!(ver, "1.0.88");
+
+        // Watch.upstream 無快取但 snapshot 有時，沿用 snapshot 版本
+        let status = crate::upstream_update::build_status("codex", &Ok("0.99.0".into()), &[], None);
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, status).await;
+        let ver2 = src.upstream("codex").await.unwrap();
+        assert_eq!(ver2, "0.99.0");
+
+        // 兩者皆無時回傳 Err，不連網
+        assert!(src.upstream("claude").await.is_err());
     }
 }
