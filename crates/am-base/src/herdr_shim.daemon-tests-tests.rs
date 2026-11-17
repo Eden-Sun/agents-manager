@@ -66,7 +66,16 @@
                      fi\n\
                    done\n\
                  fi\n\
-                 if [ -n \"${AM_TEST_SIGNAL_PARENT:-}\" ]; then kill -INT \"$PPID\"; sleep 2; exit 1; fi\n\
+                 if [ -n \"${AM_TEST_SIGNAL_PARENT:-}\" ]; then\n\
+                   # INT 要送給 shim 本身：`$(…)` 裡的 herdr，$PPID 只是 command substitution 的子 shell。dash 下子 shell 被 INT 立刻死、shim 也跟著走；\n\
+                   # macOS 的 bash 3.2 會等前景子行程（這個假 herdr）結束，它正常結束就把待處理的 INT 吞掉（#1964）。所以沿著祖先，把每個仍是這次 `agent start` 的行程都送一次。\n\
+                   p=$PPID\n\
+                   while [ -n \"$p\" ] && [ \"$p\" -gt 1 ]; do\n\
+                     c=$(ps -o command= -p \"$p\" 2>/dev/null)\n\
+                     case \"$c\" in *'agent start'*) kill -INT \"$p\"; p=$(ps -o ppid= -p \"$p\" 2>/dev/null | tr -d ' ') ;; *) break ;; esac\n\
+                   done\n\
+                   sleep 2; exit 1\n\
+                 fi\n\
                  if [ \"$1 $2\" = 'agent start' ]; then\n\
                    prev=; name=; pane=\n\
                    for a in \"$@\"; do\n\
