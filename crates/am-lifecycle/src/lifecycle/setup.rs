@@ -3475,8 +3475,17 @@ mod remote_hook_tests {
         if let Ok(pid) = std::fs::read_to_string(&pid_path) {
             let _ = Command::new("/bin/kill").args(["-KILL", pid.trim()]).status();
         }
-        assert!(status.success(), "hook must exit successfully without waiting on herdr: {status}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(8), "hook waited for a blocked herdr report");
+        // 診斷（#1964：macOS 夜間在這裡被 8 秒上限 SIGKILL，原因未定）：herdr 有沒有被啟動（pid 檔）與 hook.log 一起帶出來，
+        // 分得出是「還沒走到背景 report」（前面某步慢，例如 python3 啟動）還是「report 擋住了 hook」。
+        let diag = format!(
+            "{status}; elapsed={:?}; herdr_started={}; hook.log={:?}; spool_d={:?}",
+            started.elapsed(),
+            pid_path.exists(),
+            std::fs::read_to_string(sb.dir.join("hook.log")).unwrap_or_default(),
+            std::fs::read_dir(sb.dir.join("hook-spool.d")).map(|d| d.count()).ok()
+        );
+        assert!(status.success(), "hook must exit successfully without waiting on herdr: {diag}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "hook waited for a blocked herdr report: {diag}");
         assert!(sb.read("hook-spool.jsonl").contains("agent-turn-complete"), "spool commits before the report");
         assert!(pid_path.exists(), "the report still starts in the background");
     }

@@ -839,6 +839,8 @@ equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
 if [ "$(assigns)" != "1" ]; then
   for f in "$ROOT/race-a.log" "$ROOT/race-b.log" "$AGM_DIR/calls.log" "$AGM_DIR/release-triage.log" "$AGM_DIR/rm-stub.log"; do echo "--- $f"; sed 's/^/    /' "$f" 2>/dev/null | head -20; done
   ls "$AGM_DIR" | sed 's/^/    ls: /'
+  echo "--- probe: PATH 開頭 / type -a rm / bash 版本"
+  ( export PATH="${AGM_EXTRA_PATH-}:$PATH"; echo "    PATH=${PATH%%:*}"; type -a rm 2>&1 | sed 's/^/    /'; bash --version | head -1 | sed 's/^/    /'; ls -l "$ROOT/bin/rm" 2>&1 | sed 's/^/    /'; "$ROOT/bin/rm" -f "$ROOT/nonexistent" 2>&1 | sed 's/^/    run: /'; ls "$AGM_DIR/rm-stub.log" 2>&1 | sed 's/^/    /' )
 fi
 teardown
 
