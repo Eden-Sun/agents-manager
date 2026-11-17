@@ -292,6 +292,20 @@ grep -qx 'test -p am-base --locked -- scratch_guard::' "$AM_TEST_CARGO_LOG" || f
 CHECK_TESTS=prompt:: changed >/dev/null || fail "CHECK_TESTS=prompt:: 失敗"
 grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fail "CHECK_TESTS 沒照給的跑：$(cat "$AM_TEST_CARGO_LOG")"
 
+# #1862 遷移 A：screen.rs／setup.rs 的純解析測試搬到 am-lifecycle 自己跑（crate-only gate），改這兩檔時 owning crate 要跑，
+# 混合檔剩下的 daemon 測試（lifecycle::screen::／lifecycle::setup::）也仍要被選到。
+for path in crates/am-lifecycle/src/lifecycle/screen.rs crates/am-lifecycle/src/lifecycle/setup.rs; do
+    mod="${path##*/}"; mod="${mod%.rs}"
+    : >"$AM_TEST_CARGO_LOG"
+    export AM_TEST_DIFF_HEAD="$path"
+    output="$(changed 2>&1)" || fail "$path 的 changed 失敗：$output"
+    grep -qx 'test -p am-lifecycle --locked' "$AM_TEST_CARGO_LOG" \
+        || fail "$path 沒有跑 owning crate am-lifecycle：$(cat "$AM_TEST_CARGO_LOG")"
+    grep -Eq "^test -p agents-managerd --locked -- .*lifecycle::${mod}::" "$AM_TEST_CARGO_LOG" \
+        || fail "$path 沒有選到剩下的 daemon 測試 lifecycle::${mod}::：$(cat "$AM_TEST_CARGO_LOG")"
+done
+export AM_TEST_DIFF_HEAD=crates/am-core/src/lib.rs
+
 # A typo or stale CHECK_TESTS override can make cargo test succeed after selecting zero tests.
 export AM_TEST_CARGO_ZERO_TESTS=1
 if output="$(CHECK_TESTS=definitely_not_a_test changed 2>&1)"; then

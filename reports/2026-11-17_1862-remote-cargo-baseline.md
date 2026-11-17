@@ -163,3 +163,43 @@ remote_cargo::tests::without_a_data_dir_the_helper_resolves_it_from_the_config_l
 remote_cargo::tests::without_sshpass_the_password_goes_through_ssh_askpass: test
 runners::am_base_tests::cargo_shim::tests::macos_local_project_tests_keep_the_remote_cargo_route_even_with_blaze_requested: test
 ```
+
+## 測試歸屬遷移 A（2026-11-17，顧問 Astra 計畫 stage 2）
+
+範圍：`am-lifecycle/src/lifecycle/screen.rs` 的 `extract_tests`、`codex_0155_screen_tests`、`codex_0157_screen_tests`、`codex_01593_banner_tests`、`sent_echo_window_tests`，與 `setup.rs` 的 `model_args_tests`、`claude_settings_tests`。七處 `cfg(all(test, feature = "daemon-test-harness"))` 改成檔內既有的 `cfg(all(test, not(feature = "daemon-test-harness")))`（crate-only）。沒動 production、Cargo feature、`daemon/src/lib.rs` 掛載、測試本文或 assertion。
+
+### 測試清單對帳（`cargo test -p <pkg> --locked -- --list`，含 `--ignored`；不帶 `--all-features`）
+
+| package | 改前 | 改後 | 差 |
+|---|---:|---:|---:|
+| agents-managerd | 6536 | 6388 | −148 |
+| am-lifecycle | 146 | 294 | +148 |
+| am-share | 97 | 97 | 0 |
+| am-supervisor | 152 | 152 | 0 |
+
+- 逐條對帳：daemon 少的 148 條，與 am-lifecycle 多的 148 條名稱一一相同（只差 `lifecycle::` 前綴）；其餘兩個 package 清單完全不變；四個 package 的 ignored 清單逐條相同（daemon 4 條、其餘 0 條）。
+- 分布：extract_tests 88、codex_0155 9、codex_0157 1、codex_01593 4、sent_echo_window 7、model_args 30、claude_settings 9。
+- 改前清單取自另一個 detached worktree（origin/main `aac6ca25d`），改後取自改動 worktree，同 flags、同 toolchain。
+
+### 路由回歸
+
+- `scripts/ci-daemon-filters_test.sh`：改 `screen.rs`／`setup.rs`（單獨與混合）仍分別選 `lifecycle::screen::`／`lifecycle::setup::`（兩檔仍有 daemon 測試，如 `limit_hit_quota_tests`、`remote_hook_tests`，不能因部分測試搬走就退成零選）。
+- `scripts/check_changed_daemon_fast_test.sh`：改這兩檔時，會跑 `test -p am-lifecycle --locked`（owning crate），daemon 子集仍包含對應的 `lifecycle::<mod>::`。兩支腳本都綠。
+- `CHECK_MAX_LOAD=40 scripts/check.sh changed`：綠（CHECK_RC=0）。
+
+### 編譯量測：`cargo test -p agents-managerd --locked --no-run`（改 `daemon/src/api.rs` 同一行後）
+
+每次前 `scripts/wait-load.sh --max 40 --min-free-mem 30`；本機現有 remote-cargo shared 熱池，不另開冷 clone、不清 target。先各預熱一次（基線 222s、拆後 314s，皆為首次，不列入比較）。
+
+| 組別 | 樣本（牆鐘秒，括號為 cargo 自報） | 有效性 |
+|---|---|---|
+| 基線 edit1 | 94.7（1m28s） | 有效，只重編 1 個 crate |
+| 基線 edit2 | 118.0（1m51s） | 有效，只重編 1 個 crate |
+| 基線 edit3 | 240.6（3m53s） | 無效：重編 am-lifecycle／am-share／am-supervisor／daemon（兩個 worktree 輪流使用同一個 shared 池，來源切換讓 crate 變 Dirty） |
+| 拆後 edit1 | 747.4（11m32s） | 無效：重編 8 個 crate（同上，另疑似與其他 bot 的建置競爭） |
+| 拆後 edit2 | 87.7（1m21s） | 有效，只重編 1 個 crate |
+| 拆後 edit3 | 243.2（3m57s） | 無效：重編 8 個 crate（同上） |
+
+- 有效樣本：基線 94.7／118.0，中位數（兩者平均）106.3s；拆後只有 1 個有效樣本 87.7s。
+- **結論：沒有可辨識的收益。** 拆後那一個有效樣本比基線快約 19%，但樣本數不足、落在基線兩次相差 23s 的雜訊範圍內，不能宣稱加速。daemon 單一 crate 的增量重編時間由 daemon 本體決定，148 條測試搬出只少了 daemon 測試二進位裡一小部分程式碼；預期的大收益要等 stage C／D 撤掉整組 `#[path]` 來源掛載。
+- 量測的方法缺陷：在同一個 shared 熱池輪流用兩個 worktree 量，每次換 worktree 都讓 am-lifecycle 等 crate 的內容變動而重編，使一半的樣本失效。更乾淨的做法是基線與拆後各用獨立 shared 成員、各連跑，或先 commit 到同一 worktree 以 `git checkout` 切換並在切換後多預熱一次。

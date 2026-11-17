@@ -2344,7 +2344,7 @@ mod hook_cmd_parts_tests {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod model_args_tests {
     use super::model_args;
     use crate::db::Bot;
@@ -4125,7 +4125,7 @@ mod pane_env_tests {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod claude_settings_tests {
     use super::*;
 

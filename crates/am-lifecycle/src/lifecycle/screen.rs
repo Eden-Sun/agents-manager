@@ -1413,7 +1413,7 @@ fn codex_tool_cell_mask(kind: &str, lines: &[&str]) -> Vec<bool> {
     mask
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod extract_tests {
     use super::*;
 
@@ -2796,7 +2796,7 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 /// `-c model_reasoning_summary="concise"`（字頭仍是 `Working`：帳號撞限，summary 還沒流出）。
 /// `finished` 是 resume 已成功回合，完成行 `  done Aug 2 at 3:00 AM`（別天、duration 3.5s 所以沒有
 /// `Worked for`）。解析器對其他完成行格式的覆蓋仍用下面 `COMPLETIONS`。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_0155_screen_tests {
     use super::*;
 
@@ -2965,7 +2965,7 @@ mod codex_0155_screen_tests {
 /// 撞限橫幅寫進額度那一格（`apply_codex_limit_hit_quota`）的去重規則。
 /// Codex 0.157.0 的 inline 冷啟動畫面（私有 prefix、`--no-daemon --no-alt-screen`）：
 /// 初始 frame 的模型與目錄仍在載入，不能被誤認成使用者輸入或回合回覆。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_0157_screen_tests {
     use super::*;
 
@@ -2984,7 +2984,7 @@ mod codex_0157_screen_tests {
 /// codex 0.159.3 的帳號安全設定提醒 inline banner（#779，openai/codex#49744）。伺服器分批開放，本機帳號還沒輪到，
 /// fixture 是照上游 rust-v0.159.3 的 snapshot（`security_setup_banner`、`security_setup_after_cutoff`、
 /// `inline_banner_wrapped_and_truncated`）排出來的版面，樣式照 `actionable_banner.rs`：標題粗體、提示 dim、選中列 `›`。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_01593_banner_tests {
     use super::*;
     use crate::lifecycle::{box_state, plain_without_hints, BoxState};
@@ -3295,7 +3295,7 @@ mod synthetic_codex_compaction_tests {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod sent_echo_window_tests {
     use super::*;
 
