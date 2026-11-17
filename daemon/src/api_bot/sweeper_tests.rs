@@ -372,3 +372,50 @@ async fn api_turn_state_drives_the_same_run_agent_status_field_cli_bots_use() {
     super::completion::set_run_agent_status(&env.app, "st-bot-x", "st-run-x", "working").await;
     assert_eq!(status("st-run-x").await, "unknown", "已結束的 run 不碰（預設值不變）");
 }
+
+/// #2036：sweeper 的交易裡不能再向 pool 借第二條連線。先佔住除了一條以外的所有連線，
+/// 超時／stale unknown 兩條路徑都要在 2 秒內完成（否則就是握交易等第二條連線的死結）。
+#[tokio::test]
+async fn sweep_needs_only_one_available_pool_connection() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    let (bot_id, run_id, conv_id, turn_id, session_id) = ("sw-bot-1c", "sw-run-1c", "sw-conv-1c", "sw-turn-1c", "sw-sess-1c");
+
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,'sw-bot-1c','claude-api','fake',?)")
+        .bind(bot_id).bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'running',?)")
+        .bind(run_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)")
+        .bind(conv_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','in_flight','ok',?)")
+        .bind(turn_id).bind(conv_id).bind(run_id).bind(&now).execute(&env.app.db).await.unwrap();
+    let chk = json!({
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "responses": [], "api_pending": true, "tool_pending": null, "completed_tool_ids": []
+    });
+    sqlx::query(
+        "INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) \
+         VALUES(?,?,?,?,1,1,?,?,?,?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(chk.to_string())
+    .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
+    .execute(&env.app.db).await.unwrap();
+    // 過了硬期限的 reserved：走超時結算路徑（交易內判斷 session_busy）。
+    sqlx::query(
+        "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) \
+         VALUES('att-1c-reserved',?,?,?,?,1,0,'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard','reserved',300,'v1',?)",
+    )
+    .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(crate::db::iso_in(-2500))
+    .execute(&env.app.db).await.unwrap();
+
+    let mut held = Vec::new();
+    for _ in 1..env.app.db.options().get_max_connections() {
+        held.push(env.app.db.acquire().await.unwrap());
+    }
+    let report = tokio::time::timeout(std::time::Duration::from_secs(2), sweep_once(&env.app))
+        .await
+        .expect("sweeper must not wait for a second pool connection while holding its transaction")
+        .unwrap();
+    assert_eq!(report.reserved_timeouts, 1);
+    drop(held);
+}

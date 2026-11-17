@@ -256,7 +256,9 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
     app: &crate::state::App,
     report: &mut SweepReport,
 ) -> anyhow::Result<()> {
-    let hard_deadline_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs + 120;
+    // 設定在 begin_write 之前讀好（#2036）。
+    let turn_timeout_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs;
+    let hard_deadline_secs = turn_timeout_secs + 120;
     let cutoff = crate::db::iso_in(-(hard_deadline_secs as i64));
     let stale_reserved: Vec<(String, Option<String>, Option<String>, Option<String>, String)> =
         sqlx::query_as(
@@ -302,7 +304,8 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
 
                 if let Some((rev, generation, chk_raw, updated_at)) = session_row {
                     // 過期的 reserved 只結清帳（上面已做）；session 現在有人在用（回合在跑、更新的 attempt）就不動 checkpoint。
-                    let busy = session_busy(app, s_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &updated_at).await?;
+                    // 交易內判斷：所有查詢都走同一個交易（不再借第二條連線，#2036）。
+                    let busy = session_busy(app, &mut *tx, turn_timeout_secs, s_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &updated_at).await?;
                     if let (false, Ok(mut val)) = (busy, serde_json::from_str::<Value>(&chk_raw)) {
                         if val["api_pending"] == true {
                             val["api_pending"] = json!(false);
@@ -354,6 +357,8 @@ async fn sweep_stale_unknown_attempts(
     app: &crate::state::App,
     report: &mut SweepReport,
 ) -> anyhow::Result<()> {
+    // 在任何交易與借連線之前先讀設定（#2036：ConfigStore 的鎖不能在握交易時拿）。
+    let turn_timeout_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs;
     let cutoff = crate::db::iso_in(-UNKNOWN_STALE_SECS);
     let stale_unknowns: Vec<(String, String, Option<String>, i64, i64, String, String, String)> = sqlx::query_as(
         "SELECT DISTINCT a.id, s.id, s.bot_id, s.revision, s.generation, s.checkpoint_json, s.updated_at, a.created_at \
@@ -372,7 +377,12 @@ async fn sweep_stale_unknown_attempts(
         // 2026-11-15 事故：舊回合的 ordinal 55 unknown 讓 sweeper 在新回合的請求進行中把 api_pending 清掉，回合 journal 因此寫失敗。
         // 判斷一律看**目前**狀態：這顆 bot 有沒有回合在跑、session 有沒有還在進行的 reserved、有沒有比這筆更新的 attempt、
         // session 最近有沒有被寫過。任何一個成立就放著不動。
-        if session_busy(app, &session_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &session_updated_at).await? {
+        // 這裡不握交易：借一條連線只給判斷用，用完還回去，才能再 begin_write。
+        let busy = {
+            let mut conn = app.db.acquire().await?;
+            session_busy(app, &mut conn, turn_timeout_secs, &session_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &session_updated_at).await?
+        };
+        if busy {
             continue;
         }
         let Ok(mut val) = serde_json::from_str::<Value>(&checkpoint_json) else { continue };
@@ -426,8 +436,13 @@ async fn sweep_stale_unknown_attempts(
 /// - session 上有還沒過硬期限的 reserved attempt（請求進行中）；
 /// - 有比 `unknown_att` 更新的 attempt（那筆 unknown 已經不是這個 session 的現況）；
 /// - session 最近 [`UNKNOWN_STALE_SECS`] 內被寫過（回合在推進 checkpoint）。
+///
+/// `conn` 必須是呼叫端手上的同一條連線（交易或借來的連線）：這裡的查詢不再向 pool 借連線（#2036）。
+/// `turn_timeout_secs` 由呼叫端在握交易之前讀好。
 async fn session_busy(
     app: &crate::state::App,
+    conn: &mut sqlx::SqliteConnection,
+    turn_timeout_secs: u64,
     session_id: &str,
     bot_id: Option<&str>,
     unknown_att: Option<&str>,
@@ -440,13 +455,13 @@ async fn session_busy(
     if crate::db::cmp_ts(session_updated_at, &crate::db::iso_in(-UNKNOWN_STALE_SECS)).is_ge() {
         return Ok(true);
     }
-    let hard = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs as i64 + 120;
+    let hard = turn_timeout_secs as i64 + 120;
     let fresh_reserved: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE session_id = ? AND state = 'reserved' AND created_at >= ?)",
     )
     .bind(session_id)
     .bind(crate::db::iso_in(-hard))
-    .fetch_one(&app.db)
+    .fetch_one(&mut *conn)
     .await?;
     if fresh_reserved {
         return Ok(true);
@@ -457,7 +472,7 @@ async fn session_busy(
     .bind(session_id)
     .bind(unknown_att.unwrap_or(""))
     .bind(unknown_created_at)
-    .fetch_one(&app.db)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(newer)
 }
