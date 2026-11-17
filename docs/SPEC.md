@@ -3100,7 +3100,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   確認後 `POST /api/hosts/{name}/cli-update {kind:"codex",target_version}`（API §12.7a，`cli_update.rs`），daemon 綁定這一版（#569）：
   0. `target_version` 要等於 daemon 眼中那台「需安裝」通知的最新目標，不同（舊分頁、剛有新版、已經裝好沒有「需安裝」）409 `stale_target`，什麼都不跑；
   1. 讀安裝前的 `codex --version`（讀不到就不裝）；已經 `>= target_version` 就不跑安裝指令，直接到第 4 步（`already_installed:true`）；
-  2. 在那台跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`（本機 `/bin/sh -c`，遠端走既有 ssh 執行路徑；逾時 5 分鐘；輸出寫 `<data_dir>/cli-update.log`）；
+  2. 在那台跑**寫死的**官方安裝指令 `curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`（僅允許 HTTPS 下載與重新導向；本機 `/bin/sh -c`，遠端走既有 ssh 執行路徑；逾時 5 分鐘；輸出寫 `<data_dir>/cli-update.log`）；
   3. 重新讀 `codex --version`，**真的變新而且 `>= target_version`** 才往下——安裝失敗、讀不到、版本沒變、或升了但沒到目標（`target_not_reached`，
      CDN 還沒傳到、PATH 上是別顆）：一顆 bot 都不重啟，`cli_update_done` 帶 `reason` 講原因、通知不動；比目標還新照成功走；
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
@@ -3112,7 +3112,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   **「同一台只跑一個」不能只記在行程裡**（#564）：daemon 被砍掉時遠端的 `curl | sh` 不會跟著停，以前重啟後 map 空了、再按一次就疊出第二個安裝。
   所以兩層：(a) 開跑前先寫 `cli_updates` 一列（部分唯一索引：每台最多一筆 `running`），終態寫入失敗時保留 `running`／host slot、盡力標成 `finishing`，以有上限退避在目前 daemon 持續重試；只有終態 commit 後才推 `cli_update_done`。CAS 更新 0 列時回讀並發布已存結果，絕不發布舊的本地結果；開機時上一顆行程
   （`boot` 不同）留下的 `running` 列由 `recover_at_startup` 接手——等那台的安裝鎖不再忙再讀版本收尾，不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），
-  到了目標就改通知讓一般的重啟收得到。啟動列舉遇到暫時 DB 錯誤時用有上限的退避重試，之後每 5 分鐘持續掃描；同一 update id 同時只跑一個接手 worker。(b) 主機端以 Perl `setpgrp(0,0)`（macOS／Linux 都支援）建立專用 process group，外層 `nohup` helper 等待完整安裝指令；鎖是 `$HOME` 下的 symlink，目標記 `process-group-id:nonce`。安裝由另一個帶 nonce argv 的 shell 執行並等待完整 pipeline，pipeline 後代留在同一 group 並繼承環境 nonce；因此外層 SSH wrapper、daemon 或持鎖 helper 被中斷／SIGKILL，仍存活的 installer shell 會保留可驗證的 nonce，不會被判成過期。探測只有在 group 仍有帶同一 nonce 的存活行程時才判定忙，避免把重用的 PID／group ID 認成 owner；helper 正常結束時清除鎖，group 已無 owner 或身份不符時遺留鎖可回收；舊版純 PID 鎖沒有可驗證的身份，視為過期。
+  到了目標就改通知讓一般的重啟收得到。啟動列舉遇到暫時 DB 錯誤時用有上限的退避重試，之後每 5 分鐘持續掃描；同一 update id 同時只跑一個接手 worker。(b) 主機端以 Perl `setpgrp(0,0)`（macOS／Linux 都支援）建立專用 process group，外層 `nohup` helper 等待完整安裝指令；鎖是 `$HOME` 下的 symlink，目標記 `process-group-id:nonce`。安裝由另一個帶 nonce argv 的 shell 執行並等待完整 pipeline，pipeline 後代留在同一 group 並繼承環境 nonce；因此外層 SSH wrapper、daemon 或持鎖 helper 被中斷／SIGKILL，仍存活的 installer shell 會保留可驗證的 nonce，不會被判成過期。探測只有在 group 仍有帶同一 nonce 的存活行程時才判定忙，避免把重用的 PID／group ID 認成 owner；`ps` 失敗、輸出欄位無法辨認或鎖 symlink target 無法讀取時 fail-closed，不回報 free、不回收該鎖，開機接手保留重試。helper 正常結束時清除鎖，group 已無 owner 或身份不符時遺留鎖可回收；舊版純 PID 鎖沒有可驗證的身份，視為過期。stale-lock 回收以持久 `.reaper` sidecar 的核心 `flock` 序列化，避免兩個 reaper 刪掉新 owner 的鎖。
   這把鎖擋的是 DB 擋不到的：隔離實例對同一台開的安裝，以及重啟後等主機端安裝完成的接手列。開機接手沿用同一 group/nonce 探測語意，只有確認安裝 group 仍忙才等待它結束，再讀版本收尾；不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），等待到上限仍忙才放掉那一列。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
   手機（≤640px）兩顆都要出現時合成一顆只留圖示的 ⌃⌃，點開兩項選單各自開原本的確認框（名字行放不下兩顆，UI-DECISIONS）。
   已經有一批重啟在跑時（#566）：那一批的清單早就定了，裝好之前的 codex 是「需安裝」、不在裡面，所以**不能**只憑「有一批在跑」就當成重啟交出去了。

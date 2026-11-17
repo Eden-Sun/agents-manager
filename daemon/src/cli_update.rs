@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// codex 自己的升級提示寫的那一句（`Run sh -c '…' to update.`）。只有這一條，不收參數。
-pub const CODEX_INSTALL: &str = "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
+pub const CODEX_INSTALL: &str = "curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
 pub const CODEX_INSTALL_LOCK: &str = "$HOME/.agents-manager-codex-install.lock";
 pub const CLAUDE_INSTALL_LOCK: &str = "$HOME/.agents-manager-claude-install.lock";
 
@@ -49,10 +49,26 @@ const TAIL_CHARS: usize = 1500;
 /// wrapper 離開不會帶走安裝。`ln -s` 原子地寫入 `process-group-id:nonce`；probe 查該 group 的存活行程是否仍帶同一個 nonce，
 /// 因此 helper 被 SIGKILL 後，只要 installer 子行程還活著就仍算忙，也不會把重用的 PID 誤認成 owner。沒有 nonce 的舊版 PID 鎖
 /// 無法驗明 owner，視為過期回收。鎖忙時不裝、印 [`LOCKED_MARK`] 退出 [`LOCKED_EXIT`]；group 內已無 owner 時可回收。
+/// stale-lock 回收用 Perl 核心 `flock` 序列化；旁邊留下的空 `.reaper` 檔只是鎖檔，不代表仍在安裝。
 /// 不分實例：換掉的是同一顆 codex。
 
 const LOCKED_EXIT: i32 = 75;
 pub(crate) const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
+
+/// Read the app's symlink lock without confusing an absent link with an unreadable one.
+fn lock_value_check() -> &'static str {
+    r#"read_lock_value() {
+  path=$1
+  if [ -L "$path" ]; then
+    value=$(readlink "$path" 2>/dev/null) || return 2
+    [ -n "$value" ] || return 2
+    printf '%s\n' "$value"
+    return 0
+  fi
+  [ -e "$path" ] && return 2
+  return 1
+}"#
+}
 
 /// 識別新式 `process-group-id:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
 /// 比對 command line 上的 nonce，因為 macOS 的 `ps` 不會用 Linux 的 `ps e` 方式輸出環境變數。
@@ -62,10 +78,17 @@ fn lock_owner_check() -> &'static str {
   case "$owner" in *:*) pgid=${owner%%:*}; nonce=${owner#*:} ;; *) return 1 ;; esac
   case "$nonce" in ''|*:* ) return 1 ;; esac
   case "$pgid" in ''|0|*[!0-9]*) return 1 ;; esac
-  kill -0 "-$pgid" 2>/dev/null || return 1
-  members=$(ps -A -o pid= -o pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { print $1 }') || return 1
+  rows=$(ps -A -o pid= -o pgid= 2>/dev/null) || return 2
+  members=$(printf '%s\n' "$rows" | awk -v pgid="$pgid" '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ { bad=1; next }
+    { seen=1; if ($2 == pgid) print $1 }
+    END { if (bad || !seen) exit 2 }
+  ') || return 2
+  [ -n "$members" ] || return 1
   for member in $members; do
-    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || continue
+    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || return 2
+    [ -n "$cmd" ] || return 2
     case "$cmd" in *"AM_CODEX_INSTALL_OWNER=$nonce"*) return 0 ;; esac
   done
   return 1
@@ -85,6 +108,28 @@ pub(crate) fn locked_script(lock: &str, inner: &str) -> String {
     let nonce = crate::db::ulid();
     let lock = shell_lock_path(lock);
     let inner = crate::hosts::sh_quote(inner);
+    let reclaim = crate::hosts::sh_quote(&format!(
+        r#"{lock_value_check}
+{owner_check}
+p=$(read_lock_value "$L")
+read_status=$?
+if [ "$read_status" -eq 0 ]; then
+  lock_owner_alive "$p"
+  owner_status=$?
+  if [ "$owner_status" -eq 0 ]; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
+  if [ "$owner_status" -gt 1 ]; then echo "{LOCKED_MARK} owner probe unavailable" >&2; exit {LOCKED_EXIT}; fi
+elif [ "$read_status" -gt 1 ]; then
+  echo "{LOCKED_MARK} owner probe unavailable" >&2
+  exit {LOCKED_EXIT}
+fi
+rm -f "$L"
+ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
+"#,
+        lock_value_check = lock_value_check(),
+        owner_check = lock_owner_check(),
+        LOCKED_MARK = LOCKED_MARK,
+        LOCKED_EXIT = LOCKED_EXIT,
+    ));
     let worker = format!(
         r#"LOCK_NONCE='{nonce}'
 L={lock}
@@ -102,15 +147,18 @@ cleanup() {{
 trap cleanup EXIT
 trap '' HUP INT TERM
 if ! ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null; then
-  p=$(readlink "$L" 2>/dev/null)
-  if [ -n "$p" ] && lock_owner_alive "$p"; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
-  rm -f "$L"
-  ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
+  # 複數 reaper 不能在「確認舊鎖過期」後各自 unlink；後來者可能刪掉先取得的新鎖。
+  # `$^F` 讓 flock fd 經過 exec 繼承：若 Perl reaper 被中止，檢查／替換中的 shell 仍持有同一把鎖。
+  export L GROUP_ID LOCK_NONCE
+  perl -e 'use Fcntl qw(:flock); $^F = 255; open my $f, ">>", $ARGV[0] or exit 70; flock($f, LOCK_EX) or exit 70; system("/bin/sh", "-c", $ARGV[1]); exit($? == -1 ? 70 : (($? & 127) ? 70 : $? >> 8));' "$L.reaper" {reclaim}
+  status=$?
+  [ "$status" -eq 0 ] || exit "$status"
 fi
 AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" /bin/sh -c 'trap ":" EXIT; eval "$1"' "AM_CODEX_INSTALL_OWNER=$LOCK_NONCE" {inner}
 "#,
         nonce = nonce,
         owner_check = lock_owner_check(),
+        reclaim = reclaim,
     );
     let worker = crate::hosts::sh_quote(&worker);
     format!(
@@ -140,8 +188,9 @@ exit "$status"
 /// 那台的安裝鎖現在有沒有活著的主人：印 `busy <pid>` 或 `free`。
 fn probe_script(lock: &str) -> String {
     format!(
-        r#"L={lock}; {owner_check}; p=$(readlink "$L" 2>/dev/null); if [ -n "$p" ] && lock_owner_alive "$p"; then echo "busy ${{p%%:*}}"; else echo free; fi"#,
+        r#"L={lock}; {lock_value_check}; {owner_check}; p=$(read_lock_value "$L"); read_status=$?; if [ "$read_status" -eq 1 ]; then echo free; elif [ "$read_status" -gt 1 ]; then echo unknown; exit 70; else lock_owner_alive "$p"; status=$?; if [ "$status" -eq 0 ]; then echo "busy ${{p%%:*}}"; elif [ "$status" -eq 1 ]; then echo free; else echo unknown; exit 70; fi; fi"#,
         lock = shell_lock_path(lock),
+        lock_value_check = lock_value_check(),
         owner_check = lock_owner_check(),
     )
 }
@@ -3600,6 +3649,210 @@ mod tests {
     fn the_host_lock_path_keeps_home_expansion_in_the_remote_shell() {
         assert_eq!(shell_lock_path(CODEX_INSTALL_LOCK), "\"$HOME/.agents-manager-codex-install.lock\"");
         assert_eq!(shell_lock_path("/tmp/a'b"), "'/tmp/a'\\''b'");
+    }
+
+    #[test]
+    fn codex_installer_forbids_non_https_redirects_before_piping_to_shell() {
+        assert_eq!(
+            CODEX_INSTALL,
+            "curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_lock_reclaimers_never_run_two_installers() {
+        use std::os::unix::fs::symlink;
+
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-reclaim-race-{}", db::ulid())));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let lock = dir.join("codex-install.lock");
+        let entered = dir.join("stale-rm-entered");
+        let release_stale_rm = dir.join("release-stale-rm");
+        let release_installer = dir.join("release-installer");
+        let first_started = dir.join("first-started");
+        let second_started = dir.join("second-started");
+        symlink("2147483647:stale", &lock).unwrap();
+
+        let rm = format!(
+            "#!/bin/sh\ncase \" $* \" in *\"$AM_TEST_LOCK_PATH\"*)\n  if [ ! -e \"$AM_TEST_RM_ENTERED\" ]; then\n    : > \"$AM_TEST_RM_ENTERED\"\n    while [ ! -e \"$AM_TEST_RELEASE_RM\" ]; do sleep 0.01; done\n  fi\n  ;;\nesac\nexec /bin/rm \"$@\"\n"
+        );
+        crate::testing::write_exec(bin.join("rm"), rm);
+
+        let first_inner = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done",
+            first_started.display(),
+            release_installer.display()
+        );
+        let mut first = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(locked_script(&lock.display().to_string(), &first_inner))
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+            .env("AM_TEST_LOCK_PATH", &lock)
+            .env("AM_TEST_RM_ENTERED", &entered)
+            .env("AM_TEST_RELEASE_RM", &release_stale_rm)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..500 {
+            if entered.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(entered.exists(), "the first contender must pause after deciding the legacy lock is stale");
+
+        let second_inner = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done",
+            second_started.display(),
+            release_installer.display()
+        );
+        let mut second = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(": > '{}'; {}", dir.join("second-launched").display(), locked_script(&lock.display().to_string(), &second_inner)))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..200 {
+            if dir.join("second-launched").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        std::fs::write(&release_stale_rm, "continue").unwrap();
+        for _ in 0..300 {
+            if first_started.exists() || second_started.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let both_entered = first_started.exists() && second_started.exists();
+
+        std::fs::write(&release_installer, "finish").unwrap();
+        let first_status = tokio::time::timeout(Duration::from_secs(5), first.wait()).await.unwrap().unwrap();
+        let second_status = tokio::time::timeout(Duration::from_secs(5), second.wait()).await.unwrap().unwrap();
+
+        assert!(first_status.success() || second_status.success(), "one contender must acquire the stale lock");
+        assert!(!both_entered, "stale-lock cleanup must not remove a newer installer's lock");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_install_lock_target_never_looks_free_or_releases_a_live_lock() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-readlink-fail-closed-{}", db::ulid())));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::testing::write_exec(bin.join("readlink"), "#!/bin/sh\nexit 1\n");
+
+        let lock = dir.join("codex-install.lock");
+        let owner_started = dir.join("owner-started");
+        let release_owner = dir.join("release-owner");
+        let contender_ran = dir.join("contender-ran");
+        let owner_inner = format!(": > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done", owner_started.display(), release_owner.display());
+        let mut owner = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(locked_script(&lock.display().to_string(), &owner_inner))
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..300 {
+            if owner_started.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(owner_started.exists(), "the owner installer must hold the lock before probing");
+
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let probe = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(probe_script(&lock.display().to_string()))
+            .env("PATH", &path)
+            .output()
+            .await
+            .unwrap();
+        let probe_text = format!("{}{}", String::from_utf8_lossy(&probe.stdout), String::from_utf8_lossy(&probe.stderr));
+
+        let contender = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(locked_script(&lock.display().to_string(), &format!(": > '{}'", contender_ran.display())))
+            .env("PATH", path)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        let contender_text = format!("{}{}", String::from_utf8_lossy(&contender.stdout), String::from_utf8_lossy(&contender.stderr));
+
+        std::fs::write(&release_owner, "finish").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), owner.wait()).await.unwrap().unwrap();
+
+        assert_eq!(probe.status.code(), Some(70), "an unreadable lock target is unknown, not free: {probe_text}");
+        assert!(probe_text.contains("unknown"), "the probe must report uncertainty: {probe_text}");
+        assert!(!contender.status.success(), "the contender must fail closed: {contender_text}");
+        assert!(contender_text.contains(LOCKED_MARK), "the contender must report a locked/unknown owner: {contender_text}");
+        assert!(!contender_ran.exists(), "a failed lock read must not remove a live installer lock");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_or_unrecognized_process_list_never_releases_a_live_install_lock() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-probe-fail-closed-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (label, bad_ps) in [
+            ("unavailable", "#!/bin/sh\ncase \"$*\" in *\"-A -o pid=\"*) exit 1;; esac\nexec /bin/ps \"$@\"\n"),
+            ("format", "#!/bin/sh\ncase \"$*\" in *\"-A -o pid=\"*) printf 'PID PGID\\n'; exit 0;; esac\nexec /bin/ps \"$@\"\n"),
+        ] {
+            let case_dir = dir.join(label);
+            let bin = case_dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            crate::testing::write_exec(bin.join("ps"), bad_ps);
+            let lock = case_dir.join("codex-install.lock");
+            let started = case_dir.join("owner-started");
+            let release = case_dir.join("release-owner");
+            let contender_ran = case_dir.join("contender-ran");
+
+            let inner = format!(": > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done", started.display(), release.display());
+            let mut owner = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(locked_script(&lock.display().to_string(), &inner))
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            for _ in 0..300 {
+                if started.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(started.exists(), "the owner installer must hold the lock before probing `{label}`");
+
+            let inner = format!(": > '{}'", contender_ran.display());
+            let contender = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(locked_script(&lock.display().to_string(), &inner))
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), contender.wait_with_output()).await.unwrap().unwrap();
+            let message = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+            std::fs::write(&release, "finish").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), owner.wait()).await.unwrap().unwrap();
+            assert!(message.contains(LOCKED_MARK), "uncertain process-list result must fail closed for `{label}`: {message}");
+            assert!(!contender_ran.exists(), "a failed process-list probe must not remove the live lock (`{label}`)");
+        }
     }
 
     /// The `/bin/sh` process here stands in for the remote command shell started by SSH.
