@@ -20,7 +20,7 @@ pub enum AgyDialog {
     Terms,
     /// `Do you trust the contents of this project?`。
     Trust,
-    /// 工具權限確認：`Run this command?`／`Allow access to this URL?`／`Allow calling this tool?`。
+    /// 工具權限確認：`Run this command?`／`Allow access to this URL?`／`Allow access to this file?`／`Allow calling this tool?`。
     Permission,
 }
 
@@ -102,7 +102,15 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
         .filter(|_| has(&|r| r.contains("yes, i trust this folder") || r.contains("no, exit")))
     {
         (i, AgyDialog::Trust)
-    } else if let Some(i) = ["run this command?", "allow access to this url?", "allow calling this tool?"].iter().find_map(|t| title(t)) {
+    } else if let Some(i) = [
+        "run this command?",
+        "allow access to this url?",
+        "allow access to this file?",
+        "allow calling this tool?",
+    ]
+    .iter()
+    .find_map(|t| title(t))
+    {
         (i, AgyDialog::Permission)
     } else {
         return None;
@@ -159,9 +167,49 @@ mod tests {
         assert_eq!(blocking_dialog(TERMS), Some(AgyDialog::Terms));
         assert_eq!(blocking_dialog(TRUST), Some(AgyDialog::Trust));
         assert_eq!(blocking_dialog(PERMISSION), Some(AgyDialog::Permission));
-        for url in ["Allow access to this URL?", "Allow calling this tool?"] {
+        for url in ["Allow access to this URL?", "Allow access to this file?", "Allow calling this tool?"] {
             assert_eq!(blocking_dialog(&format!("\n {url}\n > Allow\n   Deny\n")), Some(AgyDialog::Permission), "{url}");
         }
+    }
+
+    /// 依 agy 1.5.2 changelog 的提示文字合成（非實機擷取），issue #2083。
+    const SYNTHETIC_FILE_PERMISSION_152: &str = "\
+      ▄▀▀▄        Antigravity CLI 1.5.2
+     ▀▀▀▀▀▀       me@example.com (Google AI Plus)
+────────────────────────────────────────────────────────
+> Read the file /etc/hosts outside the workspace.
+
+● Read(/etc/hosts) (ctrl+o to expand)
+
+File Access
+────────────────────────────────────────────────────────
+
+Requesting permission for:
+   /etc/hosts
+
+Allow access to this file?
+> 1. Allow once
+  2. Always allow for this conversation
+  3. Always allow in settings.json
+  4. Deny
+";
+
+    #[test]
+    fn file_access_permission_is_recognised() {
+        assert_eq!(blocking_dialog(SYNTHETIC_FILE_PERMISSION_152), Some(AgyDialog::Permission));
+    }
+
+    /// agy 1.5.8 自訂狀態列被暫時覆蓋（如 Copied...、設定錯誤、權限重載通知）與 spinner 動畫中不誤判為對話框（issue #2114）。
+    #[test]
+    fn status_messages_and_spinner_are_not_dialogs() {
+        let copied = format!("{MAIN}\n? for shortcuts    Copied 3 lines (42 characters)\n");
+        assert_eq!(blocking_dialog(&copied), None);
+        let save_err = format!("{MAIN}\nFailed to save settings: permission denied\n");
+        assert_eq!(blocking_dialog(&save_err), None);
+        let reload = format!("{MAIN}\nPermission rules reloaded from settings.json\n");
+        assert_eq!(blocking_dialog(&reload), None);
+        let spinner = "      ▄▀▀▄        Antigravity CLI 1.5.8\n\n⠋ Thinking...\n\n";
+        assert_eq!(blocking_dialog(spinner), None);
     }
 
     /// 2026-10-04 真機（agy 1.2.16，登入後，沒開 auto_approve）：要跑 `ls` 時的權限框。

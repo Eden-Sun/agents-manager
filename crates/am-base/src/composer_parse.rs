@@ -673,4 +673,17 @@ mod agy_placeholder_tests {
         assert!(!plain.contains("Auto mode"), "{plain}");
         assert!(plain.contains(">"), "{plain}");
     }
+
+    /// agy 1.5.8：自訂 status line 被暫時覆蓋為狀態訊息（Copied…、設定錯誤通知）時，輸入框狀態不受干擾（issue #2114）。
+    #[test]
+    fn agy_status_messages_in_footer_do_not_affect_box_state() {
+        for msg in [
+            "Copied 3 lines (42 characters)",
+            "Failed to save settings: permission denied",
+            "Permission rules reloaded from settings.json",
+        ] {
+            assert_eq!(box_state("agy", &real("", msg)), BoxState::Empty, "空框＋狀態訊息：{msg}");
+            assert_eq!(box_state("agy", &real(" user prompt", msg)), BoxState::NonEmpty, "有字＋狀態訊息：{msg}");
+        }
+    }
 }
