@@ -12,6 +12,8 @@
 #     {claude,codex}-release-task.md（claude_review）、release-triage-task.md（#1185）、docs/API.md（api_doc_parity、ws_event_docs_tests；#1170）。
 #   - am-base 讀 web／ops／scripts 底下的檔（#2072）：host-baseline/baseline.toml、web/src/lib/outboxList.ts、codex-async-* fixtures、
 #     scripts/project-cargo.sh、host-baseline-sync-mac-verify.sh。ci-changed-parts_test.sh 會掃 Rust 原始碼裡指到這些目錄的路徑，漏列就紅。
+# ci-daemon-filters_test.sh（fixture，約 7 秒）不走第 4 欄：ci-ops-tests.py 只看 scripts/ bin/ ops/ 等 ops 路徑，
+#   Rust-only 改動根本不會進 ops 段；改由 scripts/check.sh 的 check_daemon 在 daemon 部分開頭直接跑（#2000）。
 # 列的順序有意義：特例要先於一般規則（例如 scripts/*.md 先於 *.md，daemon/* 先於 docs）。
 .claude/skills/*|ops|-|@default
 crates/am-lifecycle/src/lifecycle/fixtures/*|web,daemon|@rust|@default

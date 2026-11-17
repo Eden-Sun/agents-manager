@@ -56,6 +56,9 @@ echo mount >>"${AM_TEST_CARGO_LOG:?}"
 [ "${AM_TEST_MOUNT_FAIL:-0}" != 1 ]
 SH
 chmod +x "$fixture/scripts/rust_test_mount_test.sh"
+# check_daemon 開頭會跑 ci-daemon-filters_test.sh（#2000）；這裡只需要它存在且成功，真正的對拍由 ci-daemon-filters_test.sh 自己測。
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/scripts/ci-daemon-filters_test.sh"
+chmod +x "$fixture/scripts/ci-daemon-filters_test.sh"
 export AM_TEST_MOUNT_LOG="$tmp/mount.log"
 
 cat >"$fixture/bin/git" <<'SH'

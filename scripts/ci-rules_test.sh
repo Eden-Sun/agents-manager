@@ -34,4 +34,7 @@ while IFS='|' read -r f want_parts want_daemon; do
     n=$((n + 1))
 done <"$golden"
 [ "$n" -gt 50 ] || fail "快照只讀到 $n 列"
+# #2000 回歸：Rust-only 改動（daemon/src/cli.rs）要跑 ci-daemon-filters_test.sh。ops 段選不到它，所以必須由 check.sh 的 daemon 部分直接跑。
+grep -q 'bash scripts/ci-daemon-filters_test.sh' scripts/check.sh || fail "check.sh 的 daemon 部分沒有跑 ci-daemon-filters_test.sh"
+[ "$(printf '%s\n' daemon/src/cli.rs | bash scripts/ci-changed-parts.sh | paste -sd, -)" = daemon ] || fail "daemon/src/cli.rs 沒有選到 daemon 部分"
 echo "ci-rules_test: ok（$n 個對拍路徑）"

@@ -126,6 +126,9 @@ check_daemon() {
         echo "web/dist/index.html 不存在：先跑 scripts/check.sh web（daemon 會把它嵌進去）" >&2
         exit 1
     fi
+    # 路徑→過濾字串的 fixture 測試（約 7 秒）：期待值依賴 Rust 模組結構，所以每次 daemon 部分要跑都跑（#2000）。
+    step "daemon: ci-daemon-filters 的 fixture 測試"
+    bash scripts/ci-daemon-filters_test.sh
     step "daemon: cargo test -p agents-managerd"
     run_daemon_tests
     # Workspace 測試覆蓋政策：daemon 與 xtask 明確執行，crates/* 由目錄迴圈執行；desktop 明確排除，
