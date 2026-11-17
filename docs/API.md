@@ -178,6 +178,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/release-triage` | User／AGM 角色看全域帳本；一般 Bot 只看派給它（或它底下的 child）、還在 `dispatched` 的列（#801） |
 | GET | `/api/search/messages` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/session` | UI bootstrap 不需 principal；TCP loopback、Host 與 Origin 守衛；帶 Bot／Service header 一律 403 `user_only`，不回傳 UI token |
+| GET | `/api/healthz` | 無 principal；不做 origin 檢查；對 DB 池跑 `SELECT 1`（#2036） |
 | GET | `/api/state` | User 取得全域狀態；Bot 只取得自己與 descendants 的投影並移除 global/private fields；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/approvals` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
@@ -260,6 +261,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/release-triage` | 同 GET（#801）：User／AGM 全域，一般 Bot 只看派給它的列 |
 | HEAD | `/api/search/messages` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/session` | 無 principal；TCP loopback、Host 與 Origin 守衛 |
+| HEAD | `/api/healthz` | 無 principal；同 GET（#2036） |
 | HEAD | `/api/state` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/supervisor/approvals` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
@@ -462,6 +464,15 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 沒有伴隨 mutation 的重投（daemon 啟動、supervisor 背景巡邏定期把既有 config 套進 DB）不經過使用者請求，
 仍是舊行為：擋下來時 `config_written:true`（這次的變更——如果有的話——已經在 config.toml 裡、只是還沒套用），
 帶 `allow_env` 提示（`AM_ALLOW_BULK_DELETE=1`，只放行啟動那一次投影）。
+
+### 1.1 `GET /api/healthz`（#2036）
+
+不需登入、不做 origin 檢查，User／Bot／Service 都能打（不在 Bot 範圍表的 deny 名單內）。實際對 DB 池跑一次 `SELECT 1`，最多等 2 秒。
+
+- 成功：`200 {"ok":true,"db_ms":N}`
+- 池被佔滿或查詢失敗／逾時：`503 {"ok":false,"error":"db_unavailable","detail":"..."}`
+
+外部監看用它偵測「行程活著但不能用」（DB 死結）。
 
 ## 2. `GET /api/state`
 

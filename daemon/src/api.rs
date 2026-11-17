@@ -404,6 +404,8 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(axum::middleware::from_fn(json_rejections))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session))
+        // #2036：不需登入（bot 也可），但要真的碰一次 DB 池；死結時外部才偵測得到「活著但不能用」。
+        .route("/healthz", get(healthz))
         // 沒這條路由的 /api/* 要回 JSON 404，不能掉到外層的 SPA fallback（200 的 index.html）。
         .fallback(api_route_not_found);
 
@@ -1388,8 +1390,34 @@ async fn get_session(
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
 }
 
+/// `/api/healthz` 等 DB 池的上限（#2036）：池被佔滿時 acquire 會等到 pool 的預設逾時，這裡先放棄。
+const HEALTHZ_DB_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 對 DB 池做一次 `SELECT 1`，最多等 `wait`。成功回耗時（毫秒）；逾時或錯誤回原因字串。
+async fn probe_db(pool: &sqlx::SqlitePool, wait: std::time::Duration) -> Result<u64, String> {
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(wait, sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(pool)).await {
+        Ok(Ok(_)) => Ok(started.elapsed().as_millis() as u64),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("no DB connection within {}ms", wait.as_millis())),
+    }
+}
+
+fn healthz_response(probe: Result<u64, String>) -> Response {
+    match probe {
+        Ok(db_ms) => Json(json!({"ok": true, "db_ms": db_ms})).into_response(),
+        Err(detail) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok": false, "error": "db_unavailable", "detail": detail}))).into_response(),
+    }
+}
+
+async fn healthz(State(app): State<Arc<App>>) -> Response {
+    healthz_response(probe_db(&app.db, HEALTHZ_DB_WAIT).await)
+}
+
 #[cfg(test)]
 mod session_principal_tests;
+#[cfg(test)]
+mod healthz_tests;
 
 pub(crate) fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
     if !connected {

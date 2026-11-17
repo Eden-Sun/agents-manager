@@ -382,7 +382,13 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         });
     }
     // 連線收完後才等受監督的迴圈，再關 SSH masters。
-    let serve_result = server.await.context("HTTP server task panicked")?;
+    let serve_result = match join_server_within_shutdown(server, app.shutdown.clone(), HTTP_SHUTDOWN_WAIT)
+        .await
+        .context("HTTP server task panicked")?
+    {
+        Some(result) => result,
+        None => Ok(()),
+    };
     finish_serve(&app, serve_result).await?;
     Ok(())
 }
@@ -390,6 +396,34 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
 /// 關機時等被追蹤的背景工作的上限（#1463）。會卡住的（等 bot 鎖、遠端 ssh）逾時就放棄，記下名字、繼續關機，
 /// 不靠 systemd 的 TimeoutStopSec 強殺。被放棄的工作都能安全中斷：下次開機由 reconcile 與 spool 補齊（SPEC §6.1、§4.4）。
 const BACKGROUND_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 關機時 HTTP server 等進行中請求的上限（#2036）。請求卡在 DB 池等連線（死結）時，`with_graceful_shutdown` 會一直等，
+/// 關機就卡住；逾時就 abort，照常進 `finish_serve`。
+const HTTP_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// 等 HTTP server 結束。關機 token 取消後最多再等 `wait`，仍沒結束就 abort 並回 `Ok(None)`（#2036）。
+/// abort 之後的 `JoinError::Cancelled` 視為正常關機；其他 JoinError（panic）照原樣回傳。
+async fn join_server_within_shutdown<T: Send + 'static>(
+    mut server: tokio::task::JoinHandle<T>,
+    shutdown: tokio_util::sync::CancellationToken,
+    wait: std::time::Duration,
+) -> Result<Option<T>, tokio::task::JoinError> {
+    let abort = server.abort_handle();
+    tokio::select! {
+        res = &mut server => return res.map(Some),
+        () = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(wait).await;
+        } => {}
+    }
+    tracing::warn!(?wait, "shutdown: in-flight HTTP requests did not finish within the wait limit; aborting");
+    abort.abort();
+    match server.await {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.is_cancelled() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 
 async fn finish_serve<E>(app: &Arc<state::App>, serve_result: Result<(), E>) -> Result<(), E> {
     app.shutdown.cancel();
@@ -422,6 +456,30 @@ fn in_app_bundle(exe: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// #2036：HTTP server 在關機時卡住（請求不結束）→ 等滿上限後 abort，回 `Ok(None)`，不掛住關機。
+    #[tokio::test(start_paused = true)]
+    async fn http_server_that_never_drains_is_aborted_after_the_shutdown_wait() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(std::future::pending::<std::io::Result<()>>());
+        shutdown.cancel();
+        let out = tokio::time::timeout(std::time::Duration::from_secs(120), join_server_within_shutdown(server, shutdown, HTTP_SHUTDOWN_WAIT)).await;
+        assert!(out.is_ok(), "關機不能等一個永遠不結束的 HTTP 請求（#2036）");
+        assert!(matches!(out.unwrap(), Ok(None)), "逾時 abort 後要當成正常關機");
+    }
+
+    /// #2036 對照組：上限內結束的請求照常收完，結果原樣回傳，不被 abort。
+    #[tokio::test(start_paused = true)]
+    async fn http_server_that_drains_within_the_shutdown_wait_is_not_aborted() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok::<(), std::io::Error>(())
+        });
+        shutdown.cancel();
+        let out = join_server_within_shutdown(server, shutdown, HTTP_SHUTDOWN_WAIT).await;
+        assert!(matches!(out, Ok(Some(Ok(())))), "上限內結束的請求要照常回傳");
+    }
+
     /// #1286：signal handler 不能排在遠端 ssh 後面：`enable_shutdown.send` 要早於 `keep_share_outboxes`，
     /// 而且後者不能在 `serve()` 裡被 `.await`（遠端慢的主機要好幾分鐘）。
     #[test]

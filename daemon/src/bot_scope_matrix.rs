@@ -74,6 +74,7 @@ fn deny_rule(method: &'static str, path: &'static str, expect: Expect, rationale
 fn rules() -> Vec<Rule> {
     vec![
         deny_rule("GET", "/api/session", Expect::Forbidden, "This loopback bootstrap returns the shared UI token to browsers; Bot and Service principals must not receive it."),
+        allow_rule("GET", "/api/healthz", "Unauthenticated liveness probe (#2036): returns only ok, the DB probe latency, or a DB error string; no user, bot, or host state."),
         rule("GET", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
