@@ -1992,8 +1992,10 @@ esac
         std::fs::write(old.join("k/sid.jsonl"), "{\"a\":1}\n").unwrap();
         let new = base.join("new-projects");
         let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+        // macOS 本身的 /usr/bin/stat 就是 BSD：假 stat 要把 `-c` 轉給 GNU stat，在 macOS 上沒有 GNU stat 可轉（#1964：夜間
+        // macos-latest 兩條 STAT_SOURCE），而且真的 BSD stat 與 devfs 的 `/dev/fd/N` 正是這條測試要守的，所以直接跑真的；其他平台照舊用假的。
         let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
-        let (out, diag) = run_with_diagnostics(&script, Some(&path));
+        let (out, diag) = run_with_diagnostics(&script, if cfg!(target_os = "macos") { None } else { Some(&path) });
         assert!(out.contains("AM_STAGED"), "BSD stat staging output; {}", diag.summary());
         assert!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap() == "{\"a\":1}\n", "BSD fixture content changed");
         // 同一個 projects（console-rpa 的情形：身份沒換）回 AM_SAME。
@@ -2097,7 +2099,9 @@ esac
         let (out, diag) = run_with_diagnostics(&script, None);
         assert!(out.contains("AM_MISSING"), "hard-linked source rejection; {}", diag.summary());
         assert!(diag.contains(diagnostics::Code::Missing(13)), "{}", diag.summary());
-        assert!(diag.contains(diagnostics::Code::NlinkSame), "{}", diag.summary());
+        // GNU stat 能直接讀 `/dev/fd/N` 的連結數（NlinkSame）；macOS 走 python fstat 那條（NlinkPre）——兩邊都是拒絕，只是記在不同的點（#1964）。
+        let rejected_at = if cfg!(target_os = "macos") { diagnostics::Code::NlinkPre } else { diagnostics::Code::NlinkSame };
+        assert!(diag.contains(rejected_at), "{}", diag.summary());
         assert!(!new.exists(), "hard-linked credential was copied as a transcript");
         let _ = std::fs::remove_dir_all(&base);
     }
