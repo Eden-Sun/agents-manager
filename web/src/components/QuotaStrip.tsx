@@ -33,6 +33,7 @@ import { carriedOverAt } from '../lib/quotaWindowAge'
 import { noFiveHourCap, projectNoFiveHour } from '../lib/quotaNoFiveHour'
 import { limitHitWhen } from '../lib/limitHitWhen'
 import './quotaStrip.css'
+import { useUserTimeZone } from '../lib/userTime'
 
 /**
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
@@ -716,6 +717,7 @@ function blockedLine(hit: QuotaLimitHit, t: ReturnType<typeof useT>): string {
 
 function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
   const t = useT()
+  useUserTimeZone()
   if (!hit) return null
   const when = limitHitWhen(hit.until)
   return (

@@ -1,5 +1,6 @@
 import { rawTransport } from './index'
 import { isRec, num, optStr, pick } from './normalize'
+import { DEFAULT_USER_TIME_ZONE, zonedParts } from '../lib/timeZone'
 
 export interface ClaudeApiBalanceAnchor {
   usd: number
@@ -140,7 +141,7 @@ const parseDay = (iso: string): number => {
 }
 
 /** 把回應整理成晶片要的資訊：有 console.ok 用實際值，否則退回推算值。`now` 供測試注入。 */
-export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = new Date()): BalanceView {
+export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = new Date(), zone: string = DEFAULT_USER_TIME_ZONE): BalanceView {
   const c = b?.console
   const estimate = b?.configured && b.remaining_usd !== undefined ? b.remaining_usd : undefined
   if (c?.status === 'ok' && c.total_usd !== undefined) {
@@ -148,7 +149,8 @@ export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = 
       .filter((p) => p.remaining_usd > 0 && p.expires_on && !Number.isNaN(parseDay(p.expires_on)))
       .sort((x, y) => parseDay(x.expires_on as string) - parseDay(y.expires_on as string))
     const nextExpiry = upcoming[0]
-    const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())
+    const zn = zonedParts(now, zone)
+    const today = Date.UTC(zn.year, zn.month - 1, zn.day)
     const days = nextExpiry ? (parseDay(nextExpiry.expires_on as string) - today) / 86_400_000 : Number.POSITIVE_INFINITY
     return { usd: c.total_usd, source: 'console', loggedOut: false, nextExpiry, expiringSoon: days <= PROMO_WARN_DAYS }
   }

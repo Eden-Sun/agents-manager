@@ -1,5 +1,6 @@
-import { useSyncExternalStore } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 import { nextLocalMidnight, startOfLocalDay } from '../lib/msgTime'
+import { useUserTimeZone } from '../lib/userTime'
 
 /**
  * 「今天」的開始（本地 0 點），跨午夜會換。訊息時間標籤靠它重算：泡泡是 memo 的，沒有這個，跨日後畫面上的
@@ -46,5 +47,10 @@ function subscribe(fn: () => void): () => void {
 
 /** 目前本地「今天」的開始（epoch ms）；跨午夜時回傳值會變，元件就會重畫。拿去當 `msgTimeLabel` 的 `now`。 */
 export function useLocalDay(): number {
+  // 時區改了：今天的開始要用新時區重算（refresh 會比對、有變才通知）。
+  const zone = useUserTimeZone()
+  useEffect(() => {
+    refresh()
+  }, [zone])
   return useSyncExternalStore(subscribe, () => today, () => today)
 }

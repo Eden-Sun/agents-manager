@@ -41,6 +41,7 @@ import './unreadChip.css'
 import './cacheClock.css'
 import './keepWarmChip.css'
 import { FrozenBadge } from './FrozenBadge'
+import { useUserTimeZone } from '../lib/userTime'
 
 /** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
@@ -224,6 +225,7 @@ function ScrollRowBar({ items, label, selectedBotId, dnd }: { items: ChipItem[];
 
 export function UnreadChip() {
   const t = useT()
+  useUserTimeZone()
   const bots = useStore((s) => s.bots)
   const projects = useStore((s) => s.projects)
   const botUnread = useStore((s) => s.botUnread)

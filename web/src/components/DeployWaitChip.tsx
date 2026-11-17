@@ -5,6 +5,7 @@ import { useStore } from '../store/store'
 import './deployWait.css'
 import { limitHitWhen } from '../lib/limitHitWhen'
 import { useT } from '../lib/i18n'
+import { useUserTimeZone } from '../lib/userTime'
 
 
 /**
@@ -14,6 +15,7 @@ import { useT } from '../lib/i18n'
  */
 export function DeployWaitChip() {
   const t = useT()
+  useUserTimeZone()
   const wait = useDeployWait((s) => s.wait)
   const notify = useStore((s) => s.notify)
   const selectBot = useStore((s) => s.selectBot)

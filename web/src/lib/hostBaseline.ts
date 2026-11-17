@@ -1,5 +1,6 @@
 import type { HostBaseline } from '../api/types'
 import { t } from './i18n'
+import { userTimeZone, zonedParts } from './userTime'
 
 export type HostBaselineLevel = 'ok' | 'warn' | 'critical' | 'unknown' | 'stale'
 
@@ -22,10 +23,11 @@ const STALE_AFTER_MS = (6 * 60 + 15) * 60 * 1000
 export function formatCheckedAt(iso: string, now: number = Date.now()): string {
   const ms = Date.parse(iso)
   if (Number.isNaN(ms)) return iso || t('不明')
-  const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
-  const year = d.getFullYear() === new Date(now).getFullYear() ? '' : `${d.getFullYear()}-`
-  return `${year}${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  const zone = userTimeZone()
+  const z = zonedParts(ms, zone)
+  const year = z.year === zonedParts(now, zone).year ? '' : `${z.year}-`
+  return `${year}${p(z.month)}-${p(z.day)} ${p(z.hour)}:${p(z.minute)}`
 }
 
 /**

@@ -4,11 +4,13 @@ export function limitHitWhen(until: string | null | undefined, now: number = Dat
   const d = new Date(until)
   if (Number.isNaN(d.getTime())) return null
   const p = (n: number) => String(n).padStart(2, '0')
-  const time = `${p(d.getHours())}:${p(d.getMinutes())}`
-  const t = new Date(now)
-  const sameDay = d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate()
-  if (sameDay) return time
+  const zone = userTimeZone()
+  const z = zonedParts(d, zone)
+  const time = `${p(z.hour)}:${p(z.minute)}`
+  if (sameZonedDay(d, now, zone)) return time
   // 跨年要帶年份：1 月的 `1/1 09:00` 會被讀成今年已過的日子（#1344 之後的重置徽章）。
-  const head = d.getFullYear() === t.getFullYear() ? '' : `${d.getFullYear()}/`
-  return `${head}${d.getMonth() + 1}/${d.getDate()} ${time}`
+  const head = z.year === zonedParts(now, zone).year ? '' : `${z.year}/`
+  return `${head}${z.month}/${z.day} ${time}`
 }
+
+import { sameZonedDay, userTimeZone, zonedParts } from './userTime'

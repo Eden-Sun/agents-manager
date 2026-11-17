@@ -20,6 +20,7 @@ import { ServicePaneNote } from './ServicePaneNote'
 import { ToolInstallGuide } from './ToolInstallGuide'
 import { ToolBadges } from './Tools'
 import './hostsPanel.css'
+import { useUserTimeZone } from '../lib/userTime'
 
 /** SPEC §11.6 host management: configured remote hosts plus the "new host" form; §11.2 tuning fields sit behind 進階. */
 
@@ -177,6 +178,7 @@ function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
 /** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
 export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: 'off' | 'ask' }) {
   const t = useT()
+  useUserTimeZone()
   const v = hostBaselineView(baseline)
   if (v.items.length === 0) {
     return (

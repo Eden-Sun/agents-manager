@@ -3,6 +3,7 @@ import { balanceView, fetchClaudeApiBalance, type ClaudeApiBalance } from '../ap
 import { balanceTooltipLines } from './balanceTooltip'
 import { useT } from '../lib/i18n'
 import './apiBotUsageBar.css'
+import { useUserTimeZone } from '../lib/userTime'
 
 /** 手機標題第二行的 claude-api 預付餘額（#1944）：桌面在工具列的 Balance 格，手機那條收在彈窗裡看不到。沒設定就不畫。 */
 export function ApiBalanceInline() {
@@ -20,7 +21,8 @@ export function ApiBalanceInline() {
       clearInterval(id)
     }
   }, [])
-  const bal = balanceView(balance)
+  const tz = useUserTimeZone()
+  const bal = balanceView(balance, new Date(), tz)
   if (bal.usd === undefined && !bal.loggedOut) return null
   const title = bal.source === 'console' || bal.loggedOut ? balanceTooltipLines(balance, bal, t).join('\n') : t('Anthropic 預付餘額（估計）')
   return (

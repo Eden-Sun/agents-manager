@@ -1,12 +1,14 @@
 import type { useT } from '../lib/i18n'
 import type { BalanceView, ClaudeApiBalance } from '../api/claudeApiBalance'
+import { userTimeZone, zonedParts } from '../lib/userTime'
 
 type Translate = ReturnType<typeof useT>
 
 const hhmm = (iso: string | null | undefined): string => {
   const d = iso ? new Date(iso) : null
   if (!d || Number.isNaN(d.getTime())) return '--:--'
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const z = zonedParts(d, userTimeZone())
+  return `${String(z.hour).padStart(2, '0')}:${String(z.minute).padStart(2, '0')}`
 }
 
 /** Balance 晶片 tooltip 的逐行文字。`t` 由元件的 `useT()` 傳進來（模組層不呼叫 msg()）。 */

@@ -7,11 +7,14 @@ import { useStore } from '../store/store'
 import { anchorAge, balanceTooltipLines } from './balanceTooltip'
 import { Modal } from './Modal'
 import './balanceQuotaChip.css'
+import { userTimeZone, zonedParts } from '../lib/userTime'
+import { useUserTimeZone } from '../lib/userTime'
 
 const hhmm = (iso: string | null | undefined): string => {
   const d = iso ? new Date(iso) : null
   if (!d || Number.isNaN(d.getTime())) return '--:--'
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const z = zonedParts(d, userTimeZone())
+  return `${String(z.hour).padStart(2, '0')}:${String(z.minute).padStart(2, '0')}`
 }
 
 /**
@@ -22,6 +25,7 @@ const hhmm = (iso: string | null | undefined): string => {
  */
 export function BalanceQuotaChip() {
   const t = useT()
+  const tz = useUserTimeZone()
   const phone = useMediaQuery(PHONE_QUERY)
   const balance = useClaudeApiBalance()
   const apiBotId = useStore((s) => s.bots.find((b) => b.kind === 'claude-api')?.id ?? null)
@@ -30,7 +34,7 @@ export function BalanceQuotaChip() {
   const [open, setOpen] = useState(false)
   const [usdText, setUsdText] = useState('')
   const [saving, setSaving] = useState(false)
-  const view = balanceView(balance)
+  const view = balanceView(balance, new Date(), tz)
   if (view.usd === undefined) return null
   const exact = view.source === 'console'
   const usd = view.usd

@@ -1,3 +1,4 @@
+import { useStore } from '../store/store'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { formatCheckedAt, hostBaselineView } from './hostBaseline'
@@ -88,6 +89,7 @@ test('未知（issues: null）又過期：說上次檢查，而不是只說未�
 })
 
 test('上次檢查的時間：跨年要帶年份（1 月看到去年 12 月底的檢查）', () => {
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
   const now = new Date(2027, 0, 1, 1, 0).getTime()
   assert.equal(formatCheckedAt(new Date(2026, 11, 31, 22, 0).toISOString(), now), '2026-12-31 22:00')
   assert.equal(formatCheckedAt(new Date(2027, 0, 1, 0, 30).toISOString(), now), '01-01 00:30')

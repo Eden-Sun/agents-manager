@@ -1,3 +1,4 @@
+import { useStore } from '../store/store'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CACHE_RED_TICK_MS, CACHE_TICK_MS, apiChipCache, cacheLevel, cacheState, chipCache } from './cacheClock.ts'
@@ -29,6 +30,7 @@ test('倒數：剩餘比例＝剩餘／TTL，隨時間往下掉', () => {
 })
 
 test('上次活動不是今天時帶月日；同一天仍只寫時分', () => {
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
   const now = new Date(2026, 9, 11, 15, 0).getTime()
   const last = new Date(2026, 9, 8, 14, 5).toISOString()
   assert.equal(cacheState(last, 3600, now)!.title, '快取已涼（上次活動 10/8 14:05）')
@@ -101,6 +103,7 @@ test('chipCache：壓縮後（cache_compacted）不畫倒數，新回合後恢�
 })
 
 test('跨年：上次活動在去年，tooltip 的時間要帶年份', () => {
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
   const now = new Date(2027, 0, 1, 0, 20).getTime()
   const last = new Date(2026, 11, 31, 23, 30).toISOString()
   assert.equal(cacheState(last, 3600, now)!.title, '快取約 10 分後到期（上次活動 2026/12/31 23:30）')

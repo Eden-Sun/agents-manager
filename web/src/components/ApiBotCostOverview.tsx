@@ -14,6 +14,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { fetchApiBotUsage, fetchApiTurnTimeline, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
 import './apiBotCostOverview.css'
+import { useUserTimeZone, userTimeZone, zonedParts } from '../lib/userTime'
 
 export interface OverviewCategory {
   key: string
@@ -59,6 +60,7 @@ export function ApiBotCostOverview({
   onJumpToTurn,
 }: ApiBotCostOverviewProps) {
   const t = useT()
+  useUserTimeZone()
   const [data, setData] = useState<ApiBotCostOverviewData | null>(initialData ?? null)
   const [loading, setLoading] = useState<boolean>(!initialData)
   const [error, setError] = useState<string | null>(null)
@@ -80,7 +82,8 @@ export function ApiBotCostOverview({
         if (!alive) return
 
         const now = new Date()
-        const todayLocal = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+        const zn = zonedParts(now, userTimeZone())
+        const todayLocal = `${zn.year}-${String(zn.month).padStart(2, '0')}-${String(zn.day).padStart(2, '0')}`
         const todayUtc = now.toISOString().slice(0, 10)
         const isToday = (ts: string | null) => {
           if (!ts) return false
@@ -430,8 +433,9 @@ function formatTimeStr(isoStr: string): string {
   try {
     const d = new Date(isoStr)
     if (Number.isNaN(d.getTime())) return isoStr
-    const hh = String(d.getHours()).padStart(2, '0')
-    const mm = String(d.getMinutes()).padStart(2, '0')
+    const z = zonedParts(d, userTimeZone())
+    const hh = String(z.hour).padStart(2, '0')
+    const mm = String(z.minute).padStart(2, '0')
     const ss = String(d.getSeconds()).padStart(2, '0')
     return `${hh}:${mm}:${ss}`
   } catch {

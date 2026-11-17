@@ -1,4 +1,5 @@
 import { msg, t } from './i18n'
+import { userTimeZone, zonedParts } from './userTime'
 
 /**
  * 主力晶片的 prompt cache 倒數（SPEC §6.5j）：晶片原本的底色就是倒數，不另加元素、不改尺寸。
@@ -43,13 +44,14 @@ export function cacheLevel(remainingSecs: number): CacheLevel {
 
 function clock(t: Date, nowMs: number): string {
   const p = (n: number) => String(n).padStart(2, '0')
-  const time = `${p(t.getHours())}:${p(t.getMinutes())}`
-  const now = new Date(nowMs)
-  const sameDay = t.getFullYear() === now.getFullYear() && t.getMonth() === now.getMonth() && t.getDate() === now.getDate()
+  const z = zonedParts(t, userTimeZone())
+  const time = `${p(z.hour)}:${p(z.minute)}`
+  const now = zonedParts(nowMs, userTimeZone())
+  const sameDay = z.year === now.year && z.month === now.month && z.day === now.day
   if (sameDay) return time
   // 跨年要帶年份：去年 12 月底的活動在 1 月看不出是哪一年（tooltip 寫的是「上次活動」）。
-  const head = t.getFullYear() === now.getFullYear() ? '' : `${t.getFullYear()}/`
-  return `${head}${t.getMonth() + 1}/${t.getDate()} ${time}`
+  const head = z.year === now.year ? '' : `${z.year}/`
+  return `${head}${z.month}/${z.day} ${time}`
 }
 
 /**
