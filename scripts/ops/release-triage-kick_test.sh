@@ -834,6 +834,11 @@ RACE_ROLE=b bash "$SCRIPT" > "$ROOT/race-b.log" 2>&1 & RACE_B=$!
 wait "$RACE_A"; wait "$RACE_B"
 equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "$AGM_DIR/race-b-started" ] && echo 1 || echo 0)"
 equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
+# 診斷（#1964：macOS 夜間派了兩次，原因未定）：不一致時把兩輪的 log 與呼叫紀錄印出來，下一輪 macOS 就看得到是 guard 沒擋住還是 rm stub 沒攔到。
+if [ "$(assigns)" != "1" ]; then
+  for f in "$ROOT/race-a.log" "$ROOT/race-b.log" "$AGM_DIR/calls.log" "$AGM_DIR/release-triage.log"; do echo "--- $f"; sed 's/^/    /' "$f" 2>/dev/null | head -20; done
+  ls "$AGM_DIR" | sed 's/^/    ls: /'
+fi
 teardown
 
 # 9. daemon 的 Claude API 分診（#1919）：API 全包＝不派協調者、不查額度、不標 dispatched。
