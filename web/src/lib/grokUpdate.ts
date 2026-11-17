@@ -15,7 +15,7 @@ export interface GrokUpdatePlan {
 }
 
 export function grokUpdatePlan(item: UpstreamItem | null | undefined): GrokUpdatePlan | null {
-  if (!item || item.kind !== 'grok' || !item.hasUpdate || !item.target) return null
+  if (!item || item.autoUpdate || item.kind !== 'grok' || !item.hasUpdate || !item.target) return null
   const hosts = item.hosts.filter((h) => h.behind).map((h) => ({ host: h.host, from: h.installedVersion }))
   if (hosts.length === 0) return null
   return { target: item.target, hosts, command: GROK_UPDATE_COMMAND }

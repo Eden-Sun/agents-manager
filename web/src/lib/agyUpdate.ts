@@ -12,7 +12,7 @@ export interface AgyUpdatePlan {
 }
 
 export function agyUpdatePlan(item: UpstreamItem | null | undefined): AgyUpdatePlan | null {
-  if (!item || item.kind !== 'agy' || !item.hasUpdate || !item.target) return null
+  if (!item || item.autoUpdate || item.kind !== 'agy' || !item.hasUpdate || !item.target) return null
   const hosts = item.hosts.filter((h) => h.behind).map((h) => ({ host: h.host, from: h.installedVersion }))
   if (hosts.length === 0) return null
   return { target: item.target, hosts }

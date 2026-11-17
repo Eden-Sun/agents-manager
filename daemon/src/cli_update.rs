@@ -491,6 +491,10 @@ pub async fn post_cli_update(
     body: Option<Json<CliUpdateIn>>,
 ) -> Result<Response, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
+    let attempts_file = crate::runners::upstream_update::attempts_path(&app.data_dir);
+    if let Some(k) = b.kind.as_deref() {
+        crate::runners::upstream_update::clear_attempt(&attempts_file, &host, k);
+    }
     let v = start(&app, &headers, &host, b.kind.as_deref(), b.target_version.as_deref(), Arc::new(Real)).await?;
     Ok((StatusCode::ACCEPTED, Json(v)).into_response())
 }

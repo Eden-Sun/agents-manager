@@ -139,6 +139,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/settings/time-zone` | Bot 與 User 皆可讀；回 `{"time_zone","utc_offset"}`（如 `Asia/Taipei`、`+8`） |
 | HEAD | `/api/settings/time-zone` | 同 GET |
+| GET | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"claude":false,"codex":false,"agy":false,"grok":false}` |
+| HEAD | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | POST | `/api/push/presence` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -409,6 +411,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身份／permit 需和驗證憑證一致 |
 | PUT | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/settings/time-zone` | User-only；Bot 與 AGM role 均 403 `user_only`；body `{"time_zone":"America/New_York"}`，寫入 `[agents] user_time_zone`；不合法的 IANA 名稱回 400 `{"error":"bad_time_zone"}`；回同 GET 形狀。新啟動的 bot 套用 |
+| PUT | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 403 `user_only`；body `{"codex":true}`（部分欄位可），更新 `[updates] auto`；回同 GET 形狀 |
 | PUT | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -2560,6 +2563,19 @@ WS（每則帶 `update_id`／`host`／`session`／`target_version`／`manual_upg
   `installed_version`／`required_version` 是 hook 腳本的版本號（`v8` 的 8）。
 - `error`：這一輪讀不到的原因（`主機未連線`、ssh 逾時、`這台找不到 herdr`…）；此時 `items` 還是上一次成功的，不當成「沒有」。
 - `auto_install`（只有 daemon 自動裝過的列才有，`grok`／`antigravity-cli`，issue #1871）：`{"ok":bool,"state":"current"|…|null,"error":string|null,"at":"…"}`。該主機 grok／agy 已登入且那一家 `not_installed` 時，巡檢那一輪裝一次（每主機每家每個 daemon 行程最多一次，失敗不重試，重啟 daemon 才再試）；結果同時推 WS `herdr_integration_auto_install`。
+
+### 12.7d CLI 自動更新設定 `GET`／`PUT /api/settings/auto-update`
+
+設定各 CLI 的自動更新（不通知）開關。
+- 支援的 kind：`claude`、`codex`、`agy`、`grok`（`herdr` 更新會重啟 herdr server 導致所有 bot 中斷，不支援自動更新）。
+- 預設全關，設定持久化於 `config.toml` 的 `[updates] auto = ["codex", ...]`，支援熱重讀。
+- `GET /api/settings/auto-update`：回 `{"claude":false,"codex":true,"agy":false,"grok":false}`。
+- `PUT /api/settings/auto-update`：User-only（Bot 回 403 `user_only`）；傳入同形狀（可帶部分欄位，如 `{"codex": true}`），回傳更新後的完整設定。
+- 巡檢與通知：
+  - 開啟自動更新的 kind 在 upstream 巡檢發現有新版時，自動對落後主機執行安裝；同一 (host, kind, target) 只嘗試一次（記錄於 `<data_dir>/auto-update-attempts.json`，daemon 重啟後亦不重試同一版），失敗也不重試同一版，直到出新版或使用者手動更新。
+  - 被 kind 停用的主機不更新。
+  - 開啟自動更新的 kind 不送新版本推播／通知，快照 item 帶 `"auto_update": true`，web 的 grok／agy／codex／claude 更新 plan 在 `auto_update` 為真時回 null（chip 不顯示）。
+  - 自動安裝失敗時，送出系統通知／push，包含主機名稱、kind 與失敗原因。
 
 `POST /api/hosts/{name}/herdr-integration`：`{"name":"claude"}`。只由使用者在設定頁「更新檢查」確認後送；在那台跑 `herdr integration install <name>`（逾時 60 秒），再讀一次狀態。
 

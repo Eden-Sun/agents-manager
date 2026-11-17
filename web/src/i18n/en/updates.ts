@@ -142,6 +142,9 @@ export default {
   '知道了': 'Got it',
   '先留著': 'Keep for now',
   // 更新檢查（components/UpdateCheckPanel.tsx）
+  '自動更新（不通知）': 'Auto-update (no notifications)',
+  '有新版自動安裝，不跳通知；跑著的 bot 重啟後才換版（codex 會重啟閒置的 codex bot）。失敗時仍會通知。': 'Automatically install new versions without notifications; running bots will only switch versions after restarting (codex will restart idle codex bots). You will still be notified upon failure.',
+  '{kind} 自動更新': '{kind} auto-update',
   '{kind} 更新沒開始：{reason}': '{kind} update did not start: {reason}',
   '{host} 的 {name} integration 已安裝': '{host}: {name} integration installed',
   '{host} 的 {name} integration 已更新': '{host}: {name} integration updated',

@@ -3210,6 +3210,20 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   遠端落後的那列照樣標「可更新」但不給按鈕、寫原因。
 - 更新動作都要確認：CLI 沿用 §6.9 的 `cli-update`（綁確認框那一版）；herdr 是危險樣式（所有 Bot 中斷）；integration 的確認框寫明會改那台的 agent 設定檔（手動「安裝」鈕的確認框寫明改 `~/.grok`／`~/.gemini` 的 hook；只有 grok／agy 且工具探測已登入時才顯示鈕；自動安裝沒有確認框，改以通知與 log 讓使用者看得到）。
 
+### 6.9f CLI 自動更新（不通知）
+
+使用者 2026-11-17 需求：「加一個功能自動更新不通知」。
+- **設定**：每個 kind 一個開關：claude／codex／agy／grok（herdr 不提供：更新會重啟 herdr server 導致所有 bot 中斷）。預設全關。存 `config.toml` `[updates] auto = ["codex", ...]`，支援熱重讀。API：`GET`／`PUT /api/settings/auto-update`（User-only）。
+- **觸發與執行**：
+  - `upstream_update` 巡檢 tick 算完狀態後，對開了自動更新的 kind、每台 behind 的主機自動安裝：
+    - claude／codex：呼叫 `cli_update::start`；回 409（該台正在裝）就略過。codex 成功後照既有流程重啟閒置 codex bot；claude 只安裝（跑著的 bot 下次重啟才換版），不自動重啟。
+    - agy：`agy_install::install`（跑著的 bot 不打斷）。
+    - grok：在那台執行 `grok update`（timeout 300s），完成後刷新該台工具版本（`tools::detect`）。
+  - **去重與保護**：同一 (host, kind, target) 只嘗試一次（記錄於 `<data_dir>/auto-update-attempts.json`，daemon 重啟後亦不重試同一版），失敗也不重試同一版，直到出新版或使用者手動更新。被 kind 停用的主機不更新。
+- **不通知與失敗通知**：
+  - 開啟自動更新的 kind 不送「上游有新版可裝」的推播／通知，快照 item 帶 `"auto_update": true`，前端 grok／agy／codex／claude 更新 plan 回 null（chip 不顯示）。
+  - **失敗要通知**：自動安裝失敗時送系統通知／push（照 upstream 通知的寫法），說明哪台哪個 kind 失敗與原因。
+
 ### 6.9e 對話訊息翻譯
 
 對話裡「主要是英文」或「主要是簡體中文」的 assistant 訊息有「翻譯」按鈕。**簡體中文（2026-11-11，使用者：「簡體字也要自動翻成繁體」）不送 API**：`daemon/src/zh_convert.rs` 用內嵌的 OpenCC `s2twp` 字典（ferrous-opencc 0.4，Apache-2.0，純 Rust）在本地轉成台灣繁體，程式碼區塊、行內 code、網址原樣保留；結果寫進同一份 `message-translate/` 快取（model `opencc-s2twp`、`cost_usd` 0），不計費、不受每小時保險絲限制，網頁與推播摘要共用。偵測：簡體專用字（字表 `daemon/src/zh_simplified_chars.txt`，與 `web/src/lib/zhSimplified.ts` 同一份）至少 3 個、佔漢字 5% 以上，假名佔漢字四分之一以上視為日文不算；中英混雜以簡體為主也只轉繁、不送英翻中，主要英文照舊走 LLM。自動翻（`auto`）的預先翻與網頁自動翻都涵蓋簡體；`auto` 關著行為不變。

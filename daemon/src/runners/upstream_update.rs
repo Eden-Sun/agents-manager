@@ -16,6 +16,190 @@ use crate::upstream_update::{
     Sources, GROK_STABLE_URL, HERDR_RELEASES_API, NPM_CLAUDE_LATEST, SWEEP,
 };
 
+const ATTEMPTS_FILE: &str = "auto-update-attempts.json";
+
+pub fn attempts_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(ATTEMPTS_FILE)
+}
+
+pub fn load_attempts(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_attempts(path: &std::path::Path, attempts: &std::collections::HashMap<String, String>) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(attempts)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub fn has_attempted(path: &std::path::Path, host: &str, kind: &str, target: &str) -> bool {
+    let map = load_attempts(path);
+    map.get(&format!("{host}:{kind}")).map(String::as_str) == Some(target)
+}
+
+pub fn record_attempt(path: &std::path::Path, host: &str, kind: &str, target: &str) {
+    let mut map = load_attempts(path);
+    map.insert(format!("{host}:{kind}"), target.to_string());
+    if let Err(e) = save_attempts(path, &map) {
+        tracing::warn!(host, kind, target, error = %e, "auto_update: 寫不進 auto-update-attempts.json");
+    }
+}
+
+pub fn clear_attempt(path: &std::path::Path, host: &str, kind: &str) {
+    let mut map = load_attempts(path);
+    if map.remove(&format!("{host}:{kind}")).is_some() {
+        let _ = save_attempts(path, &map);
+    }
+}
+
+pub async fn send_auto_update_failure(app: &Arc<App>, host: &str, kind: &str, reason: &str) {
+    tracing::warn!(host, kind, reason, "auto_update: 自動安裝失敗");
+    let text = format!("{host} 的 {kind} 自動安裝失敗：{reason}");
+    let ev = json!({
+        "kind": kind,
+        "host": host,
+        "has_update": true,
+        "notify": "error",
+        "error_kind": "auto_update",
+        "text": text,
+        "auto_update": true,
+    });
+    app.emit("upstream_update", ev).await;
+}
+
+async fn auto_install_one(app: &Arc<App>, host: &str, kind: &str, target: &str) {
+    match kind {
+        "claude" | "codex" => {
+            let res = crate::cli_update::start(
+                app,
+                &axum::http::HeaderMap::new(),
+                host,
+                Some(kind),
+                Some(target),
+                Arc::new(crate::cli_update::Real),
+            )
+            .await;
+            match res {
+                Ok(_) => {
+                    tracing::info!(host, kind, target, "auto_update: cli_update started");
+                }
+                Err(crate::lifecycle::LcError::Conflict(_)) => {
+                    tracing::info!(host, kind, target, "auto_update: cli_update conflict, skipping");
+                }
+                Err(e) => {
+                    send_auto_update_failure(app, host, kind, &format!("{e:?}")).await;
+                }
+            }
+        }
+        "agy" => {
+            match crate::agy_install::install(app, host).await {
+                Ok(done) => {
+                    tracing::info!(host, to = %done.to, "auto_update: agy installed successfully");
+                    crate::upstream_update::note_installed(app.as_ref(), "agy", host, &done.to).await;
+                }
+                Err(crate::agy_install::InstallError::Busy(_)) => {
+                    tracing::info!(host, "auto_update: agy install busy, skipping");
+                }
+                Err(e) => {
+                    send_auto_update_failure(app, host, "agy", &format!("{e:?}")).await;
+                }
+            }
+        }
+        "grok" => {
+            let fence = match app.hosts.fence(host).await {
+                Some(f) => f,
+                None => {
+                    send_auto_update_failure(app, host, "grok", "主機不存在或連線中斷").await;
+                    return;
+                }
+            };
+            let timeout = Duration::from_secs(300);
+            let exec_res = if fence.conn().is_local() {
+                let wrapped = "exec 2>&1\ngrok update";
+                match crate::hosts::sh_local(wrapped, timeout).await {
+                    Ok(Some(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+                    Ok(Some(out)) => Err(format!("exit {}：{}", out.status, String::from_utf8_lossy(&out.stderr).trim())),
+                    Ok(None) => Err("超過 300 秒逾時".to_string()),
+                    Err(e) => Err(format!("{e:#}")),
+                }
+            } else {
+                fence.conn().ssh_exec_path_timeout("grok update", timeout).await.map_err(|e| format!("{e:#}"))
+            };
+
+            match exec_res {
+                Ok(_) => {
+                    tracing::info!(host, "auto_update: grok update succeeded");
+                    if let Ok(ht) = crate::tools::detect(app, host).await {
+                        if let Some(t) = ht.tools.get("grok").and_then(|t| t.version.as_deref()) {
+                            crate::upstream_update::note_installed(app.as_ref(), "grok", host, t).await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    send_auto_update_failure(app, host, "grok", &err).await;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub async fn tick_and_auto_install(app: &Arc<App>) -> Vec<Value> {
+    let src = Live(app.clone());
+    let path = last_path(app.as_ref());
+    let auto_cfg = app.cfg.updates_fresh().await;
+    let evs = tick(app.as_ref(), &app.upstream_watch, &src, &path, &auto_cfg.auto).await;
+    for ev in &evs {
+        crate::changelog_translate::kick_detected(app, ev);
+    }
+    run_auto_installs(app, &auto_cfg).await;
+    evs
+}
+
+async fn run_auto_installs(app: &Arc<App>, auto_cfg: &am_config::UpdatesCfg) {
+    let snapshot = app.upstream_watch.snapshot().await;
+    let attempts_file = attempts_path(&app.data_dir);
+
+    for status in snapshot {
+        let kind = &status.kind;
+        if !auto_cfg.is_auto(kind) {
+            continue;
+        }
+        if !status.has_update {
+            continue;
+        }
+        let Some(target) = status.target_version.as_deref().or(status.latest_version.as_deref()) else {
+            continue;
+        };
+
+        for host_disk in &status.hosts {
+            if !host_disk.behind {
+                continue;
+            }
+            let host = &host_disk.host;
+
+            // 被 kind 停用的主機不更新
+            if crate::identity_prefs::kind_disabled(&app.db, host, kind).await {
+                continue;
+            }
+
+            // 同一 (host, kind, target) 只嘗試一次
+            if has_attempted(&attempts_file, host, kind, target) {
+                continue;
+            }
+
+            // 記下嘗試記錄（即使失敗或重啟也不重試同一版）
+            record_attempt(&attempts_file, host, kind, target);
+
+            auto_install_one(app, host, kind, target).await;
+        }
+    }
+}
+
 /// Shared authoritative release discovery for the watcher and scheduled triage CLI.
 /// Changelog publication can lag behind these sources.
 pub async fn fetch_latest(kind: &str) -> Result<String> {
@@ -169,22 +353,17 @@ impl Sources for CachedLive {
 pub fn spawn(app: Arc<App>) {
     // 開機先等工具探測跑完（第一輪延後 60 秒），不然第一輪一台主機都沒有。
     crate::background_loop::spawn_periodic(&app, "upstream update watcher", SWEEP, Duration::from_secs(60), |app| async move {
-        let _guard = tick_mutex().lock().await;
-        let src = Live(app.clone());
-        let path = last_path(&app);
-        // 新版偵測到的那一筆，背景送一次翻譯（#1948）；不 await，不擋偵測迴圈。
-        for ev in tick(&app, &app.upstream_watch, &src, &path).await {
-            crate::changelog_translate::kick_detected(&app, &ev);
-        }
+        tick_and_auto_install(&app).await;
     });
 }
 
 /// 停用／啟用 kind 後手動重算一次 upstream update 快照並廣播。
 pub async fn refresh_now(app: &Arc<App>) {
     let _guard = tick_mutex().lock().await;
+    let auto_cfg = app.cfg.updates_fresh().await;
     let src = CachedLive(Live(app.clone()));
     let path = last_path(app.as_ref());
-    for ev in tick(app.as_ref(), &app.upstream_watch, &src, &path).await {
+    for ev in tick(app.as_ref(), &app.upstream_watch, &src, &path, &auto_cfg.auto).await {
         crate::changelog_translate::kick_detected(app, &ev);
     }
 }
@@ -288,5 +467,31 @@ mod disabled_kind_tests {
 
         // 兩者皆無時回傳 Err，不連網
         assert!(src.upstream("claude").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod auto_update_tests {
+    use super::*;
+
+    #[test]
+    fn attempts_tracking_only_tries_once_until_new_target_or_cleared() {
+        let dir = crate::testing::scratch_dir("auto-update-test");
+        let path = attempts_path(&dir);
+
+        assert!(!has_attempted(&path, "local", "codex", "0.158.0"));
+        record_attempt(&path, "local", "codex", "0.158.0");
+        assert!(has_attempted(&path, "local", "codex", "0.158.0"));
+
+        // 新版本不視為已嘗試
+        assert!(!has_attempted(&path, "local", "codex", "0.159.0"));
+
+        // 其他主機或其他 kind 不受影響
+        assert!(!has_attempted(&path, "remote1", "codex", "0.158.0"));
+        assert!(!has_attempted(&path, "local", "claude", "0.158.0"));
+
+        // 手動更新清除後，可以重新嘗試
+        clear_attempt(&path, "local", "codex");
+        assert!(!has_attempted(&path, "local", "codex", "0.158.0"));
     }
 }

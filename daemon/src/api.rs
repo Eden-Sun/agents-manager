@@ -171,6 +171,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/spawn-authority", get(crate::expert_peers::spawn_authority))
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/settings/time-zone", get(crate::user_settings::get).put(crate::user_settings::put))
+        .route("/settings/auto-update", get(crate::auto_update_settings::get).put(crate::auto_update_settings::put))
         .route("/push/vapid-key", get(crate::webpush::get_vapid_key))
         .route("/push/subscriptions", get(crate::webpush::list).post(crate::webpush::subscribe).delete(crate::webpush::unsubscribe))
         .route("/push/test", post(crate::webpush::test_push))
@@ -839,6 +840,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("PUT", "/api/model-mode", BotRoutePolicy::UserOnly),
     ("PUT", "/api/settings/time-zone", BotRoutePolicy::UserOnly),
+    ("GET", "/api/settings/auto-update", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/settings/auto-update", BotRoutePolicy::UserOnly),
     ("GET", "/api/push/vapid-key", BotRoutePolicy::UserOnly),
     ("GET", "/api/push/subscriptions", BotRoutePolicy::UserOnly),
     ("POST", "/api/push/subscriptions", BotRoutePolicy::UserOnly),
@@ -4583,6 +4586,8 @@ async fn install_agy(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     require_user(&principal)?;
+    let attempts_file = crate::runners::upstream_update::attempts_path(&app.data_dir);
+    crate::runners::upstream_update::clear_attempt(&attempts_file, &name, "agy");
     match crate::agy_install::install(&app, &name).await {
         Ok(done) => {
             // 升好了：上游更新快照立刻跟上，header／設定頁不用等下一輪 10 分鐘巡邏才收起「可更新」。

@@ -137,7 +137,7 @@ export interface ClaudeInstallPlan {
 
 /** Claude fleet 快照有任何主機未到共同目標時持續提供安裝計畫；不依賴一次性 toast 或 active run。 */
 export function claudeInstallPlan(item: UpstreamItem | null | undefined): ClaudeInstallPlan | null {
-  if (!item || item.kind !== 'claude' || !item.hasUpdate || !item.target || item.hosts.length === 0) return null
+  if (!item || item.autoUpdate || item.kind !== 'claude' || !item.hasUpdate || !item.target || item.hosts.length === 0) return null
   const hosts = item.hosts.map((host) => ({ ...host }))
   return {
     target: item.target,
@@ -160,6 +160,7 @@ export function codexInstallPlan(
   hostOf: (bot: Bot) => string,
   upstream?: UpstreamItem | null,
 ): CodexInstallPlan | null {
+  if (upstream?.autoUpdate) return null
   const first = bots.find((b) => b.kind === 'codex' && needsManualInstall(b, runs[b.id]))
   if (!first) return codexUpstreamPlan(bots, runs, hasInFlightTurn, hostOf, upstream)
   const host = hostOf(first)

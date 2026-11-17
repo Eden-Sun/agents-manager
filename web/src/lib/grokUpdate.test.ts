@@ -38,3 +38,7 @@ test('讀不到版本的主機也列（from 是 null），不能因此整顆提�
   const p = grokUpdatePlan(item({ hosts: [{ host: 'mac_builder', installedVersion: null, error: 'timeout', behind: true }] }))
   assert.deepEqual(p?.hosts, [{ host: 'mac_builder', from: null }])
 })
+
+test('autoUpdate 為真時 grokUpdatePlan 回 null', () => {
+  assert.equal(grokUpdatePlan(item({ autoUpdate: true })), null)
+})

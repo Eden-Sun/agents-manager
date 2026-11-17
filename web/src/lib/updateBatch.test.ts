@@ -318,6 +318,7 @@ test('claudeInstallPlan：有一台落後時一次涵蓋所有已安裝主機，
   assert.equal(p.target, '2.1.284')
   assert.deepEqual(p.hosts.map((h) => h.host), ['local', 'mac_builder', 'unreadable'])
   assert.deepEqual(p.installHosts, ['mac_builder', 'unreadable'])
+  assert.equal(claudeInstallPlan({ ...item, autoUpdate: true }), null, 'autoUpdate 時 claudeInstallPlan 回 null')
 })
 
 test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本機優先，通知照 daemon 格式）', () => {
@@ -339,6 +340,7 @@ test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本
   assert.equal(p?.host, 'local', '本機優先')
   assert.equal(p?.notice, 'codex 有新版 0.158.0 → 0.159.0，需安裝後重啟')
   assert.equal(p?.installCount, 0)
+  assert.equal(codexInstallPlan(bots, runs, none, () => 'local', { ...upstream, autoUpdate: true }), null, 'autoUpdate 時 codexInstallPlan 回 null')
   assert.equal(codexInstallPlan(bots, runs, none, () => 'local', { ...upstream, hasUpdate: false }), null)
   assert.equal(codexInstallPlan(bots, runs, none, () => 'local'), null, "claude 的「需安裝」不算 codex 的")
 })

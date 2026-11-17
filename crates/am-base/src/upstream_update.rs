@@ -161,6 +161,9 @@ pub struct UpstreamStatus {
     pub has_update: bool,
     /// 上次真的推過通知的上游版本（去重用）。
     pub notified_version: Option<String>,
+    /// 是否開啟了自動更新（不通知）。
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 /// 純函式：上游結果＋每台主機的磁碟版本 → 快照。版本比較一律用數值（`0.9.9 < 0.9.10`）。
@@ -225,6 +228,7 @@ pub fn build_status(kind: &str, upstream: &Result<String, String>, disks: &[(Str
         error: upstream.as_ref().err().cloned(),
         hosts,
         notified_version: None,
+        auto_update: false,
     }
 }
 
@@ -427,7 +431,13 @@ pub fn last_path(app: &impl crate::capabilities::DataDir) -> PathBuf {
 }
 
 /// 一輪：每個 kind 比一次，快照有變或要通知才推 `upstream_update`。回傳推出去的事件（測試用）。
-pub async fn tick(app: &impl crate::capabilities::Emit, watch: &Watch, src: &dyn Sources, last_file: &Path) -> Vec<Value> {
+pub async fn tick(
+    app: &impl crate::capabilities::Emit,
+    watch: &Watch,
+    src: &dyn Sources,
+    last_file: &Path,
+    auto_kinds: &[String],
+) -> Vec<Value> {
     let mut emitted = Vec::new();
     for kind in KINDS {
         let (upstream, checked_at) = watch.upstream(src, kind).await;
@@ -437,6 +447,8 @@ pub async fn tick(app: &impl crate::capabilities::Emit, watch: &Watch, src: &dyn
             disks.push((host, r));
         }
         let mut status = build_status(kind, &upstream, &disks, Some(checked_at));
+        let is_auto = auto_kinds.iter().any(|k| k == kind);
+        status.auto_update = is_auto;
         let mut last = load_last(last_file);
         let prev = watch.snapshot.lock().await.get(kind).cloned();
         let notify = if should_notify(&status, last.get(kind).map(String::as_str)) {
@@ -446,7 +458,11 @@ pub async fn tick(app: &impl crate::capabilities::Emit, watch: &Watch, src: &dyn
                 // 記不下來下一輪會再推一次；寧可重複也不要漏。
                 tracing::warn!(kind, error = %e, "upstream_update: 寫不進 last_notified");
             }
-            Some("update")
+            if is_auto {
+                None
+            } else {
+                Some("update")
+            }
         } else if status.error.is_some() && prev.as_ref().is_none_or(|p| p.error.is_none()) {
             Some("error")
         } else {

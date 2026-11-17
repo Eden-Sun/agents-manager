@@ -225,7 +225,7 @@
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.281 (Claude Code)", "codex-cli 0.157.0");
 
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let c = of(&evs, "claude").expect("第一輪要推");
         assert_eq!(c["notify"], "update");
         assert!(c["text"].as_str().unwrap().contains("2.1.283"));
@@ -235,15 +235,15 @@
         assert!(of(&evs, "codex").unwrap()["text"].is_null());
 
         // 同一版第二輪：什麼都不推（快照沒變、已通知過）。
-        assert!(tick(&e.app, &w, &src, &last).await.is_empty(), "同一版不重複通知");
+        assert!(tick(&e.app, &w, &src, &last, &[]).await.is_empty(), "同一版不重複通知");
         // daemon 重啟（新的 Watch）也不重報：去重記在檔案。
         let w2 = Watch::default();
-        let evs = tick(&e.app, &w2, &src, &last).await;
+        let evs = tick(&e.app, &w2, &src, &last, &[]).await;
         assert!(evs.iter().all(|e| e["notify"].is_null()), "重啟後同一版不重報：{evs:?}");
 
         // claude 自己下載好了：快照改成沒有更新，推一次（web 收掉），不通知。
         src.set_disk("claude", "2.1.283 (Claude Code)");
-        let evs = tick(&e.app, &w2, &src, &last).await;
+        let evs = tick(&e.app, &w2, &src, &last, &[]).await;
         let c = of(&evs, "claude").unwrap();
         assert_eq!(c["has_update"], false);
         assert!(c["notify"].is_null());
@@ -285,13 +285,13 @@
         let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
         src.set_upstream("grok", Ok("1.0.47"));
 
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let g = of(&evs, "grok").expect("grok 落後要推");
         assert_eq!((g["notify"].as_str(), g["has_update"].as_bool()), (Some("update"), Some(true)));
         assert!(g["text"].as_str().unwrap().contains("grok update"));
-        assert!(tick(&e.app, &w, &src, &last).await.is_empty(), "同一版不重複通知");
+        assert!(tick(&e.app, &w, &src, &last, &[]).await.is_empty(), "同一版不重複通知");
         src.set_disk("grok", "grok 1.0.47 (abcdef012345)");
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let g = of(&evs, "grok").unwrap();
         assert_eq!(g["has_update"], false);
         assert!(g["notify"].is_null(), "裝好了只收掉提示，不再通知");
@@ -324,13 +324,13 @@
         let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
         src.set_disk("agy", "1.4.2");
 
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let a = of(&evs, "agy").expect("agy 落後要推");
         assert_eq!((a["notify"].as_str(), a["has_update"].as_bool()), (Some("update"), Some(true)));
         assert_eq!(a["hosts"][0]["installed_version"], "1.4.2");
-        assert!(tick(&e.app, &w, &src, &last).await.is_empty(), "同一版不重複通知");
+        assert!(tick(&e.app, &w, &src, &last, &[]).await.is_empty(), "同一版不重複通知");
         src.set_disk("agy", "1.4.5");
-        let a = of(&tick(&e.app, &w, &src, &last).await, "agy").cloned().unwrap();
+        let a = of(&tick(&e.app, &w, &src, &last, &[]).await, "agy").cloned().unwrap();
         assert_eq!(a["has_update"], false);
         assert!(a["notify"].is_null(), "升好了只收掉提示，不再通知");
     }
@@ -343,7 +343,7 @@
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
         src.set_disk("agy", "1.4.2");
-        tick(&e.app, w, &src, &last).await;
+        tick(&e.app, w, &src, &last, &[]).await;
         assert!(w.snapshot().await.iter().any(|s| s.kind == "agy" && s.has_update));
         note_installed(e.app.as_ref(), "agy", "local", "1.4.5").await;
         let agy = w.snapshot().await.into_iter().find(|s| s.kind == "agy").unwrap();
@@ -356,14 +356,14 @@
         let w = Watch::default();
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.281"), Ok("0.157.0"), "2.1.281", "codex-cli 0.156.1");
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let c = of(&evs, "codex").unwrap();
         assert_eq!(c["notify"], "update");
         assert!(c["text"].as_str().unwrap().contains("需先安裝"));
         // 上游又出了下一版：TTL 內用快取，不會馬上看到——清掉快取模擬過期。
         src.set_upstream("codex", Ok("0.158.0"));
         w.upstream.lock().await.clear();
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         assert_eq!(of(&evs, "codex").unwrap()["notify"], "update", "新的一版要再通知");
         assert_eq!(of(&evs, "codex").unwrap()["latest_version"], "0.158.0");
     }
@@ -376,13 +376,13 @@
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.281"), Ok("0.157.0"), "2.1.281", "codex-cli 0.157.0");
         src.set_disk("herdr", "herdr 0.9.1");
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let h = of(&evs, "herdr").expect("herdr 要推");
         assert_eq!(h["notify"], "update");
         assert_eq!(h["target_version"], "0.9.3");
         assert_eq!(h["hosts"][0]["behind"], true);
         assert!(h["text"].as_str().unwrap().contains("herdr 上游有新版 0.9.3"));
-        assert!(of(&tick(&e.app, &w, &src, &last).await, "herdr").is_none(), "同一版不重複通知");
+        assert!(of(&tick(&e.app, &w, &src, &last, &[]).await, "herdr").is_none(), "同一版不重複通知");
         assert_eq!(load_last(&last).get("herdr").map(String::as_str), Some("0.9.3"));
     }
 
@@ -393,9 +393,9 @@
         let w = Watch::default();
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Err("GitHub HTTP 403 rate limit"), "2.1.283", "codex-cli 0.157.0");
-        tick(&e.app, &w, &src, &last).await;
+        tick(&e.app, &w, &src, &last, &[]).await;
         assert_eq!(*src.calls.lock().unwrap(), 5, "claude、codex、herdr、grok、agy 各問一次");
-        tick(&e.app, &w, &src, &last).await;
+        tick(&e.app, &w, &src, &last, &[]).await;
         assert_eq!(*src.calls.lock().unwrap(), 6, "claude、herdr、grok、agy 用快取，只有失敗的 codex 重問");
     }
 
@@ -406,16 +406,16 @@
         let w = Watch::default();
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Err("連不上 npm registry：dns error"), Ok("0.157.0"), "2.1.281", "codex-cli 0.157.0");
-        let evs = tick(&e.app, &w, &src, &last).await;
+        let evs = tick(&e.app, &w, &src, &last, &[]).await;
         let c = of(&evs, "claude").unwrap();
         assert_eq!(c["notify"], "error");
         assert!(c["text"].as_str().unwrap().contains("dns error"));
         assert!(c["latest_version"].is_null() && c["has_update"] == false);
         // 下一輪的嘗試時間一定不同（毫秒精度）：時間戳變了不算快照變了。
         tokio::time::sleep(Duration::from_millis(5)).await;
-        assert!(of(&tick(&e.app, &w, &src, &last).await, "claude").is_none(), "持續抓不到不重複推");
+        assert!(of(&tick(&e.app, &w, &src, &last, &[]).await, "claude").is_none(), "持續抓不到不重複推");
         src.set_upstream("claude", Ok("2.1.283"));
-        let c = of(&tick(&e.app, &w, &src, &last).await, "claude").cloned().unwrap();
+        let c = of(&tick(&e.app, &w, &src, &last, &[]).await, "claude").cloned().unwrap();
         assert_eq!(c["notify"], "update", "恢復之後照常通知新版");
         assert!(c["error"].is_null());
     }
@@ -435,4 +435,26 @@
         assert_eq!(behind_target_for_host(&e.app, "codex-behind-test", "bt-new").await, None, "已經是新版");
         assert_eq!(behind_target_for_host(&e.app, "codex-behind-test", "bt-missing").await, None);
         assert_eq!(behind_target_for_host(&e.app, "no-such-kind", "bt-old").await, None);
+    }
+
+    /// 開了自動更新的 kind：should_notify 那條通知不送（notify: null），item_json 與快照帶 auto_update: true。
+    #[tokio::test]
+    async fn tick_with_auto_update_suppresses_notification_and_marks_auto_update() {
+        let e = crate::testing::env().await;
+        let w = Watch::default();
+        let last = e.dir.join(LAST_FILE);
+        let src = Fake::new(Ok("2.1.283"), Ok("0.158.0"), "2.1.281", "codex-cli 0.157.0");
+
+        // claude 開自動更新，codex 沒開
+        let auto_kinds = vec!["claude".to_string()];
+        let evs = tick(&e.app, &w, &src, &last, &auto_kinds).await;
+
+        let claude_ev = of(&evs, "claude").expect("claude 快照有變仍會 emit 快照事件");
+        assert!(claude_ev["notify"].is_null(), "開了自動更新不跳通知");
+        assert_eq!(claude_ev["auto_update"], true, "item_json 帶 auto_update: true");
+        assert_eq!(claude_ev["has_update"], true);
+
+        let codex_ev = of(&evs, "codex").expect("codex 沒開自動更新");
+        assert_eq!(codex_ev["notify"], "update", "沒開自動更新照舊通知");
+        assert_eq!(codex_ev["auto_update"], false);
     }

@@ -1071,6 +1071,13 @@ pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)>
             let v = data["latest_version"].as_str()?;
             Some((format!("upstream:{k}:{v}"), plain_payload("有新版", &format!("{} 有新版 {v}", kind_label(k)), &format!("update:{k}"), "/")))
         }
+        // 自動更新失敗通知
+        "upstream_update" if data["notify"] == "error" && data["auto_update"] == true => {
+            let k = data["kind"].as_str()?;
+            let h = data["host"].as_str().unwrap_or("local");
+            let text = data["text"].as_str().unwrap_or("自動更新失敗");
+            Some((format!("auto_update_error:{h}:{k}"), plain_payload("自動更新失敗", text, &format!("auto_update_error:{h}:{k}"), "/")))
+        }
         // 網頁上「已安裝」的結果：成功才通知。
         "cli_update_done" if data["ok"] == true => {
             let k = data["kind"].as_str()?;
@@ -2722,6 +2729,10 @@ pub(crate) mod tests {
         assert_eq!(p["body"], "codex CLI 有新版 0.130.0");
         assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": null})).is_none());
         assert!(update_notice("upstream_update", &json!({"kind": "codex", "latest_version": "1", "notify": "error"})).is_none());
+        let auto_err = json!({"kind": "codex", "host": "local", "notify": "error", "auto_update": true, "text": "local 的 codex 自動安裝失敗：逾時"});
+        let (err_key, err_p) = update_notice("upstream_update", &auto_err).unwrap();
+        assert_eq!(err_key, "auto_update_error:local:codex");
+        assert_eq!(err_p["body"], "local 的 codex 自動安裝失敗：逾時");
         let done = json!({"ok": true, "kind": "claude", "host": "mac_builder", "target_version": "2.1.300"});
         assert_eq!(update_notice("cli_update_done", &done).unwrap().1["body"], "claude CLI 已更新到 2.1.300");
         assert!(update_notice("cli_update_done", &json!({"ok": false, "kind": "claude", "target_version": "2"})).is_none());

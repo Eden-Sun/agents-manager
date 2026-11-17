@@ -18,6 +18,7 @@ export interface UpstreamItem {
   hosts: { host: string; installedVersion: string | null; error: string | null; behind: boolean }[]
   notify: 'update' | 'error' | null
   text: string | null
+  autoUpdate?: boolean
 }
 
 function isRec(v: unknown): v is Record<string, unknown> {
@@ -45,6 +46,7 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
       : [],
     notify,
     text: typeof raw.text === 'string' && raw.text ? raw.text : null,
+    autoUpdate: raw.auto_update === true,
   }
 }
 

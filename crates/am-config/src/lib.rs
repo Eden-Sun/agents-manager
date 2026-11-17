@@ -449,6 +449,25 @@ pub struct ConfigFile {
     /// issue #719 階段 3a：逐台開啟主機一致性補齊（`[host_baseline.sync]`）。沒寫＝每台都 off，既有設定檔的長相不變。
     #[serde(default, skip_serializing_if = "HostBaselineCfg::is_default")]
     pub host_baseline: HostBaselineCfg,
+    /// CLI 自動更新設定（`[updates]`）。
+    #[serde(default, skip_serializing_if = "UpdatesCfg::is_default")]
+    pub updates: UpdatesCfg,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatesCfg {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto: Vec<String>,
+}
+
+impl UpdatesCfg {
+    pub fn is_default(&self) -> bool {
+        self.auto.is_empty()
+    }
+
+    pub fn is_auto(&self, kind: &str) -> bool {
+        self.auto.iter().any(|k| k == kind)
+    }
 }
 
 /// `[host_baseline.sync]` 一台主機的值。`auto` 在階段 3a 一律當 `ask`；讀不懂的值當 `off`（都只記一次 WARN，不讓設定檔載入失敗）。
@@ -2162,7 +2181,14 @@ impl ConfigStore {
         g.cfg.agents.clone()
     }
 
-    /// 檔案內容變了就重讀一次，只換可以熱換的區段（`[build]`、`[agents]`）。mtime 只用來判斷讀取錯誤是否改變；
+    /// `[updates]` 的最新值（CLI 自動更新設定）。
+    pub async fn updates_fresh(&self) -> UpdatesCfg {
+        let mut g = self.inner.lock().await;
+        self.refresh_hot_sections(&mut g);
+        g.cfg.updates.clone()
+    }
+
+    /// 檔案內容變了就重讀一次，只換可以熱換的區段（`[build]`、`[agents]`、`[updates]`）。mtime 只用來判斷讀取錯誤是否改變；
     /// 內容指紋也會偵測相同 mtime 的原子替換，以及壞檔在相同 mtime 下被修好。
     fn refresh_hot_sections(&self, g: &mut Loaded) {
         let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
@@ -2207,6 +2233,10 @@ impl ConfigStore {
                 if cfg.agents != g.cfg.agents {
                     tracing::info!(path = %self.path.display(), "config.toml [agents] changed on disk; using the new values");
                     g.cfg.agents = cfg.agents;
+                }
+                if cfg.updates != g.cfg.updates {
+                    tracing::info!(path = %self.path.display(), "config.toml [updates] changed on disk; using the new values");
+                    g.cfg.updates = cfg.updates;
                 }
             }
             Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be parsed; keeping the in-memory [build]/[agents]"),
@@ -3344,6 +3374,20 @@ model = "gpt-6"
     }
 
     /// 回到預設而被省略序列化的區段（`skip_serializing_if`）要從檔案裡拿掉，不能因為「保留未知鍵」而殘留。
+    #[tokio::test]
+    async fn updates_section_round_trips_and_refreshes_hot() {
+        let (store, path) = store_with("[updates]\nauto = [\"codex\", \"claude\"]\n").await;
+        assert_eq!(store.updates_fresh().await.auto, vec!["codex", "claude"]);
+        assert!(store.updates_fresh().await.is_auto("codex"));
+        assert!(!store.updates_fresh().await.is_auto("grok"));
+
+        // 手改檔案熱重讀
+        std::fs::write(&path, "[updates]\nauto = [\"grok\"]\n").unwrap();
+        assert_eq!(store.updates_fresh().await.auto, vec!["grok"]);
+        assert!(store.updates_fresh().await.is_auto("grok"));
+        assert!(!store.updates_fresh().await.is_auto("codex"));
+    }
+
     #[tokio::test]
     async fn a_section_reset_to_its_default_is_removed_not_kept_as_an_unknown_key() {
         let (store, path) = store_with("[codex]\ninstant_interrupt = true\n\n[[projects]]\npath = \"/tmp\"\nlabel = \"p\"\nid = \"01P\"\n").await;

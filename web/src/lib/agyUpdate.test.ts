@@ -33,6 +33,7 @@ test('沒有新版、沒有落後主機、或不是 agy 的項目都不出 chip'
   assert.equal(agyUpdatePlan(item({ target: null })), null)
   assert.equal(agyUpdatePlan(item({ hosts: [{ host: 'local', installedVersion: '1.4.6', error: null, behind: false }] })), null)
   assert.equal(agyUpdatePlan(item({ kind: 'grok' })), null)
+  assert.equal(agyUpdatePlan(item({ autoUpdate: true })), null)
 })
 
 test('tooltip 寫新版、每台版本與安裝方式；讀不到版本寫明', () => {
