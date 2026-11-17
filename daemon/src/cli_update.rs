@@ -60,10 +60,15 @@ fn lock_value_check() -> &'static str {
     r#"read_lock_value() {
   path=$1
   if [ -L "$path" ]; then
-    value=$(readlink "$path" 2>/dev/null) || return 2
-    [ -n "$value" ] || return 2
-    printf '%s\n' "$value"
-    return 0
+    value=$(readlink "$path" 2>/dev/null)
+    if [ -n "$value" ]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    # `-L` 與 `readlink` 之間鎖可能剛被釋放（owner 的 cleanup 在同一刻 `rm -f`）：已經不在就是「沒有鎖」，不是讀不出來。
+    [ -L "$path" ] && return 2
+    [ -e "$path" ] && return 2
+    return 1
   fi
   [ -e "$path" ] && return 2
   return 1
@@ -3849,6 +3854,56 @@ mod tests {
             assert!(message.contains(LOCKED_MARK), "uncertain process-list result must fail closed for `{label}`: {message}");
             assert!(!contender_ran.exists(), "a failed process-list probe must not remove the live lock (`{label}`)");
         }
+    }
+
+    /// 根因之二（偶發 exit 70 `unknown`）：`[ -L ]` 為真之後、`readlink` 之前鎖被 owner 的 cleanup 刪掉，舊腳本把 readlink 失敗當讀不出來（2）。
+    /// 假 `readlink` 先刪掉 symlink 再失敗，重現那個瞬間：必須回 1（沒有鎖）。鎖真的讀不出來（還在、readlink 壞）仍回 2。
+    #[test]
+    fn lock_value_read_treats_a_link_released_mid_read_as_absent() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-lock-value-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::testing::write_exec(dir.join("readlink"), "#!/bin/sh\n[ -n \"$KEEP\" ] || rm -f \"$1\"\nexit 1\n");
+        let run = |keep: &str| {
+            let link = dir.join("lock");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink("1:N", &link).unwrap();
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{}\nread_lock_value '{}'; echo $?", lock_value_check(), link.display()))
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .env("KEEP", keep)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(run(""), "1", "released between the test and the read: no lock");
+        assert_eq!(run("1"), "2", "a lock that stays but cannot be read is still unknown");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 根因（偶發 exit 70）：探測列出 group 成員後、逐一 `ps -p` 之前，短命成員（installer 的 `sleep`）已結束，舊腳本把它當探測失敗。
+    /// 用假 `ps` 讓成員 2147480000 在列表後消失（不存在的 pid）、成員 11 帶 owner nonce：必須判定 owner 還活著；全部成員都消失則判定已不在（1），不是 2。
+    #[test]
+    fn lock_owner_probe_skips_members_that_exit_after_the_listing() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-lock-owner-ps-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::testing::write_exec(
+            dir.join("ps"),
+            "#!/bin/sh\ncase \"$*\" in\n  *-A*) printf '2147480000 99\\n11 99\\n' ;;\n  *'-p 11 -o command='*) [ -n \"$ONLY_GONE\" ] || echo 'sh AM_CODEX_INSTALL_OWNER=N' ;;\n  *-p*) exit 1 ;;\nesac\n",
+        );
+        let run = |only_gone: &str| {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{}\nlock_owner_alive 99:N; echo $?", lock_owner_check()))
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .env("ONLY_GONE", only_gone)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(run(""), "0", "a vanished member must not make the probe unknown");
+        assert_eq!(run("1"), "1", "when every member is gone the owner is not alive");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The `/bin/sh` process here stands in for the remote command shell started by SSH.
