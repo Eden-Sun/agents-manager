@@ -214,7 +214,7 @@ it('確認後呼叫 applyHostBaseline 帶 plan_rev 與 ids', async () => {
     // 成功結果顯示 backup_id 與各項結果
     const root = document.querySelector('.host-baseline-apply-wrap')!
     assert.match(root.textContent ?? '', /備份 ID：20261025T010203Z-bk01/)
-    assert.match(root.textContent ?? '', /可用這個備份 ID 還原（還原按鈕另案）/)
+    assert.match(root.textContent ?? '', /可用這個備份 ID 還原/)
     assert.match(root.textContent ?? '', /claude\.hooks: 已補齊/)
     assert.match(root.textContent ?? '', /claude\.perm: 已補齊/)
   } finally {

@@ -562,7 +562,7 @@ export default {
   '確認補齊主機設定': 'Confirm Host Baseline Fix',
   '確認補齊': 'Confirm fix',
   '備份 ID：{id}': 'Backup ID: {id}',
-  '可用這個備份 ID 還原（還原按鈕另案）': 'You can restore from this backup ID (restore button coming separately)',
+  '可用這個備份 ID 還原': 'You can restore from this backup ID',
   '未知結果': 'Unknown result',
   '還原備份': 'Restore',
   '{file}：{action}': '{file}: {action}',

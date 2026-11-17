@@ -202,7 +202,7 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
             <span className="apply-backup-id">
               {t('備份 ID：{id}', { id: applyResult.backup_id })}
               <span className="apply-restore-hint">
-                {t('可用這個備份 ID 還原（還原按鈕另案）')}
+                {t('可用這個備份 ID 還原')}
               </span>
             </span>
           ) : null}
