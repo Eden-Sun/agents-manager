@@ -249,6 +249,59 @@ gone   "git 失敗時 .claude/worktrees 照舊掃" "$WT2/target/debug/incrementa
 check  "log 記下 worktree list 失敗" "worktree list 失敗" "$LOG"
 teardown
 
+# 5i. （熱池）remote-cargo/<hash>/shared*/target/*/incremental 底下的 crate 層目錄：整棵久沒動才刪；新的、裡面有近期檔的、
+#     deps、熱池本身、symlink 都不動；有行程在用的也不動（issue：熱池 shared-3 累積 60 GB 而 (a) 永遠碰不到）。
+age_tree() { # age_tree <目錄>：目錄與底下所有東西都改成舊的
+  local f
+  while IFS= read -r f; do old "$f"; done < <(find "$1")
+}
+setup
+POOL="$RC/hashA/shared/target/debug"
+mkdir -p "$POOL/incremental/oldcrate-aaa/s1" "$POOL/incremental/newcrate-bbb" "$POOL/incremental/mixed-ccc/s1" "$POOL/deps" "$RC/hashA/shared/target/release/incremental/oldrel-ddd"
+echo x > "$POOL/incremental/oldcrate-aaa/s1/f"; echo x > "$POOL/incremental/newcrate-bbb/f"; echo x > "$POOL/incremental/mixed-ccc/s1/f"; echo x > "$POOL/deps/libold.rlib"
+echo x > "$RC/hashA/shared/target/release/incremental/oldrel-ddd/f"
+age_tree "$POOL/incremental/oldcrate-aaa"; age_tree "$POOL/deps"; age_tree "$RC/hashA/shared/target/release/incremental/oldrel-ddd"
+# mixed-ccc：目錄與舊檔都舊，但裡面有一個剛寫的檔 → 有近期的東西，保留。
+age_tree "$POOL/incremental/mixed-ccc"; echo y > "$POOL/incremental/mixed-ccc/s1/fresh"
+# symlink crate 指到別處的舊目錄 → 不跟、不刪
+mkdir -p "$ROOT/outside-crate"; echo x > "$ROOT/outside-crate/f"; age_tree "$ROOT/outside-crate"
+ln -s "$ROOT/outside-crate" "$POOL/incremental/linkcrate-eee"
+equals "exit 0" "$(run)" "0"
+gone   "熱池：整棵舊的 crate 目錄被刪" "$POOL/incremental/oldcrate-aaa"
+exists "熱池：新的 crate 目錄留著" "$POOL/incremental/newcrate-bbb"
+exists "熱池：裡面有近期檔的 crate 目錄留著（目錄本身舊）" "$POOL/incremental/mixed-ccc"
+exists "熱池：deps 不刪" "$POOL/deps/libold.rlib"
+gone   "熱池：release profile 的舊 crate 也刪" "$RC/hashA/shared/target/release/incremental/oldrel-ddd"
+exists "熱池：shared 與 target 本身留著" "$POOL"
+exists "熱池：symlink crate 本身留著" "$POOL/incremental/linkcrate-eee"
+exists "熱池：symlink 指到的目錄沒被刪" "$ROOT/outside-crate/f"
+teardown
+
+# 5j. 熱池裡有行程的 cwd 在舊 crate 目錄底下 → 那個目錄不動，其他舊的照刪。
+setup
+POOL="$RC/hashB/shared/target/debug"
+mkdir -p "$POOL/incremental/busycrate-fff" "$POOL/incremental/idle-ggg"
+echo x > "$POOL/incremental/busycrate-fff/f"; echo x > "$POOL/incremental/idle-ggg/f"
+age_tree "$POOL/incremental/busycrate-fff"; age_tree "$POOL/incremental/idle-ggg"
+( cd "$POOL/incremental/busycrate-fff" && exec sleep 30 ) >/dev/null 2>&1 & SLEEPERS="$SLEEPERS $!"
+BUSYPOOL=$!
+for _ in $(seq 1 2000); do [ "$(readlink "/proc/$BUSYPOOL/cwd" 2>/dev/null)" = "$(cd "$POOL/incremental/busycrate-fff" && pwd -P)" ] && break; done
+equals "exit 0" "$(run)" "0"
+exists "熱池：有行程在用的舊 crate 目錄不動" "$POOL/incremental/busycrate-fff/f"
+gone   "熱池：沒人用的舊 crate 目錄照刪" "$POOL/incremental/idle-ggg"
+check  "熱池：log 記下跳過的原因" "有行程在用" "$LOG"
+teardown
+
+# 5k. 熱池的 shared 目錄是 symlink 指到別處 → 整個不跟，那邊的東西不動。
+setup
+mkdir -p "$ROOT/elsewhere-pool/target/debug/incremental/oldx-hhh"; echo x > "$ROOT/elsewhere-pool/target/debug/incremental/oldx-hhh/f"
+age_tree "$ROOT/elsewhere-pool"
+mkdir -p "$RC/hashC"; ln -s "$ROOT/elsewhere-pool" "$RC/hashC/shared"
+equals "exit 0" "$(run)" "0"
+exists "熱池 shared 是 symlink：指到的目錄不被刪" "$ROOT/elsewhere-pool/target/debug/incremental/oldx-hhh/f"
+check  "熱池 shared 是 symlink：log 記下拒絕" "路徑不符預期" "$LOG"
+teardown
+
 # 6. 磁碟水位：90% → 呼叫 ops-alert 一次；50% → 不呼叫。
 setup
 echo 90 > "$FIX/pct"

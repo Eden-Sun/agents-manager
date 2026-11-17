@@ -5,6 +5,8 @@
 # 磁碟滿了才有人發現。由 systemd user timer `com.agm.disk-gc.timer` 每小時跑一次（Linux），純機械不花 LLM。
 #
 #   (a) ~/.cache/agents-manager/remote-cargo/* 頂層目錄超過 DISK_GC_REMOTE_CARGO_DAYS 天沒動、而且沒有行程在用 → 刪（不論 build.remote 開關）
+#   (e) ~/.cache/agents-manager/remote-cargo/*/shared*/target/*/incremental/ 底下的 crate 層目錄：整棵（目錄與裡面的檔）都超過
+#       DISK_GC_POOL_INCREMENTAL_HOURS 小時沒動、而且沒有行程在用 → 刪。熱池本身不刪、deps 不刪（熱池永遠在用，(a) 碰不到它）。
 #   (b) 主樹、各登記 worktree（`git worktree list`，含 ~/project/agm-* 那種不在 .claude 底下的）與 ubuntu-ci 的常駐 clone
 #       （`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`）的 target/*/incremental：超過 DISK_GC_INCREMENTAL_DAYS 天的子目錄 → 刪
 #   (c) 各 worktree（不含主樹、不含 CI clone）的 target/：.fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
@@ -27,10 +29,11 @@ GIT="${DISK_GC_GIT:-git}"
 CI_ROOT="${AGM_CI_ROOT:-$HOME/.cache/agents-manager/ci}"
 REMOTE_DAYS="${DISK_GC_REMOTE_CARGO_DAYS:-7}"
 INC_DAYS="${DISK_GC_INCREMENTAL_DAYS:-2}"
+POOL_HOURS="${DISK_GC_POOL_INCREMENTAL_HOURS:-6}"
 TARGET_DAYS="${DISK_GC_TARGET_DAYS:-7}"
 ALERT_PCT="${DISK_GC_ALERT_PCT:-85}"
 ALERT_FREE_GB="${DISK_GC_ALERT_FREE_GB:-20}"
-for v in REMOTE_DAYS INC_DAYS TARGET_DAYS ALERT_PCT ALERT_FREE_GB; do
+for v in REMOTE_DAYS INC_DAYS TARGET_DAYS POOL_HOURS ALERT_PCT ALERT_FREE_GB; do
   case "${!v}" in ''|*[!0-9]*) echo "disk-gc: ${v} 不是數字（${!v}）" >&2; exit 2 ;; esac
 done
 
@@ -103,6 +106,32 @@ else
     else
       skip "remote-cargo（路徑不符預期或含 symlink，整步放棄）"
     fi
+  fi
+
+  # (e) 熱池（remote-cargo/<hash>/shared*）的 target/*/incremental：只刪 crate 層目錄，而且整棵都沒動才刪。
+  #     cargo 重編既有 unit 只改寫裡面的檔、不一定動目錄 mtime（#1177），所以判斷的是「目錄與底下任何一層有沒有近期的東西」。
+  #     讀不完（find 失敗）一律當成有近期的東西，保留（#1261）。
+  if [ -d "$RC" ] && [ ! -L "$RC" ] && safe_dir "$RC" && cd "$RC" 2>/dev/null; then
+    for h in ./*/; do
+      h="${h%/}"; [ -d "$h" ] && [ ! -L "$h" ] || continue
+      for s in "$h"/shared*; do
+        [ -e "$s" ] || [ -L "$s" ] || continue
+        if [ -L "$s" ] || ! safe_dir "$RC/${s#./}"; then skip "remote-cargo/${s#./}（路徑不符預期或含 symlink）"; continue; fi
+        [ -d "$s" ] || continue
+        for pr in "$s"/target/*; do
+          [ -d "$pr" ] && [ ! -L "$pr" ] || continue
+          inc="$pr/incremental"
+          [ -d "$inc" ] && [ ! -L "$inc" ] || continue
+          while IFS= read -r -d '' x; do
+            name="${x#./}"
+            if under "$CWDS" "$(phys "$RC/$name")" || under "$FDS" "$(phys "$RC/$name")"; then skip "remote-cargo/${name}（有行程在用）"; continue; fi
+            recent=$(find "$x" -mmin -$((POOL_HOURS * 60)) -print -quit 2>/dev/null); rc=$?
+            if [ -n "$recent" ] || [ "$rc" -ne 0 ]; then continue; fi
+            remove "$x" || skip "remote-cargo/${name}（刪除失敗）"
+          done < <(find "$inc" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+        done
+      done
+    done
   fi
 
   # (b)(c) 主樹與各 worktree 的 target/
