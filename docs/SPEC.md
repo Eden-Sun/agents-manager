@@ -4680,7 +4680,7 @@ SQLite 池健康探測獨立於使用 DB 的業務巡邏：每 30 秒檢查池�
      `daemon-swap.sh` 的本機 API 呼叫忽略環境 proxy，並拒絕 redirect，避免把 UI／service token 轉送到別的主機。
      `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（回滾）先把候選 sha 記進 `.rejected`，kick 再確認並推 `ops_alert`；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`。rc=11 表示找不到唯一的舊 daemon 行程、停止後仍存活，或 rollback 時 daemon 行程不唯一；binary 與 DB 保留原樣並回報失敗。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
   5. 任何失敗推 `ops_alert`（同 `source`+`reason` 每小時最多一則，§18.9），並寫 `daemon-update.log`；連續 `AGM_FAIL_ALERT_AFTER`（6）輪沒能完成推 `check_failing`。「有人在忙」「沒有新的綠燈 commit」是正常的等，不算失敗。
-  鎖帶 pid 與時間（執行者不在了就回收，還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
+  鎖帶 pid 與時間（執行者不在且鎖超過 `AGM_LOCK_STALE_SECS`＝120 秒才回收；還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人；mtime 在未來視為時間不可信，不回收並推 `runner_clock_skew` 告警）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。
 - **誰重建**：例行更新由上面那支腳本自己建；有 bot 要在 main 之前的 commit 上線，才走 §18.10 的 rebuild／restart 核准（申請者自己建、AGM 裁示）。
 - **docs-only 不重啟**：換版成功後 `daemon-swap.sh` 把 origin/main short sha 寫進 `supervisor/AGM/daemon-update.built`（回滾不寫）。kick 用
