@@ -186,3 +186,15 @@ fn codex_classify_stop_and_legacy_turn_complete() {
     });
     assert!(matches!(classify("codex", &title_payload), HookKind::TurnComplete { assistant: Some(ref text), .. } if text == r#"{"title":"Some title"}"#));
 }
+
+/// Redacted captures from codex 0.169.0 (`codex exec`, one turn): the stdin Stop payload and the legacy notify argv of the SAME turn
+/// (#1989 live verification). Both must classify to the same session and turn so the shared native-turn key dedups them.
+#[test]
+fn codex_0_169_stop_and_legacy_notify_share_session_and_turn() {
+    let stop: Value = serde_json::from_str(include_str!("../lifecycle/fixtures/codex_0.169_stop.json")).unwrap();
+    let legacy: Value = serde_json::from_str(include_str!("../lifecycle/fixtures/codex_0.169_notify.json")).unwrap();
+    let (HookKind::TurnComplete { session_id: s1, turn_id: t1, .. }, HookKind::TurnComplete { session_id: s2, turn_id: t2, .. }) = (classify("codex", &stop), classify("codex", &legacy)) else { panic!("both must be TurnComplete") };
+    assert_eq!((s1.as_deref(), t1.as_deref()), (Some("SESSION"), Some("TURN")));
+    assert_eq!((s1, t1), (s2, t2));
+    assert!(legacy.get("input-messages").is_some() && stop.get("input-messages").is_none(), "Stop payload is bounded: no accumulated input-messages");
+}

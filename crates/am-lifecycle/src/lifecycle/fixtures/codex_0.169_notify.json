@@ -1,0 +1,11 @@
+{
+  "type": "agent-turn-complete",
+  "thread-id": "SESSION",
+  "turn-id": "TURN",
+  "cwd": "/work",
+  "client": "codex_exec",
+  "input-messages": [
+    "Reply with exactly: ONE"
+  ],
+  "last-assistant-message": "ONE"
+}

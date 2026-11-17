@@ -1323,7 +1323,8 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                         let home = codex_hook_home(env, conn.home().await?)?;
                         am_base::codex_hook::install_remote(&conn, &home, &crate::hosts::remote_root_for(app.instance().as_deref()), app.instance().as_deref()).await
                     }.await;
-                    codex_notification_args(legacy, ready)
+                    // Remote trust lives in the remote config.toml; not read yet, so remote keeps legacy notify.
+                    codex_notification_args(legacy, ready.map(|()| false))
                 } else {
                     legacy
                 }
@@ -1414,13 +1415,20 @@ fn codex_hook_home(env: &Value, home: String) -> anyhow::Result<String> {
     Ok(path)
 }
 
-fn codex_notification_args(legacy: Vec<String>, installed: anyhow::Result<()>) -> Vec<String> {
-    if installed.is_err() {
-        // User configuration errors must not expose their contents in logs.
-        tracing::warn!("Codex Stop hook setup unavailable; retaining legacy notify");
+fn codex_notification_args(legacy: Vec<String>, trusted: anyhow::Result<bool>) -> Vec<String> {
+    match trusted {
+        // Phase two (#1989): the user-trusted stdin Stop hook will run, so drop legacy notify (its argv JSON hits E2BIG).
+        Ok(true) => vec!["-c".into(), "notify=[]".into()],
+        Ok(false) => {
+            tracing::warn!("Codex Stop hook is not trusted yet; retaining legacy notify");
+            legacy
+        }
+        Err(_) => {
+            // User configuration errors must not expose their contents in logs.
+            tracing::warn!("Codex Stop hook setup unavailable; retaining legacy notify");
+            legacy
+        }
     }
-    // Phase one only installs Stop. User review never disables legacy notify here.
-    legacy
 }
 
 /// issue #1884：Bash 工具跑之前先過廣域 kill 守門。同一支 `agents-managerd hook claude`——它看到 PreToolUse 只判斷、不送 daemon、
@@ -4559,9 +4567,10 @@ mod codex_stop_args_tests {
     use crate::testing as tt;
 
     #[test]
-    fn phase_one_always_retains_legacy_notify() {
+    fn legacy_notify_is_dropped_only_for_a_trusted_hook() {
         let legacy = vec!["-c".into(), "notify=[\"legacy-hook\"]".into()];
-        assert_eq!(codex_notification_args(legacy.clone(), Ok(())), legacy);
+        assert_eq!(codex_notification_args(legacy.clone(), Ok(true)), vec!["-c".to_string(), "notify=[]".to_string()]);
+        assert_eq!(codex_notification_args(legacy.clone(), Ok(false)), legacy);
         assert_eq!(codex_notification_args(legacy.clone(), Err(anyhow::anyhow!("unavailable"))), legacy);
     }
 
@@ -4611,6 +4620,17 @@ mod codex_stop_args_tests {
         assert!(!trusted.contains(&"notify=[]".into()));
         assert_eq!(std::fs::read(&hooks_path).unwrap(), hooks);
         assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), reviewed);
+        // Exact trusted hash (what Codex records after review): legacy notify is replaced by notify=[] (phase two, #1989).
+        let command = am_base::hosts::sh_quote(&env.app.data_dir.join("codex-hook.sh").to_string_lossy());
+        let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", am_base::codex_hook::stop_hook_trust_hash(&command));
+        std::fs::write(home.join("config.toml"), &good).unwrap();
+        let phase_two = injected_args(&env.app, &bot, &project, &pane_env).await.unwrap();
+        let mut expected = permission_args("codex", bot.auto_approve != 0);
+        expected.extend(["-c".into(), "notify=[]".into()]);
+        assert_eq!(phase_two, expected);
+        env.app.cfg.update(|cfg| { cfg.codex.stop_hook = false; Ok(()) }).await.unwrap();
+        assert_eq!(injected_args(&env.app, &bot, &project, &pane_env).await.unwrap(), legacy, "switch off: trusted hash changes nothing");
+        env.app.cfg.update(|cfg| { cfg.codex.stop_hook = true; Ok(()) }).await.unwrap();
         bot.inject_hooks = 0;
         assert_eq!(injected_args(&env.app, &bot, &project, &pane_env).await.unwrap(), permission_args("codex", bot.auto_approve != 0));
     }

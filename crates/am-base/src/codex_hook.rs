@@ -213,8 +213,34 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
         })
     }
 }
-/// Install the dispatcher and append its Stop group without reading or writing trust.
-pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>) -> Result<()> {
+/// Hash Codex 0.169 stores in `[hooks.state."<hooks.json>:stop:<group>:0"].trusted_hash` for our canonical Stop handler:
+/// sha256 of the key-sorted compact JSON of the normalized identity (verified against `hooks/list` `currentHash`, #1989).
+pub fn stop_hook_trust_hash(command: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // serde_json::Value objects are BTreeMap-ordered, so serialization is key-sorted.
+    let identity = serde_json::json!({
+        "event_name": "stop",
+        "hooks": [{"async": false, "command": command, "timeout": 5, "type": "command"}],
+    });
+    let digest = Sha256::digest(serde_json::to_vec(&identity).unwrap_or_default());
+    format!("sha256:{}", digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// True only when the user's own `config.toml` already trusts exactly this Stop handler. Read-only; any error means "not trusted".
+pub fn stop_hook_trusted(codex_home: &Path, command: &str, group_index: usize) -> bool {
+    let key = format!("{}:stop:{group_index}:0", codex_home.join("hooks.json").display());
+    let Ok(text) = std::fs::read_to_string(codex_home.join("config.toml")) else { return false };
+    let Ok(doc) = text.parse::<toml::Table>() else { return false };
+    doc.get("hooks")
+        .and_then(|h| h.get("state"))
+        .and_then(|s| s.get(&key))
+        .and_then(|e| e.get("trusted_hash"))
+        .and_then(|v| v.as_str())
+        == Some(stop_hook_trust_hash(command).as_str())
+}
+
+/// Install the dispatcher and append its Stop group without writing trust. Returns whether Codex will already run it (user-trusted).
+pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>) -> Result<bool> {
     crate::private_files::create_private_dir(data_dir)?;
     crate::private_files::create_private_dir(codex_home)?;
     let dispatcher = data_dir.join(CODEX_HOOK_SH);
@@ -229,7 +255,9 @@ pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>)
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(())
+    let installed = std::fs::read_to_string(&hooks)?;
+    let group_index = merge_hooks_json(&installed, &command)?.group_index;
+    Ok(stop_hook_trusted(codex_home, &command, group_index))
 }
 
 /// Remote installation only; user review and legacy notify are unchanged.
@@ -551,5 +579,32 @@ mod tests {
                 "remote_write":write_remote_dispatcher_script("/__AM_ROOT__/installed/codex-hook.sh","#!/bin/sh\nexit 0\n"),
             })
         );
+    }
+
+    /// Real Codex 0.169.0 `hooks/list` `currentHash` for `{"type":"command","command":"/tmp/claude-1000/stopexp.YmY3/collect.sh","timeout":5}` (#1989 live verification).
+    #[test]
+    fn stop_hook_trust_hash_matches_codex_0_169_current_hash() {
+        assert_eq!(
+            stop_hook_trust_hash("/tmp/claude-1000/stopexp.YmY3/collect.sh"),
+            "sha256:1c7ccd958319119de4fa7b5568141442f18cff574b79306ad7d89f620dae251f"
+        );
+    }
+
+    #[test]
+    fn install_local_reports_trust_only_for_the_exact_user_recorded_hash() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-trust");
+        let home = dir.join("codex");
+        let data = dir.join("data");
+        assert!(!install_local(&home, &data, None).unwrap(), "fresh install is untrusted");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        let key = format!("{}:stop:0:0", home.join("hooks.json").display());
+        std::fs::write(home.join("config.toml"), format!("[hooks.state.{key:?}]\ntrusted_hash=\"sha256:stale\"\n")).unwrap();
+        assert!(!install_local(&home, &data, None).unwrap(), "wrong hash is untrusted");
+        let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", stop_hook_trust_hash(&command));
+        std::fs::write(home.join("config.toml"), &good).unwrap();
+        assert!(install_local(&home, &data, None).unwrap());
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), good, "trust file is never written");
+        std::fs::write(home.join("config.toml"), "not = [valid").unwrap();
+        assert!(!install_local(&home, &data, None).unwrap(), "unparseable config is untrusted");
     }
 }

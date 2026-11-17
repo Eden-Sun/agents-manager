@@ -1,0 +1,11 @@
+{
+  "session_id": "SESSION",
+  "turn_id": "TURN",
+  "transcript_path": "/CODEX_HOME/sessions/rollout.jsonl",
+  "cwd": "/work",
+  "hook_event_name": "Stop",
+  "model": "gpt-6.1-sol",
+  "permission_mode": "bypassPermissions",
+  "stop_hook_active": false,
+  "last_assistant_message": "ONE"
+}

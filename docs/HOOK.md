@@ -60,3 +60,5 @@ Claude Code 2.1.296+ 的 `--debug` log 會在每個 command hook 結束時留一
 - **輸出**：JSON，只有 event（白名單）× outcome（`finished`／`completed`／`timed_out`／`cancelled`／`backgrounded`／`failed_to_start`）的 count、`nonzero_status`、`with_duration`（有耗時的總筆數）、p50／p95／max（最近鄰）。`max_ms` 與 `with_duration` 是全體；超過樣本上限時百分位只來自前 N 筆，`percentile_sample` 會標出 N。**不輸出**原始行、command、plugin、matcher、參數——那些是任意文字，不保證不含敏感內容。看不懂的行計入 `skipped_lines`；沒有耗時的行（`timed out`、`cancelled`、`completed with status`…）不算 0、不進百分位。
 - **限制**：量的是 Claude 眼中 hook 本身的耗時，**不能區分 MCP 或模型慢**；跟 `hook_events.received_at`／`processed_at` 的差值（送端戳到 daemon 處理完的延遲，含排隊與重試）是兩回事，不要互相替代。
 - 測試：`scripts/claude-hook-debug_test.sh`（包 `claude-hook-debug_test.py`，自造文字，不碰真實 log）。
+
+Codex 第二階段（#1989）：`[codex] stop_hook=true` 且 Stop handler 已被使用者 trusted（本機）時，daemon 以 `-c notify=[]` 停用 legacy notify，只剩 stdin Stop；否則兩路並存、按 native turn 去重。細節見 SPEC §4.1。
