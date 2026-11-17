@@ -129,6 +129,7 @@ while IFS= read -r f; do
         # 用 #[path] 掛在別的模組底下的檔（掛載點：daemon/src/api.rs、daemon/src/runners/s6_l.rs、daemon/src/remote_cargo.rs、daemon/src/state.rs）；照檔名推會選到零個（#1338、#1983）。
         daemon/src/shell.rs) printf 'api::shell::\n' ;;
         daemon/src/bot_scope_matrix.rs) printf 'api::bot_scope_matrix::\n' ;;
+        daemon/src/shell_identity_delete.rs) printf 'api::shell_identity_delete::\n' ;;
         daemon/src/app_ports_p4sess.rs) printf 'runners::s6_l::app_ports_p4sess::\n' ;;
         # remote_cargo.rs 以 #[path] 把 remote_cargo_tests/<名>.rs 掛成 remote_cargo::<名>；照檔名推會選到零個。
         # reconcile.rs 以 #[path] 把 reconcile_tests/<名>.rs 掛成 reconcile::<名>；照檔名推會選到零個。

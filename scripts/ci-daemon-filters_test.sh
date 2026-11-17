@@ -57,6 +57,7 @@ check "cli:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src
 # 用 #[path] 掛在別的模組底下的檔：照掛載點給字串（api.rs、runners/s6_l.rs、remote_cargo.rs、state.rs）；照檔名推會選到零個（#1338、#1983）。
 check "api::shell:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/shell.rs"
 check "api::bot_scope_matrix:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/bot_scope_matrix.rs"
+check "api::shell_identity_delete:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/shell_identity_delete.rs"
 check "runners::s6_l::app_ports_p4sess:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/app_ports_p4sess.rs"
 check "reconcile::compat_tests:: testing::scratch_leak_guard::" "daemon/src/reconcile_tests/compat_tests.rs"
 check "remote_cargo::tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/remote_cargo_tests/tests.rs"
