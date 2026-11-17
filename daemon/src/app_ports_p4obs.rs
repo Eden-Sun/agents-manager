@@ -157,8 +157,8 @@ impl crate::transcript_read::TranscriptRoots for AppTranscriptRoots<'_> {
         async move { crate::lifecycle::codex_home(self.app, self.bot).await }
     }
 
-    fn user_home(&self) -> Option<std::path::PathBuf> {
-        crate::home::dir()
+    fn agy_home(&self) -> impl std::future::Future<Output = Option<std::path::PathBuf>> + Send + '_ {
+        crate::app_ports_p5::agy_home_of(self.app, self.bot)
     }
 }
 

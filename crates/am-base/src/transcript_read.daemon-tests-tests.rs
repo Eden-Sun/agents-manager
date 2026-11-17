@@ -84,7 +84,7 @@
         local: Option<bool>,
         claude: Option<PathBuf>,
         codex: Option<PathBuf>,
-        home: Option<PathBuf>,
+        agy: Option<PathBuf>,
     }
 
     impl TranscriptRoots for Fake {
@@ -100,13 +100,13 @@
         fn codex_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_ {
             async move { self.codex.clone() }
         }
-        fn user_home(&self) -> Option<PathBuf> {
-            self.home.clone()
+        fn agy_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_ {
+            async move { self.agy.clone() }
         }
     }
 
     fn fake(kind: &'static str) -> Fake {
-        Fake { kind, local: Some(true), claude: None, codex: None, home: None }
+        Fake { kind, local: Some(true), claude: None, codex: None, agy: None }
     }
 
     #[tokio::test]
@@ -121,7 +121,7 @@
         assert_eq!(trusted_roots_for(&f).await, vec![base.join(".codex/sessions")]);
         let mut f = fake("agy");
         assert!(trusted_roots_for(&f).await.is_empty());
-        f.home = Some(base.clone());
+        f.agy = Some(base.clone());
         assert_eq!(trusted_roots_for(&f).await, vec![base.join(".gemini/antigravity-cli/brain")]);
         assert!(trusted_roots_for(&fake("grok")).await.is_empty(), "grok 沒有 transcript root");
     }
@@ -158,4 +158,42 @@
         for bad in ["relative/s.jsonl", "/a/../b/s.jsonl", "/a/b/s.txt", "/a/b\u{7}/s.jsonl"] {
             assert!(!transcript_allowed_for(&f, bad).await, "{bad:?}");
         }
+    
+    /// agy 有效 HOME 的決定：bot env 蓋身份 env；`$HOME`／`~` 以 daemon 家目錄展開；空白的 bot env 不蓋身份；都沒設＝daemon 家目錄。
+    #[test]
+    fn agy_home_is_the_bot_env_over_the_identity_env_over_the_daemon_home() {
+        let d = tmp("agy-home");
+        assert_eq!(agy_home_from(&d, None, None), d);
+        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-"), None), d.join(".agy-"));
+        assert_eq!(agy_home_from(&d, Some("${HOME}/.agy-a"), None), d.join(".agy-a"));
+        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-a"), Some("$HOME/.agy-b")), d.join(".agy-b"), "bot env 蓋身份");
+        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-a"), Some("  ")), d.join(".agy-a"), "空白的 bot env 不蓋");
+        assert_eq!(agy_home_from(&d, None, Some("~/.agy-c")), d.join(".agy-c"), "~ 展開");
+        assert_eq!(agy_home_from(&d, Some("/srv/agy"), None), PathBuf::from("/srv/agy"), "絕對路徑照用");
     }
+
+    /// 身份自訂 HOME 的 agy：自己的 brain 收、別的身份（或預設家目錄）的 brain 拒；symlink 指到 root 外面也拒。
+    #[tokio::test]
+    async fn an_agy_identity_reads_only_under_its_own_home_brain() {
+        let base = tmp("agy-iso");
+        let own = base.join(".agy-a/.gemini/antigravity-cli/brain");
+        let other = base.join(".agy-b/.gemini/antigravity-cli/brain");
+        let plain = base.join(".gemini/antigravity-cli/brain");
+        let outside = tmp("agy-outside");
+        for b in [&own, &other, &plain] {
+            std::fs::create_dir_all(b.join("u1/.system_generated/logs")).unwrap();
+            std::fs::write(b.join("u1/.system_generated/logs/s.jsonl"), "{}\n").unwrap();
+        }
+        std::fs::write(outside.join("s.jsonl"), "{}\n").unwrap();
+        std::os::unix::fs::symlink(&outside, own.join("u2")).unwrap();
+        let s = |p: PathBuf| p.to_string_lossy().into_owned();
+
+        let mut f = fake("agy");
+        f.agy = Some(base.join(".agy-a"));
+        assert!(transcript_allowed_for(&f, &s(own.join("u1/.system_generated/logs/s.jsonl"))).await, "自己的身份 HOME 收");
+        assert!(!transcript_allowed_for(&f, &s(other.join("u1/.system_generated/logs/s.jsonl"))).await, "別的身份的路徑拒");
+        assert!(!transcript_allowed_for(&f, &s(plain.join("u1/.system_generated/logs/s.jsonl"))).await, "預設家目錄的路徑拒");
+        assert!(!transcript_allowed_for(&f, &s(own.join("u2/s.jsonl"))).await, "symlink 指到 root 外面拒");
+        assert!(!local_transcript_allowed_for(&f, &s(other.join("u1/.system_generated/logs/s.jsonl"))).await);
+    }
+}

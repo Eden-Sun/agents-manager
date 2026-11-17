@@ -118,20 +118,30 @@ pub trait TranscriptRoots: Send + Sync {
     fn claude_config_dir(&self) -> impl Future<Output = Option<String>> + Send + '_;
     /// codex 的 `CODEX_HOME`（身份 → bot env → `~/.codex`）；沒有家目錄＝`None`。
     fn codex_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_;
-    /// 使用者的家目錄（agy 的設定目錄只認 `$HOME`，沒有身份切換）。
-    fn user_home(&self) -> Option<PathBuf>;
+    /// agy 這顆 bot 啟動時的有效 HOME（身份 env 的 `HOME` 展開後，再被 bot env 的 `HOME` 蓋掉；沒設＝daemon 的家目錄）。查不到＝`None`。
+    fn agy_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_;
+}
+
+/// agy 的有效 HOME：bot env 的 `HOME` 優先，其次身份 env 的 `HOME`（空白視為沒設）；`$HOME`／`~` 以 daemon 的家目錄展開，
+/// 與 pane env 的展開（`expand_home`）同一套。兩者都沒設＝daemon 的家目錄。
+pub fn agy_home_from(daemon_home: &Path, identity_home: Option<&str>, bot_home: Option<&str>) -> PathBuf {
+    let nonblank = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    match nonblank(bot_home).or_else(|| nonblank(identity_home)) {
+        Some(v) => PathBuf::from(crate::config::expand_home(&v, &daemon_home.to_string_lossy())),
+        None => daemon_home.to_path_buf(),
+    }
 }
 
 /// 這顆本機 bot 的 transcript／rollout 該在哪些目錄底下：claude＝它實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身份 → `~/.claude`）的
-/// `projects/`；codex＝`CODEX_HOME/sessions/`；grok 沒有。子 agent 的身份如果尚未從 pane env 記錄進 DB，就先不收 transcript_path；
+/// `projects/`；codex＝`CODEX_HOME/sessions/`；agy＝它有效 HOME（[`agy_home_from`]）底下的 brain；grok 沒有。子 agent 的身份如果尚未從 pane env 記錄進 DB，就先不收 transcript_path；
 /// 放行所有 `~/.claude-*` 會讓一顆 bot 用自己的 hook token 指定另一個身份的對話檔，之後 UI 的輪詢就會替它讀出來。
 pub async fn trusted_roots_for(src: &impl TranscriptRoots) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     match src.kind() {
         "claude" => roots.extend(src.claude_config_dir().await.map(|d| PathBuf::from(d).join("projects"))),
         "codex" => roots.extend(src.codex_home().await.map(|h| h.join("sessions"))),
-        // agy：設定目錄只認 `$HOME`（沒有身份切換），對話在 `brain/<id>/.system_generated/logs/`。
-        "agy" => roots.extend(src.user_home().map(|h| h.join(".gemini").join("antigravity-cli").join("brain"))),
+        // agy：身份＝換 HOME（影子家目錄），對話在 `<HOME>/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/`。
+        "agy" => roots.extend(src.agy_home().await.map(|h| h.join(".gemini").join("antigravity-cli").join("brain"))),
         _ => {}
     }
     roots

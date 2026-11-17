@@ -39,9 +39,20 @@ impl TranscriptRoots for AppTranscriptRoots<'_> {
         async move { crate::lifecycle::codex_home(self.app, self.bot).await }
     }
 
-    fn user_home(&self) -> Option<PathBuf> {
-        crate::home::dir()
+    fn agy_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_ {
+        agy_home_of(self.app, self.bot)
     }
+}
+
+/// 一顆 agy bot 的有效 HOME（身份 env 的 `HOME`、bot env 的 `HOME` 蓋掉它）；給 [`transcript_read::TranscriptRoots::agy_home`] 用，p4obs 也共用。
+pub(crate) async fn agy_home_of(app: &Arc<App>, bot: &db::Bot) -> Option<PathBuf> {
+    let daemon_home = crate::home::dir()?;
+    let identity_home = match bot.identity.as_deref().filter(|s| !s.is_empty()) {
+        Some(idn) => crate::tools::identity_for_host(app, LOCAL_HOST, idn).await.and_then(|i| i.env.get("HOME").cloned()),
+        None => None,
+    };
+    let bot_home = bot.env().get("HOME").cloned();
+    Some(transcript_read::agy_home_from(&daemon_home, identity_home.as_deref(), bot_home.as_deref()))
 }
 
 // 目前只有測試（`lifecycle::agy_tests`）直接問 root 清單。
