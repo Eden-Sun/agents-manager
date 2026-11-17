@@ -146,6 +146,32 @@
         enrich_agy_payload(&mut wrong_type, "PreInvocation");
         assert_eq!(wrong_type["hookEventName"], "PreInvocation");
         assert_eq!(wrong_type["lastUserInput"], 12345);
+
+        // issue #2094: agy 1.5.4 hook 輸入 JSON 新增 hookEventName、cwd、toolCall.id，支援 payload 自動推導與可選欄位保留
+        let mut from_payload_event = serde_json::json!({
+            "hookEventName": "PreInvocation",
+            "cwd": "/path/to/workdir",
+            "toolCall": {"id": "call_abc", "name": "run_command", "args": {"CommandLine": "echo 1"}}
+        });
+        enrich_agy_payload(&mut from_payload_event, "");
+        assert_eq!(from_payload_event["hookEventName"], "PreInvocation");
+        assert_eq!(from_payload_event["cwd"], "/path/to/workdir");
+        assert_eq!(from_payload_event["toolCall"]["id"], "call_abc");
+
+        // issue #2099: agy 1.5.6 Stop hook 新增 continuation_active
+        let mut stop_with_continuation = serde_json::json!({
+            "hookEventName": "Stop",
+            "continuation_active": true
+        });
+        enrich_agy_payload(&mut stop_with_continuation, "");
+        assert_eq!(stop_with_continuation["hookEventName"], "Stop");
+        assert_eq!(stop_with_continuation["continuation_active"], true);
+
+        // issue #2111: agy 1.5.8 BOM 支援
+        let bom_payload = "\u{feff}{\"conversationId\":\"c-bom\",\"hookEventName\":\"PreInvocation\"}";
+        let parsed_bom = parse_payload(bom_payload);
+        assert_eq!(parsed_bom["conversationId"], "c-bom");
+        assert_eq!(parsed_bom["hookEventName"], "PreInvocation");
     }
 
     const MIB: u64 = 1024 * 1024;

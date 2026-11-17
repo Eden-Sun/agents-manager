@@ -199,6 +199,16 @@
         assert_eq!(v["decision"], "deny");
         assert!(v["reason"].as_str().unwrap().contains("-1"));
 
+        // issue #2094: agy 1.5.4 含 cwd 與 toolCall.id
+        let agy_with_id = r#"{"conversationId":"c","cwd":"/repo","toolCall":{"id":"call-99","name":"run_command","args":{"CommandLine":"pkill -f claude"}}}"#;
+        let v = deny_json("agy", "PreToolUse", agy_with_id).expect("擋");
+        assert_eq!(v["decision"], "deny");
+
+        // issue #2111: stdin 帶有 UTF-8 BOM
+        let agy_bom = "\u{feff}{\"conversationId\":\"c\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"pkill -f claude\"}}}";
+        let v = deny_json("agy", "PreToolUse", agy_bom).expect("擋");
+        assert_eq!(v["decision"], "deny");
+
         let ok = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"lsof -ti :3917 | xargs kill"}}"#;
         assert_eq!(guard("claude", "", ok), Guard::Pass);
     }

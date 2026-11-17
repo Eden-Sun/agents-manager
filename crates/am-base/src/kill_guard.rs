@@ -874,7 +874,8 @@ pub fn guard(provider: &str, event: &str, stdin_text: &str) -> Guard {
 
 /// [`guard`]，log 交給呼叫端（測試收集用）。內部 panic 也接住、放行並記一行：守門自己的錯不能擋掉正常指令。
 pub fn guard_logged(provider: &str, event: &str, stdin_text: &str, log: &mut dyn FnMut(&str)) -> Guard {
-    let Ok(payload) = serde_json::from_str::<Value>(stdin_text) else {
+    let clean = stdin_text.trim_start_matches('\u{feff}');
+    let Ok(payload) = serde_json::from_str::<Value>(clean) else {
         // 事件名在參數裡（agy）或 payload 文字裡看得出是 PreToolUse 才記：其他事件的壞 payload 是 daemon 事件流程的事。
         if event_is_pre(event) {
             log("PreToolUse payload 不是合法 JSON，放行");

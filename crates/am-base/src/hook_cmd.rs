@@ -183,12 +183,25 @@ pub fn hook_body(
 /// agy 1.4.7 起 stdin JSON 可能自帶 `lastUserInput`（字串）；enrich 不動它，原樣傳給 daemon。
 pub fn enrich_agy_payload(payload: &mut serde_json::Value, event: &str) {
     const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    let event_name = if !event.trim().is_empty() {
+        event.trim().to_string()
+    } else {
+        payload
+            .as_object()
+            .and_then(|obj| {
+                obj.get("hookEventName")
+                    .or_else(|| obj.get("hook_event_name"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let Some(obj) = payload.as_object_mut() else { return };
-    let event = event.trim();
-    if !event.is_empty() {
-        obj.insert("hookEventName".into(), serde_json::json!(event));
+    if !event_name.is_empty() {
+        obj.insert("hookEventName".into(), serde_json::json!(event_name));
     }
-    if event != "Stop" {
+    if event_name != "Stop" {
         return;
     }
     let Some(path) = obj.get("transcriptPath").and_then(|v| v.as_str()).filter(|p| p.ends_with(".jsonl")) else { return };
@@ -207,7 +220,8 @@ pub fn enrich_agy_payload(payload: &mut serde_json::Value, event: &str) {
 
 /// Non-object → `{"raw": "<text>"}` so the daemon still sees something.
 pub fn parse_payload(text: &str) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(text) {
+    let clean = text.trim_start_matches('\u{feff}');
+    match serde_json::from_str::<serde_json::Value>(clean) {
         Ok(v) if v.is_object() => v,
         _ => serde_json::json!({ "raw": text }),
     }

@@ -225,3 +225,16 @@
             PathBuf::from("/h/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
         );
     }
+
+    #[test]
+    fn files_with_utf8_bom_are_supported() {
+        let bom_settings = "\u{feff}{\"colorScheme\":\"dark\"}";
+        let out = statusline_merge(bom_settings, "/d/agy-hook.sh state").unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["colorScheme"], "dark");
+
+        let bom_hooks = "\u{feff}{\"other\":{\"enabled\":true}}";
+        let out = hooks_merge(bom_hooks, "agents-manager", "/d/agy-hook.sh").unwrap().unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["other"]["enabled"], true);
+    }

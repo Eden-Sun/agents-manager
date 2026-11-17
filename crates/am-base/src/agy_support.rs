@@ -36,10 +36,11 @@ pub fn hook_name(instance: Option<&str>) -> String {
 pub const HOOK_EVENTS: [&str; 3] = ["SessionStart", "PreInvocation", "Stop"];
 
 fn parse_object(existing: &str, what: &str) -> Result<serde_json::Map<String, Value>> {
-    if existing.trim().is_empty() {
+    let clean = existing.trim_start_matches('\u{feff}').trim();
+    if clean.is_empty() {
         return Ok(Default::default());
     }
-    match serde_json::from_str::<Value>(existing).with_context(|| format!("{what} is not valid JSON"))? {
+    match serde_json::from_str::<Value>(clean).with_context(|| format!("{what} is not valid JSON"))? {
         Value::Object(o) => Ok(o),
         _ => bail!("{what} is not a JSON object"),
     }
