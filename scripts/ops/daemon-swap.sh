@@ -146,6 +146,22 @@ prune_old_db_backups() {
         fi
     done
 }
+write_rejected_marker() { # write_rejected_marker <full sha>; persist rollback decision before stopping services
+    local sha="$1" marker="$AGM_DIR/daemon-update.rejected" tmp trailing_newlines
+    [ ! -L "$marker" ] || return 1
+    if [ -e "$marker" ] && [ ! -f "$marker" ]; then return 1; fi
+    tmp=$(mktemp "$AGM_DIR/daemon-update.rejected.tmp.XXXXXX") || return 1
+    if [ -f "$marker" ] && ! cat "$marker" > "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! grep -qxF -- "$sha" "$tmp"; then
+        if [ -s "$tmp" ]; then
+            trailing_newlines=$(tail -c 1 "$tmp" | wc -l | tr -d '[:space:]')
+            if [ "$trailing_newlines" = 0 ]; then printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+        fi
+        printf '%s\n' "$sha" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    if ! mv -f "$tmp" "$marker"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
 service_capability() {
     # 測試用：注入假的能力探測，才不用真的打 daemon。
     [ -n "${SWAP_CAP_CMD:-}" ] && { "$SWAP_CAP_CMD"; return; }
@@ -805,6 +821,11 @@ rollback() {
     else
         # 沒升 schema：舊 binary 直接開得了現在的 DB，只換 binary 回去。DB 在新 daemon 跑的這段時間
         # 已經寫進新資料（回合、訊息、child 收編…），還原備份會把這些全部抹掉（issue #902）。
+        if write_rejected_marker "$SHA"; then
+            log "候選 sha 已在 rollback 前寫入 rejected 清單"
+        else
+            log "WARN: rollback 前 rejected 清單寫入失敗；kick 結束後會再試並告警"
+        fi
         if ! stop_daemon_for_rollback; then
             log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
             exit 11
@@ -823,6 +844,11 @@ rollback() {
         fi
         log "rolled back pid $(dpid)"
         exit 7
+    fi
+    if write_rejected_marker "$SHA"; then
+        log "候選 sha 已在 rollback 前寫入 rejected 清單"
+    else
+        log "WARN: rollback 前 rejected 清單寫入失敗；kick 結束後會再試並告警"
     fi
     if ! stop_daemon_for_rollback; then
         log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
