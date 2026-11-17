@@ -58,9 +58,20 @@ impl Sources for Live {
         Box::pin(async move {
             // 先拿主機清單再鎖 tools：不要拿著 tools 鎖去等別的鎖。
             let conns = self.0.hosts.list().await;
+            let mut disabled_hosts = std::collections::HashSet::new();
+            if kind != "herdr" {
+                for c in &conns {
+                    if crate::identity_prefs::kind_disabled(&self.0.db, &c.name, kind).await {
+                        disabled_hosts.insert(c.name.clone());
+                    }
+                }
+            }
             let tools = self.0.tools.lock().await;
             let mut out = Vec::new();
             for c in conns {
+                if disabled_hosts.contains(&c.name) {
+                    continue;
+                }
                 let installed = match tools.get(&c.name) {
                     Some(t) if kind == "herdr" => t.herdr_cli.is_some(),
                     Some(t) => t.tools.get(kind).is_some_and(|t| t.installed),
@@ -131,6 +142,15 @@ pub fn spawn(app: Arc<App>) {
     });
 }
 
+/// 停用／啟用 kind 後手動重算一次 upstream update 快照並廣播。
+pub async fn refresh_now(app: &Arc<App>) {
+    let src = Live(app.clone());
+    let path = last_path(app.as_ref());
+    for ev in tick(app.as_ref(), &app.upstream_watch, &src, &path).await {
+        crate::changelog_translate::kick_detected(app, &ev);
+    }
+}
+
 pub fn routes() -> Router<Arc<App>> {
     Router::new().route("/upstream-updates", get(get_status))
 }
@@ -139,4 +159,73 @@ pub fn routes() -> Router<Arc<App>> {
 async fn get_status(State(app): State<Arc<App>>) -> Json<Value> {
     let items: Vec<Value> = app.upstream_watch.snapshot().await.iter().map(item_json).collect();
     Json(json!({ "items": items }))
+}
+
+#[cfg(test)]
+mod disabled_kind_tests {
+    use super::*;
+
+    /// 停用的 CLI（kind_prefs disabled）在 upstream_update 的 hosts 篩選排除，但 herdr 不受影響；啟用後重新列出。
+    #[tokio::test]
+    async fn disabled_kind_is_excluded_from_upstream_hosts() {
+        let env = crate::testing::env().await;
+        let mut tools = std::collections::BTreeMap::new();
+        tools.insert("grok".to_string(), crate::tools::ToolInfo {
+            installed: true,
+            path: Some("/usr/bin/grok".into()),
+            version: Some("1.0.77".into()),
+            logged_in: Some(true),
+        });
+        let ht = crate::tools::HostTools {
+            tools,
+            identities: Default::default(),
+            shell_identities: vec![],
+            utc_offset_secs: None,
+            herdr_cli: Some("herdr 0.9.3".into()),
+            checked_at: crate::db::now(),
+        };
+        env.app.tools.lock().await.insert("local".into(), ht);
+
+        let live = Live(env.app.clone());
+
+        // 預設未停用：grok 與 herdr 都在 hosts 清單
+        let grok_hosts = live.hosts("grok").await;
+        assert!(grok_hosts.contains(&"local".to_string()), "預設應含 local: {grok_hosts:?}");
+        let herdr_hosts = live.hosts("herdr").await;
+        assert!(herdr_hosts.contains(&"local".to_string()), "herdr 應含 local: {herdr_hosts:?}");
+
+        // 停用 local 的 grok
+        crate::identity_prefs::put_kind_disabled(
+            State(env.app.clone()),
+            axum::extract::Path("grok".into()),
+            Json(crate::identity_prefs::KindDisableIn {
+                host: Some("local".into()),
+                disabled: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // 停用後：grok 排除 local，herdr 依然包含 local
+        let grok_hosts = live.hosts("grok").await;
+        assert!(!grok_hosts.contains(&"local".to_string()), "停用後不應含 local: {grok_hosts:?}");
+        let herdr_hosts = live.hosts("herdr").await;
+        assert!(herdr_hosts.contains(&"local".to_string()), "herdr 不受影響: {herdr_hosts:?}");
+
+        // 重新啟用 grok
+        crate::identity_prefs::put_kind_disabled(
+            State(env.app.clone()),
+            axum::extract::Path("grok".into()),
+            Json(crate::identity_prefs::KindDisableIn {
+                host: Some("local".into()),
+                disabled: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // 啟用後：grok 重新出現
+        let grok_hosts = live.hosts("grok").await;
+        assert!(grok_hosts.contains(&"local".to_string()), "啟用後重新含 local: {grok_hosts:?}");
+    }
 }

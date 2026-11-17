@@ -141,8 +141,8 @@ pub async fn kind_disabled(pool: &SqlitePool, host: &str, kind: &str) -> bool {
 
 #[derive(Deserialize)]
 pub struct KindDisableIn {
-    host: Option<String>,
-    disabled: bool,
+    pub host: Option<String>,
+    pub disabled: bool,
 }
 
 /// `GET /api/kind-prefs`：停用中的 `{host, kind}`。
@@ -182,6 +182,7 @@ pub async fn put_kind_disabled(
     .await
     .map_err(up)?;
     app.emit("kind_prefs_changed", json!({"host": host, "kind": kind, "disabled": b.disabled})).await;
+    crate::runners::upstream_update::refresh_now(&app).await;
     Ok(Json(json!({"host": host, "kind": kind, "disabled": b.disabled})))
 }
 
