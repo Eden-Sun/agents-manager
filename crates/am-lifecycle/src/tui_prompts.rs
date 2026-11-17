@@ -1804,6 +1804,25 @@ Grok Build 1.0.46\n\
         assert!(!is_codex_model_migration_prompt(&no_footer), "the migration copy alone is not a prompt");
     }
 
+    /// codex 0.166 safety-block 後的「較安全改寫」選單（#2035）。畫面取自 upstream insta snapshot
+    /// （openai/codex PR #57365，見 fixtures/README-codex-upstream-safety.txt）：游標在 `› 1.`，不是空輸入列。
+    #[test]
+    fn codex_0166_safety_recourse_picker_is_an_open_menu_not_an_idle_composer() {
+        let picker = include_str!("lifecycle/fixtures/codex-upstream-safety-recourse-picker.txt");
+        let lines: Vec<&str> = picker.lines().collect();
+        assert!(!composer_is_idle(&lines));
+        assert!(awaits_menu_choice(picker), "{picker}");
+        assert!(screen_has_answerable_prompt(picker));
+        // 說明框（ⓘ This content can’t be shown）印在選單之上：整段畫面一起仍是開著的選單。
+        let notice = include_str!("lifecycle/fixtures/codex-upstream-safety-block-notice.txt");
+        let full = format!("{notice}\n• Finding an explanation and safer ways to continue…\n\n{picker}");
+        assert!(awaits_menu_choice(&full), "{full}");
+        assert!(screen_has_answerable_prompt(&full));
+        // 引文在上、底下回到空輸入列＝不是選單。
+        let quoted = format!("⏺ 畫面：\n{picker}\n────────\n›\n");
+        assert!(!awaits_menu_choice(&quoted));
+    }
+
     /// 窄 pane 把 `enter/esc confirm · ctrl+c quit` 折成兩行時，遷移選單仍開著。
     #[test]
     fn a_wrapped_migration_footer_is_still_the_prompt() {

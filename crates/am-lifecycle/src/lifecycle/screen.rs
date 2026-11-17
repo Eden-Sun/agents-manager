@@ -3424,3 +3424,18 @@ mod same_or_nearly_same_reply_tests {
         assert!(!is_same_or_nearly_same_reply(reply_a, reply_b));
     }
 }
+
+#[cfg(test)]
+mod codex_safety_recourse_tests {
+    use super::*;
+
+    /// codex 0.166 safety-block 改寫選單（upstream snapshot，#2035）不是 inline banner、也不是 idle 輸入框，
+    /// `› 1. Overview` 不能被當成使用者回音或回覆。
+    #[test]
+    fn the_safety_recourse_picker_is_not_a_banner_or_idle_prompt() {
+        let picker = include_str!("fixtures/codex-upstream-safety-recourse-picker.txt");
+        let lines: Vec<&str> = picker.lines().collect();
+        assert_eq!(codex_inline_banner(&lines), None);
+        assert!(!lines.iter().any(|l| is_codex_idle_prompt(l)));
+    }
+}

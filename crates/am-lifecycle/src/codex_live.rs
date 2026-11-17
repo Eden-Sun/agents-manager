@@ -537,6 +537,7 @@ async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
 pub fn picker_open(screen: &str) -> bool {
     crate::tui_prompts::is_codex_model_migration_prompt(screen)
         || rate_limit_switch_prompt_open(screen)
+        || safety_recourse_picker_open(screen)
         // 啟動時的更新選單（預設選 Update now）：`/model`、`/fast` 打進去、Enter 就是替使用者按下「現在更新」。
         || crate::codex_update::update_menu_open(screen)
         || model_menu_open(screen)
@@ -589,6 +590,28 @@ pub fn rate_limit_switch_prompt_open(screen: &str) -> bool {
         && rate_limit_footer_open(&lines)
 }
 
+/// codex 0.166 safety-block 後的「較安全改寫」選單（openai/codex#57365；upstream snapshot
+/// `daybreak_recourse_picker`，#2035）：標題 `Here are a few ways I can help:`、說明
+/// `Choosing a rewrite sends it in a new chat.`、帶游標的編號選項、腳註 `enter select · esc back`。
+/// 它取代輸入框，是使用者的決定（選一個會在新 chat 送出改寫）：不能打字進去、也不替使用者按。
+pub fn safety_recourse_picker_open(screen: &str) -> bool {
+    const TAIL_LINES: usize = 20;
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail_raw = &raw[raw.len().saturating_sub(TAIL_LINES)..];
+    let lines: Vec<String> = tail_raw
+        .iter()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase())
+        .collect();
+    let numbered = |l: &String| {
+        let b = l.trim_start_matches('›').trim_start();
+        b.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    lines.iter().any(|l| l.starts_with("choosing a rewrite sends it in a new chat"))
+        && lines.iter().any(|l| l.starts_with("› 1. "))
+        && lines.iter().filter(|l| numbered(l)).count() >= 2
+        && rate_limit_footer_open(&lines)
+}
+
 /// 腳註整行是 `enter select · esc back`。窄 pane 會在 `·` 後面折成兩行，最後一行就不再同時含這兩段。
 fn rate_limit_footer_open(lines: &[String]) -> bool {
     if lines.last().is_some_and(|l| l.starts_with("enter select") && l.contains("esc back")) {
@@ -609,7 +632,7 @@ fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
 async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<bool, ()> {
     for _ in 0..PICKER_ESCAPES {
         let screen = read(client, pane_id).await?;
-        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || crate::codex_update::update_menu_open(&screen) {
+        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || safety_recourse_picker_open(&screen) || crate::codex_update::update_menu_open(&screen) {
             return Ok(false);
         }
         if !picker_open(&screen) && !transcript_browser_open(&screen) {
@@ -1261,6 +1284,20 @@ pub async fn send_resume(client: &HerdrClient, pane_id: &str) -> Result<(), &'st
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests {
     use super::{fast_plan, needs_second_toggle, FastPlan};
+
+    /// codex 0.166 safety-block 的改寫選單（upstream snapshot，#2035）開著時，不能往裡面打 prompt。
+    #[test]
+    fn codex_0166_safety_recourse_picker_blocks_typing() {
+        let picker = include_str!("lifecycle/fixtures/codex-upstream-safety-recourse-picker.txt");
+        assert!(super::picker_open(picker), "{picker}");
+        let idle = "  Ask me\n\n› Ask Codex to do anything\n";
+        assert!(!super::picker_open(idle));
+        // 窄 pane 把腳註折成兩行時仍開著。
+        let wrapped = picker.replace("  enter select · esc back", "  enter select ·\n  esc back");
+        assert!(super::picker_open(&wrapped), "{wrapped}");
+        // 只引說明字樣、沒有選項與腳註＝不是選單。
+        assert!(!super::picker_open("Choosing a rewrite sends it in a new chat.\n› Ask Codex to do anything\n"));
+    }
 
     /// #393：`/fast on|off` 不是 slash 形式（0.154.0 實測會被當一般 prompt 送給模型），所以只能靠開關＋讀畫面。
     /// 已知現況就只在不對時按一下；未知現況以前直接拒絕（unknown_fast_tier），現在先按一下、讀回、方向錯才再按。
