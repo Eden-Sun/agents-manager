@@ -214,6 +214,16 @@ AM_USAGE_DONE=0
         assert!(parse_claude_usage_report("{\"usage_report\":{\"rate_limits\":{\"limi", None).is_none());
     }
 
+    /// 回歸保護：main 的 probe 不折行（pane 讀法 recent_unwrapped 還原軟折行），超長的一行 usage_report 應直接解得開。
+    #[test]
+    fn a_long_unwrapped_usage_report_line_parses() {
+        let pad = "x".repeat(6000);
+        let line = format!(r#"{{"usage_report":{{"pad":"{pad}","rate_limits":{{"limits":[{{"kind":"session","percent":95,"resets_at":"2026-10-14T18:00:00Z"}},{{"kind":"weekly_all","percent":81,"resets_at":"2026-10-19T23:59:00Z"}}]}}}}}}"#);
+        let q = parse_claude_usage_report(&line, Some("cc1")).expect("long single-line report");
+        assert_eq!(q.five_hour.unwrap().used_pct, 95.0);
+        assert_eq!(q.seven_day.unwrap().used_pct, 81.0);
+    }
+
     #[test]
     fn session_and_week_all_models_map() {
         let q = parse_claude_usage(SCREEN, at("2026-09-06T10:00:00+08:00"), Some("cc0")).unwrap();
