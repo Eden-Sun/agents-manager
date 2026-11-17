@@ -13,12 +13,13 @@
 #      多台（`remote-cargo --list-hosts` 列出兩台以上，#1956）時逐台各帶 `--host <名字>` 跑，一台失敗不擋下一台。
 #   6. 成功＝記成功的 sha（`STATE`；多台時每台一份 `STATE.<名字>`）。暫時失敗（124 逾時，或 128 以上的訊號中斷）記在 `<狀態檔>.retry`：同一個 sha 最多 3 次，
 #      第 2、3 次之間各隔一輪（退避）；用完就放棄這個 sha，等下一版 main。其他 cargo 失敗（例如編譯錯）視為這個 sha 有問題，直接放棄，不重試。
+#   7. 有別的 bot 的 remote-cargo 在跑或排隊時不預熱（開跑前與每步之前都看一次）；跑到一半有人來就讓開（不記失敗次數）。
 #
 # 快取 key：遠端目錄 hash 的種子是 git common dir（remote_cargo.rs `cache_hash`，#1856），同一個 repo 的預熱 worktree
 # 與 child worktree 對到同一份 `shared/`，所以預熱熱的快取 child 用得到。見 docs/SPEC.md 外部 cargo 那節。
 #
 # 可覆寫（測試用）：AGM_PREWARM_REPO、AGM_PREWARM_WORKTREE、AGM_PREWARM_CONFIG、AGM_PREWARM_DAEMON、AGM_PREWARM_STATE、
-# AGM_PREWARM_FETCH_TIMEOUT。
+# AGM_PREWARM_FETCH_TIMEOUT、AGM_PREWARM_PS（列行程的指令，預設 `ps -eo args=`）。
 set -u
 
 REPO="${AGM_PREWARM_REPO:-$HOME/project/agents-manager}"
@@ -27,11 +28,22 @@ CFG="${AGM_PREWARM_CONFIG:-$HOME/.config/agents-manager/config.toml}"
 DAEMON="${AGM_PREWARM_DAEMON:-$REPO/target/release/agents-managerd}"
 STATE="${AGM_PREWARM_STATE:-$HOME/.cache/agents-manager/remote-cargo-prewarm.sha}"
 FETCH_TIMEOUT="${AGM_PREWARM_FETCH_TIMEOUT:-300}"
+PS_CMD="${AGM_PREWARM_PS:-ps -eo args=}"
 MAX_ATTEMPTS=3
 MARKER="agm-remote-cargo-prewarm"
 
 log() {
     echo "remote-cargo-prewarm: $*"
+}
+
+# 數別的 worktree 在用編譯名額的 remote-cargo helper（`--cwd` 不是本腳本的 ${WT}；本腳本自己的 warm 呼叫不能算進去）。
+others_building() {
+    $PS_CMD 2>/dev/null | awk -v wt="$WT" '
+        index($0, " remote-cargo --config ") && index($0, " --cwd ") {
+            n = split($0, a, " ")
+            for (i = 1; i < n; i++) if (a[i] == "--cwd") { if (a[i + 1] != wt) c++; break }
+        }
+        END { print c + 0 }'
 }
 
 mkdir -p "$(dirname "$STATE")" || exit 0
@@ -127,6 +139,12 @@ prepare_worktree() {
     }
 }
 
+n="$(others_building)"
+if [ "$n" -gt 0 ]; then
+    log "有 ${n} 個 bot 正在用編譯名額，這次不預熱（不記失敗次數，下一輪再試）"
+    exit 0
+fi
+
 prepare_worktree || exit 0
 
 # check.sh 的 Rust 路徑也用臨時 stub：daemon 用 rust-embed 把 web/dist 編進去，預熱不跑 web build（web/dist 是 gitignore 的，不弄髒 worktree）。
@@ -179,6 +197,12 @@ for host in "${pending[@]}"; do
     fi
     rc=0
     for step in "${steps[@]}"; do
+        n="$(others_building)"
+        if [ "$n" -gt 0 ]; then
+            log "有 ${n} 個 bot 開始用編譯名額，預熱讓開（${where} 停在 ${step} 之前，不記失敗次數）"
+            rc=75
+            break
+        fi
         # shellcheck disable=SC2086
         warm $step || rc=$?
         [ "$rc" = 0 ] || break

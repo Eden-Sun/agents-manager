@@ -78,7 +78,7 @@ reset_state() {
 run() {
     env AGM_PREWARM_REPO="$ROOT/repo" AGM_PREWARM_WORKTREE="$WT" AGM_PREWARM_CONFIG="$CFG" \
         AGM_PREWARM_DAEMON="${DAEMON_OVERRIDE:-$ROOT/bin/agents-managerd}" AGM_PREWARM_STATE="$STATE" \
-        AGM_PREWARM_FETCH_TIMEOUT=30 LOG="$LOG" FAKE_RC_FILE="$RC_FILE" PATH="$ROOT/fakebin:$PATH" \
+        AGM_PREWARM_FETCH_TIMEOUT=30 AGM_PREWARM_PS="${PS_OVERRIDE:-true}" LOG="$LOG" FAKE_RC_FILE="$RC_FILE" PATH="$ROOT/fakebin:$PATH" \
         bash "$SCRIPT" 2>&1
 }
 
@@ -301,6 +301,34 @@ equals "service 叫安裝後的腳本" "$(grep -c '^ExecStart=.*/bin/remote-carg
 MANIFEST="$HERE/install-manifest.tsv"
 equals "對照表有腳本列" "$(grep -c '^scripts/ops/remote-cargo-prewarm.sh  *bin/remote-cargo-prewarm.sh  *linux$' "$MANIFEST")" "1"
 equals "對照表有 timer 與 service 列" "$(grep -c '^scripts/ops/systemd/com.agm.remote-cargo-prewarm\.\(service\|timer\) ' "$MANIFEST")" "2"
+
+# 20. 別的 worktree 的 remote-cargo 在用編譯名額 → 這輪不預熱（不叫 helper、不記狀態、不記重試）；清掉後下一輪正常預熱。
+reset_state
+BUSY_PS="$ROOT/bin/ps-busy"
+printf '#!/bin/bash\necho "/x/agents-managerd remote-cargo --config /c --cwd /home/u/other-wt -- test -p a"\n' > "$BUSY_PS"
+chmod +x "$BUSY_PS"
+push_new_main three
+out=$(PS_OVERRIDE="$BUSY_PS" run); rc=$?
+equals "別的 worktree 在用名額 exit 0" "$rc" "0"
+equals "別的 worktree 在用名額不叫 helper" "$(count daemon)" "0"
+equals "別的 worktree 在用名額不記成功" "$(exists "$STATE")" "no"
+equals "別的 worktree 在用名額不記重試（不算失敗次數）" "$(exists "$RETRY")" "no"
+contains "別的 worktree 在用名額有說明" "$out" "這次不預熱"
+out=$(run); rc=$?
+equals "名額空出來後正常預熱 exit 0" "$rc" "0"
+equals "名額空出來後預熱三次 helper" "$(count daemon)" "3"
+equals "名額空出來後記成功 sha" "$(cat "$STATE")" "$(origin_sha)"
+
+# 21. 只看到自己（--cwd 是本腳本的 worktree）→ 不算別人，照常預熱。
+reset_state
+SELF_PS="$ROOT/bin/ps-self"
+printf '#!/bin/bash\necho "/x/agents-managerd remote-cargo --config /c --cwd %s -- test -p a"\n' "$WT" > "$SELF_PS"
+chmod +x "$SELF_PS"
+out=$(PS_OVERRIDE="$SELF_PS" run); rc=$?
+equals "只有自己的 remote-cargo exit 0" "$rc" "0"
+equals "只有自己的 remote-cargo 照常預熱三次" "$(count daemon)" "3"
+equals "只有自己的 remote-cargo 記成功 sha" "$(cat "$STATE")" "$(origin_sha)"
+equals "只有自己的 remote-cargo 不說不預熱" "$(printf '%s' "$out" | grep -c '這次不預熱' || true)" "0"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
