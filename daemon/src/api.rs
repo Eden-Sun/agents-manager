@@ -2681,6 +2681,19 @@ async fn create_bot(
         }
         None => None,
     };
+    // #2002：身份刪除與引用寫入互斥。admit 取在遠端 I/O（reserve_share_bot_on）之後、驗證之前，持有到 config 提交完；
+    // 取到後重驗（刪除剛完成＝快取已無此身份 → 404 identity）。
+    let identity_admit = crate::identity_fence::admit(&host, &b.kind, identity.as_deref()).await;
+    if identity_admit.is_some() {
+        if let Err(e) = check_identity(&app, &host, &identity, &b.kind).await {
+            if let Some((ws, created_folder)) = &workspace {
+                crate::share::admin::finish_share_bot_on(&app, &host, &id, ws, *created_folder, false).await;
+            }
+            return Err(e);
+        }
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("create_bot_after_identity_admit", &pid).await;
+    }
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
@@ -2731,6 +2744,7 @@ async fn create_bot(
         Ok(())
     })
     .await;
+    drop(identity_admit);
     if let Some((ws, created_folder)) = &workspace {
         let created = res.is_ok() && replayed.lock().unwrap().is_none();
         crate::share::admin::finish_share_bot_on(&app, &host, &id, ws, *created_folder, created).await;
@@ -3365,10 +3379,15 @@ async fn patch_bot(
         let normalized = crate::role_policy::validate_bot(&kind, &model, ro)?;
         b.runtime_override = Some(Some(normalized));
     }
+    // #2002：admit 在驗證之前取、持有到 config／DB 提交完（見 `identity_fence`）。
+    let mut identity_admit = None;
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
             let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
+            identity_admit = crate::identity_fence::admit(&host, &kind, Some(name)).await;
             check_identity(&app, &host, &Some(name.clone()), &kind).await?;
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("patch_bot_after_identity_admit", &id).await;
         }
     }
     // `primary` 只存 DB、其他欄位寫 config.toml：兩個 store 不可能同一個交易，混送半套生效的風險比多送一次請求大得多（#350）。
@@ -3458,6 +3477,7 @@ async fn patch_bot(
     .await
     .map_err(|e| if e.to_string() == "no-bot" { LcError::NotFound("bot".into()) } else { projection_err(e) })?;
     }
+    drop(identity_admit);
     app.emit("bot_changed", json!({"bot_id": id})).await;
     if b.name.is_some() {
         // 遠端主機要經 ssh，不讓改名的回應等它。

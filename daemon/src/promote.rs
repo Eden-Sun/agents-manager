@@ -412,6 +412,15 @@ async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> boo
 }
 
 /// 升級出來的 user bot 的設定（設定從 child 帶：模型、強度、身份；args 不帶——那是收編時看到的舊 argv）。
+/// #2002：在 `identity_fence::admit` 之下重驗 child 的身份（刪除剛完成＝快取已無它）。無身份＝預設帳號，不驗。
+pub(crate) async fn admit_identity_still_exists(app: &Arc<App>, child: &db::Bot) -> anyhow::Result<()> {
+    let Some(name) = child.identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return Ok(()) };
+    if crate::tools::identity_for_host(app, LOCAL_HOST, name).await.is_none() {
+        anyhow::bail!("references unknown identity `{name}`");
+    }
+    Ok(())
+}
+
 /// handler 與開機補完（`promote_intents`）共用同一份，補完出來的跟 handler 做的一模一樣。
 pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Option<String>, effort: &Option<String>) -> BotCfg {
     BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
@@ -588,17 +597,22 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_stop", &id).await;
 
-    // 5. 建 user bot（設定見 `user_bot_cfg`）。
-    let created = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
-        let p = cfg
-            .projects
-            .iter_mut()
-            .find(|p| p.id.as_deref() == Some(child.project_id.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-        p.bots.push(user_bot_cfg(&child, &new_id, &name, &model, &effort));
-        Ok(())
-    })
-    .await;
+    // 5. 建 user bot（設定見 `user_bot_cfg`）。#2002：身份引用寫入前先 admit 並重驗，持有到 config 提交完。
+    let identity_admit = crate::identity_fence::admit(LOCAL_HOST, "claude", child.identity.as_deref()).await;
+    let created = match admit_identity_still_exists(&app, &child).await {
+        Err(e) => Err(e),
+        Ok(()) => crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+            let p = cfg
+                .projects
+                .iter_mut()
+                .find(|p| p.id.as_deref() == Some(child.project_id.as_str()))
+                .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
+            p.bots.push(user_bot_cfg(&child, &new_id, &name, &model, &effort));
+            Ok(())
+        })
+        .await,
+    };
+    drop(identity_admit);
     if let Err(e) = created {
         staged.undo();
         crate::delete_intents::abandon(&app, &intent, "create failed; rolled back").await;

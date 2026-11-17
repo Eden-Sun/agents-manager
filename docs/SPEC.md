@@ -4514,6 +4514,8 @@ daemon 只接受唯一的直接單行 alias 定義。本機 bash（目前 `SHELL
 
 備份位置由 daemon 在 prepare 前產生；prepare 回應遺失時只重讀該路徑核對，不重寫。仍無法確認則回 `alias_backup_unconfirmed` 與預定 `backup_path`（不宣稱檔案存在），原 rc 不改。備份目錄與檔案同樣檢查 ACL/xattr；失敗回復不成功時明確回 `alias_restore_conflict`。操作前後精確檢查同一 `(host, claude, ccN)` 的 Bot、active runtime identity、`supervisors`（含 patrol）與 `supervisor_roles` 引用；supervisor rows 透過自己的 `project_id`，沒有時才用關聯 Bot 的 project，限定精確 host。回傳 ref type 為 bot/runtime/supervisor/supervisor_role；runtime 的 id 是 run id。有明確引用回 409 並列出 reference。未綁 identity 的 Bot 即使使用同一個預設帳號，也不算引用，因刪除 alias 不刪憑證。操作期間若出現新引用或重探仍看得到 alias，僅在目前檔案內容仍等於本次候選時條件式恢復原檔；若比對不符就保留現況與備份並回報 `restored:false`。同 host 的 alias 刪除彼此序列化；其他 config writer 與外部編輯器沒有共用 admission lock。hash/stat 檢查到 rename 仍有 TOCTOU 窗口，這不是核心層 compare-and-swap，不能宣稱零覆蓋風險或線性化。UI 確認需列出 host 與 alias，並說明憑證／歷史保留、備份位置及外部編輯器競態限制。
 
+**刪除與引用的互斥（#2002，identity admission fence）。** 刪除 shell alias 的「前檢查→改 rc→後檢查→更新快取」與所有「驗證身份存在 → 寫入引用」的路徑，以 `(host, kind, identity)` 為鍵共用一把 `RwLock`（`am-base::identity_fence`）：刪除方在 host 鎖之內取 `exclusive`（鎖順序固定：host 鎖 → 身份 exclusive），持有到後檢查與快取更新完成；引用方在驗證之前取 `admit`，持有到寫入提交後才放，取到後重驗身份仍存在（刪除剛完成＝快取已無此身份 → 回「身份不存在」）。涵蓋：bot 建立與 PATCH 身份、fork（經由建立）、promote／promote 補完、child 身份偵測寫入（`runners/pane_identity`）、supervisor setup 與 responder。預設帳號（無 identity）不進 fence；不同 host／kind／身份互不阻塞。持有 admit 時不等待 ssh／herdr 這類長時間外部 I/O。**保證範圍**：只序列化 daemon 內的寫入；使用者手動編輯 config.toml 不受此鎖保護，只能靠刪除的後檢查與之後的驗證失敗。
+
 ### 16.4a 未知與未登入分開、顯示依據（使用者 2026-11-14）
 `logged_in` 三態：`true`／`false`（問到了：exit 0 且輸出認得）與 `null`（問不到：逾時、輸出無法解析、指令失敗、沒完成）。`null` 不會被寫成未登入；問不到時沿用上次的結果，但 `checked_at` 留上次的時間、`basis` 寫明這次為什麼沒問到，網頁身份列顯示「上次檢查 …」與依據。
 

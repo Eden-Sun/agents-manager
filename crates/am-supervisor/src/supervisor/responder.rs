@@ -168,6 +168,8 @@ pub async fn ensure_env(
     let effort = crate::config::normalize_effort("claude", Some(&effort))
         .map_err(LcError::Bad)?
         .ok_or_else(|| LcError::Bad("effort must not be empty".into()))?;
+    // #2002: admit before validating; held through the config write and `set_runtime` (local I/O only).
+    let _identity_admit = am_base::identity_fence::admit(crate::config::LOCAL_HOST, "claude", Some(&identity)).await;
     if app.identity_for_host(crate::config::LOCAL_HOST, &identity).await.is_none() {
         return Err(LcError::conflict(
             "responder identity is not configured on this host",

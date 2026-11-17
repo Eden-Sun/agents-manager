@@ -109,6 +109,7 @@ pub mod tui_prompts;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/turn_error.rs"]
 pub mod turn_error;
+pub use am_base::identity_fence;
 pub use am_base::{
     agent_relay,
     agy_remote,

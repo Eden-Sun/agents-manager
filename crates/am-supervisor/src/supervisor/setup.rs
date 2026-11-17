@@ -256,6 +256,8 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
 
     // The identity has to exist already: silently running the manager under whatever account
     // happens to be default is exactly the kind of guess that produces a bot nobody can log in.
+    // #2002: admit before validating, held until the config write is committed (see `identity_fence`).
+    let identity_admit = am_base::identity_fence::admit(crate::config::LOCAL_HOST, "claude", Some(&sup.identity)).await;
     if app.identity_for_host(crate::config::LOCAL_HOST, &sup.identity).await.is_none() {
         return Err(LcError::conflict(
             "supervisor identity is not configured on this host",
@@ -381,6 +383,7 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
             LcError::Upstream(e.to_string())
         }
     })?;
+    drop(identity_admit);
 
     let responder = super::roles::responder_bot(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
     let deployed = deploy_files(app, &bot_id, responder.as_deref(), &persona).map_err(|e| LcError::Upstream(e.to_string()))?;

@@ -219,3 +219,94 @@ async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
     assert!(!tools["mac_builder"].identities.contains_key("work"), "被刪的那一台的快取列要拿掉");
     assert!(tools["local"].identities.contains_key("work"), "本機自己的 work 沒被刪，快取列不能一起消失");
 }
+
+// ── #2002：身份刪除與引用寫入互斥（identity_fence） ──
+
+async fn seed_shell_cc1(app: &Arc<App>) {
+    let ht = crate::tools::HostTools {
+        tools: Default::default(),
+        identities: Default::default(),
+        shell_identities: vec![ident("cc1", "claude", None)],
+        utc_offset_secs: None,
+        herdr_cli: None,
+        checked_at: crate::db::now(),
+    };
+    app.tools.lock().await.insert(LOCAL_HOST.into(), ht);
+}
+
+async fn seed_fence_project(env: &crate::testing::Env) {
+    let app = env.app.clone();
+    let (spid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+    app.cfg
+        .update(move |c| {
+            c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    seed_shell_cc1(&app).await;
+}
+
+fn new_claude_bot(name: &str, identity: Option<&str>) -> Json<NewBot> {
+    Json(serde_json::from_value(json!({"name": name, "kind": "claude", "identity": identity})).unwrap())
+}
+
+async fn settle() {
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// (a) 刪除持有 exclusive 時 create 會等；刪除完成（快取已無此身份）後 create 回「身份不存在」。
+#[tokio::test]
+async fn create_bot_waits_for_an_in_flight_identity_delete_then_reports_it_missing() {
+    let env = crate::testing::env().await;
+    seed_fence_project(&env).await;
+    let app = env.app.clone();
+    let guard = crate::identity_fence::exclusive(LOCAL_HOST, "claude", "cc1").await;
+    let (a2, pid) = (app.clone(), env.project_id.clone());
+    let task = tokio::spawn(async move { create_bot(State(a2), Path(pid), new_claude_bot("late", Some("cc1"))).await.map(|r| r.status()) });
+    settle().await;
+    assert!(!task.is_finished(), "刪除還沒完成：create 要等");
+    // 模擬刪除完成：快取移除 alias，再放鎖。
+    app.tools.lock().await.get_mut(LOCAL_HOST).unwrap().shell_identities.clear();
+    drop(guard);
+    let res = task.await.unwrap();
+    assert!(matches!(res, Err(LcError::NotFound(_))), "身份已刪：{res:?}");
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE name = 'late'").fetch_one(&app.db).await.unwrap();
+    assert_eq!(n, 0);
+}
+
+/// (b) create 持有 admit 時刪除會等；create 提交後刪除拿到鎖，後檢查看得到這個 bot 引用。
+#[tokio::test]
+async fn identity_delete_waits_for_an_in_flight_create_and_then_sees_its_reference() {
+    let env = crate::testing::env().await;
+    seed_fence_project(&env).await;
+    let app = env.app.clone();
+    let blocked_while_admitted = Arc::new(std::sync::Mutex::new(None::<(bool, tokio::task::JoinHandle<()>)>));
+    let slot = blocked_while_admitted.clone();
+    crate::lifecycle::race_point::arm("create_bot_after_identity_admit", &env.project_id, move || async move {
+        let t = tokio::spawn(async { drop(crate::identity_fence::exclusive(LOCAL_HOST, "claude", "cc1").await) });
+        settle().await;
+        *slot.lock().unwrap() = Some((!t.is_finished(), t));
+    });
+    let res = create_bot(State(app.clone()), Path(env.project_id.clone()), new_claude_bot("early", Some("cc1"))).await.expect("身份還在");
+    assert_eq!(res.status(), StatusCode::OK);
+    let (waited, t) = blocked_while_admitted.lock().unwrap().take().expect("race point 有跑");
+    assert!(waited, "create 持有 admit：刪除方要等");
+    t.await.unwrap();
+    let refs = crate::db::live_bots_on_host(&app.db, LOCAL_HOST).await.unwrap();
+    assert!(refs.iter().any(|b| b.name == "early" && b.identity.as_deref() == Some("cc1")), "刪除拿到鎖時，後檢查看得到 create 提交的引用");
+}
+
+/// (c) 不同身份／不同 host 不互相阻塞；(d) 預設帳號不進 fence。
+#[tokio::test]
+async fn the_fence_is_per_host_kind_identity_and_skips_the_default_account() {
+    let _held = crate::identity_fence::exclusive(LOCAL_HOST, "claude", "cc1").await;
+    let t = std::time::Duration::from_secs(5);
+    assert!(tokio::time::timeout(t, crate::identity_fence::admit(LOCAL_HOST, "claude", Some("cc2"))).await.is_ok(), "不同身份");
+    assert!(tokio::time::timeout(t, crate::identity_fence::admit("mac_builder", "claude", Some("cc1"))).await.is_ok(), "不同 host");
+    assert!(tokio::time::timeout(t, crate::identity_fence::admit(LOCAL_HOST, "codex", Some("cc1"))).await.is_ok(), "不同 kind");
+    assert!(crate::identity_fence::admit(LOCAL_HOST, "claude", None).await.is_none(), "預設帳號");
+    assert!(crate::identity_fence::admit(LOCAL_HOST, "claude", Some("  ")).await.is_none(), "空白＝預設帳號");
+}

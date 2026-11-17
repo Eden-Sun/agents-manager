@@ -197,6 +197,8 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         let Some(child) = child.as_ref() else { return Err("the child is gone and the target bot was never created".into()) };
         let cfg_entry = crate::promote::user_bot_cfg(child, &new_id, &name, &model, &effort);
         let pid = project_id.clone();
+        let _identity_admit = crate::identity_fence::admit(LOCAL_HOST, "claude", child.identity.as_deref()).await;
+        crate::promote::admit_identity_still_exists(&app, child).await.map_err(|x| format!("cannot create the promoted bot: {x:#}"))?;
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
             let proj = cfg.projects.iter_mut().find(|q| q.id.as_deref() == Some(pid.as_str())).ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
             proj.bots.push(cfg_entry.clone());

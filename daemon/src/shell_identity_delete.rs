@@ -1087,6 +1087,9 @@ pub(super) async fn delete_shell_identity(
     }
     let lock = host_lock(&host);
     let _host_guard = lock.lock().await;
+    // Lock order: host lock → identity exclusive. Held through post-check and cache update so
+    // bot create/assign paths (`identity_fence::admit`) cannot interleave (#2002).
+    let _identity_guard = crate::identity_fence::exclusive(&host, "claude", &identity).await;
     let fence = app.hosts.fence(&host).await.ok_or_else(|| LcError::NotFoundValue(json!({
         "error":"not_found","reason":"host_not_found","host":host,"kind":"claude","identity":identity
     })))?;

@@ -144,6 +144,11 @@ pub async fn sync_child_identity(
     // Keep the authority read gate through both writes: a host repoint between this check and
     // persistence must not let the retired machine overwrite the replacement's identity.
     let Some(persisted) = fence.run_current(async {
+        // #2002：runtime／child 身份引用寫入前先 admit，取到後重驗身份仍在（刪除剛完成就等下一輪偵測）。
+        let _identity_admit = crate::identity_fence::admit(host, &bot.kind, Some(name.as_str())).await;
+        if _identity_admit.is_some() && crate::tools::identity_for_host(app, host, &name).await.is_none() {
+            return false;
+        }
         // The run remembers the account it was actually read off (`runs.runtime_identity`), even
         // when it matches the inherited value: NULL there means "nobody knows", and the UI says so.
         if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
