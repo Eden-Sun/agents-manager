@@ -342,11 +342,27 @@ pub async fn start_one_if_needed(app: &Arc<App>, project_id: &str, cluster: &str
 }
 
 pub async fn start_member_if_needed(app: &Arc<App>, members: &[Member]) -> Option<String> {
+    spawn_member_start(app, members).map(|(id, _)| id)
+}
+
+/// 選一個該啟動的成員並在背景啟動它；把背景任務的 handle 一併交出，測試要等它收尾才不會跟自己插的 runs 列搶（`runs.bot_id` UNIQUE）。
+fn spawn_member_start(app: &Arc<App>, members: &[Member]) -> Option<(String, tokio::task::JoinHandle<()>)> {
     let id = pick_to_start_member(members)?.id.clone();
     let (app, bot) = (app.clone(), id.clone());
-    tokio::spawn(Box::pin(async move {
+    let handle = tokio::spawn(Box::pin(async move {
         if let Err(e) = crate::lifecycle::start_bot(&app, &bot).await { tracing::warn!(bot = %bot, error = ?e, "cluster auto-start failed"); }
     }));
+    Some((id, handle))
+}
+
+/// 同 [`start_one_if_needed`]，但等背景啟動任務跑完才回（只給測試：之後它才能安全地自己寫該 bot 的 runs 列）。
+#[cfg(test)]
+async fn start_one_and_wait(app: &Arc<App>, project_id: &str, cluster: &str) -> Option<String> {
+    let clusters = project_clusters(app, project_id).await.ok()?;
+    let c = clusters.iter().find(|c| c.name == cluster)?;
+    if c.pick_best(None).is_some() { return None }
+    let (id, handle) = spawn_member_start(app, &c.members)?;
+    handle.await.expect("the background start must not panic");
     Some(id)
 }
 
@@ -770,10 +786,12 @@ mod tests {
         }
         let cs = project_clusters(&env.app, &env.project_id).await.unwrap();
         assert_eq!((cs.len(), cs[0].members.len()), (1, 2));
-        let started = start_one_if_needed(&env.app, &env.project_id, "haiku").await;
+        // 背景啟動任務會自己寫 runs 列；等它收尾再放我們的假 run，否則兩邊搶 `runs.bot_id` UNIQUE（偶發 2067）。
+        let started = start_one_and_wait(&env.app, &env.project_id, "haiku").await;
         assert!(started.is_some());
         // 已有啟動中的成員：不重複啟動。
         let first = started.unwrap();
+        sqlx::query("DELETE FROM runs WHERE bot_id=?").bind(&first).execute(&env.app.db).await.unwrap();
         let run = crate::testing::fake_run(&env.app, &first).await;
         sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
         assert_eq!(start_one_if_needed(&env.app, &env.project_id, "haiku").await, None);
