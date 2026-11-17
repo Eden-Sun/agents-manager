@@ -1679,6 +1679,15 @@ async fn start_inner_body(
     for w in app.pretrust_for_start(bot, &project.host, cwd).await {
         tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
     }
+    // claude 2.1.326 起 `--add-dir` 的目錄也有自己的信任框（「Adding a new directory… This session hasn't worked here
+    // before」，游標在 *No, exit*），分享用 bot 的 outbox 就卡在這裡（2026-11-16）。同一份信任紀錄，照工作目錄一樣先寫。
+    if bot.kind == "claude" {
+        for dir in add_dir_args(&args) {
+            for w in app.pretrust_for_start(bot, &project.host, dir).await {
+                tracing::warn!(bot = %bot.name, dir, warning = %w, "could not pre-trust an --add-dir directory");
+            }
+        }
+    }
 
     // 2. workspace
     // `(root pane, 它開在哪個目錄)`：bot 有自己的 cwd 時不能沿用開在專案目錄的 root（見 `acquire_run_pane`）。
@@ -2547,3 +2556,29 @@ mod specialist_section_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "start_tests/hire_fork_tests.rs"]
 mod hire_fork_tests;
+
+/// argv 裡每個 `--add-dir <dir>`／`--add-dir=<dir>` 的目錄（claude 2.1.326 起每個都要信任，見 `start_inner`）。
+fn add_dir_args(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--add-dir" {
+            if let Some(d) = it.next().map(String::as_str).filter(|d| !d.is_empty() && !d.starts_with("--")) {
+                out.push(d);
+            }
+        } else if let Some(d) = a.strip_prefix("--add-dir=").filter(|d| !d.is_empty()) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod add_dir_args_tests {
+    #[test]
+    fn collects_every_add_dir_value() {
+        let args: Vec<String> = ["--restricted", "--add-dir", "/o/B1", "--add-dir=/x", "--add-dir", "--model", "opus"].map(String::from).to_vec();
+        assert_eq!(super::add_dir_args(&args), vec!["/o/B1", "/x"]);
+        assert!(super::add_dir_args(&["--model".to_string(), "opus".to_string()]).is_empty());
+    }
+}
