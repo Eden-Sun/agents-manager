@@ -49,7 +49,9 @@ for p in glob.glob("/proc/[0-9]*/environ"):
     done
   fi
 else
-  ps -Ewwo pid=,args= 2>/dev/null
+  # 環境段是選配的（讀不到＝判不出是不是 bot 的行程，screen_kill 會拒絕送訊號，見 `env_unreadable`）：macOS 的 `ps -E` 遇到讀不到環境的行程
+  # 會以 1 結束（#1964：夜間 macos-latest 上 `/api/mem/processes` 回 502 `ps exited exit status: 1`），不能讓整支腳本跟著失敗。
+  ps -Ewwo pid=,args= 2>/dev/null || true
 fi"#;
 
 /// Everything else stays folded into its parent's `subtree_bytes` instead of turning the list
@@ -994,6 +996,30 @@ mod tests {
             let err = screen_kill(&dump, 402).unwrap_err().to_string();
             assert!(err.contains("環境"), "{row}: {err}");
         }
+    }
+
+    /// #1964：macOS 的 `ps -E` 讀不到環境時以 1 結束；行程樹照樣要回，腳本整體 exit 0（以前 `/api/mem/processes` 因此回 502）。
+    #[test]
+    fn ps_tree_env_survives_a_failing_macos_env_ps() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("am-psenv-{}", &crate::db::ulid()[16..])); // scratch-guard: allow 測試結尾自己刪
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write("uname", "#!/bin/sh\necho Darwin\n");
+        write("ps", "#!/bin/sh\ncase \"$1\" in -E*) exit 1 ;; esac\necho '  1     0  1000 /sbin/launchd'\n");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(PS_TREE_ENV)
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{:?}", out.status);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("/sbin/launchd"));
     }
 
     #[test]
