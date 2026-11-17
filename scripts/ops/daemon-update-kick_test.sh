@@ -16,6 +16,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/daemon-update-kick.sh"
 GITBIN=$(command -v git)
+export GITBIN
 PASS=0
 FAIL=0
 
@@ -72,10 +73,24 @@ setup() {
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   echo "$(echo "$C0" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 
-  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
+  export GIT_BIN="$ROOT/bin/git" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
-  export STUB_GH_FAIL="" STUB_BUILD_INPUTS_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
+  export STUB_GH_FAIL="" STUB_BUILD_INPUTS_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP="" STUB_GIT_CLONE_FAIL=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
+
+  cat > "$ROOT/bin/git" <<'STUB'
+#!/bin/bash
+if [ "${STUB_GIT_CLONE_FAIL:-}" = 1 ]; then
+  case " $* " in *" clone "*)
+    for dst do :; done
+    mkdir -p "$dst"
+    echo partial-clone > "$dst/partial"
+    exit 1
+    ;; esac
+fi
+exec "$GITBIN" "$@"
+STUB
+  chmod +x "$ROOT/bin/git"
 
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
@@ -162,6 +177,36 @@ check "換版指向專用 checkout" "--checkout $ROOT/deploy" "$AGM_DIR/swap.log
 check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
 check_no "不申請核准、不派工" "approval\|assign\|lease" "$AGM_DIR/agm.log"
 check_eq "主樹 HEAD 沒被動" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+teardown
+
+# clone 中途失敗必須清掉 staging checkout，不能把殘缺目錄留在正式 cache 路徑阻塞後續輪。
+setup
+ci "$C3" success
+export STUB_GIT_CLONE_FAIL=1
+run >/dev/null
+check_eq "clone 失敗不留下正式 deploy-checkout" "no" "$([ -e "$ROOT/deploy" ] && echo yes || echo no)"
+check_eq "clone 失敗清掉 staging 目錄" "0" "$(find "$ROOT" -maxdepth 1 -name 'deploy.clone.*' -print | wc -l | tr -d ' ')"
+teardown
+
+# deploy checkout 的 origin 即使仍含線上祖先，也只能取自 repo 指向的 upstream，不能部署同祖先 fork 的 main。
+setup
+FORK_ORIGIN="$ROOT/fork.git"; FORK_WORK="$ROOT/fork-work"
+"$GITBIN" init -q --bare -b main "$FORK_ORIGIN"
+"$GITBIN" -C "$WORK" push -q "$FORK_ORIGIN" "$C0:refs/heads/main"
+"$GITBIN" clone -q "$FORK_ORIGIN" "$FORK_WORK"
+"$GITBIN" -C "$FORK_WORK" config user.email t@t; "$GITBIN" -C "$FORK_WORK" config user.name t
+echo fork-only > "$FORK_WORK/daemon/src/a.rs"
+"$GITBIN" -C "$FORK_WORK" add -A; "$GITBIN" -C "$FORK_WORK" commit -q -m fork-only
+"$GITBIN" -C "$FORK_WORK" push -q origin HEAD:main
+FORK_SHA=$("$GITBIN" -C "$FORK_WORK" rev-parse HEAD)
+ci "$FORK_SHA" success
+"$GITBIN" clone -q --no-checkout "$ORIGIN" "$ROOT/deploy"
+"$GITBIN" -C "$ROOT/deploy" remote set-url origin "$FORK_ORIGIN"
+run >/dev/null
+check_eq "不同 upstream 的 checkout 不讀 fork CI" "0" "$(wc -l < "$AGM_DIR/gh.log" | tr -d ' ')"
+check_eq "不同 upstream 的 checkout 不建置" "0" "$(count 'cargo build' "$AGM_DIR/build.log")"
+check_eq "不同 upstream 的 checkout 不部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "不同 upstream 明確告警" "deploy_checkout_origin_mismatch" "$AGM_DIR/alerts.log"
 teardown
 
 # 3. HEAD 還在跑（pending）：往前一顆找到綠燈的那顆；中間 docs-only 不會被當成候選。

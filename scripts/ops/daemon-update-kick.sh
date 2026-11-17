@@ -34,6 +34,7 @@ WEB_BUILDER="${SELF%/*}/build-web-bundle.py"
 DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
 REPO="${AGM_REPO:-$HOME/project/agents-manager}"      # 正式 daemon 跑的那份（daemon-swap 換它的 target/release）
 DEPLOY="${AGM_DEPLOY_CHECKOUT:-$HOME/.cache/agents-manager/deploy-checkout}"   # 專用乾淨 checkout，只有這支腳本動它
+CLONE_STAGE=""
 GH_REPO="${AGM_GH_REPO:-Eden-Sun/agents-manager}"
 CI_CONTEXT="${AGM_CI_CONTEXT:-ubuntu-ci}"
 CI_LOOKBACK="${AGM_CI_LOOKBACK:-30}"                  # 沿 first-parent 往回最多看幾顆
@@ -174,7 +175,11 @@ settle() {
   fi
   return 0
 }
-cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; }
+cleanup() {
+  settle
+  [ -z "$CLONE_STAGE" ] || rm -rf "$CLONE_STAGE" 2>/dev/null || true
+  rm -rf "$LOCK" 2>/dev/null || true
+}
 take_lock() {
   mkdir "$LOCK" 2>/dev/null || return 1
   if ! echo "$$ $(date +%s)" > "$LOCK/owner"; then rm -rf "$LOCK" 2>/dev/null; return 1; fi
@@ -289,11 +294,29 @@ if isinstance(at,str) and at.strip():
 fi
 
 # ── 專用 checkout：不存在就 clone（來源＝主樹的 origin URL），之後每輪只 fetch ──
+ORIGIN_URL=$("$GIT" -C "$REPO" remote get-url origin 2>/dev/null) || { note_fail "讀不到 ${REPO} 的 origin URL，建不出專用 checkout"; exit 0; }
+if [ -e "$DEPLOY" ] && [ ! -d "$DEPLOY/.git" ]; then
+  alert deploy_checkout_invalid "專用 checkout 路徑 ${DEPLOY} 已存在但不是 git clone，自動部署停住；請確認該路徑內容後移開它"
+  note_fail "專用 checkout 路徑存在但不是 git clone"
+  exit 0
+fi
 if [ ! -d "$DEPLOY/.git" ]; then
-  ORIGIN_URL=$("$GIT" -C "$REPO" remote get-url origin 2>/dev/null) || { note_fail "讀不到 ${REPO} 的 origin URL，建不出專用 checkout"; exit 0; }
   mkdir -p "$(dirname "$DEPLOY")" 2>/dev/null
-  "$GIT" clone -q --no-checkout "$ORIGIN_URL" "$DEPLOY" >> "$LOG" 2>&1 || { note_fail "clone 專用 checkout ${DEPLOY} 失敗"; exit 0; }
+  CLONE_STAGE=$(mktemp -d "${DEPLOY}.clone.XXXXXX") || { note_fail "無法建立專用 checkout 的暫存 clone 目錄"; exit 0; }
+  "$GIT" clone -q --no-checkout "$ORIGIN_URL" "$CLONE_STAGE/repo" >> "$LOG" 2>&1 || { note_fail "clone 專用 checkout ${DEPLOY} 失敗"; exit 0; }
+  if [ -e "$DEPLOY" ] || [ -L "$DEPLOY" ]; then
+    alert deploy_checkout_invalid "clone 完成時專用 checkout 路徑 ${DEPLOY} 已被建立；保留既有路徑並丟棄暫存 clone"
+    note_fail "clone 完成時專用 checkout 路徑已被建立"
+    exit 0
+  fi
+  mv "$CLONE_STAGE/repo" "$DEPLOY" >> "$LOG" 2>&1 || { note_fail "無法將暫存 clone 移到專用 checkout ${DEPLOY}"; exit 0; }
   log "建好專用 checkout ${DEPLOY}"
+fi
+CHECKOUT_ORIGIN_URL=$("$GIT" -C "$DEPLOY" remote get-url origin 2>/dev/null) || CHECKOUT_ORIGIN_URL=""
+if [ -z "$CHECKOUT_ORIGIN_URL" ] || [ "$CHECKOUT_ORIGIN_URL" != "$ORIGIN_URL" ]; then
+  alert deploy_checkout_origin_mismatch "專用 checkout ${DEPLOY} 的 origin 與正式 repo 不同；預期「${ORIGIN_URL}」、實際「${CHECKOUT_ORIGIN_URL:-讀取失敗}」，停止 fetch、建置與部署"
+  note_fail "專用 checkout origin 不符合正式 repo，停止部署"
+  exit 0
 fi
 "$GIT" -C "$DEPLOY" fetch -q origin main >> "$LOG" 2>&1 || { note_fail "fetch origin/main 失敗，這輪不動"; exit 0; }
 HEAD_SHA=$("$GIT" -C "$DEPLOY" rev-parse origin/main) || { note_fail "無法讀取 origin/main，跳過"; exit 0; }

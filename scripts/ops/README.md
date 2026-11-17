@@ -215,7 +215,7 @@ see above — which must reach `git`, `gh`, `bun`, `python3` and `nice`):
 | --- | --- | --- |
 | `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | Supervisor working directory (`bin/agm`, logs and state live here) |
 | `AGM_REPO` | `~/project/agents-manager` | The checkout the production daemon runs from (`daemon-swap.sh` swaps its `target/release`); also the source of the dedicated checkout's origin URL |
-| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | Dedicated clean checkout (cloned on first use). Only this script touches it — never the main tree or anyone's worktree; `target/` and `node_modules` stay so builds are incremental |
+| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | Dedicated clean checkout (first cloned to a staging directory beside it and moved into place on success). Verifies origin matches the primary repo origin before each run; stops if path exists but is not a clone or origin mismatches. Only this script touches it — never the main tree or anyone's worktree; `target/` and `node_modules` stay so builds are incremental |
 | `AGM_GH_REPO` | `Eden-Sun/agents-manager` | Repo to ask for commit status |
 | `AGM_CI_CONTEXT` | `ubuntu-ci` | Which status context to read |
 | `AGM_CI_LOOKBACK` | `30` | How many first-parent commits to look back (`ubuntu-ci` only runs the newest HEAD and skips shas in between) |
