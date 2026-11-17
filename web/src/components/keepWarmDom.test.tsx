@@ -17,6 +17,9 @@ virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
 after(async () => {
+  // 共用的 mock 還留著本檔最後送出的回合（要 2.4 秒虛擬時間才收尾）；不等它結束的話，同一個行程裡之後的檔案
+  // （suggestionBarDom）看到的是「這回合還在跑」，建議那一條不顯示（#1964）。
+  await advanceMockTime(3000)
   resetStoreForTest()
   await teardownDom()
 })

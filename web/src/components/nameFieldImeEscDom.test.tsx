@@ -9,9 +9,16 @@ import { useStore } from '../store/store'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 
+// 測試把 store 的 patchBot／patchProject 換成假的；不還原的話同一個行程裡之後的 DOM 測試（newExpertBotFormDom 的 PATCH、
+// suggestionBarDom）打到的是這個假函式（#1964）。
+const realPatch = { patchBot: useStore.getState().patchBot, patchProject: useStore.getState().patchProject }
+
 before(setupDom)
 after(teardownDom)
-afterEach(unmountAll)
+afterEach(async () => {
+  await unmountAll()
+  useStore.setState(realPatch)
+})
 
 test('BotNameField：組字中的 Esc 不關輸入框', async () => {
   let patched = 0
