@@ -1756,6 +1756,36 @@ Accessing workspace:\n/home/user/project\n\n\
         assert!(plain_without_hints("claude", &typed_second).contains("commit notes.txt"));
     }
 
+    const CLAUDE_2326_FAILED_EMPTY: &str = include_str!("fixtures/claude-2.1.326-failed-empty-hint.ansi");
+    const CLAUDE_2326_FAILED_TYPED: &str = include_str!("fixtures/claude-2.1.326-failed-typed.ansi");
+
+    /// 2.1.326 請求失敗（模型不存在）後的空框：`❯ ` 接 dim 的 `Once fixed, resend your message`（實機擷取）。
+    /// 樣式讀：dim 的提示＝空框；同一格位置使用者真的打的 `abc`（不是 dim）＝草稿。
+    #[test]
+    fn claude_2326_failed_request_hint_is_an_empty_box_when_styled() {
+        assert_eq!(box_state("claude", CLAUDE_2326_FAILED_EMPTY), BoxState::Empty);
+        assert_eq!(box_state("claude", CLAUDE_2326_FAILED_TYPED), BoxState::NonEmpty);
+        assert_eq!(crate::lifecycle::poller::composer_text("claude", CLAUDE_2326_FAILED_EMPTY), None);
+        assert_eq!(crate::lifecycle::poller::composer_text("claude", CLAUDE_2326_FAILED_TYPED).as_deref(), Some("abc"));
+    }
+
+    /// 純文字讀（herdr 不給 ansi）：composer 列內容**完全等於**實機字串才是空框；多一個字一律是草稿。
+    /// 含 try／retry／resend 的使用者輸入不得判成空框（沿用 7d4c38a2d 的回歸精神）。
+    #[test]
+    fn claude_2326_failed_request_hint_is_an_empty_box_when_plain_only_if_exact() {
+        let plain = strip_ansi(CLAUDE_2326_FAILED_EMPTY);
+        assert_eq!(crate::lifecycle::poller::composer_text("claude", &plain), None, "{plain}");
+        let read = plain_without_hints("claude", &plain);
+        let lines: Vec<&str> = read.lines().collect();
+        assert!(crate::tui_prompts::composer_is_idle(&lines), "{read}");
+
+        const HINT: &str = "Once fixed, resend your message";
+        for text in ["try again", "retry", "resend", "Once fixed, resend your message please", "Once fixed, resend"] {
+            let typed = plain.replace(HINT, text);
+            assert_eq!(crate::lifecycle::poller::composer_text("claude", &typed).as_deref(), Some(text), "{text}");
+        }
+    }
+
     /// 只有已知的空框形狀才算空：任何額外位元組、任何續行（含空白列）都是非空（第七輪 #1）。
     #[test]
     fn only_the_exact_empty_shape_is_an_empty_box() {

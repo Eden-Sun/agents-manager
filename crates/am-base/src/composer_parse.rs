@@ -324,9 +324,29 @@ pub(crate) fn hint_rows(kind: &str, c: &ComposerRow, content: &[(char, bool)], l
     Some(more)
 }
 
+/// 2.1.326 請求失敗（例如模型不存在）後，輸入列是 `❯ ` 接 dim 的這句（實機擷取 `claude-2.1.326-failed-empty-hint.ansi`）。
+/// 純文字讀看不到 dim，所以只認 composer 列的內容**完全等於**這句；多一個字就是使用者的草稿。
+const CLAUDE_FAILED_REQUEST_HINT: &str = "Once fixed, resend your message";
+
+/// 純文字讀的失敗提示：composer 列內容完全等於 [`CLAUDE_FAILED_REQUEST_HINT`] 時拿掉那句，留下空的 `❯`。
+fn plain_failed_request_hint(kind: &str, screen: &str) -> String {
+    if kind != "claude" || !screen.contains(CLAUDE_FAILED_REQUEST_HINT) {
+        return screen.to_string();
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(c) = locate_composer(kind, &lines, false, composer_tail(kind, &lines)) else { return screen.to_string() };
+    let content: String = marker_row_content(kind, &c, false).into_iter().map(|(ch, _)| ch).collect();
+    if content.trim() != CLAUDE_FAILED_REQUEST_HINT {
+        return screen.to_string();
+    }
+    let mut plain: Vec<String> = lines.iter().map(|l| (*l).to_string()).collect();
+    plain[c.idx] = plain[c.idx].replacen(CLAUDE_FAILED_REQUEST_HINT, "", 1).trim_end().to_string();
+    plain.join("\n")
+}
+
 pub fn plain_without_hints(kind: &str, screen: &str) -> String {
     if !screen.contains('\u{1b}') {
-        return screen.to_string();
+        return plain_failed_request_hint(kind, screen);
     }
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex";

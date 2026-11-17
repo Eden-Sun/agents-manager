@@ -1864,6 +1864,19 @@ Grok Build 1.0.46\n\
         assert!(!composer_is_idle(&[]));
     }
 
+    /// 2.1.326 資料夾信任提示（實機擷取 `claude-2.1.326-trust.ansi`）：`Quick safety check` 加 `❯ No, exit / Yes, I trust this folder`。
+    /// 它是 answerable 的提示，不是空輸入列，也不能被當成閒置。
+    #[test]
+    fn claude_2326_folder_trust_prompt_is_answerable_and_not_idle() {
+        let ansi = include_str!("lifecycle/fixtures/claude-2.1.326-trust.ansi");
+        let plain = crate::lifecycle::strip_ansi(ansi);
+        assert!(plain.contains("Quick safety check"), "{plain}");
+        assert!(screen_has_answerable_prompt(&plain), "{plain}");
+        assert!(screen_has_answerable_prompt(ansi), "styled 讀也要認得");
+        let lines: Vec<&str> = plain.lines().collect();
+        assert!(!composer_is_idle(&lines), "信任框佔住輸入列，不是空列");
+    }
+
     #[test]
     fn switch_model_confirmation_is_recognised() {
         assert!(is_switch_model_dialog(SWITCH_MODEL));

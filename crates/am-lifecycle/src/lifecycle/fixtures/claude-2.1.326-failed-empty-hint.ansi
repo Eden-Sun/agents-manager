@@ -1,0 +1,25 @@
+
+[0m[38;2;215;119;87m ▐[0m[38;2;215;119;87m[48;2;0;0;0m▛███▛█[0m   [0m[1mClaude Code [0m[38;2;153;153;153mv2.1.326[0m
+[0m[38;2;215;119;87m▝▜[0m[38;2;215;119;87m[48;2;0;0;0m█████[0m[38;2;215;119;87m█▀  [0m[38;2;153;153;153mclaude-nonexistent-model-x · Claude Max[0m
+[0m[38;2;215;119;87m ▝▝   ▝▝   [0m[38;2;153;153;153m/tmp/claude-1000/-home-ubuntu-project-agents-manager/0966ff44-5e9e-484a-892a-31c449bb6cf9/scratchpad/claude-fail[0m
+
+[0m[38;2;255;193;7m⚠ Model "claude-nonexistent-model-x" isn't recognized[0m[38;2;153;153;153m · context assumed to be 1m tokens · update Claude Code, or see https://code.claude.com/docs/en/model-config[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mhi[0m[48;2;55;55;55m                                                                                                                                                                                                              [0m
+
+[0m[38;2;255;193;7m● There's an issue with the selected model (claude-nonexistent-model-x). It may not exist or you may not have access to it. Run /model to pick a different model.[0m
+
+
+
+
+
+
+
+
+
+
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ [0m[2mOnce fixed, resend your message[0m
+[0m[38;2;136;136;136m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;153;153;153muser | claude-fail | claude-nonexistent-model-x H | 5h left 92%(rst 4h 32m) | 7d left 55%(rst 2d 18h) | F5 left 97%[0m
+  [0m[38;2;255;107;128m⏵⏵ bypass permissions on[0m[38;2;153;153;153m (shift+tab to cycle)[0m
