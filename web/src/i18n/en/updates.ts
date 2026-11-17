@@ -141,6 +141,18 @@ export default {
   '已結束的子 agent（已通知母 Bot 視需要重開）：': 'Sub-agents that ended (their parent Bots were notified to restart them if needed):',
   '知道了': 'Got it',
   '先留著': 'Keep for now',
+  // Codex Stop hook 信任（components/CodexStopHookSettings.tsx）
+  'Codex Stop hook 信任': 'Codex Stop hook trust',
+  '信任後，AG Man 會停用會爆 argv 上限的舊通知，改用 stdin Stop hook。': 'Once trusted, AG Man turns off the legacy notify (which can exceed the argv limit) and uses the stdin Stop hook instead.',
+  '尚未開啟（設定檔 [codex] stop_hook = false），目前不會安裝或使用。': 'Not enabled yet ([codex] stop_hook = false in the config); nothing is installed or used for now.',
+  '已信任': 'Trusted',
+  '未信任': 'Not trusted',
+  '雜湊不符（hook 被改過）': 'Hash mismatch (the hook was changed)',
+  '尚未安裝': 'Not installed yet',
+  '無法讀取': 'Unreadable',
+  '信任此 hook': 'Trust this hook',
+  '信任 AG Man 的 Codex Stop hook？': 'Trust the AG Man Codex Stop hook?',
+  '這會讓 {target} 的 codex 在每個回合結束時執行 AG Man 的 stop hook，並在該帳號目錄的 config.toml 寫入一筆 trusted_hash（寫入前會備份）。': 'This lets codex on {target} run the AG Man stop hook at the end of every turn, and writes one trusted_hash entry to that account directory\'s config.toml (backed up first).',
   // 更新檢查（components/UpdateCheckPanel.tsx）
   '自動更新（不通知）': 'Auto-update (no notifications)',
   '有新版自動安裝，不跳通知；跑著的 bot 重啟後才換版（codex 會重啟閒置的 codex bot）。失敗時仍會通知。': 'Automatically install new versions without notifications; running bots will only switch versions after restarting (codex will restart idle codex bots). You will still be notified upon failure.',

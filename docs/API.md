@@ -140,6 +140,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/settings/time-zone` | Bot 與 User 皆可讀；回 `{"time_zone","utc_offset"}`（如 `Asia/Taipei`、`+8`） |
 | HEAD | `/api/settings/time-zone` | 同 GET |
 | GET | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"claude":false,"codex":false,"agy":false,"grok":false}` |
+| GET | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"enabled":false,"entries":[{"host":"local","identity":null,"codex_home":"…","status":"untrusted"}]}`，`status` ∈ `not_installed`／`untrusted`／`hash_mismatch`／`trusted`／`unavailable`（讀不到或逾時 8 秒） |
+| HEAD | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
+| POST | `/api/codex/stop-hook/trust` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"host":"local","identity":null}`；只在 hook 已安裝時，備份 `config.toml`（`config.toml.am-bak-<秒>`）後只寫 `[hooks.state."…:stop:<組>:0"].trusted_hash`；成功回該筆 entry；未安裝／設定檔壞掉 → 409 `stop_hook_not_trustable`；未知 host／身份 → 404 |
 | HEAD | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -3325,3 +3328,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 停止成員自動啟動的 `POST /api/bots/{id}/prompt` 錯誤格式為 `{error, message, sent:false}`：`member_stopped`（409，呼叫者無權自動啟動或目標不符合條件）、`member_not_dispatchable`（403，成員已停用或不可派工；對非 advisor 的 `claude-api` bot 的 bot 派工回 403 `member_not_dispatchable`，`message: "<名稱> 是 claude-api（純 API 模型），不能接受 bot 派工"`）、`member_start_failed`（503，啟動失敗，`message` 包含原因）、`member_start_timeout`（503，等待啟動就緒逾時；啟動可能仍在進行）。只有同專案的專家模式頂層管理者或代班副管理者可啟動啟用中的頂層成員；自動啟動走一般 bot start 並等就緒後透過既有佇列送出。
 
 成員 `manager_use=false` 的 relay 拒絕維持 `403`、`reason: "member_disabled"`，並附 `message`：成員名稱、由使用者停用的原因及請使用者在 AG Man 側欄重新啟用的指示。
+
+### Codex Stop hook 信任（#1989 phase 3）
+
+`GET /api/codex/stop-hook` 逐主機（含 local）× codex 帳號目錄（預設目錄與該機 `kind = codex` 的身份，`CODEX_HOME` 照身份 env 展開）回信任狀態。`POST /api/codex/stop-hook/trust` 由使用者在 web 確認後呼叫，寫入與 daemon 啟動 bot 時判斷用的同一個雜湊（見 SPEC §4.1）。兩者皆 User-only。

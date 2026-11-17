@@ -226,17 +226,121 @@ pub fn stop_hook_trust_hash(command: &str) -> String {
     format!("sha256:{}", digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 
-/// True only when the user's own `config.toml` already trusts exactly this Stop handler. Read-only; any error means "not trusted".
-pub fn stop_hook_trusted(codex_home: &Path, command: &str, group_index: usize) -> bool {
-    let key = format!("{}:stop:{group_index}:0", codex_home.join("hooks.json").display());
-    let Ok(text) = std::fs::read_to_string(codex_home.join("config.toml")) else { return false };
-    let Ok(doc) = text.parse::<toml::Table>() else { return false };
-    doc.get("hooks")
-        .and_then(|h| h.get("state"))
-        .and_then(|s| s.get(&key))
-        .and_then(|e| e.get("trusted_hash"))
-        .and_then(|v| v.as_str())
-        == Some(stop_hook_trust_hash(command).as_str())
+/// Where Codex records trust for our Stop handler.
+pub fn stop_hook_state_key(hooks_path: &str, group_index: usize) -> String {
+    format!("{hooks_path}:stop:{group_index}:0")
+}
+
+/// `[hooks.state."<key>"].trusted_hash` as written by the user's own review; unparseable config reads as absent.
+fn recorded_trusted_hash(config_text: &str, key: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Table>().ok()?;
+    doc.get("hooks")?.get("state")?.get(key)?.get("trusted_hash")?.as_str().map(str::to_owned)
+}
+
+/// Whether Codex will run our Stop handler (#1989).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopHookStatus {
+    /// Our group is not in `hooks.json` yet.
+    NotInstalled,
+    /// Installed, no trust recorded.
+    Untrusted,
+    /// Trust recorded for this slot but for a different handler (command changed, or user edited it).
+    HashMismatch,
+    Trusted,
+}
+
+/// Pure status from the two files' text. `Err` when `hooks.json` is unparseable or our group is ambiguous.
+pub fn stop_hook_status_in(hooks_text: &str, config_text: &str, hooks_path: &str, command: &str) -> Result<(StopHookStatus, Option<usize>)> {
+    let merged = merge_hooks_json(hooks_text, command)?;
+    if merged.merged_json.is_some() {
+        return Ok((StopHookStatus::NotInstalled, None));
+    }
+    let key = stop_hook_state_key(hooks_path, merged.group_index);
+    let status = match recorded_trusted_hash(config_text, &key) {
+        None => StopHookStatus::Untrusted,
+        Some(h) if h == stop_hook_trust_hash(command) => StopHookStatus::Trusted,
+        Some(_) => StopHookStatus::HashMismatch,
+    };
+    Ok((status, Some(merged.group_index)))
+}
+
+/// Set only `[hooks.state."<key>"].trusted_hash`, keeping every other byte of the user's config. `None` when already correct.
+pub fn trust_edit(config_text: &str, key: &str, hash: &str) -> Result<Option<String>> {
+    use toml_edit::{DocumentMut, Item, Table};
+    let mut doc: DocumentMut = config_text.parse().context("config.toml is not valid TOML")?;
+    fn sub<'a>(parent: &'a mut Table, name: &str) -> Result<&'a mut Table> {
+        if !parent.contains_key(name) {
+            let mut t = Table::new();
+            t.set_implicit(true);
+            parent.insert(name, Item::Table(t));
+        }
+        parent.get_mut(name).and_then(Item::as_table_mut).ok_or_else(|| anyhow!("`{name}` in config.toml is not a table"))
+    }
+    let state = sub(sub(doc.as_table_mut(), "hooks")?, "state")?;
+    let entry = sub(state, key)?;
+    if entry.get("trusted_hash").and_then(Item::as_str) == Some(hash) {
+        return Ok(None);
+    }
+    entry.set_implicit(false);
+    entry["trusted_hash"] = toml_edit::value(hash);
+    Ok(Some(doc.to_string()))
+}
+
+/// Local status for one Codex home.
+pub fn local_stop_hook_status(codex_home: &Path, command: &str) -> Result<StopHookStatus> {
+    let hooks = codex_home.join("hooks.json");
+    let hooks_text = std::fs::read_to_string(&hooks).unwrap_or_default();
+    let config_text = std::fs::read_to_string(codex_home.join("config.toml")).unwrap_or_default();
+    Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks.to_string_lossy(), command)?.0)
+}
+
+/// User-confirmed trust (local): back up `config.toml`, then write only our one key.
+pub fn local_trust_stop_hook(codex_home: &Path, command: &str) -> Result<()> {
+    let hooks = codex_home.join("hooks.json");
+    let hooks_text = std::fs::read_to_string(&hooks).unwrap_or_default();
+    let (status, idx) = stop_hook_status_in(&hooks_text, "", &hooks.to_string_lossy(), command)?;
+    let Some(idx) = idx else { bail!("the Stop hook is not installed yet ({status:?})") };
+    let key = stop_hook_state_key(&hooks.to_string_lossy(), idx);
+    let hash = stop_hook_trust_hash(command);
+    let config = codex_home.join("config.toml");
+    if config.exists() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let backup = codex_home.join(format!("config.toml.am-bak-{stamp}"));
+        std::fs::copy(&config, &backup)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    crate::trust::update_file(&config, |existing| trust_edit(existing, &key, &hash))?;
+    Ok(())
+}
+
+/// Remote status for one Codex home (reads both files over the host's cached connection).
+pub async fn remote_stop_hook_status(conn: &HostConn, codex_home: &str, command: &str) -> Result<StopHookStatus> {
+    let home = codex_home.trim_end_matches('/');
+    let hooks = format!("{home}/hooks.json");
+    let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
+    let config_text = crate::trust::read_remote_text(conn, &format!("{home}/config.toml")).await?;
+    Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks, command)?.0)
+}
+
+/// User-confirmed trust (remote): backup then merge one key.
+pub async fn remote_trust_stop_hook(conn: &HostConn, codex_home: &str, command: &str) -> Result<()> {
+    let home = codex_home.trim_end_matches('/');
+    let hooks = format!("{home}/hooks.json");
+    let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
+    let (status, idx) = stop_hook_status_in(&hooks_text, "", &hooks, command)?;
+    let Some(idx) = idx else { bail!("the Stop hook is not installed yet ({status:?})") };
+    let key = stop_hook_state_key(&hooks, idx);
+    let hash = stop_hook_trust_hash(command);
+    let config = format!("{home}/config.toml");
+    let q = sh_quote(&config);
+    conn.ssh_exec(&format!("[ -f {q} ] && cp -p {q} {q}.am-bak-$(date +%s) || true")).await?;
+    crate::trust::update_remote_file(conn, &config, |existing| trust_edit(existing, &key, &hash)).await?;
+    Ok(())
 }
 
 /// Install the dispatcher and append its Stop group without writing trust. Returns whether Codex will already run it (user-trusted).
@@ -255,18 +359,18 @@ pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>)
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o600))?;
     }
+    let config_text = std::fs::read_to_string(codex_home.join("config.toml")).unwrap_or_default();
     let installed = std::fs::read_to_string(&hooks)?;
-    let group_index = merge_hooks_json(&installed, &command)?.group_index;
-    Ok(stop_hook_trusted(codex_home, &command, group_index))
+    Ok(stop_hook_status_in(&installed, &config_text, &hooks.to_string_lossy(), &command)?.0 == StopHookStatus::Trusted)
 }
 
-/// Remote installation only; user review and legacy notify are unchanged.
+/// Remote installation only; never writes trust. Returns whether the user already trusts the handler (one extra read of the remote `config.toml`).
 pub fn install_remote<'a>(
     conn: &'a HostConn,
     codex_home: &'a str,
     remote_root: &'a str,
     instance: Option<&'a str>,
-) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
+) -> impl std::future::Future<Output = Result<bool>> + Send + 'a {
     Box::pin(async move {
         let root = remote_root.trim_end_matches('/');
         let home = conn.home().await?;
@@ -286,7 +390,9 @@ pub fn install_remote<'a>(
         .await?;
         conn.ssh_exec(&format!("chmod 600 {}", sh_quote(&hooks)))
             .await?;
-        Ok(())
+        let installed = crate::trust::read_remote_text(conn, &hooks).await?;
+        let config_text = crate::trust::read_remote_text(conn, &format!("{}/config.toml", codex_home.trim_end_matches('/'))).await?;
+        Ok(stop_hook_status_in(&installed, &config_text, &hooks, &command)?.0 == StopHookStatus::Trusted)
     })
 }
 

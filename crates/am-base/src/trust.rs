@@ -440,6 +440,12 @@ async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &
     bail!("{store} kept changing while pre-trusting it")
 }
 
+/// Read one remote text file over the host's cached connection (missing file = empty string).
+pub async fn read_remote_text(conn: &crate::hosts::HostConn, path: &str) -> Result<String> {
+    let out = conn.ssh_exec(&remote_read_script(&crate::hosts::sh_quote(path), &[])).await?;
+    Ok(parse_remote_read(&out, 0).with_context(|| format!("reading {path}"))?.2)
+}
+
 /// 遠端任一個 JSON／設定檔的「讀 → 合併 → 寫回」，規則同 [`mark_trusted_remote`]（cksum 圍欄、暫存檔＋`mv`、權限照原檔、新檔 0600、
 /// 讀到寫之間被改過就重讀）：`merge` 收現有內容（沒有檔＝空字串）回新內容，`None`＝已經是對的、不寫。回「有沒有寫」。
 /// 讀不懂（`merge` 回錯）就整個放棄、不碰檔案。給 agy 的遠端 `hooks.json`／`settings.json`（使用者與 agy 自己也在寫）。

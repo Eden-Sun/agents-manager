@@ -1568,3 +1568,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 綁定 Bot 的小晶片沿用 `BotIcon`（SVG），不用 🤖 emoji（#1180）。非專屬 bot 不再在列上寫字，改成晶片變色（warn）並把說明放進晶片 tooltip。
 
 - 2026-11-13：claude-api 建立與設定的模型選單提供 Opus 5.5（預設）及 Fable 5.2；建立時保留所選模型，不再將選擇丟棄。切換模型後須 fresh 對話。
+
+## Codex Stop hook 信任（#1989 phase 3）
+
+- 位置：「更新」頁，緊接在「自動更新（不通知）」下方，一塊小區段 `CodexStopHookSettings`。
+- 每列＝主機 / 帳號目錄 + 狀態文字（已信任／未信任／雜湊不符／尚未安裝／無法讀取）；只有「未信任」「雜湊不符」才有「信任此 hook」按鈕。
+- 按鈕只開確認對話框，說明 codex 會在每個回合結束時執行 AG Man 的 stop hook、並寫入一筆 `trusted_hash`（會先備份）；確認後才送 POST，絕不在載入時自動信任。
+- `[codex] stop_hook = false` 時仍顯示狀態，但說明目前不會安裝或使用。
+- i18n：同一句繁中只對應一種英文；新字串都在 `i18n/en/updates.ts`（`預設帳號`、`取消` 沿用既有）。

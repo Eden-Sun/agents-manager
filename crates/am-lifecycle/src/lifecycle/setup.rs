@@ -1319,12 +1319,15 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                 let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 let legacy = vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)];
                 if stop_hook_enabled {
-                    let ready = async {
+                    // Bounded: a slow or dead host must never delay the bot start; any failure keeps legacy notify.
+                    let ready = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, async {
                         let home = codex_hook_home(env, conn.home().await?)?;
                         am_base::codex_hook::install_remote(&conn, &home, &crate::hosts::remote_root_for(app.instance().as_deref()), app.instance().as_deref()).await
-                    }.await;
-                    // Remote trust lives in the remote config.toml; not read yet, so remote keeps legacy notify.
-                    codex_notification_args(legacy, ready.map(|()| false))
+                    }).await {
+                        Ok(r) => r,
+                        Err(_) => Err(anyhow::anyhow!("remote Codex Stop hook check timed out")),
+                    };
+                    codex_notification_args(legacy, ready)
                 } else {
                     legacy
                 }
@@ -1405,6 +1408,9 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
     out.extend(hook_args);
     Ok(out)
 }
+/// Upper bound for the remote Stop-hook install/trust check during a bot start (#1989).
+const REMOTE_STOP_HOOK_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+
 fn codex_hook_home(env: &Value, home: String) -> anyhow::Result<String> {
     let path = env.get("CODEX_HOME").and_then(Value::as_str).map(str::trim)
         .filter(|value| !value.is_empty()).map(str::to_owned)

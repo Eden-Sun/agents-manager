@@ -12,6 +12,7 @@ import { UpstreamChangelogBox } from './UpstreamChangelogBox'
 import { useReviewAsk } from '../hooks/useReviewAsk'
 import { changelogRange } from '../lib/upstreamRange'
 import { AutoUpdateSettings } from './AutoUpdateSettings'
+import { CodexStopHookSettings } from './CodexStopHookSettings'
 import './updateCheck.css'
 
 /**
@@ -131,6 +132,7 @@ export function UpdateCheckPanel() {
   return (
     <div className="update-check">
       <AutoUpdateSettings />
+      <CodexStopHookSettings />
       <p className="hint">
         {t.x(
           '每台主機一張表：herdr、各 agent CLI、herdr integration。這裡是總覽，更新動作沿用既有入口；integration 只在你按「更新」時才會在那台跑 {cmd}；沒裝的只顯示，只有 grok／agy 已登入時 daemon 會自動裝一次、也可以按「安裝」。',

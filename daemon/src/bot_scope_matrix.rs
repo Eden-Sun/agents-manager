@@ -132,6 +132,8 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/settings/time-zone", Expect::UserOnly, None),
         rule("GET", "/api/settings/auto-update", Expect::UserOnly, None),
         rule("PUT", "/api/settings/auto-update", Expect::UserOnly, None),
+        rule("GET", "/api/codex/stop-hook", Expect::UserOnly, None),
+        rule("POST", "/api/codex/stop-hook/trust", Expect::UserOnly, None),
         rule("GET", "/api/push/vapid-key", Expect::UserOnly, None),
         rule("GET", "/api/push/subscriptions", Expect::UserOnly, None),
         rule("POST", "/api/push/subscriptions", Expect::UserOnly, None),
