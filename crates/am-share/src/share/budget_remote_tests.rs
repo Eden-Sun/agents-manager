@@ -1,7 +1,7 @@
 //! R-S4：遠端專案分享 bot 的預算量測、outbox 保留政策與巡邏（remote-share-design §6、SPEC §20.5）。
 //!
 //! 腳本部分用 `local_sh_fake` 讓本機 `/bin/sh` 扮演遠端（腳本的每一條擋法都真的被執行），HOME／TMPDIR 指到 scratch 目錄，不碰真實 HOME。
-//! `is_full`／`sweep`／keep 標記要整個 `App`，放在 `with_app`（`daemon-test-harness`）。
+//! `is_full`／`sweep`／keep 標記要的是 DB、主機登記與 `SiteEnv`／`ShareStorage`，放在 `with_app`（crate-only，用 `test_env::TestShareEnv`）。
 
 use std::fs;
 #[cfg(not(feature = "daemon-test-harness"))]
@@ -249,13 +249,14 @@ async fn the_keep_mark_script_replaces_a_symlinked_mark_instead_of_writing_throu
 
 // ───────────────────────── 需要整個 App 的：is_full／sweep／keep 標記 ─────────────────────────
 
-#[cfg(feature = "daemon-test-harness")]
+#[cfg(not(feature = "daemon-test-harness"))]
 mod with_app {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::share::budget::{self, Measured, Unavailable};
-    use crate::testing as tt;
+    // #1862 遷移 B：這組只需要 DB／主機登記／SiteEnv，不需要 daemon `App`：用 am-share 自己的窄環境（同名同形的 env／claude_bot）。
+    use crate::share::test_env as tt;
 
     /// 把測試 app 的專案搬到一台假遠端主機（`local_sh_fake`：本機 sh 扮演它，家目錄＝scratch）。
     async fn remote_host(e: &tt::Env, host: &str, scratch: &Path) -> Arc<HostConn> {

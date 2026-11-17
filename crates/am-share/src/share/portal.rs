@@ -1445,6 +1445,6 @@ pub fn check_listen(listen: &str, main_port: u16) -> Result<std::net::SocketAddr
 #[path = "portal_ooxml.rs"]
 mod ooxml;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "portal_upload_tests.rs"]
 mod upload_tests;

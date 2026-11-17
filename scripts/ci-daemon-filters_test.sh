@@ -45,7 +45,11 @@ check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_d
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "share::tests::trusted::" "crates/am-share/src/share/trusted_tests.rs"
-check "share::portal::upload_tests::" "crates/am-share/src/share/portal_upload_tests.rs"
+# #1862 遷移 B：portal_upload_tests（整檔）與 budget_remote_tests（整檔）搬到 am-share 自己跑，daemon 不再有這兩組；
+# portal_remote_tests 留 1 條要 daemon prompt 路徑的測試（壞 SVG 提醒），改它仍要選到 daemon 的過濾字串。test_env.rs 是 crate-only 的測試環境。
+check "" "crates/am-share/src/share/portal_upload_tests.rs"
+check "share::portal_remote_tests::" "crates/am-share/src/share/portal_remote_tests.rs"
+check "" "crates/am-share/src/share/test_env.rs"
 # 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
 check "share::" "crates/am-share/src/share/store.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
@@ -152,7 +156,7 @@ check "" "crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs"
 check "lifecycle::start::tab_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/tab_tests.rs"
 check "lifecycle::start::resume_args_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/resume_args_tests.rs"
 check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"
-check "share::budget_remote_tests::" "crates/am-share/src/share/budget_remote_tests.rs"
+check "" "crates/am-share/src/share/budget_remote_tests.rs"
 # Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.
 check "" "crates/am-lifecycle/src/ask_answers.rs"
 check "" "crates/am-share/src/share/svg_check.rs"

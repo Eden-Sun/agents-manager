@@ -19,7 +19,10 @@ assert check(Path('crates/am-lifecycle/src/ask_answers.rs').read_text())
 assert not check(Path('crates/am-supervisor/src/supervisor/store.rs').read_text())
 assert module['owned_path'](Path('crates/am-share/src/share/remote_fs_tests.rs'))
 assert not module['owned_path'](Path('crates/am-share/src/share/remote_cage_tests.rs'))
-assert not module['owned_path'](Path('crates/am-share/src/share/budget_remote_tests.rs'))
+# #1862 遷移 B：budget_remote_tests 整檔 crate-only（mod.rs 的 gate 掛載）；portal_upload_tests 由 portal.rs 以 #[path] 掛上（同目錄兄弟檔）。
+assert module['owned_path'](Path('crates/am-share/src/share/budget_remote_tests.rs'))
+assert module['owned_path'](Path('crates/am-share/src/share/portal_upload_tests.rs'))
+assert not module['owned_path'](Path('crates/am-share/src/share/portal_remote_tests.rs'))
 # store.rs 以 #[path] 掛 store_tests/：不含 App 的那批（非 harness）屬 crate 自己的測試，harness 那批不是。
 assert module['owned_path'](Path('crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs'))
 assert module['owned_path'](Path('crates/am-supervisor/src/supervisor/store_tests/persona_migration_tests.rs'))

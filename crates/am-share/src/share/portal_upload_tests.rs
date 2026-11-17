@@ -7,18 +7,19 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
-use crate::testing as tt;
+// #1862 遷移 B：不需要 daemon `App`，用 am-share 自己的窄環境（同名同形的 env／claude_bot／scratch_dir）。
+use crate::share::test_env as tt;
 
 /// 等名額被占滿／放回的上限。只是失敗時的保險（成功時幾毫秒就到）；被等的是真的 TCP＋DB，
 /// 2 秒在整樹平行時會被排擠到逾時（#1155，同 #952）。
 const PERMIT_WAIT: Duration = Duration::from_secs(30);
 
-async fn fixture() -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
+async fn fixture() -> (tt::Env, String, Portal<tt::App>, SocketAddr, reqwest::Client) {
     fixture_with(UPLOAD_QUEUE_WAIT).await
 }
 
 /// `upload_wait`：名額滿了排隊等多久。
-async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
+async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal<tt::App>, SocketAddr, reqwest::Client) {
     let e = tt::env().await;
     let root = tt::scratch_dir("am-share-upload-root");
     let root = root.to_string_lossy().into_owned();

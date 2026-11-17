@@ -296,15 +296,20 @@ grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fai
 # 混合檔剩下的 daemon 測試（lifecycle::screen::／lifecycle::setup::）也仍要被選到。
 # #1862 遷移 B：resume_context.rs／codex_history.rs 也一樣（兩檔仍留 daemon 測試）。
 for pair in crates/am-lifecycle/src/lifecycle/screen.rs:lifecycle::screen:: crates/am-lifecycle/src/lifecycle/setup.rs:lifecycle::setup:: \
-    crates/am-lifecycle/src/lifecycle/resume_context.rs:lifecycle::resume_context:: crates/am-lifecycle/src/codex_history.rs:codex_history::; do
-    path="${pair%%:*}"; filter="${pair#*:}"
+    crates/am-lifecycle/src/lifecycle/resume_context.rs:lifecycle::resume_context:: crates/am-lifecycle/src/codex_history.rs:codex_history:: \
+    crates/am-share/src/share/portal_remote_tests.rs:share::portal_remote_tests:: \
+    crates/am-share/src/share/portal_upload_tests.rs: crates/am-share/src/share/budget_remote_tests.rs:; do
+    path="${pair%%:*}"; filter="${pair#*:}"; crate="${path#crates/}"; crate="${crate%%/*}"
     : >"$AM_TEST_CARGO_LOG"
     export AM_TEST_DIFF_HEAD="$path"
     output="$(changed 2>&1)" || fail "$path 的 changed 失敗：$output"
-    grep -qx 'test -p am-lifecycle --locked' "$AM_TEST_CARGO_LOG" \
-        || fail "$path 沒有跑 owning crate am-lifecycle：$(cat "$AM_TEST_CARGO_LOG")"
+    grep -qx "test -p ${crate} --locked" "$AM_TEST_CARGO_LOG" \
+        || fail "$path 沒有跑 owning crate ${crate}：$(cat "$AM_TEST_CARGO_LOG")"
+    # 整檔搬走（filter 為空）的檔：daemon 不該再選到任何東西。
+    if [ -n "$filter" ]; then
     grep -Eq "^test -p agents-managerd --locked -- .*${filter}" "$AM_TEST_CARGO_LOG" \
         || fail "$path 沒有選到剩下的 daemon 測試 ${filter}：$(cat "$AM_TEST_CARGO_LOG")"
+    fi
 done
 export AM_TEST_DIFF_HEAD=crates/am-core/src/lib.rs
 

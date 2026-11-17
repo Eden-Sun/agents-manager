@@ -25,7 +25,7 @@ pub mod svg_check;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod remote_fs_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod portal_remote_tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -34,10 +34,14 @@ mod remote_cage_tests;
 #[cfg(test)]
 use am_base::test_dirs;
 
+/// #1862 遷移 B：crate-only 測試用的窄環境（取代 daemon `App` 與 `testing`）。
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+pub(crate) mod test_env;
+
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod budget_remote_tests;
 
 pub use crate::agent_relay::SHARE_SENDER;

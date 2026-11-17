@@ -100,6 +100,18 @@ def owned_path(path: Path) -> bool:
                 (parent.parent / declaration[1] / "mod.rs").resolve(),
             }:
                 return True
+    # 同目錄的兄弟檔以 `#[cfg(all(test, not(...)))] #[path = "<this file>"] mod x;` 掛上（如 share/portal.rs 掛 portal_upload_tests.rs）。
+    for sibling in sorted(path.parent.glob("*.rs")):
+        if sibling == path:
+            continue
+        source = sibling.read_text()
+        masked = mask_rust(source)
+        for gate in GATE.finditer(source):
+            if not masked.startswith("#[cfg", gate.start()):
+                continue
+            declaration = re.match(r'\s*#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;', source[gate.end():])
+            if declaration and (sibling.parent / declaration[1]).resolve() == path.resolve():
+                return True
     # `<name>_tests/<file>.rs` 由 `<name>.rs` 以 `#[cfg(all(test, not(...)))] #[path = "<name>_tests/<file>.rs"] mod x;` 掛上。
     if path.parent.name.endswith("_tests"):
         parent = path.parent.parent / (path.parent.name[: -len("_tests")] + ".rs")
