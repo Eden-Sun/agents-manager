@@ -91,10 +91,6 @@ fn line_starts_with(lines: &[String], prefix: &str) -> bool {
 /// 擋不住刻意排成一行一句的引文，見 issue #114）。
 pub fn composer_is_idle(lines: &[&str]) -> bool {
     lines.iter().any(|l| {
-        let s = l.trim().trim_matches(|c| "│┃╭╮╰╯─━▔".contains(c)).trim();
-        if s.starts_with('❯') && am_base::composer_parse::is_claude_placeholder(s.strip_prefix('❯').unwrap_or("")) {
-            return true;
-        }
         let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
         matches!(chars.next(), Some('❯') | Some('›')) && chars.next().is_none()
     })
@@ -2388,7 +2384,7 @@ mod answerable_prompt_tests {
         use am_base::capture::Capture;
         use am_base::composer_parse::{box_state, BoxState};
 
-        // 1. Empty prompt hint (classified as idle)
+        // 1. Empty prompt hint。2.1.326 的空框提示原文未知，非 dim 的文字一律當成有字；拿到實機 ANSI 擷取再補。
         const EMPTY_PROMPT_HINT: &str = "\
 ⏺ Request failed: 500 Internal Server Error
   ⎿  Error: server overloaded, try again later
@@ -2400,9 +2396,9 @@ mod answerable_prompt_tests {
   ⏵⏵ bypass permissions on
 ";
         assert!(!has(EMPTY_PROMPT_HINT), "empty prompt hint 畫面不該有 answerable prompt");
-        assert_eq!(box_state("claude", EMPTY_PROMPT_HINT), BoxState::Empty, "帶提示的空輸入列分類為 Empty");
-        assert!(!am_base::capture::claude::PARSER.still_busy(EMPTY_PROMPT_HINT), "帶提示的空輸入列不是 busy");
-        assert!(am_base::capture::claude::PARSER.awaits_input(EMPTY_PROMPT_HINT), "帶提示的空輸入列分類為等待輸入 (idle)");
+        assert_eq!(box_state("claude", EMPTY_PROMPT_HINT), BoxState::NonEmpty, "無 ANSI 的提示文字視為有字");
+        assert!(!am_base::capture::claude::PARSER.still_busy(EMPTY_PROMPT_HINT), "帶提示的輸入列不是 busy");
+        assert!(!am_base::capture::claude::PARSER.awaits_input(EMPTY_PROMPT_HINT), "無 ANSI 的提示文字不算等待輸入");
 
         // 2. Queued prompt (classified as busy)
         const QUEUED_PROMPT: &str = "\

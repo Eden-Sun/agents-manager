@@ -253,11 +253,6 @@ pub fn is_agy_placeholder(text: &str) -> bool {
     t.ends_with("(shift+tab to cycle)") && t.to_ascii_lowercase().contains("mode:")
 }
 
-pub fn is_claude_placeholder(text: &str) -> bool {
-    let t = text.trim().to_ascii_lowercase();
-    t.contains("try ") || t.contains("retry") || t.contains("what to do") || t.contains("/help")
-}
-
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
@@ -309,8 +304,7 @@ pub(crate) fn marker_row_content(kind: &str, c: &ComposerRow, particles: bool) -
 
 pub(crate) fn hint_rows(kind: &str, c: &ComposerRow, content: &[(char, bool)], lines: &[&str], particles: bool) -> Option<usize> {
     let text: String = content.iter().map(|(ch, _)| *ch).collect();
-    let text_is_placeholder = (kind == "agy" && is_agy_placeholder(&text))
-        || (kind == "claude" && is_claude_placeholder(&text));
+    let text_is_placeholder = kind == "agy" && is_agy_placeholder(&text);
     let visible: Vec<bool> = content.iter().filter(|(ch, _)| !ch.is_whitespace()).map(|(_, hint)| *hint).collect();
     if visible.is_empty() || (!visible.iter().all(|hint| *hint) && !text_is_placeholder) {
         return None;
@@ -344,8 +338,7 @@ pub fn plain_without_hints(kind: &str, screen: &str) -> String {
             let glyph = composer_glyph(kind);
             let at = cells.iter().position(|x| Some(x.ch) == glyph).unwrap_or(0);
             let text: String = content.iter().map(|(ch, _)| *ch).collect();
-            let is_ph = (kind == "agy" && is_agy_placeholder(&text))
-                || (kind == "claude" && is_claude_placeholder(&text));
+            let is_ph = kind == "agy" && is_agy_placeholder(&text);
             let row: String = cells
                 .iter()
                 .enumerate()
@@ -664,6 +657,15 @@ mod agy_placeholder_tests {
         assert_eq!(box_state("agy", &mixed), BoxState::NonEmpty);
         let claude = format!("\u{1b}[90m{RULE}\u{1b}[39m\n❯ \u{1b}[90mAuto mode text\u{1b}[39m\n\u{1b}[90m{RULE}\u{1b}[39m\n");
         assert_eq!(box_state("claude", &claude), BoxState::NonEmpty, "claude 的灰字不當提示（它的提示是 dim）");
+    }
+
+    /// 使用者或 daemon 打進 claude 輸入框的正常文字，即使含 try／retry／/help 也是有字（d143c2bc3 回歸）。
+    #[test]
+    fn claude_typed_text_containing_hint_words_is_not_an_empty_box() {
+        for text in ["please try again", "看 /help", "retry later"] {
+            let screen = format!("{RULE}\n❯ {text}\n{RULE}\n");
+            assert_eq!(box_state("claude", &screen), BoxState::NonEmpty, "{text}");
+        }
     }
 
     #[test]
