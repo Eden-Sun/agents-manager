@@ -891,13 +891,27 @@ pub async fn type_text(
         }
         seen = read().await?;
     }
-    let box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
-    let evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
+    let mut box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
+    let mut evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
+    if should_repaste(&proof, box_empty, evidence_grew) {
+        // 2026-11-17 m4p L2 事故：遠端 herdr 晚一幀重畫，第一次貼的字其實已在路上；700ms 後讀到空框就立刻重貼，
+        // 框裡變兩份字，重貼後又只等一個 settle 就判 `nothing_typed`（不按 Enter），下一則 409 `composer_busy`。
+        // 重貼前先多等一個 settle 再讀一次，重新判斷；仍然空框且證據沒長才重貼。
+        tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+        seen = read().await?;
+        box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
+        evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
+    }
     if should_repaste(&proof, box_empty, evidence_grew) {
         tracing::warn!(run = %run.id, bot = %bot.name, "the paste did not reach the composer; pasting once more");
         client.pane_send_text(&pane, text).await?;
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
+        // 同一事故：重貼後也可能晚一幀。判 `nothing_typed` 之前最多再多等一個 settle 讀一次。
+        if box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty {
+            tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
+            seen = read().await?;
+        }
     } else if proof == Proof::Unverified && box_empty {
         // 沒有證據的那條路不重貼（見 `should_repaste`），但也不能一格空框就判「沒打進去」：遠端／grok 晚一幀
         // 重畫時字其實已經在框裡，判 `nothing_typed` 會不按 Enter、把字留在框裡，下一則 prompt 因此 409

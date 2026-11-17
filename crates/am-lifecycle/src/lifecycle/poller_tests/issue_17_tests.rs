@@ -437,6 +437,38 @@ async fn a_swallowed_enter_is_unproven_even_while_the_spinner_redraws() {
     assert!(f.env.herdr.pane("pane-17").unwrap().transcript.is_empty());
 }
 
+/// 2026-11-17 m4p L2 事故：有證據路徑（claude）晚一幀才畫出貼上的字，不准重貼（否則框裡兩份字），照常送出。
+#[tokio::test]
+async fn a_late_redraw_on_an_evidence_run_is_not_pasted_twice() {
+    let f = fixture("claude", "").await;
+    live(&f, crate::testing::LivePane { swallow_text: true, ..wide() });
+    let app = f.env.app.clone();
+    db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+    let (run, bot) = run_and_bot(&f).await;
+    let client = client_for_run(&app, &run).await.unwrap();
+    let (calls, panes) = (f.env.herdr.calls.clone(), f.env.herdr.live.clone());
+    let redraw = tokio::spawn(async move {
+        loop {
+            let m: Vec<String> = calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+            if let Some(pos) = m.iter().position(|x| x == "pane.send_text") {
+                if m[pos..].iter().any(|x| x == "pane.read") {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut live = panes.lock().unwrap();
+        let p = live.get_mut("pane-17").unwrap();
+        p.swallow_text = false;
+        p.composer = vec!["Reply with PONG please".into()];
+    });
+    let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
+    redraw.await.unwrap();
+    assert_ne!(out, Delivered::Unproven("nothing_typed"));
+    assert_eq!(count(&f, "pane.send_text"), 1, "晚一幀不重貼");
+    assert!(count(&f, "pane.send_keys") >= 1, "有按 Enter");
+}
+
 #[tokio::test]
 async fn a_swallowed_paste_is_pasted_once_more_and_then_unproven() {
     let f = fixture("claude", "").await;
