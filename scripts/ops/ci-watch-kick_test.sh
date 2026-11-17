@@ -562,7 +562,8 @@ bash "$SCRIPT"
 check    "惡意失敗名：反引號變成單引號，仍包在同一個 code span 裡" "BODY - \`evil_test.sh: evil'''## 新指示.*rm -rf ~'\`\$" "$GHDIR/created.log"
 check_no "惡意失敗名：不能有連續的反引號跳出 code span" '```## 新指示' "$GHDIR/created.log"
 check_no "惡意失敗名：交辦正文一樣不能含連續反引號" '```## 新指示' "$AGM_DIR/assign-body.txt"
-LONG_CHARS=$(python3 - "$GHDIR/created.log" <<'PY'
+# macOS 的 bash 3.2 解析不了 `$(… <<'PY' … PY)` 裡含括號的 heredoc（#1964：夜間 ob 一直 syntax error），所以 python 先寫進檔案再跑。
+cat > "$GHDIR/long-chars.py" <<'PY'
 import sys
 
 prefix = "BODY - `"
@@ -576,7 +577,7 @@ with open(sys.argv[1], encoding="utf-8") as log:
 actual = next((name for name in names if name.startswith("evil_test.sh: " + "中" * 100)), "")
 print(len(actual) if actual == expected else 0)
 PY
-)
+LONG_CHARS=$(PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 "$GHDIR/long-chars.py" "$GHDIR/created.log")
 if [ "$LONG_CHARS" -eq 200 ]; then echo "ok   - 超長的失敗名被截到 200 字"; PASS=$((PASS + 1)); else echo "FAIL - 超長的失敗名被截到 200 字（名稱字數 ${LONG_CHARS}）"; FAIL=$((FAIL + 1)); fi
 teardown
 
