@@ -118,17 +118,21 @@ pub trait TranscriptRoots: Send + Sync {
     fn claude_config_dir(&self) -> impl Future<Output = Option<String>> + Send + '_;
     /// codex 的 `CODEX_HOME`（身份 → bot env → `~/.codex`）；沒有家目錄＝`None`。
     fn codex_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_;
-    /// agy 這顆 bot 啟動時的有效 HOME（身份 env 的 `HOME` 展開後，再被 bot env 的 `HOME` 蓋掉；沒設＝daemon 的家目錄）。查不到＝`None`。
+    /// agy 這顆 bot 啟動時的有效 HOME（見 [`agy_home_from`]）。查不到＝`None`（不收）。
     fn agy_home(&self) -> impl Future<Output = Option<PathBuf>> + Send + '_;
 }
 
-/// agy 的有效 HOME：bot env 的 `HOME` 優先，其次身份 env 的 `HOME`（空白視為沒設）；`$HOME`／`~` 以 daemon 的家目錄展開，
-/// 與 pane env 的展開（`expand_home`）同一套。兩者都沒設＝daemon 的家目錄。
-pub fn agy_home_from(daemon_home: &Path, identity_home: Option<&str>, bot_home: Option<&str>) -> PathBuf {
+/// agy 的有效 HOME：bot env 的 `HOME` 優先，其次身份 env 的 `HOME`（空白視為沒設）；`$HOME`／`~` 以 `host_home` 展開，
+/// 與 pane env 的展開（`expand_home`）同一套。`host_home` 是 bot 所在主機的家目錄（本機＝daemon 的、遠端＝那台的）。
+/// 兩者都沒設＝`host_home`。`host_home` 拿不到（遠端還沒快取）＝`None`，呼叫端據此拒絕，不放寬。
+pub fn agy_home_from(host_home: Option<&Path>, identity_home: Option<&str>, bot_home: Option<&str>) -> Option<PathBuf> {
     let nonblank = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
     match nonblank(bot_home).or_else(|| nonblank(identity_home)) {
-        Some(v) => PathBuf::from(crate::config::expand_home(&v, &daemon_home.to_string_lossy())),
-        None => daemon_home.to_path_buf(),
+        Some(v) => {
+            let home = host_home?;
+            Some(PathBuf::from(crate::config::expand_home(&v, &home.to_string_lossy())))
+        }
+        None => host_home.map(Path::to_path_buf),
     }
 }
 

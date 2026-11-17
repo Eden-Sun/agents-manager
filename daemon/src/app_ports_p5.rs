@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::config::LOCAL_HOST;
 use crate::db;
+use crate::hosts::HostsAccess as _;
 use crate::state::App;
 use crate::transcript_read::{self, TranscriptRoots};
 
@@ -45,14 +46,21 @@ impl TranscriptRoots for AppTranscriptRoots<'_> {
 }
 
 /// 一顆 agy bot 的有效 HOME（身份 env 的 `HOME`、bot env 的 `HOME` 蓋掉它）；給 [`transcript_read::TranscriptRoots::agy_home`] 用，p4obs 也共用。
+/// 展開基準是 bot 所在主機的家目錄：本機＝daemon 的；遠端＝那台的（只用已快取的，沒有就 `None`、拒絕，不為此去 ssh）。
 pub(crate) async fn agy_home_of(app: &Arc<App>, bot: &db::Bot) -> Option<PathBuf> {
-    let daemon_home = crate::home::dir()?;
+    let host = db::bot_host(&app.db, &bot.id).await.ok()?;
+    let host_home = if host == LOCAL_HOST {
+        crate::home::dir()
+    } else {
+        let fence = app.hosts().fence(&host).await?;
+        fence.conn().cached_home().await.map(PathBuf::from)
+    };
     let identity_home = match bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        Some(idn) => crate::tools::identity_for_host(app, LOCAL_HOST, idn).await.and_then(|i| i.env.get("HOME").cloned()),
+        Some(idn) => crate::tools::identity_for_host(app, &host, idn).await.and_then(|i| i.env.get("HOME").cloned()),
         None => None,
     };
     let bot_home = bot.env().get("HOME").cloned();
-    Some(transcript_read::agy_home_from(&daemon_home, identity_home.as_deref(), bot_home.as_deref()))
+    transcript_read::agy_home_from(host_home.as_deref(), identity_home.as_deref(), bot_home.as_deref())
 }
 
 // 目前只有測試（`lifecycle::agy_tests`）直接問 root 清單。

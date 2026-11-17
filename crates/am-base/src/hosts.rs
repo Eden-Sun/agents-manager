@@ -707,6 +707,11 @@ impl HostConn {
         })
     }
 
+    /// 已快取的 `$HOME`（本機是 daemon 的家目錄；遠端要先有人問過才有）。沒有＝`None`，不為此去 ssh。
+    pub async fn cached_home(&self) -> Option<String> {
+        self.remote_home.lock().await.clone()
+    }
+
     pub async fn home(&self) -> Result<String> {
         if let Some(h) = self.remote_home.lock().await.clone() {
             return Ok(h);

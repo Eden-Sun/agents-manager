@@ -161,15 +161,44 @@
     
     /// agy 有效 HOME 的決定：bot env 蓋身份 env；`$HOME`／`~` 以 daemon 家目錄展開；空白的 bot env 不蓋身份；都沒設＝daemon 家目錄。
     #[test]
-    fn agy_home_is_the_bot_env_over_the_identity_env_over_the_daemon_home() {
+    fn agy_home_is_the_bot_env_over_the_identity_env_over_the_host_home() {
         let d = tmp("agy-home");
-        assert_eq!(agy_home_from(&d, None, None), d);
-        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-"), None), d.join(".agy-"));
-        assert_eq!(agy_home_from(&d, Some("${HOME}/.agy-a"), None), d.join(".agy-a"));
-        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-a"), Some("$HOME/.agy-b")), d.join(".agy-b"), "bot env 蓋身份");
-        assert_eq!(agy_home_from(&d, Some("$HOME/.agy-a"), Some("  ")), d.join(".agy-a"), "空白的 bot env 不蓋");
-        assert_eq!(agy_home_from(&d, None, Some("~/.agy-c")), d.join(".agy-c"), "~ 展開");
-        assert_eq!(agy_home_from(&d, Some("/srv/agy"), None), PathBuf::from("/srv/agy"), "絕對路徑照用");
+        let h = Some(d.as_path());
+        assert_eq!(agy_home_from(h, None, None), Some(d.clone()));
+        assert_eq!(agy_home_from(h, Some("$HOME/.agy-"), None), Some(d.join(".agy-")));
+        assert_eq!(agy_home_from(h, Some("${HOME}/.agy-a"), None), Some(d.join(".agy-a")));
+        assert_eq!(agy_home_from(h, Some("$HOME/.agy-a"), Some("$HOME/.agy-b")), Some(d.join(".agy-b")), "bot env 蓋身份");
+        assert_eq!(agy_home_from(h, Some("$HOME/.agy-a"), Some("  ")), Some(d.join(".agy-a")), "空白的 bot env 不蓋");
+        assert_eq!(agy_home_from(h, None, Some("~/.agy-c")), Some(d.join(".agy-c")), "~ 展開");
+        assert_eq!(agy_home_from(h, Some("/srv/agy"), None), Some(PathBuf::from("/srv/agy")), "絕對路徑照用");
+    }
+
+    /// 遠端主機的 agy bot：`$HOME` 展開的基準是**那台**的家目錄（/Users/…），不是 daemon 的；那台的家目錄還沒快取＝拒絕（`None`），不放寬成 daemon 的。
+    #[test]
+    fn a_remote_agy_home_expands_against_that_host_and_refuses_without_its_home() {
+        let remote = Path::new("/Users/m4p");
+        assert_eq!(agy_home_from(Some(remote), None, Some("$HOME/.agy-")), Some(PathBuf::from("/Users/m4p/.agy-")));
+        assert_eq!(agy_home_from(Some(remote), Some("$HOME/.agy-a"), None), Some(PathBuf::from("/Users/m4p/.agy-a")));
+        assert_eq!(agy_home_from(Some(remote), None, Some("~/.agy-c")), Some(PathBuf::from("/Users/m4p/.agy-c")));
+        assert_eq!(agy_home_from(None, None, Some("$HOME/.agy-")), None, "遠端 HOME 未快取：拒絕");
+        assert_eq!(agy_home_from(None, Some("~/.agy-a"), None), None, "遠端 HOME 未快取：identity 的 ~ 也拒絕");
+        assert_eq!(agy_home_from(None, None, None), None, "沒設、也沒有家目錄＝拒絕");
+        assert_eq!(agy_home_from(None, Some("/srv/agy"), None), Some(PathBuf::from("/srv/agy")), "絕對路徑不需要家目錄");
+    }
+
+    /// 遠端 agy bot 的 transcript：路徑在那台，daemon 只收形狀（不在本機讀）；本機讀取的入口一律拒絕；root 查不到時形狀也照樣要過。
+    #[tokio::test]
+    async fn a_remote_agy_bot_is_accepted_by_shape_and_never_read_locally() {
+        let mut f = fake("agy");
+        f.local = Some(false);
+        f.agy = Some(PathBuf::from("/Users/m4p/.agy-"));
+        let p = "/Users/m4p/.agy-/.gemini/antigravity-cli/brain/u1/.system_generated/logs/s.jsonl";
+        assert!(transcript_allowed_for(&f, p).await, "遠端：形狀過就收");
+        assert!(!transcript_allowed_for(&f, "/Users/m4p/../x.jsonl").await, "遠端：仍擋 .. ");
+        assert!(!local_transcript_allowed_for(&f, p).await, "遠端：本機不讀");
+        f.agy = None;
+        assert!(transcript_allowed_for(&f, p).await, "遠端 root 查不到不影響形狀判斷");
+        assert!(!local_transcript_allowed_for(&f, p).await);
     }
 
     /// 身份自訂 HOME 的 agy：自己的 brain 收、別的身份（或預設家目錄）的 brain 拒；symlink 指到 root 外面也拒。
