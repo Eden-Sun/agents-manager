@@ -53,6 +53,12 @@ check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
 # 改這兩檔仍要選到 daemon 的 lifecycle::screen::／lifecycle::setup::，不能因部分測試搬走就退成零選。
 check "lifecycle::screen::" "crates/am-lifecycle/src/lifecycle/screen.rs"
 check "lifecycle::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs"
+# #1862 遷移 B：resume_context／codex_history 的 DB／純解析測試改 crate-only，兩檔仍各留 daemon 測試（resume_context::tests 兩邊都編譯、
+# codex_history::tests::the_hook_defaults_off_in_tests 只在 daemon harness），改這兩檔仍要選到各自的 daemon 過濾字串。
+# 共用的測試輔助 am_base::test_dirs 改動走 am-base 自己的測試。
+check "lifecycle::resume_context::" "crates/am-lifecycle/src/lifecycle/resume_context.rs"
+check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
+check "runners::am_base_tests::" "crates/am-base/src/test_dirs.rs"
 check "lifecycle::screen:: lifecycle::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs" "crates/am-lifecycle/src/lifecycle/screen.rs"
 check "runners::supervisor:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/supervisor/health.rs"
 # 檔案自己沒有測試、但同名子目錄有測試：不退，留在這一層（runners::supervisor:: 底下有測試）。

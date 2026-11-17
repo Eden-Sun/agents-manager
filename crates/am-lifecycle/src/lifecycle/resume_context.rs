@@ -265,11 +265,62 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod database_tests {
     use super::*;
-    use crate::capabilities::Db;
-    use crate::{db, testing};
+    use crate::db;
+
+    /// #1862 遷移 B：這組測試只碰 SQLite pool，不需要 daemon `App`。這個小夾具開一個真的暫存 DB 檔、套上共用 schema
+    /// （`db::open_with(path, &[])`，與正式啟動同一份 migration，沒有複製 SQL），並給出與 daemon `testing::{env,claude_bot}`
+    /// 同名同形的入口，讓測試本文不用改。
+    mod testing {
+        use crate::db;
+        use sqlx::SqlitePool;
+
+        pub struct App {
+            pool: SqlitePool,
+        }
+        impl App {
+            pub fn db(&self) -> &SqlitePool {
+                &self.pool
+            }
+        }
+        pub struct Env {
+            pub app: App,
+            pub project_id: String,
+        }
+
+        pub async fn env() -> Env {
+            let dir = crate::test_dirs::scratch_dir("am-resume-ctx-db");
+            let pool = db::open_with(&dir.join("db.sqlite3"), &[]).await.unwrap();
+            let project_id = db::ulid();
+            sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?, 'local', ?)")
+                .bind(&project_id)
+                .bind(dir.join("repo").to_string_lossy().to_string())
+                .bind("proj")
+                .bind(db::now())
+                .execute(&pool)
+                .await
+                .unwrap();
+            Env { app: App { pool }, project_id }
+        }
+
+        pub async fn claude_bot(app: &App, project_id: &str, name: &str) -> db::Bot {
+            let id = db::ulid();
+            sqlx::query(
+                "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+                 VALUES (?,?,?,'claude','[]',0,1,'tok','user',?)",
+            )
+            .bind(&id)
+            .bind(project_id)
+            .bind(name)
+            .bind(db::now())
+            .execute(&app.pool)
+            .await
+            .unwrap();
+            db::bot(&app.pool, &id).await.unwrap().unwrap()
+        }
+    }
 
     async fn row(pool: &SqlitePool, id: &str, bot: &str, sid: &str, status: Option<Value>, at: &str) {
         sqlx::query("INSERT INTO runs (id, bot_id, state, native_session_id, status_json, started_at)

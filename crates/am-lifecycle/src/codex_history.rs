@@ -13,7 +13,7 @@
 //! `[codex_history] enabled = true`。關著時所有呼叫端的行為與沒有這個模組時一致（測試 build 的 source 預設也是空的，
 //! 要用就 `App.codex_history.set(...)` 換一個 stub）。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -581,14 +581,14 @@ impl HistoryConn for AppServerConn {
 // ───────────────────────── 測試用 stub ─────────────────────────
 
 /// 決定性的假 source：每個 [`Binding`] 一份歷史（新到舊），可以隨時改、可以讓它全部失敗。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 #[derive(Default)]
 pub struct StubSource {
     inner: std::sync::Mutex<StubState>,
     pub opens: AtomicU64,
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 #[derive(Default)]
 struct StubState {
     items: HashMap<Binding, Vec<Item>>,
@@ -601,7 +601,7 @@ struct StubState {
     arrivals: Vec<(u64, Binding, String, String, String)>,
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 impl StubSource {
     pub fn new() -> Arc<Self> {
         Arc::new(Self { inner: std::sync::Mutex::new(StubState { remote_ok: true, ..Default::default() }), opens: AtomicU64::new(0) })
@@ -635,20 +635,20 @@ impl StubSource {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 struct StubConn {
     src: Arc<StubSource>,
     binding: Binding,
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 fn stub_page<T: Clone>(all: &[T], cursor: Option<&str>, limit: u32) -> Page<T> {
     let start: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
     let end = (start + limit as usize).min(all.len());
     Page { data: all[start.min(all.len())..end].to_vec(), next_cursor: (end < all.len()).then(|| end.to_string()) }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 impl HistoryConn for StubConn {
     fn items_desc<'a>(&'a mut self, cursor: Option<&'a str>, limit: u32) -> BoxFuture<'a, Result<Page<Item>, HistoryError>> {
         Box::pin(async move {
@@ -677,7 +677,7 @@ impl HistoryConn for StubConn {
 }
 
 /// `Arc<StubSource>` 當 source 用（stub 自己要留一份讓測試改歷史）。
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 impl HistorySource for Arc<StubSource> {
     fn supports(&self, host: &str) -> bool {
         host == LOCAL_HOST || self.inner.lock().unwrap().remote_ok
@@ -702,19 +702,22 @@ impl HistorySource for Arc<StubSource> {
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "daemon-test-harness"))]
     fn bind(host: &str, home: Option<&str>, thread: &str) -> Binding {
         Binding { host: host.into(), codex_home: home.map(PathBuf::from), thread_id: thread.into() }
     }
 
+    #[cfg(not(feature = "daemon-test-harness"))]
     fn conn(src: &Arc<StubSource>, b: &Binding) -> StubConn {
         StubConn { src: src.clone(), binding: b.clone() }
     }
 
     /// 真實 app-server 的 `thread/items/list` 回應形狀（2026-10-01 對 codex 0.159.3 實測）。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_real_items_response_shape_is_parsed() {
         let r = json!({"data": [
@@ -735,6 +738,7 @@ mod tests {
     }
 
     /// 多段 text 輸入接起來等於我們送的那句也算；跟別人的不能混。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn a_split_user_message_matches_only_when_it_concatenates_to_the_prompt() {
         let item = Item { turn_id: "t".into(), item_id: "u".into(), kind: ItemKind::User(vec!["ab".into(), "cd".into()]) };
@@ -744,6 +748,7 @@ mod tests {
     }
 
     /// 增量讀：基準之後的新東西由舊到新；空 thread 的基準是 None。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn items_since_reads_only_what_is_after_the_baseline() {
         let src = StubSource::new();
@@ -767,6 +772,7 @@ mod tests {
     }
 
     /// 基準不在歷史裡（被截、投影停住）＝錯誤，不是「沒有新東西」。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn a_missing_baseline_is_an_error_not_an_empty_answer() {
         let src = StubSource::new();
@@ -781,6 +787,7 @@ mod tests {
         assert!(items_since(&mut c, Some("u1")).await.is_err());
     }
 
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_reply_is_the_final_answer_of_our_own_turn() {
         let it = |turn: &str, id: &str, kind| Item { turn_id: turn.into(), item_id: id.into(), kind };
@@ -800,6 +807,7 @@ mod tests {
         assert_eq!(reply_after(&ok, &["沒送過".to_string()]), None);
     }
 
+    #[cfg(feature = "daemon-test-harness")]
     #[test]
     fn the_hook_defaults_off_in_tests_and_swaps() {
         let hook = HistoryHook::default();
@@ -810,16 +818,115 @@ mod tests {
         assert!(hook.get().is_none());
     }
 
+    /// #1862 遷移 B：以下四個測試與 app-server 往返測試只需要「歷史讀取需要的那幾個能力」，不需要 daemon `App`。
+    /// `tt` 是窄的假環境：真的暫存 SQLite（共用 schema，`db::open_with(path, &[])`）＋ [`CodexHistoryHost`] 的最小實作。
+    /// 沒有設定的能力不會預設成功：`source()` 在測試自己 `codex_history.set(..)` 之前是 `None`（絕不會是真的 `AppServerSource`，
+    /// 所以 crate-only 測試不可能起真的 codex）；`codex_program()` 是一個不存在的路徑，真要被執行就明確失敗。
+    #[cfg(not(feature = "daemon-test-harness"))]
+    mod tt {
+        use super::*;
+        use sqlx::SqlitePool;
+
+        pub struct CfgState {
+            pub codex_history: CodexHistoryCfg,
+        }
+        pub struct CodexHistoryCfg {
+            pub enabled: bool,
+        }
+        pub struct FakeCfg(std::sync::Mutex<CfgState>);
+        impl FakeCfg {
+            pub async fn update(&self, f: impl FnOnce(&mut CfgState) -> Result<(), String>) -> Result<(), String> {
+                f(&mut self.0.lock().unwrap())
+            }
+        }
+
+        pub struct FakeHistoryEnv {
+            pub db: SqlitePool,
+            pub codex_history: HistoryHook,
+            pub cfg: FakeCfg,
+        }
+
+        impl CodexHistoryHost for FakeHistoryEnv {
+            async fn enabled(&self) -> bool {
+                self.cfg.0.lock().unwrap().codex_history.enabled
+            }
+            fn source(&self) -> Option<Arc<dyn HistorySource>> {
+                self.codex_history.get()
+            }
+            async fn bot_host<'a>(&'a self, bot_id: &'a str) -> Option<String> {
+                db::bot_host(&self.db, bot_id).await.ok()
+            }
+            /// daemon 版先看 identity、再看 bot 的 `CODEX_HOME`、最後 `~/.codex`；這裡只認 bot 自己的 env，其餘給固定的假家目錄。
+            async fn codex_home<'a>(&'a self, bot: &'a db::Bot) -> Option<PathBuf> {
+                let v = bot.env().get("CODEX_HOME").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+                Some(PathBuf::from(v.unwrap_or_else(|| "/fake-home/.codex".to_string())))
+            }
+            async fn codex_program(&self) -> String {
+                "/nonexistent/fake-history-env-codex".to_string()
+            }
+        }
+
+        pub struct Env {
+            pub app: Arc<FakeHistoryEnv>,
+            pub project_id: String,
+        }
+
+        pub async fn env() -> Env {
+            let dir = crate::test_dirs::scratch_dir("am-codex-history-db");
+            let pool = db::open_with(&dir.join("db.sqlite3"), &[]).await.unwrap();
+            let project_id = db::ulid();
+            sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?, 'local', ?)")
+                .bind(&project_id)
+                .bind(dir.join("repo").to_string_lossy().to_string())
+                .bind("proj")
+                .bind(db::now())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let app = FakeHistoryEnv {
+                db: pool,
+                // daemon harness 的預設（空 source），不是 crate 的預設（真的 AppServerSource）。
+                codex_history: HistoryHook(RwLock::new(None)),
+                cfg: FakeCfg(std::sync::Mutex::new(CfgState { codex_history: CodexHistoryCfg { enabled: true } })),
+            };
+            Env { app: Arc::new(app), project_id }
+        }
+
+        /// 同 daemon `testing::fake_run`：看起來在跑、沒有真的 agent。
+        pub async fn fake_run(app: &FakeHistoryEnv, bot_id: &str) -> String {
+            let id = db::ulid();
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+                 VALUES (?,?,'running','idle','ws-1',?, 'agent', 'test', ?)",
+            )
+            .bind(&id)
+            .bind(bot_id)
+            .bind(format!("pane-{bot_id}"))
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+            id
+        }
+
+        /// 同 daemon `testing::write_exec`（含 #189 的 ETXTBSY 守衛）：共用 `am_base::test_dirs::write_exec`。
+        pub fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
+            crate::test_dirs::write_exec(path, content)
+        }
+    }
+
+    #[cfg(not(feature = "daemon-test-harness"))]
     /// 寫一支假腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: &std::path::Path, body: &str) {
-        crate::testing::write_exec(path, format!("#!/bin/sh\n{body}"))
+        tt::write_exec(path, format!("#!/bin/sh\n{body}"))
     }
 
     /// 真的 app-server 的 JSON-RPC 往返：用一支假的 `codex`（shell script）驗證 initialize／initialized、
     /// 略過 notification、error 轉成 `HistoryError::Rpc`、`CODEX_HOME` 帶進子行程。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_app_server_conn_speaks_jsonrpc_over_stdio() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid())));
+        let dir = crate::test_dirs::track(std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("codex");
         // 讀一行回一行：initialize 前先噴一則 notification；items/list 回一筆並帶 CODEX_HOME 當 item id；turns/list 回 error。
@@ -846,8 +953,7 @@ done
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    use crate::testing as tt;
-
+    #[cfg(not(feature = "daemon-test-harness"))]
     async fn codex_bot_and_run(env: &tt::Env, session: Option<&str>) -> (db::Bot, db::Run) {
         let app = &env.app;
         let bot_id = db::ulid();
@@ -868,6 +974,7 @@ done
 
     /// 綁定：thread id 來自 run 的 durable `native_session_id`（daemon 重啟後同一個值），`CODEX_HOME` 來自 bot 的 env；
     /// 沒有 session、沒開、不是 codex、source 不支援那台主機，都不給 binding（不從「最近一條 thread」猜）。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_binding_is_strict_and_survives_a_daemon_restart() {
         let env = tt::env().await;
@@ -901,6 +1008,7 @@ done
     }
 
     /// 遠端主機：binding 帶 host、沒有本機的 `CODEX_HOME`；只認本機的 source 不會被拿去讀遠端。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn a_remote_host_has_its_own_binding_and_a_local_only_source_declines_it() {
         let env = tt::env().await;
@@ -925,6 +1033,7 @@ done
     }
 
     /// 回覆補撈：thread 歷史裡我們那則之後、同一個 turn 的 final_answer；歷史讀不到／還沒回完＝`None`，不編。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn the_exact_reply_comes_from_our_own_turn_only() {
         let env = tt::env().await;
@@ -953,6 +1062,7 @@ done
     }
 
     /// 中斷證據：只有 turn.status 明說 interrupted 才是 true；其餘（跑完、還在跑、找不到、RPC error）都是「沒有證據」。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[tokio::test]
     async fn interruption_is_only_ever_positive_evidence() {
         let env = tt::env().await;
@@ -976,6 +1086,7 @@ done
     }
 
     /// 計數：structured-hit／rollout-fallback／screen-fallback 各記各的。
+    #[cfg(not(feature = "daemon-test-harness"))]
     #[test]
     fn the_evidence_sources_are_counted_separately() {
         let before = counts();
