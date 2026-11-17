@@ -2261,6 +2261,8 @@ herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它；後面接 `[agents]` 的 agent md（§6.5i）。
 **共用 prompt prefix（#1941）**：`child_agent_rules()` 是無參數的固定文字，不嵌任何 bot 的名字、id、日期或 pane；名稱一律寫成 `$AM_AGENT_NAME`（bot 與子 pane 的環境變數，pane env 由 `lifecycle::setup::pane_env_for_fence` 注入），需要寫死的具體名字只放在注入文字的最後一段（`agent_name_note`）。所以所有 bot 注入的文字除最後一段外逐字相同，provider 的 prompt cache 可以共用同一段前綴。改這份文字會讓全部 bot 的共用前綴失效一次，少改、合併改。
 
+背景工作段（#2048 #2050）：短的背景等待由 agent 自理（必須限時、不吞錯、用完自停）；預期跑超過一個回合或要給人看的常駐行程放 herdr shell pane（會掛在該 bot 底下、可從側欄關閉）。
+
 **語氣是規格的一部分（2026-09-13）**：注入給 bot 與 child 的人設／提示一律寫成**命令**——「必須」「一律」「禁止」，
 開頭先講明「硬規則，不是建議」。客氣的寫法（「請…」「…比較清楚」）agent 會當成建議而不執行，實測就是這樣漏掉找閒置 child、
 漏掉關分頁。`lifecycle` 的 `the_rules_read_as_orders_not_suggestions` 測試守這條：出現「請」就紅燈。

@@ -1769,6 +1769,13 @@ PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：*
 - **登入態**（使用者 2026-10-15）：使用者要你登入時可以照做；使用者也可以在自己的環境用 agent-browser 登入，\
 再把登入態（`--state` 檔、cookie、session）交給你的 session 接著執行。登入態檔算憑證：**禁止**放 scratchpad、`$AM_OUTBOX` 或 repo，用完就刪。\n\
 \n\
+背景工作（同樣是硬規則，使用者 2026-10-31，issue #2048 #2050）：\n\
+\n\
+- **背景等待一律限時**：`run_in_background` 的 until／while 迴圈、輪詢腳本都要有上限（外層 `timeout <秒>` 或最大次數）；逾時要印出原因並以非 0 結束。\n\
+- **等待條件的查詢不准吞錯誤**：不要 `2>/dev/null` 之後再判空字串；查詢失敗就直接結束並印出錯誤。\n\
+- **用完自己停**：不再需要的背景工作要自己停掉（Claude 用 TaskStop；其他 CLI 用自己記下的 PID `kill`）。\n\
+- **常駐行程放 herdr shell pane**：dev server、watcher、長駐 tail／log 追蹤這類預期跑超過一個回合、或要給使用者／別的 bot 看的行程，用 `herdr pane split --pane \"$HERDR_PANE_ID\"` 開 pane、`herdr pane run <pane> \"<指令>\"` 執行，不放在 CLI 的背景 shell；做完**必須**關掉那個 pane。\n\
+\n\
 輸出檔案（同樣是硬規則，使用者 2026-09-16 裁示）：\n\
 \n\
 - **scratchpad 只放中間產物**（腳本、log、暫存資料）。scratchpad **不是**給使用者的地方，**禁止**把要交給使用者的檔案放在那裡。\n\
