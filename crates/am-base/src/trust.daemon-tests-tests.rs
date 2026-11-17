@@ -314,3 +314,26 @@ trust_level = "trusted"
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 新建的身份目錄（例如 `~/.codex/`）是 0700，不沿用 umask（移植自 ec199db2a）。
+    #[cfg(unix)]
+    #[test]
+    fn a_new_identity_trust_directory_is_created_0700() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-new-dir-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join(".codex/config.toml");
+        assert!(mark_trusted("codex", &store, &["/workspace".into()]).unwrap());
+        let mode = std::fs::metadata(dir.join(".codex")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "new identity directory inherited a permissive umask: {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 遠端寫入：`umask 077` 要排在 `mkdir -p` 之前（移植自 ec199db2a）。
+    #[test]
+    fn remote_trust_write_sets_private_umask_before_creating_directories() {
+        let script = remote_write_script("'/home/bot/.codex/config.toml'", "'missing'", "body");
+        let private_umask = script.find("umask 077").expect("remote write must set a private umask");
+        let mkdir = script.find("mkdir -p").expect("remote write must create its parent");
+        assert!(private_umask < mkdir, "remote mkdir runs before private umask:\n{script}");
+    }

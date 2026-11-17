@@ -432,7 +432,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/schedules/{id}/run` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/schedules/{id}/history` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| PUT | `/api/identities/{name}/disabled` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| PUT | `/api/identities/{name}/disabled` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/kind-prefs` | User 或 Bot principal；回 `{disabled:[{host,kind}]}`，kind 停用（kind × host）。 |
 | HEAD | `/api/kind-prefs` | User 或 Bot principal；同 GET |
 | PUT | `/api/kinds/{kind}/disabled` | User-only；Bot 與 AGM role 均 → 403 `user_only`。body `{host?, disabled}`，kind 只收 claude／codex／grok／agy（`claude-api` 不在此）。停用後：`POST /api/projects/{id}/bots` 回 409 `kind_disabled`；`start`（含重啟、resume、派工觸發的啟動）回 409 `kind_disabled`，已在跑的 Run 不殺；grok 額度不再探測。回 `{host,kind,disabled}` 並推 `kind_prefs_changed`。 |
