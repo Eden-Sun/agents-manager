@@ -6053,7 +6053,7 @@ async fn service_daemon_swap_restart_window(
         Err(e) => {
             // 等太久要告訴使用者、讓使用者調度（SPEC §18.10，使用者 2026-10-04）。
             crate::deploy_wait::observe(&app, owner, &id, commit, Err(&e)).await;
-            if !crate::swap_window::keep_after(&e) {
+            if !crate::swap_window::keep_after(&e) && !crate::swap_window::held_by_approval(&e, &id) {
                 let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
             }
             Err(e)

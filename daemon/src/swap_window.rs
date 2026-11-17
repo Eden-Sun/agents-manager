@@ -101,6 +101,19 @@ pub fn keep_after(err: &LcError) -> bool {
     }
 }
 
+/// A retry can find the same active lease that an earlier request acquired with this
+/// reused approval. Revoking that approval would invalidate the first holder's renewals.
+pub fn held_by_approval(err: &LcError, approval_id: &str) -> bool {
+    match err {
+        LcError::Conflict(v) => {
+            v.get("reason").and_then(|r| r.as_str()) == Some("lease_held")
+                && v.pointer("/lease/held").and_then(serde_json::Value::as_bool) == Some(true)
+                && v.pointer("/lease/approval_id").and_then(serde_json::Value::as_str) == Some(approval_id)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
