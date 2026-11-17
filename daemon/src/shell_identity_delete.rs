@@ -240,9 +240,17 @@ def fsync_dir(path):
         try: os.close(fd)
         except OSError: pass
 def metadata_safe(path):
-    try:
-        if os.listxattr(path,follow_symlinks=False): return False
-    except OSError: return False
+    # macOS 的 python3 沒有 os.listxattr（AttributeError 會一路變成 source_unknown，#1964：macOS 上整個 shell alias 刪除都走不通），
+    # 改問系統的 /usr/bin/xattr（-s＝不跟 symlink）；有任何 xattr 一樣視為不安全。
+    if sys.platform=='darwin':
+        try:
+            names=subprocess.run(['/usr/bin/xattr','-s',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=3,check=False)
+        except Exception: return False
+        if names.returncode!=0 or names.stdout.strip(): return False
+    else:
+        try:
+            if os.listxattr(path,follow_symlinks=False): return False
+        except OSError: return False
     if sys.platform=='darwin':
         try:
             result=subprocess.run(['/bin/ls','-lde',path],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,timeout=3,check=False)
