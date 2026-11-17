@@ -30,9 +30,9 @@ use std::time::Duration;
 /// 畫面底部看幾個非空行：claude 的模式列在最後一兩行；codex 的背景行上面還有額度警告、輸入框、狀態列、快捷鍵提示。
 const BOTTOM_LINES: usize = 8;
 
-/// 背景工作持續超過這麼久就標「可能卡住」（#774）。遠端 cargo 這種正常的長工作一兩個小時就跑完；三小時還標著多半是
-/// 卡住或忘了收（例如 `sleep`、`tail -f`、沒 listen port 的 watcher）。
-pub const STUCK_AFTER_SECS: i64 = 3 * 3600;
+/// 背景工作持續超過這麼久就標「可能卡住」（#774）。遠端 cargo 這種正常的長工作多半一小時內跑完；超過一小時還標著多半是
+/// 卡住或忘了收（例如 `sleep`、`tail -f`、沒 listen port 的 watcher）。跨過門檻時 daemon 對該 bot 送一次通知（#2049）。
+pub const STUCK_AFTER_SECS: i64 = 3600;
 
 /// 一個 run 的背景帳。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub struct Entry {
     pub since: Option<i64>,
     /// 上一次記帳時算出的「可能卡住」：跨過門檻那一輪要推 `bot_status`，網頁才換字。
     pub stuck: bool,
+    /// 這一段已經對 bot 送過「卡住」通知（#2049）：每段只送一次；歸零或新的一段重置。
+    pub notified: bool,
 }
 
 /// `App.background_jobs`：run id → 背景帳（**看過的**都記，含 0；沒有那一列＝巡邏還沒看過它，#767）。
@@ -66,8 +68,30 @@ fn record_at(m: &mut HashMap<String, Entry>, run_id: &str, n: u32, now: i64) -> 
     let prev = m.get(run_id).copied();
     let since = if n == 0 { None } else { prev.and_then(|e| e.since).or(Some(now)) };
     let stuck = stuck_at(since, now);
-    m.insert(run_id.to_string(), Entry { n, since, stuck });
+    // 同一段（since 沒變）沿用已通知；新的一段或歸零就重置。
+    let notified = prev.is_some_and(|e| e.since == since && e.notified);
+    m.insert(run_id.to_string(), Entry { n, since, stuck, notified });
     prev.map(|e| (e.n, e.stuck)) != Some((n, stuck))
+}
+
+/// 跨過門檻、還沒通知過的背景帳：標成已通知並回傳 `(run id, 開始時間 unix 毫秒, 背景數)`。每段只回傳一次（#2049）。
+pub fn take_newly_stuck(m: &mut HashMap<String, Entry>, now_ms: i64) -> Vec<(String, i64, u32)> {
+    let mut out = Vec::new();
+    for (run_id, e) in m.iter_mut() {
+        let Some(since) = e.since else { continue };
+        if e.n == 0 || e.notified || !stuck_at(Some(since), now_ms) {
+            continue;
+        }
+        e.notified = true;
+        e.stuck = true;
+        out.push((run_id.clone(), since, e.n));
+    }
+    out
+}
+
+/// [`take_newly_stuck`] 用現在的時間。
+pub fn take_newly_stuck_now(m: &mut HashMap<String, Entry>) -> Vec<(String, i64, u32)> {
+    take_newly_stuck(m, now_ms())
 }
 
 /// 畫面底部標著的背景工作數；沒有＝0。
@@ -303,19 +327,19 @@ mod tests {
     fn the_start_time_is_set_on_zero_to_n_kept_while_running_and_cleared_on_zero() {
         let (mut m, h) = (HashMap::new(), 3_600_000);
         assert!(record_at(&mut m, "r", 0, 0), "第一次看過（乾淨）也算變了");
-        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false });
+        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false, notified: false });
         assert!(record_at(&mut m, "r", 1, 10 * h));
         assert_eq!(m["r"].since, Some(10 * h), "0→N 記下開始時間");
-        assert!(record_at(&mut m, "r", 2, 11 * h), "數字變了");
+        assert!(record_at(&mut m, "r", 2, 10 * h + h / 2), "數字變了");
         assert_eq!(m["r"].since, Some(10 * h), "N→M 不重算：還是同一段背景");
-        assert!(!record_at(&mut m, "r", 2, 12 * h), "沒變、也還沒到門檻：不推");
-        assert!(record_at(&mut m, "r", 2, 13 * h), "數字沒變，但跨過門檻（3 小時）：要推，網頁才換字");
+        assert!(!record_at(&mut m, "r", 2, 10 * h + h / 2 + 1), "沒變、也還沒到門檻：不推");
+        assert!(record_at(&mut m, "r", 2, 11 * h), "數字沒變，但跨過門檻（1 小時）：要推，網頁才換字");
         assert!(m["r"].stuck);
-        assert!(!record_at(&mut m, "r", 2, 14 * h), "已經標過卡住：不重推");
-        assert!(record_at(&mut m, "r", 0, 15 * h));
-        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false }, "歸零清掉");
-        assert!(record_at(&mut m, "r", 1, 16 * h));
-        assert_eq!(m["r"].since, Some(16 * h), "下一段背景重新起算");
+        assert!(!record_at(&mut m, "r", 2, 11 * h + 1), "已經標過卡住：不重推");
+        assert!(record_at(&mut m, "r", 0, 12 * h));
+        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false, notified: false }, "歸零清掉");
+        assert!(record_at(&mut m, "r", 1, 13 * h));
+        assert_eq!(m["r"].since, Some(13 * h), "下一段背景重新起算");
         assert!(!m["r"].stuck);
     }
 
@@ -330,11 +354,11 @@ mod tests {
         let v = run_json(&app, &run, Some(&run_id));
         assert_eq!((v["background_since"].clone(), v["background_secs"].clone(), v["background_stuck"].clone()), (Value::Null, Value::Null, false.into()), "沒看過");
 
-        // 一小時前開始的背景：帶得出持續秒數，還不算卡住。
-        record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 1, now_ms() - 3_600_000);
+        // 半小時前開始的背景：帶得出持續秒數，還不算卡住。
+        record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 1, now_ms() - 1_800_000);
         let v = run_json(&app, &run, Some(&run_id));
         let secs = v["background_secs"].as_i64().unwrap();
-        assert!((3600..3660).contains(&secs), "持續秒數：{secs}");
+        assert!((1800..1860).contains(&secs), "持續秒數：{secs}");
         assert!(v["background_since"].as_str().unwrap().ends_with('Z'));
         assert_eq!(v["background_stuck"], false);
         let health = crate::supervisor::health::snapshot(&app).await.unwrap();
@@ -431,4 +455,57 @@ mod tests {
 /// 背景工作計數。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait JobCounts: Send + Sync {
     fn background_jobs(&self) -> &crate::background_jobs::Counts;
+}
+
+#[cfg(test)]
+mod stuck_notice_tests {
+    use super::*;
+
+    const T: i64 = STUCK_AFTER_SECS * 1000;
+
+    #[test]
+    fn nothing_is_returned_before_the_threshold() {
+        let mut m = HashMap::new();
+        record_at(&mut m, "r", 1, 0);
+        assert!(take_newly_stuck(&mut m, T - 1).is_empty());
+        assert!(!m["r"].notified);
+    }
+
+    #[test]
+    fn crossing_the_threshold_returns_once() {
+        let mut m = HashMap::new();
+        record_at(&mut m, "r", 1, 0);
+        assert_eq!(take_newly_stuck(&mut m, T), vec![("r".to_string(), 0, 1)]);
+        assert!(take_newly_stuck(&mut m, T + 1000).is_empty(), "同一段只送一次");
+        assert!(m["r"].notified && m["r"].stuck);
+    }
+
+    #[test]
+    fn a_new_segment_after_zero_notifies_again() {
+        let mut m = HashMap::new();
+        record_at(&mut m, "r", 1, 0);
+        assert_eq!(take_newly_stuck(&mut m, T).len(), 1);
+        record_at(&mut m, "r", 0, T + 1);
+        record_at(&mut m, "r", 1, T + 2);
+        assert!(take_newly_stuck(&mut m, T + 3).is_empty(), "新的一段還沒到門檻");
+        assert_eq!(take_newly_stuck(&mut m, 2 * T + 2), vec![("r".to_string(), T + 2, 1)]);
+    }
+
+    #[test]
+    fn a_number_change_within_the_same_segment_keeps_notified() {
+        let mut m = HashMap::new();
+        record_at(&mut m, "r", 1, 0);
+        assert_eq!(take_newly_stuck(&mut m, T).len(), 1);
+        record_at(&mut m, "r", 2, T + 5);
+        assert!(m["r"].notified, "N→M 不清通知");
+        assert!(take_newly_stuck(&mut m, T + 10).is_empty(), "同一段變動後不重送");
+    }
+
+    #[test]
+    fn the_now_wrapper_uses_the_clock() {
+        let mut m = HashMap::new();
+        record_at(&mut m, "r", 1, now_ms() - T - 1000);
+        assert_eq!(take_newly_stuck_now(&mut m).len(), 1);
+        assert!(take_newly_stuck_now(&mut m).is_empty());
+    }
 }

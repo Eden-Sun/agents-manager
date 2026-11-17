@@ -9,6 +9,7 @@ pub(crate) mod app_ports_p11;
 pub(crate) mod app_ports_p2;
 pub mod autostart_revive;
 pub mod background_hook;
+pub mod background_stuck;
 pub mod background_jobs;
 #[cfg(test)]
 mod background_tracking_tests;

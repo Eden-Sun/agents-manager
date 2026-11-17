@@ -71,7 +71,7 @@ export function BackgroundJobsBar({ botId }: { botId: string }) {
   const [open, setOpen] = useState(false)
   if (n === 0) return null
   const ageT = age ? t('已持續 {age}。', { age }) : ''
-  const detail = stuck ? t('已持續 {age}，可能卡住或忘了收；要停就到 pane 裡處理。', { age: age ?? t('超過 3 小時') }) : backgroundDetail(kind, n) + ageT
+  const detail = stuck ? t('已持續 {age}，可能卡住或忘了收；要停就到 pane 裡處理。', { age: age ?? t('超過 1 小時') }) : backgroundDetail(kind, n) + ageT
   return (
     <div className={`bg-jobs-bar${stuck ? ' bg-jobs-stuck' : ''}${open ? ' open' : ''}`} role="status">
       <button type="button" className="bg-jobs-summary" aria-expanded={open} title={detail} onClick={() => setOpen((v) => !v)}>

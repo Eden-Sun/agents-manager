@@ -46,7 +46,7 @@ const dict: Dict = {
   "點擊送出": "Click to send",
   "已持續 {age}。": "Running for {age}.",
   "已持續 {age}，可能卡住或忘了收；要停就到 pane 裡處理。": "Running for {age}; may be stuck or forgotten. Manage in pane to stop.",
-  "超過 3 小時": "over 3 hours",
+  "超過 1 小時": "over 1 hour",
   "已送出 /compact，壓縮完 context 用量會更新": "Sent /compact; context usage will update once compressed",
   "沒有送出：{reason}": "Not sent: {reason}",
   "對這顆 bot 送 /compact，壓縮對話脈絡": "Send /compact to this bot to compress conversation context",

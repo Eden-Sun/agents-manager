@@ -3559,7 +3559,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 - 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）；巡邏還沒看過這個 run 時是 `null`（不是 0）。hook 報過的另帶 `background_source:"hook"`、`background_tasks[]`、`session_crons[]`（API.md）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。一鍵重啟（§6.9）會跳過 `background_jobs > 0` 的 bot（#767）；`null` 不擋。
 - **跑了多久、是不是卡住（issue #774）**：claude 2.1.288 起，終端 session 的背景指令不再有時間上限（上游只對 `-p`／SDK／CI 保留），卡住或忘了收的
   背景 shell 會讓 bot 無限期標著「背景執行中」。帳上同時記這一段背景的開始時間（數字第一次 > 0；N 變 M 不重算、歸零清掉），投影帶
-  `background_since`／`background_secs`；持續超過 3 小時（`STUCK_AFTER_SECS`）`background_stuck = true`，網頁改標「背景工作可能卡住（N）」（warn 色），
+  `background_since`／`background_secs`；持續超過 1 小時（`STUCK_AFTER_SECS`）`background_stuck = true`，網頁改標「背景工作可能卡住（N）」（warn 色）；跨過門檻時 daemon 對該 bot 送一次 daemon 通知（每段只一次，歸零重置），提醒它確認還需不需要，不自動停任何工作（#2049），
   `GET /api/supervisor/health` 的 `background_stuck[]` 列出這些 bot（`{bot_id, name, kind, run_id, background_jobs, since, secs}`）。只是露出：不進 `status`、
   不叫醒巡檢、**不自動殺行程**。開始時間在記憶體，daemon 重啟後從重啟後第一次看到算起（下限）。
 - 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、輸入框上方一條說明（標題列不放，2026-09-30 使用者）（claude 說 shell、codex 說終端）。

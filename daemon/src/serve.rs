@@ -300,6 +300,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::codex_reset::spawn(app.clone());
     memstat::spawn_poller(app.clone());
     runners::db_pool::spawn(app.clone());
+    runners::background_stuck::spawn(app.clone());
     crate::runners::quota_claude::spawn_claude_poller(app.clone());
     runners::quota_grok::spawn_grok_poller(app.clone());
     runners::quota_agy::spawn_agy_poller(app.clone());
