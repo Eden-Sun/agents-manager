@@ -398,9 +398,23 @@ export async function fetchOutbox(
 }
 
 /** 下載或預覽 outbox 裡的一個檔案：帶 token 抓成 blob URL（`<a href>` 或新分頁帶不了 header）。 */
-export function outboxFileUrl(botId: string, name: string, inline = false): Promise<string> {
+export async function outboxFileUrl(botId: string, name: string, inline = false): Promise<string> {
   const q = inline ? '&inline=1' : ''
-  return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/outbox/file?path=${encodeURIComponent(name)}${q}`)
+  const url = await transport.blobUrl(`/bots/${encodeURIComponent(botId)}/outbox/file?path=${encodeURIComponent(name)}${q}`)
+  return inline ? utf8PreviewUrl(url) : url
+}
+
+/**
+ * 預覽分頁開的是 blob URL：Safari／iOS 開 blob 時不看 `charset=utf-8`，中文 md／txt 整頁亂碼（使用者 2026-11-17）。
+ * 文字檔在前面補 UTF-8 BOM（每個瀏覽器都認、優先於 charset）。只用在預覽，下載的檔案內容不動。
+ */
+export async function utf8PreviewUrl(url: string): Promise<string> {
+  const blob = await (await fetch(url)).blob()
+  if (!blob.type.startsWith('text/')) return url
+  const head = new Uint8Array(await blob.slice(0, 3).arrayBuffer())
+  if (head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) return url
+  URL.revokeObjectURL(url)
+  return URL.createObjectURL(new Blob([new Uint8Array([0xef, 0xbb, 0xbf]), blob], { type: 'text/plain;charset=utf-8' }))
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
