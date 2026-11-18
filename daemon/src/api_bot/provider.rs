@@ -143,6 +143,7 @@ pub trait Provider: Send + Sync {
 pub(crate) fn for_id(id: &str, options: SessionOptions, quote: Arc<dyn QuoteProvider>) -> Option<Arc<dyn Provider>> {
     match id {
         super::anthropic::ID => Some(Arc::new(super::anthropic::AnthropicProvider::new(super::anthropic::options_from(options)?, quote))),
+        super::openai::provider::ID => Some(Arc::new(super::openai::provider::OpenAiProvider::new(options, quote)?)),
         _ => None,
     }
 }
