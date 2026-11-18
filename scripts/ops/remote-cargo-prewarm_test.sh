@@ -11,6 +11,13 @@ UNIT_DIR="$HERE/systemd"
 PASS=0
 FAIL=0
 
+# 預熱腳本只在 Linux 主機跑（systemd 排程，用 flock 防重入，見 scripts/ops/systemd/）；macOS 沒有 flock，腳本會誤報「上一輪還在跑」
+# 而整個案例都走不到（#1964：夜間 macos-latest 全紅）。沒有 flock 的環境略過並說明；有 flock 的環境（ubuntu-ci／開發機）照跑完整套。
+if ! command -v flock >/dev/null 2>&1; then
+  echo "skip - 此環境沒有 flock：remote-cargo-prewarm.sh 只在 Linux 主機（systemd）跑，整套略過"
+  exit 0
+fi
+
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
