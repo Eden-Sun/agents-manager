@@ -21,6 +21,9 @@ const TEXT: Record<string, string> = {
   api_session_expired: msg('上一段對話 session 已過期，無法接續；請清除對話後重新開始。'),
   api_checkpoint_too_large: msg('對話記錄已超出上限大小，無法載入；請清除對話後重新開始。'),
   api_receipt_unsettled: msg('對話結算憑證尚未就緒，無法確認狀態；請稍後再試。'),
+  openai_not_configured: msg('先到 環境設定 → OpenAI API 啟用並設定金鑰（啟用開關與金鑰檔都要就緒）。'),
+  attachments_unsupported_for_kind: msg('這個 bot 種類不支援附件：請移除附件後再送。'),
+  compact_unsupported: msg('這個 bot 種類不支援 /compact。'),
 }
 
 export function apiBotStartReasonText(reason: unknown): string | null {

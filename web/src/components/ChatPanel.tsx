@@ -1,4 +1,5 @@
 import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
+import { isApiKind } from './kindMeta'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
 import { ApiBotCostOverview } from './ApiBotCostOverview'
@@ -388,7 +389,7 @@ export function LiveBubble({
           {from ? <span className="msg-from">{from}</span> : null}
           <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
           <span>{text ? t('輸出中…') : (act ?? t('等待回覆…'))}</span>
-          {kind === 'claude-api' && botId ? <ApiTurnProgress botId={botId} /> : null}
+          {isApiKind(kind) && botId ? <ApiTurnProgress botId={botId} /> : null}
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
               {open ? t('收起內容') : t('看目前內容（{n} 字）', { n: text.length })}
@@ -1017,10 +1018,10 @@ function Composer({
             <button
               type="button"
               className="mini-btn"
-              title={botKind === 'claude-api' ? t('立刻中止進行中的 API 請求並結束這一回合（不再繼續花費），Bot 仍保持啟動') : t('送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動')}
+              title={isApiKind(botKind) ? t('立刻中止進行中的 API 請求並結束這一回合（不再繼續花費），Bot 仍保持啟動') : t('送一個 Esc 請 Bot 中斷目前回覆，Bot 仍保持啟動')}
               onClick={() => void interruptBot(botId)}
             >
-              {botKind === 'claude-api' ? t('強制中斷') : t('ESC 中斷')}
+              {isApiKind(botKind) ? t('強制中斷') : t('ESC 中斷')}
             </button>
           ) : null}
           {state.inFlightTurnId && pending.trim() && (isClaude || sendNowSupported) && sendNowButton(botKind, pending) ? (
@@ -1071,7 +1072,8 @@ function Composer({
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
       <DraftTooLargeNote draftKey={draftKey} />
       <div className="composer-box">
-        <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
+        {/* openai-api：daemon 回 400 attachments_unsupported_for_kind，所以不給附件入口。 */}
+        {botKind === 'openai-api' ? null : <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />}
         <textarea
           ref={ref}
           data-draft-key={draftKey}
@@ -1390,7 +1392,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   })
   const rawTab0 = useStore((s) => s.rightTab)
   // claude-api bot 沒有 pane／終端：終端分頁一律退回對話（舊網址、切 bot 時殘留的 terminal 分頁）。
-  const apiBot = useStore((s) => s.bots.find((b) => b.id === s.selectedBotId)?.kind === 'claude-api')
+  const apiBot = useStore((s) => isApiKind(s.bots.find((b) => b.id === s.selectedBotId)?.kind))
   const rawTab = apiBot && rawTab0 === 'terminal' ? 'chat' : rawTab0
   // 預覽只給頂層 bot；切到子 agent 時 store 會回 chat，這裡再擋一次（例如舊網址）。
   // 桌機預覽在 `.app` 最右欄（PreviewColumn）；只有抽屜版面（≤1024px，含手機）沒有那一欄，才留分頁。
@@ -1844,7 +1846,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             />
           ) : null}
           <MessageList botId={botId} />
-          {!active && !waitingForStart && bot.kind !== 'claude-api' ? (
+          {!active && !waitingForStart && !isApiKind(bot.kind) ? (
             <div className="bot-stopped-bar" role="status">
               <span>{composerReason || t('Bot 未在執行中，無法送出訊息')}</span>
               <button

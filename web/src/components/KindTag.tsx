@@ -25,7 +25,8 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'codex':
-      // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
+    case 'openai-api':
+      // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo; openai-api（直打 API）同一個商標，文字標籤區分。
       return (
         <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
           <path

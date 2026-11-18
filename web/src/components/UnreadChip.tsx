@@ -265,9 +265,10 @@ export function UnreadChip() {
   const now = useCacheTick(bots.some((b) => b.primary), primaryRed)
   const redNow = bots.some((b) => {
     if (!b.primary) return false
+    // openai-api 沒有 Claude 的快取 TTL，也沒有 CLI 的 statusLine 快取時鐘：不畫倒數。
     const c = b.kind === 'claude-api'
       ? apiChipCache(getApiBotCache(b.id), now, lamps[b.id] === 'working')
-      : chipCache(runs[b.id], now)
+      : b.kind === 'openai-api' ? null : chipCache(runs[b.id], now)
     return c?.level === 'low'
   })
   if (redNow !== primaryRed) setPrimaryRed(redNow)
@@ -322,7 +323,7 @@ export function UnreadChip() {
         cache: pinned
           ? b.kind === 'claude-api'
             ? apiChipCache(getApiBotCache(b.id), now, working)
-            : chipCache(runs[b.id], now, working)
+            : b.kind === 'openai-api' ? null : chipCache(runs[b.id], now, working)
           : null,
         codexPrimary: pinned && b.kind === 'codex',
         codexUsage,

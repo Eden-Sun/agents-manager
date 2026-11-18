@@ -267,6 +267,7 @@ const dict: Dict = {
   // src/schedules/ScheduleBotPicker.tsx
   '屬於其他專案': 'Belongs to another project',
   'claude-api 不能接排程': 'claude-api cannot take schedules',
+  'openai-api 不能接排程': 'openai-api cannot take schedules',
   '子 agent 不能接排程': 'Sub-agents cannot take schedules',
   '分享用 Bot 不能接排程': 'Shared Bots cannot take schedules',
   '搜尋 Bot 名稱或身份': 'Search Bot name or identity',

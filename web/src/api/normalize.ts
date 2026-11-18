@@ -264,6 +264,7 @@ export function toToolMap(raw: unknown): ToolMap {
   for (const k of BOT_KINDS) out[k] = one(root[k])
   // claude-api 沒有 CLI 可探測：永遠視為可用（只讓 `tools[bot.kind]` 不炸；建立入口不看這格）。
   out['claude-api'] = { installed: true, path: null, version: null, logged_in: null }
+  out['openai-api'] = { installed: true, path: null, version: null, logged_in: null }
   return out
 }
 

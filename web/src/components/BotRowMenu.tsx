@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { isApiKind } from './kindMeta'
 import { anchorOf, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HeadMoreMenu } from './HeadMoreMenu'
@@ -67,7 +68,7 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
           </button>
         )}
         {/* 有 live run 才給重新啟動；child 由父 Bot 重開（/restart 回 409），claude-api 沒有 CLI 行程可重啟（#1911）。 */}
-        {active && !isChildBot(bot) && bot.kind !== 'claude-api' ? (
+        {active && !isChildBot(bot) && !isApiKind(bot.kind) ? (
           <button
             type="button"
             className="head-menu-item"

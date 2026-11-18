@@ -1,4 +1,5 @@
 /** claude-api bot 每則回覆的單價與進行中的進度。 */
+import { isApiKind } from './kindMeta'
 import { useEffect, useState } from 'react'
 import type { ApiTurnCost } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
@@ -18,7 +19,7 @@ export function ApiTurnCostTag({
   onToggle?: () => void
 }) {
   const t = useT()
-  const isApi = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude-api')
+  const isApi = useStore((s) => isApiKind(s.bots.find((b) => b.id === botId)?.kind))
   const turns = useApiTurnCosts(isApi ? botId : undefined)
   const turn = turnId ? turns.find((x) => x.turn_id === turnId) : undefined
   if (!turn || turn.in_flight) return null

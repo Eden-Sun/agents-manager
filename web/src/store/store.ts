@@ -1,4 +1,5 @@
 import { receiveCodexReset } from './codexReset'
+import { isApiKind } from '../components/kindMeta'
 import { handleToolInstallDone } from '../lib/toolInstallDone'
 import { autoInstallNotice } from './integrationAutoInstall'
 import type { TerminalFooterView } from '../lib/codexTerminalFooter'
@@ -1607,7 +1608,7 @@ export const useStore = create<StoreState>((set, get) => {
   async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false, cacheTtl) {
     // claude-api（#1944）：daemon 只收 prompt 與附件，插隊／排隊／草稿／停著自動啟動等旗標一律 400
     // `api_native_prompt_unsupported`。停著就先 start 再送；其餘旗標拿掉。
-    if (get().bots.find((b) => b.id === botId)?.kind === 'claude-api') {
+    if (isApiKind(get().bots.find((b) => b.id === botId)?.kind)) {
       const r = get().runs[botId]
       if (startIfStopped && !(r && (r.state === 'running' || r.state === 'starting'))) {
         try {
@@ -2000,7 +2001,9 @@ export const useStore = create<StoreState>((set, get) => {
     } catch (e) {
       // daemon 說這個鍵已經是另一件事（例如設定變了）：作廢，下一次是新的動作。
       if (String(e).includes('request_id_reused')) settleCreateRequest(reqKey)
-      get().notify('error', errText(e))
+      // openai_not_configured 等 API kind 的原因給人話（不要漏成代碼）。
+      const apiReason = e instanceof ApiError ? apiBotStartReasonText(e.body.reason) : null
+      get().notify('error', apiReason ?? errText(e))
       return null
     } finally {
       set((st) => {
@@ -4009,7 +4012,7 @@ export function composerState(state: StoreState, botId: string | null): Composer
   if (handedOff) return { ...base, reason: handedOffReason(handedOff) }
   const hostName = bot ? projectHostName(state, bot.project_id) : 'local'
   // claude-api（#1944）沒有終端也不經 herdr：不看 herdr 連線，停著時直接可送（sendPrompt 會先 start），不顯示「Bot 沒在跑」。
-  const apiBot = bot?.kind === 'claude-api'
+  const apiBot = isApiKind(bot?.kind)
   if (apiBot) {
     // 不經 herdr，不看連線
   } else if (hostName !== 'local') {

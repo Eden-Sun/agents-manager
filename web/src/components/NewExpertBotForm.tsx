@@ -21,6 +21,8 @@ import { RuntimeSettingsFields } from './RuntimeSettingsFields'
 import type { ShareProfile } from '../api/types'
 import { ShareProfileField } from './ShareProfileField'
 import { KindTag } from './KindTag'
+import { isApiKind } from './kindMeta'
+import { fetchOpenAiApiSettings } from '../api/openaiApi'
 import { EMPTY_SHARE_FOLDER, shareCreateFields, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 
 export type ExpertRoleChoice = 'manager' | 'advisor' | 'executor' | 'specialist'
@@ -115,6 +117,16 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const modelTouched = useRef(false)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  // openai-api：沒啟用或沒金鑰就不能建（daemon 回 409 openai_not_configured）；讀設定失敗當作沒設定。
+  const [openaiState, setOpenaiState] = useState<{ ready: boolean } | null>(null)
+  useEffect(() => {
+    let alive = true
+    fetchOpenAiApiSettings()
+      .then((s) => { if (alive) setOpenaiState({ ready: Boolean(s?.enabled && s.key_present) }) })
+      .catch(() => { if (alive) setOpenaiState({ ready: false }) })
+    return () => { alive = false }
+  }, [])
+  const openaiReady = openaiState?.ready === true
 
   const nameRef = useRef<HTMLInputElement>(null)
   const nameLabelId = useId()
@@ -219,8 +231,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   // 驗證
   const nameOk = isValidBotName(name.trim())
   // claude-api 沒有 CLI 要裝（同一般新增表單）；只能當顧問：沒有 pane／終端工具，也不接派工。
-  const apiKind = kind === 'claude-api'
-  const cliOk = apiKind || Boolean(tools[kind]?.installed)
+  const apiKind = isApiKind(kind)
+  const cliOk = kind === 'openai-api' ? openaiReady : apiKind || Boolean(tools[kind]?.installed)
   const trackOk = role !== 'specialist' || Boolean(track.trim())
   const rangeError = customizeRuntime ? firstRangeError(runtimeDraft) : null
   const shareOn = !apiKind && shareProfile !== null && !shareProfileBlocked(kind)
@@ -374,11 +386,13 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </span>
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {CREATABLE_KINDS.map((k) => {
-            const isApi = k === 'claude-api'
-            const missing = isApi ? false : !tools[k]?.installed
+            const isApi = isApiKind(k)
+            // openai-api 沒啟用或沒金鑰：整顆停用（狀態讀完之前也停用）。
+            const openaiOff = k === 'openai-api' && !openaiReady
+            const missing = openaiOff ? true : isApi ? false : !tools[k]?.installed
             // claude-api 只能當顧問：不能接派工、不能用終端工具，其他角色顯示但不能選。
             const roleBlocked = isApi && role !== 'advisor'
-            const title = roleBlocked ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
+            const title = roleBlocked ? (k === 'claude-api' ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : t('openai-api 只能當顧問：不能接派工、不能用終端工具')) : openaiOff ? t('先到 環境設定 → OpenAI API 啟用並設定金鑰') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">
                 <button
@@ -406,7 +420,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
                 {roleBlocked ? (
                   <span className="kind-missing-reason">{t('限顧問')}</span>
                 ) : missing ? (
-                  <span className="kind-missing-reason">{t('未安裝')}</span>
+                  <span className="kind-missing-reason">{openaiOff ? t('未設定') : t('未安裝')}</span>
                 ) : null}
               </span>
             )
@@ -516,6 +530,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       <PersonaField value={persona} onChange={setPersona} collapsible />
       {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />}
 
+      {kind === 'openai-api' && !openaiReady ? <div className="hint warn" role="status">{t('先到 環境設定 → OpenAI API 啟用並設定金鑰')}</div> : null}
       {errorMsg ? <div className="hint warn" role="alert">{errorMsg}</div> : null}
 
       <div className="form-actions">

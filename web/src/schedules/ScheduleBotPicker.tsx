@@ -11,6 +11,7 @@ import { botLamp, useStore } from '../store/store'
 export function ineligibleReason(b: Bot, projectId: string): string | null {
   if (b.project_id !== projectId) return msg('屬於其他專案')
   if (b.kind === 'claude-api') return msg('claude-api 不能接排程')
+  if (b.kind === 'openai-api') return msg('openai-api 不能接排程')
   if (b.managed_by !== 'user' || b.parent_bot_id) return msg('子 agent 不能接排程')
   if (b.share_profile) return msg('分享用 Bot 不能接排程')
   return null

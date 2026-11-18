@@ -24,6 +24,11 @@ export function parseModelSeries(kind: BotKind, id: string): Parsed | null {
     const m = /^gpt-(\d+(?:\.\d+)*)-([a-z]+)$/.exec(norm)
     return m ? { series: `codex:${m[2]}`, version: toVersion(m[1]) } : null
   }
+  if (kind === 'openai-api') {
+    // OpenAI API：`gpt-6-luna` → 系列 `luna`，版號 `6`（與 codex 同格式，系列前綴分開）。
+    const m = /^gpt-(\d+(?:\.\d+)*)-([a-z]+)$/.exec(norm)
+    return m ? { series: `openai:${m[2]}`, version: toVersion(m[1]) } : null
+  }
   if (kind === 'claude' || kind === 'claude-api') {
     const alias = /^(fable|opus|sonnet|haiku)$/.exec(norm)
     if (alias) return { series: `claude:${alias[1]}`, version: [] }

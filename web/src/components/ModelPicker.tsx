@@ -1,8 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { isApiKind } from './kindMeta'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, OPENAI_API_EFFORT_OPTIONS, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -19,13 +20,13 @@ import './modelPicker.css'
 function staticModels(kind: BotKind): ModelInfo[] {
   // agy：強度已經在模型 slug 裡（`-high`／`-low`），沒有獨立的強度檔。
   const efforts =
-    kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
+    kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : kind === 'openai-api' ? [...OPENAI_API_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
   return MODEL_OPTIONS[kind].map((id, i) => ({
     id,
     display_name: id,
     description: '',
     is_default: i === 0,
-    default_effort: kind === 'claude-api' ? 'high' : null,
+    default_effort: kind === 'claude-api' ? 'high' : kind === 'openai-api' ? 'medium' : null,
     efforts,
     // claude-api 的 fast 是固定可用的（speed=fast，單價 2 倍）；API 清單到了會被覆蓋成同一份。
     service_tiers: kind === 'claude-api' ? [{ id: 'fast', name: 'fast', description: t('speed=fast（單價 2 倍）') }] : [],
@@ -228,7 +229,7 @@ export function ApiModelFields({
             {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
             {liveFast(kind) ? <span className="field-note live-note">{t('執行中改會即時套用，不用重啟')}</span> : null}
             {/* claude-api 每回合開始讀一次設定：進行中的回合維持原速度，下一回合起才換（單價與預留都綁回合）。 */}
-            {kind === 'claude-api' ? <span className="field-note live-note">{t('下一回合起生效；進行中的回合維持原速度')}</span> : null}
+            {isApiKind(kind) ? <span className="field-note live-note">{t('下一回合起生效；進行中的回合維持原速度')}</span> : null}
           </span>
         </label>
       ) : null}
@@ -503,7 +504,7 @@ export function ModelQuickPicker({
           </div>
         ) : null}
         <span className="hint" id={hintId} aria-hidden="true">
-          {kind === 'claude-api' ? t('改模型、強度或 fast 下一回合起生效；進行中的回合維持原設定') : liveFast(kind) ? t('執行中改模型、強度或 fast 都會即時套用') : t('執行中改模型或強度會即時套用')}
+          {isApiKind(kind) ? t('改模型、強度或 fast 下一回合起生效；進行中的回合維持原設定') : liveFast(kind) ? t('執行中改模型、強度或 fast 都會即時套用') : t('執行中改模型或強度會即時套用')}
         </span>
       </div>
     ) : null

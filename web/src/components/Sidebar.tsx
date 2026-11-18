@@ -75,7 +75,7 @@ import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
 import { BotRowMenu } from './BotRowMenu'
 import { KindTag } from './KindTag'
-import { KIND_LABEL } from './kindMeta'
+import { KIND_LABEL, isApiKind } from './kindMeta'
 import { QuickAddBots } from './QuickAddBots'
 import { loginKindOnHost } from '../lib/onboardingActions'
 import { ADD_PROJECT_EVENT } from '../lib/onboarding'
@@ -694,7 +694,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
 
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
-  const apiKind = kind === 'claude-api'
+  const apiKind = isApiKind(kind)
   const cliOk = apiKind || Boolean(tools[kind]?.installed)
   /** 不指定身份＝用那台的預設帳號；它沒登入時 bot 會停在登入畫面（`logged_in === null` 是問不到，不下結論）。 */
   const defaultLoggedOut = !apiKind && cliOk && identity === '' && tools[kind]?.logged_in === false
@@ -879,7 +879,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {CREATABLE_KINDS.map((k) => {
             // claude-api 沒有 CLI 要裝；本機與遠端專案都能建（遠端不隔離，經 ssh 執行）。
-            const missing = k === 'claude-api' ? false : !tools[k].installed
+            const missing = isApiKind(k) ? false : !tools[k].installed
             const reason = missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
               <span key={k} className="opt-wrap">

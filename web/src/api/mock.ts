@@ -84,7 +84,7 @@ const MOCK_TINY_ASK_JEV = {
 const MOCK_TWO_ASK_JEV = { ...MOCK_TINY_ASK_JEV, questions: [{ index: 0, scores: [0.91, 0.08], suggested: 0 }] }
 
 function toKind(v: unknown): BotKind {
-  return BOT_KINDS.includes(v as BotKind) || v === 'claude-api' ? (v as BotKind) : 'claude'
+  return BOT_KINDS.includes(v as BotKind) || v === 'claude-api' || v === 'openai-api' ? (v as BotKind) : 'claude'
 }
 
 type Rec = Record<string, unknown>
@@ -408,6 +408,7 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   grok: { installed: true, path: '/Users/me/.local/bin/grok', version: '1.0.13', logged_in: null },
   agy: { installed: true, path: '/Users/me/.local/bin/agy', version: '1.2.16', logged_in: null },
   'claude-api': { installed: true, path: null, version: null, logged_in: null },
+  'openai-api': { installed: true, path: null, version: null, logged_in: null },
 }
 
 /** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
@@ -466,6 +467,9 @@ const models = (): Record<BotKind, Rec[]> => ({
     { id: 'gemini-3.8-flash-medium', display_name: 'gemini-3.8-flash-medium', description: '', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-high', display_name: 'gemini-3.8-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+  ],
+  'openai-api': [
+    { id: 'gpt-6-luna', display_name: 'gpt-6-luna', description: '', is_default: true, default_effort: 'medium', efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [] },
   ],
   'claude-api': [
     { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', description: '', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [{ id: 'fast', name: 'fast', description: L('speed=fast（單價 2 倍）', 'speed=fast (2x price)') }] },
@@ -584,6 +588,7 @@ export class MockTransport implements Transport {
     grok: { installed: false, path: null, version: null, logged_in: null },
     agy: { ...TOOLS_ALL_OK.agy, logged_in: true },
     'claude-api': { ...TOOLS_ALL_OK['claude-api'] },
+    'openai-api': { ...TOOLS_ALL_OK['openai-api'] },
   }
   /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
   /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
@@ -1467,7 +1472,7 @@ export class MockTransport implements Transport {
 
   /** Unknown kind → 400; down host → 502. */
   private models(kind: string, host: string, identity: string) {
-    if (!BOT_KINDS.includes(kind as BotKind) && kind !== 'claude-api') {
+    if (!BOT_KINDS.includes(kind as BotKind) && kind !== 'claude-api' && kind !== 'openai-api') {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
     }
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -2237,7 +2242,7 @@ export class MockTransport implements Transport {
       error: null,
       disconnected_since: now(),
       // grok missing (exercises the tools hint).
-      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null }, 'claude-api': { ...TOOLS_ALL_OK['claude-api'] } },
+      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null }, 'claude-api': { ...TOOLS_ALL_OK['claude-api'] }, 'openai-api': { ...TOOLS_ALL_OK['openai-api'] } },
       identities: {
         ...Object.fromEntries(
           this.identities.map((i) => [

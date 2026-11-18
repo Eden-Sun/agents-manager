@@ -3,11 +3,14 @@ import { msg, t, tr } from '../lib/i18n'
 /** Wire types for the daemon API. Source of truth: SPEC §7, appendix C, `daemon/src/api.rs`, docs/API.md; shape drift is absorbed in `normalize.ts`. */
 
 /** `claude-api`＝daemon 內 harness 直接打 Claude API 的 bot（#1944）：沒有 CLI／pane／安裝探測／額度，所以不在 BOT_KINDS。 */
-export type BotKind = 'claude' | 'codex' | 'grok' | 'agy' | 'claude-api'
+/** `openai-api`＝同理直打 OpenAI Responses API 的 bot（D2b）：同樣沒有 CLI／pane，不在 BOT_KINDS。 */
+export type BotKind = 'claude' | 'codex' | 'grok' | 'agy' | 'claude-api' | 'openai-api'
 /** SPEC §12：有 CLI 的 kind（工具偵測、額度、模型清單、身份都逐一迴圈它）。 */
 export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
-/** 可以建立的 kind＝BOT_KINDS＋claude-api。 */
-export const CREATABLE_KINDS: readonly BotKind[] = [...BOT_KINDS, 'claude-api']
+/** 直打 API、沒有 CLI 的 kind（沒有 pane／安裝探測／額度）。 */
+export const API_BOT_KINDS: readonly BotKind[] = ['claude-api', 'openai-api']
+/** 可以建立的 kind＝BOT_KINDS＋API kind。 */
+export const CREATABLE_KINDS: readonly BotKind[] = [...BOT_KINDS, ...API_BOT_KINDS]
 export const API_BOT_KIND: BotKind = 'claude-api'
 
 export type RunState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
@@ -916,6 +919,8 @@ export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'] as const
 export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+/** openai-api 的強度（D2b-2：none/low/medium/high/xhigh/max，預設 medium）。 */
+export const OPENAI_API_EFFORT_OPTIONS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 /** 不翻譯，用原廠的字（只首字母大寫），才對得上 CLI 畫面與文件。 */
 export function effortLabel(level: string): string {
@@ -939,6 +944,8 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
   // claude-api：與 daemon 的核准模型／價格清單一致，Opus 仍是預設。
   'claude-api': ['claude-opus-5-5', 'claude-fable-5-2'],
+  // openai-api：daemon 核准清單只有 gpt-6-luna（D2b-2）。
+  'openai-api': ['gpt-6-luna'],
   // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）

@@ -322,6 +322,7 @@ const ENV_PREFILL: Record<BotKind, string> = {
   // agy 的狀態在 `$HOME/.gemini`，沒有專用變數、XDG_* 也無效（2026-11-14 實測）：身份＝換一個 HOME（daemon 會建影子家目錄）。
   agy: 'HOME=$HOME/.agy-',
   'claude-api': '',
+  'openai-api': '',
 }
 
 function NewIdentityForm() {

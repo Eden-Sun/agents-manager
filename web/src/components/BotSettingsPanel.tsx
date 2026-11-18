@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { isApiKind } from './kindMeta'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useDialogFocus } from '../hooks/useDialogFocus'
@@ -530,13 +531,13 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   }
   // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
   // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
-  const restartButton = child || bot.kind === 'claude-api' ? null : (
+  const restartButton = child || isApiKind(bot.kind) ? null : (
     <button type="button" className="btn primary" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('立即重啟')}
     </button>
   )
   // 常駐於面板底部（不靠橫幅）：卡住時（例如 codex 停在審核框）使用者一定找得到。有 live run 才是「重新啟動」，沒有就改成「啟動」。
-  const footerRestart = child || bot.kind === 'claude-api' ? null : running ? (
+  const footerRestart = child || isApiKind(bot.kind) ? null : running ? (
     <button type="button" className="btn" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('重新啟動')}
     </button>
@@ -603,7 +604,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       ) : null}
 
       {/* claude-api 每回合重讀設定、沒有重啟：不出「待套用」。 */}
-      {bot.role_pending && bot.kind !== 'claude-api' ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
+      {bot.role_pending && !isApiKind(bot.kind) ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
       <div className="bs-body">
         <form
           className="form"
@@ -679,7 +680,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               setFast(v)
             }}
           />
-          {bot.kind === 'claude-api' ? null : <div className="field rt-override">
+          {isApiKind(bot.kind) ? null : <div className="field rt-override">
             <span>{t('執行期覆寫')}</span>
             <p className="hint">{t('只覆寫這顆 Bot；沒設＝跟角色（角色設定在專案設定）。改動後需重啟 Bot 才生效。')}</p>
             <RuntimeSettingsFields
@@ -793,9 +794,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           ) : null}
         </form>
 
-        {bot.kind === 'claude-api' ? (
+        {isApiKind(bot.kind) ? (
           <>
-            <ClaudeApiBotLimits botId={botId} />
+            {/* 花費上限與回合時限是 Claude 專屬設定；openai-api 只給停止／清除對話。 */}
+            {bot.kind === 'claude-api' ? <ClaudeApiBotLimits botId={botId} /> : null}
             <ApiBotControls botId={botId} name={bot.name} />
           </>
         ) : null}
