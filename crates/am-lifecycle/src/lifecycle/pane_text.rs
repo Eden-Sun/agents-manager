@@ -126,10 +126,9 @@ pub fn invisible_review_notice(screen: &str) -> bool {
     screen.lines().any(|l| l.contains("invisible character") && l.contains("review and press Enter to send"))
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
-
     /// 每一類都照 2.1.278 的 `jn()`：零寬、雙向控制、tag 字元、變體選擇符、BOM、C0／C1 控制字元都拿掉。
     #[test]
     fn every_class_the_cli_strips_is_removed() {
@@ -149,7 +148,6 @@ mod tests {
             assert_eq!(for_pane("claude", input), "ab", "{why}");
         }
     }
-
     /// 終端色碼整段拿掉（2.1.277 之前會讓 TUI 崩潰）；其他 OSC／C1 CSI 也一樣。
     #[test]
     fn terminal_escape_sequences_are_removed_whole() {
@@ -159,13 +157,11 @@ mod tests {
         assert_eq!(for_pane("claude", "a\u{9b}1;2Hb"), "ab");
         assert_eq!(for_pane("claude", "尾巴\u{1b}"), "尾巴", "結尾落單的 ESC");
     }
-
     /// 換行類照 CLI 換成 `\n`；CRLF 收成一個 LF（CLI 也是，而且不算清理）。
     #[test]
     fn line_breaks_become_newlines() {
         assert_eq!(for_pane("claude", "a\r\nb\rc\u{0b}d\u{0c}e\u{85}f\u{2028}g\u{2029}h"), "a\nb\nc\nd\ne\nf\ng\nh");
     }
-
     /// `\n`、`\t`、中日韓文字、一般 emoji、全形標點都不動。
     #[test]
     fn ordinary_text_is_untouched() {
@@ -173,7 +169,6 @@ mod tests {
             assert_eq!(for_pane("claude", s), s);
         }
     }
-
     /// CLI 依上下文**保留**的（emoji 之間的 ZWJ、emoji 後面的 FE0F、膚色修飾接在 ZWJ 序列裡），這裡一律拿掉：
     /// 清完的字 CLI 一個都不會再動（2.1.278 `uqr()`；只讀原始碼判斷，實機驗證留到升級時，見 SPEC §6.3）。
     /// 家庭 emoji 會被拆成三個人，❤️ 變成 ❤——agent 看到的字，泡泡照原文。
@@ -185,7 +180,6 @@ mod tests {
         assert_eq!(for_pane("claude", "🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"), "🏴");
         assert_eq!(for_pane("claude", "👍🏽"), "👍🏽", "膚色修飾 U+1F3FD 不在表上");
     }
-
     /// 清過的字再清一次不會變（CLI 對它沒有東西可清）。
     #[test]
     fn cleaning_is_a_fixed_point() {
@@ -194,7 +188,6 @@ mod tests {
         assert!(!once.chars().any(|c| claude_strips(c) && c != '\n' && c != '\t'), "{once:?}");
         assert_eq!(for_pane("claude", &once), once);
     }
-
     /// 只有 claude 會改寫 prompt：codex／grok 照原樣。
     #[test]
     fn other_kinds_are_left_alone() {
@@ -202,131 +195,17 @@ mod tests {
         assert_eq!(for_pane("codex", s), s);
         assert_eq!(for_pane("grok", s), s);
     }
-
     #[test]
     fn a_prompt_that_is_all_invisible_leaves_nothing() {
         assert!(nothing_left("\u{200b}\u{feff}", &for_pane("claude", "\u{200b}\u{feff}")));
         assert!(!nothing_left("", ""), "本來就是空的：照舊，不歸這條管");
         assert!(!nothing_left("a\u{200b}", "a"));
     }
-
     #[test]
     fn the_review_notice_is_recognised() {
         assert!(invisible_review_notice("❯ 清過的字\n────\n  Removed 1 invisible character · review and press Enter to send\n"));
         assert!(invisible_review_notice("  Removed 3 invisible characters · review and press Enter to send"));
         assert!(!invisible_review_notice("  Removed 3 invisible characters · nothing left to send"), "框是空的：沒有東西會被誤送");
         assert!(!invisible_review_notice("⏺ 我會 review and press Enter to send 那個按鈕"), "少了 invisible character 不算");
-    }
-}
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod delivery_tests {
-    //! 走真的 `prompt()`＋模擬 2.1.277 的 pane（`LivePane::strips_on_enter`）。實機（真的 claude ≥ 2.1.277）驗證留到升級時，
-    //! 做法寫在 SPEC §6.3。
-    use super::super::*;
-    use super::claude_strips;
-    use crate::testing as tt;
-
-    struct Fixture {
-        env: tt::Env,
-        bot_id: String,
-        pane: String,
-    }
-
-    /// 一顆閒著、會回話的 claude pane：transcript 檔就是送達證據；`strips` 是這顆 CLI 按 Enter 時會清掉的字。
-    async fn fixture(strips: fn(char) -> bool) -> Fixture {
-        let env = tt::env().await;
-        let app = env.app.clone();
-        let bot = tt::claude_bot(&app, &env.project_id, "clean-send").await;
-        let transcript = env.dir.join(format!("session-{}.jsonl", db::ulid()));
-        std::fs::write(&transcript, "").unwrap();
-        let pane = format!("pane-{}", bot.id);
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, native_session_id, transcript_path, started_at)
-             VALUES (?,?,'running','idle',?,'test','sess-clean',?,?)",
-        )
-        .bind(db::ulid())
-        .bind(&bot.id)
-        .bind(&pane)
-        .bind(transcript.to_str().unwrap())
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        env.herdr.live_pane(&pane, tt::LivePane { width: Some(120), transcript_file: Some(transcript), strips_on_enter: Some(strips), ..Default::default() });
-        Fixture { env, bot_id: bot.id, pane }
-    }
-
-    async fn stored(f: &Fixture, turn_id: &str) -> (String, String) {
-        sqlx::query_as("SELECT t.prompt_text, m.content FROM turns t JOIN messages m ON m.turn_id = t.id AND m.role = 'user' WHERE t.id = ?")
-            .bind(turn_id)
-            .fetch_one(&f.env.app.db)
-            .await
-            .unwrap()
-    }
-
-    /// 從網頁貼來的零寬空白＋從 log 貼來的色碼：打進 pane 的、`prompt_text` 都是清過的字，泡泡是原文，
-    /// CLI 一按 Enter 就收下（沒有 review），transcript 裡逐字相同——送達證據成立。
-    #[tokio::test]
-    async fn a_prompt_with_invisible_characters_and_colour_codes_goes_in_clean_and_is_proven() {
-        let f = fixture(claude_strips).await;
-        let dirty = "看這段\u{200b}：\u{1b}[31m紅字\u{1b}[0m 完\u{feff}";
-        let out = prompt(&f.env.app, &f.bot_id, dirty, "crid-clean").await.unwrap();
-        assert_eq!(out.delivery, "ok", "{out:?}");
-        assert_eq!(stored(&f, &out.turn_id).await, ("看這段：紅字 完".to_string(), dirty.to_string()), "prompt_text 清過、泡泡原文");
-        let p = f.env.herdr.pane(&f.pane).unwrap();
-        assert_eq!((p.transcript.as_slice(), p.notice.as_deref()), (&["❯ 看這段：紅字 完".to_string()][..], None), "CLI 沒有要 review");
-    }
-
-    /// 保險：CLI 還會清掉一個我們表上沒有的字（這裡假設下一版把 U+2800 盲文空白也當成隱形字元）——畫面出現 review 提示，
-    /// 框裡是清過的字。不再按 Enter（再按送出去的就不是記下的那一段），送達記成不明，交給使用者看。
-    #[tokio::test]
-    async fn a_review_prompt_from_the_cli_is_not_pressed_through() {
-        fn future_cli(c: char) -> bool {
-            c == '\u{2800}' || claude_strips(c)
-        }
-        let f = fixture(future_cli).await;
-        let out = prompt(&f.env.app, &f.bot_id, "盲文空白\u{2800}在這", "crid-review").await.unwrap();
-        assert_ne!(out.delivery, "ok", "{out:?}");
-        let p = f.env.herdr.pane(&f.pane).unwrap();
-        assert!(p.transcript.is_empty(), "沒有被按出去：{:?}", p.transcript);
-        assert_eq!(p.composer, vec!["盲文空白在這".to_string()], "清過的字還在框裡");
-        assert!(p.notice.as_deref().is_some_and(|n| n.contains("review and press Enter to send")));
-    }
-
-    /// 另外兩條存 `prompt_text` 的路也存清過的字：對方回合中時 AGM 的派工排進佇列（`queue_for_next_turn`，flush 與 stall
-    /// 重送都讀它），以及 bot 沒在跑時送出、等它起來（`start_send`）。泡泡照樣是原文。
-    #[tokio::test]
-    async fn the_queued_and_the_waiting_for_start_paths_store_the_clean_text_too() {
-        let f = fixture(claude_strips).await;
-        let app = f.env.app.clone();
-        // 對方回合中：佔住一個在飛的回合，AGM 的派工才會排進佇列。
-        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=?").bind(&f.bot_id).fetch_one(&app.db).await.unwrap();
-        let conv = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
-        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
-            .bind(db::ulid())
-            .bind(&conv)
-            .bind(&run)
-            .bind(db::now())
-            .execute(&app.db)
-            .await
-            .unwrap();
-        let dirty = "派工\u{200b}內容\u{1b}[1m";
-        let queued = prompt_relayed_queueable(&app, &f.bot_id, dirty, "agm-clean", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay).await.unwrap();
-        assert_eq!(queued.delivery, "queued");
-        assert_eq!(stored(&f, &queued.turn_id).await, ("派工內容".to_string(), dirty.to_string()));
-
-        let idle = tt::claude_bot(&app, &f.env.project_id, "not-running").await;
-        let waiting = super::super::start_send::prompt_starting(&app, &idle.id, dirty, "crid-waiting", &[], super::super::RelaySrc::default()).await.unwrap();
-        assert_eq!(stored(&f, &waiting.turn_id).await, ("派工內容".to_string(), dirty.to_string()));
-    }
-
-    /// 整段都是隱形字元：清完什麼都不剩，回 400，不打一個空的 Enter 進去。
-    #[tokio::test]
-    async fn a_prompt_that_is_all_invisible_is_refused() {
-        let f = fixture(claude_strips).await;
-        let err = prompt(&f.env.app, &f.bot_id, "\u{200b}\u{feff}", "crid-empty").await.unwrap_err();
-        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
-        assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text"), "一個字都沒打");
     }
 }

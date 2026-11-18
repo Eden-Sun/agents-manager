@@ -13,7 +13,7 @@
 //! `[codex_history] enabled = true`。關著時所有呼叫端的行為與沒有這個模組時一致（測試 build 的 source 預設也是空的，
 //! 要用就 `App.codex_history.set(...)` 換一個 stub）。
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -581,14 +581,14 @@ impl HistoryConn for AppServerConn {
 // ───────────────────────── 測試用 stub ─────────────────────────
 
 /// 決定性的假 source：每個 [`Binding`] 一份歷史（新到舊），可以隨時改、可以讓它全部失敗。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
 pub struct StubSource {
     inner: std::sync::Mutex<StubState>,
     pub opens: AtomicU64,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
 struct StubState {
     items: HashMap<Binding, Vec<Item>>,
@@ -601,7 +601,7 @@ struct StubState {
     arrivals: Vec<(u64, Binding, String, String, String)>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl StubSource {
     pub fn new() -> Arc<Self> {
         Arc::new(Self { inner: std::sync::Mutex::new(StubState { remote_ok: true, ..Default::default() }), opens: AtomicU64::new(0) })
@@ -635,20 +635,20 @@ impl StubSource {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 struct StubConn {
     src: Arc<StubSource>,
     binding: Binding,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn stub_page<T: Clone>(all: &[T], cursor: Option<&str>, limit: u32) -> Page<T> {
     let start: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
     let end = (start + limit as usize).min(all.len());
     Page { data: all[start.min(all.len())..end].to_vec(), next_cursor: (end < all.len()).then(|| end.to_string()) }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl HistoryConn for StubConn {
     fn items_desc<'a>(&'a mut self, cursor: Option<&'a str>, limit: u32) -> BoxFuture<'a, Result<Page<Item>, HistoryError>> {
         Box::pin(async move {
@@ -677,7 +677,7 @@ impl HistoryConn for StubConn {
 }
 
 /// `Arc<StubSource>` 當 source 用（stub 自己要留一份讓測試改歷史）。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl HistorySource for Arc<StubSource> {
     fn supports(&self, host: &str) -> bool {
         host == LOCAL_HOST || self.inner.lock().unwrap().remote_ok
@@ -805,17 +805,6 @@ mod tests {
         let next_turn = vec![it("t3", "a3", fin("別人的")), it("t3", "u3", user("下一句")), it("t2", "u", user("跑測試"))];
         assert_eq!(reply_after(&next_turn, &sent), None, "中間又有別的 user 訊息");
         assert_eq!(reply_after(&ok, &["沒送過".to_string()]), None);
-    }
-
-    #[cfg(feature = "daemon-test-harness")]
-    #[test]
-    fn the_hook_defaults_off_in_tests_and_swaps() {
-        let hook = HistoryHook::default();
-        assert!(hook.get().is_none());
-        hook.set(Some(Arc::new(StubSource::new())));
-        assert!(hook.get().is_some());
-        hook.set(None);
-        assert!(hook.get().is_none());
     }
 
     /// #1862 遷移 B：以下四個測試與 app-server 往返測試只需要「歷史讀取需要的那幾個能力」，不需要 daemon `App`。

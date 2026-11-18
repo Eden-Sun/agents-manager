@@ -2564,3 +2564,11 @@ mod add_dir_args_tests {
         assert!(super::add_dir_args(&["--model".to_string(), "opus".to_string()]).is_empty());
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub async fn record_daemon_url_injected(pool: &sqlx::SqlitePool, run_id: &str, env: &Value) -> LcResult<()> { super::record_daemon_url_injected(pool, run_id, env).await }
+}

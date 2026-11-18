@@ -56,7 +56,7 @@ pub mod grok_hook;
 pub mod agy_hook;
 pub mod agy_busy;
 pub mod agy_session;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod agy_tests;
 pub mod grok_transcript;
 pub mod claude_child_log;
@@ -96,7 +96,7 @@ pub mod transcript_origin;
 pub use transcript_origin::starter_origin_kind_at;
 pub mod screen;
 pub mod transcript_stage;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod claude_linux_screens;
 pub mod limit_banner;
 pub mod stuck_turns;

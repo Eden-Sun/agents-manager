@@ -1,0 +1,309 @@
+#![allow(unused_imports)]
+//! #1862 L2-1：從 am-lifecycle 搬來、需要真 daemon App／DB 的測試。
+
+mod tests {
+    use crate::lifecycle_tests::prelude::*;
+    use crate::codex_model_migration::*;
+    use std::sync::Arc;
+    use crate::db;
+    use crate::state::App;
+    use crate::runners::codex_model_migration::observe_screen;
+    use crate::testing as tt;
+    async fn run_of(app: &Arc<App>, run_id: &str) -> db::Run {
+        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id=?")
+            .bind(run_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+    async fn system_messages(app: &Arc<App>, bot_id: &str) -> Vec<String> {
+        let conversation = db::conversation_id(&app.db, bot_id).await.unwrap();
+        sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at, rowid")
+            .bind(conversation)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn migration_screen_blocks_without_sending_keys_and_releases_after_user_choice() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-migration").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let run = run_of(&env.app, &run_id).await;
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+
+        observe_screen(&env.app, &run, migration).await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "blocked");
+        assert!(is_open(&run_id));
+        let notices = system_messages(&env.app, &bot.id).await;
+        assert_eq!(notices, [WAITING_HINT]);
+        assert!(
+            env.herdr.calls_to("pane.send_keys").is_empty(),
+            "the daemon must leave the user's choice untouched"
+        );
+
+        observe_screen(
+            &env.app,
+            &run_of(&env.app, &run_id).await,
+            "› Ask Codex to do anything\n",
+        )
+        .await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "idle");
+        assert!(!is_open(&run_id));
+        assert_eq!(env.herdr.calls_to("pane.send_keys").len(), 0);
+        let messages = system_messages(&env.app, &bot.id).await;
+        assert_eq!(messages, [WAITING_HINT, CLOSED_NOTE]);
+    }
+    /// issue #1408：codex 啟動框常在 `starting` 期間出現（start 等 ready 最多 60 秒）：那段也要標 blocked、講原因；框關掉後還原。
+    #[tokio::test]
+    async fn a_startup_dialog_is_marked_while_the_run_is_still_starting() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-migration-starting").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state='starting', agent_status='unknown' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+
+        observe_screen(&env.app, &run_of(&env.app, &run_id).await, migration).await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "blocked", "starting 期間的啟動框也要標");
+        assert_eq!(system_messages(&env.app, &bot.id).await, [WAITING_HINT]);
+
+        observe_screen(&env.app, &run_of(&env.app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&env.app, &run_id).await.agent_status, "unknown", "框關掉之後還原成啟動前的狀態");
+        assert_eq!(system_messages(&env.app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+    }
+    #[tokio::test]
+    async fn stale_dialog_observation_does_not_mutate_ended_run() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-migration-stale-run").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let old_id = tt::fake_run(&env.app, &bot.id).await;
+        let old = run_of(&env.app, &old_id).await;
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&old_id).execute(&env.app.db).await.unwrap();
+        let current_id = tt::fake_run(&env.app, &bot.id).await;
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+
+        observe_screen(&env.app, &old, migration).await;
+
+        assert_eq!(run_of(&env.app, &old_id).await.agent_status, "idle", "ended run must not be synthetically blocked");
+        assert_eq!(run_of(&env.app, &current_id).await.agent_status, "idle", "new run remains untouched");
+        assert!(!is_open(&old_id), "stale screen must not create an episode");
+        assert!(system_messages(&env.app, &bot.id).await.is_empty(), "stale screen must not insert an alert");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "stale screen must not wake queued work");
+    }
+    /// 啟動時的更新選單與 rate-limit 切換選單一樣擋住輸入列、要使用者本人選：herdr 判成 idle 時要補標 blocked、
+    /// 在對話裡講原因（網頁看得到、知道去 pane 處理）、一個鍵都不按；選單關掉自動回到原本的狀態、補一句「已關閉」並放行排隊的訊息。
+    #[tokio::test]
+    async fn other_startup_dialogs_block_with_their_own_reason_and_release_when_closed() {
+        for (name, screen, reason_has) in [
+            ("update", include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-update-menu.txt"), "更新"),
+            ("rate", include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-rate-limit-switch.txt"), "切換模型"),
+        ] {
+            let env = tt::env().await;
+            let app = env.app.clone();
+            let bot = tt::claude_bot(&app, &env.project_id, &format!("codex-dialog-{name}")).await;
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+            let run_id = tt::fake_run(&app, &bot.id).await;
+            let run = run_of(&app, &run_id).await;
+            assert_eq!(run.agent_status, "idle", "前提：herdr 判成 idle");
+
+            observe_screen(&app, &run, screen).await;
+            assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "{name}：要補標 blocked");
+            assert!(is_open(&run_id), "{name}");
+            let notes = system_messages(&app, &bot.id).await;
+            assert_eq!(notes.len(), 1, "{name}：講一次原因就好：{notes:?}");
+            assert!(notes[0].contains(reason_has) && notes[0].contains("終端"), "{name}：原因要講清楚、說去終端處理：{}", notes[0]);
+            observe_screen(&app, &run_of(&app, &run_id).await, screen).await;
+            assert_eq!(system_messages(&app, &bot.id).await.len(), 1, "{name}：同一個選單不重複講");
+            assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "{name}：不替使用者選");
+            assert!(env.herdr.calls_to("pane.send_text").is_empty(), "{name}");
+
+            observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+            assert_eq!(run_of(&app, &run_id).await.agent_status, "idle", "{name}：關掉後回到原本的狀態");
+            assert!(!is_open(&run_id), "{name}");
+            assert_eq!(system_messages(&app, &bot.id).await.last().map(String::as_str), Some(CLOSED_NOTE), "{name}");
+        }
+    }
+    #[tokio::test]
+    async fn a_newer_herdr_status_supersedes_the_synthetic_block_before_queue_release() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-superseded").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "working", "do not overwrite herdr's newer state");
+        assert!(!is_open(&run_id), "the newer status authoritatively superseded our marker");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+    }
+    #[tokio::test]
+    async fn an_ended_run_releases_the_synthetic_blocked_episode() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-ended").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+
+        let run = run_of(&app, &run_id).await;
+        assert_eq!(run.state, "exited");
+        assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
+        assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT], "an ended run gets no stale close message");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "an ended run cannot wake the queue");
+    }
+    /// The restore marker is owed until SQLite commits it. A later patrol must retry before it
+    /// writes the close note or wakes the prompt queue.
+    #[tokio::test]
+    async fn a_failed_restore_keeps_the_episode_until_a_later_patrol_succeeds() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-restore").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        let conversation = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,'web','queued','pending','next prompt',?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
+        sqlx::query(
+            "CREATE TRIGGER refuse_codex_migration_restore BEFORE UPDATE OF agent_status ON runs
+             WHEN OLD.agent_status='blocked' AND NEW.agent_status='idle' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "restore did not commit");
+        assert!(is_open(&run_id), "the patrol needs the retained episode to retry");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT]);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "don't wake the queue yet");
+
+        sqlx::query("DROP TRIGGER refuse_codex_migration_restore")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle");
+        assert!(!is_open(&run_id));
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE], "closure note is written once");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
+    }
+    /// #978：同一個 run 先跳模型遷移、再換成更新選單（中間沒有「沒有框」的空檔）。原因與提示要跟著換，同一張框不重講。
+    #[tokio::test]
+    async fn a_dialog_that_turns_into_another_dialog_updates_the_reason_and_hint() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-dialog-swap").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=?")
+            .bind(&run_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let app = env.app.clone();
+        let migration = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.157-model-migration.txt");
+        let update_menu = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-update-menu.txt");
+
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        assert_eq!(open_dialog(&run_id), Some(Dialog::Migration));
+
+        observe_screen(&app, &run_of(&app, &run_id).await, update_menu).await;
+        assert_eq!(open_dialog(&run_id), Some(Dialog::UpdateMenu), "blocked_reason reads the episode's dialog");
+        let messages = system_messages(&app, &bot.id).await;
+        assert_eq!(messages.iter().filter(|m| m.as_str() == WAITING_HINT).count(), 1);
+        assert_eq!(messages.iter().filter(|m| m.as_str() == UPDATE_WAITING_HINT).count(), 1);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, update_menu).await;
+        assert_eq!(system_messages(&app, &bot.id).await.len(), messages.len(), "the same dialog is not announced again");
+
+        open().lock().unwrap().remove(&run_id);
+    }
+    /// #1989：hook 審核框走同一套機制：補標 blocked＋原因、提示講一次（寫明重啟即可）、一個鍵都不按；框關掉還原並放行。
+    /// daemon 重啟（記憶體裡的 episode 沒了、DB 還留著補標的 blocked）後再看到同一個框：不重貼提示，關掉仍還原成 idle。
+    #[tokio::test]
+    async fn the_hook_review_box_blocks_with_a_restart_hint_and_survives_a_daemon_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-hook-review").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let review = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.169.1-hooks-review.txt");
+        assert_eq!(Dialog::of(review), Some(Dialog::HookReview));
+
+        observe_screen(&app, &run_of(&app, &run_id).await, review).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked");
+        assert_eq!(crate::blocked_reason::of(&run_id).map(|r| r.code), Some("codex_hook_review"));
+        let notes = system_messages(&app, &bot.id).await;
+        assert_eq!(notes, [HOOK_REVIEW_WAITING_HINT]);
+        assert!(notes[0].contains("重新啟動這顆 bot 即可") && notes[0].contains("不會自動按鍵"), "{}", notes[0]);
+
+        // daemon 重啟：episode 不見了，run 在 DB 裡還是 blocked。
+        open().lock().unwrap().remove(&run_id);
+        observe_screen(&app, &run_of(&app, &run_id).await, review).await;
+        assert!(is_open(&run_id), "重啟後重新接手這個框");
+        assert_eq!(crate::blocked_reason::of(&run_id).map(|r| r.code), Some("codex_hook_review"));
+        assert_eq!(system_messages(&app, &bot.id).await, [HOOK_REVIEW_WAITING_HINT], "同一個框不因重啟再貼一次");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty(), "不按任何鍵");
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle", "框關掉後還原，不會一直掛著 blocked");
+        assert!(!is_open(&run_id));
+        assert_eq!(system_messages(&app, &bot.id).await, [HOOK_REVIEW_WAITING_HINT, CLOSED_NOTE]);
+    }
+}

@@ -37,8 +37,20 @@ module_has_tests() { # module_has_tests <src 根目錄> <用 / 分隔的模組�
     return 1
 }
 
+# #1862 L2-1：這些 am-lifecycle 模組裡需要真 App 的測試搬進 daemon/src/lifecycle_tests/<名>.rs（模組路徑 lifecycle_tests::<名>::）。
+# 改它們的 crate 原始碼（含 *_tests.rs）要加選搬走的那一份；crate 內留下的純測試由 check.sh 的 `cargo test -p am-lifecycle` 跑。
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup "
+emit_lifecycle_moved() { # emit_lifecycle_moved <repo 相對路徑>
+    local n
+    n="$(basename "${1%.rs}")"
+    case "$LIFECYCLE_MOVED" in *" $n "*) printf 'lifecycle_tests::%s::\n' "$n"; return 0 ;; esac
+    n="${n%_tests}"
+    case "$LIFECYCLE_MOVED" in *" $n "*) printf 'lifecycle_tests::%s::\n' "$n" ;; esac
+}
+
 emit_mod() { # emit_mod <repo 相對路徑> <用 / 分隔的模組路徑>
     local f="$1" mod="$2" base root
+    case "$f" in crates/am-lifecycle/src/*.rs) emit_lifecycle_moved "$f" ;; esac
     case "$f" in
         crates/am-lifecycle/src/*.rs | crates/am-share/src/*.rs | crates/am-supervisor/src/*.rs)
             # These tests already run in the owning crate target. Keep mixed/App modules below.
@@ -153,6 +165,7 @@ while IFS= read -r f; do
             mod="${f#crates/am-lifecycle/src/}"
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
+            emit_lifecycle_moved "$f"
             ;;
         # start.rs／poller.rs 以 #[path] 把 <檔名>_tests/<mod>.rs 掛成 lifecycle::<檔名>::<mod>；照檔名推會選到零個。
         crates/am-lifecycle/src/lifecycle/*_tests/*.rs)

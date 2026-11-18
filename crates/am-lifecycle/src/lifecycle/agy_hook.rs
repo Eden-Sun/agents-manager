@@ -111,3 +111,12 @@ pub fn install_at(app: &(impl crate::capabilities::DataDir + crate::capabilities
     }
     Ok(changed)
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub fn heal_at(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance), home: &Path) -> anyhow::Result<bool> { super::heal_at(app, home) }
+    pub fn dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String { super::dispatch_sh(exe, data_dir, instance) }
+}

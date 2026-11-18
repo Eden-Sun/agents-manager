@@ -35,11 +35,11 @@ check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/
 check "lifecycle::poller::issue_17_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/issue_17_tests.rs"
 check "lifecycle::poller::folded_paste_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/folded_paste_tests.rs"
 check "lifecycle::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
-check "lifecycle::claude_resume_menu::tests::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
+check "lifecycle::claude_resume_menu::tests:: lifecycle_tests::claude_resume_menu::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
 # 混合：兩支新路徑＋既有有效路徑（judge_tests.rs）同進來，各自的真實過濾字串都要在，且排序去重（#1961）。
-check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: testing::scratch_leak_guard::" \
+check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: testing::scratch_leak_guard::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 # #1862 C1：share 的 tests.rs／trusted_tests.rs 搬成 daemon 自己的測試檔（daemon/src/share_tests/），不再靠 share 的 #[path] 掛載編譯；
@@ -64,15 +64,15 @@ check "share_tests::" "crates/am-share/src/share/store.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
 # #1862 遷移 A：screen.rs／setup.rs 的純解析測試模組改為 crate-only，但兩檔仍有 daemon 測試（limit_hit_quota_tests、remote_hook_tests 等）；
 # 改這兩檔仍要選到 daemon 的 lifecycle::screen::／lifecycle::setup::，不能因部分測試搬走就退成零選。
-check "lifecycle::screen::" "crates/am-lifecycle/src/lifecycle/screen.rs"
-check "lifecycle::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs"
+check "lifecycle_tests::screen::" "crates/am-lifecycle/src/lifecycle/screen.rs"
+check "lifecycle::setup:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs"
 # #1862 遷移 B：resume_context／codex_history 的 DB／純解析測試改 crate-only，兩檔仍各留 daemon 測試（resume_context::tests 兩邊都編譯、
 # codex_history::tests::the_hook_defaults_off_in_tests 只在 daemon harness），改這兩檔仍要選到各自的 daemon 過濾字串。
 # 共用的測試輔助 am_base::test_dirs 改動走 am-base 自己的測試。
 check "lifecycle::resume_context::" "crates/am-lifecycle/src/lifecycle/resume_context.rs"
-check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
+check "codex_history:: lifecycle_tests::codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "runners::am_base_tests::" "crates/am-base/src/test_dirs.rs"
-check "lifecycle::screen:: lifecycle::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs" "crates/am-lifecycle/src/lifecycle/screen.rs"
+check "lifecycle::setup:: lifecycle_tests::screen:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs" "crates/am-lifecycle/src/lifecycle/screen.rs"
 check "runners::supervisor:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/supervisor/health.rs"
 # 檔案自己沒有測試、但同名子目錄有測試：不退，留在這一層（runners::supervisor:: 底下有測試）。
 check "runners::supervisor:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/supervisor.rs"
@@ -104,7 +104,7 @@ check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_test
 check "changelog_translate::stream:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate_stream.rs"
 check "testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/timestamp_compat_tests.rs"
 # 直接 `mod x_tests;` 宣告的不受影響。
-check "lifecycle::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
+check "lifecycle_tests::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
 check "" "crates/am-share/src/share/remote_fs_tests.rs"
 # Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
 check "__all__" "daemon/build.rs"
@@ -121,7 +121,7 @@ check "__all__ testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/s
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
 check "__all__" "crates/am-base/src/release_triage/rules.toml"
 check "lifecycle::queue::" "crates/am-lifecycle/src/lifecycle/queue.rs"
-check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
+check "codex_history:: lifecycle_tests::codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
 check "share_tests::" "crates/am-share/src/share/portal.rs"

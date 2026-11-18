@@ -462,6 +462,14 @@ async fn after_start_body(
     AgentStatus::Unknown
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "claude_resume_menu_tests.rs"]
 mod tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub async fn accept_on_body_at(app: &(impl Db + HerdrRoutes + HostsAccess), run: &db::Run, client: &RunClient, now: Option<std::time::Instant>) -> anyhow::Result<bool> { super::accept_on_body_at(app, run, client, now).await }
+}

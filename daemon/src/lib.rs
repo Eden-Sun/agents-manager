@@ -48,6 +48,8 @@ pub use am_lifecycle::{
 };
 // #1862 S4：supervisor 不再以 #[path] 編進 daemon（測試與正式 build 都用 am_supervisor crate）。
 pub use am_supervisor::{build_info, relay_auth, supervisor};
+#[cfg(test)]
+mod lifecycle_tests;
 // App-backed unit tests still belong to the daemon crate. Under `cargo test`, compile the same
 // source modules at the crate root so their `crate::` paths and the App adapters share one set of
 // types. Production builds use the extracted crate re-exports above.

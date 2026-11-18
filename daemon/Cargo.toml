@@ -60,6 +60,7 @@ am-base = { path = "../crates/am-base", features = ["test-hooks"] }
 am-share = { path = "../crates/am-share", features = ["test-hooks"] }
 am-supervisor = { path = "../crates/am-supervisor", features = ["test-hooks"] }
 am-config = { path = "../crates/am-config", features = ["test-hooks"] }
+am-lifecycle = { path = "../crates/am-lifecycle", features = ["test-hooks"] }
 # paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.
 tokio = { version = "1", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
