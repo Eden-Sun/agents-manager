@@ -20,7 +20,7 @@ use crate::state::App;
 
 const USE_CASE: &str = "message_translate";
 const CACHE_DIR: &str = "message-translate";
-const PROMPT_VERSION: &str = "2";
+const PROMPT_VERSION: &str = "3";
 /// 訊息內容上限（字元）：再長的回覆不翻，避免一次扣太多。
 pub(crate) const MAX_CHARS: usize = 20_000;
 const MAX_OUT_TOKENS: u32 = 8_000;
@@ -28,7 +28,7 @@ const MAX_OUT_TOKENS: u32 = 8_000;
 const SYSTEM: &str = "You are a translation engine. Translate the English parts of the user's message into Traditional Chinese (zh-TW, Taiwan usage). \
 Keep existing Traditional Chinese text, references, and names exactly as they are—do not rewrite or re-translate them. \
 Convert Simplified Chinese to Traditional Chinese (zh-TW). Never output Japanese. \
-Do NOT translate code, identifiers, file paths, shell commands, URLs, environment variables, commit hashes, or issue numbers: copy them verbatim. \
+Do NOT translate code, identifiers, file paths, shell commands, URLs, environment variables, commit hashes, version numbers, or issue numbers: copy them verbatim. \
 Company names, product or system names, and abbreviations (e.g., CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. \
 Do not add explanations. Reply with the translation only.";
 
@@ -65,7 +65,7 @@ pub(crate) use crate::claude_api::cost_usd;
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
         "Translate the English parts of the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). \
-        原文中已經是中文（繁體）的段落、引用、名稱請原樣保留，不要改寫或重譯；簡體段落請轉成台灣繁體（zh-TW）。英文句子、條列項目與表格單元都要翻，但程式碼、檔案路徑、產品名稱與縮寫照原文保留。\
+        原文中已經是中文（繁體）的段落、引用、名稱請原樣保留，不要改寫或重譯；簡體段落請轉成台灣繁體（zh-TW）。英文句子、條列項目與表格單元都要翻，但程式碼、指令、檔案路徑、版本號、產品名稱與縮寫照原文保留。\
         Reply with the translation only; do NOT include the <source> or </source> tags.\n<source>\n{content}\n</source>"
     );
     ClaudeRequest {
@@ -942,7 +942,8 @@ mod tests {
         assert!(r.prompt.contains("<source>\nRun `cargo test` in /tmp\n</source>"));
         assert!(r.prompt.contains("原文中已經是中文（繁體）的段落、引用、名稱請原樣保留"));
         assert!(r.prompt.contains("不要改寫或重譯"));
-        assert!(sys.contains("Never output Japanese"));
+        assert!(sys.contains("Never output Japanese") && sys.contains("version numbers") && sys.contains("Convert Simplified Chinese"));
+        assert!(r.prompt.contains("簡體段落請轉成台灣繁體") && r.prompt.contains("版本號") && r.prompt.contains("指令"));
     }
 
     #[test]
@@ -954,6 +955,15 @@ mod tests {
         // 英文原樣沒翻（只有中文引用保留）→ 仍要判 untranslated
         let untranslated = "Please review the deployment plan for the API service before Friday, the team needs it.\n這是引用：OK。";
         assert_eq!(local_reason(source, untranslated), Some("untranslated"), "英文沒翻的混合訊息仍要擋下");
+    }
+
+    #[test]
+    fn mixed_message_with_code_versions_and_zh_quote_is_not_untranslated() {
+        // 英文段含行內程式碼與版本號、夾繁體中文段：英文翻掉、其餘原樣保留 → 不判 untranslated
+        let source = "Please upgrade the `agm` CLI to v0.155.1 before the release review, then rerun the checks.\n原文引用：請先確認。";
+        let translated = "請在發版審查前把 `agm` CLI 升級到 v0.155.1，然後重跑檢查。\n原文引用：請先確認。";
+        assert_eq!(local_reason(source, translated), None);
+        // 來源中文字數超過拉丁字母十分之一時不算「主要英文」，本來就不做 untranslated 檢查（既有門檻，此次未改）。
     }
 
     #[test]
