@@ -36,7 +36,7 @@ export function mergedUpdateLabels(x: {
       : t('重啟中 {done}/{total}（收起，不會中斷）', { done: batch.done, total: batch.total })
     : readyCount > 0
       ? t('重啟 {n} 顆閒置的 Bot 套用更新', { n: readyCount })
-      : t('{n} 顆有更新但在忙，閒下來再按', { n: busyCount })
+      : t('{n} 顆有更新但在忙，點開可安排閒下來自動重啟', { n: busyCount })
   const codexItem = codexCli
     ? t('{host} 的 codex {phase}…', { host: codexCli.host, phase: tr(CLI_UPDATE_PHASE_LABEL[codexCli.phase]) })
     : t('安裝 codex{to} 並重啟（{n} 顆還沒裝）', { to: to ? ` ${to}` : '', n: installCount })

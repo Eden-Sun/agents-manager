@@ -154,7 +154,7 @@ export function MergedUpdateChip() {
                 className="head-menu-item"
                 role="menuitem"
                 tabIndex={-1}
-                disabled={!batch && readyCount === 0}
+                disabled={!batch && readyCount === 0 && busyCount === 0}
                 onClick={() => (batch ? clear() : setWhich('restart'))}
               >
                 {restartItem}

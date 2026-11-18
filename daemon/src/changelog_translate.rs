@@ -34,7 +34,7 @@ pub fn model_output_tokens(model: &str) -> u32 {
     stream::model_output_tokens(model)
 }
 
-const PROMPT_VERSION: &str = "1";
+const PROMPT_VERSION: &str = "2";
 const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 /// 翻譯實際用的設定：key 檔跟 `[claude_api]` 同一把（`[changelog_translate] key_file` 被明確改過才用舊的）。
@@ -652,10 +652,35 @@ fn finish(data_dir: &Path, fp: &str, attempt_id: &str, result: Result<ClientOutc
     };
     let produced = fill_attempt(&mut job.attempts[pos], result, &included, sent_n);
     if let Some((summary, sections)) = produced {
+        let (summary, sections) = localize(&job.lang, summary, sections);
         job.summary = summary;
         job.sections = sections;
     }
     let _ = save(&path, &job);
+}
+
+/// zh-Hant 的模型輸出一律再過本地 OpenCC（s2twp），Haiku 常夾簡體。程式碼、行內 code、網址由 `to_traditional` 原樣保留。
+/// 只改文字不改數量與版本，所以前面的驗證結果不受影響。其他語言原樣回傳。
+fn localize(
+    lang: &str,
+    summary: Vec<String>,
+    sections: Vec<OutSection>,
+) -> (Vec<String>, Vec<OutSection>) {
+    if lang != "zh-Hant" {
+        return (summary, sections);
+    }
+    let summary = summary
+        .iter()
+        .map(|s| crate::zh_convert::to_traditional(s))
+        .collect();
+    let sections = sections
+        .into_iter()
+        .map(|s| OutSection {
+            body: crate::zh_convert::to_traditional(&s.body),
+            version: s.version,
+        })
+        .collect();
+    (summary, sections)
 }
 
 fn fill_attempt(
@@ -925,7 +950,7 @@ fn plan_input(kind: &str, limits: &Limits, sections: &[crate::changelog::Section
 /// `zh-Hant` 那一句只服務繁中；`ja` 等其他允許值各有自己的句子。
 fn verified_language(lang: &str) -> Option<&'static str> {
     match lang {
-        "zh-Hant" => Some("Traditional Chinese (zh-Hant)"),
+        "zh-Hant" => Some("Traditional Chinese as used in Taiwan (zh-TW). Never use Simplified Chinese characters."),
         "zh-Hans" => Some("Simplified Chinese (zh-Hans)"),
         "en" => Some("English (en)"),
         "ja" => Some("Japanese (ja)"),
@@ -2641,6 +2666,69 @@ mod tests {
     }
 
     #[test]
+    fn zh_hant_output_is_converted_to_taiwan_traditional_and_code_is_kept() {
+        let sim = "修复解析器，请更新到最新版本。";
+        let body = "修复问题\n```\n修复问题 = 1\n```\n行内 `软件` 与 https://example.com/软件";
+        let (sum, secs) = localize(
+            "zh-Hant",
+            vec![sim.into(), "修复问题".into(), "第三点".into()],
+            vec![OutSection { version: "2.1.5".into(), body: body.into() }],
+        );
+        assert_eq!(sum[0], "修復解析器，請更新到最新版本。");
+        assert_eq!(sum[1], "修復問題");
+        assert_eq!(secs[0].version, "2.1.5");
+        assert!(secs[0].body.starts_with("修復問題\n```\n修复问题 = 1\n```\n"), "{}", secs[0].body);
+        assert!(secs[0].body.contains("行內 `软件` 與 https://example.com/软件"), "{}", secs[0].body);
+    }
+
+    #[test]
+    fn other_languages_are_not_converted() {
+        let sim = "修复了解析器，请更新到最新版本。";
+        for lang in ["zh-Hans", "ja", "en"] {
+            let (sum, secs) = localize(
+                lang,
+                vec![sim.into()],
+                vec![OutSection { version: "2.1.5".into(), body: sim.into() }],
+            );
+            assert_eq!(sum, vec![sim.to_string()], "{lang}");
+            assert_eq!(secs[0].body, sim, "{lang}");
+        }
+    }
+
+    #[test]
+    fn prompt_version_bump_changes_the_fingerprint_so_old_cache_misses() {
+        let limits = limits_of(&ChangelogTranslateCfg::default(), 8000);
+        let sections = crate::changelog::parse_changelog(CHANGELOG);
+        let picked = crate::changelog::pick_sections(&sections, Some("2.1.3"), "2.1.5");
+        let plan = plan_input("claude", &limits, &picked);
+        assert_ne!(fingerprint(&plan), fingerprint_with("1", &plan));
+        assert_eq!(fingerprint(&plan), fingerprint_with(PROMPT_VERSION, &plan));
+    }
+
+    #[tokio::test]
+    async fn zh_hant_model_reply_with_simplified_chinese_is_saved_as_traditional() {
+        let text = concat!(
+            "{\"summary\":[\"修复解析器\",\"修复问题\",\"第三点\"],",
+            "\"sections\":[{\"version\":\"2.1.5\",\"body\":\"修复问题\\n`软件` 与 https://example.com/软件\"},{\"version\":\"2.1.4\",\"body\":\"修复状态列\"}]}"
+        )
+        .to_string();
+        let (env, _fake) = boot(vec![Step::Raw {
+            text,
+            usage: Some(sample_usage()),
+            model: Some("claude-haiku-5-5".into()),
+            stop_reason: Some("end_turn".into()),
+        }])
+        .await;
+        enable(&env).await;
+        let _ = post(&env.app, q_to("2.1.5")).await;
+        let done = until_status(&env.app, "2.1.5", "completed").await;
+        assert_eq!(done["summary"][0], "修復解析器");
+        assert_eq!(done["summary"][1], "修復問題");
+        let body = done["sections"][0]["body"].as_str().unwrap();
+        assert_eq!(body, "修復問題\n`软件` 與 https://example.com/软件");
+    }
+
+    #[test]
     fn fingerprint_ignores_host_and_changes_with_content_or_settings() {
         let limits = limits_of(&ChangelogTranslateCfg::default(), 8000);
         let sections = crate::changelog::parse_changelog(CHANGELOG);
@@ -3526,7 +3614,7 @@ mod tests {
         assert_eq!(fake.calls(), 2);
         assert_eq!(hant["lang"], "zh-Hant");
         assert_ne!(hant["fingerprint"], ja["fingerprint"]);
-        assert!(fake.seen()[1].prompt.contains("Traditional Chinese (zh-Hant)"));
+        assert!(fake.seen()[1].prompt.contains("Traditional Chinese as used in Taiwan (zh-TW)"));
         env.app
             .cfg
             .update(|c| {

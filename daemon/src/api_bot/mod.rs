@@ -4,10 +4,12 @@
 #![allow(dead_code)]
 
 pub(crate) mod adapter;
+pub(crate) mod anthropic;
+pub(crate) mod provider;
 pub(crate) mod completion;
 pub(crate) mod http;
+pub(crate) mod openai;
 pub(crate) mod protocol;
-pub(crate) mod provider;
 pub(crate) mod quote;
 mod pricing;
 pub(crate) mod runner;
@@ -21,8 +23,6 @@ pub(crate) mod tools;
 mod adapter_tests;
 #[cfg(test)]
 mod wrap_up_tests;
-#[cfg(test)]
-mod provider_seam_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod completion_tests;
 pub(crate) mod prompt;
@@ -61,3 +61,5 @@ mod sweeper_tests;
 mod explicit_retirement;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod explicit_retirement_tests;
+#[cfg(test)]
+mod provider_seam_tests;

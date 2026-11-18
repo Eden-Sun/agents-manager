@@ -646,6 +646,8 @@ export class MockTransport implements Transport {
   ]
   private projects: MockProject[] = []
   private bots: MockBot[] = []
+  /** 「閒下來自動重啟套用更新」排著的 bot id（daemon 存 DB，這裡只放記憶體）。 */
+  private updateRestart: string[] = []
   private baseSnapshots = new Map<string, string>()
   /** 使用者顯示時區（`/settings/time-zone`）。 */
   private timeZone = DEFAULT_USER_TIME_ZONE
@@ -1347,6 +1349,13 @@ export class MockTransport implements Transport {
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
 
+    // 須排在 `bots/{id}` 前：`update-restart` 不是 bot id。
+    if (seg[0] === 'bots' && seg[1] === 'update-restart' && seg.length === 2) {
+      const ids: string[] = Array.isArray(b?.bot_ids) ? b.bot_ids.filter((v: unknown): v is string => typeof v === 'string') : []
+      if (method === 'POST') this.updateRestart = [...new Set([...this.updateRestart, ...ids])]
+      if (method === 'DELETE') this.updateRestart = ids.length === 0 ? [] : this.updateRestart.filter((x) => !ids.includes(x))
+      return { bot_ids: this.updateRestart }
+    }
     // SPEC §6.9：須排在 `bots/{id}` 前，否則 `restart-idle` 被當成 bot id。
     if (method === 'POST' && seg[0] === 'bots' && seg[1] === 'restart-idle' && seg.length === 2) {
       return this.restartIdle()

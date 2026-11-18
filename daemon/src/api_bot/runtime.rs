@@ -781,7 +781,8 @@ impl ApiBotRuntime {
                     }
                     reached
                 };
-                let execution = super::runner::run_with_wrap_up(
+                let execution = super::runner::run_with_codec(
+                    adapter.codec(),
                     adapter.as_ref(),
                     &tools,
                     adapter.as_ref(),
@@ -2489,8 +2490,10 @@ pub(super) async fn startup_checkpoint_on(
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
         let checkpoint = Checkpoint::new(&value).ok()?;
         let state: super::runner::State = serde_json::from_value(checkpoint.value()).ok()?;
-        // 復原：標籤與 session 的 provider 不一致的 checkpoint 一律當作不能放行（無標籤＝舊的 Claude 格式）。
-        super::provider::check_checkpoint_tag(&state, &super::provider::AnthropicProvider::codec_only()).ok()?;
+        // recovery：不認得的 provider 標籤一律當成未解決，不替它結算。
+        if !super::provider::is_known(state.provider_id()) {
+            return None;
+        }
         Some(startup_context_settled(&state, owner_failed))
     })()
     .unwrap_or(false);

@@ -1432,6 +1432,7 @@
         sqlx::query("DROP TABLE child_done_sources").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&mut *tx).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
@@ -1583,6 +1584,7 @@
         sqlx::query("DROP TABLE child_done_sources").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&pool).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&pool).await.unwrap();

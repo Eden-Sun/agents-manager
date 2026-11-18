@@ -721,11 +721,13 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         app.schedule_flush_queued(&run.bot_id);
         // 忙的時候改的 codex fast 等的就是這條邊（#393）。
         app.schedule_deferred_live(&run.bot_id);
+        crate::update_restart::schedule(app, &run.bot_id);
     } else if prev != "idle" && status == "idle" {
         // 剛起來（`unknown`）或對話框剛關掉（`blocked`）就閒下來：排著的也該送了——bot 沒在跑時收下的那一則
         // （issue #122）正是等這一刻，不然要等退避的 timer（最少 15 秒）。flush 自己的閘門照舊把關。
         app.schedule_flush_queued(&run.bot_id);
         app.schedule_deferred_live(&run.bot_id);
+        crate::update_restart::schedule(app, &run.bot_id);
     }
 
     // 沒有 hook 的被接管 pane（對話檔是唯一的完成證據）：沒收到 working 邊就沒有回合在飛，idle 時補讀對話檔（issue #1798）。
