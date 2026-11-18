@@ -174,7 +174,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/settings/time-zone", get(crate::user_settings::get).put(crate::user_settings::put))
         .route("/settings/auto-update", get(crate::auto_update_settings::get).put(crate::auto_update_settings::put))
-        .route("/bots/update-restart", get(crate::update_restart::get).post(crate::update_restart::post).delete(crate::update_restart::delete))
         .route("/codex/stop-hook", get(crate::codex_stop_hook_api::get))
         .route("/codex/stop-hook/trust", post(crate::codex_stop_hook_api::post_trust))
         .route("/push/vapid-key", get(crate::webpush::get_vapid_key))
@@ -849,9 +848,6 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("PUT", "/api/settings/time-zone", BotRoutePolicy::UserOnly),
     ("GET", "/api/settings/auto-update", BotRoutePolicy::UserOnly),
     ("PUT", "/api/settings/auto-update", BotRoutePolicy::UserOnly),
-    ("GET", "/api/bots/update-restart", BotRoutePolicy::UserOnly),
-    ("POST", "/api/bots/update-restart", BotRoutePolicy::UserOnly),
-    ("DELETE", "/api/bots/update-restart", BotRoutePolicy::UserOnly),
     ("GET", "/api/codex/stop-hook", BotRoutePolicy::UserOnly),
     ("POST", "/api/codex/stop-hook/trust", BotRoutePolicy::UserOnly),
     ("GET", "/api/push/vapid-key", BotRoutePolicy::UserOnly),

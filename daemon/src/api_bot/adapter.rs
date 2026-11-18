@@ -18,6 +18,7 @@ use am_base::db::api_bot::{self as db_api, Checkpoint, Fence};
 
 use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
+use super::provider::{self, AnthropicProvider, ApiProvider, ErrorClass, SendParams};
 use super::quote::{QuoteProvider, RequestEnvelope};
 use super::runner::{Journal, Model, State, Tools};
 
@@ -92,12 +93,8 @@ pub(crate) struct ApiBotAdapter {
     options: Options,
     system: Value,
     limits: AdapterLimits,
-    quote_provider: Arc<dyn QuoteProvider>,
-    /// 這個 session 的模型供應商（建立時固定）：編碼請求、送出、錯誤分類與 transcript 編解碼都經過它。
-    provider: Arc<dyn super::provider::Provider>,
-    /// 這個 session 的 checkpoint 版本標籤：`Some(provider id)`＝v2（新建的 session）；`None`＝沒有標籤的舊 session，
-    /// 維持舊格式存回去（位元組不變）。
-    session_tag: Option<String>,
+    /// session 建立時固定的 provider（報價也是它的）：編碼、送出、錯誤分類、報價都經過它。
+    provider: Arc<dyn ApiProvider>,
     http_cfg: AdapterHttpConfig,
     tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
@@ -135,9 +132,56 @@ struct ActiveAttempt {
     key: Option<Secret>,
 }
 
-pub(super) use super::anthropic::checkpoint_matches_model;
-#[cfg(test)]
-pub(super) use super::anthropic::definitive_rejection;
+pub(super) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
+    // 兩邊都必須是支援的 claude-api 模型（如 claude-opus-5-5、claude-fable-5-2）。
+    // 請求已帶 thinking.block_binding.prefix_mismatch_behavior = "drop_block"，
+    // 支援模型之間的 checkpoint 可安全接續。
+    if !am_config::api_bot_model_supported(model) {
+        return false;
+    }
+    if state.responses.iter().any(|r| !am_config::api_bot_model_supported(&r.model)) {
+        return false;
+    }
+    !(state.responses.is_empty()
+        && state.messages.iter().any(|m| {
+            m.content.as_array().is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    matches!(
+                        b.get("type").and_then(Value::as_str),
+                        Some("thinking" | "redacted_thinking")
+                    )
+                })
+            })
+        }))
+}
+
+/// API 明確拒絕、確定沒有處理（也不計費）的錯誤：4xx（408 逾時除外）、429、529 過載。
+/// 逾時、連線中斷、回應過大或讀壞都不算：那些不知道上游有沒有處理。
+pub(super) fn definitive_rejection(err: &http::Error) -> bool {
+    match err {
+        http::Error::RateLimited { .. } => true,
+        http::Error::Http { status, .. } => (400..500).contains(status) && *status != 408 || *status == 529,
+        _ => false,
+    }
+}
+
+/// 已成功收到的回應內容不合法的原因（`None`＝合法）；規則與 runner 收到回應後的檢查相同。
+fn invalid_content_reason(provider: &dyn ApiProvider, resp: &Response, durable: &State, model: &str) -> Option<String> {
+    if resp.model != model {
+        return Some(format!("response model {} != requested {model}", resp.model));
+    }
+    let calls = match provider.tool_calls(resp) {
+        Ok(calls) => calls,
+        Err(why) => return Some(format!("tools(): {why}")),
+    };
+    if calls.len() > 32 {
+        return Some(format!("too many tool calls: {}", calls.len()));
+    }
+    if let Some(c) = calls.iter().find(|c| durable.completed_tool_ids.contains(&c.id)) {
+        return Some(format!("tool id already completed: {}", c.id));
+    }
+    None
+}
 
 impl ApiBotAdapter {
     /// 接上串流進度出口（runtime 在建好 adapter 後呼叫）。
@@ -166,32 +210,6 @@ impl ApiBotAdapter {
     /// 取走（並清掉）最近一次預留被拒絕的原因。
     pub(crate) fn take_refusal(&self) -> Option<String> {
         self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
-    }
-
-    /// 要存成 checkpoint 的 JSON：版本標籤一律照 session 固定的那一個寫（新 session＝`{"v":2,"provider":…}`，舊 session＝不帶）。
-    /// runner 手上的 state 帶著別的 provider 標籤＝不是這個 session 的 transcript，拒絕。
-    fn checkpoint_value(&self, state: &State) -> Result<Value, ()> {
-        if state.provider.is_some() && state.provider != self.session_tag {
-            return Err(());
-        }
-        let mut val = serde_json::to_value(state).map_err(|_| ())?;
-        let object = val.as_object_mut().ok_or(())?;
-        match &self.session_tag {
-            Some(provider) => {
-                object.insert("v".into(), Value::from(am_base::db::api_bot::CHECKPOINT_VERSION));
-                object.insert("provider".into(), Value::String(provider.clone()));
-            }
-            None => {
-                object.remove("v");
-                object.remove("provider");
-            }
-        }
-        Ok(val)
-    }
-
-    /// 這個 session 的 transcript 編解碼（runner 用）。
-    pub(crate) fn codec(&self) -> &dyn super::provider::Codec {
-        self.provider.codec()
     }
 
     #[cfg(test)]
@@ -236,14 +254,13 @@ impl ApiBotAdapter {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
-        let provider = super::provider::for_id(super::anthropic::ID, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
-        let initial_state = State {
+        let provider: Arc<dyn ApiProvider> = Arc::new(AnthropicProvider::new(quote_provider));
+        let mut initial_state = State {
             system: Some(system_str),
-            v: Some(am_base::db::api_bot::CHECKPOINT_VERSION),
-            provider: Some(provider.id().to_string()),
             ..Default::default()
         };
+        // session 建立時固定 provider 與 checkpoint 格式版本。
+        provider::stamp_checkpoint(&mut initial_state, &*provider);
         let state_val =
             serde_json::to_value(&initial_state).map_err(|_| http::Error::InvalidRequest)?;
         let checkpoint = Checkpoint::new(&state_val).map_err(|_| http::Error::InvalidRequest)?;
@@ -260,8 +277,6 @@ impl ApiBotAdapter {
             system,
             limits,
             provider,
-            session_tag: Some(super::anthropic::ID.to_string()),
-            quote_provider,
             http_cfg,
             tools,
             refusal: std::sync::Mutex::new(None),
@@ -330,10 +345,10 @@ impl ApiBotAdapter {
             .fetch_optional(&pool).await.map_err(|_| http::Error::InvalidRequest)?;
         let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
             .map_err(|_| http::Error::InvalidRequest)?;
-        // session 的 provider 在建立時就固定：依 checkpoint 的標籤取回同一個（沒有標籤＝Claude）；不認得就拒絕，不改任何 durable 狀態。
-        let provider = super::provider::for_id(previous.provider_id(), quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
-        let session_tag = previous.provider.clone();
-        if !provider.checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
+        let provider: Arc<dyn ApiProvider> = Arc::new(AnthropicProvider::new(quote_provider));
+        // session 的 provider 在建立時固定：標籤不一致（或版本比現行新）就不接續。
+        provider::check_checkpoint_tag(&previous, &*provider).map_err(|_| http::Error::InvalidRequest)?;
+        if !checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
 
         let new_rev = db_api::rebind(
             &pool,
@@ -359,9 +374,8 @@ impl ApiBotAdapter {
             .map_err(|_| http::Error::InvalidRequest)?;
         let mut loaded_state: State =
             serde_json::from_value(loaded_chk.value()).map_err(|_| http::Error::InvalidRequest)?;
-        if loaded_state.provider != session_tag {
-            return Err(http::Error::InvalidRequest);
-        }
+        provider::check_checkpoint_tag(&loaded_state, &*provider).map_err(|_| http::Error::InvalidRequest)?;
+        provider::stamp_checkpoint(&mut loaded_state, &*provider);
         loaded_state.messages = super::protocol::prune_messages_for_compaction(&loaded_state.messages);
 
         let effective_system = if let Some(ref stored) = loaded_state.system {
@@ -383,8 +397,6 @@ impl ApiBotAdapter {
             system: effective_system,
             limits,
             provider,
-            session_tag,
-            quote_provider,
             http_cfg,
             tools,
             refusal: std::sync::Mutex::new(None),
@@ -413,6 +425,10 @@ impl ApiBotAdapter {
 }
 
 impl Model for ApiBotAdapter {
+    fn provider(&self) -> &dyn ApiProvider {
+        &*self.provider
+    }
+
     fn complete<'a>(
         &'a self,
         messages: &'a [Message],
@@ -433,7 +449,8 @@ impl Model for ApiBotAdapter {
 
                 let mut eff_options = self.options.clone();
                 eff_options.effort = effective_effort.clone();
-                let reconstructed = self.provider.encode(
+                let reconstructed = RequestEnvelope::with_provider(
+                    &*self.provider,
                     eff_options,
                     self.system.clone(),
                     messages.to_vec(),
@@ -457,10 +474,13 @@ impl Model for ApiBotAdapter {
                 )
             };
 
-            // 送出的是 reserve 時報價、算 hash 的那一份已編碼請求（`active.envelope`），不重新組 body。
-            let transport = || super::provider::Transport {
+            // 送出的是報價、算 hash 的那一份已編碼 body（不重組）。
+            let params = SendParams {
                 endpoint: &self.http_cfg.endpoint,
                 key: key.as_str(),
+                body: envelope.body_ref(),
+                options: envelope.options(),
+                messages: envelope.messages(),
                 timeout: self.http_cfg.timeout,
                 max_response_bytes: self.http_cfg.max_response_bytes,
             };
@@ -469,9 +489,9 @@ impl Model for ApiBotAdapter {
             let res = match &self.progress_sink {
                 Some(sink) => {
                     let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
-                    self.provider.send(transport(), &envelope, cancel, Some(&report)).await
+                    self.provider.send(params, cancel, Some(&report)).await
                 }
-                None => self.provider.send(transport(), &envelope, cancel, None).await,
+                None => self.provider.send(params, cancel, None).await,
             };
             let duration_ms = req_start.elapsed().as_millis() as u64;
             drop(key);
@@ -482,8 +502,8 @@ impl Model for ApiBotAdapter {
                     // HTTP 已成功收到完整回應：帳是確定的。內容不合法（工具解析失敗、一批超過 32 個、
                     // 工具 id 重複、模型不符）或用量不合規則時，也要把這次 attempt 結成 `recorded`、收掉 api_pending，
                     // 之後的 prompt 才送得出去；transcript 維持送出前的 durable 狀態（不留半截 assistant tool batch）。
-                    let content_problem = self.provider.invalid_content_reason(&resp, &cursor.last_durable_state, &envelope.options().model);
-                    let quote_res = self.quote_provider.settle(&envelope, &resp);
+                    let content_problem = invalid_content_reason(&*self.provider, &resp, &cursor.last_durable_state, &envelope.options().model);
+                    let quote_res = self.provider.quote().settle(&envelope, &resp);
                     let valid_quote = match &quote_res {
                         Ok(uq)
                             if uq.estimated_microusd >= 0
@@ -540,7 +560,7 @@ impl Model for ApiBotAdapter {
                             None => (
                                 None,
                                 None,
-                                self.quote_provider.reserve(&envelope).map(|q| q.reserved_microusd).unwrap_or(0).max(0),
+                                self.provider.quote().reserve(&envelope).map(|q| q.reserved_microusd).unwrap_or(0).max(0),
                             ),
                         };
                         tracing::warn!(
@@ -561,7 +581,7 @@ impl Model for ApiBotAdapter {
                         };
                         let mut next_state = cursor.last_durable_state.clone();
                         next_state.api_pending = false;
-                        let val = self.checkpoint_value(&next_state)
+                        let val = serde_json::to_value(&next_state)
                             .map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
                         let chk =
                             Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
@@ -597,11 +617,11 @@ impl Model for ApiBotAdapter {
                     // 照 `record` 的規則要把 pending 標記收掉（receipt `failed`、費用 0）。否則 checkpoint 永遠停在
                     // api_pending，這顆 bot 之後的每一則都被當成「上一次還沒結算」拒收，重啟時還會讓整個 API 啟動閘隔離。
                     // 逾時、連線中斷、回應讀壞才是真的不知道有沒有處理，維持 `unknown`。
-                    let rejected = self.provider.definitive_rejection(&err);
+                    let rejected = self.provider.classify_error(&err) == ErrorClass::DefinitiveRejection;
                     let mut next_state = cursor.last_durable_state.clone();
                     next_state.api_pending = !rejected;
 
-                    if let Ok(val) = self.checkpoint_value(&next_state) {
+                    if let Ok(val) = serde_json::to_value(&next_state) {
                         if let Ok(chk) = Checkpoint::new(&val) {
                             let receipt = db_api::Receipt {
                                 state: if rejected { "failed" } else { "unknown" },
@@ -629,7 +649,19 @@ impl Model for ApiBotAdapter {
 impl Journal for ApiBotAdapter {
     fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>> {
         Box::pin(async move {
-            let val = self.checkpoint_value(state)?;
+            // checkpoint 格式標籤：session 的 provider 固定；標籤不符就不存，沒標籤的（舊格式）補上。
+            let stamped;
+            let state = if state.provider.is_some() && state.payload_version.is_some() {
+                provider::check_checkpoint_tag(state, &*self.provider)?;
+                state
+            } else {
+                let mut owned = state.clone();
+                provider::check_checkpoint_tag(&owned, &*self.provider)?;
+                provider::stamp_checkpoint(&mut owned, &*self.provider);
+                stamped = owned;
+                &stamped
+            };
+            let val = serde_json::to_value(state).map_err(|_| ())?;
             let chk = Checkpoint::new(&val).map_err(|_| ())?;
             let raw_len = serde_json::to_vec(&val).map_err(|_| ())?.len();
             if raw_len > self.limits.max_checkpoint_bytes {
@@ -654,7 +686,7 @@ impl Journal for ApiBotAdapter {
                     // While HTTP is active/pending, disallow arbitrary mutation of messages/responses.
                     // Only allow exactly matching the last durable state (idempotent checkpoint), without granting permits.
                     let durable_val =
-                        self.checkpoint_value(&cursor.last_durable_state)?;
+                        serde_json::to_value(&cursor.last_durable_state).map_err(|_| ())?;
                     if val != durable_val {
                         return Err(());
                     }
@@ -696,7 +728,8 @@ impl Journal for ApiBotAdapter {
 
                     let mut eff_options = self.options.clone();
                     eff_options.effort = cursor.effective_effort.clone();
-                    let mut envelope = self.provider.encode(
+                    let mut envelope = RequestEnvelope::with_provider(
+                        &*self.provider,
                         eff_options,
                         self.system.clone(),
                         state.messages.clone(),
@@ -710,7 +743,7 @@ impl Journal for ApiBotAdapter {
                         self.refuse("api_bot_key_unavailable");
                     })?;
                     if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); self.refuse("api_bot_key_unavailable"); return Err(()); }
-                    let quote = self.quote_provider.reserve(&envelope).map_err(|_| self.refuse("api_bot_quote_refused"))?;
+                    let quote = self.provider.quote().reserve(&envelope).map_err(|_| self.refuse("api_bot_quote_refused"))?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
                     }
@@ -828,7 +861,7 @@ impl Journal for ApiBotAdapter {
                             return Err(());
                         }
 
-                        let expected_tools = settled.response.tools().map_err(|_| ())?;
+                        let expected_tools = self.provider.tool_calls(&settled.response).map_err(|_| ())?;
                         let expected_tool_pending = expected_tools.first().map(|c| c.id.clone());
                         if state.tool_pending != expected_tool_pending {
                             return Err(());

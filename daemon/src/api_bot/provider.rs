@@ -1,115 +1,232 @@
-//! Provider 接點（openai-api 切片 A）：runner 與 adapter 只認這裡的中立型別與兩個 trait，
-//! 原生的請求／回應／transcript 形狀由各 provider 的實作負責（目前只有 `anthropic`）。
+//! Provider 接點（openai-api 計畫切片 A）：`ApiBotAdapter` 與 runner 只認這份中立契約，
+//! 請求編碼、串流終態與 usage、錯誤分類、報價、以及「把中立的工具結果／提示文字轉成原生訊息」都由 provider 實作。
+//! 目前只有 Anthropic（現有 http.rs／sse.rs／protocol.rs／quote.rs 的行為原封搬進來；protocol.rs 留作 Anthropic codec）。
 //!
-//! Transcript（`runner::State` 的 `messages`／`responses`）以 provider **原生**格式保存，不重新建模：
-//! `Message.content`、`Response.content`／`stop_reason`／`usage` 對 runner 是不透明的容器，只有該 provider 的
-//! [`Codec`] 會讀寫裡面的內容。這樣舊 checkpoint 與送出的 request body 才能逐位元組不變。
+//! 不變條件（每個 provider 都要守）：
+//! - 報價、算 request hash、實際送出的 body 是**同一份**已編碼請求（[`RequestEnvelope`] 建立時編碼一次、之後只讀）。
+//! - runner 不認任何原生格式：它只看可見文字、工具呼叫、工具結果、終止原因；原生 transcript（`State.messages`／`responses`）
+//!   由 provider 讀寫，checkpoint 以 `State.provider`／`State.payload_version` 標明格式（無標籤＝舊的 Claude 格式）。
 use super::http;
-use super::protocol::{Message, Options, Response};
-use super::quote::{QuoteError, QuoteProvider, RequestEnvelope};
+use super::protocol::{self, Message, Options, Response, ToolCall};
+use super::quote::{FailClosed, QuoteError, QuoteProvider};
 use super::runner::State;
 use super::sse::StreamProgress;
 use futures::future::BoxFuture;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// 模型要求執行的一個工具呼叫：`id`＝呼叫 id（call id）、`name`＝工具名、`input`＝參數（JSON 物件）。
-pub use super::protocol::ToolCall;
+/// session 建立時固定的 provider；resume／recovery 驗證 checkpoint 的標籤與它一致。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderId {
+    Anthropic,
+}
+impl ProviderId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderId::Anthropic => "anthropic",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "anthropic" => Some(ProviderId::Anthropic),
+            _ => None,
+        }
+    }
+    /// bot kind 固定 provider（`claude-api` → Anthropic）。
+    pub fn for_bot_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "claude-api" => Some(ProviderId::Anthropic),
+            _ => None,
+        }
+    }
+}
 
-/// 一個工具呼叫的結果，交給 provider 寫回 transcript。
+/// 現行 checkpoint payload 版本。無標籤的舊 checkpoint 一律按 Anthropic 現行格式讀（等同 v1）。
+pub const ANTHROPIC_PAYLOAD_VERSION: u32 = 1;
+
+/// 一次工具執行的結果（中立）：runner 只產這個，provider 轉成原生的 tool_result。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolResult {
+pub struct ToolOutcome {
     pub call_id: String,
-    pub output: String,
+    pub content: String,
     pub is_error: bool,
 }
 
-/// 模型這一次回應為什麼停下來。`Other` 帶 provider 的原字串（只用來回報，不拿來分支）。
+/// 回應的終止原因（中立）。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StopReason {
+pub enum HaltKind {
     EndTurn,
     Refusal,
     MaxTokens,
     Other(String),
 }
 
-/// provider 把一份回應收進 transcript 之後，給 runner 的中立視圖。
-#[derive(Clone, Debug, PartialEq)]
-pub struct TurnOutput {
-    /// 這一批要執行的工具（照回應裡的順序）。
-    pub calls: Vec<ToolCall>,
-    pub stop: StopReason,
-    /// 回應帶了伺服器端壓縮：runner 存完 checkpoint 之後要呼叫 [`Codec::prune_after_compaction`]。
-    pub compacted: bool,
-    /// 伺服器端工具跑到一半暫停（Anthropic 的 `pause_turn`）：沒有工具要跑時直接重送就會接著做。
-    pub resumable_pause: bool,
+/// 錯誤分類：`DefinitiveRejection`＝確定沒有被處理也不計費（記 $0、收掉 pending）；`Unknown`＝可能已處理，維持 unknown。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorClass {
+    DefinitiveRejection,
+    Unknown,
 }
 
-/// 回應內容不合法（工具格式錯、數量超過上限、工具 id 已經完成過）。transcript 不會被動到。
-#[derive(Debug, PartialEq, Eq)]
-pub struct InvalidResponse;
-
-/// 一批工具結果最多幾個（超過＝不合法的回應）。
-pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 32;
-
-/// Transcript 的原生編解碼：runner 只透過它讀寫 `State` 裡的原生內容。全部是純同步、不做 I/O。
-pub trait Codec: Send + Sync {
-    /// 驗證並把回應收進 transcript（原生 assistant 訊息＋`responses`）。失敗時 `state` 不變。
-    fn accept(&self, state: &mut State, response: Response) -> Result<TurnOutput, InvalidResponse>;
-    /// 把這一批目前為止的工具結果寫成 transcript 的最後一則（原生的工具結果訊息）。`replace_last`＝這一批的訊息
-    /// 已經在 transcript 裡，整則換成新的內容；否則新增一則。`note` 是附在結果後面、給模型看的系統提示。
-    fn put_tool_results(&self, state: &mut State, results: &[ToolResult], note: Option<&str>, replace_last: bool);
-    /// 在下一次請求的最後一則使用者訊息後面附一段提示；最後一則不是可以附加的形狀就不動。
-    fn append_note(&self, state: &mut State, note: &str);
-    /// 伺服器端壓縮之後，把 transcript 修剪成 provider 還會用到的部分。
-    fn prune_after_compaction(&self, state: &mut State);
-    /// 回應裡給使用者看的文字（不含 thinking、工具內容）。
-    fn visible_text(&self, response: &Response) -> String;
-}
-
-/// 送出一份已編碼請求所需的連線設定。
-pub struct Transport<'a> {
+/// 送出一次請求所需的一切（body 是已編碼、已報價、已算過 hash 的那一份）。沒有 Debug：含私人內容與金鑰。
+pub struct SendParams<'a> {
     pub endpoint: &'a str,
     pub key: &'a str,
-    pub timeout: Duration,
+    pub body: &'a Value,
+    pub options: &'a Options,
+    pub messages: &'a [Message],
+    pub timeout: std::time::Duration,
     pub max_response_bytes: usize,
 }
 
-/// 一個模型供應商：編碼請求、送出並解析串流終態與用量、錯誤分類、報價。session 建立時固定一個。
-pub trait Provider: Send + Sync {
-    /// 穩定的識別字（寫進 checkpoint 與 session）：`"anthropic"`。
-    fn id(&self) -> &'static str;
-    fn codec(&self) -> &dyn Codec;
-    /// 把 transcript 編成**不可變**的請求：報價、request hash、實際送出都用回傳的這一份。
-    fn encode(&self, options: Options, system: Value, messages: Vec<Message>) -> Result<RequestEnvelope, QuoteError>;
-    /// 送出已編碼的請求，回傳解析好的終態回應（含用量）。回傳 BoxFuture：不讓呼叫端的 poll 框變大。
-    fn send<'a>(
-        &'a self,
-        transport: Transport<'a>,
-        request: &'a RequestEnvelope,
-        cancel: &'a CancellationToken,
-        progress: Option<&'a (dyn Fn(&StreamProgress) + Send + Sync)>,
-    ) -> BoxFuture<'a, Result<Response, http::Error>>;
-    /// 上游明確拒絕、確定沒有處理也不計費的錯誤。
-    fn definitive_rejection(&self, err: &http::Error) -> bool;
-    /// 已成功收到的回應內容不合法的原因（`None`＝合法）。
-    fn invalid_content_reason(&self, response: &Response, durable: &State, model: &str) -> Option<String>;
-    /// 這份 checkpoint 能不能用 `model` 接續。
-    fn checkpoint_matches_model(&self, state: &State, model: &str) -> bool;
-    fn quote_provider(&self) -> Arc<dyn QuoteProvider>;
+pub type ProgressFn<'a> = Option<&'a (dyn Fn(&StreamProgress) + Send + Sync)>;
+
+pub trait ApiProvider: Send + Sync {
+    fn id(&self) -> ProviderId;
+    fn payload_version(&self) -> u32;
+
+    /// 編碼出要送的原生 body（純函式、不碰網路與金鑰）。
+    fn encode(&self, options: &Options, system: &Value, messages: &[Message]) -> Result<Value, QuoteError>;
+    /// 送出（一個 permit 一次 POST）並解析串流終態與 usage。用 BoxFuture：poll 框不放大 adapter 的 future。
+    fn send<'a>(&'a self, params: SendParams<'a>, cancel: &'a CancellationToken, progress: ProgressFn<'a>) -> BoxFuture<'a, Result<Response, http::Error>>;
+    fn classify_error(&self, err: &http::Error) -> ErrorClass;
+    fn quote(&self) -> Arc<dyn QuoteProvider>;
+
+    // ── runner 用的中立操作 ──
+    fn tool_calls(&self, response: &Response) -> Result<Vec<ToolCall>, &'static str>;
+    fn visible_text(&self, response: &Response) -> String;
+    fn assistant_message(&self, response: &Response) -> Message;
+    fn tool_results_message(&self, outcomes: &[ToolOutcome]) -> Message;
+    /// 在最後一則（工具結果）user 訊息尾端補一段提示文字；那一則不是可附加的形狀就不加並回 false。
+    fn append_notice(&self, message: &mut Message, text: &str) -> bool;
+    fn halt_kind(&self, response: &Response) -> HaltKind;
+    /// 伺服器端工具暫停後要不要自動重送延續（Anthropic 的 `pause_turn`）。
+    fn continues_after(&self, response: &Response) -> bool;
+    /// 回應含壓縮區塊時，壓縮後 transcript 要修剪（回傳 `Some` 才要改寫並存 checkpoint）。
+    fn prune_after_response(&self, response: &Response, messages: &[Message]) -> Option<Vec<Message>>;
 }
 
-/// 依識別字取得 provider（session 建立時固定、resume／recovery 依 checkpoint 的標籤取回同一個）。不認得的回 `None`。
-pub(crate) fn for_id(id: &str, quote: Arc<dyn QuoteProvider>) -> Option<Arc<dyn Provider>> {
-    match id {
-        super::anthropic::ID => Some(Arc::new(super::anthropic::AnthropicProvider::new(quote))),
-        _ => None,
+/// 舊 checkpoint 沒有標籤＝Anthropic v1；有標籤就必須與目前 provider 一致、版本不得比目前新。
+pub fn check_checkpoint_tag(state: &State, provider: &dyn ApiProvider) -> Result<(), ()> {
+    if let Some(tag) = &state.provider {
+        if ProviderId::parse(tag) != Some(provider.id()) {
+            return Err(());
+        }
+    }
+    if state.payload_version.is_some_and(|v| v == 0 || v > provider.payload_version()) {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// 把標籤寫進 checkpoint（只補沒有的；有的已由 [`check_checkpoint_tag`] 驗證過）。
+pub fn stamp_checkpoint(state: &mut State, provider: &dyn ApiProvider) {
+    state.provider.get_or_insert_with(|| provider.id().as_str().to_string());
+    state.payload_version.get_or_insert(provider.payload_version());
+}
+
+// ────────────────────────────── Anthropic ──────────────────────────────
+
+/// Anthropic Messages API：現有 protocol.rs／http.rs／sse.rs 的行為，一字不改地放在接點後面。
+pub struct AnthropicProvider {
+    quote: Option<Arc<dyn QuoteProvider>>,
+}
+impl AnthropicProvider {
+    pub fn new(quote: Arc<dyn QuoteProvider>) -> Self {
+        Self { quote: Some(quote) }
+    }
+    /// 只有編碼／轉換，沒有報價（報價一律 fail-closed）：給不經 adapter 的 runner 測試用的預設值。
+    pub const fn codec_only() -> Self {
+        Self { quote: None }
     }
 }
 
-/// 這個識別字是不是已知的 provider（recovery 只認得出標籤、還不需要建 provider 的地方用）。
-pub(crate) fn is_known(id: &str) -> bool {
-    id == super::anthropic::ID
+/// `Model::provider()` 的預設值：只做 Anthropic 編碼與中立轉換。
+pub static DEFAULT_ANTHROPIC: AnthropicProvider = AnthropicProvider::codec_only();
+
+impl ApiProvider for AnthropicProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Anthropic
+    }
+    fn payload_version(&self) -> u32 {
+        ANTHROPIC_PAYLOAD_VERSION
+    }
+    fn encode(&self, options: &Options, system: &Value, messages: &[Message]) -> Result<Value, QuoteError> {
+        options.validate().map_err(|_| QuoteError::InvalidRequest)?;
+        if messages.is_empty() {
+            return Err(QuoteError::InvalidRequest);
+        }
+        Ok(protocol::request(options, system, messages))
+    }
+    fn send<'a>(&'a self, params: SendParams<'a>, cancel: &'a CancellationToken, progress: ProgressFn<'a>) -> BoxFuture<'a, Result<Response, http::Error>> {
+        Box::pin(async move {
+            let no_system = Value::Null; // body 已編碼；system 只用於編碼，送出時不再重組
+            let req = http::FullMessagesRequest {
+                endpoint: params.endpoint,
+                key: params.key,
+                options: params.options,
+                system: &no_system,
+                messages: params.messages,
+                timeout: params.timeout,
+                max_response_bytes: params.max_response_bytes,
+            };
+            http::complete_encoded(&req, params.body, cancel, progress).await
+        })
+    }
+    fn classify_error(&self, err: &http::Error) -> ErrorClass {
+        if super::adapter::definitive_rejection(err) {
+            ErrorClass::DefinitiveRejection
+        } else {
+            ErrorClass::Unknown
+        }
+    }
+    fn quote(&self) -> Arc<dyn QuoteProvider> {
+        self.quote.clone().unwrap_or_else(|| Arc::new(FailClosed))
+    }
+    fn tool_calls(&self, response: &Response) -> Result<Vec<ToolCall>, &'static str> {
+        response.tools()
+    }
+    fn visible_text(&self, response: &Response) -> String {
+        super::runner::final_text(response)
+    }
+    fn assistant_message(&self, response: &Response) -> Message {
+        Message { role: "assistant".into(), content: json!(response.content) }
+    }
+    fn tool_results_message(&self, outcomes: &[ToolOutcome]) -> Message {
+        let blocks: Vec<Value> = outcomes
+            .iter()
+            .map(|o| json!({"type": "tool_result", "tool_use_id": o.call_id, "content": o.content, "is_error": o.is_error}))
+            .collect();
+        Message { role: "user".into(), content: json!(blocks) }
+    }
+    fn append_notice(&self, message: &mut Message, text: &str) -> bool {
+        if message.role != "user" {
+            return false;
+        }
+        match message.content.as_array_mut() {
+            Some(arr) => {
+                arr.push(json!({"type": "text", "text": text}));
+                true
+            }
+            None => false,
+        }
+    }
+    fn halt_kind(&self, response: &Response) -> HaltKind {
+        match response.stop_reason.as_str() {
+            "end_turn" => HaltKind::EndTurn,
+            "refusal" => HaltKind::Refusal,
+            "max_tokens" => HaltKind::MaxTokens,
+            other => HaltKind::Other(other.to_string()),
+        }
+    }
+    fn continues_after(&self, response: &Response) -> bool {
+        // Anthropic 伺服器端工具（web_search、web_fetch 等）執行滿 server-side iterations 時以 `pause_turn` 暫停；自動重送延續。
+        response.stop_reason == "pause_turn"
+            && response.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("server_tool_use"))
+    }
+    fn prune_after_response(&self, response: &Response, messages: &[Message]) -> Option<Vec<Message>> {
+        let has_compaction = response.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction"));
+        has_compaction.then(|| protocol::prune_messages_for_compaction(messages))
+    }
 }

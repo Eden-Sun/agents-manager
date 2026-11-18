@@ -519,37 +519,6 @@ enum Restarted {
     Failed(anyhow::Error),
 }
 
-/// 排著「閒下來自動重啟」的 bot 輪到時的結果（`update_restart`）。
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DueOutcome {
-    /// 重啟了（旗標可清）。
-    Restarted,
-    /// 這次還不能重啟（還在忙、畫面底部有背景工作、codex 還沒裝新版…）：旗標留著，等下一次閒置。
-    NotYet(&'static str),
-    /// 不必再等：更新已套用／bot 不在了／子 agent，或重啟本身失敗（失敗不無限重試）——旗標可清。
-    Dropped(&'static str),
-}
-
-/// 一鍵重啟的同一條安全路徑，只對一顆：先 `recheck`（還有更新要套、閒置、非子 agent），再在 bot 鎖內重判閒置與背景工作後
-/// resume 重啟。**不打斷**忙的 bot：`require_idle`／`refuse_background_jobs` 擋下就回 `NotYet`。
-pub(crate) async fn restart_one_when_due(app: &Arc<App>, bot_id: &str) -> DueOutcome {
-    match recheck(app, bot_id).await {
-        None => {}
-        Some(Skip::NoLongerPending) => return DueOutcome::Dropped("no_longer_pending"),
-        Some(Skip::Child) => return DueOutcome::Dropped("child"),
-        Some(other) => return DueOutcome::NotYet(other.code()),
-    }
-    match restart_resuming_with_authority(app, bot_id, None).await {
-        Restarted::Ok(_) => DueOutcome::Restarted,
-        Restarted::Busy(Skip::Child | Skip::NoLongerPending) => DueOutcome::Dropped("no_longer_pending"),
-        Restarted::Busy(skip) => DueOutcome::NotYet(skip.code()),
-        Restarted::Failed(e) => {
-            tracing::warn!(bot = bot_id, error = %e, "scheduled update restart failed; dropping the schedule");
-            DueOutcome::Dropped("restart_failed")
-        }
-    }
-}
-
 #[cfg(test)]
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
     restart_resuming_with_authority(app, bot_id, None).await

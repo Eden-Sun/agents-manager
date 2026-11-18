@@ -6,7 +6,6 @@ pub mod model_mode;
 pub mod user_settings;
 pub mod auto_update_settings;
 pub mod codex_stop_hook_api;
-pub mod update_restart;
 pub mod webpush;
 mod expert_peers;
 pub mod expert_cluster;

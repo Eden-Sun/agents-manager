@@ -17,9 +17,6 @@ pub fn pending_settled_after_failed_owner(api_pending: bool, tool_pending: bool,
     !tool_pending && (!api_pending || owner_failed)
 }
 
-/// 有版本標籤的 checkpoint payload 的版本號（`"v"`）。沒有標籤的是舊格式。
-pub const CHECKPOINT_VERSION: u64 = 2;
-
 /// Deliberately no derived Debug/Serialize: a checkpoint contains full private conversation data.
 pub struct Checkpoint(String);
 impl std::fmt::Debug for Checkpoint {
@@ -39,22 +36,11 @@ impl Checkpoint {
                     | "tool_pending"
                     | "completed_tool_ids"
                     | "system"
-                    | "v"
                     | "provider"
+                    | "payload_version"
             )),
             "unsupported checkpoint field"
         );
-        // 版本標籤（v2）：`{"v":2,"provider":"<id>"}` 兩個一起出現；都沒有＝舊格式（一律當 Claude 讀）。
-        let tagged = match (object.get("v"), object.get("provider")) {
-            (None, None) => true,
-            (Some(v), Some(Value::String(p))) => {
-                v.as_u64() == Some(CHECKPOINT_VERSION)
-                    && (1..=32).contains(&p.len())
-                    && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
-            }
-            _ => false,
-        };
-        ensure!(tagged, "invalid checkpoint version tag");
         ensure!(
             value["messages"].is_array()
                 && value["responses"].is_array()
@@ -63,7 +49,10 @@ impl Checkpoint {
                 && value["completed_tool_ids"].is_array()
                 && (value.get("system").is_none()
                     || value["system"].is_null()
-                    || value["system"].is_string()),
+                    || value["system"].is_string())
+                // provider 接點的格式標籤（舊 checkpoint 沒有）：provider 是字串、版本是正整數。
+                && (value.get("provider").is_none() || value["provider"].is_string())
+                && (value.get("payload_version").is_none() || value["payload_version"].as_u64().is_some_and(|v| v > 0)),
             "invalid checkpoint shape"
         );
         let encoded = serde_json::to_string(value)?;
@@ -892,19 +881,6 @@ mod tests {
             "opaque-original"
         );
         assert!(Checkpoint::new(&json!({"key_file":"should-not-persist"})).is_err());
-        // 版本標籤：v 與 provider 要一起出現、v 只收 2、provider 是短的小寫識別字；沒有標籤的舊格式照收。
-        let base = json!({"messages":[],"responses":[],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]});
-        let with = |extra: Value| {
-            let mut v = base.clone();
-            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            Checkpoint::new(&v)
-        };
-        assert!(with(json!({})).is_ok());
-        let tagged = with(json!({"v":2,"provider":"anthropic"})).unwrap();
-        assert_eq!(tagged.value()["provider"], "anthropic");
-        for bad in [json!({"v":2}), json!({"provider":"anthropic"}), json!({"v":1,"provider":"anthropic"}), json!({"v":3,"provider":"anthropic"}), json!({"v":2,"provider":""}), json!({"v":2,"provider":"Open AI"}), json!({"v":"2","provider":"anthropic"}), json!({"v":2,"provider":7})] {
-            assert!(with(bad.clone()).is_err(), "{bad}");
-        }
         assert_eq!(count(&pool).await, 0);
     }
     #[tokio::test]

@@ -60,65 +60,25 @@ pub async fn complete(
 }
 
 /// 與 `complete` 相同，但串流進行中會（最多每秒一次）呼叫 `progress`。
-/// 這個入口自己編碼 body（測試與 fixture 用）；正式路徑用 [`complete_encoded`]，送出報價與 hash 用的那一份位元組。
 pub async fn complete_with_progress(
     req: &FullMessagesRequest<'_>,
     cancel: &CancellationToken,
     progress: Option<&(dyn Fn(&StreamProgress) + Send + Sync)>,
 ) -> Result<Response, Error> {
-    let body = serde_json::to_vec(&protocol::request(req.options, req.system, req.messages)).map_err(|_| Error::InvalidRequest)?;
-    let beta = protocol::beta_header(req.options, req.messages);
-    let wire = Wire { endpoint: req.endpoint, key: req.key, options: req.options, has_messages: !req.messages.is_empty(), beta: &beta, body: &body, timeout: req.timeout, max_response_bytes: req.max_response_bytes };
-    Box::pin(send(&wire, cancel, progress)).await
+    let body = protocol::request(req.options, req.system, req.messages);
+    complete_encoded(req, &body, cancel, progress).await
 }
 
-/// 已編碼的請求：body 位元組、beta header 都取自 [`RequestEnvelope`]——跟報價、request hash 是同一份，不再重新組 JSON。
-pub struct EncodedMessagesRequest<'a> {
-    pub endpoint: &'a str,
-    pub key: &'a str,
-    pub request: &'a super::quote::RequestEnvelope,
-    pub timeout: Duration,
-    pub max_response_bytes: usize,
-}
-
+/// 送出**已編碼**的 body（adapter 報價、算 hash 的那一份），不再重組一次：報價／hash／實際送出的位元組是同一份。
 pub async fn complete_encoded(
-    req: &EncodedMessagesRequest<'_>,
-    cancel: &CancellationToken,
-    progress: Option<&(dyn Fn(&StreamProgress) + Send + Sync)>,
-) -> Result<Response, Error> {
-    let wire = Wire {
-        endpoint: req.endpoint,
-        key: req.key,
-        options: req.request.options(),
-        has_messages: !req.request.messages().is_empty(),
-        beta: req.request.beta_header(),
-        body: req.request.wire(),
-        timeout: req.timeout,
-        max_response_bytes: req.max_response_bytes,
-    };
-    Box::pin(send(&wire, cancel, progress)).await
-}
-
-/// 真正上線的那一份：兩個入口都收斂到這裡。
-struct Wire<'a> {
-    endpoint: &'a str,
-    key: &'a str,
-    options: &'a Options,
-    has_messages: bool,
-    beta: &'a str,
-    body: &'a [u8],
-    timeout: Duration,
-    max_response_bytes: usize,
-}
-
-async fn send(
-    req: &Wire<'_>,
+    req: &FullMessagesRequest<'_>,
+    body: &Value,
     cancel: &CancellationToken,
     progress: Option<&(dyn Fn(&StreamProgress) + Send + Sync)>,
 ) -> Result<Response, Error> {
     req.options.validate().map_err(|_| Error::InvalidRequest)?;
     if req.key.trim().is_empty()
-        || !req.has_messages
+        || req.messages.is_empty()
         || req.timeout.is_zero()
         || !(1..=8 * 1024 * 1024).contains(&req.max_response_bytes)
     {
@@ -153,14 +113,20 @@ async fn send(
     let builder = builder.no_proxy();
     let client = builder.build().map_err(|_| Error::InvalidRequest)?;
     let operation = async {
-        // `.json(value)` 等於 Content-Type: application/json ＋ serde_json::to_vec(value)；這裡送的就是事先編好的那一份。
+        let mut betas = vec![protocol::THINKING_BINDING_BETA];
+        if req.options.compact_at_input_tokens > 0 || protocol::is_compact_request(req.messages) {
+            betas.push(protocol::COMPACT_BETA);
+        }
+        if req.options.clear_tool_uses_at_input_tokens > 0 {
+            betas.push(protocol::CONTEXT_MANAGEMENT_BETA);
+        }
+        let beta_header = betas.join(",");
         let mut response = client
             .post(url)
             .header("x-api-key", req.key)
             .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", req.beta)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(req.body.to_vec())
+            .header("anthropic-beta", beta_header)
+            .json(body)
             .send()
             .await
             .map_err(|e| {

@@ -612,10 +612,6 @@ export interface StoreState {
   restartBot: (botId: string, resumeNative?: boolean) => Promise<boolean>
   /** SPEC §6.9：閒置的 claude bot 全部 exit + resume；忙的跳過。 */
   restartIdleBots: () => Promise<void>
-  /** 排著「閒下來自動重啟套用更新」的 bot id（daemon 持久化，WS `update_restart_changed` 同步）。 */
-  updateRestartScheduled: string[]
-  scheduleUpdateRestart: (botIds: string[]) => Promise<void>
-  cancelUpdateRestart: (botIds: string[]) => Promise<void>
   /** null = 沒有批次在跑，也沒有摘要要看。 */
   restartBatch: RestartBatch | null
   clearRestartBatch: () => void
@@ -1027,7 +1023,6 @@ export const useStore = create<StoreState>((set, get) => {
   notices: [],
   busy: {},
   restartBatch: null,
-  updateRestartScheduled: [],
   cliUpdates: [],
   upstreamUpdates: {},
 
@@ -1190,8 +1185,6 @@ export const useStore = create<StoreState>((set, get) => {
       }
     })
     receiveCodexReset(st.codex_reset, get().notify)
-    // 排著的「閒下來自動重啟」在 daemon 的 DB 裡：重連／換版後從這裡對回來（讀不到不影響其他）。
-    void api.fetchUpdateRestart().then((ids) => set({ updateRestartScheduled: ids }), () => {})
     applyHerdrSnapshot(st.herdr_updates)
     applyDeployWaitSnapshot(st.deploy_wait)
     {
@@ -2167,19 +2160,6 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   clearRestartBatch: () => set({ restartBatch: null }),
-
-  async scheduleUpdateRestart(botIds) {
-    await guarded(set, get, 'update-restart', async () => {
-      set({ updateRestartScheduled: await api.scheduleUpdateRestart(botIds) })
-      get().notify('info', t('已排程：{n} 顆閒下來會自動重啟套用更新', { n: botIds.length }))
-    })
-  },
-
-  async cancelUpdateRestart(botIds) {
-    await guarded(set, get, 'update-restart', async () => {
-      set({ updateRestartScheduled: await api.cancelUpdateRestart(botIds) })
-    })
-  },
 
   async restartIdleBots() {
     await guarded(set, get, 'restart-idle', async () => {
@@ -3541,12 +3521,6 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       const quota = toKindQuota(pick(data, 'quota'), kind)
       set((s) => ({ quota: { ...s.quota, [kind]: quota } }))
       if (quotaLimitChanged(before, [[kind, quota]])) void get().refreshState()
-      return
-    }
-    case 'update_restart_changed': {
-      if (!isRec(data)) return
-      const ids = Array.isArray(data.bot_ids) ? data.bot_ids.filter((v): v is string => typeof v === 'string') : []
-      set({ updateRestartScheduled: ids })
       return
     }
     // SPEC §6.9：批次重啟的進度。一顆一顆來，`index` 是第幾顆（1-based）。

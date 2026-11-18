@@ -312,10 +312,6 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/ws` | query token；TCP loopback、Host 與 Origin 守衛 |
 | PATCH | `/api/bots/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PATCH | `/api/projects/{id}` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| GET | `/api/bots/update-restart` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"bot_ids":[…]}`＝排著「閒下來自動重啟套用更新」的 bot（§10.3b） |
-| HEAD | `/api/bots/update-restart` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
-| POST | `/api/bots/update-restart` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"bot_ids":[…]}`，排程（§10.3b） |
-| DELETE | `/api/bots/update-restart` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"bot_ids":[…]}`，取消；空名單＝全部取消 |
 | POST | `/api/bots/restart-idle` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/abort` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/attachments` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -1096,7 +1092,6 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
-| `update_restart_changed` | 見 §10.3b |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
 | `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
 | `herdr_integration_auto_install` | `{"host","name","ok","state","error"}`：daemon 自動裝了某台的 grok／antigravity-cli herdr integration（SPEC §6.9c，issue #1871）；`ok:false` 時 `error` 是原因，不重試 |
@@ -2179,15 +2174,6 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 ```
 
 `done` 的三張清單是權威（補齊漏掉的 progress）；用 `batch_id` 擋掉別的分頁那一批。
-
-### 10.3b `GET`／`POST`／`DELETE /api/bots/update-restart`
-「閒下來自動重啟套用更新」（SPEC §6.9）：更新晶片在「有更新但相關 Bot 都在忙」時，使用者可把那些 bot 排成「下次閒置時自動重啟（`--resume` 接回）」，不強制中斷。User-only。
-
-- `GET` → `200 {"bot_ids":["…"]}`（只列沒刪的 bot）。
-- `POST {"bot_ids":["…"]}` → 排程，回目前全部排著的 `{"bot_ids":[…]}`。bot 不存在／已刪 → 404；子 agent（`managed_by = child`）→ 409 `child_restart_forbidden`。已經閒置的當場就判一次。
-- `DELETE {"bot_ids":["…"]}` → 取消；空名單＝全部取消。回目前排著的。
-- 旗標存 `bot_update_restart`（durable，daemon 重啟後保留）。bot 每次回到 idle，daemon 走一鍵重啟的同一條安全路徑（`recheck` 還有更新要套用、非子 agent，再於 bot 鎖內重判閒置與背景工作）：重啟成功、更新已不需要套用、子 agent 或重啟失敗就清旗標；還在忙（`working`／`blocked`／背景工作…）旗標留著等下一次閒置，idle 邊當下回合還沒收尾的幾種原因另在 3／10／30／60／120 秒後各再判一次。
-- WS：`update_restart_changed` `{"bot_ids":[…]}`（排程、取消、重啟後清掉都推；網頁拿它同步晶片的時鐘角標）。
 
 ### 10.4 `DELETE /api/bots/{id}[?confirm=supervisor]`
 `200 {}`（有連帶刪子 agent 時 `{"removed_children":["<bot_id>",…]}`；有沒清掉的 runtime 目錄時另帶 `"kept_dirs":[{"bot_id","reason"}]`）。

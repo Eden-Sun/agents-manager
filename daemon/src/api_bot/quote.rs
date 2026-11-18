@@ -1,32 +1,9 @@
 //! Complete immutable request identity and an explicitly unapproved pricing seam.
 //! No body, key, or provider error is formatted into diagnostics here.
-use super::protocol::{self, Message, Options, Response};
+use super::protocol::{Message, Options, Response};
+use super::provider::{AnthropicProvider, ApiProvider};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-/// 已編碼、不可變的請求：送上線的 body 位元組、同一份 body 的 JSON 值（報價量大小用）、request hash、beta header。
-/// 建好之後沒有任何可變的入口；報價、算 hash、實際送出都讀這一份。沒有 Debug／Serialize：內容是私密的。
-pub(crate) struct EncodedRequest {
-    body: Value,
-    wire: Vec<u8>,
-    hash: String,
-    beta_header: String,
-}
-impl EncodedRequest {
-    /// 送上線的位元組（`serde_json::to_vec(body)`，與 reqwest `.json()` 產生的相同）。
-    pub(crate) fn wire(&self) -> &[u8] {
-        &self.wire
-    }
-    pub(crate) fn body(&self) -> &Value {
-        &self.body
-    }
-    pub(crate) fn hash(&self) -> &str {
-        &self.hash
-    }
-    pub(crate) fn beta_header(&self) -> &str {
-        &self.beta_header
-    }
-}
 
 /// Owns every input to the sole wire builder. Accessors cannot mutate quoted inputs.
 /// Deliberately no Debug or Serialize implementation: requests contain private content.
@@ -35,47 +12,42 @@ pub(crate) struct RequestEnvelope {
     options: Options,
     system: Value,
     messages: Vec<Message>,
-    encoded: std::sync::Arc<EncodedRequest>,
+    /// 編碼一次、之後只讀：報價、hash、實際送出的 body 都是這一份。
+    body: Value,
+    hash: String,
     previous_response: Option<Response>,
 }
 impl RequestEnvelope {
+    /// 以 Anthropic 編碼（既有呼叫點的預設；provider 化的呼叫點用 [`RequestEnvelope::with_provider`]）。
     pub(crate) fn new(
         options: Options,
         system: Value,
         messages: Vec<Message>,
     ) -> Result<Self, QuoteError> {
-        options.validate().map_err(|_| QuoteError::InvalidRequest)?;
-        if messages.is_empty() {
-            return Err(QuoteError::InvalidRequest);
-        }
-        // 唯一一次編碼：之後報價、hash、送出都用這份，不再呼叫 `protocol::request`。
-        let body = protocol::request(&options, &system, &messages);
-        let wire = serde_json::to_vec(&body).map_err(|_| QuoteError::InvalidRequest)?;
+        Self::with_provider(&AnthropicProvider::codec_only(), options, system, messages)
+    }
+    pub(crate) fn with_provider(
+        provider: &dyn ApiProvider,
+        options: Options,
+        system: Value,
+        messages: Vec<Message>,
+    ) -> Result<Self, QuoteError> {
+        let body = provider.encode(&options, &system, &messages)?;
         // Recursively sort object keys, independent of serde_json feature unification.
         let canonical = canonicalize(&body);
         let bytes = serde_json::to_vec(&canonical).map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(bytes));
-        let beta_header = protocol::beta_header(&options, &messages);
         Ok(Self {
             options,
             system,
             messages,
-            encoded: std::sync::Arc::new(EncodedRequest { body, wire, hash, beta_header }),
+            body,
+            hash,
             previous_response: None,
         })
     }
-    pub(crate) fn encoded(&self) -> &EncodedRequest {
-        &self.encoded
-    }
-    /// 送上線的位元組。
-    pub(crate) fn wire(&self) -> &[u8] {
-        self.encoded.wire()
-    }
-    pub(crate) fn beta_header(&self) -> &str {
-        self.encoded.beta_header()
-    }
     pub(crate) fn hash(&self) -> &str {
-        self.encoded.hash()
+        &self.hash
     }
     pub(crate) fn options(&self) -> &Options {
         &self.options
@@ -93,9 +65,12 @@ impl RequestEnvelope {
             "standard"
         }
     }
-    /// 已編碼的 body（JSON 值）；不重新組。
-    pub(crate) fn body(&self) -> &Value {
-        self.encoded.body()
+    pub(crate) fn body(&self) -> Value {
+        self.body.clone()
+    }
+    /// 實際送出的那一份（與 hash、報價同一份編碼）。
+    pub(crate) fn body_ref(&self) -> &Value {
+        &self.body
     }
     pub(crate) fn previous_response(&self) -> Option<&Response> {
         self.previous_response.as_ref()

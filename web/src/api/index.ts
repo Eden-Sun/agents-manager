@@ -629,24 +629,6 @@ export async function translatePendingQuestions(
   }
 }
 
-/** 「閒下來自動重啟套用更新」排著的 bot id（`GET /api/bots/update-restart`）。 */
-export async function fetchUpdateRestart(): Promise<string[]> {
-  const raw = await transport.request('GET', '/bots/update-restart')
-  return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
-}
-
-/** 把這些 bot 排成「下次閒置時自動重啟（resume 接回）」；回目前全部排著的。 */
-export async function scheduleUpdateRestart(botIds: string[]): Promise<string[]> {
-  const raw = await transport.request('POST', '/bots/update-restart', { bot_ids: botIds })
-  return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
-}
-
-/** 取消排程；空名單＝全部取消。 */
-export async function cancelUpdateRestart(botIds: string[]): Promise<string[]> {
-  const raw = await transport.request('DELETE', '/bots/update-restart', { bot_ids: botIds })
-  return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
-}
-
 /** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
 export async function restartIdleBots(): Promise<RestartPlan> {
   const raw = await transport.request('POST', '/bots/restart-idle')

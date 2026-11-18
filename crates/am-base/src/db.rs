@@ -10,7 +10,6 @@ pub mod schema_guard;
 pub(crate) mod predicates;
 pub mod turn_guard;
 pub mod api_bot;
-pub mod update_restart;
 
 /// 各 feature 自己那幾張表的 migration（`supervisor::store`、`read_marks`、`panes`…）：db 只建共用的 schema，這些由 composition 層
 /// 以明確的順序提供（[`open_with`]）。失敗語意不變：任何一步回錯，整個 `open_with` 就回錯，版本戳記不蓋（見 [`migrate_with`]）。
@@ -464,11 +463,6 @@ CREATE TABLE IF NOT EXISTS api_bot_rejected_responses (
   content_blocks_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_api_bot_rejected_responses_bot ON api_bot_rejected_responses(bot_id, id);
--- 「閒下來自動重啟套用更新」（2026-11-18）：使用者在更新確認框排的；bot 下一次閒置時重啟（resume 接回），重啟後清掉。
-CREATE TABLE IF NOT EXISTS bot_update_restart (
-  bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
-  requested_at TEXT NOT NULL
-);
 
 "#;
 
@@ -671,8 +665,6 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (94, "7ee64d1c638b0801"),
     // 被拒回應記錄（2026-11-15）：`api_bot_rejected_responses`（CREATE TABLE）。
     (95, "9823d73c31741f77"),
-    // 閒下來自動重啟套用更新（2026-11-18）：`bot_update_restart`（CREATE TABLE）。
-    (96, "e0364d581dcb0388"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

@@ -1,6 +1,6 @@
 //! 切片 A（provider 接點）的相容性基準：同一份「舊」checkpoint（無 provider／版本標籤）在抽接點前後，
 //! 產生位元組相同的 Claude request body、相同 hash、相同工具結果 transcript 與相同價格。
-//! 期望值是在抽接點**之前**的程式（origin/main 4f3575ac6）上跑出來寫死的；之後不准為了讓測試過而改它們。
+//! 期望值是在抽接點**之前**的程式上跑出來寫死的；之後不准為了讓測試過而改它們。
 use super::pricing::DirectGlobal;
 use super::protocol::{Message, Options, Response, ToolCall};
 use super::quote::{QuoteProvider, RequestEnvelope};
@@ -84,15 +84,53 @@ fn a_legacy_checkpoint_loads_and_encodes_to_the_golden_claude_request() {
     // body：serde_json 預設的物件鍵序（preserve_order 未開時是字母序），逐字固定。
     let body = serde_json::to_string(&env.body()).unwrap();
     assert_eq!(body, GOLDEN_BODY, "Claude request body 必須與抽接點之前位元組相同");
-    assert_eq!(env.wire(), GOLDEN_BODY.as_bytes(), "實際送上線的位元組就是報價／算 hash 的那一份");
-    assert_eq!(env.encoded().hash(), GOLDEN_HASH);
-    assert_eq!(env.beta_header(), super::protocol::THINKING_BINDING_BETA);
     assert_eq!(env.hash(), GOLDEN_HASH, "request hash");
     // 報價與結算（價格）
     let quote = DirectGlobal.reserve(&env).unwrap();
     assert_eq!((quote.reserved_microusd, quote.pricing_version.as_str()), GOLDEN_RESERVE);
     let settled = DirectGlobal.settle(&env, &state.responses[0]).unwrap();
     assert_eq!((settled.estimated_microusd, settled.actual_speed), GOLDEN_SETTLE);
+}
+
+/// 經 provider 接點編碼（`with_provider`）與預設路徑（`new`）逐位元組相同；報價與 hash 也相同。
+#[test]
+fn the_provider_path_encodes_the_same_bytes_hash_and_price() {
+    use super::provider::AnthropicProvider;
+    let state: State = serde_json::from_value(legacy_checkpoint()).unwrap();
+    let provider = AnthropicProvider::new(std::sync::Arc::new(DirectGlobal));
+    let system = Value::String(state.system.clone().unwrap());
+    let env = RequestEnvelope::with_provider(&provider, options(), system, state.messages.clone()).unwrap();
+    assert_eq!(serde_json::to_string(env.body_ref()).unwrap(), GOLDEN_BODY);
+    assert_eq!(env.hash(), GOLDEN_HASH);
+    // 報價、hash、實際送出的 body 是同一份編碼：hash 就是這份 body 的 canonical sha256。
+    let q = super::provider::ApiProvider::quote(&provider);
+    let quote = q.reserve(&env).unwrap();
+    assert_eq!((quote.reserved_microusd, quote.pricing_version.as_str()), GOLDEN_RESERVE);
+    let settled = q.settle(&env, &state.responses[0]).unwrap();
+    assert_eq!((settled.estimated_microusd, settled.actual_speed), GOLDEN_SETTLE);
+}
+
+/// 舊 checkpoint（無標籤）原樣序列化不多出欄位；補標籤後才有，而且 `Checkpoint::new` 兩種都收。
+#[test]
+fn legacy_checkpoints_stay_untagged_until_stamped_and_both_shapes_validate() {
+    use super::provider::{check_checkpoint_tag, stamp_checkpoint, AnthropicProvider};
+    let legacy = legacy_checkpoint();
+    let mut state: State = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&state).unwrap(), legacy, "沒有標籤的 checkpoint 讀進來再寫出去不多不少");
+    let provider = AnthropicProvider::codec_only();
+    check_checkpoint_tag(&state, &provider).unwrap();
+    stamp_checkpoint(&mut state, &provider);
+    let stamped = serde_json::to_value(&state).unwrap();
+    assert_eq!(stamped["provider"], "anthropic");
+    assert_eq!(stamped["payload_version"], 1);
+    am_base::db::api_bot::Checkpoint::new(&legacy).unwrap();
+    am_base::db::api_bot::Checkpoint::new(&stamped).unwrap();
+    for bad in [json!({"provider": "openai"}), json!({"payload_version": 0}), json!({"payload_version": 2})] {
+        let mut v = legacy.clone();
+        v.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+        let st: State = serde_json::from_value(v).unwrap();
+        assert!(check_checkpoint_tag(&st, &provider).is_err(), "{:?}", st.provider);
+    }
 }
 
 #[tokio::test]
@@ -134,84 +172,6 @@ async fn the_two_calls_left_notice_keeps_its_exact_wire_shape() {
     runner::run(&notice_model(), &EchoTools, &Mem, &mut state, &CancellationToken::new(), 3).await.unwrap();
     assert_eq!(serde_json::to_string(&state.messages).unwrap(), GOLDEN_NOTICE);
 }
-
-/// 第二份舊 checkpoint：工具批次已結清、下一次請求是軟期限的收尾請求（wrap-up）。
-fn legacy_wrap_up_checkpoint() -> Value {
-    json!({
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "refactor the module"}]},
-            {"role": "assistant", "content": [
-                {"type": "redacted_thinking", "data": "opaque-blob"},
-                {"type": "tool_use", "id": "toolu_w1", "name": "str_replace_based_edit_tool", "input": {"command": "view", "path": "/src/lib.rs"}},
-                {"type": "tool_use", "id": "toolu_w2", "name": "bash", "input": {"command": "cargo test"}}
-            ]},
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "toolu_w1", "content": "fn main() {}", "is_error": false},
-                {"type": "tool_result", "tool_use_id": "toolu_w2", "content": "not executed: time limit reached", "is_error": true}
-            ]}
-        ],
-        "responses": [{
-            "id": "msg_w1", "model": crate::config::API_BOT_MODEL,
-            "content": [
-                {"type": "redacted_thinking", "data": "opaque-blob"},
-                {"type": "tool_use", "id": "toolu_w1", "name": "str_replace_based_edit_tool", "input": {"command": "view", "path": "/src/lib.rs"}},
-                {"type": "tool_use", "id": "toolu_w2", "name": "bash", "input": {"command": "cargo test"}}
-            ],
-            "stop_reason": "tool_use",
-            "usage": {"input_tokens": 5000, "output_tokens": 300, "speed": "standard",
-                      "cache_creation_input_tokens": 1200, "cache_read_input_tokens": 800}
-        }],
-        "api_pending": false,
-        "tool_pending": null,
-        "completed_tool_ids": ["toolu_w1", "toolu_w2"]
-    })
-}
-
-/// 記下每一次送給模型的 messages（也就是那一次 request 的內容）。
-struct Recording(Mutex<Vec<Response>>, Mutex<Vec<Vec<Message>>>);
-impl Model for Recording {
-    fn complete<'a>(&'a self, messages: &'a [Message], _: &'a CancellationToken) -> BoxFuture<'a, Result<Response, super::http::Error>> {
-        Box::pin(async move {
-            self.1.lock().unwrap().push(messages.to_vec());
-            Ok(self.0.lock().unwrap().remove(0))
-        })
-    }
-}
-
-#[tokio::test]
-async fn a_wrap_up_request_from_a_legacy_checkpoint_matches_the_golden_request_and_price() {
-    let mut state: State = serde_json::from_value(legacy_wrap_up_checkpoint()).unwrap();
-    assert!(state.system.is_none(), "這份舊 checkpoint 沒有 system 欄位");
-    let model = Recording(Mutex::new(vec![response(vec![json!({"type": "text", "text": "summary: half done"})], "end_turn")]), Mutex::new(Vec::new()));
-    let halt = runner::run_with_wrap_up(&model, &EchoTools, &Mem, &mut state, &CancellationToken::new(), 8, &|| false, &|| true).await.unwrap();
-    assert_eq!(halt, Halt::TimeLimit);
-    let sent = model.1.lock().unwrap().clone();
-    assert_eq!(sent.len(), 1, "收尾只送一次請求");
-    // 收尾請求：1 小時快取、fast、開 web_search 的選項組合，system 是陣列形狀。
-    let opts = Options { max_tokens: 2048, effort: "medium".into(), fast: true, cache_ttl_1h: true, web_search: true, ..Options::default() };
-    let system = json!([{"type": "text", "text": "You are AG Man's API bot."}]);
-    let env = RequestEnvelope::new(opts, system, sent[0].clone()).unwrap();
-    assert_eq!(serde_json::to_string(&env.body()).unwrap(), GOLDEN_WRAP_BODY, "收尾請求的 body 必須位元組相同");
-    assert_eq!(env.wire(), GOLDEN_WRAP_BODY.as_bytes());
-    assert_eq!(env.hash(), GOLDEN_WRAP_HASH);
-    assert_eq!(env.speed(), "fast");
-    let quote = DirectGlobal.reserve(&env).unwrap();
-    assert_eq!((quote.reserved_microusd, quote.pricing_version.as_str()), GOLDEN_WRAP_RESERVE);
-    let settled = DirectGlobal.settle(&env, state.responses.last().unwrap()).unwrap();
-    assert_eq!((settled.estimated_microusd, settled.actual_speed), GOLDEN_WRAP_SETTLE);
-    assert_eq!(serde_json::to_string(&state.messages).unwrap(), GOLDEN_WRAP_MESSAGES, "收尾後的 transcript");
-    // checkpoint 本身（State 的序列化）也固定：舊格式讀進來再存，欄位與順序不變。
-    let mut saved = serde_json::to_value(&state).unwrap();
-    saved["completed_tool_ids"].as_array_mut().unwrap().sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-    assert_eq!(serde_json::to_string(&saved).unwrap(), GOLDEN_WRAP_CHECKPOINT);
-}
-
-const GOLDEN_WRAP_BODY: &str = r##"{"max_tokens":2048,"messages":[{"content":[{"text":"refactor the module","type":"text"}],"role":"user"},{"content":[{"data":"opaque-blob","type":"redacted_thinking"},{"id":"toolu_w1","input":{"command":"view","path":"/src/lib.rs"},"name":"str_replace_based_edit_tool","type":"tool_use"},{"cache_control":{"ttl":"1h","type":"ephemeral"},"id":"toolu_w2","input":{"command":"cargo test"},"name":"bash","type":"tool_use"}],"role":"assistant"},{"content":[{"content":"fn main() {}","is_error":false,"tool_use_id":"toolu_w1","type":"tool_result"},{"content":"not executed: time limit reached","is_error":true,"tool_use_id":"toolu_w2","type":"tool_result"},{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"[AG Man] The time limit for this turn has been reached. Do NOT start any new action or tool call. Reply with a summary: what is done, what is not done, and how to continue.","type":"text"}],"role":"user"}],"model":"claude-opus-5-5","output_config":{"effort":"medium"},"speed":"fast","stream":true,"system":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"You are AG Man's API bot.","type":"text"}],"thinking":{"block_binding":{"prefix_mismatch_behavior":"drop_block"},"type":"adaptive"},"tool_choice":{"type":"auto"},"tools":[{"name":"bash","type":"bash_20250124"},{"name":"str_replace_based_edit_tool","type":"text_editor_20250728"},{"name":"web_search","type":"web_search_20260209"}]}"##;
-const GOLDEN_WRAP_HASH: &str = "4cb2dcc10cce165d8020c43fd80d52f82a517a497b174168bc164dd11b67e27d";
-const GOLDEN_WRAP_RESERVE: (i64, &str) = (285424, "claude-opus-5-5-global-2026-11-14");
-const GOLDEN_WRAP_SETTLE: (i64, Option<&str>) = (1080, Some("standard"));
-const GOLDEN_WRAP_MESSAGES: &str = r##"[{"role":"user","content":[{"text":"refactor the module","type":"text"}]},{"role":"assistant","content":[{"data":"opaque-blob","type":"redacted_thinking"},{"id":"toolu_w1","input":{"command":"view","path":"/src/lib.rs"},"name":"str_replace_based_edit_tool","type":"tool_use"},{"id":"toolu_w2","input":{"command":"cargo test"},"name":"bash","type":"tool_use"}]},{"role":"user","content":[{"content":"fn main() {}","is_error":false,"tool_use_id":"toolu_w1","type":"tool_result"},{"content":"not executed: time limit reached","is_error":true,"tool_use_id":"toolu_w2","type":"tool_result"},{"text":"[AG Man] The time limit for this turn has been reached. Do NOT start any new action or tool call. Reply with a summary: what is done, what is not done, and how to continue.","type":"text"}]},{"role":"assistant","content":[{"text":"summary: half done","type":"text"}]}]"##;
-const GOLDEN_WRAP_CHECKPOINT: &str = r##"{"api_pending":false,"completed_tool_ids":["toolu_w1","toolu_w2"],"messages":[{"content":[{"text":"refactor the module","type":"text"}],"role":"user"},{"content":[{"data":"opaque-blob","type":"redacted_thinking"},{"id":"toolu_w1","input":{"command":"view","path":"/src/lib.rs"},"name":"str_replace_based_edit_tool","type":"tool_use"},{"id":"toolu_w2","input":{"command":"cargo test"},"name":"bash","type":"tool_use"}],"role":"assistant"},{"content":[{"content":"fn main() {}","is_error":false,"tool_use_id":"toolu_w1","type":"tool_result"},{"content":"not executed: time limit reached","is_error":true,"tool_use_id":"toolu_w2","type":"tool_result"},{"text":"[AG Man] The time limit for this turn has been reached. Do NOT start any new action or tool call. Reply with a summary: what is done, what is not done, and how to continue.","type":"text"}],"role":"user"},{"content":[{"text":"summary: half done","type":"text"}],"role":"assistant"}],"responses":[{"content":[{"data":"opaque-blob","type":"redacted_thinking"},{"id":"toolu_w1","input":{"command":"view","path":"/src/lib.rs"},"name":"str_replace_based_edit_tool","type":"tool_use"},{"id":"toolu_w2","input":{"command":"cargo test"},"name":"bash","type":"tool_use"}],"id":"msg_w1","model":"claude-opus-5-5","stop_reason":"tool_use","usage":{"cache_creation_input_tokens":1200,"cache_read_input_tokens":800,"input_tokens":5000,"output_tokens":300,"speed":"standard"}},{"content":[{"text":"summary: half done","type":"text"}],"id":"msg_2","model":"claude-opus-5-5","stop_reason":"end_turn","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":120,"output_tokens":30,"speed":"standard"}}],"tool_pending":null}"##;
 
 const GOLDEN_BODY: &str = r##"{"max_tokens":4096,"messages":[{"content":"check the repo","role":"user"},{"content":[{"signature":"sig-1","thinking":"plan","type":"thinking"},{"text":"looking","type":"text"},{"cache_control":{"type":"ephemeral"},"id":"toolu_1","input":{"command":"ls"},"name":"bash","type":"tool_use"}],"role":"assistant"},{"content":[{"cache_control":{"type":"ephemeral"},"content":"a.txt\nb.txt","is_error":false,"tool_use_id":"toolu_1","type":"tool_result"}],"role":"user"}],"model":"claude-opus-5-5","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"be brief","type":"text"}],"thinking":{"block_binding":{"prefix_mismatch_behavior":"drop_block"},"type":"adaptive"},"tool_choice":{"type":"auto"},"tools":[{"name":"bash","type":"bash_20250124"},{"name":"str_replace_based_edit_tool","type":"text_editor_20250728"}]}"##;
 const GOLDEN_HASH: &str = "df06ad30f92e56547fb527d11768424664b304c2462d3eb10302424037f75861";

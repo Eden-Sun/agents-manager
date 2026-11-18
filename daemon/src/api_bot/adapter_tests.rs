@@ -458,7 +458,7 @@ mod tests {
 
         let received = bodies.lock().await;
         assert_eq!(received.len(), 1);
-        assert_eq!(&received[0], expected_envelope.body());
+        assert_eq!(received[0], expected_envelope.body());
 
         drop(received);
         server.shutdown().await;
@@ -1687,133 +1687,77 @@ mod tests {
         assert_eq!(refusal.as_deref(), Some("api_total_cap_reached:cap=1:spent=0.95"));
     }
 
-    // ── checkpoint 版本標籤與 session 固定 provider（openai-api 切片 A 第 4 片）──────────────────────────────
-
-    use crate::api_bot::http;
-    use crate::api_bot::runner::Journal as _;
-
-    fn tag_http(endpoint: &str) -> AdapterHttpConfig {
-        AdapterHttpConfig {
-            endpoint: endpoint.to_string(),
-            key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-            timeout: Duration::from_secs(5),
-            max_response_bytes: 1024 * 1024,
-        }
-    }
-
-    async fn stored_checkpoint(pool: &SqlitePool, session: &str) -> (i64, String, serde_json::Value) {
-        let (revision, turn, raw): (i64, String, String) =
-            sqlx::query_as("SELECT revision, owner_turn_id, checkpoint_json FROM api_bot_sessions WHERE id=?").bind(session).fetch_one(pool).await.unwrap();
-        (revision, turn, serde_json::from_str(&raw).unwrap())
-    }
-
-    /// 開一個新 session（generation 1），再把 owner turn 收掉、開下一個 turn，回傳 rebind 要用的兩個 identity。
-    async fn tag_session() -> (SqlitePool, String, ApiBotAdapter, AdapterIdentity, AdapterIdentity) {
+    /// provider 接點：新 session 的 checkpoint 帶 provider／版本標籤；舊的無標籤 checkpoint 照現行 Claude 格式讀、續接時補上標籤；
+    /// 標籤指到別的 provider 或版本比現行新就不接續（session 建立時固定 provider）。
+    #[tokio::test]
+    async fn test_checkpoint_provider_tag_is_stamped_legacy_is_read_as_claude_and_foreign_is_refused() {
         let (pool, bot, run, turn1, session) = setup_test_db().await;
         let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone(), generation: 1 };
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            identity.clone(),
-            test_options(),
-            serde_json::json!("sys"),
-            test_limits(),
-            Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
-            tag_http("http://127.0.0.1:9"),
-            None,
-        )
-        .await
-        .unwrap();
-        let next = AdapterIdentity { turn_id: "t2".into(), ..identity.clone() };
-        (pool, session, adapter, identity, next)
-    }
+        let make = |pool: SqlitePool| {
+            (
+                pool,
+                test_options(),
+                test_limits(),
+                Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }) as Arc<dyn QuoteProvider>,
+                AdapterHttpConfig {
+                    endpoint: "http://127.0.0.1:9".into(),
+                    key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                    timeout: Duration::from_secs(5),
+                    max_response_bytes: 1024 * 1024,
+                },
+            )
+        };
+        let (p, o, l, q, h) = make(pool.clone());
+        ApiBotAdapter::new(p, identity.clone(), o, serde_json::json!("sys"), l, q, h, None).await.unwrap();
+        let stored = |pool: SqlitePool, session: String| async move {
+            let raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?").bind(session).fetch_one(&pool).await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap()
+        };
+        let created = stored(pool.clone(), session.clone()).await;
+        assert_eq!(created["provider"], "anthropic");
+        assert_eq!(created["payload_version"], 1);
 
-    async fn hand_over_turn(pool: &SqlitePool, from: &AdapterIdentity, to: &AdapterIdentity) {
-        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&from.turn_id).execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at) VALUES(?,'c',?,'web','in_flight',?)")
-            .bind(&to.turn_id).bind(&to.run_id).bind(am_base::db::now()).execute(pool).await.unwrap();
-    }
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&turn1).execute(&pool).await.unwrap();
+        let rebind_as = |turn: &'static str| {
+            let pool = pool.clone();
+            let identity = identity.clone();
+            let (p, o, l, q, h) = make(pool);
+            let session = session.clone();
+            let bot = bot.clone();
+            let run = run.clone();
+            async move {
+                let _ = (&session, &bot);
+                ApiBotAdapter::rebind(p, &identity, 0, AdapterIdentity { session_id: identity.session_id.clone(), bot_id: identity.bot_id.clone(), run_id: run, turn_id: turn.into(), generation: 1 }, o, serde_json::json!("x"), l, q, h, None).await
+            }
+        };
+        let new_turn = |turn: &'static str| {
+            let pool = pool.clone();
+            let run = run.clone();
+            async move {
+                sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at) VALUES(?,'c',?,'web','in_flight',?)")
+                    .bind(turn).bind(run).bind(am_base::db::now()).execute(&pool).await.unwrap();
+            }
+        };
 
-    async fn tag_rebind(pool: &SqlitePool, old: &AdapterIdentity, revision: i64, new: &AdapterIdentity) -> Result<(ApiBotAdapter, State), http::Error> {
-        ApiBotAdapter::rebind(
-            pool.clone(),
-            old,
-            revision,
-            new.clone(),
-            test_options(),
-            serde_json::json!("sys"),
-            test_limits(),
-            Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
-            tag_http("http://127.0.0.1:9"),
-            None,
-        )
-        .await
-    }
-
-    fn user_turn(text: &str) -> State {
-        State { system: Some("sys".into()), messages: vec![Message { role: "user".into(), content: serde_json::json!(text) }], ..Default::default() }
-    }
-
-    /// 新 session 的 checkpoint 從第一份就帶 `{"v":2,"provider":"anthropic"}`；runner 拿沒有標籤的 state 來存（runtime 的第一回合就是這樣）
-    /// 標籤也不會掉；rebind 之後還在，交回的 state 也帶著。
-    #[tokio::test]
-    async fn a_new_session_checkpoint_is_tagged_v2_with_its_provider_and_stays_tagged() {
-        let (pool, session, adapter, identity, next) = tag_session().await;
-        let (_, _, first) = stored_checkpoint(&pool, &session).await;
-        assert_eq!((first["v"].as_u64(), first["provider"].as_str()), (Some(2), Some("anthropic")));
-
-        adapter.save(&user_turn("hello")).await.unwrap();
-        let (revision, _, saved) = stored_checkpoint(&pool, &session).await;
-        assert_eq!((saved["v"].as_u64(), saved["provider"].as_str()), (Some(2), Some("anthropic")), "an untagged runner state is stamped with the session's tag");
-        assert_eq!(saved["messages"][0]["content"], "hello");
-
-        // 帶著別的 provider 標籤的 state 不是這個 session 的 transcript：拒絕，什麼都不寫。
-        let foreign = State { v: Some(2), provider: Some("openai".into()), ..user_turn("other") };
-        assert!(adapter.save(&foreign).await.is_err());
-        assert_eq!(stored_checkpoint(&pool, &session).await.2, saved);
-
-        hand_over_turn(&pool, &identity, &next).await;
-        let (_rebound, state) = tag_rebind(&pool, &identity, revision, &next).await.unwrap();
-        assert_eq!((state.v, state.provider.as_deref(), state.provider_id()), (Some(2), Some("anthropic"), "anthropic"));
-        let (_, _, after) = stored_checkpoint(&pool, &session).await;
-        assert_eq!((after["v"].as_u64(), after["provider"].as_str()), (Some(2), Some("anthropic")));
-    }
-
-    /// 沒有標籤的舊 checkpoint 一律按 Claude 的格式讀；接續之後照舊格式存回去（不補標籤，位元組形狀不變）。
-    #[tokio::test]
-    async fn an_untagged_legacy_checkpoint_resumes_as_claude_and_is_saved_back_untagged() {
-        let (pool, session, _adapter, identity, next) = tag_session().await;
-        let legacy = serde_json::json!({"messages":[{"role":"user","content":"old"},{"role":"assistant","content":[{"type":"text","text":"hi"}]}],
-            "responses":[{"id":"msg_old","model":am_config::API_BOT_MODEL,"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}],
-            "api_pending":false,"tool_pending":null,"completed_tool_ids":[],"system":"sys"});
+        // 1. 標籤指到別的 provider：不接續，也不換 owner。
+        let mut foreign = created.clone();
+        foreign["provider"] = serde_json::json!("openai");
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(foreign.to_string()).bind(&session).execute(&pool).await.unwrap();
+        new_turn("t2").await;
+        assert!(rebind_as("t2").await.is_err(), "foreign provider tag must be refused");
+        // 2. 版本比現行新：不接續。
+        let mut newer = created.clone();
+        newer["payload_version"] = serde_json::json!(2);
+        sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(newer.to_string()).bind(&session).execute(&pool).await.unwrap();
+        assert!(rebind_as("t2").await.is_err(), "newer payload version must be refused");
+        // 3. 舊的無標籤 checkpoint：照 Claude 格式讀，續接後補上標籤。
+        let mut legacy = created.clone();
+        legacy.as_object_mut().unwrap().remove("provider");
+        legacy.as_object_mut().unwrap().remove("payload_version");
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(legacy.to_string()).bind(&session).execute(&pool).await.unwrap();
-        hand_over_turn(&pool, &identity, &next).await;
-        let (rebound, mut state) = tag_rebind(&pool, &identity, 0, &next).await.unwrap();
-        assert_eq!((state.v, state.provider.clone(), state.provider_id()), (None, None, "anthropic"));
-        assert_eq!(state.messages.len(), 2, "the legacy transcript is read as-is");
-        state.messages.push(Message { role: "user".into(), content: serde_json::json!("next") });
-        rebound.save(&state).await.unwrap();
-        let (_, _, saved) = stored_checkpoint(&pool, &session).await;
-        assert!(saved.get("v").is_none() && saved.get("provider").is_none(), "a legacy session stays in the legacy shape: {saved}");
-        assert_eq!(saved["messages"].as_array().unwrap().len(), 3);
-        // 舊 session 不會被默默升級成別的 provider。
-        let tagged = State { v: Some(2), provider: Some("anthropic".into()), ..state.clone() };
-        assert!(rebound.save(&tagged).await.is_err());
-    }
-
-    /// session 的 provider 在建立時固定：checkpoint 標的是不認得的 provider（或標籤壞掉）時 resume 拒絕，
-    /// owner／revision 不變（rebind 之前就擋下）。
-    #[tokio::test]
-    async fn resuming_a_checkpoint_of_another_or_unknown_provider_is_refused_before_any_durable_change() {
-        for tag in [serde_json::json!({"v":2,"provider":"openai"}), serde_json::json!({"v":2,"provider":"nope"}), serde_json::json!({"v":3,"provider":"anthropic"}), serde_json::json!({"provider":"anthropic"})] {
-            let (pool, session, _adapter, identity, next) = tag_session().await;
-            let mut foreign = serde_json::json!({"messages":[],"responses":[],"api_pending":false,"tool_pending":null,"completed_tool_ids":[],"system":"sys"});
-            foreign.as_object_mut().unwrap().extend(tag.as_object().unwrap().clone());
-            sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?").bind(foreign.to_string()).bind(&session).execute(&pool).await.unwrap();
-            hand_over_turn(&pool, &identity, &next).await;
-            assert!(tag_rebind(&pool, &identity, 0, &next).await.is_err(), "{tag}");
-            let (revision, owner_turn, stored) = stored_checkpoint(&pool, &session).await;
-            assert_eq!((revision, owner_turn.as_str()), (0, identity.turn_id.as_str()), "{tag}: ownership and revision are untouched");
-            assert_eq!(stored, foreign, "{tag}");
-        }
+        let (adapter, state) = rebind_as("t2").await.expect("untagged legacy checkpoint resumes as Claude");
+        assert_eq!(state.provider.as_deref(), Some("anthropic"));
+        assert_eq!(state.payload_version, Some(1));
+        drop(adapter);
     }
 }

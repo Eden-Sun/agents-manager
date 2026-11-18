@@ -91,10 +91,8 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ResumeProofError::Unconfirmed)?;
     let checkpoint = Checkpoint::new(&value).map_err(|_| ResumeProofError::Unconfirmed)?;
     let state: super::runner::State = serde_json::from_value(checkpoint.value()).map_err(|_| ResumeProofError::Unconfirmed)?;
-    // session 的 provider 在建立時固定：checkpoint 標的 provider 不認得就不接（沒有標籤＝Claude）。
-    if !super::provider::is_known(state.provider_id()) {
-        return Err(ResumeProofError::Unconfirmed);
-    }
+    // session 的 provider 在建立時固定（bot kind 決定）：checkpoint 標籤不一致就不接續（無標籤＝舊的 Claude 格式）。
+    super::provider::check_checkpoint_tag(&state, &super::provider::AnthropicProvider::codec_only()).map_err(|_| ResumeProofError::Unconfirmed)?;
     let model: Option<String> = sqlx::query_scalar("SELECT model FROM bots WHERE id=?")
         .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
     let target_model = model.as_deref().unwrap_or(am_config::API_BOT_MODEL);
