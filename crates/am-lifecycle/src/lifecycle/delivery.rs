@@ -1242,6 +1242,31 @@ mod plain_warn_tests {
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
+    /// 送後核對的補按規則（`may_press_retry_submit`）：只有「完整比對仍是自己的草稿、沒有送達證據、還沒補按過」才補一次。
+    const LONG_SCREEN: &str = include_str!("fixtures/codex-synthetic-long-draft.txt");
+    const LONG_TEXT: &str = include_str!("fixtures/codex-synthetic-long-draft.expected.txt");
+
+    #[test]
+    fn a_long_codex_draft_gets_exactly_one_retry_press_when_the_first_enter_did_not_take() {
+        let text = LONG_TEXT.trim_end_matches('\n');
+        assert!(super::may_press_retry_submit("codex", LONG_SCREEN, text, false, false), "第一次 Enter 沒生效：補按一次");
+        assert!(!super::may_press_retry_submit("codex", LONG_SCREEN, text, false, true), "已經補按過就不再按");
+        assert!(!super::may_press_retry_submit("codex", LONG_SCREEN, text, true, false), "已有送達證據不按");
+    }
+
+    #[test]
+    fn a_history_prompt_or_a_truncated_or_menu_frame_never_gets_a_retry_press() {
+        let text = LONG_TEXT.trim_end_matches('\n');
+        // 歷史 `›`：框裡不是本則。
+        assert!(!super::may_press_retry_submit("codex", "› 舊問題\n• 舊回覆\n", "舊問題", false, false));
+        // 框被截斷：畫面只剩前幾列，比對不到完整草稿。
+        let truncated: String = LONG_SCREEN.lines().take(12).collect::<Vec<_>>().join("\n");
+        assert!(!super::may_press_retry_submit("codex", &truncated, text, false, false), "截斷不補按");
+        // 選單（hook 審核框）：不是輸入框。
+        let review = include_str!("fixtures/codex-0.169.1-hooks-review.txt");
+        assert!(!super::may_press_retry_submit("codex", review, text, false, false), "選單不補按");
+    }
+
     #[test]
     fn macos_local_a_numbered_choice_is_not_a_composer_draft() {
         let menu = "Choose an option\n❯ 1. Example first\n  2. Example second\n";

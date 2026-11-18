@@ -173,8 +173,55 @@ pub fn composer_row(kind: &str, lines: &[&str]) -> Option<usize> {
 }
 
 pub(crate) const COMPOSER_TAIL: usize = 24;
+/// codex 草稿的窗口上限（與 `composer_text_rows` 的 400 列讀取上限一致）。
+pub(crate) const CODEX_DRAFT_MAX: usize = 400;
+
+/// codex 底部的狀態列（實機 0.155：`  gpt-… low · <cwd> · Context … used …`；摺疊貼上時是 `  GPT-6.1-Sol default · <cwd>`，
+/// 底下還可能有一列警告）。判斷用「· 分隔」或「Context … used」。
+fn looks_like_codex_footer(row: &str) -> bool {
+    let t = row.trim();
+    t.contains(" · ") || (t.contains("Context") && t.contains("% used"))
+}
+
+/// 草稿的底邊（不含）：`›` 之後第一列底部狀態列；它前面有一列空白的墊行時，草稿到墊行為止。
+/// 沒有狀態列時，退回「非空、又不縮排」的列（助理的輸出 `•` 也是這種列）。草稿內的空白行都保留。
+pub(crate) fn codex_boundary(lines: &[&str], composer: usize) -> usize {
+    for i in composer + 1..lines.len() {
+        let row = strip_ansi(lines[i]);
+        if looks_like_codex_footer(&row) {
+            let pad = i.checked_sub(1).filter(|&p| p > composer && strip_ansi(lines[p]).trim().is_empty());
+            return pad.unwrap_or(i);
+        }
+        if !row.trim().is_empty() && !row.starts_with("  ") {
+            return i;
+        }
+    }
+    lines.len()
+}
+
+/// codex 當前 composer 的 `›` 列（由下往上找）。候選的底邊若是助理的輸出（`•`）就是歷史訊息，不是當前 composer，跳過往上找。
+pub(crate) fn codex_composer_row(lines: &[&str]) -> Option<usize> {
+    let n = lines.len();
+    let from = n.saturating_sub(CODEX_DRAFT_MAX);
+    (from..n).rev().find(|&idx| {
+        if !strip_ansi(lines[idx]).starts_with('›') {
+            return false;
+        }
+        let boundary = codex_boundary(lines, idx);
+        !(boundary < n && strip_ansi(lines[boundary]).starts_with('•'))
+    })
+}
 
 pub fn composer_tail(kind: &str, lines: &[&str]) -> usize {
+    if kind == "codex" {
+        if let Some(idx) = codex_composer_row(lines) {
+            let distance = lines.len() - idx;
+            if distance > COMPOSER_TAIL {
+                return distance.min(CODEX_DRAFT_MAX);
+            }
+        }
+        return COMPOSER_TAIL;
+    }
     if kind != "claude" || locate_composer(kind, lines, false, COMPOSER_TAIL).is_some() {
         return COMPOSER_TAIL;
     }
@@ -257,6 +304,10 @@ pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
+    // codex：找到的 `›` 必須是當前 composer（歷史的 `›` 後面接著助理輸出，不能拿來判斷框空不空）。
+    if kind == "codex" && codex_composer_row(&lines) != Some(c.idx) {
+        return BoxState::Unready;
+    }
     if kind == "agy" {
         let has_top_rule = lines[..c.idx].iter().rev().take(6).any(|r| is_rule_row(strip_ansi(r).trim()));
         if !has_top_rule {
@@ -467,7 +518,7 @@ pub fn composer_text(kind: &str, screen: &str) -> Option<String> {
 }
 
 pub fn composer_text_whole(kind: &str, screen: &str) -> Option<String> {
-    composer_text_rows(kind, screen, kind == "claude", None)
+    composer_text_rows(kind, screen, matches!(kind, "claude" | "codex"), None)
 }
 
 /// Read a known pasted draft using the same bounded window as the delivery state check.
@@ -515,9 +566,18 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool, tail: Opt
         let content = t[marker.len()..].trim();
         !content.is_empty() && !(kind == "agy" && is_agy_placeholder(content))
     })?;
+    // codex：找到的 `›` 必須就是當前 composer（歷史訊息的 `›` 後面接著助理輸出，不算）；草稿到底邊為止。
+    let codex_end = if kind == "codex" {
+        if codex_composer_row(&lines) != Some(from + idx) {
+            return None;
+        }
+        Some(codex_boundary(&lines, from + idx))
+    } else {
+        None
+    };
     let mut out: Vec<String> = Vec::new();
     for (n, line) in tail[idx..].iter().enumerate() {
-        if n > 0 && kind == "codex" && keep_blank_rows && !line.starts_with("  ") {
+        if codex_end.is_some_and(|end| from + idx + n >= end) {
             break;
         }
         let row = undecorate_for(kind, line);
@@ -595,8 +655,56 @@ mod composer_draft_shape_tests {
         for row in &rows[1..] { screen.push_str(&format!("  {row}\n")); }
         screen.push_str("\ngpt-6.1-sol context 13%\n");
         assert_eq!(composer_text_whole_within("codex", &screen, 72), Some(rows.join("\n")));
-        assert_eq!(composer_text_whole_within("codex", &screen, 24), None);
+        // 窗口由結構決定（`›` 到底部 footer），不再被 24 列截斷：就算傳小的 tail 也讀得到整段。
+        assert_eq!(composer_text_whole_within("codex", &screen, 24), Some(rows.join("\n")));
         assert_eq!(composer_text_whole_within("codex", &screen.replace('›', " "), 72), None);
+    }
+
+    /// 合成的 codex 畫面（不是實機截圖）：43 行、中文 markdown 表格、空白行（不縮排的 `""`）、縮排的程式碼、
+    /// 倒數第 40 列以上才是 `›`，下方是 footer。歷史的 `›` 與 `•` 回覆在上面，不能被當成當前 composer。
+    fn codex_long_draft_screen(msg: &[String], history_above: bool) -> String {
+        let mut rows: Vec<String> = Vec::new();
+        if history_above {
+            rows.push("› 上一則的問題".into());
+            rows.push("• 上一則的回覆很長很長".into());
+            rows.push("  續行的回覆".into());
+            rows.push(String::new());
+        }
+        for (i, line) in msg.iter().enumerate() {
+            rows.push(if i == 0 { format!("› {line}") } else if line.is_empty() { String::new() } else { format!("  {line}") });
+        }
+        rows.push(String::new());
+        rows.push("gpt-6.1-sol · ~/project/agents-manager".into());
+        rows.join("\n") + "\n"
+    }
+
+    fn long_message() -> Vec<String> {
+        let mut m = vec!["請看以下比較表：".to_string(), String::new(), "| 項目 | 說明 | 狀態 |".into(), "|---|---|---|".into()];
+        for i in 0..20 {
+            m.push(format!("| 第 {i} 項 | 中文說明很長很長很長很長很長很長很長很長 | 完成 |"));
+        }
+        m.push(String::new());
+        m.push("    縮排的程式碼 fn main() {}".into());
+        m.push(String::new());
+        m.push("最後一段，使用者自己打的。".into());
+        m
+    }
+
+    #[test]
+    fn a_43_row_codex_draft_with_blank_rows_and_a_footer_is_read_back_exactly() {
+        let msg = long_message();
+        let screen = codex_long_draft_screen(&msg, true);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(composer_tail("codex", &lines) > COMPOSER_TAIL, "窗口要跟著草稿長到底部 footer");
+        assert_eq!(composer_text_whole("codex", &screen), Some(msg.join("\n")), "逐字一致（含空白行與縮排）");
+        assert_eq!(box_state("codex", &screen), BoxState::NonEmpty);
+    }
+
+    #[test]
+    fn a_history_prompt_above_assistant_output_is_not_the_composer() {
+        let screen = "› 舊問題\n• 舊回覆\n  續行\n".to_string();
+        assert_eq!(composer_text_whole("codex", &screen), None);
+        assert_eq!(box_state("codex", &screen), BoxState::Unready);
     }
 
     /// 2.1.281 真畫面形狀（`claude-2.1.281-multiline-draft.ansi`）：`❯` 在第 0 欄、續行縮排兩格、框線是 `─`。

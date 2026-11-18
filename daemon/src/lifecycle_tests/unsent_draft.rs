@@ -274,7 +274,8 @@ mod tests {
     /// 告警只有 bot、pane、輪數、時間，不含畫面文字。
     #[tokio::test]
     async fn an_unreadable_composer_waits_for_its_rounds_then_alerts_once() {
-        let filler: Vec<String> = (1..=30).map(|i| format!("filler {i}")).collect();
+        // 框的 `›` 離底部超過 400 列（codex 草稿的讀取上限）：讀不到，不是一段長草稿。
+        let filler: Vec<String> = (1..=450).map(|i| format!("filler {i}")).collect();
         let refs: Vec<&str> = filler.iter().map(String::as_str).collect();
         let f = fixture(&refs, false).await;
         let app = f.env.app.clone();

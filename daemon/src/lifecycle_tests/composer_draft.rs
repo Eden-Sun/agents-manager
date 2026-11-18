@@ -780,4 +780,41 @@ mod tests {
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&env.app.db).await.unwrap();
         assert_eq!(turns, 0, "沒有開回合");
     }
+
+    /// 合成的 codex 長草稿（43 行、中文表格、空白行、縮排程式碼、歷史 `›`／`•` 在上面、footer 在下面）。不是實機截圖。
+    const CODEX_LONG_DRAFT: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-synthetic-long-draft.txt");
+    const CODEX_LONG_DRAFT_TEXT: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-synthetic-long-draft.expected.txt");
+    
+    /// 讀草稿（GET composer-draft 與送後核對共用的讀法）：43 行草稿＋空白行要逐字回來，不能在第一個空白行截斷。
+    #[tokio::test]
+    async fn a_codex_long_draft_with_blank_rows_is_read_back_whole_on_the_get_path() {
+        let env = tt::env().await;
+        env.herdr.set_screen("pane-long", CODEX_LONG_DRAFT);
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (state, draft, _) = read_draft(&client, "pane-long", "codex").await.unwrap();
+        assert_eq!(state, BoxState::NonEmpty);
+        assert_eq!(draft.as_deref(), Some(CODEX_LONG_DRAFT_TEXT.trim_end_matches('\n')));
+    
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-long-draft").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET pane_id='pane-long' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let snap = snapshot(&client, &run, &bot).await.unwrap();
+        // GET 回完整草稿（不截，網頁「編輯後送出」要整段）；token 綁的也是整段。
+        assert_eq!(snap["draft"], json!(CODEX_LONG_DRAFT_TEXT.trim_end_matches('\n')));
+        assert_eq!(snap["draft_truncated"], json!(false));
+        assert_eq!(snap["draft_token"].as_str().map(str::len), Some(64), "有 token＝網頁出現「送出」黃條: {snap}");
+    }
+    
+    /// 歷史訊息裡的 `›`（後面接著助理的 `•` 輸出）不是當前輸入框：不回草稿、沒有 token。
+    #[tokio::test]
+    async fn a_history_prompt_above_assistant_output_is_not_a_draft_on_the_get_path() {
+        let env = tt::env().await;
+        env.herdr.set_screen("pane-hist", "› 舊問題\n• 舊回覆\n  續行\n");
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (state, draft, _) = read_draft(&client, "pane-hist", "codex").await.unwrap();
+        assert_eq!((state, draft), (BoxState::Unready, None));
+    }
 }

@@ -203,7 +203,12 @@ fn composer_frame(kind: &str, text: &str) -> Option<ComposerFrame> {
         let bottom = (marker + 1..lines.len()).find(|&i| rule(&plain[i]))?;
         (top, bottom, plain[top].clone(), plain[bottom].clone())
     } else {
-        let bottom = (marker + 1..lines.len()).find(|&i| plain[i].trim().is_empty())?;
+        // codex 草稿可以有空白行：框的底邊是第一個非空、又不縮排的列（footer），不是第一個空白列。
+        let bottom = if kind == "codex" {
+            (marker + 1..lines.len()).find(|&i| !plain[i].trim().is_empty() && !plain[i].starts_with("  ")).unwrap_or(lines.len())
+        } else {
+            (marker + 1..lines.len()).find(|&i| plain[i].trim().is_empty())?
+        };
         (marker, bottom, String::new(), String::new())
     };
     let glyph = match kind { "codex" => '›', "agy" => '>', "claude" | "grok" => '❯', _ => return None };
