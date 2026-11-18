@@ -484,6 +484,63 @@ async fn upstream_failures_are_classified_and_only_clear_rejections_are_definiti
     assert!(state.messages.iter().all(|m| m.content.get("type").and_then(Value::as_str) != Some("function_call")), "the half call is not kept for replay");
 }
 
+/// 決定（2026-11-18）：串流已經開始（HTTP 200）之後收到 `response.failed` 或 `error`，不管錯誤代碼看起來多明確，
+/// 一律不是「確定沒處理」——attempt 記 unknown、保留預留。只有 HTTP 回應本身就是 401／403／400 類才算明確拒絕。
+#[tokio::test]
+async fn a_failure_after_the_stream_started_is_never_a_definitive_rejection_whatever_its_code() {
+    let provider = luna();
+    let request = provider.encode("medium", &json!("sys"), &fresh_state().messages, None).unwrap();
+    let cancel = CancellationToken::new();
+    let created = json!({"type": "response.created", "response": {"id": "r"}});
+    for (label, tail) in [
+        ("error event, auth code", json!({"type": "error", "code": "invalid_api_key", "message": "bad key"})),
+        ("error event, quota code", json!({"type": "error", "code": "insufficient_quota", "message": "no credit"})),
+        ("error event, request code", json!({"type": "error", "code": "invalid_request_error", "message": "bad"})),
+        ("failed, model rejected", json!({"type": "response.failed", "response": {"error": {"code": "model_not_found", "message": "nope"}}})),
+        ("failed, rate limit", json!({"type": "response.failed", "response": {"error": {"code": "rate_limit_exceeded", "message": "slow down"}}})),
+    ] {
+        let server = serve(vec![Reply::sse(sse(&[created.clone(), tail]))]).await;
+        let err = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
+        assert!(matches!(&err, http::Error::StreamAborted { kind: Some(_), .. }), "{label}: {err:?}");
+        assert!(!provider.definitive_rejection(&err), "{label}: the reservation must be kept");
+    }
+    // 對照：同樣的代碼出現在 HTTP 回應本身（串流開始之前）才是明確拒絕。
+    for (status, code) in [(401, "invalid_api_key"), (403, "permission_denied"), (400, "invalid_request_error")] {
+        let server = serve(vec![Reply::json(status, json!({"error": {"code": code, "message": "x"}}))]).await;
+        let err = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
+        assert!(matches!(&err, http::Error::Http { status: s, .. } if *s == status), "{code}: {err:?}");
+        assert!(provider.definitive_rejection(&err), "{code}");
+    }
+}
+
+/// 決定（2026-11-18）：usage 缺 `cached_tokens`／`cache_write_tokens` 視為 0、照常結算；缺 `input_tokens` 或 `output_tokens`
+/// 就是 MissingUsage——回應不採用、費用未知、保留預留（不是明確拒絕）。
+#[tokio::test]
+async fn usage_without_cache_details_settles_as_zero_but_missing_input_or_output_tokens_is_missing_usage() {
+    let provider = luna();
+    let request = provider.encode("medium", &json!("sys"), &fresh_state().messages, None).unwrap();
+    let cancel = CancellationToken::new();
+
+    // 沒有任何快取分項：快取讀寫都當 0，全部是普通輸入。
+    let server = serve(vec![Reply::sse(two_tools_stream(json!({"input_tokens": 1000, "output_tokens": 40})))]).await;
+    let response = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap();
+    assert_eq!((response.usage["cached_tokens"].as_u64(), response.usage["cache_write_tokens"].as_u64()), (Some(0), Some(0)));
+    let settled = OpenAiQuote.settle(request.as_ref(), &response).unwrap();
+    assert_eq!(settled.estimated_microusd, (1000_u128 * 100_000 + 40 * 500_000).div_ceil(1_000_000) as i64);
+    assert!(provider.usage_problem(request.as_ref(), &response).is_none());
+
+    for (label, usage_value) in [
+        ("no input_tokens", json!({"output_tokens": 40, "input_tokens_details": {"cached_tokens": 0}})),
+        ("no output_tokens", json!({"input_tokens": 1000})),
+        ("empty usage", json!({})),
+    ] {
+        let server = serve(vec![Reply::sse(two_tools_stream(usage_value))]).await;
+        let err = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
+        assert!(matches!(&err, http::Error::InvalidResponseDetail(why) if why.contains("usage")), "{label}: {err:?}");
+        assert!(!provider.definitive_rejection(&err), "{label}: the reservation must be kept");
+    }
+}
+
 /// redirect 一律不跟：Authorization 不會被帶到別的站。
 #[tokio::test]
 async fn a_redirect_is_never_followed() {
