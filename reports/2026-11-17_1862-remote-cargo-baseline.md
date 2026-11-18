@@ -203,3 +203,46 @@ runners::am_base_tests::cargo_shim::tests::macos_local_project_tests_keep_the_re
 - 有效樣本：基線 94.7／118.0，中位數（兩者平均）106.3s；拆後只有 1 個有效樣本 87.7s。
 - **結論：沒有可辨識的收益。** 拆後那一個有效樣本比基線快約 19%，但樣本數不足、落在基線兩次相差 23s 的雜訊範圍內，不能宣稱加速。daemon 單一 crate 的增量重編時間由 daemon 本體決定，148 條測試搬出只少了 daemon 測試二進位裡一小部分程式碼；預期的大收益要等 stage C／D 撤掉整組 `#[path]` 來源掛載。
 - 量測的方法缺陷：在同一個 shared 熱池輪流用兩個 worktree 量，每次換 worktree 都讓 am-lifecycle 等 crate 的內容變動而重編，使一半的樣本失效。更乾淨的做法是基線與拆後各用獨立 shared 成員、各連跑，或先 commit 到同一 worktree 以 `git checkout` 切換並在切換後多預熱一次。
+
+## C 階段：撤掉 daemon 的 share `#[path]` 掛載（2026-11-18）
+
+C1（`acfef31a7`）、C2（`0b49c5109`）、C3（`1acd05874`）。C3 之後 daemon 測試 build 不再把 `crates/am-share/src/share/` 在 daemon 內重編一份，`daemon/src/lib.rs` 的 `share` 改成單一的 `pub use am_share::share;`。
+
+### 對帳（四個 package 的 `--list`，含 ignored）
+- C1：daemon 6299→6299（`share::tests::*` 73、`share::tests::trusted::*` 13 → `share_tests::*`、`share_tests::trusted::*`，86 條一一對應）。
+- C2：daemon 6302→6302（`share::remote_cage_tests::*` 16 → `share_tests::remote_cage::*`；`share::portal_remote_tests::a_broken_remote_svg_gets_one_reminder` → `share_tests::remote_svg::…`）。
+- C3：daemon 6302→6301（−1）。少的那一條是 `share::remote_fs::test_support::tests::diagnostics_are_fixed_metadata_and_bound_overflow_without_payload`：它是 `remote_fs.rs` 內的純單元測試，掛載時 daemon 與 am-share 各編一份、各跑一次；撤掛載後只剩 am-share 那份（am-share 的清單前後都有它）。沒有測試遺失，只是去掉重複。其餘三個 package 與 ignored 清單逐條相同。
+
+### C3 之前 `cfg(test)` 差異盤點（掛載時 share 在 daemon 內是 `cfg(test)`，改用 am_share 後是依賴 crate）
+全部由 `cfg(test)` 改為 `cfg(any(test, feature = "test-hooks"))`（`cfg(not(test))` 同步改成 `not(any(...))`）；am-share 新增 feature `test-hooks`（會一併打開 `am-base/test-hooks`），只有 daemon 的 `[dev-dependencies]` 啟用，正式 build 不編。因此 daemon 測試看到的時序與接縫與掛載時相同，正式 build 不變：
+- 時序常數：`portal::UPLOAD_QUEUE_WAIT` 60s→300ms、`STREAM_RECHECK` 30s→300ms、`LIST_QUEUE_WAIT` 60s→5s；`compose::COMPOSE_WAIT` 10s→1s。
+- 名額語意：`compose::slots()` 在 test 版是每條執行緒各一份 semaphore（不同測試不互搶），正式版是全站一份；`compose` 的 `DECODES` 解碼計數器。
+- race point：`portal.rs` 8 處 `race_point::hit(...)`、`store::enable` 的 `share_enable_after_read`。`race_point` 是 am-base 的單一全域登記，daemon 測試 `arm` 的與 share `hit` 的是同一份（C3 後 298 條相關測試全綠證實會觸發）。
+- 測試專用函式：`portal::stream_for_test／next_for_test／map_for_test／list_turn_key_is_held_for_test／fail_next_files_scan_task_for_test`、`budget::set_cached_for_test／clear_cached_for_test`、`admin::reserve_restricted`、`store::insert_restricted`、`remote_fs::{inbox_write_racing, measure_racing, test_support}`。
+- 沒有「預設啟動真外部程式」的 cfg(test) 差異：`HistoryHook::default` 之類在 am-lifecycle（早已是獨立 crate，daemon 測試本來就用它的非 daemon-harness 預設與自己的 `testing` 設定），am-share 內沒有對應項；share 的外部 I/O 只經 `SiteEnv`／`PortalEnv` 等 trait，由 daemon 的 `App` 實作。
+- `impl … for App`（`app_ports_p10` 等）：改成單一 share 型別後仍成立，daemon 測試 build 通過；`share_tests::*`、`delete_bot`、`ops_sql_contract`、`runners::share_*`、`bot_scope_matrix`、`child_retire`、`reconcile`（共 298 條）執行全綠。
+
+### CI 選測（`scripts/ci-daemon-filters.sh`）
+改 `crates/am-share/src/*`：非「整檔測試」的檔一律加選 `share_tests::`（含自己測試是 crate-only 的 `svg_check.rs`、`budget.rs`）；整檔 crate-only 的 `*_tests.rs`／`test_env.rs` 不選 daemon；`crates/am-share/Cargo.toml` 仍是 `__all__`。`crates/am-share/src/lib.rs` 不再是 `__all__`（不再被 `#[path]` 編進 daemon）。`check.sh` 對 `crates/am-share/` 的 owning crate 測試（`cargo test -p am-share`）本來就會跑，所以改 am-share 時 am-share 自己的測試加 daemon 的 `share_tests::` 都會跑；回歸在 `ci-daemon-filters_test.sh`、`check_changed_daemon_fast_test.sh`。
+
+### 編譯量測（`cargo test -p agents-managerd --locked --no-run`，改 `daemon/src/api.rs` 同一行）
+基線＝C3 前一個 commit `d67fbb5fb`，拆後＝C3 `1acd05874`。各用不同的 shared 成員、各自連跑（以 flock 把其他成員佔住來釘成員，並從 cargo 輸出的路徑核對實際用了哪一份）；每次前 `scripts/wait-load.sh --max 40 --min-free-mem 30`。有效＝只重編 daemon 一個 crate；其餘標無效，不挑。
+
+| 組別 | 成員 | 牆鐘秒（cargo 自報） | 重編 crate 數 | 有效 |
+|---|---|---|---:|---|
+| 基線 預熱 | shared | 76.7（1m11s） | 1 | 預熱，不列入 |
+| 基線 edit1 | shared | 73.8（1m08s） | 1 | 有效 |
+| 基線 edit2 | shared | 892.0（4m23s） | 4 | 無效（含長時間排隊，且重編 am-lifecycle／am-share／am-supervisor） |
+| 基線 edit3 | shared | 79.4（1m13s） | 1 | 有效 |
+| C3 預熱 | shared-2 | 1080.2（3m39s） | 8 | 預熱，不列入 |
+| C3 edit1 | shared-2 | 651.3（4m10s） | 8 | 無效（全部 8 個 crate 重編） |
+| C3 edit2 | shared-2 | 1325.0（10m40s） | 6 | 無效 |
+| C3 edit3 | shared-2 | 425.5（3m24s） | 8 | 無效 |
+| C3 重跑 預熱 | shared-3 | 633.1（10m21s） | 8 | 預熱，不列入 |
+| C3 重跑 edit1 | job-*（冷編譯） | 1722.6（13m32s） | 304 | 無效：池滿等了 15 分鐘後退到冷編譯 |
+| C3 重跑 edit2 | shared-3 | 728.1（5m03s） | 8 | 無效 |
+| C3 重跑 edit3 | shared-3 | 620.5（4m06s） | 8 | 無效 |
+
+- 基線有效樣本 2 個：73.8、79.4，中位數 76.6s。
+- **C3 沒有任何有效樣本，無法給拆後的中位數，也不能宣稱收益或退步。** 每次 C3 的 edit 都重編了全部或大部分 crate：機器負載高（量測期間 load average 11–20）、成員在我兩次執行之間會被別的 bot 的 build 拿去並換上它們的來源／feature 組合（pool 取鎖是「第一份沒人持鎖」，我無法在兩次 cargo 之間替自己保住成員），所以指紋被洗掉。這是量測環境的問題，不代表 C3 本身變慢；原因與證據都留在本節，不挑較快的一次。
+- 結構上能預期的收益：daemon 測試 build 少編一份約 1.5 萬行的 share 來源（及其測試），C3 的 daemon 測試 crate 單元縮小；要得到可信數字，需要一個專用、不被其他 bot 使用的 shared 成員（例如在量測期間暫停 pool 的其他使用者，或給量測 profile 一個獨立的 remote-cargo 目錄），這個前置條件目前不存在。
