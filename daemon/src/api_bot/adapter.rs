@@ -18,7 +18,8 @@ use am_base::db::api_bot::{self as db_api, Checkpoint, Fence};
 
 use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
-use super::quote::{QuoteProvider, RequestEnvelope};
+use super::quote::QuotedRequest;
+use super::quote::QuoteProvider;
 use super::runner::{Journal, Model, State, Tools};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +90,6 @@ pub(crate) struct AdapterHttpConfig {
 pub(crate) struct ApiBotAdapter {
     pool: SqlitePool,
     identity: AdapterIdentity,
-    options: Options,
     system: Value,
     limits: AdapterLimits,
     quote_provider: Arc<dyn QuoteProvider>,
@@ -130,7 +130,8 @@ struct SettledResponse {
 
 struct ActiveAttempt {
     id: String,
-    envelope: RequestEnvelope,
+    /// reserve 時報價、算 hash 的那一份已編碼請求；送出的也是它。
+    envelope: Arc<dyn QuotedRequest>,
     permit_available: bool,
     key: Option<Secret>,
 }
@@ -147,7 +148,7 @@ impl ApiBotAdapter {
     }
 
     fn progress_frame(&self, p: &super::sse::StreamProgress) -> Value {
-        let est = super::pricing::running_cost_microusd(&self.options.model, self.options.fast, self.options.cache_ttl_1h, p);
+        let est = self.provider.running_cost_microusd(p);
         serde_json::json!({
             "bot_id": self.identity.bot_id,
             "run_id": self.identity.run_id,
@@ -237,7 +238,8 @@ impl ApiBotAdapter {
             other => other.to_string(),
         };
         // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
-        let provider = super::provider::for_id(super::anthropic::ID, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
+        let provider = super::provider::for_id(super::anthropic::ID, super::anthropic::session_options(options), quote_provider.clone())
+            .ok_or(http::Error::InvalidRequest)?;
         let initial_state = State {
             system: Some(system_str),
             v: Some(am_base::db::api_bot::CHECKPOINT_VERSION),
@@ -252,11 +254,10 @@ impl ApiBotAdapter {
             .await
             .map_err(|_| http::Error::InvalidRequest)?;
 
-        let effective_effort = options.effort.clone();
+        let effective_effort = provider.effort().to_string();
         Ok(Self {
             pool,
             identity,
-            options,
             system,
             limits,
             provider,
@@ -331,9 +332,10 @@ impl ApiBotAdapter {
         let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
             .map_err(|_| http::Error::InvalidRequest)?;
         // session 的 provider 在建立時就固定：依 checkpoint 的標籤取回同一個（沒有標籤＝Claude）；不認得就拒絕，不改任何 durable 狀態。
-        let provider = super::provider::for_id(previous.provider_id(), quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
+        let provider = super::provider::for_id(previous.provider_id(), super::anthropic::session_options(options), quote_provider.clone())
+            .ok_or(http::Error::InvalidRequest)?;
         let session_tag = previous.provider.clone();
-        if !provider.checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
+        if !provider.checkpoint_matches_model(&previous) { return Err(http::Error::InvalidRequest); }
 
         let new_rev = db_api::rebind(
             &pool,
@@ -362,7 +364,7 @@ impl ApiBotAdapter {
         if loaded_state.provider != session_tag {
             return Err(http::Error::InvalidRequest);
         }
-        loaded_state.messages = super::protocol::prune_messages_for_compaction(&loaded_state.messages);
+        provider.codec().prune_after_compaction(&mut loaded_state);
 
         let effective_system = if let Some(ref stored) = loaded_state.system {
             Value::String(stored.clone())
@@ -375,11 +377,10 @@ impl ApiBotAdapter {
             system
         };
 
-        let effective_effort = options.effort.clone();
+        let effective_effort = provider.effort().to_string();
         let adapter = Self {
             pool,
             identity: new_identity,
-            options,
             system: effective_system,
             limits,
             provider,
@@ -431,14 +432,8 @@ impl Model for ApiBotAdapter {
                     return Err(http::Error::InvalidRequest);
                 }
 
-                let mut eff_options = self.options.clone();
-                eff_options.effort = effective_effort.clone();
-                let reconstructed = self.provider.encode(
-                    eff_options,
-                    self.system.clone(),
-                    messages.to_vec(),
-                )
-                .map_err(|_| http::Error::InvalidRequest)?;
+                let reconstructed = self.provider.encode(&effective_effort, &self.system, messages, None)
+                    .map_err(|_| http::Error::InvalidRequest)?;
 
                 if reconstructed.hash() != active.envelope.hash() {
                     return Err(http::Error::InvalidRequest);
@@ -469,9 +464,9 @@ impl Model for ApiBotAdapter {
             let res = match &self.progress_sink {
                 Some(sink) => {
                     let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
-                    self.provider.send(transport(), &envelope, cancel, Some(&report)).await
+                    self.provider.send(transport(), envelope.as_ref(), cancel, Some(&report)).await
                 }
-                None => self.provider.send(transport(), &envelope, cancel, None).await,
+                None => self.provider.send(transport(), envelope.as_ref(), cancel, None).await,
             };
             let duration_ms = req_start.elapsed().as_millis() as u64;
             drop(key);
@@ -482,8 +477,8 @@ impl Model for ApiBotAdapter {
                     // HTTP 已成功收到完整回應：帳是確定的。內容不合法（工具解析失敗、一批超過 32 個、
                     // 工具 id 重複、模型不符）或用量不合規則時，也要把這次 attempt 結成 `recorded`、收掉 api_pending，
                     // 之後的 prompt 才送得出去；transcript 維持送出前的 durable 狀態（不留半截 assistant tool batch）。
-                    let content_problem = self.provider.invalid_content_reason(&resp, &cursor.last_durable_state, &envelope.options().model);
-                    let quote_res = self.quote_provider.settle(&envelope, &resp);
+                    let content_problem = self.provider.invalid_content_reason(&resp, &cursor.last_durable_state);
+                    let quote_res = self.quote_provider.settle(envelope.as_ref(), &resp);
                     let valid_quote = match &quote_res {
                         Ok(uq)
                             if uq.estimated_microusd >= 0
@@ -515,7 +510,7 @@ impl Model for ApiBotAdapter {
                         let reason = match &content_problem {
                             Some(cp) => format!("content: {cp}"),
                             None => {
-                                let problem = super::pricing::classify_usage_problem(&envelope, &resp);
+                                let problem = self.provider.usage_problem(envelope.as_ref(), &resp);
                                 match problem {
                                     Some(p) => format!("untrusted_usage: {p}"),
                                     None => format!("untrusted_usage: {:?}", quote_res.as_ref().err()),
@@ -540,7 +535,7 @@ impl Model for ApiBotAdapter {
                             None => (
                                 None,
                                 None,
-                                self.quote_provider.reserve(&envelope).map(|q| q.reserved_microusd).unwrap_or(0).max(0),
+                                self.quote_provider.reserve(envelope.as_ref()).map(|q| q.reserved_microusd).unwrap_or(0).max(0),
                             ),
                         };
                         tracing::warn!(
@@ -673,44 +668,37 @@ impl Journal for ApiBotAdapter {
                             .unwrap_or(0);
 
                             if spent >= threshold {
-                                let lowered = super::protocol::lower_effort_level(&self.options.effort);
-                                if lowered != self.options.effort && cursor.effective_effort != lowered {
+                                let configured = self.provider.effort();
+                                let lowered = self.provider.lower_effort(configured);
+                                if lowered != configured && cursor.effective_effort != lowered {
                                     tracing::info!(
                                         bot_id = %self.identity.bot_id,
                                         turn_id = %self.identity.turn_id,
-                                        from = %self.options.effort,
+                                        from = %configured,
                                         to = %lowered,
                                         spent_microusd = spent,
                                         threshold_microusd = threshold,
                                         "auto lowered effort due to turn cost threshold"
                                     );
                                 }
-                                cursor.effective_effort = lowered.to_string();
-                                cursor.effort_auto_lowered = lowered != self.options.effort;
+                                cursor.effort_auto_lowered = lowered != configured;
+                                cursor.effective_effort = lowered;
                             } else {
-                                cursor.effective_effort = self.options.effort.clone();
+                                cursor.effective_effort = self.provider.effort().to_string();
                                 cursor.effort_auto_lowered = false;
                             }
                         }
                     }
 
-                    let mut eff_options = self.options.clone();
-                    eff_options.effort = cursor.effective_effort.clone();
-                    let mut envelope = self.provider.encode(
-                        eff_options,
-                        self.system.clone(),
-                        state.messages.clone(),
-                    )
-                    .map_err(|_| ())?;
-                    if let Some(prev) = state.responses.last() {
-                        envelope.set_previous_response(Some(prev.clone()));
-                    }
+                    let envelope = self.provider
+                        .encode(&cursor.effective_effort, &self.system, &state.messages, state.responses.last())
+                        .map_err(|_| ())?;
                     let key = self.http_cfg.key_source.snapshot().await.map_err(|_| {
                         tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable");
                         self.refuse("api_bot_key_unavailable");
                     })?;
                     if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); self.refuse("api_bot_key_unavailable"); return Err(()); }
-                    let quote = self.quote_provider.reserve(&envelope).map_err(|_| self.refuse("api_bot_quote_refused"))?;
+                    let quote = self.quote_provider.reserve(envelope.as_ref()).map_err(|_| self.refuse("api_bot_quote_refused"))?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
                         return Err(());
                     }

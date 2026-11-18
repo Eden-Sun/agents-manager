@@ -209,7 +209,8 @@ pub(super) fn running_cost_microusd(model: &str, fast: bool, ttl_1h: bool, p: &s
 }
 
 impl QuoteProvider for DirectGlobal {
-    fn reserve(&self, request: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
+    fn reserve(&self, request: &dyn super::quote::QuotedRequest) -> Result<ReservationQuote, QuoteError> {
+        let request = RequestEnvelope::of(request)?;
         let body = request.body();
         if forbidden(&body, request.options().cache_ttl_1h, request.options().web_search, request.options().web_fetch) {
             return Err(QuoteError::InvalidRequest);
@@ -230,7 +231,8 @@ impl QuoteProvider for DirectGlobal {
         })
     }
 
-    fn settle(&self, request: &RequestEnvelope, response: &Response) -> Result<UsageQuote, QuoteError> {
+    fn settle(&self, request: &dyn super::quote::QuotedRequest, response: &Response) -> Result<UsageQuote, QuoteError> {
+        let request = RequestEnvelope::of(request)?;
         self.reserve(request)?;
         let rates = rates(&request.options().model)?;
         if response.model != request.options().model { return Err(QuoteError::UntrustedUsage); }

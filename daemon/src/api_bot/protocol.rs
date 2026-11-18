@@ -17,7 +17,7 @@ pub struct Response {
     pub usage: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Options {
     pub model: String,
     pub effort: String,
@@ -270,6 +270,9 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
     body
 }
 
+/// Claude 請求宣告、由本機執行的工具（`request()` 的 `tools` 與回應驗證共用這一份名單）。
+pub const CLIENT_TOOL_NAMES: &[&str] = &["bash", "str_replace_based_edit_tool"];
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
     pub id: String,
@@ -279,7 +282,13 @@ pub struct ToolCall {
 
 impl Response {
     /// Validate the whole response before executing any tool, including later blocks.
+    /// 可執行的工具是 Claude 請求裡宣告的那幾個（[`CLIENT_TOOL_NAMES`]）。
     pub fn tools(&self) -> Result<Vec<ToolCall>, &'static str> {
+        self.tools_among(CLIENT_TOOL_NAMES)
+    }
+
+    /// 同 [`Self::tools`]，可執行的工具名由呼叫端（provider 的 codec）給，不寫死在回應型別裡。
+    pub fn tools_among(&self, allowed: &[&str]) -> Result<Vec<ToolCall>, &'static str> {
         if self.id.is_empty() || !crate::config::api_bot_model_supported(&self.model) || !self.usage.is_object() {
             return Err("invalid response metadata");
         }
@@ -301,7 +310,7 @@ impl Response {
                     .and_then(Value::as_str)
                     .ok_or("missing tool name")?;
                 if !ids.insert(id.to_owned())
-                    || !matches!(name, "bash" | "str_replace_based_edit_tool")
+                    || !allowed.contains(&name)
                 {
                     return Err("duplicate or unsupported tool");
                 }

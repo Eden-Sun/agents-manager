@@ -2,8 +2,8 @@
 //! 傳輸（`http.rs`／`sse.rs`）與報價都在這裡接上 [`super::provider`] 的中立介面。行為與抽接點之前逐位元組相同。
 use super::http;
 use super::protocol::{self, Message, Options, Response};
-use super::provider::{Codec, InvalidResponse, Provider, StopReason, ToolResult, Transport, TurnOutput, MAX_TOOL_CALLS_PER_RESPONSE};
-use super::quote::{QuoteError, QuoteProvider, RequestEnvelope};
+use super::provider::{Codec, InvalidResponse, Provider, ProviderExtras, SessionOptions, StopReason, ToolResult, Transport, TurnOutput, MAX_TOOL_CALLS_PER_RESPONSE};
+use super::quote::{QuoteError, QuoteProvider, QuotedRequest, RequestEnvelope};
 use super::runner::State;
 use super::sse::StreamProgress;
 use futures::future::BoxFuture;
@@ -12,6 +12,59 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub const ID: &str = "anthropic";
+/// 官方主機與 endpoint：正式建置只准連這一台。
+pub const OFFICIAL_HOST: &str = "api.anthropic.com";
+pub const OFFICIAL_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+
+/// Claude 專屬、別家沒有對應的 session 設定（[`Options`] 扣掉 model／effort／max_tokens）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnthropicExtras {
+    pub fast: bool,
+    pub compact_at_input_tokens: u32,
+    pub clear_tool_uses_at_input_tokens: u32,
+    pub clear_tool_uses_keep: u32,
+    pub clear_tool_uses_clear_at_least: u32,
+    pub cache_ttl_1h: bool,
+    pub web_search: bool,
+    pub web_fetch: bool,
+}
+
+/// Claude 的 [`Options`] → 中立的 session 選項（無損）。
+pub fn session_options(options: Options) -> SessionOptions {
+    SessionOptions {
+        model: options.model,
+        effort: options.effort,
+        max_output_tokens: options.max_tokens,
+        extras: ProviderExtras::Anthropic(AnthropicExtras {
+            fast: options.fast,
+            compact_at_input_tokens: options.compact_at_input_tokens,
+            clear_tool_uses_at_input_tokens: options.clear_tool_uses_at_input_tokens,
+            clear_tool_uses_keep: options.clear_tool_uses_keep,
+            clear_tool_uses_clear_at_least: options.clear_tool_uses_clear_at_least,
+            cache_ttl_1h: options.cache_ttl_1h,
+            web_search: options.web_search,
+            web_fetch: options.web_fetch,
+        }),
+    }
+}
+
+/// 中立的 session 選項 → Claude 的 [`Options`]；`extras` 不是 Claude 的就回 `None`。
+pub fn options_from(options: SessionOptions) -> Option<Options> {
+    let ProviderExtras::Anthropic(x) = options.extras else { return None };
+    Some(Options {
+        model: options.model,
+        effort: options.effort,
+        fast: x.fast,
+        max_tokens: options.max_output_tokens,
+        compact_at_input_tokens: x.compact_at_input_tokens,
+        clear_tool_uses_at_input_tokens: x.clear_tool_uses_at_input_tokens,
+        clear_tool_uses_keep: x.clear_tool_uses_keep,
+        clear_tool_uses_clear_at_least: x.clear_tool_uses_clear_at_least,
+        cache_ttl_1h: x.cache_ttl_1h,
+        web_search: x.web_search,
+        web_fetch: x.web_fetch,
+    })
+}
 
 fn has_block(response: &Response, kind: &str) -> bool {
     response.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some(kind))
@@ -22,7 +75,7 @@ pub struct AnthropicCodec;
 
 impl Codec for AnthropicCodec {
     fn accept(&self, state: &mut State, response: Response) -> Result<TurnOutput, InvalidResponse> {
-        let calls = response.tools().map_err(|_| InvalidResponse)?;
+        let calls = response.tools_among(protocol::CLIENT_TOOL_NAMES).map_err(|_| InvalidResponse)?;
         if calls.len() > MAX_TOOL_CALLS_PER_RESPONSE || calls.iter().any(|c| state.completed_tool_ids.contains(&c.id)) {
             return Err(InvalidResponse);
         }
@@ -138,12 +191,13 @@ pub(crate) fn invalid_content_reason(resp: &Response, durable: &State, model: &s
 }
 
 pub(crate) struct AnthropicProvider {
+    options: Options,
     quote_provider: Arc<dyn QuoteProvider>,
 }
 
 impl AnthropicProvider {
-    pub(crate) fn new(quote_provider: Arc<dyn QuoteProvider>) -> Self {
-        Self { quote_provider }
+    pub(crate) fn new(options: Options, quote_provider: Arc<dyn QuoteProvider>) -> Self {
+        Self { options, quote_provider }
     }
 }
 
@@ -156,22 +210,43 @@ impl Provider for AnthropicProvider {
         &AnthropicCodec
     }
 
-    fn encode(&self, options: Options, system: Value, messages: Vec<Message>) -> Result<RequestEnvelope, QuoteError> {
-        RequestEnvelope::new(options, system, messages)
+    fn model(&self) -> &str {
+        &self.options.model
+    }
+
+    fn effort(&self) -> &str {
+        &self.options.effort
+    }
+
+    fn lower_effort(&self, effort: &str) -> String {
+        protocol::lower_effort_level(effort).to_string()
+    }
+
+    fn official_endpoint(&self) -> &'static str {
+        OFFICIAL_ENDPOINT
+    }
+
+    fn encode(&self, effort: &str, system: &Value, transcript: &[Message], previous: Option<&Response>) -> Result<Arc<dyn QuotedRequest>, QuoteError> {
+        let mut options = self.options.clone();
+        options.effort = effort.to_string();
+        let envelope = RequestEnvelope::new(options, system.clone(), transcript.to_vec())?.with_previous_response(previous.cloned());
+        Ok(Arc::new(envelope))
     }
 
     fn send<'a>(
         &'a self,
         transport: Transport<'a>,
-        request: &'a RequestEnvelope,
+        request: &'a dyn QuotedRequest,
         cancel: &'a CancellationToken,
         progress: Option<&'a (dyn Fn(&StreamProgress) + Send + Sync)>,
     ) -> BoxFuture<'a, Result<Response, http::Error>> {
         Box::pin(async move {
+            let request = RequestEnvelope::of(request).map_err(|_| http::Error::InvalidRequest)?;
             let req = http::EncodedMessagesRequest {
                 endpoint: transport.endpoint,
                 key: transport.key,
                 request,
+                official_host: OFFICIAL_HOST,
                 timeout: transport.timeout,
                 max_response_bytes: transport.max_response_bytes,
             };
@@ -179,19 +254,55 @@ impl Provider for AnthropicProvider {
         })
     }
 
+    fn running_cost_microusd(&self, progress: &StreamProgress) -> Option<i64> {
+        super::pricing::running_cost_microusd(&self.options.model, self.options.fast, self.options.cache_ttl_1h, progress)
+    }
+
+    fn usage_problem(&self, request: &dyn QuotedRequest, response: &Response) -> Option<String> {
+        super::pricing::classify_usage_problem(RequestEnvelope::of(request).ok()?, response)
+    }
+
     fn definitive_rejection(&self, err: &http::Error) -> bool {
         definitive_rejection(err)
     }
 
-    fn invalid_content_reason(&self, response: &Response, durable: &State, model: &str) -> Option<String> {
-        invalid_content_reason(response, durable, model)
+    fn invalid_content_reason(&self, response: &Response, durable: &State) -> Option<String> {
+        invalid_content_reason(response, durable, &self.options.model)
     }
 
-    fn checkpoint_matches_model(&self, state: &State, model: &str) -> bool {
-        checkpoint_matches_model(state, model)
+    fn checkpoint_matches_model(&self, state: &State) -> bool {
+        checkpoint_matches_model(state, &self.options.model)
     }
 
     fn quote_provider(&self) -> Arc<dyn QuoteProvider> {
         self.quote_provider.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 中立選項來回一趟不能掉任何一個 Claude 設定（掉了就會改變送出的 body）。
+    #[test]
+    fn session_options_round_trip_every_claude_setting() {
+        let options = Options {
+            model: am_config::API_BOT_FABLE_MODEL.into(),
+            effort: "xhigh".into(),
+            fast: true,
+            max_tokens: 12_345,
+            compact_at_input_tokens: 150_000,
+            clear_tool_uses_at_input_tokens: 60_000,
+            clear_tool_uses_keep: 7,
+            clear_tool_uses_clear_at_least: 9_000,
+            cache_ttl_1h: true,
+            web_search: true,
+            web_fetch: true,
+        };
+        let neutral = session_options(options.clone());
+        assert_eq!((neutral.model.as_str(), neutral.effort.as_str(), neutral.max_output_tokens), (am_config::API_BOT_FABLE_MODEL, "xhigh", 12_345));
+        assert_eq!(options_from(neutral), Some(options));
+        let foreign = SessionOptions { model: "m".into(), effort: "low".into(), max_output_tokens: 1, extras: ProviderExtras::None };
+        assert_eq!(options_from(foreign), None, "another provider's options never become a Claude request");
     }
 }

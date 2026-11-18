@@ -68,7 +68,7 @@ pub async fn complete_with_progress(
 ) -> Result<Response, Error> {
     let body = serde_json::to_vec(&protocol::request(req.options, req.system, req.messages)).map_err(|_| Error::InvalidRequest)?;
     let beta = protocol::beta_header(req.options, req.messages);
-    let wire = Wire { endpoint: req.endpoint, key: req.key, options: req.options, has_messages: !req.messages.is_empty(), beta: &beta, body: &body, timeout: req.timeout, max_response_bytes: req.max_response_bytes };
+    let wire = Wire { endpoint: req.endpoint, key: req.key, options: req.options, has_messages: !req.messages.is_empty(), beta: &beta, body: &body, official_host: super::anthropic::OFFICIAL_HOST, timeout: req.timeout, max_response_bytes: req.max_response_bytes };
     Box::pin(send(&wire, cancel, progress)).await
 }
 
@@ -77,6 +77,8 @@ pub struct EncodedMessagesRequest<'a> {
     pub endpoint: &'a str,
     pub key: &'a str,
     pub request: &'a super::quote::RequestEnvelope,
+    /// provider 的官方主機（正式建置只准連這一台的 443）。
+    pub official_host: &'static str,
     pub timeout: Duration,
     pub max_response_bytes: usize,
 }
@@ -93,6 +95,7 @@ pub async fn complete_encoded(
         has_messages: !req.request.messages().is_empty(),
         beta: req.request.beta_header(),
         body: req.request.wire(),
+        official_host: req.official_host,
         timeout: req.timeout,
         max_response_bytes: req.max_response_bytes,
     };
@@ -107,6 +110,8 @@ struct Wire<'a> {
     has_messages: bool,
     beta: &'a str,
     body: &'a [u8],
+    #[cfg_attr(test, allow(dead_code))]
+    official_host: &'static str,
     timeout: Duration,
     max_response_bytes: usize,
 }
@@ -130,7 +135,7 @@ async fn send(
     }
     #[cfg(not(test))]
     if url.scheme() != "https"
-        || url.host_str() != Some("api.anthropic.com")
+        || url.host_str() != Some(req.official_host)
         || url.port_or_known_default() != Some(443)
     {
         return Err(Error::InvalidRequest);

@@ -769,14 +769,14 @@ async fn native_key_read_failure_does_not_poison_another_bot_after_repair() {
 struct Quote;
 
 impl super::super::quote::QuoteProvider for Quote {
-    fn reserve(&self, _: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
+    fn reserve(&self, _: &dyn crate::api_bot::quote::QuotedRequest) -> Result<ReservationQuote, QuoteError> {
         Ok(ReservationQuote {
             reserved_microusd: 100,
             pricing_version: "fixture-v1".into(),
         })
     }
 
-    fn settle(&self, _: &RequestEnvelope, _: &Response) -> Result<UsageQuote, QuoteError> {
+    fn settle(&self, _: &dyn crate::api_bot::quote::QuotedRequest, _: &Response) -> Result<UsageQuote, QuoteError> {
         Ok(UsageQuote {
             estimated_microusd: 50,
             actual_speed: None,

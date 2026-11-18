@@ -223,7 +223,7 @@ mod tests {
     }
 
     impl QuoteProvider for TestQuoteProvider {
-        fn reserve(&self, _req: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
+        fn reserve(&self, _req: &dyn crate::api_bot::quote::QuotedRequest) -> Result<ReservationQuote, QuoteError> {
             Ok(ReservationQuote {
                 reserved_microusd: self.reserved_amount,
                 pricing_version: "test-v1".into(),
@@ -231,7 +231,7 @@ mod tests {
         }
         fn settle(
             &self,
-            _req: &RequestEnvelope,
+            _req: &dyn crate::api_bot::quote::QuotedRequest,
             resp: &Response,
         ) -> Result<UsageQuote, QuoteError> {
             let u = resp.usage.as_object().ok_or(QuoteError::UntrustedUsage)?;
@@ -252,10 +252,10 @@ mod tests {
 
     struct FailClosedQuoteProvider;
     impl QuoteProvider for FailClosedQuoteProvider {
-        fn reserve(&self, _: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
+        fn reserve(&self, _: &dyn crate::api_bot::quote::QuotedRequest) -> Result<ReservationQuote, QuoteError> {
             Err(QuoteError::Unapproved)
         }
-        fn settle(&self, _: &RequestEnvelope, _: &Response) -> Result<UsageQuote, QuoteError> {
+        fn settle(&self, _: &dyn crate::api_bot::quote::QuotedRequest, _: &Response) -> Result<UsageQuote, QuoteError> {
             Err(QuoteError::Unapproved)
         }
     }

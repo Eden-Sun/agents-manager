@@ -28,6 +28,37 @@ impl EncodedRequest {
     }
 }
 
+/// 一份已編碼請求對 adapter 與報價的中立視圖：不看 provider 的原生內容，只認 hash、計價層級與模型。
+/// 各 provider 的實作自己持有原生的請求（Claude＝[`RequestEnvelope`]），報價時用 `as_any` 取回自己的型別。
+pub(crate) trait QuotedRequest: Send + Sync {
+    /// 已編碼 body 的 hash（預留、核對、帳本用）。
+    fn hash(&self) -> &str;
+    /// 請求的計價層級標籤（寫進 attempt）。
+    fn speed(&self) -> &'static str;
+    fn model(&self) -> &str;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+impl QuotedRequest for RequestEnvelope {
+    fn hash(&self) -> &str {
+        RequestEnvelope::hash(self)
+    }
+    fn speed(&self) -> &'static str {
+        RequestEnvelope::speed(self)
+    }
+    fn model(&self) -> &str {
+        &self.options.model
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+impl RequestEnvelope {
+    /// 從中立視圖取回 Claude 的請求；不是 Claude 的請求就是用錯 provider，回 `InvalidRequest`。
+    pub(crate) fn of(request: &dyn QuotedRequest) -> Result<&RequestEnvelope, QuoteError> {
+        request.as_any().downcast_ref::<RequestEnvelope>().ok_or(QuoteError::InvalidRequest)
+    }
+}
+
 /// Owns every input to the sole wire builder. Accessors cannot mutate quoted inputs.
 /// Deliberately no Debug or Serialize implementation: requests contain private content.
 #[derive(Clone)]
@@ -142,20 +173,20 @@ pub(crate) struct UsageQuote {
 /// Implementations must validate complete usage, not treat missing token counts as zero.
 /// Both methods are pure: no HTTP, key access, or speculative token-count requests.
 pub(crate) trait QuoteProvider: Send + Sync {
-    fn reserve(&self, request: &RequestEnvelope) -> Result<ReservationQuote, QuoteError>;
+    fn reserve(&self, request: &dyn QuotedRequest) -> Result<ReservationQuote, QuoteError>;
     fn settle(
         &self,
-        request: &RequestEnvelope,
+        request: &dyn QuotedRequest,
         response: &Response,
     ) -> Result<UsageQuote, QuoteError>;
 }
 /// The only production provider in C1. Approval of prices and token bounds belongs to D.
 pub(crate) struct FailClosed;
 impl QuoteProvider for FailClosed {
-    fn reserve(&self, _: &RequestEnvelope) -> Result<ReservationQuote, QuoteError> {
+    fn reserve(&self, _: &dyn QuotedRequest) -> Result<ReservationQuote, QuoteError> {
         Err(QuoteError::Unapproved)
     }
-    fn settle(&self, _: &RequestEnvelope, _: &Response) -> Result<UsageQuote, QuoteError> {
+    fn settle(&self, _: &dyn QuotedRequest, _: &Response) -> Result<UsageQuote, QuoteError> {
         Err(QuoteError::Unapproved)
     }
 }
