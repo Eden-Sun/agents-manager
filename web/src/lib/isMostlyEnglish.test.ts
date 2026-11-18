@@ -19,3 +19,14 @@ test('中文說明加大段英文程式碼區塊：看說明、不看程式碼',
 test('英文說明加一點中文專有名詞：是', () => {
   assert.equal(isMostlyEnglish('The daemon restarted cleanly and the 翻譯 button now shows up in every long English reply.'), true)
 })
+
+test('英文回覆內含一段繁中引用（約 6 行中文＋10 行英文）：是', () => {
+  const englishLines = 'This is a test line.\n'.repeat(10)
+  const chineseLines = '這是一段繁體中文的引用說明。\n'.repeat(6)
+  assert.equal(isMostlyEnglish(englishLines + chineseLines), true)
+})
+
+test('繁中回覆夾英文指令／路徑：否', () => {
+  assert.equal(isMostlyEnglish('已經修好了，請執行 `cd /home/ubuntu/project/am-wt-eng` 並確認狀態。'), false)
+})
+
