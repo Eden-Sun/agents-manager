@@ -354,6 +354,27 @@ impl OpenAiProvider {
     }
 }
 
+impl OpenAiProvider {
+    /// 這份 transcript 對應的 codec 請求（還沒編碼）。[`Provider::encode`] 編的就是它；測試拿它對 `pricing::quote_request` 核對報價。
+    pub(crate) fn request_for(&self, effort: &str, system: &Value, transcript: &[Message]) -> Result<codec::Request, QuoteError> {
+        if transcript.is_empty() {
+            return Err(QuoteError::InvalidRequest);
+        }
+        let instructions = match system {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        Ok(codec::Request {
+            model: self.model.clone(),
+            instructions,
+            input: input_items(transcript).map_err(|_| QuoteError::InvalidRequest)?,
+            tools: tool_specs(),
+            effort: Some(effort.to_string()),
+            max_output_tokens: self.max_output_tokens,
+        })
+    }
+}
+
 impl Provider for OpenAiProvider {
     fn id(&self) -> &'static str {
         ID
@@ -384,21 +405,7 @@ impl Provider for OpenAiProvider {
     }
 
     fn encode(&self, effort: &str, system: &Value, transcript: &[Message], _previous: Option<&Response>) -> Result<Arc<dyn QuotedRequest>, QuoteError> {
-        if transcript.is_empty() {
-            return Err(QuoteError::InvalidRequest);
-        }
-        let instructions = match system {
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
-        let request = codec::Request {
-            model: self.model.clone(),
-            instructions,
-            input: input_items(transcript).map_err(|_| QuoteError::InvalidRequest)?,
-            tools: tool_specs(),
-            effort: Some(effort.to_string()),
-            max_output_tokens: self.max_output_tokens,
-        };
+        let request = self.request_for(effort, system, transcript)?;
         // 配對錯、重複 call_id、不支援的 effort 都在這裡（HTTP 之前）拒絕。
         let wire = request.body().map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(&wire));
