@@ -307,13 +307,36 @@ fn a_stream_without_a_terminal_event_is_truncated_even_in_the_middle_of_an_event
 }
 
 #[test]
-fn a_completed_response_without_usage_is_usable_but_its_cost_is_unknown_not_zero() {
+fn a_completed_response_without_trustworthy_usage_is_refused_not_priced_as_unknown() {
     let msg = message_item("好");
-    let bytes = sse(&[json!({"type": "response.completed", "response": {"id": "r", "status": "completed", "output": [msg]}})]);
-    let out = completed(run(&bytes, 6).unwrap().0);
-    assert_eq!(out.text, "好");
-    assert_eq!(out.usage, Err(UsageError::Missing));
+    let stream = |usage: Option<Value>| {
+        let mut resp = json!({"id": "r", "status": "completed", "output": [msg.clone()]});
+        if let Some(usage) = usage {
+            resp["usage"] = usage;
+        }
+        sse(&[json!({"type": "response.completed", "response": resp})])
+    };
+    assert!(matches!(run(&stream(Some(usage(10, 0, 0, 5, 0))), 6).unwrap().0, Outcome::Completed(_)));
+    // 沒有 usage、usage 是 null、分項矛盾：都不採用。
+    for bad in [None, Some(Value::Null), Some(usage(100, 80, 40, 10, 0)), Some(json!({"input_tokens": 10}))] {
+        for chunk in [1, 6, 4096] {
+            assert_eq!(run(&stream(bad.clone()), chunk).map(|_| ()), Err(CodecError::MissingUsage), "{bad:?}");
+        }
+    }
+    // 兩個工具的完整串流，只把 completed 的 usage 拿掉：工具一個都不交出。
+    let text = String::from_utf8(two_tool_stream()).unwrap();
+    let at = text.rfind("data: ").unwrap();
+    let mut last: Value = serde_json::from_str(text[at + 6..].trim_end()).unwrap();
+    assert!(last["response"].as_object_mut().unwrap().remove("usage").is_some());
+    let stripped = format!("{}data: {last}\n\n", &text[..at]);
+    assert_eq!(run(stripped.as_bytes(), 7).map(|_| ()), Err(CodecError::MissingUsage));
     assert_eq!(Usage::from_response(Some(&Value::Null)), Err(UsageError::Missing));
+    // 未完成的回應沒有 usage 仍回 Incomplete（費用未知，由呼叫端保留預留）。
+    let incomplete = sse(&[json!({"type": "response.incomplete", "response": {"id": "r", "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": []}})]);
+    match run(&incomplete, 8).unwrap().0 {
+        Outcome::Incomplete { output, .. } => assert_eq!(output.usage, Err(UsageError::Missing)),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -660,4 +683,62 @@ fn quotes_newlines_and_backslashes_in_the_request_are_escaped_not_spliced() {
     assert_eq!(body["input"][0]["content"][0]["text"], json!(tricky));
     assert_eq!(body["store"], json!(false), "內容裡的字樣不能變成欄位");
     assert_eq!(r.body().unwrap(), bytes);
+}
+
+// ───────────── 補強：依模型的報價／結算入口 ─────────────
+
+#[test]
+fn settle_refuses_unknown_models_and_non_standard_tiers() {
+    let u = Usage::from_response(Some(&usage_with_ttl(12_000, 4_000, 3_000, 4_000, 500))).unwrap();
+    assert_eq!(settle("gpt-6-luna", &u, None), Ok(1_765));
+    assert_eq!(settle("gpt-6-luna", &u, Some("default")), Ok(1_765));
+    for tier in ["flex", "priority", "fast", "auto", ""] {
+        assert_eq!(settle("gpt-6-luna", &u, Some(tier)), Err(PriceError::UnsupportedTier), "{tier}");
+    }
+    assert_eq!(settle("gpt-unknown", &u, None), Err(PriceError::UnknownModel));
+    assert_eq!(settle("gpt-6-luna-2026-11-01", &u, None), Err(PriceError::UnknownModel), "價表只認請求的模型 id");
+    let tiny = Usage::from_response(Some(&usage(7, 0, 0, 1, 0))).unwrap();
+    assert_eq!(settle("gpt-6-luna", &tiny, None), Ok(2), "0.7 + 0.5 = 1.2 微美元 → 2，不是 0");
+    let broken = Usage { input_tokens: 10, cached_tokens: 8, cache_write_tokens: 8, cache_write_12h_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+    assert_eq!(settle("gpt-6-luna", &broken, None), Err(PriceError::Overflow), "分項超過總數");
+    // 串流回報非標準 tier：結果帶得出來，結算拒絕。
+    let msg = message_item("好");
+    let bytes = sse(&[json!({"type": "response.completed", "response": {"id": "r", "status": "completed", "service_tier": "priority", "output": [msg], "usage": usage(10, 0, 0, 5, 0)}})]);
+    let out = completed(run(&bytes, 9).unwrap().0);
+    assert_eq!(settle("gpt-6-luna", out.usage.as_ref().unwrap(), out.service_tier.as_deref()), Err(PriceError::UnsupportedTier));
+}
+
+#[test]
+fn quote_request_bounds_the_bytes_that_are_actually_sent() {
+    let request = luna_request(vec![InputItem::User("hi".into())]);
+    let wire = request.body().unwrap();
+    let bound = input_token_bound("gpt-6-luna", wire.len()).unwrap();
+    assert_eq!(bound, wire.len() as u64 + INPUT_MARGIN_TOKENS);
+    let quote = quote_request(&request).unwrap();
+    assert_eq!(Ok(quote), quote_upper_bound("gpt-6-luna", bound, 4096));
+    // 這份請求最貴的結算：全部輸入都是 12 小時快取寫、輸出用滿。
+    let worst = Usage::from_response(Some(&usage_with_ttl(bound, 0, 0, bound, 4096))).unwrap();
+    assert_eq!(settle("gpt-6-luna", &worst, None), Ok(quote));
+    // 歷史越長報價越高；同一份請求報價不變。
+    let longer = luna_request(vec![InputItem::User("hi".repeat(5_000))]);
+    assert!(quote_request(&longer).unwrap() > quote);
+    assert_eq!(quote_request(&request), Ok(quote));
+
+    // 缺價的模型、編不出來的請求、超過 context window：HTTP 前拒絕。
+    let mut unknown = luna_request(vec![InputItem::User("hi".into())]);
+    unknown.model = "gpt-unknown".into();
+    assert_eq!(quote_request(&unknown), Err(PriceError::UnknownModel));
+    let mut bad_effort = luna_request(vec![InputItem::User("hi".into())]);
+    bad_effort.effort = Some("minimal".into());
+    assert_eq!(quote_request(&bad_effort), Err(PriceError::InvalidRequest));
+    let orphan = luna_request(vec![InputItem::ToolOutput { call_id: "nope".into(), output: "x".into() }]);
+    assert_eq!(quote_request(&orphan), Err(PriceError::InvalidRequest));
+    assert_eq!(quote_request(&luna_request(vec![InputItem::User("x".repeat(1_050_000))])), Err(PriceError::TooLarge));
+
+    assert_eq!(input_token_bound("gpt-6-luna", 1_050_000 - 8192), Ok(1_050_000));
+    assert_eq!(input_token_bound("gpt-6-luna", 1_050_000 - 8191), Err(PriceError::TooLarge));
+    assert_eq!(input_token_bound("gpt-unknown", 1), Err(PriceError::UnknownModel));
+    assert_eq!(quote_upper_bound("gpt-unknown", 1, 1), Err(PriceError::UnknownModel));
+    assert_eq!(quote_upper_bound("gpt-6-luna", u64::MAX, u64::MAX), Err(PriceError::Overflow));
+    assert_eq!(quote_upper_bound("gpt-6-luna", 272_001, 0), Ok(136_001), "上界跨過 272K 用長文價");
 }

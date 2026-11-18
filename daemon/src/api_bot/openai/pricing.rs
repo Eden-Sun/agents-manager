@@ -21,6 +21,8 @@ pub(crate) struct PriceTable {
     pub output: u64,
     /// 輸入 token **超過**這個數時，整個請求改用長文價：輸入與快取 ×2、輸出 ×1.5。
     pub long_context_over: u64,
+    /// 模型的 context window（tokens）：輸入上界超過它的請求在 HTTP 前拒絕。
+    pub context_window: u64,
 }
 
 /// gpt-6-luna，標準 tier，2026-11-18：普通輸入 $0.10、快取讀 $0.01、預設寫 $0.125、輸出 $0.50（每百萬 tokens）。
@@ -36,6 +38,7 @@ pub(crate) const GPT_6_LUNA_2026_11_18: PriceTable = PriceTable {
     cache_write_12h: 250_000,
     output: 500_000,
     long_context_over: 272_000,
+    context_window: 1_050_000,
 };
 
 /// 這個 binary 認得的價表（每個模型取生效日最新的一張）。找不到＝缺價，呼叫端必須在 HTTP 前拒絕。
@@ -161,4 +164,55 @@ fn round_up(input: u128, output: u128, long_context: bool) -> Option<u64> {
     let (input_halves, output_halves) = if long_context { (4, 3) } else { (2, 2) };
     let halves = input.checked_mul(input_halves)?.checked_add(output.checked_mul(output_halves)?)?;
     u64::try_from(halves.div_ceil(2_000_000)).ok()
+}
+
+/// 報價／結算無法給出金額的原因。呼叫端一律當作「不准送」或「費用未知」，不當作 0。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PriceError {
+    /// 這個模型沒有價表。
+    UnknownModel,
+    /// 回應的 service tier 不是標準價（flex／priority…）：沒有核准的價。
+    UnsupportedTier,
+    /// 請求編不出來（模型、effort 或工具配對不合法）。
+    InvalidRequest,
+    /// 請求大到超過模型的 context window。
+    TooLarge,
+    /// 金額溢位或用量分項矛盾。
+    Overflow,
+}
+
+/// 請求位元組數之外，替上游隱藏的內容與特殊 token 留的固定餘裕。
+pub(crate) const INPUT_MARGIN_TOKENS: u64 = 8192;
+
+/// 一份已編碼請求的輸入 token 上界：一個 token 至少涵蓋 1 byte，所以 body 位元組數（加固定餘裕）就是上界。
+pub(crate) fn input_token_bound(model: &str, wire_bytes: usize) -> Result<u64, PriceError> {
+    let table = price_table(model).ok_or(PriceError::UnknownModel)?;
+    let bound = u64::try_from(wire_bytes).ok().and_then(|b| b.checked_add(INPUT_MARGIN_TOKENS)).ok_or(PriceError::Overflow)?;
+    if bound > table.context_window {
+        return Err(PriceError::TooLarge);
+    }
+    Ok(bound)
+}
+
+/// 預留用的上界報價（微美元）：依模型查價表，見 [`quote_upper_bound_microusd`]。
+pub(crate) fn quote_upper_bound(model: &str, input_tokens_bound: u64, max_output_tokens: u64) -> Result<u64, PriceError> {
+    let table = price_table(model).ok_or(PriceError::UnknownModel)?;
+    quote_upper_bound_microusd(table, input_tokens_bound, max_output_tokens).ok_or(PriceError::Overflow)
+}
+
+/// 送出前的預留報價：用的就是實際要送的那份位元組（含工具定義與重送的歷史）與 `max_output_tokens`。
+pub(crate) fn quote_request(request: &super::codec::Request) -> Result<u64, PriceError> {
+    let table = price_table(&request.model).ok_or(PriceError::UnknownModel)?;
+    let wire = request.body().map_err(|_| PriceError::InvalidRequest)?;
+    let bound = input_token_bound(table.model, wire.len())?;
+    quote_upper_bound(table.model, bound, request.max_output_tokens)
+}
+
+/// 結算（微美元）。`model` 是**請求**的模型；`service_tier` 是回應回報的 tier，不是標準價就回 [`PriceError::UnsupportedTier`]。
+pub(crate) fn settle(model: &str, usage: &Usage, service_tier: Option<&str>) -> Result<u64, PriceError> {
+    let table = price_table(model).ok_or(PriceError::UnknownModel)?;
+    if !is_standard_tier(service_tier) {
+        return Err(PriceError::UnsupportedTier);
+    }
+    cost_microusd(table, usage).ok_or(PriceError::Overflow)
 }

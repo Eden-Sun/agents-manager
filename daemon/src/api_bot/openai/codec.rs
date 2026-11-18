@@ -50,6 +50,8 @@ pub(crate) enum CodecError {
     DuplicateCallId(String),
     /// 工具參數不是合法 JSON 物件：整個回應不採用，工具不執行。
     BadToolArguments(String),
+    /// `response.completed` 沒有完整可信的 usage：這一次的費用算不出來，整個回應不採用（不當成 0、也不當成可用）。
+    MissingUsage,
     /// 事件順序、JSON、型別或與 `response.completed` 不一致。
     Protocol(String),
     Sse(SseError),
@@ -205,7 +207,7 @@ pub(crate) struct ModelOutput {
     pub tool_calls: Vec<ToolCall>,
     /// 下一次呼叫要原樣重播的有序 items（含 reasoning）。
     pub replay: Vec<ReplayItem>,
-    /// `Err(Missing)`＝回應沒帶 usage：費用未知，**不能當 0**。
+    /// completed 的回應一定是 `Ok`（缺 usage 會是 [`CodecError::MissingUsage`]）；只有未完成的回應可能是 `Err`：費用未知，**不能當 0**。
     pub usage: Result<Usage, UsageError>,
     /// 回應回報的 service tier；價表只涵蓋標準 tier（見 `pricing::is_standard_tier`）。
     pub service_tier: Option<String>,
@@ -335,6 +337,9 @@ impl ResponseAssembler {
                     return Err(CodecError::Protocol("completed event carries a non-completed status".into()));
                 }
                 let output = self.build_output(resp, true)?;
+                if output.usage.is_err() {
+                    return Err(CodecError::MissingUsage);
+                }
                 self.terminal = Some(Outcome::Completed(output));
             }
             "response.incomplete" => {
