@@ -4,6 +4,30 @@ use super::protocol::{self, Message, Options, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// 已編碼、不可變的請求：送上線的 body 位元組、同一份 body 的 JSON 值（報價量大小用）、request hash、beta header。
+/// 建好之後沒有任何可變的入口；報價、算 hash、實際送出都讀這一份。沒有 Debug／Serialize：內容是私密的。
+pub(crate) struct EncodedRequest {
+    body: Value,
+    wire: Vec<u8>,
+    hash: String,
+    beta_header: String,
+}
+impl EncodedRequest {
+    /// 送上線的位元組（`serde_json::to_vec(body)`，與 reqwest `.json()` 產生的相同）。
+    pub(crate) fn wire(&self) -> &[u8] {
+        &self.wire
+    }
+    pub(crate) fn body(&self) -> &Value {
+        &self.body
+    }
+    pub(crate) fn hash(&self) -> &str {
+        &self.hash
+    }
+    pub(crate) fn beta_header(&self) -> &str {
+        &self.beta_header
+    }
+}
+
 /// Owns every input to the sole wire builder. Accessors cannot mutate quoted inputs.
 /// Deliberately no Debug or Serialize implementation: requests contain private content.
 #[derive(Clone)]
@@ -11,7 +35,7 @@ pub(crate) struct RequestEnvelope {
     options: Options,
     system: Value,
     messages: Vec<Message>,
-    hash: String,
+    encoded: std::sync::Arc<EncodedRequest>,
     previous_response: Option<Response>,
 }
 impl RequestEnvelope {
@@ -24,21 +48,34 @@ impl RequestEnvelope {
         if messages.is_empty() {
             return Err(QuoteError::InvalidRequest);
         }
+        // 唯一一次編碼：之後報價、hash、送出都用這份，不再呼叫 `protocol::request`。
         let body = protocol::request(&options, &system, &messages);
+        let wire = serde_json::to_vec(&body).map_err(|_| QuoteError::InvalidRequest)?;
         // Recursively sort object keys, independent of serde_json feature unification.
         let canonical = canonicalize(&body);
         let bytes = serde_json::to_vec(&canonical).map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(bytes));
+        let beta_header = protocol::beta_header(&options, &messages);
         Ok(Self {
             options,
             system,
             messages,
-            hash,
+            encoded: std::sync::Arc::new(EncodedRequest { body, wire, hash, beta_header }),
             previous_response: None,
         })
     }
+    pub(crate) fn encoded(&self) -> &EncodedRequest {
+        &self.encoded
+    }
+    /// 送上線的位元組。
+    pub(crate) fn wire(&self) -> &[u8] {
+        self.encoded.wire()
+    }
+    pub(crate) fn beta_header(&self) -> &str {
+        self.encoded.beta_header()
+    }
     pub(crate) fn hash(&self) -> &str {
-        &self.hash
+        self.encoded.hash()
     }
     pub(crate) fn options(&self) -> &Options {
         &self.options
@@ -56,8 +93,9 @@ impl RequestEnvelope {
             "standard"
         }
     }
-    pub(crate) fn body(&self) -> Value {
-        protocol::request(&self.options, &self.system, &self.messages)
+    /// 已編碼的 body（JSON 值）；不重新組。
+    pub(crate) fn body(&self) -> &Value {
+        self.encoded.body()
     }
     pub(crate) fn previous_response(&self) -> Option<&Response> {
         self.previous_response.as_ref()

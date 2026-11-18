@@ -459,12 +459,11 @@ impl Model for ApiBotAdapter {
                 )
             };
 
-            let req = http::FullMessagesRequest {
+            // 送出的是 reserve 時報價、算 hash 的那一份已編碼請求（`active.envelope`），不重新組 body。
+            let req = http::EncodedMessagesRequest {
                 endpoint: &self.http_cfg.endpoint,
                 key: key.as_str(),
-                options: envelope.options(),
-                system: envelope.system(),
-                messages: envelope.messages(),
+                request: &envelope,
                 timeout: self.http_cfg.timeout,
                 max_response_bytes: self.http_cfg.max_response_bytes,
             };
@@ -473,9 +472,9 @@ impl Model for ApiBotAdapter {
             let res = match &self.progress_sink {
                 Some(sink) => {
                     let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
-                    http::complete_with_progress(&req, cancel, Some(&report)).await
+                    http::complete_encoded(&req, cancel, Some(&report)).await
                 }
-                None => http::complete(&req, cancel).await,
+                None => http::complete_encoded(&req, cancel, None).await,
             };
             let duration_ms = req_start.elapsed().as_millis() as u64;
             drop(key);

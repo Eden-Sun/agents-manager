@@ -133,6 +133,18 @@ pub const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 /// Compaction 自訂摘要指示詞。
 pub const COMPACT_INSTRUCTIONS: &str = "Keep the user's goal, decisions made, files and findings so far, open questions, and what remains to do.";
 
+/// 這份請求要帶的 `anthropic-beta` header 值（與 body 一起決定，報價／送出共用同一份）。
+pub fn beta_header(options: &Options, messages: &[Message]) -> String {
+    let mut betas = vec![THINKING_BINDING_BETA];
+    if options.compact_at_input_tokens > 0 || is_compact_request(messages) {
+        betas.push(COMPACT_BETA);
+    }
+    if options.clear_tool_uses_at_input_tokens > 0 {
+        betas.push(CONTEXT_MANAGEMENT_BETA);
+    }
+    betas.join(",")
+}
+
 /// 檢查最後一則使用者訊息是否為主動要求壓縮（`/compact`）。
 pub fn is_compact_request(messages: &[Message]) -> bool {
     messages.last().is_some_and(|m| {

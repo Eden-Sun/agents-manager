@@ -84,6 +84,9 @@ fn a_legacy_checkpoint_loads_and_encodes_to_the_golden_claude_request() {
     // body：serde_json 預設的物件鍵序（preserve_order 未開時是字母序），逐字固定。
     let body = serde_json::to_string(&env.body()).unwrap();
     assert_eq!(body, GOLDEN_BODY, "Claude request body 必須與抽接點之前位元組相同");
+    assert_eq!(env.wire(), GOLDEN_BODY.as_bytes(), "實際送上線的位元組就是報價／算 hash 的那一份");
+    assert_eq!(env.encoded().hash(), GOLDEN_HASH);
+    assert_eq!(env.beta_header(), super::protocol::THINKING_BINDING_BETA);
     assert_eq!(env.hash(), GOLDEN_HASH, "request hash");
     // 報價與結算（價格）
     let quote = DirectGlobal.reserve(&env).unwrap();
@@ -189,6 +192,7 @@ async fn a_wrap_up_request_from_a_legacy_checkpoint_matches_the_golden_request_a
     let system = json!([{"type": "text", "text": "You are AG Man's API bot."}]);
     let env = RequestEnvelope::new(opts, system, sent[0].clone()).unwrap();
     assert_eq!(serde_json::to_string(&env.body()).unwrap(), GOLDEN_WRAP_BODY, "收尾請求的 body 必須位元組相同");
+    assert_eq!(env.wire(), GOLDEN_WRAP_BODY.as_bytes());
     assert_eq!(env.hash(), GOLDEN_WRAP_HASH);
     assert_eq!(env.speed(), "fast");
     let quote = DirectGlobal.reserve(&env).unwrap();

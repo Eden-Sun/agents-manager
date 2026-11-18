@@ -458,7 +458,7 @@ mod tests {
 
         let received = bodies.lock().await;
         assert_eq!(received.len(), 1);
-        assert_eq!(received[0], expected_envelope.body());
+        assert_eq!(&received[0], expected_envelope.body());
 
         drop(received);
         server.shutdown().await;
