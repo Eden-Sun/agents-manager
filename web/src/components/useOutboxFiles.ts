@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { OutboxFile } from '../api'
 import { downloadFailure, lastSettledTurnKey, orderFiles, readOutbox, relayedOutboxRefs, splitOutboxName } from '../lib/outboxList'
-import { isSandboxPreviewable, renderSandboxShell } from '../lib/sandboxPreview'
+import { isHtmlFile } from '../lib/htmlPreview'
 import { clearOutboxPreviews } from '../lib/outboxPreviewCache'
 import { useStore } from '../store/store'
 
@@ -144,15 +144,10 @@ export function useOutboxFiles() {
     const kept0 = kept
     setBusy(mine)
     try {
-      if (isSandboxPreviewable(name)) {
-        // html：取回文字，在這個空白分頁裡建沙盒外殼（opaque origin 的 iframe），bot 的 html 不會以主應用的身分執行。
-        // 沒有 blob URL 要釋放（文字取回後 outboxFileText 已經 revoke），分頁關閉就沒有東西留著。
-        renderSandboxShell(w, name, await api.outboxFileText(from, name))
-        return
-      }
       // 預覽走帶 token 的 blobUrl（避免 URL 洩漏 token 或新分頁認證缺失）
       // 注意：預覽安全性靠後端與前端嚴格的 MIME 白名單，Blob URL 本身不繼承 HTTP 回應的 CSP
-      const url = await api.outboxFileUrl(from, name, true)
+      // .html／.htm：重包成 text/html 的 blob 在新分頁完整打開（不沙箱化，使用者 2026-11-18）；其他照舊走 inline 的 blob。
+      const url = isHtmlFile(name) ? await api.outboxHtmlUrl(from, name) : await api.outboxFileUrl(from, name, true)
       try {
         w.location.href = url
       } catch {

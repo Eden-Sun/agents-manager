@@ -153,7 +153,6 @@ const dict: Dict = {
   "下載 {name}": "Download {name}",
   "開新分頁預覽 {name}": "Preview {name} in new tab",
   "開新分頁預覽（不下載）": "Preview in new tab (without downloading)",
-  "開新分頁預覽（沙盒，不下載）": "Preview in new tab (sandboxed, without downloading)",
   "放開以附加檔案": "Release to attach files",
   "待送出的檔案": "Pending files to send",
   "移除 {name}": "Remove {name}",

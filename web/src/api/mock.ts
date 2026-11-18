@@ -560,6 +560,19 @@ function mockUploadProgress(name: string, total: number, { signal, onProgress }:
   })
 }
 
+/** mock 的 outbox 範例 html：用 CDN 的 Chart.js 畫長條圖（外部 script 要能載入，不沙箱化）。 */
+const MOCK_REPORT_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Sales report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script></head>
+<body style="font-family:sans-serif"><h1>Sales report</h1><canvas id="c" width="480" height="240"></canvas>
+<p id="status">loading chart.js…</p>
+<script>
+window.addEventListener('load', function () {
+  var ok = typeof Chart !== 'undefined';
+  document.getElementById('status').textContent = ok ? 'chart.js loaded' : 'chart.js NOT loaded';
+  if (ok) new Chart(document.getElementById('c'), { type: 'bar', data: { labels: ['Q1', 'Q2', 'Q3', 'Q4'], datasets: [{ label: 'Revenue', data: [12, 19, 8, 15], backgroundColor: '#3b82f6' }] }, options: { animation: false } });
+});
+</script></body></html>`
+
 export class MockTransport implements Transport {
   readonly mock = true
 
@@ -1161,6 +1174,8 @@ export class MockTransport implements Transport {
     const out = /^\/bots\/([^/]+)\/outbox\/file\?path=(.+)$/.exec(path)
     if (out) {
       const name = decodeURIComponent(out[2])
+      // .html：演 bot 產的報表（CDN 的 Chart.js）；後端對 .html 回 octet-stream，前端自己決定預覽 blob 的 type（使用者 2026-11-18：不沙箱化）。
+      if (/\.html?$/i.test(name)) return URL.createObjectURL(new Blob([MOCK_REPORT_HTML], { type: 'application/octet-stream' }))
       return URL.createObjectURL(new Blob([`（mock）${name} 的內容\n`], { type: 'text/plain' }))
     }
     // 對話裡的本機圖片：畫一張標出路徑的示意圖，`missing` 開頭的演 404。
@@ -2060,6 +2075,7 @@ export class MockTransport implements Transport {
       ...(kept ? { kept: true } : {}),
       files: [
         ...(this.outboxAdded.get(botId) ?? []).map((name) => file(name, 141, 5)),
+        file('sales-report.html', 1_024, 90),
         file('tracking.tsv', 18_432, 120),
         file(L('出貨追蹤 v2.md', 'shipment-tracking v2.md'), 4_096, 1_500),
         file('run.log', 1_204_233, 3_300),

@@ -1600,16 +1600,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 表格與 code block 維持各自在 `.bubble.md` 內橫向捲動（`table`、`pre` 的 `overflow-x:auto`），不影響列表寬度。
 - 測試：`chatMobileOverflow.test.ts` 斷言上述規則。
 
-## outbox 的 .html 沙盒預覽（2026-11-18，使用者指示）
+## outbox 的 .html 預覽：直接開、不沙箱化（2026-11-18，使用者決定）
 
-- 「bot 給你的檔案」的 `.html`／`.htm` 也有 ↗（title「開新分頁預覽（沙盒，不下載）」）；`.svg` 與其他未列副檔名沒有。判斷函式是 `isSandboxPreviewable`，不動 `INLINE_PREVIEW_EXTENSIONS`／`isBrowserPreviewable` 的語意。
-- 不能把 html 直接開成 blob: 分頁（會與主應用同源、可讀 token）。流程：點擊當下 `window.open('')` 先開空白頁、`opener = null` → 帶 token 下載取文字 → 在該分頁寫入靜態外殼，DOM 建 `<iframe sandbox="allow-scripts" srcdoc>`，標題是檔名、iframe 佔滿視窗。旗標只准 `allow-scripts`（測試鎖死）。
-- 實測（真瀏覽器，mock 外殼頁）：含 `<script>` 的 html 能畫 canvas；iframe 內讀 `localStorage`、`parent.document`、`document.cookie`、設 `top.location` 都丟 SecurityError，`window.open` 被擋，`alert` 無效果（沒有 allow-modals），連網被外殼 CSP 擋。
-- 取捨：外殼 CSP 會被 srcdoc 繼承，所以 bot 的 html 不能載外部 script／樣式／圖片或連網；圖表要用內嵌的程式與資料。
-
-
-## 專案排程狀態點：等待中是黃色，不沿用上次失敗的紅（2026-11-18，使用者截圖）
-
-- 現象：卡片「現在：等待送出」時狀態點是紅的，因為沿用了「上次：失敗」。
-- 規則（`scheduleRowLines`）：停用＝空心；有未結束的 occurrence 且還沒在跑＝黃（`waiting`：pending、等待重試、queued 未開始）；執行中沿用上次結果的顏色（「現在」那行已寫「執行中」）；沒有未結束的 occurrence 才依上次結果（成功綠、失敗紅、從未執行灰）。
-- 黃色用既有的 `--warn` token（`schedules.css` 的 `.project-schedule-dot.waiting`），深淺色模式都有定義。
+- 使用者原話：「.html 預覽不需要沙箱化」。要的是能正常打開 bot 產的 html 報表（含 CDN 的 Chart.js 等外部 script／樣式／圖片）；同日稍早的 sandbox iframe 版（外殼 CSP 擋掉所有外部資源）取代掉，`lib/sandboxPreview.ts` 與其測試移除。
+- 「bot 給你的檔案」的 `.html`／`.htm` 有 ↗（title 同其他預覽「開新分頁預覽（不下載）」）；`.svg` 與其他未列副檔名沒有。判斷函式 `isHtmlFile`（`lib/htmlPreview.ts`），不動 `INLINE_PREVIEW_EXTENSIONS`／`isBrowserPreviewable` 的語意。
+- 流程沿用 `openPreview`：點擊當下 `window.open('')` 先開空白頁、`opener = null` → `api.outboxHtmlUrl` 帶 token 下載（非 inline、後端回 octet-stream）→ 重包成 `text/html;charset=utf-8` 的 blob URL（原本取檔的 blob 立刻釋放）→ 新分頁導過去；每 30 秒看分頁是否關閉，關了才 revoke。後端不用改，blob 的 type 由前端決定。
+- 風險（使用者已接受）：blob URL 與主應用同源，bot 產的 html 以同源身分執行，讀得到 localStorage／token、打得到 API。
+- 測試：`outboxHtmlPreviewDom.test.tsx`（html 點 ↗ 產生 `text/html` blob 並開新分頁、關閉後 revoke、`.txt` 行為不變、`.svg`／未列副檔名沒有 ↗）、`htmlPreview.test.ts`。

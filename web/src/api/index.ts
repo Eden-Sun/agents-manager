@@ -406,13 +406,17 @@ export async function outboxFileUrl(botId: string, name: string, inline = false)
   return inline ? utf8PreviewUrl(url) : url
 }
 
-/** outbox 檔案的文字內容（帶 token 的下載，非 inline）：給 html 沙盒預覽用，取完立刻釋放 blob URL。 */
-export async function outboxFileText(botId: string, name: string): Promise<string> {
-  const url = await outboxFileUrl(botId, name, false)
+/**
+ * outbox 的 .html 預覽：帶 token 取回檔案（後端是 octet-stream），重包成 `text/html;charset=utf-8` 的 blob URL 給新分頁打開
+ * （使用者 2026-11-18：html 不沙箱化，外部 script／樣式／圖片要能載入；見 lib/htmlPreview.ts）。原本那個 blob URL 取完就釋放。
+ */
+export async function outboxHtmlUrl(botId: string, name: string): Promise<string> {
+  const raw = await outboxFileUrl(botId, name, false)
   try {
-    return await (await fetch(url)).text()
+    const blob = await (await fetch(raw)).blob()
+    return URL.createObjectURL(new Blob([blob], { type: 'text/html;charset=utf-8' }))
   } finally {
-    URL.revokeObjectURL(url)
+    URL.revokeObjectURL(raw)
   }
 }
 
