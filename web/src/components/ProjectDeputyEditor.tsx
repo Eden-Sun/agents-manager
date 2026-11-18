@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { Bot, Project } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -12,14 +12,17 @@ export function ProjectDeputyEditor({ project, bots }: { project: Project; bots:
   const t = useT()
   const patchProject = useStore((s) => s.patchProject)
   const saved = project.deputy ?? null
+  const deputyKey = `${project.id}:${saved?.bot_id ?? ''}:${saved?.after_sec ?? DEFAULT_AFTER_SEC}`
+  const [prevKey, setPrevKey] = useState(deputyKey)
   const [botId, setBotId] = useState(saved?.bot_id ?? '')
   const [afterSec, setAfterSec] = useState(String(saved?.after_sec ?? DEFAULT_AFTER_SEC))
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
+  if (deputyKey !== prevKey) {
+    setPrevKey(deputyKey)
     setBotId(saved?.bot_id ?? '')
     setAfterSec(String(saved?.after_sec ?? DEFAULT_AFTER_SEC))
-  }, [saved?.bot_id, saved?.after_sec, project.id])
+  }
 
   // 只有顧問、專家能當副管理者（管理者與執行者不行）。
   const candidates = bots.filter((b) => b.role === 'advisor' || b.role === 'specialist')

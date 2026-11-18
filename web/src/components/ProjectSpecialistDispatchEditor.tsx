@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { Project } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -13,12 +13,15 @@ export function ProjectSpecialistDispatchEditor({ project }: { project: Project 
   const t = useT()
   const patchProject = useStore((s) => s.patchProject)
   const saved = project.specialist_dispatch
+  const dispatchKey = `${project.id}:${saved}`
+  const [prevKey, setPrevKey] = useState(dispatchKey)
   const [on, setOn] = useState(saved ?? true)
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
+  if (dispatchKey !== prevKey) {
+    setPrevKey(dispatchKey)
     setOn(saved ?? true)
-  }, [saved, project.id])
+  }
 
   const supported = saved !== undefined
   const dirty = supported && on !== saved

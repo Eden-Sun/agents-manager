@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { Bot, Project, Run, RuntimeSettings } from '../api/types'
 import { useT } from '../lib/i18n'
 import { ROLE_SUGGESTIONS, RUNTIME_ROLES, type RuntimeRole, cleanSettings, firstRangeError, sameSettings } from '../lib/runtimePolicy'
@@ -27,13 +27,16 @@ export function RolePolicyEditor({ project }: { project: Project }) {
   const runs = useStore((s) => s.runs)
   const saved = useMemo<Record<string, RuntimeSettings>>(() => project.role_policy ?? {}, [project.role_policy])
   const savedKey = JSON.stringify(saved)
+  const fullKey = `${project.id}:${savedKey}`
+  const [prevKey, setPrevKey] = useState(fullKey)
   const [draft, setDraft] = useState<Record<string, RuntimeSettings>>(saved)
   const [saving, setSaving] = useState(false)
 
   // 專案在別處被改了（或換了專案）：草稿跟著存的值走。
-  useEffect(() => {
-    setDraft(JSON.parse(savedKey) as Record<string, RuntimeSettings>)
-  }, [savedKey, project.id])
+  if (fullKey !== prevKey) {
+    setPrevKey(fullKey)
+    setDraft(saved)
+  }
 
   const roleLabel: Record<RuntimeRole, string> = {
     manager: t('管理者'),

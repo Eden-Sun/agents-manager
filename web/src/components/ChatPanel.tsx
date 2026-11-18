@@ -1758,7 +1758,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         mobileStatus={apiBot}
         mobileContent={<MobileContextPanel botId={botId} projectId={bot.project_id} status={statusInfo} reading={phoneCtx}
           anchor={mobileContextAnchor} onClose={() => setGitInfoBotId(null)}
-          issues={<IssuesBar projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} onInserted={() => setGitInfoBotId(null)} />} />}
+          issues={<IssuesBar key={bot.project_id} projectId={bot.project_id} draftKey={`bot:${botId}`} inputRef={composerRef} onInserted={() => setGitInfoBotId(null)} />} />}
         mobileOpen={gitInfoBotId === botId}
         onOpen={() => setGitInfoBotId(botId)}
         onClose={() => setGitInfoBotId(null)}
@@ -1766,6 +1766,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           phone || (tab === 'chat' && !settingsOpen) ? (
             <>
               <IssuesBar
+                key={bot.project_id}
                 projectId={bot.project_id}
                 draftKey={`bot:${botId}`}
                 inputRef={composerRef}

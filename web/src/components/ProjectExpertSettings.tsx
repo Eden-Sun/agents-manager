@@ -67,9 +67,9 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
 
         {isExpert ? (
           <SaveGroupProvider value={group.value}>
-            <ProjectDeputyEditor project={project} bots={bots} />
-            <ProjectSpecialistDispatchEditor project={project} />
-            <RolePolicyEditor project={project} />
+            <ProjectDeputyEditor key={`deputy:${project.id}`} project={project} bots={bots} />
+            <ProjectSpecialistDispatchEditor key={`dispatch:${project.id}`} project={project} />
+            <RolePolicyEditor key={`role:${project.id}`} project={project} />
             <div className="rp-savebar project-savebar">
               <span className="hint">
                 {group.dirtyLabels.length > 0 ? t('已變更：{parts}', { parts: group.dirtyLabels.join('、') }) : t('沒有變更')}

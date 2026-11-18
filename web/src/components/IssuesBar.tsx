@@ -110,7 +110,10 @@ export function IssuesBar({
     }
   }, [projectId, githubUrl, repo])
 
-  useEffect(() => {
+  const projectKey = `${projectId}:${githubUrl ?? ''}`
+  const [prevProjectKey, setPrevProjectKey] = useState(projectKey)
+  if (projectKey !== prevProjectKey) {
+    setPrevProjectKey(projectKey)
     scopeGen.current++
     seq.current++
     detailSeq.current++
@@ -120,7 +123,7 @@ export function IssuesBar({
     setFetching(null)
     setError(null)
     setAuthError(false)
-  }, [projectId, githubUrl])
+  }
 
   const invalidateScope = () => {
     scopeGen.current++

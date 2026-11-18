@@ -706,12 +706,25 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
   const filterQ = projectFilter.trim().toLowerCase()
   const visibleProjects = filterQ ? projects.filter((p) => p.label.toLowerCase().includes(filterQ)) : projects
 
-  useEffect(() => {
-    if (!pid) return
+  const [prevPid, setPrevPid] = useState(pid)
+  if (!prevPid && pid) {
+    setPrevPid(pid)
     const s = useStore.getState()
-    const currentTools = toolsOfHost(s, projectHostName(s, pid))
+    const nextTools = toolsOfHost(s, projectHostName(s, pid))
     const currentBots = s.bots
-    const nextKind = defaultKindForProject(pid, currentTools, currentBots)
+    const nextKind = defaultKindForProject(pid, nextTools, currentBots)
+    setKind(nextKind)
+    if (!nameTouched.current) setName(uniqueBotName(nextKind, pid, currentBots))
+  }
+
+  const pickProject = (nextPid: string) => {
+    setProjectId(nextPid)
+    setPrevPid(nextPid)
+    nameTouched.current = false
+    const s = useStore.getState()
+    const nextTools = toolsOfHost(s, projectHostName(s, nextPid))
+    const currentBots = s.bots
+    const nextKind = defaultKindForProject(nextPid, nextTools, currentBots)
     setKind(nextKind)
     // 換專案（可能換主機、換 kind）：跟 `pickKind` 一樣清掉上一個專案挑的欄位，不然會用 claude 的
     // model／身份去建 codex 的 bot——`ApiModelFields` 只標「不支援」、不自動清，畫面上卻顯示預設值。
@@ -719,8 +732,8 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
     setModel(null)
     setEffort(null)
     setFast(false)
-    if (!nameTouched.current) setName(uniqueBotName(nextKind, pid, currentBots))
-  }, [pid])
+    setName(uniqueBotName(nextKind, nextPid, currentBots))
+  }
 
   useEffect(() => {
     nameRef.current?.focus()
@@ -769,10 +782,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
                     className={`opt${pid === p.id ? ' on' : ''}`}
                     disabled={!up}
                     title={up ? p.path : t('{name}（主機未連線）', { name: p.label })}
-                    onClick={() => {
-                      setProjectId(p.id)
-                      nameTouched.current = false
-                    }}
+                    onClick={() => pickProject(p.id)}
                   >
                     <span className="opt-label">{p.label}</span>
                     <HostBadge host={p.host} connected={up} />
@@ -853,10 +863,7 @@ export function NewBotForm({ onDone, initialProjectId, onCreated, scheduler, def
                   className={`opt${pid === p.id ? ' on' : ''}`}
                   disabled={!up}
                   title={up ? p.path : t('{name}（主機未連線）', { name: p.label })}
-                  onClick={() => {
-                    setProjectId(p.id)
-                    nameTouched.current = false
-                  }}
+                  onClick={() => pickProject(p.id)}
                 >
                   <span className="opt-label">{p.label}</span>
                   <HostBadge host={p.host} connected={up} />
