@@ -2842,3 +2842,250 @@ async fn a_running_child_can_spawn_after_its_parent_run_stops_and_session_change
         .unwrap();
     assert_eq!(stale_registered, 0, "a pane from the retired session must not be registered");
 }
+
+// ── fleet operator（`[agents] fleet_operators`）：代表主控 daemon 的 bot 跨專案管理 bot 生命週期 ──────────────
+
+struct Fleet {
+    e: crate::testing::Env,
+    operator: db::Bot,
+    /// 另一個專案裡的頂層 bot（有 fake run）。
+    target: db::Bot,
+    other_project: String,
+}
+
+async fn fleet_other_project_bot(e: &crate::testing::Env, project_id: &str, name: &str) -> db::Bot {
+    let bot = crate::testing::claude_bot(&e.app, project_id, name).await;
+    sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(format!("tok-{}", bot.id)).bind(&bot.id).execute(&e.app.db).await.unwrap();
+    db::bot(&e.app.db, &bot.id).await.unwrap().unwrap()
+}
+
+/// 把 bot 寫進 `config.toml` 裡它專案的 `bots`（專案不在就先加）：PATCH 會回寫設定檔，只有 DB 列會 404。
+async fn fleet_register(e: &crate::testing::Env, project_id: &str, bot: &db::Bot) {
+    let entry = crate::config::BotCfg { id: Some(bot.id.clone()), name: bot.name.clone(), kind: bot.kind.clone(), manager_use: true, inject_hooks: bot.inject_hooks != 0, ..Default::default() };
+    let path = if project_id == e.project_id { e.repo.clone() } else { e.dir.join("fleet-other-project") };
+    let (pid, path) = (project_id.to_string(), path.to_string_lossy().to_string());
+    e.app
+        .cfg
+        .update(move |cfg| {
+            if !cfg.projects.iter().any(|p| p.id.as_deref() == Some(pid.as_str())) {
+                cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true, handed_off_to: None, id: Some(pid.clone()), path, label: "fleet-other".into(), host: LOCAL_HOST.into(), bots: vec![] });
+            }
+            cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).unwrap().bots.push(entry);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn fleet_env() -> Fleet {
+    let e = crate::testing::env().await;
+    let operator = distinct_bot(&e, "fleet-operator").await;
+    let other_project = db::ulid();
+    let path = e.dir.join("fleet-other-project");
+    std::fs::create_dir_all(&path).unwrap();
+    sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
+        .bind(&other_project)
+        .bind(path.to_string_lossy().to_string())
+        .bind("fleet-other")
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    let target = fleet_other_project_bot(&e, &other_project, "fleet-target").await;
+    crate::testing::fake_run(&e.app, &target.id).await;
+    fleet_register(&e, &e.project_id.clone(), &operator).await;
+    fleet_register(&e, &other_project, &target).await;
+    Fleet { e, operator, target, other_project }
+}
+
+async fn set_fleet_operators(e: &crate::testing::Env, ids: &[&str]) {
+    let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+    e.app.cfg.update(move |cfg| { cfg.agents.fleet_operators = ids; Ok(()) }).await.unwrap();
+}
+
+async fn as_bot(e: &crate::testing::Env, who: &db::Bot, method: &str, path: &str, body: &str) -> String {
+    raw(
+        e.app.clone(),
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            who.id, who.hook_token, body.len()
+        ),
+    )
+    .await
+}
+
+fn forbidden(r: &str) -> bool {
+    r.starts_with("HTTP/1.1 403")
+}
+
+/// fleet operator 放行的六種操作（方法、子路徑、body）。
+fn fleet_ops(target: &str) -> Vec<(&'static str, String, &'static str)> {
+    vec![
+        ("POST", format!("/api/bots/{target}/restart"), "{}"),
+        ("POST", format!("/api/bots/{target}/start"), "{}"),
+        ("POST", format!("/api/bots/{target}/interrupt"), "{}"),
+        ("GET", format!("/api/bots/{target}/terminal"), ""),
+        ("PATCH", format!("/api/bots/{target}"), r#"{"model":"opus"}"#),
+        ("POST", format!("/api/bots/{target}/stop"), "{}"),
+    ]
+}
+
+#[tokio::test]
+async fn an_empty_fleet_operators_list_changes_nothing_for_a_cross_project_bot() {
+    let f = fleet_env().await;
+    for (method, path, body) in fleet_ops(&f.target.id) {
+        let r = as_bot(&f.e, &f.operator, method, &path, body).await;
+        assert!(forbidden(&r) && (r.contains("user_only") || r.contains("bot_resource_scope")), "{method} {path} without the setting stays 403: {r}");
+    }
+    assert_eq!(db::bot(&f.e.app.db, &f.target.id).await.unwrap().unwrap().model, f.target.model);
+    assert!(db::active_run(&f.e.app.db, &f.target.id).await.unwrap().is_some(), "the target was not stopped");
+}
+
+#[tokio::test]
+async fn a_fleet_operator_manages_the_lifecycle_of_a_bot_in_another_project() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    for (method, path, body) in fleet_ops(&f.target.id) {
+        let r = as_bot(&f.e, &f.operator, method, &path, body).await;
+        assert!(!forbidden(&r) && !r.starts_with("HTTP/1.1 401"), "{method} {path} is allowed for a fleet operator: {r}");
+    }
+    let model = db::bot(&f.e.app.db, &f.target.id).await.unwrap().unwrap().model;
+    assert!(model.as_deref().is_some_and(|m| m.contains("opus")) && model != f.target.model, "PATCH model was applied: {model:?}");
+    let stopped = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/stop", f.target.id), "{}").await;
+    assert!(stopped.starts_with("HTTP/1.1 204"), "{stopped}");
+    for body in [r#"{"effort":"high"}"#, r#"{"fast":true}"#, r#"{"name":"fleet-renamed"}"#] {
+        let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{}", f.target.id), body).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "PATCH {body}: {r}");
+    }
+}
+
+#[tokio::test]
+async fn a_fleet_operator_cannot_delete_reconfigure_or_reach_beyond_the_lifecycle_allowlist() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    let t = &f.target.id;
+    let before = db::bot(&f.e.app.db, t).await.unwrap().unwrap();
+    let denied: Vec<(&str, String, &str)> = vec![
+        ("DELETE", format!("/api/bots/{t}"), ""),
+        ("DELETE", format!("/api/projects/{}", f.other_project), ""),
+        ("PATCH", format!("/api/projects/{}", f.other_project), r#"{"label":"x"}"#),
+        ("PUT", format!("/api/bots/{t}/role"), r#"{"role":"executor"}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"role":"manager"}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"identity":"cc2"}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"env":{"X":"1"}}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"args":["--x"]}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"persona":"p"}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"auto_approve":true}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"autostart":true}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"inject_hooks":false}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"primary":true}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"manager_use":false}"#),
+        ("PATCH", format!("/api/bots/{t}"), r#"{"model":"opus","args":["--x"]}"#),
+        ("POST", format!("/api/bots/{t}/credential/rotate"), ""),
+        ("POST", format!("/api/bots/{t}/fork"), "{}"),
+        ("POST", format!("/api/bots/{t}/promote"), "{}"),
+        ("POST", format!("/api/bots/{t}/rewind"), "{}"),
+        ("POST", format!("/api/bots/{t}/login"), "{}"),
+        ("POST", format!("/api/bots/{t}/abort"), "{}"),
+        ("POST", format!("/api/bots/{t}/compact"), "{}"),
+        ("GET", format!("/api/bots/{t}/messages"), ""),
+        ("POST", "/api/hosts/local/shells".to_string(), "{}"),
+        ("GET", "/api/hosts/local/shells".to_string(), ""),
+        ("PUT", "/api/settings/time-zone".to_string(), r#"{"time_zone":"UTC"}"#),
+        ("POST", "/api/hosts".to_string(), "{}"),
+    ];
+    for (method, path, body) in &denied {
+        let r = as_bot(&f.e, &f.operator, method, path, body).await;
+        assert!(forbidden(&r), "{method} {path} {body} stays forbidden for a fleet operator: {r}");
+    }
+    let after = db::bot(&f.e.app.db, t).await.unwrap().unwrap();
+    assert!(after.deleted_at.is_none());
+    assert_eq!((after.model, after.role, after.identity, after.hook_token), (before.model, before.role, before.identity, before.hook_token));
+    assert_eq!(f.e.app.cfg.agents_fresh().await.fleet_operators, vec![f.operator.id.clone()], "the operator cannot change the list");
+}
+
+#[tokio::test]
+async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role() {
+    let f = fleet_env().await;
+    set_fleet_operators(&f.e, &[&f.operator.id]).await;
+    // 分享用 bot：一條都不放行。
+    let shared = fleet_other_project_bot(&f.e, &f.other_project, "fleet-shared").await;
+    crate::testing::fake_run(&f.e.app, &shared.id).await;
+    sqlx::query("INSERT INTO shared_bots(bot_id,profile,workspace,created_at) VALUES (?,'trusted','/tmp/shared-ws',?)").bind(&shared.id).bind(db::now()).execute(&f.e.app.db).await.unwrap();
+    fleet_register(&f.e, &f.other_project, &shared).await;
+    // 別人的 child：不是頂層。
+    let child = fleet_other_project_bot(&f.e, &f.other_project, "fleet-target-child").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.target.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
+    crate::testing::fake_run(&f.e.app, &child.id).await;
+    for victim in [&shared, &child] {
+        for (method, path, body) in fleet_ops(&victim.id) {
+            let r = as_bot(&f.e, &f.operator, method, &path, body).await;
+            assert!(forbidden(&r), "{method} {path} ({}) stays forbidden: {r}", victim.name);
+        }
+        assert!(db::active_run(&f.e.app.db, &victim.id).await.unwrap().is_some());
+    }
+    // AGM 巡檢：不能被 stop；其他生命週期操作照放行。
+    let patrol = fleet_other_project_bot(&f.e, &f.other_project, "fleet-patrol").await;
+    crate::testing::fake_run(&f.e.app, &patrol.id).await;
+    crate::supervisor::store::get_or_init(&f.e.app.db).await.unwrap();
+    crate::supervisor::store::set_env(&f.e.app.db, &patrol.id, &f.other_project, "/tmp").await.unwrap();
+    fleet_register(&f.e, &f.other_project, &patrol).await;
+    let r = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/stop", patrol.id), "{}").await;
+    assert!(forbidden(&r), "a fleet operator cannot stop the AGM patrol: {r}");
+    assert!(db::active_run(&f.e.app.db, &patrol.id).await.unwrap().is_some());
+    let r = as_bot(&f.e, &f.operator, "PATCH", &format!("/api/bots/{}", patrol.id), r#"{"model":"opus"}"#).await;
+    assert!(r.starts_with("HTTP/1.1 200"), "PATCH model on the patrol is allowed: {r}");
+}
+
+#[tokio::test]
+async fn only_the_listed_top_level_bot_id_is_a_fleet_operator() {
+    let f = fleet_env().await;
+    let plain = distinct_bot(&f.e, "fleet-plain").await;
+    let child = distinct_bot(&f.e, "fleet-operator-child").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.operator.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
+    let child = db::bot(&f.e.app.db, &child.id).await.unwrap().unwrap();
+    fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
+    // operator 與它的 child 都列進去：child 不是頂層，列了也沒用；名稱不算數。
+    set_fleet_operators(&f.e, &[&f.operator.id, &child.id, &plain.name]).await;
+    for who in [&plain, &child] {
+        for (method, path, body) in fleet_ops(&f.target.id) {
+            let r = as_bot(&f.e, who, method, &path, body).await;
+            assert!(forbidden(&r), "{} {method} {path} stays forbidden: {r}", who.name);
+        }
+    }
+    assert!(db::active_run(&f.e.app.db, &f.target.id).await.unwrap().is_some());
+    // 刪掉的 operator：token 本身就不再有效。
+    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&f.operator.id).execute(&f.e.app.db).await.unwrap();
+    let r = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/stop", f.target.id), "{}").await;
+    assert!(r.starts_with("HTTP/1.1 401"), "{r}");
+}
+
+#[tokio::test]
+async fn editing_fleet_operators_on_disk_takes_effect_at_once_both_ways() {
+    let f = fleet_env().await;
+    let patch = format!("/api/bots/{}", f.target.id);
+    let body = r#"{"effort":"high"}"#;
+    assert!(forbidden(&as_bot(&f.e, &f.operator, "PATCH", &patch, body).await));
+    let path = f.e.app.cfg.path.clone();
+    let original = std::fs::read_to_string(&path).unwrap();
+    assert!(!original.contains("[agents]"), "fixture config has no [agents] section: {original}");
+    std::fs::write(&path, format!("{original}\n[agents]\nfleet_operators = [\"{}\"]\n", f.operator.id)).unwrap();
+    let r = as_bot(&f.e, &f.operator, "PATCH", &patch, body).await;
+    assert!(r.starts_with("HTTP/1.1 200"), "hand-edited config applies without a daemon restart: {r}");
+    std::fs::write(&path, &original).unwrap();
+    let r = as_bot(&f.e, &f.operator, "PATCH", &patch, body).await;
+    assert!(forbidden(&r), "removing the id revokes it at once: {r}");
+}
+
+/// 新增的 fleet operator 判斷（讀設定檔＋幾次 DB 查詢）不能把 auth middleware 的框推過 1 MiB。
+#[test]
+fn a_fleet_operator_gate_fits_in_a_one_mib_stack() {
+    on_budget_stack(|| async {
+        let f = fleet_env().await;
+        set_fleet_operators(&f.e, &[&f.operator.id]).await;
+        for (method, path, body) in fleet_ops(&f.target.id) {
+            let r = as_bot(&f.e, &f.operator, method, &path, body).await;
+            assert!(!forbidden(&r), "{method} {path}: {r}");
+        }
+    });
+}

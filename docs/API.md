@@ -93,6 +93,16 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | API.md 其餘標 User-only 的管理操作 | 該路由註冊的方法 | 一般 Bot 不允許 | 中央 Bot route policy 回 `403 user_only`；只有標明 User-only even for AGM 的路徑會連 AGM 角色一併拒絕。 |
 | `/api/services/daemon-swap/probe/{bot_id}`、`/api/services/herdr-upgrade/resume/{bot_id}` | POST | 不適用 | 只接受各自列明的 Service principal；Bot principal 維持 403。 |
 
+**Fleet operator（`[agents] fleet_operators`，使用者 2026-11-18）**：代表主控 daemon 的管理者 bot。列在 `config.toml` `[agents] fleet_operators = ["<bot_id>"]` 的 bot（只認 bot id，本身必須是存活的頂層 bot；child 不繼承）可對**任何專案、任何主機**上別的存活頂層 bot 打下列路由，其餘照舊：
+
+| 放行 | 限制 |
+|---|---|
+| `POST /api/bots/{id}/start`、`/restart`、`/stop`、`/interrupt` | AGM 角色（巡檢／協調者）不能被 `/stop` |
+| `PATCH /api/bots/{id}` | 只收 `model`／`effort`／`fast`／`name`；帶其他欄位 403 `user_only` |
+| `GET /api/bots/{id}/terminal` | 唯讀 |
+
+不放行：`DELETE` bot／專案、`PUT …/role`、`credential/rotate`、`identity`／`env`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot（任何操作）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`）。
+
 跨資源測試逐一打上述動態路徑家族的每個方法，並覆蓋 Bot A 對 Bot B、編碼 ID、同 bot、child、AGM 專用任務／交辦例外與 User principal。
 
 A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是網頁，而網頁手上的憑證就是 UI token，沒有可以要求的角色；

@@ -795,6 +795,10 @@ pub struct AgentsCfg {
     /// 使用者時區（IANA 名稱，例如 `Asia/Taipei`）。沒寫＝`Asia/Taipei`。新啟動的 bot 套用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_time_zone: Option<String>,
+    /// 代表主控 daemon 的 bot（只認 bot id）：可跨專案、跨主機對頂層 bot 做 start／restart／stop／interrupt、
+    /// 改 model／effort／fast／name、讀 terminal。預設空＝沒有這個權限。只有使用者能改（SPEC「fleet operator」）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_operators: Vec<String>,
 }
 
 /// 沒設定時的使用者時區。

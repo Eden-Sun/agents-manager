@@ -1124,7 +1124,14 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         let sender_withdraw = method == "POST" && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 4 && p[0] == "api" && p[1] == "turns" && p[3] == "withdraw")
             && lifecycle::sender_may_withdraw(&app, &decoded_bot_path_segments(path).unwrap()[2], bot_id).await.unwrap_or(false);
         let manager_base = policy == Some(BotRoutePolicy::UserOnly) && matches!(&principal, RequestPrincipal::Bot(_)) && manager_base_snapshot(&app, bot_id, path).await;
-        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle) {
+        // fleet operator（`[agents] fleet_operators`）：跨專案的生命週期操作；只在其他放行都不成立時才查（要讀一次設定檔）。
+        let fleet_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm)
+            && !is_agm_role
+            && !manager_lifecycle
+            && !confirm_query
+            && matches!(&principal, RequestPrincipal::Bot(_))
+            && Box::pin(fleet_operator_route(&app, bot_id, method, path)).await;
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1288,6 +1295,10 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                     && crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?
                         == Some(crate::supervisor::roles::Role::Patrol)
                 {
+                    return Ok(());
+                }
+                if Box::pin(fleet_operator_over(app, caller, method, &parts, &target_bot)).await? {
+                    log_fleet_operation(caller, method, &parts, &target_bot);
                     return Ok(());
                 }
                 Some("bot")
@@ -3046,6 +3057,67 @@ pub(crate) async fn expert_manager_over(app: &Arc<App>, caller: &str, target: &d
     Ok(db::project(&app.db, &me.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none() && p.mode == "expert"))
 }
 
+/// fleet operator 能做的操作形狀：start／restart／stop／interrupt、PATCH（欄位在 `patch_bot` 限 model／effort／fast／name）、讀 terminal。
+/// 刪除、角色、credential、fork／promote／rewind／login、子資源一律不在內。
+fn fleet_operator_op(method: &str, parts: &[impl AsRef<str>]) -> bool {
+    if parts.len() < 3 || parts[0].as_ref() != "api" || parts[1].as_ref() != "bots" {
+        return false;
+    }
+    match (method, parts.len(), parts.get(3).map(|p| p.as_ref())) {
+        ("POST", 4, Some("start" | "restart" | "stop" | "interrupt")) => true,
+        ("GET" | "HEAD", 4, Some("terminal")) => true,
+        ("PATCH", 3, None) => true,
+        _ => false,
+    }
+}
+
+/// `caller` 列在 `[agents] fleet_operators`（熱重載，只認 bot id）、本身是存活的頂層 bot，而 `target` 是任何專案、任何主機上
+/// 別的存活頂層 bot，且這次是 [`fleet_operator_op`] 的操作。child 不繼承；分享用 bot 一律不碰；AGM 角色（巡檢／協調者）不能被 stop。
+async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> Result<bool, LcError> {
+    if !fleet_operator_op(method, parts) || target.id == caller || target.parent_bot_id.is_some() || target.managed_by == "child" || target.deleted_at.is_some() {
+        return Ok(false);
+    }
+    if !app.cfg.agents_fresh().await.fleet_operators.iter().any(|id| id == caller) {
+        return Ok(false);
+    }
+    let Some(me) = db::bot(&app.db, caller).await.map_err(any_err)? else { return Ok(false) };
+    if me.deleted_at.is_some() || me.parent_bot_id.is_some() || me.managed_by == "child" {
+        return Ok(false);
+    }
+    // 讀不到就當成分享用 bot（fail closed）。
+    if !matches!(db::is_share_bot(&app.db, &target.id).await, Ok(false)) {
+        return Ok(false);
+    }
+    if parts.get(3).map(|p| p.as_ref()) == Some("stop") && crate::supervisor::roles::role_of_bot(&app.db, &target.id).await.map_err(any_err)?.is_some() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// 路由層（UserOrAgm 閘）用的版本：解不開、查不到、DB 錯都當成不放行。
+async fn fleet_operator_route(app: &Arc<App>, caller: &str, method: &str, path: &str) -> bool {
+    let Some(parts) = decoded_bot_path_segments(path) else { return false };
+    if !fleet_operator_op(method, &parts) { return false }
+    let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
+    fleet_operator_over(app, caller, method, &parts, &target).await.unwrap_or(false)
+}
+
+/// 稽核：fleet operator 的跨專案操作每次都記一行（caller、target、專案、操作）。
+#[inline(never)]
+fn log_fleet_operation(caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) {
+    let op = parts.get(3).map(|p| p.as_ref()).unwrap_or("patch");
+    tracing::info!(
+        http = %crate::config_audit::http_caller(),
+        fleet_operator = %caller,
+        target_bot = %target.id,
+        target_name = %target.name,
+        target_project = %target.project_id,
+        method,
+        op,
+        "fleet operator cross-project bot operation"
+    );
+}
+
 /// `GET|PUT|DELETE /api/bots/{id}/base-snapshot` by the expert manager of that bot's project.
 async fn manager_base_snapshot(app: &Arc<App>, caller: &str, path: &str) -> bool {
     let Some(parts) = decoded_bot_path_segments(path) else { return false };
@@ -3259,8 +3331,9 @@ async fn patch_bot(
     }
     // 專家管理者（非 AGM 角色的 Bot，含代班的副管理者）只能改 model／effort／fast／name（使用者 2026-11-08）。
     if let RequestPrincipal::Bot(caller) = &principal {
-        if crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none()
-            && (b.persona.is_some() || b.args.is_some() || b.autostart.is_some() || b.inject_hooks.is_some() || b.auto_approve.is_some() || b.is_primary.is_some())
+        // 目標不在自己的 bot 樹裡（＝靠管理者或 fleet operator 的放行進來的）也一樣只收這四個，就算 caller 另有 AGM 角色。
+        if (b.persona.is_some() || b.args.is_some() || b.autostart.is_some() || b.inject_hooks.is_some() || b.auto_approve.is_some() || b.is_primary.is_some())
+            && (crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none() || !bot_descends_from_or_is(&app, caller, &id).await?)
         {
             return Err(bot_user_only());
         }
