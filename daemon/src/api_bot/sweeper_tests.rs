@@ -419,3 +419,51 @@ async fn sweep_needs_only_one_available_pool_connection() {
     assert_eq!(report.reserved_timeouts, 1);
     drop(held);
 }
+
+/// openai-api 的 session 卡在一批工具中途（owner 回合已失敗）：sweeper 用 OpenAI 的 codec 結清——這一批裡**所有**還沒有結果的
+/// function_call 都補上錯誤結果（不寫 Claude 的 `tool_result` block），之後不再是卡住的，而且通得過重啟接續的結清檢查。
+#[tokio::test]
+async fn sweeper_settles_every_unreturned_function_call_of_a_stuck_openai_session() {
+    let env = crate::testing::env().await;
+    let now = crate::db::now();
+    let (bot_id, run_id, conv_id, turn_id, session_id) = ("sw-oa-bot", "sw-oa-run", "sw-oa-conv", "sw-oa-turn", "sw-oa-sess");
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,model,hook_token,created_at) VALUES(?,?,'sw-oa','openai-api','gpt-6-luna','fake',?)").bind(bot_id).bind(&env.project_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES(?,?,'exited',?)").bind(run_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)").bind(conv_id).bind(bot_id).bind(&now).execute(&env.app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web','failed','ok',?)").bind(turn_id).bind(conv_id).bind(run_id).bind(&now).execute(&env.app.db).await.unwrap();
+    let call = |id: &str, call_id: &str| json!({"type": "function_call", "id": id, "call_id": call_id, "name": "bash", "arguments": "{\"command\":\"true\"}", "status": "completed"});
+    let items = vec![json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "ENC"}), call("fc_1", "call_1"), call("fc_2", "call_2"), call("fc_3", "call_3")];
+    let mut messages = vec![json!({"role": "user", "content": "do three things"})];
+    messages.extend(items.iter().map(|item| json!({"role": "item", "content": item})));
+    messages.push(json!({"role": "tool_results", "content": {"results": [{"call_id": "call_1", "output": "ok", "is_error": false}]}}));
+    let checkpoint = json!({
+        "v": 2, "provider": "openai", "messages": messages,
+        "responses": [{"id": "resp_1", "model": "gpt-6-luna", "content": items, "stop_reason": "completed", "usage": null}],
+        "api_pending": false, "tool_pending": "call_2", "completed_tool_ids": ["call_1"],
+    });
+    sqlx::query("INSERT INTO api_bot_sessions(id,bot_id,owner_run_id,owner_turn_id,generation,revision,checkpoint_json,created_at,updated_at,expires_at) VALUES(?,?,?,?,1,1,?,?,?,?)")
+        .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(checkpoint.to_string()).bind(&now).bind(&now).bind(crate::db::iso_in(3600)).execute(&env.app.db).await.unwrap();
+    assert!(detect_stuck(&env.app, bot_id).await.is_some());
+
+    let report = sweep_once(&env.app).await.unwrap();
+    assert_eq!(report.abandoned_checkpoints, 1);
+    let raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?").bind(session_id).fetch_one(&env.app.db).await.unwrap();
+    let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!((val["provider"].clone(), val["api_pending"].clone(), val["tool_pending"].clone()), (json!("openai"), json!(false), serde_json::Value::Null));
+    let after = val["messages"].as_array().unwrap();
+    assert_eq!(after.len(), messages.len(), "結果接在同一批 tool_results 後面，沒有多一則 Claude 形狀的訊息");
+    assert_eq!(after.last().unwrap()["content"]["results"], json!([
+        {"call_id": "call_1", "output": "ok", "is_error": false},
+        {"call_id": "call_2", "output": "not executed: turn ended", "is_error": true},
+        {"call_id": "call_3", "output": "not executed: turn ended", "is_error": true},
+    ]));
+    assert!(!raw.contains("tool_use_id"));
+    let state: super::runner::State = serde_json::from_value(val).unwrap();
+    assert!(["call_1", "call_2", "call_3"].iter().all(|id| state.completed_tool_ids.contains(*id)));
+    assert!(super::runtime::startup_context_settled(&state, true), "結清後可以在重啟時接續");
+    assert_eq!(detect_stuck(&env.app, bot_id).await, None);
+
+    // 結清前的同一份 checkpoint 過不了接續檢查（對照）。
+    let unsettled: super::runner::State = serde_json::from_value(checkpoint).unwrap();
+    assert!(!super::runtime::startup_context_settled(&unsettled, true));
+}

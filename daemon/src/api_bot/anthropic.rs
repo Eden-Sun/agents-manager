@@ -137,6 +137,34 @@ impl Codec for AnthropicCodec {
         }
         text
     }
+
+    fn unpaired_tool_calls(&self, state: &State) -> Result<Vec<String>, ()> {
+        let mut declared: Vec<String> = Vec::new();
+        let mut returned = std::collections::HashSet::new();
+        for message in &state.messages {
+            for block in message.content.as_array().into_iter().flatten() {
+                match (message.role.as_str(), block.get("type").and_then(Value::as_str)) {
+                    ("assistant", Some("tool_use")) => declared.push(block.get("id").and_then(Value::as_str).ok_or(())?.to_string()),
+                    ("user", Some("tool_result")) => {
+                        returned.insert(block.get("tool_use_id").and_then(Value::as_str).ok_or(())?.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(declared.into_iter().filter(|id| !returned.contains(id)).collect())
+    }
+
+    fn settle_unpaired_tool_calls(&self, state: &mut State, note: &str) -> usize {
+        let Ok(unpaired) = self.unpaired_tool_calls(state) else { return 0 };
+        if unpaired.is_empty() {
+            return 0;
+        }
+        let blocks: Vec<Value> = unpaired.iter().map(|id| json!({"type": "tool_result", "tool_use_id": id, "content": note, "is_error": true})).collect();
+        state.messages.push(Message { role: "user".into(), content: json!(blocks) });
+        state.completed_tool_ids.extend(unpaired.iter().cloned());
+        unpaired.len()
+    }
 }
 
 pub(crate) fn checkpoint_matches_model(state: &State, model: &str) -> bool {

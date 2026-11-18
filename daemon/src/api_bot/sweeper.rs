@@ -184,7 +184,22 @@ async fn sweep_abandoned_pending_checkpoints(
         // 3. Clear api_pending and synthesize tool_result for tool_pending:
         let mut new_val = val.clone();
         new_val["api_pending"] = json!(false);
-        if let Some(tool_pending_id) = new_val["tool_pending"].as_str().map(|s| s.to_string()) {
+        // OpenAI 的 transcript 形狀不同（output item 一筆一筆、結果是 tool_results 批次），而且每個 function_call 都要有結果：
+        // 交給它的 codec 把這一批裡所有還沒有結果的呼叫都結清。Claude 走下面原本的路徑（不變）。
+        let openai = new_val.get("provider").and_then(Value::as_str) == Some(super::openai::provider::ID);
+        if openai {
+            let Ok(mut state) = serde_json::from_value::<super::runner::State>(new_val.clone()) else {
+                tx.rollback().await?;
+                continue;
+            };
+            state.tool_pending = None;
+            super::provider::Codec::settle_unpaired_tool_calls(&super::openai::provider::OpenAiCodec, &mut state, "not executed: turn ended");
+            let Ok(settled) = serde_json::to_value(&state) else {
+                tx.rollback().await?;
+                continue;
+            };
+            new_val = settled;
+        } else if let Some(tool_pending_id) = new_val["tool_pending"].as_str().map(|s| s.to_string()) {
             new_val["tool_pending"] = json!(null);
             let mut completed: Vec<String> = new_val["completed_tool_ids"]
                 .as_array()

@@ -95,10 +95,19 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
     if !super::provider::is_known(state.provider_id()) {
         return Err(ResumeProofError::Unconfirmed);
     }
-    let model: Option<String> = sqlx::query_scalar("SELECT model FROM bots WHERE id=?")
+    let (kind, model): (String, Option<String>) = sqlx::query_as("SELECT kind, model FROM bots WHERE id=?")
         .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
-    let target_model = model.as_deref().unwrap_or(am_config::API_BOT_MODEL);
-    if !super::adapter::checkpoint_matches_model(&state, target_model) {
+    // session 的供應商必須就是這顆 bot 的 kind 的那一家（不拿 Claude 的 checkpoint 配 OpenAI 的 key 接著送，反之亦然）。
+    if am_config::api_provider(&kind) != Some(state.provider_id()) {
+        return Err(ResumeProofError::Unconfirmed);
+    }
+    let target_model = model.as_deref().unwrap_or(am_config::api_bot_defaults(&kind).map_or(am_config::API_BOT_MODEL, |d| d.0));
+    let matches = if state.provider_id() == super::openai::provider::ID {
+        am_config::api_bot_model_supported_for(&kind, target_model) && state.responses.iter().all(|r| am_config::api_bot_model_supported_for(&kind, &r.model))
+    } else {
+        super::adapter::checkpoint_matches_model(&state, target_model)
+    };
+    if !matches {
         let from = state.responses.last().map(|r| r.model.clone()).unwrap_or_default();
         return Err(ResumeProofError::ModelChanged { from, to: target_model.to_string() });
     }

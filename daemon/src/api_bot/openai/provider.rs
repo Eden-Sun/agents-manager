@@ -182,6 +182,43 @@ impl Codec for OpenAiCodec {
 
     fn prune_after_compaction(&self, _state: &mut State) {}
 
+    fn unpaired_tool_calls(&self, state: &State) -> Result<Vec<String>, ()> {
+        let mut declared: Vec<String> = Vec::new();
+        let mut returned = HashSet::new();
+        for entry in &state.messages {
+            match entry.role.as_str() {
+                ROLE_ITEM if entry.content.get("type").and_then(Value::as_str) == Some("function_call") => {
+                    declared.push(entry.content.get("call_id").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or(())?.to_string());
+                }
+                ROLE_TOOL_RESULTS => {
+                    for result in entry.content.get("results").and_then(Value::as_array).ok_or(())? {
+                        returned.insert(result.get("call_id").and_then(Value::as_str).ok_or(())?.to_string());
+                    }
+                }
+                ROLE_USER | ROLE_ITEM => {}
+                _ => return Err(()),
+            }
+        }
+        Ok(declared.into_iter().filter(|id| !returned.contains(id)).collect())
+    }
+
+    /// Responses API 要求每個 `function_call` 都有對應的 `function_call_output`：被中斷的那一批裡**每一個**還沒有結果的呼叫都補上
+    /// （不只 `tool_pending` 那一個），不然下一次請求在送出前就會被配對檢查擋下。
+    fn settle_unpaired_tool_calls(&self, state: &mut State, note: &str) -> usize {
+        let Ok(unpaired) = self.unpaired_tool_calls(state) else { return 0 };
+        if unpaired.is_empty() {
+            return 0;
+        }
+        let added: Vec<Value> = unpaired.iter().map(|id| json!({"call_id": id, "output": note, "is_error": true})).collect();
+        // 這一批已經有部分結果（最後一筆就是 tool_results）就接在後面；否則開一筆新的。
+        match state.messages.last_mut().filter(|m| m.role == ROLE_TOOL_RESULTS).and_then(|m| m.content.get_mut("results")).and_then(Value::as_array_mut) {
+            Some(results) => results.extend(added),
+            None => state.messages.push(Message { role: ROLE_TOOL_RESULTS.into(), content: json!({ "results": added }) }),
+        }
+        state.completed_tool_ids.extend(unpaired.iter().cloned());
+        unpaired.len()
+    }
+
     fn visible_text(&self, response: &Response) -> String {
         let mut text = String::new();
         for item in &response.content {
@@ -256,6 +293,11 @@ fn usage_of(response: &Response) -> Result<Usage, QuoteError> {
         return Err(QuoteError::UntrustedUsage);
     }
     Ok(usage)
+}
+
+/// 上游回報的模型是不是我們要求的那一個：完全相同，或是它帶日期／版本的快照名（`<要求的>-…`）。
+fn model_matches(requested: &str, upstream: &str) -> bool {
+    upstream == requested || upstream.strip_prefix(requested).is_some_and(|rest| rest.starts_with('-'))
 }
 
 fn usage_value(usage: &Usage, service_tier: Option<&str>) -> Value {
@@ -597,13 +639,24 @@ async fn post(
             }
             Outcome::Truncated => return Err(Error::TransportUnknown),
         };
+        // 上游實際回報的模型：是我們要求的（或它的快照名）就記成要求的那個 id，原名留在 usage 的 `upstream_model`；
+        // 回報了別的模型就原樣帶出去，後面的內容檢查（`invalid_content_reason`）與結算會拒絕它。沒回報＝當作要求的那個。
+        let upstream_model = output.model.clone();
+        let model = match &upstream_model {
+            Some(upstream) if !model_matches(&request.model, upstream) => upstream.clone(),
+            _ => request.model.clone(),
+        };
+        let mut usage = output.usage.as_ref().map(|usage| usage_value(usage, output.service_tier.as_deref())).unwrap_or(Value::Null);
+        if let (Some(obj), Some(upstream)) = (usage.as_object_mut(), &upstream_model) {
+            obj.insert("upstream_model".into(), json!(upstream));
+        }
         Ok(Response {
             id: output.response_id.unwrap_or_default(),
-            model: request.model.clone(),
+            model,
             content: output.replay.iter().map(|item| item.to_checkpoint_value().clone()).collect(),
             stop_reason,
             // 只有未完成的回應可能沒有用量（completed 缺 usage 已經在組裝時拒絕）：存 `null`，結算回 UntrustedUsage，不當成 0。
-            usage: output.usage.as_ref().map(|usage| usage_value(usage, output.service_tier.as_deref())).unwrap_or(Value::Null),
+            usage,
         })
     };
     tokio::select! {

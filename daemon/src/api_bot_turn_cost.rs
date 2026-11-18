@@ -68,6 +68,12 @@ pub(crate) async fn cache_info(db: &SqlitePool, bot_id: &str) -> Result<Value, s
          WHERE a.bot_id=? AND a.state='recorded' AND a.finished_at IS NOT NULL ORDER BY a.finished_at DESC, a.ordinal DESC LIMIT 1",
     ).bind(bot_id).fetch_optional(db).await?;
     let working: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved')").bind(bot_id).fetch_one(db).await?;
+    // 5 分鐘／1 小時的倒數是 Claude prompt cache 的規則：只有 claude-api 有。openai-api 的快取只從 usage 的 cached／cache_write 看，
+    // 沒有可倒數的 TTL（`ttl_secs`／`expires_at` 給 null）。
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(bot_id).fetch_optional(db).await?;
+    if kind.as_deref().is_some_and(|k| k != crate::config::CLAUDE_API_KIND) {
+        return Ok(json!({"last_request_at": last.map(|l| l.0), "ttl_secs": null, "expires_at": null, "working": working}));
+    }
     Ok(cache_json(last, working))
 }
 

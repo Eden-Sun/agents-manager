@@ -2567,6 +2567,20 @@ pub(super) fn startup_context_settled(state: &super::runner::State, owner_failed
     if !am_base::db::api_bot::pending_settled_after_failed_owner(state.api_pending, state.tool_pending.is_some(), owner_failed) {
         return false;
     }
+    // OpenAI 的 transcript 由它的 codec 判斷：對話線上沒有還沒結果的工具呼叫，而且回應裡宣告過的每個呼叫都已完成。
+    // （下面是 Claude 形狀的判斷，維持原樣。）
+    if state.provider_id() == super::openai::provider::ID {
+        use super::provider::Codec as _;
+        let codec = super::openai::provider::OpenAiCodec;
+        if !codec.unpaired_tool_calls(state).is_ok_and(|unpaired| unpaired.is_empty()) {
+            return false;
+        }
+        return state.responses.iter().all(|r| {
+            r.content.iter().filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call")).all(|item| {
+                item.get("call_id").and_then(|v| v.as_str()).is_some_and(|id| state.completed_tool_ids.contains(id))
+            })
+        });
+    }
     let mut declared = std::collections::HashSet::new();
     let mut returned = std::collections::HashSet::new();
     for message in &state.messages {

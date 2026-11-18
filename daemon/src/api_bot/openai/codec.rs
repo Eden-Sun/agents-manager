@@ -211,6 +211,8 @@ pub(crate) struct ModelOutput {
     pub usage: Result<Usage, UsageError>,
     /// 回應回報的 service tier；價表只涵蓋標準 tier（見 `pricing::is_standard_tier`）。
     pub service_tier: Option<String>,
+    /// 上游實際回報的模型 id（`response.model`；可能是帶日期的快照名）。沒回報＝`None`。
+    pub model: Option<String>,
     pub stop: StopKind,
 }
 
@@ -423,6 +425,7 @@ impl ResponseAssembler {
             replay,
             usage: Usage::from_response(resp.get("usage")),
             service_tier: resp.get("service_tier").and_then(Value::as_str).map(str::to_string),
+            model: resp.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()).map(str::to_string),
             stop: StopKind::EndTurn,
         };
         Ok((output, has_call))
@@ -490,6 +493,7 @@ impl ResponseAssembler {
             replay,
             usage: Usage::from_response(resp.get("usage")),
             service_tier: resp.get("service_tier").and_then(Value::as_str).map(str::to_string),
+            model: resp.get("model").and_then(Value::as_str).filter(|m| !m.is_empty()).map(str::to_string),
             stop,
         })
     }

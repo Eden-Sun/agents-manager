@@ -648,6 +648,77 @@ fn the_codec_rejects_duplicate_or_already_completed_call_ids_and_keeps_notes_wit
     assert_eq!(input[input.len() - 1]["content"][0]["text"], "two calls left\nwrap up now");
 }
 
+/// 上游回報的模型會帶出來（D1 的缺口：以前一律填要求的那個）：快照名記成要求的 id、原名留在 usage；
+/// 回報了別的模型就原樣帶出，內容檢查與結算都拒絕它；沒回報＝當作要求的那個。
+#[tokio::test]
+async fn the_model_the_upstream_reports_is_carried_out_and_a_different_one_is_refused() {
+    let reply = |model: Option<&str>| {
+        let msg = message_item("hi");
+        let mut response = json!({"id": "resp_m", "status": "completed", "output": [msg], "usage": usage(900, 0, 0, 30, 0)});
+        if let Some(model) = model {
+            response["model"] = json!(model);
+        }
+        Reply::sse(sse(&[json!({"type": "response.created", "response": {"id": "resp_m"}}), json!({"type": "response.completed", "response": response})]))
+    };
+    let server = serve(vec![reply(Some("gpt-6-luna-2026-10-01")), reply(Some("gpt-6-luna")), reply(None), reply(Some("gpt-6-lunatic")), reply(Some("gpt-5"))]).await;
+    let provider = luna();
+    let request = provider.encode("medium", &json!("sys"), &fresh_state().messages, None).unwrap();
+    let cancel = CancellationToken::new();
+    let mut got = Vec::new();
+    for _ in 0..5 {
+        got.push(provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap());
+    }
+    // 快照名／同名／沒回報：都是要求的模型，可以結算。
+    for (response, upstream) in got[..3].iter().zip([json!("gpt-6-luna-2026-10-01"), json!("gpt-6-luna"), Value::Null]) {
+        assert_eq!(response.model, "gpt-6-luna");
+        assert_eq!(response.usage.get("upstream_model").cloned().unwrap_or(Value::Null), upstream);
+        assert!(provider.invalid_content_reason(response, &State::default()).is_none());
+        assert!(OpenAiQuote.settle(request.as_ref(), response).is_ok());
+    }
+    // 別的模型（包含只是字首相同的）：帶出原名，內容與結算都不收。
+    for (response, upstream) in got[3..].iter().zip(["gpt-6-lunatic", "gpt-5"]) {
+        assert_eq!(response.model, upstream);
+        assert!(provider.invalid_content_reason(response, &State::default()).is_some_and(|why| why.contains(upstream)), "{upstream}");
+        assert!(matches!(OpenAiQuote.settle(request.as_ref(), response), Err(QuoteError::UntrustedUsage)));
+    }
+}
+
+/// 回合在一批工具呼叫中途被中斷：codec 找得出還沒有結果的呼叫，並把**每一個**都補上「沒有執行」的結果（Responses API 要求
+/// 每個 function_call 都有 output）。補完後 transcript 可以再編成請求，那些呼叫標成已完成、不會被重跑。
+#[test]
+fn the_codec_settles_every_tool_call_an_interrupted_turn_left_without_a_result() {
+    let response = Response { id: "r".into(), model: "gpt-6-luna".into(), content: vec![reasoning_item(), call_item("fc_1", "call_A", "bash", ARGS_A), call_item("fc_2", "call_B", "bash", ARGS_A), call_item("fc_3", "call_C", "bash", ARGS_A)], stop_reason: "completed".into(), usage: Value::Null };
+    // (1) 一個結果都還沒有。
+    let mut none_ran = fresh_state();
+    OpenAiCodec.accept(&mut none_ran, response.clone()).unwrap();
+    assert_eq!(OpenAiCodec.unpaired_tool_calls(&none_ran).unwrap(), ["call_A", "call_B", "call_C"]);
+    assert!(luna().encode("medium", &json!("sys"), &none_ran.messages, None).is_err(), "沒結清的 transcript 送不出去");
+    assert_eq!(OpenAiCodec.settle_unpaired_tool_calls(&mut none_ran, "not executed: turn ended"), 3);
+    // (2) 第一個跑完了，第二個執行到一半。
+    let mut one_ran = fresh_state();
+    OpenAiCodec.accept(&mut one_ran, response).unwrap();
+    OpenAiCodec.put_tool_results(&mut one_ran, &[provider::ToolResult { call_id: "call_A".into(), output: "ok".into(), is_error: false }], None, false);
+    one_ran.completed_tool_ids.insert("call_A".into());
+    one_ran.tool_pending = Some("call_B".into());
+    assert_eq!(OpenAiCodec.unpaired_tool_calls(&one_ran).unwrap(), ["call_B", "call_C"]);
+    assert_eq!(OpenAiCodec.settle_unpaired_tool_calls(&mut one_ran, "not executed: turn ended"), 2);
+    for state in [&none_ran, &one_ran] {
+        assert!(OpenAiCodec.unpaired_tool_calls(state).unwrap().is_empty());
+        assert!(["call_A", "call_B", "call_C"].iter().all(|id| state.completed_tool_ids.contains(*id)));
+        let body: Value = serde_json::from_slice(luna().encode("medium", &json!("sys"), &state.messages, None).unwrap().as_any().downcast_ref::<OpenAiRequest>().unwrap().wire()).unwrap();
+        let outputs: Vec<(&str, &str)> = body["input"].as_array().unwrap().iter().filter(|i| i["type"] == "function_call_output").map(|i| (i["call_id"].as_str().unwrap(), i["output"].as_str().unwrap())).collect();
+        assert_eq!(outputs.iter().map(|o| o.0).collect::<Vec<_>>(), ["call_A", "call_B", "call_C"]);
+        assert!(outputs.iter().filter(|o| o.0 != "call_A" || std::ptr::eq(state, &none_ran)).all(|o| o.1.contains("not executed: turn ended")), "{outputs:?}");
+    }
+    assert_eq!(OpenAiCodec.settle_unpaired_tool_calls(&mut one_ran, "again"), 0, "已結清的再跑一次不會多補");
+    // 形狀壞掉的 transcript 不猜。
+    let mut broken = fresh_state();
+    broken.messages.push(Message { role: "tool_results".into(), content: json!({"results": "oops"}) });
+    assert!(OpenAiCodec.unpaired_tool_calls(&broken).is_err());
+    // provider 的識別字查得到 codec；不認得的沒有。
+    assert!(provider::is_known("openai") && provider::is_known("anthropic") && !provider::is_known("gemini"));
+}
+
 /// 新的 async 路徑（編碼 → 送出 → 組串流 → 工具 → 再送）在 1 MiB 的執行緒上跑得完。
 #[test]
 fn a_full_openai_turn_fits_in_a_one_mib_stack() {

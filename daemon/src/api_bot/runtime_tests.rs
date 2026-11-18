@@ -6856,10 +6856,14 @@ async fn openai_two_tool_server() -> (String, Arc<std::sync::Mutex<Vec<(String, 
 
 /// `[openai_api]` 開好（有 key 檔、每回合成本上限），並注入 OpenAI 的假 endpoint／key／價表與工具。**不動** `[claude_api]`（維持關閉）。
 async fn enable_fake_openai_runtime(env: &crate::testing::Env, endpoint: String, tools: Arc<dyn super::super::runner::Tools>) {
-    let key = env.dir.join("openai-runtime-key");
+    enable_fake_openai_runtime_on(&env.app, &env.dir, endpoint, tools).await
+}
+
+async fn enable_fake_openai_runtime_on(app: &Arc<crate::state::App>, dir: &std::path::Path, endpoint: String, tools: Arc<dyn super::super::runner::Tools>) {
+    let key = dir.join("openai-runtime-key");
     crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
     let key = key.to_string_lossy().into_owned();
-    env.app
+    app
         .cfg
         .update(move |cfg| {
             cfg.openai_api.enabled = true;
@@ -6872,7 +6876,7 @@ async fn enable_fake_openai_runtime(env: &crate::testing::Env, endpoint: String,
         })
         .await
         .unwrap();
-    env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
+    app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
         endpoint,
         key_source: Arc::new(super::super::adapter::FixedTestKey(OPENAI_TEST_KEY.into())),
         quote: Arc::new(super::super::openai::provider::OpenAiQuote),
@@ -6978,6 +6982,63 @@ async fn openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls() {
     let visible: Vec<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=?").bind(&bot).fetch_all(&env.app.db).await.unwrap();
     assert!(visible.iter().all(|m| !m.contains("ENC-runtime-secret")), "但不進對話");
     assert!(!env.app.cfg.get().await.claude_api.enabled, "整個過程 Claude API 都沒開");
+}
+
+/// daemon 重啟後 openai-api 的 session 接得回來：啟動閘門認得 openai 的 checkpoint（不隔離 API）、native resume 的證明通過、
+/// 同一個 session 換新 generation；下一回合送出的 input 帶著重啟前的整段對話（含兩個工具呼叫與結果、加密 reasoning）。
+/// 用量端點：成本是 OpenAI 的帳，快取沒有可倒數的 TTL。
+#[tokio::test]
+async fn openai_api_session_resumes_after_a_daemon_restart_with_its_history() {
+    let env = crate::testing::env().await;
+    let (endpoint, seen, shutdown, server) = openai_two_tool_server().await;
+    let executed = Arc::new(AtomicUsize::new(0));
+    enable_fake_openai_runtime(&env, endpoint.clone(), Arc::new(OkTools(executed.clone()))).await;
+    let bot = insert_openai_bot(&env, "openai-restart").await;
+    let run = crate::lifecycle::start_bot(&env.app, &bot).await.unwrap();
+    let first = crate::lifecycle::prompt(&env.app, &bot, "run both commands", &crate::db::ulid()).await.unwrap();
+    let key = ApiTurnKey { bot_id: bot.clone(), run_id: run, turn_id: first.turn_id };
+    wait_until_completed(&env.app, &key).await;
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { if env.app.api_bot_runtime.inner.controls.lock().unwrap().get(&FullKey::from(&key)).is_some_and(|r| r.owner_exited) { break; } tokio::task::yield_now().await; } }).await.unwrap();
+    let session: String = sqlx::query_scalar("SELECT id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    crate::lifecycle::stop_bot(&env.app, &bot).await.unwrap();
+    env.app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, env.app.background_tasks.wait()).await.unwrap();
+
+    let app = crate::testing::restart_app(&env).await;
+    app.set_startup_ready(false);
+    super::super::startup_gate::barrier(&app).await;
+    app.set_startup_ready(true);
+    assert!(app.api_startup_gate.ready(), "openai 的 checkpoint 沒有讓啟動閘門隔離 API");
+    enable_fake_openai_runtime_on(&app, &env.dir, endpoint, Arc::new(OkTools(executed.clone()))).await;
+    let run2 = crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.expect("native resume of an openai session");
+    let second = crate::lifecycle::prompt(&app, &bot, "and now?", &crate::db::ulid()).await.unwrap();
+    let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run2, turn_id: second.turn_id };
+    wait_until_completed(&app, &key2).await;
+    app.background_tasks.close();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, app.background_tasks.wait()).await.unwrap();
+    shutdown.cancel();
+    server.await.unwrap();
+
+    let (actual, generation): (String, i64) = sqlx::query_as("SELECT id,generation FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL").bind(&bot).fetch_one(&app.db).await.unwrap();
+    assert_eq!((actual, generation), (session, 2), "同一個 session、新的 generation");
+    assert_eq!(executed.load(Ordering::SeqCst), 2, "重啟前跑過的工具沒有重跑");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    let input = seen[2].1["input"].as_array().unwrap().clone();
+    let kinds: Vec<&str> = input.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["message", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output", "message", "message"]);
+    assert_eq!(input[1]["encrypted_content"], "ENC-runtime-secret");
+    assert!(input[7]["content"][0]["text"].as_str().unwrap().contains("and now?"));
+    let attempts: Vec<(String, String)> = sqlx::query_as("SELECT provider, state FROM api_bot_attempts WHERE bot_id=? ORDER BY created_at, ordinal").bind(&bot).fetch_all(&app.db).await.unwrap();
+    assert_eq!(attempts, vec![("openai".to_string(), "recorded".to_string()); 3]);
+
+    // 快取資訊：openai-api 沒有 Claude 的 5 分鐘／1 小時倒數。
+    let cache = crate::api_bot_turn_cost::cache_info(&app.db, &bot).await.unwrap();
+    assert!(cache["last_request_at"].is_string() && cache["ttl_secs"].is_null() && cache["expires_at"].is_null(), "{cache}");
+    // 回合時間線：工具從 OpenAI 的 function_call 看得到。
+    let timeline = super::super::timeline::get_turn_timeline(&app.db, &bot, &key.turn_id).await.unwrap().unwrap();
+    let tools = timeline["timeline"].as_array().map(|items| items.iter().filter(|i| i["type"] == "tool").count()).unwrap_or(0);
+    assert_eq!(tools, 2, "{timeline}");
 }
 
 /// 新的 async 路徑（openai-api 的 start → prompt → tool → settle）在 1 MiB 的執行緒上跑得完。

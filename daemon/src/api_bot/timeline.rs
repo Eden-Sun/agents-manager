@@ -530,6 +530,23 @@ fn build_timeline_and_summary(
                 .and_then(Value::as_array)
                 .unwrap_or(&empty_vec);
             for b in content_blocks {
+                // OpenAI 的回應：output item `function_call`（id 是 `call_id`），結果在 `tool_results` 批次裡。
+                if b.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let call_id = b.get("call_id").and_then(Value::as_str).unwrap_or("");
+                    let is_error = messages.iter().any(|m| {
+                        m.get("role").and_then(Value::as_str) == Some("tool_results")
+                            && m.pointer("/content/results").and_then(Value::as_array).is_some_and(|results| {
+                                results.iter().any(|r| r.get("call_id").and_then(Value::as_str) == Some(call_id) && r.get("is_error").and_then(Value::as_bool) == Some(true))
+                            })
+                    });
+                    timeline_items.push(json!({
+                        "type": "tool",
+                        "name": b.get("name").and_then(Value::as_str).unwrap_or("unknown"),
+                        "duration_ms": Value::Null,
+                        "is_error": is_error,
+                    }));
+                    continue;
+                }
                 if b.get("type").and_then(Value::as_str) == Some("tool_use") {
                     let tool_id = b.get("id").and_then(Value::as_str).unwrap_or("");
                     let name = b

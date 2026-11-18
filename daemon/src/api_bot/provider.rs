@@ -73,6 +73,11 @@ pub trait Codec: Send + Sync {
     fn prune_after_compaction(&self, state: &mut State);
     /// 回應裡給使用者看的文字（不含 thinking、工具內容）。
     fn visible_text(&self, response: &Response) -> String;
+    /// transcript 裡宣告了、但還沒有結果的工具呼叫 id（照出現順序）。形狀壞掉回 `Err`。recovery 用它判斷對話是不是結清了。
+    fn unpaired_tool_calls(&self, state: &State) -> Result<Vec<String>, ()>;
+    /// 把還沒有結果的工具呼叫都補上一筆「沒有執行」的結果（`is_error`），並標成已完成：回合被中斷後，下一次請求才編得出來，
+    /// 而且那些工具永遠不會被重跑。回傳補了幾筆。
+    fn settle_unpaired_tool_calls(&self, state: &mut State, note: &str) -> usize;
 }
 
 /// 送出一份已編碼請求所需的連線設定。
@@ -150,5 +155,14 @@ pub(crate) fn for_id(id: &str, options: SessionOptions, quote: Arc<dyn QuoteProv
 
 /// 這個識別字是不是已知的 provider（recovery 只認得出標籤、還不需要建 provider 的地方用）。
 pub(crate) fn is_known(id: &str) -> bool {
-    id == super::anthropic::ID
+    codec_for(id).is_some()
+}
+
+/// 依識別字取得 transcript 的 codec（只讀寫 transcript，不需要 session 選項或金鑰；recovery／sweeper 用）。
+pub(crate) fn codec_for(id: &str) -> Option<&'static dyn Codec> {
+    match id {
+        super::anthropic::ID => Some(&super::anthropic::AnthropicCodec),
+        super::openai::provider::ID => Some(&super::openai::provider::OpenAiCodec),
+        _ => None,
+    }
 }
