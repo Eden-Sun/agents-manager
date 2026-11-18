@@ -8,7 +8,7 @@
 風險更低的解法在生產路徑上跑著、被 1000 多條測試釘住；剩下沒解的部分（多 bot 操作的鎖排序、
 50 個呼叫點分散在 12 個檔案），actor 換一種方式重現同樣的難題，不是拿掉它。
 
-沒有做任何生產程式改動；示範用的原型在 `daemon/src/lifecycle/actor_runtime_eval_prototype.rs`，
+沒有做任何生產程式改動；示範用的原型在 `crates/am-lifecycle/src/lifecycle/actor_runtime_eval_prototype.rs`，
 整檔 `#[cfg(test)]`（比照 issue #81 的 `native_transport_prototype.rs`），不進 `cargo build`。
 
 ## 讀了什麼
@@ -32,13 +32,13 @@ trigger 或純函式），但**執行**轉移的程式碼——`queue::flush_que
 
 ### 現有 per-bot mutex + centralized controller 是否已足夠？
 
-「centralized controller」目前不存在（也不需要存在）——`app.bot_lock`（`daemon/src/state.rs:272`）
+「centralized controller」目前不存在（也不需要存在）——`app.bot_lock`（`daemon/src/state.rs:600`）
 仍然是分散在 12 個檔案裡的 50 個呼叫點各自 `lock().await` 之後做自己的事，doc comment 自己講得
 明白：「start / stop / prompt / hook matching / spool replay / reconcile all take it.」。這聽起來
 像是問題，但**真正扛住正確性的不是這把鎖**：
 
 - `turns_one_in_flight`／`turns_one_queued` 這兩個 UNIQUE INDEX（`crates/am-base/src/db.rs`）讓「兩邊都以為
-  自己搶到了」變成 SQL 錯誤，不是靜默的資料損毀——`queue.rs:5-8` 的 doc comment 直接寫「the one-in-flight
+  自己搶到了」變成 SQL 錯誤，不是靜默的資料損毀——`crates/am-lifecycle/src/lifecycle/queue.rs:44` 的 doc comment 直接寫「the one-in-flight
   / one-queued unique indexes make a lost race an error」。
 - 今晚新增的 `turns_status_transition` trigger 讓「非法轉移」不管從哪條路徑來都是 `RAISE(ABORT)`。
 - `supervisor::assignment_state`／`mission::workflow` 把另外兩張表的等價保證做成純函式。
@@ -54,13 +54,13 @@ constraint 都還在。這是「已經足夠」的判斷基礎：不是「沒有
 會把「排隊」這件事從「等 `bot_lock`」換成「等 mailbox 輪到自己」，但保護資料正確性的仍然是同一組
 DB constraint——actor 沒有拿掉它們，也不能拿掉，因為 DB 檔案本身不知道呼叫端是不是 actor。
 
-**Interrupt**：`interrupt_grace`（`daemon/src/lifecycle/interrupt_grace.rs`）處理的是「使用者按了
+**Interrupt**：`interrupt_grace`（`crates/am-lifecycle/src/lifecycle/interrupt_grace.rs`）處理的是「使用者按了
 中斷，排隊的派工要等到真的閒置滿寬限才送」，本質是一個**跨事件的時間視窗判斷**（連續閒置多久、
 有沒有更新的使用者輸入），不是鎖爭用問題。actor 化不會讓這個判斷變簡單：無論是「進 mailbox 前
 查一次剩餘寬限」還是「actor 收到訊息時查一次」，要查的是同一份 DB 狀態（`interrupted_at`、
 最後一次活動時間），時間窗邏輯本身不會因為換了執行模型而消失。
 
-**Lock ordering**：這是三者裡**唯一** actor 換不掉底層難題的。`api.rs:1348` 的 `lock_bots_in_order`
+**Lock ordering**：這是三者裡**唯一** actor 換不掉底層難題的。`daemon/src/api.rs:3790` 的 `lock_bots_in_order`
 明講「刪除是唯一會同時持多把（bot_lock）的路徑」，而且是繞過死鎖才長成現在這樣（`sol 五輪`：
 `delete_bot` 先鎖 parent、`delete_project` 先鎖 child，ULID 不保證誰比較小，兩條路徑對開時互等）。
 換成「每個 bot 一個 actor」之後，`delete_project` 要嘛（a）依然需要同時協調 parent／child 兩個
@@ -124,7 +124,7 @@ event-sourcing／snapshot 機制，否則外部看不到——這既是額外的
 
 ## 驗證
 
-- 新增 `daemon/src/lifecycle/actor_runtime_eval_prototype.rs`（`#[cfg(test)]`，不進正式二進位），
+- 新增 `crates/am-lifecycle/src/lifecycle/actor_runtime_eval_prototype.rs`（`#[cfg(test)]`，不進正式二進位），
   3 條測試：一條示範 actor mailbox 收下訊息到真正落地之間有易失空窗，重啟（丟掉 task）會讓那個空窗
   裡的訊息完全消失；一條對照 `turn_controller::set_status` 本身就是原子的持久化操作，沒有這種空窗；
   一條把 `bot_lock` 目前的呼叫檔案清單（11 個）與「刪除是唯一會同時持多把」這個事實釘進測試，

@@ -15,9 +15,9 @@ Agent／fork（issue 交辦當下的硬性限制）。證據來源：
    不是用猜的）。
 2. `ListAgents` 對現在這個 session 實際看到的環境跑了一次（唯讀，不送訊息）。
 3. `claude --help` 的完整子命令清單。
-4. herdr 那條路現有的實作：`daemon/src/lifecycle/delivery.rs`、`daemon/src/lifecycle/prompt.rs`、
+4. herdr 那條路現有的實作：`crates/am-lifecycle/src/lifecycle/delivery.rs`、`crates/am-lifecycle/src/lifecycle/prompt.rs`、
    `daemon/src/herdr.rs`。
-5. 一個 `#[cfg(test)]`（不進正式二進位）的小型原型：`daemon/src/lifecycle/native_transport_prototype.rs`，
+5. 一個 `#[cfg(test)]`（不進正式二進位）的小型原型：`crates/am-lifecycle/src/lifecycle/native_transport_prototype.rs`，
    把「native 結果」套進既有 `Delivered`／`delivery` 欄位，用測試釘住套不套得上。
 
 ## 建議的抽象，跟這次評估的落點
@@ -46,7 +46,7 @@ native transport 沒有對等的東西——要嘛請某個活著的 agent sessi
 - **ListAgents 看到的身份是 session 的顯示名稱**，不是 agents-manager 的 `bot_id`。實測
   （見上面「方法論」第 2 點）看到的名字（例如 `wt-is63web-9b`）恰好跟這台機器上那顆 bot 的
   worktree 目錄同名，但那是巧合，不是 agents-manager 設的——`git grep -n '"--name"\|"-n"'`
-  daemon/src/lifecycle/start.rs 完全沒有結果：agents-manager 啟動 claude bot 時**從來沒有
+  `crates/am-lifecycle/src/lifecycle/start.rs` 完全沒有結果：agents-manager 啟動 claude bot 時**從來沒有
   傳過 `--name`／`-n`**，顯示名稱完全交給 CLI 自己決定。要讓 native transport 能可靠定位到
   一顆特定的 agents-manager bot，第一步就要先讓 daemon 在啟動時傳穩定的 `--name`（例如
   `bot_id` 或 `<project>-<bot name>`），這是目前完全沒有的整合。
@@ -88,14 +88,14 @@ agents-manager 的 autostart bot 常常跑在 `--dangerously-skip-permissions`�
 (a send resumes it from its transcript)」。這代表**同一個 Claude Code harness 自己的
 session/transcript**在完成後仍可以用名字接續。但這跟 agents-manager 的 restart 是**兩套完全
 不同的東西**：daemon 重啟一顆 bot 是重新起一個 CLI 行程（`--resume <native_session_id>`，
-見 `daemon/src/lifecycle/start.rs`），這個新行程在 Claude Code harness 眼中是不是「同一個
+見 `crates/am-lifecycle/src/lifecycle/start.rs`），這個新行程在 Claude Code harness 眼中是不是「同一個
 session」（因此 SendMessage 認不認得同一個名字接得回去）**沒有查證過，也查不到**——這需要
 真的重啟一顆 bot 才能觀察，而這次任務明確禁止對正在跑的 bot 做這件事。誠實列成「未知」，
 不假裝驗證過。
 
 ### 如何映射到現有 delivery=ok/unknown/failed
 
-見 `daemon/src/lifecycle/native_transport_prototype.rs`（`#[cfg(test)]`，不進正式二進位）
+見 `crates/am-lifecycle/src/lifecycle/native_transport_prototype.rs`（`#[cfg(test)]`，不進正式二進位）
 與下面的表。三條測試釘住這個結論，不是只有文字：
 `only_refusal_and_unknown_recipient_map_cleanly_onto_the_existing_four_delivery_values`、
 `reusing_delivered_unproven_for_no_ack_would_wrongly_enable_auto_resend`、
@@ -139,7 +139,7 @@ session」（因此 SendMessage 認不認得同一個名字接得回去）**沒�
 
 ## 驗證
 
-- `daemon/src/lifecycle/native_transport_prototype.rs`：`#[cfg(test)]` 整檔，`cargo test`
+- `crates/am-lifecycle/src/lifecycle/native_transport_prototype.rs`：`#[cfg(test)]` 整檔，`cargo test`
   才會編，`cargo build`／正式二進位完全看不到。3 條測試全綠（見上面「如何映射」小節列的測試名）。
 - daemon 全套測試、`clippy --all-targets`：見 commit 訊息裡的數字。
 - 沒有對任何正在跑的 bot 送過 `SendMessage`；沒有開過額外的 Agent／fork。
