@@ -4208,6 +4208,15 @@ Grok 撞限的回合不以 `end_turn` 收尾。`hookrecv` 對通過世代圍籬�
 | fork／`--effort` | 第二階段；`fork_args_by_kind` 回 `unsupported_kind` |
 
 `bots.kind` 的 CHECK 收 `'agy'`：舊庫就地放寬（`db::widen_bots_kind_check`——在交易裡改 `sqlite_master.sql` 並遞增 `schema_version`，不重建 `bots`，因為十七張表指著它；放寬後的定義跟全新 DB 一字不差），`SCHEMA_VERSION` 42。
+`bots.kind` 的 CHECK 再收 `'openai-api'`（openai-api D2b-2，2026-11-18，schema 98）：同一支 `widen_bots_kind_check` 就地放寬，舊資料不搬、不變。**部署是單向的**：新 binary 開過的 DB 是 schema 98，舊 binary 的 schema guard 不認、會拒絕開啟——要回滾 binary 得先還原升級前的 DB 備份。
+
+**openai-api bot kind（D2b-2）**：與 `claude-api` 一樣在 daemon 內跑 harness、沒有 CLI／pane，**不在** CLI 的 `KINDS` 裡（不探測安裝、不查額度、不能停用 kind）；`valid_bot_kind`／`bot_kinds_list` 收它，`efforts_for_kind("openai-api")`＝none／low／medium／high／xhigh／max（預設 medium），模型只收 `gpt-6-luna`（`api_bot_model_supported_for(kind, model)`，各家只收自己的）。
+- **設定與金鑰只看 `[openai_api]`**：建立與啟動都先看 `enabled` 與 key 檔，不能用就回具名錯誤 `openai_not_configured`；limits 用 `[openai_api.api_bot]`（必填每回合成本上限）。Claude 的設定、key、啟動預算門檻（`api_bot_turn_cost_cap_too_low`）與 `claude_api_cap` 都不套用。
+- **session**：`runtime.rs` 依 bot 的 kind 組 `AdapterProvider`（`provider::for_id("openai", SessionOptions, OpenAiQuote)`），endpoint 固定官方 Responses、key 走 `OpenAiConfigKeySource`；checkpoint 標 `openai`，attempt 記 `provider='openai'`、`service_tier='standard'`，總上限在預留的同一個寫交易裡檢查（`reserve_scoped`）。
+- **v1 沒有的東西**：附件（`POST /prompt` 帶附件回 400 `attachments_unsupported_for_kind`；runtime 再擋一次，不靜默丟掉）、壓縮（`/compact` 回 `compact_unsupported`）、自動降 effort、fast、web_search／web_fetch、1 小時快取。context 太大時在送出前拒絕（請求的輸入上界超過模型的 context window 就編不出請求）。
+- **指示更新**：system 變了時 Claude 是在 user 訊息前加一個 text 區塊；OpenAI 的 user 訊息是純文字，更新內容直接接在訊息前面。
+- **尚未完成**（D2b-3、D2b-4）：daemon 重啟後的恢復與卡住工具的結清（recovery／sweeper 還只認 Claude 的 transcript 形狀）、顧問派工的端到端與派工前依供應商的上限檢查、Web 建立入口（切片 E）。
+
 
 ### 12a.2 hook 與 statusLine：全域設定檔 + env 分派
 agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini CLI）共用的 `~/.gemini`，所以跟 grok（§12.2）同一個做法：**資料目錄裡一支 dispatcher `agy-hook.sh <事件>`**（bot 啟動時改寫），設定檔指向它，pane env 沒有 `AM_BOT_ID`／`AM_HOOK_TOKEN`（或 `AM_INSTANCE` 不符）就什麼都不做——使用者自己開的 agy 不受影響。

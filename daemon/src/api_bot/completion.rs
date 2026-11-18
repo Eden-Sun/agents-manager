@@ -17,6 +17,10 @@ impl FinalText {
     pub(super) fn from_response(response: &Response) -> Self {
         Self(super::runner::final_text(response))
     }
+    /// 已經由 session 的 codec 取出的可見文字（各家的回應形狀不同）。
+    pub(super) fn from_text(text: String) -> Self {
+        Self(text)
+    }
     pub(super) fn receipt_payload(&self) -> Result<super::receipt::Payload, super::receipt::Error> {
         super::receipt::Payload::visible(&self.0)
     }

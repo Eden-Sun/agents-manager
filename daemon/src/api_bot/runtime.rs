@@ -299,15 +299,24 @@ impl ApiBotRuntime {
         let remote = project.host != crate::config::LOCAL_HOST;
         if remote && !app.hosts.get(&project.host).await.is_some_and(|c| c.is_connected()) { return Err(E::Refused("api_bot_host_offline")); }
         let cfg = app.cfg.get().await;
-        if !cfg.claude_api.enabled || !cfg.claude_api.api_bot.enabled { return Err(E::Refused("api_bot_disabled")); }
-        let cap = cfg.claude_api.api_bot.max_turn_cost_microusd;
-        if matches!(cap, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
-        let limits = cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("api_bot_disabled"))?;
+        let openai = bot.kind == crate::config::OPENAI_API_KIND;
+        // 設定與金鑰跟著 kind 的供應商：openai-api 只看 `[openai_api]`，不讀 Claude 的設定。
+        let limits = if openai {
+            if super::openai::provider::configured(&cfg).is_err() { return Err(E::Refused("openai_not_configured")); }
+            if matches!(cfg.openai_api.api_bot.max_turn_cost_microusd, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
+            cfg.openai_api.api_bot.validated(cfg.openai_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("openai_not_configured"))?
+        } else {
+            if !cfg.claude_api.enabled || !cfg.claude_api.api_bot.enabled { return Err(E::Refused("api_bot_disabled")); }
+            let cap = cfg.claude_api.api_bot.max_turn_cost_microusd;
+            if matches!(cap, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
+            cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("api_bot_disabled"))?
+        };
         if self.dependencies_snapshot().is_none() {
             // 單次預留現在依實際 request 估；啟動時還沒有 request，用「3 萬 token 輸入（按快取寫入價）＋ max_output_tokens」當最低門檻。
+            // 這個門檻是 Claude 的價；openai-api 不套（它的預留在送出前依實際請求的上界報價，買不起就在那裡擋）。
             let factor = if bot.fast != 0 { 2_i64 } else { 1 };
             let reserve = (32_768_i64 * 5 + i64::from(limits.max_output_tokens) * 20) * factor;
-            if limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
+            if !openai && limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
             if !remote && (!native_bwrap_available() || !bwrap_userns_works().await) { return Err(E::Refused("api_bot_sandbox_unavailable")); }
             let dependencies = production_dependencies(app, &bot, &project, &limits).await.map_err(|_| E::Refused("api_bot_workspace_unavailable"))?;
             let key = dependencies.key_source.snapshot().await.map_err(|_| E::Refused("api_bot_key_unavailable"))?;
@@ -512,12 +521,14 @@ impl ApiBotRuntime {
             if !same_conversation { return Err(ApiBotError::Busy); }
         }
         let cfg = app.cfg.get().await;
-        let limits = cfg
-            .claude_api
-            .api_bot
-            .validated(cfg.claude_api.enabled)
-            .map_err(|_| ApiBotError::Upstream)?
-            .ok_or(ApiBotError::Upstream)?;
+        let openai = bot.kind == crate::config::OPENAI_API_KIND;
+        let limits = if openai {
+            cfg.openai_api.api_bot.validated(cfg.openai_api.enabled)
+        } else {
+            cfg.claude_api.api_bot.validated(cfg.claude_api.enabled)
+        }
+        .map_err(|_| ApiBotError::Upstream)?
+        .ok_or(ApiBotError::Upstream)?;
         let dependencies = match dependencies {
             Some(dependencies) => dependencies,
             None => production_dependencies(app, &bot, &project, &limits).await?,
@@ -550,7 +561,26 @@ impl ApiBotRuntime {
             web_search,
             web_fetch,
         };
-        options.validate().map_err(|_| ApiBotError::Upstream)?;
+        // 這個 session 的供應商：跟著 bot 的 kind，建立時固定（接續時 adapter 會核對 checkpoint 的標籤）。
+        let adapter_provider = || {
+            if openai {
+                super::adapter::AdapterProvider {
+                    id: super::openai::provider::ID,
+                    options: super::provider::SessionOptions {
+                        model: bot.model.clone().unwrap_or_else(|| crate::config::OPENAI_API_BOT_MODEL.into()),
+                        effort: options.effort.clone(),
+                        max_output_tokens: limits.max_output_tokens,
+                        extras: super::provider::ProviderExtras::None,
+                    },
+                    quote: dependencies.quote.clone(),
+                }
+            } else {
+                super::adapter::AdapterProvider::anthropic(options.clone(), dependencies.quote.clone())
+            }
+        };
+        if !openai {
+            options.validate().map_err(|_| ApiBotError::Upstream)?;
+        }
 
         let agent_name = run.agent_name.as_deref().unwrap_or(&bot.name);
         let agent_md = crate::lifecycle::agent_md::load(app, &project).await;
@@ -569,22 +599,23 @@ impl ApiBotRuntime {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
             max_requests_per_hour: hourly_fuse,
-            total_cap_usd: cfg.claude_api.api_bot.total_cap_usd,
-            total_cap_since: cfg.claude_api.api_bot.total_cap_since.clone(),
-            auto_lower_effort_turn_cost_microusd: limits.auto_lower_effort_turn_cost_microusd,
+            // 總上限各家各的（openai 的在預留的同一個寫交易裡檢查，只算 openai 的 attempt）。
+            total_cap_usd: if openai { cfg.openai_api.api_bot.total_cap_usd } else { cfg.claude_api.api_bot.total_cap_usd },
+            total_cap_since: if openai { cfg.openai_api.api_bot.total_cap_since.clone() } else { cfg.claude_api.api_bot.total_cap_since.clone() },
+            // openai-api 不做自動降 effort（也沒有壓縮）。
+            auto_lower_effort_turn_cost_microusd: if openai { None } else { limits.auto_lower_effort_turn_cost_microusd },
         };
         let (identity, expected_cursor, resume_old_admission) = self.identity_for_turn(app, &full).await?;
         let session_cursor = expected_cursor.clone();
         let (adapter, mut state) = if let Some(cursor) = session_cursor {
-            let (adapter, state) = match super::adapter::ApiBotAdapter::rebind(
+            let (adapter, state) = match super::adapter::ApiBotAdapter::rebind_with(
                 app.db.clone(),
                 &cursor.identity,
                 cursor.revision,
                 identity.clone(),
-                options.clone(),
+                adapter_provider(),
                 system.clone(),
                 adapter_limits.clone(),
-                dependencies.quote.clone(),
                 api_http_config(&dependencies, &limits),
                 Some(dependencies.tools.clone()),
             ).await {
@@ -599,13 +630,12 @@ impl ApiBotRuntime {
             };
             (Arc::new(adapter.with_progress_sink(progress_sink(app))), state)
         } else {
-            let adapter = super::adapter::ApiBotAdapter::new(
+            let adapter = super::adapter::ApiBotAdapter::new_with(
                 app.db.clone(),
                 identity.clone(),
-                options.clone(),
+                adapter_provider(),
                 system,
                 adapter_limits,
-                dependencies.quote.clone(),
                 api_http_config(&dependencies, &limits),
                 Some(dependencies.tools.clone()),
             )
@@ -659,7 +689,16 @@ impl ApiBotRuntime {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        let user_content = if !attachments.is_empty() || needs_instruction_update {
+        // openai-api v1 不支援附件：`POST /prompt` 已經先擋（`attachments_unsupported_for_kind`）；走到這裡代表繞過了那道檢查，
+        // 一樣不送——不靜默丟掉附件。
+        if openai && !attachments.is_empty() {
+            tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "openai-api turn carries attachments; refused (attachments_unsupported_for_kind)");
+            return Err(ApiBotError::Upstream);
+        }
+        let user_content = if openai {
+            // OpenAI 的 transcript 一筆 user 訊息就是純文字；指示更新直接接在前面。
+            serde_json::Value::String(if needs_instruction_update { format!("[Instructions updated by AG Man]\n\n{fresh_system_text}\n\n{prompt}") } else { prompt })
+        } else if !attachments.is_empty() || needs_instruction_update {
             let mut content_blocks = Vec::new();
             if needs_instruction_update {
                 let update_text = format!("[Instructions updated by AG Man]\n\n{fresh_system_text}");
@@ -856,10 +895,10 @@ impl ApiBotRuntime {
                         .responses
                         .iter()
                         .rev()
-                        .find(|r| !super::runner::final_text(r).trim().is_empty())
+                        .find(|r| !adapter.codec().visible_text(r).trim().is_empty())
                         .or_else(|| state.responses.last());
                     if let Some(response) = last_response_with_text {
-                        let _ = final_text_tx.send(super::completion::FinalText::from_response(response));
+                        let _ = final_text_tx.send(super::completion::FinalText::from_text(adapter.codec().visible_text(response)));
                     }
                 }
                 Ok(outcome)
@@ -1963,6 +2002,11 @@ async fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, 
         let conn = app.hosts.get(&project.host).await.ok_or(ApiBotError::Upstream)?;
         Arc::new(super::tools::RemoteTools::new(conn, root, tool_limits).map_err(|_| ApiBotError::Upstream)?)
     };
+    // endpoint、金鑰、報價跟著 kind 的供應商：openai-api 用官方 Responses endpoint、`[openai_api]` 自己的 key、OpenAI 的價表。
+    if bot.kind == crate::config::OPENAI_API_KIND {
+        let key_source = Arc::new(OpenAiConfigKeySource(Arc::downgrade(&app.shared())));
+        return Ok(ApiBotDependencies { endpoint: super::openai::provider::OFFICIAL_ENDPOINT.into(), key_source, quote: Arc::new(super::openai::provider::OpenAiQuote), tools, shutdown_join_timeout: None });
+    }
     let key_source = Arc::new(ConfigKeySource(Arc::downgrade(&app.shared())));
     Ok(ApiBotDependencies { endpoint: super::anthropic::OFFICIAL_ENDPOINT.into(), key_source, quote: Arc::new(super::pricing::DirectGlobal), tools, shutdown_join_timeout: None })
 }

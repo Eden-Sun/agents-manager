@@ -861,6 +861,8 @@ mod compact_tests {
         assert_eq!(compact_slash_command("claude"), Some("/compact"));
         assert_eq!(compact_slash_command("codex"), Some("/compact"));
         assert_eq!(compact_slash_command("claude-api"), Some("/compact"));
+        // openai-api 沒有壓縮：不提供 /compact（`compact` 回 400 `compact_unsupported`），也不映射成別的指令。
+        assert_eq!(compact_slash_command("openai-api"), None);
         assert_eq!(compact_slash_command("grok"), None);
     }
 }

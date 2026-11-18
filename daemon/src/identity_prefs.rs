@@ -160,7 +160,7 @@ pub async fn put_kind_disabled(
     Path(kind): Path<String>,
     Json(b): Json<KindDisableIn>,
 ) -> Result<Json<Value>, LcError> {
-    if !crate::config::valid_bot_kind(&kind) || kind == crate::config::API_BOT_KIND {
+    if !crate::config::valid_bot_kind(&kind) || crate::config::is_api_kind(&kind) {
         return Err(LcError::Bad("kind must be claude | codex | grok | agy".into()));
     }
     let host = b

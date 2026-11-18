@@ -1730,3 +1730,47 @@ async fn claude_api_advisor_can_be_created_then_patched_with_role_and_manager_us
         assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_cli_fields_unsupported"), "{body}: {r:?}");
     }
 }
+
+/// openai-api（D2b-2）：可以用 API 建立，但 `[openai_api]` 沒開或 key 檔不能用時回具名錯誤 `openai_not_configured`（不建任何東西）。
+/// 模型只收核准的 OpenAI 模型、預設 gpt-6-luna／medium；CLI 欄位與 fast 不收；PATCH model 也只收 OpenAI 的。
+#[tokio::test]
+async fn openai_api_bot_is_created_only_when_openai_is_configured_and_only_with_openai_models() {
+    let e = env().await;
+    crate::testing::seed_project_config(&e).await;
+    let body = json!({"name": "oa-adv", "kind": "openai-api"});
+    let refused = add(&e, body.clone()).await;
+    assert!(matches!(&refused, Err(LcError::Conflict(v)) if v["reason"] == "openai_not_configured" && v["message"] == "OpenAI 未啟用或未設定金鑰"), "{refused:?}");
+    // 開了但 key 檔不存在：一樣是 openai_not_configured。
+    let missing = e.dir.join("no-openai-key").to_string_lossy().into_owned();
+    e.app.cfg.update(move |c| { c.openai_api.enabled = true; c.openai_api.key_file = missing; Ok(()) }).await.unwrap();
+    assert!(matches!(add(&e, body.clone()).await, Err(LcError::Conflict(ref v)) if v["reason"] == "openai_not_configured"));
+    let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE kind='openai-api'").fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(bots, 0, "拒絕不留 bot");
+
+    let key = e.dir.join("openai-key");
+    crate::key_file::stage_key(&key.to_string_lossy(), "sk-openai-test-create").unwrap().publish().unwrap();
+    let key = key.to_string_lossy().into_owned();
+    e.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
+    let id = add(&e, body).await.unwrap();
+    let bot = db::bot(&e.app.db, &id).await.unwrap().unwrap();
+    assert_eq!((bot.kind.as_str(), bot.model.as_deref(), bot.effort.as_deref()), ("openai-api", Some("gpt-6-luna"), Some("medium")), "預設模型與 effort 是 OpenAI 的");
+    patch(&e, &id, json!({"role": "advisor", "manager_use": true})).await.unwrap();
+    assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().role.as_deref(), Some("advisor"));
+
+    for (bad, reason) in [
+        (json!({"name": "oa-bad1", "kind": "openai-api", "model": "claude-opus-5-5"}), "api_bot_model_unsupported"),
+        (json!({"name": "oa-bad2", "kind": "openai-api", "model": "gpt-4"}), "api_bot_model_unsupported"),
+        (json!({"name": "oa-bad3", "kind": "openai-api", "identity": "cc1"}), "api_bot_cli_fields_unsupported"),
+        (json!({"name": "oa-bad4", "kind": "openai-api", "fast": true}), "api_bot_cli_fields_unsupported"),
+        (json!({"name": "ca-bad", "kind": "claude-api", "model": "gpt-6-luna"}), "api_bot_model_unsupported"),
+    ] {
+        let r = add(&e, bad.clone()).await;
+        assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == reason), "{bad}: {r:?}");
+    }
+    assert!(add(&e, json!({"name": "oa-effort", "kind": "openai-api", "effort": "ultra"})).await.is_err(), "effort 照 luna 的清單");
+    let none = add(&e, json!({"name": "oa-none", "kind": "openai-api", "effort": "none"})).await.unwrap();
+    assert_eq!(db::bot(&e.app.db, &none).await.unwrap().unwrap().effort.as_deref(), Some("none"));
+    let r = patch(&e, &id, json!({"model": "claude-opus-5-5"})).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_model_unsupported"), "{r:?}");
+    patch(&e, &id, json!({"model": "gpt-6-luna", "effort": "high"})).await.unwrap();
+}

@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok','agy','claude-api')),
+  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api')),
   model TEXT,
   effort TEXT,
   fast INTEGER NOT NULL DEFAULT 0,
@@ -675,6 +675,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (96, "e0364d581dcb0388"),
     // openai-api 切片 C（2026-11-18）：`api_bot_attempts.provider`／`service_tier`（ALTER ADD）、provider 不可變 trigger 與 (provider, created_at) 索引。
     (97, "e221e96c9fdae2a0"),
+    // openai-api D2b-2（2026-11-18）：`bots.kind` 的 CHECK 多收 `openai-api`（就地放寬 `sqlite_master.sql`，不搬資料）。
+    (98, "8bda24e0822e32ff"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1188,7 +1190,9 @@ pub async fn apply_migrations_failing_after_spawn_hints_drop_for_test(pool: &Sql
 async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> {
     const OLD: &str = "CHECK (kind IN ('claude','codex','grok'))";
     const FOUR: &str = "CHECK (kind IN ('claude','codex','grok','agy'))";
-    const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api'))";
+    const FIVE: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api'))";
+    // openai-api D2b-2（2026-11-18）：再放寬一種。只放寬、不搬資料；**單向**——寫進 `openai-api` 的列之後，舊 binary 的 schema guard 不認這份 schema。
+    const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api'))";
     let sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'").fetch_optional(&mut *conn).await?;
     let Some(sql) = sql else { return Ok(()) };
     if sql.contains(NEW) {
@@ -1198,7 +1202,13 @@ async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> 
     if !sql.contains("CHECK (kind IN") && !sql.contains("CHECK(kind IN") {
         return Ok(());
     }
-    let previous = if sql.contains(FOUR) { FOUR } else { OLD };
+    let previous = if sql.contains(FIVE) {
+        FIVE
+    } else if sql.contains(FOUR) {
+        FOUR
+    } else {
+        OLD
+    };
     anyhow::ensure!(sql.contains(previous), "bots 表的 kind CHECK 長得不認得，不敢就地放寬：{sql}");
     let widened = sql.replacen(previous, NEW, 1);
     let version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await?;

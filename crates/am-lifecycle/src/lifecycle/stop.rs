@@ -863,8 +863,8 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
-    // claude-api 沒有 pane：直接取消這一筆的 API 請求（不停 run），不碰 herdr／Esc。
-    if bot.kind == crate::config::API_BOT_KIND {
+    // API bot（claude-api／openai-api）沒有 pane：直接取消這一筆的 API 請求（不停 run），不碰 herdr／Esc。
+    if crate::config::is_api_kind(&bot.kind) {
         return interrupt_api_turn(app, bot_id, &run, expect_turn, seen.as_ref()).await;
     }
     // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。

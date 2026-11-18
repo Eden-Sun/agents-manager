@@ -1927,6 +1927,8 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
         "agy" => &[],
         // claude-api：直接打 Messages API，`output_config.effort` 只收這五級（api_bot/protocol.rs `Options::validate`）。
         API_BOT_KIND => &["low", "medium", "high", "xhigh", "max"],
+        // openai-api：Responses API 的 `reasoning.effort`，照模型的清單（gpt-6-luna）。
+        OPENAI_API_KIND => OPENAI_USE_EFFORTS,
         _ => &[],
     }
 }
@@ -1937,7 +1939,7 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
 pub const API_BOT_KIND: &str = CLAUDE_API_KIND;
 /// 在 daemon 內跑 harness 的 API bot kind（openai-api 計畫 D2a）：**生命週期判斷一律用 [`is_api_kind`]／[`api_kinds_sql!`]，不要寫字面值**
 /// （有一條守門測試 `no_literal_claude_api_kind_outside_the_kind_definitions` 擋）；Claude 專屬的（prompt cache TTL、Claude CLI 登入／
-/// fast／compaction、Claude 總上限）才用 [`CLAUDE_API_KIND`]。`openai-api` 在 D2b 之前**還不是合法 kind**（[`valid_bot_kind`] 不認）。
+/// fast／compaction、Claude 總上限）才用 [`CLAUDE_API_KIND`]。`openai-api` 自 D2b-2 起是合法 kind（[`valid_bot_kind`]）。
 pub const CLAUDE_API_KIND: &str = "claude-api";
 pub const OPENAI_API_KIND: &str = "openai-api";
 pub const API_BOT_KINDS: &[&str] = &[CLAUDE_API_KIND, OPENAI_API_KIND];
@@ -1970,14 +1972,35 @@ pub fn api_bot_model_supported(model: &str) -> bool {
 }
 /// 建立時沒指定 effort 的預設（bot 的 effort 必填，runtime 讀到 NULL 會拒絕）。
 pub const API_BOT_DEFAULT_EFFORT: &str = "high";
+/// openai-api 的預設模型與 effort（模型清單是 [`OPENAI_USE_MODELS`]，effort 清單是 [`OPENAI_USE_EFFORTS`]）。
+pub const OPENAI_API_BOT_MODEL: &str = "gpt-6-luna";
+pub const OPENAI_API_BOT_DEFAULT_EFFORT: &str = "medium";
 
-/// 可建立的 bot kind：[`KINDS`] ∪ [`API_BOT_KIND`]。
+/// 這個 API bot kind 能不能用這個模型（各家只收自己核准、有價表的模型）；不是 API kind 回 false。
+pub fn api_bot_model_supported_for(kind: &str, model: &str) -> bool {
+    match kind {
+        CLAUDE_API_KIND => api_bot_model_supported(model),
+        OPENAI_API_KIND => OPENAI_USE_MODELS.contains(&model),
+        _ => false,
+    }
+}
+
+/// 這個 API bot kind 沒指定時的模型與 effort；不是 API kind 回 `None`。
+pub fn api_bot_defaults(kind: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        CLAUDE_API_KIND => Some((API_BOT_MODEL, API_BOT_DEFAULT_EFFORT)),
+        OPENAI_API_KIND => Some((OPENAI_API_BOT_MODEL, OPENAI_API_BOT_DEFAULT_EFFORT)),
+        _ => None,
+    }
+}
+
+/// 可建立的 bot kind：[`KINDS`] ∪ [`API_BOT_KINDS`]（claude-api、openai-api）。兩種 API kind 都**不在** CLI 的 [`KINDS`] 裡。
 pub fn valid_bot_kind(kind: &str) -> bool {
-    valid_kind(kind) || kind == API_BOT_KIND
+    valid_kind(kind) || is_api_kind(kind)
 }
 
 pub fn bot_kinds_list() -> String {
-    format!("{}, {API_BOT_KIND}", kinds_list().replace(" or ", ", "))
+    format!("{}, {}", kinds_list().replace(" or ", ", "), API_BOT_KINDS.join(", "))
 }
 
 pub fn normalize_effort(kind: &str, e: Option<&str>) -> Result<Option<String>, String> {

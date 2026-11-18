@@ -210,7 +210,7 @@
             .foreign_keys(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let old = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
-        for stmt in SCHEMA.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api'))", "CHECK (kind IN ('claude','codex','grok'))").split(";\n") {
+        for stmt in SCHEMA.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api'))", "CHECK (kind IN ('claude','codex','grok'))").split(";\n") {
             let s = stmt.trim();
             if !s.is_empty() {
                 sqlx::query(s).execute(&old).await.unwrap();
@@ -1448,7 +1448,7 @@
             sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&mut *tx).await.unwrap();
         }
         let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='bots'").fetch_one(&mut *tx).await.unwrap();
-        let old = sql.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api'))", "CHECK (kind IN ('claude','codex','grok','agy'))");
+        let old = sql.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api'))", "CHECK (kind IN ('claude','codex','grok','agy'))");
         assert_ne!(sql, old);
         sqlx::query("PRAGMA writable_schema=ON").execute(&mut *tx).await.unwrap();
         sqlx::query("UPDATE sqlite_master SET sql=?WHERE name='bots'").bind(old).execute(&mut *tx).await.unwrap();
@@ -1597,6 +1597,18 @@
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
         drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;
+        // openai-api D2b-2：v69 的 `bots.kind` CHECK 還沒有 `openai-api`（就地放寬是之後的事）。
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='bots'").fetch_one(&mut *conn).await.unwrap();
+            let old = sql.replace("CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api'))", "CHECK (kind IN ('claude','codex','grok','agy','claude-api'))");
+            assert_ne!(sql, old);
+            sqlx::query("PRAGMA writable_schema=ON").execute(&mut *conn).await.unwrap();
+            sqlx::query("UPDATE sqlite_master SET sql=? WHERE name='bots'").bind(old).execute(&mut *conn).await.unwrap();
+            let schema_version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await.unwrap();
+            sqlx::query(&format!("PRAGMA schema_version={}", schema_version + 1)).execute(&mut *conn).await.unwrap();
+            sqlx::query("PRAGMA writable_schema=OFF").execute(&mut *conn).await.unwrap();
+        }
         sqlx::query("PRAGMA user_version=69").execute(&pool).await.unwrap();
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&pool).await.unwrap()),pinned(69));
         let now=now();
@@ -1620,6 +1632,11 @@
         let upgraded=open(&path).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&upgraded).await.unwrap(),SCHEMA_VERSION);
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&upgraded).await.unwrap()),pinned(SCHEMA_VERSION));
+        // openai-api D2b-2：升級後 `bots.kind` 收 `openai-api`；舊的列不變，不認得的 kind 照樣被擋。
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('ob','rp','openai','openai-api','fake',?)").bind(&now).execute(&upgraded).await.unwrap();
+        assert!(sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('xb','rp','nope','gemini-api','fake',?)").bind(&now).execute(&upgraded).await.is_err());
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT kind FROM bots WHERE id='rb'").fetch_one(&upgraded).await.unwrap(),"claude-api");
+        sqlx::query("DELETE FROM bots WHERE id='ob'").execute(&upgraded).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM sqlite_master WHERE name IN('api_bot_join_receipts','api_bot_join_receipts_pending')").fetch_one(&upgraded).await.unwrap(),2);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM api_bot_join_receipts").fetch_one(&upgraded).await.unwrap(),0);
         // Additive migration is idempotent, with existing private checkpoint/accounting intact.

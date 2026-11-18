@@ -330,6 +330,14 @@ fn codec_error(err: CodecError) -> http::Error {
     }
 }
 
+/// `[openai_api]` 能不能用：總開關要開、key 檔要讀得到。不能用時回原因（不含 key），呼叫端回具名錯誤 `openai_not_configured`。
+pub(crate) fn configured(cfg: &crate::config::ConfigFile) -> Result<(), String> {
+    if !cfg.openai_api.enabled {
+        return Err("[openai_api] enabled 沒有開".into());
+    }
+    crate::key_file::key_status(&cfg.openai_api.key_file)
+}
+
 pub(crate) struct OpenAiProvider {
     model: String,
     effort: String,

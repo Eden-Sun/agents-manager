@@ -884,21 +884,14 @@ impl Journal for ApiBotAdapter {
                             return Err(());
                         }
 
-                        if state.messages.len() != durable.messages.len() + 1 {
+                        // transcript 只能多出「這份回應照 session 的 codec 收進去」的那一段（Claude：一則 assistant 訊息；
+                        // OpenAI：回應的每個 output item 各一筆）。由 codec 從上一份 durable 狀態算出預期值再整份比對。
+                        let mut expected = durable.clone();
+                        let accepted = self.provider.codec().accept(&mut expected, settled.response.clone()).map_err(|_| ())?;
+                        if state.messages != expected.messages {
                             return Err(());
                         }
-                        if durable.messages != state.messages[..durable.messages.len()] {
-                            return Err(());
-                        }
-                        let last_msg = state.messages.last().unwrap();
-                        if last_msg.role != "assistant"
-                            || last_msg.content != Value::from(settled.response.content.clone())
-                        {
-                            return Err(());
-                        }
-
-                        let expected_tools = settled.response.tools().map_err(|_| ())?;
-                        let expected_tool_pending = expected_tools.first().map(|c| c.id.clone());
+                        let expected_tool_pending = accepted.calls.first().map(|c| c.id.clone());
                         if state.tool_pending != expected_tool_pending {
                             return Err(());
                         }

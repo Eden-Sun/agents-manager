@@ -23,16 +23,26 @@ fn is_api_kind_and_api_provider_know_both_api_kinds_and_nothing_else() {
     for k in API_BOT_KINDS {
         assert!(matches!(api_provider(k), Some("anthropic" | "openai")));
     }
-    // D2b 之前 openai-api 還不是合法 kind：行為完全不變。
-    assert!(crate::valid_bot_kind("claude-api"));
-    assert!(!crate::valid_bot_kind("openai-api"), "D2b 才開放");
+    // D2b-2 起兩種 API kind 都可以建立，但都不在 CLI 的 KINDS 裡（不探測安裝、不開 pane）。
+    assert!(crate::valid_bot_kind("claude-api") && crate::valid_bot_kind("openai-api"));
+    assert!(!crate::KINDS.contains(&"claude-api") && !crate::KINDS.contains(&"openai-api"));
+    assert!(!crate::valid_kind("openai-api"));
+    assert!(crate::bot_kinds_list().ends_with("claude-api, openai-api"));
+    // 模型與 effort 各家各的：openai-api 只收 gpt-6-luna、effort 照 luna 的清單（預設 medium）。
+    assert!(crate::api_bot_model_supported_for("openai-api", "gpt-6-luna") && !crate::api_bot_model_supported_for("openai-api", "claude-opus-5-5"));
+    assert!(crate::api_bot_model_supported_for("claude-api", "claude-opus-5-5") && !crate::api_bot_model_supported_for("claude-api", "gpt-6-luna"));
+    assert!(!crate::api_bot_model_supported_for("codex", "gpt-6-luna"));
+    assert_eq!(crate::efforts_for_kind("openai-api"), ["none", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(crate::api_bot_defaults("openai-api"), Some(("gpt-6-luna", "medium")));
+    assert_eq!(crate::api_bot_defaults("claude-api"), Some(("claude-opus-5-5", "high")));
+    assert_eq!(crate::api_bot_defaults("claude"), None);
 }
 
 /// 允許出現字面 `claude-api` 的非測試檔（以 repo 相對路徑）：kind 的定義處，以及與 kind 無關或必須是字面值的地方。
 const ALLOWED: &[(&str, &str)] = &[
     ("crates/am-config/src/lib.rs", "kind 常數與 valid_bot_kind 的定義"),
     ("crates/am-config/src/api_bot.rs", "設定的單元測試（寫在檔案內）"),
-    ("crates/am-base/src/db.rs", "bots.kind 的 CHECK 約束（schema 字面值；D2b 一併改）"),
+    ("crates/am-base/src/db.rs", "bots.kind 的 CHECK 約束（schema 字面值）"),
     ("daemon/src/claude_api.rs", "資料目錄 `<data_dir>/claude-api/`（不是 bot kind）"),
 ];
 

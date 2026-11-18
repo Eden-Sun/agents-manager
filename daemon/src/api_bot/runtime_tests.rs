@@ -6792,3 +6792,196 @@ async fn native_model_switch_refusals_are_http_409_with_stable_reason() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, server).await.unwrap().unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, provider).await.unwrap().unwrap();
 }
+
+// ───────────── openai-api（D2b-2）：啟動的具名拒絕、整回合（兩個工具呼叫）、帳記在 openai ─────────────
+
+const OPENAI_TEST_KEY: &str = "sk-openai-test-only";
+
+struct OkTools(Arc<AtomicUsize>);
+impl super::super::runner::Tools for OkTools {
+    fn execute<'a>(&'a self, call: &'a crate::api_bot::protocol::ToolCall, _: &'a CancellationToken) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { Ok(format!("ran {}", call.id)) })
+    }
+}
+
+fn openai_sse(events: &[Value]) -> Vec<u8> {
+    events.iter().map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap())).collect::<String>().into_bytes()
+}
+
+fn openai_usage(input: u64, output: u64) -> Value {
+    json!({"input_tokens": input, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": output, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": input + output})
+}
+
+/// 第一次回兩個 function_call（bash ×2）、第二次回最終文字；記下每次收到的 body 與 Authorization。
+async fn openai_two_tool_server() -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>, CancellationToken, tokio::task::JoinHandle<()>) {
+    let seen: Arc<std::sync::Mutex<Vec<(String, Value)>>> = Arc::default();
+    let record = seen.clone();
+    let handler = move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+        let record = record.clone();
+        async move {
+            let n = {
+                let mut seen = record.lock().unwrap();
+                seen.push((headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string(), serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                seen.len()
+            };
+            let call = |id: &str, call_id: &str| json!({"type": "function_call", "id": id, "call_id": call_id, "name": "bash", "arguments": "{\"command\":\"true\"}", "status": "completed"});
+            let body = if n == 1 {
+                let reasoning = json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "ENC-runtime-secret"});
+                let out = vec![reasoning, call("fc_1", "call_1"), call("fc_2", "call_2")];
+                openai_sse(&[
+                    json!({"type": "response.created", "response": {"id": "resp_1"}}),
+                    json!({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": out, "usage": openai_usage(900, 40)}}),
+                ])
+            } else {
+                let msg = json!({"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "both commands ran", "annotations": []}]});
+                openai_sse(&[
+                    json!({"type": "response.created", "response": {"id": "resp_2"}}),
+                    json!({"type": "response.completed", "response": {"id": "resp_2", "status": "completed", "output": [msg], "usage": openai_usage(1100, 12)}}),
+                ])
+            };
+            axum::response::Response::builder().status(200).header("content-type", "text/event-stream").body(axum::body::Body::from(body)).unwrap()
+        }
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route("/v1/responses", post(handler));
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
+    });
+    (format!("http://{address}/v1/responses"), seen, shutdown, task)
+}
+
+/// `[openai_api]` 開好（有 key 檔、每回合成本上限），並注入 OpenAI 的假 endpoint／key／價表與工具。**不動** `[claude_api]`（維持關閉）。
+async fn enable_fake_openai_runtime(env: &crate::testing::Env, endpoint: String, tools: Arc<dyn super::super::runner::Tools>) {
+    let key = env.dir.join("openai-runtime-key");
+    crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
+    let key = key.to_string_lossy().into_owned();
+    env.app
+        .cfg
+        .update(move |cfg| {
+            cfg.openai_api.enabled = true;
+            cfg.openai_api.key_file = key;
+            cfg.openai_api.api_bot.max_turn_cost_microusd = Some(5_000_000);
+            cfg.openai_api.api_bot.max_output_tokens = 2048;
+            cfg.openai_api.api_bot.turn_timeout_secs = 30;
+            cfg.openai_api.api_bot.command_timeout_secs = 10;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
+        endpoint,
+        key_source: Arc::new(super::super::adapter::FixedTestKey(OPENAI_TEST_KEY.into())),
+        quote: Arc::new(super::super::openai::provider::OpenAiQuote),
+        tools,
+        shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
+    });
+}
+
+async fn insert_openai_bot(env: &crate::testing::Env, name: &str) -> String {
+    let bot = crate::db::ulid();
+    sqlx::query("INSERT INTO bots(id,project_id,name,kind,model,effort,fast,hook_token,created_at) VALUES(?,?,?,'openai-api','gpt-6-luna','medium',0,'fixture',?)")
+        .bind(&bot).bind(&env.project_id).bind(name).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    bot
+}
+
+/// openai-api 的啟動只看 `[openai_api]`：沒開／沒 key → `openai_not_configured`；沒有每回合成本上限 → 具名拒絕；
+/// 不套 Claude 的啟動預算門檻（很低的上限也過得了這一關），Claude 的設定完全不影響它。拒絕都不留 run。
+#[tokio::test]
+async fn openai_api_native_start_reads_only_openai_settings_and_names_its_refusals() {
+    use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError as E, ApiNativeStartMode};
+    let env = crate::testing::env().await;
+    let bot = insert_openai_bot(&env, "openai-refuse").await;
+    let reason = |r: Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, E>| match r { Err(E::Refused(x)) => x, Err(E::Unconfirmed) => "UNCONFIRMED", Err(_) => "OTHER", Ok(_) => "OK" };
+    let go = || env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: false });
+    assert_eq!(reason(go().await), "openai_not_configured");
+    // Claude 那邊全開也沒用：openai-api 不讀 Claude 的設定與 key。
+    env.app.cfg.update(|c| { c.claude_api.enabled = true; c.claude_api.api_bot.enabled = true; c.claude_api.api_bot.max_turn_cost_microusd = Some(5_000_000); Ok(()) }).await.unwrap();
+    assert_eq!(reason(go().await), "openai_not_configured");
+    let missing = env.dir.join("no-such-openai-key").to_string_lossy().into_owned();
+    env.app.cfg.update(move |c| { c.openai_api.enabled = true; c.openai_api.key_file = missing; Ok(()) }).await.unwrap();
+    assert_eq!(reason(go().await), "openai_not_configured", "開了但 key 讀不到");
+    let key = env.dir.join("openai-start-key");
+    crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
+    let key = key.to_string_lossy().into_owned();
+    env.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
+    assert_eq!(reason(go().await), "api_bot_turn_cost_cap_missing");
+    // 上限很低也不會被 Claude 的啟動預算常數擋（`api_bot_turn_cost_cap_too_low` 是 Claude 的價）。
+    env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(1000); Ok(()) }).await.unwrap();
+    assert_ne!(reason(go().await), "api_bot_turn_cost_cap_too_low");
+    let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state NOT IN ('running','starting')").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(runs, 0);
+}
+
+/// 啟動 openai-api bot、送一則需要兩個工具呼叫的回合到完成：兩個工具都執行、結果用 call_id 回送、最終文字成為 assistant 訊息；
+/// 兩筆 attempt 記在 openai 的帳、金額是 OpenAI 價表的結算；checkpoint 標 openai；加密 reasoning 不進對話。Claude 的 API 沒開也不受影響。
+#[tokio::test]
+async fn openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls() {
+    let env = crate::testing::env().await;
+    let (endpoint, seen, shutdown, server) = openai_two_tool_server().await;
+    let executed = Arc::new(AtomicUsize::new(0));
+    enable_fake_openai_runtime(&env, endpoint, Arc::new(OkTools(executed.clone()))).await;
+    let bot = insert_openai_bot(&env, "openai-native").await;
+    let crid = crate::db::ulid();
+    let run = crate::lifecycle::start_bot(&env.app, &bot).await.expect("openai-api native start");
+    let pane: Option<String> = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
+    assert!(pane.is_none(), "API bot 沒有 pane");
+    crate::lifecycle::prompt(&env.app, &bot, "run both commands", &crid).await.expect("openai-api native prompt");
+    let final_message: String = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let found: Option<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='assistant' ORDER BY m.created_at DESC LIMIT 1")
+                .bind(&bot).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(text) = found { break text; }
+            // 回合失敗就不用等到逾時：把原因印出來。
+            let failed: Option<(String, Option<String>)> = sqlx::query_as("SELECT t.status, t.start_error FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='failed'").bind(&bot).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(failed) = failed {
+                let notes: Vec<String> = sqlx::query_scalar("SELECT m.role || ': ' || m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=?").bind(&bot).fetch_all(&env.app.db).await.unwrap();
+                let attempts: Vec<(String, String)> = sqlx::query_as("SELECT provider, state FROM api_bot_attempts WHERE bot_id=?").bind(&bot).fetch_all(&env.app.db).await.unwrap();
+                panic!("the turn failed: {failed:?}; messages: {notes:?}; attempts: {attempts:?}; requests seen: {}", seen.lock().unwrap().len());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the turn finished with an assistant message");
+    shutdown.cancel();
+    server.await.unwrap();
+
+    assert_eq!(final_message, "both commands ran");
+    assert_eq!(executed.load(Ordering::SeqCst), 2, "兩個工具都執行，各一次");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "兩次模型呼叫");
+    assert!(seen.iter().all(|(auth, _)| auth == &format!("Bearer {OPENAI_TEST_KEY}")));
+    let first = &seen[0].1;
+    assert_eq!((first["model"].clone(), first["store"].clone(), first["reasoning"]["effort"].clone(), first["max_output_tokens"].clone()), (json!("gpt-6-luna"), json!(false), json!("medium"), json!(2048)));
+    assert_eq!(first["input"].as_array().unwrap().len(), 1);
+    assert!(first["input"][0]["content"][0]["text"].as_str().unwrap().contains("run both commands"));
+    let input = seen[1].1["input"].as_array().unwrap().clone();
+    let kinds: Vec<&str> = input.iter().map(|i| i["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["message", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output"]);
+    assert_eq!(input[4], json!({"type": "function_call_output", "call_id": "call_1", "output": "ran call_1"}));
+    assert_eq!(input[5], json!({"type": "function_call_output", "call_id": "call_2", "output": "ran call_2"}));
+
+    // 帳：兩筆都記在 openai、標準層級、已結算；金額＝OpenAI 價表（900→90、40→20；1100→110、12→6 微美元）。
+    let attempts: Vec<(String, Option<String>, String, Option<i64>)> = sqlx::query_as("SELECT provider, service_tier, state, estimated_microusd FROM api_bot_attempts WHERE bot_id=? ORDER BY ordinal").bind(&bot).fetch_all(&env.app.db).await.unwrap();
+    assert_eq!(attempts, [
+        ("openai".to_string(), Some("standard".to_string()), "recorded".to_string(), Some(110)),
+        ("openai".to_string(), Some("standard".to_string()), "recorded".to_string(), Some(116)),
+    ]);
+    let checkpoint: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    let checkpoint: Value = serde_json::from_str(&checkpoint).unwrap();
+    assert_eq!((checkpoint["v"].as_u64(), checkpoint["provider"].as_str()), (Some(2), Some("openai")));
+    assert!(checkpoint.to_string().contains("ENC-runtime-secret"), "加密 reasoning 留在私人的 checkpoint 裡續傳");
+    let visible: Vec<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=?").bind(&bot).fetch_all(&env.app.db).await.unwrap();
+    assert!(visible.iter().all(|m| !m.contains("ENC-runtime-secret")), "但不進對話");
+    assert!(!env.app.cfg.get().await.claude_api.enabled, "整個過程 Claude API 都沒開");
+}
+
+/// 新的 async 路徑（openai-api 的 start → prompt → tool → settle）在 1 MiB 的執行緒上跑得完。
+#[test]
+fn openai_api_start_prompt_tool_settle_fits_one_mib_stack() {
+    std::thread::Builder::new().stack_size(1024 * 1024).spawn(openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls).unwrap().join().unwrap();
+}

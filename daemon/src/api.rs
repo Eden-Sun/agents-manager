@@ -2523,9 +2523,14 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
 fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
     let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
     if let Some(m) = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        if !crate::config::api_bot_model_supported(m) {
+        // 各家只收自己核准的模型（claude-api 不收 gpt-*，openai-api 不收 claude-*）。
+        if !crate::config::api_bot_model_supported_for(&b.kind, m) {
             return Err(bad("api_bot_model_unsupported"));
         }
+    }
+    // openai-api 沒有 fast（Claude 的計價選項）。
+    if b.kind == crate::config::OPENAI_API_KIND && b.fast {
+        return Err(bad("api_bot_cli_fields_unsupported"));
     }
     if b.identity.as_deref().is_some_and(|s| !s.trim().is_empty())
         || !b.args.is_empty()
@@ -2575,9 +2580,15 @@ async fn create_bot(
         Some(r @ ("executor" | "advisor")) if expert_project => Some(r.to_string()),
         Some(_) => return Err(LcError::Bad("role on create only accepts `scheduler` (expert projects also `executor`／`advisor`)".into())),
     };
-    let api_bot = b.kind == crate::config::API_BOT_KIND;
+    let api_bot = crate::config::is_api_kind(&b.kind);
     if api_bot {
         check_api_bot_create(&b)?;
+        // openai-api：`[openai_api]` 沒開或 key 檔不能用就不讓建（具名錯誤，網頁照著提示去設定）。
+        if b.kind == crate::config::OPENAI_API_KIND {
+            if let Err(reason) = crate::api_bot::openai::provider::configured(&app.cfg.get().await) {
+                return Err(LcError::conflict("openai_not_configured", json!({"message": "OpenAI 未啟用或未設定金鑰", "detail": reason})));
+            }
+        }
     }
     // model／env／args 最後是 CLI 的 argv 與 pane 的環境變數，形狀不對在這裡就擋（`bot_input`）。
     if let Some(m) = &b.model {
@@ -2629,7 +2640,7 @@ async fn create_bot(
     let share_bot = share_profile.is_some();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
-    let (model, remapped) = if api_bot { (Some(b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::API_BOT_MODEL).to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
+    let (model, remapped) = if api_bot { (Some(b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::api_bot_defaults(&b.kind).map_or(crate::config::API_BOT_MODEL, |d| d.0)).to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
     // 受限 bot 沒指定模型：用 `/api/models` 當下列出的最新 Opus（使用者 2026-10-03：不寫死，CLI 的帳號預設會跑到舊版）。
     let model = match (restricted, model) {
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
@@ -2651,7 +2662,7 @@ async fn create_bot(
     };
     let mut effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     if api_bot && effort.is_none() {
-        effort = Some(crate::config::API_BOT_DEFAULT_EFFORT.to_string());
+        effort = Some(crate::config::api_bot_defaults(&b.kind).map_or(crate::config::API_BOT_DEFAULT_EFFORT, |d| d.1).to_string());
     }
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     check_env_names(&env)?;
@@ -3407,9 +3418,9 @@ async fn patch_bot(
     }
     if b.model.is_some() {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-        if current.kind == crate::config::API_BOT_KIND {
-            let model = b.model.as_ref().and_then(|m| m.as_deref()).unwrap_or(crate::config::API_BOT_MODEL).trim();
-            if !crate::config::api_bot_model_supported(model) { return Err(LcError::BadValue(json!({"error":"bad_request","reason":"api_bot_model_unsupported"}))); }
+        if let Some((default_model, _)) = crate::config::api_bot_defaults(&current.kind) {
+            let model = b.model.as_ref().and_then(|m| m.as_deref()).unwrap_or(default_model).trim();
+            if !crate::config::api_bot_model_supported_for(&current.kind, model) { return Err(LcError::BadValue(json!({"error":"bad_request","reason":"api_bot_model_unsupported"}))); }
             b.model = Some(Some(model.to_owned()));
         }
     }
@@ -5042,6 +5053,17 @@ fn api_bot_models() -> Value {
     json!({"kind":crate::config::API_BOT_KIND,"host":LOCAL_HOST,"source":"static","fetched_at":db::now(),"models":models})
 }
 
+/// openai-api 的模型清單：本機核准的那幾個（有 harness 與價表），不去問 `/v1/models`。
+fn openai_api_bot_models() -> Value {
+    let models: Vec<_> = crate::config::OPENAI_USE_MODELS.iter().map(|model| json!({
+        "id": model, "display_name": "GPT-6 Luna", "description": "", "is_default": *model == crate::config::OPENAI_API_BOT_MODEL,
+        "default_effort": crate::config::OPENAI_API_BOT_DEFAULT_EFFORT,
+        "efforts": crate::config::efforts_for_kind(crate::config::OPENAI_API_KIND),
+        "service_tiers": [],
+    })).collect();
+    json!({"kind":crate::config::OPENAI_API_KIND,"host":LOCAL_HOST,"source":"static","fetched_at":db::now(),"models":models})
+}
+
 async fn get_models(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
@@ -5050,6 +5072,9 @@ async fn get_models(
     if q.kind == crate::config::API_BOT_KIND {
         // 沒有 CLI 可問：清單是寫死的一筆（harness 只會送這個模型），不看 host／身份、也不走快取。
         return Ok(Json(api_bot_models()));
+    }
+    if q.kind == crate::config::OPENAI_API_KIND {
+        return Ok(Json(openai_api_bot_models()));
     }
     if !crate::config::valid_kind(&q.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
@@ -5570,7 +5595,7 @@ async fn delete_identity(
 async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     if principal != RequestPrincipal::User { return Err(bot_user_only()); }
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if bot.kind != crate::config::API_BOT_KIND {
+    if !crate::config::is_api_kind(&bot.kind) {
         return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "not_api_bot"})));
     }
     type Totals = (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64);
@@ -6594,6 +6619,16 @@ pub(crate) async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let bot_record = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?;
     let kind = bot_record.as_ref().map(|b| b.kind.as_str());
+    // openai-api v1：沒有附件、沒有壓縮。送出前就明確拒絕（不靜默丟掉附件、不把 /compact 當成一般文字送給模型）。
+    if kind == Some(crate::config::OPENAI_API_KIND) {
+        if !b.attachments.is_empty() {
+            return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "attachments_unsupported_for_kind", "kind": crate::config::OPENAI_API_KIND, "message": "openai-api 不支援附件", "sent": false})));
+        }
+        let text = b.text.trim();
+        if text == "/compact" || text.starts_with("/compact ") {
+            return Err(LcError::BadValue(json!({"error": "compact_unsupported", "kind": crate::config::OPENAI_API_KIND, "message": "openai-api has no /compact command", "sent": false})));
+        }
+    }
     if kind.is_some_and(crate::config::is_api_kind) {
         let is_advisor = bot_record.as_ref().and_then(|b| b.role.as_deref()) == Some("advisor");
         let is_bot_dispatch = matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. }) || b.relay_from.is_some();
@@ -6601,7 +6636,7 @@ pub(crate) async fn prompt_bot(
             let name = bot_record.as_ref().map(|b| b.name.as_str()).unwrap_or(&id);
             return Err(LcError::Forbidden(json!({
                 "error": "member_not_dispatchable",
-                "message": format!("{name} 是 claude-api（純 API 模型），不能接受 bot 派工"),
+                "message": format!("{name} 是 {}（純 API 模型），不能接受 bot 派工", kind.unwrap_or(crate::config::CLAUDE_API_KIND)),
                 "sent": false
             })));
         }
@@ -7651,3 +7686,5 @@ mod relay_autostart_tests;
 
 #[cfg(test)]
 mod claude_api_advisor_relay_tests;
+#[cfg(test)]
+mod openai_api_kind_tests;
