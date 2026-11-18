@@ -900,6 +900,46 @@ async fn agy_trust_dialog_is_not_offered_as_draft() {
     let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
     let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
     let snap = snapshot(&client, &run, &bot).await.unwrap();
-    assert_eq!(snap["state"], "unready");
+    assert_eq!(snap["state"], "dialog");
     assert_eq!(snap["draft"], Value::Null);
+    assert_eq!(snap["draft_actions"], json!([]));
+}
+
+/// #1989（SOL 2026-11-18）：codex 的 hook 審核框游標列是 `› 1. Review hooks`，跟輸入框同一個記號，以前被讀成「框裡的草稿」，
+/// 網頁掛出草稿列與「送出框裡那段」——按下去就是在審核框上按 Enter（可能選到 Trust all）。現在 snapshot 回 `dialog`、
+/// 沒有草稿與 token；送出、清除都回 409 `dialog_open`，一個鍵都不按。
+#[tokio::test]
+async fn the_codex_hook_review_box_is_a_dialog_not_a_draft_and_no_draft_action_touches_it() {
+    let env = tt::env().await;
+    let review = include_str!("fixtures/codex-0.169.1-hooks-review.txt");
+    assert_eq!(crate::composer_parse::box_state("codex", review), BoxState::NonEmpty, "前提：光看輸入框記號會把選項讀成草稿");
+    env.herdr.set_screen("pane-review", review);
+    let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+    let (state, draft, _) = read_draft(&client, "pane-review", "codex").await.unwrap();
+    assert_eq!((state, draft), (BoxState::Unready, None));
+
+    let bot = tt::claude_bot(&env.app, &env.project_id, "codex-review-draft").await;
+    sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
+    let run_id = tt::fake_run(&env.app, &bot.id).await;
+    sqlx::query("UPDATE runs SET pane_id='pane-review' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
+    let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+    let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+
+    let snap = snapshot(&client, &run, &bot).await.unwrap();
+    assert_eq!(snap["state"], "dialog", "{snap}");
+    assert_eq!(snap["dialog"]["code"], "codex_hook_review");
+    assert!(snap["dialog"]["text"].as_str().unwrap().contains("重新啟動"), "{snap}");
+    assert_eq!(snap["draft"], Value::Null);
+    assert_eq!(snap["draft_token"], Value::Null);
+    assert_eq!(snap["draft_actions"], json!([]));
+
+    // 舊分頁手上還留著當時那份「草稿」的 token：照樣拒絕。
+    let stale = draft_token(&run.id, "pane-review", "1. Review hooks\n2. Trust all and continue\n3. Continue without trusting (hooks won't run)");
+    let cleared = clear(&env.app, &client, &run, &bot, &stale, false).await;
+    assert!(matches!(&cleared, Err(LcError::Conflict(v)) if v["reason"] == "dialog_open" && v["dialog"] == "codex_hook_review"), "clear 要回 dialog_open");
+    let submitted = submit(&env.app, &bot.id, &stale, "review-submit").await;
+    assert!(matches!(&submitted, Err(LcError::Conflict(v)) if v["reason"] == "dialog_open"), "submit 要回 dialog_open");
+    assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty(), "一個鍵都不按");
+    let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(turns, 0, "沒有開回合");
 }

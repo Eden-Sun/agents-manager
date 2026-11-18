@@ -48,6 +48,20 @@ export function ComposerDraftBar({
   const mine = text.trim()
   const hasMine = mine !== '' || attachments.length > 0
 
+  // 畫面是擋路的對話框（codex hook 審核框等）：只講原因、帶去終端；沒有「送出框裡那段」——那等於替使用者在對話框上按 Enter。
+  if (block.dialog) {
+    return (
+      <div className="composer-draft composer-draft-dialog" role="status">
+        <span className="composer-draft-label">{t('沒送出：bot 停在對話框，不是輸入框')}</span>
+        <span>{block.dialog}</span>
+        <div className="composer-draft-actions">
+          <button type="button" className="mini-btn" onClick={() => setRightTab('terminal')}>{t('前往終端')}</button>
+          <button type="button" className="mini-btn" onClick={() => dismiss(botId)}>{t('取消')}</button>
+        </div>
+      </div>
+    )
+  }
+
   if (!block.draft) {
     return (
       <div className="composer-draft" role="status">

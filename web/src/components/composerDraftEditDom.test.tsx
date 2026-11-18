@@ -166,7 +166,7 @@ test('composer_draft 事件：present:true 才去 GET 並掛上那一條；prese
   mock.composerDrafts.set(bot.id, null)
 })
 
-test('選到 idle 的 bot：打一次 GET 補上錯過的草稿；每次選取一次、已有草稿列或不是 idle 就不打', { timeout: 30_000 }, async () => {
+test('選到 idle 的 bot：打一次 GET 補上錯過的草稿；每次選取一次（已有草稿列是重新驗）、不是 idle 就不打', { timeout: 30_000 }, async () => {
   const { requests, bot } = await openChat('am-claude')
   // 前面的測試送過 prompt：等 mock 把回合跑完回到 idle。
   await until(async () => {
@@ -186,19 +186,23 @@ test('選到 idle 的 bot：打一次 GET 補上錯過的草稿；每次選取�
   await reselect()
   await until(() => useStore.getState().composerDrafts[bot.id]?.draft === '錯過事件的草稿', '選取時補上草稿列')
   assert.equal(gets(), base + 1, '每次選取一次')
-  // 草稿列已經在：再選一次不重讀。
+  // 草稿列已經在：再選一次重新驗一次（#1989：掛著的那一條不能永遠不失效），草稿還在就留著。
   await reselect()
-  assert.equal(gets(), base + 1, '已有草稿列不再讀')
-  // 沒有草稿：每次選取仍只讀一次，不掛。
-  await act(async () => useStore.getState().dismissComposerDraft(bot.id))
+  assert.equal(gets(), base + 2, '已有草稿列：選到時重新驗一次')
+  assert.equal(useStore.getState().composerDrafts[bot.id]?.draft, '錯過事件的草稿')
+  // 終端那邊已經清掉了：下一次選到就把那一條收掉。
   mock.composerDrafts.set(bot.id, null)
   await reselect()
-  assert.equal(gets(), base + 2)
+  await until(() => useStore.getState().composerDrafts[bot.id] === undefined, '重新驗到空框：收掉')
+  assert.equal(gets(), base + 3)
+  // 沒有草稿：每次選取仍只讀一次，不掛。
+  await reselect()
+  assert.equal(gets(), base + 4)
   assert.equal(useStore.getState().composerDrafts[bot.id], undefined)
   // 不是 idle（回合在跑）就不打。
   useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: { ...s.runs[bot.id], agent_status: 'working' } } }) as never)
   await reselect()
-  assert.equal(gets(), base + 2, '不是 idle 不讀')
+  assert.equal(gets(), base + 4, '不是 idle 不讀')
   useStore.setState((s) => ({ runs: { ...s.runs, [bot.id]: { ...s.runs[bot.id], agent_status: 'idle' } } }) as never)
 })
 

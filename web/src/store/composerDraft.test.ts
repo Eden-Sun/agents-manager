@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
 import type { Bot, Project } from '../api/types.ts'
 import { ApiError } from '../api/types.ts'
-import { draftBlockFrom } from './composerDraft.ts'
+import { draftBlockFrom, draftBlockFromSnapshot, draftIsStale, pruneStaleDrafts } from './composerDraft.ts'
 
 const { useStore } = await import('./store.ts')
 
@@ -39,7 +39,7 @@ test('撞到框裡有字：留下一條草稿（框裡的字＋可用的動作�
   seed()
   routeDaemon(() => busy('一段留在框裡的假草稿'))
   assert.equal(await useStore.getState().sendPrompt('b1', '我自己要送的'), false)
-  assert.deepEqual(block(), { draft: '一段留在框裡的假草稿', token: 'token:一段留在框裡的假草稿', truncated: false, actions: ['submit', 'clear'] })
+  assert.deepEqual({ ...block(), runId: undefined }, { draft: '一段留在框裡的假草稿', token: 'token:一段留在框裡的假草稿', truncated: false, actions: ['submit', 'clear'], runId: undefined })
   assert.deepEqual(notices(), [], '有那一條就不用 toast')
 })
 
@@ -140,4 +140,28 @@ test('draftBlockFrom：只認 daemon 給的兩種動作；沒有 full-draft toke
   assert.equal(draftBlockFrom(e({ reason: 'draft_changed', draft: null })), null)
   assert.equal(draftBlockFrom(e({ reason: 'a turn is already in flight', draft: 'd' })), null)
   assert.equal(draftBlockFrom(new Error('x')), null)
+})
+
+test('GET 回 dialog：只有說明、沒有草稿與動作；綁 run', () => {
+  const block = draftBlockFromSnapshot({ state: 'dialog', draft: '', token: '', actions: [], runId: 'r1', dialog: '重新啟動這顆 bot 即可' })
+  assert.deepEqual(block, { draft: '', token: '', truncated: false, actions: [], dialog: '重新啟動這顆 bot 即可', runId: 'r1' })
+  assert.equal(draftBlockFromSnapshot({ state: 'draft', draft: 'x', token: 't', actions: ['submit'], runId: 'r1' })?.runId, 'r1')
+})
+
+test('草稿動作撞上對話框（409 dialog_open 帶 dialog）：換成對話框說明；一般送出的 dialog_open 不掛列', () => {
+  const hit = draftBlockFrom(new ApiError(409, { reason: 'dialog_open', dialog: 'codex_hook_review', message: '重新啟動即可', run_id: 'r2' }, 'dialog_open'))
+  assert.deepEqual(hit, { draft: '', token: '', truncated: false, actions: [], dialog: '重新啟動即可', runId: 'r2' })
+  assert.equal(draftBlockFrom(new ApiError(409, { reason: 'dialog_open', message: 'x' }, 'dialog_open')), null)
+})
+
+test('別的 run 留下的草稿列算過期；沒記 run 的舊列不判', () => {
+  const a = { draft: 'a', token: 't', truncated: false, actions: [] as never[], runId: 'r1' }
+  const legacy = { draft: 'b', token: 't', truncated: false, actions: [] as never[] }
+  assert.equal(draftIsStale(a, 'r1'), false)
+  assert.equal(draftIsStale(a, 'r2'), true)
+  assert.equal(draftIsStale(a, undefined), true)
+  assert.equal(draftIsStale(legacy, 'r2'), false)
+  const drafts = { b1: a, b2: legacy }
+  assert.equal(pruneStaleDrafts(drafts, { b1: { id: 'r1' } }), drafts, '沒有過期的：回原物件')
+  assert.deepEqual(pruneStaleDrafts(drafts, { b1: { id: 'r2' } }), { b2: legacy })
 })

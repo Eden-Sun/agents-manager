@@ -47,7 +47,7 @@ import {
 import { ApiError } from '../api/types'
 import { getTimeZone } from '../api/timeZone'
 import { DEFAULT_USER_TIME_ZONE } from '../lib/timeZone'
-import { DRAFT_REASON_TEXT, draftBlockFrom, draftBlockFromSnapshot, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
+import { DRAFT_REASON_TEXT, draftBlockFrom, draftBlockFromSnapshot, draftIsGone, draftIsStale, markDraftBusy, pruneStaleDrafts, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, MemSnapshot, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalFormat, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
@@ -1695,7 +1695,7 @@ export const useStore = create<StoreState>((set, get) => {
         return true
       }
       // 框裡卡著草稿：輸入列旁邊常駐一條，讓使用者送出框裡那段或清掉再送（不是一閃就沒的 toast）。
-      const block = draftBlockFrom(e)
+      const block = draftBlockFrom(e, get().runs[botId]?.id)
       if (block) {
         set((s) => ({ composerDrafts: { ...s.composerDrafts, [botId]: block } }))
         // 按了動作卻又擋下（框裡換了字、清不掉）：那一條換成新的草稿，再說一聲為什麼沒動。
@@ -1758,13 +1758,13 @@ export const useStore = create<StoreState>((set, get) => {
         const runId = get().runs[botId]?.id
         if (snap.runId && runId && snap.runId !== runId) return null
         // 回合還在跑時框裡的字不是「卡住的草稿」、也不能清：不掛；但它可能只是剛送完還沒閒下來，有重試次數就再看。
-        if (snap.busy) continue
+        if (snap.busy && snap.state !== 'dialog') continue
         // 確定是空框：既有的草稿列已經沒有東西可處理，收掉（`unready`／讀不到不算，那不等於空）。
         if (snap.state === 'empty') {
           if (get().composerDrafts[botId]) set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
           return null
         }
-        const block = draftBlockFromSnapshot(snap, opts.editNow)
+        const block = draftBlockFromSnapshot({ ...snap, runId: snap.runId || runId }, opts.editNow)
         if (block) {
           // 使用者已經在編輯同一段（token 相同）就別重置 editing。
           set((s) => {
@@ -1825,7 +1825,7 @@ export const useStore = create<StoreState>((set, get) => {
         } catch (e) {
           if (e instanceof ApiError) settleCreateRequest(reqKey)
           // 框裡有使用者打的字／Tab 之後框裡是別的字：照既有的草稿流程留一條，讓人處理。
-          const block = draftBlockFrom(e)
+          const block = draftBlockFrom(e, get().runs[botId]?.id)
           if (block) set((s) => ({ composerDrafts: { ...s.composerDrafts, [botId]: block } }))
           const un = asUncommittedSend(e)
           if (un) {
@@ -2929,6 +2929,18 @@ function turnStillOpen(status: Turn['status']): boolean {
  * DOM 測試收尾（`testing/domHarness.ts`）：bun 整樹同一個行程，store 是模組單例——關掉 socket 與額度 interval、
  * 把「只做一次」的旗標與 seq 歸零、state 換回初始值，下一個測試檔才拿到乾淨的 store。
  */
+/**
+ * 草稿列綁 run：run 表一變（bot 重啟、停止）就把別的 run 留下的那幾條收掉。以前掛上之後 run 換了也不會失效，
+ * 重啟後正常的 bot 底下還留著舊畫面的「草稿」與送出按鈕（#1989，SOL 2026-11-18）。
+ */
+useStore.subscribe((s, prev) => {
+  if (s.runs === prev.runs) return
+  const kept = pruneStaleDrafts(s.composerDrafts, s.runs)
+  if (kept === s.composerDrafts) return
+  for (const botId of Object.keys(s.composerDrafts)) if (!(botId in kept)) bumpDraftEpoch(botId)
+  useStore.setState({ composerDrafts: kept })
+})
+
 export function resetStoreForTest(): void {
   resetAttachmentDraftsForTest()
   for (const timer of noticeTimers.values()) clearTimeout(timer)
@@ -2987,9 +2999,14 @@ export function probeComposerDraftOnce(get: GetFn, botId: string): void {
   const s = get()
   const bot = s.bots.find((b) => b.id === botId)
   const run = s.runs[botId]
-  if (!bot || !run || run.state !== 'running' || run.agent_status !== 'idle') return
+  const cur = s.composerDrafts[botId]
+  // 已經掛著的那一條每次選到都重新驗一次：別的 run 留下的直接收掉；同一個 run 的再讀一次畫面（空框／對話框會把它換掉）。
+  // 使用者正在處理（動作進行中、已放進輸入框編輯）的不打擾。
+  if (cur && draftIsStale(cur, run?.id)) get().dismissComposerDraft(botId)
+  if (cur && (cur.busy || cur.editing || cur.editNow)) return
+  if (!bot || !run || run.state !== 'running') return
+  if (!get().composerDrafts[botId] && run.agent_status !== 'idle') return
   if (!['claude', 'codex', 'grok'].includes(bot.kind)) return
-  if (s.composerDrafts[botId]) return
   draftProbing.add(botId)
   void get().loadComposerDraft(botId).finally(() => draftProbing.delete(botId))
 }

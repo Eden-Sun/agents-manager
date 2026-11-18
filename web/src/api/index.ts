@@ -208,7 +208,9 @@ export async function fetchPendingQuestion(botId: string): Promise<unknown> {
 
 /** `GET /bots/:id/composer-draft`：輸入框現在有沒有一段沒送出的字（完整、不截；`token` 綁完整草稿，之後的 `clear`／`submit` 通用）。 */
 export interface ComposerDraftSnapshot {
-  state: 'draft' | 'empty' | 'unready'
+  /** `dialog`＝畫面是擋路的對話框（不是草稿，沒有動作；`dialog` 是 daemon 的說明）。 */
+  state: 'draft' | 'empty' | 'unready' | 'dialog'
+  dialog: string
   /** 這份快照讀的是哪個 run（晚回來的 GET 要跟現在的 run 對得上才算數）。 */
   runId: string
   busy: boolean
@@ -223,7 +225,8 @@ export async function fetchComposerDraft(botId: string): Promise<ComposerDraftSn
   const state = pick(o, 'state')
   const actions = Array.isArray(pick(o, 'draft_actions')) ? (pick(o, 'draft_actions') as unknown[]) : []
   return {
-    state: state === 'draft' || state === 'unready' ? state : 'empty',
+    state: state === 'draft' || state === 'unready' || state === 'dialog' ? state : 'empty',
+    dialog: isRec(pick(o, 'dialog')) ? str(pick(pick(o, 'dialog') as Record<string, unknown>, 'text')) : '',
     runId: str(pick(o, 'run_id')),
     busy: pick(o, 'busy') === true,
     draft: str(pick(o, 'draft')),

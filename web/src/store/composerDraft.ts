@@ -28,6 +28,13 @@ export interface ComposerDraftBlock {
   busy?: DraftAction
   /** 使用者按了「編輯後送出」：這段已放進輸入框，下一次送出走 `clear_draft`＋這個 token（改過的 `text`）。 */
   editing?: boolean
+  /** 這一條是哪個 run 的畫面：run 換了（重啟）它就不再成立，自動收掉（`draftIsStale`）。 */
+  runId?: string
+  /**
+   * 畫面不是輸入框、是已辨識的擋路對話框（codex hook 審核框等）：這句是 daemon 給的說明。沒有草稿、沒有任何草稿動作——
+   * 對話框的游標列不是草稿，「送出框裡那段」等於替使用者在對話框上按 Enter（#1989）。
+   */
+  dialog?: string
   /** 一出現就自動進編輯（Session paused 選了「Edit prompt and retry」）；放進輸入框後由輸入列清掉。 */
   editNow?: boolean
 }
@@ -35,9 +42,20 @@ export interface ComposerDraftBlock {
 const ACTIONS: readonly DraftAction[] = ['submit', 'clear']
 
 /** 409 裡描述草稿的欄位；讀不到內容時仍保留說明，但不能提供草稿動作。 */
-export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
+export function draftBlockFrom(e: unknown, currentRunId?: string): ComposerDraftBlock | null {
+  const block = draftBlockOf(e)
+  if (!block) return null
+  const runId = e instanceof ApiError && typeof e.body.run_id === 'string' && e.body.run_id ? e.body.run_id : currentRunId
+  return runId ? { ...block, runId } : block
+}
+
+function draftBlockOf(e: unknown): ComposerDraftBlock | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null
   const reason = e.body.reason
+  // 草稿動作撞上對話框（daemon 一個鍵都沒按）：那一條換成對話框說明，不再給草稿動作。一般送出的 `dialog_open` 沒有 `dialog` 欄位，不走這裡。
+  if (reason === 'dialog_open' && typeof e.body.dialog === 'string') {
+    return { draft: '', token: '', truncated: false, actions: [], dialog: typeof e.body.message === 'string' && e.body.message ? e.body.message : msg('bot 停在一個對話框，請到「終端」處理或重新啟動這顆 bot') }
+  }
   if (reason !== 'composer_busy' && reason !== 'draft_changed' && reason !== 'draft_uncleared') return null
   const draft = e.body.draft
   if (typeof draft !== 'string' || !draft.trim()) {
@@ -49,13 +67,32 @@ export function draftBlockFrom(e: unknown): ComposerDraftBlock | null {
   return { draft, token, truncated: e.body.draft_truncated === true, actions: token ? actions : [] }
 }
 
-/** 從 `GET /composer-draft` 的結果做一條（`state` 不是有字、或沒有可用的動作就回 `null`）。 */
+/** 從 `GET /composer-draft` 的結果做一條（`state` 不是有字、或沒有可用的動作就回 `null`）。`dialog`＝只有說明、沒有任何草稿動作。 */
 export function draftBlockFromSnapshot(
-  snap: { state: string; draft: string; token: string; actions: DraftAction[] },
+  snap: { state: string; draft: string; token: string; actions: DraftAction[]; runId?: string; dialog?: string },
   editNow = false,
 ): ComposerDraftBlock | null {
+  const run = snap.runId ? { runId: snap.runId } : {}
+  if (snap.state === 'dialog') {
+    return { draft: '', token: '', truncated: false, actions: [], dialog: snap.dialog || msg('bot 停在一個對話框，請到「終端」處理或重新啟動這顆 bot'), ...run }
+  }
   if (snap.state !== 'draft' || !snap.draft.trim()) return null
-  return { draft: snap.draft, token: snap.token, truncated: false, actions: snap.token ? snap.actions : [], ...(editNow ? { editNow: true } : {}) }
+  return { draft: snap.draft, token: snap.token, truncated: false, actions: snap.token ? snap.actions : [], ...run, ...(editNow ? { editNow: true } : {}) }
+}
+
+/** 這一條是別的 run 的畫面（bot 重啟過、或 run 已經沒了）：不再成立，要收掉。沒記 run 的舊列不判。 */
+export function draftIsStale(block: ComposerDraftBlock | undefined, currentRunId: string | undefined): boolean {
+  return Boolean(block?.runId) && block?.runId !== currentRunId
+}
+
+/** run 表變了之後還成立的草稿列；沒有變動回原物件（不觸發重繪）。 */
+export function pruneStaleDrafts(
+  drafts: Record<string, ComposerDraftBlock>,
+  runs: Record<string, { id: string } | null | undefined>,
+): Record<string, ComposerDraftBlock> {
+  const stale = Object.keys(drafts).filter((botId) => draftIsStale(drafts[botId], runs[botId]?.id))
+  if (stale.length === 0) return drafts
+  return Object.fromEntries(Object.entries(drafts).filter(([botId]) => !stale.includes(botId)))
 }
 
 /** 草稿動作失敗時的說明（沒列到的走一般錯誤文字）。 */

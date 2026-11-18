@@ -642,7 +642,7 @@ async fn read_guard_screen(client: &HerdrClient, pane: &str, run: &db::Run, reas
     })
 }
 
-fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> {
+pub(super) fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> {
     match kind {
         "claude" if crate::tui_prompts::stuck_at_login(screen) => Some("needs_login"),
         "claude" if crate::tui_prompts::cold_resume_choice(screen).is_some() => Some(super::claude_resume_menu::PENDING),

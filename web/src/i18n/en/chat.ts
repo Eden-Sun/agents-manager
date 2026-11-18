@@ -5,6 +5,8 @@ export default {
   '{n} 次請求 · 輸入 {i} · 輸出 {o} · 快取讀 {r} · 快取寫 {w}': '{n} requests · input {i} · output {o} · cache read {r} · cache write {w}',
   '第 {n} 次請求 · ≈ ${x} 目前為止': 'Request #{n} · ≈ ${x} so far',
   '第 {n} 次請求 · 已花 ${x}': 'Request #{n} · spent ${x}',
+  '沒送出：bot 停在對話框，不是輸入框': 'Not sent: the bot is on a dialog, not its input box',
+  'bot 停在一個對話框，請到「終端」處理或重新啟動這顆 bot': 'The bot is on a dialog. Handle it in the terminal, or restart this bot.',
   '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
   // components/PhoneOutboxTray.tsx
   'bot 給的檔案（{n}）': 'Files from bot ({n})',

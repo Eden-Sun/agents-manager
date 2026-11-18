@@ -859,7 +859,8 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 **主動通知（2026-11-13）**：不必等使用者先送一則被 409。bot 回到 idle 時 daemon 讀一次輸入框（之後最多再讀兩次，不輪詢），有字推 WS `composer_draft {present:true}`、字不見了（回合開始或探測讀到空框）推 `present:false`；只有 claude／codex／grok（有 `draft_actions` 的 kind）會探測。這顆 bot 有 `queued`／`in_flight` 回合（送字進行中）時跳過探測，不會把 daemon 正在打進框的字當成草稿。`GET composer-draft` 的回應另帶 `run_id`（那份快照讀的是哪個 run）。使用者在終端自己清掉而 bot 一直閒置，要等下一個 idle 邊或網頁動作回 `draft_gone` 才會知道。
 
 **唯讀看框（2026-11-13）**：`GET /api/bots/{id}/composer-draft`（權限同 `GET /bots/{id}/terminal`，不按任何鍵）。回
-`{"bot_id","run_id","state":"draft"|"empty"|"unready","busy","draft","draft_truncated":false,"draft_token","draft_actions"}`：
+`{"bot_id","run_id","state":"draft"|"empty"|"unready"|"dialog","busy","draft","draft_truncated":false,"draft_token","draft_actions","dialog"?}`：
+`state:"dialog"`＝畫面是已辨識、擋在輸入框前面的對話框（codex 的 hook 審核框／模型升級／更新選單／額度換模型／`/model` 選單、claude 的選單、grok 信任框、agy 對話框），帶 `dialog:{code,text}`、沒有草稿與 token、`draft_actions` 是空的——對話框的游標列不是草稿；這時 `submit_draft`／`clear_draft` 回 409 `dialog_open`（`dialog`＝代碼、`message`＝說明），一個鍵都不按。
 `draft` 是**完整**草稿（不像 409 截到 500 字），`draft_token` 跟同一刻 409 給的相同、可直接用在上面兩個動作；`state:"empty"` 時
 `draft`／`draft_token` 為 `null`、`draft_actions` 為 `[]`；`busy:true`＝這個 run 正在跑回合（那時不該當成卡住的草稿，清框也會被拒）。
 沒有 active run／pane 回 404，畫面讀不到回 409 `composer_unreadable`。網頁「編輯後送出」用它取完整草稿，改完以 `clear_draft`＋`expect_draft_token`＋新 `text` 送出。

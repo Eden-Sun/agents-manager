@@ -697,7 +697,7 @@ test('送出撞 409 composer_busy 顯示常駐提示；resume_unverified 講人�
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'composer_busy', run_id: 'r1', retryable: true, sent: false }, 409))
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
-  assert.deepEqual(useStore.getState().composerDrafts.b1, { draft: '', token: '', truncated: false, actions: [] })
+  assert.deepEqual(useStore.getState().composerDrafts.b1, { draft: '', token: '', truncated: false, actions: [], runId: 'r1' })
   assert.equal(noticeTexts().length, 0)
 
   seed()

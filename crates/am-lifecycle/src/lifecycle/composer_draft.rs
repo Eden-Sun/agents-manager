@@ -93,13 +93,39 @@ fn full_fields(kind: &str, run: &db::Run, draft: &str) -> Value {
         "draft_actions": if available { actions(kind) } else { Vec::new() }})
 }
 
-/// 唯讀：這一刻 pane 輸入框裡有沒有一段沒送出的字（不按任何鍵）。`state`：`draft`＝有字（帶完整 `draft`／`draft_token`／`draft_actions`）、
+/// 畫面上開著的是已辨識、擋在輸入框前面的對話框（codex 的 hook 審核框／模型升級／更新選單／額度換模型／`/model` 選單、
+/// claude 的選單、grok 的信任框、agy 的對話框）：`(代碼, 給使用者看的一句話)`。這些框的游標列（codex 的 `› 1. Review hooks`）
+/// 跟輸入框同一個記號，會被讀成「框裡有字」——那不是草稿，對它按 Enter／Ctrl+C 就是替使用者回答對話框（#1989：審核框上
+/// Enter 可能選到 Trust all）。草稿的讀取、送出、清除一律先過這一關。
+pub fn blocking_dialog(kind: &str, screen: &str) -> Option<(&'static str, String)> {
+    let plain = crate::composer_parse::strip_ansi(screen);
+    if kind == "codex" {
+        if let Some(dialog) = crate::codex_model_migration::Dialog::of(&plain) {
+            return Some((dialog.reason().code, dialog.hint().to_string()));
+        }
+    }
+    let reason = super::prompt::agent_prompt_dialog_reason(kind, &plain)?;
+    Some((reason, "bot 停在一個要人回答的對話框或選單，不是輸入框裡的草稿；請到「終端」處理（或重新啟動這顆 bot）。AG Man 不會替你按鍵。".to_string()))
+}
+
+/// 草稿動作遇到對話框：409 `dialog_open`，一個鍵都不按；不是對話框就是一般的讀不到框。
+fn not_a_composer(kind: &str, run: &db::Run, read: &crate::herdr::PaneRead) -> LcError {
+    match blocking_dialog(kind, &read.text) {
+        Some((code, message)) => LcError::conflict("dialog_open", json!({"run_id": run.id, "retryable": false, "sent": false, "dialog": code, "message": message})),
+        None => unreadable(run),
+    }
+}
+
+/// 唯讀：這一刻 pane 輸入框裡有沒有一段沒送出的字（不按任何鍵）。`state`：`dialog`＝畫面是擋路的對話框（帶 `dialog:{code,text}`，
+/// 沒有草稿、沒有動作）、`draft`＝有字（帶完整 `draft`／`draft_token`／`draft_actions`）、
 /// `empty`＝空框、`unready`＝框還沒畫好（畫面不是輸入框）；`busy`＝這個 run 正在跑回合（那時框裡的字多半是別的東西，也不能清）。
 /// 讀不到畫面回 409 `composer_unreadable`，沒有 pane 回 404。
 pub async fn snapshot(client: &HerdrClient, run: &db::Run, bot: &db::Bot) -> LcResult<Value> {
     let Some(pane) = pane_of(run) else { return Err(LcError::NotFound("pane".into())) };
-    let (state, draft, _) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let (state, draft, read) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let dialog = blocking_dialog(&bot.kind, &read.text);
     let (label, fields) = match (state, draft.as_deref()) {
+        _ if dialog.is_some() => ("dialog", draft_fields(&bot.kind, run, None)),
         (BoxState::NonEmpty, Some(d)) => ("draft", full_fields(&bot.kind, run, d)),
         (BoxState::Unready, _) => ("unready", draft_fields(&bot.kind, run, None)),
         (BoxState::Empty, _) => ("empty", draft_fields(&bot.kind, run, None)),
@@ -109,6 +135,9 @@ pub async fn snapshot(client: &HerdrClient, run: &db::Run, bot: &db::Bot) -> LcR
     let mut body = json!({"bot_id": bot.id, "run_id": run.id, "state": label, "busy": run.agent_status == "working"});
     if let (Some(o), Some(f)) = (body.as_object_mut(), fields.as_object()) {
         o.extend(f.clone());
+        if let Some((code, text)) = dialog {
+            o.insert("dialog".into(), json!({"code": code, "text": text}));
+        }
     }
     Ok(body)
 }
@@ -124,7 +153,8 @@ pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> 
     if read.pane_id != pane || read.source != SCAN_SOURCE {
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
     }
-    let state = box_state(kind, &read.text);
+    // 對話框的游標列不是草稿：一律當成「不是輸入框」，沒有字、沒有 token、沒有動作。
+    let state = if blocking_dialog(kind, &read.text).is_some() { BoxState::Unready } else { box_state(kind, &read.text) };
     let text = (state == BoxState::NonEmpty).then(|| composer_text_whole(kind, &read.text)).flatten();
     Ok((state, text, read))
 }
@@ -272,7 +302,7 @@ pub async fn clear(
     let (state, now, authorized_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     match state {
         BoxState::Empty => return Err(refusal("draft_gone", run, true, &bot.kind, None)),
-        BoxState::Unready => return Err(unreadable(run)),
+        BoxState::Unready => return Err(not_a_composer(&bot.kind, run, &authorized_snapshot)),
         BoxState::NonEmpty => {}
     }
     if !now.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d)) {
@@ -285,7 +315,7 @@ pub async fn clear(
     // last read but before Herdr applies the key remains a narrow, non-atomic window.
     let (fresh_state, fresh, fresh_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     if fresh_state == BoxState::Unready {
-        return Err(unreadable(run));
+        return Err(not_a_composer(&bot.kind, run, &fresh_snapshot));
     }
     let unchanged = fresh_state == BoxState::NonEmpty
         && same_snapshot(&bot.kind, &authorized_snapshot, &fresh_snapshot)
@@ -658,7 +688,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         .map_err(|_| SubmitDraftError::NoKeySent(unreadable(&run)))?;
     match state {
         BoxState::Empty => return Err(SubmitDraftError::NoKeySent(refusal("draft_gone", &run, false, &bot.kind, None))),
-        BoxState::Unready => return Err(SubmitDraftError::NoKeySent(unreadable(&run))),
+        BoxState::Unready => return Err(SubmitDraftError::NoKeySent(not_a_composer(&bot.kind, &run, &authorized_snapshot))),
         BoxState::NonEmpty => {}
     }
     let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
@@ -738,7 +768,7 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
         Err(_) => return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await,
     };
     if final_state == BoxState::Unready {
-        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await;
+        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, not_a_composer(&bot.kind, &run, &final_snapshot)).await;
     }
     if final_state == BoxState::Empty {
         let gone = refusal("draft_gone", &run, false, &bot.kind, None);
