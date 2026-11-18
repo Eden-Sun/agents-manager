@@ -83,7 +83,6 @@ export function OpenAiApiSettings() {
         if (!busy && dirty && !capInvalid) save()
       }}
     >
-      <h3 className="page-title">{t('OpenAI API')}</h3>
       <p className="hint">{t('OpenAI 只走 API（按 API 計費）：翻譯可改用 OpenAI，之後的顧問型 bot 也用這裡的金鑰與上限。預設關閉。')}</p>
       <label className="claude-api-switch">
         <input type="checkbox" data-testid="openai-api-enabled" checked={enabled} disabled={!settings.key_present && !enabled} onChange={(e) => setEnabled(e.target.checked)} />

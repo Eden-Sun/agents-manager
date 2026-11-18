@@ -16,7 +16,7 @@ beforeEach(() => {
 test('七個分頁順序與名稱符合規格', () => {
   assert.deepEqual(
     ENV_TABS.map((t) => t.id),
-    ['setup', 'hosts', 'updates', 'identities', 'judge', 'claude-api', 'display'],
+    ['setup', 'hosts', 'updates', 'identities', 'judge', 'claude-api', 'openai-api', 'display'],
   )
 })
 

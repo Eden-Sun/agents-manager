@@ -123,3 +123,69 @@ test('帳本：供應商篩選帶 provider 參數；模型欄用短名（Luna）
   await settle()
   assert.deepEqual(cells().map((c) => c.title), ['gpt-6-luna'])
 })
+
+// ───── 獨立分頁（使用者 2026-11-18：「設定裡面不是只有 Claude API，也要有 OpenAI 的 API」） ─────
+
+test('OpenAI API 是和 Claude API 並列的獨立分頁；Claude 那一頁不再內嵌 OpenAI 設定區', async () => {
+  const { EnvShell } = await import('./EnvShell')
+  stub({ ...base, key_present: true, key_error: null }, [])
+  const root = await mount(<EnvShell />)
+  await settle()
+  const tab = root.querySelector<HTMLButtonElement>('#env-tab-openai-api')!
+  assert.ok(tab, '導覽多一個「OpenAI API」')
+  assert.equal(tab.querySelector('.env-nav-label')?.textContent, 'OpenAI API')
+  assert.ok(root.querySelector('#env-tab-claude-api'), 'Claude API 分頁照留')
+  assert.equal(root.querySelector('#env-panel-claude-api [data-testid=openai-api-settings]'), null, 'Claude 分頁裡沒有 OpenAI 設定區')
+  assert.ok(root.querySelector('#env-panel-openai-api [data-testid=openai-api-settings]'), 'OpenAI 設定區在自己的分頁')
+  await click(tab)
+  assert.equal(tab.getAttribute('aria-selected'), 'true')
+  assert.equal(root.querySelector<HTMLElement>('#env-panel-openai-api')!.hidden, false)
+  assert.equal(root.querySelector<HTMLElement>('#env-panel-claude-api')!.hidden, true)
+})
+
+test('OpenAI 分頁有「設定｜帳本」，帳本只抓 provider=openai 並用短名＋tooltip', async () => {
+  const { OpenAiApiPanel } = await import('./OpenAiApiPanel')
+  const urls: string[] = []
+  const rows = [{ at: '2026-11-18T08:00:00.000Z', use: 'message_translate', model: 'gpt-6-luna', provider: 'openai', ms: 100, ok: true, error_kind: null, input_tokens: 7, output_tokens: 3, stop_reason: null }]
+  globalThis.fetch = (async (input: string) => {
+    urls.push(String(input))
+    const path = String(input).replace(/^\/api/, '').split('?')[0]
+    if (path === '/session') return new Response(JSON.stringify({ token: 'test-token' }), { status: 200 })
+    if (path === '/openai-api/settings') return new Response(JSON.stringify(base), { status: 200 })
+    if (path === '/claude-api/ledger') return new Response(JSON.stringify({ totals: { calls: 1, ok: 1, errors: 0, input_tokens: 7, output_tokens: 3 }, by_use: {}, rows }), { status: 200 })
+    return new Response('{}', { status: 404 })
+  }) as unknown as typeof fetch
+  const root = await mount(<OpenAiApiPanel />)
+  await settle()
+  const tabs = [...root.querySelectorAll<HTMLButtonElement>('button[role=tab]')]
+  assert.deepEqual(tabs.map((t) => t.textContent), ['設定', '帳本'])
+  await click(tabs[1]!)
+  await until(() => root.querySelector('[data-testid=openai-api-totals]') !== null, '帳本載入')
+  assert.ok(urls.some((u) => u.includes('/claude-api/ledger') && u.includes('provider=openai')))
+  const cell = root.querySelector<HTMLElement>('#openai-book td[data-label="模型"]')!
+  assert.equal(cell.textContent, 'Luna')
+  assert.equal(cell.title, 'gpt-6-luna')
+})
+
+test('Claude 分頁翻譯組的供應商旁有連到 OpenAI API 分頁的連結', async () => {
+  let opened = 0
+  const settings = {
+    enabled: true, key_present: true, key_error: null, models: ['claude-haiku-5-5'], efforts: ['low'], uses: [],
+    groups: [{ id: 'translate', label: '翻譯', uses: ['message_translate'], enabled: true, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 0, auto: null, provider: 'anthropic', openai_allowed: true, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 0 }],
+    openai: { available: true, unavailable_reason: null, models: ['gpt-6-luna'], efforts: ['low'] },
+  }
+  globalThis.fetch = (async (input: string) => {
+    const path = String(input).replace(/^\/api/, '').split('?')[0]
+    if (path === '/session') return new Response(JSON.stringify({ token: 'test-token' }), { status: 200 })
+    if (path === '/claude-api/settings') return new Response(JSON.stringify(settings), { status: 200 })
+    if (path === '/claude-api/ledger') return new Response(JSON.stringify({ totals: {}, by_use: {}, rows: [] }), { status: 200 })
+    return new Response('{}', { status: 404 })
+  }) as unknown as typeof fetch
+  const root = await mount(<ClaudeApiPanel onOpenOpenAi={() => { opened += 1 }} />)
+  await settle()
+  const link = root.querySelector<HTMLButtonElement>('[data-testid=claude-api-open-openai-translate]')!
+  assert.ok(link, '翻譯組有連結')
+  await click(link)
+  assert.equal(opened, 1)
+  assert.equal(root.querySelector('[data-testid=openai-api-settings]'), null)
+})

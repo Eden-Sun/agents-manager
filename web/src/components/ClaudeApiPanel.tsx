@@ -19,7 +19,6 @@ import { msg, useT } from '../lib/i18n'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel'
 import { ClaudeApiBotLimits } from './ClaudeApiBotLimits'
-import { OpenAiApiSettings } from './OpenAiApiSettings'
 import { translationModelName } from './messageTranslationConstants'
 import './claudeApiPanel.css'
 
@@ -56,7 +55,8 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
   )
 }
 
-export function ClaudeApiPanel() {
+/** `onOpenOpenAi`：翻譯組的供應商旁的連結——切到「OpenAI API」分頁（OpenAI 的設定與帳本在那裡，不塞在這一頁）。 */
+export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } = {}) {
   const t = useT()
   const [subTab, setSubTab] = useState<'form' | 'book'>('form')
   const [settings, setSettings] = useState<ClaudeApiSettings | null | undefined>(undefined)
@@ -147,7 +147,6 @@ export function ClaudeApiPanel() {
   const modelOptions = (current: string) => (settings.models.includes(current) ? settings.models : [...settings.models, current])
 
   const formContent = (
-    <>
     <form
       className="form claude-api-panel"
       onSubmit={(e) => {
@@ -234,6 +233,11 @@ export function ClaudeApiPanel() {
                       </span>
                     ) : null}
                     {onOpenAi ? <span className="hint">{t('只有對話訊息翻譯改用 OpenAI；更新框翻譯仍用 Claude。')}</span> : null}
+                    {onOpenOpenAi ? (
+                      <button type="button" className="btn" data-testid={`claude-api-open-openai-${u.id}`} onClick={onOpenOpenAi}>
+                        {t('OpenAI API 設定（啟用、金鑰、上限、帳本）→')}
+                      </button>
+                    ) : null}
                   </label>
                 ) : null}
                 <label className="field">
@@ -286,8 +290,6 @@ export function ClaudeApiPanel() {
         </button>
       </div>
     </form>
-    <OpenAiApiSettings />
-    </>
   )
 
   const ledgerContent = (

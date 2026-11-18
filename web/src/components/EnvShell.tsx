@@ -20,6 +20,7 @@ import { UpdateCheckPanel } from './UpdateCheckPanel'
 import { IdentitiesPanel } from './IdentitiesPanel'
 import { JudgePanel } from './JudgePanel'
 import { ClaudeApiPanel } from './ClaudeApiPanel'
+import { OpenAiApiPanel } from './OpenAiApiPanel'
 import { KindDisplayToggle } from './KindTag'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { LanguageToggle } from './LanguageToggle'
@@ -239,7 +240,18 @@ export function EnvShell() {
           hidden={activeTab !== 'claude-api'}
         >
           <h2 className="page-title">Claude API</h2>
-          <ClaudeApiPanel />
+          <ClaudeApiPanel onOpenOpenAi={() => selectTab('openai-api')} />
+        </section>
+
+        <section
+          role="tabpanel"
+          id="env-panel-openai-api"
+          aria-labelledby="env-tab-openai-api"
+          className="env-tabpanel"
+          hidden={activeTab !== 'openai-api'}
+        >
+          <h2 className="page-title">OpenAI API</h2>
+          <OpenAiApiPanel />
         </section>
 
         <section

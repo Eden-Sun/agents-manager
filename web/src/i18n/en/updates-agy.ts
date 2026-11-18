@@ -11,6 +11,7 @@ const dict: Dict = {
 
   // lib/envTabs.ts
   'Claude API': 'Claude API',
+  'OpenAI API': 'OpenAI API',
 
   // toolsHelpers.ts & MergedUpdateChip.tsx & AgyUpdateChip.tsx
   '讀取失敗': 'Could not load',

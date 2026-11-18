@@ -1,6 +1,6 @@
 import { msg } from './i18n'
 
-export type EnvTabId = 'setup' | 'hosts' | 'updates' | 'identities' | 'judge' | 'claude-api' | 'display'
+export type EnvTabId = 'setup' | 'hosts' | 'updates' | 'identities' | 'judge' | 'claude-api' | 'openai-api' | 'display'
 
 export interface EnvTabMeta {
   id: EnvTabId
@@ -15,6 +15,7 @@ export const ENV_TABS: readonly EnvTabMeta[] = [
   { id: 'identities', label: msg('身份'), panelTitle: msg('身份') },
   { id: 'judge', label: msg('Jev 建議'), panelTitle: msg('Jev 建議') },
   { id: 'claude-api', label: msg('Claude API'), panelTitle: msg('Claude API') },
+  { id: 'openai-api', label: msg('OpenAI API'), panelTitle: msg('OpenAI API') },
   { id: 'display', label: msg('顯示'), panelTitle: msg('顯示') },
 ] as const
 
