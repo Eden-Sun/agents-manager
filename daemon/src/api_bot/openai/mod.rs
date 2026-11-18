@@ -19,3 +19,5 @@ mod tests;
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod key_tests;
+#[cfg(test)]
+mod leak_tests;

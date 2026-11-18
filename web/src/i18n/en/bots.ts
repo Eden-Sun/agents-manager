@@ -441,6 +441,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '先到 環境設定 → OpenAI API 啟用並設定金鑰（啟用開關與金鑰檔都要就緒）。': 'First go to Settings → OpenAI API, enable it, and set the key (both the enable switch and the key file must be ready).',
   '這個 bot 種類不支援附件：請移除附件後再送。': 'This bot kind does not support attachments: remove them and send again.',
   '這個 bot 種類不支援 /compact。': 'This bot kind does not support /compact.',
+  '這個 bot 種類不支援 prompt cache 保留時間（cache_ttl）：請不要帶 cache_ttl，改用預設。': 'This bot kind does not support the prompt cache retention option (cache_ttl): leave it out to use the default.',
+  'cache_ttl 只給 claude-api bot 用。': 'cache_ttl is only for claude-api bots.',
   'Claude API Bot（用量與上限）': 'Claude API Bots (Usage & Limits)',
   '所有 claude-api bot 共用的總花費上限與每回合設定（時間與 API 呼叫次數）。亦可在各 bot 的狀態列或設定面板修改。': 'Total spend cap and per-turn limits shared across all claude-api bots. You can also adjust them directly from each bot’s status bar or settings.',
   '本 Bot 累計花費：': 'This Bot’s spend: ',

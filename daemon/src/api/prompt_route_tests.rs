@@ -508,6 +508,11 @@ async fn cache_ttl_is_validated_and_api_bot_only() {
     }
     let r = parse_cache_ttl(&e.app, &cli, Some("1h")).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_api_bot_only"), "{r:?}");
+    // openai-api 也是 API bot，但沒有 cache_ttl：字面說「這個 kind 不支援」，不是「只給 claude-api」。
+    let oa = typed_bot_named(&e, "openai-api", "route-oa", "pane-oa").await;
+    let r = parse_cache_ttl(&e.app, &oa, Some("1h")).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_unsupported_for_kind"), "{r:?}");
+    assert_eq!(parse_cache_ttl(&e.app, &oa, None).await.unwrap(), None);
     // 不帶的時候其他 kind 照舊（舊客戶端相容）。
     assert_eq!(parse_cache_ttl(&e.app, &cli, None).await.unwrap(), None);
 }

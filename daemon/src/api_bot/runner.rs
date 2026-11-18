@@ -23,7 +23,7 @@ pub trait Journal: Send + Sync {
     fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>>;
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub messages: Vec<Message>,
     pub responses: Vec<Response>,
@@ -41,6 +41,22 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
 }
+/// Debug 只印狀態與筆數，不印 transcript 內容（messages／responses 可能含使用者文字與 OpenAI 加密 reasoning）。
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("messages", &format_args!("<{} messages>", self.messages.len()))
+            .field("responses", &format_args!("<{} responses>", self.responses.len()))
+            .field("api_pending", &self.api_pending)
+            .field("tool_pending", &self.tool_pending.as_ref().map(|_| "<set>"))
+            .field("completed_tool_ids", &self.completed_tool_ids.len())
+            .field("system", &self.system.as_ref().map(|s| format!("<str len={}>", s.len())))
+            .field("v", &self.v)
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
 impl State {
     /// 這份 transcript 是哪個 provider 的原生格式；沒有標籤的舊 checkpoint 是 Claude。
     pub fn provider_id(&self) -> &str {

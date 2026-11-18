@@ -325,6 +325,7 @@ export default {
   '留空＝不設上限；設定上限時從現在起算。': 'Leave empty for no cap; setting a cap counts from now.',
   '上限要是 0 以上的數字。': 'The cap must be a number, 0 or more.',
   'OpenAI 累計花費 {spent}（bot {bots}、翻譯等一次性用途 {uses}）。': 'OpenAI total spend {spent} (bots {bots}, one-off uses like translation {uses}).',
+  'bot 的花費上限只計 bot 用量，不含翻譯（與 Claude 相同，只算 bot 的 api_bot_attempts）。': 'The bot spend cap counts bot usage only, not translation (same as Claude: only bot api_bot_attempts count).',
   '只寫進這台機器的 key 檔（權限 600），不進設定檔、不會再顯示。': 'Written only to this machine’s key file (mode 600). It is not stored in the config file and is never shown again.',
   '啟用（會把下面專案的撞限畫面與翻譯譯文，遮罩 token／密碼後送到 TypeSafe）': 'Enable (sends limit-hit screens and message translations for the projects below to TypeSafe, with tokens and passwords masked)',
   '適用的專案（沒勾＝不送）': 'Applicable projects (unchecked = not sent)',

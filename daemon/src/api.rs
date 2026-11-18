@@ -6386,10 +6386,14 @@ async fn parse_cache_ttl(app: &Arc<App>, bot_id: &str, raw: Option<&str>) -> Res
         _ => return Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_invalid","allowed":["5m","1h"]}))),
     };
     let kind = db::bot(&app.db, bot_id).await.map_err(any_err)?.map(|b| b.kind);
-    if kind.as_deref() != Some(crate::config::API_BOT_KIND) {
-        return Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_api_bot_only"})));
+    match kind.as_deref() {
+        Some(k) if k == crate::config::API_BOT_KIND => Ok(Some(secs)),
+        // openai-api 是 API bot，但 v1 沒有 prompt cache 保留的選項：字面明說是「這個 kind 不支援」。
+        Some(k) if k == am_config::OPENAI_API_KIND => {
+            Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_unsupported_for_kind"})))
+        }
+        _ => Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_api_bot_only"}))),
     }
-    Ok(Some(secs))
 }
 
 #[derive(Deserialize)]

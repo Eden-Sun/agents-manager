@@ -2,19 +2,52 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Content remains opaque JSON: thinking/signatures/unknown extension fields must round-trip.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// Debug 不印內容（OpenAI reasoning 的 `encrypted_content` 與使用者文字都不能進 log）：只印 role 與 content 的形狀。
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: String,
     pub content: Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Message {{ role: {:?}, content: {} }}", self.role, content_shape(&self.content))
+    }
+}
+
+/// content 的形狀：字串只給長度；陣列給筆數與每項的 `type`（種類名，不是內容）；物件只給鍵數。
+pub(crate) fn content_shape(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("<str len={}>", s.len()),
+        Value::Array(items) => {
+            let kinds: Vec<&str> = items.iter().map(|i| i.get("type").and_then(Value::as_str).unwrap_or("?")).collect();
+            format!("<array len={} types={kinds:?}>", items.len())
+        }
+        Value::Object(map) => format!("<object keys={}>", map.len()),
+        Value::Null => "null".into(),
+        _ => "<scalar>".into(),
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Response {
     pub id: String,
     pub model: String,
     pub content: Vec<Value>,
     pub stop_reason: String,
     pub usage: Value,
+}
+
+impl std::fmt::Debug for Response {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Response {{ model: {:?}, stop_reason: {:?}, content: <len={}>, usage: <redacted> }}",
+            self.model,
+            self.stop_reason,
+            self.content.len()
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

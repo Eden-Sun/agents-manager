@@ -539,7 +539,34 @@ impl Provider for OpenAiProvider {
 }
 
 /// 送出一份已編碼的請求並把串流組成終態。只有這裡碰網路；不印 body、不印 key。
+/// 錯誤裡的文字（上游 `message`、`request_id` 等）會先把 key 換成 `<redacted>`：上游 401 有時會把 key 回吐在錯誤訊息裡，
+/// 而錯誤會一路流到 log、WS 與使用者看得到的通知，不能靠「上游不會那樣做」。
 async fn post(
+    transport: &Transport<'_>,
+    request: &OpenAiRequest,
+    cancel: &CancellationToken,
+    progress: Option<&(dyn Fn(&StreamProgress) + Send + Sync)>,
+) -> Result<Response, http::Error> {
+    post_inner(transport, request, cancel, progress).await.map_err(|e| scrub_error(e, transport.key))
+}
+
+/// 把錯誤裡任何出現的 key 換掉（key 空字串時不動，免得每個字元之間都被插進去）。
+pub(crate) fn scrub_error(e: http::Error, key: &str) -> http::Error {
+    let clean = |s: Option<String>| match s {
+        Some(v) if !key.is_empty() => Some(v.replace(key, "<redacted>")),
+        other => other,
+    };
+    match e {
+        http::Error::Http { status, kind, message, request_id } => {
+            http::Error::Http { status, kind: clean(kind), message: clean(message), request_id: clean(request_id) }
+        }
+        http::Error::StreamAborted { kind, message } => http::Error::StreamAborted { kind: clean(kind), message: clean(message) },
+        http::Error::InvalidResponseDetail(v) if !key.is_empty() => http::Error::InvalidResponseDetail(v.replace(key, "<redacted>")),
+        other => other,
+    }
+}
+
+async fn post_inner(
     transport: &Transport<'_>,
     request: &OpenAiRequest,
     cancel: &CancellationToken,

@@ -109,6 +109,9 @@ export function OpenAiApiSettings() {
       <p className="hint" data-testid="openai-api-spent">
         {t('OpenAI 累計花費 {spent}（bot {bots}、翻譯等一次性用途 {uses}）。', { spent: usd(settings.spent_usd), bots: usd(settings.spent_bots_usd), uses: usd(settings.spent_uses_usd) })}
       </p>
+      <p className="hint" data-testid="openai-api-cap-scope">
+        {t('bot 的花費上限只計 bot 用量，不含翻譯（與 Claude 相同，只算 bot 的 api_bot_attempts）。')}
+      </p>
       <div className="form-actions">
         {note ? <span className={note.ok ? 'claude-api-note ok' : 'claude-api-note err'} role="status">{note.text}</span> : null}
         <button type="submit" className="btn primary" data-testid="openai-api-save" disabled={busy || !dirty || capInvalid}>
