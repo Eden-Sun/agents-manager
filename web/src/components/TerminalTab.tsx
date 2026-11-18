@@ -8,6 +8,7 @@ import { useStore } from '../store/store'
 import { AnsiTerm } from './AnsiTerm'
 import { setTermWrap, useTermWrap } from './termWrap'
 import './terminalTab.css'
+import { ESC } from '../lib/charCodes'
 
 /** Below this many columns a TUI agent's output is fragmented beyond repair (31-column grok pane, 2026-09-06). */
 const READABLE_COLUMNS = 60
@@ -18,10 +19,13 @@ const AUTO_REFRESH_MS = 3000
 /** bot 正在工作（`agent_status=working`）時的自動刷新間隔：輸出在跑，3 秒太慢。閒置仍維持 `AUTO_REFRESH_MS`。 */
 const AUTO_REFRESH_WORKING_MS = 1000
 
+/** 空白列（只有空白或色碼）連續的那一段。 */
+const SQUEEZE_BLANK_ROWS = new RegExp(`\\n(?:[ \\t]|${ESC}\\[[0-9;:]*m)*(?:\\n(?:[ \\t]|${ESC}\\[[0-9;:]*m)*)+`, 'g')
+
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
   // 只有空白（或只剩 SGR 色碼）的列都算空列：上色的快照裡空列常帶著重設碼。
-  return text.replace(/\n(?:[ \t]|\x1b\[[0-9;:]*m)*(?:\n(?:[ \t]|\x1b\[[0-9;:]*m)*)+/g, '\n\n')
+  return text.replace(SQUEEZE_BLANK_ROWS, '\n\n')
 }
 
 /** SPEC §3.2: read-only `recent_unwrapped` snapshot, auto-refreshed every 3s plus a manual button (no xterm.js). */

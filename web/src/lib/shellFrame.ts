@@ -8,6 +8,11 @@
  */
 
 /** 把 herdr 的畫面文字切成列；尾端的換行不算一列；有給 `rows` 就補空列到那個高度。 */
+import { ESC } from './charCodes'
+
+/** SGR／CSI 轉義序列（去色碼、算顯示寬度用）。 */
+const ANSI_SGR = new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g')
+
 export function splitFrame(text: string, rows: number | null): string[] {
   const body = text.endsWith('\n') ? text.slice(0, -1) : text
   const lines = body === '' ? [] : body.split('\n')
@@ -83,7 +88,7 @@ function fullRedraw(next: string[]): FramePlan {
 
 /** 顯示寬度（去 SGR、中日韓全形算 2）。 */
 function displayWidth(line: string): number {
-  const plain = line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  const plain = line.replace(ANSI_SGR, '')
   let w = 0
   for (const ch of plain) {
     const c = ch.codePointAt(0) ?? 0
@@ -110,7 +115,7 @@ export function cursorSeq(lines: string[], typedSpaces = 0): string {
   let row = lines.length - 1
   while (row > 0 && isBlank(lines[row])) row--
   if (row < 0 || isBlank(lines[row])) return '\x1b[1;1H\x1b[?25h'
-  const plain = lines[row].replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  const plain = lines[row].replace(ANSI_SGR, '')
   const trimmed = plain.replace(/ +$/, '')
   const col = displayWidth(trimmed) + Math.min(typedSpaces, plain.length - trimmed.length)
   // TUI 的畫面文字裡可能夾了「隱藏游標」，這裡一律打開。

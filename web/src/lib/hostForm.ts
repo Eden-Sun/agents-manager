@@ -3,11 +3,12 @@
  * 前端放行、daemon 拒絕時使用者只看到一句 400；反過來前端擋得比 daemon 嚴就是在騙人。回傳 `null`＝沒問題。
  */
 import { t } from './i18n'
+import { hasCodeIn } from './charCodes'
 
 /** ssh 目標（可用 ssh_config 別名）：開頭 `-` 會被 ssh 當成選項（`-oProxyCommand=…` 在本機執行命令），空白／控制字元永遠不是合法的目標。 */
 export function sshTargetProblem(ssh: string): string | null {
   const hostPart = ssh.includes('@') ? ssh.slice(ssh.lastIndexOf('@') + 1) : ssh
-  if (!ssh || ssh.startsWith('-') || hostPart.startsWith('-') || /[\s\u0000-\u001f\u007f-\u009f]/.test(ssh)) {
+  if (!ssh || ssh.startsWith('-') || hostPart.startsWith('-') || /\s/.test(ssh) || hasCodeIn(ssh, 0, 0x1f) || hasCodeIn(ssh, 0x7f, 0x9f)) {
     return t('ssh 目標要是主機（或 user@host、ssh_config 別名）：不能空、不能以 - 開頭、不能有空白')
   }
   return null

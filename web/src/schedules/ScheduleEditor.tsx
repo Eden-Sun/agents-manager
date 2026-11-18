@@ -201,6 +201,7 @@ export function ScheduleEditor({
   const [confirmPause, setConfirmPause] = useState(false)
   const [confirmRun, setConfirmRun] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(() => Boolean(scheduleId))
   // 建立的冪等 key：重送同一張表單用同一個；後端說 key 已用在別的內容上才換新的。
   const [createKey, setCreateKey] = useState(() => newClientRequestId())
   const detailRequestSequence = useRef(0)
@@ -267,7 +268,6 @@ export function ScheduleEditor({
     [eligible, detail?.bot_id],
   )
 
-  const [loading, setLoading] = useState(() => Boolean(scheduleId))
   // 同專案的其他排程：挑 Bot 時看它已經被哪些排程用、有沒有時間衝突（只讀，不影響存檔）。
   const [projectSchedules, setProjectSchedules] = useState<Schedule[]>([])
   useEffect(() => {

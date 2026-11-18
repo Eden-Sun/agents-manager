@@ -136,8 +136,14 @@ export function shareBeforeCursor(id: string | undefined): string | undefined {
   return id
 }
 
+/** 0x00–0x20（控制字元與空白）：分享頁不能 import 主 UI 的 lib，所以就地比字元碼。 */
+function hasSpaceOrControl(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) <= 0x20) return true
+  return false
+}
+
 export function shareSafeHref(href: string | null | undefined): string | undefined {
-  if (!href || href !== href.trim() || /[\u0000-\u0020]/.test(href)) return undefined
+  if (!href || href !== href.trim() || hasSpaceOrControl(href)) return undefined
   try {
     const u = new URL(href)
     return u.protocol === 'http:' || u.protocol === 'https:' ? href : undefined
