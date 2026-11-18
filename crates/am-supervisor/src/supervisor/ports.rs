@@ -76,6 +76,9 @@ pub trait QuotaOps {
     async fn quota_snapshot_json(&self) -> Value;
     /// 記憶體裡這把 key 的讀數（key 要是 `quota::quota_key` 算出來的完整 key）。
     async fn quota_reading(&self, key: &str) -> Option<Quota>;
+    /// flush 最近因為額度擋過這顆 bot 的佇列（`lifecycle::quota_hold::recently_held`，行程內狀態）。走 port 而不是 supervisor
+    /// 直接呼叫 lifecycle：那份狀態屬於 daemon 側的 lifecycle，supervisor 不該自己抓另一份（#1862 S4）。
+    fn quota_recently_held(&self, bot_id: &str) -> bool;
 }
 
 /// judge（Jev 影子報告、卡住掃描、撞單排程）。語意＝同名的 `crate::judge` 函式。

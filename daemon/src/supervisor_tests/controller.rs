@@ -1076,7 +1076,7 @@ mod conflict_fuse_tests {
 }
 mod no_grace_period_tests {
     use super::*;
-    use crate::supervisor::api::{post_lease_release, LeaseHolderIn};
+    use crate::runners::supervisor::api::{post_lease_release, LeaseHolderIn};
     use axum::extract::{Path, State};
     use axum::Json;
 
@@ -2682,5 +2682,23 @@ mod responder_attribution_read_failure_tests {
         let delivered = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
         let turn_id = delivered.turn_id.expect("successful dispatch records a turn");
         assert_eq!(relay_from_for_turn(&app, &turn_id).await.as_deref(), Some(manager_id.as_str()));
+    }
+}
+
+/// #1862 S4（新增，不是搬移）：supervisor 不再以 #[path] 編進 daemon 之後，controller 靠 `QuotaOps::quota_recently_held` 讀的必須是 daemon 側
+/// （lifecycle）寫下的 hold，而不是 am_supervisor 自己抓到的另一份行程內靜態。
+mod quota_hold_port_tests {
+    use super::*;
+    use crate::supervisor::ports::QuotaOps;
+
+    #[tokio::test]
+    async fn a_hold_noted_on_the_daemon_side_is_seen_through_the_quota_port() {
+        let e = crate::testing::env().await;
+        let bot = crate::db::ulid();
+        assert!(!e.app.quota_recently_held(&bot), "沒寫過 hold 的 bot 不算剛被擋過");
+        crate::lifecycle::quota_hold::note_held(&bot);
+        assert!(e.app.quota_recently_held(&bot), "daemon 側 note_held 寫的 hold，controller 經 port 要看得到");
+        crate::lifecycle::quota_hold::forget_held(&bot);
+        assert!(!e.app.quota_recently_held(&bot), "放掉之後也要跟著看不到");
     }
 }

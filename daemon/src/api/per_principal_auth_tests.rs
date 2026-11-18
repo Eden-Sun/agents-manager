@@ -1447,11 +1447,11 @@ async fn a_concurrent_swap_retry_does_not_revoke_the_live_window_approval() {
         "approved",
         "the active swap owns this approval until it releases its lease"
     );
-    let renew = crate::supervisor::api::post_lease_renew(
+    let renew = crate::runners::supervisor::api::post_lease_renew(
         State(e.app.clone()),
         Path("restart".into()),
         HeaderMap::new(),
-        Json(crate::supervisor::api::LeaseHolderIn {
+        Json(crate::runners::supervisor::api::LeaseHolderIn {
             owner: "daemon-update-kick".into(),
             fence: first["lease"]["fence"].as_i64().unwrap(),
             ttl_secs: Some(600),

@@ -104,6 +104,9 @@ impl<T: QuotaOps + ?Sized> QuotaOps for Arc<T> {
     async fn quota_reading(&self, key: &str) -> Option<crate::quota::Quota> {
         (**self).quota_reading(key).await
     }
+    fn quota_recently_held(&self, bot_id: &str) -> bool {
+        (**self).quota_recently_held(bot_id)
+    }
 }
 
 impl<T: JudgeOps + ?Sized> JudgeOps for Arc<T> {

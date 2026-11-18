@@ -6,10 +6,10 @@
 # 靠另外跑測試才抓到壞掉的 commit。整包 daemon 測試要十幾分鐘不能放進收尾，所以挑「改到的模組自己的測試」：
 #   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；am-base Rust 模組 → daemon composition harness；am-lifecycle／am-share Rust 模組沿用原 daemon 路徑（share/…→`share::…::`）。
 #   - build scripts、crate wiring、共用測試 helper、被嵌入的非 Rust 資料與 daemon/tests 變更，回報 `__all__` 跑全套。
-#     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle／am-supervisor 的 lib.rs 也是 `__all__`（不能當成一般模組）。
+#     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle 的 lib.rs 也是 `__all__`（不能當成一般模組）。
 #   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（清單在 scripts/ci-rules.tsv 第 3 欄，跟 ci-changed-parts.sh、ci-ops-tests.py 同一份）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
-#     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）、docs/API.md（api_doc_parity、ws_event_docs_tests）、
+#     ops/fixtures → supervisor_tests::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）、docs/API.md（api_doc_parity、ws_event_docs_tests）、
 #     outboxList.ts → am_base_tests::outbox、project-cargo.sh → am_base_tests::cargo_shim（#2072）。
 #   - 讀它的測試只在 am-base crate 自己的 target（沒掛進 daemon）時印 `__am_base_crate__`：check.sh 據此跑 `cargo test -p am-base`（#2072）。
 # 這是「合理子集」不是全量：跨模組的連帶影響（改了被很多模組用的型別）抓不到，完整的交給 ubuntu-ci（scripts/ops/ubuntu-ci.sh）。
@@ -115,7 +115,7 @@ while IFS= read -r f; do
         Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/* | daemon/Cargo.toml | daemon/build.rs \
             | daemon/src/main.rs | daemon/src/lib.rs | daemon/src/testing.rs | daemon/src/test_home.rs | daemon/tests/* \
             | crates/*/Cargo.toml | crates/*/build.rs \
-            | crates/am-lifecycle/src/lib.rs | crates/am-supervisor/src/lib.rs)
+            | crates/am-lifecycle/src/lib.rs)
             printf '__all__\n'
             ;;
         # child_done 的測試由 am-lifecycle 的 child_done.rs 以 #[path] 編進 daemon（lib.rs），模組路徑是 child_done::tests::；
@@ -224,38 +224,17 @@ while IFS= read -r f; do
                 *) printf '__all__\n' ;;
             esac
             ;;
-        # store.rs 以 #[path] 把 store_tests/*.rs 掛成 supervisor::store::tests／persona_migration_tests；crate-only 那批由 emit_mod 的 owned 判斷略過。
-        crates/am-supervisor/src/supervisor/store_tests/*.rs)
-            if python3 -B scripts/ci-crate-only-tests.py "$f"; then continue; fi
-            printf 'supervisor::store::tests::\n'
-            ;;
-        # build_info.rs 的 daemon_wiring_smoke（1 條）搬到 supervisor_tests::build_info::；其餘 crate-only 的 build_info 測試由 am-supervisor 自己跑。
-        crates/am-supervisor/src/build_info.rs) printf 'supervisor_tests::build_info::\n' ;;
-        # supervisor/mod.rs 的 `tests`（4 條）也搬到 supervisor_tests::tests::；改 mod.rs 兩組都選（掛載中的其餘模組＋搬過去的整組）。
-        crates/am-supervisor/src/supervisor/mod.rs) printf 'supervisor::\nsupervisor_tests::\n' ;;
-        # #1862 S1／S2a／S2b／S3a／S3b：這幾個 supervisor 模組的 daemon 整合測試搬成 daemon/src/supervisor_tests/<模組>.rs（名稱 supervisor::<模組>:: → supervisor_tests::<模組>::）；
-        # 改模組本身就選搬過去的那組（模組裡其餘 crate-only 測試由 `cargo test -p am-supervisor` 跑）。
-        crates/am-supervisor/src/supervisor/health.rs | crates/am-supervisor/src/supervisor/setup.rs | crates/am-supervisor/src/supervisor/watchdog.rs \
-            | crates/am-supervisor/src/supervisor/cli_refresh.rs | crates/am-supervisor/src/supervisor/role_faults.rs \
-            | crates/am-supervisor/src/supervisor/failover.rs | crates/am-supervisor/src/supervisor/store.rs \
-            | crates/am-supervisor/src/supervisor/responder.rs | crates/am-supervisor/src/supervisor/controller.rs \
-            | crates/am-supervisor/src/supervisor/idle_sleep.rs | crates/am-supervisor/src/supervisor/maintenance.rs \
-            | crates/am-supervisor/src/supervisor/incidents.rs | crates/am-supervisor/src/supervisor/bot_requests.rs \
-            | crates/am-supervisor/src/supervisor/timing.rs)
-            mod="${f##*/}"
-            printf 'supervisor_tests::%s::\n' "${mod%.rs}"
-            ;;
-        # #1862 D：supervisor 的 crate-only 測試環境（test_env.rs 沒有任何 daemon 測試，照檔名推會選到零個）。
-        crates/am-supervisor/src/supervisor/test_env.rs) ;;
+        # #1862 S4：supervisor 不再以 #[path] 編進 daemon，daemon 對它的測試只剩 daemon/src/supervisor_tests/（用 am_supervisor 的公開與 test-hooks 接縫）
+        # 與 daemon 自己的 runner 測試（runners::supervisor::）。改 am-supervisor：crate 自己的測試由 check.sh 跑 `cargo test -p am-supervisor`；
+        # daemon 這邊固定加選 supervisor_tests:: 與 runners::supervisor::。整檔都是 crate-only 測試的檔（test_env.rs、store_tests/*）daemon 沒有對應測試，不選。
         crates/am-supervisor/src/*)
-            rel="${f#crates/am-supervisor/src/}"
-            case "$rel" in
-                *.rs) ;;
-                *) printf '__all__\n'; continue ;;
+            case "$f" in
+                */test_env.rs | */store_tests/*.rs) if [ -f "$f" ] && python3 -B scripts/ci-crate-only-tests.py "$f"; then continue; fi ;;
             esac
-            mod="${rel%.rs}"
-            mod="${mod%/mod}"
-            emit_mod "$f" "$mod"
+            case "$f" in
+                *.rs) printf 'supervisor_tests::\nrunners::supervisor::\n' ;;
+                *) printf '__all__\n' ;;
+            esac
             ;;
     esac
 done | LC_ALL=C sort -u

@@ -4,6 +4,7 @@
 #[allow(unused_imports)]
 mod tests {
     use crate::supervisor::cli_refresh::*;
+    use crate::runners::supervisor::cli::get_cli;
     use axum::extract::State;
     use axum::Json;
     use serde_json::{json, Value};

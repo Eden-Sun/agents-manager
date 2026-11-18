@@ -111,6 +111,9 @@ impl QuotaOps for App {
     async fn quota_reading(&self, key: &str) -> Option<Quota> {
         self.quotas.lock().await.get(key).cloned()
     }
+    fn quota_recently_held(&self, bot_id: &str) -> bool {
+        crate::lifecycle::quota_hold::recently_held(bot_id)
+    }
 }
 
 impl JudgeOps for App {

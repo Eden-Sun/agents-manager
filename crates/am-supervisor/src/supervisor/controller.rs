@@ -531,17 +531,56 @@ fn settle_event(a: &store::Assignment, turn_status: &str, evidence_complete: boo
     (kind, payload)
 }
 
-/// 撞到上限時要做什麼——抽成純函式，好讓「重送幾次之後放棄」這條規則能被測到。
-#[derive(Debug, PartialEq)]
-#[doc(hidden)]
-pub enum QuotaAction {
-    /// CLI 說了時間：等到那時候。
-    WaitUntil(String),
-    /// CLI 沒說時間：等一段固定的時間再問。
-    WaitBlind,
-    /// 等太多次了，這不是「等一下就回來」的那種額度：交給 AGM。
-    GiveUp,
+
+/// `QuotaAction`／`TurnEnd` 兩個值型別。`$vis` 讓同一份定義在 `test`／`test-hooks` 建置下是 `pub`（daemon 的 `supervisor_tests` 要保留
+/// `assert_eq!`／結構字面值），正式 build 維持私有；兩種可見性共用一份定義，不會只改一份而漂移（#1862 S4）。
+macro_rules! controller_value_types {
+    ($vis:vis,) => {
+        /// 撞到上限時要做什麼——抽成純函式，好讓「重送幾次之後放棄」這條規則能被測到。
+        #[derive(Debug, PartialEq)]
+        #[doc(hidden)]
+        $vis enum QuotaAction {
+            /// CLI 說了時間：等到那時候。
+            WaitUntil(String),
+            /// CLI 沒說時間：等一段固定的時間再問。
+            WaitBlind,
+            /// 等太多次了，這不是「等一下就回來」的那種額度：交給 AGM。
+            GiveUp,
+        }
+
+        /// 回合結束時手上的證據，判斷它是不是被撞限打斷的。
+        #[doc(hidden)]
+        $vis struct TurnEnd<'a> {
+            $vis status: &'a str,
+            $vis reply: Option<&'a str>,
+            /// 這一回合的中斷原因（[`turn_error_of`]）。
+            $vis turn_error: Option<&'a str>,
+        }
+
+        impl TurnEnd<'_> {
+            /// 帳號正被擋著時，這一回合是不是被撞限打斷的。
+            ///
+            /// - run 記下了這回合的中斷原因：是撞限橫幅才算；斷線之類別的錯誤不算。
+            /// - 正常答完（`completed`／`completed_fallback`，有回覆、回覆本身不是撞限橫幅）：不算。帳號上的撞限可能是
+            ///   同身份另一顆 bot 撞的，這顆的工作已經做完——以前照樣 park，結果沒進 `result`，之後重送再做一次，
+            ///   或重送用完被報成 `quota_exhausted`（review3 c1 H1）。
+            /// - 其餘（失敗、沒有回覆、回覆就是橫幅）：算。codex 對排隊送進去的回合回同一張橫幅時，撞限的 `at` 不會更新，
+            ///   所以不拿「撞限晚於回合開始」當必要條件。
+            $vis fn cut_by_limit(&self) -> bool {
+                if let Some(err) = self.turn_error {
+                    return is_limit_banner(err);
+                }
+                let answered = matches!(self.status, "completed" | "completed_fallback")
+                    && self.reply.map(str::trim).is_some_and(|r| !r.is_empty() && !is_limit_banner(r));
+                !answered
+            }
+        }
+    };
 }
+#[cfg(any(test, feature = "test-hooks"))]
+controller_value_types!(pub,);
+#[cfg(not(any(test, feature = "test-hooks")))]
+controller_value_types!(,);
 
 /// 等太久就不是「等」了：單一個壞掉的時間不該把一件工作壓一整天。
 const MAX_QUOTA_WAIT_SECS: i64 = 6 * 3600;
@@ -1028,14 +1067,6 @@ pub async fn turn_error_of_for_test(db: &SqlitePool, turn_id: &str) -> anyhow::R
     turn_error_of(db, turn_id).await
 }
 
-/// 回合結束時手上的證據，判斷它是不是被撞限打斷的。
-#[doc(hidden)]
-pub struct TurnEnd<'a> {
-    pub status: &'a str,
-    pub reply: Option<&'a str>,
-    /// 這一回合的中斷原因（[`turn_error_of`]）。
-    pub turn_error: Option<&'a str>,
-}
 
 /// 這段文字就是 CLI 的撞限橫幅（claude 的 `You've hit/reached your … limit`、codex 的 `hit your usage limit`）。
 /// 只看短短一兩行的：回覆裡**談到**撞限的長文不是橫幅。
@@ -1044,26 +1075,6 @@ fn is_limit_banner(text: &str) -> bool {
     lines.len() <= 2
         && lines.iter().any(|l| crate::turn_error::is_quota_limit(l) || crate::lifecycle::codex_limit_hit_line(l).is_some())
 }
-
-impl TurnEnd<'_> {
-    /// 帳號正被擋著時，這一回合是不是被撞限打斷的。
-    ///
-    /// - run 記下了這回合的中斷原因：是撞限橫幅才算；斷線之類別的錯誤不算。
-    /// - 正常答完（`completed`／`completed_fallback`，有回覆、回覆本身不是撞限橫幅）：不算。帳號上的撞限可能是
-    ///   同身份另一顆 bot 撞的，這顆的工作已經做完——以前照樣 park，結果沒進 `result`，之後重送再做一次，
-    ///   或重送用完被報成 `quota_exhausted`（review3 c1 H1）。
-    /// - 其餘（失敗、沒有回覆、回覆就是橫幅）：算。codex 對排隊送進去的回合回同一張橫幅時，撞限的 `at` 不會更新，
-    ///   所以不拿「撞限晚於回合開始」當必要條件。
-    pub fn cut_by_limit(&self) -> bool {
-        if let Some(err) = self.turn_error {
-            return is_limit_banner(err);
-        }
-        let answered = matches!(self.status, "completed" | "completed_fallback")
-            && self.reply.map(str::trim).is_some_and(|r| !r.is_empty() && !is_limit_banner(r));
-        !answered
-    }
-}
-
 /// Reconcile every open assignment against what the database actually says about its turn.
 /// This is the restart path, and the only correct handling of `unknown` delivery: look, do
 /// not re-send.
@@ -1152,7 +1163,7 @@ async fn sweep_missing_events(db: &SqlitePool) {
 ///
 /// 只看「turn 還停在 `queued`」的那些：一旦 queue flush 送出去，turn 會變成 in_flight／完成，
 /// 這條就不再管它。等待上限 `[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）。
-pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps)) {
+pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps + crate::supervisor::ports::QuotaOps)) {
     let limit = app.cfg().get().await.supervisor.assignment_queue_wait_secs as i64;
     let Ok(open) = store::open_assignments(app.db()).await else { return };
     for a in open {
@@ -1197,7 +1208,7 @@ pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::ca
         let now = chrono::Utc::now();
         let holding = match &hit {
             Some(h) => crate::lifecycle::quota_hold::bounded(h, now, chrono::Duration::seconds(MAX_QUOTA_WAIT_SECS)),
-            None => crate::lifecycle::quota_hold::recently_held(&a.target_bot_id),
+            None => app.quota_recently_held(&a.target_bot_id),
         };
         if holding {
             continue;

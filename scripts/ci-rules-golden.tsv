@@ -11,7 +11,7 @@ crates/am-supervisor/src/supervisor/roles.rs|daemon,ops|@rust
 crates/am-supervisor/src/mission/store.rs|daemon,ops|@rust
 scripts/check.sh|web,daemon,ops,ob|cargo_shim::
 scripts/ops/lint-shell-vars.sh|daemon,ops|herdr_shim::
-scripts/ops/fixtures/x|daemon,ops|supervisor::setup::
+scripts/ops/fixtures/x|daemon,ops|supervisor_tests::setup::
 scripts/ops/claude-release-task.md|daemon,ops|claude_review::
 scripts/ops/codex-release-task.md|daemon,ops|claude_review::
 scripts/ops/release-triage-task.md|daemon,ops|__daemon_release_triage_submission__
@@ -23,8 +23,8 @@ web/src/lib/__fixtures__/codex-async-x|web,daemon|__am_base_crate__
 scripts/ops/README.md|ops|-
 scripts/ops/release-issue-task.md|ops|-
 scripts/x.md|ops|-
-docs/goals/agm-supervisor-persona.md|daemon|supervisor::persona::,supervisor::setup::
-docs/goals/agm-responder-persona.md|daemon|supervisor::persona::,supervisor::responder::
+docs/goals/agm-supervisor-persona.md|daemon|supervisor_tests::responder::,supervisor_tests::setup::
+docs/goals/agm-responder-persona.md|daemon|supervisor_tests::responder::,supervisor_tests::setup::
 docs/API.md|daemon|api_route_methods_match_documented_inventory,ws_event_docs_tests::
 daemon/Cargo.toml|daemon|@rust
 daemon/build.rs|daemon|@rust
@@ -51,7 +51,7 @@ Cargo.toml|daemon|@rust
 Cargo.lock|daemon|@rust
 rust-toolchainx|daemon|@rust
 .cargo/x|daemon|@rust
-scripts/agm.py|daemon,ops|supervisor::setup::
+scripts/agm.py|daemon,ops|supervisor_tests::setup::
 scripts/agm_test.py|daemon,ops|-
 scripts/chatgpt-consultx.sh|ops,ob|-
 scripts/ob_browser_test.mjs|ob|-

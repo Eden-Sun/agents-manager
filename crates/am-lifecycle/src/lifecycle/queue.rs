@@ -1518,9 +1518,9 @@ mod flush_queue_tests {
     }
 
     async fn decide(app: &Arc<App>, id: &str, decision: &str) -> Value {
-        let input: crate::supervisor::api::ReviewIn =
+        let input: crate::runners::supervisor::api::ReviewIn =
             serde_json::from_value(json!({"decision": decision, "reason": "改主意了"})).unwrap();
-        crate::supervisor::api::post_review(axum::extract::State(app.clone()), axum::extract::Path(id.to_string()), axum::http::HeaderMap::new(), axum::Json(input))
+        crate::runners::supervisor::api::post_review(axum::extract::State(app.clone()), axum::extract::Path(id.to_string()), axum::http::HeaderMap::new(), axum::Json(input))
             .await
             .map(|j| j.0)
             .unwrap()

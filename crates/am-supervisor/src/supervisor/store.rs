@@ -929,7 +929,7 @@ pub async fn requests(pool: &SqlitePool, limit: i64) -> Result<Vec<Value>> {
 /// leaves a `queued` row the controller picks up again with the same client_request_id.
 ///
 /// 測試夾具用；正式路徑一律走 [`insert_assignment_linked`]（連結跟列一起寫，issue #136）。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_assignment(
     pool: &SqlitePool,
@@ -1950,7 +1950,7 @@ pub async fn inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
 ///
 /// 讀取端改走 `roles::list_for`（角色條件要在 SQL 的 LIMIT 之前）；這一支留給既有測試釘住
 /// 「未 ack 的順序」這條規則。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn open_inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? AND state!='handled' ORDER BY created_at ASC, id ASC LIMIT ?",
@@ -2007,7 +2007,7 @@ pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
 }
 
 // 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 /// Prompted, not yet confirmed. Deliberately *not* `handled`: only the manager acking it —
 /// or the UI acking on its behalf — closes the event, so a failed notify keeps it queued.
 pub async fn mark_delivered_inbox(
@@ -2118,7 +2118,7 @@ pub async fn delivered_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
 }
 
 // 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 /// Pending events whose backoff has not run out yet are skipped; everything else is due.
 pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Result<Vec<InboxEvent>> {
     let next_at = crate::db::ts_sql("notify_next_at");
@@ -2329,7 +2329,7 @@ pub struct ApprovalSupersedeRefused {
     pub reason: &'static str,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn create_approval(
     pool: &SqlitePool,
     requester: &str,
@@ -2656,7 +2656,7 @@ pub async fn approvals(pool: &SqlitePool, limit: i64) -> Result<Vec<Approval>> {
 
 /// Approve, deny, revoke or consume. Only a `pending` approval can be approved or denied; a
 /// revoke applies to one that was already approved, and takes effect for every later acquire.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn decide_approval(
     pool: &SqlitePool,
     id: &str,
@@ -3126,7 +3126,7 @@ impl Incident {
 ///
 /// Returns `(incident, opened)`. `opened == false` on every tick after the first, which is what
 /// keeps a five-hour outage at one notification instead of six hundred.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn open_incident(
     pool: &SqlitePool,
     kind: &str,
@@ -3196,7 +3196,7 @@ pub async fn open_incident_notifying(
 }
 
 /// The condition cleared. `Ok(None)` = there was nothing open, which is the ordinary case.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> Result<Option<Incident>> {
     resolve_incident_notifying(pool, kind, resource, false).await
 }
@@ -3253,7 +3253,7 @@ pub async fn incidents(pool: &SqlitePool, limit: i64) -> Result<Vec<Incident>> {
 }
 
 // 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn ack_inbox(pool: &SqlitePool, id: &str) -> Result<bool> {
     let res = sqlx::query("UPDATE supervisor_inbox SET state='handled', updated_at=? WHERE supervisor_id=? AND id=?")
         .bind(crate::db::now())

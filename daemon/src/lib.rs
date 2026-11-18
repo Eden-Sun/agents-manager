@@ -24,9 +24,6 @@ mod am_lifecycle_arc_ports;
 #[cfg(test)]
 #[path = "../../crates/am-lifecycle/src/ports_impl.rs"]
 mod am_lifecycle_ports_impl;
-#[cfg(test)]
-#[path = "../../crates/am-supervisor/src/app_arc_ports.rs"]
-mod am_supervisor_arc_ports;
 #[cfg(not(test))]
 pub use am_lifecycle::{
     ask_answers,
@@ -49,7 +46,7 @@ pub use am_lifecycle::{
     tui_prompts,
     turn_error,
 };
-#[cfg(not(test))]
+// #1862 S4：supervisor 不再以 #[path] 編進 daemon（測試與正式 build 都用 am_supervisor crate）。
 pub use am_supervisor::{build_info, relay_auth, supervisor};
 // App-backed unit tests still belong to the daemon crate. Under `cargo test`, compile the same
 // source modules at the crate root so their `crate::` paths and the App adapters share one set of
@@ -221,12 +218,6 @@ mod supervisor_owned;
 mod app_ports_p6;
 #[cfg(test)]
 use am_base::test_dirs;
-#[cfg(test)]
-#[path = "../../crates/am-supervisor/src/build_info.rs"]
-pub mod build_info;
-#[cfg(test)]
-#[path = "../../crates/am-supervisor/src/relay_auth.rs"]
-pub mod relay_auth;
 mod app_ports_r2a9;
 mod api;
 #[cfg(test)]
@@ -306,9 +297,6 @@ mod read_marks;
 pub mod remote_cargo;
 mod reconcile;
 mod state;
-#[cfg(test)]
-#[path = "../../crates/am-supervisor/src/supervisor/mod.rs"]
-pub mod supervisor;
 mod supervisor_evidence;
 mod startup;
 mod service_auth;

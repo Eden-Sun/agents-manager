@@ -134,15 +134,15 @@ check "cargo_shim::" "scripts/check.sh"
 check "herdr_shim::" "scripts/ops/lint-shell-vars.sh"
 check "claude_review::" "scripts/ops/codex-release-task.md"
 check "__daemon_release_triage_submission__" "scripts/ops/release-triage-task.md"
-check "supervisor::setup::" "scripts/ops/fixtures/patrol-runtime.json"
-check "supervisor::setup::" "scripts/agm.py"
+check "supervisor_tests::setup::" "scripts/ops/fixtures/patrol-runtime.json"
+check "supervisor_tests::setup::" "scripts/agm.py"
 # #2072：am-base 讀的非 Rust 檔。測試掛在 daemon harness 的直接選；只在 am-base crate 裡的印 __am_base_crate__（check.sh 補跑 cargo test -p am-base）。
 check "runners::am_base_tests::outbox::" "web/src/lib/outboxList.ts"
 check "runners::am_base_tests::cargo_shim::" "scripts/project-cargo.sh"
 check "__am_base_crate__" "ops/host-baseline/baseline.toml"
 check "__am_base_crate__" "scripts/ops/host-baseline-sync-mac-verify.sh"
 check "__am_base_crate__" "web/src/lib/__fixtures__/codex-async-screen-cases.json"
-check "supervisor::persona:: supervisor::responder:: supervisor::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
+check "supervisor_tests::responder:: supervisor_tests::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
 # docs/API.md：路由對照（api_doc_parity，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests）。#1170。
 check "api_route_methods_match_documented_inventory ws_event_docs_tests::" "docs/API.md"
 # 跟 daemon 無關的檔案不產生過濾字串。
@@ -150,7 +150,7 @@ check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
 # crate 的 lib.rs 是接線檔（#[path] 進 daemon），不能對成 lib:: 這種選不到測試的過濾字串（issue #1018）。
 check "share_tests::" "crates/am-share/src/lib.rs"
 check "__all__" "crates/am-lifecycle/src/lib.rs"
-check "__all__" "crates/am-supervisor/src/lib.rs"
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/lib.rs"
 # crate 的 build.rs／Cargo.toml 改動要跑 daemon 全套，不能印「沒有可挑的測試子集」就綠燈。
 check "__all__" "crates/am-supervisor/build.rs"
 check "__all__" "crates/am-core/Cargo.toml"
@@ -173,16 +173,19 @@ check "share_tests::" "crates/am-share/src/share/svg_check.rs"
 # #1862 S1：health／setup／watchdog／cli_refresh／role_faults／failover／store 的 daemon 測試搬到 daemon/src/supervisor_tests/，改這些檔選搬過去的那組；
 # mod.rs 兩組都選；搬過去的測試檔本身照 daemon 模組路徑推。
 for m in health setup watchdog cli_refresh role_faults failover store responder controller idle_sleep maintenance incidents bot_requests timing; do
-    check "supervisor_tests::$m::" "crates/am-supervisor/src/supervisor/$m.rs"
+    check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/$m.rs"
     check "supervisor_tests::$m:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/$m.rs"
 done
-check "supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/mod.rs"
+# #1862 S4：supervisor 不再掛進 daemon：改 am-supervisor 的非整檔測試檔一律選 supervisor_tests:: 與 runners::supervisor::（test_env／store_tests 的 crate-only 測試檔不選）。
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/mod.rs"
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/roles.rs"
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/controller.rs"
 # #1862 S3b：build_info.rs 的 daemon_wiring_smoke 搬到 supervisor_tests::build_info::；flow_fixture 沒有自己的測試，改它選它所有的使用者。
-check "supervisor_tests::build_info::" "crates/am-supervisor/src/build_info.rs"
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/build_info.rs"
 check "supervisor_tests::build_info:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/build_info.rs"
 check "api::relay_announce_tests:: api::relay_from_auth_tests:: runners::supervisor::api:: runners::supervisor::responder_api:: supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/flow_fixture.rs"
 check "supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/mod.rs"
-check "" "crates/am-supervisor/src/supervisor/assignment_state.rs"
+check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/assignment_state.rs"
 check "" "crates/am-supervisor/src/supervisor/test_env.rs"
 # am-base uses the actual composition mount table, including aliases and shared fallbacks.
 check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"

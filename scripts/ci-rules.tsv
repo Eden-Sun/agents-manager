@@ -23,7 +23,7 @@ crates/am-supervisor/src/supervisor/roles.rs|daemon,ops|@rust|__all__
 crates/am-supervisor/src/mission/store.rs|daemon,ops|@rust|__all__
 scripts/check.sh|web,daemon,ops,ob|cargo_shim::|__all__
 scripts/ops/lint-shell-vars.sh|daemon,ops|herdr_shim::|@default
-scripts/ops/fixtures/*|daemon,ops|supervisor::setup::|@default
+scripts/ops/fixtures/*|daemon,ops|supervisor_tests::setup::|@default
 scripts/ops/claude-release-task.md|daemon,ops|claude_review::|@default
 scripts/ops/codex-release-task.md|daemon,ops|claude_review::|@default
 scripts/ops/release-triage-task.md|daemon,ops|__daemon_release_triage_submission__|@default
@@ -33,8 +33,8 @@ scripts/ops/host-baseline-sync-mac-verify.sh|daemon,ops|__am_base_crate__|@defau
 web/src/lib/outboxList.ts|web,daemon|runners::am_base_tests::outbox::|@default
 web/src/lib/__fixtures__/codex-async-*|web,daemon|__am_base_crate__|@default
 scripts/*.md|ops|-|@default
-docs/goals/agm-supervisor-persona.md|daemon|supervisor::persona::,supervisor::setup::|@default
-docs/goals/agm-responder-persona.md|daemon|supervisor::persona::,supervisor::responder::|@default
+docs/goals/agm-supervisor-persona.md|daemon|supervisor_tests::responder::,supervisor_tests::setup::|@default
+docs/goals/agm-responder-persona.md|daemon|supervisor_tests::responder::,supervisor_tests::setup::|@default
 docs/API.md|daemon|api_route_methods_match_documented_inventory,ws_event_docs_tests::|@default
 daemon/tests/fixtures/api_bot/*|daemon|api_bot::|@default
 daemon/*|daemon|@rust|@default
@@ -51,7 +51,7 @@ Cargo.toml|daemon|@rust|@default
 Cargo.lock|daemon|@rust|@default
 rust-toolchain*|daemon|@rust|@default
 .cargo/*|daemon|@rust|@default
-scripts/agm.py|daemon,ops|supervisor::setup::|scripts/agm_test.py
+scripts/agm.py|daemon,ops|supervisor_tests::setup::|scripts/agm_test.py
 scripts/agm_test.py|daemon,ops|-|@default
 scripts/chatgpt-consult*.sh|ob,ops|-|@default
 scripts/ob*|ob|-|@default

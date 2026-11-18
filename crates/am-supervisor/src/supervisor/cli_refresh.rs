@@ -7,10 +7,6 @@
 //! 協調者那條還會重設身份／model／effort，開機不能走那條。沒設定的角色、不存在的目錄一律跳過，不代建。
 //! 寫不進去只記 warn 並推一則 inbox，daemon 照樣開機。`scripts/ops/*.sh` 沒有內嵌，仍要手動安裝。
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use axum::extract::State;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-use axum::Json;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -198,6 +194,3 @@ pub async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capa
     }
     outcomes
 }
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-pub use crate::runners::supervisor::cli::get_cli;
