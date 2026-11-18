@@ -63,3 +63,5 @@ mod explicit_retirement;
 mod explicit_retirement_tests;
 #[cfg(test)]
 mod provider_seam_tests;
+#[cfg(test)]
+mod legacy_golden_tests;
