@@ -576,11 +576,8 @@ pub async fn revoke_queued_turn<C: QueueContext>(app: &C, turn_id: &str, why: &s
     Ok(true)
 }
 
-/// 撤銷已經 commit 之後要推的東西（訊息、turn 事件）。
-pub struct Revoked {
-    pub bot_id: String,
-    pub message: db::Message,
-}
+// #1862 S0：值型別搬到 am-base（`lc_error.rs`）供 am-supervisor 的 ports 簽名共用；舊路徑 `queue::Revoked`／`lifecycle::Revoked` 照舊可用。
+pub use crate::lc_error::Revoked;
 
 /// [`revoke_queued_turn`] 的交易內版本：要跟別的寫入綁在一起時用（例如保險絲「撤成功才標 blocked」）。
 /// `None`＝這筆已經不是 queued（被 flush 領走、或早就撤過），什麼都沒寫。commit 之後呼叫 [`announce_revoked`]。

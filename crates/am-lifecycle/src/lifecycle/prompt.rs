@@ -403,25 +403,8 @@ pub async fn prompt_with(
     prompt_with_attachments_and_relay(app, bot_id, text, client_request_id, attachment_ids, None).await
 }
 
-/// queued turn 的 lane，由 daemon 的可信寫入路徑選定；request id 前綴不參與分類。
-/// `RelaySrc` 另外保存訊息來源（`messages.relay_from`／`relay_unverified`）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum QueueClass {
-    #[default]
-    User,
-    Relay,
-    DaemonNotice,
-}
-
-impl QueueClass {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Relay => "relay",
-            Self::DaemonNotice => "daemon",
-        }
-    }
-}
+// #1862 S0：`QueueClass` 搬到 am-base（`lc_error.rs`），舊路徑 `prompt::QueueClass`／`lifecycle::QueueClass` 照舊可用。
+pub use crate::lc_error::QueueClass;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RelaySrc<'a> {

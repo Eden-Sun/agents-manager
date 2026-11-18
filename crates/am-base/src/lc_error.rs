@@ -118,3 +118,53 @@ pub struct PromptOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_now: Option<&'static str>,
 }
+
+// ───────── #1862 S0：從 am-lifecycle 搬下來的純值型別（簽名要跨 crate 共用，不能有兩份）─────────
+// 原定義位置（`lifecycle::queue`／`lifecycle::start`／`lifecycle::prompt`）都 `pub use` 這裡，所有舊路徑不變。
+
+/// 撤銷已經 commit 之後要推的東西（訊息、turn 事件）。
+pub struct Revoked {
+    pub bot_id: String,
+    pub message: crate::db::Message,
+}
+
+/// `resume_native` continues the bot's last native session (batch update restart).
+/// `fork_session`：從這個 native session 分出一個新 session（`POST /bots/:id/fork` 的第一次啟動，SPEC §6.10）。
+/// `require_idle`：restart 在**拿到 bot 鎖之後**再確認一次閒置，不閒置回 409 `not_idle`、什麼都不動（一鍵重啟用）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct StartOpts {
+    pub resume_native: bool,
+    /// 跟 `resume_native` 一起用：接不回原本的對話就**不啟動**，回 409 `resumed:false`＋原因，
+    /// 由呼叫端決定要不要改成開新對話（`?resume=native`，herdr 升級 2026-09-17）。沒設的話照舊退回開新對話。
+    pub resume_required: bool,
+    pub fork_session: Option<String>,
+    /// 跟 `fork_session` 一起用：這段對話屬於哪一顆來源 bot（fork 的來源）。搬對話檔只看這顆的 run（#1168）。
+    pub fork_source_bot: Option<String>,
+    pub require_idle: bool,
+    /// Bulk update restart must re-read the live pane under the bot lock before stopping it.
+    pub refuse_background_jobs: bool,
+    /// 跟 `resume_native` 一起用：不看 DB 記的 session，改接這一段（`?resume=native&session=<id>`）。
+    /// 救援用：DB 記錯（例如 2026-09-22 被 codex 子行程的 thread-id 蓋掉）時，讓 AGM 指名接回真正的對話。
+    pub resume_session: Option<String>,
+}
+
+/// queued turn 的 lane，由 daemon 的可信寫入路徑選定；request id 前綴不參與分類。
+/// `RelaySrc` 另外保存訊息來源（`messages.relay_from`／`relay_unverified`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueueClass {
+    #[default]
+    User,
+    Relay,
+    DaemonNotice,
+}
+
+impl QueueClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Relay => "relay",
+            Self::DaemonNotice => "daemon",
+        }
+    }
+}
