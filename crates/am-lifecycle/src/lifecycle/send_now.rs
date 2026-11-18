@@ -228,14 +228,12 @@ fn unknown(bot: &db::Bot, run: &db::Run, interrupted: &db::Turn, proof: Option<S
     Outcome::Unknown(why)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
-
     fn status(version: &str) -> String {
         format!(r#"{{"version":"{version} (Claude Code)","model_name":"Opus"}}"#)
     }
-
     /// 2.1.275 起才有那顆鍵；剛好那一版要算過。
     #[test]
     fn the_send_now_key_starts_at_the_version_that_shipped_it() {
@@ -245,7 +243,6 @@ mod tests {
         assert_eq!(supported("claude", Some(&status("2.1.274"))), Err(Refusal::CliTooOld));
         assert_eq!(supported("claude", Some(&status("2.1.9"))), Err(Refusal::CliTooOld));
     }
-
     /// 只有 claude 有這顆鍵：codex／grok 連版本都不用看，照舊排隊。
     #[test]
     fn only_claude_has_the_key() {
@@ -253,7 +250,6 @@ mod tests {
             assert_eq!(supported(kind, Some(&status("2.1.275"))), Err(Refusal::UnsupportedKind), "{kind}");
         }
     }
-
     /// 版本不明就不插隊：按錯鍵的代價是把使用者的字打進不知道什麼地方，寧可退回排隊那條路。
     #[test]
     fn an_unknown_version_is_never_assumed_new_enough() {
@@ -262,7 +258,6 @@ mod tests {
         assert_eq!(supported("claude", Some("not json")), Err(Refusal::VersionUnknown));
         assert_eq!(supported("claude", Some(r#"{"version":"unknown"}"#)), Err(Refusal::VersionUnknown));
     }
-
     /// 每個拒絕原因都有自己的機器可讀代碼與一句中文說明（回進 409 的 body）。
     #[test]
     fn every_refusal_says_why_in_both_forms() {
@@ -274,7 +269,6 @@ mod tests {
         assert!(Refusal::CodexTooOld.message().contains(CODEX_MIN_VERSION));
         assert!(Refusal::CodexRestartNeeded.message().contains("重啟這顆 bot"), "要講解法");
     }
-
     /// issue #748：codex 的閘門。旗標關＝跟以前一樣「只有 claude 有」；旗標開還要看跑著的版本 >= 0.159.0，
     /// 版本不明就不賭（steer 打進去的字，舊版只會排進輸入佇列，等於假裝插了隊）。
     #[test]
@@ -290,7 +284,6 @@ mod tests {
         assert_eq!(gate(true, None), Err(Refusal::CodexVersionUnknown));
         assert_eq!(gate(true, Some("garbage")), Err(Refusal::CodexVersionUnknown));
     }
-
     /// issue #748：旗標開著時，啟動沒帶 instant_interrupt 參數的 run（`runs.codex_instant_interrupt` 是 0 或 NULL）
     /// 一律回 restart_needed，版本再新也一樣；旗標關著時不看 run 記了什麼，跟以前完全相同。
     #[test]
@@ -302,7 +295,6 @@ mod tests {
         }
         assert_eq!(gate("codex", None, Some("0.164.0"), true, true), Ok(Mode::CodexSteer));
     }
-
     /// 旗標只管 codex：claude 的閘門照舊走 statusLine 版本，旗標開不開都一樣；grok／shell 永遠不行。
     #[test]
     fn the_codex_flag_changes_nothing_for_other_kinds() {

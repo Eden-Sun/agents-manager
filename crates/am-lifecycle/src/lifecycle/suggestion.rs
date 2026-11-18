@@ -267,7 +267,3 @@ pub async fn accept(
         }
     }
 }
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "suggestion_tests.rs"]
-mod tests;

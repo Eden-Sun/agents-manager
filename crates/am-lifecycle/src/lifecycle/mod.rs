@@ -62,7 +62,7 @@ pub mod grok_transcript;
 pub mod claude_child_log;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub mod grok_hook_tests;
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 pub mod suggestion_list_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub(crate) mod diag_support;

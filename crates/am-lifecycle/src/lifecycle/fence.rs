@@ -163,14 +163,12 @@ pub async fn classify(pool: &sqlx::SqlitePool, bot_id: &str, run: &db::Run, ev: 
     decide(&now, &ev, prior.as_deref().map(|run_id| PriorRun { run_id }).as_ref())
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
-
     fn gen<'a>(run_id: &'a str, session: Option<&'a str>) -> Generation<'a> {
         Generation { run_id, session_id: session, resume_session_id: None, adopted: false }
     }
-
     /// 這一代自己的事件照常處理。
     #[test]
     fn an_event_from_this_generation_is_current() {
@@ -181,7 +179,6 @@ mod tests {
         let resuming = Generation { run_id: "01RUN-B", session_id: None, resume_session_id: Some("s-old"), adopted: false };
         assert_eq!(decide(&resuming, &EventIdentity { run_id: None, session_id: Some("s-old") }, None), Ownership::Current);
     }
-
     /// 上一代的事件擋下來：那是 issue #69 的 race（interrupt → 重啟 → 舊 Stop 才到）。
     #[test]
     fn an_event_from_an_older_run_is_stale_and_may_not_mutate() {
@@ -194,7 +191,6 @@ mod tests {
         let named = decide(&now, &EventIdentity { run_id: Some("01RUN-A"), session_id: None }, None);
         assert!(!named.may_mutate(), "{named:?}");
     }
-
     /// issue #92：`--resume` 接回同一段對話，新舊兩個行程回報**同一個** session。換身份前那個行程
     /// 遲到的事件只看 session 是「這一代的」——它自己帶的 run id 才分得開。
     #[test]
@@ -206,7 +202,6 @@ mod tests {
         // 沒帶 run id（舊行程、舊版 hook.sh）：只剩 session 可看，照舊當成這一代的。
         assert_eq!(decide(&resumed, &EventIdentity { run_id: None, session_id: Some("s-same") }, None), Ownership::Current);
     }
-
     /// 收編來的 run：它的行程是在別的 run 底下起的，帶的 run id 本來就對不上——不能因此把它自己的
     /// 事件全部丟掉，交給 session 規則。
     #[test]
@@ -218,7 +213,6 @@ mod tests {
         let old = decide(&adopted, &EventIdentity { run_id: Some("01RUN-STARTED"), session_id: Some("s-old") }, Some(&PriorRun { run_id: "01RUN-OLD" }));
         assert!(!old.may_mutate(), "{old:?}");
     }
-
     /// 證不出來就放行——不靠時序猜。最重要的是 claude 在同一個 CLI 裡 `/clear` 換 session 的情況：
     /// 用「session 不一樣就丟」的話，`/clear` 之後每一則 Stop 都會被殺掉。
     #[test]
@@ -235,7 +229,6 @@ mod tests {
         let fresh = decide(&gen("01RUN-B", None), &EventIdentity { run_id: None, session_id: Some("s-x") }, None);
         assert!(fresh.may_mutate(), "{fresh:?}");
     }
-
     /// `decide` 完全信任 `prior`：「這是不是真的更早」是呼叫端（`classify`，用 rowid 驗過）的責任，
     /// 不是這支純函式的事（issue #98：以前這裡還會用 ULID 字典序複查一次，同一毫秒內會複查出錯的答案）。
     #[test]
@@ -245,65 +238,10 @@ mod tests {
         let out = decide(&now, &EventIdentity { run_id: None, session_id: Some("s-y") }, Some(&PriorRun { run_id: "01RUN-Z" }));
         assert!(matches!(&out, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-Z"), "{out:?}");
     }
-
     /// 空字串不是身份：`Some("")` 要跟沒帶一樣。
     #[test]
     fn blank_identities_count_as_missing() {
         let now = gen("01RUN-B", Some("s-new"));
         assert_eq!(decide(&now, &EventIdentity { run_id: Some("  "), session_id: Some(" ") }, None), Ownership::Unproven("事件沒帶 session id"));
-    }
-
-    /// issue #98：`classify` 找上一代 run 要看 rowid（寫入順序），不能看 ULID 字典序——這裡故意讓
-    /// **先寫進去**的那個 run 的 ULID 字典序反而比較大（模擬同一毫秒內隨機段沒有照時間排的情況），
-    /// 證明圍籬還是正確認得出它是舊世代，沒有被字典序騙過去。
-    #[tokio::test]
-    async fn classify_finds_the_prior_run_by_insertion_order_even_when_its_ulid_sorts_after_the_current_one() {
-        use crate::testing as tt;
-        let env = tt::env().await;
-        let app = env.app.clone();
-        let bot_id = db::ulid();
-        sqlx::query(
-            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
-             VALUES (?,?,'fence-rowid','claude','[]',0,1,'tok',?)",
-        )
-        .bind(&bot_id)
-        .bind(&env.project_id)
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-
-        // 故意反過來：先寫進去的（真正的上一代）用一個字典序**比較大**的假 ULID。
-        let old_run_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ";
-        let new_run_id = "01AAAAAAAAAAAAAAAAAAAAAAAA";
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
-             VALUES (?,?,'exited','unknown','pane-old','s-old',?,?)",
-        )
-        .bind(old_run_id)
-        .bind(&bot_id)
-        .bind(db::now())
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at)
-             VALUES (?,?,'running','working','pane-new',?)",
-        )
-        .bind(new_run_id)
-        .bind(&bot_id)
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
-        let new_run = sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id = ?").bind(new_run_id).fetch_one(&app.db).await.unwrap();
-
-        let ev = EventIdentity { run_id: None, session_id: Some("s-old") };
-        let out = classify(&app.db, &bot_id, &new_run, ev).await;
-        assert!(
-            matches!(&out, Ownership::Stale { prior_run_id, .. } if prior_run_id == old_run_id),
-            "寫入順序證得出 old_run 是上一代，不該被 ULID 字典序騙成 Unproven：{out:?}"
-        );
     }
 }

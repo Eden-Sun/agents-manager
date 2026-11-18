@@ -28,18 +28,18 @@ check "child_alerts::tests:: testing::scratch_leak_guard::" "daemon/src/child_al
 check "judge::tests:: testing::scratch_leak_guard::" "daemon/src/judge_tests.rs"
 check "lifecycle::grok_transcript::tests::" "crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs"
 check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/claude_child_log_tests.rs"
-check "lifecycle::suggestion::tests::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
-check "lifecycle::composer_draft::tests::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
+check "lifecycle::suggestion::tests:: lifecycle_tests::suggestion::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
+check "lifecycle::composer_draft::tests:: lifecycle_tests::composer_draft::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
 # poller.rs 把 poller_tests/<mod>.rs 以 #[path] 掛成 poller::<mod>_tests：改測試檔與改 poller.rs 都要跑到這批。
 check "lifecycle::poller::issue_17_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/issue_17_tests.rs"
 check "lifecycle::poller::folded_paste_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/folded_paste_tests.rs"
 check "lifecycle::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
 check "lifecycle::claude_resume_menu::tests:: lifecycle_tests::claude_resume_menu::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
-check "lifecycle::unsent_draft::tests::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
+check "lifecycle::unsent_draft::tests:: lifecycle_tests::unsent_draft::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
 # 混合：兩支新路徑＋既有有效路徑（judge_tests.rs）同進來，各自的真實過濾字串都要在，且排序去重（#1961）。
-check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: testing::scratch_leak_guard::" \
+check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: lifecycle_tests::unsent_draft:: testing::scratch_leak_guard::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 # #1862 C1：share 的 tests.rs／trusted_tests.rs 搬成 daemon 自己的測試檔（daemon/src/share_tests/），不再靠 share 的 #[path] 掛載編譯；
@@ -69,7 +69,7 @@ check "lifecycle::setup:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lif
 # #1862 遷移 B：resume_context／codex_history 的 DB／純解析測試改 crate-only，兩檔仍各留 daemon 測試（resume_context::tests 兩邊都編譯、
 # codex_history::tests::the_hook_defaults_off_in_tests 只在 daemon harness），改這兩檔仍要選到各自的 daemon 過濾字串。
 # 共用的測試輔助 am_base::test_dirs 改動走 am-base 自己的測試。
-check "lifecycle::resume_context::" "crates/am-lifecycle/src/lifecycle/resume_context.rs"
+check "lifecycle::resume_context:: lifecycle_tests::resume_context::" "crates/am-lifecycle/src/lifecycle/resume_context.rs"
 check "codex_history:: lifecycle_tests::codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "runners::am_base_tests::" "crates/am-base/src/test_dirs.rs"
 check "lifecycle::setup:: lifecycle_tests::screen:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs" "crates/am-lifecycle/src/lifecycle/screen.rs"

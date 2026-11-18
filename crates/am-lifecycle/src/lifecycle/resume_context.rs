@@ -190,7 +190,7 @@ pub(crate) async fn on_identity(pool: &SqlitePool, run: &crate::db::Run, session
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod tests {
     use super::*;
 
@@ -406,4 +406,16 @@ mod database_tests {
         restore(e.app.db(), &bot.id, "new", "same", Some("opus")).await.unwrap();
         assert!(status(e.app.db(), "new").await.is_none());
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub const MARKER: &str = super::MARKER;
+    pub const MODEL: &str = super::MODEL;
+    pub const INVALIDATED: &str = super::INVALIDATED;
+    pub fn model_matches(source: &str, target: &str) -> bool { super::model_matches(source, target) }
+    pub fn snapshot(previous: &Value, session: &str, model: &str) -> Option<Value> { super::snapshot(previous, session, model) }
 }

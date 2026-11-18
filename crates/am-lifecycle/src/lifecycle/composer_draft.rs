@@ -842,6 +842,16 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now: None })
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "composer_draft_tests.rs"]
 mod tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub fn draft_token(run_id: &str, pane: &str, draft: &str) -> String { super::draft_token(run_id, pane, draft) }
+    pub async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, crate::herdr::PaneRead)> { super::read_draft(client, pane, kind).await }
+    pub async fn draft_proof(app: &impl LcHost, client: &HerdrClient, run: &db::Run, bot: &db::Bot, pane: &str, draft: &str) -> LcResult<Proof> { super::draft_proof(app, client, run, bot, pane, draft).await }
+}

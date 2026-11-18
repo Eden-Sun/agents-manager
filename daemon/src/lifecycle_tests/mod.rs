@@ -1,17 +1,30 @@
-//! #1862 L2-1：am-lifecycle 的 daemon 整合測試（比照 supervisor_tests／share_tests）。
+//! #1862 L2：am-lifecycle 的 daemon 整合測試（比照 supervisor_tests／share_tests）。
 mod agent_md;
 mod agy_session;
 mod agy_tests;
 mod blocked_reason;
+mod busy_send;
 mod claude_resume_menu;
 mod codex_history;
 mod codex_model_migration;
+mod composer_draft;
 mod daemon_notice;
 mod dangerous_rm;
 mod default_session;
+mod delivery;
 mod events;
+mod fence;
+mod owed_delivery;
 mod pane_text;
 mod paste_check;
+mod prelude;
+mod prompt;
+mod resume_context;
+mod resume_gate;
+mod resume_nudge;
 mod screen;
 mod setup;
-mod prelude;
+mod slash;
+mod start_send;
+mod suggestion;
+mod unsent_draft;

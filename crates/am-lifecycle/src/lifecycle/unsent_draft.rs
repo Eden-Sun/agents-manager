@@ -38,34 +38,42 @@ pub enum Recovery {
     Failed,
 }
 
-/// 讀不到的輪數（以 turn 為鍵）。表滿時新增前先淘汰最舊的一筆：回合若是被別的路收掉（例如 Stop hook），
-/// 它那一筆不會再被 `forget`，不淘汰的話會永遠占著位子、把之後的 turn 擋在等待之外。
-#[derive(Default)]
-struct Unreadable {
-    seq: u64,
-    /// turn → (讀不到的輪數, 插入序號)。
-    rounds: HashMap<String, (u32, u64)>,
-}
+macro_rules! unreadable_type {
+    ($vis:vis,) => {
+        /// 讀不到的輪數（以 turn 為鍵）。表滿時新增前先淘汰最舊的一筆：回合若是被別的路收掉（例如 Stop hook），
+        /// 它那一筆不會再被 `forget`，不淘汰的話會永遠占著位子、把之後的 turn 擋在等待之外。
+        #[derive(Default)]
+        $vis struct Unreadable {
+            $vis seq: u64,
+            /// turn → (讀不到的輪數, 插入序號)。
+            $vis rounds: HashMap<String, (u32, u64)>,
+        }
 
-impl Unreadable {
-    /// 這一則又讀不到一次：回是否還要再等。
-    fn again(&mut self, turn_id: &str, max: usize) -> bool {
-        if !self.rounds.contains_key(turn_id) && self.rounds.len() >= max {
-            if let Some(oldest) = self.rounds.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone()) {
-                self.rounds.remove(&oldest);
+        impl Unreadable {
+            /// 這一則又讀不到一次：回是否還要再等。
+            $vis fn again(&mut self, turn_id: &str, max: usize) -> bool {
+                if !self.rounds.contains_key(turn_id) && self.rounds.len() >= max {
+                    if let Some(oldest) = self.rounds.iter().min_by_key(|(_, (_, at))| *at).map(|(k, _)| k.clone()) {
+                        self.rounds.remove(&oldest);
+                    }
+                }
+                self.seq += 1;
+                let at = self.seq;
+                let entry = self.rounds.entry(turn_id.to_string()).or_insert((0, at));
+                entry.0 += 1;
+                if entry.0 < UNREADABLE_ROUNDS {
+                    return true;
+                }
+                self.rounds.remove(turn_id);
+                false
             }
         }
-        self.seq += 1;
-        let at = self.seq;
-        let entry = self.rounds.entry(turn_id.to_string()).or_insert((0, at));
-        entry.0 += 1;
-        if entry.0 < UNREADABLE_ROUNDS {
-            return true;
-        }
-        self.rounds.remove(turn_id);
-        false
-    }
+    };
 }
+#[cfg(any(test, feature = "test-hooks"))]
+unreadable_type!(pub,);
+#[cfg(not(any(test, feature = "test-hooks")))]
+unreadable_type!(,);
 
 fn unreadable_rounds() -> &'static Mutex<Unreadable> {
     static ROUNDS: OnceLock<Mutex<Unreadable>> = OnceLock::new();
@@ -315,6 +323,14 @@ async fn alert(app: &impl StuckTurnContext, bot: &db::Bot, turn: &db::Turn, reas
     }
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "unsent_draft_tests.rs"]
 mod tests;
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str, turn: &db::Turn, sent: &[String]) -> anyhow::Result<Recovery> { super::press_enter_once(app, run, kind, turn, sent).await }
+}

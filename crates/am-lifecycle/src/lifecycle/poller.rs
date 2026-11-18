@@ -2318,3 +2318,11 @@ mod no_reply_notice_tests {
         assert!(!is_no_reply_notice("請修正第 4、5 號問題"));
     }
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod test_seams {
+    //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
+    use super::*;
+    pub async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> { super::try_fallback(app, run_id, expected_turn).await }
+}
