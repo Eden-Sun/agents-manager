@@ -119,6 +119,7 @@ export function IssuesBar({
     detailSeq.current++
     setIssues(null)
     setIssuesScope(null)
+    setOpenCount(null)
     setLoading(false)
     setFetching(null)
     setError(null)
