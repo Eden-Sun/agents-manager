@@ -2,6 +2,7 @@
 use crate::hosts::{sh_quote, HostConn};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
+use std::sync::Arc;
 pub const CODEX_HOOK_SH: &str = "codex-hook.sh";
 
 /// Script body for the local `codex-hook.sh` dispatcher.
@@ -302,6 +303,147 @@ pub async fn remote_stop_hook_status(conn: &HostConn, codex_home: &str, command:
     let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
     let config_text = crate::trust::read_remote_text(conn, &format!("{home}/config.toml")).await?;
     Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks, command)?.0)
+}
+
+/// AG Man 自己的 canonical Stop group 在 `hooks.json` 裡的位置；沒有＝`None`。
+/// 使用者改過（形狀不符、歧義）：`Err`，呼叫端不動檔案。
+fn canonical_group_present(existing: &str, command: &str) -> Result<Option<usize>> {
+    let merged = merge_hooks_json(existing, command)?;
+    Ok(if merged.merged_json.is_some() { None } else { Some(merged.group_index) })
+}
+
+/// 拿掉第 `idx` 組（那一組必須是 canonical）。在陣列尾端就整組刪；在中間就只清空它的 `hooks`，
+/// 讓後面各組的 group index（信任鍵 `…:stop:<組>:0` 的一部分）不位移。
+fn without_canonical_group(existing: &str, idx: usize) -> Result<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(existing).map_err(|_| anyhow!("invalid JSON in hooks.json"))?;
+    let stop = doc
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("Stop"))
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow!("hooks.json hooks.Stop must be an array"))?;
+    if idx + 1 == stop.len() {
+        stop.remove(idx);
+    } else {
+        stop[idx]["hooks"] = serde_json::json!([]);
+    }
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+/// 刪掉我們在 `[hooks.state]` 裡那一鍵（其他鍵與其餘內容不動）。沒有＝`None`。
+pub fn trust_remove_edit(config_text: &str, key: &str) -> Result<Option<String>> {
+    use toml_edit::{DocumentMut, Item};
+    let mut doc: DocumentMut = config_text.parse().context("config.toml is not valid TOML")?;
+    let removed = doc
+        .get_mut("hooks")
+        .and_then(Item::as_table_mut)
+        .and_then(|h| h.get_mut("state"))
+        .and_then(Item::as_table_mut)
+        .and_then(|state| state.remove(key))
+        .is_some();
+    Ok(if removed { Some(doc.to_string()) } else { None })
+}
+
+/// 同一台主機、同一個 CODEX_HOME 的 hook 寫入（安裝並信任、移除）都在這把鎖底下做。
+pub fn home_lock(host: &str, codex_home: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
+    let mut map = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(format!("{host}\n{codex_home}")).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+}
+
+/// 寫入前的備份：`<檔名>.am-bak-<epoch 秒>`，權限 0600。
+fn backup_local(path: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let backup = path.with_file_name(format!("{name}.am-bak-{stamp}"));
+    std::fs::copy(path, &backup).with_context(|| format!("backing up {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// 移除 AG Man 自己的 Stop handler（只認 canonical 那一組）。先拿掉 handler，再拿掉它的信任項（剩下的信任無害）。
+/// 兩個檔案各自寫前備份；寫後讀回，我們的 handler 還在就報錯。回 `false` 表示沒有我們的項目可移。
+pub fn remove_local(codex_home: &Path, command: &str) -> Result<bool> {
+    let hooks = codex_home.join("hooks.json");
+    let Ok(existing) = std::fs::read_to_string(&hooks) else { return Ok(false) };
+    let Some(idx) = canonical_group_present(&existing, command)? else { return Ok(false) };
+    let key = stop_hook_state_key(&hooks.to_string_lossy(), idx);
+    backup_local(&hooks)?;
+    crate::trust::update_file(&hooks, |cur| match canonical_group_present(cur, command)? {
+        Some(i) => Ok(Some(without_canonical_group(cur, i)?)),
+        None => Ok(None),
+    })?;
+    if canonical_group_present(&std::fs::read_to_string(&hooks)?, command)?.is_some() {
+        bail!("Codex Stop handler is still registered after the removal write");
+    }
+    let config = codex_home.join("config.toml");
+    if let Ok(text) = std::fs::read_to_string(&config) {
+        if trust_remove_edit(&text, &key)?.is_some() {
+            backup_local(&config)?;
+            crate::trust::update_file(&config, |cur| trust_remove_edit(cur, &key))?;
+        }
+    }
+    Ok(true)
+}
+
+/// 遠端版的 [`remove_local`]。
+pub async fn remove_remote(conn: &HostConn, codex_home: &str, command: &str) -> Result<bool> {
+    let home = codex_home.trim_end_matches('/');
+    let hooks = format!("{home}/hooks.json");
+    let existing = crate::trust::read_remote_text(conn, &hooks).await?;
+    let Some(idx) = canonical_group_present(&existing, command)? else { return Ok(false) };
+    let key = stop_hook_state_key(&hooks, idx);
+    let backup = |path: &str| {
+        let q = sh_quote(path);
+        format!("set -e\ncp -p {q} {q}.am-bak-$(date +%s)\nprintf 'AM_BACKUP_OK\\n'\n")
+    };
+    if !conn.ssh_exec(&backup(&hooks)).await?.contains("AM_BACKUP_OK") {
+        bail!("could not back up the remote hooks.json");
+    }
+    crate::trust::update_remote_file(conn, &hooks, |cur| match canonical_group_present(cur, command)? {
+        Some(i) => Ok(Some(without_canonical_group(cur, i)?)),
+        None => Ok(None),
+    })
+    .await?;
+    if canonical_group_present(&crate::trust::read_remote_text(conn, &hooks).await?, command)?.is_some() {
+        bail!("Codex Stop handler is still registered after the removal write");
+    }
+    let config = format!("{home}/config.toml");
+    if trust_remove_edit(&crate::trust::read_remote_text(conn, &config).await?, &key)?.is_some() {
+        if !conn.ssh_exec(&backup(&config)).await?.contains("AM_BACKUP_OK") {
+            bail!("could not back up the remote config.toml");
+        }
+        crate::trust::update_remote_file(conn, &config, |cur| trust_remove_edit(cur, &key)).await?;
+    }
+    Ok(true)
+}
+
+/// 讓本機這個 CODEX_HOME 與設定一致（#1989）。`keep_trusted=true`（`stop_hook=true`）：已信任就保留並回 `true`；
+/// 未信任／雜湊不符的殘留就移除；`keep_trusted=false`（`stop_hook=false`）：一律移除我們的項目。
+pub fn reconcile_local(codex_home: &Path, command: &str, keep_trusted: bool) -> Result<bool> {
+    match local_stop_hook_status(codex_home, command)? {
+        StopHookStatus::NotInstalled => Ok(false),
+        StopHookStatus::Trusted if keep_trusted => Ok(true),
+        _ => {
+            remove_local(codex_home, command)?;
+            Ok(false)
+        }
+    }
+}
+
+/// 遠端版的 [`reconcile_local`]。
+pub async fn reconcile_remote(conn: &HostConn, codex_home: &str, command: &str, keep_trusted: bool) -> Result<bool> {
+    match remote_stop_hook_status(conn, codex_home, command).await? {
+        StopHookStatus::NotInstalled => Ok(false),
+        StopHookStatus::Trusted if keep_trusted => Ok(true),
+        _ => {
+            remove_remote(conn, codex_home, command).await?;
+            Ok(false)
+        }
+    }
 }
 
 /// 寫入 dispatcher 腳本，回傳 Codex 會不會執行我們的 Stop handler（唯讀）。**不註冊 hook**：
@@ -728,6 +870,98 @@ mod tests {
         assert!(install_local(&home, &data, None).unwrap(), "the exact recorded hash is trusted");
         std::fs::write(home.join("config.toml"), "not = [valid").unwrap();
         assert!(!install_local(&home, &data, None).unwrap(), "unparseable config is untrusted");
+    }
+
+    fn ours_and_user_groups(command: &str) -> serde_json::Value {
+        serde_json::json!({"hooks":{"Stop":[
+            {"hooks":[{"type":"command","command":"user-first","timeout":5}]},
+            {"hooks":[{"type":"command","command":command,"timeout":5}]},
+            {"hooks":[{"type":"command","command":"user-last","timeout":5}]}
+        ]}})
+    }
+
+    #[test]
+    fn removing_our_middle_group_keeps_later_groups_and_their_trust_keys() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-remove-mid");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = dir.join("data");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        let hooks = home.join("hooks.json");
+        std::fs::write(&hooks, ours_and_user_groups(&command).to_string()).unwrap();
+        let config = format!(
+            "[projects.\"/x\"]\ntrust_level = \"trusted\"\n[hooks.state.{:?}]\ntrusted_hash={:?}\n[hooks.state.{:?}]\ntrusted_hash=\"sha256:user-last\"\n",
+            stop_hook_state_key(&hooks.to_string_lossy(), 1),
+            stop_hook_trust_hash(&command),
+            stop_hook_state_key(&hooks.to_string_lossy(), 2),
+        );
+        std::fs::write(home.join("config.toml"), &config).unwrap();
+        assert!(!reconcile_local(&home, &command, false).unwrap(), "disabled: our trusted handler is removed");
+        let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&hooks).unwrap()).unwrap();
+        let stop = after["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 3, "a middle group is emptied, not deleted, so later indices stay put");
+        assert_eq!(stop[0]["hooks"][0]["command"], "user-first");
+        assert!(stop[1]["hooks"].as_array().unwrap().is_empty());
+        assert_eq!(stop[2]["hooks"][0]["command"], "user-last");
+        let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(!cfg.contains(&stop_hook_state_key(&hooks.to_string_lossy(), 1)), "our trust entry is removed");
+        assert!(cfg.contains("sha256:user-last"), "the later group's trust key is not moved or removed");
+        assert!(cfg.starts_with("[projects.\"/x\"]\ntrust_level = \"trusted\"\n"), "the user's own table survives: {cfg:?}");
+    }
+
+    #[test]
+    fn removing_our_last_group_deletes_it() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-remove-last");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = dir.join("data");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        let initial = serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-only","timeout":5}]},{"hooks":[{"type":"command","command":command,"timeout":5}]}]}});
+        std::fs::write(home.join("hooks.json"), initial.to_string()).unwrap();
+        reconcile_local(&home, &command, false).unwrap();
+        let after: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(after["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(after["hooks"]["Stop"][0]["hooks"][0]["command"], "user-only");
+    }
+
+    #[test]
+    fn an_untrusted_leftover_of_ours_is_removed_when_not_approved() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-leftover");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = dir.join("data");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        std::fs::write(home.join("hooks.json"), ours_and_user_groups(&command).to_string()).unwrap();
+        assert!(!reconcile_local(&home, &command, true).unwrap());
+        let after = std::fs::read_to_string(home.join("hooks.json")).unwrap();
+        assert!(!after.contains(&command), "the incident's untrusted handler is gone");
+        assert!(after.contains("user-first") && after.contains("user-last"));
+    }
+
+    #[test]
+    fn a_trusted_handler_is_kept_when_enabled() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-keep");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = dir.join("data");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        install_and_trust_local(&home, &data, None).unwrap();
+        let before = std::fs::read(home.join("hooks.json")).unwrap();
+        assert!(reconcile_local(&home, &command, true).unwrap());
+        assert_eq!(std::fs::read(home.join("hooks.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_non_canonical_group_with_our_command_is_never_touched() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-noncanon");
+        let home = dir.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = dir.join("data");
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        let edited = serde_json::json!({"hooks":{"Stop":[{"matcher":"x","hooks":[{"type":"command","command":command,"timeout":5}]}]}}).to_string();
+        std::fs::write(home.join("hooks.json"), &edited).unwrap();
+        assert!(reconcile_local(&home, &command, false).is_err(), "someone else changed our group: report, do not edit");
+        assert_eq!(std::fs::read_to_string(home.join("hooks.json")).unwrap(), edited);
     }
 
 }

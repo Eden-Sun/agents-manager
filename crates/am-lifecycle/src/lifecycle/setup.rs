@@ -1318,17 +1318,31 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
             "codex" => {
                 let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 let legacy = vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)];
+                // 啟動只唯讀判斷信任、不註冊未信任的 handler（#1989）；殘留與 stop_hook=false 的項目由 reconcile 移除（best effort）。
+                let root = crate::hosts::remote_root_for(app.instance().as_deref());
+                let paths = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, remote_codex_paths(env, &conn, &root)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(anyhow::anyhow!("remote Codex home lookup timed out")),
+                };
                 if stop_hook_enabled {
                     // Bounded: a slow or dead host must never delay the bot start; any failure keeps legacy notify.
                     let ready = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, async {
-                        let home = codex_hook_home(env, conn.home().await?)?;
-                        am_base::codex_hook::install_remote(&conn, &home, &crate::hosts::remote_root_for(app.instance().as_deref()), app.instance().as_deref()).await
+                        let (home, _) = paths.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                        am_base::codex_hook::install_remote(&conn, home, &root, app.instance().as_deref()).await
                     }).await {
                         Ok(r) => r,
                         Err(_) => Err(anyhow::anyhow!("remote Codex Stop hook check timed out")),
                     };
+                    if !matches!(ready, Ok(true)) {
+                        if let Ok((home, command)) = &paths {
+                            reconcile_remote_stop_hook(&conn, &project.host, home, command, true).await;
+                        }
+                    }
                     codex_notification_args(legacy, ready)
                 } else {
+                    if let Ok((home, command)) = &paths {
+                        reconcile_remote_stop_hook(&conn, &project.host, home, command, false).await;
+                    }
                     legacy
                 }
             }
@@ -1378,14 +1392,33 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
             let parts = hook_cmd_parts(app, bot, "codex");
             let arr = serde_json::to_string(&parts)?;
             let legacy = vec!["-c".into(), format!("notify={arr}")];
+            let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("Codex home unavailable"))
+                .and_then(|h| codex_hook_home(env, h.to_string_lossy().into_owned()));
+            let command = sh_quote(&app.data_dir().join(am_base::codex_hook::CODEX_HOOK_SH).to_string_lossy());
+            let lock = home.as_deref().ok().map(|h| am_base::codex_hook::home_lock(am_config::LOCAL_HOST, h));
+            let _guard = match &lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             if stop_hook_enabled {
-                let ready = (|| {
-                    let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("Codex home unavailable"))?;
-                    let home = codex_hook_home(env, home.to_string_lossy().into_owned())?;
-                    am_base::codex_hook::install_local(std::path::Path::new(&home), app.data_dir(), app.instance().as_deref())
-                })();
+                let ready = match &home {
+                    Ok(h) => am_base::codex_hook::install_local(std::path::Path::new(h), app.data_dir(), app.instance().as_deref()),
+                    Err(e) => Err(anyhow::anyhow!("{e:#}")),
+                };
+                if !matches!(ready, Ok(true)) {
+                    if let Ok(h) = &home {
+                        if let Err(e) = am_base::codex_hook::reconcile_local(std::path::Path::new(h), &command, true) {
+                            tracing::warn!(error = %e, "could not reconcile the local Codex Stop hook; leaving it as is");
+                        }
+                    }
+                }
                 codex_notification_args(legacy, ready)
             } else {
+                if let Ok(h) = &home {
+                    if let Err(e) = am_base::codex_hook::reconcile_local(std::path::Path::new(h), &command, false) {
+                        tracing::warn!(error = %e, "could not reconcile the local Codex Stop hook; leaving it as is");
+                    }
+                }
                 legacy
             }
         }
@@ -1410,6 +1443,8 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
 }
 /// Upper bound for the remote Stop-hook install/trust check during a bot start (#1989).
 const REMOTE_STOP_HOOK_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+/// 殘留清理要多幾趟 ssh（備份、寫入、讀回）；平常沒有殘留時只有兩次讀取，遠低於這個上限。
+const REMOTE_STOP_HOOK_RECONCILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 fn codex_hook_home(env: &Value, home: String) -> anyhow::Result<String> {
     let path = env.get("CODEX_HOME").and_then(Value::as_str).map(str::trim)
@@ -1419,6 +1454,32 @@ fn codex_hook_home(env: &Value, home: String) -> anyhow::Result<String> {
         anyhow::bail!("relative CODEX_HOME cannot prove the Stop hook trust source");
     }
     Ok(path)
+}
+
+/// 遠端的 CODEX_HOME 與 dispatcher 的絕對路徑（與 `install_remote` 寫入的位置一致）。
+async fn remote_codex_paths(env: &Value, conn: &HostConn, root: &str) -> anyhow::Result<(String, String)> {
+    let host_home = conn.home().await?;
+    let codex_home = codex_hook_home(env, host_home.clone())?;
+    let command = sh_quote(&format!("{}/{}/{}", host_home.trim_end_matches('/'), root, am_base::codex_hook::CODEX_HOOK_SH));
+    Ok((codex_home, command))
+}
+
+/// 遠端 CODEX_HOME 與設定對齊（#1989）：同一把 host＋CODEX_HOME 鎖底下，超時或失敗只記 warn、不擋啟動。
+/// 回 `true` 表示我們的 handler 已信任並保留。
+async fn reconcile_remote_stop_hook(conn: &HostConn, host: &str, codex_home: &str, command: &str, keep_trusted: bool) -> bool {
+    let lock = am_base::codex_hook::home_lock(host, codex_home);
+    let _guard = lock.lock().await;
+    match tokio::time::timeout(REMOTE_STOP_HOOK_RECONCILE_BUDGET, am_base::codex_hook::reconcile_remote(conn, codex_home, command, keep_trusted)).await {
+        Ok(Ok(kept)) => kept,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not reconcile the remote Codex Stop hook; leaving it as is");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("remote Codex Stop hook reconcile timed out; leaving it as is");
+            false
+        }
+    }
 }
 
 fn codex_notification_args(legacy: Vec<String>, trusted: anyhow::Result<bool>) -> Vec<String> {
@@ -4690,5 +4751,137 @@ mod codex_stop_args_tests {
         env.app.cfg.update(|cfg| { cfg.codex.stop_hook = true; Ok(()) }).await.unwrap();
         bot.inject_hooks = 0;
         assert_eq!(injected_args(&env.app, &bot, &project, &pane_env).await.unwrap(), permission_args("codex", bot.auto_approve != 0));
+    }
+
+    fn leftover_hooks(command: &str) -> Value {
+        json!({"hooks":{"Stop":[
+            {"hooks":[{"type":"command","command":"user-first","timeout":5}]},
+            {"hooks":[{"type":"command","command":command,"timeout":5}]},
+            {"hooks":[{"type":"command","command":"user-last","timeout":5}]}
+        ]}})
+    }
+
+    fn stop_commands(hooks_path: &std::path::Path) -> Vec<Vec<String>> {
+        let v: Value = serde_json::from_slice(&std::fs::read(hooks_path).unwrap()).unwrap();
+        v["hooks"]["Stop"].as_array().unwrap().iter()
+            .map(|g| g["hooks"].as_array().unwrap().iter().map(|h| h["command"].as_str().unwrap().to_owned()).collect())
+            .collect()
+    }
+
+    fn backups(dir: &std::path::Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).count()
+    }
+
+    /// 事故現場（#1989）：先前版本留下未信任的 handler。下一次啟動（開關開或關）在 codex 起來之前把它拿掉，
+    /// 第三方 group 與它們的信任鍵留在原位。
+    #[tokio::test]
+    async fn a_start_removes_our_untrusted_leftover_and_keeps_third_party_hooks_in_place() {
+        for enabled in [true, false] {
+            let env = tt::env().await;
+            let mut bot = tt::claude_bot(&env.app, &env.project_id, "stop-hook-leftover").await;
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(env.app.db()).await.unwrap();
+            bot.kind = "codex".into();
+            let project = db::project(env.app.db(), &env.project_id).await.unwrap().unwrap();
+            let home = env.dir.join("codex-identity");
+            let bin = env.dir.join("codex-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            tt::write_exec(&bin.join("codex"), "#!/bin/sh\nprintf 'codex-cli 0.169.0\\n'\n");
+            let command = am_base::hosts::sh_quote(&env.app.data_dir.join("codex-hook.sh").to_string_lossy());
+            let hooks_path = home.join("hooks.json");
+            std::fs::write(&hooks_path, leftover_hooks(&command).to_string()).unwrap();
+            let third_party = format!("[hooks.state.{:?}]\ntrusted_hash=\"sha256:user-last\"\n", format!("{}:stop:2:0", hooks_path.display()));
+            std::fs::write(home.join("config.toml"), &third_party).unwrap();
+            env.app.cfg.update(|cfg| { cfg.codex.stop_hook = enabled; Ok(()) }).await.unwrap();
+            let args = injected_args(&env.app, &bot, &project, &json!({"CODEX_HOME":home, "PATH":bin})).await.unwrap();
+            assert!(!args.contains(&"notify=[]".into()), "untrusted: legacy notify stays (enabled={enabled})");
+            assert_eq!(stop_commands(&hooks_path), vec![vec!["user-first".to_string()], vec![], vec!["user-last".to_string()]], "enabled={enabled}");
+            assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), third_party, "third-party trust is untouched");
+            assert_eq!(backups(&home, "hooks.json.am-bak-"), 1, "hooks.json is backed up before the write");
+            assert_eq!(backups(&home, "config.toml.am-bak-"), 0, "config.toml is not rewritten when we have no entry in it");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_keeps_our_trusted_handler_when_enabled_and_removes_it_with_its_trust_when_disabled() {
+        let env = tt::env().await;
+        let mut bot = tt::claude_bot(&env.app, &env.project_id, "stop-hook-trusted").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(env.app.db()).await.unwrap();
+        bot.kind = "codex".into();
+        let project = db::project(env.app.db(), &env.project_id).await.unwrap().unwrap();
+        let home = env.dir.join("codex-identity");
+        let bin = env.dir.join("codex-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        tt::write_exec(&bin.join("codex"), "#!/bin/sh\nprintf 'codex-cli 0.169.0\\n'\n");
+        let pane_env = json!({"CODEX_HOME":home, "PATH":bin});
+        am_base::codex_hook::install_and_trust_local(&home, &env.app.data_dir, env.app.instance().as_deref()).unwrap();
+        let hooks_path = home.join("hooks.json");
+        let (hooks_before, config_before) = (std::fs::read(&hooks_path).unwrap(), std::fs::read(home.join("config.toml")).unwrap());
+        env.app.cfg.update(|cfg| { cfg.codex.stop_hook = true; Ok(()) }).await.unwrap();
+        assert!(injected_args(&env.app, &bot, &project, &pane_env).await.unwrap().contains(&"notify=[]".into()));
+        assert_eq!(std::fs::read(&hooks_path).unwrap(), hooks_before, "trusted: not touched");
+        assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), config_before);
+        assert_eq!(backups(&home, "hooks.json.am-bak-"), 0);
+        env.app.cfg.update(|cfg| { cfg.codex.stop_hook = false; Ok(()) }).await.unwrap();
+        assert!(!injected_args(&env.app, &bot, &project, &pane_env).await.unwrap().contains(&"notify=[]".into()));
+        assert!(stop_commands(&hooks_path).is_empty(), "disabled: our handler is unregistered");
+        assert!(!std::fs::read_to_string(home.join("config.toml")).unwrap().contains("trusted_hash"), "and so is its trust entry");
+        assert_eq!(backups(&home, "hooks.json.am-bak-"), 1);
+    }
+
+    async fn fake_remote(env: &tt::Env, home: &std::path::Path) -> (std::sync::Arc<HostConn>, String) {
+        let host = format!("codex-rem-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.clone(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() }).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        let fake_home = home.to_path_buf();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &fake_home).output()?;
+            if !out.status.success() {
+                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        (conn, host)
+    }
+
+    /// 遠端路徑（m4p 的現場）：未信任的殘留被移除，第三方 group 與信任鍵不位移；已信任的不動；關掉開關才移除。
+    #[tokio::test]
+    async fn the_remote_reconcile_removes_only_our_untrusted_leftover() {
+        let env = tt::env().await;
+        let remote_home = tt::scratch_dir("am-remote-codex-leftover");
+        let (conn, host) = fake_remote(&env, &remote_home).await;
+        let root = crate::hosts::remote_root_for(env.app.instance().as_deref());
+        let (codex_home, command) = remote_codex_paths(&json!({}), &conn, &root).await.unwrap();
+        assert_eq!(codex_home, format!("{}/.codex", remote_home.display()));
+        let dir = std::path::PathBuf::from(&codex_home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hooks_path = dir.join("hooks.json");
+        std::fs::write(&hooks_path, leftover_hooks(&command).to_string()).unwrap();
+        let third_party = format!("model = \"x\"\n\n[hooks.state.{:?}]\ntrusted_hash=\"sha256:user-last\"\n", format!("{}:stop:2:0", hooks_path.display()));
+        std::fs::write(dir.join("config.toml"), &third_party).unwrap();
+
+        assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, true).await);
+        assert_eq!(stop_commands(&hooks_path), vec![vec!["user-first".to_string()], vec![], vec!["user-last".to_string()]]);
+        assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), third_party);
+        assert_eq!(backups(&dir, "hooks.json.am-bak-"), 1);
+        assert_eq!(backups(&dir, "config.toml.am-bak-"), 0);
+        // 沒有我們的項目：再跑一次什麼都不寫。
+        let settled = std::fs::read(&hooks_path).unwrap();
+        assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, false).await);
+        assert_eq!(std::fs::read(&hooks_path).unwrap(), settled);
+        assert_eq!(backups(&dir, "hooks.json.am-bak-"), 1);
+
+        // 使用者確認後安裝並信任：開關開著時保留。
+        am_base::codex_hook::install_and_trust_remote(&conn, &codex_home, &root, env.app.instance().as_deref()).await.unwrap();
+        let trusted = std::fs::read(&hooks_path).unwrap();
+        assert!(reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, true).await, "trusted: kept");
+        assert_eq!(std::fs::read(&hooks_path).unwrap(), trusted);
+        // 開關關掉：handler 與它自己的信任項一起移除，第三方的信任還在。
+        assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, false).await);
+        let after = std::fs::read_to_string(&hooks_path).unwrap();
+        assert!(!after.contains(&command) && after.contains("user-first") && after.contains("user-last"));
+        let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(cfg.contains("sha256:user-last") && cfg.starts_with("model = \"x\"\n"), "{cfg:?}");
+        assert!(!cfg.contains(&am_base::codex_hook::stop_hook_trust_hash(&command)), "{cfg:?}");
     }
 }

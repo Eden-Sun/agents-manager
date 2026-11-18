@@ -123,15 +123,6 @@ pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Exten
     Ok(Json(Report { enabled: app.cfg.get().await.codex.stop_hook, entries }))
 }
 
-type TrustLocks = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
-
-/// 每個 (host, CODEX_HOME) 一把鎖；寫入信任與安裝 handler 只在這把鎖底下做。
-fn trust_lock(host: &str, codex_home: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<TrustLocks> = std::sync::OnceLock::new();
-    let mut map = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(format!("{host}\n{codex_home}")).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
-}
-
 pub(crate) async fn post_trust(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
@@ -145,7 +136,7 @@ pub(crate) async fn post_trust(
     }
     let t = resolve(&app, &body.host, body.identity.as_deref()).await?;
     // 同一台主機、同一個 CODEX_HOME 的寫入序列化：兩次按鈕不會互相覆蓋 config.toml／hooks.json。
-    let lock = trust_lock(&t.host, &t.codex_home);
+    let lock = codex_hook::home_lock(&t.host, &t.codex_home);
     let _guard = lock.lock().await;
     let instance = app.instance();
     let wrote = if t.host == am_config::LOCAL_HOST {
