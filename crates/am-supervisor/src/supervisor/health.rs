@@ -988,10 +988,12 @@ mod probe_cache_tests {
         fn audit_write(&self, _at: &'static std::panic::Location<'static>, _path: &Path, _old: &ConfigFile, _new: &ConfigFile) {}
     }
 
+    type ReleaseTriageProbeFn = Arc<dyn Fn(&ReleaseTriageCfg) -> Option<Value> + Send + Sync>;
+
     struct MockApp {
         dir: PathBuf,
         store: ConfigStore,
-        probe_fn: Arc<dyn Fn(&ReleaseTriageCfg) -> Option<Value> + Send + Sync>,
+        probe_fn: ReleaseTriageProbeFn,
     }
 
     impl DataDir for MockApp {
@@ -1010,8 +1012,8 @@ mod probe_cache_tests {
         async fn pane_shows_login_problem(&self, _run: &crate::db::Run) -> Option<bool> {
             None
         }
-        fn process_dump<'a>(&'a self, _host: &'a str) -> impl std::future::Future<Output = anyhow::Result<String>> + Send + 'a {
-            async { Ok(String::new()) }
+        async fn process_dump(&self, _host: &str) -> anyhow::Result<String> {
+            Ok(String::new())
         }
         async fn identity_for_host(&self, _host: &str, _name: &str) -> Option<crate::config::IdentityCfg> {
             None
@@ -1038,8 +1040,8 @@ mod probe_cache_tests {
             Fut: std::future::Future<Output = ()> + Send + 'static,
         {
         }
-        fn is_share_bot<'a>(&'a self, _bot_id: &'a str) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send + 'a {
-            async { Ok(false) }
+        async fn is_share_bot(&self, _bot_id: &str) -> anyhow::Result<bool> {
+            Ok(false)
         }
     }
 

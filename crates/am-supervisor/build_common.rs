@@ -15,7 +15,7 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn dirty_from_status(status: Option<&str>) -> bool {
-    status.map_or(true, |s| !s.is_empty())
+    status.is_none_or(|s| !s.is_empty())
 }
 
 /// 讀不到 status 一律 fail closed（#884）。例外：dev／test 在沒有 `.git` 的來源（remote-cargo 的 shared 排除了 `.git`）

@@ -146,7 +146,7 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 ///
 /// 啟動本身失敗時意圖照樣留著：交給看門狗的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded
 /// （999480e 對協調者的決定，這裡跟它一致）。
-pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + Clone + Send + Sync + 'static)) -> Result<(), LcError> {
+pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + Clone + 'static)) -> Result<(), LcError> {
     // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
     // directly on Opus instead of briefly opening the wrong session.
     // 大 future 包成 Box（#1461，理由見 runners::supervisor::api::post_start）。
@@ -187,7 +187,7 @@ fn persist_intent_failed<E: std::fmt::Display>(e: E) -> LcError {
 ///
 /// 這裡**不動** `desired_running`：看門狗與換模型重啟都走這條，寫意圖會把看門狗的重試次數歸零
 /// （`set_desired_running` 的語意是「人做了新決定」），有界重試就變成永遠重試。
-pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ports::TurnOps + ports::ControllerRuntime + ports::QuotaOps + ports::JudgeOps + Clone + Send + Sync + 'static), detail: Option<&str>) -> Result<(), LcError> {
+pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ports::TurnOps + ports::ControllerRuntime + ports::QuotaOps + ports::JudgeOps + Clone + 'static), detail: Option<&str>) -> Result<(), LcError> {
     let bot = manager_bot(app.db())
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;

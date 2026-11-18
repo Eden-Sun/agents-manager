@@ -186,12 +186,14 @@ async fn reassign_one(db: &SqlitePool, e: &store::InboxEvent, reason: &str, now:
     Ok(n > 0)
 }
 
+type StalledApprovalRow = (String, String, Option<String>, String, Option<String>);
+
 /// 開著超過 30 分鐘、還沒有人裁示的核准。給 `incidents::observe` 用。
 ///
 /// 不看在誰手上：改派之後巡檢也沒登入時，要喊的是人。`wait_since` 是被取代時接過來的等待起點，
 /// 有就用它——重申請接續的等待不能因為換了一筆 id 就從零開始算。
 pub async fn stalled_approvals(db: &SqlitePool, after_secs: i64) -> anyhow::Result<Vec<(String, i64, String)>> {
-    let rows: Vec<(String, String, Option<String>, String, Option<String>)> =
+    let rows: Vec<StalledApprovalRow> =
         sqlx::query_as("SELECT id, created_at, wait_since, requester, expires_at FROM supervisor_approvals WHERE supervisor_id=? AND status='pending'")
             .bind(store::SUPERVISOR_ID)
             .fetch_all(db)

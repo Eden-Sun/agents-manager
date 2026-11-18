@@ -513,7 +513,7 @@ async fn delivery_does_not_close_an_event_but_an_ack_does() {
     let p = pool().await;
     get_or_init(&p).await.unwrap();
     let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
-    mark_delivered_inbox(&p, &[id.clone()], "turn-9", "ok").await.unwrap();
+    mark_delivered_inbox(&p, std::slice::from_ref(&id), "turn-9", "ok").await.unwrap();
     assert!(pending_inbox(&p).await.unwrap().is_empty(), "delivered events are not offered again");
     assert_eq!(pending_count(&p).await.unwrap(), 1, "but they are still outstanding");
     assert!(ack_inbox(&p, &id).await.unwrap());
@@ -1154,7 +1154,7 @@ async fn an_acknowledgement_never_goes_backwards() {
     get_or_init(&p).await.unwrap();
     let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
     assert!(ack_inbox(&p, &id).await.unwrap());
-    mark_delivered_inbox(&p, &[id.clone()], "turn-1", "ok").await.unwrap();
+    mark_delivered_inbox(&p, std::slice::from_ref(&id), "turn-1", "ok").await.unwrap();
     let e = inbox(&p, 10).await.unwrap().into_iter().find(|e| e.id == id).unwrap();
     assert_eq!(e.state, "handled", "the late delivery write must not un-ack it");
     assert_eq!(open_inbox_count(&p).await.unwrap(), 0);

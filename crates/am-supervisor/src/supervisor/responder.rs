@@ -465,7 +465,7 @@ fn watched(row: &roles::RoleRow, quota_unknown_retry: bool) -> watchdog::Watched
     }
 }
 
-pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + TurnOps + ControllerRuntime + QuotaOps + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + Clone + Send + Sync + 'static)) {
+pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + TurnOps + ControllerRuntime + QuotaOps + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + Clone + 'static)) {
     let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
     let Ok(bot) = roles::responder_bot(app.db()).await else { return };
     let Some(bot) = bot else {

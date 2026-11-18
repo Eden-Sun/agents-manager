@@ -35,8 +35,10 @@ pub const SLOW_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// 整拍的 key（`_` 開頭，排序時跟各段分得開）。
 pub const TICK_TOTAL: &str = "tick:_total";
 
-fn samples() -> &'static Mutex<HashMap<String, VecDeque<(Instant, u64)>>> {
-    static S: OnceLock<Mutex<HashMap<String, VecDeque<(Instant, u64)>>>> = OnceLock::new();
+type SamplesMap = HashMap<String, VecDeque<(Instant, u64)>>;
+
+fn samples() -> &'static Mutex<SamplesMap> {
+    static S: OnceLock<Mutex<SamplesMap>> = OnceLock::new();
     S.get_or_init(Default::default)
 }
 

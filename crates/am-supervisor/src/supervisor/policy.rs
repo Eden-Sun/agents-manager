@@ -57,7 +57,7 @@ fn reset_passed(w: &Window, now: DateTime<Utc>) -> bool {
 
 /// Fable 那一格**還說得出話**的讀數（issue #475）：`resets_at` 是 `None` 而且讀數比窗長還舊就沒有。
 /// 沒有讀數時「剩多少」不能當 0 也不能當 100——所以 `decide` 那邊回 `Keep`（維持現狀），不切換。
-fn usable_fable<'a>(q: &'a Quota, now: DateTime<Utc>) -> Option<&'a Window> {
+fn usable_fable(q: &Quota, now: DateTime<Utc>) -> Option<&Window> {
     q.usable_window(Bucket::Fable, now)
 }
 

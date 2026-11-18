@@ -1297,7 +1297,7 @@ async fn handled_notify_completed_after_failures(
     if failed_turns.is_empty() {
         return false;
     }
-    let ids = std::iter::repeat("?").take(failed_turns.len()).collect::<Vec<_>>().join(",");
+    let ids = std::iter::repeat_n("?", failed_turns.len()).collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT EXISTS (
             SELECT 1 FROM supervisor_inbox i JOIN turns t ON t.id=i.notify_turn_id
@@ -1552,7 +1552,7 @@ pub async fn quota_reset_at(app: &impl crate::supervisor::ports::QuotaOps, ident
 }
 
 /// Loop scheduling and startup adapters live in `runners::supervisor::runtime`.
-
+///
 /// Record consecutive role-classification failures without depending on hook reception storage.
 pub fn note_classify_result(app: &impl ClassifyFailureState, result: anyhow::Result<usize>) {
     use std::sync::atomic::Ordering;

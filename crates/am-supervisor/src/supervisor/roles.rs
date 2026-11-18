@@ -316,13 +316,15 @@ async fn repeats_recent_wake(pool: &SqlitePool, id: &str, kind: &str, payload: &
     Ok(hit.is_some())
 }
 
+type UnclassifiedInboxRow = (String, String, String, Option<String>, String, Option<String>);
+
 /// 把還沒分類的 inbox 列補上角色與喚醒旗標。寫入端（store、mission、bulk_restart）都不用改，
 /// 路由只存在這一個地方。
 ///
 /// 路由表算出「叫醒」之後還要過一關重複退避（[`repeat_backoff_kind`]）：由舊到新逐筆處理，前一筆寫完 `wake`
 /// 後一筆才查，所以同一批裡的同一件事也只有最舊那筆叫醒。
 pub async fn classify(pool: &SqlitePool) -> Result<usize> {
-    let rows: Vec<(String, String, String, Option<String>, String, Option<String>)> = sqlx::query_as(
+    let rows: Vec<UnclassifiedInboxRow> = sqlx::query_as(
         "SELECT i.id, i.kind, i.payload_json, a.review_role, i.created_at, i.bot_id
            FROM supervisor_inbox i LEFT JOIN supervisor_assignments a ON a.id = i.assignment_id
           WHERE i.role IS NULL
@@ -1315,7 +1317,7 @@ mod tests {
 
         // 原收件者才 ack 得動；協調者送不進去也結不掉。
         let id: String = sqlx::query_scalar("SELECT id FROM supervisor_inbox WHERE event_key='old-recovered'").fetch_one(&p).await.unwrap();
-        assert_eq!(mark_delivered(&p, &[id.clone()], Role::Responder, "t-new", "ok").await.unwrap(), 0);
+        assert_eq!(mark_delivered(&p, std::slice::from_ref(&id), Role::Responder, "t-new", "ok").await.unwrap(), 0);
         assert_eq!(ack(&p, &id, Role::Responder, true).await.unwrap(), AckOutcome::ClaimedByOther("patrol".into()));
         assert_eq!(ack(&p, &id, Role::Patrol, true).await.unwrap(), AckOutcome::Acked);
     }

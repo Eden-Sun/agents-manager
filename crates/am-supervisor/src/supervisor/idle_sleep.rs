@@ -826,7 +826,7 @@ where
 
 /// 控制迴圈每一拍呼叫一次。真正的巡邏最多每分鐘一次，而且丟到背景跑——一顆 `stop_bot` 最久要等
 /// agent 十秒，二十顆就是三分多鐘，同步做完會把 dispatch／notify 這些也一起卡住。
-pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown + crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps + Clone + Send + Sync + 'static)) {
+pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown + crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps + Clone + 'static)) {
     if cfg!(test) || app.shutdown().is_cancelled() {
         return;
     }
