@@ -921,6 +921,12 @@ export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] a
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 /** openai-api 的強度（D2b-2：none/low/medium/high/xhigh/max，預設 medium）。 */
 export const OPENAI_API_EFFORT_OPTIONS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+/// astra／sol 的 API 拒絕 `none`（官方模型頁）；luna 仍收 none。與 daemon `OPENAI_NO_NONE_EFFORTS` 同一份。
+export const OPENAI_API_NO_NONE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+/** openai-api 某模型可用的 effort（依模型，不是 kind 共用）。 */
+export function openAiApiEffortsFor(model: string | null | undefined): readonly string[] {
+  return model === 'gpt-6-luna' ? OPENAI_API_EFFORT_OPTIONS : OPENAI_API_NO_NONE_EFFORT_OPTIONS
+}
 
 /** 不翻譯，用原廠的字（只首字母大寫），才對得上 CLI 畫面與文件。 */
 export function effortLabel(level: string): string {
@@ -944,8 +950,8 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
   // claude-api：與 daemon 的核准模型／價格清單一致，Opus 仍是預設。
   'claude-api': ['claude-opus-5-5', 'claude-fable-5-2'],
-  // openai-api：daemon 核准清單只有 gpt-6-luna（D2b-2）。
-  'openai-api': ['gpt-6-luna'],
+  // openai-api：核准清單（預設 astra，與 daemon `OPENAI_API_BOT_MODELS` 同一份）。
+  'openai-api': ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-luna'],
   // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）

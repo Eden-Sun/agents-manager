@@ -42,7 +42,7 @@ async fn compact_is_unsupported_for_an_openai_api_bot_both_as_a_prompt_and_as_th
     assert!(!crate::lifecycle::slash::compact_slash_command("openai-api").is_some());
 }
 
-/// 模型清單不問 CLI、不打 `/v1/models`：固定是本機核准的 gpt-6-luna，effort 照 luna 的清單、預設 medium、沒有 fast。
+/// 模型清單不問 CLI、不打 `/v1/models`：本機核准的三個（astra 預設、sol、luna）；effort 依模型（astra／sol 不收 none）、預設 medium、沒有 fast。
 #[tokio::test]
 async fn the_openai_api_model_list_is_the_locally_approved_one() {
     let env = crate::testing::env().await;
@@ -50,10 +50,13 @@ async fn the_openai_api_model_list_is_the_locally_approved_one() {
     let Json(models) = get_models(State(env.app.clone()), Extension(RequestPrincipal::User), Query(q)).await.unwrap();
     assert_eq!((models["kind"].clone(), models["source"].clone()), (json!("openai-api"), json!("static")));
     let list = models["models"].as_array().unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!((list[0]["id"].clone(), list[0]["is_default"].clone(), list[0]["default_effort"].clone()), (json!("gpt-6-luna"), json!(true), json!("medium")));
-    assert_eq!(list[0]["efforts"], json!(["none", "low", "medium", "high", "xhigh", "max"]));
-    assert_eq!(list[0]["service_tiers"], json!([]));
+    let ids: Vec<&str> = list.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"]);
+    assert_eq!((list[0]["is_default"].clone(), list[0]["default_effort"].clone()), (json!(true), json!("medium")));
+    assert_eq!(list[0]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]), "astra 不收 none");
+    assert_eq!(list[1]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]), "sol 不收 none");
+    assert_eq!(list[2]["efforts"], json!(["none", "low", "medium", "high", "xhigh", "max"]), "luna 仍收 none");
+    assert!(list.iter().all(|m| m["service_tiers"] == json!([])));
     // claude-api 的清單不變。
     let q = ModelsQuery { kind: "claude-api".into(), host: None, refresh: None, identity: None };
     let Json(claude) = get_models(State(env.app.clone()), Extension(RequestPrincipal::User), Query(q)).await.unwrap();

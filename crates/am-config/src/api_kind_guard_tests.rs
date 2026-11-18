@@ -28,12 +28,12 @@ fn is_api_kind_and_api_provider_know_both_api_kinds_and_nothing_else() {
     assert!(!crate::KINDS.contains(&"claude-api") && !crate::KINDS.contains(&"openai-api"));
     assert!(!crate::valid_kind("openai-api"));
     assert!(crate::bot_kinds_list().ends_with("claude-api, openai-api"));
-    // 模型與 effort 各家各的：openai-api 只收 gpt-6-luna、effort 照 luna 的清單（預設 medium）。
+    // 模型與 effort 各家各的：openai-api 收 astra（預設）／sol／luna，effort 依模型（astra／sol 不收 none）。
     assert!(crate::api_bot_model_supported_for("openai-api", "gpt-6-luna") && !crate::api_bot_model_supported_for("openai-api", "claude-opus-5-5"));
     assert!(crate::api_bot_model_supported_for("claude-api", "claude-opus-5-5") && !crate::api_bot_model_supported_for("claude-api", "gpt-6-luna"));
     assert!(!crate::api_bot_model_supported_for("codex", "gpt-6-luna"));
     assert_eq!(crate::efforts_for_kind("openai-api"), ["none", "low", "medium", "high", "xhigh", "max"]);
-    assert_eq!(crate::api_bot_defaults("openai-api"), Some(("gpt-6-luna", "medium")));
+    assert_eq!(crate::api_bot_defaults("openai-api"), Some(("gpt-6.2-astra", "medium")));
     assert_eq!(crate::api_bot_defaults("claude-api"), Some(("claude-opus-5-5", "high")));
     assert_eq!(crate::api_bot_defaults("claude"), None);
 }

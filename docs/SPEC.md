@@ -6080,3 +6080,5 @@ expert 跨專案 relay 拒絕，例外：別的專案可送給 expert 專案的�
 - 對話圖片與手機 outbox 共用全螢幕檢視器：點圖切換整張／原尺寸可捲動，點背景、Esc、手機下滑或返回關閉；同則訊息／托盤的已載入圖片可左右切換，原圖與下載留在次要工具列，關閉恢復焦點與捲動位置。
 
 停用成員的 relay 拒絕與延遲派工失敗通知須包含成員名稱及側欄重新啟用指示；API 的 `reason` 保持 `member_disabled`。
+
+**openai-api 模型擴充（2026-11-19，使用者指示）**：bot 的核准模型是 `gpt-6.2-astra`（預設）、`gpt-6.2-sol`、`gpt-6-luna`（`am_config::OPENAI_API_BOT_MODELS`）。價表各自帶日期並有 fixture 釘住（官方模型頁原文，標準 tier；12 小時寫入輸入×2.5；輸入超過 272K 整個請求輸入與快取 ×2、輸出 ×1.5）。effort 依模型：astra／sol 的 API 拒絕 `none`，建立或改模型／強度時組合不合法即 400 `api_bot_effort_unsupported_for_model`。**翻譯用途不變**（`OPENAI_USE_MODELS` 只有 luna）；翻譯組設 astra／sol 或拿它當重試模型一律拒絕。

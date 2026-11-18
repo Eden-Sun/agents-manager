@@ -2531,6 +2531,15 @@ fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
             return Err(bad("api_bot_model_unsupported"));
         }
     }
+    // openai-api：effort 依模型（astra／sol 不收 none），沒給模型就看預設模型。
+    if b.kind == crate::config::OPENAI_API_KIND {
+        if let Some(e) = b.effort.as_deref().map(|e| e.trim().to_ascii_lowercase()).filter(|e| !e.is_empty()) {
+            let model = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::OPENAI_API_BOT_MODEL);
+            if !crate::config::openai_api_effort_supported(model, &e) {
+                return Err(bad("api_bot_effort_unsupported_for_model"));
+            }
+        }
+    }
     // openai-api 沒有 fast（Claude 的計價選項）。
     if b.kind == crate::config::OPENAI_API_KIND && b.fast {
         return Err(bad("api_bot_cli_fields_unsupported"));
@@ -3488,6 +3497,26 @@ async fn patch_bot(
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
     };
+    // openai-api：改模型或強度時，生效中的（模型，強度）組合必須在該模型的清單裡（astra／sol 不收 none）。
+    if b.model.is_some() || effort.is_some() {
+        let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        if current.kind == crate::config::OPENAI_API_KIND {
+            let model = match &b.model {
+                Some(Some(m)) => m.clone(),
+                _ => current.model.clone().unwrap_or_else(|| crate::config::OPENAI_API_BOT_MODEL.to_string()),
+            };
+            let eff = match &effort {
+                Some(Some(e)) => Some(e.clone()),
+                Some(None) => None,
+                None => current.effort.clone(),
+            };
+            if let Some(e) = eff {
+                if !crate::config::openai_api_effort_supported(&model, &e) {
+                    return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "api_bot_effort_unsupported_for_model"})));
+                }
+            }
+        }
+    }
     // 執行期覆寫：看得到 kind／model（PATCH 帶的 model 優先，否則用現在存的），用同一套 context 視窗與 TTL 規則驗證，存正規化後的物件。
     if let Some(Some(ro)) = &b.runtime_override {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -5058,10 +5087,13 @@ fn api_bot_models() -> Value {
 
 /// openai-api 的模型清單：本機核准的那幾個（有 harness 與價表），不去問 `/v1/models`。
 fn openai_api_bot_models() -> Value {
-    let models: Vec<_> = crate::config::OPENAI_USE_MODELS.iter().map(|model| json!({
-        "id": model, "display_name": "GPT-6 Luna", "description": "", "is_default": *model == crate::config::OPENAI_API_BOT_MODEL,
+    let models: Vec<_> = crate::config::OPENAI_API_BOT_MODELS.iter().map(|model| json!({
+        "id": model,
+        "display_name": match *model { "gpt-6.2-astra" => "GPT-6.2 Astra", "gpt-6.2-sol" => "GPT-6.2 Sol", _ => "GPT-6 Luna" },
+        "description": "", "is_default": *model == crate::config::OPENAI_API_BOT_MODEL,
         "default_effort": crate::config::OPENAI_API_BOT_DEFAULT_EFFORT,
-        "efforts": crate::config::efforts_for_kind(crate::config::OPENAI_API_KIND),
+        // effort 依模型：astra／sol 不收 none（官方模型頁）。
+        "efforts": if *model == "gpt-6-luna" { crate::config::OPENAI_USE_EFFORTS } else { crate::config::OPENAI_NO_NONE_EFFORTS },
         "service_tiers": [],
     })).collect();
     json!({"kind":crate::config::OPENAI_API_KIND,"host":LOCAL_HOST,"source":"static","fetched_at":db::now(),"models":models})

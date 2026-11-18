@@ -450,20 +450,48 @@ fn usd_str_to_micro(s: &str) -> u64 {
 
 #[test]
 fn the_price_table_matches_the_dated_fixture() {
-    let fixture: Value = serde_json::from_str(include_str!("fixtures/gpt-6-luna-pricing-2026-11-18.json")).unwrap();
-    let p = &fixture["per_million_tokens_usd"];
-    let t = price_table("gpt-6-luna").expect("luna 有價");
-    assert_eq!(t.model, fixture["model"].as_str().unwrap());
-    assert_eq!(t.effective_date, fixture["effective_date"].as_str().unwrap());
-    assert_eq!(t.input, usd_str_to_micro(p["input"].as_str().unwrap()));
-    assert_eq!(t.cache_read, usd_str_to_micro(p["cache_read"].as_str().unwrap()));
-    assert_eq!(t.cache_write, usd_str_to_micro(p["cache_write_default"].as_str().unwrap()));
-    assert_eq!(t.output, usd_str_to_micro(p["output"].as_str().unwrap()));
-    assert_eq!((t.input, t.cache_read, t.cache_write, t.output), (100_000, 10_000, 125_000, 500_000));
-    assert_eq!(t.cache_write_12h, usd_str_to_micro(p["cache_write_12h"].as_str().unwrap()));
-    assert_eq!(t.cache_write_12h * 2, t.input * 5, "12 小時寫入＝輸入價 ×2.5");
-    assert_eq!(Some(t.long_context_over), fixture["long_context"]["over_input_tokens"].as_u64());
+    // 三個核准模型各一份 fixture（來源是官方模型頁）；表裡的每個數字都要跟它對得上。
+    for (model, raw) in [
+        ("gpt-6-luna", include_str!("fixtures/gpt-6-luna-pricing-2026-11-18.json")),
+        ("gpt-6.2-astra", include_str!("fixtures/gpt-6.2-astra-pricing-2026-11-19.json")),
+        ("gpt-6.2-sol", include_str!("fixtures/gpt-6.2-sol-pricing-2026-11-19.json")),
+    ] {
+        let fixture: Value = serde_json::from_str(raw).unwrap();
+        let p = &fixture["per_million_tokens_usd"];
+        let t = price_table(model).unwrap_or_else(|| panic!("{model} 有價"));
+        assert_eq!(t.model, fixture["model"].as_str().unwrap());
+        assert_eq!(t.effective_date, fixture["effective_date"].as_str().unwrap());
+        assert_eq!(t.input, usd_str_to_micro(p["input"].as_str().unwrap()), "{model} input");
+        assert_eq!(t.cache_read, usd_str_to_micro(p["cache_read"].as_str().unwrap()), "{model} cache_read");
+        assert_eq!(t.cache_write, usd_str_to_micro(p["cache_write_default"].as_str().unwrap()), "{model} cache_write");
+        assert_eq!(t.cache_write_12h, usd_str_to_micro(p["cache_write_12h"].as_str().unwrap()), "{model} cache_write_12h");
+        assert_eq!(t.output, usd_str_to_micro(p["output"].as_str().unwrap()), "{model} output");
+        assert_eq!(t.cache_write_12h * 2, t.input * 5, "{model}：12 小時寫入＝輸入價 ×2.5");
+        assert_eq!(Some(t.long_context_over), fixture["long_context"]["over_input_tokens"].as_u64());
+        if let Some(w) = fixture["context_window"].as_u64() {
+            assert_eq!(t.context_window, w);
+        }
+        assert_eq!(t.context_window, 1_050_000, "{model} context window");
+    }
+    assert_eq!(price_table("gpt-6-luna").map(|t| (t.input, t.cache_read, t.cache_write, t.output)), Some((100_000, 10_000, 125_000, 500_000)));
+    assert_eq!(price_table("gpt-6.2-astra").map(|t| (t.input, t.cache_read, t.cache_write, t.output)), Some((8_000_000, 400_000, 10_000_000, 40_000_000)));
+    assert_eq!(price_table("gpt-6.2-sol").map(|t| (t.input, t.cache_read, t.cache_write, t.output)), Some((2_000_000, 100_000, 2_500_000, 10_000_000)));
     assert!(price_table("gpt-unknown").is_none(), "缺價＝找不到，呼叫端在 HTTP 前拒絕");
+}
+
+/// astra／sol 的精確結算（微美元）：短文、長文（輸入超過 272K，輸入與快取 ×2、輸出 ×1.5）、12 小時寫入。
+#[test]
+fn astra_and_sol_settle_to_the_exact_micro_dollar() {
+    let astra = price_table("gpt-6.2-astra").unwrap();
+    let sol = price_table("gpt-6.2-sol").unwrap();
+    let short = Usage { input_tokens: 1000, cached_tokens: 0, cache_write_tokens: 0, cache_write_12h_tokens: 0, output_tokens: 100, reasoning_tokens: 0 };
+    assert_eq!(cost_microusd(astra, &short), Some(12_000), "1000×$8＋100×$40 = $0.012");
+    let long = Usage { input_tokens: 300_000, cached_tokens: 100_000, cache_write_tokens: 0, cache_write_12h_tokens: 0, output_tokens: 1000, reasoning_tokens: 0 };
+    assert_eq!(cost_microusd(astra, &long), Some(3_340_000), "長文：(200K×$8＋100K×$0.4)×2＋1K×$40×1.5 = $3.34");
+    let twelve = Usage { input_tokens: 1000, cached_tokens: 0, cache_write_tokens: 1000, cache_write_12h_tokens: 1000, output_tokens: 0, reasoning_tokens: 0 };
+    assert_eq!(cost_microusd(sol, &twelve), Some(5_000), "12 小時寫入 1K×$5（sol）");
+    let mixed = Usage { input_tokens: 2000, cached_tokens: 500, cache_write_tokens: 500, cache_write_12h_tokens: 500, output_tokens: 100, reasoning_tokens: 0 };
+    assert_eq!(cost_microusd(astra, &mixed), Some(22_200), "1K×$8＋0.5K×$0.4＋0.5K×$20＋0.1K×$40 = 8000＋200＋10000＋4000");
 }
 
 fn cost(u: Value) -> u64 {

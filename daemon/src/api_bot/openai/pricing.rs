@@ -41,9 +41,39 @@ pub(crate) const GPT_6_LUNA_2026_11_18: PriceTable = PriceTable {
     context_window: 1_050_000,
 };
 
+/// gpt-6.2-astra，標準 tier，2026-11-19（官方模型頁原文 `Model ID: gpt-6.2-astra`）：輸入 $8、快取讀 $0.4、
+/// 預設寫 $10、12 小時寫 $20、輸出 $40（每百萬 tokens）；輸入超過 272K 時整個請求輸入與快取 ×2、輸出 ×1.5。
+/// https://developers.openai.com/api/docs/models/gpt-6.2-astra.md — checked 2026-11-19.
+pub(crate) const GPT_6_2_ASTRA_2026_11_19: PriceTable = PriceTable {
+    model: "gpt-6.2-astra",
+    effective_date: "2026-11-19",
+    input: 8_000_000,
+    cache_read: 400_000,
+    cache_write: 10_000_000,
+    cache_write_12h: 20_000_000,
+    output: 40_000_000,
+    long_context_over: 272_000,
+    context_window: 1_050_000,
+};
+
+/// gpt-6.2-sol，標準 tier，2026-11-19（官方模型頁原文 `Model ID: gpt-6.2-sol`）：輸入 $2、快取讀 $0.1、
+/// 預設寫 $2.5、12 小時寫 $5、輸出 $10（每百萬 tokens）；長文價同 astra。
+/// https://developers.openai.com/api/docs/models/gpt-6.2-sol.md — checked 2026-11-19.
+pub(crate) const GPT_6_2_SOL_2026_11_19: PriceTable = PriceTable {
+    model: "gpt-6.2-sol",
+    effective_date: "2026-11-19",
+    input: 2_000_000,
+    cache_read: 100_000,
+    cache_write: 2_500_000,
+    cache_write_12h: 5_000_000,
+    output: 10_000_000,
+    long_context_over: 272_000,
+    context_window: 1_050_000,
+};
+
 /// 這個 binary 認得的價表（每個模型取生效日最新的一張）。找不到＝缺價，呼叫端必須在 HTTP 前拒絕。
 pub(crate) fn price_table(model: &str) -> Option<&'static PriceTable> {
-    const TABLES: &[PriceTable] = &[GPT_6_LUNA_2026_11_18];
+    const TABLES: &[PriceTable] = &[GPT_6_LUNA_2026_11_18, GPT_6_2_ASTRA_2026_11_19, GPT_6_2_SOL_2026_11_19];
     TABLES.iter().filter(|t| t.model == model).max_by_key(|t| t.effective_date)
 }
 

@@ -1,0 +1,19 @@
+{
+  "model": "gpt-6.2-sol",
+  "effective_date": "2026-11-19",
+  "source": "https://developers.openai.com/api/docs/models/gpt-6.2-sol.md (standard tier)",
+  "currency": "USD",
+  "per_million_tokens_usd": {
+    "input": "2.00",
+    "cache_read": "0.10",
+    "cache_write_default": "2.50",
+    "cache_write_12h": "5.00",
+    "output": "10.00"
+  },
+  "long_context": {
+    "over_input_tokens": 272000,
+    "input_and_cache_multiplier": "2",
+    "output_multiplier": "1.5"
+  },
+  "context_window": 1050000
+}

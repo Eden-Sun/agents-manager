@@ -1753,7 +1753,7 @@ async fn openai_api_bot_is_created_only_when_openai_is_configured_and_only_with_
     e.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
     let id = add(&e, body).await.unwrap();
     let bot = db::bot(&e.app.db, &id).await.unwrap().unwrap();
-    assert_eq!((bot.kind.as_str(), bot.model.as_deref(), bot.effort.as_deref()), ("openai-api", Some("gpt-6-luna"), Some("medium")), "預設模型與 effort 是 OpenAI 的");
+    assert_eq!((bot.kind.as_str(), bot.model.as_deref(), bot.effort.as_deref()), ("openai-api", Some("gpt-6.2-astra"), Some("medium")), "預設模型是 astra、effort 是 medium");
     patch(&e, &id, json!({"role": "advisor", "manager_use": true})).await.unwrap();
     assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().role.as_deref(), Some("advisor"));
 
@@ -1768,8 +1768,19 @@ async fn openai_api_bot_is_created_only_when_openai_is_configured_and_only_with_
         assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == reason), "{bad}: {r:?}");
     }
     assert!(add(&e, json!({"name": "oa-effort", "kind": "openai-api", "effort": "ultra"})).await.is_err(), "effort 照 luna 的清單");
-    let none = add(&e, json!({"name": "oa-none", "kind": "openai-api", "effort": "none"})).await.unwrap();
+    // effort 依模型：astra（預設）不收 none；luna 收。
+    let r = add(&e, json!({"name": "oa-none-astra", "kind": "openai-api", "effort": "none"})).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
+    let r = add(&e, json!({"name": "oa-none-sol", "kind": "openai-api", "model": "gpt-6.2-sol", "effort": "none"})).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
+    let none = add(&e, json!({"name": "oa-none", "kind": "openai-api", "model": "gpt-6-luna", "effort": "none"})).await.unwrap();
     assert_eq!(db::bot(&e.app.db, &none).await.unwrap().unwrap().effort.as_deref(), Some("none"));
+    // 改模型到 astra 時，生效中的 none 不能跟過去。
+    let r = patch(&e, &none, json!({"model": "gpt-6.2-astra"})).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
+    patch(&e, &none, json!({"model": "gpt-6.2-astra", "effort": "low"})).await.unwrap();
+    let r = patch(&e, &id, json!({"effort": "none"})).await;
+    assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
     let r = patch(&e, &id, json!({"model": "claude-opus-5-5"})).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_model_unsupported"), "{r:?}");
     patch(&e, &id, json!({"model": "gpt-6-luna", "effort": "high"})).await.unwrap();

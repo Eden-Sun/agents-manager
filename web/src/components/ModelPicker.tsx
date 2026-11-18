@@ -3,7 +3,7 @@ import { isApiKind } from './kindMeta'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
-import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, OPENAI_API_EFFORT_OPTIONS, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
+import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -20,14 +20,15 @@ import './modelPicker.css'
 function staticModels(kind: BotKind): ModelInfo[] {
   // agy：強度已經在模型 slug 裡（`-high`／`-low`），沒有獨立的強度檔。
   const efforts =
-    kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : kind === 'openai-api' ? [...OPENAI_API_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
+    kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
   return MODEL_OPTIONS[kind].map((id, i) => ({
     id,
     display_name: id,
     description: '',
     is_default: i === 0,
     default_effort: kind === 'claude-api' ? 'high' : kind === 'openai-api' ? 'medium' : null,
-    efforts,
+    // openai-api：依模型（astra／sol 不收 none）。
+    efforts: kind === 'openai-api' ? [...openAiApiEffortsFor(id)] : efforts,
     // claude-api 的 fast 是固定可用的（speed=fast，單價 2 倍）；API 清單到了會被覆蓋成同一份。
     service_tiers: kind === 'claude-api' ? [{ id: 'fast', name: 'fast', description: t('speed=fast（單價 2 倍）') }] : [],
   }))

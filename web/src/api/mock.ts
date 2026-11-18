@@ -469,7 +469,9 @@ const models = (): Record<BotKind, Rec[]> => ({
     { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
   ],
   'openai-api': [
-    { id: 'gpt-6-luna', display_name: 'gpt-6-luna', description: '', is_default: true, default_effort: 'medium', efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [] },
+    { id: 'gpt-6.2-astra', display_name: 'GPT-6.2 Astra', description: '', is_default: true, default_effort: 'medium', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [] },
+    { id: 'gpt-6.2-sol', display_name: 'GPT-6.2 Sol', description: '', is_default: false, default_effort: 'medium', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [] },
+    { id: 'gpt-6-luna', display_name: 'GPT-6 Luna', description: '', is_default: false, default_effort: 'medium', efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [] },
   ],
   'claude-api': [
     { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', description: '', is_default: true, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], service_tiers: [{ id: 'fast', name: 'fast', description: L('speed=fast（單價 2 倍）', 'speed=fast (2x price)') }] },

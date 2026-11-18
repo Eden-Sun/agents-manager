@@ -23,6 +23,7 @@ const TEXT: Record<string, string> = {
   api_receipt_unsettled: msg('對話結算憑證尚未就緒，無法確認狀態；請稍後再試。'),
   cache_ttl_unsupported_for_kind: msg('這個 bot 種類不支援 prompt cache 保留時間（cache_ttl）：請不要帶 cache_ttl，改用預設。'),
   cache_ttl_api_bot_only: msg('cache_ttl 只給 claude-api bot 用。'),
+  api_bot_effort_unsupported_for_model: msg('這個模型不收這個強度：gpt-6.2 Astra／Sol 不收 none，請改 low 以上或換 gpt-6-luna。'),
   openai_not_configured: msg('先到 環境設定 → OpenAI API 啟用並設定金鑰（啟用開關與金鑰檔都要就緒）。'),
   attachments_unsupported_for_kind: msg('這個 bot 種類不支援附件：請移除附件後再送。'),
   compact_unsupported: msg('這個 bot 種類不支援 /compact。'),

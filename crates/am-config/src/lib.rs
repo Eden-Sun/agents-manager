@@ -1140,6 +1140,18 @@ pub const API_PROVIDER_OPENAI: &str = "openai";
 /// 用途走 OpenAI 時核准的模型與 effort（由低到高）；預設模型是第一個。
 pub const OPENAI_USE_MODELS: &[&str] = &["gpt-6-luna"];
 pub const OPENAI_USE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+/// openai-api bot 核准的模型（有價表、有 harness）；預設是第一個。翻譯用途仍只用 [`OPENAI_USE_MODELS`]（luna），不跟這份共用。
+pub const OPENAI_API_BOT_MODELS: &[&str] = &["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"];
+/// astra／sol 的 API 拒絕 `reasoning.effort = none`（官方模型頁）；luna 仍收 none。
+pub const OPENAI_NO_NONE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// 這個 openai-api 模型能不能用這個 effort（模型各自的清單，不是 kind 共用的）。
+pub fn openai_api_effort_supported(model: &str, effort: &str) -> bool {
+    match model.trim() {
+        "gpt-6-luna" => OPENAI_USE_EFFORTS.contains(&effort),
+        "gpt-6.2-astra" | "gpt-6.2-sol" => OPENAI_NO_NONE_EFFORTS.contains(&effort),
+        _ => false,
+    }
+}
 pub const OPENAI_USE_DEFAULT_EFFORT: &str = "low";
 
 /// 這一組可不可以改用 OpenAI（v1 只有翻譯）。
@@ -1163,7 +1175,7 @@ pub fn api_provider_of(raw: &str) -> Option<&'static str> {
 
 /// 這個模型 id 屬於哪個供應商（帳本與計價用）：核准的 OpenAI 模型是 `openai`，其餘是 `anthropic`。
 pub fn api_provider_of_model(model: &str) -> &'static str {
-    if OPENAI_USE_MODELS.contains(&model.trim()) {
+    if OPENAI_USE_MODELS.contains(&model.trim()) || OPENAI_API_BOT_MODELS.contains(&model.trim()) {
         API_PROVIDER_OPENAI
     } else {
         API_PROVIDER_ANTHROPIC
@@ -1977,15 +1989,15 @@ pub fn api_bot_model_supported(model: &str) -> bool {
 }
 /// 建立時沒指定 effort 的預設（bot 的 effort 必填，runtime 讀到 NULL 會拒絕）。
 pub const API_BOT_DEFAULT_EFFORT: &str = "high";
-/// openai-api 的預設模型與 effort（模型清單是 [`OPENAI_USE_MODELS`]，effort 清單是 [`OPENAI_USE_EFFORTS`]）。
-pub const OPENAI_API_BOT_MODEL: &str = "gpt-6-luna";
+/// openai-api 的預設模型與 effort（模型清單是 [`OPENAI_API_BOT_MODELS`]，effort 依模型：[`openai_api_effort_supported`]）。
+pub const OPENAI_API_BOT_MODEL: &str = "gpt-6.2-astra";
 pub const OPENAI_API_BOT_DEFAULT_EFFORT: &str = "medium";
 
 /// 這個 API bot kind 能不能用這個模型（各家只收自己核准、有價表的模型）；不是 API kind 回 false。
 pub fn api_bot_model_supported_for(kind: &str, model: &str) -> bool {
     match kind {
         CLAUDE_API_KIND => api_bot_model_supported(model),
-        OPENAI_API_KIND => OPENAI_USE_MODELS.contains(&model),
+        OPENAI_API_KIND => OPENAI_API_BOT_MODELS.contains(&model),
         _ => false,
     }
 }
@@ -4043,12 +4055,31 @@ mod retry_cross_provider_tests {
     }
 
     /// 品質沒過的重試模型可以跨到 OpenAI，但只有翻譯組能；Claude 模型與空字串照舊。
+    /// openai-api 的模型與 effort：預設 astra；astra／sol 不收 none，luna 收；不在清單的模型一律不收。
+    #[test]
+    fn openai_api_models_default_to_astra_and_only_luna_takes_effort_none() {
+        assert_eq!(api_bot_defaults(OPENAI_API_KIND), Some(("gpt-6.2-astra", "medium")));
+        for m in ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"] {
+            assert!(api_bot_model_supported_for(OPENAI_API_KIND, m), "{m}");
+        }
+        assert!(!api_bot_model_supported_for(OPENAI_API_KIND, "gpt-6-sol"), "未核准的不收");
+        assert!(!openai_api_effort_supported("gpt-6.2-astra", "none"));
+        assert!(!openai_api_effort_supported("gpt-6.2-sol", "none"));
+        assert!(openai_api_effort_supported("gpt-6-luna", "none"));
+        assert!(openai_api_effort_supported("gpt-6.2-astra", "max"));
+        assert!(!openai_api_effort_supported("gpt-6.2-astra", "ultra"));
+    }
+
     #[test]
     fn a_retry_model_may_be_claude_or_an_approved_openai_model_but_openai_only_for_translate() {
         assert_eq!(claude_api_group_problem("translate", &group("gpt-6-luna")), None, "翻譯組可以重試到 OpenAI");
         assert_eq!(claude_api_group_problem("translate", &group("claude-sonnet-5-5")), None);
         assert_eq!(claude_api_group_problem("translate", &group("")), None, "空字串＝不升級");
         assert!(claude_api_group_problem("changelog_analysis", &group("gpt-6-luna")).is_some(), "其他組不能重試到 OpenAI");
+        // 翻譯組的 OpenAI 只用 luna：astra／sol（bot 的核准模型）不能當翻譯的模型或重試模型。
+        assert!(claude_api_group_problem("translate", &group("gpt-6.2-astra")).is_some(), "翻譯不用 astra（貴）");
+        assert!(claude_api_group_problem("translate", &group("gpt-6.2-sol")).is_some(), "翻譯不用 sol");
+        assert_eq!(api_provider_of_model("gpt-6.2-astra"), API_PROVIDER_OPENAI, "帳本與計價認得 astra 是 OpenAI");
         assert!(claude_api_group_problem("translate", &group("gpt-9-unknown")).is_some(), "不認得的模型擋下");
         assert!(claude_api_group_problem("translate", &group("not a model")).is_some());
     }
