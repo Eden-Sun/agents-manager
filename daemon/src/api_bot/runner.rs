@@ -1,7 +1,7 @@
-use super::protocol::{Message, Response, ToolCall};
+use super::protocol::{Message, Response};
+use super::provider::{Codec, StopReason, ToolCall, ToolResult};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 pub trait Model: Send + Sync {
@@ -55,20 +55,10 @@ pub enum Error {
     Model(super::http::Error),
 }
 
-/// Project only user-visible text blocks from a completed provider response.
-///
-/// The checkpoint keeps the full protocol content for continuation; this projection is only for
-/// the ordinary assistant message and deliberately drops thinking/signatures/tool payloads.
+/// Project only user-visible text from a completed Claude response (thinking／signatures／tool payloads are dropped).
+/// 其他 provider 用各自 [`Codec::visible_text`]。
 pub(crate) fn final_text(response: &Response) -> String {
-    let mut text = String::new();
-    for block in &response.content {
-        if block.get("type").and_then(Value::as_str) == Some("text") {
-            if let Some(part) = block.get("text").and_then(Value::as_str) {
-                text.push_str(part);
-            }
-        }
-    }
-    text
+    super::anthropic::AnthropicCodec.visible_text(response)
 }
 
 /// No automatic retry/fallback or crash replay. The host must fence run/generation and persist
@@ -89,29 +79,26 @@ pub async fn run(
 /// `not executed: interrupted by user`，全部標完成、`tool_pending=None` 後存 checkpoint，下一回合才送得出去。
 /// 只有「工具真的回來了」才會走到這裡；沒有記下結果就不放寬 `tool_pending`。
 fn settle_interrupted_batch(
+    codec: &dyn Codec,
     state: &mut State,
-    results: &mut Vec<Value>,
+    results: &mut Vec<ToolResult>,
     pushed: bool,
     finished: Option<(&str, String)>,
-    rest: &[crate::api_bot::protocol::ToolCall],
+    rest: &[ToolCall],
     note: &str,
 ) {
     if let Some((id, output)) = finished {
-        results.push(json!({"type":"tool_result","tool_use_id":id,"content":format!("{output}\n[interrupted by user]"),"is_error":true}));
+        results.push(ToolResult { call_id: id.to_string(), output: format!("{output}\n[interrupted by user]"), is_error: true });
         state.completed_tool_ids.insert(id.to_string());
     }
     for call in rest {
-        results.push(json!({"type":"tool_result","tool_use_id":call.id,"content":format!("not executed: {note}"),"is_error":true}));
+        results.push(ToolResult { call_id: call.id.clone(), output: format!("not executed: {note}"), is_error: true });
         state.completed_tool_ids.insert(call.id.clone());
     }
     if results.is_empty() {
         return;
     }
-    if pushed {
-        state.messages.last_mut().expect("tool result batch exists").content = json!(results);
-    } else {
-        state.messages.push(Message { role: "user".into(), content: json!(results) });
-    }
+    codec.put_tool_results(state, results, None, pushed);
     state.tool_pending = None;
 }
 
@@ -128,22 +115,30 @@ pub async fn run_interruptible(
 }
 
 const WRAP_UP_NOTE: &str = "[AG Man] The time limit for this turn has been reached. Do NOT start any new action or tool call. Reply with a summary: what is done, what is not done, and how to continue.";
+const TWO_CALLS_LEFT_NOTE: &str = "[AG Man] You have 2 API calls left in this turn. Stop starting new work: write a progress summary (what is done, findings so far, what remains and how to continue) as your reply.";
 
-/// 加一則收尾提示給下一次請求：附在最後一則（工具結果）user 訊息上；最後一則不是陣列內容就不加。
-fn push_wrap_up_note(state: &mut State) {
-    if let Some(last) = state.messages.last_mut() {
-        if last.role == "user" {
-            if let Some(arr) = last.content.as_array_mut() {
-                arr.push(json!({"type": "text", "text": WRAP_UP_NOTE}));
-            }
-        }
-    }
+/// 同 [`run_with_codec`]，transcript 是 Claude 的形狀（現有的呼叫端與測試）。
+pub async fn run_with_wrap_up(
+    model: &impl Model,
+    tools: &impl Tools,
+    journal: &impl Journal,
+    state: &mut State,
+    cancel: &CancellationToken,
+    max_calls: usize,
+    user_interrupted: &(dyn Fn() -> bool + Sync),
+    wrap_up: &(dyn Fn() -> bool + Sync),
+) -> Result<Halt, Error> {
+    run_with_codec(&super::anthropic::AnthropicCodec, model, tools, journal, state, cancel, max_calls, user_interrupted, wrap_up).await
 }
 
 /// 同 [`run_interruptible`]，另有軟期限 `wrap_up`：回傳 true 之後不再執行新的工具，
 /// 剩下的工具結清成 `not executed`，再送**一次**收尾請求（附提示，要模型寫摘要），結束於 [`Halt::TimeLimit`]。
 /// 進行中的請求與工具不被中斷（硬期限由呼叫端另外取消）；收尾請求不佔 `max_calls`。
-pub async fn run_with_wrap_up(
+///
+/// runner 只認中立的工具呼叫／工具結果／終止原因；transcript 的原生內容一律經 `codec` 讀寫。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_codec(
+    codec: &dyn Codec,
     model: &impl Model,
     tools: &impl Tools,
     journal: &impl Journal,
@@ -166,7 +161,7 @@ pub async fn run_with_wrap_up(
         }
         if !wrapping_up && wrap_up() {
             wrapping_up = true;
-            push_wrap_up_note(state);
+            codec.append_note(state, WRAP_UP_NOTE);
         }
         if call_idx >= max_calls && !wrapping_up {
             break;
@@ -177,65 +172,46 @@ pub async fn run_with_wrap_up(
             .complete(&state.messages, cancel)
             .await
             .map_err(Error::Model)?;
-        let calls = response.tools().map_err(|_| Error::InvalidResponse)?;
-        if calls.len() > 32
-            || calls
-                .iter()
-                .any(|c| state.completed_tool_ids.contains(&c.id))
-        {
-            return Err(Error::InvalidResponse);
-        }
-        state.messages.push(Message {
-            role: "assistant".into(),
-            content: json!(response.content),
-        });
-        let reason = response.stop_reason.clone();
-        state.responses.push(response);
+        let output = codec.accept(state, response).map_err(|_| Error::InvalidResponse)?;
+        let calls = output.calls;
         state.api_pending = false;
         // There may be tools not yet started: keep a pending marker until ALL results are
         // durably committed. Crash recovery must not send an incomplete assistant tool batch.
         state.tool_pending = calls.first().map(|c| c.id.clone());
         checkpoint(journal, state).await?;
-        let has_compaction = state.responses.last().is_some_and(|r| {
-            r.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction"))
-        });
-        if has_compaction {
-            state.messages = super::protocol::prune_messages_for_compaction(&state.messages);
+        if output.compacted {
+            codec.prune_after_compaction(state);
             checkpoint(journal, state).await?;
         }
         if wrapping_up && !calls.is_empty() {
             // 收尾請求還是要工具：不執行，結清後結束（對話維持合法）。
-            let mut results: Vec<Value> = Vec::new();
-            settle_interrupted_batch(state, &mut results, false, None, &calls, "time limit reached");
+            let mut results: Vec<ToolResult> = Vec::new();
+            settle_interrupted_batch(codec, state, &mut results, false, None, &calls, "time limit reached");
             checkpoint(journal, state).await?;
             return Ok(Halt::TimeLimit);
         }
         if calls.is_empty() {
-            if wrapping_up && reason == "end_turn" {
+            if wrapping_up && output.stop == StopReason::EndTurn {
                 return Ok(Halt::TimeLimit);
             }
-            let has_server_tool = state.responses.last().is_some_and(|r| {
-                r.content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("server_tool_use"))
-            });
-            if reason == "pause_turn" && has_server_tool && call_idx < max_calls && !wrapping_up {
-                // Anthropic 伺服器端工具（web_search、web_fetch 等）執行滿 server-side iterations 時，
-                // 以 stop_reason: "pause_turn" 暫停；自動重送延續，直到 end_turn 或預算用完。
+            if output.resumable_pause && call_idx < max_calls && !wrapping_up {
+                // 伺服器端工具暫停：自動重送延續，直到正常結束或預算用完。
                 continue;
             }
-            return Ok(match reason.as_str() {
-                "end_turn" => Halt::EndTurn,
-                "refusal" => Halt::Refusal,
-                "max_tokens" => Halt::MaxTokens,
-                _ => Halt::Other(reason),
+            return Ok(match output.stop {
+                StopReason::EndTurn => Halt::EndTurn,
+                StopReason::Refusal => Halt::Refusal,
+                StopReason::MaxTokens => Halt::MaxTokens,
+                StopReason::Other(reason) => Halt::Other(reason),
             });
         }
-        let mut results: Vec<Value> = Vec::new();
+        let mut results: Vec<ToolResult> = Vec::new();
         let mut out_of_time = false;
         for (idx, call) in calls.iter().enumerate() {
             // 軟期限：不開始新工具，這一批剩下的結清，下一輪送收尾請求。
             if !user_interrupted() && wrap_up() && !cancel.is_cancelled() {
                 let pushed = !results.is_empty();
-                settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..], "time limit reached");
+                settle_interrupted_batch(codec, state, &mut results, pushed, None, &calls[idx..], "time limit reached");
                 out_of_time = true;
                 break;
             }
@@ -243,7 +219,7 @@ pub async fn run_with_wrap_up(
                 // 前一個工具已經回來並記下結果（tool_pending 只是批次還沒收尾）；使用者中斷就把剩下的結清。
                 if user_interrupted() {
                     let pushed = !results.is_empty();
-                    settle_interrupted_batch(state, &mut results, pushed, None, &calls[idx..], "interrupted by user");
+                    settle_interrupted_batch(codec, state, &mut results, pushed, None, &calls[idx..], "interrupted by user");
                     checkpoint(journal, state).await?;
                 }
                 return Err(Error::Cancelled);
@@ -258,7 +234,7 @@ pub async fn run_with_wrap_up(
                         Err(e) => e,
                     };
                     let pushed = !results.is_empty();
-                    settle_interrupted_batch(state, &mut results, pushed, Some((&call.id, output)), &calls[idx + 1..], "interrupted by user");
+                    settle_interrupted_batch(codec, state, &mut results, pushed, Some((&call.id, output)), &calls[idx + 1..], "interrupted by user");
                     checkpoint(journal, state).await?;
                 }
                 return Err(Error::Cancelled);
@@ -267,22 +243,11 @@ pub async fn run_with_wrap_up(
                 Ok(s) => (s, false),
                 Err(e) => (e, true),
             };
-            results.push(json!({"type":"tool_result", "tool_use_id":call.id,"content":content,"is_error":is_error}));
+            results.push(ToolResult { call_id: call.id.clone(), output: content, is_error });
             state.completed_tool_ids.insert(call.id.clone());
             // Keep partial results in the transcript too, so a durable checkpoint cannot lose
             // the output of a side effect. Only the final batch is submitted to the model.
-            if results.len() == 1 {
-                state.messages.push(Message {
-                    role: "user".into(),
-                    content: json!(results),
-                });
-            } else {
-                state
-                    .messages
-                    .last_mut()
-                    .expect("tool result batch exists")
-                    .content = json!(results);
-            }
+            codec.put_tool_results(state, &results, None, results.len() > 1);
             checkpoint(journal, state).await?;
         }
         if out_of_time {
@@ -292,15 +257,7 @@ pub async fn run_with_wrap_up(
         }
         let remaining_calls = max_calls.saturating_sub(call_idx + 1);
         if remaining_calls == 2 {
-            results.push(json!({
-                "type": "text",
-                "text": "[AG Man] You have 2 API calls left in this turn. Stop starting new work: write a progress summary (what is done, findings so far, what remains and how to continue) as your reply."
-            }));
-            state
-                .messages
-                .last_mut()
-                .expect("tool result batch exists")
-                .content = json!(results);
+            codec.put_tool_results(state, &results, Some(TWO_CALLS_LEFT_NOTE), true);
         }
         state.tool_pending = None;
         checkpoint(journal, state).await?;

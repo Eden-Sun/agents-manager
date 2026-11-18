@@ -781,7 +781,8 @@ impl ApiBotRuntime {
                     }
                     reached
                 };
-                let execution = super::runner::run_with_wrap_up(
+                let execution = super::runner::run_with_codec(
+                    adapter.codec(),
                     adapter.as_ref(),
                     &tools,
                     adapter.as_ref(),

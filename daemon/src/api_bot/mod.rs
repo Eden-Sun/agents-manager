@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 pub(crate) mod adapter;
+pub(crate) mod anthropic;
+pub(crate) mod provider;
 pub(crate) mod completion;
 pub(crate) mod http;
 pub(crate) mod protocol;

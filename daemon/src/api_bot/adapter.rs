@@ -93,6 +93,8 @@ pub(crate) struct ApiBotAdapter {
     system: Value,
     limits: AdapterLimits,
     quote_provider: Arc<dyn QuoteProvider>,
+    /// 這個 session 的模型供應商（建立時固定）：編碼請求、送出、錯誤分類與 transcript 編解碼都經過它。
+    provider: Arc<dyn super::provider::Provider>,
     http_cfg: AdapterHttpConfig,
     tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
@@ -130,56 +132,7 @@ struct ActiveAttempt {
     key: Option<Secret>,
 }
 
-pub(super) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
-    // 兩邊都必須是支援的 claude-api 模型（如 claude-opus-5-5、claude-fable-5-2）。
-    // 請求已帶 thinking.block_binding.prefix_mismatch_behavior = "drop_block"，
-    // 支援模型之間的 checkpoint 可安全接續。
-    if !am_config::api_bot_model_supported(model) {
-        return false;
-    }
-    if state.responses.iter().any(|r| !am_config::api_bot_model_supported(&r.model)) {
-        return false;
-    }
-    !(state.responses.is_empty()
-        && state.messages.iter().any(|m| {
-            m.content.as_array().is_some_and(|blocks| {
-                blocks.iter().any(|b| {
-                    matches!(
-                        b.get("type").and_then(Value::as_str),
-                        Some("thinking" | "redacted_thinking")
-                    )
-                })
-            })
-        }))
-}
-
-/// API 明確拒絕、確定沒有處理（也不計費）的錯誤：4xx（408 逾時除外）、429、529 過載。
-/// 逾時、連線中斷、回應過大或讀壞都不算：那些不知道上游有沒有處理。
-pub(super) fn definitive_rejection(err: &http::Error) -> bool {
-    match err {
-        http::Error::RateLimited { .. } => true,
-        http::Error::Http { status, .. } => (400..500).contains(status) && *status != 408 || *status == 529,
-        _ => false,
-    }
-}
-
-/// 已成功收到的回應內容不合法的原因（`None`＝合法）；規則與 runner 收到回應後的檢查相同。
-fn invalid_content_reason(resp: &Response, durable: &State, model: &str) -> Option<String> {
-    if resp.model != model {
-        return Some(format!("response model {} != requested {model}", resp.model));
-    }
-    let calls = match resp.tools() {
-        Ok(calls) => calls,
-        Err(why) => return Some(format!("tools(): {why}")),
-    };
-    if calls.len() > 32 {
-        return Some(format!("too many tool calls: {}", calls.len()));
-    }
-    if let Some(c) = calls.iter().find(|c| durable.completed_tool_ids.contains(&c.id)) {
-        return Some(format!("tool id already completed: {}", c.id));
-    }
-    None
-}
+pub(super) use super::anthropic::{checkpoint_matches_model, definitive_rejection};
 
 impl ApiBotAdapter {
     /// 接上串流進度出口（runtime 在建好 adapter 後呼叫）。
@@ -208,6 +161,11 @@ impl ApiBotAdapter {
     /// 取走（並清掉）最近一次預留被拒絕的原因。
     pub(crate) fn take_refusal(&self) -> Option<String> {
         self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// 這個 session 的 transcript 編解碼（runner 用）。
+    pub(crate) fn codec(&self) -> &dyn super::provider::Codec {
+        self.provider.codec()
     }
 
     #[cfg(test)]
@@ -271,6 +229,7 @@ impl ApiBotAdapter {
             options,
             system,
             limits,
+            provider: Arc::new(super::anthropic::AnthropicProvider::new(quote_provider.clone())),
             quote_provider,
             http_cfg,
             tools,
@@ -386,6 +345,7 @@ impl ApiBotAdapter {
             options,
             system: effective_system,
             limits,
+            provider: Arc::new(super::anthropic::AnthropicProvider::new(quote_provider.clone())),
             quote_provider,
             http_cfg,
             tools,
@@ -435,7 +395,7 @@ impl Model for ApiBotAdapter {
 
                 let mut eff_options = self.options.clone();
                 eff_options.effort = effective_effort.clone();
-                let reconstructed = RequestEnvelope::new(
+                let reconstructed = self.provider.encode(
                     eff_options,
                     self.system.clone(),
                     messages.to_vec(),
@@ -460,10 +420,9 @@ impl Model for ApiBotAdapter {
             };
 
             // 送出的是 reserve 時報價、算 hash 的那一份已編碼請求（`active.envelope`），不重新組 body。
-            let req = http::EncodedMessagesRequest {
+            let transport = || super::provider::Transport {
                 endpoint: &self.http_cfg.endpoint,
                 key: key.as_str(),
-                request: &envelope,
                 timeout: self.http_cfg.timeout,
                 max_response_bytes: self.http_cfg.max_response_bytes,
             };
@@ -472,9 +431,9 @@ impl Model for ApiBotAdapter {
             let res = match &self.progress_sink {
                 Some(sink) => {
                     let report = |p: &super::sse::StreamProgress| sink(self.progress_frame(p));
-                    http::complete_encoded(&req, cancel, Some(&report)).await
+                    self.provider.send(transport(), &envelope, cancel, Some(&report)).await
                 }
-                None => http::complete_encoded(&req, cancel, None).await,
+                None => self.provider.send(transport(), &envelope, cancel, None).await,
             };
             let duration_ms = req_start.elapsed().as_millis() as u64;
             drop(key);
@@ -485,7 +444,7 @@ impl Model for ApiBotAdapter {
                     // HTTP 已成功收到完整回應：帳是確定的。內容不合法（工具解析失敗、一批超過 32 個、
                     // 工具 id 重複、模型不符）或用量不合規則時，也要把這次 attempt 結成 `recorded`、收掉 api_pending，
                     // 之後的 prompt 才送得出去；transcript 維持送出前的 durable 狀態（不留半截 assistant tool batch）。
-                    let content_problem = invalid_content_reason(&resp, &cursor.last_durable_state, &envelope.options().model);
+                    let content_problem = self.provider.invalid_content_reason(&resp, &cursor.last_durable_state, &envelope.options().model);
                     let quote_res = self.quote_provider.settle(&envelope, &resp);
                     let valid_quote = match &quote_res {
                         Ok(uq)
@@ -600,7 +559,7 @@ impl Model for ApiBotAdapter {
                     // 照 `record` 的規則要把 pending 標記收掉（receipt `failed`、費用 0）。否則 checkpoint 永遠停在
                     // api_pending，這顆 bot 之後的每一則都被當成「上一次還沒結算」拒收，重啟時還會讓整個 API 啟動閘隔離。
                     // 逾時、連線中斷、回應讀壞才是真的不知道有沒有處理，維持 `unknown`。
-                    let rejected = definitive_rejection(&err);
+                    let rejected = self.provider.definitive_rejection(&err);
                     let mut next_state = cursor.last_durable_state.clone();
                     next_state.api_pending = !rejected;
 
@@ -699,7 +658,7 @@ impl Journal for ApiBotAdapter {
 
                     let mut eff_options = self.options.clone();
                     eff_options.effort = cursor.effective_effort.clone();
-                    let mut envelope = RequestEnvelope::new(
+                    let mut envelope = self.provider.encode(
                         eff_options,
                         self.system.clone(),
                         state.messages.clone(),
