@@ -58,3 +58,5 @@ mod sweeper_tests;
 mod explicit_retirement;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod explicit_retirement_tests;
+#[cfg(test)]
+mod provider_seam_tests;
