@@ -141,7 +141,7 @@ fn poll_unreadable(turn_id: &str, failures: u32, e: &anyhow::Error) -> u32 {
 /// idle-prompt safety net that calls `try_fallback` (see below). Stops once the turn leaves `in_flight`.
 pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
     if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             return;
         }
     }
@@ -299,7 +299,7 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
 /// (which ignores other values) can still close it if the Stop hook never comes.
 pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return;
     }
     let lock = app.bot_lock(&run.bot_id).await;
@@ -1139,7 +1139,7 @@ async fn resend_with_retry(
 /// forever (not logged in, invisible modal). Cancelled by the first `working` / `blocked` event.
 pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str) {
     if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             return;
         }
     }
@@ -1224,7 +1224,7 @@ async fn stall_round(
     grace: Duration,
 ) -> StallRound {
     if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             return StallRound::Done;
         }
     }
@@ -1525,7 +1525,7 @@ pub async fn arm_fallback(app: &impl LcHost, run_id: &str, bot_id: &str) {
 
 async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
     if let Ok(Some(bot)) = db::bot(app.db(), bot_id).await {
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             return;
         }
     }
@@ -1612,7 +1612,7 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return Ok(false);
     }
     let run = codex_session_refresh::refresh(app, &run, &bot, &turn.id).await.unwrap_or(run);

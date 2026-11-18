@@ -77,10 +77,10 @@ async fn sweep_abandoned_pending_checkpoints(
 ) -> anyhow::Result<()> {
     let sessions: Vec<(String, String, Option<String>, Option<String>, i64, i64, String)> =
         sqlx::query_as(
-            "SELECT s.id, s.bot_id, s.owner_run_id, s.owner_turn_id, s.generation, s.revision, s.checkpoint_json \
+            concat!("SELECT s.id, s.bot_id, s.owner_run_id, s.owner_turn_id, s.generation, s.revision, s.checkpoint_json \
              FROM api_bot_sessions s \
              JOIN bots b ON b.id = s.bot_id \
-             WHERE b.kind = 'claude-api' AND b.deleted_at IS NULL AND s.retired_at IS NULL",
+             WHERE b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND s.retired_at IS NULL"),
         )
         .fetch_all(&app.db)
         .await?;
@@ -568,7 +568,7 @@ pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Optio
 
 pub(crate) async fn stuck_api_bots(app: &crate::state::App) -> Vec<StuckBotEntry> {
     let bots: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM bots WHERE kind = 'claude-api' AND deleted_at IS NULL",
+        concat!("SELECT id, name FROM bots WHERE kind IN ", crate::config::api_kinds_sql!(), " AND deleted_at IS NULL"),
     )
     .fetch_all(&app.db)
     .await

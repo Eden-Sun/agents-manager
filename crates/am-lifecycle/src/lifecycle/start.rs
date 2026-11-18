@@ -171,7 +171,7 @@ pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOp
             return Err(LcError::conflict("kind_disabled", json!({"reason": "kind_disabled", "host": host, "kind": kind})));
         }
     }
-    if kind == "claude-api" {
+    if crate::config::is_api_kind(&kind) {
         if opts.fork_session.is_some() || opts.fork_source_bot.is_some() || opts.resume_session.is_some() || opts.require_idle || opts.refuse_background_jobs {
             return Err(LcError::Upstream("api_native_start_unconfirmed".into()));
         }
@@ -216,7 +216,7 @@ async fn start_bot_locked_with_host_fence_body(
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
-    if bot.kind == "claude-api" { return Err(LcError::Upstream("api_native_start_unconfirmed".into())); }
+    if crate::config::is_api_kind(&bot.kind) { return Err(LcError::Upstream("api_native_start_unconfirmed".into())); }
     // A child only exists as the pane its parent opened; starting here would open an unrelated pane.
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
@@ -1938,7 +1938,7 @@ async fn restart_bot_with_authority_body(
     }
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if bot.kind == "claude-api" { return Err(LcError::conflict("api_bot_restart_unsupported", json!({"bot_id": bot_id}))); }
+    if crate::config::is_api_kind(&bot.kind) { return Err(LcError::conflict("api_bot_restart_unsupported", json!({"bot_id": bot_id}))); }
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }

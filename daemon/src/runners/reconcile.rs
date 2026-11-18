@@ -79,7 +79,7 @@ async fn autostart_pass(app: &Arc<App>, host: &str, owed: &mut Option<HashMap<St
     };
     let mut still = HashMap::new();
     for bot in bots {
-        if bot.kind == "claude-api" { continue; }
+        if crate::config::is_api_kind(&bot.kind) { continue; }
         if bot.autostart != 1 || owed.as_ref().is_some_and(|o| !o.contains_key(&bot.id)) {
             continue;
         }

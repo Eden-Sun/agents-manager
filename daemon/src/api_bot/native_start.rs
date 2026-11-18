@@ -129,7 +129,7 @@ async fn create_run_inner(app: &crate::state::App, bot: &str, required: bool, cl
         }
     };
     // run 在 daemon 內跑（沒有 pane），所以 `runs.host` 一律 'local'；專案在哪台主機只影響工具（本機 bwrap／遠端 ssh）。
-    let inserted = sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,started_at,host) SELECT ?,b.id,'starting','unknown',?,'local' FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.managed_by!='child' AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=b.id AND r.state IN ('starting','running','stopping'))")
+    let inserted = sqlx::query(concat!("INSERT INTO runs(id,bot_id,state,agent_status,started_at,host) SELECT ?,b.id,'starting','unknown',?,'local' FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.managed_by!='child' AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=b.id AND r.state IN ('starting','running','stopping'))"))
         .bind(&id).bind(crate::db::now()).bind(bot).execute(&mut *tx).await.map_err(|e| {
             failed(bot, "insert_run")(e);
             E::Unconfirmed

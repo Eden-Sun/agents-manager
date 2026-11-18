@@ -169,11 +169,12 @@ pub(super) async fn owner_on(
         JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id
         WHERE s.id=? AND b.id=? AND r.id=? AND t.id=?
           AND s.generation=? AND s.revision=? AND s.retired_at IS NULL AND {expiry}>?
-          AND b.kind='claude-api' AND b.deleted_at IS NULL
+          AND b.kind IN {api_kinds} AND b.deleted_at IS NULL
           AND r.state='running' AND t.status=? AND t.delivery='ok'
           AND NOT EXISTS(SELECT 1 FROM runs successor WHERE successor.bot_id=b.id
               AND successor.id!=r.id AND successor.state IN ('running','starting','stopping'))
     )",
+        api_kinds = crate::config::API_KINDS_SQL,
     ))
     .bind(&identity.session_id)
     .bind(&identity.bot_id)

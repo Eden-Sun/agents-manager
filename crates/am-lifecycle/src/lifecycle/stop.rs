@@ -112,7 +112,7 @@ async fn stop_locked_body(
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
     app.refuse_handed_off(bot_id).await?;
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         if for_restart {
             return Err(LcError::conflict(
                 "api_bot_restart_unsupported",
@@ -477,7 +477,7 @@ async fn api_begin_stop_transaction_body(pool: &sqlx::SqlitePool, key: &super::a
     let mut tx = db::begin_write(pool).await.map_err(|_| E::Storage)?;
     let result: Result<R, E> = async {
         if shutdown.is_cancelled() { return Err(E::Busy); }
-        let state: Option<String> = sqlx::query_scalar("SELECT r.state FROM bots b JOIN runs r ON r.bot_id=b.id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND r.id=?")
+        let state: Option<String> = sqlx::query_scalar(concat!("SELECT r.state FROM bots b JOIN runs r ON r.bot_id=b.id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND r.id=?"))
             .bind(&key.bot_id).bind(&key.run_id).fetch_optional(&mut *tx).await.map_err(|_| E::Storage)?;
         let Some(state) = state else { return Err(E::IdentityMismatch); };
         if !matches!(state.as_str(), "starting" | "running" | "stopping") { return Ok(R::Lost); }
@@ -490,7 +490,7 @@ async fn api_begin_stop_transaction_body(pool: &sqlx::SqlitePool, key: &super::a
                 Ok(R::Applied { withdrawn })
             }
             M::Idle => {
-                let count = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=? AND state='running' AND agent_status='idle' AND EXISTS(SELECT 1 FROM bots b WHERE b.id=runs.bot_id AND b.kind='claude-api' AND b.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.status='in_flight') AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='queued')")
+                let count = sqlx::query(concat!("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=? AND state='running' AND agent_status='idle' AND EXISTS(SELECT 1 FROM bots b WHERE b.id=runs.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL) AND NOT EXISTS(SELECT 1 FROM turns t WHERE t.run_id=runs.id AND t.status='in_flight') AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='queued')"))
                     .bind(&key.run_id).bind(&key.bot_id).bind(&key.bot_id).execute(&mut *tx).await.map_err(|_| E::Storage)?.rows_affected();
                 Ok(if count == 1 { R::Applied { withdrawn: Vec::new() } } else { R::Lost })
             }

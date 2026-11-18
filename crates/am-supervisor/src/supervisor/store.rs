@@ -2868,12 +2868,12 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 /// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
 // claude-api（#1944）沒有 pane、回合在 daemon 內跑：只有 run 真的在 running、而且回合還在合理時間內（15 分，> turn_timeout）
 // 才算送達臨界區。2026-11-01 一則卡在 stopping run 裡的 in_flight 回合讓換版窗口等了兩個多小時（死結：修正要換版才上線）。
-pub const DELIVERY_CRITICAL_PREDICATE: &str = "(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
+pub const DELIVERY_CRITICAL_PREDICATE: &str = concat!("(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
                        AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working')))
-      OR (t.status='in_flight' AND t.delivery='pending' AND NOT EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind='claude-api'))
-      OR (t.status='in_flight' AND EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind='claude-api')
+      OR (t.status='in_flight' AND t.delivery='pending' AND NOT EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), "))
+      OR (t.status='in_flight' AND EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), ")
           AND EXISTS (SELECT 1 FROM runs r WHERE r.id=t.run_id AND r.state='running')
-          AND t.created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-15 minutes'))";
+          AND t.created_at > strftime('%Y-%m-%dT%H:%M:%fZ','now','-15 minutes'))");
 
 /// 上面那份條件套在「任何一顆 bot」上，給 `NOT EXISTS (…)` 用。沒有 bind 參數。
 pub fn delivery_critical_anywhere_sql() -> String {
@@ -2889,8 +2889,9 @@ pub fn delivery_critical_anywhere_sql() -> String {
 /// 只放過**一顆**，而且呼叫端已經驗過它就是核准的 requester；其他 bot 的臨界區照擋。
 pub fn delivery_critical_except_sql() -> String {
     format!(
-        "SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
-          WHERE (c.bot_id <> ? OR EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind='claude-api')) AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"
+        concat!("SELECT 1 FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE (c.bot_id <> ? OR EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), ")) AND ({DELIVERY_CRITICAL_PREDICATE}) LIMIT 1"),
+        DELIVERY_CRITICAL_PREDICATE = DELIVERY_CRITICAL_PREDICATE
     )
 }
 

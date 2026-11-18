@@ -5,7 +5,7 @@ use std::sync::Arc;
 pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Error> {
     let mut after: Option<(String, String)> = None;
     loop {
-        let runs: Vec<(String, String)> = sqlx::query_as("SELECT b.id,r.id FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.kind='claude-api' AND r.state IN ('starting','running','stopping') AND (? IS NULL OR (b.id,r.id)>(?,?)) ORDER BY b.id,r.id LIMIT 64")
+        let runs: Vec<(String, String)> = sqlx::query_as(concat!("SELECT b.id,r.id FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.kind IN ", crate::config::api_kinds_sql!(), " AND r.state IN ('starting','running','stopping') AND (? IS NULL OR (b.id,r.id)>(?,?)) ORDER BY b.id,r.id LIMIT 64"))
             .bind(after.as_ref().map(|v| &v.0)).bind(after.as_ref().map(|v| &v.0)).bind(after.as_ref().map(|v| &v.1))
             .fetch_all(&app.db).await.map_err(|_| Error::Storage)?;
         if runs.is_empty() {
@@ -34,7 +34,7 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
             let mut tx = crate::db::begin_write(&app.db)
                 .await
                 .map_err(|_| Error::Storage)?;
-            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.id=? AND b.kind='claude-api' AND r.id=? AND r.state IN ('starting','running','stopping') AND NOT EXISTS(SELECT 1 FROM runs x WHERE x.bot_id=b.id AND x.id!=r.id AND x.state IN ('starting','running','stopping'))) AND NOT EXISTS(SELECT 1 FROM api_bot_join_receipts WHERE bot_id=? AND run_id=? AND state='pending') AND NOT EXISTS(SELECT 1 FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id WHERE t.run_id=? AND t.status IN ('in_flight','queued') AND (c.bot_id IS NOT ? OR EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='assistant'))) ")
+            let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND r.id=? AND r.state IN ('starting','running','stopping') AND NOT EXISTS(SELECT 1 FROM runs x WHERE x.bot_id=b.id AND x.id!=r.id AND x.state IN ('starting','running','stopping'))) AND NOT EXISTS(SELECT 1 FROM api_bot_join_receipts WHERE bot_id=? AND run_id=? AND state='pending') AND NOT EXISTS(SELECT 1 FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id WHERE t.run_id=? AND t.status IN ('in_flight','queued') AND (c.bot_id IS NOT ? OR EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.role='assistant'))) "))
             .bind(&bot).bind(&run).bind(&bot).bind(&run).bind(&run).bind(&bot)
             .fetch_one(&mut *tx).await.map_err(|_| Error::Storage)?;
             if !valid {
@@ -63,7 +63,7 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
         }
     }
     // A keyset page becoming empty does not prove that no earlier key appeared.
-    let remains: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.kind='claude-api' AND r.state IN ('starting','running','stopping'))")
+    let remains: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.kind IN ", crate::config::api_kinds_sql!(), " AND r.state IN ('starting','running','stopping'))"))
         .fetch_one(&app.db).await.map_err(|_| Error::Storage)?;
     if remains {
         return Err(Error::Unresolved);

@@ -89,7 +89,7 @@ async fn prompt_starting_or_queue_authorized(
     let accepted = {
         let _g = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
         match db::bot(app.db(), bot_id).await {
-            Ok(Some(bot)) if bot.kind != "claude-api" => {},
+            Ok(Some(bot)) if !crate::config::is_api_kind(&bot.kind) => {},
             Ok(Some(_)) => return Err(LcError::Bad("api_native_prompt_unsupported".into())),
             _ => return Err(LcError::Upstream("api_start_send_unconfirmed".into())),
         }
@@ -269,7 +269,7 @@ async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
     // The kick may outlive a withdrawal/stop. Recheck at actual start admission under the
     // same lock as cancellation, then use the locked wake/start surfaces below.
     let bot_guard = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
-    if !matches!(db::bot(app.db(), bot_id).await, Ok(Some(bot)) if bot.kind != "claude-api") { return; }
+    if !matches!(db::bot(app.db(), bot_id).await, Ok(Some(bot)) if !crate::config::is_api_kind(&bot.kind)) { return; }
     let waiting = sqlx::query_scalar::<_, bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id
           WHERE c.bot_id=? AND t.status='queued' AND t.awaits_start=1 AND {})",
@@ -612,7 +612,7 @@ async fn resume_waiting(app: &impl LcHost, host: &str, only: Option<HashSet<Stri
             }
         }
         match db::bot(app.db(), &bot_id).await {
-            Ok(Some(bot)) if bot.kind != "claude-api" => {},
+            Ok(Some(bot)) if !crate::config::is_api_kind(&bot.kind) => {},
             Ok(Some(_)) => continue,
             _ => { unknown.insert(bot_id); continue; }
         }

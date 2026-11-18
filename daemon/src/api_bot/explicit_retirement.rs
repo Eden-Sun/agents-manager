@@ -25,7 +25,7 @@ pub(super) fn retire<'a>(app: &'a Arc<crate::state::App>, bot: &'a str, target: 
 }
 
 async fn candidate(conn: &mut sqlx::SqliteConnection, bot: &str, target: &ApiFreshTarget) -> Result<Option<RetentionCandidate>, E> {
-    sqlx::query_as("SELECT s.bot_id,s.id,s.owner_run_id,s.owner_turn_id,s.generation,s.revision,s.expires_at,s.retired_at,b.deleted_at FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND s.generation=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND s.retired_at IS NULL")
+    sqlx::query_as(concat!("SELECT s.bot_id,s.id,s.owner_run_id,s.owner_turn_id,s.generation,s.revision,s.expires_at,s.retired_at,b.deleted_at FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND s.generation=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND s.retired_at IS NULL"))
         .bind(&target.session_id).bind(bot).bind(target.generation).fetch_optional(conn).await.map_err(|_| E::Storage)
 }
 

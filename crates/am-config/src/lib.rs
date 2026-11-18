@@ -1934,7 +1934,34 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
 /// 在 daemon 內跑 harness、直接打 Claude API 的 bot kind（#1944）。**刻意不放進 [`KINDS`]**：`KINDS` 是「有 CLI、
 /// 要 herdr pane、要探測安裝／額度」的那四種，`tools`／`quota`／`kind_probe`／`agent.start` 都會對它逐一迴圈。
 /// 建立與設定檔驗證改用 [`valid_bot_kind`]。
-pub const API_BOT_KIND: &str = "claude-api";
+pub const API_BOT_KIND: &str = CLAUDE_API_KIND;
+/// 在 daemon 內跑 harness 的 API bot kind（openai-api 計畫 D2a）：**生命週期判斷一律用 [`is_api_kind`]／[`api_kinds_sql!`]，不要寫字面值**
+/// （有一條守門測試 `no_literal_claude_api_kind_outside_the_kind_definitions` 擋）；Claude 專屬的（prompt cache TTL、Claude CLI 登入／
+/// fast／compaction、Claude 總上限）才用 [`CLAUDE_API_KIND`]。`openai-api` 在 D2b 之前**還不是合法 kind**（[`valid_bot_kind`] 不認）。
+pub const CLAUDE_API_KIND: &str = "claude-api";
+pub const OPENAI_API_KIND: &str = "openai-api";
+pub const API_BOT_KINDS: &[&str] = &[CLAUDE_API_KIND, OPENAI_API_KIND];
+/// SQL 的 `kind IN …` 片段字面值（編譯期 `concat!` 用）：`concat!("… b.kind IN ", am_config::api_kinds_sql!(), " …")`。
+#[macro_export]
+macro_rules! api_kinds_sql {
+    () => {
+        "('claude-api','openai-api')"
+    };
+}
+/// 同 [`api_kinds_sql!`]，給執行期組 SQL 的地方。
+pub const API_KINDS_SQL: &str = api_kinds_sql!();
+/// 是不是 API bot（daemon 內跑 harness、沒有 CLI／pane）：目前是 claude-api 與 openai-api。
+pub fn is_api_kind(kind: &str) -> bool {
+    API_BOT_KINDS.contains(&kind)
+}
+/// API bot kind 對應的 provider（`api_bot_attempts.provider`／checkpoint 標籤）；不是 API kind 回 `None`。
+pub fn api_provider(kind: &str) -> Option<&'static str> {
+    match kind {
+        CLAUDE_API_KIND => Some("anthropic"),
+        OPENAI_API_KIND => Some("openai"),
+        _ => None,
+    }
+}
 /// 未指定模型時保留 Opus 預設；可用模型必須有對應的 harness 與價格 snapshot。
 pub const API_BOT_MODEL: &str = "claude-opus-5-5";
 pub const API_BOT_FABLE_MODEL: &str = "claude-fable-5-2";
@@ -3975,3 +4002,6 @@ mod claude_unlimited_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+mod api_kind_guard_tests;

@@ -96,7 +96,7 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
         return Ok(());
     };
     match kind.as_deref() {
-        Some("claude-api") => { tx.rollback().await?; return Ok(()); }
+        Some(k) if crate::config::is_api_kind(k) => { tx.rollback().await?; return Ok(()); }
         Some(_) => {},
         None => anyhow::bail!("queued restamp bot unavailable"),
     }
@@ -173,7 +173,7 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
 }
 
 pub async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
-    let turns: Vec<String> = sqlx::query_scalar("SELECT t.id FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id LEFT JOIN bots b ON b.id=c.bot_id WHERE t.restamp_pending=1 AND (b.kind != 'claude-api' OR b.id IS NULL) ORDER BY t.created_at, t.id")
+    let turns: Vec<String> = sqlx::query_scalar(concat!("SELECT t.id FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id LEFT JOIN bots b ON b.id=c.bot_id WHERE t.restamp_pending=1 AND (b.kind NOT IN ", crate::config::api_kinds_sql!(), " OR b.id IS NULL) ORDER BY t.created_at, t.id"))
         .fetch_all(app.db())
         .await?;
     let mut failed = None;
@@ -991,7 +991,7 @@ async fn prompt_inner(
     expected_run: Option<&str>,
 ) -> LcResult<PromptOut> {
     let bot_kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
-    if bot_kind == "claude-api" {
+    if crate::config::is_api_kind(&bot_kind) {
         if relay.from.is_some() || relay.unverified || relay.queue_class != QueueClass::User || queue_if_busy || queue_awaits_idle || admission != Admission::Gated || want_send_now || clear_draft.is_some() || share_token.is_some() || expected_run.is_some() {
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }

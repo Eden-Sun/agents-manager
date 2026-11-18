@@ -107,7 +107,7 @@ struct Stored {
 }
 
 async fn owner(conn: &mut SqliteConnection, f: &Fence<'_>) -> Result<()> {
-    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b JOIN runs r ON r.bot_id=b.id JOIN turns t ON t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND r.id=? AND r.state='running' AND t.id=? AND t.status='in_flight' AND c.bot_id=b.id)")
+    let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM bots b JOIN runs r ON r.bot_id=b.id JOIN turns t ON t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND r.id=? AND r.state='running' AND t.id=? AND t.status='in_flight' AND c.bot_id=b.id)"))
         .bind(f.bot).bind(f.run).bind(f.turn).fetch_one(conn).await?;
     ensure!(
         valid && f.generation > 0 && f.revision >= 0,
@@ -514,7 +514,7 @@ pub async fn close_reserved_unknown_on(
     finished_at: &str,
 ) -> Result<u64> {
     Ok(sqlx::query(
-        "UPDATE api_bot_attempts
+        concat!("UPDATE api_bot_attempts
             SET state='unknown', estimated_microusd=NULL, finished_at=?
           WHERE bot_id=? AND run_id=? AND turn_id=? AND state='reserved'
             AND EXISTS (
@@ -523,11 +523,11 @@ pub async fn close_reserved_unknown_on(
                   JOIN runs r ON r.bot_id=b.id
                   JOIN turns t ON t.run_id=r.id
                   JOIN conversations c ON c.id=t.conversation_id
-                 WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL
+                 WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL
                    AND r.id=? AND r.state='running'
                    AND t.id=? AND t.run_id=r.id AND t.status='in_flight'
                    AND c.bot_id=b.id
-            )",
+            )"),
     )
     .bind(finished_at)
     .bind(bot_id)
@@ -580,7 +580,7 @@ pub async fn prune_unless_unresolved(pool: &SqlitePool) -> Result<StartupPrune> 
 /// Read a stable bounded page of retention candidates without checkpoint contents.
 #[doc(hidden)]
 pub async fn retention_candidates(pool: &SqlitePool, after: Option<(&str, &str)>, at: &str) -> Result<Vec<(String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>)>> {
-    Ok(sqlx::query_as("SELECT s.bot_id,s.id,s.owner_run_id,s.owner_turn_id,s.generation,s.revision,s.expires_at,s.retired_at,b.deleted_at FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE b.kind='claude-api' AND (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND (? IS NULL OR (s.bot_id,s.id)>(?,?)) ORDER BY s.bot_id,s.id LIMIT 64")
+    Ok(sqlx::query_as(concat!("SELECT s.bot_id,s.id,s.owner_run_id,s.owner_turn_id,s.generation,s.revision,s.expires_at,s.retired_at,b.deleted_at FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE b.kind IN ", crate::config::api_kinds_sql!(), " AND (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND (? IS NULL OR (s.bot_id,s.id)>(?,?)) ORDER BY s.bot_id,s.id LIMIT 64"))
         .bind(at).bind(after.map(|v| v.0)).bind(after.map(|v| v.0)).bind(after.map(|v| v.1)).fetch_all(pool).await?)
 }
 
@@ -590,7 +590,7 @@ type SettledSessionRow = (String,String,Option<String>,Option<String>,i64,i64,St
 /// Invoke only after a retention-specific proof in the caller's write transaction.
 #[doc(hidden)]
 pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &SettledSessionRow, at: &str) -> Result<bool> {
-    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind='claude-api' AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS ? AND b.deleted_at IS ? AND (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))")
+    let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS ? AND b.deleted_at IS ? AND (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))"))
         .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).bind(&c.7).bind(&c.8).bind(at).fetch_one(&mut *conn).await?;
     if !valid { return Ok(false); }
     sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE session_id=? AND state='reserved'")
@@ -603,7 +603,7 @@ pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &SettledSession
 /// Delete one exact explicitly retired session after the caller proved settled receipts in this transaction.
 #[doc(hidden)]
 pub async fn explicit_retire_delete_on(conn: &mut SqliteConnection, c: &SettledSessionRow, at: &str) -> Result<bool> {
-    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS NULL AND ? IS NULL AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))")
+    let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS NULL AND ? IS NULL AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))"))
         .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).bind(&c.7).fetch_one(&mut *conn).await?;
     if !valid { return Ok(false); }
     sqlx::query("UPDATE api_bot_attempts SET state='unknown',estimated_microusd=NULL,finished_at=? WHERE session_id=? AND state='reserved'").bind(at).bind(&c.1).execute(&mut *conn).await?;
@@ -826,7 +826,7 @@ pub async fn stuck_claude_api_bots_in_db(
     stale_unknown_cutoff: &str,
 ) -> Result<Vec<(String, String, &'static str)>> {
     let bots: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM bots WHERE kind='claude-api' AND deleted_at IS NULL"
+        concat!("SELECT id, name FROM bots WHERE kind IN ", crate::config::api_kinds_sql!(), " AND deleted_at IS NULL")
     ).fetch_all(pool).await?;
 
     let mut stuck = Vec::new();

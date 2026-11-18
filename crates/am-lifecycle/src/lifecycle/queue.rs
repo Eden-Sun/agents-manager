@@ -61,7 +61,7 @@ pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyh
 
 async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::Result<()> {
     match db::bot(app.db(), bot_id).await? {
-        Some(bot) if bot.kind == "claude-api" => return Ok(()),
+        Some(bot) if crate::config::is_api_kind(&bot.kind) => return Ok(()),
         Some(_) => {},
         None => anyhow::bail!("queued bot is unavailable"),
     }
@@ -719,10 +719,10 @@ pub async fn pending_queue_retries(app: &impl crate::capabilities::Db) -> anyhow
     // `next_flush_at IS NULL` 的也要收：AGM 派工排進來的 queued turn 沒有退避時間，靠回合結束的事件送出；
     // daemon 重啟時那個事件早就過去了，不補一次就變成永遠不會送的孤兒（AGM 2026-09-16）。
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT c.bot_id, COALESCE(t.next_flush_at, '1970-01-01T00:00:00Z')
+        concat!("SELECT c.bot_id, COALESCE(t.next_flush_at, '1970-01-01T00:00:00Z')
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
            LEFT JOIN bots b ON b.id=c.bot_id
-          WHERE t.status = 'queued' AND (b.kind != 'claude-api' OR b.id IS NULL)",
+          WHERE t.status = 'queued' AND (b.kind NOT IN ", crate::config::api_kinds_sql!(), " OR b.id IS NULL)"),
     )
     .fetch_all(app.db())
     .await?;

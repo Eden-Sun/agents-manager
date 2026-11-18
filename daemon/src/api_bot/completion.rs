@@ -60,11 +60,11 @@ pub(super) async fn completion_owner_is_current_result(
         JOIN turns t ON t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id
         JOIN api_bot_sessions s ON s.bot_id=b.id AND s.owner_run_id=r.id AND s.owner_turn_id=t.id
         WHERE b.id=? AND r.id=? AND t.id=? AND s.id=? AND s.generation=?
-          AND b.kind='claude-api' AND b.deleted_at IS NULL AND r.state='running'
+          AND b.kind IN {api_kinds} AND b.deleted_at IS NULL AND r.state='running'
           AND t.status IN ('in_flight','completed','failed') AND t.delivery='ok'
           AND s.retired_at IS NULL AND {expiry}>?
           AND NOT EXISTS(SELECT 1 FROM runs successor WHERE successor.bot_id=b.id AND successor.id!=r.id AND successor.state IN ('starting','running','stopping'))
-    )"))
+    )", api_kinds = crate::config::API_KINDS_SQL))
         .bind(&key.bot_id).bind(&key.run_id).bind(&key.turn_id).bind(&identity.session_id).bind(identity.generation).bind(crate::db::now())
         .fetch_one(&app.db).await.map_err(|_| StoreError::Retryable)
 }
@@ -84,15 +84,15 @@ async fn store_in_transaction(
     text: &FinalText,
 ) -> Result<Option<Committed>> {
     let conversation_id = sqlx::query_scalar::<_, String>(
-        "SELECT c.id
+        concat!("SELECT c.id
            FROM bots b
            JOIN runs r ON r.bot_id=b.id
            JOIN turns t ON t.run_id=r.id
            JOIN conversations c ON c.id=t.conversation_id
-          WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL
+          WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL
             AND r.id=? AND r.state='running'
             AND t.id=? AND t.run_id=r.id AND t.status='in_flight'
-            AND c.bot_id=b.id",
+            AND c.bot_id=b.id"),
     )
     .bind(&key.bot_id)
     .bind(&key.run_id)

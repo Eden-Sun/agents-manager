@@ -84,7 +84,7 @@ async fn prompt_body_inner(
     let maintenance_open = matches!(app.window_held().await, Ok(None));
     let now = crate::db::now();
     let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| E::Unconfirmed)?;
-    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL)")
+    let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL)"))
         .bind(bot).fetch_one(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     if !valid { return Err(E::Unconfirmed); }
     let conversation: Option<String> = sqlx::query_scalar("SELECT id FROM conversations WHERE bot_id=?").bind(bot).fetch_optional(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
@@ -120,7 +120,7 @@ async fn prompt_body_inner(
         return Ok(PromptOut { turn_id: turn, message_id, delivery, send_now: None });
     }
     if !maintenance_open { return Err(E::Unconfirmed); }
-    let run: Option<String> = sqlx::query_scalar("SELECT r.id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.state='running'")
+    let run: Option<String> = sqlx::query_scalar(concat!("SELECT r.id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.state='running'"))
         .bind(bot).fetch_optional(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     let run = run.ok_or(E::Unconfirmed)?;
     // 換模型後舊對話接續的前置檢查（使用者 2026-11-14）：建立回合之前就證明。接不了就明確拒絕、不寫 pending 回合，
@@ -141,7 +141,7 @@ async fn prompt_body_inner(
     }
     let turn = crate::db::ulid();
     let message = crate::db::ulid();
-    let changed = sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,client_request_id,created_at,prompt_text,auto_resend,cache_ttl_secs) SELECT ?,?,?,'web','in_flight','pending',?,?,?,0,? WHERE EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id JOIN runs r ON r.bot_id=b.id JOIN conversations c ON c.bot_id=b.id WHERE b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.id=? AND r.state='running' AND c.id=?)")
+    let changed = sqlx::query(concat!("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,client_request_id,created_at,prompt_text,auto_resend,cache_ttl_secs) SELECT ?,?,?,'web','in_flight','pending',?,?,?,0,? WHERE EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id JOIN runs r ON r.bot_id=b.id JOIN conversations c ON c.bot_id=b.id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.id=? AND r.state='running' AND c.id=?)"))
         .bind(&turn).bind(&conversation).bind(&run).bind(crid).bind(&now).bind(text).bind(cache_ttl_secs).bind(bot).bind(&run).bind(&conversation)
         .execute(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     if changed.rows_affected()!=1 { return Err(E::Unconfirmed); }

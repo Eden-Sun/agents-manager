@@ -483,7 +483,7 @@ pub async fn adopt_turns_of_ended_runs(app: &impl InterruptionContext, boot: &st
     let mut done = true;
     for (turn, run, bot, state) in rows {
         match db::bot(app.db(), &bot).await {
-            Ok(Some(b)) if b.kind == "claude-api" => continue,
+            Ok(Some(b)) if crate::config::is_api_kind(&b.kind) => continue,
             Ok(Some(_)) => {},
             Ok(None) | Err(_) => { done = false; continue; }
         }
@@ -526,7 +526,7 @@ pub async fn adopt_unbound_send_nows(app: &impl InterruptionContext, boot: &str)
     let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
     for (turn, conv, bot) in rows {
         match db::bot(app.db(), &bot).await {
-            Ok(Some(b)) if b.kind == "claude-api" => continue,
+            Ok(Some(b)) if crate::config::is_api_kind(&b.kind) => continue,
             Ok(Some(_)) => {},
             Ok(None) | Err(_) => { done = false; continue; }
         }

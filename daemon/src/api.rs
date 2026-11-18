@@ -3698,9 +3698,9 @@ async fn patch_bot(
             _ => true,
         }
     } else { false };
-    let mut out = json!({"needs_restart": if kind == "claude-api" { false } else { needs_restart || role_needs_restart }});
+    let mut out = json!({"needs_restart": if crate::config::is_api_kind(&kind) { false } else { needs_restart || role_needs_restart }});
     if let Some(value) = remapped { out["remapped"] = value; }
-    if kind == "claude-api" && b.model.is_some() {
+    if kind == crate::config::CLAUDE_API_KIND && b.model.is_some() {
         let has_session: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL)")
             .bind(&id).fetch_one(&app.db).await.unwrap_or(false);
         if has_session {
@@ -5650,7 +5650,7 @@ async fn api_bot_turn_timeline(
         .map_err(any_err)?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if bot.kind != "claude-api" {
+    if !crate::config::is_api_kind(&bot.kind) {
         return Err(LcError::Bad("only claude-api bots have api timeline".into()));
     }
     let timeline = crate::api_bot::timeline::get_turn_timeline(&app.db, &id, &turn_id)
@@ -5740,7 +5740,7 @@ async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Que
     let common = StartQuery { resume: q.resume, session: q.session };
     let opts = resume_opts(&common)?;
     let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|b| b.kind);
-    if kind.as_deref() == Some("claude-api") {
+    if kind.as_deref().is_some_and(crate::config::is_api_kind) {
         use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshTarget, ApiNativeStartError, ApiNativeStartMode};
         if opts.resume_session.is_some() { return Err(LcError::Bad("api_native_session_override_unsupported".into())); }
         let fresh = common.resume.as_deref().is_some_and(|v| v.trim() == "fresh");
@@ -6592,7 +6592,7 @@ pub(crate) async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let bot_record = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?;
     let kind = bot_record.as_ref().map(|b| b.kind.as_str());
-    if kind == Some("claude-api") {
+    if kind.is_some_and(crate::config::is_api_kind) {
         let is_advisor = bot_record.as_ref().and_then(|b| b.role.as_deref()) == Some("advisor");
         let is_bot_dispatch = matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. }) || b.relay_from.is_some();
         if is_bot_dispatch && !is_advisor {
@@ -6701,7 +6701,7 @@ pub(crate) async fn prompt_bot(
             if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
-        if kind != Some("claude-api") {
+        if !kind.is_some_and(crate::config::is_api_kind) {
             ensure_relay_member_ready(&app, sender, &id).await?;
         }
         let request_id = db::ulid();
@@ -6735,7 +6735,7 @@ pub(crate) async fn prompt_bot(
             }
         }
         let delivery_key = format!("relay-request:{request_id}");
-        let is_target_claude_api = kind == Some("claude-api");
+        let is_target_claude_api = kind == Some(crate::config::CLAUDE_API_KIND);
         let out = if is_target_claude_api {
             use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError, ApiNativeStartMode};
             if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(&app, 0).await {

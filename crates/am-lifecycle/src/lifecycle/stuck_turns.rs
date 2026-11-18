@@ -151,15 +151,15 @@ pub async fn sweep_at(app: &impl StuckTurnContext, host: Option<&str>, now: Inst
 
 async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instant, threshold: Duration) -> Vec<String> {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
-        "SELECT t.id, r.id, r.bot_id, r.agent_status
+        concat!("SELECT t.id, r.id, r.bot_id, r.agent_status
            FROM turns t
            JOIN runs r ON r.id = t.run_id
            JOIN bots b ON b.id = r.bot_id
            JOIN projects p ON p.id = b.project_id
           WHERE t.status = 'in_flight' AND r.state = 'running' AND (? IS NULL OR p.host = ?)
             AND p.handed_off_to IS NULL
-            AND b.kind != 'claude-api'
-          ORDER BY t.rowid",
+            AND b.kind NOT IN ", crate::config::api_kinds_sql!(), "
+          ORDER BY t.rowid"),
     )
     .bind(host)
     .bind(host)
@@ -264,7 +264,7 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
         return None;
     }
     let bot = db::bot(app.db(), &run.bot_id).await.ok()??;
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return None;
     }
     let turn = db::in_flight_turn(app.db(), run_id).await.ok()??;
@@ -291,7 +291,7 @@ pub async fn close_after_session_paused(app: &impl StuckTurnContext, run_id: &st
 /// `unknown` 若仍未驗證，收成 failed 並保留 unknown；已確認送達才可走完成備援。
 async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     if let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await {
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             return Ok(false);
         }
     }
@@ -312,7 +312,7 @@ async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn
 /// 從未送出的 in_flight 回合：failed＋`delivery='failed'`＋一則系統訊息，同一個交易。`Ok(false)`：別的路先收掉了。
 async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return Ok(false);
     }
     let mut tx = app.db().begin().await?;
@@ -331,7 +331,7 @@ async fn fail_never_sent(app: &impl StuckTurnContext, run: &db::Run, turn: &db::
 
 async fn fail_unconfirmed(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return Ok(false);
     }
     let mut tx = app.db().begin().await?;
@@ -347,7 +347,7 @@ async fn fail_unconfirmed(app: &impl StuckTurnContext, run: &db::Run, turn: &db:
 /// 收一筆。`Ok(false)`：CAS 沒搶到（別的路剛好收掉了）。
 async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn, why: CloseWhy) -> anyhow::Result<bool> {
     let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         return Ok(false);
     }
     let reply = proven_reply(app, &bot, run, turn).await?;

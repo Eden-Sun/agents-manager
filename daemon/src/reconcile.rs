@@ -133,7 +133,7 @@ impl Recovery {
             };
             if !owed { continue; }
             match db::bot(app.db(), &run.bot_id).await {
-                Ok(Some(bot)) if bot.kind == "claude-api" => continue,
+                Ok(Some(bot)) if crate::config::is_api_kind(&bot.kind) => continue,
                 Ok(Some(_)) => {},
                 Ok(None) | Err(_) => { still.insert(run.id); continue; }
             }
@@ -642,7 +642,7 @@ pub(crate) async fn reconcile_host_locked(app: &impl ReconcileHostEnv, host: &st
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();
     for bot in bots {
-        if bot.kind == "claude-api" { continue; }
+        if crate::config::is_api_kind(&bot.kind) { continue; }
         let mut bot = bot;
         if handed_off.contains(bot.project_id.as_str()) {
             continue;

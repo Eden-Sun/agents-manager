@@ -71,11 +71,11 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        let is_api_advisor = bot.kind == "claude-api" && bot.role.as_deref() == Some("advisor");
+        let is_api_advisor = crate::config::is_api_kind(&bot.kind) && bot.role.as_deref() == Some("advisor");
         let is_shared = shared_ids.contains(&bot.id);
-        let dispatchable = (bot.kind != "claude-api" || is_api_advisor) && !is_shared;
+        let dispatchable = (!crate::config::is_api_kind(&bot.kind) || is_api_advisor) && !is_shared;
         let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             peer["billing"] = json!("api");
             if !is_api_advisor {
                 peer["dispatch_reason"] = json!("純 API 模型，不能接受 bot 派工");
@@ -167,7 +167,7 @@ pub(crate) async fn list(
         let mut reasons = Vec::new();
 
         // -1. claude-api（純 API 模型，不能接受 bot 派工）
-        if bot.kind == "claude-api" {
+        if crate::config::is_api_kind(&bot.kind) {
             eligible = false;
             reasons.push("純 API 模型，不能接受 bot 派工".to_string());
         }

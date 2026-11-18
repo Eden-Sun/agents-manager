@@ -73,7 +73,7 @@ pub(crate) async fn cache_info(db: &SqlitePool, bot_id: &str) -> Result<Value, s
 
 fn cache_json(last: Option<(String, Option<i64>)>, working: bool) -> Value {
     let Some((at, ttl)) = last else { return json!({"last_request_at": null, "ttl_secs": null, "expires_at": null, "working": working}) };
-    let ttl = crate::cache_clock::ttl_secs_for("claude-api", ttl).unwrap_or(crate::cache_clock::API_TTL_DEFAULT_SECS);
+    let ttl = crate::cache_clock::ttl_secs_for(crate::config::CLAUDE_API_KIND, ttl).unwrap_or(crate::cache_clock::API_TTL_DEFAULT_SECS);
     let expires = crate::db::parse_ts(&at).map(|t| crate::db::iso_at(t + chrono::Duration::seconds(ttl)));
     json!({"last_request_at": at, "ttl_secs": ttl, "expires_at": expires, "working": working})
 }

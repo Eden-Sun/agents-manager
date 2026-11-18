@@ -30,8 +30,8 @@ fn parse_target(body: &Value) -> Result<ApiFreshTarget, LcError> {
 /// 核心只回 `Unconfirmed`、分不出這兩種，所以在進核心前先分。核心仍會在交易裡重新驗證，這一步只是分類。
 async fn preflight(app: &App, bot: &str, target: &ApiFreshTarget) -> Result<(), LcError> {
     let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT s.generation FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id \
-         WHERE s.id=? AND s.bot_id=? AND s.retired_at IS NULL AND b.kind='claude-api' AND b.deleted_at IS NULL",
+        concat!("SELECT s.generation FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id \
+         WHERE s.id=? AND s.bot_id=? AND s.retired_at IS NULL AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL"),
     )
     .bind(&target.session_id)
     .bind(bot)

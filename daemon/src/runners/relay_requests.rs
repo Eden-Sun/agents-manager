@@ -330,7 +330,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                 }
             }
             let to_kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&to).fetch_optional(&app.db).await?;
-            let is_claude_api = to_kind.as_deref() == Some("claude-api");
+            let is_claude_api = to_kind.as_deref() == Some(crate::config::CLAUDE_API_KIND);
             if is_claude_api && existing.is_none() {
                 if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(app, 0).await {
                     let cap_str = crate::claude_api_cap::format_usd_pretty(cap);

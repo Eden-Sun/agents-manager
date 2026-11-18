@@ -292,7 +292,7 @@ impl ApiBotRuntime {
         };
         if !app.api_startup_gate.ready() || self.explicit_retire_quarantined(bot_id) { tracing::warn!(bot = bot_id, "api native start not confirmed: startup gate not ready or bot quarantined"); return Err(E::Unconfirmed); }
         let bot = crate::db::bot(&app.db, bot_id).await.map_err(|error| { tracing::warn!(bot = bot_id, ?error, "api native start not confirmed: bot lookup failed"); E::Unconfirmed })?
-            .filter(|b| b.kind == "claude-api" && b.deleted_at.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: bot missing, deleted or not claude-api"); E::Unconfirmed })?;
+            .filter(|b| crate::config::is_api_kind(&b.kind) && b.deleted_at.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: bot missing, deleted or not claude-api"); E::Unconfirmed })?;
         let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|error| { tracing::warn!(bot = bot_id, ?error, "api native start not confirmed: project lookup failed"); E::Unconfirmed })?
             .filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: project missing, deleted or handed off"); E::Unconfirmed })?;
         // 遠端專案不隔離、不需要 bwrap，但主機要連得上；沒連線就明確拒絕（不建 run）。
@@ -949,7 +949,7 @@ impl ApiBotRuntime {
             crate::lifecycle::race_point::hit("api_native_before_delivery_commit", &key.turn_id).await;
             let admitted = async {
                 let mut tx = crate::db::begin_write(&app.db).await.map_err(|_| ())?;
-                let changed = sqlx::query("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind='claude-api' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)")
+                let changed = sqlx::query(concat!("UPDATE turns SET delivery='ok',delivery_verified=1 WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id JOIN conversations c ON c.id=turns.conversation_id AND c.bot_id=b.id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.cwd IS ? AND p.path=?)"))
                     .bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id).bind(bot.cwd.as_deref()).bind(&project.path).execute(&mut *tx).await.map_err(|_| ())?;
                 if changed.rows_affected() != 1 || app.shutdown.is_cancelled() { tx.rollback().await.map_err(|_| ())?; return Err(()); }
                 tx.commit().await.map_err(|_| ())?;
@@ -1200,9 +1200,9 @@ impl crate::lifecycle::api_bot_port::ApiBotPort for crate::state::App {
     }
     async fn api_fresh_target(&self, bot_id: &str) -> crate::lifecycle::api_bot_port::ApiFreshAvailability {
         use crate::lifecycle::api_bot_port::{ApiFreshAvailability as A, ApiFreshTarget};
-        match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if bot.kind == "claude-api" && bot.deleted_at.is_none() => {}, _ => return A::Unavailable };
+        match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if crate::config::is_api_kind(&bot.kind) && bot.deleted_at.is_none() => {}, _ => return A::Unavailable };
         let _gate = match tokio::time::timeout(Duration::from_secs(3), self.api_bot_runtime.bot_gate(bot_id)).await { Ok(guard) => guard, Err(_) => return A::Unavailable };
-        let bot = match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if bot.kind == "claude-api" && bot.deleted_at.is_none() => bot, _ => return A::Unavailable };
+        let bot = match crate::db::bot(&self.db, bot_id).await { Ok(Some(bot)) if crate::config::is_api_kind(&bot.kind) && bot.deleted_at.is_none() => bot, _ => return A::Unavailable };
         if !self.api_startup_gate.ready() || self.shutdown.is_cancelled() || self.api_bot_runtime.explicit_retire_quarantined(&bot.id) { return A::Unavailable; }
         if !matches!(crate::db::project(&self.db, &bot.project_id).await, Ok(Some(p)) if p.deleted_at.is_none() && p.handed_off_to.is_none()) { return A::Unavailable; }
         let expiry = crate::db::ts_sql("expires_at");
@@ -1987,7 +1987,7 @@ async fn validated_turn(
         .await
         .map_err(|_| ApiBotError::Upstream)?
         .ok_or(ApiBotError::IdentityMismatch)?;
-    if bot.deleted_at.is_some() || bot.kind != "claude-api" {
+    if bot.deleted_at.is_some() || !crate::config::is_api_kind(&bot.kind) {
         return Err(ApiBotError::IdentityMismatch);
     }
     let project = crate::db::project(&app.db, &bot.project_id)

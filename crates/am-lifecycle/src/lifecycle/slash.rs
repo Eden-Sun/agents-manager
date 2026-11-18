@@ -768,7 +768,7 @@ pub async fn login(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
 /// grok 沒有同名指令，不猜。
 pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
     match kind {
-        "claude" | "codex" | "claude-api" => Some("/compact"),
+        "claude" | "codex" | crate::config::CLAUDE_API_KIND => Some("/compact"),
         _ => None,
     }
 }
@@ -788,7 +788,7 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
             "message": format!("{} has no /compact command", bot.kind),
         })));
     };
-    if bot.kind == "claude-api" {
+    if crate::config::is_api_kind(&bot.kind) {
         let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
             LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
         })?;

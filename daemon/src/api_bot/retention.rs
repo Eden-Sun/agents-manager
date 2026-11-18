@@ -52,7 +52,7 @@ pub(super) fn scan_once(app: &Arc<crate::state::App>) -> impl Future<Output = an
 }
 async fn scan_body(app: &Arc<crate::state::App>) -> anyhow::Result<()> {
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() { return Ok(()); }
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE kind='claude-api')").fetch_one(&app.db).await?;
+    let exists: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM bots WHERE kind IN ", crate::config::api_kinds_sql!(), ")")).fetch_one(&app.db).await?;
     if !exists { return Ok(()); }
     let at = crate::db::now();
     let mut after: Option<(String,String)> = None;

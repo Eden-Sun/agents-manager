@@ -34,7 +34,7 @@ pub const API_TTL_LONG_SECS: i64 = 3600;
 
 /// 帶上最後一回合的 TTL：claude-api 用它（不是 3600 就當預設 300），其他 kind 同 [`ttl_secs`]。
 pub fn ttl_secs_for(kind: &str, api_ttl: Option<i64>) -> Option<i64> {
-    if kind == "claude-api" {
+    if kind == crate::config::CLAUDE_API_KIND {
         return Some(if api_ttl == Some(API_TTL_LONG_SECS) { API_TTL_LONG_SECS } else { API_TTL_DEFAULT_SECS });
     }
     ttl_secs(kind)
@@ -47,7 +47,7 @@ pub fn never_cools(kind: &str) -> bool {
 
 /// 有「最後一次 API 活動」可推的 kind（`last_api_at`）。
 fn tracks_activity(kind: &str) -> bool {
-    ttl_secs(kind).is_some() || never_cools(kind) || kind == "claude-api"
+    ttl_secs(kind).is_some() || never_cools(kind) || kind == crate::config::CLAUDE_API_KIND
 }
 
 /// 最近一筆真的送出去的回合（不含 queued）。

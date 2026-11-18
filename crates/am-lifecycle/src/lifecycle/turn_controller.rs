@@ -209,7 +209,7 @@ async fn api_bot_terminal_on(
 ) -> Result<Outcome> {
     edge("in_flight", target, why)?;
     let done = sqlx::query(
-        "UPDATE turns
+        concat!("UPDATE turns
             SET status=?, completed_at=COALESCE(completed_at, ?)
           WHERE id=? AND run_id=? AND status='in_flight'
             AND EXISTS (
@@ -218,9 +218,9 @@ async fn api_bot_terminal_on(
                   JOIN bots b ON b.id=r.bot_id
                   JOIN conversations c ON c.id=turns.conversation_id
                  WHERE r.id=turns.run_id AND r.id=? AND r.state='running'
-                   AND b.id=? AND b.kind='claude-api' AND b.deleted_at IS NULL
+                   AND b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL
                    AND c.bot_id=b.id
-            )",
+            )"),
     )
     .bind(target)
     .bind(crate::db::now())
@@ -633,6 +633,6 @@ mod tests {
 pub async fn abandon_api_run_turns_on(conn: &mut sqlx::SqliteConnection, bot: &str, run: &str) -> Result<u64> {
     edge("in_flight", "failed", "API-bot restart abandonment")?;
     edge("queued", "failed", "API-bot restart abandonment")?;
-    Ok(sqlx::query("UPDATE turns SET status='failed', completed_at=COALESCE(completed_at,?), delivery=CASE WHEN status='queued' THEN 'failed' ELSE delivery END WHERE run_id=? AND status IN ('in_flight','queued') AND EXISTS (SELECT 1 FROM conversations c JOIN runs r ON r.bot_id=c.bot_id JOIN bots b ON b.id=r.bot_id WHERE c.id=turns.conversation_id AND b.id=? AND b.kind='claude-api' AND r.id=? AND r.state IN ('starting','running','stopping'))")
+    Ok(sqlx::query(concat!("UPDATE turns SET status='failed', completed_at=COALESCE(completed_at,?), delivery=CASE WHEN status='queued' THEN 'failed' ELSE delivery END WHERE run_id=? AND status IN ('in_flight','queued') AND EXISTS (SELECT 1 FROM conversations c JOIN runs r ON r.bot_id=c.bot_id JOIN bots b ON b.id=r.bot_id WHERE c.id=turns.conversation_id AND b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND r.id=? AND r.state IN ('starting','running','stopping'))"))
         .bind(crate::db::now()).bind(run).bind(bot).bind(run).execute(conn).await?.rows_affected())
 }

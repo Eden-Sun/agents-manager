@@ -37,7 +37,7 @@ async fn barrier_body(app: &Arc<crate::state::App>) {
         Err("api_startup_not_exclusive")
     } else {
         match sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM bots WHERE kind='claude-api')",
+            concat!("SELECT EXISTS(SELECT 1 FROM bots WHERE kind IN ", crate::config::api_kinds_sql!(), ")"),
         )
         .fetch_one(&app.db)
         .await
