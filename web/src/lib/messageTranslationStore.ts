@@ -5,10 +5,22 @@
  * 模組層不呼叫 msg()／api／store：純資料，文案與 API 都在 hook 裡。
  */
 
+/** 品質沒過的細節（daemon 422 的 `detail`）：只有檢查名稱、字數、是否相同、用過的模型與次數，不含整段內容。 */
+export interface RejectDetail {
+  check: string
+  src_latin: number
+  src_cjk: number
+  reply_latin: number
+  reply_cjk: number
+  identical: boolean
+  models: string[]
+  attempts: number
+}
+
 export type TranslationEntry =
   | { status: 'idle' | 'loading' | 'error' }
   /** 品質檢查沒過（daemon 422 translate_rejected）：這則翻不好，不是服務壞掉；顯示原文＋小提示，手動鈕照常。 */
-  | { status: 'rejected'; reason?: string; text?: string }
+  | { status: 'rejected'; reason?: string; text?: string; detail?: RejectDetail }
   | { status: 'done'; text: string; show: boolean; cost: number | null; cached: boolean; model: string; lowConfidence?: boolean; jevProb?: number | null }
 
 const IDLE: TranslationEntry = { status: 'idle' }

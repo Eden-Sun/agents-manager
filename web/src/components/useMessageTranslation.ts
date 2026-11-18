@@ -1,17 +1,23 @@
 import { createElement, useEffect, useSyncExternalStore } from 'react'
-import { translateMessage } from '../api'
+import { reportTranslation, translateMessage } from '../api'
 import { ApiError } from '../api/types'
 import type { Message } from '../api/types'
 import { isMostlyEnglish } from '../lib/isMostlyEnglish'
 import { isMostlySimplified } from '../lib/zhSimplified'
 import { useT } from '../lib/i18n'
-import { autoTranslateAllowed, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, noteTranslationSuccess, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
+import { autoTranslateAllowed, type RejectDetail, claimAutoTranslate, getTranslation, isDeclined, isWanted, noteAutoFailure, noteTranslationSuccess, setDeclined, setTranslation, setWanted, subscribeTranslations } from '../lib/messageTranslationStore'
 import { useStore } from '../store/store'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
 import { MessageTranslationButton, MessageTranslationContent } from './MessageTranslation'
 import { AUTO_TRANSLATE_RECENT, usd } from './messageTranslationConstants'
 
 export { AUTO_TRANSLATE_RECENT, usd }
+
+function isRejectDetail(v: unknown): v is RejectDetail {
+  if (typeof v !== 'object' || v === null) return false
+  const d = v as Record<string, unknown>
+  return typeof d.check === 'string' && typeof d.identical === 'boolean' && Array.isArray(d.models) && typeof d.attempts === 'number'
+}
 
 /**
  * assistant 訊息說英文時，meta 列的「翻譯」鈕＋譯文（daemon 用 Claude API 翻成繁中，同一則有快取不重複扣費）。
@@ -45,7 +51,8 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
         if (e instanceof ApiError && e.status === 422 && e.body.error === 'translate_rejected') {
           const reason = typeof e.body.reason === 'string' ? e.body.reason : undefined
           const text = typeof e.body.translation === 'string' && e.body.translation.trim() ? e.body.translation : undefined
-          setTranslation(msg.id, { status: 'rejected', reason, text })
+          const detail = isRejectDetail(e.body.detail) ? e.body.detail : undefined
+          setTranslation(msg.id, { status: 'rejected', reason, text, detail })
           // 手動按的要看到原因（不是靜默失敗）：提示列會寫檢查名稱，重試就再按「翻譯」，被擋的譯文可用「仍然顯示譯文」看。
           if (kind === 'manual') useStore.getState().notify('info', reason === 'japanese_output' ? t('譯文含日文，品質檢查未通過') : reason === 'untranslated' ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過') : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試'))
           return
@@ -93,6 +100,13 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
       onFlip: flipFace,
       onManual: () => { setWanted(msg.id, true); setDeclined(msg.id, false); run('manual') },
       rejectedReason: st.status === 'rejected' ? st.reason : undefined,
+      rejectDetail: st.status === 'rejected' ? st.detail : undefined,
+      onReport: () => {
+        reportTranslation(msg.id).then(
+          (r) => useStore.getState().notify('info', r.sent ? t('已回報給管理者') : t('10 分鐘內已回報過這則，不重複送出')),
+          (e: unknown) => useStore.getState().notify('error', t('回報失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
+        )
+      },
       onShowAnyway: st.status === 'rejected' && st.text
         ? () => { setWanted(msg.id, true); setTranslation(msg.id, { status: 'done', text: st.text!, show: true, cost: null, cached: true, model: '', lowConfidence: true, jevProb: null }) }
         : undefined,

@@ -308,6 +308,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(crate::changelog_translate::get_translation).post(crate::changelog_translate::post_translation),
         )
         .route("/messages/{id}/translate", post(crate::message_translate::post_translate))
+        .route("/messages/{id}/translate-report", post(crate::message_translate::post_translate_report))
         .route("/pending-questions/translate", post(crate::message_translate::post_pending_question_translate))
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
@@ -891,6 +892,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/keys", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/send-queued-now", BotRoutePolicy::UserOnly),
     ("POST", "/api/messages/{id}/translate", BotRoutePolicy::UserOnly),
+    ("POST", "/api/messages/{id}/translate-report", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/read", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/suggestion/accept", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/text", BotRoutePolicy::UserOnly),

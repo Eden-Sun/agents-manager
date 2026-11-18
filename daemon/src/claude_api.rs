@@ -358,6 +358,13 @@ pub async fn complete_with_effort(app: &App, req: ClaudeRequest, effort: &str) -
     complete_with_timeout(&cfg, &app.claude_api, req, None, Some(effort)).await
 }
 
+/// 同 [`complete_with_effort`]，但這一次也指定模型（`model` 須是 `claude-` 開頭的安全字元）。`effort` 為 `None` 時用設定的 effort。
+/// 給「品質沒過就升級模型重試」用（message_translate）；不改設定、不改之後的呼叫。
+pub async fn complete_with_model(app: &App, req: ClaudeRequest, model: &str, effort: Option<&str>) -> Result<ClaudeReply, ClaudeError> {
+    let cfg = app.cfg.claude_fresh().await;
+    complete_with_timeout_model(&cfg, &app.claude_api, req, None, effort, Some(model)).await
+}
+
 pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest) -> Result<ClaudeReply, ClaudeError> {
     complete_with_timeout(cfg, api, req, None, None).await
 }
@@ -371,6 +378,11 @@ pub async fn complete_at_least(app: &App, req: ClaudeRequest, min_timeout_ms: u6
 
 /// `effort_override`：`Some` 時這一次用它取代設定的 effort（空字串仍是「不送」，呼叫端不該傳空字串）。
 async fn complete_with_timeout(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest, min_timeout_ms: Option<u64>, effort_override: Option<&str>) -> Result<ClaudeReply, ClaudeError> {
+    complete_with_timeout_model(cfg, api, req, min_timeout_ms, effort_override, None).await
+}
+
+/// `model_override`：`Some` 時這一次用它取代設定的模型（保險絲、帳本仍照用途）。
+async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest, min_timeout_ms: Option<u64>, effort_override: Option<&str>, model_override: Option<&str>) -> Result<ClaudeReply, ClaudeError> {
     let Some(state) = cfg.claude_use_state(req.use_case) else { return Err(ClaudeError::Disabled) };
     let legacy = CLAUDE_API_USES.iter().any(|d| d.id == req.use_case && d.legacy_section.is_some());
     if !state.enabled || (!legacy && !cfg.claude_api.enabled) {
@@ -384,7 +396,7 @@ async fn complete_with_timeout(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeReq
     let request = MessagesRequest {
         endpoint: cfg.claude_api.endpoint.clone(),
         key,
-        model: state.model.clone(),
+        model: model_override.map_or_else(|| state.model.clone(), str::to_string),
         effort: effort_override.map_or_else(|| state.effort.clone(), str::to_string),
         max_tokens: req.max_tokens,
         timeout_ms: cfg.claude_api.timeout_ms.max(min_timeout_ms.unwrap_or(0)).max(1),
@@ -715,7 +727,7 @@ fn settings_json(cfg: &ConfigFile) -> Value {
     let uses: Vec<Value> = CLAUDE_API_USES
         .iter()
         .map(|d| {
-            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default });
+            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default, retry_model: String::new() });
             json!({
                 "id": d.id, "group": d.group, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
                 "default_model": d.model, "default_effort": d.effort, "default_max_per_hour": d.max_per_hour,
@@ -726,10 +738,10 @@ fn settings_json(cfg: &ConfigFile) -> Value {
     let groups: Vec<Value> = CLAUDE_API_GROUPS
         .iter()
         .map(|g| {
-            let s = cfg.claude_group_state(g.id).unwrap_or(ClaudeApiUseState { enabled: false, model: g.model.into(), effort: g.effort.into(), max_per_hour: g.max_per_hour, auto: g.auto_default });
+            let s = cfg.claude_group_state(g.id).unwrap_or(ClaudeApiUseState { enabled: false, model: g.model.into(), effort: g.effort.into(), max_per_hour: g.max_per_hour, auto: g.auto_default, retry_model: g.retry_model.into() });
             json!({
                 "id": g.id, "label": g.label, "uses": g.members, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
-                "default_model": g.model, "default_effort": g.effort, "default_max_per_hour": g.max_per_hour,
+                "default_model": g.model, "default_effort": g.effort, "default_max_per_hour": g.max_per_hour, "retry_model": s.retry_model, "default_retry_model": g.retry_model,
             })
         })
         .collect();
@@ -756,6 +768,7 @@ pub(crate) struct UseBody {
     pub effort: Option<String>,
     pub max_per_hour: Option<u32>,
     pub auto: Option<bool>,
+    pub retry_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -796,6 +809,11 @@ fn validate_body(id: &str, u: &UseBody, has_auto: bool, floor: u32) -> Result<()
         }
         if u.auto.is_some() && !has_auto {
             return Err(LcError::Bad(format!("{id} has no auto switch")));
+        }
+        if let Some(m) = u.retry_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            if !claude_model_id_ok(m) {
+                return Err(LcError::Bad(format!("bad retry_model: {m}")));
+            }
         }
         if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
             return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
@@ -840,7 +858,10 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
         if let Some(v) = u.auto {
             st.auto = Some(v);
         }
-        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto });
+        if let Some(v) = u.retry_model.as_deref() {
+            st.retry_model = v.trim().to_string();
+        }
+        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto, retry_model: Some(st.retry_model.clone()) });
         // 更新框翻譯的功能本身讀 `[changelog_translate]`：把共用的開關／模型／effort 同步過去（每小時上限它自己管，不動）。
         if gid == "translate" {
             let t = &mut cfg.changelog_translate;

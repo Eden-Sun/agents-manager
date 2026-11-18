@@ -1068,6 +1068,9 @@ pub struct ClaudeApiUseCfg {
     /// 「自動」開關（目前只有 `message_translate`：英文訊息自動翻譯，使用者 2026-11-06）。沒寫＝用 [`ClaudeApiUseDef::auto_default`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
+    /// 品質檢查沒過時的重試模型（只有組會寫）。沒寫＝用組預設；空字串＝不升級。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_model: Option<String>,
 }
 
 
@@ -1111,11 +1114,13 @@ pub struct ClaudeApiGroupDef {
     pub max_per_hour: u32,
     pub default_on: bool,
     pub auto_default: Option<bool>,
+    /// 品質檢查沒過（原樣回傳或沒翻成中文）時的重試模型；空字串＝不升級。
+    pub retry_model: &'static str,
 }
 pub const CLAUDE_API_GROUPS: &[ClaudeApiGroupDef] = &[
-    ClaudeApiGroupDef { id: "schedule_outcome", label: "排程結果分類", members: &["schedule_outcome"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: None },
-    ClaudeApiGroupDef { id: "changelog_analysis", label: "changelog 影響分析", members: &["changelog_review", "release_triage"], model: "claude-opus-5-5", effort: "low", max_per_hour: 30, default_on: false, auto_default: None },
-    ClaudeApiGroupDef { id: "translate", label: "翻譯", members: &["message_translate", "changelog_translate"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, default_on: true, auto_default: Some(true) },
+    ClaudeApiGroupDef { id: "schedule_outcome", label: "排程結果分類", members: &["schedule_outcome"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: None , retry_model: "" },
+    ClaudeApiGroupDef { id: "changelog_analysis", label: "changelog 影響分析", members: &["changelog_review", "release_triage"], model: "claude-opus-5-5", effort: "low", max_per_hour: 30, default_on: false, auto_default: None , retry_model: "" },
+    ClaudeApiGroupDef { id: "translate", label: "翻譯", members: &["message_translate", "changelog_translate"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, default_on: true, auto_default: Some(true) , retry_model: "claude-sonnet-5-5" },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet／Opus）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
@@ -1166,6 +1171,8 @@ pub struct ClaudeApiUseState {
     pub max_per_hour: u32,
     /// 自動開關的生效值；沒有自動開關的用途是 `None`。
     pub auto: Option<bool>,
+    /// 品質檢查沒過時重試改用的模型（只給組用；空字串＝不升級，照舊同模型重試）。
+    pub retry_model: String,
 }
 
 impl ClaudeApiCfg {
@@ -1187,6 +1194,7 @@ impl ClaudeApiCfg {
             effort: pick(&cfg.effort, def.effort),
             max_per_hour: cfg.max_per_hour.unwrap_or(def.max_per_hour),
             auto: def.auto_default.map(|d| cfg.auto.unwrap_or(d)),
+            retry_model: CLAUDE_API_GROUPS.iter().find(|g| g.id == def.group).map_or_else(String::new, |g| g.retry_model.to_string()),
         })
     }
 }
@@ -1203,7 +1211,7 @@ impl ConfigFile {
         match id {
             "changelog_translate" => {
                 let t = &self.changelog_translate;
-                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None })
+                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None, retry_model: String::new() })
             }
             _ => self.claude_api.use_state(id),
         }
@@ -1219,7 +1227,7 @@ impl ConfigFile {
         let written = |id: &str| -> ClaudeApiUseCfg {
             if id == "changelog_translate" && !self.changelog_translate.is_default() {
                 let t = &self.changelog_translate;
-                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: Some(t.max_per_hour), auto: None };
+                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: Some(t.max_per_hour), auto: None, retry_model: None };
             }
             self.claude_api.uses.get(id).cloned().unwrap_or_default()
         };
@@ -1266,6 +1274,7 @@ fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseSta
         effort: pick(&g.effort, gd.effort),
         max_per_hour: g.max_per_hour.unwrap_or(gd.max_per_hour),
         auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
+        retry_model: g.retry_model.clone().unwrap_or_else(|| gd.retry_model.to_string()),
     }
 }
 

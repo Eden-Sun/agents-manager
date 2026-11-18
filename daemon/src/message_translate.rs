@@ -32,6 +32,19 @@ Do NOT translate code, identifiers, file paths, shell commands, URLs, environmen
 Company names, product or system names, and abbreviations (e.g., CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. \
 Do not add explanations. Reply with the translation only.";
 
+/// 品質沒過的細節：檢查名稱、拉丁／CJK 字數（同 `prose_stats`）、譯文與原文是否完全相同、每次嘗試用的模型與總次數。
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub(crate) struct RejectDetail {
+    pub check: String,
+    pub src_latin: usize,
+    pub src_cjk: usize,
+    pub reply_latin: usize,
+    pub reply_cjk: usize,
+    pub identical: bool,
+    pub models: Vec<String>,
+    pub attempts: usize,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct CacheEntry {
     translation: String,
@@ -55,6 +68,12 @@ struct CacheEntry {
     /// 品質沒過的那份譯文（最後一次嘗試）：使用者按「仍然顯示譯文」時用，不自動顯示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejected_translation: Option<String>,
+    /// 品質沒過的細節（給網頁「原因」與回報用）：只有數字與模型名，不含整段內容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reject_detail: Option<RejectDetail>,
+    /// 回報給管理者的時間（10 分鐘內同一則只送一次）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    report_sent_at: Option<String>,
     /// 品質沒過後重試時用的 effort（往上提一階）；沒重試就沒有，照設定的 effort 翻。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
@@ -154,11 +173,23 @@ pub(crate) fn is_quality_rejection(e: &LcError) -> bool {
 
 /// 422 本體：`reason` 是檢查名稱，`translation` 是被擋的那份譯文（網頁「仍然顯示譯文」用；舊標記沒有）。
 fn rejection_error(reason: &str, translation: Option<&str>) -> LcError {
+    rejection_error_with(reason, translation, None)
+}
+
+fn rejection_error_with(reason: &str, translation: Option<&str>, detail: Option<&RejectDetail>) -> LcError {
     let mut v = json!({"error": "translate_rejected", "reason": reason});
     if let Some(t) = translation.filter(|t| !t.trim().is_empty()) {
         v["translation"] = json!(t);
     }
+    if let Some(d) = detail {
+        v["detail"] = json!(d);
+    }
     LcError::Unprocessable(v)
+}
+
+fn load_rejection_detail(path: &Path) -> Option<RejectDetail> {
+    let e: CacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    e.reject_detail
 }
 
 /// 「主要是英文」判斷用的字數（Latin 字母數、CJK 字數；跟 [`is_mostly_english`] 同一套去程式碼的規則）。只有數字，不含內容，可進 log。
@@ -234,7 +265,7 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
     }
     if !force {
         if let Some((reason, tr)) = load_rejection(&path) {
-            return Err(rejection_error(&reason, tr.as_deref()));
+            return Err(rejection_error_with(&reason, tr.as_deref(), load_rejection_detail(&path).as_ref()));
         }
     }
     let slot = flight_slot(&path);
@@ -249,10 +280,10 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
         if let Some((reason, tr)) = load_rejection(&path) {
             drop(guard);
             flight_forget(&path, slot);
-            return Err(rejection_error(&reason, tr.as_deref()));
+            return Err(rejection_error_with(&reason, tr.as_deref(), load_rejection_detail(&path).as_ref()));
         }
     }
-    let out = translate_upstream(app, id, content, &path).await;
+    let out = translate_upstream(app, id, content, &path, force).await;
     drop(guard);
     flight_forget(&path, slot);
     out
@@ -365,22 +396,24 @@ async fn check_jev(app: &App, id: &str, source: &str, translation: &str) -> Opti
 }
 
 /// 品質沒過：寫負面標記（覆蓋同鍵的舊檔），回 422。
-fn mark_rejected(path: &Path, reason: &str, source: &str, reply: &str) -> LcError {
+fn mark_rejected(path: &Path, reason: &str, source: &str, reply: &str, models: Vec<String>, attempts: usize) -> LcError {
+    // 只寫檢查名稱與數字（不含內容）：Latin／CJK 是去掉程式碼後的字母數，`identical` 是譯文與原文完全相同。
+    let (sl, sc) = prose_stats(source);
+    let (rl, rc) = prose_stats(reply);
+    let detail = RejectDetail { check: reason.into(), src_latin: sl, src_cjk: sc, reply_latin: rl, reply_cjk: rc, identical: reply.trim() == source.trim(), models, attempts };
     let entry = CacheEntry {
         prompt_version: PROMPT_VERSION.into(),
         rejected: Some(reason.into()),
         rejected_at: Some(crate::db::now()),
         rejected_translation: Some(reply.to_string()).filter(|r| !r.trim().is_empty()),
+        reject_detail: Some(detail.clone()),
         ..Default::default()
     };
-    // 只寫檢查名稱與數字（不含內容）：Latin／CJK 是去掉程式碼後的字母數，`identical` 是譯文與原文完全相同。
-    let (sl, sc) = prose_stats(source);
-    let (rl, rc) = prose_stats(reply);
     tracing::info!(check = reason, src_latin = sl, src_cjk = sc, reply_latin = rl, reply_cjk = rc, identical = (reply.trim() == source.trim()), src_chars = source.chars().count(), reply_chars = reply.chars().count(), "message translate rejected by quality check");
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate rejection marker write failed: {e}");
     }
-    rejection_error(reason, Some(reply))
+    rejection_error_with(reason, Some(reply), Some(&detail))
 }
 
 /// 品質沒過重試時的 effort：沿 [`CLAUDE_API_EFFORTS`] 往上一階（low → medium → high → xhigh → max）。
@@ -406,14 +439,16 @@ struct Attempt {
     jev: Option<f64>,
 }
 
-async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_reason: Option<&str>) -> Result<Attempt, LcError> {
+/// `model`：`Some` 時這一次改用它（品質沒過的升級重試）；`None` 照設定的模型。
+async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_reason: Option<&str>, model: Option<&str>) -> Result<Attempt, LcError> {
     let req = match prev_reason {
         Some(r) => build_retry_request(content, r),
         None => build_request(content),
     };
-    let reply = match effort {
-        Some(e) => claude_api::complete_with_effort(app, req, e).await,
-        None => claude_api::complete(app, req).await,
+    let reply = match (model, effort) {
+        (Some(m), e) => claude_api::complete_with_model(app, req, m, e).await,
+        (None, Some(e)) => claude_api::complete_with_effort(app, req, e).await,
+        (None, None) => claude_api::complete(app, req).await,
     }
     .map_err(error_of)?;
     let translation = clean_reply(&reply.text);
@@ -440,21 +475,34 @@ fn score(p: Option<f64>) -> f64 {
     p.unwrap_or(1.0)
 }
 
-async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> Result<Value, LcError> {
+async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, force: bool) -> Result<Value, LcError> {
     let min_prob = app.cfg.get().await.judge.translate_min_probability;
-    let mut attempts = vec![attempt(app, id, content, None, None).await?];
+    let state = app.cfg.claude_fresh().await.claude_use_state(USE_CASE);
+    let configured = state.as_ref().map(|s| s.effort.clone()).unwrap_or_default();
+    // 升級模型（[claude_api.groups.translate] retry_model；空字串＝不升級）。手動重試（force）首次就用它。
+    let retry_model = state.as_ref().map(|s| s.retry_model.trim().to_string()).unwrap_or_default();
+    let first_model = (force && !retry_model.is_empty()).then_some(retry_model.as_str());
+    let mut attempts = vec![attempt(app, id, content, None, None, first_model).await?];
     if needs_retry(&attempts[0], min_prob) {
-        // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
-        let configured = app.cfg.claude_fresh().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
         let prev = attempts[0].reason;
-        attempts.push(attempt(app, id, content, Some(next_effort(&configured)), prev).await?);
+        // 本地檢查回 untranslated／japanese_output（Haiku 原樣回傳或夾日文）：重試改用升級模型，effort 照設定、不額外提高。
+        // 已經用升級模型的（force 首次）就不再換，照舊只提高 effort。
+        let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "japanese_output")) && attempts[0].model != retry_model;
+        let next = if upgrade {
+            attempt(app, id, content, None, prev, Some(&retry_model)).await?
+        } else {
+            // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
+            attempt(app, id, content, Some(next_effort(&configured)), prev, None).await?
+        };
+        attempts.push(next);
     }
 
     // 通過本地檢查的嘗試裡，挑 Jev 分數最高的（同分取後一次）。都沒過本地檢查＝這則翻不好，回 422。
     let Some(best) = attempts.iter().filter(|a| a.reason.is_none()).max_by(|a, b| score(a.jev).total_cmp(&score(b.jev))) else {
         let last = attempts.last().expect("at least one attempt");
         let reason = last.reason.unwrap_or("untranslated");
-        return Err(mark_rejected(path, reason, content, &last.translation));
+        let models: Vec<String> = attempts.iter().map(|a| a.model.clone()).collect();
+        return Err(mark_rejected(path, reason, content, &last.translation, models, attempts.len()));
     };
 
     // 費用是兩次嘗試的合計（重試也是真的扣費）。
@@ -540,6 +588,81 @@ pub(crate) const SUMMARY_MAX_CHARS: usize = 40;
 /// 判斷文字是否含有日文假名（平假名 U+3040–U+309F 或片假名 U+30A0–U+30FF）。
 pub(crate) fn has_japanese_kana(text: &str) -> bool {
     text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30FF}'))
+}
+
+/// 同一則訊息回報給管理者的最短間隔（秒）。
+const REPORT_WINDOW_SECS: i64 = 600;
+
+fn load_entry(path: &Path) -> Option<CacheEntry> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// `POST /api/messages/{id}/translate-report`（User-only）：翻譯品質沒過時，把原因摘要以 `bot_request` 送給本專案的管理者 bot。
+/// 同一則訊息 10 分鐘內只送一次（送出時間記在快取的負面標記上，重啟也不會重送）。不含整段原文，只附前 200 字。
+pub async fn post_translate_report(State(app): State<Arc<App>>, AxPath(id): AxPath<String>, Extension(principal): Extension<crate::api::RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    if principal != crate::api::RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT m.role, m.content, c.bot_id, b.project_id FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id WHERE m.id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let (role, content, bot_id, project_id) = row.ok_or_else(|| LcError::NotFound("message".into()))?;
+    if role != "assistant" {
+        return Err(LcError::Bad("only assistant messages can be reported".into()));
+    }
+    let path = cache_path(&app.data_dir, &cache_key(&id, &content));
+    let mut entry = load_entry(&path).unwrap_or_default();
+    let Some(reason) = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty()) else {
+        return Err(LcError::conflict("not_rejected", json!({"message_id": id})));
+    };
+    if let Some(sent) = entry.report_sent_at.as_deref() {
+        let recent = chrono::DateTime::parse_from_rfc3339(sent).map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < REPORT_WINDOW_SECS).unwrap_or(false);
+        if recent {
+            return Ok(Json(json!({"sent": false, "reason": "duplicate", "sent_at": sent})));
+        }
+    }
+    let manager: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM bots WHERE project_id = ? AND role = 'manager' AND parent_bot_id IS NULL AND deleted_at IS NULL ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(&project_id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let Some((manager_id,)) = manager else {
+        return Err(LcError::conflict("no_manager", json!({"project_id": project_id})));
+    };
+    let detail = entry.reject_detail.clone();
+    let summary = match &detail {
+        Some(d) => format!(
+            "翻譯品質檢查未通過：{}；原文拉丁 {}／CJK {}，譯文拉丁 {}／CJK {}，譯文與原文相同：{}，嘗試 {} 次，模型 {}",
+            d.check, d.src_latin, d.src_cjk, d.reply_latin, d.reply_cjk, d.identical, d.attempts, d.models.join(" → ")
+        ),
+        None => format!("翻譯品質檢查未通過：{reason}"),
+    };
+    let payload = json!({
+        "kind": "translate_report",
+        "message_id": id,
+        "bot_id": bot_id,
+        "project_id": project_id,
+        "reason": reason,
+        "detail": detail,
+        "summary": summary,
+        "source_head": content.chars().take(200).collect::<String>(),
+    });
+    let event_key = format!("translate-report:{id}:{}", crate::db::ulid());
+    crate::supervisor_inbox::push_inbox(&app.db, &event_key, "bot_request", None, Some(&manager_id), None, &payload)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let sent_at = crate::db::now();
+    entry.report_sent_at = Some(sent_at.clone());
+    if let Err(e) = save(&path, &entry) {
+        tracing::warn!("message translate report marker write failed: {e}");
+    }
+    Ok(Json(json!({"sent": true, "manager_bot_id": manager_id, "sent_at": sent_at})))
 }
 
 /// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`。都沒有回 None。
@@ -1152,6 +1275,8 @@ mod tests {
     #[tokio::test]
     async fn rejected_first_reply_retries_once_at_next_effort() {
         let (app, _dir) = app(true).await;
+        // 這兩個測的是「不升級、同模型提一階」的路徑；升級模型另有測試（retry_model_tests）。
+        app.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), ..Default::default() }); Ok(()) }).await.unwrap();
         let content = "The system has encountered an unexpected condition.";
         let f = fake_seq(&app, vec!["システムで予期しない状態が発生しました。".into(), "系統遇到了非預期的狀況。".into()]);
         let a = translate(&app, "m_effort_up", content).await.unwrap();
@@ -1168,6 +1293,8 @@ mod tests {
     #[tokio::test]
     async fn retry_at_top_effort_stays_max() {
         let (app, _dir) = app(true).await;
+        // 這兩個測的是「不升級、同模型提一階」的路徑；升級模型另有測試（retry_model_tests）。
+        app.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), effort: "max".into(), ..Default::default() }); Ok(()) }).await.unwrap();
         app.cfg
             .update(|c| {
                 c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), effort: "max".into(), ..Default::default() });
@@ -1623,5 +1750,179 @@ mod tests {
         let ok = post_pending_question_translate(State(app.clone()), user(), Json(pq_body())).await.unwrap();
         assert_eq!(ok.0["cached"], json!(false));
         assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod retry_model_tests {
+    use super::*;
+    use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, MessagesRequest, Usage};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// 依序回覆 `replies`，並記下每一次請求實際用的模型與 effort（合成回覆，不打真 API）。
+    struct Echo {
+        calls: AtomicUsize,
+        replies: Mutex<Vec<String>>,
+        models: Mutex<Vec<String>>,
+        efforts: Mutex<Vec<String>>,
+    }
+
+    impl MessagesClient for Echo {
+        fn complete<'a>(&'a self, req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.models.lock().unwrap().push(req.model.clone());
+            self.efforts.lock().unwrap().push(req.effort.clone());
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = self.replies.lock().unwrap().get(idx).cloned().unwrap_or_else(|| "fallback".into());
+            let model = req.model.clone();
+            Box::pin(async move {
+                Ok(ClientOutcome {
+                    text,
+                    model: Some(model),
+                    stop_reason: Some("end_turn".into()),
+                    usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
+                })
+            })
+        }
+    }
+
+    async fn app(enabled: bool) -> (Arc<App>, PathBuf) {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-msg-retry-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let key = dir.join("key");
+        crate::key_file::stage_key(&key.to_string_lossy(), "sk-ant-test-retry").unwrap().publish().unwrap();
+        let key = key.to_string_lossy().into_owned();
+        store
+            .update(move |c| {
+                c.claude_api.key_file = key;
+                if enabled {
+                    c.claude_api.enabled = true;
+                    c.claude_api.uses.insert(USE_CASE.into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), ..Default::default() });
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        (App::new(db, client.clone(), client, store, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false), dir)
+    }
+
+    fn echo(app: &Arc<App>, replies: Vec<String>) -> Arc<Echo> {
+        let f = Arc::new(Echo { calls: AtomicUsize::new(0), replies: Mutex::new(replies), models: Mutex::new(Vec::new()), efforts: Mutex::new(Vec::new()) });
+        app.claude_api.set_client(f.clone());
+        f
+    }
+
+    const SRC: &str = "The system has encountered an unexpected condition.";
+    const GOOD: &str = "系統遇到了非預期的狀況。";
+
+    /// 原樣回傳原文（Haiku 的老毛病）→ 重試改用預設升級模型 sonnet，effort 照設定（low）不額外提高。
+    #[tokio::test]
+    async fn untranslated_retry_upgrades_to_the_default_retry_model_at_the_configured_effort() {
+        let (app, _d) = app(true).await;
+        let f = echo(&app, vec![SRC.into(), GOOD.into()]);
+        let out = translate(&app, "m_up", SRC).await.unwrap();
+        assert_eq!(*f.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string(), "claude-sonnet-5-5".to_string()]);
+        let efforts = f.efforts.lock().unwrap().clone();
+        assert_eq!(efforts, vec!["low".to_string(), "low".to_string()], "升級重試的 effort 照設定，不額外提高");
+        assert_eq!(out["model"], json!("claude-sonnet-5-5"), "回傳的模型是實際改用的那一個");
+        assert_eq!(out["translation"], json!(GOOD));
+    }
+
+    /// `retry_model` 設成空字串＝不升級：照舊同模型、effort 往上一階。
+    #[tokio::test]
+    async fn an_empty_retry_model_does_not_upgrade() {
+        let (app, _d) = app(true).await;
+        app.cfg
+            .update(|c| {
+                c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), ..Default::default() });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let f = echo(&app, vec![SRC.into(), GOOD.into()]);
+        translate(&app, "m_noup", SRC).await.unwrap();
+        assert_eq!(*f.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string(), "claude-haiku-5-5".to_string()]);
+        assert_eq!(f.efforts.lock().unwrap()[1], "medium", "不升級時照舊往上提一階");
+    }
+
+    /// 手動重試（force）首次就用升級模型。
+    #[tokio::test]
+    async fn a_forced_manual_retry_uses_the_retry_model_from_the_first_attempt() {
+        let (app, _d) = app(true).await;
+        let f = echo(&app, vec![GOOD.into()]);
+        let out = translate_with(&app, "m_force", SRC, true).await.unwrap();
+        assert_eq!(*f.models.lock().unwrap(), vec!["claude-sonnet-5-5".to_string()]);
+        assert_eq!(out["translation"], json!(GOOD));
+    }
+
+    /// 熱重載：改 config.toml 的 `retry_model`，不重啟就生效。
+    #[tokio::test]
+    async fn an_edited_retry_model_takes_effect_without_a_restart() {
+        let (app, dir) = app(true).await;
+        let path = dir.join("config.toml");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("\n[claude_api.groups.translate]\nretry_model = \"claude-opus-5-5\"\n");
+        std::fs::write(&path, text).unwrap();
+        let at = std::time::SystemTime::now() + std::time::Duration::from_secs(9);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        let f = echo(&app, vec![SRC.into(), GOOD.into()]);
+        translate(&app, "m_hot", SRC).await.unwrap();
+        assert_eq!(f.models.lock().unwrap()[1], "claude-opus-5-5");
+    }
+
+    /// 兩次都沒過：422 帶原因細節（檢查名稱、字數、是否相同、用過的模型與次數），細節也寫進負面標記。
+    #[tokio::test]
+    async fn a_rejection_carries_the_reason_detail_and_is_stored_with_it() {
+        let (app, _d) = app(true).await;
+        echo(&app, vec![SRC.into(), SRC.into()]);
+        let err = translate(&app, "m_detail", SRC).await.unwrap_err();
+        let LcError::Unprocessable(v) = err else { panic!("422 expected") };
+        assert_eq!(v["reason"], json!("untranslated"));
+        assert_eq!(v["detail"]["check"], json!("untranslated"));
+        assert_eq!(v["detail"]["identical"], json!(true));
+        assert_eq!(v["detail"]["attempts"], json!(2));
+        assert_eq!(v["detail"]["models"], json!(["claude-haiku-5-5", "claude-sonnet-5-5"]));
+        let path = cache_path(&app.data_dir, &cache_key("m_detail", SRC));
+        assert_eq!(load_rejection_detail(&path).map(|d| d.attempts), Some(2));
+    }
+
+    /// 回報：User 才能呼叫；訊息必須是已被擋的 assistant；送給本專案的 manager bot；10 分鐘內同一則只送一次。
+    #[tokio::test]
+    async fn the_report_goes_to_the_projects_manager_once_per_ten_minutes_and_only_for_users() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "xl-bot").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let conv = crate::db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&bot.id).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let content = SRC.repeat(3);
+        let msg = crate::db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'hook',?)")
+            .bind(&msg).bind(&conv).bind(&content).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        // 把「已被擋」的負面標記寫好（用真的寫入函式，不打 API）。
+        let path = cache_path(&e.app.data_dir, &cache_key(&msg, &content));
+        let _ = mark_rejected(&path, "untranslated", &content, &content, vec!["claude-haiku-5-5".into(), "claude-sonnet-5-5".into()], 2);
+
+        let first = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User)).await.unwrap().0;
+        assert_eq!(first["sent"], json!(true));
+        assert_eq!(first["manager_bot_id"], json!(bot.id));
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request' AND bot_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(n.0, 1, "送進管理者的收件匣");
+
+        let again = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User)).await.unwrap().0;
+        assert_eq!((again["sent"].clone(), again["reason"].clone()), (json!(false), json!("duplicate")), "10 分鐘內只送一次");
+
+        let bot_caller = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await;
+        assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
+
+        let plain = crate::db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant','plain reply',?,?)")
+            .bind(&plain).bind(&conv).bind("hook").bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let not_rejected = post_translate_report(State(e.app.clone()), AxPath(plain), Extension(crate::api::RequestPrincipal::User)).await;
+        assert!(matches!(not_rejected, Err(LcError::Conflict(_))), "沒有被擋的譯文不能回報");
     }
 }

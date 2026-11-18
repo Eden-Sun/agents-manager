@@ -597,6 +597,14 @@ export async function translateMessage(
   }
 }
 
+/** `POST /messages/:id/translate-report`：翻譯品質沒過時，把原因摘要送給本專案的管理者（10 分鐘內同一則只送一次；`sent: false` 就是重複）。 */
+export async function reportTranslation(messageId: string): Promise<{ sent: boolean; reason: string | null }> {
+  const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate-report`)
+  const o = isRec(raw) ? raw : {}
+  const reason = pick(o, 'reason')
+  return { sent: pick(o, 'sent') === true, reason: typeof reason === 'string' ? reason : null }
+}
+
 /** `POST /pending-questions/translate`：整份待答問卷一次翻成繁中（只翻顯示；送回 CLI 的仍是原選項）。`id` 由 daemon 產生（`q{n}`、`q{n}-o{m}`）。 */
 export interface TranslatedPendingQuestions {
   questions: { id: string; header: string; question: string; options: { id: string; label: string; description: string }[] }[]

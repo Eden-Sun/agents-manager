@@ -568,6 +568,7 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/bots/{id}/send-queued-now", Expect::Forbidden, None),
         rule("POST", "/api/messages/{id}/translate", Expect::Forbidden, None),
         rule("POST", "/api/pending-questions/translate", Expect::Forbidden, None),
+        rule("POST", "/api/messages/{id}/translate-report", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/messages", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/messages", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/messages", Expect::Forbidden, None),
