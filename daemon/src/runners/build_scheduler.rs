@@ -64,14 +64,22 @@ pub async fn post_acquire(
     {
         Acquired::Granted { token, expires_at } => {
             let cfg = app.cfg.build_fresh().await;
-            Ok(Json(json!({
+            let mut out = json!({
                 "granted": true,
                 "token": token,
                 "expires_at": expires_at,
                 "cargo_jobs": cfg.cargo_jobs,
                 "test_threads": cfg.test_threads(),
                 "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?
-            })))
+            });
+            // 熱池在這台機器上：本機原生 cargo 要拿同一組名額（見 `BuildRemoteCfg::same_machine_slot_pool`）。沒有就不給這兩個欄位。
+            if let Some(home) = std::env::var_os("HOME") {
+                if let Some((dir, max)) = cfg.remote.same_machine_slot_pool(cfg.max_concurrent(), std::path::Path::new(&home)) {
+                    out["local_slot_dir"] = json!(dir.display().to_string());
+                    out["local_slot_max"] = json!(max);
+                }
+            }
+            Ok(Json(out))
         }
         Acquired::Waiting { active, since } => {
             let cfg = app.cfg.build_fresh().await;

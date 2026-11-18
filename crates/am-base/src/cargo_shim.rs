@@ -494,6 +494,43 @@ am_caller_gone() {
     ! kill -0 "$_parent" 2>/dev/null
 }
 
+# 拿遠端熱池的一顆名額（`<dir>/<n>` 的 flock）給本機原生 cargo：全滿就排隊、每 2 秒再試。呼叫端已經不在了就回 1（呼叫端收尾）。
+# fd 7 留在這個 shell 裡，exec 出去的子行程都會繼承，所以持有到 cargo 結束；呼叫端要在 cargo 結束後 `exec 7>&-`。
+am_take_pool_slot() {
+    _pdir=$1
+    _pmax=$2
+    case "$_pmax" in *[!0-9]* | '') return 0 ;; esac
+    [ "$_pmax" -gt 0 ] || return 0
+    if ! command -v flock >/dev/null 2>&1; then
+        printf 'agents-manager: 這台沒有 flock，本機 cargo 無法跟遠端熱池共用名額，只受本機名額管\n' >&2
+        return 0
+    fi
+    mkdir -p "$_pdir" 2>/dev/null || {
+        printf 'agents-manager: 建不出 %s，本機 cargo 無法跟遠端熱池共用名額\n' "$_pdir" >&2
+        return 1
+    }
+    _pq=0
+    while :; do
+        _pi=1
+        while [ "$_pi" -le "$_pmax" ]; do
+            if exec 7>>"$_pdir/$_pi" && flock -n 7; then
+                return 0
+            fi
+            { exec 7>&-; } 2>/dev/null
+            _pi=$((_pi + 1))
+        done
+        if [ "$_pq" = 0 ]; then
+            printf 'agents-manager: 本機 cargo 與遠端熱池共用的 %s 個名額滿了，排隊等一個空出來……\n' "$_pmax" >&2
+            _pq=1
+        fi
+        if am_caller_gone; then
+            printf 'agents-manager: 呼叫端已經結束，不再等熱池名額\n' >&2
+            return 1
+        fi
+        sleep 2
+    done
+}
+
 am_cargo() {
     # 遞迴保險絲：萬一 `am_is_shim` 認不出某一份 shim（被改過檔頭、或別的專案裝了同名 wrapper），
     # 兩份 shim 會互相把對方當成真 cargo 一路 fork 下去。寧可大聲失敗，也不要 fork 到機器躺平。
@@ -715,6 +752,8 @@ am_cargo() {
     _ttl=$(am_json_field lease_ttl_secs "$_resp")
     case "$_jobs" in *[!0-9]* | '') _jobs=2 ;; esac
     case "$_ttl" in *[!0-9]* | '') _ttl=180 ;; esac
+    _pool_dir=$(am_json_field local_slot_dir "$_resp")
+    _pool_max=$(am_json_field local_slot_max "$_resp")
     # 測試執行緒上限跟著名額走（issue #813、#1711）：libtest 用 `RUST_TEST_THREADS`，nextest 用 `NEXTEST_TEST_THREADS`。
     # 呼叫端設的值不超過名額就尊重；沒設才注入名額回應的 `test_threads`。舊 daemon 沒有欄位＝用預設 8；`0`＝daemon 明講不設。
     _test_env=""
@@ -874,10 +913,19 @@ am_cargo() {
         am_lease_lost_exit
     fi
 
+    # 本機原生 cargo 跟遠端熱池守同一組名額（`[build.remote]` 指到這台時）：熱池拿 `<remote_root>/.slots/<n>` 的 flock 罩住整段編譯，
+    # 名額回應帶了那個目錄與份數（沒帶＝舊 daemon，或熱池不在這台，就不加這一道）。拿到的 flock 留在 fd 7，跟著 exec 鏈傳給守衛與 cargo；
+    # cargo 結束（正常或被砍）fd 全關，名額就放。
+    am_take_pool_slot "$_pool_dir" "$_pool_max" || {
+        _release
+        trap - EXIT INT TERM
+        exit 1
+    }
     # `$_test_env` 不加引號：空的就不展開成任何參數，有值時是一個不含空白的 `RUST_TEST_THREADS=N`。
     env AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" $_test_env \
         sh -c "$_guard_sh" am-guarded "$_state/pid" "$_real" "$@"
     _cargo_rc=$?
+    { exec 7>&-; } 2>/dev/null
     if am_lease_lost_now "$_cargo_rc"; then
         am_lease_lost_exit
     fi

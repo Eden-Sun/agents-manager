@@ -2347,7 +2347,15 @@ while time.time() < end:
     fn a_lease_directory_in_use_is_left_alone_by_another_shims_sweep() {
         let s = Sandbox::new();
         s.install_lease_curl(180);
-        s.install_slow_cargo(4);
+        // A 的 cargo 要等到測試明說放行才結束（不是等真實秒數）：固定秒數會在機器忙的時候比「下一顆 shim」先跑完，
+        // A 自己收尾把目錄清掉，斷言就紅——跟目錄清理的邏輯無關。上限 60 秒只是防止測試掛住。
+        let d = s.dir.display();
+        write_exec(
+            s.dir.join("real/cargo"),
+            format!(
+                "#!/bin/sh\n[ -z \"${{AM_TEST_FAST:-}}\" ] || exit 0\ntouch '{d}/cargo.ready'\ni=0\nwhile [ ! -f '{d}/cargo.release' ] && [ $i -lt 1200 ]; do /bin/sleep 0.05; i=$((i + 1)); done\n[ -f '{d}/cargo.release' ] || exit 3\nexit 0\n"
+            ),
+        );
         let (mut a, group) = start_slow_shim(&s);
         let mine = s.lease_dirs();
         assert_eq!(mine.len(), 1, "{mine:?}");
@@ -2355,6 +2363,7 @@ while time.time() < end:
         run_the_next_shim(&s);
         assert_eq!(s.lease_dirs(), mine, "A 還在跑，別人不能把它的目錄清掉");
 
+        std::fs::write(s.dir.join("cargo.release"), "go").unwrap();
         assert!(a.wait().unwrap().success(), "A 正常跑完");
         s.assert_group_gone(group);
         assert!(s.lease_dirs().is_empty(), "A 自己收尾要清掉：{:?}", s.lease_dirs());
@@ -2786,4 +2795,133 @@ esac
         assert_eq!(rc, 101);
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert!(calls.contains("release"), "失敗也要放：{calls}");
+    }
+
+    fn has_flock() -> bool {
+        Command::new("flock").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// 這顆 `<dir>/<n>` 的名額現在是不是空的（試拿一下、拿到就立刻放）。
+    fn pool_slot_free(file: &std::path::Path) -> bool {
+        Command::new("flock").arg("-n").arg(file).arg("true").status().unwrap().success()
+    }
+
+    /// 模擬遠端熱池的一個持有者：`exec 9>>` 之後 `flock -x 9`，再 `exec sleep`，鎖就跟著 sleep 這一顆行程走（kill 它就放）。
+    fn hold_pool_slot(file: &std::path::Path) -> std::process::Child {
+        std::fs::OpenOptions::new().create(true).append(true).open(file).unwrap();
+        let child = Command::new("sh")
+            .args(["-c", "exec 9>>\"$0\"; flock -x 9 || exit 1; exec sleep 300", &file.display().to_string()])
+            .spawn()
+            .unwrap();
+        let up = std::time::Instant::now();
+        while pool_slot_free(file) {
+            assert!(up.elapsed() < std::time::Duration::from_secs(10), "持有者沒拿到鎖");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child
+    }
+
+    /// 名額回應帶上熱池的目錄與份數（`local_slot_dir`／`local_slot_max`），其餘照常。
+    fn install_pool_curl(s: &Sandbox, pool: &std::path::Path, max: u32) {
+        s.install_fake_curl(&format!(
+            "echo \"$*\" >> '{d}/curl.log'\ncase \"$*\" in\n  *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":180,\"local_slot_dir\":\"{p}\",\"local_slot_max\":{max}}}' ;;\n  *) printf '{{}}' ;;\nesac",
+            d = s.dir.display(),
+            p = pool.display(),
+        ));
+    }
+
+    fn path_with_fakes(s: &Sandbox) -> String {
+        format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display())
+    }
+
+    /// 熱池的名額全滿（兩顆都被別人拿著）時，本機原生 cargo 不起來、印排隊訊息；放掉一顆就只放行這一個。
+    #[test]
+    fn native_cargo_waits_while_the_hot_pool_holds_every_slot_then_runs_on_the_first_free_one() {
+        if !has_flock() {
+            return;
+        }
+        let s = Sandbox::new();
+        let pool = s.dir.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        install_pool_curl(&s, &pool, 2);
+        let mut holders = vec![hold_pool_slot(&pool.join("1")), hold_pool_slot(&pool.join("2"))];
+        let log = s.dir.join("cargo.log");
+        let err = s.dir.join("shim.err");
+        let mut cmd = s.command(&path_with_fakes(&s));
+        cmd.args(["check"]).env("AM_TEST_FAKE_CARGO_LOG", &log);
+        for (k, v) in lease_env(&s) {
+            cmd.env(k, v);
+        }
+        cmd.stdout(std::process::Stdio::null()).stderr(std::fs::File::create(&err).unwrap());
+        let mut shim = spawn_retrying(&mut cmd);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!log.exists(), "熱池名額全滿：本機 cargo 不該起來");
+        assert!(std::fs::read_to_string(&err).unwrap().contains("排隊"), "要印排隊訊息");
+
+        // 放掉一顆：只有這一顆空出來，shim 拿到它之後照常跑完。
+        let freed = holders.remove(0);
+        let mut freed = freed;
+        let _ = freed.kill();
+        let _ = freed.wait();
+        let up = std::time::Instant::now();
+        let status = loop {
+            if let Some(st) = shim.try_wait().unwrap() {
+                break st;
+            }
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "空出一顆名額後 shim 沒跑起來");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status:?}");
+        assert!(log.exists(), "拿到名額之後本機 cargo 要真的跑");
+        assert!(!pool_slot_free(&pool.join("2")), "另一顆仍被熱池持有，不能被本機搶走");
+        assert!(pool_slot_free(&pool.join("1")), "shim 結束後名額要放掉");
+        for mut h in holders {
+            let _ = h.kill();
+            let _ = h.wait();
+        }
+    }
+
+    /// 本機 cargo 持有熱池名額時被砍（shim 與 cargo 都死）：名額要放掉，別人才拿得到。
+    #[test]
+    fn a_killed_native_cargo_gives_its_hot_pool_slot_back() {
+        if !has_flock() {
+            return;
+        }
+        let s = Sandbox::new();
+        let pool = s.dir.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        std::fs::File::create(pool.join("1")).unwrap();
+        install_pool_curl(&s, &pool, 1);
+        s.install_slow_cargo(120);
+        let mut cmd = s.command(&path_with_fakes(&s));
+        cmd.args(["check"]);
+        for (k, v) in lease_env(&s) {
+            cmd.env(k, v);
+        }
+        let (mut shim, _, _) = s.start_group(&mut cmd, false);
+        let group = shim.id() as i32;
+        let up = std::time::Instant::now();
+        while !s.dir.join("cargo.ready").exists() {
+            assert!(up.elapsed() < std::time::Duration::from_secs(30), "cargo 沒起來");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!pool_slot_free(&pool.join("1")), "本機 cargo 跑的時候要持有熱池名額");
+
+        unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
+        let _ = shim.wait();
+        for f in ["cargo.pid", "rustc.pid"] {
+            if let Some(p) = s.pid(f) {
+                s.kill_if_ours(p);
+            }
+        }
+        for (pid, c) in group_members(group) {
+            if c.contains("sleep 120") || c.contains("sleep 300") {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        let up = std::time::Instant::now();
+        while !pool_slot_free(&pool.join("1")) {
+            assert!(up.elapsed() < std::time::Duration::from_secs(10), "cargo 砍掉之後熱池名額沒放");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }

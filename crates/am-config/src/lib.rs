@@ -1417,6 +1417,26 @@ impl BuildRemoteCfg {
         }
     }
 
+    /// 指到這台機器自己的熱池（`host` 是 `local`、`127.0.0.1` 或 `localhost`）時，它的名額目錄與份數：
+    /// `<remote_root>/.slots` 的 `<n>` flock 就是熱池的名額（守門拿、整段編譯持有）。本機原生 cargo 拿同一組，才不會
+    /// 熱池用掉 3 個、本機另外再編 3 個。`home` 是這台的 `$HOME`（相對的 `remote_root` 接在它底下）；`max_concurrent = 0`
+    /// （依遠端核數自動算）時沿用 `build_max`（與 `[build] max_concurrent` 同值）。沒有這樣的熱池（或停用）回 `None`。
+    pub fn same_machine_slot_pool(&self, build_max: usize, home: &std::path::Path) -> Option<(std::path::PathBuf, usize)> {
+        let t = self.targets().into_iter().find(|t| {
+            matches!(t.host.trim(), LOCAL_BUILD_HOST | "127.0.0.1" | "localhost")
+        })?;
+        if !self.enabled {
+            return None;
+        }
+        let max = if t.max_concurrent == 0 { build_max } else { t.max_concurrent };
+        if max == 0 {
+            return None;
+        }
+        let root = std::path::Path::new(&t.remote_root);
+        let root = if root.is_absolute() { root.to_path_buf() } else { home.join(root) };
+        Some((root.join(".slots"), max))
+    }
+
     /// 照設定順序展開成每台一份完整設定（#1956）：第一台是 `[build.remote]` 本身（host 空就不算），
     /// 之後是 `hosts` 裡開著的那幾台，沒寫的欄位沿用第一台。展開後的每一份 `hosts` 都是空的。
     pub fn targets(&self) -> Vec<BuildRemoteCfg> {
@@ -3697,5 +3717,42 @@ model = "claude-haiku-5-5"
         }
         let project = ProjectCfg { id: Some("p2".into()), path: "/tmp".into(), label: "x".into(), ..Default::default() };
         assert!(!toml::to_string_pretty(&project).unwrap().contains("role_policy"));
+    }
+}
+
+#[cfg(test)]
+mod slot_pool_tests {
+    use super::*;
+
+    fn remote(host: &str, max: usize) -> BuildRemoteCfg {
+        BuildRemoteCfg { enabled: true, host: host.into(), user: "ubuntu".into(), remote_root: ".cache/agents-manager/remote-cargo".into(), max_concurrent: max, ..BuildRemoteCfg::default() }
+    }
+
+    #[test]
+    fn a_hot_pool_on_this_machine_shares_its_slot_names_with_native_cargo() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(
+            remote("127.0.0.1", 3).same_machine_slot_pool(2, home),
+            Some((std::path::PathBuf::from("/home/u/.cache/agents-manager/remote-cargo/.slots"), 3))
+        );
+        assert!(remote("local", 1).same_machine_slot_pool(2, home).is_some());
+        assert!(remote("localhost", 1).same_machine_slot_pool(2, home).is_some());
+    }
+
+    #[test]
+    fn a_remote_host_elsewhere_or_a_disabled_pool_gates_nothing_locally() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(remote("r7.example", 3).same_machine_slot_pool(2, home), None);
+        let mut off = remote("127.0.0.1", 3);
+        off.enabled = false;
+        assert_eq!(off.same_machine_slot_pool(2, home), None);
+    }
+
+    #[test]
+    fn auto_pool_size_falls_back_to_the_local_build_max_and_absolute_roots_are_kept() {
+        let home = std::path::Path::new("/home/u");
+        let mut r = remote("127.0.0.1", 0);
+        r.remote_root = "/srv/rc".into();
+        assert_eq!(r.same_machine_slot_pool(2, home), Some((std::path::PathBuf::from("/srv/rc/.slots"), 2)));
     }
 }

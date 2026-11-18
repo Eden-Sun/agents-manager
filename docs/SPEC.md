@@ -2679,6 +2679,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `host = "local"` 是本機執行器：同一套守門／共用 target 池／名額／manifest 直接在本機 `sh -c` 跑，不經 ssh 與 rsync-over-ssh，環境跟 ssh 進去一樣乾淨（pane 的 `AM_*` 不帶過去），只在 Linux。
   多台時照順序逐台「試用」：池裡有空的份、名額有空（本機另看 1 分鐘負載 ≤ `max_load`，預設呼叫端的 `CHECK_MAX_LOAD` 或核心數 × 1.25）就直接在那台開工；都忙就排排隊人數最少的那台、同分照設定順序；
   設錯的那台（缺 user、macOS 上的 `host = "local"` 等）只略過並警告，全部都錯才退回本機；連不上的那台略過並記健康檔（每台一份；名額排到逾時退回本機時，記的是排的那台）。`/api/build-slots` 的 `remote.hosts` 每台一格。預熱（`remote-cargo-prewarm.sh`）照 `remote-cargo --list-hosts` 逐台各帶 `--host` 跑，狀態每台一份。
+- **本機原生 cargo 與同機熱池共用名額（`AGM_RUST_ENGINE=cargo` 等會落到本機的指令）**：`[build.remote]` 指到這台（`host` 為 `local`／`127.0.0.1`／`localhost`）時，熱池的名額就是 `$HOME/<remote_root>/.slots/<n>`（`n` 在 1..`max_concurrent`，守門拿 flock、整段編譯持有）。名額回應（`POST /api/build-slots/acquire` 的 `granted:true`）額外帶 `local_slot_dir`／`local_slot_max`，shim 在起本機 cargo 之前，先在同一組 `<n>` 拿一顆 flock（fd 7，跟著 exec 鏈傳給守衛與 cargo），全滿就每 2 秒再試並印「排隊」訊息；cargo 結束（或被砍、shim 被殺）fd 全關，名額即放。因此同機的熱池與本機原生 cargo 合計同時最多 `max_concurrent` 個編譯，不會各自再編一份。`max_concurrent = 0`（自動）時沿用 `[build] max_concurrent`。不指到這台的熱池、或舊 daemon（回應沒有這兩個欄位）不加這一道，仍只受本機 `[build] max_concurrent` 管。`engine=cargo` 的語意不變（不經遠端池、不 offload），只多了名額。
 - **轉到外部編譯主機的指令不佔本機名額（issue #155，使用者 2026-09-19 決定）**：本機名額管的是本機的 RAM／CPU。`check`／`test`／`clippy`
   （#104 的 verification 三個）在 pane 有 `AM_DAEMON_EXE`／`AM_CONFIG_PATH` 時，shim **先**叫 `remote-cargo` helper，
   **不先 acquire**：不受本機 `max_concurrent` 限制；遠端有自己的名額（`[build.remote] max_concurrent`，預設依遠端核數與 RAM 算，滿了最多等 3 秒後 helper 回 125、改排本機名額；
