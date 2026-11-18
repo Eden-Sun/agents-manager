@@ -62,9 +62,9 @@ const DOWNLOAD_SLOTS: usize = 8;
 /// 單一分享同時進行的下載。
 const DOWNLOADS_PER_SHARE: usize = 2;
 /// 名額滿了的上傳排隊等多久：等的時候 body 還沒讀、不扣這個分享的每分鐘額度；等不到才 429。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 const UPLOAD_QUEUE_WAIT: Duration = Duration::from_secs(60);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 const UPLOAD_QUEUE_WAIT: Duration = Duration::from_millis(300);
 /// 全站最多幾個上傳同時在排隊；再多的立刻 429（排隊的連線也是資源）。
 const UPLOAD_QUEUE_MAX: usize = 64;
@@ -75,9 +75,9 @@ pub const MAX_STREAMS_PER_SHARE: usize = 4;
 /// 進 token DB 查詢之前可同時佔用的全域名額。
 const MAX_TOKEN_LOOKUPS: usize = 8;
 /// SSE 每隔多久重新確認一次 token 還有效（關分享／重產時另外會被 [`kick`] 叫醒）。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 const STREAM_RECHECK: Duration = Duration::from_secs(30);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 const STREAM_RECHECK: Duration = Duration::from_millis(300);
 
 /// 每則分享使用者的訊息一律以這個開頭再打進 TUI。claude 的輸入框把**第一個字**當模式切換：`!` 是 bash 模式
@@ -266,10 +266,14 @@ pub fn kick(bot_id: &str) {
 
 /// 同一個分享的檔案清單同時最多幾趟（進行中＋排隊）；超過的立刻 429（#1183）。
 pub(crate) const LIST_REQUESTS_PER_SHARE: usize = 4;
+/// 測試接縫：[`LIST_REQUESTS_PER_SHARE`] 在 `share` 之外不可見，daemon 的 `share_tests` 讀這個；正式 build 不編。
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub const LIST_REQUESTS_PER_SHARE_FOR_TEST: usize = LIST_REQUESTS_PER_SHARE;
 /// 排隊等前一趟最久多久，等不到也 429（#1183）。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 const LIST_QUEUE_WAIT: Duration = Duration::from_secs(60);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 const LIST_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
 type ListLock = Arc<tokio::sync::Mutex<()>>;
@@ -322,8 +326,10 @@ async fn list_turn(bot_id: &str) -> Result<ListTurn, Response> {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn list_turn_key_is_held_for_test(bot_id: &str) -> bool {
+/// 測試接縫：只給 daemon 的 `share_tests` 用，正式 build 不編。
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn list_turn_key_is_held_for_test(bot_id: &str) -> bool {
     list_locks().lock().unwrap_or_else(|e| e.into_inner()).contains_key(bot_id)
 }
 
@@ -558,7 +564,7 @@ async fn upload_admission<H: PortalEnv>(State(st): State<Portal<H>>, Path(token)
         Ok(id) => id,
         Err(response) => return response,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_upload_after_bot_for", &bot_id).await;
     // 單一分享的進行中＋排隊上限：先於全站名額檢查，一個連結不能把全站的名額與排隊位子佔滿。permit 跟 `_permit` 一樣活到回應結束。
     let Some(_share_permit) = st.share_uploads.try_acquire(&bot_id) else {
@@ -790,7 +796,7 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         Ok(id) => id,
         Err(r) => return r,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_send_after_bot_for", &bot_id).await;
 
     let crid = b.client_request_id.trim();
@@ -1043,7 +1049,7 @@ impl<H: PortalEnv> Stream<H> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream<H> {
     Stream {
         app: app.clone(),
@@ -1060,12 +1066,12 @@ pub fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pe
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn next_for_test<H: PortalEnv>(stream: &mut Stream<H>) -> Option<Event> {
     stream.next().await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &WsEvent) -> Option<Event> {
     stream.map(ev).await
 }
@@ -1148,13 +1154,13 @@ async fn upload<H: PortalEnv>(
                 .into_response()
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_upload_before_authority_lock", &format!("{bot_id}:{name}")).await;
     let _authority = match authority_lock(&st, &token, &bot_id).await {
         Ok(g) => g,
         Err(r) => return r,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
     let len = data.len();
@@ -1163,7 +1169,7 @@ async fn upload<H: PortalEnv>(
         Err(()) => return unavailable(),
         Ok(Some(site)) => {
             // 測試用：解析完、寫入之前（#1026）。這中間若改指到另一台，寫入要被圍籬擋下，不能寫進舊主機。
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             crate::race_point::hit("share_upload_after_site_resolve", &bot_id).await;
             return match site.inbox_write(&stored, &data, INBOX_MAX_BYTES, INBOX_MAX_FILES).await {
                 Ok(()) => Json(json!({"id": stored, "name": name, "size": len, "mime": mime})).into_response(),
@@ -1216,7 +1222,7 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
     };
     // token 驗完就放掉 per-bot 互斥鎖（#906）：後面的 outbox 掃描是慢 I/O，不能讓 hook／送訊息（同一把鎖）排在它後面。
     drop(authority);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_io_after_authority_released", &bot_id).await;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // 遠端專案（#955）：經 ssh 列遠端 outbox——**不刪任何檔**（分享用 bot 走保留政策，不是 1 小時）；outbox 還沒建＝空清單，
@@ -1316,7 +1322,7 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
     };
     // token 驗完就放掉 per-bot 互斥鎖（#906）：讀檔與 SVG 嵌圖（spawn_blocking 合成）很慢，不能讓同一把鎖上的 hook／送訊息排在後面。
     drop(authority);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_io_after_authority_released", &bot_id).await;
     // 只認 outbox 第一層的檔名；子目錄、`..`、隱藏檔一律不給。
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') || name.chars().any(char::is_control) {

@@ -40,9 +40,9 @@ const PIXEL_MAX: u64 = 8192 * 6144;
 /// 全站同時進行的 compose 數（解碼很吃記憶體與 CPU）。
 const COMPOSE_SLOTS: usize = 1;
 /// 等全站 compose 名額最久這麼久，等不到回 503。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 pub(crate) const COMPOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) const COMPOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 /// 快取總量（data URI 的位元組數）。
 const CACHE_MAX: usize = 64 * 1024 * 1024;
@@ -208,19 +208,26 @@ struct Cache {
 }
 
 /// 全站 compose 名額：跨分享連結共用，避免多個連結同時各解一批大圖。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 pub(crate) fn slots() -> Arc<tokio::sync::Semaphore> {
     static S: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     S.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(COMPOSE_SLOTS))).clone()
 }
 
 /// 測試版：每個測試（各自一條執行緒、current_thread runtime）用自己的名額，彼此不搶；名額的行為本身不變。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn slots() -> Arc<tokio::sync::Semaphore> {
     thread_local! {
         static S: Arc<tokio::sync::Semaphore> = Arc::new(tokio::sync::Semaphore::new(COMPOSE_SLOTS));
     }
     S.with(Arc::clone)
+}
+
+/// 測試接縫：`slots` 在 `share` 之外不可見，這裡只轉呼叫（test／test-hooks 版是每條執行緒各一份名額）；正式 build 不編。
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn slots_for_test() -> Arc<tokio::sync::Semaphore> {
+    slots()
 }
 
 fn cache() -> &'static Mutex<Cache> {
@@ -253,10 +260,10 @@ fn cache_put(k: Key, v: Embedded) {
 }
 
 // 解碼次數（測試看快取有沒有生效）；`embed` 在呼叫端的執行緒上同步跑，平行的其他測試不會算進來。
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 fn decodes_for_test() -> usize {
     DECODES.with(|d| d.get())
 }
@@ -558,7 +565,7 @@ fn sniff(bytes: &[u8]) -> Result<ImageFormat, &'static str> {
 
 /// 解碼 → 修正方向 → 縮到長邊 [`LONG_SIDE`] → 編碼成 data URI。
 fn to_data_uri(bytes: &[u8]) -> Embedded {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     DECODES.with(|d| d.set(d.get() + 1));
     let format = sniff(bytes)?;
     let mut reader = ImageReader::with_format(std::io::Cursor::new(bytes), format);

@@ -1468,7 +1468,7 @@ async fn share_file_listing_waiters_are_capped_and_rejected_at_once() {
     entered_rx.await.unwrap();
     let burst: Vec<_> = (0..6).map(|_| tokio::spawn(c.get(format!("{base}/s/{ta}/api/files")).send())).collect();
     // 超過的那幾趟要立刻回 429；它們各自要走完建連線、驗 token、回應寫回，高負載下不會在固定時間內全部結束，所以等到條件成立才數（#1277）。
-    let want = 6 - (portal::LIST_REQUESTS_PER_SHARE - 1);
+    let want = 6 - (portal::LIST_REQUESTS_PER_SHARE_FOR_TEST - 1);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let rejected_now = loop {
         let n = burst.iter().filter(|h| h.is_finished()).count();
@@ -2413,7 +2413,7 @@ async fn compose_waits_for_the_global_slot() {
     std::fs::write(outbox.join("poster.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/p.jpg"/></svg>"#).unwrap();
     let base = serve(portal::router(e.app.clone())).await;
     let c = client();
-    let permit = crate::share::compose::slots().acquire_owned().await.unwrap();
+    let permit = crate::share::compose::slots_for_test().acquire_owned().await.unwrap();
     let r = c.get(format!("{base}/s/{token}/api/files/poster.svg")).send().await.unwrap();
     assert_eq!(r.status(), 503, "名額被占走時不解碼");
     assert_eq!(r.headers()["retry-after"], "5");

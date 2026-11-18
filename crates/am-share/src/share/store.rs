@@ -121,7 +121,7 @@ pub async fn shared_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Erro
     Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM bot_shares").fetch_all(pool).await?.into_iter().collect())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn insert_restricted(pool: &SqlitePool, bot_id: &str, workspace: &str) -> Result<(), sqlx::Error> {
     insert_share_bot(pool, bot_id, PROFILE_RESTRICTED, workspace).await
 }
@@ -300,7 +300,7 @@ pub async fn set_share_enabled(
     .bind(bot_id)
     .fetch_optional(&mut *tx)
     .await?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_enable_after_read", bot_id).await;
 
     let (token, changed, final_allow_embed) = match existing {

@@ -56,8 +56,13 @@ check "" "crates/am-share/src/share/portal_remote_tests.rs"
 # portal_remote_tests 留 1 條要 daemon prompt 路徑的測試（壞 SVG 提醒），改它仍要選到 daemon 的過濾字串。test_env.rs 是 crate-only 的測試環境。
 check "" "crates/am-share/src/share/portal_upload_tests.rs"
 check "" "crates/am-share/src/share/test_env.rs"
+# #1862 C3：share 不再掛進 daemon。改 am-share 的 production 檔（含自己測試是 crate-only 的 svg_check／budget）一律加選 daemon 的 share_tests::；
+# 改 crate 的 Cargo.toml 仍是 __all__；已刪的舊測試檔路徑（remote_cage_tests、tests.rs）也只選 share_tests::，不再選到零個的 share::tests::。
+check "share_tests::" "crates/am-share/src/share/budget.rs" "crates/am-share/src/share/remote_fs.rs"
+check "__all__" "crates/am-share/Cargo.toml"
+check "share_tests::" "crates/am-share/src/share/remote_cage_tests.rs"
 # 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
-check "share::" "crates/am-share/src/share/store.rs"
+check "share_tests::" "crates/am-share/src/share/store.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
 # #1862 遷移 A：screen.rs／setup.rs 的純解析測試模組改為 crate-only，但兩檔仍有 daemon 測試（limit_hit_quota_tests、remote_hook_tests 等）；
 # 改這兩檔仍要選到 daemon 的 lifecycle::screen::／lifecycle::setup::，不能因部分測試搬走就退成零選。
@@ -122,8 +127,8 @@ check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
 check "build_info::" "crates/am-supervisor/src/build_info.rs"
-check "share::portal::" "crates/am-share/src/share/portal.rs"
-check "share::" "crates/am-share/src/share/mod.rs"
+check "share_tests::" "crates/am-share/src/share/portal.rs"
+check "share_tests::" "crates/am-share/src/share/mod.rs"
 check "__all__ lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
 # 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"
@@ -146,13 +151,13 @@ check "api_route_methods_match_documented_inventory ws_event_docs_tests::" "docs
 # 跟 daemon 無關的檔案不產生過濾字串。
 check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
 # crate 的 lib.rs 是接線檔（#[path] 進 daemon），不能對成 lib:: 這種選不到測試的過濾字串（issue #1018）。
-check "__all__" "crates/am-share/src/lib.rs"
+check "share_tests::" "crates/am-share/src/lib.rs"
 check "__all__" "crates/am-lifecycle/src/lib.rs"
 check "__all__" "crates/am-supervisor/src/lib.rs"
 # crate 的 build.rs／Cargo.toml 改動要跑 daemon 全套，不能印「沒有可挑的測試子集」就綠燈。
 check "__all__" "crates/am-supervisor/build.rs"
 check "__all__" "crates/am-core/Cargo.toml"
-check "__all__ share::portal::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
+check "share_tests::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
@@ -165,7 +170,7 @@ check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"
 check "" "crates/am-share/src/share/budget_remote_tests.rs"
 # Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.
 check "" "crates/am-lifecycle/src/ask_answers.rs"
-check "" "crates/am-share/src/share/svg_check.rs"
+check "share_tests::" "crates/am-share/src/share/svg_check.rs"
 check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
 check "build_info::" "crates/am-supervisor/src/build_info.rs"
 # am-base uses the actual composition mount table, including aliases and shared fallbacks.

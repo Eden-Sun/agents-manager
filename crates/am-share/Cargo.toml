@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# App-backed share tests are compiled by agents-managerd's composition test harness.
+# App-backed share tests live in daemon/src/share_tests (daemon-owned, via the test-hooks seams); this feature only keeps the crate-only cfg markers.
 daemon-test-harness = []
 # 只給測試用的接縫（`#[doc(hidden)] pub`，名稱都帶 `_for_test`）：daemon 的測試檔（daemon/src/share_tests）用，正式 build 不編。
-test-hooks = []
+test-hooks = ["am-base/test-hooks"]
 
 [dependencies]
 am-base = { path = "../am-base" }

@@ -1720,7 +1720,7 @@ impl RemoteSite {
     }
 
     /// 測試用：在身份驗證與寫入之間塞一段 shell（模擬同一個 SSH 使用者的並行攻擊者）。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub async fn inbox_write_racing(&self, stored_name: &str, data: &[u8], max_bytes: u64, max_files: usize, race: &str) -> Result<(), InboxError> {
         self.inbox_write_with(stored_name, data, max_bytes, max_files, race).await
     }
@@ -1908,7 +1908,7 @@ impl RemoteSite {
         self.measure_with("").await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub async fn measure_racing(&self, race: &str) -> Result<budget::Measured, RfsError> {
         self.measure_with(race).await
     }
@@ -1947,7 +1947,7 @@ impl RemoteSite {
 
 // ───────────────────── 測試替身支援 ─────────────────────
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub mod test_support {
     use super::*;
     use std::process::Stdio;

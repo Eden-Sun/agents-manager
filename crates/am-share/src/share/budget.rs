@@ -106,14 +106,14 @@ fn record(bot_id: &str, place: Place, m: Measured, by_sweep: bool) -> Option<Mea
     prev_swept
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn set_cached_for_test<S: SiteEnv>(app: &S, bot_id: &str, m: Measured) {
     if let Ok(Some(place)) = place_of(app, bot_id).await {
         record(bot_id, place, m, true);
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub fn clear_cached_for_test(bot_id: &str) {
     cache().lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id);
 }

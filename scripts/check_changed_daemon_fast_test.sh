@@ -295,10 +295,12 @@ grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fai
 # #1862 遷移 A：screen.rs／setup.rs 的純解析測試搬到 am-lifecycle 自己跑（crate-only gate），改這兩檔時 owning crate 要跑，
 # 混合檔剩下的 daemon 測試（lifecycle::screen::／lifecycle::setup::）也仍要被選到。
 # #1862 遷移 B：resume_context.rs／codex_history.rs 也一樣（兩檔仍留 daemon 測試）。
+# #1862 C3：改 am-share 的 production 檔（含自己測試是 crate-only 的 svg_check）→ am-share 自己的測試＋daemon 的 share_tests::；整檔測試檔只跑 am-share。
 for pair in crates/am-lifecycle/src/lifecycle/screen.rs:lifecycle::screen:: crates/am-lifecycle/src/lifecycle/setup.rs:lifecycle::setup:: \
     crates/am-lifecycle/src/lifecycle/resume_context.rs:lifecycle::resume_context:: crates/am-lifecycle/src/codex_history.rs:codex_history:: \
     crates/am-share/src/share/portal_remote_tests.rs: \
-    crates/am-share/src/share/portal_upload_tests.rs: crates/am-share/src/share/budget_remote_tests.rs:; do
+    crates/am-share/src/share/portal_upload_tests.rs: crates/am-share/src/share/budget_remote_tests.rs: \
+    crates/am-share/src/share/store.rs:share_tests:: crates/am-share/src/share/svg_check.rs:share_tests::; do
     path="${pair%%:*}"; filter="${pair#*:}"; crate="${path#crates/}"; crate="${crate%%/*}"
     : >"$AM_TEST_CARGO_LOG"
     export AM_TEST_DIFF_HEAD="$path"

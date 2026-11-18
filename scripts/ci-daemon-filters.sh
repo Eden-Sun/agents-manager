@@ -6,7 +6,7 @@
 # 靠另外跑測試才抓到壞掉的 commit。整包 daemon 測試要十幾分鐘不能放進收尾，所以挑「改到的模組自己的測試」：
 #   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；am-base Rust 模組 → daemon composition harness；am-lifecycle／am-share Rust 模組沿用原 daemon 路徑（share/…→`share::…::`）。
 #   - build scripts、crate wiring、共用測試 helper、被嵌入的非 Rust 資料與 daemon/tests 變更，回報 `__all__` 跑全套。
-#     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle／am-share／am-supervisor 的 lib.rs 也是 `__all__`（不能當成一般模組）。
+#     crate 的 Cargo.toml／build.rs，與以 #[path] 編進 daemon 的 am-lifecycle／am-supervisor 的 lib.rs 也是 `__all__`（不能當成一般模組）。
 #   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（清單在 scripts/ci-rules.tsv 第 3 欄，跟 ci-changed-parts.sh、ci-ops-tests.py 同一份）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
 #     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）、docs/API.md（api_doc_parity、ws_event_docs_tests）、
@@ -115,7 +115,7 @@ while IFS= read -r f; do
         Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/* | daemon/Cargo.toml | daemon/build.rs \
             | daemon/src/main.rs | daemon/src/lib.rs | daemon/src/testing.rs | daemon/src/test_home.rs | daemon/tests/* \
             | crates/*/Cargo.toml | crates/*/build.rs \
-            | crates/am-lifecycle/src/lib.rs | crates/am-share/src/lib.rs | crates/am-supervisor/src/lib.rs)
+            | crates/am-lifecycle/src/lib.rs | crates/am-supervisor/src/lib.rs)
             printf '__all__\n'
             ;;
         # child_done 的測試由 am-lifecycle 的 child_done.rs 以 #[path] 編進 daemon（lib.rs），模組路徑是 child_done::tests::；
@@ -194,7 +194,20 @@ while IFS= read -r f; do
                 *) printf '__all__\n' ;;
             esac
             ;;
-        crates/am-lifecycle/src/* | crates/am-share/src/*)
+        # #1862 C3：am-share 不再以 #[path] 編進 daemon，daemon 對它的測試只剩 daemon/src/share_tests/（用 am_share 的公開與 test-hooks 接縫）。
+        # 改 am-share：crate 自己的測試由 check.sh 跑 `cargo test -p am-share`；daemon 這邊固定加選 share_tests::。
+        # 整檔都是 crate-only 的測試檔（*_tests.rs、test_env.rs 且 ci-crate-only-tests 認得）daemon 沒有對應測試，不選。
+        crates/am-share/src/*)
+            # 只有「整檔都是測試」的 crate-only 檔略過；含 production 程式的檔（即使它自己的測試是 crate-only）仍要跑 share_tests::。
+            case "$f" in
+                *_tests.rs | */test_env.rs) if [ -f "$f" ] && python3 -B scripts/ci-crate-only-tests.py "$f"; then continue; fi ;;
+            esac
+            case "$f" in
+                *.rs) printf 'share_tests::\n' ;;
+                *) printf '__all__\n' ;;
+            esac
+            ;;
+        crates/am-lifecycle/src/*)
             rel="${f#crates/*/src/}"
             case "$rel" in
                 *.rs)

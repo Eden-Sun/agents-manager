@@ -102,7 +102,7 @@ pub async fn reserve_share_bot(
     Ok((ws, created))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn reserve_restricted(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
     reserve_share_bot(app, bot_id, store::PROFILE_RESTRICTED, folder, replay).await
 }
