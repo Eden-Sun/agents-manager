@@ -6,6 +6,7 @@
 pub(crate) mod adapter;
 pub(crate) mod completion;
 pub(crate) mod http;
+pub(crate) mod openai;
 pub(crate) mod protocol;
 pub(crate) mod quote;
 mod pricing;
