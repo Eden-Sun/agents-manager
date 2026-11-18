@@ -253,6 +253,7 @@ pub mod message_translate;
 pub mod message_pretranslate;
 pub mod zh_convert;
 pub mod claude_api;
+pub mod openai_api_settings;
 pub mod openai_text;
 pub mod claude_api_balance;
 pub mod claude_console_balance;

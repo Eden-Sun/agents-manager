@@ -399,6 +399,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::herdr_integration::routes())
         .merge(crate::runners::judge::routes())
         .merge(crate::claude_api::routes())
+        .merge(crate::openai_api_settings::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
@@ -923,6 +924,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/judge/shadow", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/openai-api/settings", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/openai-api/settings", BotRoutePolicy::UserOnly),
     ("GET", "/api/claude-api/settings", BotRoutePolicy::UserOrAgm),
     ("PUT", "/api/claude-api/settings", BotRoutePolicy::UserOrAgm),
     ("GET", "/api/claude-api/ledger", BotRoutePolicy::UserOrAgm),
@@ -7539,6 +7542,10 @@ mod ct_eq_tests;
 /// 呼叫端分成兩次；不會有「回失敗、其中一半卻生效了」。
 #[cfg(test)]
 mod mixed_store_tests;
+
+/// `/api/openai-api/settings` 與帳本的供應商篩選。
+#[cfg(test)]
+mod openai_settings_tests;
 
 /// #352：`POST /api/projects/:id/bots` 的冪等。回應遺失後原樣重送（快速新增每次帶 `name_auto:true`）不能再建第二顆 bot；
 /// 記在 config.toml 的那顆 bot 上（daemon 持久，瀏覽器重整、daemon 重啟都在）。

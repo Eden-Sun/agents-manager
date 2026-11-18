@@ -448,6 +448,8 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/build-slots", Expect::UserOnly, None),
         rule("GET", "/api/judge/settings", Expect::UserOnly, None),
         rule("PUT", "/api/judge/settings", Expect::UserOnly, None),
+        rule("GET", "/api/openai-api/settings", Expect::UserOnly, None),
+        rule("PUT", "/api/openai-api/settings", Expect::UserOnly, None),
         rule("GET", "/api/claude-api/settings", Expect::UserOnly, None),
         rule("PUT", "/api/claude-api/settings", Expect::UserOnly, None),
         rule("GET", "/api/claude-api/ledger", Expect::UserOnly, None),

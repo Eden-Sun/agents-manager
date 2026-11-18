@@ -768,6 +768,9 @@ struct LedgerInner {
     rows: VecDeque<Row>,
     total: Totals,
     by_use: BTreeMap<String, Totals>,
+    /// 各供應商的累計與（供應商、用途）的累計：帳本的供應商篩選（全部／Claude／OpenAI）用。
+    by_provider: BTreeMap<&'static str, Totals>,
+    by_provider_use: BTreeMap<(&'static str, String), Totals>,
 }
 
 impl Ledger {
@@ -775,19 +778,33 @@ impl Ledger {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.total.add(&row);
         g.by_use.entry(row.use_case.clone()).or_default().add(&row);
+        g.by_provider.entry(row.provider).or_default().add(&row);
+        g.by_provider_use.entry((row.provider, row.use_case.clone())).or_default().add(&row);
         g.rows.push_front(row);
         g.rows.truncate(LEDGER_CAP);
     }
 
     /// `{totals, by_use, rows, since}`，rows 新的在前。
     pub fn snapshot(&self, limit: usize) -> Value {
+        self.snapshot_for(limit, None)
+    }
+
+    /// 同 [`Self::snapshot`]，`provider` 給了就只看那個供應商（`anthropic`／`openai`）的列、總計與每個用途的累計。
+    pub fn snapshot_for(&self, limit: usize, provider: Option<&str>) -> Value {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let by_use: serde_json::Map<String, Value> = g.by_use.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
+        let (totals, by_use): (Value, serde_json::Map<String, Value>) = match provider {
+            None => (g.total.to_json(), g.by_use.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()),
+            Some(p) => (
+                g.by_provider.get(p).map_or_else(|| Totals::default().to_json(), Totals::to_json),
+                g.by_provider_use.iter().filter(|((pp, _), _)| *pp == p).map(|((_, k), v)| (k.clone(), v.to_json())).collect(),
+            ),
+        };
         json!({
-            "totals": g.total.to_json(),
+            "totals": totals,
             "by_use": by_use,
-            "rows": g.rows.iter().take(limit).map(Row::to_json).collect::<Vec<_>>(),
+            "rows": g.rows.iter().filter(|r| provider.is_none_or(|p| r.provider == p)).take(limit).map(Row::to_json).collect::<Vec<_>>(),
             "since": "daemon_start",
+            "provider": provider,
         })
     }
 }
@@ -1036,10 +1053,17 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
 #[derive(Deserialize)]
 pub(crate) struct LedgerQuery {
     limit: Option<usize>,
+    /// `anthropic`／`openai`；沒帶或 `all`＝全部。
+    provider: Option<String>,
 }
 
-pub(crate) async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<LedgerQuery>) -> Json<Value> {
-    Json(app.claude_api.ledger.snapshot(q.limit.unwrap_or(20).clamp(1, LEDGER_CAP)))
+pub(crate) async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<LedgerQuery>) -> Result<Json<Value>, LcError> {
+    let provider = match q.provider.as_deref() {
+        None | Some("") | Some("all") => None,
+        Some(p) if p == API_PROVIDER_ANTHROPIC || p == API_PROVIDER_OPENAI => Some(p),
+        Some(_) => return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "invalid_provider", "allowed": ["all", API_PROVIDER_ANTHROPIC, API_PROVIDER_OPENAI]}))),
+    };
+    Ok(Json(app.claude_api.ledger.snapshot_for(q.limit.unwrap_or(20).clamp(1, LEDGER_CAP), provider)))
 }
 
 pub(crate) async fn get_balance(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
