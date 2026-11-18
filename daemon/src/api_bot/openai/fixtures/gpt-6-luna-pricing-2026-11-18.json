@@ -1,0 +1,12 @@
+{
+  "model": "gpt-6-luna",
+  "effective_date": "2026-11-18",
+  "source": "https://developers.openai.com/api/docs/models/gpt-6-luna (standard tier)",
+  "currency": "USD",
+  "per_million_tokens_usd": {
+    "input": "0.10",
+    "cache_read": "0.01",
+    "cache_write_default": "0.125",
+    "output": "0.50"
+  }
+}
