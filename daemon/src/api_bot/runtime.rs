@@ -2490,6 +2490,10 @@ pub(super) async fn startup_checkpoint_on(
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
         let checkpoint = Checkpoint::new(&value).ok()?;
         let state: super::runner::State = serde_json::from_value(checkpoint.value()).ok()?;
+        // recovery：不認得的 provider 標籤一律當成未解決，不替它結算。
+        if !super::provider::is_known(state.provider_id()) {
+            return None;
+        }
         Some(startup_context_settled(&state, owner_failed))
     })()
     .unwrap_or(false);

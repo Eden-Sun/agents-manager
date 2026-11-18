@@ -100,3 +100,16 @@ pub trait Provider: Send + Sync {
     fn checkpoint_matches_model(&self, state: &State, model: &str) -> bool;
     fn quote_provider(&self) -> Arc<dyn QuoteProvider>;
 }
+
+/// 依識別字取得 provider（session 建立時固定、resume／recovery 依 checkpoint 的標籤取回同一個）。不認得的回 `None`。
+pub(crate) fn for_id(id: &str, quote: Arc<dyn QuoteProvider>) -> Option<Arc<dyn Provider>> {
+    match id {
+        super::anthropic::ID => Some(Arc::new(super::anthropic::AnthropicProvider::new(quote))),
+        _ => None,
+    }
+}
+
+/// 這個識別字是不是已知的 provider（recovery 只認得出標籤、還不需要建 provider 的地方用）。
+pub(crate) fn is_known(id: &str) -> bool {
+    id == super::anthropic::ID
+}

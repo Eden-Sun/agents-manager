@@ -34,6 +34,18 @@ pub struct State {
     pub completed_tool_ids: std::collections::HashSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// checkpoint payload 的版本標籤：`v`（目前是 2）與 `provider` 一起出現。都沒有＝舊格式，一律按 Claude 的形狀讀。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u64>,
+    /// 這個 session 固定的 provider（[`super::provider::Provider::id`]）。`messages`／`responses` 是它的原生格式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+impl State {
+    /// 這份 transcript 是哪個 provider 的原生格式；沒有標籤的舊 checkpoint 是 Claude。
+    pub fn provider_id(&self) -> &str {
+        self.provider.as_deref().unwrap_or(super::anthropic::ID)
+    }
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Halt {

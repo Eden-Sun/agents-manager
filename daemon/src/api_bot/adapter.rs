@@ -95,6 +95,9 @@ pub(crate) struct ApiBotAdapter {
     quote_provider: Arc<dyn QuoteProvider>,
     /// 這個 session 的模型供應商（建立時固定）：編碼請求、送出、錯誤分類與 transcript 編解碼都經過它。
     provider: Arc<dyn super::provider::Provider>,
+    /// 這個 session 的 checkpoint 版本標籤：`Some(provider id)`＝v2（新建的 session）；`None`＝沒有標籤的舊 session，
+    /// 維持舊格式存回去（位元組不變）。
+    session_tag: Option<String>,
     http_cfg: AdapterHttpConfig,
     tools: Option<Arc<dyn Tools>>,
     cursor: Mutex<CursorState>,
@@ -132,7 +135,9 @@ struct ActiveAttempt {
     key: Option<Secret>,
 }
 
-pub(super) use super::anthropic::{checkpoint_matches_model, definitive_rejection};
+pub(super) use super::anthropic::checkpoint_matches_model;
+#[cfg(test)]
+pub(super) use super::anthropic::definitive_rejection;
 
 impl ApiBotAdapter {
     /// 接上串流進度出口（runtime 在建好 adapter 後呼叫）。
@@ -161,6 +166,27 @@ impl ApiBotAdapter {
     /// 取走（並清掉）最近一次預留被拒絕的原因。
     pub(crate) fn take_refusal(&self) -> Option<String> {
         self.refusal.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// 要存成 checkpoint 的 JSON：版本標籤一律照 session 固定的那一個寫（新 session＝`{"v":2,"provider":…}`，舊 session＝不帶）。
+    /// runner 手上的 state 帶著別的 provider 標籤＝不是這個 session 的 transcript，拒絕。
+    fn checkpoint_value(&self, state: &State) -> Result<Value, ()> {
+        if state.provider.is_some() && state.provider != self.session_tag {
+            return Err(());
+        }
+        let mut val = serde_json::to_value(state).map_err(|_| ())?;
+        let object = val.as_object_mut().ok_or(())?;
+        match &self.session_tag {
+            Some(provider) => {
+                object.insert("v".into(), Value::from(am_base::db::api_bot::CHECKPOINT_VERSION));
+                object.insert("provider".into(), Value::String(provider.clone()));
+            }
+            None => {
+                object.remove("v");
+                object.remove("provider");
+            }
+        }
+        Ok(val)
     }
 
     /// 這個 session 的 transcript 編解碼（runner 用）。
@@ -210,8 +236,12 @@ impl ApiBotAdapter {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
+        // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
+        let provider = super::provider::for_id(super::anthropic::ID, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
         let initial_state = State {
             system: Some(system_str),
+            v: Some(am_base::db::api_bot::CHECKPOINT_VERSION),
+            provider: Some(provider.id().to_string()),
             ..Default::default()
         };
         let state_val =
@@ -229,7 +259,8 @@ impl ApiBotAdapter {
             options,
             system,
             limits,
-            provider: Arc::new(super::anthropic::AnthropicProvider::new(quote_provider.clone())),
+            provider,
+            session_tag: Some(super::anthropic::ID.to_string()),
             quote_provider,
             http_cfg,
             tools,
@@ -299,7 +330,10 @@ impl ApiBotAdapter {
             .fetch_optional(&pool).await.map_err(|_| http::Error::InvalidRequest)?;
         let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
             .map_err(|_| http::Error::InvalidRequest)?;
-        if !checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
+        // session 的 provider 在建立時就固定：依 checkpoint 的標籤取回同一個（沒有標籤＝Claude）；不認得就拒絕，不改任何 durable 狀態。
+        let provider = super::provider::for_id(previous.provider_id(), quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
+        let session_tag = previous.provider.clone();
+        if !provider.checkpoint_matches_model(&previous, &options.model) { return Err(http::Error::InvalidRequest); }
 
         let new_rev = db_api::rebind(
             &pool,
@@ -325,6 +359,9 @@ impl ApiBotAdapter {
             .map_err(|_| http::Error::InvalidRequest)?;
         let mut loaded_state: State =
             serde_json::from_value(loaded_chk.value()).map_err(|_| http::Error::InvalidRequest)?;
+        if loaded_state.provider != session_tag {
+            return Err(http::Error::InvalidRequest);
+        }
         loaded_state.messages = super::protocol::prune_messages_for_compaction(&loaded_state.messages);
 
         let effective_system = if let Some(ref stored) = loaded_state.system {
@@ -345,7 +382,8 @@ impl ApiBotAdapter {
             options,
             system: effective_system,
             limits,
-            provider: Arc::new(super::anthropic::AnthropicProvider::new(quote_provider.clone())),
+            provider,
+            session_tag,
             quote_provider,
             http_cfg,
             tools,
@@ -523,7 +561,7 @@ impl Model for ApiBotAdapter {
                         };
                         let mut next_state = cursor.last_durable_state.clone();
                         next_state.api_pending = false;
-                        let val = serde_json::to_value(&next_state)
+                        let val = self.checkpoint_value(&next_state)
                             .map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
                         let chk =
                             Checkpoint::new(&val).map_err(|_| http::Error::InvalidResponseDetail(reason.clone()))?;
@@ -563,7 +601,7 @@ impl Model for ApiBotAdapter {
                     let mut next_state = cursor.last_durable_state.clone();
                     next_state.api_pending = !rejected;
 
-                    if let Ok(val) = serde_json::to_value(&next_state) {
+                    if let Ok(val) = self.checkpoint_value(&next_state) {
                         if let Ok(chk) = Checkpoint::new(&val) {
                             let receipt = db_api::Receipt {
                                 state: if rejected { "failed" } else { "unknown" },
@@ -591,7 +629,7 @@ impl Model for ApiBotAdapter {
 impl Journal for ApiBotAdapter {
     fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>> {
         Box::pin(async move {
-            let val = serde_json::to_value(state).map_err(|_| ())?;
+            let val = self.checkpoint_value(state)?;
             let chk = Checkpoint::new(&val).map_err(|_| ())?;
             let raw_len = serde_json::to_vec(&val).map_err(|_| ())?.len();
             if raw_len > self.limits.max_checkpoint_bytes {
@@ -616,7 +654,7 @@ impl Journal for ApiBotAdapter {
                     // While HTTP is active/pending, disallow arbitrary mutation of messages/responses.
                     // Only allow exactly matching the last durable state (idempotent checkpoint), without granting permits.
                     let durable_val =
-                        serde_json::to_value(&cursor.last_durable_state).map_err(|_| ())?;
+                        self.checkpoint_value(&cursor.last_durable_state)?;
                     if val != durable_val {
                         return Err(());
                     }
