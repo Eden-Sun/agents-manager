@@ -4,6 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { useState } from 'react'
 import { mount, act, typeInto, setupDom, teardownDom, unmountAll, click } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, PatchBotInput, PatchProjectInput, Project } from '../api/types'
@@ -135,4 +136,25 @@ test('角色卡快取命中率：取該專案同角色 Bot 的 run.prompt_cache.
   assert.match(cache('執行者'), /70%$/, '只算同專案：(0.9+0.5)/2')
   assert.match(cache('顧問'), /—$/, 'hit_ratio 為 null')
   assert.match(cache('專家'), /—$/, '沒有這個角色的 Bot')
+})
+
+test('切換專案時第一次 render 就不顯示「已變更」且正確反映新專案角色政策', async () => {
+  const p1 = { id: 'p1', label: 'P1', path: '/p1', host: 'local', mode: 'expert', role_policy: { manager: { keep_warm: true } } } as unknown as Project
+  const p2 = { id: 'p2', label: 'P2', path: '/p2', host: 'local', mode: 'expert', role_policy: { manager: { keep_warm: false } } } as unknown as Project
+  let setP!: (p: Project) => void
+  function Harness() {
+    const [cur, setCur] = useState(p1)
+    setP = setCur
+    return <RolePolicyEditor project={cur} />
+  }
+  await mount(<Harness />)
+  assert.equal(pill(card('管理者'), '開').getAttribute('aria-checked'), 'true')
+  assert.equal(saveBtn().disabled, true, 'p1 存的值與目前表單一致，不能存')
+
+  await act(async () => {
+    setP(p2)
+  })
+  // 切換至 p2（manager keep_warm: false），第一次 render 就應該反映新專案資料且不能誤判為已變更
+  assert.equal(pill(card('管理者'), '關').getAttribute('aria-checked'), 'true')
+  assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })

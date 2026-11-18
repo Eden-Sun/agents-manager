@@ -1,6 +1,7 @@
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { useState } from 'react'
+import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { toProject } from '../api/normalize'
 import { ProjectExpertSettings } from './ProjectExpertSettings'
@@ -134,4 +135,27 @@ test('normalize：daemon 的 specialist_dispatch 原樣帶入，缺欄位為 und
   assert.equal(toProject({ ...base, specialist_dispatch: false })?.specialist_dispatch, false)
   assert.equal(toProject({ ...base, specialist_dispatch: true })?.specialist_dispatch, true)
   assert.equal(toProject(base)?.specialist_dispatch, undefined)
+})
+
+test('切換專案時第一次 render 就不顯示「已變更」且正確反映新專案開關', async () => {
+  const p1 = { id: 'p1', label: 'P1', path: '/p1', host: 'local', mode: 'expert', specialist_dispatch: false } as unknown as Project
+  const p2 = { id: 'p2', label: 'P2', path: '/p2', host: 'local', mode: 'expert', specialist_dispatch: true } as unknown as Project
+  let setP!: (p: Project) => void
+  function Harness() {
+    const [cur, setCur] = useState(p1)
+    setP = setCur
+    return <ProjectSpecialistDispatchEditor project={cur} />
+  }
+  await mount(<Harness />)
+  const cb = () => document.querySelector<HTMLInputElement>('.project-specialist-dispatch-editor input[type="checkbox"]')!
+  const saveBtn = () => [...document.querySelectorAll<HTMLButtonElement>('.project-specialist-dispatch-editor button')].find((b) => b.textContent?.trim() === '儲存')!
+  assert.equal(cb().checked, false)
+  assert.equal(saveBtn().disabled, true, 'p1 沒變更不能按')
+
+  await act(async () => {
+    setP(p2)
+  })
+  // 切換至 p2（specialist_dispatch: true），第一次 render 就不應殘留 p1 的 false 導致按鈕啟用或勾選狀態不符
+  assert.equal(cb().checked, true)
+  assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })

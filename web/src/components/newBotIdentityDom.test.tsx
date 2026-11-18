@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { BOT_KINDS, CREATABLE_KINDS } from '../api/types'
-import { Sidebar } from './Sidebar'
+import { NewBotForm, Sidebar } from './Sidebar'
 
 afterEach(unmountAll)
 before(setupDom)
@@ -183,4 +183,26 @@ test('claude-api：選 Fable 5.2 時 POST 保留完整模型 id', async () => {
   await settle(50)
   const post = requests.find((r) => r.method === 'POST' && /\/projects\/p1\/bots$/.test(r.path))
   assert.equal((post?.body as Record<string, unknown> | undefined)?.model, 'claude-fable-5-2')
+})
+
+test('切換專案時第一次 render 就反映新專案的預設 kind 與 name，不顯示舊專案資料', async () => {
+  useStore.setState({
+    projects: [project('p1'), project('p2')],
+    bots: [bot('b1', 'p1'), { ...bot('b2', 'p2'), kind: 'codex', name: 'codex-saved' }],
+    localTools: Object.fromEntries(BOT_KINDS.map((k) => [k, { installed: true, path: null, version: null, logged_in: true }])),
+  } as never)
+  await mount(<NewBotForm onDone={() => {}} />)
+
+  // 一開始預設為 p1，kind 是 claude
+  const kindOpt = () => document.querySelector<HTMLElement>('[aria-label="kind"] .opt.on .opt-label')?.textContent?.trim()
+  const nameInput = () => document.querySelector<HTMLInputElement>('input[type="text"]:not(.opt-filter)')!
+  assert.equal(kindOpt(), 'claude')
+
+  // 點擊切換至 p2（p2 的最新 bot 是 codex，預設 kind 應切為 codex）
+  const p2Btn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Project"] .opt')].find((b) => b.textContent?.includes('proj-p2'))!
+  assert.ok(p2Btn, '有 proj-p2 按鈕')
+  await click(p2Btn)
+  // 切換專案後第一次 render 就應該更新 kind 與 name，不應殘留舊專案的 claude
+  assert.equal(kindOpt(), 'codex', '第一次 render 即反映新專案預設 kind')
+  assert.match(nameInput().value, /^codex/, '第一次 render 即反映新專案名稱')
 })

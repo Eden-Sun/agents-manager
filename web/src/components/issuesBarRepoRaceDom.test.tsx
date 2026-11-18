@@ -1,7 +1,7 @@
 /** #1833：repo／query 切換的 debounce 空窗不能讓舊 repo 搜尋結果重新出現或被插入。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { installManualTimers } from '../testing/manualTimers'
 import { resetStoreForTest, useStore } from '../store/store'
@@ -190,5 +190,55 @@ test('切 repo 後，已在讀取的舊 issue 內容不再插入草稿', async (
   } finally {
     timers.restore()
     api.restore()
+  }
+})
+
+test('切換專案時第一次 render 就不顯示舊專案的 Issues 清單', async () => {
+  resetStoreForTest()
+  useStore.setState({
+    projects: [
+      { id: 'p1', label: 'p1', path: '/p1', host: 'local', github: { owner: 'example', repo: 'main', url: 'https://github.com/example/main' } },
+      { id: 'p2', label: 'p2', path: '/p2', host: 'local', github: { owner: 'example', repo: 'sub', url: 'https://github.com/example/sub' } },
+    ] as never,
+    drafts: {},
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = ((input: RequestInfo | URL) => {
+    const path = String(input)
+    if (path.includes('/session')) return Promise.resolve(respond({ token: 'test-token' }))
+    if (path.includes('/submodules')) return Promise.resolve(respond({ submodules: [] }))
+    if (path.includes('/projects/p1/issues')) return Promise.resolve(respond({ issues: [MAIN_ISSUE] }))
+    if (path.includes('/projects/p2/issues')) return new Promise(() => {}) // p2 尚未回應
+    return Promise.resolve(respond({}))
+  }) as typeof fetch
+
+  try {
+    let setPid!: (pid: string) => void
+    function SwitchHarness() {
+      const [pid, setPidState] = useState('p1')
+      setPid = setPidState
+      const ref = useRef<HTMLTextAreaElement>(null)
+      return (
+        <>
+          <textarea ref={ref} />
+          <IssuesBar projectId={pid} draftKey="bot:b1" inputRef={ref} />
+        </>
+      )
+    }
+    await mount(<SwitchHarness />)
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('.issues-btn')!.click()
+      await new Promise((r) => setTimeout(r, 40))
+    })
+    await pump()
+    assert.equal(document.querySelector('.issue-title')?.textContent?.trim(), '#7 MAIN issue seven', 'p1 的 issues 已載入')
+
+    await act(async () => {
+      setPid('p2')
+    })
+    // 切換至 p2，第一次 render 就不應該殘留 p1 的 issue 列表
+    assert.equal(document.querySelector('.issue-title'), null, '切換專案後第一次 render 不顯示舊專案資料')
+  } finally {
+    globalThis.fetch = originalFetch
   }
 })

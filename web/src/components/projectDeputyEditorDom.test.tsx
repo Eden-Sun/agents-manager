@@ -3,6 +3,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { useState } from 'react'
 import { mount, act, typeInto, setupDom, teardownDom, unmountAll, click } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, PatchProjectInput, Project } from '../api/types'
@@ -17,8 +18,8 @@ after(async () => {
   await teardownDom()
 })
 
-const project = (deputy: Project['deputy'] = null) =>
-  ({ id: 'p1', label: 'proj', path: '/p1', host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', deputy }) as unknown as Project
+const project = (deputy: Project['deputy'] = null, id = 'p1') =>
+  ({ id, label: 'proj', path: `/${id}`, host: 'local', mode: 'expert', workspace_id: null, github: null, created_at: '', deputy }) as unknown as Project
 const bot = (id: string, role: Bot['role']) => ({ id, name: id, role, project_id: 'p1' }) as unknown as Bot
 const BOTS = [bot('mgr', 'manager'), bot('adv', 'advisor'), bot('spc', 'specialist'), bot('exe', 'executor')]
 
@@ -84,4 +85,23 @@ test('已設定：顯示存的值；選「不設」送 null', async () => {
   assert.equal(number().disabled, true, '沒選人時門檻停用')
   await click(saveBtn())
   assert.deepEqual(sent, [{ deputy: null }])
+})
+
+test('切換專案時第一次 render 就不顯示「已變更」且清除舊專案副管理者選擇', async () => {
+  let setP!: (p: Project) => void
+  function Harness() {
+    const [cur, setCur] = useState(project({ bot_id: 'adv', after_sec: 180 }, 'p1'))
+    setP = setCur
+    return <ProjectDeputyEditor project={cur} bots={BOTS} />
+  }
+  await mount(<Harness />)
+  assert.equal(select().value, 'adv')
+  assert.equal(saveBtn().disabled, true, 'p1 存的值與目前表單一致，不能存')
+
+  await act(async () => {
+    setP(project(null, 'p2'))
+  })
+  // 切換至 p2（deputy: null），第一次 render 就應該清除副管理者選擇，且不能誤判為已變更
+  assert.equal(select().value, '')
+  assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })
