@@ -75,11 +75,16 @@
 
 /* 有更新但全在忙：數字改「在忙幾顆」並退成灰——按不動，不該搶眼。 */
 
-.quota-update.waiting,
+.quota-update.waiting:not(.scheduled),
 .quota-update:disabled {
   color: var(--text-faint);
   cursor: default;
 }
+
+/* 已排程「閒下來自動重啟」：右上角小時鐘，顏色用強調色（不是停用的灰）。 */
+.quota-update.scheduled { color: var(--accent); }
+.quota-update-clock { position: absolute; top: -4px; right: -5px; font-size: 9px; line-height: 1; }
+.confirm-check { display: block; margin: 6px 0 0; font-size: 12px; cursor: pointer; }
 
 .quota-update.running.done {
   cursor: pointer;

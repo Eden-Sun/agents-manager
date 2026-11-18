@@ -62,6 +62,12 @@ export function UpdateQuotaChip() {
   )
 }
 
+/** 更新內容（changelog）看哪一顆：第一顆等著套用的；沒有就第一顆在忙的（要安裝的 codex 不算，那邊有自己的 chip）。 */
+function firstTargetId(s: Parameters<Parameters<typeof useStore>[0]>[0]): string | undefined {
+  const c = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+  return (c.ready[0] ?? c.busy.find((b) => !b.install))?.botId
+}
+
 /** `control`：手機合成的那顆（`MergedUpdateChip`）代為開框，這裡只畫確認框、不畫按鈕。 */
 export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
@@ -86,24 +92,42 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     ),
   )
   const busyCount = busyLines.length
+  // 在忙的 bot id（跟 busyLines 同一個過濾與順序）：「閒下來自動重啟」排的就是它們。
+  const busyIds = useStore(
+    useShallow((s) =>
+      updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
+        .busy.filter((b) => !b.install)
+        .map((b) => b.botId),
+    ),
+  )
+  const scheduled = useStore(useShallow((s) => s.updateRestartScheduled))
+  const scheduleUpdateRestart = useStore((s) => s.scheduleUpdateRestart)
+  const cancelUpdateRestart = useStore((s) => s.cancelUpdateRestart)
+  const scheduledBusy = busyIds.filter((id) => scheduled.includes(id))
+  const allScheduled = busyCount > 0 && scheduledBusy.length === busyCount
+  const [alsoBusy, setAlsoBusy] = useState(false)
+  const busyOnly = readyCount === 0
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
-  const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
+  const setConfirming = (v: boolean) => {
+    if (!v) setAlsoBusy(false)
+    return control ? !v && control.close() : setLocalOpen(v)
+  }
   // changelog 用第一顆等著套用的 bot 所在主機、kind 與它跑著的版本；同一台同 kind 都是同一份。
   const changelogHost = useStore((s) => {
-    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    const first = firstTargetId(s)
     return projectHostName(s, s.bots.find((b) => b.id === first)?.project_id ?? null)
   })
   const changelogKind = useStore((s) => {
-    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    const first = firstTargetId(s)
     return s.bots.find((b) => b.id === first)?.kind ?? 'claude'
   })
   const changelogFrom = useStore((s) => {
-    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    const first = firstTargetId(s)
     return first ? (s.runs[first]?.status?.version ?? null) : null
   })
   const changelogNotice = useStore((s) => {
-    const first = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready[0]?.botId
+    const first = firstTargetId(s)
     return first ? (s.runs[first]?.update_notice ?? null) : null
   })
   // codex 的版本區間從通知讀（磁碟已裝好的那種通知也寫著兩個版本），claude 照舊（issue #561）。
@@ -141,15 +165,17 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const busyNote = busyCount > 0 ? t('\n{n} 顆在忙，會先跳過：\n{names}', { n: busyCount, names: busyLines.join('\n') }) : ''
   const label =
     readyCount === 0
-      ? t('有 CLI 更新，但這些 Bot 現在都在忙——閒下來再按')
+      ? scheduledBusy.length > 0
+        ? t('{n} 顆在忙，已排程閒下來自動重啟（點開可查看或取消）', { n: busyCount })
+        : t('{n} 顆在忙，點開可安排閒下來自動重啟', { n: busyCount })
       : t('有 CLI 更新 · 重啟 {n} 顆閒置的 Bot（結束目前的 agent，再用同一個 session --resume 接回來，上下文不會掉）', { n: readyCount })
 
   return (
     <>
       {control ? null : <button
         type="button"
-        className={`quota-update${readyCount === 0 ? ' waiting' : ''}`}
-        disabled={sending || readyCount === 0}
+        className={`quota-update${readyCount === 0 ? ' waiting' : ''}${scheduledBusy.length > 0 ? ' scheduled' : ''}`}
+        disabled={sending}
         title={`${label}${readyCount > 0 ? t('：\n{names}', { names: readyNames.join(t('、')) }) : ''}${busyNote}`}
         aria-label={label}
         onClick={() => setConfirming(true)}
@@ -158,10 +184,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         <span className="quota-update-n" aria-hidden="true">
           {sending ? '…' : readyCount === 0 ? busyCount : readyCount}
         </span>
+        {scheduledBusy.length > 0 ? <span className="quota-update-clock" aria-hidden="true">⏱</span> : null}
       </button>}
       <ConfirmDialog
         open={confirming}
-        title={t('重啟這些 Bot 來套用更新？')}
+        title={busyOnly ? (allScheduled ? t('這些 Bot 已排成閒下來自動重啟') : t('這些 Bot 都在忙：閒下來自動重啟？')) : t('重啟這些 Bot 來套用更新？')}
         body={
           <>
             {confirming ? (
@@ -173,35 +200,49 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                 ) : null}
               </div>
             ) : null}
-            <p>
+            {busyOnly ? (
+              <p>
+                {t.x('有 CLI 更新，但以下 {n} 顆現在都在忙，不會打斷它們。排成「閒下來自動重啟」後，每顆下次閒置時會結束目前的 agent，再用同一個 session {resume} 接回來，上下文不會掉；可以隨時取消。', {
+                  n: <strong>{busyCount}</strong>,
+                  resume: <code>--resume</code>,
+                })}
+              </p>
+            ) : null}
+            {busyOnly ? null : <p>
               {t.x('以下 {n} 顆會結束目前的 agent，再用同一個 session {resume} 接回來——上下文不會掉，但重啟要花幾秒，這段時間它們不會回話。', {
                 n: <strong>{readyCount}</strong>,
                 resume: <code>--resume</code>,
               })}
-            </p>
-            <ul className="confirm-list">
+            </p>}
+            {busyOnly ? null : <ul className="confirm-list">
               {readyNames.map((n, i) => (
                 <li key={`${i}:${n}`}>{n}</li>
               ))}
-            </ul>
-            {unknownCount > 0 ? (
+            </ul>}
+            {!busyOnly && unknownCount > 0 ? (
               <p className="confirm-note">
                 {t('標「背景狀態未知」的 {n} 顆，daemon 還沒讀過它們畫面底部有沒有背景工作（剛重啟）；若有，重啟會一起結束。要保險就等 30 秒再按。', { n: unknownCount })}
               </p>
             ) : null}
             {busyCount > 0 ? (
               <>
-                <p className="confirm-note">{t('另外 {n} 顆在忙，這次會跳過：', { n: busyCount })}</p>
+                {busyOnly ? null : <p className="confirm-note">{t('另外 {n} 顆在忙，這次會跳過：', { n: busyCount })}</p>}
                 <ul className="confirm-list dim">
                   {busyLines.map((n, i) => (
-                    <li key={`${i}:${n}`}>{n}</li>
+                    <li key={`${i}:${n}`}>{scheduled.includes(busyIds[i]) ? `${n}${t('（已排程）')}` : n}</li>
                   ))}
                 </ul>
+                {busyOnly ? null : (
+                  <label className="confirm-check">
+                    <input type="checkbox" checked={alsoBusy} onChange={(e) => setAlsoBusy(e.target.checked)} />{' '}
+                    {t('其餘 {n} 顆在忙的，閒下來也自動重啟', { n: busyCount })}
+                  </label>
+                )}
               </>
             ) : null}
           </>
         }
-        confirmLabel={t('重啟 {n} 顆', { n: readyCount })}
+        confirmLabel={busyOnly ? (allScheduled ? t('取消自動重啟') : t('閒下來自動重啟')) : t('重啟 {n} 顆', { n: readyCount })}
         // 批次框跟單顆框同一顆按鈕：更新的解析是**版本層級**的事，跟要重啟幾顆無關。
         // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
         // （使用者 2026-09-19：「還是沒見按鈕」）。claude 與 codex 同一套（issue #561）。
@@ -211,8 +252,14 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         width={440}
         onCancel={() => setConfirming(false)}
         onConfirm={() => {
+          const alsoIds = alsoBusy ? busyIds.filter((id) => !scheduled.includes(id)) : []
           setConfirming(false)
-          void restartIdleBots()
+          if (busyOnly) {
+            // 全在忙：不重啟任何一顆；排成閒下來自動重啟，已經全排了就是取消。
+            void (allScheduled ? cancelUpdateRestart(busyIds) : scheduleUpdateRestart(busyIds))
+            return
+          }
+          void restartIdleBots().then(() => (alsoIds.length > 0 ? scheduleUpdateRestart(alsoIds) : undefined))
         }}
       />
     </>
