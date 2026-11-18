@@ -3089,3 +3089,45 @@ fn a_fleet_operator_gate_fits_in_a_one_mib_stack() {
         }
     });
 }
+
+/// 使用者授權 fleet operator 代為查看與確認 Codex Stop hook 信任（2026-11-18）：只有列名的頂層 bot 能打這兩支。
+#[tokio::test]
+async fn only_a_fleet_operator_may_read_and_trust_the_codex_stop_hook_for_the_user() {
+    let f = fleet_env().await;
+    let plain = distinct_bot(&f.e, "hook-trust-plain").await;
+    let child = distinct_bot(&f.e, "hook-trust-child").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.operator.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
+    let child = db::bot(&f.e.app.db, &child.id).await.unwrap().unwrap();
+    let codex_home = crate::home::dir().unwrap().join(".codex");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let trust = r#"{"host":"local","identity":null}"#;
+    let user_only = |r: &str| forbidden(r) && r.contains("user_only");
+
+    // 清單是空的：operator 自己也照舊 403。
+    assert!(user_only(&as_bot(&f.e, &f.operator, "GET", "/api/codex/stop-hook", "").await));
+    assert!(user_only(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await));
+    assert!(!codex_home.join("hooks.json").exists(), "nothing was installed");
+
+    // child 的 id 也列進去：不是頂層，不算。
+    set_fleet_operators(&f.e, &[&f.operator.id, &child.id]).await;
+    for who in [&plain, &child] {
+        let r = as_bot(&f.e, who, "GET", "/api/codex/stop-hook", "").await;
+        assert!(user_only(&r), "{} GET: {r}", who.name);
+        let r = as_bot(&f.e, who, "POST", "/api/codex/stop-hook/trust", trust).await;
+        assert!(user_only(&r), "{} POST: {r}", who.name);
+    }
+    assert!(!codex_home.join("hooks.json").exists(), "a refused caller wrote nothing");
+
+    let r = as_bot(&f.e, &f.operator, "GET", "/api/codex/stop-hook", "").await;
+    assert!(r.starts_with("HTTP/1.1 200") && r.contains(r#""host":"local""#), "{r}");
+    let r = as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await;
+    assert!(r.starts_with("HTTP/1.1 200") && r.contains(r#""status":"trusted""#), "{r}");
+    assert!(std::fs::read_to_string(codex_home.join("config.toml")).unwrap().contains("trusted_hash"));
+    // 其他 User-only 的設定路由不因此打開。
+    assert!(user_only(&as_bot(&f.e, &f.operator, "PUT", "/api/settings/time-zone", r#"{"time_zone":"UTC"}"#).await));
+    assert!(forbidden(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/other", trust).await) || as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/other", trust).await.starts_with("HTTP/1.1 404"));
+
+    // 從清單移除：立刻失效。
+    set_fleet_operators(&f.e, &[]).await;
+    assert!(user_only(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await));
+}

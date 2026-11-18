@@ -1131,7 +1131,12 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
             && !confirm_query
             && matches!(&principal, RequestPrincipal::Bot(_))
             && Box::pin(fleet_operator_route(&app, bot_id, method, path)).await;
-        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle) {
+        let fleet_codex_hook = policy == Some(BotRoutePolicy::UserOnly)
+            && !sender_withdraw
+            && !manager_base
+            && matches!(&principal, RequestPrincipal::Bot(_))
+            && Box::pin(fleet_codex_stop_hook_route(&app, bot_id, method, path)).await;
+        if (policy == Some(BotRoutePolicy::UserOnly) && !sender_withdraw && !manager_base && !fleet_codex_hook) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !manager_lifecycle && !fleet_lifecycle) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -3077,11 +3082,7 @@ async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: 
     if !fleet_operator_op(method, parts) || target.id == caller || target.parent_bot_id.is_some() || target.managed_by == "child" || target.deleted_at.is_some() {
         return Ok(false);
     }
-    if !app.cfg.agents_fresh().await.fleet_operators.iter().any(|id| id == caller) {
-        return Ok(false);
-    }
-    let Some(me) = db::bot(&app.db, caller).await.map_err(any_err)? else { return Ok(false) };
-    if me.deleted_at.is_some() || me.parent_bot_id.is_some() || me.managed_by == "child" {
+    if !is_fleet_operator(app, caller).await? {
         return Ok(false);
     }
     // 讀不到就當成分享用 bot（fail closed）。
@@ -3092,6 +3093,24 @@ async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: 
         return Ok(false);
     }
     Ok(true)
+}
+
+/// `caller` 列在 `[agents] fleet_operators`（熱重載，只認 bot id），而且本身是存活的頂層 bot。child 不算，列了也不算。
+pub(crate) async fn is_fleet_operator(app: &Arc<App>, caller: &str) -> Result<bool, LcError> {
+    if !app.cfg.agents_fresh().await.fleet_operators.iter().any(|id| id == caller) {
+        return Ok(false);
+    }
+    let Some(me) = db::bot(&app.db, caller).await.map_err(any_err)? else { return Ok(false) };
+    Ok(me.deleted_at.is_none() && me.parent_bot_id.is_none() && me.managed_by != "child")
+}
+
+/// fleet operator 可代使用者查看與確認 Codex Stop hook 信任（使用者 2026-11-18）：`GET|HEAD /api/codex/stop-hook`、
+/// `POST /api/codex/stop-hook/trust`。路由仍是 UserOnly，只對這個身份放行；handler 再驗一次。
+async fn fleet_codex_stop_hook_route(app: &Arc<App>, caller: &str, method: &str, path: &str) -> bool {
+    let Some(parts) = decoded_bot_path_segments(path) else { return false };
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let shape = matches!((method, parts.as_slice()), ("GET" | "HEAD", ["api", "codex", "stop-hook"]) | ("POST", ["api", "codex", "stop-hook", "trust"]));
+    shape && is_fleet_operator(app, caller).await.unwrap_or(false)
 }
 
 /// 路由層（UserOrAgm 閘）用的版本：解不開、查不到、DB 錯都當成不放行。

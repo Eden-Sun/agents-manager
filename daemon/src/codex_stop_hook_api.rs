@@ -1,7 +1,7 @@
 //! Codex stdin Stop hook 的信任狀態（#1989 phase 3）：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust`。
 //!
 //! 狀態只讀、逐主機逐 Codex 帳號目錄；POST 由使用者確認後只寫 `config.toml` 裡 `[hooks.state."…:stop:…"]` 那一鍵
-//! （先備份、其餘內容與格式不動）。管理員範圍：User-only。
+//! （先備份、其餘內容與格式不動）。管理員範圍：User，以及 `[agents] fleet_operators` 列名的頂層 bot（使用者 2026-11-18 授權代為確認）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,10 +95,17 @@ async fn probe(app: &Arc<App>, t: &Target) -> anyhow::Result<StopHookStatus> {
     codex_hook::remote_stop_hook_status(&conn, &t.codex_home, &t.command).await
 }
 
-pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Report>, LcError> {
-    if principal != RequestPrincipal::User {
-        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+/// 使用者，或 `[agents] fleet_operators` 列名的頂層 bot（使用者授權它代為確認信任）。回傳 fleet operator 的 bot id（使用者＝`None`）。
+async fn user_or_fleet_operator(app: &Arc<App>, principal: &RequestPrincipal) -> Result<Option<String>, LcError> {
+    match principal {
+        RequestPrincipal::User => Ok(None),
+        RequestPrincipal::Bot(caller) if crate::api::is_fleet_operator(app, caller).await? => Ok(Some(caller.clone())),
+        _ => Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"}))),
     }
+}
+
+pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Report>, LcError> {
+    user_or_fleet_operator(&app, &principal).await?;
     let mut entries = Vec::new();
     for host in host_names(&app).await {
         let mut ids: Vec<Option<String>> = vec![None];
@@ -128,13 +135,22 @@ pub(crate) async fn post_trust(
     Extension(principal): Extension<RequestPrincipal>,
     Json(body): Json<TrustBody>,
 ) -> Result<Json<Entry>, LcError> {
-    if principal != RequestPrincipal::User {
-        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
-    }
+    let fleet_operator = user_or_fleet_operator(&app, &principal).await?;
     if !host_names(&app).await.contains(&body.host) {
         return Err(LcError::NotFound(format!("host `{}`", body.host)));
     }
     let t = resolve(&app, &body.host, body.identity.as_deref()).await?;
+    if let Some(caller) = &fleet_operator {
+        tracing::info!(
+            http = %crate::config_audit::http_caller(),
+            fleet_operator = %caller,
+            op = "codex_stop_hook_trust",
+            host = %t.host,
+            identity = t.identity.as_deref().unwrap_or(""),
+            codex_home = %t.codex_home,
+            "fleet operator trusts the Codex Stop hook on behalf of the user"
+        );
+    }
     // 同一台主機、同一個 CODEX_HOME 的寫入序列化：兩次按鈕不會互相覆蓋 config.toml／hooks.json。
     let lock = codex_hook::home_lock(&t.host, &t.codex_home);
     let _guard = lock.lock().await;

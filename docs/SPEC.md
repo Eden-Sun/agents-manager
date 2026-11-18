@@ -2827,6 +2827,7 @@ Fleet operator（使用者 2026-11-18）：`[agents] fleet_operators = ["<bot_id
 
 - **誰算**：只認 bot id（名稱不算）；該 bot 必須存在、未刪除、是頂層 bot。child 不繼承，就算把 child 的 id 寫進去也不算。清單只能由使用者改 `config.toml`，沒有任何 API 會寫它；`[agents]` 熱重載（`ConfigStore::agents_fresh`），加入／移除在下一個請求生效。
 - **能做**（對象：任何專案、任何主機上別的存活頂層 bot）：`POST /bots/{id}/start|restart|stop|interrupt`、`PATCH /bots/{id}`（只收 model／effort／fast／name，跟專家管理者同一份白名單）、`GET /bots/{id}/terminal`。
+- **代使用者確認 Codex Stop hook 信任**（使用者 2026-11-18）：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust` 對 fleet operator 放行（路由仍是 UserOnly，其他 bot、operator 的 child、AGM 角色照舊 403 `user_only`）；信任時記一行 log（`op="codex_stop_hook_trust"`、`host`）。
 - **不能做**：刪 bot／專案、改角色、credential rotate、改 identity／env／args／persona、fork／promote／rewind／login、讀訊息與附件、碰分享用 bot（任何操作）、碰別人的 child、stop AGM 角色（巡檢／協調者）、host／shell／ui-token 類的 User-only 路由。
 - **實作**：`api.rs` 的 `fleet_operator_over`（路徑範圍，`authorize_bot_path`）與 `fleet_operator_route`（UserOrAgm 閘）；`patch_bot` 對「目標不在 caller 自己 bot 樹」的 Bot principal 一律套四欄白名單。放行時記一行 info log `fleet operator cross-project bot operation`（caller、target bot、專案、操作）。
 - **CLI**：`agm bot start|stop|restart|set <bot_id>` 沒有本地的專案檢查，直接交給 daemon 判斷，跨專案 bot 可直接用。

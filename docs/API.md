@@ -101,6 +101,8 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | `PATCH /api/bots/{id}` | 只收 `model`／`effort`／`fast`／`name`；帶其他欄位 403 `user_only` |
 | `GET /api/bots/{id}/terminal` | 唯讀 |
 
+另外可代使用者查看與確認 Codex Stop hook 信任：`GET /api/codex/stop-hook`、`POST /api/codex/stop-hook/trust`（body `{"host":"<主機名>","identity":null}`；這兩支沒有目標 bot，只看 caller 是不是 fleet operator）；信任時記一行 log `fleet operator trusts the Codex Stop hook on behalf of the user`（`op="codex_stop_hook_trust"`、`host`、`identity`、`codex_home`）。
+
 不放行：`DELETE` bot／專案、`PUT …/role`、`credential/rotate`、`identity`／`env`／`args`／`persona` 等欄位、fork／promote／rewind／login／abort／compact、訊息與附件、分享用 bot（任何操作）、別人的 child、host／shell／設定類的 User-only 路由。清單只有使用者能改（沒有 API 寫入它）；`[agents]` 熱重載，加入或移除在下一個請求就生效。預設空清單＝行為與沒有這個功能時相同。每次放行在 daemon log 記一行 `fleet operator cross-project bot operation`（`fleet_operator`、`target_bot`、`target_project`、`op`）。
 
 跨資源測試逐一打上述動態路徑家族的每個方法，並覆蓋 Bot A 對 Bot B、編碼 ID、同 bot、child、AGM 專用任務／交辦例外與 User principal。
@@ -155,9 +157,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/settings/time-zone` | Bot 與 User 皆可讀；回 `{"time_zone","utc_offset"}`（如 `Asia/Taipei`、`+8`） |
 | HEAD | `/api/settings/time-zone` | 同 GET |
 | GET | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"claude":false,"codex":false,"agy":false,"grok":false}` |
-| GET | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"enabled":false,"entries":[{"host":"local","identity":null,"codex_home":"…","status":"untrusted"}]}`，`status` ∈ `not_installed`／`untrusted`／`hash_mismatch`／`trusted`／`unavailable`（讀不到或逾時 8 秒） |
-| HEAD | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
-| POST | `/api/codex/stop-hook/trust` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"host":"local","identity":null}`；安裝並信任 AG Man 自己的 Stop handler（#1989）：先備份 `config.toml`（`config.toml.am-bak-<秒>`）、寫精確 `trusted_hash`，再寫 `hooks.json`（只追加／保留我們自己的 group）；其他 hook 與其信任不動；同一 (host, CODEX_HOME) 序列化。成功回該筆 entry（`trusted`）；設定檔壞掉或寫入後未確認信任 → 409 `stop_hook_not_trustable`；未知 host／身份 → 404 |
+| GET | `/api/codex/stop-hook` | User，或 `[agents] fleet_operators` 列名的頂層 bot（使用者 2026-11-18 授權代為確認）；其他 Bot 與 AGM role 均 → 403 `user_only`；回 `{"enabled":false,"entries":[{"host":"local","identity":null,"codex_home":"…","status":"untrusted"}]}`，`status` ∈ `not_installed`／`untrusted`／`hash_mismatch`／`trusted`／`unavailable`（讀不到或逾時 8 秒） |
+| HEAD | `/api/codex/stop-hook` | User，或 `[agents] fleet_operators` 列名的頂層 bot（使用者 2026-11-18 授權代為確認）；其他 Bot 與 AGM role 均 → 403 `user_only` |
+| POST | `/api/codex/stop-hook/trust` | User，或 `[agents] fleet_operators` 列名的頂層 bot（使用者 2026-11-18 授權代為確認）；其他 Bot 與 AGM role 均 → 403 `user_only`；body `{"host":"local","identity":null}`；安裝並信任 AG Man 自己的 Stop handler（#1989）：先備份 `config.toml`（`config.toml.am-bak-<秒>`）、寫精確 `trusted_hash`，再寫 `hooks.json`（只追加／保留我們自己的 group）；其他 hook 與其信任不動；同一 (host, CODEX_HOME) 序列化。成功回該筆 entry（`trusted`）；設定檔壞掉或寫入後未確認信任 → 409 `stop_hook_not_trustable`；未知 host／身份 → 404 |
 | HEAD | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
