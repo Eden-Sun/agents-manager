@@ -10,6 +10,12 @@ mod failover;
 mod responder;
 mod controller;
 pub(crate) mod idle_sleep;
+mod maintenance;
+mod incidents;
+mod timing;
+mod bot_requests;
+mod build_info;
+pub(crate) mod flow_fixture;
 mod store;
 
 mod tests {

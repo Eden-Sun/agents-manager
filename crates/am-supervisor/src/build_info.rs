@@ -229,17 +229,3 @@ mod tests {
 }
 
 // Keep one daemon-only wiring smoke while pure cases run in their owning crate targets.
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod daemon_wiring_smoke {
-    #[test]
-    fn extracted_features_and_the_cli_remain_wired_into_the_daemon() {
-        use clap::CommandFactory as _;
-        assert_eq!(crate::Cli::command().get_version(), Some(super::VERSION));
-        let payload = serde_json::json!({});
-        assert!(crate::ask_answers::carried(&payload).is_empty());
-        assert!(am_lifecycle::ask_answers::carried(&payload).is_empty());
-        assert!(crate::share::svg_check::check("<svg/>").is_ok());
-        assert!(am_share::share::svg_check::check("<svg/>").is_ok());
-        assert_eq!(crate::supervisor::assignment_state::ALL.len(), am_supervisor::supervisor::assignment_state::ALL.len());
-    }
-}

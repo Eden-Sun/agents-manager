@@ -345,7 +345,7 @@ mod tests {
     /// `inbox_gave_up`，寫得出誰在等哪一則、補送幾次、最後的錯誤。
     #[tokio::test]
     async fn giving_up_on_a_notification_wakes_the_other_role() {
-        use crate::supervisor::bot_requests::flow_tests;
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         use crate::supervisor::roles::{self, Role};
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
@@ -403,7 +403,7 @@ mod tests {
     /// 而巡檢自己那三個壞回合一個都沒被算到。
     #[tokio::test]
     async fn a_failed_patrol_notify_turn_is_never_counted_against_the_responder() {
-        use crate::supervisor::bot_requests::flow_tests;
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         use crate::supervisor::roles::{self, Role};
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
@@ -447,7 +447,7 @@ mod tests {
     /// the notify-stalled fault.
     #[tokio::test]
     async fn an_acked_completed_notify_turn_clears_notify_stalled() {
-        use crate::supervisor::bot_requests::flow_tests;
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         use crate::supervisor::roles::{self, Role};
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
@@ -499,7 +499,7 @@ mod tests {
     /// 走「notify turn is gone」把一個其實還在跑的回合的事件放回佇列、又重送一次 digest，還算進補送次數。
     #[tokio::test]
     async fn an_unreadable_notify_turn_is_not_treated_as_a_missing_one() {
-        use crate::supervisor::bot_requests::flow_tests;
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         use crate::supervisor::roles::{self, Role};
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
@@ -534,7 +534,7 @@ mod tests {
     /// `delivered` 下一輪再判。以前先標 `gave_up`（不再被掃）、再 `let _` 推喊人的事件，寫不進去就永遠沒人被叫醒。
     #[tokio::test]
     async fn giving_up_and_waking_the_other_role_land_together() {
-        use crate::supervisor::bot_requests::flow_tests;
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         use crate::supervisor::roles::{self, Role};
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
@@ -678,7 +678,7 @@ mod tests {
 /// 巡檢的喚醒條件：只有「要叫醒人」的事件才開一次回合（SPEC §18.15）。
 mod patrol_wake_tests {
     use super::*;
-    use crate::supervisor::bot_requests::flow_tests as fx;
+    use crate::supervisor_tests::flow_fixture as fx;
     use crate::supervisor::roles::{self, Role};
 
     async fn seed(app: &Arc<App>, key: &str, kind: &str, payload: serde_json::Value) {

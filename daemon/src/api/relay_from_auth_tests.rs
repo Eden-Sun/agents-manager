@@ -247,7 +247,7 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
 /// 寫給 AGM（協調者存在）的申請：對不上的 token 一樣 403、不進收件匣；沒帶也 403（#410 相容期已結束）。
 #[tokio::test]
 async fn requests_to_agm_follow_the_same_rule() {
-    use crate::supervisor::bot_requests::flow_tests::{app, configure_responder};
+    use crate::supervisor_tests::flow_fixture::{app, configure_responder};
     let app = app().await;
     configure_responder(&app).await;
     let inbox = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap() };

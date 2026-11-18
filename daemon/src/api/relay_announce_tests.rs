@@ -1,5 +1,5 @@
 use super::*;
-use crate::supervisor::bot_requests::flow_tests;
+use crate::supervisor_tests::flow_fixture as flow_tests;
 
 #[tokio::test]
 async fn expert_ordinary_announce_checks_frozen_recipient_and_role() {

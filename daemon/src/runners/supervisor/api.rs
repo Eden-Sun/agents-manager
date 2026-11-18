@@ -3163,7 +3163,7 @@ mod review_boundary_tests {
 #[cfg(test)]
 mod desired_running_tests {
     use super::*;
-    use crate::supervisor::bot_requests::flow_tests;
+    use crate::supervisor_tests::flow_fixture as flow_tests;
 
     /// `UPDATE supervisors SET desired_running=…` 一律失敗（磁碟滿、SQLite 鎖逾時）。
     async fn break_intent_writes(app: &Arc<App>) {

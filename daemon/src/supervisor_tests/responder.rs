@@ -275,7 +275,8 @@ mod tests {
 mod flow_tests {
     use super::*;
     use crate::quota::{LimitHit, Quota};
-    use crate::supervisor::bot_requests::{self, flow_tests as fx};
+    use crate::supervisor::bot_requests;
+    use crate::supervisor_tests::flow_fixture as fx;
 
     fn blocked() -> Quota {
         Quota {

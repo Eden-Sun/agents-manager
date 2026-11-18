@@ -124,7 +124,6 @@ check "lifecycle::queue::" "crates/am-lifecycle/src/lifecycle/queue.rs"
 check "codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/mod.rs"
 check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
-check "build_info::" "crates/am-supervisor/src/build_info.rs"
 check "share_tests::" "crates/am-share/src/share/portal.rs"
 check "share_tests::" "crates/am-share/src/share/mod.rs"
 check "__all__ lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
@@ -168,23 +167,23 @@ check "" "crates/am-share/src/share/budget_remote_tests.rs"
 # Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.
 check "" "crates/am-lifecycle/src/ask_answers.rs"
 check "share_tests::" "crates/am-share/src/share/svg_check.rs"
-check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
 # #1862 D：bot_requests（26→3）、assignment_state（2→0）、incidents（27→9）的資料／流程測試搬到 am-supervisor 自己跑（test_env 窄環境）；
 # bot_requests／incidents 仍各留要 TurnOps／QuotaOps／HostsAccess 等的 daemon 測試，改它們仍要選到各自的 daemon 過濾字串；
 # assignment_state 的 daemon 測試全搬走（只剩 crate target）；test_env.rs 是 crate-only 的測試環境。
 # #1862 S1：health／setup／watchdog／cli_refresh／role_faults／failover／store 的 daemon 測試搬到 daemon/src/supervisor_tests/，改這些檔選搬過去的那組；
 # mod.rs 兩組都選；搬過去的測試檔本身照 daemon 模組路徑推。
-for m in health setup watchdog cli_refresh role_faults failover store responder controller idle_sleep; do
+for m in health setup watchdog cli_refresh role_faults failover store responder controller idle_sleep maintenance incidents bot_requests timing; do
     check "supervisor_tests::$m::" "crates/am-supervisor/src/supervisor/$m.rs"
     check "supervisor_tests::$m:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/$m.rs"
 done
 check "supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/mod.rs"
+# #1862 S3b：build_info.rs 的 daemon_wiring_smoke 搬到 supervisor_tests::build_info::；flow_fixture 沒有自己的測試，改它選它所有的使用者。
+check "supervisor_tests::build_info::" "crates/am-supervisor/src/build_info.rs"
+check "supervisor_tests::build_info:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/build_info.rs"
+check "api::relay_announce_tests:: api::relay_from_auth_tests:: runners::supervisor::api:: runners::supervisor::responder_api:: supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/flow_fixture.rs"
 check "supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/mod.rs"
-check "supervisor::bot_requests::" "crates/am-supervisor/src/supervisor/bot_requests.rs"
-check "supervisor::incidents::" "crates/am-supervisor/src/supervisor/incidents.rs"
 check "" "crates/am-supervisor/src/supervisor/assignment_state.rs"
 check "" "crates/am-supervisor/src/supervisor/test_env.rs"
-check "build_info::" "crates/am-supervisor/src/build_info.rs"
 # am-base uses the actual composition mount table, including aliases and shared fallbacks.
 check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"
 check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture.rs"

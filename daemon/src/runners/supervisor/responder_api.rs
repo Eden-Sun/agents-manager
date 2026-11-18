@@ -77,8 +77,8 @@ mod tests {
     /// start 失敗（這裡是 herdr socket 不存在）時「要它跑」已經記下，看門狗會接手重試。
     #[tokio::test]
     async fn a_failed_start_still_leaves_the_responder_wanted() {
-        let app = super::super::bot_requests::flow_tests::app().await;
-        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        let app = crate::supervisor_tests::flow_fixture::app().await;
+        crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
         assert!(post_start(State(app.clone())).await.is_err(), "測試環境沒有 herdr，start 一定失敗");
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 1);
     }
@@ -86,7 +86,7 @@ mod tests {
     /// 還沒 setup 就 start：回 not_configured，不留下一個沒有 bot 可以對應的「要它跑」（issue #84）。
     #[tokio::test]
     async fn a_start_without_a_configured_responder_leaves_no_dangling_intent() {
-        let app = super::super::bot_requests::flow_tests::app().await;
+        let app = crate::supervisor_tests::flow_fixture::app().await;
         let err = post_start(State(app.clone())).await.unwrap_err();
         assert!(format!("{err:?}").contains("responder_not_configured"), "{err:?}");
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 0);
@@ -95,8 +95,8 @@ mod tests {
     /// #968：協調者人設的留痕在 projection 之前寫；projection 失敗（persona.md 寫不進去）時，權威那一份已經生效，留痕也要在。
     #[tokio::test]
     async fn a_responder_persona_change_is_noted_even_when_projection_fails() {
-        let app = super::super::bot_requests::flow_tests::app().await;
-        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        let app = crate::supervisor_tests::flow_fixture::app().await;
+        crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
         // 測試 app 的 config.toml 沒有這顆 responder bot，`apply_persona` 必然失敗（persona.md 也故意做成目錄，寫不進去）。
         std::fs::create_dir_all(responder::dir(&app).join("persona.md")).unwrap();
         let err = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn { text: "新的".into(), expected_version: None }))
@@ -116,8 +116,8 @@ mod tests {
     /// #968：巡檢與協調者的人設版號各自從 0 數；同一個版號的兩則留痕不能互相被 `INSERT OR IGNORE` 吃掉。
     #[tokio::test]
     async fn patrol_and_responder_persona_changes_with_the_same_version_both_notify() {
-        let app = super::super::bot_requests::flow_tests::app().await;
-        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        let app = crate::supervisor_tests::flow_fixture::app().await;
+        crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
         sqlx::query("UPDATE supervisors SET persona_version=5").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisor_roles SET persona_version=5 WHERE role='responder'").execute(&app.db).await.unwrap();
         // 兩邊的 `persona_sync_incomplete` 都算成功：這裡只要留痕寫完。
@@ -140,8 +140,8 @@ mod tests {
     /// stop：意圖寫不進去就**不要停**，也不要回成功——停了也會被看門狗拉回來（issue #84）。
     #[tokio::test]
     async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
-        let app = super::super::bot_requests::flow_tests::app().await;
-        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        let app = crate::supervisor_tests::flow_fixture::app().await;
+        crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
         roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
         sqlx::query(
             "CREATE TRIGGER role_desired_running_unwritable BEFORE UPDATE OF desired_running ON supervisor_roles

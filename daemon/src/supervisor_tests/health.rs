@@ -265,7 +265,8 @@ mod tests {
     /// 端到端：setup 過、從沒 start，bot 送來一筆申請 → 健康頂層不再是 healthy。
     #[tokio::test]
     async fn a_request_queued_for_a_responder_that_never_started_shows_up_in_health() {
-        use crate::supervisor::bot_requests::{self, flow_tests, ReplyMark};
+        use crate::supervisor::bot_requests::{self, ReplyMark};
+        use crate::supervisor_tests::flow_fixture as flow_tests;
         let app = flow_tests::app().await;
         flow_tests::configure_responder(&app).await;
         let snap = snapshot(&app).await.unwrap();
