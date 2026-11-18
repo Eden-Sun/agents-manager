@@ -1643,7 +1643,8 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **kind 判斷集中**：`isApiKind(kind)`（claude-api／openai-api，直打 API、沒有 CLI／pane）與 `apiProvider(kind)`（`anthropic`／`openai`）都在 `components/kindMeta.ts`。API bot 通用的行為（聊天不走終端、無 pane 的生命週期、排程不接、row menu 不給重啟、Esc 改強制中斷、不給 `/compact` 按鈕）改用 `isApiKind`。
 - **Claude 專屬保留 `'claude-api'`**：Claude 餘額晶片、cache TTL 與 `useCacheInput`（冷快取倒數）、`ClaudeApiBotLimits`（花費上限與回合時限）、`ComposerCostHint`（重寫成本估算）、身份的 Claude 登入。openai-api 不畫快取倒數、不畫 Claude 上限區，但保留 `ApiBotControls`（停止／清除對話）。
 - **建立表單**：kind 選單多「OpenAI」一顆，只能當顧問（同 claude-api）。OpenAI 沒啟用或沒金鑰時整顆停用，角標寫「未設定」，按鈕 title 說明「先到 環境設定 → OpenAI API 啟用並設定金鑰」；讀設定失敗當作沒設定。模型只有 `gpt-6-luna`，強度 none/low/medium/high/xhigh/max，預設 medium。
-- **附件**：openai-api 不顯示附件選擇鈕（daemon 回 400 `attachments_unsupported_for_kind`）。
+- **附件**：openai-api 在網頁入口擋掉（拖放、貼上、按鈕都經 `files.add`，換成不收檔的替身），輸入框上方常駐「OpenAI API bot 不支援附件」，不靠 daemon 回 400。
 - **錯誤文字**：`openai_not_configured`、`attachments_unsupported_for_kind`、`compact_unsupported` 在 `lib/apiBotStartReason.ts` 轉成人話；建立失敗也走這張表。
 - **標籤**：側欄與 KindTag 顯示「OpenAI」，圖示沿用 OpenAI 商標；短名 `luna`（`shortModel`）；系列 `openai:luna`（與 codex 分開）。
 - 測試：`components/openaiApiBotKindDom.test.tsx`（停用／提示／就緒後可選／標籤）、`components/kindMeta.test.ts`（判斷、短名、系列、模型清單）。
+- **費用（選後者：只顯示實際值）**：openai-api 不做即時估價（進行中不顯示 ≈，只顯示已結算＋預留），回合後顯示 daemon 結算的實際費用，下面拆成輸入／快取讀／快取寫／輸出，reasoning 另列（已含在輸出裡，有值才顯示）。輸入框上方不出現 Claude 的快取冷提示（`ComposerCostHint` 對 openai 不出）。OpenAI 價表不在網頁端估算。

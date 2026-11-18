@@ -19,10 +19,12 @@ export function ApiTurnCostTag({
   onToggle?: () => void
 }) {
   const t = useT()
-  const isApi = useStore((s) => isApiKind(s.bots.find((b) => b.id === botId)?.kind))
+  const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
+  const isApi = isApiKind(kind)
   const turns = useApiTurnCosts(isApi ? botId : undefined)
   const turn = turnId ? turns.find((x) => x.turn_id === turnId) : undefined
   if (!turn || turn.in_flight) return null
+  if (kind === 'openai-api') return <OpenAiTurnCost turn={turn} onToggle={onToggle} expanded={expanded} />
   const tip = t('{n} 次請求 · 輸入 {i} · 輸出 {o} · 快取讀 {r} · 快取寫 {w}', {
     n: turn.requests, i: turn.input_tokens, o: turn.output_tokens, r: turn.cache_read_tokens, w: turn.cache_write_tokens,
   })
@@ -42,6 +44,47 @@ export function ApiTurnCostTag({
     )
   }
   return <span className="msg-cost mono" title={tip}>${turn.cost_usd.toFixed(3)}</span>
+}
+
+/**
+ * openai-api 回合的實際費用（回合後才有；不做即時估價，也不套 Claude 的快取 TTL）：金額為 daemon 依 OpenAI 價表結算的值，
+ * 下面拆成輸入／快取讀／快取寫／輸出，reasoning 另列（已含在輸出裡）。
+ */
+function OpenAiTurnCost({ turn, onToggle, expanded }: { turn: ApiTurnCost; onToggle?: () => void; expanded?: boolean }) {
+  const t = useT()
+  const breakdown = t('輸入 {i} · 快取讀 {r} · 快取寫 {w} · 輸出 {o}', {
+    i: turn.input_tokens, r: turn.cache_read_tokens, w: turn.cache_write_tokens, o: turn.output_tokens,
+  })
+  const reasoning = turn.reasoning_tokens ? t(' · reasoning {n}（已含在輸出）', { n: turn.reasoning_tokens }) : ''
+  const cost = `$${turn.cost_usd.toFixed(3)}`
+  const detail = (
+    <span className="msg-cost mono api-openai-breakdown" data-k="openai-breakdown" title={t('{n} 次請求', { n: turn.requests })}>
+      {breakdown}{reasoning}
+    </span>
+  )
+  if (onToggle) {
+    return (
+      <>
+        <button
+          type="button"
+          className={`msg-cost mono api-turn-cost-btn${expanded ? ' expanded' : ''}`}
+          onClick={onToggle}
+          aria-expanded={expanded}
+          aria-label={t('花費 {cost}，展開查看時間軸', { cost })}
+        >
+          <span>{cost}</span>
+          <span className="api-cost-arrow" aria-hidden="true">{expanded ? ' ▾' : ' ▸'}</span>
+        </button>
+        {detail}
+      </>
+    )
+  }
+  return (
+    <>
+      <span className="msg-cost mono">{cost}</span>
+      {detail}
+    </>
+  )
 }
 
 /**
@@ -98,7 +141,9 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
         {t('本回合仍是 {cur}，下一回合起改為 {next}', { cur: turn.speed, next: configured })}
       </span>
     ) : null
-  if (est !== null) {
+  // openai-api 沒有即時估價（價表只在回合結算後才算）：不顯示 ≈，只顯示已結算＋預留。
+  const openai = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'openai-api')
+  if (est !== null && !openai) {
     const x = (turn?.cost_usd ?? 0) + est / 1_000_000
     return (
       <>

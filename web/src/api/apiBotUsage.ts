@@ -12,6 +12,8 @@ export interface ApiTurnCost {
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
+  /** openai-api：reasoning token（已含在輸出裡，另列顯示）；沒給＝0。 */
+  reasoning_tokens?: number
   /** 這一回合送出請求用的速度（`standard`／`fast`）；每回合開始讀一次設定、整回合固定。舊 daemon 沒給＝null。 */
   speed: string | null
   /** 回合第一個請求送出的時間（進行中的回合算「已進行多久」）；舊 daemon 沒給＝null。 */
@@ -67,6 +69,7 @@ export function toApiBotUsage(raw: unknown): ApiBotUsage {
     output_tokens: n(x, 'output_tokens'),
     cache_read_tokens: n(x, 'cache_read_tokens'),
     cache_write_tokens: n(x, 'cache_write_tokens'),
+    reasoning_tokens: n(x, 'reasoning_tokens'),
     speed: optStr(pick(x, 'speed')),
     started_at: optStr(pick(x, 'started_at')),
     max_calls: typeof x.max_calls === 'number' ? x.max_calls : null,

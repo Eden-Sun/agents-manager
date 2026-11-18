@@ -118,6 +118,9 @@ const SOURCE_LABEL: Record<string, string> = {
 }
 
 /** Codex 帳號提示是給 TUI 看的（`Run /usage`）；對話裡只說還有幾次重置。 */
+/** openai-api 不收附件：入口丟掉檔案（`files.add` 的替身）。 */
+function refuseAttachments(): void {}
+
 function systemNoticeText(content: string): string {
   const m = content.match(/^You have (\d+) usage limit resets? available\b/i)
   if (!m) return content
@@ -1478,7 +1481,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const codexFast = bot?.kind === 'codex' && runningFast(bot, run)
   const herdrId = herdrIdentity(run, bot?.agent_name)
   // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
-  const files = useAttachments(botId, botId)
+  // openai-api：網頁直接擋在入口（拖放、貼上、按鈕都經 files.add），不靠 daemon 回 400。
+  const noAttach = bot?.kind === 'openai-api'
+  const attachments = useAttachments(botId, botId)
+  const files = noAttach ? { ...attachments, add: refuseAttachments } : attachments
   const drop = useDropTarget(files.add, !botId)
   // 暫存區縮圖落進這個托盤；終端分頁時托盤不在畫面上就不接收，免得圖憑空消失。
   useShelfSink(files.add, botId && bot && (tab === 'chat' || settingsBotId === botId) ? bot.name : null)
@@ -1863,6 +1869,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           <BackgroundJobsBar botId={botId} />
           {/* 手機的「bot 給的檔案」：輸入框上方的收合列（使用者 2026-11-03）；桌面在右側欄托盤。 */}
           <PhoneOutboxTray />
+          {noAttach ? <div className="composer-cost" role="status" data-k="openai-no-attach">{t('OpenAI API bot 不支援附件')}</div> : null}
           <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>
