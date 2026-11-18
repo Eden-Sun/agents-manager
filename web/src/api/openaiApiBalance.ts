@@ -1,4 +1,6 @@
-import { rawTransport } from './transport'
+import { HttpTransport } from './transport'
+
+const transport = new HttpTransport()
 
 export interface OpenAiApiBalanceAnchor {
   usd: number
@@ -17,10 +19,10 @@ export interface OpenAiApiBalance {
 }
 
 export async function fetchOpenAiApiBalance(): Promise<OpenAiApiBalance> {
-  return (await rawTransport.request('GET', '/openai-api/balance')) as OpenAiApiBalance
+  return (await transport.request('GET', '/openai-api/balance')) as OpenAiApiBalance
 }
 
 export async function putOpenAiApiBalanceAnchor(usd: number, at?: string): Promise<OpenAiApiBalance> {
   const body = { usd, at }
-  return (await rawTransport.request('PUT', '/openai-api/balance-anchor', body)) as OpenAiApiBalance
+  return (await transport.request('PUT', '/openai-api/balance-anchor', body)) as OpenAiApiBalance
 }

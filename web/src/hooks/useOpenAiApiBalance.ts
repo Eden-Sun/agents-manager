@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { fetchOpenAiApiBalance, OpenAiApiBalance } from '../api/openaiApiBalance'
+import type { OpenAiApiBalance } from '../api/openaiApiBalance'
+import { fetchOpenAiApiBalance } from '../api/openaiApiBalance'
 
 let balance: OpenAiApiBalance | null = null
 const listeners = new Set<() => void>()
