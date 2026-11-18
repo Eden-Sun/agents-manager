@@ -225,12 +225,13 @@ while IFS= read -r f; do
             ;;
         # supervisor/mod.rs 的 `tests`（4 條）也搬到 supervisor_tests::tests::；改 mod.rs 兩組都選（掛載中的其餘模組＋搬過去的整組）。
         crates/am-supervisor/src/supervisor/mod.rs) printf 'supervisor::\nsupervisor_tests::\n' ;;
-        # #1862 S1／S2a／S2b：這幾個 supervisor 模組的 daemon 整合測試搬成 daemon/src/supervisor_tests/<模組>.rs（名稱 supervisor::<模組>:: → supervisor_tests::<模組>::）；
+        # #1862 S1／S2a／S2b／S3a：這幾個 supervisor 模組的 daemon 整合測試搬成 daemon/src/supervisor_tests/<模組>.rs（名稱 supervisor::<模組>:: → supervisor_tests::<模組>::）；
         # 改模組本身就選搬過去的那組（模組裡其餘 crate-only 測試由 `cargo test -p am-supervisor` 跑）。
         crates/am-supervisor/src/supervisor/health.rs | crates/am-supervisor/src/supervisor/setup.rs | crates/am-supervisor/src/supervisor/watchdog.rs \
             | crates/am-supervisor/src/supervisor/cli_refresh.rs | crates/am-supervisor/src/supervisor/role_faults.rs \
             | crates/am-supervisor/src/supervisor/failover.rs | crates/am-supervisor/src/supervisor/store.rs \
-            | crates/am-supervisor/src/supervisor/responder.rs | crates/am-supervisor/src/supervisor/controller.rs)
+            | crates/am-supervisor/src/supervisor/responder.rs | crates/am-supervisor/src/supervisor/controller.rs \
+            | crates/am-supervisor/src/supervisor/idle_sleep.rs)
             mod="${f##*/}"
             printf 'supervisor_tests::%s::\n' "${mod%.rs}"
             ;;

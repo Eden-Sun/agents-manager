@@ -134,7 +134,7 @@ async fn a_trusted_share_bot_is_kept_out_of_idle_sleep_and_outbox_expiry() {
     assert!(store::is_share_bot(&e.app.db, &b.id).await.unwrap());
     assert!(!store::is_caged(&e.app.db, &b.id).await.unwrap());
     tt::fake_run(&e.app, &b.id).await;
-    let c = crate::supervisor::idle_sleep::candidates(&e.app).await.unwrap().into_iter().find(|c| c.bot_id == b.id).expect("在名單裡");
+    let c = crate::supervisor_tests::idle_sleep::candidates(&e.app).await.unwrap().into_iter().find(|c| c.bot_id == b.id).expect("在名單裡");
     assert!(c.is_share_bot, "閒置再久也不收");
     // outbox 列表：不過期（`ttl_secs:null`、`kept`）。
     let out = crate::outbox::dir_for(&e.app.data_dir, &b.id).unwrap();

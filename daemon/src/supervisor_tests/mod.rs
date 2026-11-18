@@ -9,6 +9,7 @@ mod role_faults;
 mod failover;
 mod responder;
 mod controller;
+pub(crate) mod idle_sleep;
 mod store;
 
 mod tests {

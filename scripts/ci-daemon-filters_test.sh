@@ -174,7 +174,7 @@ check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
 # assignment_state 的 daemon 測試全搬走（只剩 crate target）；test_env.rs 是 crate-only 的測試環境。
 # #1862 S1：health／setup／watchdog／cli_refresh／role_faults／failover／store 的 daemon 測試搬到 daemon/src/supervisor_tests/，改這些檔選搬過去的那組；
 # mod.rs 兩組都選；搬過去的測試檔本身照 daemon 模組路徑推。
-for m in health setup watchdog cli_refresh role_faults failover store responder controller; do
+for m in health setup watchdog cli_refresh role_faults failover store responder controller idle_sleep; do
     check "supervisor_tests::$m::" "crates/am-supervisor/src/supervisor/$m.rs"
     check "supervisor_tests::$m:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/$m.rs"
 done
