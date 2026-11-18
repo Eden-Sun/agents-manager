@@ -20,17 +20,17 @@ use crate::state::App;
 
 const USE_CASE: &str = "message_translate";
 const CACHE_DIR: &str = "message-translate";
-const PROMPT_VERSION: &str = "1";
+const PROMPT_VERSION: &str = "2";
 /// 訊息內容上限（字元）：再長的回覆不翻，避免一次扣太多。
 pub(crate) const MAX_CHARS: usize = 20_000;
 const MAX_OUT_TOKENS: u32 = 8_000;
 
-const SYSTEM: &str = "You are a translation engine. Translate the user's message into Traditional Chinese (zh-TW, Taiwan usage). \
-請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。 \
-Preserve the markdown structure exactly (headings, lists, tables, emphasis, links). \
-Do NOT translate fenced code blocks, inline code, file paths, shell commands, URLs, identifiers, environment variables, \
-commit hashes or issue numbers: copy them verbatim. Company names, product or system names and abbreviations (for example CTBC, MIA02, UAT, PR) \
-stay exactly as written in the source, like identifiers. Do not add explanations, notes or quotes. Reply with the translation only.";
+const SYSTEM: &str = "You are a translation engine. Translate the English parts of the user's message into Traditional Chinese (zh-TW, Taiwan usage). \
+Keep existing Traditional Chinese text, references, and names exactly as they are—do not rewrite or re-translate them. \
+Convert Simplified Chinese to Traditional Chinese (zh-TW). Never output Japanese. \
+Do NOT translate code, identifiers, file paths, shell commands, URLs, environment variables, commit hashes, or issue numbers: copy them verbatim. \
+Company names, product or system names, and abbreviations (e.g., CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. \
+Do not add explanations. Reply with the translation only.";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct CacheEntry {
@@ -64,7 +64,9 @@ pub(crate) use crate::claude_api::cost_usd;
 
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
-        "Translate the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). 請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。Company names, product/system names and abbreviations (e.g. CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. 公司名、產品／系統名與縮寫（如 CTBC、MIA02、UAT、PR）照原文保留，不翻。Reply with the translation only; do NOT include the <source> or </source> tags in your reply.\n<source>\n{content}\n</source>\n現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"
+        "Translate the English parts of the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). \
+        原文中已經是中文（繁體）的段落、引用、名稱請原樣保留，不要改寫或重譯；簡體段落請轉成台灣繁體（zh-TW）。英文句子、條列項目與表格單元都要翻，但程式碼、檔案路徑、產品名稱與縮寫照原文保留。\
+        Reply with the translation only; do NOT include the <source> or </source> tags.\n<source>\n{content}\n</source>"
     );
     ClaudeRequest {
         use_case: USE_CASE,
@@ -541,6 +543,7 @@ pub(crate) fn has_japanese_kana(text: &str) -> bool {
 }
 
 /// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`。都沒有回 None。
+/// 混合訊息（英文段＋原樣保留的中文段）靠 `is_mostly_english` 的比例判斷：英文翻掉後譯文以中文為主，不會被判為 untranslated。
 pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
     if !has_japanese_kana(source) && has_japanese_kana(reply) {
         return Some("japanese_output");
@@ -935,14 +938,22 @@ mod tests {
         let r = build_request("Run `cargo test` in /tmp");
         assert_eq!(r.use_case, "message_translate");
         let sys = r.system.unwrap();
-        assert!(sys.contains("Traditional Chinese") && sys.contains("fenced code blocks") && sys.contains("commit hashes") && sys.contains("translation only"));
+        assert!(sys.contains("Translate the English parts") && sys.contains("Keep existing Traditional Chinese text") && sys.contains("do not rewrite"));
         assert!(r.prompt.contains("<source>\nRun `cargo test` in /tmp\n</source>"));
-        let tail = r.prompt.split("\n</source>\n").nth(1).expect("prompt 有結尾的 </source> 行");
-        assert!(tail.trim_start().starts_with("現在把上面 <source> 內的英文逐句翻成繁體中文（台灣）。原文已含少量中文詞，不代表已翻譯；英文句子都要翻。"), "提醒要接在 </source> 之後");
-        assert!(r.prompt.contains("Traditional Chinese (zh-TW"));
-        assert!(r.prompt.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
-        assert!(sys.contains("請翻譯成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
-        assert!(SUMMARY_SYSTEM.contains("請寫成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。"));
+        assert!(r.prompt.contains("原文中已經是中文（繁體）的段落、引用、名稱請原樣保留"));
+        assert!(r.prompt.contains("不要改寫或重譯"));
+        assert!(sys.contains("Never output Japanese"));
+    }
+
+    #[test]
+    fn mixed_message_is_not_untranslated() {
+        // 英文為主、夾一段中文引用：英文翻掉、引用原樣保留 → 不判 untranslated
+        let source = "Please review the deployment plan for the API service before Friday, the team needs it.\n這是引用：OK。";
+        let translated = "請在週五前檢視 API 服務的部署計畫，團隊需要它。\n這是引用：OK。";
+        assert_eq!(local_reason(source, translated), None, "英文已翻、中文引用保留的混合訊息不應判為 untranslated");
+        // 英文原樣沒翻（只有中文引用保留）→ 仍要判 untranslated
+        let untranslated = "Please review the deployment plan for the API service before Friday, the team needs it.\n這是引用：OK。";
+        assert_eq!(local_reason(source, untranslated), Some("untranslated"), "英文沒翻的混合訊息仍要擋下");
     }
 
     #[test]
@@ -951,8 +962,7 @@ mod tests {
         let sys = r.system.unwrap();
         assert!(sys.contains("CTBC") && sys.contains("MIA02") && sys.contains("UAT") && sys.contains("PR"));
         assert!(sys.contains("stay exactly as written in the source"));
-        assert!(r.prompt.contains("stay exactly as written in the source"));
-        assert!(r.prompt.contains("CTBC、MIA02、UAT、PR"));
+        assert!(r.prompt.contains("照原文保留"));
     }
 
     #[test]
