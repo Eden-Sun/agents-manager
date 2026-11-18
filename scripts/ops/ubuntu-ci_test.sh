@@ -89,6 +89,7 @@ HERDR
   # web 段沒跑時 daemon 前要重建 bundle：測試用假指令（記錄呼叫、做出 web/dist/index.html），不碰 bun。$FIX/bundle.rc 決定回傳碼。
   export AGM_CI_WEB_BUNDLE_CMD='echo bundle >> "$FIX/bundle.log"; mkdir -p web/dist && echo x > web/dist/index.html; exit "$(cat "$FIX/bundle.rc" 2>/dev/null || echo 0)"'
   unset AGM_CI_FULL_INTERVAL
+  export AGM_CI_DEPLOY_DIR="$ROOT/agm"; mkdir -p "$AGM_CI_DEPLOY_DIR"; unset AGM_CI_DEPLOY_WAIT AGM_CI_DEPLOY_POLL
   export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s AGM_CI_MIN_FREE_GB=0
   CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"; : > "$FIX/gh.attempts"; export AGM_CI_STATUS_RETRY_SLEEP=0
 }
@@ -1020,6 +1021,51 @@ rm "$FIX/rc.daemon"
 push_file docs/upgrade.md recovered-after-upgrade
 run >/dev/null
 equals "失敗真的恢復後才能成功" "$(ran web)$(ran ob)$(ran ops)$(ran daemon):$(json_get state)" "0001:success"
+teardown
+
+
+# 15. 部署建置期間 CI 讓路（daemon-update.lock 由活著的 pid 持有時等到釋放；限時，逾時照跑；死 pid 的殘鎖不等）。
+hold_lock() { # hold_lock <pid>：照 daemon-update-kick.sh 的格式放鎖（目錄＋owner＝"pid epoch"）
+  mkdir -p "$AGM_CI_DEPLOY_DIR/daemon-update.lock"; echo "$1 $(date +%s)" > "$AGM_CI_DEPLOY_DIR/daemon-update.lock/owner"
+}
+setup
+export AGM_CI_DEPLOY_WAIT=30 AGM_CI_DEPLOY_POLL=1
+sleep 30 & HOLDER=$!
+hold_lock "$HOLDER"
+( sleep 3; rm -rf "$AGM_CI_DEPLOY_DIR/daemon-update.lock" ) &
+RELEASER=$!
+equals "部署鎖被持有：等到釋放後照常跑、exit 0" "$(run)" "0"
+check "等待期間印一行說明" "CI 讓路" "$ROOT/out"
+check "釋放後繼續" "部署已結束" "$ROOT/out"
+check "釋放後 CI 跑完是 success" "state=success" "$FIX/gh.log"
+wait "$RELEASER" 2>/dev/null
+kill "$HOLDER" 2>/dev/null
+teardown
+
+setup
+export AGM_CI_DEPLOY_WAIT=2 AGM_CI_DEPLOY_POLL=1
+sleep 30 & HOLDER=$!
+hold_lock "$HOLDER"
+equals "部署鎖一直不放：逾時後照跑、exit 0" "$(run)" "0"
+check "逾時印原因" "不再讓路，照跑" "$ROOT/out"
+check "逾時後 CI 照跑完成" "state=success" "$FIX/gh.log"
+kill "$HOLDER" 2>/dev/null
+teardown
+
+setup
+export AGM_CI_DEPLOY_WAIT=30 AGM_CI_DEPLOY_POLL=1
+hold_lock 999999
+equals "鎖的 owner 已死（殘鎖）：不等" "$(run)" "0"
+check_no "沒有讓路訊息" "CI 讓路" "$ROOT/out"
+teardown
+
+setup
+export AGM_CI_DEPLOY_WAIT=0
+sleep 30 & HOLDER=$!
+hold_lock "$HOLDER"
+equals "AGM_CI_DEPLOY_WAIT=0：不讓路" "$(run)" "0"
+check_no "沒有讓路訊息" "CI 讓路" "$ROOT/out"
+kill "$HOLDER" 2>/dev/null
 teardown
 
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"

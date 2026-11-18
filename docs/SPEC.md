@@ -4673,6 +4673,7 @@ SQLite 池健康探測獨立於使用 DB 的業務巡邏：每 30 秒檢查池�
   ops 測試最多並行 8 支，依一分鐘負載扣除估算的忙碌 CPU 數後調低 worker 數，至少保留 1 支，避免與同機編譯工作競爭。OB CLI 結束時關閉 SQLite 連線，保持錯誤 stderr 為可解析的 JSON，不受 Python 3.13+ 資源警告污染。共用 `sharedMock` 的 web 測試透過 `virtualMockTime()` 的收尾清除殘留 shell／登入 pane，保留每主機 8 顆上限，避免跨檔順序造成失敗。
   同一 SHA 後續產生的新最終 status 會取代 `${CI_ROOT}/unposted` 裡的舊結果，避免延遲補送把較新的 GitHub status 蓋回舊狀態。
 - **例行自動部署**（使用者 2026-09-29 簡化）：建置已在推 main 前跑過（`scripts/check.sh changed`）、`ubuntu-ci` 也在背景跑整樹，所以 AGM **不再驗一次、不開核准單、不派建置 child、不經 LLM**。
+  部署建置的速度（#部署變快）：`daemon-update-kick.sh` 的 `cargo build --release` 只在這一條帶 `CARGO_PROFILE_RELEASE_LTO=false`、`CARGO_PROFILE_RELEASE_INCREMENTAL=true`（不做跨 crate thin LTO、開增量），不改 workspace `[profile.release]`，正式打包（`package-dmg.sh` 等）照舊；`AGM_DEPLOY_FAST_BUILD=0` 恢復原行為，預設開，第一次切換整包重編一次。`ubuntu-ci.sh` 每輪開始跑 cargo 前，若 `daemon-update.lock` 由活著的 pid 持有就讓路等到釋放（上限 `AGM_CI_DEPLOY_WAIT`，預設 1800 秒，0＝不讓路，逾時印原因照跑；不另造鎖、不殺進行中的 CI）。生效方式：`ubuntu-ci.sh` 由常駐 clone 直接執行，下一輪自動套用；`daemon-update-kick.sh` 是安裝在 `bin/` 的部署檔，要等 `ops-install`／`agm ops-sync` 把新版裝進去才生效（見 scripts/ops/README.md）。
   systemd timer／launchd `com.agm.daemon-update` 每 5 分鐘跑 `daemon-update-kick.sh`，**腳本自己直接做**：
   1. `git fetch`（專用 checkout，見 3）→ `git diff --quiet <built> origin/main -- <build-inputs>` 沒有會進 binary 的差異就結束（不問 GitHub）。
   2. 從 `origin/main` 沿 first-parent 往回（最多 `AGM_CI_LOOKBACK`＝30 顆）找最新一顆 commit status `ubuntu-ci`＝`success` 的 sha

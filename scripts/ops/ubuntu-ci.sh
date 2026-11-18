@@ -45,6 +45,38 @@ esac
 WEB_BUNDLE_CMD="${AGM_CI_WEB_BUNDLE_CMD:-cd web && bun install --frozen-lockfile && bunx vite build}"
 PARTS="ob ops web daemon"
 
+# 部署建置期間讓路：daemon-update-kick.sh 持有 ${DEPLOY_DIR}/daemon-update.lock（pid 還活著）時，這一輪先不跑 cargo，
+# 免得部署的 release 建置跟 CI 的 cargo test 搶 CPU。沿用部署自己的鎖（不另造會殘留的鎖）；限時 AGM_CI_DEPLOY_WAIT 秒
+# （預設 1800；0＝不讓路），逾時印原因後照跑，不會永遠卡住。CI 已經在跑時部署才開始：不殺 CI，只有下一輪才讓路。
+DEPLOY_DIR="${AGM_CI_DEPLOY_DIR:-${AGM_DIR:-${HOME}/.config/agents-manager/supervisor/AGM}}"
+DEPLOY_WAIT="${AGM_CI_DEPLOY_WAIT:-1800}"
+DEPLOY_POLL="${AGM_CI_DEPLOY_POLL:-10}"
+case "${DEPLOY_WAIT}" in ''|*[!0-9]*) echo "ubuntu-ci: AGM_CI_DEPLOY_WAIT='${DEPLOY_WAIT}' 不是非負整數，改用預設 1800" >&2; DEPLOY_WAIT=1800 ;; esac
+case "${DEPLOY_POLL}" in ''|*[!0-9]*|0) DEPLOY_POLL=10 ;; esac
+deploy_lock_held() {
+    local lock="${DEPLOY_DIR}/daemon-update.lock" pid
+    [ -d "${lock}" ] || return 1
+    pid=$(cut -d' ' -f1 "${lock}/owner" 2>/dev/null || true)
+    case "${pid}" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "${pid}" 2>/dev/null
+}
+# yield_to_deploy <log>：訊息寫進 log 與 stderr（systemd journal）。
+yield_to_deploy() {
+    local out="$1" waited=0
+    [ "${DEPLOY_WAIT}" -gt 0 ] || return 0
+    deploy_lock_held || return 0
+    printf '[ubuntu-ci] 部署正在建置／換版（%s/daemon-update.lock），CI 讓路，最多等 %ss\n' "${DEPLOY_DIR}" "${DEPLOY_WAIT}" | tee -a "${out}" >&2
+    while deploy_lock_held; do
+        if [ "${waited}" -ge "${DEPLOY_WAIT}" ]; then
+            printf '[ubuntu-ci] 等了 %ss 部署還沒結束，不再讓路，照跑\n' "${waited}" | tee -a "${out}" >&2
+            return 0
+        fi
+        sleep "${DEPLOY_POLL}"
+        waited=$((waited + DEPLOY_POLL))
+    done
+    printf '[ubuntu-ci] 部署已結束（等了 %ss），開始跑\n' "${waited}" | tee -a "${out}" >&2
+}
+
 # 網路半開時 clone／fetch 會卡到天荒地老、整個握著鎖，之後每分鐘都「上一輪還在跑」而 CI／自動部署靜默停擺（#946）：
 # 兩者都要有時限（timeout 是 GNU 版，會把訊號送給整個行程群組，git 的子行程一起收掉）。
 # AGM_CI_GIT_BIN 是測試接縫（假 git 的 fetch 睡很久）。
@@ -443,6 +475,7 @@ printf '==> [ubuntu-ci] mode=%s reason=%s run=[%s]\n' "${mode}" "${select_reason
 part_state_json=""
 part_base_json=""
 if [ "${docs_only}" = 0 ]; then
+yield_to_deploy "${log}"
 for part in ${PARTS}; do
     if ! in_run_parts "${part}"; then
         # 沒跑：不是「測過」。secs 記 null、status.json 標 reused 並附上沿用的基準。

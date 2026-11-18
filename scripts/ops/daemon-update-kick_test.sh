@@ -126,7 +126,7 @@ exit 0
 STUB
   cat > "$ROOT/bin/cargo" <<'STUB'
 #!/bin/bash
-echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*}" >> "$AGM_DIR/build.log"
+echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*} LTO=${CARGO_PROFILE_RELEASE_LTO:-unset} INC=${CARGO_PROFILE_RELEASE_INCREMENTAL:-unset}" >> "$AGM_DIR/build.log"
 [ -z "$STUB_CARGO_FAIL" ] || exit 1
 mkdir -p target/release
 git rev-parse HEAD > target/release/agents-managerd
@@ -171,6 +171,7 @@ check "web 建置在專用 checkout" "bun run build --outDir $REAL_WEB/.dist-sta
 check "cargo 建置在專用 checkout" "cargo build --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
 check "cargo 帶 AM_REAL_CARGO 與 cargo 的 PATH" "AM_REAL_CARGO=$ROOT/bin/cargo PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
 check_eq "專用 checkout 停在目標 sha" "$C3" "$("$GITBIN" -C "$ROOT/deploy" rev-parse HEAD)"
+check "預設部署建置關 LTO、開 incremental" "LTO=false INC=true" "$AGM_DIR/build.log"
 check "換版的 sha" "--sha $C3" "$AGM_DIR/swap.log"
 check "換版的舊版是 .built" "--old $(echo "$C0" | cut -c1-8)" "$AGM_DIR/swap.log"
 check "換版帶舊 binary 的 hash" "--old-hash $(shasum -a 256 "$AGM_REPO/target/release/agents-managerd" | cut -c1-16)" "$AGM_DIR/swap.log"
@@ -178,6 +179,16 @@ check "換版指向專用 checkout" "--checkout $ROOT/deploy" "$AGM_DIR/swap.log
 check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
 check_no "不申請核准、不派工" "approval\|assign\|lease" "$AGM_DIR/agm.log"
 check_eq "主樹 HEAD 沒被動" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+teardown
+
+# 2b. AGM_DEPLOY_FAST_BUILD=0：恢復原本的建置（不帶 LTO／incremental 環境變數）。
+setup
+ci "$C3" success
+export AGM_DEPLOY_FAST_BUILD=0
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "開關為 0 時兩個環境變數都不帶" "LTO=unset INC=unset" "$AGM_DIR/build.log"
+unset AGM_DEPLOY_FAST_BUILD
 teardown
 
 # clone 中途失敗必須清掉 staging checkout，不能把殘缺目錄留在正式 cache 路徑阻塞後續輪。

@@ -220,6 +220,7 @@ see above — which must reach `git`, `gh`, `bun`, `python3` and `nice`):
 | `AGM_CI_CONTEXT` | `ubuntu-ci` | Which status context to read |
 | `AGM_CI_LOOKBACK` | `30` | How many first-parent commits to look back (`ubuntu-ci` only runs the newest HEAD and skips shas in between) |
 | `AM_AGENT_NAME` | `daemon-update-kick` | Lease owner / `ops_alert` source |
+| `AGM_DEPLOY_FAST_BUILD` | `1` | Deploy build only: `cargo build --release` runs with `CARGO_PROFILE_RELEASE_LTO=false` and `CARGO_PROFILE_RELEASE_INCREMENTAL=true` (no cross-crate thin LTO, incremental on) so a deploy no longer recompiles and re-links the whole tree. The workspace `[profile.release]` and `package-dmg.sh` are untouched. `0` restores the old build. The first round after switching rebuilds everything once. |
 | `AGM_FAIL_ALERT_AFTER` | `6` | Consecutive rounds that could not finish before `ops_alert check_failing` (5 min each ≈ 30 min) |
 | `AGM_LOCK_STALE_SECS` | `120` | With no discoverable owner, a lock older than this is reclaimed as stale; never reclaimed while the OS advisory lock is still held |
 | `AGM_LOCK_HUNG_SECS` | `7200` | Owner alive but stuck this long: push `ops_alert runner_hung` (the lock is not stolen; a cold build takes over ten minutes, so this is generous) |
@@ -1043,6 +1044,13 @@ automatically on the next round.
 Locally, agents wrap up with `scripts/check.sh changed`: a Rust-only change in a clean checkout with no
 `web/dist/index.html` temporarily creates a rust-embed stub and removes it afterwards, so it neither installs dependencies
 nor builds web. Web checks and the background full CI still build the real production bundle.
+
+**Yielding to a deploy build.** Before running `cargo` for any part, `ubuntu-ci.sh` checks the deploy's own
+`daemon-update.lock` (`${AGM_CI_DEPLOY_DIR:-$AGM_DIR}`, default `~/.config/agents-manager/supervisor/AGM`; owner pid alive).
+While a deploy holds it, the round waits and prints one line (`CI 讓路`), then continues when the lock is released. The
+wait is bounded by `AGM_CI_DEPLOY_WAIT` seconds (default `1800`, `0` = never yield); on timeout it prints the reason and runs
+anyway. A stale lock whose owner is dead is not waited for, and no new lock is created. A CI round already running when a deploy starts
+is never killed; only the next round yields. `AGM_CI_DEPLOY_POLL` (default 10 s) is the poll step.
 
 Isolated test: `bash scripts/ops/ubuntu-ci_test.sh` (a local bare repo, fake `gh`, `AGM_CI_GIT_BIN` as a fake git).
 Install (on agm-host; needs `loginctl enable-linger ubuntu`):
