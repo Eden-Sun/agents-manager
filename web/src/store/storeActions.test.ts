@@ -972,7 +972,7 @@ test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不
     await timers.clock.advance(0)
     await flush()
     const last = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/')).at(-1)
-    assert.equal((last?.body as { text: string }).text, '')
+    assert.equal((last?.body as { text?: string } | undefined)?.text, '')
   } finally {
     timers.restore()
   }

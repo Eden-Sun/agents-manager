@@ -182,5 +182,5 @@ test('claude-api：選 Fable 5.2 時 POST 保留完整模型 id', async () => {
   await click([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!)
   await settle(50)
   const post = requests.find((r) => r.method === 'POST' && /\/projects\/p1\/bots$/.test(r.path))
-  assert.equal((post?.body as Record<string, unknown>).model, 'claude-fable-5-2')
+  assert.equal((post?.body as Record<string, unknown> | undefined)?.model, 'claude-fable-5-2')
 })

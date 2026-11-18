@@ -59,6 +59,7 @@ export function UpdateCheckPanel() {
   }, [load])
 
   const checks: HostCheck[] = useMemo(() => {
+    void t
     const shared = new Set(hosts.filter((h) => h.shared_session).map((h) => h.name))
     const one = (host: string, tools: Parameters<typeof buildHostCheck>[0]['tools'], herdr: Parameters<typeof buildHostCheck>[0]['herdr']) =>
       buildHostCheck({

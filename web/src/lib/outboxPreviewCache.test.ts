@@ -91,7 +91,11 @@ test('限流：同時在飛的取檔數不超過上限，完成一個才放下�
       peak = Math.max(peak, running)
       gates.push((ok) => {
         running--
-        ok ? resolve('x') : reject(new Error('boom'))
+        if (ok) {
+          resolve('x')
+        } else {
+          reject(new Error('boom'))
+        }
       })
     })
   const all = Array.from({ length: 40 }, () => limited(task).catch(() => 'failed'))

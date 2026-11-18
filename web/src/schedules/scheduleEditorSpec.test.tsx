@@ -326,6 +326,6 @@ test('試跑使用獨立請求並在歷史標示試跑', async () => {
   await click(button)
   await settle()
   const request = reqs.find((r) => r.method === 'POST' && r.path.endsWith('/schedules/s1/run'))
-  assert.equal((request?.body as { dry_run?: boolean }).dry_run, true)
+  assert.equal((request?.body as { dry_run?: boolean } | undefined)?.dry_run, true)
   assert.match(document.querySelector('.schedule-history')?.textContent ?? '', /試跑/)
 })

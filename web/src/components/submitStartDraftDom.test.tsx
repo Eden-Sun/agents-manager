@@ -95,7 +95,7 @@ test('停在 Submit 分頁：預載不退回即時模式，英文自動翻（整
   await until(() => root.querySelector('.bc-title')?.textContent?.startsWith('譯:') === true, '自動翻出譯文')
   await new Promise((r) => setTimeout(r, 30))
   assert.equal(reqs.filter((r) => isTranslate(r.path)).length, 1, '整份只打一次')
-  assert.equal((reqs.find((r) => isTranslate(r.path))?.body as { questions: unknown[] }).questions.length, 2)
+  assert.equal(((reqs.find((r) => isTranslate(r.path))?.body as { questions?: unknown[] } | undefined)?.questions?.length), 2)
   assert.ok(tui.sent.length > 0 && tui.sent.every((k) => ['left', 'right', 'tab', 'shift+tab'].includes(k)), '只送導覽鍵')
   assert.equal(tui.tab, 0, '預載停在第一個未答題')
   // 已答的題（Review 上的答案）預設帶入：第二題選了 Newsletter subscription

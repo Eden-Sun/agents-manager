@@ -16,10 +16,9 @@ function deferred<T = void>() {
 test('同一時間只有一個請求在路上，飛的期間按的鍵合成下一批', async () => {
   const sent: string[][] = []
   const gate = [deferred(), deferred()]
-  let call = 0
   const q = new KeyQueue(async (keys) => {
     sent.push(keys)
-    await gate[call++].promise
+    await gate[sent.length - 1].promise
   })
 
   q.push(['l'])

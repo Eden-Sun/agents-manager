@@ -116,7 +116,7 @@ export function TerminalTab({ botId }: { botId: string }) {
   const body = useMemo(() => {
     if (!snap) return err ? t('讀取終端失敗：{err}', { err }) : t('讀取中…')
     return tight ? squeeze(terminal.body) : terminal.body
-  }, [err, snap, tight, terminal.body])
+  }, [err, snap, tight, terminal.body, t])
 
   // 貼底顯示最新輸出，除非使用者自己往上捲（`useScrollTail`）。
   const tail = useScrollTail<HTMLPreElement>([body])

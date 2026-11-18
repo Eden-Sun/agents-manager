@@ -441,7 +441,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       setSendError(t('沒等到回應，可以再送一次。'))
     }, AWAIT_LIMIT_MS)
     return () => clearTimeout(timer)
-  }, [awaiting])
+  }, [awaiting, t])
 
   const busy = status === 'working' || awaiting
   // bot 這一回合做的圖（與回覆裡提到的）直接畫在那則回覆下面。

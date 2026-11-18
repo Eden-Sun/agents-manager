@@ -104,9 +104,9 @@ export function useApiBotCacheSub(botIds: readonly string[]): number {
   const [ver, setVer] = useState(0)
   const key = botIds.slice().sort().join(',')
   useEffect(() => {
-    if (!botIds.length) return
+    if (!key) return
     const bump = () => setVer((v) => v + 1)
-    const unsubs = botIds.map((id) => subscribe(id, bump))
+    const unsubs = key.split(',').map((id) => subscribe(id, bump))
     return () => unsubs.forEach((u) => u())
   }, [key])
   return ver

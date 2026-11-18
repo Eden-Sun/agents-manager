@@ -132,7 +132,7 @@ test('多分頁問卷：預載完後整份只打一次翻譯，分頁與題目�
   await new Promise((r) => setTimeout(r, 30))
   const bodies = translateBodies(reqs)
   assert.equal(bodies.length, 1, '兩題一次呼叫')
-  assert.equal((bodies[0]?.body as { questions: unknown[] }).questions.length, 2)
+  assert.equal((bodies[0]?.body as { questions?: unknown[] } | undefined)?.questions?.length, 2)
   assert.ok([...root.querySelectorAll('.bc-title')].every((e) => e.textContent?.startsWith('譯:')), '選項都是譯文')
   assert.ok([...root.querySelectorAll('.bc-tab')].some((e) => e.textContent?.includes('譯:')), '分頁名也是譯文')
 

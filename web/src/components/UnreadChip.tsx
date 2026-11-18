@@ -273,6 +273,8 @@ export function UnreadChip() {
   if (redNow !== primaryRed) setPrimaryRed(redNow)
 
   const items = useMemo(() => {
+    // 依賴 apiCacheVer 驅動快取重算（getApiBotCache 讀外部可變快取）
+    void apiCacheVer
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
     const kidsRunning = (id: string) =>
       bots.filter((b) => b.parent_bot_id === id && (lamps[b.id] === 'working' || lamps[b.id] === 'blocked')).length
