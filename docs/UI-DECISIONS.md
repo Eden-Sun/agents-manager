@@ -1591,3 +1591,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 側欄 bot 的 ⋯ 選單：有 live run 時加「重新啟動」（沒有 run 時已有的「啟動」照舊）。
 - 不給的情況：child（父 Bot 重開，`/restart` 回 409，#1911）與 claude-api（沒有 CLI 行程可重啟）。重啟一律接回原對話。
 - i18n：「重新啟動」沿用既有英文 `Restart`（`i18n/en/chat.ts`），「啟動」沿用 `Start`，沒有新增字串。
+
+## 手機對話區不再水平超版（2026-11-18，使用者 iPhone 截圖）
+
+- 現象：390 寬手機上訊息列表整個可左右捲，助理泡泡與時間列左側被切。
+- 根因：`.msg-meta` 是 nowrap 且高度固定 20px，列內子項 `min-width:auto` 縮不下來；譯文狀態列（「譯文跟原文幾乎一樣…」）是一行長字，撐出泡泡、再撐寬整個列表（實測 scrollWidth 390 → 579）。
+- 修法（`chatPanel.css`，不用整體 `overflow-x:hidden`）：meta 列與左側子項 `min-width:0`；有譯文狀態列時列改成可換行、高度跟內容走；狀態列 `overflow-wrap:anywhere`。修後同一內容列表 scrollWidth 390、狀態列換成兩行。
+- 表格與 code block 維持各自在 `.bubble.md` 內橫向捲動（`table`、`pre` 的 `overflow-x:auto`），不影響列表寬度。
+- 測試：`chatMobileOverflow.test.ts` 斷言上述規則。

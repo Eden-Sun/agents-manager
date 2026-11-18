@@ -201,6 +201,28 @@
   margin-bottom: 0;
 }
 
+/* 2026-11-18 手機水平超版（iPhone 截圖）：meta 列是 nowrap 且高度固定 20px，列內子項 min-width:auto 縮不下來，
+   長的譯文狀態列（「譯文跟原文幾乎一樣…」）會把整列撐出泡泡、再把整個訊息列表撐寬，iOS 就整列左右捲。
+   修根因：列與左側子項可縮；有狀態列時列改成可換行、高度跟內容走；長字串斷行。 */
+.msg-meta-above,
+.msg-meta-below,
+.msg-meta-left {
+  min-width: 0;
+  max-width: 100%;
+}
+.msg-meta:has(.msg-translate-hint) {
+  flex-wrap: wrap;
+  white-space: normal;
+  height: auto;
+  min-height: 20px;
+  row-gap: 2px;
+}
+.msg-meta .msg-translate-hint {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .msg-snapshot-body {
   margin: 6px 0 0;
   max-height: 320px;
