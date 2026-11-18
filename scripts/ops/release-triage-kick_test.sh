@@ -826,6 +826,12 @@ exec /bin/rm "$@"
 STUB
 chmod +x "$ROOT/bin/rm"
 export AGM_EXTRA_PATH="$ROOT/bin" AGM_LOCK_STALE_SECS=0 STUB_PUBLISH_SLEEP=2
+# ops 的 destructive-canary 把 `rm` 做成 export -f 的函式（#1964：macOS 夜間印出 `rm is a function`）：函式比 PATH 上的 stub 優先，
+# 所以 stub 一次都沒被呼叫、兩輪沒有被卡住而是先後各跑一次。這一段把 rm 暫時換成「轉給 stub」的函式，跑完還原原本的（canary 的）定義。
+_saved_rm=$(declare -f rm 2>/dev/null || true)
+export ROOT
+rm() { "$ROOT/bin/rm" "$@"; }
+export -f rm
 RACE_ROLE=a bash "$SCRIPT" > "$ROOT/race-a.log" 2>&1 & RACE_A=$!
 : > "$AGM_DIR/race-a-started"
 _wait=0
@@ -833,6 +839,8 @@ while [ ! -e "$AGM_DIR/race-a-entered" ] && [ "$_wait" -lt 100 ]; do sleep 0.02;
 : > "$AGM_DIR/race-b-started"
 RACE_ROLE=b bash "$SCRIPT" > "$ROOT/race-b.log" 2>&1 & RACE_B=$!
 wait "$RACE_A"; wait "$RACE_B"
+unset -f rm
+if [ -n "$_saved_rm" ]; then eval "$_saved_rm"; export -f rm; fi
 equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "$AGM_DIR/race-b-started" ] && echo 1 || echo 0)"
 equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
 # 診斷（#1964：macOS 夜間派了兩次，原因未定）：不一致時把兩輪的 log 與呼叫紀錄印出來，下一輪 macOS 就看得到是 guard 沒擋住還是 rm stub 沒攔到。
