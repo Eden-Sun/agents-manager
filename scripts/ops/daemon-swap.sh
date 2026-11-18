@@ -1128,6 +1128,7 @@ fi
 # reconcile.rs 的 parent_replaced_child 只在 herdr 確認舊 pane 不在、父 bot active、herdr 帶 ownership hint 的 successor 時才寫這個 cause，
 # 所以這裡的 exit_reason 放寬不會放過一般的 child 消失。
 # 換版只重啟 daemon、herdr 不動，關不掉 pane；空的 herdr 也不會替沒有的 pane 發事件（child_retire.rs OBSERVED_CLOSE）。
+# delete_bot／delete_project intent 可能在 SWAP_T0 前開始、窗口內才完成；只有 intent 的建立或更新時間在窗口內，或它仍是 pending/running，才配合窗口內 deleted_at 算刻意刪除。窗口前已完成的舊 intent 不算。
 # 判準見 SPEC §6.5a。
 # 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
 deleted_on_purpose() { # $1=bot id → 印 1 才算
@@ -1135,7 +1136,8 @@ deleted_on_purpose() { # $1=bot id → 印 1 才算
     "$SQLITE" -readonly "$DB" "SELECT count(*) FROM bots b WHERE b.id = '$1'
       AND b.deleted_at IS NOT NULL AND b.deleted_at >= '$SWAP_T0'
       AND (EXISTS (SELECT 1 FROM intents i WHERE i.kind IN ('delete_bot', 'delete_project')
-        AND i.status != 'abandoned' AND i.created_at >= '$SWAP_T0'
+        AND i.status != 'abandoned'
+        AND (i.created_at >= '$SWAP_T0' OR i.updated_at >= '$SWAP_T0' OR i.status IN ('pending', 'running'))
         AND (i.subject_id = b.id OR i.subject_id = b.project_id OR instr(i.payload_json, '\"' || b.id || '\"') > 0))
       OR EXISTS (SELECT 1 FROM intents i WHERE i.kind = 'retire_child' AND i.status = 'done'
         AND i.created_at >= '$SWAP_T0' AND i.subject_id = b.id

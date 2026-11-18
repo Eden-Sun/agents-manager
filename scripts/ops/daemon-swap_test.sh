@@ -150,7 +150,8 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
     ALTER TABLE bots ADD COLUMN parent_bot_id TEXT;
     ALTER TABLE bots ADD COLUMN created_at TEXT;
     CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT, subject_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL);
+      status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT '2000-01-01T00:00:00.000Z');
     CREATE TABLE runs (bot_id TEXT NOT NULL, state TEXT NOT NULL);"
 
   cat > "$ROOT/bin/agm" <<'STUB'
@@ -290,7 +291,7 @@ case "$q" in
            n=$(cat "$ROOT/delayed-retire-lookups" 2>/dev/null || echo 0); n=$((n + 1))
            echo "$n" > "$ROOT/delayed-retire-lookups"
            if [ "$n" -ge 2 ] && [ ! -e "$ROOT/delayed-retire-inserted" ]; then
-             "$REAL_SQLITE" "$ROOT/audit.sqlite3" "INSERT INTO intents VALUES ('it-delayed','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+             "$REAL_SQLITE" "$ROOT/audit.sqlite3" "INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it-delayed','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
              : > "$ROOT/delayed-retire-inserted"
            fi
          fi ;;
@@ -1580,7 +1581,7 @@ teardown
 setup 10 10
 export STUB_NAMES_BEFORE='["a","b","kid"]' STUB_NAMES_AFTER='["a","b"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
-  INSERT INTO intents VALUES ('it1','delete_bot','id-kid','{\"bots\":[],\"requested_by\":\"agm\"}','done','2099-01-01T00:00:00.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','delete_bot','id-kid','{\"bots\":[],\"requested_by\":\"agm\"}','done','2099-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "窗口內刻意刪掉的不回滾（rc=0）" "0" "$rc"
 check "log 列出窗口內刪掉的" "missing=\[\] deleted_in_window=\[kid \]" "$SWAP_LOG"
@@ -1592,7 +1593,7 @@ teardown
 setup 10 10
 export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','mom','p1','2099-01-01T00:00:01.000Z'), ('id-kid','kid','p1','2099-01-01T00:00:02.000Z');
-  INSERT INTO intents VALUES ('it1','delete_bot','id-mom','{\"bots\":[{\"id\":\"id-kid\",\"managed_by\":\"child\"}]}','done','2099-01-01T00:00:00.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','delete_bot','id-mom','{\"bots\":[{\"id\":\"id-kid\",\"managed_by\":\"child\"}]}','done','2099-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "連帶刪掉的 child 也不回滾（rc=0）" "0" "$rc"
 check "兩顆都算刻意刪除" "deleted_in_window=\[kid mom \]" "$SWAP_LOG"
@@ -1613,10 +1614,34 @@ teardown
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
-  INSERT INTO intents VALUES ('it0','delete_bot','id-kid','{}','done','2000-01-01T00:00:00.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it0','delete_bot','id-kid','{}','done','2000-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "窗口外的刪除紀錄不算（rc=7）" "7" "$rc"
 check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
+teardown
+
+# 30a. A delete intent may start before swap inventory and finish during the swap; the fresh deletion timestamp
+#      plus an open matching intent proves intent, even though its created_at precedes SWAP_T0.
+setup 10 10
+export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it-in-flight','delete_bot','id-kid','{}','running','2000-01-01T00:00:00.000Z');"
+rc=$(run)
+check_eq "換版前開始、窗口內定案的刪除不回滾（rc=0）" "0" "$rc"
+check "窗口內定案由 open delete intent 證明" "deleted_in_window=\[kid \]" "$SWAP_LOG"
+check_no "跨窗口 delete intent 不誤回滾" "ROLLBACK" "$SWAP_LOG"
+teardown
+
+# The handler may finish the same delete before the post-start inventory runs; updated_at records that in-window completion.
+setup 10 10
+export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it-finished','delete_bot','id-kid','{}','done','2000-01-01T00:00:00.000Z');
+  UPDATE intents SET updated_at='2099-01-01T00:00:01.000Z' WHERE id='it-finished';"
+rc=$(run)
+check_eq "換版前開始、窗口內完成的刪除不回滾（rc=0）" "0" "$rc"
+check "窗口內完成時間由 updated_at 證明" "deleted_in_window=\[kid \]" "$SWAP_LOG"
+check_no "完成時間在窗口內不誤回滾" "ROLLBACK" "$SWAP_LOG"
 teardown
 
 # 31. 父 bot 用 `herdr pane close` 收掉 child（沒呼叫 DELETE，#554）：daemon 退役時寫了 retire_child 紀錄，
@@ -1624,7 +1649,7 @@ teardown
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid","pro"]' STUB_NAMES_AFTER='["a"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z'), ('id-pro','pro','p1','2099-01-01T00:00:02.000Z');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"pane_closed\"}','done','2099-01-01T00:00:01.000Z'),
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"pane_closed\"}','done','2099-01-01T00:00:01.000Z'),
     ('it2','retire_child','id-pro','{\"why\":\"promoted\",\"cause\":\"promoted\"}','done','2099-01-01T00:00:02.000Z');"
 rc=$(run)
 check_eq "pane 被關掉而退役的 child 不回滾（rc=0）" "0" "$rc"
@@ -1639,7 +1664,7 @@ for c in agent_missing unconfirmed herdr_restarted; do
   setup 10 10
   export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
   seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
-    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"$c\"}','done','2099-01-01T00:00:01.000Z');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"$c\"}','done','2099-01-01T00:00:01.000Z');"
   rc=$(run)
   check_eq "cause=${c} 的退役照樣回滾（rc=7）" "7" "$rc"
   check "cause=${c}：log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
@@ -1650,7 +1675,7 @@ done
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
-  INSERT INTO intents VALUES ('it0','retire_child','id-kid','{\"cause\":\"pane_closed\"}','done','2000-01-01T00:00:00.000Z'),
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it0','retire_child','id-kid','{\"cause\":\"pane_closed\"}','done','2000-01-01T00:00:00.000Z'),
     ('it1','retire_child','id-grandkid','{\"cause\":\"pane_closed\",\"parent_bot_id\":\"id-kid\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "窗口外、或別顆的退役紀錄都不算（rc=7）" "7" "$rc"
@@ -1665,7 +1690,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','m
   INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
     VALUES ('id-new-kid','new-kid','p1',NULL,'child','id-mom','2099-01-01T00:00:02.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "父 bot 活著且有窗口內 successor 的 unconfirmed child 不回滾（rc=0）" "0" "$rc"
 check_no "有 successor 時不回滾" "ROLLBACK" "$SWAP_LOG"
@@ -1694,7 +1719,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "母 bot 消失仍回滾（rc=7）" "7" "$rc"
 check "母 bot 仍列在 missing" 'missing=\[kid mom \]' "$SWAP_LOG"
@@ -1745,7 +1770,7 @@ export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
 seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "父 row 存在但沒有 active run：child 仍回滾（rc=7）" "7" "$rc"
 check "沒有 active parent run 時 child 保持 missing" 'missing=\[kid \]' "$SWAP_LOG"
@@ -1759,7 +1784,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2000-01-01T00:00:01.000Z\",\"exit_reason\":\"pane gone\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2000-01-01T00:00:01.000Z\",\"exit_reason\":\"pane gone\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "換版前就結束的 child 被退役：不回滾（rc=0）" "0" "$rc"
 check "被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
@@ -1784,7 +1809,7 @@ for c in ended_late no_last_run agent_gone live_run; do
       VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
              ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
     INSERT INTO runs VALUES ('id-mom','running'); $extra
-    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"$why\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"$last}','done','2099-01-01T00:00:01.000Z');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"$why\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"$last}','done','2099-01-01T00:00:01.000Z');"
   rc=$(run)
   check_eq "34d 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
   check "34d 對照 ${c}：child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
@@ -1799,7 +1824,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"pane exited\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"pane exited\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "父 bot 收掉 child（pane exited）：不回滾（rc=0）" "0" "$rc"
 check "被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
@@ -1824,7 +1849,7 @@ for c in still_running not_observed pane_present parent_idle; do
       VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
              ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
     $momrun
-    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"$pane\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"$state\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"$reason\"}}','done','2099-01-01T00:00:01.000Z');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"$pane\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"$state\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"$reason\"}}','done','2099-01-01T00:00:01.000Z');"
   rc=$(run)
   check_eq "34e 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
   check "34e 對照 ${c}：child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
@@ -1850,14 +1875,14 @@ for c in pane_closed unconfirmed agent_missing parent_idle no_successor old_reti
   esac
   successor_sql="INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
     VALUES ('id-new-kid','new-kid','p1','2099-01-01T12:27:27.000Z','child','id-mom','2099-01-01T12:27:20.000Z');
-    INSERT INTO intents VALUES ('it-new','retire_child','id-new-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"$successor_cause\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"exit_reason\":\"pane exited\"}}','$successor_status','$successor_retired_at');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it-new','retire_child','id-new-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"$successor_cause\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"exit_reason\":\"pane exited\"}}','$successor_status','$successor_retired_at');"
   [ "$c" = no_successor ] && successor_sql=""
   seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
       VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
              ('id-kid','kid','p1','2099-01-01T12:27:17.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
     $parent_run_sql
     $successor_sql
-    INSERT INTO intents VALUES ('it-old','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"ended_at\":\"2099-01-01T12:27:17.000Z\",\"exit_reason\":\"$old_reason\"}}','done','2099-01-01T12:27:17.000Z');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it-old','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"pane_id\":\"wBVC:pUX\",\"state\":\"exited\",\"ended_at\":\"2099-01-01T12:27:17.000Z\",\"exit_reason\":\"$old_reason\"}}','done','2099-01-01T12:27:17.000Z');"
   rc=$(run)
   if [ "$c" = pane_closed ]; then
     check_eq "1895 同 pane successor 正常退役且父 active：不回滾（rc=0）" "0" "$rc"
@@ -1880,7 +1905,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "34g a 本次型（agent not found during reconcile，父 active）：不回滾（rc=0）" "0" "$rc"
 check "34g a 被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
@@ -1893,7 +1918,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','user',NULL,'2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "34g c 頂層 bot 不見：回滾（rc=7）" "7" "$rc"
 check "34g c 頂層 bot 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
@@ -1906,7 +1931,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1','2099-01-01T00:00:01.000Z','user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "34g d 父 bot 已刪：回滾（rc=7）" "7" "$rc"
 check "34g d child 列在 missing" 'missing=\[.*kid' "$SWAP_LOG"
@@ -1927,7 +1952,7 @@ for c in parent_idle pane_present; do
       VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
              ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
     $momrun
-    INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"$pane\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
+    INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"$pane\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\"}}','done','2099-01-01T00:00:01.000Z');"
   rc=$(run)
   check_eq "34g 對照 ${c}：照樣回滾（rc=7）" "7" "$rc"
   check "34g 對照 ${c}：child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
@@ -1941,7 +1966,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"boot_id\":\"boot-test\",\"call_site\":\"daemon/src/reconcile.rs:423:12\",\"cause\":\"parent_replaced_child\",\"last_run\":{\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\",\"id\":\"run-test\",\"pane_id\":\"w0:pRG\",\"state\":\"exited\"},\"mode\":\"implicit\",\"name\":\"kid\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"project_id\":\"p1\",\"requested_by\":\"-\",\"why\":\"parent_replaced_child\"}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"boot_id\":\"boot-test\",\"call_site\":\"daemon/src/reconcile.rs:423:12\",\"cause\":\"parent_replaced_child\",\"last_run\":{\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"agent not found during reconcile\",\"id\":\"run-test\",\"pane_id\":\"w0:pRG\",\"state\":\"exited\"},\"mode\":\"implicit\",\"name\":\"kid\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"project_id\":\"p1\",\"requested_by\":\"-\",\"why\":\"parent_replaced_child\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "34h wait1937 真實形狀：不回滾（rc=0）" "0" "$rc"
 check "34h 被認成預期退役" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
@@ -1954,7 +1979,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"crashed\"}}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"parent_replaced_child\",\"cause\":\"parent_replaced_child\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\",\"last_run\":{\"state\":\"exited\",\"ended_at\":\"2099-01-01T00:00:00.900Z\",\"exit_reason\":\"crashed\"}}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "34i exit_reason=crashed：回滾（rc=7）" "7" "$rc"
 check "34i child 列在 missing" 'missing=\[kid \]' "$SWAP_LOG"
