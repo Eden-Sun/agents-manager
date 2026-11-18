@@ -58,10 +58,9 @@ fn parse_ampm_time(tok: &str) -> Option<(u32, u32)> {
     let t = tok.trim().to_ascii_lowercase();
     let (hm, pm) = if let Some(h) = t.strip_suffix("pm") {
         (h, true)
-    } else if let Some(h) = t.strip_suffix("am") {
-        (h, false)
     } else {
-        return None;
+        let h = t.strip_suffix("am")?;
+        (h, false)
     };
     let (h, m) = if let Some((h, m)) = hm.split_once(':') {
         (h.parse::<u32>().ok()?, m.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?)
@@ -131,7 +130,7 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
             // 日期本身不存在（2/29 遇到平年）就跳過那一年；仍在門檻內的候選若落在 DST gap 就放棄，
             // 不換成別年的同一天。
             let nearest = || -> Option<DateTime<chrono_tz::Tz>> {
-                let cutoff = now.clone() - chrono::Duration::days(1);
+                let cutoff = now - chrono::Duration::days(1);
                 for year in [now.year() - 1, now.year(), now.year() + 1] {
                     let Some(d) = naive(year) else { continue };
                     if d < cutoff.naive_local() {

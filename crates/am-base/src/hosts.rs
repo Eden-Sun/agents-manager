@@ -285,7 +285,6 @@ pub async fn sh_local_capture(script: &str, timeout: Duration) -> Result<LocalRu
     // （`$SHELL -lic` 探測）會去搶前景、被 job control 停住。setsid 之後沒有控制終端，子行程與它的孫行程都碰不到 tty；
     // 同時子行程是新 session 的 leader（pgid＝pid），逾時整個群組砍掉的做法照舊。
     unsafe {
-        use std::os::unix::process::CommandExt as _;
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
@@ -1637,7 +1636,7 @@ impl HostManager {
             conn.connected.store(ok, Ordering::SeqCst);
             app.set_local_herdr_connected(ok);
             *conn.error.lock().await = if ok { None } else { Some("local herdr ping failed".into()) };
-            H::host_changed(&app, &fence).await;
+            H::host_changed(app, &fence).await;
             return Some((ok, conn.error_string().await));
         }
         let _authority = conn.authority_gate.write().await;
@@ -1731,15 +1730,14 @@ pub fn target_epoch(cfg: &HostCfg) -> i64 {
 /// 一次最多列幾個子目錄（本機與遠端同一個數字）；超過就截斷並回 `truncated:true`。
 pub const DIR_LIST_LIMIT: usize = 2000;
 
-/// 遠端目錄列舉要跑的 sh（純字串，可以拿到本機直接跑來驗）。
-
+// 遠端目錄列舉要跑的 sh（純字串，可以拿到本機直接跑來驗）。
 /// 輸出靠 `AM_*` 開頭的行解析，所以：目前路徑或目錄名字含控制字元（換行、tab、CR…）的一律不列——否則一個叫
 /// `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」；憑證與金鑰目錄（`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.gemini`、daemon 與各 CLI 的設定目錄）
 /// 不給進；子目錄最多 [`DIR_LIST_LIMIT`] 個。
 pub fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
         None => "\"$HOME\"".to_string(),
-        Some(p) if p == "~" => "\"$HOME\"".to_string(),
+        Some("~") => "\"$HOME\"".to_string(),
         // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         Some(p) if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
         Some(p) => sh_quote(p),

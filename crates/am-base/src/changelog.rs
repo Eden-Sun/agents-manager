@@ -197,7 +197,7 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
         })
         .cloned()
         .collect();
-    picked.sort_by(|a, b| parse_version(&b.version).cmp(&parse_version(&a.version)));
+    picked.sort_by_key(|v| std::cmp::Reverse(parse_version(&v.version)));
     picked
 }
 
@@ -576,7 +576,7 @@ pub async fn target_sections(kind: &str, primary: Result<String>, src: &FeedSour
         return release_sections(&pinned, url, to).await
             .map_err(|error| anyhow!("CHANGELOG 缺少 {to} 或抓取／解析失敗；備援也失敗：{error:#}"));
     }
-    if let Err(error) = primary { return Err(error); }
+    primary?;
     Err(anyhow!("CHANGELOG 裡沒有 {to} 這一版的段落"))
 }
 

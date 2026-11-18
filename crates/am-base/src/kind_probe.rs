@@ -70,11 +70,9 @@ pub fn verdict(host: &str, kind: &str, found: Option<String>) -> Result<(), Stri
     }
 }
 
-/// preflight 本身的測試：跟 start_bot 的其他測試不同，這裡**要**走過「找不找得到」。用自己的 runner——真的
-/// `/bin/sh -c <probe>`，環境釘死在測試給的 `bin/`——所以答案只取決於 stub 在不在，跟跑測試的機器裝了什麼無關
-/// （開發機、乾淨 Linux 都一樣）。
-
-
+// preflight 本身的測試：跟 start_bot 的其他測試不同，這裡**要**走過「找不找得到」。用自己的 runner——真的
+// `/bin/sh -c <probe>`，環境釘死在測試給的 `bin/`——所以答案只取決於 stub 在不在，跟跑測試的機器裝了什麼無關
+// （開發機、乾淨 Linux 都一樣）。
 /// kind 預檢的接線點。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait KindProbeState: Send + Sync {
     fn kind_probe(&self) -> &crate::kind_probe::KindProbeHook;

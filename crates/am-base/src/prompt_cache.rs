@@ -400,9 +400,7 @@ pub const CONTEXT_UNKNOWN_KEY: &str = "_agm_context_unknown";
 /// 只給網頁看的副本，DB 裡的原文不改（`primary_keep_warm` 等保守判斷仍讀原文）。沒有影響＝`None`。
 pub fn mask_invalidated_context(raw: &str) -> Option<String> {
     let mut v: Value = serde_json::from_str(raw).ok()?;
-    if v.get("_agm_context_invalidated").is_none() {
-        return None;
-    }
+    v.get("_agm_context_invalidated")?;
     let ctx = v.get("context_window").filter(|c| c.is_object())?;
     let positive = |key: &str| ctx.get(key).and_then(Value::as_f64).is_some_and(|n| n > 0.0);
     let usage_sum = ctx.get("current_usage").and_then(Value::as_object).map(|u| {

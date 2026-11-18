@@ -384,7 +384,7 @@ pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<Str
 
 /// 同 [`add_note`]，但寫在呼叫端的交易裡：要跟別的寫入一起成功或一起回滾（issue #890）。
 pub async fn add_note_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, kind: &str, body: &Value) -> Result<String> {
-    add_note_on(&mut **tx, kind, body).await
+    add_note_on(tx, kind, body).await
 }
 
 async fn add_note_on(conn: &mut sqlx::SqliteConnection, kind: &str, body: &Value) -> Result<String> {

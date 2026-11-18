@@ -123,11 +123,9 @@ pub fn skip_reason(c: &Cand) -> Option<Skip> {
         Some(Skip::UnknownStatus)
     } else if c.turn_in_flight {
         Some(Skip::TurnInFlight)
-    } else if let Some(n) = c.background_jobs.filter(|n| *n > 0) {
-        // 排在最後：它是閒置、沒有回合，唯一還擋著的是背景工作。`None`（沒看過）不擋——沒有證據。
-        Some(Skip::BackgroundJobs(n))
     } else {
-        None
+        // 排在最後：它是閒置、沒有回合，唯一還擋著的是背景工作。`None`（沒看過）不擋——沒有證據。
+        c.background_jobs.filter(|n| *n > 0).map(Skip::BackgroundJobs)
     }
 }
 

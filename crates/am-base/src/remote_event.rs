@@ -76,6 +76,7 @@ fn record_inner(data_dir: &Path, ev: &RemoteCargoEvent) -> std::io::Result<Recor
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(&lock_path)?;
 
@@ -211,6 +212,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
             .open(&lock_path)
             .unwrap();

@@ -158,6 +158,7 @@ pub fn marker(kind: &str, version: &str, ids: &[String]) -> String {
 /// - 隱藏標記（`release-triage:`）與 HTML 註解（`<!--`、`-->`）：標記是去重的鍵，只有 daemon 能寫；被偽造就能讓別版的 issue 被判成「已存在」，
 ///   也能用一個沒關的 `<!--` 把整張內文藏起來；
 /// - `@提及`：`@everyone`／`@user` 會真的通知到人（`@anthropic-ai/sdk` 這種套件名照樣讀得出來，只是不再是提及）。
+///
 /// 用零寬空白（U+200B）插在中間，所以人與 bot 讀到的字幾乎不變。
 pub fn defang(text: &str) -> String {
     const ZWSP: char = '\u{200b}';

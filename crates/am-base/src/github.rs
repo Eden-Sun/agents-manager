@@ -195,7 +195,7 @@ pub fn strip_ansi(s: &str) -> String {
         match chars.peek() {
             Some('[') => {
                 chars.next();
-                while let Some(x) = chars.next() {
+                for x in chars.by_ref() {
                     if ('\x40'..='\x7e').contains(&x) {
                         break;
                     }
@@ -252,9 +252,7 @@ pub async fn detect_project(app: &(impl crate::github::GithubCache + crate::host
         publish_github(app, &p.id, &info).await;
         return info;
     }
-    let Some(fence) = app.hosts().fence(&p.host).await else {
-        return None;
-    };
+    let fence = app.hosts().fence(&p.host).await?;
     match probe_fenced(app, &fence, &p.path).await {
         Probe::Stale => None,
         Probe::Done(info) => {

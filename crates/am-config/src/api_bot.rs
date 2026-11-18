@@ -336,8 +336,7 @@ max_turn_cost_microusd = 500000
 
     #[test]
     fn validated_disabled_returns_ok_none() {
-        let mut cfg = ApiBotCfg::default();
-        cfg.max_turn_cost_microusd = Some(100);
+        let mut cfg = ApiBotCfg { max_turn_cost_microusd: Some(100), ..Default::default() };
 
         // global off, api_bot off -> Ok(None)
         assert_eq!(cfg.validated(false), Ok(None));
@@ -352,8 +351,7 @@ max_turn_cost_microusd = 500000
 
     #[test]
     fn validated_budget_validation() {
-        let mut cfg = ApiBotCfg::default();
-        cfg.enabled = true;
+        let mut cfg = ApiBotCfg { enabled: true, ..Default::default() };
 
         // None budget is rejected when enabled
         cfg.max_turn_cost_microusd = None;
@@ -382,9 +380,7 @@ max_turn_cost_microusd = 500000
 
     #[test]
     fn validated_limits_mapping_and_boundaries() {
-        let mut cfg = ApiBotCfg::default();
-        cfg.enabled = true;
-        cfg.max_turn_cost_microusd = Some(1000);
+        let mut cfg = ApiBotCfg { enabled: true, max_turn_cost_microusd: Some(1000), ..Default::default() };
 
         // Default valid check
         let limits = cfg.validated(true).unwrap().unwrap();

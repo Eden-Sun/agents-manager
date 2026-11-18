@@ -71,7 +71,7 @@ pub async fn clear_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<(
 /// can fail closed and defer reconciliation.
 pub async fn retirement_block(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     let mut conn = pool.acquire().await?;
-    retirement_block_on(&mut *conn, bot_id).await
+    retirement_block_on(&mut conn, bot_id).await
 }
 
 /// The same guard lookup against a caller-owned connection, used inside the retirement write

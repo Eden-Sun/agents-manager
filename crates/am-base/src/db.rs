@@ -2009,8 +2009,8 @@ pub async fn queued_turns_by_bot(pool: &SqlitePool) -> Result<std::collections::
     let mut out = std::collections::HashMap::new();
     for row in rows {
         let bot_id: String = row.try_get("queue_bot_id")?;
-        if !out.contains_key(&bot_id) {
-            out.insert(bot_id, Turn::from_row(&row)?);
+        if let std::collections::hash_map::Entry::Vacant(e) = out.entry(bot_id) {
+            e.insert(Turn::from_row(&row)?);
         }
     }
     Ok(out)

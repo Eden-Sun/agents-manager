@@ -495,7 +495,7 @@ pub async fn requeue_stale(pool: &SqlitePool, kind: &str) -> Result<Vec<(String,
             .dispatched_at
             .as_deref()
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map_or(true, |t| t.with_timezone(&chrono::Utc) < cutoff);
+            .is_none_or(|t| t.with_timezone(&chrono::Utc) < cutoff);
         if !stale {
             continue;
         }

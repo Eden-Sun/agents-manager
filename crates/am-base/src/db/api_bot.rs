@@ -483,9 +483,12 @@ pub async fn retention_candidates(pool: &SqlitePool, after: Option<(&str, &str)>
         .bind(at).bind(after.map(|v| v.0)).bind(after.map(|v| v.0)).bind(after.map(|v| v.1)).fetch_all(pool).await?)
 }
 
+/// Settled-session row handed to the retention/retire delete helpers below.
+type SettledSessionRow = (String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>);
+
 /// Invoke only after a retention-specific proof in the caller's write transaction.
 #[doc(hidden)]
-pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &(String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>), at: &str) -> Result<bool> {
+pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &SettledSessionRow, at: &str) -> Result<bool> {
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind='claude-api' AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS ? AND b.deleted_at IS ? AND (s.expires_at<=? OR b.deleted_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))")
         .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).bind(&c.7).bind(&c.8).bind(at).fetch_one(&mut *conn).await?;
     if !valid { return Ok(false); }
@@ -498,7 +501,7 @@ pub async fn retention_delete_on(conn: &mut SqliteConnection, c: &(String,String
 
 /// Delete one exact explicitly retired session after the caller proved settled receipts in this transaction.
 #[doc(hidden)]
-pub async fn explicit_retire_delete_on(conn: &mut SqliteConnection, c: &(String,String,Option<String>,Option<String>,i64,i64,String,Option<String>,Option<String>), at: &str) -> Result<bool> {
+pub async fn explicit_retire_delete_on(conn: &mut SqliteConnection, c: &SettledSessionRow, at: &str) -> Result<bool> {
     let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id WHERE s.id=? AND s.bot_id=? AND b.kind='claude-api' AND b.deleted_at IS NULL AND s.owner_run_id IS ? AND s.owner_turn_id IS ? AND s.generation=? AND s.revision=? AND s.expires_at=? AND s.retired_at IS NULL AND ? IS NULL AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=s.bot_id AND r.state IN ('starting','running','stopping')))")
         .bind(&c.1).bind(&c.0).bind(&c.2).bind(&c.3).bind(c.4).bind(c.5).bind(&c.6).bind(&c.7).fetch_one(&mut *conn).await?;
     if !valid { return Ok(false); }
@@ -704,8 +707,82 @@ pub async fn list_rejected_responses(
     Ok(rows)
 }
 
+/// Restart abandonment retains the reservation when the request outcome is unknown.
+/// Caller must prove the exact abandoned run in the same write transaction.
+pub async fn abandon_run_reserved_on(conn: &mut SqliteConnection, bot: &str, run: &str, at: &str) -> Result<u64> {
+    Ok(sqlx::query("UPDATE api_bot_attempts SET state='unknown', estimated_microusd=NULL, finished_at=? WHERE bot_id=? AND run_id=? AND state='reserved'")
+        .bind(at).bind(bot).bind(run).execute(conn).await?.rows_affected())
+}
+
+/// Query stuck claude-api bots from SQLite database.
+/// A bot is considered stuck in the database if:
+/// 1. Its live session checkpoint has api_pending or tool_pending while its owner turn is not active.
+/// 2. It has an attempt in 'reserved' state created before `reserved_cutoff`.
+/// 3. It has an attempt in 'unknown' state before `stale_unknown_cutoff` while its live session has api_pending.
+pub async fn stuck_claude_api_bots_in_db(
+    pool: &SqlitePool,
+    reserved_cutoff: &str,
+    stale_unknown_cutoff: &str,
+) -> Result<Vec<(String, String, &'static str)>> {
+    let bots: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, name FROM bots WHERE kind='claude-api' AND deleted_at IS NULL"
+    ).fetch_all(pool).await?;
+
+    let mut stuck = Vec::new();
+    for (bot_id, name) in bots {
+        // 1. Reserved timeout
+        let has_stalled_reserved: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved' AND created_at < ?)"
+        ).bind(&bot_id).bind(reserved_cutoff).fetch_one(pool).await.unwrap_or(false);
+        if has_stalled_reserved {
+            stuck.push((bot_id, name, "reserved_attempt_timeout"));
+            continue;
+        }
+
+        // 2. Checkpoint pending
+        let session: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT checkpoint_json, owner_turn_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+        ).bind(&bot_id).fetch_optional(pool).await.unwrap_or(None);
+
+        if let Some((raw_chk, owner_turn_id)) = session {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw_chk) {
+                let api_pending = val["api_pending"] == true;
+                let tool_pending = !val["tool_pending"].is_null();
+                if api_pending || tool_pending {
+                    let owner_ended = if let Some(t_id) = &owner_turn_id {
+                        let status: Option<String> = sqlx::query_scalar(
+                            "SELECT status FROM turns WHERE id=?"
+                        ).bind(t_id).fetch_optional(pool).await.unwrap_or(None);
+                        status.is_none_or(|s| s != "queued" && s != "in_flight")
+                    } else {
+                        true
+                    };
+                    if owner_ended {
+                        stuck.push((bot_id, name, "checkpoint_pending_after_owner_exit"));
+                        continue;
+                    }
+
+                    // 3. Stale unknown attempt while checkpoint is api_pending
+                    let has_stale_unknown: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='unknown' AND COALESCE(finished_at, created_at) < ?)"
+                    ).bind(&bot_id).bind(stale_unknown_cutoff).fetch_one(pool).await.unwrap_or(false);
+                    if has_stale_unknown {
+                        stuck.push((bot_id, name, "unknown_attempt_stuck"));
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    Ok(stuck)
+}
+
 #[cfg(test)]
 mod tests {
+    type RecordedAttempt = (String, Option<String>, String, Option<String>, i64, Option<i64>, Option<String>);
+    type TerminalAttempt = (String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>);
+    type ReservedRow = (String, String, Option<i64>, i64, Option<String>);
+    type DetachedAttempt = (Option<String>, Option<String>, Option<String>, String, i64, Option<i64>, Option<String>);
     use super::*;
     use serde_json::json;
     async fn pool() -> SqlitePool {
@@ -1026,12 +1103,12 @@ mod tests {
             .await
             .unwrap();
 
-        let recorded_before: (String, Option<String>, String, Option<String>, i64, Option<i64>, Option<String>) =
+        let recorded_before: RecordedAttempt =
             sqlx::query_as("SELECT state,actual_speed,usage_json,finished_at,reserved_microusd,estimated_microusd,pricing_version FROM api_bot_attempts WHERE id='recorded'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let terminal_before: Vec<(String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>)> =
+        let terminal_before: Vec<TerminalAttempt> =
             sqlx::query_as("SELECT id,state,actual_speed,usage_json,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id IN ('recorded','failed','unknown') ORDER BY id")
                 .fetch_all(&pool)
                 .await
@@ -1061,7 +1138,7 @@ mod tests {
         );
         tx.commit().await.unwrap();
 
-        let reserved_rows: Vec<(String, String, Option<i64>, i64, Option<String>)> =
+        let reserved_rows: Vec<ReservedRow> =
             sqlx::query_as("SELECT id,state,estimated_microusd,reserved_microusd,finished_at FROM api_bot_attempts WHERE id IN ('attempt-a','reserved-b') ORDER BY id")
                 .fetch_all(&pool)
                 .await
@@ -1070,19 +1147,19 @@ mod tests {
         for (id, state, estimated, reserved, finished) in reserved_rows {
             assert_eq!((state.as_str(), estimated, reserved, finished.as_deref()), ("unknown", None, if id == "attempt-a" { 100 } else { 250 }, Some(at)));
         }
-        let recorded_after: (String, Option<String>, String, Option<String>, i64, Option<i64>, Option<String>) =
+        let recorded_after: RecordedAttempt =
             sqlx::query_as("SELECT state,actual_speed,usage_json,finished_at,reserved_microusd,estimated_microusd,pricing_version FROM api_bot_attempts WHERE id='recorded'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(recorded_after, recorded_before, "recorded usage and cost stay byte-for-byte unchanged");
-        let terminal_after: Vec<(String, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>)> =
+        let terminal_after: Vec<TerminalAttempt> =
             sqlx::query_as("SELECT id,state,actual_speed,usage_json,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id IN ('recorded','failed','unknown') ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
         assert_eq!(terminal_after, terminal_before, "recorded/failed/unknown rows are not rewritten");
-        let detached: (Option<String>, Option<String>, Option<String>, String, i64, Option<i64>, Option<String>) =
+        let detached: DetachedAttempt =
             sqlx::query_as("SELECT bot_id,run_id,turn_id,state,reserved_microusd,estimated_microusd,finished_at FROM api_bot_attempts WHERE id='detached'")
                 .fetch_one(&pool)
                 .await
@@ -1294,74 +1371,4 @@ mod tests {
         let rows_after = list_rejected_responses(&pool, Some("a"), 500).await.unwrap();
         assert_eq!(rows_after.len(), 0);
     }
-}
-
-/// Restart abandonment retains the reservation when the request outcome is unknown.
-/// Caller must prove the exact abandoned run in the same write transaction.
-pub async fn abandon_run_reserved_on(conn: &mut SqliteConnection, bot: &str, run: &str, at: &str) -> Result<u64> {
-    Ok(sqlx::query("UPDATE api_bot_attempts SET state='unknown', estimated_microusd=NULL, finished_at=? WHERE bot_id=? AND run_id=? AND state='reserved'")
-        .bind(at).bind(bot).bind(run).execute(conn).await?.rows_affected())
-}
-
-/// Query stuck claude-api bots from SQLite database.
-/// A bot is considered stuck in the database if:
-/// 1. Its live session checkpoint has api_pending or tool_pending while its owner turn is not active.
-/// 2. It has an attempt in 'reserved' state created before `reserved_cutoff`.
-/// 3. It has an attempt in 'unknown' state before `stale_unknown_cutoff` while its live session has api_pending.
-pub async fn stuck_claude_api_bots_in_db(
-    pool: &SqlitePool,
-    reserved_cutoff: &str,
-    stale_unknown_cutoff: &str,
-) -> Result<Vec<(String, String, &'static str)>> {
-    let bots: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM bots WHERE kind='claude-api' AND deleted_at IS NULL"
-    ).fetch_all(pool).await?;
-
-    let mut stuck = Vec::new();
-    for (bot_id, name) in bots {
-        // 1. Reserved timeout
-        let has_stalled_reserved: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved' AND created_at < ?)"
-        ).bind(&bot_id).bind(reserved_cutoff).fetch_one(pool).await.unwrap_or(false);
-        if has_stalled_reserved {
-            stuck.push((bot_id, name, "reserved_attempt_timeout"));
-            continue;
-        }
-
-        // 2. Checkpoint pending
-        let session: Option<(String, Option<String>)> = sqlx::query_as(
-            "SELECT checkpoint_json, owner_turn_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL ORDER BY updated_at DESC LIMIT 1"
-        ).bind(&bot_id).fetch_optional(pool).await.unwrap_or(None);
-
-        if let Some((raw_chk, owner_turn_id)) = session {
-            if let Ok(val) = serde_json::from_str::<Value>(&raw_chk) {
-                let api_pending = val["api_pending"] == true;
-                let tool_pending = !val["tool_pending"].is_null();
-                if api_pending || tool_pending {
-                    let owner_ended = if let Some(t_id) = &owner_turn_id {
-                        let status: Option<String> = sqlx::query_scalar(
-                            "SELECT status FROM turns WHERE id=?"
-                        ).bind(t_id).fetch_optional(pool).await.unwrap_or(None);
-                        status.map_or(true, |s| s != "queued" && s != "in_flight")
-                    } else {
-                        true
-                    };
-                    if owner_ended {
-                        stuck.push((bot_id, name, "checkpoint_pending_after_owner_exit"));
-                        continue;
-                    }
-
-                    // 3. Stale unknown attempt while checkpoint is api_pending
-                    let has_stale_unknown: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='unknown' AND COALESCE(finished_at, created_at) < ?)"
-                    ).bind(&bot_id).bind(stale_unknown_cutoff).fetch_one(pool).await.unwrap_or(false);
-                    if has_stale_unknown {
-                        stuck.push((bot_id, name, "unknown_attempt_stuck"));
-                        continue;
-                    }
-                }
-            }
-        }
-    }
-    Ok(stuck)
 }

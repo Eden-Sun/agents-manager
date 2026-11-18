@@ -1115,7 +1115,8 @@ mod tests {
     #[test]
     fn restore_rejects_an_untrusted_manifest_as_a_whole() {
         let modified = b"features.hooks = true\n";
-        let cases: Vec<(&str, Box<dyn Fn(&Path, &Path)>)> = vec![
+        type Case = (&'static str, Box<dyn Fn(&Path, &Path)>);
+        let cases: Vec<Case> = vec![
             ("absolute", Box::new(|_, _| {})),
             ("dotdot", Box::new(|_, _| {})),
             ("other file", Box::new(|_, _| {})),

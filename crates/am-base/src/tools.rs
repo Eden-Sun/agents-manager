@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Default)]
 pub struct ToolInfo {
     pub installed: bool,
     pub path: Option<String>,
@@ -19,11 +20,6 @@ pub struct ToolInfo {
     pub logged_in: Option<bool>,
 }
 
-impl Default for ToolInfo {
-    fn default() -> Self {
-        Self { installed: false, path: None, version: None, logged_in: None }
-    }
-}
 
 
 /// 偵測（`detect*`）、身份登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
@@ -1328,9 +1324,7 @@ pub fn install_prompt(kind: &str) -> Option<String> {
 }
 
 
-/// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
-
-
+// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
 /// 每台主機的 CLI／身份偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ToolsTable: Send + Sync {
     fn tools(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tools::HostTools>>;

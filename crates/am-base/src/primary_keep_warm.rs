@@ -144,6 +144,7 @@ fn restored_window(opened_ago: Duration, closed_ago: Option<Duration>) -> Window
 /// * 保溫回覆：收尾時間取回合 `completed_at`（真的完成時間），保護到收尾＋`WINDOW_GRACE`＋`WINDOW_ECHO`。
 /// * 熱壓：收據的 `done_at`／`claimed_at` 是 `/compact` **送出**的時間，壓縮要跑多久不知道，所以保守補回「從送出起視窗開到 `WINDOW_MAX`」，
 ///   再接 `WINDOW_ECHO`（送出＋15 分＋15 分內都保護）；巡邏看到閒置後照常收，不會比正常執行短。
+///
 /// 正常執行的收尾時刻是巡邏第一次看到閒置；保溫回覆補回用回合完成時間，兩者最多差一個巡邏週期（補回的回音期只會偏短一點點）。
 /// 同一個 run 兩種都有就取保護結束較晚的那個。時間字串是 `db::now()` 那種定寬 UTC，字串比較就是時間比較。
 pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {

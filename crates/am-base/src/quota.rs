@@ -906,7 +906,7 @@ pub const STALE_AFTER: chrono::Duration = chrono::Duration::minutes(30);
 /// 這筆讀數該不該標「陳舊」：開機從快取回填、還沒被真探測換掉的（`flagged`），或執行中太久沒人更新。
 /// 解不開的 `updated_at` 當成陳舊（同這個檔案其他地方「解不開＝過期」的方向）。
 pub fn reading_is_stale(q: &Quota, flagged: bool, now: chrono::DateTime<chrono::Utc>) -> bool {
-    flagged || parse_utc(&q.updated_at).map_or(true, |at| now - at > STALE_AFTER)
+    flagged || parse_utc(&q.updated_at).is_none_or(|at| now - at > STALE_AFTER)
 }
 
 pub async fn set(
@@ -1263,7 +1263,7 @@ fn recalibrate_limit_hit_at(mut hit: LimitHit, fresh: &Quota, now: chrono::DateT
     if resets - len >= at {
         return None;
     }
-    if hit.until.as_deref().and_then(parse_utc).map_or(true, |u| resets < u) {
+    if hit.until.as_deref().and_then(parse_utc).is_none_or(|u| resets < u) {
         hit.until = Some(crate::db::iso_at(resets));
     }
     Some(hit)
@@ -1334,7 +1334,7 @@ fn grok_bucket_len(bucket: &str) -> Option<chrono::Duration> {
 
 /// 紀錄作廢：過了那一桶的窗長（從上次清掉起算），或被清掉那筆撞限的 `until` 已經到期。
 fn grok_pct_clear_expired(m: &GrokPctClear, now: chrono::DateTime<chrono::Utc>) -> bool {
-    grok_bucket_len(&m.bucket).map_or(true, |len| now - m.cleared_at >= len) || m.until.is_some_and(|u| now >= u)
+    grok_bucket_len(&m.bucket).is_none_or(|len| now - m.cleared_at >= len) || m.until.is_some_and(|u| now >= u)
 }
 
 /// 表滿時先清掉作廢的紀錄；回傳清完之後還有沒有空位。

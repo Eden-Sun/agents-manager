@@ -18,7 +18,6 @@ pub async fn output_within(script: &str, limit: Duration) -> std::io::Result<Out
     // 自己開一個行程群組（setsid，pgid＝sh 的 pid）：`kill_on_drop` 只殺得到 sh 本身，它底下的孫行程（`&` 的背景工作、
     // 管線的其他段）會留在背景。逾時或被丟掉時整群一起殺，同 `hosts::sh_local_capture`。
     unsafe {
-        use std::os::unix::process::CommandExt as _;
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());

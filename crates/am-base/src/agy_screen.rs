@@ -102,18 +102,16 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
         .filter(|_| has(&|r| r.contains("yes, i trust this folder") || r.contains("no, exit")))
     {
         (i, AgyDialog::Trust)
-    } else if let Some(i) = [
-        "run this command?",
-        "allow access to this url?",
-        "allow access to this file?",
-        "allow calling this tool?",
-    ]
-    .iter()
-    .find_map(|t| title(t))
-    {
-        (i, AgyDialog::Permission)
     } else {
-        return None;
+        let i = [
+            "run this command?",
+            "allow access to this url?",
+            "allow access to this file?",
+            "allow calling this tool?",
+        ]
+        .iter()
+        .find_map(|t| title(t))?;
+        (i, AgyDialog::Permission)
     };
     // 輸入列在標題下面＝框已經關了（回覆抄了框的字，畫面上只剩輸入列）。標題上面的單獨 `>` 是回覆裡的引文，框照樣要認到。
     if tail[at + 1..].iter().any(|l| is_composer_row(l)) {
@@ -145,6 +143,7 @@ fn is_task_running_row(line: &str) -> bool {
 /// 1. 輸入框（最後兩條框線之間）下方的 footer 有 `esc to cancel`；
 /// 2. 輸入框下方有 `● [HH:MM:SS] … running` 的背景工作列；
 /// 3. 輸入框上方，最後一行 `○ Running (` 之後沒有新的 assistant 正文（只有 `●`／`○`／`└`／spinner 的進度列）。
+///
 /// 找不到輸入框就判不忙（維持原本行為）。
 pub fn is_busy(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().collect();

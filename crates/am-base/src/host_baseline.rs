@@ -368,7 +368,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
         let present = |v: Option<&&str>| v.copied() == Some("1");
         match f[1] {
             "tool" if f.len() >= 3 => {
-                if f.get(3).map_or(true, |p| p.is_empty()) {
+                if f.get(3).is_none_or(|p| p.is_empty()) {
                     if let Some(sev) = manifest::severity_of(&m.tools, f[2]) {
                         let note = m.tools.iter().find(|t| t.name == f[2]).and_then(|t| t.note.clone());
                         issues.push(BaselineIssue { note, ..issue(format!("tool.{}", f[2]), sev, format!("缺工具 {}（登入 shell 的 PATH 找不到）", f[2])) });
@@ -450,15 +450,14 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     issues.push(issue(format!("{who}.{}", f[2]), severity_of(table, f[2]), format!("{who}：缺 {}", f[2])));
                 }
             }
-            "gitconfig-token" if f.len() >= 3 => {
-                if present(f.get(2)) {
+            "gitconfig-token" if f.len() >= 3
+                && present(f.get(2)) => {
                     issues.push(issue(
                         "gitconfig.token".into(),
                         WARN,
                         "~/.gitconfig 內嵌帶密碼的網址（只報有，不顯示內容）".into(),
                     ));
                 }
-            }
             _ => {}
         }
     }

@@ -237,6 +237,7 @@ fn pending_out(version: &str, entries: &[Entry]) -> PendingVersion {
 ///   從此永遠不會再出現在 `pending` 裡——codex 0.155.0／0.155.1 卡了三天沒人分析就是這個洞：
 ///   `release-triage-check` 第一次成功抓到並插入，那一輪派工沒能完成，之後每一輪都因為這個邊界值把
 ///   它們濾掉，鎖與額度都正常、log 也不再報錯，帳本卻永遠停在 `pending`）。
+///
 /// `target` comes from independent upstream discovery, not the changelog maximum.
 pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>, target: &str) -> Result<CheckReport> {
     if !rules::supported(kind) {

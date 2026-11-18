@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
+type DiskReadHook = Option<Box<dyn Fn(&Path)>>;
+
+#[cfg(test)]
 thread_local! {
-    static AFTER_DISK_READ: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_DISK_READ: std::cell::RefCell<DiskReadHook> = const { std::cell::RefCell::new(None) };
 }
 
 fn default_listen() -> String {
@@ -1941,8 +1944,7 @@ pub fn short_child_name(project_label: &str, name: &str) -> String {
     let prefix = format!("{slug}-");
 
     let mut short = name;
-    loop {
-        let Some(after_slug) = short.strip_prefix(&prefix) else { break };
+    while let Some(after_slug) = short.strip_prefix(&prefix) {
         let Some(id_tail) = after_slug.get(..BOT_ID_TAIL) else { break };
         if !id_tail.bytes().all(|c| c.is_ascii_alphanumeric()) {
             break;
@@ -2402,7 +2404,7 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>, [u8; 32])> 
 
 /// Parse an already-read config file; callers can validate and parse the same snapshot.
 fn parse_file_text(path: &Path, text: &str) -> Result<(ConfigFile, [u8; 32])> {
-    let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+    let (cfg, unknown) = parse_config(text).with_context(|| format!("parse {}", path.display()))?;
     for key in unknown.into_iter().filter(|k| !is_retired_key(k)) {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
@@ -2469,12 +2471,12 @@ fn write_resolved(target: &Path, base: Option<&str>, cfg: &ConfigFile) -> Result
         f.write_all(text.as_bytes())?;
         // rename 會把暫存檔的權限當成新檔的權限：原檔被 chmod 過（0600、0640…）就沿用，不能被悄悄放寬或收窄
         // （跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩）。
-        if let Ok(md) = std::fs::metadata(&target) {
+        if let Ok(md) = std::fs::metadata(target) {
             let _ = f.set_permissions(md.permissions());
         }
         f.sync_all()?;
         drop(f);
-        std::fs::rename(&tmp, &target)?;
+        std::fs::rename(&tmp, target)?;
         // 目錄項目的更動也要落盤；有些檔案系統不支援對目錄 fsync，那就算了（檔案本身已經 sync 過）。
         if let Some(dir) = target.parent() {
             if let Ok(d) = std::fs::File::open(dir) {

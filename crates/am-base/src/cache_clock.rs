@@ -236,7 +236,7 @@ pub async fn last_turns_by_bot(pool: &SqlitePool) -> anyhow::Result<HashMap<Stri
 
 /// 單顆 bot 的 [`last_turns_by_bot`]（`bot_status` 事件用）。
 pub async fn last_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> anyhow::Result<Option<LastTurn>> {
-    let row: Option<LastTurnRow> = sqlx::query_as(&format!("{} WHERE c.bot_id = ?", &*LAST_TURN_SQL)).bind(bot_id).fetch_optional(pool).await?;
+    let row: Option<LastTurnRow> = sqlx::query_as(&format!("{} WHERE c.bot_id = ?", *LAST_TURN_SQL)).bind(bot_id).fetch_optional(pool).await?;
     Ok(row.map(|r| last_turn_of(r).1))
 }
 
