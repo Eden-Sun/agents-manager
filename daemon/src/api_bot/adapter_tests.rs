@@ -1816,4 +1816,126 @@ mod tests {
             assert_eq!(stored, foreign, "{tag}");
         }
     }
+
+    // ── 供應商由呼叫端指定（openai-api D2b-1）：帳本範圍與總上限跟著 session 的供應商 ──────────────────────────
+
+    use crate::api_bot::adapter::AdapterProvider;
+    use crate::api_bot::provider::{ProviderExtras, SessionOptions};
+
+    fn openai_spec() -> AdapterProvider {
+        AdapterProvider {
+            id: crate::api_bot::openai::provider::ID,
+            options: SessionOptions { model: "gpt-6-luna".into(), effort: "medium".into(), max_output_tokens: 1024, extras: ProviderExtras::None },
+            quote: Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+        }
+    }
+
+    fn capped(cap_usd: f64) -> AdapterLimits {
+        AdapterLimits { total_cap_usd: Some(cap_usd), total_cap_since: Some("2000-01-01T00:00:00.000Z".into()), ..test_limits() }
+    }
+
+    async fn attempts(pool: &SqlitePool) -> Vec<(String, Option<String>, String, i64)> {
+        sqlx::query_as("SELECT provider, service_tier, state, reserved_microusd FROM api_bot_attempts ORDER BY created_at, id").fetch_all(pool).await.unwrap()
+    }
+
+    fn pending(text: &str) -> State {
+        State { api_pending: true, ..user_turn(text) }
+    }
+
+    /// OpenAI 的 session：checkpoint 標 `openai`，預留記在 openai 的帳（provider、service tier），不佔 Claude 的額。
+    #[tokio::test]
+    async fn an_openai_session_is_tagged_and_its_reservations_are_booked_under_openai() {
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn, generation: 1 };
+        let adapter = ApiBotAdapter::new_with(pool.clone(), identity, openai_spec(), serde_json::json!("sys"), capped(1.0), tag_http("http://127.0.0.1:9"), None).await.unwrap();
+        let (_, _, first) = stored_checkpoint(&pool, &session).await;
+        assert_eq!((first["v"].as_u64(), first["provider"].as_str()), (Some(2), Some("openai")));
+
+        adapter.save(&pending("hello")).await.expect("reserved under the openai cap");
+        assert_eq!(attempts(&pool).await, [("openai".to_string(), Some("standard".to_string()), "reserved".to_string(), 10_000)]);
+        assert_eq!(stored_checkpoint(&pool, &session).await.2["provider"], "openai");
+        // Claude 的總上限只算 anthropic 的 attempt：openai 花了多少都不影響。
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(am_base::db::api_bot::provider_spent_microusd(&mut conn, "anthropic", "2000-01-01T00:00:00.000Z").await.unwrap(), 0);
+        assert_eq!(am_base::db::api_bot::provider_spent_microusd(&mut conn, "openai", "2000-01-01T00:00:00.000Z").await.unwrap(), 10_000);
+    }
+
+    /// 總上限各算各的：同一個 DB 裡 openai 與 Claude 各有 $0.015 的上限、各報價 $0.01——兩邊都預留得到
+    /// （如果混著算，第二筆就會超過）。
+    #[tokio::test]
+    async fn each_provider_has_its_own_total_cap() {
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let identity = AdapterIdentity { session_id: session, bot_id: bot.clone(), run_id: run, turn_id: turn, generation: 1 };
+        let openai = ApiBotAdapter::new_with(pool.clone(), identity, openai_spec(), serde_json::json!("sys"), capped(0.015), tag_http("http://127.0.0.1:9"), None).await.unwrap();
+        openai.save(&pending("one")).await.expect("within the openai cap");
+        // 再開一顆 Claude bot（自己的 run／turn／session）。
+        let now = am_base::db::now();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('b-claude','p','claude-side','claude-api','fixture',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r-claude','b-claude','running',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('c-claude','b-claude',?)").bind(&now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at) VALUES('t-claude','c-claude','r-claude','web','in_flight',?)").bind(&now).execute(&pool).await.unwrap();
+        let claude_identity = AdapterIdentity { session_id: "s-claude".into(), bot_id: "b-claude".into(), run_id: "r-claude".into(), turn_id: "t-claude".into(), generation: 1 };
+        let claude = ApiBotAdapter::new(
+            pool.clone(),
+            claude_identity,
+            test_options(),
+            serde_json::json!("sys"),
+            capped(0.015),
+            Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+            tag_http("http://127.0.0.1:9"),
+            None,
+        )
+        .await
+        .unwrap();
+        claude.save(&pending("claude one")).await.expect("openai spend does not count against the Claude cap");
+        assert!(claude.take_refusal().is_none());
+        let booked: Vec<(String, Option<String>)> = attempts(&pool).await.into_iter().map(|a| (a.0, a.1)).collect();
+        assert_eq!(booked, [("openai".to_string(), Some("standard".to_string())), ("anthropic".to_string(), None)]);
+        let mut conn = pool.acquire().await.unwrap();
+        for provider in ["openai", "anthropic"] {
+            assert_eq!(am_base::db::api_bot::provider_spent_microusd(&mut conn, provider, "2000-01-01T00:00:00.000Z").await.unwrap(), 10_000, "{provider}: only its own attempts count");
+        }
+    }
+
+    /// openai 的總上限在預留時擋下：原因是 `api_total_cap_reached`，沒有新增 attempt、checkpoint 不動。
+    #[tokio::test]
+    async fn an_exhausted_openai_cap_refuses_the_reservation_with_a_named_reason() {
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn, generation: 1 };
+        // 上限 $0.005，報價 $0.01：第一筆就超過。
+        let adapter = ApiBotAdapter::new_with(pool.clone(), identity, openai_spec(), serde_json::json!("sys"), capped(0.005), tag_http("http://127.0.0.1:9"), None).await.unwrap();
+        let (revision, _, before) = stored_checkpoint(&pool, &session).await;
+        assert!(adapter.save(&pending("too expensive")).await.is_err());
+        assert_eq!(adapter.take_refusal().as_deref(), Some("api_total_cap_reached:cap=0.005:spent=0"));
+        assert!(attempts(&pool).await.is_empty());
+        let (revision_after, _, after) = stored_checkpoint(&pool, &session).await;
+        assert_eq!((revision_after, after), (revision, before));
+    }
+
+    /// 接續時供應商必須與 session 的一致：Claude 的 session 用 openai 接、openai 的 session 用 Claude 接，都拒絕且不改 owner／revision。
+    #[tokio::test]
+    async fn rebinding_with_another_provider_than_the_sessions_is_refused_before_any_durable_change() {
+        // Claude 的 session（tag_session 開的）用 openai 接。
+        let (pool, session, _adapter, identity, next) = tag_session().await;
+        hand_over_turn(&pool, &identity, &next).await;
+        let refused = ApiBotAdapter::rebind_with(pool.clone(), &identity, 0, next.clone(), openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await;
+        assert!(refused.is_err());
+        let (revision, owner_turn, _) = stored_checkpoint(&pool, &session).await;
+        assert_eq!((revision, owner_turn.as_str()), (0, identity.turn_id.as_str()));
+        // 用對的供應商就接得上。
+        assert!(tag_rebind(&pool, &identity, 0, &next).await.is_ok());
+
+        // openai 的 session 用 Claude 接。
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn, generation: 1 };
+        ApiBotAdapter::new_with(pool.clone(), identity.clone(), openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await.unwrap();
+        let next = AdapterIdentity { turn_id: "t2".into(), ..identity.clone() };
+        hand_over_turn(&pool, &identity, &next).await;
+        assert!(tag_rebind(&pool, &identity, 0, &next).await.is_err(), "a Claude adapter never takes over an OpenAI session");
+        let (revision, owner_turn, stored) = stored_checkpoint(&pool, &session).await;
+        assert_eq!((revision, owner_turn.as_str(), stored["provider"].as_str()), (0, identity.turn_id.as_str(), Some("openai")));
+        let (rebound, state) = ApiBotAdapter::rebind_with(pool.clone(), &identity, 0, next, openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await.unwrap();
+        assert_eq!(state.provider_id(), "openai");
+        drop(rebound);
+    }
 }

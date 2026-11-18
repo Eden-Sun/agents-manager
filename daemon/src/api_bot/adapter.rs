@@ -56,6 +56,21 @@ impl AdapterLimits {
     }
 }
 
+/// 一個 session 要用哪個供應商：識別字（`provider::for_id` 認得的）、它的 session 選項、報價。
+/// session 建立時固定；接續時必須與 checkpoint 的標籤一致。
+pub(crate) struct AdapterProvider {
+    pub(crate) id: &'static str,
+    pub(crate) options: super::provider::SessionOptions,
+    pub(crate) quote: Arc<dyn QuoteProvider>,
+}
+
+impl AdapterProvider {
+    /// Claude：`protocol::Options` 無損轉成中立的 session 選項。
+    pub(crate) fn anthropic(options: Options, quote: Arc<dyn QuoteProvider>) -> Self {
+        Self { id: super::anthropic::ID, options: super::anthropic::session_options(options), quote }
+    }
+}
+
 pub(super) struct Secret(String);
 impl Secret {
     pub(super) fn new(value: String) -> Self { Self(value) }
@@ -203,7 +218,8 @@ impl ApiBotAdapter {
         &self.system
     }
 
-    /// Create adapter for the first turn (generation 1, fresh session at revision 0).
+    /// Create adapter for the first turn (generation 1, fresh session at revision 0). Claude 的便利入口：
+    /// 等同 [`Self::new_with`] 帶 `anthropic` 的 [`AdapterProvider`]。
     pub(crate) async fn new(
         pool: SqlitePool,
         identity: AdapterIdentity,
@@ -217,6 +233,20 @@ impl ApiBotAdapter {
         options
             .validate()
             .map_err(|_| http::Error::InvalidRequest)?;
+        Self::new_with(pool, identity, AdapterProvider::anthropic(options, quote_provider), system, limits, http_cfg, tools).await
+    }
+
+    /// 開一個新 session，供應商由 `spec` 指定並從此固定（寫進 checkpoint 的標籤與每筆 attempt 的 `provider`）。
+    pub(crate) async fn new_with(
+        pool: SqlitePool,
+        identity: AdapterIdentity,
+        spec: AdapterProvider,
+        system: Value,
+        limits: AdapterLimits,
+        http_cfg: AdapterHttpConfig,
+        tools: Option<Arc<dyn Tools>>,
+    ) -> Result<Self, http::Error> {
+        let AdapterProvider { id: provider_id, options, quote: quote_provider } = spec;
         limits.validate()?;
         if identity.generation != 1
             || identity.session_id.is_empty()
@@ -241,8 +271,7 @@ impl ApiBotAdapter {
             other => other.to_string(),
         };
         // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
-        let provider = super::provider::for_id(super::anthropic::ID, super::anthropic::session_options(options), quote_provider.clone())
-            .ok_or(http::Error::InvalidRequest)?;
+        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
         let initial_state = State {
             system: Some(system_str),
             v: Some(am_base::db::api_bot::CHECKPOINT_VERSION),
@@ -263,8 +292,9 @@ impl ApiBotAdapter {
             identity,
             system,
             limits,
+            // session 的標籤就是它的供應商（之後每一份 checkpoint 都照這個寫）。
+            session_tag: Some(provider.id().to_string()),
             provider,
-            session_tag: Some(super::anthropic::ID.to_string()),
             quote_provider,
             http_cfg,
             tools,
@@ -283,7 +313,8 @@ impl ApiBotAdapter {
         })
     }
 
-    /// Rebind an existing settled session to a new run / turn, loading durable state.
+    /// Rebind an existing settled session to a new run / turn, loading durable state. Claude 的便利入口：
+    /// 等同 [`Self::rebind_with`] 帶 `anthropic` 的 [`AdapterProvider`]。
     pub(crate) async fn rebind(
         pool: SqlitePool,
         old_fence: &AdapterIdentity,
@@ -299,6 +330,24 @@ impl ApiBotAdapter {
         options
             .validate()
             .map_err(|_| http::Error::InvalidRequest)?;
+        Self::rebind_with(pool, old_fence, old_revision, new_identity, AdapterProvider::anthropic(options, quote_provider), system, limits, http_cfg, tools).await
+    }
+
+    /// 接續既有 session。session 的供應商在建立時就固定：checkpoint 標的（沒有標籤＝Claude）必須就是 `spec` 的那一家，
+    /// 不一致就拒絕，而且不改任何 durable 狀態（owner／revision 不動）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn rebind_with(
+        pool: SqlitePool,
+        old_fence: &AdapterIdentity,
+        old_revision: i64,
+        new_identity: AdapterIdentity,
+        spec: AdapterProvider,
+        system: Value,
+        limits: AdapterLimits,
+        http_cfg: AdapterHttpConfig,
+        tools: Option<Arc<dyn Tools>>,
+    ) -> Result<(Self, State), http::Error> {
+        let AdapterProvider { id: provider_id, options, quote: quote_provider } = spec;
         limits.validate()?;
 
         if new_identity.session_id != old_fence.session_id
@@ -335,8 +384,10 @@ impl ApiBotAdapter {
         let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
             .map_err(|_| http::Error::InvalidRequest)?;
         // session 的 provider 在建立時就固定：依 checkpoint 的標籤取回同一個（沒有標籤＝Claude）；不認得就拒絕，不改任何 durable 狀態。
-        let provider = super::provider::for_id(previous.provider_id(), super::anthropic::session_options(options), quote_provider.clone())
-            .ok_or(http::Error::InvalidRequest)?;
+        if previous.provider_id() != provider_id {
+            return Err(http::Error::InvalidRequest);
+        }
+        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
         let session_tag = previous.provider.clone();
         if !provider.checkpoint_matches_model(&previous) { return Err(http::Error::InvalidRequest); }
 
@@ -706,8 +757,16 @@ impl Journal for ApiBotAdapter {
                         return Err(());
                     }
 
-                    if let (Some(cap_usd), Some(ref since)) = (self.limits.total_cap_usd, &self.limits.total_cap_since) {
-                        if cap_usd >= 0.0 && !since.is_empty() {
+                    // 帳本範圍跟著 session 的供應商：每筆 attempt 記它的 `provider`，每小時請求數與總上限都只算同一家的。
+                    let ledger_provider = self.provider.id();
+                    let claude = ledger_provider == db_api::PROVIDER_ANTHROPIC;
+                    let total_cap = match (self.limits.total_cap_usd, &self.limits.total_cap_since) {
+                        (Some(cap_usd), Some(since)) if cap_usd >= 0.0 && !since.is_empty() => Some((cap_usd, since.as_str())),
+                        _ => None,
+                    };
+                    // Claude：照舊在預留前先查（只算 anthropic 的 attempt；別家的花費不佔 Claude 的額）。
+                    if let (true, Some((cap_usd, since))) = (claude, total_cap) {
+                        {
                             let spent_microusd: i64 = sqlx::query_scalar(
                                 "SELECT COALESCE(SUM(
                                     CASE WHEN state='recorded' THEN COALESCE(estimated_microusd, 0)
@@ -716,8 +775,9 @@ impl Journal for ApiBotAdapter {
                                          ELSE 0 END
                                  ), 0)
                                  FROM api_bot_attempts
-                                 WHERE created_at >= ? AND state IN ('recorded', 'reserved', 'unknown')",
+                                 WHERE provider = ? AND created_at >= ? AND state IN ('recorded', 'reserved', 'unknown')",
                             )
+                            .bind(ledger_provider)
                             .bind(since)
                             .fetch_one(&self.pool)
                             .await
@@ -746,19 +806,37 @@ impl Journal for ApiBotAdapter {
                         pricing_version: &quote.pricing_version,
                     };
 
-                    let res = db_api::reserve(
+                    // 其他供應商：總上限在預留的同一個寫交易裡檢查（兩筆並發只有一筆拿得到最後的額度）。
+                    let scope = if claude {
+                        db_api::ProviderScope::ANTHROPIC
+                    } else {
+                        db_api::ProviderScope {
+                            provider: ledger_provider,
+                            service_tier: Some(envelope.speed()),
+                            total_cap: total_cap.map(|(cap_usd, since)| db_api::TotalCap { since, cap_microusd: (cap_usd * 1_000_000.0).round() as i64 }),
+                        }
+                    };
+                    let res = db_api::reserve_scoped(
                         &self.pool,
                         &fence,
                         &attempt,
                         &chk,
                         self.limits.max_turn_microusd,
                         self.limits.max_requests_per_hour,
+                        &scope,
                     )
                     .await
-                    .map_err(|e| match e.downcast_ref::<db_api::ReserveRefused>() {
-                        Some(db_api::ReserveRefused::TurnBudget) => self.refuse("api_bot_turn_cost_cap_exceeded"),
-                        Some(db_api::ReserveRefused::HourlyLimit) => self.refuse("api_bot_hourly_limit_reached"),
-                        None => {}
+                    .map_err(|e| {
+                        if let Some(cap) = e.downcast_ref::<db_api::TotalCapRefused>() {
+                            let usd = |microusd: i64| crate::claude_api_cap::format_usd_pretty(microusd as f64 / 1_000_000.0);
+                            self.refuse(format!("api_total_cap_reached:cap={}:spent={}", usd(cap.cap_microusd), usd(cap.spent_microusd)));
+                            return;
+                        }
+                        match e.downcast_ref::<db_api::ReserveRefused>() {
+                            Some(db_api::ReserveRefused::TurnBudget) => self.refuse("api_bot_turn_cost_cap_exceeded"),
+                            Some(db_api::ReserveRefused::HourlyLimit) => self.refuse("api_bot_hourly_limit_reached"),
+                            None => {}
+                        }
                     })?;
 
                     match res {
