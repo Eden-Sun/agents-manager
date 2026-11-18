@@ -8,6 +8,7 @@ mod cli_refresh;
 mod role_faults;
 mod failover;
 mod responder;
+mod controller;
 mod store;
 
 mod tests {
