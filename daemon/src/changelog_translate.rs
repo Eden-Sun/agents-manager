@@ -2370,7 +2370,8 @@ mod tests {
         assert_eq!(fake.calls(), 1, "blocked while the first is in flight");
         gate.notify_one();
         until_status(&env.app, "2.1.5", "completed").await;
-        for _ in 0..200 {
+        // 等延後重送（retry_floor 200ms）：上限只是放棄的耐心，不是斷言；macOS 的 runner 在整樹測試的負載下會慢過 2 秒（#1964）。
+        for _ in 0..2000 {
             if fake.calls() >= 2 {
                 break;
             }
