@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useReviewAsk } from '../hooks/useReviewAsk'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { readyLabel, updateBatchCounts } from '../lib/updateBatch'
+import { updateBatchCounts } from '../lib/updateBatch'
 import { updateRange } from '../lib/updateRange'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -68,6 +68,17 @@ function firstTargetId(s: Parameters<Parameters<typeof useStore>[0]>[0]): string
   return (c.ready[0] ?? c.busy.find((b) => !b.install))?.botId
 }
 
+/**
+ * 名單每一列的字：bot 名稱 · 專案 · 身份（沒有就「預設」）· 主機（非 local 才寫）· 補充（在忙原因、背景狀態未知…）。
+ * 範圍與 `updateBatchCounts` 一樣（不擴大也不縮小）；專案還沒載入就略過專案那一段。
+ */
+function rowText(s: Parameters<Parameters<typeof useStore>[0]>[0], botId: string, name: string, tail: string[], noIdentity: string): string {
+  const bot = s.bots.find((b) => b.id === botId)
+  const project = s.projects.find((p) => p.id === bot?.project_id)
+  const host = projectHostName(s, bot?.project_id ?? null)
+  return [name, project?.label, bot?.identity || noIdentity, host !== 'local' ? host : null, ...tail].filter((x): x is string => Boolean(x)).join(' · ')
+}
+
 /** `control`：手機合成的那顆（`MergedUpdateChip`）代為開框，這裡只畫確認框、不畫按鈕。 */
 export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
@@ -79,8 +90,13 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   // 字串陣列用 `useShallow` 逐項比就穩。名單不用「、」「\n」串成一個字串再拆（名字可以含「、」，#998）。
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const readyNames = useStore(
-    useShallow((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.map(readyLabel)),
+    useShallow((s) =>
+      updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.map((b) =>
+        rowText(s, b.botId, b.name, b.backgroundUnknown ? [t('背景狀態未知')] : [], t('預設')),
+      ),
+    ),
   )
+  const readyIds = useStore(useShallow((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.map((b) => b.botId)))
   // 巡邏還沒看過它們的背景工作（#767）：沒有證據所以照樣會重啟，確認框要講清楚。
   const unknownCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.filter((b) => b.backgroundUnknown).length)
   // 還沒裝新版的 codex 由旁邊的 `CodexInstallChip` 負責（安裝＋重啟），不再算進這顆的「在忙」。
@@ -88,7 +104,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     useShallow((s) =>
       updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
         .busy.filter((b) => !b.install)
-        .map((b) => t('{name}（{why}）', { name: b.name, why: b.why })),
+        .map((b) => rowText(s, b.botId, b.name, [b.why], t('預設'))),
     ),
   )
   const busyCount = busyLines.length
@@ -106,6 +122,9 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const scheduledBusy = busyIds.filter((id) => scheduled.includes(id))
   const allScheduled = busyCount > 0 && scheduledBusy.length === busyCount
   const [alsoBusy, setAlsoBusy] = useState(false)
+  // 強制重啟（使用者 2026-11-18 明確要求，覆蓋先前「不提供強制中斷」）：先二次確認，才一顆顆走單顆重啟。
+  const restartBot = useStore((s) => s.restartBot)
+  const [force, setForce] = useState<{ ids: string[]; names: string[] } | null>(null)
   const busyOnly = readyCount === 0
   const [localOpen, setLocalOpen] = useState(false)
   const confirming = control ? control.open : localOpen
@@ -187,7 +206,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         {scheduledBusy.length > 0 ? <span className="quota-update-clock" aria-hidden="true">⏱</span> : null}
       </button>}
       <ConfirmDialog
-        open={confirming}
+        open={confirming && force === null}
         title={busyOnly ? (allScheduled ? t('這些 Bot 已排成閒下來自動重啟') : t('這些 Bot 都在忙：閒下來自動重啟？')) : t('重啟這些 Bot 來套用更新？')}
         body={
           <>
@@ -216,7 +235,12 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             </p>}
             {busyOnly ? null : <ul className="confirm-list">
               {readyNames.map((n, i) => (
-                <li key={`${i}:${n}`}>{n}</li>
+                <li key={`${i}:${n}`}>
+                  <span className="confirm-row-text">{n}</span>
+                  <button type="button" className="confirm-row-force" onClick={() => setForce({ ids: [readyIds[i]], names: [n] })}>
+                    {t('立即重啟')}
+                  </button>
+                </li>
               ))}
             </ul>}
             {!busyOnly && unknownCount > 0 ? (
@@ -229,7 +253,12 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                 {busyOnly ? null : <p className="confirm-note">{t('另外 {n} 顆在忙，這次會跳過：', { n: busyCount })}</p>}
                 <ul className="confirm-list dim">
                   {busyLines.map((n, i) => (
-                    <li key={`${i}:${n}`}>{scheduled.includes(busyIds[i]) ? `${n}${t('（已排程）')}` : n}</li>
+                    <li key={`${i}:${n}`}>
+                      <span className="confirm-row-text">{scheduled.includes(busyIds[i]) ? `${n} · ${t('已排程')}` : n}</span>
+                      <button type="button" className="confirm-row-force" onClick={() => setForce({ ids: [busyIds[i]], names: [n] })}>
+                        {t('立即重啟')}
+                      </button>
+                    </li>
                   ))}
                 </ul>
                 {busyOnly ? null : (
@@ -239,6 +268,13 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                   </label>
                 )}
               </>
+            ) : null}
+            {readyCount + busyCount > 0 ? (
+              <p>
+                <button type="button" className="confirm-row-force all" onClick={() => setForce({ ids: [...readyIds, ...busyIds], names: [...readyNames, ...busyLines] })}>
+                  {t('全部立即重啟')}
+                </button>
+              </p>
             ) : null}
           </>
         }
@@ -260,6 +296,39 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             return
           }
           void restartIdleBots().then(() => (alsoIds.length > 0 ? scheduleUpdateRestart(alsoIds) : undefined))
+        }}
+      />
+      <ConfirmDialog
+        open={force !== null}
+        danger
+        title={t('立即重啟？')}
+        body={
+          force ? (
+            <>
+              <p>
+                {force.ids.length === 1
+                  ? t.x('會中斷這顆目前的回合（Esc 停下），之後用 {resume} 接回，上下文不會掉，但正在進行的工作要重新下指令。', { resume: <code>--resume</code> })
+                  : t.x('會中斷這 {n} 顆目前的回合（Esc 停下），之後用 {resume} 接回，上下文不會掉，但正在進行的工作要重新下指令。', { n: <strong>{force.ids.length}</strong>, resume: <code>--resume</code> })}
+              </p>
+              <ul className="confirm-list">
+                {force.names.map((n, i) => (
+                  <li key={`${i}:${n}`}>{n}</li>
+                ))}
+              </ul>
+            </>
+          ) : null
+        }
+        confirmLabel={t('立即重啟 {n} 顆', { n: force?.ids.length ?? 0 })}
+        width={440}
+        onCancel={() => setForce(null)}
+        onConfirm={() => {
+          const ids = force?.ids ?? []
+          setForce(null)
+          setConfirming(false)
+          // 一顆顆來（per-bot 鎖與 pane 版面都假設一次一顆）；daemon 在重啟成功後清掉該顆「閒下來自動重啟」的旗標。
+          void (async () => {
+            for (const id of ids) await restartBot(id)
+          })()
         }}
       />
     </>

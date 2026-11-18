@@ -138,3 +138,9 @@
 .sidebar-head .quota-update::before {
   display: none;
 }
+
+/* 名單每列的「立即重啟」（強制，會中斷目前的回合；使用者 2026-11-18）。 */
+.confirm-list li { display: flex; gap: 8px; align-items: baseline; }
+.confirm-row-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.confirm-row-force { flex: none; font-size: 11px; padding: 0 6px; color: var(--danger); }
+.confirm-row-force.all { font-size: 12px; padding: 2px 8px; }

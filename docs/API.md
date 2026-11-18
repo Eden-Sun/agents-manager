@@ -2187,6 +2187,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - `POST {"bot_ids":["…"]}` → 排程，回目前全部排著的 `{"bot_ids":[…]}`。bot 不存在／已刪 → 404；子 agent（`managed_by = child`）→ 409 `child_restart_forbidden`。已經閒置的當場就判一次。
 - `DELETE {"bot_ids":["…"]}` → 取消；空名單＝全部取消。回目前排著的。
 - 旗標存 `bot_update_restart`（durable，daemon 重啟後保留）。bot 每次回到 idle，daemon 走一鍵重啟的同一條安全路徑（`recheck` 還有更新要套用、非子 agent，再於 bot 鎖內重判閒置與背景工作）：重啟成功、更新已不需要套用、子 agent 或重啟失敗就清旗標；還在忙（`working`／`blocked`／背景工作…）旗標留著等下一次閒置，idle 邊當下回合還沒收尾的幾種原因另在 3／10／30／60／120 秒後各再判一次。
+- 使用者強制重啟（`POST /api/bots/{id}/restart`）**成功**後也會清掉那顆的旗標並推同一個事件；失敗則旗標留著。
 - WS：`update_restart_changed` `{"bot_ids":[…]}`（排程、取消、重啟後清掉都推；網頁拿它同步晶片的時鐘角標）。
 
 ### 10.4 `DELETE /api/bots/{id}[?confirm=supervisor]`

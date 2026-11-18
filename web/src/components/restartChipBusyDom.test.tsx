@@ -25,6 +25,10 @@ before(async () => {
       if (method === 'DELETE') serverIds = (body.bot_ids as string[]).length === 0 ? [] : serverIds.filter((x) => !(body.bot_ids as string[]).includes(x))
       return new Response(JSON.stringify({ bot_ids: serverIds }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
+    if (/\/bots\/[^/]+\/restart(\?|$)/.test(url)) {
+      calls.push({ method, url, body })
+      return new Response(JSON.stringify({ run_id: 'r2', resumed: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
     if (url.includes('/bots/restart-idle')) {
       calls.push({ method, url, body })
       return new Response(JSON.stringify({ batch_id: 'b1', total: 1, planned: [{ bot_id: 'ready', name: 'ready' }], skipped: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -68,15 +72,14 @@ test('全忙時晶片可點、標示在忙數，title 說明可安排自動重�
   assert.equal(chip()!.disabled, false, '全忙也不能是 disabled')
   assert.equal(chip()!.querySelector('.quota-update-n')!.textContent, '2')
   assert.match(chip()!.getAttribute('aria-label') ?? '', /2 顆在忙，點開可安排閒下來自動重啟/)
-  assert.match(chip()!.title, /a（/)
+  assert.match(chip()!.title, /a · 預設 · 正在跑/)
 })
 
 test('全忙時打開的確認框列出忙碌名單，按「閒下來自動重啟」呼叫 API，不重啟任何一顆', async () => {
   useStore.setState({ bots: [bot('a'), bot('b')], runs: { a: working('a'), b: working('b') }, busy: {} })
   await open()
-  const items = [...document.querySelectorAll('.confirm-list.dim li')].map((li) => li.textContent ?? '')
-  assert.equal(items.length, 2)
-  assert.ok(items[0].startsWith('a（') && items[1].startsWith('b（'), `名單含各自在做什麼：${items}`)
+  const items = [...document.querySelectorAll('.confirm-list.dim li .confirm-row-text')].map((li) => li.textContent ?? '')
+  assert.deepEqual(items, ['a · 預設 · 正在跑', 'b · 預設 · 正在跑'], '名單含專案／身份與各自在做什麼')
   assert.ok(buttonByText('閒下來自動重啟'))
   assert.equal(buttonByText('重啟 0 顆'), undefined, '沒有強制重啟')
   await click(buttonByText('閒下來自動重啟')!)
@@ -96,7 +99,7 @@ test('已排程：晶片有時鐘角標，確認框改成「取消自動重啟�
   assert.match(chip()!.getAttribute('aria-label') ?? '', /已排程/)
   await click(chip()!)
   await until(() => document.querySelector('.confirm-list') !== null, '確認框')
-  assert.match(document.querySelector('.confirm-list.dim li')!.textContent ?? '', /（已排程）/)
+  assert.match(document.querySelector('.confirm-list.dim li .confirm-row-text')!.textContent ?? '', /· 已排程$/)
   await click(buttonByText('取消自動重啟')!)
   await until(() => calls.some((c) => c.method === 'DELETE'), '送出取消')
   assert.deepEqual(calls.find((c) => c.method === 'DELETE')!.body, { bot_ids: ['a'] })
@@ -123,4 +126,60 @@ test('有閒置的也有忙的、沒勾選：不排程', async () => {
   await until(() => calls.some((c) => c.url.includes('restart-idle')), '重啟')
   await settle()
   assert.ok(!calls.some((c) => c.method === 'POST' && c.url.includes('update-restart')))
+})
+
+// ───────────── 強制重啟（使用者 2026-11-18 明確要求；按前二次確認）─────────────
+
+const restartCalls = () => calls.filter((c) => /\/bots\/[^/]+\/restart/.test(c.url) && !c.url.includes('restart-idle'))
+const forceButtons = () => [...document.querySelectorAll<HTMLButtonElement>('button.confirm-row-force:not(.all)')]
+
+test('每列（含在忙的）有「立即重啟」；按下要二次確認，確認文字寫清楚會中斷回合，確認後才呼叫單顆 restart', async () => {
+  useStore.setState({ bots: [bot('ready'), bot('busy1')], runs: { ready: run('ready'), busy1: working('busy1') }, busy: {} })
+  await open()
+  assert.equal(forceButtons().length, 2, '閒置與在忙的都有按鈕')
+  const busyBtn = forceButtons()[1]
+  await click(busyBtn)
+  await settle()
+  assert.equal(restartCalls().length, 0, '第一下只開確認框，不直接重啟')
+  const text = document.body.textContent ?? ''
+  assert.match(text, /會中斷這顆目前的回合（Esc 停下），之後用 --resume 接回，上下文不會掉，但正在進行的工作要重新下指令/)
+  await click(buttonByText('立即重啟 1 顆')!)
+  await until(() => restartCalls().length === 1, '確認後送出 restart')
+  assert.match(restartCalls()[0].url, /\/bots\/busy1\/restart/)
+  assert.equal(restartCalls()[0].method, 'POST')
+})
+
+test('二次確認按取消：不重啟、回到名單', async () => {
+  useStore.setState({ bots: [bot('busy1')], runs: { busy1: working('busy1') }, busy: {} })
+  await open()
+  await click(forceButtons()[0])
+  await settle()
+  await click(buttonByText('取消')!)
+  await settle()
+  assert.equal(restartCalls().length, 0)
+  assert.ok(document.querySelector('.confirm-list'), '回到原本的名單')
+})
+
+test('「全部立即重啟」同樣二次確認，確認後一顆顆呼叫 restart', async () => {
+  useStore.setState({ bots: [bot('ready'), bot('busy1')], runs: { ready: run('ready'), busy1: working('busy1') }, busy: {} })
+  await open()
+  await click(buttonByText('全部立即重啟')!)
+  await settle()
+  assert.equal(restartCalls().length, 0)
+  assert.match(document.body.textContent ?? '', /會中斷這 2 顆目前的回合/)
+  await click(buttonByText('立即重啟 2 顆')!)
+  await until(() => restartCalls().length === 2, '兩顆都送 restart')
+  assert.deepEqual(restartCalls().map((c) => c.url.match(/bots\/([^/]+)\/restart/)![1]).sort(), ['busy1', 'ready'])
+})
+
+test('子 agent 不出現在名單、也沒有立即重啟按鈕', async () => {
+  useStore.setState({
+    bots: [bot('kid', { managed_by: 'child', parent_bot_id: 'p' }), bot('busy1')],
+    runs: { kid: working('kid'), busy1: working('busy1') },
+    busy: {},
+  })
+  await open()
+  const rows = [...document.querySelectorAll('.confirm-row-text')].map((e) => e.textContent ?? '')
+  assert.ok(!rows.some((r) => r.startsWith('kid')), `子 agent 不列：${rows}`)
+  assert.equal(forceButtons().length, 1)
 })

@@ -5843,6 +5843,8 @@ async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(
             lead.finish(&run_id);
             let body = started_json(&app, &run_id, &opts).await?;
             app.emit("bot_changed", json!({"bot_id": id})).await;
+            // 強制重啟＝更新已套用：清掉「閒下來自動重啟」的旗標（失敗時上面的 `?` 已經離開，旗標留著）。
+            crate::update_restart::forced_restart_done(&app, &id).await;
             Ok(body)
         }
     })
@@ -7517,6 +7519,9 @@ mod unknown_api_route_tests;
 
 #[cfg(test)]
 mod per_principal_auth_tests;
+
+#[cfg(test)]
+mod update_restart_force_tests;
 
 #[cfg(test)]
 mod file_api_auth_tests;

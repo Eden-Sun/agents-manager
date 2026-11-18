@@ -77,6 +77,14 @@ pub(crate) async fn delete(State(app): State<Arc<App>>, Extension(principal): Ex
     Ok(Json(snapshot(&app).await?))
 }
 
+/// 使用者強制重啟（`POST /api/bots/{id}/restart`）成功之後呼叫：這顆已經套用了更新，「閒下來自動重啟」的旗標不再有意義，清掉
+/// 並通知網頁（沒排著就什麼都不做）。重啟失敗時不呼叫——旗標留著，下一次閒置照樣會試。
+pub async fn forced_restart_done(app: &Arc<App>, bot_id: &str) {
+    if db::update_restart::clear(&app.db, bot_id).await.unwrap_or(false) {
+        publish(app).await;
+    }
+}
+
 fn in_progress() -> &'static Mutex<HashSet<String>> {
     static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     S.get_or_init(Default::default)

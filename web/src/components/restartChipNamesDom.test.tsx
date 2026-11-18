@@ -34,8 +34,8 @@ const run = (botId: string, over: Partial<Run> = {}): Run =>
     ...over,
   }) as unknown as Run
 
-const readyItems = () => [...document.querySelectorAll<HTMLLIElement>('.confirm-list:not(.dim) li')].map((li) => li.textContent)
-const busyItems = () => [...document.querySelectorAll<HTMLLIElement>('.confirm-list.dim li')].map((li) => li.textContent)
+const readyItems = () => [...document.querySelectorAll<HTMLLIElement>('.confirm-list:not(.dim) li .confirm-row-text')].map((li) => li.textContent)
+const busyItems = () => [...document.querySelectorAll<HTMLLIElement>('.confirm-list.dim li .confirm-row-text')].map((li) => li.textContent)
 
 async function openConfirm() {
   await mount(<RestartChip />)
@@ -47,7 +47,7 @@ async function openConfirm() {
 test('名字含「、」的 bot 在確認框裡是一列，不被拆成兩列', async () => {
   useStore.setState({ bots: [bot('b1', { name: '前端、後端' })], runs: { b1: run('b1') }, busy: {} })
   await openConfirm()
-  assert.deepEqual(readyItems(), ['前端、後端'])
+  assert.deepEqual(readyItems(), ['前端、後端 · 預設'])
 })
 
 test('兩顆同名 bot（不同專案）各一列，沒有 duplicate key', async () => {
@@ -63,7 +63,7 @@ test('兩顆同名 bot（不同專案）各一列，沒有 duplicate key', async
       busy: {},
     })
     await openConfirm()
-    assert.deepEqual(readyItems(), ['review', 'review'])
+    assert.deepEqual(readyItems(), ['review · 預設', 'review · 預設'])
   } finally {
     console.error = original
   }
@@ -78,8 +78,24 @@ test('在忙的那份照舊：進「會跳過」名單、一列一顆、寫正�
     busy: {},
   })
   await openConfirm()
-  assert.deepEqual(readyItems(), ['ok'])
+  assert.deepEqual(readyItems(), ['ok · 預設'])
   const busy = busyItems()
   assert.equal(busy.length, 1)
-  assert.match(busy[0] ?? '', /^忙的、一顆（正在跑）$/)
+  assert.equal(busy[0], '忙的、一顆 · 預設 · 正在跑')
+})
+
+test('每列帶專案名、身份與（非 local 才有的）主機；沒有身份寫「預設」', async () => {
+  useStore.setState({
+    projects: [
+      { id: 'p1', label: 'agents-manager', host: 'local' },
+      { id: 'p2', label: 'other-proj', host: 'mac1' },
+    ] as never,
+    bots: [bot('a', { name: 'sn-c0a', project_id: 'p1', identity: 'cc0' }), bot('b', { name: 'remote', project_id: 'p2', identity: null }), bot('c', { name: 'busy', project_id: 'p2', identity: 'cc1' })],
+    runs: { a: run('a'), b: run('b'), c: run('c', { agent_status: 'working' }) },
+    busy: {},
+  })
+  await openConfirm()
+  assert.deepEqual(readyItems(), ['sn-c0a · agents-manager · cc0', 'remote · other-proj · 預設 · mac1'])
+  assert.deepEqual(busyItems(), ['busy · other-proj · cc1 · mac1 · 正在跑'])
+  useStore.setState({ projects: [] as never })
 })
