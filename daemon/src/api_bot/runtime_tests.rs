@@ -6984,6 +6984,89 @@ async fn openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls() {
     assert!(!env.app.cfg.get().await.claude_api.enabled, "整個過程 Claude API 都沒開");
 }
 
+/// 假 key（sentinel）跑完整流程：建立→啟動→一回合，上游每次都 401 並把 key 回吐在錯誤訊息裡。
+/// 收集這段期間所有 WS 事件（序列化後）與回合狀態，斷言都不含 sentinel；回合應為 failed（證明走的是 401 那條路）。
+#[tokio::test]
+async fn openai_api_turn_that_is_refused_with_the_key_echoed_leaks_it_into_no_ws_event() {
+    const WS_SENTINEL: &str = "sk-test-SENTINEL-XYZ-ws";
+    let env = crate::testing::env().await;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = json!({"error": {"code": "invalid_api_key", "type": "invalid_request_error", "message": format!("Incorrect API key provided: {WS_SENTINEL}.")}});
+                (axum::http::StatusCode::UNAUTHORIZED, Json(body))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let stop = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
+    });
+
+    // 用 sentinel 當 key：整個 `[openai_api]` 設定與 key 檔都從這個值來。
+    let key_path = env.dir.join("openai-ws-sentinel-key");
+    crate::key_file::stage_key(&key_path.to_string_lossy(), WS_SENTINEL).unwrap().publish().unwrap();
+    let key_file = key_path.to_string_lossy().into_owned();
+    env.app
+        .cfg
+        .update(move |cfg| {
+            cfg.openai_api.enabled = true;
+            cfg.openai_api.key_file = key_file;
+            cfg.openai_api.api_bot.max_turn_cost_microusd = Some(5_000_000);
+            cfg.openai_api.api_bot.max_output_tokens = 2048;
+            cfg.openai_api.api_bot.turn_timeout_secs = 30;
+            cfg.openai_api.api_bot.command_timeout_secs = 10;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.app.api_bot_runtime.set_test_dependencies(ApiBotDependencies {
+        endpoint,
+        key_source: Arc::new(super::super::adapter::FixedTestKey(WS_SENTINEL.into())),
+        quote: Arc::new(super::super::openai::provider::OpenAiQuote),
+        tools: Arc::new(OkTools(Arc::new(AtomicUsize::new(0)))),
+        shutdown_join_timeout: Some(DEADLOCK_TIMEOUT),
+    });
+
+    let mut ws = env.app.subscribe();
+    let bot = insert_openai_bot(&env, "openai-ws-leak").await;
+    let crid = crate::db::ulid();
+    crate::lifecycle::start_bot(&env.app, &bot).await.expect("openai-api native start");
+    crate::lifecycle::prompt(&env.app, &bot, "hello", &crid).await.expect("openai-api native prompt");
+
+    let status: String = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let st: Option<String> = sqlx::query_scalar("SELECT t.status FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('failed','completed') LIMIT 1")
+                .bind(&bot).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(st) = st { break st; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the refused turn settles");
+    shutdown.cancel();
+    server.await.unwrap();
+    assert_eq!(status, "failed", "401 應該讓回合失敗");
+    assert!(seen.load(Ordering::SeqCst) >= 1, "確實有打到假上游");
+
+    // 把這段期間所有 WS 事件序列化（kind＋data 的 Debug／JSON 兩種都收）。
+    let mut events = String::new();
+    while let Ok(ev) = ws.try_recv() {
+        events.push_str(&format!("{} {} {:?}\n", ev.kind, ev.data, ev.data));
+    }
+    assert!(!events.is_empty(), "應該有 WS 事件可以檢查");
+    assert!(!events.contains(WS_SENTINEL), "WS 事件洩漏 key：{events}");
+    assert!(!events.contains("Incorrect API key"), "上游錯誤原文不該出現在 WS：{events}");
+}
+
 /// daemon 重啟後 openai-api 的 session 接得回來：啟動閘門認得 openai 的 checkpoint（不隔離 API）、native resume 的證明通過、
 /// 同一個 session 換新 generation；下一回合送出的 input 帶著重啟前的整段對話（含兩個工具呼叫與結果、加密 reasoning）。
 /// 用量端點：成本是 OpenAI 的帳，快取沒有可倒數的 TTL。
