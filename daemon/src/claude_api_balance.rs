@@ -108,7 +108,7 @@ impl BalanceCache {
 }
 
 /// 解析 RFC3339 時間
-fn parse_rfc3339(ts: &str) -> Result<DateTime<Utc>> {
+pub(crate) fn parse_rfc3339(ts: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
         .map(|t| t.with_timezone(&Utc))
         .map_err(|e| anyhow!("invalid RFC3339 timestamp '{ts}': {e}"))
@@ -135,7 +135,6 @@ fn floor_to_hour(dt: DateTime<Utc>) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), 0, 0).unwrap()
 }
 
-/// 將微美元轉為美元（微美元＝10^-6 USD）
 /// 解析 cost_report 的 amount（美分字串，例如 "23.5018" ＝ $0.235018）
 pub fn cents_str_to_usd(cents_str: &str) -> Result<f64> {
     let cents: f64 = cents_str.trim().parse()

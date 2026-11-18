@@ -19,6 +19,10 @@ const MERGED_ROUTE_SOURCES: &[(&str, &str)] = &[
     ("crate::runners::judge", include_str!("../src/runners/judge.rs")),
     ("crate::claude_api", include_str!("../src/claude_api.rs")),
     (
+        "crate::openai_api_balance",
+        include_str!("../src/openai_api_balance.rs"),
+    ),
+    (
         "crate::herdr_integration",
         include_str!("../src/herdr_integration.rs"),
     ),

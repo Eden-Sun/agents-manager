@@ -170,6 +170,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | GET | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
 | GET | `/api/claude-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| GET | `/api/openai-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/claude-api/cap` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | GET | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
@@ -256,6 +257,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | HEAD | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
 | HEAD | `/api/claude-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| HEAD | `/api/openai-api/balance` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/claude-api/cap` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | HEAD | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
@@ -356,6 +358,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/build/remote/test` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/changelog/translation` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；翻譯會打付費 API，只供使用者按鈕，GET 只讀不送出；自動翻（`auto`，#1948）由 daemon 背景對新版送一次、開框 `absent` 時前端補翻一次，兩者都走同一份帳本 |
 | PUT | `/api/claude-api/balance-anchor` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
+| PUT | `/api/openai-api/balance-anchor` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | PUT | `/api/claude-api/cap` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/deploy/now` | User-only；Bot → 403 `ui_only` |
@@ -2077,6 +2080,12 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 `GET /api/claude-api/balance`（User-only，唯讀）：Anthropic 預付剩餘額度。若未配置 admin_key_file 或 balance_anchor_usd，回 `{configured: false}`。若配置則回 `{configured: true, anchor: {usd, at}, spent_usd, remaining_usd, report_through, local_since, as_of, error?}`。花費以三段式計算（錨點當天本機帳、完整日 Anthropic cost_report 報表、未涵蓋日本機帳；本機帳＝`api_bot_attempts` 加 `{data_dir}/claude-api/spend.jsonl`，後者記同一把 key 的其他用途〔翻譯、changelog、分診〕成功呼叫的 `{at,use_case,model,microusd}`，保留約 90 天），結果在記憶體快取 10 分鐘；Anthropic API 錯誤時退回本機帳並附帶 `error`。
 回應（`configured` 為 true 或 false 皆有）另有 `console` 物件，是 daemon 定期用 agent-browser 讀 Console Billing 頁拿到的**實際**餘額（Anthropic 沒有查預付餘額的 API）：`{status, purchased_usd?, promotional_usd?, total_usd?, promotions?: [{remaining_usd, total_usd, expires_on}], fetched_at?, error?}`。`status`：`ok`（有數字欄位；`total_usd = purchased_usd + promotional_usd`，`expires_on` 為 `YYYY-MM-DD` 或 `null`）、`logged_out`（登入態過期，需重新匯出 `console_state_file`）、`parse_failed`（頁面格式變了）、`error`（agent-browser 失敗／逾時，或開機後尚未讀到第一次〔`error: "pending"`〕）、`not_configured`（`[claude_api] console_balance_enabled = false` 或登入態檔不存在，只有 `status`）。非 `ok` 時沒有金額欄位。間隔 `[claude_api] console_balance_interval_minutes`（預設 30、最小 5）。
+
+`PUT /api/claude-api/balance-anchor`（User-only）：更新 Anthropic 預付餘額錨點。body `{usd: number, at?: string}`（`at` 預設為目前 UTC 時間）。更新 `[claude_api]` 配置並持久化至 config。回傳更新後的 `GET /api/claude-api/balance` 內容。
+
+`GET /api/openai-api/balance`（User-only，唯讀）：OpenAI API 全域餘額推算。回 `{enabled, configured, as_of, anchor?, spent_usd?, remaining_usd?, uncertain_usd?, remaining_floor_usd?, error?}`。`enabled` 為 `[openai_api] enabled`，未啟用時整格不顯示（`configured` 恆為 false、不查帳）；啟用但沒有錨點（`balance_anchor_usd`／`balance_anchor_at`）回 `{enabled: true, configured: false}`。有錨點時：花費＝錨點時刻之後的本機帳，`api_bot_attempts` provider=openai（recorded 用估價，unknown 有估價用估價、沒估價以預留上限計入 `uncertain_usd`）加 `claude-api/spend.jsonl` 裡 provider=openai 的行；Claude 的花費不計入。`remaining_usd = anchor − spent_usd`，`remaining_floor_usd = remaining_usd − uncertain_usd`（最壞情況）。OpenAI 沒有餘額端點，只能靠校正。
+
+`PUT /api/openai-api/balance-anchor`（User-only）：body `{usd: number, at?: string}`（`at` 預設為目前 UTC 時間）。`usd` 負數或非有限、`at` 不是 RFC3339 → 400 `bad_request`（reason：`invalid_usd`／具名錯誤）。寫回 `[openai_api] balance_anchor_usd`／`balance_anchor_at`（既有設定寫入路徑），回 `{ok: true, anchor: {usd, at}}`。
 
 `PUT /api/claude-api/balance-anchor`（User-only）：更新 Anthropic 預付餘額錨點。body `{usd: number, at?: string}`（`at` 預設為目前 UTC 時間）。更新 `[claude_api]` 配置並持久化至 config。回傳更新後的 `GET /api/claude-api/balance` 內容。
 

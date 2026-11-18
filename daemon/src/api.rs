@@ -933,6 +933,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("PUT", "/api/claude-api/balance-anchor", BotRoutePolicy::UserOnly),
     ("GET", "/api/claude-api/cap", BotRoutePolicy::UserOnly),
     ("PUT", "/api/claude-api/cap", BotRoutePolicy::UserOnly),
+    ("GET", "/api/openai-api/balance", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/openai-api/balance-anchor", BotRoutePolicy::UserOnly),
     ("GET", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/credential/rotate", BotRoutePolicy::UserOrAgm),
@@ -7706,3 +7708,5 @@ mod relay_autostart_tests;
 mod claude_api_advisor_relay_tests;
 #[cfg(test)]
 mod openai_api_kind_tests;
+#[cfg(test)]
+mod openai_api_balance_tests;

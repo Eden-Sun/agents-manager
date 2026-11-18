@@ -1654,3 +1654,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **選項**：「不升級（同模型再試）」、Claude 模型、以及（只有翻譯組）核准的 OpenAI 模型；OpenAI 沒開或沒金鑰時 OpenAI 選項停用、標「（未啟用）」，下面一行寫原因。
 - **預設**：翻譯組＝Claude Sonnet（daemon 內建）；翻譯組的主模型是 Haiku，所以品質沒過才升級。
 - **沒選 OpenAI 也能用**：選了 OpenAI 但它沒開，重試退回 Claude Sonnet（daemon 記 warn），不會讓翻譯直接失敗。
+
+## OpenAI API 全域餘額晶片（2026-11-19）
+
+- **位置**：額度列最後一格，緊接在 Claude 的 `BalanceQuotaChip` 之後（使用者裁示：放在 Claude 餘額下面）。
+- **三種狀態**：`[openai_api] enabled` 為假→整格不畫；啟用但沒有錨點→畫「設定 OpenAI 餘額」，點開的視窗跟有錨點時是同一個（說明還沒設定、輸入目前餘額）；有錨點→`OpenAI $x`（標籤必須帶 OpenAI，才分得出是哪家）。
+- **文案**：推算值只寫「已用 OpenAI 餘額 $x 校正」，不沿用 Console 字樣（OpenAI 沒有 Console 實際值）；tooltip 列錨點、已確定花費、結果不明的最壞情況。
+- **不做的事**：不做 Console 實際值讀取、不做自動輪詢；校正一律手動，因為儲值與贈送額度只能靠使用者輸入。
+- 測試：`components/openAiBalanceChipDom.test.tsx`（未啟用不畫、無錨點顯示設定、有錨點顯示金額、位置在 Claude 之後、PUT 呼叫）。

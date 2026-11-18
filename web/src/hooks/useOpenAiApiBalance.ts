@@ -19,6 +19,17 @@ export function useOpenAiApiBalance() {
 }
 
 export async function reloadOpenAiApiBalance() {
-  balance = await fetchOpenAiApiBalance()
+  // 讀不到就當沒有（晶片不畫），不能讓額度列掛一個沒人接的 rejection。
+  try {
+    balance = await fetchOpenAiApiBalance()
+  } catch {
+    balance = null
+  }
   for (const l of listeners) l()
+}
+
+/** 測試用：清掉模組快取，讓下一個測試從頭讀。 */
+export function resetOpenAiApiBalanceForTest() {
+  balance = null
+  listeners.clear()
 }
