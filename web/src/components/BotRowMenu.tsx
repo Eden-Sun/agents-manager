@@ -3,6 +3,7 @@ import { anchorOf, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
+import { isChildBot } from '../lib/updateBatch'
 import { useT } from '../lib/i18n'
 
 /**
@@ -25,6 +26,9 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
   const canFork = useStore((s) => Boolean(s.runs[botId]?.native_session_id))
   const openSettings = useStore((s) => s.openSettings)
   const startBot = useStore((s) => s.startBot)
+  const restartBot = useStore((s) => s.restartBot)
+  const notify = useStore((s) => s.notify)
+  const busyRestart = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
   const cloneBot = useStore((s) => s.cloneBot)
   const forkBot = useStore((s) => s.forkBot)
   const promoteBot = useStore((s) => s.promoteBot)
@@ -62,6 +66,19 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             {t('啟動')}
           </button>
         )}
+        {/* 有 live run 才給重新啟動；child 由父 Bot 重開（/restart 回 409），claude-api 沒有 CLI 行程可重啟（#1911）。 */}
+        {active && !isChildBot(bot) && bot.kind !== 'claude-api' ? (
+          <button
+            type="button"
+            className="head-menu-item"
+            role="menuitem"
+            disabled={busyRestart || handedOff != null}
+            title={handedOff ? handedOffReason(handedOff) : undefined}
+            onClick={() => void restartBot(botId).then((ok) => ok && notify('info', t('{name} 已重新啟動', { name: bot.name })))}
+          >
+            {t('重新啟動')}
+          </button>
+        ) : null}
         {/* 分身只給頂層 bot（child 列是 compact）：child 的 pane 與帳號環境是母 agent 開的。 */}
         {compact || bot.managed_by === 'child' ? null : (
           <button

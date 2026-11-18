@@ -247,6 +247,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const closeSettings = useStore((s) => s.closeSettings)
   const patchBot = useStore((s) => s.patchBot)
   const restartBot = useStore((s) => s.restartBot)
+  const startBot = useStore((s) => s.startBot)
+  const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const removeBot = useStore((s) => s.removeBot)
   const notify = useStore((s) => s.notify)
   const loginBot = useStore((s) => s.loginBot)
@@ -514,25 +516,33 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
   // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
+  // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
+  // 改模型等其他設定後的重啟會開新對話、整個失憶。
+  const doRestart = () => {
+    setRestarting(true)
+    void restartBot(botId).then((ok) => {
+      setRestarting(false)
+      if (ok) {
+        setBanner(null)
+        notify('info', t('{name} 已重新啟動', { name: bot.name }))
+      }
+    })
+  }
+  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
+  // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
   const restartButton = child || bot.kind === 'claude-api' ? null : (
-    <button
-      type="button"
-      className="btn primary"
-      disabled={restarting}
-      onClick={() => {
-        setRestarting(true)
-        // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
-        // 改模型等其他設定後的重啟會開新對話、整個失憶。
-        void restartBot(botId).then((ok) => {
-          setRestarting(false)
-          if (ok) {
-            setBanner(null)
-            notify('info', t('{name} 已重新啟動', { name: bot.name }))
-          }
-        })
-      }}
-    >
+    <button type="button" className="btn primary" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('立即重啟')}
+    </button>
+  )
+  // 常駐於面板底部（不靠橫幅）：卡住時（例如 codex 停在審核框）使用者一定找得到。有 live run 才是「重新啟動」，沒有就改成「啟動」。
+  const footerRestart = child || bot.kind === 'claude-api' ? null : running ? (
+    <button type="button" className="btn" disabled={restarting} onClick={doRestart}>
+      {restarting ? t('重啟中…') : t('重新啟動')}
+    </button>
+  ) : (
+    <button type="button" className="btn" disabled={busyStart} onClick={() => void startBot(botId)}>
+      {t('啟動')}
     </button>
   )
 
@@ -810,6 +820,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       <div className="bs-actions">
         <span className="hint">{dirty ? t('已變更：{keys}', { keys: changedKeys.join(', ') }) : t('沒有變更')}</span>
         <span className="spacer" />
+        {footerRestart}
         <button type="button" className="btn" onClick={requestClose}>
           {t('關閉')}
         </button>
