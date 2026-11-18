@@ -1622,3 +1622,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **child 照舊不給**：子 agent 不在名單、沒有按鈕（daemon 仍對 `restart` 回 409 `child_restart_forbidden`）。
 - **旗標**：強制重啟成功後，daemon 清掉該顆「閒下來自動重啟」的旗標並推 `update_restart_changed`；重啟失敗旗標留著。
 
+## 翻譯組的「供應商」選單：Claude／OpenAI（2026-11-18，使用者：「若有也能用 openai 翻」）
+
+- **位置**：環境設定 → Claude API → 「翻譯」那一組，放在「模型」前面。只有翻譯組有這個選單（其他組不能改供應商）；舊 daemon 沒回 OpenAI 狀態時不顯示。
+- **OpenAI 沒開或沒金鑰**：選項看得到但停用，後面標「（未啟用）」，選單下方一行寫原因（daemon 給的，例如「OpenAI 未啟用（[openai_api] enabled）」）。不藏起來：使用者要知道有這個選項、以及為什麼現在不能選。
+- **換供應商**：模型與思考強度一起換成那一家的清單與預設（OpenAI：`gpt-6-luna`、low；思考強度多一個 none）。選了 OpenAI 時多一行提示「只有對話訊息翻譯改用 OpenAI；更新框翻譯仍用 Claude」。
+- **翻譯失敗的提示**：供應商設成 OpenAI 但沒開或沒金鑰時，手動翻譯跳「OpenAI 未啟用或未設定金鑰…」並說明兩個出路（啟用 OpenAI，或把供應商改回 Claude）；daemon 不會悄悄改用 Claude。
+- **標籤照實**：譯文下方的模型標籤與費用照實顯示（`gpt-6-luna` 與 OpenAI 價表算出的金額）；帳本的模型欄在 OpenAI 的列後面標「OpenAI」。
+

@@ -237,6 +237,8 @@ fn usage_json(u: &claude_api::Usage) -> Value {
 fn error_of(e: ClaudeError) -> LcError {
     match e {
         ClaudeError::Disabled | ClaudeError::NoKey(_) => LcError::conflict("claude_api_not_configured", json!({"message": e.to_string()})),
+        // 翻譯設成走 OpenAI 但沒開或沒有 key：具名回報，不改走 Claude。
+        ClaudeError::OpenAiNotConfigured(_) => LcError::conflict("openai_not_configured", json!({"message": "OpenAI 未啟用或未設定金鑰", "detail": e.to_string()})),
         other => LcError::Upstream(format!("translate_failed: {other}")),
     }
 }
@@ -426,6 +428,17 @@ pub(crate) fn next_effort(current: &str) -> &'static str {
     ladder[(idx + 1).min(ladder.len() - 1)]
 }
 
+/// 同 [`next_effort`]，但照這個供應商自己的清單：OpenAI 是 none → low → medium → high → xhigh → max（不認得的當作預設 medium）。
+pub(crate) fn next_effort_for(provider: &str, current: &str) -> &'static str {
+    if provider != crate::config::API_PROVIDER_OPENAI {
+        return next_effort(current);
+    }
+    let ladder = crate::config::OPENAI_USE_EFFORTS;
+    let medium = ladder.iter().position(|e| *e == "medium").unwrap_or(0);
+    let idx = ladder.iter().position(|e| *e == current.trim()).unwrap_or(medium);
+    ladder[(idx + 1).min(ladder.len() - 1)]
+}
+
 /// 一次翻譯嘗試：譯文、本地檢查結果、Jev 分數（只有過本地檢查才問 Jev）。
 struct Attempt {
     translation: String,
@@ -479,6 +492,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     let min_prob = app.cfg.get().await.judge.translate_min_probability;
     let state = app.cfg.claude_fresh().await.claude_use_state(USE_CASE);
     let configured = state.as_ref().map(|s| s.effort.clone()).unwrap_or_default();
+    let provider = state.as_ref().map_or(crate::config::API_PROVIDER_ANTHROPIC, |s| s.provider);
     // 升級模型（[claude_api.groups.translate] retry_model；空字串＝不升級）。手動重試（force）首次就用它。
     let retry_model = state.as_ref().map(|s| s.retry_model.trim().to_string()).unwrap_or_default();
     let first_model = (force && !retry_model.is_empty()).then_some(retry_model.as_str());
@@ -492,7 +506,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
             attempt(app, id, content, None, prev, Some(&retry_model)).await?
         } else {
             // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
-            attempt(app, id, content, Some(next_effort(&configured)), prev, None).await?
+            attempt(app, id, content, Some(next_effort_for(provider, &configured)), prev, None).await?
         };
         attempts.push(next);
     }
@@ -1924,5 +1938,341 @@ mod retry_model_tests {
             .bind(&plain).bind(&conv).bind("hook").bind(crate::db::now()).execute(&e.app.db).await.unwrap();
         let not_rejected = post_translate_report(State(e.app.clone()), AxPath(plain), Extension(crate::api::RequestPrincipal::User)).await;
         assert!(matches!(not_rejected, Err(LcError::Conflict(_))), "沒有被擋的譯文不能回報");
+    }
+}
+
+/// 翻譯改用 OpenAI（`[claude_api.groups.translate] provider = "openai"`，openai-api 切片 F）。
+/// 假的 loopback Responses server；key 是 sentinel，不打真的 API。
+#[cfg(test)]
+mod openai_translate_tests {
+    use super::*;
+    use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, MessagesRequest, Usage};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    const OPENAI_KEY: &str = "sk-openai-SENTINEL-do-not-leak";
+    const SRC: &str = "The system has encountered an unexpected condition.";
+    const GOOD: &str = "系統遇到了非預期的狀況。";
+
+    /// Claude 那一側：只數有沒有被呼叫（OpenAI 的測試裡必須是 0）。
+    struct ClaudeSpy(AtomicUsize);
+    impl MessagesClient for ClaudeSpy {
+        fn complete<'a>(&'a self, req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let model = req.model.clone();
+            Box::pin(async move {
+                Ok(ClientOutcome { text: GOOD.into(), model: Some(model), stop_reason: Some("end_turn".into()), usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }) })
+            })
+        }
+    }
+
+    enum Reply {
+        Text(&'static str, Value),
+        Status(u16, Value),
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        bodies: Vec<Value>,
+        auth: Vec<String>,
+    }
+
+    struct Server {
+        endpoint: String,
+        seen: Arc<Mutex<Seen>>,
+        stop: tokio_util::sync::CancellationToken,
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stop.cancel();
+        }
+    }
+
+    fn usage(input: u64, cached: u64, write: u64, output: u64) -> Value {
+        json!({"input_tokens": input, "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": write}, "output_tokens": output, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": input + output})
+    }
+
+    fn sse_text(text: &str, usage: &Value) -> Vec<u8> {
+        let msg = json!({"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]});
+        let events = [
+            json!({"type": "response.created", "response": {"id": "resp_1"}}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+            json!({"type": "response.output_text.delta", "output_index": 0, "delta": text}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": msg.clone()}),
+            json!({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [msg], "usage": usage}}),
+        ];
+        events.iter().map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap())).collect::<String>().into_bytes()
+    }
+
+    async fn serve(replies: Vec<Reply>) -> Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://127.0.0.1:{}/v1/responses", listener.local_addr().unwrap().port());
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let script = Arc::new(Mutex::new(replies.into_iter().collect::<std::collections::VecDeque<_>>()));
+        let (seen_in, stop) = (seen.clone(), tokio_util::sync::CancellationToken::new());
+        let app = axum::Router::new().route(
+            "/v1/responses",
+            axum::routing::post(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let (seen, script) = (seen_in.clone(), script.clone());
+                async move {
+                    {
+                        let mut seen = seen.lock().unwrap();
+                        seen.bodies.push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                        seen.auth.push(headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string());
+                    }
+                    let (status, content_type, body) = match script.lock().unwrap().pop_front() {
+                        Some(Reply::Text(text, usage)) => (200, "text/event-stream", sse_text(text, &usage)),
+                        Some(Reply::Status(status, body)) => (status, "application/json", body.to_string().into_bytes()),
+                        None => (500, "application/json", b"{}".to_vec()),
+                    };
+                    axum::response::Response::builder().status(status).header("content-type", content_type).body(axum::body::Body::from(body)).unwrap()
+                }
+            }),
+        );
+        let child = stop.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).with_graceful_shutdown(async move { child.cancelled().await }).await;
+        });
+        Server { endpoint, seen, stop }
+    }
+
+    /// Claude API 開著、有 Claude 的 key；OpenAI 的 key 檔已寫好但 `[openai_api]` 與翻譯組的供應商由各測試自己設。
+    async fn app() -> (Arc<App>, PathBuf, Arc<ClaudeSpy>, String) {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-msg-openai-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let key = dir.join("key");
+        crate::key_file::stage_key(&key.to_string_lossy(), "sk-ant-test-openai-suite").unwrap().publish().unwrap();
+        let openai_key = dir.join("openai-key");
+        crate::key_file::stage_key(&openai_key.to_string_lossy(), OPENAI_KEY).unwrap().publish().unwrap();
+        let key = key.to_string_lossy().into_owned();
+        store
+            .update(move |c| {
+                c.claude_api.key_file = key;
+                c.claude_api.enabled = true;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
+        let app = App::new(db, client.clone(), client, store, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
+        let spy = Arc::new(ClaudeSpy(AtomicUsize::new(0)));
+        app.claude_api.set_client(spy.clone());
+        (app, dir, spy, openai_key.to_string_lossy().into_owned())
+    }
+
+    async fn use_openai(app: &Arc<App>, key_file: &str, enabled: bool) {
+        let key_file = key_file.to_string();
+        app.cfg
+            .update(move |c| {
+                c.openai_api.enabled = enabled;
+                c.openai_api.key_file = key_file;
+                c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { provider: "openai".into(), ..Default::default() });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    fn spend_lines(dir: &Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join("claude-api").join("spend.jsonl")).unwrap_or_default().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn translation_goes_to_openai_and_is_booked_as_openai_at_the_settled_price() {
+        let (app, dir, claude, key_file) = app().await;
+        use_openai(&app, &key_file, true).await;
+        let server = serve(vec![Reply::Text(GOOD, usage(1200, 200, 100, 80))]).await;
+        app.claude_api.set_openai_endpoint(&server.endpoint);
+
+        let out = translate(&app, "m_openai", SRC).await.unwrap();
+        assert_eq!((out["translation"].clone(), out["model"].clone(), out["cached"].clone()), (json!(GOOD), json!("gpt-6-luna"), json!(false)));
+        assert_eq!(claude.0.load(Ordering::SeqCst), 0, "Claude is never called for an OpenAI translation");
+
+        // 請求：無狀態、沒有工具、instructions＝system、input＝一則 user 訊息、effort 照設定（OpenAI 的預設 low）。
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(seen.bodies.len(), 1);
+        let body = &seen.bodies[0];
+        assert_eq!((body["model"].clone(), body["store"].clone(), body["stream"].clone()), (json!("gpt-6-luna"), json!(false), json!(true)));
+        assert!(body.get("tools").is_none() && body.get("previous_response_id").is_none());
+        assert_eq!(body["instructions"], json!(SYSTEM));
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["max_output_tokens"], json!(MAX_OUT_TOKENS));
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert!(input[0]["content"][0]["text"].as_str().unwrap().contains(SRC));
+        assert_eq!(seen.auth, [format!("Bearer {OPENAI_KEY}")]);
+        drop(seen);
+
+        // 金額＝OpenAI 價表的結算：普通輸入 900、快取讀 200、快取寫 100、輸出 80。
+        let settled = crate::api_bot::openai::pricing::settle(
+            "gpt-6-luna",
+            &crate::api_bot::openai::pricing::Usage { input_tokens: 1200, cached_tokens: 200, cache_write_tokens: 100, cache_write_12h_tokens: 0, output_tokens: 80, reasoning_tokens: 0 },
+            None,
+        )
+        .unwrap() as i64;
+        assert_eq!(settled, (900_i64 * 100_000 + 200 * 10_000 + 100 * 125_000 + 80 * 500_000 + 999_999) / 1_000_000);
+        assert_eq!(out["cost_usd"], json!(settled as f64 / 1e6));
+        assert_eq!(out["usage"], json!({"input_tokens": 900, "output_tokens": 80, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 200}));
+
+        // 帳本與花費明細都標 provider=openai；花費明細的金額就是結算值。
+        let ledger = app.claude_api.ledger.snapshot(10);
+        assert_eq!((ledger["rows"][0]["provider"].clone(), ledger["rows"][0]["model"].clone(), ledger["rows"][0]["ok"].clone()), (json!("openai"), json!("gpt-6-luna"), json!(true)));
+        let spend = spend_lines(&dir);
+        assert_eq!(spend.len(), 1);
+        assert_eq!((spend[0]["provider"].clone(), spend[0]["model"].clone(), spend[0]["microusd"].clone(), spend[0]["use_case"].clone()), (json!("openai"), json!("gpt-6-luna"), json!(settled), json!(USE_CASE)));
+        // OpenAI 的花費不算進 Claude 帳戶餘額的扣減。
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        assert!(crate::claude_api::read_spend_since(&dir, since).is_empty());
+        assert_eq!(crate::claude_api::read_provider_spend_since(&dir, since, "openai").len(), 1);
+
+        // key 不出現在回應、帳本、花費明細。
+        for text in [out.to_string(), ledger.to_string(), serde_json::to_string(&spend).unwrap()] {
+            assert!(!text.contains(OPENAI_KEY) && !text.contains("SENTINEL"), "{text}");
+        }
+    }
+
+    /// `[openai_api]` 沒開、或開了但 key 檔不能用：具名錯誤 `openai_not_configured`，不送任何請求，也**不**退回 Claude。
+    #[tokio::test]
+    async fn openai_off_or_without_a_key_is_a_named_error_and_never_falls_back_to_claude() {
+        for (enabled, key_ok) in [(false, true), (true, false)] {
+            let (app, dir, claude, key_file) = app().await;
+            let key_file = if key_ok { key_file } else { dir.join("no-such-key").to_string_lossy().into_owned() };
+            use_openai(&app, &key_file, enabled).await;
+            let server = serve(vec![Reply::Text(GOOD, usage(10, 0, 0, 5))]).await;
+            app.claude_api.set_openai_endpoint(&server.endpoint);
+            let err = translate(&app, "m_off", SRC).await.unwrap_err();
+            let LcError::Conflict(v) = &err else { panic!("409 expected: {err:?}") };
+            assert_eq!(v["reason"], json!("openai_not_configured"), "enabled={enabled} key_ok={key_ok}");
+            assert_eq!(v["message"], json!("OpenAI 未啟用或未設定金鑰"));
+            assert!(!v.to_string().contains(OPENAI_KEY));
+            assert_eq!(claude.0.load(Ordering::SeqCst), 0, "no silent fallback to Claude");
+            assert!(server.seen.lock().unwrap().bodies.is_empty(), "nothing was sent to OpenAI either");
+            assert!(spend_lines(&dir).is_empty());
+            assert_eq!(app.claude_api.ledger.snapshot(10)["rows"].as_array().unwrap().len(), 0, "not sent, not booked");
+        }
+    }
+
+    /// 熱重載：手改 config.toml 把翻譯組切到 OpenAI，不重啟就生效；改回來也立刻回到 Claude。
+    #[tokio::test]
+    async fn switching_the_provider_in_config_toml_takes_effect_without_a_restart() {
+        let (app, dir, claude, key_file) = app().await;
+        let server = serve(vec![Reply::Text(GOOD, usage(100, 0, 0, 20))]).await;
+        app.claude_api.set_openai_endpoint(&server.endpoint);
+        let path = dir.join("config.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let touch = |text: &str, secs: u64| {
+            std::fs::write(&path, text).unwrap();
+            let at = std::time::SystemTime::now() + std::time::Duration::from_secs(secs);
+            std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        };
+
+        translate(&app, "m_hot_1", SRC).await.unwrap();
+        assert_eq!((claude.0.load(Ordering::SeqCst), server.seen.lock().unwrap().bodies.len()), (1, 0), "default: Claude");
+
+        touch(&format!("{original}\n[claude_api.groups.translate]\nprovider = \"openai\"\n\n[openai_api]\nenabled = true\nkey_file = \"{key_file}\"\n"), 9);
+        let out = translate(&app, "m_hot_2", SRC).await.unwrap();
+        assert_eq!(out["model"], json!("gpt-6-luna"));
+        assert_eq!((claude.0.load(Ordering::SeqCst), server.seen.lock().unwrap().bodies.len()), (1, 1), "now OpenAI");
+
+        touch(&original, 18);
+        let out = translate(&app, "m_hot_3", SRC).await.unwrap();
+        assert_eq!(out["model"], json!("claude-haiku-5-5"));
+        assert_eq!((claude.0.load(Ordering::SeqCst), server.seen.lock().unwrap().bodies.len()), (2, 1), "back to Claude");
+    }
+
+    /// 品質沒過的重試留在 OpenAI：沒設重試模型＝同模型、effort 照 OpenAI 的清單提高一級。
+    #[tokio::test]
+    async fn a_quality_retry_stays_on_openai_and_raises_the_effort_one_step() {
+        let (app, _dir, claude, key_file) = app().await;
+        use_openai(&app, &key_file, true).await;
+        let server = serve(vec![Reply::Text(SRC, usage(100, 0, 0, 20)), Reply::Text(GOOD, usage(100, 0, 0, 30))]).await;
+        app.claude_api.set_openai_endpoint(&server.endpoint);
+        let out = translate(&app, "m_retry", SRC).await.unwrap();
+        assert_eq!((out["translation"].clone(), out["model"].clone()), (json!(GOOD), json!("gpt-6-luna")));
+        let seen = server.seen.lock().unwrap();
+        assert_eq!(seen.bodies.iter().map(|b| (b["model"].as_str().unwrap().to_string(), b["reasoning"]["effort"].as_str().unwrap().to_string())).collect::<Vec<_>>(),
+            [("gpt-6-luna".to_string(), "low".to_string()), ("gpt-6-luna".to_string(), "medium".to_string())]);
+        assert_eq!(claude.0.load(Ordering::SeqCst), 0);
+        assert_eq!(next_effort_for("openai", "none"), "low");
+        assert_eq!(next_effort_for("openai", "max"), "max");
+        assert_eq!(next_effort_for("openai", ""), "high", "不認得＝預設 medium，往上一級");
+        assert_eq!(next_effort_for("anthropic", "low"), next_effort("low"));
+    }
+
+    /// 回應沒有可信的用量、或上游拒絕：是錯誤，不記花費（不當成 0 元的成功），錯誤訊息裡沒有 key。
+    #[tokio::test]
+    async fn a_reply_without_usage_or_an_upstream_rejection_is_an_error_with_no_spend_and_no_key() {
+        let (app, dir, claude, key_file) = app().await;
+        use_openai(&app, &key_file, true).await;
+        let echo_key = json!({"error": {"code": "invalid_api_key", "message": format!("Incorrect API key provided: {OPENAI_KEY}")}});
+        let server = serve(vec![Reply::Text(GOOD, Value::Null), Reply::Text(GOOD, json!({"output_tokens": 5})), Reply::Status(401, echo_key)]).await;
+        app.claude_api.set_openai_endpoint(&server.endpoint);
+        for id in ["m_nousage", "m_noinput", "m_401"] {
+            let err = translate(&app, id, SRC).await.unwrap_err();
+            let text = format!("{err:?}");
+            assert!(matches!(err, LcError::Upstream(_)), "{id}: {text}");
+            assert!(!text.contains(OPENAI_KEY) && !text.contains("SENTINEL"), "{id}: {text}");
+        }
+        assert!(spend_lines(&dir).is_empty(), "no usage, no spend line");
+        let ledger = app.claude_api.ledger.snapshot(10);
+        let kinds: Vec<_> = ledger["rows"].as_array().unwrap().iter().map(|r| (r["error_kind"].as_str().unwrap_or("").to_string(), r["provider"].as_str().unwrap().to_string())).collect();
+        assert_eq!(kinds, [("auth".to_string(), "openai".to_string()), ("bad_response".to_string(), "openai".to_string()), ("bad_response".to_string(), "openai".to_string())]);
+        assert!(!ledger.to_string().contains(OPENAI_KEY));
+        assert_eq!(claude.0.load(Ordering::SeqCst), 0);
+    }
+
+    /// 設定驗證：只有翻譯組能設 openai；openai 的模型／effort／重試模型要屬於 OpenAI；手改設定檔繞過 PUT 也在呼叫時擋下。
+    #[tokio::test]
+    async fn only_the_translate_group_may_use_openai_and_its_model_must_be_an_openai_one() {
+        let (app, _dir, claude, key_file) = app().await;
+        let put = |body: Value| {
+            let app = app.clone();
+            async move { crate::claude_api::put_settings(axum::extract::State(app), axum::Json(serde_json::from_value(body).unwrap())).await }
+        };
+        for bad in [
+            json!({"groups": {"schedule_outcome": {"provider": "openai"}}}),
+            json!({"groups": {"changelog_analysis": {"provider": "openai"}}}),
+            json!({"groups": {"translate": {"provider": "gemini"}}}),
+            json!({"groups": {"translate": {"provider": "openai", "model": "claude-haiku-5-5"}}}),
+            json!({"groups": {"translate": {"provider": "openai", "retry_model": "claude-sonnet-5-5"}}}),
+            json!({"groups": {"translate": {"provider": "openai", "effort": "ultra"}}}),
+            json!({"groups": {"translate": {"provider": "anthropic", "model": "gpt-6-luna"}}}),
+            json!({"uses": {"message_translate": {"provider": "openai"}}}),
+        ] {
+            let err = put(bad.clone()).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{bad}: {err:?}");
+        }
+        assert!(app.cfg.claude_fresh().await.claude_api.groups.get("translate").is_none_or(|g| g.provider.is_empty()), "a refused PUT changes nothing");
+
+        // 合法的切換：模型／effort／重試模型換成 OpenAI 的預設；更新框翻譯留在 Claude（不把 OpenAI 的模型寫進它的設定）。
+        let axum::Json(view) = put(json!({"groups": {"translate": {"provider": "openai"}}})).await.unwrap();
+        let group = view["groups"].as_array().unwrap().iter().find(|g| g["id"] == "translate").unwrap().clone();
+        assert_eq!((group["provider"].clone(), group["model"].clone(), group["effort"].clone(), group["retry_model"].clone(), group["openai_allowed"].clone()), (json!("openai"), json!("gpt-6-luna"), json!("low"), json!(""), json!(true)));
+        assert_eq!(view["openai"]["available"], json!(false), "OpenAI 還沒開：設定頁要顯示成停用並附原因");
+        assert!(view["openai"]["unavailable_reason"].as_str().is_some_and(|r| r.contains("OpenAI")));
+        let cfg = app.cfg.claude_fresh().await;
+        assert_eq!(cfg.claude_use_state("message_translate").unwrap().provider, "openai");
+        let changelog = cfg.claude_use_state("changelog_translate").unwrap();
+        assert_eq!((changelog.provider, changelog.model.as_str()), ("anthropic", "claude-haiku-5-5"));
+        assert!(cfg.changelog_translate.model.starts_with("claude-"));
+
+        // 切回 Claude：回到 Claude 的預設，設定檔不留 provider 欄位。
+        let axum::Json(view) = put(json!({"groups": {"translate": {"provider": "anthropic"}}})).await.unwrap();
+        let group = view["groups"].as_array().unwrap().iter().find(|g| g["id"] == "translate").unwrap().clone();
+        assert_eq!((group["provider"].clone(), group["model"].clone(), group["retry_model"].clone()), (json!("anthropic"), json!("claude-haiku-5-5"), json!("claude-sonnet-5-5")));
+        assert!(app.cfg.claude_fresh().await.claude_api.groups["translate"].provider.is_empty());
+
+        // 手改設定檔：別的組寫了 openai，那個用途的呼叫回 bad_config，不送。
+        app.cfg.update(|c| { c.claude_api.groups.insert("schedule_outcome".into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), provider: "openai".into(), ..Default::default() }); Ok(()) }).await.unwrap();
+        use_openai(&app, &key_file, true).await;
+        let cfg = app.cfg.claude_fresh().await;
+        assert_eq!(cfg.claude_use_state("schedule_outcome").unwrap().provider, "anthropic", "a group that may not use OpenAI never resolves to it");
+        let err = crate::claude_api::complete_with(&cfg, &app.claude_api, ClaudeRequest { use_case: "schedule_outcome", system: None, prompt: "x".into(), max_tokens: 16, format: None }).await.unwrap_err();
+        assert_eq!(err.kind(), "bad_config");
+        assert_eq!(claude.0.load(Ordering::SeqCst), 0);
     }
 }

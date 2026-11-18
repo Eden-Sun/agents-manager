@@ -48,7 +48,8 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
     (draft.model ?? saved.model) !== saved.model ||
     (draft.effort ?? saved.effort) !== saved.effort ||
     (draft.max_per_hour ?? saved.max_per_hour) !== saved.max_per_hour ||
-    (draft.auto ?? saved.auto) !== saved.auto
+    (draft.auto ?? saved.auto) !== saved.auto ||
+    (draft.provider ?? saved.provider ?? 'anthropic') !== (saved.provider ?? 'anthropic')
   )
 }
 
@@ -185,6 +186,18 @@ export function ClaudeApiPanel() {
           const model = d.model ?? u.model
           const effort = d.effort ?? u.effort
           const perHour = d.max_per_hour ?? u.max_per_hour
+          // 供應商：只有允許的組（翻譯）而且 daemon 有回 OpenAI 狀態才顯示選單。
+          const openai = u.openai_allowed ? settings.openai ?? null : null
+          const provider = d.provider ?? u.provider ?? 'anthropic'
+          const onOpenAi = openai !== null && provider === 'openai'
+          const models = onOpenAi ? (openai.models.includes(model) ? openai.models : [...openai.models, model]) : modelOptions(model)
+          const efforts = onOpenAi ? openai.efforts : settings.efforts
+          const defaultModel = onOpenAi ? openai.models[0] : u.default_model
+          // 換供應商時模型與思考強度一起換成那一家的預設（Claude 的模型不能送到 OpenAI，反之亦然）。
+          const switchProvider = (next: string) =>
+            patchUse(u.id, next === 'openai' && openai !== null
+              ? { provider: 'openai', model: openai.models[0] ?? '', effort: 'low' }
+              : { provider: 'anthropic', model: u.default_model, effort: u.default_effort })
           return (
             <fieldset key={u.id} className="claude-api-use" data-use={u.id} disabled={!u.uses.includes('changelog_translate') && !enabled}>
               <legend>{t.tr(USE_LABELS[u.id] ?? u.label)}</legend>
@@ -200,13 +213,31 @@ export function ClaudeApiPanel() {
                 </label>
               ) : null}
               <div className="claude-api-use-fields">
+                {openai !== null ? (
+                  <label className="field" data-testid={`claude-api-provider-${u.id}`}>
+                    <span>{t('供應商')}</span>
+                    <select value={provider} onChange={(e) => switchProvider(e.target.value)}>
+                      <option value="anthropic">Claude</option>
+                      <option value="openai" disabled={!openai.available && provider !== 'openai'}>
+                        OpenAI
+                        {openai.available ? '' : t('（未啟用）')}
+                      </option>
+                    </select>
+                    {!openai.available ? (
+                      <span className="hint" data-testid={`claude-api-provider-hint-${u.id}`}>
+                        {openai.unavailable_reason ?? t('OpenAI 未啟用或未設定金鑰')}
+                      </span>
+                    ) : null}
+                    {onOpenAi ? <span className="hint">{t('只有對話訊息翻譯改用 OpenAI；更新框翻譯仍用 Claude。')}</span> : null}
+                  </label>
+                ) : null}
                 <label className="field">
                   <span>{t('模型')}</span>
                   <select value={model} onChange={(e) => patchUse(u.id, { model: e.target.value })}>
-                    {modelOptions(model).map((m) => (
+                    {models.map((m) => (
                       <option key={m} value={m}>
                         {m}
-                        {m === u.default_model ? t('（預設）') : ''}
+                        {m === defaultModel ? t('（預設）') : ''}
                       </option>
                     ))}
                   </select>
@@ -214,7 +245,7 @@ export function ClaudeApiPanel() {
                 <label className="field">
                   <span>{t('思考強度')}</span>
                   <select value={effort} onChange={(e) => patchUse(u.id, { effort: e.target.value })}>
-                    {settings.efforts.map((x) => (
+                    {efforts.map((x) => (
                       <option key={x} value={x}>
                         {x}
                       </option>
@@ -318,7 +349,10 @@ export function ClaudeApiPanel() {
                     <tr key={`${r.at}-${i}`}>
                       <td className="num" data-label={t('時間')}>{r.at.slice(5, 19).replace('T', ' ')}</td>
                       <td data-label={t('用途')}>{settings.uses.find((u) => u.id === r.use)?.label ?? r.use}</td>
-                      <td data-label={t('模型')}>{r.model}</td>
+                      <td data-label={t('模型')}>
+                        {r.model}
+                        {r.provider === 'openai' ? <em className="claude-api-provider"> OpenAI</em> : null}
+                      </td>
                       <td className="num" data-label={t('輸入')}>{nf.format(r.input_tokens)}</td>
                       <td className="num" data-label={t('輸出')}>{nf.format(r.output_tokens)}</td>
                       <td className="num" data-label={t('耗時')}>{(r.ms / 1000).toFixed(1)}s</td>

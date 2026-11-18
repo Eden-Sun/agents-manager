@@ -40,6 +40,18 @@ export interface ClaudeApiGroup {
   default_max_per_hour: number
   /** 「自動」開關（翻譯組：英文訊息自動翻）；這組沒有就是 null。 */
   auto: boolean | null
+  /** 供應商：`anthropic`（Claude，預設）或 `openai`。舊 daemon 沒回就是 Claude。 */
+  provider?: string
+  /** 這組能不能改用 OpenAI（目前只有翻譯）。 */
+  openai_allowed?: boolean
+}
+
+/** OpenAI 能不能選：沒開或沒 key 時選項仍在，但停用並顯示原因。 */
+export interface ClaudeApiOpenAi {
+  available: boolean
+  unavailable_reason: string | null
+  models: string[]
+  efforts: string[]
 }
 
 export interface ClaudeApiSettings {
@@ -54,6 +66,8 @@ export interface ClaudeApiSettings {
   uses: ClaudeApiUse[]
   /** daemon 有沒有回 `groups`；沒有就用逐用途寫法存檔。 */
   groupsApi: boolean
+  /** OpenAI 供應商的狀態；舊 daemon 沒有這個欄位就是 null（不顯示供應商選單）。 */
+  openai?: ClaudeApiOpenAi | null
 }
 
 export interface ClaudeApiUsePatch {
@@ -62,6 +76,8 @@ export interface ClaudeApiUsePatch {
   effort?: string
   max_per_hour?: number
   auto?: boolean
+  /** 只有組收：`anthropic`／`openai`。 */
+  provider?: string
 }
 
 export interface ClaudeApiPatch {
@@ -76,6 +92,8 @@ export interface ClaudeApiLedgerRow {
   at: string
   use: string
   model: string
+  /** `anthropic`／`openai`；舊 daemon 沒回就當 Claude。 */
+  provider?: string
   ms: number
   ok: boolean
   error_kind: string | null
@@ -175,6 +193,8 @@ function parseGroup(raw: unknown): ClaudeApiGroup | null {
     default_effort: s(o.default_effort),
     default_max_per_hour: n(o.default_max_per_hour),
     auto: typeof o.auto === 'boolean' ? o.auto : null,
+    provider: o.provider === 'openai' ? 'openai' : 'anthropic',
+    openai_allowed: o.openai_allowed === true,
   }
 }
 
@@ -198,6 +218,18 @@ function parse(raw: unknown): ClaudeApiSettings | null {
     groups,
     uses,
     groupsApi,
+    openai: parseOpenAi(o.openai),
+  }
+}
+
+function parseOpenAi(raw: unknown): ClaudeApiOpenAi | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  return {
+    available: o.available === true,
+    unavailable_reason: typeof o.unavailable_reason === 'string' ? o.unavailable_reason : null,
+    models: strings(o.models),
+    efforts: strings(o.efforts),
   }
 }
 

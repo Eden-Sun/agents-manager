@@ -65,7 +65,10 @@ export function useMessageTranslation(msg: Message, opts: { recent?: boolean } =
         }
         const reason = e instanceof Error ? e.message : String(e)
         // 未設定時直接講去哪裡開，不丟錯誤碼。
-        useStore.getState().notify('error', reason.includes('claude_api_not_configured')
+        // 翻譯設成用 OpenAI 但沒開或沒有金鑰：講清楚原因，daemon 不會悄悄改用 Claude。
+        useStore.getState().notify('error', reason.includes('openai_not_configured')
+          ? t('OpenAI 未啟用或未設定金鑰：翻譯的供應商設成 OpenAI，請啟用 OpenAI 並設定金鑰，或到「環境設定 → Claude API」把翻譯的供應商改回 Claude')
+          : reason.includes('claude_api_not_configured')
           ? t('翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定')
           : t('翻譯失敗：{reason}', { reason }))
       },

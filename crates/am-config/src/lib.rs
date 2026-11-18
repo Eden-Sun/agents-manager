@@ -1075,6 +1075,10 @@ pub struct ClaudeApiUseCfg {
     /// 品質檢查沒過時的重試模型（只有組會寫）。沒寫＝用組預設；空字串＝不升級。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_model: Option<String>,
+    /// 模型供應商：空字串或 `anthropic`＝Claude（現狀）；`openai`＝OpenAI Responses API。
+    /// 只有 [`claude_api_group_allows_openai`] 的組（v1：`translate`）可以設 `openai`。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider: String,
 }
 
 
@@ -1130,6 +1134,77 @@ pub const CLAUDE_API_GROUPS: &[ClaudeApiGroupDef] = &[
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 pub const CLAUDE_API_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
+/// 用途可選的供應商。
+pub const API_PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const API_PROVIDER_OPENAI: &str = "openai";
+/// 用途走 OpenAI 時核准的模型與 effort（由低到高）；預設模型是第一個。
+pub const OPENAI_USE_MODELS: &[&str] = &["gpt-6-luna"];
+pub const OPENAI_USE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+pub const OPENAI_USE_DEFAULT_EFFORT: &str = "low";
+
+/// 這一組可不可以改用 OpenAI（v1 只有翻譯）。
+pub fn claude_api_group_allows_openai(gid: &str) -> bool {
+    gid == "translate"
+}
+
+/// 這個用途的呼叫會不會跟著組改用 OpenAI。更新框翻譯（`changelog_translate`）有自己的串流 client 與工作檔，v1 留在 Claude。
+pub fn claude_api_use_allows_openai(id: &str) -> bool {
+    id == "message_translate"
+}
+
+/// 設定值 → 供應商；不認得的值回 `None`。
+pub fn api_provider_of(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "" | API_PROVIDER_ANTHROPIC => Some(API_PROVIDER_ANTHROPIC),
+        API_PROVIDER_OPENAI => Some(API_PROVIDER_OPENAI),
+        _ => None,
+    }
+}
+
+/// 這個模型 id 屬於哪個供應商（帳本與計價用）：核准的 OpenAI 模型是 `openai`，其餘是 `anthropic`。
+pub fn api_provider_of_model(model: &str) -> &'static str {
+    if OPENAI_USE_MODELS.contains(&model.trim()) {
+        API_PROVIDER_OPENAI
+    } else {
+        API_PROVIDER_ANTHROPIC
+    }
+}
+
+/// 一組設定（`[claude_api.groups.<gid>]`）的問題；`None`＝合法。PUT 與每次呼叫都查（手改設定檔也擋得住）：
+/// - `provider` 只能是空／`anthropic`／`openai`，而且只有允許的組能設 `openai`。
+/// - `openai`：model 要在核准清單（空＝預設）、effort 照 OpenAI 的清單、retry_model 是空或核准的 OpenAI 模型。
+/// - Claude：model／retry_model 要是 `claude-` 的 id、effort 照 Claude 的清單。
+pub fn claude_api_group_problem(gid: &str, g: &ClaudeApiUseCfg) -> Option<String> {
+    let Some(provider) = api_provider_of(&g.provider) else { return Some(format!("{gid}: unknown provider `{}`", g.provider.trim())) };
+    let (model, effort) = (g.model.trim(), g.effort.trim());
+    let retry = g.retry_model.as_deref().map(str::trim).unwrap_or("");
+    if provider == API_PROVIDER_OPENAI {
+        if !claude_api_group_allows_openai(gid) {
+            return Some(format!("{gid}: provider openai is only available for the translate group"));
+        }
+        if !model.is_empty() && !OPENAI_USE_MODELS.contains(&model) {
+            return Some(format!("{gid}: `{model}` is not an approved OpenAI model"));
+        }
+        if !effort.is_empty() && !OPENAI_USE_EFFORTS.contains(&effort) {
+            return Some(format!("{gid}: `{effort}` is not an OpenAI effort"));
+        }
+        if !retry.is_empty() && !OPENAI_USE_MODELS.contains(&retry) {
+            return Some(format!("{gid}: retry_model `{retry}` is not an approved OpenAI model"));
+        }
+        return None;
+    }
+    if !model.is_empty() && !claude_model_id_ok(model) {
+        return Some(format!("{gid}: bad model id `{model}`"));
+    }
+    if !effort.is_empty() && !CLAUDE_API_EFFORTS.contains(&effort) {
+        return Some(format!("{gid}: bad effort `{effort}`"));
+    }
+    if !retry.is_empty() && !claude_model_id_ok(retry) {
+        return Some(format!("{gid}: bad retry_model `{retry}`"));
+    }
+    None
+}
+
 fn default_claude_api_key_file() -> String {
     default_changelog_key_file()
 }
@@ -1177,6 +1252,8 @@ pub struct ClaudeApiUseState {
     pub auto: Option<bool>,
     /// 品質檢查沒過時重試改用的模型（只給組用；空字串＝不升級，照舊同模型重試）。
     pub retry_model: String,
+    /// 這次呼叫走哪個供應商（[`API_PROVIDER_ANTHROPIC`]／[`API_PROVIDER_OPENAI`]）。
+    pub provider: &'static str,
 }
 
 impl ClaudeApiCfg {
@@ -1199,6 +1276,7 @@ impl ClaudeApiCfg {
             max_per_hour: cfg.max_per_hour.unwrap_or(def.max_per_hour),
             auto: def.auto_default.map(|d| cfg.auto.unwrap_or(d)),
             retry_model: CLAUDE_API_GROUPS.iter().find(|g| g.id == def.group).map_or_else(String::new, |g| g.retry_model.to_string()),
+            provider: API_PROVIDER_ANTHROPIC,
         })
     }
 }
@@ -1209,13 +1287,26 @@ impl ConfigFile {
     pub fn claude_use_state(&self, id: &str) -> Option<ClaudeApiUseState> {
         if let Some(def) = CLAUDE_API_USES.iter().find(|d| d.id == id) {
             if let (Some(g), Some(gd)) = (self.claude_api.groups.get(def.group), CLAUDE_API_GROUPS.iter().find(|g| g.id == def.group)) {
-                return Some(group_overlay(gd, g));
+                let state = group_overlay(gd, g);
+                if state.provider == API_PROVIDER_OPENAI && !claude_api_use_allows_openai(id) {
+                    // 組改用 OpenAI，但這個用途留在 Claude：開關與上限照組，模型／effort 用 Claude 的（`[changelog_translate]` 寫的或組預設）。
+                    let written = if id == "changelog_translate" { Some(&self.changelog_translate) } else { None };
+                    let claude = |v: Option<&String>, d: &str, ok: &dyn Fn(&str) -> bool| v.map(|s| s.trim()).filter(|s| ok(s)).unwrap_or(d).to_string();
+                    return Some(ClaudeApiUseState {
+                        model: claude(written.map(|t| &t.model), gd.model, &claude_model_id_ok),
+                        effort: claude(written.map(|t| &t.effort), gd.effort, &|e| CLAUDE_API_EFFORTS.contains(&e)),
+                        retry_model: String::new(),
+                        provider: API_PROVIDER_ANTHROPIC,
+                        ..state
+                    });
+                }
+                return Some(state);
             }
         }
         match id {
             "changelog_translate" => {
                 let t = &self.changelog_translate;
-                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None, retry_model: String::new() })
+                Some(ClaudeApiUseState { enabled: t.enabled, model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None, retry_model: String::new(), provider: API_PROVIDER_ANTHROPIC })
             }
             _ => self.claude_api.use_state(id),
         }
@@ -1231,7 +1322,7 @@ impl ConfigFile {
         let written = |id: &str| -> ClaudeApiUseCfg {
             if id == "changelog_translate" && !self.changelog_translate.is_default() {
                 let t = &self.changelog_translate;
-                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: Some(t.max_per_hour), auto: None, retry_model: None };
+                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: Some(t.max_per_hour), auto: None, retry_model: None, provider: String::new() };
             }
             self.claude_api.uses.get(id).cloned().unwrap_or_default()
         };
@@ -1272,6 +1363,19 @@ impl ConfigFile {
 
 fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseState {
     let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
+    // 只有允許的組會真的走 OpenAI；其他組寫了 `openai` 由 [`claude_api_group_problem`] 擋下（這裡不讓它生效）。
+    if claude_api_group_allows_openai(gd.id) && api_provider_of(&g.provider) == Some(API_PROVIDER_OPENAI) {
+        return ClaudeApiUseState {
+            enabled: g.enabled.unwrap_or(gd.default_on),
+            model: pick(&g.model, OPENAI_USE_MODELS[0]),
+            effort: pick(&g.effort, OPENAI_USE_DEFAULT_EFFORT),
+            max_per_hour: g.max_per_hour.unwrap_or(gd.max_per_hour),
+            auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
+            // 沒寫＝不換模型（重試同模型、effort 提高一級）；Claude 的預設重試模型不適用。
+            retry_model: g.retry_model.as_deref().map(str::trim).unwrap_or("").to_string(),
+            provider: API_PROVIDER_OPENAI,
+        };
+    }
     ClaudeApiUseState {
         enabled: g.enabled.unwrap_or(gd.default_on),
         model: pick(&g.model, gd.model),
@@ -1279,6 +1383,7 @@ fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseSta
         max_per_hour: g.max_per_hour.unwrap_or(gd.max_per_hour),
         auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
         retry_model: g.retry_model.clone().unwrap_or_else(|| gd.retry_model.to_string()),
+        provider: API_PROVIDER_ANTHROPIC,
     }
 }
 

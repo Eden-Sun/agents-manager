@@ -257,3 +257,71 @@ test('每小時上限非 0 時說明寫清楚 0＝不限', async () => {
   await settle()
   assert.match(root.querySelector(`[data-testid=claude-api-limit-hint-${g.id}]`)?.textContent ?? '', /0 ＝ 不限/)
 })
+
+// ── 翻譯組的供應商選單（openai-api 切片 F）──────────────────────────────
+
+const translateGroup = (over: Record<string, unknown>) => groups(true).map((g) => (g.id === 'translate' ? { ...g, enabled: true, provider: 'anthropic', openai_allowed: true, ...over } : g))
+const openai = (available: boolean) => ({
+  enabled: available,
+  key_present: available,
+  available,
+  unavailable_reason: available ? null : 'OpenAI 未啟用（[openai_api] enabled）',
+  models: ['gpt-6-luna'],
+  efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+})
+const selectIn = (root: Element, testId: string) => root.querySelector<HTMLSelectElement>(`[data-testid="${testId}"] select`)
+const change = (el: HTMLSelectElement, value: string) => {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set
+  setter?.call(el, value)
+  el.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
+test('翻譯組有供應商選單；OpenAI 未啟用時選項停用並顯示原因，其他組沒有選單', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, groups: translateGroup({}), openai: openai(false) }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const select = selectIn(root, 'claude-api-provider-translate')
+  assert.ok(select, '翻譯組有供應商選單')
+  assert.equal(select.value, 'anthropic')
+  const option = select.querySelector<HTMLOptionElement>('option[value="openai"]')
+  assert.ok(option?.disabled, 'OpenAI 沒開：選項看得到但不能選')
+  assert.match(root.querySelector('[data-testid="claude-api-provider-hint-translate"]')?.textContent ?? '', /OpenAI 未啟用/)
+  assert.equal(root.querySelector('[data-testid="claude-api-provider-changelog_analysis"]'), null, '其他組不能改供應商')
+})
+
+test('選 OpenAI：模型與思考強度換成 OpenAI 的清單，存檔帶 provider 與 OpenAI 的模型', async () => {
+  const puts: unknown[] = []
+  stub(settings({ enabled: true, key_present: true, key_error: null, groups: translateGroup({}), openai: openai(true) }), puts)
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const select = selectIn(root, 'claude-api-provider-translate')
+  assert.ok(select && !select.querySelector<HTMLOptionElement>('option[value="openai"]')?.disabled)
+  change(select, 'openai')
+  await settle()
+  const fieldset = root.querySelector('fieldset[data-use="translate"]')
+  const selects = [...(fieldset?.querySelectorAll('select') ?? [])]
+  const modelOptions = [...selects[1].querySelectorAll('option')].map((o) => o.value)
+  const effortOptions = [...selects[2].querySelectorAll('option')].map((o) => o.value)
+  assert.deepEqual(modelOptions, ['gpt-6-luna'])
+  assert.deepEqual(effortOptions, ['none', 'low', 'medium', 'high', 'xhigh', 'max'])
+  assert.match(fieldset?.textContent ?? '', /更新框翻譯仍用 Claude/)
+  root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  await settle()
+  assert.equal(puts.length, 1)
+  const sent = puts[0] as { groups?: Record<string, Record<string, unknown>> }
+  assert.deepEqual(sent.groups?.translate, { provider: 'openai', model: 'gpt-6-luna', effort: 'low' })
+})
+
+test('已經是 OpenAI 的翻譯組：選單停在 OpenAI', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, groups: translateGroup({ provider: 'openai', model: 'gpt-6-luna', effort: 'medium' }), openai: openai(true) }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.equal(selectIn(root, 'claude-api-provider-translate')?.value, 'openai')
+})
+
+test('舊 daemon 沒回 openai 欄位時不顯示供應商選單', async () => {
+  stub(settings({ enabled: true, key_present: true, key_error: null, groups: translateGroup({}) }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.equal(root.querySelector('[data-testid="claude-api-provider-translate"]'), null)
+})

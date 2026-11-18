@@ -500,5 +500,6 @@ export default {
   'Claude API 總開關沒開：到「環境設定 → Claude API」打開': 'The Claude API master switch is off: turn it on in Settings → Claude API',
   'Claude API key 還沒設定：到「環境設定 → Claude API」設定': 'No Claude API key yet: set it in Settings → Claude API',
   '「對話訊息翻譯」被關掉了：到「環境設定 → Claude API」打開': '"Message translation" is turned off: turn it on in Settings → Claude API',
+  'OpenAI 未啟用或未設定金鑰：翻譯的供應商設成 OpenAI，請啟用 OpenAI 並設定金鑰，或到「環境設定 → Claude API」把翻譯的供應商改回 Claude': 'OpenAI is not enabled or has no key: translation is set to use OpenAI. Enable OpenAI and set its key, or switch the translation provider back to Claude in Settings → Claude API',
   '翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定': 'Translation is off: in Settings → Claude API, turn on the master switch and "Message translation", and check the API key',
 } satisfies Dict

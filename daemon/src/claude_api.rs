@@ -16,7 +16,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{claude_model_id_ok, ClaudeApiUseState, ConfigFile, CLAUDE_API_EFFORTS, CLAUDE_API_GROUPS, CLAUDE_API_MODELS, CLAUDE_API_USES};
+use crate::config::{api_provider_of_model, claude_api_group_problem, ClaudeApiUseState, ConfigFile, API_PROVIDER_ANTHROPIC, API_PROVIDER_OPENAI, CLAUDE_API_EFFORTS, CLAUDE_API_GROUPS, CLAUDE_API_MODELS, CLAUDE_API_USES, OPENAI_USE_EFFORTS, OPENAI_USE_MODELS};
 use crate::key_file::{key_status, read_key, stage_key};
 use crate::lc_error::LcError;
 use crate::state::App;
@@ -289,6 +289,10 @@ pub enum ClaudeError {
     Rejected { status: u16 },
     /// 200 但內容不能用：沒有文字，或 `stop_reason` 是 `refusal`。
     BadResponse(String),
+    /// 這個用途設成走 OpenAI，但 `[openai_api]` 沒開或 key 檔不能用（原因不含 key）。沒送出、不記帳本，**也不會改走 Claude**。
+    OpenAiNotConfigured(String),
+    /// 這個用途的設定不合法（例如不允許的組設了 `provider = "openai"`、模型不屬於該供應商）。沒送出、不記帳本。
+    BadConfig(String),
 }
 
 impl ClaudeError {
@@ -305,6 +309,8 @@ impl ClaudeError {
             Self::Network => "network",
             Self::Rejected { .. } => "rejected",
             Self::BadResponse(_) => "bad_response",
+            Self::OpenAiNotConfigured(_) => "openai_not_configured",
+            Self::BadConfig(_) => "bad_config",
         }
     }
 
@@ -336,6 +342,8 @@ impl std::fmt::Display for ClaudeError {
             Self::Network => write!(f, "claude api unreachable"),
             Self::Rejected { status } => write!(f, "claude api rejected the request (HTTP {status})"),
             Self::BadResponse(why) => write!(f, "claude api returned an unusable response: {why}"),
+            Self::OpenAiNotConfigured(reason) => write!(f, "OpenAI 未啟用或未設定金鑰（{reason}）"),
+            Self::BadConfig(why) => write!(f, "api use is misconfigured: {why}"),
         }
     }
 }
@@ -388,15 +396,36 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
     if !state.enabled || (!legacy && !cfg.claude_api.enabled) {
         return Err(ClaudeError::Disabled);
     }
-    let key_file = if req.use_case == "changelog_translate" { cfg.changelog_translate_key_file() } else { cfg.claude_api.key_file.clone() };
-    let key = read_key(&key_file).map_err(|e| ClaudeError::NoKey(e.to_string()))?;
+    // 手改設定檔也擋得住：這個用途所屬的組設定不合法就不送。
+    if let Some(def) = CLAUDE_API_USES.iter().find(|d| d.id == req.use_case) {
+        if let Some(problem) = cfg.claude_api.groups.get(def.group).and_then(|g| claude_api_group_problem(def.group, g)) {
+            return Err(ClaudeError::BadConfig(problem));
+        }
+    }
+    let openai = state.provider == API_PROVIDER_OPENAI;
+    let model = model_override.map_or_else(|| state.model.clone(), str::to_string);
+    // 這一次指定的模型（重試升級）必須屬於同一個供應商：不會把 Claude 的模型送到 OpenAI，反之亦然。
+    if (api_provider_of_model(&model) == API_PROVIDER_OPENAI) != openai {
+        return Err(ClaudeError::BadConfig(format!("model `{model}` does not belong to provider {}", state.provider)));
+    }
+    let (endpoint, key, client) = if openai {
+        // 沒開或沒有 key：回具名錯誤，不退回 Claude。
+        if !cfg.openai_api.enabled {
+            return Err(ClaudeError::OpenAiNotConfigured("[openai_api] enabled 沒有開".into()));
+        }
+        let key = read_key(&cfg.openai_api.key_file).map_err(|e| ClaudeError::OpenAiNotConfigured(e.to_string()))?;
+        (api.openai_endpoint(), key, api.openai_client())
+    } else {
+        let key_file = if req.use_case == "changelog_translate" { cfg.changelog_translate_key_file() } else { cfg.claude_api.key_file.clone() };
+        (cfg.claude_api.endpoint.clone(), read_key(&key_file).map_err(|e| ClaudeError::NoKey(e.to_string()))?, api.client())
+    };
     if !api.reserve(req.use_case, state.max_per_hour) {
         return Err(ClaudeError::Budget);
     }
     let request = MessagesRequest {
-        endpoint: cfg.claude_api.endpoint.clone(),
+        endpoint,
         key,
-        model: model_override.map_or_else(|| state.model.clone(), str::to_string),
+        model,
         effort: effort_override.map_or_else(|| state.effort.clone(), str::to_string),
         max_tokens: req.max_tokens,
         timeout_ms: cfg.claude_api.timeout_ms.max(min_timeout_ms.unwrap_or(0)).max(1),
@@ -405,7 +434,7 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
         prompt: req.prompt,
     };
     let started = Instant::now();
-    let result = api.client().complete(&request).await;
+    let result = client.complete(&request).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let outcome = result.map_err(ClaudeError::from_client).and_then(|o| {
         let usage = o.usage.clone();
@@ -415,7 +444,7 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
         if o.text.trim().is_empty() {
             return Err((ClaudeError::BadResponse(format!("empty text (stop_reason {})", o.stop_reason.as_deref().unwrap_or("none"))), usage));
         }
-        Ok(ClaudeReply { text: o.text, model: o.model.unwrap_or_else(|| state.model.clone()), stop_reason: o.stop_reason, usage: o.usage })
+        Ok(ClaudeReply { text: o.text, model: o.model.unwrap_or_else(|| request.model.clone()), stop_reason: o.stop_reason, usage: o.usage })
     });
     match outcome {
         Ok(reply) => {
@@ -424,7 +453,7 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
             Ok(reply)
         }
         Err((e, usage)) => {
-            api.ledger.record(Row::new(req.use_case, &state.model, elapsed_ms, Some(e.kind()), usage.as_ref(), None));
+            api.ledger.record(Row::new(req.use_case, &request.model, elapsed_ms, Some(e.kind()), usage.as_ref(), None));
             Err(e)
         }
     }
@@ -504,6 +533,10 @@ pub(crate) fn cache_read_multiplier(model: &str) -> f64 {
 
 /// 這次請求的微美元成本（四捨五入）；模型價格不明回 None。
 pub(crate) fn cost_microusd(model: &str, u: &Usage) -> Option<i64> {
+    // OpenAI 的模型用 OpenAI 的價表（整數運算、含長文價）；其餘是 Claude 的牌價。
+    if api_provider_of_model(model) == API_PROVIDER_OPENAI {
+        return crate::openai_text::cost_microusd(model.trim(), u);
+    }
     let (inp, out) = price_per_mtok(model)?;
     let n = |v: Option<i64>| v.unwrap_or(0).max(0) as f64;
     // 每百萬 token 的美元 ＝ 每 token 的微美元，所以不必再除。
@@ -538,6 +571,11 @@ fn trim_spend(path: &std::path::Path) {
     }
 }
 
+/// 這一行花費是哪個供應商的；舊的行沒有 `provider` 欄位，一律是 anthropic。
+fn spend_provider(l: &str) -> String {
+    serde_json::from_str::<Value>(l).ok().and_then(|v| v.get("provider").and_then(Value::as_str).map(str::to_string)).unwrap_or_else(|| API_PROVIDER_ANTHROPIC.to_string())
+}
+
 fn spend_line(l: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {
     let v: Value = serde_json::from_str(l).ok()?;
     let at = chrono::DateTime::parse_from_rfc3339(v.get("at")?.as_str()?).ok()?.with_timezone(&chrono::Utc);
@@ -545,9 +583,15 @@ fn spend_line(l: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {
 }
 
 /// 讀花費明細檔裡 `at >= since` 的 (時間字串, 微美元)；壞行與檔不存在都略過。
+/// **只算 Claude（anthropic）的花費**：這份清單是拿去扣 Claude 帳戶餘額的，OpenAI 的花費不能算進去。
 pub(crate) fn read_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>) -> Vec<(String, i64)> {
+    read_provider_spend_since(data_dir, since, API_PROVIDER_ANTHROPIC)
+}
+
+/// 同上，但取指定供應商（`anthropic`／`openai`）的花費。
+pub(crate) fn read_provider_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>, provider: &str) -> Vec<(String, i64)> {
     let Ok(text) = std::fs::read_to_string(data_dir.join("claude-api").join(SPEND_FILE)) else { return Vec::new() };
-    text.lines().filter_map(spend_line).filter(|(at, _)| *at >= since).map(|(at, m)| (am_base::db::iso_at(at), m)).collect()
+    text.lines().filter(|l| spend_provider(l) == provider).filter_map(spend_line).filter(|(at, _)| *at >= since).map(|(at, m)| (am_base::db::iso_at(at), m)).collect()
 }
 
 /// App 上的一份：可注入的 client、用量帳本、每個用途的保險絲。
@@ -555,6 +599,9 @@ pub struct ClaudeApi {
     /// 花費明細檔（`{data_dir}/claude-api/spend.jsonl`）；None＝不落檔（測試的預設）。
     spend_file: Option<std::path::PathBuf>,
     client: Mutex<Arc<dyn MessagesClient>>,
+    /// 用途設成 `provider = "openai"` 時用的 client 與 endpoint（正式環境固定官方 HTTPS；測試注入 loopback）。
+    openai_client: Mutex<Arc<dyn MessagesClient>>,
+    openai_endpoint: Mutex<String>,
     pub ledger: Ledger,
     sent: Mutex<HashMap<String, VecDeque<Instant>>>,
     pub balance_cache: Arc<crate::claude_api_balance::BalanceCache>,
@@ -567,6 +614,8 @@ impl ClaudeApi {
         Self {
             spend_file: None,
             client: Mutex::new(Arc::new(AnthropicHttpClient)),
+            openai_client: Mutex::new(Arc::new(crate::openai_text::OpenAiTextClient)),
+            openai_endpoint: Mutex::new(crate::openai_text::OFFICIAL_ENDPOINT.to_string()),
             ledger: Ledger::default(),
             sent: Mutex::new(HashMap::new()),
             balance_cache: Arc::new(crate::claude_api_balance::BalanceCache::new()),
@@ -584,7 +633,8 @@ impl ClaudeApi {
     fn record_spend(&self, use_case: &str, model: &str, usage: Option<&Usage>) {
         let (Some(path), Some(u)) = (&self.spend_file, usage) else { return };
         let Some(microusd) = cost_microusd(model, u) else { return };
-        if let Err(e) = append_spend(path, &json!({"at": crate::db::now(), "use_case": use_case, "model": model, "microusd": microusd})) {
+        // `provider`：舊的行沒有這個欄位，一律是 anthropic。
+        if let Err(e) = append_spend(path, &json!({"at": crate::db::now(), "use_case": use_case, "model": model, "provider": api_provider_of_model(model), "microusd": microusd})) {
             tracing::warn!(error = %e, "claude api spend log write failed");
         }
     }
@@ -596,6 +646,25 @@ impl ClaudeApi {
 
     fn client(&self) -> Arc<dyn MessagesClient> {
         self.client.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn openai_client(&self) -> Arc<dyn MessagesClient> {
+        self.openai_client.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn openai_endpoint(&self) -> String {
+        self.openai_endpoint.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    #[cfg(test)]
+    pub fn set_openai_client(&self, client: Arc<dyn MessagesClient>) {
+        *self.openai_client.lock().unwrap_or_else(|e| e.into_inner()) = client;
+    }
+
+    /// 測試把 OpenAI 的請求導到 loopback 的假 server（正式建置的 client 只連官方主機）。
+    #[cfg(test)]
+    pub fn set_openai_endpoint(&self, endpoint: &str) {
+        *self.openai_endpoint.lock().unwrap_or_else(|e| e.into_inner()) = endpoint.to_string();
     }
 
     /// 先占名額再送（跟 Jev 的 `reserve_slot` 同一個想法）：一小時內已占滿就不送。`max_per_hour == 0` 是不上限（#1948）。
@@ -628,6 +697,8 @@ pub struct Row {
     pub at: String,
     pub use_case: String,
     pub model: String,
+    /// `anthropic` 或 `openai`（由模型決定）。
+    pub provider: &'static str,
     pub elapsed_ms: u64,
     pub error_kind: Option<&'static str>,
     pub input_tokens: u64,
@@ -642,6 +713,7 @@ impl Row {
             at: crate::db::now(),
             use_case: use_case.into(),
             model: model.into(),
+            provider: api_provider_of_model(model),
             elapsed_ms,
             error_kind,
             input_tokens: usage.map_or(0, |u| n(u.input_tokens)),
@@ -652,7 +724,7 @@ impl Row {
 
     fn to_json(&self) -> Value {
         json!({
-            "at": self.at, "use": self.use_case, "model": self.model, "ms": self.elapsed_ms, "ok": self.error_kind.is_none(),
+            "at": self.at, "use": self.use_case, "model": self.model, "provider": self.provider, "ms": self.elapsed_ms, "ok": self.error_kind.is_none(),
             "error_kind": self.error_kind, "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
             "stop_reason": self.stop_reason,
         })
@@ -727,9 +799,10 @@ fn settings_json(cfg: &ConfigFile) -> Value {
     let uses: Vec<Value> = CLAUDE_API_USES
         .iter()
         .map(|d| {
-            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default, retry_model: String::new() });
+            let s = cfg.claude_use_state(d.id).unwrap_or(ClaudeApiUseState { enabled: false, model: d.model.into(), effort: d.effort.into(), max_per_hour: d.max_per_hour, auto: d.auto_default, retry_model: String::new(), provider: API_PROVIDER_ANTHROPIC });
             json!({
                 "id": d.id, "group": d.group, "label": d.label, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
+                "provider": s.provider,
                 "default_model": d.model, "default_effort": d.effort, "default_max_per_hour": d.max_per_hour,
                 "legacy_section": d.legacy_section,
             })
@@ -738,9 +811,10 @@ fn settings_json(cfg: &ConfigFile) -> Value {
     let groups: Vec<Value> = CLAUDE_API_GROUPS
         .iter()
         .map(|g| {
-            let s = cfg.claude_group_state(g.id).unwrap_or(ClaudeApiUseState { enabled: false, model: g.model.into(), effort: g.effort.into(), max_per_hour: g.max_per_hour, auto: g.auto_default, retry_model: g.retry_model.into() });
+            let s = cfg.claude_group_state(g.id).unwrap_or(ClaudeApiUseState { enabled: false, model: g.model.into(), effort: g.effort.into(), max_per_hour: g.max_per_hour, auto: g.auto_default, retry_model: g.retry_model.into(), provider: API_PROVIDER_ANTHROPIC });
             json!({
                 "id": g.id, "label": g.label, "uses": g.members, "enabled": s.enabled, "model": s.model, "effort": s.effort, "max_per_hour": s.max_per_hour, "auto": s.auto,
+                "provider": s.provider, "openai_allowed": crate::config::claude_api_group_allows_openai(g.id),
                 "default_model": g.model, "default_effort": g.effort, "default_max_per_hour": g.max_per_hour, "retry_model": s.retry_model, "default_retry_model": g.retry_model,
             })
         })
@@ -751,9 +825,29 @@ fn settings_json(cfg: &ConfigFile) -> Value {
         "key_error": key.err(),
         "models": CLAUDE_API_MODELS,
         "efforts": CLAUDE_API_EFFORTS,
+        // 可選的供應商。OpenAI 沒開或 key 不能用時仍列出，但 `available=false` 並附原因（設定頁顯示成停用的選項）。
+        "openai": openai_status(cfg),
         "groups": groups,
         // 舊欄位（相容讀取）：每個用途一列，值是它所屬組的生效值。
         "uses": uses,
+    })
+}
+
+/// 設定頁要知道的 OpenAI 狀態：能不能選、不能選的原因、可選的模型與 effort。不含 key 本身。
+fn openai_status(cfg: &ConfigFile) -> Value {
+    let key = key_status(&cfg.openai_api.key_file);
+    let reason = if !cfg.openai_api.enabled {
+        Some("OpenAI 未啟用（[openai_api] enabled）".to_string())
+    } else {
+        key.as_ref().err().map(|e| format!("OpenAI 未設定金鑰（{e}）"))
+    };
+    json!({
+        "enabled": cfg.openai_api.enabled,
+        "key_present": key.is_ok(),
+        "available": reason.is_none(),
+        "unavailable_reason": reason,
+        "models": OPENAI_USE_MODELS,
+        "efforts": OPENAI_USE_EFFORTS,
     })
 }
 
@@ -769,6 +863,8 @@ pub(crate) struct UseBody {
     pub max_per_hour: Option<u32>,
     pub auto: Option<bool>,
     pub retry_model: Option<String>,
+    /// `anthropic`／`openai`（只有組收；v1 只有翻譯組能設 openai）。換供應商而沒帶 model／effort／retry_model 時，那三個回到新供應商的預設。
+    pub provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -796,27 +892,24 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
 }
 
 fn validate_body(id: &str, u: &UseBody, has_auto: bool, floor: u32) -> Result<(), LcError> {
-    {
-        if let Some(m) = u.model.as_deref() {
-            if !claude_model_id_ok(m.trim()) {
-                return Err(LcError::Bad(format!("bad model id: {m}")));
-            }
-        }
-        if let Some(e) = u.effort.as_deref() {
-            if !CLAUDE_API_EFFORTS.contains(&e.trim()) {
-                return Err(LcError::Bad(format!("bad effort: {e}")));
-            }
-        }
-        if u.auto.is_some() && !has_auto {
-            return Err(LcError::Bad(format!("{id} has no auto switch")));
-        }
-        if let Some(m) = u.retry_model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-            if !claude_model_id_ok(m) {
-                return Err(LcError::Bad(format!("bad retry_model: {m}")));
-            }
-        }
-        if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
-            return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
+    // model／effort／retry_model／provider 的合法性要看套用之後的供應商：由 `validate_applied` 對整組的結果檢查。
+    if u.auto.is_some() && !has_auto {
+        return Err(LcError::Bad(format!("{id} has no auto switch")));
+    }
+    if u.max_per_hour.is_some_and(|n| !(floor..=1000).contains(&n)) {
+        return Err(LcError::Bad(format!("max_per_hour must be {floor}..=1000")));
+    }
+    Ok(())
+}
+
+/// 套用之後每一組都要合法（供應商、模型、effort、重試模型互相對得上）；逐用途的舊 PUT 不能帶 `provider`。
+fn validate_applied(next: &ConfigFile, body: &SettingsBody) -> Result<(), LcError> {
+    if body.uses.iter().flatten().any(|(_, u)| u.provider.is_some()) {
+        return Err(LcError::Bad("provider is set per group, not per use".into()));
+    }
+    for (gid, g) in &next.claude_api.groups {
+        if let Some(problem) = claude_api_group_problem(gid, g) {
+            return Err(LcError::Bad(problem));
         }
     }
     Ok(())
@@ -843,6 +936,17 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
     }
     for (gid, u) in patches {
         let Some(mut st) = cfg.claude_group_state(gid) else { continue };
+        // 供應商：照 body 原樣記下（合法性由 `validate_applied` 檢查）。換了供應商，舊供應商的模型／effort／重試模型不帶過去。
+        let current = cfg.claude_api.groups.get(gid).map(|g| g.provider.trim().to_string()).unwrap_or_default();
+        let provider = u.provider.as_deref().map(|p| p.trim().to_string()).unwrap_or(current.clone());
+        let normalized = |p: &str| crate::config::api_provider_of(p).unwrap_or("?");
+        if normalized(&provider) != normalized(&current) {
+            let to_openai = normalized(&provider) == API_PROVIDER_OPENAI;
+            let def = CLAUDE_API_GROUPS.iter().find(|g| g.id == gid);
+            st.model = if to_openai { OPENAI_USE_MODELS[0].to_string() } else { def.map_or_else(String::new, |g| g.model.to_string()) };
+            st.effort = if to_openai { crate::config::OPENAI_USE_DEFAULT_EFFORT.to_string() } else { def.map_or_else(String::new, |g| g.effort.to_string()) };
+            st.retry_model = if to_openai { String::new() } else { def.map_or_else(String::new, |g| g.retry_model.to_string()) };
+        }
         if let Some(v) = u.enabled {
             st.enabled = v;
         }
@@ -861,13 +965,18 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
         if let Some(v) = u.retry_model.as_deref() {
             st.retry_model = v.trim().to_string();
         }
-        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto, retry_model: Some(st.retry_model.clone()) });
+        // 預設（Claude）不寫 `provider` 欄位：沒用到這個功能的設定檔長相不變。
+        let written_provider = if normalized(&provider) == API_PROVIDER_ANTHROPIC { String::new() } else { provider.clone() };
+        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto, retry_model: Some(st.retry_model.clone()), provider: written_provider });
         // 更新框翻譯的功能本身讀 `[changelog_translate]`：把共用的開關／模型／effort 同步過去（每小時上限它自己管，不動）。
+        // 翻譯組改用 OpenAI 時更新框翻譯留在 Claude：只同步開關，它的模型／effort 不動（不把 OpenAI 的模型寫進去）。
         if gid == "translate" {
             let t = &mut cfg.changelog_translate;
             t.enabled = st.enabled;
-            t.model = st.model;
-            t.effort = st.effort;
+            if normalized(&provider) != API_PROVIDER_OPENAI {
+                t.model = st.model;
+                t.effort = st.effort;
+            }
         }
     }
 }
@@ -887,6 +996,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
     // 任何一層要從「關」變成「開」，key 就必須可用（新貼的算數）。
     let mut next = prev.clone();
     apply(&mut next, &body);
+    validate_applied(&next, &body)?;
     let (prev_master, prev_uses) = anything_on(&prev);
     let (next_master, next_uses) = anything_on(&next);
     if (next_master && !prev_master) || next_uses.iter().zip(&prev_uses).any(|(n, p)| *n && !*p) {
