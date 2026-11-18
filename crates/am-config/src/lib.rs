@@ -1172,12 +1172,23 @@ pub fn api_provider_of_model(model: &str) -> &'static str {
 
 /// 一組設定（`[claude_api.groups.<gid>]`）的問題；`None`＝合法。PUT 與每次呼叫都查（手改設定檔也擋得住）：
 /// - `provider` 只能是空／`anthropic`／`openai`，而且只有允許的組能設 `openai`。
-/// - `openai`：model 要在核准清單（空＝預設）、effort 照 OpenAI 的清單、retry_model 是空或核准的 OpenAI 模型。
-/// - Claude：model／retry_model 要是 `claude-` 的 id、effort 照 Claude 的清單。
+/// - `retry_model`（品質沒過的重試模型）：空＝不升級；可以是 Claude 的 `claude-` id，也可以是核准的 OpenAI 模型，
+///   但 OpenAI 模型只有允許的組（translate）能設（跨供應商重試，與組的 provider 無關）。
+/// - `openai`：model 要在核准清單（空＝預設）、effort 照 OpenAI 的清單。
+/// - Claude：model 要是 `claude-` 的 id、effort 照 Claude 的清單。
 pub fn claude_api_group_problem(gid: &str, g: &ClaudeApiUseCfg) -> Option<String> {
     let Some(provider) = api_provider_of(&g.provider) else { return Some(format!("{gid}: unknown provider `{}`", g.provider.trim())) };
     let (model, effort) = (g.model.trim(), g.effort.trim());
     let retry = g.retry_model.as_deref().map(str::trim).unwrap_or("");
+    if !retry.is_empty() {
+        if OPENAI_USE_MODELS.contains(&retry) {
+            if !claude_api_group_allows_openai(gid) {
+                return Some(format!("{gid}: retry_model `{retry}` is an OpenAI model; only the translate group may retry on OpenAI"));
+            }
+        } else if !claude_model_id_ok(retry) {
+            return Some(format!("{gid}: bad retry_model `{retry}`"));
+        }
+    }
     if provider == API_PROVIDER_OPENAI {
         if !claude_api_group_allows_openai(gid) {
             return Some(format!("{gid}: provider openai is only available for the translate group"));
@@ -1188,9 +1199,6 @@ pub fn claude_api_group_problem(gid: &str, g: &ClaudeApiUseCfg) -> Option<String
         if !effort.is_empty() && !OPENAI_USE_EFFORTS.contains(&effort) {
             return Some(format!("{gid}: `{effort}` is not an OpenAI effort"));
         }
-        if !retry.is_empty() && !OPENAI_USE_MODELS.contains(&retry) {
-            return Some(format!("{gid}: retry_model `{retry}` is not an approved OpenAI model"));
-        }
         return None;
     }
     if !model.is_empty() && !claude_model_id_ok(model) {
@@ -1198,9 +1206,6 @@ pub fn claude_api_group_problem(gid: &str, g: &ClaudeApiUseCfg) -> Option<String
     }
     if !effort.is_empty() && !CLAUDE_API_EFFORTS.contains(&effort) {
         return Some(format!("{gid}: bad effort `{effort}`"));
-    }
-    if !retry.is_empty() && !claude_model_id_ok(retry) {
-        return Some(format!("{gid}: bad retry_model `{retry}`"));
     }
     None
 }
@@ -4028,3 +4033,23 @@ mod claude_unlimited_tests {
 
 #[cfg(test)]
 mod api_kind_guard_tests;
+
+#[cfg(test)]
+mod retry_cross_provider_tests {
+    use super::*;
+
+    fn group(retry: &str) -> ClaudeApiUseCfg {
+        ClaudeApiUseCfg { retry_model: Some(retry.into()), ..Default::default() }
+    }
+
+    /// 品質沒過的重試模型可以跨到 OpenAI，但只有翻譯組能；Claude 模型與空字串照舊。
+    #[test]
+    fn a_retry_model_may_be_claude_or_an_approved_openai_model_but_openai_only_for_translate() {
+        assert_eq!(claude_api_group_problem("translate", &group("gpt-6-luna")), None, "翻譯組可以重試到 OpenAI");
+        assert_eq!(claude_api_group_problem("translate", &group("claude-sonnet-5-5")), None);
+        assert_eq!(claude_api_group_problem("translate", &group("")), None, "空字串＝不升級");
+        assert!(claude_api_group_problem("changelog_analysis", &group("gpt-6-luna")).is_some(), "其他組不能重試到 OpenAI");
+        assert!(claude_api_group_problem("translate", &group("gpt-9-unknown")).is_some(), "不認得的模型擋下");
+        assert!(claude_api_group_problem("translate", &group("not a model")).is_some());
+    }
+}

@@ -51,7 +51,8 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
     (draft.effort ?? saved.effort) !== saved.effort ||
     (draft.max_per_hour ?? saved.max_per_hour) !== saved.max_per_hour ||
     (draft.auto ?? saved.auto) !== saved.auto ||
-    (draft.provider ?? saved.provider ?? 'anthropic') !== (saved.provider ?? 'anthropic')
+    (draft.provider ?? saved.provider ?? 'anthropic') !== (saved.provider ?? 'anthropic') ||
+    (draft.retry_model ?? saved.retry_model ?? '') !== (saved.retry_model ?? '')
   )
 }
 
@@ -190,6 +191,7 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
           const model = d.model ?? u.model
           const effort = d.effort ?? u.effort
           const perHour = d.max_per_hour ?? u.max_per_hour
+          const retryModel = d.retry_model ?? u.retry_model ?? ''
           // 供應商：只有允許的組（翻譯）而且 daemon 有回 OpenAI 狀態才顯示選單。
           const openai = u.openai_allowed ? settings.openai ?? null : null
           const provider = d.provider ?? u.provider ?? 'anthropic'
@@ -276,6 +278,23 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
                   <span className="hint" data-testid={`claude-api-limit-hint-${u.id}`}>
                     {perHour === 0 ? t('不限') : t('0 ＝ 不限（每小時送出次數不設上限）')}
                   </span>
+                </label>
+                <label className="field" data-testid={`claude-api-retry-${u.id}`}>
+                  <span>{t('品質沒過時的重試模型')}</span>
+                  <select value={retryModel} onChange={(e) => patchUse(u.id, { retry_model: e.target.value })}>
+                    <option value="">{t('不升級（同模型再試）')}</option>
+                    {settings.models.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                    {openai !== null && u.openai_allowed ? openai.models.map((m) => (
+                      <option key={m} value={m} disabled={!openai.available}>
+                        {m}{openai.available ? '' : t('（未啟用）')}
+                      </option>
+                    )) : null}
+                  </select>
+                  {openai !== null && u.openai_allowed && !openai.available ? (
+                    <span className="hint" data-testid={`claude-api-retry-hint-${u.id}`}>{openai.unavailable_reason ?? t('OpenAI 未啟用或未設定金鑰')}</span>
+                  ) : null}
                 </label>
               </div>
               {u.uses.includes('changelog_translate') ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: 'changelog_translate' })}</span> : null}

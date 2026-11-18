@@ -365,6 +365,8 @@ export default {
   '模型': 'Model',
   '思考強度': 'Thinking effort',
   '每小時上限': 'Hourly limit',
+  '品質沒過時的重試模型': 'Retry model when the quality check fails',
+  '不升級（同模型再試）': 'No upgrade (retry with the same model)',
   '供應商': 'Provider',
   '（未啟用）': ' (not enabled)',
   'OpenAI 未啟用或未設定金鑰': 'OpenAI is not enabled or has no key',

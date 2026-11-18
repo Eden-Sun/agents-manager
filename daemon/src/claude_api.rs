@@ -16,7 +16,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{api_provider_of_model, claude_api_group_problem, ClaudeApiUseState, ConfigFile, API_PROVIDER_ANTHROPIC, API_PROVIDER_OPENAI, CLAUDE_API_EFFORTS, CLAUDE_API_GROUPS, CLAUDE_API_MODELS, CLAUDE_API_USES, OPENAI_USE_EFFORTS, OPENAI_USE_MODELS};
+use crate::config::{api_provider_of_model, claude_api_group_allows_openai, claude_api_group_problem, claude_api_use_allows_openai, ClaudeApiUseState, ConfigFile, API_PROVIDER_ANTHROPIC, API_PROVIDER_OPENAI, CLAUDE_API_EFFORTS, CLAUDE_API_GROUPS, CLAUDE_API_MODELS, CLAUDE_API_USES, OPENAI_USE_EFFORTS, OPENAI_USE_MODELS};
 use crate::key_file::{key_status, read_key, stage_key};
 use crate::lc_error::LcError;
 use crate::state::App;
@@ -402,11 +402,15 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
             return Err(ClaudeError::BadConfig(problem));
         }
     }
-    let openai = state.provider == API_PROVIDER_OPENAI;
+    // 供應商跟著實際送的模型走（品質沒過的重試可以跨到另一家）；沒有覆寫就照組的設定。
     let model = model_override.map_or_else(|| state.model.clone(), str::to_string);
-    // 這一次指定的模型（重試升級）必須屬於同一個供應商：不會把 Claude 的模型送到 OpenAI，反之亦然。
-    if (api_provider_of_model(&model) == API_PROVIDER_OPENAI) != openai {
-        return Err(ClaudeError::BadConfig(format!("model `{model}` does not belong to provider {}", state.provider)));
+    let openai = api_provider_of_model(&model) == API_PROVIDER_OPENAI;
+    if openai {
+        // OpenAI 只給允許的用途（用途與所屬的組都要允許，v1 只有翻譯）。
+        let group = CLAUDE_API_USES.iter().find(|d| d.id == req.use_case).map(|d| d.group).unwrap_or_default();
+        if !(claude_api_use_allows_openai(req.use_case) && claude_api_group_allows_openai(group)) {
+            return Err(ClaudeError::BadConfig(format!("model `{model}` is an OpenAI model; `{}` may not use OpenAI", req.use_case)));
+        }
     }
     let (endpoint, key, client) = if openai {
         // 沒開或沒有 key：回具名錯誤，不退回 Claude。
@@ -422,11 +426,16 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
     if !api.reserve(req.use_case, state.max_per_hour) {
         return Err(ClaudeError::Budget);
     }
+    // OpenAI 才有的 effort（`none`）送到 Claude 會被拒：改用 Claude 的預設 low。
+    let mut effort = effort_override.map_or_else(|| state.effort.clone(), str::to_string);
+    if !openai && !CLAUDE_API_EFFORTS.contains(&effort.as_str()) {
+        effort = "low".into();
+    }
     let request = MessagesRequest {
         endpoint,
         key,
         model,
-        effort: effort_override.map_or_else(|| state.effort.clone(), str::to_string),
+        effort,
         max_tokens: req.max_tokens,
         timeout_ms: cfg.claude_api.timeout_ms.max(min_timeout_ms.unwrap_or(0)).max(1),
         system: req.system,

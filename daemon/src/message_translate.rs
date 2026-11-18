@@ -478,6 +478,24 @@ async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_
     })
 }
 
+/// 品質沒過的重試模型那一家不可用（OpenAI 沒開或沒金鑰）時，退回內建預設（不會讓重試直接失敗）。
+const RETRY_FALLBACK_MODEL: &str = "claude-sonnet-5-5";
+
+fn is_openai_unavailable(e: &LcError) -> bool {
+    matches!(e, LcError::Conflict(v) if v["reason"] == "openai_not_configured")
+}
+
+/// 用指定的（升級）模型打一次；它那一家不可用就記一行 warn，改用 [`RETRY_FALLBACK_MODEL`]。
+async fn attempt_upgraded(app: &App, id: &str, content: &str, effort: Option<&str>, prev_reason: Option<&str>, model: &str) -> Result<Attempt, LcError> {
+    match attempt(app, id, content, effort, prev_reason, Some(model)).await {
+        Err(e) if is_openai_unavailable(&e) => {
+            tracing::warn!(model, fallback = RETRY_FALLBACK_MODEL, "translate retry model's provider is not available; retrying with the default model");
+            attempt(app, id, content, effort, prev_reason, Some(RETRY_FALLBACK_MODEL)).await
+        }
+        other => other,
+    }
+}
+
 /// 要不要重試：本地檢查沒過，或 Jev 分數低於門檻。
 fn needs_retry(a: &Attempt, min_prob: f64) -> bool {
     a.reason.is_some() || a.jev.is_some_and(|p| p < min_prob)
@@ -496,14 +514,17 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     // 升級模型（[claude_api.groups.translate] retry_model；空字串＝不升級）。手動重試（force）首次就用它。
     let retry_model = state.as_ref().map(|s| s.retry_model.trim().to_string()).unwrap_or_default();
     let first_model = (force && !retry_model.is_empty()).then_some(retry_model.as_str());
-    let mut attempts = vec![attempt(app, id, content, None, None, first_model).await?];
+    let mut attempts = vec![match first_model {
+        Some(m) => attempt_upgraded(app, id, content, None, None, m).await?,
+        None => attempt(app, id, content, None, None, None).await?,
+    }];
     if needs_retry(&attempts[0], min_prob) {
         let prev = attempts[0].reason;
         // 本地檢查回 untranslated／japanese_output（Haiku 原樣回傳或夾日文）：重試改用升級模型，effort 照設定、不額外提高。
         // 已經用升級模型的（force 首次）就不再換，照舊只提高 effort。
         let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "japanese_output")) && attempts[0].model != retry_model;
         let next = if upgrade {
-            attempt(app, id, content, None, prev, Some(&retry_model)).await?
+            attempt_upgraded(app, id, content, None, prev, &retry_model).await?
         } else {
             // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
             attempt(app, id, content, Some(next_effort_for(provider, &configured)), prev, None).await?
@@ -2135,6 +2156,80 @@ mod openai_translate_tests {
         }
     }
 
+    /// Claude 那一側：依序回覆，並記下每一次實際用的模型（合成回覆，不打真 API）。
+    struct ClaudeSeq {
+        calls: AtomicUsize,
+        replies: Mutex<Vec<String>>,
+        models: Mutex<Vec<String>>,
+    }
+
+    impl MessagesClient for ClaudeSeq {
+        fn complete<'a>(&'a self, req: &'a MessagesRequest) -> Pin<Box<dyn Future<Output = Result<ClientOutcome, ClientError>> + Send + 'a>> {
+            self.models.lock().unwrap().push(req.model.clone());
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = self.replies.lock().unwrap().get(idx).cloned().unwrap_or_else(|| "fallback".into());
+            let model = req.model.clone();
+            Box::pin(async move {
+                Ok(ClientOutcome {
+                    text,
+                    model: Some(model),
+                    stop_reason: Some("end_turn".into()),
+                    usage: Some(Usage { input_tokens: Some(10), output_tokens: Some(5), cache_creation_input_tokens: None, cache_read_input_tokens: None }),
+                })
+            })
+        }
+    }
+
+    /// 只設「品質沒過的重試模型」（組的供應商照預設 anthropic）；`openai_on` 決定 `[openai_api]` 開不開。
+    async fn set_retry_model(app: &Arc<App>, retry: &str, openai_on: bool, key_file: &str) {
+        let (retry, key_file) = (retry.to_string(), key_file.to_string());
+        app.cfg
+            .update(move |c| {
+                c.openai_api.enabled = openai_on;
+                c.openai_api.key_file = key_file;
+                c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(retry), ..Default::default() });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    const SRC_X: &str = "The system has encountered an unexpected condition.";
+    const GOOD_X: &str = "系統遇到了非預期的狀況。";
+
+    /// 跨供應商重試：Claude 第一次原樣回傳 → 重試改走 OpenAI（gpt-6-luna）；兩筆花費各自標自己的 provider。
+    #[tokio::test]
+    async fn a_quality_retry_can_cross_to_openai_and_each_spend_is_booked_to_its_provider() {
+        let (app, dir, _spy, key_file) = app().await;
+        set_retry_model(&app, "gpt-6-luna", true, &key_file).await;
+        let claude = Arc::new(ClaudeSeq { calls: AtomicUsize::new(0), replies: Mutex::new(vec![SRC_X.into()]), models: Mutex::new(Vec::new()) });
+        app.claude_api.set_client(claude.clone());
+        let server = serve(vec![Reply::Text(GOOD_X, usage(1200, 200, 100, 80))]).await;
+        app.claude_api.set_openai_endpoint(&server.endpoint);
+
+        let out = translate(&app, "m_cross", SRC_X).await.unwrap();
+        assert_eq!(out["model"], json!("gpt-6-luna"));
+        assert_eq!(out["translation"], json!(GOOD_X));
+        assert_eq!(*claude.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string()], "Claude 只打第一次");
+        assert_eq!(server.seen.lock().unwrap().auth.len(), 1, "重試打一次 OpenAI");
+        let providers: Vec<Value> = spend_lines(&dir).iter().map(|l| l["provider"].clone()).collect();
+        assert_eq!(providers, vec![json!("anthropic"), json!("openai")]);
+    }
+
+    /// `[openai_api]` 沒開：重試模型那一家不可用 → 不讓重試失敗，退回 claude-sonnet-5-5 重試（記一行 warn）。
+    #[tokio::test]
+    async fn a_quality_retry_falls_back_to_sonnet_when_openai_is_off() {
+        let (app, _dir, _spy, key_file) = app().await;
+        set_retry_model(&app, "gpt-6-luna", false, &key_file).await;
+        let claude = Arc::new(ClaudeSeq { calls: AtomicUsize::new(0), replies: Mutex::new(vec![SRC_X.into(), GOOD_X.into()]), models: Mutex::new(Vec::new()) });
+        app.claude_api.set_client(claude.clone());
+
+        let out = translate(&app, "m_fallback", SRC_X).await.unwrap();
+        assert_eq!(*claude.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string(), "claude-sonnet-5-5".to_string()]);
+        assert_eq!(out["model"], json!("claude-sonnet-5-5"));
+        assert_eq!(out["translation"], json!(GOOD_X));
+    }
+
     /// `[openai_api]` 沒開、或開了但 key 檔不能用：具名錯誤 `openai_not_configured`，不送任何請求，也**不**退回 Claude。
     #[tokio::test]
     async fn openai_off_or_without_a_key_is_a_named_error_and_never_falls_back_to_claude() {
@@ -2238,7 +2333,7 @@ mod openai_translate_tests {
             json!({"groups": {"changelog_analysis": {"provider": "openai"}}}),
             json!({"groups": {"translate": {"provider": "gemini"}}}),
             json!({"groups": {"translate": {"provider": "openai", "model": "claude-haiku-5-5"}}}),
-            json!({"groups": {"translate": {"provider": "openai", "retry_model": "claude-sonnet-5-5"}}}),
+            json!({"groups": {"schedule_outcome": {"retry_model": "gpt-6-luna"}}}),
             json!({"groups": {"translate": {"provider": "openai", "effort": "ultra"}}}),
             json!({"groups": {"translate": {"provider": "anthropic", "model": "gpt-6-luna"}}}),
             json!({"uses": {"message_translate": {"provider": "openai"}}}),

@@ -44,6 +44,8 @@ export interface ClaudeApiGroup {
   provider?: string
   /** 這組能不能改用 OpenAI（目前只有翻譯）。 */
   openai_allowed?: boolean
+  /** 品質沒過時的重試模型（Claude 或核准的 OpenAI 模型）；空字串＝不升級。舊 daemon 沒有就是空。 */
+  retry_model?: string
 }
 
 /** OpenAI 能不能選：沒開或沒 key 時選項仍在，但停用並顯示原因。 */
@@ -78,6 +80,8 @@ export interface ClaudeApiUsePatch {
   auto?: boolean
   /** 只有組收：`anthropic`／`openai`。 */
   provider?: string
+  /** 只有組收：品質沒過的重試模型；空字串＝不升級。 */
+  retry_model?: string
 }
 
 export interface ClaudeApiPatch {
@@ -197,6 +201,7 @@ function parseGroup(raw: unknown): ClaudeApiGroup | null {
     auto: typeof o.auto === 'boolean' ? o.auto : null,
     provider: o.provider === 'openai' ? 'openai' : 'anthropic',
     openai_allowed: o.openai_allowed === true,
+    retry_model: typeof o.retry_model === 'string' ? o.retry_model : '',
   }
 }
 

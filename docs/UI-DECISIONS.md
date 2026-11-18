@@ -1648,3 +1648,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **標籤**：側欄與 KindTag 顯示「OpenAI」，圖示沿用 OpenAI 商標；短名 `luna`（`shortModel`）；系列 `openai:luna`（與 codex 分開）。
 - 測試：`components/openaiApiBotKindDom.test.tsx`（停用／提示／就緒後可選／標籤）、`components/kindMeta.test.ts`（判斷、短名、系列、模型清單）。
 - **費用（選後者：只顯示實際值）**：openai-api 不做即時估價（進行中不顯示 ≈，只顯示已結算＋預留），回合後顯示 daemon 結算的實際費用，下面拆成輸入／快取讀／快取寫／輸出，reasoning 另列（已含在輸出裡，有值才顯示）。輸入框上方不出現 Claude 的快取冷提示（`ComposerCostHint` 對 openai 不出）。OpenAI 價表不在網頁端估算。
+## 翻譯組的「品質沒過時的重試模型」（2026-11-18，使用者：「更重視速度，預設用 Haiku，Luna 作為第二方案」）
+
+- **位置**：環境設定 → Claude API → 每一組的「每小時上限」後面，「品質沒過時的重試模型」選單。
+- **選項**：「不升級（同模型再試）」、Claude 模型、以及（只有翻譯組）核准的 OpenAI 模型；OpenAI 沒開或沒金鑰時 OpenAI 選項停用、標「（未啟用）」，下面一行寫原因。
+- **預設**：翻譯組＝Claude Sonnet（daemon 內建）；翻譯組的主模型是 Haiku，所以品質沒過才升級。
+- **沒選 OpenAI 也能用**：選了 OpenAI 但它沒開，重試退回 Claude Sonnet（daemon 記 warn），不會讓翻譯直接失敗。
