@@ -685,7 +685,14 @@ async fn remote_outbox_list_skips_only_the_non_utf8_name() {
     let site = make_test_remote_site(&scratch, "host-list-nonutf8-1");
     let ob = Path::new(&site.outbox);
     fs::write(ob.join("ok.txt"), b"ok").unwrap();
-    fs::write(ob.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")), b"x").unwrap();
+    // APFS（macOS）不收非 UTF-8 的檔名（EILSEQ），那邊根本造不出這種檔：只驗正常檔照列、不 panic，不在 macOS 造不出的前提上斷言略過行為（#1964）。
+    if let Err(e) = fs::write(ob.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")), b"x") {
+        assert!(cfg!(target_os = "macos"), "只有 macOS 的檔案系統會拒絕這個檔名：{e}");
+        eprintln!("skip - 此檔案系統不收非 UTF-8 檔名（{e}），只驗正常檔照列");
+        let list = site.outbox_list(1_000).await.unwrap();
+        assert!(list.iter().any(|f| f["name"] == "ok.txt"), "{list:?}");
+        return;
+    }
 
     let list = site.outbox_list(1_000).await.unwrap();
     let names: Vec<&str> = list.iter().map(|f| f["name"].as_str().unwrap()).collect();

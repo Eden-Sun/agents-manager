@@ -239,8 +239,9 @@ async fn files_older_than_an_hour_are_listed_and_never_deleted() {
     let r = setup(&e, "ls-old").await;
     let old = r.outbox.join("old-report.txt");
     std::fs::write(&old, b"still here").unwrap();
-    let status = std::process::Command::new("touch").arg("-d").arg("2 hours ago").arg(&old).status().unwrap();
-    assert!(status.success());
+    // BSD touch（macOS）沒有 `-d '2 hours ago'`（#1964）：直接設 mtime，兩邊一樣。
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    std::fs::OpenOptions::new().write(true).open(&old).unwrap().set_modified(two_hours_ago).unwrap();
     for _ in 0..2 {
         let resp = client().get(r.url("files")).send().await.unwrap();
         assert_eq!(resp.status(), 200);
