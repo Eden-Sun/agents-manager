@@ -7,6 +7,7 @@ mod watchdog;
 mod cli_refresh;
 mod role_faults;
 mod failover;
+mod responder;
 mod store;
 
 mod tests {

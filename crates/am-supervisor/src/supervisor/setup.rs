@@ -165,6 +165,13 @@ pub(super) fn shared_agent_md() -> String {
 "#.to_string()
 }
 
+/// 測試接縫（#1862 S2a）：`shared_agent_md` 在模組外不可見，daemon 的 `supervisor_tests` 只透過這個轉呼叫（不改行為）；`#[doc(hidden)]`，正式 build 不編。
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn shared_agent_md_for_test() -> String {
+    shared_agent_md()
+}
+
 fn claude_md(_dir: &Path, _bot_id: &str, _port: u16) -> String {
     shared_agent_md()
 }
