@@ -1004,6 +1004,19 @@ case "$AVAILKB" in
             exit 5
         fi ;;
 esac
+
+# DB backup and inventory collection may outlive the 15-minute lease. Revalidate the same fenced
+# lease immediately before stopping the daemon; if it expired or changed owners, leave the live
+# service untouched and defer this deployment.
+RENEW_OUT=$(agm lease renew restart --owner "$OWNER" --fence "$FENCE" --ttl 900 --lease-token-file "$TOKEN_FILE" 2>&1)
+RENEW_RC=$?
+if [ "$RENEW_RC" -ne 0 ]; then
+    log "ABORT: 換版前 restart lease 續約失敗 rc=${RENEW_RC}：$(printf '%s' "$RENEW_OUT" | tr -d '\n' | head -c 200)"
+    release_window "換版前 restart lease 續約失敗" || true
+    exit 4
+fi
+log "restart lease renewed before stopping daemon"
+
 if ! stop_daemon "$OLDPID"; then
     log "ABORT: daemon is still alive after SIGKILL; refusing to replace binary"
     release_window "線上 daemon 無法停止" || true
