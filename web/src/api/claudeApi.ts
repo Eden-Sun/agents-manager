@@ -145,14 +145,16 @@ export function mockTranslateOn(auto = true): void {
   }
 }
 const mockLedger: ClaudeApiLedger = {
-  totals: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 },
-  by_use: { changelog_review: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 } },
+  totals: { calls: 4, ok: 3, errors: 1, input_tokens: 9540, output_tokens: 1610 },
+  by_use: { changelog_review: { calls: 3, ok: 2, errors: 1, input_tokens: 9120, output_tokens: 1480 }, message_translate: { calls: 1, ok: 1, errors: 0, input_tokens: 420, output_tokens: 130 } },
   rows: [
     { at: '2026-10-23T08:12:03.120Z', use: 'changelog_review', model: 'claude-sonnet-5-5', ms: 4210, ok: true, error_kind: null, input_tokens: 3480, output_tokens: 610, stop_reason: 'end_turn' },
     { at: '2026-10-23T08:10:41.002Z', use: 'changelog_review', model: 'claude-sonnet-5-5', ms: 1200, ok: false, error_kind: 'rate_limited', input_tokens: 0, output_tokens: 0, stop_reason: null },
     { at: '2026-10-23T07:58:10.554Z', use: 'changelog_review', model: 'claude-sonnet-5-5', ms: 5100, ok: true, error_kind: null, input_tokens: 5640, output_tokens: 870, stop_reason: 'end_turn' },
+    { at: '2026-10-23T07:50:00.000Z', use: 'message_translate', model: 'gpt-6-luna', provider: 'openai', ms: 900, ok: true, error_kind: null, input_tokens: 420, output_tokens: 130, stop_reason: 'completed' },
   ],
 }
+const mockOpenAiTotals: ClaudeApiTotals = { calls: 1, ok: 1, errors: 0, input_tokens: 420, output_tokens: 130 }
 
 function parseUse(raw: unknown): ClaudeApiUse | null {
   if (typeof raw !== 'object' || raw === null) return null
@@ -255,6 +257,7 @@ function parseLedger(raw: unknown): ClaudeApiLedger {
           at: typeof x.at === 'string' ? x.at : '',
           use: typeof x.use === 'string' ? x.use : '',
           model: typeof x.model === 'string' ? x.model : '',
+          provider: typeof x.provider === 'string' ? x.provider : undefined,
           ms: n(x.ms),
           ok: x.ok === true,
           error_kind: typeof x.error_kind === 'string' ? x.error_kind : null,
@@ -278,9 +281,17 @@ export async function fetchClaudeApiSettings(): Promise<ClaudeApiSettings | null
   }
 }
 
-export async function fetchClaudeApiLedger(limit = 10): Promise<ClaudeApiLedger> {
-  if (rawTransport.mock) return mockLedger
-  return parseLedger(await rawTransport.request('GET', `/claude-api/ledger?limit=${limit}`))
+/** 帳本的供應商篩選：全部／Claude（anthropic）／OpenAI。 */
+export type LedgerProvider = 'all' | 'anthropic' | 'openai'
+
+export async function fetchClaudeApiLedger(limit = 10, provider: LedgerProvider = 'all'): Promise<ClaudeApiLedger> {
+  if (rawTransport.mock) {
+    if (provider === 'all') return mockLedger
+    const rows = mockLedger.rows.filter((r) => (r.provider ?? 'anthropic') === provider)
+    return { totals: provider === 'openai' ? mockOpenAiTotals : mockLedger.totals, by_use: {}, rows }
+  }
+  const q = provider === 'all' ? '' : `&provider=${provider}`
+  return parseLedger(await rawTransport.request('GET', `/claude-api/ledger?limit=${limit}${q}`))
 }
 
 export type ClaudeApiSaveResult = { ok: true; settings: ClaudeApiSettings } | { ok: false; message: string }

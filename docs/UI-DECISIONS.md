@@ -1630,3 +1630,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **翻譯失敗的提示**：供應商設成 OpenAI 但沒開或沒金鑰時，手動翻譯跳「OpenAI 未啟用或未設定金鑰…」並說明兩個出路（啟用 OpenAI，或把供應商改回 Claude）；daemon 不會悄悄改用 Claude。
 - **標籤照實**：譯文下方的模型標籤與費用照實顯示（`gpt-6-luna` 與 OpenAI 價表算出的金額）；帳本的模型欄在 OpenAI 的列後面標「OpenAI」。
 
+## 環境設定「OpenAI API」區與短名（2026-11-18，使用者指示）
+
+- **短名**：「UI 不是 by gpt 而是 by luna」——譯文下方的來源短名（`translationModelName`）對 `gpt-<版本>-<名稱>` 取名稱首字大寫（`gpt-6-luna`→`Luna`、`gpt-6.2-sol`→`Sol`），Claude 規則不變；`shortModel` 對 `openai-api` 去掉 `gpt-<版本>-` 只留名稱（`luna`）。帳本列的模型欄用同一個短名，完整 id 放 tooltip。
+- **「OpenAI API」設定區**（環境設定 → Claude API 的設定分頁，Claude 的表單下面）：啟用開關（`[openai_api] enabled`，沒有可用 key 就不能開）、金鑰狀態（已設定／未設定＋原因）與 key_file 路徑（可改）、總花費上限（美元）與起算時間（設上限從現在起算，OpenAI 自己的上限、不佔 Claude 的額度）、OpenAI 累計花費（bot＋一次性用途）。**不顯示、不回傳 key 內容**，也沒有貼 key 的欄位：key 放進 key_file 指到的檔（權限 600）。`GET／PUT /api/openai-api/settings`，User-only。
+- **帳本的供應商篩選**：全部／Claude／OpenAI（`GET /api/claude-api/ledger?provider=`），總計與每個用途的累計也依供應商。
+- 測試：`openAiApiSettingsDom.test.tsx`、`translationModelName.test.ts`、`shortModel.test.ts`；daemon `api/openai_settings_tests.rs`（bot 403、GET 沒有 sentinel key、熱重載、累計花費只算 openai、帳本篩選）。
+

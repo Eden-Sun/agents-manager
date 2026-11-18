@@ -1098,6 +1098,8 @@ pub fn routes() -> axum::Router<Arc<App>> {
     use axum::routing::get;
     axum::Router::new()
         .route("/claude-api/settings", get(get_settings).put(put_settings))
+        // 環境設定的「OpenAI API」區（使用者 2026-11-18）：處理函式在 openai_api_settings.rs，路由跟 Claude 的設定放同一支 router。
+        .route("/openai-api/settings", get(crate::openai_api_settings::get_settings).put(crate::openai_api_settings::put_settings))
         .route("/claude-api/ledger", get(get_ledger))
         .route("/claude-api/balance", get(get_balance))
         .route("/claude-api/balance-anchor", axum::routing::put(put_balance_anchor))

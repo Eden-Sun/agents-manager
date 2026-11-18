@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   fetchClaudeApiLedger,
+  type LedgerProvider,
   fetchClaudeApiSettings,
   saveClaudeApiSettings,
   type ClaudeApiLedger,
@@ -18,6 +19,8 @@ import { msg, useT } from '../lib/i18n'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel'
 import { ClaudeApiBotLimits } from './ClaudeApiBotLimits'
+import { OpenAiApiSettings } from './OpenAiApiSettings'
+import { translationModelName } from './messageTranslationConstants'
 import './claudeApiPanel.css'
 
 const nf = new Intl.NumberFormat('en-US')
@@ -65,6 +68,7 @@ export function ClaudeApiPanel() {
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [ledger, setLedger] = useState<ClaudeApiLedger | null>(null)
+  const [ledgerProvider, setLedgerProvider] = useState<LedgerProvider>('all')
   const [cap, setCap] = useState<ClaudeApiCap | null>(null)
 
   const adopt = (s: ClaudeApiSettings) => {
@@ -74,10 +78,10 @@ export function ClaudeApiPanel() {
   }
 
   const loadLedger = useCallback(() => {
-    void fetchClaudeApiLedger(8)
+    void fetchClaudeApiLedger(8, ledgerProvider)
       .then(setLedger)
       .catch(() => setLedger(null))
-  }, [])
+  }, [ledgerProvider])
 
   useEffect(() => {
     let alive = true
@@ -143,6 +147,7 @@ export function ClaudeApiPanel() {
   const modelOptions = (current: string) => (settings.models.includes(current) ? settings.models : [...settings.models, current])
 
   const formContent = (
+    <>
     <form
       className="form claude-api-panel"
       onSubmit={(e) => {
@@ -281,6 +286,8 @@ export function ClaudeApiPanel() {
         </button>
       </div>
     </form>
+    <OpenAiApiSettings />
+    </>
   )
 
   const ledgerContent = (
@@ -291,6 +298,14 @@ export function ClaudeApiPanel() {
           {t('重新整理')}
         </button>
       </h3>
+      <label className="field claude-api-ledger-filter">
+        <span>{t('供應商')}</span>
+        <select data-testid="claude-api-ledger-provider" value={ledgerProvider} onChange={(e) => setLedgerProvider(e.target.value as LedgerProvider)}>
+          <option value="all">{t('全部')}</option>
+          <option value="anthropic">Claude</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </label>
       <div className="claude-api-ledger-notice" data-testid="claude-api-ledger-notice">
         <p className="hint">
           <strong>{t('說明：')}</strong>
@@ -349,8 +364,8 @@ export function ClaudeApiPanel() {
                     <tr key={`${r.at}-${i}`}>
                       <td className="num" data-label={t('時間')}>{r.at.slice(5, 19).replace('T', ' ')}</td>
                       <td data-label={t('用途')}>{settings.uses.find((u) => u.id === r.use)?.label ?? r.use}</td>
-                      <td data-label={t('模型')}>
-                        {r.model}
+                      <td data-label={t('模型')} title={r.model}>
+                        {translationModelName(r.model)}
                         {r.provider === 'openai' ? <em className="claude-api-provider"> OpenAI</em> : null}
                       </td>
                       <td className="num" data-label={t('輸入')}>{nf.format(r.input_tokens)}</td>

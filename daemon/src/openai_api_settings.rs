@@ -128,7 +128,3 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<P
     let cfg = app.cfg.claude_fresh().await;
     Ok(Json(settings_json(&app, &cfg).await))
 }
-
-pub fn routes() -> axum::Router<Arc<App>> {
-    axum::Router::new().route("/openai-api/settings", axum::routing::get(get_settings).put(put_settings))
-}
