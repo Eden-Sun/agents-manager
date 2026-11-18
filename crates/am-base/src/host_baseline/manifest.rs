@@ -803,8 +803,22 @@ printf 'AM_BL end\n'
             "codex-key approval_policy 0",
             "codex-key features.hooks 1",
             "codex-key features.hooks 0",
-            "claude-key defaultMode ?",
         ];
+        // 「沒有 jq」那個分支（印 `?`）要在探測 jq 的 login shell 真的找不到 jq 的環境才走得到：macOS 的 login shell 會用 path_helper／
+        // Homebrew 把 PATH 補回來，限縮過的 PATH 擋不住它，那個分支在那種環境不可能出現（#1964：夜間 macos-latest）。
+        // 先用跟腳本相同的探測確認；找得到 jq 就不期待 `?`，新舊腳本逐 byte 相同的斷言（上面）照舊對每個變體成立。
+        let probe_scratch = crate::hosts::remote_script_support::Scratch::new();
+        let nojq_login_finds_jq = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("HISTFILE=/dev/null \"${SHELL:-/bin/sh}\" -lic 'command -v jq' 2>/dev/null </dev/null")
+            .env("PATH", path_without_jq(&probe_scratch.0))
+            .env("HOME", probe_scratch.0.join("home"))
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim().starts_with('/')))
+            .unwrap_or(false);
+        if !nojq_login_finds_jq {
+            want.push("claude-key defaultMode ?");
+        }
         let jq = std::process::Command::new("/bin/sh").arg("-c").arg("command -v jq").env("PATH", path_with_jq()).output().unwrap();
         if jq.status.success() {
             want.extend(["claude-key defaultMode 1", "claude-key defaultMode 0", "claude-key defaultMode x", "claude-key statusLine 1", "claude-key statusLine 0", "claude-key hooks 0"]);
