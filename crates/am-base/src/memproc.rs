@@ -51,7 +51,9 @@ for p in glob.glob("/proc/[0-9]*/environ"):
 else
   # 環境段是選配的（讀不到＝判不出是不是 bot 的行程，screen_kill 會拒絕送訊號，見 `env_unreadable`）：macOS 的 `ps -E` 遇到讀不到環境的行程
   # 會以 1 結束（#1964：夜間 macos-latest 上 `/api/mem/processes` 回 502 `ps exited exit status: 1`），不能讓整支腳本跟著失敗。
-  ps -Ewwo pid=,args= 2>/dev/null || true
+  # 一定要 `-A`：沒有選取條件時 macOS 的 ps 只列「同使用者同 tty」的行程，daemon（launchd 起的、沒有 tty）什麼都選不到、回 1，
+  # 環境段整段是空的（#1964 夜間 macOS 實測 `ps -Ewwo pid=,args=` exit 1，`-p <pid>` 則正常）。
+  ps -AEwwo pid=,args= 2>/dev/null || true
 fi"#;
 
 /// Everything else stays folded into its parent's `subtree_bytes` instead of turning the list
@@ -1010,7 +1012,7 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write("uname", "#!/bin/sh\necho Darwin\n");
-        write("ps", "#!/bin/sh\ncase \"$1\" in -E*) exit 1 ;; esac\necho '  1     0  1000 /sbin/launchd'\n");
+        write("ps", "#!/bin/sh\ncase \"$1\" in -*E*) exit 1 ;; esac\necho '  1     0  1000 /sbin/launchd'\n");
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(PS_TREE_ENV)
@@ -1020,6 +1022,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(out.status.success(), "{:?}", out.status);
         assert!(String::from_utf8_lossy(&out.stdout).contains("/sbin/launchd"));
+        // 環境那一趟要帶 -A（macOS 沒有選取條件會 exit 1、什麼都不列）。
+        assert!(PS_TREE_ENV.contains("ps -AEwwo pid=,args="), "macOS 環境段要用 -A");
     }
 
     #[test]
