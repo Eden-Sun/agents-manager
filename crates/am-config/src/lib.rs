@@ -2,6 +2,7 @@
 //! and is projected from TOML (see `projection.rs`).
 
 pub mod api_bot;
+pub mod openai_api;
 pub mod runtime_params;
 
 use anyhow::{anyhow, Context, Result};
@@ -434,6 +435,9 @@ pub struct ConfigFile {
     /// issue #1919：一次性 LLM 工作改走 Claude API key。預設關；沒寫這段，既有設定檔的長相不變。
     #[serde(default, skip_serializing_if = "ClaudeApiCfg::is_default")]
     pub claude_api: ClaudeApiCfg,
+    /// openai-api bot kind（切片 C）：預設關；沒寫這段，既有設定檔的長相不變。key 檔與 Claude 的分開。
+    #[serde(default, skip_serializing_if = "openai_api::OpenAiApiCfg::is_default")]
+    pub openai_api: openai_api::OpenAiApiCfg,
     /// 使用者 2026-10-01：bot 的指示檔（agent md）由這裡指定，CLI 自己的 CLAUDE.md／AGENTS.md 一律不讀（SPEC §6.5i）。
     #[serde(default, skip_serializing_if = "AgentsCfg::is_default")]
     pub agents: AgentsCfg,
@@ -2282,6 +2286,10 @@ impl ConfigStore {
                     tracing::info!(path = %self.path.display(), "config.toml [updates] changed on disk; using the new values");
                     g.cfg.updates = cfg.updates;
                 }
+                if cfg.openai_api != g.cfg.openai_api {
+                    tracing::info!(path = %self.path.display(), "config.toml [openai_api] changed on disk; using the new values");
+                    g.cfg.openai_api = cfg.openai_api;
+                }
                 let claude_changed = cfg.claude_api.enabled != g.cfg.claude_api.enabled
                     || cfg.claude_api.uses != g.cfg.claude_api.uses
                     || cfg.claude_api.groups != g.cfg.claude_api.groups
@@ -3240,6 +3248,31 @@ mod supervisor_cfg_tests {
         assert_eq!(on, back, "明寫開著要留得住");
         let off: ConfigFile = toml::from_str("[codex_history]\nenabled = false\n").unwrap();
         assert!(!off.codex_history.enabled);
+    }
+
+    #[test]
+    fn openai_api_is_off_by_default_has_its_own_key_file_and_shares_the_limit_validation() {
+        let none: ConfigFile = toml::from_str("").unwrap();
+        assert!(!none.openai_api.enabled);
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("openai_api"), "沒寫這段，設定檔的長相不變");
+        assert_ne!(none.openai_api.key_file, none.claude_api.key_file, "openai 用自己的 key 檔");
+        // 關著：不驗證、不回限制。
+        assert_eq!(none.openai_api.api_bot.validated(none.openai_api.enabled), Ok(None));
+        let on: ConfigFile = toml::from_str("[openai_api]\nenabled=true\nkey_file='/k/openai'\n[openai_api.api_bot]\nmax_turn_cost_microusd=250000\ntotal_cap_usd=5.0\ntotal_cap_since='2026-11-18T00:00:00Z'\n").unwrap();
+        assert!(on.openai_api.enabled);
+        assert_eq!(on.openai_api.api_bot.total_cap_usd, Some(5.0));
+        let v = on.openai_api.api_bot.validated(true).unwrap().expect("開了就有限制");
+        assert_eq!(v.max_turn_cost_microusd, 250_000);
+        // 共用同一套邊界：沒有每回合成本上限、或超出範圍就拒絕。
+        assert!(openai_api::OpenAiApiBotCfg::default().validated(true).is_err(), "開了卻沒有每回合成本上限");
+        let mut bad = on.openai_api.api_bot.clone();
+        bad.max_api_calls_per_turn = 999;
+        assert!(bad.validated(true).is_err());
+        // Claude 專屬的 compaction／clear_tool_uses／auto-lower-effort 不接受（沒有對應欄位，寫了也不生效、不 roundtrip）。
+        let with_claude_only: ConfigFile = toml::from_str("[openai_api.api_bot]\ncompact_at_input_tokens=1\nauto_lower_effort_turn_cost_microusd=5\n").unwrap();
+        assert!(!toml::to_string_pretty(&with_claude_only).unwrap().contains("compact_at_input_tokens"));
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert_eq!(back.openai_api, on.openai_api);
     }
 
     #[test]

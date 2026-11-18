@@ -6,6 +6,7 @@
 //! 加密 reasoning（`encrypted_content`）只供下一次呼叫續傳：不進對話、log、WS（`ReplayItem` 的 Debug 會遮掉）。
 #![allow(dead_code)]
 
+pub(crate) mod cap;
 pub(crate) mod codec;
 pub(crate) mod pricing;
 pub(crate) mod provider;
@@ -15,3 +16,6 @@ pub(crate) mod sse;
 mod provider_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "daemon-test-harness"))]
+mod key_tests;

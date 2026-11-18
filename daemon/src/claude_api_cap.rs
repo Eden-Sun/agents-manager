@@ -10,12 +10,12 @@ use serde_json::{json, Value};
 
 use crate::state::App;
 
-/// 查詢指定時間起算的所有 claude-api bot 合計花費（微美元）
+/// 查詢指定時間起算、指定 provider 的所有 API bot 合計花費（微美元；Claude 傳 `am_base::db::api_bot::PROVIDER_ANTHROPIC`，別家的花費不算進來）
 /// 花費＝created_at >= since_rfc3339 且 state IN ('recorded', 'reserved', 'unknown')
 /// recorded: estimated_microusd
 /// reserved: reserved_microusd
 /// unknown: COALESCE(estimated_microusd, reserved_microusd)
-pub async fn query_total_cap_spent_microusd(app: &Arc<App>, since_rfc3339: &str) -> Result<i64> {
+pub async fn query_total_cap_spent_microusd(app: &Arc<App>, since_rfc3339: &str, provider: &str) -> Result<i64> {
     let spent: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(
             CASE WHEN state='recorded' THEN COALESCE(estimated_microusd, 0)
@@ -24,8 +24,9 @@ pub async fn query_total_cap_spent_microusd(app: &Arc<App>, since_rfc3339: &str)
                  ELSE 0 END
          ), 0)
          FROM api_bot_attempts
-         WHERE created_at >= ? AND state IN ('recorded', 'reserved', 'unknown')",
+         WHERE provider = ? AND created_at >= ? AND state IN ('recorded', 'reserved', 'unknown')",
     )
+    .bind(provider)
     .bind(since_rfc3339)
     .fetch_one(&app.db)
     .await?;
@@ -50,7 +51,7 @@ pub async fn check_total_cap_allowed(
         _ => return Ok(()),
     };
 
-    let spent_microusd = query_total_cap_spent_microusd(app, since).await.unwrap_or(0);
+    let spent_microusd = query_total_cap_spent_microusd(app, since, am_base::db::api_bot::PROVIDER_ANTHROPIC).await.unwrap_or(0);
     let cap_microusd = (cap_usd * 1_000_000.0).round() as i64;
     let total_with_reservation = spent_microusd.saturating_add(reserve_microusd.max(0));
 
@@ -81,7 +82,7 @@ pub async fn get_claude_api_cap(app: Arc<App>) -> Result<Value, LcError> {
     let since = cfg.claude_api.api_bot.total_cap_since.clone();
 
     let spent_usd = if let Some(ref s) = since {
-        let microusd = query_total_cap_spent_microusd(&app, s)
+        let microusd = query_total_cap_spent_microusd(&app, s, am_base::db::api_bot::PROVIDER_ANTHROPIC)
             .await
             .map_err(|e| LcError::Bad(format!("query cap spent error: {e}")))?;
         microusd as f64 / 1_000_000.0
@@ -192,7 +193,7 @@ pub async fn put_claude_api_cap(app: Arc<App>, body: PutCapRequest) -> Result<Va
     let (new_cap, new_since) = (after.total_cap_usd, after.total_cap_since.clone());
 
     let spent_usd = if let Some(ref s) = new_since {
-        let microusd = query_total_cap_spent_microusd(&app, s)
+        let microusd = query_total_cap_spent_microusd(&app, s, am_base::db::api_bot::PROVIDER_ANTHROPIC)
             .await
             .map_err(|e| LcError::Bad(format!("query cap spent error: {e}")))?;
         microusd as f64 / 1_000_000.0

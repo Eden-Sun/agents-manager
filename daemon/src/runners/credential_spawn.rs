@@ -292,9 +292,7 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
             release(&app, &body.bot_id, &permit_id);
             return fail(StatusCode::BAD_REQUEST, "invalid_child_name", "child name contains invalid characters");
         }
-        // 預先信任：與 lifecycle 一樣，四種 CLI 的 child 啟動前把 pane 目錄寫進它的信任紀錄。
-        // 寫入失敗只 warn，不擋 spawn（與 lifecycle 的 best-effort 相同）。
-        if matches!(body.kind.as_str(), "agy" | "claude" | "codex" | "grok") {
+        if body.kind == "agy" {
             let pane_info = match observed {
                 Ok(Ok((Some(ref pane), _))) => Some(pane),
                 _ => None,
@@ -305,14 +303,14 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
                 .filter(|s| !s.is_empty());
             if let Some(target_cwd) = pane_cwd {
                 let mut child_bot = bot.clone();
-                child_bot.kind = body.kind.clone();
-                child_bot.identity = child_pretrust_identity(&app, &bot, &authority.host, &body.kind, &body.identity).await;
+                child_bot.kind = "agy".to_string();
+                child_bot.identity = child_pretrust_identity(&app, &bot, &authority.host, "agy", &body.identity).await;
                 child_bot.cwd = Some(target_cwd.to_string());
                 for w in crate::trust::pretrust_for_start(&app, &child_bot, &authority.host, target_cwd).await {
-                    tracing::warn!(parent = %bot.name, host = %authority.host, target_cwd, warning = %w, "could not pre-trust child workspace");
+                    tracing::warn!(parent = %bot.name, host = %authority.host, target_cwd, warning = %w, "could not pre-trust child agy workspace");
                 }
             } else {
-                tracing::warn!(parent = %bot.name, host = %authority.host, pane = %body.pane_id, "child pane has no cwd; cannot pre-trust child workspace");
+                tracing::warn!(parent = %bot.name, host = %authority.host, pane = %body.pane_id, "child pane has no cwd; cannot pre-trust agy workspace");
             }
         }
         let spawn_id = crate::db::ulid();
@@ -861,198 +859,5 @@ mod tests {
                 "non-agy child must not affect agy trustedWorkspaces: {settings}"
             );
         }
-    }
-
-    // ── 四種 CLI 的 child 預先信任（沿用 agy fixture；只用合成設定，不讀真憑證）──────────────────────────
-    //
-    // 信任紀錄檔（`trust::store_path`）：claude `CLAUDE_CONFIG_DIR/.claude.json`（未設＝`$HOME/.claude.json`）、
-    // codex `CODEX_HOME/config.toml`（未設＝`$HOME/.codex`）、grok `GROK_HOME/trusted_folders.toml`（未設＝`$HOME/.grok`）。
-
-    fn kind_env_key(kind: &str) -> &'static str {
-        match kind {
-            "claude" => "CLAUDE_CONFIG_DIR",
-            "codex" => "CODEX_HOME",
-            "grok" => "GROK_HOME",
-            other => panic!("no trust store fixture for {other}"),
-        }
-    }
-
-    /// 預設帳號的信任紀錄檔（沒設環境變數時）。
-    fn kind_default_store(kind: &str, home: &std::path::Path) -> std::path::PathBuf {
-        match kind {
-            "claude" => home.join(".claude.json"),
-            "codex" => home.join(".codex/config.toml"),
-            _ => home.join(".grok/trusted_folders.toml"),
-        }
-    }
-
-    /// 身份目錄裡的信任紀錄檔。
-    fn kind_identity_store(kind: &str, dir: &std::path::Path) -> std::path::PathBuf {
-        match kind {
-            "claude" => dir.join(".claude.json"),
-            "codex" => dir.join("config.toml"),
-            _ => dir.join("trusted_folders.toml"),
-        }
-    }
-
-    /// 紀錄檔裡有沒有這個目錄（JSON／TOML 都是字串，直接找路徑；原字串與 canonical 都認）。
-    fn store_trusts(store: &std::path::Path, cwd: &str) -> bool {
-        let Ok(text) = std::fs::read_to_string(store) else { return false };
-        text.contains(cwd) || text.contains(&crate::trust::canonical(cwd))
-    }
-
-    /// 本機：母 bot（claude）開 child（`kind`）的 pane，給不給 identity 都一樣走 spawn begin。
-    async fn local_kind_spawn(e: &crate::testing::Env, kind: &str, identity: &str, cwd: &str, identities: Vec<crate::config::IdentityCfg>) -> (StatusCode, Value) {
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.identities.extend(identities);
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let parent = crate::testing::claude_bot(&e.app, &e.project_id, &format!("{kind}-local-parent")).await;
-        crate::testing::fake_run(&e.app, &parent.id).await;
-        let pane_id = format!("w1:p-{kind}-local-child");
-        e.herdr.live_pane(&pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
-        e.herdr.set_pane_foreground_cwd(&pane_id, cwd);
-        let (status, Json(body)) = begin(
-            State(e.app.clone()),
-            bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: "agent".into(), pane_id: pane_id.clone(), child_name: format!("{kind}-local-kid"), kind: kind.into(), identity: identity.into() }),
-        )
-        .await;
-        (status, body)
-    }
-
-    /// 遠端：同 `remote_agy_spawn`，但 kind 可換；身份 `k1` 是這台的 `kind` 身份（信任寫進它的目錄），`agy` 身份 `ag1` 給「kind 不符」用。
-    async fn remote_kind_spawn(e: &crate::testing::Env, host: &str, kind: &str, identity: &str, cwd: &str) -> (std::path::PathBuf, StatusCode) {
-        let remote_home = e.dir.join(format!("{host}-home"));
-        std::fs::create_dir_all(&remote_home).unwrap();
-        let cfg = crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
-        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
-        let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
-        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
-        *conn.remote_home.lock().await = Some(remote_home.to_string_lossy().into_owned());
-        let fake_remote = remote_home.clone();
-        crate::hosts::set_ssh_fake(host, move |script| {
-            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &fake_remote).output()?;
-            if !out.status.success() {
-                anyhow::bail!("ssh fake failed: {}", String::from_utf8_lossy(&out.stderr));
-            }
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        });
-        let h = host.to_string();
-        let key = kind_env_key(kind);
-        let kind_s = kind.to_string();
-        e.app
-            .cfg
-            .update(move |cfg| {
-                cfg.identities.push(crate::config::IdentityCfg { name: "k1".into(), kind: kind_s.clone(), host: Some(h.clone()), env: [(key.to_string(), format!("$HOME/.k1-{kind_s}"))].into(), args: vec![] });
-                cfg.identities.push(crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: Some(h.clone()), env: [("HOME".to_string(), "$HOME/.agy-ag1".to_string())].into(), args: vec![] });
-                Ok(())
-            })
-            .await
-            .unwrap();
-        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
-        let parent = crate::testing::claude_bot(&e.app, &e.project_id, &format!("{kind}-remote-parent")).await;
-        crate::testing::fake_run(&e.app, &parent.id).await;
-        let pane_id = format!("w1:p-{kind}-remote-child");
-        e.herdr.live_pane(&pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
-        e.herdr.set_pane_foreground_cwd(&pane_id, cwd);
-        let (status, Json(body)) = begin(
-            State(e.app.clone()),
-            bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: "agent".into(), pane_id, child_name: format!("{kind}-remote-kid"), kind: kind.into(), identity: identity.into() }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        (remote_home, status)
-    }
-
-    /// 本機、帶 identity：信任寫進那個身份的目錄，預設帳號不寫。
-    #[tokio::test]
-    async fn a_claude_codex_or_grok_child_with_an_identity_is_pretrusted_in_that_identitys_dir_locally() {
-        for kind in ["claude", "codex", "grok"] {
-            let e = crate::testing::env().await;
-            let cwd_dir = e.dir.join(format!("{kind}-local-worktree"));
-            std::fs::create_dir_all(&cwd_dir).unwrap();
-            let cwd = cwd_dir.to_string_lossy().into_owned();
-            let ident_dir = e.dir.join(format!("{kind}-local-k1"));
-            let key = kind_env_key(kind);
-            let ident = crate::config::IdentityCfg { name: "k1".into(), kind: kind.into(), host: Some(crate::config::LOCAL_HOST.into()), env: [(key.to_string(), ident_dir.to_string_lossy().into_owned())].into(), args: vec![] };
-            let (status, body) = local_kind_spawn(&e, kind, "k1", &cwd, vec![ident]).await;
-            assert_eq!(status, StatusCode::OK, "{kind}: {body}");
-            assert!(store_trusts(&kind_identity_store(kind, &ident_dir), &cwd), "{kind}：身份目錄要有 child 的 pane 目錄");
-            let home = crate::home::dir().unwrap();
-            assert!(!store_trusts(&kind_default_store(kind, &home), &cwd), "{kind}：預設帳號不該被寫");
-        }
-    }
-
-    /// 本機、非法 identity（不存在、或 kind 不符）：忽略，照舊從母 bot（claude）推 → 預設帳號。
-    #[tokio::test]
-    async fn an_illegal_identity_falls_back_to_the_inherited_default_locally() {
-        for kind in ["claude", "codex", "grok"] {
-            for bad in ["nope", "ag1"] {
-                let e = crate::testing::env().await;
-                let cwd_dir = e.dir.join(format!("{kind}-{bad}-fallback-worktree"));
-                std::fs::create_dir_all(&cwd_dir).unwrap();
-                let cwd = cwd_dir.to_string_lossy().into_owned();
-                let ident_dir = e.dir.join(format!("{kind}-{bad}-k1"));
-                let key = kind_env_key(kind);
-                // ag1 是 agy 的身份（kind 不符）；nope 根本不存在。兩者都有目錄，確認不能寫進去。
-                let kind_ident = crate::config::IdentityCfg { name: "k1".into(), kind: kind.into(), host: Some(crate::config::LOCAL_HOST.into()), env: [(key.to_string(), ident_dir.to_string_lossy().into_owned())].into(), args: vec![] };
-                let agy_ident = crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: Some(crate::config::LOCAL_HOST.into()), env: [("HOME".to_string(), ident_dir.to_string_lossy().into_owned())].into(), args: vec![] };
-                let (status, body) = local_kind_spawn(&e, kind, bad, &cwd, vec![kind_ident, agy_ident]).await;
-                assert_eq!(status, StatusCode::OK, "{kind}/{bad}: {body}");
-                let home = crate::home::dir().unwrap();
-                assert!(store_trusts(&kind_default_store(kind, &home), &cwd), "{kind}/{bad}：退回預設帳號");
-                assert!(!ident_dir.exists() || !store_trusts(&kind_identity_store(kind, &ident_dir), &cwd), "{kind}/{bad}：不能寫進身份目錄");
-            }
-        }
-    }
-
-    /// 遠端、帶 identity：信任寫進遠端那台的身份目錄。
-    #[tokio::test]
-    async fn a_claude_codex_or_grok_child_with_an_identity_is_pretrusted_in_that_identitys_dir_remotely() {
-        for kind in ["claude", "codex", "grok"] {
-            let e = crate::testing::env().await;
-            let host = format!("{kind}-remote-ident-host");
-            let cwd = format!("/remote/{kind}/worktree");
-            let (remote_home, _) = remote_kind_spawn(&e, &host, kind, "k1", &cwd).await;
-            assert!(store_trusts(&kind_identity_store(kind, &remote_home.join(format!(".k1-{kind}"))), &cwd), "{kind}：遠端身份目錄要有 child 的目錄");
-            assert!(!store_trusts(&kind_default_store(kind, &remote_home), &cwd), "{kind}：遠端預設帳號不該被寫");
-        }
-    }
-
-    /// 遠端、非法 identity：退回母 bot 的預設帳號（遠端家目錄）。
-    #[tokio::test]
-    async fn an_illegal_identity_falls_back_to_the_inherited_default_remotely() {
-        for kind in ["claude", "codex", "grok"] {
-            for bad in ["nope", "ag1"] {
-                let e = crate::testing::env().await;
-                let host = format!("{kind}-{bad}-remote-host");
-                let cwd = format!("/remote/{kind}/{bad}");
-                let (remote_home, _) = remote_kind_spawn(&e, &host, kind, bad, &cwd).await;
-                assert!(store_trusts(&kind_default_store(kind, &remote_home), &cwd), "{kind}/{bad}：遠端退回預設帳號");
-                assert!(!remote_home.join(format!(".k1-{kind}")).exists(), "{kind}/{bad}：不能寫進 k1 的目錄");
-            }
-        }
-    }
-
-    /// 寫入失敗（身份目錄其實是一個檔案）只記 warn，spawn 照常成功（與 lifecycle 的 best-effort 相同）。
-    #[tokio::test]
-    async fn a_failed_pretrust_write_only_warns_and_the_spawn_still_succeeds() {
-        let e = crate::testing::env().await;
-        let cwd_dir = e.dir.join("claude-blocked-worktree");
-        std::fs::create_dir_all(&cwd_dir).unwrap();
-        let cwd = cwd_dir.to_string_lossy().into_owned();
-        // 身份的 CLAUDE_CONFIG_DIR 是一個既有的檔案：寫 `.claude.json` 時 mkdir／開檔必定失敗。
-        let blocker = e.dir.join("claude-blocker-file");
-        std::fs::write(&blocker, "not a dir").unwrap();
-        let ident = crate::config::IdentityCfg { name: "k1".into(), kind: "claude".into(), host: Some(crate::config::LOCAL_HOST.into()), env: [("CLAUDE_CONFIG_DIR".to_string(), blocker.to_string_lossy().into_owned())].into(), args: vec![] };
-        let (status, body) = local_kind_spawn(&e, "claude", "k1", &cwd, vec![ident]).await;
-        assert_eq!(status, StatusCode::OK, "寫入失敗不能擋 spawn：{body}");
-        assert!(body["permit_id"].is_string() && body["spawn_id"].is_string());
     }
 }

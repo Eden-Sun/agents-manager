@@ -673,6 +673,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (95, "9823d73c31741f77"),
     // 閒下來自動重啟套用更新（2026-11-18）：`bot_update_restart`（CREATE TABLE）。
     (96, "e0364d581dcb0388"),
+    // openai-api 切片 C（2026-11-18）：`api_bot_attempts.provider`／`service_tier`（ALTER ADD）、provider 不可變 trigger 與 (provider, created_at) 索引。
+    (97, "e221e96c9fdae2a0"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -903,6 +905,10 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 啟動相關設定的版本雜湊（#355 機制 B／#353）：`bots.launch_rev`＝目前設定的版本，`runs.launch_rev`＝這個 run 啟動時載入的版本；
         // NULL＝沒記（舊資料，視為相同、不誤報「需重啟」）。P1 只加欄位、沒有人讀寫。
         ("bots", "launch_rev", "ALTER TABLE bots ADD COLUMN launch_rev TEXT"),
+        // openai-api 切片 C（2026-11-18）：每筆 attempt 的 provider（不可變，見 `api_bot_attempts_provider_immutable`）與計價用的 service tier。
+        // 既有列（含已脫離 bot 的歷史列）一律是 anthropic：DEFAULT 讓舊列自動回填，Claude 的總上限前後相等。
+        ("api_bot_attempts", "provider", "ALTER TABLE api_bot_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT 'anthropic' CHECK(provider IN ('anthropic','openai'))"),
+        ("api_bot_attempts", "service_tier", "ALTER TABLE api_bot_attempts ADD COLUMN service_tier TEXT"),
         ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
         // issue #339：`relay_from` 是呼叫端自稱、沒帶自己的 bot token 證明（相容期）＝1。舊列 0＝不是這條路寫的。
         ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
@@ -1070,6 +1076,17 @@ WHEN OLD.status = 'queued' AND NEW.status = 'in_flight' AND EXISTS (
     AND (o.attempt_no > s.retry_count + 1 OR julianday('now') > julianday(o.scheduled_for) + s.retry_deadline_mins / 1440.0)
 )
 BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
+    // provider 一旦寫進 attempt 就不能改（帳本隔離的前提：Claude 的上限只算 anthropic、OpenAI 的只算 openai）。
+    sync_trigger(
+        &mut tx,
+        "api_bot_attempts_provider_immutable",
+        "CREATE TRIGGER api_bot_attempts_provider_immutable BEFORE UPDATE OF provider ON api_bot_attempts
+           WHEN OLD.provider IS NOT NEW.provider
+         BEGIN SELECT RAISE(ABORT, 'api_bot_attempts.provider is immutable'); END",
+    )
+    .await
+    .context("create api_bot_attempts provider immutability trigger")?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS api_bot_attempts_provider_created ON api_bot_attempts(provider, created_at)").execute(&mut *tx).await.context("index api_bot_attempts provider")?;
     // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
     // body 自己就帶了分號，切開來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
     // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：

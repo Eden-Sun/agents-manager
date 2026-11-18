@@ -61,6 +61,9 @@ impl Secret {
     pub(super) fn new(value: String) -> Self { Self(value) }
     pub(super) fn is_empty(&self) -> bool { self.0.trim().is_empty() }
     fn as_str(&self) -> &str { &self.0 }
+    /// 測試才讀得到內容（驗證「哪一家的 key 檔」）；正式碼只有 `as_str` 的私有用法，沒有 Debug／Display。
+    #[cfg(test)]
+    pub(super) fn expose_for_test(&self) -> &str { &self.0 }
 }
 impl Drop for Secret {
     fn drop(&mut self) {

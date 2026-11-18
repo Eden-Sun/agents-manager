@@ -1909,7 +1909,7 @@ fn progress_sink(app: &crate::state::App) -> super::adapter::ProgressSink {
     })
 }
 
-struct ConfigKeySource(std::sync::Weak<crate::state::App>);
+pub(super) struct ConfigKeySource(pub(super) std::sync::Weak<crate::state::App>);
 impl super::adapter::KeySource for ConfigKeySource {
     fn snapshot(&self) -> futures::future::BoxFuture<'_, Result<super::adapter::Secret, ()>> {
         Box::pin(async move {
@@ -1917,6 +1917,20 @@ impl super::adapter::KeySource for ConfigKeySource {
             let cfg = app.cfg.get().await;
             cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| ())?.ok_or(())?;
             crate::key_file::read_key(&cfg.claude_api.key_file).map(super::adapter::Secret::new).map_err(|_| ())
+        })
+    }
+}
+
+/// openai-api 的 key 來源：只讀 `[openai_api]` 自己的設定與 key 檔（跟 Claude 的分開，絕不混用；session 建立時固定 provider）。
+/// 錯誤一律回 `()`：不帶路徑、不帶 key、不帶底層錯誤文字。
+pub(super) struct OpenAiConfigKeySource(pub(super) std::sync::Weak<crate::state::App>);
+impl super::adapter::KeySource for OpenAiConfigKeySource {
+    fn snapshot(&self) -> futures::future::BoxFuture<'_, Result<super::adapter::Secret, ()>> {
+        Box::pin(async move {
+            let app = self.0.upgrade().ok_or(())?;
+            let cfg = app.cfg.get().await;
+            cfg.openai_api.api_bot.validated(cfg.openai_api.enabled).map_err(|_| ())?.ok_or(())?;
+            crate::key_file::read_key(&cfg.openai_api.key_file).map(super::adapter::Secret::new).map_err(|_| ())
         })
     }
 }

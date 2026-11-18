@@ -242,6 +242,60 @@ impl std::fmt::Display for ReserveRefused {
 }
 impl std::error::Error for ReserveRefused {}
 
+/// 這筆預留算哪一家的帳（`api_bot_attempts.provider`，寫入後不可變）。`anthropic` 是舊行為：舊列都是它。
+pub const PROVIDER_ANTHROPIC: &str = "anthropic";
+pub const PROVIDER_OPENAI: &str = "openai";
+
+/// 某一家的總花費上限（只算同 provider、`created_at >= since` 的 reserved／recorded／unknown）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TotalCap<'a> {
+    pub since: &'a str,
+    pub cap_microusd: i64,
+}
+
+/// 預留所屬的帳本範圍：provider、計價 tier，以及（選用）要在**同一個寫交易**裡檢查的 provider 總上限。
+#[derive(Clone, Copy, Debug)]
+pub struct ProviderScope<'a> {
+    pub provider: &'a str,
+    pub service_tier: Option<&'a str>,
+    pub total_cap: Option<TotalCap<'a>>,
+}
+
+impl ProviderScope<'static> {
+    /// 舊行為：Claude，不在這裡檢查總上限（Claude 的總上限由 `claude_api_cap` 另外把關）。
+    pub const ANTHROPIC: ProviderScope<'static> = ProviderScope { provider: PROVIDER_ANTHROPIC, service_tier: None, total_cap: None };
+}
+
+/// provider 總上限擋下（還沒送任何請求）：`downcast_ref::<TotalCapRefused>()` 取得；不是 `ReserveRefused` 的成員，
+/// 所以既有只認 `ReserveRefused` 的呼叫端不受影響。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TotalCapRefused {
+    pub cap_microusd: i64,
+    pub spent_microusd: i64,
+}
+impl std::fmt::Display for TotalCapRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("API bot total spend cap reached")
+    }
+}
+impl std::error::Error for TotalCapRefused {}
+
+/// 這一家從 `since` 起已花（或已預留）的微美元：recorded＝estimated、reserved＝reserved、unknown＝estimated 沒有就用 reserved。
+pub async fn provider_spent_microusd(conn: &mut SqliteConnection, provider: &str, since: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd, 0)
+                                  WHEN state='reserved' THEN reserved_microusd
+                                  WHEN state='unknown' THEN COALESCE(estimated_microusd, reserved_microusd)
+                                  ELSE 0 END), 0)
+           FROM api_bot_attempts
+          WHERE provider = ? AND created_at >= ? AND state IN ('recorded','reserved','unknown')",
+    )
+    .bind(provider)
+    .bind(since)
+    .fetch_one(conn)
+    .await?)
+}
+
 /// An existing attempt is NEVER permission to send again, including failed/unknown attempts.
 pub async fn reserve(
     pool: &SqlitePool,
@@ -251,6 +305,21 @@ pub async fn reserve(
     max_turn_microusd: i64,
     max_per_hour: i64,
 ) -> Result<Reservation> {
+    reserve_scoped(pool, f, a, checkpoint, max_turn_microusd, max_per_hour, &ProviderScope::ANTHROPIC).await
+}
+
+/// 同 [`reserve`]，多帶帳本範圍：每小時請求數只數同 provider；有 `total_cap` 時，**餘額檢查與寫入預留在同一個
+/// `BEGIN IMMEDIATE` 交易**裡完成——兩筆並發只有一筆能拿到最後的預算（另一筆在寫鎖後看到前一筆的預留而被擋）。
+pub async fn reserve_scoped(
+    pool: &SqlitePool,
+    f: &Fence<'_>,
+    a: &Attempt<'_>,
+    checkpoint: &Checkpoint,
+    max_turn_microusd: i64,
+    max_per_hour: i64,
+    scope: &ProviderScope<'_>,
+) -> Result<Reservation> {
+    ensure!(matches!(scope.provider, PROVIDER_ANTHROPIC | PROVIDER_OPENAI), "unknown provider");
     ensure!(
         !a.id.is_empty()
             && a.ordinal >= 0
@@ -285,19 +354,35 @@ pub async fn reserve(
         return Err(anyhow::Error::new(ReserveRefused::TurnBudget));
     }
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_attempts WHERE created_at>=?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_attempts WHERE created_at>=? AND provider=?")
             .bind(super::iso_in(-3600))
+            .bind(scope.provider)
             .fetch_one(&mut *tx)
             .await?;
     // max_per_hour <= 0＝不限（使用者發起的回合、或設定為 0）。
     if max_per_hour > 0 && count >= max_per_hour {
         return Err(anyhow::Error::new(ReserveRefused::HourlyLimit));
     }
+    if let Some(cap) = scope.total_cap {
+        let spent = provider_spent_microusd(&mut tx, scope.provider, cap.since).await?;
+        if !spent.checked_add(a.reserved_microusd).is_some_and(|n| n <= cap.cap_microusd) {
+            return Err(anyhow::Error::new(TotalCapRefused { cap_microusd: cap.cap_microusd, spent_microusd: spent }));
+        }
+    }
     let revision = cas(&mut tx, f, checkpoint, &at).await?;
-    sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?,?)")
-        .bind(a.id).bind(f.session).bind(f.bot).bind(f.run).bind(f.turn).bind(f.generation).bind(a.ordinal).bind(a.request_hash).bind(a.speed).bind(a.reserved_microusd).bind(a.pricing_version).bind(&at).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at,provider,service_tier) VALUES(?,?,?,?,?,?,?,?,?,'reserved',?,?,?,?,?)")
+        .bind(a.id).bind(f.session).bind(f.bot).bind(f.run).bind(f.turn).bind(f.generation).bind(a.ordinal).bind(a.request_hash).bind(a.speed).bind(a.reserved_microusd).bind(a.pricing_version).bind(&at).bind(scope.provider).bind(scope.service_tier).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Reservation::Fresh(revision))
+}
+/// 字串裡有沒有長得像 API key 的片段（Anthropic `sk-ant-…`、OpenAI `sk-…`／`sk-proj-…`／測試用 `sk-test-…`）：`sk-` 後面
+/// 接 8 個以上的 key 字元就算。寧可多擋：帳務資料裡本來就不該有任何字串形的 key。
+fn looks_like_api_key(text: &str) -> bool {
+    text.match_indices("sk-").any(|(i, _)| {
+        // `risk-assessment-notes` 這種單字中間的 `sk-` 不算：前面必須是字串開頭或非英數字元。
+        let boundary = text[..i].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
+        boundary && text[i + 3..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).count() >= 8
+    })
 }
 /// Keep vendor usage extensions, but reject credential-bearing objects. Full responses,
 /// prompts, auth/config objects are never accepted as accounting data.
@@ -322,7 +407,7 @@ fn usage_json(usage: Option<&Value>) -> Result<Option<String>> {
                 ) && safe(v)
             }),
             Value::Array(values) => values.iter().all(safe),
-            Value::String(text) => !text.contains("sk-ant-"),
+            Value::String(text) => !looks_like_api_key(text),
             _ => true,
         }
     }
@@ -812,6 +897,12 @@ mod tests {
             .await
             .unwrap();
         super::super::migrate_with(&pool, &[]).await.unwrap();
+        seed(&pool).await;
+        pool
+    }
+    /// 同一份夾具（專案、兩顆 bot a／b、run、對話、回合），給記憶體 DB 與並發測試用的檔案 DB 共用。
+    async fn seed(pool: &SqlitePool) {
+        let pool = pool.clone();
         sqlx::query("INSERT INTO projects(id,path,label,created_at)VALUES('p','/test','p',?)")
             .bind(super::super::now())
             .execute(&pool)
@@ -838,7 +929,6 @@ mod tests {
                     .bind(format!("t{id}{i}")).bind(format!("c{id}")).bind(format!("r{id}")).bind(if i == 1 { "in_flight" } else { "queued" }).bind(super::super::now()).execute(&pool).await.unwrap();
             }
         }
-        pool
     }
     async fn advance_turn(pool: &SqlitePool) {
         sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id='ta1'")
@@ -1399,5 +1489,192 @@ mod tests {
         assert_eq!(prune(&pool).await.unwrap(), 0);
         let rows_after = list_rejected_responses(&pool, Some("a"), 500).await.unwrap();
         assert_eq!(rows_after.len(), 0);
+    }
+
+    // ───────────── openai-api 切片 C：provider 隔離帳本 ─────────────
+
+    fn fence_b() -> Fence<'static> {
+        Fence { session: "sb", bot: "b", run: "rb", turn: "tb1", generation: 1, revision: 0 }
+    }
+    fn openai_scope<'a>(cap: Option<TotalCap<'a>>) -> ProviderScope<'a> {
+        ProviderScope { provider: PROVIDER_OPENAI, service_tier: Some("standard"), total_cap: cap }
+    }
+    fn attempt_of<'a>(id: &'a str, reserved: i64) -> Attempt<'a> {
+        Attempt { id, ordinal: 0, request_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", speed: "standard", reserved_microusd: reserved, pricing_version: "openai:gpt-6-luna:2026-11-18" }
+    }
+    const EPOCH: &str = "1970-01-01T00:00:00.000Z";
+    async fn spent(pool: &SqlitePool, provider: &str) -> i64 {
+        let mut c = pool.acquire().await.unwrap();
+        provider_spent_microusd(&mut c, provider, EPOCH).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_attempts_carry_their_provider_which_is_immutable_and_validated() {
+        let pool = pool().await;
+        let f = fence();
+        create(&pool, &f, &checkpoint(false)).await.unwrap();
+        // 舊呼叫路徑（`reserve`）＝anthropic，沒有 tier。
+        reserve(&pool, &f, &attempt_of("old-path", 100), &checkpoint(true), 1000, 0).await.unwrap();
+        let row: (String, Option<String>) = sqlx::query_as("SELECT provider, service_tier FROM api_bot_attempts WHERE id='old-path'").fetch_one(&pool).await.unwrap();
+        assert_eq!(row, ("anthropic".into(), None));
+        // OpenAI 路徑寫 openai ＋ tier。
+        let f1 = Fence { revision: 1, ..f.clone() };
+        let rec = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(1) };
+        let rev = record(&pool, &f1, "old-path", &rec, &checkpoint(false)).await.unwrap();
+        let f2 = Fence { revision: rev, ..f1 };
+        reserve_scoped(&pool, &f2, &Attempt { ordinal: 1, ..attempt_of("oa", 100) }, &checkpoint(true), 1000, 0, &openai_scope(None)).await.unwrap();
+        let row: (String, Option<String>) = sqlx::query_as("SELECT provider, service_tier FROM api_bot_attempts WHERE id='oa'").fetch_one(&pool).await.unwrap();
+        assert_eq!(row, ("openai".into(), Some("standard".into())));
+        // 不可變、只收已知 provider。
+        assert!(sqlx::query("UPDATE api_bot_attempts SET provider='openai' WHERE id='old-path'").execute(&pool).await.is_err());
+        assert!(sqlx::query("UPDATE api_bot_attempts SET provider='anthropic' WHERE id='oa'").execute(&pool).await.is_err());
+        assert!(sqlx::query("UPDATE api_bot_attempts SET provider='mystery' WHERE id='oa'").execute(&pool).await.is_err());
+        assert!(reserve_scoped(&pool, &f, &attempt_of("x", 5), &checkpoint(true), 1000, 0, &ProviderScope { provider: "mystery", service_tier: None, total_cap: None }).await.is_err());
+    }
+
+    /// 升級：舊 DB（沒有 provider 欄）含 recorded／reserved／unknown／failed 與已脫離 bot 的歷史列、舊 checkpoint——
+    /// 升級後全部歸 anthropic，Claude 的總花費前後逐位相等，舊 checkpoint 一個位元組都沒變，openai 帳是 0。
+    #[tokio::test]
+    async fn upgrade_assigns_every_old_row_to_anthropic_and_keeps_claude_spend_and_checkpoints() {
+        let pool = pool().await;
+        let f = fence();
+        let old_checkpoint = checkpoint(false);
+        create(&pool, &f, &old_checkpoint).await.unwrap();
+        // 退回舊 schema（拿掉這一片加的東西）。
+        for sql in [
+            "DROP TRIGGER api_bot_attempts_provider_immutable",
+            "DROP INDEX api_bot_attempts_provider_created",
+            "ALTER TABLE api_bot_attempts DROP COLUMN provider",
+            "ALTER TABLE api_bot_attempts DROP COLUMN service_tier",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let now = super::super::now();
+        // recorded 42、reserved 90（已脫離 bot）、unknown（沒估價→用預留 340）、failed（不算）、另一顆 bot 的 recorded 7。
+        for (id, bot, state, reserved, estimated, ord) in [
+            ("rec", Some("a"), "recorded", 300_i64, Some(42_i64), 0_i64),
+            ("det", None, "reserved", 90, None, 1),
+            ("unk", Some("a"), "unknown", 340, None, 2),
+            ("bad", Some("a"), "failed", 320, Some(18), 3),
+            ("oth", Some("b"), "recorded", 50, Some(7), 0),
+        ] {
+            let (session, run, turn) = if bot == Some("b") { (Some("sb"), Some("rb"), Some("tb1")) } else if bot.is_some() { (Some("s"), Some("ra"), Some("ta1")) } else { (None, None, None) };
+            if bot == Some("b") && ord == 0 {
+                create(&pool, &fence_b(), &checkpoint(false)).await.unwrap();
+            }
+            sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,?,?,?,1,?,'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard',?,?,?,'fixture-v1',?)")
+                .bind(id).bind(session).bind(bot).bind(run).bind(turn).bind(ord).bind(state).bind(reserved).bind(estimated).bind(&now).execute(&pool).await.unwrap();
+        }
+        // 舊的（沒有 provider 條件）整張表加總＝升級前 Claude 的總花費。
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd,0) WHEN state='reserved' THEN reserved_microusd
+                                      WHEN state='unknown' THEN COALESCE(estimated_microusd,reserved_microusd) ELSE 0 END),0)
+               FROM api_bot_attempts WHERE created_at >= ? AND state IN ('recorded','reserved','unknown')",
+        ).bind(EPOCH).fetch_one(&pool).await.unwrap();
+        assert_eq!(before, 42 + 90 + 340 + 7);
+        let checkpoints_before: Vec<(String, String)> = sqlx::query_as("SELECT id, checkpoint_json FROM api_bot_sessions ORDER BY id").fetch_all(&pool).await.unwrap();
+        sqlx::query("PRAGMA user_version = 96").execute(&pool).await.unwrap();
+
+        super::super::migrate_with(&pool, &[]).await.unwrap();
+
+        let providers: Vec<(String, String)> = sqlx::query_as("SELECT id, provider FROM api_bot_attempts ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(providers.len(), 5, "含已脫離 bot 的歷史列都還在");
+        assert!(providers.iter().all(|(_, p)| p == "anthropic"), "{providers:?}");
+        assert_eq!(spent(&pool, PROVIDER_ANTHROPIC).await, before, "Claude 的總花費前後相等");
+        assert_eq!(spent(&pool, PROVIDER_OPENAI).await, 0);
+        let checkpoints_after: Vec<(String, String)> = sqlx::query_as("SELECT id, checkpoint_json FROM api_bot_sessions ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(checkpoints_after, checkpoints_before, "舊 checkpoint 一個位元組都沒動");
+        // 升級後的 trigger 仍然生效。
+        assert!(sqlx::query("UPDATE api_bot_attempts SET provider='openai' WHERE id='rec'").execute(&pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_two_providers_never_use_each_others_cap_or_hourly_budget() {
+        let pool = pool().await;
+        let fa = fence();
+        create(&pool, &fa, &checkpoint(false)).await.unwrap();
+        // Claude 已經花了 900。
+        reserve(&pool, &fa, &attempt_of("claude-1", 900), &checkpoint(true), 100_000, 1).await.unwrap();
+        let cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
+        // OpenAI 的額度是自己的：Claude 的 900 不算，每小時 1 筆的限制也只數 openai（Claude 那筆不佔）。
+        let fb = fence_b();
+        create(&pool, &fb, &checkpoint(false)).await.unwrap();
+        reserve_scoped(&pool, &fb, &attempt_of("openai-1", 600), &checkpoint(true), 100_000, 1, &openai_scope(Some(cap))).await.unwrap();
+        assert_eq!(spent(&pool, PROVIDER_ANTHROPIC).await, 900);
+        assert_eq!(spent(&pool, PROVIDER_OPENAI).await, 600, "OpenAI 的預留不算進 Claude 的總花費");
+        // OpenAI 這一家再要 500 會超過它自己的 1000，被擋、不留列。
+        let rec = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(600) };
+        let rev = record(&pool, &Fence { revision: 1, ..fb.clone() }, "openai-1", &rec, &checkpoint(false)).await.unwrap();
+        let err = reserve_scoped(&pool, &Fence { revision: rev, ..fb.clone() }, &Attempt { ordinal: 1, ..attempt_of("openai-2", 500) }, &checkpoint(true), 100_000, 0, &openai_scope(Some(cap))).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<TotalCapRefused>(), Some(&TotalCapRefused { cap_microusd: 1_000, spent_microusd: 600 }));
+        assert_eq!(count(&pool).await, 2);
+        // Claude 的額度同樣不受 OpenAI 的 600 影響：它自己的 900 + 100 = 1000 剛好還能預留。
+        let rec_a = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(900) };
+        let rev_a = record(&pool, &Fence { revision: 1, ..fa.clone() }, "claude-1", &rec_a, &checkpoint(false)).await.unwrap();
+        let claude_cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
+        let scope_a = ProviderScope { provider: PROVIDER_ANTHROPIC, service_tier: None, total_cap: Some(claude_cap) };
+        reserve_scoped(&pool, &Fence { revision: rev_a, ..fa.clone() }, &Attempt { ordinal: 1, ..attempt_of("claude-2", 100) }, &checkpoint(true), 100_000, 0, &scope_a).await.expect("Claude 的 900+100 沒超過它自己的 1000");
+    }
+
+    /// 同 provider 兩筆並發：只有一筆拿得到最後的預算（餘額檢查與寫入預留在同一個 BEGIN IMMEDIATE 交易）。
+    #[tokio::test]
+    async fn two_concurrent_reservations_for_the_same_provider_cannot_both_take_the_last_budget() {
+        let dir = crate::test_dirs::scratch_dir("am-openai-cap-race");
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.join("race.db"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(20))
+            .foreign_keys(true);
+        for round in 0..8 {
+            let path = dir.join(format!("race{round}.db"));
+            let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(4).connect_with(opts.clone().filename(&path)).await.unwrap();
+            super::super::migrate_with(&pool, &[]).await.unwrap();
+            seed(&pool).await;
+            let (fa, fb) = (fence(), fence_b());
+            create(&pool, &fa, &checkpoint(false)).await.unwrap();
+            create(&pool, &fb, &checkpoint(false)).await.unwrap();
+            // 上限 1000，各要 600：只能有一筆。
+            let cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
+            let (cp_a, cp_b) = (checkpoint(true), checkpoint(true));
+            let (at_a, at_b) = (attempt_of("race-a", 600), attempt_of("race-b", 600));
+            let (scope_a, scope_b) = (openai_scope(Some(cap)), openai_scope(Some(cap)));
+            let (ra, rb) = tokio::join!(
+                reserve_scoped(&pool, &fa, &at_a, &cp_a, 100_000, 0, &scope_a),
+                reserve_scoped(&pool, &fb, &at_b, &cp_b, 100_000, 0, &scope_b),
+            );
+            let oks = [ra.is_ok(), rb.is_ok()].iter().filter(|b| **b).count();
+            assert_eq!(oks, 1, "round {round}: 只有一筆能拿到最後的預算：{ra:?} / {rb:?}");
+            let loser = if ra.is_err() { ra.unwrap_err() } else { rb.unwrap_err() };
+            assert!(loser.downcast_ref::<TotalCapRefused>().is_some(), "輸的那筆是被總上限擋下：{loser:?}");
+            assert_eq!(spent(&pool, PROVIDER_OPENAI).await, 600);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unaffordable_reservation_is_refused_before_anything_is_written() {
+        let pool = pool().await;
+        let f = fence();
+        create(&pool, &f, &checkpoint(false)).await.unwrap();
+        // 每回合上限 500 < 預留 600：HTTP 前就擋（TurnBudget），不留列。
+        let e = reserve_scoped(&pool, &f, &attempt_of("big", 600), &checkpoint(true), 500, 0, &openai_scope(None)).await.unwrap_err();
+        assert!(matches!(e.downcast_ref::<ReserveRefused>(), Some(ReserveRefused::TurnBudget)));
+        // 總上限 100 < 預留 600：同樣擋。
+        let e = reserve_scoped(&pool, &f, &attempt_of("big", 600), &checkpoint(true), 5_000, 0, &openai_scope(Some(TotalCap { since: EPOCH, cap_microusd: 100 }))).await.unwrap_err();
+        assert!(e.downcast_ref::<TotalCapRefused>().is_some());
+        assert_eq!(count(&pool).await, 0);
+    }
+
+    #[test]
+    fn usage_that_looks_like_it_carries_an_api_key_is_never_stored() {
+        for bad in ["sk-test-SENTINEL-XYZ", "prefix sk-proj-abcdefgh12345 suffix", "sk-ant-api03-abcdef", "key=sk-AAAAAAAA"] {
+            assert!(looks_like_api_key(bad), "{bad}");
+            assert!(usage_json(Some(&json!({"input_tokens": 1, "output_tokens": 1, "note": bad}))).is_err(), "{bad}");
+        }
+        for ok in ["task-list", "sk-short", "risk-assessment-notes", "desk-top-1"] {
+            assert!(!looks_like_api_key(ok), "{ok}");
+        }
+        assert!(usage_json(Some(&json!({"input_tokens": 1, "output_tokens": 1}))).is_ok());
     }
 }

@@ -453,7 +453,7 @@ pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> 
                               ELSE 0 END, 0),
                 (state='unknown' AND estimated_microusd IS NULL)
          FROM api_bot_attempts
-         WHERE created_at >= ? AND state IN ('recorded', 'unknown')
+         WHERE provider = 'anthropic' AND created_at >= ? AND state IN ('recorded', 'unknown')
          ORDER BY created_at ASC"
     )
     .bind(since_rfc3339)

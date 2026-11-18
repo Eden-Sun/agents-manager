@@ -1585,6 +1585,10 @@
         sqlx::query("DROP TABLE child_done_state").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS api_bot_rejected_responses").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&pool).await.unwrap();
+        // openai-api 切片 C：provider 欄／tier 欄／不可變 trigger／索引（v69 的 api_bot_attempts 還沒有這些）。
+        for sql in ["DROP TRIGGER api_bot_attempts_provider_immutable", "DROP INDEX api_bot_attempts_provider_created", "ALTER TABLE api_bot_attempts DROP COLUMN provider", "ALTER TABLE api_bot_attempts DROP COLUMN service_tier"] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&pool).await.unwrap();
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&pool).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&pool).await.unwrap();
