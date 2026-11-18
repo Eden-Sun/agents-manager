@@ -409,6 +409,24 @@ mod tests {
         assert_eq!(p_exec["dispatch_reason"], "純 API 模型，不能接受 bot 派工");
     }
 
+    /// openai-api 的顧問跟 claude-api 的一樣：可派工、標 API 計費；不是顧問就不可派。
+    #[tokio::test]
+    async fn openai_api_advisor_is_dispatchable_with_api_billing() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let adv = crate::testing::claude_bot(&app, &env.project_id, "oa-adv").await;
+        sqlx::query("UPDATE bots SET kind='openai-api', role='advisor', model='gpt-6-luna' WHERE id=?").bind(&adv.id).execute(&app.db).await.unwrap();
+        let exec = crate::testing::claude_bot(&app, &env.project_id, "oa-exec").await;
+        sqlx::query("UPDATE bots SET kind='openai-api', role='executor', model='gpt-6-luna' WHERE id=?").bind(&exec.id).execute(&app.db).await.unwrap();
+        let value = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(adv.id.clone()))).await.unwrap().0;
+        let peers = value["peers"].as_array().unwrap();
+        let p_adv = peers.iter().find(|p| p["id"] == adv.id).unwrap();
+        assert_eq!((p_adv["kind"].clone(), p_adv["dispatchable"].clone(), p_adv["billing"].clone()), (json!("openai-api"), json!(true), json!("api")));
+        assert!(p_adv.get("dispatch_reason").is_none());
+        let p_exec = peers.iter().find(|p| p["id"] == exec.id).unwrap();
+        assert_eq!((p_exec["dispatchable"].clone(), p_exec["dispatch_reason"].clone()), (json!(false), json!("純 API 模型，不能接受 bot 派工")));
+    }
+
     #[tokio::test]
     async fn peers_manager_use_disabled_marks_ineligible() {
         let env = crate::testing::env().await;

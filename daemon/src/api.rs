@@ -5592,6 +5592,7 @@ async fn delete_identity(
 /// `GET /api/bots/{id}/api-usage`：claude-api bot 的累計花費與 token 用量（唯讀，只讀 `api_bot_attempts`，不含 prompt／回覆）。
 /// 金額都是整數微美元：`recorded`＝已結算的估價；`reserved`＝已預留、還沒回的；`unknown`＝結果不明、保留預留額（不捏造成零）。
 /// 命中率＝cache_read ÷ (input＋cache_read＋cache_creation)（Anthropic 的 `input_tokens` 不含快取的部分）。
+/// OpenAI 的 usage 欄位叫 `cached_tokens`／`cache_write_tokens`，而且 `input_tokens` **含**它們：SQL 裡換成同一種語意再加總。
 async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     if principal != RequestPrincipal::User { return Err(bot_user_only()); }
     let bot = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -5605,9 +5606,9 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd,0) END),0),
                 COALESCE(SUM(CASE WHEN state='reserved' THEN reserved_microusd END),0),
                 COALESCE(SUM(CASE WHEN state='unknown' THEN COALESCE(estimated_microusd,reserved_microusd) END),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.input_tokens'),0) END),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),0) END),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),0) END),0)
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.input_tokens'),0) - COALESCE(json_extract(usage_json,'$.cached_tokens'),0) - COALESCE(json_extract(usage_json,'$.cache_write_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),json_extract(usage_json,'$.cached_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),json_extract(usage_json,'$.cache_write_tokens'),0) END),0)
          FROM api_bot_attempts WHERE bot_id=?",
     )
     .bind(&id).fetch_one(&app.db).await.map_err(any_err)?;
@@ -5625,7 +5626,8 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
         "SELECT usage_json FROM api_bot_attempts WHERE bot_id=? AND state='recorded' ORDER BY created_at DESC, ordinal DESC LIMIT 1",
     )
     .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
-    let compact_at = app.cfg.get().await.claude_api.api_bot.compact_at_input_tokens;
+    // 壓縮門檻是 Claude 的設定；openai-api 沒有壓縮（給 0 → null）。
+    let compact_at = if bot.kind == crate::config::OPENAI_API_KIND { 0 } else { app.cfg.get().await.claude_api.api_bot.compact_at_input_tokens };
     let context = json!({
         "tokens": last_usage.flatten().and_then(|u| serde_json::from_str::<Value>(&u).ok()).map(|u| crate::api_bot_turn_cost::context_tokens(&u)),
         "compact_at": (compact_at > 0).then_some(compact_at),
@@ -5635,19 +5637,29 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
     let last_json = last.map(|(actual, requested, usage, at)| {
         let u: Value = usage.and_then(|u| serde_json::from_str(&u).ok()).unwrap_or(Value::Null);
         let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+        // OpenAI 的 usage：快取欄位叫 cached_tokens／cache_write_tokens，而且 input_tokens 含它們；換成跟 Claude 同一種語意再回。
+        let (read, write) = (g("cache_read_input_tokens").max(g("cached_tokens")), g("cache_creation_input_tokens").max(g("cache_write_tokens")));
+        let plain_input = g("input_tokens") - g("cached_tokens") - g("cache_write_tokens");
         let effort = u.get("effort").and_then(Value::as_str);
         let auto_lowered = u.get("auto_lowered_effort").and_then(Value::as_bool).unwrap_or(false);
-        json!({"speed": actual.unwrap_or(requested), "at": at, "input_tokens": g("input_tokens"), "output_tokens": g("output_tokens"),
-               "cache_read_input_tokens": g("cache_read_input_tokens"), "cache_creation_input_tokens": g("cache_creation_input_tokens"),
+        json!({"speed": actual.unwrap_or(requested), "at": at, "input_tokens": plain_input, "output_tokens": g("output_tokens"),
+               "cache_read_input_tokens": read, "cache_creation_input_tokens": write,
                "effort": effort, "auto_lowered_effort": auto_lowered})
     });
     let stuck = crate::api_bot::sweeper::detect_stuck(&app, &id).await;
     // 進行中的回合要讓使用者看到「第幾次／上限、跑多久／時限」：把這顆設定的每回合上限附在每個 turn 上（回合開始時讀一次，跟 runtime 同一組數字）。
-    let limits = app.cfg.get().await.claude_api.api_bot.clone();
+    let (max_calls, turn_timeout_secs) = {
+        let cfg = app.cfg.get().await;
+        if bot.kind == crate::config::OPENAI_API_KIND {
+            (json!(cfg.openai_api.api_bot.max_api_calls_per_turn), json!(cfg.openai_api.api_bot.turn_timeout_secs))
+        } else {
+            (json!(cfg.claude_api.api_bot.max_api_calls_per_turn), json!(cfg.claude_api.api_bot.turn_timeout_secs))
+        }
+    };
     let mut turns = crate::api_bot_turn_cost::recent_turns(&app.db, &id).await.map_err(any_err)?;
     for t in &mut turns {
-        t["max_calls"] = json!(limits.max_api_calls_per_turn);
-        t["turn_timeout_secs"] = json!(limits.turn_timeout_secs);
+        t["max_calls"] = max_calls.clone();
+        t["turn_timeout_secs"] = turn_timeout_secs.clone();
     }
     Ok(Json(json!({
         "bot_id": id,
@@ -6772,10 +6784,11 @@ pub(crate) async fn prompt_bot(
             }
         }
         let delivery_key = format!("relay-request:{request_id}");
-        let is_target_claude_api = kind == Some(crate::config::CLAUDE_API_KIND);
+        // API 顧問（claude-api／openai-api）走同一條 native 路徑；派工前的上限依目標的供應商各算各的。
+        let is_target_claude_api = kind.is_some_and(crate::config::is_api_kind);
         let out = if is_target_claude_api {
             use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError, ApiNativeStartMode};
-            if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(&app, 0).await {
+            if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed_for_kind(&app, kind.unwrap_or_default(), 0).await {
                 let cap_str = crate::claude_api_cap::format_usd_pretty(cap);
                 let spent_str = crate::claude_api_cap::format_usd_pretty(spent);
                 let err_msg = format!("api_total_cap_reached:cap={cap_str}:spent={spent_str}");

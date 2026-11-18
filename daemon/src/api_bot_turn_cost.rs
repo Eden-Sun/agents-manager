@@ -11,10 +11,10 @@ pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Va
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd,0) END),0),
                 COALESCE(SUM(CASE WHEN state='reserved' THEN reserved_microusd END),0),
                 COALESCE(SUM(state='reserved'),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.input_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.input_tokens'),0) - COALESCE(json_extract(usage_json,'$.cached_tokens'),0) - COALESCE(json_extract(usage_json,'$.cache_write_tokens'),0) END),0),
                 COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.output_tokens'),0) END),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),0) END),0),
-                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_read_input_tokens'),json_extract(usage_json,'$.cached_tokens'),0) END),0),
+                COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(json_extract(usage_json,'$.cache_creation_input_tokens'),json_extract(usage_json,'$.cache_write_tokens'),0) END),0),
                 MAX(requested_speed), MIN(created_at),
                 MAX(json_extract(usage_json,'$.effort')),
                 MAX(json_extract(usage_json,'$.auto_lowered_effort'))

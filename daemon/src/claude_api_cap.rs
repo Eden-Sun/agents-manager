@@ -63,6 +63,21 @@ pub async fn check_total_cap_allowed(
     }
 }
 
+/// 派工前的總上限檢查，依**目標 bot 的 kind 的供應商**：openai-api 只看 `[openai_api.api_bot]` 的上限與 openai 的帳，
+/// 其他（claude-api）照舊看 Claude 的。兩家互不佔額：一家用完不擋另一家。回 `Err((上限, 已花))`（美元）。
+pub async fn check_total_cap_allowed_for_kind(app: &Arc<App>, kind: &str, reserve_microusd: i64) -> Result<(), (f64, f64)> {
+    if kind != crate::config::OPENAI_API_KIND {
+        return check_total_cap_allowed(app, reserve_microusd).await;
+    }
+    let cfg = app.cfg.get().await;
+    let Some((since, cap_microusd)) = crate::api_bot::openai::cap::total_cap(&cfg) else { return Ok(()) };
+    let spent_microusd = query_total_cap_spent_microusd(app, &since, am_base::db::api_bot::PROVIDER_OPENAI).await.unwrap_or(0);
+    if spent_microusd.saturating_add(reserve_microusd.max(0)) > cap_microusd {
+        return Err((cap_microusd as f64 / 1_000_000.0, spent_microusd as f64 / 1_000_000.0));
+    }
+    Ok(())
+}
+
 /// 格式化金額（去除多餘小數位或保留美觀，如 10 或 10.5 或 10.25）
 pub fn format_usd_pretty(val: f64) -> String {
     let s = format!("{:.4}", val);

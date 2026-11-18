@@ -4217,8 +4217,9 @@ Grok 撞限的回合不以 `end_turn` 收尾。`hookrecv` 對通過世代圍籬�
 - **指示更新**：system 變了時 Claude 是在 user 訊息前加一個 text 區塊；OpenAI 的 user 訊息是純文字，更新內容直接接在訊息前面。
 - **重啟後的恢復**（D2b-3）：啟動閘門、native resume、sweeper 都認得 openai 的 checkpoint（`provider::codec_for`）。resume 要求 session 的供應商就是 bot 的 kind 的那一家，而且 bot 現在的模型與 checkpoint 裡每一份回應的模型都在 openai-api 的核准清單內；不符照舊回 `api_model_changed`／不接續。回合在一批工具呼叫中途被中斷時，sweeper 用 OpenAI 的 codec 結清：這一批裡**每一個**還沒有結果的 `function_call` 都補上 `not executed: turn ended`（`is_error`）並標成已完成（Responses API 要求每個呼叫都有 output；Claude 仍只補 `tool_pending` 那一個，行為不變）。對話是否結清（`startup_context_settled`）對 openai 由 codec 判斷：沒有未配對的呼叫，且回應裡宣告過的呼叫都已完成。
 - **上游回報的模型**：回應的 `model` 取上游實際回報的值。等於要求的模型、或是它的快照名（`<要求的>-…`）→ 記成要求的 id，原名留在 usage 的 `upstream_model`；回報了別的模型 → 原樣帶出，內容檢查與結算都拒絕（費用未知）；沒回報 → 當作要求的那個。
-- **用量顯示**：`api-usage` 的 `cache` 對 openai-api 只給 `last_request_at`／`working`，`ttl_secs`、`expires_at` 為 null（5 分鐘／1 小時倒數是 Claude prompt cache 的規則）。回合時間線的工具備援讀得懂 OpenAI 的 `function_call` 與 `tool_results`。
-- **尚未完成**（D2b-4）：顧問派工的端到端與派工前依供應商的上限檢查、Web 建立入口（切片 E）。
+- **用量顯示**：`api-usage` 的 `cache` 對 openai-api 只給 `last_request_at`／`working`，`ttl_secs`、`expires_at` 為 null（5 分鐘／1 小時倒數是 Claude prompt cache 的規則）。回合時間線的工具備援讀得懂 OpenAI 的 `function_call` 與 `tool_results`。OpenAI 的 usage 欄位（`cached_tokens`／`cache_write_tokens`，且 `input_tokens` **含**它們）在 `api-usage`、最近回合、回合時間線都換成跟 Claude 同一種語意（input 不含快取）再回，命中率才對；時間線的花費拆分用 OpenAI 的價表（含長文加價），不是 Claude 的；`context.compact_at` 為 null、每回合上限取 `[openai_api.api_bot]`。
+- **工具耗時紀錄**（兩種 API kind 共用）：記在**叫它的那一次請求**上（執行前就定下是哪一筆 attempt），並用單一 UPDATE 接上；同一次回應的多個工具不會互相蓋掉，也不會落到下一次請求那一列。
+- **顧問派工**（D2b-4）：`role=advisor` 的 openai-api bot 跟 claude-api 顧問走同一條路——只收帶 `expect_result` 的請教、不是顧問回 403 `member_not_dispatchable`、沒在跑時派工自動啟動（啟動被拒 → 請求 `failed`，`start_failed:<原因>`，例 `openai_not_configured`）、忙時排隊由背景補送、回覆後管理者收到一則結果通知。派工前的總上限**依目標的供應商各算各的**（`check_total_cap_allowed_for_kind`）：openai-api 只看 `[openai_api.api_bot]` 的上限與 `provider=openai` 的帳，用完 → 請求 `failed`，`api_total_cap_reached:cap=…:spent=…`；一家用完不擋另一家。`agm peers` 把 openai-api 顧問列為可派工（`billing: "api"`）。
 
 
 ### 12a.2 hook 與 statusLine：全域設定檔 + env 分派

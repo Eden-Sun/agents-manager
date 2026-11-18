@@ -7036,9 +7036,89 @@ async fn openai_api_session_resumes_after_a_daemon_restart_with_its_history() {
     let cache = crate::api_bot_turn_cost::cache_info(&app.db, &bot).await.unwrap();
     assert!(cache["last_request_at"].is_string() && cache["ttl_secs"].is_null() && cache["expires_at"].is_null(), "{cache}");
     // 回合時間線：工具從 OpenAI 的 function_call 看得到。
-    let timeline = super::super::timeline::get_turn_timeline(&app.db, &bot, &key.turn_id).await.unwrap().unwrap();
+    // （工具的耗時是回合外的背景寫入：等兩筆都落地。兩個工具同一次回應，各記各的、不互相蓋掉。）
+    let timeline = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            // 兩筆都記在叫它們的那一次請求（ordinal 0）上，不會落到下一次請求那一列。
+            let recorded: Vec<Option<i64>> = sqlx::query_scalar("SELECT json_array_length(usage_json, '$.tools') FROM api_bot_attempts WHERE turn_id=? ORDER BY ordinal").bind(&key.turn_id).fetch_all(&app.db).await.unwrap();
+            assert!(recorded.get(1).copied().flatten().is_none(), "{recorded:?}");
+            if recorded.first().copied().flatten() == Some(2) { break super::super::timeline::get_turn_timeline(&app.db, &bot, &key.turn_id).await.unwrap().unwrap(); }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("both tool records land");
     let tools = timeline["timeline"].as_array().map(|items| items.iter().filter(|i| i["type"] == "tool").count()).unwrap_or(0);
     assert_eq!(tools, 2, "{timeline}");
+    // 花費拆分用 OpenAI 的價表（不是 Claude 的）：第一回合 2000 輸入 ×$0.10/M＋52 輸出 ×$0.50/M，合計就是帳上的 226 微美元。
+    let breakdown = &timeline["summary"]["breakdown"];
+    let usd = |v: &Value| (v.as_f64().unwrap() * 1e9).round() as i64;
+    assert_eq!((usd(&breakdown["input"]["cost_usd"]), usd(&breakdown["output"]["cost_usd"]), usd(&timeline["summary"]["total_cost_usd"])), (200_000, 26_000, 226_000), "{timeline}");
+}
+
+/// 端到端：管理者請教（`expect_result`）→ openai-api 顧問（沒在跑，派工時自動啟動；回合裡用了兩個工具）回覆 →
+/// 管理者收到**剛好一則**結果通知，內容是顧問的回覆；再掃幾次也不會多送。全程走假 OpenAI server，Claude 的 API 沒開。
+#[tokio::test]
+async fn openai_api_advisor_relay_end_to_end_delivers_exactly_one_result_notice() {
+    let env = crate::testing::env().await;
+    sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+    let (endpoint, seen, shutdown, server) = openai_two_tool_server().await;
+    let executed = Arc::new(AtomicUsize::new(0));
+    enable_fake_openai_runtime(&env, endpoint, Arc::new(OkTools(executed.clone()))).await;
+    let manager = crate::testing::claude_bot(&env.app, &env.project_id, "mgr-bot").await;
+    sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+    let advisor = insert_openai_bot(&env, "openai-advisor").await;
+    sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor).execute(&env.app.db).await.unwrap();
+    let mgr_run = crate::testing::fake_run(&env.app, &manager.id).await;
+    sqlx::query("UPDATE runs SET state='running', runtime_role_policy=? WHERE id=?").bind(format!("{}:local:expert:manager", env.project_id)).bind(&mgr_run).execute(&env.app.db).await.unwrap();
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("X-AM-Bot-Id", manager.id.parse().unwrap());
+    headers.insert("X-AM-Bot-Token", manager.hook_token.parse().unwrap());
+    let body: crate::api::PromptIn = serde_json::from_value(json!({"text": "Which commands should run?", "client_request_id": "oa-e2e-1", "expect_result": true})).unwrap();
+    let res = crate::api::prompt_bot(axum::extract::State(env.app.clone()), axum::extract::Path(advisor.clone()), headers, axum::Extension(crate::api::RequestPrincipal::Bot(manager.id.clone())), axum::Json(body)).await.unwrap();
+    let val: Value = serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 65536).await.unwrap()).unwrap();
+    // 顧問沒在跑：派工先把它啟動，請求留在 pending，由背景補送。
+    assert_eq!(val["delivery"], "pending", "{val}");
+    let request_id = val["request_id"].as_str().unwrap().to_string();
+    let running: Option<String> = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? AND ended_at IS NULL").bind(&advisor).fetch_optional(&env.app.db).await.unwrap();
+    assert_eq!(running.as_deref(), Some("running"), "派工自動啟動了 openai-api 顧問");
+
+    // 掃到請求有了回合、回合完成、請求 answered 為止。
+    sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&mgr_run).execute(&env.app.db).await.unwrap();
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            crate::runners::relay_requests::sweep(&env.app).await;
+            let (state, error): (String, Option<String>) = sqlx::query_as("SELECT state, error FROM relay_requests WHERE id=?").bind(&request_id).fetch_one(&env.app.db).await.unwrap();
+            assert_ne!(state, "failed", "{error:?}");
+            if state == "answered" || state == "notified" { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("the request is answered");
+    for _ in 0..3 {
+        crate::runners::relay_requests::sweep(&env.app).await;
+    }
+    shutdown.cancel();
+    server.await.unwrap();
+
+    assert_eq!(executed.load(Ordering::SeqCst), 2, "顧問的回合跑了兩個工具");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].1["input"][0]["content"][0]["text"].as_str().unwrap().contains("Which commands should run?"));
+    let mgr_conv = crate::db::conversation_id(&env.app.db, &manager.id).await.unwrap();
+    let notices: Vec<(String, String)> = sqlx::query_as("SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id=t.id AND m.role='user' WHERE t.conversation_id=? AND t.queue_class='daemon'").bind(&mgr_conv).fetch_all(&env.app.db).await.unwrap();
+    assert_eq!(notices.len(), 1, "管理者只收到一則結果通知：{notices:?}");
+    assert!(notices[0].1.contains("both commands ran"), "{}", notices[0].1);
+    assert!(!notices[0].1.contains("ENC-runtime-secret"));
+    let attempts: Vec<String> = sqlx::query_scalar("SELECT provider FROM api_bot_attempts WHERE bot_id=?").bind(&advisor).fetch_all(&env.app.db).await.unwrap();
+    assert_eq!(attempts, ["openai", "openai"]);
+
+    // 通知送達確認後請求進 notified，仍然只有那一則。
+    sqlx::query("UPDATE turns SET status='in_flight', delivery='ok', delivery_verified=1, run_id=? WHERE id=?").bind(&mgr_run).bind(&notices[0].0).execute(&env.app.db).await.unwrap();
+    crate::runners::relay_requests::sweep(&env.app).await;
+    let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id=?").bind(&request_id).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(state, "notified");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND queue_class='daemon'").bind(&mgr_conv).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(count, 1);
+    assert!(!env.app.cfg.get().await.claude_api.enabled);
 }
 
 /// 新的 async 路徑（openai-api 的 start → prompt → tool → settle）在 1 MiB 的執行緒上跑得完。

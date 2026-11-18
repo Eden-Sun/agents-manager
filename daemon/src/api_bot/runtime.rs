@@ -1871,6 +1871,17 @@ impl super::runner::Tools for TimedSharedTools {
         cancel: &'a CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
+            // 這個工具是哪一次請求叫的：**執行前**就定下來（此刻最新的 recorded attempt 就是剛收到的那份回應）。
+            // 以前是背景寫入時才找「最新的」，工具跑得快時會記到下一次請求那一列。查不到就不記（只影響時間線的耗時）。
+            let attempt_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM api_bot_attempts WHERE bot_id = ? AND turn_id = ? AND state = 'recorded' ORDER BY ordinal DESC, created_at DESC LIMIT 1",
+            )
+            .bind(&self.bot_id)
+            .bind(&self.turn_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
             let start = std::time::Instant::now();
             let res = self.inner.execute(call, cancel).await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -1878,50 +1889,22 @@ impl super::runner::Tools for TimedSharedTools {
 
             // 異步記錄工具耗時與錯誤至該 attempt 的 usage_json["tools"]
             let pool = self.pool.clone();
-            let bot_id = self.bot_id.clone();
-            let turn_id = self.turn_id.clone();
             let tool_name = call.name.clone();
 
+            // 一個 UPDATE 完成「讀出 tools → 接上一筆 → 寫回」：同一次回應的兩個工具各自收尾時不會互相蓋掉
+            // （以前是先 SELECT 再整份寫回，後寫的會把先寫的那一筆弄丟）。
             tokio::spawn(async move {
-                let latest_attempt: Option<(String, Option<String>)> = sqlx::query_as(
-                    "SELECT id, usage_json FROM api_bot_attempts \
-                     WHERE bot_id = ? AND turn_id = ? AND state = 'recorded' \
-                     ORDER BY ordinal DESC, created_at DESC LIMIT 1",
+                let Some(attempt_id) = attempt_id else { return };
+                let entry = serde_json::json!({"name": tool_name, "duration_ms": duration_ms, "is_error": is_error}).to_string();
+                let _ = sqlx::query(
+                    "UPDATE api_bot_attempts \
+                     SET usage_json = json_set(usage_json, '$.tools', json_insert(COALESCE(json_extract(usage_json, '$.tools'), '[]'), '$[#]', json(?))) \
+                     WHERE id = ? AND usage_json IS NOT NULL AND json_valid(usage_json) AND json_type(usage_json) = 'object'",
                 )
-                .bind(&bot_id)
-                .bind(&turn_id)
-                .fetch_optional(&pool)
-                .await
-                .ok()
-                .flatten();
-
-                if let Some((att_id, usage_raw)) = latest_attempt {
-                    if let Some(raw) = usage_raw {
-                        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                            if let Some(obj) = val.as_object_mut() {
-                                let tools_arr = obj
-                                    .entry("tools")
-                                    .or_insert_with(|| serde_json::json!([]));
-                                if let Some(arr) = tools_arr.as_array_mut() {
-                                    arr.push(serde_json::json!({
-                                        "name": tool_name,
-                                        "duration_ms": duration_ms,
-                                        "is_error": is_error,
-                                    }));
-                                    if let Ok(new_usage) = serde_json::to_string(&val) {
-                                        let _ = sqlx::query(
-                                            "UPDATE api_bot_attempts SET usage_json = ? WHERE id = ?",
-                                        )
-                                        .bind(new_usage)
-                                        .bind(att_id)
-                                        .execute(&pool)
-                                        .await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                .bind(entry)
+                .bind(attempt_id)
+                .execute(&pool)
+                .await;
             });
 
             res

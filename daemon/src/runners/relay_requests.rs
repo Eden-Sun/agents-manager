@@ -330,9 +330,10 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                 }
             }
             let to_kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(&to).fetch_optional(&app.db).await?;
-            let is_claude_api = to_kind.as_deref() == Some(crate::config::CLAUDE_API_KIND);
+            // API 顧問（claude-api／openai-api）：派工前的上限、自動啟動、native prompt 都同一條路；上限依目標的供應商各算各的。
+            let is_claude_api = to_kind.as_deref().is_some_and(crate::config::is_api_kind);
             if is_claude_api && existing.is_none() {
-                if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed(app, 0).await {
+                if let Err((cap, spent)) = crate::claude_api_cap::check_total_cap_allowed_for_kind(app, to_kind.as_deref().unwrap_or_default(), 0).await {
                     let cap_str = crate::claude_api_cap::format_usd_pretty(cap);
                     let spent_str = crate::claude_api_cap::format_usd_pretty(spent);
                     let err_msg = format!("api_total_cap_reached:cap={cap_str}:spent={spent_str}");

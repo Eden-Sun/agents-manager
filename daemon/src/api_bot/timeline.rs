@@ -251,7 +251,15 @@ fn build_timeline_and_summary(
     )],
     checkpoint: Option<&Value>,
 ) -> Value {
-    let rates = model_rates(model);
+    // OpenAI 的模型用它自己的價表拆分（單位換成這裡的「每千萬 token 的美元」）；usage 的欄位名與 input 的定義也不同，見下。
+    let openai_table = crate::api_bot::openai::pricing::price_table(model);
+    let rates = match openai_table {
+        Some(t) => {
+            let unit = |microusd_per_mtok: u64| microusd_per_mtok as f64 / 100_000.0;
+            Rates { input: unit(t.input), write_5m: unit(t.cache_write), write_1h: unit(t.cache_write), read: unit(t.cache_read), output: unit(t.output) }
+        }
+        None => model_rates(model),
+    };
     let is_ttl_1h = cache_ttl_secs > 300;
 
     let mut total_cost_usd = 0.0_f64;
@@ -443,14 +451,23 @@ fn build_timeline_and_summary(
                 .unwrap_or(0);
             let u_read = usage_obj
                 .as_ref()
-                .and_then(|u| u.get("cache_read_input_tokens"))
+                .and_then(|u| u.get("cache_read_input_tokens").or_else(|| u.get("cached_tokens")))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let u_write = usage_obj
                 .as_ref()
-                .and_then(|u| u.get("cache_creation_input_tokens"))
+                .and_then(|u| u.get("cache_creation_input_tokens").or_else(|| u.get("cache_write_tokens")))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            // OpenAI 的 `input_tokens` **含**快取讀寫（Claude 的不含）：拆分時扣掉，才不會重複計；
+            // 輸入超過長文門檻時整個請求輸入與快取 ×2、輸出 ×1.5。
+            let (u_in, in_factor, out_factor) = match openai_table {
+                Some(t) => {
+                    let long = u_in > t.long_context_over;
+                    (u_in.saturating_sub(u_read.saturating_add(u_write)), if long { 2.0 } else { 1.0 }, if long { 1.5 } else { 1.0 })
+                }
+                None => (u_in, 1.0, 1.0),
+            };
 
             // server tool check
             let u_server_tool = usage_obj
@@ -464,10 +481,10 @@ fn build_timeline_and_summary(
                 rates.write_5m
             };
 
-            let c_in = (u_in as f64 * rates.input) * speed_factor / 10_000_000.0;
-            let c_read = (u_read as f64 * rates.read) * speed_factor / 10_000_000.0;
-            let c_write = (u_write as f64 * write_rate) * speed_factor / 10_000_000.0;
-            let c_out = (u_out as f64 * rates.output) * speed_factor / 10_000_000.0;
+            let c_in = (u_in as f64 * rates.input) * speed_factor * in_factor / 10_000_000.0;
+            let c_read = (u_read as f64 * rates.read) * speed_factor * in_factor / 10_000_000.0;
+            let c_write = (u_write as f64 * write_rate) * speed_factor * in_factor / 10_000_000.0;
+            let c_out = (u_out as f64 * rates.output) * speed_factor * out_factor / 10_000_000.0;
 
             input_tokens += u_in;
             input_cost_usd += c_in;
