@@ -8,6 +8,7 @@ pub(crate) mod anthropic;
 pub(crate) mod provider;
 pub(crate) mod completion;
 pub(crate) mod http;
+pub(crate) mod openai;
 pub(crate) mod protocol;
 pub(crate) mod quote;
 mod pricing;
