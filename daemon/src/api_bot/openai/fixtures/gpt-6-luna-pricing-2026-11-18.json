@@ -7,6 +7,12 @@
     "input": "0.10",
     "cache_read": "0.01",
     "cache_write_default": "0.125",
+    "cache_write_12h": "0.25",
     "output": "0.50"
+  },
+  "long_context": {
+    "over_input_tokens": 272000,
+    "input_and_cache_multiplier": "2",
+    "output_multiplier": "1.5"
   }
 }

@@ -437,6 +437,9 @@ fn the_price_table_matches_the_dated_fixture() {
     assert_eq!(t.cache_write, usd_str_to_micro(p["cache_write_default"].as_str().unwrap()));
     assert_eq!(t.output, usd_str_to_micro(p["output"].as_str().unwrap()));
     assert_eq!((t.input, t.cache_read, t.cache_write, t.output), (100_000, 10_000, 125_000, 500_000));
+    assert_eq!(t.cache_write_12h, usd_str_to_micro(p["cache_write_12h"].as_str().unwrap()));
+    assert_eq!(t.cache_write_12h * 2, t.input * 5, "12 小時寫入＝輸入價 ×2.5");
+    assert_eq!(Some(t.long_context_over), fixture["long_context"]["over_input_tokens"].as_u64());
     assert!(price_table("gpt-unknown").is_none(), "缺價＝找不到，呼叫端在 HTTP 前拒絕");
 }
 
@@ -454,9 +457,10 @@ fn cost_splits_ordinary_input_cache_read_cache_write_and_output() {
     // 3000×$0.10 + 6000×$0.01 + 1000×$0.125 + 2000×$0.50（每百萬）＝ 300 + 60 + 125 + 1000 = 1485 微美元。
     assert_eq!(cost_microusd(&GPT_6_LUNA_2026_11_18, &parsed), Some(1_485));
     // 各分項單獨驗：
-    assert_eq!(cost(usage(1_000_000, 0, 0, 0, 0)), 100_000, "100 萬普通輸入 = $0.10");
-    assert_eq!(cost(usage(1_000_000, 1_000_000, 0, 0, 0)), 10_000, "100 萬快取讀 = $0.01");
-    assert_eq!(cost(usage(1_000_000, 0, 1_000_000, 0, 0)), 125_000, "100 萬預設寫 = $0.125");
+    // 輸入分項用 20 萬 tokens 驗（超過 272K 會改用長文價，見 input_over_272k_…）。
+    assert_eq!(cost(usage(200_000, 0, 0, 0, 0)), 20_000, "20 萬普通輸入 = $0.02（$0.10／百萬）");
+    assert_eq!(cost(usage(200_000, 200_000, 0, 0, 0)), 2_000, "20 萬快取讀 = $0.002（$0.01／百萬）");
+    assert_eq!(cost(usage(200_000, 0, 200_000, 0, 0)), 25_000, "20 萬預設寫 = $0.025（$0.125／百萬）");
     assert_eq!(cost(usage(0, 0, 0, 1_000_000, 0)), 500_000, "100 萬輸出 = $0.50");
 }
 
@@ -497,7 +501,163 @@ fn inconsistent_usage_is_refused_instead_of_priced() {
 
 #[test]
 fn cost_arithmetic_never_wraps_around() {
-    let huge = Usage { input_tokens: u64::MAX, cached_tokens: 0, cache_write_tokens: 0, output_tokens: u64::MAX, reasoning_tokens: 0 };
-    let exact = (u128::from(u64::MAX) * 100_000 + u128::from(u64::MAX) * 500_000).div_ceil(1_000_000);
+    let huge = Usage { input_tokens: u64::MAX, cached_tokens: 0, cache_write_tokens: 0, cache_write_12h_tokens: 0, output_tokens: u64::MAX, reasoning_tokens: 0 };
+    // 輸入超過長文門檻：輸入 ×2、輸出 ×1.5。
+    let exact = (u128::from(u64::MAX) * 100_000 * 4 + u128::from(u64::MAX) * 500_000 * 3).div_ceil(2_000_000);
     assert_eq!(cost_microusd(&GPT_6_LUNA_2026_11_18, &huge), u64::try_from(exact).ok());
+}
+
+// ───────────── 補強：長文價、寫入期限、預留上界、tier ─────────────
+
+fn usage_with_ttl(input: u64, cached: u64, w30: u64, w12: u64, output: u64) -> Value {
+    let mut u = usage(input, cached, w30 + w12, output, 0);
+    u["input_tokens_details"]["cache_write_tokens_details"] = json!({"ttl_30m_tokens": w30, "ttl_12h_tokens": w12});
+    u
+}
+
+#[test]
+fn input_over_272k_prices_the_whole_request_at_the_long_context_rate() {
+    // 剛好 272K 還是標準價：272000×$0.10 + 1000×$0.50（每百萬）。
+    assert_eq!(cost(usage(272_000, 0, 0, 1_000, 0)), 27_200 + 500);
+    // 超過一顆就整個請求改價：輸入與快取 ×2、輸出 ×1.5。
+    assert_eq!(cost(usage(272_001, 0, 0, 1_000, 0)), 54_401 + 750, "272001×0.2 = 54400.2 → 與輸出相加後進位一次");
+    // 普通 200000×0.10×2 + 讀 100000×0.01×2 + 輸出 1001×0.50×1.5 = 40000 + 2000 + 750.75 → 42751。
+    assert_eq!(cost(usage(300_000, 100_000, 0, 1_001, 0)), 42_751);
+    // 快取寫也 ×2：300000×0.125×2。
+    assert_eq!(cost(usage(300_000, 0, 300_000, 0, 0)), 75_000);
+}
+
+#[test]
+fn twelve_hour_cache_writes_are_priced_separately_and_lifetimes_must_add_up() {
+    // 普通 1000×0.10 + 讀 4000×0.01 + 30 分寫 3000×0.125 + 12 小時寫 4000×0.25 + 輸出 500×0.50 = 100+40+375+1000+250。
+    let u = usage_with_ttl(12_000, 4_000, 3_000, 4_000, 500);
+    let parsed = Usage::from_response(Some(&u)).unwrap();
+    assert_eq!((parsed.cache_write_tokens, parsed.cache_write_12h_tokens, parsed.ordinary_input()), (7_000, 4_000, 1_000));
+    assert_eq!(cost_microusd(&GPT_6_LUNA_2026_11_18, &parsed), Some(1_765));
+    // 同樣的 token 數全部是預設期限就便宜 500：不能把 12 小時的當預設期限算。
+    assert_eq!(cost(usage_with_ttl(12_000, 4_000, 7_000, 0, 500)), 1_265);
+    assert_eq!(cost(usage(12_000, 4_000, 7_000, 500, 0)), 1_265, "沒有分項＝預設期限");
+
+    // 分項加起來不等於 cache_write_tokens、不認得的期限、型別不對：拒絕，不估價。
+    let mut off = usage_with_ttl(12_000, 4_000, 3_000, 4_000, 500);
+    off["input_tokens_details"]["cache_write_tokens"] = json!(7_001);
+    off["total_tokens"] = json!(12_500);
+    let mut unknown = usage_with_ttl(12_000, 4_000, 3_000, 4_000, 500);
+    unknown["input_tokens_details"]["cache_write_tokens_details"]["ttl_7d_tokens"] = json!(0);
+    let mut not_object = usage(12_000, 4_000, 7_000, 500, 0);
+    not_object["input_tokens_details"]["cache_write_tokens_details"] = json!(7_000);
+    for bad in [off, unknown, not_object] {
+        assert!(matches!(Usage::from_response(Some(&bad)), Err(UsageError::Inconsistent(_))), "{bad}");
+    }
+    // 手動組出矛盾的 Usage（12 小時寫入比寫入總數多）：回 None，不下溢。
+    let broken = Usage { input_tokens: 10, cached_tokens: 0, cache_write_tokens: 2, cache_write_12h_tokens: 3, output_tokens: 0, reasoning_tokens: 0 };
+    assert_eq!(cost_microusd(&GPT_6_LUNA_2026_11_18, &broken), None);
+}
+
+#[test]
+fn the_reservation_quote_is_an_upper_bound_on_any_settlement() {
+    let t = &GPT_6_LUNA_2026_11_18;
+    let quote = |input, output| quote_upper_bound_microusd(t, input, output).unwrap();
+    // 最貴的情況：全部輸入都是 12 小時快取寫、輸出用滿。
+    for (input, output) in [(1, 1), (9_000, 4_096), (272_000, 128_000), (272_001, 128_000), (1_050_000, 128_000)] {
+        let worst = cost(usage_with_ttl(input, 0, 0, input, output));
+        assert_eq!(quote(input, output), worst, "input={input}");
+        for cheaper in [usage(input, 0, 0, output, 0), usage(input, input, 0, output, 0), usage(input, 0, input, output / 2, 0), usage(input / 2, 0, 0, output, 0)] {
+            assert!(cost(cheaper.clone()) <= quote(input, output), "{cheaper}");
+        }
+    }
+    assert_eq!(quote(1, 0), 1, "再小的預留也不是 0");
+    assert_eq!(quote(0, 0), 0);
+    // 上界跨過長文門檻就用長文價：272000×0.25 vs 272001×0.25×2。
+    assert_eq!(quote(272_000, 0), 68_000);
+    assert_eq!(quote(272_001, 0), 136_001);
+    assert_eq!(quote_upper_bound_microusd(t, u64::MAX, u64::MAX), u64::try_from((u128::from(u64::MAX) * 250_000 * 4 + u128::from(u64::MAX) * 500_000 * 3).div_ceil(2_000_000)).ok());
+}
+
+#[test]
+fn the_service_tier_is_reported_and_only_the_standard_tier_has_a_price() {
+    let msg = message_item("好");
+    let stream = |tier: Value| {
+        let mut resp = json!({"id": "r", "status": "completed", "output": [msg.clone()], "usage": usage(10, 0, 0, 5, 0)});
+        if !tier.is_null() {
+            resp["service_tier"] = tier;
+        }
+        completed(run(&sse(&[json!({"type": "response.completed", "response": resp})]), 9).unwrap().0).service_tier
+    };
+    assert_eq!(stream(Value::Null), None);
+    assert_eq!(stream(json!("default")).as_deref(), Some("default"));
+    assert_eq!(stream(json!("priority")).as_deref(), Some("priority"));
+    assert!(is_standard_tier(None) && is_standard_tier(Some("default")));
+    for other in ["flex", "priority", "fast", "auto", ""] {
+        assert!(!is_standard_tier(Some(other)), "{other}");
+    }
+}
+
+// ───────────── 補強：切分、行尾、終態之後、未完成的呼叫、跳脫 ─────────────
+
+#[test]
+fn any_chunking_and_any_line_ending_assemble_to_the_same_outcome() {
+    let bytes = two_tool_stream();
+    let reference = run(&bytes, bytes.len()).unwrap();
+    // 每一塊大小都不同（固定種子的 LCG）：切點會落在 UTF-8 字元、JSON 跳脫、行尾的任何位置。
+    for seed in 0..64u64 {
+        let mut state = seed;
+        let mut asm = ResponseAssembler::new();
+        let mut updates = Vec::new();
+        let mut rest = &bytes[..];
+        while !rest.is_empty() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let (chunk, tail) = rest.split_at((1 + (state >> 33) as usize % 97).min(rest.len()));
+            rest = tail;
+            updates.extend(asm.feed(chunk).unwrap());
+        }
+        assert_eq!((asm.finish().unwrap(), updates), reference, "seed={seed}");
+    }
+    // 行尾換成 CRLF 或單獨的 CR（含 CR 與 LF 被切在兩塊）結果相同。
+    let text = String::from_utf8(bytes).unwrap();
+    for eol in ["\r\n", "\r"] {
+        let other = text.replace('\n', eol);
+        for chunk in [1, 2, 7, other.len()] {
+            assert_eq!(run(other.as_bytes(), chunk).unwrap(), reference, "eol={eol:?} chunk={chunk}");
+        }
+    }
+}
+
+#[test]
+fn bytes_after_the_terminal_event_cannot_overturn_the_result() {
+    let mut bytes = final_text_stream("好");
+    let reference = run(&bytes, bytes.len()).unwrap().0;
+    bytes.extend_from_slice(b"data: {not json\n\ndata: [DONE]\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{}}\n\n");
+    for chunk in [1, 7, bytes.len()] {
+        assert_eq!(run(&bytes, chunk).unwrap().0, reference, "chunk={chunk}");
+    }
+    // 終態之前的雜訊仍然是錯誤。
+    assert!(matches!(run(b"data: {not json\n\n", 3), Err(CodecError::Protocol(_))));
+}
+
+#[test]
+fn a_completed_response_carrying_an_unfinished_tool_call_runs_nothing() {
+    for status in ["in_progress", "incomplete"] {
+        let mut call = call_item("fc", "c1", "read_file", "{}");
+        call["status"] = json!(status);
+        let ok = call_item("fc0", "c0", "read_file", "{}");
+        let bytes = sse(&[json!({"type": "response.completed", "response": {"id": "r", "status": "completed", "output": [ok, call], "usage": usage(1, 0, 0, 1, 0)}})]);
+        assert_eq!(run(&bytes, 7).map(|_| ()), Err(CodecError::BadToolArguments("c1".into())), "status={status}");
+    }
+}
+
+#[test]
+fn quotes_newlines_and_backslashes_in_the_request_are_escaped_not_spliced() {
+    let tricky = "He said \"hi\"\nline2\t\\ \u{1}\",\"store\":true,\"x\":\"結束";
+    let mut r = luna_request(vec![InputItem::User(tricky.into())]);
+    r.instructions = tricky.into();
+    let bytes = r.body().unwrap();
+    let raw = std::str::from_utf8(&bytes).unwrap();
+    assert!(raw.contains(r#"He said \"hi\"\nline2\t\\ \u0001\",\"store\":true"#), "{raw}");
+    assert!(!raw.contains('\n'), "body 是單行 JSON");
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["instructions"], json!(tricky));
+    assert_eq!(body["input"][0]["content"][0]["text"], json!(tricky));
+    assert_eq!(body["store"], json!(false), "內容裡的字樣不能變成欄位");
+    assert_eq!(r.body().unwrap(), bytes);
 }

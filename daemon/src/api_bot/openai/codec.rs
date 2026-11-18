@@ -207,6 +207,8 @@ pub(crate) struct ModelOutput {
     pub replay: Vec<ReplayItem>,
     /// `Err(Missing)`＝回應沒帶 usage：費用未知，**不能當 0**。
     pub usage: Result<Usage, UsageError>,
+    /// 回應回報的 service tier；價表只涵蓋標準 tier（見 `pricing::is_standard_tier`）。
+    pub service_tier: Option<String>,
     pub stop: StopKind,
 }
 
@@ -271,11 +273,11 @@ impl ResponseAssembler {
             if ev.data.trim() == "[DONE]" {
                 continue;
             }
+            if self.terminal.is_some() {
+                continue; // 終態之後的事件不採用（連解析都不做：尾端的雜訊不能推翻已核對的結果）
+            }
             let data: Value = serde_json::from_str(&ev.data).map_err(|e| CodecError::Protocol(format!("event is not JSON: {e}")))?;
             let kind = data.get("type").and_then(Value::as_str).map(str::to_string).or(ev.event.clone()).unwrap_or_default();
-            if self.terminal.is_some() {
-                continue; // 終態之後的事件不採用
-            }
             self.on_event(&kind, &data, &mut updates)?;
         }
         Ok(updates)
@@ -415,6 +417,7 @@ impl ResponseAssembler {
             tool_calls: Vec::new(),
             replay,
             usage: Usage::from_response(resp.get("usage")),
+            service_tier: resp.get("service_tier").and_then(Value::as_str).map(str::to_string),
             stop: StopKind::EndTurn,
         };
         Ok((output, has_call))
@@ -449,6 +452,10 @@ impl ResponseAssembler {
                     if !seen_calls.insert(call_id.to_string()) {
                         return Err(CodecError::DuplicateCallId(call_id.to_string()));
                     }
+                    // completed 的 response 裡還沒完成的呼叫＝參數可能是半截的：整個回應不採用。
+                    if item.get("status").and_then(Value::as_str).is_some_and(|s| s != "completed") {
+                        return Err(CodecError::BadToolArguments(call_id.to_string()));
+                    }
                     let raw = item.get("arguments").and_then(Value::as_str).unwrap_or("");
                     let arguments: Value = serde_json::from_str(raw).map_err(|_| CodecError::BadToolArguments(call_id.to_string()))?;
                     if !arguments.is_object() {
@@ -477,6 +484,7 @@ impl ResponseAssembler {
             tool_calls,
             replay,
             usage: Usage::from_response(resp.get("usage")),
+            service_tier: resp.get("service_tier").and_then(Value::as_str).map(str::to_string),
             stop,
         })
     }
