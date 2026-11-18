@@ -632,7 +632,9 @@ fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
 async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<bool, ()> {
     for _ in 0..PICKER_ESCAPES {
         let screen = read(client, pane_id).await?;
-        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || safety_recourse_picker_open(&screen) || crate::codex_update::update_menu_open(&screen) {
+        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || safety_recourse_picker_open(&screen) || crate::codex_update::update_menu_open(&screen)
+            || crate::lifecycle::codex_hook_review::review_open(&screen)
+        {
             return Ok(false);
         }
         if !picker_open(&screen) && !transcript_browser_open(&screen) {

@@ -1,34 +1,11 @@
 //! codex 0.169+ 啟動時的 hook 審核框（上游 `startup_hooks_review.rs`，rust-v0.169.1）。
 //!
 //! 有未信任（或內容改過）的 hook 時，codex TUI 會停在「Hooks need review」選單等鍵盤。選項 2 會信任**所有**待審 hook，
-//! 所以不能自動按任何鍵（Enter 確認、Esc 略過、1／2／3 都不碰）。這裡只辨識畫面、擋住送字，並通知人。
+//! 所以不能自動按任何鍵（Enter 確認、Esc 略過、1／2／3 都不碰）。這裡只辨識畫面、擋住送字；標 blocked、聊天室提示、通知上層、框關掉還原都走 `codex_model_migration::Dialog::HookReview`。
 //! 辨識要求標題、三個選項、結尾的操作列依序出現（同一個選單的結構），不靠單一字句，所以對話裡引用的同一句話不會誤判。
 
 /// 被審核框擋下時 `NotAttempted` 的 reason（佇列照可重試的規則放回去，不送字）。
 pub const REASON: &str = "codex_hook_review_pending";
-
-/// 已經通知過、審核框還沒被看到關掉的 run（同一次審核框只講一次，佇列每次重試都會再擋一次）。
-fn notified() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static NOTIFIED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
-    NOTIFIED.get_or_init(Default::default)
-}
-
-pub const NOTICE: &str = "codex 停在「Hooks need review」審核框（有新的或改過的 hook 還沒信任）。框開著時送出的字會被框吃掉，\
-     所以這則訊息沒有送出（一個字都沒打）；daemon 也不會替你按任何鍵（包括「Trust all」）。請到「終端」處理審核框，\
-     處理完後排著的訊息會照常重試送出。";
-
-/// 審核框擋住派送時呼叫：第一次看到寫一則通知；框不在了就忘掉，下次出現再講一次。
-pub async fn observe(app: &impl crate::lifecycle::s6_ports::ScreenServices, run: &crate::db::Run, shown: bool) {
-    if !shown {
-        notified().lock().unwrap().remove(&run.id);
-        return;
-    }
-    if !notified().lock().unwrap().insert(run.id.clone()) {
-        return;
-    }
-    tracing::warn!(run = %run.id, bot = %run.bot_id, "codex hook review screen holds delivery; waiting for a human (never auto-accepted)");
-    app.post_codex_hook_review_notice(run, NOTICE).await;
-}
 
 /// 畫面上的審核框是否開著（已去 ANSI）。
 pub fn review_open(screen: &str) -> bool {

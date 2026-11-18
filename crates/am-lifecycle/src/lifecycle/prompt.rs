@@ -715,7 +715,9 @@ pub async fn final_agent_prompt_guard(
         .await
         .map_err(|_| "pane_unreadable")?;
     if bot.kind == "codex" {
-        super::codex_hook_review::observe(app, run, super::codex_hook_review::review_open(&read.text)).await;
+        if super::codex_hook_review::review_open(&read.text) {
+            app.observe_codex_hook_review(run, &read.text).await;
+        }
         super::codex_banner::observe(app, run, super::codex_banner::blocks_typing(&read.text)).await;
     }
     if let Some(reason) = agent_prompt_dialog_reason(&bot.kind, &read.text) {
@@ -875,6 +877,14 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
     // but any unreadable step in `close_picker` is returned as a refusal.
     if bot.kind == "codex" {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
+            // hook 審核框：不按任何鍵（Esc 是略過、2 是全部信任），也不讓下面的關選單流程碰它。
+            if super::codex_hook_review::review_open(&screen) {
+                app.observe_codex_screen(run, &screen).await;
+                return Err(LcError::conflict(
+                    "dialog_open",
+                    json!({"run_id": run.id, "message": crate::codex_model_migration::HOOK_REVIEW_WAITING_HINT}),
+                ));
+            }
             if crate::tui_prompts::is_codex_model_migration_prompt(&screen) {
                 app.observe_codex_screen(run, &screen).await;
                 return Err(LcError::conflict(

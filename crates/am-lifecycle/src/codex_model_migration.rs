@@ -13,6 +13,8 @@ pub const WAITING_HINT: &str = "Codex 正停在模型升級提示，請到「終
 pub const UPDATE_WAITING_HINT: &str = "Codex 更新提示等待選擇：啟動時跳出「Update available」選單（預設選 1. Update now）擋在輸入列前面。請到「終端」選 2. Skip（或 3. Skip until next version）；daemon 不替你選更新，也不會把訊息打進選單；完成選擇後排隊的訊息會繼續送出。";
 /// 額度快用完時的換模型建議。
 pub const RATE_LIMIT_WAITING_HINT: &str = "Codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單；完成選擇後排隊的訊息會繼續送出。";
+/// 啟動時的 hook 審核框（codex 0.169+）：選項 2 會信任所有待審 hook，所以一個鍵都不替使用者按。
+pub const HOOK_REVIEW_WAITING_HINT: &str = "Codex 停在「Hooks need review」審核框（有新的或改過的 hook 還沒信任），擋在輸入列前面，訊息送不進去。重新啟動這顆 bot 即可（AG Man 啟動時會清掉自己留下、未信任的 hook；不會自動按鍵，也不會把訊息打進審核框）；排隊的訊息會在重啟後繼續送出。";
 pub const CLOSED_NOTE: &str = "Codex 擋住輸入列的提示已關閉，排隊的訊息可繼續送出。";
 
 /// 擋在輸入列前面、要使用者本人選的 codex 畫面。
@@ -21,12 +23,15 @@ pub enum Dialog {
     Migration,
     UpdateMenu,
     RateLimitSwitch,
+    HookReview,
 }
 
 impl Dialog {
     /// 畫面上現在開著的是哪一種（都不是＝`None`）。
     pub fn of(screen: &str) -> Option<Self> {
-        if crate::tui_prompts::is_codex_model_migration_prompt(screen) {
+        if crate::lifecycle::codex_hook_review::review_open(screen) {
+            Some(Self::HookReview)
+        } else if crate::tui_prompts::is_codex_model_migration_prompt(screen) {
             Some(Self::Migration)
         } else if crate::codex_update::update_menu_open(screen) {
             Some(Self::UpdateMenu)
@@ -43,6 +48,7 @@ impl Dialog {
             Self::Migration => crate::blocked_reason::Reason { code: "codex_migration", text: "codex 模型升級提示等待選擇".into() },
             Self::UpdateMenu => crate::blocked_reason::Reason { code: "codex_update_menu", text: "codex 更新提示等待選擇".into() },
             Self::RateLimitSwitch => crate::blocked_reason::Reason { code: "rate_limit_switch", text: "codex 額度換模型建議等待選擇".into() },
+            Self::HookReview => crate::blocked_reason::Reason { code: "codex_hook_review", text: "codex hook 審核框擋住輸入（重新啟動即可）".into() },
         }
     }
 
@@ -52,6 +58,7 @@ impl Dialog {
             Self::Migration => WAITING_HINT,
             Self::UpdateMenu => UPDATE_WAITING_HINT,
             Self::RateLimitSwitch => RATE_LIMIT_WAITING_HINT,
+            Self::HookReview => HOOK_REVIEW_WAITING_HINT,
         }
     }
 }
@@ -385,5 +392,37 @@ mod tests {
         assert_eq!(system_messages(&app, &bot.id).await.len(), messages.len(), "the same dialog is not announced again");
 
         open().lock().unwrap().remove(&run_id);
+    }
+    /// #1989：hook 審核框走同一套機制：補標 blocked＋原因、提示講一次（寫明重啟即可）、一個鍵都不按；框關掉還原並放行。
+    /// daemon 重啟（記憶體裡的 episode 沒了、DB 還留著補標的 blocked）後再看到同一個框：不重貼提示，關掉仍還原成 idle。
+    #[tokio::test]
+    async fn the_hook_review_box_blocks_with_a_restart_hint_and_survives_a_daemon_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-hook-review").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let review = include_str!("lifecycle/fixtures/codex-0.169.1-hooks-review.txt");
+        assert_eq!(Dialog::of(review), Some(Dialog::HookReview));
+
+        observe_screen(&app, &run_of(&app, &run_id).await, review).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked");
+        assert_eq!(crate::blocked_reason::of(&run_id).map(|r| r.code), Some("codex_hook_review"));
+        let notes = system_messages(&app, &bot.id).await;
+        assert_eq!(notes, [HOOK_REVIEW_WAITING_HINT]);
+        assert!(notes[0].contains("重新啟動這顆 bot 即可") && notes[0].contains("不會自動按鍵"), "{}", notes[0]);
+
+        // daemon 重啟：episode 不見了，run 在 DB 裡還是 blocked。
+        open().lock().unwrap().remove(&run_id);
+        observe_screen(&app, &run_of(&app, &run_id).await, review).await;
+        assert!(is_open(&run_id), "重啟後重新接手這個框");
+        assert_eq!(crate::blocked_reason::of(&run_id).map(|r| r.code), Some("codex_hook_review"));
+        assert_eq!(system_messages(&app, &bot.id).await, [HOOK_REVIEW_WAITING_HINT], "同一個框不因重啟再貼一次");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty(), "不按任何鍵");
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle", "框關掉後還原，不會一直掛著 blocked");
+        assert!(!is_open(&run_id));
+        assert_eq!(system_messages(&app, &bot.id).await, [HOOK_REVIEW_WAITING_HINT, CLOSED_NOTE]);
     }
 }

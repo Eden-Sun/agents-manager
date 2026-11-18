@@ -503,9 +503,9 @@ async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &s
         &refreshed
     } else { screen };
     if kind == "codex" {
-        let review = super::codex_hook_review::review_open(screen);
-        super::codex_hook_review::observe(app, run, review).await;
-        if review {
+        if super::codex_hook_review::review_open(screen) {
+            // 標 blocked＋原因、聊天室提示一次（跟巡邏共用同一個 episode，不重複講）。
+            app.observe_codex_hook_review(run, screen).await;
             return Err(Delivered::NotAttempted { reason: super::codex_hook_review::REASON, retry: true });
         }
         let banner = super::codex_banner::blocks_typing(screen);
