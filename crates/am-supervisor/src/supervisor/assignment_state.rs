@@ -461,22 +461,21 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{from} -> {to} 表上是合法的，trigger 不該擋：{e}"));
         }
     }
-}
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-mod tests {
+    // #1862 D：下面兩條原本在 daemon harness 的 `mod tests`，只需要 DB 與 race point，搬進 crate-only 的 `mod tests`（測試名不變）。
+
     use super::*;
 
     /// #831：裝守衛讀完現在那一份、還沒換的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 DROP 直接 517，
     /// daemon 起不來；寫鎖從讀之前就拿著，對方等，守衛照樣裝上。
     #[tokio::test]
     async fn an_unrelated_writer_between_the_trigger_read_and_the_swap_does_not_fail_the_install() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-831-guard-{}", crate::db::ulid())));
+        let dir = crate::test_dirs::track(std::env::temp_dir().join(format!("am-831-guard-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
+        let p = super::super::test_env::open(&dir.join("t.sqlite3")).await.unwrap();
         sqlx::query("DROP TRIGGER supervisor_assignments_status_transition").execute(&p).await.unwrap();
         let key = crate::db::file_key(&mut *p.acquire().await.unwrap()).await;
-        let other = crate::testing::arm_foreign_writer(std::path::Path::new(&key), "sync_trigger_after_read", &key);
+        let other = super::super::test_env::arm_foreign_writer(std::path::Path::new(&key), "sync_trigger_after_read", &key);
 
         install_guard(&p).await.expect("an unrelated writer must not fail the guard install");
         assert_eq!(*other.lock().unwrap(), Some(false), "the install holds the write lock from its read on; the other writer waits");
@@ -492,10 +491,10 @@ mod tests {
     /// 只在測試的暫存 DB 驗：開一次、換成舊版的守衛、關掉重開（＝升級後的 daemon 開同一個 DB）。
     #[tokio::test]
     async fn guards_left_by_an_older_build_are_replaced_when_the_db_is_opened() {
-        let dir = crate::testing::track(std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid())));
+        let dir = crate::test_dirs::track(std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite3");
-        let p = crate::app_ports_p1::open(&path).await.unwrap();
+        let p = super::super::test_env::open(&path).await.unwrap();
         // 舊版留下的守衛：轉移表還沒有 → quota_blocked 那幾條（現在合法的邊被擋），turns 那張還沒有 → in_flight。
         for (name, stale) in [
             (
@@ -519,7 +518,7 @@ mod tests {
         }
         p.close().await;
 
-        let p = crate::app_ports_p1::open(&path).await.unwrap();
+        let p = super::super::test_env::open(&path).await.unwrap();
         // SQLite 存的是去掉 `IF NOT EXISTS` 的原文。
         let current = |ddl: String| ddl.replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
         for (name, want) in [

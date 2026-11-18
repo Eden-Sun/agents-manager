@@ -4,6 +4,10 @@
 //! restart, a model switch or a lost session is here, in the daemon, not in its context.
 //! The model understands and decides. The daemon persists, retries, watches and switches.
 
+/// #1862 D：crate-only 測試用的窄環境（取代 daemon `App`／`testing`）。
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+pub(crate) mod test_env;
+
 pub mod api;
 pub mod assignment_state;
 pub mod bot_requests;

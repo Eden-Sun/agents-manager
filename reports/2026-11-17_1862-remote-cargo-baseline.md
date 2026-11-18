@@ -246,3 +246,39 @@ C1（`acfef31a7`）、C2（`0b49c5109`）、C3（`1acd05874`）。C3 之後 daem
 - 基線有效樣本 2 個：73.8、79.4，中位數 76.6s。
 - **C3 沒有任何有效樣本，無法給拆後的中位數，也不能宣稱收益或退步。** 每次 C3 的 edit 都重編了全部或大部分 crate：機器負載高（量測期間 load average 11–20）、成員在我兩次執行之間會被別的 bot 的 build 拿去並換上它們的來源／feature 組合（pool 取鎖是「第一份沒人持鎖」，我無法在兩次 cargo 之間替自己保住成員），所以指紋被洗掉。這是量測環境的問題，不代表 C3 本身變慢；原因與證據都留在本節，不挑較快的一次。
 - 結構上能預期的收益：daemon 測試 build 少編一份約 1.5 萬行的 share 來源（及其測試），C3 的 daemon 測試 crate 單元縮小；要得到可信數字，需要一個專用、不被其他 bot 使用的 shared 成員（例如在量測期間暫停 pool 的其他使用者，或給量測 profile 一個獨立的 remote-cargo 目錄），這個前置條件目前不存在。
+
+## D 階段第一批：am-supervisor 資料／流程測試改 crate-only（2026-11-18）
+
+### 搬了什麼
+am-supervisor 新增 crate-only 測試環境 `crates/am-supervisor/src/supervisor/test_env.rs`：`TestSupervisorEnv`（真的暫存 SQLite＝共用 schema＋`supervisor::store::migrate`，沒有複製 SQL；真的 `ConfigStore`，daemon 版投影驗證／稽核 hooks 為 no-op；實作 `Db`／`Emit`／`DataDir`／`Cfg`）。`emit` 會記下每個事件（`events()` 可讀）、`current_seq` 遞增，不是靜默成功；沒有 herdr／額度表／prompt 路徑／runner。另有 `arm_foreign_writer` 的 crate-only 複本（用 am-base 的 `race_point`）。
+
+| 模組 | 搬走（daemon→crate） | 留 daemon | 備註 |
+|---|---:|---:|---|
+| `bot_requests` | 23（`tests` 3、`dedupe_window_tests` 9、`flow_tests` 11） | 3 | 留的 3 條呼叫 `supervisor::assign`，要 `TurnOps`／`QuotaOps`／`JudgeOps` |
+| `assignment_state` | 2 | 0 | 併進該檔既有的 crate-only `mod tests`（避免兩個同名 mod），測試名不變 |
+| `incidents` | 18 | 9 | 留的 9 條：3 條 `testing::env()`、6 條呼叫 `sweep`／`observe`（要 `HostsAccess`／`IncidentState`／`RoleFaultTable`／`QuotaTables`／`HostProbes` 等） |
+| 合計 | **43** | | |
+
+`flow_tests` 與 `incidents::tests` 兩邊都編譯（逐條 gate）：crate-only 版 `App` 是 `TestSupervisorEnv`，daemon 版仍是 `state::App`；`flow_tests::app()` 兩邊各一份函式本體。
+
+### 對帳（四個 package 的 `--list`，含 ignored，base＝`1461ca85d`）
+- agents-managerd 6309→6266（−43）；am-supervisor 153→196（+43）；am-lifecycle 342、am-share 151 不變；ignored 清單不變；沒有新增 ignore。
+- 這 43 條的測試名（`supervisor::<模組>::…`）新舊逐條相同（daemon 少的清單與 am-supervisor 多的清單一一相同）。
+
+### 替換點（斷言不改）
+- `bot_requests.rs`：`use crate::state::App` 依 gate 分兩套；`flow_tests::app()` 的建立步驟（daemon 版 `App::new(app_ports_p1::open, app_ports_p2::load_config, HerdrClient::new(absent.sock)…)`；crate 版 `test_env::app_in(scratch_dir)`）。
+- `assignment_state.rs`：`crate::testing::track` → `crate::test_dirs::track`、`crate::app_ports_p1::open` → `super::super::test_env::open`、`crate::testing::arm_foreign_writer` → `super::super::test_env::arm_foreign_writer`。
+- `incidents.rs`：只加 gate，`obs`／`thresholds` 輔助函式加 `#[allow(dead_code)]`（daemon 版不用它們）。
+
+### cfg(test) 差異盤點（為之後撤掛載；這一批沒有動 production）
+am-supervisor 現有 production 檔裡的 test／harness 條件編譯（共約 100 處，已排除測試模組本身），撤掛載時（掛載中的 supervisor 在 daemon 內是 `cfg(test)`，改用 am_supervisor 後是非 test 依賴 crate）要全部改成 `cfg(any(test, feature = "test-hooks"))` 並由 daemon dev-dependency 啟用，同 am-share 的慣例：
+- 行為差異（最要緊）：`idle_sleep.rs:830` `if cfg!(test) || shutdown…`（測試下直接 return）、`maintenance.rs:122` `if cfg!(test) { return 0 }`；`cfg!(test)` 不能跨 crate，需改成 `cfg!(any(test, feature = "test-hooks"))`。
+- race point：`bot_requests`×2、`controller`×2、`idle_sleep`×2、`responder`×1、`store`×2（`crate::lifecycle::race_point` 在 daemon 掛載版指 daemon 的 lifecycle，撤掛載後要改成 am-base 的 `crate::race_point`，同 am-share）。
+- 只在 harness 才有的 production 介面：`use crate::state::App`（controller／idle_sleep／responder／bot_requests）、`pub use crate::runners::supervisor::{api, cli, runtime}::*`（`api.rs`、`cli_refresh.rs`、`controller.rs:1578/1581`）、`failover::owner_of`、`idle_sleep::{candidates, asleep, test_ps}`、`maintenance::fault`、`build_info::daemon_wiring_smoke`。這些在 crate 版沒有 `crate::state`／`crate::runners`，只能搬進 daemon 測試檔或以 trait 注入。
+- 一般 `cfg(test)` 的測試輔助：`assignment_state::{is_terminal, set_status, row}`、`store`（`open_inbox`、`create_approval`、`decide_approval`、`open_incident`、`resolve_incident`、`ack_inbox` 等 8 個）、`health` 的 `ProbeSlot`／`cached_probe`、`timing` 的 `HoldProbe`／`ProbeGuard`、`mod.rs::op_lock_is_free`。
+- 沒有「預設啟動真外部程式」的 cfg(test) 差異（外部 I/O 都經 `ports.rs` 的 trait，由 daemon `App` 實作）。
+
+### 評估：撤掉 `daemon/src/lib.rs:305` 的 supervisor `#[path]` 掛載還差什麼
+- 仍要 daemon 的測試約 **264 條**（總共 307 條 harness 測試，減去這批 43）：`controller` 90、`idle_sleep` 51、`maintenance` 42、`responder` 35、`failover` 16、`health` 13、`setup` 12、`cli_refresh` 11、`watchdog` 11、`incidents` 9、`role_faults` 7、`mod` 4、`bot_requests` 3、`timing` 2、`build_info` 1。它們大多要 `state::App` 或 `runners::supervisor::{runtime,api,cli}`、quota 表、herdr、事件匯流排、`testing::env`，不是窄夾具能取代的（controller 內 8 個子模組同樣用 `App::new(app_ports_p1::open, load_config)`，但還要 `runners::quota`／`lifecycle::quota_hold`／herdr）。
+- 要做的事：(1) 把這 264 條搬成 daemon 自己的測試檔（`daemon/src/supervisor_tests/…`，`use crate::supervisor::*`），同 share C1／C2；(2) 測試用到的私有項逐項開 `#[doc(hidden)] pub` 接縫（controller／idle_sleep／maintenance 的測試用 `super::*` 讀大量私有函式，數量遠多於 share 的 3 個）；(3) 上面的 cfg(test)／`cfg!(test)`／race_point／harness-only 介面改成 `any(test, feature = "test-hooks")`，加 am-supervisor 的 `test-hooks`（含 `am-base/test-hooks`）並由 daemon dev-dependency 啟用；(4) `crate::state::App` 只用在 harness 的 re-export 要搬到 daemon 側；(5) 同批還有 lib.rs 的另外三個小掛載（`app_arc_ports.rs`、`build_info.rs`、`relay_auth.rs`）。
+- 估算（粗略量級，未實測）：搬測試與修路徑約 2 天、私有項接縫與 cfg 改寫約 1.5 天、逐條對帳與 CI 選測約 1 天，合計約 4～5 天；建議拆成 D2（`controller`＋`responder`）、D3（`idle_sleep`＋`maintenance`＋其餘）、D4（撤掛載＋cfg 改寫＋CI），每段獨立對帳、各自 commit。先不要撤。

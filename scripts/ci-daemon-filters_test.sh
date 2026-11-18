@@ -172,6 +172,13 @@ check "" "crates/am-share/src/share/budget_remote_tests.rs"
 check "" "crates/am-lifecycle/src/ask_answers.rs"
 check "share_tests::" "crates/am-share/src/share/svg_check.rs"
 check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
+# #1862 D：bot_requests（26→3）、assignment_state（2→0）、incidents（27→9）的資料／流程測試搬到 am-supervisor 自己跑（test_env 窄環境）；
+# bot_requests／incidents 仍各留要 TurnOps／QuotaOps／HostsAccess 等的 daemon 測試，改它們仍要選到各自的 daemon 過濾字串；
+# assignment_state 的 daemon 測試全搬走（只剩 crate target）；test_env.rs 是 crate-only 的測試環境。
+check "supervisor::bot_requests::" "crates/am-supervisor/src/supervisor/bot_requests.rs"
+check "supervisor::incidents::" "crates/am-supervisor/src/supervisor/incidents.rs"
+check "" "crates/am-supervisor/src/supervisor/assignment_state.rs"
+check "" "crates/am-supervisor/src/supervisor/test_env.rs"
 check "build_info::" "crates/am-supervisor/src/build_info.rs"
 # am-base uses the actual composition mount table, including aliases and shared fallbacks.
 check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"

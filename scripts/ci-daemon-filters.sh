@@ -223,6 +223,8 @@ while IFS= read -r f; do
             if python3 -B scripts/ci-crate-only-tests.py "$f"; then continue; fi
             printf 'supervisor::store::tests::\n'
             ;;
+        # #1862 D：supervisor 的 crate-only 測試環境（test_env.rs 沒有任何 daemon 測試，照檔名推會選到零個）。
+        crates/am-supervisor/src/supervisor/test_env.rs) ;;
         crates/am-supervisor/src/*)
             rel="${f#crates/am-supervisor/src/}"
             case "$rel" in
