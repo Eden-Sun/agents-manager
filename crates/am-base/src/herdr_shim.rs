@@ -174,12 +174,16 @@ am_spawn_begin() {
     fi
     _spawn_purpose=${1:-agent}
     _spawn_kind=${2:-${_kind:-${AM_KIND:-}}}
+    # `--identity <名>`（issue #1775）也帶給 daemon：預先信任（agy 的 trustedWorkspaces）要寫進**那個身份**的設定檔，
+    # 不是母 bot 身份的那一份。沒指定就送空字串（daemon 照舊從母 bot 推）。
+    _spawn_identity=""
+    [ "${_idset:-0}" = 1 ] && _spawn_identity=${_idn:-}
     _out=$(am_curl_bot -s --connect-timeout 2 -m 5 -w '\n%{http_code}' -X POST "$(am_spawn_daemon_base)/relay/spawn/begin" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" \
         --data-urlencode "purpose=${_spawn_purpose}" \
         --data-urlencode "pane_id=${_pane:-}" --data-urlencode "child_name=${_child_name:-}" \
-        --data-urlencode "kind=${_spawn_kind:-}" 2>/dev/null)
+        --data-urlencode "kind=${_spawn_kind:-}" --data-urlencode "identity=${_spawn_identity}" 2>/dev/null)
     _rc=$?
     _code=$(printf '%s\n' "$_out" | tail -n 1)
     _body=$(printf '%s\n' "$_out" | sed '$d')

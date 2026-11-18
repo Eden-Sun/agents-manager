@@ -145,6 +145,22 @@ fn release(app: &Arc<App>, bot_id: &str, permit_id: &str) -> bool {
     gate.release(bot_id, permit_id)
 }
 
+/// child 的預先信任要寫進哪個身份的設定檔。shim 帶來的 `--identity` 是這台、這個 kind 的身份（跟 `$AM_IDENTITIES`
+/// 同一份來源 `tools::identities_for_host`）就用它；沒帶、或不是合法的身份（warn）就照舊從母 bot 推。
+async fn child_pretrust_identity(app: &Arc<App>, parent: &crate::db::Bot, host: &str, child_kind: &str, requested: &str) -> Option<String> {
+    let inherited = crate::identity_kind::child_identity(parent.identity.as_deref(), &parent.kind, child_kind);
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return inherited;
+    }
+    let known = crate::tools::identities_for_host(app, host).await.iter().any(|i| i.name == requested && i.kind == child_kind);
+    if known {
+        return Some(requested.to_string());
+    }
+    tracing::warn!(parent = %parent.name, host, child_kind, identity = requested, "spawn begin named an identity this host does not have for that kind; pre-trusting with the inherited one");
+    inherited
+}
+
 #[derive(Deserialize)]
 pub struct SpawnBegin {
     pub bot_id: String,
@@ -158,6 +174,9 @@ pub struct SpawnBegin {
     pub child_name: String,
     #[serde(default)]
     pub kind: String,
+    /// `herdr agent start --identity <名>` 的值（舊 shim 不帶＝空）。只用來決定預先信任寫進哪個身份的設定檔。
+    #[serde(default)]
+    pub identity: String,
 }
 
 #[derive(Deserialize)]
@@ -285,7 +304,7 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
             if let Some(target_cwd) = pane_cwd {
                 let mut child_bot = bot.clone();
                 child_bot.kind = "agy".to_string();
-                child_bot.identity = crate::identity_kind::child_identity(bot.identity.as_deref(), &bot.kind, "agy");
+                child_bot.identity = child_pretrust_identity(&app, &bot, &authority.host, "agy", &body.identity).await;
                 child_bot.cwd = Some(target_cwd.to_string());
                 for w in crate::trust::pretrust_for_start(&app, &child_bot, &authority.host, target_cwd).await {
                     tracing::warn!(parent = %bot.name, host = %authority.host, target_cwd, warning = %w, "could not pre-trust child agy workspace");
@@ -488,7 +507,7 @@ mod tests {
         let (status, Json(body)) = begin(
             State(app.clone()),
             bot_headers(&parent.hook_token),
-            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new(), kind: String::new() }),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: String::new(), pane_id: String::new(), child_name: String::new(), kind: String::new(), identity: String::new(), }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "spawn begin should reserve the parent credential: {body}");
@@ -518,7 +537,7 @@ mod tests {
         e.herdr.set_agent("existing-agent", "w1:p-busy", false);
         let (status, _) = begin(State(e.app.clone()), bot_headers(&parent.hook_token), Form(SpawnBegin {
             bot_id: parent.id, timeout_ms: String::new(), purpose: "agent".into(),
-            pane_id: "w1:p-busy".into(), child_name: "other-child".into(), kind: String::new(),
+            pane_id: "w1:p-busy".into(), child_name: "other-child".into(), kind: String::new(), identity: String::new(),
         })).await;
         assert_eq!(status, StatusCode::CONFLICT);
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM child_credentials").fetch_one(&e.app.db).await.unwrap();
@@ -589,7 +608,7 @@ mod tests {
                 purpose: "agent".into(),
                 pane_id: pane_id.into(),
                 child_name: "agy-kid".into(),
-                kind: "agy".into(),
+                kind: "agy".into(), identity: String::new(),
             }),
         )
         .await;
@@ -656,7 +675,7 @@ mod tests {
                 purpose: "agent".into(),
                 pane_id: pane_id.into(),
                 child_name: "remote-agy-kid".into(),
-                kind: "agy".into(),
+                kind: "agy".into(), identity: String::new(),
             }),
         )
         .await;
@@ -669,6 +688,88 @@ mod tests {
             trusted.iter().any(|v| v.as_str() == Some("/remote/project/worktree")),
             "remote trustedWorkspaces must include child worktree: {settings}"
         );
+    }
+
+    /// 遠端主機 fixture：假 ssh 在 `remote_home` 底下跑、專案搬到那台、母 bot（claude）有 run、空的 child pane 停在 worktree。
+    async fn remote_agy_spawn(e: &crate::testing::Env, host: &str, identity: &str) -> (std::path::PathBuf, StatusCode) {
+        let remote_home = e.dir.join(format!("{host}-home"));
+        std::fs::create_dir_all(&remote_home).unwrap();
+        let cfg = crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
+        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
+        let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        *conn.remote_home.lock().await = Some(remote_home.to_string_lossy().into_owned());
+        let fake_remote = remote_home.clone();
+        crate::hosts::set_ssh_fake(host, move |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &fake_remote).output()?;
+            if !out.status.success() {
+                anyhow::bail!("ssh fake failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        // 這台有一個 agy 身份 ag1（HOME 在影子家目錄）與一個 claude 身份 cc9（kind 不符，不能拿來當 agy 的）。
+        let h = host.to_string();
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.identities.push(crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: Some(h.clone()), env: [("HOME".to_string(), "$HOME/.agy-ag1".to_string())].into(), args: vec![] });
+                cfg.identities.push(crate::config::IdentityCfg { name: "cc9".into(), kind: "claude".into(), host: Some(h.clone()), env: [("CLAUDE_CONFIG_DIR".to_string(), "$HOME/.claude-cc9".to_string())].into(), args: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        let parent = crate::testing::claude_bot(&e.app, &e.project_id, "remote-parent").await;
+        crate::testing::fake_run(&e.app, &parent.id).await;
+        let pane_id = "w1:p-remote-child";
+        e.herdr.live_pane(pane_id, crate::testing::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_pane_foreground_cwd(pane_id, "/remote/project/worktree");
+        let (status, Json(body)) = begin(
+            State(e.app.clone()),
+            bot_headers(&parent.hook_token),
+            Form(SpawnBegin { bot_id: parent.id.clone(), timeout_ms: String::new(), purpose: "agent".into(), pane_id: pane_id.into(), child_name: "remote-agy-kid".into(), kind: "agy".into(), identity: identity.into() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        (remote_home, status)
+    }
+
+    fn agy_trusts(home: &std::path::Path, dir: &str) -> bool {
+        let Ok(text) = std::fs::read_to_string(home.join(".gemini/antigravity-cli/settings.json")) else { return false };
+        let settings: Value = serde_json::from_str(&text).unwrap();
+        settings["trustedWorkspaces"].as_array().is_some_and(|a| a.iter().any(|v| v.as_str() == Some(dir)))
+    }
+
+    /// 事故（2026-11-18，pt-hub SOL）：`herdr agent start … --kind agy --identity ag1` 的 child 用 ag1 的影子家目錄，
+    /// 信任卻寫進預設帳號的 settings.json，child 卡在「Do you trust the contents of this project?」。
+    #[tokio::test]
+    async fn an_agy_child_started_with_an_identity_is_pretrusted_in_that_identitys_home() {
+        let e = crate::testing::env().await;
+        let (home, _) = remote_agy_spawn(&e, "agy-ident-host", "ag1").await;
+        assert!(agy_trusts(&home.join(".agy-ag1"), "/remote/project/worktree"), "ag1 的 settings.json 要有 child 的 worktree");
+        assert!(!home.join(".gemini").exists(), "預設帳號的 settings.json 不該被寫");
+    }
+
+    /// 不是這台 agy 的身份（不存在、或是別的 kind 的）：忽略，照舊從母 bot 推（這裡母 bot 是 claude → 預設帳號）。
+    #[tokio::test]
+    async fn an_unknown_or_wrong_kind_identity_falls_back_to_the_inherited_one() {
+        for (host, identity) in [("agy-bad-ident-host", "nope"), ("agy-wrong-kind-host", "cc9"), ("agy-traversal-host", "../../etc")] {
+            let e = crate::testing::env().await;
+            let (home, _) = remote_agy_spawn(&e, host, identity).await;
+            assert!(agy_trusts(&home, "/remote/project/worktree"), "{identity}：退回預設帳號的 settings.json");
+            assert!(!home.join(".agy-ag1").exists() && !home.join(".claude-cc9").exists(), "{identity}：不能寫進別的身份目錄");
+        }
+    }
+
+    /// 舊 shim 的表單沒有 `identity` 欄位：反序列化成空字串，行為與以前相同。
+    #[tokio::test]
+    async fn a_form_without_the_identity_field_behaves_as_before() {
+        let form: SpawnBegin = serde_json::from_value(json!({"bot_id":"b1","timeout_ms":"","purpose":"agent","pane_id":"w1:p1","child_name":"kid","kind":"agy"})).unwrap();
+        assert_eq!(form.identity, "");
+        let e = crate::testing::env().await;
+        let (home, _) = remote_agy_spawn(&e, "agy-old-shim-host", "").await;
+        assert!(agy_trusts(&home, "/remote/project/worktree"));
+        assert!(!home.join(".agy-ag1").exists());
     }
 
     #[tokio::test]
@@ -708,7 +809,7 @@ mod tests {
                 purpose: "agent".into(),
                 pane_id: pane_id.into(),
                 child_name: "broken-kid".into(),
-                kind: "agy".into(),
+                kind: "agy".into(), identity: String::new(),
             }),
         )
         .await;
@@ -742,7 +843,7 @@ mod tests {
                 purpose: "agent".into(),
                 pane_id: pane_id.into(),
                 child_name: "codex-kid".into(),
-                kind: "codex".into(),
+                kind: "codex".into(), identity: String::new(),
             }),
         )
         .await;

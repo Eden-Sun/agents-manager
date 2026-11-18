@@ -805,6 +805,38 @@ esac"#, calls.display()));
         }
     }
 
+    /// `agent start --identity <名>` 的身份名也要帶給 begin（`identity`）：daemon 據此把預先信任寫進那個身份的設定檔。
+    /// 沒帶 `--identity` 就送空值（daemon 照舊從母 bot 推）。
+    #[test]
+    fn begin_carries_the_agent_start_identity() {
+        for (args, want) in [
+            (vec!["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p3", "--identity", "ag1"], "identity=ag1"),
+            (vec!["agent", "start", "kid", "--kind", "agy", "--identity=ag1", "--pane", "w1:p3"], "identity=ag1"),
+            (vec!["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p3"], "identity="),
+        ] {
+            let s = Sandbox::new();
+            let log = s.dir.join("curl.log");
+            write_script(
+                &s.dir.join("real").join("curl"),
+                &format!(
+                    "printf '%s\\n' \"$@\" >> '{}'\n\
+                     case \"$*\" in\n\
+                       */api/pane-authorize*) printf '{{\"allowed\":true,\"pane_id\":\"w1:p9\"}}\\n200'; exit 0 ;;\n\
+                       */api/spawn-authority*) printf '200'; exit 0 ;;\n\
+                       */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\",\"spawn_id\":\"test-spawn\",\"child_token\":\"test-child-token\"}}\\n200'; exit 0 ;;\n\
+                       */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+                     esac\n",
+                    log.display()
+                ),
+            );
+            let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_AGENT_NAME", "p-1"), ("AM_KIND", "codex"), ("AM_IDENTITIES", "agy/ag1:HOME=/h/.agy-ag1;claude/cc1:CLAUDE_CONFIG_DIR=/h/.claude-cc1")];
+            let (_, err, rc) = s.run_full(&env, &args);
+            assert_eq!(rc, 0, "{err}");
+            let sent = std::fs::read_to_string(&log).unwrap();
+            assert!(sent.lines().any(|l| l == want), "{args:?} → {sent}");
+        }
+    }
+
     /// 2026-09-08：沒帶 `--model` 的子 agent 跑 CLI 預設；同 kind 才補母 bot 的，自己有寫的不動。
     #[test]
     fn a_child_without_a_model_inherits_the_parents() {
