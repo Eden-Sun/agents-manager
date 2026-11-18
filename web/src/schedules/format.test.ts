@@ -61,3 +61,34 @@ test('列的三行：停用空心、原訂描述；隨機區間寫（隨機）�
   assert.equal(once.next.text, '已完成，沒有下一次')
   assert.equal(once.dot, 'never')
 })
+
+test('狀態點：上次失敗＋現在等待 → 黃（waiting）；上次失敗＋沒有未結束的 occurrence → 紅（fail）', () => {
+  const now = new Date('2026-11-12T04:00:00Z').getTime()
+  const base = { id: 's', project_id: 'p', bot_id: 'b', name: 'n', prompt: 'x', tz: 'UTC', generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', mode: 'daily', spec: { mode: 'daily', time: '18:01' }, enabled: true, next_due: '2026-11-12T18:01:00Z' } as const
+  const failedLast: Record<string, unknown> = { status: 'failed', outcome: 'failure', started_at: '2026-11-11T18:01:00Z', updated_at: '2026-11-11T18:02:00Z', duration_ms: 1000 }
+  const pending: Record<string, unknown> = { id: 'o1', schedule_id: 's', source: 'scheduled', scheduled_for: '2026-11-12T18:01:00Z', generation: 1, bot_id: 'b', prompt: 'x', status: 'pending', waiting_reason: null, merged_count: 0, conversation_id: null, turn_id: null }
+  const waiting = scheduleRowLines({ ...base, open: pending, last: failedLast } as never, undefined, now)
+  assert.equal(waiting.next.label, '現在')
+  assert.equal(waiting.next.text, '等待送出')
+  assert.equal(waiting.dot, 'waiting', '現在是等待，就算上次失敗也是黃')
+  const retrying = { ...pending, status: 'pending', next_retry_at: '2026-11-12T04:30:00Z', attempt_no: 2 }
+  assert.equal(scheduleRowLines({ ...base, open: retrying, last: failedLast } as never, undefined, now).dot, 'waiting', '等待重試也是黃')
+  const queued = { ...pending, status: 'queued', turn_status: 'queued' }
+  assert.equal(scheduleRowLines({ ...base, open: queued, last: failedLast } as never, undefined, now).dot, 'waiting', 'queued 未開始是黃')
+  const idle = scheduleRowLines({ ...base, open: null, last: failedLast } as never, undefined, now)
+  assert.equal(idle.dot, 'fail', '沒有未結束的 occurrence 才看上次結果：紅')
+})
+
+test('狀態點：執行中沿用上次結果的顏色（不是黃）', () => {
+  const now = new Date('2026-11-12T04:00:00Z').getTime()
+  const base = { id: 's', project_id: 'p', bot_id: 'b', name: 'n', prompt: 'x', tz: 'UTC', generation: 1, notify: 'failure', clear_after: false, created_at: '', updated_at: '', mode: 'daily', spec: { mode: 'daily', time: '18:01' }, enabled: true, next_due: '2026-11-12T18:01:00Z' } as const
+  const failedLast: Record<string, unknown> = { status: 'failed', outcome: 'failure', started_at: '2026-11-11T18:01:00Z', updated_at: '2026-11-11T18:02:00Z', duration_ms: 1000 }
+  const running: Record<string, unknown> = { id: 'o1', schedule_id: 's', source: 'scheduled', scheduled_for: '2026-11-12T03:00:00Z', generation: 1, bot_id: 'b', prompt: 'x', status: 'queued', waiting_reason: null, turn_status: 'in_flight', running_since: '2026-11-12T03:59:00Z', merged_count: 0, conversation_id: null, turn_id: null }
+  const r = scheduleRowLines({ ...base, open: running, last: failedLast } as never, undefined, now)
+  assert.equal(r.next.label, '現在')
+  assert.match(r.next.text, /^執行中/)
+  assert.equal(r.dot, 'fail', '執行中不上黃，沿用上次結果')
+  const live = scheduleRowLines({ ...base, open: { ...running, running_since: null, turn_status: 'queued' }, last: failedLast } as never, 'in_flight', now)
+  assert.match(live.next.text, /^執行中/)
+  assert.notEqual(live.dot, 'waiting', '即時狀態是 in_flight 也算執行中')
+})

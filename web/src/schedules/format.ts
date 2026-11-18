@@ -213,9 +213,13 @@ export function cadenceText(s: Schedule): string {
 }
 
 /** 執行中（或綁定的 turn 進行中）的顯示：執行中 · 已 25 秒；等待 Bot 忙碌；其餘沿用 occurrenceLine。 */
+/** 執行中：有開始時間，或綁定的 turn 進行中（即時狀態優先）。 */
+function openRunning(o: ScheduleOccurrence, liveTurnStatus: string | undefined): boolean {
+  return !!o.running_since || (liveTurnStatus ?? o.turn_status) === 'in_flight'
+}
+
 function openText(o: ScheduleOccurrence, liveTurnStatus: string | undefined, nowMs: number): string {
-  const st = liveTurnStatus ?? o.turn_status
-  if (o.running_since || st === 'in_flight') {
+  if (openRunning(o, liveTurnStatus)) {
     const ms = totalDurationMs({ duration_ms: o.duration_ms ?? 0, running_since: o.running_since }, nowMs) ?? 0
     return t('執行中 · 已 {d}', { d: formatDuration(ms) })
   }
@@ -224,11 +228,12 @@ function openText(o: ScheduleOccurrence, liveTurnStatus: string | undefined, now
 }
 
 export interface RowLine { label?: string; text: string; title: string; tone?: 'needs-rebind' }
-export type RowDot = 'ok' | 'fail' | 'never' | 'off'
+export type RowDot = 'ok' | 'fail' | 'never' | 'off' | 'waiting'
 
 /**
  * 專案排程列的三行內容。第1行（名稱＋狀態點）在元件裡組；這裡給第2行（下次／現在／停用／需重指定）與第3行（上次）。
- * 狀態點：停用＝空心（off）；否則看上次結果：成功 ok、失敗 fail、從未執行 never。
+ * 狀態點：停用＝空心（off）；有未結束的 occurrence 且還沒開始跑＝等待（waiting，黃）；其餘看上次結果：成功 ok、失敗 fail、從未執行 never。
+ * 執行中沿用上次結果的顏色（不另外上色）：「現在」那行已寫「執行中」。
  */
 export function scheduleRowLines(s: Schedule, liveTurnStatus: string | undefined, nowMs: number): { dot: RowDot; next: RowLine; last: RowLine } {
   const now = new Date(nowMs)
@@ -252,7 +257,7 @@ export function scheduleRowLines(s: Schedule, liveTurnStatus: string | undefined
     next = { label: t('下次'), text, title: tip }
   }
 
-  return { dot: rowDot(s), next, last: lastLine(s, now) }
+  return { dot: rowDot(s, liveTurnStatus), next, last: lastLine(s, now) }
 }
 
 function scheduleLastOk(s: Schedule): boolean {
@@ -260,8 +265,10 @@ function scheduleLastOk(s: Schedule): boolean {
   return !!o && (o.outcome === 'success' || (o.outcome == null && o.status === 'done'))
 }
 
-function rowDot(s: Schedule): RowDot {
+function rowDot(s: Schedule, liveTurnStatus: string | undefined): RowDot {
   if (s.enabled === false) return 'off'
+  // 「現在」優先於「上次」：有未結束的 occurrence 且沒在跑，就是等待（pending、等待重試、queued 未開始）。
+  if (s.open && !openRunning(s.open, liveTurnStatus)) return 'waiting'
   if (!s.last || s.last.status === 'cancelled') return 'never'
   return scheduleLastOk(s) ? 'ok' : 'fail'
 }

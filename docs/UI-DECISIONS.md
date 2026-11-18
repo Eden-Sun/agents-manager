@@ -1607,3 +1607,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 實測（真瀏覽器，mock 外殼頁）：含 `<script>` 的 html 能畫 canvas；iframe 內讀 `localStorage`、`parent.document`、`document.cookie`、設 `top.location` 都丟 SecurityError，`window.open` 被擋，`alert` 無效果（沒有 allow-modals），連網被外殼 CSP 擋。
 - 取捨：外殼 CSP 會被 srcdoc 繼承，所以 bot 的 html 不能載外部 script／樣式／圖片或連網；圖表要用內嵌的程式與資料。
 
+
+## 專案排程狀態點：等待中是黃色，不沿用上次失敗的紅（2026-11-18，使用者截圖）
+
+- 現象：卡片「現在：等待送出」時狀態點是紅的，因為沿用了「上次：失敗」。
+- 規則（`scheduleRowLines`）：停用＝空心；有未結束的 occurrence 且還沒在跑＝黃（`waiting`：pending、等待重試、queued 未開始）；執行中沿用上次結果的顏色（「現在」那行已寫「執行中」）；沒有未結束的 occurrence 才依上次結果（成功綠、失敗紅、從未執行灰）。
+- 黃色用既有的 `--warn` token（`schedules.css` 的 `.project-schedule-dot.waiting`），深淺色模式都有定義。
