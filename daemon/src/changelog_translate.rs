@@ -2360,7 +2360,8 @@ mod tests {
         let _release = Release(gate.clone());
         let (env, fake) = boot(vec![Step::Hang(gate.clone()), ok_step()]).await;
         env.app.changelog.seed("agy", "## 2.1.5\n- agy change\n## 2.1.4\n- old agy\n").await;
-        *env.app.changelog_translate.retry_floor.lock().unwrap() = std::time::Duration::from_millis(200);
+        // 200ms 太貼：第一筆還在翻（gate 還沒放）時重送就又被擋、之後不再排，macOS 負載下穩定踩到（#1964）；1.5s 仍遠短於輪詢上限。
+        *env.app.changelog_translate.retry_floor.lock().unwrap() = std::time::Duration::from_millis(1500);
         enable(&env).await;
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_calls(&fake, 1).await;
