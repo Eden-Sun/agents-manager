@@ -60,7 +60,7 @@ export function CodexStopHookSettings() {
         {report.entries.map((e) => (
           <li key={`${e.host}/${e.identity ?? ''}`}>
             <span>{label(e)}</span> <span>{statusText(e)}</span>{' '}
-            {e.status === 'untrusted' || e.status === 'hash_mismatch' ? (
+            {e.status === 'not_installed' || e.status === 'untrusted' || e.status === 'hash_mismatch' ? (
               <button type="button" disabled={busy} onClick={() => setPending(e)}>
                 {t('信任此 hook')}
               </button>

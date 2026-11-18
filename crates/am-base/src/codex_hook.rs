@@ -295,14 +295,39 @@ pub fn local_stop_hook_status(codex_home: &Path, command: &str) -> Result<StopHo
     Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks.to_string_lossy(), command)?.0)
 }
 
-/// User-confirmed trust (local): back up `config.toml`, then write only our one key.
-pub fn local_trust_stop_hook(codex_home: &Path, command: &str) -> Result<()> {
+/// Remote status for one Codex home (reads both files over the host's cached connection).
+pub async fn remote_stop_hook_status(conn: &HostConn, codex_home: &str, command: &str) -> Result<StopHookStatus> {
+    let home = codex_home.trim_end_matches('/');
+    let hooks = format!("{home}/hooks.json");
+    let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
+    let config_text = crate::trust::read_remote_text(conn, &format!("{home}/config.toml")).await?;
+    Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks, command)?.0)
+}
+
+/// 寫入 dispatcher 腳本，回傳 Codex 會不會執行我們的 Stop handler（唯讀）。**不註冊 hook**：
+/// 註冊只在使用者確認信任時（[`install_and_trust_local`]），所以這裡不會製造未信任的項目（#1989）。
+pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>) -> Result<bool> {
+    crate::private_files::create_private_dir(data_dir)?;
+    let dispatcher = data_dir.join(CODEX_HOOK_SH);
+    write_local_dispatcher(&dispatcher, &local_dispatch_sh(data_dir, instance))?;
+    let command = sh_quote(&dispatcher.to_string_lossy());
+    Ok(local_stop_hook_status(codex_home, &command)? == StopHookStatus::Trusted)
+}
+
+/// 使用者確認後：註冊 AG Man 自己的 Stop group，並信任**這一項**的精確 hash。
+/// 順序是先寫信任、後寫 handler：任何時刻 codex 看到的 handler 都已經被信任，或根本還不存在；
+/// 中途失敗最多留下一筆沒有對應 handler 的信任（無害），不會留下未信任的 handler。
+pub fn install_and_trust_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>) -> Result<()> {
+    crate::private_files::create_private_dir(data_dir)?;
+    crate::private_files::create_private_dir(codex_home)?;
+    let dispatcher = data_dir.join(CODEX_HOOK_SH);
+    write_local_dispatcher(&dispatcher, &local_dispatch_sh(data_dir, instance))?;
     let hooks = codex_home.join("hooks.json");
-    let hooks_text = std::fs::read_to_string(&hooks).unwrap_or_default();
-    let (status, idx) = stop_hook_status_in(&hooks_text, "", &hooks.to_string_lossy(), command)?;
-    let Some(idx) = idx else { bail!("the Stop hook is not installed yet ({status:?})") };
-    let key = stop_hook_state_key(&hooks.to_string_lossy(), idx);
-    let hash = stop_hook_trust_hash(command);
+    let command = sh_quote(&dispatcher.to_string_lossy());
+    let existing = std::fs::read_to_string(&hooks).unwrap_or_default();
+    let merged = merge_hooks_json(&existing, &command)?;
+    let key = stop_hook_state_key(&hooks.to_string_lossy(), merged.group_index);
+    let hash = stop_hook_trust_hash(&command);
     let config = codex_home.join("config.toml");
     if config.exists() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -315,56 +340,19 @@ pub fn local_trust_stop_hook(codex_home: &Path, command: &str) -> Result<()> {
         }
     }
     crate::trust::update_file(&config, |existing| trust_edit(existing, &key, &hash))?;
-    Ok(())
-}
-
-/// Remote status for one Codex home (reads both files over the host's cached connection).
-pub async fn remote_stop_hook_status(conn: &HostConn, codex_home: &str, command: &str) -> Result<StopHookStatus> {
-    let home = codex_home.trim_end_matches('/');
-    let hooks = format!("{home}/hooks.json");
-    let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
-    let config_text = crate::trust::read_remote_text(conn, &format!("{home}/config.toml")).await?;
-    Ok(stop_hook_status_in(&hooks_text, &config_text, &hooks, command)?.0)
-}
-
-/// User-confirmed trust (remote): backup then merge one key.
-pub async fn remote_trust_stop_hook(conn: &HostConn, codex_home: &str, command: &str) -> Result<()> {
-    let home = codex_home.trim_end_matches('/');
-    let hooks = format!("{home}/hooks.json");
-    let hooks_text = crate::trust::read_remote_text(conn, &hooks).await?;
-    let (status, idx) = stop_hook_status_in(&hooks_text, "", &hooks, command)?;
-    let Some(idx) = idx else { bail!("the Stop hook is not installed yet ({status:?})") };
-    let key = stop_hook_state_key(&hooks, idx);
-    let hash = stop_hook_trust_hash(command);
-    let config = format!("{home}/config.toml");
-    let q = sh_quote(&config);
-    conn.ssh_exec(&format!("[ -f {q} ] && cp -p {q} {q}.am-bak-$(date +%s) || true")).await?;
-    crate::trust::update_remote_file(conn, &config, |existing| trust_edit(existing, &key, &hash)).await?;
-    Ok(())
-}
-
-/// Install the dispatcher and append its Stop group without writing trust. Returns whether Codex will already run it (user-trusted).
-pub fn install_local(codex_home: &Path, data_dir: &Path, instance: Option<&str>) -> Result<bool> {
-    crate::private_files::create_private_dir(data_dir)?;
-    crate::private_files::create_private_dir(codex_home)?;
-    let dispatcher = data_dir.join(CODEX_HOOK_SH);
-    write_local_dispatcher(&dispatcher, &local_dispatch_sh(data_dir, instance))?;
-    let hooks = codex_home.join("hooks.json");
-    let command = sh_quote(&dispatcher.to_string_lossy());
-    crate::trust::update_file(&hooks, |existing| {
-        Ok(merge_hooks_json(existing, &command)?.merged_json)
-    })?;
+    crate::trust::update_file(&hooks, |existing| Ok(merge_hooks_json(existing, &command)?.merged_json))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o600))?;
     }
-    let config_text = std::fs::read_to_string(codex_home.join("config.toml")).unwrap_or_default();
-    let installed = std::fs::read_to_string(&hooks)?;
-    Ok(stop_hook_status_in(&installed, &config_text, &hooks.to_string_lossy(), &command)?.0 == StopHookStatus::Trusted)
+    if local_stop_hook_status(codex_home, &command)? != StopHookStatus::Trusted {
+        bail!("Codex Stop hook is not trusted after the write (check config.toml for a conflicting entry)");
+    }
+    Ok(())
 }
 
-/// Remote installation only; never writes trust. Returns whether the user already trusts the handler (one extra read of the remote `config.toml`).
+/// 寫入 dispatcher 腳本，回傳遠端 Codex 會不會執行我們的 Stop handler（唯讀，不註冊）。見 [`install_local`]。
 pub fn install_remote<'a>(
     conn: &'a HostConn,
     codex_home: &'a str,
@@ -376,24 +364,42 @@ pub fn install_remote<'a>(
         let home = conn.home().await?;
         let dispatcher = format!("{home}/{root}/{CODEX_HOOK_SH}");
         let script = remote_dispatch_sh(root, instance);
-        let out = conn
-            .ssh_exec(&write_remote_dispatcher_script(&dispatcher, &script))
-            .await?;
+        let out = conn.ssh_exec(&write_remote_dispatcher_script(&dispatcher, &script)).await?;
         if !out.contains("AM_CODEX_DISPATCH_OK") {
             bail!("remote Codex dispatcher installation failed");
         }
-        let hooks = format!("{}/hooks.json", codex_home.trim_end_matches('/'));
         let command = sh_quote(&dispatcher);
-        crate::trust::update_remote_file(conn, &hooks, |existing| {
-            Ok(merge_hooks_json(existing, &command)?.merged_json)
-        })
-        .await?;
-        conn.ssh_exec(&format!("chmod 600 {}", sh_quote(&hooks)))
-            .await?;
-        let installed = crate::trust::read_remote_text(conn, &hooks).await?;
-        let config_text = crate::trust::read_remote_text(conn, &format!("{}/config.toml", codex_home.trim_end_matches('/'))).await?;
-        Ok(stop_hook_status_in(&installed, &config_text, &hooks, &command)?.0 == StopHookStatus::Trusted)
+        Ok(remote_stop_hook_status(conn, codex_home, &command).await? == StopHookStatus::Trusted)
     })
+}
+
+/// 遠端版的 [`install_and_trust_local`]：同樣先寫信任、後寫 handler；寫前備份 config.toml。
+pub async fn install_and_trust_remote(conn: &HostConn, codex_home: &str, remote_root: &str, instance: Option<&str>) -> Result<()> {
+    let root = remote_root.trim_end_matches('/');
+    let home = conn.home().await?;
+    let dispatcher = format!("{home}/{root}/{CODEX_HOOK_SH}");
+    let script = remote_dispatch_sh(root, instance);
+    let out = conn.ssh_exec(&write_remote_dispatcher_script(&dispatcher, &script)).await?;
+    if !out.contains("AM_CODEX_DISPATCH_OK") {
+        bail!("remote Codex dispatcher installation failed");
+    }
+    let home_dir = codex_home.trim_end_matches('/');
+    let hooks = format!("{home_dir}/hooks.json");
+    let config = format!("{home_dir}/config.toml");
+    let command = sh_quote(&dispatcher);
+    let existing = crate::trust::read_remote_text(conn, &hooks).await?;
+    let merged = merge_hooks_json(&existing, &command)?;
+    let key = stop_hook_state_key(&hooks, merged.group_index);
+    let hash = stop_hook_trust_hash(&command);
+    let q = sh_quote(&config);
+    conn.ssh_exec(&format!("[ -f {q} ] && cp -p {q} {q}.am-bak-$(date +%s) || true")).await?;
+    crate::trust::update_remote_file(conn, &config, |existing| trust_edit(existing, &key, &hash)).await?;
+    crate::trust::update_remote_file(conn, &hooks, |existing| Ok(merge_hooks_json(existing, &command)?.merged_json)).await?;
+    conn.ssh_exec(&format!("chmod 600 {}", sh_quote(&hooks))).await?;
+    if remote_stop_hook_status(conn, codex_home, &command).await? != StopHookStatus::Trusted {
+        bail!("Codex Stop hook is not trusted after the write (check config.toml for a conflicting entry)");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -635,47 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn installation_preserves_config_and_existing_groups_without_creating_trust() {
-        let dir = crate::test_dirs::scratch_dir("am-codex-stop-install");
-        let home = dir.join("codex");
-        let data = dir.join("data");
-        std::fs::create_dir_all(&home).unwrap();
-        let config = "# user-owned\n[hooks.state.existing]\ntrusted_hash = 'fixture-only'\n";
-        std::fs::write(home.join("config.toml"), config).unwrap();
-        let initial = serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"herdr"}]}],"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}});
-        std::fs::write(home.join("hooks.json"), initial.to_string()).unwrap();
-        install_local(&home, &data, None).unwrap();
-        let first = std::fs::read(home.join("hooks.json")).unwrap();
-        install_local(&home, &data, None).unwrap();
-        assert_eq!(std::fs::read(home.join("hooks.json")).unwrap(), first);
-        assert_eq!(
-            std::fs::read_to_string(home.join("config.toml")).unwrap(),
-            config
-        );
-        let merged: serde_json::Value = serde_json::from_slice(&first).unwrap();
-        assert_eq!(
-            merged["hooks"]["SessionStart"],
-            initial["hooks"]["SessionStart"]
-        );
-        assert_eq!(merged["hooks"]["Stop"][0], initial["hooks"]["Stop"][0]);
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            for (path, mode) in [
-                (home.clone(), 0o700),
-                (data.clone(), 0o700),
-                (home.join("hooks.json"), 0o600),
-                (data.join(CODEX_HOOK_SH), 0o700),
-            ] {
-                assert_eq!(
-                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                    mode
-                );
-            }
-        }
-    }
-    #[test]
     fn native_shell_fixture_uses_the_production_builders() {
         println!(
             "C89_BASE_FIXTURE={}",
@@ -697,20 +662,72 @@ mod tests {
     }
 
     #[test]
-    fn install_local_reports_trust_only_for_the_exact_user_recorded_hash() {
-        let dir = crate::test_dirs::scratch_dir("am-codex-stop-trust");
+    fn install_never_registers_an_untrusted_stop_group() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-install");
         let home = dir.join("codex");
         let data = dir.join("data");
-        assert!(!install_local(&home, &data, None).unwrap(), "fresh install is untrusted");
+        std::fs::create_dir_all(&home).unwrap();
+        let config = "# user-owned\n[hooks.state.existing]\ntrusted_hash = 'fixture-only'\n";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        let initial = serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}});
+        std::fs::write(home.join("hooks.json"), initial.to_string()).unwrap();
+        assert!(!install_local(&home, &data, None).unwrap(), "install alone never reports trusted");
+        assert_eq!(std::fs::read(home.join("hooks.json")).unwrap(), initial.to_string().into_bytes(), "no handler is registered before the user trusts it");
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), config);
+        assert!(data.join(CODEX_HOOK_SH).exists(), "the dispatcher script is still written");
+    }
+
+    #[test]
+    fn install_and_trust_registers_only_our_group_and_trusts_exactly_that_handler() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-trust-all");
+        let home = dir.join("codex");
+        let data = dir.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        let config = "# user-owned\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        let initial = serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}});
+        std::fs::write(home.join("hooks.json"), initial.to_string()).unwrap();
+        install_and_trust_local(&home, &data, None).unwrap();
+        assert!(install_local(&home, &data, None).unwrap(), "the trusted handler reads as trusted");
+        let merged: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(merged["hooks"]["Stop"][0], initial["hooks"]["Stop"][0], "the user's own Stop group is untouched");
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        let after = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(after.starts_with(config), "everything the user wrote stays byte-identical");
+    }
+
+    #[test]
+    fn a_failed_install_and_trust_never_leaves_an_untrusted_handler_behind() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-order");
+        let home = dir.join("codex");
+        let data = dir.join("data");
+        std::fs::create_dir_all(home.join("hooks.json")).unwrap(); // hooks.json cannot be written: the handler write must fail
+        assert!(install_and_trust_local(&home, &data, None).is_err());
+        let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
+        let hooks = home.join("hooks.json");
+        assert_eq!(
+            local_stop_hook_status(&home, &command).unwrap(),
+            StopHookStatus::NotInstalled,
+            "no untrusted handler is left registered"
+        );
+        let _ = hooks;
+    }
+
+    #[test]
+    fn install_local_reports_trust_only_for_the_exact_user_recorded_hash() {
+        let dir = crate::test_dirs::scratch_dir("am-codex-stop-exact-hash");
+        let home = dir.join("codex");
+        let data = dir.join("data");
         let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
         let key = format!("{}:stop:0:0", home.join("hooks.json").display());
+        std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), format!("[hooks.state.{key:?}]\ntrusted_hash=\"sha256:stale\"\n")).unwrap();
         assert!(!install_local(&home, &data, None).unwrap(), "wrong hash is untrusted");
-        let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", stop_hook_trust_hash(&command));
-        std::fs::write(home.join("config.toml"), &good).unwrap();
-        assert!(install_local(&home, &data, None).unwrap());
-        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), good, "trust file is never written");
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        install_and_trust_local(&home, &data, None).unwrap();
+        assert!(install_local(&home, &data, None).unwrap(), "the exact recorded hash is trusted");
         std::fs::write(home.join("config.toml"), "not = [valid").unwrap();
         assert!(!install_local(&home, &data, None).unwrap(), "unparseable config is untrusted");
     }
+
 }

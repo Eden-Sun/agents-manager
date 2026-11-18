@@ -123,6 +123,15 @@ pub(crate) async fn get(State(app): State<Arc<App>>, Extension(principal): Exten
     Ok(Json(Report { enabled: app.cfg.get().await.codex.stop_hook, entries }))
 }
 
+type TrustLocks = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
+/// 每個 (host, CODEX_HOME) 一把鎖；寫入信任與安裝 handler 只在這把鎖底下做。
+fn trust_lock(host: &str, codex_home: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<TrustLocks> = std::sync::OnceLock::new();
+    let mut map = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(format!("{host}\n{codex_home}")).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+}
+
 pub(crate) async fn post_trust(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
@@ -135,11 +144,16 @@ pub(crate) async fn post_trust(
         return Err(LcError::NotFound(format!("host `{}`", body.host)));
     }
     let t = resolve(&app, &body.host, body.identity.as_deref()).await?;
+    // 同一台主機、同一個 CODEX_HOME 的寫入序列化：兩次按鈕不會互相覆蓋 config.toml／hooks.json。
+    let lock = trust_lock(&t.host, &t.codex_home);
+    let _guard = lock.lock().await;
+    let instance = app.instance();
     let wrote = if t.host == am_config::LOCAL_HOST {
-        codex_hook::local_trust_stop_hook(std::path::Path::new(&t.codex_home), &t.command)
+        codex_hook::install_and_trust_local(std::path::Path::new(&t.codex_home), &app.data_dir, instance.as_deref())
     } else {
         let conn = app.hosts.get(&t.host).await.ok_or_else(|| LcError::NotFound(format!("host `{}`", t.host)))?;
-        match tokio::time::timeout(PROBE_BUDGET, codex_hook::remote_trust_stop_hook(&conn, &t.codex_home, &t.command)).await {
+        let root = crate::hosts::remote_root_for(instance.as_deref());
+        match tokio::time::timeout(PROBE_BUDGET, codex_hook::install_and_trust_remote(&conn, &t.codex_home, &root, instance.as_deref())).await {
             Ok(r) => r,
             Err(_) => Err(anyhow::anyhow!("timed out")),
         }
@@ -163,10 +177,11 @@ mod tests {
         std::fs::create_dir_all(&codex_home).unwrap();
         let t = resolve(&app, "local", None).await.unwrap();
         assert_eq!(t.codex_home, codex_home.to_string_lossy());
-        codex_hook::install_local(&codex_home, &app.data_dir, app.instance().as_deref()).unwrap();
+        // 安裝本身不註冊 handler：沒有信任之前，hooks.json 裡不會出現我們的項目（#1989）。
+        assert!(!codex_hook::install_local(&codex_home, &app.data_dir, app.instance().as_deref()).unwrap());
         let before = "# keep me\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n";
         std::fs::write(codex_home.join("config.toml"), before).unwrap();
-        assert_eq!(status_str(probe(&app, &t).await.unwrap()), "untrusted");
+        assert_eq!(status_str(probe(&app, &t).await.unwrap()), "not_installed");
         let Json(e) = post_trust(State(app.clone()), Extension(RequestPrincipal::User), Json(TrustBody { host: "local".into(), identity: None })).await.unwrap();
         assert_eq!(e.status, "trusted");
         let after = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();

@@ -147,7 +147,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"claude":false,"codex":false,"agy":false,"grok":false}` |
 | GET | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only`；回 `{"enabled":false,"entries":[{"host":"local","identity":null,"codex_home":"…","status":"untrusted"}]}`，`status` ∈ `not_installed`／`untrusted`／`hash_mismatch`／`trusted`／`unavailable`（讀不到或逾時 8 秒） |
 | HEAD | `/api/codex/stop-hook` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
-| POST | `/api/codex/stop-hook/trust` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"host":"local","identity":null}`；只在 hook 已安裝時，備份 `config.toml`（`config.toml.am-bak-<秒>`）後只寫 `[hooks.state."…:stop:<組>:0"].trusted_hash`；成功回該筆 entry；未安裝／設定檔壞掉 → 409 `stop_hook_not_trustable`；未知 host／身份 → 404 |
+| POST | `/api/codex/stop-hook/trust` | User-only；Bot 與 AGM role 均 → 403 `user_only`；body `{"host":"local","identity":null}`；安裝並信任 AG Man 自己的 Stop handler（#1989）：先備份 `config.toml`（`config.toml.am-bak-<秒>`）、寫精確 `trusted_hash`，再寫 `hooks.json`（只追加／保留我們自己的 group）；其他 hook 與其信任不動；同一 (host, CODEX_HOME) 序列化。成功回該筆 entry（`trusted`）；設定檔壞掉或寫入後未確認信任 → 409 `stop_hook_not_trustable`；未知 host／身份 → 404 |
 | HEAD | `/api/settings/auto-update` | User-only；Bot 與 AGM role 均 → 403 `user_only` |
 | GET | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | GET | `/api/push/settings` | User-only；Bot 與 AGM role 均 403 `user_only` |
