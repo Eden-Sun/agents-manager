@@ -238,3 +238,22 @@ test('舊 daemon（沒有 groups）：一個用途一列，存檔走逐用途寫
   await settle()
   assert.deepEqual(puts, [{ enabled: true, uses: { changelog_review: { enabled: true } } }])
 })
+
+test('每小時上限填 0 顯示「不限」，輸入框允許 0（不再被夾在 1 以上）', async () => {
+  const g = groups(true)[0]
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: [{ ...g, max_per_hour: 0, default_max_per_hour: 0 }] }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  const input = root.querySelector<HTMLInputElement>(`fieldset[data-use=${g.id}] input[type=number]`)!
+  assert.equal(input.getAttribute('min'), '0')
+  assert.equal(input.value, '0')
+  assert.equal(root.querySelector(`[data-testid=claude-api-limit-hint-${g.id}]`)?.textContent, '不限')
+})
+
+test('每小時上限非 0 時說明寫清楚 0＝不限', async () => {
+  const g = groups(true)[0]
+  stub(settings({ enabled: true, key_present: true, key_error: null, uses: uses(true), groups: [{ ...g, max_per_hour: 12 }] }), [])
+  const root = await mount(<ClaudeApiPanel />)
+  await settle()
+  assert.match(root.querySelector(`[data-testid=claude-api-limit-hint-${g.id}]`)?.textContent ?? '', /0 ＝ 不限/)
+})

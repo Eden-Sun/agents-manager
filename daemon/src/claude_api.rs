@@ -347,14 +347,14 @@ impl std::error::Error for ClaudeError {}
 /// 開關：`[claude_api] enabled` 總開關與用途自己的 `enabled` 都要開；`changelog_translate` 是舊的一段，
 /// 只看 `[changelog_translate] enabled`，不受總開關管。
 pub async fn complete(app: &App, req: ClaudeRequest) -> Result<ClaudeReply, ClaudeError> {
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg.claude_fresh().await;
     complete_with(&cfg, &app.claude_api, req).await
 }
 
 /// 同 [`complete`]，但這一次用指定的 effort（不看設定）。模型仍由設定決定。`effort` 須是 `CLAUDE_API_EFFORTS` 之一。
 /// 給「品質沒過就提一階 effort 重試」用（message_translate）；不改設定、不改之後的呼叫。
 pub async fn complete_with_effort(app: &App, req: ClaudeRequest, effort: &str) -> Result<ClaudeReply, ClaudeError> {
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg.claude_fresh().await;
     complete_with_timeout(&cfg, &app.claude_api, req, None, Some(effort)).await
 }
 
@@ -365,7 +365,7 @@ pub async fn complete_with(cfg: &ConfigFile, api: &ClaudeApi, req: ClaudeRequest
 /// 同 [`complete`]，但這一次的逾時至少 `min_timeout_ms`（`[claude_api] timeout_ms` 較長就用它）。
 /// 給輸出量隨輸入成長的用途（上游新版分診一次要判上百條），固定 60 秒會在模型寫完前斷掉。
 pub async fn complete_at_least(app: &App, req: ClaudeRequest, min_timeout_ms: u64) -> Result<ClaudeReply, ClaudeError> {
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg.claude_fresh().await;
     complete_with_timeout(&cfg, &app.claude_api, req, Some(min_timeout_ms), None).await
 }
 
@@ -746,7 +746,7 @@ fn settings_json(cfg: &ConfigFile) -> Value {
 }
 
 pub(crate) async fn get_settings(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(settings_json(&app.cfg.get().await))
+    Json(settings_json(&app.cfg.claude_fresh().await))
 }
 
 #[derive(Deserialize)]
@@ -771,13 +771,13 @@ pub(crate) struct SettingsBody {
 fn validate(body: &SettingsBody) -> Result<(), LcError> {
     for (id, u) in body.groups.iter().flatten() {
         let Some(g) = CLAUDE_API_GROUPS.iter().find(|g| g.id == id) else { return Err(LcError::Bad(format!("unknown group: {id}"))) };
-        validate_body(id, u, g.auto_default.is_some(), 1)?;
+        validate_body(id, u, g.auto_default.is_some(), 0)?;
     }
     for (id, u) in body.uses.iter().flatten() {
         let Some(d) = CLAUDE_API_USES.iter().find(|d| d.id == id) else { return Err(LcError::Bad(format!("unknown use: {id}"))) };
         let has_auto = CLAUDE_API_GROUPS.iter().find(|g| g.id == d.group).is_some_and(|g| g.auto_default.is_some());
-        // changelog_translate 的 0＝不上限（#1948）；其他用途仍要求 1..=1000。
-        validate_body(id, u, has_auto && d.auto_default.is_some(), if id == "changelog_translate" { 0 } else { 1 })?;
+        // 0＝不上限（#1948；所有用途與組共用）；上限 1000。
+        validate_body(id, u, has_auto && d.auto_default.is_some(), 0)?;
     }
     Ok(())
 }
@@ -840,7 +840,7 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
         if let Some(v) = u.auto {
             st.auto = Some(v);
         }
-        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: st.max_per_hour, auto: st.auto });
+        cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto });
         // 更新框翻譯的功能本身讀 `[changelog_translate]`：把共用的開關／模型／effort 同步過去（每小時上限它自己管，不動）。
         if gid == "translate" {
             let t = &mut cfg.changelog_translate;
@@ -857,7 +857,7 @@ fn anything_on(cfg: &ConfigFile) -> (bool, Vec<bool>) {
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<SettingsBody>) -> Result<Json<Value>, LcError> {
     validate(&body)?;
-    let prev = app.cfg.get().await;
+    let prev = app.cfg.claude_fresh().await;
     let key_file = prev.claude_api.key_file.clone();
     let staged = match body.token.as_deref().filter(|t| !t.trim().is_empty()) {
         Some(token) => Some(stage_key(&key_file, token).map_err(|e| LcError::Bad(e.to_string()))?),
@@ -899,7 +899,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
             return Err(LcError::Upstream(format!("key publish failed: {e}")));
         }
     }
-    Ok(Json(settings_json(&app.cfg.get().await)))
+    Ok(Json(settings_json(&app.cfg.claude_fresh().await)))
 }
 
 #[derive(Deserialize)]
@@ -1245,10 +1245,12 @@ mod tests {
             json!({"uses": {"ghost": {"enabled": true}}}),
             json!({"uses": {"changelog_review": {"model": "gpt-4"}}}),
             json!({"uses": {"changelog_review": {"effort": "ultra"}}}),
-            json!({"uses": {"changelog_review": {"max_per_hour": 0}}}),
+            json!({"uses": {"changelog_review": {"max_per_hour": 1001}}}),
         ] {
             assert!(matches!(put(&app, bad).await, Err(LcError::Bad(_))));
         }
+        // 0＝不限是合法值（#翻譯不限）。
+        assert!(put(&app, json!({"uses": {"changelog_review": {"max_per_hour": 0}}})).await.is_ok());
         // 只關開關：key 還在。
         let off = put(&app, json!({"enabled": false, "token": "  "})).await.unwrap().0;
         assert_eq!((off["enabled"].clone(), off["key_present"].clone()), (json!(false), json!(true)));
@@ -1271,5 +1273,28 @@ mod tests {
         let body = r.request_json();
         assert!(body.get("output_config").is_none() && body.get("system").is_none());
         assert!(!format!("{r:?}").contains("sk-ant-secret"));
+    }
+
+    /// 翻譯不限：`0`＝不上限，存得進去、名額不擋（連續超過舊上限仍放行）；`1001` 仍拒絕；翻譯組預設就是不限；
+    /// 改完 config.toml（不重啟）之後呼叫端讀得到新值。
+    #[tokio::test]
+    async fn a_zero_hourly_limit_is_unlimited_saves_and_hot_reloads() {
+        let (app, dir) = app_with_key().await;
+        put(&app, json!({"enabled": true, "token": "sk-ant-test-0100"})).await.unwrap();
+        put(&app, json!({"groups": {"translate": {"max_per_hour": 0}}})).await.unwrap();
+        assert_eq!(app.cfg.claude_fresh().await.claude_group_state("translate").unwrap().max_per_hour, 0);
+        assert!(matches!(put(&app, json!({"groups": {"translate": {"max_per_hour": 1001}}})).await, Err(LcError::Bad(_))));
+        // 不限：連續送超過一般上限也照放（reserve 不擋）。
+        let api = ClaudeApi::new();
+        for _ in 0..300 {
+            assert!(api.reserve("message_translate", 0));
+        }
+        // 對照：有上限的用途照擋。
+        assert!(api.reserve("schedule_outcome", 2) && api.reserve("schedule_outcome", 2));
+        assert!(!api.reserve("schedule_outcome", 2));
+        // 預設：翻譯組與訊息翻譯預設不限。
+        let defaults: ConfigFile = toml::from_str("").unwrap();
+        assert_eq!(defaults.claude_use_state("message_translate").unwrap().max_per_hour, 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

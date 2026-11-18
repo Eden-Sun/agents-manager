@@ -1062,17 +1062,14 @@ pub struct ClaudeApiUseCfg {
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
-    /// 一小時內最多送幾次（保險絲）；0＝用預設。
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub max_per_hour: u32,
+    /// 一小時內最多送幾次（保險絲）。沒寫（`None`）＝用該用途／組的預設；`0`＝不限（#1948 的 translate 同一套規矩）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_hour: Option<u32>,
     /// 「自動」開關（目前只有 `message_translate`：英文訊息自動翻譯，使用者 2026-11-06）。沒寫＝用 [`ClaudeApiUseDef::auto_default`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
 }
 
-fn is_zero_u32(n: &u32) -> bool {
-    *n == 0
-}
 
 /// 一個用途的預設值（不含開關）。
 pub struct ClaudeApiUseDef {
@@ -1100,7 +1097,7 @@ pub const CLAUDE_API_USES: &[ClaudeApiUseDef] = &[
     ClaudeApiUseDef { id: "schedule_outcome", group: "schedule_outcome", label: "排程結果分類", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: None },
     ClaudeApiUseDef { id: "changelog_review", group: "changelog_analysis", label: "影響分析 changelog", model: "claude-opus-5-5", effort: "low", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
     ClaudeApiUseDef { id: "release_triage", group: "changelog_analysis", label: "上游新版分診", model: "claude-opus-5-5", effort: "low", max_per_hour: 30, legacy_section: None, default_on: false, auto_default: None },
-    ClaudeApiUseDef { id: "message_translate", group: "translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, legacy_section: None, default_on: true, auto_default: Some(true) },
+    ClaudeApiUseDef { id: "message_translate", group: "translate", label: "對話訊息翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: None, default_on: true, auto_default: Some(true) },
     ClaudeApiUseDef { id: "changelog_translate", group: "translate", label: "更新框翻譯", model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, legacy_section: Some("changelog_translate"), default_on: false, auto_default: None },
 ];
 /// 設定頁一列＝一組。同組的用途共用一份設定（開關、模型、effort、每小時上限、自動）；呼叫端與帳本仍按用途 id。
@@ -1118,7 +1115,7 @@ pub struct ClaudeApiGroupDef {
 pub const CLAUDE_API_GROUPS: &[ClaudeApiGroupDef] = &[
     ClaudeApiGroupDef { id: "schedule_outcome", label: "排程結果分類", members: &["schedule_outcome"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: None },
     ClaudeApiGroupDef { id: "changelog_analysis", label: "changelog 影響分析", members: &["changelog_review", "release_triage"], model: "claude-opus-5-5", effort: "low", max_per_hour: 30, default_on: false, auto_default: None },
-    ClaudeApiGroupDef { id: "translate", label: "翻譯", members: &["message_translate", "changelog_translate"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 120, default_on: true, auto_default: Some(true) },
+    ClaudeApiGroupDef { id: "translate", label: "翻譯", members: &["message_translate", "changelog_translate"], model: "claude-haiku-5-5", effort: "low", max_per_hour: 0, default_on: true, auto_default: Some(true) },
 ];
 /// 設定頁下拉的候選模型（最新 Haiku／Sonnet／Opus）。設定值不限於這兩個，但 id 必須是 `claude-` 開頭的安全字元。
 pub const CLAUDE_API_MODELS: &[&str] = &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
@@ -1188,7 +1185,7 @@ impl ClaudeApiCfg {
             enabled,
             model: pick(&cfg.model, def.model),
             effort: pick(&cfg.effort, def.effort),
-            max_per_hour: if cfg.max_per_hour == 0 { def.max_per_hour } else { cfg.max_per_hour },
+            max_per_hour: cfg.max_per_hour.unwrap_or(def.max_per_hour),
             auto: def.auto_default.map(|d| cfg.auto.unwrap_or(d)),
         })
     }
@@ -1222,7 +1219,7 @@ impl ConfigFile {
         let written = |id: &str| -> ClaudeApiUseCfg {
             if id == "changelog_translate" && !self.changelog_translate.is_default() {
                 let t = &self.changelog_translate;
-                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: t.max_per_hour, auto: None };
+                return ClaudeApiUseCfg { enabled: Some(t.enabled), model: t.model.clone(), effort: t.effort.clone(), max_per_hour: Some(t.max_per_hour), auto: None };
             }
             self.claude_api.uses.get(id).cloned().unwrap_or_default()
         };
@@ -1242,8 +1239,8 @@ impl ConfigFile {
                 break;
             }
         }
-        if let Some(w) = gd.members.iter().map(|m| written(m)).find(|w| w.max_per_hour != 0) {
-            st.max_per_hour = w.max_per_hour;
+        if let Some(v) = gd.members.iter().find_map(|m| written(m).max_per_hour) {
+            st.max_per_hour = v;
         }
         if let Some(a) = gd.members.iter().find_map(|m| self.claude_api.uses.get(*m).and_then(|u| u.auto)) {
             st.auto = gd.auto_default.map(|_| a);
@@ -1267,7 +1264,7 @@ fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseSta
         enabled: g.enabled.unwrap_or(gd.default_on),
         model: pick(&g.model, gd.model),
         effort: pick(&g.effort, gd.effort),
-        max_per_hour: if g.max_per_hour == 0 { gd.max_per_hour } else { g.max_per_hour },
+        max_per_hour: g.max_per_hour.unwrap_or(gd.max_per_hour),
         auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
     }
 }
@@ -2210,6 +2207,15 @@ impl ConfigStore {
         g.cfg.agents.clone()
     }
 
+    /// 翻譯與 Claude API 用途的設定（熱重載）：`[claude_api]` 的 `enabled`／`uses`／`groups`，以及 `[changelog_translate]` 的
+    /// `enabled`／`model`／`effort`／`max_per_hour`，都是改完 config.toml 就生效，不必重啟 daemon。其餘欄位（key 檔、endpoint、
+    /// timeout 等）照舊只在啟動與 [`Self::update`] 時載入。
+    pub async fn claude_fresh(&self) -> ConfigFile {
+        let mut g = self.inner.lock().await;
+        self.refresh_hot_sections(&mut g);
+        g.cfg.clone()
+    }
+
     /// `[updates]` 的最新值（CLI 自動更新設定）。
     pub async fn updates_fresh(&self) -> UpdatesCfg {
         let mut g = self.inner.lock().await;
@@ -2266,6 +2272,21 @@ impl ConfigStore {
                 if cfg.updates != g.cfg.updates {
                     tracing::info!(path = %self.path.display(), "config.toml [updates] changed on disk; using the new values");
                     g.cfg.updates = cfg.updates;
+                }
+                let claude_changed = cfg.claude_api.enabled != g.cfg.claude_api.enabled
+                    || cfg.claude_api.uses != g.cfg.claude_api.uses
+                    || cfg.claude_api.groups != g.cfg.claude_api.groups
+                    || (cfg.changelog_translate.enabled, &cfg.changelog_translate.model, &cfg.changelog_translate.effort, cfg.changelog_translate.max_per_hour)
+                        != (g.cfg.changelog_translate.enabled, &g.cfg.changelog_translate.model, &g.cfg.changelog_translate.effort, g.cfg.changelog_translate.max_per_hour);
+                if claude_changed {
+                    tracing::info!(path = %self.path.display(), "config.toml [claude_api] uses/groups or [changelog_translate] changed on disk; using the new values");
+                    g.cfg.claude_api.enabled = cfg.claude_api.enabled;
+                    g.cfg.claude_api.uses = cfg.claude_api.uses;
+                    g.cfg.claude_api.groups = cfg.claude_api.groups;
+                    g.cfg.changelog_translate.enabled = cfg.changelog_translate.enabled;
+                    g.cfg.changelog_translate.model = cfg.changelog_translate.model;
+                    g.cfg.changelog_translate.effort = cfg.changelog_translate.effort;
+                    g.cfg.changelog_translate.max_per_hour = cfg.changelog_translate.max_per_hour;
                 }
             }
             Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be parsed; keeping the in-memory [build]/[agents]"),
@@ -3758,5 +3779,52 @@ mod slot_pool_tests {
         let mut r = remote("127.0.0.1", 0);
         r.remote_root = "/srv/rc".into();
         assert_eq!(r.same_machine_slot_pool(2, home), Some((std::path::PathBuf::from("/srv/rc/.slots"), 2)));
+    }
+}
+
+#[cfg(test)]
+mod claude_unlimited_tests {
+    use super::*;
+
+    /// 預設：翻譯組與對話訊息翻譯不限（0）；其他用途的預設不動。
+    #[test]
+    fn translate_defaults_are_unlimited_and_the_other_defaults_are_unchanged() {
+        assert_eq!(CLAUDE_API_GROUPS.iter().find(|g| g.id == "translate").unwrap().max_per_hour, 0);
+        assert_eq!(CLAUDE_API_USES.iter().find(|d| d.id == "message_translate").unwrap().max_per_hour, 0);
+        assert_eq!(CLAUDE_API_GROUPS.iter().find(|g| g.id == "changelog_analysis").unwrap().max_per_hour, 30);
+        let cfg: ConfigFile = toml::from_str("").unwrap();
+        assert_eq!(cfg.claude_group_state("translate").unwrap().max_per_hour, 0);
+        assert_eq!(cfg.claude_use_state("message_translate").unwrap().max_per_hour, 0);
+    }
+
+    /// 寫了 `0` 就是不限（不再被當成「沒寫」而換回預設）；沒寫才用預設。
+    #[test]
+    fn an_explicit_zero_is_unlimited_and_an_unset_limit_uses_the_default() {
+        let zero: ConfigFile = toml::from_str("[claude_api.groups.changelog_analysis]\nmax_per_hour = 0\n").unwrap();
+        assert_eq!(zero.claude_group_state("changelog_analysis").unwrap().max_per_hour, 0);
+        assert_eq!(zero.claude_use_state("release_triage").unwrap().max_per_hour, 0);
+        let unset: ConfigFile = toml::from_str("[claude_api.groups.changelog_analysis]\nmodel = \"claude-opus-5-5\"\n").unwrap();
+        assert_eq!(unset.claude_group_state("changelog_analysis").unwrap().max_per_hour, 30);
+        let old_zero: ConfigFile = toml::from_str("[claude_api.uses.release_triage]\nmax_per_hour = 0\n").unwrap();
+        assert_eq!(old_zero.claude_group_state("changelog_analysis").unwrap().max_per_hour, 0, "舊的逐用途 0 也是不限");
+    }
+
+    /// 熱重載：改 config.toml 的 `groups`／`uses` 不必重啟，`claude_fresh()` 立刻看得到；key 檔等其他欄位不動。
+    #[tokio::test]
+    async fn an_edited_claude_limit_is_picked_up_without_a_restart() {
+        let dir = super::test_support::scratch_dir("am-claude-hot");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[claude_api]\nkey_file = 'a.key'\n\n[claude_api.groups.translate]\nmax_per_hour = 5\n").unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        assert_eq!(store.claude_fresh().await.claude_group_state("translate").unwrap().max_per_hour, 5);
+
+        std::fs::write(&path, "[claude_api]\nkey_file = 'b.key'\n\n[claude_api.groups.translate]\nmax_per_hour = 0\n").unwrap();
+        let at = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        let fresh = store.claude_fresh().await;
+        assert_eq!(fresh.claude_group_state("translate").unwrap().max_per_hour, 0);
+        assert_eq!(fresh.claude_api.key_file, "a.key", "其他欄位維持啟動時的值");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

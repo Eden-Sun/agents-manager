@@ -212,7 +212,7 @@ fn error_of(e: ClaudeError) -> LcError {
 
 /// 自動翻譯（網頁的 `auto`，以及 daemon 的預先翻，見 `message_pretranslate`）是否開著：總開關、用途開關、`auto` 都要開。
 pub(crate) async fn auto_on(app: &App) -> bool {
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg.claude_fresh().await;
     cfg.claude_api.enabled && cfg.claude_use_state(USE_CASE).is_some_and(|s| s.enabled && s.auto == Some(true))
 }
 
@@ -445,7 +445,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path) -> 
     let mut attempts = vec![attempt(app, id, content, None, None).await?];
     if needs_retry(&attempts[0], min_prob) {
         // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
-        let configured = app.cfg.get().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
+        let configured = app.cfg.claude_fresh().await.claude_use_state(USE_CASE).map(|s| s.effort).unwrap_or_default();
         let prev = attempts[0].reason;
         attempts.push(attempt(app, id, content, Some(next_effort(&configured)), prev).await?);
     }

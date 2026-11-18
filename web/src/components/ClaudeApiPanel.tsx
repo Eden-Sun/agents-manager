@@ -225,7 +225,7 @@ export function ClaudeApiPanel() {
                   <span>{t('每小時上限')}</span>
                   <input
                     type="number"
-                    min={1}
+                    min={0}
                     max={1000}
                     value={perHour}
                     onChange={(e) => {
@@ -233,6 +233,9 @@ export function ClaudeApiPanel() {
                       if (Number.isFinite(n)) patchUse(u.id, { max_per_hour: n })
                     }}
                   />
+                  <span className="hint" data-testid={`claude-api-limit-hint-${u.id}`}>
+                    {perHour === 0 ? t('不限') : t('0 ＝ 不限（每小時送出次數不設上限）')}
+                  </span>
                 </label>
               </div>
               {u.uses.includes('changelog_translate') ? <span className="hint">{t('設定存在 [{section}]，不受總開關管。', { section: 'changelog_translate' })}</span> : null}
