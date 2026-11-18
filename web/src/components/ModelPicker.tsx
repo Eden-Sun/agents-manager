@@ -6,6 +6,7 @@ import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER,
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
+import { latestModels } from '../lib/modelSeries'
 import { runningFast } from '../lib/runtimeDrift'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -106,7 +107,8 @@ export function ApiModelFields({
   const usingLast = last !== null && apiModels.length > 0
   const fromApi = apiModels.length > 0
   const models = fromApi ? apiModels : staticModels(kind)
-  const shownModels = sortModels(kind, visibleModels(models, model))
+  const latest = latestModels(kind, visibleModels(models, model), model)
+  const shownModels = sortModels(kind, latest.models)
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
   const efforts = current?.efforts ?? []
@@ -156,6 +158,7 @@ export function ApiModelFields({
               onClick={() => pickModel(m.id)}
             >
               {modelLabel(m)}
+              {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}
         </div>
@@ -368,7 +371,8 @@ export function ModelQuickPicker({
   const models = fromApi ? apiModels : staticModels(kind)
   const loading = open && cached === undefined
   const model = bot?.model ?? null
-  const shownModels = sortModels(kind, visibleModels(models, model))
+  const latest = latestModels(kind, visibleModels(models, model), model)
+  const shownModels = sortModels(kind, latest.models)
   const effort = bot?.effort ?? null
   // 完整 id（`claude-sonnet-5-5`）要對到別名（`sonnet`）：同 `ApiModelFields`，先完全相等再 `modelMatches`（#939）。
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || models.find((m) => m.is_default) || models[0]
@@ -449,6 +453,7 @@ export function ModelQuickPicker({
               onClick={() => pickModel(m.id)}
             >
               {modelLabel(m)}
+              {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}
         </div>

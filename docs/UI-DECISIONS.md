@@ -1576,3 +1576,10 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 按鈕只開確認對話框，說明 codex 會在每個回合結束時執行 AG Man 的 stop hook、並寫入一筆 `trusted_hash`（會先備份）；確認後才送 POST，絕不在載入時自動信任。
 - `[codex] stop_hook = false` 時仍顯示狀態，但說明目前不會安裝或使用。
 - i18n：同一句繁中只對應一種英文；新字串都在 `i18n/en/updates.ts`（`預設帳號`、`取消` 沿用既有）。
+
+## 模型選單只出每個系列的最新版（2026-11-18，使用者指示「UI 只要出最新」）
+
+- 範圍：web 的模型選單（`ApiModelFields`：新增 Bot、建立專家 Bot、Bot 設定；`ModelQuickPicker`：快捷改模型）。daemon 的 `/api/models` 不動，仍回完整清單。
+- 規則（`web/src/lib/modelSeries.ts`）：依 kind 的命名拆出系列與版號，每個系列只留版號最大的（版號逐段數字比較，`6.10` > `6.2`）。codex `gpt-<版號>-<系列>`、claude `claude-<系列>-<版號>`（別名 `opus` 等視為最舊）、agy `gemini-<版號>-<系列>[-強度]`（同版號的強度變體全保留）。拆不出系列的（如 grok、測試用 id）照舊全部顯示。
+- 目前設定的模型若是被隱藏的舊版：仍列出、被選中，並標「舊版」，不讓選中的值消失；使用者可改成新版。
+- i18n：「舊版」沿用既有的譯法 `old version`（`i18n/en/updates.ts`），不另開一個英文，避免衝突。
