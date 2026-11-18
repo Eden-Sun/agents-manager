@@ -26,6 +26,6 @@ assert module['owned_path'](Path('crates/am-share/src/share/portal_remote_tests.
 # store.rs 以 #[path] 掛 store_tests/：不含 App 的那批（非 harness）屬 crate 自己的測試，harness 那批不是。
 assert module['owned_path'](Path('crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs'))
 assert module['owned_path'](Path('crates/am-supervisor/src/supervisor/store_tests/persona_migration_tests.rs'))
-assert not module['owned_path'](Path('crates/am-supervisor/src/supervisor/store_tests/tests.rs'))
+# #1862 S1：store_tests/tests.rs（daemon 整合測試）已搬到 daemon/src/supervisor_tests/store.rs，不再存在。
 print('crate-only ownership: pure/mixed/unknown/fixture/malformed cases passed')
 PY

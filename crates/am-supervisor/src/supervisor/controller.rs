@@ -188,8 +188,8 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
     // about a person from a failed read. Retrying a few seconds later costs nothing; a prompt
     // wearing the user's face cannot be taken back.
     // 驗收角色是協調者、而協調者存在時，派工訊息標成協調者送的：bot 回話才會找對人。
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("dispatch_before_responder_attribution", &a.id).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("dispatch_before_responder_attribution", &a.id).await;
     let responder = match a.review_role.as_deref() {
         Some("patrol") => None,
         _ => match super::roles::responder_bot(app.db()).await {
@@ -763,8 +763,8 @@ async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::E
                 .bind(&a.id)
                 .fetch_one(&mut *tx)
                 .await?;
-        #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("late_reply_after_assignment_read", &a.id).await;
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::race_point::hit("late_reply_after_assignment_read", &a.id).await;
         let moved = sqlx::query(
             "UPDATE supervisor_assignments SET turn_status='completed', evidence_complete=1, result=COALESCE(result, ?), updated_at=?
               WHERE id=? AND turn_status='completed_fallback'",

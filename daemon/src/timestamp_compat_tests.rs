@@ -393,7 +393,8 @@ fn production_sources() -> Vec<(String, String)> {
         .into_iter()
         .filter_map(|f| {
             let at = f.strip_prefix(&root).unwrap().display().to_string();
-            if at == "timestamp_compat_tests.rs" || at.ends_with("_tests.rs") {
+            // #1862：從 crates/ 搬進 daemon 的整份測試目錄（share_tests／supervisor_tests）不是 production，原本放在 crates/ 底下本來就不在掃描範圍。
+            if at == "timestamp_compat_tests.rs" || at.ends_with("_tests.rs") || at.starts_with("share_tests/") || at.starts_with("supervisor_tests/") {
                 return None; // 整份都是測試
             }
             let src = std::fs::read_to_string(&f).unwrap();

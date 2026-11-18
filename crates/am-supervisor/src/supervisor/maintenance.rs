@@ -119,7 +119,7 @@ pub fn behind_escalates(code_commits: u64) -> bool {
 async fn behind_code_commits(app: &impl crate::supervisor::ports::HostProbes) -> u64 {
     // 單元測試不看測試 checkout 落後 origin/main 多少（那跟受測行為無關、而且會讓結果隨 repo 狀態飄）；規則本身由
     // `behind_escalates` 的純函式測試釘住。
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-hooks")) {
         return 0;
     }
     static CACHE: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
@@ -352,10 +352,10 @@ pub async fn release(
     } else {
         store::release_lease(app.db(), resource, owner, fence).await?
     };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
+    #[cfg(any(test, feature = "test-hooks"))]
     if released {
         // key 用這張租約的 token（沒有 token 的舊列才退回 resource）：測試之間共用 `"rebuild"` 時，別條測試的 release 會吃掉動作（issue #949）。
-        crate::lifecycle::race_point::hit("lease_release_after_mark", held.lease_token.as_deref().unwrap_or(resource)).await;
+        crate::race_point::hit("lease_release_after_mark", held.lease_token.as_deref().unwrap_or(resource)).await;
     }
     if released {
         if let Some(ap) = held.approval_id.as_deref() {

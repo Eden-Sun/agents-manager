@@ -302,6 +302,7 @@ for pair in crates/am-lifecycle/src/lifecycle/screen.rs:lifecycle::screen:: crat
     crates/am-share/src/share/portal_upload_tests.rs: crates/am-share/src/share/budget_remote_tests.rs: \
     crates/am-share/src/share/store.rs:share_tests:: crates/am-share/src/share/svg_check.rs:share_tests:: \
     crates/am-supervisor/src/supervisor/bot_requests.rs:supervisor::bot_requests:: crates/am-supervisor/src/supervisor/incidents.rs:supervisor::incidents:: \
+    crates/am-supervisor/src/supervisor/health.rs:supervisor_tests::health:: crates/am-supervisor/src/supervisor/failover.rs:supervisor_tests::failover:: \
     crates/am-supervisor/src/supervisor/assignment_state.rs: crates/am-supervisor/src/supervisor/test_env.rs:; do
     path="${pair%%:*}"; filter="${pair#*:}"; crate="${path#crates/}"; crate="${crate%%/*}"
     : >"$AM_TEST_CARGO_LOG"

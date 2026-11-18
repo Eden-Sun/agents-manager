@@ -223,11 +223,11 @@ fn bad_proof() -> LcError {
 /// （`roles::ack` 的 `1=1`），所以把自己的 token 打壞反而比帶對還多權限——降級同時是提權。
 pub async fn actor_role(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<Role>, LcError> {
     let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("actor_role_before_lookup", &id).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("actor_role_before_lookup", &id).await;
     let result = roles::role_of_bot(app.db(), &id).await;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("actor_role_after_lookup", &id).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("actor_role_after_lookup", &id).await;
     result.map_err(|e| LcError::Upstream(e.to_string()))
 }
 

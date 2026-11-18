@@ -2456,8 +2456,8 @@ async fn create_approval_inner(
         .fetch_optional(&mut *tx)
         .await?,
     };
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("approval_after_supersede_read", requester).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("approval_after_supersede_read", requester).await;
     // 自動挑的那一筆不會讓整筆申請失敗：對不上（剛被裁示、剛過期）就只是不取代。
     let auto = auto_supersedes.is_some();
     if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()).or(auto_supersedes.as_deref()) {
@@ -3212,8 +3212,8 @@ pub async fn resolve_incident_notifying(pool: &SqlitePool, kind: &str, resource:
     .bind(resource)
     .fetch_optional(&mut *tx)
     .await?;
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("incident_resolve_after_read", resource).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("incident_resolve_after_read", resource).await;
     let Some(row) = row else { return Ok(None) };
     let now = crate::db::now();
     sqlx::query("UPDATE supervisor_incidents SET status='resolved', resolved_at=?, last_seen_at=? WHERE id=?")
@@ -3270,7 +3270,3 @@ mod tests;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "store_tests/persona_migration_tests.rs"]
 mod persona_migration_tests;
-
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "store_tests/tests.rs"]
-mod tests;

@@ -19,7 +19,6 @@ check() {
 # daemon/src 下所有 .rs 檔（只排除 testing.rs 自己）改動時會觸發 testing::scratch_leak_guard::（#1983）。
 check "lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle/queue.rs"
 check "api:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api.rs"
-check "supervisor::" "crates/am-supervisor/src/supervisor/mod.rs"
 check "supervisor::controller::" "crates/am-supervisor/src/supervisor/controller.rs"
 # 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
 # 檔名不是 _tests.rs 結尾的測試檔（如 tests.rs）也屬於 production_sources 掃描範圍，因此帶有 timestamp_compat_tests::。
@@ -162,7 +161,6 @@ check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
 # store.rs 的 harness 測試掛在 store_tests/tests.rs；crate-only 的 store_tests/tests_crate_only.rs 不進 daemon 篩選。
-check "supervisor::store::tests::" "crates/am-supervisor/src/supervisor/store_tests/tests.rs"
 check "" "crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs"
 check "lifecycle::start::tab_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/tab_tests.rs"
 check "lifecycle::start::resume_args_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/resume_args_tests.rs"
@@ -175,6 +173,14 @@ check "supervisor::timing::" "crates/am-supervisor/src/supervisor/timing.rs"
 # #1862 D：bot_requests（26→3）、assignment_state（2→0）、incidents（27→9）的資料／流程測試搬到 am-supervisor 自己跑（test_env 窄環境）；
 # bot_requests／incidents 仍各留要 TurnOps／QuotaOps／HostsAccess 等的 daemon 測試，改它們仍要選到各自的 daemon 過濾字串；
 # assignment_state 的 daemon 測試全搬走（只剩 crate target）；test_env.rs 是 crate-only 的測試環境。
+# #1862 S1：health／setup／watchdog／cli_refresh／role_faults／failover／store 的 daemon 測試搬到 daemon/src/supervisor_tests/，改這些檔選搬過去的那組；
+# mod.rs 兩組都選；搬過去的測試檔本身照 daemon 模組路徑推。
+for m in health setup watchdog cli_refresh role_faults failover store; do
+    check "supervisor_tests::$m::" "crates/am-supervisor/src/supervisor/$m.rs"
+    check "supervisor_tests::$m:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/$m.rs"
+done
+check "supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/mod.rs"
+check "supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/mod.rs"
 check "supervisor::bot_requests::" "crates/am-supervisor/src/supervisor/bot_requests.rs"
 check "supervisor::incidents::" "crates/am-supervisor/src/supervisor/incidents.rs"
 check "" "crates/am-supervisor/src/supervisor/assignment_state.rs"

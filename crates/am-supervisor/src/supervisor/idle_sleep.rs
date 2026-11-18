@@ -650,8 +650,8 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
         return;
     }
     // 測試專用的競態點：「已標記、還沒停」的那一瞬，另一條路（叫醒／prompt）剛好落在這裡。
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    crate::lifecycle::race_point::hit("idle_sleep.marked", &c.bot_id).await;
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::race_point::hit("idle_sleep.marked", &c.bot_id).await;
     // 寫完標記到停機之間，事件流可能剛說它開始忙（handle_status 不拿鎖）：再問一次記憶體，再由停機那一步的許可
     // （`stop_bot_locked_if_idle`，DB 裡同一句 UPDATE）做最後的排序（issue #144）。
     if observed_busy(&run) {
@@ -827,7 +827,7 @@ where
 /// 控制迴圈每一拍呼叫一次。真正的巡邏最多每分鐘一次，而且丟到背景跑——一顆 `stop_bot` 最久要等
 /// agent 十秒，二十顆就是三分多鐘，同步做完會把 dispatch／notify 這些也一起卡住。
 pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown + crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps + Clone + 'static)) {
-    if cfg!(test) || app.shutdown().is_cancelled() {
+    if cfg!(any(test, feature = "test-hooks")) || app.shutdown().is_cancelled() {
         return;
     }
     let threshold = idle_minutes();
@@ -924,8 +924,8 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
                 continue;
             }
         }
-        #[cfg(all(test, feature = "daemon-test-harness"))]
-        crate::lifecycle::race_point::hit("idle_sleep_before_sleep_one", &c.bot_id).await;
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::race_point::hit("idle_sleep_before_sleep_one", &c.bot_id).await;
         if decide(&f, threshold).is_ok() {
             sleep_one(app, &f, threshold).await;
         }

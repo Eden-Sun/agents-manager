@@ -517,8 +517,8 @@ pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabili
             // 寫進去再停掉 pane。照舊的 `row` 啟動等於把使用者剛按下的 stop 蓋掉，而且收不回來：
             // bot 跑著、意圖是 0，下一拍 `plan_for` 因為 `wanted=false` 回 `Idle`，看門狗從此不管它。
             // 巡檢那半（`watchdog::start`）一直是這樣防的，這裡以前沒跟上。
-            #[cfg(all(test, feature = "daemon-test-harness"))]
-            crate::lifecycle::race_point::hit("responder_watchdog_start", &bot.id).await;
+            #[cfg(any(test, feature = "test-hooks"))]
+            crate::race_point::hit("responder_watchdog_start", &bot.id).await;
             let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
             let Ok(liveness) = super::manager_liveness(app.db(), &bot.id).await else { return };
             if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, |at: &str| watchdog::scheduled_past(app, "responder", at)) != watchdog::Plan::Start {

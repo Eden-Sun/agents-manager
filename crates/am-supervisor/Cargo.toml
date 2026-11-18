@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 # Compile App-backed tests for extracted modules in the daemon harness.
 daemon-test-harness = []
+# 只給測試用的接縫（race point、`cfg!(test)` 行為差異、`_for_test` 輔助）：daemon 的測試檔（daemon/src/supervisor_tests）用，正式 build 不編。
+test-hooks = ["am-base/test-hooks"]
 
 [dependencies]
 am-base = { path = "../am-base" }
