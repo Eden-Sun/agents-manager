@@ -22,13 +22,23 @@ pub struct OpenAiApiCfg {
     /// key 檔路徑（`key_file::read_key` 讀；權限規則同 Claude 的）。**不是** Claude 的那一把。
     #[serde(default = "default_openai_api_key_file")]
     pub key_file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_anchor_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance_anchor_at: Option<String>,
     #[serde(default, skip_serializing_if = "OpenAiApiBotCfg::is_default")]
     pub api_bot: OpenAiApiBotCfg,
 }
 
 impl Default for OpenAiApiCfg {
     fn default() -> Self {
-        Self { enabled: false, key_file: default_openai_api_key_file(), api_bot: OpenAiApiBotCfg::default() }
+        Self {
+            enabled: false,
+            key_file: default_openai_api_key_file(),
+            balance_anchor_usd: None,
+            balance_anchor_at: None,
+            api_bot: OpenAiApiBotCfg::default(),
+        }
     }
 }
 

@@ -399,6 +399,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::herdr_integration::routes())
         .merge(crate::runners::judge::routes())
         .merge(crate::claude_api::routes())
+        .merge(crate::openai_api_balance::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))

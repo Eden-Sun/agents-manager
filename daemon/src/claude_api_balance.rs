@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 
 use crate::lc_error::LcError;
 use crate::state::App;
+use crate::balance_utils::{AttemptSpent, microusd_to_usd};
 
 /// 快取過期時間：10 分鐘
 const CACHE_TTL: Duration = Duration::from_secs(600);
@@ -135,26 +136,11 @@ fn floor_to_hour(dt: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// 將微美元轉為美元（微美元＝10^-6 USD）
-pub fn microusd_to_usd(microusd: i64) -> f64 {
-    microusd as f64 / 1_000_000.0
-}
-
 /// 解析 cost_report 的 amount（美分字串，例如 "23.5018" ＝ $0.235018）
 pub fn cents_str_to_usd(cents_str: &str) -> Result<f64> {
     let cents: f64 = cents_str.trim().parse()
         .map_err(|e| anyhow!("invalid cost_report amount '{cents_str}': {e}"))?;
     Ok(cents / 100.0)
-}
-
-/// 一筆本機 attempts 的花費紀錄
-#[derive(Debug, Clone)]
-pub struct AttemptSpent {
-    pub created_at: String,
-    pub microusd: i64,
-    /// true＝不是確定的花費：結果不明（`unknown`）又沒有估價的 attempt，金額是**預留上限**（最壞情況，實際多半低很多：
-    /// 2026-11-15 P.api 三筆各以 $6.53 記、實際約 $1.70）。確定的（recorded、翻譯／分診帳本）才算進「已花」，
-    /// 不確定的另外列出，餘額另給「最壞情況」下限。
-    pub uncertain: bool,
 }
 
 /// 純計算核心：輸入錨點、cost_report 桶資料、本機 attempts，回傳花費與計算明細

@@ -593,12 +593,12 @@ fn spend_line(l: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {
 
 /// 讀花費明細檔裡 `at >= since` 的 (時間字串, 微美元)；壞行與檔不存在都略過。
 /// **只算 Claude（anthropic）的花費**：這份清單是拿去扣 Claude 帳戶餘額的，OpenAI 的花費不能算進去。
-pub(crate) fn read_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>) -> Vec<(String, i64)> {
+pub fn read_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>) -> Vec<(String, i64)> {
     read_provider_spend_since(data_dir, since, API_PROVIDER_ANTHROPIC)
 }
 
 /// 同上，但取指定供應商（`anthropic`／`openai`）的花費。
-pub(crate) fn read_provider_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>, provider: &str) -> Vec<(String, i64)> {
+pub fn read_provider_spend_since(data_dir: &std::path::Path, since: chrono::DateTime<chrono::Utc>, provider: &str) -> Vec<(String, i64)> {
     let Ok(text) = std::fs::read_to_string(data_dir.join("claude-api").join(SPEND_FILE)) else { return Vec::new() };
     text.lines().filter(|l| spend_provider(l) == provider).filter_map(spend_line).filter(|(at, _)| *at >= since).map(|(at, m)| (am_base::db::iso_at(at), m)).collect()
 }
