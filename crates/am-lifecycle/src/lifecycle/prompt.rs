@@ -1044,6 +1044,67 @@ async fn prompt_inner(
         tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去");
     }
 
+    match prompt_gate(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, queue_awaits_idle, admission, want_send_now, clear_draft, expected_run).await? {
+        Gated::Done(out) => Ok(out),
+        Gated::Go(ready) => prompt_commit_and_deliver(app, bot_id, text, client_request_id, relay, admission, *ready).await,
+    }
+}
+
+/// 閘門階段的結果：已經有答案（排隊／冪等／steer），或可以建 turn 並送出。
+enum Gated {
+    Done(PromptOut),
+    Go(Box<Ready>),
+}
+
+/// 閘門階段通過後，建 turn 與送出需要的東西（小型值；沒有任何中間 future）。
+struct Ready {
+    bot: db::Bot,
+    conv: String,
+    files: Vec<crate::attach::Attachment>,
+    deliver: String,
+    run: db::Run,
+    client: crate::lifecycle::RunClient,
+    plan: Plan,
+    interrupted: Option<db::Turn>,
+    send_now: Option<&'static str>,
+    send_now_active: bool,
+}
+
+/// `prompt_inner` 分三段、各段被呼叫端裝箱（#1461／#1465 的 1 MiB stack 守門）：整段寫在一個 async fn 裡時，debug 建置下
+/// 它的 poll 框有 500 KiB 以上（每個 await 的暫存都各佔一份），握手那一拍光進來就吃掉預算的大半。分開之後同一時間只有一段的框在棧上。
+#[allow(clippy::too_many_arguments)]
+fn prompt_gate<'a>(
+    app: &'a impl LcHost,
+    bot_id: &'a str,
+    text: &'a str,
+    client_request_id: &'a str,
+    attachment_ids: &'a [String],
+    relay: RelaySrc<'a>,
+    queue_if_busy: bool,
+    queue_awaits_idle: bool,
+    admission: Admission,
+    want_send_now: bool,
+    clear_draft: Option<&'a str>,
+    expected_run: Option<&'a str>,
+) -> impl std::future::Future<Output = LcResult<Gated>> + 'a {
+    Box::pin(prompt_gate_body(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, queue_awaits_idle, admission, want_send_now, clear_draft, expected_run))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prompt_gate_body(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    queue_awaits_idle: bool,
+    admission: Admission,
+    want_send_now: bool,
+    clear_draft: Option<&str>,
+    expected_run: Option<&str>,
+) -> LcResult<Gated> {
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
@@ -1076,7 +1137,7 @@ async fn prompt_inner(
         .map_err(up)?
     {
         check_same_text(app, &t, text).await?;
-        return answer_for_turn(app, &t).await;
+        return answer_for_turn(app, &t).await.map(Gated::Done);
     }
     // 新的（非保溫）回合＝真的活動：「不用保溫」到此為止。
     app.note_keep_warm_prompt(bot_id, client_request_id).await;
@@ -1121,7 +1182,7 @@ async fn prompt_inner(
     if queue_awaits_idle {
         let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
         if in_flight.is_some() || run.agent_status != "idle" {
-            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await;
+            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await.map(Gated::Done);
         }
     }
     if run.agent_status == "blocked" {
@@ -1146,7 +1207,7 @@ async fn prompt_inner(
         Some(t) if send_now_ok => Some(t),
         Some(t) => {
             if queue_if_busy {
-                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await;
+                return queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await.map(Gated::Done);
             }
             let mut detail = json!({"turn_id": t.id});
             if let Some(r) = refused {
@@ -1173,12 +1234,12 @@ async fn prompt_inner(
         if queue_awaits_idle {
             let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
             schedule_flush_retry(app, bot_id, left);
-            return Ok(out);
+            return Ok(Gated::Done(out));
         }
         if queue_if_busy {
             let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await?;
             schedule_flush_retry(app, bot_id, left);
-            return Ok(out);
+            return Ok(Gated::Done(out));
         }
         return Err(LcError::conflict(
             "resume_unverified",
@@ -1194,11 +1255,11 @@ async fn prompt_inner(
             if queue_awaits_idle {
                 let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
                 schedule_flush_retry(app, bot_id, wait);
-                return Ok(out);
+                return Ok(Gated::Done(out));
             }
             let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, relay).await?;
             schedule_flush_retry(app, bot_id, wait);
-            return Ok(out);
+            return Ok(Gated::Done(out));
         }
     }
     pane_ready_for_prompt(app, &bot, &run, &conv).await?;
@@ -1220,7 +1281,7 @@ async fn prompt_inner(
     // codex steer（#748）：字照一般方式打進忙碌的 pane，併進**同一個**進行中的回合——不收舊回合、不建新回合。
     // 閒著（沒有進行中的回合）時不走這裡，照一般送出（`send_now: "idle"`）。
     if let (Some(send_now::Mode::CodexSteer), Some(turn)) = (send_now_mode, interrupted.as_ref()) {
-        return super::codex_steer::steer(app, &client, &run, &bot, turn, text, &deliver, client_request_id).await;
+        return super::codex_steer::steer(app, &client, &run, &bot, turn, text, &deliver, client_request_id).await.map(Gated::Done);
     }
     // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
     // (box busy, no way to prove it) must never become an in-flight turn nobody can release
@@ -1235,6 +1296,31 @@ async fn prompt_inner(
         Err(not) => return Err(super::composer_draft::with_draft(&client, &run, &bot, not_attempted_error(&run.id, not)).await),
     };
 
+    Ok(Gated::Go(Box::new(Ready { bot, conv, files, deliver, run, client, plan, interrupted, send_now, send_now_active })))
+}
+
+fn prompt_commit_and_deliver<'a>(
+    app: &'a impl LcHost,
+    bot_id: &'a str,
+    text: &'a str,
+    client_request_id: &'a str,
+    relay: RelaySrc<'a>,
+    admission: Admission,
+    ready: Ready,
+) -> impl std::future::Future<Output = LcResult<PromptOut>> + 'a {
+    Box::pin(prompt_commit_and_deliver_body(app, bot_id, text, client_request_id, relay, admission, ready))
+}
+
+async fn prompt_commit_and_deliver_body(
+    app: &impl LcHost,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    relay: RelaySrc<'_>,
+    admission: Admission,
+    ready: Ready,
+) -> LcResult<PromptOut> {
+    let Ready { bot, conv, files, deliver, run, client, plan, interrupted, send_now, send_now_active } = ready;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_turn_commit", bot_id).await;
 
@@ -1423,6 +1509,7 @@ async fn prompt_inner(
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
 }
+
 
 /// 插隊送出沒有打斷任何東西（#120）：送出鍵沒生效（`unknown = false`）或不知道生效了沒有（`true`）。
 /// 正在跑的那一回合原封不動；新的那一則收成 failed（不佔 run 的 in-flight 名額），送達記成 `failed`／`unknown`，
@@ -4439,5 +4526,17 @@ mod restamp_tests {
         .await
         .unwrap();
         assert_eq!((delivery.as_str(), verified, auto_resend), ("ok", 1, 0), "第二條 evidence 仍更新送達欄位");
+    }
+}
+
+/// #1461／#1465 守門：`prompt_inner` 拆段之後，段與段之間傳的 `Ready` 要維持小型值（只放資料列與 client，不放中間 future）。
+/// 真正的棧餘裕由 daemon 的 `*_fits_in_a_one_mib_stack` 守：握手那一拍（`prompt_control_plane`）就在 `the_plain_bot_gate_path_…` 裡。
+#[cfg(test)]
+mod stack_shape_tests {
+    #[test]
+    fn the_prompt_stage_hand_off_stays_small() {
+        const LIMIT: usize = 16 * 1024;
+        assert!(std::mem::size_of::<super::Ready>() <= LIMIT, "Ready 有 {} 位元組，超過 {LIMIT}", std::mem::size_of::<super::Ready>());
+        assert!(std::mem::size_of::<super::Gated>() <= LIMIT);
     }
 }
