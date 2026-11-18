@@ -543,7 +543,9 @@ while IFS= read -r line; do
   case "$line" in
     FILE\ *)
       len=${{line#FILE }}
-      payload=$(head -c "$len")
+      # `dd bs=1` 剛好讀 $len 位元組：BSD（macOS）的 `head -c` 會從 pipe 多讀一整塊，後面的檔案框就被吃掉
+      # （#1964：macOS 上只有第一個檔回 HASH，其餘 Untrusted）。
+      payload=$(dd bs=1 count="$len" 2>/dev/null)
       name=${{payload%%	*}}
       data=${{payload#*	}}
       tmp=$(mktemp ./tmp.XXXXXX 2>/dev/null) || {{ printf 'ERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0; }}
@@ -556,7 +558,7 @@ while IFS= read -r line; do
       rlen=$(printf '%s' "$res" | wc -c | tr -d ' ')
       printf 'HASH %d\n%s\n' "$rlen" "$res"
       # 跳過 payload 後的換行
-      head -c 1 >/dev/null
+      dd bs=1 count=1 >/dev/null 2>&1
       ;;
     *)
       printf 'ERR 9\nUNTRUSTED\nAM_RFS_DONE\n'; exit 0
