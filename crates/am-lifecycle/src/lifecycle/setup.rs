@@ -4662,22 +4662,23 @@ mod codex_stop_args_tests {
         assert_eq!(untrusted, legacy);
         assert!(!untrusted.contains(&"notify=[]".into()));
         assert!(!home.join("config.toml").exists(), "installer never creates trust state");
+        // 啟動不註冊未信任的 handler（#1989）：hooks.json 不會因為啟動而出現。
         let hooks_path = home.join("hooks.json");
-        let hooks = std::fs::read(&hooks_path).unwrap();
-        let root: Value = serde_json::from_slice(&hooks).unwrap();
-        let groups = root["hooks"]["Stop"].as_array().unwrap();
-        assert_eq!(groups.len(), 1);
+        assert!(!hooks_path.exists(), "a start never registers an untrusted Stop handler");
         let key = format!("{}:stop:0:0", hooks_path.display());
         // A user-owned trust record must remain untouched and must not disable legacy.
         let reviewed = format!("[hooks.state.{key:?}]\ntrusted_hash=\"user-owned-sentinel\"\n");
+        std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), &reviewed).unwrap();
         let trusted = injected_args(&env.app, &bot, &project, &pane_env).await.unwrap();
         assert_eq!(trusted, legacy);
         assert!(!trusted.contains(&"notify=[]".into()));
-        assert_eq!(std::fs::read(&hooks_path).unwrap(), hooks);
+        assert!(!hooks_path.exists());
         assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), reviewed);
         // Exact trusted hash (what Codex records after review): legacy notify is replaced by notify=[] (phase two, #1989).
         let command = am_base::hosts::sh_quote(&env.app.data_dir.join("codex-hook.sh").to_string_lossy());
+        // 使用者確認後才註冊（與 POST /api/codex/stop-hook/trust 同一條路徑）；之後的 config 就是確認時寫的那一鍵。
+        am_base::codex_hook::install_and_trust_local(&home, &env.app.data_dir, env.app.instance().as_deref()).unwrap();
         let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", am_base::codex_hook::stop_hook_trust_hash(&command));
         std::fs::write(home.join("config.toml"), &good).unwrap();
         let phase_two = injected_args(&env.app, &bot, &project, &pane_env).await.unwrap();
