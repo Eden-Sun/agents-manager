@@ -2573,6 +2573,7 @@ pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩�
   指到 scratchpad 的絕對路徑、`..` 或符號連結一律 404。**分享入口（§20）維持單層**：portal 的 `/api/files` 只列 outbox 最上層、`/api/files/{name}` 只認單一檔名，外部使用者的清單與下載面不隨子資料夾擴大。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
 - 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
 - 網頁「檔案暫存」下半段「bot 給你的檔案」：每列標剩餘時間（剩不到 10 分鐘用警告色），附件下載（UI-DECISIONS）。下載中切到別的 bot 時，舊那趟回來的結果只交付檔案或通知（會寫明是哪顆 bot 的），不改目前 bot 的清單、重讀或下載中狀態（#1805）。
+  .html／.htm 有 ↗ 沙盒預覽（使用者 2026-11-18）：後端不變（仍 octet-stream、`inline` 模式絕不回 text/html）；前端用帶 token 的下載取回文字，在先開好的空白分頁（`w.opener = null`）寫入只含我們靜態程式碼的外殼（CSP meta、無 script、無 bot 內容），再用 DOM API 建 `<iframe sandbox="allow-scripts">` 並設 `srcdoc`——不含 allow-same-origin／top-navigation／popups／forms／modals，bot 的 html 在 opaque origin 跑自己的 JS，讀不到主應用的 storage／cookie／DOM、不能導走上層或開視窗；外殼 CSP 同時是它的上限（`connect-src 'none'`、無外部資源）。`INLINE_PREVIEW_EXTENSIONS` 語意不變，svg 不在範圍。
   子資料夾裡的檔顯示成 `資料夾/檔名`（資料夾前綴淡色），存檔名只取最後一段。
   圖檔（PNG/JPEG/GIF/WebP）滑鼠停 150ms 或鍵盤聚焦就在那一列左邊浮出預覽（使用者 2026-09-18），走同一支下載 API 抓成 blob，快取最多 12 張、換 bot 全部釋放；手機沒有 hover，照舊點一下下載。
   瀏覽器能直接顯示的格式（PDF 為主，以及點陣圖、純文字/Markdown/JSON 等；#1866）每列提供預覽按鈕（「↗」），點擊時以帶認證的 Blob URL 開啟新分頁展示且不觸發下載，關閉分頁後回收 Blob URL；非白名單格式或可執行檔案維持僅下載。

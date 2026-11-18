@@ -1599,3 +1599,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - 修法（`chatPanel.css`，不用整體 `overflow-x:hidden`）：meta 列與左側子項 `min-width:0`；有譯文狀態列時列改成可換行、高度跟內容走；狀態列 `overflow-wrap:anywhere`。修後同一內容列表 scrollWidth 390、狀態列換成兩行。
 - 表格與 code block 維持各自在 `.bubble.md` 內橫向捲動（`table`、`pre` 的 `overflow-x:auto`），不影響列表寬度。
 - 測試：`chatMobileOverflow.test.ts` 斷言上述規則。
+
+## outbox 的 .html 沙盒預覽（2026-11-18，使用者指示）
+
+- 「bot 給你的檔案」的 `.html`／`.htm` 也有 ↗（title「開新分頁預覽（沙盒，不下載）」）；`.svg` 與其他未列副檔名沒有。判斷函式是 `isSandboxPreviewable`，不動 `INLINE_PREVIEW_EXTENSIONS`／`isBrowserPreviewable` 的語意。
+- 不能把 html 直接開成 blob: 分頁（會與主應用同源、可讀 token）。流程：點擊當下 `window.open('')` 先開空白頁、`opener = null` → 帶 token 下載取文字 → 在該分頁寫入靜態外殼，DOM 建 `<iframe sandbox="allow-scripts" srcdoc>`，標題是檔名、iframe 佔滿視窗。旗標只准 `allow-scripts`（測試鎖死）。
+- 實測（真瀏覽器，mock 外殼頁）：含 `<script>` 的 html 能畫 canvas；iframe 內讀 `localStorage`、`parent.document`、`document.cookie`、設 `top.location` 都丟 SecurityError，`window.open` 被擋，`alert` 無效果（沒有 allow-modals），連網被外殼 CSP 擋。
+- 取捨：外殼 CSP 會被 srcdoc 繼承，所以 bot 的 html 不能載外部 script／樣式／圖片或連網；圖表要用內嵌的程式與資料。
+

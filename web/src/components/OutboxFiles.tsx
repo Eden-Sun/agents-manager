@@ -1,6 +1,7 @@
 import { useT } from '../lib/i18n'
 import { useEffect, useRef, useState } from 'react'
 import type { OutboxFile } from '../api'
+import { isSandboxPreviewable } from '../lib/sandboxPreview'
 import { emptyReason, fileSize, isBrowserPreviewable, isPreviewableImage, LOAD_FAILED, remainingLabel, remainingNow, splitOutboxName } from '../lib/outboxList'
 import { OutboxImagePreview } from './OutboxImagePreview'
 import { useOutboxFiles } from './useOutboxFiles'
@@ -76,7 +77,8 @@ export function OutboxFiles() {
             const { dir: folder, base } = splitOutboxName(f.name)
             const itemBusy = busy?.bot === (f.owner ?? botId) && busy.name === f.name ? busy.mode : null
             const isBusy = itemBusy !== null
-            const canPreview = isBrowserPreviewable(f.name)
+            const sandboxed = isSandboxPreviewable(f.name)
+            const canPreview = isBrowserPreviewable(f.name) || sandboxed
             return (
               <li key={`${f.owner ?? ''}/${f.name}`} className="outbox-item">
                 <button
@@ -107,7 +109,7 @@ export function OutboxFiles() {
                     className="icon-btn outbox-preview-btn"
                     disabled={isBusy}
                     aria-label={t("開新分頁預覽 {name}", { name: f.name })}
-                    title={t("開新分頁預覽（不下載）")}
+                    title={sandboxed ? t("開新分頁預覽（沙盒，不下載）") : t("開新分頁預覽（不下載）")}
                     onClick={(e) => {
                       e.stopPropagation()
                       void openPreview(f.name, f.owner)

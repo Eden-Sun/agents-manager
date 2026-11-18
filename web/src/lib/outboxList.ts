@@ -178,7 +178,10 @@ export function isPreviewableImage(name: string): boolean {
  * 前端以 `fetch` 取回後轉為 `blob:` URL 開啟新分頁，該 blob URL 與主應用同源，
  * 伺服器端 HTTP 回應帶的 CSP sandbox 對該分頁無效。實際防止 XSS 的關鍵防線為
  * 嚴格的 MIME 白名單（只映射到純文字、圖片、JSON 與 PDF，排除所有可執行類型）。
- * 未來若需支援 SVG、HTML 預覽，必須另行設計沙盒容器（如 sandboxed iframe），不可直接列入。
+ * **HTML 不在這份名單**：它走另一條沙盒路徑（`lib/sandboxPreview.ts`，使用者 2026-11-18）——取回文字後放進
+ * `<iframe sandbox="allow-scripts" srcdoc>`（沒有 allow-same-origin，opaque origin），讀不到主應用的 storage／token／DOM、
+ * 不能導走上層或開視窗，外殼頁只含我們的靜態程式碼。後端仍把 .html 當 octet-stream、inline 模式絕不回 text/html。
+ * SVG 還沒有對應設計，不可直接列入。
  */
 export const INLINE_PREVIEW_EXTENSIONS: readonly string[] = [
   'pdf',

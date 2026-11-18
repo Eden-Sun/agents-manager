@@ -406,6 +406,16 @@ export async function outboxFileUrl(botId: string, name: string, inline = false)
   return inline ? utf8PreviewUrl(url) : url
 }
 
+/** outbox 檔案的文字內容（帶 token 的下載，非 inline）：給 html 沙盒預覽用，取完立刻釋放 blob URL。 */
+export async function outboxFileText(botId: string, name: string): Promise<string> {
+  const url = await outboxFileUrl(botId, name, false)
+  try {
+    return await (await fetch(url)).text()
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 /**
  * 預覽分頁開的是 blob URL：Safari／iOS 開 blob 時不看 `charset=utf-8`，中文 md／txt 整頁亂碼（使用者 2026-11-17）。
  * 文字檔在前面補 UTF-8 BOM（每個瀏覽器都認、優先於 charset）。只用在預覽，下載的檔案內容不動。
