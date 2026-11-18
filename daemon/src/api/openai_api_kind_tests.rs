@@ -176,7 +176,7 @@ async fn api_usage_reads_openai_cache_fields_in_the_same_terms_as_claude() {
         id
     }
     let t1 = turn(&env, &bot).await;
-    let usage = json!({"input_tokens": 1000, "cached_tokens": 600, "cache_write_tokens": 100, "cache_write_12h_tokens": 0, "output_tokens": 50, "reasoning_tokens": 0, "service_tier": "default"});
+    let usage = json!({"input_tokens": 1000, "cached_tokens": 600, "cache_write_tokens": 100, "cache_write_12h_tokens": 0, "output_tokens": 50, "reasoning_tokens": 20, "service_tier": "default"});
     sqlx::query("INSERT INTO api_bot_attempts (id, bot_id, turn_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, provider, usage_json, created_at, finished_at) VALUES (?, ?, ?, 1, 0, 'h', 'standard', 'recorded', 74, 200, 'v1', 'openai', ?, ?, ?)")
         .bind(db::ulid()).bind(&bot).bind(&t1).bind(usage.to_string()).bind(db::now()).bind(db::now()).execute(&env.app.db).await.unwrap();
     let Json(out) = api_bot_usage(State(env.app.clone()), Path(bot.clone()), Extension(RequestPrincipal::User)).await.unwrap();
@@ -188,6 +188,18 @@ async fn api_usage_reads_openai_cache_fields_in_the_same_terms_as_claude() {
     let turns = crate::api_bot_turn_cost::recent_turns(&env.app.db, &bot).await.unwrap();
     assert_eq!((turns[0]["input_tokens"].clone(), turns[0]["cache_read_tokens"].clone(), turns[0]["cache_write_tokens"].clone()), (json!(300), json!(600), json!(100)), "{}", turns[0]);
 
+    // reasoning tokens 帶進回合費用（只供顯示，已含在 output 裡、不另計價）：同一回合的多次請求加總；沒收到回應的不算。
+    assert_eq!(turns[0]["reasoning_tokens"], 20, "{}", turns[0]);
+    let more = json!({"input_tokens": 10, "cached_tokens": 0, "cache_write_tokens": 0, "output_tokens": 40, "reasoning_tokens": 15});
+    for (ordinal, state) in [(1, "recorded"), (2, "unknown")] {
+        sqlx::query("INSERT INTO api_bot_attempts (id, bot_id, turn_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, provider, usage_json, created_at, finished_at) VALUES (?, ?, ?, 1, ?, 'h', 'standard', ?, 21, 200, 'v1', 'openai', ?, ?, ?)")
+            .bind(db::ulid()).bind(&bot).bind(&t1).bind(ordinal).bind(state).bind(more.to_string()).bind(db::now()).bind(db::now()).execute(&env.app.db).await.unwrap();
+    }
+    let turns = crate::api_bot_turn_cost::recent_turns(&env.app.db, &bot).await.unwrap();
+    assert_eq!((turns[0]["reasoning_tokens"].clone(), turns[0]["output_tokens"].clone(), turns[0]["cost_usd"].clone()), (json!(35), json!(90), json!(0.000095)), "{}", turns[0]);
+    let Json(via_api) = api_bot_usage(State(env.app.clone()), Path(bot.clone()), Extension(RequestPrincipal::User)).await.unwrap();
+    assert_eq!(via_api["turns"][0]["reasoning_tokens"], 35);
+
     // Claude 的列：欄位原樣。
     let claude = crate::testing::claude_bot(&env.app, &env.project_id, "ca-usage").await.id;
     sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&claude).execute(&env.app.db).await.unwrap();
@@ -196,5 +208,6 @@ async fn api_usage_reads_openai_cache_fields_in_the_same_terms_as_claude() {
     sqlx::query("INSERT INTO api_bot_attempts (id, bot_id, turn_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, usage_json, created_at, finished_at) VALUES (?, ?, ?, 1, 0, 'h', 'standard', 'recorded', 74, 200, 'v1', ?, ?, ?)")
         .bind(db::ulid()).bind(&claude).bind(&t2).bind(usage.to_string()).bind(db::now()).bind(db::now()).execute(&env.app.db).await.unwrap();
     let Json(same) = api_bot_usage(State(env.app.clone()), Path(claude), Extension(RequestPrincipal::User)).await.unwrap();
+    assert!(same["turns"][0].get("reasoning_tokens").is_none(), "Claude 的回合不帶 reasoning_tokens：{}", same["turns"][0]);
     assert_eq!((same["tokens"]["input"].clone(), same["tokens"]["cache_read"].clone(), same["tokens"]["cache_creation"].clone(), same["cache_hit_rate"].clone()), (json!(300), json!(600), json!(100), json!(0.6)));
 }
