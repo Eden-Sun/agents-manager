@@ -102,6 +102,18 @@ pub async fn post_codex_security_banner_notice(app: &(impl crate::capabilities::
     }
 }
 
+/// codex 的 hook 審核框擋住派送：在聊天室留一則 system 通知（不按任何鍵）。
+pub async fn post_codex_hook_review_notice(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, notice: &str) {
+    match db::conversation_id(app.db(), &run.bot_id).await {
+        Ok(conv) => {
+            if let Err(e) = crate::lifecycle::insert_message(app, &conv, None, "system", notice, "system", false, None).await {
+                tracing::warn!(run = %run.id, error = ?e, "could not post the codex hook review notice");
+            }
+        }
+        Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not post the codex hook review notice"),
+    }
+}
+
 /// 推送 codex 安全提醒 ops_alert 到 supervisor inbox。
 pub async fn push_codex_security_banner_alert(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, reason: &str) {
     let name = match db::bot(app.db(), &run.bot_id).await {

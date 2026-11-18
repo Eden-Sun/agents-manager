@@ -1,0 +1,12 @@
+[1m  Hooks need review[0m[0m
+  2 hooks are new or changed.[0m
+  Hooks can run outside the sandbox[0m
+  after you trust them.[0m
+
+
+[36m› 1. Review hooks[0m[0m
+  2. Trust all and continue[0m
+  3. Continue without trusting (hooks[0m
+     won't run)[0m
+
+[2m  enter confirm · esc skip[0m[0m

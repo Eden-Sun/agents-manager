@@ -536,6 +536,10 @@ impl s6_ports::ScreenServices for App {
         crate::app_ports_p4obs::post_codex_security_banner_notice(&self.shared(), run, notice).await;
     }
 
+    async fn post_codex_hook_review_notice(&self, run: &crate::db::Run, notice: &str) {
+        crate::app_ports_p4obs::post_codex_hook_review_notice(&self.shared(), run, notice).await;
+    }
+
     async fn push_codex_security_banner_alert(&self, run: &crate::db::Run, reason: &str) {
         crate::app_ports_p4obs::push_codex_security_banner_alert(&self.shared(), run, reason).await;
     }

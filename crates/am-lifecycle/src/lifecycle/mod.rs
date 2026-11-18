@@ -75,6 +75,7 @@ pub mod live_apply_debt;
 pub mod slash;
 pub mod delivery;
 pub mod codex_banner;
+pub mod codex_hook_review;
 pub mod composer_draft;
 pub mod suggestion;
 pub mod queued_send_now;

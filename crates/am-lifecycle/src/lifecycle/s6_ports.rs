@@ -415,6 +415,7 @@ pub trait ScreenServices: Send + Sync {
     ) -> impl Future<Output = anyhow::Result<Option<(String, u64)>>> + Send;
     fn insert_system_notice(&self, conversation_id: &str, notice: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     fn post_codex_security_banner_notice(&self, run: &db::Run, notice: &str) -> impl Future<Output = ()> + Send;
+    fn post_codex_hook_review_notice(&self, run: &db::Run, notice: &str) -> impl Future<Output = ()> + Send;
     fn push_codex_security_banner_alert(&self, run: &db::Run, reason: &str) -> impl Future<Output = ()> + Send;
     fn shadow_limit_hit(&self, sample: crate::judge::Sample) -> impl Future<Output = ()> + Send;
     fn mark_codex_limit_hit(&self, bot: &db::Bot, notice: &str) -> impl Future<Output = anyhow::Result<()>> + Send;

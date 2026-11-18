@@ -810,6 +810,12 @@ pub async fn apply(
 ) -> Result<CodexRuntime, &'static str> {
     // The startup migration and rate-limit suggestion both require a user choice. Do not type into
     // either screen or dismiss it with Escape while applying a setting.
+    // 「Hooks need review」審核框不能用 Esc 關（它的 Esc 是略過，而且要使用者本人決定信任）：先看到就停，不進選單流程。
+    if let Ok(screen) = read(client, pane_id).await {
+        if crate::lifecycle::codex_hook_review::review_open(&screen) {
+            return Err(crate::lifecycle::codex_hook_review::REASON);
+        }
+    }
     match close_picker_checked(client, pane_id).await {
         Ok(true) => {}
         Ok(false) => return Err("picker_open"),

@@ -503,6 +503,11 @@ async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &s
         &refreshed
     } else { screen };
     if kind == "codex" {
+        let review = super::codex_hook_review::review_open(screen);
+        super::codex_hook_review::observe(app, run, review).await;
+        if review {
+            return Err(Delivered::NotAttempted { reason: super::codex_hook_review::REASON, retry: true });
+        }
         let banner = super::codex_banner::blocks_typing(screen);
         super::codex_banner::observe(app, run, banner).await;
         if banner {

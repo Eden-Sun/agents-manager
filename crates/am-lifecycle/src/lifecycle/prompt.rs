@@ -669,6 +669,7 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
         "claude" if super::delivery::claude_open_choice_menu(screen) => Some("dialog_open"),
         "grok" if crate::tui_prompts::is_grok_trust_dialog(screen) => Some("dialog_open"),
         "agy" => crate::agy_screen::blocking_dialog(screen).map(|d| d.reason()),
+        "codex" if super::codex_hook_review::review_open(screen) => Some(super::codex_hook_review::REASON),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
         // #782：帳號安全提醒橫幅開著時 agent.prompt 打進去的開頭數字一樣會被當成選項吃掉。
         "codex" if super::codex_banner::blocks_typing(screen) => Some(super::codex_banner::REASON),
@@ -731,6 +732,7 @@ pub async fn final_agent_prompt_guard(
         .await
         .map_err(|_| "pane_unreadable")?;
     if bot.kind == "codex" {
+        super::codex_hook_review::observe(app, run, super::codex_hook_review::review_open(&read.text)).await;
         super::codex_banner::observe(app, run, super::codex_banner::blocks_typing(&read.text)).await;
     }
     if let Some(reason) = agent_prompt_dialog_reason(&bot.kind, &read.text) {
@@ -1460,6 +1462,14 @@ async fn send_now_fell_through(
 mod prompt_tests {
     use super::*;
     use crate::testing as tt;
+
+    /// 上游 0.169.1 的審核框：派送被擋下、回可重試的 `codex_hook_review_pending`，不按任何鍵（不會被當成 composer 的草稿）。
+    #[test]
+    fn codex_hook_review_screen_is_a_retryable_reason_not_composer_busy() {
+        let screen = include_str!("fixtures/codex-0.169.1-hooks-review.txt");
+        assert_eq!(agent_prompt_dialog_reason("codex", screen), Some(crate::lifecycle::codex_hook_review::REASON));
+        assert_eq!(agent_prompt_dialog_reason("codex", "• Done.\n\n› \n  gpt-5 · ~/project\n"), None);
+    }
 
     #[tokio::test]
     async fn macos_local_numbered_menu_is_reported_without_sending_keys() {
