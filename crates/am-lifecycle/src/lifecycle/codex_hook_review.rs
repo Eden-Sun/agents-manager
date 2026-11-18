@@ -51,7 +51,10 @@ pub fn review_open(screen: &str) -> bool {
             return false;
         };
         let footer = at(&|l| l.contains("enter confirm") && l.contains("esc skip"));
-        one < two && two < three && footer.is_some_and(|f| f > three && f - three <= 4)
+        // 審核框開著時，操作列就是畫面最後一行（框底下不會有 composer 或狀態列）。對話裡印出同一段文字
+        // （例如 agent 自己 cat 了這個 fixture）時底下還有輸入框，不算開著，才不會把正常畫面一直當成審核框擋住。
+        let nothing_below = |f: usize| lines[heading + 1 + f + 1..].iter().all(|l| l.is_empty());
+        one < two && two < three && footer.is_some_and(|f| f > three && f - three <= 4 && nothing_below(f))
     })
 }
 
@@ -82,6 +85,21 @@ mod tests {
     fn options_without_the_footer_are_not_open() {
         let screen: String = PLAIN.lines().filter(|l| !l.contains("enter confirm")).collect::<Vec<_>>().join("\n");
         assert!(!review_open(&screen));
+    }
+
+    /// 對話裡印出整個審核框（例如 agent cat 了 fixture、或貼了截圖文字），底下是正常的輸入框：不是開著的審核框。
+    #[test]
+    fn the_whole_box_quoted_above_a_live_composer_is_not_open() {
+        let screen = format!("{PLAIN}\n\n› Ask Codex to do anything\n\n  gpt-5 · ~/project\n");
+        assert!(!review_open(&screen));
+        let ansi = format!("{ANSI}\n\n› \n  gpt-5 · ~/project\n");
+        assert!(!review_open(&ansi));
+    }
+
+    /// 真的審核框底下只有空白列（pane 比框高時）：仍然算開著。
+    #[test]
+    fn trailing_blank_rows_keep_it_open() {
+        assert!(review_open(&format!("{PLAIN}\n\n   \n\n")));
     }
 
     #[test]

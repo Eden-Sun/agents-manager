@@ -106,6 +106,16 @@ pub async fn post_codex_security_banner_notice(app: &(impl crate::capabilities::
 pub async fn post_codex_hook_review_notice(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, notice: &str) {
     match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conv) => {
+            // 「同一次審核框只講一次」的記錄在記憶體裡，daemon 重啟（部署）後會再擋一次、再講一次：聊天室最後一則已經是
+            // 這則通知就不重貼（中間有新訊息才再講，那則新訊息確實沒送出）。
+            let last: Result<Option<(String, String)>, _> =
+                sqlx::query_as("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+                    .bind(&conv)
+                    .fetch_optional(app.db())
+                    .await;
+            if matches!(&last, Ok(Some((role, content))) if role == "system" && content == notice) {
+                return;
+            }
             if let Err(e) = crate::lifecycle::insert_message(app, &conv, None, "system", notice, "system", false, None).await {
                 tracing::warn!(run = %run.id, error = ?e, "could not post the codex hook review notice");
             }
@@ -261,4 +271,31 @@ pub async fn set_quota(app: &Arc<App>, host: &str, base: &str, quota: crate::quo
 #[cfg(test)]
 pub async fn handle_status(app: &Arc<App>, host: &str, session: &str, event: &crate::herdr::Event) {
     crate::runners::events::handle_status(app, host, session, event).await;
+}
+
+#[cfg(test)]
+mod codex_hook_review_notice_tests {
+    use crate::db;
+    use crate::testing as tt;
+
+    async fn notices(app: &crate::state::App, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'system'").bind(conv).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// daemon 重啟後記憶體裡的「講過了」會清掉：同一則通知不連貼；中間有新訊息（那則確實沒送出）才再講一次。
+    #[tokio::test]
+    async fn the_same_notice_is_not_posted_twice_in_a_row() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "hook-review-notice").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        let shared = env.app.shared();
+        super::post_codex_hook_review_notice(&shared, &run, "notice").await;
+        super::post_codex_hook_review_notice(&shared, &run, "notice").await;
+        assert_eq!(notices(&env.app, &conv).await, 1);
+        crate::lifecycle::insert_message(&shared, &conv, None, "user", "hi", "web", false, None).await.unwrap();
+        super::post_codex_hook_review_notice(&shared, &run, "notice").await;
+        assert_eq!(notices(&env.app, &conv).await, 2);
+    }
 }
