@@ -96,6 +96,67 @@ pub fn composer_is_idle(lines: &[&str]) -> bool {
     })
 }
 
+/// claude 輸入框外框的上下線：整行只有 `─`／`━`（可帶 `╭╮╰╯` 角），至少 10 格。
+fn is_composer_rule(line: &str) -> bool {
+    // 輸入框自己的線從第 0 欄開始；輸入框裡的多行文字，續行一律縮排兩格（真畫面 `claude-2.1.281-multiline-draft.ansi`），
+    // 所以文字裡引用的 `────` 不會被當成輸入框的線。
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let t = line.trim();
+    t.chars().count() >= 10 && t.chars().all(|c| "─━╭╮╰╯".contains(c))
+}
+
+/// 一行的「輸入游標」：去掉框線字元後以 `❯`／`›` 開頭，回游標後面的字；不是游標列回 `None`。
+fn cursor_text(line: &str) -> Option<String> {
+    let body: String = line.chars().filter(|c| !"│┃".contains(*c)).collect();
+    let body = body.trim_start();
+    let c = body.chars().next().filter(|c| matches!(c, '❯' | '›'))?;
+    Some(body[c.len_utf8()..].trim().to_string())
+}
+
+/// 畫面上**最後一個 claude 輸入框**裡的行範圍（`start..end`，不含上下兩條線）：被兩條線夾住、第一行是 `❯`／`›` 游標、
+/// 游標後面不是 `1. …` 這種選單列。真的對話框出現時輸入框不在（或在對話框之下且為空）；對話框自己的 `❯ 1. Yes` 選項不是
+/// 被兩條線夾在中間的第一行，所以不會被當成輸入框。回 `None`＝找不到。
+///
+/// 為什麼要有：child 的對話框原文會被轉貼進母 bot 的輸入框（child_alerts），裡面有 `Do you want to proceed?`、`❯ 1. Yes`、`2. No`——
+/// 輸入列不空，[`composer_is_idle`] 擋不住，母 bot 就被誤判成停在對話框，之後所有送達被擋成死結（pt-hub mg1，2026-11-18）。
+/// 輸入框裡的字不管長得多像框，都不是框。
+pub fn composer_region(lines: &[&str]) -> Option<std::ops::Range<usize>> {
+    let rules: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_composer_rule(l)).map(|(i, _)| i).collect();
+    for pair in rules.windows(2).rev() {
+        let (top, bottom) = (pair[0], pair[1]);
+        if bottom <= top + 1 {
+            continue;
+        }
+        let Some(first) = cursor_text(lines[top + 1]) else { continue };
+        if menu_row(lines[top + 1]).is_some() && !first.is_empty() && first.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        return Some(top + 1..bottom);
+    }
+    None
+}
+
+/// 比對對話框用的畫面視圖：輸入框裡**有字**時，那幾行換成中性的 `·`（行數與位置不變，呼叫端用的行號仍然有效）。
+/// 輸入框空著（只有游標）或找不到輸入框就原樣回傳——那種情況由 [`composer_is_idle`] 與各函式既有的守衛處理。
+pub fn dialog_view(screen: &str) -> std::borrow::Cow<'_, str> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(region) = composer_region(&lines) else { return std::borrow::Cow::Borrowed(screen) };
+    let filled = lines[region.clone()].iter().enumerate().any(|(i, l)| {
+        if i == 0 { cursor_text(l).is_some_and(|t| !t.is_empty()) } else { !l.trim().is_empty() }
+    });
+    if !filled {
+        return std::borrow::Cow::Borrowed(screen);
+    }
+    let mut out = String::with_capacity(screen.len());
+    for (i, l) in lines.iter().enumerate() {
+        out.push_str(if region.contains(&i) { "·" } else { l });
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// 問句要由 `●` / `>` 開頭且相鄰幾行內有至少三個選項，避免 agent 引用這些字串時誤認。
 /// 這一行是不是**選項列**：`N: 標籤` 之外幾乎沒有別的字。真的問卷是
 /// `1: Bad  2: Fine  3: Good  0: Dismiss` 單獨一列（窄 pane 折成兩列也還是只有選項）；
@@ -298,6 +359,10 @@ fn has_prompt_cue(norm: &str) -> bool {
 /// 輸入列空著（[`composer_is_idle`]）是結構性證據：真的確認框會佔用輸入列，所以那時**提示字樣不算數**——工具輸出裡寫著
 /// `Do you want to …`、`1. foo` 清單不是框；既有的對話框辨識（它們各自會擋引文）仍照算。
 pub fn screen_has_answerable_prompt(screen: &str) -> bool {
+    screen_has_answerable_prompt_inner(&dialog_view(screen))
+}
+
+fn screen_has_answerable_prompt_inner(screen: &str) -> bool {
     if screen.trim().is_empty() {
         return true; // 讀不到內容不等於沒有提示。
     }
@@ -354,6 +419,10 @@ pub const UPDATE_NOTICE: &str = "Update installed · Restart to update";
 /// `/effort` 是同一個框，標題換成「Change effort level?」（2026-09-18 實測）：兩個都要認，
 /// 漏掉哪一個，那個框就留在畫面上吃掉下一則 prompt。
 pub fn is_switch_model_dialog(screen: &str) -> bool {
+    is_switch_model_dialog_inner(&dialog_view(screen))
+}
+
+fn is_switch_model_dialog_inner(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
     if composer_is_idle(tail_raw) {
@@ -366,6 +435,10 @@ pub fn is_switch_model_dialog(screen: &str) -> bool {
 
 /// Claude 2.1.326 的子 agent 計畫批准卡片（"Yes, and switch to default (ask each time) for this session" 和 "No"）。
 pub fn is_plan_approval_dialog(screen: &str) -> bool {
+    is_plan_approval_dialog_inner(&dialog_view(screen))
+}
+
+fn is_plan_approval_dialog_inner(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
     if composer_is_idle(tail_raw) {
@@ -428,6 +501,10 @@ fn migration_footer(tail: &[String]) -> Option<&'static str> {
 /// 交辦 queued 不送，排隊逾時被撤回、租約過期）。兩個選項各自成行才算；同 [`is_switch_model_dialog`]，
 /// 輸入列空著就不是框。第二個選項「keep bypass permissions」是我們要的，呼叫端送 Down＋Enter。
 pub fn is_auto_mode_offer(screen: &str) -> bool {
+    is_auto_mode_offer_inner(&dialog_view(screen))
+}
+
+fn is_auto_mode_offer_inner(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
     if composer_is_idle(tail_raw) {
@@ -511,6 +588,10 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
 /// `Session paused`…）。那不是回合結束，選單那幾行更不是回覆（2026-09-25 cf-ox-fork-fork：herdr 判 idle，
 /// 備援把 `2. Edit prompt and retry with …` 存成了回覆）。
 pub fn awaits_menu_choice(screen: &str) -> bool {
+    awaits_menu_choice_inner(&dialog_view(screen))
+}
+
+fn awaits_menu_choice_inner(screen: &str) -> bool {
     // daemon 接回原 session 的額度警告不是交給使用者的 blocked choice。
     if cold_resume_choice(screen).is_some() {
         return false;
@@ -575,6 +656,10 @@ pub fn cold_resume_choice(screen: &str) -> Option<ResumeChoice> {
 /// （沒有對話輸出）、輸入列不是空的——回覆裡引用這段原文時底下一定還有空的輸入列。真畫面在
 /// `lifecycle/fixtures/claude-2.1.287-held-message.txt`、`claude-2.1.287-bash-with-held-queued.txt`（排在 Bash 框後面時不算開著）。
 pub fn held_message_prompt_start(screen: &str) -> Option<usize> {
+    held_message_prompt_start_inner(&dialog_view(screen))
+}
+
+fn held_message_prompt_start_inner(screen: &str) -> Option<usize> {
     let raw: Vec<(usize, &str)> = screen.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()).collect();
     let tail = &raw[raw.len().saturating_sub(DIALOG_FRAME_TAIL_LINES)..];
     let lines: Vec<&str> = tail.iter().map(|(_, l)| *l).collect();
@@ -616,6 +701,10 @@ pub fn is_held_message_prompt(screen: &str) -> bool {
 /// 標題要自己一行、在選單正上方的同一個框裡（中間不能夾對話輸出）。真畫面（只取選單那段）在
 /// `lifecycle/fixtures/claude-2.1.281-session-paused.txt`。
 pub fn is_session_paused_menu(screen: &str) -> bool {
+    is_session_paused_menu_inner(&dialog_view(screen))
+}
+
+fn is_session_paused_menu_inner(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..];
     let Some((first, _)) = open_choice_menu(tail) else { return false };
@@ -634,6 +723,10 @@ pub fn is_session_paused_menu(screen: &str) -> bool {
 /// `Fetch`、`Read file  1 of 3`、`Tool use`…）、標題後面有 `Do you want to …` 那句問題。防誤刪框、Session paused、auto mode、
 /// 切換模型、問卷是別的選單，不算；回覆裡逐行引用原文時底下有空的輸入列，也不算。真畫面在 `lifecycle/fixtures/claude-2.1.28[67]-*-permission*.txt`。
 pub fn permission_prompt(screen: &str) -> Option<String> {
+    permission_prompt_inner(&dialog_view(screen))
+}
+
+fn permission_prompt_inner(screen: &str) -> Option<String> {
     if is_held_message_prompt(screen) {
         return Some("Held message".to_string());
     }
@@ -845,6 +938,10 @@ fn is_dash_rule(line: &str) -> bool {
 }
 
 pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
+    dangerous_rm_prompt_inner(&dialog_view(screen))
+}
+
+fn dangerous_rm_prompt_inner(screen: &str) -> Option<DangerousRm> {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = raw.len().saturating_sub(RM_DIALOG_TAIL_LINES);
     let tail_raw = &raw[start..];
@@ -2027,6 +2124,76 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let one = dangerous_rm_prompt(DANGEROUS_RM_ONE_ROW).expect("單列指令的真畫面");
         assert_eq!(one.target, "command substitution output");
         assert_eq!(one.command.as_deref(), Some(r#"rm -rf "$(echo tmpdir2)""#));
+    }
+
+    /// 母 bot 的畫面：輸入框（上下兩條線夾住、`❯` 開頭）裡裝著 `typed`，底下是狀態列。
+    fn parent_screen_with_typed(typed: &str) -> String {
+        let rule = "─".repeat(96);
+        let mut lines = typed.lines();
+        let first = lines.next().unwrap_or("");
+        let rest: String = lines.map(|l| format!("  {l}\n")).collect();
+        format!("● earlier reply\n\n✻ Worked for 3s · done 7:21 PM\n\n{rule}\n❯ {first}\n{rest}{rule}\n  mg1 | agents-manager | Opus 5 31%\n  ⏵⏵ bypass permissions on\n")
+    }
+
+    fn assert_no_dialog_recognised(screen: &str, why: &str) {
+        assert!(dangerous_rm_prompt(screen).is_none(), "{why}: dangerous_rm");
+        assert!(permission_prompt(screen).is_none(), "{why}: permission");
+        assert!(!awaits_menu_choice(screen), "{why}: awaits_menu_choice");
+        assert!(!is_switch_model_dialog(screen), "{why}: switch_model");
+        assert!(!is_plan_approval_dialog(screen), "{why}: plan");
+        assert!(!is_auto_mode_offer(screen), "{why}: auto_mode");
+        assert!(!is_session_paused_menu(screen), "{why}: session_paused");
+        assert!(!is_held_message_prompt(screen), "{why}: held_message");
+    }
+
+    /// pt-hub mg1 的死結（2026-11-18）：child 的 Dangerous rm 框原文被轉貼進母 bot 的輸入框，輸入列不空，
+    /// 母 bot 被誤判成停在 Dangerous rm 框、之後所有送達被擋成 409。輸入框裡的字不管像不像框都不是框。
+    #[test]
+    fn a_dialog_quoted_into_the_composer_is_not_a_dialog() {
+        for (name, fixture) in [("2.1.281", DANGEROUS_RM), ("2.1.289 倒數", include_str!("lifecycle/fixtures/claude-2.1.289-dangerous-rm-countdown-30rows.txt"))] {
+            // 舊格式：原文逐行直接放進輸入框（沒有前綴）。
+            let old = parent_screen_with_typed(fixture);
+            assert_no_dialog_recognised(&old, &format!("{name} 無前綴引文在輸入框內"));
+            assert!(!screen_has_answerable_prompt(&old), "{name}: 輸入框裡的字沒有東西可回答");
+            // 現行格式：child_alerts 的整則通知（每行有 `· ` 前綴）。
+            let notice = crate::child_alerts::message_for("otafable", fixture);
+            assert_no_dialog_recognised(&parent_screen_with_typed(&notice), &format!("{name} 通知在輸入框內"));
+            assert!(!screen_has_answerable_prompt(&parent_screen_with_typed(&notice)), "{name}: 通知在輸入框內沒有東西可回答");
+        }
+    }
+
+    /// 真的框照舊認得；輸入框在對話框之下且為空也一樣（框還開著）。
+    #[test]
+    fn a_real_dialog_is_still_recognised_and_its_view_is_untouched() {
+        assert!(matches!(dialog_view(DANGEROUS_RM), std::borrow::Cow::Borrowed(_)));
+        assert!(dangerous_rm_prompt(DANGEROUS_RM).is_some());
+        let rule = "─".repeat(96);
+        let with_empty_composer_below = format!("{DANGEROUS_RM}\n{rule}\n❯ \n{rule}\n");
+        assert!(dangerous_rm_prompt(&with_empty_composer_below).is_none(), "輸入列空著＝沒有框在擋（既有規則）");
+    }
+
+    /// 通知引用的每一行都有 `· ` 前綴：就算沒有輸入框（直接印在畫面上），任何比對函式也不會把引用文當成框。
+    #[test]
+    fn the_quote_prefix_survives_norm_line_so_no_matcher_sees_a_dialog() {
+        for fixture in [DANGEROUS_RM, DANGEROUS_RM_ONE_ROW, DANGEROUS_RM_2286_MULTILINE, PERMISSION_2286_BASH] {
+            let quoted = crate::child_alerts::quote_lines(fixture);
+            assert!(quoted.lines().all(|l| l.starts_with(crate::child_alerts::QUOTE_PREFIX)));
+            assert_no_dialog_recognised(&format!("{quoted}\n"), "引用文直接印在畫面尾端");
+            assert_no_dialog_recognised(&crate::child_alerts::message_for("kid", fixture), "整則通知直接印在畫面尾端");
+        }
+    }
+
+    /// composer_region：兩條線夾住、第一行是游標；`❯ 1. Yes` 這種選單列不算。
+    #[test]
+    fn composer_region_finds_the_last_input_box_only() {
+        let rule = "─".repeat(40);
+        let screen = format!("old\n{rule}\n❯ a\n{rule}\nnote\n{rule}\n❯ typed\n  more\n{rule}\nstatus\n");
+        let lines: Vec<&str> = screen.lines().collect();
+        assert_eq!(composer_region(&lines), Some(6..8));
+        let menu = format!("{rule}\n❯ 1. Yes\n  2. No\n{rule}\n");
+        let lines: Vec<&str> = menu.lines().collect();
+        assert_eq!(composer_region(&lines), None, "選單列夾在兩條線之間也不是輸入框");
+        assert_eq!(composer_region(&["no rules", "❯ x"]), None);
     }
 
     use super::screens::{

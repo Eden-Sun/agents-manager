@@ -2931,6 +2931,31 @@ mod prompt_tests {
         assert!(trust_file.exists(), "讀得到之後信任的是專案目錄");
     }
 
+    /// pt-hub mg1 的死結（2026-11-18）：child 的 Dangerous rm 框原文被當通知打進母 bot 的輸入框、沒送出（composer_unreadable）；
+    /// 輸入框裡那段字不能讓母 bot 被當成「停在 Dangerous rm 框」——否則通知的重試與所有送達都被 409 擋死。
+    /// 輸入框裡裝著通知（不論有沒有前綴）時，送達閘門不回 dangerous_rm_pending／dialog_open；真的框照舊擋（上一個測試）。
+    #[tokio::test]
+    async fn a_dialog_quoted_in_the_composer_does_not_block_delivery() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let rule = "─".repeat(96);
+        let notice = crate::child_alerts::message_for("otafable", crate::tui_prompts::screens::DANGEROUS_RM);
+        for typed in [notice.as_str(), crate::tui_prompts::screens::DANGEROUS_RM] {
+            let mut lines = typed.lines();
+            let first = lines.next().unwrap_or("");
+            let rest: String = lines.map(|l| format!("  {l}\n")).collect();
+            let screen = format!("● earlier\n\n{rule}\n❯ {first}\n{rest}{rule}\n  status\n  ⏵⏵ bypass permissions on\n");
+            f.env.herdr.set_screen("pane-prompt-test", &screen);
+            if let Err(LcError::Conflict(v)) = pane_ready_for_prompt(&app, &bot, &run, &f.conv).await {
+                let reason = v["reason"].as_str().unwrap_or_default();
+                assert!(!matches!(reason, "dangerous_rm_pending" | "dialog_open"), "輸入框裡的引文不是框：{v}");
+            }
+        }
+    }
+
     /// 2.1.281 的防誤刪框（herdr 判成 idle 也一樣）：409 `dangerous_rm_pending` 帶目標，一個鍵都不按、一個字都不打；
     /// 通知寫在對話裡，同一個框被擋幾次都只寫一次（排隊的 flush 會一再撞這道閘門）。
     #[tokio::test]
