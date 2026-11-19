@@ -1713,3 +1713,16 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
   - `kindTag.css` 放寬 `.kind-tag.claude-api.icon, .kind-tag.openai-api.icon` 為 `width: auto; padding: 0 4px;`，內部 SVG `width: auto; height: 12px;`（精簡列 `height: 11px; padding: 0 3px;`），確保側欄、額度列、建立表單各處不被裁切、不換行。
   - 深淺色主題（`prefers-color-scheme: dark` 與 `[data-theme="dark"]`）白字對比皆清楚可讀；文字模式不受影響。
 - **測試**：`components/openaiApiBotKindDom.test.tsx` 斷言圖示模式下 claude-api 與 openai-api 右側均有寬 18、高 12、字級 10 之「API」實心長方形徽章，文字模式維持各自文字標籤。
+
+## codex 與 openai-api 模型顯示與排序統一（2026-11-19，使用者截圖）
+
+- **背景**：codex 模型按鈕混用空格與連字號（「6-Luna｜6.2-Sol｜6.2-Astra｜6.1 Terra」）且順序凌亂。根因是按鈕字取 daemon 回傳的 `display_name`（各 CLI／API 回傳格式不一），且排序依賴寫死的靜態清單（新版本無從排序）。
+- **做法**：
+  - **命名統一，由模型 id 推導**：按鈕顯示一律由 `m.id` 解析 `gpt-<版本>-<名稱>` → 「<版本>-<名稱首字大寫>」（`gpt-6-luna`→`6-Luna`、`gpt-6.1-terra`→`6.1-Terra`、`gpt-6.2-sol`→`6.2-Sol`、`gpt-6.2-astra`→`6.2-Astra`），不再使用 `display_name`。codex 與 openai-api 共用函式（`formatGptModelLabel`）。
+  - **側欄短名統一**：`shortModel` 對 codex 與 openai-api 一律回「<版本>-<名稱>」小寫（`6.2-astra`），openai-api 不再只回 `astra`。認不得格式的 id 原樣顯示；title／tooltip 維持完整 id。
+  - **排序由便宜到貴**：依家族固定順序 `luna < terra < sol < astra` 排序；同家族多版本依版本號由舊到新（5.6 < 6 < 6.1 < 6.2）。從 id 解析家族規則排序，不再依賴硬編碼清單；新版本自動排入正確位置。
+  - **預設模型保持不變**：`openai-api` 預設模型仍為 astra（即使排在最後，`is_default: true` 仍預設選中 astra）。
+  - 建立 Bot 表單、Bot 設定 ModelPicker、快捷改模型選單（ModelQuickPicker）三處完全一致。
+- **測試**：
+  - `lib/gptModel.test.ts`：label 推導（四個例子＋未知 id）、排序（亂序輸入→luna,terra,sol,astra；同家族多版本）、shortModel 兩個 kind 一致。
+  - `lib/shortModel.test.ts`、`components/kindMeta.test.ts`、`components/modelSeriesDom.test.tsx` 既有斷言更新。

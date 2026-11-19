@@ -30,12 +30,14 @@ test('agy 去掉 gemini-，尾巴的強度拆出去', () => {
   assert.equal(agyEffort('claude', 'claude-x-high'), null)
 })
 
-test('openai-api 去掉 gpt-<版本>-，只留名稱（使用者 2026-11-18）', () => {
-  assert.equal(shortModel('openai-api', 'gpt-6-luna'), 'luna')
-  assert.equal(shortModel('openai-api', 'gpt-6.2-sol'), 'sol')
-  assert.equal(shortModel('openai-api', 'gpt-6-luna-pro'), 'luna-pro')
+test('openai-api 與 codex 規則統一，回 <版本>-<名稱> 小寫（使用者 2026-11-19）', () => {
+  assert.equal(shortModel('openai-api', 'gpt-6-luna'), '6-luna')
+  assert.equal(shortModel('openai-api', 'gpt-6.2-sol'), '6.2-sol')
+  assert.equal(shortModel('openai-api', 'gpt-6-luna-pro'), '6-luna-pro')
+  assert.equal(shortModel('openai-api', 'gpt-6.2-astra'), '6.2-astra')
   assert.equal(shortModel('openai-api', null), null)
-  // 其他 kind 不受影響：codex 仍只去掉 gpt-，Claude 規則不變。
+  // codex 與 openai-api 一致
   assert.equal(shortModel('codex', 'gpt-6-astra'), '6-astra')
+  assert.equal(shortModel('codex', 'gpt-6.2-astra'), '6.2-astra')
   assert.equal(shortModel('claude-api', 'claude-opus-5-5'), 'opus')
 })

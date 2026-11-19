@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
+import { compareGptModels, formatGptModelLabel } from '../lib/gptModel'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -25,7 +26,7 @@ function staticModels(kind: BotKind): ModelInfo[] {
     id,
     display_name: id,
     description: '',
-    is_default: i === 0,
+    is_default: kind === 'openai-api' ? id.includes('astra') : i === 0,
     default_effort: kind === 'claude-api' ? 'high' : kind === 'openai-api' ? 'medium' : null,
     // openai-api：依模型（astra／sol 不收 none）。
     efforts: kind === 'openai-api' ? [...openAiApiEffortsFor(id)] : efforts,
@@ -45,15 +46,32 @@ function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[
   return models.filter((m) => modelMatches(m.id, selected) || !HIDDEN_MODELS.includes(m.id))
 }
 
-/** 按鈕字拿掉 `gpt-` 前綴省寬度，完整 id 在 `title`（2026-09-09 使用者決定）。 */
-function modelLabel(m: ModelInfo): string {
+/**
+ * 按鈕顯示字（使用者 2026-11-19）：
+ * - codex 與 openai-api 由模型 id 推導（不用 display_name，統一格式「<版本>-<名稱首字大寫>」）。
+ * - 認不得格式的 id 照舊原樣顯示，完整 id 在 `title`。
+ */
+function modelLabel(m: ModelInfo, kind?: BotKind): string {
+  if (kind === 'codex' || kind === 'openai-api' || /^gpt-\d/i.test(m.id)) {
+    const formatted = formatGptModelLabel(m.id)
+    if (formatted !== m.id) return formatted
+  }
   const name = m.display_name || m.id
-  // display_name 是大寫 `GPT-`，id 是小寫。
   return name.replace(/^gpt-/i, '')
 }
 
-/** 照 `MODEL_OPTIONS` 排序：API 順序隨 CLI 版本變會毀掉肌肉記憶；新模型接在後面。 */
+/**
+ * 排序：
+ * - codex 與 openai-api：依家族由便宜到貴（luna < terra < sol < astra；同家族由舊到新，2026-11-19 使用者要求）。
+ * - 其餘 kind：照 `MODEL_OPTIONS` 排序，新模型接在後面。
+ */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
+  if (kind === 'codex' || kind === 'openai-api') {
+    return models
+      .map((m, i) => ({ m, i }))
+      .sort((a, b) => compareGptModels(canonicalModel(kind, a.m.id), canonicalModel(kind, b.m.id)) || a.i - b.i)
+      .map((x) => x.m)
+  }
   const want = MODEL_OPTIONS[kind] ?? []
   // `want` 寫的是正式 id，daemon 的清單可能還是別名（claude 目前就回 `opus`）：對過去再排（#539）。
   const rank = (id: string) => {
@@ -159,7 +177,7 @@ export function ApiModelFields({
               title={[m.id, m.description, m.is_default ? t('模型預設') : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
             >
-              {modelLabel(m)}
+              {modelLabel(m, kind)}
               {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}
@@ -454,7 +472,7 @@ export function ModelQuickPicker({
               disabled={patching}
               onClick={() => pickModel(m.id)}
             >
-              {modelLabel(m)}
+              {modelLabel(m, kind)}
               {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}

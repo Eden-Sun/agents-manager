@@ -950,9 +950,9 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
   // claude-api：與 daemon 的核准模型／價格清單一致，Opus 仍是預設。
   'claude-api': ['claude-opus-5-5', 'claude-fable-5-2'],
-  // openai-api：核准清單（預設 astra，與 daemon `OPENAI_API_BOT_MODELS` 同一份）。
-  'openai-api': ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-luna'],
-  // 輕到重；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號。
+  // openai-api：核准清單（依家族由便宜到貴：luna < sol < astra，預設 astra 排在最後；2026-11-19 使用者要求）。
+  'openai-api': ['gpt-6-luna', 'gpt-6.2-sol', 'gpt-6.2-astra'],
+  // 輕到重（依家族由便宜到貴：luna < terra < sol < astra；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號）。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],

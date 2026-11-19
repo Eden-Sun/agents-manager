@@ -50,7 +50,7 @@ test('新增 Bot（沒選模型）只出每個系列的最新版', async () => {
     <ApiModelFields kind="codex" host="local" model={null} onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
   )
   const texts = modelRadios().map((el) => el.textContent?.trim())
-  assert.deepEqual(texts, ['6-luna', '6.2-sol', '6.2-astra', '6.1-terra'])
+  assert.deepEqual(texts, ['6-Luna', '6.1-Terra', '6.2-Sol', '6.2-Astra'])
   assert.ok(!texts.some((x) => x?.includes(t('舊版'))), '沒有任何舊版標記')
 })
 

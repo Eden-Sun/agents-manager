@@ -23,16 +23,16 @@ test('apiProvider：依 kind 回供應商，非 API kind 回 null', () => {
 test('openai-api 標籤是 OpenAI，可建立，核准模型 astra（預設）／sol／luna', () => {
   assert.equal(KIND_LABEL['openai-api'], 'OpenAI')
   assert.ok(CREATABLE_KINDS.includes('openai-api'))
-  assert.deepEqual([...MODEL_OPTIONS['openai-api']], ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-luna'])
-  assert.equal(MODEL_OPTIONS['openai-api'][0], 'gpt-6.2-astra', '建立表單預設是 astra（清單第一個）')
+  assert.deepEqual([...MODEL_OPTIONS['openai-api']], ['gpt-6-luna', 'gpt-6.2-sol', 'gpt-6.2-astra'])
+  assert.equal(MODEL_OPTIONS['openai-api'][2], 'gpt-6.2-astra', '建立表單 astra 排最後（依家族便宜到貴）')
   assert.equal(openAiApiEffortsFor('gpt-6.2-astra').includes('none'), false, 'astra 不收 none')
   assert.equal(openAiApiEffortsFor('gpt-6-luna').includes('none'), true, 'luna 收 none')
 })
 
-test('shortModel：openai-api 留下名稱（gpt-6.2-astra → astra）', () => {
-  assert.equal(shortModel('openai-api', 'gpt-6.2-astra'), 'astra')
-  assert.equal(shortModel('openai-api', 'gpt-6-luna'), 'luna')
-  assert.equal(shortModel('openai-api', 'gpt-6.2-sol'), 'sol')
+test('shortModel：openai-api 留下版本與名稱（gpt-6.2-astra → 6.2-astra）', () => {
+  assert.equal(shortModel('openai-api', 'gpt-6.2-astra'), '6.2-astra')
+  assert.equal(shortModel('openai-api', 'gpt-6-luna'), '6-luna')
+  assert.equal(shortModel('openai-api', 'gpt-6.2-sol'), '6.2-sol')
 })
 
 test('parseModelSeries：openai-api 的系列與 codex 分開', () => {
