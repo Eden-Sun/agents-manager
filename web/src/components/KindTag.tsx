@@ -18,21 +18,23 @@ function OpenAiPath() {
 }
 
 /**
- * 直打 API 的 bot（claude-api / openai-api）右下角實心小徽章：
- * 圓角矩形底（fill 用 currentColor 跟隨 kind 品牌色），上面粗體白字「API」，字級 9。
+ * 直打 API 的 bot（claude-api / openai-api）實心長方形徽章：
+ * 放在主圖示（左邊 16×16）右側、垂直置中，兩者間距約 1.5。
+ * 寬 18、高 12（圓角 2.5），字級約 10、字重 800、字距 0.3，白字置中。
  * 兩個 case 共用同一個 ApiBadge 小元件，保持兩者視覺一致。
  */
 export function ApiBadge() {
   return (
     <g className="api-badge">
-      <rect x="9.2" y="6" width="14.4" height="9.8" rx="2" fill="currentColor" />
+      <rect x="17.5" y="2" width="18" height="12" rx="2.5" fill="currentColor" />
       <text
-        x="16.4"
-        y="10.9"
+        x="26.5"
+        y="8"
         textAnchor="middle"
         dominantBaseline="central"
-        fontSize="9"
+        fontSize="10"
         fontWeight="800"
+        letterSpacing="0.3"
         fill="#ffffff"
         fontFamily="system-ui, -apple-system, sans-serif"
       >
@@ -72,10 +74,10 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'claude-api':
-      // claude 星芒＋右下角「API」實心小徽章，一眼分得出是直打 API 的 bot。
+      // claude 星芒＋右側「API」實心長方形徽章，一眼分得出是直打 API 的 bot。
       return (
-        <svg viewBox="0 0 24 16" width="1.5em" height="1em" aria-hidden="true">
-          <path d="M7 1.5v11M1.5 7h11M3.1 3.1l7.8 7.8M10.9 3.1l-7.8 7.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
+        <svg viewBox="0 0 36 16" width="2.25em" height="1em" aria-hidden="true">
+          <path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
           <ApiBadge />
         </svg>
       )
@@ -83,10 +85,10 @@ export function KindIcon({ kind }: { kind: BotKind }) {
       // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
       return <OpenAiMark />
     case 'openai-api':
-      // openai-api（直打 API）：同一個 GPT 商標，右下角「API」實心小徽章（同 claude-api 的做法）。
+      // openai-api（直打 API）：同一個 GPT 商標，右側「API」實心長方形徽章（同 claude-api 的做法）。
       return (
-        <svg viewBox="0 0 24 16" width="1.5em" height="1em" aria-hidden="true">
-          <g transform="translate(0.5, 1) scale(0.54)">
+        <svg viewBox="0 0 36 16" width="2.25em" height="1em" aria-hidden="true">
+          <g transform="translate(0.8, 0.8) scale(0.6)">
             <OpenAiPath />
           </g>
           <ApiBadge />

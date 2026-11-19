@@ -11,21 +11,32 @@
   height: 12px;
 }
 
-/* claude-api / openai-api（viewBox 24×16，帶 1.5:1 的 API 實心徽章）：放寬 svg 寬度，不被 12×12 壓扁成 8px 高 */
+/* claude-api / openai-api（viewBox 36×16，帶 2.25:1 的 API 實心長方形徽章）：放寬 tag 與 svg 寬度，不被 20px / 12×12 壓扁或裁切 */
+.kind-tag.claude-api.icon,
+.kind-tag.openai-api.icon {
+  width: auto;
+  padding: 0 4px;
+}
+
 .kind-tag.claude-api.icon svg,
 .kind-tag.openai-api.icon svg {
   width: auto;
   height: 12px;
-  max-width: 100%;
 }
 
 .bot-row.compact .kind-tag.icon {
   width: 18px;
 }
 
+.bot-row.compact .kind-tag.claude-api.icon,
+.bot-row.compact .kind-tag.openai-api.icon {
+  width: auto;
+  padding: 0 3px;
+}
+
 .bot-row.compact .kind-tag.claude-api.icon svg,
 .bot-row.compact .kind-tag.openai-api.icon svg {
-  height: 10px;
+  height: 11px;
 }
 
 .kind-tag {
@@ -37,6 +48,7 @@
   border-radius: 3px;
   border: 1px solid var(--border-strong);
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .kind-tag.claude {

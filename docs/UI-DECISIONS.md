@@ -1703,12 +1703,13 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **openai-api 側欄圖示**：跟 codex 同一組綠色（淺色、系統深色、`data-theme="dark"` 三組），加虛線框區分；GPT 商標右下角小「API」字（同 claude-api 的做法）。不再落到預設灰色。
 - 測試：`components/quotaBalanceChipDom.test.tsx`、`openAiBalanceChipDom.test.tsx` 斷言圖示與無文字標籤；`openaiApiBotKindDom.test.tsx` 斷言 openai-api 圖示模式有「API」字樣。
 
-## claude-api 與 openai-api 圖示：實心「API」小徽章（2026-11-19，使用者回饋）
+## claude-api 與 openai-api 圖示：實心「API」長方形徽章（2026-11-19，使用者回饋加大）
 
-- **背景**：側欄（bot 選單）claude-api 與 openai-api 圖示右下角的「API」字太小、不顯眼，加大並做成實心徽章。
+- **背景**：側欄（bot 選單）claude-api 與 openai-api 圖示壓在右下角的小「API」字仍不夠顯眼，使用者要求改為放在主圖示右側的長方形標誌，讓字體清楚可讀。
 - **做法**：
-  - 右下角抽出共用的 `ApiBadge` 小元件：底為圓角矩形（`fill="currentColor"` 依 kind 色），上嵌加粗白字「API」（`fontSize="9"`、`fontWeight="800"`、`fill="#ffffff"`），淺色與深色主題（`prefers-color-scheme: dark` 與 `[data-theme="dark"]`）對比皆清楚可讀。
-  - 圖示統一調整 viewBox 為 `0 0 24 16`（`width="1.5em" height="1em"`），徽章不遮擋主商標圖形。
-  - `kindTag.css` 對帶徽章的圖示放寬 `width: auto; height: 12px; max-width: 100%`（精簡列 `height: 10px`），保持主圖示高度與 1:1 kind 圖示一致且不被壓扁。
-  - 文字模式（kind 標示切成文字時）不受影響。
-- **測試**：`components/openaiApiBotKindDom.test.tsx` 斷言圖示模式下 claude-api 與 openai-api 包含「API」字樣與徽章元素（`.api-badge rect`），文字模式維持各自文字標籤。
+  - 共用 `ApiBadge` 小元件：主圖示佔左邊 16×16，API 實心長方形徽章移至**主圖示右側**、垂直置中（間距約 1.5）。
+  - 徽章規格：寬 18、高 12（圓角 2.5），字級 10、字重 800、字距 0.3，白字置中（`dominantBaseline="central"`、`textAnchor="middle"`），底色 `fill="currentColor"`（跟隨 kind 品牌色）。
+  - 圖示統一調整 viewBox 為 `0 0 36 16`（`width="2.25em" height="1em"`）。
+  - `kindTag.css` 放寬 `.kind-tag.claude-api.icon, .kind-tag.openai-api.icon` 為 `width: auto; padding: 0 4px;`，內部 SVG `width: auto; height: 12px;`（精簡列 `height: 11px; padding: 0 3px;`），確保側欄、額度列、建立表單各處不被裁切、不換行。
+  - 深淺色主題（`prefers-color-scheme: dark` 與 `[data-theme="dark"]`）白字對比皆清楚可讀；文字模式不受影響。
+- **測試**：`components/openaiApiBotKindDom.test.tsx` 斷言圖示模式下 claude-api 與 openai-api 右側均有寬 18、高 12、字級 10 之「API」實心長方形徽章，文字模式維持各自文字標籤。
