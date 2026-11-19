@@ -7069,7 +7069,8 @@ async fn openai_api_turn_that_is_refused_with_the_key_echoed_leaks_it_into_no_ws
     }
     assert!(!events.is_empty(), "應該有 WS 事件可以檢查");
     assert!(!events.contains(WS_SENTINEL), "WS 事件洩漏 key：{events}");
-    assert!(!events.contains("Incorrect API key"), "上游錯誤原文不該出現在 WS：{events}");
+    // 上游錯誤原文現在會以使用者可見的失敗訊息呈現（25c22663a），但 key 必須已被遮蔽。
+    assert!(!events.contains("Incorrect API key provided: sk-"), "上游錯誤裡的 key 沒有遮蔽：{events}");
 }
 
 /// daemon 重啟後 openai-api 的 session 接得回來：啟動閘門認得 openai 的 checkpoint（不隔離 API）、native resume 的證明通過、
