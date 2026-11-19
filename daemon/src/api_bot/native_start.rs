@@ -57,6 +57,22 @@ async fn create_run_inner(app: &crate::state::App, bot: &str, required: bool, cl
         refused(bot, "gate_not_ready_or_quarantined");
         return Err(E::Unconfirmed);
     }
+    // 同一顆 bot 已經在跑（`starting`／`running`）：一般續接（不要求特定 resume、不是 Fresh）不另開，回可辨識的 `ActiveRun`。
+    // 這裡在 bot 鎖內，跟其他啟動序列化；Fresh 與要求 resume 的請求照舊走下面的路徑。
+    if !cleared && !required {
+        let active: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state IN ('starting','running') LIMIT 1")
+            .bind(bot)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|e| {
+                failed(bot, "active_run_lookup")(e);
+                E::Unconfirmed
+            })?;
+        if let Some(run_id) = active {
+            tracing::info!(bot, run_id = %run_id, "api native start: run already active, reusing it");
+            return Err(E::ActiveRun { run_id });
+        }
+    }
     let id = crate::db::ulid();
     let key = crate::lifecycle::api_bot_port::ApiRunKey { bot_id: bot.to_owned(), run_id: id.clone() };
     let guard = tokio::select! {

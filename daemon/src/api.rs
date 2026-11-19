@@ -5803,14 +5803,14 @@ async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts)
 }
 
 #[derive(Deserialize, Default)]
-struct NativeStartQuery {
+pub(crate) struct NativeStartQuery {
     resume: Option<String>,
     session: Option<String>,
     api_expected_session_id: Option<String>,
     api_expected_generation: Option<String>,
 }
 
-async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<NativeStartQuery>, Extension(principal): Extension<RequestPrincipal>) -> Result<Response, LcError> {
+pub(crate) async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<NativeStartQuery>, Extension(principal): Extension<RequestPrincipal>) -> Result<Response, LcError> {
     let common = StartQuery { resume: q.resume, session: q.session };
     let opts = resume_opts(&common)?;
     let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|b| b.kind);
@@ -5832,6 +5832,7 @@ async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<String>, Que
             ApiNativeStartError::Unconfirmed => LcError::Upstream("api_native_start_unconfirmed".into()),
             ApiNativeStartError::ClearedButStartUnconfirmed => LcError::Upstream("api_fresh_cleared_start_unconfirmed".into()),
             ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
+            ApiNativeStartError::ActiveRun { run_id } => LcError::conflict("api_run_already_active", json!({"reason": "api_run_already_active", "run_id": run_id})),
             ApiNativeStartError::ModelChanged { from, to } => LcError::conflict("api_model_changed", json!({
                 "reason": "api_model_changed",
                 "checkpoint_model": from,
@@ -6851,6 +6852,7 @@ pub(crate) async fn prompt_bot(
                             ApiNativeStartError::ModelChanged { .. } => "start_failed:api_model_changed".to_string(),
                             ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
                             ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
+                            ApiNativeStartError::ActiveRun { .. } => "start_failed:api_run_already_active".to_string(),
                         };
                         sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
                             .bind(&err_msg).bind(&request_id).execute(&app.db).await.map_err(any_err)?;

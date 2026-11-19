@@ -354,6 +354,7 @@ async fn reconcile(app: &Arc<App>, id: &str) -> anyhow::Result<()> {
                                 ApiNativeStartError::ModelChanged { .. } => "start_failed:api_model_changed".to_string(),
                                 ApiNativeStartError::ClearedButStartUnconfirmed => "start_failed:api_fresh_cleared_start_unconfirmed".to_string(),
                                 ApiNativeStartError::Unconfirmed => "start_failed:api_native_start_unconfirmed".to_string(),
+                                ApiNativeStartError::ActiveRun { .. } => "start_failed:api_run_already_active".to_string(),
                             };
                             sqlx::query("UPDATE relay_requests SET state='failed',error=? WHERE id=? AND state='pending' AND to_turn_id IS NULL")
                                 .bind(&err_msg).bind(id).execute(&app.db).await?;

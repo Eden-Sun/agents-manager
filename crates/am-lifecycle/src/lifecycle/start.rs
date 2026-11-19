@@ -178,6 +178,7 @@ pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOp
         return crate::lifecycle::api_bot_port::ApiBotPort::api_native_start(app, bot_id, crate::lifecycle::api_bot_port::ApiNativeStartMode::Resume { required: opts.resume_required })
             .await.map(|result| result.run_id).map_err(|e| match e {
                 crate::lifecycle::api_bot_port::ApiNativeStartError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
+                crate::lifecycle::api_bot_port::ApiNativeStartError::ActiveRun { run_id } => LcError::conflict("api_run_already_active", json!({"reason": "api_run_already_active", "run_id": run_id})),
                 crate::lifecycle::api_bot_port::ApiNativeStartError::ModelChanged { from, to } => LcError::conflict("api_model_changed", json!({
                     "reason": "api_model_changed",
                     "checkpoint_model": from,

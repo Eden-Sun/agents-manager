@@ -75,6 +75,9 @@ pub enum ApiNativeStartError {
     ClearedButStartUnconfirmed,
     Refused(&'static str),
     ModelChanged { from: String, to: String },
+    /// 同一顆 bot 已經有 `starting`／`running` 的 run（只限不要求特定 resume 的續接）：明確告訴呼叫端「已經在跑」，
+    /// 不是無法確認（`Unconfirmed` 仍是失敗）。呼叫端可以直接沿用這個 run。
+    ActiveRun { run_id: String },
 }
 
 pub trait ApiBotPort: Send + Sync {

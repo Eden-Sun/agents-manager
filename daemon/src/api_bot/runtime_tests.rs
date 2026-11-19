@@ -7214,3 +7214,74 @@ async fn openai_api_advisor_relay_end_to_end_delivers_exactly_one_result_notice(
 fn openai_api_start_prompt_tool_settle_fits_one_mib_stack() {
     std::thread::Builder::new().stack_size(1024 * 1024).spawn(openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls).unwrap().join().unwrap();
 }
+
+/// 同一顆 openai-api bot 已經 `running`（2026-11-19：對已在跑的 bot 送出，前端以為停著又打 start）：一般續接回可辨識的
+/// `ActiveRun`（帶那顆 run），不另開、不回「無法確認」；要求特定 resume 與 Fresh 不合併（照舊）。HTTP 層是 409 `api_run_already_active` 帶 `run_id`。
+#[tokio::test]
+async fn an_already_running_api_bot_answers_active_run_for_plain_resume_only() {
+    use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshTarget, ApiNativeStartError as E, ApiNativeStartMode};
+    let env = crate::testing::env().await;
+    let bot = insert_openai_bot(&env, "openai-already-running").await;
+    let key = env.dir.join("openai-already-running-key");
+    crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
+    let key = key.to_string_lossy().into_owned();
+    env.app.cfg.update(move |c| {
+        c.openai_api.enabled = true;
+        c.openai_api.key_file = key;
+        c.openai_api.api_bot.max_turn_cost_microusd = Some(5_000_000);
+        Ok(())
+    }).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,started_at,host) VALUES('run-already',?,'running','idle',?,'local')")
+        .bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+
+    match env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: false }).await {
+        Err(E::ActiveRun { run_id }) => assert_eq!(run_id, "run-already"),
+        Err(e) => panic!("一般續接要回 ActiveRun，實際 {e:?}"),
+        Ok(_) => panic!("已在跑的 bot 不該另開一個 run"),
+    }
+    // 要求特定 resume：不合併，照舊報錯（不是 ActiveRun）。
+    match env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: true }).await {
+        Err(E::ActiveRun { .. }) => panic!("required resume 不能合併"),
+        _ => {}
+    }
+    // Fresh：不合併（照舊）。
+    let fresh = ApiNativeStartMode::Fresh(ApiFreshTarget { session_id: "s-none".into(), generation: 1 });
+    match env.app.api_native_start(&bot, fresh).await {
+        Err(E::ActiveRun { .. }) => panic!("Fresh 不能合併"),
+        _ => {}
+    }
+    let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state IN ('starting','running')").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(runs, 1, "沒有另開第二個 run");
+}
+
+/// HTTP：一般續接撞到已在跑的 run → 409 `api_run_already_active`，帶 `run_id`（網頁據此重新確認、不顯示錯誤）。
+#[tokio::test]
+async fn the_native_start_endpoint_answers_409_api_run_already_active_with_the_run_id() {
+    use crate::api::{NativeStartQuery, RequestPrincipal};
+    use axum::extract::{Path, Query, State};
+    use axum::Extension;
+    let env = crate::testing::env().await;
+    let bot = insert_openai_bot(&env, "openai-endpoint-running").await;
+    let key = env.dir.join("openai-endpoint-key");
+    crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
+    let key = key.to_string_lossy().into_owned();
+    env.app.cfg.update(move |c| {
+        c.openai_api.enabled = true;
+        c.openai_api.key_file = key;
+        c.openai_api.api_bot.max_turn_cost_microusd = Some(5_000_000);
+        Ok(())
+    }).await.unwrap();
+    sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,started_at,host) VALUES('run-endpoint',?,'running','idle',?,'local')")
+        .bind(&bot).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
+    let err = match crate::api::start_bot_http(State(env.app.clone()), Path(bot.clone()), Query(NativeStartQuery::default()), Extension(RequestPrincipal::User)).await {
+        Err(e) => e,
+        Ok(_) => panic!("已在跑的 bot 不該回成功"),
+    };
+    match err {
+        crate::lc_error::LcError::Conflict(v) => {
+            assert_eq!(v["reason"], "api_run_already_active", "{v}");
+            assert_eq!(v["run_id"], "run-endpoint", "{v}");
+        }
+        other => panic!("要是 409 conflict，實際 {other:?}"),
+    }
+}

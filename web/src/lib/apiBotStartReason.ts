@@ -27,6 +27,7 @@ const TEXT: Record<string, string> = {
   openai_not_configured: msg('先到 環境設定 → OpenAI API 啟用並設定金鑰（啟用開關與金鑰檔都要就緒）。'),
   attachments_unsupported_for_kind: msg('這個 bot 種類不支援附件：請移除附件後再送。'),
   compact_unsupported: msg('這個 bot 種類不支援 /compact。'),
+  api_run_already_active: msg('這顆 bot 已經在執行中（已有一個進行中的 run）。'),
 }
 
 /**
@@ -34,6 +35,7 @@ const TEXT: Record<string, string> = {
  * daemon 的 reason 名稱跟 Claude 共用，所以依 bot 的 kind 選句；沒有對應的 OpenAI 句就退回通用句。
  */
 const OPENAI_TEXT: Record<string, string> = {
+  api_native_start_unconfirmed: msg('daemon 無法確認 OpenAI bot 的啟動狀態；請稍後再試。'),
   // 單回合上限留空就是不設上限（daemon 不再因此拒絕），所以 cap_missing 對 openai 不會出現；萬一出現也不講 Claude 的設定位置。
   api_bot_turn_cost_cap_missing: msg('[openai_api.api_bot] 的單回合成本上限設定有誤：留空＝不設上限，或填大於 0 的數字（到 設定 → OpenAI API 修改）。'),
   api_bot_config_invalid: msg('[openai_api.api_bot] 的設定值超出允許範圍，請檢查各項上限。'),

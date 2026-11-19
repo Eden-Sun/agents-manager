@@ -834,7 +834,7 @@ function isRunStateUncommitted(e: unknown, which: 'start' | 'stop' | 'restart'):
 }
 
 function isActiveRunConflict(e: unknown): boolean {
-  return e instanceof ApiError && e.status === 409 && e.body.reason === 'active run already exists'
+  return e instanceof ApiError && e.status === 409 && (e.body.reason === 'active run already exists' || e.body.reason === 'api_run_already_active')
 }
 
 function runStateUncommittedText(e: unknown): string {
@@ -1613,6 +1613,8 @@ export const useStore = create<StoreState>((set, get) => {
       if (startIfStopped && !(r && (r.state === 'running' || r.state === 'starting'))) {
         try {
           await api.startBot(botId)
+          // 啟動成功後同步 run（跟一般 startBot 一樣）：不然下一次送出前端還以為停著，又打一次 start（2026-11-19）。
+          await get().refreshState()
         } catch (e) {
           if (e instanceof ApiError && e.status === 409 && (e.body?.reason === 'api_model_changed' || e.body?.error === 'api_model_changed')) {
             const checkpointModel = typeof e.body.checkpoint_model === 'string' ? e.body.checkpoint_model : ''
@@ -1620,8 +1622,12 @@ export const useStore = create<StoreState>((set, get) => {
             set({ apiModelConflict: { botId, checkpointModel, currentModel } })
             return false
           }
-          get().notify('error', t('啟動失敗：{reason}', { reason: startErrText(e, get().bots.find((b) => b.id === botId)?.kind) }))
-          return false
+          // 已經有 run 在跑（daemon 明確回 api_run_already_active）：不是失敗，同步 run 後照常送，不顯示錯誤。
+          if (!isActiveRunConflict(e)) {
+            get().notify('error', t('啟動失敗：{reason}', { reason: startErrText(e, get().bots.find((b) => b.id === botId)?.kind) }))
+            return false
+          }
+          await get().refreshState()
         }
       }
       sendNow = false
