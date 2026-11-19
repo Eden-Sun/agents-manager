@@ -1144,13 +1144,19 @@ pub const OPENAI_USE_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhig
 pub const OPENAI_API_BOT_MODELS: &[&str] = &["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-luna"];
 /// astra／sol 的 API 拒絕 `reasoning.effort = none`（官方模型頁）；luna 仍收 none。
 pub const OPENAI_NO_NONE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+/// openai-api 模型的 effort 清單（唯一來源：設定驗證、/api/models、codec、provider 建構都用它）。
+/// 不認得的模型回 `None`。
+pub fn openai_api_efforts_for_model(model: &str) -> Option<&'static [&'static str]> {
+    match model.trim() {
+        "gpt-6-luna" => Some(OPENAI_USE_EFFORTS),
+        "gpt-6.2-astra" | "gpt-6.2-sol" => Some(OPENAI_NO_NONE_EFFORTS),
+        _ => None,
+    }
+}
+
 /// 這個 openai-api 模型能不能用這個 effort（模型各自的清單，不是 kind 共用的）。
 pub fn openai_api_effort_supported(model: &str, effort: &str) -> bool {
-    match model.trim() {
-        "gpt-6-luna" => OPENAI_USE_EFFORTS.contains(&effort),
-        "gpt-6.2-astra" | "gpt-6.2-sol" => OPENAI_NO_NONE_EFFORTS.contains(&effort),
-        _ => false,
-    }
+    openai_api_efforts_for_model(model).is_some_and(|list| list.contains(&effort))
 }
 pub const OPENAI_USE_DEFAULT_EFFORT: &str = "low";
 

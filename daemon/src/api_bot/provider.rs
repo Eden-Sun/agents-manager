@@ -145,11 +145,32 @@ pub trait Provider: Send + Sync {
 
 /// 依識別字取得 provider（session 建立時固定、resume／recovery 依 checkpoint 的標籤取回同一個）。不認得的回 `None`。
 /// 選項不屬於這個 provider（`extras` 對不上）也回 `None`。
-pub(crate) fn for_id(id: &str, options: SessionOptions, quote: Arc<dyn QuoteProvider>) -> Option<Arc<dyn Provider>> {
+pub(crate) fn for_id(id: &str, options: SessionOptions, quote: Arc<dyn QuoteProvider>) -> Result<Arc<dyn Provider>, ProviderInitError> {
     match id {
-        super::anthropic::ID => Some(Arc::new(super::anthropic::AnthropicProvider::new(super::anthropic::options_from(options)?, quote))),
-        super::openai::provider::ID => Some(Arc::new(super::openai::provider::OpenAiProvider::new(options, quote)?)),
-        _ => None,
+        super::anthropic::ID => {
+            let opts = super::anthropic::options_from(options).ok_or(ProviderInitError::Anthropic)?;
+            Ok(Arc::new(super::anthropic::AnthropicProvider::new(opts, quote)))
+        }
+        super::openai::provider::ID => Ok(Arc::new(super::openai::provider::OpenAiProvider::new(options, quote).map_err(ProviderInitError::OpenAi)?)),
+        other => Err(ProviderInitError::UnknownProvider(other.to_string())),
+    }
+}
+
+/// [`for_id`] 建不起來的具名原因。`reason()` 是穩定代碼，不含使用者文字。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderInitError {
+    UnknownProvider(String),
+    Anthropic,
+    OpenAi(super::openai::provider::ProviderInitError),
+}
+
+impl ProviderInitError {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::UnknownProvider(_) => "unknown_provider".into(),
+            Self::Anthropic => "anthropic_options".into(),
+            Self::OpenAi(e) => e.reason().into(),
+        }
     }
 }
 

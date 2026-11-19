@@ -199,9 +199,9 @@ fn replay_items_must_be_kinds_we_saved() {
 
 #[test]
 fn reasoning_effort_is_validated_per_model_with_medium_as_default() {
-    assert_eq!(LUNA_EFFORTS, ["none", "low", "medium", "high", "xhigh", "max"]);
+    assert_eq!(crate::config::OPENAI_USE_EFFORTS, ["none", "low", "medium", "high", "xhigh", "max"]);
     assert_eq!(resolve_effort("gpt-6-luna", None), Ok("medium"));
-    for e in LUNA_EFFORTS {
+    for e in crate::config::OPENAI_USE_EFFORTS.iter().copied() {
         assert_eq!(resolve_effort("gpt-6-luna", Some(e)), Ok(e));
     }
     assert_eq!(resolve_effort("gpt-6-luna", Some("minimal")), Err(CodecError::UnsupportedEffort { model: "gpt-6-luna".into(), effort: "minimal".into() }));

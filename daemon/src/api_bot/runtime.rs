@@ -577,6 +577,14 @@ impl ApiBotRuntime {
                 super::adapter::AdapterProvider::anthropic(options.clone(), dependencies.quote.clone())
             }
         };
+        // provider 建不起來（模型／強度不在清單、沒有價表…）：還沒有任何東西交給 worker，是確定的失敗。
+        // pending 的回合（使用者剛送出、已提交）不能懸在 in_flight：立刻收成 failed，寫穩定 reason，原訊息保留可重送。
+        if native_pending {
+            let probe = adapter_provider();
+            if let Err(e) = super::provider::for_id(probe.id, probe.options.clone(), probe.quote.clone()) {
+                return fail_pending_turn(app, key, &e).await;
+            }
+        }
         if !openai {
             options.validate().map_err(|_| ApiBotError::Upstream)?;
         }
@@ -1519,6 +1527,23 @@ impl CompletionRecoveryReason {
         }
     }
 }
+/// 提交了 pending 的回合、但 worker 還沒接手就確定失敗（provider 建不起來）：把這一回合收成 failed，
+/// 穩定的 reason 寫進 `start_error` 並廣播；使用者原訊息保留可重送。守的是精確的 bot／run／turn，
+/// 而且什麼都還沒交給 worker，所以這是確定的失敗（交接結果不明的情況不走這裡）。回傳 Ok：此次 spawn 已收尾。
+async fn fail_pending_turn(app: &crate::state::App, key: &ApiTurnKey, err: &super::provider::ProviderInitError) -> Result<(), ApiBotError> {
+    let code = format!("api_provider_init_failed:{}", err.reason());
+    let now = crate::db::now();
+    let changed = sqlx::query("UPDATE turns SET status='failed', delivery='failed', start_error=?, completed_at=? WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.deleted_at IS NULL)")
+        .bind(&code).bind(&now).bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id)
+        .execute(&app.db).await.map(|r| r.rows_affected()).unwrap_or(0);
+    // 細節（模型、強度）只進 log：全是我們自己的設定值，沒有使用者文字或 key。
+    tracing::warn!(reason = %code, detail = ?err, bot_id = %key.bot_id, run_id = %key.run_id, turn_id = %key.turn_id, changed, "API turn failed before handoff");
+    if changed == 1 {
+        crate::lifecycle::emit_turn(&app.shared(), &key.turn_id).await;
+    }
+    Ok(())
+}
+
 fn log_completion_recovery(key: &ApiTurnKey, reason: CompletionRecoveryReason, failures: usize) {
     tracing::info!(bot = %key.bot_id, run = %key.run_id, turn = %key.turn_id,
         reason = reason.code(), failures, "API bot joined-completion recovery");

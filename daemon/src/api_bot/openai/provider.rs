@@ -387,19 +387,50 @@ pub(crate) struct OpenAiProvider {
     quote_provider: Arc<dyn QuoteProvider>,
 }
 
-impl OpenAiProvider {
-    /// `options.extras` 必須是 `None`（OpenAI 第一版沒有專屬設定）；模型與 effort 要在核准清單裡。
-    pub(crate) fn new(options: SessionOptions, quote_provider: Arc<dyn QuoteProvider>) -> Option<Self> {
-        if options.extras != ProviderExtras::None || options.max_output_tokens == 0 {
-            return None;
+/// provider 建不起來的具名原因（不含使用者文字；細節給 WARN log，stable reason 給 turn 的 `start_error`）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderInitError {
+    Extras,
+    MaxOutputTokens,
+    UnsupportedModel(String),
+    UnsupportedEffort { model: String, effort: String },
+    NoPriceTable(String),
+}
+
+impl ProviderInitError {
+    /// 穩定的代碼（給 turn 的 `start_error` 與 log 的 reason 欄位用）。
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            Self::Extras => "extras_unsupported",
+            Self::MaxOutputTokens => "max_output_tokens_zero",
+            Self::UnsupportedModel(_) => "unsupported_model",
+            Self::UnsupportedEffort { .. } => "unsupported_effort",
+            Self::NoPriceTable(_) => "no_price_table",
         }
-        let effort = codec::resolve_effort(&options.model, Some(&options.effort)).ok()?;
-        pricing::price_table(&options.model)?;
-        Some(Self { model: options.model, effort: effort.to_string(), max_output_tokens: u64::from(options.max_output_tokens), quote_provider })
+    }
+}
+
+impl OpenAiProvider {
+    /// `options.extras` 必須是 `None`（OpenAI 第一版沒有專屬設定）；模型與 effort 要在 am-config 的清單裡（唯一來源）。
+    pub(crate) fn new(options: SessionOptions, quote_provider: Arc<dyn QuoteProvider>) -> Result<Self, ProviderInitError> {
+        if options.extras != ProviderExtras::None {
+            return Err(ProviderInitError::Extras);
+        }
+        if options.max_output_tokens == 0 {
+            return Err(ProviderInitError::MaxOutputTokens);
+        }
+        let effort = codec::resolve_effort(&options.model, Some(&options.effort)).map_err(|e| match e {
+            CodecError::UnsupportedEffort { model, effort } => ProviderInitError::UnsupportedEffort { model, effort },
+            _ => ProviderInitError::UnsupportedModel(options.model.clone()),
+        })?;
+        if pricing::price_table(&options.model).is_none() {
+            return Err(ProviderInitError::NoPriceTable(options.model.clone()));
+        }
+        Ok(Self { model: options.model, effort: effort.to_string(), max_output_tokens: u64::from(options.max_output_tokens), quote_provider })
     }
 
     /// 用內建標準價表報價的 provider。
-    pub(crate) fn with_standard_pricing(options: SessionOptions) -> Option<Self> {
+    pub(crate) fn with_standard_pricing(options: SessionOptions) -> Result<Self, ProviderInitError> {
         Self::new(options, Arc::new(OpenAiQuote))
     }
 }

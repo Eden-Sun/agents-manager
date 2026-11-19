@@ -7285,3 +7285,96 @@ async fn the_native_start_endpoint_answers_409_api_run_already_active_with_the_r
         other => panic!("要是 409 conflict，實際 {other:?}"),
     }
 }
+/// 假上游：每次 POST 都回一則純文字（不叫工具），並記下送出的 body。
+async fn openai_text_server(text: &'static str) -> (String, Arc<std::sync::Mutex<Vec<Value>>>, CancellationToken, tokio::task::JoinHandle<()>) {
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let record = seen.clone();
+    let handler = move |body: axum::body::Bytes| {
+        let record = record.clone();
+        async move {
+            record.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+            let msg = json!({"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]});
+            let body = openai_sse(&[
+                json!({"type": "response.created", "response": {"id": "resp_1"}}),
+                json!({"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [msg], "usage": openai_usage(300, 20)}}),
+            ]);
+            axum::response::Response::builder().status(200).header("content-type", "text/event-stream").body(axum::body::Body::from(body)).unwrap()
+        }
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let app = Router::new().route("/v1/responses", post(handler));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
+    });
+    (format!("http://{address}/v1/responses"), seen, shutdown, task)
+}
+
+/// 三個核准模型各自從停用狀態送第一句：一個 run、一個 session、一個已結算的 attempt、一則 assistant 回覆；
+/// 送出的 body 帶的是該模型與它的 effort（astra／sol 的 high、luna 的 high）。
+#[tokio::test]
+async fn each_approved_openai_model_completes_its_first_turn() {
+    for (model, effort) in [("gpt-6.2-astra", "high"), ("gpt-6.2-sol", "high"), ("gpt-6-luna", "high")] {
+        let env = crate::testing::env().await;
+        let (endpoint, seen, shutdown, server) = openai_text_server("first reply").await;
+        enable_fake_openai_runtime(&env, endpoint, Arc::new(OkTools(Arc::new(AtomicUsize::new(0))))).await;
+        let bot = insert_openai_bot(&env, &format!("openai-first-{effort}-{}", model.len())).await;
+        sqlx::query("UPDATE bots SET model=?, effort=? WHERE id=?").bind(model).bind(effort).bind(&bot).execute(&env.app.db).await.unwrap();
+        let crid = crate::db::ulid();
+        crate::lifecycle::start_bot(&env.app, &bot).await.expect("openai-api native start");
+        crate::lifecycle::prompt(&env.app, &bot, "first question", &crid).await.expect("openai-api native prompt");
+        tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+            loop {
+                let done: Option<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='assistant' LIMIT 1")
+                    .bind(&bot).fetch_optional(&env.app.db).await.unwrap();
+                if done.is_some() { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{model}/{effort}: the first turn finished with an assistant reply"));
+        shutdown.cancel();
+        server.await.unwrap();
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        let settled: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_bot_attempts WHERE bot_id=? AND state='recorded'").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!((runs, sessions, settled), (1, 1, 1), "{model}/{effort}");
+        let body = seen.lock().unwrap()[0].clone();
+        assert_eq!((body["model"].clone(), body["reasoning"]["effort"].clone()), (json!(model), json!(effort)), "{model}/{effort}");
+    }
+}
+
+/// 提交了 pending 的回合，但 provider 建不起來（這裡用 astra＋none 模擬：設定層已擋，DB 被直接改成這個組合）：
+/// 還沒交給 worker、沒有任何上游呼叫，回合立刻收成 failed，`start_error` 是穩定的 reason，使用者原訊息保留。
+#[tokio::test]
+async fn a_pending_openai_turn_whose_provider_cannot_be_built_fails_with_a_reason_and_keeps_the_message() {
+    let env = crate::testing::env().await;
+    let (endpoint, seen, shutdown, server) = openai_text_server("should never be sent").await;
+    enable_fake_openai_runtime(&env, endpoint, Arc::new(OkTools(Arc::new(AtomicUsize::new(0))))).await;
+    let bot = insert_openai_bot(&env, "openai-bad-provider").await;
+    sqlx::query("UPDATE bots SET model='gpt-6.2-astra', effort='none' WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
+    let crid = crate::db::ulid();
+    crate::lifecycle::start_bot(&env.app, &bot).await.expect("openai-api native start");
+    crate::lifecycle::prompt(&env.app, &bot, "hello there", &crid).await.expect("the prompt is accepted and recorded");
+    let (status, start_error): (String, Option<String>) = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT t.status, t.start_error FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='failed' LIMIT 1")
+                .bind(&bot).fetch_optional(&env.app.db).await.unwrap();
+            if let Some(row) = row { break row; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the turn fails instead of staying in_flight");
+    shutdown.cancel();
+    server.await.unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(start_error.as_deref(), Some("api_provider_init_failed:unsupported_effort"));
+    assert!(seen.lock().unwrap().is_empty(), "沒有任何上游呼叫");
+    let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='user' AND m.content='hello there'").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(kept, 1, "使用者原訊息保留");
+    let in_flight: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='in_flight'").bind(&bot).fetch_one(&env.app.db).await.unwrap();
+    assert_eq!(in_flight, 0, "沒有懸空的 in_flight");
+}

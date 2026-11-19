@@ -305,9 +305,9 @@ async fn a_checkpoint_or_request_of_another_provider_is_refused_without_any_netw
     let server = serve(vec![]).await;
     let quote: Arc<dyn QuoteProvider> = Arc::new(OpenAiQuote);
     // 選項不屬於這個 provider：建不出來。
-    assert!(provider::for_id(ID, crate::api_bot::anthropic::session_options(Options::default()), quote.clone()).is_none());
-    assert!(provider::for_id(crate::api_bot::anthropic::ID, luna_options(), quote.clone()).is_none());
-    assert!(provider::for_id("nope", luna_options(), quote.clone()).is_none());
+    assert!(provider::for_id(ID, crate::api_bot::anthropic::session_options(Options::default()), quote.clone()).is_err());
+    assert!(provider::for_id(crate::api_bot::anthropic::ID, luna_options(), quote.clone()).is_err());
+    assert!(provider::for_id("nope", luna_options(), quote.clone()).is_err());
 
     // Claude 的 checkpoint（有標籤或沒標籤的舊格式）不能用 OpenAI 接續，Claude 形狀的 transcript 也編不出請求。
     let openai = luna();
@@ -608,7 +608,7 @@ fn the_provider_reports_its_identity_effort_ladder_and_refuses_unapproved_option
         SessionOptions { effort: "ultra".into(), ..luna_options() },
         SessionOptions { max_output_tokens: 0, ..luna_options() },
     ] {
-        assert!(OpenAiProvider::with_standard_pricing(bad).is_none());
+        assert!(OpenAiProvider::with_standard_pricing(bad).is_err());
     }
     // 不支援的 effort、空的 transcript、配對不上的工具結果都在 HTTP 之前拒絕。
     assert!(provider.encode("ultra", &json!("sys"), &fresh_state().messages, None).is_err());

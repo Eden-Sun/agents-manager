@@ -271,7 +271,7 @@ impl ApiBotAdapter {
             other => other.to_string(),
         };
         // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
-        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
+        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).map_err(|_| http::Error::InvalidRequest)?;
         let initial_state = State {
             system: Some(system_str),
             v: Some(am_base::db::api_bot::CHECKPOINT_VERSION),
@@ -387,7 +387,7 @@ impl ApiBotAdapter {
         if previous.provider_id() != provider_id {
             return Err(http::Error::InvalidRequest);
         }
-        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).ok_or(http::Error::InvalidRequest)?;
+        let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).map_err(|_| http::Error::InvalidRequest)?;
         let session_tag = previous.provider.clone();
         if !provider.checkpoint_matches_model(&previous) { return Err(http::Error::InvalidRequest); }
 

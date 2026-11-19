@@ -18,16 +18,11 @@ pub(crate) const RESPONSES_PATH: &str = "/v1/responses";
 
 // ───────────────────────────── effort ─────────────────────────────
 
-/// gpt-6-luna 的 `reasoning.effort`（依序由低到高）。
-pub(crate) const LUNA_EFFORTS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 pub(crate) const DEFAULT_EFFORT: &str = "medium";
 
-/// 這個 API 模型允許的 effort 清單；不認得的模型回 `None`（呼叫端在 HTTP 前拒絕）。
+/// 這個 API 模型允許的 effort 清單：轉交 am-config（唯一來源）；不認得的模型回 `None`（呼叫端在 HTTP 前拒絕）。
 pub(crate) fn efforts_for_model(model: &str) -> Option<&'static [&'static str]> {
-    match model {
-        "gpt-6-luna" => Some(&LUNA_EFFORTS),
-        _ => None,
-    }
+    crate::config::openai_api_efforts_for_model(model)
 }
 
 /// 驗證並回要送的 effort；沒指定就用預設 `medium`。
