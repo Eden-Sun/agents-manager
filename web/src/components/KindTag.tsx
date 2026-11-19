@@ -18,6 +18,31 @@ function OpenAiPath() {
 }
 
 /**
+ * 直打 API 的 bot（claude-api / openai-api）右下角實心小徽章：
+ * 圓角矩形底（fill 用 currentColor 跟隨 kind 品牌色），上面粗體白字「API」，字級 9。
+ * 兩個 case 共用同一個 ApiBadge 小元件，保持兩者視覺一致。
+ */
+export function ApiBadge() {
+  return (
+    <g className="api-badge">
+      <rect x="9.2" y="6" width="14.4" height="9.8" rx="2" fill="currentColor" />
+      <text
+        x="16.4"
+        y="10.9"
+        textAnchor="middle"
+        dominantBaseline="central"
+        fontSize="9"
+        fontWeight="800"
+        fill="#ffffff"
+        fontFamily="system-ui, -apple-system, sans-serif"
+      >
+        API
+      </text>
+    </g>
+  )
+}
+
+/**
  * 額度列／餘額列用的小圖示標（符號取代文字標籤）：顏色跟 kind 色（--kind-claude／--kind-codex），aria-label 與 title 仍是文字。
  */
 export function KindGlyph({ kind, label }: { kind: BotKind; label: string }) {
@@ -47,24 +72,24 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'claude-api':
-      // claude 星芒＋右下角小「API」標，一眼分得出是直打 API 的 bot。
+      // claude 星芒＋右下角「API」實心小徽章，一眼分得出是直打 API 的 bot。
       return (
-        <svg viewBox="0 0 20 16" width="1.25em" height="1em" aria-hidden="true">
+        <svg viewBox="0 0 24 16" width="1.5em" height="1em" aria-hidden="true">
           <path d="M7 1.5v11M1.5 7h11M3.1 3.1l7.8 7.8M10.9 3.1l-7.8 7.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" fill="none" />
-          <text x="19.5" y="15.2" textAnchor="end" fontSize="7" fontWeight="800" fill="currentColor" fontFamily="system-ui, sans-serif">API</text>
+          <ApiBadge />
         </svg>
       )
     case 'codex':
       // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
       return <OpenAiMark />
     case 'openai-api':
-      // openai-api（直打 API）：同一個 GPT 商標，右下角小「API」標（同 claude-api 的做法）。
+      // openai-api（直打 API）：同一個 GPT 商標，右下角「API」實心小徽章（同 claude-api 的做法）。
       return (
-        <svg viewBox="0 0 34 24" width="1.4em" height="1em" aria-hidden="true">
-          <g transform="scale(0.75)">
+        <svg viewBox="0 0 24 16" width="1.5em" height="1em" aria-hidden="true">
+          <g transform="translate(0.5, 1) scale(0.54)">
             <OpenAiPath />
           </g>
-          <text x="33.5" y="23.5" textAnchor="end" fontSize="9" fontWeight="800" fill="currentColor" fontFamily="system-ui, sans-serif">API</text>
+          <ApiBadge />
         </svg>
       )
     case 'grok':

@@ -11,8 +11,21 @@
   height: 12px;
 }
 
+/* claude-api / openai-api（viewBox 24×16，帶 1.5:1 的 API 實心徽章）：放寬 svg 寬度，不被 12×12 壓扁成 8px 高 */
+.kind-tag.claude-api.icon svg,
+.kind-tag.openai-api.icon svg {
+  width: auto;
+  height: 12px;
+  max-width: 100%;
+}
+
 .bot-row.compact .kind-tag.icon {
   width: 18px;
+}
+
+.bot-row.compact .kind-tag.claude-api.icon svg,
+.bot-row.compact .kind-tag.openai-api.icon svg {
+  height: 10px;
 }
 
 .kind-tag {
