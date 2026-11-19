@@ -14,17 +14,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${HERE}/dev-server-kick.ts"
 PASS=0
 FAIL=0
+. "$HERE/../test-assertions.sh" || exit 1
 check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
   else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null | head -20; FAIL=$((FAIL + 1)); fi
-}
-check_no() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; FAIL=$((FAIL + 1))
-  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
-}
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
 }
 
 # 真 binary 的絕對路徑要先抓：跑腳本時 PATH 換成 fakebin，用名字找會拿到假的

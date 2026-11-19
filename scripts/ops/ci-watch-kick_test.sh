@@ -8,6 +8,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/ci-watch-kick.sh"
 PASS=0
 FAIL=0
+. "$HERE/../test-assertions.sh" || exit 1
 
 setup() {
   ROOT=$(mktemp -d)
@@ -135,18 +136,6 @@ mk_ops_log() {
   done
 }
 
-check() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi
-}
-check_no() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; FAIL=$((FAIL + 1))
-  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
-}
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
-}
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 creates() { grep -c '^TITLE ' "$GHDIR/created.log" 2>/dev/null | tr -d ' '; }
 comments() { grep -c '^COMMENT' "$GHDIR/comments.log" 2>/dev/null | tr -d ' '; }

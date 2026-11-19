@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/herdr-update-kick.sh"
 PASS=0
 FAIL=0
+. "$HERE/../test-assertions.sh" || exit 1
 # 派工正文的驗收段依平台而異（#886）；既有案例是 macOS 的，固定成 darwin，linux 另測。
 export AGM_OPS_PLATFORM=darwin
 
@@ -160,18 +161,6 @@ run_launchd() {
 }
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 
-check() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi
-}
-check_no() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; FAIL=$((FAIL + 1))
-  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
-}
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
-}
 
 # 1. 有更新、第一次看到：派給 responder（runtime.json 這份沒有 release_bot_id），帶版本與 CHANGELOG 內容，state 寫入。
 setup

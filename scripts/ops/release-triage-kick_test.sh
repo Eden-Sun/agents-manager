@@ -9,6 +9,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/release-triage-kick.sh"
 PASS=0
 FAIL=0
+. "$HERE/../test-assertions.sh" || exit 1
 
 setup() {
   ROOT=$(mktemp -d)
@@ -141,18 +142,6 @@ start_live_runner() {
   [ -s "$AGM_DIR/release-triage.lock/owner" ]
 }
 
-check() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi
-}
-check_no() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; FAIL=$((FAIL + 1))
-  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
-}
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
-}
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 assignment_ids() { sed -n '/ assign /s/.*--request-id \([^ ]*\).*/\1/p' "$AGM_DIR/calls.log"; }
 

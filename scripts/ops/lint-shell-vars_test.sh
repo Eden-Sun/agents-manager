@@ -7,10 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LINT="${HERE}/lint-shell-vars.sh"
 PASS=0
 FAIL=0
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
-}
+. "$HERE/../test-assertions.sh" || exit 1
 has() {
   case "$2" in
     *"$3"*) echo "ok   - $1"; PASS=$((PASS + 1)) ;;
