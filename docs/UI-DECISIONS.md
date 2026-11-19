@@ -1687,3 +1687,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **設定入口**：「設定 → OpenAI API」多一欄「單回合成本上限（美元）」，美元輸入、存微美元；必須大於 0（0／負數不能存，按鈕停用）；留空＝不設上限（使用者 2026-11-19：「我是不上限」），bot 照常啟動。與 Claude 的總上限欄位同一種版面。
 - 測試：`apiBotStartReason.test.ts`（OpenAI／Claude 句子與沒給 kind 的退回）、`openAiApiSettingsDom.test.tsx`（美元↔微美元、0／負數不能存、留空清除）、daemon `openai_settings_tests.rs`（PUT 寫回、0 → 400、null 清除）。
 
+
+## 手機對話區水平超版：根因是 OpenAI token 拆解列（2026-11-19，iPhone 截圖）
+
+- **現象**：openai-api bot 的對話在 390px 左右滑動，訊息列往左偏、左邊被切；上方用量列也跟著被切。
+- **根因（瀏覽器實測）**：`.api-openai-breakdown`（「輸入 … · 快取讀 … · 輸出 …」）是 `.msg-meta` 底下 nowrap 的 flex 子項，`min-width:auto` 撐到約 562px；`.msg-list` 的 scrollWidth 685 > clientWidth 390。用量列本身沒有溢出，是被列表橫捲帶走。
+- **修法**：有拆解時 meta 列改可換行、高度跟內容走；拆解本身 `min-width:0`、`overflow-wrap:anywhere`。另外 `.bubble.md` 加 `min-width:0`／`max-width:100%`，行內 `code` 加 `overflow-wrap:anywhere`（長路徑可斷）；fenced pre、table 仍在自己內部橫向捲動。`.msg-list` 加 `overflow-x:hidden` 只當保險，不取代根因修正。
+- **驗證**：390px 修前 `.msg-list` scrollWidth 685、修後 390 = clientWidth；`document.scrollingElement` 390 = 390；320px 也無溢出，用量列在 10–310px 內。截圖前後對照見執行紀錄。
+- **測試**：`components/chatMobileOverflow.test.ts` 補四則 CSS 規則斷言。

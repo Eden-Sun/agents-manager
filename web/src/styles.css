@@ -1540,6 +1540,8 @@ button.pane-toggle:hover:not(:disabled) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 保險：訊息列不產生水平捲動（根因修在各子元素；這裡只擋漏網的溢出）。 */
+  overflow-x: hidden;
   width: 100%;
   max-width: var(--chat-max);
   margin: 0 auto;
@@ -2532,6 +2534,9 @@ button.pane-toggle:hover:not(:disabled) {
   white-space: normal;
   font-size: 15px;
   line-height: 24px;
+  /* 手機水平超版（2026-11-19）：泡泡必須守在欄寬內，長內容只在 pre／table 自己的內部捲動。 */
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* 太長／太深的訊息預設純文字（SafeMarkdown）。 */
@@ -2565,6 +2570,8 @@ button.pane-toggle:hover:not(:disabled) {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--code-bg);
+  /* 行內長路徑沒有空白可斷，必須能在任意字元斷行；fenced pre 的 code 繼承 white-space:pre，不受影響。 */
+  overflow-wrap: anywhere;
 }
 
 /* No border, so fenced blocks don't read as a box inside a box. */

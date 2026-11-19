@@ -40,3 +40,35 @@ test('表格與 code block 在自己內部橫向捲動，不靠整體 overflow-x
   assert.match(ruleBody(styles, '.bubble.md table'), /overflow-x:\s*auto;/)
   assert.match(ruleBody(styles, '.bubble.md pre'), /overflow(-x)?:\s*auto;/)
 })
+
+/*
+ * 2026-11-19 iPhone 截圖（openai-api 回合）：OpenAI 回合的 token 拆解 `.api-openai-breakdown` 是 nowrap 的 flex 子項，
+ * 撐到約 560px，整個 msg-list 左右橫捲；助理 markdown 的行內 code 長路徑沒有斷行點，也會撐寬泡泡。
+ * 瀏覽器實測（390px）：修前 .msg-list scrollWidth 685 > clientWidth 390；修後應相等。
+ */
+test('OpenAI 回合的 token 拆解列：有拆解時可換行、拆解本身可縮並斷行', () => {
+  const meta = ruleBody(css, '.msg-meta:has(.api-openai-breakdown)')
+  assert.match(meta, /flex-wrap:\s*wrap;/)
+  assert.match(meta, /white-space:\s*normal;/)
+  assert.match(meta, /height:\s*auto;/)
+  const item = ruleBody(css, '.msg-meta .api-openai-breakdown')
+  assert.match(item, /min-width:\s*0;/)
+  assert.match(item, /max-width:\s*100%;/)
+  assert.match(item, /overflow-wrap:\s*anywhere;/)
+})
+
+test('助理 markdown 泡泡守在欄寬內（min-width:0；max-width:100%）', () => {
+  const body = ruleBody(styles, '.bubble.md')
+  assert.match(body, /min-width:\s*0;/)
+  assert.match(body, /max-width:\s*100%;/)
+})
+
+test('行內 code 可在任意字元斷行（長路徑不撐寬）', () => {
+  assert.match(ruleBody(styles, '.bubble.md code'), /overflow-wrap:\s*anywhere;/)
+})
+
+test('訊息列表不產生水平捲動（保險：overflow-x:hidden；根因已在各子元素修）', () => {
+  const body = ruleBody(styles, '.msg-list')
+  assert.match(body, /overflow-y:\s*auto;/)
+  assert.match(body, /overflow-x:\s*hidden;/)
+})

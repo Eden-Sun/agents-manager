@@ -223,6 +223,21 @@
   overflow-wrap: anywhere;
 }
 
+/* 同一類水平超版（iPhone 截圖 2026-11-19）：OpenAI 回合的 token 拆解（`.api-openai-breakdown`）是 nowrap 的 flex 子項，
+   min-width:auto 撐到約 560px，整個 msg-list 跟著左右捲、左側被切。改成可換行、可縮；有拆解時列高跟內容走。 */
+.msg-meta:has(.api-openai-breakdown) {
+  flex-wrap: wrap;
+  white-space: normal;
+  height: auto;
+  min-height: 20px;
+  row-gap: 2px;
+}
+.msg-meta .api-openai-breakdown {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .msg-snapshot-body {
   margin: 6px 0 0;
   max-height: 320px;
