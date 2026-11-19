@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { installManualClockTimers } from '../testing/manualClockTimers'
 import { act, click, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import { installManualTimers } from '../testing/manualTimers'
+import { shareFileStubs } from '../testing/shareFileStubs'
 import { ShareApp } from './ShareApp'
 import type { ShareClient, ShareEvents, ShareSendResult } from './shareApi'
 import type { ShareMessage, ShareStatus } from './shareModel'
@@ -33,14 +34,7 @@ function client(opts: {
     async send() {
       return opts.send()
     },
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe(ev: ShareEvents) {
       // 推播起不來：只能靠輪詢（`onDown`）；沒設就是連上了但什麼事件都不會來。

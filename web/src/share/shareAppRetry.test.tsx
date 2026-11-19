@@ -5,6 +5,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { shareFileStubs } from '../testing/shareFileStubs'
 import { ShareApp } from './ShareApp'
 import type { ShareClient, ShareSendResult } from './shareApi'
 import { ShareHttpError, type ShareMessage } from './shareModel'
@@ -37,14 +38,7 @@ function fakeClient(outcomes: Array<Error | ShareSendResult | void>): { client: 
       log.push({ id, role: 'user', text, created_at: at, attachments: [] }, { id: `${id}-a`, role: 'assistant', text: '好', created_at: at, attachments: [] })
       return out
     },
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }

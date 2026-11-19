@@ -5,6 +5,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { shareFileStubs } from '../testing/shareFileStubs'
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
@@ -110,14 +111,7 @@ test('超過一頁時可載入較早訊息，不重複、不把人捲回最底',
       return { bot_name: 'b', status: 'idle', messages: older, has_more: false }
     },
     async send() {},
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }
@@ -161,14 +155,7 @@ test('送出期間 SSE 先到齊，不能在 POST resolve 之後又卡回思考�
       status = 'idle'
       for (const s of subs) s.onStatus('idle')
     },
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe(ev) {
       subs.push(ev)
@@ -769,14 +756,7 @@ function clientWith(messages: () => Promise<ReturnType<typeof page>>, subscribe:
   return {
     messages,
     async send() {},
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe,
   }
@@ -1497,14 +1477,7 @@ test('載入較早訊息後留在原來那一則，不跳到最舊', { timeout: 
       return { bot_name: 'b', status: 'idle', messages: older, has_more: false }
     },
     async send() {},
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }

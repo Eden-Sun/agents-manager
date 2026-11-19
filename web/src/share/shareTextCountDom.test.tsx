@@ -5,6 +5,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { shareFileStubs } from '../testing/shareFileStubs'
 import { ShareApp } from './ShareApp'
 import type { ShareClient } from './shareApi'
 
@@ -21,14 +22,7 @@ test('字數照 Unicode 字元數：4001 個 emoji（UTF-16 長度 8002）daemon
     async send(text) {
       sent.push(text)
     },
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }

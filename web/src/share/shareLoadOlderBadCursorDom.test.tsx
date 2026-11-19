@@ -5,6 +5,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { shareFileStubs } from '../testing/shareFileStubs'
 import { ShareApp } from './ShareApp'
 import type { ShareClient } from './shareApi'
 import { ShareHttpError, type ShareMessage } from './shareModel'
@@ -32,14 +33,7 @@ test('載入較早訊息遇到 400 bad_cursor：重載第一頁，不顯示「�
       return { bot_name: 'b', status: 'idle', messages: recent, has_more: true }
     },
     async send() {},
-    async upload() {
-      return { id: 'a', name: 'a' }
-    },
-    async files() {
-      return []
-    },
-    fileUrl: () => '/s/t/api/files/a',
-    previewUrl: () => '/s/t/api/files/a?inline=1',
+    ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }
