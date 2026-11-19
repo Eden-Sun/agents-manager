@@ -18,7 +18,7 @@ mod tests {
     async fn native_api_start_send_refuses_before_write_and_preserves_waiting_debt() {
         let e = tt::env().await;
         let api = tt::claude_bot(&e.app, &e.project_id, "native-start-send").await;
-        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(am_config::CLAUDE_API_KIND).bind(&api.id).execute(&e.app.db).await.unwrap();
         let crid = db::ulid();
         let out = prompt_starting(&e.app, &api.id, TEXT, &crid, &[], RelaySrc::default()).await;
         assert!(matches!(out, Err(LcError::Bad(ref message)) if message == "api_native_prompt_unsupported"));

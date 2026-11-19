@@ -2653,7 +2653,7 @@ mod restamp_tests {
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
         let (turn, message) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "fixture").await;
         sqlx::query("UPDATE turns SET restamp_pending=1,delivered_at='2026-09-30T13:38:55.000Z' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
-        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(am_config::CLAUDE_API_KIND).bind(&bot.id).execute(&app.db).await.unwrap();
         restamp_queued_prompt(&app, &turn).await.unwrap();
         assert_eq!(created(&app, &message).await, "2026-09-30T13:28:31.333Z");
         let pending: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
@@ -2672,7 +2672,7 @@ mod restamp_tests {
         let api = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-api").await;
         let cli = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-cli").await;
         let missing = crate::testing::claude_bot(&app, &env.project_id, "d3b2-mix-missing").await;
-        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&api.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(am_config::CLAUDE_API_KIND).bind(&api.id).execute(&app.db).await.unwrap();
         let mut rows = Vec::new();
         for bot in [&api, &cli, &missing] {
             let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();

@@ -63,7 +63,7 @@ mod live_slash_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "api-compact-proof").await;
-        sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(am_config::CLAUDE_API_KIND).bind(&bot.id).execute(&app.db).await.unwrap();
         assert!(crate::lifecycle::slash::compact(&app, &bot.id, None).await.is_err());
         let run = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run).execute(&app.db).await.unwrap();
