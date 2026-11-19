@@ -408,7 +408,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   'openai-api · 直接打 OpenAI API 的 bot（daemon 內的 harness，沒有 CLI／pane）': 'openai-api · a bot that calls the OpenAI API directly (in-daemon harness; no CLI or pane)',
   'speed=fast（單價 2 倍）': 'speed=fast (2x price)',
   'Claude API 沒有開：config 要同時打開 [claude_api] enabled 與 [claude_api.api_bot] enabled，再重新載入設定。': 'Claude API is off: enable both [claude_api] enabled and [claude_api.api_bot] enabled in the config, then reload it.',
-  '沒有設定單回合成本上限：到 設定 → OpenAI API 填「單回合成本上限」（或 config 的 [openai_api.api_bot] max_turn_cost_microusd，必須大於 0）。': 'No per-turn cost cap: set \'單回合成本上限\' under Settings → OpenAI API (or max_turn_cost_microusd under [openai_api.api_bot] in config; must be > 0).',
+  '[openai_api.api_bot] 的單回合成本上限設定有誤：留空＝不設上限，或填大於 0 的數字（到 設定 → OpenAI API 修改）。': 'The per-turn cost cap in [openai_api.api_bot] is invalid: leave it empty for no cap, or enter a number greater than 0 (change it under Settings → OpenAI API).',
   '[openai_api.api_bot] 的設定值超出允許範圍，請檢查各項上限。': 'A [openai_api.api_bot] setting is out of range; check the limits.',
   '讀不到 OpenAI API key：請確認 [openai_api] key_file 指向存在、權限正確且非空的檔案。': 'Cannot read the OpenAI API key: make sure [openai_api] key_file points to an existing, correctly permissioned, non-empty file.',
   '沒有設定單次成本上限：在 [claude_api.api_bot] 填 max_turn_cost_microusd（必須大於 0）。': 'No per-turn cost cap: set max_turn_cost_microusd (> 0) under [claude_api.api_bot].',

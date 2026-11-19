@@ -6912,7 +6912,12 @@ async fn openai_api_native_start_reads_only_openai_settings_and_names_its_refusa
     crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
     let key = key.to_string_lossy().into_owned();
     env.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
-    assert_eq!(reason(go().await), "api_bot_turn_cost_cap_missing");
+    // 單回合上限留空＝不設上限：照常過啟動檢查（不再以 cap_missing 擋），也不是設定錯誤。
+    assert_ne!(reason(go().await), "api_bot_turn_cost_cap_missing", "openai 沒設上限也能啟動");
+    assert_ne!(reason(go().await), "api_bot_config_invalid");
+    env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(0); Ok(()) }).await.unwrap();
+    assert_eq!(reason(go().await), "api_bot_config_invalid", "0 是無效值，不是不限");
+    env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = None; Ok(()) }).await.unwrap();
     // 上限很低也不會被 Claude 的啟動預算常數擋（`api_bot_turn_cost_cap_too_low` 是 Claude 的價）。
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(1000); Ok(()) }).await.unwrap();
     assert_ne!(reason(go().await), "api_bot_turn_cost_cap_too_low");

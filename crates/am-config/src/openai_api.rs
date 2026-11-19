@@ -114,8 +114,14 @@ impl OpenAiApiBotCfg {
         }
     }
 
-    /// 同 `ApiBotCfg::validated`：`enabled == false` 回 `Ok(None)`；開了就檢查所有限制（含必填的 `max_turn_cost_microusd`）。
+    /// 同 `ApiBotCfg::validated`：`enabled == false` 回 `Ok(None)`；開了就檢查所有限制。
+    /// 單回合上限**可選**（使用者 2026-11-19：留空＝不設上限）：沒設就用 `i64::MAX` 當上限，預留與結算照常記帳，只是不會因上限擋下。
+    /// 設了的話仍必須是 1 以上的整數（0 是無效值，不是「不限」）。
     pub fn validated(&self, enabled: bool) -> Result<Option<ValidatedLimits>, String> {
-        self.as_shared().validated(enabled)
+        let mut shared = self.as_shared();
+        if shared.max_turn_cost_microusd.is_none() {
+            shared.max_turn_cost_microusd = Some(i64::MAX as u64);
+        }
+        shared.validated(enabled)
     }
 }

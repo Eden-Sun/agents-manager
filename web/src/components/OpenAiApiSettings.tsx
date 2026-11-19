@@ -115,11 +115,11 @@ export function OpenAiApiSettings() {
       </label>
       <label className="field">
         <span>{t('單回合成本上限（美元）')}</span>
-        <input type="number" min={0} step="0.01" data-testid="openai-api-turn-cap" value={turnCap} placeholder={t('未設定')} onChange={(e) => setTurnCap(e.target.value)} />
+        <input type="number" min={0} step="0.01" data-testid="openai-api-turn-cap" value={turnCap} placeholder={t('不設上限')} onChange={(e) => setTurnCap(e.target.value)} />
         <span className="hint" data-testid="openai-api-turn-cap-hint">
-          {t('單回合（一次回合）的花費上限，必須大於 0。留空＝未設定；未設定時 OpenAI bot 無法啟動。')}
+          {t('單回合（一次回合）的花費上限，必須大於 0。留空＝不設上限。')}
         </span>
-        {turnInvalid ? <span className="hint err" data-testid="openai-api-turn-cap-invalid">{t('單回合上限要大於 0；留空＝未設定。')}</span> : null}
+        {turnInvalid ? <span className="hint err" data-testid="openai-api-turn-cap-invalid">{t('單回合上限要大於 0；留空＝不設上限。')}</span> : null}
       </label>
       <p className="hint" data-testid="openai-api-spent">
         {t('OpenAI 累計花費 {spent}（bot {bots}、翻譯等一次性用途 {uses}）。', { spent: usd(settings.spent_usd), bots: usd(settings.spent_bots_usd), uses: usd(settings.spent_uses_usd) })}

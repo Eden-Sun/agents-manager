@@ -3435,8 +3435,11 @@ mod supervisor_cfg_tests {
         assert_eq!(on.openai_api.api_bot.total_cap_usd, Some(5.0));
         let v = on.openai_api.api_bot.validated(true).unwrap().expect("開了就有限制");
         assert_eq!(v.max_turn_cost_microusd, 250_000);
-        // 共用同一套邊界：沒有每回合成本上限、或超出範圍就拒絕。
-        assert!(openai_api::OpenAiApiBotCfg::default().validated(true).is_err(), "開了卻沒有每回合成本上限");
+        // 單回合上限可選：沒設＝不設上限（i64::MAX），照常啟動；設了 0 仍是無效值。
+        assert_eq!(openai_api::OpenAiApiBotCfg::default().validated(true).unwrap().expect("開了就有限制").max_turn_cost_microusd, i64::MAX);
+        let zero = openai_api::OpenAiApiBotCfg { max_turn_cost_microusd: Some(0), ..openai_api::OpenAiApiBotCfg::default() };
+        assert!(zero.validated(true).is_err(), "0 不是不限");
+        // 其他共用的邊界照舊。
         let mut bad = on.openai_api.api_bot.clone();
         bad.max_api_calls_per_turn = 999;
         assert!(bad.validated(true).is_err());

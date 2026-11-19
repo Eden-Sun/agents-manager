@@ -303,7 +303,6 @@ impl ApiBotRuntime {
         // 設定與金鑰跟著 kind 的供應商：openai-api 只看 `[openai_api]`，不讀 Claude 的設定。
         let limits = if openai {
             if super::openai::provider::configured(&cfg).is_err() { return Err(E::Refused("openai_not_configured")); }
-            if matches!(cfg.openai_api.api_bot.max_turn_cost_microusd, None | Some(0)) { return Err(E::Refused("api_bot_turn_cost_cap_missing")); }
             cfg.openai_api.api_bot.validated(cfg.openai_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("openai_not_configured"))?
         } else {
             if !cfg.claude_api.enabled || !cfg.claude_api.api_bot.enabled { return Err(E::Refused("api_bot_disabled")); }

@@ -29,9 +29,8 @@ test('每個已知原因都有中文說明，未知原因回 null', () => {
 
 test('openai-api bot 缺單回合上限：講 OpenAI 的設定位置；claude-api 與沒給 kind 維持原句', () => {
   const oa = apiBotStartReasonText('api_bot_turn_cost_cap_missing', 'openai-api') ?? ''
-  assert.match(oa, /OpenAI API/)
-  assert.doesNotMatch(oa, /claude_api/)
   assert.match(oa, /openai_api\.api_bot/)
+  assert.doesNotMatch(oa, /claude_api/, 'openai bot 不講 Claude 的設定位置')
   const cl = apiBotStartReasonText('api_bot_turn_cost_cap_missing', 'claude-api') ?? ''
   assert.match(cl, /\[claude_api\.api_bot\]/)
   assert.equal(apiBotStartReasonText('api_bot_turn_cost_cap_missing'), cl, '沒給 kind 也是 Claude 原句')
