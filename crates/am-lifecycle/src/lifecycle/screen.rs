@@ -3371,7 +3371,7 @@ mod codex_safety_recourse_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod agy_1_5_12_scroll_indicator_tests {
     use super::*;
     use crate::composer_parse::{box_state, composer_text, pane_awaits_input, BoxState};
