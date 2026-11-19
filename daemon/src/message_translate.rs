@@ -608,17 +608,9 @@ pub struct TranslateQuery {
     force: Option<bool>,
 }
 
-// ── 推播內文：一句短摘要（webpush.rs 用）──────────────────────────────────────────
+// ── 推播內文用的小工具 ──────────────────────────────────────────────────────────
 //
-// 與對話翻譯同一個用途（`message_translate`）與開關；譯文本身直接用 [`translate`]（快取跟網頁共用），
-// 摘要只給推播用，快取在 `message-translate/ps-<sha256>.json`。
-
-const SUMMARY_VERSION: &str = "1";
-const SUMMARY_SYSTEM: &str = "You write one-line push notification text. Summarize the user's message as ONE short sentence in Traditional Chinese \
-(zh-TW, Taiwan usage), at most 40 characters. 請寫成繁體中文（台灣用語，zh-TW）。不要用日文、簡體中文或英文。 \
-Say what happened or what is being asked. Do NOT include code, file paths, URLs, \
-commit hashes, keys or tokens. No quotes, no markdown, no preface. Reply with the sentence only.";
-pub(crate) const SUMMARY_MAX_CHARS: usize = 40;
+// 推播內文不再由模型摘要（使用者 2026-11-19：摘要模型會把自己的指示吐進推播內文），長訊息改用固定句（webpush.rs）。
 
 /// 判斷文字是否含有日文假名（平假名 U+3040–U+309F 或片假名 U+30A0–U+30FF）。
 pub(crate) fn has_japanese_kana(text: &str) -> bool {
@@ -738,34 +730,6 @@ pub(crate) fn is_mostly_english(text: &str) -> bool {
         else if matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}') { cjk += 1 }
     }
     latin >= 20 && cjk * 10 <= latin
-}
-
-/// 推播用的一句摘要（≤ 40 字）。查快取、沒有才打 API。
-pub(crate) async fn summarize(app: &App, content: &str) -> Result<String, LcError> {
-    let mut h = Sha256::new();
-    h.update(SUMMARY_VERSION.as_bytes());
-    h.update(b"\0");
-    h.update(content.as_bytes());
-    let key = format!("ps-{}", h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
-    let path = cache_path(&app.data_dir, &key);
-    if let Some(hit) = load(&path) {
-        return Ok(hit.translation);
-    }
-    let clipped: String = content.chars().take(MAX_CHARS).collect();
-    let req = ClaudeRequest { use_case: USE_CASE, system: Some(SUMMARY_SYSTEM.to_string()), prompt: clipped, max_tokens: 200, format: None };
-    let reply = claude_api::complete(app, req).await.map_err(error_of)?;
-    let line = reply.text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    if line.is_empty() {
-        return Err(LcError::Upstream("summary_empty".into()));
-    }
-    let mut out: String = line.chars().take(SUMMARY_MAX_CHARS).collect();
-    if line.chars().count() > SUMMARY_MAX_CHARS { out.push('…'); }
-    let cost = reply.usage.as_ref().and_then(|u| cost_usd(&reply.model, u));
-    let entry = CacheEntry { translation: out.clone(), model: reply.model, prompt_version: SUMMARY_VERSION.into(), cost_usd: cost, jev_prob: None, ..Default::default() };
-    if let Err(e) = save(&path, &entry) {
-        tracing::warn!("push summary cache write failed: {e}");
-    }
-    Ok(out)
 }
 
 // ── 待答問卷（codex／claude 的「需要回應」決策題）：一份問卷一次呼叫 ──────────────────────────

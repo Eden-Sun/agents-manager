@@ -371,6 +371,10 @@ const PRESENCE_STALE: Duration = Duration::from_secs(90);
 /// 「正在看」要求最近這麼久內有互動。
 const PRESENCE_ACTIVE_SECS: u64 = 60;
 const BODY_MAX: usize = 80;
+/// 推播內文的短句上限（字）：單行且不超過才直接用原文；長的或多行的一律用 `LONG_BODY`（不再呼叫模型摘要，2026-11-19）。
+const SHORT_MAX_CHARS: usize = 40;
+/// 長訊息的固定內文（使用者 2026-11-19：長訊息不要摘要，直接說明這是長訊息，點開看完整內容）。
+const LONG_BODY: &str = "長訊息，點開查看完整內容";
 /// 訊息類推播（回合完成／需要回應）送出前等這麼久再判斷一次「已讀」：期間在任一端讀了就不送（使用者 2026-11-11）。
 /// 可設常數；測試會設成 0（`READ_DELAY_MS`）。
 static READ_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(20_000);
@@ -676,15 +680,10 @@ async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
         }
     }
     let nonblank = work.lines().filter(|l| !l.trim().is_empty()).count();
-    if nonblank <= 1 && work.chars().count() <= mt::SUMMARY_MAX_CHARS {
+    if nonblank <= 1 && work.chars().count() <= SHORT_MAX_CHARS {
         return first_line(&work, BODY_MAX);
     }
-    if on {
-        if let Ok(Ok(s)) = tokio::time::timeout(line_wait(), mt::summarize(app, &work)).await {
-            return first_line(&s, BODY_MAX);
-        }
-    }
-    first_line(&work, BODY_MAX)
+    LONG_BODY.to_string()
 }
 
 async fn primary_bot(app: &Arc<App>, bot_id: &str) -> Option<crate::db::Bot> {
@@ -2287,6 +2286,7 @@ pub(crate) mod tests {
         sum_calls: AtomicUsize,
         tr_delay_ms: u64,
         sum_prompts: std::sync::Mutex<Vec<String>>,
+        tr_text: std::sync::Mutex<String>,
     }
 
     impl crate::claude_api::MessagesClient for PFake {
@@ -2297,7 +2297,7 @@ pub(crate) mod tests {
                 let text = if is_tr {
                     self.tr_calls.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(self.tr_delay_ms)).await;
-                    "已部署完成，測試全數通過".to_string()
+                    self.tr_text.lock().unwrap().clone()
                 } else {
                     self.sum_calls.fetch_add(1, Ordering::SeqCst);
                     self.sum_prompts.lock().unwrap().push(prompt);
@@ -2323,7 +2323,7 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-        let f = Arc::new(PFake { tr_calls: AtomicUsize::new(0), sum_calls: AtomicUsize::new(0), tr_delay_ms, sum_prompts: Default::default() });
+        let f = Arc::new(PFake { tr_calls: AtomicUsize::new(0), sum_calls: AtomicUsize::new(0), tr_delay_ms, sum_prompts: Default::default(), tr_text: std::sync::Mutex::new("已部署完成，測試全數通過".to_string()) });
         env.app.claude_api.set_client(f.clone());
         (env, bot_id, n, rx, f)
     }
@@ -2383,35 +2383,52 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn long_or_multiline_reply_is_summarized_to_one_sentence() {
+    async fn long_or_multiline_reply_gets_the_fixed_long_body_and_is_never_summarized() {
         let _g = SENDER_TESTS.lock().await;
         clear_presence();
         let (env, bot_id, n, mut rx, f) = push_env(true, false, 0).await;
+        // 多行。
         let long_zh = "第一行說明目前的進度，已經完成部署\n第二行是更多細節：測試全部通過\n第三行列出檔案路徑 /tmp/a/b/c";
         add_reply(&env, &bot_id, "t1", long_zh).await;
         handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
-        let got = rx.try_recv().expect("要推");
-        assert_eq!(got["body"], "摘要：部署完成並通過測試");
-        assert_eq!(f.sum_prompts.lock().unwrap().as_slice(), [long_zh.to_string()]);
-        // auto 關：英文長句不翻，直接摘要原文。
+        assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY);
+        // 單行但超過 40 字。
+        let single_long = "這是一句很長很長的中文訊息，超過四十個字的上限，所以不能直接當推播內文送出去，要改用固定的長訊息提示";
         let n2 = Arc::new(MainNotifier::default());
-        add_reply(&env, &bot_id, "t2", EN_LONG).await;
+        add_reply(&env, &bot_id, "t2", single_long).await;
         handle_event(&env.app, &n2, &turn_ev(&bot_id, "t2", "completed")).await;
-        assert_eq!(rx.try_recv().unwrap()["body"], "摘要：部署完成並通過測試");
-        assert_eq!(f.tr_calls.load(Ordering::SeqCst), 0, "auto 關著不自動翻譯");
-        assert_eq!(f.sum_prompts.lock().unwrap()[1], EN_LONG);
+        assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY);
+        // auto 關：英文長句不翻，也不摘要。
+        let n3 = Arc::new(MainNotifier::default());
+        add_reply(&env, &bot_id, "t3", EN_LONG).await;
+        handle_event(&env.app, &n3, &turn_ev(&bot_id, "t3", "completed")).await;
+        assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY);
+        assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (0, 0), "auto 關著不翻，且長訊息從不呼叫模型摘要");
         set_test_sender(None);
     }
 
     #[tokio::test]
-    async fn disabled_feature_falls_back_to_first_line_without_any_call() {
+    async fn english_long_reply_translated_to_multiple_lines_gets_the_fixed_long_body() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_presence();
+        let (env, bot_id, n, mut rx, f) = push_env(true, true, 0).await;
+        *f.tr_text.lock().unwrap() = "第一行：部署完成\n第二行：測試通過".to_string();
+        add_reply(&env, &bot_id, "t1", EN_LONG).await;
+        handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
+        assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY, "譯文多行也是固定句");
+        assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (1, 0));
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn disabled_feature_sends_the_long_body_without_any_call() {
         let _g = SENDER_TESTS.lock().await;
         clear_presence();
         let (env, bot_id, n, mut rx, f) = push_env(false, true, 0).await;
         add_reply(&env, &bot_id, "t1", &format!("{EN_LONG}\nsecond line")).await;
         handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
         let got = rx.try_recv().expect("功能關閉也要推");
-        assert_eq!(got["body"], first_line(EN_LONG, BODY_MAX));
+        assert_eq!(got["body"], LONG_BODY, "多行一律固定句，不論翻譯或摘要開關");
         assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (0, 0));
         set_test_sender(None);
     }
