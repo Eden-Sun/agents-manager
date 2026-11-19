@@ -21,6 +21,29 @@ async fn a_bot(env: &tt::Env, name: &str) -> String {
     id
 }
 
+async fn insert_idle_parent_run(
+    app: &App,
+    parent: &str,
+    workspace_id: &str,
+    root: &crate::herdr::PaneInfo,
+    parent_agent: &str,
+) {
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+    )
+    .bind(db::ulid())
+    .bind(parent)
+    .bind(workspace_id)
+    .bind(&root.pane_id)
+    .bind(&root.tab_id)
+    .bind(parent_agent)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+}
+
 async fn run_of(app: &Arc<App>, bot_id: &str) -> Option<db::Run> {
     sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE bot_id = ? ORDER BY started_at DESC LIMIT 1")
         .bind(bot_id)
@@ -2339,20 +2362,7 @@ async fn an_explicitly_claimed_stranger_is_adopted_as_its_child() {
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     *env.herdr.agents.lock().unwrap() = vec![
         json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
@@ -2397,20 +2407,7 @@ async fn a_grandchild_in_the_same_tab_lands_under_the_child() {
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
     let kid_agent = format!("{parent_agent}-lastq");
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     let agent_json = |name: &str, pane: &str, tab: &str| {
         json!({"name": name, "agent": "claude", "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": tab, "pane_id": pane, "cwd": "/tmp/p"})
@@ -2457,20 +2454,7 @@ async fn a_sibling_opened_in_a_childs_tab_follows_its_claim() {
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     let agent_json = |name: &str, ws: &str, pane: &str, tab: &str| {
         json!({"name": name, "agent": "claude", "agent_status": "idle",
                "workspace_id": ws, "tab_id": tab, "pane_id": pane, "cwd": "/tmp/p"})
@@ -2510,20 +2494,7 @@ async fn a_child_name_with_a_redundant_project_agent_prefix_is_stored_short() {
     let parent_agent = crate::config::agent_name(&project_label, &parent);
     let redundant_prefix = crate::config::agent_name(&project_label, &redundant_prefix_bot);
     let herdr_child_name = format!("{parent_agent}-{redundant_prefix}-sheet");
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     *env.herdr.agents.lock().unwrap() = vec![
         json!({"name": parent_agent.clone(), "agent": "claude", "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
@@ -2646,20 +2617,7 @@ async fn spawn_hints_keep_a_new_tab_full_of_children_from_chaining_or_duplicatin
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
 
     // 一個全新的 tab（不是父自己的），裡面連續開三顆——今晚實戰的形狀。
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
@@ -2713,20 +2671,7 @@ async fn a_spawn_hint_that_arrives_after_the_pass_still_gets_the_child_adopted()
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
         json!({"name": name, "agent": "grok", "agent_status": "working",
                "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
@@ -3015,20 +2960,7 @@ async fn a_shim_spawn_claim_that_arrives_after_the_pass_still_gets_the_child_ado
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     let agent_json = |name: &str, pane: &crate::herdr::PaneInfo| {
         json!({"name": name, "agent": "grok", "agent_status": "working",
                "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
@@ -3074,20 +3006,7 @@ async fn an_unreadable_spawn_hint_defers_adoption_instead_of_guessing_by_tab() {
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
     let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
     let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
@@ -3143,20 +3062,7 @@ async fn overlapping_reconcile_passes_never_adopt_the_same_child_twice() {
         let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
         let parent = a_bot(&env, "alfa").await;
         let parent_agent = crate::config::agent_name("proj", &parent);
-        sqlx::query(
-            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-                 VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-        )
-        .bind(db::ulid())
-        .bind(&parent)
-        .bind(&ws.workspace_id)
-        .bind(&root.pane_id)
-        .bind(&root.tab_id)
-        .bind(&parent_agent)
-        .bind(db::now())
-        .execute(&app.db)
-        .await
-        .unwrap();
+        insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
         let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
         let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
         let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
@@ -3198,20 +3104,7 @@ async fn without_spawn_hints_a_new_tab_full_of_children_stays_unknown() {
 
     let parent = a_bot(&env, "alfa").await;
     let parent_agent = crate::config::agent_name("proj", &parent);
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
 
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
     let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
@@ -3566,20 +3459,7 @@ async fn an_unclaimed_rename_keeps_the_child_instance_unknown() {
         json!({"name": name, "agent": "claude", "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
     };
-    sqlx::query(
-        "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
-             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
-    )
-    .bind(db::ulid())
-    .bind(&parent)
-    .bind(&ws.workspace_id)
-    .bind(&root.pane_id)
-    .bind(&root.tab_id)
-    .bind(&parent_agent)
-    .bind(db::now())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
     *env.herdr.agents.lock().unwrap() =
         vec![agent_json(&parent_agent, &root), agent_json(&format!("{parent_agent}-other"), &kid_pane)];
 
