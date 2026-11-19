@@ -47,6 +47,26 @@ button.quota-balance {
   }
 }
 
+/* 餘額列的小圖示標（KindGlyph）：claude 星芒、OpenAI 商標，顏色跟 kind 色；不用文字標籤。 */
+.kind-glyph {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  font-size: 12px;
+  line-height: 1;
+}
+.kind-glyph svg {
+  display: block;
+  width: 1em;
+  height: 1em;
+}
+.kind-glyph.claude {
+  color: var(--kind-claude);
+}
+.kind-glyph.codex {
+  color: var(--kind-codex);
+}
+
 /* 全域 API 餘額群組（使用者 2026-11-19）：放在 `.quota-open` 外、跟量表同排，不收合、不被裁；Claude 與 OpenAI 上下兩行，只有一家有值就一行。 */
 .quota-api-group {
   flex: none;

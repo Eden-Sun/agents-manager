@@ -4,6 +4,7 @@ import { reloadOpenAiApiBalance, useOpenAiApiBalance } from '../hooks/useOpenAiA
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { Modal } from './Modal'
+import { KindGlyph } from './KindTag'
 import './balanceQuotaChip.css'
 
 /**
@@ -59,19 +60,10 @@ export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'ro
   return (
     <>
       <button type="button" className={cls} data-k={variant === 'row' ? 'openai-balance-row' : 'openai-balance'} title={title} onClick={() => setOpen(true)}>
-        {variant === 'row' ? (
-          <>
-            <span className="quota-pop-balance-k">{t('OpenAI API 餘額')}</span>
-            <span className="quota-pop-balance-v">{configured ? `$${usd.toFixed(2)}` : t('設定 OpenAI 餘額')}</span>
-          </>
-        ) : configured ? (
-          <>
-            <span className="quota-balance-k">OpenAI</span>
-            <span className="quota-balance-v">{`$${usd.toFixed(2)}`}</span>
-          </>
-        ) : (
-          <span className="quota-balance-v">{t('設定 OpenAI 餘額')}</span>
-        )}
+        <KindGlyph kind="codex" label={t('OpenAI API 餘額')} />
+        <span className={variant === 'row' ? 'quota-pop-balance-v' : 'quota-balance-v'}>
+          {configured ? `$${usd.toFixed(2)}` : t('設定 OpenAI 餘額')}
+        </span>
       </button>
       <Modal open={open} title={t('OpenAI API 餘額')} width={420} onClose={() => setOpen(false)}>
         <div className="quota-balance-dialog" data-k="openai-balance-dialog">

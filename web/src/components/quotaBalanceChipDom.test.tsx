@@ -58,8 +58,9 @@ test('估算：顯示 Claude $23.29（不加 ≈，估算只在 tooltip 與 clas
     await mount(<BalanceQuotaChip />)
     await settle()
     assert.ok(chip(), '有設定錨點就畫')
-    assert.equal(chip()!.textContent, 'Claude$23.29')
-    assert.deepEqual([...chip()!.children].map((c) => [c.className, c.textContent]), [['quota-balance-k', 'Claude'], ['quota-balance-v', '$23.29']], '桌機兩行：上行小字 API、下行數字')
+    assert.equal(chip()!.textContent, '$23.29')
+    assert.deepEqual([...chip()!.children].map((c) => [c.className, c.textContent]), [['kind-glyph claude', ''], ['quota-balance-v', '$23.29']], '桌機：Claude 星芒圖示（無文字標籤）＋數字')
+    assert.equal(chip()!.querySelector('.kind-glyph.claude')?.getAttribute('aria-label'), 'Claude 餘額', '圖示的 aria-label 仍是文字')
     const tip = chip()!.getAttribute('title') ?? ''
     assert.match(tip, /估算/)
     assert.match(tip, /已確定花費/)
@@ -73,7 +74,7 @@ test('Console 讀得到：顯示實際值（Claude 標籤＋金額）', async ()
   await withBalance({ ...estimate, console: { status: 'ok', purchased_usd: 20, promotional_usd: 1.5, total_usd: 21.5, promotions: [], fetched_at: '2026-11-15T09:00:00.000Z' } }, async () => {
     await mount(<BalanceQuotaChip />)
     await settle()
-    assert.equal(chip()!.textContent, 'Claude$21.50')
+    assert.equal(chip()!.textContent, '$21.50')
     assert.match(chip()!.getAttribute('title') ?? '', /Console 實際值/)
   })
 })
@@ -121,7 +122,7 @@ test('點一下開校正視窗：顯示距上次校正多久；輸入 Console �
     await settle()
     assert.deepEqual(puts, [{ usd: 65.67 }], '送出 Console 目前餘額當新錨點')
     assert.equal(document.querySelector('[data-k="quota-balance-dialog"]'), null, '校正完關視窗')
-    assert.equal(chip()!.textContent, 'Claude$65.67', '重讀後顯示新數字')
+    assert.equal(chip()!.textContent, '$65.67', '重讀後顯示新數字')
     await click(chip()!)
     await click(document.querySelector<HTMLButtonElement>('[data-k="goto-api-bot"]')!)
     assert.equal(useStore.getState().selectedBotId, 'api-1')
@@ -139,7 +140,8 @@ test('手機：縮成短格式 $23.3', async () => {
       await mount(<BalanceQuotaChip />)
       await settle()
       assert.equal(chip()!.textContent, '$23.3')
-      assert.equal(chip()!.querySelector('.quota-balance-k'), null, '手機只有數字一行')
+      assert.ok(chip()!.querySelector('.kind-glyph.claude svg'), '手機寬也有圖示')
+      assert.equal(chip()!.querySelector('.quota-balance-k'), null, '手機沒有文字標籤')
     })
   } finally {
     window.matchMedia = origMatch
@@ -182,7 +184,7 @@ test('估算成負數：膠囊顯示「需校正」而不是負的金額，視�
   await withBalance({ ...estimate, remaining_usd: -2.12, remaining_floor_usd: -2.77, spent_usd: 100.2575 }, async () => {
     await mount(<BalanceQuotaChip />)
     await settle()
-    assert.equal(chip()!.textContent, 'Claude需校正')
+    assert.equal(chip()!.textContent, '需校正')
     assert.ok(chip()!.classList.contains('warn'))
     const tip = chip()!.getAttribute('title') ?? ''
     assert.match(tip, /錨點已過舊/)

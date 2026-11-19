@@ -94,3 +94,15 @@ test('KindTag：openai-api 顯示 OpenAI 標籤並帶 .kind-tag.openai-api', asy
   assert.ok(tag, '應有 .kind-tag.openai-api')
   assert.equal(tag?.getAttribute('aria-label'), 'OpenAI')
 })
+
+test('KindTag（圖示模式）：openai-api 是 GPT 商標＋右下角小「API」字，不分顏色的 codex 同色', async () => {
+  useStore.setState({ kindDisplay: 'icon' } as never)
+  await mount(<KindTag kind="openai-api" />)
+  await settle()
+  const tag = document.querySelector('.kind-tag.openai-api')
+  assert.ok(tag, '應有 .kind-tag.openai-api')
+  const text = tag!.querySelector('svg text')
+  assert.equal(text?.textContent, 'API', '右下角有 API 字樣')
+  assert.ok(tag!.querySelector('svg path'), '仍是 GPT 商標路徑')
+  useStore.setState({ kindDisplay: 'text' } as never)
+})

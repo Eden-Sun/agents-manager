@@ -1695,3 +1695,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **修法**：有拆解時 meta 列改可換行、高度跟內容走；拆解本身 `min-width:0`、`overflow-wrap:anywhere`。另外 `.bubble.md` 加 `min-width:0`／`max-width:100%`，行內 `code` 加 `overflow-wrap:anywhere`（長路徑可斷）；fenced pre、table 仍在自己內部橫向捲動。`.msg-list` 加 `overflow-x:hidden` 只當保險，不取代根因修正。
 - **驗證**：390px 修前 `.msg-list` scrollWidth 685、修後 390 = clientWidth；`document.scrollingElement` 390 = 390；320px 也無溢出，用量列在 10–310px 內。截圖前後對照見執行紀錄。
 - **測試**：`components/chatMobileOverflow.test.ts` 補四則 CSS 規則斷言。
+
+## 餘額列與 bot 圖示：符號取代文字標籤、GPT 同色（2026-11-19，使用者截圖）
+
+- **餘額列用圖示**：額度列與選單「API 餘額」區的 Claude／OpenAI 一律用 kind 圖示（`KindGlyph`，claude 星芒、GPT 商標，顏色用 `--kind-claude`／`--kind-codex`），不再寫「Claude」「OpenAI」文字。手機寬也畫圖示；aria-label／title 仍是「Claude 餘額」「OpenAI 餘額」。
+- **openai-api 側欄圖示**：跟 codex 同一組綠色（淺色、系統深色、`data-theme="dark"` 三組），加虛線框區分；GPT 商標右下角小「API」字（同 claude-api 的做法）。不再落到預設灰色。
+- 測試：`components/quotaBalanceChipDom.test.tsx`、`openAiBalanceChipDom.test.tsx` 斷言圖示與無文字標籤；`openaiApiBotKindDom.test.tsx` 斷言 openai-api 圖示模式有「API」字樣。

@@ -7,6 +7,36 @@ import { KIND_LABEL, KIND_DESC } from './kindMeta'
 import { t, useT } from '../lib/i18n'
 /** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 
+/** OpenAI（GPT）商標的路徑，codex 與 openai-api 共用；不要複製 path。 */
+function OpenAiPath() {
+  return (
+    <path
+      fill="currentColor"
+      d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.911 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.182a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .511 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.998-2.9 6.056 6.056 0 0 0-.748-7.073Zm-9.022 12.608a4.476 4.476 0 0 1-2.877-1.04l.142-.081 4.778-2.758a.795.795 0 0 0 .393-.681v-6.737l2.02 1.169a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.493ZM3.6 18.304a4.471 4.471 0 0 1-.535-3.014l.142.085 4.783 2.758a.771.771 0 0 0 .781 0l5.843-3.368v2.332a.08.08 0 0 1-.034.062L9.74 19.95a4.499 4.499 0 0 1-6.14-1.646ZM2.341 7.896a4.485 4.485 0 0 1 2.366-1.973v5.677a.766.766 0 0 0 .388.677l5.815 3.354-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786a4.504 4.504 0 0 1-1.648-6.117Zm16.597 3.855-5.833-3.387 2.015-1.164a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667Zm2.01-3.023-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.499 4.499 0 0 1 6.681 4.66ZM8.307 12.863l-2.02-1.164a.08.08 0 0 1-.038-.057V6.074a4.499 4.499 0 0 1 7.376-3.454l-.142.081-4.778 2.758a.795.795 0 0 0-.393.681Zm1.098-2.365 2.602-1.5 2.607 1.5v2.999l-2.598 1.5-2.607-1.5Z"
+    />
+  )
+}
+
+/**
+ * 額度列／餘額列用的小圖示標（符號取代文字標籤）：顏色跟 kind 色（--kind-claude／--kind-codex），aria-label 與 title 仍是文字。
+ */
+export function KindGlyph({ kind, label }: { kind: BotKind; label: string }) {
+  return (
+    <span className={`kind-glyph ${kind}`} role="img" aria-label={label} title={label}>
+      <KindIcon kind={kind} />
+    </span>
+  )
+}
+
+/** 單純的 GPT 商標圖示（codex）。 */
+function OpenAiMark() {
+  return (
+    <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
+      <OpenAiPath />
+    </svg>
+  )
+}
+
 /** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark, agy = the Antigravity arch. */
 export function KindIcon({ kind }: { kind: BotKind }) {
   switch (kind) {
@@ -25,14 +55,16 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'codex':
+      // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
+      return <OpenAiMark />
     case 'openai-api':
-      // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo; openai-api（直打 API）同一個商標，文字標籤區分。
+      // openai-api（直打 API）：同一個 GPT 商標，右下角小「API」標（同 claude-api 的做法）。
       return (
-        <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.911 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.182a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .511 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.998-2.9 6.056 6.056 0 0 0-.748-7.073Zm-9.022 12.608a4.476 4.476 0 0 1-2.877-1.04l.142-.081 4.778-2.758a.795.795 0 0 0 .393-.681v-6.737l2.02 1.169a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.493ZM3.6 18.304a4.471 4.471 0 0 1-.535-3.014l.142.085 4.783 2.758a.771.771 0 0 0 .781 0l5.843-3.368v2.332a.08.08 0 0 1-.034.062L9.74 19.95a4.499 4.499 0 0 1-6.14-1.646ZM2.341 7.896a4.485 4.485 0 0 1 2.366-1.973v5.677a.766.766 0 0 0 .388.677l5.815 3.354-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786a4.504 4.504 0 0 1-1.648-6.117Zm16.597 3.855-5.833-3.387 2.015-1.164a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667Zm2.01-3.023-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.499 4.499 0 0 1 6.681 4.66ZM8.307 12.863l-2.02-1.164a.08.08 0 0 1-.038-.057V6.074a4.499 4.499 0 0 1 7.376-3.454l-.142.081-4.778 2.758a.795.795 0 0 0-.393.681Zm1.098-2.365 2.602-1.5 2.607 1.5v2.999l-2.598 1.5-2.607-1.5Z"
-          />
+        <svg viewBox="0 0 34 24" width="1.4em" height="1em" aria-hidden="true">
+          <g transform="scale(0.75)">
+            <OpenAiPath />
+          </g>
+          <text x="33.5" y="23.5" textAnchor="end" fontSize="9" fontWeight="800" fill="currentColor" fontFamily="system-ui, sans-serif">API</text>
         </svg>
       )
     case 'grok':

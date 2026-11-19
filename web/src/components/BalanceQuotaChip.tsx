@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import { anchorAge, balanceTooltipLines } from './balanceTooltip'
 import { useClaudeBalanceView } from './balanceHooks'
 import { Modal } from './Modal'
+import { KindGlyph } from './KindTag'
 import './balanceQuotaChip.css'
 import { userTimeZone, zonedParts } from '../lib/userTime'
 
@@ -61,12 +62,12 @@ export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row
   const body =
     variant === 'row' ? (
       <>
-        <span className="quota-pop-balance-k">{t('Claude 餘額')}</span>
+        <KindGlyph kind="claude" label={t('Claude 餘額')} />
         <span className="quota-pop-balance-v">{text}</span>
       </>
     ) : (
       <>
-        {phone ? null : <span className="quota-balance-k">Claude</span>}
+        <KindGlyph kind="claude" label={t('Claude 餘額')} />
         <span className="quota-balance-v">{text}</span>
       </>
     )

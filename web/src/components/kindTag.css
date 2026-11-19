@@ -39,10 +39,16 @@
   color: var(--kind-claude);
 }
 
-.kind-tag.codex {
+.kind-tag.codex,
+.kind-tag.openai-api {
   background: #e7f6f1;
   border-color: #b3e0d3;
   color: var(--kind-codex);
+}
+
+/* openai-api（直打 API）：GPT 同色，虛線框區分（同 claude-api 的做法）。 */
+.kind-tag.openai-api {
+  border-style: dashed;
 }
 
 .kind-tag.grok {
@@ -66,7 +72,8 @@
     color: var(--kind-claude);
   }
 
-  :root:not([data-theme="light"]) .kind-tag.codex {
+  :root:not([data-theme="light"]) .kind-tag.codex,
+  :root:not([data-theme="light"]) .kind-tag.openai-api {
     background: #12261f;
     border-color: #1f5546;
     color: var(--kind-codex);
@@ -92,7 +99,8 @@
   color: var(--kind-claude);
 }
 
-:root[data-theme="dark"] .kind-tag.codex {
+:root[data-theme="dark"] .kind-tag.codex,
+:root[data-theme="dark"] .kind-tag.openai-api {
   background: #12261f;
   border-color: #1f5546;
   color: var(--kind-codex);

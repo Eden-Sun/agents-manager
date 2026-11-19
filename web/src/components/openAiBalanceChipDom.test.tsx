@@ -83,7 +83,9 @@ test('有錨點：畫 OpenAI 字樣與金額；tooltip 標示估算與錨點', a
   await withBalances(anchored, async () => {
     await mount(<OpenAiBalanceChip />)
     await settle()
-    assert.deepEqual([...chip()!.children].map((c) => [c.className, c.textContent]), [['quota-balance-k', 'OpenAI'], ['quota-balance-v', '$18.00']])
+    assert.deepEqual([...chip()!.children].map((c) => [c.className, c.textContent]), [['kind-glyph codex', ''], ['quota-balance-v', '$18.00']], 'GPT 圖示（無文字標籤）＋數字')
+    assert.equal(chip()!.querySelector('.kind-glyph.codex')?.getAttribute('aria-label'), 'OpenAI API 餘額')
+    assert.ok(chip()!.querySelector('.kind-glyph.codex svg'), '有 svg 圖示')
     const tip = chip()!.getAttribute('title') ?? ''
     assert.match(tip, /估算/)
     assert.match(tip, /錨點：\$20\.00/)
