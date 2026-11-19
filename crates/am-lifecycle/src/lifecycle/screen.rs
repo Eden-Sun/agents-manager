@@ -290,17 +290,53 @@ pub fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
+/// agy 1.5.12 altscreen 捲動指示列：`↓ 25 lines · 2 turns`、`↓ 1 line · 1 turn`、`↓ 10 lines` 等（issue #2157）。
+pub fn is_agy_scroll_indicator(s: &str) -> bool {
+    let cleaned = crate::composer_parse::strip_ansi(s);
+    let t = cleaned.trim();
+    let Some(rest) = t.strip_prefix('↓') else { return false };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = rest.split(|c| c == '·' || c == '•').collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        let words: Vec<&str> = part.split_whitespace().collect();
+        words.len() == 2
+            && words[0].chars().all(|c| c.is_ascii_digit())
+            && matches!(words[1], "line" | "lines" | "turn" | "turns")
+    })
+}
+
 /// agy 的輸入區是「分隔線、`>` 輸入列、分隔線」：回音只在**輸入區上面**找（輸入列裡打到一半的字不是回音）。
 /// 最後一個回音之後才是這一回合的輸出；回音捲出畫面（長回答）就從啟動 banner 之後算（banner 帶帳號 email 與方案，絕不能進聊天紀錄）。
+/// 捲動指示列（`↓ 25 lines · 2 turns`，issue #2157）可能出現在頂部分隔線與輸入列之間或分隔線上方，跳過它以正確認得輸入框頂部。
 fn agy_composer_top(lines: &[&str]) -> usize {
     let is_rule = |l: &str| {
         let t = l.trim();
         !t.is_empty() && t.chars().all(|c| "─━".contains(c))
     };
-    (0..lines.len().saturating_sub(1))
+    let top = (0..lines.len().saturating_sub(1))
         .rev()
-        .find(|&i| is_rule(lines[i]) && lines.get(i + 1).is_some_and(|n| n.trim_start().starts_with('>')))
-        .unwrap_or(lines.len())
+        .find(|&i| {
+            if !is_rule(lines[i]) {
+                return false;
+            }
+            let next = lines[i + 1..].iter().find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !is_agy_scroll_indicator(t)
+            });
+            next.is_some_and(|n| n.trim_start().starts_with('>'))
+        })
+        .unwrap_or(lines.len());
+    if let Some(p) = lines[..top].iter().rposition(|l| !l.trim().is_empty()).filter(|&p| is_agy_scroll_indicator(lines[p])) {
+        p
+    } else {
+        top
+    }
 }
 
 fn agy_after_echo(lines: &[&str]) -> usize {
@@ -324,7 +360,7 @@ fn is_agy_tool_row(t: &str) -> bool {
     rest.contains("(ctrl+o") || rest.split_once('(').is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ':')))
 }
 
-/// agy 畫面上不是回答的東西：shell 提示與我們打進去的環境載入／啟動指令、banner（logo、版本、**帳號與方案**、模型、cwd）、輸入區底下的提示列。
+/// agy 畫面上不是回答的東西：shell 提示與我們打進去的環境載入／啟動指令、banner（logo、版本、**帳號與方案**、模型、cwd）、輸入區底下的提示列、捲動指示列（#2157）。
 fn is_agy_chrome(s: &str) -> bool {
     let s = s.trim();
     s.starts_with('▄')
@@ -334,6 +370,7 @@ fn is_agy_chrome(s: &str) -> bool {
         || s.starts_with("agy ")
         || s == "agy"
         || s.starts_with("? for shortcuts")
+        || is_agy_scroll_indicator(s)
         || (s.contains('@') && s.split_whitespace().next().is_some_and(|w| w.contains(':') && (w.contains("$") || w.ends_with('$') || w.ends_with('#'))))
 }
 
@@ -3331,5 +3368,121 @@ mod codex_safety_recourse_tests {
         let lines: Vec<&str> = picker.lines().collect();
         assert_eq!(codex_inline_banner(&lines), None);
         assert!(!lines.iter().any(|l| is_codex_idle_prompt(l)));
+    }
+}
+
+#[cfg(test)]
+mod agy_1_5_12_scroll_indicator_tests {
+    use super::*;
+    use crate::composer_parse::{box_state, composer_text, pane_awaits_input, BoxState};
+
+    const RULE: &str = "───────────────────────────────────────────────────────────────────────────────────────────────────────";
+
+    #[test]
+    fn scroll_indicator_pattern_recognition() {
+        assert!(is_agy_scroll_indicator("↓ 25 lines · 2 turns"));
+        assert!(is_agy_scroll_indicator("↓ 1 line · 1 turn"));
+        assert!(is_agy_scroll_indicator("↓ 10 lines"));
+        assert!(is_agy_scroll_indicator("↓ 1 turn"));
+        assert!(is_agy_scroll_indicator("↓ 25 lines • 2 turns"));
+        assert!(is_agy_scroll_indicator("  ↓ 25 lines · 2 turns  "));
+        assert!(is_agy_scroll_indicator("\u{1b}[38;5;8m↓ 25 lines · 2 turns\u{1b}[0m"));
+        assert!(is_agy_scroll_indicator("\u{1b}[2m↓ 1 line · 1 turn\u{1b}[22m"));
+
+        // Negative cases
+        assert!(!is_agy_scroll_indicator(""));
+        assert!(!is_agy_scroll_indicator("↓"));
+        assert!(!is_agy_scroll_indicator("25 lines · 2 turns"));
+        assert!(!is_agy_scroll_indicator("↓ not a scroll indicator"));
+        assert!(!is_agy_scroll_indicator("↓ 25"));
+        assert!(!is_agy_scroll_indicator("↓ 25 files"));
+        assert!(!is_agy_scroll_indicator("> prompt"));
+        assert!(!is_agy_scroll_indicator(RULE));
+    }
+
+    #[test]
+    fn scroll_indicator_between_rule_and_prompt_does_not_break_prompt_or_reply_detection() {
+        let screen = format!(
+            "      ▄▀▀▄        Antigravity CLI 1.5.12\n\
+                  ▀▀▀▀▀▀       me@example.com (Google AI Pro)\n\
+                 ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)\n\
+                ▄▀▀    ▀▀▄     ~/project/agents-manager\n\
+               ▄▀▀      ▀▀▄\n\n\
+             {RULE}\n\
+             > 請幫我重構資料庫模組\n\
+             \n\
+             ● Read(db.rs) (ctrl+o to expand)\n\
+             ▸ Thought for 4s, 310 tokens\n\
+               Checking existing query signatures.\n\
+             \n\
+               已成功重構 db.rs 模組，所有測試皆已通過。\n\
+             \n\
+             {RULE}\n\
+             ↓ 25 lines · 2 turns\n\
+             >\n\
+             {RULE}\n\
+             ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
+        );
+
+        // 1. Prompt echo text is cleanly extracted
+        assert_eq!(
+            last_prompt_echo_text("agy", &screen).as_deref(),
+            Some("請幫我重構資料庫模組")
+        );
+
+        // 2. Reply is cleanly extracted without leaking rules, scroll indicator, or prompt
+        let reply = clean_screen("agy", &screen).expect("clean reply");
+        assert!(reply.contains("已成功重構 db.rs 模組，所有測試皆已通過。"), "{reply}");
+        assert!(!reply.contains("↓ 25 lines"), "{reply}");
+        assert!(!reply.contains(RULE), "{reply}");
+        assert!(!reply.contains("Antigravity CLI"), "{reply}");
+        assert!(!reply.contains("? for shortcuts"), "{reply}");
+
+        // 3. Waiting state and empty prompt box are detected
+        assert_eq!(box_state("agy", &screen), BoxState::Empty);
+        assert!(pane_awaits_input("agy", &screen));
+
+        // 4. When user has typed into the prompt box, BoxState is NonEmpty and draft text is extracted
+        let typed_screen = screen.replace("\n>\n", "\n> 新的問題\n");
+        assert_eq!(box_state("agy", &typed_screen), BoxState::NonEmpty);
+        assert_eq!(composer_text("agy", &typed_screen).as_deref(), Some("新的問題"));
+    }
+
+    #[test]
+    fn scroll_indicator_above_rule_does_not_break_prompt_or_reply_detection() {
+        let screen = format!(
+            "      ▄▀▀▄        Antigravity CLI 1.5.12\n\
+                  ▀▀▀▀▀▀       me@example.com (Google AI Pro)\n\
+                 ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)\n\
+                ▄▀▀    ▀▀▄     ~/project/agents-manager\n\
+               ▄▀▀      ▀▀▄\n\n\
+             {RULE}\n\
+             > 檢查修復\n\
+             \n\
+               所有測試已全數通過，無任何報錯。\n\
+             \n\
+             ↓ 12 lines · 1 turn\n\
+             {RULE}\n\
+             > \u{1b}[38;5;8mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[0m\n\
+             {RULE}\n\
+             ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
+        );
+
+        // 1. Prompt echo text is cleanly extracted
+        assert_eq!(
+            last_prompt_echo_text("agy", &screen).as_deref(),
+            Some("檢查修復")
+        );
+
+        // 2. Reply is cleanly extracted without leaking rules or scroll indicator
+        let reply = clean_screen("agy", &screen).expect("clean reply");
+        assert!(reply.contains("所有測試已全數通過，無任何報錯。"), "{reply}");
+        assert!(!reply.contains("↓ 12 lines"), "{reply}");
+        assert!(!reply.contains(RULE), "{reply}");
+
+        // 3. Waiting state and empty prompt box (with placeholder) are detected
+        assert_eq!(box_state("agy", &screen), BoxState::Empty);
+        assert_eq!(composer_text("agy", &screen), None);
+        assert!(pane_awaits_input("agy", &screen.replace("> \u{1b}[38;5;8mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[0m", ">")));
     }
 }
