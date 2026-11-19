@@ -85,6 +85,16 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
     Ok(None)
 }
 
+/// 純 API bot（claude-api／openai-api）沒有終端、不能當執行者派工，只能被「請教」（`expect_result`）。誰可以請教它：
+/// - 顧問（role=advisor）：任何通過 relay 政策的 bot（專家模式的原規則）。
+/// - 母子模式（parent_child）專案裡沒有角色的頂層 API bot：同專案、沒被刪的頂層 bot（parent 對 parent，使用者 2026-11-19）。
+///   child 仍不能直接請教它，要經自己的 parent。
+pub(crate) fn api_bot_consultable(project: &crate::db::Project, to: &crate::db::Bot, from: Option<&crate::db::Bot>) -> bool {
+    if to.role.as_deref() == Some("advisor") { return true; }
+    project.mode == "parent_child" && project.id == to.project_id && to.role.is_none() && to.parent_bot_id.is_none()
+        && from.is_some_and(|f| f.project_id == to.project_id && f.parent_bot_id.is_none() && f.deleted_at.is_none())
+}
+
 /// 分享助理不能被當成派工對象的穩定原因碼（relay 403 的 `reason`，peers 的 `dispatch_reason`）。
 pub const SHARED_BOT_NOT_DISPATCHABLE: &str = "shared_bot_not_dispatchable";
 

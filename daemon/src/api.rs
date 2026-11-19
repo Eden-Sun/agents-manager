@@ -6718,13 +6718,23 @@ pub(crate) async fn prompt_bot(
         }
     }
     if kind.is_some_and(crate::config::is_api_kind) {
-        let is_advisor = bot_record.as_ref().and_then(|b| b.role.as_deref()) == Some("advisor");
         let is_bot_dispatch = matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. }) || b.relay_from.is_some();
+        // 可被請教（顧問，或母子模式 parent 對 parent）才收 bot 請求；判斷見 `relay_policy::api_bot_consultable`。
+        let is_advisor = match bot_record.as_ref() {
+            Some(to) if is_bot_dispatch => {
+                let sender = match &principal { RequestPrincipal::Bot(s) | RequestPrincipal::Child { child_id: s, .. } => Some(s.as_str()), _ => None };
+                let from = match sender { Some(s) => db::bot(&app.db, s).await.map_err(any_err)?, None => None };
+                let project = db::project(&app.db, &to.project_id).await.map_err(any_err)?;
+                project.is_some_and(|p| crate::relay_policy::api_bot_consultable(&p, to, from.as_ref()))
+            }
+            Some(to) => to.role.as_deref() == Some("advisor"),
+            None => false,
+        };
         if is_bot_dispatch && !is_advisor {
             let name = bot_record.as_ref().map(|b| b.name.as_str()).unwrap_or(&id);
             return Err(LcError::Forbidden(json!({
                 "error": "member_not_dispatchable",
-                "message": format!("{name} 是 {}（純 API 模型），不能接受 bot 派工", kind.unwrap_or(crate::config::CLAUDE_API_KIND)),
+                "message": format!("{name} 是 {}（純 API 模型），只接受顧問請教，或母子模式下同專案頂層 bot 的請教（--expect-result）", kind.unwrap_or(crate::config::CLAUDE_API_KIND)),
                 "sent": false
             })));
         }

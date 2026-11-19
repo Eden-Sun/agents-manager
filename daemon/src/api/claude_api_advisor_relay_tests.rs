@@ -128,3 +128,36 @@ async fn claude_api_advisor_stopped_auto_starts_or_fails_request_on_start_error(
     assert_eq!(state, "failed");
     assert_eq!(err_str.as_deref(), Some("start_failed:api_bot_disabled"));
 }
+
+/// 母子模式（parent_child）：parent 對 parent 要能溝通。同專案頂層 bot 請教沒有角色的頂層 API bot 會通過派工閘
+/// （之後照 API bot 規則要 `expect_result`）；child 不能直接請教，照舊 403。
+#[tokio::test]
+async fn parent_child_top_level_bots_can_consult_an_api_bot() {
+    let env = crate::testing::env().await;
+    sqlx::query("UPDATE projects SET mode='parent_child' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+    let parent = crate::testing::claude_bot(&env.app, &env.project_id, "pc-parent").await;
+    let api = crate::testing::claude_bot(&env.app, &env.project_id, "pc-api").await;
+    sqlx::query("UPDATE bots SET kind='openai-api', model='gpt-6-luna' WHERE id=?").bind(&api.id).execute(&env.app.db).await.unwrap();
+    let child = crate::testing::claude_bot(&env.app, &env.project_id, "pc-child").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&child.id).execute(&env.app.db).await.unwrap();
+    let send = |from: String, crid: &'static str| {
+        let app = env.app.clone();
+        let to = api.id.clone();
+        async move {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-AM-Bot-Id", from.parse().unwrap());
+            headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+            let body: PromptIn = serde_json::from_value(json!({"text":"consult","client_request_id":crid})).unwrap();
+            prompt_bot(State(app), Path(to), headers, Extension(RequestPrincipal::Bot(from)), Json(body)).await.unwrap_err()
+        }
+    };
+    let err = send(parent.id.clone(), "p1").await;
+    assert!(matches!(&err, LcError::Bad(s) if s.contains("requires expect_result")), "parent passes the dispatch gate: {err:?}");
+    let err = send(child.id.clone(), "c1").await;
+    assert!(matches!(&err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable"), "child still refused: {err:?}");
+
+    // expert 專案沒有角色的 API bot 照舊不可請教。
+    sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+    let err = send(parent.id.clone(), "p2").await;
+    assert!(matches!(&err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable"), "expert keeps advisor-only: {err:?}");
+}

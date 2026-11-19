@@ -71,7 +71,7 @@ pub(crate) async fn list(
             }
         }
         let open: Option<i64> = sqlx::query_scalar("SELECT count(*) FROM relay_requests WHERE to_bot_id=? AND state IN ('pending','delivered')").bind(&bot.id).fetch_one(&app.db).await.ok();
-        let is_api_advisor = crate::config::is_api_kind(&bot.kind) && bot.role.as_deref() == Some("advisor");
+        let is_api_advisor = crate::config::is_api_kind(&bot.kind) && crate::relay_policy::api_bot_consultable(&project, bot, caller.as_ref());
         let is_shared = shared_ids.contains(&bot.id);
         let dispatchable = (!crate::config::is_api_kind(&bot.kind) || is_api_advisor) && !is_shared;
         let mut peer = json!({"id":bot.id,"name":bot.name,"kind":bot.kind,"role":bot.role,"track":bot.track,"model":bot.model,"manager_use":bot.manager_use == 1,"dispatchable":dispatchable,"host":project.host,"run_state":run.as_ref().map(|r| r.state.as_str()).unwrap_or("stopped"),"agent_status":status,"observed_at":observed_at,"status_stale":true,"open_requests":open});
@@ -407,6 +407,24 @@ mod tests {
         assert_eq!(p_exec["dispatchable"], false);
         assert_eq!(p_exec["billing"], "api");
         assert_eq!(p_exec["dispatch_reason"], "純 API 模型，不能接受 bot 派工");
+    }
+
+    /// 母子模式：頂層 bot 看同專案沒有角色的頂層 API bot 是可請教的（parent 對 parent），child 看則不可。
+    #[tokio::test]
+    async fn parent_child_api_bot_is_dispatchable_for_top_level_callers() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        sqlx::query("UPDATE projects SET mode='parent_child' WHERE id=?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        let parent = crate::testing::claude_bot(&app, &env.project_id, "pcp-parent").await;
+        let api = crate::testing::claude_bot(&app, &env.project_id, "pcp-api").await;
+        sqlx::query("UPDATE bots SET kind='openai-api', model='gpt-6-luna' WHERE id=?").bind(&api.id).execute(&app.db).await.unwrap();
+        let child = crate::testing::claude_bot(&app, &env.project_id, "pcp-child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&child.id).execute(&app.db).await.unwrap();
+        for (caller, want) in [(&parent.id, true), (&child.id, false)] {
+            let value = list(State(app.clone()), Path(env.project_id.clone()), Query(PeersQuery::default()), Extension(RequestPrincipal::Bot(caller.clone()))).await.unwrap().0;
+            let p = value["peers"].as_array().unwrap().iter().find(|p| p["id"] == api.id).unwrap().clone();
+            assert_eq!(p["dispatchable"], want, "caller {caller}: {p}");
+        }
     }
 
     /// openai-api 的顧問跟 claude-api 的一樣：可派工、標 API 計費；不是顧問就不可派。
