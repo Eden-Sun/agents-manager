@@ -14,9 +14,8 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
-import { BalanceQuotaChip } from './BalanceQuotaChip'
+import { ApiBalanceGroup } from './ApiBalanceGroup'
 import { useClaudeBalanceVisible, useOpenAiBalanceVisible } from './balanceHooks'
-import { OpenAiBalanceChip } from './OpenAiBalanceChip'
 import { DEFAULT_ACCOUNT } from '../store/identityRows'
 import { disableUntil } from '../lib/quotaDisableUntil'
 import { KindIcon } from './KindTag'
@@ -1054,7 +1053,10 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
-      const avail = measureQuotaAvail(head, strip)
+      // 餘額群組跟量表同排、不收合：可用寬度先扣掉它（`.quota-api-group`，使用者 2026-11-19）。
+      const groupEl = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
+      const groupGap = parseFloat(getComputedStyle(strip).columnGap) || 0
+      const avail = Math.max(0, measureQuotaAvail(head, strip) - (groupEl ? groupEl.getBoundingClientRect().width + groupGap : 0))
       // Full layout must fit count × widest active cell, not the sum of unequal cell widths.
       // Measure it even after a narrow viewport or late data made the row collapse.
       const wasCollapsed = row.classList.contains('collapsed')
@@ -1152,11 +1154,8 @@ export function QuotaStrip({
             </Fragment>
           )
         })}
-        {/* Anthropic API 餘額：全域（不分主機）。放在 `.quota-open` 最後一格、不是它的兄弟——寬度由 fit 量測（`measureQuotaRow` 把非量表的子項算成固定寬），
-            放在外面時量不到它，額度多的時候膠囊會疊在最後一格上（2026-11-15 使用者截圖）。 */}
-        <BalanceQuotaChip />
-        <OpenAiBalanceChip />
       </div>
+      <ApiBalanceGroup />
       {open ? (
         <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host, t)}</div>
@@ -1167,14 +1166,6 @@ export function QuotaStrip({
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
               {t('看全部（{count}）', { count: popEntries.length })}
             </button>
-          ) : null}
-          {/* API 餘額區：全域、不分主機，手機 setOnly 時也顯示（使用者 2026-11-19）。各列自己判斷可見，都不可見就整塊不畫。 */}
-          {claudeBalanceVisible || openaiBalanceVisible ? (
-            <div className="quota-pop-api" data-k="quota-pop-api">
-              <div className="quota-pop-api-title">{t('API 餘額')}</div>
-              <BalanceQuotaChip variant="row" />
-              <OpenAiBalanceChip variant="row" />
-            </div>
           ) : null}
           {freshest ? <p className="quota-pop-foot">{t('更新於 {time} · ↻ 是距離重置還有多久', { time: fmtTime(freshest) })}</p> : null}
         </div>

@@ -146,7 +146,7 @@ test('手機：縮成短格式 $23.3', async () => {
   }
 })
 
-test('版面：膠囊是額度列（.quota-open）裡的一格，不是列外的兄弟、也不是 absolute 疊在量表上（寬度量測才算得到它）', async () => {
+test('版面：膠囊在「API 餘額」群組裡，群組是額度列（.quota-strip）的子項、不在會被收合裁切的 .quota-open 裡，也不是 absolute 疊在量表上', async () => {
   mockApi(sharedMock)
   await useStore.getState().refreshState()
   await useStore.getState().loadQuota()
@@ -156,10 +156,12 @@ test('版面：膠囊是額度列（.quota-open）裡的一格，不是列外的
     await settle()
     const c = chip()
     assert.ok(c, '額度列要畫出膠囊')
-    assert.ok(c.parentElement?.classList.contains('quota-open'), '在 .quota-open 裡，fit 量測（measureQuotaRow）才把它算成固定寬')
-    assert.equal(c.closest('.quota-strip')?.querySelector(':scope > [data-k="quota-balance"]'), null, '不是 .quota-strip 的直接子項（那裡的寬度沒人量）')
+    const g = c.closest<HTMLElement>('[data-k="quota-api-group"]')
+    assert.ok(g, '在 API 餘額群組裡')
+    assert.equal(g!.parentElement?.classList.contains('quota-strip'), true, '群組是 .quota-strip 的子項，fit 量測會扣掉它的寬度')
+    assert.equal(c.closest('.quota-open'), null, '不在會被收合裁切的 .quota-open 裡')
     assert.notEqual(c.style.position, 'absolute')
-    assert.ok(c.parentElement!.querySelector('.quota-hp'), '跟量表同一列')
+    assert.ok(g!.parentElement!.querySelector('.quota-hp'), '跟量表同一列')
   })
 })
 

@@ -1663,10 +1663,13 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **不做的事**：不做 Console 實際值讀取、不做自動輪詢；校正一律手動，因為儲值與贈送額度只能靠使用者輸入。
 - 測試：`components/openAiBalanceChipDom.test.tsx`（未啟用不畫、無錨點顯示設定、有錨點顯示金額、位置在 Claude 之後、PUT 呼叫）。
 
-## API 餘額在額度選單與無額度主機上的呈現（2026-11-19）
+## API 餘額在額度列上的呈現（2026-11-19，取代同日較早的「選單餘額區」版本）
 
-- **總餘額不分主機**（使用者裁示）：沒有任何額度格的主機（例如 m4p）仍畫出 Claude 與 OpenAI 餘額晶片；只有兩個餘額都不可見時才整條額度列不畫。
-- **選單底部「API 餘額」區**：額度選單（`.quota-pop`）在 `quota-pop-foot` 之前列出 Claude、OpenAI 各一列（金額，或「設定 OpenAI 餘額」入口），點了開各自原本的校正視窗；本機與遠端主機都有；手機 setOnly 時仍顯示（額度格只露出點選的那一格，餘額區不受影響）。未設定／未啟用的那一列不畫，兩者都不可見就整塊不畫。
-- **同一份邏輯**：晶片與選單列共用 `BalanceQuotaChip`／`OpenAiBalanceChip`（`variant='chip'|'row'`），可見性用 `useClaudeBalanceVisible`／`useOpenAiBalanceVisible`，不另外複製資料或視窗。
-- **沒有額度格就開不了選單**：選單的入口是額度格，主機沒有格時沒有選單；餘額只能從晶片進（晶片本身就開校正視窗）。
-- 測試：`components/quotaBalanceMenuDom.test.tsx`（m4p 無格仍畫晶片、兩者都不可見整條不畫、本機與 m4p 選單有餘額區、手機 setOnly、未啟用那列不畫）。
+- **總餘額不分主機**（使用者裁示）：沒有任何額度格的主機（例如 m4p）仍畫出餘額群組；兩家都不可見才整條額度列不畫。
+- **問題（使用者截圖）**：本機列的標題列尾端有「API ≈$16.84」「OpenAI $83.00」，m4p 那列（多一格 ccl、右邊有對話／終端分頁，空間較窄）只剩 API，OpenAI 被裁掉。原因是 `.main-head .quota-open.collapsed { overflow-x: clip }` 在空間不夠時裁掉尾巴，而餘額晶片放在 `.quota-open` 最後，最先被裁的就是它。
+- **做法**：餘額是一個 `ApiBalanceGroup`（`.quota-api-group`），放在 `.quota-open` 外面、同一排、`flex: none`，不收合、不被裁。Claude 在上、OpenAI 在下，只有一家有值就一行。
+- **量表讓位**：fit 量測（`remeasure`）的可用寬度先扣掉群組寬度加 gap，所以收合時裁的是量表，不是餘額。
+- **點擊**：群組裡兩顆晶片各自開原本的校正視窗。
+- **取消**：同日較早加的「額度選單底部 API 餘額區」已移除（不做）。
+- **沒有額度格的主機**：選單入口是額度格，沒有格時開不了選單，所以餘額只在群組裡看，這是刻意的。
+- 測試：`components/apiBalanceGroupDom.test.tsx`（群組不在 `.quota-open` 內、窄寬度收合時仍在、m4p 無格仍畫、兩家都不可見不畫、只有一家一行、兩家兩行、點擊各開各的視窗）；`quotaBalanceChipDom.test.tsx` 的版面斷言改成群組版。
