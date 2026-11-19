@@ -78,3 +78,53 @@ test('「使用一張」：打 User-only 端點（不帶 credit_id），成功�
     globalThis.fetch = realFetch
   }
 })
+
+const snoozeChoice = (label: string) => [...document.querySelectorAll('[role=menuitem]')].find((b) => b.textContent?.trim() === label) as HTMLElement
+
+async function snoozeFromMenu(label: string, hours: 1 | 24 | 72, at: string) {
+  useStore.setState({ quota: quotaWithHit(at) })
+  const calls: { url: string; method?: string; body: unknown }[] = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+    return new Response(JSON.stringify({ key: 'mac_builder/codex:co0', snoozed_until: '2026-11-08T12:00:00Z' }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }) as typeof fetch
+  try {
+    const stop = startResetCreditOfferNotice(() => NOW)
+    await mount(<ResetCreditOffer />)
+    await click([...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === '不再提醒 ▾')!)
+    await click(snoozeChoice(label))
+    await flush()
+    await flush()
+    const hit = calls.find((c) => c.url.includes('/quota/reset-credit/snooze'))
+    assert.ok(hit, `expected the snooze endpoint for ${label}`)
+    assert.equal(hit.method, 'PUT')
+    assert.deepEqual(hit.body, { key: 'mac_builder/codex:co0', hours })
+    assert.equal(document.querySelector('[role=alertdialog]'), null, `${label} closes the dialog`)
+    stop()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+test('「不再提醒」選單：1 小時打 PUT hours=1，對話框關掉', () => snoozeFromMenu('1 小時', 1, '2026-11-08T11:00:00Z'))
+test('「不再提醒」選單：1 天打 PUT hours=24，對話框關掉', () => snoozeFromMenu('1 天', 24, '2026-11-08T12:00:00Z'))
+test('「不再提醒」選單：3 天打 PUT hours=72，對話框關掉', () => snoozeFromMenu('3 天', 72, '2026-11-08T13:00:00Z'))
+
+test('暫停中不跳；暫停過期後同一次耗盡再跳（暫停那次不算已問過）', async () => {
+  let clock = NOW
+  const snoozed = { ...quotaWithHit('2026-11-08T14:00:00Z') }
+  const cell = snoozed['mac_builder/codex:co0'] as unknown as Record<string, unknown>
+  cell.reset_offer_snoozed_until = '2026-11-08T07:30:00Z'
+  useStore.setState({ quota: snoozed })
+  const stop = startResetCreditOfferNotice(() => clock)
+  await mount(<ResetCreditOffer />)
+  await flush()
+  assert.equal(document.querySelector('[role=alertdialog]'), null, '暫停中不跳')
+
+  clock = Date.parse('2026-11-08T08:00:00Z')
+  useStore.setState({ quota: { ...quotaWithHit('2026-11-08T14:00:00Z') } })
+  await flush()
+  assert.match(document.body.textContent ?? '', /還有 2 張重置券/, '暫停過期後同一次耗盡再問')
+  stop()
+})

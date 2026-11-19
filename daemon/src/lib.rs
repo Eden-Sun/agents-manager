@@ -8,6 +8,7 @@ pub mod auto_update_settings;
 pub mod codex_stop_hook_api;
 pub mod update_restart;
 pub mod webpush;
+pub mod reset_offer_snooze;
 mod expert_peers;
 pub mod expert_cluster;
 mod expert_member;

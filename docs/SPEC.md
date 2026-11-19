@@ -5110,6 +5110,10 @@ MissionController）用的單一入口：帶 CAS、擋非法邊、轉移沒發�
 `supervisor_assignments.expects_review`（預設 1）。`expects_review=0`（API `kind:"notice"`、CLI `agm assign --notice`）：送達且回合 `completed`/`completed_fallback` → 直接 `completed`，
 inbox `assignment_noticed`（`needs_review=false`）。送不出去或回合失敗的通知**仍**進 `awaiting_review`。`assignment_stalled` 跳過停在 `awaiting_review` 的通知；`quota_blocked` 不算卡住。
 
+#### 18.8a1 重置券提示「不再提醒」（2026-11-19 使用者）
+
+codex 額度用完的重置券提示（網頁對話框與重置券推播）可以按「不再提醒 ▾」選 1 小時／1 天／3 天。暫停以**額度 key**為單位（例 `m4p/codex:co0`），存 daemon 的 `{data_dir}/reset-offer-snooze.json`（`{key: until}`，過期自動清），因此網頁與推播跨裝置一致。`PUT /api/quota/reset-credit/snooze`（User-only，`hours` 只收 1／24／72）設定、`DELETE` 取消；`GET /api/quota` 的該格帶 `reset_offer_snoozed_until`。推播在暫停中不推、也不記入已推紀錄，所以暫停結束後同一次耗盡、仍有券時會再推一次；網頁端暫停那次也不算已問過。**這個功能只控制提醒，任何路徑都不自動兌換重置券。**
+
 #### 18.8a2 codex 重置券到期前一天提示（2026-11-07 使用者）
 
 `rateLimitResetCredits.credits[]` 逐張收進 `Quota.reset_credits.credits`（`{id,title,status,granted_at,expires_at}`，只收 `available`／`redeeming`，依到期由早到晚），`expires_at`／`title` 取最早到期那張，不依供應商清單順序（API.md §12.4）。

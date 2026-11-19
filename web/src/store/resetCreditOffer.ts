@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import type { KindQuota, QuotaMap } from '../api/types'
 import { t } from '../lib/i18n'
-import { redeemResetCredit } from '../api'
+import { redeemResetCredit, snoozeResetCredit } from '../api'
 import { fmtCreditDate } from '../lib/resetCredits'
 import { useStore } from './store'
 import { creditKeyLabel } from './resetCreditsNotice'
@@ -62,6 +62,8 @@ export function resetCreditOffers(
   for (const [key, q] of Object.entries(quota)) {
     const kind = key.split('/').pop()!.split(':')[0]
     if (kind !== 'codex' || !q || q.stale || !q.reset_credits || q.reset_credits.available <= 0) continue
+    // 按了「不再提醒」的額度：暫停到期前不跳，也不記入 seen（到期後同一次耗盡還會問）。
+    if (snoozedUntilMs(q, now) !== null) continue
     const marker = exhaustionMarker(q, now)
     if (!marker) continue
     const id = `${key}|${marker}`
@@ -83,6 +85,12 @@ export function resetCreditOffers(
   return { offers, next }
 }
 
+/** 暫停中（`reset_offer_snoozed_until` 還沒到）回傳到期時刻（ms）；沒有或已過期回傳 null。 */
+export function snoozedUntilMs(q: KindQuota, now: number): number | null {
+  const until = q.reset_offer_snoozed_until ? Date.parse(q.reset_offer_snoozed_until) : NaN
+  return Number.isFinite(until) && until > now ? until : null
+}
+
 export function resetCreditOfferText(o: ResetCreditOffer): string {
   const soonest = o.expiresAt ? t('（最早 {time} 到期）', { time: fmtCreditDate(o.expiresAt) }) : ''
   const held = o.heldBots.length > 0 ? t('停工的 bot：{names}。', { names: o.heldBots.join('、') }) : ''
@@ -101,6 +109,13 @@ function loadSeen(): Record<string, number> {
   } catch {
     return {}
   }
+}
+
+// 已問過的耗盡事件：模組共用一份（「不再提醒」要能把當次事件從這裡拿掉）。第一次用到才讀 localStorage。
+let seenState: Record<string, number> | null = null
+function currentSeen(): Record<string, number> {
+  if (seenState === null) seenState = loadSeen()
+  return seenState
 }
 
 function saveSeen(v: Record<string, number>) {
@@ -130,14 +145,15 @@ export function useResetCreditOffer(): ResetCreditOffer | null {
 
 /** 跟額度資料一起看：新的耗盡事件進隊列；已問過的不再問。 */
 export function startResetCreditOfferNotice(now: () => number = Date.now): () => void {
-  let seen = loadSeen()
+  seenState = loadSeen()
   let last: QuotaMap | null = null
   const check = (quota: QuotaMap) => {
     if (quota === last) return
     last = quota
+    const seen = currentSeen()
     const { offers, next } = resetCreditOffers(seen, quota, now())
     if (JSON.stringify(next) !== JSON.stringify(seen)) {
-      seen = next
+      seenState = next
       saveSeen(next)
     }
     if (offers.length === 0) return
@@ -149,6 +165,32 @@ export function startResetCreditOfferNotice(now: () => number = Date.now): () =>
   return () => {
     unsub()
   }
+}
+
+/** 「不再提醒」：暫停這個額度 key `hours` 小時（1／24／72）。成功回傳 `true` 並關掉這張；失敗留著讓使用者重試。 */
+export async function snoozeResetCreditOffer(o: ResetCreditOffer, hours: 1 | 24 | 72): Promise<boolean> {
+  const notify = useStore.getState().notify
+  let until: string
+  try {
+    until = (await snoozeResetCredit({ key: o.key, hours })).snoozedUntil
+  } catch (e) {
+    notify('error', t('暫停提醒失敗：{msg}', { msg: e instanceof Error ? e.message : String(e) }))
+    return false
+  }
+  // 這次耗盡不算「已問過」：拿掉，暫停結束後同一次耗盡還能再問。
+  const seen = { ...currentSeen() }
+  delete seen[o.id]
+  seenState = seen
+  saveSeen(seen)
+  // 馬上把額度格標上暫停（不等下一次輪詢），避免這張或同一個事件又跳回來。
+  useStore.setState((s) => {
+    const cur = s.quota[o.key]
+    return cur ? { quota: { ...s.quota, [o.key]: { ...cur, reset_offer_snoozed_until: until } } } : {}
+  })
+  queue = queue.filter((x) => x.id !== o.id)
+  emit()
+  notify('info', t('{name} 的重置券提示已暫停到 {time}。', { name: creditKeyLabel(o.key), time: fmtCreditDate(until) }))
+  return true
 }
 
 /** 用掉當前這張（或只是關掉它）。回傳 `true` 表示 daemon 回成功。 */

@@ -1159,6 +1159,8 @@ export interface KindQuota {
   host: string
   /** 額度擋下了排著的 prompt、停工中的 bot 名稱（codex 格才有；舊 daemon 沒有就是 undefined）。 */
   held_bots?: string[]
+  /** 這個額度 key 的重置券提示被按了「不再提醒」：到這個時刻前不跳（daemon 的 reset-offer-snooze）。 */
+  reset_offer_snoozed_until?: string | null
 }
 
 /** key 見 `quotaKey`（SPEC §14，按主機分開）；null = 沒有額度資訊。 */

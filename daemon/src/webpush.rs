@@ -80,7 +80,7 @@ fn user_only(principal: &RequestPrincipal) -> Result<(), LcError> {
 
 // ---------- 檔案（0600、原子寫入） ----------
 
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
@@ -1239,7 +1239,9 @@ pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono
     let mut seen = load_reset_seen(&app.data_dir);
     let ts = now.timestamp();
     seen.retain(|_, at| ts - *at < 7 * 86400);
-    let fresh: Vec<ResetOffer> = reset_offers(snap, now).into_iter().filter(|o| !seen.contains_key(&o.id)).collect();
+    // 使用者按了「不再提醒」的帳號：不推、也不記入 seen（暫停結束後同一次耗盡還會再推）。
+    let snoozed = crate::reset_offer_snooze::load(&app.data_dir, now);
+    let fresh: Vec<ResetOffer> = reset_offers(snap, now).into_iter().filter(|o| !snoozed.contains_key(&o.key) && !seen.contains_key(&o.id)).collect();
     if fresh.is_empty() {
         return 0;
     }
@@ -2953,6 +2955,32 @@ pub(crate) mod tests {
         assert_eq!(scan_reset_credits(&app, &snap("T2"), now).await, 1, "新的一次停工再推");
         write_private(&settings_path(&app.data_dir), br#"{"reset_credits":false}"#).unwrap();
         assert_eq!(scan_reset_credits(&app, &snap("T3"), now).await, 0, "開關關了不推");
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn reset_credit_snooze_suppresses_push_then_same_event_pushes_after_expiry() {
+        let _g = SENDER_TESTS.lock().await;
+        let (env, _bot, _n, mut rx) = primary_env().await;
+        let app = env.app.clone();
+        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+        let now = t("2026-11-10T00:00:00Z");
+        let snap = json!({"kinds": {
+            "mac_builder/codex:co0": {"limit_hit": {"at": "T1", "until": "2026-11-10T05:00:00Z"}, "reset_credits": {"available": 2}},
+        }});
+        let key = "mac_builder/codex:co0";
+        crate::reset_offer_snooze::set(&app.data_dir, key, now + chrono::Duration::hours(1), now).unwrap();
+        assert_eq!(scan_reset_credits(&app, &snap, now).await, 0, "暫停中不推");
+        assert!(rx.try_recv().is_err());
+        // 暫停中的 scan 不記 seen：暫停結束後同一次耗盡、還有券，要再推一次。
+        assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::minutes(59)).await, 0);
+        assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(2)).await, 1, "暫停過期後同一事件再推");
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(2)).await, 0, "推過就不重推");
+        // 推過之後才按不再提醒：暫停時清掉已記的 seen，過期後同一次耗盡還會再推。
+        crate::reset_offer_snooze::set(&app.data_dir, key, now + chrono::Duration::hours(4), now + chrono::Duration::hours(2)).unwrap();
+        assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(3)).await, 0, "暫停中");
+        assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::minutes(270)).await, 1, "過期後再推");
         set_test_sender(None);
     }
 

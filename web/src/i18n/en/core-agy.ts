@@ -257,6 +257,10 @@ const dict: Dict = {
   '。要用一張嗎？': '. Would you like to use one?',
   '使用一張': 'Use one',
   '不用': 'Not now',
+  '不再提醒': 'Remind me less',
+  '1 小時': '1 hour',
+  '1 天': '1 day',
+  '3 天': '3 days',
 
   // src/components/ProjectSettingsPanel.tsx
   '找不到 Project': 'Project not found',
@@ -299,6 +303,8 @@ const dict: Dict = {
   '停工的 bot：{names}。': 'Suspended Bots: {names}.',
   '{name} 額度用完了。{held}還有 {n} 張重置券{soonest}，要用一張嗎？': { one: '{name} quota exhausted. {held}There is {n} reset credit available{soonest}. Would you like to use one?', other: '{name} quota exhausted. {held}There are {n} reset credits available{soonest}. Would you like to use one?' },
   '{name} 已使用一張重置券，額度重置了。': '{name} used a reset credit; quota has been reset.',
+  '暫停提醒失敗：{msg}': 'Could not pause reminders: {msg}',
+  '{name} 的重置券提示已暫停到 {time}。': 'Reset credit reminders for {name} are paused until {time}.',
   '已通知 {n} 顆停工的 bot 繼續工作。': { one: 'Notified {n} suspended Bot to resume work.', other: 'Notified {n} suspended Bots to resume work.' },
   '這張重置券剛才已經用過了。': 'This reset credit was just used.',
   '這次沒有需要重置的額度（{outcome}）。': 'No quota needed resetting this time ({outcome}).',

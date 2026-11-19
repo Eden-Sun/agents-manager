@@ -313,6 +313,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
         .route("/quota/reset-credit/use", post(use_reset_credit))
+        .route("/quota/reset-credit/snooze", axum::routing::put(put_reset_credit_snooze).delete(delete_reset_credit_snooze))
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::runners::build_scheduler::get_status))
@@ -991,6 +992,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("PUT", "/api/kinds/{kind}/disabled", BotRoutePolicy::UserOnly),
     ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/quota/reset-credit/use", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/quota/reset-credit/snooze", BotRoutePolicy::UserOnly),
+    ("DELETE", "/api/quota/reset-credit/snooze", BotRoutePolicy::UserOnly),
     ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/dispatched", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/release-triage/auto", BotRoutePolicy::UserOrAgm),
@@ -5353,6 +5356,7 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
     }
     let mut snap = crate::quota::snapshot(&app).await;
     crate::runners::reset_credit::annotate_held_bots(&app, &mut snap).await;
+    crate::reset_offer_snooze::annotate(&app.data_dir, &mut snap, chrono::Utc::now());
     let mut resp = Json(snap).into_response();
     if pending {
         // body 是 quota key 的 map，不能塞旗標進去（前端會把它當成一格額度）：用 header 說「還有探測在背景跑」。
@@ -5405,6 +5409,38 @@ async fn use_reset_credit(State(app): State<Arc<App>>, Json(body): Json<UseReset
         Err(crate::runners::reset_credit::RedeemError::UnknownCredit) => Err(LcError::NotFound("credit".into())),
         Err(crate::runners::reset_credit::RedeemError::Rpc(e)) => Err(LcError::Upstream(format!("{e:#}"))),
     }
+}
+
+#[derive(Deserialize)]
+struct ResetCreditSnoozeBody {
+    key: String,
+    hours: i64,
+}
+
+/// `PUT /api/quota/reset-credit/snooze` body `{key, hours: 1|24|72}`：這個額度 key 的重置券提示暫停到期前不再提醒（User-only）。
+/// 只控制提醒，不兌換券。回 `{key, snoozed_until}`。
+async fn put_reset_credit_snooze(State(app): State<Arc<App>>, Json(body): Json<ResetCreditSnoozeBody>) -> Result<Json<Value>, LcError> {
+    let key = body.key.trim();
+    if key.is_empty() || key.len() > 200 {
+        return Err(LcError::BadValue(json!({"error": "bad_key", "message": "key 必須是額度 key（例 m4p/codex:co0）"})));
+    }
+    if !crate::reset_offer_snooze::SNOOZE_HOURS.contains(&body.hours) {
+        return Err(LcError::BadValue(json!({"error": "bad_hours", "allowed": crate::reset_offer_snooze::SNOOZE_HOURS})));
+    }
+    let now = chrono::Utc::now();
+    let until = now + chrono::Duration::hours(body.hours);
+    let snoozed_until = crate::reset_offer_snooze::set(&app.data_dir, key, until, now).map_err(any_err)?;
+    Ok(Json(json!({"key": key, "snoozed_until": snoozed_until})))
+}
+
+/// `DELETE /api/quota/reset-credit/snooze?key=<額度 key>`：取消暫停（User-only）。回 `{key, cleared}`。
+async fn delete_reset_credit_snooze(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, LcError> {
+    let key = q.get("key").map(|k| k.trim().to_string()).unwrap_or_default();
+    if key.is_empty() {
+        return Err(LcError::BadValue(json!({"error": "bad_key", "message": "缺 key"})));
+    }
+    let cleared = crate::reset_offer_snooze::clear(&app.data_dir, &key, chrono::Utc::now()).map_err(any_err)?;
+    Ok(Json(json!({"key": key, "cleared": cleared})))
 }
 
 #[cfg(test)]
@@ -7612,6 +7648,8 @@ mod unknown_api_route_tests;
 
 #[cfg(test)]
 mod per_principal_auth_tests;
+#[cfg(test)]
+mod reset_offer_snooze_tests;
 
 #[cfg(test)]
 mod update_restart_force_tests;

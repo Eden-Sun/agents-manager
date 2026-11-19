@@ -1077,6 +1077,13 @@ export async function redeemResetCredit(input: { host: string; identity: string 
   return { outcome: str(o.outcome), resumed: arr(o.resumed).map((x) => str(x)) }
 }
 
+/** 重置券提示「不再提醒」（User-only，跨裝置共用）：hours 只收 1／24／72。只控制提醒，不兌換。 */
+export async function snoozeResetCredit(input: { key: string; hours: 1 | 24 | 72 }): Promise<{ snoozedUntil: string }> {
+  const raw = await transport.request('PUT', '/quota/reset-credit/snooze', { key: input.key, hours: input.hours })
+  const o = isRec(raw) ? raw : {}
+  return { snoozedUntil: str(o.snoozed_until) }
+}
+
 /** 上游新版分診帳本（SPEC §18.2c）：更新框顯示這幾版分析過了沒、結論是什麼（issue #561）。 */
 export async function fetchReleaseTriage(kind: string): Promise<ReturnType<typeof parseTriageRows>> {
   return parseTriageRows(await transport.request('GET', `/release-triage?kind=${encodeURIComponent(kind)}`))

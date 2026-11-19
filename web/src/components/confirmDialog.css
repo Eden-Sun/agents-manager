@@ -104,3 +104,14 @@
     max-height: calc(var(--vvh, 100dvh) - 24px);
   }
 }
+
+/* 重置券提示的「不再提醒 ▾」選單（ResetCreditOffer.tsx）。 */
+.reset-snooze { margin-top: 8px; }
+.reset-snooze-menu {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
