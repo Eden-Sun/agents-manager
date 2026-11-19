@@ -1673,3 +1673,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **選單餘額區保留**：額度選單（`.quota-pop`）底部的「API 餘額」區（Claude、OpenAI 各一列，同一校正視窗，手機 setOnly 時仍顯示）保留，與群組並存；群組負責窄寬度不被裁，選單區負責遠端主機與手機看得到。（使用者 2026-11-19 撤回先前「取消」的指示。）
 - **沒有額度格的主機**：選單入口是額度格，沒有格時開不了選單，所以餘額只在群組裡看，這是刻意的。
 - 測試：`components/apiBalanceGroupDom.test.tsx`（群組不在 `.quota-open` 內、窄寬度收合時仍在、m4p 無格仍畫、兩家都不可見不畫、只有一家一行、兩家兩行、點擊各開各的視窗）；`quotaBalanceChipDom.test.tsx` 的版面斷言改成群組版。
+
+## Claude 餘額的標籤與金額（2026-11-19，使用者截圖）
+
+- **標籤改 Claude**：額度列上的膠囊標籤由「API」改成「Claude」，金額前不加「≈」（截圖：「API ≈$16.84」→「Claude $16.84」）。選單區那列同樣寫 Claude（區塊標題「API 餘額」保留，因為它同時放 OpenAI）。手機仍只顯示數字。
+- **估算與實際的區別**不再靠「≈」，改由 tooltip 文字（「Anthropic API 餘額（估算）／（Console 實際值）」）與 `estimate`／`exact` class 標示；負數仍顯示「需校正」。
+- 測試：`components/quotaBalanceChipDom.test.tsx` 斷言改成 Claude 標籤與無 ≈ 的金額。

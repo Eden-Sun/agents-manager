@@ -18,8 +18,8 @@ const hhmm = (iso: string | null | undefined): string => {
 }
 
 /**
- * 全域額度列的 Anthropic API 餘額（使用者 2026-11-15：「額度列找個位置放餘額」）。
- * 數字：Console 讀得到就是 Console 實際值（`API $23.29`），否則是用同一套公式的**估算**（`API ≈$23.29`：錨點－官方報表－本機已確定花費，
+ * 全域額度列的 Anthropic（Claude）API 餘額（使用者 2026-11-15：「額度列找個位置放餘額」）。
+ * 數字：Console 讀得到就是 Console 實際值（`Claude $23.29`），否則是用同一套公式的**估算**（`Claude $23.29`，tooltip 與 class 標示估算：錨點－官方報表－本機已確定花費，
  * 預留與結果不明的不扣、列在 tooltip）。手機縮成短格式 `$23.3`。沒設定（沒有錨點也讀不到 Console）就整格不畫。
  * 點下去開小視窗：列出明細、距上次校正多久，可輸入 Console 目前餘額校正錨點（官方沒有餘額端點，儲值／贈送額度只能靠校正）；有 claude-api bot 時另有「到 claude-api bot」。
  */
@@ -41,7 +41,7 @@ export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row
   const usd = view.usd
   // 估算成負數＝錨點已經過舊（期間有儲值或贈送額度：官方查得到花費、查不到儲值）：顯示「需校正」，不要把一個必錯的負數當餘額。
   const stale = !exact && usd < 0
-  const text = stale ? t('需校正') : phone ? `$${usd.toFixed(1)}` : `${exact ? '' : '≈'}$${usd.toFixed(2)}`
+  const text = stale ? t('需校正') : phone ? `$${usd.toFixed(1)}` : `$${usd.toFixed(2)}`
   const lines = balanceTooltipLines(balance, view, t)
   const stamp = exact ? balance?.console?.fetched_at : balance?.as_of
   const title = [
@@ -61,12 +61,12 @@ export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row
   const body =
     variant === 'row' ? (
       <>
-        <span className="quota-pop-balance-k">{t('Anthropic API 餘額')}</span>
+        <span className="quota-pop-balance-k">{t('Claude 餘額')}</span>
         <span className="quota-pop-balance-v">{text}</span>
       </>
     ) : (
       <>
-        {phone ? null : <span className="quota-balance-k">API</span>}
+        {phone ? null : <span className="quota-balance-k">Claude</span>}
         <span className="quota-balance-v">{text}</span>
       </>
     )
