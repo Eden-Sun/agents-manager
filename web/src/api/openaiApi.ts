@@ -13,6 +13,8 @@ export interface OpenAiApiSettings {
   key_error: string | null
   total_cap_usd: number | null
   total_cap_since: string | null
+  /** 單回合成本上限（微美元）：`null`＝未設定（OpenAI bot 無法啟動）。 */
+  max_turn_cost_microusd: number | null
   /** OpenAI 累計花費（美元）：bot 帳本＋一次性用途（翻譯）的帳。 */
   spent_usd: number
   spent_bots_usd: number
@@ -24,6 +26,8 @@ export interface OpenAiApiPatch {
   key_file?: string
   /** 帶 `null`＝清除上限（起算時間一起清）；沒帶＝不動。 */
   total_cap_usd?: number | null
+  /** 單回合成本上限（微美元，必須大於 0）；帶 `null`＝清除；沒帶＝不動。 */
+  max_turn_cost_microusd?: number | null
 }
 
 const rec = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {})
@@ -40,6 +44,7 @@ export function parseOpenAiApiSettings(raw: unknown): OpenAiApiSettings | null {
     key_error: typeof o.key_error === 'string' ? o.key_error : null,
     total_cap_usd: typeof bot.total_cap_usd === 'number' ? bot.total_cap_usd : null,
     total_cap_since: typeof bot.total_cap_since === 'string' ? bot.total_cap_since : null,
+    max_turn_cost_microusd: typeof bot.max_turn_cost_microusd === 'number' ? bot.max_turn_cost_microusd : null,
     spent_usd: num(o.spent_usd),
     spent_bots_usd: num(o.spent_bots_usd),
     spent_uses_usd: num(o.spent_uses_usd),
@@ -48,7 +53,7 @@ export function parseOpenAiApiSettings(raw: unknown): OpenAiApiSettings | null {
 
 let mockState: OpenAiApiSettings | null = null
 const mockStateOf = (): OpenAiApiSettings =>
-  (mockState ??= { enabled: false, key_file: '~/.config/agents-manager/openai-api-key', key_present: false, key_error: 'key file unreadable', total_cap_usd: null, total_cap_since: null, spent_usd: 0.0123, spent_bots_usd: 0.01, spent_uses_usd: 0.0023 })
+  (mockState ??= { enabled: false, key_file: '~/.config/agents-manager/openai-api-key', key_present: false, key_error: 'key file unreadable', total_cap_usd: null, total_cap_since: null, max_turn_cost_microusd: null, spent_usd: 0.0123, spent_bots_usd: 0.01, spent_uses_usd: 0.0023 })
 
 /** 舊 daemon 沒有這個端點（404／405）→ `null`，整區顯示「需要更新 daemon」。其餘錯誤往外丟。 */
 export async function fetchOpenAiApiSettings(): Promise<OpenAiApiSettings | null> {
@@ -72,6 +77,7 @@ export async function saveOpenAiApiSettings(patch: OpenAiApiPatch): Promise<Open
       enabled: patch.enabled ?? cur.enabled,
       key_file: patch.key_file ?? cur.key_file,
       ...(patch.total_cap_usd === undefined ? {} : { total_cap_usd: patch.total_cap_usd, total_cap_since: patch.total_cap_usd === null ? null : new Date().toISOString() }),
+      ...(patch.max_turn_cost_microusd === undefined ? {} : { max_turn_cost_microusd: patch.max_turn_cost_microusd }),
     }
     return { ok: true, settings: mockState }
   }

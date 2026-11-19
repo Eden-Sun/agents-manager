@@ -817,9 +817,9 @@ function errText(e: unknown): string {
  * 明確指定的 identity 確認沒登入（GH #83）：daemon 的 409 已經把身份／主機／怎麼登入寫成人話放在
  * `hint`，直接顯示它，不要漏成原始的 `identity_not_logged_in` 代碼。
  */
-function startErrText(e: unknown): string {
+function startErrText(e: unknown, kind?: unknown): string {
   if (e instanceof ApiError) {
-    const apiBot = apiBotStartReasonText(e.body.reason) ?? apiBotStartReasonText(e.body.message) ?? apiBotStartReasonText(e.body.error)
+    const apiBot = apiBotStartReasonText(e.body.reason, kind) ?? apiBotStartReasonText(e.body.message, kind) ?? apiBotStartReasonText(e.body.error, kind)
     if (apiBot) return apiBot
   }
   if (e instanceof ApiError && e.body.reason === 'identity_not_logged_in' && typeof e.body.hint === 'string' && e.body.hint) {
@@ -1620,7 +1620,7 @@ export const useStore = create<StoreState>((set, get) => {
             set({ apiModelConflict: { botId, checkpointModel, currentModel } })
             return false
           }
-          get().notify('error', t('啟動失敗：{reason}', { reason: startErrText(e) }))
+          get().notify('error', t('啟動失敗：{reason}', { reason: startErrText(e, get().bots.find((b) => b.id === botId)?.kind) }))
           return false
         }
       }
@@ -1744,7 +1744,7 @@ export const useStore = create<StoreState>((set, get) => {
         get().notify('error', e.body.send_now_message)
         return false
       }
-      get().notify('error', startErrText(e))
+      get().notify('error', startErrText(e, get().bots.find((b) => b.id === botId)?.kind))
       return false
     }
   },
@@ -2002,7 +2002,7 @@ export const useStore = create<StoreState>((set, get) => {
       // daemon 說這個鍵已經是另一件事（例如設定變了）：作廢，下一次是新的動作。
       if (String(e).includes('request_id_reused')) settleCreateRequest(reqKey)
       // openai_not_configured 等 API kind 的原因給人話（不要漏成代碼）。
-      const apiReason = e instanceof ApiError ? apiBotStartReasonText(e.body.reason) : null
+      const apiReason = e instanceof ApiError ? apiBotStartReasonText(e.body.reason, input.kind) : null
       get().notify('error', apiReason ?? errText(e))
       return null
     } finally {

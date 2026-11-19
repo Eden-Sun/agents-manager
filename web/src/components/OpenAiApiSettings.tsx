@@ -15,6 +15,7 @@ export function OpenAiApiSettings() {
   const [enabled, setEnabled] = useState(false)
   const [keyFile, setKeyFile] = useState('')
   const [cap, setCap] = useState('')
+  const [turnCap, setTurnCap] = useState('')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
 
@@ -23,6 +24,7 @@ export function OpenAiApiSettings() {
     setEnabled(s.enabled)
     setKeyFile(s.key_file)
     setCap(s.total_cap_usd === null ? '' : String(s.total_cap_usd))
+    setTurnCap(s.max_turn_cost_microusd === null ? '' : String(s.max_turn_cost_microusd / 1_000_000))
   }
 
   useEffect(() => {
@@ -53,10 +55,15 @@ export function OpenAiApiSettings() {
   const capNumber = cap.trim() === '' ? null : Number(cap)
   const capInvalid = capNumber !== null && (!Number.isFinite(capNumber) || capNumber < 0)
   const savedCap = settings.total_cap_usd
+  // 單回合上限：輸入美元、存微美元；留空＝未設定（清除），必須大於 0。
+  const turnNumber = turnCap.trim() === '' ? null : Number(turnCap)
+  const turnMicro = turnNumber === null || !Number.isFinite(turnNumber) ? null : Math.round(turnNumber * 1_000_000)
+  const turnInvalid = turnNumber !== null && (!Number.isFinite(turnNumber) || (turnMicro ?? 0) < 1)
   const patch: OpenAiApiPatch = {}
   if (enabled !== settings.enabled) patch.enabled = enabled
   if (keyFile.trim() !== settings.key_file) patch.key_file = keyFile.trim()
   if (!capInvalid && capNumber !== savedCap) patch.total_cap_usd = capNumber
+  if (!turnInvalid && turnMicro !== settings.max_turn_cost_microusd) patch.max_turn_cost_microusd = turnMicro
   const dirty = Object.keys(patch).length > 0
 
   const save = () => {
@@ -80,7 +87,7 @@ export function OpenAiApiSettings() {
       data-testid="openai-api-settings"
       onSubmit={(e) => {
         e.preventDefault()
-        if (!busy && dirty && !capInvalid) save()
+        if (!busy && dirty && !capInvalid && !turnInvalid) save()
       }}
     >
       <p className="hint">{t('OpenAI 只走 API（按 API 計費）：翻譯可改用 OpenAI，之後的顧問型 bot 也用這裡的金鑰與上限。預設關閉。')}</p>
@@ -106,6 +113,14 @@ export function OpenAiApiSettings() {
         </span>
         {capInvalid ? <span className="hint err">{t('上限要是 0 以上的數字。')}</span> : null}
       </label>
+      <label className="field">
+        <span>{t('單回合成本上限（美元）')}</span>
+        <input type="number" min={0} step="0.01" data-testid="openai-api-turn-cap" value={turnCap} placeholder={t('未設定')} onChange={(e) => setTurnCap(e.target.value)} />
+        <span className="hint" data-testid="openai-api-turn-cap-hint">
+          {t('單回合（一次回合）的花費上限，必須大於 0。留空＝未設定；未設定時 OpenAI bot 無法啟動。')}
+        </span>
+        {turnInvalid ? <span className="hint err" data-testid="openai-api-turn-cap-invalid">{t('單回合上限要大於 0；留空＝未設定。')}</span> : null}
+      </label>
       <p className="hint" data-testid="openai-api-spent">
         {t('OpenAI 累計花費 {spent}（bot {bots}、翻譯等一次性用途 {uses}）。', { spent: usd(settings.spent_usd), bots: usd(settings.spent_bots_usd), uses: usd(settings.spent_uses_usd) })}
       </p>
@@ -114,7 +129,7 @@ export function OpenAiApiSettings() {
       </p>
       <div className="form-actions">
         {note ? <span className={note.ok ? 'claude-api-note ok' : 'claude-api-note err'} role="status">{note.text}</span> : null}
-        <button type="submit" className="btn primary" data-testid="openai-api-save" disabled={busy || !dirty || capInvalid}>
+        <button type="submit" className="btn primary" data-testid="openai-api-save" disabled={busy || !dirty || capInvalid || turnInvalid}>
           {t('儲存')}
         </button>
       </div>

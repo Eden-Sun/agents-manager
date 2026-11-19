@@ -1679,3 +1679,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **標籤改 Claude**：額度列上的膠囊標籤由「API」改成「Claude」，金額前不加「≈」（截圖：「API ≈$16.84」→「Claude $16.84」）。選單區那列同樣寫 Claude（區塊標題「API 餘額」保留，因為它同時放 OpenAI）。手機仍只顯示數字。
 - **估算與實際的區別**不再靠「≈」，改由 tooltip 文字（「Anthropic API 餘額（估算）／（Console 實際值）」）與 `estimate`／`exact` class 標示；負數仍顯示「需校正」。
 - 測試：`components/quotaBalanceChipDom.test.tsx` 斷言改成 Claude 標籤與無 ≈ 的金額。
+
+## OpenAI bot 啟動失敗句與單回合上限（2026-11-19，使用者截圖）
+
+- **問題**：啟動 OpenAI bot 出現「沒有設定單次成本上限：在 [claude_api.api_bot] 填 max_turn_cost_microusd」。真正缺的是 `[openai_api.api_bot] max_turn_cost_microusd`，而網頁對這個 reason 一律寫 Claude 的設定位置。
+- **句子依 bot kind 選**（reason 名稱不改，daemon 不需要帶 provider）：openai-api 的 `api_bot_turn_cost_cap_missing`、`api_bot_config_invalid`、`api_bot_key_unavailable` 各有 OpenAI 的句子（指向「設定 → OpenAI API」與 `[openai_api…]`）；其餘沿用原句。
+- **設定入口**：「設定 → OpenAI API」多一欄「單回合成本上限（美元）」，美元輸入、存微美元；必須大於 0（0／負數不能存，按鈕停用）；留空＝清除，並提示「未設定時 OpenAI bot 無法啟動」。與 Claude 的總上限欄位同一種版面。
+- 測試：`apiBotStartReason.test.ts`（OpenAI／Claude 句子與沒給 kind 的退回）、`openAiApiSettingsDom.test.tsx`（美元↔微美元、0／負數不能存、留空清除）、daemon `openai_settings_tests.rs`（PUT 寫回、0 → 400、null 清除）。
+

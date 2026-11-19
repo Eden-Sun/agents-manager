@@ -112,6 +112,26 @@ async fn put_writes_the_cap_validates_it_and_a_hand_edit_hot_reloads() {
     assert_eq!((v["api_bot"]["total_cap_usd"].clone(), v["api_bot"]["total_cap_since"].clone()), (Value::Null, Value::Null));
 }
 
+/// 單回合成本上限：PUT 寫回 `[openai_api.api_bot] max_turn_cost_microusd`；0／負數拒絕；`null` 清除。
+#[tokio::test]
+async fn put_writes_the_per_turn_cost_cap_and_refuses_zero() {
+    let e = env().await;
+    let (status, v) = put(&e, json!({"max_turn_cost_microusd": 1_000_000})).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["api_bot"]["max_turn_cost_microusd"], 1_000_000);
+    assert_eq!(e.app.cfg.get().await.openai_api.api_bot.max_turn_cost_microusd, Some(1_000_000));
+    let (status, v) = put(&e, json!({"max_turn_cost_microusd": 0})).await;
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(v["reason"], "invalid_max_turn_cost_microusd");
+    let (status, _) = put(&e, json!({"max_turn_cost_microusd": -5})).await;
+    assert_eq!(status, 422, "負數不是合法的 u64：反序列化就拒絕（axum 回 422），不會寫進設定");
+    assert_eq!(e.app.cfg.get().await.openai_api.api_bot.max_turn_cost_microusd, Some(1_000_000), "拒絕的請求不寫");
+    let (status, v) = put(&e, json!({"max_turn_cost_microusd": null})).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["api_bot"]["max_turn_cost_microusd"], Value::Null);
+    assert_eq!(e.app.cfg.get().await.openai_api.api_bot.max_turn_cost_microusd, None);
+}
+
 #[tokio::test]
 async fn the_spent_total_counts_only_openai_from_both_ledgers() {
     let e = env().await;

@@ -29,6 +29,18 @@ const TEXT: Record<string, string> = {
   compact_unsupported: msg('這個 bot 種類不支援 /compact。'),
 }
 
-export function apiBotStartReasonText(reason: unknown): string | null {
-  return typeof reason === 'string' && Object.hasOwn(TEXT, reason) ? tr(TEXT[reason]) : null
+/**
+ * openai-api bot 的同名原因要講 OpenAI 的設定位置（使用者 2026-11-19：缺單回合上限時寫成 [claude_api.api_bot] 是錯的）。
+ * daemon 的 reason 名稱跟 Claude 共用，所以依 bot 的 kind 選句；沒有對應的 OpenAI 句就退回通用句。
+ */
+const OPENAI_TEXT: Record<string, string> = {
+  api_bot_turn_cost_cap_missing: msg('沒有設定單回合成本上限：到 設定 → OpenAI API 填「單回合成本上限」（或 config 的 [openai_api.api_bot] max_turn_cost_microusd，必須大於 0）。'),
+  api_bot_config_invalid: msg('[openai_api.api_bot] 的設定值超出允許範圍，請檢查各項上限。'),
+  api_bot_key_unavailable: msg('讀不到 OpenAI API key：請確認 [openai_api] key_file 指向存在、權限正確且非空的檔案。'),
+}
+
+export function apiBotStartReasonText(reason: unknown, kind?: unknown): string | null {
+  if (typeof reason !== 'string') return null
+  if (kind === 'openai-api' && Object.hasOwn(OPENAI_TEXT, reason)) return tr(OPENAI_TEXT[reason])
+  return Object.hasOwn(TEXT, reason) ? tr(TEXT[reason]) : null
 }

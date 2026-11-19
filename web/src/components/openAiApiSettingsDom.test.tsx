@@ -189,3 +189,32 @@ test('Claude 分頁翻譯組的供應商旁有連到 OpenAI API 分頁的連結'
   assert.equal(opened, 1)
   assert.equal(root.querySelector('[data-testid=openai-api-settings]'), null)
 })
+
+test('單回合成本上限：美元輸入存成微美元；0／負數不能存（按鈕停用）；留空清除', async () => {
+  const puts: unknown[] = []
+  const withTurn = { ...base, key_present: true, key_error: null, api_bot: { ...base.api_bot, max_turn_cost_microusd: 2_000_000 } }
+  stub(withTurn, puts, { ...withTurn, api_bot: { ...base.api_bot, max_turn_cost_microusd: 3_500_000 } })
+  const root = await mount(<OpenAiApiSettings />)
+  await settle()
+  const turn = root.querySelector<HTMLInputElement>('[data-testid=openai-api-turn-cap]')!
+  assert.equal(turn.value, '2', '已存的微美元以美元顯示')
+  await typeInto(turn, '3.5')
+  submit(root)
+  await settle()
+  assert.deepEqual(puts, [{ max_turn_cost_microusd: 3_500_000 }])
+
+  await typeInto(root.querySelector<HTMLInputElement>('[data-testid=openai-api-turn-cap]')!, '0')
+  assert.ok(root.querySelector('[data-testid=openai-api-turn-cap-invalid]'), '0 要提示')
+  assert.equal(root.querySelector<HTMLButtonElement>('[data-testid=openai-api-save]')!.disabled, true)
+  submit(root)
+  await settle()
+  assert.equal(puts.length, 1, '0 不送出')
+
+  await typeInto(root.querySelector<HTMLInputElement>('[data-testid=openai-api-turn-cap]')!, '-1')
+  assert.equal(root.querySelector<HTMLButtonElement>('[data-testid=openai-api-save]')!.disabled, true, '負數不能存')
+
+  await typeInto(root.querySelector<HTMLInputElement>('[data-testid=openai-api-turn-cap]')!, '')
+  submit(root)
+  await settle()
+  assert.deepEqual(puts[1], { max_turn_cost_microusd: null }, '留空＝清除')
+})

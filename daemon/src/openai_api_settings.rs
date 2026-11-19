@@ -62,6 +62,9 @@ pub(crate) struct PutSettings {
     total_cap_usd: Option<Option<f64>>,
     #[serde(default, deserialize_with = "present")]
     total_cap_since: Option<Option<String>>,
+    /// 單回合成本上限（微美元，必須大於 0）：`null`＝清除（清了 OpenAI bot 無法啟動）。
+    #[serde(default, deserialize_with = "present")]
+    max_turn_cost_microusd: Option<Option<u64>>,
 }
 
 fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -93,8 +96,11 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<P
             return Err(bad("invalid_key_file"));
         }
     }
+    if let Some(Some(0)) = body.max_turn_cost_microusd {
+        return Err(bad("invalid_max_turn_cost_microusd"));
+    }
     let now = am_base::db::now();
-    let PutSettings { enabled, key_file, total_cap_usd, total_cap_since } = body;
+    let PutSettings { enabled, key_file, total_cap_usd, total_cap_since, max_turn_cost_microusd } = body;
     app.cfg
         .update(move |cfg| {
             let o = &mut cfg.openai_api;
@@ -120,6 +126,9 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<P
             }
             if let Some(since) = total_cap_since {
                 o.api_bot.total_cap_since = since;
+            }
+            if let Some(turn) = max_turn_cost_microusd {
+                o.api_bot.max_turn_cost_microusd = turn;
             }
             Ok(())
         })
