@@ -1,14 +1,14 @@
 import { useState } from 'react'
-import { balanceView, putClaudeApiBalanceAnchor } from '../api/claudeApiBalance'
-import { reloadClaudeApiBalance, useClaudeApiBalance } from '../hooks/useClaudeApiBalance'
+import { putClaudeApiBalanceAnchor } from '../api/claudeApiBalance'
+import { reloadClaudeApiBalance } from '../hooks/useClaudeApiBalance'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { anchorAge, balanceTooltipLines } from './balanceTooltip'
+import { useClaudeBalanceView } from './balanceHooks'
 import { Modal } from './Modal'
 import './balanceQuotaChip.css'
 import { userTimeZone, zonedParts } from '../lib/userTime'
-import { useUserTimeZone } from '../lib/userTime'
 
 const hhmm = (iso: string | null | undefined): string => {
   const d = iso ? new Date(iso) : null
@@ -23,18 +23,19 @@ const hhmm = (iso: string | null | undefined): string => {
  * 預留與結果不明的不扣、列在 tooltip）。手機縮成短格式 `$23.3`。沒設定（沒有錨點也讀不到 Console）就整格不畫。
  * 點下去開小視窗：列出明細、距上次校正多久，可輸入 Console 目前餘額校正錨點（官方沒有餘額端點，儲值／贈送額度只能靠校正）；有 claude-api bot 時另有「到 claude-api bot」。
  */
-export function BalanceQuotaChip() {
+/**
+ * `variant='chip'`：額度列上的膠囊；`variant='row'`：額度選單底部「API 餘額」區的一列（同一份資料、同一個校正視窗）。
+ */
+export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row' } = {}) {
   const t = useT()
-  const tz = useUserTimeZone()
   const phone = useMediaQuery(PHONE_QUERY)
-  const balance = useClaudeApiBalance()
+  const { balance, view } = useClaudeBalanceView()
   const apiBotId = useStore((s) => s.bots.find((b) => b.kind === 'claude-api')?.id ?? null)
   const selectBot = useStore((s) => s.selectBot)
   const notify = useStore((s) => s.notify)
   const [open, setOpen] = useState(false)
   const [usdText, setUsdText] = useState('')
   const [saving, setSaving] = useState(false)
-  const view = balanceView(balance, new Date(), tz)
   if (view.usd === undefined) return null
   const exact = view.source === 'console'
   const usd = view.usd
@@ -56,13 +57,19 @@ export function BalanceQuotaChip() {
     .filter(Boolean)
     .join('\n')
   const warn = stale || view.loggedOut || view.expiringSoon || (balance?.uncertain_usd ?? 0) > 0
-  const cls = `quota-balance${exact ? ' exact' : ' estimate'}${warn ? ' warn' : ''}`
-  const body = (
-    <>
-      {phone ? null : <span className="quota-balance-k">API</span>}
-      <span className="quota-balance-v">{text}</span>
-    </>
-  )
+  const cls = variant === 'row' ? `quota-pop-balance${warn ? ' warn' : ''}` : `quota-balance${exact ? ' exact' : ' estimate'}${warn ? ' warn' : ''}`
+  const body =
+    variant === 'row' ? (
+      <>
+        <span className="quota-pop-balance-k">{t('Anthropic API 餘額')}</span>
+        <span className="quota-pop-balance-v">{text}</span>
+      </>
+    ) : (
+      <>
+        {phone ? null : <span className="quota-balance-k">API</span>}
+        <span className="quota-balance-v">{text}</span>
+      </>
+    )
   const usdVal = Number.parseFloat(usdText)
   const save = async () => {
     if (!Number.isFinite(usdVal) || usdVal < 0 || saving) return
@@ -81,7 +88,7 @@ export function BalanceQuotaChip() {
   }
   return (
     <>
-      <button type="button" className={cls} data-k="quota-balance" title={title} onClick={() => setOpen(true)}>
+      <button type="button" className={cls} data-k={variant === 'row' ? 'quota-balance-row' : 'quota-balance'} title={title} onClick={() => setOpen(true)}>
         {body}
       </button>
       <Modal open={open} title={t('Anthropic API 餘額')} width={420} onClose={() => setOpen(false)}>

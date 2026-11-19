@@ -1662,3 +1662,11 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **文案**：推算值只寫「已用 OpenAI 餘額 $x 校正」，不沿用 Console 字樣（OpenAI 沒有 Console 實際值）；tooltip 列錨點、已確定花費、結果不明的最壞情況。
 - **不做的事**：不做 Console 實際值讀取、不做自動輪詢；校正一律手動，因為儲值與贈送額度只能靠使用者輸入。
 - 測試：`components/openAiBalanceChipDom.test.tsx`（未啟用不畫、無錨點顯示設定、有錨點顯示金額、位置在 Claude 之後、PUT 呼叫）。
+
+## API 餘額在額度選單與無額度主機上的呈現（2026-11-19）
+
+- **總餘額不分主機**（使用者裁示）：沒有任何額度格的主機（例如 m4p）仍畫出 Claude 與 OpenAI 餘額晶片；只有兩個餘額都不可見時才整條額度列不畫。
+- **選單底部「API 餘額」區**：額度選單（`.quota-pop`）在 `quota-pop-foot` 之前列出 Claude、OpenAI 各一列（金額，或「設定 OpenAI 餘額」入口），點了開各自原本的校正視窗；本機與遠端主機都有；手機 setOnly 時仍顯示（額度格只露出點選的那一格，餘額區不受影響）。未設定／未啟用的那一列不畫，兩者都不可見就整塊不畫。
+- **同一份邏輯**：晶片與選單列共用 `BalanceQuotaChip`／`OpenAiBalanceChip`（`variant='chip'|'row'`），可見性用 `useClaudeBalanceVisible`／`useOpenAiBalanceVisible`，不另外複製資料或視窗。
+- **沒有額度格就開不了選單**：選單的入口是額度格，主機沒有格時沒有選單；餘額只能從晶片進（晶片本身就開校正視窗）。
+- 測試：`components/quotaBalanceMenuDom.test.tsx`（m4p 無格仍畫晶片、兩者都不可見整條不畫、本機與 m4p 選單有餘額區、手機 setOnly、未啟用那列不畫）。

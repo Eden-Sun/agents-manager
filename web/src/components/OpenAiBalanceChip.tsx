@@ -11,7 +11,8 @@ import './balanceQuotaChip.css'
  * 未啟用（`[openai_api] enabled = false`）整格不畫；啟用但還沒設錨點就畫「設定 OpenAI 餘額」，點開的視窗跟有錨點時是同一個，
  * 可以在這裡輸入 OpenAI 帳戶目前的可用餘額當錨點。有錨點就畫 `OpenAI $x`（錨點－本機已確定花費，OpenAI 沒有餘額端點，只能推算）。
  */
-export function OpenAiBalanceChip() {
+/** `variant='row'`：額度選單底部「API 餘額」區的一列（同一份資料、同一個校正視窗）。 */
+export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'row' } = {}) {
   const t = useT()
   const balance = useOpenAiApiBalance()
   const notify = useStore((s) => s.notify)
@@ -36,7 +37,7 @@ export function OpenAiBalanceChip() {
         .join('\n')
     : t('OpenAI API 餘額：尚未設定。點一下輸入目前餘額當錨點')
   const warn = configured && (usd < 0 || uncertain > 0)
-  const cls = `quota-balance estimate${warn ? ' warn' : ''}`
+  const cls = variant === 'row' ? `quota-pop-balance${warn ? ' warn' : ''}` : `quota-balance estimate${warn ? ' warn' : ''}`
 
   const usdVal = Number.parseFloat(usdText)
   const save = async () => {
@@ -57,8 +58,13 @@ export function OpenAiBalanceChip() {
 
   return (
     <>
-      <button type="button" className={cls} data-k="openai-balance" title={title} onClick={() => setOpen(true)}>
-        {configured ? (
+      <button type="button" className={cls} data-k={variant === 'row' ? 'openai-balance-row' : 'openai-balance'} title={title} onClick={() => setOpen(true)}>
+        {variant === 'row' ? (
+          <>
+            <span className="quota-pop-balance-k">{t('OpenAI API 餘額')}</span>
+            <span className="quota-pop-balance-v">{configured ? `$${usd.toFixed(2)}` : t('設定 OpenAI 餘額')}</span>
+          </>
+        ) : configured ? (
           <>
             <span className="quota-balance-k">OpenAI</span>
             <span className="quota-balance-v">{`$${usd.toFixed(2)}`}</span>

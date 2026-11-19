@@ -46,3 +46,41 @@ button.quota-balance {
     padding: 1px 5px;
   }
 }
+
+/* 額度選單底部「API 餘額」區（使用者 2026-11-19）：手機與遠端主機都看得到，一列一家。 */
+.quota-pop-api {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+}
+.quota-pop-api-title {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.quota-pop-balance {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.quota-pop-balance-k {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.quota-pop-balance-v {
+  font-variant-numeric: tabular-nums;
+}
+.quota-pop-balance.warn .quota-pop-balance-v {
+  color: var(--warn, #c77700);
+}

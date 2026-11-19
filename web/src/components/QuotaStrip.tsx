@@ -15,6 +15,7 @@ import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
 import { BalanceQuotaChip } from './BalanceQuotaChip'
+import { useClaudeBalanceVisible, useOpenAiBalanceVisible } from './balanceHooks'
 import { OpenAiBalanceChip } from './OpenAiBalanceChip'
 import { DEFAULT_ACCOUNT } from '../store/identityRows'
 import { disableUntil } from '../lib/quotaDisableUntil'
@@ -987,6 +988,9 @@ export function QuotaStrip({
   const [agyLogoutOpen, setAgyLogoutOpen] = useState(false)
   // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
+  // 餘額是全域的（不分主機）：沒有額度格的主機也要看得到（使用者 2026-11-19）。
+  const claudeBalanceVisible = useClaudeBalanceVisible()
+  const openaiBalanceVisible = useOpenAiBalanceVisible()
   const phone = useMediaQuery(PHONE_QUERY)
   // 手機明細貼在額度列正下方（2026-09-09 使用者：跳在底下太遠）。
   const [popTop, setPopTop] = useState<number | null>(null)
@@ -1085,7 +1089,8 @@ export function QuotaStrip({
 
   const popEntries = ordered
 
-  if (ordered.length === 0) return null
+  // 沒有任何額度格時仍畫出餘額晶片（只畫晶片，不畫空的量表）；兩個餘額都不可見才整條不畫。
+  if (ordered.length === 0 && !claudeBalanceVisible && !openaiBalanceVisible) return null
 
   const freshest = popEntries
     .map((e) => quota[e.fullKey]?.updated_at ?? null)
@@ -1162,6 +1167,14 @@ export function QuotaStrip({
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
               {t('看全部（{count}）', { count: popEntries.length })}
             </button>
+          ) : null}
+          {/* API 餘額區：全域、不分主機，手機 setOnly 時也顯示（使用者 2026-11-19）。各列自己判斷可見，都不可見就整塊不畫。 */}
+          {claudeBalanceVisible || openaiBalanceVisible ? (
+            <div className="quota-pop-api" data-k="quota-pop-api">
+              <div className="quota-pop-api-title">{t('API 餘額')}</div>
+              <BalanceQuotaChip variant="row" />
+              <OpenAiBalanceChip variant="row" />
+            </div>
           ) : null}
           {freshest ? <p className="quota-pop-foot">{t('更新於 {time} · ↻ 是距離重置還有多久', { time: fmtTime(freshest) })}</p> : null}
         </div>
