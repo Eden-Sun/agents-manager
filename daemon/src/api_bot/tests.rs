@@ -145,11 +145,11 @@ struct MemoryJournal {
     fail_at: Option<usize>,
 }
 impl Journal for MemoryJournal {
-    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>> {
+    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), crate::api_bot::runner::JournalFailure>> {
         Box::pin(async move {
             let mut saved = self.snapshots.lock().unwrap();
             if self.fail_at == Some(saved.len()) {
-                return Err(());
+                return Err(crate::api_bot::runner::JournalFailure::DbWriteFailed);
             }
             saved.push(state.clone());
             Ok(())
@@ -293,7 +293,7 @@ async fn pending_recovery_and_checkpoint_failure_never_execute_or_send() {
             2
         )
         .await,
-        Err(runner::Error::Journal)
+        Err(runner::Error::Journal(crate::api_bot::runner::JournalFailure::DbWriteFailed))
     );
     assert!(f.seen.lock().unwrap().is_empty());
     assert_eq!(tools.count.load(Ordering::SeqCst), 0);
@@ -324,7 +324,7 @@ async fn journal_failure_after_tool_is_unknown_and_not_replayed() {
             2
         )
         .await,
-        Err(runner::Error::Journal)
+        Err(runner::Error::Journal(crate::api_bot::runner::JournalFailure::DbWriteFailed))
     );
     assert_eq!(tools.count.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -690,7 +690,7 @@ async fn journal_failure_on_final_response_also_poisons_in_memory_reuse() {
             1
         )
         .await,
-        Err(runner::Error::Journal)
+        Err(runner::Error::Journal(crate::api_bot::runner::JournalFailure::DbWriteFailed))
     );
     assert_eq!(
         runner::run(

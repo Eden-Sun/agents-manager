@@ -106,25 +106,44 @@ struct Stored {
     checkpoint_json: String,
 }
 
+/// 圍籬對不上（owner、run／turn／世代、或 session 已退役）：呼叫端用 `downcast_ref::<StaleFence>()` 區分於真正的寫入失敗。
+/// Display 文字與舊的 `ensure!` 訊息一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleFence(pub &'static str);
+impl std::fmt::Display for StaleFence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for StaleFence {}
+
+/// 寫入時 revision 已不是預期值（別的寫入先到了）：`downcast_ref::<StaleRevision>()`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleRevision;
+impl std::fmt::Display for StaleRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stale checkpoint revision")
+    }
+}
+impl std::error::Error for StaleRevision {}
+
 async fn owner(conn: &mut SqliteConnection, f: &Fence<'_>) -> Result<()> {
     let valid: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM bots b JOIN runs r ON r.bot_id=b.id JOIN turns t ON t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND r.id=? AND r.state='running' AND t.id=? AND t.status='in_flight' AND c.bot_id=b.id)"))
         .bind(f.bot).bind(f.run).bind(f.turn).fetch_one(conn).await?;
-    ensure!(
-        valid && f.generation > 0 && f.revision >= 0,
-        "stale API bot owner"
-    );
+    if !(valid && f.generation > 0 && f.revision >= 0) {
+        return Err(anyhow::Error::new(StaleFence("stale API bot owner")));
+    }
     Ok(())
 }
 async fn current(conn: &mut SqliteConnection, f: &Fence<'_>, at: &str) -> Result<Stored> {
     owner(conn, f).await?;
     let row: Stored = sqlx::query_as("SELECT owner_run_id,owner_turn_id,generation,revision,checkpoint_json FROM api_bot_sessions WHERE id=? AND bot_id=? AND retired_at IS NULL AND expires_at>?")
-        .bind(f.session).bind(f.bot).bind(at).fetch_optional(conn).await?.context("API bot session unavailable")?;
-    ensure!(
-        row.owner_run_id.as_deref() == Some(f.run)
+        .bind(f.session).bind(f.bot).bind(at).fetch_optional(conn).await?.ok_or_else(|| anyhow::Error::new(StaleFence("API bot session unavailable")))?;
+    if !(row.owner_run_id.as_deref() == Some(f.run)
             && row.owner_turn_id.as_deref() == Some(f.turn)
-            && row.generation == f.generation,
-        "stale API bot session fence"
-    );
+            && row.generation == f.generation) {
+        return Err(anyhow::Error::new(StaleFence("stale API bot session fence")));
+    }
     Ok(row)
 }
 async fn cas(
@@ -139,7 +158,9 @@ async fn cas(
         .context("checkpoint revision overflow")?;
     let changed=sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=?,revision=?,updated_at=?,expires_at=? WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND revision=? AND retired_at IS NULL AND expires_at>?")
         .bind(&checkpoint.0).bind(next).bind(at).bind(super::iso_in(RETENTION_SECS)).bind(f.session).bind(f.bot).bind(f.run).bind(f.turn).bind(f.generation).bind(f.revision).bind(at).execute(conn).await?.rows_affected();
-    ensure!(changed == 1, "stale checkpoint revision");
+    if changed != 1 {
+        return Err(anyhow::Error::new(StaleRevision));
+    }
     Ok(next)
 }
 
@@ -161,7 +182,9 @@ pub async fn load(pool: &SqlitePool, f: &Fence<'_>) -> Result<Checkpoint> {
     let mut tx = super::begin_write(pool).await?;
     let row = current(&mut tx, f, &super::now()).await?;
     tx.commit().await?;
-    ensure!(row.revision == f.revision, "stale checkpoint revision");
+    if row.revision != f.revision {
+        return Err(anyhow::Error::new(StaleRevision));
+    }
     Checkpoint::new(
         &serde_json::from_str(&row.checkpoint_json).context("invalid stored checkpoint")?,
     )

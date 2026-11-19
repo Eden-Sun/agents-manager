@@ -20,7 +20,7 @@ use super::http;
 use super::protocol::{Message, Options, Response, ToolCall};
 use super::quote::QuotedRequest;
 use super::quote::QuoteProvider;
-use super::runner::{Journal, Model, State, Tools};
+use super::runner::{Journal, JournalFailure, Model, State, Tools};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AdapterIdentity {
@@ -675,14 +675,94 @@ impl Model for ApiBotAdapter {
     }
 }
 
+/// 一次 `save` 的診斷資料：只放 id、數字與 reason 代碼，**不放** prompt、工具輸出、金鑰或 checkpoint 內容。
+#[derive(Default)]
+pub(super) struct SaveDiag {
+    pub(super) bot_id: String,
+    pub(super) turn_id: String,
+    pub(super) generation: i64,
+    pub(super) revision: Option<i64>,
+    pub(super) pending_before: Option<bool>,
+    pub(super) pending_after: Option<bool>,
+    pub(super) bytes: Option<u64>,
+    pub(super) limit: Option<u64>,
+    pub(super) sqlite_code: Option<String>,
+}
+
+impl SaveDiag {
+    fn new(bot_id: &str, turn_id: &str, generation: i64) -> Self {
+        Self { bot_id: bot_id.to_string(), turn_id: turn_id.to_string(), generation, ..Self::default() }
+    }
+
+    /// 這一行就是統一出口記的內容（`key=value`，放在 `log` 欄位）：只有 id、數字與 reason 代碼。
+    pub(super) fn log_line(&self, failure: JournalFailure) -> String {
+        format!(
+            "reason={} bot_id={} turn_id={} generation={} revision={:?} pending_before={:?} pending_after={:?} bytes={:?} limit={:?} sqlite_code={:?}",
+            failure.code(),
+            self.bot_id,
+            self.turn_id,
+            self.generation,
+            self.revision,
+            self.pending_before,
+            self.pending_after,
+            self.bytes,
+            self.limit,
+            self.sqlite_code
+        )
+    }
+
+    /// 統一出口：每次失敗只記一行。
+    fn emit(&self, failure: JournalFailure) {
+        tracing::warn!(log = %self.log_line(failure), "API bot checkpoint not saved");
+    }
+}
+
+/// 把 DB 錯誤分成圍籬、revision 與真正的寫入失敗；SQLite 錯誤只附上代碼。
+pub(super) fn db_failure(diag: &mut SaveDiag, e: &anyhow::Error) -> JournalFailure {
+    if let Some(sqlx::Error::Database(db)) = e.downcast_ref::<sqlx::Error>() {
+        diag.sqlite_code = db.code().map(|c| c.into_owned());
+    }
+    if e.downcast_ref::<db_api::StaleFence>().is_some() {
+        JournalFailure::FenceMismatch
+    } else if e.downcast_ref::<db_api::StaleRevision>().is_some() {
+        JournalFailure::StaleRevision
+    } else {
+        JournalFailure::DbWriteFailed
+    }
+}
+
 impl Journal for ApiBotAdapter {
-    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>> {
+    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), JournalFailure>> {
         Box::pin(async move {
-            let val = self.checkpoint_value(state)?;
-            let chk = Checkpoint::new(&val).map_err(|_| ())?;
-            let raw_len = serde_json::to_vec(&val).map_err(|_| ())?.len();
+            let (result, diag) = self.save_observed(state).await;
+            if let Err(failure) = result {
+                diag.emit(failure);
+            }
+            result
+        })
+    }
+}
+
+impl ApiBotAdapter {
+    /// `save` 的可觀察版本：回結果與這一次的診斷資料（測試用來確認統一出口記的內容）。
+    pub(super) async fn save_observed(&self, state: &State) -> (Result<(), JournalFailure>, SaveDiag) {
+        let mut diag = SaveDiag::new(&self.identity.bot_id, &self.identity.turn_id, self.identity.generation);
+        let result = self.save_checkpoint(state, &mut diag).await;
+        (result, diag)
+    }
+
+    /// `Journal::save` 的本體：每個失敗都回具名原因；log 由 `save` 統一記一次（見 [`SaveDiag::emit`]）。
+    async fn save_checkpoint(&self, state: &State, diag: &mut SaveDiag) -> Result<(), JournalFailure> {
+            if state.provider.is_some() && state.provider != self.session_tag {
+                return Err(JournalFailure::CheckpointProviderMismatch);
+            }
+            let val = self.checkpoint_value(state).map_err(|_| JournalFailure::CheckpointSerialize)?;
+            let chk = Checkpoint::new(&val).map_err(|_| JournalFailure::CheckpointSerialize)?;
+            let raw_len = serde_json::to_vec(&val).map_err(|_| JournalFailure::CheckpointSerialize)?.len();
+            diag.bytes = Some(raw_len as u64);
+            diag.limit = Some(self.limits.max_checkpoint_bytes as u64);
             if raw_len > self.limits.max_checkpoint_bytes {
-                return Err(());
+                return Err(JournalFailure::CheckpointTooLarge);
             }
 
             let mut cursor = self.cursor.lock().await;
@@ -697,15 +777,18 @@ impl Journal for ApiBotAdapter {
 
             let before_pending = cursor.last_api_pending;
             let after_pending = state.api_pending;
+            diag.revision = Some(cursor.revision);
+            diag.pending_before = Some(before_pending);
+            diag.pending_after = Some(after_pending);
 
             match (before_pending, after_pending) {
                 (true, true) => {
                     // While HTTP is active/pending, disallow arbitrary mutation of messages/responses.
                     // Only allow exactly matching the last durable state (idempotent checkpoint), without granting permits.
                     let durable_val =
-                        self.checkpoint_value(&cursor.last_durable_state)?;
+                        self.checkpoint_value(&cursor.last_durable_state).map_err(|_| JournalFailure::CheckpointSerialize)?;
                     if val != durable_val {
-                        return Err(());
+                        return Err(JournalFailure::PendingStateChanged);
                     }
                     Ok(())
                 }
@@ -746,15 +829,19 @@ impl Journal for ApiBotAdapter {
 
                     let envelope = self.provider
                         .encode(&cursor.effective_effort, &self.system, &state.messages, state.responses.last())
-                        .map_err(|_| ())?;
+                        .map_err(|_| JournalFailure::EncodeFailed)?;
                     let key = self.http_cfg.key_source.snapshot().await.map_err(|_| {
                         tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable");
                         self.refuse("api_bot_key_unavailable");
+                        JournalFailure::Refused
                     })?;
-                    if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); self.refuse("api_bot_key_unavailable"); return Err(()); }
-                    let quote = self.quote_provider.reserve(envelope.as_ref()).map_err(|_| self.refuse("api_bot_quote_refused"))?;
+                    if key.is_empty() { tracing::info!(reason="api_key_unavailable", "API key snapshot unavailable"); self.refuse("api_bot_key_unavailable"); return Err(JournalFailure::Refused); }
+                    let quote = self.quote_provider.reserve(envelope.as_ref()).map_err(|_| {
+                        self.refuse("api_bot_quote_refused");
+                        JournalFailure::InvalidQuote
+                    })?;
                     if quote.reserved_microusd <= 0 || quote.pricing_version.is_empty() {
-                        return Err(());
+                        return Err(JournalFailure::InvalidQuote);
                     }
 
                     // 帳本範圍跟著 session 的供應商：每筆 attempt 記它的 `provider`，每小時請求數與總上限都只算同一家的。
@@ -791,7 +878,7 @@ impl Journal for ApiBotAdapter {
                                 let cap_str = crate::claude_api_cap::format_usd_pretty(cap_usd);
                                 let spent_str = crate::claude_api_cap::format_usd_pretty(spent_usd);
                                 self.refuse(format!("api_total_cap_reached:cap={cap_str}:spent={spent_str}"));
-                                return Err(());
+                                return Err(JournalFailure::Refused);
                             }
                         }
                     }
@@ -830,12 +917,18 @@ impl Journal for ApiBotAdapter {
                         if let Some(cap) = e.downcast_ref::<db_api::TotalCapRefused>() {
                             let usd = |microusd: i64| crate::claude_api_cap::format_usd_pretty(microusd as f64 / 1_000_000.0);
                             self.refuse(format!("api_total_cap_reached:cap={}:spent={}", usd(cap.cap_microusd), usd(cap.spent_microusd)));
-                            return;
+                            return JournalFailure::Refused;
                         }
                         match e.downcast_ref::<db_api::ReserveRefused>() {
-                            Some(db_api::ReserveRefused::TurnBudget) => self.refuse("api_bot_turn_cost_cap_exceeded"),
-                            Some(db_api::ReserveRefused::HourlyLimit) => self.refuse("api_bot_hourly_limit_reached"),
-                            None => {}
+                            Some(db_api::ReserveRefused::TurnBudget) => {
+                                self.refuse("api_bot_turn_cost_cap_exceeded");
+                                JournalFailure::Refused
+                            }
+                            Some(db_api::ReserveRefused::HourlyLimit) => {
+                                self.refuse("api_bot_hourly_limit_reached");
+                                JournalFailure::Refused
+                            }
+                            None => db_failure(diag, &e),
                         }
                     })?;
 
@@ -852,51 +945,51 @@ impl Journal for ApiBotAdapter {
                             });
                             Ok(())
                         }
-                        db_api::Reservation::Existing { .. } => Err(()),
+                        db_api::Reservation::Existing { .. } => Err(JournalFailure::AttemptExists),
                     }
                 }
                 (true, false) => {
                     let (active_id, resp, estimated_microusd, actual_speed, duration_ms) = {
-                        let active = cursor.active_attempt.as_ref().ok_or(())?;
-                        let settled = cursor.settled_response.as_ref().ok_or(())?;
+                        let active = cursor.active_attempt.as_ref().ok_or(JournalFailure::ResponseTransitionMismatch)?;
+                        let settled = cursor.settled_response.as_ref().ok_or(JournalFailure::ResponseTransitionMismatch)?;
 
                         // Verify legal increment from last durable state to state with assistant response
                         let durable = &cursor.last_durable_state;
                         if state.responses.len() != durable.responses.len() + 1 {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
                         // Response has no PartialEq; compare prefix via JSON values
                         let durable_resp_val =
-                            serde_json::to_value(&durable.responses).map_err(|_| ())?;
+                            serde_json::to_value(&durable.responses).map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         let state_prefix_resp_val =
                             serde_json::to_value(&state.responses[..durable.responses.len()])
-                                .map_err(|_| ())?;
+                                .map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         if durable_resp_val != state_prefix_resp_val {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
                         let last_resp_val = serde_json::to_value(state.responses.last().unwrap())
-                            .map_err(|_| ())?;
+                            .map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         let settled_resp_val =
-                            serde_json::to_value(&settled.response).map_err(|_| ())?;
+                            serde_json::to_value(&settled.response).map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         if last_resp_val != settled_resp_val {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
                         // transcript 只能多出「這份回應照 session 的 codec 收進去」的那一段（Claude：一則 assistant 訊息；
                         // OpenAI：回應的每個 output item 各一筆）。由 codec 從上一份 durable 狀態算出預期值再整份比對。
                         let mut expected = durable.clone();
-                        let accepted = self.provider.codec().accept(&mut expected, settled.response.clone()).map_err(|_| ())?;
+                        let accepted = self.provider.codec().accept(&mut expected, settled.response.clone()).map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         if state.messages != expected.messages {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
                         let expected_tool_pending = accepted.calls.first().map(|c| c.id.clone());
                         if state.tool_pending != expected_tool_pending {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
                         if state.completed_tool_ids != durable.completed_tool_ids {
-                            return Err(());
+                            return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
                         (
@@ -923,7 +1016,7 @@ impl Journal for ApiBotAdapter {
 
                     let next_rev = db_api::record(&self.pool, &fence, &active_id, &receipt, &chk)
                         .await
-                        .map_err(|_| ())?;
+                        .map_err(|e| db_failure(diag, &e))?;
 
                     cursor.active_attempt = None;
                     cursor.settled_response = None;
@@ -935,14 +1028,13 @@ impl Journal for ApiBotAdapter {
                 _ => {
                     let next_rev = db_api::save(&self.pool, &fence, &chk)
                         .await
-                        .map_err(|_| ())?;
+                        .map_err(|e| db_failure(diag, &e))?;
                     cursor.revision = next_rev;
                     cursor.last_api_pending = after_pending;
                     cursor.last_durable_state = state.clone();
                     Ok(())
                 }
             }
-        })
     }
 }
 

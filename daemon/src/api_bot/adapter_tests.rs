@@ -1537,7 +1537,7 @@ mod tests {
                         runner_res,
                         Err(runner::Error::Cancelled)
                             | Err(runner::Error::Model(crate::api_bot::http::Error::Cancelled))
-                            | Err(runner::Error::Journal)
+                            | Err(runner::Error::Journal(crate::api_bot::runner::JournalFailure::FenceMismatch))
                     ),
                     "runner must fail due to cancellation or journal owner CAS failure, got {:?}",
                     runner_res
@@ -1937,5 +1937,103 @@ mod tests {
         let (rebound, state) = ApiBotAdapter::rebind_with(pool.clone(), &identity, 0, next, openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await.unwrap();
         assert_eq!(state.provider_id(), "openai");
         drop(rebound);
+    }
+
+    // ---- Journal 失敗的具名原因與統一出口 log（2026-11-19）----
+
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+        fn make_writer(&'a self) -> LogSink {
+            self.clone()
+        }
+    }
+
+    fn one_message_state(text: &str, pending: bool) -> State {
+        State {
+            messages: vec![Message { role: "user".into(), content: serde_json::json!(text) }],
+            api_pending: pending,
+            ..State::default()
+        }
+    }
+
+    async fn journal_adapter(limits: crate::api_bot::adapter::AdapterLimits) -> (ApiBotAdapter, SqlitePool, String, String, Arc<AtomicUsize>) {
+        let wire_calls = Arc::new(AtomicUsize::new(0));
+        let server = spawn_mock_server(wire_calls.clone(), serde_json::json!({}), None, None, None).await;
+        let (pool, bot, run, turn, session) = setup_test_db().await;
+        let adapter = ApiBotAdapter::new(
+            pool.clone(),
+            AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run.clone(), turn_id: turn, generation: 1 },
+            test_options(),
+            serde_json::json!("System"),
+            limits,
+            Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
+            AdapterHttpConfig {
+                endpoint: server.endpoint.clone(),
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        (adapter, pool, session, run, wire_calls)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_too_large_log_line_has_reason_and_numbers_and_never_the_prompt() {
+        let mut limits = test_limits();
+        limits.max_checkpoint_bytes = 64;
+        let (adapter, _pool, _session, _run, wire_calls) = journal_adapter(limits).await;
+        let state = one_message_state("PROMPT-SENTINEL-7f3a 這是一段很長的提示內容，用來超過上限的長長長長長長長長長長長長長長長長", false);
+        let (result, diag) = adapter.save_observed(&state).await;
+        assert_eq!(result, Err(runner::JournalFailure::CheckpointTooLarge));
+        assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
+        // 統一出口記的就是這一行（真實 save 路徑產生的診斷資料）：只含 reason、id、數字與 SQLite 代碼。
+        let line = diag.log_line(runner::JournalFailure::CheckpointTooLarge);
+        assert_eq!(line.matches("reason=checkpoint_too_large").count(), 1, "{line}");
+        assert!(line.contains("limit=Some(64)") && line.contains("bot_id="), "{line}");
+        assert!(!line.contains("PROMPT-SENTINEL") && !line.contains("提示內容"), "log 不可含 prompt：{line}");
+    }
+
+    #[tokio::test]
+    async fn stale_revision_fence_and_real_write_failure_get_their_own_reasons() {
+        use crate::api_bot::runner::Journal as _;
+        // 別的寫入先到了（revision 被推進）：stale_revision，不是「對話狀態無法寫入」。
+        let (adapter, pool, session, _run, _) = journal_adapter(test_limits()).await;
+        sqlx::query("UPDATE api_bot_sessions SET revision = revision + 1 WHERE id = ?").bind(&session).execute(&pool).await.unwrap();
+        assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::StaleRevision));
+
+        // 回合的 run 已結束：圍籬對不上，fence_mismatch。
+        let (adapter, pool, _session, run, _) = journal_adapter(test_limits()).await;
+        sqlx::query("UPDATE runs SET state = 'stopped' WHERE id = ?").bind(&run).execute(&pool).await.unwrap();
+        assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::FenceMismatch));
+
+        // 真正的寫入失敗（連線池已關閉）：db_write_failed，這才是唯一顯示「對話狀態無法寫入」的原因。
+        let (adapter, pool, _session, _run, _) = journal_adapter(test_limits()).await;
+        pool.close().await;
+        assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::DbWriteFailed));
+    }
+
+    #[tokio::test]
+    async fn turn_cap_too_small_refuses_before_http_with_the_named_reason() {
+        use crate::api_bot::runner::Journal as _;
+        let mut limits = test_limits();
+        limits.max_turn_microusd = 1; // 預留 10_000 超過單回合上限
+        let (adapter, _pool, _session, _run, wire_calls) = journal_adapter(limits).await;
+        assert_eq!(adapter.save(&one_message_state("hi", true)).await, Err(runner::JournalFailure::Refused));
+        assert_eq!(wire_calls.load(Ordering::SeqCst), 0, "cap 不足：HTTP 之前就拒絕");
+        assert_eq!(adapter.take_refusal().as_deref(), Some("api_bot_turn_cost_cap_exceeded"));
     }
 }

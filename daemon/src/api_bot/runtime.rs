@@ -2089,8 +2089,9 @@ fn map_runner_result(
         Err(super::runner::Error::Cancelled) => TurnOutcome::Cancelled,
         Err(super::runner::Error::Model(H::Cancelled)) if cancel.is_cancelled() => TurnOutcome::Cancelled,
         Err(super::runner::Error::Budget) => TurnOutcome::Failed("api_bot_max_calls_reached".into()),
-        // 預留被拒絕時儲存失敗會冒成 Journal；有明確原因（額度、key、報價）就用它。
-        Err(super::runner::Error::Journal) => TurnOutcome::Failed(refusal.unwrap_or_else(|| "journal".into())),
+        // 預留被拒絕時儲存失敗會冒成 Journal；有明確原因（額度、key、報價）就用它，沒有才用儲存失敗的具名原因
+        // （只有真正的寫入失敗才是 `journal`，見 `JournalFailure::reason`）。
+        Err(super::runner::Error::Journal(failure)) => TurnOutcome::Failed(refusal.unwrap_or_else(|| failure.reason().into())),
         Err(super::runner::Error::PendingUnknown) => TurnOutcome::Failed("pending_unknown".into()),
         Err(super::runner::Error::InvalidResponse) => TurnOutcome::Failed("invalid_response".into()),
         Err(super::runner::Error::Model(e)) => TurnOutcome::Failed(match e {

@@ -22,6 +22,8 @@ pub(crate) mod tools;
 #[cfg(test)]
 mod adapter_tests;
 #[cfg(test)]
+mod journal_failure_tests;
+#[cfg(test)]
 mod wrap_up_tests;
 #[cfg(test)]
 mod debug_redaction_tests;

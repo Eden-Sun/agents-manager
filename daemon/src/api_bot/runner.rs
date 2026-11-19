@@ -20,7 +20,65 @@ pub trait Tools: Send + Sync {
 }
 pub trait Journal: Send + Sync {
     /// Return Ok ONLY after this entire checkpoint is durable. A failures must stop execution.
-    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>>;
+    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), JournalFailure>>;
+}
+
+/// `Journal::save` 失敗的具名原因。統一出口（adapter 的 `save`）記一次結構化 log；
+/// 只有 [`JournalFailure::DbWriteFailed`] 才是「對話狀態無法寫入」，其餘各有自己的人話訊息（見 [`JournalFailure::reason`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalFailure {
+    /// checkpoint 的 provider 標籤跟這個 session 不同（不能把別家的紀錄寫進來）。
+    CheckpointProviderMismatch,
+    /// checkpoint 無法序列化或欄位不合格式。
+    CheckpointSerialize,
+    /// checkpoint 超過 `max_checkpoint_bytes`。
+    CheckpointTooLarge,
+    /// 上一次請求還沒結束（pending），但 checkpoint 內容跟上次落地的不同。
+    PendingStateChanged,
+    /// 請求無法編碼（provider 拒絕這份 transcript）。
+    EncodeFailed,
+    /// 報價失敗或報價無效（未核准的模型／欄位、金額不合理）。
+    InvalidQuote,
+    /// 同一筆 attempt 已存在（重複預留）。
+    AttemptExists,
+    /// 回應落地時，transcript 與上一份落地狀態不符合合法的增量。
+    ResponseTransitionMismatch,
+    /// 圍籬對不上：run／turn／世代已換掉，或 session 已退役。
+    FenceMismatch,
+    /// revision 過期：別的寫入先到了。
+    StaleRevision,
+    /// 額度、key、或 cap 在送出前擋下（明確原因已由 adapter 的 refusal 記下）。
+    Refused,
+    /// 真正的儲存失敗（SQLite 寫入錯誤等）。
+    DbWriteFailed,
+}
+
+impl JournalFailure {
+    /// log 與測試用的穩定代碼。
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::CheckpointProviderMismatch => "checkpoint_provider_mismatch",
+            Self::CheckpointSerialize => "checkpoint_serialize",
+            Self::CheckpointTooLarge => "checkpoint_too_large",
+            Self::PendingStateChanged => "pending_state_changed",
+            Self::EncodeFailed => "encode_failed",
+            Self::InvalidQuote => "invalid_quote",
+            Self::AttemptExists => "attempt_exists",
+            Self::ResponseTransitionMismatch => "response_transition_mismatch",
+            Self::FenceMismatch => "fence_mismatch",
+            Self::StaleRevision => "stale_revision",
+            Self::Refused => "refused",
+            Self::DbWriteFailed => "db_write_failed",
+        }
+    }
+
+    /// 給 turn 失敗原因（`completion::reason_message` 用）的代碼：只有寫入失敗用 `journal`，其餘用各自的代碼。
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::DbWriteFailed => "journal",
+            other => other.code(),
+        }
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -78,7 +136,7 @@ pub enum Error {
     PendingUnknown,
     Cancelled,
     Budget,
-    Journal,
+    Journal(JournalFailure),
     InvalidResponse,
     Model(super::http::Error),
 }
@@ -293,11 +351,11 @@ pub async fn run_with_codec(
     Ok(Halt::MaxCallsReached)
 }
 
-async fn checkpoint(journal: &impl Journal, state: &mut State) -> Result<(), Error> {
-    if journal.save(state).await.is_err() {
+pub(super) async fn checkpoint(journal: &impl Journal, state: &mut State) -> Result<(), Error> {
+    if let Err(failure) = journal.save(state).await {
         // Also poison the in-memory state: callers cannot reuse an uncommitted transcript.
         state.api_pending = true;
-        return Err(Error::Journal);
+        return Err(Error::Journal(failure));
     }
     Ok(())
 }

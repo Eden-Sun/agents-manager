@@ -194,9 +194,9 @@ impl Tools for EchoTools {
 #[derive(Default)]
 struct Snapshots(Mutex<Vec<String>>);
 impl Journal for Snapshots {
-    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), ()>> {
+    fn save<'a>(&'a self, state: &'a State) -> BoxFuture<'a, Result<(), crate::api_bot::runner::JournalFailure>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(serde_json::to_string(state).map_err(|_| ())?);
+            self.0.lock().unwrap().push(serde_json::to_string(state).map_err(|_| crate::api_bot::runner::JournalFailure::CheckpointSerialize)?);
             Ok(())
         })
     }
@@ -421,10 +421,11 @@ async fn the_reserved_amount_equals_pricing_quote_request_for_the_same_request()
     // 長文門檻真的被跨過了（否則上面那一例沒有測到長文價）。
     let long_bound = super::pricing::input_token_bound("gpt-6-luna", provider.request_for("low", &system, &long).unwrap().body().unwrap().len()).unwrap();
     assert!(long_bound > super::pricing::GPT_6_LUNA_2026_11_18.long_context_over);
-    // 超過 context window：兩邊都在送出前拒絕。
+    // 位元組超過 context window：不在送出前拒絕（上游會以 context 上限拒絕、不計費），預留以 context window 封頂。
     let huge = vec![Message { role: "user".into(), content: json!("x".repeat(1_100_000)) }];
-    assert!(provider.encode("medium", &system, &huge, None).is_err());
-    assert_eq!(super::pricing::quote_request(&provider.request_for("medium", &system, &huge).unwrap()), Err(super::pricing::PriceError::TooLarge));
+    let encoded = provider.encode("medium", &system, &huge, None).expect("oversized bytes are reserved, not refused");
+    let expected = super::pricing::quote_request(&provider.request_for("medium", &system, &huge).unwrap()).expect("priced at the context window");
+    assert_eq!(OpenAiQuote.reserve(encoded.as_ref()).unwrap().reserved_microusd, expected as i64);
 }
 
 /// completed 的回應沒帶 usage：整個回應不採用（費用算不出來），而且不是「確定沒處理」——attempt 留成未知，不當成 0 元。

@@ -205,8 +205,6 @@ pub(crate) enum PriceError {
     UnsupportedTier,
     /// 請求編不出來（模型、effort 或工具配對不合法）。
     InvalidRequest,
-    /// 請求大到超過模型的 context window。
-    TooLarge,
     /// 金額溢位或用量分項矛盾。
     Overflow,
 }
@@ -214,14 +212,16 @@ pub(crate) enum PriceError {
 /// 請求位元組數之外，替上游隱藏的內容與特殊 token 留的固定餘裕。
 pub(crate) const INPUT_MARGIN_TOKENS: u64 = 8192;
 
-/// 一份已編碼請求的輸入 token 上界：一個 token 至少涵蓋 1 byte，所以 body 位元組數（加固定餘裕）就是上界。
+/// 一份已編碼請求的輸入 token 預留上界。
+///
+/// 一個 token 至少涵蓋 1 byte，所以 body 位元組數（加固定餘裕）是上界；但它通常遠大於真實 token 數
+/// （中文、JSON 轉義下可以高估約 5 倍），所以**超過 context window 只代表這個估算判不出來，不代表請求不合法**。
+/// 模型本身會以 context 上限拒絕超長請求（拒絕時不計費），因此 context window 也是可證的上界：兩者取較小值。
+/// 這個函式不因大小拒絕；只有位元組數溢位或模型沒有價表才是 `Err`。
 pub(crate) fn input_token_bound(model: &str, wire_bytes: usize) -> Result<u64, PriceError> {
     let table = price_table(model).ok_or(PriceError::UnknownModel)?;
-    let bound = u64::try_from(wire_bytes).ok().and_then(|b| b.checked_add(INPUT_MARGIN_TOKENS)).ok_or(PriceError::Overflow)?;
-    if bound > table.context_window {
-        return Err(PriceError::TooLarge);
-    }
-    Ok(bound)
+    let bytes_bound = u64::try_from(wire_bytes).ok().and_then(|b| b.checked_add(INPUT_MARGIN_TOKENS)).ok_or(PriceError::Overflow)?;
+    Ok(bytes_bound.min(table.context_window))
 }
 
 /// 預留用的上界報價（微美元）：依模型查價表，見 [`quote_upper_bound_microusd`]。

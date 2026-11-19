@@ -762,10 +762,14 @@ fn quote_request_bounds_the_bytes_that_are_actually_sent() {
     assert_eq!(quote_request(&bad_effort), Err(PriceError::InvalidRequest));
     let orphan = luna_request(vec![InputItem::ToolOutput { call_id: "nope".into(), output: "x".into() }]);
     assert_eq!(quote_request(&orphan), Err(PriceError::InvalidRequest));
-    assert_eq!(quote_request(&luna_request(vec![InputItem::User("x".repeat(1_050_000))])), Err(PriceError::TooLarge));
+    // 位元組上界超過 context window 不拒絕：預留以 context window 封頂（上游超長會拒絕、不計費）。
+    let big = luna_request(vec![InputItem::User("x".repeat(1_050_000))]);
+    assert_eq!(quote_request(&big), quote_upper_bound("gpt-6-luna", 1_050_000, big.max_output_tokens));
 
     assert_eq!(input_token_bound("gpt-6-luna", 1_050_000 - 8192), Ok(1_050_000));
-    assert_eq!(input_token_bound("gpt-6-luna", 1_050_000 - 8191), Err(PriceError::TooLarge));
+    assert_eq!(input_token_bound("gpt-6-luna", 1_050_000 - 8191), Ok(1_050_000), "封頂在 context window");
+    assert_eq!(input_token_bound("gpt-6-luna", 10_000_000), Ok(1_050_000));
+    assert_eq!(input_token_bound("gpt-6-luna", 100), Ok(100 + 8192), "小請求仍用位元組上界");
     assert_eq!(input_token_bound("gpt-unknown", 1), Err(PriceError::UnknownModel));
     assert_eq!(quote_upper_bound("gpt-unknown", 1, 1), Err(PriceError::UnknownModel));
     assert_eq!(quote_upper_bound("gpt-6-luna", u64::MAX, u64::MAX), Err(PriceError::Overflow));

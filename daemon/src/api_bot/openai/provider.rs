@@ -243,7 +243,7 @@ pub(crate) struct OpenAiRequest {
     hash: String,
     model: String,
     max_output_tokens: u64,
-    /// 輸入 token 的可證上界（`pricing::input_token_bound`：body 位元組數加固定餘裕；超過 context window 的請求編不出來）。
+    /// 輸入 token 的可證上界（`pricing::input_token_bound`：body 位元組數加固定餘裕，以 context window 封頂）。
     input_bound: u64,
 }
 
@@ -490,7 +490,7 @@ impl Provider for OpenAiProvider {
         // 配對錯、重複 call_id、不支援的 effort 都在這裡（HTTP 之前）拒絕。
         let wire = request.body().map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(&wire));
-        // 大到超過模型 context window 的請求也在這裡拒絕。
+        // 位元組上界只用來預留，超過 context window 不在這裡拒絕（上游會拒絕，且不計費）。
         let input_bound = pricing::input_token_bound(&self.model, wire.len()).map_err(|_| QuoteError::InvalidRequest)?;
         Ok(Arc::new(OpenAiRequest { wire, hash, model: self.model.clone(), max_output_tokens: self.max_output_tokens, input_bound }))
     }

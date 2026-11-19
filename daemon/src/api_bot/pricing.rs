@@ -100,7 +100,9 @@ fn strip_media_and_count(v: &mut Value, media_tokens: &mut u64) -> Result<(), Qu
     Ok(())
 }
 
-/// 這個 request 輸入 token 的保守上界（不低估）；估不出來（超過 1M context）就拒絕。
+/// 這個 request 輸入 token 的保守上界（不低估），以 1M context window 封頂。
+/// 位元組上界超過 context 不代表請求不合法（只是估算判不出來）：模型會以 context 上限拒絕超長請求（不計費），
+/// 所以封頂後的值仍是可證的上界；預留以它計價，cap 不足仍在 HTTP 之前拒絕。
 /// 位元組上界過度保守（中文、多層轉義下 1 token 遠多於 1 byte，導致數十萬 token 即超過百萬 bytes）；
 /// 若有前次回覆真實用量，則以前次 input token 加上新增內容的位元組數（1 token 至少 1 byte，新增位元組數
 /// 是新增 token 數的嚴格上界）推估增量上界，兩者取較小值，既防止位元組誤殺，又絕不低估使成本保險絲失效。
@@ -126,8 +128,7 @@ pub(super) fn input_token_bound(request: &RequestEnvelope) -> Result<u64, QuoteE
         body_bound
     };
 
-    if bound > MAX_CONTEXT_TOKENS { return Err(QuoteError::InvalidRequest); }
-    Ok(bound)
+    Ok(bound.min(MAX_CONTEXT_TOKENS))
 }
 
 fn previous_usage_prefix(response: &Response) -> Option<u64> {

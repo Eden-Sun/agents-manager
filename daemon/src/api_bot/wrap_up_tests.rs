@@ -72,7 +72,7 @@ impl Tools for FlipTools {
 #[derive(Default)]
 struct Mem;
 impl Journal for Mem {
-    fn save<'a>(&'a self, _: &'a State) -> BoxFuture<'a, Result<(), ()>> {
+    fn save<'a>(&'a self, _: &'a State) -> BoxFuture<'a, Result<(), crate::api_bot::runner::JournalFailure>> {
         Box::pin(async { Ok(()) })
     }
 }
