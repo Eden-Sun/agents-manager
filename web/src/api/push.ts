@@ -40,6 +40,7 @@ export interface PushSettingsValue {
   quota: boolean
   schedules: boolean
   ops: boolean
+  new_models: boolean
 }
 
 export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<PushSettingsValue> {

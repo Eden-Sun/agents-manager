@@ -11,7 +11,7 @@ export function PushSettings() {
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
-  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true, schedules: true, ops: true })
+  const [opts, setOpts] = useState<PushSettingsValue>({ main_bots: true, other_bots: true, hosts: true, updates: true, reset_credits: true, auth: true, quota: true, schedules: true, ops: true, new_models: true })
   useEffect(() => {
     getPushSettings().then((s) => setOpts((prev) => ({ ...prev, ...s })), () => {})
   }, [])
@@ -97,6 +97,7 @@ export function PushSettings() {
         ['hosts', t('遠端主機斷線與 bot 停止推播')],
         ['schedules', t('排程等不到 bot 超時推播')],
         ['ops', t('系統異常時推播：換版失敗／回滾、磁碟不足、herdr 非預期重啟、多顆 agent 同時消失、巡檢停止')],
+        ['new_models', t('claude 或 codex 上新模型時推播')],
       ] as const).map(([key, label]) => (
         <label key={key} className="push-settings-note" style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
           <input type="checkbox" checked={opts[key] ?? true} onChange={(e) => toggle(key, e.target.checked)} /> {label}

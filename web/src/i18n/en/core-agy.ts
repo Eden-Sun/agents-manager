@@ -222,6 +222,7 @@ const dict: Dict = {
   'codex 額度用完且有重置券時推播（只通知，不自動使用）': 'Push when Codex quota is exhausted and reset credits are available (notify only, not auto-used)',
   '遠端主機斷線與 bot 停止推播': 'Push when remote host disconnects or Bot stops',
   '排程等不到 bot 超時推播': 'Push when schedule times out waiting for Bot',
+  'claude 或 codex 上新模型時推播': 'Push when a new claude or codex model is released',
   '系統異常時推播：換版失敗／回滾、磁碟不足、herdr 非預期重啟、多顆 agent 同時消失、巡檢停止': 'Push on system anomaly: upgrade failure/rollback, low disk space, unexpected herdr restart, multiple agents vanishing, patrol stopped',
 
   // src/components/ImageViewer.tsx

@@ -410,7 +410,7 @@ fn settings_path(dir: &Path) -> PathBuf {
     dir.join("push-settings.json")
 }
 
-/// 推播開關（`main_bots`／`other_bots`／`updates`／`reset_credits`／`auth`／`quota`／`schedules`／`ops`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
+/// 推播開關（`main_bots`／`other_bots`／`updates`／`reset_credits`／`auth`／`quota`／`schedules`／`ops`／`new_models`）；沒有檔案、沒有這個鍵或讀不懂＝開（預設開）。
 pub(crate) fn setting_enabled(dir: &Path, key: &str) -> bool {
     std::fs::read_to_string(settings_path(dir)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[key].as_bool()).unwrap_or(true)
 }
@@ -438,7 +438,8 @@ fn settings_json(dir: &Path) -> Value {
         "auth": setting_enabled(dir, "auth"),
         "quota": setting_enabled(dir, "quota"),
         "schedules": setting_enabled(dir, "schedules"),
-        "ops": setting_enabled(dir, "ops")
+        "ops": setting_enabled(dir, "ops"),
+        "new_models": setting_enabled(dir, "new_models")
     })
 }
 
@@ -1046,7 +1047,7 @@ fn plain_payload(title: &str, body: &str, tag: &str, url: &str) -> Value {
     json!({"title": title, "body": body, "tag": tag, "url": url})
 }
 
-async fn send_plain(app: &Arc<App>, payload: Value) {
+pub(crate) async fn send_plain(app: &Arc<App>, payload: Value) {
     if load_subs(&app.data_dir).is_empty() {
         return;
     }
@@ -1269,6 +1270,9 @@ pub fn spawn_extra_notifiers(app: Arc<App>) {
     } else {
         let _ = build_changed(&app.data_dir, crate::build_info::BUILD_SHA);
     }
+    crate::background_loop::spawn_periodic(&app, "new model scan", crate::runners::new_models::SCAN_EVERY, crate::runners::new_models::SCAN_FIRST, |app| async move {
+        crate::runners::new_models::run(&app).await;
+    });
     crate::background_loop::spawn_periodic(&app, "reset credit push", Duration::from_secs(60), Duration::from_secs(30), |app| async move {
         let mut snap = crate::quota::snapshot(&app).await;
         crate::runners::reset_credit::annotate_held_bots(&app, &mut snap).await;
@@ -1725,6 +1729,8 @@ pub(crate) struct SettingsInput {
     pub schedules: Option<bool>,
     #[serde(default)]
     pub ops: Option<bool>,
+    #[serde(default)]
+    pub new_models: Option<bool>,
 }
 
 pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>, Json(input): Json<SettingsInput>) -> Result<Json<Value>, LcError> {
@@ -1741,6 +1747,7 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Extension(p): Exte
         ("quota", input.quota),
         ("schedules", input.schedules),
         ("ops", input.ops),
+        ("new_models", input.new_models),
     ] {
         if let Some(v) = v {
             cur[k] = json!(v);
