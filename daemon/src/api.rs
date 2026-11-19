@@ -6741,7 +6741,8 @@ pub(crate) async fn prompt_bot(
         if is_bot_dispatch && is_advisor && !b.expect_result {
             return Err(LcError::Bad("api_native_prompt_unsupported: advisor requires expect_result".into()));
         }
-        if b.send_now || b.clear_draft || b.submit_draft || b.share_reply_visible || !b.attachments.is_empty() || b.ack || b.reply_to.is_some() {
+        // 使用者從網頁送的附件（圖片／PDF）native 路徑收得下（native_prompt 會驗格式與大小）；bot 請教仍不帶附件。
+        if b.send_now || b.clear_draft || b.submit_draft || b.share_reply_visible || (is_bot_dispatch && !b.attachments.is_empty()) || b.ack || b.reply_to.is_some() {
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
         if !is_advisor && (b.start_if_stopped || b.queue_if_busy) {

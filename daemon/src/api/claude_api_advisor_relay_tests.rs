@@ -161,3 +161,12 @@ async fn parent_child_top_level_bots_can_consult_an_api_bot() {
     let err = send(parent.id.clone(), "p2").await;
     assert!(matches!(&err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable"), "expert keeps advisor-only: {err:?}");
 }
+
+/// 使用者從網頁對 claude-api bot 夾圖片／PDF：不在派工閘被 `api_native_prompt_unsupported` 擋掉（native 路徑自己驗附件）。
+#[tokio::test]
+async fn a_user_prompt_to_a_claude_api_bot_may_carry_attachments() {
+    let (env, _manager, advisor) = expert_fixture().await;
+    let body: PromptIn = serde_json::from_value(json!({"text":"看圖","client_request_id":"u1","attachments":["att-1"]})).unwrap();
+    let r = prompt_bot(State(env.app.clone()), Path(advisor), HeaderMap::new(), Extension(RequestPrincipal::User), Json(body)).await;
+    assert!(!matches!(&r, Err(LcError::Bad(s)) if s.contains("api_native_prompt_unsupported")), "{:?}", r.err());
+}
