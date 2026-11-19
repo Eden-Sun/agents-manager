@@ -879,6 +879,21 @@ struct HeldResponse {
     response: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<Value>>>,
 }
 
+async fn serve_messages(route: axum::routing::MethodRouter) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route("/v1/messages", route);
+    let shutdown = CancellationToken::new();
+    let shutdown_task = shutdown.clone();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
+            .await
+            .unwrap();
+    });
+    (format!("http://{address}/v1/messages"), shutdown, task)
+}
+
 async fn fake_server(
     calls: Arc<AtomicUsize>,
     hit: Arc<Notify>,
@@ -902,20 +917,7 @@ async fn fake_server(
             "usage":{"input_tokens":1,"output_tokens":1}
         }))
     }
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route("/v1/messages", post(complete))
-        .with_state((calls, hit));
-    let shutdown = CancellationToken::new();
-    let shutdown_task = shutdown.clone();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
-            .await
-            .unwrap();
-    });
-    (format!("http://{address}/v1/messages"), shutdown, task)
+    serve_messages(post(complete).with_state((calls, hit))).await
 }
 
 async fn held_response_server(
@@ -942,25 +944,8 @@ async fn held_response_server(
         hit,
         response: tokio::sync::Mutex::new(Some(response_rx)),
     });
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route("/v1/messages", post(complete))
-        .with_state(state);
-    let shutdown = CancellationToken::new();
-    let shutdown_task = shutdown.clone();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
-            .await
-            .unwrap();
-    });
-    (
-        format!("http://{address}/v1/messages"),
-        shutdown,
-        task,
-        response_tx,
-    )
+    let (endpoint, shutdown, task) = serve_messages(post(complete).with_state(state)).await;
+    (endpoint, shutdown, task, response_tx)
 }
 
 async fn tool_response_server(
@@ -986,20 +971,7 @@ async fn tool_response_server(
             "usage":{"input_tokens":1,"output_tokens":1}
         }))
     }
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route("/v1/messages", post(complete))
-        .with_state((calls, hit));
-    let shutdown = CancellationToken::new();
-    let shutdown_task = shutdown.clone();
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { shutdown_task.cancelled().await })
-            .await
-            .unwrap();
-    });
-    (format!("http://{address}/v1/messages"), shutdown, task)
+    serve_messages(post(complete).with_state((calls, hit))).await
 }
 
 async fn enable_fake_runtime(
