@@ -115,7 +115,8 @@ fn ask_two_tools_then_final_text_with_interleaved_argument_fragments() {
         assert_eq!(u, ref_updates, "chunk={chunk}");
     }
     let out = completed(ref_outcome);
-    assert_eq!(ref_updates, vec![Update::TextDelta("我先讀".into()), Update::TextDelta("兩個檔案".into())], "暫態 UI 只有文字 delta");
+    let texts: Vec<Update> = ref_updates.iter().filter(|u| matches!(u, Update::TextDelta(_))).cloned().collect();
+    assert_eq!(texts, vec![Update::TextDelta("我先讀".into()), Update::TextDelta("兩個檔案".into())], "暫態 UI 的文字 delta");
     assert_eq!(out.text, "我先讀兩個檔案");
     assert_eq!(out.stop, StopKind::ToolUse);
     assert_eq!(out.response_id.as_deref(), Some("resp_1"));

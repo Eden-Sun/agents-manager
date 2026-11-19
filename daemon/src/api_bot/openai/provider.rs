@@ -18,7 +18,7 @@ use crate::api_bot::protocol::{Message, Response, ToolCall};
 use crate::api_bot::provider::{Codec, InvalidResponse, Provider, ProviderExtras, SessionOptions, StopReason, ToolResult, Transport, TurnOutput, MAX_TOOL_CALLS_PER_RESPONSE};
 use crate::api_bot::quote::{QuoteError, QuoteProvider, QuotedRequest, ReservationQuote, UsageQuote};
 use crate::api_bot::runner::State;
-use crate::api_bot::sse::StreamProgress;
+use crate::api_bot::sse::{StreamProgress, TAIL_CHARS};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -656,6 +656,7 @@ async fn post_inner(
         }
         let mut assembler = ResponseAssembler::new();
         let mut shown = StreamProgress::default();
+        let mut last_report = tokio::time::Instant::now();
         let mut total = 0_usize;
         while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
             total = total.saturating_add(chunk.len());
@@ -664,14 +665,20 @@ async fn post_inner(
             }
             let updates = assembler.feed(&chunk).map_err(codec_error)?;
             if let Some(report) = progress {
-                let mut changed = false;
-                for Update::TextDelta(delta) in updates {
-                    shown.generated_chars += delta.chars().count();
-                    shown.text_tail.push_str(&delta);
-                    changed = true;
+                // 與 Claude（http.rs）同一個節奏：每個 chunk 都看一眼，距上次報告滿 PROGRESS_INTERVAL 才報；
+                // 文字、思考（reasoning 項目開始）、函式呼叫參數都算進度，尾端文字與 Claude 一樣只留 TAIL_CHARS。
+                for update in updates {
+                    match update {
+                        Update::TextDelta(delta) => {
+                            shown.generated_chars += delta.chars().count();
+                            shown.text_tail.push_str(&delta);
+                        }
+                        Update::Activity(bytes) => shown.other_bytes += bytes,
+                    }
                 }
-                if changed {
-                    let keep = shown.text_tail.chars().count().saturating_sub(400);
+                if last_report.elapsed() >= http::PROGRESS_INTERVAL {
+                    last_report = tokio::time::Instant::now();
+                    let keep = shown.text_tail.chars().count().saturating_sub(TAIL_CHARS);
                     shown.text_tail = shown.text_tail.chars().skip(keep).collect();
                     report(&shown);
                 }

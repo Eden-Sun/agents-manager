@@ -37,7 +37,8 @@ pub enum Error {
 }
 
 /// 串流進度回呼的最短間隔。
-const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+/// 串流進度回呼的最短間隔（Claude 與 OpenAI 共用，節奏一致）。
+pub(crate) const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 串流中的 `error` 事件（已是 HTTP 200 之後）→ `StreamAborted`，不套用 HTTP 狀態碼的「確定沒處理」語意。
 fn stream_error(e: StreamError) -> Error {

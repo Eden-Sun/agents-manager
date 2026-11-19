@@ -21,3 +21,5 @@ mod tests;
 mod key_tests;
 #[cfg(test)]
 mod leak_tests;
+#[cfg(test)]
+mod progress_tests;

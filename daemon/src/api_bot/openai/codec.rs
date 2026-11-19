@@ -232,7 +232,11 @@ pub(crate) enum Outcome {
 /// 串流進行中的暫態 UI 更新（不是終態、不入帳）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Update {
+    /// 文字 delta（進 text tail）。
     TextDelta(String),
+    /// 非文字的串流活動（函式呼叫參數的位元組數；reasoning／function_call 項目開始＝0）。
+    /// 進度回呼要照 Claude 的節奏在這些時候也報，否則工具參數與思考期間使用者看不到任何更新。
+    Activity(usize),
 }
 
 // ───────────────────────────── 組裝 ─────────────────────────────
@@ -301,6 +305,7 @@ impl ResponseAssembler {
                 let idx = Self::index(data)?;
                 let item = data.get("item").cloned().ok_or_else(|| CodecError::Protocol("output_item.added without item".into()))?;
                 self.items.insert(idx, ItemState { item, ..Default::default() });
+                updates.push(Update::Activity(0));
             }
             "response.output_text.delta" => {
                 let idx = Self::index(data)?;
@@ -312,6 +317,7 @@ impl ResponseAssembler {
                 let idx = Self::index(data)?;
                 let delta = data.get("delta").and_then(Value::as_str).ok_or_else(|| CodecError::Protocol("arguments delta without delta".into()))?;
                 self.items.entry(idx).or_default().args.push_str(delta);
+                updates.push(Update::Activity(delta.len()));
             }
             "response.function_call_arguments.done" => {
                 let idx = Self::index(data)?;

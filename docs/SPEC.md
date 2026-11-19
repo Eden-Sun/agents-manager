@@ -6085,3 +6085,5 @@ expert 跨專案 relay 拒絕，例外：別的專案可送給 expert 專案的�
 **openai-api 模型擴充（2026-11-19，使用者指示）**：bot 的核准模型是 `gpt-6.2-astra`（預設）、`gpt-6.2-sol`、`gpt-6-luna`（`am_config::OPENAI_API_BOT_MODELS`）。價表各自帶日期並有 fixture 釘住（官方模型頁原文，標準 tier；12 小時寫入輸入×2.5；輸入超過 272K 整個請求輸入與快取 ×2、輸出 ×1.5）。effort 依模型：astra／sol 的 API 拒絕 `none`，建立或改模型／強度時組合不合法即 400 `api_bot_effort_unsupported_for_model`。**翻譯用途不變**（`OPENAI_USE_MODELS` 只有 luna）；翻譯組設 astra／sol 或拿它當重試模型一律拒絕。
 
 **openai-api 懸空回合收尾（2026-11-19）**：effort 清單唯一來源是 `am_config::openai_api_efforts_for_model`（設定驗證、/api/models、codec、provider 都用它）。provider 建不起來（`ProviderInitError`，具名）時，還沒交給 worker 的 pending 回合立刻收成 `failed`，`start_error = api_provider_init_failed:<reason>`，廣播給 UI，使用者原訊息保留可重送；交接結果不明的情況仍走既有復原。
+
+**openai-api 進度與 Claude 一致（2026-11-19）**：串流進度回呼與 Claude 同一個節奏（`http::PROGRESS_INTERVAL`＝1 秒，距上次報告滿一秒才報，不是每個 chunk 都報）；文字、reasoning 項目開始、函式呼叫參數都算進度；尾端文字上限 `sse::TAIL_CHARS`（2000）。
