@@ -15,7 +15,9 @@ import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
 import { quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
 import { ApiBalanceGroup } from './ApiBalanceGroup'
+import { BalanceQuotaChip } from './BalanceQuotaChip'
 import { useClaudeBalanceVisible, useOpenAiBalanceVisible } from './balanceHooks'
+import { OpenAiBalanceChip } from './OpenAiBalanceChip'
 import { DEFAULT_ACCOUNT } from '../store/identityRows'
 import { disableUntil } from '../lib/quotaDisableUntil'
 import { KindIcon } from './KindTag'
@@ -1166,6 +1168,14 @@ export function QuotaStrip({
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
               {t('看全部（{count}）', { count: popEntries.length })}
             </button>
+          ) : null}
+          {/* API 餘額區：全域、不分主機，手機 setOnly 時也顯示（使用者 2026-11-19）。各列自己判斷可見，都不可見就整塊不畫。 */}
+          {claudeBalanceVisible || openaiBalanceVisible ? (
+            <div className="quota-pop-api" data-k="quota-pop-api">
+              <div className="quota-pop-api-title">{t('API 餘額')}</div>
+              <BalanceQuotaChip variant="row" />
+              <OpenAiBalanceChip variant="row" />
+            </div>
           ) : null}
           {freshest ? <p className="quota-pop-foot">{t('更新於 {time} · ↻ 是距離重置還有多久', { time: fmtTime(freshest) })}</p> : null}
         </div>

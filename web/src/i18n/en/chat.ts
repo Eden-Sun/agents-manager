@@ -456,6 +456,7 @@ export default {
   '校正': 'Calibrate',
   '到 claude-api bot': 'Go to the claude-api bot',
   'OpenAI API 餘額': 'OpenAI API balance',
+  'API 餘額': 'API balance',
   '例如 20.00': 'e.g. 20.00',
   '目前餘額：{usd}': 'Current balance: {usd}',
   'OpenAI API 餘額：尚未設定。點一下輸入目前餘額當錨點': 'OpenAI API balance: not set. Click to enter the current balance as the anchor',
