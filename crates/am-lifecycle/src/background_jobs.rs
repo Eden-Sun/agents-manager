@@ -105,11 +105,63 @@ pub fn parse(kind: &str, screen: &str) -> u32 {
     }
 }
 
-/// 模式列的一段 `N shell(s)`：前面是行首或 `·`，後面是 `·` 或行尾（`N shells still running` 不符）。
+fn is_claude_task_unit(unit: &str) -> bool {
+    matches!(
+        unit,
+        "shell"
+            | "shells"
+            | "shell(s)"
+            | "monitor"
+            | "monitors"
+            | "monitor(s)"
+            | "task"
+            | "tasks"
+            | "task(s)"
+            | "background task"
+            | "background tasks"
+            | "background task(s)"
+            | "background agent"
+            | "background agents"
+            | "background dynamic workflow"
+            | "background dynamic workflows"
+            | "cloud session"
+            | "cloud sessions"
+            | "cloud dynamic workflow"
+            | "cloud dynamic workflows"
+            | "mcp task"
+            | "mcp tasks"
+            | "scheduled task"
+            | "scheduled tasks"
+            | "team"
+            | "teams"
+            | "artifact comment monitor"
+            | "artifact comment monitors"
+    )
+}
+
+/// 模式列的一段背景工作計數（2.1.281 起為 `N shell(s)`，2.1.329 起整合成單一數字，或以逗號分隔）：
+/// 前面是行首或 `·`，後面是 `·` 或行尾（`N shells still running` 不符）。
 fn claude_shells(line: &str) -> Option<u32> {
     line.split('·').map(str::trim).find_map(|seg| {
-        let (n, rest) = seg.split_once(' ')?;
-        matches!(rest, "shell" | "shells").then(|| n.parse().ok()).flatten()
+        let mut sum = 0;
+        let mut found = false;
+        for part in seg.split(',') {
+            let part = part.trim();
+            let stripped = part.strip_prefix('◇').map(str::trim_start).unwrap_or(part);
+            if !stripped.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let (n, unit) = stripped.split_once(' ')?;
+            let n: u32 = n.parse().ok()?;
+            let unit = unit.trim().to_ascii_lowercase();
+            if is_claude_task_unit(&unit) {
+                sum += n;
+                found = true;
+            } else {
+                return None;
+            }
+        }
+        found.then_some(sum)
     })
 }
 
@@ -507,5 +559,46 @@ mod stuck_notice_tests {
         record_at(&mut m, "r", 1, now_ms() - T - 1000);
         assert_eq!(take_newly_stuck_now(&mut m).len(), 1);
         assert!(take_newly_stuck_now(&mut m).is_empty());
+    }
+}
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+mod claude_2_1_329_footer_background_tests {
+    use super::*;
+
+    #[test]
+    fn parses_combined_footer_background_counts() {
+        // claude 2.1.329: footer background count supports combined tasks, monitors, etc.
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 background task · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 2 background tasks · ← for agents"), Some(2));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 monitor · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 3 monitors · ← for agents"), Some(3));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 shell, 1 monitor · ← for agents"), Some(2));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 2 shells, 3 monitors · ← for agents"), Some(5));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 background agent · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 2 background agents · ← for agents"), Some(2));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 background dynamic workflow · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 scheduled task · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · ◇ 1 cloud session · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 shell · ← for agents"), Some(1));
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on · 4 shells · ← for agents"), Some(4));
+    }
+
+    #[test]
+    fn ignores_non_footer_or_summary_lines() {
+        assert_eq!(claude_shells("✻ Brewed for 1m 15s · done 1:36 PM · 1 shell still running"), None);
+        assert_eq!(claude_shells("✻ done · 2 background tasks still running"), None);
+        assert_eq!(claude_shells("Ran 1 shell command"), None);
+        assert_eq!(claude_shells("⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"), None);
+        assert_eq!(claude_shells("⏸ manual mode on · ← for agents"), None);
+    }
+
+    #[test]
+    fn parse_recognizes_new_claude_footers_at_bottom_of_screen() {
+        let screen = "✻ Task completed\n────────────────────────────────\n>\n────────────────────────────────\n  main | my-bot | claude-3-7-sonnet | 98% left\n  ⏵⏵ bypass permissions on · 2 background tasks · ← for agents\n";
+        assert_eq!(parse("claude", screen), 2);
+
+        let screen_mixed = "✻ Task completed\n────────────────────────────────\n>\n────────────────────────────────\n  main | my-bot | claude-3-7-sonnet | 98% left\n  ⏵⏵ bypass permissions on · 1 shell, 2 monitors · ← for agents\n";
+        assert_eq!(parse("claude", screen_mixed), 3);
     }
 }
