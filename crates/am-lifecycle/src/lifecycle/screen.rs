@@ -2692,6 +2692,38 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(live_activity("grok", GROK_SCREEN).unwrap(), "Thought for 0.1s");
     }
 
+    /// agy 真畫面（r1943-neon 回報）：轉圈列優先，背景工作數附在後面；只看回音之後的列。
+    const AGY_READING: &str = "\
+> 幫我看一下 AGENT-VERIFY.md
+● Ran (ls -la)
+● Explored 2 files (AGENT-VERIFY.md, output.txt)
+… 60 more actions (30 reads, 17 edits, 13 commands: 2 failed) …
+● Running (cd /home/ubuntu/project/x && cargo test -p agents-managerd -- schema_guard::) (ctrl+o to expand)
+  ● [14:29:11] cd /home/ubuntu/project/x running
+⢿  Reading file...
+────────────────────────────────────────
+Gemini 4 Neon · medium · 1 task(s) · /tasks
+";
+
+    #[test]
+    fn live_activity_reads_agy_spinner_row_and_background_tasks() {
+        assert_eq!(live_activity("agy", AGY_READING).unwrap(), "Reading file... · 1 個背景工作");
+    }
+
+    #[test]
+    fn live_activity_falls_back_to_agy_running_row() {
+        let s = "> go\n● Running (cd x && cargo test -p a -- b::) (ctrl+o to expand)\n────\nGemini 4 Neon · medium · /tasks\n";
+        assert_eq!(live_activity("agy", s).unwrap(), "Running cd x && cargo test -p a -- b::");
+        // 只有背景工作數、沒有活動列：不算活動
+        assert_eq!(live_activity("agy", "> go\nGemini 4 Neon · medium · 2 task(s) · /tasks\n"), None);
+    }
+
+    #[test]
+    fn live_activity_for_agy_ignores_rows_before_the_prompt_echo() {
+        let s = "⢿  Reading old...\n> 新問題\n● Ran (ls)\n";
+        assert_eq!(live_activity("agy", s), None);
+    }
+
     /// Real capture: three minutes in, only this row, UI still 「等待回覆（hook）…」.
     const BOOGIEING: &str = "\
 ❯ 幫我重構一下

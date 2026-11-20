@@ -602,6 +602,9 @@ pub fn live_activity(kind: &str, text: &str) -> Option<String> {
     }
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
+    if kind == "agy" {
+        return agy_activity(&lines[start..]).map(|s| cap_activity(&s));
+    }
     let grok = kind == "grok";
     // Fast path only; the glyph set grows between releases, `is_activity_shape` catches the rest.
     let glyphs: &[char] = if grok { &['◆'] } else { &['✻', '✽', '✶', '✳', '✢', '·'] };
@@ -629,13 +632,56 @@ pub fn live_activity(kind: &str, text: &str) -> Option<String> {
         // The last activity row on screen is the current one.
         found = Some(rest.to_string());
     }
-    let s = found?;
+    found.map(|s| cap_activity(&s))
+}
+
+/// 截到 `ACTIVITY_MAX` 字，超過補 `…`。
+fn cap_activity(s: &str) -> String {
     if s.chars().count() <= ACTIVITY_MAX {
-        return Some(s);
+        return s.to_string();
     }
     let mut cut: String = s.chars().take(ACTIVITY_MAX).collect::<String>().trim_end().to_string();
     cut.push('…');
-    Some(cut)
+    cut
+}
+
+/// agy 的活動列（畫面上 `after_last_prompt_echo` 之後的部分）。agy 沒有 spinner 字元表，認三種列：
+/// - 轉圈列：braille（U+2800–U+28FF）開頭，例 `⢿  Reading file...`，取最後一列、去掉轉圈字元。
+/// - 工具列：`● Running (<指令>) (ctrl+o to expand)`，取 `Running <指令>`（指令可含括號，取最後一個 `)` 之前）。
+/// - 頁尾 `… · 1 task(s) · /tasks`：有背景工作時附「N 個背景工作」。
+/// 轉圈列優先，其次工具列；兩者都沒有就回 None（不把背景工作數單獨當活動）。
+fn agy_activity(rows: &[&str]) -> Option<String> {
+    let mut spinner: Option<String> = None;
+    let mut running: Option<String> = None;
+    let mut tasks: Option<u32> = None;
+    for line in rows {
+        let s = line.trim();
+        let Some(first) = s.chars().next() else { continue };
+        if ('\u{2800}'..='\u{28FF}').contains(&first) {
+            let rest = s[first.len_utf8()..].trim();
+            if !rest.is_empty() {
+                spinner = Some(rest.to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = s.strip_suffix(" (ctrl+o to expand)").unwrap_or(s).strip_prefix("● Running (") {
+            let cmd = rest.rfind(')').map_or(rest, |i| &rest[..i]).trim();
+            if !cmd.is_empty() {
+                running = Some(format!("Running {cmd}"));
+            }
+            continue;
+        }
+        for part in s.split('·') {
+            if let Some(n) = part.trim().strip_suffix(" task(s)").and_then(|n| n.trim().parse::<u32>().ok()) {
+                tasks = Some(n);
+            }
+        }
+    }
+    let main = spinner.or(running)?;
+    Some(match tasks.filter(|n| *n > 0) {
+        Some(n) => format!("{main} · {n} 個背景工作"),
+        None => main,
+    })
 }
 
 /// Retry / API-error banner (`API error · Retrying in 3s · attempt 1/10`, codex `stream error: …;

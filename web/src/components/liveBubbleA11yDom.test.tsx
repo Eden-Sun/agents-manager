@@ -37,3 +37,11 @@ test('等待階段不帶活動列的秒數：階段字是「等待回覆」，�
   const visible = [...document.querySelectorAll('.msg-meta-left span')].find((el) => !el.classList.contains('sr-only'))
   assert.equal(visible?.textContent, 'Thinking… (12s)')
 })
+
+test('有半成品文字時活動列照顯示：「輸出中… · 活動」，讀屏階段字不變', async () => {
+  await mount(<LiveBubble text="好的，我先看" activity="Running cargo test -p x" kind="agy" />)
+  const stage = document.querySelector('.sr-only[role="status"]')
+  assert.equal(stage!.textContent, '正在輸出回覆')
+  const visible = [...document.querySelectorAll('.msg-meta-left span')].find((el) => !el.classList.contains('sr-only') && !el.className)
+  assert.equal(visible?.textContent, '輸出中… · Running cargo test -p x')
+})

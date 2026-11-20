@@ -391,7 +391,8 @@ export function LiveBubble({
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
           <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
-          <span>{text ? t('輸出中…') : (act ?? t('等待回覆…'))}</span>
+          {/* 有半成品文字也顯示活動列（agy 的「正在讀檔／執行指令」），不然只剩「輸出中…」看不出在做什麼。 */}
+          <span>{text ? (act ? `${t('輸出中…')} · ${act}` : t('輸出中…')) : (act ?? t('等待回覆…'))}</span>
           {isApiKind(kind) && botId ? <ApiTurnProgress botId={botId} /> : null}
           {text ? (
             <button type="button" className="live-peek" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
