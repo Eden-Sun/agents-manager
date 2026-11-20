@@ -38,6 +38,8 @@ const shellRow = (host: string, identity: string) =>
   document.querySelector<HTMLElement>(`.identity-row.is-shell[data-shell-host="${host}"][data-shell-identity="${identity}"]`)
 const shellDeleteButton = (host: string, identity: string) =>
   shellRow(host, identity)?.querySelector<HTMLButtonElement>('button[aria-label*="shell alias"]')
+/** 身份頁是每台主機一個分頁：要看哪台的列先點那台的 tab。 */
+const pickHost = async (name: string) => click(document.querySelector<HTMLElement>(`#identity-tab-${name}`)!)
 const shellDeleteCalls = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'DELETE' && r.path.includes('/shell-identities/'))
 
 async function open(backend: MockTransport = mock) {
@@ -311,10 +313,14 @@ it('shell alias 移除使用 host/kind/name 專用 URL；只移除 m4p alias，�
   await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
   await backend.request('POST', '/hosts', { name: 'lab', ssh: 'lab' })
   const requests = await open(backend)
+  await pickHost('m4p')
   assert.ok(shellRow('m4p', 'cc2'))
+  await pickHost('lab')
   assert.ok(shellRow('lab', 'cc2'))
+  await pickHost('local')
   assert.ok(row('cc2'), '同名 config identity row 存在')
 
+  await pickHost('m4p')
   await click(shellDeleteButton('m4p', 'cc2')!)
   const dialog = document.querySelector('[role=alertdialog]')!
   await click(btn(dialog, '移除 alias')!)
@@ -326,7 +332,9 @@ it('shell alias 移除使用 host/kind/name 專用 URL；只移除 m4p alias，�
   assert.equal(request.path, '/api/hosts/m4p/shell-identities/cc2?kind=claude')
   assert.equal(request.body, undefined, 'DELETE 不帶 body')
   assert.equal(shellRow('m4p', 'cc2'), null, '只移除指定 host 的 alias')
+  await pickHost('lab')
   assert.ok(shellRow('lab', 'cc2'), '另一台同名 shell alias 保留')
+  await pickHost('local')
   assert.ok(row('cc2'), '同名 config identity 的舊 DELETE 資料不受影響')
   assert.equal(shellDeleteCalls(requests).length, 1, '不呼叫 config identity DELETE')
   assert.match(document.querySelector('[role=status]')?.textContent ?? '', /外部編輯器可能.*檔案替換之間修改設定/)
@@ -370,6 +378,7 @@ for (const [type, expected] of [
     const backend = new MockTransport()
     await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
     await open(backend)
+    await pickHost('m4p')
     backend.failNext('DELETE', '^/hosts/m4p/shell-identities/cc2\\?kind=claude$', 409, {
       error: 'conflict', reason: 'identity_in_use', refs: [{ type, id: 'ref-id' }],
     })
@@ -379,8 +388,9 @@ for (const [type, expected] of [
     const text = document.querySelector('.identity-shell-delete-result')!.textContent ?? ''
     assert.ok(text.includes('主機：m4p；Claude shell alias：cc2'))
     assert.ok(text.includes(expected))
-    assert.ok(shellRow('local', 'cc2'))
     assert.ok(shellRow('m4p', 'cc2'))
+    await pickHost('local')
+    assert.ok(shellRow('local', 'cc2'))
   })
 }
 
@@ -410,4 +420,55 @@ it('備份建立未確認：回傳預定位置但不能宣稱備份已保留', a
   assert.ok(text.includes(backup))
   assert.ok(!text.includes('保留的備份路徑：'))
   assert.ok(shellRow('local', 'cc2'))
+})
+
+const tabs = () => [...document.querySelectorAll<HTMLElement>('[role=tablist].identity-host-tabs [role=tab]')]
+const kindCards = () => [...document.querySelectorAll<HTMLElement>('[data-kind-card]')].map((c) => c.dataset.kindCard)
+
+it('只有一台主機時不顯示分頁；每種 CLI 各一張卡，卡頭寫出 CLI 名稱', async () => {
+  resetStoreForTest()
+  await open(new MockTransport())
+  assert.equal(document.querySelector('[role=tablist].identity-host-tabs'), null, '只有本機就不顯示 tab')
+  for (const kind of ['claude', 'codex', 'grok', 'agy']) {
+    assert.ok(kindCards().includes(`local-${kind}`), `local 有 ${kind} 卡`)
+    const card = document.querySelector<HTMLElement>(`[data-kind-card="local-${kind}"]`)!
+    assert.equal(card.querySelector('.identity-kind-card-head')?.textContent?.includes(kind), true, `${kind} 卡頭有名稱`)
+  }
+  assert.ok(document.querySelector('[data-kind-card="local-claude"] button'), '本機卡有啟用開關')
+})
+
+it('多台主機：每台一個 tab，點哪台只列哪台的卡；遠端卡沒有本機的啟用開關', async () => {
+  resetStoreForTest()
+  const backend = new MockTransport()
+  await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
+  await open(backend)
+  assert.deepEqual(tabs().map((t) => t.id), ['identity-tab-local', 'identity-tab-m4p'])
+  assert.equal(tabs()[0].getAttribute('aria-selected'), 'true', '預設是本機')
+  await pickHost('m4p')
+  assert.equal(tabs()[1].getAttribute('aria-selected'), 'true')
+  assert.ok(kindCards().every((k) => k?.startsWith('m4p-')), `只剩 m4p 的卡：${kindCards().join(',')}`)
+  assert.equal(document.querySelector('[data-kind-card="m4p-claude"] .identity-kind-card-head button'), null, '遠端卡沒有停用開關')
+})
+
+it('斷線主機的 tab 仍在、標「斷線」，內容顯示離線說明且沒有登入鍵', async () => {
+  resetStoreForTest()
+  const backend = new MockTransport()
+  await backend.request('POST', '/hosts', { name: 'bad_lab', ssh: 'bad_lab' })
+  await open(backend)
+  await pickHost('bad_lab')
+  const tab = document.querySelector('#identity-tab-bad_lab')!
+  assert.match(tab.textContent ?? '', /斷線/)
+  assert.ok(document.querySelector('.identity-offline-banner'), '離線說明')
+  assert.equal(document.querySelector('[data-kind-card="bad_lab-claude"] .identity-login-btn'), null, '斷線時不給登入鍵')
+})
+
+it('記住上次選的主機分頁：重新掛載後還停在那一台', async () => {
+  resetStoreForTest()
+  const backend = new MockTransport()
+  await backend.request('POST', '/hosts', { name: 'm4p', ssh: 'm4p' })
+  await open(backend)
+  await pickHost('m4p')
+  await unmountAll()
+  await mount(<IdentitiesPanel />)
+  assert.equal(document.querySelector('#identity-tab-m4p')?.getAttribute('aria-selected'), 'true')
 })

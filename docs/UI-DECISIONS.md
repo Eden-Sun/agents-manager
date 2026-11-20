@@ -1739,3 +1739,12 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
   - 身份建立的主機用既有 `POST /identities` 的 `host` 欄位（daemon 已支援，前端 `NewIdentityInput` 補上這個欄位）。
 - **判定純函式**（`components/identityEnv.ts`）：`suggestedIdentityEnvText`、`normalizeHomeDir`（`~`、`$HOME`、`${HOME}` 視為同一目錄）、`identityHomeDir`、`sharedHomeWith`、`validIdentityName`。
 - **測試**：`components/identityHome.test.ts`（純函式）、`components/addIdentityDialog.test.tsx`（建議目錄、同名擋住、共用警告、切 CLI 提示、送出→輪詢到已登入、達上限顯示失敗且不關）。
+## 設定 → 身份頁重做：主機分頁＋CLI 卡（第 1 階段版面骨架，2026-11-20，使用者核可）
+
+- **背景**：身份頁一條長清單，本機與各遠端、四種 CLI、預設帳號、shell alias 混在一起；CLI 名稱不顯眼，動作按鈕名稱不一致。
+- **做法（第 1 階段）**：
+  - **主機分頁**（`IdentityHostTabs.tsx`）：每台主機一個 tab；tab 上有「N 已登入」與異常紅點（斷線、或 daemon 標了要重新登入）。只有一台主機（只有本機）時不顯示分頁。斷線主機的 tab 仍在，標「斷線」。記住上次選的分頁（`localStorage`，讀寫失敗就當沒記住）。
+  - **CLI 卡**（`IdentityKindCard.tsx`）：分頁內依 claude／codex／grok／agy 各一張卡，卡頭是圖示＋CLI 名稱（＋本機的啟用開關）。卡內依序是預設帳號、該主機該 kind 的自訂身份、shell 偵測身份。沒安裝只標一行說明。
+  - **列的統一**：三態狀態一律「已登入／未登入／無法確認」；「主機離線」與「最後檢查」另外標；email（帳號）與 5h 已用額度直接在列上；次要動作（登出、停用、隱藏、刪除、移除 alias）收進「更多」，主要按鈕（登入／切換）留在列上。路徑與 env 放進可展開的「路徑與 env」，說明文字用一般字體。
+  - **修正**：`IdentityHostLogins` 之前對本機身份會列出所有遠端的同名登入狀態，現在依 host 只列自己那台。
+- **不做（留給後續階段）**：動作改名與「重新登入…」、危險區確認、新增身份對話框與建議目錄、bot 數可點與改綁、cc0 與預設帳號的說明。

@@ -15,9 +15,6 @@ const dict: Dict = {
   '更新框翻譯': 'Changelog box translation',
 
   // src/components/IdentitiesPanel.tsx
-  '未知（尚未偵測）': 'Unknown (not probed)',
-  '自訂身份': 'Custom identities',
-  'Shell 偵測身份': 'Shell detected identities',
 
   // HostsPanel.tsx
   '遠端主機 {host}（已連線）': 'Remote host {host} (connected)',

@@ -80,12 +80,126 @@
 }
 
 .identity-detail {
-  font-size: 11px;
-  font-family: var(--font-mono);
+  font-size: 12px;
   color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 路徑與 env 收進可展開詳情：列上只留一般字體的說明。 */
+.identity-path {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.identity-path > summary {
+  cursor: pointer;
+  width: max-content;
+}
+
+.identity-path code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.identity-account {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.identity-offline {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+.identity-offline-banner {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* 「更多」：次要動作收進摺疊區，主要按鈕留在列上。 */
+.identity-more > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  list-style: none;
+}
+
+.identity-more-body {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+/* 主機分頁 */
+.identity-host-tabs {
+  flex-wrap: wrap;
+}
+
+.identity-tab-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.identity-tab-off {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.identity-tab-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--danger, #d33);
+  vertical-align: middle;
+}
+
+.identity-host-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* CLI 卡：一張卡一個 kind。 */
+.identity-kind-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised, transparent);
+}
+
+.identity-kind-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+@media (max-width: 480px) {
+  .identity-kind-card {
+    padding: 8px 10px;
+  }
 }
 
 /* 已登入用中性色（常態），未登入警示色，問不到則淡掉。 */
@@ -123,4 +237,31 @@
   font-size: 11px;
   color: var(--warn);
   font-weight: 600;
+}
+
+.identity-kind-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.identity-quota {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.identity-quota.is-stale {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* 說明文字用一般字體（全域 .hint 是等寬）。 */
+.identities-panel .hint {
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
 }

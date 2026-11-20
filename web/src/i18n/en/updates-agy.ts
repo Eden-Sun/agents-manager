@@ -3,7 +3,7 @@ import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
   // src/components/EnvShell.tsx
-  '點選分頁可切換環境準備、主機、更新檢查、身份與各項服務設定。': 'Switch tabs above for Setup, Hosts, Updates, Identities, and services.',
+  '點選分頁可切換環境準備、主機、更新檢查、身份與各項服務設定。': 'Pick a section to switch between Setup, Hosts, Updates, Identities, and services.',
   '我知道了': 'Got it',
 
   // store/herdrUpdate.ts
