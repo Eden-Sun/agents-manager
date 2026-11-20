@@ -59,6 +59,31 @@ export function parseAgyModel(id: string): ParsedAgyModel | null {
 }
 
 /**
+ * 強度標籤格式化（首字大寫，xhigh 格式化為 XHigh）：
+ * low → Low, medium → Medium, high → High, xhigh → XHigh
+ */
+export function formatAgyEffortLabel(effort: string): string {
+  if (effort.toLowerCase() === 'xhigh') return 'XHigh'
+  return effort.charAt(0).toUpperCase() + effort.slice(1).toLowerCase()
+}
+
+/**
+ * 按鈕顯示字（比照 codex，由 id 推導）：
+ * `gemini-<版號>-<家族>[-<強度>]` → 「<版號>-<家族首字大寫> <強度>」
+ * 例：`gemini-3.8-flash-low` → 「3.8-Flash Low」
+ *     `gemini-4-neon-xhigh` → 「4-Neon XHigh」
+ *     `gemini-4-argon` → 「4-Argon」
+ * 認不得格式的 id 照舊原樣顯示。
+ */
+export function formatAgyModelLabel(id: string): string {
+  const parsed = parseAgyModel(id)
+  if (!parsed) return id
+  const capitalizedFamily = parsed.family.charAt(0).toUpperCase() + parsed.family.slice(1)
+  const effortPart = parsed.effort ? ` ${formatAgyEffortLabel(parsed.effort)}` : ''
+  return `${parsed.version}-${capitalizedFamily}${effortPart}`
+}
+
+/**
  * 比較兩版本號（由舊到新）：
  * e.g. 3.8 < 4 < 4.1
  */

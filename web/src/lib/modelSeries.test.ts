@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { ModelInfo } from '../api/types.ts'
-import { compareVersion, latestModels, parseModelSeries } from './modelSeries.ts'
-import { compareAgyModels, parseAgyModel, sortAgyModelIds } from './agyModel.ts'
+import { compareVersion, ensureCurrentModel, latestModels, parseModelSeries } from './modelSeries.ts'
+import { compareAgyModels, formatAgyEffortLabel, formatAgyModelLabel, parseAgyModel, sortAgyModelIds } from './agyModel.ts'
 
 const m = (id: string): ModelInfo => ({
   id,
@@ -225,4 +225,40 @@ test('sortAgyModelIds：認不得的 id 排最後原樣', () => {
   ]
   const actual = sortAgyModelIds(input)
   assert.deepEqual(actual, expected)
+})
+
+test('formatAgyModelLabel：由 id 推導「<版號>-<家族首字大寫> <強度>」，認不得的保留原樣', () => {
+  assert.equal(formatAgyEffortLabel('low'), 'Low')
+  assert.equal(formatAgyEffortLabel('medium'), 'Medium')
+  assert.equal(formatAgyEffortLabel('high'), 'High')
+  assert.equal(formatAgyEffortLabel('xhigh'), 'XHigh')
+  assert.equal(formatAgyModelLabel('gemini-3.8-flash-low'), '3.8-Flash Low')
+  assert.equal(formatAgyModelLabel('gemini-3.8-flash-medium'), '3.8-Flash Medium')
+  assert.equal(formatAgyModelLabel('gemini-3.8-flash-high'), '3.8-Flash High')
+  assert.equal(formatAgyModelLabel('gemini-4-hydrogen-low'), '4-Hydrogen Low')
+  assert.equal(formatAgyModelLabel('gemini-4-hydrogen-xhigh'), '4-Hydrogen XHigh')
+  assert.equal(formatAgyModelLabel('gemini-4-argon'), '4-Argon')
+  assert.equal(formatAgyModelLabel('gemini-4-argon-medium'), '4-Argon Medium')
+  assert.equal(formatAgyModelLabel('gemini-4-neon-medium'), '4-Neon Medium')
+  assert.equal(formatAgyModelLabel('gemini-4-neon-xhigh'), '4-Neon XHigh')
+  assert.equal(formatAgyModelLabel('unknown-model'), 'unknown-model')
+  assert.equal(formatAgyModelLabel('gpt-6-luna'), 'gpt-6-luna')
+})
+
+test('ensureCurrentModel：目前模型不在清單時補上虛擬項目並標記 missingIds', () => {
+  const staticList = [m('gemini-3.8-flash-low'), m('gemini-3.8-flash-medium'), m('gemini-3.8-flash-high')]
+  const res = ensureCurrentModel(staticList, 'gemini-4-neon-medium', 'agy')
+  assert.equal(res.models.length, 4)
+  assert.equal(res.missingIds.has('gemini-4-neon-medium'), true)
+  assert.ok(res.models.some((x) => x.id === 'gemini-4-neon-medium'))
+
+  // 已在清單內：不重複加
+  const resExists = ensureCurrentModel(staticList, 'gemini-3.8-flash-medium', 'agy')
+  assert.equal(resExists.models.length, 3)
+  assert.equal(resExists.missingIds.size, 0)
+
+  // agy 已停用的舊版：不補進選單
+  const resRetired = ensureCurrentModel(staticList, 'gemini-3.1-pro-high', 'agy')
+  assert.equal(resRetired.models.length, 3)
+  assert.equal(resRetired.missingIds.size, 0)
 })

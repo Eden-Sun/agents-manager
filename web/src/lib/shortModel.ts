@@ -18,10 +18,10 @@ export function shortModel(kind: string, model: string | null): string | null {
 }
 
 
-const AGY_EFFORT_SUFFIX = /-(low|medium|high)$/
+const AGY_EFFORT_SUFFIX = /-(low|medium|high|xhigh)$/i
 
-/** agy slug 尾巴的強度（`gemini-3.8-flash-high` → `high`）；不是 agy 或沒有強度尾巴回 `null`。 */
+/** agy slug 尾巴的強度（`gemini-3.8-flash-high` → `high`、`gemini-4-neon-xhigh` → `xhigh`）；不是 agy 或沒有強度尾巴回 `null`。 */
 export function agyEffort(kind: string, model: string | null): string | null {
   if (kind !== 'agy' || !model) return null
-  return AGY_EFFORT_SUFFIX.exec(model)?.[1] ?? null
+  return AGY_EFFORT_SUFFIX.exec(model)?.[1]?.toLowerCase() ?? null
 }

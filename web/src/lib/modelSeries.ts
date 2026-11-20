@@ -1,4 +1,11 @@
 import type { BotKind, ModelInfo } from '../api/types'
+import {
+  agyModelAllowed,
+  CLAUDE_EFFORT_OPTIONS,
+  CODEX_EFFORT_OPTIONS,
+  EFFORT_OPTIONS,
+  openAiApiEffortsFor,
+} from '../api/types'
 import { modelMatches, stripModelContext } from './modelMatches'
 
 /**
@@ -80,4 +87,52 @@ export function latestModels(
     }
   }
   return { models: kept, oldIds }
+}
+
+/**
+ * 確保目前設定的模型出現在清單中：
+ * 若 API 清單／內建備用清單沒有該模型（且不是 agy 已淘汰的舊版），補上一顆虛擬項目，並在 missingIds 註記（標「不在清單」）。
+ */
+export function ensureCurrentModel(
+  models: ModelInfo[],
+  model: string | null | undefined,
+  kind?: BotKind,
+): { models: ModelInfo[]; missingIds: ReadonlySet<string> } {
+  if (!model) {
+    return { models, missingIds: new Set() }
+  }
+  // agy 已停用的舊模型（如 gemini-3.1）：由下方 banner 提示改用 3.8 medium，不補進選單。
+  if (kind === 'agy' && !agyModelAllowed(model)) {
+    return { models, missingIds: new Set() }
+  }
+  const exists = models.some((m) => m.id === model || modelMatches(m.id, model))
+  if (exists) {
+    return { models, missingIds: new Set() }
+  }
+  const defaultModel = models.find((m) => m.is_default) ?? models[0]
+  const defaultEfforts =
+    kind === 'agy'
+      ? []
+      : defaultModel?.efforts?.length
+        ? defaultModel.efforts
+        : kind === 'openai-api'
+          ? [...openAiApiEffortsFor(model)]
+          : kind === 'grok'
+            ? [...EFFORT_OPTIONS]
+            : kind === 'codex'
+              ? [...CODEX_EFFORT_OPTIONS]
+              : [...CLAUDE_EFFORT_OPTIONS]
+  const missingItem: ModelInfo = {
+    id: model,
+    display_name: model,
+    description: '',
+    is_default: false,
+    default_effort: defaultModel?.default_effort ?? null,
+    efforts: defaultEfforts,
+    service_tiers: [],
+  }
+  return {
+    models: [missingItem, ...models],
+    missingIds: new Set([model]),
+  }
 }

@@ -1792,3 +1792,15 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **新增後**：切到該主機分頁、捲到新列並標亮約 6 秒；列上方顯示「已新增 X（尚未登入）」＋「立即登入」。
 - **登入不關設定視窗**：身份頁發起的登入用 `loginIdentity(host, name, { background: true })`：終端在背景開，只記在 `identityLoginPane`，不切 `shellView`、不清 `settingsBotId`。要看終端按「打開登入終端」才切過去。其他呼叫端（Bot 設定、onboarding）行為不變。
 - **測試**：`settingsIdentitiesDom.test.tsx` 改為對話框流程，新增：env 錯誤鎖送出、從 codex 卡預選、agy 預填與送出、新列標亮＋立即登入走背景模式。
+
+## agy 目前模型不在清單時補全顯示與標籤統一（2026-11-20，使用者截圖）
+
+- **背景**：在特定主機（如 m4p）無法取得 agy 完整模型清單而退回寫死 3 個 3.8 Flash 模型（或快取過期/靜態備用清單）時，正跑著其他模型（如 `gemini-4-neon-medium`）的 agy bot，在「Bot 設定 → 模型」選單中目前模型完全未出現也未被選中，看起來像沒有設定；且側欄顯示「4-neon-Medium」，而 ModelPicker 按鈕顯示 id 原樣。
+- **原因**：`visibleModels` 與 `latestModels` 皆僅針對輸入的 `models` 做篩選或系列分組；當後端 API 清單缺漏退回 `staticModels` 時，`model` 本身不在清單內，導致 `latestModels` 與 `shownModels` 均無該項目，`aria-checked` 無一吻合。
+- **做法**：
+  - **補全目前模型（`ensureCurrentModel`）**：在進入 `visibleModels` 與 `latestModels` 之前，若目前模型不在清單內且非 agy 淘汰舊版，自動補一顆虛擬項目，並在 `missingIds` 記錄。在按鈕顯示上附帶標註「不在清單」（`t('不在清單')`），且維持選中態（`aria-checked="true"`）。建立 bot 表單、Bot 設定、快速改模型選單（ModelQuickPicker）三處一致補全。
+  - **按鈕標籤比照 codex 統一**：agy 按鈕標籤由 id 推導「<版號>-<家族首字大寫> <強度>」（`formatAgyModelLabel`，例：`gemini-3.8-flash-low` → `3.8-Flash Low`、`gemini-4-neon-xhigh` → `4-Neon XHigh`、`gemini-4-argon` → `4-Argon`）；認不得格式的 id 照舊原樣顯示，按鈕 `title` 維持完整 id。側欄短名維持現在的 `4-neon-Medium` 格式（`shortModel` + `effortLabel`），快速改模型選單同步套用統一標籤。
+  - **備用清單提示**：當清單來源為靜態或快取失效（`!fromApi` 或 `usingLast && cached === null`）時，在選單旁顯示提示「此主機的模型清單暫時讀不到，顯示的是備用清單」。
+- **測試**：
+  - `lib/modelSeries.test.ts`：`formatAgyModelLabel` 推導各家族版號強度與未知 id；`ensureCurrentModel` 對缺失模型補全與標註。
+  - `components/modelSeriesDom.test.tsx`：Bot 設定、建立表單、快速改模型選單三處缺失模型均正常顯示且被選中、標註「不在清單」；靜態／stale 清單時正確顯示備用清單提示。

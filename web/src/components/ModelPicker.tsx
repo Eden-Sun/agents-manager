@@ -5,11 +5,11 @@ import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { compareGptModels, formatGptModelLabel } from '../lib/gptModel'
-import { buildAgyFamilyOrder, compareAgyModels } from '../lib/agyModel'
+import { buildAgyFamilyOrder, compareAgyModels, formatAgyModelLabel } from '../lib/agyModel'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
-import { latestModels } from '../lib/modelSeries'
+import { ensureCurrentModel, latestModels } from '../lib/modelSeries'
 import { runningFast } from '../lib/runtimeDrift'
 import { t, useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -48,13 +48,18 @@ function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[
 }
 
 /**
- * 按鈕顯示字（使用者 2026-11-19）：
+ * 按鈕顯示字（使用者 2026-11-19、2026-11-20）：
  * - codex 與 openai-api 由模型 id 推導（不用 display_name，統一格式「<版本>-<名稱首字大寫>」）。
+ * - agy 比照 codex 由 id 推導「<版號>-<家族首字大寫> <強度>」（例：gemini-3.8-flash-low → 3.8-Flash Low、gemini-4-neon-xhigh → 4-Neon XHigh）。
  * - 認不得格式的 id 照舊原樣顯示，完整 id 在 `title`。
  */
 function modelLabel(m: ModelInfo, kind?: BotKind): string {
   if (kind === 'codex' || kind === 'openai-api' || /^gpt-\d/i.test(m.id)) {
     const formatted = formatGptModelLabel(m.id)
+    if (formatted !== m.id) return formatted
+  }
+  if (kind === 'agy' || /^gemini-\d/i.test(m.id)) {
+    const formatted = formatAgyModelLabel(m.id)
     if (formatted !== m.id) return formatted
   }
   const name = m.display_name || m.id
@@ -135,7 +140,8 @@ export function ApiModelFields({
   const apiModels = apiModelList(kind, Array.isArray(cached) ? cached : last)
   const usingLast = last !== null && apiModels.length > 0
   const fromApi = apiModels.length > 0
-  const models = fromApi ? apiModels : staticModels(kind)
+  const rawModels = fromApi ? apiModels : staticModels(kind)
+  const { models, missingIds } = ensureCurrentModel(rawModels, model, kind)
   const latest = latestModels(kind, visibleModels(models, model), model)
   const shownModels = sortModels(kind, latest.models)
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
@@ -171,7 +177,7 @@ export function ApiModelFields({
       <div className="field">
         <span>
           {t('模型')}
-          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi && !(usingLast && cached === null) ? null : <span className="field-note warn">{usingLast ? t('API 不可用，使用上次取得的清單') : t('API 不可用，使用內建清單')}</span>}
+          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi && !(usingLast && cached === null) ? null : <span className="field-note warn">{usingLast ? t('此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單') : t('此主機的模型清單暫時讀不到，顯示的是備用清單')}</span>}
           {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
@@ -187,7 +193,7 @@ export function ApiModelFields({
               onClick={() => pickModel(m.id)}
             >
               {modelLabel(m, kind)}
-              {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
+              {missingIds.has(m.id) ? <span className="field-note"> {t('不在清單')}</span> : latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}
         </div>
@@ -396,10 +402,12 @@ export function ModelQuickPicker({
 
   const last = Array.isArray(cached) ? null : lastKnownModels(kind, modelsKey(kind, host, identity))
   const apiModels = apiModelList(kind, Array.isArray(cached) ? cached : last)
-  const fromApi = apiModels.length > 0
-  const models = fromApi ? apiModels : staticModels(kind)
-  const loading = open && cached === undefined
+  const usingLast = last !== null && apiModels.length > 0
   const model = bot?.model ?? null
+  const fromApi = apiModels.length > 0
+  const rawModels = fromApi ? apiModels : staticModels(kind)
+  const { models, missingIds } = ensureCurrentModel(rawModels, model, kind)
+  const loading = open && cached === undefined
   const latest = latestModels(kind, visibleModels(models, model), model)
   const shownModels = sortModels(kind, latest.models)
   const effort = bot?.effort ?? null
@@ -467,6 +475,10 @@ export function ModelQuickPicker({
           <span className="hint" aria-hidden="true">
             {t('載入模型清單…')}
           </span>
+        ) : !fromApi || (usingLast && cached === null) ? (
+          <span className="hint field-note warn" aria-hidden="true">
+            {usingLast ? t('此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單') : t('此主機的模型清單暫時讀不到，顯示的是備用清單')}
+          </span>
         ) : null}
         <div className="opt-group models" role="group" aria-label={t('模型')}>
           {shownModels.map((m) => (
@@ -482,7 +494,7 @@ export function ModelQuickPicker({
               onClick={() => pickModel(m.id)}
             >
               {modelLabel(m, kind)}
-              {latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
+              {missingIds.has(m.id) ? <span className="field-note"> {t('不在清單')}</span> : latest.oldIds.has(m.id) ? <span className="field-note"> {t('舊版')}</span> : null}
             </button>
           ))}
         </div>
