@@ -297,17 +297,18 @@ mod tests {
                 }
             }
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
-            for _ in 0..4 {
+            for _ in 0..20 {
                 socket.write_all(b"data: {\"type\":\"ping\"}\n\n").await.unwrap();
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             socket.write_all(wire().as_bytes()).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err(), "stream completion must not issue a second request");
         });
         let req = TranslateRequest { endpoint, key:"mock".into(), model:"claude-sonnet-5-5".into(), effort:"low".into(),
-            max_tokens:128_000, timeout_ms:250, system:None, format:None, prompt:"mock".into() };
+            max_tokens:128_000, timeout_ms:1_000, system:None, format:None, prompt:"mock".into() };
         let start = std::time::Instant::now();
         let out = StreamingClient.complete(&req).await.unwrap();
-        assert!(start.elapsed() > Duration::from_millis(250));
+        assert!(start.elapsed() > Duration::from_millis(1_000));
         assert_eq!(out.text, "完整繁中");
         server.await.unwrap();
     }
