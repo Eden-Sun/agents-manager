@@ -339,6 +339,8 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
                 let merged = crate::tools::merge_identities(&cfg.identities, &p.host, None);
                 match merged.iter().map(|(i, _)| i).find(|i| i.name == idn) {
                     None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
+                    // 內建的 agy 預設帳號（`ag0`；舊資料記成 `agy`）不寫在 `[[identities]]`。
+                    None if crate::tools::is_builtin_default_identity(&b.kind, idn) => {}
                     None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
                     Some(i) if i.kind != b.kind => {
                         bail!("identity `{idn}` is for {} but bot `{}` is {}", i.kind, b.name, b.kind)

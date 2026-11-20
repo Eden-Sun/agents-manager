@@ -5,6 +5,7 @@
  * 兩列都找到本機那筆、mac_builder 那筆在畫面上看不到，按第二列的 ✕ 刪掉的卻是**本機**的 `cc1`（第二輪 review H3）。
  */
 import type { Bot, Identity, Project } from '../api/types'
+import { isBuiltinDefaultIdentity } from '../lib/defaultIdentity'
 import { t } from '../lib/i18n'
 
 const LOCAL = 'local'
@@ -64,7 +65,7 @@ export function defaultAccountBots<B extends Pick<Bot, 'id' | 'name' | 'identity
   host: string,
   kind: string,
 ): B[] {
-  return kindBots(bots, projects, host, kind).filter((b) => !b.identity)
+  return kindBots(bots, projects, host, kind).filter((b) => !b.identity || isBuiltinDefaultIdentity(kind, b.identity))
 }
 
 export function defaultAccountUseCount<B extends Pick<Bot, 'id' | 'name' | 'identity' | 'kind' | 'project_id'>>(

@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { AGY_DEFAULT_IDENTITY, isBuiltinDefaultIdentity } from '../lib/defaultIdentity'
 import { fmtDateTime, userTimeZone } from '../lib/userTime'
 import { utcOffsetLabel } from '../lib/timeZone'
 import type { Bot, BotKind } from '../api/types'
@@ -29,6 +30,14 @@ export function IdentityBadge({
     return (
       <span className="identity-badge is-unknown" title={t('身份：未知（這個 Run 沒有記錄啟動身份）')}>
         {t('未知')}
+      </span>
+    )
+  }
+  // agy 的預設帳號叫 ag0（沒指定、`ag0`、舊資料 `agy` 都是它）：跟 ag1 並排時才分得出來。
+  if (kind === 'agy' && (name ? isBuiltinDefaultIdentity(kind, name) : showDefault)) {
+    return (
+      <span className="identity-badge" title={t('身份：ag0（agy 預設帳號）')}>
+        {AGY_DEFAULT_IDENTITY}
       </span>
     )
   }
@@ -461,7 +470,9 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
             </span>
           ) : null}
         </span>
-        <span className="identity-detail">{t('預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）')}</span>
+        <span className="identity-detail">
+          {kind === 'agy' ? t('ag0：預設帳號（未指定身份或指定 ag0 的 Bot 使用）') : t('預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）')}
+        </span>
         <span className="identity-logins">
           <span className="identity-login-wrap">
             <span className={`identity-login is-${state === true ? 'ok' : state === false ? 'out' : 'unknown'}`}>

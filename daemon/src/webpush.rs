@@ -1288,7 +1288,8 @@ pub(crate) async fn query_affected_bots(
     bucket: Option<&str>,
 ) -> Vec<(String, String)> {
     let id_str = identity.unwrap_or("").trim();
-    let is_default = id_str.is_empty() || id_str == "cc0" || id_str == "co0";
+    // 各 kind 預設帳號的名字：claude `cc0`、codex `co0`、agy `ag0`（舊資料記成 `agy`）。
+    let is_default = id_str.is_empty() || matches!(id_str, "cc0" | "co0" | "ag0" | "agy");
     let rows: Vec<(String, String, Option<String>)> = if is_default {
         sqlx::query_as::<_, (String, String, Option<String>)>(
             "SELECT b.id, b.name, b.model FROM bots b
@@ -1297,19 +1298,18 @@ pub(crate) async fn query_affected_bots(
                AND p.host = ?
                AND b.kind = ?
                AND (
-                 b.identity IS NULL OR TRIM(b.identity) = '' OR b.identity = 'cc0' OR b.identity = 'co0' OR b.identity = ?
+                 b.identity IS NULL OR TRIM(b.identity) = '' OR b.identity IN ('cc0', 'co0', 'ag0', 'agy') OR b.identity = ?
                  OR EXISTS (
                    SELECT 1 FROM runs r
                    WHERE r.bot_id = b.id
                      AND r.state IN ('starting', 'running', 'stopping')
-                     AND (r.runtime_identity = ? OR (r.runtime_identity IS NULL AND (? = 'cc0' OR ? = 'co0' OR ? = '')))
+                     AND (r.runtime_identity = ? OR (r.runtime_identity IS NULL AND (? IN ('cc0', 'co0', 'ag0', 'agy') OR ? = '')))
                  )
                )
              ORDER BY b.is_primary DESC, b.name ASC",
         )
         .bind(host)
         .bind(kind)
-        .bind(id_str)
         .bind(id_str)
         .bind(id_str)
         .bind(id_str)
@@ -1364,7 +1364,11 @@ pub(crate) fn format_auth_payload(
     bot_ids: &[String],
     bot_names: &[String],
 ) -> Value {
-    let identity = identity.trim();
+    // agy 預設帳號叫 `ag0`（舊資料 `agy`、或沒有身份）。
+    let identity = match identity.trim() {
+        "" | "agy" if kind == "agy" => crate::tools::AGY_DEFAULT_IDENTITY,
+        other => other,
+    };
     let ident_label = if identity.is_empty() {
         if host == crate::config::LOCAL_HOST {
             kind.to_string()
@@ -1431,7 +1435,10 @@ pub(crate) fn format_quota_payload(
     quota_key: &str,
 ) -> Value {
     let id_str = identity.map(str::trim).unwrap_or("");
-    let base_label = if !id_str.is_empty() {
+    let base_label = if kind == "agy" && matches!(id_str, "" | "agy") {
+        // agy 預設帳號（裸 `agy` key）叫 `ag0`。
+        crate::tools::AGY_DEFAULT_IDENTITY.to_string()
+    } else if !id_str.is_empty() {
         id_str.to_string()
     } else {
         kind.to_string()
@@ -2818,11 +2825,12 @@ pub(crate) mod tests {
 
         // agy (empty identity)
         let pa = format_auth_payload("local", "agy", "", &["b1".into()], &["agy-wkr".into()]);
-        assert_eq!(pa["title"], "agy 被登出");
+        assert_eq!(pa["title"], "agy ag0 被登出", "agy 的預設帳號叫 ag0");
     }
 
     #[test]
     fn format_quota_payload_formatting() {
+        let ids4_of = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("x{i}")).collect() };
         // cc1, 7 bots, future reset
         let bots: Vec<String> = (1..=7).map(|i| format!("wkr-{i}")).collect();
         let ids: Vec<String> = (1..=7).map(|i| format!("b{i}")).collect();
@@ -2833,6 +2841,13 @@ pub(crate) mod tests {
         assert!(p["body"].as_str().unwrap().ends_with("重置"));
         assert_eq!(p["url"], "/bots/b1");
         assert_eq!(p["tag"], "quota:local/claude:cc1");
+
+        // agy 預設帳號（裸 `agy` key、或舊資料 `agy`）叫 ag0；ag1 照舊。
+        let pa = format_quota_payload("local", "agy", None, None, None, &ids4_of(1), &ids4_of(1), "agy");
+        assert_eq!(pa["title"], "ag0 額度用完");
+        assert_eq!(format_quota_payload("m4p", "agy", Some("ag1"), None, None, &ids4_of(1), &ids4_of(1), "m4p/agy:ag1")["title"], "ag1（m4p）額度用完");
+        assert_eq!(format_auth_payload("local", "agy", "", &ids4_of(1), &ids4_of(1))["title"], "agy ag0 被登出");
+        assert_eq!(format_auth_payload("local", "agy", "ag1", &ids4_of(1), &ids4_of(1))["title"], "agy ag1 被登出");
 
         // codex 5h bucket, 4 bots
         let bots4: Vec<String> = (1..=4).map(|i| format!("b-{i}")).collect();

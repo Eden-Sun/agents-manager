@@ -4,6 +4,48 @@
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
     /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 mac_builder 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
     /// 也不能因此讓遠端用不到它：codex／grok 身份只可能寫在 config 裡（review 2026-09-16 M6）。
+    /// agy 的預設帳號叫 `ag0`（使用者 2026-11-20）：每台都有、沒有 env（＝不換 HOME），額度落在裸 `agy`；
+    /// 舊資料記成 `agy` 的照樣解析得到；使用者自己的 ag1 不受影響；子 pane 跑在真家目錄上就認成 ag0。
+    #[tokio::test]
+    async fn agy_default_account_is_the_builtin_identity_ag0_on_every_host() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        app.cfg
+            .update(|c| {
+                c.identities = vec![crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: None, env: [("HOME".to_string(), "$HOME/.agy-ag1".to_string())].into(), args: vec![] }];
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for host in [crate::config::LOCAL_HOST, "m4p"] {
+            let ag0 = identity_for_host(app, host, AGY_DEFAULT_IDENTITY).await.expect("ag0 每台都有");
+            assert_eq!((ag0.kind.as_str(), ag0.env.is_empty()), ("agy", true), "{host}");
+            let legacy = identity_for_host(app, host, "agy").await.expect("舊資料的 `agy` 也是預設帳號");
+            assert_eq!((legacy.kind.as_str(), legacy.env.is_empty()), ("agy", true), "{host}");
+            assert_eq!(crate::quota::quota_base_for_host(app.as_ref(), host, "agy", Some("ag0")).await, "agy", "{host}：ag0 的額度就是裸 agy 那一格");
+            assert_eq!(crate::quota::quota_base_for_host(app.as_ref(), host, "agy", Some("agy")).await, "agy", "{host}");
+            assert_eq!(crate::quota::quota_base_for_host(app.as_ref(), host, "agy", Some("ag1")).await, "agy:ag1", "{host}：ag1 有自己的 HOME");
+        }
+        let list = identities_for_host(app, crate::config::LOCAL_HOST).await;
+        assert_eq!(list.iter().filter(|i| i.name == "ag0").count(), 1);
+        assert_eq!(list.iter().find(|i| i.name == "ag1").and_then(|i| i.env.get("HOME")).map(String::as_str), Some("$HOME/.agy-ag1"));
+        assert!(identity_for_host(app, crate::config::LOCAL_HOST, "ag9").await.is_none(), "不認得的名字仍然不認得");
+        // 子 pane 的 HOME 是真家目錄 → ag0；是 ag1 的影子家目錄 → ag1。
+        assert_eq!(crate::pane_identity::child_identity(&list, "agy", "HOME", "/home/me", Some("/home/me")).as_deref(), Some("ag0"));
+        assert_eq!(crate::pane_identity::child_identity(&list, "agy", "HOME", "/home/me", Some("/home/me/.agy-ag1")).as_deref(), Some("ag1"));
+        assert!(is_builtin_default_identity("agy", "ag0") && is_builtin_default_identity("agy", "agy"));
+        assert!(!is_builtin_default_identity("agy", "ag1") && !is_builtin_default_identity("claude", "ag0"));
+    }
+
+    /// 使用者自己（config）已有同名的身份時以使用者的為準，內建的不覆蓋。
+    #[test]
+    fn a_user_identity_named_like_a_builtin_wins() {
+        let mine = crate::config::IdentityCfg { name: "ag0".into(), kind: "agy".into(), host: None, env: [("HOME".to_string(), "/x".to_string())].into(), args: vec![] };
+        let out = with_builtin_identities(vec![mine.clone()]);
+        assert_eq!(out, vec![mine]);
+        assert_eq!(with_builtin_identities(vec![]).iter().map(|i| (i.kind.as_str(), i.name.as_str())).collect::<Vec<_>>(), vec![("agy", "ag0")]);
+    }
+
     #[tokio::test]
     async fn a_config_identity_without_a_host_applies_everywhere_but_yields_to_that_hosts_own() {
         let env = crate::testing::env().await;

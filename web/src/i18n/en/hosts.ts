@@ -596,6 +596,8 @@ export default {
   '身份：未知（這個 Run 沒有記錄啟動身份）': 'Identity: unknown (this run did not record its starting identity)',
   '未知': 'Unknown',
   '身份：不指定（本機預設）': 'Identity: unset (local default)',
+  '身份：ag0（agy 預設帳號）': 'Identity: ag0 (the agy default account)',
+  'ag0：預設帳號（未指定身份或指定 ag0 的 Bot 使用）': 'ag0: the default account (used by bots with no identity or with ag0)',
   '預設': 'Default',
   '身份：不指定（本機預設 cc0）': 'Identity: unset (local default cc0)',
   '身份：{name}': 'Identity: {name}',

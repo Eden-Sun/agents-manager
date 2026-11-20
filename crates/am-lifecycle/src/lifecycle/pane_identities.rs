@@ -33,6 +33,11 @@ fn identity_entry(i: &IdentityCfg, home: &str) -> Option<String> {
         }
         kvs.push(format!("{key}={value}"));
     }
+    // agy 的預設帳號（內建 `ag0`，沒有自己的 HOME）：明寫真家目錄。shim 對「沒有帳號目錄」的身份會 `unset` 那個變數，
+    // 對 claude／codex 是回到預設目錄，對 agy 卻是 `unset HOME`；而且母 bot 若是 ag1（HOME＝影子家目錄），子 pane 要換回真的家。
+    if i.kind == "agy" && kvs.is_empty() && !home.is_empty() && token_ok(home, &BAD_VALUE) {
+        kvs.push(format!("HOME={home}"));
+    }
     let head = format!("{}/{}", i.kind, i.name);
     Some(if kvs.is_empty() { head } else { format!("{head}:{}", kvs.join(",")) })
 }
@@ -67,6 +72,15 @@ mod tests {
             identities_env(&list, "/home/remote"),
             "claude/cc0;claude/cc1:CLAUDE_CONFIG_DIR=/home/remote/.claude-cc1;codex/cx1:CODEX_HOME=/home/remote/.codex-cx1"
         );
+    }
+
+    /// agy 的預設帳號（內建 `ag0`，沒有 HOME）明寫那台的真家目錄：母 bot 是 ag1（HOME＝影子家目錄）時，
+    /// `--identity ag0` 的子 pane 要換回真的家，不能讓 shim `unset HOME`。有自己 HOME 的 ag1 照舊。
+    #[test]
+    fn the_agy_default_identity_carries_the_real_home() {
+        let list = [ident("ag0", "agy", &[]), ident("ag1", "agy", &[("HOME", "$HOME/.agy-ag1")])];
+        assert_eq!(identities_env(&list, "/Users/m4p"), "agy/ag0:HOME=/Users/m4p;agy/ag1:HOME=/Users/m4p/.agy-ag1");
+        assert_eq!(identities_env(&[ident("ag0", "agy", &[])], ""), "agy/ag0", "不知道家目錄就不寫，不亂填");
     }
 
     /// 只帶帳號目錄那三個 key：其他 key（例如 API key）不進 pane env。

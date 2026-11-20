@@ -1,4 +1,5 @@
 import { useDismiss } from '../lib/useDismiss'
+import { AGY_DEFAULT_IDENTITY } from '../lib/defaultIdentity'
 import { fmtDateTime } from '../lib/userTime'
 import { CodexResetHint } from './CodexResetHint'
 import { leftPct } from '../lib/quotaLeft'
@@ -147,7 +148,8 @@ function staleSuffix(q: KindQuota | null, now: number, t: ReturnType<typeof useT
 }
 
 function entryLabel(entry: QuotaEntry): string {
-  return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
+  const identity = entry.identity ?? (entry.kind === 'agy' ? AGY_DEFAULT_IDENTITY : null)
+  return identity ? `${KIND_LABEL[entry.kind]} · ${identity}` : KIND_LABEL[entry.kind]
 }
 
 function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: number, t: ReturnType<typeof useT>): string {
@@ -575,7 +577,7 @@ function Gauge({
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {entry.identity ?? entry.kind}
+            {entry.identity ?? (entry.kind === 'agy' ? AGY_DEFAULT_IDENTITY : entry.kind)}
           </span>
         )}
         {headPct ? (

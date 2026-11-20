@@ -1,4 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { isBuiltinDefaultIdentity } from '../lib/defaultIdentity'
 import { isApiKind } from './kindMeta'
 import type { BotKind, IdentityStatus, PatchBotInput } from '../api/types'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -196,8 +197,10 @@ export function IdentityOptions({
         </button>
       </span>
       <div className="opt-group" role="radiogroup" aria-label={t('身份')}>
-        <button type="button" role="radio" aria-checked={value === ''} className={`opt${value === '' ? ' on' : ''}`} onClick={() => onChange('')}>
-          {t('不指定身份（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })}
+        <button type="button" role="radio" aria-checked={value === '' || isBuiltinDefaultIdentity(kind, value)} className={`opt${value === '' || isBuiltinDefaultIdentity(kind, value) ? ' on' : ''}`} onClick={() => onChange('')}>
+          {kind === 'agy'
+            ? t('ag0（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })
+            : t('不指定身份（{account}）', { account: !host || host === 'local' ? t('本機預設') : t('{host} 的預設帳號', { host }) })}
         </button>
         {identities.map((i) => {
           const st = status[i.name]

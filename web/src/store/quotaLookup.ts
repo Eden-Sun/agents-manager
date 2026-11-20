@@ -9,6 +9,7 @@
  * 額度按主機分（SPEC §14），所以每次查詢都要帶 host。
  */
 import { quotaKey } from '../api/types'
+import { isBuiltinDefaultIdentity } from '../lib/defaultIdentity'
 import type { BotKind, Identity, KindQuota, QuotaMap } from '../api/types'
 import { projectNoFiveHour } from '../lib/quotaNoFiveHour'
 
@@ -68,7 +69,8 @@ export function quotaBaseKey(
   identity: string | null,
   identities: readonly Identity[],
 ): string {
-  if (!identity) return kind
+  // agy 內建的預設帳號（`ag0`／舊資料 `agy`）不在身份表裡，daemon 一律寫裸 `agy`。
+  if (!identity || isBuiltinDefaultIdentity(kind, identity)) return kind
   // 別的 kind 的身份（codex bot 身上的 claude `cc1`）不是這個 CLI 的帳號代號：daemon 一律寫裸 kind。
   const own = identities.find((i) => i.name === identity)
   if (own && own.kind !== kind) return kind

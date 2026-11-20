@@ -107,6 +107,7 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '身份': 'Identities',
   '重新問 {host} 上的 CLI 每個身份是否已登入': 'Check whether each CLI Identity on {host} is signed in',
   '不指定身份（{account}）': 'Use the default account ({account})',
+  'ag0（{account}）': 'ag0 ({account})',
   '本機預設': 'the local default',
   '{host} 的預設帳號': 'the default account on {host}',
   '{name}（{status}）': '{name} ({status})',

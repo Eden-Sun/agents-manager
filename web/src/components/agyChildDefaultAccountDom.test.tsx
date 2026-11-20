@@ -38,10 +38,10 @@ async function badgeFor(runtime_identity: string | null): Promise<HTMLElement | 
   return document.querySelector<HTMLElement>('[data-bot-id="child"] .kind-identity .identity-badge')
 }
 
-test('agy 子 agent 在預設帳號上（runtime_identity 空字串）：晶片顯示「預設」，不是「未知」', async () => {
+test('agy 子 agent 在預設帳號上（runtime_identity 空字串）：晶片顯示「ag0」，不是「未知」', async () => {
   const badge = await badgeFor('')
   assert.ok(badge, '應該畫出身份晶片')
-  assert.equal(badge.textContent?.trim(), '預設')
+  assert.equal(badge.textContent?.trim(), 'ag0')
   assert.ok(!badge.classList.contains('is-unknown'))
 })
 

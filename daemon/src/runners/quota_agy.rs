@@ -163,6 +163,10 @@ pub async fn refresh_agy_identities(app: &Arc<App>, host: &str) {
             continue;
         }
         let shares = crate::quota::identity_shares_default("agy", &idn.env);
+        if shares {
+            // 沒有自己的 HOME（內建的 `ag0`）＝預設帳號：那一格由 `refresh_agy` 問，這裡不重問、也不因它的登入狀態清掉。
+            continue;
+        }
         let base = crate::quota::quota_base_default_aware("agy", Some(&idn.name), shares);
         let full = crate::quota::quota_key(host, &base);
         if logins.get(&idn.name).and_then(|i| i.logged_in) == Some(false) {
@@ -546,7 +550,8 @@ pub fn spawn_agy_identity_poller(app: Arc<App>) {
     crate::background_loop::spawn_periodic(&app, "agy identity poller", AGY_IDENTITY_RECHECK, AGY_IDENTITY_RECHECK, |app| async move {
         for host in crate::quota::pollable_hosts(&app).await {
             let identities = crate::tools::identities_for_host(&app, &host).await;
-            let names = agy_identity_names(identities.iter().map(|i| (i.name.as_str(), i.kind.as_str())));
+            // 內建的 `ag0`（沒有自己的 HOME）就是預設帳號，沒有另一份登入可驗。
+            let names = agy_identity_names(identities.iter().filter(|i| !crate::quota::identity_shares_default(&i.kind, &i.env)).map(|i| (i.name.as_str(), i.kind.as_str())));
             for name in names {
                 let _ = crate::tools::recheck_identity_login(&app, &host, &name).await;
             }

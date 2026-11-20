@@ -5500,6 +5500,10 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
+    if b.name == crate::tools::AGY_DEFAULT_IDENTITY {
+        // `ag0` 是內建的 agy 預設帳號名（每台都有、沒有 env）；再建一筆同名的會讓「ag0＝預設帳號」不成立。
+        return Err(LcError::conflict("identity name is reserved", json!({"name": b.name, "message": "ag0 是內建的 agy 預設帳號，不能另建同名身份"})));
+    }
     if b.kind == "agy" {
         // agy 沒有設定目錄變數，身份＝換 `HOME`（影子家目錄）；沒帶、或指回真家目錄＝其實是預設帳號，擋掉免得兩個身份共用一份登入。
         let home = crate::tools::agy_identity_home(&b.env);

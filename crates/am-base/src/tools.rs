@@ -374,7 +374,31 @@ pub async fn identities_for_host_ref<H: ToolsEnv>(app: &H, host: &str) -> Vec<cr
     let identities = app.config_identities().await;
     let tools = app.tools_cache().lock().await;
     let shell = tools.get(host).map(|t| t.shell_identities.as_slice());
-    merge_identities(&identities, host, shell).into_iter().map(|(i, _)| i).collect()
+    with_builtin_identities(merge_identities(&identities, host, shell).into_iter().map(|(i, _)| i).collect())
+}
+
+/// agy 預設帳號（不換 `HOME`）的名字：比照 claude 的 `cc0`、codex 的 `co0`，讓它跟身份 `ag1` 一樣叫得出來
+/// （使用者 2026-11-20）。沒有 env，所以啟動、額度 key（裸 `agy`）、模型清單都等同「不指定身份」。
+pub const AGY_DEFAULT_IDENTITY: &str = "ag0";
+
+/// 內建身份：每台主機都有、不寫在 config 也不是 shell alias。目前只有 agy 的 [`AGY_DEFAULT_IDENTITY`]。
+pub fn builtin_identities() -> Vec<crate::config::IdentityCfg> {
+    vec![crate::config::IdentityCfg { name: AGY_DEFAULT_IDENTITY.into(), kind: "agy".into(), host: None, env: BTreeMap::new(), args: vec![] }]
+}
+
+/// 這個名字對這個 kind 是不是「內建的預設帳號」。舊資料把 agy 預設帳號記成 kind 名 `agy` 的也算。
+pub fn is_builtin_default_identity(kind: &str, name: &str) -> bool {
+    kind == "agy" && matches!(name.trim(), AGY_DEFAULT_IDENTITY | "agy")
+}
+
+/// 把內建身份補在清單最後；使用者自己（config／shell）已有同名的就以使用者的為準，不覆蓋。
+pub fn with_builtin_identities(mut list: Vec<crate::config::IdentityCfg>) -> Vec<crate::config::IdentityCfg> {
+    for b in builtin_identities() {
+        if !list.iter().any(|i| i.name == b.name) {
+            list.push(b);
+        }
+    }
+    list
 }
 
 pub async fn identity_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
@@ -383,7 +407,12 @@ pub async fn identity_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str
 
 /// Borrowed variant for callers whose ports do not need to retain the App allocation.
 pub async fn identity_for_host_ref<H: ToolsEnv>(app: &H, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
-    identities_for_host_ref(app, host).await.into_iter().find(|i| i.name == name)
+    let list = identities_for_host_ref(app, host).await;
+    if let Some(found) = list.iter().find(|i| i.name == name) {
+        return Some(found.clone());
+    }
+    // 舊資料：agy 預設帳號曾被記成 `agy`。照內建的 ag0 解析（沒有 env），不讓既有 bot 因「不認得的身份」起不來。
+    (name.trim() == "agy").then(|| crate::config::IdentityCfg { name: name.to_string(), kind: "agy".into(), host: None, env: BTreeMap::new(), args: vec![] })
 }
 
 /// Deliberately *not* a file check: a claude account can live in the Keychain with no `.credentials.json`.

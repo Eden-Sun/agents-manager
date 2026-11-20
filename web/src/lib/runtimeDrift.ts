@@ -1,5 +1,6 @@
 // `.ts` 副檔名：node --experimental-strip-types 的 resolver 不補副檔名。
 import { effortLabel } from '../api/types.ts'
+import { canonicalIdentity, defaultIdentityName } from './defaultIdentity.ts'
 import type { Bot, Run } from '../api/types.ts'
 import { modelMatches } from './modelMatches.ts'
 
@@ -26,7 +27,6 @@ function comparesFast(kind: string): boolean {
 }
 
 const NONE = '（CLI 預設）' // i18n-ignore
-const DEFAULT_IDENTITY = 'cc0'
 
 function normalizedIdentity(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? ''
@@ -34,7 +34,7 @@ function normalizedIdentity(value: string | null | undefined): string | null {
 }
 
 function identityLabel(value: string | null | undefined, kind: string): string {
-  return normalizedIdentity(value) ?? (kind === 'claude' ? DEFAULT_IDENTITY : '（預設）') // i18n-ignore
+  return canonicalIdentity(kind, value) ?? defaultIdentityName(kind) ?? '（預設）' // i18n-ignore
 }
 
 /** 已知的 runtime 身份；`undefined`＝沒記／沒有 active run，`null`＝已知但使用本機預設帳號。 */
@@ -124,8 +124,9 @@ export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftFiel
     out.push({ field: 'fast', label: 'fast', running: run.runtime_fast ? '開' : '關', configured: bot.fast ? '開' : '關' }) // i18n-ignore
   }
   if (typeof run.runtime_identity === 'string') {
-    const running = normalizedIdentity(run.runtime_identity)
-    const configured = normalizedIdentity(bot.identity)
+    // agy 的 `ag0`／`agy`／空值是同一個預設帳號：先收斂再比，不然設定空、實際 ag0 會被標成不一致。
+    const running = canonicalIdentity(bot.kind, run.runtime_identity)
+    const configured = canonicalIdentity(bot.kind, bot.identity)
     if (running !== configured) {
       out.push({
         field: 'identity',

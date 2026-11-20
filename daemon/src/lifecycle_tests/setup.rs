@@ -648,7 +648,7 @@ mod pane_env_tests {
             .await
             .unwrap();
         let e = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap();
-        assert_eq!(e["AM_IDENTITIES"], json!("claude/cc1:CLAUDE_CONFIG_DIR=/home/remote/.claude-cc1;codex/cx1:CODEX_HOME=/home/remote/.codex-cx1"));
+        assert_eq!(e["AM_IDENTITIES"], json!("claude/cc1:CLAUDE_CONFIG_DIR=/home/remote/.claude-cc1;codex/cx1:CODEX_HOME=/home/remote/.codex-cx1;agy/ag0:HOME=/home/remote"), "內建的 agy 預設帳號 ag0 每台都列，帶那台的真家目錄");
     }
     /// `<shim>:/usr/local/bin:…`，claude 起不來（`command not found`）。遠端 pane 的 PATH 要照 host 的 `remote_path`，
     /// 開頭的 `$HOME`／`~` 展開成那台的 home（herdr 照字面設 env，不經 shell）。

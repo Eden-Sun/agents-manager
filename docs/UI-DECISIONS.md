@@ -1762,6 +1762,19 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **不做（留給後續階段）**：新增身份對話框（`AddIdentityDialog`，hc0d 負責）、版面骨架與分頁（第 1 階段）、手機版收合（第 P2）。
 - **純前端**：沒有新增或改動任何 API；bot 改綁走既有的 bot 設定面板。
 
+## agy 預設帳號顯示為 ag0（2026-11-20，使用者）
+
+- **背景**：agy 有預設帳號與身份 `ag1` 兩個帳號，額度列卻一格寫 `agy`、一格寫 `ag1`，側欄的預設帳號徽章寫「預設」，分不出是哪個帳號；claude 的預設帳號一直叫 `cc0`。
+- **決策**：agy 的預設帳號在所有畫面叫 `ag0`（`lib/defaultIdentity.ts`，daemon 那邊是內建身份，SPEC §16.8）。
+  - 額度列：裸 `agy` 那一格的標籤與 tooltip 寫 `ag0`（精簡模式照舊只畫圖示，`ag1` 那格有名字）。
+  - 側欄與群集列的身份徽章：agy bot 沒指定身份、`ag0`、或舊資料 `agy` 都畫 `ag0`（不再是「預設」）。
+  - 身份頁：agy 卡的預設帳號列說明寫「ag0：預設帳號」，綁 `ag0` 的 bot 也算在這一列的使用者裡。
+  - bot 設定的身份選項：agy 的「不指定身份」那一顆改標 `ag0（本機預設／<host> 的預設帳號）`；bot 已存 `ag0` 時這一顆是選取狀態。
+  - 快速新增：agy 有其他身份時也列一顆 `ag0`（以前只列 `[[identities]]` 的，預設帳號要先刪身份才開得到）。
+  - 「設定與實際帳號不同」的提示：`ag0`／`agy`／空值視為同一個帳號，不誤報；標籤寫 `ag0`。
+- **不改的**：額度 key 仍是裸 `agy`（`ag1` 是 `agy:ag1`），停用表的預設帳號仍是 `@default`；claude／codex／grok 的顯示不變。
+- **測試**：`lib/defaultIdentity.test.ts`、`components/agyChildDefaultAccountDom.test.tsx`。
+
 ## agy 模型依價格排序（2026-11-20，使用者需求）
 
 - **背景**：agy API 回傳 14 個模型（3.8 Flash 3 檔、4 Hydrogen 4 檔、4 Argon 3 檔、4 Neon 4 檔），daemon 回傳順序未排序，且原本 ModelPicker 對 agy 依賴靜態寫死的 3.8 清單，導致 Gemini 4 系列無法依照價格正確排序。

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { AGY_DEFAULT_IDENTITY } from '../lib/defaultIdentity'
 import type { BotKind } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, toolsOfHost, useStore } from '../store/store'
@@ -67,6 +68,24 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           quotaOff,
         })
         continue
+      }
+      if (kind === 'agy') {
+        // agy 的預設帳號（ag0）不在身份表裡（它不是 `[[identities]]`）：有 ag1 時也要能直接開一顆 ag0。
+        const loggedOut = tools[kind].logged_in === false
+        const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, null))
+        out.push({
+          key: kind,
+          kind,
+          identity: null,
+          label: AGY_DEFAULT_IDENTITY,
+          title: quotaOff
+            ? t('{name} 已在額度條上暫時停用——現在開一顆同樣沒額度可用', { name: AGY_DEFAULT_IDENTITY })
+            : loggedOut
+              ? t('{name} 在 {host} 尚未登入——點一下開登入終端', { name: AGY_DEFAULT_IDENTITY, host: hostLabel })
+              : `${kind} · ${AGY_DEFAULT_IDENTITY}${t('（{host}）', { host: hostLabel })}`,
+          loggedOut,
+          quotaOff,
+        })
       }
       for (const i of ids) {
         const st = status[i.name]
