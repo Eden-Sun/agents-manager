@@ -447,7 +447,7 @@ pub struct ConfigFile {
     /// issue #749：codex app-server 的 thread 歷史當結構化 turn evidence（SPEC §4.4a）。預設開，可關。
     #[serde(default, skip_serializing_if = "CodexHistoryCfg::is_default")]
     pub codex_history: CodexHistoryCfg,
-    /// `[agy]`：agy 的 context 視窗大小（網頁顯示用量百分比的分母）。預設 400K，可調到 1M；沒寫這段，既有設定檔的長相不變。
+    /// `[agy]`：agy 的 context 視窗大小（網頁顯示用量百分比的分母）。預設 1,048,576（1M），可調到 2,000,000；沒寫這段，既有設定檔的長相不變。
     #[serde(default, skip_serializing_if = "AgyCfg::is_default")]
     pub agy: AgyCfg,
     /// 分享 bot 的對外入口（SPEC「分享 bot」）。沒寫＝不開那個 listener、也不能開分享連結。
@@ -725,16 +725,16 @@ impl CodexCfg {
 }
 
 /// `[agy]`：agy 的 context 視窗大小（token）。agy 本身不回報視窗大小，網頁的 context % 用這個數當分母。
-/// 預設 400000；agy 可把視窗調到 1M，這裡照實際設定填。範圍 1..=1000000，超出範圍的值改用邊界並記一行 WARN。
+/// 預設 1048576（agy 的 Gemini 3.8 Flash、Gemini 4 Neon／Argon／Hydrogen 官方視窗都是 1,048,576），這裡照實際設定填。範圍 1..=2000000，超出範圍的值改用邊界並記一行 WARN。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgyCfg {
     #[serde(default = "default_agy_context_window_tokens", deserialize_with = "de_agy_context_window_tokens")]
     pub context_window_tokens: u64,
 }
 
-pub const AGY_CONTEXT_WINDOW_DEFAULT: u64 = 400_000;
+pub const AGY_CONTEXT_WINDOW_DEFAULT: u64 = 1_048_576;
 pub const AGY_CONTEXT_WINDOW_MIN: u64 = 1;
-pub const AGY_CONTEXT_WINDOW_MAX: u64 = 1_000_000;
+pub const AGY_CONTEXT_WINDOW_MAX: u64 = 2_000_000;
 
 fn default_agy_context_window_tokens() -> u64 {
     AGY_CONTEXT_WINDOW_DEFAULT
@@ -744,7 +744,7 @@ fn de_agy_context_window_tokens<'de, D: serde::Deserializer<'de>>(d: D) -> Resul
     let raw = u64::deserialize(d)?;
     let clamped = raw.clamp(AGY_CONTEXT_WINDOW_MIN, AGY_CONTEXT_WINDOW_MAX);
     if clamped != raw {
-        tracing::warn!(raw, used = clamped, "[agy] context_window_tokens 超出 1..=1000000，改用邊界值");
+        tracing::warn!(raw, used = clamped, "[agy] context_window_tokens 超出 1..=2000000，改用邊界值");
     }
     Ok(clamped)
 }
@@ -3402,14 +3402,17 @@ mod supervisor_cfg_tests {
     /// `-32601 not supported yet`、`thread/turns/list` 回 `thread not loaded`，預設開等於每則 codex prompt 白起一個 app-server
     /// （還會寫 CODEX_HOME、對外跑 `git ls-remote`）卻永遠拿不到證據。要用請在設定檔明寫 `enabled = true`。
     #[test]
-    fn agy_context_window_defaults_to_400k_and_clamps_to_1m() {
+    fn agy_context_window_defaults_to_1m_and_clamps_to_the_max() {
         let none: ConfigFile = toml::from_str("").unwrap();
-        assert_eq!(none.agy.context_window_tokens, 400_000);
+        assert_eq!(none.agy.context_window_tokens, 1_048_576);
         assert!(!toml::to_string_pretty(&none).unwrap().contains("[agy]"), "沒寫就不出現在序列化結果裡");
         let one_m: ConfigFile = toml::from_str("[agy]\ncontext_window_tokens = 1000000\n").unwrap();
         assert_eq!(one_m.agy.context_window_tokens, 1_000_000);
+        let official: ConfigFile = toml::from_str("[agy]\ncontext_window_tokens = 1048576\n").unwrap();
+        assert_eq!(official.agy.context_window_tokens, 1_048_576, "官方 1,048,576 要原樣保留");
         let high: ConfigFile = toml::from_str("[agy]\ncontext_window_tokens = 5000000\n").unwrap();
         assert_eq!(high.agy.context_window_tokens, AGY_CONTEXT_WINDOW_MAX, "超過上限改用上限");
+        assert_eq!(AGY_CONTEXT_WINDOW_MAX, 2_000_000);
         let zero: ConfigFile = toml::from_str("[agy]\ncontext_window_tokens = 0\n").unwrap();
         assert_eq!(zero.agy.context_window_tokens, AGY_CONTEXT_WINDOW_MIN, "低於下限改用下限");
     }

@@ -227,17 +227,21 @@ pub fn parse_turns(jsonl: &str) -> Vec<Turn> {
     done
 }
 
-/// 最後一筆模型回覆的 `input_tokens`＝那次請求讀進去的整段 context（真機：新對話第一問 11824）。
+/// 最後一筆模型回覆的整段 context＝`input_tokens`（未命中快取的新 token）＋`cache_read_tokens`（命中快取讀進來的 token）。
+/// agy 的 `input_tokens` 只算未命中快取的部分，只取它會把 context 低估（真機：3415＋140185＝143600，只顯示 3.4k）。
+/// `cache_read_tokens` 缺就當 0；新對話第一問沒有快取，只有 `input_tokens`（真機 11824）。
 pub fn last_input_tokens(jsonl: &str) -> Option<i64> {
     jsonl.lines().rev().find_map(|l| {
         let v: Value = serde_json::from_str(l).ok()?;
         assistant_text(l)?;
-        v.get("input_tokens").and_then(Value::as_i64).filter(|n| *n > 0)
+        let input = v.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let cached = v.get("cache_read_tokens").and_then(Value::as_i64).unwrap_or(0);
+        Some(input + cached).filter(|n| *n > 0)
     })
 }
 
 /// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數、視窗大小、用量百分比。
-/// agy 不回報視窗大小，所以視窗大小來自 `[agy] context_window_tokens`（預設 400K，可調到 1M），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
+/// agy 不回報視窗大小，所以視窗大小來自 `[agy] context_window_tokens`（預設 1,048,576，可調到 2,000,000），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
 pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_window_tokens: u64) -> Option<String> {
     if model.is_none() && context_tokens.is_none() {
         return None;

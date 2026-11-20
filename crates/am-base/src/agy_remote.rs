@@ -78,8 +78,11 @@ if ev=="Stop":
                 a=assistant_text(v)
                 if a is not None:
                     asst=a
-                    t=v.get("input_tokens")
-                    tokens=t if isinstance(t,int) and not isinstance(t,bool) and t>0 else tokens
+                    def _n(k):
+                        x=v.get(k)
+                        return x if isinstance(x,int) and not isinstance(x,bool) else 0
+                    t=_n("input_tokens")+_n("cache_read_tokens")
+                    tokens=t if t>0 else tokens
             if tokens is not None:
                 p["lastInputTokens"]=tokens
             if asst is not None:

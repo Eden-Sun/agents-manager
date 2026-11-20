@@ -175,6 +175,18 @@
         .join("\n");
         assert_eq!(last_input_tokens(&text), Some(20000));
         assert_eq!(last_input_tokens(&user_step(0, "q")), None);
+        // 有快取：context＝input_tokens（未命中）＋cache_read_tokens（命中）；只看最後一筆回覆
+        let cached = [
+            json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","input_tokens":3000,"cache_read_tokens":100000}).to_string(),
+            json!({"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"b","input_tokens":3415,"cache_read_tokens":140185}).to_string(),
+        ]
+        .join("\n");
+        assert_eq!(last_input_tokens(&cached), Some(143_600));
+        // cache_read_tokens 缺就當 0；input_tokens 缺、只有快取也算
+        let no_cache_field = json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","input_tokens":5000}).to_string();
+        assert_eq!(last_input_tokens(&no_cache_field), Some(5000));
+        let only_cache = json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","cache_read_tokens":7000}).to_string();
+        assert_eq!(last_input_tokens(&only_cache), Some(7000));
         assert_eq!(status_json(None, None, 400_000), None);
         let v: Value = serde_json::from_str(&status_json(Some("gemini-3.8-flash-medium"), Some(20000), 400_000).unwrap()).unwrap();
         assert_eq!(v["model"]["id"], "gemini-3.8-flash-medium");
@@ -189,7 +201,9 @@
             let v: Value = serde_json::from_str(&status_json(None, Some(tokens), window).unwrap()).unwrap();
             v["context_window"].clone()
         };
-        // 預設 400K：20000 / 400000 = 5.0%
+        // 預設 1M（1,048,576）：20000 / 1048576 ≈ 1.9%
+        assert_eq!(pct(20_000, 1_048_576)["used_percentage"], 1.9);
+        // 400K 視窗：20000 / 400000 = 5.0%
         assert_eq!(pct(20_000, 400_000)["used_percentage"], 5.0);
         // 設定成 1M：同樣 20000 → 2.0%，視窗大小照實寫
         let one_m = pct(20_000, 1_000_000);
