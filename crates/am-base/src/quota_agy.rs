@@ -198,6 +198,23 @@ pub fn pane_probe_command_with_env(exe: Option<&str>, env: &BTreeMap<String, Str
     )
 }
 
+/// 遠端在 pane 裡跑 `agy models` 的那一行（同 [`pane_probe_command_with_env`] 的包法與標記，只換子命令）：
+/// 模型清單跟額度一樣要讀 Keychain，純 ssh 在 macOS 上拿到的是「Please sign in」。`env`＝身份的 `HOME`（已展開），預設帳號傳空的。
+pub fn pane_models_command(exe: Option<&str>, env: &BTreeMap<String, String>) -> String {
+    let exe = crate::hosts::sh_quote(exe.unwrap_or("agy"));
+    let assign = env_assignments(env);
+    format!(
+        "d=$(mktemp -d 2>/dev/null) && cd \"$d\" && {{ printf '\\nAM_AGY_%s\\n' BEGIN; \
+         AGY_CLI_DISABLE_AUTO_UPDATE=true {assign}{exe} models </dev/null 2>&1; rc=$?; cd /; rm -rf \"$d\"; \
+         printf '\\nAM_AGY_%s=%s\\n' DONE \"$rc\"; }} || printf '\\nAM_AGY_%s=%s\\n' DONE 1"
+    )
+}
+
+/// 沒登入時 `agy models` 印的字（2026-11-20 m4p 實測：`Error: Please sign in to view available models.`）；它會自己結束，不必等逾時。
+pub fn models_sign_in_required(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("please sign in")
+}
+
 /// 畫面最後一次 `AM_AGY_BEGIN` 之後的部分（沒有就整個畫面）。
 pub fn after_begin(screen: &str) -> &str {
     screen.rfind(PANE_BEGIN).map_or(screen, |i| &screen[i + PANE_BEGIN.len()..])

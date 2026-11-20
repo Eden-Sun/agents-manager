@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::config::LOCAL_HOST;
 use crate::hosts::sh_quote;
 use crate::models::{
-    agy_models_from_text, agy_models_script, agy_static_models, claude_config_dir, claude_static_models, codex_apply_identity_config,
+    agy_models_from_screen, agy_models_from_text, agy_models_script, agy_static_models, claude_config_dir, claude_static_models, codex_apply_identity_config,
     codex_models_from_rpc, enrich_grok_models, find_response, grok_models_from_text,
     home_env_prefix, home_file_expr, identity_home_dir, read_claude_effort_settings,
     read_optional_text, rpc_lines, CACHE_TTL,
@@ -17,6 +17,8 @@ const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_RPC_HOLD_SECS: u32 = 6;
 /// `agy models` 要起一個約 200 MB 的執行檔，比 `--version` 慢；逾時就退回寫死的清單。
 const AGY_MODELS_TIMEOUT: Duration = Duration::from_secs(30);
+/// 遠端 pane 版的時限：開 workspace、等 shell 起來、打指令各要一兩秒，比直接跑寬一點。
+const AGY_MODELS_PANE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// 本機找 `exe` 的絕對路徑：含 `/` 直接用，否則走 login shell 探測。探測走 [`crate::hosts::sh_local_stdout`]，
 /// 逾時整個行程群組收掉（卡住的 `-lic` 互動 shell 不會留下來，issue #889）。
@@ -106,23 +108,78 @@ pub async fn codex_rpc_in(app: &Arc<App>, host: &str, home: Option<&str>, method
     find_response(&out, ID).ok_or_else(|| anyhow!("codex app-server on {host}: no response to `{method}`:\n{}", out.trim()))?
 }
 
-/// agy 的模型清單：本機用「這個身份的 HOME」跑 `agy models`（身份＝換 `HOME`，帳號不同可用的模型也不同，不能拿預設帳號的清單冒充；
-/// 經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。讀不到、解不出來、逾時，
-/// 或是遠端（ssh 進去讀不到 macOS Keychain，`agy models` 回「Please sign in」，2026-11-20 在 m4p 實測）都回 `static`，
-/// 呼叫端（[`list`]）會先借同 kind、**同身份**的上次抓到清單，最後才用寫死的 [`agy_static_models`]。exe 沒有快取就不猜 PATH，同樣回 `static`。
+/// agy 的模型清單，依「主機＋帳號」抓（身份＝換 `HOME`，帳號不同可用的模型也不同，不能拿別的帳號或寫死的清單冒充；
+/// 經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。
+/// - 本機：用這個身份的 `HOME` 跑 `agy models`。
+/// - 遠端：先走 ssh（憑證存在檔案裡的帳號讀得到：影子家目錄沒有 Keychain，agy 把 token 寫在 `.gemini/antigravity-cli/antigravity-oauth-token`，
+///   2026-11-20 m4p 的 ag1 實測）；ssh 拿不到（macOS 預設帳號的憑證在 login Keychain，非互動 ssh 讀不到，回「Please sign in」）
+///   就在那台 herdr 的 pane 裡跑（GUI session 讀得到 Keychain，同額度探測 `quota_agy::pane_probe` 的做法），從畫面讀回來。
+/// 都拿不到（沒登入、逾時、exe 沒有快取）回 `static`，呼叫端（[`list`]）先用這台這個身份上次抓到的，再借別台同身份的，最後才是寫死的 [`agy_static_models`]。
 async fn agy_model_list(app: &Arc<App>, host: &str, identity: Option<&str>) -> Result<(&'static str, Vec<Value>)> {
+    let Some(exe) = crate::tools::cached_path(app, host, "agy").await else { return Ok(("static", agy_static_models())) };
+    let home = identity_home_dir(app, host, identity, "agy", "HOME").await?;
     if host == LOCAL_HOST {
-        if let Some(exe) = crate::tools::cached_path(app, host, "agy").await {
-            let home = identity_home_dir(app, host, identity, "agy", "HOME").await?;
-            if let Ok(run) = crate::hosts::sh_local_capture(&agy_models_script(&exe, home.as_deref()), AGY_MODELS_TIMEOUT).await {
-                let models = agy_models_from_text(&String::from_utf8_lossy(&run.stdout));
-                if !run.timed_out && !models.is_empty() {
-                    return Ok(("agy-cli", models));
-                }
+        if let Ok(run) = crate::hosts::sh_local_capture(&agy_models_script(&exe, home.as_deref()), AGY_MODELS_TIMEOUT).await {
+            let models = agy_models_from_text(&String::from_utf8_lossy(&run.stdout));
+            if !run.timed_out && !models.is_empty() {
+                return Ok(("agy-cli", models));
             }
         }
+        return Ok(("static", agy_static_models()));
     }
-    Ok(("static", agy_static_models()))
+    let Some(conn) = app.hosts.get(host).await else { return Ok(("static", agy_static_models())) };
+    // 未登入時 `agy models` 以非 0 結束：`|| true` 讓 ssh 那層不當成連線錯誤，輸出照樣過濾成空的，往下試 pane。
+    let script = format!("{{ {}; }} 2>/dev/null || true\n", agy_models_script(&exe, home.as_deref()));
+    if let Ok(out) = conn.ssh_exec_path_timeout(&script, AGY_MODELS_TIMEOUT).await {
+        let models = agy_models_from_text(&out);
+        if !models.is_empty() {
+            return Ok(("agy-cli", models));
+        }
+    }
+    match agy_models_via_pane(app, host, &exe, home.as_deref()).await {
+        Ok(models) if !models.is_empty() => Ok(("agy-cli", models)),
+        Ok(_) => Ok(("static", agy_static_models())),
+        Err(e) => {
+            tracing::debug!(host, identity = identity.unwrap_or(""), error = %format!("{e:#}"), "agy models pane probe failed; falling back to the last known list");
+            Ok(("static", agy_static_models()))
+        }
+    }
+}
+
+/// 在遠端 herdr 的 pane 裡跑 `agy models`、從畫面讀清單。跟 agy 額度探測共用 `#agy` 探測鎖與 workspace label
+/// （一次只開一個探測 pane；殘留的由同一套清理收掉）。沒登入（`Please sign in`）提早結束，回空清單。
+async fn agy_models_via_pane(app: &Arc<App>, host: &str, exe: &str, home: Option<&str>) -> Result<Vec<Value>> {
+    use crate::quota_agy::{is_probe_label, models_sign_in_required, pane_done, pane_models_command, after_begin, PANE_BEGIN, PROBE_LABEL_PREFIX};
+    let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let client = crate::quota_claude::client_for_fence(host, &fence).await?;
+    let real_home = crate::hosts::home_for_fence(&fence).await?;
+    if !app.hosts.is_current(&fence).await {
+        bail!("host `{host}` changed before its agy models probe");
+    }
+    let env: std::collections::BTreeMap<String, String> = home.map(|dir| [("HOME".to_string(), dir.to_string())].into()).unwrap_or_default();
+    let label = crate::quota_claude::tagged_probe_label(app.as_ref(), host, PROBE_LABEL_PREFIX.to_string()).await;
+    let run = crate::quota_claude::run_marked_pane(
+        &client,
+        &real_home,
+        &label,
+        json!({}),
+        &pane_models_command(Some(exe), &env),
+        AGY_MODELS_PANE_TIMEOUT,
+        PANE_BEGIN,
+        is_probe_label,
+        pane_done,
+        |screen| models_sign_in_required(after_begin(screen)),
+    )
+    .await?;
+    if !app.hosts.is_current(&fence).await {
+        bail!("host `{host}` was reconnected/reconfigured during the agy models probe; stale result discarded");
+    }
+    Ok(match run {
+        crate::quota_claude::MarkedRun::Done((_rc, text)) => agy_models_from_screen(&text),
+        crate::quota_claude::MarkedRun::Early(_) => vec![],
+        crate::quota_claude::MarkedRun::TimedOut(_) => bail!("`agy models` on {host} did not finish within {}s", AGY_MODELS_PANE_TIMEOUT.as_secs()),
+    })
 }
 
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
@@ -267,6 +324,8 @@ fn fallback_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: 
 }
 
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
+    // agy 內建的預設帳號（`ag0`，舊資料 `agy`）就是「不指定身份」：收斂成同一格快取與同一份 models-last。
+    let identity = identity.filter(|name| !crate::tools::is_builtin_default_identity(kind, name));
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
         if let Some((at, v)) = app.models_cache.lock().await.get(&key) {
@@ -421,6 +480,37 @@ mod tests {
         let got = load_agy_sibling(&dir, "m4p", None).expect("預設帳號借預設帳號的");
         assert_eq!(got["models"][0]["id"], json!("gemini-4-neon-medium"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 遠端 pane 版：指令包在 `AM_AGY_BEGIN`／`AM_AGY_DONE=` 標記裡、帶身份的 HOME；畫面上 tab 變空白也解得出 slug，
+    /// 不收的模型與雜訊行（提示字、shell 回顯）照樣濾掉；沒登入那句認得出來。
+    #[test]
+    fn agy_models_read_back_from_a_remote_pane_screen() {
+        use crate::quota_agy::{models_sign_in_required, pane_done, pane_models_command};
+        let env: std::collections::BTreeMap<String, String> = [("HOME".to_string(), "/Users/m4p/.agy-ag1".to_string())].into();
+        let cmd = pane_models_command(Some("/Users/m4p/.local/bin/agy"), &env);
+        assert!(cmd.contains("HOME='/Users/m4p/.agy-ag1' '/Users/m4p/.local/bin/agy' models </dev/null"), "{cmd}");
+        assert!(!cmd.contains("AM_AGY_BEGIN") && !cmd.contains("AM_AGY_DONE="), "標記拆成 printf 參數，shell 回顯不會被當成標記：{cmd}");
+        assert!(!pane_models_command(Some("agy"), &Default::default()).contains("HOME="), "預設帳號不改 HOME");
+
+        let screen = "m4p@mac ~ % d=$(mktemp -d) && …\n\nAM_AGY_BEGIN\nFetching available models...\n\
+gemini-4-neon-high          Gemini 4 Neon (High)\n\
+gemini-3.8-flash-medium     Gemini 3.8 Flash (Medium)\n\
+gemini-3.8-flash-low        Gemini 3.8 Flash (Low)\n\
+claude-opus-5-5-low         Claude Opus 5.5 (Low)\n\
+gpt-oss-120b-medium         GPT-OSS 120B (Medium)\n\nAM_AGY_DONE=0\nm4p@mac ~ % ";
+        let (rc, body) = pane_done(screen).expect("跑完");
+        assert_eq!(rc, 0);
+        let models = agy_models_from_screen(&body);
+        let ids: Vec<&str> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["gemini-3.8-flash-medium", "gemini-4-neon-high", "gemini-3.8-flash-low"], "預設排第一，claude／gpt-oss 不收");
+        assert_eq!(models[1]["display_name"], json!("Gemini 4 Neon (High)"));
+        assert_eq!(models[0]["is_default"], json!(true));
+
+        let out = "\nAM_AGY_BEGIN\nFetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.\n";
+        assert!(models_sign_in_required(out));
+        assert!(agy_models_from_screen(out).is_empty(), "沒登入＝空清單，呼叫端退回上次抓到的");
+        assert!(!models_sign_in_required(&body));
     }
 
     #[test]

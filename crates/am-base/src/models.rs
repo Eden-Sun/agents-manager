@@ -142,6 +142,22 @@ pub fn agy_models_from_text(text: &str) -> Vec<Value> {
     models
 }
 
+/// 同 [`agy_models_from_text`]，但輸入是**終端畫面**（遠端在 herdr pane 裡跑 `agy models` 讀回來的）：tab 已被終端展開成空白，
+/// 所以每行取第一個空白之前的字當 slug、其餘當顯示名。slug 不含空白，過濾規則與排序同一份。
+pub fn agy_models_from_screen(screen: &str) -> Vec<Value> {
+    let tabbed: String = screen
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            match line.split_once(char::is_whitespace) {
+                Some((id, name)) => format!("{id}\t{}\n", name.trim()),
+                None => format!("{line}\n"),
+            }
+        })
+        .collect();
+    agy_models_from_text(&tabbed)
+}
+
 /// 本機探測 `agy models` 的指令：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄（同 `quota_agy::probe_script`）。
 /// `home` 是身份的家目錄（agy 的身份＝換 `HOME`）：agy 的帳號憑證與可用模型都在那裡，沒有就用預設的家目錄。
 pub fn agy_models_script(exe: &str, home: Option<&str>) -> String {
