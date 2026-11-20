@@ -739,6 +739,15 @@ pub async fn final_agent_prompt_guard(
     if let Some(reason) = agent_prompt_dialog_reason(&bot.kind, &read.text) {
         return Err(reason);
     }
+    // `agent.prompt` bypasses the pane typing preflight. Recheck the Codex composer here so a
+    // restored draft or a queued follow-up cannot be combined with a newly delivered prompt.
+    if bot.kind == "codex" && (run.resume_session_id.is_some() || run.resume_outcome.is_some()) {
+        if let Err(super::delivery::Delivered::NotAttempted { reason, .. }) =
+            super::delivery::composer_ready(app, run, "codex", &read.text).await
+        {
+            return Err(reason);
+        }
+    }
     Ok(())
 }
 

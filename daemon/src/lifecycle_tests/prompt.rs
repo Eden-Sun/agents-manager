@@ -1477,6 +1477,48 @@ mod prompt_tests {
         assert!(notes.iter().any(|n| n.contains("安全提醒橫幅")), "{notes:?}");
     }
     #[tokio::test]
+    async fn agent_prompt_is_fenced_by_a_codex_queued_followup() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET resume_session_id='session-2170' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "• PONG\n\n› \n\n  GPT-6.2-Sol default · /tmp/x\n");
+        let queued_screen = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.171.0-queued-follow-up.txt")
+            .replace("\\x1b", "\u{1b}");
+        assert_eq!(crate::composer_parse::box_state("codex", &queued_screen), crate::composer_parse::BoxState::Empty);
+        let screens = f.env.herdr.screens.clone();
+        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert("pane-prompt-test".into(), queued_screen);
+        });
+
+        let result = prompt(&app, &f.bot_id, "Reply with PONG please", "codex-queued-followup-fence").await;
+        let Err(LcError::Conflict(body)) = result else { panic!("queued follow-up must block direct delivery: {result:?}") };
+        assert_eq!(body["reason"], "composer_busy", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(f.env.herdr.calls_to("agent.prompt").is_empty(), "do not resend into a queued follow-up");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+    #[tokio::test]
+    async fn agent_prompt_is_fenced_by_a_nonempty_codex_composer() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET resume_session_id='session-2170' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "• PONG\n\n› \n\n  GPT-6.2-Sol default · /tmp/x\n");
+        let screens = f.env.herdr.screens.clone();
+        crate::lifecycle::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert(
+                "pane-prompt-test".into(),
+                "• PONG\n\n› UNSENT-DRAFT-2170\n\n  GPT-6.2-Sol default · /tmp/x\n".into(),
+            );
+        });
+
+        let result = prompt(&app, &f.bot_id, "Reply with PONG please", "codex-draft-fence").await;
+        let Err(LcError::Conflict(body)) = result else { panic!("nonempty composer must block direct delivery: {result:?}") };
+        assert_eq!(body["reason"], "composer_busy", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(f.env.herdr.calls_to("agent.prompt").is_empty(), "do not append to a restored draft");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+    #[tokio::test]
     async fn agent_prompt_is_refused_when_host_generation_changes_after_client_capture() {
         let f = fixture("claude", "test").await;
         let app = f.env.app.clone();

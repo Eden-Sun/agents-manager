@@ -493,7 +493,7 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
 
 /// 打第一個字之前的輸入框判斷（計畫、準備、貼字前三處共用）。codex 的帳號安全提醒橫幅開著時框看起來是空的，但打進去的
 /// 開頭數字會被當成選項吃掉（#782）：整則不送、可重試，第一次看到時通知人；不按 Esc 或任何鍵。
-async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
+pub(super) async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
     let refreshed;
     let screen = if kind == "claude" && crate::tui_prompts::cold_resume_choice(screen).is_some() {
         let pending = || Delivered::NotAttempted { reason: super::claude_resume_menu::PENDING, retry: true };
@@ -513,6 +513,9 @@ async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &s
         if banner {
             return Err(Delivered::NotAttempted { reason: super::codex_banner::REASON, retry: true });
         }
+        if codex_has_queued_followup(screen) {
+            return Err(Delivered::NotAttempted { reason: "composer_busy", retry: true });
+        }
     }
     if kind == "agy" {
         if let Some(dialog) = crate::agy_screen::blocking_dialog(screen) {
@@ -524,6 +527,26 @@ async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str, screen: &s
         BoxState::NonEmpty => Err(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
         BoxState::Unready => Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
     }
+}
+
+/// Codex 0.171 keeps queued follow-ups above the composer, so the composer can be empty while a
+/// prior question is still waiting to be sent automatically. Only inspect the queue block adjacent
+/// to the current composer; old transcript rows must not block future delivery.
+fn codex_has_queued_followup(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(composer) = crate::composer_parse::composer_row("codex", &lines) else { return false };
+    let start = composer.saturating_sub(12);
+    let rows: Vec<String> = lines[start..composer]
+        .iter()
+        .map(|row| crate::composer_parse::strip_ansi(row))
+        .collect();
+    let Some(header) = rows
+        .iter()
+        .rposition(|row| row.trim().trim_start_matches('•').trim() == "Queued follow-up inputs")
+    else {
+        return false;
+    };
+    rows[header + 1..].iter().any(|row| row.trim_start().starts_with('↳'))
 }
 
 /// Decide how to deliver, touching nothing: the route, the evidence and an empty box. Callers run
