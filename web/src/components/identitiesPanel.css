@@ -265,3 +265,61 @@
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* 主要按鈕旁的小註：說明會在哪台開終端。 */
+.identity-hint-inline {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* 「⋯」選單的分組：一般（可逆）與危險操作（清憑證／刪設定，危險色）分開。 */
+.identity-menu-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.identity-menu-group + .identity-menu-group {
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.identity-menu-label {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.identity-menu-group.is-danger .identity-menu-label {
+  color: var(--danger, #d33);
+}
+
+.identity-danger-btn {
+  color: var(--danger, #d33);
+  border-color: var(--danger, #d33);
+}
+
+/* 「N 個 Bot」：可展開，列出使用中的 bot 並能前往改綁。 */
+.identity-users > summary {
+  cursor: pointer;
+  list-style: none;
+  text-decoration: underline dotted;
+}
+
+.identity-users-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.identity-users-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

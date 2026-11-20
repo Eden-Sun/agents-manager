@@ -1,10 +1,10 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { fmtDateTime, userTimeZone } from '../lib/userTime'
 import { utcOffsetLabel } from '../lib/timeZone'
-import type { BotKind } from '../api/types'
+import type { Bot, BotKind } from '../api/types'
 import { useT } from '../lib/i18n'
 import { identityDisabled, useStore } from '../store/store'
-import { DEFAULT_ACCOUNT, defaultAccountUseCount, findIdentity, hostLabel, identityUseCount } from '../store/identityRows'
+import { DEFAULT_ACCOUNT, defaultAccountBots, findIdentity, hostLabel, identityBots } from '../store/identityRows'
 import { loginKindOnHost } from '../lib/onboardingActions'
 import { quotaForIdentity } from '../store/quotaLookup'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -69,8 +69,72 @@ export function IdentityQuotaChip({ host, kind, identity }: { host: string; kind
   )
 }
 
+/**
+ * cc0 設定檔 vs 預設帳號：同樣叫 cc0 不代表同一個帳號。預設帳號＝沒指定身份的 Bot 用的（不換設定目錄）；
+ * cc0 設定檔＝有自己 CLAUDE_CONFIG_DIR 的身份，只給指定 cc0 的 Bot 用。列上寫明，不靠同名合併。
+ */
+export function Cc0Note({ name, kind }: { name: string; kind: string }) {
+  const t = useT()
+  if (kind !== 'claude' || name !== 'cc0') return null
+  return <span className="identity-detail">{t('cc0 設定檔：有自己的 CLAUDE_CONFIG_DIR，只給指定 cc0 的 Bot 用；跟「預設帳號」是不同目錄，不會合併')}</span>
+}
+
+/** 「N 個 Bot」可點：展開列出使用中的 bot，每一顆都能前往改綁（先改綁才能刪身份）。 */
+export function IdentityUsers({ bots }: { bots: readonly Pick<Bot, 'id' | 'name'>[] }) {
+  const t = useT()
+  if (bots.length === 0) return <span className="host-count">{t('沒有 Bot 使用')}</span>
+  return (
+    <details className="identity-users">
+      <summary className="host-count">{t('{n} 個 Bot', { n: bots.length })}</summary>
+      <ul className="identity-users-list">
+        {bots.map((b) => (
+          <li key={b.id}>
+            <span className="identity-users-name">{b.name}</span>
+            <button type="button" className="mini-btn" onClick={(e) => goRebind(e.currentTarget, b.id)}>
+              {t('改綁…')}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
+
+/** 前往 bot 設定改綁身份：先收掉包著身份頁的環境設定彈窗，再開那顆 bot 的設定。 */
+function goRebind(from: HTMLElement, botId: string) {
+  closeEnclosingPopup(from)
+  const s = useStore.getState()
+  s.selectBot(botId)
+  s.openSettings(botId)
+}
+
+/** 「⋯」選單。一般區放可逆的設定；危險區放會清憑證或刪設定的動作，用危險色、點了還要再確認。 */
+export function IdentityMoreMenu({ general, danger }: { general?: ReactNode; danger?: ReactNode }) {
+  const t = useT()
+  if (!general && !danger) return null
+  return (
+    <details className="identity-more">
+      <summary>{t('更多')}</summary>
+      <span className="identity-more-body">
+        {general ? (
+          <span className="identity-menu-group">
+            <span className="identity-menu-label">{t('一般')}</span>
+            {general}
+          </span>
+        ) : null}
+        {danger ? (
+          <span className="identity-menu-group is-danger">
+            <span className="identity-menu-label">{t('危險操作')}</span>
+            {danger}
+          </span>
+        ) : null}
+      </span>
+    </details>
+  )
+}
+
 /** 身份在每台主機各自的登入狀態（帳號是每台各自登入的）；`null` = 問不到，標「未知」而非「未登入」。 */
-export function IdentityHostLogins({ name, kind, only, extraMore }: { name: string; kind?: string; only?: string; extraMore?: ReactNode }) {
+export function IdentityHostLogins({ name, kind, only, danger }: { name: string; kind?: string; only?: string; danger?: ReactNode }) {
   const t = useT()
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
@@ -98,73 +162,82 @@ export function IdentityHostLogins({ name, kind, only, extraMore }: { name: stri
             : r.state === false
               ? t('{label}：這個身份沒有登入，用它啟動的 bot 會停在登入畫面', { label: r.label })
               : t('{label}：無法確認（{reason}）', { label: r.label, reason: r.reason ?? t('尚未偵測過') })
-        const more = r.connected && (r.state === true || kind) ? (
-          <details className="identity-more">
-            <summary>{t('更多')}</summary>
-            <span className="identity-more-body">
-              {r.state === true ? <IdentityLogoutButton host={r.host} identity={name} /> : null}
-              {kind ? <IdentityDisableButton host={r.host} kind={kind} name={name} /> : null}
-              {only === r.host ? extraMore : null}
-            </span>
-          </details>
+        const menu = r.connected ? (
+          <IdentityMoreMenu
+            general={kind ? <IdentityDisableButton host={r.host} kind={kind} name={name} /> : undefined}
+            danger={
+              <>
+                {r.state === true ? <IdentityLogoutButton host={r.host} identity={name} kind={kind ?? 'claude'} /> : null}
+                {only === r.host ? danger : null}
+              </>
+            }
+          />
         ) : null
         return (
           <span key={r.host} className="identity-login-wrap">
             <span className={`identity-login is-${cls}`} title={title}>
-              {r.label} {text}
+              {only === undefined ? `${r.label} ` : null}
+              {text}
             </span>
             {r.state === true && r.account ? <span className="identity-account">{r.account}</span> : null}
             {!r.connected ? <span className="identity-offline">{t('主機離線')}</span> : null}
-            <span className="identity-detail">
-              {t('最後檢查')} {checkedAtText(r.checkedAt, t)}
+            <span className="identity-detail" title={checkedAtAbs(r.checkedAt)}>
+              {checkedAtText(r.checkedAt, t)}
             </span>
             {r.connected ? <IdentityLoginButton host={r.host} identity={name} loggedIn={r.state === true} /> : null}
-            {more}
+            {menu}
           </span>
         )
       })}
     </span>
   )
 }
+
 function closeEnclosingPopup(from: HTMLElement) {
   if (!from.closest('.modal-backdrop')) return
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
+/** 主要按鈕：未登入是「登入」，已登入是「重新登入…」；旁註說明會在哪台開終端（不開瀏覽器）。 */
 export function IdentityLoginButton({ host, identity, loggedIn }: { host: string; identity: string; loggedIn: boolean }) {
   const t = useT()
   const loginIdentity = useStore((s) => s.loginIdentity)
   const notify = useStore((s) => s.notify)
   const [busy, setBusy] = useState(false)
   return (
-    <button
-      type="button"
-      className="mini-btn identity-login-btn"
-      disabled={busy}
-      title={t('在{host}開臨時 pane，帶著 {identity} 的設定執行登入', { host: hostLabel(host), identity })}
-      onClick={(e) => {
-        if (busy) return
-        const btn = e.currentTarget
-        setBusy(true)
-        void loginIdentity(host, identity)
-          .then((ok) => {
-            if (ok) closeEnclosingPopup(btn)
-          })
-          .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
-          .finally(() => setBusy(false))
-      }}
-    >
-      {busy ? t('登入中…') : loggedIn ? t('切換') : t('登入')}
-    </button>
+    <>
+      <button
+        type="button"
+        className="mini-btn identity-login-btn identity-primary-btn"
+        disabled={busy}
+        title={t('在{host}開臨時 pane，帶著 {identity} 的設定執行登入', { host: hostLabel(host), identity })}
+        onClick={(e) => {
+          if (busy) return
+          const btn = e.currentTarget
+          setBusy(true)
+          void loginIdentity(host, identity)
+            .then((ok) => {
+              if (ok) closeEnclosingPopup(btn)
+            })
+            .catch((err) => notify('error', err instanceof Error ? err.message : String(err)))
+            .finally(() => setBusy(false))
+        }}
+      >
+        {busy ? t('登入中…') : loggedIn ? t('重新登入…') : t('登入')}
+      </button>
+      <span className="identity-hint-inline">{t('會在{host}開終端', { host: hostLabel(host) })}</span>
+    </>
   )
 }
 
-/** 登出走跟登入同一條路（臨時 pane），但會清掉那個帳號的憑證，所以先問一次。 */
-export function IdentityLogoutButton({ host, identity }: { host: string; identity: string }) {
+/** 登出走跟登入同一條路（臨時 pane），但會清掉那個帳號的憑證，所以先問一次。確認框標題帶主機、CLI、身份名。 */
+export function IdentityLogoutButton({ host, identity, kind }: { host: string; identity: string; kind: string }) {
   const t = useT()
   const logoutIdentity = useStore((s) => s.logoutIdentity)
   const notify = useStore((s) => s.notify)
-  const used = useStore((s) => identityUseCount(s.bots, s.projects, host, identity))
+  const bots = useStore((s) => s.bots)
+  const projects = useStore((s) => s.projects)
+  const used = useMemo(() => identityBots(bots, projects, host, identity).length, [bots, projects, host, identity])
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
   // 確認框的 onConfirm 沒有按鈕事件可用：先把按鈕元素存起來，登出成功後收掉包著這個面板的「環境設定」彈窗（跟登入同一條）。
@@ -174,21 +247,22 @@ export function IdentityLogoutButton({ host, identity }: { host: string; identit
       <button
         ref={btnRef}
         type="button"
-        className="mini-btn identity-login-btn"
+        className="mini-btn identity-login-btn identity-danger-btn"
         disabled={busy}
         title={t('在{host}開臨時 pane，帶著 {identity} 的設定登出這個帳號', { host: hostLabel(host), identity })}
         onClick={() => setConfirm(true)}
       >
-        {busy ? t('登出中…') : t('登出')}
+        {busy ? t('登出中…') : t('登出此帳號…')}
       </button>
       <ConfirmDialog
         open={confirm}
-        title={t('登出 {identity}', { identity })}
+        title={t('登出：{host} · {kind} · {identity}', { host: hostLabel(host), kind, identity })}
         body={
           <>
-            {t.x('會在{host}開一個臨時 pane，帶著 {identity} 的設定目錄執行登出，清掉這個帳號的憑證。', {
+            {t.x('會在{host}開一個臨時 pane，帶著 {identity} 的設定目錄執行 {kind} 的登出，清掉這個身份的憑證。設定檔與家目錄其他內容不刪。', {
               host: hostLabel(host),
               identity: <strong>{identity}</strong>,
+              kind: <code>{kind}</code>,
             })}
             {used > 0 ? (
               <>
@@ -218,7 +292,7 @@ export function IdentityLogoutButton({ host, identity }: { host: string; identit
   )
 }
 
-/** 停用＝之後挑身份時看不到它（daemon 記在 `identity_prefs`），已經綁著它的 Bot 不動。 */
+/** 不再提供給新 Bot＝之後挑身份時看不到它（daemon 記在 `identity_prefs`），已經綁著它的 Bot 不動。 */
 export function IdentityDisableButton({ host, kind, name }: { host: string; kind: string; name: string }) {
   const t = useT()
   const disabled = useStore((s) => identityDisabled(s, host, kind, name))
@@ -231,24 +305,24 @@ export function IdentityDisableButton({ host, kind, name }: { host: string; kind
       disabled={busy}
       title={
         disabled
-          ? t('重新啟用：{name} 會再出現在{host}的身份選單裡', { name, host: hostLabel(host) })
-          : t('標為停用：{name} 不再出現在{host}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響', { name, host: hostLabel(host) })
+          ? t('重新提供：{name} 會再出現在{host}的身份選單與自動挑選裡', { name, host: hostLabel(host) })
+          : t('不再提供給新 Bot：{name} 不再出現在{host}的身份選單與自動挑選裡，已經在用它的 Bot 不受影響', { name, host: hostLabel(host) })
       }
       onClick={() => void setIdentityDisabled(host, kind, name, !disabled)}
     >
-      {disabled ? t('啟用') : t('停用')}
+      {disabled ? t('重新提供給新 Bot') : t('不再提供給新 Bot')}
     </button>
   )
 }
 
-/** 停用中的身份在列表上要一眼看得出來。 */
+/** 「不再提供給新 Bot」的身份在列表上要一眼看得出來。 */
 export function DisabledChip({ host, kind, name }: { host: string; kind: string; name: string }) {
   const t = useT()
   const disabled = useStore((s) => identityDisabled(s, host, kind, name))
   if (!disabled) return null
   return (
-    <span className="identity-disabled-chip" title={t('{name} 已停用：挑身份時不會出現，已經在用它的 Bot 不受影響', { name })}>
-      {t('停用')}
+    <span className="identity-disabled-chip" title={t('{name} 不再提供給新 Bot：挑身份時不會出現，已經在用它的 Bot 不受影響', { name })}>
+      {t('不提供新 Bot')}
     </span>
   )
 }
@@ -256,21 +330,26 @@ export function DisabledChip({ host, kind, name }: { host: string; kind: string;
 export function IdentityRow({ host, name }: { host: string; name: string }) {
   const t = useT()
   const ident = useStore((s) => findIdentity(s.identities, host, name))
-  const used = useStore((s) => identityUseCount(s.bots, s.projects, host, name))
+  const bots = useStore((s) => s.bots)
+  const projects = useStore((s) => s.projects)
+  const usedBots = useMemo(() => identityBots(bots, projects, host, name), [bots, projects, host, name])
+  const used = usedBots.length
   const removeIdentity = useStore((s) => s.removeIdentity)
   const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
   const envText = envDisplayText(ident.env)
   const emptyKeys = emptyEnvKeys(ident.env)
   const keyList = emptyKeys.join(t('、'))
+  const where = hostLabel(host)
   return (
     <div className="identity-row">
       <span className="identity-main">
         <span className="identity-name">
           <IdentityBadge name={ident.name} />
-          <span className="host-count">{used > 0 ? t('{n} 個 Bot', { n: used }) : t('未使用')}</span>
+          <IdentityUsers bots={usedBots} />
           <DisabledChip host={host} kind={ident.kind} name={ident.name} />
         </span>
+        <Cc0Note name={ident.name} kind={ident.kind} />
         {emptyKeys.length > 0 ? (
           <span className="identity-empty-env" role="alert" title={t('空值等於沒設；要改請到 config.toml 該身份的 [identities.env] 寫上值，或刪掉這個身份重建')}>
             {t('⚠ env {keys} 的值是空的，這個身份會悄悄用預設帳號', { keys: keyList })}
@@ -281,15 +360,14 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
           name={ident.name}
           kind={ident.kind}
           only={host}
-          extraMore={
+          danger={
             <button
               type="button"
-              className="icon-btn"
-              aria-label={t('刪除身份 {name}', { name })}
-              title={used > 0 ? t('仍有 Bot 使用這個身份') : t('刪除身份')}
+              className="mini-btn identity-login-btn identity-danger-btn"
               onClick={() => setConfirmDelete(true)}
+              title={t('只移除設定檔裡的這個身份；登入憑證與家目錄保留')}
             >
-              ✕
+              {t('移除身份設定…')}
             </button>
           }
         />
@@ -300,25 +378,25 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
       </span>
       <ConfirmDialog
         open={confirmDelete}
-        title={t('刪除身份')}
+        title={t('移除身份設定：{host} · {kind} · {name}', { host: where, kind: ident.kind, name })}
         body={
           <>
-            {t.x('要把{host}的身份 {name} 移除嗎？別台同名的不受影響，已經登入的帳號本身也不受影響。', {
-              host: <strong>{hostLabel(host)}</strong>,
+            {t.x('會從{host}的設定檔移除身份 {name}。別台同名的不受影響，已經登入的帳號本身（憑證與家目錄）也不受影響。', {
+              host: <strong>{where}</strong>,
               name: <strong>{name}</strong>,
             })}
             {used > 0 ? (
               <>
                 <br />
-                <strong>{t('{host}仍有 {n} 個 Bot 綁著這個身份', { host: hostLabel(host), n: used })}</strong>
-                {t('，需先把那些 Bot 改用別的身份或移除。')}
+                <strong>{t('仍有 {n} 個 Bot 綁著這個身份', { n: used })}</strong>
+                {t('：先到上方「{n} 個 Bot」逐一改綁到別的身份，才能移除。', { n: used })}
               </>
             ) : (
               t(' 目前沒有 Bot 在用它。')
             )}
           </>
         }
-        confirmLabel={t('刪除身份')}
+        confirmLabel={t('移除身份設定')}
         confirmDisabled={used > 0}
         danger
         onCancel={() => setConfirmDelete(false)}
@@ -333,15 +411,18 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
 
 
 /**
- * 每個 kind 的**預設帳號**（不換設定目錄的那個）：登入／登出／從 AG Man 隱藏（使用者 2026-11-14：「例如現在 grok 已不訂閱」）。
+ * 每個 kind 的**預設帳號**（不換設定目錄的那個）：登入／登出／從額度列隱藏（使用者 2026-11-14：「例如現在 grok 已不訂閱」）。
  * 登出＝該 CLI 自己的登出指令（claude／codex／grok 開臨時 pane，agy 刪憑證檔），不刪家目錄的檔案；
- * 隱藏＝額度條與這裡不再把它當可用帳號（`identity_prefs` 的 `@default`），可以隨時顯示回來，CLI 的登入不動。
+ * 隱藏＝只影響額度列（`identity_prefs` 的 `@default`），登入不動，可以隨時顯示回來。
  */
 export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind }) {
   const t = useT()
   const tool = useStore((s) => (host === 'local' ? s.localTools : s.hosts.find((h) => h.name === host)?.tools)?.[kind])
   const connected = useStore((s) => host === 'local' || s.hosts.find((h) => h.name === host)?.connected === true)
-  const used = useStore((s) => defaultAccountUseCount(s.bots, s.projects, host, kind))
+  const bots = useStore((s) => s.bots)
+  const projects = useStore((s) => s.projects)
+  const usedBots = useMemo(() => defaultAccountBots(bots, projects, host, kind), [bots, projects, host, kind])
+  const used = usedBots.length
   const hidden = useStore((s) => identityDisabled(s, host, kind, DEFAULT_ACCOUNT))
   const setIdentityDisabled = useStore((s) => s.setIdentityDisabled)
   const logout = useStore((s) => s.logoutKindDefault)
@@ -366,19 +447,18 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
       <span className="identity-main">
         <span className="identity-name">
           <KindTag kind={kind} />
-          <span className="host-count">{where}</span>
-          <span className="host-count">{used > 0 ? t('{n} 個 Bot', { n: used }) : t('未使用')}</span>
+          <IdentityUsers bots={usedBots} />
           {hidden ? (
-            <span className="identity-disabled-chip" title={t('已從 AG Man 隱藏：額度條不列它；CLI 的登入沒動')}>
+            <span className="identity-disabled-chip" title={t('已從額度列隱藏：額度列不列它；CLI 的登入沒動')}>
               {t('已隱藏')}
             </span>
           ) : null}
         </span>
-        <span className="identity-detail">{t('預設帳號（不指定身份的 Bot 用它）')}</span>
+        <span className="identity-detail">{t('預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）')}</span>
         <span className="identity-logins">
           <span className="identity-login-wrap">
             <span className={`identity-login is-${state === true ? 'ok' : state === false ? 'out' : 'unknown'}`}>
-              {where} {state === true ? t('已登入') : state === false ? t('未登入') : t('無法確認')}
+              {state === true ? t('已登入') : state === false ? t('未登入') : t('無法確認')}
             </span>
             <IdentityQuotaChip host={host} kind={kind} identity={null} />
             {!connected ? <span className="identity-offline">{t('主機離線')}</span> : null}
@@ -386,30 +466,32 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
               <>
                 <button
                   type="button"
-                  className="mini-btn identity-login-btn"
+                  className="mini-btn identity-login-btn identity-primary-btn"
                   onClick={() => void loginKindOnHost(host, kind, null)}
                   title={t('在{host}開臨時終端登入預設帳號（不開瀏覽器）', { host: where })}
                 >
-                  {state === true ? t('重新登入') : t('登入')}
+                  {state === true ? t('重新登入…') : t('登入')}
                 </button>
-                <details className="identity-more">
-                  <summary>{t('更多')}</summary>
-                  <span className="identity-more-body">
-                    {state === true ? (
-                      <button ref={btnRef} type="button" className="mini-btn identity-login-btn" disabled={busy} onClick={() => setConfirmLogout(true)}>
-                        {busy ? t('登出中…') : t('登出')}
-                      </button>
-                    ) : null}
+                <span className="identity-hint-inline">{t('會在{host}開終端', { host: where })}</span>
+                <IdentityMoreMenu
+                  general={
                     <button
                       type="button"
                       className={`mini-btn identity-login-btn${hidden ? ' is-off' : ''}`}
                       onClick={() => (hidden ? void setIdentityDisabled(host, kind, DEFAULT_ACCOUNT, false) : setConfirmHide(true))}
-                      title={hidden ? t('顯示回來：額度條會再列出{host}的預設帳號', { host: where }) : t('隱藏：額度條不再列{host}的預設帳號（登入沒動，隨時可復原）', { host: where })}
+                      title={hidden ? t('顯示回額度列：額度列會再列出{host}的預設帳號', { host: where }) : t('從額度列隱藏：額度列不再列{host}的預設帳號（登入沒動，隨時可復原）', { host: where })}
                     >
-                      {hidden ? t('顯示') : t('隱藏')}
+                      {hidden ? t('顯示回額度列') : t('從額度列隱藏')}
                     </button>
-                  </span>
-                </details>
+                  }
+                  danger={
+                    state === true ? (
+                      <button ref={btnRef} type="button" className="mini-btn identity-login-btn identity-danger-btn" disabled={busy} onClick={() => setConfirmLogout(true)}>
+                        {busy ? t('登出中…') : t('登出此帳號…')}
+                      </button>
+                    ) : undefined
+                  }
+                />
               </>
             ) : null}
           </span>
@@ -417,7 +499,7 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
       </span>
       <ConfirmDialog
         open={confirmLogout}
-        title={t('登出 {kind} 預設帳號', { kind })}
+        title={t('登出：{host} · {kind} · 預設帳號', { host: where, kind })}
         body={
           <>
             {t.x('會在{host}開一個臨時 pane 執行 {kind} 自己的登出指令，清掉預設帳號的憑證；家目錄裡的其他檔案不會刪。', { host: where, kind: <code>{kind}</code> })}
@@ -441,15 +523,9 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
       />
       <ConfirmDialog
         open={confirmHide}
-        title={t('隱藏 {kind} 預設帳號', { kind })}
-        body={
-          <>
-            {t.x('隱藏之後{host}的額度條不再列 {kind} 的預設帳號。登入狀態與家目錄的檔案都不動，之後可以按「顯示」復原。', { host: where, kind: <code>{kind}</code> })}
-            {usedNote}
-          </>
-        }
-        confirmLabel={t('隱藏')}
-        danger={used > 0}
+        title={t('從額度列隱藏：{host} · {kind} · 預設帳號', { host: where, kind })}
+        body={t.x('只影響{host}的額度列：不再列出 {kind} 預設帳號的剩餘額度。登入狀態與家目錄都不動，之後可以按「顯示回額度列」復原。', { host: where, kind: <code>{kind}</code> })}
+        confirmLabel={t('從額度列隱藏')}
         onCancel={() => setConfirmHide(false)}
         onConfirm={() => {
           setConfirmHide(false)
@@ -460,9 +536,23 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
   )
 }
 
-/** 上次檢查時間（使用者時區顯示，daemon 給的是 UTC）。沒問過就說沒問過。 */
+/** 上次檢查：人話相對時間（尚未檢查／剛剛／N 分鐘前／N 小時前／N 天前），超過一週才寫日期。確切時間放在 title。 */
 function checkedAtText(iso: string | null | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return t('尚未檢查')
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const mins = Math.floor((Date.now() - d.getTime()) / 60_000)
+  if (mins < 1) return t('剛剛檢查')
+  if (mins < 60) return t('{n} 分鐘前檢查', { n: mins })
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return t('{n} 小時前檢查', { n: hours })
+  const days = Math.floor(hours / 24)
+  if (days < 7) return t('{n} 天前檢查', { n: days })
+  return `${t('檢查於')} ${fmtDateTime(d, { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit' })}`
+}
+
+function checkedAtAbs(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
   const s = fmtDateTime(d, { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })

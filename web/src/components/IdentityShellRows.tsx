@@ -5,7 +5,7 @@ import { useStore } from '../store/store'
 import type { BotKind } from '../api/types'
 import { hostLabel, shadowedByConfig } from '../store/identityRows'
 import { ConfirmDialog } from './ConfirmDialog'
-import { DisabledChip, IdentityBadge, IdentityHostLogins } from './IdentityRow'
+import { Cc0Note, DisabledChip, IdentityBadge, IdentityHostLogins } from './IdentityRow'
 
 function shellDeleteReasonText(outcome: ShellIdentityDeleteOutcome, t: ReturnType<typeof useT>) {
   switch (outcome.reason) {
@@ -86,15 +86,15 @@ export function ShellIdentityDeleteButton({
         type="button"
         className="mini-btn identity-login-btn"
         aria-label={t('移除 {host} 的 shell alias {identity}', { host: hostLabel(host), identity })}
-        title={t('從{host}的 shell 設定移除 alias {identity}', { host: hostLabel(host), identity })}
+        title={t('從{host}的 shell 設定移除 claude alias {identity}（只移除 alias，登入與設定目錄保留）', { host: hostLabel(host), identity })}
         disabled={busy}
         onClick={() => setConfirm(true)}
       >
-        {busy ? t('移除中…') : t('移除 alias')}
+        {busy ? t('移除中…') : t('從 shell 設定移除…')}
       </button>
       <ConfirmDialog
         open={confirm}
-        title={t('移除 {host} 的 shell alias {identity}', { host: hostLabel(host), identity })}
+        title={t('從 shell 設定移除：{host} · claude · {identity}', { host: hostLabel(host), identity })}
         body={
           <>
             {t.x('這會從{host}的 shell 設定移除 Claude alias {identity}。只移除 alias；登入憑證、設定目錄與對話歷史都會保留。', {
@@ -106,7 +106,7 @@ export function ShellIdentityDeleteButton({
             {t('外部編輯器可能在內容比對到檔案替換之間修改設定；這個操作無法和外部編輯器同步鎖定。')}
           </>
         }
-        confirmLabel={t('移除 alias')}
+        confirmLabel={t('從 shell 設定移除')}
         danger
         onCancel={() => setConfirm(false)}
         onConfirm={() => {
@@ -132,30 +132,25 @@ export function ShellIdentityRows({ host, kind }: { host: string; kind: BotKind 
   return (
     <>
       {deleteResult ? <ShellIdentityDeleteNotice result={deleteResult} /> : null}
-      {rows.length > 0 ? (
-        <p className="hint">
-          {t.x('從登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改 alias 內容請編輯該主機的 shell 設定。「停用」只會把它從身份選單拿掉，「移除 alias」則會刪掉支援的 Claude ccN alias。', {
-            alias: <code>ccN</code>,
-            rc: <code>~/.bashrc、~/.zshrc</code>,
-          })}
-        </p>
-      ) : null}
       {rows.map((st) => (
         <div className="identity-row is-shell" key={st.name} data-shell-host={host} data-shell-identity={st.name}>
           <span className="identity-main">
             <span className="identity-name">
               <IdentityBadge name={st.name} />
+              <span className="identity-source-tag">{t('shell alias')}</span>
+              <span className="identity-info" tabIndex={0} title={t('從登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改 alias 內容請編輯該主機的 shell 設定。「不再提供給新 Bot」只會把它從身份選單拿掉，「從 shell 設定移除」則會刪掉支援的 Claude ccN alias。', { alias: 'ccN', rc: '~/.bashrc、~/.zshrc' })} aria-label={t('說明')}>ⓘ</span>
               <DisabledChip host={host} kind={st.kind} name={st.name} />
             </span>
             <details className="identity-path">
               <summary>{t('路徑與 env')}</summary>
               <code>{st.config_dir ? `CLAUDE_CONFIG_DIR=${st.config_dir}` : t('預設帳號（無 CLAUDE_CONFIG_DIR）')}</code>
             </details>
+            <Cc0Note name={st.name} kind={st.kind} />
             <IdentityHostLogins
               name={st.name}
               kind={st.kind}
               only={host}
-              extraMore={
+              danger={
                 st.kind === 'claude' && /^cc[0-6]$/.test(st.name) ? (
                   <ShellIdentityDeleteButton host={host} identity={st.name} onResult={(outcome) => setDeleteResult({ host, identity: st.name, outcome })} />
                 ) : null

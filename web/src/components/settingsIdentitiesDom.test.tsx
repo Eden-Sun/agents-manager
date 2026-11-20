@@ -55,29 +55,29 @@ async function open(backend: MockTransport = mock) {
 it('登入：按「登入」開臨時 pane、切到那個 shell，事件進來後這一列變「已登入」並多出「切換」「登出」', async () => {
   const requests = await open()
   assert.match(chip('cc1'), /未登入/)
-  assert.equal(btn(row('cc1'), '登出'), undefined, '沒登入就沒有登出鍵')
+  assert.equal(btn(row('cc1'), '登出此帳號…'), undefined, '沒登入就沒有登出鍵')
   await click(btn(row('cc1'), '登入')!)
   await until(() => calls(requests, /\/hosts\/local\/identities\/cc1\/login/).length === 1, '打了 login')
   await until(() => useStore.getState().shellView !== null, '切到登入用的 shell')
   await until(() => /已登入/.test(chip('cc1')), '收到 host_changed 後變已登入')
-  assert.ok(btn(row('cc1'), '切換'), '已登入的列按鈕變「切換」')
-  assert.ok(btn(row('cc1'), '登出'))
-  assert.equal(btn(row('cc1'), '切換')!.disabled, false, 'busy 已經放掉')
+  assert.ok(btn(row('cc1'), '重新登入…'), '已登入的列按鈕變「重新登入…」')
+  assert.ok(btn(row('cc1'), '登出此帳號…'))
+  assert.equal(btn(row('cc1'), '重新登入…')!.disabled, false, 'busy 已經放掉')
 })
 
 it('登出：先跳確認、確認前不送；確認後送 logout，這一列變「未登入」、登出鍵消失', async () => {
   await mock.request('POST', '/hosts/local/identities/cc1/login') // 不依賴前一個測試：自己先把它登入
   const requests = await open()
   await until(() => /已登入/.test(chip('cc1')), '已登入')
-  await click(btn(row('cc1'), '登出')!)
+  await click(btn(row('cc1'), '登出此帳號…')!)
   const dialog = document.querySelector('[role=alertdialog]')!
   assert.ok(dialog)
-  assert.match(dialog.textContent ?? '', /登出 cc1/)
+  assert.match(dialog.textContent ?? '', /登出：.*cc1/)
   assert.equal(calls(requests, /logout/).length, 0, '還沒確認不能送')
   await click(btn(dialog, '登出')!)
   await until(() => calls(requests, /\/identities\/cc1\/logout/).length === 1, '打了 logout')
   await until(() => /未登入/.test(chip('cc1')), '變未登入')
-  assert.equal(btn(row('cc1'), '登出'), undefined)
+  assert.equal(btn(row('cc1'), '登出此帳號…'), undefined)
   assert.ok(btn(row('cc1'), '登入'))
 })
 
@@ -86,7 +86,7 @@ it('登出：取消不送請求', async () => {
   await click(btn(row('cc1'), '登入')!)
   await until(() => /已登入/.test(chip('cc1')), '先登入')
   useStore.setState({ shellView: null })
-  await click(btn(row('cc1'), '登出')!)
+  await click(btn(row('cc1'), '登出此帳號…')!)
   await click(btn(document.querySelector('[role=alertdialog]')!, '取消')!)
   assert.equal(document.querySelector('[role=alertdialog]'), null)
   assert.equal(calls(requests, /logout/).length, 0)
@@ -113,18 +113,18 @@ it('登入失敗（daemon 回 502）：跳錯誤通知、不切 shell、按鈕�
   assert.equal(calls(requests, /login/).length, 1, '登入請求走到 mock daemon，收到 HTTP 502')
 })
 
-it('停用／啟用：本機按下去列上出現「停用」標記；另一個分頁的停用（WS 事件）也會跟著變', async () => {
+it('不再提供給新 Bot／重新提供：本機按下去列上出現「不提供新 Bot」標記；另一個分頁的變更（WS 事件）也會跟著變', async () => {
   const requests = await open()
   const chipOf = () => row('cc1').querySelector('.identity-disabled-chip')
   assert.equal(chipOf(), null)
-  await click(btn(row('cc1'), '停用')!)
+  await click(btn(row('cc1'), '不再提供給新 Bot')!)
   await until(() => chipOf() !== null, '本機停用後出現標記')
   assert.ok(requests.some((r) => r.method === 'PUT' && /\/identities\/cc1\/disabled/.test(r.path)))
-  assert.ok(btn(row('cc1'), '啟用'), '按鈕變「啟用」')
+  assert.ok(btn(row('cc1'), '重新提供給新 Bot'), '按鈕變「重新提供給新 Bot」')
   // 另一個分頁把它啟用：這個分頁只靠 identity_prefs_changed 事件更新。
   await mock.request('PUT', '/identities/cc1/disabled', { kind: 'claude', disabled: false, host: 'local' })
   await until(() => chipOf() === null, '另一個分頁啟用後標記消失')
-  assert.ok(btn(row('cc1'), '停用'))
+  assert.ok(btn(row('cc1'), '不再提供給新 Bot'))
 })
 
 it('新增身份後出現在清單；用不到就能刪（要先確認）', async () => {
@@ -132,9 +132,9 @@ it('新增身份後出現在清單；用不到就能刪（要先確認）', asyn
   await mock.request('POST', '/identities', { name: 'dom3id', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-dom3' } })
   await useStore.getState().refreshState()
   await until(() => Boolean(row('dom3id')), '新身份出現')
-  await click(row('dom3id').querySelector('button[aria-label^="刪除身份"]')!)
+  await click(btn(row('dom3id'), '移除身份設定…')!)
   assert.equal(requests.some((r) => r.method === 'DELETE'), false)
-  await click(btn(document.querySelector('[role=alertdialog]')!, '刪除身份')!)
+  await click(btn(document.querySelector('[role=alertdialog]')!, '移除身份設定')!)
   await until(() => requests.some((r) => r.method === 'DELETE' && /\/identities\/dom3id/.test(r.path)), '送了 DELETE')
   await until(() => !row('dom3id'), '清單移除')
 })
@@ -246,7 +246,7 @@ it('預設帳號：每個已安裝 kind 一列；登出先確認、確認後打 
   const row = defaultRow('local', 'claude')
   assert.ok(row, 'claude 預設帳號那一列')
   assert.match(row.textContent ?? '', /預設帳號/)
-  await click(btn(row, '登出')!)
+  await click(btn(row, '登出此帳號…')!)
   assert.equal(calls(requests, /\/kinds\/claude\/logout/).length, 0, '確認前不送')
   await click(btn(document.querySelector('[role=alertdialog]')!, '登出')!)
   await until(() => calls(requests, /\/hosts\/local\/kinds\/claude\/logout/).length === 1, '送出預設帳號登出')
@@ -254,17 +254,17 @@ it('預設帳號：每個已安裝 kind 一列；登出先確認、確認後打 
   await until(() => /未登入/.test(defaultRow('local', 'claude').textContent ?? ''), '登出後變未登入')
 })
 
-it('預設帳號：隱藏要先確認、存成 @default 的停用；隱藏後顯示「已隱藏」，按「顯示」復原', async () => {
+it('預設帳號：從額度列隱藏要先確認、存成 @default 的停用；隱藏後顯示「已隱藏」，按「顯示回額度列」復原', async () => {
   const requests = await open()
   const put = () => requests.filter((r) => r.method === 'PUT' && /\/identities\/%40default\/disabled/.test(r.path))
-  await click(btn(defaultRow('local', 'claude'), '隱藏')!)
+  await click(btn(defaultRow('local', 'claude'), '從額度列隱藏')!)
   assert.equal(put().length, 0, '確認前不送')
-  await click(btn(document.querySelector('[role=alertdialog]')!, '隱藏')!)
+  await click(btn(document.querySelector('[role=alertdialog]')!, '從額度列隱藏')!)
   await until(() => put().length === 1, '送出隱藏')
   assert.deepEqual(put()[0]!.body, { kind: 'claude', disabled: true, host: 'local' })
   await until(() => /已隱藏/.test(defaultRow('local', 'claude').textContent ?? ''), '列上標已隱藏')
   assert.ok(useStore.getState().disabledIdentities.includes('local|claude|@default'))
-  await click(btn(defaultRow('local', 'claude'), '顯示')!)
+  await click(btn(defaultRow('local', 'claude'), '顯示回額度列')!)
   await until(() => put().length === 2 && !/已隱藏/.test(defaultRow('local', 'claude').textContent ?? ''), '復原')
   assert.deepEqual(put()[1]!.body, { kind: 'claude', disabled: false, host: 'local' })
 })
@@ -294,7 +294,7 @@ it('shell alias 移除被新 ref 擋下：row 保留、refs 與已建立的備�
   })
   await click(shellDeleteButton('local', 'cc2')!)
   const dialog = document.querySelector('[role=alertdialog]')!
-  await click(btn(dialog, '移除 alias')!)
+  await click(btn(dialog, '從 shell 設定移除')!)
   await until(() => Boolean(document.querySelector('[role=alert]')?.textContent?.includes(backupPath)), '顯示備份路徑')
   const result = document.querySelector('[role=alert]')!
   assert.match(result.textContent ?? '', /刪除期間有參照開始使用/)
@@ -323,7 +323,7 @@ it('shell alias 移除使用 host/kind/name 專用 URL；只移除 m4p alias，�
   await pickHost('m4p')
   await click(shellDeleteButton('m4p', 'cc2')!)
   const dialog = document.querySelector('[role=alertdialog]')!
-  await click(btn(dialog, '移除 alias')!)
+  await click(btn(dialog, '從 shell 設定移除')!)
   const backupPath = '/mock/m4p/.agents-manager/shell-identity-backups/cc2.bak'
   await until(() => Boolean(document.querySelector('[role=status]')?.textContent?.includes(backupPath)), '顯示成功備份路徑')
 
@@ -354,7 +354,7 @@ for (const [label, reply] of [
       method === 'DELETE' && path.includes('/shell-identities/') ? reply : original(method, path, body)
     await open(backend)
     await click(shellDeleteButton('local', 'cc2')!)
-    await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+    await click(btn(document.querySelector('[role=alertdialog]')!, '從 shell 設定移除')!)
     await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '回應已呈現')
     const result = document.querySelector('.identity-shell-delete-result')!
     assert.equal(result.getAttribute('role'), 'alert', '未知或不符契約的回應不能宣稱成功')
@@ -383,7 +383,7 @@ for (const [type, expected] of [
       error: 'conflict', reason: 'identity_in_use', refs: [{ type, id: 'ref-id' }],
     })
     await click(shellDeleteButton('m4p', 'cc2')!)
-    await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+    await click(btn(document.querySelector('[role=alertdialog]')!, '從 shell 設定移除')!)
     await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '顯示失敗目標')
     const text = document.querySelector('.identity-shell-delete-result')!.textContent ?? ''
     assert.ok(text.includes('主機：m4p；Claude shell alias：cc2'))
@@ -412,7 +412,7 @@ it('備份建立未確認：回傳預定位置但不能宣稱備份已保留', a
     error: 'conflict', reason: 'alias_backup_unconfirmed', backup_path: backup,
   })
   await click(shellDeleteButton('local', 'cc2')!)
-  await click(btn(document.querySelector('[role=alertdialog]')!, '移除 alias')!)
+  await click(btn(document.querySelector('[role=alertdialog]')!, '從 shell 設定移除')!)
   await until(() => Boolean(document.querySelector('.identity-shell-delete-result')), '顯示備份未確認')
   const text = document.querySelector('.identity-shell-delete-result')!.textContent ?? ''
   assert.match(text, /無法確認備份是否建立/)
@@ -471,4 +471,22 @@ it('記住上次選的主機分頁：重新掛載後還停在那一台', async (
   await unmountAll()
   await mount(<IdentitiesPanel />)
   assert.equal(document.querySelector('#identity-tab-m4p')?.getAttribute('aria-selected'), 'true')
+})
+
+it('停用本機 CLI 要先確認，確認框說明本機受影響的 Bot 數；確認前不送請求', async () => {
+  const requests = await open()
+  const before = requests.length
+  const card = document.querySelector<HTMLElement>('[data-kind-card="local-claude"]')!
+  await click(btn(card, '停用本機 claude…')!)
+  const dialog = document.querySelector('[role=alertdialog]')!
+  assert.match(dialog.textContent ?? '', /目前本機有 \d+ 顆 claude Bot/)
+  assert.equal(requests.slice(before).filter((r) => r.method !== 'GET').length, 0, '確認前不送')
+  await click(btn(dialog, '停用本機 claude')!)
+  await until(() => requests.some((r) => r.method === 'PUT' && /\/kinds\/claude\/disabled/.test(r.path)), '確認後送出停用')
+})
+
+it('cc0 設定檔與預設帳號分開標示：同名不合併', async () => {
+  await open()
+  assert.match(row('cc0').textContent ?? '', /cc0 設定檔.*只給指定 cc0 的 Bot 用/)
+  assert.match(defaultRow('local', 'claude').textContent ?? '', /預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）/)
 })
