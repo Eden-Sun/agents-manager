@@ -5121,7 +5121,8 @@ async fn get_models(
     if app.hosts.get(&host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
-    let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty());
+    // agy 內建的預設帳號（`ag0`，舊資料 `agy`）＝不指定身份：快取、背景刷新、回應都用同一格（`runners::models::list` 同一條）。
+    let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty()).filter(|s| !crate::tools::is_builtin_default_identity(&q.kind, s));
     if let RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } = &principal {
         if matches!(&principal, RequestPrincipal::Child { .. }) || crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(any_err)?.is_none() {
             if let Some(cached) = crate::models::cached(&app, &host, &q.kind, identity).await {

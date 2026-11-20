@@ -1083,6 +1083,30 @@ async fn a_plain_bot_model_cache_miss_does_not_spawn_the_cli() {
     assert!(response.starts_with("HTTP/1.1 503") && response.contains("model_cache_miss"), "a stale cache must not trigger an implicit probe: {response}");
 }
 
+/// agy 的預設帳號 `ag0`（舊資料 `agy`）＝不指定身份：`?identity=ag0` 讀的是預設帳號那一格快取，不是另一格永遠 miss 的
+/// `…/agy/ag0`（2026-11-20 上線後實測：ag0 一直回 `model_cache_miss`）。ag1 是另一個帳號，不借預設帳號的清單。
+#[tokio::test]
+async fn the_agy_default_account_name_reads_the_default_accounts_model_cache() {
+    let e = crate::testing::env().await;
+    let bot = distinct_bot(&e, "agy-models-bot").await;
+    e.app.models_cache.lock().await.insert(
+        "local/agy/".into(),
+        (std::time::Instant::now(), json!({"kind":"agy","host":"local","source":"agy-cli","models":[{"id":"gemini-4-neon-medium"}]})),
+    );
+    let get = |query: &'static str| {
+        let (app, id, token) = (e.app.clone(), bot.id.clone(), bot.hook_token.clone());
+        async move {
+            raw(app, format!("GET /api/models?kind=agy{query} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {id}\r\nX-AM-Bot-Token: {token}\r\nConnection: close\r\n\r\n")).await
+        }
+    };
+    for query in ["", "&identity=ag0", "&identity=agy"] {
+        let response = get(query).await;
+        assert!(response.starts_with("HTTP/1.1 200") && response.contains("gemini-4-neon-medium"), "`{query}` 讀預設帳號那一格：{response}");
+    }
+    let response = get("&identity=ag1").await;
+    assert!(response.starts_with("HTTP/1.1 503") && response.contains("model_cache_miss"), "ag1 是另一個帳號：{response}");
+}
+
 /// Deployment status is the browser's global host/repo and all-Bot activity panel.
 #[tokio::test]
 async fn a_plain_bot_cannot_read_global_deployment_status() {
