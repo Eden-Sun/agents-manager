@@ -792,3 +792,12 @@ gemini-4-argon\n";
         let err = "{\"id\":2,\"error\":{\"code\":-1,\"message\":\"nope\"}}";
         assert!(find_response(err, 2).unwrap().is_err());
     }
+
+    /// 身份清單裡沒有設定的模型 → 改用清單的預設（`is_default`）；有就不動；清單空＝不判斷。
+    #[test]
+    fn agy_model_fallback_only_when_the_identity_lacks_the_model() {
+        let list = agy_models_from_text("gemini-3.8-flash-high\tFlash High\ngemini-3.8-flash-medium\tFlash Medium\n");
+        assert_eq!(agy_model_fallback(&list, "gemini-3.8-flash-high"), None, "有就不動");
+        assert_eq!(agy_model_fallback(&list, "gemini-4-neon-medium").as_deref(), Some("gemini-3.8-flash-medium"), "不在清單 → 預設");
+        assert_eq!(agy_model_fallback(&[], "gemini-4-neon-medium"), None, "清單空＝不判斷");
+    }

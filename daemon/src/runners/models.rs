@@ -106,21 +106,23 @@ pub async fn codex_rpc_in(app: &Arc<App>, host: &str, home: Option<&str>, method
     find_response(&out, ID).ok_or_else(|| anyhow!("codex app-server on {host}: no response to `{method}`:\n{}", out.trim()))?
 }
 
-/// agy 的模型清單：本機跑 `agy models`（經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。讀不到、解不出來、逾時，
+/// agy 的模型清單：本機用「這個身份的 HOME」跑 `agy models`（身份＝換 `HOME`，帳號不同可用的模型也不同，不能拿預設帳號的清單冒充；
+/// 經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。讀不到、解不出來、逾時，
 /// 或是遠端（ssh 進去讀不到 macOS Keychain，`agy models` 回「Please sign in」，2026-11-20 在 m4p 實測）都回 `static`，
-/// 呼叫端（[`list`]）會先借同 kind 的上次抓到清單，最後才用寫死的 [`agy_static_models`]。exe 沒有快取就不猜 PATH，同樣回 `static`。
-async fn agy_model_list(app: &Arc<App>, host: &str) -> (&'static str, Vec<Value>) {
+/// 呼叫端（[`list`]）會先借同 kind、**同身份**的上次抓到清單，最後才用寫死的 [`agy_static_models`]。exe 沒有快取就不猜 PATH，同樣回 `static`。
+async fn agy_model_list(app: &Arc<App>, host: &str, identity: Option<&str>) -> Result<(&'static str, Vec<Value>)> {
     if host == LOCAL_HOST {
         if let Some(exe) = crate::tools::cached_path(app, host, "agy").await {
-            if let Ok(run) = crate::hosts::sh_local_capture(&agy_models_script(&exe), AGY_MODELS_TIMEOUT).await {
+            let home = identity_home_dir(app, host, identity, "agy", "HOME").await?;
+            if let Ok(run) = crate::hosts::sh_local_capture(&agy_models_script(&exe, home.as_deref()), AGY_MODELS_TIMEOUT).await {
                 let models = agy_models_from_text(&String::from_utf8_lossy(&run.stdout));
                 if !run.timed_out && !models.is_empty() {
-                    return ("agy-cli", models);
+                    return Ok(("agy-cli", models));
                 }
             }
         }
     }
-    ("static", agy_static_models())
+    Ok(("static", agy_static_models()))
 }
 
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
@@ -166,7 +168,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             let (global, per_model, default_model) = read_claude_effort_settings(app.as_ref(), host, config_dir.as_deref()).await?;
             ("static", claude_static_models(global.as_deref(), &per_model, default_model.as_deref()))
         }
-        "agy" => agy_model_list(app, host).await,
+        "agy" => agy_model_list(app, host, identity).await?,
         other => bail!("unknown kind `{other}`"),
     };
     Ok(json!({
@@ -227,11 +229,16 @@ fn load_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Opti
 }
 
 /// agy 專用：這台抓不到時，借「其他主機」上次抓到的 agy 清單（`fetched_at` 最新的那份）。只看 kind 是 agy、
-/// 來源不是這台、清單非空的檔。標 `stale`、`source: "other-host"`、`source_host`（`host` 仍是要查的這台）。
-fn load_agy_sibling(dir: &std::path::Path, host: &str) -> Option<Value> {
+/// **同一個身份**（檔名尾巴 `-agy-<身份>.json`；帳號不同，可用模型也不同，不能借）、來源不是這台、清單非空的檔。
+/// 標 `stale`、`source: "other-host"`、`source_host`（`host` 仍是要查的這台）。
+fn load_agy_sibling(dir: &std::path::Path, host: &str, identity: Option<&str>) -> Option<Value> {
     let entries = std::fs::read_dir(dir.join("models-last")).ok()?;
+    let suffix = format!("-agy-{}.json", safe_part(identity.unwrap_or("")));
     let mut best: Option<(String, Value)> = None;
     for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().ends_with(&suffix) {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         if v.get("kind").and_then(Value::as_str) != Some("agy") {
@@ -254,9 +261,9 @@ fn load_agy_sibling(dir: &std::path::Path, host: &str) -> Option<Value> {
     Some(v)
 }
 
-/// 讀不到（或回了寫死清單）時的回退順序：這台上次抓到 → （agy 才有）同 kind 其他主機上次抓到 → `None`（呼叫端用寫死清單）。
+/// 讀不到（或回了寫死清單）時的回退順序：這台上次抓到 → （agy 才有）同 kind、同身份的其他主機上次抓到 → `None`（呼叫端用寫死清單）。
 fn fallback_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
-    load_last_known(dir, host, kind, identity).or_else(|| if kind == "agy" { load_agy_sibling(dir, host) } else { None })
+    load_last_known(dir, host, kind, identity).or_else(|| if kind == "agy" { load_agy_sibling(dir, host, identity) } else { None })
 }
 
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
@@ -387,6 +394,32 @@ mod tests {
         assert_eq!(got["models"][0]["id"], json!("gemini-3.8-flash-high"));
         // 其他 kind 不借 agy 的清單。
         assert!(fallback_last_known(&dir, "m4p", "codex", None).is_none(), "非 agy 不借別台");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// agy 身份＝換 HOME：`agy models` 的指令要帶這個身份的 HOME，沒有身份就不改 HOME（預設帳號）。
+    #[test]
+    fn agy_models_script_runs_under_the_identity_home() {
+        let with = agy_models_script("/opt/agy", Some("/home/u/.agy-ag1"));
+        assert!(with.starts_with("HOME='/home/u/.agy-ag1'; export HOME; "), "{with}");
+        assert!(with.contains("'/opt/agy' models"), "{with}");
+        assert!(!agy_models_script("/opt/agy", None).contains("export HOME"), "沒有身份＝預設 HOME");
+    }
+
+    /// agy 借別台的清單只借「同一個身份」的：ag1 的清單不借給 ag2，也不借給預設帳號；預設帳號的清單不借給 ag1。
+    #[test]
+    fn agy_sibling_borrows_only_the_same_identity() {
+        let dir = crate::testing::scratch_dir("am-models-agy-identity");
+        let one = |id: &str| json!([{"id": id}]);
+        let ag1 = json!({"kind": "agy", "host": "local", "source": "agy-cli", "fetched_at": "2026-11-20T00:00:00Z", "models": one("gemini-3.8-flash-high")});
+        let default = json!({"kind": "agy", "host": "local", "source": "agy-cli", "fetched_at": "2026-11-21T00:00:00Z", "models": one("gemini-4-neon-medium")});
+        save_last_known(&dir, "local", "agy", Some("ag1"), &ag1);
+        save_last_known(&dir, "local", "agy", None, &default);
+        let got = load_agy_sibling(&dir, "m4p", Some("ag1")).expect("同身份要借得到");
+        assert_eq!(got["models"][0]["id"], json!("gemini-3.8-flash-high"));
+        assert!(load_agy_sibling(&dir, "m4p", Some("ag2")).is_none(), "別的身份不借");
+        let got = load_agy_sibling(&dir, "m4p", None).expect("預設帳號借預設帳號的");
+        assert_eq!(got["models"][0]["id"], json!("gemini-4-neon-medium"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

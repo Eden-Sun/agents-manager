@@ -1288,6 +1288,46 @@ async fn fork_identity_note(pool: &sqlx::SqlitePool, bot_id: &str) -> Result<Opt
     Ok(Some(format!("你是從 {source_name}（agent 名 {source_agent}）fork 出來的新 bot。來源對話裡的 child {children} 屬於來源 bot，不屬於你。派工或操作 child 前，先確認 `$AM_AGENT_NAME`，並用 `herdr agent list` 確認 child 屬於自己。")))
 }
 
+/// 啟動用的模型：agy 先確認設定的模型在這個身份的清單裡（[`agy_model_guard`]），再照 effort 校正（[`effort_checked`]）。
+async fn launch_model_bot(app: &impl StartContext, bot: &db::Bot, host: &str) -> db::Bot {
+    let bot = agy_model_guard(app, bot, host).await;
+    effort_checked(app, &bot, host).await
+}
+
+/// agy 的模型是 slug，換帳號（身份＝換 `HOME`）可用的不一樣：設定的模型不在「這台＋這個身份」剛抓到的清單裡，就不靜靜帶進去
+/// （agy 的互動模式遇到不認得的 `--model` 只警告、退回它自己的預設，畫面仍顯示設定的值，2026-11-20）。
+/// 改用該身份清單的預設啟動，並在對話裡留一則系統訊息；`bots.model` 不動，不一致由既有的「設定與實際不同」標記顯示。
+/// 只在新鮮、本機抓到的清單（`agy-cli`）上判斷；借來的、寫死的清單不拿來說這個帳號不支援。
+async fn agy_model_guard(app: &impl StartContext, bot: &db::Bot, host: &str) -> db::Bot {
+    let Some(model) = bot.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else { return bot.clone() };
+    if bot.kind != "agy" {
+        return bot.clone();
+    }
+    let Ok(list) = app.models_list(host, "agy", bot.identity.as_deref(), false).await else { return bot.clone() };
+    if list["source"] != "agy-cli" || list["stale"].as_bool() == Some(true) {
+        return bot.clone();
+    }
+    let Some(models) = list["models"].as_array() else { return bot.clone() };
+    let Some(fallback) = crate::models::agy_model_fallback(models, model) else { return bot.clone() };
+    let who = match bot.identity.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => format!("身份 {name}"),
+        None => "預設帳號".to_string(),
+    };
+    let notice = format!("設定的 {model} 在此帳號（{who}）不支援，已改用 {fallback} 啟動。要換模型請到設定頁選這個帳號可用的模型。");
+    tracing::warn!(bot = %bot.name, model, fallback = %fallback, "agy model is not in this identity's list; starting with its default");
+    match db::conversation_id(app.db(), &bot.id).await {
+        Ok(conv) => {
+            if let Err(e) = crate::lifecycle::messages::insert_message(app, &conv, None, "system", &notice, "system", false, None).await {
+                tracing::warn!(bot = %bot.name, error = %e, "could not record the agy model fallback notice");
+            }
+        }
+        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not find the conversation for the agy model fallback notice"),
+    }
+    let mut out = bot.clone();
+    out.model = Some(fallback);
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stage_persona(
     app: &impl HostsAccess,
@@ -1526,12 +1566,12 @@ async fn start_inner_body(
         // 受限 bot 不吃 bot／身份自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
         let prompt = app.install_restricted_prompt(bot, &host, ws, &env).await.map_err(up)?;
         args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
-        args.extend(model_args(&effort_checked(app, bot, &project.host).await));
+        args.extend(model_args(&launch_model_bot(app, bot, &project.host).await));
     } else {
         args.extend(persona_args_cli_docs(bot, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
         // B 期：角色 policy／bot 覆寫生效時，啟動模型與 context 參數以它為準（沒有覆寫就是 bot 自己的，完全不變）。
         let overlay = super::runtime_overlay::overlay_for(app, bot).await.map_err(up)?;
-        let mut model_bot = effort_checked(app, bot, &project.host).await;
+        let mut model_bot = launch_model_bot(app, bot, &project.host).await;
         if overlay.model.is_some() {
             model_bot.model = overlay.model.clone();
         }
@@ -2304,7 +2344,7 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     let mut args = super::setup::permission_args(&bot.kind, bot.auto_approve != 0);
     // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
     let overlay = super::runtime_overlay::overlay_for(app, &bot).await.map_err(up)?;
-    let mut model_bot = effort_checked(app, &bot, &host).await;
+    let mut model_bot = launch_model_bot(app, &bot, &host).await;
     if overlay.model.is_some() {
         model_bot.model = overlay.model.clone();
     }

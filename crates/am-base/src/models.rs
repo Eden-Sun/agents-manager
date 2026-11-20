@@ -143,12 +143,24 @@ pub fn agy_models_from_text(text: &str) -> Vec<Value> {
 }
 
 /// 本機探測 `agy models` 的指令：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄（同 `quota_agy::probe_script`）。
-pub fn agy_models_script(exe: &str) -> String {
+/// `home` 是身份的家目錄（agy 的身份＝換 `HOME`）：agy 的帳號憑證與可用模型都在那裡，沒有就用預設的家目錄。
+pub fn agy_models_script(exe: &str, home: Option<&str>) -> String {
+    let env = home.map(|dir| home_env_prefix("HOME", dir)).unwrap_or_default();
     format!(
-        "d=$(mktemp -d 2>/dev/null) || exit 1; cd \"$d\" || exit 1; \
+        "{env}d=$(mktemp -d 2>/dev/null) || exit 1; cd \"$d\" || exit 1; \
          AGY_CLI_DISABLE_AUTO_UPDATE=true {exe} models </dev/null; rc=$?; cd / ; rm -rf \"$d\"; exit $rc",
         exe = sh_quote(exe)
     )
+}
+
+/// 身份的清單（`agy models`，這個帳號真的能用的）裡找不到設定的模型時，回傳要改用的預設（清單第一個 `is_default`，沒有就第一個）。
+/// 清單是空的、或已含設定的模型，回 `None`：呼叫端只在有「新鮮、能判斷」的清單時才用它。
+pub fn agy_model_fallback(models: &[Value], model: &str) -> Option<String> {
+    if models.is_empty() || models.iter().any(|m| m["id"].as_str() == Some(model)) {
+        return None;
+    }
+    let pick = models.iter().find(|m| m["is_default"].as_bool() == Some(true)).or(models.first())?;
+    pick["id"].as_str().map(str::to_string)
 }
 
 /// Map only explicitly retired names and aliases; other full model ids stay intact.
