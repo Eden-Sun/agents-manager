@@ -5,7 +5,8 @@
 //! - `POST /api/projects/{id}/lineage/advance`：把某顆 session 設為該線檢查點，舊檢查點改 retired。
 //! - `POST /api/projects/{id}/lineage/retire`：退役。
 //!
-//! 權限：讀＝User 或同專案 Bot（含 child）；寫＝User、同專案的頂層 manager（含代班中的副管理者）、同專案的 AGM 角色。
+//! 權限：讀＝User 或同專案 Bot（含 child）；寫＝User、同專案的 AGM 角色，expert 專案另含頂層 manager（含代班中的副管理者），
+//! 母子模式（parent_child）專案另含同專案任何頂層 bot（child 一律唯讀）。
 //! 跨專案的 Bot 在 `authorize_bot_path` 就被擋下（403 `bot_resource_scope`），這裡再核一次專案，不靠路由層。
 
 use std::sync::Arc;
@@ -100,8 +101,8 @@ fn fields(b: SessionBody) -> Result<(String, String, Fields), LcError> {
         return Err(bad("role", "worker or thinker"));
     }
     let kind = opt(b.kind);
-    if kind.as_deref().is_some_and(|k| !crate::config::valid_kind(k)) {
-        return Err(bad("kind", "a CLI kind (claude, codex, grok, agy)"));
+    if kind.as_deref().is_some_and(|k| !lineage::KINDS.contains(&k)) {
+        return Err(bad("kind", "only codex sessions are tracked"));
     }
     let parent_session_id = opt(b.parent_session_id);
     if parent_session_id.as_deref().is_some_and(|p| !valid_session_id(p)) {
@@ -147,15 +148,21 @@ async fn caller_in_project(app: &Arc<App>, principal: &RequestPrincipal, project
     Ok(Some(bot))
 }
 
-/// 寫入：User、同專案頂層 manager（或代班中的副管理者）、同專案的 AGM 角色。執行者、顧問、專家、child 只能讀。
+/// 寫入：User、同專案的 AGM 角色；expert 專案的頂層 manager（或代班中的副管理者）；母子模式專案的頂層 bot。
+/// expert 專案的執行者、顧問、專家，以及任何模式的 child 只能讀。
 async fn require_writer(app: &Arc<App>, principal: &RequestPrincipal, project_id: &str) -> Result<(), LcError> {
     let Some(bot) = caller_in_project(app, principal, project_id).await? else { return Ok(()) };
-    let denied = || LcError::Forbidden(json!({"error": "forbidden", "reason": "role_required", "message": "session 血統只有管理者（或 AGM 角色、使用者）能改；其他成員只能讀"}));
+    let denied = || LcError::Forbidden(json!({"error": "forbidden", "reason": "role_required", "message": "session 血統只有管理者（母子模式為頂層 bot）、AGM 角色或使用者能改；其他成員與 child 只能讀"}));
     if !matches!(principal, RequestPrincipal::Bot(_)) || bot.parent_bot_id.is_some() {
         return Err(denied());
     }
-    // manager 只在 expert 專案有意義（同 `api::expert_manager_over`）。
-    if bot.role.as_deref() == Some("manager") && live_project(app, project_id).await?.mode == "expert" {
+    // 母子模式（parent_child）沒有 manager：派工的是頂層 bot（parent），做完由它決定要不要前移，所以同專案頂層 bot 都可寫。
+    // expert 專案只認 manager（同 `api::expert_manager_over`）、代班中的副管理者與 AGM 角色。
+    let expert = live_project(app, project_id).await?.mode == "expert";
+    if !expert && bot.managed_by != "child" {
+        return Ok(());
+    }
+    if expert && bot.role.as_deref() == Some("manager") {
         return Ok(());
     }
     if crate::supervisor::roles::role_of_bot(&app.db, &bot.id).await.map_err(up)?.is_some() {

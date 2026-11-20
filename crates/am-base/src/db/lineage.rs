@@ -8,6 +8,8 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 pub const ROLES: [&str; 2] = ["worker", "thinker"];
+/// 血統只管 codex（claude 快取 60 分，照舊，#1943）；表上有同一條 CHECK。
+pub const KINDS: [&str; 1] = ["codex"];
 pub const STATES: [&str; 3] = ["checkpoint", "active", "retired"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
@@ -28,7 +30,7 @@ pub struct LineageSession {
     pub updated_at: String,
 }
 
-/// 建立或前移時可帶的欄位。`None`＝不動（既有列）或用預設（新列：role=worker、kind=codex）。
+/// 建立或前移時可帶的欄位。`None`＝不動（既有列）或用預設（新列：role=worker、kind=codex）。`kind` 只收 [`KINDS`]。
 #[derive(Debug, Clone, Default)]
 pub struct Fields {
     pub role: Option<String>,
@@ -263,7 +265,17 @@ mod tests {
                 .bind(crate::db::ulid()).bind(role).bind(state).execute(&pool).await;
             assert!(r.unwrap_err().to_string().contains("CHECK"), "{role}/{state}");
         }
+        // 血統只給 codex：其他 kind 在 DB 就擋（直接 INSERT、UPDATE、經 create／advance 都一樣）。
+        for kind in ["claude", "grok", "agy", "claude-api", ""] {
+            let r = sqlx::query("INSERT INTO lineage_sessions(id,project_id,line,kind,session_id,created_at,updated_at)VALUES(?,'p1','web',?,'k','t','t')").bind(crate::db::ulid()).bind(kind).execute(&pool).await;
+            assert!(r.unwrap_err().to_string().contains("CHECK"), "kind {kind:?}");
+        }
+        assert!(matches!(create(&pool, "p1", "web", "k", Fields { kind: Some("claude".into()), ..Default::default() }).await, Err(LineageError::Db(_))));
+        assert!(matches!(advance(&pool, "p1", "web", "k", Fields { kind: Some("claude".into()), ..Default::default() }).await, Err(LineageError::Db(_))));
         create(&pool, "p1", "web", "s1", Fields::default()).await.unwrap();
+        assert!(sqlx::query("UPDATE lineage_sessions SET kind='claude' WHERE session_id='s1'").execute(&pool).await.unwrap_err().to_string().contains("CHECK"));
+        assert!(matches!(advance(&pool, "p1", "web", "s1", Fields { kind: Some("claude".into()), ..Default::default() }).await, Err(LineageError::Db(_))));
+        assert_eq!(states(&pool, "p1", "web").await, vec![pair("s1", "active")], "被擋的寫入不留痕跡");
         let r = sqlx::query("INSERT INTO lineage_sessions(id,project_id,line,session_id,created_at,updated_at)VALUES('y','p1','quota','s1','t','t')").execute(&pool).await;
         assert!(r.unwrap_err().to_string().contains("UNIQUE"), "同專案同一顆 session 只有一列");
         let r = sqlx::query("INSERT INTO lineage_sessions(id,project_id,line,session_id,created_at,updated_at)VALUES('z','nope','web','s9','t','t')").execute(&pool).await;

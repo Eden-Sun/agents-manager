@@ -476,7 +476,7 @@ CREATE TABLE IF NOT EXISTS lineage_sessions (
   project_id TEXT NOT NULL REFERENCES projects(id),
   line TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker','thinker')),
-  kind TEXT NOT NULL DEFAULT 'codex',
+  kind TEXT NOT NULL DEFAULT 'codex' CHECK (kind IN ('codex')),
   session_id TEXT NOT NULL,
   parent_session_id TEXT,
   context_tokens INTEGER,
@@ -698,8 +698,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (97, "e221e96c9fdae2a0"),
     // openai-api D2b-2（2026-11-18）：`bots.kind` 的 CHECK 多收 `openai-api`（就地放寬 `sqlite_master.sql`，不搬資料）。
     (98, "8bda24e0822e32ff"),
-    // codex session 血統（issue #1943 子票 A，2026-11-20）：`lineage_sessions`（CREATE TABLE）與「一條線一顆 checkpoint」部分唯一索引。
-    (99, "efa593ac7a112a18"),
+    // codex session 血統（issue #1943 子票 A，2026-11-20）：`lineage_sessions`（CREATE TABLE，`kind` 只收 codex）與「一條線一顆 checkpoint」部分唯一索引。
+    (99, "8392961c08c2cf76"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

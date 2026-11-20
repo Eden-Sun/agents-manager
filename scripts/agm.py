@@ -2877,7 +2877,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
     s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
     s.set_defaults(func=cmd_peers)
-    s = sub.add_parser("lineage", help="codex session 血統（#1943）：按模組線記檢查點；list 同專案都可讀，其餘限管理者／AGM")
+    s = sub.add_parser("lineage", help="codex session 血統（#1943）：按模組線記檢查點；list 同專案都可讀，其餘限管理者／AGM（母子模式為頂層 bot）")
     lineage = s.add_subparsers(dest="lineage_command", required=True)
 
     def _lineage_fields(p) -> None:
@@ -2887,7 +2887,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--head", help="當時的 HEAD commit sha（7–64 位 hex）")
         p.add_argument("--summary", help="一行摘要（最多 500 字）")
         p.add_argument("--role", choices=["worker", "thinker"], help="新登記時預設 worker")
-        p.add_argument("--kind", choices=["claude", "codex", "grok", "agy"], help="新登記時預設 codex")
+        p.add_argument("--kind", choices=["codex"], help="只收 codex（預設）")
         p.add_argument("--context-tokens", dest="context_tokens", type=int, help="目前 context token 數")
         p.add_argument("--last-api-at", dest="last_api_at", help="最後一次 API 回合的時間（RFC 3339）")
 

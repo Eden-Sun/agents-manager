@@ -119,12 +119,67 @@ async fn only_manager_agm_role_or_user_may_write() {
     crate::supervisor::store::get_or_init(&app.db).await.unwrap();
     crate::supervisor::store::set_env(&app.db, &agm.id, &pid, "/tmp").await.unwrap();
     advance(State(app.clone()), Path(pid.clone()), bot(&agm), body(json!({"line": "web", "session_id": "s"}))).await.map_err(|e| format!("{e:?}")).unwrap();
-
-    // manager 角色只在 expert 專案算數。
-    sqlx::query("UPDATE projects SET mode='parent_child' WHERE id=?").bind(&pid).execute(&app.db).await.unwrap();
-    let e = retire(State(app.clone()), Path(pid.clone()), bot(&c.manager), Json(RetireBody { session_id: "s".into() })).await.unwrap_err();
-    assert!(reason(&e) == "role_required", "{e:?}");
     assert_eq!(listed(&c, &pid, bot(&c.manager), ListQuery::default()).await.unwrap(), vec![row("web", "s", "checkpoint")]);
+}
+
+/// 母子模式（parent_child）沒有 manager：同專案任何存活的頂層 bot 都可寫，child 仍唯讀，別的專案照樣碰不到。
+#[tokio::test]
+async fn in_a_parent_child_project_any_top_level_bot_writes_and_children_only_read() {
+    let c = cast().await;
+    let (app, pid, other) = (c.env.app.clone(), c.env.project_id.clone(), c.other_project.clone());
+    sqlx::query("UPDATE projects SET mode='parent_child' WHERE id IN (?,?)").bind(&pid).bind(&other).execute(&app.db).await.unwrap();
+    sqlx::query("UPDATE bots SET role=NULL").execute(&app.db).await.unwrap();
+    let parent = crate::testing::claude_bot(&app, &pid, "lin-parent").await;
+    let child = crate::testing::claude_bot(&app, &pid, "lin-pc-child").await;
+    sqlx::query("UPDATE bots SET managed_by='child',parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&child.id).execute(&app.db).await.unwrap();
+
+    // 頂層 bot（沒有角色）：add／advance／retire 都可以；不必是登記那顆 session 的 bot。
+    let Json(added) = create(State(app.clone()), Path(pid.clone()), bot(&parent), body(json!({"line": "web", "session_id": "pc-1"}))).await.map_err(|e| format!("{e:?}")).unwrap();
+    assert_eq!(added["session"]["state"], "active");
+    let Json(moved) = advance(State(app.clone()), Path(pid.clone()), bot(&c.executor), body(json!({"line": "web", "session_id": "pc-1"}))).await.map_err(|e| format!("{e:?}")).unwrap();
+    assert_eq!(moved["session"]["state"], "checkpoint");
+    advance(State(app.clone()), Path(pid.clone()), bot(&parent), body(json!({"line": "web", "session_id": "pc-2"}))).await.map_err(|e| format!("{e:?}")).unwrap();
+    let Json(gone) = retire(State(app.clone()), Path(pid.clone()), bot(&c.manager), Json(RetireBody { session_id: "pc-1".into() })).await.map_err(|e| format!("{e:?}")).unwrap();
+    assert_eq!(gone["session"]["state"], "retired");
+
+    // child：不論用 child 憑證還是 bot 憑證，都只能讀。
+    let as_child = || Extension(RequestPrincipal::Child { child_id: child.id.clone(), parent_bot_id: parent.id.clone() });
+    for (what, who) in [("child credential", as_child()), ("child presenting as a bot", bot(&child))] {
+        let e = create(State(app.clone()), Path(pid.clone()), who.clone(), body(json!({"line": "web", "session_id": "kid"}))).await.unwrap_err();
+        assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "create by {what}: {e:?}");
+        let e = advance(State(app.clone()), Path(pid.clone()), who.clone(), body(json!({"line": "web", "session_id": "pc-1"}))).await.unwrap_err();
+        assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "advance by {what}: {e:?}");
+        let e = retire(State(app.clone()), Path(pid.clone()), who.clone(), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
+        assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "retire by {what}: {e:?}");
+        assert_eq!(listed(&c, &pid, who, ListQuery::default()).await.unwrap(), vec![row("web", "pc-2", "checkpoint"), row("web", "pc-1", "retired")], "{what} reads");
+    }
+    // parent 欄位還在、只是 managed_by 沒標成 child 的 bot 也不算頂層。
+    sqlx::query("UPDATE bots SET managed_by='user' WHERE id=?").bind(&child.id).execute(&app.db).await.unwrap();
+    let e = retire(State(app.clone()), Path(pid.clone()), bot(&child), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
+    assert!(reason(&e) == "role_required", "{e:?}");
+    // 被刪的頂層 bot 不行。
+    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&c.executor.id).execute(&app.db).await.unwrap();
+    let e = retire(State(app.clone()), Path(pid.clone()), bot(&c.executor), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
+    assert!(matches!(e, LcError::Forbidden(_)), "{e:?}");
+
+    // 跨專案：別的（同為母子模式的）專案的頂層 bot 寫不進來，路由層與 handler 都擋；反向亦然。
+    for (method, tail) in [("GET", ""), ("POST", ""), ("POST", "/advance"), ("POST", "/retire")] {
+        assert!(matches!(authorize_bot_path(&app, &c.outsider_manager.id, method, &format!("/api/projects/{pid}/lineage{tail}")).await, Err(LcError::Forbidden(_))), "{method} {tail}");
+        assert!(matches!(authorize_bot_path(&app, &parent.id, method, &format!("/api/projects/{other}/lineage{tail}")).await, Err(LcError::Forbidden(_))), "{method} {tail}");
+    }
+    let e = advance(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager), body(json!({"line": "web", "session_id": "hijack"}))).await.unwrap_err();
+    assert!(reason(&e) == "cross_project", "{e:?}");
+    let e = create(State(app.clone()), Path(other.clone()), bot(&parent), body(json!({"line": "web", "session_id": "hijack"}))).await.unwrap_err();
+    assert!(reason(&e) == "cross_project", "{e:?}");
+    let e = retire(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
+    assert!(reason(&e) == "cross_project", "{e:?}");
+    assert_eq!(listed(&c, &pid, Extension(RequestPrincipal::User), ListQuery::default()).await.unwrap(), vec![row("web", "pc-2", "checkpoint"), row("web", "pc-1", "retired")]);
+    assert!(listed(&c, &other, Extension(RequestPrincipal::User), ListQuery::default()).await.unwrap().is_empty());
+
+    // 切回 expert：沒有角色的頂層 bot 不再能寫（expert 維持原規則）。
+    sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&pid).execute(&app.db).await.unwrap();
+    let e = retire(State(app.clone()), Path(pid.clone()), bot(&parent), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
+    assert!(reason(&e) == "role_required", "{e:?}");
 }
 
 #[tokio::test]
@@ -171,6 +226,7 @@ async fn bad_fields_and_missing_projects_are_refused_before_anything_is_written(
         ("session_id", json!({"line": "web", "session_id": "has space"})),
         ("role", json!({"line": "web", "session_id": "s", "role": "boss"})),
         ("kind", json!({"line": "web", "session_id": "s", "kind": "claude-api"})),
+        ("kind", json!({"line": "web", "session_id": "s", "kind": "claude"})),
         ("parent_session_id", json!({"line": "web", "session_id": "s", "parent_session_id": "s"})),
         ("context_tokens", json!({"line": "web", "session_id": "s", "context_tokens": -1})),
         ("last_api_at", json!({"line": "web", "session_id": "s", "last_api_at": "yesterday"})),
