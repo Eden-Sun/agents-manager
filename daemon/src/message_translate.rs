@@ -20,7 +20,7 @@ use crate::state::App;
 
 const USE_CASE: &str = "message_translate";
 const CACHE_DIR: &str = "message-translate";
-const PROMPT_VERSION: &str = "3";
+const PROMPT_VERSION: &str = "4";
 /// 訊息內容上限（字元）：再長的回覆不翻，避免一次扣太多。
 pub(crate) const MAX_CHARS: usize = 20_000;
 const MAX_OUT_TOKENS: u32 = 8_000;
@@ -30,6 +30,7 @@ Keep existing Traditional Chinese text, references, and names exactly as they ar
 Convert Simplified Chinese to Traditional Chinese (zh-TW). Never output Japanese. \
 Do NOT translate code, identifiers, file paths, shell commands, URLs, environment variables, commit hashes, version numbers, or issue numbers: copy them verbatim. \
 Company names, product or system names, and abbreviations (e.g., CTBC, MIA02, UAT, PR) stay exactly as written in the source, like identifiers. \
+Preserve the exact Markdown structure (every table row's column count, table separator rows, fenced code blocks, lists, headings, and inline code) without adding or removing any elements. \
 Do not add explanations. Reply with the translation only.";
 
 /// 品質沒過的細節：檢查名稱、拉丁／CJK 字數（同 `prose_stats`）、譯文與原文是否完全相同、每次嘗試用的模型與總次數。
@@ -84,7 +85,7 @@ pub(crate) use crate::claude_api::cost_usd;
 pub(crate) fn build_request(content: &str) -> ClaudeRequest {
     let prompt = format!(
         "Translate the English parts of the text inside <source> into Traditional Chinese (zh-TW, Taiwan usage). \
-        原文中已經是中文（繁體）的段落、引用、名稱請原樣保留，不要改寫或重譯；簡體段落請轉成台灣繁體（zh-TW）。英文句子、條列項目與表格單元都要翻，但程式碼、指令、檔案路徑、版本號、產品名稱與縮寫照原文保留。\
+        原文中已經是中文（繁體）的段落、引用、名稱請原樣保留，不要改寫或重譯；簡體段落請轉成台灣繁體（zh-TW）。英文句子、條列項目與表格單元都要翻，但程式碼、指令、檔案路徑、版本號、產品名稱與縮寫照原文保留。完整保留 Markdown 結構（表格每列欄數、分隔列、程式碼區塊、清單、標題、行內 code）不可增刪。\
         Reply with the translation only; do NOT include the <source> or </source> tags.\n<source>\n{content}\n</source>"
     );
     ClaudeRequest {
@@ -102,6 +103,7 @@ pub(crate) fn build_retry_request(content: &str, prev_reason: &str) -> ClaudeReq
     let mut req = build_request(content);
     let note = match prev_reason {
         "japanese_output" => "IMPORTANT: a previous attempt contained Japanese. Reply in Traditional Chinese (zh-TW) only. 前一次回覆含日文，請只用繁體中文。",
+        "markdown_structure" => "IMPORTANT: a previous attempt broke the Markdown structure (table column counts or separator rows, fenced code blocks, headings, or list items). Preserve the exact Markdown structure of <source> without adding, removing, or merging tables, columns, code blocks, headings, or list items. 前一次回覆破壞了 Markdown 結構（表格欄數／分隔列、程式碼區塊、標題或清單），請完整保留原文的 Markdown 結構。",
         _ => "IMPORTANT: a previous attempt returned the source unchanged (or still in English), which is wrong. Every English sentence, list item and table cell of prose must be rewritten in Traditional Chinese; only code, identifiers, paths and product names stay in English. 前一次回覆與原文相同，這是錯的：每一句英文都必須改寫成繁體中文。",
     };
     req.prompt = format!("{note}\n{}", req.prompt);
@@ -464,7 +466,7 @@ async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_
         (None, None) => claude_api::complete(app, req).await,
     }
     .map_err(error_of)?;
-    let translation = clean_reply(&reply.text);
+    let translation = repair_markdown_tables(&clean_reply(&reply.text));
     let reason = local_reason(content, &translation);
     let jev = if reason.is_none() { check_jev(app, id, content, &translation).await } else { None };
     Ok(Attempt {
@@ -520,9 +522,9 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     }];
     if needs_retry(&attempts[0], min_prob) {
         let prev = attempts[0].reason;
-        // 本地檢查回 untranslated／japanese_output（Haiku 原樣回傳或夾日文）：重試改用升級模型，effort 照設定、不額外提高。
+        // 本地檢查回 untranslated／japanese_output／markdown_structure：重試改用升級模型，effort 照設定、不額外提高。
         // 已經用升級模型的（force 首次）就不再換，照舊只提高 effort。
-        let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "japanese_output")) && attempts[0].model != retry_model;
+        let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "japanese_output" | "markdown_structure")) && attempts[0].model != retry_model;
         let next = if upgrade {
             attempt_upgraded(app, id, content, None, prev, &retry_model).await?
         } else {
@@ -692,7 +694,8 @@ pub async fn post_translate_report(State(app): State<Arc<App>>, AxPath(id): AxPa
     Ok(Json(json!({"sent": true, "manager_bot_id": manager_id, "sent_at": sent_at})))
 }
 
-/// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`。都沒有回 None。
+/// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`；
+/// 譯文修補分隔列後仍與原文的 Markdown 結構不符 → `markdown_structure`。都沒有回 None。
 /// 混合訊息（英文段＋原樣保留的中文段）靠 `is_mostly_english` 的比例判斷：英文翻掉後譯文以中文為主，不會被判為 untranslated。
 pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
     if !has_japanese_kana(source) && has_japanese_kana(reply) {
@@ -701,7 +704,213 @@ pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
     if is_mostly_english(source) && is_mostly_english(reply) {
         return Some("untranslated");
     }
+    if !markdown_structure_matches(source, reply) {
+        return Some("markdown_structure");
+    }
     None
+}
+
+// ── Markdown 表格分隔列決定性修補與結構檢查 ───────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct Fence { ch: char, len: usize }
+
+fn fence_open(line: &str) -> Option<Fence> {
+    let trimmed = line.strip_suffix('\r').unwrap_or(line);
+    let indent = trimmed.bytes().take_while(|&b| b == b' ').count();
+    if indent > 3 { return None; }
+    let rest = &trimmed[indent..];
+    let ch = rest.chars().next().filter(|&c| c == '`' || c == '~')?;
+    let len = rest.chars().take_while(|&c| c == ch).count();
+    if len < 3 || (ch == '`' && rest[len..].contains('`')) { return None; }
+    Some(Fence { ch, len })
+}
+
+fn fence_close(line: &str, open: Fence) -> bool {
+    let trimmed = line.strip_suffix('\r').unwrap_or(line);
+    let indent = trimmed.bytes().take_while(|&b| b == b' ').count();
+    if indent > 3 { return false; }
+    let rest = &trimmed[indent..];
+    let len = rest.chars().take_while(|&c| c == open.ch).count();
+    len >= open.len && rest[len..].trim().is_empty()
+}
+
+fn is_atx_heading(line: &str) -> bool {
+    let trimmed = line.strip_suffix('\r').unwrap_or(line);
+    let indent = trimmed.bytes().take_while(|&b| b == b' ').count();
+    if indent > 3 { return false; }
+    let rest = &trimmed[indent..];
+    let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && matches!(rest.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+}
+
+fn is_list_item(line: &str) -> bool {
+    let s = line.strip_suffix('\r').unwrap_or(line).trim_start_matches([' ', '\t']);
+    if ["- ", "-\t", "* ", "*\t", "+ ", "+\t"].iter().any(|p| s.starts_with(p)) { return true; }
+    let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+    (1..=9).contains(&digits) && [". ", ".\t", ") ", ")\t"].iter().any(|p| s[digits..].starts_with(p))
+}
+
+/// 依未跳脫的 `|` 切出表格列的儲存格；不含未跳脫 `|` 或沒有內容時回 `None`。
+fn split_table_cells(line: &str) -> Option<Vec<&str>> {
+    let s = line.strip_suffix('\r').unwrap_or(line).trim();
+    if s.is_empty() { return None; }
+    let bytes = s.as_bytes();
+    let (mut pipes, mut i) = (Vec::new(), 0);
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+        if bytes[i] == b'|' { pipes.push(i); }
+        i += 1;
+    }
+    if pipes.is_empty() { return None; }
+    let start = usize::from(pipes.first() == Some(&0));
+    let end = if pipes.last() == Some(&(s.len() - 1)) && s.len() - 1 >= start { s.len() - 1 } else { s.len() };
+    if start >= end { return None; }
+    let mut cells = Vec::new();
+    let mut cell_start = start;
+    for &p in &pipes {
+        if p >= start && p < end {
+            cells.push(&s[cell_start..p]);
+            cell_start = p + 1;
+        }
+    }
+    cells.push(&s[cell_start..end]);
+    Some(cells)
+}
+
+fn is_delimiter_cell(cell: &str) -> bool {
+    let c = cell.trim();
+    let inner = c.strip_prefix(':').unwrap_or(c);
+    let inner = inner.strip_suffix(':').unwrap_or(inner);
+    !inner.is_empty() && inner.bytes().all(|b| b == b'-')
+}
+
+struct DelimiterRow<'a> { indent: &'a str, leading_pipe: bool, trailing_pipe: bool, cells: Vec<&'a str>, has_cr: bool }
+
+fn parse_delimiter_row(line: &str) -> Option<DelimiterRow<'_>> {
+    let (body, has_cr) = match line.strip_suffix('\r') { Some(b) => (b, true), None => (line, false) };
+    let indent_len = body.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+    let trimmed = body[indent_len..].trim_end();
+    // 必須含 `|`，避免把 `---`（水平線／setext 標題底線）誤認成表格分隔列。
+    if trimmed.is_empty() || !trimmed.contains('|') { return None; }
+    let cells = split_table_cells(trimmed)?;
+    if !cells.iter().all(|c| is_delimiter_cell(c)) { return None; }
+    Some(DelimiterRow {
+        indent: &body[..indent_len],
+        leading_pipe: trimmed.starts_with('|'),
+        trailing_pipe: trimmed.ends_with('|'),
+        cells,
+        has_cr,
+    })
+}
+
+fn table_header_cols(line: &str) -> Option<usize> {
+    if is_atx_heading(line) || parse_delimiter_row(line).is_some() { return None; }
+    split_table_cells(line).map(|c| c.len())
+}
+
+/// 決定性修補：把 Markdown 表格的分隔列修成與該表表頭相同欄數（保留既有欄位的對齊冒號 `:---:` 等），
+/// 只動分隔列，不改儲存格文字；fenced code block（``` / ~~~）內不處理。
+pub(crate) fn repair_markdown_tables(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let (mut fence, mut prev_header_cols, mut changed) = (None, None, false);
+
+    for line in &lines {
+        if let Some(open) = fence {
+            out.push((*line).to_string());
+            if fence_close(line, open) { fence = None; }
+            prev_header_cols = None;
+            continue;
+        }
+        if let Some(open) = fence_open(line) {
+            fence = Some(open);
+            out.push((*line).to_string());
+            prev_header_cols = None;
+            continue;
+        }
+        if let (Some(header_cols), Some(delim)) = (prev_header_cols, parse_delimiter_row(line)) {
+            if delim.cells.len() != header_cols {
+                let mut cells: Vec<&str> = delim.cells.iter().copied().take(header_cols).collect();
+                cells.resize(header_cols, "---");
+                let mut rebuilt = String::with_capacity(line.len() + 16);
+                rebuilt.push_str(delim.indent);
+                if delim.leading_pipe { rebuilt.push('|'); }
+                rebuilt.push_str(&cells.join("|"));
+                if delim.trailing_pipe { rebuilt.push('|'); }
+                if delim.has_cr { rebuilt.push('\r'); }
+                out.push(rebuilt);
+                changed = true;
+            } else {
+                out.push((*line).to_string());
+            }
+            prev_header_cols = None;
+            continue;
+        }
+        out.push((*line).to_string());
+        prev_header_cols = table_header_cols(line);
+    }
+    if changed { out.join("\n") } else { text.to_string() }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TableShape { cols: usize, rows: usize }
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MarkdownStructure { tables: Vec<TableShape>, code_blocks: usize, unclosed_fence: bool, headings: usize, list_items: usize }
+
+fn extract_markdown_structure(text: &str) -> MarkdownStructure {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let (mut s, mut fence, mut i) = (MarkdownStructure::default(), None, 0);
+    while i < lines.len() {
+        let line = lines[i];
+        if let Some(open) = fence {
+            if fence_close(line, open) { fence = None; }
+            i += 1;
+            continue;
+        }
+        if let Some(open) = fence_open(line) {
+            fence = Some(open);
+            s.code_blocks += 1;
+            i += 1;
+            continue;
+        }
+        if let Some(hcols) = table_header_cols(line) {
+            if lines.get(i + 1).and_then(|l| parse_delimiter_row(l)).is_some_and(|d| d.cells.len() == hcols) {
+                i += 2;
+                let mut rows = 0;
+                while i < lines.len() && !lines[i].trim().is_empty() && fence_open(lines[i]).is_none() && !is_atx_heading(lines[i]) && split_table_cells(lines[i]).is_some() {
+                    rows += 1;
+                    i += 1;
+                }
+                s.tables.push(TableShape { cols: hcols, rows });
+                continue;
+            }
+        }
+        if is_atx_heading(line) { s.headings += 1; } else if is_list_item(line) { s.list_items += 1; }
+        i += 1;
+    }
+    s.unclosed_fence = fence.is_some();
+    s
+}
+
+fn roughly_matches(src: usize, dst: usize) -> bool {
+    if src == dst { return true; }
+    if src == 0 { return dst <= 1; }
+    if dst == 0 { return false; }
+    src.abs_diff(dst) <= (src / 3).max(1)
+}
+
+/// 比較原文與譯文的 Markdown 結構：表格數與每表欄數、fenced code block 數、標題數、清單項目數是否一致。
+pub(crate) fn markdown_structure_matches(source: &str, reply: &str) -> bool {
+    let (s, d) = (extract_markdown_structure(source), extract_markdown_structure(reply));
+    if (!s.unclosed_fence && d.unclosed_fence) || s.code_blocks != d.code_blocks || s.tables.len() != d.tables.len() {
+        return false;
+    }
+    if s.tables.iter().zip(&d.tables).any(|(st, dt)| st.cols != dt.cols || (st.rows > 0 && (dt.rows == 0 || !roughly_matches(st.rows, dt.rows)))) {
+        return false;
+    }
+    roughly_matches(s.headings, d.headings) && roughly_matches(s.list_items, d.list_items)
 }
 
 /// 「主要是英文」：跟網頁 `isMostlyEnglish` 同一套規則（去掉程式碼區塊、行內 code、網址後，拉丁字母 ≥ 20 且 CJK 不超過十分之一）。
@@ -1923,6 +2132,105 @@ mod retry_model_tests {
             .bind(&plain).bind(&conv).bind("hook").bind(crate::db::now()).execute(&e.app.db).await.unwrap();
         let not_rejected = post_translate_report(State(e.app.clone()), AxPath(plain), Extension(crate::api::RequestPrincipal::User)).await;
         assert!(matches!(not_rejected, Err(LcError::Conflict(_))), "沒有被擋的譯文不能回報");
+    }
+
+    #[test]
+    fn markdown_table_repair_and_prompt_version() {
+        assert_eq!(PROMPT_VERSION, "4");
+        let req = build_request("| A | B |\n|---|---|\n| 1 | 2 |");
+        assert!(req.system.unwrap().contains("Preserve the exact Markdown structure"));
+        assert!(req.prompt.contains("完整保留 Markdown 結構"));
+
+        // 分隔列少一欄 → 補成同欄數、不動儲存格文字
+        let fixed = repair_markdown_tables("| 欄一 | 欄二 | 欄三 |\n|---|---|\n| 甲 | 乙 | 丙 |");
+        assert_eq!(fixed, "| 欄一 | 欄二 | 欄三 |\n|---|---|---|\n| 甲 | 乙 | 丙 |");
+        assert_eq!(extract_markdown_structure(&fixed).tables, vec![TableShape { cols: 3, rows: 1 }]);
+
+        // 含對齊冒號：補欄與截斷皆保留既有對齊冒號
+        assert_eq!(
+            repair_markdown_tables("| 項目 | 對齊 | 數字 | 備註 |\n| :--- | :---: | ---: |\n| A | B | 1 | ok |"),
+            "| 項目 | 對齊 | 數字 | 備註 |\n| :--- | :---: | ---: |---|\n| A | B | 1 | ok |"
+        );
+        assert_eq!(
+            repair_markdown_tables("| 項目 | 數字 |\n| :--- | ---: | :---: |\n| A | 1 |"),
+            "| 項目 | 數字 |\n| :--- | ---: |\n| A | 1 |"
+        );
+
+        // ``` / ~~~ 程式碼區塊內的 |---| 不動
+        let fenced = "說明\n\n```markdown\n| A | B | C |\n|---|---|\n| 1 | 2 | 3 |\n```\n\n~~~md\n| X | Y | Z |\n|---|---|\n| 4 | 5 | 6 |\n~~~\n\n| 真一 | 真二 | 真三 |\n|---|---|\n| 7 | 8 | 9 |";
+        let expected = fenced.replacen("| 真一 | 真二 | 真三 |\n|---|---|", "| 真一 | 真二 | 真三 |\n|---|---|---|", 1);
+        assert_eq!(repair_markdown_tables(fenced), expected);
+    }
+
+    /// 2026-11-20 回歸 fixture：9 欄比較表，模型把分隔列少寫 1 欄（8 欄），修補後一次成表寫入快取、不重試。
+    #[tokio::test]
+    async fn regression_2026_11_20_nine_column_table_separator_repaired() {
+        let source = "\
+You picked B in the previous dialog, but I haven't renamed anything yet. Role names like `director` and `lead` stay the same.
+
+| Option | Format | haiku cc0 ×2 | haiku cc1 | sonnet | fable | agy ag1 | codex terra | Rename on model change? |
+|---|---|---|---|---|---|---|---|---|
+| **A** | account-number | `cc0-1` `cc0-2` | `cc1-1` | `cc0-3` | `cc0-4` | `ag1-1` | `co0-1` | No |
+| **B** (your current pick) | account-model-number | `cc0-haiku-1` `cc0-haiku-2` | `cc1-haiku-1` | `cc0-sonnet-1` | `cc0-fable-1` | `ag1-flash-1` | `co0-terra-1` | Only when model family changes |
+| **C** | model-account-number | `haiku-cc0-1` `haiku-cc0-2` | `haiku-cc1-1` | `sonnet-cc0-1` | `fable-cc0-1` | `flash-ag1-1` | `terra-co0-1` | Only when model family changes |
+| **D** | current scheme (abbreviation-account-letter) | `hk-cc0a` `hk-cc0b` | `hk-cc1a` | `sn-cc0a` | `fb-cc0a` | `ag-ag1a` | `te-co0a` | On model change |
+
+**How they compare**
+- **A** is shortest and never needs renaming.
+- **B** puts the account first.
+- **C** puts the model first.
+- **D** is the recently adopted scheme.";
+
+        let broken_reply = "\
+你在上一個對話框選了 B，但我還沒有重新命名任何東西。`director`、`lead` 這類角色名稱保持不變。
+
+| 選項 | 格式 | haiku cc0 ×2 | haiku cc1 | sonnet | fable | agy ag1 | codex terra | 模型變更時是否重新命名？ |
+|---|---|---|---|---|---|---|---|
+| **A** | account-number | `cc0-1` `cc0-2` | `cc1-1` | `cc0-3` | `cc0-4` | `ag1-1` | `co0-1` | 否 |
+| **B**（你目前的選擇） | account-model-number | `cc0-haiku-1` `cc0-haiku-2` | `cc1-haiku-1` | `cc0-sonnet-1` | `cc0-fable-1` | `ag1-flash-1` | `co0-terra-1` | 只有在模型家族變更時 |
+| **C** | model-account-number | `haiku-cc0-1` `haiku-cc0-2` | `haiku-cc1-1` | `sonnet-cc0-1` | `fable-cc0-1` | `flash-ag1-1` | `terra-co0-1` | 只有在模型家族變更時 |
+| **D** | 目前方案（abbreviation-account-letter） | `hk-cc0a` `hk-cc0b` | `hk-cc1a` | `sn-cc0a` | `fb-cc0a` | `ag-ag1a` | `te-co0a` | 模型變更時 |
+
+**比較方式**
+- **A** 最短，不需要重新命名。
+- **B** 將帳號放在前面。
+- **C** 將模型放在前面。
+- **D** 是剛採用的方案。";
+
+        let (app, _d) = app(true).await;
+        let f = echo(&app, vec![broken_reply.into()]);
+        let out = translate(&app, "m_2026_11_20_table", source).await.unwrap();
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1, "分隔列修補後結構一致，不觸發重試");
+        let translated = out["translation"].as_str().unwrap();
+        assert!(translated.contains("\n|---|---|---|---|---|---|---|---|---|\n"), "分隔列應修補為 9 欄");
+        assert!(translated.contains("| **B**（你目前的選擇） | account-model-number |"), "儲存格文字不動");
+        assert_eq!(extract_markdown_structure(translated), extract_markdown_structure(source));
+        let hit = load(&cache_path(&app.data_dir, &cache_key("m_2026_11_20_table", source))).expect("寫入快取");
+        assert!(hit.translation.contains("\n|---|---|---|---|---|---|---|---|---|\n"));
+    }
+
+    #[tokio::test]
+    async fn broken_markdown_structure_retries_and_rejects_after_two_failures() {
+        let src1 = "# Summary\n\n| Name | Status |\n|---|---|\n| alpha | ok |\n\n```sh\necho hi\n```\n\n- one\n- two\n- three";
+        let bad1 = "摘要：alpha 正常，執行 echo hi，項目一二三。";
+        let good1 = "# 摘要\n\n| 名稱 | 狀態 |\n|---|---|\n| alpha | 正常 |\n\n```sh\necho hi\n```\n\n- 一\n- 二\n- 三";
+        let (a1, _d1) = app(true).await;
+        let f1 = echo(&a1, vec![bad1.into(), good1.into()]);
+        let out = translate(&a1, "m_md_retry", src1).await.unwrap();
+        assert_eq!(*f1.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string(), "claude-sonnet-5-5".to_string()]);
+        assert_eq!(out["translation"], json!(good1));
+
+        // retry_model 為空時提高 effort；兩次都壞（3 欄變 2 欄）走現有 rejected 流程
+        let src2 = "## Plan\n\n| Step | Owner | Result |\n|---|---|---|\n| 1 | Alice | Done |";
+        let (a2, _d2) = app(true).await;
+        a2.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), ..Default::default() }); Ok(()) }).await.unwrap();
+        let f2 = echo(&a2, vec!["## 計畫\n\n| 步驟 | 負責人 |\n|---|---|\n| 1 | Alice |".into(), "## 計畫\n\n| 步驟 | 結果 |\n|---|---|\n| 1 | 完成 |".into()]);
+        let err = translate(&a2, "m_md_reject", src2).await.unwrap_err();
+        assert_eq!(*f2.efforts.lock().unwrap(), vec!["low".to_string(), "medium".to_string()]);
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected" && v["reason"] == "markdown_structure"), "{err:?}");
+        let path = cache_path(&a2.data_dir, &cache_key("m_md_reject", src2));
+        assert_eq!(load_rejection(&path).map(|(r, _)| r).as_deref(), Some("markdown_structure"));
+        assert!(load(&path).is_none());
     }
 }
 
