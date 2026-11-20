@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { RefObject } from 'react'
+import { useDismiss } from '../lib/useDismiss'
 import * as api from '../api'
 import { ApiError } from '../api/types'
 import type { Issue, ProjectSubmodule } from '../api/types'
@@ -177,19 +178,9 @@ export function IssuesBar({
   useEffect(() => {
     if (!open) return
     searchRef.current?.focus()
-    const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
   }, [open])
+
+  useDismiss(open, wrap, () => setOpen(false))
 
   if (!github) return null
 

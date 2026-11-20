@@ -1,6 +1,7 @@
 import { useT } from "../lib/i18n"
 import { copyText } from '../lib/copyText'
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
+import { useDismiss } from '../lib/useDismiss'
 import { TerminalIcon } from './Icons'
 import './attachButton.css'
 
@@ -13,21 +14,7 @@ export function AttachButton({ command, compact }: { command: string; compact?: 
   const [lastCopy, setLastCopy] = useState<'ok' | 'fail' | null>(null)
   const wrap = useRef<HTMLSpanElement>(null)
 
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  useDismiss(open, wrap, () => setOpen(false))
 
   const copy = async (): Promise<'ok' | 'fail'> => {
     const r = (await copyText(command)) ? 'ok' : 'fail'

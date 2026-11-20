@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useMenuKeys } from '../hooks/useMenuKeys'
+import { useDismiss } from '../lib/useDismiss'
 import { MoreIcon } from './Icons'
 import './headMoreMenu.css'
 
@@ -44,21 +45,7 @@ export function HeadMoreMenu({
     if (r.bottom > floor && btnTop - 6 - r.height >= ceil) el.dataset.up = ''
   }, [open])
 
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  useDismiss(open, wrap, () => setOpen(false))
 
   return (
     <div className="head-menu" ref={wrap}>

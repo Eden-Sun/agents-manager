@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useDismiss } from '../lib/useDismiss'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
@@ -31,14 +32,7 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
   const menuRef = useRef<HTMLUListElement>(null)
   const menuKeys = useMenuKeys(open, menuRef, btnRef, () => setOpen(false))
 
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [open])
+  useDismiss(open, wrap, () => setOpen(false))
 
   const go = (botId: string) => {
     setOpen(false)

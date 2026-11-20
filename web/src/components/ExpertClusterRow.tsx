@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
+import { useDismiss } from '../lib/useDismiss'
 import { useShallow } from 'zustand/react/shallow'
 import { LOCAL_HOST, type Bot } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
@@ -41,14 +42,7 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
   const off = total - on
   const allOn = off === 0
 
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
+  useDismiss(open, wrapRef, () => setOpen(false))
 
   // 只送差異成員的 PATCH；失敗的計數回報，全部成功不跳通知。
   const setAll = (next: boolean) => {

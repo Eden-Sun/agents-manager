@@ -1,3 +1,4 @@
+import { useDismiss } from '../lib/useDismiss'
 import { fmtDateTime } from '../lib/userTime'
 import { CodexResetHint } from './CodexResetHint'
 import { leftPct } from '../lib/quotaLeft'
@@ -1008,21 +1009,7 @@ export function QuotaStrip({
     if (shellPane && open && phone) setOpen(false)
   }
 
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  useDismiss(open, wrap, () => setOpen(false))
 
   useEffect(() => {
     if (!phone) return
