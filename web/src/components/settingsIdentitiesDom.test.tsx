@@ -404,7 +404,7 @@ it('停用本機 CLI 要先確認，確認框說明本機受影響的 Bot 數；
 
 it('cc0 設定檔與預設帳號分開標示：同名不合併', async () => {
   await open()
-  assert.match(row('cc0').textContent ?? '', /cc0 設定檔.*只給指定 cc0 的 Bot 用/)
+  assert.match(row('cc0').textContent ?? '', /cc0 設定檔，與預設帳號不同目錄/)
   assert.match(defaultRow('local', 'claude').textContent ?? '', /預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）/)
 })
 

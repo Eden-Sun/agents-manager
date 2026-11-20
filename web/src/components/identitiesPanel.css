@@ -196,12 +196,6 @@
   gap: 8px;
 }
 
-@media (max-width: 480px) {
-  .identity-kind-card {
-    padding: 8px 10px;
-  }
-}
-
 /* 已登入用中性色（常態），未登入警示色，問不到則淡掉。 */
 
 .identity-logins {
@@ -363,5 +357,93 @@
   }
   100% {
     box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+/* ⓘ 說明：縮成一個小圖示，完整文字放在 title／aria-label。 */
+.identity-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dim);
+  cursor: help;
+  vertical-align: middle;
+}
+
+.identity-source-tag {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-sunken, transparent);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* 手機（≤480px，含 320）：卡頭與列換行、按鈕不截斷、「更多」選單整列展開，不擠在同一行。 */
+@media (max-width: 480px) {
+  .identity-kind-card {
+    padding: 8px 10px;
+    min-width: 0;
+  }
+  .identity-kind-card-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .identity-kind-card-head > .identity-kind-title {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .identity-row {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .identity-main {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+  .identity-login-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .identity-login-btn,
+  .identity-primary-btn {
+    white-space: nowrap;
+    min-height: 32px;
+    padding: 0 10px;
+  }
+  .identity-more {
+    flex: 1 1 100%;
+  }
+  .identity-more-body {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    margin: 6px 0 0;
+  }
+  .identity-menu-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .identity-menu-group + .identity-menu-group {
+    margin-left: 0;
+    padding-left: 0;
+    padding-top: 6px;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  .identity-users-list li {
+    flex-wrap: wrap;
   }
 }

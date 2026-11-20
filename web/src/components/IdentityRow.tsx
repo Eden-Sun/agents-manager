@@ -76,7 +76,15 @@ export function IdentityQuotaChip({ host, kind, identity }: { host: string; kind
 export function Cc0Note({ name, kind }: { name: string; kind: string }) {
   const t = useT()
   if (kind !== 'claude' || name !== 'cc0') return null
-  return <span className="identity-detail">{t('cc0 設定檔：有自己的 CLAUDE_CONFIG_DIR，只給指定 cc0 的 Bot 用；跟「預設帳號」是不同目錄，不會合併')}</span>
+  const full = t('cc0 設定檔：有自己的 CLAUDE_CONFIG_DIR，只給指定 cc0 的 Bot 用；跟「預設帳號」是不同目錄，不會合併')
+  return (
+    <span className="identity-detail">
+      {t('cc0 設定檔，與預設帳號不同目錄')}{' '}
+      <span className="identity-info" tabIndex={0} title={full} aria-label={full}>
+        ⓘ
+      </span>
+    </span>
+  )
 }
 
 /** 「N 個 Bot」可點：展開列出使用中的 bot，每一顆都能前往改綁（先改綁才能刪身份）。 */
@@ -210,7 +218,7 @@ export function IdentityLoginButton({ host, identity, loggedIn }: { host: string
         type="button"
         className="mini-btn identity-login-btn identity-primary-btn"
         disabled={busy}
-        title={t('在{host}開臨時 pane，帶著 {identity} 的設定執行登入', { host: hostLabel(host), identity })}
+        title={t('在{host}開臨時 pane，帶著 {identity} 的設定執行登入（會在{host}開終端，不開瀏覽器）', { host: hostLabel(host), identity })}
         onClick={(e) => {
           if (busy) return
           const btn = e.currentTarget
@@ -225,7 +233,6 @@ export function IdentityLoginButton({ host, identity, loggedIn }: { host: string
       >
         {busy ? t('登入中…') : loggedIn ? t('重新登入…') : t('登入')}
       </button>
-      <span className="identity-hint-inline">{t('會在{host}開終端', { host: hostLabel(host) })}</span>
     </>
   )
 }
@@ -468,11 +475,10 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
                   type="button"
                   className="mini-btn identity-login-btn identity-primary-btn"
                   onClick={() => void loginKindOnHost(host, kind, null)}
-                  title={t('在{host}開臨時終端登入預設帳號（不開瀏覽器）', { host: where })}
+                  title={t('在{host}開臨時終端登入預設帳號（會在{host}開終端，不開瀏覽器）', { host: where })}
                 >
                   {state === true ? t('重新登入…') : t('登入')}
                 </button>
-                <span className="identity-hint-inline">{t('會在{host}開終端', { host: where })}</span>
                 <IdentityMoreMenu
                   general={
                     <button

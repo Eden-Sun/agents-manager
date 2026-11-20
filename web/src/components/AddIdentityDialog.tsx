@@ -341,7 +341,7 @@ export function AddIdentityDialog({
 
             <section className="add-identity-summary" aria-label={t('摘要')}>
               <dl>
-                <dt>{t('主機')}</dt>
+                <dt>{t('所在主機')}</dt>
                 <dd>{hostLabel}</dd>
                 <dt>{t('實際目錄')}</dt>
                 <dd>
