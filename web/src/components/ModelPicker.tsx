@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { compareGptModels, formatGptModelLabel } from '../lib/gptModel'
+import { buildAgyFamilyOrder, compareAgyModels } from '../lib/agyModel'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -63,6 +64,7 @@ function modelLabel(m: ModelInfo, kind?: BotKind): string {
 /**
  * 排序：
  * - codex 與 openai-api：依家族由便宜到貴（luna < terra < sol < astra；同家族由舊到新，2026-11-19 使用者要求）。
+ * - agy：依家族由便宜到貴（flash < hydrogen < argon < neon；未知家族排最後照原順序；同家族依版號由舊到新、再依強度 low < medium < high < xhigh；認不得的 id 排最後原樣，2026-11-20 使用者要求）。
  * - 其餘 kind：照 `MODEL_OPTIONS` 排序，新模型接在後面。
  */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
@@ -70,6 +72,13 @@ function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
     return models
       .map((m, i) => ({ m, i }))
       .sort((a, b) => compareGptModels(canonicalModel(kind, a.m.id), canonicalModel(kind, b.m.id)) || a.i - b.i)
+      .map((x) => x.m)
+  }
+  if (kind === 'agy') {
+    const familyOrder = buildAgyFamilyOrder(models.map((m) => m.id))
+    return models
+      .map((m, i) => ({ m, i }))
+      .sort((a, b) => compareAgyModels(a.m.id, b.m.id, familyOrder) || a.i - b.i)
       .map((x) => x.m)
   }
   const want = MODEL_OPTIONS[kind] ?? []

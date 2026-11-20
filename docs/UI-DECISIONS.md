@@ -1739,6 +1739,7 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
   - 身份建立的主機用既有 `POST /identities` 的 `host` 欄位（daemon 已支援，前端 `NewIdentityInput` 補上這個欄位）。
 - **判定純函式**（`components/identityEnv.ts`）：`suggestedIdentityEnvText`、`normalizeHomeDir`（`~`、`$HOME`、`${HOME}` 視為同一目錄）、`identityHomeDir`、`sharedHomeWith`、`validIdentityName`。
 - **測試**：`components/identityHome.test.ts`（純函式）、`components/addIdentityDialog.test.tsx`（建議目錄、同名擋住、共用警告、切 CLI 提示、送出→輪詢到已登入、達上限顯示失敗且不關）。
+
 ## 設定 → 身份頁重做：主機分頁＋CLI 卡（第 1 階段版面骨架，2026-11-20，使用者核可）
 
 - **背景**：身份頁一條長清單，本機與各遠端、四種 CLI、預設帳號、shell alias 混在一起；CLI 名稱不顯眼，動作按鈕名稱不一致。
@@ -1760,3 +1761,15 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
   - **cc0 與預設帳號不合併**：預設帳號列寫「預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）」；名為 `cc0` 的設定檔（config 或 shell）列上註記「有自己的 CLAUDE_CONFIG_DIR，只給指定 cc0 的 Bot 用」（`Cc0Note`）。
 - **不做（留給後續階段）**：新增身份對話框（`AddIdentityDialog`，hc0d 負責）、版面骨架與分頁（第 1 階段）、手機版收合（第 P2）。
 - **純前端**：沒有新增或改動任何 API；bot 改綁走既有的 bot 設定面板。
+
+## agy 模型依價格排序（2026-11-20，使用者需求）
+
+- **背景**：agy API 回傳 14 個模型（3.8 Flash 3 檔、4 Hydrogen 4 檔、4 Argon 3 檔、4 Neon 4 檔），daemon 回傳順序未排序，且原本 ModelPicker 對 agy 依賴靜態寫死的 3.8 清單，導致 Gemini 4 系列無法依照價格正確排序。
+- **做法**：
+  - **排序由便宜到貴**：依家族固定順序 `flash < hydrogen < argon < neon`；未知家族排最後、照原順序。同家族依版號由舊到新、再依強度 `low < medium < high < xhigh` 排序；認不得格式的 id 排最後原樣（`lib/agyModel.ts` 的 `compareAgyModels`）。
+  - **最新版保留規則**：`lib/modelSeries.ts` 的 `parseModelSeries` 支援 `-xhigh` 強度後綴。`latestModels` 對 agy 四個家族各自依系列 key（`agy:flash`、`agy:hydrogen`、`agy:argon`、`agy:neon`）保留最新版，不同家族不可互相隱藏。
+  - **各處選單一致**：建立 Bot 表單、Bot 設定 ModelPicker、快捷改模型選單（ModelQuickPicker）統一經由 `latestModels` 與 `sortModels` 排序，行為一致。
+  - **預設與 daemon 不變**：agy 預設模型維持 `gemini-3.8-flash-medium`（`is_default: true`），子 agent 最低強度預設 `gemini-3.8-flash-low` 保持不變，不改 daemon。
+- **測試**：
+  - `lib/modelSeries.test.ts`：14 個模型亂序輸入正確依序排列（flash、hydrogen、argon、neon 各自強度 low<medium<high<xhigh）；未知家族與未知 id 排序；斷言 14 個模型經 `latestModels` 全部保留，四家族不互相隱藏。
+  - `components/agyRetiredModelDom.test.tsx`：後備清單依價格排序後 medium 依然為模型預設。

@@ -30,7 +30,12 @@ test('後備清單（API 不可用）是 3.8 Flash 三檔，不收的模型一�
   assert.equal(buttons.length, 3)
   for (const id of MODEL_OPTIONS.agy) assert.ok(buttons.some((t) => t.startsWith(id)), id)
   for (const retired of RETIRED) assert.ok(!buttons.some((t) => t.includes(retired)), retired)
-  assert.ok(buttons[0].includes('模型預設'), '預設維持 3.8 medium')
+  assert.deepEqual(
+    buttons.map((t) => t.split(' ')[0]),
+    ['gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high'],
+    '由便宜到貴：low < medium < high',
+  )
+  assert.ok(buttons[1].includes('模型預設'), '預設維持 3.8 medium')
   assert.equal(el.querySelector('.field-note.warn.hint, .hint.field-note.warn'), null, '3.8 沒有下架提示')
 })
 

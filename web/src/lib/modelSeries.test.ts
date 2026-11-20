@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { ModelInfo } from '../api/types.ts'
 import { compareVersion, latestModels, parseModelSeries } from './modelSeries.ts'
+import { compareAgyModels, parseAgyModel, sortAgyModelIds } from './agyModel.ts'
 
 const m = (id: string): ModelInfo => ({
   id,
@@ -64,7 +65,164 @@ test('agy：同版號的強度變體全保留，舊版號隱藏', () => {
   assert.deepEqual(ids(r.models), ['gemini-3.8-flash-medium', 'gemini-3.8-flash-high', 'gemini-3.8-flash-low', 'gemini-3.8-pro-low'])
 })
 
+test('agy：四個家族（flash, hydrogen, argon, neon 包含 xhigh）都保留，家族不同不可互相隱藏', () => {
+  const models14 = [
+    m('gemini-3.8-flash-low'),
+    m('gemini-3.8-flash-medium'),
+    m('gemini-3.8-flash-high'),
+    m('gemini-4-hydrogen-low'),
+    m('gemini-4-hydrogen-medium'),
+    m('gemini-4-hydrogen-high'),
+    m('gemini-4-hydrogen-xhigh'),
+    m('gemini-4-argon-low'),
+    m('gemini-4-argon-medium'),
+    m('gemini-4-argon-high'),
+    m('gemini-4-neon-low'),
+    m('gemini-4-neon-medium'),
+    m('gemini-4-neon-high'),
+    m('gemini-4-neon-xhigh'),
+  ]
+  const r = latestModels('agy', models14, null)
+  assert.equal(r.models.length, 14, '14 個模型全部保留')
+  assert.deepEqual(ids(r.models), ids(models14), '四家族模型不互相隱藏')
+  assert.equal(r.oldIds.size, 0)
+})
+
 test('grok 等其他 kind 不分組，全部照舊', () => {
   const all = ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'].map(m)
   assert.deepEqual(ids(latestModels('grok', all, null).models), ids(all))
+})
+
+test('parseAgyModel：解析 gemini-<版號>-<家族>[-<強度>]', () => {
+  const p1 = parseAgyModel('gemini-3.8-flash-low')
+  assert.ok(p1)
+  assert.equal(p1?.version, '3.8')
+  assert.deepEqual(p1?.versionNumbers, [3, 8])
+  assert.equal(p1?.family, 'flash')
+  assert.equal(p1?.familyRank, 0)
+  assert.equal(p1?.effort, 'low')
+  assert.equal(p1?.effortRank, 0)
+
+  const p2 = parseAgyModel('gemini-4-hydrogen-xhigh')
+  assert.ok(p2)
+  assert.equal(p2?.version, '4')
+  assert.deepEqual(p2?.versionNumbers, [4])
+  assert.equal(p2?.family, 'hydrogen')
+  assert.equal(p2?.familyRank, 1)
+  assert.equal(p2?.effort, 'xhigh')
+  assert.equal(p2?.effortRank, 3)
+
+  const p3 = parseAgyModel('gemini-4-argon')
+  assert.ok(p3)
+  assert.equal(p3?.family, 'argon')
+  assert.equal(p3?.familyRank, 2)
+  assert.equal(p3?.effort, undefined)
+  assert.equal(p3?.effortRank, -1)
+
+  const p4 = parseAgyModel('gemini-4-neon-medium')
+  assert.ok(p4)
+  assert.equal(p4?.family, 'neon')
+  assert.equal(p4?.familyRank, 3)
+  assert.equal(p4?.effort, 'medium')
+  assert.equal(p4?.effortRank, 1)
+
+  // 未知家族
+  const pUnknownFam = parseAgyModel('gemini-4-custom-high')
+  assert.ok(pUnknownFam)
+  assert.equal(pUnknownFam?.family, 'custom')
+  assert.equal(pUnknownFam?.familyRank, 99)
+
+  // 認不得格式的 id
+  assert.equal(parseAgyModel('unknown-model'), null)
+  assert.equal(parseAgyModel('claude-opus-5-5'), null)
+  assert.equal(parseAgyModel('gemini-flash'), null)
+})
+
+test('compareAgyModels：家族由便宜到貴：flash < hydrogen < argon < neon', () => {
+  assert.ok(compareAgyModels('gemini-3.8-flash-low', 'gemini-4-hydrogen-low') < 0)
+  assert.ok(compareAgyModels('gemini-4-hydrogen-low', 'gemini-4-argon-low') < 0)
+  assert.ok(compareAgyModels('gemini-4-argon-low', 'gemini-4-neon-low') < 0)
+})
+
+test('sortAgyModelIds：14 個模型亂序輸入 → flash(low,medium,high)、hydrogen(…)、argon(…)、neon(…)', () => {
+  const input = [
+    'gemini-4-neon-high',
+    'gemini-4-argon-low',
+    'gemini-3.8-flash-high',
+    'gemini-4-hydrogen-xhigh',
+    'gemini-4-neon-low',
+    'gemini-3.8-flash-low',
+    'gemini-4-argon-high',
+    'gemini-4-hydrogen-medium',
+    'gemini-4-neon-medium',
+    'gemini-3.8-flash-medium',
+    'gemini-4-hydrogen-low',
+    'gemini-4-argon-medium',
+    'gemini-4-neon-xhigh',
+    'gemini-4-hydrogen-high',
+  ]
+  const expected = [
+    // Flash
+    'gemini-3.8-flash-low',
+    'gemini-3.8-flash-medium',
+    'gemini-3.8-flash-high',
+    // Hydrogen
+    'gemini-4-hydrogen-low',
+    'gemini-4-hydrogen-medium',
+    'gemini-4-hydrogen-high',
+    'gemini-4-hydrogen-xhigh',
+    // Argon
+    'gemini-4-argon-low',
+    'gemini-4-argon-medium',
+    'gemini-4-argon-high',
+    // Neon
+    'gemini-4-neon-low',
+    'gemini-4-neon-medium',
+    'gemini-4-neon-high',
+    'gemini-4-neon-xhigh',
+  ]
+  const actual = sortAgyModelIds(input)
+  assert.deepEqual(actual, expected)
+})
+
+test('sortAgyModelIds：未知家族排最後、照原順序；同未知家族依版本由舊到新、再依強度', () => {
+  const input = [
+    'gemini-4-customb-high',
+    'gemini-3.8-flash-medium',
+    'gemini-5-customa-medium',
+    'gemini-4-customa-high',
+    'gemini-4-customa-low',
+    'gemini-4-argon-low',
+  ]
+  const expected = [
+    'gemini-3.8-flash-medium',
+    'gemini-4-argon-low',
+    // 未知家族：customb 比 customa 早出現，保持原順序在前
+    'gemini-4-customb-high',
+    // 同未知家族 customa：版本 4 先（low < high），再版本 5
+    'gemini-4-customa-low',
+    'gemini-4-customa-high',
+    'gemini-5-customa-medium',
+  ]
+  const actual = sortAgyModelIds(input)
+  assert.deepEqual(actual, expected)
+})
+
+test('sortAgyModelIds：認不得的 id 排最後原樣', () => {
+  const input = [
+    'invalid-model-1',
+    'gemini-4-argon-low',
+    'another-bad-id',
+    'gemini-3.8-flash-high',
+    'custom-raw-string',
+  ]
+  const expected = [
+    'gemini-3.8-flash-high',
+    'gemini-4-argon-low',
+    'invalid-model-1',
+    'another-bad-id',
+    'custom-raw-string',
+  ]
+  const actual = sortAgyModelIds(input)
+  assert.deepEqual(actual, expected)
 })

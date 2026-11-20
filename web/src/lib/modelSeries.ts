@@ -36,7 +36,7 @@ export function parseModelSeries(kind: BotKind, id: string): Parsed | null {
     return m ? { series: `claude:${m[1]}`, version: toVersion(m[2]) } : null
   }
   if (kind === 'agy') {
-    const m = /^gemini-(\d+(?:\.\d+)*)-([a-z]+)(?:-(?:low|medium|high))?$/.exec(norm)
+    const m = /^gemini-(\d+(?:\.\d+)*)-([a-z]+)(?:-(?:low|medium|high|xhigh))?$/.exec(norm)
     return m ? { series: `agy:${m[2]}`, version: toVersion(m[1]) } : null
   }
   return null
