@@ -191,3 +191,29 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(cold.remainingSecs, 0)
   assert.match(cold.title, /快取已涼/)
 })
+
+test('agy 12 分 TTL：閒置 <5 分 fresh、5–10 分 warn、10–12 分 low、>12 分 cold', () => {
+  // 門檻：剩 >420 fresh、120–420 warn、<120 low（agy 720 秒，見 cache_clock::ttl_secs）。
+  assert.equal(cacheLevel(421, 720), 'fresh')
+  assert.equal(cacheLevel(420, 720), 'warn')
+  assert.equal(cacheLevel(120, 720), 'warn')
+  assert.equal(cacheLevel(119, 720), 'low')
+  assert.equal(cacheLevel(1, 720), 'low')
+  assert.equal(cacheLevel(0, 720), 'cold')
+  const now = Date.parse('2026-11-20T10:00:00.000Z')
+  const idle = (mins: number) => new Date(now - mins * 60_000).toISOString()
+  assert.equal(cacheState(idle(4), 720, now)?.level, 'fresh')
+  assert.equal(cacheState(idle(7), 720, now)?.level, 'warn')
+  assert.equal(cacheState(idle(11), 720, now)?.level, 'low')
+  assert.equal(cacheState(idle(13), 720, now)?.level, 'cold')
+  const warn = cacheState(idle(7), 720, now)
+  assert.match(warn?.title ?? '', /Gemini/)
+})
+
+test('claude 門檻不變：剩 15 分 warn、剩 5 分 warn、<5 分 low', () => {
+  assert.equal(cacheLevel(901, 3600), 'fresh')
+  assert.equal(cacheLevel(900, 3600), 'warn')
+  assert.equal(cacheLevel(300, 3600), 'warn')
+  assert.equal(cacheLevel(299, 3600), 'low')
+  assert.equal(cacheLevel(900), 'warn', '沒給 TTL 走預設門檻')
+})

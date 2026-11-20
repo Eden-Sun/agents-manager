@@ -177,6 +177,10 @@ pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAcces
 pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::Cfg), bot: &db::Bot, run: &db::Run, text: &str) {
     let model = run.runtime_model.as_deref().or(bot.model.as_deref());
     let window = app.cfg().get().await.agy.context_window_tokens;
+    // 快取倒數用：最後一筆 assistant 回覆的時間（不論 status_json 有沒有變都記）。
+    if let Some(at) = crate::agy_support::last_assistant_at(text) {
+        crate::cache_clock::on_agy_transcript(&run.id, &at);
+    }
     let Some(json) = crate::agy_support::status_json(model, crate::agy_support::last_input_tokens(text), window) else { return };
     if run.status_json.as_deref() == Some(json.as_str()) {
         return;

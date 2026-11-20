@@ -100,6 +100,9 @@
         assert!(!eligible("codex", true, "running", "idle", false, false), "codex 的 cache 不會涼掉，不保溫");
         assert!(!eligible("grok", true, "running", "idle", false, false));
         assert!(!eligible("agy", true, "running", "idle", false, false));
+        // agy 有 12 分 TTL（網頁倒數用），但不保溫、不熱壓：ttl 有值不代表被納入（使用者 2026-11-20）。
+        assert!(cache_clock::ttl_secs("agy").is_some(), "agy 有倒數");
+        assert_eq!(warm_compact_min_context_pct("agy"), None, "agy 沒有熱壓門檻");
         assert!(!eligible("claude", false, "running", "idle", false, false), "不是主力");
         assert!(!eligible("claude", true, "stopping", "idle", false, false));
         for status in ["blocked", "working", "unknown"] {

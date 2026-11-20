@@ -251,4 +251,16 @@
         let out = hooks_merge(bom_hooks, "agents-manager", "/d/agy-hook.sh").unwrap().unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["other"]["enabled"], true);
+    
+    #[test]
+    fn last_assistant_time_is_the_newest_planner_reply() {
+        let t = concat!(
+            r#"{"type":"PLANNER_RESPONSE","created_at":"2026-11-20T01:00:00Z","content":"first"}"#, "\n",
+            r#"{"type":"USER_INPUT","created_at":"2026-11-20T01:05:00Z","content":"hi"}"#, "\n",
+            r#"{"type":"PLANNER_RESPONSE","created_at":"2026-11-20T01:06:00Z","content":"second"}"#, "\n",
+            r#"{"type":"TOOL_RESULT","created_at":"2026-11-20T01:07:00Z","content":"x"}"#,
+        );
+        assert_eq!(last_assistant_at(t).as_deref(), Some("2026-11-20T01:06:00Z"), "工具輸出不算回覆");
+        assert_eq!(last_assistant_at(r#"{"type":"USER_INPUT","created_at":"2026-11-20T01:00:00Z","content":"x"}"#), None);
     }
+}

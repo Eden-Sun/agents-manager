@@ -240,6 +240,15 @@ pub fn last_input_tokens(jsonl: &str) -> Option<i64> {
     })
 }
 
+/// 最後一筆 assistant 回覆的 `created_at`（UTC ISO）：agy 的「最後一次 API 活動」（`cache_clock` 用它算快取倒數）。
+pub fn last_assistant_at(jsonl: &str) -> Option<String> {
+    jsonl.lines().rev().find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        assistant_text(l)?;
+        v.get("created_at").and_then(Value::as_str).map(str::to_owned)
+    })
+}
+
 /// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數、視窗大小、用量百分比。
 /// agy 不回報視窗大小，所以視窗大小來自 `[agy] context_window_tokens`（預設 1,048,576，可調到 2,000,000），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
 pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_window_tokens: u64) -> Option<String> {

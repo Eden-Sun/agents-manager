@@ -34,11 +34,19 @@ export interface CacheState {
 
 const WARN_SECS = 15 * 60
 const LOW_SECS = 5 * 60
+/** agy（Gemini）的 TTL：實測約 12 分冷掉，沒有保證時間（後端 `cache_clock::ttl_secs`）。 */
+const AGY_TTL_SECS = 720
 
-export function cacheLevel(remainingSecs: number): CacheLevel {
+/** 等級門檻（剩餘秒數）。agy 的 12 分 TTL 用 7 分／2 分門檻，即閒置 <5 分 fresh、5–10 分 warn、10–12 分 low；其他 TTL 維持 15 分／5 分。 */
+function thresholds(ttlSecs?: number): { warn: number; low: number } {
+  return ttlSecs === AGY_TTL_SECS ? { warn: 420, low: 120 } : { warn: WARN_SECS, low: LOW_SECS }
+}
+
+export function cacheLevel(remainingSecs: number, ttlSecs?: number): CacheLevel {
+  const { warn, low } = thresholds(ttlSecs)
   if (remainingSecs <= 0) return 'cold'
-  if (remainingSecs < LOW_SECS) return 'low'
-  if (remainingSecs <= WARN_SECS) return 'warn'
+  if (remainingSecs < low) return 'low'
+  if (remainingSecs <= warn) return 'warn'
   return 'fresh'
 }
 
@@ -77,15 +85,19 @@ export function cacheState(
   const hotSince = Number.isFinite(kept) && kept > at ? kept : at
   // 時鐘差一點（daemon 比這台快）時不讓剩餘超過 TTL。
   const remainingSecs = Math.max(0, Math.min(ttlSecs, Math.round((hotSince + ttlSecs * 1000 - nowMs) / 1000)))
-  const level = cacheLevel(remainingSecs)
+  const level = cacheLevel(remainingSecs, ttlSecs)
   const last = hotSince > at
     ? t('上次活動 {time}，已保溫 {warm}', { time: clock(new Date(at), nowMs), warm: clock(new Date(hotSince), nowMs) })
     : t('上次活動 {time}', { time: clock(new Date(at), nowMs) })
+  const n = Math.max(1, Math.ceil(remainingSecs / 60))
   const title = level === 'cold'
     ? t('快取已涼（{last}）', { last })
-    : t('快取約 {n} 分後到期（{last}）', { n: Math.max(1, Math.ceil(remainingSecs / 60)), last })
-  // 紅色（≤ 5 分）改以 5 分鐘為滿刻度，見 `CacheState.frac`；綠、黃照舊。
-  const frac = remainingSecs <= LOW_SECS ? Math.min(1, remainingSecs / LOW_SECS) : remainingSecs / ttlSecs
+    : ttlSecs === AGY_TTL_SECS
+      ? t('快取約 {n} 分後到期（Gemini 快取無保證時間，約 5–12 分；{last}）', { n, last })
+      : t('快取約 {n} 分後到期（{last}）', { n, last })
+  // 紅色（≤ 5 分，agy 為 2 分）改以門檻為滿刻度，見 `CacheState.frac`；綠、黃照舊。
+  const low = thresholds(ttlSecs).low
+  const frac = remainingSecs <= low ? Math.min(1, remainingSecs / low) : remainingSecs / ttlSecs
   return { level, remainingSecs, frac, title }
 }
 

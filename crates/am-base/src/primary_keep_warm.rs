@@ -451,7 +451,7 @@ pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilitie
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if bot.is_primary == 0 || cache_clock::ttl_secs(&bot.kind).is_none() {
+    if bot.is_primary == 0 || bot.kind != "claude" || cache_clock::ttl_secs(&bot.kind).is_none() {
         return Err(LcError::BadValue(serde_json::json!({
             "error": "not_primary",
             "message": "keep-warm only applies to a primary claude bot",
@@ -632,6 +632,10 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
         tuning.keep_warm_after_secs
     };
     if age_secs < first_look_secs {
+        return Ok(None);
+    }
+    // 只有 claude 保溫與熱壓（agy 有 TTL 但不保溫；見 `eligible`）。
+    if bot.kind != "claude" {
         return Ok(None);
     }
     let Some(cache_ttl_secs) = cache_clock::ttl_secs(&bot.kind) else { return Ok(None) };

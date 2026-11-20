@@ -9,8 +9,11 @@
 //! 回合進行中（`agent_status == "working"` 或有 in-flight 回合）＝熱，`last_api_at` 給現在。
 //! 主力的保溫回合（[`crate::primary_keep_warm`]，`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`）**不算活動**：回合時間、statusLine 指紋、
 //! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色；熱壓之後視為涼掉，`cache_kept_warm_at` 不含熱壓、也不含熱壓之前的保溫。
-//! TTL 依 kind：claude 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷）；codex 的 cache 不會因閒置冷掉（使用者 2026-10-24），
-//! 不帶 TTL（`last_api_at` 照帶、不畫倒數、不保溫）；grok 未知不帶。
+//! TTL 依 kind：claude 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷）；agy 720 秒（Gemini 的 implicit cache 沒有保證時間，
+//! 官方只說「最久 24 小時、多數更早淘汰」；本機 56,246 筆實測：<1 分 96% 命中、6–12 分 36–51%、12–16 分 0–12%、>30 分 0%，取 12 分當冷掉點）；
+//! agy 的「最後活動」來自 transcript 最後一筆 assistant 的 `created_at`（[`on_agy_transcript`]）。
+//! codex 的 cache 不會因閒置冷掉（使用者 2026-10-24），不帶 TTL（`last_api_at` 照帶、不畫倒數、不保溫）；grok 未知不帶。
+//! agy 不保溫、不熱壓：`primary_keep_warm` 只認 claude（[`crate::primary_keep_warm::eligible`]），不因有 TTL 就被納入。
 //! 兩個欄位都掛在 run JSON（`/api/state` 的 `bot.run` 與 `bot_status` 事件的 `run`）；daemon 重啟後記憶體帳歸零，
 //! 退回回合時間。
 
@@ -24,6 +27,8 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 pub fn ttl_secs(kind: &str) -> Option<i64> {
     match kind {
         "claude" => Some(3600),
+        // 實測冷掉點 12 分（見檔頭）；Gemini 沒有保證時間，這是經驗值不是合約。
+        "agy" => Some(720),
         _ => None,
     }
 }
@@ -151,6 +156,17 @@ pub fn derive(
         .map(db::iso_at)
 }
 
+/// agy 讀到 transcript 時記下最後一筆 assistant 回覆的時間（`created_at`，UTC ISO）。同一個記憶體帳（[`statusline_at`]）：
+/// 只往後推，不倒退（讀到舊的紀錄檔不會把年齡拉回去）。daemon 重啟後歸零，退回回合時間，跟 claude 的 statusLine 一樣。
+pub fn on_agy_transcript(run_id: &str, at: &str) {
+    let Some(new) = db::parse_ts(at) else { return };
+    let mut m = store().lock().unwrap_or_else(|e| e.into_inner());
+    let newer = m.get(run_id).and_then(|old| db::parse_ts(old)).is_none_or(|old| new > old);
+    if newer {
+        m.insert(run_id.to_string(), db::iso_at(new));
+    }
+}
+
 /// 在 run JSON（`background_jobs::run_json` 的結果）上補 `last_api_at` 與 `cache_ttl_secs`；沒有 run（`null`）不動。
 /// claude-api 沒有 statusLine／pane：最後活動只看回合時間與「進行中＝現在」；TTL 用**最後一回合送出時選的**（`turns.cache_ttl_secs`）。
 pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) {
@@ -251,12 +267,22 @@ mod tests {
     }
 
     #[test]
-    fn ttl_is_an_hour_for_claude_and_none_for_codex_and_grok() {
+    fn ttl_is_an_hour_for_claude_twelve_minutes_for_agy_and_none_for_codex_and_grok() {
         assert_eq!(ttl_secs("claude"), Some(3600));
         assert_eq!(ttl_secs("codex"), None, "codex 的 cache 不會因閒置冷掉");
         assert!(never_cools("codex") && !never_cools("claude") && !never_cools("grok"));
         assert_eq!(ttl_secs("grok"), None);
-        assert_eq!(ttl_secs("agy"), None, "agy 的 TUI 路徑沒有 cache 讀數（設計 #19），網頁不畫倒數");
+        // agy 的 transcript 有 cache_read_tokens，實測冷掉點約 12 分（見檔頭的數據），所以有 TTL。
+        assert_eq!(ttl_secs("agy"), Some(720), "agy 12 分冷掉");
+    }
+
+    #[test]
+    fn agy_transcript_time_only_moves_forward() {
+        on_agy_transcript("agy-run-1", "2026-10-04T10:00:00.000Z");
+        on_agy_transcript("agy-run-1", "2026-10-04T09:00:00.000Z");
+        assert_eq!(statusline_at("agy-run-1").as_deref(), Some("2026-10-04T10:00:00.000Z"), "舊紀錄不倒退");
+        on_agy_transcript("agy-run-1", "2026-10-04T10:05:00.000Z");
+        assert_eq!(statusline_at("agy-run-1").as_deref(), Some("2026-10-04T10:05:00.000Z"));
     }
 
     #[test]
