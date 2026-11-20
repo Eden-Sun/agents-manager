@@ -478,13 +478,25 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .collect()
 }
 
-/// agy 的後備模型清單：Gemini 3.8 Flash 三檔（2026-10-05 起的寫死清單）。`fetch` 能讀到 `agy models` 就用它的結果（[`agy_models_from_text`]），
-/// 讀不到（未登入、逾時、遠端）才退回這一份。effort 變體已經在 slug 裡，所以 `efforts` 是空的。最前面那個是預設。
+/// agy 的後備模型清單（最後手段）：`fetch` 讀不到 `agy models` 的結果（遠端讀不到登入、本機未登入、逾時）時才用，
+/// 而且 daemon 會先試「同 kind 的其他主機上次抓到的清單」（見 daemon `agy_fallback`）。14 個，對應 agy 1.5.13 的 `agy models`（2026-11-20）。
+/// effort 變體已經在 slug 裡，所以 `efforts` 是空的。最前面那個是預設（[`AGY_DEFAULT_MODEL`]）。
 pub fn agy_static_models() -> Vec<Value> {
     [
-        (AGY_DEFAULT_MODEL, "Gemini 3.8 Flash (Medium)"),
-        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
         ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)"),
+        ("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)"),
+        ("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)"),
+        ("gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)"),
+        ("gemini-4-argon-low", "Gemini 4 Argon (Low)"),
+        ("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
+        ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+        ("gemini-4-neon-low", "Gemini 4 Neon (Low)"),
+        ("gemini-4-neon-medium", "Gemini 4 Neon (Medium)"),
+        ("gemini-4-neon-high", "Gemini 4 Neon (High)"),
+        ("gemini-4-neon-xhigh", "Gemini 4 Neon (XHigh)"),
     ]
     .iter()
     .enumerate()

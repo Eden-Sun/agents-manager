@@ -107,7 +107,8 @@ pub async fn codex_rpc_in(app: &Arc<App>, host: &str, home: Option<&str>, method
 }
 
 /// agy 的模型清單：本機跑 `agy models`（經 [`agy_models_from_text`] 過濾，只收 Gemini 3.8 含以上）。讀不到、解不出來、逾時，
-/// 或是遠端（ssh 進去讀不到 Keychain，會回未登入）都退回寫死的 3.8 Flash 三檔。exe 沒有快取就不猜 PATH，同樣退回。
+/// 或是遠端（ssh 進去讀不到 macOS Keychain，`agy models` 回「Please sign in」，2026-11-20 在 m4p 實測）都回 `static`，
+/// 呼叫端（[`list`]）會先借同 kind 的上次抓到清單，最後才用寫死的 [`agy_static_models`]。exe 沒有快取就不猜 PATH，同樣回 `static`。
 async fn agy_model_list(app: &Arc<App>, host: &str) -> (&'static str, Vec<Value>) {
     if host == LOCAL_HOST {
         if let Some(exe) = crate::tools::cached_path(app, host, "agy").await {
@@ -225,6 +226,39 @@ fn load_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Opti
     Some(v)
 }
 
+/// agy 專用：這台抓不到時，借「其他主機」上次抓到的 agy 清單（`fetched_at` 最新的那份）。只看 kind 是 agy、
+/// 來源不是這台、清單非空的檔。標 `stale`、`source: "other-host"`、`source_host`（`host` 仍是要查的這台）。
+fn load_agy_sibling(dir: &std::path::Path, host: &str) -> Option<Value> {
+    let entries = std::fs::read_dir(dir.join("models-last")).ok()?;
+    let mut best: Option<(String, Value)> = None;
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        if v.get("kind").and_then(Value::as_str) != Some("agy") {
+            continue;
+        }
+        let other = v.get("host").and_then(Value::as_str).unwrap_or("");
+        if other.is_empty() || other == host || !v.get("models").and_then(Value::as_array).is_some_and(|m| !m.is_empty()) {
+            continue;
+        }
+        let at = v.get("fetched_at").and_then(Value::as_str).unwrap_or("").to_string();
+        if best.as_ref().map_or(true, |(b, _)| at > *b) {
+            best = Some((at, v));
+        }
+    }
+    let (_, mut v) = best?;
+    v["source_host"] = v["host"].clone();
+    v["host"] = json!(host);
+    v["source"] = json!("other-host");
+    v["stale"] = json!(true);
+    Some(v)
+}
+
+/// 讀不到（或回了寫死清單）時的回退順序：這台上次抓到 → （agy 才有）同 kind 其他主機上次抓到 → `None`（呼叫端用寫死清單）。
+fn fallback_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
+    load_last_known(dir, host, kind, identity).or_else(|| if kind == "agy" { load_agy_sibling(dir, host) } else { None })
+}
+
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
@@ -243,11 +277,11 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
             v
         }
         Ok(v) if kind == "claude" => v,
-        Ok(v) => match load_last_known(&app.data_dir, host, kind, identity) {
+        Ok(v) => match fallback_last_known(&app.data_dir, host, kind, identity) {
             Some(last) => return Ok(last),
             None => v,
         },
-        Err(e) => match load_last_known(&app.data_dir, host, kind, identity) {
+        Err(e) => match fallback_last_known(&app.data_dir, host, kind, identity) {
             Some(last) => return Ok(last),
             None => return Err(e),
         },
@@ -322,6 +356,38 @@ mod tests {
         let mut keys: Vec<String> = app.models_cache.lock().await.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, vec!["local/agy/fresh".to_string()]);
+    }
+
+    /// agy 回退順序（2026-11-20：m4p 的 `agy models` 讀不到登入）：這台上次抓到 → 同 kind 其他主機上次抓到（最新、清單非空）→ `None`（呼叫端用寫死清單）。
+    #[test]
+    fn agy_fallback_order_own_then_other_host_then_none() {
+        let dir = crate::testing::scratch_dir("am-models-agy-fallback");
+        let one = |id: &str| json!([{"id": id}]);
+        let local_old = json!({"kind": "agy", "host": "local", "source": "agy-cli", "fetched_at": "2026-11-19T00:00:00Z", "models": one("gemini-4-neon-medium")});
+        let local_new = json!({"kind": "agy", "host": "local", "source": "agy-cli", "fetched_at": "2026-11-20T00:00:00Z", "models": one("gemini-4-argon-high")});
+        let codex = json!({"kind": "codex", "host": "other", "source": "codex-app-server", "fetched_at": "2026-11-21T00:00:00Z", "models": one("gpt-6.1-sol")});
+        let empty = json!({"kind": "agy", "host": "lab", "source": "agy-cli", "fetched_at": "2026-11-22T00:00:00Z", "models": []});
+        assert!(fallback_last_known(&dir, "m4p", "agy", Some("ag1")).is_none(), "什麼都沒有＝None");
+        save_last_known(&dir, "local", "agy", None, &local_old);
+        save_last_known(&dir, "local", "agy", Some("ag1"), &local_new);
+        save_last_known(&dir, "other", "codex", None, &codex);
+        save_last_known(&dir, "lab", "agy", None, &empty);
+        let got = fallback_last_known(&dir, "m4p", "agy", Some("ag1")).unwrap();
+        assert_eq!(got["source"], json!("other-host"));
+        assert_eq!(got["source_host"], json!("local"), "借的是最新的 local 那份（清單非空的）");
+        assert_eq!(got["host"], json!("m4p"), "host 仍是查的這台");
+        assert_eq!(got["stale"], json!(true));
+        assert_eq!(got["models"][0]["id"], json!("gemini-4-argon-high"));
+        // 這台自己抓到過：優先用自己的，不借別台。
+        let own = json!({"kind": "agy", "host": "m4p", "source": "agy-cli", "fetched_at": "2026-11-18T00:00:00Z", "models": one("gemini-3.8-flash-high")});
+        save_last_known(&dir, "m4p", "agy", Some("ag1"), &own);
+        let got = fallback_last_known(&dir, "m4p", "agy", Some("ag1")).unwrap();
+        assert_eq!(got["host"], json!("m4p"));
+        assert_eq!(got["source"], json!("agy-cli"), "自己的上次抓到優先");
+        assert_eq!(got["models"][0]["id"], json!("gemini-3.8-flash-high"));
+        // 其他 kind 不借 agy 的清單。
+        assert!(fallback_last_known(&dir, "m4p", "codex", None).is_none(), "非 agy 不借別台");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

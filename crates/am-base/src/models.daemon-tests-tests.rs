@@ -307,6 +307,20 @@
         assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.8-flash-high".into()]).0.as_deref(), Some("gemini-3.8-flash-high"));
     }
 
+    /// 2026-11-20：寫死清單更新成 agy 1.5.13 的 14 個；預設仍是 3.8 Flash Medium 且排第一；全部都過 `agy_model_allowed`（3.8 含以上）。
+    #[test]
+    fn agy_static_list_is_the_fourteen_current_models() {
+        let ids: Vec<String> = agy_static_models().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids.len(), 14, "{ids:?}");
+        assert_eq!(ids[0], AGY_DEFAULT_MODEL);
+        assert_eq!(AGY_DEFAULT_MODEL, "gemini-3.8-flash-medium");
+        for id in ["gemini-4-hydrogen-xhigh", "gemini-4-argon-low", "gemini-4-neon-xhigh", "gemini-3.8-flash-low"] {
+            assert!(ids.iter().any(|x| x == id), "{id} 要在清單裡");
+        }
+        assert!(ids.iter().all(|id| agy_model_allowed(id)), "{ids:?}");
+        assert!(!agy_model_allowed("gemini-3.7-flash-high"), "3.8 以下仍擋");
+    }
+
     /// 2026-10-14：agy 只收 Gemini 3.8 含以上。判斷式（daemon 的 `agy_model_allowed`，web 的 `agyModelAllowed` 同一條）：
     /// 3.7 以下、非 Gemini、沒有版號的都不收；4、4-argon、3.10 收。
     #[test]
@@ -389,14 +403,15 @@ gemini-4-argon\n";
         assert!(agy_models_from_text("claude-sonnet-4-6\tClaude\ngpt-oss-120b-medium\tGPT-OSS\n").is_empty());
     }
 
-    /// 本機沒有偵測到 agy 就不猜 PATH，直接是寫死的 3.8 Flash 三檔（測試環境不會去起真的 agy）。
+    /// 本機沒有偵測到 agy 就不猜 PATH，直接是寫死的 14 個（測試環境不會去起真的 agy）。
     #[tokio::test]
     async fn agy_list_without_a_detected_binary_is_the_static_fallback() {
         let env = crate::testing::env().await;
         let v = list(&env.app, "local", "agy", None, true).await.unwrap();
         assert_eq!(v["source"], "static");
         let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low"]);
+        assert_eq!(ids, agy_static_models().iter().map(|m| m["id"].as_str().unwrap()).collect::<Vec<_>>());
+        assert_eq!(ids.len(), 14);
     }
 
     /// `/effort` 之後對話裡還留著上一則 `Switched to … (low effort)`。回讀必須用框底，不能用上面那則。
