@@ -218,6 +218,68 @@ async fn deprecated_models_are_remapped_at_create_and_patch_and_response_says_so
     assert_eq!(db::bot(&e.app.db, &claude_id).await.unwrap().unwrap().model.as_deref(), Some("claude-opus-4-1"));
 }
 
+/// agy 啟動守門（`lifecycle::start::agy_model_guard`）走完整的啟動路徑：設定的模型不在「這台＋這個帳號」剛抓到的清單裡，
+/// `agent.start` 帶的是該清單的預設、對話裡留一則系統訊息、`bots.model` 不動；在清單裡就原樣帶。
+/// `identity = "ag0"` 與不指定身份看的是同一格清單。借來的／過期的清單不拿來判斷。
+#[tokio::test]
+async fn an_agy_bot_whose_model_is_not_in_its_accounts_list_starts_with_that_lists_default() {
+    let e = env().await;
+    crate::testing::seed_project_config(&e).await;
+    let model_of_last_start = |e: &Env| -> Option<String> {
+        let call = e.herdr.calls_to("agent.start").pop().expect("有起過 agent");
+        let args: Vec<String> = call["args"].as_array().unwrap().iter().filter_map(|a| a.as_str().map(String::from)).collect();
+        args.iter().position(|a| a == "--model").map(|at| args[at + 1].clone())
+    };
+    let flash_only = |stale: bool| {
+        let mut v = json!({"kind":"agy","host":"local","source":"agy-cli","models":[
+            {"id":"gemini-3.8-flash-medium","is_default":true},{"id":"gemini-3.8-flash-high","is_default":false}]});
+        if stale {
+            v["stale"] = json!(true);
+        }
+        v
+    };
+    let seed = |v: Value| {
+        let app = e.app.clone();
+        async move {
+            app.models_cache.lock().await.insert("local/agy/".into(), (std::time::Instant::now(), v));
+        }
+    };
+    let notices = |id: String| {
+        let app = e.app.clone();
+        async move {
+            let conv = db::conversation_id(&app.db, &id).await.unwrap();
+            sqlx::query_scalar::<_, String>("SELECT content FROM messages WHERE conversation_id = ? AND role = 'system' AND content LIKE '%不支援%'")
+                .bind(conv)
+                .fetch_all(&app.db)
+                .await
+                .unwrap()
+        }
+    };
+
+    seed(flash_only(false)).await;
+    let missing = add(&e, json!({"name": "agy-neon", "kind": "agy", "model": "gemini-4-neon-medium"})).await.unwrap();
+    lifecycle::start_bot(&e.app, &missing).await.unwrap();
+    assert_eq!(model_of_last_start(&e).as_deref(), Some("gemini-3.8-flash-medium"), "不在清單 → 清單的預設");
+    let said = notices(missing.clone()).await;
+    assert!(said.len() == 1 && said[0].contains("gemini-4-neon-medium") && said[0].contains("gemini-3.8-flash-medium"), "{said:?}");
+    assert_eq!(db::bot(&e.app.db, &missing).await.unwrap().unwrap().model.as_deref(), Some("gemini-4-neon-medium"), "設定不動");
+
+    let named = add(&e, json!({"name": "agy-neon-ag0", "kind": "agy", "identity": "ag0", "model": "gemini-4-neon-medium"})).await.unwrap();
+    lifecycle::start_bot(&e.app, &named).await.unwrap();
+    assert_eq!(model_of_last_start(&e).as_deref(), Some("gemini-3.8-flash-medium"), "ag0 就是預設帳號，看同一格清單");
+
+    let listed = add(&e, json!({"name": "agy-flash", "kind": "agy", "model": "gemini-3.8-flash-high"})).await.unwrap();
+    lifecycle::start_bot(&e.app, &listed).await.unwrap();
+    assert_eq!(model_of_last_start(&e).as_deref(), Some("gemini-3.8-flash-high"), "在清單裡就原樣帶");
+    assert!(notices(listed).await.is_empty());
+
+    seed(flash_only(true)).await;
+    let borrowed = add(&e, json!({"name": "agy-neon-stale", "kind": "agy", "model": "gemini-4-neon-medium"})).await.unwrap();
+    lifecycle::start_bot(&e.app, &borrowed).await.unwrap();
+    assert_eq!(model_of_last_start(&e).as_deref(), Some("gemini-4-neon-medium"), "過期／借來的清單不拿來說這個帳號不支援");
+    assert!(notices(borrowed).await.is_empty());
+}
+
 /// 最近一次 `agent.start` 的 `--settings` 檔案內容：daemon 真的交給 claude 的那包設定。
 fn settings_of_last_start(e: &Env) -> Value {
     let call = e.herdr.calls_to("agent.start").pop().expect("有起過 agent");

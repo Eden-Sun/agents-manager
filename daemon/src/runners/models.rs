@@ -251,15 +251,45 @@ fn safe_part(raw: &str) -> String {
     format!("{}~{h:016x}", clean.trim_start_matches('.'))
 }
 
+/// 「最後抓到」檔名裡的身份片段。agy 的預設帳號（沒有身份、`ag0`、舊資料 `agy`）一律寫成 `ag0`，
+/// 檔名才看得出是哪個帳號（`local-agy-ag0.json`／`local-agy-ag1.json`）；其他 kind 照舊（沒有身份＝空字串的雜湊）。
+fn last_known_identity_part(kind: &str, identity: Option<&str>) -> String {
+    match identity {
+        Some(name) if !crate::tools::is_builtin_default_identity(kind, name) => safe_part(name),
+        _ if kind == "agy" => crate::tools::AGY_DEFAULT_IDENTITY.to_string(),
+        _ => safe_part(""),
+    }
+}
+
 fn last_known_path(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> std::path::PathBuf {
-    let name = format!("{}-{}-{}.json", safe_part(host), safe_part(kind), safe_part(identity.unwrap_or("")));
+    let name = format!("{}-{}-{}.json", safe_part(host), safe_part(kind), last_known_identity_part(kind, identity));
     dir.join("models-last").join(name)
+}
+
+/// 舊檔名遷移：agy 預設帳號以前存成 `<host>-agy-~<空字串雜湊>.json`，改名成 `<host>-agy-ag0.json`（新檔已在就丟掉舊的）。
+/// 讀寫 agy 的「最後抓到」之前各跑一次；沒有舊檔時只是一次 `read_dir`。
+fn migrate_agy_default_last_known(dir: &std::path::Path) {
+    let legacy = format!("-agy-{}.json", safe_part(""));
+    let Ok(entries) = std::fs::read_dir(dir.join("models-last")) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(head) = name.strip_suffix(&legacy) else { continue };
+        let target = entry.path().with_file_name(format!("{head}-agy-{}.json", crate::tools::AGY_DEFAULT_IDENTITY));
+        if target.exists() {
+            let _ = std::fs::remove_file(entry.path());
+        } else {
+            let _ = std::fs::rename(entry.path(), target);
+        }
+    }
 }
 
 /// 成功查詢後寫「最後抓到」：0600、暫存檔＋rename。寫不成不影響回應。
 fn save_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>, v: &Value) {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    if kind == "agy" {
+        migrate_agy_default_last_known(dir);
+    }
     let path = last_known_path(dir, host, kind, identity);
     let Some(parent) = path.parent() else { return };
     let _ = std::fs::create_dir_all(parent);
@@ -291,7 +321,7 @@ fn load_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Opti
 /// 標 `stale`、`source: "other-host"`、`source_host`（`host` 仍是要查的這台）。
 fn load_agy_sibling(dir: &std::path::Path, host: &str, identity: Option<&str>) -> Option<Value> {
     let entries = std::fs::read_dir(dir.join("models-last")).ok()?;
-    let suffix = format!("-agy-{}.json", safe_part(identity.unwrap_or("")));
+    let suffix = format!("-agy-{}.json", last_known_identity_part("agy", identity));
     let mut best: Option<(String, Value)> = None;
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().ends_with(&suffix) {
@@ -321,6 +351,9 @@ fn load_agy_sibling(dir: &std::path::Path, host: &str, identity: Option<&str>) -
 
 /// 讀不到（或回了寫死清單）時的回退順序：這台上次抓到 → （agy 才有）同 kind、同身份的其他主機上次抓到 → `None`（呼叫端用寫死清單）。
 fn fallback_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
+    if kind == "agy" {
+        migrate_agy_default_last_known(dir);
+    }
     load_last_known(dir, host, kind, identity).or_else(|| if kind == "agy" { load_agy_sibling(dir, host, identity) } else { None })
 }
 
@@ -512,6 +545,34 @@ gpt-oss-120b-medium         GPT-OSS 120B (Medium)\n\nAM_AGY_DONE=0\nm4p@mac ~ % 
         assert!(models_sign_in_required(out));
         assert!(agy_models_from_screen(out).is_empty(), "沒登入＝空清單，呼叫端退回上次抓到的");
         assert!(!models_sign_in_required(&body));
+    }
+
+    /// agy 預設帳號的「最後抓到」檔名是 `<host>-agy-ag0.json`（沒有身份、`ag0`、舊資料 `agy` 同一個檔）；
+    /// 舊的雜湊檔名在下一次讀寫時改名過來，新檔已在就丟掉舊的；ag1 的檔不受影響。
+    #[test]
+    fn the_agy_default_accounts_last_known_file_is_named_ag0_and_the_old_name_migrates() {
+        let dir = crate::testing::scratch_dir("am-models-agy-ag0");
+        let last = dir.join("models-last");
+        std::fs::create_dir_all(&last).unwrap();
+        let body = |id: &str| json!({"kind": "agy", "host": "local", "source": "agy-cli", "fetched_at": "2026-11-20T00:00:00Z", "models": [{"id": id}]});
+        let legacy = last.join(format!("local-agy-{}.json", safe_part("")));
+        std::fs::write(&legacy, body("gemini-4-neon-medium").to_string()).unwrap();
+        std::fs::write(last.join("local-agy-ag1.json"), body("gemini-3.8-flash-high").to_string()).unwrap();
+        for identity in [None, Some("ag0"), Some("agy")] {
+            assert_eq!(last_known_path(&dir, "local", "agy", identity), last.join("local-agy-ag0.json"), "{identity:?}");
+        }
+        let got = fallback_last_known(&dir, "local", "agy", None).expect("舊檔名遷移後讀得到");
+        assert_eq!(got["models"][0]["id"], json!("gemini-4-neon-medium"));
+        assert!(!legacy.exists() && last.join("local-agy-ag0.json").exists(), "舊檔改名成 ag0");
+        assert_eq!(fallback_last_known(&dir, "local", "agy", Some("ag1")).unwrap()["models"][0]["id"], json!("gemini-3.8-flash-high"));
+        // 新檔已在：殘留的舊檔丟掉，不蓋過新的。
+        std::fs::write(&legacy, body("stale").to_string()).unwrap();
+        save_last_known(&dir, "local", "agy", Some("ag0"), &body("gemini-4-argon-low"));
+        assert!(!legacy.exists());
+        assert_eq!(fallback_last_known(&dir, "m4p", "agy", None).expect("別台借 ag0 的")["models"][0]["id"], json!("gemini-4-argon-low"));
+        // 其他 kind 的檔名不變。
+        assert_eq!(last_known_path(&dir, "local", "codex", None), last.join(format!("local-codex-{}.json", safe_part(""))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
