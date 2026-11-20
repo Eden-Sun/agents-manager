@@ -12,6 +12,7 @@ pub mod reset_offer_snooze;
 mod expert_peers;
 pub mod expert_cluster;
 mod expert_member;
+mod session_lineage;
 pub mod relay_policy;
 mod specialist_dispatch;
 mod pane_authority;

@@ -1509,6 +1509,53 @@ class IncidentsCommandTest(CliCase):
 
 
 class ExpertBotCommandsTest(CliCase):
+    def test_lineage_subcommands_call_the_project_routes_with_bot_proof(self):
+        session = {"line": "web", "session_id": "sess-2", "state": "checkpoint"}
+        FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [session]})
+        FakeDaemon.routes["POST /api/projects/p1/lineage"] = (200, {"session": dict(session, state="active")})
+        FakeDaemon.routes["POST /api/projects/p1/lineage/advance"] = (200, {"session": session, "retired": {"session_id": "sess-1", "state": "retired"}})
+        FakeDaemon.routes["POST /api/projects/p1/lineage/retire"] = (200, {"session": dict(session, state="retired")})
+        with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}):
+            self.assertEqual(self.ok("lineage", "list")["sessions"], [session])
+            self.ok("lineage", "list", "--line", "web", "--state", "checkpoint")
+            self.assertEqual(self.ok("lineage", "add", "web", "sess-2", "--parent", "sess-1", "--role", "thinker", "--context-tokens", "1200")["session"]["state"], "active")
+            advanced = self.ok("lineage", "advance", "web", "sess-2", "--parent", "sess-1", "--head", "0b43a28e4", "--summary", "merged the quota fix")
+            self.assertEqual(advanced["retired"]["session_id"], "sess-1")
+            self.ok("lineage", "advance", "web", "sess-2")
+            self.assertEqual(self.ok("lineage", "retire", "sess-2")["session"]["state"], "retired")
+        seen = FakeDaemon.seen
+        self.assertEqual([(r["method"], r["path"]) for r in seen], [
+            ("GET", "/api/projects/p1/lineage"),
+            ("GET", "/api/projects/p1/lineage?line=web&state=checkpoint"),
+            ("POST", "/api/projects/p1/lineage"),
+            ("POST", "/api/projects/p1/lineage/advance"),
+            ("POST", "/api/projects/p1/lineage/advance"),
+            ("POST", "/api/projects/p1/lineage/retire"),
+        ])
+        for request in seen:
+            self.assertEqual((request["bot_id"], request["bot_token"], request["token"]), ("bot-a", "bot-secret", None))
+        self.assertEqual(seen[2]["body"], {"line": "web", "session_id": "sess-2", "parent_session_id": "sess-1", "role": "thinker", "context_tokens": 1200})
+        self.assertEqual(seen[3]["body"], {"line": "web", "session_id": "sess-2", "parent_session_id": "sess-1", "head_sha": "0b43a28e4", "summary": "merged the quota fix"})
+        self.assertEqual(seen[4]["body"], {"line": "web", "session_id": "sess-2"}, "沒給的欄位不送，daemon 才不會動到既有值")
+        self.assertEqual(seen[5]["body"], {"session_id": "sess-2"})
+
+    def test_lineage_needs_a_project_and_surfaces_daemon_refusals(self):
+        FakeDaemon.routes["POST /api/projects/p1/lineage/advance"] = (403, {"error": "forbidden", "reason": "role_required"})
+        FakeDaemon.routes["POST /api/projects/p1/lineage/retire"] = (404, {"error": "not_found", "reason": "lineage_session_not_found"})
+        env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+        with patch.dict(os.environ, env):
+            os.environ.pop("AM_PROJECT_ID", None)
+            self.assertEqual(self.bad("lineage", "list")["error"], "no_project")
+            self.assertEqual(FakeDaemon.seen, [])
+        with patch.dict(os.environ, dict(env, AM_PROJECT_ID="p1")):
+            self.assertNotEqual(self.run_cli("lineage", "advance", "web")[0], 0, "session_id 必填")
+            self.assertNotEqual(self.run_cli("lineage", "advance", "web", "s", "--role", "boss")[0], 0)
+            self.assertEqual(FakeDaemon.seen, [])
+            refused = self.bad("lineage", "advance", "web", "sess-2")
+            self.assertIn("role_required", json.dumps(refused))
+            missing = self.bad("lineage", "retire", "nope")
+            self.assertIn("lineage_session_not_found", json.dumps(missing))
+
     def test_peers_and_requests_use_only_bot_proof_without_runtime(self):
         FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": []})
         FakeDaemon.routes["GET /api/projects/p1/peers?for=ticket-1"] = (200, {"candidates": []})

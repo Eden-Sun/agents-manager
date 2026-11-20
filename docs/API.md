@@ -150,6 +150,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/{id}/composer-draft` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
+| GET | `/api/projects/{id}/lineage` | User 或同專案 Bot（含 child）；跨專案 403；codex session 血統（見「Session 血統」） |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
 | POST | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -248,6 +249,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/bots/{id}/composer-draft` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
+| HEAD | `/api/projects/{id}/lineage` | 同 GET |
 | HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -339,6 +341,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/restart` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/member` | User 或同專案 expert manager；把 expert 專案留下的 child 原地轉成成員（同 id 寫進 config.toml、清 parent），body `{role?: executor|advisor|specialist, effort?, session_id?, track?}`（`role=specialist` 必帶 `track`，缺 → 400 `track_required`；與 PATCH／PUT role 同一條規則）；pane 不重啟，回 `needs_restart:true` |
 | POST | `/api/projects/{id}/members` | User 或該 expert 專案的 manager；增聘頂層成員，body `{name, kind?, model?, effort?, identity?, role?, track?, fork_from?}`。kind／model／effort 由使用者或 manager 自行決定；`role` 為 `executor`（預設）或 `specialist`（後者必帶 `track`，缺 → 400 `track_required`），不自動啟動。舊 body 的 `pool_entry` 退役並忽略 |
+| POST | `/api/projects/{id}/lineage` | User、同專案 expert manager（含代班中的副管理者）或同專案的 AGM role Bot；其他同專案 Bot 403 `role_required`；跨專案 403；登記一顆 active session |
+| POST | `/api/projects/{id}/lineage/advance` | User、同專案 expert manager（含代班中的副管理者）或同專案的 AGM role Bot；其他同專案 Bot 403 `role_required`；跨專案 403；前移檢查點 |
+| POST | `/api/projects/{id}/lineage/retire` | User、同專案 expert manager（含代班中的副管理者）或同專案的 AGM role Bot；其他同專案 Bot 403 `role_required`；跨專案 403；退役 |
 | GET | `/api/bots/{id}/base-snapshot` | codex bot 的基準快照：`{locked:false}` 或 `{locked:true, session_id, locked_at, locked_by}`。User 與該 bot 所在 expert 專案的 manager 可用；其他 Bot（含 bot 自己）與 AGM role 均 → 403 `user_only`（handler 內再驗：非 manager → 403 `manager_role_scope`） |
 | PUT | `/api/bots/{id}/base-snapshot` | 把 bot 目前最近的 codex native session（`runs.native_session_id`，同 `fork_from`）鎖成基準，連同 rollout 位置與時間；已有就換成現在這個。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`）。非 codex → 400 `base_snapshot_not_codex`；還沒有 session → 409 `base_snapshot_no_session` |
 | DELETE | `/api/bots/{id}/base-snapshot` | 清除基準（沒有也回 `{locked:false}`）。仍勾 `from_base` 的排程之後的執行會 failed（`base_snapshot_missing`）。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`） |
@@ -3390,6 +3395,17 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 停止成員自動啟動的 `POST /api/bots/{id}/prompt` 錯誤格式為 `{error, message, sent:false}`：`member_stopped`（409，呼叫者無權自動啟動或目標不符合條件）、`member_not_dispatchable`（403，成員已停用或不可派工；對 API bot（`claude-api`／`openai-api`）的 bot 派工，除非目標是 advisor、或母子模式下同專案頂層 bot 請教沒有角色的頂層 API bot（仍須 `expect_result`），否則回 403 `member_not_dispatchable`，`message: "<名稱> 是 <kind>（純 API 模型），只接受顧問請教，或母子模式下同專案頂層 bot 的請教（--expect-result）"`）、`member_start_failed`（503，啟動失敗，`message` 包含原因）、`member_start_timeout`（503，等待啟動就緒逾時；啟動可能仍在進行）。只有同專案的專家模式頂層管理者或代班副管理者可啟動啟用中的頂層成員；自動啟動走一般 bot start 並等就緒後透過既有佇列送出。
 
 成員 `manager_use=false` 的 relay 拒絕維持 `403`、`reason: "member_disabled"`，並附 `message`：成員名稱、由使用者停用的原因及請使用者在 AG Man 側欄重新啟用的指示。
+
+### Session 血統（issue #1943 子票 A）
+
+按專案、模組線（`line`）記 CLI session 的帳本（表 `lineage_sessions`，SCHEMA 99；實作 `crates/am-base/src/db/lineage.rs`、`daemon/src/session_lineage.rs`）。只記帳：不開 session、不碰 pane；派工挑線、fork 與 since-diff 注入是後續子票。每列 `{id, project_id, line, role, kind, session_id, parent_session_id, context_tokens, last_api_at, head_sha, state, summary, created_at, updated_at}`：`role` 是 `worker`／`thinker`（預設 `worker`），`kind` 是 CLI kind（預設 `codex`），`state` 是 `checkpoint`／`active`／`retired`。同一 `(project_id, line)` 最多一顆 `checkpoint`（部分唯一索引）；同一專案同一個 `session_id` 只有一列。
+
+- `GET /api/projects/{id}/lineage[?line=<線>&state=<狀態>]` → `{project_id, sessions:[…]}`，依線名排序，每條線檢查點排最前、其餘新的在前。User 或同專案 Bot（含 child）可讀。
+- `POST /api/projects/{id}/lineage {line, session_id, role?, kind?, parent_session_id?, context_tokens?, last_api_at?, head_sha?, summary?}` → `{session}`：登記一顆進行中（`active`）的 session。同專案已登記過 → 409 `{reason:"lineage_session_exists", session}`（不覆寫）。
+- `POST /api/projects/{id}/lineage/advance`（body 同上）→ `{session, retired}`：把這顆 session 設為 `line` 的檢查點，原檢查點改 `retired` 並放在回應的 `retired`（沒有、或前移的是同一顆時為 `null`；同一顆重複前移是冪等的）。沒登記過的 session 當場建一列，沒給 `parent_session_id` 時記前一顆檢查點；已登記的只更新有給的欄位，已退役的也能再前移（退回舊檢查點）。這顆 session 登記在另一條線 → 409 `{reason:"lineage_line_mismatch", session_line}`，什麼都不改。
+- `POST /api/projects/{id}/lineage/retire {session_id}` → `{session}`：改成 `retired`（檢查點退役後那條線沒有檢查點）；已退役的原樣回傳；沒登記 → 404 `{error:"not_found", reason:"lineage_session_not_found"}`。
+
+寫入（後三條）只給 User、同專案 expert 專案的頂層 manager（含代班中的副管理者）與同專案的 AGM 角色 Bot；執行者、顧問、專家與 child → 403 `{reason:"role_required"}`。Bot 憑證只能碰自己專案：別的專案的路徑 → 403 `bot_resource_scope`（AGM 角色也一樣），handler 另核一次（`cross_project`）。專案不存在或已刪 → 404。欄位不合 → 400 `{error:"bad_request", reason:"invalid_lineage_field", field, message}`：`line` 是 1–64 個 `[A-Za-z0-9._-]`、英數開頭；`session_id`／`parent_session_id` 是 1–200 個不含空白的可見 ASCII，且不能相同；`role`、`kind` 限上述值（API kind 不收）；`context_tokens` ≥ 0；`last_api_at` 是 RFC 3339；`head_sha` 是 7–64 位 hex（存小寫）；`summary` 收成一行、最多 500 字。未知欄位（例如直接指定 `state`）→ 422。CLI：`agm lineage list [--line X] [--state S]`、`agm lineage add|advance <line> <session_id> [--parent <sid>] [--head <sha>] [--summary …] [--role …] [--kind …] [--context-tokens N] [--last-api-at T]`、`agm lineage retire <session_id>`，專案取自 `AM_PROJECT_ID`、用自己的 bot 憑證。
 
 ### Codex Stop hook 信任（#1989 phase 3）
 

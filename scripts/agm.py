@@ -1813,6 +1813,39 @@ def cmd_peers(client: Client, cfg: dict, args) -> object:
     return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers", query)
 
 
+def _lineage_path(tail: str = "") -> str:
+    return "/api/projects/" + urllib.parse.quote(_project_id(), safe="") + "/lineage" + tail
+
+
+def _lineage_body(args) -> dict:
+    """advance／add 共用：只送有給的欄位（daemon 對沒給的欄位不動或用預設）。"""
+    body = {"line": args.line, "session_id": args.session_id}
+    for key, attr in (("parent_session_id", "parent"), ("head_sha", "head"), ("summary", "summary"), ("role", "role"), ("kind", "kind"), ("context_tokens", "context_tokens"), ("last_api_at", "last_api_at")):
+        value = getattr(args, attr, None)
+        if value is not None and value != "":
+            body[key] = value
+    return body
+
+
+def cmd_lineage_list(client: Client, cfg: dict, args) -> object:
+    """列出本專案的 session 血統（#1943）；--line／--state 篩選。"""
+    return client.get(_lineage_path(), {"line": args.line, "state": args.state})
+
+
+def cmd_lineage_add(client: Client, cfg: dict, args) -> object:
+    """登記一顆進行中（active）的 session；之後做完用 advance 前移、放棄用 retire。"""
+    return client.post(_lineage_path(), _lineage_body(args))
+
+
+def cmd_lineage_advance(client: Client, cfg: dict, args) -> object:
+    """把 session 設為該線的檢查點；原檢查點改 retired（回應的 `retired`）。"""
+    return client.post(_lineage_path("/advance"), _lineage_body(args))
+
+
+def cmd_lineage_retire(client: Client, cfg: dict, args) -> object:
+    return client.post(_lineage_path("/retire"), {"session_id": args.session_id})
+
+
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
@@ -2844,6 +2877,33 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("peers", help="列出同專案 bot 與觀察狀態")
     s.add_argument("--for", dest="for_track", help="專家模式：依 track 評估候選執行者（回傳 candidates）")
     s.set_defaults(func=cmd_peers)
+    s = sub.add_parser("lineage", help="codex session 血統（#1943）：按模組線記檢查點；list 同專案都可讀，其餘限管理者／AGM")
+    lineage = s.add_subparsers(dest="lineage_command", required=True)
+
+    def _lineage_fields(p) -> None:
+        p.add_argument("line", help="模組線名（例 lifecycle、web、quota；[A-Za-z0-9._-]）")
+        p.add_argument("session_id", help="CLI 的 session id（例 codex 的 thread id）")
+        p.add_argument("--parent", help="父 session id（advance 新登記時沒給＝前一顆檢查點）")
+        p.add_argument("--head", help="當時的 HEAD commit sha（7–64 位 hex）")
+        p.add_argument("--summary", help="一行摘要（最多 500 字）")
+        p.add_argument("--role", choices=["worker", "thinker"], help="新登記時預設 worker")
+        p.add_argument("--kind", choices=["claude", "codex", "grok", "agy"], help="新登記時預設 codex")
+        p.add_argument("--context-tokens", dest="context_tokens", type=int, help="目前 context token 數")
+        p.add_argument("--last-api-at", dest="last_api_at", help="最後一次 API 回合的時間（RFC 3339）")
+
+    s = lineage.add_parser("list", help="列出本專案的血統列（每條線檢查點排最前）")
+    s.add_argument("--line", help="只看這條線")
+    s.add_argument("--state", choices=["checkpoint", "active", "retired"], help="只看這個狀態")
+    s.set_defaults(func=cmd_lineage_list)
+    s = lineage.add_parser("add", help="登記一顆進行中（active）的 session")
+    _lineage_fields(s)
+    s.set_defaults(func=cmd_lineage_add)
+    s = lineage.add_parser("advance", help="把 session 設為該線檢查點，原檢查點改 retired")
+    _lineage_fields(s)
+    s.set_defaults(func=cmd_lineage_advance)
+    s = lineage.add_parser("retire", help="退役一顆 session（做壞／放棄，或重種後的舊檢查點）")
+    s.add_argument("session_id")
+    s.set_defaults(func=cmd_lineage_retire)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／specialist／none）")
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "specialist", "none"])
@@ -2942,7 +3002,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

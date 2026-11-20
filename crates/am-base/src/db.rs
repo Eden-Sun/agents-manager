@@ -11,6 +11,7 @@ pub(crate) mod predicates;
 pub mod turn_guard;
 pub mod api_bot;
 pub mod update_restart;
+pub mod lineage;
 
 /// 各 feature 自己那幾張表的 migration（`supervisor::store`、`read_marks`、`panes`…）：db 只建共用的 schema，這些由 composition 層
 /// 以明確的順序提供（[`open_with`]）。失敗語意不變：任何一步回錯，整個 `open_with` 就回錯，版本戳記不蓋（見 [`migrate_with`]）。
@@ -469,6 +470,26 @@ CREATE TABLE IF NOT EXISTS bot_update_restart (
   bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
   requested_at TEXT NOT NULL
 );
+-- codex session 血統（issue #1943 子票 A）：每個專案按模組線（line）記 CLI session；一條線最多一顆 checkpoint（派工的起點）。
+CREATE TABLE IF NOT EXISTS lineage_sessions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  line TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker','thinker')),
+  kind TEXT NOT NULL DEFAULT 'codex',
+  session_id TEXT NOT NULL,
+  parent_session_id TEXT,
+  context_tokens INTEGER,
+  last_api_at TEXT,
+  head_sha TEXT,
+  state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('checkpoint','active','retired')),
+  summary TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (project_id, session_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_sessions_checkpoint ON lineage_sessions(project_id, line) WHERE state = 'checkpoint';
+CREATE INDEX IF NOT EXISTS idx_lineage_sessions_line ON lineage_sessions(project_id, line, state);
 
 "#;
 
@@ -677,6 +698,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (97, "e221e96c9fdae2a0"),
     // openai-api D2b-2（2026-11-18）：`bots.kind` 的 CHECK 多收 `openai-api`（就地放寬 `sqlite_master.sql`，不搬資料）。
     (98, "8bda24e0822e32ff"),
+    // codex session 血統（issue #1943 子票 A，2026-11-20）：`lineage_sessions`（CREATE TABLE）與「一條線一顆 checkpoint」部分唯一索引。
+    (99, "efa593ac7a112a18"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

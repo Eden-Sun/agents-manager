@@ -170,6 +170,9 @@ pub fn router(app: Arc<App>) -> Router {
     let upload_slots = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
     let api = Router::new()
         .route("/projects/{id}/peers", get(crate::expert_peers::list))
+        .route("/projects/{id}/lineage", get(crate::session_lineage::list).post(crate::session_lineage::create))
+        .route("/projects/{id}/lineage/advance", post(crate::session_lineage::advance))
+        .route("/projects/{id}/lineage/retire", post(crate::session_lineage::retire))
         .route("/spawn-authority", get(crate::expert_peers::spawn_authority))
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/settings/time-zone", get(crate::user_settings::get).put(crate::user_settings::put))
@@ -7772,6 +7775,9 @@ mod manager_role_scope_tests;
 
 #[cfg(test)]
 mod expert_member_tests;
+
+#[cfg(test)]
+mod session_lineage_tests;
 
 /// 專家（specialist）的 API 約定：track 必填、只有使用者能改 track、role_policy 只有使用者能改；hire 由使用者或 manager 決定 kind／model／effort。
 #[cfg(test)]
