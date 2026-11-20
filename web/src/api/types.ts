@@ -425,6 +425,8 @@ export interface Identity {
 export interface NewIdentityInput {
   name: string
   kind: BotKind
+  /** 哪一台主機；省略＝本機（daemon 的 `NewIdentity.host`）。 */
+  host?: string
   env: Record<string, string>
   /** 契約保留；UI 不提供 */
   args?: string[]

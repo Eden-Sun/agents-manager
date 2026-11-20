@@ -1,4 +1,5 @@
 import { t } from '../lib/i18n'
+import type { BotKind } from '../api/types'
 
 /** `KEY=VALUE` 每行 → map；忽略空行與 `#` 註解。 */
 export function parseEnvText(text: string): Record<string, string> {
@@ -80,3 +81,81 @@ export function emptyEnvKeys(env: Record<string, string>): string[] {
     .filter(([, v]) => !rustTrim(v))
     .map(([k]) => k)
 }
+
+/** 身份名稱規則（同 daemon 的 `SLUG_NAME_RE`，設定頁與新增對話框共用）。 */
+export const validIdentityName = (name: string): boolean => /^[a-z][a-z0-9_-]{0,31}$/.test(name)
+
+/** 各 kind 的設定目錄變數；沒有的（claude-api、openai-api）回 undefined。agy 沒有目錄變數，身份＝換 `HOME`。 */
+export function identityHomeVar(kind: BotKind): string | undefined {
+  return HOME_VAR[kind]
+}
+const HOME_VAR: Partial<Record<BotKind, string>> = {
+  claude: 'CLAUDE_CONFIG_DIR',
+  codex: 'CODEX_HOME',
+  grok: 'GROK_HOME',
+  agy: 'HOME',
+}
+
+/** 各 kind 預設帳號（不指定身份）實際用的目錄。agy 的預設是真家目錄，不是獨立目錄，所以沒有。 */
+const DEFAULT_HOME_DIR: Partial<Record<BotKind, string>> = {
+  claude: '$HOME/.claude',
+  codex: '$HOME/.codex',
+  grok: '$HOME/.grok',
+}
+
+/** 建議的獨立目錄：`$HOME/.<cli>-<名稱>`，例如 `$HOME/.claude-cc1`；預設帳號用的 `~/.claude` 不會撞到。 */
+export function suggestedIdentityDir(kind: BotKind, name: string): string {
+  return `$HOME/.${kind}-${name}`
+}
+
+/** 建議的 env 整段文字（`KEY=VALUE`）；沒有目錄變數的 kind 回空字串。名稱還沒填完時照樣給前綴，由呼叫端決定要不要顯示。 */
+export function suggestedIdentityEnvText(kind: BotKind, name: string): string {
+  const v = identityHomeVar(kind)
+  return v ? `${v}=${suggestedIdentityDir(kind, name)}` : ''
+}
+
+/**
+ * 把目錄字串正規化成可比的形式：`~`、`$HOME`、`${HOME}` 視為同一個家目錄，去掉尾端的 `/`。
+ * 只用來比對「兩個身份是不是指到同一個目錄」，不拿來改寫存進去的值。
+ */
+export function normalizeHomeDir(dir: string): string {
+  return rustTrim(dir)
+    .replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, '$HOME')
+    .replace(/\/+$/, '')
+}
+
+/** 這份 env 裡 kind 的目錄變數值（去頭尾空白）；沒有或是空的回 null。 */
+export function identityHomeDir(kind: BotKind, env: Record<string, string>): string | null {
+  const v = identityHomeVar(kind)
+  if (!v || !Object.hasOwn(env, v)) return null
+  const dir = rustTrim(env[v])
+  return dir ? dir : null
+}
+
+/**
+ * 新身份的目錄跟哪些既有身份（同 kind、同一台主機）共用。`names` 是身份名稱；`defaultAccount` 表示跟預設帳號（cc0 等）同一目錄。
+ * 目錄是空的（沒設）時兩者都是空，由呼叫端另外擋「沒有目錄變數」。
+ */
+export function sharedHomeWith(
+  kind: BotKind,
+  env: Record<string, string>,
+  host: string,
+  existing: readonly { name: string; kind: BotKind; host?: string | null; env: Record<string, string> }[],
+): { names: string[]; defaultAccount: boolean } {
+  const dir = identityHomeDir(kind, env)
+  if (!dir) return { names: [], defaultAccount: false }
+  const norm = normalizeHomeDir(dir)
+  const names = existing
+    .filter((i) => i.kind === kind && (i.host || 'local') === host)
+    .filter((i) => {
+      const other = identityHomeDir(kind, i.env)
+      return other !== null && normalizeHomeDir(other) === norm
+    })
+    .map((i) => i.name)
+  const def = DEFAULT_HOME_DIR[kind]
+  const defaultAccount = def !== undefined && normalizeHomeDir(def) === norm
+  return { names, defaultAccount }
+}
+
+/** 設定頁身份能建立的 CLI（claude-api／openai-api 是 API bot，沒有身份）。 */
+export const IDENTITY_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']

@@ -1,0 +1,173 @@
+/* components/AddIdentityDialog.tsx 專屬樣式。遮罩沿用 confirmDialog.css 的 .confirm-backdrop。 */
+.add-identity-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 16px 18px 14px;
+}
+
+.add-identity-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.add-identity-form,
+.add-identity-progress {
+  display: grid;
+  gap: 12px;
+}
+
+.add-identity-field {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.add-identity-field input,
+.add-identity-field select,
+.add-identity-field textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.add-identity-field input:focus,
+.add-identity-field select:focus,
+.add-identity-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.add-identity-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.add-identity-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.add-identity-host-only {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.add-identity-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.add-identity-advanced[open] {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.add-identity-prompt {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.add-identity-prompt p {
+  margin: 0;
+}
+
+.add-identity-prompt-actions,
+.add-identity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.add-identity-summary {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.add-identity-summary dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.add-identity-summary dt {
+  color: var(--text-dim);
+}
+
+.add-identity-summary dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.add-identity-summary code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.add-identity-none {
+  color: var(--text-dim);
+}
+
+.add-identity-warn {
+  margin: 0;
+  color: var(--warn);
+}
+
+.add-identity-errors {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--danger);
+}
+
+.add-identity-created {
+  margin: 0;
+  font-size: 13px;
+}
+
+.add-identity-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.add-identity-status.is-done {
+  color: var(--accent);
+}
+
+@media (max-width: 420px) {
+  .add-identity-dialog {
+    padding: 14px 14px 12px;
+  }
+}

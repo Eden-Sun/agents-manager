@@ -1726,3 +1726,16 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **測試**：
   - `lib/gptModel.test.ts`：label 推導（四個例子＋未知 id）、排序（亂序輸入→luna,terra,sol,astra；同家族多版本）、shortModel 兩個 kind 一致。
   - `lib/shortModel.test.ts`、`components/kindMeta.test.ts`、`components/modelSeriesDom.test.tsx` 既有斷言更新。
+
+## 設定→身份：新增帳號對話框（第 3 階段，2026-11-20，使用者核可重做）
+
+- **背景**：身份頁的「新增身份」表單是頁尾的一張表，env 要自己打、看不到實際目錄，也不知道會不會跟既有身份共用同一份登入。重做時把新增流程拉成獨立對話框，並接上「新增並登入」。
+- **做法**（`components/AddIdentityDialog.tsx`，純前端，沒有改後端）：
+  - 流程：（只有本機時不顯示主機；多台時選主機）→ CLI → 名稱 →（進階：env，預填建議值）→ 摘要（實際目錄、是否共用）→「新增並登入」。
+  - **建議目錄**：`$HOME/.<cli>-<名稱>`（claude 的 `CLAUDE_CONFIG_DIR`、codex 的 `CODEX_HOME`、grok 的 `GROK_HOME`、agy 的 `HOME`）。名稱改了、env 還是建議值就跟著換；env 被改過就不動。
+  - **切 CLI**：env 還是上一種 CLI 的建議值就直接換成新 CLI 的；是自訂值就先問「保留自訂值」或「改用 X 建議」。
+  - **共用警告**：新目錄若指到同 CLI、同一台主機的既有身份，或指到預設帳號的目錄（`~/.claude`、`~/.codex`、`~/.grok`），摘要顯示警告但仍可送出（兩個身份共用一份登入是使用者可以選的）。同名身份與缺目錄變數的 env 會擋住送出。
+  - **登入狀態**：建立後開登入終端，對話框停在「等待登入」並每 3 秒自動檢查（上限 40 次）；檢查中→已登入／未確認（可「重新檢查」）；開終端失敗可「重試登入」。對話框不關設定視窗；建立中不能用 Esc 關掉。
+  - 身份建立的主機用既有 `POST /identities` 的 `host` 欄位（daemon 已支援，前端 `NewIdentityInput` 補上這個欄位）。
+- **判定純函式**（`components/identityEnv.ts`）：`suggestedIdentityEnvText`、`normalizeHomeDir`（`~`、`$HOME`、`${HOME}` 視為同一目錄）、`identityHomeDir`、`sharedHomeWith`、`validIdentityName`。
+- **測試**：`components/identityHome.test.ts`（純函式）、`components/addIdentityDialog.test.tsx`（建議目錄、同名擋住、共用警告、切 CLI 提示、送出→輪詢到已登入、達上限顯示失敗且不關）。
