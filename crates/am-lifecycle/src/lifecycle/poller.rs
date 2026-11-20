@@ -1953,15 +1953,18 @@ pub fn is_spinner_glyph(c: char) -> bool {
 /// Mid-turn: a spinner still on screen. codex's `• Working (4s • esc to interrupt)` has no ellipsis,
 /// so it's matched separately (2026-09-08).
 pub fn pane_still_busy(screen: &str) -> bool {
+    let screen = crate::composer_parse::codex_main_conversation(screen);
+    let screen = screen.as_ref();
     crate::capture::claude::PARSER.still_busy(screen) || screen.lines().any(is_codex_working_line)
 }
 
-/// codex 的狀態列：`• {header} ({elapsed} • esc to interrupt)`，後面可能再接 ` · {訊息}`。header 預設 `Working`，
+/// codex 的狀態列：`•|◦ {header} ({elapsed} • esc to interrupt)`，後面可能再接 ` · {訊息}`。0.171 workspace 開啟時
+/// 活動列會用 `◦`；header 預設 `Working`，
 /// 壓縮時是 `Compacting context`，reasoning summary 開著時是 summary 的最新一行（0.155 起，#207）——只認 `Working (`
 /// 的話，還在想的 codex 會被當成停了，備援把狀態列當回覆收掉回合。所以認結構：括號裡是經過時間、` • `、`… to interrupt`
 /// （中斷鍵可以改綁）。格式照 codex `status_indicator_widget.rs`。
 fn is_codex_working_line(s: &str) -> bool {
-    let Some(rest) = s.trim().strip_prefix('•') else { return false };
+    let Some(rest) = s.trim().strip_prefix('•').or_else(|| s.trim().strip_prefix('◦')) else { return false };
     rest.match_indices(" (").any(|(i, _)| {
         let Some((elapsed, tail)) = rest[i + 2..].split_once(" • ") else { return false };
         is_codex_duration(elapsed) && tail.split_once(')').is_some_and(|(hint, _)| hint.ends_with(" to interrupt"))
@@ -1978,6 +1981,8 @@ pub fn is_tool_progress(reply: &str) -> bool {
 ///   `Orchestrating…` 之類，動詞會隨版本換，只有括號裡的經過時間／token 計數是穩定的）。
 /// 已完成的行（`✻ Crunched for 9s`）沒有 `…`，不算。
 pub fn is_screen_busy(screen: &str) -> bool {
+    let screen = crate::composer_parse::codex_main_conversation(screen);
+    let screen = screen.as_ref();
     pane_still_busy(screen) || screen.lines().any(|l| is_activity_shape(l.trim()))
 }
 

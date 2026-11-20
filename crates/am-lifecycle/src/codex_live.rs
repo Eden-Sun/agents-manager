@@ -67,6 +67,8 @@ fn context_percent(line: &str) -> bool {
 pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
     // Last match in the viewport tail wins: the startup banner and a quoted line higher up share
     // the shape. A narrow pane wraps the line; join a continuation line.
+    let screen = crate::composer_parse::codex_main_conversation(screen);
+    let screen = screen.as_ref();
     let lines: Vec<&str> = screen.lines().collect();
     let tail = &lines[lines.len().saturating_sub(STATUS_TAIL_LINES)..];
     let mut out = None;
@@ -534,6 +536,19 @@ async fn text(client: &HerdrClient, pane_id: &str, t: &str) -> bool {
 /// Must be checked before typing into codex: a user message sent into a picker was eaten and its
 /// Enter switched the model. Migration and rate-limit prompts are user decisions; never dismiss
 /// them from this helper.
+/// Codex's native command approval modal is a blocking menu, not composer text. Its numbered
+/// choices reuse `›`, so composer draft reads must stop before treating them as user input.
+pub fn permission_approval_open(screen: &str) -> bool {
+    let scoped = crate::composer_parse::codex_main_conversation(screen);
+    let plain = crate::composer_parse::strip_ansi(scoped.as_ref());
+    plain.contains("Would you like to run the following command?")
+        && plain.contains("Environment:")
+        && plain.contains("Reason:")
+        && plain.lines().any(|line| line.trim_start().starts_with("$ "))
+        && plain.contains("Yes, proceed")
+        && plain.contains("No, and tell Codex what to do differently")
+}
+
 pub fn picker_open(screen: &str) -> bool {
     crate::tui_prompts::is_codex_model_migration_prompt(screen)
         || rate_limit_switch_prompt_open(screen)

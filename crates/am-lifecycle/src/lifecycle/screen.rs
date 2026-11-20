@@ -377,6 +377,8 @@ fn is_agy_chrome(s: &str) -> bool {
 /// What the user typed on the last prompt echo, prefix stripped — the only source of the user
 /// message for a turn typed straight into the pane (no hook payload until it ends).
 pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
+    let scoped = if kind == "codex" { crate::composer_parse::codex_main_conversation(text) } else { std::borrow::Cow::Borrowed(text) };
+    let text = scoped.as_ref();
     let echo = prompt_echo_prefix(kind)?;
     let lines: Vec<&str> = text.lines().collect();
     let idx = after_last_prompt_echo(kind, &lines);
@@ -1164,6 +1166,8 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
         return None;
     }
+    let scoped = if kind == "codex" { crate::composer_parse::codex_main_conversation(text) } else { std::borrow::Cow::Borrowed(text) };
+    let text = scoped.as_ref();
     let text_without_survey = if kind == "claude" { without_feedback_survey(text) } else { std::borrow::Cow::Borrowed(text) };
     let lines: Vec<&str> = text_without_survey.lines().collect();
     let start = reply_start(kind, &lines);
@@ -1288,6 +1292,8 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     if kind == "claude" && crate::tui_prompts::cold_resume_choice(text).is_some() {
         return None;
     }
+    let scoped = if kind == "codex" { crate::composer_parse::codex_main_conversation(text) } else { std::borrow::Cow::Borrowed(text) };
+    let text = scoped.as_ref();
     if kind == "claude" {
         return crate::capture::claude::PARSER.extract_reply(&without_feedback_survey(text));
     }

@@ -98,7 +98,8 @@ fn full_fields(kind: &str, run: &db::Run, draft: &str) -> Value {
 /// 跟輸入框同一個記號，會被讀成「框裡有字」——那不是草稿，對它按 Enter／Ctrl+C 就是替使用者回答對話框（#1989：審核框上
 /// Enter 可能選到 Trust all）。草稿的讀取、送出、清除一律先過這一關。
 pub fn blocking_dialog(kind: &str, screen: &str) -> Option<(&'static str, String)> {
-    let plain = crate::composer_parse::strip_ansi(screen);
+    let scoped = if kind == "codex" { crate::composer_parse::codex_main_conversation(screen) } else { std::borrow::Cow::Borrowed(screen) };
+    let plain = crate::composer_parse::strip_ansi(scoped.as_ref());
     if kind == "codex" {
         if let Some(dialog) = crate::codex_model_migration::Dialog::of(&plain) {
             return Some((dialog.reason().code, dialog.hint().to_string()));

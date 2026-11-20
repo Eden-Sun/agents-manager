@@ -1,0 +1,40 @@
+[1;2m› [0mRun the single shell command `touch /etc/am-2169-test-marker` and then … [2m│[0;1;4m Side chat ×[0m                         +
+                                                                               [2m│[0m
+■ Conversation interrupted - use /feedback if something went wrong             [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│[0m
+[1;2m› [0mRun one shell command: sleep 20, then print exactly READY. Do not modify     [2m│[0m
+  files or spawn agents.                                                       [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│[0m
+[2m• [0mI’ll run the command and wait for its output.                                [2m│[0m
+                                                                               [2m│[0m
+[1m•[0m [1mRan[0m sleep 20 && printf '%s\n' READY                                          [2m│[0m
+[2m  └ READY[0m                                                                      [2m│[0m
+                                                                               [2m│[0m
+■ Conversation interrupted - use /feedback if something went wrong             [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│[0m
+[1;2m› [0mRun the single shell command touch /etc/am-2169-test-marker and then     [2m│[0m
+  print READY. Request approval and wait; do not run alternatives.             [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│[0m
+• [1mRunning[0m touch /etc/am-2169-test-marker                                   [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│[0m
+  [1mWould you like to run the following command?[0m                                 [2m│[0m
+                                                                               [2m│[0m
+  Environment: [1mlocal[0m                                                           [2m│[0m
+                                                                               [2m│[0m
+  Reason: [3mDo you approve creating /etc/am-2169-test-marker outside the[0m     [2m│[0m
+  [3msandbox?[0m                                                                     [2m│[0m
+                                                                               [2m│[0m
+  $ touch /etc/am-2169-test-marker                                         [2m│[0m
+                                                                               [2m│[0m
+                                                                               [2m│
+[0;1;7m› 1. Yes, proceed (y)                                                          [0;2m│›
+[0m  2. Yes, and don't ask again for commands that start with `touch /etc/am-2169-[2m│
+[0m     approval-marker` ([1mp[0m)                                                      [2m│[0m  [2mGPT-6.2-Sol default · /tmp/am-2169-[0m
+  3. No, and tell Codex what to do differently ([1mesc[0m)                           [2m│[0m  [2mcodex.8Z7rZS · Run delayed READY[0m
+                                                                               [2m│[0m  [2mcommand[0m
+  [2mPress [0;1menter[0;2m to confirm or [0;1mesc[0;2m to cancel                                      │[0m

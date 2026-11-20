@@ -3,6 +3,7 @@
 use am_ports::CaptureParser;
 use anyhow::Result;
 use crate::herdr::{HerdrClient, HerdrError, PaneRead};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -161,6 +162,107 @@ pub fn strip_ansi(row: &str) -> String {
     styled_chars(row).into_iter().map(|(c, _)| c).collect()
 }
 
+/// Keep Codex screen parsing inside the main conversation when its workspace panel is open.
+/// The 0.171 TUI draws a persistent `│` divider and a `+` control in the workspace header;
+/// transcript text in the right pane must not be read as main composer, activity, or status.
+pub fn codex_main_conversation(screen: &str) -> Cow<'_, str> {
+    let rows: Vec<Vec<(char, usize, usize)>> = screen.lines().map(visible_chars_with_columns).collect();
+    let mut divider_counts = HashMap::<usize, usize>::new();
+    for row in &rows {
+        for &(ch, _, column) in row {
+            if ch == '│' && column >= 24 {
+                *divider_counts.entry(column).or_default() += 1;
+            }
+        }
+    }
+    let Some((&divider, &count)) = divider_counts.iter().max_by_key(|(_, count)| *count) else {
+        return Cow::Borrowed(screen);
+    };
+    if count < 8.max(rows.len() / 4) {
+        return Cow::Borrowed(screen);
+    }
+    let header = rows.iter().take(5).any(|row| {
+        row.iter().enumerate().any(|(i, &(ch, _, column))| {
+            if ch != '│' || column.abs_diff(divider) > 12 {
+                return false;
+            }
+            row[i + 1..].iter().any(|&(right_ch, _, _)| right_ch == '+')
+                && row[i + 1..].iter().any(|&(right_ch, _, _)| !right_ch.is_whitespace())
+        })
+    });
+    if !header {
+        return Cow::Borrowed(screen);
+    }
+
+    let mut out = String::with_capacity(screen.len());
+    for (i, row) in screen.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let cut = visible_chars_with_columns(row)
+            .into_iter()
+            .filter(|(ch, _, column)| *ch == '│' && column.abs_diff(divider) <= 12)
+            .min_by_key(|(_, _, column)| column.abs_diff(divider))
+            .map(|(_, byte, _)| byte);
+        match cut {
+            Some(byte) => out.push_str(&row[..byte]),
+            None => out.push_str(row),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Visible character, byte offset, and terminal column. SGR sequences do not occupy cells;
+/// wide Unicode characters do. This lets the divider stay aligned even when the conversation
+/// contains CJK text or emoji.
+fn visible_chars_with_columns(row: &str) -> Vec<(char, usize, usize)> {
+    let mut out = Vec::new();
+    let mut byte = 0;
+    let mut column = 0;
+    while byte < row.len() {
+        let rest = &row[byte..];
+        let Some(ch) = rest.chars().next() else { break };
+        if ch == '\u{1b}' {
+            let next = byte + ch.len_utf8();
+            if row[next..].starts_with('[') {
+                byte = next + 1;
+                while byte < row.len() {
+                    let control = row[byte..].chars().next().unwrap_or('\0');
+                    byte += control.len_utf8();
+                    if ('@'..='~').contains(&control) {
+                        break;
+                    }
+                }
+            } else {
+                byte = next;
+                if byte < row.len() {
+                    byte += row[byte..].chars().next().unwrap_or('\0').len_utf8();
+                }
+            }
+            continue;
+        }
+        let width = terminal_cell_width(ch);
+        if ch != '\r' {
+            out.push((ch, byte, column));
+        }
+        column += width;
+        byte += ch.len_utf8();
+    }
+    out
+}
+
+fn terminal_cell_width(ch: char) -> usize {
+    let c = ch as u32;
+    if matches!(c, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F | 0xE0100..=0xE01EF) {
+        return 0;
+    }
+    if matches!(c, 0x1100..=0x115F | 0x2329..=0x232A | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x1F300..=0x1FAFF | 0x20000..=0x3FFFD) {
+        2
+    } else {
+        1
+    }
+}
+
 pub struct ComposerRow {
     pub idx: usize,
     pub boxed: bool,
@@ -291,6 +393,8 @@ pub enum BoxState {
 }
 
 pub fn box_state(kind: &str, screen: &str) -> BoxState {
+    let scoped = if kind == "codex" { codex_main_conversation(screen) } else { Cow::Borrowed(screen) };
+    let screen = scoped.as_ref();
     let lines: Vec<&str> = screen.lines().collect();
     box_state_within(kind, screen, composer_tail(kind, &lines))
 }
@@ -301,6 +405,8 @@ pub fn is_agy_placeholder(text: &str) -> bool {
 }
 
 pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
+    let scoped = if kind == "codex" { codex_main_conversation(screen) } else { Cow::Borrowed(screen) };
+    let screen = scoped.as_ref();
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
@@ -396,6 +502,8 @@ fn plain_failed_request_hint(kind: &str, screen: &str) -> String {
 }
 
 pub fn plain_without_hints(kind: &str, screen: &str) -> String {
+    let scoped = if kind == "codex" { codex_main_conversation(screen) } else { Cow::Borrowed(screen) };
+    let screen = scoped.as_ref();
     if !screen.contains('\u{1b}') {
         return plain_failed_request_hint(kind, screen);
     }

@@ -659,6 +659,12 @@ async fn read_guard_screen(client: &HerdrClient, pane: &str, run: &db::Run, reas
 }
 
 pub(super) fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> {
+    let scoped = if kind == "codex" {
+        crate::composer_parse::codex_main_conversation(screen)
+    } else {
+        std::borrow::Cow::Borrowed(screen)
+    };
+    let screen = scoped.as_ref();
     match kind {
         "claude" if crate::tui_prompts::stuck_at_login(screen) => Some("needs_login"),
         "claude" if crate::tui_prompts::cold_resume_choice(screen).is_some() => Some(super::claude_resume_menu::PENDING),
@@ -669,6 +675,7 @@ pub(super) fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'s
         "grok" if crate::tui_prompts::is_grok_trust_dialog(screen) => Some("dialog_open"),
         "agy" => crate::agy_screen::blocking_dialog(screen).map(|d| d.reason()),
         "codex" if super::codex_hook_review::review_open(screen) => Some(super::codex_hook_review::REASON),
+        "codex" if crate::codex_live::permission_approval_open(screen) => Some("dialog_open"),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
         // #782：帳號安全提醒橫幅開著時 agent.prompt 打進去的開頭數字一樣會被當成選項吃掉。
         "codex" if super::codex_banner::blocks_typing(screen) => Some(super::codex_banner::REASON),

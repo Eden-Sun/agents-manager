@@ -103,3 +103,73 @@ mod codex_0_160 {
         assert!(!seen.fast);
     }
 }
+
+/// codex 0.171.0 enables the workspace panel by default. Captures were taken from the real TUI
+/// with AG Man's `-c sandbox_mode="workspace-write" -c service_tier=""` launch settings.
+mod codex_0_171_workspace {
+    use super::*;
+    use crate::composer_parse::{codex_main_conversation, composer_text_whole, strip_ansi};
+    use crate::lifecycle::composer_draft::blocking_dialog;
+    use crate::lifecycle::poller::pane_still_busy;
+
+    const IDLE: &str = include_str!("fixtures/codex-0.171.0-workspace-idle.txt");
+    const IDLE_ANSI: &str = include_str!("fixtures/codex-0.171.0-workspace-idle.ansi");
+    const SIDE_IDLE: &str = include_str!("fixtures/codex-0.171.0-workspace-side-idle.txt");
+    const SIDE_IDLE_ANSI: &str = include_str!("fixtures/codex-0.171.0-workspace-side-idle.ansi");
+    const SIDE_DRAFT: &str = include_str!("fixtures/codex-0.171.0-workspace-side-draft.txt");
+    const SIDE_WORKING: &str = include_str!("fixtures/codex-0.171.0-workspace-side-working.txt");
+    const SIDE_WORKING_ANSI: &str = include_str!("fixtures/codex-0.171.0-workspace-side-working.ansi");
+    const APPROVAL: &str = include_str!("fixtures/codex-0.171.0-workspace-approval.txt");
+
+    #[test]
+    fn the_workspace_divider_is_removed_before_main_conversation_parsing() {
+        for (name, screen) in [
+            ("idle", IDLE),
+            ("side idle", SIDE_IDLE),
+            ("side draft", SIDE_DRAFT),
+            ("side working", SIDE_WORKING),
+            ("approval", APPROVAL),
+        ] {
+            let main = codex_main_conversation(screen);
+            let plain = strip_ansi(main.as_ref());
+            assert!(!plain.contains("Open in sidebar"), "{name}: empty workspace leaked into main pane\n{plain}");
+            assert!(!plain.contains("Side chat"), "{name}: side chat leaked into main pane\n{plain}");
+            assert!(!plain.contains("New side chat"), "{name}: side chat prompt leaked into main pane\n{plain}");
+        }
+        assert!(matches!(codex_main_conversation("• Working (4s • esc to interrupt)"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn the_default_workspace_idle_and_working_screens_keep_their_state() {
+        assert_eq!(box_state("codex", IDLE_ANSI), BoxState::Empty, "fresh workspace idle");
+        assert_eq!(composer_text_whole("codex", IDLE_ANSI), None, "placeholder is not a draft");
+        assert!(!pane_still_busy(IDLE));
+
+        assert_eq!(box_state("codex", SIDE_IDLE_ANSI), BoxState::Empty, "main chat idle with side chat open");
+        assert!(!pane_still_busy(SIDE_IDLE), "completed main chat stays idle even when the workspace is open");
+
+        assert_eq!(box_state("codex", SIDE_WORKING_ANSI), BoxState::Empty, "working composer is empty");
+        assert!(pane_still_busy(SIDE_WORKING), "main chat working indicator remains visible");
+    }
+
+    #[test]
+    fn a_typed_main_composer_stays_a_draft_with_the_workspace_open() {
+        assert_eq!(box_state("codex", SIDE_DRAFT), BoxState::NonEmpty);
+        assert_eq!(composer_text_whole("codex", SIDE_DRAFT).as_deref(), Some("workspace side draft #2169"));
+    }
+
+    #[test]
+    fn the_native_command_approval_is_a_blocking_dialog_not_a_composer_draft() {
+        let dialog = blocking_dialog("codex", APPROVAL).expect("approval modal blocks composer actions");
+        assert_eq!(dialog.0, "dialog_open");
+        assert_eq!(crate::lifecycle::prompt::agent_prompt_dialog_reason("codex", APPROVAL), Some("dialog_open"));
+        assert!(crate::codex_live::permission_approval_open(APPROVAL));
+    }
+
+    #[test]
+    fn status_footer_is_read_from_the_main_workspace_column() {
+        let runtime = crate::codex_live::parse_status_line(SIDE_DRAFT).expect("main footer status line");
+        assert_eq!(runtime.model, "gpt-6.2-sol");
+        assert_eq!(runtime.effort.as_deref(), Some("default"));
+    }
+}

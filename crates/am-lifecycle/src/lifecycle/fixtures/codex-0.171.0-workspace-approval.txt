@@ -1,0 +1,40 @@
+› Run the single shell command `touch /etc/am-2169-test-marker` and then … │ Side chat ×                         +
+                                                                               │
+■ Conversation interrupted - use /feedback if something went wrong             │
+                                                                               │
+                                                                               │
+› Run one shell command: sleep 20, then print exactly READY. Do not modify     │
+  files or spawn agents.                                                       │
+                                                                               │
+                                                                               │
+• I’ll run the command and wait for its output.                                │
+                                                                               │
+• Ran sleep 20 && printf '%s\n' READY                                          │
+  └ READY                                                                      │
+                                                                               │
+■ Conversation interrupted - use /feedback if something went wrong             │
+                                                                               │
+                                                                               │
+› Run the single shell command touch /etc/am-2169-test-marker and then     │
+  print READY. Request approval and wait; do not run alternatives.             │
+                                                                               │
+                                                                               │
+• Running touch /etc/am-2169-test-marker                                   │
+                                                                               │
+                                                                               │
+  Would you like to run the following command?                                 │
+                                                                               │
+  Environment: local                                                           │
+                                                                               │
+  Reason: Do you approve creating /etc/am-2169-test-marker outside the     │
+  sandbox?                                                                     │
+                                                                               │
+  $ touch /etc/am-2169-test-marker                                         │
+                                                                               │
+                                                                               │
+› 1. Yes, proceed (y)                                                          │›
+  2. Yes, and don't ask again for commands that start with `touch /etc/am-2169-│
+     approval-marker` (p)                                                      │  GPT-6.2-Sol default · /tmp/am-2169-
+  3. No, and tell Codex what to do differently (esc)                           │  codex.8Z7rZS · Run delayed READY
+                                                                               │  command
+  Press enter to confirm or esc to cancel                                      │
