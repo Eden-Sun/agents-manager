@@ -58,7 +58,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
-import { dropHostModels, modelsKey, saveLastModels, shouldFetchModels, type ModelsCache } from './modelsCache'
+import { dropHostModels, modelsKey, saveLastModels, shouldFetchModels, type ModelsCache, type ModelsMetaCache } from './modelsCache'
 import { byTime, capList, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -442,6 +442,7 @@ export interface StoreState {
   quota: QuotaMap
   /** keyed `kind@host@identity`; null = fetch failed (use static list). */
   models: ModelsCache
+  modelsMeta: ModelsMetaCache
   /** issue #26: last failed fetch time; retried after `MODELS_RETRY_MS`. */
   modelsFailedAt: Record<string, number>
   dropHostModels: (host: string) => void
@@ -986,6 +987,7 @@ export const useStore = create<StoreState>((set, get) => {
   quota: {},
   mem: null,
   models: {},
+  modelsMeta: {},
   modelsFailedAt: {},
   kindDisplay: readKindDisplay(),
   toolHintDismissed: false,
@@ -2402,12 +2404,20 @@ export const useStore = create<StoreState>((set, get) => {
     const hostEpoch = hostModelsEpoch.get(hostName) ?? 0
     const stillCurrent = () => modelsReq.get(key) === gen && (hostModelsEpoch.get(hostName) ?? 0) === hostEpoch
     try {
-      const list = await api.fetchModels(kind, host, identity)
+      const res = await api.fetchModels(kind, host, identity)
       if (!stillCurrent()) return get().models[key] ?? null
+      const list = res.models
       saveLastModels(key, list)
       set((s) => {
         const { [key]: _gone, ...failed } = s.modelsFailedAt
-        return { models: { ...s.models, [key]: list }, modelsFailedAt: failed }
+        return {
+          models: { ...s.models, [key]: list },
+          modelsMeta: {
+            ...s.modelsMeta,
+            [key]: { source: res.source, source_host: res.source_host, stale: res.stale },
+          },
+          modelsFailedAt: failed,
+        }
       })
       return list
     } catch {
@@ -2415,6 +2425,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (!stillCurrent()) return get().models[key] ?? null
       set((s) => ({
         models: { ...s.models, [key]: null },
+        modelsMeta: { ...s.modelsMeta, [key]: { source: 'static', stale: true } },
         modelsFailedAt: { ...s.modelsFailedAt, [key]: Date.now() },
       }))
       return null
@@ -2426,6 +2437,7 @@ export const useStore = create<StoreState>((set, get) => {
     hostModelsEpoch.set(hostName, (hostModelsEpoch.get(hostName) ?? 0) + 1)
     set((s) => ({
       models: dropHostModels(s.models, host),
+      modelsMeta: dropHostModels(s.modelsMeta, host),
       modelsFailedAt: dropHostModels(s.modelsFailedAt, host),
     }))
   },

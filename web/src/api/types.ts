@@ -1003,6 +1003,12 @@ export function canonicalModel(kind: BotKind, id: string): string {
 }
 
 /** `GET /api/models?kind=&host=` */
+export interface ModelsMeta {
+  source?: string | null
+  source_host?: string | null
+  stale?: boolean
+}
+
 export interface ModelInfo {
   id: string
   display_name: string

@@ -260,6 +260,8 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '載入中…': 'Loading…',
   '此主機的模型清單暫時讀不到，顯示的是備用清單': 'Model list for this host cannot be loaded right now; showing the fallback list',
   '此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單': 'Model list for this host cannot be loaded right now; showing the last list fetched as fallback',
+  '此主機的模型清單暫時讀不到，沿用 {source_host} 的清單': 'Model list for this host cannot be loaded right now; using the list from {source_host}',
+  '本機': 'This machine',
   '不在清單': 'not in list',
   '舊版': 'old version',
   '模型預設': 'Model default',

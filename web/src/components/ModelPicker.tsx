@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { isApiKind } from './kindMeta'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import type { BotKind, ModelInfo, PatchBotInput } from '../api/types'
+import type { BotKind, ModelInfo, ModelsMeta, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { compareGptModels, formatGptModelLabel } from '../lib/gptModel'
 import { buildAgyFamilyOrder, compareAgyModels, formatAgyModelLabel } from '../lib/agyModel'
@@ -101,6 +101,34 @@ function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
 /** codex 的 fast 是 `priority`；claude-api 的是 `fast`（speed=fast，單價 2 倍）。 */
 const isFastTier = (id: string) => id === FAST_TIER || id === 'fast'
 
+/**
+ * 提示清單來源為備用清單：
+ * - other-host: 「此主機的模型清單暫時讀不到，沿用 {source_host} 的清單」
+ * - static (非 claude) 或完全沒讀到 API: 「此主機的模型清單暫時讀不到，顯示的是備用清單」
+ * - 同主機上次抓到的 stale 或使用 localStorage lastKnown: 「此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單」
+ */
+function fallbackWarning(
+  t: ReturnType<typeof useT>,
+  kind: BotKind,
+  meta: ModelsMeta | undefined,
+  usingLast: boolean,
+  cachedNull: boolean,
+  fromApi: boolean,
+): string | null {
+  if (fromApi && meta?.source === 'other-host') {
+    const rawHost = meta.source_host || 'local'
+    const sourceHost = rawHost === 'local' ? t('本機') : rawHost
+    return t('此主機的模型清單暫時讀不到，沿用 {source_host} 的清單', { source_host: sourceHost })
+  }
+  if ((fromApi && meta?.stale) || (usingLast && cachedNull)) {
+    return t('此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單')
+  }
+  if ((fromApi && meta?.source === 'static' && kind !== 'claude') || !fromApi) {
+    return t('此主機的模型清單暫時讀不到，顯示的是備用清單')
+  }
+  return null
+}
+
 export function ApiModelFields({
   kind,
   host,
@@ -128,6 +156,7 @@ export function ApiModelFields({
   const t = useT()
   const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
+  const meta = useStore((s) => s.modelsMeta[key])
   const loadModels = useStore((s) => s.loadModels)
   useEffect(() => {
     // null = last fetch failed; the store retries once the cooldown has passed (issue #26).
@@ -151,6 +180,7 @@ export function ApiModelFields({
   const fallbackEffort = (suggestedEffort && efforts.includes(suggestedEffort)) ? suggestedEffort : effectiveDefaultEffort(current)
   const selectedEffort = effort ?? fallbackEffort
   const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
+  const warnText = fallbackWarning(t, kind, meta, usingLast, cached === null, fromApi)
 
   // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
   // 只認 API 清單：靜態退路會把好的值誤標不支援。
@@ -177,7 +207,11 @@ export function ApiModelFields({
       <div className="field">
         <span>
           {t('模型')}
-          {loading ? <span className="field-note">{t('載入中…')}</span> : fromApi && !(usingLast && cached === null) ? null : <span className="field-note warn">{usingLast ? t('此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單') : t('此主機的模型清單暫時讀不到，顯示的是備用清單')}</span>}
+          {loading ? (
+            <span className="field-note">{t('載入中…')}</span>
+          ) : warnText ? (
+            <span className="field-note warn">{warnText}</span>
+          ) : null}
           {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
@@ -339,6 +373,7 @@ export function ModelQuickPicker({
   const identity = bot?.identity ?? null
   const key = `${kind}@${host || 'local'}@${identity || ''}`
   const cached = useStore((s) => s.models[key])
+  const meta = useStore((s) => s.modelsMeta[key])
   const loadModels = useStore((s) => s.loadModels)
   const patchBot = useStore((s) => s.patchBot)
   const notify = useStore((s) => s.notify)
@@ -454,6 +489,7 @@ export function ModelQuickPicker({
   }
 
   const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
+  const warnText = fallbackWarning(t, kind, meta, usingLast, cached === null, fromApi)
 
   const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false), cached)
   const hintId = useId()
@@ -475,9 +511,9 @@ export function ModelQuickPicker({
           <span className="hint" aria-hidden="true">
             {t('載入模型清單…')}
           </span>
-        ) : !fromApi || (usingLast && cached === null) ? (
+        ) : warnText ? (
           <span className="hint field-note warn" aria-hidden="true">
-            {usingLast ? t('此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單') : t('此主機的模型清單暫時讀不到，顯示的是備用清單')}
+            {warnText}
           </span>
         ) : null}
         <div className="opt-group models" role="group" aria-label={t('模型')}>

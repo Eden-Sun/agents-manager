@@ -1,7 +1,8 @@
-import type { BotKind, ModelInfo } from '../api/types'
+import type { BotKind, ModelInfo, ModelsMeta } from '../api/types'
 
 /** null = 上次抓取失敗（畫面用靜態清單）。 */
 export type ModelsCache = Record<string, ModelInfo[] | null>
+export type ModelsMetaCache = Record<string, ModelsMeta>
 
 /** issue #26：失敗多半是暫時的，冷卻後重試。 */
 export const MODELS_RETRY_MS = 30_000

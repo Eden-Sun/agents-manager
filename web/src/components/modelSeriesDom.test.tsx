@@ -125,3 +125,63 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
   assert.ok(popWarn, '快速選單應有 stale 提示')
   assert.match(popWarn.textContent ?? '', /此主機的模型清單暫時讀不到，顯示的是備用清單/)
 })
+
+test('模型清單來源 stale 提示：other-host 沿用其他主機清單、static 顯示備用清單、claude 正常 static 不顯示提示', async () => {
+  // 1. other-host 且 source_host 為 local
+  await act(() =>
+    useStore.setState({
+      models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
+      modelsMeta: { 'agy@m4p@': { source: 'other-host', source_host: 'local', stale: true } },
+    } as never),
+  )
+  const el1 = await mount(
+    <ApiModelFields kind="agy" host="m4p" model="gemini-3.8-flash-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
+  )
+  const warn1 = el1.querySelector('.field-note.warn')
+  assert.ok(warn1, 'other-host local 應有提示')
+  assert.match(warn1.textContent ?? '', /此主機的模型清單暫時讀不到，沿用 本機 的清單/)
+  await unmountAll()
+
+  // 2. other-host 且 source_host 為遠端主機
+  await act(() =>
+    useStore.setState({
+      models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
+      modelsMeta: { 'agy@m4p@': { source: 'other-host', source_host: 'remote-1', stale: true } },
+    } as never),
+  )
+  const el2 = await mount(
+    <ApiModelFields kind="agy" host="m4p" model="gemini-3.8-flash-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
+  )
+  const warn2 = el2.querySelector('.field-note.warn')
+  assert.ok(warn2, 'other-host remote-1 應有提示')
+  assert.match(warn2.textContent ?? '', /此主機的模型清單暫時讀不到，沿用 remote-1 的清單/)
+  await unmountAll()
+
+  // 3. static 回傳（agy 抓不到退回 static）
+  await act(() =>
+    useStore.setState({
+      models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
+      modelsMeta: { 'agy@m4p@': { source: 'static' } },
+    } as never),
+  )
+  const el3 = await mount(
+    <ApiModelFields kind="agy" host="m4p" model="gemini-3.8-flash-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
+  )
+  const warn3 = el3.querySelector('.field-note.warn')
+  assert.ok(warn3, 'agy static 應有備用清單提示')
+  assert.match(warn3.textContent ?? '', /此主機的模型清單暫時讀不到，顯示的是備用清單/)
+  await unmountAll()
+
+  // 4. claude 正常 static 不應顯示警告
+  await act(() =>
+    useStore.setState({
+      models: { 'claude@local@': [model('claude-sonnet-4-6')] },
+      modelsMeta: { 'claude@local@': { source: 'static' } },
+    } as never),
+  )
+  const el4 = await mount(
+    <ApiModelFields kind="claude" host="local" model="claude-sonnet-4-6" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
+  )
+  assert.equal(el4.querySelector('.field-note.warn'), null, 'claude static 正常不應有警告')
+  await unmountAll()
+})

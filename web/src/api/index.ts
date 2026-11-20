@@ -1,5 +1,5 @@
 import { MockTransport } from './mock'
-import { toHostBaselinePlan, toHostBaselineApplyResult, toHostBaselineBackups, toHostBaselineRestoreResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModels, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules } from './normalize'
+import { toHostBaselinePlan, toHostBaselineApplyResult, toHostBaselineBackups, toHostBaselineRestoreResult, toHostShell, toHostShells, toInstallResult, toIssueDetail, toIssues, toMessagesPage, toMemProcesses, toMemSnapshot, toModelsResponse, toQuota, toState, toTerminal, toToolMap, toIdentityStatusMap, num, str, isRec, optStr, pick, arr, toSubmodules, type ModelsResponse } from './normalize'
 import { HttpTransport } from './transport'
 import { ApiError } from './types'
 import { parseTriageRows } from '../lib/releaseTriage'
@@ -28,7 +28,6 @@ import type {
   InstallToolResult,
   Issue,
   IssueDetail,
-  ModelInfo,
   QuotaMap,
   NewHostInput,
   NewIdentityInput,
@@ -867,11 +866,11 @@ export function localImageUrl(botId: string, path: string): Promise<string> {
 }
 
 /** `identity` (claude) picks whose settings.json the default effort comes from (SPEC §17.1); unknown falls back safely. */
-export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelInfo[]> {
+export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelsResponse> {
   const q = new URLSearchParams({ kind })
   if (host && host !== 'local') q.set('host', host)
   if (identity) q.set('identity', identity)
-  return toModels(await transport.request('GET', `/models?${q.toString()}`))
+  return toModelsResponse(await transport.request('GET', `/models?${q.toString()}`))
 }
 
 export async function fetchQuota(): Promise<QuotaMap> {

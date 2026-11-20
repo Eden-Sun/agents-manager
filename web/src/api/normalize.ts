@@ -879,6 +879,23 @@ export function unwrap(data: unknown, key: string): unknown {
 
 export { isRec, num, str, bool, optStr, pick, arr }
 
+export interface ModelsResponse {
+  models: ModelInfo[]
+  source?: string | null
+  source_host?: string | null
+  stale?: boolean
+}
+
+export function toModelsResponse(raw: unknown): ModelsResponse {
+  const root = isRec(raw) ? raw : {}
+  return {
+    models: toModels(raw),
+    source: optStr(pick(root, 'source')),
+    source_host: optStr(pick(root, 'source_host')),
+    stale: bool(pick(root, 'stale'), false),
+  }
+}
+
 export function toModels(raw: unknown): ModelInfo[] {
   const root = isRec(raw) ? raw : {}
   return arr(pick(root, 'models'))

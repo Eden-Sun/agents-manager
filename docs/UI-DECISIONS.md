@@ -1804,3 +1804,18 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **測試**：
   - `lib/modelSeries.test.ts`：`formatAgyModelLabel` 推導各家族版號強度與未知 id；`ensureCurrentModel` 對缺失模型補全與標註。
   - `components/modelSeriesDom.test.tsx`：Bot 設定、建立表單、快速改模型選單三處缺失模型均正常顯示且被選中、標註「不在清單」；靜態／stale 清單時正確顯示備用清單提示。
+
+## agy 備用清單提示涵蓋 other-host 與 static（2026-11-20 補充，daemon 41fe899d0）
+
+- **背景**：遠端主機（如 m4p）抓不到 agy 清單時，daemon `/api/models` 會借同 kind、同 identity 其他主機上次抓到的清單，回傳 `stale: true`、`source: "other-host"`、`source_host: "local"`；若都沒有才退回 `source: "static"`。原本前端僅在 HTTP 失敗（`!fromApi`）時顯示備用清單提示，無法反映 daemon 的 fallback 回應。
+- **做法**：
+  - `web/src/api/normalize.ts` 的 `toModelsResponse` 解析 `source`、`source_host`、`stale`，由 `store.modelsMeta` 儲存每個 key 的中繼資訊。
+  - `fallbackWarning` 規則：
+    1. `source === 'other-host'`：顯示「此主機的模型清單暫時讀不到，沿用 {source_host} 的清單」（`source_host === 'local'` 顯示「本機」）。
+    2. API 回傳 `stale: true` 或前端使用 `lastKnownModels` 快取：顯示「此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單」。
+    3. API 回傳 `source === 'static'`（非 claude）或前端完全未取得 API 清單：顯示「此主機的模型清單暫時讀不到，顯示的是備用清單」。
+    4. claude 正常的 `source === 'static'` 不顯示警告。
+  - `ApiModelFields`（建立 Bot 表單、Bot 設定）與 `ModelQuickPicker`（快速改模型選單）統一套用。
+- **測試**：
+  - `lib/modelSeries.test.ts`：單元測試 `fallbackWarning` 對 other-host（本機/遠端）、stale、static（非 claude 與 claude）之邏輯判斷。
+  - `components/modelSeriesDom.test.tsx`：DOM 測試 other-host、static 與 claude 正常無警告行為。
