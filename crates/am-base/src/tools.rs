@@ -856,9 +856,12 @@ pub fn agy_shadow_home_sh(dir: &str, real_home: &str) -> String {
         r#"real={real}; dir={dir}
 [ -n "$real" ] && [ -n "$dir" ] && [ "$dir" != "$real" ] || exit 0
 mkdir -p "$dir/.gemini" "$dir/.config" || exit 1
+dirp=$(cd "$dir" 2>/dev/null && pwd -P)
 for p in "$real"/.[!.]* "$real"/..?* "$real"/*; do
   [ -e "$p" ] || [ -L "$p" ] || continue
   [ "$p" != "$dir" ] || continue
+  # 指回這個影子家目錄的連結（目錄改名後留下的舊名相容連結，例 `~/.agy-` → `.agy-ag1`）不連進來：連了就是自己繞回自己。
+  if [ -L "$p" ] && [ -d "$p" ] && [ -n "$dirp" ] && [ "$(cd "$p" 2>/dev/null && pwd -P)" = "$dirp" ]; then continue; fi
   n=${{p##*/}}
   case "$n" in .gemini|.config) continue ;; esac
   if [ "$n" = Library ] && [ -d "$p" ]; then

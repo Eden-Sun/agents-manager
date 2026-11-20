@@ -949,6 +949,8 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         std::fs::write(real.join(".gitconfig"), "x").unwrap();
         std::fs::write(real.join(".gemini/mine"), "real login").unwrap();
         let dir = real.join(".agy-b");
+        // 目錄改名後留下的舊名相容連結（`~/.agy-` → `.agy-b`）：不能連進影子家目錄，那是自己繞回自己。
+        std::os::unix::fs::symlink(".agy-b", real.join(".agy-")).unwrap();
         let sh = agy_shadow_home_sh(dir.to_str().unwrap(), real.to_str().unwrap());
         for _ in 0..2 {
             let ok = std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap();
@@ -961,6 +963,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(dir.join(".config/gh").is_symlink(), ".config 其餘連回去");
         assert!(dir.join(".gitconfig").is_symlink() && dir.join(".ssh").is_symlink(), "git／ssh 設定照常可用");
         assert!(!dir.join(".agy-b").exists(), "不把自己連進自己");
+        assert!(!dir.join(".agy-").exists() && !dir.join(".agy-").is_symlink(), "指回自己的舊名連結也不連進來");
         // macOS：Library 不能整包連回去，否則身份讀得到真家目錄的 login Keychain（預設帳號的 token）。
         std::fs::create_dir_all(real.join("Library/Keychains")).unwrap();
         std::fs::create_dir_all(real.join("Library/Preferences")).unwrap();

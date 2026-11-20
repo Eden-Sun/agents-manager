@@ -128,8 +128,9 @@ async fn agy_model_list(app: &Arc<App>, host: &str, identity: Option<&str>) -> R
         return Ok(("static", agy_static_models()));
     }
     let Some(conn) = app.hosts.get(host).await else { return Ok(("static", agy_static_models())) };
-    // 未登入時 `agy models` 以非 0 結束：`|| true` 讓 ssh 那層不當成連線錯誤，輸出照樣過濾成空的，往下試 pane。
-    let script = format!("{{ {}; }} 2>/dev/null || true\n", agy_models_script(&exe, home.as_deref()));
+    // 未登入時 `agy models` 以非 0 結束：包在 subshell 裡（指令尾巴有 `exit $rc`）再 `|| true`，ssh 那層不當成連線錯誤，
+    // 輸出照樣過濾成空的，往下試 pane。
+    let script = format!("( {} ) 2>/dev/null || true\n", agy_models_script(&exe, home.as_deref()));
     if let Ok(out) = conn.ssh_exec_path_timeout(&script, AGY_MODELS_TIMEOUT).await {
         let models = agy_models_from_text(&out);
         if !models.is_empty() {
