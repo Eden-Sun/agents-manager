@@ -295,8 +295,8 @@ const PlainBubble = memo(function PlainBubble({
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>{t('（空白訊息）')}</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          // 譯文與原文同一個泡泡翻面切換（`useMessageTranslation`）；key 換了就重播翻面動畫。
-          <div key={translation.flip ?? 'orig'} className={translation.flip ? 'msg-flip' : undefined}>
+          // 譯文與原文同一個泡泡翻面切換（`useMessageTranslation`）；換面時播放微移淡入動效。
+          <div key={translation.swapKey ?? (translation.flip ?? 'orig')} className={translation.animClass}>
             {translation.content ?? <SafeMarkdown text={msg.content} botId={msg.bot_id} />}
           </div>
         ) : folded && preview ? (

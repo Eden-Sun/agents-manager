@@ -29,11 +29,15 @@ const msg = (content: string, over: Partial<Message> = {}): Message => ({
 })
 
 function Probe({ m }: { m: Message }) {
-  const { button, content } = useMessageTranslation(m)
+  const { button, content, animClass, swapKey } = useMessageTranslation(m)
   return (
     <div>
       <div className="meta">{button}</div>
-      <div className="bubble">{content ?? m.content}</div>
+      <div className="bubble">
+        <div key={swapKey} className={animClass}>
+          {content ?? m.content}
+        </div>
+      </div>
     </div>
   )
 }
@@ -118,6 +122,91 @@ test('點翻譯 → unmount → 重新 mount 仍是譯文，沒有第二次 API 
   assert.equal(translateCalls(reqs), 1)
 })
 
+test('雙向切換：手動換面原→譯帶 msg-swap-forward 且圖示 spin-forward，譯→原帶 msg-swap-backward 且圖示 spin-backward', async () => {
+  fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  await mount(<Probe m={msg(EN)} />)
+  // 原→譯
+  await click(document.querySelector('.msg-translate')!)
+  await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
+  const fwdBody = document.querySelector('.msg-swap-forward')
+  assert.ok(fwdBody, '原→譯應有 msg-swap-forward 動畫 class')
+  const fwdIco = document.querySelector('.msg-translate-ico.spin-forward')
+  assert.ok(fwdIco, '原→譯應有 spin-forward 圖示旋轉 class')
+
+  // 譯→原
+  await click(document.querySelector('.msg-translate')!)
+  await until(() => document.querySelector('.msg-translation') === null, '切回原文')
+  const bwdBody = document.querySelector('.msg-swap-backward')
+  assert.ok(bwdBody, '譯→原應有 msg-swap-backward 動畫 class')
+  const bwdIco = document.querySelector('.msg-translate-ico.spin-backward')
+  assert.ok(bwdIco, '譯→原應有 spin-backward 圖示旋轉 class')
+})
+
+test('快速連點 3 下：以最後一次為準停在譯文，動畫為 msg-swap-forward，不另打翻譯 API', async () => {
+  const reqs = fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  await mount(<Probe m={msg(EN)} />)
+  const btn = document.querySelector<HTMLElement>('.msg-translate')!
+  // 第一次點擊：打 API 並切到譯文
+  await click(btn)
+  await until(() => document.querySelector('.msg-translation') !== null, '第一次譯文顯示')
+  assert.equal(translateCalls(reqs), 1)
+
+  // 快速連點：譯→原、原→譯、譯→原、原→譯
+  await click(btn)
+  await click(btn)
+  await click(btn)
+  await click(btn)
+  assert.ok(document.querySelector('.msg-translation'), '連點後以最後一次為準停在譯文')
+  assert.ok(document.querySelector('.msg-swap-forward'), '最後是原→譯，應有 msg-swap-forward')
+  assert.ok(document.querySelector('.msg-translate-ico.spin-forward'), '圖示為 spin-forward')
+  assert.equal(translateCalls(reqs), 1, '快速連點不另發翻譯請求')
+})
+
+test('重掛不播動畫：初次掛載、偏好恢復與 remount 不帶 msg-swap-* 與 spin-* 動畫 class', async () => {
+  fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+  await mount(<Probe m={msg(EN)} />)
+  await click(document.querySelector('.msg-translate')!)
+  await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
+  await unmountAll()
+
+  // 模擬虛擬列重掛／切換 bot 回來：記憶體狀態中 show 已經是 true
+  await mount(<Probe m={msg(EN)} />)
+  assert.ok(document.querySelector('.msg-translation'), '重掛後仍是譯文')
+  assert.equal(document.querySelector('.msg-swap-forward'), null, '重掛不可帶 msg-swap-forward')
+  assert.equal(document.querySelector('.msg-swap-backward'), null, '重掛不可帶 msg-swap-backward')
+  assert.equal(document.querySelector('.msg-swap-auto'), null, '重掛不可帶 msg-swap-auto')
+  assert.equal(document.querySelector('.msg-translate-ico.spin-forward'), null, '重掛不可轉圖示')
+  assert.equal(document.querySelector('.msg-translate-ico.spin-backward'), null, '重掛不可轉圖示')
+})
+
+test('prefers-reduced-motion：直接換面，正文與圖示都不播放動畫', async () => {
+  const origMatchMedia = window.matchMedia
+  try {
+    window.matchMedia = (query: string) => ({
+      matches: query.includes('prefers-reduced-motion: reduce'),
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }) as unknown as MediaQueryList
+
+    fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
+    await mount(<Probe m={msg(EN)} />)
+    await click(document.querySelector('.msg-translate')!)
+    await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
+    assert.equal(document.querySelector('.msg-swap-forward'), null, 'reduced motion 不帶 msg-swap-forward')
+    assert.equal(document.querySelector('.msg-translate-ico.spin-forward'), null, 'reduced motion 不轉圖示')
+    assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
+  } finally {
+    window.matchMedia = origMatchMedia
+  }
+})
+
+
+
 test('localStorage 有記錄時 mount 自動翻（載入中顯示原文＋翻譯中…），快取命中仍顯示原本金額、不寫未扣費', async () => {
   localStorage.setItem('am.msgTranslate.want', JSON.stringify(['m1']))
   resetTranslationStore()
@@ -168,3 +257,5 @@ test('按回原文後 remount 仍是原文，且從記憶清單移除', async ()
   assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 譯文')
   assert.equal(translateCalls(reqs), 1)
 })
+
+

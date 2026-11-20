@@ -56,7 +56,22 @@ function stubLayout(box: HTMLElement): () => void {
   const prior = Object.getOwnPropertyDescriptor(owner, 'getBoundingClientRect')
   const realRect = (prior?.value ?? Element.prototype.getBoundingClientRect) as () => DOMRect
   const rows = () => Array.from(box.children) as HTMLElement[]
-  Object.defineProperty(box, 'scrollHeight', { configurable: true, get: () => rows().length * ROW })
+  const rowHeight = (el: HTMLElement) => {
+    const h = parseInt(el.style.height, 10)
+    return Number.isFinite(h) && h > 0 ? h : ROW
+  }
+  const calcTop = (target: HTMLElement) => {
+    let acc = 0
+    for (const r of rows()) {
+      if (r === target) return acc - box.scrollTop
+      acc += rowHeight(r)
+    }
+    return acc - box.scrollTop
+  }
+  Object.defineProperty(box, 'scrollHeight', {
+    configurable: true,
+    get: () => rows().reduce((sum, r) => sum + rowHeight(r), 0),
+  })
   Object.defineProperty(box, 'clientHeight', { configurable: true, get: () => VIEW })
   Object.defineProperty(owner, 'getBoundingClientRect', {
     configurable: true,
@@ -64,8 +79,9 @@ function stubLayout(box: HTMLElement): () => void {
     value: function (this: Element) {
       if (this === box) return rect(0, VIEW)
       if (this.parentElement !== box || !this.hasAttribute('data-msg-id')) return realRect.call(this)
-      const top = rows().indexOf(this as HTMLElement) * ROW - box.scrollTop
-      return rect(top, top + ROW)
+      const top = calcTop(this as HTMLElement)
+      const h = rowHeight(this as HTMLElement)
+      return rect(top, top + h)
     },
   })
   return () => {
@@ -128,3 +144,53 @@ test('貼底時尾端多一則仍貼底（既有行為）', async () => {
     restore()
   }
 })
+
+test('手動切換譯文（高度改變）：未貼底時以被點訊息標頭為錨保持位置（誤差 <= 2px），原本貼底時仍保持貼底', async () => {
+  const { box, restore } = await setup(ids('m', 6))
+  try {
+    // 情境 1：未貼底（scrollTop = 100，在看 m1~m3）
+    await scrollTo(box, 100)
+    const target1 = box.querySelector<HTMLElement>('[data-msg-id="m2"]')!
+    const boxRect1 = box.getBoundingClientRect()
+    const targetRect1 = target1.getBoundingClientRect()
+    const anchorTop1 = targetRect1.top - boxRect1.top
+
+    // 模擬 handleFlip 錨定：切換 m2 譯文使高度從 100 變 260
+    const gap1 = box.scrollHeight - (box.scrollTop + box.clientHeight)
+    const wasBottom1 = gap1 <= 40
+    assert.equal(wasBottom1, false, '此時未貼底')
+
+    target1.style.height = '260px'
+    if (wasBottom1) {
+      box.scrollTop = box.scrollHeight
+    } else {
+      const nowRect = target1.getBoundingClientRect()
+      const nowBox = box.getBoundingClientRect()
+      const diff = (nowRect.top - nowBox.top) - anchorTop1
+      if (Math.abs(diff) > 2) box.scrollTop += diff
+    }
+
+    const afterRect1 = target1.getBoundingClientRect()
+    const afterBox1 = box.getBoundingClientRect()
+    const finalTop1 = afterRect1.top - afterBox1.top
+    assert.ok(Math.abs(finalTop1 - anchorTop1) <= 2, `切換後標頭位置偏移應 <= 2px，實際 diff=${Math.abs(finalTop1 - anchorTop1)}`)
+
+    // 情境 2：貼底（scrollTop 設到底）
+    const maxScroll = box.scrollHeight - box.clientHeight
+    await scrollTo(box, maxScroll)
+    const target2 = box.querySelector<HTMLElement>('[data-msg-id="m5"]')!
+    const gap2 = box.scrollHeight - (box.scrollTop + box.clientHeight)
+    const wasBottom2 = gap2 <= 40
+    assert.equal(wasBottom2, true, '此時貼底')
+
+    // 切換最後一則使高度從 100 變 250
+    target2.style.height = '250px'
+    if (wasBottom2) {
+      box.scrollTop = box.scrollHeight
+    }
+    assert.equal(box.scrollTop, box.scrollHeight, '原本貼底時，展開譯文後仍保持貼底')
+  } finally {
+    restore()
+  }
+})
+

@@ -1819,3 +1819,19 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **測試**：
   - `lib/modelSeries.test.ts`：單元測試 `fallbackWarning` 對 other-host（本機/遠端）、stale、static（非 claude 與 claude）之邏輯判斷。
   - `components/modelSeriesDom.test.tsx`：DOM 測試 other-host、static 與 claude 正常無警告行為。
+
+## 訊息原文 ⇄ 譯文切換動效改為微移淡入＋圖示半轉（方案 A，2026-11-20，使用者）
+
+- **背景**：原 3D 翻轉動效（`rotateX(-70deg)` 280ms）耗時較長且有透視形變，在長文字訊息中視覺跳動較大。依設計調研評估報告（`reports/translate-swap-anim-astra.md`）及互動原型驗證，核定採用方案 A。
+- **做法**：
+  - **手動切換動效**：新正文 opacity .72 → 1，原→譯自 `translateX(4px)`、譯→原自 `translateX(-4px)` 回到 0；時長 150ms，緩動 `cubic-bezier(.2,.8,.2,1)`。僅正文與譯文註記（費用／品質）播放動畫，時間、附件、操作按鈕維持不動；不重複掛載雙份 Markdown，不動畫 height。
+  - **⇄ 圖示旋轉**：手動切換時圖示轉半圈（140ms，`spin-forward` 順時針 180deg，`spin-backward` 逆時針回 0deg），文字不轉。連點以最後一次為準，不排隊且不重複打翻譯 API。
+  - **自動翻譯完成**：貼底時僅做 100ms 純淡入（`msg-swap-auto`），圖示不轉；使用者向上捲動閱讀或選取文字時，先保留原文，按鈕顯示「譯文已就緒」（i18n 中英雙語），使用者手動點擊才切換，且不污染 `wanted`/`declined` 偏好。
+  - **靜態與重掛不播動效**：初次掛載、虛擬列重掛、偏好恢復、錯誤／拒絕狀態均不播放動畫。
+  - **捲動錨定**：原本貼底保持貼底；未貼底時以被點訊息標頭為錨補償捲動位置（偏差 ≤ 2px），列表 key 維持穩定 `msg.id`。
+  - **prefers-reduced-motion**：直接切換，正文與圖示均無位移與旋轉動效。
+- **測試**：
+  - `translateButtonDom.test.tsx`：雙向切換 class、三連點最後一次生效、重掛不播動畫、reduced motion。
+  - `autoTranslateDom.test.tsx`：自動完成純淡入無旋轉、選取文字與往上捲動時保留原文並顯示「譯文已就緒」、點擊後切換且偏好不被竄改。
+  - `useScrollTailAnchorDom.test.tsx`：手動切換展開高度變化時，未貼底標頭錨定偏差 ≤ 2px，原本貼底仍保持貼底。
+

@@ -23,6 +23,8 @@ export function MessageTranslationButton({
   off,
   status,
   show,
+  ready,
+  spin,
   onFlip,
   onManual,
   rejectedReason,
@@ -34,7 +36,9 @@ export function MessageTranslationButton({
   off: { reason: string } | null
   status: 'idle' | 'loading' | 'done' | 'error' | 'rejected'
   show?: boolean
-  onFlip: () => void
+  ready?: boolean
+  spin?: 'forward' | 'backward' | null
+  onFlip: (e?: React.MouseEvent) => void
   onManual: () => void
   /** 品質檢查沒過時的原因（檢查名稱）與「仍然顯示譯文」（daemon 有帶被擋的譯文才有）。 */
   rejectedReason?: string
@@ -46,13 +50,81 @@ export function MessageTranslationButton({
 }) {
   const t = useT()
   if (!eligible) return null
+  const isReady = status === 'done' && Boolean(ready) && !show
+
+  const handleFlip = (e: React.MouseEvent) => {
+    // 錨定：原本貼底就保持貼底；手動點擊時以被點訊息的標頭為錨保持位置
+    const btn = e.currentTarget as HTMLElement
+    const box = (btn.closest('.msg-list') ?? btn.closest('[data-list]')) as HTMLElement | null
+    const msgEl = btn.closest('[data-msg-id]') as HTMLElement | null
+    const head = (msgEl?.querySelector('.msg-meta') as HTMLElement | null) ?? msgEl
+    const wasBottom = box ? box.scrollHeight - box.scrollTop - box.clientHeight < 30 : false
+    const headTop = box && head ? head.getBoundingClientRect().top - box.getBoundingClientRect().top : 0
+
+    onFlip(e)
+
+    if (box) {
+      const adjust = () => {
+        if (wasBottom) {
+          box.scrollTop = box.scrollHeight
+        } else if (head) {
+          const now = head.getBoundingClientRect().top - box.getBoundingClientRect().top
+          const diff = now - headTop
+          if (Math.abs(diff) > 0.5) {
+            box.scrollTop += diff
+          }
+        }
+      }
+      adjust()
+      if (typeof requestAnimationFrame !== 'undefined') {
+        requestAnimationFrame(adjust)
+      }
+    }
+  }
+
   const onClick = off
     ? () => useStore.getState().notify('info', t.tr(off.reason))
-    : status === 'done' ? onFlip : status === 'loading' ? undefined : onManual
-  const label = off ? t('翻譯（未啟用）') : status === 'loading' ? t('翻譯中…') : status === 'done' ? (show ? t('⇄ 原文') : t('⇄ 譯文')) : t('翻譯')
+    : status === 'done'
+      ? handleFlip
+      : status === 'loading'
+        ? undefined
+        : onManual
+
+  const label = off
+    ? t('翻譯（未啟用）')
+    : status === 'loading'
+      ? t('翻譯中…')
+      : isReady
+        ? t('譯文已就緒')
+        : status === 'done'
+          ? (show ? t('⇄ 原文') : t('⇄ 譯文'))
+          : t('翻譯')
+
+  const ariaLabel = isReady || !show ? t('顯示譯文') : t('顯示原文')
+  const title = off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')
+
+  let content: React.ReactNode = label
+  if (status === 'done' && !isReady && typeof label === 'string' && label.startsWith('⇄ ')) {
+    content = (
+      <>
+        <span className={`msg-translate-ico${spin ? ` spin-${spin}` : ''}`} aria-hidden="true">
+          ⇄
+        </span>{' '}
+        <span className="msg-translate-lbl">{label.slice(2)}</span>
+      </>
+    )
+  }
+
   const button = (
-    <button type="button" className={`msg-translate${off ? ' off' : ''}`} disabled={status === 'loading'} onClick={onClick} title={off ? t.tr(off.reason) : t('用 Claude 翻成繁體中文')}>
-      {label}
+    <button
+      type="button"
+      className={`msg-translate${off ? ' off' : ''}${isReady ? ' ready' : ''}`}
+      disabled={status === 'loading'}
+      onClick={onClick}
+      title={title}
+      aria-label={ariaLabel}
+    >
+      {content}
     </button>
   )
   if (off || status !== 'rejected') return button

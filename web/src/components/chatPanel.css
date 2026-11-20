@@ -1163,28 +1163,100 @@
   margin: 0;
 }
 
-/* 原文⇄譯文翻面：同一個泡泡裡換內容，換的那一下沿 X 軸翻過來。 */
-.msg-flip {
-  animation: msg-flip-in 0.28s ease-out;
-  transform-origin: center;
-  backface-visibility: hidden;
+/* 原文⇄譯文交換動畫（方案 A：微移淡入＋圖示轉半圈） */
+.msg-swap-forward {
+  animation: msg-swap-in-fwd 150ms cubic-bezier(.2, .8, .2, 1);
+  will-change: opacity, transform;
 }
 
-@keyframes msg-flip-in {
-  from {
-    opacity: 0.2;
-    transform: perspective(800px) rotateX(-70deg);
-  }
+.msg-swap-backward {
+  animation: msg-swap-in-bwd 150ms cubic-bezier(.2, .8, .2, 1);
+  will-change: opacity, transform;
+}
 
+.msg-swap-auto {
+  animation: msg-swap-in-auto 100ms cubic-bezier(.2, .8, .2, 1);
+  will-change: opacity;
+}
+
+@keyframes msg-swap-in-fwd {
+  from {
+    opacity: 0.72;
+    transform: translateX(4px);
+  }
   to {
     opacity: 1;
-    transform: none;
+    transform: translateX(0);
   }
+}
+
+@keyframes msg-swap-in-bwd {
+  from {
+    opacity: 0.72;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes msg-swap-in-auto {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.msg-translate-ico {
+  display: inline-block;
+  will-change: transform;
+}
+
+.msg-translate-ico.spin-forward {
+  animation: msg-ico-spin-fwd 140ms cubic-bezier(.2, .8, .2, 1) forwards;
+}
+
+.msg-translate-ico.spin-backward {
+  animation: msg-ico-spin-bwd 140ms cubic-bezier(.2, .8, .2, 1) forwards;
+}
+
+@keyframes msg-ico-spin-fwd {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(180deg); }
+}
+
+@keyframes msg-ico-spin-bwd {
+  from { transform: rotate(180deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 譯文已就緒（醒目提示） */
+.msg-translate.ready {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 向下相容別名 */
+.msg-flip {
+  animation: msg-swap-in-fwd 150ms cubic-bezier(.2, .8, .2, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .msg-swap-forward,
+  .msg-swap-backward,
+  .msg-swap-auto,
   .msg-flip {
-    animation: none;
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+  .msg-translate-ico {
+    animation: none !important;
+    transform: none !important;
+    transition: none !important;
   }
 }
 

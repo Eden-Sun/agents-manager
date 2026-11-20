@@ -27,11 +27,15 @@ const msg = (content: string, over: Partial<Message> = {}): Message => ({
 })
 
 function Probe({ m, recent = true }: { m: Message; recent?: boolean }) {
-  const { button, content } = useMessageTranslation(m, { recent })
+  const { button, content, animClass, swapKey } = useMessageTranslation(m, { recent })
   return (
-    <div className={`row-${m.id}`}>
+    <div className={`row-${m.id}`} data-msg-id={m.id}>
       <div className="meta">{button}</div>
-      <div className="bubble">{content ?? m.content}</div>
+      <div className="bubble">
+        <div key={swapKey} className={animClass}>
+          {content ?? m.content}
+        </div>
+      </div>
     </div>
   )
 }
@@ -263,4 +267,78 @@ test('手動翻譯被品質檢查擋下：提示寫出原因、可「仍然顯�
   await click(document.querySelector('[data-k="translate-show-anyway"]') as HTMLButtonElement)
   await until(() => (document.querySelector('.msg-translation')?.textContent ?? '').includes('被擋下的譯文'), '仍然顯示譯文')
   assert.equal(calls, before, '顯示被擋譯文不再打 API')
+})
+
+test('自動翻譯完成（貼底中）：正文 msg-swap-auto 純淡入，圖示不旋轉', async () => {
+  fakeApi(route())
+  await mount(<Probe m={msg(EN, { id: 'auto-bottom' })} />)
+  await until(() => document.querySelector('.msg-translation') !== null, '自動翻出譯文')
+  assert.ok(document.querySelector('.msg-swap-auto'), '貼底自動完成應帶 msg-swap-auto 純淡入')
+  assert.equal(document.querySelector('.msg-translate-ico.spin-forward'), null, '自動完成不轉圖示')
+  assert.equal(document.querySelector('.msg-translate-ico.spin-backward'), null, '自動完成不轉圖示')
+})
+
+test('自動翻譯完成（選取文字中）：先保留原文、按鈕顯示「譯文已就緒」，點了才換且不改寫偏好', async () => {
+  const origGetSelection = window.getSelection
+  try {
+    // 模擬使用者正在選取文字
+    window.getSelection = () => ({
+      toString: () => 'selecting some text',
+    }) as unknown as Selection
+
+    fakeApi(route())
+    await mount(<Probe m={msg(EN, { id: 'auto-select' })} />)
+    await until(() => document.querySelector('.msg-translate.ready') !== null, '按鈕標註譯文已就緒')
+    assert.equal(document.querySelector('.msg-translate')?.textContent, '譯文已就緒')
+    assert.equal(document.querySelector('.msg-translation'), null, '選取中先保留原文')
+    // 偏好：記住 wanted，但不改寫 declined
+    assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.want') ?? '[]'), ['auto-select'])
+    assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.declined') ?? '[]'), [])
+
+    // 使用者點擊按鈕才換成譯文
+    await click(document.querySelector('.msg-translate') as HTMLButtonElement)
+    await until(() => document.querySelector('.msg-translation') !== null, '點擊後顯示譯文')
+    assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
+    assert.ok(document.querySelector('.msg-swap-forward'), '手動換面應帶 msg-swap-forward')
+    assert.ok(document.querySelector('.msg-translate-ico.spin-forward'), '手動換面轉半圈')
+    // 依然不改寫 declined 偏好
+    assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.declined') ?? '[]'), [])
+  } finally {
+    window.matchMedia = window.matchMedia
+    window.getSelection = origGetSelection
+  }
+})
+
+test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕顯示「譯文已就緒」，點了才換', async () => {
+  fakeApi(route())
+  // 掛在有 .msg-list 且非貼底的容器中
+  const host = document.createElement('div')
+  host.className = 'msg-list'
+  Object.defineProperty(host, 'scrollHeight', { value: 1000, configurable: true })
+  Object.defineProperty(host, 'scrollTop', { value: 200, configurable: true })
+  Object.defineProperty(host, 'clientHeight', { value: 400, configurable: true })
+  document.body.appendChild(host)
+
+  try {
+    await mount(
+      <div className="msg-list" style={{ height: 400, overflow: 'auto' }}>
+        <Probe m={msg(EN, { id: 'auto-reading' })} />
+      </div>,
+    )
+    const listEl = document.querySelector('.msg-list') as HTMLElement
+    Object.defineProperty(listEl, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(listEl, 'scrollTop', { value: 200, configurable: true })
+    Object.defineProperty(listEl, 'clientHeight', { value: 400, configurable: true })
+
+    await until(() => document.querySelector('.msg-translate.ready') !== null, '按鈕標註譯文已就緒')
+    assert.equal(document.querySelector('.msg-translate')?.textContent, '譯文已就緒')
+    assert.equal(document.querySelector('.msg-translation'), null, '閱讀歷史中先保留原文')
+
+    // 點擊後切換到譯文
+    await click(document.querySelector('.msg-translate') as HTMLButtonElement)
+    await until(() => document.querySelector('.msg-translation') !== null, '點擊後顯示譯文')
+    assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
+  } finally {
+    host.remove()
+  }
 })
