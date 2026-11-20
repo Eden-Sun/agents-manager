@@ -1773,3 +1773,9 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
 - **測試**：
   - `lib/modelSeries.test.ts`：14 個模型亂序輸入正確依序排列（flash、hydrogen、argon、neon 各自強度 low<medium<high<xhigh）；未知家族與未知 id 排序；斷言 14 個模型經 `latestModels` 全部保留，四家族不互相隱藏。
   - `components/agyRetiredModelDom.test.tsx`：後備清單依價格排序後 medium 依然為模型預設。
+## 設定→身份：新增帳號接線（第 3 階段接線，2026-11-20）
+
+- **入口**：頁首與每張 CLI 卡的「新增帳號」打開 `AddIdentityDialog`；從卡打開時預選該 CLI，主機預選目前分頁。頁尾舊的「新增身份」表單移除。
+- **新增後**：切到該主機分頁、捲到新列並標亮約 6 秒；列上方顯示「已新增 X（尚未登入）」＋「立即登入」。
+- **登入不關設定視窗**：身份頁發起的登入用 `loginIdentity(host, name, { background: true })`：終端在背景開，只記在 `identityLoginPane`，不切 `shellView`、不清 `settingsBotId`。要看終端按「打開登入終端」才切過去。其他呼叫端（Bot 設定、onboarding）行為不變。
+- **測試**：`settingsIdentitiesDom.test.tsx` 改為對話框流程，新增：env 錯誤鎖送出、從 codex 卡預選、agy 預填與送出、新列標亮＋立即登入走背景模式。

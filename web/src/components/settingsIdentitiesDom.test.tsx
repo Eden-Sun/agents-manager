@@ -139,69 +139,6 @@ it('新增身份後出現在清單；用不到就能刪（要先確認）', asyn
   await until(() => !row('dom3id'), '清單移除')
 })
 
-it('新增身份表單：env 打錯的行逐行說明並鎖住送出（不靜靜丟掉）；打了名字沒送出就關分頁會被攔', async () => {
-  const requests = await open()
-  const form = () => document.querySelector('.identities-panel form, form')!
-  const nameInput = [...document.querySelectorAll<HTMLInputElement>('form input[type=text]')].find((i) => i.placeholder === 'cc1')!
-  const envBox = document.querySelector<HTMLTextAreaElement>('form textarea')!
-  const unload = () => {
-    const ev = new Event('beforeunload', { cancelable: true })
-    window.dispatchEvent(ev)
-    return ev.defaultPrevented
-  }
-  assert.equal(unload(), false, '還沒打東西')
-  await typeInto(nameInput, 'cc9')
-  assert.equal(unload(), true, '打了名字沒送出：攔')
-  await typeInto(envBox, 'CLAUDE_CONFIG_DIR ~/.claude-cc9')
-  assert.match(form().textContent ?? '', /第 1 行.*沒有 =/)
-  const submit = [...form().querySelectorAll('button')].find((b) => b.textContent === '新增身份') as HTMLButtonElement
-  assert.equal(submit.disabled, true)
-  assert.equal(calls(requests, /\/identities$/).length, 0, '一個請求都沒送')
-})
-
-it('新增身份表單：還沒命名時改了 env 也會攔 beforeunload', async () => {
-  await open()
-  const envBox = document.querySelector<HTMLTextAreaElement>('.identities-panel form textarea')!
-  const unload = () => {
-    const ev = new Event('beforeunload', { cancelable: true })
-    window.dispatchEvent(ev)
-    return ev.defaultPrevented
-  }
-  assert.equal(unload(), false, '初始表單沒有未儲存值')
-  await typeInto(envBox, 'CLAUDE_CONFIG_DIR=/tmp/not-a-real-config')
-  assert.equal(unload(), true, '環境值是使用者輸入，即使名稱還空白也不能無提示丟掉')
-})
-
-it('新增身份完成時不清掉送出後又輸入的下一個身份名稱', async () => {
-  const requests = await open()
-  const originalFetch = globalThis.fetch
-  let release!: () => void
-  let markStarted!: () => void
-  const held = new Promise<void>((resolve) => { release = resolve })
-  const started = new Promise<void>((resolve) => { markStarted = resolve })
-  globalThis.fetch = (async (input: string, init?: RequestInit) => {
-    if (String(input) === '/api/identities' && init?.method === 'POST') {
-      markStarted()
-      await held
-    }
-    return originalFetch(input, init)
-  }) as unknown as typeof fetch
-  try {
-    const name = [...document.querySelectorAll<HTMLInputElement>('.identities-panel form input[type=text]')].find((i) => i.placeholder === 'cc1')!
-    await typeInto(name, 'cc10')
-    await click([...document.querySelectorAll('.identities-panel form button')].find((b) => b.textContent === '新增身份')!)
-    await started
-    await typeInto(name, 'cc11')
-    release()
-    await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/identities'), '新增身份完成')
-    await until(() => Boolean(row('cc10')), '新身份出現在清單')
-    assert.equal(name.value, 'cc11', '完成先前請求時不能覆蓋使用者後打的字')
-  } finally {
-    release()
-    globalThis.fetch = originalFetch
-  }
-})
-
 it('config 裡既有的空值 env 身份在列上標警告（只標示，不送任何改寫請求）；有值的身份不標', async () => {
   const requests = await open()
   await mount_with_identities()
@@ -217,27 +154,6 @@ async function mount_with_identities() {
   await act(() => useStore.setState({ identities: [...identities, { name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] }] }))
 }
 
-it('新增身份表單選 agy：預填 HOME=$HOME/.agy-、說明副作用，送出的是 kind agy＋HOME', async () => {
-  const requests = await open()
-  const form = () => document.querySelector('.identities-panel form, form')!
-  const radios = [...form().querySelectorAll<HTMLInputElement>('input[type=radio][name=identity-kind]')]
-  assert.deepEqual(radios.map((r) => r.value), ['claude', 'codex', 'grok', 'agy'], 'kind 是四個 radio')
-  assert.ok(form().querySelector('[role=radiogroup][aria-label=kind]'), 'kind 有 radiogroup 無障礙標記')
-  assert.equal(form().querySelector('[data-k="agy-home-hint"]'), null, '其他 kind 不顯示 agy 說明')
-  await act(async () => {
-    radios.find((r) => r.value === 'agy')!.click()
-  })
-  const envBox = form().querySelector<HTMLTextAreaElement>('textarea')!
-  assert.equal(envBox.value, 'HOME=$HOME/.agy-')
-  assert.match(form().querySelector('[data-k="agy-home-hint"]')?.textContent ?? '', /HOME.*\.gemini.*未登入/)
-  const nameInput = [...form().querySelectorAll<HTMLInputElement>('input[type=text]')].find((i) => i.placeholder === 'cc1')!
-  await typeInto(nameInput, 'agb')
-  await typeInto(envBox, 'HOME=$HOME/.agy-agb')
-  await click([...form().querySelectorAll('button')].find((b) => b.textContent === '新增身份')!)
-  await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/identities'), '送出新增身份')
-  const post = requests.find((r) => r.method === 'POST' && r.path === '/api/identities')!
-  assert.deepEqual(post.body, { name: 'agb', kind: 'agy', env: { HOME: '$HOME/.agy-agb' } })
-})
 
 const defaultRow = (host: string, kind: string) => document.querySelector(`[data-k="default-${host}-${kind}"]`)!
 
@@ -447,7 +363,8 @@ it('多台主機：每台一個 tab，點哪台只列哪台的卡；遠端卡沒
   await pickHost('m4p')
   assert.equal(tabs()[1].getAttribute('aria-selected'), 'true')
   assert.ok(kindCards().every((k) => k?.startsWith('m4p-')), `只剩 m4p 的卡：${kindCards().join(',')}`)
-  assert.equal(document.querySelector('[data-kind-card="m4p-claude"] .identity-kind-card-head button'), null, '遠端卡沒有停用開關')
+  const remoteHead = [...(document.querySelector('[data-kind-card="m4p-claude"] .identity-kind-card-head')?.querySelectorAll('button') ?? [])]
+  assert.equal(remoteHead.filter((b) => b.textContent !== '新增帳號').length, 0, '遠端卡沒有停用開關（只有新增帳號）')
 })
 
 it('斷線主機的 tab 仍在、標「斷線」，內容顯示離線說明且沒有登入鍵', async () => {
@@ -489,4 +406,67 @@ it('cc0 設定檔與預設帳號分開標示：同名不合併', async () => {
   await open()
   assert.match(row('cc0').textContent ?? '', /cc0 設定檔.*只給指定 cc0 的 Bot 用/)
   assert.match(defaultRow('local', 'claude').textContent ?? '', /預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）/)
+})
+
+/** 頁首「新增帳號」（不預選 CLI）。 */
+const openAddFromHeader = async () => click([...document.querySelectorAll<HTMLButtonElement>('.identity-page-actions button')][0]!)
+const dialog = () => document.querySelector<HTMLElement>('.add-identity-dialog')!
+const dialogButton = (text: string) => [...dialog().querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === text)!
+const dialogName = () => dialog().querySelector<HTMLInputElement>('input[type=text]')!
+const dialogEnv = () => dialog().querySelector<HTMLTextAreaElement>('textarea')!
+const pageText = () => document.querySelector('.identities-panel')?.textContent ?? ''
+
+it('新增帳號對話框：env 打錯的行逐行說明並鎖住送出；一個請求都沒送', async () => {
+  const requests = await open()
+  await openAddFromHeader()
+  assert.ok(dialog(), '頁首打開對話框')
+  await typeInto(dialogName(), 'cc9')
+  await typeInto(dialogEnv(), 'CLAUDE_CONFIG_DIR ~/.claude-cc9')
+  assert.match(dialog().textContent ?? '', /第 1 行.*沒有 =/)
+  assert.equal(dialogButton('新增並登入').disabled, true)
+  assert.equal(calls(requests, /\/identities$/).length, 0)
+})
+
+it('從 codex 卡按「新增帳號」：預選 codex、env 預填 CODEX_HOME＝$HOME/.codex-<名稱>', async () => {
+  await open()
+  await click(document.querySelector<HTMLButtonElement>('[data-kind-card="local-codex"] .identity-kind-actions button')!)
+  const picked = dialog().querySelector<HTMLInputElement>('input[name=add-identity-kind]:checked')
+  assert.equal(picked?.value, 'codex')
+  await typeInto(dialogName(), 'work')
+  assert.equal(dialogEnv().value, 'CODEX_HOME=$HOME/.codex-work')
+  assert.ok(dialog().textContent?.includes('$HOME/.codex-work'), '摘要顯示實際目錄')
+})
+
+it('新增 agy 身份：預填 HOME=$HOME/.agy-，送出的是 kind agy＋HOME（建立於本機，不帶 host）', async () => {
+  const requests = await open()
+  await openAddFromHeader()
+  await click(dialog().querySelector<HTMLInputElement>('input[value=agy]')!)
+  assert.equal(dialogEnv().value, 'HOME=$HOME/.agy-')
+  await typeInto(dialogName(), 'agb')
+  await click(dialogButton('新增並登入'))
+  await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/identities'), '送出新增身份')
+  const post = requests.find((r) => r.method === 'POST' && r.path === '/api/identities')!
+  assert.deepEqual(post.body, { name: 'agb', kind: 'agy', env: { HOME: '$HOME/.agy-agb' } })
+})
+
+it('新增後：標亮新列、顯示尚未登入＋立即登入；立即登入是背景開，不切走設定頁', async () => {
+  const requests = await open()
+  await openAddFromHeader()
+  await typeInto(dialogName(), 'cc12')
+  await click(dialogButton('新增並登入'))
+  await until(() => Boolean(document.querySelector('[data-fresh-row="true"]')), '新列標亮')
+  // mock 的登入會立刻變已登入；這裡模擬「還沒完成授權」的狀態。
+  await act(() =>
+    useStore.setState((s) => ({
+      localIdentityStatus: { ...s.localIdentityStatus, cc12: { ...s.localIdentityStatus.cc12, logged_in: false } },
+    })),
+  )
+  await until(() => pageText().includes('尚未登入'), '提示尚未登入')
+  await click(dialogButton('稍後再登入'))
+  assert.equal(document.querySelector('.add-identity-dialog'), null)
+  await click([...document.querySelectorAll<HTMLButtonElement>('.identity-fresh-banner button')].find((b) => b.textContent === '立即登入')!)
+  await until(() => requests.some((r) => /\/identities\/cc12\/login/.test(r.path)), '送了 login')
+  assert.equal(useStore.getState().shellView, null, '背景登入：不切到 shell')
+  assert.ok(useStore.getState().identityLoginPane, '登入終端記在 identityLoginPane')
+  assert.ok(document.querySelector('.identities-panel'), '設定頁的身份面板還在')
 })

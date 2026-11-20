@@ -28,11 +28,15 @@ export interface AddIdentityDialogProps {
   hosts: AddIdentityHost[]
   /** 預先選的主機（例如從某台主機的分頁按「新增帳號」）。 */
   initialHost?: string
+  /** 預先選的 CLI（從某張 CLI 卡按「新增帳號」）。 */
+  initialKind?: BotKind
   existing: readonly Identity[]
   /** 建立身份；回 false 表示失敗（通知由 store 負責），對話框停在表單。 */
   onCreate: (input: NewIdentityInput, host: string) => Promise<boolean>
   /** 在那台主機開登入終端；回 true 表示終端已開。 */
   onLogin: (host: string, name: string) => Promise<boolean>
+  /** 打開背景開著的登入終端（終端在背景開，要自己切過去才看得到）。 */
+  onOpenTerminal?: () => void
   /** 讀目前的登入狀態：true／false／null（無法確認）。 */
   loggedIn: (host: string, name: string) => boolean | null
   /** 重新抓身份狀態（store.refreshState）。 */
@@ -57,9 +61,11 @@ export function AddIdentityDialog({
   open,
   hosts,
   initialHost,
+  initialKind,
   existing,
   onCreate,
   onLogin,
+  onOpenTerminal,
   loggedIn,
   refreshStatus,
   onCreated,
@@ -72,9 +78,9 @@ export function AddIdentityDialog({
   const dialogRef = useRef<HTMLDivElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
   const [host, setHost] = useState(initialHost ?? hosts[0]?.name ?? 'local')
-  const [kind, setKind] = useState<BotKind>('claude')
+  const [kind, setKind] = useState<BotKind>(initialKind ?? 'claude')
   const [name, setName] = useState('')
-  const [envText, setEnvText] = useState(suggestedIdentityEnvText('claude', ''))
+  const [envText, setEnvText] = useState(suggestedIdentityEnvText(initialKind ?? 'claude', ''))
   const [kindPrompt, setKindPrompt] = useState<KindPrompt | null>(null)
   const [phase, setPhase] = useState<Phase>('form')
   const [created, setCreated] = useState<{ host: string; name: string } | null>(null)
@@ -86,9 +92,9 @@ export function AddIdentityDialog({
     setLastOpen(open)
     if (open) {
       setHost(initialHost ?? hosts[0]?.name ?? 'local')
-      setKind('claude')
+      setKind(initialKind ?? 'claude')
       setName('')
-      setEnvText(suggestedIdentityEnvText('claude', ''))
+      setEnvText(suggestedIdentityEnvText(initialKind ?? 'claude', ''))
       setKindPrompt(null)
       setPhase('form')
       setCreated(null)
@@ -384,6 +390,11 @@ export function AddIdentityDialog({
                   <button type="button" className="btn" onClick={onClose}>
                     {t('稍後再登入')}
                   </button>
+                  {onOpenTerminal ? (
+                    <button type="button" className="btn" onClick={onOpenTerminal}>
+                      {t('打開登入終端')}
+                    </button>
+                  ) : null}
                   <button type="button" className="btn primary" onClick={() => setPhase('checking')}>
                     {t('我已完成登入，立即檢查')}
                   </button>
@@ -398,6 +409,15 @@ export function AddIdentityDialog({
                     <button type="button" className="btn primary" onClick={() => created && void openLogin(created.host, created.name)}>
                       {t('重試登入')}
                     </button>
+                  ) : onOpenTerminal ? (
+                    <>
+                      <button type="button" className="btn" onClick={onOpenTerminal}>
+                        {t('打開登入終端')}
+                      </button>
+                      <button type="button" className="btn primary" onClick={() => { attemptsRef.current = 0; setPhase('checking') }}>
+                        {t('重新檢查')}
+                      </button>
+                    </>
                   ) : (
                     <button
                       type="button"

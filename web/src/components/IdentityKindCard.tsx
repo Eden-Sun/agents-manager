@@ -58,7 +58,7 @@ function KindSwitch({ kind }: { kind: BotKind }) {
  * 一張 CLI 卡：標頭是 kind（圖示＋名稱）與（本機）啟用開關；內容依序是預設帳號、自訂身份、shell 偵測身份。
  * 沒安裝時標一行說明；身份（綁著它的 config 身份）仍照列。
  */
-export function IdentityKindCard({ host, kind, children }: { host: string; kind: BotKind; children: ReactNode }) {
+export function IdentityKindCard({ host, kind, children, onAdd }: { host: string; kind: BotKind; children: ReactNode; onAdd?: () => void }) {
   const t = useT()
   const tool = useKindTool(host, kind)
   const installed = tool?.installed === true
@@ -69,7 +69,14 @@ export function IdentityKindCard({ host, kind, children }: { host: string; kind:
           <KindTag kind={kind} />
           <span className="identity-kind-name">{KIND_LABEL[kind]}</span>
         </span>
-        {host === 'local' ? <KindSwitch kind={kind} /> : null}
+        <span className="identity-kind-actions">
+          {onAdd ? (
+            <button type="button" className="mini-btn" onClick={onAdd}>
+              {t('新增帳號')}
+            </button>
+          ) : null}
+          {host === 'local' ? <KindSwitch kind={kind} /> : null}
+        </span>
       </header>
       {installed ? null : <p className="hint">{tool ? t('這台主機沒有安裝 {kind}', { kind }) : t('尚未偵測 {kind} 是否安裝', { kind })}</p>}
       {children}

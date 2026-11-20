@@ -616,10 +616,6 @@ export default {
   '（無 env）': '(no env)',
   ' 目前沒有 Bot 在用它。': ' No bot is using it.',
   '名稱（例如 cc1）': 'Name (for example cc1)',
-  '小寫英文字母開頭，之後可接小寫字母、數字、- 或 _，最多 32 個字。': 'Start with a lowercase letter; then lowercase letters, digits, - or _ are allowed, up to 32 characters.',
-  'agy 沒有設定目錄變數，所以這個身份是換一個 {home}：daemon 會建那個目錄，{gemini} 與 agy 的憑證各自獨立（建好是未登入，登入請按身份列上的「登入」），其餘（git／ssh／PATH 等）用連結指回真家目錄。副作用：用這個身份的 agy 看到的 {homeVar} 是那個目錄。': 'agy has no config-dir variable, so this identity is a separate {home}: the daemon creates that directory, {gemini} and agy credentials are independent (it starts signed out; use Log in on the identity row), and everything else (git/ssh/PATH…) is linked back to the real home. Side effect: agy under this identity sees {homeVar} as that directory.',
-  'env（每行 KEY=VALUE；{home} 與開頭 {tilde} 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）': 'env (one KEY=VALUE per line; {home} and a leading {tilde} expand to the home directory on that host; claude uses CLAUDE_CONFIG_DIR, grok uses GROK_HOME)',
-  '新增身份': 'Add identity',
   '只支援 Claude cc0 到 cc6 shell alias。': 'Only Claude shell aliases cc0 through cc6 are supported.',
   '找不到這台主機上可直接移除的 shell alias；設定身份沒有變更。': 'No directly removable shell alias was found on this host; configured identities were not changed.',
   '這個身份仍被 Bot、執行中的 Run、巡檢或 supervisor role 使用，shell alias 沒有移除。': 'A bot, active run, patrol, or supervisor role still uses this identity; the shell alias was not removed.',
@@ -707,4 +703,7 @@ export default {
   '{n} 天前檢查': 'Checked {n} d ago',
   '檢查於': 'Checked on',
   '從登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改 alias 內容請編輯該主機的 shell 設定。「不再提供給新 Bot」只會把它從身份選單拿掉，「從 shell 設定移除」則會刪掉支援的 Claude ccN alias。': 'Identities recognized from the {alias} aliases in the login shell ({rc}, etc.). You can assign them to a bot directly. To change an alias, edit that host\'s shell config. "No longer offer to new bots" only removes it from the identity picker; "Remove from shell config" deletes the supported Claude ccN alias.',
+  // 身份頁接線（新增帳號對話框、背景登入）
+  '打開登入終端': 'Open sign-in terminal',
+  '已新增 {name}（尚未登入）': 'Added {name} (not signed in yet)',
 } satisfies Dict

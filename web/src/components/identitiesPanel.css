@@ -323,3 +323,45 @@
   align-items: center;
   gap: 8px;
 }
+
+/* 第 2 階段接線：頁首「新增帳號」、CLI 卡標頭的按鈕、新增後的定位與標亮。 */
+.identity-page-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.identity-kind-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.identity-fresh-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+
+.identity-row-fresh {
+  border-radius: var(--radius);
+  animation: identity-row-flash 2.4s ease-out;
+}
+
+@keyframes identity-row-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}

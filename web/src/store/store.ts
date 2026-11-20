@@ -671,7 +671,11 @@ export interface StoreState {
   loadModels: (kind: BotKind, host: string, identity?: string | null) => Promise<ModelInfo[] | null>
   /** Ask a running bot on `host` to install + log in `kind`; opens that bot's chat. null = failed. */
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
-  loginIdentity: (host: string, identity: string) => Promise<boolean>
+  /** 身份登入。`background`：從身份頁發起時用，終端在背景開、不切走 shellView、不關設定視窗；終端之後用 `openIdentityLoginPane` 打開。 */
+  loginIdentity: (host: string, identity: string, opts?: { background?: boolean }) => Promise<boolean>
+  /** 背景開的登入終端（`loginIdentity` 的 background 模式）；按了才切過去。 */
+  identityLoginPane: { host: string; identity: string; paneId: string; cwd: string } | null
+  openIdentityLoginPane: () => void
   logoutIdentity: (host: string, identity: string) => Promise<boolean>
   /** 額度欄 agy 那格的登出：刪該主機的 agy 憑證，成功後那格改顯示未登入。 */
   logoutAgy: (host: string) => Promise<boolean>
@@ -1012,6 +1016,7 @@ export const useStore = create<StoreState>((set, get) => {
   supervisorRev: 0,
   schedulesRev: 0,
   shellView: initialShellView,
+  identityLoginPane: null,
   supervisorProjectId: null,
   agmDeleteAsk: null,
 
@@ -2535,10 +2540,17 @@ export const useStore = create<StoreState>((set, get) => {
     return ok
   },
 
-  async loginIdentity(host, identity) {
+  async loginIdentity(host, identity, opts) {
     const kind = (identityStatusOfHost(get(), host)[identity]?.kind ?? 'claude') as BotKind
     if (!(await get().confirmCodexLoginReplace(host, kind, identity))) return false
-    return identityAuth(set, get, host, identity, 'login')
+    return identityAuth(set, get, host, identity, 'login', opts?.background === true)
+  },
+
+  openIdentityLoginPane() {
+    const pane = get().identityLoginPane
+    if (!pane) return
+    markUserNav()
+    set({ shellView: { host: pane.host, paneId: pane.paneId, cwd: pane.cwd }, settingsBotId: null })
   },
 
   confirmCodexLoginReplace(host, kind, identity) {
@@ -2909,9 +2921,18 @@ function existingLoginPane(e: unknown): string | null {
 }
 
 /** 登入與登出走同一段：都是開一個臨時 pane 看 CLI 跑完，差別只在打哪一行指令。 */
-async function identityAuth(set: SetFn, get: GetFn, host: string, identity: string, op: 'login' | 'logout') {
+async function identityAuth(set: SetFn, get: GetFn, host: string, identity: string, op: 'login' | 'logout', background = false) {
   let ok = false
   await guarded(set, get, `identity-${op}:${host}:${identity}`, async () => {
+    // 背景模式（身份頁）：只記下登入終端，不切 shellView、不動 settingsBotId，設定視窗不會被關掉。
+    const show = (paneId: string, cwd: string) => {
+      if (background) {
+        set({ identityLoginPane: { host, identity, paneId, cwd } })
+        return
+      }
+      markUserNav()
+      set({ shellView: { host, paneId, cwd }, settingsBotId: null })
+    }
     let shell
     try {
       shell = op === 'login' ? await api.loginIdentity(host, identity) : await api.logoutIdentity(host, identity)
@@ -2919,13 +2940,12 @@ async function identityAuth(set: SetFn, get: GetFn, host: string, identity: stri
       // 這個身份已有登入終端（使用者先前按過登入、面板關掉或換頁後找不到它）：不報錯，把那顆既有登入終端重新打開接著做。
       const existing = op === 'login' ? existingLoginPane(e) : null
       if (!existing) throw e
-      markUserNav()
-      set({ shellView: { host, paneId: existing, cwd: '' }, settingsBotId: null })
+      show(existing, '')
       get().notify('info', t('這個身份已有登入終端，已重新打開；接著完成授權就好'))
       ok = true
       return
     }
-    set({ shellView: { host, paneId: shell.pane_id, cwd: shell.cwd }, settingsBotId: null })
+    show(shell.pane_id, shell.cwd)
     ok = true
   })
   return ok
