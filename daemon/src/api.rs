@@ -3179,22 +3179,21 @@ async fn manager_base_snapshot(app: &Arc<App>, caller: &str, path: &str) -> bool
     expert_manager_over(app, caller, &target).await.unwrap_or(false)
 }
 
-/// `POST /api/bots/{id}/start|restart` by an expert manager over that bot.
+/// `POST /api/bots/{id}/start|restart` or lifecycle op by an expert manager over that bot.
 async fn manager_may_start(app: &Arc<App>, caller: &str, method: &str, path: &str) -> bool {
     let Some(parts) = decoded_bot_path_segments(path) else { return false };
     if parts.len() < 3 || parts[0] != "api" || parts[1] != "bots" { return false }
     let Ok(Some(target)) = db::bot(&app.db, &parts[2]).await else { return false };
-    if target.manager_use == 0 { return false }
     if crate::runners::relay_deputy::may_restart(app, caller, method, &parts, &target).await { return true }
     if !manager_lifecycle_op(method, &parts, &target) { return false }
     expert_manager_over(app, caller, &target).await.unwrap_or(false)
 }
 
-/// start／restart：manager 管的任何成員；stop 與刪除：只限執行者（顧問常駐，只有使用者收）。
+/// start／restart：manager 管的任何成員（停派成員不可啟動）；stop 與刪除：只限執行者（顧問常駐，只有使用者收）。
 fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> bool {
     let sub = parts.get(3).map(|p| p.as_ref());
     match (method, parts.len(), sub) {
-        ("POST", 4, Some("start" | "restart")) => true,
+        ("POST", 4, Some("start" | "restart")) => target.manager_use != 0,
         ("POST", 4, Some("stop")) => matches!(target.role.as_deref(), Some("executor" | "specialist")),
         // 刪除：只限自己專案的頂層執行者／專家（child 跟著母 bot 走，不另外刪）。
         ("DELETE", 3, None) => target.parent_bot_id.is_none() && matches!(target.role.as_deref(), Some("executor" | "specialist")),

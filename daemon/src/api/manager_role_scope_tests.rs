@@ -216,6 +216,14 @@ async fn http_post(app: Arc<App>, path: &str, auth: &str, payload: &str) -> Stri
     .await
 }
 
+async fn http_delete(app: Arc<App>, path: &str, auth: &str) -> String {
+    raw(
+        app,
+        format!("DELETE {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n"),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn expert_manager_may_read_its_project_members_including_claude_api_bots() {
     let env = crate::testing::env().await;
@@ -351,4 +359,96 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
     let resp_att_http = http_get(env.app.clone(), &format!("/api/attachments/{}", exec_attachment.id), &bot_headers(&manager)).await;
     assert!(resp_att_http.starts_with("HTTP/1.1 403"), "UserOnly routes die at bot_user_only before authorize_bot_path: {resp_att_http}");
     assert!(resp_att_http.contains("user_only"), "UserOnly reason: {resp_att_http}");
+}
+
+#[tokio::test]
+async fn expert_manager_deletes_paused_executor_in_its_project_only() {
+    let env = crate::testing::env().await;
+    let (pid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+
+    let manager = distinct_bot(&env, &env.project_id, "p-manager").await;
+    let paused_executor = distinct_bot(&env, &env.project_id, "p-paused-exec").await;
+    let paused_advisor = distinct_bot(&env, &env.project_id, "p-paused-adv").await;
+
+    sqlx::query("UPDATE bots SET role='manager', manager_use=1 WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
+    sqlx::query("UPDATE bots SET role='executor', manager_use=0 WHERE id=?").bind(&paused_executor.id).execute(&env.app.db).await.unwrap();
+    sqlx::query("UPDATE bots SET role='advisor', manager_use=0 WHERE id=?").bind(&paused_advisor.id).execute(&env.app.db).await.unwrap();
+
+    let other_project = db::ulid();
+    sqlx::query("INSERT INTO projects(id,path,label,host,created_at,mode) VALUES(?,?,'other','local',?,'parent_child')")
+        .bind(&other_project).bind(format!("/tmp/{other_project}")).bind(db::now()).execute(&env.app.db).await.unwrap();
+    let other_paused_exec = distinct_bot(&env, &other_project, "p-other-paused").await;
+    sqlx::query("UPDATE bots SET role='executor', manager_use=0 WHERE id=?").bind(&other_paused_exec.id).execute(&env.app.db).await.unwrap();
+
+    sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+
+    let (m_id, pe_id, pa_id, other_pid, other_pe_id) = (manager.id.clone(), paused_executor.id.clone(), paused_advisor.id.clone(), other_project.clone(), other_paused_exec.id.clone());
+    // 把專案與 bot 寫進 config，以便完整測試 delete_bot
+    env.app.cfg.update(move |cfg| {
+        cfg.projects.push(crate::config::ProjectCfg {
+            mode: "expert".into(),
+            role_policy: Default::default(),
+            deputy: None,
+            specialist_dispatch: true,
+            handed_off_to: None,
+            id: Some(pid),
+            path: repo,
+            label: "proj".into(),
+            host: LOCAL_HOST.into(),
+            bots: vec![
+                toml::from_str(&format!("id = '{m_id}'\nname = 'p-manager'\nkind = 'claude'\nrole = 'manager'\n")).unwrap(),
+                toml::from_str(&format!("id = '{pe_id}'\nname = 'p-paused-exec'\nkind = 'claude'\nrole = 'executor'\nmanager_use = false\n")).unwrap(),
+                toml::from_str(&format!("id = '{pa_id}'\nname = 'p-paused-adv'\nkind = 'claude'\nrole = 'advisor'\nmanager_use = false\n")).unwrap(),
+            ],
+        });
+        cfg.projects.push(crate::config::ProjectCfg {
+            mode: "parent_child".into(),
+            role_policy: Default::default(),
+            deputy: None,
+            specialist_dispatch: true,
+            handed_off_to: None,
+            id: Some(other_pid.clone()),
+            path: format!("/tmp/{other_pid}"),
+            label: "other".into(),
+            host: LOCAL_HOST.into(),
+            bots: vec![
+                toml::from_str(&format!("id = '{other_pe_id}'\nname = 'p-other-paused'\nkind = 'claude'\n")).unwrap(),
+            ],
+        });
+        Ok(())
+    }).await.unwrap();
+
+    // 1. manager 刪自己專案停派執行者 -> 成功（manager_may_start 放行，HTTP DELETE 成功）
+    assert!(manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_executor.id)).await, "manager may delete paused executor");
+    assert!(authorize_bot_path(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_executor.id)).await.is_ok());
+
+    let resp_del = http_delete(env.app.clone(), &format!("/api/bots/{}", paused_executor.id), &bot_headers(&manager)).await;
+    assert!(resp_del.starts_with("HTTP/1.1 200"), "manager successfully deleted paused executor: {resp_del}");
+    let deleted_at: Option<String> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id=?").bind(&paused_executor.id).fetch_one(&env.app.db).await.unwrap();
+    assert!(deleted_at.is_some(), "paused executor is soft-deleted");
+
+    // 2. manager 刪別專案停派執行者 -> 403
+    assert!(!manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", other_paused_exec.id)).await, "cannot delete paused executor in other project");
+    let resp_del_other = http_delete(env.app.clone(), &format!("/api/bots/{}", other_paused_exec.id), &bot_headers(&manager)).await;
+    assert!(resp_del_other.starts_with("HTTP/1.1 403"), "delete other project paused executor must return 403: {resp_del_other}");
+
+    // 3. manager start 停派執行者 -> 仍 403
+    let paused_exec2 = distinct_bot(&env, &env.project_id, "p-paused-exec2").await;
+    sqlx::query("UPDATE bots SET role='executor', manager_use=0 WHERE id=?").bind(&paused_exec2.id).execute(&env.app.db).await.unwrap();
+
+    assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/start", paused_exec2.id)).await, "manager cannot start paused executor");
+    assert!(!manager_may_start(&env.app, &manager.id, "POST", &format!("/api/bots/{}/restart", paused_exec2.id)).await, "manager cannot restart paused executor");
+
+    let resp_start = http_post(env.app.clone(), &format!("/api/bots/{}/start", paused_exec2.id), &bot_headers(&manager), "{}").await;
+    assert!(resp_start.starts_with("HTTP/1.1 403"), "start paused executor must return 403: {resp_start}");
+    assert!(resp_start.contains("user_only"), "reason must be user_only: {resp_start}");
+
+    // 4. manager 刪停派顧問 -> 403
+    assert!(!manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_advisor.id)).await, "manager cannot delete paused advisor");
+    let resp_del_adv = http_delete(env.app.clone(), &format!("/api/bots/{}", paused_advisor.id), &bot_headers(&manager)).await;
+    assert!(resp_del_adv.starts_with("HTTP/1.1 403"), "delete paused advisor must return 403: {resp_del_adv}");
+    assert!(resp_del_adv.contains("user_only"), "reason must be user_only: {resp_del_adv}");
+
+    // 5. PATCH 停派執行者（改名）放行
+    assert!(manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", paused_exec2.id)).await, "manager may patch paused executor");
 }
