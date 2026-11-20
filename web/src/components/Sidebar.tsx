@@ -1391,6 +1391,9 @@ export function Sidebar() {
     })
   })
 
+  // 側欄 BotRow 共用的拖曳／排序 props（6 處都帶同一組）。
+  const rowShared = { drag, onDrag: setDrag, onDropAt: dropAt, onNudge: nudge, onStep: step }
+
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
 
@@ -1531,6 +1534,38 @@ export function Sidebar() {
           if (query && topLevel.length === 0) return null
           const pDragging = pdrag?.id === p.id
           const pDropEdge = pdrag && pdrag.id !== p.id && pdrag.overId === p.id ? pdrag.edge : null
+          // 一列 bot ＋ 它的子 agent 清單；專家模式與一般模式共用，DOM 相同。
+          const renderMember = (b: Bot) => {
+            const kids = descendantsOf(b.id)
+            // 搜尋中一律展開。
+            const shut = kids.length > 0 && collapsed.has(b.id) && !query
+            const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
+            const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
+            return (
+              <Fragment key={b.id}>
+                <BotRow
+                  botId={b.id}
+                  hit={hits[b.id]}
+                  childCount={kids.length}
+                  collapsed={shut}
+                  kidsLamp={kidsLamp}
+                  kidsWait={kidsWait}
+                  kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
+                  onToggleChildren={toggleChildren}
+                  {...rowShared}
+                />
+                {shut || kids.length === 0 ? null : (
+                  <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
+                    {kids.map((c, i) => (
+                      <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
+                        <BotRow compact botId={c.id} hit={hits[c.id]} {...rowShared} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Fragment>
+            )
+          }
           return (
             <section
               className={`project${pDragging ? ' dragging' : ''}${pDropEdge ? ` drop-${pDropEdge}` : ''}${hostUp(p.host) ? '' : ' host-down'}`}
@@ -1641,49 +1676,6 @@ export function Sidebar() {
                     <Fragment key={sec.role}>
                       <ExpertSectionHeader title={sec.title} abbr={sec.abbr} />
                       {(sec.role === 'executor' ? groupClusterItems(sec.items) : sec.items.map((item) => ({ kind: 'single' as const, item }))).map((entry) => {
-                        const renderMember = (b: Bot) => {
-                        const kids = descendantsOf(b.id)
-                        const shut = kids.length > 0 && collapsed.has(b.id) && !query
-                        const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
-                        const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
-                        return (
-                          <Fragment key={b.id}>
-                            <BotRow
-                              botId={b.id}
-                              hit={hits[b.id]}
-                              childCount={kids.length}
-                              collapsed={shut}
-                              kidsLamp={kidsLamp}
-                              kidsWait={kidsWait}
-                              kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
-                              onToggleChildren={toggleChildren}
-                              drag={drag}
-                              onDrag={setDrag}
-                              onDropAt={dropAt}
-                              onNudge={nudge}
-                              onStep={step}
-                            />
-                            {shut || kids.length === 0 ? null : (
-                              <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
-                                {kids.map((c, i) => (
-                                  <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
-                                    <BotRow
-                                      compact
-                                      botId={c.id}
-                                      hit={hits[c.id]}
-                                      drag={drag}
-                                      onDrag={setDrag}
-                                      onDropAt={dropAt}
-                                      onNudge={nudge}
-                                      onStep={step}
-                                    />
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </Fragment>
-                        )
-                        }
                         if (entry.kind === 'single') return renderMember(entry.item)
                         return (
                           <ExpertClusterRow key={`cluster:${entry.name}`} projectId={p.id} name={entry.name} members={entry.members}>
@@ -1694,50 +1686,7 @@ export function Sidebar() {
                     </Fragment>
                   ))
                 ) : (
-                  list.map((b) => {
-                    const kids = descendantsOf(b.id)
-                    // 搜尋中一律展開。
-                    const shut = kids.length > 0 && collapsed.has(b.id) && !query
-                    const kidsLamp = shut ? kidsLampOf(lampState, kids.map((c) => c.id)) : null
-                    const kidsWait = kids.length ? kidsWaitOf(lampState, unreadMap, kids.map((c) => c.id)) : null
-                    return (
-                      <Fragment key={b.id}>
-                        <BotRow
-                          botId={b.id}
-                          hit={hits[b.id]}
-                          childCount={kids.length}
-                          collapsed={shut}
-                          kidsLamp={kidsLamp}
-                          kidsWait={kidsWait}
-                          kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
-                          onToggleChildren={toggleChildren}
-                          drag={drag}
-                          onDrag={setDrag}
-                          onDropAt={dropAt}
-                          onNudge={nudge}
-                          onStep={step}
-                        />
-                        {shut || kids.length === 0 ? null : (
-                          <div id={`bot-kids-${b.id}`} className="bot-kids" role="list" aria-label={t('{name} 的 {n} 個子 agent', { name: b.name, n: kids.length })} ref={kidsWheelRef}>
-                            {kids.map((c, i) => (
-                              <div key={c.id} className={`bot-child${i === kids.length - 1 ? ' last' : ''}${c.parent_bot_id !== b.id ? ' deep' : ''}`}>
-                                <BotRow
-                                  compact
-                                  botId={c.id}
-                                  hit={hits[c.id]}
-                                  drag={drag}
-                                  onDrag={setDrag}
-                                  onDropAt={dropAt}
-                                  onNudge={nudge}
-                                  onStep={step}
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </Fragment>
-                    )
-                  })
+                  list.map(renderMember)
                 )}
                 </div>
               )}
@@ -1756,17 +1705,7 @@ export function Sidebar() {
                   <SchedulerBotRows
                     projectId={p.id}
                     bots={schedBots}
-                    render={(b) => (
-                      <BotRow
-                        botId={b.id}
-                        hit={hits[b.id]}
-                        drag={drag}
-                        onDrag={setDrag}
-                        onDropAt={dropAt}
-                        onNudge={nudge}
-                        onStep={step}
-                      />
-                    )}
+                    render={(b) => <BotRow botId={b.id} hit={hits[b.id]} {...rowShared} />}
                   />
                 </SchedulerBotSection>
               )}
