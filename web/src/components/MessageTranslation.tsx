@@ -31,6 +31,8 @@ export function MessageTranslationButton({
   rejectDetail,
   onShowAnyway,
   onReport,
+  onRedo,
+  redoing,
 }: {
   eligible: boolean
   off: { reason: string } | null
@@ -40,6 +42,9 @@ export function MessageTranslationButton({
   spin?: 'forward' | 'backward' | null
   onFlip: (e?: React.MouseEvent) => void
   onManual: () => void
+  /** 「重新翻譯」：譯文狀態才顯示；`redoing` 是正在重翻（按鈕停用、顯示進行中）。 */
+  onRedo?: () => void
+  redoing?: boolean
   /** 品質檢查沒過時的原因（檢查名稱）與「仍然顯示譯文」（daemon 有帶被擋的譯文才有）。 */
   rejectedReason?: string
   /** 品質沒過的細節（原因摘要，點開看）；daemon 沒帶就不顯示。 */
@@ -127,7 +132,21 @@ export function MessageTranslationButton({
       {content}
     </button>
   )
-  if (off || status !== 'rejected') return button
+  const redoButton =
+    status === 'done' && onRedo && !off ? (
+      <button type="button" className="msg-translate msg-translate-redo" data-k="translate-redo" disabled={redoing} onClick={onRedo} title={t('用 Claude 重新翻譯這則（用升級模型，成功覆寫譯文）')} aria-label={t('重新翻譯這則')}>
+        <span aria-hidden="true">↻</span>{' '}
+        <span className="msg-translate-lbl">{redoing ? t('重新翻譯中…') : t('重新翻譯')}</span>
+      </button>
+    ) : null
+  if (off || status !== 'rejected') {
+    return redoButton ? (
+      <>
+        {button}
+        {redoButton}
+      </>
+    ) : button
+  }
   return (
     <>
       {button}
@@ -136,7 +155,9 @@ export function MessageTranslationButton({
           ? t('譯文含日文，品質檢查未通過')
           : rejectedReason === 'untranslated'
             ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過')
-            : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}
+            : rejectedReason === 'partially_untranslated'
+              ? t('譯文仍有英文段落沒翻，品質檢查未通過')
+              : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}
         {onShowAnyway ? <> · <button type="button" className="msg-translate" data-k="translate-show-anyway" onClick={onShowAnyway}>{t('仍然顯示譯文')}</button></> : null}
         {onReport ? <> · <button type="button" className="msg-translate" data-k="translate-report" onClick={onReport}>{t('回報給管理者')}</button></> : null}
       </span>

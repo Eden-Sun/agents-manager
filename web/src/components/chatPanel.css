@@ -1152,6 +1152,10 @@
   opacity: 0.7;
   font-style: italic;
 }
+/* 譯文狀態的「重新翻譯」：緊接在「⇄ 原文」後面；點擊範圍沿用 .msg-translate（手機 ≥40px）。 */
+.msg-translate-redo {
+  margin-inline-start: 2px;
+}
 .msg-translate:hover:not(:disabled) {
   color: var(--text);
   text-decoration: underline;

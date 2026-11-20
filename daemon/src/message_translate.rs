@@ -258,10 +258,33 @@ pub(crate) async fn translate(app: &App, id: &str, content: &str) -> Result<Valu
     translate_with(app, id, content, false).await
 }
 
-/// `force`：略過負面標記，重新打 API（使用者手動重試）。品質沒過回 422 `translate_rejected`（`reason`：`untranslated`／`low_fidelity`），並寫負面標記。
+/// 重翻（使用者按「重新翻譯」）同一則 60 秒內只打一次：剛寫好的譯文直接沿用。
+const REDO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 快取命中才回譯文。`redo`：快取檔 60 秒內剛寫過才算命中（連按只打一次），否則視為未命中、要重翻。
+fn hit_for(path: &Path, redo: bool) -> Option<CacheEntry> {
+    let hit = load(path)?;
+    if !redo {
+        return Some(hit);
+    }
+    let age = std::fs::metadata(path).ok()?.modified().ok()?.elapsed().ok()?;
+    (age < REDO_COOLDOWN).then_some(hit)
+}
+
+/// `force`：略過負面標記，重新打 API（使用者手動重試）。品質沒過回 422 `translate_rejected`（`reason`：`untranslated`／`partially_untranslated`／…），並寫負面標記。
 pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bool) -> Result<Value, LcError> {
+    translate_core(app, id, content, force, false).await
+}
+
+/// 重新翻譯（使用者按「重新翻譯」）：略過正面快取，首次就用升級模型（retry_model），成功覆寫同一份快取；
+/// 品質沒過回 422 並保留舊譯文（不寫負面標記、不刪快取）。
+pub(crate) async fn translate_redo(app: &App, id: &str, content: &str) -> Result<Value, LcError> {
+    translate_core(app, id, content, true, true).await
+}
+
+async fn translate_core(app: &App, id: &str, content: &str, force: bool, redo: bool) -> Result<Value, LcError> {
     let path = cache_path(&app.data_dir, &cache_key(id, content));
-    if let Some(hit) = load(&path) {
+    if let Some(hit) = hit_for(&path, redo) {
         return Ok(hit_body(&hit));
     }
     if crate::zh_convert::local_applies(content) {
@@ -275,7 +298,7 @@ pub(crate) async fn translate_with(app: &App, id: &str, content: &str, force: bo
     let slot = flight_slot(&path);
     let guard = slot.lock().await;
     // 等鎖期間別人可能已經寫好快取：拿到控制權後重查，命中就不打 API。
-    if let Some(hit) = load(&path) {
+    if let Some(hit) = hit_for(&path, redo) {
         drop(guard);
         flight_forget(&path, slot);
         return Ok(hit_body(&hit));
@@ -414,6 +437,10 @@ fn mark_rejected(path: &Path, reason: &str, source: &str, reply: &str, models: V
         ..Default::default()
     };
     tracing::info!(check = reason, src_latin = sl, src_cjk = sc, reply_latin = rl, reply_cjk = rc, identical = (reply.trim() == source.trim()), src_chars = source.chars().count(), reply_chars = reply.chars().count(), "message translate rejected by quality check");
+    // 重新翻譯沒過：已有通過的譯文就保留它（不覆蓋成負面標記）。
+    if load_entry(path).is_some_and(|e| !e.translation.trim().is_empty()) {
+        return rejection_error_with(reason, Some(reply), Some(&detail));
+    }
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate rejection marker write failed: {e}");
     }
@@ -524,7 +551,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
         let prev = attempts[0].reason;
         // 本地檢查回 untranslated／japanese_output／markdown_structure：重試改用升級模型，effort 照設定、不額外提高。
         // 已經用升級模型的（force 首次）就不再換，照舊只提高 effort。
-        let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "japanese_output" | "markdown_structure")) && attempts[0].model != retry_model;
+        let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "partially_untranslated" | "japanese_output" | "markdown_structure")) && attempts[0].model != retry_model;
         let next = if upgrade {
             attempt_upgraded(app, id, content, None, prev, &retry_model).await?
         } else {
@@ -601,6 +628,9 @@ pub async fn post_translate(
     if content.chars().count() > MAX_CHARS {
         return Err(LcError::Unprocessable(json!({"error": "message_too_long", "max_chars": MAX_CHARS})));
     }
+    if q.retranslate.unwrap_or(false) {
+        return Ok(Json(translate_redo(&app, &id, &content).await?));
+    }
     Ok(Json(translate_with(&app, &id, &content, q.force.unwrap_or(false)).await?))
 }
 
@@ -608,6 +638,8 @@ pub async fn post_translate(
 pub struct TranslateQuery {
     /// 手動重試：略過品質沒過的負面標記。
     force: Option<bool>,
+    /// 重新翻譯：略過正面快取，首次用升級模型，成功覆寫快取、失敗保留舊譯文。
+    retranslate: Option<bool>,
 }
 
 // ── 推播內文用的小工具 ──────────────────────────────────────────────────────────
@@ -704,10 +736,51 @@ pub(crate) fn local_reason(source: &str, reply: &str) -> Option<&'static str> {
     if is_mostly_english(source) && is_mostly_english(reply) {
         return Some("untranslated");
     }
+    if partially_untranslated(source, reply) {
+        return Some("partially_untranslated");
+    }
     if !markdown_structure_matches(source, reply) {
         return Some("markdown_structure");
     }
     None
+}
+
+/// 「部分沒翻」：原文的英文散文段（不在程式碼區塊裡，行內 code 不算，≥8 個英文字）原樣出現在譯文裡就算沒過。
+/// 整則「主要是英文」的判斷（[`is_mostly_english`]）抓不到這種情況：譯文中文多，前後英文段原樣留下（2026-11-20 截圖：只翻了表格）。
+pub(crate) fn partially_untranslated(source: &str, reply: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    // 英文字數：去掉行內 code，只數含英文字母的單字（網址不算）。
+    fn english_words(line: &str) -> usize {
+        line.split('`')
+            .enumerate()
+            .filter(|(n, _)| n % 2 == 0)
+            .flat_map(|(_, tok)| tok.split_whitespace())
+            .filter(|w| !w.starts_with("http://") && !w.starts_with("https://") && w.chars().any(|c| c.is_ascii_alphabetic()))
+            .count()
+    }
+    let reply_norm = norm(reply);
+    let mut fence: Option<Fence> = None;
+    for line in source.split('\n') {
+        if let Some(open) = fence {
+            if fence_close(line, open) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = fence_open(line) {
+            fence = Some(open);
+            continue;
+        }
+        if english_words(line) >= 8 {
+            let needle = norm(line);
+            if !needle.is_empty() && reply_norm.contains(&needle) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── Markdown 表格分隔列決定性修補與結構檢查 ───────────────────────────────────
@@ -1412,6 +1485,55 @@ mod tests {
         // 手動重試（force）才會再打。
         let _ = translate_with(&app, "m_fail", content, true).await;
         assert_eq!(f.calls.load(Ordering::SeqCst), 3, "force 略過標記");
+    }
+
+    /// 2026-11-20 截圖：英文段＋中文表格，整則中文多（不算「主要是英文」），前後英文段原樣留下。
+    #[test]
+    fn partially_untranslated_catches_kept_english_paragraphs() {
+        let source = "This is the first English paragraph that describes the setup in detail.\n\n| 項目 | 說明 |\n|---|---|\n| 版本 | 1.0 |\n\nAnother English paragraph that explains the rollback procedure step by step.";
+        let partial = "這是第一段。\n\n| 項目 | 說明 |\n|---|---|\n| 版本 | 1.0 |\n\nAnother English paragraph that explains the rollback procedure step by step.";
+        assert_eq!(local_reason(source, partial), Some("partially_untranslated"));
+        let good = "這是第一段，描述設定的細節。\n\n| 項目 | 說明 |\n|---|---|\n| 版本 | 1.0 |\n\n這是回滾程序的逐步說明。";
+        assert_eq!(local_reason(source, good), None);
+    }
+
+    #[test]
+    fn partially_untranslated_ignores_code_and_short_lines() {
+        // 程式碼區塊與行內 code 不算英文段；不到 8 個英文字的句子也不算。
+        let source = "中文說明在這裡。\n\n```\nthis is a long english code line that stays as is in the block\n```\n\nRun `cargo test --workspace` now.\n\nOK done";
+        let reply = "中文說明在這裡。\n\n```\nthis is a long english code line that stays as is in the block\n```\n\n現在執行 `cargo test --workspace`。\n\nOK done";
+        assert_eq!(local_reason(source, reply), None);
+    }
+
+    #[tokio::test]
+    async fn redo_overwrites_cache_and_keeps_old_on_failure() {
+        let (app, _dir) = app(true).await;
+        let content = "The 504 comes from GitHub, not AG Man's own server. The check for new codex versions asks GitHub for the latest 100 codex releases.";
+        let path = cache_path(&app.data_dir, &cache_key("m_redo", content));
+        save(&path, &CacheEntry { translation: "舊譯文".into(), model: "old".into(), prompt_version: PROMPT_VERSION.into(), ..Default::default() }).unwrap();
+
+        // 剛寫好（60 秒內）：連按只沿用，不打 API。
+        let f = fake_seq(&app, vec!["不該被用到".into()]);
+        let same = translate_redo(&app, "m_redo", content).await.unwrap();
+        assert_eq!(same["translation"], json!("舊譯文"));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 0, "60 秒內重按不打 API");
+
+        // 快取過了 60 秒：重翻失敗（兩次都原樣回傳）回 422，舊譯文保留。
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let f = fake_seq(&app, vec![content.to_string(), content.to_string()]);
+        let err = translate_redo(&app, "m_redo", content).await.unwrap_err();
+        assert!(matches!(&err, LcError::Unprocessable(v) if v["error"] == "translate_rejected"), "重翻沒過回 422: {err:?}");
+        assert_eq!(f.calls.load(Ordering::SeqCst), 2, "首次＋一次重試");
+        assert_eq!(load(&path).map(|e| e.translation).as_deref(), Some("舊譯文"), "失敗保留舊譯文，不寫負面標記覆蓋");
+
+        // 重翻成功：覆寫同一份快取。
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let f = fake_seq(&app, vec!["新的 GitHub 504 來源說明，不是 AG Man 自己的伺服器。".into()]);
+        let ok = translate_redo(&app, "m_redo", content).await.unwrap();
+        assert_eq!(ok["cached"], json!(false));
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(load(&path).map(|e| e.translation).as_deref(), Some("新的 GitHub 504 來源說明，不是 AG Man 自己的伺服器。"));
     }
 
     #[tokio::test]

@@ -13,6 +13,17 @@ import { AUTO_TRANSLATE_RECENT, usd } from './messageTranslationConstants'
 
 export { AUTO_TRANSLATE_RECENT, usd }
 
+/** 品質沒過的提示文字（手動翻、重新翻譯共用）。 */
+function rejectNotice(t: ReturnType<typeof useT>, reason: string | undefined): string {
+  return reason === 'japanese_output'
+    ? t('譯文含日文，品質檢查未通過')
+    : reason === 'untranslated'
+      ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過')
+      : reason === 'partially_untranslated'
+        ? t('譯文仍有英文段落沒翻，品質檢查未通過')
+        : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')
+}
+
 function isRejectDetail(v: unknown): v is RejectDetail {
   if (typeof v !== 'object' || v === null) return false
   const d = v as Record<string, unknown>
@@ -46,6 +57,7 @@ export function useMessageTranslation(
   const [anim, setAnim] = useState<'forward' | 'backward' | 'auto' | null>(null)
   const [spin, setSpin] = useState<'forward' | 'backward' | null>(null)
   const [swapSeq, setSwapSeq] = useState(0)
+  const [redoing, setRedoing] = useState(false)
 
   // 狀態在 store（以 msg.id 為鍵）：remount 不會掉回原文。
   // manual＝使用者按的；restore＝重整後重抓以前選過看譯文的；fresh＝自動翻譯新訊息。後兩者失敗不跳錯誤也不重試。
@@ -99,7 +111,7 @@ export function useMessageTranslation(
           const detail = isRejectDetail(e.body.detail) ? e.body.detail : undefined
           setTranslation(msg.id, { status: 'rejected', reason, text, detail })
           // 手動按的要看到原因（不是靜默失敗）：提示列會寫檢查名稱，重試就再按「翻譯」，被擋的譯文可用「仍然顯示譯文」看。
-          if (kind === 'manual') useStore.getState().notify('info', reason === 'japanese_output' ? t('譯文含日文，品質檢查未通過') : reason === 'untranslated' ? t('譯文跟原文幾乎一樣（沒翻成中文），品質檢查未通過') : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試'))
+          if (kind === 'manual') useStore.getState().notify('info', rejectNotice(t, reason))
           return
         }
         setTranslation(msg.id, { status: 'error' })
@@ -116,6 +128,33 @@ export function useMessageTranslation(
           : reason.includes('claude_api_not_configured')
           ? t('翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定')
           : t('翻譯失敗：{reason}', { reason }))
+      },
+    )
+  }
+  // 重新翻譯：daemon 略過正面快取、用升級模型重翻。成功就換成新譯文（同一套交換動畫）；沒過（422）保留舊譯文＋提示原因。
+  const redo = () => {
+    if (redoing || st.status !== 'done') return
+    setRedoing(true)
+    translateMessage(msg.id, false, true).then(
+      (r) => {
+        setRedoing(false)
+        noteTranslationSuccess()
+        const reduceMotion = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+        if (!reduceMotion) {
+          setAnim('forward')
+          setSpin('forward')
+        }
+        setSwapSeq((s) => s + 1)
+        setTranslation(msg.id, { status: 'done', text: r.translation, show: true, ready: false, cost: r.costUsd, cached: r.cached, model: r.model, lowConfidence: r.lowConfidence, jevProb: r.jevProb })
+      },
+      (e: unknown) => {
+        setRedoing(false)
+        if (e instanceof ApiError && e.status === 422 && e.body.error === 'translate_rejected') {
+          // 沒過就保留原本的譯文；原因（檢查名稱）看得到的是手動翻那條提示，這裡只說明沒換掉。
+          useStore.getState().notify('info', t('重新翻譯沒過（品質檢查未通過），保留原本的譯文'))
+          return
+        }
+        useStore.getState().notify('error', t('重新翻譯失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) }))
       },
     )
   }
@@ -182,6 +221,8 @@ export function useMessageTranslation(
       spin,
       onFlip: flipFace,
       onManual: () => { setWanted(msg.id, true); setDeclined(msg.id, false); run('manual') },
+      onRedo: redo,
+      redoing,
       rejectedReason: st.status === 'rejected' ? st.reason : undefined,
       rejectDetail: st.status === 'rejected' ? st.detail : undefined,
       onReport: () => {
