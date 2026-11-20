@@ -140,18 +140,24 @@
   }
 
   /* git 鍵直接寫 context（2026-11-05）。有 token：上已用（11px）、下百分比（10px），不放圖示——
-     40×40 再加圖示兩行會黏在一起。只有百分比或剛 resume 的「—」才維持圖示在上、數字在下。
-     寬鎖 40px，額度列 padding-left: 40px 不用再讓。 */
+     36×36 再加圖示兩行會黏在一起。只有百分比或剛 resume 的「—」才維持圖示在上、數字在下。
+     緊湊卡片（2026-11-20，方案 1）：鈕縮到 36px 並加底色框；額度列 padding-left: 40px（36 + 4px 間距）。 */
   .main-head.bot-head > .mobile-git-info.has-ctx {
     display: inline-flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 0;
-    width: 40px;
-    min-width: 40px;
-    max-width: 40px;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 36px;
+    margin: 0 0 2px;
     padding: 1px 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-sunken);
     line-height: 1;
     overflow: hidden;
   }
@@ -203,7 +209,7 @@
     line-height: 1.05;
   }
 
-  /* 常駐讓出 git 鍵欄（4 + 32px），不然 cc0 會滑到 git 鍵底下（2026-09-11 手機實拍）。 */
+  /* 常駐讓出 git 鍵欄（36px 鈕 + 4px 間距），不然 cc0 會滑到 git 鍵底下（2026-09-11 手機實拍；2026-11-20 鈕縮 36px）。 */
   .main-head.bot-head:has(> .mobile-git-info) .quota-open {
     position: relative;
     padding-left: 40px;

@@ -123,3 +123,33 @@ button.quota-balance {
 .quota-pop-balance.warn .quota-pop-balance-v {
   color: var(--warn, #c77700);
 }
+
+/* 手機緊湊卡片（2026-11-20，方案 1）：兩家 API 餘額合成單一 36px 小卡，跟額度格同高、一屏放得下；
+   各家仍各自點擊開原本校正視窗，只拿掉各自的外框。 */
+@media (width <= 640px) {
+  .quota-api-group {
+    margin-left: 4px;
+    padding: 2px 5px;
+    gap: 1px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-sunken);
+    min-height: 36px;
+    justify-content: center;
+  }
+
+  .quota-api-group .quota-balance {
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    gap: 3px;
+    font-size: 10.5px;
+    line-height: 1.25;
+    justify-content: flex-end;
+  }
+
+  .quota-api-group .quota-balance.warn .quota-balance-v {
+    color: var(--warn, #c98a00);
+    font-weight: 650;
+  }
+}

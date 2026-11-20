@@ -5,14 +5,12 @@
 
 @media (width <= 640px) {
   .main-head .quota-open {
-    gap: 5px;
-    padding: 4px 4px;
+    gap: 3px;
+    padding: 2px 0;
   }
 
   .main-head .quota-hp {
     gap: 5px;
-    padding: 3px 5px;
-    min-height: 26px;
   }
 
   /* `.quota-open` 已有 5px gap，再加分隔線會變成表格。 */
@@ -25,7 +23,7 @@
 
   .main-head .quota-head {
     flex-direction: row;
-    gap: 4px;
+    gap: 2px;
     width: auto;
   }
 }
@@ -685,9 +683,13 @@
 /* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
 
 @media (width <= 640px) {
-  .main-head .quota-compact .quota-window-name,
+  .main-head .quota-compact .quota-window-name {
+    font-size: 9.5px;
+    color: var(--text-dim);
+  }
+
   .main-head .quota-compact-pct {
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-dim);
   }
 
@@ -792,17 +794,14 @@
     padding: 0 8px 6px;
   }
 
+  /* 緊湊卡片（2026-11-20，方案 1）：拿掉壓在文字上的黑色邊緣漸層，只留乾淨底；超過五顆帳號仍可橫捲。 */
   .main-head .quota-open {
     overflow-x: auto;
     flex-wrap: nowrap;
-    gap: 6px;
-    padding: 2px 0 4px;
+    gap: 3px;
+    padding: 2px 0;
     scrollbar-width: none;
-    background:
-      linear-gradient(to right, var(--bg-panel) 30%, transparent) left / 20px 100% no-repeat local,
-      linear-gradient(to left, var(--bg-panel) 30%, transparent) right / 20px 100% no-repeat local,
-      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 28%), transparent) left / 10px 100% no-repeat scroll,
-      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 28%), transparent) right / 10px 100% no-repeat scroll;
+    background: none;
   }
 
   .main-head .quota-open::-webkit-scrollbar {
@@ -825,7 +824,7 @@
 
   .main-head .quota-hp .quota-identity {
     display: inline;
-    font-size: 12px;
+    font-size: 11px;
     max-width: 4.5em;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -846,16 +845,13 @@
 @media (width <= 640px) {
   .main-head .quota-hp {
     flex-direction: column;
-    align-items: flex-start;
     gap: 1px;
-    padding: 3px 8px;
-    min-height: 40px;
   }
 
   .main-head .quota-hp .quota-head {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 2px;
   }
 
   /* 兩行 chip 已夠高，不再用負 margin 撐可按範圍。 */
@@ -866,7 +862,9 @@
   }
 
   .main-head .quota-compact {
-    padding-left: 2px;
+    padding-left: 0;
+    font-size: 11px;
+    letter-spacing: -0.02em;
   }
 }
 

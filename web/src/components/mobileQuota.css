@@ -1,19 +1,47 @@
 /* 手機（≤640px）額度列維持純文字 chip（2026-09-13 使用者：「上下條不侷限於現在的種類」「上下空間貼齊以節省」）：
    1. 每一格都畫兩條邊框量表，**兩條都在下方**（2026-09-13 使用者：「手機版本兩條都在下方」）：5h 在上、7d／週貼底。
-   2. 上下留白收緊。 */
+   2. 上下留白收緊。
+   3. 緊湊卡片（2026-11-20，方案 1）：每格是 36px 高的小卡、格間 3px，390px 一屏放得下五顆帳號＋兩家 API 餘額；
+      底部留 8px 給兩條量表，5h 在上（bottom 4px）、7d 貼底（bottom 1px），互不黏住。 */
 @media (width <= 640px) {
   .main-head .quota-hp.quota-framed {
     position: relative;
   }
 
   .main-head .quota-hp {
-    padding: 2px 8px 6px;
-    min-height: 0;
+    padding: 2px 5px 8px;
+    min-height: 36px;
+    border-radius: 6px;
+    background: var(--bg-sunken);
+    border: 1px solid transparent;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* 焦點格：淡強調底＋淡強調框；被擋（limit_hit）的紅框交給 quotaLimitHit.css，這裡不蓋。 */
+  .main-head .quota-hp.focused.quota-framed:not(.quota-blocked) {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  .main-head .quota-hp .quota-border-meter {
+    left: 4px;
+    right: 4px;
+    height: 2px;
   }
 
   .main-head .quota-hp .quota-border-meter.top {
     top: auto;
-    bottom: 2px;
+    bottom: 4px;
+  }
+
+  .main-head .quota-hp .quota-border-meter.bottom {
+    bottom: 1px;
+  }
+
+  .main-head .quota-hp .quota-border-mark {
+    height: 5px;
+    bottom: -1.5px;
   }
 
   .main-head > .quota-strip {
@@ -21,6 +49,7 @@
   }
 
   .main-head .quota-open {
-    padding: 0;
+    gap: 3px;
+    padding: 2px 0;
   }
 }
