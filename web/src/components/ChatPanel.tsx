@@ -309,8 +309,9 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
-      {msg.role === 'user' ? <MessageLedgerBar msg={msg} /> : null}
+      {/* 插隊鈕緊貼泡泡（它的測試與版面都依賴這個相鄰關係），帳本列與「⋯」放在它後面。 */}
       <SupplementSendNow msg={msg} />
+      {msg.role === 'user' ? <MessageLedgerBar msg={msg} /> : null}
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           <span className="chev">{expanded ? '▼' : '▶'}</span> {expanded ? t('收合') : t('展開全文')}

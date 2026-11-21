@@ -208,3 +208,19 @@
     box-shadow: 0 -8px 28px rgb(0 0 0 / 0.18);
   }
 }
+
+/* 使用者訊息的「⋯」：泡泡下方靠右的小鈕，選單貼在它下面（不擋泡泡內容）。 */
+.ledger-add-row {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.ledger-add-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 150px;
+}

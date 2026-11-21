@@ -467,6 +467,9 @@ pub struct ConfigFile {
     /// `[agy]`：agy 的 context 視窗大小（網頁顯示用量百分比的分母）。預設 1,048,576（1M），可調到 2,000,000；沒寫這段，既有設定檔的長相不變。
     #[serde(default, skip_serializing_if = "AgyCfg::is_default")]
     pub agy: AgyCfg,
+    /// `[ledger]`：承諾帳本的自動收件（預設關）。關著時使用者訊息不會自動建項；要追蹤的由使用者按「加入追蹤」，或管理者建立。
+    #[serde(default, skip_serializing_if = "LedgerCfg::is_default")]
+    pub ledger: LedgerCfg,
     /// 分享 bot 的對外入口（SPEC「分享 bot」）。沒寫＝不開那個 listener、也不能開分享連結。
     #[serde(default, skip_serializing_if = "ShareCfg::is_default")]
     pub share: ShareCfg,
@@ -739,6 +742,19 @@ impl CodexCfg {
 pub struct AgyCfg {
     #[serde(default = "default_agy_context_window_tokens", deserialize_with = "de_agy_context_window_tokens")]
     pub context_window_tokens: u64,
+}
+
+/// `[ledger]`：承諾帳本。`auto_ingest = true` 時，每則人打的使用者訊息自動建一筆待整理項目（舊行為）；預設 false。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerCfg {
+    #[serde(default)]
+    pub auto_ingest: bool,
+}
+
+impl LedgerCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 pub const AGY_CONTEXT_WINDOW_DEFAULT: u64 = 1_048_576;

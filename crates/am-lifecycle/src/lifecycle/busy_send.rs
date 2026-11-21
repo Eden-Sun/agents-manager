@@ -77,7 +77,7 @@ pub(super) async fn refuse_if_slot_taken(app: &(impl crate::capabilities::Db + S
 /// The caller holds the per-bot lock and has already resolved/validated the attachments.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn queue_awaiting_idle(
-    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + BusySendServices + SupervisorSendRepo),
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Cfg + BusySendServices + SupervisorSendRepo),
     conversation_id: &str,
     bot_id: &str,
     text: &str,
@@ -177,5 +177,5 @@ pub(super) async fn queue_awaiting_idle(
 pub mod test_seams {
     //! #1862 L2：daemon 測試要碰的私有項，窄轉呼叫（只在測試建置存在）。
     use super::*;
-    pub async fn queue_awaiting_idle(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + BusySendServices + SupervisorSendRepo), conversation_id: &str, bot_id: &str, text: &str, deliver: &str, client_request_id: &str, relay: prompt::RelaySrc<'_>, files: &[Attachment]) -> LcResult<prompt::PromptOut> { super::queue_awaiting_idle(app, conversation_id, bot_id, text, deliver, client_request_id, relay, files).await }
+    pub async fn queue_awaiting_idle(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Cfg + BusySendServices + SupervisorSendRepo), conversation_id: &str, bot_id: &str, text: &str, deliver: &str, client_request_id: &str, relay: prompt::RelaySrc<'_>, files: &[Attachment]) -> LcResult<prompt::PromptOut> { super::queue_awaiting_idle(app, conversation_id, bot_id, text, deliver, client_request_id, relay, files).await }
 }

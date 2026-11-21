@@ -23,7 +23,7 @@ export async function fetchProjectLedger(projectId: string, opts: { sourceMessag
 /** 新增後續承諾（補漏）；帶 `source_message_id` 就掛在那則訊息下面。 */
 export async function createLedgerItems(
   projectId: string,
-  body: { source_message_id?: string; title: string; status?: 'following' | 'clarifying' | 'answered' },
+  body: { source_message_id?: string; title: string; status?: 'untriaged' | 'following' | 'clarifying' | 'answered' },
 ): Promise<LedgerItem[]> {
   return itemsOf(await rawTransport.request('POST', `/projects/${encodeURIComponent(projectId)}/ledger`, body))
 }

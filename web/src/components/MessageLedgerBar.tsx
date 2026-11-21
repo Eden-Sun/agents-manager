@@ -29,6 +29,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [addMenu, setAddMenu] = useState(false)
 
   useEffect(() => {
     if (msg.ledger_items) setItems(msg.ledger_items)
@@ -46,11 +47,11 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
     }
   }, [projectId, msg.id, rev])
 
-  if (!projectId || !items || items.length === 0) return null
+  if (!projectId) return null
 
   // 要給使用者看的項目：排除併入別項的，以及已取消的（「不用做了」的不再計、也不列）。
-  const live = items.filter((it) => it.status !== 'merged' && it.status !== 'cancelled')
-  if (live.length === 0) return null
+  const all = items ?? []
+  const live = all.filter((it) => it.status !== 'merged' && it.status !== 'cancelled')
   const allUntriaged = live.every((it) => it.status === 'untriaged')
   const allClosed = live.every((it) => it.status === 'done' || it.status === 'answered')
 
@@ -105,7 +106,43 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
       ? t('追蹤完成')
       : t('追蹤 {n} 項：{parts}', { n: live.length, parts: parts.join('・') })
 
+  // 「加入追蹤」：預設不自動收件，要追蹤的人從這裡加（交管理者整理）。已有追蹤項就不再加。
+  const addToTracking = () =>
+    runPatch(async () => {
+      const title = trackingTitle(msg.content)
+      if (!title) return null
+      const created = await createLedgerItems(projectId, { source_message_id: msg.id, title, status: 'untriaged' })
+      setItems((cur) => [...(cur ?? []), ...created])
+      setAddMenu(false)
+      notify('info', t('已加入追蹤，交管理者整理'))
+      return null
+    })
+
+  const addRow =
+    msg.role === 'user' ? (
+      <div className="ledger-add-row">
+        <button type="button" className="ledger-more" aria-label={t('訊息動作')} aria-haspopup="menu" aria-expanded={addMenu} onClick={() => setAddMenu((v) => !v)}>
+          ⋯
+        </button>
+        {addMenu ? (
+          <div className="ledger-menu ledger-add-menu" role="menu">
+            {live.length > 0 ? (
+              <button type="button" role="menuitem" disabled>
+                {t('已在追蹤')}
+              </button>
+            ) : (
+              <button type="button" role="menuitem" disabled={busy || !trackingTitle(msg.content)} onClick={() => void addToTracking()}>
+                {t('加入追蹤')}
+              </button>
+            )}
+          </div>
+        ) : null}
+      </div>
+    ) : null
+
   return (
+    <>
+    {live.length > 0 ? (
     <div className="ledger-bar" aria-label={t('承諾帳本進度')}>
       <button type="button" className="ledger-bar-summary" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span aria-hidden="true">{allClosed ? '✓' : '📋'}</span> {summary}
@@ -192,7 +229,16 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
         </>
       ) : null}
     </div>
+    ) : null}
+    {addRow}
+    </>
   )
+}
+
+/** 訊息的第一行、去頭尾空白、最多 80 字（字元數，與 daemon 的標題規則一致）。 */
+function trackingTitle(content: string): string {
+  const first = (content.trim().split('\n')[0] ?? '').trim()
+  return Array.from(first).slice(0, 80).join('')
 }
 
 function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {

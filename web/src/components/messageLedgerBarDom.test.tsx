@@ -49,7 +49,8 @@ const msg = (ledger?: LedgerItem[]): Message =>
 function setup() {
   const requests: { method: string; path: string; body: unknown }[] = []
   const bot = { id: 'b1', name: 'agy-bot', project_id: 'p1', kind: 'agy', model: null, effort: null, fast: false, identity: null, needs_restart: false } as unknown as Bot
-  useStore.setState({ bots: [bot], busy: {} } as never)
+  // ledgerRev 是跨測試的全域狀態：上一則測試改過的值不能帶進來（否則這裡會多拉一次帳本）。
+  useStore.setState({ bots: [bot], busy: {}, ledgerRev: {} } as never)
   mockApi({
     request: async (method: string, path: string, body?: unknown) => {
       requests.push({ method, path, body })
@@ -156,4 +157,32 @@ test('ledger_updated 到達（rev 變動）才重新拉這一則', async () => {
   await act(() => useStore.setState((s) => ({ ledgerRev: { ...s.ledgerRev, msg_3things: 1 } })) as never)
   await new Promise((r) => setTimeout(r, 10))
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.includes('source_message_id=msg_3things')), JSON.stringify(requests))
+})
+
+test('使用者訊息的「⋯」→「加入追蹤」：POST 帶 source_message_id、前 80 字標題、status=untriaged', async () => {
+  const requests = setup()
+  const el = await mount(<MessageLedgerBar msg={msg(undefined)} />)
+  await click(el.querySelector('.ledger-add-row .ledger-more')!)
+  await click(btn(el, '加入追蹤'))
+  const post = requests.find((r) => r.method === 'POST')!
+  assert.deepEqual(post.body, { source_message_id: 'msg_3things', title: '三件事', status: 'untriaged' })
+})
+
+test('已有追蹤項的訊息：選單顯示「已在追蹤」且不可按', async () => {
+  setup()
+  const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
+  await click(el.querySelector('.ledger-add-row .ledger-more')!)
+  const already = btn(el, '已在追蹤')
+  assert.ok(already.disabled)
+  assert.equal(btn(el, '加入追蹤'), undefined)
+})
+
+test('標題：只取第一行、最多 80 字', async () => {
+  const requests = setup()
+  const long = '一'.repeat(120) + '\n第二行'
+  const el = await mount(<MessageLedgerBar msg={{ ...msg(undefined), content: long } as Message} />)
+  await click(el.querySelector('.ledger-add-row .ledger-more')!)
+  await click(btn(el, '加入追蹤'))
+  const post = requests.find((r) => r.method === 'POST')!
+  assert.equal((post.body as { title: string }).title, '一'.repeat(80))
 })

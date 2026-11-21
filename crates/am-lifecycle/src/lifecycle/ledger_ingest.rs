@@ -4,12 +4,16 @@
 //! daemon 排的提醒（DaemonNotice）、保溫、控制面握手、relay 一律不收，否則提醒會變成自己的待辦、越排越多。
 //! 收件失敗只記 log，訊息本身已經收下。
 
-use crate::capabilities::{Db, Emit};
+use crate::capabilities::{Cfg, Db, Emit};
 use crate::lifecycle::prompt::RelaySrc;
 use crate::lc_error::QueueClass;
 use serde_json::json;
 
-pub(crate) async fn ingest_user_prompt(app: &(impl Db + Emit), relay: RelaySrc<'_>, bot_id: &str, message_id: &str, turn_id: &str, text: &str) {
+pub(crate) async fn ingest_user_prompt(app: &(impl Db + Emit + Cfg), relay: RelaySrc<'_>, bot_id: &str, message_id: &str, turn_id: &str, text: &str) {
+    // 預設不自動收件：每則都建項太吵，要追蹤的才加（`[ledger] auto_ingest`）。
+    if !app.cfg().get().await.ledger.auto_ingest {
+        return;
+    }
     if relay.from.is_some() || relay.unverified || relay.daemon || relay.queue_class != QueueClass::User {
         return;
     }

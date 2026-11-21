@@ -956,11 +956,27 @@ mod prompt_tests {
         assert_eq!(notes, vec![UNRETRACTED_NOTE.to_string()]);
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
     }
+    /// 預設（`[ledger] auto_ingest` 沒開）：使用者訊息照常送出，但不建帳本項目，也不推 `ledger_updated`。
+    #[tokio::test]
+    async fn a_user_prompt_is_not_ingested_by_default() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let mut events = app.subscribe();
+        let out = prompt_with(&app, &f.bot_id, "請查 CI 失敗", "prompt-ledger-default-off", &[]).await.unwrap();
+        while let Ok(Ok(ev)) = tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await {
+            assert_ne!(ev.kind, "ledger_updated", "no announcement while the switch is off");
+        }
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ledger_items WHERE source_message_id = ?").bind(&out.message_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0, "the message was delivered but no item was created");
+    }
+
     /// daemon 自己排的回合（提醒＝DaemonNotice、保溫探測＝`prompt_expect_run`）不是人打的字：不入帳，也不推 `ledger_updated`。
+    /// 開關打開也一樣（這是來源白名單，不是開關）。
     #[tokio::test]
     async fn daemon_turns_are_never_ingested_as_user_commitments() {
         let f = fixture("codex", "test").await;
         let app = f.env.app.clone();
+        app.cfg.update(|c| { c.ledger.auto_ingest = true; Ok(()) }).await.unwrap();
         let notice = "承諾帳本提醒（系統排的，不是使用者訊息）：以下事項需要你處理";
         crate::lifecycle::prompt_relayed_queueable(&app, &f.bot_id, notice, "daemon-notice-1", None, crate::lifecycle::QueueClass::DaemonNotice).await.unwrap();
         let keep_warm = crate::lifecycle::prompt_expect_run(&app, &f.bot_id, "any updates", "keep-warm-1", &f.run_id).await;
@@ -976,6 +992,7 @@ mod prompt_tests {
     async fn a_user_prompt_to_the_management_bot_is_ingested_and_announced() {
         let f = fixture("codex", "test").await;
         let app = f.env.app.clone();
+        app.cfg.update(|c| { c.ledger.auto_ingest = true; Ok(()) }).await.unwrap();
         let mut events = app.subscribe();
         let out = prompt_with(&app, &f.bot_id, "請查 CI 失敗", "prompt-ledger-ingest", &[]).await.unwrap();
         let mut announced = None;
