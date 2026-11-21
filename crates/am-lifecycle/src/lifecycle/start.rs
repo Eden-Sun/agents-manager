@@ -1853,13 +1853,13 @@ async fn start_inner_body(
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    let status = match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
-        Ok(info) => info.agent_status.normalized(),
+    let (status, ready_session) = match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
+        Ok(info) => (info.agent_status.normalized(), super::dead_panes::herdr_session_id(&info)),
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
             // Do NOT close the pane on timeout (SPEC §6.2.7).
             match client.agent_get(&pane_id).await {
-                Ok(Some(info)) => info.agent_status.normalized(),
+                Ok(Some(info)) => (info.agent_status.normalized(), super::dead_panes::herdr_session_id(&info)),
                 _ => {
                     close_pane_and_tab(&client, Some(&workspace_id), Some(&tab_id), &pane_id).await;
                     return Err(up(e));
@@ -1867,6 +1867,15 @@ async fn start_inner_body(
             }
         }
     };
+    if bot.kind == "codex" && opts.fork_session.is_some() {
+        if let Some(sid) = ready_session.as_deref().filter(|s| Some(*s) != opts.fork_session.as_deref()) {
+            let _ = sqlx::query("UPDATE runs SET native_session_id = COALESCE(native_session_id, ?) WHERE id = ?")
+                .bind(sid)
+                .bind(run_id)
+                .execute(app.db())
+                .await;
+        }
+    }
     let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
     crate::codex_live::spawn_boot_version_read(app.db(), &client, fence.or(ready_fence.as_ref()), &bot.kind, &bot.id, run_id, &pane_id);
     // agent 起來了、`running` 還沒記下的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。

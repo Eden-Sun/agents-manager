@@ -78,6 +78,8 @@ pub enum LineageError {
     ClaimLineMismatch { claim_line: String },
     /// fork claim 沒有 work_session_id，且呼叫端也沒給 session_id。
     ClaimMissingWorkSession,
+    /// 只有 fork claim 可以登記 work_session_id。
+    ClaimNotFork,
     /// 呼叫端給的 session_id 與 claim 綁定的目標不一致。
     ClaimSessionMismatch { expected: String, got: String },
     /// 認領之後檢查點已經被別的寫入者前移。
@@ -103,6 +105,7 @@ impl std::fmt::Display for LineageError {
             Self::ClaimClosed(c) => write!(f, "claim is already {}", c.state),
             Self::ClaimLineMismatch { claim_line } => write!(f, "claim belongs to line `{claim_line}`"),
             Self::ClaimMissingWorkSession => write!(f, "fork claim has no work_session_id"),
+            Self::ClaimNotFork => write!(f, "only fork claims accept work_session_id"),
             Self::ClaimSessionMismatch { expected, got } => write!(f, "claim targets session `{expected}`, got `{got}`"),
             Self::CheckpointMoved { .. } => write!(f, "checkpoint moved since claim was opened"),
             Self::Db(e) => write!(f, "{e}"),
@@ -349,8 +352,35 @@ pub async fn abandon(pool: &SqlitePool, project_id: &str, claim_id: &str) -> Res
     Ok(updated)
 }
 
+/// 補記 `fork` claim 的 `work_session_id`（開工認領後才啟動 worker 拿到新 session id 時使用）。
+pub async fn set_claim_work_session(
+    pool: &SqlitePool,
+    project_id: &str,
+    claim_id: &str,
+    work_session_id: &str,
+) -> Result<LineageClaim, LineageError> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    let row = claim_by_id(&mut tx, project_id, claim_id).await?.ok_or(LineageError::ClaimNotFound)?;
+    if row.state != "open" {
+        return Err(LineageError::ClaimClosed(Box::new(row)));
+    }
+    if row.mode != "fork" {
+        return Err(LineageError::ClaimNotFork);
+    }
+    sqlx::query("UPDATE lineage_claims SET work_session_id = ?, updated_at = ? WHERE id = ?")
+        .bind(work_session_id)
+        .bind(crate::db::now())
+        .bind(&row.id)
+        .execute(&mut *tx)
+        .await?;
+    let updated = claim_by_id(&mut tx, project_id, claim_id).await?.ok_or(LineageError::ClaimNotFound)?;
+    tx.commit().await?;
+    Ok(updated)
+}
+
 /// 帶 `claim_id` 前移：同一交易內核對 claim 屬於同專案同線、狀態為 `open`、且目前檢查點仍等於 `base_session_id`；
 /// 通過後 `resume` 前移 `base_session_id` 本身（冪等更新），`fork` 前移 `work_session_id`，並把 claim 標為 `advanced`。
+/// `line` 為空字串時直接沿用 claim 記的線名。
 pub async fn advance_with_claim(
     pool: &SqlitePool,
     project_id: &str,
@@ -361,13 +391,17 @@ pub async fn advance_with_claim(
 ) -> Result<Advanced, LineageError> {
     let mut tx = crate::db::begin_write(pool).await?;
     let claim = claim_by_id(&mut tx, project_id, claim_id).await?.ok_or(LineageError::ClaimNotFound)?;
-    if claim.line != line {
+    let line = if line.is_empty() {
+        claim.line.clone()
+    } else if claim.line != line {
         return Err(LineageError::ClaimLineMismatch { claim_line: claim.line });
-    }
+    } else {
+        line.to_string()
+    };
     if claim.state != "open" {
         return Err(LineageError::ClaimClosed(Box::new(claim)));
     }
-    let current = checkpoint_in_tx(&mut tx, project_id, line).await?;
+    let current = checkpoint_in_tx(&mut tx, project_id, &line).await?;
     if current.as_ref().map(|c| c.session_id.as_str()) != Some(claim.base_session_id.as_str()) {
         return Err(LineageError::CheckpointMoved { checkpoint: current.map(Box::new) });
     }
@@ -386,7 +420,7 @@ pub async fn advance_with_claim(
         }
     }
     let now = crate::db::now();
-    let (session, retired) = advance_in_tx(&mut tx, project_id, line, &target, f, &now).await?;
+    let (session, retired) = advance_in_tx(&mut tx, project_id, &line, &target, f, &now).await?;
     sqlx::query("UPDATE lineage_claims SET state = 'advanced', updated_at = ? WHERE id = ?")
         .bind(&now)
         .bind(&claim.id)
@@ -634,5 +668,24 @@ mod tests {
         assert_eq!(ab.state, "abandoned");
         assert_eq!(abandon(&pool, "p1", &c_f2.claim.id).await.unwrap().state, "abandoned");
         assert!(matches!(advance_with_claim(&pool, "p1", "web", &c_f2.claim.id, None, Fields::default()).await, Err(LineageError::ClaimClosed(_))));
+    }
+
+    #[tokio::test]
+    async fn set_claim_work_session_and_inferred_line_advance() {
+        let pool = pool().await;
+        advance(&pool, "p1", "web", "s1", Fields::default()).await.unwrap();
+        let c_res = claim(&pool, "p1", "web", "resume", None, Some("bak"), None).await.unwrap();
+        assert!(matches!(set_claim_work_session(&pool, "p1", &c_res.claim.id, "w0").await, Err(LineageError::ClaimNotFork)));
+        abandon(&pool, "p1", &c_res.claim.id).await.unwrap();
+
+        let c_fork = claim(&pool, "p1", "web", "fork", None, None, None).await.unwrap();
+        let updated = set_claim_work_session(&pool, "p1", &c_fork.claim.id, "w-new").await.unwrap();
+        assert_eq!(updated.work_session_id.as_deref(), Some("w-new"));
+
+        // line 為空字串時由 claim.line 推得。
+        let adv = advance_with_claim(&pool, "p1", "", &c_fork.claim.id, None, Fields { head_sha: Some("1234567".into()), ..Default::default() }).await.unwrap();
+        assert_eq!(adv.session.session_id, "w-new");
+        assert_eq!(adv.session.line, "web");
+        assert!(matches!(set_claim_work_session(&pool, "p1", &c_fork.claim.id, "w-late").await, Err(LineageError::ClaimClosed(_))));
     }
 }

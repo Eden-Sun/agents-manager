@@ -21,9 +21,15 @@ fn an_explicit_session_rides_only_on_native_and_must_be_plain() {
     assert_eq!(o.resume_session.as_deref(), Some("246fcf93-af39-48d3-8041-b27df5a91958"));
     assert!(o.resume_native && o.resume_required);
     assert!(resume_opts(&q(Some("native"), Some(""))).unwrap().resume_session.is_none());
-    assert!(matches!(resume_opts(&q(None, Some("abc"))), Err(LcError::Bad(_))), "沒有 native 不收 session");
+    assert!(matches!(resume_opts(&q(None, Some("abc"))), Err(LcError::Bad(_))), "沒有 native/fork 不收 session");
     assert!(matches!(resume_opts(&q(Some("native"), Some("a b"))), Err(LcError::Bad(_))));
     assert!(matches!(resume_opts(&q(Some("native"), Some("../x"))), Err(LcError::Bad(_))));
+    let f = resume_opts(&q(Some("fork"), Some(" 246fcf93-af39-48d3-8041-b27df5a91958 "))).unwrap();
+    assert_eq!(f.fork_session.as_deref(), Some("246fcf93-af39-48d3-8041-b27df5a91958"));
+    assert!(!f.resume_native);
+    assert!(matches!(resume_opts(&q(Some("fork"), None)), Err(LcError::Bad(_))), "fork 必帶 session");
+    assert!(matches!(resume_opts(&q(Some("fork"), Some(""))), Err(LcError::Bad(_))));
+    assert!(matches!(resume_opts(&q(Some("fork"), Some("../x"))), Err(LcError::Bad(_))));
 }
 
 #[tokio::test]

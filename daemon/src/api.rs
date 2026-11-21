@@ -176,6 +176,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/ledger", get(crate::ledger_api::list).post(crate::ledger_api::create))
         .route("/projects/{id}/ledger/{item_id}", patch(crate::ledger_api::patch))
         .route("/projects/{id}/lineage/claim", post(crate::session_lineage::claim))
+        .route("/projects/{id}/lineage/claim/{claim_id}", patch(crate::session_lineage::set_claim_work_session))
         .route("/projects/{id}/lineage/claim/{claim_id}/abandon", post(crate::session_lineage::abandon))
         .route("/spawn-authority", get(crate::expert_peers::spawn_authority))
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
@@ -5796,28 +5797,41 @@ async fn api_fresh_target(State(app): State<Arc<App>>, Path(id): Path<String>, E
 struct StartQuery {
     /// 沒帶（預設）：有記錄的 session 就接回，沒有才開新對話（2026-10-02 使用者：「預設必 resume」——console-rpa 換身分後
     /// 重啟沒帶參數，起了新 session、整個失憶）。`native`：一定要接回，接不回回 409 `resumed:false`、不啟動。
-    /// `fresh`：明確要開新對話。
+    /// `fresh`：明確要開新對話。`fork`：從 `session` 指定的既有 codex 對話持久分岔（須帶 `session`）。
     resume: Option<String>,
-    /// 跟 `resume=native` 一起：不看 DB，接這一段 session（救援用；只有 `bin/agm` 露出這個旗標）。
+    /// 跟 `resume=native` 或 `resume=fork` 一起：不看 DB，指名接回或分岔這一段 session。
     session: Option<String>,
+}
+
+fn valid_plain_session(s: &str) -> bool {
+    s.len() <= 128 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }
 
 fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
     let session = q.session.as_deref().map(str::trim).filter(|v| !v.is_empty());
     match q.resume.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-        None if session.is_some() => Err(LcError::Bad("`session` needs `resume=native`".into())),
+        None if session.is_some() => Err(LcError::Bad("`session` needs `resume=native` or `resume=fork`".into())),
         None => Ok(lifecycle::StartOpts { resume_native: true, ..Default::default() }),
         Some("fresh") if session.is_none() => Ok(lifecycle::StartOpts::default()),
-        Some("fresh") => Err(LcError::Bad("`session` needs `resume=native`".into())),
+        Some("fresh") => Err(LcError::Bad("`session` needs `resume=native` or `resume=fork`".into())),
         Some("native") => {
             if let Some(s) = session {
-                if s.len() > 128 || !s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
+                if !valid_plain_session(s) {
                     return Err(LcError::Bad("`session` must be a plain session id".into()));
                 }
             }
             Ok(lifecycle::StartOpts { resume_native: true, resume_required: true, resume_session: session.map(str::to_string), ..Default::default() })
         }
-        Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native` or `fresh`)"))),
+        Some("fork") => {
+            let Some(s) = session else {
+                return Err(LcError::Bad("`resume=fork` requires `session`".into()));
+            };
+            if !valid_plain_session(s) {
+                return Err(LcError::Bad("`session` must be a plain session id".into()));
+            }
+            Ok(lifecycle::StartOpts { fork_session: Some(s.to_string()), ..Default::default() })
+        }
+        Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native`, `fresh`, or `fork`)"))),
     }
 }
 
@@ -5831,6 +5845,15 @@ fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
 /// - 還沒結論或 `unverified`（等滿沒回報、刻意放行）：`resume_session_id` 還在，照「帶了 `--resume`」算 `true`；
 /// - 都沒有：這次沒帶 `--resume`（接不回、退回開新對話）。
 async fn started_json(app: &Arc<App>, run_id: &str, opts: &lifecycle::StartOpts) -> Result<Value, LcError> {
+    if opts.fork_session.is_some() {
+        let native: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(any_err)?
+            .flatten();
+        return Ok(json!({"run_id": run_id, "forked": true, "session_id": native}));
+    }
     if !opts.resume_native {
         return Ok(json!({"run_id": run_id}));
     }
@@ -5863,6 +5886,7 @@ pub(crate) async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<S
     let kind = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.map(|b| b.kind);
     if kind.as_deref().is_some_and(crate::config::is_api_kind) {
         use crate::lifecycle::api_bot_port::{ApiBotPort, ApiFreshTarget, ApiNativeStartError, ApiNativeStartMode};
+        if opts.fork_session.is_some() { return Err(LcError::Bad("api_fork_unsupported".into())); }
         if opts.resume_session.is_some() { return Err(LcError::Bad("api_native_session_override_unsupported".into())); }
         let fresh = common.resume.as_deref().is_some_and(|v| v.trim() == "fresh");
         let mode = if fresh {

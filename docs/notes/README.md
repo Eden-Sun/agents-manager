@@ -10,6 +10,22 @@
 - 用途：
   - `agm lineage pick <path>...`：依變更檔案路徑自動挑選單一模組線（跨線或未匹配則回傳 null，指示呼叫端走一般 fork）。
   - `agm lineage since <line>`：取該線目前檢查點的 HEAD SHA，比對自檢查點以來該線路徑的 `git diff --stat`，並產生可直接注入派工 prompt 前綴的中文說明。
+  - `agm lineage dispatch`：把血統派工串成單一指令（`pick → since → claim → 啟動 worker → 前綴注入 → 派送 prompt`）。
+  - `agm lineage finish`：結束認領（`--merged` 帶 `claim_id` 前移檢查點；`--abandon` 放棄並回傳要接手的備份 session）。
+
+## 血統派工與收尾流程（B3）
+
+1. **小、單寫者（`resume` 模式）**：
+   - `agm lineage dispatch --paths <files...> --prompt-file <file> (--bot <id> | --child <name>)`
+   - 先跑無 prompt 的 `codex exec fork --json <checkpoint>` 產生乾淨備份 `backup_session_id`（不呼叫模型）。
+   - 向 daemon 認領 `mode=resume`（帶 `backup_session_id`）；若該線已有 open resume 認領（409 `lineage_line_busy`），自動改走下方 `fork` 模式。
+   - 啟動 worker 直接接回檢查點（專家模式：`POST /api/bots/{id}/start|restart?resume=native&session=<checkpoint>`；母子模式：`herdr agent start <child> --kind codex --pane <pane> -- resume <checkpoint>`），再於 prompt 前加上 `agm lineage since <line>` 的 `prompt_prefix` 送出。
+   - 成功合流後執行 `agm lineage finish <claim_id> --merged --head <sha> --summary "…"`（帶 `claim_id` 前移）；失敗則執行 `agm lineage finish <claim_id> --abandon`，用回傳的 `backup_session_id` 接手。
+2. **大／跨線／平行（`--fork` 或 busy 改 fork）**：
+   - 認領 `mode=fork`（不擋線），worker 從檢查點持久分岔（專家模式：`?resume=fork&session=<checkpoint>`；母子模式：`herdr agent start … -- fork <checkpoint>`）。
+   - 取得新產生的 `work_session_id` 後，向 daemon 登記為 `active` session 並寫回 claim（`PATCH /api/projects/{id}/lineage/claim/{claim_id}`），再送出帶 `since` 前綴的 prompt。
+   - 成功合流後同樣以 `agm lineage finish <claim_id> --merged …` 前移；若檢查點已被別人移走或 claim 已關閉（409 `lineage_checkpoint_moved`／`lineage_claim_closed`），原樣回報給呼叫端，不重試也不改用無 claim 的 advance。
+3. **失敗自動回滾**：`dispatch` 在認領成立後若啟動 worker、登記或送 prompt 任一步失敗，會自動呼叫 `abandon` 釋放 claim（母子模式並關閉新建的 split pane），再以非 0 輸出錯誤 JSON。
 
 ## 目前定義的模組線
 

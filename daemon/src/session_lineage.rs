@@ -30,6 +30,7 @@ pub(crate) struct ListQuery {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionBody {
+    #[serde(default)]
     pub line: String,
     pub session_id: Option<String>,
     pub claim_id: Option<String>,
@@ -49,6 +50,12 @@ pub(crate) struct ClaimBody {
     pub mode: String,
     pub backup_session_id: Option<String>,
     pub work_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClaimWorkSessionBody {
+    pub work_session_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -99,9 +106,9 @@ fn opt(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-fn fields(b: SessionBody) -> Result<(String, Option<String>, Option<String>, Fields), LcError> {
+fn fields(b: SessionBody, allow_empty_line: bool) -> Result<(String, Option<String>, Option<String>, Fields), LcError> {
     let line = b.line.trim().to_string();
-    if !valid_line(&line) {
+    if !(allow_empty_line && line.is_empty()) && !valid_line(&line) {
         return Err(bad("line", "1–64 chars of [A-Za-z0-9._-], starting with a letter or digit"));
     }
     let session_id = opt(b.session_id);
@@ -201,6 +208,7 @@ fn lineage_err(e: LineageError) -> LcError {
         LineageError::ClaimClosed(claim) => LcError::conflict("lineage_claim_closed", json!({"claim": *claim})),
         LineageError::ClaimLineMismatch { claim_line } => LcError::conflict("lineage_line_mismatch", json!({"claim_line": claim_line})),
         LineageError::ClaimMissingWorkSession => bad("work_session_id", "fork claim has no work_session_id"),
+        LineageError::ClaimNotFork => bad("mode", "only fork claims accept work_session_id"),
         LineageError::ClaimSessionMismatch { expected, got } => {
             LcError::conflict("lineage_claim_session_mismatch", json!({"expected_session_id": expected, "session_id": got}))
         }
@@ -237,7 +245,7 @@ pub(crate) async fn create(
 ) -> Result<Json<Value>, LcError> {
     require_writer(&app, &principal, &project_id).await?;
     live_project(&app, &project_id).await?;
-    let (line, session_id, claim_id, f) = fields(body)?;
+    let (line, session_id, claim_id, f) = fields(body, false)?;
     if claim_id.is_some() {
         return Err(bad("claim_id", "only supported on advance"));
     }
@@ -254,7 +262,8 @@ pub(crate) async fn advance(
 ) -> Result<Json<Value>, LcError> {
     require_writer(&app, &principal, &project_id).await?;
     live_project(&app, &project_id).await?;
-    let (line, session_id, claim_id, f) = fields(body)?;
+    let has_claim = body.claim_id.as_deref().is_some_and(|c| !c.trim().is_empty());
+    let (line, session_id, claim_id, f) = fields(body, has_claim)?;
     let done = match claim_id {
         Some(cid) => lineage::advance_with_claim(&app.db, &project_id, &line, &cid, session_id.as_deref(), f).await.map_err(lineage_err)?,
         None => {
@@ -301,6 +310,26 @@ pub(crate) async fn claim(
     .await
     .map_err(lineage_err)?;
     Ok(Json(json!({"claim": claimed.claim, "checkpoint": claimed.checkpoint})))
+}
+
+pub(crate) async fn set_claim_work_session(
+    State(app): State<Arc<App>>,
+    Path((project_id, claim_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(body): Json<ClaimWorkSessionBody>,
+) -> Result<Json<Value>, LcError> {
+    require_writer(&app, &principal, &project_id).await?;
+    live_project(&app, &project_id).await?;
+    let claim_id = claim_id.trim();
+    if !valid_session_id(claim_id) {
+        return Err(bad("claim_id", "1–200 printable ASCII chars without spaces"));
+    }
+    let work_session_id = body.work_session_id.trim();
+    if !valid_session_id(work_session_id) {
+        return Err(bad("work_session_id", "1–200 printable ASCII chars without spaces"));
+    }
+    let claim = lineage::set_claim_work_session(&app.db, &project_id, claim_id, work_session_id).await.map_err(lineage_err)?;
+    Ok(Json(json!({"claim": claim})))
 }
 
 pub(crate) async fn abandon(

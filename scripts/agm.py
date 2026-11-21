@@ -2074,6 +2074,322 @@ def cmd_lineage_since(client: Client, cfg: dict, args) -> object:
     }
 
 
+def _extract_session_id_from_text(text: str) -> str | None:
+    """從 `codex exec fork --json` 輸出（或文字訊息）抓新產生的 session/thread id。"""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                obj = None
+            if isinstance(obj, dict):
+                for key in ("thread_id", "session_id"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+    m = re.search(r"session\s+id:\s*([A-Za-z0-9._-]+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _codex_backup_fork(session_id: str, repo: Path) -> str:
+    """跑無 prompt 的 `codex exec fork --json <session_id>` 留乾淨備份，不呼叫模型。"""
+    codex_bin = os.environ.get("AGM_CODEX_BIN") or "codex"
+    try:
+        proc = subprocess.run(
+            [codex_bin, "exec", "fork", "--json", session_id],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        raise AgmError("codex_not_found", f"找不到 codex 執行檔：{codex_bin}", 1, base_session_id=session_id)
+    except subprocess.TimeoutExpired:
+        raise AgmError("backup_fork_timeout", "codex exec fork 備份逾時", 1, base_session_id=session_id)
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise AgmError("backup_fork_failed", f"codex exec fork 備份失敗：{msg}", 1, base_session_id=session_id)
+    backup_id = _extract_session_id_from_text(proc.stdout) or _extract_session_id_from_text(proc.stderr)
+    if not backup_id:
+        raise AgmError("backup_fork_failed", "codex exec fork 未回傳備份 session id", 1, base_session_id=session_id)
+    return backup_id
+
+
+def _herdr_bin() -> str:
+    return os.environ.get("AGM_HERDR_BIN") or "herdr"
+
+
+def _herdr_run(cmd_args: list[str], err_kind: str, err_prefix: str) -> str:
+    try:
+        proc = subprocess.run([_herdr_bin(), *cmd_args], capture_output=True, text=True, timeout=90)
+    except FileNotFoundError:
+        raise AgmError("herdr_not_found", f"找不到 herdr 執行檔：{_herdr_bin()}", 1)
+    except subprocess.TimeoutExpired:
+        raise AgmError(err_kind, f"{err_prefix}：逾時", 1)
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise AgmError(err_kind, f"{err_prefix}：{msg}", 1)
+    return proc.stdout.strip()
+
+
+def _herdr_split_pane(parent_pane: str) -> str:
+    out = _herdr_run(["pane", "split", "--pane", parent_pane], "herdr_split_failed", "herdr pane split 失敗")
+    if out.startswith("{"):
+        try:
+            obj = json.loads(out)
+            if isinstance(obj, dict) and isinstance(obj.get("pane_id"), str) and obj["pane_id"].strip():
+                return obj["pane_id"].strip()
+        except json.JSONDecodeError:
+            pass
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if lines:
+        return lines[-1].split()[-1]
+    raise AgmError("herdr_split_failed", "herdr pane split 未回傳 pane id", 1)
+
+
+def _herdr_close_pane(pane_id: str) -> None:
+    try:
+        subprocess.run([_herdr_bin(), "pane", "close", pane_id], capture_output=True, text=True, timeout=15)
+    except Exception:
+        pass
+
+
+def _herdr_agent_session(target: str) -> str | None:
+    out = _herdr_run(["agent", "get", target], "herdr_get_failed", "herdr agent get 失敗")
+    if out.startswith("{"):
+        try:
+            obj = json.loads(out)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            sess = obj.get("agent_session")
+            if isinstance(sess, dict) and isinstance(sess.get("value"), str) and sess["value"].strip():
+                return sess["value"].strip()
+            if isinstance(obj.get("session_id"), str) and obj["session_id"].strip():
+                return obj["session_id"].strip()
+    return None
+
+
+def _find_bot_in_state(client: Client, cfg: dict, bot_id: str) -> dict | None:
+    manager = ""
+    try:
+        manager = manager_bot_id(cfg)
+    except AgmError:
+        pass
+    sup = optional_get(client, "/api/supervisor/state")
+    state = slim_state(sup if sup is not None else client.get("/api/state"), manager)
+    for b in state.get("bots") or []:
+        if b.get("id") == bot_id:
+            return b
+    return None
+
+
+def _poll_fork_session(client: Client, cfg: dict, bot_id: str, base_session_id: str) -> str | None:
+    for attempt in range(6):
+        b = _find_bot_in_state(client, cfg, bot_id)
+        run = (b or {}).get("run") or {}
+        sid = run.get("native_session_id")
+        if isinstance(sid, str) and sid.strip() and sid.strip() != base_session_id:
+            return sid.strip()
+        if attempt < 5:
+            time.sleep(0.5)
+    return None
+
+
+def cmd_lineage_dispatch(client: Client, cfg: dict, args) -> object:
+    """血統派工（#1943 B3）：pick → claim →（resume 先備份）→ 啟動 worker → 前綴 since → 送 prompt。"""
+    bot_target = getattr(args, "bot", None)
+    child_target = getattr(args, "child", None)
+    if bool(bot_target) == bool(child_target):
+        raise AgmError("bad_args", "dispatch 必須擇一指定 --bot（專家模式）或 --child（母子模式）", 2)
+    paths_arg = getattr(args, "paths", None)
+    line_arg = getattr(args, "line", None)
+    if not paths_arg and not line_arg:
+        raise AgmError("bad_args", "dispatch 必須指定 --paths 或 --line", 2)
+
+    prompt_path = Path(args.prompt_file).expanduser()
+    try:
+        user_prompt = prompt_path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        raise AgmError("bad_args", f"讀不到 --prompt-file（{prompt_path}）：{e.strerror or e}", 2)
+    if not user_prompt:
+        raise AgmError("bad_args", "--prompt-file 內容不可為空", 2)
+
+    repo = _resolve_repo(getattr(args, "repo", None))
+    force_fork = bool(getattr(args, "fork", False))
+
+    if paths_arg:
+        picked = cmd_lineage_pick(None, cfg, args)
+        if line_arg:
+            line = line_arg.strip()
+            if not _valid_line(line):
+                raise AgmError("invalid_line", f"模組線名稱不合規則：{line}", 2, line=line)
+            if picked.get("line") is None:
+                force_fork = True
+        else:
+            if picked.get("line") is None:
+                raise AgmError(
+                    "no_single_line",
+                    "路徑跨線或未匹配任何模組線，無法自動決定血統線；請改用 --line 指定或手動處理",
+                    1,
+                    lines=picked.get("lines"),
+                    unmatched=picked.get("unmatched"),
+                )
+            line = str(picked["line"])
+    else:
+        line = str(line_arg).strip()
+        if not _valid_line(line):
+            raise AgmError("invalid_line", f"模組線名稱不合規則：{line}", 2, line=line)
+
+    since_ns = argparse.Namespace(
+        line=line,
+        lines_file=getattr(args, "lines_file", None),
+        repo=str(repo),
+    )
+    since = cmd_lineage_since(client, cfg, since_ns)
+    base_session_id = str(since["checkpoint_session"])
+    full_prompt = f"{since['prompt_prefix']}\n\n{user_prompt}"
+
+    mode = "fork" if force_fork else "resume"
+    backup_session_id: str | None = None
+    claim_resp: dict | None = None
+
+    if mode == "resume":
+        backup_session_id = _codex_backup_fork(base_session_id, repo)
+        try:
+            res = client.post(
+                _lineage_path("/claim"),
+                {"line": line, "mode": "resume", "backup_session_id": backup_session_id},
+            )
+            claim_resp = res if isinstance(res, dict) else None
+        except AgmError as e:
+            detail = e.extra.get("detail") if isinstance(e.extra, dict) else None
+            if e.kind == "http_error" and e.extra.get("status") == 409 and isinstance(detail, dict) and detail.get("reason") == "lineage_line_busy":
+                mode = "fork"
+                backup_session_id = None
+            else:
+                raise
+
+    if mode == "fork":
+        res = client.post(_lineage_path("/claim"), {"line": line, "mode": "fork"})
+        claim_resp = res if isinstance(res, dict) else None
+
+    if not claim_resp or not isinstance(claim_resp.get("claim"), dict) or not claim_resp["claim"].get("id"):
+        raise AgmError("claim_failed", "認領血統線回傳格式錯誤", 1, line=line)
+    claim_id = str(claim_resp["claim"]["id"])
+
+    created_pane: str | None = None
+    try:
+        worker_info: dict[str, object]
+        if bot_target:
+            bot_info = _find_bot_in_state(client, cfg, bot_target)
+            if bot_info is None:
+                raise AgmError("bot_not_found", f"找不到目標 bot：{bot_target}", 1, bot_id=bot_target)
+            op = "restart" if bot_info.get("run") else "start"
+            if mode == "resume":
+                q = urllib.parse.urlencode({"resume": "native", "session": base_session_id})
+                start_res = client.post(f"/api/bots/{path_segment(bot_target)}/{op}?{q}", {})
+                if isinstance(start_res, dict) and start_res.get("resumed") is False:
+                    raise AgmError("worker_resume_failed", f"bot {bot_target} 未能接回檢查點 {base_session_id}", 1, detail=start_res)
+                work_session_id = base_session_id
+            else:
+                q = urllib.parse.urlencode({"resume": "fork", "session": base_session_id})
+                start_res = client.post(f"/api/bots/{path_segment(bot_target)}/{op}?{q}", {})
+                sid = start_res.get("session_id") if isinstance(start_res, dict) else None
+                work_session_id = sid.strip() if isinstance(sid, str) and sid.strip() else None
+                if not work_session_id:
+                    work_session_id = _poll_fork_session(client, cfg, bot_target, base_session_id)
+                if not work_session_id:
+                    raise AgmError("fork_session_unknown", f"bot {bot_target} fork 啟動後未取得新 session id", 1, bot_id=bot_target)
+            worker_info = {"kind": "bot", "bot_id": bot_target}
+        else:
+            pane_id = getattr(args, "pane", None)
+            if not pane_id:
+                parent_pane = os.environ.get("HERDR_PANE_ID", "").strip()
+                if not parent_pane:
+                    raise AgmError("no_pane", "母子模式需要 --pane 或環境變數 HERDR_PANE_ID", 2)
+                pane_id = _herdr_split_pane(parent_pane)
+                created_pane = pane_id
+            subcmd = "resume" if mode == "resume" else "fork"
+            start_cmd = ["agent", "start", child_target, "--kind", "codex", "--pane", pane_id]
+            if getattr(args, "identity", None):
+                start_cmd.extend(["--identity", args.identity])
+            start_cmd.extend(["--", subcmd, base_session_id])
+            _herdr_run(start_cmd, "worker_start_failed", f"herdr agent start {child_target} 失敗")
+            if mode == "resume":
+                work_session_id = base_session_id
+            else:
+                work_session_id = _herdr_agent_session(child_target)
+                if not work_session_id:
+                    raise AgmError("fork_session_unknown", f"child {child_target} fork 啟動後未取得新 session id", 1, child=child_target)
+            worker_info = {"kind": "child", "child": child_target, "pane_id": pane_id}
+
+        if mode == "fork":
+            try:
+                client.post(
+                    _lineage_path(),
+                    {
+                        "line": line,
+                        "session_id": work_session_id,
+                        "parent_session_id": base_session_id,
+                        "role": "worker",
+                        "kind": "codex",
+                    },
+                )
+            except AgmError as e:
+                detail = e.extra.get("detail") if isinstance(e.extra, dict) else None
+                if not (e.kind == "http_error" and e.extra.get("status") == 409 and isinstance(detail, dict) and detail.get("reason") == "lineage_session_exists"):
+                    raise
+            client.patch(
+                _lineage_path(f"/claim/{path_segment(claim_id)}"),
+                {"work_session_id": work_session_id},
+            )
+
+        if bot_target:
+            req_id = getattr(args, "request_id", None) or f"lineage-{claim_id}"
+            client.post(
+                f"/api/bots/{path_segment(bot_target)}/prompt",
+                {"text": full_prompt, "client_request_id": req_id},
+            )
+        else:
+            _herdr_run(["agent", "prompt", child_target, full_prompt], "worker_prompt_failed", f"herdr agent prompt {child_target} 失敗")
+    except Exception:
+        try:
+            client.post(_lineage_path(f"/claim/{path_segment(claim_id)}/abandon"), {})
+        except Exception:
+            pass
+        if created_pane:
+            _herdr_close_pane(created_pane)
+        raise
+
+    return {
+        "line": line,
+        "mode": mode,
+        "claim_id": claim_id,
+        "base_session_id": base_session_id,
+        "backup_session_id": backup_session_id,
+        "work_session_id": work_session_id,
+        "worker": worker_info,
+    }
+
+
+def cmd_lineage_finish(client: Client, cfg: dict, args) -> object:
+    """結束血統認領（#1943 B3）：--merged 帶 claim_id 前移；--abandon 放棄並回要接手的備份 session。"""
+    if args.merged:
+        body: dict[str, object] = {"claim_id": args.claim_id}
+        for key, attr in (("line", "line"), ("session_id", "session"), ("head_sha", "head"), ("summary", "summary")):
+            val = getattr(args, attr, None)
+            if val is not None and str(val).strip() != "":
+                body[key] = str(val).strip()
+        return client.post(_lineage_path("/advance"), body)
+    return client.post(_lineage_path(f"/claim/{path_segment(args.claim_id)}/abandon"), {})
+
+
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
@@ -2765,11 +3081,14 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
         return client.post(f"/api/bots/{path_segment(args.bot_id)}/restore", {})
     path = f"/api/bots/{path_segment(args.bot_id)}/{args.op}"
     # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
+    # `--resume fork`：從 `--session` 指定的既有 codex 對話持久分岔。
     # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
     if getattr(args, "session", None) and not getattr(args, "resume", None):
-        raise AgmError("bad_args", "--session 要跟 --resume native 一起用", 2)
-    if getattr(args, "session", None) and args.resume != "native":
-        raise AgmError("bad_args", "--session 要跟 --resume native 一起用", 2)
+        raise AgmError("bad_args", "--session 要跟 --resume native 或 --resume fork 一起用", 2)
+    if getattr(args, "session", None) and args.resume not in ("native", "fork"):
+        raise AgmError("bad_args", "--session 要跟 --resume native 或 --resume fork 一起用", 2)
+    if getattr(args, "resume", None) == "fork" and not getattr(args, "session", None):
+        raise AgmError("bad_args", "--resume fork 必須帶 --session", 2)
     if getattr(args, "resume", None):
         if args.op not in ("start", "restart"):
             raise AgmError("bad_args", "--resume 只有 bot start / restart 收", 2)
@@ -3142,6 +3461,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--config", "--lines-file", dest="lines_file", help="指定 lines.toml 路徑（預設 docs/notes/lines.toml）")
     s.add_argument("--repo", help="指定 git repo 路徑")
     s.set_defaults(func=cmd_lineage_since)
+    s = lineage.add_parser("dispatch", help="血統派工：pick → claim →（resume 備份）→ 啟動 worker → 前綴 since → 派 prompt")
+    s.add_argument("--paths", nargs="+", help="要改動的檔案路徑清單（依 lines.toml 挑線）")
+    s.add_argument("--line", help="直接指定模組線名（或作為 --paths 跨線時的基準線）")
+    s.add_argument("--prompt-file", dest="prompt_file", required=True, help="派工 prompt 檔案路徑")
+    s.add_argument("--fork", action="store_true", help="強制走持久 fork 模式")
+    s.add_argument("--bot", help="專家模式：目標執行者 bot id")
+    s.add_argument("--child", help="母子模式：要開啟的 herdr child 名稱")
+    s.add_argument("--pane", help="母子模式：既有 pane id（省略則從 $HERDR_PANE_ID split）")
+    s.add_argument("--identity", help="母子模式：herdr agent start 的 --identity")
+    s.add_argument("--request-id", dest="request_id", help="送 prompt 用的 client_request_id")
+    s.add_argument("--config", "--lines-file", dest="lines_file", help="指定 lines.toml 路徑（預設 docs/notes/lines.toml）")
+    s.add_argument("--repo", help="指定 git repo 路徑")
+    s.set_defaults(func=cmd_lineage_dispatch)
+    s = lineage.add_parser("finish", help="結束血統認領：--merged 帶 claim_id 前移，或 --abandon 放棄並回傳備份 session")
+    s.add_argument("claim_id", help="dispatch 回傳的 claim_id")
+    fin_mode = s.add_mutually_exclusive_group(required=True)
+    fin_mode.add_argument("--merged", action="store_true", help="工作已合流，帶 claim_id 前移檢查點")
+    fin_mode.add_argument("--abandon", action="store_true", help="放棄認領，並印出要接手的備份 session")
+    s.add_argument("--head", help="--merged 時記錄的 HEAD commit sha（7–64 位 hex）")
+    s.add_argument("--summary", help="--merged 時記錄的一行摘要（最多 500 字）")
+    s.add_argument("--line", help="選填：覆寫線名驗證")
+    s.add_argument("--session", help="選填：覆寫目標 session_id")
+    s.set_defaults(func=cmd_lineage_finish)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／specialist／none）")
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "specialist", "none"])
@@ -3211,8 +3553,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--identity")
-    s.add_argument("--resume", choices=["native", "fresh"], help="start/restart：預設就會接回記錄的對話（接不回才開新的）；native＝一定要接回（接不回是 409 resumed:false）；fresh＝明確開新對話")
-    s.add_argument("--session", help="跟 --resume native 一起：不看 DB，指名接回這一段 session id（DB 記錯時的救援路徑）")
+    s.add_argument("--resume", choices=["native", "fresh", "fork"], help="start/restart：預設就會接回記錄的對話（接不回才開新的）；native＝一定要接回（接不回是 409 resumed:false）；fresh＝明確開新對話；fork＝從 --session 指定之 codex 對話持久分岔")
+    s.add_argument("--session", help="跟 --resume native 或 --resume fork 一起：不看 DB，指名接回或分岔這一段 session id")
     s.add_argument("--confirm-supervisor", dest="confirm_supervisor", action="store_true",
                    help="delete：確定要刪 AGM 的 bot（總管專案裡的、總管的 child）；沒帶會 409 supervisor_owned")
     s.set_defaults(func=cmd_bot)

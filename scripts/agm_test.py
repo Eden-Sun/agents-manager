@@ -1724,6 +1724,226 @@ paths = ["web/**"]
                 self.assertEqual(err["error"], "sha_not_found")
                 self.assertIn("git fetch", err["message"])
 
+    def _setup_lineage_repo(self, root: Path):
+        for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+        lines_file = root / "lines.toml"
+        lines_file.write_text("[lines.web]\npaths = [\"web/**\"]\n\n[lines.ops]\npaths = [\"scripts/**\"]\n", encoding="utf-8")
+        (root / "web").mkdir(parents=True, exist_ok=True)
+        (root / "web" / "App.tsx").write_text("export const App = 1;\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "checkpoint"], check=True, capture_output=True)
+        chk_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        (root / "web" / "App.tsx").write_text("export const App = 2;\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "change"], check=True, capture_output=True)
+        prompt_file = root / "task.md"
+        prompt_file.write_text("請修好 App.tsx 的按鈕", encoding="utf-8")
+        return lines_file, chk_sha, prompt_file
+
+    def _write_fake_bin(self, path: Path, script: str) -> Path:
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_lineage_dispatch_resume_expert_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            codex_log = root / "codex.log"
+            fake_codex = self._write_fake_bin(
+                root / "fake-codex",
+                f"#!/usr/bin/env python3\nimport json, sys\nopen({str(codex_log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\nprint(json.dumps({{'type': 'thread.started', 'thread_id': 'bak-sess-1'}}))\n",
+            )
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = (200, {"claim": {"id": "clm-1", "line": "web", "mode": "resume", "base_session_id": "chk-sess-1", "backup_session_id": "bak-sess-1", "state": "open"}, "checkpoint": cp})
+            FakeDaemon.routes["GET /api/supervisor/state"] = (200, {"projects": [{"id": "p1", "bots": [{"id": "b-exec", "name": "exec", "kind": "codex", "run": {"id": "r1", "state": "running", "agent_status": "idle"}}]}]})
+            FakeDaemon.routes["POST /api/bots/b-exec/restart"] = (200, {"run_id": "r2", "resumed": True, "session_id": "chk-sess-1", "resume_outcome": "verified"})
+            FakeDaemon.routes["POST /api/bots/b-exec/prompt"] = (200, {"ok": True, "turn_id": "t1"})
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(fake_codex),
+            }
+            with patch.dict(os.environ, env):
+                out = self.ok("lineage", "dispatch", "--paths", "web/App.tsx", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+            self.assertEqual(out["line"], "web")
+            self.assertEqual(out["mode"], "resume")
+            self.assertEqual(out["claim_id"], "clm-1")
+            self.assertEqual(out["base_session_id"], "chk-sess-1")
+            self.assertEqual(out["backup_session_id"], "bak-sess-1")
+            self.assertEqual(out["work_session_id"], "chk-sess-1")
+            self.assertEqual(out["worker"], {"kind": "bot", "bot_id": "b-exec"})
+            # 確認無 prompt 的 codex exec fork
+            codex_argv = json.loads(codex_log.read_text(encoding="utf-8").strip())
+            self.assertEqual(codex_argv, ["exec", "fork", "--json", "chk-sess-1"])
+            # 確認 prompt 前面加了 since 的 prompt_prefix
+            prompt_call = [r for r in FakeDaemon.seen if r["path"] == "/api/bots/b-exec/prompt"][0]
+            self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", prompt_call["body"]["text"])
+            self.assertTrue(prompt_call["body"]["text"].endswith("請修好 App.tsx 的按鈕"))
+
+    def test_lineage_dispatch_fork_and_busy_fallback_expert_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            fake_codex = self._write_fake_bin(
+                root / "fake-codex",
+                "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type': 'thread.started', 'thread_id': 'bak-unused'}))\n",
+            )
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["GET /api/supervisor/state"] = (200, {"projects": [{"id": "p1", "bots": [{"id": "b-exec", "name": "exec", "kind": "codex", "run": None}]}]})
+            FakeDaemon.routes["POST /api/bots/b-exec/start"] = (200, {"run_id": "r-fork", "forked": True, "session_id": "fork-sess-1"})
+            FakeDaemon.routes["POST /api/projects/p1/lineage"] = (200, {"session": {"line": "web", "session_id": "fork-sess-1", "state": "active"}})
+            FakeDaemon.routes["PATCH /api/projects/p1/lineage/claim/clm-fork"] = (200, {"claim": {"id": "clm-fork", "work_session_id": "fork-sess-1"}})
+            FakeDaemon.routes["POST /api/bots/b-exec/prompt"] = (200, {"ok": True})
+
+            def claim_side_effect(_path):
+                body = FakeDaemon.seen[-1]["body"]
+                if body.get("mode") == "resume":
+                    return (409, {"error": "conflict", "reason": "lineage_line_busy"})
+                return (200, {"claim": {"id": "clm-fork", "line": "web", "mode": "fork", "base_session_id": "chk-sess-1", "state": "open"}, "checkpoint": cp})
+
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = claim_side_effect
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(fake_codex),
+            }
+            with patch.dict(os.environ, env):
+                # 1. busy 改走 fork
+                out = self.ok("lineage", "dispatch", "--paths", "web/App.tsx", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(out["mode"], "fork")
+                self.assertIsNone(out["backup_session_id"])
+                self.assertEqual(out["work_session_id"], "fork-sess-1")
+                # 2. 強制 --fork 不呼叫 codex exec fork
+                FakeDaemon.seen.clear()
+                out2 = self.ok("lineage", "dispatch", "--line", "web", "--fork", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(out2["mode"], "fork")
+                self.assertEqual(out2["work_session_id"], "fork-sess-1")
+                self.assertTrue(any(r["method"] == "PATCH" and r["path"] == "/api/projects/p1/lineage/claim/clm-fork" for r in FakeDaemon.seen))
+
+    def test_lineage_dispatch_parent_child_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            herdr_log = root / "herdr.log"
+            fake_herdr = self._write_fake_bin(
+                root / "fake-herdr",
+                f"""#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+open({str(herdr_log)!r}, 'a').write(json.dumps(args) + '\\n')
+if args[:2] == ['pane', 'split']:
+    print(json.dumps({{'pane_id': 'pane-child-1'}}))
+elif args[:2] == ['agent', 'get']:
+    print(json.dumps({{'agent': 'codex', 'agent_session': {{'kind': 'id', 'value': 'child-fork-sess'}}}}))
+else:
+    print(json.dumps({{'ok': True}}))
+""",
+            )
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = (200, {"claim": {"id": "clm-pc", "line": "web", "mode": "fork", "base_session_id": "chk-sess-1", "state": "open"}, "checkpoint": cp})
+            FakeDaemon.routes["POST /api/projects/p1/lineage"] = (200, {"session": {"line": "web", "session_id": "child-fork-sess", "state": "active"}})
+            FakeDaemon.routes["PATCH /api/projects/p1/lineage/claim/clm-pc"] = (200, {"claim": {"id": "clm-pc", "work_session_id": "child-fork-sess"}})
+
+            env = {
+                "AM_BOT_ID": "bot-parent", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_HERDR_BIN": str(fake_herdr), "HERDR_PANE_ID": "pane-parent",
+            }
+            with patch.dict(os.environ, env):
+                out = self.ok("lineage", "dispatch", "--line", "web", "--fork", "--prompt-file", str(prompt_file), "--child", "p-kid", "--repo", str(root), "--lines-file", str(lines_file))
+            self.assertEqual(out["worker"], {"kind": "child", "child": "p-kid", "pane_id": "pane-child-1"})
+            self.assertEqual(out["work_session_id"], "child-fork-sess")
+            calls = [json.loads(ln) for ln in herdr_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(calls[0], ["pane", "split", "--pane", "pane-parent"])
+            self.assertEqual(calls[1], ["agent", "start", "p-kid", "--kind", "codex", "--pane", "pane-child-1", "--", "fork", "chk-sess-1"])
+            self.assertEqual(calls[2], ["agent", "get", "p-kid"])
+            self.assertEqual(calls[3][:3], ["agent", "prompt", "p-kid"])
+
+    def test_lineage_dispatch_rollback_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            fake_codex = self._write_fake_bin(
+                root / "fake-codex",
+                "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type': 'thread.started', 'thread_id': 'bak-sess-1'}))\n",
+            )
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = (200, {"claim": {"id": "clm-rb", "line": "web", "mode": "resume", "base_session_id": "chk-sess-1", "state": "open"}, "checkpoint": cp})
+            FakeDaemon.routes["GET /api/supervisor/state"] = (200, {"projects": [{"id": "p1", "bots": [{"id": "b-exec", "name": "exec", "kind": "codex", "run": {"id": "r1"}}]}]})
+            FakeDaemon.routes["POST /api/bots/b-exec/restart"] = (409, {"error": "conflict", "resumed": False})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim/clm-rb/abandon"] = (200, {"claim": {"id": "clm-rb", "state": "abandoned"}, "backup_session_id": "bak-sess-1"})
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(fake_codex),
+            }
+            with patch.dict(os.environ, env):
+                err = self.bad("lineage", "dispatch", "--paths", "web/App.tsx", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+            self.assertEqual(err["error"], "http_error")
+            self.assertTrue(any(r["path"] == "/api/projects/p1/lineage/claim/clm-rb/abandon" for r in FakeDaemon.seen), "失敗時必須自動 abandon 回滾 claim")
+
+    def test_lineage_dispatch_cross_line_requires_line_or_forces_fork(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, prompt_file = self._setup_lineage_repo(root)
+            (root / "scripts").mkdir(exist_ok=True)
+            (root / "scripts" / "a.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            cp = {"line": "web", "session_id": "chk-sess-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["POST /api/projects/p1/lineage/claim"] = (200, {"claim": {"id": "clm-x", "line": "web", "mode": "fork", "base_session_id": "chk-sess-1", "state": "open"}, "checkpoint": cp})
+            FakeDaemon.routes["GET /api/supervisor/state"] = (200, {"projects": [{"id": "p1", "bots": [{"id": "b-exec", "name": "exec", "kind": "codex", "run": None}]}]})
+            FakeDaemon.routes["POST /api/bots/b-exec/start"] = (200, {"run_id": "r-x", "forked": True, "session_id": "fork-x"})
+            FakeDaemon.routes["POST /api/projects/p1/lineage"] = (200, {"session": {"line": "web", "session_id": "fork-x", "state": "active"}})
+            FakeDaemon.routes["PATCH /api/projects/p1/lineage/claim/clm-x"] = (200, {"claim": {"id": "clm-x", "work_session_id": "fork-x"}})
+            FakeDaemon.routes["POST /api/bots/b-exec/prompt"] = (200, {"ok": True})
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+            }
+            with patch.dict(os.environ, env):
+                err = self.bad("lineage", "dispatch", "--paths", "web/App.tsx", "scripts/a.sh", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "no_single_line")
+                out = self.ok("lineage", "dispatch", "--paths", "web/App.tsx", "scripts/a.sh", "--line", "web", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(out["mode"], "fork")
+
+    def test_lineage_finish_merged_abandon_and_409_passthrough(self):
+        FakeDaemon.routes["POST /api/projects/p1/lineage/advance"] = (200, {"session": {"line": "web", "session_id": "w1", "state": "checkpoint"}, "claim": {"id": "clm-1", "state": "advanced"}})
+        FakeDaemon.routes["POST /api/projects/p1/lineage/claim/clm-1/abandon"] = (200, {"claim": {"id": "clm-1", "state": "abandoned"}, "backup_session_id": "bak-1"})
+        env = {"AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+        with patch.dict(os.environ, env):
+            merged = self.ok("lineage", "finish", "clm-1", "--merged", "--head", "abcdef1", "--summary", "done")
+            self.assertEqual(merged["claim"]["state"], "advanced")
+            adv_req = FakeDaemon.seen[-1]["body"]
+            self.assertEqual(adv_req, {"claim_id": "clm-1", "head_sha": "abcdef1", "summary": "done"})
+
+            ab = self.ok("lineage", "finish", "clm-1", "--abandon")
+            self.assertEqual(ab["backup_session_id"], "bak-1")
+
+            for reason in ("lineage_checkpoint_moved", "lineage_claim_closed"):
+                FakeDaemon.seen.clear()
+                FakeDaemon.routes["POST /api/projects/p1/lineage/advance"] = (409, {"error": "conflict", "reason": reason})
+                err = self.bad("lineage", "finish", "clm-1", "--merged")
+                self.assertEqual(err["status"], 409)
+                self.assertEqual(err["detail"]["reason"], reason)
+                self.assertEqual(len(FakeDaemon.seen), 1, "409 不重試、不改用無 claim 的 advance")
+
+    def test_bot_resume_fork_requires_session(self):
+        FakeDaemon.routes["POST /api/bots/b1/start"] = (200, {"run_id": "r1", "forked": True, "session_id": "sess-2"})
+        out = self.ok("bot", "start", "b1", "--resume", "fork", "--session", "sess-1")
+        self.assertTrue(out["forked"])
+        self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/start?resume=fork&session=sess-1")
+        self.assertNotEqual(self.run_cli("bot", "restart", "b1", "--resume", "fork")[0], 0)
+
     def test_peers_and_requests_use_only_bot_proof_without_runtime(self):
         FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": []})
         FakeDaemon.routes["GET /api/projects/p1/peers?for=ticket-1"] = (200, {"candidates": []})
