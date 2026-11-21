@@ -250,7 +250,7 @@ pub fn last_assistant_at(jsonl: &str) -> Option<String> {
 }
 
 /// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數、視窗大小、用量百分比。
-/// agy 不回報視窗大小，所以視窗大小來自 `[agy] context_window_tokens`（預設 1,048,576，可調到 2,000,000），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
+/// 沒有 statusLine（舊版 agy、沒有 hook 的子 agent）時，視窗大小來自 `[agy] context_window_tokens`（預設 1,048,576，可調到 2,000,000），百分比＝token 數／視窗大小×100（取一位小數，上限 100）。
 pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_window_tokens: u64) -> Option<String> {
     if model.is_none() && context_tokens.is_none() {
         return None;
@@ -269,6 +269,226 @@ pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_win
         });
     }
     Some(v.to_string())
+}
+
+/// 這份 `runs.status_json` 是不是由 agy 的 `statusLine`（`state` 事件）寫的。
+/// 有 statusLine 時（帶 `_agm_statusline: true` 或它的真實 `context_window_size`／`agent_state`），優先於 Stop hook／transcript 估算與 `[agy] context_window_tokens`。
+pub fn has_statusline(status_json: Option<&str>) -> bool {
+    let Some(raw) = status_json else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(raw) else { return false };
+    v.get("_agm_statusline").and_then(Value::as_bool) == Some(true)
+        || v.get("agent_state").and_then(Value::as_str).is_some()
+}
+
+/// 從 agy `statusLine` 的 `model.{id, display_name, effort}` 組出 AG Man 使用的模型 slug（如 `gemini-4-argon-medium`）。
+///
+/// agy 的模型清單與 `--model` 把 effort 嵌在 slug 尾端（`gemini-4-argon-medium`），但 statusLine 可能回：
+/// 1. `id` 已含 effort（如 `gemini-4-argon-medium`）；
+/// 2. `id` 不含 effort（如 `gemini-4-argon`）＋ `effort: "medium"` → 拼成 `gemini-4-argon-medium`（若拼出來過 [`crate::models::agy_model_allowed`] 就取拼好的，否則像 `gemini-pro-orchestrator-neon` 這種固定強度的模型維持原 `id`）。
+/// 不過 `agy_model_allowed` 的 id（例如未核准的第三方模型）回 `None`。
+pub fn model_slug_from_statusline(payload: &Value) -> Option<String> {
+    let model = payload.get("model")?.as_object()?;
+    let id = model.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())?;
+    let id_lower = id.to_ascii_lowercase();
+    let effort = model
+        .get("effort")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/effort/level").and_then(Value::as_str))
+        .or_else(|| payload.get("effort").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(str::to_ascii_lowercase);
+    if let Some(eff) = &effort {
+        let suffix = format!("-{eff}");
+        if !id_lower.ends_with(&suffix) {
+            let combined = format!("{id_lower}-{eff}");
+            if crate::models::agy_model_allowed(&combined) {
+                return Some(combined);
+            }
+        }
+    }
+    crate::models::agy_model_allowed(&id_lower).then_some(id_lower)
+}
+
+/// 把 agy 官方 `statusLine` JSON（`https://antigravity.google/docs/cli/statusline`）轉成 `runs.status_json`（形狀照現有 claude statusLine／[`status_json`]，網頁不用大改）。
+///
+/// * `context_window`：取官方 `context_window_size`（優先於 `fallback_window` 即 `[agy] context_window_tokens`）；
+///   token 數優先取 `current_usage`（`input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens`，缺項當 0；相容 `cache_read_tokens`／`cache_creation_tokens`），
+///   沒有正的 `current_usage` 才取 `total_input_tokens`；`used_percentage` 有官方有限數且 ≥0 就用（夾在 0..=100、一位小數），否則由 token 數 ÷ 視窗大小算。
+///   保留 `total_output_tokens`、`remaining_percentage` 與正規化後的 `current_usage`（含 `cache_read_input_tokens`）。
+///   若當前 payload 的 `context_window` 還沒帶真讀數（剛啟動重繪全 0 或缺欄位），沿用 `prev_status_json` 已有的 `context_window`。
+/// * `model`：保留 `id`（若能與 `effort` 合成合規 slug 則用合成 slug）、`display_name`、`effort`，並同步寫入頂層 `effort: {"level": effort}`（供 `toStatusInfo` 讀取）。
+/// * 狀態欄位：寫入 `agent_state`、`tool_confirmation_pending`（bool）、`task_count`（u32，缺省 0）、`pending_input_count`（u32，缺省 0）。
+/// * `quota`：原樣記在 `status_json.quota`（只記不取代 `/usage` 探測）。
+/// * **絕不寫入 `transcript_path`／`transcriptPath`**（statusLine 給的是摘要版 `transcript.jsonl`，既有防護保留）。
+pub fn status_json_from_statusline(
+    payload: &Value,
+    prev_status_json: Option<&str>,
+    fallback_model: Option<&str>,
+    fallback_window: u64,
+) -> Option<String> {
+    let obj = payload.as_object()?;
+    let prev: Value = prev_status_json.and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
+    let mut out = serde_json::Map::new();
+    out.insert("_agm_statusline".into(), json!(true));
+
+    // 1. model & effort
+    let raw_model = obj.get("model").and_then(Value::as_object);
+    let slug = model_slug_from_statusline(payload)
+        .or_else(|| raw_model.and_then(|m| m.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+        .or_else(|| prev.pointer("/model/id").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| fallback_model.map(str::to_string));
+    let display = raw_model
+        .and_then(|m| m.get("display_name").or_else(|| m.get("displayName")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| prev.pointer("/model/display_name").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| slug.clone());
+    let effort = raw_model
+        .and_then(|m| m.get("effort"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/effort/level").and_then(Value::as_str))
+        .or_else(|| obj.get("effort").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| prev.pointer("/model/effort").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| prev.pointer("/effort/level").and_then(Value::as_str).map(str::to_string));
+    if let Some(id) = slug {
+        let mut m = serde_json::Map::new();
+        m.insert("id".into(), json!(id));
+        m.insert("display_name".into(), json!(display.unwrap_or_else(|| id.clone())));
+        if let Some(eff) = &effort {
+            m.insert("effort".into(), json!(eff));
+        }
+        out.insert("model".into(), Value::Object(m));
+    }
+    if let Some(eff) = effort {
+        out.insert("effort".into(), json!({"level": eff}));
+    }
+
+    // 2. context_window（statusLine 的值優先於 transcript 估算與 [agy] context_window_tokens）
+    if let Some(cw) = obj.get("context_window").or_else(|| obj.get("contextWindow")).and_then(Value::as_object) {
+        let size = cw
+            .get("context_window_size")
+            .or_else(|| cw.get("contextWindowSize"))
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
+            .or_else(|| prev.pointer("/context_window/context_window_size").and_then(Value::as_u64).filter(|&n| n > 0))
+            .unwrap_or_else(|| fallback_window.max(1));
+        let cu = cw.get("current_usage").or_else(|| cw.get("currentUsage")).and_then(Value::as_object);
+        let i64_of = |m: &serde_json::Map<String, Value>, k1: &str, k2: &str| -> Option<i64> {
+            m.get(k1).or_else(|| m.get(k2)).and_then(Value::as_i64).filter(|&n| n >= 0)
+        };
+        let (usage_obj, usage_tokens) = if let Some(u) = cu {
+            let inp = i64_of(u, "input_tokens", "inputTokens").unwrap_or(0);
+            let out_t = i64_of(u, "output_tokens", "outputTokens").unwrap_or(0);
+            let cc = i64_of(u, "cache_creation_input_tokens", "cacheCreationInputTokens")
+                .or_else(|| i64_of(u, "cache_creation_tokens", "cacheCreationTokens"))
+                .unwrap_or(0);
+            let cr = i64_of(u, "cache_read_input_tokens", "cacheReadInputTokens")
+                .or_else(|| i64_of(u, "cache_read_tokens", "cacheReadTokens"))
+                .unwrap_or(0);
+            let sum = inp + cc + cr;
+            (
+                Some(json!({
+                    "input_tokens": inp,
+                    "output_tokens": out_t,
+                    "cache_creation_input_tokens": cc,
+                    "cache_read_input_tokens": cr,
+                })),
+                (sum > 0).then_some(sum),
+            )
+        } else {
+            (None, None)
+        };
+        let total_in = cw
+            .get("total_input_tokens")
+            .or_else(|| cw.get("totalInputTokens"))
+            .and_then(Value::as_i64)
+            .filter(|&n| n >= 0);
+        // 整段 context 大小：current_usage（本輪 input + cache_read + cache_creation）優先，否則用 total_input_tokens。
+        let context_tokens = usage_tokens.or(total_in);
+        let pct_from_payload = cw
+            .get("used_percentage")
+            .or_else(|| cw.get("usedPercentage"))
+            .and_then(Value::as_f64)
+            .filter(|p| p.is_finite() && *p >= 0.0)
+            .map(|p| ((p * 10.0).round() / 10.0).min(100.0));
+        let has_reading = context_tokens.is_some_and(|n| n > 0)
+            || pct_from_payload.is_some_and(|p| p > 0.0)
+            || cw.get("context_window_size").or_else(|| cw.get("contextWindowSize")).and_then(Value::as_u64).is_some_and(|n| n > 0);
+        if has_reading {
+            let tokens = context_tokens.unwrap_or(0);
+            let pct = match pct_from_payload {
+                Some(p) if p > 0.0 || tokens == 0 => p,
+                _ => used_percentage(tokens, size),
+            };
+            let mut c = serde_json::Map::new();
+            c.insert("total_input_tokens".into(), json!(tokens));
+            if let Some(tot_out) = cw.get("total_output_tokens").or_else(|| cw.get("totalOutputTokens")).and_then(Value::as_i64) {
+                c.insert("total_output_tokens".into(), json!(tot_out));
+            }
+            c.insert("context_window_size".into(), json!(size));
+            c.insert("used_percentage".into(), json!(pct));
+            if let Some(rem) = cw
+                .get("remaining_percentage")
+                .or_else(|| cw.get("remainingPercentage"))
+                .and_then(Value::as_f64)
+                .filter(|p| p.is_finite() && *p >= 0.0)
+            {
+                c.insert("remaining_percentage".into(), json!(((rem * 10.0).round() / 10.0).min(100.0)));
+            }
+            if let Some(u) = usage_obj {
+                c.insert("current_usage".into(), u);
+            }
+            out.insert("context_window".into(), Value::Object(c));
+        } else if let Some(prev_cw) = prev.get("context_window").filter(|v| v.is_object()) {
+            out.insert("context_window".into(), prev_cw.clone());
+        }
+    } else if let Some(prev_cw) = prev.get("context_window").filter(|v| v.is_object()) {
+        out.insert("context_window".into(), prev_cw.clone());
+    }
+
+    // 3. agent_state / tool_confirmation_pending / task_count / pending_input_count
+    if let Some(state) = obj
+        .get("agent_state")
+        .or_else(|| obj.get("agentState"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("agent_state".into(), json!(state));
+    }
+    let confirm = obj
+        .get("tool_confirmation_pending")
+        .or_else(|| obj.get("toolConfirmationPending"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    out.insert("tool_confirmation_pending".into(), json!(confirm));
+    let tasks = obj
+        .get("task_count")
+        .or_else(|| obj.get("taskCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    out.insert("task_count".into(), json!(tasks));
+    let pending_in = obj
+        .get("pending_input_count")
+        .or_else(|| obj.get("pendingInputCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    out.insert("pending_input_count".into(), json!(pending_in));
+
+    // 4. quota：先只記不取代 /usage 探測
+    if let Some(q) = obj.get("quota").filter(|q| !q.is_null()) {
+        out.insert("quota".into(), q.clone());
+    } else if let Some(prev_q) = prev.get("quota").filter(|q| !q.is_null()) {
+        out.insert("quota".into(), prev_q.clone());
+    }
+
+    Some(Value::Object(out).to_string())
 }
 
 /// `tokens／size×100`，四捨五入到一位小數、上限 100，負數當 0。

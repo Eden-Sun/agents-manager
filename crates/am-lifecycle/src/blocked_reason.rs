@@ -87,6 +87,12 @@ pub fn of(run_id: &str) -> Option<Reason> {
     if let Some(text) = crate::session_paused::agy_label(run_id) {
         return Some(Reason { code: "agy_dialog", text: text.into() });
     }
+    if crate::lifecycle::agy_busy::tool_confirmation_pending(run_id) {
+        return Some(Reason {
+            code: "agy_dialog",
+            text: crate::agy_screen::AgyDialog::Permission.label().into(),
+        });
+    }
     if crate::session_paused::is_forced(run_id) {
         return Some(Reason { code: "session_paused", text: "claude Session paused 選單等待選擇".into() });
     }

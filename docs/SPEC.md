@@ -4249,7 +4249,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 | 事件 | 結果 |
 |---|---|
 | `SessionStart`／`PreInvocation` | Identity：`conversationId`→`runs.native_session_id`、`transcriptPath`→`runs.transcript_path`（只收 `~/.gemini/antigravity-cli/brain/` 底下的 `.jsonl`，`transcript_read::trusted_roots`）。對話是**第一則 prompt 才建立**，`SessionStart` 沒有文件、不一定來，所以第一個 `PreInvocation` 補身份 |
-| `state`（statusLine） | StatusLine（單槽、最新的贏、不進收件匣）：只在有 `conversation_id` 時補 `native_session_id`；**不記它的 `transcript_path`**（真機給的是 `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl` 摘要版、另一個目錄，完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來）；`agent_state`／`tool_confirmation_pending`／`quota` 第二階段才接 |
+| `state`（statusLine） | StatusLine（單槽、最新的贏、不進收件匣，官方 `https://antigravity.google/docs/cli/statusline`）：有 `conversation_id` 時補 `native_session_id`；**不記它的 `transcript_path`**（真機給的是 `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl` 摘要版、另一個目錄，完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來）；解析 `context_window.{context_window_size,total_input_tokens,total_output_tokens,used_percentage,remaining_percentage,current_usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}}`、`model.{id,display_name,effort}`、`agent_state`、`tool_confirmation_pending`、`task_count`、`pending_input_count`、`quota` 寫進 `runs.status_json`（形狀對齊 claude statusLine／`agy_support::status_json`，標 `_agm_statusline: true`）：有 statusLine 的讀數**優先於** Stop hook／transcript 估算與 `[agy] context_window_tokens`；`model.{id,effort}` 合成合規 slug 校正 `runs.runtime_model`（`agy_live::adopt_statusline_model`，有 statusLine 時優先於 30 秒畫面爬字）；`agent_state`＋`task_count` 連動 `agy_busy`（`task_count > 0` 或 `agent_state` 為工作中狀態時不提早收，回到 `idle` 且 `task_count == 0` 時解除 `fullyIdle:false` 證據）；`tool_confirmation_pending` 連動 blocked 判斷（為 `true` 時補標 `blocked`、`blocked_reason.code = agy_dialog`，為 `false` 時還原並叫醒排隊 flush）；`quota` 只記在 `status_json.quota`，不取代 `/usage` 探測；statusLine 沒來（舊版、沒有 hook 的子 agent）時維持既有 transcript 估算與畫面判讀備援 |
 | `Stop` 有 `error` 文字，或 `terminationReason == "ERROR"` | TurnFailed：`error` 文字進 `classify_failure`（429／quota→額度、auth／API key→帳號、其他→API；`Interrupted` 不算失敗） |
 | `Stop` 且 `fullyIdle == false` | Ignore（背景工作還在跑，回合還沒真的結束） |
 | 其他 `Stop` | TurnComplete：`assistant`＝`lastAssistantMessage`、`user`＝`lastUserMessage`；**不給 `turn_id`**（`executionNum` 跨回合是否唯一沒驗過，當去重鑰匙會吃掉之後的回合） |
@@ -4314,7 +4314,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **不做**：遠端的 `lastAssistantMessage` 以外的 transcript 讀取（daemon 端不開遠端檔）。
 
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
-`/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身份要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身份＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身份切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+`/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身份要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身份＝換 HOME 現在沒有，不做）、額度改讀 statusLine 的 `quota`（現在 statusLine 的 `quota` 先只記進 `status_json`，額度列仍用 `/usage` 探測，§12a.7）、`--effort` 獨立旗標、persona（per-bot HOME 全域規則檔或 `SessionStart`／`PreInvocation` 的 `injectSteps`）。細節與風險見設計文件。
 
 ## 13. 專案設定
 

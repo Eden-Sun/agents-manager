@@ -89,3 +89,39 @@ async fn a_busy_agy_screen_blocks_the_fallback_even_without_hook_evidence() {
     assert!(!try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
     assert_eq!(turn_status(&app, &a).await, "in_flight");
 }
+
+#[tokio::test]
+async fn statusline_task_count_and_agent_state_hold_the_turn_then_release_when_idle_and_zero_tasks() {
+    let f = fixture().await;
+    let app = f.env.app.clone();
+    let a = a_turn(&app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+
+    // 1. statusLine 回報背景工作還在跑（agent_state=idle 但 task_count=1）：即使沒收過 Stop、畫面也乾淨，備援不能提早收
+    let bg_state = json!({
+        "hookEventName": "state",
+        "conversation_id": "c-1",
+        "agent_state": "idle",
+        "task_count": 1,
+        "pending_input_count": 0,
+        "tool_confirmation_pending": false
+    });
+    process(&app, &HookBody { bot_id: f.bot_id.clone(), provider: "agy".into(), payload: bg_state, received_at: None, truncated: false, run_id: None }).await.unwrap();
+    assert!(crate::lifecycle::agy_busy::holds(&f.run_id, &a), "task_count > 0 必須擋住備援");
+    assert!(!try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
+    assert_eq!(turn_status(&app, &a).await, "in_flight");
+
+    // 2. 先收過 fullyIdle:false Stop，接著背景工作結束、statusLine 回報 agent_state=idle 且 task_count=0 → 解除證據，備援能正常收（不會永遠卡在輸出中）
+    stop(&f, false).await;
+    let idle_state = json!({
+        "hookEventName": "state",
+        "conversation_id": "c-1",
+        "agent_state": "idle",
+        "task_count": 0,
+        "pending_input_count": 0,
+        "tool_confirmation_pending": false
+    });
+    process(&app, &HookBody { bot_id: f.bot_id.clone(), provider: "agy".into(), payload: idle_state, received_at: None, truncated: false, run_id: None }).await.unwrap();
+    assert!(!crate::lifecycle::agy_busy::holds(&f.run_id, &a), "statusLine 回報 idle + task_count=0 解除忙碌證據");
+    assert!(try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
+    assert_eq!(turn_status(&app, &a).await, "completed_fallback");
+}

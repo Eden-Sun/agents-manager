@@ -252,3 +252,142 @@ async fn a_hook_from_another_provider_is_refused_for_an_agy_bot() {
     assert!(provider_matches_kind("agy", "agy"));
     assert!(!provider_matches_kind("claude", "agy") && !provider_matches_kind("agy", "claude"));
 }
+
+/// 官方 statusLine JSON fixture：完整解析 context_window（含 cache_read_input_tokens、真实 context_window_size）、
+/// model.{id,effort}、agent_state、tool_confirmation_pending、task_count、pending_input_count、quota；
+/// 有 statusLine 時優先於 Stop hook／transcript 估算與 `[agy] context_window_tokens`；
+/// `tool_confirmation_pending` 觸發與解除 blocked；`quota` 只記進 status_json 不覆蓋 `/usage` 額度列；
+/// 遠端（m4p）經 dispatcher → hook.sh spool → drain_remote_locked 一樣完整接取。
+#[tokio::test]
+async fn statusline_official_payload_takes_precedence_over_transcript_fallback_and_drives_blocked_and_remote_spool() {
+    let env = tt::env().await;
+    let app = env.app.clone();
+    app.cfg.update(|c| {
+        c.agy.context_window_tokens = 400_000;
+        Ok(())
+    }).await.unwrap();
+    let (bot_id, run_id, _turn) = agy_turn(&app, &env.project_id).await;
+    sqlx::query("UPDATE bots SET model = 'gemini-3.8-flash-medium' WHERE id = ?").bind(&bot_id).execute(&app.db).await.unwrap();
+    sqlx::query("UPDATE runs SET runtime_model = 'gemini-3.8-flash-medium', agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+
+    // 1. statusLine 送來官方欄位（1M 視窗、cache_read_input_tokens、model=gemini-4-argon+high、tool_confirmation_pending=true、task_count=2、quota）
+    let state_payload = json!({
+        "hookEventName": "state",
+        "conversation_id": "conv-sl-1",
+        "transcript_path": "/h/.gemini/antigravity/brain/conv-sl-1/.system_generated/logs/transcript.jsonl",
+        "model": {
+            "id": "gemini-4-argon",
+            "display_name": "Gemini 4 Argon (High)",
+            "effort": "high"
+        },
+        "context_window": {
+            "total_input_tokens": 150_000,
+            "total_output_tokens": 3_000,
+            "context_window_size": 1_048_576,
+            "used_percentage": 14.3,
+            "remaining_percentage": 85.7,
+            "current_usage": {
+                "input_tokens": 10_000,
+                "output_tokens": 600,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 140_000
+            }
+        },
+        "agent_state": "tool_use",
+        "tool_confirmation_pending": true,
+        "task_count": 2,
+        "pending_input_count": 1,
+        "quota": {"gemini": {"remaining_fraction": 0.75}}
+    });
+    process(&app, &body(&bot_id, state_payload.clone())).await.unwrap();
+
+    let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+    assert_eq!(r.native_session_id.as_deref(), Some("conv-sl-1"));
+    assert_eq!(r.transcript_path, None, "statusLine 的摘要版 transcript_path 絕不寫入");
+    assert_eq!(r.runtime_model.as_deref(), Some("gemini-4-argon-high"), "model.id + effort 校正 runtime_model");
+    assert_eq!(r.agent_status, "blocked", "tool_confirmation_pending:true 補標 blocked");
+    let reason = crate::blocked_reason::of(&run_id).expect("blocked_reason");
+    assert_eq!(reason.code, "agy_dialog");
+    assert!(reason.text.contains("權限"), "{}", reason.text);
+
+    let st: Value = serde_json::from_str(r.status_json.as_deref().expect("status_json")).unwrap();
+    assert_eq!(st["context_window"]["context_window_size"], 1_048_576, "官方視窗大小優先於 [agy] context_window_tokens (400K)");
+    assert_eq!(st["context_window"]["total_input_tokens"], 150_000);
+    assert_eq!(st["context_window"]["current_usage"]["cache_read_input_tokens"], 140_000);
+    assert_eq!(st["model"]["id"], "gemini-4-argon-high");
+    assert_eq!(st["effort"]["level"], "high");
+    assert_eq!(st["agent_state"], "tool_use");
+    assert_eq!(st["tool_confirmation_pending"], true);
+    assert_eq!(st["task_count"], 2);
+    assert_eq!(st["pending_input_count"], 1);
+    assert_eq!(st["quota"]["gemini"]["remaining_fraction"], 0.75);
+    assert!(!app.quotas.lock().await.contains_key("agy"), "quota 只記在 status_json，不取代 /usage 探測");
+
+    // 2. 隨後 Stop hook 帶舊的 transcript lastInputTokens (11824) 來：已有 statusLine，不能被 transcript 估算與 400K 設定覆蓋
+    process(&app, &body(&bot_id, stop(json!({"conversationId": "conv-sl-1", "lastAssistantMessage": "DONE", "lastUserMessage": "say OK", "lastInputTokens": 11824})))).await.unwrap();
+    let r_after_stop = db::run(&app.db, &run_id).await.unwrap().unwrap();
+    let st_after: Value = serde_json::from_str(r_after_stop.status_json.as_deref().unwrap()).unwrap();
+    assert_eq!(st_after["context_window"]["context_window_size"], 1_048_576, "Stop hook 不覆蓋 statusLine 的視窗");
+    assert_eq!(st_after["context_window"]["total_input_tokens"], 150_000, "Stop hook 不覆蓋 statusLine 的 token 數");
+
+    // 3. 使用者核准工具後 statusLine 回報 tool_confirmation_pending:false、agent_state:idle、task_count:0 → 自動解除 blocked
+    let mut cleared_payload = state_payload.clone();
+    cleared_payload["tool_confirmation_pending"] = json!(false);
+    cleared_payload["agent_state"] = json!("idle");
+    cleared_payload["task_count"] = json!(0);
+    cleared_payload["pending_input_count"] = json!(0);
+    process(&app, &body(&bot_id, cleared_payload)).await.unwrap();
+    let r_cleared = db::run(&app.db, &run_id).await.unwrap().unwrap();
+    assert_eq!(r_cleared.agent_status, "idle", "待確認解除後還原成補標前的 idle");
+    assert!(crate::blocked_reason::of(&run_id).is_none());
+
+    // 4. 遠端（m4p）路徑：statusLine 由遠端 agy-hook.sh state → hook.sh 寫入 hook-spool.d → drain_remote_locked → hook_inbox worker 處理
+    let host = "m4p";
+    let conn = app
+        .hosts
+        .insert_remote_for_test(crate::config::HostCfg {
+            daemon_url: None,
+            shared_session: false,
+            name: host.into(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "am-test".into(),
+            remote_path: String::new(),
+        })
+        .await;
+    conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    let rem_proj = db::ulid();
+    sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/remote/m4p', 'm4p', ?, ?)")
+        .bind(&rem_proj)
+        .bind(host)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let (rem_bot, rem_run, _rem_turn) = agy_turn(&app, &rem_proj).await;
+    let remote_line = json!({
+        "bot_id": rem_bot,
+        "provider": "agy",
+        "payload": state_payload,
+        "received_at": "2026-11-21T05:00:00Z",
+        "truncated": false,
+        "run_id": rem_run,
+    })
+    .to_string();
+    crate::hosts::set_ssh_fake(host, move |script| {
+        if script.contains("umask 077") {
+            return Ok(format!("{remote_line}\n"));
+        }
+        Ok(String::new())
+    });
+    assert_eq!(drain_remote(&app, host, &rem_bot).await.unwrap(), 1);
+    crate::runners::hook_inbox::drain_once(&app).await.unwrap();
+    let rr = db::run(&app.db, &rem_run).await.unwrap().unwrap();
+    assert_eq!(rr.native_session_id.as_deref(), Some("conv-sl-1"));
+    assert_eq!(rr.transcript_path, None);
+    let rst: Value = serde_json::from_str(rr.status_json.as_deref().expect("remote status_json")).unwrap();
+    assert_eq!(rst["context_window"]["context_window_size"], 1_048_576);
+    assert_eq!(rst["context_window"]["current_usage"]["cache_read_input_tokens"], 140_000);
+    assert_eq!(rst["task_count"], 2);
+}

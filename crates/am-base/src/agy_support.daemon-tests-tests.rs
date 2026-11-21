@@ -263,4 +263,61 @@
         assert_eq!(last_assistant_at(t).as_deref(), Some("2026-11-20T01:06:00Z"), "工具輸出不算回覆");
         assert_eq!(last_assistant_at(r#"{"type":"USER_INPUT","created_at":"2026-11-20T01:00:00Z","content":"x"}"#), None);
     }
+
+    #[test]
+    fn official_statusline_payload_populates_context_cache_model_state_tasks_and_drops_transcript_path() {
+        let payload = json!({
+            "hookEventName": "state",
+            "conversation_id": "conv-official-1",
+            "transcript_path": "/home/u/.gemini/antigravity/brain/conv-official-1/.system_generated/logs/transcript.jsonl",
+            "model": {
+                "id": "gemini-4-argon",
+                "display_name": "Gemini 4 Argon (Medium)",
+                "effort": "medium"
+            },
+            "context_window": {
+                "total_input_tokens": 143_600,
+                "total_output_tokens": 4_200,
+                "context_window_size": 1_048_576,
+                "used_percentage": 13.7,
+                "remaining_percentage": 86.3,
+                "current_usage": {
+                    "input_tokens": 3_415,
+                    "output_tokens": 512,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 140_185
+                }
+            },
+            "agent_state": "working",
+            "tool_confirmation_pending": true,
+            "task_count": 2,
+            "pending_input_count": 1,
+            "quota": {
+                "gemini": {"remaining_fraction": 0.82}
+            }
+        });
+        assert_eq!(model_slug_from_statusline(&payload).as_deref(), Some("gemini-4-argon-medium"));
+        let raw = status_json_from_statusline(&payload, None, Some("gemini-3.8-flash-medium"), 400_000).expect("status_json");
+        assert!(has_statusline(Some(&raw)));
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["model"]["id"], "gemini-4-argon-medium");
+        assert_eq!(v["model"]["display_name"], "Gemini 4 Argon (Medium)");
+        assert_eq!(v["model"]["effort"], "medium");
+        assert_eq!(v["effort"]["level"], "medium");
+        // statusLine 的 context_window_size (1,048,576) 優先於 fallback_window (400,000)
+        assert_eq!(v["context_window"]["context_window_size"], 1_048_576);
+        assert_eq!(v["context_window"]["total_input_tokens"], 143_600);
+        assert_eq!(v["context_window"]["total_output_tokens"], 4_200);
+        assert_eq!(v["context_window"]["used_percentage"], 13.7);
+        assert_eq!(v["context_window"]["remaining_percentage"], 86.3);
+        assert_eq!(v["context_window"]["current_usage"]["input_tokens"], 3_415);
+        assert_eq!(v["context_window"]["current_usage"]["cache_read_input_tokens"], 140_185);
+        assert_eq!(v["agent_state"], "working");
+        assert_eq!(v["tool_confirmation_pending"], true);
+        assert_eq!(v["task_count"], 2);
+        assert_eq!(v["pending_input_count"], 1);
+        assert_eq!(v["quota"]["gemini"]["remaining_fraction"], 0.82);
+        // 絕不寫入 statusLine 的摘要版 transcript_path
+        assert!(v.get("transcript_path").is_none() && v.get("transcriptPath").is_none());
+    }
 }

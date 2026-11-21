@@ -294,7 +294,12 @@ impl HostSidePort for App {
 
 impl ProviderPort for App {
     async fn adopt_statusline_model(&self, run: &db::Run, payload: &Value) {
-        crate::claude_live::adopt_statusline_model(&self.shared(), run, payload).await
+        let app = self.shared();
+        if matches!(db::bot(&app.db, &run.bot_id).await, Ok(Some(b)) if b.kind == "agy") {
+            crate::agy_live::adopt_statusline_model(&app, run, payload).await;
+            return;
+        }
+        crate::claude_live::adopt_statusline_model(&app, run, payload).await
     }
     async fn login_on_auth_failure(&self, bot: &db::Bot, admitted: Option<&crate::hosts::HostFence>) {
         crate::runners::login_prompt::on_auth_failure(&self.shared(), bot, admitted).await

@@ -1655,21 +1655,67 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
         }
-        // agy 的 statusLine 只用來補身份（對話一建立就有 `conversation_id`／`transcript_path`）。它的 `agent_state`／
-        // `tool_confirmation_pending`／`quota` 之後（第二階段）才接；下面那段是 claude 的 rate_limits 與帳號，不能套在它身上。
+        // agy 的 statusLine（官方 `https://antigravity.google/docs/cli/statusline`）：
+        // 1. 補 conversation_id（對話一建立就有；**不記它的 `transcript_path`**——給的是摘要版 `transcript.jsonl`，完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來）；
+        // 2. 解析 `context_window`（含 `context_window_size`、`total_input_tokens`、`current_usage.cache_read_input_tokens`…）、`model.{id,effort}`、`agent_state`、`tool_confirmation_pending`、`task_count`、`pending_input_count`、`quota`（只記不取代 /usage 探測）寫進 `runs.status_json`，有 statusLine 時優先於 transcript 估算與 `[agy] context_window_tokens`；
+        // 3. `agent_state`＋`task_count` 連動 `agy_busy`（背景工作未結束時不提早收、結束回 idle 時解除）；`tool_confirmation_pending` 連動 blocked 判斷；
+        // 4. `model.{id,effort}` 校正 `runs.runtime_model`。
         HookKind::StatusLine if provider == "agy" => {
             let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
-            // 只記 conversation id（沒有的話什麼都不記）。**不記它的 `transcript_path`**：真機（1.2.16）statusLine 給的是
-            // `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`（摘要版、另一個目錄），
-            // 完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來。
-            if let (Some(r), Some(conv)) = (&run, s("conversationId", "conversation_id")) {
-                let result = sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ? AND native_session_id IS NOT ?")
-                    .bind(conv)
-                    .bind(&r.id)
-                    .bind(conv)
-                    .execute(app.db())
-                    .await?;
-                if result.rows_affected() > 0 {
+            if let Some(r) = &run {
+                let mut emit = false;
+                if let Some(conv) = s("conversationId", "conversation_id") {
+                    let result = sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ? AND native_session_id IS NOT ?")
+                        .bind(conv)
+                        .bind(&r.id)
+                        .bind(conv)
+                        .execute(app.db())
+                        .await?;
+                    if result.rows_affected() > 0 {
+                        emit = true;
+                    }
+                }
+                let agent_state = s("agent_state", "agentState");
+                let task_count = body.payload.get("task_count").or_else(|| body.payload.get("taskCount")).and_then(Value::as_u64).unwrap_or(0) as u32;
+                let pending_input = body.payload.get("pending_input_count").or_else(|| body.payload.get("pendingInputCount")).and_then(Value::as_u64).unwrap_or(0) as u32;
+                let confirm_pending = body.payload.get("tool_confirmation_pending").or_else(|| body.payload.get("toolConfirmationPending")).and_then(Value::as_bool).unwrap_or(false);
+                lifecycle::agy_busy::note_statusline(&r.id, agent_state, task_count, pending_input, confirm_pending);
+                if confirm_pending {
+                    if r.agent_status != "blocked" {
+                        let prev = r.agent_status.clone();
+                        if db::compare_and_set_running_run_agent_status(app.db(), r, &prev, "blocked").await.unwrap_or(false) {
+                            crate::session_paused::record_forced(&r.id, prev, Some(crate::agy_screen::AgyDialog::Permission.label()));
+                            emit = true;
+                        }
+                    }
+                } else if let Some((prev, epoch)) = crate::session_paused::get_forced(&r.id) {
+                    if crate::session_paused::agy_label(&r.id) == Some(crate::agy_screen::AgyDialog::Permission.label()) {
+                        match db::compare_and_set_running_run_agent_status(app.db(), r, "blocked", &prev).await {
+                            Ok(true) => {
+                                crate::session_paused::retire(&r.id, epoch);
+                                emit = true;
+                                app.schedule_flush_queued(&bot.id);
+                            }
+                            Ok(false) => crate::session_paused::retire(&r.id, epoch),
+                            Err(_) => {}
+                        }
+                    }
+                }
+                let fallback_model = r.runtime_model.as_deref().or(bot.model.as_deref());
+                let window = app.cfg().get().await.agy.context_window_tokens;
+                if let Some(rich) = crate::agy_support::status_json_from_statusline(&body.payload, r.status_json.as_deref(), fallback_model, window) {
+                    if r.status_json.as_deref() != Some(rich.as_str()) {
+                        crate::cache_clock::on_statusline(&r.id, r.status_json.as_deref(), Some(&rich), &db::now());
+                        sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?")
+                            .bind(&rich)
+                            .bind(&r.id)
+                            .execute(app.db())
+                            .await?;
+                        emit = true;
+                    }
+                }
+                app.adopt_statusline_model(r, &body.payload).await;
+                if emit {
                     app.emit_bot_status(&bot.id).await;
                 }
             }
@@ -1903,15 +1949,18 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
             }
-            // agy 沒有 claude 那種 statusLine 數字：模型與 context 的 token 數（hook 子行程讀 transcript 帶來的）記成網頁讀得懂的精簡 `status_json`。
+            // agy 的 statusLine 沒來（舊版、沒有 statusLine 回報）時的備援：模型與 context 的 token 數（hook 子行程讀 transcript 帶來的）
+            // 記成網頁讀得懂的精簡 `status_json`。已經收過 statusLine 時以 statusLine 為準，不拿 transcript 估算與 `[agy] context_window_tokens` 覆蓋。
             if provider == "agy" {
                 if let Some(r) = &run {
-                    let model = r.runtime_model.as_deref().or(bot.model.as_deref());
-                    let window = app.cfg().get().await.agy.context_window_tokens;
-                    if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64), window) {
-                        if r.status_json.as_deref() != Some(json.as_str()) {
-                            sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(app.db()).await?;
-                            app.emit_bot_status(&bot.id).await;
+                    if !crate::agy_support::has_statusline(r.status_json.as_deref()) {
+                        let model = r.runtime_model.as_deref().or(bot.model.as_deref());
+                        let window = app.cfg().get().await.agy.context_window_tokens;
+                        if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64), window) {
+                            if r.status_json.as_deref() != Some(json.as_str()) {
+                                sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(app.db()).await?;
+                                app.emit_bot_status(&bot.id).await;
+                            }
                         }
                     }
                 }

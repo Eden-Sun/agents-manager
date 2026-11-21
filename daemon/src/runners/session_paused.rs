@@ -40,7 +40,9 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 }
 
 pub async fn observe_agy_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
-    let dialog = crate::agy_screen::blocking_dialog(screen);
+    let dialog = crate::agy_screen::blocking_dialog(screen).or_else(|| {
+        crate::lifecycle::agy_busy::tool_confirmation_pending(&run.id).then_some(crate::agy_screen::AgyDialog::Permission)
+    });
     observe_with(app, run, dialog.is_some(), dialog.map(|d| d.label())).await;
 }
 

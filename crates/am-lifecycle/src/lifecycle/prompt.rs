@@ -848,9 +848,13 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
             return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": "claude 正在等待選單選擇，請到終端處理後再送。"})));
         }
     }
-    // agy 的登入框、色彩頁、條款頁、信任框、權限框 herdr 全判 idle：認到就不送、也不按任何鍵（條款頁一個 Enter 就切換同意與否）。
+    // agy 的登入框、色彩頁、條款頁、信任框、權限框（或 statusLine 回報 `tool_confirmation_pending`）herdr 可能判 idle：
+    // 認到就不送、也不按任何鍵（條款頁一個 Enter 就切換同意與否）。
     if bot.kind == "agy" {
-        if let Some(dialog) = crate::agy_screen::blocking_dialog(&screen) {
+        let dialog = crate::agy_screen::blocking_dialog(&screen).or_else(|| {
+            super::agy_busy::tool_confirmation_pending(&run.id).then_some(crate::agy_screen::AgyDialog::Permission)
+        });
+        if let Some(dialog) = dialog {
             let hint = dialog.label();
             let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
             return Err(LcError::conflict(dialog.reason(), json!({"run_id": run.id, "message": hint})));

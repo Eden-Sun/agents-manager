@@ -124,6 +124,17 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     record(app, run_id, seen).await
 }
 
+/// 以 statusLine 回報的 `model.{id, effort}` 校正 `runs.runtime_model`（有 statusLine 時優先於 30 秒畫面爬字）。
+/// 回傳 `true` = 有改動。
+pub async fn adopt_statusline_model(
+    app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit),
+    run: &db::Run,
+    payload: &serde_json::Value,
+) -> bool {
+    let Some(seen) = crate::agy_support::model_slug_from_statusline(payload) else { return false };
+    record(app, &run.id, seen).await
+}
+
 /// 把讀到的模型寫進 `runs.runtime_model`（child 的設定一併跟著）。回傳 `true` = 有改動。
 async fn record(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, seen: String) -> bool {
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
@@ -140,15 +151,19 @@ async fn record(app: &(impl crate::capabilities::BotStatusEmit + crate::capabili
         tracing::warn!(run = %run_id, bot = %bot.name, error = %e, "could not record the agy runtime model, retrying next sweep");
         return false;
     }
-    tracing::info!(run = %run_id, bot = %bot.name, %model, child, "agy runtime corrected from the footer");
+    tracing::info!(run = %run_id, bot = %bot.name, %model, child, "agy runtime corrected");
     app.emit_bot_status(&bot.id).await;
     true
 }
 
 /// 巡邏用。`hint` 是鎖外已經讀過的畫面：跟 runtime 一樣就停；不一樣才拿 bot 鎖確認還是同一個 run 再校正。
+/// 若這個 run 已經收過 agy `statusLine` 的模型回報（`status_json` 帶 `_agm_statusline` 與 `model.id`），以 statusLine 為準，不再每 30 秒爬畫面覆蓋。
 /// 框底讀不到（窄 pane 截掉）而且 child 還不知道模型時，每個 run 頭 20 輪改找捲動紀錄裡的啟動橫幅（[`parse_banner`]）。
 pub async fn sync_runtime(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: &str) {
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return };
+    if crate::agy_support::has_statusline(run.status_json.as_deref()) && run.runtime_model.is_some() {
+        return;
+    }
     let child = matches!(db::bot(app.db(), bot_id).await, Ok(Some(b)) if b.managed_by == "child");
     let Some(seen) = parse_footer(hint) else {
         if child && run.runtime_model.is_none() && banner_try(run_id) {
