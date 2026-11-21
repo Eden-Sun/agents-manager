@@ -1,76 +1,35 @@
 import { useState } from 'react'
 import { useT } from '../lib/i18n'
-import { msgTimeLabel } from '../lib/msgTime'
 import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
-import { MessageRetroSheet } from './TranslateRetroRecords'
+import { MessageTranslateRecordSheet } from './TranslateRetroRecords'
 import { isLocalTranslation, translationModelName, usd } from './messageTranslationConstants'
 import type { RejectDetail } from '../lib/messageTranslationStore'
 
-/**
- * 譯文下方那行：`(by <模型短名> $<金額>)`（使用者 2026-11-12 裁示）。快取命中也照樣顯示原本的金額，
- * 不另標「未扣費」；OpenCC 只寫 `(by OpenCC)`；金額不明時只寫模型名。
- */
 function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; model: string }): string {
   const model = translationModelName(st.model)
   if (isLocalTranslation(st.model) || st.cost === null) return t('(by {model})', { model })
   return t('(by {model} {cost})', { model, cost: usd(st.cost) })
 }
 
-/**
- * 「複盤」：譯文已完成、使用者覺得翻得不好時，記下這一版的紀錄（只給使用者自己看，不送管理者）。
- * 按下展開小輸入框（選填「哪裡翻得不好」）；送出後顯示「已記錄複盤（時間）」與「查看」。
- */
-function RetroControl({ t, sentAt, messageId, onSend }: { t: ReturnType<typeof useT>; sentAt: string | null; messageId: string; onSend: (note: string) => void }) {
+function RecordTrigger({ messageId }: { messageId: string }) {
+  const t = useT()
   const [open, setOpen] = useState(false)
-  const [note, setNote] = useState('')
-  const [viewing, setViewing] = useState(false)
   return (
     <>
       <button
         type="button"
         className="msg-translate msg-translate-retro"
         data-k="translate-retro"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        title={t('記下這則為什麼翻不好（只給你自己看，不送管理者）')}
+        onClick={(e) => {
+          e.stopPropagation()
+          setOpen(true)
+        }}
+        title={t('查看這則譯文的翻譯紀錄')}
       >
         {t('複盤')}
       </button>
-      {open ? (
-        <form
-          className="msg-translate-retro-form"
-          data-k="translate-retro-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            onSend(note)
-            setOpen(false)
-            setNote('')
-          }}
-        >
-          <input
-            className="msg-translate-retro-input"
-            type="text"
-            maxLength={500}
-            value={note}
-            placeholder={t('哪裡翻得不好（選填）')}
-            aria-label={t('哪裡翻得不好（選填）')}
-            onChange={(e) => setNote(e.target.value)}
-          />
-          <button type="submit" className="msg-translate" data-k="translate-retro-send">{t('送出')}</button>
-        </form>
-      ) : null}
-      {sentAt ? (
-        <span className="msg-translate-retro-sent" data-k="translate-retro-sent">
-          {t('已記錄複盤（{time}）', { time: msgTimeLabel(sentAt) })}
-        </span>
-      ) : null}
-      {sentAt ? (
-        <button type="button" className="msg-translate" data-k="translate-retro-view" onClick={() => setViewing(true)}>
-          {t('查看')}
-        </button>
-      ) : null}
-      {viewing ? <MessageRetroSheet messageId={messageId} open onClose={() => setViewing(false)} /> : null}
+      {open ? <MessageTranslateRecordSheet messageId={messageId} open onClose={() => setOpen(false)} /> : null}
     </>
   )
 }
@@ -94,9 +53,7 @@ export function MessageTranslationButton({
   onReport,
   onRedo,
   redoing,
-  onRetro,
-  retroSentAt,
-  retroMessageId,
+  messageId,
 }: {
   eligible: boolean
   off: { reason: string } | null
@@ -106,21 +63,13 @@ export function MessageTranslationButton({
   spin?: 'forward' | 'backward' | null
   onFlip: (e?: React.MouseEvent) => void
   onManual: () => void
-  /** 「重新翻譯」：譯文狀態才顯示；`redoing` 是正在重翻（按鈕停用、顯示進行中）。 */
   onRedo?: () => void
   redoing?: boolean
-  /** 品質檢查沒過時的原因（檢查名稱）與「仍然顯示譯文」（daemon 有帶被擋的譯文才有）。 */
   rejectedReason?: string
-  /** 品質沒過的細節（原因摘要，點開看）；daemon 沒帶就不顯示。 */
   rejectDetail?: RejectDetail
   onShowAnyway?: () => void
-  /** 「回報給管理者」：有值才顯示按鈕。 */
   onReport?: () => void
-  /** 「複盤」（譯文狀態才顯示）：送出使用者的備註（可空字串）；`retroSentAt` 是上次開複盤的時間。 */
-  onRetro?: (note: string) => void
-  retroSentAt?: string | null
-  /** 「查看」複盤記錄用的訊息 id（有 `onRetro` 時才需要）。 */
-  retroMessageId?: string
+  messageId?: string
 }) {
   const t = useT()
   if (!eligible) return null
@@ -208,14 +157,11 @@ export function MessageTranslationButton({
         <span className="msg-translate-lbl">{redoing ? t('重新翻譯中…') : t('重新翻譯')}</span>
       </button>
     ) : null
-  const retroNode =
-    status === 'done' && onRetro && !off ? <RetroControl t={t} sentAt={retroSentAt ?? null} messageId={retroMessageId ?? ''} onSend={onRetro} /> : null
   if (off || status !== 'rejected') {
-    return redoButton || retroNode ? (
+    return redoButton ? (
       <>
         {button}
         {redoButton}
-        {retroNode}
       </>
     ) : button
   }
@@ -232,13 +178,13 @@ export function MessageTranslationButton({
               : t('這則沒有自動翻譯（品質檢查未通過），可以手動再試')}
         {onShowAnyway ? <> · <button type="button" className="msg-translate" data-k="translate-show-anyway" onClick={onShowAnyway}>{t('仍然顯示譯文')}</button></> : null}
         {onReport ? <> · <button type="button" className="msg-translate" data-k="translate-report" onClick={onReport}>{t('回報給管理者')}</button></> : null}
+        {messageId ? <> · <RecordTrigger messageId={messageId} /></> : null}
       </span>
       {rejectDetail ? <RejectReasonDetails t={t} d={rejectDetail} /> : null}
     </>
   )
 }
 
-/** 點開看原因摘要：檢查名稱、原文與譯文的拉丁／CJK 字數、是否完全相同、嘗試次數與模型。不含整段內容。 */
 function RejectReasonDetails({ t, d }: { t: ReturnType<typeof useT>; d: RejectDetail }) {
   return (
     <details className="msg-translate-detail" data-k="translate-reject-detail">
@@ -255,6 +201,7 @@ function RejectReasonDetails({ t, d }: { t: ReturnType<typeof useT>; d: RejectDe
 }
 
 export function MessageTranslationContent({
+  messageId,
   text,
   botId,
   cost,
@@ -262,6 +209,7 @@ export function MessageTranslationContent({
   lowConfidence,
   jevProb,
 }: {
+  messageId?: string
   text: string
   botId?: string | null
   cost: number | null
@@ -273,7 +221,10 @@ export function MessageTranslationContent({
   return (
     <div className="msg-translation" lang="zh-Hant">
       <SafeMarkdown text={text} botId={botId} />
-      <div className="msg-translation-cost">{costLine(t, { cost, model })}</div>
+      <div className="msg-translation-foot">
+        <div className="msg-translation-cost">{costLine(t, { cost, model })}</div>
+        {messageId ? <RecordTrigger messageId={messageId} /> : null}
+      </div>
       {lowConfidence && jevProb != null ? (
         <div className="msg-translation-lowconf">{t('品質分數偏低（Jev {score}）', { score: jevProb.toFixed(2) })}</div>
       ) : null}

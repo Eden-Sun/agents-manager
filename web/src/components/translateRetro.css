@@ -1,4 +1,41 @@
-/* 譯文「複盤」記錄（TranslateRetroRecords.tsx）：清單與單筆卡片。390px 寬不橫向捲動。 */
+.retro-sheet-body {
+  padding: 12px 16px 16px;
+  min-width: 0;
+}
+
+.retro-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.retro-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.retro-filters .field {
+  flex: 1 1 130px;
+  min-width: 0;
+}
+
+.retro-filters select {
+  width: 100%;
+  padding: 5px 8px;
+  color: inherit;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.retro-refresh {
+  min-height: 32px;
+}
+
 .retro-list {
   display: flex;
   flex-direction: column;
@@ -17,13 +54,31 @@
 .retro-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
+  align-items: center;
+  gap: 4px 8px;
   margin-bottom: 6px;
 }
 
 .retro-time {
   font-variant-numeric: tabular-nums;
+}
+
+.retro-badge {
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border, #d0d7de);
+}
+
+.retro-badge.rejected {
+  color: var(--danger, #cf222e);
+  border-color: color-mix(in srgb, var(--danger, #cf222e) 40%, transparent);
+}
+
+.retro-badge.retried {
+  color: var(--warn, #9a6700);
+  border-color: color-mix(in srgb, var(--warn, #9a6700) 40%, transparent);
 }
 
 .retro-facts {
@@ -59,8 +114,9 @@
 
 .retro-texts summary {
   cursor: pointer;
-  min-height: 40px;
-  display: list-item;
+  padding: 6px 0;
+  line-height: 1.4;
+  user-select: none;
 }
 
 .retro-pair {
@@ -70,20 +126,17 @@
 }
 
 .retro-pair section {
-  background: var(--surface-2, rgba(127, 127, 127, 0.08));
-  border-radius: 6px;
+  min-width: 0;
   padding: 8px 10px;
-  min-width: 0;
-}
-
-.retro-body {
-  padding: 12px 16px;
-  min-width: 0;
+  background: var(--bg-sunken, #f6f8fa);
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 6px;
 }
 
 .retro-pair h5 {
   margin: 0 0 4px;
-  font-size: 0.9em;
+  font-size: 0.85em;
+  color: var(--muted, #57606a);
 }
 
 .retro-pair pre {
@@ -98,7 +151,7 @@
 
 .retro-more {
   align-self: center;
-  min-height: 32px;
+  min-height: 36px;
 }
 
 @media (min-width: 520px) {

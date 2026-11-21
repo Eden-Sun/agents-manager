@@ -102,11 +102,13 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(subtabs.getAttribute('aria-label'), 'Claude API 分類')
 
   const tabs = subtabs.querySelectorAll<HTMLButtonElement>('button[role="tab"]')
-  assert.equal(tabs.length, 2, '應有 2 個子分頁')
+  assert.equal(tabs.length, 3, '應有 3 個子分頁')
   assert.equal(tabs[0].textContent, '設定')
   assert.equal(tabs[1].textContent, '帳本')
+  assert.equal(tabs[2].textContent, '翻譯紀錄')
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true', '預設選中「設定」')
   assert.equal(tabs[1].getAttribute('aria-selected'), 'false')
+  assert.equal(tabs[2].getAttribute('aria-selected'), 'false')
 
   // 設定 panel 可見，帳本 panel hidden
   const formPanel = root.querySelector('#api-form')

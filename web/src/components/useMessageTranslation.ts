@@ -58,8 +58,6 @@ export function useMessageTranslation(
   const [spin, setSpin] = useState<'forward' | 'backward' | null>(null)
   const [swapSeq, setSwapSeq] = useState(0)
   const [redoing, setRedoing] = useState(false)
-  // 複盤：這次記錄的時間（daemon 回的 sent_at；重複時是那筆既有紀錄的時間）。
-  const [retroSentAt, setRetroSentAt] = useState<string | null>(null)
 
   // 狀態在 store（以 msg.id 為鍵）：remount 不會掉回原文。
   // manual＝使用者按的；restore＝重整後重抓以前選過看譯文的；fresh＝自動翻譯新訊息。後兩者失敗不跳錯誤也不重試。
@@ -233,17 +231,7 @@ export function useMessageTranslation(
           (e: unknown) => useStore.getState().notify('error', t('回報失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
         )
       },
-      retroSentAt,
-      retroMessageId: msg.id,
-      onRetro: (note: string) => {
-        reportTranslation(msg.id, note).then(
-          (r) => {
-            if (r.sentAt) setRetroSentAt(r.sentAt)
-            useStore.getState().notify('info', r.sent ? t('已記錄複盤') : t('這句備註已記錄過，不重複存'))
-          },
-          (e: unknown) => useStore.getState().notify('error', t('複盤失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
-        )
-      },
+      messageId: msg.id,
       onShowAnyway: st.status === 'rejected' && st.text
         ? () => { setWanted(msg.id, true); setTranslation(msg.id, { status: 'done', text: st.text!, show: true, ready: false, cost: null, cached: true, model: '', lowConfidence: true, jevProb: null }) }
         : undefined,
@@ -251,6 +239,7 @@ export function useMessageTranslation(
     content:
       st.status === 'done' && st.show
         ? createElement(MessageTranslationContent, {
+            messageId: msg.id,
             text: st.text,
             botId: msg.bot_id,
             cost: st.cost,

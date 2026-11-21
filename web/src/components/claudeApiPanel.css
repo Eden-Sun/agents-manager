@@ -138,11 +138,3 @@
     opacity: 0.7;
   }
 }
-
-/* 翻譯組的「複盤記錄」入口（ClaudeApiPanel.tsx）：說明一行、按鈕在下方，390px 不擠。 */
-.claude-api-retro-entry {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-}

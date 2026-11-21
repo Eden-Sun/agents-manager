@@ -1,41 +1,51 @@
-/**
- * 譯文「複盤」記錄（使用者 2026-11-21）：只給使用者自己看，不送管理者。
- *
- * - `GET /translate-retros?project_id&limit&before`：全部複盤，新到舊；`nextBefore` 原樣帶回就是下一頁。
- * - `GET /messages/:id/translate-retros`：這則訊息的複盤（舊到新）。
- */
 import { rawTransport } from './index'
 import { ApiError } from './types'
+import type { RejectDetail } from '../lib/messageTranslationStore'
 
-/** 單次模型嘗試（含被升級重翻的那幾次）。 */
 export interface RetroAttempt {
   model: string
   effort: string | null
-  /** 本地檢查沒過的原因；過了就 null。 */
   reason: string | null
   jevProb: number | null
   costUsd: number | null
 }
 
-export interface TranslateRetro {
+export interface TranslateRecordNote {
   at: string
-  messageId: string
-  botId: string
-  projectId: string
-  note: string | null
-  /** 實際產出這版譯文的模型（與訊息上「(by …)」的名稱同一個來源）。 */
+  note: string
+}
+
+export interface TranslateLocalChecks {
+  untranslated: boolean
+  partiallyUntranslated: boolean
+  markdownStructure: boolean
+  japaneseOutput: boolean
+}
+
+export interface TranslateRecord {
+  at: string
+  messageId: string | null
+  botId: string | null
+  projectId: string | null
+  status: 'done' | 'rejected'
   model: string
   effort: string | null
   promptVersion: string
   costUsd: number | null
   attempts: RetroAttempt[]
+  retried: boolean
   jevProb: number | null
   lowConfidence: boolean
-  /** 四項本地檢查各自的結果。 */
-  localChecks: { untranslated: boolean; partiallyUntranslated: boolean; markdownStructure: boolean; japaneseOutput: boolean }
+  localChecks: TranslateLocalChecks | null
+  checkFailed: boolean
+  rejected: string | null
+  rejectDetail: RejectDetail | null
   source: string
   translation: string
+  notes: TranslateRecordNote[]
 }
+
+export type TranslateRecordFilter = 'all' | 'retried' | 'failed' | 'rejected'
 
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -47,56 +57,93 @@ function parseAttempt(raw: unknown): RetroAttempt {
   return { model: str(o.model) ?? '', effort: str(o.effort), reason: str(o.reason), jevProb: num(o.jev_prob), costUsd: num(o.cost_usd) }
 }
 
-export function parseRetro(raw: unknown): TranslateRetro | null {
-  const o = rec(raw)
-  const at = str(o.at)
-  if (at === null) return null
-  const lc = rec(o.local_checks)
+function parseLocalChecks(raw: unknown): TranslateLocalChecks | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const lc = raw as Record<string, unknown>
+  if (Object.keys(lc).length === 0) return null
   return {
-    at,
-    messageId: str(o.message_id) ?? '',
-    botId: str(o.bot_id) ?? '',
-    projectId: str(o.project_id) ?? '',
-    note: str(o.note),
+    untranslated: bool(lc.untranslated),
+    partiallyUntranslated: bool(lc.partially_untranslated),
+    markdownStructure: bool(lc.markdown_structure),
+    japaneseOutput: bool(lc.japanese_output),
+  }
+}
+
+function parseRejectDetail(raw: unknown): RejectDetail | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const d = raw as Record<string, unknown>
+  if (typeof d.check !== 'string' || typeof d.identical !== 'boolean' || !Array.isArray(d.models) || typeof d.attempts !== 'number') {
+    return null
+  }
+  return {
+    check: d.check,
+    src_latin: num(d.src_latin) ?? 0,
+    src_cjk: num(d.src_cjk) ?? 0,
+    reply_latin: num(d.reply_latin) ?? 0,
+    reply_cjk: num(d.reply_cjk) ?? 0,
+    identical: d.identical,
+    models: d.models.filter((m): m is string => typeof m === 'string'),
+    attempts: d.attempts,
+  }
+}
+
+function parseNote(raw: unknown): TranslateRecordNote | null {
+  const o = rec(raw)
+  const note = str(o.note)
+  if (!note) return null
+  return { at: str(o.at) ?? '', note }
+}
+
+export function parseTranslateRecord(raw: unknown): TranslateRecord | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  const status = o.status === 'rejected' ? 'rejected' : 'done'
+  return {
+    at: str(o.at) ?? '',
+    messageId: str(o.message_id),
+    botId: str(o.bot_id),
+    projectId: str(o.project_id),
+    status,
     model: str(o.model) ?? '',
     effort: str(o.effort),
     promptVersion: str(o.prompt_version) ?? '',
     costUsd: num(o.cost_usd),
     attempts: Array.isArray(o.attempts) ? o.attempts.map(parseAttempt) : [],
+    retried: bool(o.retried),
     jevProb: num(o.jev_prob),
     lowConfidence: bool(o.low_confidence),
-    localChecks: {
-      untranslated: bool(lc.untranslated),
-      partiallyUntranslated: bool(lc.partially_untranslated),
-      markdownStructure: bool(lc.markdown_structure),
-      japaneseOutput: bool(lc.japanese_output),
-    },
+    localChecks: parseLocalChecks(o.local_checks),
+    checkFailed: bool(o.check_failed),
+    rejected: str(o.rejected),
+    rejectDetail: parseRejectDetail(o.reject_detail),
     source: str(o.source) ?? '',
     translation: str(o.translation) ?? '',
+    notes: Array.isArray(o.notes) ? o.notes.map(parseNote).filter((n): n is TranslateRecordNote => n !== null) : [],
   }
 }
 
-/** 列表一頁：`nextBefore` 為 null 就是最後一頁。 */
-export async function fetchTranslateRetros(opts: { projectId?: string; limit?: number; before?: string } = {}): Promise<{ retros: TranslateRetro[]; nextBefore: string | null }> {
-  if (rawTransport.mock) return { retros: [], nextBefore: null }
+export async function fetchTranslateRecords(
+  opts: { projectId?: string; limit?: number; before?: string; filter?: TranslateRecordFilter } = {},
+): Promise<{ records: TranslateRecord[]; nextBefore: string | null }> {
+  if (rawTransport.mock) return { records: [], nextBefore: null }
   const q = new URLSearchParams()
   if (opts.projectId) q.set('project_id', opts.projectId)
   if (opts.limit) q.set('limit', String(opts.limit))
   if (opts.before) q.set('before', opts.before)
+  if (opts.filter && opts.filter !== 'all') q.set('filter', opts.filter)
   const qs = q.toString()
-  const raw = rec(await rawTransport.request('GET', `/translate-retros${qs ? `?${qs}` : ''}`))
-  const retros = Array.isArray(raw.retros) ? raw.retros.map(parseRetro).filter((r): r is TranslateRetro => r !== null) : []
-  return { retros, nextBefore: str(raw.next_before) }
+  const raw = rec(await rawTransport.request('GET', `/translate-records${qs ? `?${qs}` : ''}`))
+  const records = Array.isArray(raw.records) ? raw.records.map(parseTranslateRecord).filter((r): r is TranslateRecord => r !== null) : []
+  return { records, nextBefore: str(raw.next_before) }
 }
 
-/** 這則訊息的複盤（舊到新）。舊 daemon 沒有這個端點 → 空陣列，不報錯。 */
-export async function fetchMessageTranslateRetros(messageId: string): Promise<TranslateRetro[]> {
-  if (rawTransport.mock) return []
+export async function fetchMessageTranslateRecord(messageId: string): Promise<TranslateRecord | null> {
+  if (rawTransport.mock) return null
   try {
-    const raw = rec(await rawTransport.request('GET', `/messages/${encodeURIComponent(messageId)}/translate-retros`))
-    return Array.isArray(raw.retros) ? raw.retros.map(parseRetro).filter((r): r is TranslateRetro => r !== null) : []
+    const raw = rec(await rawTransport.request('GET', `/messages/${encodeURIComponent(messageId)}/translate-record`))
+    return parseTranslateRecord(raw.record)
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return []
+    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return null
     throw e
   }
 }

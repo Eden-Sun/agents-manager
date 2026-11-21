@@ -19,7 +19,7 @@ import { msg, useT } from '../lib/i18n'
 import { EnvSubTabs, type EnvSubTabItem } from './EnvSubTabs'
 import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel'
 import { ClaudeApiBotLimits } from './ClaudeApiBotLimits'
-import { RetroRecordModal } from './TranslateRetroRecords'
+import { TranslateRecordsPanel } from './TranslateRetroRecords'
 import { translationModelName } from './messageTranslationConstants'
 import './claudeApiPanel.css'
 
@@ -60,7 +60,7 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
 /** `onOpenOpenAi`：翻譯組的供應商旁的連結——切到「OpenAI API」分頁（OpenAI 的設定與帳本在那裡，不塞在這一頁）。 */
 export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } = {}) {
   const t = useT()
-  const [subTab, setSubTab] = useState<'form' | 'book'>('form')
+  const [subTab, setSubTab] = useState<'form' | 'book' | 'records'>('form')
   const [settings, setSettings] = useState<ClaudeApiSettings | null | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
@@ -72,8 +72,6 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
   const [ledger, setLedger] = useState<ClaudeApiLedger | null>(null)
   const [ledgerProvider, setLedgerProvider] = useState<LedgerProvider>('all')
   const [cap, setCap] = useState<ClaudeApiCap | null>(null)
-  /** 翻譯組的「複盤記錄」清單（只給使用者自己看）。 */
-  const [retroOpen, setRetroOpen] = useState(false)
 
   const adopt = (s: ClaudeApiSettings) => {
     setSettings(s)
@@ -215,14 +213,6 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
                 <input type="checkbox" checked={on} disabled={!willHaveKey && !on} onChange={(e) => patchUse(u.id, { enabled: e.target.checked })} />
                 <span>{t('啟用')}</span>
               </label>
-              {u.uses.includes('message_translate') ? (
-                <div className="claude-api-retro-entry">
-                  <span className="hint">{t('譯文點「複盤」記下的紀錄（只給你自己看，不送管理者）')}</span>
-                  <button type="button" className="btn" data-testid="claude-api-retro-log" onClick={() => setRetroOpen(true)}>
-                    {t('複盤記錄 →')}
-                  </button>
-                </div>
-              ) : null}
               {u.auto !== null ? (
                 <label className="claude-api-switch" data-testid={`claude-api-auto-${u.id}`}>
                   <input type="checkbox" checked={d.auto ?? u.auto} onChange={(e) => patchUse(u.id, { auto: e.target.checked })} />
@@ -417,20 +407,18 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
     </div>
   )
 
-  const subTabItems: EnvSubTabItem<'form' | 'book'>[] = [
+  const subTabItems: EnvSubTabItem<'form' | 'book' | 'records'>[] = [
     { id: 'form', label: t('設定'), panelId: 'api-form', content: formContent },
     { id: 'book', label: t('帳本'), panelId: 'api-book', content: ledgerContent },
+    { id: 'records', label: t('翻譯紀錄'), panelId: 'api-records', content: <TranslateRecordsPanel active={subTab === 'records'} /> },
   ]
 
   return (
-    <>
-      <EnvSubTabs<'form' | 'book'>
-        ariaLabel={t('Claude API 分類')}
-        value={subTab}
-        onChange={setSubTab}
-        items={subTabItems}
-      />
-      {retroOpen ? <RetroRecordModal open onClose={() => setRetroOpen(false)} /> : null}
-    </>
+    <EnvSubTabs<'form' | 'book' | 'records'>
+      ariaLabel={t('Claude API 分類')}
+      value={subTab}
+      onChange={setSubTab}
+      items={subTabItems}
+    />
   )
 }

@@ -1135,54 +1135,42 @@
   }
 }
 /* 譯文下方的費用行：小字、不搶內容。 */
-.msg-translation-cost {
+.msg-translation-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
   margin-top: 6px;
+}
+.msg-translation-cost {
   font-size: 11px;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
-/* 低分譯文的小標：跟費用行一樣淡，不搶譯文。 */
 .msg-translation-lowconf {
   margin-top: 2px;
   font-size: 11px;
   color: var(--text-faint);
 }
-/* 未啟用：看得到功能在，但一眼知道還不能用；按了只提示去哪裡開。 */
 .msg-translate.off {
   opacity: 0.7;
   font-style: italic;
 }
-/* 譯文狀態的「重新翻譯」：緊接在「⇄ 原文」後面；點擊範圍沿用 .msg-translate（手機 ≥40px）。 */
 .msg-translate-redo {
   margin-inline-start: 2px;
 }
 .msg-translate-retro {
-  margin-inline-start: 2px;
-  min-height: 32px;
-  min-width: 32px;
   display: inline-flex;
   align-items: center;
+  min-height: 28px;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
-.msg-translate-retro-form {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  margin-inline-start: 4px;
-}
-.msg-translate-retro-input {
-  min-width: 0;
-  width: min(220px, 60vw);
-  font-size: inherit;
-}
-.msg-translate-retro-form .msg-translate {
-  min-height: 32px;
-  min-width: 32px;
-}
-.msg-translate-retro-sent {
-  margin-inline-start: 4px;
-  font-size: 0.9em;
-  color: var(--muted, inherit);
+@media (width <= 640px) {
+  .msg-translate-retro {
+    min-height: 36px;
+    padding: 4px 8px;
+  }
 }
 .msg-translate:hover:not(:disabled) {
   color: var(--text);

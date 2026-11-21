@@ -599,13 +599,8 @@ export async function translateMessage(
   }
 }
 
-/**
- * `POST /messages/:id/translate-report`：品質沒過（不帶 note）→ 回報原因；譯文已完成 → 「複盤」（帶 `note`，選填，≤500 字）。
- * 送給本專案的管理者，10 分鐘內同一則只送一次（`sent: false` 就是重複，`sentAt` 是那次送出的時間）。
- */
-export async function reportTranslation(messageId: string, note?: string): Promise<{ sent: boolean; reason: string | null; sentAt: string | null }> {
-  const body = note === undefined ? undefined : { note }
-  const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate-report`, body)
+export async function reportTranslation(messageId: string): Promise<{ sent: boolean; reason: string | null; sentAt: string | null }> {
+  const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate-report`)
   const o = isRec(raw) ? raw : {}
   const reason = pick(o, 'reason')
   const sentAt = pick(o, 'sent_at')
