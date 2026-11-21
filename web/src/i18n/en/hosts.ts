@@ -129,16 +129,11 @@ export default {
   '還沒有可用的 API key，先貼上 key 再開。': 'No usable API key yet. Paste a key before turning this on.',
   'daemon 回了看不懂的內容': 'The daemon returned something unreadable',
   // components/AgyLogout.tsx
-  '清掉{host}的 agy 登入憑證': 'Clear the agy sign-in credentials on {host}',
   '{host}有 {n} 顆 Bot 沒指定身份、用的就是這個預設帳號': '{host} has {n} bot(s) with no identity set; they use this default account',
   '：正在跑的不受影響，之後重新啟動會用別的帳號或停在登入畫面。': ': running ones are not affected; after a restart they use another account or stop at the login screen.',
   '已隱藏': 'Hidden',
   '會在{host}開一個臨時 pane 執行 {kind} 自己的登出指令，清掉預設帳號的憑證；家目錄裡的其他檔案不會刪。': 'Opens a temporary pane on {host} and runs the {kind} logout command, clearing the default account credentials; no other files in the home directory are deleted.',
   '登出中…': 'Signing out…',
-  '登出 agy': 'Sign out agy',
-  '會刪掉{host}上 agy 的登入憑證，之後要在 agy 裡重新登入才能用。': 'This deletes the agy sign-in credentials on {host}. You will need to sign in to agy again before using it.',
-  '目前有 {n} 顆 agy bot 在跑': { one: 'Currently {n} agy bot is running', other: 'Currently {n} agy bots are running' },
-  '：不會被停掉，但憑證清掉後它們會失去授權。': ': they will not be stopped, but they lose authorization once the credentials are cleared.',
   '登出': 'Sign out',
   // components/LoginPromptBanner.tsx・JevLabel.tsx
   '在 {host} 替 {identity} 開登入：打開登入網站、貼回 code': 'Sign in to {identity} on {host}: open the sign-in site and paste the code back',
