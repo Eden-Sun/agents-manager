@@ -196,3 +196,15 @@ test('agy 沒有 Argon 組（ag1）：手機與面板都不出現 Ar', { timeout
     assert.doesNotMatch(cell.getAttribute('title') ?? '', /Argon/)
   })
 })
+
+test('agy 只有 Argon 有讀數時 popover 顯示 Ar 列，不寫「背景查詢中」', { timeout: 30_000 }, async () => {
+  await mountAgyWith({ five_hour: null, seven_day: null, argon_weekly: quotaWindow(75, 100) })
+  const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+  await click(cell.querySelector('.quota-bars-open')!)
+  await until(() => document.querySelector('.quota-pop') !== null, 'popover 開啟')
+  const row = [...document.querySelectorAll<HTMLElement>('.quota-pop-row')].find((r) => r.querySelector('.quota-kind.agy'))!
+  const text = row.textContent ?? ''
+  assert.doesNotMatch(text, /背景查詢中/)
+  assert.match(text, /Ar/)
+  assert.match(text, /75/, 'Ar 顯示剩餘 75（面板慣例：剩餘）')
+})

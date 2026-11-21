@@ -926,7 +926,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <p className="quota-pop-note warn">{t('{host} 尚未安裝 agy，要自動安裝嗎？', { host: hostLabel(host, t) })}</p>
           <QuotaLoginSlash kind="agy" host={host} hostLabel={hostLabel(host, t)} identity={null} />
         </>
-      ) : !known || (five === null && seven === null && fable === null) ? (
+      ) : !known || (five === null && seven === null && fable === null && (entry.kind !== 'agy' || remaining(q?.argon_weekly) === null)) ? (
         <>
           <p className={`quota-pop-note${loggedOut || agyQuotaError ? ' warn' : ''}`}>
             {loggedOut
