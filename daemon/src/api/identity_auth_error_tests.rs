@@ -48,15 +48,7 @@ async fn identity_auth_stops_before_opening_a_shell_when_remote_home_is_unreadab
 
     let e = crate::testing::env().await;
     let host = format!("identity-api-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-    let conn = e.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
-        shared_session: false,
-        name: host.clone(),
-        ssh: "unused".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "agents-manager".into(),
-        remote_path: String::new(),
-    }).await;
+    let conn = e.app.hosts.insert_remote_for_test(HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
     conn.connected.store(true, Ordering::SeqCst);
     e.app.cfg.update(|cfg| {
         cfg.identities.push(crate::config::IdentityCfg {
@@ -116,15 +108,7 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
     // 先把主機寫進 config（不必等它真的連上：這條測的是閘門，不是連線）。
     e.app.cfg
         .update(move |f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: "zz92".into(),
-                ssh: "old-box".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            });
+            f.hosts.push(HostCfg { name: "zz92".into(), ssh: "old-box".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             Ok(())
         })
         .await
@@ -183,15 +167,7 @@ async fn xreview_deleting_a_host_is_refused_while_a_deleted_bots_remote_shim_is_
     let host = "zz92-cleanup";
     app.cfg
         .update(|f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.into(),
-                ssh: "unused-test-host".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            });
+            f.hosts.push(HostCfg { name: host.into(), ssh: "unused-test-host".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             Ok(())
         })
         .await
@@ -243,15 +219,7 @@ async fn a_deleted_bot_owed_on_the_old_host_still_blocks_that_host_after_its_pro
     app.cfg
         .update(|f| {
             for name in [old, new] {
-                f.hosts.push(HostCfg { daemon_url: None,
-                    shared_session: false,
-                    name: name.into(),
-                    ssh: "unused-test-host".into(),
-                    ssh_port: 22,
-                    ssh_opts: vec![],
-                    herdr_session: "agents-manager".into(),
-                    remote_path: String::new(),
-                });
+                f.hosts.push(HostCfg { name: name.into(), ssh: "unused-test-host".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             }
             Ok(())
         })
@@ -273,15 +241,7 @@ async fn xreview_deleting_a_host_is_refused_for_a_live_orphan_bot_in_a_deleted_p
     let host = "zz92-orphan";
     app.cfg
         .update(|f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.into(),
-                ssh: "unused-test-host".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            });
+            f.hosts.push(HostCfg { name: host.into(), ssh: "unused-test-host".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             Ok(())
         })
         .await
@@ -320,15 +280,7 @@ async fn xreview_delete_host_rechecks_projects_while_removing_the_host_config() 
     let host = "zz92-config-project-race";
     app.cfg
         .update(|f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.into(),
-                ssh: "unused-test-host".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            });
+            f.hosts.push(HostCfg { name: host.into(), ssh: "unused-test-host".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             f.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                 id: Some("01CONFIGRACE".into()),
                 path: "/tmp/xreview-host-config-race".into(),
@@ -365,15 +317,7 @@ async fn xreview_repoint_confirmation_covers_an_active_orphan_run() {
     let host = "zz92-repoint-orphan";
     app.cfg
         .update(|f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.into(),
-                ssh: "old-test-target".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            });
+            f.hosts.push(HostCfg { name: host.into(), ssh: "old-test-target".into(), herdr_session: "agents-manager".into(), ..Default::default() });
             Ok(())
         })
         .await
@@ -433,15 +377,7 @@ async fn deleting_a_host_keeps_a_connection_recreated_after_its_config_removal()
         .update({
             let host = host.clone();
             move |f| {
-                f.hosts.push(HostCfg { daemon_url: None,
-                    shared_session: false,
-                    name: host,
-                    ssh: "old-test-target".into(),
-                    ssh_port: 22,
-                    ssh_opts: vec![],
-                    herdr_session: "agents-manager".into(),
-                    remote_path: String::new(),
-                });
+                f.hosts.push(HostCfg { name: host, ssh: "old-test-target".into(), herdr_session: "agents-manager".into(), ..Default::default() });
                 Ok(())
             }
         })

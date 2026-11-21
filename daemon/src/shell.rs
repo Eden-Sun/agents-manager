@@ -986,10 +986,9 @@ mod tests {
         assert_eq!(code(registered(app, "local", "ws-404:pGone", Access::Type).await), "404");
     }
 
-    #[tokio::test]
-    async fn a_cached_typeable_verdict_does_not_authorize_after_an_agent_appears() {
-        let env = crate::testing::env().await;
-        let app = &env.app;
+    /// 在 `local` 開一個 shell pane（cwd `/tmp`，shell 行程 pid `shell_pid`，行程樹只有那個 zsh），登錄成 host shell 並回傳它。
+    /// 五個 typeable 測試共用的 setup。
+    async fn setup_typeable_shell(env: &crate::testing::Env, app: &Arc<App>, shell_pid: i64) -> crate::herdr::PaneInfo {
         let session = app.session_for_host("local").await.unwrap();
         let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
         *app.host_shells.lock().await = vec![HostShell {
@@ -1001,8 +1000,16 @@ mod tests {
             cwd: "/tmp".into(),
             created_at: crate::db::now(),
         }];
-        env.herdr.set_shell_pid(&pane.pane_id, 41101);
-        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        env.herdr.set_shell_pid(&pane.pane_id, shell_pid);
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(shell_pid as i32, 1, "-zsh")]));
+        pane
+    }
+
+    #[tokio::test]
+    async fn a_cached_typeable_verdict_does_not_authorize_after_an_agent_appears() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let pane = setup_typeable_shell(&env, app, 41101).await;
 
         registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
         env.herdr.set_agent("kid", &pane.pane_id, false);
@@ -1017,19 +1024,7 @@ mod tests {
     async fn a_cached_typeable_verdict_does_not_authorize_a_reused_pane_id() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        let session = app.session_for_host("local").await.unwrap();
-        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
-        *app.host_shells.lock().await = vec![HostShell {
-            host: "local".into(),
-            herdr_session: session,
-            workspace_id: pane.workspace_id.clone(),
-            tab_id: pane.tab_id.clone(),
-            pane_id: pane.pane_id.clone(),
-            cwd: "/tmp".into(),
-            created_at: crate::db::now(),
-        }];
-        env.herdr.set_shell_pid(&pane.pane_id, 41101);
-        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        let pane = setup_typeable_shell(&env, app, 41101).await;
         registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
 
         {
@@ -1047,19 +1042,7 @@ mod tests {
     async fn a_cached_typeable_verdict_does_not_authorize_after_the_pane_starts_listening() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        let session = app.session_for_host("local").await.unwrap();
-        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
-        *app.host_shells.lock().await = vec![HostShell {
-            host: "local".into(),
-            herdr_session: session,
-            workspace_id: pane.workspace_id.clone(),
-            tab_id: pane.tab_id.clone(),
-            pane_id: pane.pane_id.clone(),
-            cwd: "/tmp".into(),
-            created_at: crate::db::now(),
-        }];
-        env.herdr.set_shell_pid(&pane.pane_id, 41101);
-        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        let pane = setup_typeable_shell(&env, app, 41101).await;
         registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
 
         *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]).listening(41101, 3010));

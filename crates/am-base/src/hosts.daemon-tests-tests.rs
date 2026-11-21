@@ -49,15 +49,7 @@
     async fn a_repointed_host_cannot_publish_the_old_connection_snapshot() {
         let env = crate::testing::env().await;
         let host = "host-changed-fence-test";
-        let cfg = |ssh: &str| HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
         let old = env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
         *old.error.lock().await = Some("server A error".into());
         let old_fence = env.app.hosts.fence(host).await.unwrap();
@@ -190,15 +182,7 @@
     async fn a_fenced_host_operation_holds_its_authority_until_completion() {
         let env = crate::testing::env().await;
         let host = "authority-gate-test";
-        let cfg = HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: "target-a".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = HostCfg { name: host.into(), ssh: "target-a".into(), herdr_session: "test".into(), ..Default::default() };
         env.app.hosts.insert_remote_for_test(cfg).await;
         let fence = env.app.hosts.fence(host).await.unwrap();
         let app = env.app.clone();
@@ -472,15 +456,7 @@
     }
 
     fn cfg() -> HostCfg {
-        HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "mac_builder".into(),
-            ssh: "mac_builder@100.64.0.2".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        HostCfg { name: "mac_builder".into(), ssh: "mac_builder@100.64.0.2".into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     /// 主機睡著／tailscale 斷線時 ssh 連不出去：沒有 ConnectTimeout 就只能等系統的 TCP 逾時（Linux 約 2 分鐘），
@@ -854,15 +830,7 @@
     /// shared_session 不換機器，指紋不動；改了任一個被看的欄位就變。跨行程要算得出一樣的數字（決定性）。
     #[test]
     fn target_epoch_follows_the_machine_not_the_settings() {
-        let base = HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "mac_builder".into(),
-            ssh: "mac_builder@100.64.0.2".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let base = HostCfg { name: "mac_builder".into(), ssh: "mac_builder@100.64.0.2".into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let e = target_epoch(&base);
         assert!(e >= 0, "指紋去掉符號位：{e}");
         assert_eq!(target_epoch(&base.clone()), e);

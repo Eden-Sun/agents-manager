@@ -128,15 +128,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("gh-fence-{}", db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let mut ids = Vec::new();
         for label in ["p1", "p2"] {
@@ -240,15 +232,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("gh-gone-{}", db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let id = db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")

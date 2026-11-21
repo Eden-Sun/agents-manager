@@ -1221,15 +1221,7 @@ async fn judge_on(f: &Fixture) -> Arc<std::sync::Mutex<Vec<Value>>> {
 
 /// 把 fixture 的專案放到遠端主機 `mac_builder`（同一個假 herdr 當那台的 socket）。
 async fn on_remote_host(f: &Fixture) {
-    let cfg = crate::config::HostCfg { daemon_url: None,
-        shared_session: false,
-        name: "mac_builder".into(),
-        ssh: "mac_builder@100.64.0.2".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test".into(),
-        remote_path: String::new(),
-    };
+    let cfg = crate::config::HostCfg { name: "mac_builder".into(), ssh: "mac_builder@100.64.0.2".into(), herdr_session: "test".into(), ..Default::default() };
     let sock = f.env.dir.join("data").join("herdr.sock");
     f.env.app.hosts.insert_remote_with_client_for_test(cfg, crate::herdr::HerdrClient::new(sock)).await;
     sqlx::query("UPDATE projects SET host='mac_builder' WHERE id=?").bind(&f.env.project_id).execute(&f.env.app.db).await.unwrap();

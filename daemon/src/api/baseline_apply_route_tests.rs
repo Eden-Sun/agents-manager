@@ -55,15 +55,7 @@ async fn set_sync(app: &Arc<App>, host: &str, mode: &str) {
 
 /// 遠端主機（假 ssh）：apply／restore／列舉備份腳本在假 HOME 裡用真的 `/bin/sh` 跑，其他（偵測）一律失敗。回傳 HOME 與被叫了幾次。
 async fn remote_host(app: &Arc<App>, host: &str) -> (std::path::PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
-    let cfg = HostCfg { daemon_url: None,
-        shared_session: false,
-        name: host.into(),
-        ssh: "unused".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "agents-manager".into(),
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() };
     let c2 = cfg.clone();
     app.cfg.update(move |f| {
         f.hosts.push(c2);

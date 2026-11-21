@@ -68,15 +68,7 @@
 
         let app = crate::testing::env().await.app.clone();
         let host = format!("grok-home-618-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         conn.connected.store(true, Ordering::SeqCst);
         app.tools.lock().await.insert(host.clone(), crate::tools::HostTools {
             tools: [("grok".into(), crate::tools::ToolInfo { installed: true, path: Some("/usr/bin/grok".into()), version: None, logged_in: Some(true) })].into(),

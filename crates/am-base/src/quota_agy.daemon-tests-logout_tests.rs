@@ -60,15 +60,7 @@
         assert!(matches!(logout(&app, "no-such-host").await, Err(LogoutError::UnknownHost)));
         // 遠端那台的 agy 額度不受本機登出影響。
         let host = format!("agy-lo-{}", crate::db::ulid().to_ascii_lowercase());
-        app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         seed(&app, &host).await;
         seed(&app, LOCAL_HOST).await;
         logout(&app, LOCAL_HOST).await.unwrap();
@@ -81,15 +73,7 @@
         let e = tt::env().await;
         let app = e.app.clone();
         let host = format!("agy-lo-r-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         let replies = Arc::new(std::sync::Mutex::new(vec!["AM_REMOVED\n".to_string(), "AM_ABSENT\n".to_string(), "boom\n".to_string()]));
         let scripts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let (r2, s2) = (replies.clone(), scripts.clone());
@@ -117,15 +101,7 @@
     }
 
     fn remote_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.to_string(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        crate::config::HostCfg { name: host.to_string(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     /// #865：logout 排在探測鎖後面時 H 被改指到別台——舊世代的請求作廢，一段 script 都不送（A、B 同名，零次就同時涵蓋兩台）。

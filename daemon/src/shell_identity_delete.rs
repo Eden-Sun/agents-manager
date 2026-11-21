@@ -1226,11 +1226,7 @@ mod tests {
         let project_id = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,host,created_at) VALUES (?, '/tmp/fake-remote', 'fake-remote', ?, ?)")
             .bind(&project_id).bind(&host).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
-        env.app.hosts.insert_remote_for_test(crate::config::HostCfg {
-            daemon_url: None,
-            name: host.clone(), ssh: "unused-fake-transport".into(), ssh_port: 22,
-            ssh_opts: vec![], herdr_session: "fake".into(), remote_path: String::new(), shared_session: false,
-        }).await;
+        env.app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused-fake-transport".into(), herdr_session: "fake".into(), ..Default::default() }).await;
         let identity = crate::config::IdentityCfg {
             name: "cc0".into(), kind: "claude".into(), host: None,
             env: Default::default(), args: vec![],

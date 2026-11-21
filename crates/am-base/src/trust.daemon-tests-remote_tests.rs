@@ -27,15 +27,7 @@
         let env = tt::env().await;
         let home = env.dir.join("remote-home");
         std::fs::create_dir_all(&home).unwrap();
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: host.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         env.app

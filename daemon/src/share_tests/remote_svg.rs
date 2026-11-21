@@ -41,15 +41,7 @@ async fn setup(e: &tt::Env, tag: &str) -> Remote {
     let home = crate::test_dirs::scratch_dir(&format!("rs3-{tag}"));
     let host = format!("rs3-{tag}-{}", db::ulid().to_lowercase());
     let _shell_diag = crate::share::remote_fs::test_support::local_sh_fake_with_diagnostics(&host, &home);
-    let cfg = HostCfg { daemon_url: None,
-        name: host.clone(),
-        ssh: "fake-ssh".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test-session".into(),
-        shared_session: false,
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.clone(), ssh: "fake-ssh".into(), herdr_session: "test-session".into(), ..Default::default() };
     let conn = e.app.hosts.insert_remote_for_test(cfg).await;
     conn.connected.store(true, Ordering::SeqCst);
     sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(&host).bind(&e.project_id).execute(&e.app.db).await.unwrap();

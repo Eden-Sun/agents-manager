@@ -661,22 +661,19 @@ mod tests {
         assert_eq!(intent_status(&e.app, &bot.id).await, vec!["done"]);
     }
 
-    #[tokio::test]
-    async fn a_credential_rotation_intent_restarts_the_old_live_run_once_on_boot() {
-        let e = tt::env().await;
-        let (bot, run1) = running_bot(&e, "rotation-recovery").await;
-        let token = crate::projection::new_token();
+    /// 寫入一筆 `credential_rotation` 的 restart intent（pending、15 分鐘後過期，從 `run_id` 重啟），並把 bot 的 hook_token 換成 `token`。回傳 intent id。
+    async fn insert_rotation_intent(db: &sqlx::SqlitePool, bot_id: &str, bot_name: &str, run_id: &str, token: &str) -> String {
         let intent_id = db::ulid();
         let now = db::now();
         let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
-        let mut tx = e.app.db.begin().await.unwrap();
+        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run_id, "bot_name": bot_name});
+        let mut tx = db.begin().await.unwrap();
         sqlx::query(
             "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
              VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
         )
         .bind(&intent_id)
-        .bind(&bot.id)
+        .bind(bot_id)
         .bind(LOCAL_HOST)
         .bind(payload.to_string())
         .bind(&now)
@@ -685,8 +682,17 @@ mod tests {
         .execute(&mut *tx)
         .await
         .unwrap();
-        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(token).bind(bot_id).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
+        intent_id
+    }
+
+    #[tokio::test]
+    async fn a_credential_rotation_intent_restarts_the_old_live_run_once_on_boot() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "rotation-recovery").await;
+        let token = crate::projection::new_token();
+        let intent_id = insert_rotation_intent(&e.app.db, &bot.id, &bot.name, &run1, &token).await;
 
         let app2 = tt::restart_app(&e).await;
         recover_host(&app2, LOCAL_HOST).await;
@@ -704,27 +710,7 @@ mod tests {
         let e = tt::env().await;
         let (bot, run1) = running_bot(&e, "rotation-user-stop").await;
         let token = crate::projection::new_token();
-        let intent_id = db::ulid();
-        let now = db::now();
-        let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
-        let mut tx = e.app.db.begin().await.unwrap();
-        sqlx::query(
-            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
-             VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
-        )
-        .bind(&intent_id)
-        .bind(&bot.id)
-        .bind(LOCAL_HOST)
-        .bind(payload.to_string())
-        .bind(&now)
-        .bind(&now)
-        .bind(expires)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
+        let intent_id = insert_rotation_intent(&e.app.db, &bot.id, &bot.name, &run1, &token).await;
 
         assert!(lifecycle::stop_bot(&e.app, &bot.id).await.unwrap());
         assert_eq!(run_state(&e.app, &run1).await, "stopped", "the user stop must stay recorded");
@@ -852,27 +838,7 @@ mod tests {
         let e = tt::env().await;
         let (bot, run1) = running_bot(&e, "rotation-discovery-retry").await;
         let token = crate::projection::new_token();
-        let intent_id = db::ulid();
-        let now = db::now();
-        let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
-        let mut tx = e.app.db.begin().await.unwrap();
-        sqlx::query(
-            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
-             VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
-        )
-        .bind(&intent_id)
-        .bind(&bot.id)
-        .bind(LOCAL_HOST)
-        .bind(payload.to_string())
-        .bind(&now)
-        .bind(&now)
-        .bind(expires)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
+        let intent_id = insert_rotation_intent(&e.app.db, &bot.id, &bot.name, &run1, &token).await;
 
         let app2 = tt::restart_app(&e).await;
         tt::make_table_unreadable(&app2, "intents").await;

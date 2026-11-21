@@ -577,15 +577,7 @@ AM_USAGE_DONE=0
     async fn a_superseded_claude_probe_cannot_overwrite_the_new_hosts_identity() {
         let app = crate::testing::env().await.app.clone();
         let host = "claude-identity-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let old_fence = app.hosts.fence(host).await.unwrap();
         app.hosts.replace_remote_for_test(&app, cfg("target-b")).await;
@@ -635,15 +627,7 @@ AM_USAGE_DONE=0
         let host = format!("claude-home-595-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.clone(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() })
             .await;
         conn.connected.store(true, Ordering::SeqCst);
         let socket = crate::hosts::short_dir(None).join(format!("{host}.sock"));

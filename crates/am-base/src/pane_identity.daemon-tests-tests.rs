@@ -83,15 +83,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("child-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         let bot = crate::testing::claude_bot(&app, &env.project_id, "child-home").await;
         sqlx::query("UPDATE bots SET managed_by='child', identity='cc1' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
@@ -129,15 +121,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-db-{name}-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some("/home/remote-child".into());
         let bot = crate::testing::claude_bot(&app, &env.project_id, name).await;
         sqlx::query("UPDATE bots SET managed_by='child', identity='cc1' WHERE id=?")
@@ -182,15 +166,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-repoint-{}", crate::db::ulid().to_ascii_lowercase());
-        let host_cfg = || crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let host_cfg = || crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = app.hosts.insert_remote_for_test(host_cfg()).await;
         *conn.remote_home.lock().await = Some("/home/remote-child".into());
         let bot = crate::testing::claude_bot(&app, &env.project_id, "identity-repoint").await;

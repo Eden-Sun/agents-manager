@@ -5,15 +5,7 @@
     use crate::testing as tt;
 
     fn remote_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.to_string(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        crate::config::HostCfg { name: host.to_string(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     /// 全域 map 以 host 名為 key，測試各用自己的名字避免互相干擾。

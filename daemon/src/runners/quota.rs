@@ -646,7 +646,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("cx-{}", crate::db::ulid());
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None, name: host.clone(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let herdr_a = crate::testing::MockHerdr::start(env.dir.join("herdr-cx-a.sock"));
         app.hosts.insert_remote_with_client_for_test(cfg("target-a"), crate::herdr::HerdrClient::new(env.dir.join("herdr-cx-a.sock"))).await;
         sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
@@ -739,15 +739,7 @@ mod tests {
         let app = env.app.clone();
         let host = "nocodex";
         app.hosts
-            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.into(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "am-test".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_for_test(crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() })
             .await;
         // 偵測快照有這台、但沒有 `codex` 這一格＝沒裝。
         app.tools.lock().await.insert(

@@ -97,15 +97,7 @@
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("spawn-repoint-{}", crate::db::ulid().to_ascii_lowercase());
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(cfg("host-a")).await;
         sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "spawn-repoint").await;

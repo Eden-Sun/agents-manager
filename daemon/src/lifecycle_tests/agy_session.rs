@@ -159,15 +159,7 @@ mod tests {
             .app
             .hosts
             .insert_remote_with_client_for_test(
-                crate::config::HostCfg { daemon_url: None,
-                    shared_session: false,
-                    name: host.clone(),
-                    ssh: "unused".into(),
-                    ssh_port: 22,
-                    ssh_opts: vec![],
-                    herdr_session: "test".into(),
-                    remote_path: String::new(),
-                },
+                crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "test".into(), ..Default::default() },
                 crate::herdr::HerdrClient::new(sock.join("herdr.sock")),
             )
             .await;

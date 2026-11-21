@@ -122,3 +122,6 @@ pub mod test_dirs;
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod scratch_guard;
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod source_mask;

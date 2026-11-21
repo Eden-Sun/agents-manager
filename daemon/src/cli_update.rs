@@ -1800,15 +1800,7 @@ mod tests {
     }
 
     fn test_host_cfg(host: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: format!("target-{host}"),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        crate::config::HostCfg { name: host.into(), ssh: format!("target-{host}"), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     async fn configure_codex_target(
@@ -1945,15 +1937,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "cli-update-repoint";
-        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let host_cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
         let fence = app.hosts.fence(host).await.expect("A is configured");
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
@@ -2522,15 +2506,7 @@ mod tests {
     async fn an_update_whose_host_was_repointed_mid_install_touches_nothing_on_the_new_target() {
         let env = crate::testing::env().await;
         let host = "cx-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let pid = db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/x', 'b', ?, ?)")
@@ -2569,15 +2545,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "cli-update-notice-repoint";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (bot, run) = codex_bot_with_notice(&env, "cx-notice-repoint", &pending).await;
@@ -2862,15 +2830,7 @@ mod tests {
     async fn a_started_update_persists_its_host_target_for_recovery() {
         let env = crate::testing::env().await;
         let host = "start-authority-347";
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: "target-a".into(),
-            ssh_port: 2222,
-            ssh_opts: vec![],
-            herdr_session: "codex-work".into(),
-            remote_path: String::new(),
-        };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: "target-a".into(), ssh_port: 2222, herdr_session: "codex-work".into(), ..Default::default() };
         env.app.hosts.insert_remote_for_test(cfg).await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (bot, _) = codex_bot_with_notice(&env, "cx-start-authority-347", &pending).await;
@@ -3129,15 +3089,7 @@ mod tests {
     async fn recovery_does_not_adopt_a_repointed_host_that_already_has_the_target_version() {
         let env = crate::testing::env().await;
         let host = "recover-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let orphan = orphan_row(&env.app, host, "0.157.0", "installing", Some("0.155.1")).await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
@@ -3459,15 +3411,7 @@ mod tests {
     async fn recovery_keeps_the_free_lock_fence_through_version_and_notice_publish() {
         let env = crate::testing::env().await;
         let host = "recover-fence-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let orphan = orphan_row(&env.app, host, "0.157.0", "installing", Some("0.155.1")).await;
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");

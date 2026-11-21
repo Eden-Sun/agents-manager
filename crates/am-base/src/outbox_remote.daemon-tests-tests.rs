@@ -7,7 +7,7 @@
         use axum::extract::{Path as UrlPath, Query, State};
         let host = "outbox-box";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into());
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -46,7 +46,7 @@
         use axum::extract::{Path as UrlPath, Query, State};
         let host = "outbox-asleep";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into()); // 連過一次，home 有快取
         assert!(!conn.is_connected());
@@ -82,15 +82,7 @@
     async fn a_target_that_went_down_before_io_never_starts_ssh() {
         let host = "outbox-raced-down";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            name: host.into(),
-            ssh: host.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -901,7 +893,7 @@ exit 1
         use axum::extract::{Path as UrlPath, State};
         let host = "outbox-share-keep";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into());
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);

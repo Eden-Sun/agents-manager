@@ -1595,15 +1595,7 @@ mod prompt_tests {
         let f = fixture("claude", "test").await;
         let app = f.env.app.clone();
         let host = format!("prompt-repoint-{}", db::ulid());
-        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let host_cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
         let socket_a = f.env.dir.join("herdr-a.sock");
         let socket_b = f.env.dir.join("herdr-b.sock");
         let herdr_a = tt::MockHerdr::start(socket_a.clone());

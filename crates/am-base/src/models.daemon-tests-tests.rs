@@ -7,15 +7,7 @@
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "unreachable-box".into(),
-            ssh: "127.0.0.1".into(),
-            ssh_port: port,
-            ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = crate::config::HostCfg { name: "unreachable-box".into(), ssh: "127.0.0.1".into(), ssh_port: port, ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()], herdr_session: "agents-manager".into(), ..Default::default() };
         e.app.hosts.apply_config(&e.app, &[cfg]).await;
         "unreachable-box"
     }
@@ -24,15 +16,7 @@
     async fn a_remote_model_identity_does_not_probe_without_home_and_recovers() {
         let e = crate::testing::env().await;
         let host = format!("model-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         e.app.cfg.update(|cfg| {
             cfg.identities.push(crate::config::IdentityCfg {
                 name: "cc1".into(),
@@ -69,15 +53,7 @@
     async fn the_builtin_default_effort_depends_on_the_model_alias() {
         let e = crate::testing::env().await;
         let host = format!("model-eff-880-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some("/home/remote-model".into());
         crate::hosts::set_ssh_fake(&host, |_| Ok(String::new()));
         let of = |alias: &'static str| {
@@ -127,15 +103,7 @@
     async fn a_model_list_from_a_superseded_host_does_not_reach_the_cache() {
         let e = crate::testing::env().await;
         let host = "models-347";
-        let cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let answer = Arc::new(std::sync::Mutex::new(r#"{"effortLevel":"low"}"#.to_string()));
         let a2 = answer.clone();
         crate::hosts::set_ssh_fake(host, move |_| Ok(a2.lock().unwrap().clone()));

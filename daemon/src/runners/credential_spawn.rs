@@ -636,16 +636,7 @@ mod tests {
         let remote_home = e.dir.join("m4p-home");
         std::fs::create_dir_all(&remote_home).unwrap();
 
-        let cfg = crate::config::HostCfg {
-            daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "test".into(), ..Default::default() };
         let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
         let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -696,7 +687,7 @@ mod tests {
     async fn remote_agy_spawn(e: &crate::testing::Env, host: &str, identity: &str) -> (std::path::PathBuf, StatusCode) {
         let remote_home = e.dir.join(format!("{host}-home"));
         std::fs::create_dir_all(&remote_home).unwrap();
-        let cfg = crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "test".into(), ..Default::default() };
         let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
         let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -778,16 +769,7 @@ mod tests {
     async fn pretrust_failure_still_starts_agy_child() {
         let e = crate::testing::env().await;
         let host = "broken-ssh-host";
-        let cfg = crate::config::HostCfg {
-            daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "test".into(), ..Default::default() };
         let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
         let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -929,7 +911,7 @@ mod tests {
     async fn remote_kind_spawn(e: &crate::testing::Env, host: &str, kind: &str, identity: &str, cwd: &str) -> (std::path::PathBuf, StatusCode) {
         let remote_home = e.dir.join(format!("{host}-home"));
         std::fs::create_dir_all(&remote_home).unwrap();
-        let cfg = crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new() };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "test".into(), ..Default::default() };
         let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
         let conn = e.app.hosts.insert_remote_with_client_for_test(cfg, client).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);

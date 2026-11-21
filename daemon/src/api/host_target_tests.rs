@@ -6,15 +6,7 @@ use crate::config::host_target_problem;
 /// without the same explicit repoint confirmation as a new ssh target.
 #[test]
 fn changing_ssh_identity_options_is_a_host_repoint() {
-    let old = HostCfg { daemon_url: None,
-        name: "build-box".into(),
-        ssh: "build-box".into(),
-        ssh_port: 22,
-        ssh_opts: vec!["-o".into(), "User=alice".into(), "-i".into(), "/keys/alice".into()],
-        herdr_session: "agents-manager".into(),
-        remote_path: String::new(),
-        shared_session: false,
-    };
+    let old = HostCfg { name: "build-box".into(), ssh: "build-box".into(), ssh_opts: vec!["-o".into(), "User=alice".into(), "-i".into(), "/keys/alice".into()], herdr_session: "agents-manager".into(), ..Default::default() };
     let mut changed_user = old.clone();
     changed_user.ssh_opts[1] = "User=bob".into();
     assert!(repoints_host(&old, &changed_user), "SSH User changes the pane authority");

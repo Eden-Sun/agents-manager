@@ -912,15 +912,7 @@ mod tests {
     #[test]
     fn hand_edited_hosts_are_validated_like_the_api_validates_them() {
         use crate::config::{ConfigFile, HostCfg};
-        let host = |name: &str, ssh: &str| HostCfg { daemon_url: None,
-            shared_session: false,
-            name: name.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let host = |name: &str, ssh: &str| HostCfg { name: name.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let with = |hosts: Vec<HostCfg>| ConfigFile { hosts, ..Default::default() };
         // serde 的 `default` 只在缺 key 時生效：手寫一個空字串照樣進得來。
         let blank_session = |s: &str| HostCfg { daemon_url: None, herdr_session: s.into(), ..host("mac_builder", "me@10.0.0.2") };

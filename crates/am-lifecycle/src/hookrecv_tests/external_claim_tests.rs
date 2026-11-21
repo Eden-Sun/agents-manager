@@ -1113,15 +1113,7 @@ async fn a_run_started_before_a_repoint_cannot_touch_the_repointed_host() {
     let env = tt::env().await;
     let app = env.app.clone();
     let host = format!("repoint-{}", db::ulid());
-    let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-        shared_session: false,
-        name: host.clone(),
-        ssh: ssh.into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test".into(),
-        remote_path: String::new(),
-    };
+    let host_cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
     app.hosts
         .insert_remote_with_client_for_test(host_cfg("target-a"), crate::herdr::HerdrClient::new(env.dir.join("a.sock")))
         .await;
@@ -1240,15 +1232,7 @@ async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
     let env = tt::env().await;
     let app = env.app.clone();
     let host = format!("samemachine-{}", db::ulid());
-    let host_cfg = |remote_path: &str| crate::config::HostCfg { daemon_url: None,
-        shared_session: false,
-        name: host.clone(),
-        ssh: "mac_builder@100.64.0.2".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test".into(),
-        remote_path: remote_path.into(),
-    };
+    let host_cfg = |remote_path: &str| crate::config::HostCfg { name: host.clone(), ssh: "mac_builder@100.64.0.2".into(), herdr_session: "test".into(), remote_path: remote_path.into(), ..Default::default() };
     app.hosts
         .insert_remote_with_client_for_test(host_cfg(""), crate::herdr::HerdrClient::new(env.dir.join("a.sock")))
         .await;

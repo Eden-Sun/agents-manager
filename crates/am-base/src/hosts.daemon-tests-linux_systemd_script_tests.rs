@@ -49,15 +49,7 @@ exit 0"#,
         );
         // nohup 分支是背景起的：真的睡一下，等待迴圈才不會在假 herdr 起來之前就跑完（最多 20 × 50ms）。
         fake(&bin, "sleep", "/bin/sleep 0.05");
-        let cfg = HostCfg { daemon_url: None,
-            name: "lx1".into(),
-            ssh: "lx1.invalid".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        };
+        let cfg = HostCfg { name: "lx1".into(), ssh: "lx1.invalid".into(), herdr_session: "test".into(), ..Default::default() };
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(HostConn::remote_session_script(&cfg, false))

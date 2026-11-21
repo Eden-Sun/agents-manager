@@ -91,15 +91,7 @@ async fn config_reads_per_state_do_not_grow_with_hosts() {
     for i in 0..10 {
         env.app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-                shared_session: false,
-                name: format!("cfg-host-{i}"),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "am-test".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_for_test(crate::config::HostCfg { name: format!("cfg-host-{i}"), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() })
             .await;
     }
     let with_hosts = reads(env.app.clone()).await;

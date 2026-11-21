@@ -27,15 +27,7 @@
         let host = unique_host();
         let sock = env.dir.join(format!("{host}.sock"));
         let herdr = tt::MockHerdr::start(sock.clone());
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            name: host.clone(),
-            ssh: "sh1.invalid".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-            shared_session: shared,
-        };
+        let cfg = crate::config::HostCfg { name: host.clone(), ssh: "sh1.invalid".into(), herdr_session: "test".into(), shared_session: shared, ..Default::default() };
         let conn = app.hosts.insert_remote_with_client_for_test(cfg.clone(), HerdrClient::new(sock.clone())).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let name = host.clone();

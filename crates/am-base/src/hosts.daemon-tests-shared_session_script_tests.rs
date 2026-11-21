@@ -26,15 +26,7 @@
             r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; [ "$1" = bootstrap ] && cp "$3" "$AM_CAPTURE"; exit 0"#,
         );
         fake(&bin, "sleep", "exit 0");
-        let cfg = HostCfg { daemon_url: None,
-            name: "sh1".into(),
-            ssh: "sh1.invalid".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        };
+        let cfg = HostCfg { name: "sh1".into(), ssh: "sh1.invalid".into(), herdr_session: "test".into(), ..Default::default() };
         let command = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("umask 000; {}", HostConn::remote_session_script(&cfg, false)))
@@ -69,15 +61,7 @@
         fake(&bin, "stat", "id -un");
         fake(&bin, "launchctl", r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; exit 0"#);
         fake(&bin, "sleep", "exit 0");
-        let cfg = HostCfg { daemon_url: None,
-            name: "sh1".into(),
-            ssh: "sh1.invalid".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-            shared_session: shared,
-        };
+        let cfg = HostCfg { name: "sh1".into(), ssh: "sh1.invalid".into(), herdr_session: "test".into(), shared_session: shared, ..Default::default() };
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(HostConn::remote_session_script(&cfg, shared))

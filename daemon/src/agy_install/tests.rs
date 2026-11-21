@@ -279,15 +279,7 @@ async fn remote(e: &tt::Env, detect_out: &'static str) -> String {
     let conn = e
         .app
         .hosts
-        .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        })
+        .insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() })
         .await;
     conn.connected.store(true, Ordering::SeqCst);
     crate::hosts::set_ssh_fake(&host, move |_| Ok(detect_out.to_string()));
@@ -305,15 +297,7 @@ async fn remote_with_herdr(e: &tt::Env, detect_out: &'static str) -> (String, tt
         .app
         .hosts
         .insert_remote_with_client_for_test(
-            crate::config::HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.clone(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-            },
+            crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() },
             crate::herdr::HerdrClient::new(sock),
         )
         .await;

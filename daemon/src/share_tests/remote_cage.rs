@@ -65,15 +65,7 @@ async fn fake_host(e: &tt::Env, tag: &str, version: &str, managed: bool) -> Fake
             .map_err(|e| anyhow::anyhow!("exec /bin/sh: {e}"))?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     });
-    let cfg = HostCfg { daemon_url: None,
-        name: host.clone(),
-        ssh: "fake-ssh".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test-session".into(),
-        shared_session: false,
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.clone(), ssh: "fake-ssh".into(), herdr_session: "test-session".into(), ..Default::default() };
     let conn = e.app.hosts.insert_remote_for_test(cfg).await;
     conn.connected.store(true, Ordering::SeqCst);
     FakeHost { host, home, version, managed, scripts }
@@ -268,15 +260,7 @@ async fn preflight_does_not_read_claude_version_from_a_banner() {
         }
         Ok("AM_MS=NONE\n".to_string())
     });
-    let cfg = HostCfg { daemon_url: None,
-        name: host.clone(),
-        ssh: "fake-ssh".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test-session".into(),
-        shared_session: false,
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.clone(), ssh: "fake-ssh".into(), herdr_session: "test-session".into(), ..Default::default() };
     let conn = e.app.hosts.insert_remote_for_test(cfg).await;
     conn.connected.store(true, Ordering::SeqCst);
     let site = crate::share::site::FencedConn::new(e.app.hosts.fence(&host).await.unwrap());
@@ -381,15 +365,7 @@ async fn creating_a_remote_share_bot_over_http_refuses_unknown_and_unreachable_h
     e.app
         .cfg
         .update(|c| {
-            c.hosts.push(HostCfg { daemon_url: None,
-                name: f.host.clone(),
-                ssh: "fake-ssh".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "s".into(),
-                shared_session: false,
-                remote_path: String::new(),
-            });
+            c.hosts.push(HostCfg { name: f.host.clone(), ssh: "fake-ssh".into(), herdr_session: "s".into(), ..Default::default() });
             c.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
                 id: Some(pid.clone()),
                 path: "/srv/app".into(),
@@ -480,15 +456,7 @@ async fn odd_host(e: &tt::Env, tag: &str, version: &'static str, managed: Result
         }
         Ok(String::new())
     });
-    let cfg = HostCfg { daemon_url: None,
-        name: host.clone(),
-        ssh: "fake-ssh".into(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test-session".into(),
-        shared_session: false,
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.clone(), ssh: "fake-ssh".into(), herdr_session: "test-session".into(), ..Default::default() };
     let conn = e.app.hosts.insert_remote_for_test(cfg).await;
     conn.connected.store(true, Ordering::SeqCst);
     host

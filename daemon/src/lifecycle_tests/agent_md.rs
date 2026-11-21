@@ -10,7 +10,7 @@ mod tests {
     async fn a_remote_projects_file_is_read_on_its_host() {
         let host = "agent-md-box";
         let env = crate::testing::env().await;
-        let cfg = crate::config::HostCfg { daemon_url: None, name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into());
         crate::hosts::set_ssh_fake(host, |script| {
@@ -213,15 +213,7 @@ mod tests {
                 .unwrap();
             let host = "profile-remote-failure";
             project.host = host.into();
-            let cfg = crate::config::HostCfg { daemon_url: None,
-                name: host.into(),
-                ssh: host.into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-                shared_session: false,
-            };
+            let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
             env.app.hosts.insert_remote_for_test(cfg).await;
             for failure in [
                 None,
@@ -266,15 +258,7 @@ mod tests {
                 .unwrap();
             let host = "profile-remote-success";
             project.host = host.into();
-            let cfg = crate::config::HostCfg { daemon_url: None,
-                name: host.into(),
-                ssh: host.into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "agents-manager".into(),
-                remote_path: String::new(),
-                shared_session: false,
-            };
+            let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
             env.app.hosts.insert_remote_for_test(cfg).await;
             for previous in [None, Some(INITIAL)] {
                 let scripts = Arc::new(Mutex::new(Vec::new()));

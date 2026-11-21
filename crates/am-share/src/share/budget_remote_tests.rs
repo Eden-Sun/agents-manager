@@ -25,15 +25,7 @@ use super::test_dirs;
 #[cfg(not(feature = "daemon-test-harness"))]
 fn site(scratch: &Path, host: &str) -> RemoteSite {
     test_support::local_sh_fake(host, scratch);
-    let cfg = HostCfg { daemon_url: None,
-        name: host.to_string(),
-        ssh: "fake-ssh".to_string(),
-        ssh_port: 22,
-        ssh_opts: vec![],
-        herdr_session: "test-session".to_string(),
-        shared_session: false,
-        remote_path: String::new(),
-    };
+    let cfg = HostCfg { name: host.to_string(), ssh: "fake-ssh".to_string(), herdr_session: "test-session".to_string(), ..Default::default() };
     let conn = HostConn::remote(cfg, None);
     conn.connected.store(true, Ordering::SeqCst);
     let home = scratch.to_string_lossy().to_string();
@@ -260,15 +252,7 @@ mod with_app {
 
     /// 把測試 app 的專案搬到一台假遠端主機（`local_sh_fake`：本機 sh 扮演它，家目錄＝scratch）。
     async fn remote_host(e: &tt::Env, host: &str, scratch: &Path) -> Arc<HostConn> {
-        let cfg = HostCfg { daemon_url: None,
-            name: host.into(),
-            ssh: "fake-ssh".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        };
+        let cfg = HostCfg { name: host.into(), ssh: "fake-ssh".into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = e.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some(scratch.to_string_lossy().into_owned());
         conn.connected.store(true, Ordering::SeqCst);

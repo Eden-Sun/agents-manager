@@ -249,15 +249,7 @@ mod remote_grok_diagnostic_tests {
         let conn = env
             .app
             .hosts
-            .insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.clone(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "am-test".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() })
             .await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let diag = Handle::new();
@@ -503,15 +495,7 @@ mod pane_env_tests {
     use crate::lifecycle::setup::*;
     use crate::testing as tt;
     async fn remote_home(app: &Arc<App>, host: &str, home: &str) {
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some(home.into());
     }
     #[tokio::test]
@@ -541,11 +525,7 @@ mod pane_env_tests {
         let injected: i64 = sqlx::query_scalar("SELECT daemon_url_injected FROM runs WHERE id=?").bind(&run).fetch_one(env.app.db()).await.unwrap();
         assert_eq!(injected, 1, "the inferred remote address is recorded for the active run");
 
-        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg {
-            daemon_url: Some("http://100.64.0.1:7788".into()), shared_session: false,
-            name: "box2".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![],
-            herdr_session: "agents-manager".into(), remote_path: String::new(),
-        }).await;
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: Some("http://100.64.0.1:7788".into()), name: "box2".into(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some("/home/remote".into());
         *conn.remote_ssh_source.lock().await = Some("2001:db8::1".parse().unwrap());
         let remote = pane_env(&env.app, &bot, "box2", "run", "name", None).await.unwrap();
@@ -659,15 +639,7 @@ mod pane_env_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener); // 沒人在聽：連線一定失敗，不會碰到真的主機。
-        let host_cfg = crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "box".into(),
-            ssh: "127.0.0.1".into(),
-            ssh_port: port,
-            ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
-            herdr_session: "agents-manager".into(),
-            remote_path: "/opt/tools/bin:$HOME/.local/bin".into(),
-        };
+        let host_cfg = crate::config::HostCfg { name: "box".into(), ssh: "127.0.0.1".into(), ssh_port: port, ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()], herdr_session: "agents-manager".into(), remote_path: "/opt/tools/bin:$HOME/.local/bin".into(), ..Default::default() };
         env.app.hosts.apply_config(&env.app, &[host_cfg]).await;
         *env.app.hosts.get("box").await.unwrap().remote_home.lock().await = Some("/home/u".into());
 
@@ -685,15 +657,7 @@ mod pane_env_tests {
         let env = tt::env().await;
         let app = &env.app;
         let host = format!("pane-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         let bot = tt::claude_bot(app, &env.project_id, "home-failure").await;
         app.cfg.update(|cfg| {
             cfg.identities.push(crate::config::IdentityCfg {
@@ -847,15 +811,7 @@ mod remote_install_permission_tests {
         let conn = env
             .app
             .hosts
-            .insert_remote_for_test(HostCfg { daemon_url: None,
-                shared_session: false,
-                name: host.clone(),
-                ssh: "unused".into(),
-                ssh_port: 22,
-                ssh_opts: vec![],
-                herdr_session: "am-test".into(),
-                remote_path: String::new(),
-            })
+            .insert_remote_for_test(HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() })
             .await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         crate::hosts::set_ssh_fake(&host, |script| {
@@ -903,15 +859,7 @@ mod remote_install_permission_tests {
         });
         std::fs::write(&hooks_path, existing.to_string()).unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "am-test".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let diag = crate::lifecycle_tests::setup::remote_grok_diagnostic_tests::Handle::new();
         let sink = diag.clone();
@@ -957,15 +905,7 @@ mod remote_install_permission_tests {
         let user_file = hooks_path.join("user-config.json");
         std::fs::write(&user_file, "leave this directory alone").unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "am-test".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let diag = crate::lifecycle_tests::setup::remote_grok_diagnostic_tests::Handle::new();
         let sink = diag.clone();
@@ -1048,15 +988,7 @@ mod remote_grok_merge_tests {
             }
         }).to_string()).unwrap();
 
-        let conn = env.app.hosts.insert_remote_for_test(HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "am-test".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let remote_home = home.to_string_lossy().into_owned();
         let fake_home = remote_home.clone();
@@ -1242,7 +1174,7 @@ mod codex_stop_args_tests {
     }
     async fn fake_remote(env: &tt::Env, home: &std::path::Path) -> (std::sync::Arc<HostConn>, String) {
         let host = format!("codex-rem-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, shared_session: false, name: host.clone(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() }).await;
+        let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() }).await;
         *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
         let fake_home = home.to_path_buf();
         crate::hosts::set_ssh_fake(&host, move |script| {

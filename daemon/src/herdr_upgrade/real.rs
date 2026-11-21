@@ -480,15 +480,7 @@ mod tests {
     async fn remote_operations_all_use_the_selected_hosts_ssh_and_remote_paths() {
         let env = crate::testing::env().await;
         let name = format!("upgrade-{}", crate::db::ulid());
-        let cfg = crate::config::HostCfg { daemon_url: None,
-            name: name.clone(),
-            ssh: "never-connect.invalid".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "remote-owner".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        };
+        let cfg = crate::config::HostCfg { name: name.clone(), ssh: "never-connect.invalid".into(), herdr_session: "remote-owner".into(), ..Default::default() };
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured = calls.clone();
         crate::hosts::set_ssh_fake(&name, move |script| {

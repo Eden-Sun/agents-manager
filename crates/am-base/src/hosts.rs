@@ -1911,7 +1911,7 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
 mod ssh_daemon_address_tests {
     use super::*;
     fn cfg(name: &str, override_url: Option<&str>) -> HostCfg {
-        HostCfg { name: name.into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "test".into(), remote_path: String::new(), shared_session: false, daemon_url: override_url.map(str::to_string) }
+        HostCfg { name: name.into(), ssh: "unused".into(), herdr_session: "test".into(), daemon_url: override_url.map(str::to_string), ..Default::default() }
     }
     #[test]
     fn changed_override_replaces_the_cached_connection() {

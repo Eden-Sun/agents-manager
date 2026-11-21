@@ -332,6 +332,23 @@ pub struct HostCfg {
     pub shared_session: bool,
 }
 
+/// 欄位預設值與 serde 的 `default` 一致（`ssh_port`＝22、`herdr_session`＝預設 session）。`name`／`ssh` 沒有合理預設，
+/// 這裡給空字串；正式的設定檔仍必須填，這個 `Default` 只給測試與 `..Default::default()` 用，不改解析行為。
+impl Default for HostCfg {
+    fn default() -> Self {
+        Self {
+            daemon_url: None,
+            name: String::new(),
+            ssh: String::new(),
+            ssh_port: default_ssh_port(),
+            ssh_opts: Vec::new(),
+            herdr_session: default_session(),
+            remote_path: String::new(),
+            shared_session: false,
+        }
+    }
+}
+
 fn default_project_mode() -> String { "parent_child".into() }
 
 /// 副管理者設定：`bot_id` 是同專案的成員；`after_sec` 是管理者忙多久（也是請求排隊多久）才改派，下限 `DEPUTY_MIN_AFTER_SEC`。
@@ -621,15 +638,7 @@ mod host_baseline_cfg_tests {
     use super::*;
 
     fn host(name: &str) -> HostCfg {
-        HostCfg { daemon_url: None,
-            name: name.into(),
-            ssh: "box".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-            shared_session: false,
-        }
+        HostCfg { name: name.into(), ssh: "box".into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     /// 沒寫這段＝每台 off，存回去也不會多出 `[host_baseline]`；寫了照讀、照存。
@@ -2889,15 +2898,7 @@ mod v40_tests {
     use super::{attach_command, normalize_effort, HostCfg};
 
     fn host(port: u16) -> HostCfg {
-        HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "mac_builder".into(),
-            ssh: "mac_builder@100.64.0.2".into(),
-            ssh_port: port,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        HostCfg { name: "mac_builder".into(), ssh: "mac_builder@100.64.0.2".into(), ssh_port: port, herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     #[test]

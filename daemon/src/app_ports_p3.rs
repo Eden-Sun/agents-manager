@@ -451,15 +451,7 @@ mod port_tests {
     use am_ports::{HerdrPort, HostRuntime};
 
     fn remote_cfg(name: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: name.into(),
-            ssh: format!("{name}.invalid"),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        crate::config::HostCfg { name: name.into(), ssh: format!("{name}.invalid"), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     #[tokio::test]

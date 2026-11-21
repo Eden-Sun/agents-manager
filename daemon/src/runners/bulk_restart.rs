@@ -1186,15 +1186,7 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = "restart-repoint";
-        let host_cfg = |ssh: &str| crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.into(),
-            ssh: ssh.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "test".into(),
-            remote_path: String::new(),
-        };
+        let host_cfg = |ssh: &str| crate::config::HostCfg { name: host.into(), ssh: ssh.into(), herdr_session: "test".into(), ..Default::default() };
         app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
         let original_fence = app.hosts.fence(host).await.expect("A is configured");
         assert!(app.hosts.is_current(&original_fence).await);

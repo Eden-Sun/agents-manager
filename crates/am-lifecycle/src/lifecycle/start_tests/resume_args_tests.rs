@@ -2239,15 +2239,7 @@ esac
         let e = env().await;
         let pm = claude_bot(&e.app, &e.project_id, "pm").await;
         let host = format!("resume-home-616-{}", db::ulid().to_ascii_lowercase());
-        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         let transcript = e.dir.join("projects/-k/remote-home-resume.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, "{}\n").unwrap();
@@ -2283,15 +2275,7 @@ esac
         let port = listener.local_addr().unwrap().port();
         drop(listener); // 沒有人在聽這個 port 了：接下來連過去是 connection refused，快速失敗。
 
-        let host_cfg = crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: "unreachable-box".into(),
-            ssh: "127.0.0.1".into(),
-            ssh_port: port,
-            ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        };
+        let host_cfg = crate::config::HostCfg { name: "unreachable-box".into(), ssh: "127.0.0.1".into(), ssh_port: port, ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()], herdr_session: "agents-manager".into(), ..Default::default() };
         e.app.hosts.apply_config(&e.app, &[host_cfg]).await;
 
         let transcript = e.dir.join("remote-pm-2.jsonl");

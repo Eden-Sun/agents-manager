@@ -597,7 +597,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         );
     }
     fn host_cfg(ssh: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None, name: "build1".into(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false }
+        crate::config::HostCfg { name: "build1".into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     fn ht_marked(marker: &str) -> HostTools {
@@ -800,15 +800,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("identity-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let identity_cfg = crate::config::IdentityCfg {
             name: "cc1".into(),
@@ -854,15 +846,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let host = format!("detect-home-616-{}", crate::db::ulid().to_ascii_lowercase());
-        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: host.clone(),
-            ssh: "unused".into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }).await;
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         app.cfg.update(|cfg| {
             cfg.identities.push(crate::config::IdentityCfg {
                 name: "cx1".into(),

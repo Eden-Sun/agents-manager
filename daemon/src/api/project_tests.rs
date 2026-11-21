@@ -81,15 +81,7 @@ async fn a_host_update_that_omits_optional_fields_keeps_the_stored_values() {
     let app = e.app.clone();
     app.cfg
         .update(|f| {
-            f.hosts.push(HostCfg { daemon_url: None,
-                name: "keep1".into(),
-                ssh: "keep1.invalid".into(),
-                ssh_port: 2222,
-                ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()],
-                herdr_session: "agents-manager".into(),
-                remote_path: "/opt/homebrew/bin:$HOME/.local/bin".into(),
-                shared_session: false,
-            });
+            f.hosts.push(HostCfg { name: "keep1".into(), ssh: "keep1.invalid".into(), ssh_port: 2222, ssh_opts: vec!["-o".into(), "ConnectTimeout=5".into()], herdr_session: "agents-manager".into(), remote_path: "/opt/homebrew/bin:$HOME/.local/bin".into(), ..Default::default() });
             Ok(())
         })
         .await

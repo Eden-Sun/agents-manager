@@ -80,15 +80,7 @@
     }
 
     fn remote_host_cfg(name: &str, target: &str) -> crate::config::HostCfg {
-        crate::config::HostCfg { daemon_url: None,
-            shared_session: false,
-            name: name.into(),
-            ssh: target.into(),
-            ssh_port: 22,
-            ssh_opts: vec![],
-            herdr_session: "agents-manager".into(),
-            remote_path: String::new(),
-        }
+        crate::config::HostCfg { name: name.into(), ssh: target.into(), herdr_session: "agents-manager".into(), ..Default::default() }
     }
 
     #[tokio::test]
