@@ -382,3 +382,134 @@ pub enum LogoutError {
     Superseded,
     Failed(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn agy_1_5_14_fixture(credits: Option<serde_json::Value>) -> String {
+        let mut data = json!({
+            "groups": [
+                {
+                    "name": "Gemini Models",
+                    "buckets": [
+                        {
+                            "id": "gemini-weekly",
+                            "name": "Weekly Limit Remaining",
+                            "window": "weekly",
+                            "remaining_fraction": 0.8,
+                            "reset_time": "2026-11-28T09:04:47Z"
+                        },
+                        {
+                            "id": "gemini-5h",
+                            "name": "Five Hour Limit Remaining",
+                            "window": "5h",
+                            "remaining_fraction": 0.6,
+                            "reset_time": "2026-11-21T19:04:47Z"
+                        }
+                    ]
+                },
+                {
+                    "name": "Claude and GPT models",
+                    "buckets": [
+                        {
+                            "id": "3p-weekly",
+                            "name": "Weekly Limit Remaining",
+                            "window": "weekly",
+                            "remaining_fraction": 1.0,
+                            "reset_time": "2026-11-28T16:30:57Z"
+                        },
+                        {
+                            "id": "3p-5h",
+                            "name": "Five Hour Limit Remaining",
+                            "window": "5h",
+                            "remaining_fraction": 1.0,
+                            "reset_time": "2026-11-21T21:30:57Z"
+                        }
+                    ]
+                }
+            ]
+        });
+        let mut root = json!({
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": null
+            }
+        });
+        if let Some(c) = credits {
+            data.as_object_mut().unwrap().insert("credits".into(), c.clone());
+            root.as_object_mut().unwrap().insert("credits".into(), c);
+        }
+        root.get_mut("command").unwrap().as_object_mut().unwrap().insert("data".into(), data);
+        root.to_string()
+    }
+
+    #[test]
+    fn agy_1_5_14_zero_credits_with_positive_remaining_fraction() {
+        let raw = agy_1_5_14_fixture(Some(json!(0)));
+        let parsed = parse_usage(&raw).expect("parsed usage");
+        assert_eq!(parsed.len(), 1);
+        let (key, quota) = &parsed[0];
+        assert_eq!(*key, "agy");
+        assert!(quota.limit_hit.is_none());
+        let five = quota.five_hour.as_ref().expect("five hour window");
+        assert!((five.used_pct - 40.0).abs() < 1e-6);
+        assert_eq!(five.resets_at.as_deref(), Some("2026-11-21T19:04:47.000Z"));
+        let seven = quota.seven_day.as_ref().expect("seven day window");
+        assert!((seven.used_pct - 20.0).abs() < 1e-6);
+        assert_eq!(seven.resets_at.as_deref(), Some("2026-11-28T09:04:47.000Z"));
+
+        let res = read_usage("local", Some(0), &raw).expect("read usage ok");
+        assert_eq!(res.len(), 1);
+        assert!(res[0].1.limit_hit.is_none());
+        assert!((res[0].1.five_hour.as_ref().unwrap().used_pct - 40.0).abs() < 1e-6);
+        assert!((res[0].1.seven_day.as_ref().unwrap().used_pct - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn agy_1_5_14_positive_credits() {
+        let raw = agy_1_5_14_fixture(Some(json!(100)));
+        let parsed = parse_usage(&raw).expect("parsed usage");
+        assert_eq!(parsed.len(), 1);
+        let (key, quota) = &parsed[0];
+        assert_eq!(*key, "agy");
+        assert!(quota.limit_hit.is_none());
+        let five = quota.five_hour.as_ref().expect("five hour window");
+        assert!((five.used_pct - 40.0).abs() < 1e-6);
+        assert_eq!(five.resets_at.as_deref(), Some("2026-11-21T19:04:47.000Z"));
+        let seven = quota.seven_day.as_ref().expect("seven day window");
+        assert!((seven.used_pct - 20.0).abs() < 1e-6);
+        assert_eq!(seven.resets_at.as_deref(), Some("2026-11-28T09:04:47.000Z"));
+
+        let res = read_usage("local", Some(0), &raw).expect("read usage ok");
+        assert_eq!(res.len(), 1);
+        assert!(res[0].1.limit_hit.is_none());
+        assert!((res[0].1.five_hour.as_ref().unwrap().used_pct - 40.0).abs() < 1e-6);
+        assert!((res[0].1.seven_day.as_ref().unwrap().used_pct - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn agy_1_5_14_no_credits_field() {
+        let raw = agy_1_5_14_fixture(None);
+        let parsed = parse_usage(&raw).expect("parsed usage");
+        assert_eq!(parsed.len(), 1);
+        let (key, quota) = &parsed[0];
+        assert_eq!(*key, "agy");
+        assert!(quota.limit_hit.is_none());
+        let five = quota.five_hour.as_ref().expect("five hour window");
+        assert!((five.used_pct - 40.0).abs() < 1e-6);
+        assert_eq!(five.resets_at.as_deref(), Some("2026-11-21T19:04:47.000Z"));
+        let seven = quota.seven_day.as_ref().expect("seven day window");
+        assert!((seven.used_pct - 20.0).abs() < 1e-6);
+        assert_eq!(seven.resets_at.as_deref(), Some("2026-11-28T09:04:47.000Z"));
+
+        let res = read_usage("local", Some(0), &raw).expect("read usage ok");
+        assert_eq!(res.len(), 1);
+        assert!(res[0].1.limit_hit.is_none());
+        assert!((res[0].1.five_hour.as_ref().unwrap().used_pct - 40.0).abs() < 1e-6);
+        assert!((res[0].1.seven_day.as_ref().unwrap().used_pct - 20.0).abs() < 1e-6);
+    }
+}
