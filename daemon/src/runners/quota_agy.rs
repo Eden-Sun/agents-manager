@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(15 * 60);
+/// 偵測被搶先時的短重試（最多約一分鐘），不套 `RETRY_AFTER_FAILURE`。
+const SUPERSEDED_RETRY_AFTER: Duration = Duration::from_secs(15);
+const SUPERSEDED_RETRIES: usize = 4;
 
 /// `env`＝身份的 HOME 等（已展開）；預設帳號傳空的。
 async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, exe: &str, env: &BTreeMap<String, String>) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
@@ -212,10 +215,23 @@ pub(crate) async fn refresh_agy_fenced(app: &Arc<App>, host: &str) -> (Option<cr
     (Some(fence), result)
 }
 
-/// 工具快取沒有這台時跑的偵測，回 `Superseded`＝另一個並行的偵測先發布了（它的 ticket 比較新，這一輪的結果被丟掉）。
-/// 這時快取若已經有這台，就沿用它繼續探測，不把「別人搶先」當成這一輪失敗（2026-11-21 ag0 一直 stale 的根因）。
-pub(crate) fn may_reuse_tools_after(outcome: &Result<crate::tools::HostTools, anyhow::Error>, cache_has_host: bool) -> bool {
-    matches!(outcome, Err(e) if e.downcast_ref::<crate::tools::Superseded>().is_some()) && cache_has_host
+/// 偵測被搶先（主機重連、或另一個較新的偵測先發布）時的下一步。
+pub(crate) enum SupersededNext {
+    Reuse,
+    Retry,
+    GiveUp,
+}
+
+/// `Superseded` 不是探測失敗（2026-11-21 ag0 一直 stale 的根因）：快取已有這台就沿用；還沒有就短重試，用完次數才放棄。
+/// 放棄也不記 900 秒退避，交給下一輪輪詢。
+pub(crate) fn superseded_next(retries_used: usize, cache_has_host: bool) -> SupersededNext {
+    if cache_has_host {
+        SupersededNext::Reuse
+    } else if retries_used < SUPERSEDED_RETRIES {
+        SupersededNext::Retry
+    } else {
+        SupersededNext::GiveUp
+    }
 }
 
 async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<bool, RefreshFail> {
@@ -223,12 +239,26 @@ async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::Ho
     tracing::debug!(host, cached, "agy quota refresh started");
     if !cached {
         tracing::info!(host, "agy quota refresh: no cached tools for this host; running detection");
-        let outcome = crate::tools::detect(app, host).await;
-        let cache_has_host = app.tools.lock().await.contains_key(host);
-        if may_reuse_tools_after(&outcome, cache_has_host) {
-            tracing::info!(host, "agy quota refresh: a concurrent detection published first; reusing its cached tools");
-        } else {
-            outcome?;
+        let mut retries = 0;
+        loop {
+            let outcome = crate::tools::detect(app, host).await;
+            let cache_has_host = app.tools.lock().await.contains_key(host);
+            match outcome {
+                Ok(_) => break,
+                Err(e) if e.is::<crate::tools::Superseded>() => match superseded_next(retries, cache_has_host) {
+                    SupersededNext::Reuse => {
+                        tracing::info!(host, "agy quota refresh: a concurrent detection published first; reusing its cached tools");
+                        break;
+                    }
+                    SupersededNext::Retry => {
+                        retries += 1;
+                        tracing::info!(host, attempt = retries, retry_in_s = SUPERSEDED_RETRY_AFTER.as_secs(), "agy quota refresh: detection superseded before its tools were published; retrying shortly");
+                        tokio::time::sleep(SUPERSEDED_RETRY_AFTER).await;
+                    }
+                    SupersededNext::GiveUp => return Err(RefreshFail { error: e, superseded: true }),
+                },
+                Err(e) => return Err(e.into()),
+            }
         }
     }
     if !app.hosts.is_current(fence).await {
@@ -483,6 +513,7 @@ pub fn spawn_agy_poller(app: Arc<App>) {
                 match refresh_agy_if_due(&app, &host).await {
                     Ok(Some(true) | None) => {}
                     Ok(Some(false)) => tracing::debug!(host = %host, "agy not installed; agy quota stays null"),
+                    Err(e) if e.is::<crate::tools::Superseded>() => tracing::info!(host = %host, error = %e, "agy quota refresh superseded by a host reconnect or a newer detection; retrying on the next poll"),
                     Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "agy quota refresh failed; keeping the last reading"),
                 }
                 refresh_agy_identities(&app, &host).await;
@@ -560,14 +591,48 @@ pub fn spawn_agy_identity_poller(app: Arc<App>) {
 mod agy_detect_race_tests {
     use super::*;
 
-    /// 並行的偵測先發布（快取已有這台）：偵測回 `Superseded` 時沿用快取，不算失敗。
+    /// 重現「並行偵測稍後才發布」：前兩次重試時快取仍沒有這台，第三次檢查時並行偵測已發布 → 沿用，不失敗，總等待遠低於 15 分鐘。
     #[test]
-    fn a_superseded_detection_is_reused_when_a_concurrent_one_already_published() {
-        let superseded: Result<crate::tools::HostTools, anyhow::Error> = Err(anyhow::Error::new(crate::tools::Superseded { host: "local".into() }));
-        assert!(may_reuse_tools_after(&superseded, true), "快取有這台：沿用");
-        assert!(!may_reuse_tools_after(&superseded, false), "快取仍沒有這台：照舊失敗");
-        let other: Result<crate::tools::HostTools, anyhow::Error> = Err(anyhow!("ssh timeout"));
-        assert!(!may_reuse_tools_after(&other, true), "其他錯誤不沿用");
+    fn a_superseded_detection_retries_briefly_then_reuses_the_concurrent_publish() {
+        let mut retries = 0;
+        let mut waited = Duration::ZERO;
+        let reused = loop {
+            let cache_has_host = retries >= 2;
+            match superseded_next(retries, cache_has_host) {
+                SupersededNext::Reuse => break true,
+                SupersededNext::Retry => {
+                    retries += 1;
+                    waited += SUPERSEDED_RETRY_AFTER;
+                }
+                SupersededNext::GiveUp => break false,
+            }
+        };
+        assert!(reused, "並行偵測發布後應沿用快取");
+        assert_eq!(retries, 2);
+        assert!(waited <= Duration::from_secs(60), "短時間內完成，不等 15 分鐘");
+    }
+
+    /// 偵測一直沒有發布：重試用完後放棄，且放棄是 superseded（不記退避）。
+    #[test]
+    fn a_superseded_detection_that_never_publishes_gives_up_without_backoff() {
+        let mut retries = 0;
+        let mut step = superseded_next(retries, false);
+        while let SupersededNext::Retry = step {
+            retries += 1;
+            step = superseded_next(retries, false);
+        }
+        assert!(matches!(step, SupersededNext::GiveUp));
+        assert_eq!(retries, SUPERSEDED_RETRIES);
+        let fail = RefreshFail { error: anyhow!("superseded"), superseded: true };
+        assert!(!starts_backoff(&fail), "換代不是失敗，不冷卻");
+    }
+
+    /// 真正的失敗維持 900 秒退避。
+    #[test]
+    fn a_real_failure_still_backs_off_for_fifteen_minutes() {
+        let fail: RefreshFail = anyhow!("ssh timeout").into();
+        assert!(starts_backoff(&fail));
+        assert_eq!(RETRY_AFTER_FAILURE, Duration::from_secs(900));
     }
 }
 
