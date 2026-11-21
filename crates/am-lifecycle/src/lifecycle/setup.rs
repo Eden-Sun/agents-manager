@@ -1387,7 +1387,7 @@ start 逾時或名稱查不到時，child 可能已在執行；先用 `herdr age
 PATH 上的 herdr 會補 `-p`、`--no-daemon`、`-c project_doc_max_bytes=0`：**禁止**自己補，也**禁止**用真 herdr 的絕對路徑繞過它。\n\
 - **環境變數與身份**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止**自己 export／`env -u`／`unset` 這些變數。\
 要讓子 agent 用別的身份：`herdr agent start <名稱> --kind <kind> --pane <新 pane> --identity <身份> -- …`（`--identity` 寫在 `--` 之前）；\
-這台可用的身份看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
+這台可用的身份看 `$AM_IDENTITIES`（格式 `<kind>/<名稱>[:KEY=路徑]`，本機與遠端一樣）；預設帳號（agy 的 `ag0`，不在清單裡）直接用 `--identity ag0`，或不帶 `--identity` 也是預設帳號。**禁止**用 `herdr pane run <pane> \"claude …\"` 之類自己起 CLI 來換帳號。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
 - **派工 prompt 必須寫明**（寫進 prompt 時 `$AM_AGENT_NAME` 代入實際的值，不照抄變數名）：「你是 `$AM_AGENT_NAME` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\

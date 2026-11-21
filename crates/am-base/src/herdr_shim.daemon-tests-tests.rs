@@ -1112,6 +1112,54 @@ esac"#, calls.display()));
         assert!(err.contains("nope") && err.contains("cc0") && err.contains("cc1"), "要列出可用的身份：{err}");
     }
 
+    /// 內建預設帳號 `ag0`（agy，不在 AM_IDENTITIES 裡，2026-11-21 m4p 被拒）：不查清單、HOME 改回真家目錄，不帶母 pane 的 ag1 HOME。
+    #[test]
+    fn the_builtin_default_agy_identity_uses_the_real_home_not_the_parents() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("HOME", "/h/.agy-ag1"),
+            ("AM_IDENTITIES", "agy/ag1:HOME=/h/.agy-ag1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9", "--identity", "ag0"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(!out.is_empty(), "有呼叫 herdr");
+        let (_, text) = s.sourced_env();
+        assert!(text.contains("export HOME='"), "{text}");
+        assert!(!text.contains("/h/.agy-ag1"), "不帶母 pane 的 ag1 HOME：{text}");
+    }
+
+    /// `--identity ag1`（清單裡的一般身份）照舊：HOME＝ag1 的目錄。
+    #[test]
+    fn a_listed_agy_identity_still_exports_its_own_home() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [
+            ("AM_AGENT_NAME", "p-1"),
+            ("AM_IDENTITIES", "agy/ag1:HOME=/h/.agy-ag1"),
+            ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (_, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9", "--identity", "ag1"]);
+        assert_eq!(rc, 0, "{err}");
+        let (_, text) = s.sourced_env();
+        assert!(text.contains("export HOME='/h/.agy-ag1'"), "{text}");
+    }
+
+    /// 不存在的身份：exit 2、不呼叫 herdr，錯誤訊息的可用清單含預設帳號 ag0。
+    #[test]
+    fn an_unknown_agy_identity_lists_the_default_name_too() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_IDENTITIES", "agy/ag1:HOME=/h/.agy-ag1")];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9", "--identity", "nope"]);
+        assert_eq!(rc, 2, "{err}");
+        assert!(out.is_empty(), "沒有呼叫 herdr：{out:?}");
+        assert!(err.contains("nope") && err.contains("ag0") && err.contains("ag1"), "{err}");
+    }
+
     /// 遠端 bot（沒有 `AM_PORT`，不走 spawn fence）同樣能用 `--identity`，`--identity=` 寫在名字前面也一樣。
     #[test]
     fn a_remote_bot_without_a_daemon_port_gets_the_same_identity_switch() {

@@ -343,6 +343,21 @@ am_child_name() {
 # `--identity <名>`（issue #1775）：`$AM_IDENTITIES` 是 daemon 注入的這台身份清單，單行、`;` 分隔，格式
 # `<kind>/<名稱>[:KEY=路徑,KEY=路徑…]`（見 lifecycle/pane_identities.rs）。am_identity_find 印出那一筆的 KEY=路徑
 # （沒有就空），找不到回 1；am_identity_names 列出同 kind 的名字給錯誤訊息用。
+# 內建預設帳號（agy 的 ag0，不在 AM_IDENTITIES 裡；2026-11-21 m4p 實測被拒）：`am_is_builtin_default` 認得它，
+# 呼叫端照「真家目錄」處理（am_real_home），不查 AM_IDENTITIES。
+am_is_builtin_default() {
+    [ "$1" = agy ] && { [ "$2" = ag0 ] || [ "$2" = agy ]; }
+}
+
+# 這個使用者的真家目錄（不看 `$HOME`：母 pane 可能是 ag1 的 HOME）。`~<使用者名>` 展開走 passwd 資料庫，Linux／macOS 都成立。
+am_real_home() {
+    _u=$(id -un 2>/dev/null) || return 1
+    [ -n "$_u" ] || return 1
+    eval "_h=~$_u"
+    [ -n "$_h" ] && [ "$_h" != "~$_u" ] || return 1
+    printf '%s' "$_h"
+}
+
 am_identity_find() {
     _want="$1/$2"
     _rest=${AM_IDENTITIES:-}
@@ -587,11 +602,20 @@ am_agent_start() {
             grok) _idacct=GROK_HOME ;;
             agy) _idacct=HOME ;;
         esac
-        _idkv=$(am_identity_find "$_ik" "$_idn") || {
-            _names=$(am_identity_names "$_ik")
-            printf 'agents-manager: 這台沒有 %s 身份 %s；可用：%s\n' "$_ik" "$_idn" "${_names:-（無）}" >&2
-            exit 2
-        }
+        if am_is_builtin_default "$_ik" "$_idn"; then
+            _h=$(am_real_home) || {
+                printf 'agents-manager: 找不到 %s 預設帳號的家目錄（使用者 %s），沒有開 agent\n' "$_ik" "$(id -un 2>/dev/null)" >&2
+                exit 2
+            }
+            _idkv="HOME=$_h"
+        else
+            _idkv=$(am_identity_find "$_ik" "$_idn") || {
+                _names=$(am_identity_names "$_ik")
+                [ "$_ik" != agy ] || _names="ag0（預設）${_names:+、$_names}"
+                printf 'agents-manager: 這台沒有 %s 身份 %s；可用：%s\n' "$_ik" "$_idn" "${_names:-（無）}" >&2
+                exit 2
+            }
+        fi
     fi
     # agy 子 agent 沒指定模型就用最低強度（2026-10-17 使用者：「除非 user 指定否則用最低 effort」）。
     # agy 的強度寫在 slug 尾巴，它自己的預設是 high；母 bot 是 agy 時也不沿用母 bot 的模型。
