@@ -5,7 +5,8 @@ import { createPortal } from 'react-dom'
 import type { BotKind, ModelInfo, ModelsMeta, PatchBotInput } from '../api/types'
 import { CLAUDE_EFFORT_OPTIONS, CODEX_EFFORT_OPTIONS, EFFORT_OPTIONS, FAST_TIER, HIDDEN_MODELS, MODEL_OPTIONS, openAiApiEffortsFor, agyModelAllowed, canonicalModel, effortLabel } from '../api/types'
 import { compareGptModels, formatGptModelLabel } from '../lib/gptModel'
-import { buildAgyFamilyOrder, compareAgyModels, formatAgyModelLabel } from '../lib/agyModel'
+import { buildAgyFamilyOrder, compareAgyModels, formatAgyEffortLabel, formatAgyModelLabel } from '../lib/agyModel'
+import { agyEffortOf, agyGroupMembers, agyGroupOf, groupAgyModels, pickAgyVariant } from '../lib/agyModelGroup'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { modelMatches } from '../lib/modelMatches'
 import { modelSwitchPatch } from '../lib/modelSwitch'
@@ -175,10 +176,17 @@ export function ApiModelFields({
   const shownModels = sortModels(kind, latest.models)
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
-  const efforts = current?.efforts ?? []
   const selectedModel = model ?? defaultModel?.id ?? null
+  // agy：模型與強度拆兩排（reports/plan-agy-model-effort.md）；存值仍是完整 slug。
+  const agy = kind === 'agy'
+  const agyGroups = agy ? groupAgyModels(shownModels) : []
+  const selGroup = agy ? (agyGroupOf(agyGroups, selectedModel) ?? agyGroups.find((g) => g.isDefault) ?? agyGroups[0] ?? null) : null
+  const selGroupEffort = agyEffortOf(selGroup, selectedModel)
+  // 整組都不在清單時「不在清單」標在模型按鈕上，強度按鈕就不再重複標。
+  const selGroupAllMissing = selGroup ? agyGroupMembers(selGroup).every((v) => missingIds.has(v.id)) : false
+  const efforts = agy ? (selGroup?.efforts ?? []) : (current?.efforts ?? [])
   const fallbackEffort = (suggestedEffort && efforts.includes(suggestedEffort)) ? suggestedEffort : effectiveDefaultEffort(current)
-  const selectedEffort = effort ?? fallbackEffort
+  const selectedEffort = agy ? selGroupEffort : (effort ?? fallbackEffort)
   const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
   const warnText = fallbackWarning(t, kind, meta, usingLast, cached === null, fromApi)
 
@@ -216,7 +224,27 @@ export function ApiModelFields({
         </span>
         {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
         <div className="opt-group models" role="radiogroup" aria-label={t('模型')}>
-          {shownModels.map((m) => (
+          {agy ? agyGroups.map((g) => {
+            const on = selGroup === g
+            const members = agyGroupMembers(g)
+            const allMissing = members.every((v) => missingIds.has(v.id))
+            const allOld = members.every((v) => latest.oldIds.has(v.id))
+            const target = pickAgyVariant(g, selGroupEffort)
+            return (
+              <button
+                key={g.key}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                className={`opt${on ? ' on' : ''}`}
+                title={[target?.id ?? g.key, g.isDefault ? t('模型預設') : ''].filter(Boolean).join(' — ')}
+                onClick={() => { if (target) pickModel(target.id) }}
+              >
+                {g.label}
+                {allMissing ? <span className="field-note"> {t('不在清單')}</span> : allOld ? <span className="field-note"> {t('舊版')}</span> : null}
+              </button>
+            )
+          }) : shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
@@ -238,26 +266,29 @@ export function ApiModelFields({
           <span>
             {t('強度')}
             {/* claude 的強度與模型無關，標「依 <模型>」是假資訊。 */}
-            {current && current.id !== model && kind !== 'claude' ? (
+            {current && current.id !== model && kind !== 'claude' && !agy ? (
               <span className="field-note">{t('依 {model}', { model: current.display_name })}</span>
             ) : null}
             {/* claude／codex 切強度會存成帳號預設（SPEC §17、§4.4a）。 */}
           </span>
           <div className="opt-group" role="radiogroup" aria-label={t('強度')}>
-            {efforts.map((e) => (
-              <button
-                key={e}
-                type="button"
-                role="radio"
-                aria-checked={selectedEffort === e}
-                className={`opt${selectedEffort === e ? ' on' : ''}`}
-                title={effortTitle(kind, current, e) ?? e}
-                onClick={() => onEffort(e)}
-              >
-                {effortLabel(e)}
-                {effortBadges(current, e, suggestedEffort)}
-              </button>
-            ))}
+            {efforts.map((e) => {
+              const v = agy ? selGroup?.variants.get(e) ?? null : null
+              return (
+                <button
+                  key={e}
+                  type="button"
+                  role="radio"
+                  aria-checked={selectedEffort === e}
+                  className={`opt${selectedEffort === e ? ' on' : ''}`}
+                  title={agy ? (v?.id ?? e) : (effortTitle(kind, current, e) ?? e)}
+                  onClick={() => { if (agy) { if (v) pickModel(v.id) } else onEffort(e) }}
+                >
+                  {agy ? formatAgyEffortLabel(e) : effortLabel(e)}
+                  {agy ? (v && missingIds.has(v.id) && !selGroupAllMissing ? <span className="field-note"> {t('不在清單')}</span> : v && latest.oldIds.has(v.id) ? <span className="field-note"> {t('舊版')}</span> : null) : effortBadges(current, e, suggestedEffort)}
+                </button>
+              )
+            })}
           </div>
         </div>
       ) : null}
@@ -448,10 +479,16 @@ export function ModelQuickPicker({
   const effort = bot?.effort ?? null
   // 完整 id（`claude-sonnet-5-5`）要對到別名（`sonnet`）：同 `ApiModelFields`，先完全相等再 `modelMatches`（#939）。
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || models.find((m) => m.is_default) || models[0]
-  const efforts = current?.efforts ?? []
   // 沒設就標 CLI 預設那顆（同 ApiModelFields；2026-09-09 使用者決定不放「預設」選項）。
   const selectedModel = model ?? current?.id ?? null
-  const selectedEffort = effort ?? effectiveDefaultEffort(current)
+  // agy：模型與強度拆兩排（同 ApiModelFields）；強度點了就切到那個變體，不送 effort。
+  const agy = kind === 'agy'
+  const agyGroups = agy ? groupAgyModels(shownModels) : []
+  const selGroup = agy ? (agyGroupOf(agyGroups, selectedModel) ?? agyGroups.find((g) => g.isDefault) ?? agyGroups[0] ?? null) : null
+  const selGroupEffort = agyEffortOf(selGroup, selectedModel)
+  const selGroupAllMissing = selGroup ? agyGroupMembers(selGroup).every((v) => missingIds.has(v.id)) : false
+  const efforts = agy ? (selGroup?.efforts ?? []) : (current?.efforts ?? [])
+  const selectedEffort = agy ? selGroupEffort : (effort ?? effectiveDefaultEffort(current))
 
   const apply = async (input: PatchBotInput) => {
     const res = await patchBot(botId, input)
@@ -517,7 +554,29 @@ export function ModelQuickPicker({
           </span>
         ) : null}
         <div className="opt-group models" role="group" aria-label={t('模型')}>
-          {shownModels.map((m) => (
+          {agy ? agyGroups.map((g) => {
+            const on = selGroup === g
+            const members = agyGroupMembers(g)
+            const allMissing = members.every((v) => missingIds.has(v.id))
+            const allOld = members.every((v) => latest.oldIds.has(v.id))
+            const target = pickAgyVariant(g, selGroupEffort)
+            return (
+              <button
+                key={g.key}
+                type="button"
+                role="menuitemradio"
+                aria-checked={on}
+                tabIndex={-1}
+                className={`opt${on ? ' on' : ''}`}
+                title={[target?.id ?? g.key, g.isDefault ? t('模型預設') : ''].filter(Boolean).join(' — ')}
+                disabled={patching}
+                onClick={() => { if (target) pickModel(target.id) }}
+              >
+                {g.label}
+                {allMissing ? <span className="field-note"> {t('不在清單')}</span> : allOld ? <span className="field-note"> {t('舊版')}</span> : null}
+              </button>
+            )
+          }) : shownModels.map((m) => (
             <button
               key={m.id}
               type="button"
@@ -538,22 +597,25 @@ export function ModelQuickPicker({
           <div className="field">
             <span aria-hidden="true">{t('強度')}</span>
             <div className="opt-group" role="group" aria-label={t('強度')}>
-              {efforts.map((e) => (
-                <button
-                  key={e}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selectedEffort === e}
-                  tabIndex={-1}
-                  className={`opt${selectedEffort === e ? ' on' : ''}`}
-                  disabled={patching}
-                  title={effortTitle(kind, current, e)}
-                  onClick={() => pickEffort(e)}
-                >
-                  {effortLabel(e)}
-                  {effortBadges(current, e)}
-                </button>
-              ))}
+              {efforts.map((e) => {
+                const v = agy ? selGroup?.variants.get(e) ?? null : null
+                return (
+                  <button
+                    key={e}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selectedEffort === e}
+                    tabIndex={-1}
+                    className={`opt${selectedEffort === e ? ' on' : ''}`}
+                    disabled={patching}
+                    title={agy ? (v?.id ?? e) : effortTitle(kind, current, e)}
+                    onClick={() => { if (agy) { if (v) pickModel(v.id) } else pickEffort(e) }}
+                  >
+                    {agy ? formatAgyEffortLabel(e) : effortLabel(e)}
+                    {agy ? (v && missingIds.has(v.id) && !selGroupAllMissing ? <span className="field-note"> {t('不在清單')}</span> : v && latest.oldIds.has(v.id) ? <span className="field-note"> {t('舊版')}</span> : null) : effortBadges(current, e)}
+                  </button>
+                )
+              })}
             </div>
           </div>
         ) : null}

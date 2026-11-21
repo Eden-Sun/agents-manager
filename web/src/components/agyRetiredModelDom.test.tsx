@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
 import type { ModelInfo } from '../api/types'
-import { MODEL_OPTIONS, canonicalModel } from '../api/types'
+import { canonicalModel } from '../api/types'
 import { ApiModelFields } from './ModelPicker'
 
 afterEach(unmountAll)
@@ -24,18 +24,16 @@ async function picker(model: string | null, onModel: (v: string | null) => void 
   return mount(<ApiModelFields kind="agy" host="local" model={model} onModel={onModel} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />)
 }
 
-test('後備清單（API 不可用）是 3.8 Flash 三檔，不收的模型一顆按鈕都沒有', async () => {
+test('後備清單（API 不可用）：模型列只有 3.8 Flash 一顆，強度列是 Low／Medium／High，不收的模型一顆都沒有', async () => {
   const el = await picker('gemini-3.8-flash-high')
-  const buttons = [...el.querySelectorAll('.opt-group.models .opt')].map((b) => b.getAttribute('title') ?? '')
-  assert.equal(buttons.length, 3)
-  for (const id of MODEL_OPTIONS.agy) assert.ok(buttons.some((t) => t.startsWith(id)), id)
-  for (const retired of RETIRED) assert.ok(!buttons.some((t) => t.includes(retired)), retired)
-  assert.deepEqual(
-    buttons.map((t) => t.split(' ')[0]),
-    ['gemini-3.8-flash-low', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-high'],
-    '由便宜到貴：low < medium < high',
-  )
-  assert.ok(buttons[1].includes('模型預設'), '預設維持 3.8 medium')
+  const models = [...el.querySelectorAll('.opt-group.models .opt')]
+  assert.deepEqual(models.map((b) => b.textContent), ['3.8-Flash'])
+  assert.equal(models[0].getAttribute('aria-checked'), 'true')
+  const efforts = [...el.querySelectorAll('.opt-group:not(.models) .opt')]
+  assert.deepEqual(efforts.map((b) => b.textContent), ['Low', 'Medium', 'High'], '由便宜到貴：low < medium < high')
+  assert.equal(efforts[2].getAttribute('aria-checked'), 'true', '目前是 high')
+  const html = el.innerHTML
+  for (const retired of RETIRED) assert.ok(!html.includes(retired), retired)
   assert.equal(el.querySelector('.field-note.warn.hint, .hint.field-note.warn'), null, '3.8 沒有下架提示')
 })
 
@@ -43,7 +41,7 @@ function info(id: string, is_default = false): ModelInfo {
   return { id, display_name: id, description: '', is_default, default_effort: null, efforts: [], service_tiers: [] }
 }
 
-test('API 給的清單照規則過濾：3.8 含以上留下、3.7／3.6／3.1 Pro／claude／gpt-oss 不出現', async () => {
+test('API 給的清單照規則過濾：3.8 含以上留下、3.7／3.6／3.1 Pro／claude／gpt-oss 不出現；3.8 組的強度列只列 Medium／High', async () => {
   const api = [
     info('gemini-3.7-flash-high'),
     info('claude-sonnet-4-6'),
@@ -54,13 +52,12 @@ test('API 給的清單照規則過濾：3.8 含以上留下、3.7／3.6／3.1 Pr
   ]
   await act(() => useStore.setState({ models: { 'agy@local@': api } } as never))
   const el = await mount(<ApiModelFields kind="agy" host="local" model="gemini-3.8-flash-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />)
-  const buttons = [...el.querySelectorAll('.opt-group.models .opt')].map((b) => b.getAttribute('title') ?? '')
-  assert.deepEqual(
-    buttons.map((t) => t.split(' ')[0]),
-    ['gemini-3.8-flash-medium', 'gemini-3.8-flash-high', 'gemini-4-argon'],
-    '預設排第一，其餘照 API 順序',
-  )
-  assert.ok(buttons[0].includes('模型預設'))
+  const models = [...el.querySelectorAll('.opt-group.models .opt')]
+  assert.deepEqual(models.map((b) => b.textContent), ['3.8-Flash', '4-Argon'], '預設 3.8 組排第一，其次 4-Argon')
+  assert.ok(models[0].getAttribute('title')?.includes('模型預設'))
+  const efforts = [...el.querySelectorAll('.opt-group:not(.models) .opt')]
+  assert.deepEqual(efforts.map((b) => b.textContent), ['Medium', 'High'])
+  assert.equal(efforts[0].getAttribute('aria-checked'), 'true')
 })
 
 test('存著不收的模型：設定面板講清楚啟動時改用 3.8 medium，一鍵改掉', async () => {

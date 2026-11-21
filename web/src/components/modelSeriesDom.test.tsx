@@ -75,11 +75,14 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
     <ApiModelFields kind="agy" host="local" model="gemini-4-neon-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
   )
   const radios = [...settingEl.querySelectorAll<HTMLElement>('[role="radio"]')]
-  const neonRadio = radios.find((r) => r.getAttribute('title')?.startsWith('gemini-4-neon-medium'))
-  assert.ok(neonRadio, '目前模型 gemini-4-neon-medium 必須在選項中')
-  assert.equal(neonRadio.getAttribute('aria-checked'), 'true', '目前模型必須被選中')
-  assert.ok(neonRadio.textContent?.includes('4-Neon Medium'), '標籤應為 4-Neon Medium')
-  assert.ok(neonRadio.textContent?.includes(t('不在清單')), '應標註不在清單')
+  // agy 拆成模型＋強度兩排：模型按鈕 4-Neon（整組不在清單）、強度按鈕 Medium 被選中。
+  const neonRadio = radios.find((r) => r.textContent?.includes('4-Neon'))
+  assert.ok(neonRadio, '目前模型的基礎模型 4-Neon 必須在選項中')
+  assert.equal(neonRadio.getAttribute('aria-checked'), 'true', '目前模型所屬的模型必須被選中')
+  assert.ok(neonRadio.textContent?.includes(t('不在清單')), '整組不在清單，模型按鈕標註')
+  const mediumRadio = radios.find((r) => r.textContent === 'Medium')
+  assert.equal(mediumRadio?.getAttribute('aria-checked'), 'true', '目前強度 Medium 被選中')
+  assert.equal(mediumRadio?.getAttribute('title'), 'gemini-4-neon-medium')
   // stale 提示
   const warnNote = settingEl.querySelector('.field-note.warn')
   assert.ok(warnNote, '應有警示小提示')
@@ -92,11 +95,12 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
     <ApiModelFields kind="agy" host="local" model="gemini-4-hydrogen-xhigh" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
   )
   const createRadios = [...createEl.querySelectorAll<HTMLElement>('[role="radio"]')]
-  const hydrogenRadio = createRadios.find((r) => r.getAttribute('title')?.startsWith('gemini-4-hydrogen-xhigh'))
-  assert.ok(hydrogenRadio, '建立表單預填模型必須在選項中')
-  assert.equal(hydrogenRadio.getAttribute('aria-checked'), 'true', '建立表單預填模型必須被選中')
-  assert.ok(hydrogenRadio.textContent?.includes('4-Hydrogen XHigh'), '標籤應為 4-Hydrogen XHigh')
-  assert.ok(hydrogenRadio.textContent?.includes(t('不在清單')), '應標註不在清單')
+  const hydrogenRadio = createRadios.find((r) => r.textContent?.includes('4-Hydrogen'))
+  assert.ok(hydrogenRadio, '建立表單預填模型的基礎模型必須在選項中')
+  assert.equal(hydrogenRadio.getAttribute('aria-checked'), 'true', '建立表單預填模型所屬的模型必須被選中')
+  assert.ok(hydrogenRadio.textContent?.includes(t('不在清單')), '整組不在清單，模型按鈕標註')
+  const xhighRadio = createRadios.find((r) => r.textContent?.startsWith('XHigh'))
+  assert.equal(xhighRadio?.getAttribute('aria-checked'), 'true', '預填的強度 XHigh 被選中')
 
   await unmountAll()
 
@@ -115,11 +119,11 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
   const popover = document.querySelector('.model-quick-pop')
   assert.ok(popover, '快速選單彈出框應打開')
   const menuRadios = [...popover.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
-  const menuNeon = menuRadios.find((r) => r.getAttribute('title')?.startsWith('gemini-4-neon-medium'))
-  assert.ok(menuNeon, '快速選單中必須出現 gemini-4-neon-medium')
-  assert.equal(menuNeon.getAttribute('aria-checked'), 'true', '快速選單中必須被選中')
-  assert.ok(menuNeon.textContent?.includes('4-Neon Medium'), '標籤應為 4-Neon Medium')
-  assert.ok(menuNeon.textContent?.includes(t('不在清單')), '快速選單中應標註不在清單')
+  const menuNeon = menuRadios.find((r) => r.textContent?.includes('4-Neon'))
+  assert.ok(menuNeon, '快速選單中必須出現基礎模型 4-Neon')
+  assert.equal(menuNeon.getAttribute('aria-checked'), 'true', '快速選單中所屬模型必須被選中')
+  assert.ok(menuNeon.textContent?.includes(t('不在清單')), '快速選單中整組不在清單，模型按鈕標註')
+  assert.equal(menuRadios.find((r) => r.textContent === 'Medium')?.getAttribute('aria-checked'), 'true', '快速選單中強度 Medium 被選中')
   // 快速選單中的 stale 提示
   const popWarn = popover.querySelector('.hint.field-note.warn')
   assert.ok(popWarn, '快速選單應有 stale 提示')
