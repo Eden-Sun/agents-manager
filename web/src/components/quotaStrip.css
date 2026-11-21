@@ -1122,6 +1122,16 @@
 }
 
 /* codex 的方案沒有 5 小時窗：那一格不畫條，寫「無上限」（quotaNoFiveHour）。 */
+/* agy 的 Gemini 4 Argon 週額度：晶片末端的小段，字小、不搶 Gemini 的條。 */
+.quota-argon {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
 .quota-no-cap {
   flex: none;
   font-size: 10.5px;

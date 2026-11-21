@@ -1083,6 +1083,7 @@ fn new_quota_snapshot(host: &str, source: &str, account: Option<String>) -> Quot
         five_hour: None,
         seven_day: None,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: None,
@@ -1235,6 +1236,7 @@ mod quota_limit_tests {
             five_hour: window(40.0, "5h-reset"),
             seven_day: window(60.0, "7d-reset"),
             fable: window(10.0, "fable-reset"),
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -1263,7 +1265,7 @@ mod quota_limit_tests {
         // 有讀數時照舊用那一桶自己的 resets_at，保底不會蓋掉它。
         let mut q = QuotaSnapshot {
             five_hour: Some(PortWindow { observed_at: None, used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
-            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: at.into(), source: "test".into(), account: None, host: "local".into(),
         };
         let lower = "you've hit your session limit".to_string();
@@ -1468,6 +1470,7 @@ mod quota_limit_tests {
             five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 0.0, resets_at: Some(hours(-1)) }),
             seven_day: Some(crate::quota::Window { observed_at: None, used_pct: 97.0, resets_at: Some(week_reset.clone()) }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,

@@ -66,6 +66,7 @@ pub fn quota_row(key: &'static str, now: &str) -> (&'static str, Quota) {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -87,6 +88,10 @@ enum UsageWindow {
     SevenDay,
 }
 
+fn window_is_weekly(bucket: &Value) -> bool {
+    matches!(bucket_window(bucket), Some(UsageWindow::SevenDay))
+}
+
 fn bucket_window(bucket: &Value) -> Option<UsageWindow> {
     let window = text_field(bucket, &["window", "type"]).unwrap_or_default().to_ascii_lowercase();
     let id = text_field(bucket, &["id", "name", "label", "title"]).unwrap_or_default().to_ascii_lowercase();
@@ -104,7 +109,14 @@ fn bucket_window(bucket: &Value) -> Option<UsageWindow> {
     }
 }
 
-/// `command.data.groups[].buckets[]`：只依 Gemini 組的窗口填入 `agy`。
+/// Gemini 4 Argon 的獨立週額度（`Gemini 4 Argon` 組，bucket `gemini-argon-wtu-weekly`，沒有 5h）：
+/// 不扣 Gemini 額度，只認得出「是 Argon」的 bucket 才走這裡，不准蓋掉 Gemini 的 weekly。
+fn is_argon(group_name: &str, bucket_name: &str) -> bool {
+    group_name.to_ascii_lowercase().contains("argon") || bucket_name.to_ascii_lowercase().contains("argon")
+}
+
+/// `command.data.groups[].buckets[]`：Gemini 組（bucket id 精確為 `gemini-weekly`／`gemini-5h`）填 `agy` 的
+/// five_hour／seven_day；Argon 組另存 `argon_weekly`（只有週窗）。Claude/GPT 組照舊略過。
 fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>> {
     let groups = v.get("command")?.get("data")?.get("groups")?.as_array()?;
     let mut out: Vec<(&'static str, Quota)> = Vec::new();
@@ -113,21 +125,30 @@ fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>>
         let Some(buckets) = group.get("buckets").and_then(Value::as_array) else { continue };
         for bucket in buckets {
             let bucket_name = text_field(bucket, &["id", "name", "label", "title", "model"]).unwrap_or_default();
-            let Some(key) = bucket_key(group_name).or_else(|| bucket_key(bucket_name)) else { continue };
+            let argon = is_argon(group_name, bucket_name);
+            // Argon 只有週窗；Gemini 只認精確的 gemini-weekly／gemini-5h（Claude/GPT 組的桶 id 是 3p-*，不會撞上），其餘略過。
+            let slot: Option<&str> = match (argon, bucket_name.to_ascii_lowercase().as_str()) {
+                (true, _) => (window_is_weekly(bucket)).then_some("argon"),
+                (false, "gemini-weekly" | "gemini-5h") => Some("gemini"),
+                _ => None,
+            };
+            let Some(slot) = slot else { continue };
             let Some(window) = bucket_window(bucket) else { continue };
             let Some(left) = bucket.get("remaining_fraction").and_then(Value::as_f64).filter(|x| x.is_finite() && (0.0..=1.0).contains(x)) else {
                 continue;
             };
             let w = Window { observed_at: None, used_pct: ((1.0 - left) * 100.0).clamp(0.0, 100.0), resets_at: bucket.get("reset_time").and_then(reset_time) };
-            let row = if let Some(row) = out.iter_mut().find(|(k, _)| *k == key) {
+            let row = if let Some(row) = out.iter_mut().find(|(k, _)| *k == "agy") {
                 row
             } else {
-                out.push(quota_row(key, now));
+                out.push(quota_row("agy", now));
                 out.last_mut().expect("just pushed")
             };
-            match window {
-                UsageWindow::FiveHour => row.1.five_hour = Some(w),
-                UsageWindow::SevenDay => row.1.seven_day = Some(w),
+            match (slot, window) {
+                ("argon", _) => row.1.argon_weekly = Some(Box::new(w)),
+                ("gemini", UsageWindow::FiveHour) => row.1.five_hour = Some(w),
+                ("gemini", UsageWindow::SevenDay) => row.1.seven_day = Some(w),
+                _ => {}
             }
         }
     }

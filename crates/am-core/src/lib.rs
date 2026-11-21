@@ -71,6 +71,7 @@ pub struct Quota {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
     pub fable: Option<Window>,
+    pub argon_weekly: Option<Box<Window>>,
     pub reset_credits: Option<ResetCredits>,
     pub limit_hit: Option<LimitHit>,
     pub plan: Option<String>,

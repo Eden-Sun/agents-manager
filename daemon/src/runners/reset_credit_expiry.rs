@@ -145,6 +145,7 @@ mod tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: Some(ResetCredits { available: credits.len() as i64, title: None, expires_at: None, credits }),
             limit_hit: None,
             plan: None,

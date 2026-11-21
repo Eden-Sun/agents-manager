@@ -72,6 +72,57 @@
         assert_eq!(gemini.source, "agy-usage");
     }
 
+    /// 三組真實結構（預設帳號 ag0）：Gemini 組、Claude/GPT 組、Gemini 4 Argon 組（只有週桶）。數值自編。
+    fn with_argon() -> String {
+        json!({"command": {"data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.85, "reset_time": "2026-11-27T08:11:25Z"},
+                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "five_hour", "remaining_fraction": 0.5, "reset_time": "2026-11-21T10:00:00Z"}
+            ]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"id": "3p-weekly", "window": "weekly", "remaining_fraction": 0.9, "reset_time": "2026-11-27T08:00:00Z"},
+                {"id": "3p-5h", "window": "five_hour", "remaining_fraction": 0.7, "reset_time": "2026-11-21T10:00:00Z"}
+            ]},
+            {"name": "Gemini 4 Argon", "buckets": [
+                {"id": "gemini-argon-wtu-weekly", "window": "weekly", "remaining_fraction": 0.875, "reset_time": "2026-11-27T08:02:23Z"}
+            ]}
+        ]}}})
+        .to_string()
+    }
+
+    /// Argon 週額度另存；它的重置時刻比 Gemini 早，卻不准蓋掉 Gemini 的 weekly（2026-11-21 線上 bug）。
+    #[test]
+    fn argon_weekly_is_kept_apart_and_never_overwrites_gemini_weekly() {
+        let got = parse_usage(&with_argon()).expect("parsed");
+        assert_eq!(got.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["agy"]);
+        let g = &got[0].1;
+        let week = g.seven_day.as_ref().unwrap();
+        assert!((week.used_pct - 15.0).abs() < 1e-9, "gemini-weekly 剩 85% → 用 15%");
+        assert_eq!(week.resets_at.as_deref(), Some("2026-11-27T08:11:25.000Z"));
+        assert!((g.five_hour.as_ref().unwrap().used_pct - 50.0).abs() < 1e-9);
+        let argon = g.argon_weekly.as_ref().expect("Argon 另存到 argon_weekly");
+        assert!((argon.used_pct - 12.5).abs() < 1e-9, "剩 87.5% → 用 12.5%");
+        assert_eq!(argon.resets_at.as_deref(), Some("2026-11-27T08:02:23.000Z"));
+        assert!(g.fable.is_none());
+    }
+
+    /// 沒有 Argon 組的帳號（ag1）：argon_weekly 是 None，序列化也不出現該 key；Argon 的 5h 桶不填、不建列。
+    #[test]
+    fn no_argon_group_means_no_argon_key_and_an_argon_five_hour_bucket_is_ignored() {
+        let plain = json!({"command": {"data": {"groups": [
+            {"name": "Gemini Models", "buckets": [{"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.5}]}
+        ]}}}).to_string();
+        let got = parse_usage(&plain).unwrap();
+        assert!(got[0].1.argon_weekly.is_none());
+        let v = serde_json::to_value(&got[0].1).unwrap();
+        assert!(v.get("argon_weekly").is_none(), "沒有就不序列化");
+
+        let argon_5h = json!({"command": {"data": {"groups": [
+            {"name": "Gemini 4 Argon", "buckets": [{"id": "gemini-argon-5h", "window": "five_hour", "remaining_fraction": 0.5}]}
+        ]}}}).to_string();
+        assert!(parse_usage(&argon_5h).is_none(), "Argon 沒有 5 小時限制，只有 5h 桶就什麼都不讀");
+    }
+
     #[test]
     fn the_legacy_response_format_still_populates_its_weekly_window() {
         let legacy = json!({"response": "Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z\n"}).to_string();

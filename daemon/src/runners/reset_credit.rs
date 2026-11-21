@@ -195,6 +195,7 @@ mod tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: Some(rc),
             limit_hit: None,
             plan: None,

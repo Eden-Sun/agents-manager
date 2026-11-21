@@ -119,6 +119,7 @@
                 five_hour: None,
                 seven_day: None,
                 fable: None,
+                argon_weekly: None,
                 reset_credits: None,
                 limit_hit: None,
                 plan: None,
@@ -542,7 +543,7 @@
         app.hosts.insert_remote_for_test(mk("inv-347", "target-a")).await;
         app.hosts.insert_remote_for_test(mk("other-347", "target-o")).await;
         let reading = || crate::quota::Quota {
-            five_hour: None, seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            five_hour: None, seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: crate::db::now(), source: "test".into(), account: None, host: String::new(),
         };
         let tools = || crate::tools::HostTools {

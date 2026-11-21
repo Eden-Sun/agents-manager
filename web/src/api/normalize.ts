@@ -962,6 +962,7 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
     five_hour: toQuotaWindow(pick(v, 'five_hour')),
     seven_day: toQuotaWindow(pick(v, 'seven_day')),
     fable: toQuotaWindow(pick(v, 'fable')),
+    argon_weekly: toQuotaWindow(pick(v, 'argon_weekly')),
     reset_credits: toResetCredits(pick(v, 'reset_credits')),
     limit_hit: toLimitHit(pick(v, 'limit_hit')),
     plan: optStr(pick(v, 'plan')),

@@ -1156,6 +1156,8 @@ export interface KindQuota {
   seven_day: QuotaWindow | null
   /** Max 方案的 Fable 週額度；沒有就是 null */
   fable: QuotaWindow | null
+  /** agy 的 Gemini 4 Argon 獨立週額度（不扣 Gemini 額度、沒有 5 小時限制）；沒有 Argon 組的帳號不給這個欄位。 */
+  argon_weekly?: QuotaWindow | null
   reset_credits: QuotaResetCredits | null
   /** CLI 的上限橫幅；codex credits 用完時 5h/7d 可以是滿的（2026-09-12），所以要單獨看。 */
   limit_hit: QuotaLimitHit | null

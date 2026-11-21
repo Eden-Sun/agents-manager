@@ -464,6 +464,8 @@ function Gauge({
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven, mark: resetMark(q?.seven_day?.resets_at, WINDOW_MS[weekLabel(entry.kind)], now) },
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
+  // agy 的 Gemini 4 Argon 週額度：獨立一段寫在晶片末端，不併入 7d／5h（它不扣 Gemini 額度）。
+  const argon = entry.kind === 'agy' ? remaining(q?.argon_weekly) : null
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
   // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
@@ -635,6 +637,11 @@ function Gauge({
           </span>
         ) : null}
         {windows.map((w) => winRow(w, countdownRows.some((r) => r.name === w.name)))}
+        {argon !== null ? (
+          <span className="quota-argon" title={t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制')}>
+            {t('Argon 7d {pct}%', { pct: fmtPct(argon, hit) })}
+          </span>
+        ) : null}
         {resetLine ? (
           <span className={`quota-reset-line ${resetLineLevel}`} title={resetLine.title}>
             {resetLine.text}

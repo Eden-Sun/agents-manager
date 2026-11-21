@@ -303,6 +303,7 @@ async fn the_limit_ends_when_a_fresh_usage_reading_says_the_window_reset() {
         five_hour: None,
         seven_day: Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::days(8))) }),
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: Some("SuperGrok".into()),

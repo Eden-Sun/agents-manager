@@ -89,6 +89,30 @@ test('agy 顯示 Gemini 的 5h／7d，忽略舊 Claude/GPT key，popover 保留�
   assert.ok([...detail.querySelectorAll('button')].some((b) => b.textContent?.includes('登出 agy')), '登出按鈕保留')
 })
 
+async function mountAgyWith(extra: Record<string, unknown>) {
+  mockApi(sharedMock)
+  await useStore.getState().refreshState()
+  await useStore.getState().loadQuota()
+  await act(async () => {
+    useStore.setState((s) => ({ localTools: { ...s.localTools, agy: { ...s.localTools.agy, logged_in: true } } }))
+    useStore.setState((s) => ({ quota: { ...s.quota, agy: { ...agyQuota(12, 98), ...extra } } }) as never)
+  })
+  await mount(<QuotaStrip />)
+  await until(() => document.querySelector('.quota-hp.agy') !== null, '一格 agy')
+}
+
+test('agy 有 Gemini 4 Argon 週額度時晶片末端多一段 Argon 7d（剩餘）', { timeout: 30_000 }, async () => {
+  await mountAgyWith({ argon_weekly: quotaWindow(88, 100) })
+  const argon = document.querySelector<HTMLElement>('.quota-hp.agy .quota-argon')
+  assert.equal(argon?.textContent, 'Argon 7d 88%', '剩餘方向，照狀態列慣例')
+  assert.match(argon?.getAttribute('title') ?? '', /Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/)
+})
+
+test('agy 沒有 Argon 組（ag1）時晶片不出現 Argon 段', { timeout: 30_000 }, async () => {
+  await mountAgyWith({})
+  assert.equal(document.querySelector('.quota-hp.agy .quota-argon'), null)
+})
+
 test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提示', { timeout: 30_000 }, async () => {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia

@@ -62,6 +62,7 @@ pub async fn apply_codex_limit_hit_quota(
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,

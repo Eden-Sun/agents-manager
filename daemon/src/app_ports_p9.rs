@@ -256,6 +256,7 @@ mod tests {
             }),
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: Some("test-plan".into()),

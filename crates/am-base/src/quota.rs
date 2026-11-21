@@ -387,6 +387,11 @@ fn ser_bucket<S: Serializer>(w: &Option<Window>, len: chrono::Duration, s: S) ->
     st.end()
 }
 
+/// `Box` 是為了不讓 `Quota` 變大：它在深層 async 呼叫鏈上被複製，多一個 `Window` 會讓 debug 測試的棧爆掉（identity_switch）。
+fn ser_argon<S: Serializer>(w: &Option<Box<Window>>, s: S) -> Result<S::Ok, S::Error> {
+    ser_bucket(&w.as_deref().cloned(), SEVEN_DAY_LEN, s)
+}
+
 fn ser_five_hour<S: Serializer>(w: &Option<Window>, s: S) -> Result<S::Ok, S::Error> {
     ser_bucket(w, FIVE_HOUR_LEN, s)
 }
@@ -456,6 +461,9 @@ pub struct Quota {
     /// Max 方案才有的 Fable 週額度；`None` 時 UI 完全不畫。
     #[serde(serialize_with = "ser_weekly")]
     pub fable: Option<Window>,
+    /// agy 的 Gemini 4 Argon 獨立週額度（不扣 Gemini 額度、沒有 5 小時限制）；只有那個帳號有 Argon 組才有值，沒有就不序列化。
+    #[serde(serialize_with = "ser_argon", default, skip_serializing_if = "Option::is_none")]
+    pub argon_weekly: Option<Box<Window>>,
     pub reset_credits: Option<ResetCredits>,
     pub limit_hit: Option<LimitHit>,
     pub plan: Option<String>,
@@ -749,6 +757,7 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         five_hour: five,
         seven_day: seven,
         fable: None,
+        argon_weekly: None,
         reset_credits: reset_credits(result),
         limit_hit: None,
         plan: rl.get("planType").and_then(|x| x.as_str()).map(String::from),
@@ -780,6 +789,7 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
         five_hour: five,
         seven_day: seven,
         fable,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: None,
@@ -991,11 +1001,20 @@ async fn set_inner(
             w.observed_at = Some(if q.updated_at.trim().is_empty() { crate::db::now() } else { q.updated_at.clone() });
         }
     }
+    if let Some(w) = q.argon_weekly.as_deref_mut().filter(|w| w.observed_at.is_none()) {
+        w.observed_at = Some(if q.updated_at.trim().is_empty() { crate::db::now() } else { q.updated_at.clone() });
+    }
     // A window the new reading lacks keeps the previous value: statusLine has no Fable and
     // otherwise wipes the probe's F bar every few seconds.
     if q.fable.is_none() {
         if let Some(prev) = quotas.get(&key) {
             q.fable = prev.fable.clone();
+        }
+    }
+    // agy 的 Argon 週額度只在它自己的組裡：讀數缺它就沿用上一份（同 fable），不讓一次缺漏把它抹掉。
+    if q.argon_weekly.is_none() {
+        if let Some(prev) = quotas.get(&key) {
+            q.argon_weekly = prev.argon_weekly.clone();
         }
     }
     // 部分讀數沿用缺窗；codex app-server 是完整帳號讀數，缺窗表示方案沒有該窗。
@@ -1047,6 +1066,11 @@ async fn set_inner(
                 if w.resets_at.is_none() && !already_past(p.resets_at.as_deref()) {
                     w.resets_at = p.resets_at.clone();
                 }
+            }
+        }
+        if let (Some(w), Some(p)) = (q.argon_weekly.as_deref_mut(), prev.argon_weekly.as_deref()) {
+            if w.resets_at.is_none() && !already_past(p.resets_at.as_deref()) {
+                w.resets_at = p.resets_at.clone();
             }
         }
     }
@@ -1505,6 +1529,7 @@ pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabil
         five_hour: None,
         seven_day: None,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: None,
@@ -1568,6 +1593,7 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::DataDir + crate:
         five_hour: None,
         seven_day: None,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: None,
@@ -1623,6 +1649,7 @@ pub fn quota_from_codex_status(q: &crate::codex_status::CodexStatusQuota, accoun
         five_hour: five,
         seven_day: seven,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: None,
@@ -1792,6 +1819,7 @@ mod cache_write_lock_tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: Some(LimitHit {
                 message: "You've hit your usage limit".into(),
@@ -1932,6 +1960,7 @@ mod clear_if_older_tests {
             five_hour: Some(Window { observed_at: None, used_pct: 40.0, resets_at: Some("2026-10-21T05:00:00Z".into()) }),
             seven_day: Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some("2026-10-26T23:42:00Z".into()) }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: Some(LimitHit {
                 message: "You hit your weekly limit.".into(),

@@ -21,6 +21,7 @@
             five_hour: None,
             seven_day: Some(w(84.0, Some("2026-10-15T03:00:00Z"))),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -161,6 +162,7 @@
             five_hour: Some(Window { used_pct: 100.0, resets_at: None, observed_at: observed.map(String::from) }),
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -353,6 +355,7 @@
                 five_hour: Some(Window { observed_at: None, used_pct: 100.0, resets_at: resets }),
                 seven_day: None,
                 fable: None,
+                argon_weekly: None,
                 reset_credits: None,
                 limit_hit: None,
                 plan: None,
@@ -385,6 +388,7 @@
             five_hour: Some(full.clone()),
             seven_day: Some(full.clone()),
             fable: Some(full),
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -583,6 +587,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(five_reset.clone()) }),
             seven_day: Some(Window { observed_at: None, used_pct: 50.0, resets_at: Some(seven_reset.clone()) }),
             fable: None,
+            argon_weekly: None,
             reset_credits: Some(ResetCredits { available: 1, title: None, expires_at: None, credits: vec![] }),
             limit_hit: None,
             plan: Some("plus".into()),
@@ -868,6 +873,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }),
             seven_day: Some(Window { observed_at: None, used_pct: 20.0, resets_at: None }),
             fable: Some(Window { observed_at: None, used_pct: 66.0, resets_at: None }),
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None, updated_at: crate::db::now(), source: "claude-usage".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
@@ -877,6 +883,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 11.0, resets_at: None }),
             seven_day: Some(Window { observed_at: None, used_pct: 21.0, resets_at: None }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None, updated_at: crate::db::now(), source: "statusline".into(), account: Some("cc1".into()), host: LOCAL_HOST.into(),
@@ -923,6 +930,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 0.0, resets_at: None }),
             seven_day: Some(Window { observed_at: None, used_pct: 0.0, resets_at: None }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit,
             plan: None,
@@ -1338,6 +1346,7 @@
             five_hour: Some(Window { observed_at: None, used_pct, resets_at: Some("2099-01-01T00:00:00Z".into()) }),
             seven_day: Some(Window { observed_at: None, used_pct: 20.0, resets_at: Some("2099-01-07T00:00:00Z".into()) }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit,
             plan: Some("test".into()),
@@ -1436,6 +1445,7 @@
             five_hour: Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(resets) }),
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
@@ -1488,7 +1498,7 @@
         app.hosts.insert_remote_for_test(cfg("target-a")).await;
         let fence = app.hosts.fence("build1").await.unwrap();
         let reading = || Quota {
-            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }), seven_day: None, fable: None, reset_credits: None,
+            five_hour: Some(Window { observed_at: None, used_pct: 10.0, resets_at: None }), seven_day: None, fable: None, argon_weekly: None, reset_credits: None,
             limit_hit: None, plan: None, updated_at: crate::db::now(), source: "test".into(), account: None, host: "build1".into(),
         };
         app.hosts.insert_remote_for_test(cfg("target-b")).await;
@@ -1501,7 +1511,7 @@
 
     fn plain(five: Option<Window>, seven: Option<Window>, fable: Option<Window>) -> Quota {
         Quota {
-            five_hour: five, seven_day: seven, fable, reset_credits: None, limit_hit: None, plan: None,
+            five_hour: five, seven_day: seven, fable, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: crate::db::now(), source: "test".into(), account: None, host: LOCAL_HOST.into(),
         }
     }
@@ -1598,6 +1608,7 @@
             five_hour: five.map(|used_pct| Window { observed_at: None, used_pct, resets_at: None }),
             seven_day: seven.map(|used_pct| Window { observed_at: None, used_pct, resets_at: seven_resets.map(String::from) }),
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: Some("SuperGrok".into()),

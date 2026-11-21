@@ -607,7 +607,7 @@ mod tests {
         let b = expert_member(&env, "quota-cluster-b", "executor", "working").await;
         let critical = crate::quota::Quota {
             five_hour: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some("2999-01-01T00:00:00Z".into()), observed_at: Some(db::now()) }),
-            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: db::now(), source: "test".into(), account: None, host: "local".into(),
         };
         env.app.quotas.lock().await.insert(crate::quota::quota_key("local", "claude"), critical);
@@ -635,7 +635,7 @@ mod tests {
 
         let critical = crate::quota::Quota {
             five_hour: Some(crate::quota::Window { used_pct: 97.0, resets_at: Some("2999-01-01T00:00:00Z".into()), observed_at: Some(db::now()) }),
-            seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: db::now(), source: "test".into(), account: None, host: "local".into(),
         };
         assert!(critical.exhausted(crate::quota::Bucket::FiveHour, chrono::Utc::now()), "fixture must be critical");

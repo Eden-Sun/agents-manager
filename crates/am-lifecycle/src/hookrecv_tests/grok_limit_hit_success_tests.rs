@@ -12,6 +12,7 @@ fn hit(secs_ago: i64) -> Quota {
         five_hour: None,
         seven_day: None,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: Some(LimitHit { message: "You hit your weekly limit.".into(), until: None, at: at(secs_ago), bucket: None }),
         plan: None,

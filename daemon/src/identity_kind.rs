@@ -158,7 +158,7 @@ mod tests {
         let keep = bot("am-claude", "claude", "cc1", "child").await;
         let user = bot("user-codex", "codex", "cc0", "user").await;
         let empty = |src: &str| crate::quota::Quota {
-            five_hour: None, seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
+            five_hour: None, seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: crate::db::now(), source: src.into(), account: None, host: crate::config::LOCAL_HOST.into(),
         };
         {

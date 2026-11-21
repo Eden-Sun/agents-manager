@@ -283,6 +283,7 @@ mod flow_tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: Some(LimitHit { message: "You've hit your limit".into(), until: Some("2999-01-01T05:00:00Z".into()), at: crate::db::now(), bucket: None }),
             plan: None,
@@ -296,7 +297,7 @@ mod flow_tests {
     /// 有讀數、沒撞限、視窗也還有：明確「可以用」。
     fn available() -> Quota {
         let w = |used: f64| Some(crate::quota::Window { observed_at: None, used_pct: used, resets_at: Some("2999-01-01T05:00:00Z".into()) });
-        Quota { five_hour: w(10.0), seven_day: w(20.0), fable: w(10.0), reset_credits: None, limit_hit: None, plan: None,
+        Quota { five_hour: w(10.0), seven_day: w(20.0), fable: w(10.0), argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
                 updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
     }
 

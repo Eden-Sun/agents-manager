@@ -815,7 +815,7 @@ mod manager_quota_tests {
 
     fn reading(used: f64, reset: &str) -> Quota {
         let w = Some(Window { observed_at: None, used_pct: used, resets_at: Some(reset.into()) });
-        Quota { five_hour: w.clone(), seven_day: w.clone(), fable: w, reset_credits: None, limit_hit: None, plan: None,
+        Quota { five_hour: w.clone(), seven_day: w.clone(), fable: w, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
                 updated_at: crate::db::now(), source: "test".into(), account: None, host: "local".into() }
     }
 
@@ -1863,6 +1863,7 @@ mod quota_restart_tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: Some(hit_until(until)),
             plan: None,
@@ -2326,6 +2327,7 @@ mod turn_done_quota_tests {
             five_hour: None,
             seven_day: None,
             fable: None,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: Some(crate::quota::LimitHit {
                 message: SESSION_BANNER.into(),

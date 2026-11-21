@@ -169,6 +169,7 @@ pub fn parse_grok_usage<Tz: TimeZone>(screen: &str, now: DateTime<Tz>) -> Option
         five_hour: five,
         seven_day: seven,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan,

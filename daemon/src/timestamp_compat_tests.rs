@@ -669,6 +669,7 @@ async fn a_quota_cache_row_written_in_seconds_does_not_block_a_newer_millisecond
         five_hour: None,
         seven_day: None,
         fable: None,
+        argon_weekly: None,
         reset_credits: None,
         limit_hit: None,
         plan: Some(at.to_string()),
