@@ -219,6 +219,7 @@ pub fn spawn_claude_poller(app: Arc<App>) {
                         Ok(false) => tracing::info!(host = %host, "claude not installed; claude quota stays null"),
                         Err(e) => tracing::warn!(host = %host, error = %e, "claude quota refresh failed"),
                     }
+                    crate::runners::claude_login_expiry::refresh_host_if_due(&app, &host).await;
                 }
             })
             .await;

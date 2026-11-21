@@ -81,12 +81,48 @@ function useUnread() {
   }, [markCurrentRead])
 }
 
+import { collectClaudeExpiryAlerts, expiryNoticeText } from './lib/claudeLoginExpiry'
 export function Notices() {
   const t = useT()
   const notices = useStore((s) => s.notices)
   const dismiss = useStore((s) => s.dismiss)
+  const localClaudeLoginExpiresAt = useStore((s) => s.localClaudeLoginExpiresAt)
+  const hosts = useStore((s) => s.hosts)
+  const dismissedLoginExpiry = useStore((s) => s.dismissedLoginExpiry)
+  const dismissLoginExpiry = useStore((s) => s.dismissLoginExpiry)
+  const loginIdentity = useStore((s) => s.loginIdentity)
+  const expiryAlerts = collectClaudeExpiryAlerts({
+    localExpiry: localClaudeLoginExpiresAt,
+    hosts,
+    nowMs: Date.now(),
+  }).filter((a) => dismissedLoginExpiry[`${a.host}:${a.account}`] !== a.stage)
   return (
     <div className="notices" role="status" aria-live="polite">
+      {expiryAlerts.map((a) => {
+        const key = `${a.host}:${a.account}`
+        const hostName = a.host === 'local' ? t('本機') : a.host
+        return (
+          <div
+            key={`expiry:${key}`}
+            className={`notice ${a.stage === 'expired' ? 'error' : 'warn'} notice-top-center`}
+            role={a.stage === 'expired' ? 'alert' : undefined}
+          >
+            <span style={{ flex: 1 }}>{expiryNoticeText(a, hostName)}</span>
+            <button
+              type="button"
+              className="notice-action"
+              onClick={() => {
+                void loginIdentity(a.host, a.account)
+              }}
+            >
+              {t('重新登入')}
+            </button>
+            <button type="button" onClick={() => dismissLoginExpiry(key, a.stage)} aria-label={t('關閉')}>
+              ✕
+            </button>
+          </div>
+        )
+      })}
       {notices.map((n) => (
         <div key={n.id} className={`notice ${n.kind}${n.topCenter ? ' notice-top-center' : ''}`} role={n.kind === 'error' ? 'alert' : undefined}>
           <span style={{ flex: 1 }}>{n.text}</span>

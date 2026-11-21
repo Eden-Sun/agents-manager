@@ -369,4 +369,5 @@ export default {
   '{host} 目前未連線，不能在那台建立身份。': '{host} is offline; accounts cannot be created there.',
   '這個目錄就是預設帳號用的目錄：新身份會和預設帳號共用同一份登入。': 'This directory is the default account\'s directory: the new account would share its sign-in.',
   '這個目錄已被 {names} 使用：兩個身份會共用同一份登入。': 'This directory is already used by {names}: the two accounts would share one sign-in.',
+  '重新登入': 'Sign in again',
 } satisfies Dict

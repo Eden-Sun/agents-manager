@@ -1425,6 +1425,7 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
     let mut out = Vec::new();
     let tools = app.tools.lock().await.clone();
     let baselines = app.host_baseline.lock().await.clone();
+    let expiries = app.claude_login_expiry.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for c in app.hosts.list().await {
         let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
         let t = tools.get(&c.name);
@@ -1445,6 +1446,7 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
             "baseline": baselines.get(&c.name).map(|b| json!(b.view(chrono::Utc::now()))),
+            "claude_login_expires_at": expiries.get(&c.name).filter(|m| !m.is_empty()),
             "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
     }
@@ -4548,9 +4550,17 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
     let Some(fence) = app.hosts.fence(&name).await else {
         return Err(LcError::NotFound("host".into()));
     };
-    let idn = crate::tools::identity_for_host(&app, &name, &identity)
-        .await
-        .ok_or_else(|| LcError::NotFound("identity".into()))?;
+    let idn = match crate::tools::identity_for_host(&app, &name, &identity).await {
+        Some(i) => i,
+        None if identity == "cc0" && !logout => crate::config::IdentityCfg {
+            name: "cc0".into(),
+            kind: "claude".into(),
+            host: None,
+            env: BTreeMap::new(),
+            args: Vec::new(),
+        },
+        None => return Err(LcError::NotFound("identity".into())),
+    };
     let Some(_) = crate::tools::cached_path(&app, &name, &idn.kind).await else {
         return Err(LcError::conflict(
             "identity_login_unavailable",

@@ -1120,7 +1120,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `schedule_notice` | `{"project_id","schedule_id","schedule_code","schedule_name","occurrence_id","status","error"}`：排程終態且依 `notify` 該通知（`failure`＝failed／unknown；`all`＝另加 done）。每筆終態只推一次（`notified` 去重）。 |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
-| `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
+| `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?,"claude_login_expires_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上；`claude_login_expires_at` 為各 claude 身份的 `refreshTokenExpiresAt` 毫秒 epoch map） |
 | `tool_install_done` | `{"host","kind","install_id","outcome","installed","pane_id","pane_kept","timed_out"}`：§12.7 直接安裝（省略 `via_bot_id`）收尾。`installed:true` 只表示指令已結束且重偵測成功；逾時或換代即使 binary 可用也為 `false`；`false` 且 `pane_kept:true` 時 pane 沒關，錯誤輸出在 `pane_id` 的終端快照裡（使用者自己關了 pane 則 `pane_kept:false`）；`timed_out` ＝等滿 15 分鐘（此時 `installed:false`、保留 pane）。`outcome` 為 `installed\|failed\|timeout\|superseded`；換代／失聯的 `superseded` 只結束原 `install_id`，`pane_id:""`、`pane_kept:false`，不可操作新主機的 pane。借 bot 安裝不推這個事件 |
 | `quota_updated` | 見 §12.5 |
 | `codex_reset_updated` | 與 §2 `codex_reset` 同格式；成功刷新後推送，通知依 `notice.id` 去重；資料來源 https://codex-reset.com/ |
@@ -1982,7 +1982,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 
 | 狀況 | 回應 |
 |---|---|
-| identity 不存在 | `404 {"what":"identity"}` |
+| identity 不存在 | `404 {"what":"identity"}`（`cc0` 為預設 claude 帳號，未寫在設定檔也可登入） |
 | 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable","host","identity","kind","message"}`（`message` 是人話；`reason` 是機器 key，不能再用 `reason` 放中文否則會蓋掉） |
 | 同 host／identity 已有 claude 登入流程 | `409 {"reason":"identity_login_in_progress","host","identity","message"}`；先完成或關閉原登入終端 |
 | host 不存在 / 未連線 / pane 建立失敗 | `404 {"what":"host"}` / 502 |

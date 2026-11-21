@@ -223,5 +223,6 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
 /// 偶爾是「失敗訊息來不及讀、pane 就被收掉」被當成 finished——那時提示會少一次，下一次授權失敗或探測會再把它叫回來。
 async fn finished(app: &Arc<App>, host: &str, identity: &str) -> Value {
     crate::runners::login_prompt::clear_and_push(app, host, identity).await;
+    crate::runners::claude_login_expiry::refresh_host(app, host).await;
     json!({"sent": true, "outcome": "finished", "message": Value::Null})
 }

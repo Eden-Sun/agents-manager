@@ -274,6 +274,7 @@ pub struct App {
     pub login_reservations: crate::login_assist::Reservations,
     /// 回合授權失敗記下的「這個身份要重新登入」（`login_prompt.rs`）：`(host, identity)` → 帳。只在記憶體。
     pub login_needed: crate::login_prompt::Registry,
+    pub claude_login_expiry: std::sync::Mutex<std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>>,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
     /// 預覽（`preview.rs`）的行程／port 查詢，測試換成假貨；正式是 herdr＋本機 TCP。
@@ -438,6 +439,7 @@ impl App {
             login_panes: Default::default(),
             login_reservations: Default::default(),
             login_needed: Default::default(),
+            claude_login_expiry: Default::default(),
             #[cfg(test)]
             preview_env: Default::default(),
             pane_live: Default::default(),
@@ -826,6 +828,9 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             }
             if let Some(b) = app.host_baseline.lock().await.get(&conn.name) {
                 ev.insert("baseline".into(), json!(b.view(chrono::Utc::now())));
+            }
+            if let Some(exp) = app.claude_login_expiry.lock().unwrap_or_else(|e| e.into_inner()).get(&conn.name).filter(|m| !m.is_empty()) {
+                ev.insert("claude_login_expires_at".into(), json!(exp));
             }
             app.emit("host_changed", Value::Object(ev)).await;
             emit_daemon_status(app).await;

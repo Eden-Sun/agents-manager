@@ -28,6 +28,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
+import { claudeExpiryState, formatExpiryTime } from '../lib/claudeLoginExpiry'
 import { useAgyMissing } from './agyInstallState'
 import { creditRows, creditUrgent, fmtCreditDate, fmtCreditIn, nearestCreditLeft } from '../lib/resetCredits'
 import { RULE_5H, RULE_WEEKLY, fmtLeft, fmtLeftLong, msUntil, resetBadge } from '../lib/quotaReset'
@@ -39,6 +40,7 @@ import { limitHitWhen } from '../lib/limitHitWhen'
 import './quotaStrip.css'
 import { useUserTimeZone } from '../lib/userTime'
 
+const EMPTY_EXPIRY: Record<string, number> = {}
 const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok', 'agy']
 
 type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
@@ -420,6 +422,11 @@ function Gauge({
   const fable = remaining(q?.fable)
   const argon = entry.kind === 'agy' ? remaining(q?.argon_weekly) : null
   const disabledMap = useDisabledQuota()
+  const expiryMap = useStore((s) =>
+    host === LOCAL_HOST ? s.localClaudeLoginExpiresAt : (s.hosts.find((h) => h.name === host)?.claude_login_expires_at ?? EMPTY_EXPIRY),
+  )
+  const claudeExpiry =
+    entry.kind === 'claude' ? claudeExpiryState(expiryMap[entry.identity ?? 'cc0'], now) : null
   let windows: WindowBar[]
   if (compact && seven !== null) {
     const shown: WindowBar = windowBar(weekLabel(entry.kind), seven, q?.seven_day, q?.updated_at)
@@ -536,6 +543,19 @@ function Gauge({
           <span aria-hidden="true" className="quota-kind-icon">
             <KindIcon kind={entry.kind} />
           </span>
+          {claudeExpiry ? (
+            <span
+              className={`quota-expiry-badge ${claudeExpiry.stage}`}
+              title={
+                claudeExpiry.stage === 'expired'
+                  ? t('Claude 登入已過期')
+                  : t('Claude 登入將於 {time} 到期', { time: formatExpiryTime(claudeExpiry.expiresAtMs) })
+              }
+              aria-label={claudeExpiry.stage === 'expired' ? t('登入已過期') : t('登入即將到期')}
+            >
+              !
+            </span>
+          ) : null}
         </span>
         {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
@@ -905,10 +925,35 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         </>
       ) : null}
       {entry.kind === 'codex' ? <CodexResetHint now={now} detail /> : null}
+      {entry.kind === 'claude' && !loggedOut ? <ClaudeExpiryPopNote host={host} identity={entry.identity ?? 'cc0'} now={now} /> : null}
     </div>
   )
 }
 
+function ClaudeExpiryPopNote({ host, identity, now }: { host: string; identity: string; now: number }) {
+  const t = useT()
+  const expiryMap = useStore((s) =>
+    host === LOCAL_HOST ? s.localClaudeLoginExpiresAt : (s.hosts.find((h) => h.name === host)?.claude_login_expires_at ?? EMPTY_EXPIRY),
+  )
+  const loginIdentity = useStore((s) => s.loginIdentity)
+  const st = claudeExpiryState(expiryMap[identity], now)
+  if (!st) return null
+  return (
+    <>
+      <p className={`quota-pop-note ${st.stage === 'expired' ? 'error' : 'warn'}`}>
+        {st.stage === 'expired'
+          ? t('{host} 上這個帳號的 Claude 登入已過期。', { host: hostLabel(host, t) })
+          : t('{host} 上這個帳號的 Claude 登入將於 {time} 到期。', {
+              host: hostLabel(host, t),
+              time: formatExpiryTime(st.expiresAtMs),
+            })}
+      </p>
+      <button type="button" className="quota-login-btn" onClick={() => void loginIdentity(host, identity)}>
+        {t('重新登入')}
+      </button>
+    </>
+  )
+}
 export function QuotaStrip({
   focusKind,
   focusIdentity,

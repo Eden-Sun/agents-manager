@@ -17,6 +17,7 @@ pub mod build_scheduler;
 pub mod bulk_restart;
 pub mod child_alerts;
 pub(crate) mod claude_child_log;
+pub mod claude_login_expiry;
 pub mod child_done;
 pub mod relay_requests;
 pub mod relay_deputy;

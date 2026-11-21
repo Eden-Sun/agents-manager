@@ -2147,6 +2147,12 @@ button.pane-toggle:hover:not(:disabled) {
   color: var(--danger);
 }
 
+.notice.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border-strong));
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
 .notice.notice-top-center {
   position: fixed;
   top: calc(env(safe-area-inset-top) + 12px);

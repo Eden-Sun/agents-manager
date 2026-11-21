@@ -671,4 +671,11 @@ export default {
   '從登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改 alias 內容請編輯該主機的 shell 設定。「不再提供給新 Bot」只會把它從身份選單拿掉，「從 shell 設定移除」則會刪掉支援的 Claude ccN alias。': 'Identities recognized from the {alias} aliases in the login shell ({rc}, etc.). You can assign them to a bot directly. To change an alias, edit that host\'s shell config. "No longer offer to new bots" only removes it from the identity picker; "Remove from shell config" deletes the supported Claude ccN alias.',
   '打開登入終端': 'Open sign-in terminal',
   '已新增 {name}（尚未登入）': 'Added {name} (not signed in yet)',
+  'Claude 登入已過期': 'Claude sign-in expired',
+  'Claude 登入將於 {time} 到期': 'Claude sign-in expires at {time}',
+  '登入已過期': 'Sign-in expired',
+  '登入即將到期': 'Sign-in expiring soon',
+  '{host} 上這個帳號的 Claude 登入已過期。': 'The Claude sign-in for this account on {host} has expired.',
+  '{host} 上這個帳號的 Claude 登入將於 {time} 到期。': 'The Claude sign-in for this account on {host} expires at {time}.',
+  '重新登入': 'Sign in again',
 } satisfies Dict

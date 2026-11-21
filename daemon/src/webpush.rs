@@ -1064,6 +1064,7 @@ pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)>
 pub(crate) struct AuthQuotaNotifier {
     auth_sent: std::sync::Mutex<std::collections::HashMap<(String, String, String), std::time::Instant>>,
     quota_sent: std::sync::Mutex<std::collections::HashMap<(String, Option<String>), (Option<String>, std::time::Instant)>>,
+    login_expiry_sent: std::sync::Mutex<std::collections::HashMap<(String, String), &'static str>>,
 }
 
 static NOTIFIER: std::sync::OnceLock<AuthQuotaNotifier> = std::sync::OnceLock::new();
@@ -1077,6 +1078,7 @@ pub(crate) fn clear_notifier() {
     let n = notifier();
     n.auth_sent.lock().unwrap().clear();
     n.quota_sent.lock().unwrap().clear();
+    n.login_expiry_sent.lock().unwrap().clear();
 }
 
 impl AuthQuotaNotifier {
@@ -1118,6 +1120,21 @@ impl AuthQuotaNotifier {
         let mut g = self.quota_sent.lock().unwrap_or_else(|e| e.into_inner());
         g.retain(|(k, _), _| k != quota_key);
     }
+
+    fn admit_login_expiry(&self, host: &str, account: &str, stage: &'static str) -> bool {
+        let key = (host.to_string(), account.to_string());
+        let mut g = self.login_expiry_sent.lock().unwrap_or_else(|e| e.into_inner());
+        if g.get(&key).copied() == Some(stage) {
+            return false;
+        }
+        g.insert(key, stage);
+        true
+    }
+
+    fn clear_login_expiry(&self, host: &str, account: &str) {
+        let mut g = self.login_expiry_sent.lock().unwrap_or_else(|e| e.into_inner());
+        g.remove(&(host.to_string(), account.to_string()));
+    }
 }
 
 pub(crate) fn clear_auth_push(host: &str, kind: &str, identity: &str) {
@@ -1131,6 +1148,46 @@ pub(crate) fn clear_auth_push_all_kinds(host: &str, identity: &str) {
 
 pub(crate) fn clear_quota_push(quota_key: &str) {
     notifier().clear_quota(quota_key);
+}
+
+pub(crate) fn clear_login_expiry_push(host: &str, account: &str) {
+    notifier().clear_login_expiry(host, account);
+}
+
+pub(crate) fn spawn_login_expiry_push(app: &Arc<App>, host: &str, account: &str, stage: &'static str, expires_at_ms: i64) {
+    if !auth_enabled(&app.data_dir) {
+        return;
+    }
+    if !notifier().admit_login_expiry(host, account, stage) {
+        return;
+    }
+    let (app, host, account) = (app.clone(), host.to_string(), account.to_string());
+    tokio::spawn(async move {
+        if load_subs(&app.data_dir).is_empty() {
+            return;
+        }
+        let where_label = if host == crate::config::LOCAL_HOST { "本機" } else { host.as_str() };
+        let (title, body) = if stage == "expired" {
+            (
+                "Claude 登入已過期",
+                format!("{account}（{where_label}）的 Claude 登入已過期，請重新登入"),
+            )
+        } else {
+            let formatted = chrono::DateTime::from_timestamp_millis(expires_at_ms)
+                .map(|dt| {
+                    let offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+                    dt.with_timezone(&offset).format("%m/%d %H:%M (+8)").to_string()
+                })
+                .unwrap_or_else(|| "即將".to_string());
+            (
+                "Claude 登入即將到期",
+                format!("{account}（{where_label}）的 Claude 登入將於 {formatted} 到期"),
+            )
+        };
+        let payload = plain_payload(title, &body, &format!("claude_expiry:{host}:{account}:{stage}"), "/");
+        let subject = app.cfg.get().await.server.push_subject.clone();
+        let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
+    });
 }
 
 fn model_of_bucket(bucket: &str) -> Option<&'static str> {
@@ -2937,6 +2994,45 @@ pub(crate) mod tests {
         spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some("2026-11-12T21:00:00Z"));
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(rx.try_recv().is_err(), "開關關閉不推");
+
+        set_test_sender(None);
+    }
+
+    #[tokio::test]
+    async fn login_expiry_push_sends_once_per_stage_and_resets_when_cleared() {
+        let _g = SENDER_TESTS.lock().await;
+        clear_notifier();
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        save_subs(&app.data_dir, &[fresh_sub("https://push.example/expiry").0]).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        set_test_sender(Some(Arc::new(move |_sub: Subscription, body: Vec<u8>| {
+            let _ = tx.send(serde_json::from_slice(&body).unwrap());
+            Box::pin(async { SendOutcome::Sent })
+        })));
+
+        let ts = 1_795_363_200_000i64;
+        spawn_login_expiry_push(&app, "local", "cc0", "3d", ts);
+        let got_3d = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(got_3d["title"], "Claude 登入即將到期");
+        assert!(got_3d["body"].as_str().unwrap().contains("cc0（本機）"), "{got_3d}");
+
+        spawn_login_expiry_push(&app, "local", "cc0", "3d", ts);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(rx.try_recv().is_err());
+
+        spawn_login_expiry_push(&app, "local", "cc0", "1d", ts);
+        let got_1d = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(got_1d["title"], "Claude 登入即將到期");
+
+        spawn_login_expiry_push(&app, "local", "cc0", "expired", ts);
+        let got_exp = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(got_exp["title"], "Claude 登入已過期");
+
+        clear_login_expiry_push("local", "cc0");
+        spawn_login_expiry_push(&app, "local", "cc0", "3d", ts);
+        let got_again = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(got_again["title"], "Claude 登入即將到期");
 
         set_test_sender(None);
     }

@@ -20,6 +20,7 @@ import { create } from 'zustand'
 import { markUserNav } from './userNav'
 import * as api from '../api'
 import { retireApiSession } from '../api/apiBotSession'
+import { toClaudeLoginExpiresAt } from '../api/normalize'
 import {
   frameBotId,
   hostArray,
@@ -307,7 +308,7 @@ function persistUnread(s: { botUnread: Record<string, number> }) {
 
 export interface Notice {
   id: number
-  kind: 'error' | 'info'
+  kind: 'error' | 'warn' | 'info'
   text: string
   topCenter?: boolean
   action?: { label: string; run: () => void | Promise<void> }
@@ -377,6 +378,8 @@ export interface StoreState {
   localBaseline: HostBaseline | null
   hostBaselineSync: Record<string, 'off' | 'ask'>
   localIdentityStatus: IdentityStatusMap
+  localClaudeLoginExpiresAt: Record<string, number>
+  dismissedLoginExpiry: Record<string, string>
   disabledIdentities: string[]
   disabledKinds: string[]
   setKindDisabled: (host: string, kind: string, disabled: boolean) => Promise<void>
@@ -453,6 +456,7 @@ export interface StoreState {
   pruneDead: () => void
   notify: (kind: Notice['kind'], text: string, action?: Notice['action'], topCenter?: boolean) => void
   dismiss: (id: number) => void
+  dismissLoginExpiry: (key: string, stage: string) => void
 
   startBot: (botId: string) => Promise<void>
   stopBot: (botId: string) => Promise<void>
@@ -782,6 +786,8 @@ export const useStore = create<StoreState>((set, get) => {
   localBaseline: null,
   hostBaselineSync: {},
   localIdentityStatus: {},
+  localClaudeLoginExpiresAt: {},
+  dismissedLoginExpiry: {},
   disabledIdentities: [],
   disabledKinds: [],
   quota: {},
@@ -860,6 +866,12 @@ export const useStore = create<StoreState>((set, get) => {
       noticeTimers.delete(id)
     }
     set((s) => ({ notices: s.notices.filter((n) => n.id !== id) }))
+  },
+
+  dismissLoginExpiry: (key, stage) => {
+    set((s) => ({
+      dismissedLoginExpiry: { ...s.dismissedLoginExpiry, [key]: stage },
+    }))
   },
 
   async bootstrap() {
@@ -952,6 +964,7 @@ export const useStore = create<StoreState>((set, get) => {
         localBaseline: st.baseline,
         hostBaselineSync: st.host_baseline_sync ?? {},
         localIdentityStatus: st.identity_status,
+        localClaudeLoginExpiresAt: st.claude_login_expires_at ?? {},
         identities: st.identities,
         projects: st.projects,
         bots: [...st.bots, ...keptPending],
@@ -2922,6 +2935,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
           ...(pick(data, 'baseline') !== undefined ? { localBaseline: toHostBaseline(pick(data, 'baseline')) } : {}),
           ...(pick(data, 'identities') !== undefined
             ? { localIdentityStatus: toIdentityStatusMap(pick(data, 'identities')) }
+            : {}),
+          ...(pick(data, 'claude_login_expires_at') !== undefined
+            ? { localClaudeLoginExpiresAt: toClaudeLoginExpiresAt(pick(data, 'claude_login_expires_at')) }
             : {}),
         })
         return

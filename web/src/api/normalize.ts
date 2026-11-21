@@ -207,9 +207,18 @@ export function toHost(v: unknown): Host | null {
     tools: toToolMap(pick(v, 'tools')),
     baseline: toHostBaseline(pick(v, 'baseline')),
     identity_status: toIdentityStatusMap(pick(v, 'identities')),
+    claude_login_expires_at: toClaudeLoginExpiresAt(pick(v, 'claude_login_expires_at')),
   }
 }
 
+export function toClaudeLoginExpiresAt(raw: unknown): Record<string, number> {
+  if (!isRec(raw)) return {}
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) out[k] = v
+  }
+  return out
+}
 export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
   const root = isRec(raw) ? raw : {}
   const out: IdentityStatusMap = {}
@@ -669,6 +678,7 @@ export function toState(raw: unknown): AppState {
   let localHerdr = UNKNOWN_HERDR
   let localBaseline: HostBaseline | null = null
   let localIdentityStatus: IdentityStatusMap = {}
+  let localClaudeLoginExpiresAt: Record<string, number> | null = null
   for (const h of hostArray(pick(root, 'hosts'))) {
     const host = toHost(h)
     if (!host) continue
@@ -678,6 +688,7 @@ export function toState(raw: unknown): AppState {
       localHerdr = host.herdr
       localBaseline = host.baseline
       localIdentityStatus = host.identity_status
+      localClaudeLoginExpiresAt = host.claude_login_expires_at ?? null
       continue
     }
     if (!hosts.some((x) => x.name === host.name)) hosts.push(host)
@@ -745,6 +756,7 @@ export function toState(raw: unknown): AppState {
     baseline: localBaseline,
     host_baseline_sync: toHostBaselineSync(pick(root, 'host_baseline_sync')),
     identity_status: localIdentityStatus,
+    claude_login_expires_at: localClaudeLoginExpiresAt,
     hosts,
     identities,
     projects,

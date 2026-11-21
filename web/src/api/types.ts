@@ -140,6 +140,7 @@ export interface Host {
   tools: ToolMap
   baseline: HostBaseline | null
   identity_status: IdentityStatusMap
+  claude_login_expires_at?: Record<string, number> | null
 }
 
 export interface ToolStatus {
@@ -522,6 +523,7 @@ export interface AppState {
   baseline: HostBaseline | null
   host_baseline_sync: Record<string, 'off' | 'ask'>
   identity_status: IdentityStatusMap
+  claude_login_expires_at?: Record<string, number> | null
   hosts: Host[]
   identities: Identity[]
   projects: Project[]

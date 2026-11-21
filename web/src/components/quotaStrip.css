@@ -194,6 +194,30 @@
   color: var(--warn);
 }
 
+.quota-pop-note.error {
+  color: var(--danger);
+}
+
+.quota-expiry-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  color: #111;
+  background: var(--warn);
+  margin-left: 2px;
+}
+
+.quota-expiry-badge.expired {
+  color: #fff;
+  background: var(--danger);
+}
+
 .quota-kind {
   flex: none;
   display: inline-flex;
