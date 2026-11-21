@@ -159,3 +159,40 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+
+.attempt-row {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.attempt-details > summary {
+  cursor: pointer;
+  min-height: 40px;
+  display: list-item;
+  align-items: center;
+}
+
+.attempt-row.failed > .attempt-details > summary {
+  color: var(--danger, #cf222e);
+}
+
+.attempt-failed-tag {
+  font-weight: 600;
+}
+
+.attempt-body {
+  padding: 4px 0 8px 12px;
+  min-width: 0;
+}
+
+.attempt-reasons {
+  margin: 4px 0;
+}
+
+.retro-pair section.attempt-version.failed {
+  border: 1px solid var(--danger, #cf222e);
+}
+
+.retro-pair section.attempt-version.failed h5 {
+  color: var(--danger, #cf222e);
+}

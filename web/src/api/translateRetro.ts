@@ -8,6 +8,11 @@ export interface RetroAttempt {
   reason: string | null
   jevProb: number | null
   costUsd: number | null
+  text: string | null
+  textTruncated: boolean
+  hasText: boolean
+  sameAsFinal: boolean
+  checks: TranslateLocalChecks | null
 }
 
 export interface TranslateRecordNote {
@@ -54,7 +59,18 @@ const rec = (v: unknown): Record<string, unknown> => (typeof v === 'object' && v
 
 function parseAttempt(raw: unknown): RetroAttempt {
   const o = rec(raw)
-  return { model: str(o.model) ?? '', effort: str(o.effort), reason: str(o.reason), jevProb: num(o.jev_prob), costUsd: num(o.cost_usd) }
+  return {
+    model: str(o.model) ?? '',
+    effort: str(o.effort),
+    reason: str(o.reason),
+    jevProb: num(o.jev_prob),
+    costUsd: num(o.cost_usd),
+    text: str(o.text),
+    textTruncated: bool(o.text_truncated),
+    hasText: bool(o.has_text) || str(o.text) !== null,
+    sameAsFinal: bool(o.same_as_final),
+    checks: parseLocalChecks(o.checks),
+  }
 }
 
 function parseLocalChecks(raw: unknown): TranslateLocalChecks | null {
@@ -125,7 +141,6 @@ export function parseTranslateRecord(raw: unknown): TranslateRecord | null {
 export async function fetchTranslateRecords(
   opts: { projectId?: string; limit?: number; before?: string; filter?: TranslateRecordFilter } = {},
 ): Promise<{ records: TranslateRecord[]; nextBefore: string | null }> {
-  if (rawTransport.mock) return { records: [], nextBefore: null }
   const q = new URLSearchParams()
   if (opts.projectId) q.set('project_id', opts.projectId)
   if (opts.limit) q.set('limit', String(opts.limit))
@@ -138,7 +153,6 @@ export async function fetchTranslateRecords(
 }
 
 export async function fetchMessageTranslateRecord(messageId: string): Promise<TranslateRecord | null> {
-  if (rawTransport.mock) return null
   try {
     const raw = rec(await rawTransport.request('GET', `/messages/${encodeURIComponent(messageId)}/translate-record`))
     return parseTranslateRecord(raw.record)

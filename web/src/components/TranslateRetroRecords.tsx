@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   fetchMessageTranslateRecord,
@@ -44,16 +44,76 @@ function reasonLabel(t: T, reason: string): string {
   }
 }
 
-function AttemptLine({ t, a }: { t: T; a: RetroAttempt }) {
+function AttemptRow({ t, a, i, r }: { t: T; a: RetroAttempt; i: number; r: TranslateRecord }) {
   const name = translationModelName(a.model) || a.model
-  const parts = [a.reason ? t('未過：{reason}', { reason: reasonLabel(t, a.reason) }) : t('通過')]
-  if (a.jevProb !== null) parts.push(`Jev ${a.jevProb.toFixed(2)}`)
-  return (
-    <li>
+  const failed = a.reason !== null
+  const [full, setFull] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const expandable = a.text !== null || a.hasText || a.sameAsFinal
+  const shown = a.text ?? full
+  const onToggle = (e: SyntheticEvent<HTMLDetailsElement>) => {
+    if (!e.currentTarget.open || a.text !== null || !a.hasText || full !== null || !r.messageId) return
+    setLoading(true)
+    fetchMessageTranslateRecord(r.messageId).then(
+      (rec) => {
+        setFull(rec?.attempts[i]?.text ?? '')
+        setLoading(false)
+      },
+      () => {
+        setFull('')
+        setLoading(false)
+      },
+    )
+  }
+  const version = a.sameAsFinal ? r.translation : shown
+  const flags = a.checks ? failedChecks(t, a.checks) : []
+  const head = (
+    <>
       <span title={a.model}>{name}</span>
       {a.effort ? ` · ${a.effort}` : ''}
       {'｜'}
-      {parts.join('｜')}
+      {failed ? (
+        <span className="attempt-failed-tag" data-k="attempt-failed">
+          {t('未過：{reason}', { reason: reasonLabel(t, a.reason ?? '') })}
+        </span>
+      ) : (
+        t('通過')
+      )}
+      {a.jevProb !== null ? ` · Jev ${a.jevProb.toFixed(2)}` : ''}
+    </>
+  )
+  if (!expandable) return <li className={`attempt-row${failed ? ' failed' : ''}`} data-k="attempt-row">{head}</li>
+  return (
+    <li className={`attempt-row${failed ? ' failed' : ''}`} data-k="attempt-row">
+      <details className="attempt-details" onToggle={onToggle}>
+        <summary>{head}</summary>
+        <div className="attempt-body">
+          {loading ? <p className="hint">{t('讀取中…')}</p> : null}
+          {!loading && version === null ? <p className="hint">{t('（舊快取，沒有這次的譯文）')}</p> : null}
+          {!loading && version !== null && version !== undefined && version !== '' ? (
+            <>
+              {a.sameAsFinal ? <p className="hint">{t('與最終採用的譯文相同')}</p> : null}
+              {a.textTruncated ? <p className="hint">{t('（只存前 1500 字）')}</p> : null}
+              {failed && flags.length > 0 ? (
+                <p className="hint attempt-reasons" data-k="attempt-reasons">
+                  {t('未過的檢查')}：{flags.join('、')}
+                </p>
+              ) : null}
+              <div className="retro-pair">
+                <section>
+                  <h5>{t('原文')}</h5>
+                  <pre>{r.source || '—'}</pre>
+                </section>
+                <section className={`attempt-version${failed ? ' failed' : ''}`} data-k="attempt-version">
+                  <h5>{t('這一版譯文')}</h5>
+                  <pre>{version}</pre>
+                </section>
+              </div>
+            </>
+          ) : null}
+          {!loading && version === '' ? <p className="hint">{t('（舊快取，沒有這次的譯文）')}</p> : null}
+        </div>
+      </details>
     </li>
   )
 }
@@ -110,7 +170,7 @@ export function TranslateRecordCard({
             <dd>
               <ol className="retro-attempts" data-k="retro-attempts">
                 {r.attempts.map((a, i) => (
-                  <AttemptLine key={i} t={t} a={a} />
+                  <AttemptRow key={i} t={t} a={a} i={i} r={r} />
                 ))}
               </ol>
             </dd>

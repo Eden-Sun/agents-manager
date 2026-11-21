@@ -93,7 +93,7 @@ struct CacheEntry {
     translated_at: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct AttemptLog {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,6 +104,16 @@ pub struct AttemptLog {
     pub jev_prob: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_truncated: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_as_final: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_text: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -419,10 +429,9 @@ fn local_convert(id: &str, bot_id: Option<String>, project_id: Option<String>, c
         jev_prob: None,
         attempt_log: vec![AttemptLog {
             model: crate::zh_convert::MODEL.into(),
-            effort: None,
-            reason: None,
-            jev_prob: None,
             cost_usd: Some(0.0),
+            same_as_final: true,
+            ..Default::default()
         }],
         message_id: Some(id.to_string()),
         bot_id,
@@ -612,14 +621,30 @@ struct Attempt {
     jev: Option<f64>,
 }
 
-fn attempt_log_of(a: &Attempt) -> AttemptLog {
-    AttemptLog {
-        model: a.model.clone(),
-        effort: a.effort.clone(),
-        reason: a.reason.map(str::to_string),
-        jev_prob: a.jev,
-        cost_usd: a.cost,
-    }
+fn attempt_logs(attempts: &[Attempt], final_idx: Option<usize>, content: &str) -> Vec<AttemptLog> {
+    attempts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let same = Some(i) == final_idx;
+            let (text, text_truncated) = if same {
+                (None, false)
+            } else {
+                (Some(a.translation.chars().take(RECORD_TEXT_MAX_CHARS).collect()), a.translation.chars().count() > RECORD_TEXT_MAX_CHARS)
+            };
+            AttemptLog {
+                model: a.model.clone(),
+                effort: a.effort.clone(),
+                reason: a.reason.map(str::to_string),
+                jev_prob: a.jev,
+                cost_usd: a.cost,
+                text,
+                text_truncated,
+                same_as_final: same,
+                has_text: false,
+                checks: Some(local_check_flags(content, &a.translation)), }
+        })
+        .collect()
 }
 
 /// `model`：`Some` 時這一次改用它（品質沒過的升級重試）；`None` 照設定的模型。
@@ -703,8 +728,9 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     }
 
     let (bot_id, project_id) = message_meta(app, id).await;
-    let attempt_log: Vec<AttemptLog> = attempts.iter().map(attempt_log_of).collect();
-    let Some(best) = attempts.iter().filter(|a| a.reason.is_none()).max_by(|a, b| score(a.jev).total_cmp(&score(b.jev))) else {
+    let best_idx = attempts.iter().enumerate().filter(|(_, a)| a.reason.is_none()).max_by(|(_, a), (_, b)| score(a.jev).total_cmp(&score(b.jev))).map(|(i, _)| i);
+    let attempt_log: Vec<AttemptLog> = attempt_logs(&attempts, best_idx, content);
+    let Some(best) = best_idx.map(|i| &attempts[i]) else {
         let last = attempts.last().expect("at least one attempt");
         let reason = last.reason.unwrap_or("untranslated");
         let models: Vec<String> = attempts.iter().map(|a| a.model.clone()).collect();
@@ -941,11 +967,14 @@ fn record_from_entry(entry: &CacheEntry, path: &Path, msg_ctx: Option<(&str, &st
         entry.rejected_translation.as_deref().unwrap_or("")
     };
     let translation: String = full_translation.chars().take(RECORD_TEXT_MAX_CHARS).collect();
-    let attempts = if !entry.attempt_log.is_empty() {
+    let attempts: Vec<AttemptLog> = if !entry.attempt_log.is_empty() {
         entry.attempt_log.clone()
     } else {
         last_retro.map(|r| r.attempts.clone()).unwrap_or_default()
-    };
+    }
+    .into_iter()
+    .map(|a| AttemptLog { has_text: a.text.is_some(), ..a })
+    .collect();
     let model = if !entry.model.is_empty() {
         entry.model.clone()
     } else {
@@ -1067,6 +1096,11 @@ pub async fn list_translate_records(
     all.sort_by(|a, b| crate::db::cmp_ts(&b.at, &a.at));
     let has_more = all.len() > limit;
     all.truncate(limit);
+    for r in &mut all {
+        for a in &mut r.attempts {
+            a.text = None;
+        }
+    }
     let next_before = if has_more { all.last().map(|r| r.at.clone()) } else { None };
     Ok(Json(json!({"records": all, "next_before": next_before})))
 }
@@ -2665,8 +2699,8 @@ mod retry_model_tests {
             low_confidence: true,
             effort: Some("high".into()),
             attempt_log: vec![
-                AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.005) },
-                AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.61), cost_usd: Some(0.015) },
+                AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.005), ..Default::default() },
+                AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.61), cost_usd: Some(0.015), ..Default::default() },
             ],
             retros: vec![legacy_retro],
             ..Default::default()
@@ -2757,6 +2791,63 @@ mod retry_model_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn attempt_logs_store_failed_text_truncated_and_skip_the_final() {
+        let attempts = vec![
+            Attempt { translation: "字".repeat(RECORD_TEXT_MAX_CHARS + 5), model: "claude-haiku-5-5".into(), usage: None, cost: Some(0.001), effort: None, reason: Some("untranslated"), jev: None },
+            Attempt { translation: "第二版".into(), model: "gpt-6-luna".into(), usage: None, cost: Some(0.002), effort: Some("high".into()), reason: None, jev: Some(0.7) },
+        ];
+        let log = attempt_logs(&attempts, Some(1), "source");
+        assert_eq!(log[0].text.as_deref().map(|t| t.chars().count()), Some(RECORD_TEXT_MAX_CHARS));
+        assert_eq!((log[0].text_truncated, log[0].same_as_final), (true, false));
+        assert_eq!((log[1].text.clone(), log[1].same_as_final), (None, true), "最終採用的那次不重複存");
+        assert!(log[0].checks.is_some());
+        let rejected = attempt_logs(&attempts, None, "source");
+        assert_eq!(rejected[1].text.as_deref(), Some("第二版"), "被擋時每一次都存");
+    }
+
+    #[tokio::test]
+    async fn attempt_text_is_served_on_single_record_and_stripped_from_list() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "attempt-text-bot").await;
+        let conv = crate::db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&bot.id).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let content = SRC.repeat(3);
+        let msg = crate::db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'hook',?)")
+            .bind(&msg).bind(&conv).bind(&content).bind("2026-11-21T06:00:00.000Z").execute(&e.app.db).await.unwrap();
+        save(
+            &cache_path(&e.app.data_dir, &cache_key(&msg, &content)),
+            &CacheEntry {
+                translation: "第二版".into(),
+                model: "gpt-6-luna".into(),
+                prompt_version: PROMPT_VERSION.into(),
+                attempt_log: vec![
+                    AttemptLog { model: "claude-haiku-5-5".into(), reason: Some("untranslated".into()), text: Some("English leftover".into()), checks: Some(json!({"untranslated": true})), ..Default::default() },
+                    AttemptLog { model: "gpt-6-luna".into(), same_as_final: true, ..Default::default() },
+                ],
+                message_id: Some(msg.clone()),
+                bot_id: Some(bot.id.clone()),
+                project_id: Some(e.project_id.clone()),
+                source_head: Some("Round 22.".into()),
+                translated_at: Some("2026-11-21T06:00:00.000Z".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let user = || Extension(crate::api::RequestPrincipal::User);
+        let got = get_message_translate_record(State(e.app.clone()), AxPath(msg.clone()), user()).await.unwrap().0;
+        let a = &got["record"]["attempts"];
+        assert_eq!(a[0]["text"], json!("English leftover"), "單則帶全文");
+        assert_eq!((a[0]["has_text"].clone(), a[1]["same_as_final"].clone()), (json!(true), json!(true)));
+        let listed = list_translate_records(user(), axum::extract::Query(RecordListQuery::default()), State(e.app.clone())).await.unwrap().0;
+        let row = listed["records"].as_array().unwrap().iter().find(|r| r["message_id"] == json!(msg)).unwrap();
+        assert!(row["attempts"][0].get("text").is_none(), "清單不帶全文");
+        assert_eq!(row["attempts"][0]["has_text"], json!(true));
+        let legacy: AttemptLog = serde_json::from_value(json!({"model": "claude-haiku-5-5"})).unwrap();
+        assert_eq!((legacy.text, legacy.has_text, legacy.checks), (None, false, None), "舊快取沒有譯文欄位就是 null");
+    }
+
     #[tokio::test]
     async fn record_list_orders_filters_pages_and_enforces_user_only() {
         let e = crate::testing::env().await;
@@ -2769,7 +2860,7 @@ mod retry_model_tests {
                 model: "claude-haiku-5-5".into(),
                 prompt_version: PROMPT_VERSION.into(),
                 cost_usd: Some(0.001),
-                attempt_log: vec![AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: None, jev_prob: Some(0.95), cost_usd: Some(0.001) }],
+                attempt_log: vec![AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: None, jev_prob: Some(0.95), cost_usd: Some(0.001), ..Default::default() }],
                 message_id: Some("m1".into()),
                 bot_id: Some(bot.id.clone()),
                 project_id: Some(e.project_id.clone()),
@@ -2788,8 +2879,8 @@ mod retry_model_tests {
                 cost_usd: Some(0.005),
                 low_confidence: true,
                 attempt_log: vec![
-                    AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.001) },
-                    AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.55), cost_usd: Some(0.004) },
+                    AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.001), ..Default::default() },
+                    AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.55), cost_usd: Some(0.004), ..Default::default() },
                 ],
                 message_id: Some("m2".into()),
                 bot_id: Some(bot.id.clone()),

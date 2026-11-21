@@ -7,6 +7,7 @@ import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
 import type { BotKind, RuntimeSettings } from './types'
 import { abortError } from './transport'
+import { mockTranslateMessage, mockTranslateRecord, mockTranslateRecords } from './mockTranslateRecord'
 import { mockTranslateEcho, surveyEnScreen, TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { mockTranslateOn } from './claudeApi'
 import { resetTranslateReady } from '../components/useTranslateReady'
@@ -1252,6 +1253,9 @@ export class MockTransport implements Transport {
     const q = new URLSearchParams(query ?? '')
     const b = (body ?? {}) as Rec
     const seg = rawPath.split('/').filter(Boolean)
+    if (method === 'POST' && seg.length === 3 && seg[0] === 'messages' && seg[2] === 'translate') return mockTranslateMessage()
+    if (method === 'GET' && seg.length === 3 && seg[0] === 'messages' && seg[2] === 'translate-record') return mockTranslateRecord(decodeURIComponent(seg[1]))
+    if (method === 'GET' && rawPath === '/translate-records') return mockTranslateRecords(q)
 
     if (seg.length === 3 && seg[0] === 'bots' && seg[2] === 'base-snapshot') {
       const id = decodeURIComponent(seg[1])

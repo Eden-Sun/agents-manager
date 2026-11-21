@@ -4,7 +4,8 @@ import { click, mount, setupDom, settle, teardownDom, unmountAll, until } from '
 import type { Message } from '../api/types'
 import { resetTranslationStore } from '../lib/messageTranslationStore'
 import { useMessageTranslation } from './useMessageTranslation'
-import { TranslateRecordsPanel } from './TranslateRetroRecords'
+import { TranslateRecordCard, TranslateRecordsPanel } from './TranslateRetroRecords'
+import type { TranslateRecord } from '../api/translateRetro'
 import { resetTranslateReady } from './useTranslateReady'
 
 before(setupDom)
@@ -190,6 +191,64 @@ test('翻譯紀錄子分頁：讀取清單、篩選與載入更多', async () =>
     await settle()
     await until(() => document.querySelectorAll('[data-k="retro-item"]').length === 1, '篩選只看重翻過')
     assert.ok(urls.some((u) => u.includes('filter=retried')))
+  } finally {
+    globalThis.fetch = base
+  }
+})
+
+const baseRecord = (over: Partial<TranslateRecord> = {}): TranslateRecord => ({
+  at: '2026-11-21T06:40:00.000Z', messageId: 'm-att', botId: 'b1', projectId: 'p1', status: 'done', model: 'gpt-6-luna', effort: 'high',
+  promptVersion: '4', costUsd: 0.02, attempts: [], retried: true, jevProb: 0.61, lowConfidence: false,
+  localChecks: { untranslated: false, partiallyUntranslated: false, markdownStructure: false, japaneseOutput: false }, checkFailed: false,
+  rejected: null, rejectDetail: null, source: 'Round 22: add tests.', translation: '第 22 輪：補測試。', notes: [], ...over,
+})
+
+const failedAttempt = (over: Record<string, unknown> = {}) => ({
+  model: 'claude-haiku-5-5', effort: null, reason: 'untranslated', jevProb: null, costUsd: 0.004,
+  text: null, textTruncated: false, hasText: true, sameAsFinal: false,
+  checks: { untranslated: true, partiallyUntranslated: false, markdownStructure: false, japaneseOutput: false }, ...over,
+})
+
+test('嘗試可展開看那一版譯文：未過的標示、列出未過原因，並與原文對照', async () => {
+  const record = baseRecord({
+    attempts: [
+      { ...failedAttempt({ text: 'Round 22: add tests.', hasText: true }), text: 'Round 22: add tests.' },
+      { model: 'gpt-6-luna', effort: 'high', reason: null, jevProb: 0.61, costUsd: 0.015, text: null, textTruncated: false, hasText: false, sameAsFinal: true, checks: null },
+    ] as TranslateRecord['attempts'],
+  })
+  await mount(<TranslateRecordCard r={record} bots={[]} />)
+  const rows = document.querySelectorAll<HTMLElement>('[data-k="attempt-row"]')
+  assert.equal(rows.length, 2)
+  assert.ok(rows[0].classList.contains('failed'), '未過的那一列有標示')
+  assert.ok(document.querySelector('[data-k="attempt-failed"]'), '未過原因在摘要裡')
+  await click(rows[0].querySelector('summary') as HTMLElement)
+  await settle()
+  const version = rows[0].querySelector('[data-k="attempt-version"]') as HTMLElement
+  assert.ok(version, '展開後看到這一版譯文')
+  assert.equal(version.querySelector('pre')?.textContent, 'Round 22: add tests.')
+  assert.ok(version.classList.contains('failed'), '譯文區塊醒目標示')
+  assert.match(rows[0].querySelector('[data-k="attempt-reasons"]')?.textContent ?? '', /未翻譯/, '列出未過的檢查')
+  assert.equal(rows[0].querySelectorAll('.retro-pair pre')[0].textContent, 'Round 22: add tests.', '原文在旁邊對照')
+})
+
+test('清單的嘗試只帶旗標：展開時才去單則讀全文；最終採用的那次顯示最終譯文', async () => {
+  const urls: string[] = []
+  const base = globalThis.fetch
+  globalThis.fetch = (async (input: string) => {
+    const url = String(input)
+    urls.push(url)
+    if (url.endsWith('/messages/m-att/translate-record')) {
+      return new Response(JSON.stringify({ message_id: 'm-att', record: { at: '2026-11-21T06:40:00.000Z', attempts: [{ model: 'claude-haiku-5-5', reason: 'untranslated', text: '完整的未過譯文', has_text: true }] } }), { status: 200 })
+    }
+    return new Response('{}', { status: 200 })
+  }) as unknown as typeof fetch
+  try {
+    const record = baseRecord({ attempts: [failedAttempt({ hasText: true, text: null })] })
+    await mount(<TranslateRecordCard r={record} bots={[]} />)
+    const row = document.querySelector<HTMLElement>('[data-k="attempt-row"]')!
+    await click(row.querySelector('summary') as HTMLElement)
+    await until(() => row.querySelector('[data-k="attempt-version"] pre')?.textContent === '完整的未過譯文', '展開後讀到全文')
+    assert.ok(urls.some((u) => u.endsWith('/messages/m-att/translate-record')), '展開時才讀單則')
   } finally {
     globalThis.fetch = base
   }
