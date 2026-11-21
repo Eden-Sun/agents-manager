@@ -491,6 +491,84 @@ CREATE TABLE IF NOT EXISTS lineage_sessions (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_sessions_checkpoint ON lineage_sessions(project_id, line) WHERE state = 'checkpoint';
 CREATE INDEX IF NOT EXISTS idx_lineage_sessions_line ON lineage_sessions(project_id, line, state);
 
+-- 承諾帳本（防遺忘，第 1 階段 T1，2026-11-21）：專案私有事項主表與交接稽核事件，見 am-base ledger 模組。
+-- 1. 專案私有承諾帳本主表
+CREATE TABLE IF NOT EXISTS ledger_items (
+    id                      TEXT PRIMARY KEY,              -- ULID
+    project_id              TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    code_no                 INTEGER NOT NULL,              -- 專案內單調遞增短碼（顯示為 L1, L2... 對齊第 0 階段）
+    source_message_id       TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    source_turn_id          TEXT REFERENCES turns(id) ON DELETE SET NULL,
+    ordinal                 INTEGER NOT NULL DEFAULT 0,    -- 同一訊息拆項序號（0 為原始收件項，1..N 為拆出子項或後續承諾）
+    title                   TEXT NOT NULL,                 -- 欠使用者的結果（短標題，<= 120 字）
+    status                  TEXT NOT NULL DEFAULT 'untriaged'
+                            CHECK (status IN (
+                                'untriaged',               -- 待分流（剛收件）
+                                'answered',                -- 當輪已答（無後續動作）
+                                'following',               -- 待跟進（有後續承諾／派工／等待）
+                                'clarifying',              -- 待向使用者釐清
+                                'done',                    -- 完成（已向使用者閉環或確認）
+                                'cancelled',               -- 取消（使用者明示不做）
+                                'merged'                   -- 已併入他項（指向 merged_into_id）
+                            )),
+    accountable_role        TEXT NOT NULL DEFAULT 'manager',
+    owner_bot_id            TEXT,                          -- 當前唯一承辦 bot ID（不設 ON DELETE CASCADE；NULL = 待接佇列）
+    promised_by_bot_id      TEXT,                          -- 作出承諾的 bot ID（例：代班副管理者）
+    relay_request_id        TEXT,                          -- 關聯的 relay_requests.id（副管理者代班改派／對帳用）
+    assignment_id           TEXT,                          -- 關聯的派工／子任務標識（可選）
+    deliverable             TEXT NOT NULL DEFAULT '',      -- 交付條件（什麼才算能向使用者交代）
+    next_step               TEXT NOT NULL DEFAULT '',      -- 下一步具體動作
+    wait_for                TEXT,                          -- 等待條件說明（例：等 child 完成／等使用者回覆）
+    due_at                  TEXT,                          -- 下次檢查／提醒到期時間（RFC3339 ms UTC）
+    merged_into_id          TEXT REFERENCES ledger_items(id) ON DELETE SET NULL,
+    close_reason            TEXT,                          -- 完成／取消／合併原因
+    version                 INTEGER NOT NULL DEFAULT 1,    -- 樂觀鎖版本號，每次狀態或承辦異動 +1
+    last_reminded_version   INTEGER,                       -- 去重提醒：上次已提醒的 version
+    last_reminded_stage     TEXT,                          -- 去重提醒：'untriaged' | 'due' | 'orphaned'
+    last_reminded_at        TEXT,                          -- 去重提醒時間
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+
+-- 專案內短碼唯一（L1, L2...）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_project_code
+    ON ledger_items(project_id, code_no);
+
+-- 同一使用者訊息冪等收件（source_message_id 非空時，同一 ordinal 只建一次）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_items_source_msg_ordinal
+    ON ledger_items(project_id, source_message_id, ordinal)
+    WHERE source_message_id IS NOT NULL;
+
+-- 查詢索引：依專案＋未結狀態＋承辦人、依訊息 ID 附掛、依 relay_request_id 對帳
+CREATE INDEX IF NOT EXISTS idx_ledger_items_project_status_owner
+    ON ledger_items(project_id, status, owner_bot_id, due_at);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_items_source_msg
+    ON ledger_items(source_message_id)
+    WHERE source_message_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_ledger_items_relay_req
+    ON ledger_items(relay_request_id)
+    WHERE relay_request_id IS NOT NULL;
+
+-- 2. 承諾帳本交接與狀態稽核事件表（append-only）
+CREATE TABLE IF NOT EXISTS ledger_events (
+    id              TEXT PRIMARY KEY,
+    item_id         TEXT NOT NULL REFERENCES ledger_items(id) ON DELETE CASCADE,
+    project_id      TEXT NOT NULL,
+    actor           TEXT NOT NULL,                         -- 'user' | 'daemon' | 'bot:<id>'
+    action          TEXT NOT NULL,                         -- 'ingest' | 'triage' | 'split' | 'commit' | 'claim' | 'handback' | 'redirect' | 'orphan_reclaim' | 'status' | 'merge' | 'cancel'
+    from_owner      TEXT,
+    to_owner        TEXT,
+    from_status     TEXT,
+    to_status       TEXT,
+    version         INTEGER NOT NULL,
+    detail_json     TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_events_item
+    ON ledger_events(item_id, created_at);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -700,6 +778,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (98, "8bda24e0822e32ff"),
     // codex session 血統（issue #1943 子票 A，2026-11-20）：`lineage_sessions`（CREATE TABLE，`kind` 只收 codex）與「一條線一顆 checkpoint」部分唯一索引。
     (99, "8392961c08c2cf76"),
+    // 防遺忘承諾帳本 T1（2026-11-21）：`ledger_items`、`ledger_events` 與索引（CREATE TABLE）。
+    (100, "d159d420a712b673"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1186,6 +1266,12 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
         feature_migrate(pool).await?;
     }
     Ok(())
+}
+
+/// crate 內測試拿到與正式啟動同一份 schema（不帶子模組 feature 的 migration）。
+#[cfg(test)]
+pub(crate) async fn migrate_for_crate_tests(pool: &SqlitePool) -> Result<()> {
+    migrate_with(pool, &[]).await
 }
 
 /// Test-only entry points accept the composition's migration list so this crate does not own app migrations.
