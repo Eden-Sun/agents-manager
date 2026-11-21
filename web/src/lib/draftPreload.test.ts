@@ -5,10 +5,8 @@ import type { Draft } from './choiceDraft.ts'
 
 const draft = { pages: [] } as unknown as Draft
 const tick = () => new Promise((r) => setTimeout(r, 1))
-/** 最後一位持有者放手後的寬限（`IN_FLIGHT_GRACE_MS`）加一點。 */
 const grace = () => new Promise((r) => setTimeout(r, 1600))
 
-/** 記下 start 被叫了幾次；resolve 由測試控制。 */
 function starter(result: Draft | null = draft) {
   let calls = 0
   let progress: ((d: number, t: number) => void) | null = null
@@ -73,7 +71,7 @@ test('最後一個視圖放掉之後才丟；一個放掉另一個還在就留�
   const a = acquirePreload('b1:q', s.start)
   const b = acquirePreload('b1:q', s.start)
   a.release()
-  a.release() // 重複放不會扣兩次
+  a.release()
   await grace()
   assert.ok(hasPreload('b1:q'))
   b.release()
@@ -119,7 +117,6 @@ test('「重新讀取」換一份新的；舊持有者放掉不會把新的丟�
   a.release()
   await grace()
   assert.ok(hasPreload('b1:q'))
-  // 之後接上來的人拿到新的那份。
   const c = acquirePreload('b1:q', s1.start)
   assert.equal(c.job, b.job)
   assert.equal(s1.calls, 1)
@@ -134,7 +131,6 @@ test('#633：重新讀取後舊 prefetch 與新 modal 都放掉，下一份同 k
   const prefetch = acquirePreload(key, oldStart.start)
   const oldModal = acquirePreload(key, oldStart.start)
 
-  // BlockedDraft cleanup runs before restartPreload; the independent prefetch still holds old entry.
   oldModal.release()
   const restart = starter(restartedDraft)
   const modal = restartPreload(key, restart.start)

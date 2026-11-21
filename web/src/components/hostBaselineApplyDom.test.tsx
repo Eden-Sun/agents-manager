@@ -1,14 +1,3 @@
-/**
- * 主機一致性計畫一鍵補齊（HostBaselineApply，#719 階段 3b）：
- * - sync=off：不畫鈕
- * - ask 且有 fixable 項：畫「補齊 N 項」鈕；缺 host_baseline_sync（舊 daemon、bot 視圖）＝off
- * - 確認框：明列主機名、要補的 id、目標檔、「會先備份、只補不蓋」
- * - 預設 focus 在取消鈕，不在確認鈕上；Enter 不能直接送出
- * - 確認後打 API 帶 plan_rev 與 ids
- * - 409（plan_outdated）：重新抓計畫，顯示「計畫已更新，請重新確認」，不自動重送
- * - 錯誤只顯示錯誤碼加固定文案，不顯示主機內容
- * - 成功顯示 backup_id 與各項結果
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, keydown, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -85,7 +74,6 @@ it('sync=ask 且有 fixable 項：畫「補齊 N 項」鈕', async () => {
 })
 
 it('沒有 host_baseline_sync 這欄（舊 daemon、bot 視圖）：一律當 off，不畫按鈕', async () => {
-  // 快照缺欄 → 正規化成空表 → 那台查不到＝undefined → 不畫。
   const sync = toState({}).host_baseline_sync
   assert.deepEqual(sync, {})
   await mount(<HostBaselineApply host="worker-1" baseline={sampleBaseline} syncMode={sync['worker-1']} />)
@@ -136,18 +124,15 @@ it('二次確認：明列主機名、要補的 id、目標檔、「會先備份�
 
     assert.equal(fetchCalled, 1)
 
-    // 對話框已開啟
     const dialog = document.querySelector('[role=alertdialog]')!
     assert.ok(dialog)
 
-    // 明列主機名、目標檔、只補不蓋
     assert.match(dialog.textContent ?? '', /主機：worker-1/)
     assert.match(dialog.textContent ?? '', /會先備份、只補不蓋/)
     assert.match(dialog.textContent ?? '', /claude\.hooks/)
     assert.match(dialog.textContent ?? '', /claude\.perm/)
     assert.match(dialog.textContent ?? '', /目標：~\/\.claude\/settings\.json/)
 
-    // 焦點檢驗：預設 focus 在「取消」鈕，不在「確認補齊」
     const confirmBtn = [...dialog.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('確認補齊'))!
     const cancelBtn = [...dialog.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('取消'))!
     assert.ok(confirmBtn)
@@ -155,7 +140,6 @@ it('二次確認：明列主機名、要補的 id、目標檔、「會先備份�
     assert.equal(document.activeElement, cancelBtn, '預設焦點必須在取消鈕')
     assert.notEqual(document.activeElement, confirmBtn, '確認鈕不准預設 focus')
 
-    // 按 Enter 落在取消鈕上，只會取消，不會觸發 apply
     await keydown(document.activeElement!, 'Enter')
     assert.equal(applyCalled, 0, 'Enter 落在取消鈕上不能觸發 apply')
   } finally {
@@ -208,10 +192,8 @@ it('確認後呼叫 applyHostBaseline 帶 plan_rev 與 ids', async () => {
       ids: ['claude.hooks', 'claude.perm'],
     })
 
-    // 對話框關閉
     assert.equal(document.querySelector('[role=alertdialog]'), null)
 
-    // 成功結果顯示 backup_id 與各項結果
     const root = document.querySelector('.host-baseline-apply-wrap')!
     assert.match(root.textContent ?? '', /備份 ID：20261025T010203Z-bk01/)
     assert.match(root.textContent ?? '', /可用這個備份 ID 還原/)
@@ -277,13 +259,11 @@ it('409 plan_outdated：重新抓計畫，顯示「計畫已更新，請重新�
     assert.equal(applyCount, 1, '只打一次 apply，不准自動重送')
     assert.equal(fetchCount, 2, '必須重新抓取新計畫')
 
-    // 對話框維持開啟，顯示固定文案提示
     assert.ok(document.querySelector('[role=alertdialog]'))
     const errBox = document.querySelector('.host-baseline-apply-err')
     assert.ok(errBox)
     assert.equal(errBox.textContent, '計畫已更新，請重新確認')
 
-    // 更新後的計畫項目呈現在對話框內（只有 claude.hooks，無 claude.perm）
     const dialogText = document.querySelector('[role=alertdialog]')!.textContent ?? ''
     assert.match(dialogText, /claude\.hooks/)
     assert.doesNotMatch(dialogText, /claude\.perm/)
@@ -328,7 +308,6 @@ it('錯誤只顯示錯誤碼加固定文案，不顯示主機上的任何檔案�
     const confirmBtn = [...dialog.querySelectorAll<HTMLButtonElement>('.confirm-actions button')].find((b) => b.textContent?.includes('確認補齊'))!
     await click(confirmBtn)
 
-    // 檢查畫面中絕對不包含 sensitive 主機檔案內容
     const root = document.querySelector('.host-baseline-apply-wrap')!
     assert.doesNotMatch(root.textContent ?? '', /SECRET_SSH_KEY_CONTENT_DO_NOT_LEAK/)
     assert.match(root.textContent ?? '', /主機備份失敗，未寫入變更/)

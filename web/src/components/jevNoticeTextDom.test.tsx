@@ -1,4 +1,3 @@
-/** 聊天室系統訊息：Jev 留的（開頭「Jev 建議」）換成統一標示；別的訊息原樣（issue #1912）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

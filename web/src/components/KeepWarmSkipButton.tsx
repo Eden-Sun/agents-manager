@@ -7,16 +7,11 @@ import { useCacheTick } from '../hooks/useCacheTick'
 import { useT } from '../lib/i18n'
 import './compactButton.css'
 
-/**
- * 「壓縮」鈕旁的「不用保溫」開關（主力的 claude 才有；codex 的 cache 不會冷，不保溫）：開著＝這顆 bot「這一輪閒置」跳過保溫與熱壓，
- * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓本身）daemon 自動恢復並廣播；再按一次取消。狀態在 `run.keep_warm_skip`。
- */
 export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; touch?: boolean }) {
   const t = useT()
   const eligible = useStore((s) => keepWarmSkippable(s.bots.find((b) => b.id === botId)))
   const run = useStore((s) => s.runs[botId])
   const skipping = run?.keep_warm_skip === true
-  // 與主力晶片的 ♨ 同一判斷；即使沒有 run 廣播，TTL 到期也要換回文案。
   const now = useCacheTick(eligible && !skipping && Boolean(run?.keep_warm_replied_at))
   const warmed = keepWarmReplied(run, now)
   const notify = useStore((s) => s.notify)
@@ -26,7 +21,6 @@ export function KeepWarmSkipButton({ botId, touch = false }: { botId: string; to
     setBusy(true)
     try {
       const { keep_warm_skip } = await api.setKeepWarmSkip(botId, !skipping)
-      // daemon 會廣播 run 更新；先套一份，免得慢一拍才看到按鈕換狀態。
       useStore.setState((s) => {
         const run = s.runs[botId]
         return run ? { runs: { ...s.runs, [botId]: { ...run, keep_warm_skip } } } : {}

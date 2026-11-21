@@ -1,14 +1,8 @@
-/**
- * 點一下複製（useTapCopy）：觸控放開之後瀏覽器一定會送 pointerout／pointerleave，不能因此把按下的紀錄清掉
- * （2026-10-09 #964：觸控點一下永遠不複製，因為 click 來時 press 已經被 leave 清掉）。
- * 滑鼠移出元件再放開仍然不算點擊；觸控拖走（移動超過 8px）也仍然不複製。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useTapCopy } from './useTapCopy'
 
-// copyText 先走 document.execCommand('copy')：換成記錄呼叫、回 true，讓 onCopied 拿到成功。
 const copies: string[] = []
 let realExecCommand: typeof document.execCommand
 
@@ -40,7 +34,6 @@ function Probe({ onCopied }: { onCopied: (ok: boolean) => void }) {
 
 const ptr = (type: string, pointerType: string, x = 10, y = 10) =>
   new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType, isPrimary: true, button: 0, pointerId: 1 })
-// React 的 onPointerLeave 是由原生 pointerout（relatedTarget 為 null＝離開元件）合成的，所以這裡送 pointerout。
 const leave = (pointerType: string) => ptr('pointerout', pointerType)
 const click = () => new MouseEvent('click', { bubbles: true })
 const tick = () => new Promise((r) => setTimeout(r, 0))

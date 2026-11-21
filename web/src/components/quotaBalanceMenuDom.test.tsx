@@ -1,9 +1,3 @@
-/**
- * 全域 API 餘額在額度列上的呈現（使用者 2026-11-19）：
- * - 沒有任何額度格的主機（例如 m4p）仍畫出餘額晶片；兩個餘額都不可見才整條不畫；
- * - 額度選單底部「API 餘額」區列出 Claude／OpenAI 各一列（本機與遠端都有），點開同一個校正視窗；
- * - 手機（setOnly）時餘額區仍顯示；未設定／未啟用的那一列不畫。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -14,11 +8,9 @@ import { resetClaudeApiBalanceForTest } from '../hooks/useClaudeApiBalance'
 import { resetOpenAiApiBalanceForTest } from '../hooks/useOpenAiApiBalance'
 import { QuotaStrip } from './QuotaStrip'
 
-/** 額度列要量版面、載入多個模組，預設 5 秒在滿載的 shard 上太緊。 */
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
 before(() => {
-  // 同一個 shard 會跟別的檔共用模組狀態（別的檔可能留著沒收完的餘額讀取）：開頭先清一次，不靠前一個檔的 afterEach。
   resetClaudeApiBalanceForTest()
   resetOpenAiApiBalanceForTest()
   return setupDom()
@@ -72,7 +64,6 @@ const settle = () => new Promise((r) => setTimeout(r, 30))
 const claudeChip = () => document.querySelector<HTMLElement>('[data-k="quota-balance"]')
 const openaiChip = () => document.querySelector<HTMLElement>('[data-k="openai-balance"]')
 
-/** 本機的 Claude 額度格（讓額度選單打得開）。 */
 function seedLocalClaudeGauge() {
   useStore.setState({
     quota: {
@@ -92,7 +83,6 @@ function seedLocalClaudeGauge() {
   } as never)
 }
 
-/** m4p 的 Claude 額度格（遠端主機也要能開選單）。 */
 function seedRemoteClaudeGauge(host: string) {
   useStore.setState({
     quota: {

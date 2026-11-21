@@ -1,7 +1,3 @@
-/**
- * #1103：預覽啟動失敗後按「重試」要重試失敗的那個目錄（帶 `dir`），不是不帶參數讓 daemon 挑第一個候選、或接上別的 dev server。
- * 失敗的目錄不在候選清單裡（例如 bot 工作目錄）時不帶，免得 daemon 以 400「不是候選目錄」拒絕。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -27,7 +23,6 @@ const failed = (over: Partial<Preview> = {}): Preview => ({
 
 const retryButton = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === '重試') ?? null
 
-/** 失敗畫面按「重試」，回傳這一次送出的 POST（路徑與 body）。 */
 async function retry(preview: Preview) {
   const requests = fakeApi((req) => (req.method === 'GET' || req.method === 'POST' ? preview : undefined))
   useStore.setState({ connected: true, bots: [bot], projects: [project], previews: { b1: preview } })

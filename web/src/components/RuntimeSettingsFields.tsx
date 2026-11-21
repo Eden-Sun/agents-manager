@@ -4,10 +4,6 @@ import { useT } from '../lib/i18n'
 import { CONTEXT_TICKS, HOT_COMPACT_MAX, HOT_COMPACT_MIN, HOT_PCT_MAX, KEEP_WARM_MAX, KEEP_WARM_MIN, formatContext, nearestTickIndex, numberOrNull } from '../lib/runtimePolicy'
 import './runtimeSettings.css'
 
-/**
- * 執行期設定的欄位（角色卡與 bot 覆寫共用）。`null`/缺＝「跟上一層」（角色卡：跟預設；bot：跟角色）。
- * `inheritLabel` 是「跟…」那顆的字（角色卡＝跟預設、bot 覆寫＝跟角色）。
- */
 export function RuntimeSettingsFields({
   value,
   onChange,
@@ -21,7 +17,6 @@ export function RuntimeSettingsFields({
   inheritLabel: string
   idPrefix: string
   disabled?: boolean
-  /** 只有 codex bot 的覆寫框才顯示「codex 永快取」提示（角色卡上講一次就好，見 RolePolicyEditor 的說明）。 */
   codexNote?: boolean
 }) {
   const t = useT()
@@ -43,7 +38,7 @@ export function RuntimeSettingsFields({
             </button>
           ) : null}
         </div>
-        {/* 刻度與拉條同寬、逐格對齊（位置扣掉拇指半寬）；沒設時拇指淡化，不假裝停在 200k。 */}
+        {}
         <div className={`rt-ctx-slider${value.context_tokens == null ? ' inherit' : ''}`} style={{ '--rt-steps': CONTEXT_TICKS.length - 1 } as CSSProperties}>
           <input
             type="range"

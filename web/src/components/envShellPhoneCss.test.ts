@@ -1,14 +1,9 @@
-/**
- * 環境設定頁的手機版樣式（issue #1466）：手機規則併在 `envShell.css` 的 `@media (width <= 640px)` 區塊裡，
- * 桌機與平板版面不動；手機的觸控目標 ≥44px、字級 ≥13px、沒有巢狀捲動。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const read = (name: string) => readFileSync(new URL(`./${name}`, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** 取出 `@media (width <= 640px) {…}` 區塊的內文（括號配對）。回傳 [區塊內文, 區塊外的 css]。 */
 function phoneBlocks(css: string): { inside: string; outside: string } {
   const re = /@media \(width <= 640px\)\s*\{/g
   let inside = ''
@@ -30,7 +25,6 @@ function phoneBlocks(css: string): { inside: string; outside: string } {
   return { inside, outside: outside + css.slice(last) }
 }
 
-/** 選擇器清單裡有 `selector` 的所有規則，宣告區串起來（同一個選擇器常分散在字級、觸控目標等幾條規則）。 */
 function decl(css: string, selector: string): string {
   const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(`(?:^|[},\\s])${esc}(?![\\w-])[^{}]*\\{([^}]*)\\}`, 'g')
@@ -58,7 +52,6 @@ test('手機：可點的目標 ≥44px', () => {
 })
 
 test('手機：安裝鍵與主要鍵也 ≥44px（蓋過 styles.css 同權或後載入的規則）', () => {
-  // styles.css 的 `.mini-btn.install-btn`（28px）與 `.btn.primary`（40px）同為 0,2,0 或更高，要靠更高的特異性壓過。
   assert.match(decl(phone.inside, '.env-panel .mini-btn.install-btn'), /min-height:\s*44px/)
   assert.match(decl(phone.inside, '.env-panel .btn.primary'), /min-height:\s*44px/)
 })
@@ -82,6 +75,5 @@ test('手機：帳本表格攤成卡片，數字欄不折行；捲動容器仍�
   assert.match(ledger.inside, /\.judge-ledger-table td::before\s*\{[^}]*attr\(data-label\)/)
   assert.match(decl(ledger.outside, '.judge-ledger-table td.num'), /white-space:\s*nowrap/)
   assert.doesNotMatch(ledger.inside, /td\.num\s*\{[^}]*white-space:\s*normal/, '手機也不讓數字欄折行')
-  // 桌機規則（外層捲動容器）沒被拿掉。
   assert.match(decl(ledger.outside, '.judge-ledger-scroll'), /overflow-x:\s*auto/)
 })

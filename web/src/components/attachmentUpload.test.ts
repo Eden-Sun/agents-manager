@@ -13,7 +13,6 @@ const item = (over: Partial<Pending> = {}): Pending => ({
   compressing: false, loaded: 0, id: null, error: null, retryable: true, ...over,
 })
 
-/** 一個還沒回應的上傳：測試手動推進度、成功、失敗。 */
 function harness(compressTo?: File) {
   const actions: PendingAction[] = []
   const errors: string[] = []
@@ -26,7 +25,6 @@ function harness(compressTo?: File) {
       opts = o
       return new Promise((resolve, reject) => {
         settle = { resolve: (id) => resolve({ id, name: 'big.zip', mime: '', size: 0, path: '' }), reject }
-        // 跟 XHR 一樣：signal 中止就以 AbortError 收掉。
         o.signal?.addEventListener('abort', () => reject(abortError()), { once: true })
       })
     },
@@ -69,22 +67,17 @@ test('進度重繪節流：50 MB 只在卡片那行字會變時才 dispatch，�
   const done = runUpload(h.deps, 'a1', new File(['x'], 'big.zip'), false, ctl.signal)
   await tick()
   const total = 50 * MB
-  // XHR 的上傳進度事件最密約每 50 ms 一次；5 分鐘的上傳就是這個量級。
   const events = 6000
   const raw: number[] = []
   for (let i = 1; i <= events; i++) raw.push(Math.round((total * i) / events))
   for (const loaded of raw) h.opts!.onProgress!(loaded, total)
 
   const drawn = h.actions.filter((a) => a.type === 'progress').map((a) => (a as { loaded: number }).loaded)
-  // 節流前是每個事件一次；節流後只剩文字真的會變的次數（0.1 MB 與 1% 裡較細的那個，約 500 階）。
   assert.ok(drawn.length < events / 8, `${events} 個事件應該被節流到幾百次，實際 ${drawn.length}`)
 
-  // **一階都不能少**：節流不是抽樣——原始事件流會畫出來的每一種文字都要真的被送出去過，
-  // 否則卡片會跳號（例如從 12% 直接跳到 14%）。
   const seen = new Set(drawn.map((l) => progressLabel(l, total)))
   const every = new Set(raw.map((l) => progressLabel(l, total)))
   assert.deepEqual([...seen].sort(), [...every].sort(), '看得到的每一階都要有對應的 dispatch')
-  // 而且順序是遞增的，不會把舊的值蓋回去。
   assert.deepEqual(drawn, [...drawn].sort((a, b) => a - b))
 
   h.settle.resolve('att1')
@@ -100,7 +93,6 @@ test('節流閘門本身：同一行字只放行一次，字變了才再放行�
   assert.equal(gate(2048, total), false)
   assert.equal(gate(0.1 * MB, total), true, '0.1 MB 就是文字的最小刻度')
   assert.equal(gate(0.1 * MB + 1, total), false)
-  // 每一張卡片各自一個閘門，不會互相影響。
   assert.equal(progressGate()(0.1 * MB, total), true)
 })
 
@@ -127,7 +119,6 @@ test('失敗：卡片記原因、可以重試，並通知一次', async () => {
   assert.equal(h.items[0].error, '連線中斷，上傳沒有完成')
   assert.equal(h.items[0].retryable, true)
   assert.deepEqual(h.errors, ['連線中斷，上傳沒有完成'])
-  // 重試把錯誤與進度歸零、又回到「上傳中」。
   const again = pendingReducer(h.items, { type: 'retry', key: 'a1' })
   assert.equal(again[0].error, null)
   assert.equal(again[0].loaded, 0)
@@ -158,7 +149,6 @@ test('百分比往下取整、單位跟著總大小', () => {
 })
 
 test('KB 進位到 1024 時改用 MB，不印「1024 KB」（卡片上的進度字）', () => {
-  // 1023.6 KB 四捨五入是 1024：總大小要寫成 1.0 MB，已送出的那一半跟著同單位。
   assert.equal(progressLabel(Math.round(1023.6 * 1024) / 2, Math.round(1023.6 * 1024)), '0.5 / 1.0 MB · 50%')
 })
 
@@ -166,7 +156,6 @@ test('擋下來的大檔不記指紋：同一個檔再拖一次照樣講一次�
   const seen = new Set<string>()
   const big = 60 * MB
   assert.equal(admitFile(seen, 'big.zip|1', big, false), 'too-large')
-  // 擋下來的那一次沒有卡片、沒有 × 可以按；指紋要是記了，第二次就變成默默略過。
   assert.equal(seen.size, 0)
   assert.equal(admitFile(seen, 'big.zip|1', big, false), 'too-large')
 })

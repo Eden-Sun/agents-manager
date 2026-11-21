@@ -9,7 +9,6 @@ export interface SlotHolder {
 
 const KINDS: readonly SlotHolderKind[] = ['user', 'start', 'daemon', 'agm', 'bot']
 
-/** daemon 的 409 `queue_slot_taken` 裡的 `holder`；舊 daemon 沒帶＝`null`。 */
 export function slotHolderFrom(body: Record<string, unknown>): SlotHolder | null {
   const h = body.holder
   if (!h || typeof h !== 'object') return null
@@ -18,7 +17,6 @@ export function slotHolderFrom(body: Record<string, unknown>): SlotHolder | null
   return { kind, botName: typeof rec.bot_name === 'string' && rec.bot_name ? rec.bot_name : null }
 }
 
-/** 唯一的排隊槽被佔著、這一則被退回時的說明（輸入框的字一直還在）。 */
 export function queueSlotNotice(holder: SlotHolder | null, attachmentCount: number): string {
   const note = attachmentCount > 0 ? t('；{n} 個附件要重新加', { n: attachmentCount }) : ''
   switch (holder?.kind) {

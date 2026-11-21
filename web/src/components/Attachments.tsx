@@ -1,9 +1,4 @@
 import { useT } from '../lib/i18n'
-/**
- * Attachments: uploaded first (`POST /bots/:id/attachments`), the send carries ids since agents only read text.
- * **Any file, not just images** (2026-09-14) — the mime only decides the card: image → thumbnail, else icon + name.
- * Bytes sit behind the UI token, so thumbnails are fetched into object URLs rather than a plain `src`.
- */
 
 import { useEffect, useRef, useState } from 'react'
 import { failureHint, failureLabel, loadFailure } from '../lib/attachmentLoad'
@@ -32,7 +27,6 @@ export function DropVeil({ label }: { label?: string }) {
   )
 }
 
-/** Pending thumbnails; 40px 認不出是哪張，hover/focus 浮一張絕對定位的大預覽。 */
 export function AttachTray({
 
   items,
@@ -99,10 +93,6 @@ export function AttachTray({
   )
 }
 
-/**
- * 卡片第二行：壓縮中／`3.2 / 12.6 MB · 25%`＋細條／失敗原因＋重試（issue #435）。
- * 進度一律有文字，條只是輔助；條用 `role="progressbar"` 帶數值給報讀器。
- */
 function PendingState({ item: it, onRetry, disabled }: { item: Pending; onRetry?: (key: string) => void; disabled?: boolean }) {
   const t = useT()
   if (it.id) return null
@@ -170,7 +160,6 @@ export function AttachPicker({
   )
 }
 
-/** A document glyph, for everything that is not an image. */
 export function FileIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -186,12 +175,6 @@ export function FileIcon() {
   )
 }
 
-/**
- * Object URL per attachment id, shared across bubbles. 每個 object URL 釘住最大 50 MB Blob，
- * 沒人用的最多留 64 個；還掛在畫面上的不 revoke（#2074：一次掛上超過 64 張圖時，舊寫法擠出就 revoke，
- * 最早的縮圖在 commit 前 URL 就失效、破圖）。
- */
-// 第一次用到才建：components 的模組層不能呼叫 lib 的函式（chunk 初始化順序，見 moduleInitOrder.test）。
 let urlCache: ReturnType<typeof createBlobUrlCache> | null = null
 
 function storedUrl(id: string): BlobLease {
@@ -217,7 +200,6 @@ export function MessageAttachments({ items }: { items: Attachment[] }) {
 function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void }) {
   const isImage = item.mime.startsWith('image/')
   const { openImage, viewer } = useImageViewer()
-  // 非圖片不去抓位元組：一個 CSV 的縮圖沒有意義，看的是檔名。
   const { url, failure } = useStoredUrl(isImage ? item.id : null)
   return (
     <><button
@@ -231,7 +213,6 @@ function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void })
         url ? (
           <img src={url} alt={item.name} />
         ) : failure ? (
-          // 抓失敗不是「還在載入」：已清除（超過保留期）與暫時失敗各說各的，不要永遠停在「…」。
           <span className="msg-attachment-fallback">{failureLabel(failure)}</span>
         ) : (
           <span className="msg-attachment-fallback">…</span>
@@ -251,15 +232,12 @@ function useStoredUrl(id: string | null): { url: string | null; failure: Attachm
   const [attempt, setAttempt] = useState(0)
   const online = useStore((s) => s.socket === 'open')
   const retryable = state.failure === 'error'
-  // 斷線／daemon 重啟時抓失敗的：連回來自己再抓一次。`gone`（404／410）重抓也一樣，不重試。
-  // 依賴是兩個布林，所以每次「失敗」或「連回來」各只觸發一次，不會形成重試迴圈。
   useEffect(() => {
     if (online && retryable) setAttempt((n) => n + 1)
   }, [online, retryable])
   useEffect(() => {
     if (!id) return
     let live = true
-    // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
     const lease = storedUrl(id)
     lease.url
       .then((u) => {
@@ -284,7 +262,6 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // 讓 popover 先吃掉自己的 Escape。
       if (e.key !== 'Escape' || e.defaultPrevented) return
       onClose()
     }

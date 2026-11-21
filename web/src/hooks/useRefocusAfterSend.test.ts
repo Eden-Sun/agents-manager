@@ -4,7 +4,6 @@ import { shouldRefocusAfterSend } from './useRefocusAfterSend.ts'
 
 const base = { wasSending: true, sending: false, hadFocus: true, focusLost: true, phone: false }
 
-// textarea 在送出期間 disabled，瀏覽器會把焦點丟到 body；送完沒人叫回來，使用者要再點一下才能打下一句。
 test('送出結束、送出前焦點在輸入框、現在掉到 body：把焦點還回輸入框', () => {
   assert.equal(shouldRefocusAfterSend(base), true)
 })

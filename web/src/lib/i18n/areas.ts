@@ -1,8 +1,3 @@
-/**
- * 多語系分區（issue #1932）：每個 `src/` 底下的檔案恰好屬於一個區塊，一個人負責一個區塊、只改自己區塊的檔案與 `src/i18n/en/<區塊>.ts`。
- * 列表是凍結的快照（依當時寫死中文的數量切成工作量相近的五份）；沒列到的新檔歸 `core`。
- * 跑 `bun scripts/i18n-report.ts --area <區塊>` 看自己還剩哪些檔案、各幾處。
- */
 export const AREA_IDS = ['chat', 'bots', 'hosts', 'updates', 'core'] as const
 export type AreaId = (typeof AREA_IDS)[number]
 
@@ -253,7 +248,6 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
 
 const OWNER = new Map<string, AreaId>(AREA_IDS.flatMap((id) => AREA_FILES[id].map((f) => [f, id] as const)))
 
-/** 路徑（`src/` 之下，如 `components/ChatPanel.tsx`）屬於哪個區塊；沒列到的歸 `core`。 */
 export function areaOf(path: string): AreaId {
   return OWNER.get(path.replace(/^src\//, '')) ?? 'core'
 }

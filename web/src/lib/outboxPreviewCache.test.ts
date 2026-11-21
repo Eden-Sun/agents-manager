@@ -1,7 +1,3 @@
-/**
- * 圖檔預覽快取：舊請求晚到的失敗不能把同 key 的新請求從快取刪掉（否則重抓一次、新 blob URL 洩漏）。
- * 載入函式由測試注入（`blobFor` 的第 4 個參數），每個請求由測試決定何時 resolve／reject。
- */
 import { test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { blobFor, clearOutboxPreviews } from './outboxPreviewCache.ts'
@@ -14,7 +10,6 @@ const load = () =>
     requests.push({ resolve, reject })
   })
 
-// 每條測試內裝 stub、結束還原；不在模組載入時改全域（同 shard 其他測試檔會互相覆寫）。
 const stubRevoke = (u: string) => {
   revoked.push(u)
 }
@@ -83,7 +78,6 @@ test('一次掛上超過 12 張：每一張拿到的 URL 在畫出來之前都�
   assert.equal(got.length, 15)
   assert.deepEqual(got.filter((u) => revoked.includes(u)), [], '還在用的 URL 不能被 revoke')
 
-  // 全部卸掉後，沒人用的只留 12 張，最久沒用的 3 張才 revoke。
   for (const l of leases) l.release()
   await flush()
   assert.deepEqual(revoked.sort(), ['blob:shot-1.png', 'blob:shot-2.png', 'blob:shot-3.png'])

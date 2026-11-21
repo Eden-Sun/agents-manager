@@ -1,4 +1,3 @@
-/** 專案改名打到一半（輸入框開著、字跟原本不同）：關分頁會丟掉，要被 `beforeunload` 攔下；沒改或收起來就不攔。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'

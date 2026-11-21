@@ -1,4 +1,3 @@
-/** 分享頁圖片的純邏輯：哪些算圖、PNG 檔名與顯示名、SVG 外部資源偵測、大小推算、canvas 上限。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { displayName, imagesByMessage, isImageName, pngCanvasSize, pngName, svgExternalRefs, svgSize, svgWithSize } from './shareImage.ts'
@@ -24,15 +23,14 @@ test('每則 bot 回覆下面畫哪些圖：那一回合做的圖、或回覆裡
   ]
   const f = (name: string, at: string | null) => ({ name, size: 1, modified_at: at })
   const out = imagesByMessage(msgs, [
-    f('早安.svg', t(0, 40)), // 第一回合裡做的 → b1
-    f('晚安.png', t(3, 1)), // 回完話才寫（時間在 b2 之後、u3 之前）→ 還是 b2
-    f('筆記.txt', t(0, 50)), // 不是圖
-    f('舊圖.png', null), // 沒時間：不靠時間掛
+    f('早安.svg', t(0, 40)),
+    f('晚安.png', t(3, 1)),
+    f('筆記.txt', t(0, 50)),
+    f('舊圖.png', null),
   ])
   assert.deepEqual(out.get('b1')?.map((x) => x.name), ['早安.svg'])
   assert.deepEqual(out.get('b2')?.map((x) => x.name), ['晚安.png', '早安.svg'], '提到的檔名也畫，同一則不重複')
   assert.equal(out.get('u1'), undefined, 'end user 的訊息不掛圖')
-  // end user 剛送出、bot 在這一回合寫了圖但還沒回覆：先不掛在上一回合。
   const pending = imagesByMessage(msgs.slice(0, 3), [f('新圖.png', t(2, 30))])
   assert.equal(pending.get('b1'), undefined)
 })

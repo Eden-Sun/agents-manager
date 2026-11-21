@@ -1,6 +1,3 @@
-/**
- * 排程編輯器的「每次從基準快照開始」：選到的 Bot 有基準快照才能開；開了之後 PATCH 帶 `from_base`。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

@@ -1,7 +1,3 @@
-/**
- * RAM 行程清單（MemPopover，issue #1347）：開著時的輪詢不疊（上一趟回來才排下一趟）、分頁在背景不抓、
- * 回前景立刻補一次、晚回來的舊清單不蓋掉新的。計時用手動時鐘（不睡牆鐘）；fetch 換成可以逐筆放行的替身。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -17,7 +13,6 @@ afterEach(unmountAll)
 
 const { MemPopover } = await import('./MemPopover')
 
-/** fetch 替身：每一趟 `/mem/processes` 都卡住，等測試自己 `resolve`；`gates[i]` 就是第 i+1 趟。 */
 function stubMem() {
   const realFetch = globalThis.fetch
   const gates: { resolve: (body: unknown) => void }[] = []
@@ -34,7 +29,6 @@ function stubMem() {
   return { gates, restore: () => void (globalThis.fetch = realFetch) }
 }
 
-/** 一趟回應：一個 bot 的一行，名字就是 `name`（畫面上靠它判斷是哪一趟的清單）。 */
 const snap = (name: string) => ({
   host: 'local',
   sampled_at: new Date().toISOString(),
@@ -43,7 +37,6 @@ const snap = (name: string) => ({
   ],
 })
 
-/** 讓 React 與 Promise 的後續工作跑完（不用牆鐘：只讓出一次 macrotask）。 */
 async function flush(rounds = 5) {
   for (let i = 0; i < rounds; i++) await act(async () => new Promise<void>((r) => setImmediate(r)))
 }
@@ -115,11 +108,9 @@ test('晚回來的舊清單不蓋掉新的：兩趟都在路上，先回來的�
     await openPopover()
     f.gates[0]!.resolve(snap('bot-A'))
     await flush()
-    // 按「重新整理」：第二趟（較舊的那趟）在路上。
     await click(document.querySelector<HTMLButtonElement>('.mem-pop-refresh')!)
     await flush()
     assert.equal(f.gates.length, 2)
-    // 停掉一顆 bot：停完會重抓，第三趟（最新的那趟）。
     const stop = () => document.querySelector<HTMLButtonElement>('.mem-pop-act button')!
     await click(stop())
     await click(stop())

@@ -1,6 +1,3 @@
-/**
- * 同一份待答問卷同時掛上兩個元件（例如面板與視窗）：自動翻譯只能打一次，不能各自因為先前算好的 `fresh` 再起一份。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

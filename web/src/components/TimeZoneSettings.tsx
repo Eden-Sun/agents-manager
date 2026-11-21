@@ -6,7 +6,6 @@ import { timeZoneOptions } from '../schedules/format'
 import { utcOffsetLabel } from '../lib/timeZone'
 import { useStore } from '../store/store'
 
-/** 環境設定→顯示：網頁顯示時間用的時區（#2047）。bot 對話用的時區在新啟動的 bot 生效。 */
 export function TimeZoneSettings() {
   const t = useT()
   const zone = useStore((s) => s.userTimeZone)

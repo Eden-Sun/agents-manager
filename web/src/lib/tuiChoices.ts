@@ -1,107 +1,52 @@
-/**
- * 從終端快照認出 agent 停著的編號選單，讓 web 畫成可點清單
- * （2026-09-12 使用者：手機選第 4 項要按三次 ↓，選項文字還被截掉）。
- *
- * 形狀：claude 2.x AskUserQuestion 單選／多分頁＋多選（2026-09-12 第三輪），也吃權限框
- * `│ ❯ 1. Yes │` 與 codex `> 1. Update now`。多選頁的坑：說明只縮排 2（跟編號同欄）、
- * 有沒編號但游標走得到的 `Submit` 列、選項間夾分隔線。
- *
- * 寧可不認也不要認錯（按鍵直送別人終端）：≥2 個編號、從 1 連號、剛好一個游標記號、
- * 整塊在畫面底（TAIL_LIMIT），缺一回 `null`，UI 退回按鍵面板。
- */
 
 import { splitPreviewPane } from './tuiPreviewPane.ts'
 import { ASYNC_QUESTION_FOOTER as ASYNC_FOOTER } from './codexAsyncQuestion.ts'
 
 export interface TuiChoice {
-  /** 畫面上印的編號；送鍵時不靠它。 */
   number: number
-  /** 去掉游標記號、編號與 `[ ]` 的本文。 */
   title: string
-  /** 說明（折行已接回）；沒有是空字串。 */
   detail: string
   current: boolean
-  /** 多選的勾選狀態；單選一律 `null`。 */
   checked: boolean | null
-  /**
-   * 並排預覽版面（右欄預覽框，issue #1473）裡游標所在這一項的預覽文字，框線已去、縮排保留。
-   * 畫面上只有游標那一項有預覽，其他項與沒有預覽框的選單一律是空字串；不替其他項捏造。
-   */
   preview: string
 }
 
-/** 分頁列的一格（問卷裡的一題）。 */
 export interface TuiTab {
   label: string
-  /** `☒`＝答過。 */
   done: boolean
-  /** `✔ Submit` 送出頁，不是一題。 */
   submit: boolean
 }
 
 export interface TuiChoiceMenu {
-  /** 折行已接回；認不出問句是 `null`。 */
   question: string | null
-  /**
-   * 問句上面那一段（權限框的指令、`Dangerous rm …` 這類警語）逐行原樣，最多 `CONTEXT_LIMIT` 行。
-   * 2026-09-20 使用者：`Do you want to proceed?` 只剩一句問句，看不出在核准什麼就要人回答。
-   * 指令要對齊，所以不接折行、原樣給 UI 用等寬字畫。
-   */
   context: string[]
-  /**
-   * 權限框夾在兩條 `╌` 虛線之間的指令（2.1.286 起；長 heredoc 可以上百行），逐行原樣、去掉 `│` 欄；沒有那種框是空陣列。
-   * 跟 `context`（說明與警語）分開，UI 才能把指令與「為什麼被攔」各自畫、各自折行。
-   */
   command: string[]
-  /** 指令的標題與上緣虛線已經捲出 pane（pane 太矮、指令太長）：`command` 只是畫面上看得到的後半段。 */
   commandCut: boolean
-  /**
-   * 問句跟選項之間的條列說明（claude 2.1.280 `Try the new fullscreen renderer?` 底下那三行 `·`），逐行、去掉共同縮排。
-   * 畫在問句下面；沒有是空陣列。
-   */
   notes: string[]
   choices: TuiChoice[]
-  /** 游標停在沒編號的 `Submit` 列時是 `-1`。 */
   cursor: number
-  /** 有 claude 腳註；只是信心指標。 */
   footer: boolean
-  /** 帶 `[ ]`：點一下是切換勾選，不是送出。 */
   multi: boolean
-  /** 不是多題問卷就是空陣列。 */
   tabs: TuiTab[]
-  /** 猜的目前分頁（第一個未答，全答完＝Submit 格）；終端用顏色標、快照讀不到，UI 要照實說是猜的。 */
   tabAt: number | null
-  /** review／confirm 頁的「● 問題 / → 答案」；一般頁是空陣列。 */
   review: { question: string; answer: string }[]
-  /** 沒編號的 `Submit` 列（多選才有）；`after` 是排在第幾個選項後面。 */
   submit: { after: number; current: boolean } | null
-  /**
-   * codex 的非同步提問展開後的選單（`Queued follow-up inputs`，腳註 `enter submit  ^] skip`／macOS `enter submit  ⌃] skip`，issue #1879）：
-   * 最後一列 `Other` 是打字列——游標停在上面直接貼字就把標題換成那段字，Enter 送出（codex 0.163.0 真機）。
-   * 只有認得這個腳註才是 `true`；舊版與其他選單沒有這個欄位。
-   */
   asyncQueue?: boolean
 }
 
-/** 只看畫面底下這麼多行，正文裡的編號清單不算。 */
 const SCAN_LINES = 200
 
-/** 最後一個選項到畫面底之間最多幾行有字的東西（腳註、輸入框、狀態列）。 */
 const TAIL_LIMIT = 10
 
-/** 問句上面最多再帶幾行（指令框＋警語）；再多就是把整個 transcript 搬進來了。 */
 const CONTEXT_LIMIT = 14
 
-/** 虛線之間的指令最多收這麼多行（長 heredoc）；再多多半是整個畫面都被當成指令了。 */
 const COMMAND_LIMIT = 160
 
-/** 2.1.286 起權限框夾住指令的虛線（整行只有 `╌`，同 daemon `is_dash_rule`）。 */
 function isDashRule(s: string): boolean {
   const t = s.trim()
   return t !== '' && /^╌+$/.test(t)
 }
 
-/** 兩個編號間最多夾幾行說明；再多就是別的東西混進來。 */
 const DETAIL_LIMIT = 8
 
 const ITEM = /^(\s*)([❯›▶>]\s)?(\d{1,2})[.)](\s+)(\S.*)$/
@@ -110,41 +55,25 @@ const CHECKBOX = /^\[([ xX*✓✔☐☑☒])\]\s*(.*)$/
 
 const SUBMIT = /^\s*([❯›▶>]\s*)?Submit\s*$/
 
-/** 有它幾乎確定是選單，但沒有也可能是（權限框就沒有）。 */
 const FOOTER = /enter to select|to navigate|esc to cancel/i
 
-/** claude 工具呼叫的行首符號：往上找問題撞到就停。 */
 const TRANSCRIPT = /^[⏺⎿✽·✢✻✶*]/
 
-/**
- * 條列說明（`  · Flicker-free output`）：**縮排過**的 `·`／`•` 加空白。claude 的 spinner／完成列
- * （`· Thinking…`、`✻ Cooked for 21s`）貼齊行首，所以 trim 之前看縮排就分得開。
- */
 const BULLET = /^\s+[·•]\s/
 
 const ASKS = /[?？]$/
 
-/** 多題時選單上面那行 `1 of 2`，不是題目的一部分。 */
 const PAGE_OF = /^\d+ of \d+$/
 
-/**
- * 沒有問號、但標題自己一行的 claude 對話框（2.1.281 `Session paused`：說明＋`Details:` 再接選項）。
- * 認到就拿標題當題目、底下那幾行當 notes，不要把整段接成一句題目。
- */
 const DIALOG_TITLE = /^Session paused$/i
 
 const TAB_MARK = /([☒☑☐✔✓])\s*([^☒☑☐✔✓←→]+)/g
 
-/**
- * 分頁列往上找幾行：review 頁中間隔著「每題 → 答案」，只看問題正上方會找不到
- * （2026-09-12 第七輪：最後一頁點不到分頁）。取最靠近的，遇分隔線／正文就停。
- */
 const TAB_SCAN = 20
 
 const REVIEW_Q = /^\s*[●•]\s+(\S.*)$/
 const REVIEW_A = /^\s*(?:→|->)\s*(\S.*)$/
 
-/** 去掉權限框框線、保留框內縮排。只吃真框線字元，ASCII `|` 太常出現在正文。 */
 function stripBox(line: string): string {
   const s = line.replace(/\s+$/, '')
   const lead = /^\s*[│┃]\s?/.exec(s)
@@ -152,7 +81,6 @@ function stripBox(line: string): string {
   return s.slice(lead[0].length).replace(/\s*[│┃]$/, '')
 }
 
-/** 選單中間會夾分隔線，不能當成結束。 */
 function isDivider(s: string): boolean {
   return s.trim() !== '' && /^[\s─-╿]+$/.test(s)
 }
@@ -165,7 +93,6 @@ function hasMarker(s: string): boolean {
   return /^\s*[❯›▶>]\s/.test(s)
 }
 
-/** 接回終端折行：CJK 之間不補空白，其餘補一個；只求通順，不保證還原原文。 */
 function joinWrapped(a: string, b: string): string {
   if (!a) return b
   if (!b) return a
@@ -176,7 +103,6 @@ function joinWrapped(a: string, b: string): string {
 interface Row {
   line: number
   marker: boolean
-  /** 編號的欄位（縮排加游標記號的寬度）：同一份選單的選項列欄位一樣，縮排更深的 `N.` 是說明。 */
   col: number
   number: number
   title: string
@@ -198,7 +124,6 @@ function matchRow(line: number, s: string): Row | null {
   }
 }
 
-/** 分頁列（`←  ☒ 編輯方式  ☐ 功能  ✔ Submit  →`）。目前題是顏色標的、讀不到，只回答過沒有。 */
 function parseTabs(s: string): TuiTab[] | null {
   if (!/[☒☑☐✔✓]/.test(s)) return null
   const out: TuiTab[] = []
@@ -211,11 +136,6 @@ function parseTabs(s: string): TuiTab[] | null {
   return out.length >= 2 ? out : null
 }
 
-/**
- * 問句跟選項之間夾著條列說明時（2026-09-24 使用者截圖，claude 2.1.280），往上掃第一行就撞到 `·` 而停，題目變 `null`。
- * 改在「分隔線 → 第一個選項」這一塊裡找最靠近選項、以問號結尾的非條列行，回它的行號；沒有回 -1。
- * 一定要碰到分隔線才算：先撞到 transcript、分頁列或別的選項＝已經走出這個提示框，上面的問句是上一輪的。
- */
 function askedAbove(lines: string[], top: number): number {
   let found = -1
   for (let i = top - 1; i >= 0 && top - i <= CONTEXT_LIMIT; i--) {
@@ -228,7 +148,6 @@ function askedAbove(lines: string[], top: number): number {
   return -1
 }
 
-/** 選項上方、同一個框裡的 `DIALOG_TITLE` 行號；中間有問號句（那才是題目）或走出框（分隔線、transcript、別的選項）回 -1。 */
 function dialogTitleAbove(lines: string[], top: number): number {
   for (let i = top - 1; i >= 0 && top - i <= CONTEXT_LIMIT; i--) {
     const s = lines[i].trim()
@@ -238,7 +157,6 @@ function dialogTitleAbove(lines: string[], top: number): number {
   return -1
 }
 
-/** 去掉共同縮排、頭尾空白行；條列說明要對齊，所以不接折行。 */
 function dedentBlock(block: string[]): string[] {
   const out = block.map((l) => l.replace(/\s+$/, ''))
   while (out.length && !out[0]) out.shift()
@@ -247,10 +165,6 @@ function dedentBlock(block: string[]): string[] {
   return out.map((l) => l.slice(Math.min(pad, indentOf(l))))
 }
 
-/**
- * 選項列的編號欄：游標那一列的（沒有游標就以最底下的編號列）。選項說明裡的 `N.` 縮排比選項深，欄位對不上就不是選項。
- * 找不到任何編號列回 `null`。
- */
 function optionColumn(lines: string[]): number | null {
   let bottom: number | null = null
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -262,17 +176,14 @@ function optionColumn(lines: string[]): number | null {
   return bottom
 }
 
-/** 認不出來回 `null`，呼叫端畫按鍵面板，不要猜。 */
 export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu | null {
   if (!text) return null
-  // 並排預覽版面先把右欄切掉（見 tuiPreviewPane.ts）；沒有那種框就是原樣。
   const raw = text.split('\n')
   const side = splitPreviewPane(raw)
   if (side && 'malformed' in side) return null
   const all = (side ? side.lines : raw).map(stripBox)
   const lines = all.slice(Math.max(0, all.length - SCAN_LINES))
 
-  // 1. 由下往上找最後一個選項行（編號欄與選項列一致的，見 `optionColumn`）。
   const optionCol = optionColumn(lines)
   let end = -1
   let footer = false
@@ -290,20 +201,14 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     if (++tail > TAIL_LIMIT) return null
   }
   if (end < 0) return null
-  // 選項底下是空的輸入列（單獨一個 `❯`／`›`）＝這份選單是回覆裡的引文：真的選單會佔住輸入列，回合結束後底下
-  // 一定還印著空輸入列（同 daemon `tui_prompts::open_choice_menu` 的 composer 守衛）。按鍵直送終端，寧可不認。
   if (lines.slice(end + 1).some((l) => /^[❯›]$/.test(l.replace(/[\s │┃╭╮╰╯─━▔]/g, '')))) return null
 
-  // 2. 往上收到編號 1。編號間的非編號行都當說明（縮排靠不住：單選縮 5、多選縮 2），
-  // 只挑出沒編號的 `Submit` 列。
   const rows: Row[] = []
   let submitLine = -1
   let gap = 0
   for (let i = end; i >= 0; i--) {
     const row = matchRow(i, lines[i])
-    // 編號欄跟選項不同的 `N.`（縮排更深的說明，如選項底下的 `       1. 先備份`）不是選項，當說明。
     if (row && row.col === optionCol) {
-      // 跳號、重號＝不是同一份選單。
       if (rows.length && row.number !== rows[rows.length - 1].number - 1) break
       rows.push(row)
       gap = 0
@@ -321,7 +226,6 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
 
   if (rows.length < 2 || rows[0].number !== 1) return null
 
-  // 沒有 `Chat about this` 時 `Submit` 排在最後一個編號之後，往下補看幾行。
   if (submitLine < 0) {
     let blanks = 0
     for (let i = end + 1; i < lines.length && i <= end + 4; i++) {
@@ -338,16 +242,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   }
 
-  // 並排預覽版面：游標走到選項底下沒編號的 `Chat about this` 時，畫面上第 N 項的 `❯` 還留著（真機 2.1.296），
-  // 算下去會把「游標在第 N 項」當真而按錯鍵——Enter 其實落在 Chat about this。底下有記號行就整份不認。
   if (side) {
     for (let i = end + 1; i < lines.length; i++) if (hasMarker(lines[i])) return null
   }
 
-  // 游標記號剛好一個：零個＝捲出畫面算不出步數，多個＝正文引用之類不是選單。
   const blockTop = rows[0].line
   const blockEnd = Math.max(end, submitLine)
-  // 只算選項列與 Submit 列上的游標；說明裡縮排的 `❯ npm test` 不是游標。
   let markers = 0
   for (let i = blockTop; i <= blockEnd; i++) {
     const onOption = matchRow(i, lines[i])?.col === optionCol || i === submitLine
@@ -355,14 +255,11 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   }
   if (markers !== 1) return null
 
-  // 上輪正文裡的表格也可能長得像預覽框。只有切欄真的影響目前選單時，
-  // 才能採用「左欄沒有說明、縮排行接回標題」的預覽規則（#1887）。
   const offset = raw.length - lines.length
   const choicePreview = Boolean(side && lines.slice(blockTop, blockEnd + 1).some((_, i) =>
     side.lines[offset + blockTop + i] !== raw[offset + blockTop + i],
   ))
 
-  // 3. 說明接成一段；最後一項收到空白行／分隔線為止。
   const choices: TuiChoice[] = rows.map((row, idx) => {
     const stop = idx + 1 < rows.length ? rows[idx + 1].line : Math.min(lines.length, row.line + 1 + TAIL_LIMIT)
     let detail = ''
@@ -370,17 +267,13 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       const s = lines[i]
       if (i === submitLine) continue
       if (s.trim() === '' || isDivider(s)) {
-        // 選項之間的空白／分隔線不算結束（真機 5、6 之間就有）。
         if (idx + 1 < rows.length) continue
         break
       }
       if (idx + 1 === rows.length && (indentOf(s) < 2 || ASYNC_FOOTER.test(s))) break
-      // 並排版面：`(Recommended)` 是標籤折下來的另一行，前面要留空白（不能被 CJK 的 joinWrapped 黏死）。
       const piece = s.trim()
       detail = choicePreview && piece.startsWith('(') && detail ? `${detail} ${piece}` : joinWrapped(detail, piece)
     }
-    // 並排版面的左欄只有標籤、沒有說明：下一行縮進的 `(Recommended)` 是標籤折下來的，接回標題。
-    // claude 自己加的 ` (Recommended)` 前面本來就是空白，CJK 結尾時 joinWrapped 會把它黏死。
     const title = choicePreview ? (detail.startsWith('(') ? `${row.title} ${detail}` : joinWrapped(row.title, detail)) : row.title
     return {
       number: row.number,
@@ -392,7 +285,6 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   })
 
-  // 4. 問題。
   let q = rows[0].line - 1
   while (q >= 0 && lines[q].trim() === '') q--
   const qs: string[] = []
@@ -400,14 +292,11 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     const s = lines[q]
     if (s.trim() === '' || isDivider(s) || TRANSCRIPT.test(s.trim()) || matchRow(q, s)) break
     if (parseTabs(s) || REVIEW_Q.test(s) || REVIEW_A.test(s) || PAGE_OF.test(s.trim())) break
-    // `⚠` 倒數／警示是問句上面的另一段，不是問句折下來的列（中間沒空白列時不能黏進題目）。
     if (s.trim().startsWith('⚠')) break
     qs.unshift(s.trim())
     q--
   }
 
-  // 4a. 掃到的不是問句（`null`，或夾在中間的說明）：到分隔線為止的區塊裡有問號結尾的行，就以它為題，
-  // 它跟選項之間的東西當 notes。沒有問號照舊。
   let notes: string[] = []
   const titled = dialogTitleAbove(lines, rows[0].line)
   if (titled >= 0) {
@@ -427,9 +316,6 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   }
 
-  // 4b. 問句上面那一段：權限框的警語、倒數與說明。空白行不算結束（指令框跟警語之間就隔著空白），
-  // 遇到 transcript 行首符號、分隔線、分頁列或選項才停——那些是上一輪的東西。
-  // 緊貼問句的空白不計（2.1.289 倒數那行後面有兩列空白，以前兩列就當成「上面是別的段落」，整段警語被丟掉）。
   const context: string[] = []
   let command: string[] = []
   let commandCut = false
@@ -440,13 +326,11 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     while (c >= 0 && context.length < CONTEXT_LIMIT) {
       const s2 = lines[c]
       if (isDashRule(s2)) {
-        // 2.1.286 起指令夾在兩條 `╌` 虛線之間：收下來，單獨一塊給 UI（長 heredoc 不受 CONTEXT_LIMIT 限制）。
         let o = c - 1
         while (o >= 0 && command.length < COMMAND_LIMIT && !isDivider(lines[o])) {
           command.unshift(lines[o].replace(/\s+$/, ''))
           o--
         }
-        // 走到畫面頂或超過上限都沒碰到上緣虛線（或框的實線）＝標題與上緣已經捲出畫面。
         commandCut = o < 0 || !isDivider(lines[o])
         while (command.length && command[command.length - 1].trim() === '') command.pop()
         break
@@ -454,12 +338,10 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       if (isDivider(s2) || TRANSCRIPT.test(s2.trim()) || matchRow(c, s2) || parseTabs(s2)) break
       if (s2.trim() === '') {
         if (!context.length) {
-          // 緊貼問句的空白列：最多略過幾列，不當成段落分界。
           if (++lead > 4) break
           c--
           continue
         }
-        // 連兩個空白行＝上面是別的段落了。
         if (++blanks > 1) break
         context.unshift('')
         c--
@@ -473,7 +355,6 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     while (context.length && context[context.length - 1].trim() === '') context.pop()
   }
 
-  // 5. 分頁列（見 TAB_SCAN）。
   let tabLine = -1
   for (let i = rows[0].line - 1; i >= 0 && rows[0].line - i <= TAB_SCAN; i--) {
     if (isDivider(lines[i]) || TRANSCRIPT.test(lines[i].trim())) break
@@ -484,7 +365,6 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   }
   const tabs = (tabLine >= 0 ? parseTabs(lines[tabLine]) : null) ?? []
 
-  // 6. review 段（review 頁才有）。
   const review: { question: string; answer: string }[] = []
   for (let i = tabLine + 1; tabLine >= 0 && i < rows[0].line; i++) {
     const mq = REVIEW_Q.exec(lines[i])
@@ -498,15 +378,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
       last.answer = joinWrapped(last.answer, ma[1].trim())
       continue
     }
-    // Type something 換行貼上之後，review 第二行沒有 `→`（2026-09-13 真機）。
     if (review.length && indentOf(lines[i]) >= 3 && lines[i].trim() && !matchRow(i, lines[i]) && !REVIEW_Q.test(lines[i])) {
       const last = review[review.length - 1]
       last.answer = joinWrapped(last.answer, lines[i].trim())
     }
   }
 
-  // 目前分頁：畫面是 Review／送出頁時就是 Submit 分頁（終端實心反白的是它，文字上只有這個線索）；
-  // 否則猜第一個還沒答的題（終端只用顏色標目前題，快照讀不到，猜錯只是跳到別題）。
   const submitIdx = tabs.findIndex((t) => t.submit)
   const onSubmitPage = review.length > 0 || choices.some((c) => /^submit answers$/i.test(c.title))
   const undone = tabs.findIndex((t) => !t.done && !t.submit)
@@ -534,17 +411,12 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
 
 export type WalkTarget = number | 'submit'
 
-/** 游標走得到的列照畫面排序；`Submit` 夾在 5、6 之間要算進 ↓ 次數。認不得的列靠 `walk` 重讀補正。 */
 function walkRows(menu: TuiChoiceMenu): WalkTarget[] {
   const rows: WalkTarget[] = menu.choices.map((_, i) => i)
   if (menu.submit) rows.splice(menu.submit.after + 1, 0, 'submit')
   return rows
 }
 
-/**
- * 走到 `target` 的方向鍵（不含 Enter）。用 ↑↓ 不用數字：每種選單都吃、超過 9 項也行，數字鍵
- * 是否直接選取各家不一（見 `daemon/src/tui_prompts.rs`）。算不出來回 `null`，呼叫端別送。
- */
 export function keysToMove(menu: TuiChoiceMenu, target: WalkTarget): string[] | null {
   const rows = walkRows(menu)
   const from = menu.submit?.current ? rows.indexOf('submit') : rows.indexOf(menu.cursor)
@@ -554,60 +426,39 @@ export function keysToMove(menu: TuiChoiceMenu, target: WalkTarget): string[] | 
   return Array.from({ length: Math.abs(delta) }, () => (delta > 0 ? 'down' : 'up'))
 }
 
-/** 單選：走過去再 Enter，一批送完（無 Submit 列、步數算得準；2026-09-12 第一輪實測）。多選走一步驗一步，見 `BlockedChoices`。 */
 export function keysToSelect(menu: TuiChoiceMenu, target: number): string[] {
   return [...(keysToMove(menu, target) ?? []), 'enter']
 }
 
-/** `Type something.` / `Chat about this`：編號列，但不是勾選項。 */
 export function isActionChoice(c: Pick<TuiChoice, 'title'>): boolean {
   return isTypeSomething(c) || /^chat about this$/i.test(c.title.trim())
 }
 
-/** 游標停在這列時可以直接貼字，標題會被取代（2026-09-13 真機）。 */
 export function isTypeSomething(c: Pick<TuiChoice, 'title'>): boolean {
   return /^type something\.?$/i.test(c.title.trim())
 }
 
-/**
- * 這一列能不能在面板裡打字作答。單選頁：走到 → 貼字 → 對帳 → Enter（2026-09-13 真機）。
- * 複選頁（2026-09-25 真機，claude 2.1.281）：游標停在 `[ ] Type something` 上直接打字，那列會**自己勾起來**
- * 並把標題換成打的字（不開輸入框、不必 Enter）；之後 Enter／space 只是翻轉那列的勾，字留著。
- * 所以複選頁也給打字框，送出時貼字、對帳「出現且已勾」，再走這一頁的 Submit 列。
- */
 export function typedAnswerHere(menu: { multi: boolean; asyncQueue?: boolean }, c: Pick<TuiChoice, 'title'>): boolean {
-  // codex 非同步提問（#1879）的 `Other` 是打字列；只在認得那份選單的腳註時才算，別的選單裡叫 `Other` 的是一般選項。
   return isTypeSomething(c) || (menu.asyncQueue === true && /^other$/i.test(c.title.trim()))
 }
 
-/** 複選頁貼字後：那列要同時「長出這段字」且「已勾起來」，才算終端收到自訂答案。 */
 export function customAnswerChecked(choice: TuiChoice, text: string): boolean {
   return choice.checked === true && customAnswerShown(choice, text)
 }
 
-/**
- * 貼上後那列是否已長出這段字：換行貼上時第一行在標題、其餘在說明；答完會多 `✔`。
- * 完整比對要過（空白不計）。只看到前綴（多行答案只露第一行）不算出現：只有說明結尾有裁切記號 `…`、
- * 而已見的部分是答案的完整前綴時才認，否則可能是第二行根本沒送到，交卷前要停下讓使用者看（#1818）。
- */
 export function customAnswerShown(choice: TuiChoice, text: string): boolean {
-  // 空白全部拿掉再比：窄 pane 會把長答案硬折行（中文沒有空格，折在字中間），折出來的斷點在
-  // 標題與說明之間變成一個空格，照原樣比就永遠對不上——會判成「沒出現」而不按 Enter，重送又變成
-  // 「選項跟讀進來時不一樣」（review3 c1 f19e855 的疑點）。英文折在空格上，去掉空白照樣對得上。
   const squash = (s: string) => s.replace(/\s+/g, '')
   const want = squash(text)
   if (!want) return false
   const visible = `${choice.title.replace(/\s*✔\s*$/, '')} ${choice.detail ?? ''}`.trim()
   const shown = squash(visible)
   if (shown.includes(want)) return true
-  // 只有多行答案才認裁切：單行被裁時照舊不算出現。已見部分還要比首行多至少一個字，第二行一個字都沒露就不放行。
   if (!text.includes('\n') || !/…$/.test(visible)) return false
   const seen = squash(visible.replace(/…$/, ''))
   const first = squash(text.split('\n')[0] ?? '')
   return seen.length > first.length && want.startsWith(seen)
 }
 
-/** 送鍵前確認選單還是同一份（↓ 次數是相對的）。不比勾選與游標：那是我們自己按出來的。 */
 export function sameChoices(a: TuiChoiceMenu, b: TuiChoiceMenu): boolean {
   return (
     a.question === b.question &&

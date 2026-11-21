@@ -21,16 +21,14 @@ test('倒數：剩餘比例＝剩餘／TTL，隨時間往下掉', () => {
   assert.equal(s.frac, 0.75)
   assert.equal(s.level, 'fresh')
   assert.match(s.title, /^快取約 45 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）$/)
-  // 15 秒後重算：少 15 秒。
   assert.equal(cacheState(at(15), 3600, T0 + 15_000)!.remainingSecs, 45 * 60 - 15)
   assert.equal(cacheState(at(50), 3600, T0)!.level, 'warn')
   assert.equal(cacheState(at(57), 3600, T0)!.level, 'low')
-  // 不到一分鐘也說「約 1 分」，不說 0 分。
   assert.match(cacheState(at(59.9), 3600, T0)!.title, /約 1 分後到期/)
 })
 
 test('上次活動不是今天時帶月日；同一天仍只寫時分', () => {
-  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
   const now = new Date(2026, 9, 11, 15, 0).getTime()
   const last = new Date(2026, 9, 8, 14, 5).toISOString()
   assert.equal(cacheState(last, 3600, now)!.title, '快取已涼（上次活動 10/8 14:05）')
@@ -62,25 +60,19 @@ test('daemon 時鐘比這台快：剩餘不超過 TTL', () => {
 })
 
 test('保溫：顏色從保溫時間起算，tooltip 仍講真實的上次活動', () => {
-  // 70 分鐘前最後一次活動（單看已涼），10 分鐘前保溫過：還剩 50 分、綠。
   const s = cacheState(at(70), 3600, T0, false, at(10))!
   assert.equal(s.remainingSecs, 50 * 60)
   assert.equal(s.level, 'fresh')
   assert.match(s.title, /^快取約 50 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d，已保溫 (?:\d+\/\d+ )?\d\d:\d\d）$/)
-  // 保溫也過期了：已涼。
   assert.equal(cacheState(at(130), 3600, T0, false, at(61))!.level, 'cold')
-  // 保溫時間比上次活動早（舊資料）或壞掉：不影響。
   assert.deepEqual(cacheState(at(20), 3600, T0, false, at(30)), cacheState(at(20), 3600, T0))
   assert.deepEqual(cacheState(at(20), 3600, T0, false, '壞掉'), cacheState(at(20), 3600, T0))
   assert.deepEqual(cacheState(at(20), 3600, T0, false, null), cacheState(at(20), 3600, T0))
 })
 
 test('熱壓後視為涼掉：daemon 不帶 cache_kept_warm_at（熱壓前的保溫也不算），111 分前的活動就是涼', () => {
-  // 58 分保溫過、110 分熱壓：保溫那筆在熱壓之後不再帶，熱壓本身也不算讓 cache 變熱。
   assert.equal(cacheState(at(111), 3600, T0, false, null)!.level, 'cold')
-  // 對照：只保溫沒熱壓（還沒到 110 分，或 context ≤ 30% 沒壓）仍是熱的。
   assert.equal(cacheState(at(111), 3600, T0, false, at(30))!.level, 'fresh')
-  // 熱壓之後真的活動重新計時：新的活動一出現就回到熱。
   assert.equal(cacheState(at(2), 3600, T0, false, null)!.level, 'fresh')
 })
 
@@ -103,16 +95,14 @@ test('chipCache：壓縮後（cache_compacted）不畫倒數，新回合後恢�
 })
 
 test('跨年：上次活動在去年，tooltip 的時間要帶年份', () => {
-  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
   const now = new Date(2027, 0, 1, 0, 20).getTime()
   const last = new Date(2026, 11, 31, 23, 30).toISOString()
   assert.equal(cacheState(last, 3600, now)!.title, '快取約 10 分後到期（上次活動 2026/12/31 23:30）')
 })
 
 test('紅色（< 5 分）底色以 5 分為滿刻度：剛變紅是滿的，5 分內流到 0', () => {
-  // 剩餘秒數直接給（不經分鐘取整）：`at(m)` 的剩餘是 3600 - m×60。
   const left = (secs: number) => new Date(T0 - (3600 - secs) * 1000).toISOString()
-  // 剩 300 秒：黃的 level，但比例已按紅色算成滿條（從黃轉紅時不跳）。
   assert.equal(cacheState(left(300), 3600, T0)!.level, 'warn')
   assert.equal(cacheState(left(300), 3600, T0)!.frac, 1)
   assert.equal(cacheState(left(299), 3600, T0)!.level, 'low')
@@ -120,7 +110,6 @@ test('紅色（< 5 分）底色以 5 分為滿刻度：剛變紅是滿的，5 �
   assert.equal(cacheState(left(150), 3600, T0)!.frac, 0.5)
   assert.equal(cacheState(left(1), 3600, T0)!.level, 'low')
   assert.ok(cacheState(left(1), 3600, T0)!.frac < 0.01, '剩 1 秒幾乎是 0')
-  // 到期：已涼，比例 0。
   assert.equal(cacheState(left(0), 3600, T0)!.frac, 0)
 })
 
@@ -143,7 +132,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(apiChipCache(undefined, T0), null)
   assert.equal(apiChipCache({ working: false, last_request_at: null, ttl_secs: null, expires_at: null }, T0), null)
 
-  // 回合進行中＝滿條、fresh
   const working = apiChipCache({ working: true, ttl_secs: 300, last_request_at: at(5) }, T0)
   assert.ok(working)
   assert.equal(working.level, 'fresh')
@@ -151,7 +139,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(working.remainingSecs, 300)
   assert.match(working.title, /回合進行中，快取是熱的/)
 
-  // 1 小時 TTL：剩 45 分（綠，fresh，75%）
   const fresh1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 45 * 60_000).toISOString(), last_request_at: at(15) }, T0)
   assert.ok(fresh1h)
   assert.equal(fresh1h.level, 'fresh')
@@ -159,7 +146,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(fresh1h.remainingSecs, 2700)
   assert.match(fresh1h.title, /快取約 45 分後到期/)
 
-  // 1 小時 TTL：剩 10 分（黃，warn，10/60）
   const warn1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 10 * 60_000).toISOString(), last_request_at: at(50) }, T0)
   assert.ok(warn1h)
   assert.equal(warn1h.level, 'warn')
@@ -167,7 +153,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(warn1h.remainingSecs, 600)
   assert.match(warn1h.title, /快取約 10 分後到期/)
 
-  // 1 小時 TTL：剩 3 分（紅，low，以 5 分為滿刻度＝3/5）
   const low1h = apiChipCache({ working: false, ttl_secs: 3600, expires_at: new Date(T0 + 3 * 60_000).toISOString(), last_request_at: at(57) }, T0)
   assert.ok(low1h)
   assert.equal(low1h.level, 'low')
@@ -175,7 +160,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(low1h.remainingSecs, 180)
   assert.match(low1h.title, /快取約 3 分後到期/)
 
-  // 5 分鐘 TTL：剩 2 分（紅，low，2/5）
   const low5m = apiChipCache({ working: false, ttl_secs: 300, expires_at: new Date(T0 + 2 * 60_000).toISOString(), last_request_at: at(3) }, T0)
   assert.ok(low5m)
   assert.equal(low5m.level, 'low')
@@ -183,7 +167,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
   assert.equal(low5m.remainingSecs, 120)
   assert.match(low5m.title, /快取約 2 分後到期/)
 
-  // 到期：已涼（冷），frac＝0，remainingSecs＝0
   const cold = apiChipCache({ working: false, ttl_secs: 300, expires_at: new Date(T0 - 10_000).toISOString(), last_request_at: at(6) }, T0)
   assert.ok(cold)
   assert.equal(cold.level, 'cold')
@@ -193,7 +176,6 @@ test('apiChipCache：回合中顯示熱（滿）、依 expires_at 與 ttl 算比
 })
 
 test('agy 12 分 TTL：閒置 <5 分 fresh、5–10 分 warn、10–12 分 low、>12 分 cold', () => {
-  // 門檻：剩 >420 fresh、120–420 warn、<120 low（agy 720 秒，見 cache_clock::ttl_secs）。
   assert.equal(cacheLevel(421, 720), 'fresh')
   assert.equal(cacheLevel(420, 720), 'warn')
   assert.equal(cacheLevel(120, 720), 'warn')

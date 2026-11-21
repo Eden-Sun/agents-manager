@@ -17,7 +17,6 @@ const reading = (stale?: boolean) => toKindQuota({
 test('額度快取回填的 stale 會保留給 UI', () => {
   assert.equal(reading(true)?.stale, true)
   assert.equal(reading(false)?.stale, false)
-  // 舊 daemon 的 payload 沒有欄位時，維持 fresh 的相容預設。
   assert.equal(reading()?.stale, false)
 })
 
@@ -58,11 +57,6 @@ test('GitHub API 的 content_notice 穿過 normalizer 到每筆 issue 與 detail
   })?.content_notice, content_notice)
 })
 
-/**
- * **issue #492** 的三態。`pick` 的用途是「挑第一個有值的鍵」，所以它把 `null` 也收斂成 `undefined`——
- * 拿它判欄位在不在，daemon 說的「現在沒有批次在跑」就會被讀成「舊 daemon，不知道」，而那一格正是
- * 用來清掉卡住的重啟進度的。存在與否只能用 `in`。
- */
 test('#492 restart_batch 的三態：在但空是 null（沒有批次），欄位不在才是 undefined（不知道）', () => {
   assert.equal(toState({ restart_batch: null }).restart_batch, null)
   assert.equal(toState({ restart_batch: '' }).restart_batch, null)

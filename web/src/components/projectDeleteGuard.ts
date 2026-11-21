@@ -1,6 +1,5 @@
 import type { Bot, Run } from '../api/types'
 
-/** 有 active run 時 `DELETE /api/projects/{id}` 回 409（API.md），確認框事先停掉確認鈕；active 定義同 daemon。 */
 export function projectDeleteBlockers(
   bots: readonly Bot[],
   runs: Readonly<Record<string, Run | null | undefined>>,

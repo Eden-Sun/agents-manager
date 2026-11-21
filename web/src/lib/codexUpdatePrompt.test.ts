@@ -44,10 +44,7 @@ test('其他畫面一律不認，寧可不顯示也不要拿錯版本去查', ()
   assert.equal(parseCodexUpdatePrompt(null), null)
 })
 
-// ── 送出那一下（issue #546）：按鈕依據的是每秒輪詢的快照，送之前要重讀 ──
-
 const SCREEN = (from: string, to: string) => `  ✨ Update available! ${from} -> ${to}\n> 1. Update now\n  2. Skip\n  3. Skip until next version\n`
-/** codex 的核准框：同樣是 `1.` 開頭，那顆 1 落進來就等於核准了別的東西。 */
 const APPROVAL = '  Allow command `rm -rf build`?\n  1. Yes\n  2. No\n'
 
 function io(screen: string | null) {

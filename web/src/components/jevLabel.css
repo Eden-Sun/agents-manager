@@ -1,4 +1,3 @@
-/* 「Jev 建議」統一標示（issue #1912）：所有 Jev（TypeSafe 型別判斷）給的建議都用這一個樣式。強調色小膠囊＋可選的「只是建議」說明。 */
 .jev-label {
   display: inline-flex;
   align-items: baseline;

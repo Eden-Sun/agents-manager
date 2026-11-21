@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('./QuotaStrip.tsx', import.meta.url), 'utf8')
-const popRow = source.match(/function PopRow\([\s\S]*?(?=\n\/\*\*)/)?.[0]
+const popRow = source.match(/function PopRow\([\s\S]*?(?=\nfunction |\nexport )/)?.[0]
 
 test('portal 確認框裡的點擊不會切換額度列', () => {
   assert.ok(popRow, 'QuotaStrip.tsx 要有 PopRow')

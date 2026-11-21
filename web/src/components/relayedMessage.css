@@ -1,5 +1,3 @@
-/* 右邊一欄只屬於使用者（2026-09-12 使用者：「訊息右方就只能有我的，agm 代發的特別標」）：user role 混了代發訊息
-   （`messages.relay_from`，SPEC §6.5d）與 daemon 通知，靠右就是冒名。用 `:has()` 認既有的 `.msg-targets.relay` / `.daemon-notice` 移到左邊。 */
 .msg.user:has(.msg-targets.relay),
 .msg.user.daemon-notice {
   align-self: flex-start;
@@ -7,7 +5,6 @@
   max-width: 90%;
 }
 
-/* 左槓＋面板底，跟使用者藍底與 bot 回覆（無槓）都分得開；尖角翻到左下。 */
 .msg.user:has(.msg-targets.relay) .bubble {
   background: color-mix(in srgb, var(--accent-ink) 7%, var(--bg-panel));
   color: var(--text);
@@ -16,7 +13,6 @@
   border-bottom-left-radius: 4px;
 }
 
-/* daemon 通知已有黃槓，只搬位置不改色。 */
 .msg.user.daemon-notice .bubble {
   border-bottom-right-radius: 14px;
   border-bottom-left-radius: 4px;
@@ -27,8 +23,6 @@
   justify-content: flex-start;
 }
 
-/* 代發／轉述預設收合成一行（2026-09-14 使用者：「agm 交辦的訊息都不用全顯示，收合就好」）。
-   摘要本身已經是單行字串，這裡只防長網址或 sha 撐破泡泡。 */
 .bubble.folded {
   overflow: hidden;
   text-overflow: ellipsis;

@@ -1,21 +1,15 @@
 import { t } from './i18n'
 
-/** 代發訊息的來源標（`messages.relay_from`，SPEC §6.5d）。
- *
- * `relay_unverified`（issue #339）：呼叫端自稱是那顆 bot、卻沒帶它自己的 bot token 證明——相容期照收，
- * 但標籤要說「未驗證」，免得冒名的話看起來跟真的那顆說的一樣。daemon 哨符不會是未驗證（HTTP 帶不進來）。 */
 export function relaySource(input: {
   fromId: string
   fromName: string
   toName: string
   unverified: boolean
-  /** 群集派工：群集名與接手成員是哪一端（成員是收件端＝派工泡泡，是寄件端＝結果通知）。 */
   cluster?: string | null
   fromIsAssignee?: boolean
   toIsAssignee?: boolean
 }): { text: string; title: string; daemon: boolean } {
   const { fromId, fromName, unverified, cluster } = input
-  // `daemon` 是哨符不是 bot id（`agent_relay::DAEMON_SENDER`）：排程／daemon 自發，沒有人按過。
   if (fromId === 'daemon') {
     return { text: t('daemon 自動觸發'), title: t('daemon 自動觸發的訊息（排程／自動化，不是人送的）'), daemon: true }
   }

@@ -11,8 +11,6 @@ const hhmm = (iso: string | null | undefined): string => {
   return `${String(z.hour).padStart(2, '0')}:${String(z.minute).padStart(2, '0')}`
 }
 
-/** Balance 晶片 tooltip 的逐行文字。`t` 由元件的 `useT()` 傳進來（模組層不呼叫 msg()）。 */
-/** 距上次校正多久：不到 1 小時／N 小時（兩天內）／N 天。 */
 export function anchorAge(iso: string | null | undefined, now: Date, t: Translate): string {
   const ms = iso ? now.getTime() - new Date(iso).getTime() : Number.NaN
   if (!Number.isFinite(ms) || ms < 0) return '—'

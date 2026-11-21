@@ -1,7 +1,3 @@
-/**
- * mock 的 herdr integration 更新總覽（SPEC §6.9c，issue #1772）：`GET /integration-updates`、
- * `POST /hosts/{name}/herdr-integration`。只改記憶體裡的表，不碰任何設定檔。
- */
 import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
@@ -40,7 +36,6 @@ export class MockIntegrationUpdates {
       const items = (h?.items ?? []) as Rec[]
       const item = items.find((x) => x.name === name)
       if (!h || !item) throw new ApiError(404, { error: 'not_found', what: 'host' }, 'not found')
-      // 手動安裝沒裝的只限 grok／antigravity-cli（daemon 另外要求那台已登入，#1871）。
       const freshOk = item.state === 'not_installed' && (name === 'grok' || name === 'antigravity-cli')
       if (item.state !== 'outdated' && !freshOk) {
         throw new ApiError(409, { error: 'conflict', reason: 'already_current', message: `${name} 的 integration 不需要更新` }, 'conflict')

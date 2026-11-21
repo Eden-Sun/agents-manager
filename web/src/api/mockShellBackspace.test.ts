@@ -1,7 +1,3 @@
-/**
- * mock 的 shell 退格要跟真終端一樣「整個字元」往回刪：打一顆 emoji（兩個 UTF-16 單位）再退格，
- * 不能只砍掉後半截，留下一個落單的高位代理字元（畫面上是 �）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

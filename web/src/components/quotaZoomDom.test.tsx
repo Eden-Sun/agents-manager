@@ -1,7 +1,3 @@
-/**
- * 剩量和重置刻度都在 10% 以下時，量表條改畫 0–10% 刻度的連續條、兩端各一根豎線（#1787，2026-10-16 第三版，取代 #1785 的 10 格點陣）；
- * 倒數模式的列不在列內寫倒數，統一在所有窗口下方另起一行（`└ 3h05`）。真的掛 `QuotaStrip` 進 happy-dom。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -20,7 +16,6 @@ const WEEK_MS = 7 * 24 * HOUR_MS
 
 interface Win {
   remaining: number
-  /** 距離重置還有幾毫秒。 */
   inMs: number
 }
 
@@ -57,11 +52,9 @@ async function mountQuota(seven: Win, fable: Win | null = null, five: Win | null
   return document.querySelector<HTMLElement>('.quota-hp.claude')!
 }
 
-/** 週窗：剩 `remaining`%、重置刻度落在窗口的 `markPct`%（重置在 窗口長 × markPct% 之後）。 */
 const mountWeek = (remaining: number, markPct: number) => mountQuota({ remaining, inMs: (WEEK_MS * markPct) / 100 })
 
 const fillOf = (el: Element) => parseFloat(el.querySelector<HTMLElement>('.quota-bar-fill')!.style.width)
-/* 刻度範圍是 `.zoomed` 的外框（CSS），DOM 只看 wrap 有沒有這個 class；兩端豎線已拿掉（2026-10-23）。 */
 const zoomed = (el: Element) => el.querySelectorAll('.quota-bar-wrap.zoomed').length
 const line = (el: Element) => el.querySelector('.quota-reset-line')
 

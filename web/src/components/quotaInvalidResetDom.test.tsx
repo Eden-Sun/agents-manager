@@ -1,7 +1,3 @@
-/**
- * 重置時間讀不出來（daemon 給了不是時間的字串）：倒數與刻度的提示不能寫出「NaN」。
- * 照額度列既有的空狀態：沒有可算的倒數就顯示「—」、不掛提示。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -40,7 +36,6 @@ async function mountWithBadReset(credits: unknown = null) {
   return document.querySelector<HTMLElement>('.quota-hp.claude')!
 }
 
-/** 格子裡所有文字與 title／aria-label，任何一處含 NaN 都算。 */
 function nanIn(el: Element): string[] {
   const hits: string[] = []
   for (const n of [el, ...el.querySelectorAll('*')]) {

@@ -33,7 +33,6 @@ test('那則與之後的標成倒回，之前的不動；找不到那則不改�
   assert.ok(next)
   assert.deepEqual(next.map((m) => m.rewound_at ?? null), [null, null, 'T', 'T'])
   assert.equal(markRewound(list, 'nope', 'T'), null)
-  // 已經全標過：不產生新清單（避免無謂 re-render），也不覆蓋第一次的時間。
   assert.equal(markRewound(next, 'u2', 'T2'), null)
 })
 
@@ -43,9 +42,6 @@ test('失敗訊息：daemon 寫好的 message 直接用；舊 daemon（405／路
   assert.match(rewindErrText(new ApiError(404, {}, 'x')), /重建並重啟 daemon/)
   assert.equal(rewindErrText(new ApiError(404, { error: 'not_found', what: 'message' }, 'x')), '找不到這則訊息。')
 })
-
-// ── 桌機「⟲ 倒回」（使用者 2026-09-24） ──
-
 
 test('markRewoundInGroup：只標同一段對話、那則之後的（混著別顆 bot 的群組清單）', () => {
   const a = (id: string) => msg(id, 'user', { conversation_id: 'A' })

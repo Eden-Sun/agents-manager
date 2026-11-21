@@ -9,23 +9,12 @@ import { resendTarget } from '../lib/resendTarget'
 import { modelAtCapacity } from '../lib/modelCapacity'
 import './turnErrorBadge.css'
 
-/**
- * 「改用 opus」送出去的正式 id（`opus` 是已停用別名，送了會被 daemon 換掉）。
- * 刻意是函式、不是模組層的 `const`：正式 build 把 components 拆進 initial-ui chunk，它跟 main chunk 互相 import，
- * 模組層呼叫 `canonicalModel` 會在 `DEPRECATED_MODELS` 還沒初始化時執行 → 整頁空白（見 moduleInitOrder.test.ts）。
- */
 const opusId = () => canonicalModel('claude', 'opus')
 
-/**
- * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）：claude 斷線只在 pane 印一行、照常 idle，`runs.turn_error` 在此顯示。
- * 沒有「知道了」：下一回合 daemon 會清掉。彈出層 portal 到 body：標題列疊在對話區底下，absolute 會被壓住。
- */
 export function TurnErrorBadge({ botId }: { botId: string }) {
   const t = useT()
   const notice = useStore((s) => s.runs[botId]?.turn_error ?? null)
-  // 模型滿載有自己的標示（輸入框上方一行、側欄與晶片的專屬色，#1674），這顆「⚠ 回合被中斷」不重複畫。
   const capacity = useStore((s) => modelAtCapacity(s.runs[botId]))
-  // 額度用盡跟斷線分開講：重送沒用，要等重置或換模型（2026-09-12 使用者：「已用盡卻沒有正確的提示」）。
   const quotaLimit = notice !== null && /^you've reached your .*limit/i.test(notice)
   const quotaName = notice && /fable/i.test(notice) ? 'Fable' : t('5 小時')
   const resetsAt = useStore((s) => {
@@ -38,7 +27,6 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     return q.limit_hit?.until ?? (/fable/i.test(notice ?? '') ? q.fable?.resets_at : q.five_hour?.resets_at) ?? null
   })
   const currentModel = useStore((s) => s.bots.find((b) => b.id === botId)?.model ?? null)
-  /** 舊資料可能還存著 `opus` 這個已停用別名，新的一律是正式 id：兩個都算「已經是 opus」（#539）。 */
   const isOpus = currentModel === opusId() || currentModel === 'opus'
   const patchBot = useStore((s) => s.patchBot)
   const resendFields = useStore(useShallow((s) => {
@@ -88,18 +76,15 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
     }
   }, [open])
 
-  // 打開：焦點進浮層（role=dialog 要有人接住焦點，讀屏才會唸）。等一格：第一次 render 還是 visibility: hidden，focus() 會落空。
   useEffect(() => {
     if (!open) return
     const raf = requestAnimationFrame(() => popRef.current?.focus({ preventScroll: true }))
     return () => cancelAnimationFrame(raf)
   }, [open])
-  // 焦點在浮層裡時收起，焦點回徽章鈕，不掉到 body。
   const closePop = () => {
     if (popRef.current?.contains(document.activeElement)) btnRef.current?.focus()
     setOpen(false)
   }
-  // 點外面 / Esc 收起來，跟其他浮層一樣。
   useEffect(() => {
     if (!open) return
     const away = (e: MouseEvent) => {
@@ -157,7 +142,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
           })}
         </p>
       )}
-      {/* 原文照貼：使用者要能拿它去對終端上那一行。 */}
+      {}
       <pre className="turn-error-raw">{notice}</pre>
       <div className="turn-error-act">
         {quotaLimit ? (
@@ -168,8 +153,6 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
             title={isOpus ? t('已經是 opus') : t('把這顆 bot 的模型改成 opus（live 套用，不重啟）')}
             onClick={() => {
               setSending(true)
-              // 送正式 id，不送已停用的 `opus` 別名（#539）：送別名的話 daemon 會換掉再存，
-              // 而這顆按鈕的 `currentModel === 'opus'` 從此永遠不成立，按完還是一直可按。
               void patchBot(botId, { model: opusId() }).then((res) => {
                 setSending(false)
                 if (res) {

@@ -1,8 +1,3 @@
-/**
- * #1807：編輯排程時只有排程時間真的變了才送 `spec`。沒動時間就不帶 spec（後端會把 spec 當成新的
- * 間隔錨點重算、升 generation），而且秒精度要保留（API 收的是秒，61 秒不能被四捨五入成 60 秒）。
- * 用正式的 `ScheduleEditor`，回應由假後端扮演。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -12,7 +7,6 @@ import { useStore } from '../store/store'
 import { ScheduleEditor } from './ScheduleEditor'
 
 afterEach(unmountAll)
-// 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；短清單仍含測試用的 Asia/Taipei。
 let tzList: ReturnType<typeof shortTimeZoneList>
 before(async () => {
   await setupDom()
@@ -30,7 +24,6 @@ const scheduleRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-/** 掛上編輯器，等詳情載入完，回傳對話框與假後端紀錄的 PATCH 送出內容。 */
 async function openEditor(row: Record<string, unknown>) {
   const requests = fakeApi((req) => {
     if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return row
@@ -39,7 +32,6 @@ async function openEditor(row: Record<string, unknown>) {
   })
   await mount(<ScheduleEditor projectId="p1" scheduleId="s1" onClose={() => {}} onSelect={() => {}} />)
   await settle()
-  // 編輯器掛在 document.body（portal），整個頁面找就好。
   const root = document.body
   const patches = () => requests.filter((r) => r.method === 'PATCH').map((r) => r.body as Record<string, unknown>)
   const save = async () => {
@@ -84,7 +76,6 @@ test('真的改了分鐘：送新的 spec（秒數依輸入）', async () => {
 })
 
 test('瀏覽器不認識排程的時區：編輯器照常 render（下次與最近執行都退回 UTC 並標示）', async () => {
-  // 假裝這台瀏覽器的 Intl 不認識 America/Coyhaique（後端 chrono-tz 認得）：非 UTC 的時區一律丟 RangeError。
   const original = Date.prototype.toLocaleString
   Date.prototype.toLocaleString = function (this: Date, locale?: string | string[], options?: Intl.DateTimeFormatOptions) {
     if (options?.timeZone && options.timeZone !== 'UTC') throw new RangeError(`Invalid time zone specified: ${options.timeZone}`)
@@ -149,7 +140,6 @@ test('詳情新 GET 先回時，較舊的排程回應不能覆蓋新狀態', asy
   let releaseOld: ((response: Response) => void) | null = null
   const response = (enabled: boolean) => new Response(JSON.stringify(scheduleRow({ enabled })), { status: 200 })
   globalThis.fetch = (async (input: unknown) => {
-    // 編輯器另外會讀同專案的排程清單（挑 Bot 用），這裡只數詳情。
     if (!String(input).endsWith('/schedules/s1')) return new Response(JSON.stringify({ schedules: [] }), { status: 200 })
     detailGets += 1
     if (detailGets === 1) return response(true)
@@ -207,7 +197,6 @@ test('切換排程：baseline 依排程重置，載入完成後的 no-op 儲存�
     if (req.method === 'GET' && req.path.endsWith('/schedules/s1')) return scheduleRow()
     return undefined
   })
-  // s2 的 GET 先扣住，才能在它載入之前檢查 baseline 是否已清空。
   const fetchUntilReleased = globalThis.fetch
   globalThis.fetch = (async (input: string, init?: { method?: string; body?: string }) => {
     if (String(input).endsWith('/schedules/s2') && (init?.method ?? 'GET') === 'GET') {
@@ -265,9 +254,7 @@ test('#1839：排程編輯器初次載入期間顯示載入中且欄位 disabled
     assert.equal(promptBox.disabled, true, '載入中表單欄位必須 disabled')
     assert.ok(document.querySelector('.schedule-loading'), '必須顯示載入提示')
 
-    // 模擬使用者若在載入期間有修改或觸碰欄位，GET resolve 後不能被舊值蓋掉
     await act(async () => {
-      // 模擬即便在 resolve 前有輸入（例如透過外部或 touched）
       promptBox.disabled = false
     })
     await typeInto(promptBox, '使用者剛打好的新任務內容')
@@ -299,12 +286,10 @@ test('#1839：初次 GET 失敗要明確顯示錯誤且儲存鈕維持禁用（�
   assert.equal(saveBtn.disabled, true, '初次 GET 失敗後儲存按鈕必須禁用，避免錯存空白/預設表單')
 })
 
-
 test('不可用的 Bot 警告可直接聚焦編輯器的 Bot 欄位', async () => {
   fakeApi((req) => req.method === 'GET' && req.path.endsWith('/schedules/s1') ? scheduleRow({ bot_available: false }) : undefined)
   await mount(<ScheduleEditor projectId="p1" scheduleId="s1" focusBot onClose={() => {}} onSelect={() => {}} />)
   await settle(50)
-  // 焦點落在目前選的 Bot 那一列（清單元件裡的按鈕）。
   const selected = document.querySelector('.sched-bot-row.selected') ?? document.querySelector('.schedule-bot-focus')
   assert.ok(selected)
   assert.equal(document.activeElement, selected)

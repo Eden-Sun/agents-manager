@@ -1,7 +1,3 @@
-/**
- * 更新晶片「有更新但相關 Bot 都在忙」（使用者 2026-11-18：「這個更新無法點，不合理」）：晶片永遠可點，
- * 全忙時開同一個確認框，列出更新內容與忙碌名單，可「閒下來自動重啟」（不強制重啟）或取消。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -33,7 +29,6 @@ before(async () => {
       calls.push({ method, url, body })
       return new Response(JSON.stringify({ batch_id: 'b1', total: 1, planned: [{ bot_id: 'ready', name: 'ready' }], skipped: [] }), { status: 200, headers: { 'content-type': 'application/json' } })
     }
-    // changelog 等其他請求：空回應即可。
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
 })
@@ -127,8 +122,6 @@ test('有閒置的也有忙的、沒勾選：不排程', async () => {
   await settle()
   assert.ok(!calls.some((c) => c.method === 'POST' && c.url.includes('update-restart')))
 })
-
-// ───────────── 強制重啟（使用者 2026-11-18 明確要求；按前二次確認）─────────────
 
 const restartCalls = () => calls.filter((c) => /\/bots\/[^/]+\/restart/.test(c.url) && !c.url.includes('restart-idle'))
 const forceButtons = () => [...document.querySelectorAll<HTMLButtonElement>('button.confirm-row-force:not(.all)')]

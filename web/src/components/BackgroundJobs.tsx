@@ -17,16 +17,11 @@ import './backgroundJobs.css'
 function useBackground(botId: string): { n: number; kind: string; age: string | null; stuck: boolean } {
   const n = useStore((s) => backgroundJobs(s.runs[botId]))
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind ?? 'claude')
-  // #774：跑了多久（每次 store 更新時重算；開始時間本身不會過期）、daemon 判定的「可能卡住」。
   const age = useStore((s) => backgroundAge(s.runs[botId]))
   const stuck = useStore((s) => backgroundStuck(s.runs[botId]))
   return { n, kind, age, stuck }
 }
 
-/**
- * #714：側欄上的「背景 N」。`variant="state"` 取代側欄那格「閒置」字；`mini` 給精簡的 child 列
- * （它們沒有狀態字，只有燈號）。標題列不放（2026-09-30 使用者：側欄與輸入框上方那條已經講了）。
- */
 export function BackgroundJobsBadge({
   botId,
   variant,
@@ -34,7 +29,6 @@ export function BackgroundJobsBadge({
 }: {
   botId: string
   variant: 'state' | 'mini'
-  /** 沒有背景工作時畫這個（側欄那格原本的「閒置」字）。 */
   fallback?: React.ReactNode
 }) {
   const t = useT()
@@ -59,10 +53,6 @@ export function BackgroundJobsBadge({
   )
 }
 
-/**
- * 聊天最底下（輸入框上方）的一條說明：最後一則之後它其實還在動。
- * 手機只畫一行（燈＋狀態＋跑多久＋第一個工作），說明句與排程收起來、點一下才展開（2026-10-03 使用者：藍色那塊太佔空間）。
- */
 export function BackgroundJobsBar({ botId }: { botId: string }) {
   const t = useT()
   const { n, kind, age, stuck } = useBackground(botId)

@@ -1,8 +1,3 @@
-/**
- * #1755：codex 的 footer（模型、目錄、Context／額度那串）不只在終端分頁有。
- * 終端畫面本身照 pane 原樣留著 footer（用線上 `GET /api/bots/{id}/terminal` 的真回應當 fixture，桌機與手機寬度各驗一次）；
- * 對話分頁沒有掛終端時，狀態列改用 daemon 寫進 `run.status_line` 的同一行，不再只剩 context 百分比。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -56,7 +51,6 @@ for (const phone of [false, true]) {
   }
 }
 
-/** claude 那條：帳號／目錄、context、快取、版本；每個欄位是 `.sl-item`，不塞原文字串。 */
 function items() {
   return [...document.querySelectorAll('.statusline-bar > .sl-item')].map((e) => ({
     k: e.getAttribute('data-k') ?? '', v: e.querySelector('.sl-v')?.textContent ?? '',

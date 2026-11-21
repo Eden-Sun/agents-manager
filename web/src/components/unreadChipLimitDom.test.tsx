@@ -1,7 +1,3 @@
-/**
- * #1899：主力晶片的撞限角標。掛真的 `UnreadChip`，資料從 `GET /api/state` 的 fixture 經 `refreshState` 進來
- * （不直接塞 store，才會走 normalize 的 toBot）。角標只在主力列、還沒過 `until` 時畫；文字併進晶片 label。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -20,7 +16,6 @@ const FUTURE = new Date(Date.now() + 6 * 3600_000).toISOString()
 const PAST = new Date(Date.now() - 3600_000).toISOString()
 const HIT = { message: "You've hit your usage limit", until: FUTURE }
 
-/** daemon 的 bot 形狀（`/api/state` 裡一顆）。 */
 const rawBot = (id: string, extra: Record<string, unknown>) => ({
   id,
   project_id: 'p1',
@@ -49,7 +44,6 @@ const bots = [
   rawBot('old', { primary: true, primary_position: 2, limit_hit: { message: 'x', until: PAST } }),
   rawBot('ok', { primary: true, primary_position: 3 }),
   rawBot('nt', { primary: true, primary_position: 4, limit_hit: { message: 'x', until: null } }),
-  // child 不在主力列；就算有撞限也不畫角標（daemon 也不會給 child 撞限）。
   rawBot('kid', { parent_bot_id: 'hit', managed_by: 'child', limit_hit: HIT }),
 ]
 

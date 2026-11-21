@@ -38,7 +38,6 @@ test('EnvSubTabs: renders tablist and tabs with correct accessibility attributes
   assert.equal(panels[1].id, 'jev-book')
   assert.notEqual(panels[1].getAttribute('hidden'), null)
 
-  // Click tab 1
   await click(tabs[1])
 
   assert.equal(tabs[0].getAttribute('aria-selected'), 'false')
@@ -46,27 +45,23 @@ test('EnvSubTabs: renders tablist and tabs with correct accessibility attributes
   assert.notEqual(panels[0].getAttribute('hidden'), null)
   assert.equal(panels[1].getAttribute('hidden'), null)
 
-  // Keyboard navigation: ArrowLeft -> select 0
   await act(async () => {
     tabs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
   })
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
   assert.equal(panels[0].getAttribute('hidden'), null)
 
-  // Keyboard navigation: ArrowRight -> select 1
   await act(async () => {
     tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
   })
   assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
   assert.equal(panels[1].getAttribute('hidden'), null)
 
-  // Keyboard navigation: Home -> select 0
   await act(async () => {
     tabs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))
   })
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
 
-  // Keyboard navigation: End -> select 1
   await act(async () => {
     tabs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))
   })

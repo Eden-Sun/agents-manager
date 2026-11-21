@@ -5,7 +5,6 @@ import { ApiError } from './types.ts'
 
 test('mock prompt persists one awaits_idle turn, rejects a second slot, and withdraws with text and attachment IDs', async () => {
   const mock = new MockTransport()
-  // A busy run can be visible before its in_flight turn row arrives.
   const internals = mock as unknown as {
     bots: { id: string; name: string }[]
     runs: unknown[]
@@ -34,7 +33,6 @@ test('mock prompt persists one awaits_idle turn, rejects a second slot, and with
 
   assert.deepEqual(await mock.request('POST', `/turns/${queued.turn_id}/withdraw`), { text: 'queued text', attachments: ['a1', 'a2'] })
 
-  // Once an in-flight row is visible, queueing must still leave it alone.
   internals.turns.push({
     id: 'active',
     conversation_id: 'c1',

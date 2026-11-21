@@ -15,7 +15,6 @@ const m = (id: string, extra: Partial<ModelInfo> = {}): ModelInfo => ({
   ...extra,
 })
 
-/** 16 顆完整清單（Gemini 3.8／4 組合＋兩顆 Orchestrator）。 */
 const FULL = [
   'gemini-3.8-flash-low',
   'gemini-3.8-flash-medium',

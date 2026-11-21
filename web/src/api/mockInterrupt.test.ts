@@ -1,4 +1,3 @@
-/** mock 的「打斷」要跟 daemon 同形：帶的 `turn_id` 已不在飛 → 409 `turn_not_in_flight`，不動在飛的那一筆（API.md §4）。 */
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
@@ -6,7 +5,6 @@ import { ApiError } from './types.ts'
 import { useManualMockClock } from './mockClock.ts'
 import { mockClaudeBot } from './mockBotHarness.ts'
 
-// mock 的 bot 啟動是 timer：用虛擬時間，不在牆鐘上輪詢等它。
 before(() => void useManualMockClock(true))
 after(() => void useManualMockClock(false))
 const mock = new MockTransport()
@@ -19,6 +17,5 @@ test('打斷帶的 turn_id 不在飛：409 turn_not_in_flight，在飛的那一�
     mock.request('POST', `/bots/${id}/interrupt`, { turn_id: 'turn_gone' }),
     (e: unknown) => e instanceof ApiError && e.status === 409 && e.message === 'turn_not_in_flight',
   )
-  // 在飛的那一筆沒被標 failed：放棄它照樣收得下（同 daemon）。
   await mock.request('POST', `/turns/${out.turn_id}/abandon`, {})
 })

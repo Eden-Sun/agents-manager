@@ -4,8 +4,6 @@ import { blobFor } from "../lib/outboxPreviewCache"
 import { previewPlacement } from "../lib/outboxList"
 import { useT } from "../lib/i18n"
 
-/** 「bot 給你的檔案」裡的圖檔滑過去浮出的預覽（使用者 2026-09-18）；抓圖與快取見 `lib/outboxPreviewCache`。 */
-/** 預覽框上限：大圖也看得清楚（直式截圖常很高），但不超出視窗。 */
 function maxBox() {
   return { width: Math.min(520, window.innerWidth - 16), height: Math.min(640, window.innerHeight - 16) }
 }
@@ -31,7 +29,6 @@ export function OutboxImagePreview({
 
   useEffect(() => {
     let alive = true
-    // 持有到卸掉為止：還在畫面上的圖不會被快取擠出 revoke（#2074）。
     const lease = blobFor(botId, name, modified)
     lease.url.then(
       (url) => alive && setSrc({ key, url }),
@@ -43,7 +40,6 @@ export function OutboxImagePreview({
     }
   }, [botId, name, modified, key])
 
-  // 圖載入後框的實際大小可能比上限小：用真的大小重算一次位置，框才會貼著那一列。
   useLayoutEffect(() => {
     const el = boxRef.current
     if (!el) return

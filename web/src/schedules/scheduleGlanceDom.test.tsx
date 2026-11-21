@@ -1,6 +1,3 @@
-/**
- * 排程清單與編輯器要把下次觸發、上次結果、花費時間分成可掃的區塊（假資料，不含真實任務內容）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

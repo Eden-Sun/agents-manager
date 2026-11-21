@@ -1,7 +1,3 @@
-/**
- * 「Jev 建議」統一標示（issue #1912）：真的掛 `JevLabel` 進 happy-dom。
- * 寫出「Jev 建議」＋機率百分比；要求時接「只是建議，不會自動動作」；沒有機率就不寫百分比。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

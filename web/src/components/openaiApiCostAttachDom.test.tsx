@@ -1,9 +1,3 @@
-/**
- * openai-api bot（切片 E 第二批）：
- * - 附件：拖放與貼上都不會進托盤，輸入框上方出現「OpenAI API bot 不支援附件」
- * - 費用：回合後顯示實際費用與拆分（輸入／快取讀／快取寫／輸出，reasoning 另列）；進行中不顯示即時估價 ≈；
- *   輸入框上方不出現 Claude 的快取冷提示
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -34,7 +28,6 @@ const usage = (turns: unknown[]) => ({
   turns,
 })
 
-/** 把 `/api-usage` 換成給定的回合；其他路徑照舊。 */
 function stubUsage(turns: unknown[]) {
   const orig = rawTransport.request.bind(rawTransport)
   rawTransport.request = (async (method: string, path: string, body?: unknown) => {

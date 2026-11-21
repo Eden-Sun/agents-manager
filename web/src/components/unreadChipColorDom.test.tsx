@@ -1,7 +1,3 @@
-/**
- * #1331：晶片列的三種狀態要一眼分得開：選取（藍框）、工作中（脈動點）、完成待看（黃底）。
- * DOM 部分釘住 class 與狀態的對應；CSS 部分照 `styles.css` 實際的 token 重算對比（不另寫一份色票）。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -25,7 +21,6 @@ const bot = (id: string, projectId: string) => ({
 const run = (botId: string, agentStatus: string) =>
   ({ id: `run-${botId}`, bot_id: botId, state: 'running', agent_status: agentStatus, workspace_id: null, pane_id: null, started_at: new Date().toISOString() }) as never
 
-/** 依晶片上的名字找（`.unread-chip-name` 就是 bot 名）。 */
 const chipNamed = (name: string) => [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((e) => e.querySelector('.unread-chip-name')?.textContent === name) ?? null
 
 beforeEach(() => {
@@ -67,13 +62,10 @@ test('工作中：帶 working，不帶 unread（數字籤只給完成待看）',
   assert.equal(r.querySelector('.unread-chip-dot'), null, '工作中不畫舊的小色點')
 })
 
-// ---- CSS：照 styles.css 的 token 重算，不另外寫色票 ----
-
 const dir = new URL('.', import.meta.url).pathname
 const styles = readFileSync(join(dir, '../styles.css'), 'utf8')
 const chipCss = readFileSync(join(dir, 'unreadChip.css'), 'utf8')
 
-/** 取一個區塊的內文：`header` 是區塊開頭那段文字（含 `{`），回傳到對應的 `}` 為止。 */
 function blockOf(src: string, header: string): string {
   const at = src.indexOf(header)
   assert.ok(at >= 0, `找不到 ${header}`)
@@ -106,7 +98,6 @@ const THEMES = [
   { name: '深色（手動）', header: ':root[data-theme="dark"] {' },
 ]
 
-/** 去掉註解後，依 `選擇器 { 宣告 }` 切出每一條規則（選擇器可以是逗號清單）。 */
 function rulesOf(src: string): { selectors: string[]; body: string }[] {
   const bare = src.replace(/\/\*[\s\S]*?\*\//g, '')
   return [...bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selectors: m[1].split(',').map((s) => s.trim()), body: m[2] }))
@@ -115,7 +106,6 @@ const keepWarmCss = readFileSync(join(dir, 'keepWarmChip.css'), 'utf8')
 const cacheCss = readFileSync(join(dir, 'cacheClock.css'), 'utf8')
 const UNREAD_WARM = '.unread-chip.unread .unread-chip-warm'
 
-// 2026-10-12 使用者：「已完成對話只要數字藍色就好，不要用 bg，會蓋到快取的時間倒數」。
 test('完成待看不塗底：任何帶 .unread 的晶片規則都不設 background，底色留給快取倒數', () => {
   for (const r of rulesOf(chipCss)) {
     for (const sel of r.selectors) {
@@ -148,11 +138,9 @@ test('codex 主力晶片底色（.cache-codex）：淺藍底在淺色與深色�
     const bgPanel = hexOf(body, 'bg-panel')
     const text = hexOf(body, 'text')
     const textDim = hexOf(body, 'text-dim')
-    // 已用區疊上 12% 深藍與 6% 淡藍，驗證最深背景的對比。
     const alpha = 0.12 + 0.06 * 0.88
     const effBgRgb = [0, 1, 2].map((i) => rgb(lampBlue)[i] * alpha + rgb(bgPanel)[i] * (1 - alpha))
     const effBgLum = 0.2126 * lin(effBgRgb[0]) + 0.7152 * lin(effBgRgb[1]) + 0.0722 * lin(effBgRgb[2])
-    // 中性字 color-mix(in srgb, var(--text) 55%, var(--text-dim))
     const textRgb = [0, 1, 2].map((i) => rgb(text)[i] * 0.55 + rgb(textDim)[i] * 0.45)
     const textLum = 0.2126 * lin(textRgb[0]) + 0.7152 * lin(textRgb[1]) + 0.0722 * lin(textRgb[2])
     const [hi, lo] = [effBgLum, textLum].sort((x, y) => y - x)

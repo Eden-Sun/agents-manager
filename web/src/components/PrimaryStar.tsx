@@ -1,7 +1,3 @@
-/**
- * 「主要 bot」開關：使用者自己的分類，釘起來後固定排在 `UnreadChip` 最前面。
- * 存 daemon 而非瀏覽器，手機與電腦追同一組；不影響啟動參數，`needs_restart` 恆為 false。
- */
 import { useStore } from '../store/store'
 import { t, useT } from '../lib/i18n'
 

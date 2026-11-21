@@ -1,7 +1,3 @@
-/**
- * 分享入口回 401／403（來源被擋：Host 或 Origin 不在允許名單，見 am-share `security_headers`）：不是「連不上」，
- * 重試不會好，要停止輪詢、畫出說明，不能一直寫「連不上，正在重試…」。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

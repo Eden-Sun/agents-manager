@@ -1,15 +1,8 @@
 import { msg, t, tr } from '../lib/i18n'
 
-/** Wire types for the daemon API. Source of truth: SPEC §7, appendix C, `daemon/src/api.rs`, docs/API.md; shape drift is absorbed in `normalize.ts`. */
-
-/** `claude-api`＝daemon 內 harness 直接打 Claude API 的 bot（#1944）：沒有 CLI／pane／安裝探測／額度，所以不在 BOT_KINDS。 */
-/** `openai-api`＝同理直打 OpenAI Responses API 的 bot（D2b）：同樣沒有 CLI／pane，不在 BOT_KINDS。 */
 export type BotKind = 'claude' | 'codex' | 'grok' | 'agy' | 'claude-api' | 'openai-api'
-/** SPEC §12：有 CLI 的 kind（工具偵測、額度、模型清單、身份都逐一迴圈它）。 */
 export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
-/** 直打 API、沒有 CLI 的 kind（沒有 pane／安裝探測／額度）。 */
 export const API_BOT_KINDS: readonly BotKind[] = ['claude-api', 'openai-api']
-/** 可以建立的 kind＝BOT_KINDS＋API kind。 */
 export const CREATABLE_KINDS: readonly BotKind[] = [...BOT_KINDS, ...API_BOT_KINDS]
 export const API_BOT_KIND: BotKind = 'claude-api'
 
@@ -19,7 +12,6 @@ export type TurnStatus = 'queued' | 'in_flight' | 'completed' | 'completed_fallb
 export type TurnDelivery = 'pending' | 'ok' | 'unknown' | 'failed'
 export type TurnOrigin = 'web' | 'external'
 export type MessageRole = 'user' | 'assistant' | 'system'
-/** `share`＝分享頁的 end user 送來的（SPEC「分享 bot」），UI 標「🔗 分享使用者」。 */
 export type MessageSource = 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system' | 'share'
 export type TerminalSource = 'visible' | 'recent_unwrapped'
 
@@ -29,25 +21,17 @@ export interface Project {
   path: string
   label: string
   workspace_id: string | null
-  /** SPEC §11.6: `"local"` = 本機，其餘為 `hosts[].name` */
   host: string
-  /** null = 非 GitHub 專案 */
   github: ProjectGithub | null
-  /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
-  /** 專家模式角色政策（role -> policy；B 期才用，現在只讀），預設 {} */
   role_policy?: Record<string, RuntimeSettings> | null
-  /** 專家模式副管理者；沒設＝null。管理者回合中太久時，排隊給它的請求改送這位。 */
   deputy?: ProjectDeputy | null
-  /** 專家派工總開關：開著時專家可直接派工給本專案任何執行者（含群集）；關掉＝只有管理者能派。舊 daemon 沒有此欄（undefined）。 */
   specialist_dispatch?: boolean
-  /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   created_at: string
 }
 
 export interface ProjectDeputy {
   bot_id: string
-  /** 管理者忙（請求排隊）多久才改派，秒；下限 60；送出時不帶＝180。 */
   after_sec?: number | null
 }
 
@@ -57,55 +41,37 @@ export interface ProjectGithub {
   url: string
 }
 
-/** `GET /api/projects/:id/submodules` 的一項。 */
 export interface ProjectSubmodule {
-  /** 相對於專案根目錄 */
   path: string
   github: ProjectGithub | null
 }
 
-/** 每台主機的 herdr 版本（SPEC §11.6）。任一欄讀不到＝null，不猜。 */
 export interface HerdrVersion {
-  /** ping 回報的 server 版本；主機沒連上時為 null */
   server_version: string | null
   protocol: number | null
-  /** protocol 是否在 daemon 實測過的清單；null＝不知道 */
   protocol_supported: boolean | null
-  /** `herdr --version`（CLI）；server 與 CLI 可能不同版 */
   cli_version: string | null
-  /** CLI 與 server 版本都知道而且不同 */
   mismatch: boolean
 }
 
 export const UNKNOWN_HERDR: HerdrVersion = { server_version: null, protocol: null, protocol_supported: null, cli_version: null, mismatch: false }
 
-/** 一項跟基準不一致的東西（SPEC §16.7）。`id` 穩定可比對。 */
 export interface BaselineIssue {
   id: string
   severity: 'critical' | 'warn'
   message: string
-  /** 宣告檔寫的用途說明（選用工具缺了時黃字顯示「選用：…」）；舊 daemon／沒寫＝省略。 */
   note?: string
 }
 
-/**
- * 主機工作環境一致性檢查（`hosts[].baseline`，SPEC §16.7，只讀）。
- * `issues: null`＝這趟探測沒跑完＝未知，**不是**全缺；整個 `baseline` 為 null＝還沒量過（或舊 daemon）。
- */
 export interface HostBaseline {
   issues: BaselineIssue[] | null
-  /** 這份結果量到的時間（最後一次**成功**的偵測）。 */
   checked_at: string
   os: string | null
-  /** 最後一次偵測失敗，或太久沒更新：結果是舊的，現在連不上。舊 daemon 沒這欄＝false。 */
   stale: boolean
-  /** 最後一次失敗的原因（第一行）；沒失敗＝null。 */
   error: string | null
-  /** dry-run 計畫裡可以自動補的差異 id（#719 階段 2）。`toHostBaseline` 一律給陣列（沒有／型別不對＝空）；手造的物件可省略＝不標。 */
   fixable?: string[]
 }
 
-/** 一致性 dry-run 計畫動作（#719 階段 2 / 3b，SPEC §16.7）。 */
 export interface BaselineAction {
   id: string
   action: 'merge_key' | 'manual' | string
@@ -116,7 +82,6 @@ export interface BaselineAction {
   reason?: string
 }
 
-/** 一致性 dry-run 計畫（GET /api/hosts/{name}/baseline/plan，#719 階段 2 / 3b）。 */
 export interface HostBaselinePlan {
   host: string
   checked_at: string
@@ -125,14 +90,12 @@ export interface HostBaselinePlan {
   actions: BaselineAction[]
 }
 
-/** 一致性差異補齊單項結果（#719 階段 3a / 3b）。 */
 export interface BaselineApplyItemResult {
   id: string
   result: 'applied' | 'present' | 'skipped' | 'manual' | string
   reason?: string
 }
 
-/** 一致性差異補齊結果（POST /api/hosts/{name}/baseline/apply，#719 階段 3a / 3b）。 */
 export interface HostBaselineApplyResult {
   host: string
   plan_rev: string
@@ -141,10 +104,8 @@ export interface HostBaselineApplyResult {
   results: BaselineApplyItemResult[]
 }
 
-/** 可還原的一份主機一致性備份（GET /api/hosts/{name}/baseline/backups，#719）。 */
 export interface HostBaselineBackupFile {
   file: string
-  /** `overwrite`＝還原會寫回備份；`delete`＝備份時不存在，還原會刪掉現有檔。 */
   restore: 'overwrite' | 'delete'
 }
 
@@ -156,93 +117,61 @@ export interface HostBaselineBackup {
 
 export interface HostBaselineBackups {
   backups: HostBaselineBackup[]
-  /** 無法列出的壞備份數。 */
   skipped: number
 }
 
-/** 還原 API 成功時的白名單結果。 */
 export interface HostBaselineRestoreResult {
   backup_id: string
   files: Array<{ file: string; result: 'restored' | 'deleted' | 'absent' | 'failed' }>
 }
 
-/** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
-  /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
   name: string
-  /** 可為 ssh_config 別名 */
   ssh: string
   ssh_port: number
   herdr_session: string
   remote_path: string
   connected: boolean
-  /** 連線正常時為 null */
   error: string | null
-  /** 從什麼時候開始連不上（ISO）；連著或舊 daemon 沒這欄＝null。離線警示條算「離線多久」用。 */
   disconnected_since: string | null
-  /** 跟別的 daemon 共用這台的 herdr session（#709）；舊 daemon 沒這欄＝undefined。herdr 一鍵更新不能動這種主機。 */
   shared_session?: boolean
-  /** 在本機終端 attach 同一個 herdr session 的指令 */
   attach_command: string
   herdr: HerdrVersion
   tools: ToolMap
-  /** 工作環境一致性（SPEC §16.7）；null＝還沒量過或舊 daemon。 */
   baseline: HostBaseline | null
-  /** daemon 的 `hosts[].identities`；per-host，因為同一身份的帳號能不能用因主機而異。 */
   identity_status: IdentityStatusMap
 }
 
-/** `logged_in` 為 null = 未知（例如 CLI 沒有可查的登入狀態）。 */
 export interface ToolStatus {
   installed: boolean
   path: string | null
   version: string | null
   logged_in: boolean | null
-  /**
-   * 只有 agy：額度探測這一輪失敗的原因（已登入、但額度暫時拿不到）；沒失敗或舊 daemon 不帶。
-   * `reason` 是固定代碼（timeout／unreadable／exit／pane／not_connected），`message` 是 daemon 的原文。
-   */
   quota_error?: { reason: string; message: string; at: string }
 }
 
 export type ToolMap = Record<BotKind, ToolStatus>
 
-/** 沒有資訊時的預設（視為已安裝、登入未知，避免誤報缺工具）。 */
 export const TOOL_UNKNOWN: ToolStatus = { installed: true, path: null, version: null, logged_in: null }
 
-/** `logged_in` 為 null = 問不到（CLI 沒裝、偵測失敗），不等於未登入。 */
 export interface IdentityStatus {
   name: string
   kind: BotKind
   logged_in: boolean | null
-  /** `logged_in: null` 的原因 */
   reason: string | null
-  /** 這個身份最後一次被問到的時間（ISO，daemon 的 db::now）。沒問過＝null。 */
   checked_at?: string | null
-  /** 判定依據（人話）：為什麼是這個狀態。 */
   basis?: string | null
-  /** claude 是 e-mail、codex 是 `ChatGPT`、grok 是 `grok.com` */
   account: string | null
-  /** claude 的 `subscriptionType` */
   plan: string | null
-  /** `config` = config.toml（可編輯）；`shell` = 從主機 shell 的 `ccN` alias 認出來的（唯讀，SPEC §16）。 */
   source: 'config' | 'shell'
-  /** `cc0` 這種預設帳號沒有 */
   config_dir: string | null
-  /**
-   * daemon 記下「這個身份要重新登入」（#838 補充：綁著它的 bot 回合因授權失敗收尾；遠端 claude 探測問不出未登入，這是唯一來源）。
-   * `since` 是這一次的識別（網頁拿它判斷「關掉過的是同一次」）；沒有／舊 daemon＝null。
-   */
   login_needed?: { since: string; via: string } | null
 }
 
-/** key = 身份名稱。缺的身份代表這台主機還沒偵測過。 */
 export type IdentityStatusMap = Record<string, IdentityStatus>
 
-/** `hosts[]` 第一筆一定是它，但 `normalize.toState()` 會濾掉：store 的 `hosts` 只含遠端，本機看 `connected`。 */
 export const LOCAL_HOST = 'local'
 
-/** SPEC §14：本機是裸 key（`claude:cc1`），遠端加前綴（`mac_builder/claude`）；須與 daemon 同規則。 */
 export function quotaKey(host: string, base: string): string {
   return !host || host === LOCAL_HOST ? base : `${host}/${base}`
 }
@@ -258,7 +187,6 @@ export interface NewHostInput {
   ssh_port?: number
   herdr_session?: string
   remote_path?: string
-  /** 原樣附加到每個 ssh 指令 */
   ssh_opts?: string[]
 }
 
@@ -268,7 +196,6 @@ export interface HostResult {
   error: string | null
 }
 
-/** issue #104：開發者專用外部 Cargo verification worker。密碼永遠不從 API 回傳。 */
 export interface RemoteCargoSettings {
   enabled: boolean
   host: string
@@ -286,11 +213,9 @@ export interface RemoteCargoInput {
   ssh_port: number
   remote_root: string
   cargo_jobs: number
-  /** undefined = 保留既有密碼；空字串 = 清除改用 key/agent auth。 */
   password?: string
 }
 
-/** `GET|POST /api/hosts/:name/gh` */
 export interface GhAccount {
   login: string
   active: boolean
@@ -318,14 +243,12 @@ export interface GhStatus {
   error: string | null
 }
 
-/** §11.2 表單預填，須與 daemon 預設一致。 */
 export const HOST_DEFAULTS = {
   ssh_port: 22,
   herdr_session: 'agents-manager',
   remote_path: '/opt/homebrew/bin:$HOME/.local/bin',
 } as const
 
-/** 角色 policy 或 bot 執行期覆寫的一層（B 期）；欄位 `null`/缺＝跟上一層或預設。 */
 export interface RuntimeSettings {
   context_tokens?: number | null
   keep_warm?: boolean | null
@@ -335,87 +258,54 @@ export interface RuntimeSettings {
 }
 
 export interface Bot {
-  /** 被未刪除的排程綁著（側欄把沒設角色的 bot 歸到排程區用；舊 daemon 不回＝false）。 */
   scheduled?: boolean
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
-  /** 專家（specialist）負責的軌道；role=specialist 時必填 */
   track?: string | null
-  /** 執行期覆蓋（B 期才用）；null＝跟角色 */
   runtime_override?: RuntimeSettings | null
   role_pending?: boolean
-  /** 角色 policy 改了、還沒重啟（不含 shim 過期等）；舊 daemon 沒給＝undefined，退回 role_pending。 */
   policy_pending?: boolean
   daemon_url_pending?: boolean
   runtime_role_policy?: string | null
-  /** 專家模式下是否可被管理者使用（預設 true） */
   manager_use?: boolean
-  /** 專家模式執行者群集名（同設定、≥2 顆才有）；null＝不在群集內 */
   cluster?: string | null
   id: string
   project_id: string
   name: string
   kind: BotKind
-  /** null = 不指定，由 CLI 決定預設（API.md v3.3） */
   model: string | null
-  /** null = CLI 預設；codex 可選值見 `GET /api/models` 的 `efforts` */
   effort: string | null
-  /** codex 的 priority service tier（`--fast`） */
   fast: boolean
-  /** system prompt 前置文字，null = 無 */
   persona: string | null
-  /** claude 才有：這顆 bot 現在讀哪份專案指示檔（沒設＝`claude-md`）；codex／grok 或舊 daemon 沒有這欄＝null。 */
   args: string[]
   autostart: boolean
-  /** false = no hook injection (terminal-fallback path) */
   inject_hooks: boolean
   auto_approve: boolean
-  /** `identities[].name`，null = 無 */
   identity: string | null
-  /** 覆蓋 identity.env */
   env: Record<string, string>
-  /** `default` means this bot was discovered in the user's session. */
   herdr_session: string | null
-  /** `user` = 使用者建立（受 TOML 投影管轄）；`child` = 別的 bot 用 herdr 開出來的子 agent。 */
   managed_by: BotManagedBy
-  /** null = 頂層 */
   parent_bot_id: string | null
-  /** 使用者釘的主要 bot：純顯示、不用重啟，存在 daemon 讓手機與電腦同步。 */
   primary: boolean
-  /** 主力（★）那列的固定順序（issue #344，daemon 存 DB）；小的在前，沒拖過都是 0，舊 daemon 沒這欄＝0。 */
   primary_position: number
-  /** 主力 bot 撞限中（#1899，daemon 只給頂層 bot；child 與舊 daemon 沒有＝null）。過了 `until` 前端就不畫。 */
   limit_hit?: BotLimitHit | null
-  /** 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353，daemon 從資料算，PATCH 回應掉了也看得到）。 */
   needs_restart: boolean
-  /** live 設定已排到這個回合結束後套用。 */
   live_apply_deferred?: boolean
-  /** null = 用 `project.path` */
   cwd: string | null
-  /** 分享用 bot（只有它能開分享連結，SPEC §20）：`restricted`＝受限、`trusted`＝信任分享（一般 bot 的權限）；一般 bot 與舊 daemon＝null。 */
   share_profile: ShareProfile | null
-  /** 分享連結開著（側欄的 🔗 亮起）；舊 daemon 沒這欄＝false。 */
   share_enabled: boolean
-  /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
   preview?: { status: 'off' | 'starting' | 'running' | 'failed'; port: number | null } | null
-  /** 只存在於瀏覽器的佔位列（`id` 以 `pending:` 開頭），daemon 建好後被取代。 */
   pending?: boolean
-  /** 建立時帶的 `client_request_id`（daemon 從 config 帶回；沒帶＝null／舊 daemon 沒這欄）：分身佔位列靠它對到真 bot，不靠名字（#1796）。 */
   create_request_id?: string | null
-  /** 有 active run 時是實際用的名字，否則是下次啟動會用的；debug 時拿去 herdr 對照 pane。 */
   agent_name: string | null
-  /** daemon 算的未讀回合數（跨裝置共用，2026-09-15）；舊 daemon 沒有這欄就是 undefined。 */
   unread?: number
-  /** daemon 存的已讀位置（跨裝置共用）；null＝還沒有。 */
   read_mark?: { at: string; id: string; seq?: number } | null
   created_at: string
 }
 
 export type BotManagedBy = 'user' | 'child'
 
-/** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）；`args` 接在 daemon 注入參數之後。 */
 export interface Identity {
   name: string
-  /** 哪一台主機的身份（SPEC §16.2）。`null`／缺 = 只適用本機。同名的 `cc1` 在不同機器上是不同帳號。 */
   host?: string | null
   kind: BotKind
   env: Record<string, string>
@@ -425,24 +315,19 @@ export interface Identity {
 export interface NewIdentityInput {
   name: string
   kind: BotKind
-  /** 哪一台主機；省略＝本機（daemon 的 `NewIdentity.host`）。 */
   host?: string
   env: Record<string, string>
-  /** 契約保留；UI 不提供 */
   args?: string[]
 }
 
-/** SPEC §2.2. UI recomputes it from the run (not `bots[].lamp`) so run-only `bot_status` WS updates stay authoritative. */
 export type Lamp = 'disconnected' | 'offline' | 'starting' | 'stopping' | 'idle' | 'working' | 'blocked' | 'unknown'
 
-/** run 為什麼停在 blocked（SPEC／API.md `run.blocked_reason`）。 */
 export interface BlockedReason {
   code: string
   text: string
 }
 
 export interface Run {
-  /** daemon 的 send-now 閘門確認支援；舊 daemon 沒帶時隱藏按鈕。 */
   send_now_supported?: boolean
   id: string
   bot_id: string
@@ -452,94 +337,58 @@ export interface Run {
   pane_id: string | null
   adopted: boolean
   herdr_session: string | null
-  /** herdr `terminal_title_stripped`（claude 會寫成當前任務摘要） */
   agent_title: string | null
-  /** statusLine 輸出原文，已去 ANSI */
   status_line: string | null
-  /** statusLine 原始資料，網頁不受終端寬度壓縮 */
   status: StatusInfo | null
-  /** `Update installed · Restart to update` 那句；null = 沒有更新在等 */
   update_notice: string | null
-  /** #714：畫面底部標著還在跑的背景工作數（claude 的 shell、codex 的背景終端）；0＝沒有。沒帶當 0；`null`＝巡邏還沒看過（#767，沒有證據）。 */
   background_jobs?: number | null
-  /** #774：這一段背景從什麼時候開始（ISO 字串；daemon 重啟後從重啟後第一次看到算起）；沒有背景工作／舊 daemon＝`null`。 */
   background_since?: string | null
-  /** #774：背景工作標著超過門檻（1 小時）：可能卡住或忘了收。舊 daemon 沒帶＝false。 */
   background_stuck?: boolean
-  /** 為什麼停在 blocked（daemon 的結構化原因，`code` 是穩定的短代碼、`text` 是一句話）；沒有／不知道＝`null`，舊 daemon 沒這個欄位也是 `null`。 */
   blocked_reason?: BlockedReason | null
-  /** claude 輸入框裡那句灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 才有，其他一律 `null`，舊 daemon 沒這個欄位也是 `null`。 */
   prompt_suggestion?: string | null
-  /** claude 壓縮對話中（`PreCompact` hook 或畫面的 spinner，daemon 的 `compacting.rs`，issue #1770）：開始的時間；不在壓縮中、超過 10 分鐘、舊 daemon 一律 `null`。網頁顯示「壓縮中…」，不另當成 working。 */
   compacting_since?: string | null
-  /** claude ≥ 2.1.287 的 Stop hook 報的背景工作明細（SPEC §6.14）；null＝沒報過（舊版 claude、剛重啟，數字來自畫面判斷）；`[]`＝報過「沒有」。 */
   background_tasks?: BackgroundTask[] | null
-  /** 同一則 Stop 報的 session 排程（/loop、ScheduleWakeup…）：只當資訊，不算背景工作。 */
   session_crons?: SessionCron[] | null
-  /**
-   * 上一回合被 API 斷線截斷的那行原文；hook 與 herdr 都會報成 done，所以要看這格。
-   * null = 正常收尾；下一回合開始時清掉。
-   */
   turn_error: string | null
-  /** `turn_error` 的種類（#1674，daemon 定）：`model_at_capacity`＝codex 模型滿載、`quota_limit`、`api_error`；沒有錯誤／舊 daemon＝null。網頁不比對 `turn_error` 的文字。 */
   turn_error_kind?: string | null
-  /** SPEC §4.4a：從實際 argv 讀回的模型／強度／fast；`null` = 不知道（例如被收編的 pane），不做比對。 */
   runtime_model: string | null
   runtime_effort: string | null
   runtime_fast: boolean | null
-  /** issue #238：啟動時使用的身份；空字串＝本機預設帳號，`null`＝不知道（收編 pane／舊列）。 */
   runtime_identity: string | null
   native_session_id: string | null
   transcript_path: string | null
   started_at: string
   ended_at: string | null
-  /** `agent_status` 最後一次真的改變的時間（daemon 觀察到的，不是這頁看到的）；issue #93。 */
   agent_status_since: string | null
-  /** 最後一次 API 活動（回合收尾、statusLine 用量變了、停在提示上；回合進行中＝現在），推算 prompt cache 還熱不熱；`null`＝沒紀錄。SPEC §6.5j。 */
   last_api_at?: string | null
-  /** 這種 kind 的 prompt cache 存活秒數（claude 3600）；`null`＝不會因閒置冷掉（codex）或不知道（grok），不畫倒數。 */
   cache_ttl_secs?: number | null
-  /** 主力的「保溫」／「熱壓」讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
   cache_kept_warm_at?: string | null
-  /** 最後一次壓縮不早於最後一次活動（壓縮後 cache 作廢、context 變小）：不畫倒數、daemon 也不保溫；有新回合就恢復為 `false`。 */
   cache_compacted?: boolean
-  /** 「不用保溫」開著：這顆主力這一輪閒置跳過保溫與熱壓；有真的活動後 daemon 自動清掉。 */
   keep_warm_skip?: boolean
-  /** 最近一次「保溫回覆」完成的時間；使用者送出新 prompt 時 daemon 清成 `null`。非 `null`＝主力晶片框換色（`lib/keepWarm.ts`）。 */
   keep_warm_replied_at?: string | null
-  /** claude／codex 的快取與 context 精簡欄位；沒有資料（舊版 claude、grok、舊 daemon）為 null／未帶。 */
   prompt_cache?: PromptCacheInfo | null
 }
 
-/** `POST /api/bots/restart-idle`，SPEC §6.9。 */
 export interface RestartSkip {
   bot_id: string
   name: string
-  /** `working` / `blocked` / `turn_in_flight` / `not_running` / `unknown_status` / `no_longer_pending`（輪到它時狀態變了）/ `state_unreadable`（輪到它時 DB 讀不到它的狀態，這次沒動它） */
   reason: string
-  /** daemon 寫好的，前端不另編一套 */
   reason_label: string
 }
 
-/** 立刻回來的計畫；實際進度走 WS。 */
 export interface RestartPlan {
   batch_id: string
   total: number
   planned: { bot_id: string; name: string }[]
   skipped: RestartSkip[]
-  /** 已經有一批在跑：`batch_id` 是那一批，其餘欄位是空的，進度看那一批的事件。 */
   already_running: boolean
-  /** 正在跑的是範圍批次（只有某台某 kind）而這次要的 bot 不在裡面：`'deferred'`＝排在那批後面，放掉那一格自動接著開。 */
   restart_status?: string
 }
 
-/** 前端維護：計畫 + WS 進度。 */
 export interface RestartBatch {
   id: string
   total: number
-  /** 成功或失敗都算 */
   done: number
-  /** null = 還沒開始或已經結束 */
   current: string | null
   ok: string[]
   failed: { name: string; error: string }[]
@@ -547,27 +396,19 @@ export interface RestartBatch {
   finished: boolean
 }
 
-/** `daemon/src/statusline_cmd.rs`；用原始欄位，因為使用者的 statusLine 腳本會縮寫（email 前 5 碼、`OP5`）。 */
 export interface StatusInfo {
   account_email: string | null
-  /** 身份在該主機沒登入、實際跑的是預設帳號時的警告 */
   account_warning: string | null
   model_name: string | null
   model_id: string | null
   effort: string | null
   thinking: boolean
-  /** CLI 有回報才是 true／false；沒有這個欄位（codex）＝null，`runningFast` 會回退到 `run.runtime_fast`（#1914）。 */
   fast_mode: boolean | null
   context_used_pct: number | null
   context_used_tokens: number | null
   context_size: number | null
-  /**
-   * 剛 resume／壓縮，還沒有真的用量讀數（daemon 的 `_agm_context_unknown`，見 API.md run.status_json）：
-   * 百分比與 token 數都是 `null`，網頁顯示「context —」，不當成 0%。舊 daemon 沒有＝false。
-   */
   context_unknown: boolean
   five_hour_pct: number | null
-  /** epoch 秒 */
   five_hour_resets_at: number | null
   seven_day_pct: number | null
   seven_day_resets_at: number | null
@@ -575,15 +416,9 @@ export interface StatusInfo {
   cwd: string | null
   version: string | null
   session_name: string | null
-  /** claude ≥ 2.1.289 statusLine 的 `prompt_cache`（精簡版）；舊版 claude／沒有這塊為 undefined。 */
   prompt_cache?: PromptCacheInfo | null
 }
 
-/**
- * 輸入框「送出代價」提示用的精簡欄位。daemon 的 `run.prompt_cache`（claude 取自 statusLine、codex 由 rollout 推算，
- * `source` 分辨）；舊 daemon 沒有時，claude 退用 statusLine 原 JSON 裡的 `prompt_cache`（`source` 為 null）。
- * `expires_at` 是 epoch 秒；`recache_tokens_if_cold`＝冷了要重寫多少 token（codex 用最近一次 input_tokens 近似）。
- */
 export interface PromptCacheInfo {
   warm: boolean | null
   expires_at: number | null
@@ -605,33 +440,24 @@ export interface Turn {
   origin: TurnOrigin
   status: TurnStatus
   delivery: TurnDelivery
-  /** 沒有無損證據可以確認送達（grok／遠端／codex 還沒回報 session 的打字，以及 herdr `agent.prompt` 那條路）。
-   *  `turns.delivery_verified = 0`。這**不代表**不會自動重送——那是 `autoResend` 的事（SPEC §4.4a）。 */
   unverified: boolean
-  /** daemon 會不會在畫面證明它沒進去時自動重送這一則（`turns.auto_resend`）。舊 daemon 沒有這一欄 → 當作 true。 */
   autoResend: boolean
-  /** issue #122：送出時 bot 沒在跑，daemon 先收下再啟動它（`turns.awaits_start`）。只對 `queued` 有意義。 */
   awaitsStart: boolean
-  /** issue #733：送出時 bot 正忙，daemon 等它回到 idle 再送（`turns.awaits_idle`）。只對 `queued` 有意義。 */
   awaitsIdle: boolean
-  /** 上一次替它啟動 bot 失敗的原因（`turns.start_error`）；`null`＝沒失敗過。 */
   startError: string | null
   client_request_id: string | null
   created_at: string
   completed_at: string | null
 }
 
-/** `daemon/src/attach.rs` */
 export interface Attachment {
   id: string
   name: string
   mime: string
   size: number
-  /** Absolute path on the bot's host */
   path: string
 }
 
-/** 承諾帳本項目（SPEC 帳本第 1 階段；daemon `GET /api/projects/{id}/ledger`）。`code` 是 `L<code_no>`。 */
 export type LedgerItemStatus = 'untriaged' | 'answered' | 'following' | 'clarifying' | 'done' | 'cancelled' | 'merged'
 
 export interface LedgerItem {
@@ -663,96 +489,61 @@ export interface Message {
   content: string
   source: MessageSource
   incomplete: boolean
-  /** SPEC §13：同一次群組發言的訊息共用；其他訊息為 null。 */
   group_id: string | null
   attachments: Attachment[]
-  /** null = 使用者 / daemon 自己 */
   relay_from: string | null
-  /** true = `relay_from` 是寄件端自稱、沒帶它的 bot token 證明（issue #339 相容期）；來源標旁寫「未驗證」。 */
   relay_unverified?: boolean
-  /** 代發來源的名字（daemon 補的，只給使用者）：來源 bot 已收掉、前端 bots 清單找不到它時用。 */
   relay_from_name?: string | null
-  /** 群集派工（`bot:cluster:<名稱>`）：群集名、實際接手的成員與它的名字（daemon 補的，只給使用者）。 */
   via_cluster?: string | null
   assignee_bot_id?: string | null
   assignee_name?: string | null
-  /** 承諾帳本：這則使用者訊息拆出的項目（daemon 附掛，依 `ordinal`）；沒附就是 `undefined`。 */
   ledger_items?: LedgerItem[]
-  /** true = 代發來源的 bot 已收掉（`deleted_at` 有值），顯示名字時標「已收掉」。 */
   relay_from_deleted?: boolean
-  /** `terminal_fallback` 當下的整個 pane 畫面；`content` 裁錯時真正的回覆還在這裡。其他來源為 null。 */
   terminal_snapshot: string | null
   created_at: string
-  /** 對話倒回（SPEC §6.13）標掉的時間：這一則已不在 CLI 的對話脈絡裡。沒有＝還在。 */
   rewound_at?: string | null
-  /** 回合中送出的方式：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。沒有＝一般送出。 */
   sent_via?: 'send_now' | 'supplement' | null
-  /** daemon 的插入序（rowid，單調）：同毫秒的訊息靠它定先後；舊 daemon 沒有。 */
   seq?: number
-  /** 「保溫」那一回合的訊息（使用者那則與 bot 的保溫回覆）：不算未讀（`store/unread.ts`）。 */
   keep_warm?: boolean
 }
 
 export interface AppState {
-  /** Public announcements, independent of personal quota windows. */
   codex_reset?: unknown
   daemon_seq: number
-  /**
-   * 現在正在跑的那一批一鍵重啟的 id（issue #492）。進度只走 WS，`bots_restart_done` 收不到時
-   * （批次中途 daemon 重啟、或落到全量 resync）前端靠這一格對帳。
-   *
-   * 三態，別把後兩者混成同一個值（同 `remote_reachable` 的教訓）：`string`＝這一批在跑、
-   * `null`＝daemon 說沒有任何一批在跑、`undefined`＝這個 daemon 還沒有這個欄位（舊版）＝**不知道**，
-   * 不知道就不要動手上的進度。
-   */
   restart_batch: string | null | undefined
-  /** 現在在跑的 codex 升級（SPEC §6.9）。同上：`undefined`＝舊 daemon 沒這欄＝不知道。 */
   cli_updates: { update_id: string; host: string }[] | undefined
-  /** 在跑的 herdr 一鍵更新（SPEC §6.9）；`undefined`＝舊 daemon 沒這欄＝不知道。 */
   herdr_updates: { update_id: string; host: string; target_version: string; phase: string; started_at: string }[] | undefined
-  /** 等換版窗口超過 3 分鐘、已通知的那次部署（SPEC §18.10），原樣交給 `store/deployWait.ts`；`undefined`＝舊 daemon 沒這欄。 */
   deploy_wait: unknown
   connected: boolean
-  /** The user's Herdr default session; separate from the manager session. */
   default_connected: boolean
-  /** attach_command / tools / identity_status 取自本機 `hosts[0]`。 */
   attach_command: string
-  /** 本機 `hosts[0].herdr` */
   herdr: HerdrVersion
   tools: ToolMap
-  /** 本機 `hosts[0].baseline` */
   baseline: HostBaseline | null
-  /** 每台主機 `[host_baseline.sync]` 實際生效的模式（#719 階段 3b，只在 User 視圖）。缺這欄＝全部當 off。 */
   host_baseline_sync: Record<string, 'off' | 'ask'>
   identity_status: IdentityStatusMap
   hosts: Host[]
   identities: Identity[]
   projects: Project[]
   bots: Bot[]
-  /** active runs only */
   runs: Run[]
   turns: Turn[]
 }
 
 export interface TerminalSnapshot {
-  /** Present on bot snapshots; absent on older daemons and host shells. */
   run_id?: string | null
   text: string
   revision: number | null
   truncated: boolean
   source: TerminalSource
   pane_id: string | null
-  /** Pane geometry; null when herdr does not report it. */
   columns: number | null
   rows: number | null
-  /** 只有主機 shell 的 `format=ansi` 讀取（或 `echo=ansi` 回應）才帶：`text` 是 ANSI 原樣，不能當純文字顯示。 */
   format?: TerminalFormat
 }
 
-/** 主機 shell 讀畫面的格式：`text` 是預設（舊的 `<pre>` 用），`ansi` 給 xterm.js 畫。 */
 export type TerminalFormat = 'text' | 'ansi'
 
-/** 主機 shell 推送 WebSocket（`…/shells/{pane}/stream`）的一張畫面；只在內容變了才送。 */
 export interface ShellStreamFrame {
   seq: number
   text: string
@@ -760,13 +551,11 @@ export interface ShellStreamFrame {
   rows: number | null
 }
 
-/** `POST /api/hosts/:name/shells` 開的純 shell pane；`pane_id` 只在 daemon 這一輪有效。 */
 export interface HostShell {
   host: string
   pane_id: string
   tab_id: string
   workspace_id: string
-  /** 實際目錄，不一定等於要求的 */
   cwd: string
   created_at: string
 }
@@ -774,17 +563,12 @@ export interface HostShell {
 export interface PromptResult {
   turn_id: string
   message_id: string | null
-  /** `queued`＝daemon 收下了、還沒送（issue #733 等 bot idle，或 issue #122 先收下再啟動）。 */
   delivery: TurnDelivery | 'queued'
-  /** 只有請求帶 `send_now` 時才有（issue #103）：`interrupted`＝打斷了一個回合，`idle`＝當下沒回合在飛，
-   *  其他值（`send_now_*`）是**沒有**插隊的原因。 */
   send_now: string | null
 }
 
 export interface WithdrawTurnResult {
-  /** #733 queued turn 原文；舊 daemon／#122 回應沒帶時為空字串。 */
   text: string
-  /** 附件 id；瀏覽器沒有原始檔時會提醒使用者重新附加。 */
   attachments: string[]
 }
 
@@ -797,7 +581,6 @@ export interface MessagesPage {
 }
 
 export interface ApiErrorBody {
-  /** machine code: `conflict` | `bad_request` | `not_found` | `upstream` */
   error?: string
   reason?: string
   message?: string
@@ -811,9 +594,6 @@ export class ApiError extends Error {
   status: number
   body: ApiErrorBody
   constructor(status: number, body: ApiErrorBody, fallback: string) {
-    // daemon: `reason` (conflict) / `message` (bad request, upstream) / `what` (not found)。
-    // 舊 daemon 對新路徑會回 405／404 且 body 是空的，欄位在但字串是空的；直接用會變「儲存失敗：」後面沒字，
-    // 所以空字串一律退回帶狀態碼的 fallback。
     const detail = String(body.reason ?? body.message ?? body.what ?? body.error ?? '').trim()
     super(detail || fallback)
     this.name = 'ApiError'
@@ -825,7 +605,6 @@ export class ApiError extends Error {
 export interface NewProjectInput {
   path: string
   label: string
-  /** SPEC §11.6：省略或 `"local"` = 本機 */
   host?: string
 }
 
@@ -833,13 +612,9 @@ export interface PatchProjectInput {
   mode?: 'parent_child' | 'expert'
   manager_bot_id?: string
   label?: string
-  /** #708：字串＝移交，`null`＝收回。 */
   handed_off_to?: string | null
-  /** 專家模式角色政策（User 才能改；`null`＝清掉） */
   role_policy?: Record<string, RuntimeSettings> | null
-  /** 副管理者（User 才能改；`null`＝清掉；`after_sec` 下限 60，不帶＝180） */
   deputy?: ProjectDeputy | null
-  /** 專家派工總開關（User 才能改）：`true`＝專家可直接派工給本專案執行者。 */
   specialist_dispatch?: boolean
 }
 
@@ -849,9 +624,7 @@ export interface DirEntry {
   git: boolean
 }
 
-/** `POST /api/fs/dirs`（issue #877）建好的資料夾。 */
 export interface CreatedDir {
-  /** 完整路徑：直接當 Project 路徑。 */
   path: string
   name: string
   parent: string | null
@@ -862,27 +635,20 @@ export interface DirListing {
   parent: string | null
   home: string
   entries: DirEntry[]
-  /** 子資料夾太多（daemon 最多列 2000 個）只列了一部分；舊 daemon 沒這欄＝false。 */
   truncated?: boolean
 }
 
-/** 受限 bot 能碰的全部範圍：新資料夾（建在 `[share] folders_root`，預設 `~/shared-bots/<name>`）或本機既有資料夾。 */
-/** 分享用 bot 的兩種（SPEC §20.1）。 */
 export type ShareProfile = 'restricted' | 'trusted'
 
 export type ShareFolderIn = { kind: 'new'; name: string } | { kind: 'existing'; path: string }
 
 export interface NewBotInput {
   name: string
-  /** 專家模式專案可選 executor／advisor／scheduler（省略＝執行者）；其他專案只收 scheduler。 */
   role?: 'scheduler' | 'executor' | 'advisor'
-  /** 名稱撞到時 daemon 自動找 `<base>-<n>`；回應帶實際 `name`。 */
   name_auto?: boolean
   kind: BotKind
-  /** `null` / 省略 = CLI 預設 */
   effort?: string | null
   model?: string | null
-  /** 契約保留，UI 一律省略（使用者決定）；要調參數改 identity 或 config.toml。 */
   args?: string[]
   autostart: boolean
   auto_approve?: boolean
@@ -890,22 +656,15 @@ export interface NewBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
-  /** 建成分享用 bot（受限或信任分享）；建好之後不能切換（要分享就新建一顆）。 */
   share_profile?: ShareProfile
-  /** 分享用 bot 的資料夾（API.md §5.6）：受限省略＝新資料夾、名字用 bot 名；信任分享只收既有資料夾，省略＝專案目錄。 */
   share_folder?: ShareFolderIn
-  /** 信任分享一定要帶 true（daemon 沒帶回 400 `confirm_trusted_required`）。 */
   confirm_trusted?: boolean
-  /** 冪等鍵（#352）：回應遺失後同一個動作重送，daemon 拿回第一次建好的那顆而不是再建一顆；見 `lib/createRequestId.ts`。 */
   client_request_id?: string
 }
 
-/** API.md v3.3：只送有變更的欄位；`null` 代表清除。 */
 export interface PatchBotInput {
-  /** 執行期覆寫（B 期，User-only）；`null`＝跟角色。 */
   runtime_override?: RuntimeSettings | null
   role?: 'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null
-  /** 專家軌道（只有 User 能改）；`null`＝清掉 */
   track?: string | null
   manager_use?: boolean
   name?: string
@@ -919,12 +678,9 @@ export interface PatchBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
-  /** 純顯示，`needs_restart` 一定是 false */
   primary?: boolean
 }
 
-/** `needs_restart = true`：已寫入 config，但目前的 Run 仍跑舊參數，要 restart 才生效。 */
-/** daemon 把送進去的停用模型換掉了（API.md「停用模型的回應」／#400）。 */
 export interface ModelRemap {
   from: string
   to: string
@@ -932,59 +688,39 @@ export interface ModelRemap {
 
 export interface PatchBotResult {
   needs_restart: boolean
-  /** 只有真的試過當場套用才有（codex model／effort／fast，SPEC §4.4a）。`deferred`＝bot 正忙、排到下次 idle 再套（#393）。 */
-  live_apply?: { applied: boolean; deferred: boolean; /** 這次按了 Esc 停下回合（回合中改 codex 的 model／effort，#1681）。 */ interrupted: boolean; reason: string | null }
-  /** 送進去的 model 是停用別名、daemon 換成別的才有；沒換就是 `null`（issue #539）。 */
+  live_apply?: { applied: boolean; deferred: boolean;  interrupted: boolean; reason: string | null }
   remapped_model: ModelRemap | null
-  /** daemon 給使用者的提示訊息（例如 claude-api 換模型接續對話）。 */
   message?: string | null
 }
 
-/** grok 的靜態 effort（`GET /api/models` 失敗時退回）。 */
 export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'] as const
-/** claude `--effort`（2.1+）；TUI 的 `/effort` 是拉桿、無帶參數形式，所以改了要重啟。 */
 export const CLAUDE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-/** codex 的靜態 effort（API.md §12.2；`GET /api/models` 失敗時退回）。 */
 export const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
-/** openai-api 的強度（D2b-2：none/low/medium/high/xhigh/max，預設 medium）。 */
 export const OPENAI_API_EFFORT_OPTIONS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-/// astra／sol 的 API 拒絕 `none`（官方模型頁）；luna 仍收 none。與 daemon `OPENAI_NO_NONE_EFFORTS` 同一份。
 export const OPENAI_API_NO_NONE_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-/** openai-api 某模型可用的 effort（依模型，不是 kind 共用）。 */
 export function openAiApiEffortsFor(model: string | null | undefined): readonly string[] {
   return model === 'gpt-6-luna' ? OPENAI_API_EFFORT_OPTIONS : OPENAI_API_NO_NONE_EFFORT_OPTIONS
 }
 
-/** 不翻譯，用原廠的字（只首字母大寫），才對得上 CLI 畫面與文件。 */
 export function effortLabel(level: string): string {
-  // `default`＝TUI 明確寫的 CLI 預設（SPEC §4.4a），不是一個等級名稱，不能首字大寫成 `Default`。
   if (level === 'default') return t('（CLI 預設）')
   return level ? level.charAt(0).toUpperCase() + level.slice(1) : level
 }
 
-/** 精簡列用的強度縮寫（2026-10-04 使用者：子 agent 列「改用緊湊的方式表示」）：Medium→M、High→H、Xhigh→XH；`max` 本來就短。 */
 export function effortShort(level: string): string {
   const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-', default: msg('預設') }
   const label = short[level.toLowerCase()]
   return label ? tr(label) : effortLabel(level)
 }
 
-/** agy 的預設模型；daemon `AGY_DEFAULT_MODEL` 同一份。 */
 export const AGY_DEFAULT_MODEL = 'gemini-3.8-flash-medium'
 
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
-  // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],
-  // claude-api：與 daemon 的核准模型／價格清單一致，Opus 仍是預設。
   'claude-api': ['claude-opus-5-5', 'claude-fable-5-2'],
-  // openai-api：核准清單（依家族由便宜到貴：luna < sol < astra，預設 astra 排在最後；2026-11-19 使用者要求）。
   'openai-api': ['gpt-6-luna', 'gpt-6.2-sol', 'gpt-6.2-astra'],
-  // 輕到重（依家族由便宜到貴：luna < terra < sol < astra；Codex 0.157 的 GPT-6 Luna / Sol 已取代舊的 5.6 型號）。
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
-  // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
-  // agy：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。這是 API 讀不到時的後備清單（Gemini 3.8 Flash 三檔，最前面是預設；daemon `agy_static_models` 同一份）。
-  // API 讀得到就用 `agy models` 的結果，經 `agyModelAllowed` 過濾（2026-10-14 使用者：「agy 只收 Gemini，3.8 含以上」）。
   agy: [
     'gemini-3.8-flash-medium',
     'gemini-3.8-flash-high',
@@ -992,19 +728,8 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   ],
 }
 
-/**
- * 選單隱藏的模型（2026-09-09）：codex `model/list` 仍回上一代。daemon 照抄 CLI，所以在選單層過濾；
- * 已設成它的 bot 仍保留那顆按鈕，否則會被顯示成「自訂」。
- */
 export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
 
-/**
- * daemon 已停用的模型別名（#400）：送這些值進去，它會換成右邊那個再存，並在回應帶 `remapped`。
- * 權威在 `daemon/src/models.rs` 的 `remap_deprecated_model`，這裡留一份只為了**前端自己不要再送別名**
- * （靜態後備清單、快捷按鈕）與排序時把別名對到正式 id；**兩邊要一起改**。
- * 選單本身照舊顯示 daemon 給的清單——claude 的 `GET /api/models` 目前就是回 `opus` 這種別名，
- * 前端擅自濾掉會讓人選不到 opus。真的被換時由 `store.patchBot` 講一句。
- */
 export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
   'claude:opus': 'claude-opus-5-5',
   'codex:gpt-5.6-sol': 'gpt-6-sol',
@@ -1012,9 +737,7 @@ export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
   'codex:gpt-5.6-luna': 'gpt-6-luna',
 }
 
-/** agy 的模型 slug 收不收（2026-10-14 使用者：「agy 只收 Gemini，版本 3.8 含以上」）：`gemini-<主>[.<次>]-…` 的版本 ≥ 3.8。daemon `agy_model_allowed` 同一條，兩邊要一起改。 */
 export function agyModelAllowed(id: string): boolean {
-  // Orchestrator（2026-11-21 實機 slug `gemini-pro-orchestrator-<家族>`，不帶版號）；daemon `agy_is_orchestrator` 同一條。
   if (/^gemini-pro-orchestrator-[a-z0-9-]+$/.test(id)) return true
   const m = /^gemini-(\d+)(?:\.(\d+))?(?=-|$)/.exec(id)
   if (!m) return false
@@ -1023,13 +746,11 @@ export function agyModelAllowed(id: string): boolean {
   return major > 3 || (major === 3 && minor >= 8)
 }
 
-/** 這個 kind 的這個 model id 的正式寫法（不是別名就原樣回）。agy 不收的一律換成 3.8 medium（daemon `remap_deprecated_model` 同一條）。 */
 export function canonicalModel(kind: BotKind, id: string): string {
   if (kind === 'agy' && !agyModelAllowed(id)) return AGY_DEFAULT_MODEL
   return DEPRECATED_MODELS[`${kind}:${id}`] ?? id
 }
 
-/** `GET /api/models?kind=&host=` */
 export interface ModelsMeta {
   source?: string | null
   source_host?: string | null
@@ -1041,15 +762,10 @@ export interface ModelInfo {
   display_name: string
   description: string
   is_default: boolean
-  /** 廠商內建預設（「廠推薦」）；claude 在每個帳號都一樣。null = 不適用 */
   default_effort: string | null
-  /** 這個帳號 settings.json 記住的強度（「此帳號預設」），只在跟 `default_effort` 不同時才有；codex／grok／agy 與舊 daemon 沒有（#1679）。 */
   account_default_effort?: string | null
-  /** 空陣列 = 該模型不支援 */
   efforts: string[]
-  /** 模型視窗大小（tokens），若 daemon 未回傳為 undefined 或 null */
   context_window?: number | null
-  /** 含 `priority` 時 UI 才顯示「Fast」開關 */
   service_tiers: { id: string; name: string; description: string }[]
 }
 
@@ -1057,46 +773,30 @@ export const FAST_TIER = 'priority'
 
 export interface QuotaWindow {
   used_pct: number
-  /** ISO；可能為 null */
   resets_at: string | null
-  /**
-   * 這一桶**最後一次真的出現在新讀數裡**的時間（ISO，API.md §12.4／issue #475）。
-   * 跟整筆的 `updated_at` 不同：新讀數缺哪一桶，daemon 會沿用上一份（statusline 被截斷只剩 7d 時保住 5h），
-   * 那時 `updated_at` 是現在、這一欄還是舊的。舊 daemon 沒有這一欄 → `null`。
-   */
   observed_at: string | null
-  /** daemon 算的門檻（剩 30%）；UI 不可自己用 `used_pct` 寫死比較。 */
   low: boolean
-  /** daemon 算的門檻（剩 5%） */
   critical: boolean
 }
 
-/** `GET /api/mem` / WS `mem_updated`（SPEC §15） */
 export interface HostMem {
   host: string
   herdr_bytes: number
-  /** 底下的 pane / agent CLI */
   agents_bytes: number
   total_bytes: number
   processes: number
-  /** 非 null 時數字都是 0，不是真的 0 */
   error: string | null
-  /** Chromium 系瀏覽器（2026-09-08）；沒有就是空陣列 */
   browsers: BrowserMem[]
-  /** 整台機器（2026-09-12），回答「還能不能再開 bot」；讀不出時為 null。 */
   machine: MachineMem | null
 }
 
-/** SPEC §15 */
 export interface MachineMem {
   total_bytes: number
-  /** Linux 取 MemAvailable；macOS 取 free+inactive+speculative+purgeable。 */
   available_bytes: number
 }
 
 export interface BrowserMem {
   name: string
-  /** renderer process 數 ≈ 分頁數 */
   tabs: number
   bytes: number
   processes: number
@@ -1108,7 +808,6 @@ export interface MemSnapshot {
   agents_bytes: number
   processes: number
   hosts: HostMem[]
-  /** 每個專案的 bot（含 child）佔幾個 pane、多少 RAM（2026-09-15）；量不到的主機上的專案不在清單裡。 */
   projects: ProjectMem[]
 }
 
@@ -1119,29 +818,22 @@ export interface ProjectMem {
   bytes: number
 }
 
-/** `GET /api/mem/processes`（SPEC §15.2） */
 export interface MemProcess {
   pid: number
   ppid: number
   rss_bytes: number
-  /** 路徑已剝掉 */
   exe: string
   argv: string
-  /** 讀不到環境時 null */
   pane_id: string | null
-  /** pane id 是 per-session 的，要配這個 socket；讀不到時 null */
   socket_path: string | null
-  /** bot 已刪也還在，此時 `bot_name` 為 null */
   bot_id: string | null
   bot_name: string | null
   project_id: string | null
   owner: MemOwner
-  /** 自己＋子孫的 RSS（砍掉能省多少）；清單依它降冪 */
   subtree_bytes: number
   children: number
 }
 
-/** `bot` 要走「停止 bot」；`pane` / `unknown` 才可以直接送訊號。 */
 export type MemOwner = 'bot' | 'pane' | 'herdr' | 'unknown'
 
 export interface MemProcesses {
@@ -1150,73 +842,52 @@ export interface MemProcesses {
   processes: MemProcess[]
 }
 
-/** `GET /api/search/messages`：命中次數與最新一次的前後文。 */
 export interface MessageHit {
   hits: number
   snippet: string
 }
 
-/** codex `rateLimitResetCredits`（TUI 的 `Reset usage`）：可立刻清空額度的券；其餘 kind 為 null。 */
 export interface QuotaResetCredits {
   available: number
-  /** 最早到期那張券的名稱 */
   title: string | null
-  /** ISO；所有可用券中最早到期的 */
   expires_at: string | null
-  /** 每一張 available／redeeming 券（2026-11-07）；舊 daemon 沒這欄＝空陣列，畫面退回只看 title／expires_at。 */
   credits: QuotaResetCredit[]
 }
 
 export interface QuotaResetCredit {
   id: string
   title: string | null
-  /** `available`｜`redeeming` */
   status: string
-  /** ISO */
   granted_at: string | null
-  /** ISO */
   expires_at: string | null
 }
 
 export interface KindQuota {
   five_hour: QuotaWindow | null
   seven_day: QuotaWindow | null
-  /** Max 方案的 Fable 週額度；沒有就是 null */
   fable: QuotaWindow | null
-  /** agy 的 Gemini 4 Argon 獨立週額度（不扣 Gemini 額度、沒有 5 小時限制）；沒有 Argon 組的帳號不給這個欄位。 */
   argon_weekly?: QuotaWindow | null
   reset_credits: QuotaResetCredits | null
-  /** CLI 的上限橫幅；codex credits 用完時 5h/7d 可以是滿的（2026-09-12），所以要單獨看。 */
   limit_hit: QuotaLimitHit | null
   plan: string | null
   updated_at: string
-  /** daemon 重啟後從上一輪讀數回填；新的探測回來前仍可顯示但不是 fresh。 */
   stale: boolean
-  /** `local` 或 `hosts[].name` */
   host: string
-  /** 額度擋下了排著的 prompt、停工中的 bot 名稱（codex 格才有；舊 daemon 沒有就是 undefined）。 */
   held_bots?: string[]
-  /** 這個額度 key 的重置券提示被按了「不再提醒」：到這個時刻前不跳（daemon 的 reset-offer-snooze）。 */
   reset_offer_snoozed_until?: string | null
 }
 
-/** key 見 `quotaKey`（SPEC §14，按主機分開）；null = 沒有額度資訊。 */
 export type QuotaMap = Record<string, KindQuota | null>
 
-/** 主力 bot 撞限（#1899）：只有 `until` 與訊息，判斷在 daemon。 */
 export interface BotLimitHit {
   message: string
-  /** ISO；null = CLI 沒寫，daemon 等它清掉才消失。 */
   until: string | null
 }
 
 export interface QuotaLimitHit {
   message: string
-  /** ISO；null = 沒寫，要等下一回合成功才消失 */
   until: string | null
-  /** ISO */
   at: string
-  /** 知道窗口時為 `five_hour`／`seven_day`／`fable`；舊紀錄可能沒有。 */
   bucket: string | null
 }
 
@@ -1224,11 +895,9 @@ export interface InstallToolResult {
   turn_id: string
 }
 
-/** 列表不含完整 body */
 export interface Issue {
   number: number
   title: string
-  /** GitHub 提供的是外部資料；舊 daemon 未帶此欄位時 UI 使用本機 fallback。 */
   content_notice?: string
   state: 'open' | 'closed'
   labels: IssueLabel[]
@@ -1240,7 +909,6 @@ export interface Issue {
 
 export interface IssueLabel {
   name: string
-  /** 6 碼 hex（無 #），null = 未知 */
   color: string | null
 }
 
@@ -1248,15 +916,12 @@ export interface IssueDetail extends Issue {
   body: string
 }
 
-/** `GET/POST /api/claude-update/review?kind=` 的 `review` 欄位：這一版的 影響分析到哪了（claude／codex 同一套，issue #561）。 */
 export interface UpdateReview {
   state: 'none' | 'pending' | 'done' | 'failed'
   target_bot_name: string
   asked_at: string
   answered_at: string
-  /** `done` 才有：AGM 的結論原文。 */
   result: string
-  /** `api`＝Claude API 快速解析（沒實測，#1919）；空字串＝派 bot 做的。 */
   source: '' | 'api'
   model: string
   error?: string
@@ -1264,7 +929,6 @@ export interface UpdateReview {
 
 export interface BackgroundTask {
   id: string
-  /** `shell`／`subagent`／`monitor`／`workflow`…（hook 報什麼就是什麼） */
   type: string
   status: string
   description: string

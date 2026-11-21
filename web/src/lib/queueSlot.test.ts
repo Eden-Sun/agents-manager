@@ -17,7 +17,6 @@ test('每種佔著的人都有清楚的中文說明，而且都說輸入框的�
   assert.ok(bot.includes('build') && bot.includes('輸入框'), bot)
   assert.ok(queueSlotNotice({ kind: 'start', botName: null }, 0).includes('啟動'))
   assert.ok(queueSlotNotice({ kind: 'daemon', botName: null }, 0).includes('daemon'))
-  // 舊文案不變（別的測試與使用者習慣）：自己的另一則在排隊，附件要重新加。
   assert.equal(queueSlotNotice({ kind: 'user', botName: null }, 2), '已有一則訊息排隊中，這一則已退回輸入框；2 個附件要重新加')
   assert.equal(queueSlotNotice(null, 0), '已有一則訊息排隊中，這一則已退回輸入框')
   assert.ok(queueSlotNotice({ kind: 'agm', botName: 'AGM' }, 1).includes('1 個附件'))

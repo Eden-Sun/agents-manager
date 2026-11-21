@@ -1,7 +1,3 @@
-/**
- * 換 bot 選單照側欄的順序（真的掛進 happy-dom）：專案與 bot 都套使用者拖出來的順序（`projectOrder`／`botOrder`），
- * 側欄收起來的（額度停用，`hiddenBotIds`）不列；正在看的那顆例外（#1243）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -10,7 +6,6 @@ import { quotaDisableKey, setQuotaDisabled } from '../store/quotaHide'
 import type { Bot, Project } from '../api/types'
 import { BotSwitcher } from './BotSwitcher'
 
-/** b3 的帳號（identity）停用：收起來的走真的額度停用投影，不直接寫 `hiddenBotIds`（那會被 quotaHide 的 subscribe 蓋掉）。 */
 const HIDE_KEY = quotaDisableKey('mac_builder', 'claude', 'acct3')
 
 afterEach(async () => {
@@ -27,7 +22,6 @@ function seed() {
   resetStoreForTest()
   setQuotaDisabled(HIDE_KEY, true, null)
   useStore.setState({
-    // daemon 回來的原始順序是 P1 在前；使用者把 P2 拖到最上面。
     projects: [
       { id: 'P1', label: 'P1', path: '/p1', host: 'mac_builder' } as Project,
       { id: 'P2', label: 'P2', path: '/p2', host: 'mac_builder' } as Project,

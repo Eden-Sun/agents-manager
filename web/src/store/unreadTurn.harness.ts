@@ -1,4 +1,3 @@
-// 未讀規則測試共用的 harness（childNoticeUnread / keepWarmUnread）：store 種子、回合／回覆／狀態幀的建構與一個完整回合的派送。
 import { reset, routeDaemon } from './storeEnv.harness.ts'
 import { resetIdleEdges, resetTurnCompletions } from './unread.ts'
 import { dispatchFrameForTest, useStore } from './store.ts'
@@ -58,7 +57,6 @@ export const status = (agent: 'working' | 'idle', extra: Record<string, unknown>
   data: { bot_id: 'b1', run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: agent, ...extra } },
 })
 
-/** 一個完整回合：in_flight → working → 回覆 → completed → idle（hook 順序）。 */
 export function runTurn(turnId: string, crid: string | null, keepWarm: boolean) {
   dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: turn(turnId, 'in_flight', crid) } })
   dispatchFrameForTest(status('working'))

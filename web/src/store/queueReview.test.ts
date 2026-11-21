@@ -1,6 +1,3 @@
-/**
- * 輸入框與待送出佇列的對抗式審查（#733 之後）：重送去重鍵的壽命、漏掉 WS 幀之後的「排隊中」殘影。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
@@ -47,11 +44,6 @@ function seed() {
 
 const promptCrids = () => requests.filter((r) => r.path.endsWith('/prompt')).map((r) => (r.body as { client_request_id: string }).client_request_id)
 
-/**
- * 回應遺失（fetch 直接失敗）時 crid 要留著，讓同一句的重試被 daemon 認成同一件事。但它不能永遠留著：
- * daemon 其實收下了（WS 幀已經把那一回合推進來），使用者之後再打同一句話（或撤回後再送），沿用舊 crid 會被
- * daemon 當成重送，回舊回合的結果——新的這一則根本沒送出去，畫面卻以為送了（輸入框清空）。
- */
 test('回應遺失後 daemon 其實收下了：同一句話之後再送，不能沿用舊的 crid（否則被當重送、新訊息默默消失）', async () => {
   seed()
   let calls = 0
@@ -63,7 +55,6 @@ test('回應遺失後 daemon 其實收下了：同一句話之後再送，不能
   })
   assert.equal(await useStore.getState().sendPrompt('b1', '幫我跑測試-stale-1', [], false, false, undefined, true), false)
   const [first] = promptCrids()
-  // daemon 其實收下了、也已經撤回（或送完）：WS 幀把那一回合推進本機，狀態是終態。
   useStore.setState({ turns: { b1: { t1: turn({ status: 'failed', delivery: 'failed', awaitsIdle: true, client_request_id: first }) } } })
 
   await useStore.getState().sendPrompt('b1', '幫我跑測試-stale-1', [], false, false, undefined, true)
@@ -108,10 +99,6 @@ test('本機不認得那一回合（別的分頁收下的、重整過）：留�
   }
 })
 
-/**
- * 分頁在背景（手機休眠、斷線）時，那一則排隊的被 flush／撤回，`turn_updated` 幀漏掉了；重連後的 `refreshState`
- * 只會清掉過期的 in_flight，不認得的 queued 會一直留在本機——這個分頁就永遠顯示「排隊中」（#733 的 7788 vs 5173 不一致）。
- */
 const stateBody = (queuedTurn: unknown = null) => ({
   daemon_seq: 5,
   projects: [{ ...project, bots: [{ ...bot, queued_turn: queuedTurn }] }],
@@ -143,13 +130,11 @@ test('refreshState：daemon 還有的 queued 回合照舊留著', async () => {
 test('refreshState：快照比本機已看到的幀還舊時，不能把剛由 WS 推進來的 queued 回合清掉', async () => {
   seed()
   const msg = { id: 'm1', conversation_id: 'c1', turn_id: 't1', bot_id: 'b1', role: 'user', content: '稍後送出', attachments: [] } as unknown as Message
-  // 本機已經看到 seq 9 的幀（那一則剛排進去），這份快照只到 seq 5。
   useStore.setState({ turns: { b1: { t1: turn() } }, messages: { b1: [msg] }, loadedBots: { b1: true }, lastDurableSeq: 9 })
   let fetches = 0
   routeDaemon((req) => {
     if (!req.path.endsWith('/state')) return json({ messages: [], turns: [], has_more: false })
     fetches++
-    // 第一份是舊快照（還沒有那一則）；補抓的第二份（seq 9）才有。
     return fetches === 1
       ? json(stateBody(null))
       : json({
@@ -160,8 +145,6 @@ test('refreshState：快照比本機已看到的幀還舊時，不能把剛由 W
   await useStore.getState().refreshState()
   assert.equal(queuedSendFor(useStore.getState(), 'b1')?.turnId, 't1', '舊快照不能清掉比它新的回合')
 })
-
-// ───────── 第二輪：佔槽的人要講清楚、同句兩分頁不能把字又塞回去 ─────────
 
 const slotRoutes = (holder: unknown, queuedText: string) => (req: { path: string }) => {
   if (req.path.endsWith('/prompt')) return json({ error: 'conflict', reason: 'queue_slot_taken', turn_id: 't1', ...(holder ? { holder } : {}) }, 409)
@@ -180,7 +163,6 @@ test('兩個分頁同一句同時 Enter：被退回的這邊發現排著的就�
   seed()
   const key = 'bot:b1' as const
   routeDaemon(slotRoutes({ kind: 'user' }, '同一句話'))
-  // 另一個分頁成功送出並清掉了共用草稿；這個分頁的 Enter 慢一步撞上唯一槽。
   useStore.getState().setDraft(key, '')
   const ok = await useStore.getState().sendPrompt('b1', '同一句話', [], false, false, undefined, true)
   assert.equal(ok, true, '同一句已經排著了：沒有東西要還給輸入框，輸入框可以清掉')
@@ -212,8 +194,6 @@ test('AGM 的交辦佔著槽：中文說清楚，輸入框的字保留', async (
   assert.ok(text.includes('AGM 的交辦正在排隊'), text)
 })
 
-// ───────── 第三輪：「同一句」的判斷要保守，寧可多還原一次也不能吞掉使用者的字 ─────────
-
 const draftKey = 'bot:b1' as const
 const sendRejected = async (holder: unknown, queuedText: string, mine: string, attachments: string[] = []) => {
   seed()
@@ -234,7 +214,6 @@ test('同一句判斷只 trim 頭尾：大小寫、內部空白、標點不同�
     assert.equal(r.ok, false, `${queued} vs ${mine}`)
     assert.equal(r.draft, mine, `${queued} vs ${mine}：字不能被吞掉`)
   }
-  // 頭尾空白才算同一句。
   const same = await sendRejected({ kind: 'user' }, '  請繼續  ', '請繼續\n')
   assert.equal(same.ok, true)
 })
@@ -256,7 +235,6 @@ test('佔槽的不是使用者自己（unknown／start／daemon／bot）時，�
 test('舊 daemon 沒回 holder 時，同一句也必須退回輸入框，不能猜佔槽的是使用者', async () => {
   seed()
   routeDaemon(slotRoutes(null, '繼續'))
-  // 另一顆已驗證 bot 可以透過舊版 API 佔 awaits_idle 槽；另一個分頁先清掉了共用草稿。
   useStore.getState().setDraft(draftKey, '')
   const ok = await useStore.getState().sendPrompt('b1', '繼續', [], false, false, undefined, true)
   assert.equal(ok, false, '舊 daemon 沒有 holder，來源不明時不能當成這句已送出')

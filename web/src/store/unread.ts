@@ -1,7 +1,3 @@
-/**
- * 回合「已完成（未讀）」的前端帳本（daemon 不知情）：純函式 + localStorage。
- * 數字與已讀標記都存：標記是真相，但重整後只有正在看的 bot 有訊息可重算，其他靠存下的數字。
- */
 
 import type { Message, Project } from '../api/types'
 import { writeShared } from './mobilePreview'
@@ -10,16 +6,13 @@ import { laterMark } from './sharedUnread'
 const MARKS_KEY = 'am.readMarks'
 const COUNTS_KEY = 'am.unread'
 
-/** bot 對話或 project 群組聊天（§13）。 */
 export type UnreadKey = `bot:${string}`
 
 export const botKey = (botId: string): UnreadKey => `bot:${botId}`
 
-/** `(at, seq)` 是新 daemon 的讀取位置全序；舊資料沒有 seq 時，同一時間戳退回 id。 */
 export interface ReadMark {
   at: string
   id: string
-  /** daemon rowid for stable same-millisecond ordering; missing on marks from older versions. */
   seq?: number
 }
 
@@ -46,10 +39,6 @@ export function loadMarks(): Record<string, ReadMark> {
   }
 }
 
-/**
- * 寫一個已讀標記：先併進磁碟上現在的那份（別的分頁可能剛寫過），逐筆取較新者，再整份存回去。
- * 回傳合併後的整份，呼叫端照這份更新記憶體。刪除（`pruneMarks`）不走這裡，它要真的把死掉的鍵拿掉。
- */
 export function recordReadMark(current: Record<string, ReadMark>, key: string, mark: ReadMark): Record<string, ReadMark> {
   const merged = mergeWithDisk(current)
   merged[key] = laterMark(merged[key], mark) ?? mark
@@ -57,16 +46,12 @@ export function recordReadMark(current: Record<string, ReadMark>, key: string, m
   return merged
 }
 
-/** 記憶體的標記併進磁碟上現在的那份（逐筆取較新者）。 */
 function mergeWithDisk(current: Record<string, ReadMark>): Record<string, ReadMark> {
   const merged: Record<string, ReadMark> = { ...current }
   for (const [k, v] of Object.entries(loadMarks())) merged[k] = laterMark(merged[k], v) ?? v
   return merged
 }
 
-/**
- * 修剪死掉的 bot 的標記後存回去。跟 `recordReadMark` 一樣先併磁碟：別的分頁剛寫的標記不能被這裡整份覆寫掉。
- */
 export function prunePersistedMarks(current: Record<string, ReadMark>, liveBot: (id: string) => boolean): Record<string, ReadMark> {
   const pruned = pruneMarks(mergeWithDisk(current), liveBot)
   saveMarks(pruned)
@@ -77,11 +62,9 @@ export function saveMarks(marks: Record<string, ReadMark>) {
   try {
     writeShared(() => localStorage.setItem(MARKS_KEY, JSON.stringify(marks)))
   } catch {
-    /* 無痕／禁用儲存：只是不跨重整 */
   }
 }
 
-/** 只有 bot 的未讀數字存本機。 */
 export interface UnreadCounts {
   bots: Record<string, number>
 }
@@ -97,7 +80,6 @@ export function loadCounts(): UnreadCounts {
       if (k.startsWith('bot:')) out.bots[k.slice(4)] = n
     }
   } catch {
-    /* 讀不到就當作全部已讀 */
   }
   return out
 }
@@ -108,39 +90,27 @@ export function saveCounts(counts: UnreadCounts) {
   try {
     writeShared(() => localStorage.setItem(COUNTS_KEY, JSON.stringify(flat)))
   } catch {
-    /* 同上 */
   }
 }
 
-/**
- * 分頁可見且視窗有 focus（選取對話由呼叫端判斷）。少了 focus，瀏覽器丟旁邊螢幕、人在別的 app
- * 時進來的回覆會被當已讀——那正是最需要徽章的情境。
- */
 export function windowActive(): boolean {
   if (typeof document === 'undefined') return true
   if (document.visibilityState !== 'visible') return false
   return typeof document.hasFocus === 'function' ? document.hasFocus() : true
 }
 
-/** 保溫回覆（`keep_warm`，`lib/keepWarm.ts`）不算：它是 daemon 代送的，不該亮未讀。 */
 export function completesTurn(msg: Pick<Message, 'role' | 'keep_warm'>): boolean {
   return msg.role === 'assistant' && !msg.keep_warm
 }
 
-/** 沒有標記 = 什麼都沒讀過。 */
 export function isUnread(msg: Pick<Message, 'id' | 'created_at' | 'seq'>, mark: ReadMark | undefined): boolean {
   if (!mark) return true
   if (msg.created_at > mark.at) return true
   if (msg.created_at !== mark.at) return false
-  // 新 daemon 帶 rowid；同毫秒依訊息真正寫入的次序，不依 ULID 的隨機段。
   if (msg.seq != null && mark.seq != null) return msg.seq > mark.seq
   return msg.id > mark.id
 }
 
-/**
- * 「往來」回合：使用者訊息至少一則、且全都帶 `relay_from`（別的 bot／daemon 代發，不是使用者自己打的）。
- * 有一則無 `relay_from` 的 user 訊息＝使用者補話，不算往來。與 daemon `read_marks` 的規則一致。
- */
 export function relayTurnIds(messages: readonly Message[]): Set<string> {
   const human = new Set<string>()
   const relay = new Set<string>()
@@ -153,17 +123,11 @@ export function relayTurnIds(messages: readonly Message[]): Set<string> {
   return relay
 }
 
-/** 專家專案（`projects.mode='expert'`）的 bot。 */
 export function isExpertBot(bot: { project_id: string; role?: string | null } | undefined, projects: readonly Pick<Project, 'id' | 'mode'>[]): boolean {
-  // 管理者回覆 daemon 通知通常是在向使用者回報，照算未讀。
   if (!bot || bot.role === 'manager') return false
   return projects.some((p) => p.id === bot.project_id && p.mode === 'expert')
 }
 
-/**
- * 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。
- * `expert` 為 true（專家專案的 bot）時，往來回合（見 `relayTurnIds`）的回覆不算未讀。
- */
 export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | undefined, expert = false): number {
   const relay = expert ? relayTurnIds(messages) : null
   const turns = new Set<string>()
@@ -175,10 +139,6 @@ export function countUnreadTurns(messages: readonly Message[], mark: ReadMark | 
   return turns.size
 }
 
-/**
- * 必須與 `turn_updated` 用同一個 key（turn.id）才能去重。沒 turn_id（防禦路徑）就掛到最近的
- * 回合（ULID 字典序＝時間序）；連回合都不知道才退回 `msg:<id>`，徽章不能因此不亮。
- */
 export function completionKey(msg: Pick<Message, 'id' | 'turn_id'>, knownTurnIds: readonly string[]): string {
   if (msg.turn_id) return msg.turn_id
   let latest: string | null = null
@@ -202,30 +162,20 @@ export function markNow(): ReadMark {
   return { at: new Date().toISOString(), id: '' }
 }
 
-/** 不清的話，刪掉的 bot 會在分頁標題 `(N)` 留下永遠點不掉的未讀。 */
 export function pruneUnread<T>(book: Record<string, T>, live: (id: string) => boolean): Record<string, T> {
   const out: Record<string, T> = {}
   for (const [k, v] of Object.entries(book)) if (live(k)) out[k] = v
   return out
 }
 
-/** 同上，給 `bot:` 前綴的標記表；舊版寫的 `group:` 標記（群組已讀現在在 daemon，#756）順手丟掉。 */
 export function pruneMarks(marks: Record<string, ReadMark>, liveBot: (id: string) => boolean) {
   return pruneUnread(marks, (k) => k.startsWith('bot:') && liveBot(k.slice(4)))
 }
 
-/**
- * 側欄顯不顯示這顆 bot 的未讀：總管專案裡的往來是 AGM 的內部事務，不顯示（2026-09-16 使用者）。
- * 側欄與分頁標題共用這一條——標題照算的話，AGM 例行回合讓 `(N)` 長期掛著，側欄卻找不到一筆點得掉（review3 c5 L2）。
- */
 export function unreadShown(bot: { project_id: string } | undefined, supervisorProjectId: string | null): boolean {
   return !(bot && supervisorProjectId && bot.project_id === supervisorProjectId)
 }
 
-/**
- * 這顆 bot 的未讀進不進任何加總：總管專案的不算（上面那條），側欄收起來的（額度停用）也不算——
- * 點不到的數字比沒有數字更糟。分頁標題與側欄收合專案的 `!N` 共用這一條（issue #510）。
- */
 export function unreadCounted(
   bot: { id: string; project_id: string },
   supervisorProjectId: string | null,
@@ -234,7 +184,6 @@ export function unreadCounted(
   return unreadShown(bot, supervisorProjectId) && !hidden.has(bot.id)
 }
 
-/** 未讀加總的來源：`bots` 是要掃的那一群（整份或某個專案的）。 */
 export interface UnreadBook {
   botUnread: Record<string, number>
   hiddenBotIds: readonly string[]
@@ -242,16 +191,6 @@ export interface UnreadBook {
   supervisorProjectId: string | null
 }
 
-/**
- * 所有加總的唯一入口：**掃 `bots`，不掃 `botUnread` 的 key**。
- *
- * 兩者不一樣的那一批是「帳還在、bot 已經不在」的殘帳（剛刪掉、還沒輪到 `pruneUnread`，或 daemon
- * 換了一批 bot）。掃 key 的話那些數字只會出現在分頁標題、側欄一列都生不出來，就是 #510 那個點不掉
- * 的數字換個地方長（i92b 的複看）。代價是開機那一瞬間 `bots` 還沒回來，標題先不顯示 `(N)`——
- * 反正 `pruneUnread` 本來就把「不在 `bots` 裡」當成死帳清掉，早一點晚一點而已。
- *
- * 只加 bot 的份：群組未讀是同一批回覆的第二份帳，相加會一則算兩次。
- */
 function sumUnread(s: UnreadBook, keep: (bot: { id: string; project_id: string }) => boolean): number {
   const hidden = new Set(s.hiddenBotIds)
   let n = 0
@@ -262,17 +201,14 @@ function sumUnread(s: UnreadBook, keep: (bot: { id: string; project_id: string }
   return n
 }
 
-/** 分頁標題的 `(N)`：側欄收起來的與總管專案的都不算。 */
 export function titleUnread(s: UnreadBook): number {
   return sumUnread(s, () => true)
 }
 
-/** 專案收合時掛在標題上的 `!N`：跟 `titleUnread` 同一份排除、同一個定義域，兩邊的數字才對得起來。 */
 export function projectUnread(s: UnreadBook, projectId: string): number {
   return sumUnread(s, (b) => b.project_id === projectId)
 }
 
-/** `message_added` 與 `turn_updated` 都代表完成，去重避免一回合跳兩下；只留最近 500 筆。 */
 const counted = new Set<string>()
 const COUNTED_CAP = 500
 
@@ -287,25 +223,17 @@ export function takeTurnCompletion(botId: string, turnId: string): boolean {
   return true
 }
 
-/** 測試用。 */
 export function resetTurnCompletions() {
   counted.clear()
 }
 
-/**
- * `bot_status` working→idle 補記的 key（終端直接輸入或沒裝 hook；docs/reviews/2026-09-12/web.md §2）。
- * 不能沿用最大 turn id：那筆多半已被 hook 記過，網頁送過一次後終端回合就永遠不亮。
- * in_flight → 共用 turn id 去重；hook 剛記過 → null（是它的尾巴）；否則 `run:<id>:<第幾次 idle>`。
- */
 const hookCompleted = new Set<string>()
 const idleEdges = new Map<string, number>()
 
-/** 接下來的那個 idle 邊緣屬於這次 hook 記的完成。 */
 export function markHookCompletion(botId: string) {
   hookCompleted.add(botId)
 }
 
-/** idle→working：清掉上一輪的標記。 */
 export function clearHookCompletion(botId: string) {
   hookCompleted.delete(botId)
 }
@@ -322,13 +250,11 @@ export function idleEdgeCompletionKey(
   return `run:${runId}:${n}`
 }
 
-/** 不在 `live` 裡的 bot（刪掉、退役的 child）不留 idle 邊緣的帳：每顆 bot 各一格，沒有人會回頭清。 */
 export function pruneIdleEdges(live: ReadonlySet<string>) {
   for (const id of [...hookCompleted]) if (!live.has(id)) hookCompleted.delete(id)
   for (const id of [...idleEdges.keys()]) if (!live.has(id)) idleEdges.delete(id)
 }
 
-/** 測試用。 */
 export function resetIdleEdges() {
   hookCompleted.clear()
   idleEdges.clear()

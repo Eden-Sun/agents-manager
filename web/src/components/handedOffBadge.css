@@ -1,4 +1,3 @@
-/* components/HandedOffBadge.tsx：側欄專案標題的「由 <host> 管理」。跟 RAM 徽章同一種外觀，字色用提醒色。 */
 
 .project-handoff {
   flex: none;

@@ -4,7 +4,6 @@ import { sendWithFreshRun } from './store.ts'
 import { ApiError } from '../api/types.ts'
 import type { StoreState } from './store.ts'
 
-/** 只需要 `runs` 與 `refreshState` 兩樣，其餘不碰。 */
 function fakeGet(runId: string | null, onRefresh?: () => void) {
   return () =>
     ({

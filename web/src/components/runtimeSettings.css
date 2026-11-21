@@ -1,4 +1,3 @@
-/* 執行期設定欄位（角色卡與 bot 覆寫共用）：沿用表單的 pill 與欄位標題，不另做裸元件。 */
 .rt-fields {
   display: flex;
   flex-direction: column;
@@ -32,7 +31,6 @@
   cursor: pointer;
 }
 
-/* 拉條與刻度同一個盒子、同寬；刻度位置＝拇指中心（扣掉拇指半寬），所以 512k 的拇指正好在「512k」上面。 */
 .rt-ctx-slider {
   --rt-thumb: 16px;
   position: relative;
@@ -94,7 +92,6 @@
   margin-top: 10px;
 }
 
-/* 角色設定：每個角色一張卡（沿用表單的卡片樣式與 pill）。 */
 .role-policy-editor {
   display: flex;
   flex-direction: column;

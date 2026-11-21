@@ -1,7 +1,3 @@
-/**
- * #1179：額度只有 Fable 有值（5h、7d 都 null）時，條上要畫出 F 的 %，不能畫成「5h —」；手機（compact）也一樣。
- * 5h、7d、F 全部沒有值時，才保留「5h —」佔位。真的掛 `QuotaStrip` 進 happy-dom，額度來自 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -16,14 +12,12 @@ const originalClaude = mock.quota.claude
 const cellOf = (identity: string) =>
   [...document.querySelectorAll<HTMLElement>('.quota-hp.claude')].find((el) => el.querySelector('.quota-identity')?.textContent === identity) ?? null
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true（與 hostShellPhoneDom.test.tsx 同寫法）。 */
 function phoneWidth(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   return () => (window.matchMedia = original)
 }
 
-/** 以 mock 的 claude 額度為底，換掉 5h／7d／F，再載入並畫出 cc0 格。 */
 async function openWith(windows: { five: boolean; seven: boolean; fable: boolean }) {
   const base = originalClaude ?? {}
   const pick = (on: boolean, w: Record<string, unknown> | null | undefined, over: Record<string, unknown>) =>

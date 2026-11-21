@@ -1,6 +1,3 @@
-/* 更新框裡的「影響分析」區塊。載入順序在 styles.css 之後由元件自己 import。 */
-/* `--line`／`--surface-2`／`--muted` 主題裡從來沒定義過，一直掉回寫死的淺色預設——深色模式下整塊白底（2026-10-01）。
-   在這個區塊上對到主題 token，深淺色跟著主題走。 */
 .agm-review {
   --line: var(--border);
   --surface-2: var(--bg-sunken);
@@ -47,8 +44,6 @@
   border-top: 1px solid var(--border);
 }
 
-/* 上游分診（issue #561）：一版一段，提防／採用／值得早升用文字標籤＋色，不只靠顏色。
-   提防是琥珀不是紅：紅只給「要你本人動手」（UI-DECISIONS 通用原則）。 */
 .triage {
   margin-top: 4px;
 }
@@ -123,8 +118,6 @@
   font-size: 12px;
 }
 
-/* 桌機更新框分左右（2026-09-19 使用者），但別把視窗撐滿（同日：「現又太大，聰明的調整 render 空間」）：
-   兩欄只長到內容需要的高度、上限 42vh 各自捲；bot 清單改成會換行的小晶片，不再一顆一行；手機維持上下。 */
 @media (width > 900px) {
   .confirm-dialog:has(.update-split) {
     width: min(880px, 92vw) !important;

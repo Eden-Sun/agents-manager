@@ -1,4 +1,3 @@
-/** 專家模式側欄執行者群集列：分組、計數、展開、整組停派。 */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
@@ -44,7 +43,7 @@ function seed(managerUse: boolean[] = [true, true, true]) {
 }
 
 beforeEach(() => {
-  try { window.localStorage.clear() } catch { /* ignore */ }
+  try { window.localStorage.clear() } catch {  }
   requests = fakeApi((req) => (req.method === 'PATCH' ? { needs_restart: false } : undefined))
 })
 
@@ -74,14 +73,11 @@ test('側欄：群集列不穿插在單顆執行者之間，也不縮排成子�
   } as never)
   await mount(<Sidebar />)
   await settle()
-  // 只看執行者段（manager 段在前，不計）。
   const rows = [...document.querySelectorAll<HTMLElement>('.bot-list > [role="listitem"]')]
     .map((e) => (e.dataset.cluster ? `c:${e.dataset.cluster}` : `s:${e.dataset.botId}`))
     .filter((x) => x !== 's:m')
   assert.deepEqual(rows, ['c:haiku', 'c:sonnet', 's:f1', 's:g1', 's:f2'])
-  // 群集列是頂層列，沒有掛在任何子 agent 清單底下（那會縮排）。
   assert.equal(document.querySelectorAll('.bot-kids .bot-cluster-row, .bot-child .bot-cluster-row').length, 0)
-  // 成員只在展開後才出現，且只在自己群集的 members 容器裡。
   assert.equal(document.querySelectorAll('.bot-cluster-members .bot-row[data-bot-id]').length, 0)
 })
 
@@ -92,7 +88,6 @@ test('收合：一列群集、計數、成員不畫，單列照舊', async () =>
   const row = clusterRow()!
   assert.ok(row)
   assert.match(row.textContent ?? '', /haiku/)
-  // 狀態與數量合併在標題上：燈號＋數字（1 執行中、2 閒置），完整文字在 aria-label／title，沒有另一行。
   const count = row.querySelector('.bot-cluster-count')!
   assert.equal(count.getAttribute('aria-label'), '共 3 顆：1 執行中 · 2 閒置')
   assert.deepEqual([...count.querySelectorAll('.bot-cluster-stat-item')].map((e) => `${e.querySelector('.lamp')!.className.match(/lamp-(\w+)/)![1]}:${e.textContent}`), ['working:1', 'idle:2'])

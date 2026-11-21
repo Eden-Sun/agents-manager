@@ -1,9 +1,3 @@
-/**
- * 對話輸入區的互動行為（真的掛 `ChatPanel` 進 happy-dom，後端是 `MockTransport`，前端走正式的 fetch／XHR 路徑）：
- * - IME 組字時 Enter 是「確認選字」，不能送出；組字結束的 Enter 才送。
- * - #733 回合中按 Enter＝請 daemon 排隊（`queue_if_busy`）：輸入框清空、出現「已排隊」；撤回把字與附件卡片放回輸入框；
- *   排隊的那一則落在 daemon，另一個分頁（全新的 store）讀回來看到同一則。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
@@ -20,16 +14,14 @@ import { ComposerDraftBar } from './ComposerDraftBar'
 virtualMockTime()
 afterEach(async () => {
   await unmountAll()
-  // 這一則留下的 mock timer（回合、啟動）在這裡走完，不帶到下一則：下一則的 bot 才真的是閒的（#1374）。
   await advanceMockTime(10_000)
 })
 before(async () => {
   await setupDom()
-  // 整個行程共用一個手動時鐘：前面檔案留下的 timer 在這個檔案開始前走完（#1374）。
   await advanceMockTime(10_000)
 })
 after(async () => {
-  resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
+  resetStoreForTest()
   await teardownDom()
 })
 
@@ -37,12 +29,8 @@ const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer te
 const prompts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && /\/bots\/[^/]+\/prompt/.test(r.path))
 const queuedBar = () => document.querySelector('.composer-queued-idle')
 
-
-// 整個檔案共用一個 mock 後端：store 會丟掉 `daemon_seq` 比較小的快照（防舊快照蓋新的），每個測試各建一個新 mock
-// 等於「daemon 重啟」，store 就不更新了。不同測試用不同的 bot，免得上一個測試留下的回合／排隊互相干擾。
 const mock = sharedMock
 
-/** 起 `name` 這顆 bot 並等它 running，選取它、掛上 ChatPanel。 */
 async function openChat(name: string) {
   const requests = mockApi(mock)
   await useStore.getState().refreshState()
@@ -61,9 +49,7 @@ async function openChat(name: string) {
   return { requests, bot }
 }
 
-/** 讓 bot 進入回合中（`slow` 的回合 mock 會跑約 8 秒），並讓前端知道。 */
 async function makeBusy(botId: string) {
-  // 上一個測試留下的回合還在跑就不再送（mock 對回合中的 bot 會 409）。
   await mock.request('POST', `/bots/${botId}/prompt`, { text: 'slow job', client_request_id: `busy-${botId}-${Date.now()}` }).catch(() => {})
   await useStore.getState().loadMessages(botId)
   await flush()
@@ -134,7 +120,6 @@ test('#733 排隊的那一則落在 daemon：全新的 store（另一個分頁�
   await keydown(textarea(), 'Enter')
   await until(() => /visible everywhere/.test(queuedBar()?.textContent ?? ''), '已排隊')
 
-  // 「另一個分頁」：本機的訊息、回合、載入記錄全清掉，只剩 daemon 那份。
   await unmountAll()
   useStore.setState({ messages: {}, turns: {}, loadedBots: {}, drafts: {} } as never)
   await useStore.getState().refreshState()
@@ -144,7 +129,6 @@ test('#733 排隊的那一則落在 daemon：全新的 store（另一個分頁�
   assert.match(queuedBar()!.textContent ?? '', /visible everywhere/)
 })
 
-/** 讓下一次附件上傳失敗一次（502），之後恢復 mock 原本的上傳；回傳還原函式。 */
 function failNextUpload(): () => void {
   const original = mock.upload.bind(mock)
   let armed = true
@@ -266,10 +250,6 @@ test('Office 類貼上文字不變成附件；只有 Files 的貼上仍收附件
   assert.equal(document.querySelectorAll('.attach-tray .attach-thumb').length, 1)
 })
 
-/**
- * 送出成功才會清空輸入框：那是 `sendPrompt(...).then(...)` 之後才發生、還要等 React 排上去的事，
- * 不是 `settle()` 一次 macrotask 就保證趕得上的。等得到就過；等不到就帶上診斷，下次紅時看得出是哪一支（#1374）。
- */
 async function untilCleared(botId: string, sendResult: () => unknown) {
   try {
     await until(() => textarea().value === '', '送出後輸入框清空', 2000)
@@ -284,14 +264,12 @@ async function untilCleared(botId: string, sendResult: () => unknown) {
 }
 
 test('送出期間加進來的附件留在托盤給下一則', { timeout: 30_000 }, async () => {
-  // 專屬的 bot：am-claude-2 會被前面的排隊測試（#733）留下排隊中的回合，共用的話這一則會排在它後面（#1374）。
   mockApi(mock)
   await useStore.getState().refreshState()
   const pid = useStore.getState().bots.find((b) => b.name === 'am-claude-2')!.project_id
   await mock.request('POST', `/projects/${pid}/bots`, { name: 'am-claude-solo', kind: 'claude', model: 'opus', identity: 'cc0' })
   await useStore.getState().refreshState()
   const { requests, bot } = await openChat('am-claude-solo')
-  // 包一層 `sendPrompt` 記下它的回傳值，給失敗訊息用；finally 還原（#1374）。
   const realSend = useStore.getState().sendPrompt
   let sendResult: unknown = '尚未呼叫'
   useStore.setState({
@@ -343,7 +321,6 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
     },
   })
 
-  // 1. attachmentsBlocked="uploading"
   await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="uploading" onSent={() => {}} onEdit={() => {}} />)
   let clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
   let submitBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('送出框裡那段'))!
@@ -351,7 +328,6 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
   assert.match(clearBtn.title, /上傳/)
   assert.equal(submitBtn.disabled, false)
 
-  // 2. attachmentsBlocked="failed"
   await unmountAll()
   await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked="failed" onSent={() => {}} onEdit={() => {}} />)
   clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!
@@ -360,7 +336,6 @@ test('清掉再送我這則：附件上傳中／失敗時 disabled', { timeout: 
   assert.match(clearBtn.title, /失敗/)
   assert.equal(submitBtn.disabled, false)
 
-  // 3. attachmentsBlocked={null}
   await unmountAll()
   await mount(<ComposerDraftBar botId="b1" text="mine" attachments={[]} attachmentsBlocked={null} onSent={() => {}} onEdit={() => {}} />)
   clearBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('清掉再送'))!

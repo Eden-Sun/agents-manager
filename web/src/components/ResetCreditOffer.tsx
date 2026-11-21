@@ -5,11 +5,9 @@ import { useT } from '../lib/i18n'
 import { fmtCreditDate } from '../lib/resetCredits'
 import { creditKeyLabel } from '../store/resetCreditsNotice'
 
-/** 「不再提醒 ▾」：展開後選 1 小時／1 天／3 天，暫停這個額度的提示（只控制提醒，不兌換）。 */
 function SnoozeMenu({ offer }: { offer: Offer }) {
   const t = useT()
   const [open, setOpen] = useState(false)
-  // 時長選項（小時）：daemon 只收 1／24／72。
   const choices: { hours: 1 | 24 | 72; label: string }[] = [
     { hours: 1, label: t('1 小時') },
     { hours: 24, label: t('1 天') },
@@ -42,7 +40,6 @@ function SnoozeMenu({ offer }: { offer: Offer }) {
   )
 }
 
-/** 額度用完、還有重置券時的一次性提問（見 store/resetCreditOffer.ts）。掛在 App 根層，不擋其他操作。 */
 export function ResetCreditOffer() {
   const t = useT()
   const offer = useResetCreditOffer()

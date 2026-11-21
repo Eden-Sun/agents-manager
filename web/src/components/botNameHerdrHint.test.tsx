@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { BotNameField } from './BotNameField.tsx'
 import { herdrIdentity } from '../lib/herdrIdentity.ts'
 
-// #572：側欄只畫暱稱，滑過去要看得到終端那邊的 herdr 名與 pane，才對得起來。
 const row = (run: { pane_id: string | null } | null, armed = false) =>
   renderToStaticMarkup(
     <BotNameField botId="b1" name="cf-ox-fork-fork" variant="row" armed={armed} hint={herdrIdentity(run, 'pt-hub-n4xznj')?.title} />,

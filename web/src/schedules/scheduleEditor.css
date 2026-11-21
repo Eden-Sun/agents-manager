@@ -1,4 +1,3 @@
-/* 排程編輯器的任務內容框：最少 8 行，超過才長高，最多 60vh 再捲動；可手動拉高。 */
 
 .schedule-editor .schedule-prompt {
   font-family: var(--font-mono);
@@ -125,8 +124,6 @@
   overflow-wrap: anywhere;
 }
 
-/* 手機（2026-11-07 使用者「優化排程設定頁手機版」）：狀態卡收緊、說明改一般字體、時間與時區並排、
-   底部動作列四顆擠一排（原本 2×2 佔了快 150px 的固定高度，蓋住表單）。 */
 @media (max-width: 480px) {
   .schedule-editor .schedule-status {
     padding: 8px 10px;
@@ -162,7 +159,6 @@
     margin: -4px 0 0;
   }
 
-  /* 模式、每幾分鐘、單次的日期時間這類寬欄位獨佔一行；「每天／每週」的時間與時區並排。 */
   .schedule-editor .schedule-time-grid > .field:first-child,
   .schedule-editor .schedule-time-grid > .field:has(input[type='number']),
   .schedule-editor .schedule-time-grid > .field:has(input[type='datetime-local']) {
@@ -212,7 +208,6 @@
   }
 }
 
-/* 手機優先：儲存列固定在底部（安全區），不用捲到最下面才能存。 */
 .schedule-editor .form-actions {
   position: sticky;
   bottom: 0;
@@ -222,13 +217,11 @@
   border-top: 1px solid var(--border, #ddd);
 }
 
-/* 任務內容放最後；高度可手動拉。 */
 .schedule-editor .schedule-prompt {
   min-height: 8rem;
   resize: vertical;
 }
 
-/* Bot 清單：大列、好掃。 */
 .sched-bot-picker { display: grid; gap: 6px; }
 .sched-bot-search { min-height: 44px; }
 .sched-bot-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
@@ -266,7 +259,6 @@
   .schedule-editor .schedule-time-grid { grid-template-columns: 1fr; }
 }
 
-/* 何時執行：模式與時區同一塊；時段是一行區間（2026-11-11，B 案）。 */
 .schedule-editor .schedule-when-context {
   grid-column: 1 / -1;
   display: grid;
@@ -313,7 +305,6 @@
   min-width: 0;
 }
 
-/* 開始與結束是一組：窄螢幕兩個輸入等分縮小，不再被擠成「08:2」；整組不夠寬時按鈕換到下一行。 */
 .schedule-editor .schedule-slot-row input[type="time"] {
   width: auto;
   flex: 1 1 0;

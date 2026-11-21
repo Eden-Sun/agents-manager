@@ -1,6 +1,3 @@
-/**
- * 通知（toast）的無障礙（issue #1135）：live region 要一直在 DOM 裡，之後才加的通知才會被螢幕閱讀器唸；錯誤用 alert。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, pendingDomTimers, setupDom, teardownDom, unmountAll } from './testing/domHarness'

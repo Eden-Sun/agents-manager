@@ -1,7 +1,3 @@
-/**
- * `usePollWhileVisible`：背景分頁的每一拍都不該打 daemon；回到前景補一次；卸載後不再跑。
- * 用手動時鐘數 tick，不靠牆鐘。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { installManualClockTimers } from '../testing/manualClockTimers'

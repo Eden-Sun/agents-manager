@@ -1,8 +1,3 @@
-/**
- * 額度用完的重置券提問（真的掛進 happy-dom）：
- * - 有券＋用完 → 跳一次提問；「不用」關掉，同一次耗盡不再跳；
- * - 「使用一張」→ 打 daemon 的 User-only 端點，成功後關掉。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -46,7 +41,6 @@ test('用完＋有券：跳一次；按「不用」關掉，同一次耗盡不�
   assert.equal(document.querySelector('[role=alertdialog]'), null, '按不用就關')
   stop()
 
-  // 同一次耗盡（同一個撞限紀錄）再來一次報價：不再跳
   const stop2 = startResetCreditOfferNotice(() => NOW + 60_000)
   useStore.setState({ quota: { ...quotaWithHit('2026-11-08T06:00:00Z') } })
   await flush()

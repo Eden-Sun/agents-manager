@@ -1,6 +1,3 @@
-/**
- * 待答問卷（原題卡）的譯文：英文主體自動翻、可切換原文／譯文、失敗可手動重試；只換顯示，不送任何作答請求。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

@@ -1,8 +1,3 @@
-/**
- * ModelQuickPicker（#939）：claude 的設定存完整 id（`claude-sonnet-5-5`，daemon 把別名展開，#400），選單的 chip 是別名（`sonnet`）。
- * 以前用 `===` 比：一顆都不亮、點同一個模型還會送 `{model:'sonnet'}`（設定被改回別名、pane 被打一次 `/model`），
- * `current` 退回 `is_default`（opus），haiku bot 的「廠推薦」標在 High。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -127,7 +122,6 @@ test('沒指定時點亮著的預設那顆仍會送出', async () => {
   assert.deepEqual(patches, [{ model: 'opus' }])
 })
 
-// #1679：「廠推薦」只標廠商內建預設；帳號 settings.json 記住的值另標「此帳號預設」，沒指定強度時亮的是帳號值（CLI 實際會跑的）。
 test('帳號記住的強度另標「此帳號預設」，不冒充廠推薦；沒指定時亮帳號值', async () => {
   setup('claude-opus-5-5')
   useStore.setState({

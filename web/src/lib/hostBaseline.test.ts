@@ -50,8 +50,6 @@ test('normalize：讀不懂的項目丟掉、severity 不認得的當提醒，is
   assert.equal(toHostBaseline(null), null)
 })
 
-// ───────── 過期：舊結果不能裝成現在的 ─────────
-
 const NOW = Date.parse('2026-10-02T12:00:00Z')
 const ago = (h: number) => new Date(NOW - h * 3600_000).toISOString()
 
@@ -89,7 +87,7 @@ test('未知（issues: null）又過期：說上次檢查，而不是只說未�
 })
 
 test('上次檢查的時間：跨年要帶年份（1 月看到去年 12 月底的檢查）', () => {
-  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) // 這些測試用本地時區建時間，時區跟著機器走
+  useStore.setState({ userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone })
   const now = new Date(2027, 0, 1, 1, 0).getTime()
   assert.equal(formatCheckedAt(new Date(2026, 11, 31, 22, 0).toISOString(), now), '2026-12-31 22:00')
   assert.equal(formatCheckedAt(new Date(2027, 0, 1, 0, 30).toISOString(), now), '01-01 00:30')

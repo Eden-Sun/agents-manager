@@ -46,7 +46,6 @@ test('AutoUpdateSettings：載入四個開關並顯示說明文字，點擊開�
     assert.equal(checkboxes.length, 4, '要有四個開關：claude, codex, agy, grok')
     assert.ok(checkboxes.every((cb) => !cb.checked), '初始預設全關')
 
-    // 點擊 codex 開關
     const codexBox = checkboxes[1]
     assert.ok(codexBox)
     await click(codexBox)

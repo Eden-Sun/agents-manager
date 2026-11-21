@@ -1,5 +1,3 @@
-/* components/GhAuth.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* 遠端 / 本機 gh 登入（HostsPanel 列、IssuesBar 錯誤列） */
 
 .gh-auth {
   display: flex;

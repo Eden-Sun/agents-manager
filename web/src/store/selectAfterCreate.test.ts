@@ -1,7 +1,3 @@
-/**
- * 新增／分身／fork／升級 bot 之後，主畫面要切到新 bot（#1339）：以前四條路只 `set({ selectedBotId })`，
- * 所以群組時間軸、整頁 shell、設定卡、終端分頁會留著舊的狀態，新 bot 看不到。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
@@ -10,10 +6,6 @@ import type { Bot, Project } from '../api/types.ts'
 const { useStore } = await import('./store.ts')
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
-/**
- * 等條件成立：每一輪讓微任務與 setImmediate 跑完，最多 `rounds` 輪；不靠時間（#1428）。
- * 等不到就帶上 `what` 失敗，不會像固定 40ms 那樣在負載高時假紅。
- */
 async function settleUntil(cond: () => boolean, what: string, rounds = 200) {
   for (let i = 0; i < rounds; i++) {
     if (cond()) return
@@ -26,7 +18,6 @@ const project = () => ({ id: 'p1', label: 'p', path: '/p', host: 'local' }) as P
 const bot = (id: string) => ({ id, name: id, project_id: 'p1', kind: 'claude', identity: null }) as Bot
 const shell = { host: 'local', paneId: 'w1:p1', cwd: '' }
 
-/** `/state` 回含新 bot 的快照；`/messages` 回空頁；建立、分身、fork、升級各回它們的 `bot_id`。 */
 function route(newId: string) {
   reset()
   routeDaemon((r) => {

@@ -9,7 +9,6 @@ test('相對時間：不到一分鐘寫「剛剛」，不寫「0 分鐘前」', 
   assert.equal(agoLabel(before(0), now), '剛剛')
   assert.equal(agoLabel(before(20_000), now), '剛剛')
   assert.equal(agoLabel(before(59_999), now), '剛剛')
-  // 時鐘比這台快（未來時間）也不寫負值。
   assert.equal(agoLabel(new Date(now + 5_000).toISOString(), now), '剛剛')
 })
 

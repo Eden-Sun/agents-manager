@@ -10,7 +10,6 @@ import { GitBar } from './GitBar'
 import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import './mobileContextPanel.css'
 
-/** 手機 context 入口的小 popup；portal 避開標題列與對話容器的裁切。 */
 export function MobileContextPanel({ botId, projectId, status, reading, issues, anchor, onClose }: {
   botId: string
   projectId: string
@@ -70,7 +69,7 @@ export function MobileContextPanel({ botId, projectId, status, reading, issues, 
       </div>
       <progress aria-label={t('Context 已用比例')} max={100} value={percentage === null ? 0 : Math.min(100, Math.max(0, percentage))} aria-valuetext={percentage === null ? '—' : `${Math.round(percentage)}%`} />
       <div className="mobile-context-cache">{cacheInput.kind === 'codex' ? t('必快取') : cache ? cache.state === 'cold' ? t('已冷') : cacheMinutes != null ? t('熱 · 剩 {n} 分', { n: cacheMinutes }) : t('熱') : '—'}</div>
-      {/* 壓縮與「不用保溫」並排（2026-11-07 使用者：popup 也要能設定不保溫；只有主力的 claude 會畫出後者）。 */}
+      {}
       <div className="mobile-context-actions">
         <CompactButton botId={botId} />
         <KeepWarmSkipButton botId={botId} />

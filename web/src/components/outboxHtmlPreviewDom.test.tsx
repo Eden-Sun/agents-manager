@@ -1,8 +1,3 @@
-/**
- * outbox 的 .html 預覽（使用者 2026-11-18：不沙箱化）：.html／.htm 與 .txt 有 ↗，.svg 與未列副檔名沒有；
- * 點 html 的 ↗ ＝ 帶 token 取檔 → 重包成 type 為 text/html 的 blob → 新分頁導到那個 blob URL（完整頁面，不包 iframe），
- * 分頁關閉後 revoke；其他副檔名（.txt）行為不變（走 inline 的 blob，不重包）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -20,7 +15,6 @@ const revoked: string[] = []
 const created: Blob[] = []
 const realSetInterval = globalThis.setInterval
 const realClearInterval = globalThis.clearInterval
-/** 預覽用的「分頁關了沒」輪詢（30 秒）：攔下來由測試手動觸發，免得真的計時、也驗得到 revoke。 */
 const polls: Array<() => void> = []
 let opened: { opener: unknown; href: string; closed: boolean } | null = null
 
@@ -104,12 +98,10 @@ test('點 .html 的 ↗：產生 type=text/html 的 blob、新分頁（opener=nu
   assert.equal(html!.type, 'text/html;charset=utf-8')
   assert.equal(await html!.text(), HTML, '內容原封不動（含外部 script），不包殼、不加 CSP')
   assert.ok(o.href.startsWith('blob:test-'), `分頁導到 blob URL：${o.href}`)
-  // 走帶 token 的非 inline 下載（後端回 octet-stream，type 由前端決定）。
   const fileReq = fetched.find((u) => u.includes('/outbox/file'))!
   assert.ok(fileReq.includes('chart.html') && !fileReq.includes('inline=1'))
   assert.ok(revoked.length >= 1, '原本取檔的 blob URL 已釋放')
   assert.ok(!revoked.includes(o.href), '分頁還開著，預覽用的 blob URL 不能先被收掉')
-  // 分頁關閉後下一次輪詢才釋放預覽用的 blob URL。
   polls.forEach((p) => p())
   assert.ok(!revoked.includes(o.href), '分頁還開著：輪詢不收')
   o.closed = true

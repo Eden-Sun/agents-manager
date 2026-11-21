@@ -5,10 +5,6 @@ import { projectHostName, useStore } from '../store/store'
 import { UpdateChangelog } from './UpdateChangelog'
 import { useT } from '../lib/i18n'
 
-/**
- * codex TUI 升級提示（`Update available! 0.153.4 -> 0.154.0`）上的「先看改了什麼」。
- * `BlockedModal` 與 `BlockedPanel` 都要有（2026-09-10 使用者：只有全畫面才有）。
- */
 export function CodexUpdateHint({
   botId,
   text,
@@ -16,7 +12,6 @@ export function CodexUpdateHint({
 }: {
   botId: string
   text: string | null | undefined
-  /** 送出答案後叫一次，讓外面那張終端快照立刻重抓（不必等下一秒的輪詢）。 */
   onAnswered?: () => void
 }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
@@ -31,7 +26,6 @@ export function CodexUpdateHint({
   const updateMenu = Boolean(update && isCodexUpdateMenu(text))
   const canSkipVersion = updateMenu && isCodexUpdateMenu(text, '3')
 
-  /** 送出前重讀畫面（issue #546）：按鈕依據的是每秒輪詢的快照，提示可能已經換掉了。 */
   const answer = (key: '1' | '2' | '3') => {
     if (busy || !update || !isCodexUpdateMenu(text, key)) return
     setBusy(key)
@@ -76,7 +70,7 @@ export function CodexUpdateHint({
         </>
       ) : null}
       <span className="hint">
-        {/* i18n-ignore */}
+        {}
         codex {update.from ? `${update.from} → ${update.to}` : update.to}：{updateMenu ? t('按 1 更新前先看新版的 release notes。') : t('目前沒有對應的互動選單，只能查看新版 release notes。')}
       </span>
       {note ? (

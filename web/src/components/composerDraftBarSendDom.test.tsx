@@ -1,8 +1,3 @@
-/**
- * 「清掉再送我這則」（`ComposerDraftBar`，#1811）：送出途中草稿被改過（本機打字，或別的裝置經 WS 同步進來），
- * 成功回來時文字要保留、附件照清；沒被改就照常清空；送出失敗或連線 reject 不清框、追蹤訂閱要解除。
- * 真的掛 `ChatPanel` 進 happy-dom，附件走共用 mock 的上傳，送出的 promise 用 store 的 `sendPrompt` 手動放行。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -25,7 +20,6 @@ const clearButton = () => [...document.querySelectorAll<HTMLButtonElement>('.com
 const draftPuts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
 const emptyPuts = (requests: FakeRequest[]) => draftPuts(requests).filter((r) => (r.body as { text?: string } | undefined)?.text === '')
 
-/** 送出函式手動放行。 */
 function gate<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
@@ -36,12 +30,10 @@ function gate<T>() {
   return { promise, resolve, reject }
 }
 
-/** 另一台裝置經 WS 把新草稿套進來（同 `draftSync` 的 `write`，直接改 store）。 */
 async function remoteDraft(key: string, text: string) {
   await act(async () => useStore.setState((s) => ({ drafts: { ...s.drafts, [key]: text } })))
 }
 
-/** 起 `name` 這顆 bot 並等它 running，選取它、掛上 ChatPanel，放一張附件、設好卡住的草稿。 */
 async function openStuck(name: string, draft: string) {
   const requests = mockApi(mock)
   await useStore.getState().refreshState()
@@ -76,7 +68,6 @@ test('清掉再送：送出途中本機打字 → 成功後文字保留、附件
   const { requests, bot } = await openStuck('am-claude', 'mine text')
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
-  // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
   await flush()
   await act(async () => clearButton().click())
   await act(async () => useStore.getState().setDraft(`bot:${bot.id}`, 'typed locally'))
@@ -91,7 +82,6 @@ test('清掉再送：送出途中另一裝置同步來新草稿 → 文字保留
   const { requests, bot } = await openStuck('am-claude-2', 'mine text')
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
-  // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
   await flush()
   await act(async () => clearButton().click())
   await remoteDraft(`bot:${bot.id}`, 'new text from another device')
@@ -106,7 +96,6 @@ test('清掉再送：草稿沒被改過 → 照常清空文字與附件', { time
   const { requests, bot } = await openStuck('am-codex', 'mine text')
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
-  // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
   await flush()
   await act(async () => clearButton().click())
   await act(async () => sent.resolve(true))
@@ -120,7 +109,6 @@ test('清掉再送：送出失敗（resolve(false)）不清文字與附件，訂
   const { bot } = await openStuck('am-claude', 'mine text')
   const sent = gate<boolean>()
   useStore.setState({ sendPrompt: () => sent.promise } as never)
-  // 讓 `ComposerDraftBar` 先換上新的 `sendPrompt`（它從 store 選取），點下去才會走手動放行的那一個。
   await flush()
   await act(async () => clearButton().click())
   await act(async () => sent.resolve(false))

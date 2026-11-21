@@ -3,10 +3,6 @@ import { BOT_TOP_EVENT, finishBotToTop, scrollBotRowToTop } from '../lib/scrollB
 import { persistSetDiff } from '../store/sharedSet'
 import { useStore } from '../store/store'
 
-/**
- * 主力晶片點下去的置頂請求（`lib/scrollBot.ts`）：先把那顆 bot 的父專案與每一層收合的祖先子列展開
- * （孫代整串收在頂層父列底下），等下一 frame 畫出那一列再捲到側欄頂端。
- */
 export function useBotScrollTop(
   setShutProjects: Dispatch<SetStateAction<Set<string>>>,
   setCollapsed: Dispatch<SetStateAction<Set<string>>>,
@@ -34,7 +30,6 @@ export function useBotScrollTop(
         try {
           persistSetDiff(key, prev, next)
         } catch {
-          /* 無痕視窗／關掉儲存：展開仍然有效，只是不跨重整記住 */
         }
         return next
       }

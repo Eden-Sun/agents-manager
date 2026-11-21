@@ -1,6 +1,5 @@
 import { useT } from "../lib/i18n"
 
-/** `Type something.` 展開的多行輸入。點選項本體只負責選取；打字在這裡，不送鍵。 */
 export function TypeAnswerField({
   value,
   onChange,

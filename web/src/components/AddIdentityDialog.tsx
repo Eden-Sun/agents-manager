@@ -16,7 +16,6 @@ import {
 import './addIdentityDialog.css'
 
 export interface AddIdentityHost {
-  /** `local` 或主機名稱。 */
   name: string
   label: string
   connected: boolean
@@ -24,34 +23,23 @@ export interface AddIdentityHost {
 
 export interface AddIdentityDialogProps {
   open: boolean
-  /** 第一個是本機。只有一台（本機）時不顯示主機選單，摘要寫「建立於本機」。 */
   hosts: AddIdentityHost[]
-  /** 預先選的主機（例如從某台主機的分頁按「新增帳號」）。 */
   initialHost?: string
-  /** 預先選的 CLI（從某張 CLI 卡按「新增帳號」）。 */
   initialKind?: BotKind
   existing: readonly Identity[]
-  /** 建立身份；回 false 表示失敗（通知由 store 負責），對話框停在表單。 */
   onCreate: (input: NewIdentityInput, host: string) => Promise<boolean>
-  /** 在那台主機開登入終端；回 true 表示終端已開。 */
   onLogin: (host: string, name: string) => Promise<boolean>
-  /** 打開背景開著的登入終端（終端在背景開，要自己切過去才看得到）。 */
   onOpenTerminal?: () => void
-  /** 讀目前的登入狀態：true／false／null（無法確認）。 */
   loggedIn: (host: string, name: string) => boolean | null
-  /** 重新抓身份狀態（store.refreshState）。 */
   refreshStatus: () => Promise<void>
-  /** 身份建好後呼叫，讓呼叫端定位到新列。 */
   onCreated?: (host: string, name: string) => void
   onClose: () => void
-  /** 登入完成的輪詢間隔與上限（測試可縮短）。 */
   pollMs?: number
   maxChecks?: number
 }
 
 type Phase = 'form' | 'creating' | 'opening' | 'waiting' | 'checking' | 'done' | 'failed'
 
-/** 切換 CLI 時，如果 env 不是建議值（使用者自己改過），要先問保留或改用建議。 */
 interface KindPrompt {
   from: BotKind
   to: BotKind
@@ -86,7 +74,6 @@ export function AddIdentityDialog({
   const [created, setCreated] = useState<{ host: string; name: string } | null>(null)
   const [openFailed, setOpenFailed] = useState(false)
   const attemptsRef = useRef(0)
-  // 每次對話框重新開啟，從乾淨的表單開始。
   const [lastOpen, setLastOpen] = useState(open)
   if (lastOpen !== open) {
     setLastOpen(open)
@@ -110,7 +97,6 @@ export function AddIdentityDialog({
 
   useDialogFocus(open, dialogRef, { initialFocus: () => nameRef.current })
 
-  // Escape：建立中不關（關了會留下「建了一半」的狀態看不到）；其餘照常關。
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -125,7 +111,6 @@ export function AddIdentityDialog({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [open, phase, onClose])
 
-  // 等待登入：每 pollMs 去問一次，之後在「檢查中」。
   useEffect(() => {
     if (phase !== 'waiting') return
     if (attemptsRef.current >= maxChecks) {
@@ -136,7 +121,6 @@ export function AddIdentityDialog({
     return () => clearTimeout(timer)
   }, [phase, pollMs, maxChecks])
 
-  // 檢查中：抓一次狀態，已登入就完成，否則回到等待。
   useEffect(() => {
     if (phase !== 'checking' || !created) return
     let alive = true
@@ -146,7 +130,6 @@ export function AddIdentityDialog({
       try {
         await latest.current.refreshStatus()
       } catch {
-        // 抓失敗就當成這一輪沒問到；下一輪再問。
       }
       if (!alive) return
       const st = latest.current.loggedIn(h, n)
@@ -204,7 +187,6 @@ export function AddIdentityDialog({
 
   const onNameChange = (raw: string) => {
     const next = raw.toLowerCase()
-    // 使用者還沒改過 env（仍是建議值）才跟著名稱更新。
     if (envText === suggestedIdentityEnvText(kind, name)) setEnvText(suggestedIdentityEnvText(kind, next))
     setName(next)
     setKindPrompt(null)
@@ -238,7 +220,6 @@ export function AddIdentityDialog({
   const showForm = phase === 'form' || (phase === 'creating' && created === null)
   const busy = phase === 'creating' || phase === 'opening' || phase === 'checking'
 
-  // 掛到 body（同 ConfirmDialog）：設定頁裡的 stacking context 會把它壓住。
   return createPortal(
     <div className="confirm-backdrop" role="presentation" onMouseDown={() => { if (!busy) onClose() }} onClick={(e) => e.stopPropagation()}>
       <div

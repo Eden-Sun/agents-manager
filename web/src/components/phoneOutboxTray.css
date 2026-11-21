@@ -1,4 +1,3 @@
-/* 手機對話下方、輸入框上方的「bot 給的檔案」收合列（使用者 2026-11-03）。列本身的檔名／剩多久沿用 outboxFiles.css 的 class。 */
 .phone-outbox {
   flex-shrink: 0;
   border-top: 1px solid var(--border);
@@ -37,7 +36,6 @@
   color: var(--text-faint);
 }
 
-/* 展開後最多佔 40% 視窗高，其餘在裡面捲：對話與輸入框不能被它擠掉。 */
 .phone-outbox-body {
   display: flex;
   flex-direction: column;
@@ -96,8 +94,6 @@
   gap: 2px;
 }
 
-
-/* 全螢幕預覽（手機的 .modal 本來就滿版）：圖置中、等比縮進可視範圍，下載鈕在下面。 */
 .phone-outbox-viewer {
   display: flex;
   flex-direction: column;
@@ -118,7 +114,6 @@
   cursor: zoom-in;
 }
 
-/* 放大：兩倍寬（手機截圖原尺寸跟螢幕差不多寬，放原尺寸等於沒放大），超出的部分在預覽框裡上下左右捲。 */
 .phone-outbox-viewer.zoomed {
   display: block;
   overflow: auto;
@@ -137,7 +132,6 @@
   color: var(--text-faint);
 }
 
-/* 按住縮圖的大圖（2026-11-07 使用者：不開 modal，放開就回來）：蓋在畫面上、不吃指標，放開的事件仍回到縮圖。 */
 .phone-outbox-peek {
   position: fixed;
   inset: 0;
@@ -152,7 +146,6 @@
 
 .phone-outbox-peek .phone-outbox-full {
   max-width: 100%;
-  /* 留出底下的縮圖列與輸入框，滑動換圖時手指下的縮圖不被大圖蓋住。 */
   max-height: calc(var(--vvh, 100dvh) - 240px);
   box-shadow: 0 4px 24px rgb(0 0 0 / 35%);
 }
@@ -163,7 +156,6 @@
   -webkit-user-drag: none;
 }
 
-/* 按住時縮圖列浮在大圖層上面，手指滑到哪張看得到；目前那張加外框。 */
 .phone-outbox-thumbs.peeking {
   position: relative;
   z-index: 1001;

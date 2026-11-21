@@ -1,30 +1,18 @@
-/**
- * 手機版重新登入 claude 身份（#838，使用者 2026-10-04）：登入 pane 上的「打開登入網站」與 code 輸入框的判斷。
- * daemon 從 `claude auth login` 的畫面取網址、確認還在等 code 才把字打進去；這裡只決定畫面上顯示什麼。
- */
 import type { LoginStatus } from '../api'
 import { t } from './i18n'
 
-/** 跟 daemon（`login_assist::valid_code`）同一套：OAuth code 會有的字元，最長 1024。前端先擋，daemon 仍會再驗。 */
 export function validLoginCode(code: string): boolean {
   const c = code.trim()
   return c.length > 0 && c.length <= 1024 && /^[A-Za-z0-9_.~#:/+=%-]+$/.test(c)
 }
 
 export type LoginPhase =
-  /** CLI 還沒印出網址。 */
   | 'starting'
-  /** 有網址，可以去登入；提示還沒出現（或 CLI 還在處理）。 */
   | 'url'
-  /** codex 裝置碼：網址與一次性碼都在畫面上，到網站輸入碼即可，不貼回終端。 */
   | 'device'
-  /** 畫面正在等貼 code。 */
   | 'waiting_code'
-  /** code 已送出，等 CLI 回應。 */
   | 'submitted'
-  /** CLI 說登入失敗。 */
   | 'failed'
-  /** pane 已收掉（CLI 結束）。 */
   | 'ended'
 
 export function loginPhase(status: LoginStatus | null, ended: boolean): LoginPhase {
@@ -36,12 +24,10 @@ export function loginPhase(status: LoginStatus | null, ended: boolean): LoginPha
   return status.url ? 'url' : 'starting'
 }
 
-/** 送出鈕要不要能按：畫面在等 code、格式對、不在送出中。 */
 export function canSubmitCode(phase: LoginPhase, code: string, sending: boolean): boolean {
   return phase === 'waiting_code' && !sending && validLoginCode(code)
 }
 
-/** 輸入框下面那一句。 */
 export function loginHint(phase: LoginPhase, code: string): string {
   switch (phase) {
     case 'starting':

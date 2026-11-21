@@ -4,15 +4,12 @@ import { installManualTimers } from '../testing/manualTimers'
 import { ApiError } from '../api/types'
 import { DraftSync, type DraftWire } from './draftSync'
 
-// debounce／重試是 `setTimeout`：換成手動時鐘，`tick(ms)` 才是「過了 ms 毫秒」而不是「睡 ms 毫秒然後祈禱」。
-// 牆鐘版本在高負載下會因為兩次 `tick(10)` 被拖長超過 30ms 的 debounce 而多送一次 PUT。
 let timers!: ReturnType<typeof installManualTimers>
 beforeEach(() => {
   timers = installManualTimers()
 })
 afterEach(() => timers.restore())
 
-/** 假的 daemon＋輸入框：用手動時鐘推進 debounce，PUT 可以卡住或失敗。 */
 function rig(opts: { debounceMs?: number } = {}) {
   const local: Record<string, string> = {}
   const focus = new Set<string>()
@@ -22,7 +19,6 @@ function rig(opts: { debounceMs?: number } = {}) {
   const cleared: string[] = []
   const gate = {
     hold: null as null | Promise<void>,
-    /** daemon 已經 commit，只把 HTTP 回應延後（PUT 回應晚到的時序）。 */
     replyHold: null as null | Promise<void>,
     fetchHold: null as null | Promise<void>,
     fail: false,
@@ -70,10 +66,9 @@ function rig(opts: { debounceMs?: number } = {}) {
   return { sync, local, focus, server, puts, gate, type, rejected, cleared }
 }
 
-/** 虛擬時間過 `ms`，並讓 PUT 的 promise 鏈跑完。 */
 const settleMicrotasks = () => new Promise<void>((resolve) => setImmediate(resolve))
 const tick = async (ms: number) => {
-  await settleMicrotasks() // 先讓剛 resolve 的 PUT 跑完，它排的 debounce 才進得了這個窗口
+  await settleMicrotasks()
   await timers.clock.advance(ms)
   await settleMicrotasks()
 }
@@ -205,10 +200,6 @@ test('在飛 PUT 較晚提交時，遠端清空也不會讓同 rev 的畫面與 
   assert.equal(r.puts.length, 1)
 })
 
-/**
- * 焦點在輸入框、本機 A 已被 daemon commit 為 rev1，但 PUT 回應還沒回來；這段時間 daemon 又提交了較新的遠端版本，
- * 輸入框因為有焦點而略過它。PUT 回應之後，本機不能把 A 當成已同步（daemon 其實是遠端那版）。
- */
 async function focusedRemoteSkippedBeforeReply(
   remote: { text: string; rev: number },
   opts: { echoFirst?: boolean; blurBeforeReply?: boolean } = {},
@@ -328,7 +319,7 @@ test('自己的回音不重套：只記 rev', async () => {
   const r = rig({ debounceMs: 10 })
   r.type('bot:a', 'abc')
   await tick(30)
-  r.type('bot:a', 'abcd') // 回音到之前又多打了一個字
+  r.type('bot:a', 'abcd')
   r.sync.remote({ key: 'bot:a', text: 'abc', rev: 1, client_id: 'me' })
   assert.equal(r.local['bot:a'], 'abcd')
   assert.equal(r.sync.knownRev('bot:a'), 1)
@@ -365,7 +356,7 @@ test('PUT 失敗：維持 dirty、之後重試；重連 load 會補送', async (
   await tick(20)
   assert.equal(r.sync.isDirty('bot:a'), true)
   r.gate.fail = false
-  await r.sync.load() // 重連：先拉（本機 dirty 不被蓋），再補送
+  await r.sync.load()
   await tick(20)
   assert.equal(r.local['bot:a'], 'offline')
   assert.equal(r.server.get('bot:a')?.text, 'offline')
@@ -397,10 +388,10 @@ test('load：本機有未同步修改的不被 daemon 的版本蓋掉也不被�
 
 test('load 的回應比本機剛送出的寫入舊：不能當成 daemon 刪了它', async () => {
   const r = rig({ debounceMs: 5 })
-  r.gate.serverList = [] // GET 在 PUT 落地之前拍的快照
+  r.gate.serverList = []
   const loading = r.sync.load()
   r.type('bot:a', 'fresh')
-  await tick(20) // PUT 完成，dirty 已清
+  await tick(20)
   await loading
   assert.equal(r.local['bot:a'], 'fresh')
 })
@@ -423,7 +414,7 @@ test('草稿太大（400）：不重送、不當成 daemon 沒有，本機改短
   assert.equal(r.sync.isDirty('bot:a'), false)
   assert.deepEqual(r.rejected, ['bot:a'])
 
-  await r.sync.load() // fetchAll 回 []：本機那份大草稿不能被清成 ''
+  await r.sync.load()
   assert.equal(r.local['bot:a']?.length, 300_000)
 
   r.gate.failWith = null
@@ -513,10 +504,10 @@ test('PUT 被拒的同時本機又改了：新的那段照樣排隊送出，不�
   let release = () => {}
   r.gate.hold = new Promise<void>((res) => (release = res))
   r.type('bot:a', 'x'.repeat(300_000))
-  await tick(30) // 大字的 PUT 在飛、卡住
-  r.type('bot:a', '短了') // 打字期間又改短：debounce 已排好
+  await tick(30)
+  r.type('bot:a', '短了')
   r.gate.failWith = new ApiError(400, { error: 'draft_too_large' }, 'draft_too_large')
-  release() // 大字被 daemon 拒絕
+  release()
   await settleMicrotasks()
   r.gate.hold = null
   r.gate.failWith = null

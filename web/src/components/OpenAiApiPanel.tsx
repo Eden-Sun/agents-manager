@@ -1,8 +1,3 @@
-/**
- * 環境設定 →「OpenAI API」分頁（使用者 2026-11-18：「設定裡面不是只有 Claude API，也要有 OpenAI 的 API」）：
- * 跟「Claude API」並列的獨立分頁，不塞在 Claude 那一頁裡。「設定」＝啟用、金鑰狀態與路徑、總上限與起算、累計花費；
- * 「帳本」＝OpenAI 的用量列（一次性用途，記憶體帳本，供應商固定 OpenAI；Claude 分頁的帳本另有全部／Claude／OpenAI 篩選）。
- */
 import { useCallback, useEffect, useState } from 'react'
 import { fetchClaudeApiLedger, type ClaudeApiLedger } from '../api/claudeApi'
 import { useT } from '../lib/i18n'

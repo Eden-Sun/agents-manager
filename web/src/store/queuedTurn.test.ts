@@ -149,12 +149,10 @@ test('withdrawing an awaits_idle turn restores the server-returned text before t
 
 test('first bootstrap migrates a leftover legacy in-memory row through /prompt once', async () => {
   seed()
-  // Simulate a HMR-preserved state object from the pre-#733 bundle.
   useStore.setState({ queuedSends: { b1: { text: 'legacy row', attachments: [] } } } as never)
   routeDaemon((req) => {
     if (req.path.endsWith('/session')) return json({ token: 't' })
     if (req.path.endsWith('/prompt')) return json({ turn_id: 'migrated', message_id: 'm1', delivery: 'queued' })
-    // Keep this test's module-level appliedStateSeq unchanged for other store tests sharing the same worker.
     if (req.path.endsWith('/state')) return json({ error: 'intentional state-read failure' }, 502)
     return json({})
   })

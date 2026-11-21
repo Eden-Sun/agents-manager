@@ -1,4 +1,3 @@
-/* components/ComposerCostHint.tsx：快取已冷時輸入框上方的一行警示；窄視窗只截尾、不換行。 */
 .composer-cost {
   min-width: 0;
   padding: 0 2px 4px;
@@ -15,7 +14,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 警示色：--warn 深淺兩種模式都已量過對比。 */
 .composer-cost.cold {
   color: var(--warn);
   font-weight: 600;

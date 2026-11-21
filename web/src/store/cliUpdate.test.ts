@@ -10,7 +10,6 @@ test('進度照階段走，版本沿用前一則', () => {
   assert.equal(cur?.phase, 'installing')
   cur = cliUpdateProgress(cur, { ...base, phase: 'verifying' })
   assert.deepEqual([cur?.phase, cur?.from], ['verifying', '0.155.1'])
-  // 看不懂的階段不動。
   assert.equal(cliUpdateProgress(cur, { ...base, phase: '???' }), cur)
 })
 

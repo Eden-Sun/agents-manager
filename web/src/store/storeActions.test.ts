@@ -1,7 +1,3 @@
-/**
- * store 動作的不變量：樂觀更新一定要收得回來，找不到的那一筆不可以拖垮整個功能。
- * 這些都不是純函式測得到的——它們的 bug 長在「送失敗之後沒有人善後」那一段。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
@@ -29,10 +25,6 @@ function seed() {
     drafts: {},
     notices: [],
 
-
-
-
-
     selectedBotId: null,
     selectedProjectId: null,
     agmDeleteAsk: null,
@@ -40,7 +32,6 @@ function seed() {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 10))
-/** 讓剛 resolve 的 promise 鏈（fetch 樁→PUT 回應）跑完；不是在等牆鐘。 */
 const flush = async () => {
   for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r))
 }
@@ -95,7 +86,6 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
   seed()
   useStore.setState({ projects: [project(), { id: 'p2', label: 'p2', path: '/p2', host: 'local' } as Project, { id: 'p3', label: 'p3', path: '/p3', host: 'local' } as Project] })
   let n = 0
-  // 第一個請求卡在閘門上，第二個先成功；放開閘門＝「第一個晚到失敗」。不靠 30ms／60ms 的牆鐘賽跑。
   let lateFailure!: () => void
   const gate = new Promise<void>((resolve) => (lateFailure = resolve))
   routeDaemon(async () => {
@@ -109,7 +99,7 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
   useStore.getState().moveProject('p3', 'p1')
   useStore.getState().moveProject('p2', 'p1')
   const want = useStore.getState().projectOrder
-  await flush() // 第二個請求已成功
+  await flush()
   lateFailure()
   await flush()
   assert.deepEqual(useStore.getState().projectOrder, want, '第二次已存成功，舊的失敗不能把順序退回去')
@@ -117,7 +107,6 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
 
 test('已讀送不出去：daemon 的舊數字不可以把徽章點回來', async () => {
   seed()
-  // 訊息載過了：否則 `loadMessages` 會用已讀標記重算，蓋掉這裡要看的那一步。
   useStore.setState({ botUnread: { b1: 3, b2: 1 }, loadedBots: { b1: true, b2: true } })
   routeDaemon((req) => {
     if (req.path.includes('/read')) return json({ error: 'upstream', message: 'daemon restarting' }, 502)
@@ -295,7 +284,6 @@ test('還在記憶體清單裡的照舊走 DELETE；pane 表關失敗時面板�
   assert.ok(noticeTexts().length > 0)
 })
 
-/** daemon 同時只准一批：第二次按回 `already_running`、total 0——不能當成「沒有要重啟的」蓋掉進度。 */
 test('已經有一批在跑時再按一鍵重啟：不蓋掉進度，也不說沒有閒置的 bot', async () => {
   seed()
   const running = { id: 'batch-1', total: 3, done: 1, current: 'A', ok: ['Z'], failed: [], skipped: [], finished: false }
@@ -311,7 +299,6 @@ test('已經有一批在跑時再按一鍵重啟：不蓋掉進度，也不說�
   assert.ok(noticeTexts().some((t) => t.includes('已經有一批')))
 })
 
-/** 正在跑的是 cli-update 開的範圍批次、等著套用的 claude 不在裡面：daemon 回 `restart_status:'deferred'`（排在那批後面）。 */
 test('一鍵重啟排在別人的範圍批次後面：接上那一批的進度，並講清楚其餘會自動接著重啟', async () => {
   seed()
   routeDaemon((req) =>
@@ -328,7 +315,6 @@ test('一鍵重啟排在別人的範圍批次後面：接上那一批的進度�
   assert.ok(!noticeTexts().some((t) => t.includes('進度照那一批顯示')), '那一批沒有涵蓋這次要的，不能說進度照它顯示就完事')
 })
 
-/** AGM 驗收 9f05b03：服務 pane（在 listen）或讀不到狀態時，daemon 回 409 要人再確認——不能預設帶 confirm 把這道繞掉。 */
 for (const [label, body, route] of [
   ['面板自己開的（DELETE）', { reason: 'service_pane', unverified: false, pane: { pane_id: 'w9:s1', host: 'local', kind: 'service', listen_ports: [3010] } }, 'own'],
   ['被 trace 的（pane 表）讀不到狀態', { reason: 'service_pane', unverified: true, pane: { pane_id: 'w9:s1', host: 'local', kind: 'shell', listen_ports: [] } }, 'traced'],
@@ -357,7 +343,6 @@ for (const [label, body, route] of [
   })
 }
 
-/** GH #83：明確 identity 確認沒登入時啟動失敗，toast 要顯示 daemon 給的 `hint`（身份／主機／怎麼登入），不是原始 reason 代碼。 */
 test('啟動撞到明確 identity 沒登入：toast 顯示 hint，不是 identity_not_logged_in 代碼', async () => {
   seed()
   routeDaemon(() =>
@@ -381,7 +366,6 @@ test('啟動撞到明確 identity 沒登入：toast 顯示 hint，不是 identit
   assert.doesNotMatch(texts[0], /identity_not_logged_in/)
 })
 
-/** 其他 409（例如一般的 not_idle）沒有專屬文案時，照舊走 `errText` 的通用格式。 */
 test('啟動撞到其他 409：沒有專屬文案時照舊顯示 reason（HTTP 碼）', async () => {
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'not_idle', bot_id: 'b1', busy: 'working' }, 409))
@@ -400,7 +384,6 @@ const uncommittedRun = (error: string) =>
     503,
   )
 
-/** API.md：503 start_state_uncommitted＝agent 起來了、DB 還沒寫成。當失敗、不刷新的話側欄仍顯示停著，使用者再按一次就 409。 */
 test('啟動 503 start_state_uncommitted：要刷新狀態，不能當成沒啟動', async () => {
   seed()
   routeDaemon((r) => (r.path.endsWith('/start') ? uncommittedRun('start_state_uncommitted') : json({}, 200)))
@@ -412,7 +395,6 @@ test('啟動 503 start_state_uncommitted：要刷新狀態，不能當成沒啟�
   assert.ok(noticeTexts().some((t) => /已經在跑/.test(t)))
 })
 
-/** 側欄還沒跟上時再按啟動：daemon 回 409 active run already exists——bot 其實在跑，要刷新而不是只報機器碼。 */
 test('啟動 409 已有 active run：刷新狀態，不當成啟動失敗', async () => {
   seed()
   routeDaemon((r) =>
@@ -437,7 +419,6 @@ test('重啟 503 restart_state_uncommitted：要刷新狀態', async () => {
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
 })
 
-/** 2026-10-02 console-rpa：換身份後按 ⟳ 重啟起了新 session、失憶。重啟一律先要求接回原對話，接不回才開新的。 */
 test('重啟預設帶 resume=native；接不回（cannot_resume）才不帶重送', async () => {
   seed()
   routeDaemon((r) => (r.path.includes('/restart') ? json({ run_id: 'r2' }, 200) : json({}, 200)))
@@ -453,7 +434,6 @@ test('重啟預設帶 resume=native；接不回（cannot_resume）才不帶重�
   assert.deepEqual(restarts().map((p) => p.endsWith('?resume=native')), [true, false], '接不回才退回開新對話')
 })
 
-/** issue #112：刪 bot 成功只該跳一次帶「復原」的通知，不該在 refreshState 之後又補一則沒有復原的。 */
 test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二張', async () => {
   seed()
   routeDaemon(() => json({}, 200))
@@ -464,7 +444,6 @@ test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二
   assert.ok(notices[0].action, '這張通知要帶「復原」')
 })
 
-/** issue #406：刪 AGM 的 bot 被 daemon 409 `supervisor_owned` 擋下——不是錯誤通知，是第二次確認；取消什麼都不送。 */
 test('刪 AGM 的 Bot：409 supervisor_owned 改問第二次，取消就什麼都不做', async () => {
   seed()
   const agm = { error: 'conflict', reason: 'supervisor_owned', bot_id: 'b1', name: 'build', role: 'AGM 專案裡的常駐工人', message: '…' }
@@ -501,7 +480,6 @@ test('刪 AGM 的 Bot：帶了 confirm 還被擋（不該發生）就報錯，�
   assert.match(noticeTexts().join('\n'), /supervisor_owned/)
 })
 
-/** 復原撞名 409：現況 `restoreBot` 吞掉錯誤，通知上按「復原」沒有任何回饋。 */
 test('復原 Bot 失敗：要跳出錯誤，不能靜默什麼都不說', async () => {
   seed()
   routeDaemon(() => json({}, 200))
@@ -517,7 +495,6 @@ test('復原 Bot 失敗：要跳出錯誤，不能靜默什麼都不說', async 
   assert.match(noticeTexts().join('\n'), /復原失敗：bot name already in use in this project（HTTP 409）/)
 })
 
-/** issue #122：沒在跑的 bot 按送出——交給 daemon 先收下，瀏覽器不留一份、自己也不去按啟動。 */
 test('沒在跑的 bot 送出：帶 start_if_stopped 交給 daemon，瀏覽器不排隊也不自己啟動', async () => {
   seed()
   useStore.setState({ runs: {}, turns: {}, messages: {} })
@@ -564,11 +541,6 @@ test('取消時已經送出去了（409）：不把文字塞回輸入框，講�
   assert.ok(noticeTexts().some((t) => t.includes('撤不回來')))
 })
 
-/**
- * #149／#147：字已經送進 bot，只是結果寫不進 DB——daemon 回 503，但 turn 與訊息都已經在對話裡（`message_added`／
- * `turn_updated` 先推了）。前端把它當「沒送出」：輸入框留著同一段字、排隊的被放回去，下一次 Enter／回合結束的 flush
- * 就用新的 client_request_id 再送一次——bot 收到兩則。API.md §5：**不是沒送，不要換新的 client_request_id 重送**。
- */
 const uncommitted503 = (over: Record<string, unknown> = {}) =>
   json(
     {
@@ -641,11 +613,6 @@ test('503 維護窗口讀不到（sent:false）跟別的 503 一樣：沒送出�
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
 })
 
-/**
- * 插隊送出（#103、#120）的 200 有四個 `send_now`：interrupted／idle 是成功；`not_sent`（送出鍵沒生效，這一則 failed，
- * 字可能還留在終端輸入框）與 `unknown`（不知道生效沒有，這一則 failed＋delivery unknown，不佔 in-flight）是**沒插成**。
- * 以前前端一律說「沒有插隊：claude 還沒有 send-now 鍵，訊息照一般方式送出」——那兩種都沒有照一般方式送出。
- */
 test('插隊送出鍵沒生效（send_now:not_sent）：說沒送出、字可能還在終端，不能說「照一般方式送出」', async () => {
   seed()
   useStore.setState({ turns: {}, messages: {} })
@@ -677,7 +644,6 @@ test('插隊送出不知道有沒有生效（send_now:unknown）：不叫人「�
   assert.equal(texts.length, 1, JSON.stringify(texts))
   assert.doesNotMatch(texts[0], /照一般方式送出|還沒有 send-now|放棄該回合/)
   assert.match(texts[0], /不重送|先別重送/)
-  // 那一則已經是 failed、不佔 in-flight：沒有回合可放棄，本地不能記一筆「送達未知的進行中回合」把輸入框鎖住。
   assert.equal(useStore.getState().turns.b1?.t9, undefined)
 })
 
@@ -689,10 +655,6 @@ test('插隊送出成功（interrupted／idle）不多說話', async () => {
   assert.deepEqual(noticeTexts(), [])
 })
 
-/**
- * 這幾天 daemon 新增的「暫時不行、之後可以原樣重來」的 409／503：`ApiError.message` 取 `reason`，
- * 通知就只剩 `composer_busy（HTTP 409）` 這種機器代碼——看不出是沒送出、字在不在、要等多久。
- */
 test('送出撞 409 composer_busy 顯示常駐提示；resume_unverified 講人話', async () => {
   seed()
   routeDaemon(() => json({ error: 'conflict', reason: 'composer_busy', run_id: 'r1', retryable: true, sent: false }, 409))
@@ -733,10 +695,6 @@ test('daemon 帶了人話 message 的可重試錯誤（維護窗口、Esc 送出
   assert.doesNotMatch(noticeTexts()[0], /interrupt_unconfirmed/)
 })
 
-/**
- * #233：daemon 的 409 帶了人話 `message`、但**沒有** `retryable`（登入指令找不到 CLI、default session 的 bot 不給開／關）時，
- * `reasonText` 只在 `retryable:true` 才用 `message`，通知就成了 `identity_login_unavailable（HTTP 409）` 這種機器代碼。
- */
 test('身份登入 409 identity_login_unavailable：顯示 daemon 的人話 message，不是機器代碼', async () => {
   seed()
   routeDaemon(() =>
@@ -759,7 +717,6 @@ test('身份登入 409 identity_login_in_progress 帶既有 pane_id：不報錯�
   assert.deepEqual(view && { host: view.host, paneId: view.paneId }, { host: 'mac_builder', paneId: 'w9:p9' })
   assert.equal(useStore.getState().notices.some((n) => n.kind === 'error'), false)
 
-  // 還在 reservation 階段（pane 尚未登記）：沒有 pane 可以重開，照舊顯示 daemon 的說明。
   useStore.setState({ shellView: null, notices: [] })
   routeDaemon(() => json({ error: 'conflict', reason: 'identity_login_in_progress', host: 'mac_builder', identity: 'cc1', message: '這個身份已有登入程序' }, 409))
   assert.equal(await useStore.getState().loginIdentity('mac_builder', 'cc1'), false)
@@ -796,10 +753,6 @@ test('送出撞 409 host_unreadable（沒有 message）：講人話，不是機�
   assert.match(texts[0], /主機/)
 })
 
-/**
- * 連點：第一下撤回成功之後，第二下拿到 409（那一則已經是 failed）。以前 `cancelStartingSend`／`abandonTurn` 沒有防連點，
- * 第二下的 409 被說成「撤不回來（可能已經送出）」／原始英文 409——而字明明已經接回輸入框。
- */
 test('取消等 bot 起來的那一則連點兩下：只撤一次，不跳「撤不回來」', async () => {
   seed()
   useStore.setState({
@@ -812,7 +765,6 @@ test('取消等 bot 起來的那一則連點兩下：只撤一次，不跳「撤
   routeDaemon((req) => {
     if (req.path.endsWith('/withdraw')) {
       withdrawn += 1
-      // 第一下成功；那一則之後就是 failed，再撤回 409。回應慢一拍，第二下才來得及在第一下還沒回來時進場。
       return withdrawn === 1 ? json({}, 200) : json({ error: 'conflict', reason: 'turn is not waiting for its bot to start' }, 409)
     }
     return json({ messages: [], turns: [], has_more: false }, 200)
@@ -860,8 +812,6 @@ test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一
     if (req.path.endsWith('/state')) {
       stateFetches += 1
       if (stateFetches === 1) {
-        // 快照是 seq 1000 時拍的；回應在路上時 `bot_status`（seq 1001）已經套用過。
-        // 追過快照的是 `bot_status`（耐久幀），兩個 seq 都推進。
         useStore.setState({ lastSeq: 1001, lastDurableSeq: 1001 })
         return json(snapshot(1000, 'working'), 200)
       }
@@ -876,18 +826,12 @@ test('快照在飛時 WS 已推進到更新的 seq：套完舊快照要再抓一
 
 test('快照來回之間只落進 turn_progress：不算落後，不再多抓一次 /api/state（#482）', async () => {
   seed()
-  // `lastSeq` 被 progress 推到 1001，但耐久 seq 還停在快照那一刻。
-  // seq 要比同檔前面那條（1000/1001）大：`appliedStateSeq` 是模組層狀態，比它舊的快照會被當成過期丟掉，
-  // 那樣這條就根本走不到「要不要補抓」那一步（第一版就是這樣假綠的）。
   useStore.setState({ lastSeq: 5000, lastDurableSeq: 5000, runs: {} })
   let stateFetches = 0
   routeDaemon((req) => {
     if (req.path.endsWith('/state')) {
       stateFetches += 1
-      // 回應在路上時來了幾幀 progress：只推 `lastSeq`，耐久 seq 不動。
       useStore.setState({ lastSeq: 5004 })
-      // 第二次（如果真的又抓了）回一份「追上 progress」的快照，讓誤判的那一版停得下來、
-      // 乾脆地在下面的斷言紅掉，而不是一直「落後→再抓」轉成無窮迴圈。
       return json(
         {
           daemon_seq: stateFetches === 1 ? 5000 : 5004,
@@ -915,9 +859,7 @@ test('seqAfterFrame：progress 與 resync 不推進耐久 seq，耐久幀兩個�
   assert.deepEqual(seqAfterFrame(at(11, 11), 'turn_progress', 12), at(12, 11), 'progress 只推 lastSeq')
   assert.deepEqual(seqAfterFrame(at(12, 11), 'turn_progress', 13), at(13, 11))
   assert.deepEqual(seqAfterFrame(at(13, 11), 'turn_updated', 14), at(14, 14), '耐久幀把兩個都帶上來')
-  // resync 帶的是 daemon 當下的 seq，可能落在某一幀 progress 上：等 refreshState 用 daemon_seq 對正。
   assert.deepEqual(seqAfterFrame(at(14, 14), 'resync', 99), at(99, 14))
-  // 晚到的舊幀不能把任何一個往回拉。
   assert.deepEqual(seqAfterFrame(at(99, 14), 'message_added', 5), at(99, 14))
 })
 
@@ -947,7 +889,6 @@ test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失
   assert.equal(noticeTexts().filter((t) => /not_found|already|找不到/.test(t)).length, 0)
 })
 
-
 test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不再寫 localStorage', async () => {
   seed()
   const timers = installManualTimers()
@@ -959,7 +900,7 @@ test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不
     st.setDraft('bot:b1', '幫我跑')
     st.setDraft('bot:b1', '幫我跑測試')
     assert.equal(requests.filter((r) => r.path.includes('/drafts/')).length, 0, 'debounce 內不送')
-    await timers.clock.advance(550) // 手動時鐘：debounce（400ms）過了；不靠牆鐘
+    await timers.clock.advance(550)
     await flush()
     const puts = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
     assert.equal(puts.length, 1)
@@ -967,7 +908,6 @@ test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不
     assert.equal((puts[0].body as { text: string }).text, '幫我跑測試')
     assert.equal(typeof (puts[0].body as { client_id: string }).client_id, 'string')
     assert.equal(localStorage.getItem('am.drafts'), null)
-    // 送出清空：不等 debounce。
     st.setDraft('bot:b1', '')
     await timers.clock.advance(0)
     await flush()
@@ -1038,7 +978,6 @@ test('重載同一頁訊息：內容沒變的沿用原物件（memo 的 Bubble �
   assert.equal(second, first, '一則都沒變：連陣列本身都不換，訂閱它的選取器才不會白跑')
   second.forEach((m, i) => assert.equal(m, first[i]))
 
-  // 其中一則被改了（遲到的 hook 以原文取代備援抓的回覆）：只有那一則換新物件，其餘照舊。
   page.messages[1] = msg('m2', 'assistant', 'hello **world**, edited')
   await useStore.getState().loadMessages('b1')
   const third = messages()
@@ -1208,14 +1147,6 @@ test('連不上 daemon／代理回空的 502：通知講人話，不是 Failed t
   assert.ok(noticeTexts().some((t) => t.includes('暫時不可用')), noticeTexts().join('|'))
 })
 
-/**
- * issue #457：按「載入更早的」補回來的 200 則，下一則新訊息進來就被 `MESSAGE_CAP` 從頭整批切掉
- * （`capList` 留的是最新的 cap 筆，而剛補回來的正是最前面那一段），畫面還會往後跳約 200 則。
- *
- * `message_added` 是 WS 幀，而這個 harness 只擋 fetch、沒有 fake WebSocket，所以「下一則新訊息會不會
- * 剪到」用 store.ts 在那條路上算的**同一個運算式**（`capList(list, capFor(floors, key))`）斷言，
- * 不假裝餵了一幀。純函式那一層在 `messageCap.test.ts`。
- */
 const capMsg = (n: number): Message =>
   ({
     id: `m${String(n).padStart(6, '0')}`,
@@ -1225,7 +1156,6 @@ const capMsg = (n: number): Message =>
     turn_id: null,
   }) as Message
 
-/** store.ts 的 `message_added` 那條路算的就是這個：再來一則新訊息會不會剪掉東西。 */
 function capWouldTrim(list: readonly { id: string }[], key: string): boolean {
   const floors = useStore.getState().messageCapFloors
   return capList([...list, { id: 'm999999' }], capFor(floors, key)).trimmed
@@ -1238,7 +1168,6 @@ test('#457：清單滿了之後補回 200 則，下一則新訊息不會把它�
   seed()
   const list = Array.from({ length: MESSAGE_CAP }, (_, i) => capMsg(1000 + i))
   useStore.setState({ messages: { b1: list }, moreMessages: { b1: true }, messageCapFloors: {} })
-  // 修好之前：上限是死的 500，長度一到 501 就從頭切 200 → 整批消失、畫面往後跳。
   assert.equal(capWouldTrim(list, 'b1'), true, '前提：補回來之前，清單已經滿在上限上')
 
   routeDaemon((r) => {
@@ -1278,7 +1207,6 @@ test('#457：那一頁一則都沒補到時不抬下緣（避免每按一次就�
   seed()
   const list = Array.from({ length: MESSAGE_CAP }, (_, i) => capMsg(1000 + i))
   useStore.setState({ messages: { b1: list }, moreMessages: { b1: true }, messageCapFloors: {} })
-  // daemon 回的全是已經有的那幾則 → 去重之後 older 是空的。
   routeDaemon(() => json({ messages: [list[0], list[1]], turns: [], has_more: false }, 200))
   await useStore.getState().loadEarlierMessages('b1')
   await settle()
@@ -1367,7 +1295,6 @@ test('panes_changed：重抓 pane 清單（別的裝置開／關／改用途的 
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.includes('/panes')), '要打 GET /api/panes')
 })
 
-// #766：翻頁游標指到已被刪掉／別顆 bot 的訊息時 daemon 回 404＋reason；網頁要重載第一頁再翻一次，不是只跳錯誤。
 const cursor404 = (reason: string) => json({ error: 'not_found', what: 'before message', reason }, 404)
 
 for (const reason of ['before_message_gone', 'before_message_not_in_conversation']) {
@@ -1386,7 +1313,6 @@ for (const reason of ['before_message_gone', 'before_message_not_in_conversation
         return cursor404(reason)
       }
       if (before) return json({ messages: [capMsg(1), capMsg(2)], turns: [], has_more: false }, 200)
-      // 重載後的第一頁：舊的最舊那則（capMsg(100)）已經不在了。
       return json({ messages: [capMsg(101), capMsg(102)], turns: [], has_more: true }, 200)
     })
     await useStore.getState().loadEarlierMessages('b1')
@@ -1412,7 +1338,6 @@ test('#766：重載之後游標還是 404：只重試一次，之後照舊跳錯
   assert.equal(cursorCalls.length, 2, `翻頁最多打兩次（原本一次＋重載後一次）：${cursorCalls.map((r) => r.path)}`)
   assert.equal(requests.filter((r) => r.path.includes('/bots/b1/messages') && !r.path.includes('before=')).length, 1, '只重載一次第一頁')
   assert.equal(noticeTexts().filter((t) => t.includes('載入更早的訊息失敗')).length, 1)
-  // 旗標要放掉：下一次使用者再按，仍可以再自救一次。
   requests.length = 0
   await useStore.getState().loadEarlierMessages('b1')
   await settle()
@@ -1430,7 +1355,6 @@ test('#766：其他錯誤（500）不重載，照舊跳錯誤', async () => {
   assert.equal(noticeTexts().filter((t) => t.includes('載入更早的訊息失敗')).length, 1)
 })
 
-/** 進度事件把跳過的也算「處理過」（done 計 ok＋failed＋skipped）；收尾的 `bots_restart_done` 要用同一套算，不然 done 前後對不上。 */
 test('一鍵重啟收尾：跳過的也算處理過，done 跟進度事件對得上', async () => {
   seed()
   const { dispatchFrameForTest } = await import('./store.ts')

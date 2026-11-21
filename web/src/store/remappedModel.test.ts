@@ -1,7 +1,3 @@
-/**
- * issue #539：daemon 對已停用的模型別名會換掉再存並回 `remapped`（API.md「停用模型的回應」）。
- * 前端以前完全沒讀這一欄，於是使用者不知道自己選的沒生效，設定面板還一直顯示那個停用值。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import './storeEnv.harness.ts'
@@ -14,10 +10,6 @@ const bot = (over: Partial<Bot> = {}) => ({ id: 'b1', name: 'b1', project_id: 'p
 const project = () => ({ id: 'p1', label: 'p', path: '/p', host: 'local' }) as Project
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
-/**
- * 自己裝 `fetch`（不走 harness 的 `routeDaemon`）：整套一起跑時，別的測試檔晚到的 `reset()` 會把共用的
- * route 洗回預設，這裡就收到 200 `{}`、斷言莫名其妙紅。跑完一定還原，別把全域留給下一個檔案。
- */
 const g = globalThis as unknown as Record<string, unknown>
 async function withDaemon<T>(handler: (path: string, method: string) => Response, body: () => Promise<T>): Promise<T> {
   const saved = g.fetch
@@ -37,7 +29,6 @@ async function withDaemon<T>(handler: (path: string, method: string) => Response
 }
 let patched = 0
 
-/** daemon：PATCH 回 remapped，之後的 `/api/state` 給替換後的值（daemon 存的就是那個）。 */
 function daemonThatRemaps(applied: string) {
   useStore.setState({ projects: [project()], bots: [bot()], notices: [], busy: {} })
   return (path: string, method: string) => {
@@ -65,8 +56,6 @@ test('#539：被換掉時回報實際採用的值，並講一句；面板記的�
   assert.match(said[0], /opus/)
   assert.match(said[0], new RegExp(applied))
 
-  // 面板把 daemon 實際採用的值記進 `saved`，`pruneSaved` 才追得上（記送出的 `opus` 會永遠追不上，
-  // 欄位就一直顯示一個沒在用的模型、還算不出 dirty）。
   const stored: BotFormBase = { name: 'b1', model: applied, effort: null, fast: false, persona: null, identity: null }
   assert.deepEqual(pruneSaved({ model: applied }, stored), {}, '記實際採用的值：放得掉')
   assert.deepEqual(pruneSaved({ model: 'opus' }, stored), { model: 'opus' }, '記送出的值：永遠追不上')

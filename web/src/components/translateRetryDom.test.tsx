@@ -1,7 +1,3 @@
-/**
- * 品質檢查沒過的細節與「回報給管理者」（使用者 2026-11-18）：提示列可點開看原因摘要；按鈕呼叫 daemon 回報端點，
- * 重複（10 分鐘內）只顯示「不重複送出」。只用假的 fetch，不打真 API。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, settle, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -38,7 +34,6 @@ function Probe({ m }: { m: Message }) {
 
 const detail = { check: 'untranslated', src_latin: 50, src_cjk: 0, reply_latin: 50, reply_cjk: 0, identical: true, models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], attempts: 2 }
 
-/** 翻譯回 422（附細節）；報告端點第一次回 sent:true，之後回 sent:false（重複）。 */
 function stubFetch(reports: string[]) {
   const base = globalThis.fetch
   let reported = 0

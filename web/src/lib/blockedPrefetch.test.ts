@@ -17,7 +17,6 @@ import {
 import { hasPreload } from './draftPreload.ts'
 import { parseChoiceMenu } from './tuiChoices.ts'
 
-/** 真機那份（A 各種，2026-09-25）：一題複選＋送出頁。 */
 const ONE_QUESTION = [
   '─'.repeat(60),
   '←  ☐ #478 守衛  ✔ Submit  →',
@@ -34,7 +33,6 @@ const ONE_QUESTION = [
   'Enter to select · ↑/↓ to navigate · Esc to cancel',
 ].join('\n')
 
-/** 兩題＋送出頁，第一題畫面。 */
 const TWO_QUESTIONS = [
   '─'.repeat(60),
   '←  ☐ 編輯方式  ☐ 功能  ✔ Submit  →',
@@ -97,7 +95,6 @@ test('多分頁問卷在看得見的分頁才背景預載，而且同一份只�
   const menu = await prefetchBlocked('b2', shown)
   assert.ok(menu)
   assert.equal(draftKey('b2', menu), 'b2:編輯方式\x01功能\x01Submit')
-  // 預載排隊、先重讀畫面才送第一顆鍵：等它真的開始（不再靠單一 tick）。
   for (let i = 0; i < 50 && shown.sent.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
   const first = shown.sent.length
   assert.ok(first > 0, '看得見就開始預載（送導覽鍵）')
@@ -138,7 +135,6 @@ test('forgetBlockedExcept：刪掉的 bot 的快照與預載被放掉，還在�
   resetBlockedPrefetch()
 })
 
-/** 手動放行的 read：模擬 `readTerminal` 還在飛。 */
 function slowDeps(text: string, extra: Partial<PrefetchDeps> = {}) {
   let release!: () => void
   const gate = new Promise<void>((r) => {

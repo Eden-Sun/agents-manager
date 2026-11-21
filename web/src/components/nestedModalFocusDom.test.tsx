@@ -1,7 +1,3 @@
-/**
- * 巢狀 Modal：內層子元件即使在 mount 時主動 focus 自己內部的輸入框，
- * 關閉內層後焦點仍須回到外層開啟按鈕，不掉到 body；外層隨後按 Escape 仍可正常關閉。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState, useRef, useEffect } from 'react'
@@ -51,7 +47,6 @@ function NestedModalPage() {
 test('巢狀 Modal 內層子元件 mount autofocus：關閉內層後焦點回到外層按鈕，下一次 Escape 可關外層 (#1848)', async () => {
   await mount(<NestedModalPage />)
 
-  // 1. 打開外層
   const openOuterBtn = document.getElementById('open-outer') as HTMLButtonElement
   openOuterBtn.focus()
   openOuterBtn.click()
@@ -60,7 +55,6 @@ test('巢狀 Modal 內層子元件 mount autofocus：關閉內層後焦點回到
   const openInnerBtn = document.getElementById('open-inner') as HTMLButtonElement
   assert.ok(openInnerBtn, '外層已開')
 
-  // 2. 點擊「建立專用 Bot…」打開內層
   openInnerBtn.focus()
   openInnerBtn.click()
   await settle(20)
@@ -69,14 +63,12 @@ test('巢狀 Modal 內層子元件 mount autofocus：關閉內層後焦點回到
   assert.ok(innerInput, '內層已開')
   assert.equal(document.activeElement, innerInput, '內層 input 獲得焦點')
 
-  // 3. 按 Escape 關閉內層
   await keydown(document.activeElement!, 'Escape')
   await settle(20)
 
   assert.equal(document.getElementById('inner-input'), null, '內層已關閉')
   assert.equal(document.activeElement, openInnerBtn, '關閉內層後焦點回到外層按鈕，不掉到 body')
 
-  // 4. 再按 Escape 關閉外層
   await keydown(document.activeElement!, 'Escape')
   await settle(20)
 

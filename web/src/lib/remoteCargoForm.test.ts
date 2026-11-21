@@ -24,13 +24,8 @@ const form = (over: Partial<RemoteCargoForm> = {}): RemoteCargoForm => ({
   ...over,
 })
 
-/**
- * `POST /api/build/remote/test` 不收 body，測的是**已儲存**的設定；按鈕卻依表單裡的主機／帳號決定能不能按。
- * 表單有沒存的改動時測試連線會測到舊主機、報「✓ 可用」（真畫面：表單填 bogus-host.invalid，結果是舊主機的 cargo 版本）。
- */
 test('表單跟已儲存的一樣：不用先存', () => {
   assert.equal(remoteCargoUnsaved(saved, form()), false)
-  // 前後空白、port／jobs 打成同一個數字不算改動（儲存時送出去的值一樣）。
   assert.equal(remoteCargoUnsaved(saved, form({ host: ' 192.168.1.46 ', port: '022', jobs: '4 ' })), false)
 })
 

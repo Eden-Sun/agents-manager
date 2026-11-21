@@ -1,8 +1,3 @@
-/**
- * #1674：codex「模型滿載」要有獨立的標示——側欄（字＋紫燈）、晶片（紫框＋說明）、對話面板輸入框上方一行；
- * 跟「⚠ 中斷」「要你回答」「撞額度」分開，下一個回合開始（daemon 清掉 turn_error／turn_error_kind）就消失。
- * 種類看 daemon 給的 `turn_error_kind`，不比對文字。
- */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

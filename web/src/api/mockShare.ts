@@ -1,8 +1,3 @@
-/**
- * mock 的分享管理端點（API.md §5.6）：`GET/POST /bots/{id}/share`、`POST /bots/{id}/share/rotate`。
- * 規則照契約：只有 `share_profile = restricted` 的 bot 能開（其他 409 `not_shareable`）；開著就回完整 url（daemon 存 token 原文）。
- * `allow_embed` 只有信任分享能設（受限帶了 400 `share_embed_trusted_only`），預設 false。
- */
 import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
@@ -14,7 +9,6 @@ interface Share {
   allow_embed: boolean
 }
 
-/** mock 的分享入口網址（真 daemon 讀 config `[share] base_url`）。 */
 export const MOCK_SHARE_BASE = 'https://agm.example.ts.net'
 
 function newToken(): string {
@@ -43,7 +37,6 @@ export class MockShares {
     return this.shares.has(botId)
   }
 
-  /** 種子資料：已經開著的分享。 */
   seed(botId: string) {
     this.shares.set(botId, { token: newToken(), created_at: new Date(Date.now() - 86_400_000).toISOString(), last_used_at: new Date(Date.now() - 600_000).toISOString(), allow_embed: false })
   }
@@ -80,7 +73,6 @@ export class MockShares {
     if (method === 'POST') {
       if (b.allow_embed !== undefined && !this.trusted(botId)) throw new ApiError(400, { error: 'bad_request', reason: 'share_embed_trusted_only' }, 'share embed trusted only')
       if (b.enabled === true) {
-        // 已開著：不換 token，回同一條。
         if (!this.shares.has(botId)) {
           this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null, allow_embed: false })
           this.changed(botId, true, false)

@@ -4,10 +4,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MergedUpdateChip } from './MergedUpdateChip.tsx'
 import { mergedUpdateLabels } from '../lib/mergedUpdateLabels.ts'
 
-/**
- * 手機 390px：兩顆並排時長名字只剩 ▾（實測 16px）。合成的這顆只留圖示（不畫數字），
- * 兩件事的說明寫在 aria-label／tooltip 裡，點開才分兩項。
- */
 test('合成那顆只留圖示、是選單鈕', () => {
   const html = renderToStaticMarkup(<MergedUpdateChip />)
   assert.match(html, /class="quota-update install merged"/)

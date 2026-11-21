@@ -1,9 +1,3 @@
-/**
- * 英文字典與原始碼的對帳（issue #1932）。並行抽字串時各區塊各改各的檔，這支擋住的是：
- * ① 字典有 key 但原始碼沒有（改了原句忘了改字典、或抽錯 key）② `t()` 的 key 不是字面字串、或插值名稱和呼叫對不上
- * ③ 英文的 `{name}` 跟 key 不一致 ④ 兩個區塊對同一句寫了不同英文 ⑤ 複數少一邊
- * ⑥ 所有 UI 呼叫的 CJK 句子都必須有英文（防漏）。列出缺了哪些用 `bun scripts/i18n-report.ts --missing`。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -28,7 +22,6 @@ const sources = walk(root)
   .filter(isUiSource)
 const scanned = sources.map((f) => {
   const text = readFileSync(join(root, '..', f), 'utf8')
-  // 沒提到 i18n 的檔案不用 parse（整個 src 約七百個檔，parse 全部要好幾秒）。
   return text.includes('i18n') ? scanKeys(f, text) : { uses: [], problems: [] }
 })
 const uses = scanned.flatMap((s) => s.uses)
@@ -47,7 +40,7 @@ test('字典的每個 key 都真的出現在原始碼（t／msg 的第一個參�
 test('所有 UI 使用的 CJK 句子都已在英文字典提供翻譯（防漏）', () => {
   const missing: string[] = []
   for (const u of uses) {
-    if (u.file.startsWith('src/share/')) continue // 分享頁走獨立字典，由 shareI18n.test.ts 守護
+    if (u.file.startsWith('src/share/')) continue
     if (/[㐀-鿿＀-￯　-〿]/.test(u.key) && !Object.hasOwn(EN, u.key)) {
       missing.push(`${u.file}:${u.line} ${u.key}`)
     }

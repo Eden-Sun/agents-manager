@@ -1,23 +1,13 @@
-/**
- * Image shelf: park images across conversations (the composer tray dies on bot switch).
- * Holds raw `File`s — attachments are project-scoped (`attach::resolve`), so upload happens on
- * drop into a conversation. Own store, not `useStore`: its localStorage mirror and `refreshState`
- * slice replacement can't carry a `File`/object URL. Persisted by `shelfPersist.ts`.
- */
 
 import { create } from 'zustand'
 import { t } from '../lib/i18n'
 
-/** Must equal daemon `attach::MAX_BYTES`（50 MiB，2026-09-24 使用者）; shared with `Attachments.tsx`. */
 export const MAX_BYTES = 50 * 1024 * 1024
 
-/** The shelf outlives a send, so it needs its own cap (24 × 50MB worst case; `File`s from pickers/drops are disk-backed, not held in RAM). */
 export const SHELF_MAX = 24
 
-/** Counted from when parked (SPEC: 30 分鐘). */
 export const SHELF_TTL_MS = 30 * 60 * 1000
 
-/** Internal shelf → composer drag payload; value is the item key. */
 export const SHELF_MIME = 'application/x-am-shelf'
 
 export interface ShelfItem {
@@ -25,24 +15,19 @@ export interface ShelfItem {
   file: File
   name: string
   size: number
-  /** Only an image can be previewed; everything else is drawn as an icon card. */
   isImage: boolean
-  /** Object URL for an image, revoked when the item leaves the shelf; `''` otherwise. */
   url: string
   addedAt: number
 }
 
-/** Tap target: the on-screen conversation's tray, registered by the mounted chat panel. */
 export interface ShelfSink {
   add: (files: File[]) => void
-  /** 「放進 <label>」 */
   label: string
 }
 
 interface ShelfState {
   items: ShelfItem[]
   sink: ShelfSink | null
-  /** Keys just handed off, for the brief 「已放入」 flash. */
   handed: string[]
   add: (files: File[]) => { added: number; tooBig: string[]; overflow: number }
   remove: (key: string) => void
@@ -50,22 +35,15 @@ interface ShelfState {
   filesFor: (keys: string[]) => File[]
   markHanded: (keys: string[]) => void
   setSink: (sink: ShelfSink | null) => void
-  /** From IndexedDB on load; keeps original `addedAt`. */
   restore: (items: { key: string; file: File; addedAt: number }[]) => void
-  /** Returns the keys removed. */
   expire: () => string[]
 }
 
-/** A `File` restored from IndexedDB keeps its `type`, so this works on both paths. */
 function isImage(file: File): boolean {
   return file.type.startsWith('image/')
 }
 
 let seq = 0
-/**
- * 每次載入一個前綴。IndexedDB 是同源分頁共用的，兩個分頁各自從 1 數的鍵會互相覆蓋（後寫的蓋掉先寫的那列，
- * 重整後拿到別人的檔案）。舊版的 `s<n>` 鍵照樣讀得回來。
- */
 const TAB = Math.random().toString(36).slice(2, 8)
 
 const initialShelfState = import.meta.hot?.data?.shelfState
@@ -96,7 +74,6 @@ export const useShelf = create<ShelfState>((set, get) => ({
         name: file.name || t('檔案'),
         size: file.size,
         isImage: isImage(file),
-        // 只有圖片需要 object URL；其他檔案畫的是圖示，開一條 blob 只是白佔記憶體。
         url: isImage(file) ? URL.createObjectURL(file) : '',
         addedAt: Date.now(),
       })
@@ -134,7 +111,6 @@ export const useShelf = create<ShelfState>((set, get) => ({
       const back: ShelfItem[] = []
       for (const it of items) {
         if (have.has(it.key) || s.items.length + back.length >= SHELF_MAX) continue
-        // 只認舊版的 `s<n>` 計數鍵；新鍵的隨機前綴可能像數字或科學記號，不能當計數器（#1624）。
         const legacy = /^s(\d+)$/.exec(it.key)
         const n = legacy ? Number(legacy[1]) : NaN
         if (Number.isSafeInteger(n) && n > seq) seq = n
@@ -163,7 +139,6 @@ export const useShelf = create<ShelfState>((set, get) => ({
   },
 }))
 
-/** For `useDropTarget`'s DOM handler (outside React). */
 export function shelfFilesFor(keys: string[]): File[] {
   const files = useShelf.getState().filesFor(keys)
   if (files.length) useShelf.getState().markHanded(keys)

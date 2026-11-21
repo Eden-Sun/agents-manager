@@ -62,13 +62,11 @@ test('ClaudeApiBotLimits: 檢視總上限與每回合上限，可修改總上限
     const root = await mount(<ClaudeApiBotLimits />)
     await settle()
 
-    // 驗證標題與初始顯示
     assert.match(root.textContent ?? '', /Claude API Bot（用量與上限）/)
     assert.match(root.textContent ?? '', /已花 \$5\.50，上限 \$20\.00/)
     assert.match(root.textContent ?? '', /每回合時間：1800 秒（1–3600） · API 呼叫：20 次（1–64）/)
     assert.match(root.textContent ?? '', /capi-bot/)
 
-    // 編輯總上限
     const editCapBtn = root.querySelectorAll<HTMLButtonElement>('.claude-api-bot-limits-btn')[0]
     await act(async () => {
       editCapBtn.click()
@@ -94,7 +92,6 @@ test('ClaudeApiBotLimits: 檢視總上限與每回合上限，可修改總上限
     assert.equal((puts[0] as any).cap_usd, 35)
     assert.match(root.textContent ?? '', /上限 \$35\.00/)
 
-    // 編輯回合上限
     const editLimitsBtn = root.querySelector<HTMLButtonElement>('.claude-api-bot-limits-section:nth-of-type(2) .claude-api-bot-limits-btn')!
     await act(async () => {
       editLimitsBtn.click()

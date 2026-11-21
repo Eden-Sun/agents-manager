@@ -1,5 +1,3 @@
-/* components/Attachments.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* attachments (drop / paste) */
 
 .drop-veil {
   position: absolute;
@@ -9,7 +7,6 @@
   place-items: center;
   border: 2px dashed var(--accent);
   border-radius: var(--radius-lg);
-  /* 幾乎透明：拖圖時對話要看得見判斷丟哪。只留虛線框＋小標籤，別加 backdrop-filter。 */
   background: color-mix(in srgb, var(--accent-soft) 12%, transparent);
   pointer-events: none;
 }
@@ -28,7 +25,6 @@
 }
 
 .attach-tray {
-  /* 放大預覽貼托盤上緣浮出，定位基準在這（預覽寬＝對話框寬）。 */
   position: relative;
   display: flex;
   flex-wrap: wrap;
@@ -56,7 +52,6 @@
 
 .attach-peek img {
   max-width: 100%;
-  /* 不長過對話區，否則從畫面上緣被切掉。 */
   max-height: min(52vh, 460px);
   object-fit: contain;
   border-radius: var(--radius);
@@ -80,7 +75,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  /* 第二行要放得下「12.6 / 48.3 MB · 25%」（issue #435）。 */
   max-width: 240px;
   padding: 4px 26px 4px 4px;
   border: 1px solid var(--border-strong);
@@ -105,7 +99,6 @@
   white-space: nowrap;
 }
 
-/* 名字一行、狀態一行（壓縮中／已傳 / 總大小 · %／失敗原因＋重試），上傳中底下再一條細進度條。 */
 .attach-thumb-text {
   display: flex;
   flex-direction: column;
@@ -165,7 +158,6 @@
   }
 }
 
-/* 手機的 × 是 44px 觸控目標（styles.css），右側留白跟著放大，才不會壓到進度文字與「重試」。 */
 @media (width <= 640px) {
   .attach-thumb {
     max-width: 280px;
@@ -221,8 +213,6 @@
   cursor: zoom-in;
 }
 
-/* 卡片坐在實心藍的使用者泡泡上，--ring 只有 1.2:1：環跟泡泡文字色走（白環 4.65:1）；hover 原本無回饋。 */
-
 .msg-attachment {
   --ring: currentcolor;
 }
@@ -235,7 +225,6 @@
   display: block;
   max-width: 220px;
   max-height: 160px;
-  /* `contain`, not `cover`: a tall screenshot must stay recognisable, not be cropped. */
   object-fit: contain;
 }
 
@@ -316,10 +305,6 @@
   white-space: nowrap;
 }
 
-/*
- * 非圖片附件（2026-09-14 起暫存區與托盤收任何檔案）。縮圖沒有意義，所以畫的是
- * 「圖示 + 檔名」，尺寸跟縮圖對齊，同一排看起來才是一組東西。
- */
 .attach-thumb-file {
   display: grid;
   place-items: center;

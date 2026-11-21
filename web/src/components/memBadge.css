@@ -1,5 +1,3 @@
-/* components/MemBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* herdr 進程樹記憶體（SPEC §15）。本機固定左上角；遠端只在標題列看著那台時出現。等寬數字防跳動。 */
 
 .mem-badge {
   flex: none;
@@ -29,8 +27,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 「剩 N」與已用量同一行，總容量只放 tooltip：折第二行會撐高徽章、擠掉分頁列與連線（2026-09-13 實拍）。 */
-
 .mem-badge .mem-free {
   color: var(--text-faint);
   font-family: var(--font-mono);
@@ -46,8 +42,6 @@
   font-weight: 650;
 }
 
-/* 量不到就顯示「—」，不拿 0 假裝。 */
-
 .mem-badge.tabs-hot {
   border-color: var(--danger);
 }
@@ -60,8 +54,6 @@
 .mem-badge.partial .mem-v {
   color: var(--warn);
 }
-
-/* 遠端那顆掛在標題列，跟 host-badge 同一種語彙。 */
 
 .mem-badge.remote {
   flex: none;

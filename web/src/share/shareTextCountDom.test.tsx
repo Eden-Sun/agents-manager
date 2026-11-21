@@ -1,7 +1,3 @@
-/**
- * 分享頁的字數上限：daemon 數的是 Unicode 字元（`text.chars().count()`，API.md §5.6 的 8000 字），
- * 網頁不能用 UTF-16 長度數——emoji 與部分 CJK 擴充字一個字佔兩個單位，會把 daemon 收得下的訊息擋掉、還顯示錯的字數。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'

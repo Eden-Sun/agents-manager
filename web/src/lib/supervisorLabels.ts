@@ -1,10 +1,5 @@
-/** AGM 面板的標籤表（獨立成檔：元件檔只能 export 元件，見 fastRefreshExports.test）。 */
 import { msg } from './i18n'
 
-/**
- * 交辦的生命週期。`awaiting_review` 是這裡最重要的一格：回合跑完只到這裡，AGM 驗收過
- * 才會變 `completed`。把它畫成「已完成」就是在替沒人看過的工作背書。
- */
 export const ASSIGN_LABEL: Record<string, string> = {
   queued: msg('待送出'),
   delivered: msg('已送達'),

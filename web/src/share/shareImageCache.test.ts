@@ -1,8 +1,3 @@
-/**
- * 分享頁點陣圖快取（#1175）：同名的舊版本一進新版就淘汰；清單裡已經沒有的檔案整條淘汰；總量有上限；
- * 抓取失敗不留；舊版的抓取還在路上、新版已經來了，舊版回來也不塞回快取。
- * 只看「同一個檔被抓了幾次」，不碰 canvas：SVG 轉圖在這裡失敗，走的是「這一版載不出來」的快取路徑（同樣會留快取）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as images from './shareImageCache'
@@ -18,7 +13,6 @@ type Api = {
 }
 const api = images as unknown as Api
 
-/** 每次 fileBlob 都記一筆檔名；`bytes` 決定回傳的「Blob」大小（點陣圖快取只看 size）。 */
 function fakeClient(make: (name: string) => Promise<Blob> | Blob = () => new Blob(['not svg'])) {
   const calls: string[] = []
   const client = {
@@ -118,7 +112,6 @@ test('點陣圖總量有上限：一直開新的檔，最舊的會被淘汰，�
   const { maxBytes } = api.SHARE_IMAGE_CACHE_LIMITS.raster
   const chunk = Math.floor(maxBytes / 4)
   const { client, calls } = fakeClient(() => ({ size: chunk }) as unknown as Blob)
-  // 共 8 張、是上限的 2 倍：不能只長不縮。
   for (let i = 0; i < 8; i++) await api.rasterOf(client, `f${i}.png`, 'v1')
   await api.rasterOf(client, 'f0.png', 'v1')
   assert.equal(count(calls, 'f0.png'), 2, '最舊的超出上限被淘汰，要重抓')

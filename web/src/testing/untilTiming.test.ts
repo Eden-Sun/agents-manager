@@ -55,13 +55,10 @@ test('until 在有 pollTick 時：慢機器每輪 settle 延遲時仍保證推�
   let steps = 0
   setPollTick(async () => {
     steps++
-    // 刻意每步睡 400ms（模擬真實機器延遲、慢速 CPU 讓每輪耗時大幅超過一般情況）
     await new Promise((r) => setTimeout(r, 400))
   })
   try {
-    const ms = 1000 // 實時 1000ms，maxSteps = ceil(1000/250) = 4
-    // 舊寫法在 1000ms 實時內只能走約 2~3 步 (<4) 就因 Date.now() < end 逾時中斷
-    // 新寫法保證 steps >= maxSteps (至少 4 步)
+    const ms = 1000
     await assert.rejects(
       until(() => false, '步數守護測試', ms),
       (err: Error) => {

@@ -7,12 +7,6 @@ import { Modal } from './Modal'
 import { KindGlyph } from './KindTag'
 import './balanceQuotaChip.css'
 
-/**
- * 全域額度列的 OpenAI API 餘額（使用者 2026-11-19：放在 Claude 餘額下面）。
- * 未啟用（`[openai_api] enabled = false`）整格不畫；啟用但還沒設錨點就畫「設定 OpenAI 餘額」，點開的視窗跟有錨點時是同一個，
- * 可以在這裡輸入 OpenAI 帳戶目前的可用餘額當錨點。有錨點就畫 `OpenAI $x`（錨點－本機已確定花費，OpenAI 沒有餘額端點，只能推算）。
- */
-/** `variant='row'`：額度選單底部「API 餘額」區的一列（同一份資料、同一個校正視窗）。 */
 export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'row' } = {}) {
   const t = useT()
   const balance = useOpenAiApiBalance()

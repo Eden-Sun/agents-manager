@@ -126,13 +126,11 @@ test('parseAgyModel：解析 gemini-<版號>-<家族>[-<強度>]', () => {
   assert.equal(p4?.effort, 'medium')
   assert.equal(p4?.effortRank, 1)
 
-  // 未知家族
   const pUnknownFam = parseAgyModel('gemini-4-custom-high')
   assert.ok(pUnknownFam)
   assert.equal(pUnknownFam?.family, 'custom')
   assert.equal(pUnknownFam?.familyRank, 99)
 
-  // 認不得格式的 id
   assert.equal(parseAgyModel('unknown-model'), null)
   assert.equal(parseAgyModel('claude-opus-5-5'), null)
   assert.equal(parseAgyModel('gemini-flash'), null)
@@ -162,20 +160,16 @@ test('sortAgyModelIds：14 個模型亂序輸入 → flash(low,medium,high)、hy
     'gemini-4-hydrogen-high',
   ]
   const expected = [
-    // Flash
     'gemini-3.8-flash-low',
     'gemini-3.8-flash-medium',
     'gemini-3.8-flash-high',
-    // Hydrogen
     'gemini-4-hydrogen-low',
     'gemini-4-hydrogen-medium',
     'gemini-4-hydrogen-high',
     'gemini-4-hydrogen-xhigh',
-    // Argon
     'gemini-4-argon-low',
     'gemini-4-argon-medium',
     'gemini-4-argon-high',
-    // Neon
     'gemini-4-neon-low',
     'gemini-4-neon-medium',
     'gemini-4-neon-high',
@@ -197,9 +191,7 @@ test('sortAgyModelIds：未知家族排最後、照原順序；同未知家族�
   const expected = [
     'gemini-3.8-flash-medium',
     'gemini-4-argon-low',
-    // 未知家族：customb 比 customa 早出現，保持原順序在前
     'gemini-4-customb-high',
-    // 同未知家族 customa：版本 4 先（low < high），再版本 5
     'gemini-4-customa-low',
     'gemini-4-customa-high',
     'gemini-5-customa-medium',
@@ -252,12 +244,10 @@ test('ensureCurrentModel：目前模型不在清單時補上虛擬項目並標�
   assert.equal(res.missingIds.has('gemini-4-neon-medium'), true)
   assert.ok(res.models.some((x) => x.id === 'gemini-4-neon-medium'))
 
-  // 已在清單內：不重複加
   const resExists = ensureCurrentModel(staticList, 'gemini-3.8-flash-medium', 'agy')
   assert.equal(resExists.models.length, 3)
   assert.equal(resExists.missingIds.size, 0)
 
-  // agy 已停用的舊版：不補進選單
   const resRetired = ensureCurrentModel(staticList, 'gemini-3.1-pro-high', 'agy')
   assert.equal(resRetired.models.length, 3)
   assert.equal(resRetired.missingIds.size, 0)

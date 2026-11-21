@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { composerState, useStore } from './store.ts'
 
-/** 2026-09-18 使用者：沒在跑的 bot 按送出要自動啟動，不是先擋著叫人按「啟動」。 */
 test('a stopped bot accepts a send and asks for an auto start', () => {
   const base = useStore.getState()
   const state = {
@@ -18,7 +17,6 @@ test('a stopped bot accepts a send and asks for an auto start', () => {
   assert.equal(cs.autoStart, true)
 })
 
-/** issue #122：重整之後 daemon 那一則還在等 bot 起來——不再提供「送出＝啟動」，而是照實說在啟動、再送就排後面。 */
 test('a stopped bot that already holds a starting send says so instead of starting again', () => {
   const base = useStore.getState()
   const state = {

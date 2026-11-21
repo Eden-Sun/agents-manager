@@ -122,7 +122,6 @@ export function ShellIdentityDeleteButton({
   )
 }
 
-/** 某台主機某個 kind 從 shell 認出來的 `ccN`（SPEC §16）：唯讀列，「移除 alias」收進「更多」。同名 config 身份會蓋過它，已列出的不重複。 */
 export function ShellIdentityRows({ host, kind }: { host: string; kind: BotKind }) {
   const t = useT()
   const configured = useStore((s) => s.identities)

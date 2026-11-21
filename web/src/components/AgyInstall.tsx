@@ -5,11 +5,6 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { hostLabel } from './toolsHelpers'
 import { useT } from '../lib/i18n'
 
-/**
- * 「<主機> 尚未安裝 agy，要自動安裝嗎？」的確認框（使用者 2026-10-06）。agy 不能跑官方 `install.sh`，由 daemon 讀官方 manifest、
- * 驗 sha512 後放到那台的 `~/.local/bin/agy`（`POST /api/hosts/{name}/agy/install`）；使用者按確認才會動手。`extra` 接在說明後面
- * （例如「裝好後接著開 shell 登入」）。
- */
 export function AgyInstallDialog({
   host,
   open,
@@ -53,10 +48,6 @@ export function AgyInstallDialog({
   )
 }
 
-/**
- * 沒裝 agy 的主機：安裝鈕（缺少 CLI 提示、主機徽章、新 bot 的 kind 選單都用它）。不需要先有一顆在跑的 bot，
- * 跟其他 CLI 的「用現有 agent 安裝」不同。按下去先跳確認，確認才裝；已經裝了就不顯示（登入在額度欄「開 shell 登入」）。
- */
 export function AgyInstallButton({ host, small }: { host: string; small?: boolean }) {
   const t = useT()
   const missing = useAgyMissing(host)

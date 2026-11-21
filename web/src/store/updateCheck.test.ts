@@ -164,7 +164,6 @@ test('工具清單讀到了、installed 為假：才是未安裝', () => {
   assert.equal(check.rows.find((r) => r.id === 'x:cli-grok')!.status, 'missing')
 })
 
-// #1813：表頭的一句話只有「真的全部確認是最新」才說「都是最新」；查不到、未安裝、integration 沒讀到都要寫出來。
 const srow = (status: CheckStatus): CheckRow => ({ id: status, group: 'cli', label: status, current: null, latest: null, status, note: null, action: null })
 const shost = (statuses: CheckStatus[], over: Partial<HostCheck> = {}): HostCheck => ({ host: 'local', integrationError: null, integrationPending: false, rows: statuses.map(srow), ...over })
 
@@ -212,7 +211,6 @@ test('integration 沒裝：grok／agy 已登入才有「安裝」鈕（fresh）�
     irow('grok', 'not_installed', null, null, { ok: false, error: 'permission denied' }),
     irow('codex', 'not_installed', null, null),
   ]
-  // agy 已登入、grok 已登入（失敗過）、codex 登入也不給。
   const t = tools({ agy: tool(true, '1.2.0', true), grok: tool(true, '1.0', true), codex: tool(true, 'codex-cli 0.157.0', true) })
   const [agy, grok, codex] = check(t, items)
   assert.deepEqual(agy.action, { kind: 'integration', name: 'antigravity-cli', fresh: true })
@@ -221,7 +219,6 @@ test('integration 沒裝：grok／agy 已登入才有「安裝」鈕（fresh）�
   assert.match(grok.note ?? '', /自動安裝失敗：permission denied.*不重試.*再試/)
   assert.equal(codex.action, null)
   assert.equal(codex.note, '還沒安裝；這裡只顯示，不自動裝')
-  // 沒登入（或沒裝 CLI、問不到登入）：沒有鈕，note 講原因。
   for (const t2 of [tools({ agy: tool(true, '1.2.0', false) }), tools({ agy: tool(true, '1.2.0', null) }), tools({ agy: tool(false) })]) {
     const [a] = check(t2, items)
     assert.equal(a.action, null)
@@ -243,10 +240,8 @@ test('自動安裝失敗的原因不管這一列現在是什麼狀態都顯示�
   assert.ok(outdated.action, '落後的仍可按更新')
   assert.match(unknown.note ?? '', /自動安裝失敗：裝完狀態是 unknown.*不重試.*重啟 daemon.*wedged/)
   assert.doesNotMatch(reread.note ?? '', /自動安裝失敗/, 'claude 不是自動裝的家')
-  // 裝完重讀失敗（state:null）：snapshot 的列仍是舊的 not_installed，原因照樣寫出來。
   const [missing] = rows([irow('grok', 'not_installed', null, null, fail('裝完重讀狀態失敗：ssh 逾時'))])
   assert.match(missing.note ?? '', /自動安裝失敗：裝完重讀狀態失敗：ssh 逾時.*不重試/)
-  // 已經是最新（使用者之後手動裝好）就不再掛舊的失敗。
   const [cur] = rows([irow('grok', 'current', 3, 3, fail('舊的'))])
   assert.equal(cur.note, null)
 })

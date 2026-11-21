@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { composerState, useStore } from './store.ts'
 import { UNKNOWN_STUCK_REASON, UNKNOWN_WORKING_REASON, unknownLock } from './deliveryUnknown.ts'
 
-/** issue #1479：delivery=unknown 但 bot 正在跑只是「還沒確認」；閒著且輸入框仍鎖著才是真的卡住。 */
 test('unknownLock: working is neutral, anything else keeps the abandon advice', () => {
   assert.deepEqual(unknownLock('working'), { reason: UNKNOWN_WORKING_REASON, working: true })
   for (const s of ['idle', 'blocked', 'unknown', '', null, undefined]) {

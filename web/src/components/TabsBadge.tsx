@@ -6,7 +6,6 @@ import { useStore } from '../store/store'
 import { BrowserIcon } from './BrowserIcons'
 import './tabsBadge.css'
 
-/** 本機瀏覽器（Chrome / ego）各自的分頁數與 RAM，常駐在 RAM 格底下（跟 pane 數一樣是「現在開著多少」）；沒有瀏覽器就不出現。 */
 export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
   const t = useT()
   const browsers = useStore((s) => s.mem?.hosts.find((h) => h.host === host)?.browsers ?? null)
@@ -29,7 +28,7 @@ export function TabsBadge({ host = LOCAL_HOST }: { host?: string }) {
           <BrowserIcon name={b.name} />
           <span className="tabs-v">
             {b.tabs}
-            {/* 自己的 span：手機抽屜標題列只放得下分頁數，CSS 要能收掉（mobile-rwd-round2-2026-09-08 問題 4）。 */}
+            {}
             <span className="tabs-bytes">
               <span className="tabs-sep">/</span>
               {humanBytes(b.bytes)}

@@ -1,14 +1,3 @@
-/**
- * claude-api bot 整體花費概覽面板（ApiBotCostOverview）。
- *
- * 需求：
- * 1. 今日花費 / session 總花費。
- * 2. 結論先行（一句話結論 ＋ 可省建議並列；無建議不留空框）。
- * 3. 堆疊占比條（語意色票：快取寫入＝黃橙、快取讀＝綠、輸入＝藍、輸出＝紫，其餘灰）。
- * 4. 4 欄對齊表格（類別 ｜ 用量 ｜ 金額 ｜ 占比，金額與占比等寬右對齊，0 元淡列在後）。
- * 5. 最貴回合清單（點擊可跳到該回合訊息）。
- * 6. 手機版單欄可讀，文字標準 token 高對比度。
- */
 
 import { useEffect, useState, useMemo } from 'react'
 import { fetchApiBotUsage, fetchApiTurnTimeline, formatTokensK, type ApiBotUsage } from '../api/apiBotUsage'
@@ -98,7 +87,6 @@ export function ApiBotCostOverview({
           ? usage.cost_microusd.recorded / 1e6
           : turns.reduce((sum, x) => sum + (x.cost_usd || 0), 0)
 
-        // 最貴的幾個回合（取前 5 名）
         const sortedTurns = [...turns]
           .filter((x) => !x.in_flight && (x.cost_usd > 0 || x.requests > 0))
           .sort((a, b) => b.cost_usd - a.cost_usd)
@@ -114,7 +102,6 @@ export function ApiBotCostOverview({
             cache_write_tokens: x.cache_write_tokens,
           }))
 
-        // 若最貴回合存在，抓其 timeline 取得潛在 suggestions / compaction
         let topTimelineSuggestions: string[] = []
         if (sortedTurns.length > 0) {
           try {
@@ -123,17 +110,14 @@ export function ApiBotCostOverview({
               topTimelineSuggestions = tl.summary.suggestions
             }
           } catch {
-            // timeline 抓取失敗不阻礙主資料呈現
           }
         }
 
-        // 分類拆分估算
         const inTokens = usage.tokens.input
         const writeTokens = usage.tokens.cache_creation
         const readTokens = usage.tokens.cache_read
         const outTokens = usage.tokens.output
 
-        // Claude 定價加權比重
         const wIn = inTokens * 3.0
         const wWrite = writeTokens * 3.75
         const wRead = readTokens * 0.30
@@ -198,7 +182,6 @@ export function ApiBotCostOverview({
           },
         ]
 
-        // 結論：找出最大項
         let largest = categories[0]
         for (const cat of categories) {
           if (cat.cost_usd > largest.cost_usd) {
@@ -216,7 +199,6 @@ export function ApiBotCostOverview({
           })
         }
 
-        // 建議
         const suggestions: string[] = []
         if (topTimelineSuggestions.length > 0) {
           suggestions.push(...topTimelineSuggestions)
@@ -287,7 +269,7 @@ export function ApiBotCostOverview({
 
   return (
     <section className="api-overview-panel" aria-label={t('Claude API 花費概覽')}>
-      {/* 頂部標題列 */}
+      {}
       <div className="api-overview-header">
         <div className="api-overview-title-row">
           <span className="api-overview-title">{t('Claude API 花費概覽')}</span>
@@ -313,7 +295,7 @@ export function ApiBotCostOverview({
         ) : null}
       </div>
 
-      {/* 結論與建議（建議並列，無建議不顯示框） */}
+      {}
       <div className="api-overview-takeaway-card">
         <div className="api-overview-conclusion">
           <span className="api-overview-conclusion-icon" aria-hidden="true">💡</span>
@@ -327,7 +309,7 @@ export function ApiBotCostOverview({
         ) : null}
       </div>
 
-      {/* 堆疊百分比長條 */}
+      {}
       <div
         className="api-overview-bar"
         role="progressbar"
@@ -348,7 +330,7 @@ export function ApiBotCostOverview({
           ))}
       </div>
 
-      {/* 對齊表格：類別 ｜ 用量 ｜ 金額 ｜ 占比 */}
+      {}
       <div className="api-overview-table-wrap">
         <table className="api-overview-table">
           <thead>
@@ -386,7 +368,7 @@ export function ApiBotCostOverview({
         </table>
       </div>
 
-      {/* 最貴回合清單（點擊可跳到該回合訊息） */}
+      {}
       <div className="api-overview-top-turns">
         <div className="api-overview-turns-title">{t('最貴回合清單')}</div>
         {top_turns.length === 0 ? (

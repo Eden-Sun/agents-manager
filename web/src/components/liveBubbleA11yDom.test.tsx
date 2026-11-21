@@ -1,7 +1,3 @@
-/**
- * #1237：回覆串流中的 `LiveBubble` 不能整顆當 live region。字數計數與活動列每 250ms 變一次，
- * 讀屏會一直重唸；讀屏只該聽到「等待 → 輸出」這個階段轉換一次。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { setupDom, teardownDom, mount, unmountAll } from '../testing/domHarness'

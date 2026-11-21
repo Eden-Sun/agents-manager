@@ -1,7 +1,3 @@
-/**
- * `useCacheTick`：active 從 false 變 true 時要立刻換成新的 now，不能拿掛載時的舊時間等 15 秒
- * （否則快取倒數會把已涼的快取算成滿格、不警告）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -12,7 +8,6 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-// 測試要在掛載後改 active：用一個能從外面叫的 setter 代替 props 重畫（domHarness 沒有 rerender）。
 const ctl: { setActive?: (v: boolean) => void; setRed?: (v: boolean) => void } = {}
 function Probe() {
   const [active, set] = useState(false)

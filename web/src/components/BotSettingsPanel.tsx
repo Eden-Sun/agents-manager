@@ -29,12 +29,6 @@ import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { msg, t, useT } from '../lib/i18n'
 import './botSettings.css'
 
-/**
- * 「Bot 設定」面板（API.md v3.3）：`PATCH /api/bots/:id` 只送變更欄位，`needs_restart` 時提示重啟。
- * 使用者決定 UI 不提供 `args` / `env` / `inject_hooks`（不顯示也不進 PATCH body）。
- */
-
-/** v4.0 人設：auto-growing textarea; empty = null. */
 export function PersonaField({ value, onChange, collapsible }: { value: string; onChange: (v: string) => void; collapsible?: boolean }) {
   useT()
   const [open, setOpen] = useState(!collapsible || Boolean(value))
@@ -69,11 +63,9 @@ export function PersonaField({ value, onChange, collapsible }: { value: string; 
   )
 }
 
-/** Small marker shown next to a bot that has a persona; hover = the first 80 chars. */
 export function PersonaMark({ persona }: { persona: string | null }) {
   useT()
   if (!persona) return null
-  // 以 code point 計：`slice` 會把 emoji 的代理對切成兩半（#1702）。
   const chars = Array.from(persona)
   const short = chars.length > 80 ? `${chars.slice(0, 80).join('')}…` : persona
   return (
@@ -86,7 +78,6 @@ export function PersonaMark({ persona }: { persona: string | null }) {
   )
 }
 
-/** 身份在目標主機上的登入警語；`logged_in === null` 是「問不到」不是「沒登入」。 */
 function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { mark: string; title: string } | null {
   if (!st) {
     return {
@@ -110,7 +101,6 @@ function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { m
 }
 
 function identityTitle(env: Record<string, string>, st: IdentityStatus | undefined, hostLabel: string): string {
-  // 身份的 env 可能放 API key／token：畫面上遮起來（tooltip 也會被截圖）。
   const envText = envDisplayText(env).split('\n').join(' ')
   const parts = [envText]
   if (st?.logged_in === true) {
@@ -120,17 +110,12 @@ function identityTitle(env: Record<string, string>, st: IdentityStatus | undefin
   } else {
     parts.push(t('{host}：登入狀態未知{reason}', { host: hostLabel, reason: st?.reason ? ` — ${st.reason}` : '' }))
   }
-  // shell alias 身份不在 config.toml，改不了也刪不掉——講清楚來源。
   if (st?.source === 'shell') {
     parts.push(t('來自 {host} 的 shell alias（ccN），不是 config.toml', { host: hostLabel }))
   }
   return parts.filter(Boolean).join('\n')
 }
 
-/**
- * 鍵盤導覽（⌥↑／⌥↓、Control+1…9、側欄列的 ↑／↓）換 bot／專案前會先問這裡（#925）：有未儲存變更就打開「放棄未儲存的變更？」
- * 並回 true 擋下。桌機設定卡非模態，`dialogOpen()` 看不到它；跟滑鼠點外面（`requestClose`）同一道門。
- */
 function LeaveGuard({ dirty, onBlocked }: { dirty: boolean; onBlocked: () => void }) {
   const latest = useRef({ dirty, onBlocked })
   useEffect(() => {
@@ -148,10 +133,6 @@ function LeaveGuard({ dirty, onBlocked }: { dirty: boolean; onBlocked: () => voi
   return null
 }
 
-/**
- * Identity as a row of options（無下拉）. 帳號每台主機各自登入，所以標的是 bot 那台主機上能否用；
- * 未登入不停用按鈕（使用者可能正要去登入）。
- */
 export function IdentityOptions({
   kind,
   host,
@@ -164,18 +145,14 @@ export function IdentityOptions({
   onChange: (v: string) => void
 }) {
   const t = useT()
-  // Filter outside the selector: a fresh array re-renders forever (React #185).
   const all = useStore((s) => s.identities)
   const status = useStore((s) => identityStatusOfHost(s, host))
   const refreshTools = useStore((s) => s.refreshTools)
   const busy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
-  // config 身份＋主機 shell 的 `ccN`（SPEC §16），依 kind 過濾（codex／grok 身份也要指派得到）。
   const disabledList = useStore((s) => s.disabledIdentities)
-  // 停用的身份不出現在選單裡（SPEC §16），但**已經綁著的那個**還是要看得見，否則這顆 bot 的設定會像是空的。
   const identities = useMemo(() => {
     const ofKind = identitiesOfHost(all, status, host).filter((i) => i.kind === kind)
     const live = enabledIdentities(disabledList, host, ofKind)
-    // 已經綁著的那一個就算被停用也要留著，否則這顆 bot 的設定看起來像沒選過。
     return ofKind.filter((i) => i.name === value || live.some((l) => l.name === i.name))
   }, [all, status, kind, disabledList, host, value])
   if (identities.length === 0) return null
@@ -211,7 +188,6 @@ export function IdentityOptions({
                 type="button"
                 role="radio"
                 aria-checked={value === i.name}
-                // 警示併進名稱：讀屏走到這顆就知道它沒登入（下面那個標記是給眼睛看的）。
                 aria-label={warn ? t('{name}（{status}）', { name: i.name, status: t.tr(warn.mark) }) : undefined}
                 className={`opt${value === i.name ? ' on' : ''}`}
                 title={identityTitle(i.env, st, hostLabel)}
@@ -260,14 +236,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const loginBusy = useStore((s) => s.busy[`login:${botId}`] === true)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
 
-  /** 角色是表單的一欄：undefined＝沒動過（沿用 bot.role），否則是使用者選的值，跟其他欄位一起按「儲存」送出。 */
   const [roleDraft, setRoleDraft] = useState<'manager' | 'executor' | 'advisor' | 'specialist' | 'scheduler' | null | undefined>(undefined)
   const [specTrack, setSpecTrack] = useState(bot?.track ?? '')
   const roleLabelId = useId()
   const trackHintId = useId()
   const trackOk = specTrack.trim() !== ''
   const roleValue = roleDraft !== undefined ? roleDraft : (bot?.role ?? null)
-  /** 執行期覆寫是表單的一欄（B 期）：undefined＝沒動過，否則是草稿，跟其他欄位一起按「儲存」送出。 */
   const [overrideDraft, setOverrideDraft] = useState<RuntimeSettings | undefined>(undefined)
   const overrideValue: RuntimeSettings = overrideDraft !== undefined ? overrideDraft : (bot?.runtime_override ?? {})
   const [name, setName] = useState(bot?.name ?? '')
@@ -275,10 +249,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [effort, setEffort] = useState<string | null>(bot?.effort ?? null)
   const [fast, setFast] = useState<boolean>(bot?.fast ?? false)
   const [persona, setPersona] = useState(bot?.persona ?? '')
-  /** 人設預設收起，已有人設才勾著（2026-09-13 使用者）。 */
   const [personaOn, setPersonaOn] = useState(Boolean(bot?.persona))
   const [identity, setIdentity] = useState(bot?.identity ?? '')
-  /** 沒動過的欄位跟著 store 走，別處改了 model／effort 時不會被開啟當下的舊值蓋回去。 */
   const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())
   const touch = (k: BotFormKey) =>
     setTouched((t) => {
@@ -289,11 +261,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     })
 
   const [banner, setBanner] = useState<'saved' | 'restart' | null>(null)
-  /** 已存成功的欄位；dirty 要跟它比，store 慢一拍時才不會誤跳「放棄未儲存？」（2026-09-11）。 */
   const [saved, setSaved] = useState<PatchBotInput>({})
   const [saving, setSaving] = useState(false)
   const [restartingLocal, setRestarting] = useState(false)
-  // 這顆 bot 在別處（⟳ 徽章、更新徽章）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
   const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
   const child = bot ? isChildBot(bot) : false
   const restarting = restartingLocal || restartingShared
@@ -323,14 +293,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const nameHintId = useId()
   const formRef = useRef<BotFormValues>({ name: '', model: null, effort: null, fast: false, persona: '', identity: '' })
   formRef.current = { name, model, effort, fast, persona, identity }
-  // 手機是全螢幕 sheet，不用 anchor 座標（只會推歪）。
   const phone = useMediaQuery(PHONE_QUERY)
   const anchor = useStore((s) => (phone ? null : s.settingsAnchor))
   const running = useStore((s) => {
     const r = s.runs[botId]
     return r ? r.state !== 'stopped' && r.state !== 'exited' : false
   })
-  // codex 回合進行中改 model／effort：儲存會先按 Esc 停下回合、套用後送 continue 接著跑（#1681），儲存前先講清楚。
   const turnWorking = useStore((s) => s.runs[botId]?.agent_status === 'working')
   const cardRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null)
@@ -344,9 +312,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       const gap = 8
       const margin = 12
       const { offsetWidth: w, offsetHeight: h } = el
-      // 桌機水平置中（2026-09-13 使用者：「按下該要置中」）。
       const left = Math.min(Math.max(margin, (window.innerWidth - w) / 2), Math.max(margin, window.innerWidth - w - margin))
-      // 不蓋到標題列與晶片列（2026-09-13 使用者）。
       const headBottom = Math.max(
         document.querySelector('.main-head')?.getBoundingClientRect().bottom ?? 0,
         document.querySelector('.unread-bar-wrap')?.getBoundingClientRect().bottom ?? 0,
@@ -354,8 +320,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       )
       const minTop = Math.max(margin, headBottom + gap)
       const top = Math.min(Math.max(minTop, anchor.top - gap), Math.max(minTop, window.innerHeight - h - margin))
-      // 上緣被推到標題列底下之後，高度上限要跟著扣掉那一段——以前一律是 `100vh - 24px`，卡片一高，
-      // 底下的「關閉／儲存」就被推出視窗外（2026-09-14 使用者）。內文自己捲，標題與按鈕列固定。
       setPos({ left, top, maxHeight: Math.max(240, window.innerHeight - top - margin) })
     }
     place()
@@ -363,7 +327,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => window.removeEventListener('resize', place)
   }, [anchor])
 
-  // Esc 行為在 render 時塞進 ref，避免 effect 依賴整個表單狀態。
   const escRef = useRef<() => void>(() => {})
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -373,14 +336,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
-  // 點外面就關：用 document pointerdown 而非全螢幕 scrim，背景才能拖圖／點 bot。確認框走 portal，要放行。
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
       const card = cardRef.current
       if (!card || !(e.target instanceof Node)) return
       if (card.contains(e.target)) return
       const el = e.target instanceof Element ? e.target : e.target.parentElement
-      // 通知是疊在上面的浮層，不是「外面的畫面」：按它的 ✕／動作鈕不算離開設定卡。
       if (el?.closest('.confirm-backdrop, .modal-backdrop, .notices')) return
       escRef.current()
     }
@@ -388,9 +349,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     return () => document.removeEventListener('pointerdown', onDown, true)
   }, [])
 
-  // 桌機非模態：只設開場焦點；手機全螢幕 sheet 才啟用 focus trap。
   useDialogFocus(phone, cardRef, { initialFocus: () => nameRef.current })
-  // 桌機沒有 focus trap，關掉時自己還焦點：開場時的焦點（開它的鈕）；焦點已經在別處（點了別的地方）就不搶。
   useEffect(() => {
     if (phone) return
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -439,15 +398,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     )
   }
 
-  // 名稱不做前端檢查（2026-09-09 使用者決定）：規則在 daemon，前端會漂走。
-  // 同 daemon `valid_bot_name`（送出去不前後裁空白）：不符就停用儲存，原因寫在欄位下面。
   const nameOk = isValidBotName(name)
   const nameBad = touched.has('name') && name !== '' && !nameOk
   const hostLabel = !host || host === 'local' ? t('本機') : host
-  /** claude 用獨立終端跑 `claude auth login`（`startCliLogin`）；grok 仍把 `/login` 送進 Bot 的畫面。 */
   const cliLogin = bot.kind === 'claude'
 
-  // store 追上存過的值就放掉那一欄，之後別處改了同一欄才看得到（render 期 setState：沒東西可放時回傳同一個物件）。
   const prunedSaved = pruneSaved(saved, bot)
   if (prunedSaved !== saved) setSaved(prunedSaved)
 
@@ -462,7 +417,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
   const form = effectiveForm(base, { name, model, effort, fast, persona, identity }, touched)
   const patch: PatchBotInput = computeBotPatch(base, form, touched, bot.kind)
-  // 角色與 track：只有專家會帶 track；換成專家或改了 track 才送。
   const roleChanged = roleDraft !== undefined && roleDraft !== (bot.role ?? null)
   const trackChanged = roleValue === 'specialist' && specTrack.trim() !== (bot.track ?? '')
   const roleTrackPatch: PatchBotInput = roleChanged
@@ -491,8 +445,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       if (!res) return
       setRoleDraft(undefined)
       setOverrideDraft(undefined)
-      // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
-      // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
       setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
       const settled = settledKeys(sent, formRef.current)
       setTouched((t) => {
@@ -501,7 +453,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         return n
       })
       setBanner(res.needsRestart ? 'restart' : res.deferred ? null : 'saved')
-      // 被換掉時 `store.patchBot` 已經講了一句，不要再疊一則「已儲存」。
       if (!res.needsRestart && !res.remappedModel) notify('info', t('已儲存 {name} 的設定', { name: patch.name ?? bot.name }))
     })
   }
@@ -518,10 +469,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     if (!deleteOpen && !closeConfirmOpen && !loginOpen) requestClose()
   }
 
-  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
-  // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
-  // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身份才帶（#658），
-  // 改模型等其他設定後的重啟會開新對話、整個失憶。
   const doRestart = () => {
     setRestarting(true)
     void restartBot(botId).then((ok) => {
@@ -532,14 +479,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       }
     })
   }
-  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。設定變更與「待套用」兩種橫幅共用同一顆。
-  // claude-api 沒有 CLI 行程可重啟（daemon 回 api_bot_restart_unsupported）：改下一回合就生效，停止後再啟動即可。
   const restartButton = child || isApiKind(bot.kind) ? null : (
     <button type="button" className="btn primary" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('立即重啟')}
     </button>
   )
-  // 常駐於面板底部（不靠橫幅）：卡住時（例如 codex 停在審核框）使用者一定找得到。有 live run 才是「重新啟動」，沒有就改成「啟動」。
   const footerRestart = child || isApiKind(bot.kind) ? null : running ? (
     <button type="button" className="btn" disabled={restarting} onClick={doRestart}>
       {restarting ? t('重啟中…') : t('重新啟動')}
@@ -568,7 +512,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <span className="bs-sub" title={project?.path}>
           {bot.name}
         </span>
-        {/* 識別放標題列（2026-09-13 使用者）。 */}
+        {}
         <RunIdents botId={botId} />
         <span className="spacer" />
         <button type="button" className="icon-btn bs-close" onClick={requestClose} aria-label={t('關閉設定')} title={t('關閉，回到對話')}>
@@ -576,13 +520,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {/* 剛存完的提示之外，daemon 從資料算出「跑的還是舊設定」（#353）也要顯示：開面板時、回應掉了、重整之後都看得到。 */}
-      {/* 儲存中：daemon 先寫 config 推 `bot_changed`、再當場套用（claude `/effort` 之類），這段時間 state 的
-          `needs_restart` 暫時是真的；套用成功就清掉。等 PATCH 回應（daemon 的判斷）再決定要不要出重啟橫幅。 */}
+      {}
+      {}
       {saving ? (
         <div className="bs-banner ok" role="status">{t('套用中…')}</div>
       ) : null}
-      {/* 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕（#1911）。 */}
+      {}
       {!saving && (banner === 'restart' || (banner === null && bot.needs_restart)) ? (
         <div className="bs-banner warn" role="status">
           {child ? (
@@ -606,7 +549,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         <div className="bs-banner ok" role="status">{t('已儲存，回合結束後自動套用。')}</div>
       ) : null}
 
-      {/* claude-api 每回合重讀設定、沒有重啟：不出「待套用」。 */}
+      {}
       {bot.role_pending && !isApiKind(bot.kind) ? <div className="bs-banner warn" role="status"><span>待套用（需重啟）：{bot.daemon_url_pending ? '此 bot 啟動時未取得 daemon 位址。' : <>設定角色 {bot.role ?? '未分配'}；執行中的政策 {bot.runtime_role_policy ? (bot.runtime_role_policy.split(':').slice(-2).join(' / ') || '未分配') : '未知'}。</>}</span>{restartButton}</div> : null}
       <div className="bs-body">
         <form
@@ -752,7 +695,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           ) : (
-            // codex TUI 只有 `/logout`：不給必定失敗的按鈕，改說去哪登入。
             <div className="field account-field">
               <span>{t('帳號')}</span>
               <div className="bs-login-row">
@@ -771,7 +713,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               </span>
             </div>
           )}
-          {/* 人設預設不勾（2026-09-13 使用者）；取消勾選＝清掉人設。 */}
+          {}
           <label className="bs-persona-toggle">
             <input
               type="checkbox"
@@ -799,7 +741,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
 
         {isApiKind(bot.kind) ? (
           <>
-            {/* 花費上限與回合時限是 Claude 專屬設定；openai-api 只給停止／清除對話。 */}
+            {}
             {bot.kind === 'claude-api' ? <ClaudeApiBotLimits botId={botId} /> : null}
             <ApiBotControls botId={botId} name={bot.name} />
           </>
@@ -807,7 +749,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         {bot.kind === 'codex' ? <BaseSnapshotControls botId={botId} name={bot.name} /> : null}
         <BotShareSection botId={botId} />
 
-        {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}
+        {}
         <div className="bs-danger bare">
           <button type="button" className="btn danger" onClick={() => setDeleteOpen(true)}>
             {t('刪除 Bot')}
@@ -834,7 +776,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚；claude 改用獨立終端跑 CLI，不佔 Bot 的畫面。 */}
+      {}
       <ConfirmDialog
         open={loginOpen}
         title={cliLogin ? t('開終端用 CLI 登入？') : t('送出登入指令？')}
@@ -935,7 +877,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   )
 }
 
-/** 識別列只留 pane id（2026-09-09 使用者決定）：其餘在 `herdr pane list` 查得到，四顆並排會撐成兩行。 */
 function RunIdents({ botId }: { botId: string }) {
   useT()
   const run = useStore((s) => s.runs[botId] ?? null)

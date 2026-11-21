@@ -1,4 +1,3 @@
-/* 對話倒回（SPEC §6.13）。 */
 .msg-rewind {
   flex: none;
   padding: 0 5px;
@@ -21,7 +20,6 @@
   cursor: not-allowed;
 }
 
-/* 被倒掉的：留著可以回頭看，但一眼看得出不在脈絡裡。 */
 .msg.rewound .bubble {
   opacity: 0.5;
 }
@@ -30,7 +28,6 @@
   border-style: dashed;
 }
 
-/* 「終端輸入列裡有字」確認框裡那段字（2026-10-01）：原樣、可捲，不撐爆對話框。 */
 .rewind-draft {
   max-height: 160px;
   overflow: auto;

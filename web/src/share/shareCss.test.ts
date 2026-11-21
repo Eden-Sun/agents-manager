@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 
 const css = readFileSync(new URL('./share.css', import.meta.url), 'utf8')
 
-/** 第一個 `selector {` 規則的內文。`from` 之後開始找。 */
 function ruleBody(selector: string, from = 0): string {
   const i = css.indexOf(`${selector} {`, from)
   assert.ok(i >= 0, `share.css 找不到 ${selector}`)

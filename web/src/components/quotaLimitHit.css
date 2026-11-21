@@ -1,24 +1,12 @@
-/* 「帳號被 CLI 擋住」（2026-09-12 使用者：codex 量表全滿卻回 `You've hit your usage limit`）：5h／7d 是速率視窗，
-   credits 用完時仍可滿格；唯一訊號是 CLI 橫幅（daemon 的 `quota.limit_hit`），所以畫成格子狀態。 */
-/* 畫法（2026-09-13 使用者：「目前看來很衝突」）：**一個紅點 + 其餘全部退色**，不整格染紅（綠量表同時說「還很夠」）。
-   class 叫 `quota-blocked` 不是 `blocked`：`styles.css` 有裸的 `.blocked`（BlockedPanel 外框），撞上會整片染紅加內距。 */
-/* 沒額度／limit_hit：紅框要留、紅點不要（2026-09-16 使用者）。
-   只有這一格用圓角外框，旁邊選取格不再做成第二張卡。 */
 .quota-hp.quota-blocked,
 .quota-hp.focused.quota-blocked,
-/* 分隔線規則 `.quota-hp + .quota-hp` 跟這條同特異度，載入順序一翻就把左邊那條染回灰色，看起來像缺一邊
-   （2026-09-16 使用者：紅框左側不見了）。多一個 class 的特異度贏過它，不靠檔案順序。 */
 .quota-hp + .quota-hp.quota-blocked,
-/* 手機另有一條把格間分隔線設成透明的 `.main-head .quota-hp + .quota-hp`（多一層 .main-head），又把紅框左邊吃掉
-   （2026-09-16 使用者手機截圖）。同樣多帶一層贏過它。 */
 .main-head .quota-hp + .quota-hp.quota-blocked {
   border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   border-radius: 7px;
   margin: 0 2px;
 }
 
-/* 紅框的上下緣就是這格唯一的外框，但量表條釘在 `-1px`（蓋住 1px 邊框畫成「邊框上的刻度」），
-   於是下緣整條被蓋掉，看起來像框沒畫完（2026-09-16 使用者截圖）。這一格把刻度往內縮，讓邊框完整。 */
 .quota-hp.quota-blocked .quota-border-meter.bottom {
   bottom: 2px;
 }
@@ -27,7 +15,6 @@
   top: 2px;
 }
 
-/* 灰階而非降透明：留著綠色就還在說「還很夠用」。 */
 .quota-hp.quota-blocked .quota-bar,
 .quota-hp.quota-blocked .quota-bar-wrap,
 .quota-hp.quota-blocked .quota-bar-pct,
@@ -37,8 +24,6 @@
   opacity: 0.5;
 }
 
-/* 灰掉的 logo＝帳號收不了工作，是唯一讓 kind logo 失色的狀態（2026-09-13 使用者：有顏色的才是正常的）。
-   多帶一個 kind class 的特異度贏過 `.quota-hp.<kind> .quota-kind` 的品牌色，不靠檔案載入順序。 */
 .quota-hp.quota-blocked .quota-kind,
 .quota-hp.quota-blocked.claude .quota-kind,
 .quota-hp.quota-blocked.codex .quota-kind,
@@ -66,8 +51,6 @@
   font-weight: 400;
 }
 
-/* 歸零且三小時內重置的那一格：只寫倒數（2026-09-14 使用者）。數字用等寬，
-   每分鐘跳一次時不會左右抖動；顏色跟「用完了」一致，不另開一種語意。 */
 .quota-reset-at {
   display: inline-flex;
   align-items: baseline;

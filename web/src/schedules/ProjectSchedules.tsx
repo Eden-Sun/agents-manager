@@ -14,7 +14,6 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
   const botName = useStore((st) => st.bots.find((b) => b.id === s.bot_id)?.name)
   const selectBot = useStore((st) => st.selectBot)
   useOnTurnChange(live, onTurnChange)
-  // 執行中才每秒重畫（已進行時間會走）；沒有執行中就不開計時器。
   const running = !!s.open && (!!s.open.running_since || (live ?? s.open.turn_status) === 'in_flight')
   const nowMs = useNowMs(running)
   const { dot, next, last } = scheduleRowLines(s, live, nowMs)
@@ -22,7 +21,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
   return (
     <li className={`project-schedule-item${s.enabled === false ? ' off' : ''}`}>
       {selecting ? <input type="checkbox" aria-label={t('選取排程 {name}', { name: s.name })} checked={selected} onChange={() => onSelect(s.id)} /> : null}
-      {/* 固定三行：名稱（狀態點）／下次或現在／上次。每行不換行，過長省略號，完整文字放 title。 */}
+      {}
       <button type="button" className="project-schedule-row" title={s.name} onClick={() => onOpen(s.id, s.bot_available === false)}>
         <span className="project-schedule-head with-side">
           <span className={`project-schedule-dot ${dot}`} aria-hidden="true" />
@@ -38,7 +37,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
           <span className="project-schedule-v">{last.text}</span>
         </span>
       </button>
-      {/* 晶片與 ⋯ 絕對定位在第1行右側，不佔第2、3行寬度。 */}
+      {}
       <div className="project-schedule-side">
         {s.bot_available !== false && botName ? (
           <button type="button" className={`project-schedule-bot${s.bot_dedicated === false ? ' warn' : ''}`} title={dedicatedNote ? `${t('執行這個排程的 Bot')}\n${dedicatedNote}` : t('執行這個排程的 Bot')} aria-label={t('跳到 Bot {name}', { name: botName })} onClick={() => selectBot(s.bot_id)}>
@@ -51,9 +50,7 @@ function ScheduleRow({ s, onOpen, onTurnChange, selecting, selected, onSelect }:
   )
 }
 
-/** 專案 menu 裡的排程列表：下次時間（附時區）、本次狀態（含綁定 turn 的即時狀態），點開進編輯／歷史。 */
 export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onOpen: (scheduleId: string, focusBot?: boolean) => void }) {
-  // 切語言時重繪；字串在 render 與 callback 裡直接用模組的 t（callback 不會卡在舊語言）。
   useLang()
   const schedulesRev = useStore((s) => s.schedulesRev)
   const [rows, setRows] = useState<Schedule[] | null>(null)
@@ -88,7 +85,6 @@ export function ProjectSchedules({ projectId, onOpen }: { projectId: string; onO
   }, [refresh, schedulesRev, bots])
 
   useEffect(() => {
-    // WS `schedules_changed` 只帶 id，這裡收到同專案的事件就重抓，不把 prompt 放進全域 state。
     const onChanged = (ev: Event) => {
       const detail = (ev as CustomEvent<{ project_id?: string }>).detail
       if (!detail?.project_id || detail.project_id === projectId) refresh()

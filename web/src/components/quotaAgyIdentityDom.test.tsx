@@ -1,7 +1,3 @@
-/**
- * 額度列的 agy 身份：每個 `kind = "agy"` 身份（自己的 HOME）一格，跟預設帳號的 agy 格並排，標身份名（`agy · ag1`）。
- * 還沒有讀數的身份也要列出來（顯示「背景查詢中」），不能像以前只認裸 `agy` 而整個消失。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -29,7 +25,6 @@ test('agy 身份每個一格、標身份名；還沒有讀數的身份也列出�
   await useStore.getState().refreshState()
   useStore.setState({ identities: [agyIdent('ag1'), agyIdent('ag2')] } as never)
   await useStore.getState().loadQuota()
-  // 預設帳號有讀數、ag1 有自己的讀數、ag2 還沒探到。
   useStore.setState({ quota: { agy: agyQuota(40), 'agy:ag1': agyQuota(25) } } as never)
   await mount(<QuotaStrip />)
   await until(() => document.querySelectorAll('.quota-hp.agy').length >= 3, '預設 agy 加兩個身份的格畫出來')

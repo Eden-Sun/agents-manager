@@ -1,8 +1,3 @@
-/**
- * 自動翻譯英文訊息（使用者 2026-11-06：「當判斷是英文訊息時自動用 API 翻譯，我就不用手動按」）。
- * daemon 設定 `message_translate.auto` 開著，最後 N 則／新到的、已完整的英文訊息掛載後自動翻成譯文；
- * 手動點回原文的不再自動翻；串流中的不翻；失敗不重試轟炸。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -58,7 +53,6 @@ test('auto 開、最後 N 則內、已完整的英文訊息：不用按就自動
   assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
   await settle(30)
   assert.equal(translateCalls(reqs), 1, '同一則只打一次')
-  // 自動翻出來的跟手動點過一樣記著（之後滑出最後 N 則、重整都維持譯文）。
   assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.want') ?? '[]'), ['m1'])
 })
 
@@ -73,7 +67,6 @@ test('手動點回原文：記住（declined），remount 與重整後都不再�
   await mount(<Probe m={msg(EN)} />)
   await settle(60)
   assert.equal(document.querySelector('.msg-translation'), null, 'remount 後仍是原文')
-  // 模擬重整：記憶體狀態清空，只剩 localStorage。
   await unmountAll()
   resetTranslationStore()
   resetTranslateReady()
@@ -82,7 +75,6 @@ test('手動點回原文：記住（declined），remount 與重整後都不再�
   assert.equal(document.querySelector('.msg-translation'), null, '重整後也不再自動翻')
   assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯')
   assert.equal(translateCalls(reqs), 1)
-  // 再點才翻，並解除 declined。
   await click(document.querySelector('.msg-translate')!)
   await until(() => document.querySelector('.msg-translation') !== null, '手動再翻')
   assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.declined') ?? '[]'), [])
@@ -179,7 +171,6 @@ test('自動翻失敗：不跳錯誤、不重試，停在可手動重試的「�
   await mount(<Probe m={msg(EN)} />)
   await settle(60)
   assert.equal(translateCalls(reqs), 1, 'remount 也不重試')
-  // 累積到上限：之後新的訊息不再自動打。
   for (let i = 0; i < AUTO_FAIL_LIMIT; i++) {
     await unmountAll()
     await mount(<Probe m={msg(EN, { id: `f${i}` })} />)
@@ -193,7 +184,6 @@ test('自動翻失敗：不跳錯誤、不重試，停在可手動重試的「�
   assert.equal(document.querySelector('.msg-translate')?.textContent, '翻譯', '仍可手動')
 })
 
-/** 把 fakeApi 的 fetch 包一層：`/translate` 依 `mode()` 回 422 品質沒過、500 真失敗，或交給原本的 route（成功）。 */
 function fakeTranslateModes(mode: () => 'ok' | 'reject' | 'fail') {
   const reqs = fakeApi(route())
   const base = globalThis.fetch
@@ -281,7 +271,6 @@ test('自動翻譯完成（貼底中）：正文 msg-swap-auto 純淡入，圖�
 test('自動翻譯完成（選取文字中）：先保留原文、按鈕顯示「譯文已就緒」，點了才換且不改寫偏好', async () => {
   const origGetSelection = window.getSelection
   try {
-    // 模擬使用者正在選取文字
     window.getSelection = () => ({
       toString: () => 'selecting some text',
     }) as unknown as Selection
@@ -291,17 +280,14 @@ test('自動翻譯完成（選取文字中）：先保留原文、按鈕顯示�
     await until(() => document.querySelector('.msg-translate.ready') !== null, '按鈕標註譯文已就緒')
     assert.equal(document.querySelector('.msg-translate')?.textContent, '譯文已就緒')
     assert.equal(document.querySelector('.msg-translation'), null, '選取中先保留原文')
-    // 偏好：記住 wanted，但不改寫 declined
     assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.want') ?? '[]'), ['auto-select'])
     assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.declined') ?? '[]'), [])
 
-    // 使用者點擊按鈕才換成譯文
     await click(document.querySelector('.msg-translate') as HTMLButtonElement)
     await until(() => document.querySelector('.msg-translation') !== null, '點擊後顯示譯文')
     assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')
     assert.ok(document.querySelector('.msg-swap-forward'), '手動換面應帶 msg-swap-forward')
     assert.ok(document.querySelector('.msg-translate-ico.spin-forward'), '手動換面轉半圈')
-    // 依然不改寫 declined 偏好
     assert.deepEqual(JSON.parse(localStorage.getItem('am.msgTranslate.declined') ?? '[]'), [])
   } finally {
     window.matchMedia = window.matchMedia
@@ -311,7 +297,6 @@ test('自動翻譯完成（選取文字中）：先保留原文、按鈕顯示�
 
 test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕顯示「譯文已就緒」，點了才換', async () => {
   fakeApi(route())
-  // 掛在有 .msg-list 且非貼底的容器中
   const host = document.createElement('div')
   host.className = 'msg-list'
   Object.defineProperty(host, 'scrollHeight', { value: 1000, configurable: true })
@@ -334,7 +319,6 @@ test('自動翻譯完成（向上捲動閱讀中）：先保留原文、按鈕�
     assert.equal(document.querySelector('.msg-translate')?.textContent, '譯文已就緒')
     assert.equal(document.querySelector('.msg-translation'), null, '閱讀歷史中先保留原文')
 
-    // 點擊後切換到譯文
     await click(document.querySelector('.msg-translate') as HTMLButtonElement)
     await until(() => document.querySelector('.msg-translation') !== null, '點擊後顯示譯文')
     assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 原文')

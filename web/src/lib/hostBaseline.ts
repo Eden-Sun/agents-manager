@@ -7,19 +7,12 @@ export type HostBaselineLevel = 'ok' | 'warn' | 'critical' | 'unknown' | 'stale'
 export interface HostBaselineView {
   text: string
   level: HostBaselineLevel
-  /** tooltip／說明；沒有就不顯示 */
   hint: string
-  /**
-   * 嚴重的排前面；沒有就是空陣列。`fix`：dry-run 計畫說可以自動補（在 `fixable` 裡）＝auto，其餘 manual；
-   * daemon 沒給 `fixable`（舊版）＝null，不標——不知道就不說需手動。
-   */
   items: { id: string; severity: 'critical' | 'warn'; message: string; note?: string; fix: 'auto' | 'manual' | null }[]
 }
 
-/** 跟 daemon 的 `RECHECK_EVERY + STALE_GRACE`（6 小時 + 15 分）同一條線：超過就算太久沒量。 */
 const STALE_AFTER_MS = (6 * 60 + 15) * 60 * 1000
 
-/** 「上次檢查」的時間，本地時區 `MM-DD HH:mm`；跨年（相對 `now`）改成 `YYYY-MM-DD HH:mm`；讀不懂就原樣顯示。 */
 export function formatCheckedAt(iso: string, now: number = Date.now()): string {
   const ms = Date.parse(iso)
   if (Number.isNaN(ms)) return iso || t('不明')
@@ -30,12 +23,6 @@ export function formatCheckedAt(iso: string, now: number = Date.now()): string {
   return `${year}${p(z.month)}-${p(z.day)} ${p(z.hour)}:${p(z.minute)}`
 }
 
-/**
- * hosts 面板的工作環境一致性行（SPEC §16.7，只讀）。
- * 沒量過、或探測沒跑完 → 「未知」，絕不當成全缺（一次 ssh 逾時不能在每台主機上喊一排缺漏）。
- * 過期（最後一次偵測失敗，或超過一個重量週期沒更新——主機一直離線時沒有任何事件，所以前端自己也算）→
- * 「上次檢查於…，目前無法連線」：舊結果照列但不再說是現況，連「與基準一致」也不能說。
- */
 export function hostBaselineView(b: HostBaseline | null, now: number = Date.now()): HostBaselineView {
   if (!b) return { text: t('一致性：尚未檢查'), level: 'unknown', hint: t('還沒量過這台主機（剛連上、或 daemon 是舊版）'), items: [] }
   const checked = Date.parse(b.checked_at)

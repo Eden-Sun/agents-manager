@@ -1,4 +1,3 @@
-/** 手機抽屜：停派切換在 ⋯／群集選單，不選 bot、不收抽屜。 */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -25,7 +24,7 @@ const bot = (id: string, over: Partial<Bot> = {}): Bot =>
 let requests: FakeRequest[] = []
 
 beforeEach(() => {
-  try { window.localStorage.clear() } catch { /* ignore */ }
+  try { window.localStorage.clear() } catch {  }
   requests = fakeApi((req) => (req.method === 'PATCH' ? { needs_restart: false } : undefined))
   useStore.setState({
     projects: [project],
@@ -37,7 +36,6 @@ beforeEach(() => {
   } as never)
 })
 
-/** App 的抽屜外殼（同一份 drawerShouldClose）：開著時點到導覽目標就收。 */
 function Shell() {
   const [open, setOpen] = useState(true)
   return (

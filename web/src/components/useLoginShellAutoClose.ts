@@ -5,10 +5,8 @@ import { forgetLoginShell, isLoginShell, loginSucceeded } from '../lib/loginShel
 import { useStore } from '../store/store'
 
 const POLL_MS = 2_000
-/** 提示後等多久才關：給人看一眼結果、或按「保留」。 */
 export const CLOSE_DELAY_MS = 4_000
 
-/** 為登入開的 shell（`lib/loginShellWatch`）：讀到登入成功就提示、幾秒後收掉 pane，並重新偵測登入狀態。 */
 export function useLoginShellAutoClose(host: string, paneId: string) {
   useEffect(() => {
     if (!isLoginShell(host, paneId)) return
@@ -37,7 +35,6 @@ export function useLoginShellAutoClose(host: string, paneId: string) {
           return
         }
       } catch {
-        // 讀不到（pane 已關、暫時斷線）：下一拍再試，pane 真的沒了面板自己會收。
       }
       if (alive) poll = setTimeout(() => void tick(), POLL_MS)
     }
@@ -45,7 +42,6 @@ export function useLoginShellAutoClose(host: string, paneId: string) {
     return () => {
       alive = false
       if (poll) clearTimeout(poll)
-      // 計時器不清：使用者切走了，登入已成功，照樣收 pane。
     }
   }, [host, paneId])
 }

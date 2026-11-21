@@ -56,17 +56,15 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
       project('p-exp', 'expert'),
     ],
     bots: [
-      // parent_child 專案
       bot('pc1', 'p-pc', 'manager'),
       bot('pc2', 'p-pc', 'executor'),
-      // expert 專案
       bot('exp-mgr', 'p-exp', 'manager'),
       bot('exp-adv', 'p-exp', 'advisor'),
       { ...bot('exp-spec', 'p-exp', 'specialist'), track: 'infra' } as Bot,
-      bot('exp-exec', 'p-exp', 'executor', null, true), // role_pending
+      bot('exp-exec', 'p-exp', 'executor', null, true),
       bot('exp-none', 'p-exp', null),
-      bot('exp-child', 'p-exp', null, 'exp-mgr'), // child
-      bot('exp-child-adv', 'p-exp', 'advisor', 'exp-mgr'), // 管理者設成顧問的 child
+      bot('exp-child', 'p-exp', null, 'exp-mgr'),
+      bot('exp-child-adv', 'p-exp', 'advisor', 'exp-mgr'),
     ],
     runs: {},
     botOrder: {},
@@ -84,30 +82,24 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   await mount(<Sidebar />)
   await settle()
 
-  // 1. parent_child 專案驗證
   const pcSection = document.querySelector<HTMLElement>('[data-project-id="p-pc"]')!
   assert.ok(pcSection, 'p-pc 專案區塊存在')
   assert.equal(pcSection.querySelectorAll('.project-expert-tag').length, 0, 'parent_child 專案標題不應有專家標籤')
   assert.equal(pcSection.querySelectorAll('.expert-section-head').length, 0, 'parent_child 專案不應有專家分段標題')
   assert.equal(pcSection.querySelectorAll('.bot-role-tag').length, 0, 'parent_child 專案 bot 列不應有角色短標')
 
-  // 2. expert 專案驗證
   const expSection = document.querySelector<HTMLElement>('[data-project-id="p-exp"]')!
   assert.ok(expSection, 'p-exp 專案區塊存在')
   assert.equal(expSection.querySelectorAll('.project-expert-tag').length, 1, 'expert 專案標題應有專家標籤')
 
-  // 分段標題驗證：順序 管理者 -> 專家 -> 顧問 -> 執行者（role 為空的併入執行者，不再有未分配）
   const headers = [...expSection.querySelectorAll('.expert-section-title')].map((el) => el.textContent?.trim())
   assert.deepEqual(headers, ['管理者', '專家', '顧問', '執行者'], '專家分段標題順序正確（不帶人數）')
-  // 英文縮寫在標題旁（2026-11-07 使用者）。
   const abbrs = [...expSection.querySelectorAll('.expert-section-head')].map((el) => el.querySelector('.expert-section-abbr')?.textContent ?? '')
   assert.deepEqual(abbrs, ['Mgr', 'Spc', 'Adv', 'Wkr'])
 
-  // 分段標題已寫角色：列上不再重複角色小標（2026-11-01 使用者），只有待套用的留著
   for (const id of ['exp-mgr', 'exp-adv', 'exp-spec']) {
     assert.equal(expSection.querySelector(`[data-bot-id="${id}"] .bot-role-tag`), null, `${id} 不應有角色短標`)
   }
-  // 側欄不顯示專家的 track（2026-11-04 使用者）
   assert.equal(expSection.querySelector('.bot-track-tag'), null, '側欄不顯示 track')
 
   const execTag = expSection.querySelector<HTMLElement>('[data-bot-id="exp-exec"] .bot-role-tag')
@@ -117,12 +109,10 @@ test('專家模式專案出現段落標題、專案「專家」標籤與角色�
   assert.ok(execTag?.querySelector('.bot-role-dot'), 'role_pending bot 應有小提示點')
   assert.match(execTag?.getAttribute('title') ?? '', /待套用（需重啟）/, 'role_pending title 應提示待套用')
 
-  // child bot 不應另外分段，且在 compact 子列中不獨立分段
   const childRow = expSection.querySelector<HTMLElement>('[data-bot-id="exp-child"]')
   assert.ok(childRow, 'child 列存在')
   assert.ok(childRow.closest('.bot-kids'), 'child 列應掛在父列底下')
   assert.equal(childRow.querySelector('.bot-role-tag'), null, '沒角色的 child 不標')
-  // 有角色的 child 不進分段，角色只能標在列上（2026-11-08 使用者：設了顧問 menu 看不出來）
   const advChild = expSection.querySelector<HTMLElement>('[data-bot-id="exp-child-adv"]')
   assert.ok(advChild?.closest('.bot-kids'), '顧問 child 仍掛在父列底下')
   assert.equal(advChild?.querySelector('.bot-role-tag')?.textContent?.trim(), '顧', '顧問 child 列上有「顧」')

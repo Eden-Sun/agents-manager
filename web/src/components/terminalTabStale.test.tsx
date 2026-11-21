@@ -1,6 +1,3 @@
-/**
- * #918：終端分頁換 bot／改行數時，慢回來的舊回應不能蓋到新畫面（真的掛元件進 happy-dom，`readTerminal` 由測試手動 resolve）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useEffect, useState } from 'react'
@@ -27,7 +24,6 @@ function snapOf(text: string, pane: string): TerminalSnapshot {
   return { text, pane_id: pane, columns: 120, rows: 30 } as unknown as TerminalSnapshot
 }
 
-/** 每次 `readTerminal` 都排進 `calls`，由測試決定誰先回來。 */
 function fakeReadTerminal() {
   const calls: Pending[] = []
   const read = (botId: string, _source: string, lines: number) =>

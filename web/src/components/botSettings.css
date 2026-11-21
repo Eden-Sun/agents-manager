@@ -1,7 +1,4 @@
-/* Bot 設定卡片版面（2026-09-13 使用者）：「不要擋到 header、寬度大一點不至於高度那麼高」「模型與強度不用特別說明」
-   「人設預設不勾也不顯示」「刪除只要一顆鍵」「識別放 modal header 就好」「header 不用 project name」。位置在 `BotSettingsPanel` 量。 */
 @media (width > 640px) {
-  /* 多一層 `.bs-scrim`：`styles.css` 在此檔之後載入，同權重的 `width: 520px` 會蓋回來。 */
   .bs-scrim > .bot-settings {
     width: min(760px, 100%);
   }
@@ -54,13 +51,9 @@
   background: none;
 }
 
-/* components/BotSettingsPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .bot-name > .persona-mark {
   flex: none;
 }
-
-/* Pop-up anchored to the gear. 只是擺放框不是遮罩（`pointer-events: none`）：反灰吃點擊會讓人開設定時不能拖圖、點別的 bot；
-   關閉靠外部 pointerdown 與 Escape。真正的 modal 才用 backdrop。 */
 
 .bs-scrim {
   position: fixed;
@@ -87,8 +80,6 @@
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-
-/* First paint is only for measuring the card; don't show it centred for a frame. */
 
 .bot-settings.measuring {
   visibility: hidden;
@@ -184,15 +175,12 @@
   bottom: 0;
 }
 
-/* 不能存的「儲存」退成中性 disabled，不要淡藍實心像可按。 */
-
 .bs-danger {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-top: 32px;
   padding: 12px 14px;
-  /* 紅色留給標題與按鈕；整塊粉紅會蓋過表單。 */
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-sunken);
@@ -229,10 +217,6 @@
   line-height: 1;
 }
 
-/* v4.0: identity login per host */
-
-/* 「未登入」跟 `.kind-missing-reason` 同語彙：警示色、不擋操作。 */
-
 .identity-logged-out {
   font-size: 11px;
   font-weight: 600;
@@ -253,9 +237,6 @@
 }
 
 @media (width <= 640px) {
-  /* `.anchored` 保險：手機不量齒輪位置，免得殘留 inline left/top 推歪 sheet。 */
-
-  /* 高度跟 `--vvh`（`useViewportPin`）走，iOS 鍵盤彈出時底部按鈕不被蓋住（issue #933）；`inset: 0 0 auto 0` 讓 `height` 生效。 */
 
   .bs-scrim {
     bottom: auto;
@@ -305,7 +286,6 @@
   letter-spacing: 0.03em;
 }
 
-/* 標題列的 pane 晶片縮成跟名字同一行高的小字（2026-09-18 使用者：「pane 晶片太大」）。 */
 .bs-head .bs-idents .copy-chip {
   min-height: 0;
   padding: 1px 6px;

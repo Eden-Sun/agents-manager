@@ -1,7 +1,3 @@
-/**
- * 登出了但還留著舊讀數的身份（2026-10-30 本機 cc1：10-25 登出後額度格一直灰著）：明細照樣要有登入入口。
- * 以前登入鈕只在「完全沒有讀數」時才畫。mock 的 cc1 正好是未登入＋有讀數。真的掛 `QuotaStrip` 進 happy-dom。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

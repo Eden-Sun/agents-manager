@@ -1,6 +1,4 @@
-/* 環境設定外殼（#1922）：桌機左側分頁 + 內頁單一捲軸；手機標題下折行分頁 */
 
-/* 桌機視窗 > 640px 時，環境設定專屬尺寸 */
 @media (width > 640px) {
   .modal:has(.env-shell) {
     width: min(960px, calc(100vw - 48px));
@@ -142,7 +140,6 @@ h2.page-title {
   display: none !important;
 }
 
-/* 子分頁（Jev 與 Claude API 共用）樣式，維持沉底軌道、選中 --bg-panel 加 --shadow */
 .env-subtabs {
   display: flex;
   gap: 2px;
@@ -181,7 +178,6 @@ h2.page-title {
   box-shadow: var(--shadow);
 }
 
-/* 手機（≤640px）：標題下折行分頁、觸控目標 ≥44px、不橫向捲動 */
 @media (width <= 640px) {
   .env-shell {
     flex-direction: column !important;
@@ -222,9 +218,6 @@ h2.page-title {
     font-size: 13px;
   }
 
-  /* 環境設定頁的手機版觸控樣式（#1466，接回分頁外殼）：
-     選擇器掛 `.env-panel`（外殼根節點）：特異性 0,2,0 蓋過各元件的單一 class。 */
-    /* 文字下限 13px：這些在桌機是 10.5–12px 的小字。 */
     .env-panel .hint,
     .env-panel .field > span,
     .env-panel .host-count,
@@ -254,7 +247,6 @@ h2.page-title {
       font-size: 13px;
     }
 
-    /* 觸控目標 ≥44px。 */
     .env-panel .btn,
     .env-panel .mini-btn,
     .env-panel .identity-login-btn,
@@ -265,7 +257,6 @@ h2.page-title {
       min-height: 44px;
     }
 
-    /* styles.css 有同權（0,2,0）或更高的規則把這兩種鍵壓回 28px／40px，這裡要更高的特異性才蓋得過。 */
     .env-panel .mini-btn.install-btn,
     .env-panel .btn.primary {
       min-height: 44px;
@@ -280,7 +271,6 @@ h2.page-title {
       padding-right: 0;
     }
 
-    /* 表單：標籤在上、欄位撐滿、一欄一行（輸入框 16px 由 styles.css 的手機規則管）。 */
     .env-panel .field input:not([type='checkbox']),
     .env-panel .field select,
     .env-panel .field textarea {
@@ -321,7 +311,6 @@ h2.page-title {
       margin: 0;
     }
 
-    /* 主機列：燈＋名稱在上，操作鍵獨占下一行（四顆鍵並排會把名稱擠成一條縫）。 */
     .env-panel .host-row {
       position: relative;
       flex-wrap: wrap;
@@ -335,7 +324,6 @@ h2.page-title {
       gap: 8px;
     }
 
-    /* 長字串折行而不是被省略號吃掉：手機沒有 hover 看 title。 */
     .env-panel .host-ssh,
     .env-panel .identity-detail,
     .env-panel .host-shell-open,
@@ -346,7 +334,6 @@ h2.page-title {
       overflow-wrap: anywhere;
     }
 
-    /* attach 說明泡泡：錨在整列、撐滿列寬，不要往左衝出螢幕。 */
     .env-panel .attach {
       position: static;
     }
@@ -357,7 +344,6 @@ h2.page-title {
       width: auto;
     }
 
-    /* 沒有巢狀捲動：清單就長在頁面裡，整頁只有 sheet 一條捲軸。 */
     .env-panel .deleted-list,
     .env-panel .host-baseline-items {
       max-height: none;
@@ -376,7 +362,6 @@ h2.page-title {
       padding-left: 20px;
     }
 
-    /* 身份列：登入／切換／登出與停用晶片可折行，不撐出列寬；✕ 刪除鍵也是 44px 觸控目標。 */
     .env-panel .identity-row .identity-main,
     .env-panel .identity-row .identity-name,
     .env-panel .identity-row .identity-logins,

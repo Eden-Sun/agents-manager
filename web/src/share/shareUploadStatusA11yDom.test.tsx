@@ -1,7 +1,3 @@
-/**
- * 分享頁上傳的狀態文字要念得出來：上傳中（第幾張）是 status，沒傳上去的錯誤是 alert。
- * 不能只是列表裡一段沒有 live 角色的文字，讀屏使用者選了檔案之後什麼都聽不到。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

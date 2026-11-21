@@ -9,7 +9,6 @@ const ago = (m: number) => new Date(NOW - m * 60_000).toISOString()
 const status = { context_used_pct: 45, context_used_tokens: 450_000, context_size: 1_000_000 }
 const base: CacheInput = { kind: 'claude', status, lastApiAt: ago(10), ttlSecs: 3600, nowMs: NOW, working: false }
 
-// claude 2.1.289 statusLine 實例形狀。
 const pcJson = (over: Record<string, unknown> = {}) => ({
   context_window: { used_percentage: 45, context_window_size: 1_000_000, total_input_tokens: 450_000 },
   prompt_cache: {
@@ -18,7 +17,6 @@ const pcJson = (over: Record<string, unknown> = {}) => ({
   },
 })
 const viaPc = (over: Record<string, unknown> = {}, extra: Partial<CacheInput> = {}) => ({ ...base, status: toStatusInfo(pcJson(over)), ...extra })
-// daemon 的 run.prompt_cache（codex＝rollout 推算）。
 const daemonPc = (over: Record<string, unknown> = {}) =>
   toPromptCache({
     source: 'rollout_estimate', warm: true, expires_at: nowS + 20 * 60, ttl_secs: 3600, recache_tokens_if_cold: 17_667, hit_ratio: 0.739,
@@ -32,7 +30,6 @@ test('tokensK / contextTokens', () => {
   assert.equal(tokensK(450_000), '450K')
   assert.equal(tokensK(1_250_000), '1.3M')
   assert.equal(tokensK(800), '800')
-  // 邊界：四捨五入後到 1000K 就該進位成 M；10M 以上不寫小數。
   assert.equal(tokensK(999_499), '999K')
   assert.equal(tokensK(999_500), '1M')
   assert.equal(tokensK(999_999), '1M')
@@ -43,7 +40,6 @@ test('tokensK / contextTokens', () => {
   assert.equal(contextTokens({ context_used_pct: 50, context_used_tokens: null, context_size: 200_000 }), 100_000)
   assert.equal(contextTokens({ context_used_pct: 50, context_used_tokens: null, context_size: null }), null)
   assert.equal(contextTokens(null), null)
-  // total_input_tokens 是累計值，百分比乘視窗優先。
   assert.equal(contextTokens({ context_used_pct: 10, context_used_tokens: 999_999, context_size: 200_000 }), 20_000)
 })
 
@@ -56,12 +52,10 @@ test('toStatusInfo：解出 prompt_cache 精簡欄位（ttl "1h" → 3600）；�
   assert.equal(toStatusInfo({ context_window: { used_percentage: 5 } })!.prompt_cache, undefined)
 })
 
-// ---- claude 有 prompt_cache：一律用它 ----
 test('claude 熱：狀態列「熱（剩 25 分）」、輸入框不警示', () => {
   const v = cacheView(viaPc())!
   assert.equal(cacheLabel(v), '熱（剩 25 分）')
   assert.equal(coldWarning(v), null)
-  // 不看 last_api_at／ttl。
   assert.equal(cacheLabel(cacheView(viaPc({}, { lastApiAt: ago(500), ttlSecs: null }))!), '熱（剩 25 分）')
   assert.equal(cacheLabel(cacheView(viaPc({ expires_at: nowS + 30 }))!), '熱（剩 1 分）')
 })
@@ -102,12 +96,10 @@ test('沒有 prompt_cache（舊版 claude）才退回 last_api_at＋ttl 推算',
   assert.equal(cold.state, 'cold')
   assert.equal(coldWarning(cold), '快取已過期，送出這則會重寫約 450K')
   assert.equal(cacheLabel(cacheView({ ...base, status: s, lastApiAt: ago(10) })!), '熱（剩 50 分）')
-  // 推算也一樣：回合中不警示；沒有活動紀錄就沒有快取欄。
   assert.equal(coldWarning(cacheView({ ...base, status: s, lastApiAt: ago(500), working: true })), null)
   assert.equal(cacheView({ ...base, status: s, lastApiAt: null }), null)
 })
 
-// Codex 不再從 rollout 或時間推算熱冷，也不顯示過期警示。
 test('codex 不採用舊 TTL 與冷讀數發出過期警示', () => {
   for (const input of [codex(), codex({ warm: false, expires_at: nowS - 30 * 60 }), codex({}, { working: true })]) {
     assert.equal(cacheView(input), null)
@@ -126,7 +118,6 @@ test('gpt-6.1-sol：context 整段由 StatusLineBar 畫，contextFallback 不重
   assert.equal(contextFallback(sol), null)
   assert.equal(contextFallback({ ...sol, model: 'GPT-6.1-Sol' }), null)
   assert.equal(contextFallback({ ...sol, promptCache: null, status: { context_used_pct: null, context_used_tokens: 73_000, context_size: null } }), null)
-  // 其他 Sol 版本與 Luna、以及 claude 的同名模型：仍用 rollout 給的視窗。
   assert.deepEqual(contextFallback({ ...sol, model: 'gpt-6-sol' }), { pct: '16%', detail: '73k/475k' })
   assert.deepEqual(contextFallback({ ...sol, model: 'gpt-6-luna' }), { pct: '16%', detail: '73k/475k' })
   assert.deepEqual(contextFallback(codex({ context_used_pct: 16, context_used_tokens: 73_000, context_size: 475_000 }, { kind: 'claude', model: 'gpt-6.1-sol' })), { pct: '16%', detail: '73k/475k' })
@@ -137,7 +128,6 @@ test('codex 沒有 rollout 或只有舊 TTL 都不推算熱冷', () => {
   assert.equal(cacheView({ ...codex(), promptCache: null }), null)
 })
 
-// ---- grok 完全不管 ----
 test('grok（與未知 kind）：沒有快取欄、沒有警示、沒有 context 補充', () => {
   const g = { ...codex(), kind: 'grok' }
   assert.equal(cacheView(g), null)

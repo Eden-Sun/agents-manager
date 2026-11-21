@@ -1,7 +1,3 @@
-/**
- * 主機 shell 的 xterm 終端（HostShellXterm）：推送 frame 會畫上去；沒有推送（舊 daemon 404）就退回輪詢。
- * 真的掛進 happy-dom，後端是 `MockTransport`；WebSocket 用 `fakeWebSocket()` 假掉，由測試決定何時連上、何時推訊息。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeWebSocket, mockApi, mount, setupDom, teardownDom, unmountAll, until, type FakeRequest, type FakeSocketControl } from '../testing/domHarness'
@@ -62,7 +58,6 @@ test('推送的 frame 畫進終端，並回報 pane 的幾何', async () => {
 test('連不上推送（舊 daemon 握手被拒）就每隔一陣子輪詢 terminal?format=ansi', async () => {
   const pane = await openPane()
   await mount(<HostShellXterm host="local" paneId={pane} wrap onTyping={() => {}} onRead={() => {}} onSend={() => {}} onGeometry={() => {}} onStreaming={() => {}} fitScreen={false} />)
-  // 不 open：WebSocket 停在 CONNECTING，等同握手沒成功，應該由輪詢補畫面。
   await until(() => terminalReads() >= 2, '沒有推送時要輪詢 terminal?format=ansi')
   assert.ok(requests.some((r) => r.path.includes('format=ansi')))
 })
@@ -95,7 +90,6 @@ test('串流 raw 的 UTF-8 位元組交給 xterm 解碼（中文不會變亂碼�
 })
 
 test('observe 模式連上就送 size（面板大小），之後收到 frame 切回舊模式', async () => {
-  // happy-dom 量不出字寬，fit 算不出 cols×rows；這裡假設面板是 120×40。
   const realPropose = FitAddon.prototype.proposeDimensions
   FitAddon.prototype.proposeDimensions = () => ({ cols: 120, rows: 40 })
   try {

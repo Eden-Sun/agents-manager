@@ -1,6 +1,3 @@
-/**
- * 桌機預覽欄的寬度把手（issue #1137）：可聚焦的 separator 要有完整的 value 範圍，Home／End 直接到最窄／最寬。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, setupDom, teardownDom, unmountAll, settle } from '../testing/domHarness'
@@ -9,7 +6,6 @@ import { setPreviewColOpen } from '../store/previewLayout'
 import { PreviewColumn } from './PreviewColumn'
 
 const VIEWPORT = 1600
-// 這兩個要等 happy-dom 註冊之後才讀（`before` 裡）：模組頂層讀 `window` 會在 DOM 還沒註冊時炸（#1348）。
 let originalMatchMedia: typeof window.matchMedia
 let originalInnerWidth: number
 
@@ -30,7 +26,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** 桌機寬度：比 1024px 斷點寬，抽屜不啟用。 */
 function desktop() {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: VIEWPORT })
   window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia

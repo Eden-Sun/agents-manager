@@ -7,18 +7,10 @@ import { CapEditor } from './CapEditor'
 import './claudeApiBotLimits.css'
 
 export interface ClaudeApiBotLimitsProps {
-  /** 若指定 botId，顯示此 bot 的累計用量統計（用於 BotSettingsPanel） */
   botId?: string
-  /** 點擊 bot 連結時的額外回呼（例如關閉 Settings Modal） */
   onSelectBot?: (botId: string) => void
 }
 
-/**
- * claude-api bot 的總花費上限與每回合時限／呼叫次數設定面板。
- * 同時共用於：
- * 1. 環境設定（Settings → Claude API）：設定全域上限與時限，並列出專案中的 claude-api bot 連結。
- * 2. Bot 設定（BotSettingsPanel）：讓手機與桌機在 bot 設定面板中直接檢視與調整總上限與每回合時限，並查看該 bot 用量。
- */
 export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsProps) {
   const t = useT()
   const [cap, setCap] = useState<ClaudeApiCap | null>(null)
@@ -130,7 +122,7 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
         {t('所有 claude-api bot 共用的總花費上限與每回合設定（時間與 API 呼叫次數）。亦可在各 bot 的狀態列或設定面板修改。')}
       </p>
 
-      {/* 若是在單一 bot 設定面板，顯示該 bot 的統計 */}
+      {}
       {botId && usage ? (
         <div className="claude-api-bot-usage-stats" data-testid="bot-usage-stats">
           <div className="stat-item">
@@ -150,7 +142,7 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
         </div>
       ) : null}
 
-      {/* 總花費上限 */}
+      {}
       <div className="claude-api-bot-limits-section">
         {editingCap ? (
           <CapEditor
@@ -206,7 +198,7 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
         )}
       </div>
 
-      {/* 每回合上限 */}
+      {}
       <div className="claude-api-bot-limits-section">
         {editingLimits ? (
           <form className="claude-api-bot-limits-form" data-testid="turn-limits-form" onSubmit={(e) => void handleSaveLimits(e)}>
@@ -269,7 +261,7 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
         </p>
       </div>
 
-      {/* 若在全域環境設定中，列出專案中的 claude-api bot 連結 */}
+      {}
       {!botId ? (
         <div className="claude-api-bot-links-section">
           {allApiBots.length > 0 ? (

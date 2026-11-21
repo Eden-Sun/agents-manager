@@ -1,4 +1,3 @@
-/* 「Claude 問／你答」卡（`AskAnswersCard`）：靠左、左邊一條 accent，跟使用者自己的泡泡（靠右、實心）分得開。 */
 .msg.ask-answers {
   align-self: flex-start;
   align-items: flex-start;

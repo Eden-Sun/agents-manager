@@ -10,8 +10,6 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { useT, type TFn } from '../lib/i18n'
 import './shareLinkButton.css'
 
-/** 分享連結拿不到完整網址時的人話（舊資料只有雜湊，或 base_url 沒設）。 */
-/** 分享選單的寬度上限（px）；窄視窗會再縮成視窗減 16px。 */
 const MENU_WIDTH = 360
 
 function noUrlText(s: ShareState, t: TFn): string {
@@ -20,7 +18,6 @@ function noUrlText(s: ShareState, t: TFn): string {
     : t('拿不到分享連結：config.toml 的 [share] base_url 沒設')
 }
 
-/** 鏈結圖示（線條、currentColor，跟 ⚙ 同風格；#1180 不用 emoji）。 */
 function LinkIcon() {
   return (
     <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
@@ -36,25 +33,17 @@ function LinkIcon() {
   )
 }
 
-/**
- * 分享用 bot 的聊天區頂端分享鈕（SPEC「分享 bot」）：一般 bot 不畫。只有一顆圖示鈕（#1180，跟 ★ ⚙ 同尺寸）：
- * 狀態用顏色表達（未分享灰、分享中 accent、信任分享警示色）。未分享時按下＝開啟並複製連結；
- * 分享中按下＝開選單，第一項「複製連結」，其後是重產／關閉（都要確認）。
- */
 export function ShareLinkButton({ botId }: { botId: string }) {
   const t = useT()
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
   const restricted = profile !== null
   const enabled = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
-  // 重產連結不改 `share_enabled`：靠 store 的 `shareRev`（每收到一次 `bot_share_changed` 加一）知道連結換了（#1098）。
   const rev = useStore((s) => s.shareRev[botId] ?? 0)
   const notify = useStore((s) => s.notify)
-  // 連結連同它是哪一版（`rev`）一起記：別處重產之後（rev 變了），舊的那條就不認，等重抓回來（#1098）。
   const [fetched, setFetched] = useState<{ rev: number; share: ShareState } | null>(null)
   const share = fetched && fetched.rev === rev ? fetched.share : null
   const [busy, setBusy] = useState(false)
   const [menu, setMenu] = useState(false)
-  // 選單用 fixed 定位貼著圖示鈕：名字列 overflow 會剪掉 absolute 的選單（#1072）。
   const [menuAt, setMenuAt] = useState<{ top: number; left: number } | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'off' | null>(null)
   const wrapRef = useRef<HTMLSpanElement>(null)
@@ -65,7 +54,6 @@ export function ShareLinkButton({ botId }: { botId: string }) {
     (state, revision) => setFetched({ rev: revision, share: state }),
   )
 
-  // 預先讀取分享狀態：按下去同步複製，不用等網路（剪貼簿要在使用者手勢裡）。
   useEffect(() => {
     if (!restricted) return
     void readAt(rev).promise.catch(() => {})
@@ -89,7 +77,6 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const menuKeys = useMenuKeys(menu, menuRef, mainRef, () => setMenu(false))
 
   if (!restricted) return null
-  // 這個瀏覽器做不到「等網路再複製」（http）：只能用已預讀的連結在手勢裡同步複製；還沒讀到就只給可選取的連結。
   const selectOnly = !asyncCopyAvailable()
 
   const copy = (s: ShareState, done: string) => {
@@ -98,7 +85,6 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   }
 
   const openMenu = () => {
-    // 選單貼著按鈕的右緣往左展開，但整個框要留在視窗裡（寬度上限＝視窗減 16px）。
     const r = mainRef.current?.getBoundingClientRect()
     if (r) {
       const width = Math.min(MENU_WIDTH, window.innerWidth - 16)
@@ -127,7 +113,6 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         notify('error', shareErrorText(e))
         return
       }
-      // 不能寫剪貼簿：把選單打開，連結就在第一項（重產後 rev 一變，上面的 effect 會再抓一次新連結）。
       if (effective.enabled && selectOnly && selectDone) {
         openMenu()
         notify('info', selectDone)
@@ -141,24 +126,20 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   const toggleMenu = () => (menu ? setMenu(false) : openMenu())
 
   const onMain = () => {
-    // 未分享：開啟並複製；分享中：開選單（第一項才是複製）。
     if (enabled) return toggleMenu()
     void run(() => setShareEnabled(botId, true), t('已開啟分享並複製連結'), t('已開啟分享：連結在選單裡，按「複製連結」'))
   }
 
   const onCopyFromMenu = () => {
     setMenu(false)
-    // 非 https：等網路之後就不能寫剪貼簿，直接用已預讀、同一版（rev）的連結在這個手勢裡複製。
     if (selectOnly) {
       if (share?.enabled && share.url) copy(share, t('已複製分享連結'))
       return
     }
-    // 複製是唯讀操作；重新讀取伺服器狀態，不能從過期的本機旗標重開分享。
     const requestRev = currentRev()
     const request = readAt(requestRev)
     void request.promise.then(
       (s) => {
-        // GET 期間若別處重產連結，這份回應已過期，不要複製舊 URL。
         if (!isCurrentRead(request)) return
         if (!s.enabled) {
           useStore.setState((state) => ({
@@ -181,7 +162,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
 
   return (
     <span className="share-link" ref={wrapRef}>
-      {/* 只有這一顆圖示鈕，跟 ★ ⚙ 同一組（#1072、#1180）；文字在 aria-label 與 title。 */}
+      {}
       <button
         ref={mainRef}
         type="button"
@@ -196,7 +177,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
         <LinkIcon />
       </button>
       {menu
-        ? // 選單放到 body：側欄的記憶體晶片等元素有自己的 z-index，會蓋住在標題列裡的選單（#2026-10-31）。
+        ?
           createPortal(
         <span
           ref={menuRef}
@@ -210,7 +191,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
                 : undefined
           }
         >
-          {/* 完整網址自動換行、可選取；非 https 也照樣給「複製連結」：已預讀到的連結在點擊手勢裡同步複製（execCommand）。 */}
+          {}
           {share?.enabled && share.url ? (
             <div className="share-link-url-text" aria-label={t('分享連結')}>
               {share.url}
@@ -250,7 +231,7 @@ export function ShareLinkButton({ botId }: { botId: string }) {
           document.body,
           )
         : null}
-      {/* 兩個框分開：同一個框有 800ms 防連點（同 BotShareSection）。 */}
+      {}
       <ConfirmDialog
         open={confirm === 'rotate'}
         title={t('重產分享連結？')}
@@ -279,7 +260,6 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   )
 }
 
-/** 側欄 bot 名字旁的標記：受限 🔗、信任分享 🔓（另一個顏色）；分享中亮起。 */
 export function ShareMark({ botId }: { botId: string }) {
   const t = useT()
   const profile = useStore((s) => s.bots.find((x) => x.id === botId)?.share_profile ?? null)

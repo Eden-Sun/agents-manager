@@ -1,7 +1,3 @@
-/**
- * codex 登入會先刪掉那個帳號原本的 auth.json（2026-11-03 實測）：已登入就先問，取消就一個請求都不發；未登入、claude 直接走。
- * 後端是 mock（不碰真的 CODEX_HOME）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

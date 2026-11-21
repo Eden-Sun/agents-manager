@@ -1,4 +1,3 @@
-/** 「登入好了，重試」的提示文字：上一則使用者訊息截 60 字，截點落在 emoji 代理對中間時不留落單的代理字元。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -22,7 +21,6 @@ function message(over: Partial<Message>): Message {
 
 test('登入好了，重試的提示：上一則截 60 字，截點落在 emoji 代理對中間時不留落單的代理字元', async () => {
   fakeApi(() => undefined)
-  // 59 個 a 加一顆 😀：UTF-16 的第 60 個單位只剩 😀 的高位代理。
   const user = message({ id: 'u1', role: 'user', content: `${'a'.repeat(59)}😀bc` })
   const authFail = message({ id: 'sys1', role: 'system', content: '（帳號或授權）claude 沒登入', created_at: '2026-10-10T00:00:01.000Z' })
   useStore.setState({

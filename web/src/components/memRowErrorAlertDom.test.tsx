@@ -1,6 +1,3 @@
-/**
- * 記憶體彈窗的「停止 bot」失敗：daemon 的理由要當 alert 念出來（按鈕還在、焦點在它身上，使用者得知道沒停成）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, settle, teardownDom, unmountAll } from '../testing/domHarness'

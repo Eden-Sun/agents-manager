@@ -1,5 +1,3 @@
-/* ANSI 顏色（AnsiTerm）：16 色走 --ansi-0…15，淺色與深色各一組，對比都夠看。
-   深色是 #0e1116（--term-bg）底，所以 0 號（黑）要提亮，不然整段黑字看不見。 */
 :root {
   --ansi-0: #24272d;
   --ansi-1: #c4302b;
@@ -66,13 +64,10 @@
 .ansi-s { text-decoration: line-through; }
 .ansi-u.ansi-s { text-decoration: underline line-through; }
 
-/* 片段裡的網址仍是可點的連結：沿用外層顏色，不被 .term-link 的強調色蓋掉。 */
 .ansi-term .term-link {
   color: inherit;
 }
 
-/* 24-bit／256 色（AnsiTerm 的 `styleProps`）：CLI 照深色終端挑色。深色主題照原色；淺色主題把明度翻過來，
-   白字變深字、claude 使用者訊息的深灰底（55,55,55）變淺灰底。不支援 relative color／light-dark() 的瀏覽器退回原色。 */
 .ansi-fg-rgb {
   color: var(--ansi-fg);
   color: light-dark(hsl(from var(--ansi-fg) h s calc(100 - l)), var(--ansi-fg));
@@ -83,7 +78,6 @@
   background-color: light-dark(hsl(from var(--ansi-bg) h s calc(100 - l / 2)), var(--ansi-bg));
 }
 
-/* 有底色的字段把上下行距也塗滿：行高 1.45 時 inline 背景只蓋字身，相鄰兩行的底色中間會留一條縫（2026-11-05 截圖）。 */
 .ansi-bg {
   padding-block: 0.14em;
 }

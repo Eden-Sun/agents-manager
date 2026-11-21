@@ -1,12 +1,6 @@
-/**
- * mock 的更新框資料（issue #561）：`/changelog`、`/release-triage`、`/claude-update/review`。
- * 截圖要演「有分析／尚未分析」兩種：`__amMock.triageOff('codex')` 清掉某個 kind 的帳本、
- * `__amMock.updateNotice('am-codex', '…')` 給某顆 bot 掛更新通知。
- */
 
 type Rec = Record<string, unknown>
 
-/** 「磁碟上」的版本：claude 的新版已經下載好；codex 是舊版（新版還沒裝）。 */
 const DISK: Record<string, string> = { claude: '2.1.282', codex: '0.155.1', herdr: '0.9.1', agy: '1.4.5', grok: '1.0.66' }
 
 const CHANGELOG: Record<string, { version: string; body: string }[]> = {
@@ -19,7 +13,6 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
     { version: '0.156.1', body: '- Fixed resume picker ordering' },
     { version: '0.156.0', body: '- Background app-server starts automatically\n- `codex exec --json` adds `turn.usage`' },
   ],
-  // agy／grok：實際抓下來的上游原文節錄（#1928）。
   agy: [
     {
       version: '1.4.6',
@@ -42,8 +35,6 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
 }
 
 function triageRows(kind: string): Rec[] {
-  // agy／grok 的帳本還是空的（新版剛出、kick 還沒跑）：更新框寫「尚未分析」，按「分析影響」才派。
-  // daemon：herdr 還沒有分診規則，`GET /api/release-triage?kind=herdr` 回空的 rows（API.md）。
   if (kind === 'herdr' || kind === 'agy' || kind === 'grok') return []
   if (kind === 'claude') {
     return [
@@ -108,14 +99,12 @@ export class MockReleaseTriage {
   private published = new Set<string>()
   private off = new Set<string>()
   private reviews = new Map<string, Rec>()
-  /** 同一 kind／from／to 只翻一次；host 不進這個鍵。 */
   private translations = new Map<string, Rec>()
 
   triageOff(kind: string) {
     this.off.add(kind)
   }
 
-  /** 認得的路徑回資料，不認得回 `undefined`（交回 mock 主體往下比對）。 */
   handle(method: string, rawPath: string, q: URLSearchParams, b: Rec): unknown {
     if (method === 'GET' && rawPath === '/changelog') {
       const kind = q.get('kind') ?? 'claude'
@@ -151,7 +140,6 @@ export class MockReleaseTriage {
     return undefined
   }
 
-  /** GET 只回已有的結果；沒翻過是 `absent`。POST 才寫進記憶體。範例譯文是繁中。 */
   private translation(method: string, q: URLSearchParams): Rec {
     const kind = q.get('kind') ?? 'claude'
     const from = q.get('from') ?? ''

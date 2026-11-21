@@ -10,12 +10,10 @@ const LOOK: Record<ThemeMode, { icon: string; name: string }> = {
   dark: { icon: '☾', name: msg('深色') },
 }
 
-/** 左上角主題鈕：同一顆按鈕三段輪流切換 自動 → 淺 → 深（2026-09-15 使用者）。 */
 export function ThemeToggle() {
   const t = useT()
   const [mode, setMode] = useState<ThemeMode>(loadTheme)
   const next = NEXT[mode]
-  // 另一個分頁換了主題：這顆鈕的圖示跟著變（DOM 本身由 main.tsx 的監聽套用）。
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       const m = themeFromStorageEvent(e.key, e.newValue)

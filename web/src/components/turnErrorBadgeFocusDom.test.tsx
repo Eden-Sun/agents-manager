@@ -1,7 +1,3 @@
-/**
- * 回合中斷徽章的浮層（role="dialog"）：打開時焦點要進浮層，讀屏才知道多了一個對話框、按鈕才夠得到；
- * Esc 或送出後收起來，焦點回到徽章鈕，不掉到 body。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, focusLikeBrowserClick, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -52,7 +48,6 @@ test('打開後焦點進浮層（role=dialog 要有人接住焦點）', async ()
 test('Esc 收起浮層，焦點回到徽章鈕（不掉到 body）', async () => {
   seed()
   const { badge, pop } = await openBadge()
-  // 前提：焦點已在浮層裡（使用者 Tab 進來或焦點進浮層）；這裡只測收起時的還焦點。
   pop!.querySelector<HTMLElement>('button')!.focus()
   await keydown(document.activeElement!, 'Escape')
   await settle(20)

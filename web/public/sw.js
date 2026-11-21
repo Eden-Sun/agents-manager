@@ -1,4 +1,3 @@
-// 只處理 push 與 notificationclick。不做離線快取、不攔 fetch：開發版與部署更新不受影響。
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
 
@@ -10,7 +9,6 @@ self.addEventListener('push', (event) => {
     data = { body: event.data ? event.data.text() : '' }
   }
   if (data.close && data.tag) {
-    // 關閉指令（別的裝置已讀）：Chrome 要求每則 push 都顯示通知，所以先用同 tag 覆蓋成無聲空白，再把這個 tag 全部關掉。
     event.waitUntil(
       (async () => {
         await self.registration.showNotification(' ', { tag: data.tag, silent: true, icon: '/icon-192.png' })

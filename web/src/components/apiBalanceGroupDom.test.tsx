@@ -1,9 +1,3 @@
-/**
- * 額度列裡的「API 餘額」群組（ApiBalanceGroup，使用者 2026-11-19）：
- * - 放在 `.quota-open` 外面，收合時仍在 DOM、不被裁（裁掉的只能是量表）；
- * - 沒有額度格的主機（m4p）仍畫出群組；兩家都不可見整個不畫；
- * - 兩家都有值就兩行，只有一家就一行；未啟用的那家不畫；點了開各自的校正視窗。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -14,12 +8,10 @@ import { resetClaudeApiBalanceForTest } from '../hooks/useClaudeApiBalance'
 import { resetOpenAiApiBalanceForTest } from '../hooks/useOpenAiApiBalance'
 import { QuotaStrip } from './QuotaStrip'
 
-/** 額度列要量版面、載入多個模組，預設 5 秒在滿載的 shard 上太緊。 */
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
 const rect = (width: number) => ({ x: 0, y: 0, left: 0, top: 0, right: width, bottom: 0, width, height: 0, toJSON() { return this } }) as DOMRect
 
-/** 每個元素都 300px、額度區 100px：量表一定放不下、會收合；回傳還原函式。 */
 function squeezeLayout(): () => void {
   const proto = HTMLElement.prototype as unknown as Record<string, unknown>
   const names = ['getBoundingClientRect', 'getClientRects', 'clientWidth'] as const
@@ -35,7 +27,6 @@ function squeezeLayout(): () => void {
   }
 }
 
-/** 同一個 shard 會跟別的檔共用模組狀態：每個測試開頭都重設，不靠前一個檔的 afterEach。 */
 before(() => {
   resetClaudeApiBalanceForTest()
   resetOpenAiApiBalanceForTest()
@@ -92,7 +83,6 @@ const group = () => document.querySelector<HTMLElement>('[data-k="quota-api-grou
 const claudeChip = () => document.querySelector<HTMLElement>('[data-k="quota-balance"]')
 const openaiChip = () => document.querySelector<HTMLElement>('[data-k="openai-balance"]')
 
-/** 本機或指定主機的 Claude 額度格（讓額度列有量表）。 */
 function seedClaudeGauge(host: string) {
   useStore.setState({
     quota: {

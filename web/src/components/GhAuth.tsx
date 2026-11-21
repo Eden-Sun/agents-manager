@@ -58,7 +58,6 @@ async function startLogin(host: string, notify: (kind: 'info' | 'error', text: s
   return next
 }
 
-/** HostsPanel row: current gh account + a login button when it cannot talk to GitHub. */
 export function GhHostStatus({ host }: { host: string }) {
   const t = useT()
   const notify = useStore((s) => s.notify)
@@ -70,7 +69,6 @@ export function GhHostStatus({ host }: { host: string }) {
     void api
       .fetchGhStatus(host)
       .then(setSt)
-      // 讀不到就留著上一份：輪詢裝置碼授權時一次失敗不能把代碼面板收掉、把輪詢停掉。第一次就讀不到時 st 本來就是 null（照舊不畫）。
       .catch(() => undefined)
   }, [host])
 
@@ -141,7 +139,6 @@ export function GhHostStatus({ host }: { host: string }) {
   )
 }
 
-/** IssuesBar error row: one-click login for the project's host, then refetch. */
 export function GhLoginButton({ host, onLoggedIn }: { host: string; onLoggedIn: () => void }) {
   const t = useT()
   const notify = useStore((s) => s.notify)

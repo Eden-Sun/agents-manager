@@ -5,7 +5,6 @@ import { useStore } from '../store/store'
 type ShareRead = { rev: number; seq: number; promise: Promise<ShareState> }
 export type SharePost = { rev: number; seq: number }
 
-/** Share GET/POST ordering shared by the settings panel and chat button. */
 export function useShareRequests(
   botId: string,
   onShare: (share: ShareState, rev: number) => void,

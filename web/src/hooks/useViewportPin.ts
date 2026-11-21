@@ -1,18 +1,8 @@
 import { useEffect } from 'react'
 import { DRAWER_QUERY, useMediaQuery } from './useMediaQuery'
 
-/**
- * iOS Safari 鍵盤不縮 layout viewport（`100dvh`、`resizes-content` 都不理），2026-09-09 使用者
- * 打字時看不到字。只有 `visualViewport.height` 會變，寫進 `--vvh` 給手機版高度用，並捲回 (0,0)。
- *
- * 門檻是 `DRAWER_QUERY`（≤1024px）不是 `PHONE_QUERY`（issue #548）：iPadOS Safari 一樣不縮 layout
- * viewport，而 641–1024px 的抽屜版面（iPad 直式 768／820、iPad mini 744）原本沒有 `--vvh`，
- * 鍵盤一彈出來就把底部輸入列蓋住。
- */
-/** 全螢幕 sheet（新增／設定對話框、bot 設定、確認框）：鍵盤彈出後焦點欄位要留在可視範圍內（issue #933）。 */
 export const SHEET_SELECTOR = '.modal, .bot-settings, .confirm-dialog'
 
-/** 焦點在 sheet 裡才補捲；頁面其他地方的焦點不動（輸入列有自己的處理）。 */
 export function revealInSheet(active: Pick<Element, 'closest' | 'scrollIntoView'> | null | undefined): boolean {
   if (!active || typeof active.closest !== 'function' || !active.closest(SHEET_SELECTOR)) return false
   active.scrollIntoView({ block: 'nearest' })
@@ -32,7 +22,6 @@ export function useViewportPin() {
     }
     apply()
     const onFocus = () => {
-      // iOS 在 focus 之後才動 viewport，多補幾次直到它安定。
       setTimeout(apply, 50)
       setTimeout(apply, 250)
       setTimeout(() => {

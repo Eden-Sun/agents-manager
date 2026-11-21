@@ -52,7 +52,6 @@ import { t, langFromSearch, setLangOverride } from '../lib/i18n'
 
 export const MOCK_MODE = import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
 
-// mock 的示範資料依語言產生，所以 `?lang=` 要在建立 MockTransport 之前套用（拍截圖用，不寫入儲存）。
 if (MOCK_MODE && typeof location !== 'undefined') {
   const forced = langFromSearch(location.search)
   if (forced) setLangOverride(forced)
@@ -62,7 +61,6 @@ const transport: Transport = MOCK_MODE ? new MockTransport() : new HttpTransport
 
 export const isMock = transport.mock
 
-/** 獨立 API 模組共用這條；各自 `new` transport 會在 mock 模式變成兩份不相干的假資料。 */
 export const rawTransport: Pick<Transport, 'request' | 'mock'> = transport
 
 export function session(): Promise<string> {
@@ -77,12 +75,10 @@ export async function fetchState(): Promise<AppState> {
   return toState(await transport.request('GET', '/state'))
 }
 
-/** API.md §6: `before` = 已載入訊息中 rowid 最小一則的 id（往前翻，issue #25）。 */
 export async function fetchMessages(
   botId: string,
   limit = 200,
   before?: string,
-  /** API.md §6：只要某個回合（或某個 role）的訊息，不必翻整段歷史。 */
   filter?: { turnId?: string; role?: 'user' | 'assistant' | 'system' },
 ): Promise<MessagesPage> {
   const q = new URLSearchParams({ limit: String(limit) })
@@ -93,7 +89,6 @@ export async function fetchMessages(
   return toMessagesPage(raw, botId)
 }
 
-/** SPEC §6.5e：專案底下的非 agent pane（shell／服務）。 */
 export interface ProjectPane {
   alias?: string | null
   pane_id: string
@@ -112,9 +107,7 @@ export interface ProjectPane {
   first_seen: string
   last_seen: string
   gc_optin: boolean
-  /** daemon 判的「只能看」（有 listen port）。舊 daemon 沒這欄＝`undefined`，呼叫端退回看 port（`lib/shellAccess`）。 */
   read_only?: boolean
-  /** 只在 `GET /api/panes?unowned=1`：daemon 認定的那顆固定 scratch。舊 daemon 沒這欄＝`undefined`。 */
   scratch?: boolean
 }
 
@@ -145,31 +138,24 @@ function toPane(v: unknown): ProjectPane {
   }
 }
 
-/** 全部被 trace 的 pane（`GET /api/panes`）：重整／深連結時用來把「從選單點進去的 pane」還原回來。 */
 export async function fetchAllPanes(): Promise<ProjectPane[]> {
   const raw = await transport.request('GET', '/panes')
   const list = (raw as { panes?: unknown[] })?.panes
   return Array.isArray(list) ? list.map(toPane) : []
 }
 
-/** 對不到任何專案的 pane（`GET /api/panes?unowned=1`），側欄底部那一組；daemon 會標哪一顆是 scratch。 */
 export async function fetchUnownedPanes(): Promise<ProjectPane[]> {
   const raw = await transport.request('GET', '/panes?unowned=1')
   const list = (raw as { panes?: unknown[] })?.panes
   return Array.isArray(list) ? list.map(toPane) : []
 }
 
-/** 關服務 pane 沒帶 confirm 的 409：回 daemon 附上的那一列（最新的 kind／port），拿來問人。其他錯誤回 `null`。 */
 export function servicePaneConflict(e: unknown): ProjectPane | null {
   if (!(e instanceof ApiError) || e.status !== 409 || e.body.reason !== 'service_pane') return null
   const pane = toPane(e.body.pane)
   return pane.pane_id ? pane : null
 }
 
-/**
- * 關 pane 被擋下要人再確認：在 listen 的服務 pane，或 daemon 讀不到它現在在跑什麼（`unverified`）。
- * 帶著 daemon 附上的那一列回來，UI 才講得出「正在 listen 3010」或「讀不到狀態」。
- */
 export interface CloseNeedsConfirm {
   pane: ProjectPane | null
   unverified: boolean
@@ -185,16 +171,11 @@ export async function focusPane(paneId: string, host: string): Promise<void> {
   await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/focus?host=${encodeURIComponent(host)}`)
 }
 
-/** 服務 pane 要 `confirm`（UI 先顯示 port 再問一次）；沒帶會回 409。 */
 export async function closePane(paneId: string, host: string, confirm: boolean): Promise<void> {
   const q = `host=${encodeURIComponent(host)}${confirm ? '&confirm=true' : ''}`
   await transport.request('POST', `/panes/${encodeURIComponent(paneId)}/close?${q}`)
 }
 
-/**
- * claude 停在 AskUserQuestion 時 transcript 裡的題目與 Jev 的選項建議：回整份 `{questions, jev_options}`
- * （`lib/pendingQuestion.ts` 的 `toPendingQuestionsFromResponse` 解）。舊 daemon 沒這支（404／405）就當沒有。
- */
 export async function fetchPendingQuestion(botId: string): Promise<unknown> {
   try {
     const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/pending-question`)
@@ -205,12 +186,9 @@ export async function fetchPendingQuestion(botId: string): Promise<unknown> {
   }
 }
 
-/** `GET /bots/:id/composer-draft`：輸入框現在有沒有一段沒送出的字（完整、不截；`token` 綁完整草稿，之後的 `clear`／`submit` 通用）。 */
 export interface ComposerDraftSnapshot {
-  /** `dialog`＝畫面是擋路的對話框（不是草稿，沒有動作；`dialog` 是 daemon 的說明）。 */
   state: 'draft' | 'empty' | 'unready' | 'dialog'
   dialog: string
-  /** 這份快照讀的是哪個 run（晚回來的 GET 要跟現在的 run 對得上才算數）。 */
   runId: string
   busy: boolean
   draft: string
@@ -249,11 +227,6 @@ export async function fetchTerminal(
   return format === 'ansi' ? { ...snap, format: 'ansi' } : snap
 }
 
-/**
- * 搬到新分頁是救回窄 pane 唯一可預期的做法（`pane.resize` 零和、`zoom` 只放大字）。
- * 搬既有 pane 不重開：`pane_id`、run、進行中回合都不受影響。
- */
-/** 跨裝置共用的已讀位置：只往前推，daemon 會推 `bot_read` 給其他分頁／裝置。 */
 export async function markBotRead(botId: string, mark: { at: string; id: string }): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/read`, { at: mark.at, message_id: mark.id })
 }
@@ -262,7 +235,6 @@ export async function movePaneToTab(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/pane/move-to-tab`)
 }
 
-/** SPEC §11.5. Non-local `host` is listed over ssh. */
 export async function listDirs(path?: string, host?: string, hidden?: boolean): Promise<DirListing> {
   const params = new URLSearchParams()
   if (path) params.set('path', path)
@@ -281,10 +253,6 @@ export async function listDirs(path?: string, host?: string, hidden?: boolean): 
   }
 }
 
-/**
- * 目錄選擇器的「新資料夾」（issue #877）：在 `parent` 底下建 `name`。名字不合 400、同名已存在 409 `already_exists`（訊息在 `body.message`）、
- * 憑證目錄 403——失敗丟 `ApiError`，由呼叫端顯示。
- */
 export async function createDir(parent: string, name: string, host?: string): Promise<CreatedDir> {
   const body: Record<string, string> = { parent, name }
   if (host && host !== 'local') body.host = host
@@ -292,8 +260,6 @@ export async function createDir(parent: string, name: string, host?: string): Pr
   const r = isRec(raw) ? raw : {}
   return { path: str(r.path), name: str(r.name), parent: r.parent == null ? null : str(r.parent) }
 }
-
-// hosts (SPEC §11.6)
 
 function toHostResult(raw: unknown, name: string): HostResult {
   const o = isRec(raw) ? raw : {}
@@ -321,17 +287,14 @@ export async function createProject(input: NewProjectInput): Promise<string> {
   return isRec(raw) ? str(pick(raw, 'project_id')) : ''
 }
 
-/** API.md §3. Rename never blocked by a live run: label only affects the next start's slug. */
 export async function patchProject(projectId: string, input: PatchProjectInput): Promise<void> {
   await transport.request('PATCH', `/projects/${encodeURIComponent(projectId)}`, input)
 }
 
-/** 停用名單的鍵：身份是每台主機、每個 kind 各一份（cc1 在別台是別的帳號）。 */
 export function identityPrefKey(host: string, kind: string, name: string): string {
   return `${host || 'local'}|${kind}|${name}`
 }
 
-/** 目前被標為停用的身份。停用只影響「還挑不挑得到它」，不會動已經綁著它的 bot。 */
 export async function fetchDisabledIdentities(): Promise<string[]> {
   const raw = await transport.request('GET', '/identity-prefs')
   const rows = isRec(raw) ? pick(raw, 'disabled') : null
@@ -341,7 +304,6 @@ export async function fetchDisabledIdentities(): Promise<string[]> {
     .map((r) => identityPrefKey(str(pick(r, 'host')), str(pick(r, 'kind')), str(pick(r, 'identity'))))
 }
 
-/** 停用中的 kind（`host|kind`）。kind 停用＝那台主機不挑、不派、不啟動、不探測這個 kind。 */
 export async function fetchDisabledKinds(): Promise<string[]> {
   const raw = await transport.request('GET', '/kind-prefs')
   const rows = isRec(raw) ? pick(raw, 'disabled') : null
@@ -365,14 +327,11 @@ export async function setIdentityDisabled(host: string, kind: string, name: stri
   })
 }
 
-/** bot 放進 `$AM_OUTBOX` 交給使用者的檔案（SPEC §6.5f）。`reason` 有值＝這顆沒有可列的（遠端）。
- *  `remainingSecs`：daemon 讀清單那一刻離被清掉還剩幾秒（放進去 1 小時後清）；null＝不會被清（分享用 bot，SPEC §20）。 */
 export type OutboxFile = {
   name: string
   size: number
   modified: number
   remainingSecs: number | null
-  /** 檔案其實在另一顆 bot 的 outbox：這顆 bot 的訊息轉述了它的路徑（例如管理者轉交子 agent 的產出）。沒有＝自己的。 */
   owner?: string
   ownerName?: string
 }
@@ -395,23 +354,17 @@ export async function fetchOutbox(
     dir: str(pick(o, 'dir')),
     reason: optStr(pick(o, 'reason')),
     ttlSecs: num(pick(o, 'ttl_secs')),
-    // 分享用 bot 的 outbox 不清（daemon 回 `kept:true`、`ttl_secs:null`）。
     kept: pick(o, 'kept') === true,
     files: files.filter((f) => f.name),
   }
 }
 
-/** 下載或預覽 outbox 裡的一個檔案：帶 token 抓成 blob URL（`<a href>` 或新分頁帶不了 header）。 */
 export async function outboxFileUrl(botId: string, name: string, inline = false): Promise<string> {
   const q = inline ? '&inline=1' : ''
   const url = await transport.blobUrl(`/bots/${encodeURIComponent(botId)}/outbox/file?path=${encodeURIComponent(name)}${q}`)
   return inline ? utf8PreviewUrl(url) : url
 }
 
-/**
- * outbox 的 .html 預覽：帶 token 取回檔案（後端是 octet-stream），重包成 `text/html;charset=utf-8` 的 blob URL 給新分頁打開
- * （使用者 2026-11-18：html 不沙箱化，外部 script／樣式／圖片要能載入；見 lib/htmlPreview.ts）。原本那個 blob URL 取完就釋放。
- */
 export async function outboxHtmlUrl(botId: string, name: string): Promise<string> {
   const raw = await outboxFileUrl(botId, name, false)
   try {
@@ -422,10 +375,6 @@ export async function outboxHtmlUrl(botId: string, name: string): Promise<string
   }
 }
 
-/**
- * 預覽分頁開的是 blob URL：Safari／iOS 開 blob 時不看 `charset=utf-8`，中文 md／txt 整頁亂碼（使用者 2026-11-17）。
- * 文字檔在前面補 UTF-8 BOM（每個瀏覽器都認、優先於 charset）。只用在預覽，下載的檔案內容不動。
- */
 export async function utf8PreviewUrl(url: string): Promise<string> {
   const blob = await (await fetch(url)).blob()
   if (!blob.type.startsWith('text/')) return url
@@ -443,7 +392,6 @@ export async function createIdentity(input: NewIdentityInput): Promise<void> {
   await transport.request('POST', '/identities', input)
 }
 
-/** 刪的是**那一台**的那一筆：同名的 `cc1` 在別台是別的帳號（SPEC §16.2）。 */
 export async function deleteIdentity(name: string, host = 'local'): Promise<void> {
   const q = host && host !== 'local' ? `?host=${encodeURIComponent(host)}` : ''
   await transport.request('DELETE', `/identities/${encodeURIComponent(name)}${q}`)
@@ -458,7 +406,6 @@ export interface ShellIdentityDeleteResponse {
   warning: 'external_editor_window'
 }
 
-/** 移除主機 shell 中的 Claude ccN alias；config identity 的 DELETE 是另一條 API。 */
 export async function deleteShellIdentity(host: string, identity: string): Promise<ShellIdentityDeleteResponse> {
   const name = host || 'local'
   const raw = await transport.request(
@@ -483,7 +430,6 @@ export async function deleteShellIdentity(host: string, identity: string): Promi
   }
 }
 
-/** API.md「停用模型的回應」（#400）：`{"remapped":{"model":{"from","to"}}}`；沒換就沒有這一段。 */
 function toModelRemap(v: unknown): ModelRemap | null {
   if (!isRec(v)) return null
   const m = isRec(v.model) ? v.model : null
@@ -499,7 +445,6 @@ export async function createBot(projectId: string, input: NewBotInput): Promise<
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), remapped_model: toModelRemap(o.remapped) }
 }
 
-/** API.md v3.3. `null` `model`/`identity` clears; renaming with an active Run → 409. */
 export async function patchBot(botId: string, input: PatchBotInput): Promise<PatchBotResult> {
   const raw = await transport.request('PATCH', `/bots/${encodeURIComponent(botId)}`, input)
   const o = isRec(raw) ? raw : {}
@@ -512,7 +457,6 @@ export async function patchBot(botId: string, input: PatchBotInput): Promise<Pat
   }
 }
 
-/** 側欄排序（API.md §5.4），存 config.toml 讓各裝置共用同一份；`primary` 是主力那列的順序（#344，存 DB）。 */
 export async function saveOrder(
   input: { projects?: string[]; bots?: Record<string, string[]>; primary?: string[] },
   signal?: AbortSignal,
@@ -520,7 +464,6 @@ export async function saveOrder(
   await transport.request('POST', '/order', input, signal)
 }
 
-/** API.md §fork：從頂層 bot 分出新 bot，CLI 接續來源的對話脈絡。建好但沒起來時 `start_error` 有值。 */
 export interface ForkResult {
   id: string
   name: string
@@ -534,7 +477,6 @@ export async function forkBot(botId: string, name?: string): Promise<ForkResult>
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')), start_error: typeof err === 'string' && err ? err : null }
 }
 
-/** API.md §promote：子 agent 升級成頂層 bot，保留同一段 claude 對話。 */
 export interface PromoteResult {
   id: string
   name: string
@@ -546,24 +488,15 @@ export async function promoteBot(botId: string, name?: string): Promise<PromoteR
   return { id: str(pick(o, 'bot_id')), name: str(pick(o, 'name')) }
 }
 
-/**
- * `resumeNative`：帶 `?resume=native` 接回 DB 記的原生對話（換身份後重啟要接續，SPEC §6.5.2）。
- * 接不回時 daemon 回 409 `cannot_resume`——呼叫端（`store.restartBot`）決定要不要改成不帶這個旗標重送。
- */
 export async function restartBot(botId: string, resumeNative?: boolean): Promise<string> {
   const qs = resumeNative ? '?resume=native' : ''
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restart${qs}`)
   return isRec(raw) ? str(pick(raw, 'run_id')) : ''
 }
 
-/**
- * `POST /bots/:id/rewind`（SPEC §6.13）：在終端驅動 claude 的 `/rewind`，倒回到這則使用者訊息送出之前；
- * `text` 是那則的原文（回填輸入框用）；`pane_cleared: false`＝CLI 放回終端輸入列的那段沒清掉。
- */
 export async function rewindBot(
   botId: string,
   messageId: string,
-  /** 409 `composer_busy` 之後按「清掉再倒回」：帶 409 回的那段字，daemon 字對得上才清。 */
   clearComposer?: string,
 ): Promise<{ text: string; hidden: number; paneCleared: boolean }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/rewind`, {
@@ -574,10 +507,6 @@ export async function rewindBot(
   return { text: str(pick(o, 'text')), hidden: num(pick(o, 'hidden'), 0), paneCleared: pick(o, 'pane_cleared') !== false }
 }
 
-/** `POST /messages/:id/translate`：把一則 assistant 訊息翻成繁體中文；同一則翻過會回快取（`cached`，不扣費）。 */
-/** `force`：手動重試，略過 daemon 對「品質檢查沒過」的負面標記（422 `translate_rejected`）。
- * `retranslate`：重新翻譯（略過正面快取，用升級模型，成功覆寫；沒過保留舊譯文，422）。
- * `costUsd`：翻這次花的美元（daemon 依牌價算）；`cached` 時是當初那次的花費、這次沒有扣費。不明＝null。 */
 export async function translateMessage(
   messageId: string,
   force = false,
@@ -593,7 +522,6 @@ export async function translateMessage(
     model: str(pick(o, 'model')),
     cached: pick(o, 'cached') === true,
     costUsd: typeof cost === 'number' ? cost : null,
-    /** 兩次嘗試的 Jev 分數都低於門檻，仍顯示這份譯文（網頁標「品質分數偏低」）。 */
     lowConfidence: pick(o, 'low_confidence') === true,
     jevProb: typeof jev === 'number' ? jev : null,
   }
@@ -607,7 +535,6 @@ export async function reportTranslation(messageId: string): Promise<{ sent: bool
   return { sent: pick(o, 'sent') === true, reason: typeof reason === 'string' ? reason : null, sentAt: typeof sentAt === 'string' ? sentAt : null }
 }
 
-/** `POST /pending-questions/translate`：整份待答問卷一次翻成繁中（只翻顯示；送回 CLI 的仍是原選項）。`id` 由 daemon 產生（`q{n}`、`q{n}-o{m}`）。 */
 export interface TranslatedPendingQuestions {
   questions: { id: string; header: string; question: string; options: { id: string; label: string; description: string }[] }[]
   model: string
@@ -639,25 +566,21 @@ export async function translatePendingQuestions(
   }
 }
 
-/** 「閒下來自動重啟套用更新」排著的 bot id（`GET /api/bots/update-restart`）。 */
 export async function fetchUpdateRestart(): Promise<string[]> {
   const raw = await transport.request('GET', '/bots/update-restart')
   return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
 }
 
-/** 把這些 bot 排成「下次閒置時自動重啟（resume 接回）」；回目前全部排著的。 */
 export async function scheduleUpdateRestart(botIds: string[]): Promise<string[]> {
   const raw = await transport.request('POST', '/bots/update-restart', { bot_ids: botIds })
   return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
 }
 
-/** 取消排程；空名單＝全部取消。 */
 export async function cancelUpdateRestart(botIds: string[]): Promise<string[]> {
   const raw = await transport.request('DELETE', '/bots/update-restart', { bot_ids: botIds })
   return arr(pick(isRec(raw) ? raw : {}, 'bot_ids')).filter((v): v is string => typeof v === 'string')
 }
 
-/** SPEC §6.9. 只回計畫；實際重啟在背景跑，進度走 WS `bots_restart_progress` / `bots_restart_done`。 */
 export async function restartIdleBots(): Promise<RestartPlan> {
   const raw = await transport.request('POST', '/bots/restart-idle')
   const o = isRec(raw) ? raw : {}
@@ -673,17 +596,11 @@ export async function restartIdleBots(): Promise<RestartPlan> {
   }
 }
 
-/**
- * header 一鍵升級 codex（SPEC §6.9）：daemon 在那台跑官方安裝指令、確認版本升上去，再重啟那台閒置的 codex。
- * 只回 `update_id`，進度走 WS `cli_update_progress` / `cli_update_done`。同一台在裝 → 409 `cli_update_in_progress`。
- * `targetVersion` 是確認框寫的那一版（#569）：跟 daemon 眼中的目標不同 → 409 `stale_target`；裝完沒到它就不重啟。
- */
 export async function startCliUpdate(host: string, kind: 'codex' | 'claude', targetVersion: string): Promise<{ update_id: string }> {
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host)}/cli-update`, { kind, target_version: targetVersion })
   return { update_id: str(pick(isRec(raw) ? raw : {}, 'update_id')) }
 }
 
-/** WS 事件與 REST 回應共用。 */
 export function toRestartSkips(v: unknown): RestartSkip[] {
   return arr(v).flatMap((x) =>
     isRec(x)
@@ -699,7 +616,6 @@ export function toRestartSkips(v: unknown): RestartSkip[] {
   )
 }
 
-/** `confirmSupervisor`：刪 AGM 的 bot 要明講（daemon 否則 409 `supervisor_owned`，issue #406）。 */
 export async function deleteBot(botId: string, opts: { confirmSupervisor?: boolean } = {}): Promise<void> {
   await transport.request('DELETE', `/bots/${encodeURIComponent(botId)}${opts.confirmSupervisor ? '?confirm=supervisor' : ''}`)
 }
@@ -717,7 +633,6 @@ export async function interruptBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/interrupt`)
 }
 
-/** 強制結束回合：不同於 `interrupt`（esc 送不出就失敗），這支先保證解鎖，送鍵只是順帶。 */
 export async function abortBot(botId: string): Promise<{ aborted: string[]; keys_sent: boolean }> {
   const r = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/abort`)
   const o = isRec(r) ? r : {}
@@ -727,33 +642,24 @@ export async function abortBot(botId: string): Promise<{ aborted: string[]; keys
   }
 }
 
-/** 對執行中 bot 送 `/login`；只送指令，完成與否要靠 `refreshTools` 重新偵測。 */
 export async function loginBot(botId: string): Promise<{ command: string; kind: string }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/login`)
   const o = isRec(raw) ? raw : {}
   return { command: str(pick(o, 'command'), '/login'), kind: str(pick(o, 'kind')) }
 }
 
-/** 對閒著的 bot 送 `/compact`（claude、codex；2026-10-04 使用者：context 旁的「壓縮」鈕）。不等壓縮完成。 */
 export async function compactBot(botId: string): Promise<{ command: string; kind: string }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/compact`)
   const o = isRec(raw) ? raw : {}
   return { command: str(pick(o, 'command'), '/compact'), kind: str(pick(o, 'kind')) }
 }
 
-/**
- * 「不用保溫」鈕（主力、claude；`POST /api/bots/:id/keep-warm/skip`）：`skip=true` 讓這顆 bot「這一輪閒置」跳過保溫與熱壓，
- * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 就自動清掉；`false` 取消。非主力或非 claude 回 400 `not_primary`。
- */
 export async function setKeepWarmSkip(botId: string, skip: boolean): Promise<{ keep_warm_skip: boolean }> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/keep-warm/skip`, { skip })
   const o = isRec(raw) ? raw : {}
   return { keep_warm_skip: pick(o, 'keep_warm_skip') === true }
 }
 
-/** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275
- *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。
- *  `startIfStopped`＝bot 沒在跑時 daemon 先收下（`delivery: queued`）再自己啟動它（issue #122）。 */
 export async function sendPrompt(
   botId: string,
   text: string,
@@ -761,11 +667,8 @@ export async function sendPrompt(
   attachments: string[] = [],
   sendNow = false,
   startIfStopped = false,
-  /** 409 `composer_busy` 之後：`clear`＝清掉框裡那段再送 `text`；`submit`＝改成送出框裡那段（`text` 不送）。 */
   draft?: { action: 'submit' | 'clear'; token: string },
-  /** issue #733：忙碌時請 daemon 建 queued turn，未提供時維持舊有 409 行為。 */
   queueIfBusy = false,
-  /** claude-api 這一回合的 prompt cache 保留：`5m`（預設，不帶）或 `1h`（寫入貴 60%，適合下一次提問隔 5–60 分鐘）。 */
   cacheTtl?: '5m' | '1h',
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
@@ -788,10 +691,6 @@ export async function sendPrompt(
   }
 }
 
-/**
- * 一鍵送出 claude 的建議下一句（`POST /bots/:id/suggestion/accept`）：daemon 對 pane 送 Tab 把灰字收進輸入框、確認後送 Enter，
- * 跟終端一模一樣；`suggestion` 是畫面上看到的那句，跟 daemon 現在讀到的不同就 409、一個鍵都不按。回傳跟 `sendPrompt` 同形。
- */
 export async function acceptSuggestion(botId: string, suggestion: string, expectRunId: string | null, clientRequestId: string): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/suggestion/accept`, {
     suggestion,
@@ -814,10 +713,6 @@ export async function sendKeys(botId: string, keys: string[], expectRunId: strin
   })
 }
 
-/**
- * 多行文字走這裡，不要拆成 `sendKeys` 的鍵名。`record`＝回合中「補充」：daemon 打字成功後把它記成進行中回合的
- * 使用者訊息（`message_added` 推過來），其他打字（回答選單、草稿）不帶。
- */
 export async function sendText(botId: string, text: string, enter: boolean, expectRunId: string | null, record = false): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/text`, {
     text,
@@ -827,7 +722,6 @@ export async function sendText(botId: string, text: string, enter: boolean, expe
   })
 }
 
-/** 補充排在 claude 終端佇列時，送 send-now 鍵立刻送出。沒有排隊 → 409 `nothing_queued`（daemon 一個鍵都不送）。 */
 export async function sendQueuedNow(botId: string, expectRunId: string | null): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/send-queued-now`, expectRunId ? { expect_run_id: expectRunId } : {})
 }
@@ -836,7 +730,6 @@ export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
 }
 
-/** 撤回仍在 queued 的 turn。#733 回傳原文與附件 id，#122 舊回應缺欄時退回空值。 */
 export async function withdrawTurn(turnId: string): Promise<WithdrawTurnResult> {
   const raw = await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/withdraw`)
   const o = isRec(raw) ? raw : {}
@@ -863,12 +756,10 @@ export function attachmentUrl(id: string): Promise<string> {
   return transport.blobUrl(`/attachments/${encodeURIComponent(id)}`)
 }
 
-/** 對話裡 Markdown 圖片的本機路徑（相對於 bot 的專案目錄）；專案外、非圖片一律 404。 */
 export function localImageUrl(botId: string, path: string): Promise<string> {
   return transport.blobUrl(`/bots/${encodeURIComponent(botId)}/local-image?path=${encodeURIComponent(path)}`)
 }
 
-/** `identity` (claude) picks whose settings.json the default effort comes from (SPEC §17.1); unknown falls back safely. */
 export async function fetchModels(kind: BotKind, host?: string, identity?: string | null): Promise<ModelsResponse> {
   const q = new URLSearchParams({ kind })
   if (host && host !== 'local') q.set('host', host)
@@ -880,7 +771,6 @@ export async function fetchQuota(): Promise<QuotaMap> {
   return toQuota(await transport.request('GET', '/quota'))
 }
 
-/** 對話輸入框的草稿（API.md `/api/drafts`）：以 daemon 為準，各瀏覽器共用。 */
 export async function fetchDrafts(): Promise<{ key: string; text: string; rev: number }[]> {
   const raw = await transport.request('GET', '/drafts')
   return arr(isRec(raw) ? raw.drafts : [])
@@ -889,13 +779,11 @@ export async function fetchDrafts(): Promise<{ key: string; text: string; rev: n
     .filter((d) => d.key && d.text && d.rev > 0)
 }
 
-/** 空字串＝刪除。回 daemon 這次的 rev。 */
 export async function putDraft(key: string, text: string, clientId: string): Promise<{ rev: number }> {
   const raw = await transport.request('PUT', `/drafts/${encodeURIComponent(key)}`, { text, client_id: clientId })
   return { rev: num(isRec(raw) ? pick(raw, 'rev') : 0, 0) }
 }
 
-/** 失敗就丟出來，由呼叫端當成「沒有訊息命中」。 */
 export async function searchMessages(q: string): Promise<Record<string, MessageHit>> {
   const raw = await transport.request('GET', `/search/messages?q=${encodeURIComponent(q)}`)
   const r = isRec(raw) ? raw : {}
@@ -908,17 +796,14 @@ export async function searchMessages(q: string): Promise<Record<string, MessageH
   return out
 }
 
-/** 軟刪復原。失敗丟 `ApiError`（撞名 409、不存在 404），由呼叫端顯示，不能吞成 false。 */
 export async function restoreBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
 }
 
-/** SPEC §15. */
 export async function fetchMem(): Promise<MemSnapshot> {
   return toMemSnapshot(await transport.request('GET', '/mem'))
 }
 
-/** SPEC §15.2. */
 export async function fetchMemPane(host: string, paneId: string, socket: string | null, lines = 40): Promise<TerminalSnapshot> {
   const sock = socket ? `&socket=${encodeURIComponent(socket)}` : ''
   const raw = await transport.request(
@@ -928,17 +813,14 @@ export async function fetchMemPane(host: string, paneId: string, socket: string 
   return toTerminal(raw, 'visible')
 }
 
-/** SPEC §15.2. */
 export async function fetchMemProcesses(host: string, signal?: AbortSignal): Promise<MemProcesses> {
   return toMemProcesses(await transport.request('GET', `/mem/processes?host=${encodeURIComponent(host)}`, undefined, signal))
 }
 
-/** SPEC §15.2. daemon 擋 herdr 本身（400）與 bot（409）；錯誤原樣上丟，照 daemon 訊息顯示。 */
 export async function killMemProcess(host: string, pid: number, signal: 'TERM' | 'KILL' = 'TERM'): Promise<void> {
   await transport.request('POST', '/mem/processes/kill', { host, pid, signal })
 }
 
-/** Detection otherwise only runs on host (re)connect — needed right after logging in. */
 export async function refreshTools(host: string): Promise<{ tools: ToolMap; identity_status: IdentityStatusMap }> {
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/refresh`)
   const rec = isRec(raw) ? raw : {}
@@ -946,7 +828,6 @@ export async function refreshTools(host: string): Promise<{ tools: ToolMap; iden
 }
 
 function toRemoteCargoSettings(raw: unknown): RemoteCargoSettings {
-  // 舊 daemon 沒有這條路徑時 GET 會落到 SPA、回 200 + index.html；當成空物件會靜靜顯示一組假預設值。
   if (!isRec(raw)) throw new ApiError(404, {}, t('這顆 daemon 還沒有 /api/build/remote（回的是網頁不是 JSON），二進位比前端舊；要 cargo build --release 後重啟 daemon。'))
   const o = raw
   return {
@@ -974,7 +855,6 @@ export async function testRemoteCargo(): Promise<{
   password_auth: boolean
   cargo_missing: boolean
   cargo_version: string
-  /** 有 cargo 卻沒有 clippy（`cargo clippy` 轉過去會失敗；按安裝會補上）。 */
   clippy_missing: boolean
   os: string
   arch: string
@@ -993,7 +873,6 @@ export async function testRemoteCargo(): Promise<{
   }
 }
 
-/** 在遠端裝 Rust 工具鏈（rustup minimal）。已經有就只回現有版本。 */
 export async function installRemoteCargoToolchain(): Promise<{
   already_installed: boolean
   cargo_version: string
@@ -1027,10 +906,6 @@ function toReview(raw: unknown): UpdateReview {
   }
 }
 
-/**
- * 這一版的 影響分析到哪了（更新框一打開就讀，有結論就直接顯示）。`version` 是 daemon 實際查的那一版：
- * claude 沒給 `to` 時就是磁碟上那一版，更新框拿它當分診區間的終點。
- */
 export async function fetchUpdateReview(input: {
   kind: string
   host?: string
@@ -1046,7 +921,6 @@ export async function fetchUpdateReview(input: {
   return { version: str(o.version), review: toReview(o.review), auto: o.auto === true }
 }
 
-/** 分析影響這一版的 changelog（claude／codex；唯讀，只建交辦）。 */
 export async function requestUpdateReview(input: { kind: string; host?: string; from?: string | null; to?: string | null; deep?: boolean; auto?: boolean }): Promise<{
   version: string
   target_bot_name: string
@@ -1069,7 +943,6 @@ export async function requestUpdateReview(input: { kind: string; host?: string; 
   return { version: str(o.version), target_bot_name: str(o.target_bot_name), source_name, duplicate: o.duplicate === true }
 }
 
-/** 花一張 codex 重置券（User-only；花錢的決定只給使用者）。`credit_id` 省略＝挑最早到期的那張。 */
 export async function redeemResetCredit(input: { host: string; identity: string | null }): Promise<{ outcome: string; resumed: string[] }> {
   const raw = await transport.request('POST', '/quota/reset-credit/use', {
     host: input.host,
@@ -1079,48 +952,35 @@ export async function redeemResetCredit(input: { host: string; identity: string 
   return { outcome: str(o.outcome), resumed: arr(o.resumed).map((x) => str(x)) }
 }
 
-/** 重置券提示「不再提醒」（User-only，跨裝置共用）：hours 只收 1／24／72。只控制提醒，不兌換。 */
 export async function snoozeResetCredit(input: { key: string; hours: 1 | 24 | 72 }): Promise<{ snoozedUntil: string }> {
   const raw = await transport.request('PUT', '/quota/reset-credit/snooze', { key: input.key, hours: input.hours })
   const o = isRec(raw) ? raw : {}
   return { snoozedUntil: str(o.snoozed_until) }
 }
 
-/** 上游新版分診帳本（SPEC §18.2c）：更新框顯示這幾版分析過了沒、結論是什麼（issue #561）。 */
 export async function fetchReleaseTriage(kind: string): Promise<ReturnType<typeof parseTriageRows>> {
   return parseTriageRows(await transport.request('GET', `/release-triage?kind=${encodeURIComponent(kind)}`))
 }
 
-/** 開臨時 pane 做該身份的登入。 */
 export async function loginIdentity(host: string, identity: string): Promise<HostShell> {
   return identityAuth(host, identity, 'login')
 }
 
-/** 同一條路的登出：帶著這個身份自己的設定目錄下指令，不會動到別的帳號。 */
 export async function logoutIdentity(host: string, identity: string): Promise<HostShell> {
   return identityAuth(host, identity, 'logout')
 }
 
-/**
- * 登出某個 kind 的**預設帳號**（不換設定目錄的那個）：claude／codex／grok 開臨時 pane 跑該 CLI 的登出指令（回 shell），
- * agy 走直接刪憑證檔（回 `{removed}`，不開 pane）。不刪家目錄的任何檔案。
- */
 export async function logoutKindDefault(host: string, kind: BotKind): Promise<HostShell | null> {
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/kinds/${encodeURIComponent(kind)}/logout`)
   return kind === 'agy' ? null : toHostShell(raw, name)
 }
 
-/**
- * 登出該主機的 agy 帳號：daemon 直接刪掉 agy 的 OAuth 憑證檔（不開 pane、不跑 TUI）。
- * `removed:false`＝本來就沒有憑證，不算錯。正在跑的 agy bot 不會被停。
- */
 export async function logoutAgy(host: string): Promise<{ removed: boolean }> {
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/agy/logout`)
   return { removed: isRec(raw) && raw.removed === true }
 }
 
-/** `POST /api/hosts/{name}/agy/install` 的回覆：裝好（或已是官方最新版）的結果。 */
 export interface AgyInstallResult {
   host: string
   platform: string
@@ -1130,10 +990,6 @@ export interface AgyInstallResult {
   already_latest: boolean
 }
 
-/**
- * 裝／更新該主機的 agy 到官方最新版：daemon 讀官方 manifest、驗 sha512 後放到 `~/.local/bin/agy`（不跑官方 install.sh）。
- * 要等下載與驗證（幾十秒）；同一台已經在裝 → 409 `agy_install_in_progress`。
- */
 export async function installAgy(host: string): Promise<AgyInstallResult> {
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/agy/install`)
   const r = isRec(raw) ? raw : {}
@@ -1156,17 +1012,12 @@ async function identityAuth(host: string, identity: string, op: 'login' | 'logou
   return toHostShell(raw, name)
 }
 
-/** Asks a running bot on that host to install + log in the CLI via a prompt. */
 export async function installTool(host: string, kind: BotKind, viaBotId: string): Promise<InstallToolResult> {
   return toInstallResult(
     await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/tools/install`, { kind, via_bot_id: viaBotId }),
   )
 }
 
-/**
- * 沒有任何 Bot 可借時的安裝（issue #1931）：不帶 `via_bot_id`，daemon 在該主機開臨時 host-shell pane 直接跑官方安裝指令
- * （claude／codex／grok），回 `{pane_id, mode:"shell"}`；CLI 結束後 daemon 重新偵測 tools 並推 `host_changed`。agy 不走這條（`installAgy`）。
- */
 export async function installToolInShell(host: string, kind: BotKind, install_id: string): Promise<{ pane_id: string; cwd: string }> {
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/tools/install`, { kind, install_id })
@@ -1225,14 +1076,12 @@ export async function cancelGhLogin(host: string): Promise<GhStatus> {
   return toGhStatus(await transport.request('POST', `/hosts/${encodeURIComponent(name)}/gh/cancel`), name)
 }
 
-/** 取得一致性 dry-run 計畫（GET /api/hosts/{name}/baseline/plan，#719 階段 2 / 3b）。 */
 export async function fetchHostBaselinePlan(host: string): Promise<HostBaselinePlan | null> {
   const name = host || 'local'
   const raw = await transport.request('GET', `/hosts/${encodeURIComponent(name)}/baseline/plan`)
   return toHostBaselinePlan(raw)
 }
 
-/** 一致性差異補齊（POST /api/hosts/{name}/baseline/apply，#719 階段 3a / 3b）。 */
 export async function applyHostBaseline(
   host: string,
   input: { plan_rev: string; ids?: string[] },
@@ -1242,21 +1091,18 @@ export async function applyHostBaseline(
   return toHostBaselineApplyResult(raw)
 }
 
-/** 列出主機上可還原的一致性備份（GET /api/hosts/{name}/baseline/backups，#719）。 */
 export async function fetchHostBaselineBackups(host: string): Promise<HostBaselineBackups | null> {
   const name = host || 'local'
   const raw = await transport.request('GET', `/hosts/${encodeURIComponent(name)}/baseline/backups`)
   return toHostBaselineBackups(raw)
 }
 
-/** 還原指定的一致性備份（POST /api/hosts/{name}/baseline/restore，#719）。 */
 export async function restoreHostBaseline(host: string, backup_id: string): Promise<HostBaselineRestoreResult | null> {
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/baseline/restore`, { backup_id })
   return toHostBaselineRestoreResult(raw)
 }
 
-/** 純 shell pane。`pane_id` 是白名單 key，只在這輪 daemon 有效，重啟後舊 pane 不認。 */
 export async function openHostShell(host: string, cwd?: string): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request('POST', `/hosts/${encodeURIComponent(name)}/shells`, cwd ? { cwd } : {})
@@ -1284,18 +1130,15 @@ export async function readHostShell(
   return format === 'ansi' ? { ...snap, format: 'ansi' } : snap
 }
 
-/** `echo: true`（`echo=ansi`）：送完約 20ms 後 daemon 回一張 visible ANSI 快照，xterm 立刻畫上；沒帶回 `null`。 */
 export interface ShellEchoOpt {
   echo?: boolean
 }
 
-/** `echo=ansi` 的回應 `{terminal}`；舊 daemon 沒有這欄就是 `null`。 */
 function echoedTerminal(raw: unknown): TerminalSnapshot | null {
   const o = isRec(raw) && isRec(raw.terminal) ? raw.terminal : null
   return o ? { ...toTerminal(o, 'visible'), format: 'ansi' } : null
 }
 
-/** `enter` 是獨立按鍵而非 `\n`（herdr 把換行當貼上）；空字串 + `enter` = 只按 Enter。 */
 export async function sendHostShellText(
   host: string,
   paneId: string,
@@ -1311,27 +1154,19 @@ export async function sendHostShellText(
   return opt.echo ? echoedTerminal(raw) : null
 }
 
-/** daemon 為 claude 身份登入開的 pane 上，從畫面取出的登入進度（#838）；網址只在這個回應裡，不進事件。 */
 export interface LoginStatus {
   host: string
   pane_id: string
   identity: string
-  /** 登入網站的網址（daemon 驗過是 claude 的 https OAuth 網址）；CLI 還沒印出來＝`null`。 */
   url: string | null
-  /** 畫面最後一行正是「Paste code here if prompted >」。 */
   awaiting_code: boolean
   code_sent: boolean
-  /** CLI 吐出的 `Login failed: …`。 */
   failure: string | null
-  /** `claude`（貼 code）或 `codex`（裝置碼）。 */
   kind: string
-  /** `code`＝網址＋把網站給的 code 貼回來；`device`＝網址＋一次性碼（輸入到網站，不貼回終端）。 */
   flow: 'code' | 'device'
-  /** codex 裝置碼的一次性碼；畫面還沒印出來或不是裝置碼流程＝`null`。 */
   device_code: string | null
 }
 
-/** `null`＝這顆 pane 不是（或已不是）daemon 開的登入 pane（404）。其他錯誤照丟。 */
 export async function fetchLoginStatus(host: string, paneId: string): Promise<LoginStatus | null> {
   try {
     const raw = await transport.request('GET', `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/login`)
@@ -1355,12 +1190,10 @@ export async function fetchLoginStatus(host: string, paneId: string): Promise<Lo
 }
 
 export interface LoginCodeResult {
-  /** `failed`＝CLI 說登入失敗（`message`）；`finished`＝CLI 結束了（成功與否看身份列重驗）；`pending`＝還在等 CLI 回應。 */
   outcome: 'failed' | 'finished' | 'pending'
   message: string | null
 }
 
-/** 把網站給的 code 打進登入 pane 並按 Enter；畫面不在等 code 時 daemon 回 409 `not_awaiting_code`、一個字都不送。 */
 export async function submitLoginCode(host: string, paneId: string, code: string): Promise<LoginCodeResult> {
   const raw = await transport.request(
     'POST',
@@ -1389,10 +1222,6 @@ export async function sendHostShellKeys(
   return opt.echo ? echoedTerminal(raw) : null
 }
 
-/**
- * 推送：`GET …/shells/{pane}/stream?source=visible&format=ansi`（WebSocket，token 走 query 同 `/ws`）。
- * 回 `null`＝這個 transport 沒有 WebSocket（mock）；握手被拒（舊 daemon 404）時 `onClose(false)`，呼叫端退回輪詢。
- */
 export function openHostShellStream(host: string, paneId: string, handlers: StreamHandlers): (() => void) | null {
   if (!transport.openStream) return null
   return transport.openStream(
@@ -1401,8 +1230,6 @@ export function openHostShellStream(host: string, paneId: string, handlers: Stre
   )
 }
 
-/** 已經沒了也算成功。 */
-/** `confirm` 只在人看過 port／「讀不到狀態」之後才帶；沒帶時服務 pane 與讀不到的 pane 會回 409 `service_pane`。 */
 export async function closeHostShell(host: string, paneId: string, confirm = false): Promise<void> {
   await transport.request(
     'DELETE',
@@ -1410,7 +1237,6 @@ export async function closeHostShell(host: string, paneId: string, confirm = fal
   )
 }
 
-/** Daemon shells out to `gh`. */
 export async function fetchIssues(
   projectId: string,
   opts: { state?: 'open' | 'closed'; limit?: number; q?: string; repo?: string } = {},
@@ -1433,7 +1259,6 @@ export async function fetchSubmodules(projectId: string): Promise<ProjectSubmodu
   return toSubmodules(await transport.request('GET', `/projects/${encodeURIComponent(projectId)}/submodules`))
 }
 
-/** Fallback: `randomUUID` is missing on non-secure origins. */
 export function newClientRequestId(): string {
   const c = globalThis.crypto
   if (c && typeof c.randomUUID === 'function') return c.randomUUID()
@@ -1449,7 +1274,6 @@ export function newClientRequestId(): string {
 export { num }
 export type { SocketHandlers }
 
-// 快速 git（chat 標題列 chip，2026-09-08）
 export interface GitSummary {
   git: boolean
   branch: string | null
@@ -1462,7 +1286,6 @@ export interface GitSummary {
   deletions: number
 }
 
-/** 404（專案不在）→ `{git:false}`，chip 靜默消失。 */
 export async function fetchGit(projectId: string): Promise<GitSummary> {
   const none: GitSummary = { git: false, branch: null, upstream: null, ahead: 0, behind: 0, changed: 0, untracked: 0, insertions: 0, deletions: 0 }
   let raw: unknown
@@ -1487,27 +1310,20 @@ export async function fetchGit(projectId: string): Promise<GitSummary> {
   }
 }
 
-/** commit = `git add -A && git commit`；pull = `--rebase --no-autostash`。 */
 export async function gitAction(projectId: string, op: 'commit' | 'push' | 'pull', message?: string): Promise<string> {
   const raw = await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/git/${op}`, op === 'commit' ? { message } : undefined)
   const o = isRec(raw) ? raw : {}
   return str(pick(o, 'output'), '')
 }
 
-// 群組任務：見 docs/API.md「群組任務」
-
-/** 同 `client_request_id` 回同一筆（冪等）；遠端專案 → 400 `remote_not_supported`。 */
-
 export async function setPaneAlias(host: string, paneId: string, alias: string): Promise<void> {
   await transport.request('PUT', `/panes/${encodeURIComponent(paneId)}/alias?host=${encodeURIComponent(host)}`, { alias })
 }
 
-/** 明確重試失敗的逐條影響分析；成功版本由 daemon 帳本去重。 */
 export async function retryReleaseTriage(kind: string, version: string): Promise<void> {
   await transport.request('POST', '/release-triage/auto', { kind, versions: [version] })
 }
 
-/** 重試帳本中已判完但尚未成功發布的提案，不重新分析。 */
 export async function publishReleaseTriage(kind: string, version: string): Promise<void> {
   await transport.request('POST', '/release-triage/publish', { kind, version })
 }

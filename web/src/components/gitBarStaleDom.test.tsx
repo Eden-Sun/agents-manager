@@ -1,7 +1,3 @@
-/**
- * 切換專案時，較早發出的 git status 請求晚回，不能把舊專案的分支蓋到新專案上（移植自 f86f9f084，原作者 Edison）。
- * 真的掛 `GitBar` 進 happy-dom：p1 的請求故意掛住，切到 p2 後 p2 先回，最後才讓 p1 回。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'

@@ -1,10 +1,3 @@
-/**
- * 分享頁的多語系（issue #1932）：只含分享頁的句子，不碰主 UI 的字典。
- *
- * 打包邊界：分享頁不 import `lib/i18n/index.ts`（會帶進整份 EN 字典與主 UI 字串），只用兩個純模組
- * `lib/i18n/translate`、`lib/i18n/lang`（見 `shareIsolation.test.ts`）。
- * key 規則同主 UI：繁中原句就是 key、字面字串、插值用 `{name}`；缺英文退回繁中。
- */
 import { useSyncExternalStore } from 'react'
 import { getLang, subscribeLang } from '../lib/i18n/lang'
 import { translate } from '../lib/i18n/translate'
@@ -42,7 +35,6 @@ export const SHARE_EN: Record<string, string | { one: string; other: string }> =
   '放大 {name}': 'Enlarge {name}',
   '關閉': 'Close',
   '這則訊息的格式太複雜，無法轉成 Markdown。': 'This message is too complex to render as Markdown.',
-  // ShareApp.tsx
   'bot 給你的檔案': 'Files from Bot',
   '重新整理': 'Refresh',
   '關閉檔案清單': 'Close file list',
@@ -80,12 +72,10 @@ export const SHARE_EN: Record<string, string | { one: string; other: string }> =
   '等 bot 回完再送（可以先打好）': 'Wait for Bot to finish before sending (you can type ahead)',
 }
 
-/** 目前語言的翻譯（非元件，例如 `shareErrorText`）。 */
 export function t(key: string, vars?: Record<string, string | number>): string {
   return translate(getLang(), SHARE_EN, key, vars)
 }
 
-/** 元件用：訂閱語言，切換時重繪；回傳綁定目前語言的 `t`。 */
 export function useT(): typeof t {
   useSyncExternalStore(subscribeLang, getLang, getLang)
   return t

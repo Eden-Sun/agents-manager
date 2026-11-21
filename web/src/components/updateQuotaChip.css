@@ -1,4 +1,3 @@
-/* components/UpdateQuotaChip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .confirm-note {
   margin: 0 0 8px;
   padding: 6px 8px;
@@ -6,8 +5,6 @@
   background: var(--bg-sunken);
   border-radius: var(--radius);
 }
-
-/* 單欄可捲：十顆以上時不能把按鈕擠出畫面。 */
 
 .confirm-list {
   margin: 0 0 8px;
@@ -22,11 +19,8 @@
   color: var(--text-dim);
 }
 
-/* 「claude 有更新」（UpdateQuotaChip.tsx）。2026-09-11 使用者：跟側欄 `.bot-update-dot` 一致——**綠色裸 chevron，不要方框**。 */
-
 .quota-update {
   flex: none;
-  /* 對齊量表第一行（5h），不要垂直置中：置中時浮在空白中間不屬於任何東西（2026-09-11 使用者）。 */
   align-self: flex-start;
   position: relative;
   display: inline-flex;
@@ -45,8 +39,6 @@
   cursor: pointer;
 }
 
-/* 1px 分隔線比 chip 上下各高 3px，才讀得出是「換一組」而非 chip 邊框。 */
-
 .quota-update::before {
   content: '';
   position: absolute;
@@ -56,8 +48,6 @@
   width: 1px;
   background: var(--border);
 }
-
-/* 用 2px 內距不用 gap（額度區塊一律不留 gap 間距）。 */
 
 .quota-update-n {
   padding-left: 2px;
@@ -73,15 +63,12 @@
   outline-offset: 2px;
 }
 
-/* 有更新但全在忙：數字改「在忙幾顆」並退成灰——按不動，不該搶眼。 */
-
 .quota-update.waiting:not(.scheduled),
 .quota-update:disabled {
   color: var(--text-faint);
   cursor: default;
 }
 
-/* 已排程「閒下來自動重啟」：右上角小時鐘，顏色用強調色（不是停用的灰）。 */
 .quota-update.scheduled { color: var(--accent); }
 .quota-update-clock { position: absolute; top: -4px; right: -5px; font-size: 9px; line-height: 1; }
 .confirm-check { display: block; margin: 6px 0 0; font-size: 12px; cursor: pointer; }
@@ -94,13 +81,9 @@
   color: var(--danger);
 }
 
-/* 只剩「codex 要先手動安裝」：按得動（切到那顆 bot），用警示色，不跟「全在忙」一樣退成灰。 */
-
 .quota-update.install {
   color: var(--warn);
 }
-
-/* codex「安裝＋重啟」跟「重啟套用」並排（UI-DECISIONS「header 的 codex 安裝」）：同一組，第二顆不再畫分隔線、不再留分組間距。 */
 
 .quota-update + .quota-update {
   margin-left: 0;
@@ -110,14 +93,10 @@
   display: none;
 }
 
-/* 安裝中：按不動，但維持警示色，看得出是 codex 那顆在跑，不是「全在忙」的灰。 */
-
 .quota-update.install.running:disabled {
   color: var(--warn);
   cursor: progress;
 }
-
-/* 手機合成的那顆（MergedUpdateChip）點開的兩項選單：fixed 對齊按鈕（位置由元件算），長句可折行、不超出螢幕。 */
 
 .update-menu-pop {
   width: max-content;
@@ -128,8 +107,6 @@
   white-space: normal;
 }
 
-/* 手機 menu 最上面那列（Sidebar，2026-09-30 使用者）：不在額度區裡，不畫分組線、不留額度區的邊距，跟部署 chip 一樣置中。 */
-
 .sidebar-head .quota-update {
   align-self: center;
   margin: 0;
@@ -139,7 +116,6 @@
   display: none;
 }
 
-/* 名單每列的「立即重啟」（強制，會中斷目前的回合；使用者 2026-11-18）。 */
 .confirm-list li { display: flex; gap: 8px; align-items: baseline; }
 .confirm-row-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .confirm-row-force { flex: none; font-size: 11px; padding: 0 6px; color: var(--danger); }

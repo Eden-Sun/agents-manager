@@ -1,6 +1,3 @@
-/**
- * 冰凍（「不用保溫」，SPEC §6.5k）在側欄：按了的主力列名旁畫雪花；沒按的主力、非主力都不畫。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

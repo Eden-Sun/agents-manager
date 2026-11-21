@@ -1,4 +1,3 @@
-/** `useStableCallback`：身份不變，但呼叫時永遠跑最新一次 render 的閉包（不能拿到過期的 state）。 */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -15,7 +14,6 @@ test('函式身份不變，呼叫的是最新一次 render 的閉包', async () 
     seen.push(fn)
     return null
   }
-  // 同一個根連續 render 三次（n 不同）：用 `mount` 掛第一次，之後 `act` 重畫同一棵樹。
   const { createRoot } = await import('react-dom/client')
   const host = document.createElement('div')
   const root = createRoot(host)

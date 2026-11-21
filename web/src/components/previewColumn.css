@@ -1,14 +1,11 @@
-/* components/PreviewColumn.tsx：`.app` 的第四欄（檔案暫存右邊）。欄寬由元件 inline 決定，軌道用 auto。 */
 body:has(.preview-col) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto auto;
 }
 
-/* 預覽欄展開時，中欄保留至少 360px 寬度，避免標題列與工具列被壓扁（issue review #6）。 */
 body:has(.preview-col:not(.rail)) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(360px, 1fr) auto auto;
 }
 
-/* 手機預覽也開著時，第三欄仍是它固定的 213px。 */
 body:has(.preview-col):has(.mobile-preview) .app {
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) 213px auto;
 }
@@ -42,7 +39,6 @@ body:has(.preview-col:not(.rail)):has(.mobile-preview) .app {
   color: var(--text-dim);
 }
 
-/* 跟 `.main-head`、`.shelf-head` 同高，三個標題列連成一條線。 */
 .preview-col-head {
   display: flex;
   align-items: center;
@@ -77,7 +73,6 @@ body:has(.preview-col:not(.rail)):has(.mobile-preview) .app {
   flex-direction: column;
 }
 
-/* 拖曳手柄：欄左緣一條 8px 的感應區，蓋在邊框上。 */
 .preview-col-grip {
   position: absolute;
   inset: 0 auto 0 -4px;
@@ -93,7 +88,6 @@ body:has(.preview-col:not(.rail)):has(.mobile-preview) .app {
   background: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
-/* 拖曳中 iframe 會吃掉 pointer 事件，先關掉。 */
 .preview-col.dragging iframe {
   pointer-events: none;
 }

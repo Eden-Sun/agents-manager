@@ -1,9 +1,3 @@
-/**
- * `GET /api/state` 的 bot 物件要跟 `daemon/src/api.rs::state_json` 同形（API.md §2）：有 `herdr_session`、
- * 有預覽在用時帶 `preview: {status, port}`（沒有就 `null`）、**沒有** `in_flight_turn`（daemon 的 state 不帶回合，
- * 回合從訊息頁的 `turns` 與 WS 來）。以前 mock 多給一個 `in_flight_turn`、少兩個欄位，用 mock 驗過的重新整理流程
- * 在真環境拿不到同樣的資料。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

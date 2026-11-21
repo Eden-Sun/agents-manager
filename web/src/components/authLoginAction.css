@@ -1,4 +1,3 @@
-/* components/AuthLoginAction.tsx：auth 失敗那則系統訊息底下的登入／重試列，跟著系統 pill 置中。 */
 
 .auth-login-action {
   display: flex;

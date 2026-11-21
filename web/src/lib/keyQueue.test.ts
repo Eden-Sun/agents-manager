@@ -2,7 +2,6 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { KeyQueue, MAX_KEYS_PER_SEND } from './keyQueue'
 
-/** 解得開的 promise，用來把「請求還在路上」這段時間握在測試手裡。 */
 function deferred<T = void>() {
   let resolve!: (v: T) => void
   let reject!: (e: unknown) => void
@@ -86,7 +85,6 @@ test('換 pane 時清掉還沒送的鍵', () => {
 
 test('貼上走同一個佇列：打一半貼一段，順序不會反過來', async () => {
   const log: string[] = []
-  // 等「整串送完」的回報，不猜要等幾毫秒：一串 1ms 的 timer 在高負載下可能比一個 30ms 的等待還晚（5/40 紅過）。
   const settled = deferred()
   const q = new KeyQueue(
     async (keys) => {
@@ -154,7 +152,6 @@ test('單次 push 150 個鍵：64／64／22', async () => {
 test('keys 70＋貼上＋keys 3：64、6、text、3', async () => {
   const order: string[] = []
   const gate = deferred()
-  // 先卡住一批，讓後面的項目都留在佇列裡一起排。
   let held = false
   const q = new KeyQueue(
     async (keys) => {

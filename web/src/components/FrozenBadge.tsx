@@ -1,9 +1,5 @@
 import './keepWarmChip.css'
 
-/**
- * 不用保溫（冰凍）的主力：雪花（inline SVG，不用 emoji，#1180）。畫在主力晶片與側欄列的名字旁；
- * 文字說明放在外層的 `title`、晶片的 sr-only 與狀態卡（SPEC §6.5k）。
- */
 export function FrozenBadge({ title }: { title?: string }) {
   return (
     <span className="frozen-badge" aria-hidden="true" title={title}>

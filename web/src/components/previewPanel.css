@@ -1,4 +1,3 @@
-/* components/PreviewPanel.tsx 專屬樣式（issue #253）。 */
 .preview-pane {
   flex: 1;
   min-height: 0;
@@ -40,7 +39,6 @@
 }
 
 .preview-empty {
-  /* 內容比欄高時要能捲：margin:auto 置中會把上下同時切掉、又不能捲（清單一長就看不到）。 */
   margin: 0 auto;
   overflow-y: auto;
   min-height: 0;
@@ -118,11 +116,9 @@
 }
 
 @media (max-width: 720px) {
-  /* 手機列寬不夠：網址讓給來源說明（網址在「在新分頁開」裡）。 */
   .preview-url {
     display: none;
   }
-
 
   .preview-frame {
     border-radius: 0;
@@ -271,7 +267,6 @@
   font-size: 11.5px;
 }
 
-/* v6：一筆一行、整列可點。八筆在桌機預設欄寬下不用捲動。 */
 .preview-others ul {
   gap: 2px;
 }
@@ -338,7 +333,6 @@
   padding: 0 5px;
 }
 
-/* 右邊的動作字收斂成次要文字（整列才是按鈕）。 */
 .preview-row-act {
   flex: none;
   font-size: 11px;
@@ -378,7 +372,6 @@
   }
 }
 
-/* 併進標題列之後這一排要有標題列的份量與邊框（2026-09-20 使用者）。 */
 .preview-bar.merged {
   min-height: 44px;
   padding: 6px 6px 6px 12px;

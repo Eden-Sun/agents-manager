@@ -14,6 +14,5 @@ test('toMessage 帶出 daemon 的 seq；沒有或 0 就是 undefined（未知）
 test('toMessages：同毫秒的訊息照 seq 排，不照 id', () => {
   const list = [raw('01M', 3), raw('01Z', 1), raw('01A', 2)]
   assert.deepEqual(toMessages(list, 'b').map((m) => m.id), ['01Z', '01A', '01M'])
-  // 舊 daemon 沒有 seq：照 id。
   assert.deepEqual(toMessages([raw('01M'), raw('01A')], 'b').map((m) => m.id), ['01A', '01M'])
 })

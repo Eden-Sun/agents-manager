@@ -5,7 +5,6 @@ import { useT } from '../lib/i18n'
 import './apiBotUsageBar.css'
 import { useUserTimeZone } from '../lib/userTime'
 
-/** 手機標題第二行的 claude-api 預付餘額（#1944）：桌面在工具列的 Balance 格，手機那條收在彈窗裡看不到。沒設定就不畫。 */
 export function ApiBalanceInline() {
   const t = useT()
   const [balance, setBalance] = useState<ClaudeApiBalance | null>(null)

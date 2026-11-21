@@ -1,4 +1,3 @@
-/* components/ClaudeLoginAssist.tsx：登入 pane 上方的「打開登入網站」＋ code 輸入框（codex 則是一次性碼）。手機一欄、整列好按。 */
 
 .login-assist {
   display: flex;
@@ -74,7 +73,6 @@
   }
 }
 
-/* codex 裝置碼：碼大字、等寬、可以框選抄；複製鍵跟碼同一列。 */
 .login-assist-device {
   flex: 1 0 100%;
   display: flex;

@@ -1,9 +1,3 @@
-/**
- * 已刪除的 bot／專案留在 localStorage 的鍵：收合狀態、預覽欄展開、上次選的種類。`pruneDead` 拿快照上的名單清一次，
- * 不然只增不減。只動這幾把鍵（不認得的一律不碰）；每一把各自包 try/catch——隱私模式下讀寫會丟例外，清不掉就算了。
- * 鍵名要跟寫入端一致：Sidebar（`am.collapsedChildren`、`am.collapsedProjects`、`am:lastKind:<pid>`）、
- * `store/previewLayout.ts`（`am.previewCol.openBots`）。
- */
 const ID_LISTS: { key: string; kind: 'bot' | 'project' }[] = [
   { key: 'am.collapsedChildren', kind: 'bot' },
   { key: 'am.collapsedProjects', kind: 'project' },
@@ -15,7 +9,6 @@ function attempt(run: () => void): void {
   try {
     run()
   } catch {
-    /* 讀寫不了就算了：這些只是版面偏好 */
   }
 }
 

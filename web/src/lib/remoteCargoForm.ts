@@ -2,7 +2,6 @@ import type { RemoteCargoInput, RemoteCargoSettings } from '../api/types'
 import { t } from './i18n'
 import { portProblem } from './hostForm'
 
-/** 外部 Cargo 設定表單（`HostsPanel` 的 `RemoteCargoPanel`）；數字欄位是使用者打的字串。 */
 export interface RemoteCargoForm {
   enabled: boolean
   host: string
@@ -16,7 +15,6 @@ export interface RemoteCargoForm {
 
 export const DEFAULT_REMOTE_ROOT = '.cache/agents-manager/remote-cargo'
 
-/** 儲存時送給 daemon 的 body（空白、空值、亂打的數字在這裡收斂成預設）。 */
 export function toRemoteCargoInput(f: RemoteCargoForm): RemoteCargoInput {
   return {
     enabled: f.enabled,
@@ -29,11 +27,6 @@ export function toRemoteCargoInput(f: RemoteCargoForm): RemoteCargoInput {
   }
 }
 
-/**
- * 表單裡有沒有還沒存的改動。`POST /api/build/remote/test` 不收 body、測的是**已儲存**的設定，
- * 表單有沒存的改動時直接測就是測到舊主機（還會報「可用」），所以測試前要先存。
- * 拿「按儲存會送出的值」跟已儲存的比：空白、`022` 這種打法不同、存下去一樣的不算。
- */
 export function remoteCargoUnsaved(saved: RemoteCargoSettings, f: RemoteCargoForm): boolean {
   const next = toRemoteCargoInput(f)
   return (
@@ -52,11 +45,6 @@ export interface RemoteCargoProblem {
   text: string
 }
 
-/**
- * 儲存前就能知道 daemon 會拒絕（或悄悄改掉）的值（`PUT /build/remote`）：host／user 只收 `A-Za-z0-9._-`（host 另可有 `:`）且不能 `-` 開頭、
- * 工作目錄只收 `A-Za-z0-9._-/` 且不含 `..`、port 1–65535、cargo jobs 1–64（超過 64 daemon 悄悄截成 64）。
- * 以前打錯的數字在 [`toRemoteCargoInput`] 被收斂成預設（port 變 22、jobs 變 4），使用者以為存的是自己打的。
- */
 export function remoteCargoProblems(f: RemoteCargoForm): RemoteCargoProblem[] {
   const out: RemoteCargoProblem[] = []
   const host = f.host.trim()

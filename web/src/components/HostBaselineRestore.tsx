@@ -52,7 +52,6 @@ export interface HostBaselineRestoreProps {
   host: string
 }
 
-/** 可還原備份的 metadata 與破壞性操作確認；不依賴 host_baseline_sync。 */
 export function HostBaselineRestore({ host }: HostBaselineRestoreProps) {
   const t = useT()
   const [list, setList] = useState<HostBaselineBackups | null>(null)

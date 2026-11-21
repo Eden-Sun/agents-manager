@@ -1,4 +1,3 @@
-/** 四種 CLI 投影分診帳本；herdr 保留原影響分析路徑。 */
 import { useEffect, useState } from 'react'
 import * as api from '../api'
 import { fetchChangelog } from '../api/changelog'
@@ -23,7 +22,6 @@ export function AgmReviewBox({
   kind: string
   host: string
   from: string | null
-  /** codex 的新版還沒裝，要從通知讀；claude 給 `null` 讓 daemon 讀磁碟。 */
   to?: string | null
   refreshKey: number
 }) {
@@ -33,7 +31,6 @@ export function AgmReviewBox({
 
   useEffect(() => {
     let alive = true
-    // 任一支讀不到（舊 daemon 沒有那支 API）就只畫另一邊，不在更新框裡吵。
     const review = !usesTriage ? loadReviewOnOpen({ kind, host, from, to }, api).catch(() => null) : !to ? fetchChangelog(kind, host, from).then((r) => ({ version: r.installedVersion || '', review: null })) : Promise.resolve(null)
     const triage = api.fetchReleaseTriage(kind).catch(() => null)
     void Promise.all([review, triage]).then(([r, t]) => {
@@ -46,7 +43,6 @@ export function AgmReviewBox({
     }
   }, [kind, host, from, to, key, usesTriage])
 
-  // 帳本目前沒有專用 SSE；開框期間輪詢，包含判完後 publish 的狀態變更。
   useEffect(() => {
     if (!usesTriage) return
     let alive = true
@@ -57,13 +53,12 @@ export function AgmReviewBox({
       try {
         const data = await api.fetchReleaseTriage(kind)
         if (alive) setLoaded((cur) => cur?.key === key ? { ...cur, triage: triageForRange(data.rows, data.repo, from, cur.version) } : cur)
-      } catch { /* 保留上次成功結果，下輪再讀。 */ }
+      } catch {  }
       finally { running = false }
     }, 5000)
     return () => { alive = false; clearInterval(timer) }
   }, [usesTriage, kind, from, key])
 
-  // 分診／publish 與 herdr review 都共用 supervisor_changed；完成後仍需刷新 publish 結果。
   const rev = useStore((s) => s.supervisorRev)
   useEffect(() => {
     let alive = true

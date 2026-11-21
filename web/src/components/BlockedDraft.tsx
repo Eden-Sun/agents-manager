@@ -1,8 +1,4 @@
 import { useT } from '../lib/i18n'
-/**
- * 多分頁問卷「先讀完、離線作答、最後一次送出」（2026-09-12 第六輪，使用者指定）。先 [`preload`] 走過每頁，之後作答只改本地 state；
- * 送出時照差集逐頁驗證，對不上就停手。預載失敗整個退回即時模式（`BlockedChoices`），不留半套草稿。
- */
 import { useEffect, useRef, useState } from 'react'
 import { commit, pageNeedsCommit, preload, readChoiceMenu, typeToPaste, wantOf, type Draft, type Io } from '../lib/choiceDraft'
 import { acquirePreload, restartPreload } from '../lib/draftPreload'
@@ -38,14 +34,12 @@ export function BlockedDraft({
   const [open, setOpen] = useState<string[]>([])
   const [round, setRound] = useState(0)
   const listRef = useRef<HTMLDivElement>(null)
-  /** 使用者按了「重新讀取」：下一輪要換一份新的預載，而不是接既有的。 */
   const retryRef = useRef(false)
 
   const ident = menu.tabs.map((t) => t.label).join('')
   const identRef = useRef(ident)
 
   const io: Io = {
-    // 讀取量收到 60 行：選單只佔畫面下半部，200 行太重（第五輪 B）。
     read: () => readChoiceMenu(async () => (await readTerminal(botId, 'visible', 60)).text),
     send: (keys) => sendKeys(botId, keys),
     wait: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -65,10 +59,6 @@ export function BlockedDraft({
     }
   }, [ident])
 
-  /**
-   * 預載，`round` 變了就重跑。同一份問卷只准跑一份：面板與全畫面視窗（及 StrictMode）會重複掛載，兩份同時送導覽鍵會互相插隊，
-   * 所以掛在 module 層（`lib/draftPreload`），以 bot + 問卷身份為 key 共用結果。
-   */
   useEffect(() => {
     let alive = true
     setErr(null)
@@ -92,18 +82,15 @@ export function BlockedDraft({
       setCustom(d.pages.map(() => ''))
       setPhase('ready')
     }).catch(() => {
-      // 預載期間的終端讀取失敗就退回即時模式，不能把 rejected job 留成 unhandled rejection。
       if (alive) setPhase('live')
     })
     return () => {
       alive = false
       handle.release()
     }
-    // menu 每秒都是新物件，不能進 deps；預載只認 round（ident 變了會推 round）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [round])
 
-  // 全部分頁讀完（ready／sending）才整份一次送翻譯；譯文只換顯示，作答與送出差集都用原文 `draft`。
   const pagesToTranslate = (phase === 'ready' || phase === 'sending') && draft ? draft.pages.filter((p) => !p.isSubmit) : []
   const tr = useMenuTranslation(
     pagesToTranslate.map((p) => ({ header: p.label, question: p.question, multi: p.multi, choices: p.choices.map((c) => ({ title: c.title, detail: c.detail })) })),
@@ -145,7 +132,6 @@ export function BlockedDraft({
     setPhase('sending')
     setErr(null)
     setStep({ done: 0, total: 0 })
-    // 單選：選了 Type something 要有字；複選：想勾、而終端上還沒勾的 Type something 要有字（已勾的是終端打好的）。
     const typedEmpty = draft.pages.some((p, i) => {
       const idx = p.multi ? typeToPaste(p, want[i]) : (want[i] ?? []).findIndex(Boolean)
       return idx >= 0 && typedAnswerHere(p, p.choices[idx] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()
@@ -160,14 +146,11 @@ export function BlockedDraft({
     try {
       res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
     } catch (e) {
-      // 沒接住的話畫面會永遠停在「送出中…」，什麼訊息都沒有（2026-10-02）。
       res = { ok: false, error: t('送出途中出錯：{msg}。終端停在哪一步請看終端原文。', { msg: e instanceof Error ? e.message : String(e) }) }
     }
     onAnswered?.()
-    // 成功也要放開按鈕：問卷還在畫面上（同一份）時才不會卡在「送出中…」。
     setPhase('ready')
     if (res.ok) return
-    // 失敗就停手並重讀終端現況，不要假裝成功。
     setErr(res.error ?? t('送出失敗。'))
   }
 
@@ -176,7 +159,6 @@ export function BlockedDraft({
     const idx = (want[page] ?? []).findIndex(Boolean)
     if (idx < 0) return ''
     if (!p.multi && typedAnswerHere(p, p.choices[idx] ?? { title: '' })) return (custom[p.tab] ?? '').trim()
-    // 譯文只換顯示：已選的答案用這一題的譯名；送鍵與比對仍用原文 `c.title`。
     const d = dispOf(p.tab)
     return p.choices
       .map((c, j) => ({ c, j }))
@@ -243,7 +225,6 @@ export function BlockedDraft({
                   const shown = open.includes(key)
                   const action = page.multi && c.checked === null
                   const picked = Boolean(want[i]?.[j])
-                  // 複選頁終端上已經勾好的 Type something 是使用者打好的字，這裡只准留或取消，不再給打字框。
                   const typeRow = typedAnswerHere(page, c) && !(page.multi && c.checked)
                   return (
                     <li key={key} className={`bc-row${c.detail ? ' bc-row-more' : ''}`}>

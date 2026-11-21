@@ -1,5 +1,3 @@
-// 專案排程的 API（daemon `schedules/api.rs`，User-only）。WS `schedules_changed` 只帶 `{project_id, id}`，
-// 網頁收到後自己重抓，prompt 不進全域 state。
 import { rawTransport } from './index'
 import { t } from '../lib/i18n'
 
@@ -12,16 +10,11 @@ export type OccurrenceStatus = 'pending' | 'queued' | 'done' | 'failed' | 'cance
 
 export interface ScheduleSpecIn {
   mode: ScheduleMode
-  /** once：本地時間 `YYYY-MM-DDTHH:MM` */
   at?: string
-  /** interval：秒（最少 60、最多一年） */
   every_secs?: number
-  /** daily／weekly：本地 `HH:MM`（第一個時段；有 slots 時以 slots 為準） */
   time?: string
-  /** weekly：0=週一 … 6=週日 */
   weekdays?: number[]
-  /** daily／weekly 的時段（一天多個），最多 8 個，時間不重複 */
-  slots?: { time: string; label?: string; /** 隨機區間的結束時間（HH:MM[:SS]）；有值就在 time–until 內隨機挑一秒觸發 */ until?: string }[]
+  slots?: { time: string; label?: string;  until?: string }[]
 }
 
 export interface ScheduleOccurrence {
@@ -32,12 +25,9 @@ export interface ScheduleOccurrence {
   generation: number
   bot_id: string
   prompt: string
-  /** 觸發它的時段標籤（沒有時段＝null／空白） */
   slot_label?: string | null
   status: OccurrenceStatus
-  /** pending 時的等待原因：bot_busy／stopping／… */
   waiting_reason: string | null
-  /** 綁定 turn 的真實狀態與 delivery（UI 分辨等待、執行中、需確認）。 */
   turn_status?: string | null
   turn_delivery?: string | null
   turn_start_error?: string | null
@@ -52,11 +42,8 @@ export interface ScheduleOccurrence {
   attempt_no?: number
   next_retry_at?: string | null
   attempts?: ScheduleAttempt[]
-  /** 第一次開始執行的時間（turn 送出；fork 重啟則從重啟開始）；還沒開始＝null。 */
   started_at?: string | null
-  /** 已結束的 attempt 耗時加總（毫秒，重試等待不算）；還沒開始＝null。 */
   duration_ms?: number | null
-  /** 進行中的 attempt 開始時間；畫面用「現在 − running_since」加上 duration_ms 顯示已進行時間。 */
   running_since?: string | null
   created_at: string
   updated_at: string
@@ -64,11 +51,9 @@ export interface ScheduleOccurrence {
 
 export interface Schedule {
   id: string
-  /** 排程代號（S1、S2…）：全域唯一、遞增、不變、刪除不回收；舊 daemon 不回此欄。 */
   code?: string
   project_id: string
   bot_id: string
-  /** daemon 判斷綁定 Bot 是否仍可接收此專案的排程；舊 daemon 不回此欄。 */
   bot_available?: boolean
   name: string
   prompt: string
@@ -79,19 +64,14 @@ export interface Schedule {
   enabled: boolean
   generation: number
   notify: ScheduleNotify
-  /** 跑完就清空對話：每次成功跑完讓綁定的 Bot 開新對話（daemon 只在 done 時清）。 */
   retry_count?: number
   retry_interval_mins?: number
   clear_after: boolean
-  /** 每次從基準快照開始（bot 的 codex 基準；`/bots/{id}/base-snapshot`）。 */
   from_base?: boolean
-  /** 綁的是排程專屬 bot（role = scheduler）；舊排程綁一般 bot 時為 false，UI 提示轉成專屬或改綁。 */
   bot_dedicated?: boolean
   created_at: string
   updated_at: string
-  /** 列表與詳情都帶：未結束的 occurrence（pending／queued），沒有就是 null。 */
   open?: ScheduleOccurrence | null
-  /** 上次執行：最近一筆已結束的 occurrence（含總花費時間 duration_ms）；沒有就是 null。 */
   last?: ScheduleOccurrence | null
 }
 
@@ -100,7 +80,6 @@ export interface ScheduleDetail extends Schedule {
 }
 
 export interface ScheduleCreateInput {
-  /** 冪等 key：同一次表單送出（含重送）用同一個值。 */
   client_request_id: string
   name: string
   prompt: string
@@ -130,7 +109,6 @@ export interface ScheduleEditInput {
 
 const enc = encodeURIComponent
 
-/** 後端回來的資料先驗再用，不 rawcast：缺 id 就是契約壞了，要明確報錯，不能讓元件讀到 undefined。 */
 function asSchedule(raw: unknown): Schedule {
   const r = raw as Partial<Schedule> | null
   if (!r || typeof r !== 'object' || typeof r.id !== 'string' || typeof r.project_id !== 'string') {
@@ -139,19 +117,16 @@ function asSchedule(raw: unknown): Schedule {
   return { ...r, open: r.open ?? null, clear_after: r.clear_after === true, from_base: r.from_base === true } as Schedule
 }
 
-/** 詳情一定帶 `recent`（daemon 的 `get_one`）；缺的話當成空陣列，不讓畫面炸。 */
 function asDetail(raw: unknown): ScheduleDetail {
   const base = asSchedule(raw)
   const recent = (raw as { recent?: unknown }).recent
   return { ...base, recent: Array.isArray(recent) ? (recent as ScheduleOccurrence[]) : [] }
 }
 
-/** 本分頁的排程異動：與 WS `schedules_changed` 同一個事件，列表與側欄代號列都聽它（沒有 project_id＝全部專案重抓）。 */
 function notifyChanged(projectId?: string): void {
   try {
     window.dispatchEvent(new CustomEvent('agm:schedules_changed', { detail: projectId ? { project_id: projectId } : {} }))
   } catch {
-    /* 非瀏覽器環境 */
   }
 }
 
@@ -186,7 +161,6 @@ export async function deleteSchedule(id: string): Promise<void> {
   notifyChanged()
 }
 
-/** 手動執行：只建立並排進既有佇列，不 steer、不 interrupt。 */
 export async function runScheduleNow(id: string, clientRequestId: string, dryRun = false): Promise<{ occurrence: ScheduleOccurrence | null }> {
   return (await rawTransport.request('POST', `/schedules/${enc(id)}/run`, { client_request_id: clientRequestId, ...(dryRun ? { dry_run: true } : {}) })) as {
     occurrence: ScheduleOccurrence | null

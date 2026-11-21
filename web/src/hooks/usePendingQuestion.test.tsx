@@ -1,4 +1,3 @@
-/** `usePendingQuestion`：分頁在背景時不讀 transcript 的那一題，回前景立刻補一次（#909）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useEffect, useState } from 'react'
@@ -19,7 +18,6 @@ function setVisibility(state: 'hidden' | 'visible') {
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
 }
 
-/** transport 在真的 fetch 之前還有幾個 await：多讓幾輪 microtask。 */
 const flush = () =>
   act(async () => {
     for (let i = 0; i < 20; i++) await Promise.resolve()

@@ -1,10 +1,3 @@
-/**
- * WebSocket 重連的退避與 token（假 WebSocket、假計時器）：
- * - daemon 換了 token（重啟、重新產生）之後，ws 連線在握手就被 401 拒絕（瀏覽器只看得到「沒開成」）。以前只有 HTTP 的
- *   GET 撞 401 才會重拿 token，ws 一直拿舊的重試，畫面永遠「斷線」直到使用者重整。
- * - 開著不到幾秒就被關（代理、半壞的 daemon）不能把退避歸零：每次「開成功」都整份重抓 state／對話／額度／草稿。
- * - 一群分頁同時重連（daemon 重啟）的抖動要夠寬，不然全部同一刻打回來。
- */
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { HttpTransport } from './transport'
@@ -30,7 +23,6 @@ class FakeWS {
     this.readyState = FakeWS.OPEN
     this.onopen?.()
   }
-  /** 握手被拒（401）：瀏覽器只會 error → close，沒有 open。 */
   reject() {
     this.readyState = 3
     this.onclose?.()
@@ -47,8 +39,6 @@ class FakeWS {
 const realSetTimeoutG = globalThis.setTimeout
 const realClearTimeoutG = globalThis.clearTimeout
 const realFetchG = globalThis.fetch
-// rig() 換掉的瀏覽器全域也要還原：留著假的 `document`，同一個行程裡之後的 DOM 測試檔拆掉 happy-dom 時會還原成這個假物件，
-// 再 import `App`（讀 `document.title`）就炸（#719 階段 3b 加測試檔、分片重排後在 shard 4 現形）。
 const BROWSER_GLOBALS = ['WebSocket', 'location', 'window', 'document'] as const
 const realBrowserG = Object.fromEntries(BROWSER_GLOBALS.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
 afterEach(() => {
@@ -108,9 +98,7 @@ function rig(token: string, sessionToken = 'new') {
     fetched,
     advance: (ms: number) => { clock += ms },
     last: () => FakeWS.instances[FakeWS.instances.length - 1],
-    /** 排著的重連 timer 的延遲（最後一個還活著的）。 */
     pendingDelay: () => [...timers].reverse().find((x) => x.live)?.ms ?? null,
-    /** 觸發最後一個還活著的 timer。 */
     fireTimer: async () => {
       const t = [...timers].reverse().find((x) => x.live)
       if (!t) throw new Error('沒有排著的重連 timer')
@@ -153,7 +141,7 @@ test('開成功又馬上被關（不到穩定時間）：退避繼續往上，�
   const delays: number[] = []
   for (let i = 0; i < 5; i++) {
     r.last().open()
-    r.advance(1_000) // 只活 1 秒
+    r.advance(1_000)
     r.last().drop()
     delays.push(r.pendingDelay() ?? -1)
     await r.fireTimer()

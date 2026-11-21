@@ -11,17 +11,10 @@ import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import type { DialogControl } from './MergedUpdateChip'
 
-/** 確認框裡照實寫出來的安裝指令：跟 daemon `cli_update::CODEX_INSTALL` 同一句（daemon 不收呼叫端傳的指令，這裡只是給人看）。 */
 const INSTALL_CMD = 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'
 
-/**
- * header 的「codex 有新版、還沒裝」（SPEC §6.9，使用者 2026-09-25：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）。
- * 跟 claude 那顆同一個樣子（⌃⌃ N，警示色）、同一種確認框（左 changelog、右 影響分析、下面列會重啟／會跳過的），
- * 確認後 daemon 在那台跑官方安裝指令 → 驗 `codex --version` → 接著一鍵重啟那台閒置的 codex。claude 也有更新時兩顆並排（UI-DECISIONS）。
- */
 export function CodexInstallChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
-  // 各 selector 回純值（見 UpdateQuotaChip：回新物件會 getSnapshot should be cached）。
   const planKey = useStore((s) => {
     const p = codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id), s.upstreamUpdates.codex)
     return p ? JSON.stringify(p) : ''
@@ -29,7 +22,6 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
   const cliKey = useStore((s) => JSON.stringify(s.cliUpdates.filter((item) => item.kind === 'codex')))
   const install = useStore((s) => s.installCodexUpdate)
   const [localOpen, setLocalOpen] = useState(false)
-  // 手機合成的那顆（`MergedUpdateChip`）代為開框時，這裡只畫確認框。
   const confirming = control ? control.open : localOpen
   const setConfirming = (v: boolean) => (control ? !v && control.close() : setLocalOpen(v))
 
@@ -52,7 +44,6 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
   const plan = JSON.parse(planKey) as NonNullable<ReturnType<typeof codexInstallPlan>>
   const range = updateRange('codex', plan.notice, null)
   const version = range.to ? ` ${range.to}` : ''
-  // 上游快照開的那份（沒有 codex 在跑）沒有「幾顆 Bot」可講，只講主機（`codexUpstreamPlan`）。
   const where = plan.installCount > 0 ? t('{host}，{n} 顆 Bot', { host: plan.host, n: plan.installCount }) : plan.host
   const label = t('codex 有新版{version}，還沒裝（{where}）· 點一下安裝{restart}', {
     version,

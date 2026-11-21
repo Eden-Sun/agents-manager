@@ -1,6 +1,3 @@
-/**
- * 草稿太大被 daemon 拒收（#1656）：輸入框上方要有一行說明，縮短、送成功（清掉提示）後消失；換一個輸入框的 key 不跟著顯示。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

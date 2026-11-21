@@ -1,6 +1,3 @@
-/**
- * AnsiTerm 真的掛進 happy-dom：色段變成帶 class／color 的 span、網址仍可點（跨色段也行）、沒有原始 ESC、沒有 key 警告。
- */
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -19,7 +16,6 @@ test('色段：每段一個 span，樣式與主題變數落在 inline style／cl
   assert.equal(spans[0].textContent, 'ERR')
   assert.equal((spans[0] as HTMLElement).style.color, 'var(--ansi-1)')
   const hot = [...el.querySelectorAll('span')].find((s) => s.textContent === 'hot') as HTMLElement
-  // 24-bit／256 色交給 CSS 依主題調整（淺色翻明度），放在變數上。
   assert.equal(hot.style.getPropertyValue('--ansi-fg'), '#ff0000')
   assert.ok(hot.classList.contains('ansi-fg-rgb'))
   assert.equal(el.textContent, 'ERR ok\nhot')

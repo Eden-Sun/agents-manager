@@ -1,4 +1,3 @@
-/* components/AttachButton.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .attach-btn:hover:not(:disabled),
 .attach-btn.on {
   color: var(--accent-ink);
@@ -63,8 +62,6 @@
   right: 8px;
   width: auto;
 }
-
-/* 指令泡泡已開時不再疊 tooltip（鍵按完還留 focus）。 */
 
 .attach-btn.on[data-tip]::after {
   display: none;

@@ -7,7 +7,6 @@ const m = (id: string, created_at = id) => ({ id, created_at })
 test('insertSorted: the common case (newest at the end) appends', () => {
   const list = [m('a'), m('b')]
   assert.deepEqual(insertSorted(list, m('c'), byTime), [m('a'), m('b'), m('c')])
-  // the input is not mutated
   assert.deepEqual(list, [m('a'), m('b')])
 })
 
@@ -72,7 +71,6 @@ test('pruneTurns never drops an in-flight turn; a settled unknown-delivery one i
     t5: { status: 'completed' },
   }
   const out = pruneTurns(map, 2)
-  // newest two + in-flight; settled `unknown` turns don't block (API.md §5).
   assert.deepEqual(Object.keys(out).sort(), ['t0', 't4', 't5'])
 })
 
@@ -107,15 +105,14 @@ test('keptAfterPage：同一毫秒、id 比頁內最新那則大的訊息要留�
   ]
   const existing = [
     ...page,
-    { id: '01C', created_at: T }, // 同毫秒、頁抓完才進來的 message_added
-    { id: '01D', created_at: '2026-10-01T10:00:00.200Z' }, // 更晚
-    { id: '01Z0', created_at: '2026-10-01T09:00:00.000Z' }, // 頁裡沒有、比頁內最新舊：resync 要能刪過期的
+    { id: '01C', created_at: T },
+    { id: '01D', created_at: '2026-10-01T10:00:00.200Z' },
+    { id: '01Z0', created_at: '2026-10-01T09:00:00.000Z' },
   ]
   assert.deepEqual(
     keptAfterPage(existing, page, '2026-10-01T10:00:01.000Z').map((m) => m.id),
     ['01C', '01D'],
   )
-  // 空頁退回 startedAt。
   assert.deepEqual(keptAfterPage(existing, [], T).map((m) => m.id), ['01D'])
 })
 
@@ -149,20 +146,15 @@ test('reuseUnchanged: 巢狀欄位變了才換；新增、刪除、換順序都�
   assert.deepEqual(reuseUnchanged([], [{ id: 'x' }]), [{ id: 'x' }])
 })
 
-// s748 的根治：同一毫秒的訊息 id（ULID 隨機段）不照插入序，daemon 帶 `seq`（rowid）。
 const S = '2026-10-01T10:00:00.123Z'
 const q = (id: string, seq: number | undefined, created_at = S) => ({ id, created_at, seq })
 
 test('byTime：同毫秒時用 seq 定先後，id 倒著也照 seq；沒有 seq 才退回 id', () => {
-  // id 是亂序的（Z 比 A 大，但 Z 先寫入）。
   const list = [q('01Z', 1), q('01A', 2), q('01M', 3)]
   assert.deepEqual([...list].sort(byTime).map((x) => x.id), ['01Z', '01A', '01M'])
-  // 時間不同時仍然時間優先，seq 不能蓋過時間。
   assert.ok(byTime(q('01A', 9, '2026-10-01T10:00:00.100Z'), q('01B', 1)) < 0)
-  // 任何一邊沒有 seq（舊 daemon／0＝未知）：退回 id。
   assert.deepEqual([q('01B', undefined), q('01A', undefined)].sort(byTime).map((x) => x.id), ['01A', '01B'])
   assert.deepEqual([q('01B', 0), q('01A', 5)].sort(byTime).map((x) => x.id), ['01A', '01B'])
-  // 插入一則亂序到達的：落在 seq 對的位置。
   assert.deepEqual(insertSorted([q('01Z', 1), q('01M', 3)], q('01A', 2), byTime)?.map((x) => x.id), ['01Z', '01A', '01M'])
 })
 
@@ -175,9 +167,9 @@ test('keptAfterPage：同毫秒的界線看 seq——頁抓完後才 commit 的�
   const page = [q('01A', 10, '2026-10-01T09:59:59.000Z'), q('01M', 11)]
   const existing = [
     ...page,
-    q('01B', 12), // 同毫秒、頁抓完才進來，id 比頁內最新（01M）小：舊的 id 比較會把它當過期丟掉
-    q('01Z', 5), // 同毫秒、seq 比頁內最新小＝頁裡該有卻沒有的過期項，id 比較大：舊的 id 比較會誤留
-    q('01D', 13, '2026-10-01T10:00:00.200Z'), // 更晚
+    q('01B', 12),
+    q('01Z', 5),
+    q('01D', 13, '2026-10-01T10:00:00.200Z'),
   ]
   assert.deepEqual(keptAfterPage(existing, page, '2026-10-01T10:00:01.000Z').map((x) => x.id), ['01B', '01D'])
 })

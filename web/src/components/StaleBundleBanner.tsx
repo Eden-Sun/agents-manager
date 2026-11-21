@@ -4,12 +4,8 @@ import { checkServedBundle, dismissStaleBundle, loadedMainScript } from '../lib/
 import { useStore } from '../store/store'
 import './staleBundleBanner.css'
 
-/** 頁面載入時的主 script（之後 DOM 不會變）；dev 模式是 null，整個偵測就不動作。 */
 const LOADED = typeof document === 'undefined' ? null : loadedMainScript(document)
 
-/**
- * 換版偵測：WS 連上（含重連）與分頁從背景回到前景時查一次。發現新前端就固定在頂部提示重新開啟；可收起，收起後同一版不再跳。
- */
 export function StaleBundleBanner({ loaded = LOADED }: { loaded?: string | null } = {}) {
   const t = useT()
   const socket = useStore((s) => s.socket)

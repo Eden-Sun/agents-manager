@@ -1,36 +1,28 @@
-// issue #1932：agy 並行分擔的 updates 區塊字典（檔案清單見派工）。
 import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
-  // src/components/EnvShell.tsx
   '點選分頁可切換環境準備、主機、更新檢查、身份與各項服務設定。': 'Pick a section to switch between Setup, Hosts, Updates, Identities, and services.',
   '我知道了': 'Got it',
 
-  // store/herdrUpdate.ts
   '準備更新': 'Preparing update',
 
-  // lib/envTabs.ts
   'Claude API': 'Claude API',
   'OpenAI API': 'OpenAI API',
 
-  // toolsHelpers.ts & MergedUpdateChip.tsx & AgyUpdateChip.tsx
   '讀取失敗': 'Could not load',
   '更新': 'Update',
   '知道了': 'Got it',
   '關閉': 'Close',
 
-  // api/deployWait.ts
   '工作中': 'working',
   '正在送訊息或排隊待送': 'Sending message or queued',
   '讀不到狀態': 'status unknown',
   '握著窗口': 'Holding restart window',
 
-  // api/integrationUpdates.ts
   '這顆 daemon 還沒有 integration 更新（HTTP 404），或不認得主機 {host}': 'This daemon does not support integration updates yet (HTTP 404), or does not recognize host {host}',
   '這顆 daemon 還沒有 integration 更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon': 'This daemon does not support integration updates yet (HTTP 405) — binary is older than the frontend; rebuild and restart daemon',
   'integration 更新只給使用者在設定頁按': 'Integration updates can only be triggered by the user in Settings',
 
-  // lib/agyQuotaError.ts
   '探測逾時（agy 一直沒有回應）': 'Probe timed out (agy did not respond)',
   'agy /usage 的輸出讀不懂': 'Cannot parse agy /usage output',
   'agy 執行失敗': 'agy execution failed',
@@ -38,18 +30,14 @@ const dict: Dict = {
   '主機尚未連線': 'Host not connected yet',
   '原因不明': 'unknown reason',
 
-  // lib/onboardingActions.ts
   '已在 {host} 開 shell 安裝 {kind}，裝完會自動重新偵測': 'Opened shell on {host} to install {kind}; will re-check automatically once done',
   '安裝 {kind} 失敗：{reason}': 'Installing {kind} failed: {reason}',
 
-  // components/AgyUpdateConfirm.tsx
   '在 {host} 把 agy 從 {from} 更新到官方最新版（約 {target}）：從官方下載（約 50 MB）、驗 sha512 後換掉 {path}；不跑官方 install.sh、{cmd1} 或 {cmd2}。跑著的 agy bot 不會被打斷，重啟後才換版。':
     'On {host}, update agy from {from} to official latest (approx. {target}): downloads from official source (approx. 50 MB), verifies sha512, and replaces {path}; does not run official install.sh, {cmd1}, or {cmd2}. Running agy bots are not interrupted and will switch version on restart.',
 
-  // components/AgyUpdateChip.tsx
   'agy 更新中…': 'Updating agy…',
 
-  // components/GrokUpdateChip.tsx & lib/grokUpdate.ts
   'grok 有新版 {version}': 'grok has a new version {version}',
   '這些主機的 grok 還不是最新的正式版：': 'grok on these hosts is not yet on the latest stable release:',
   '讀不到版本': 'version unknown',
@@ -60,7 +48,6 @@ const dict: Dict = {
   'grok {target}：{hosts} 還沒升（只提示，指令 {command}）':
     'grok {target}: {hosts} not updated yet (notice only, command {command})',
 
-  // lib/herdrVersion.ts
   'herdr 版本：未知': 'herdr version: unknown',
   '主機沒連上或讀不到 herdr 版本': 'Host offline or cannot read herdr version',
   'herdr CLI {cli}（server 版本未知）': 'herdr CLI {cli} (server version unknown)',
@@ -70,12 +57,10 @@ const dict: Dict = {
   'protocol {protocol} 不在 daemon 實測過的清單，RPC 形狀沒驗過。':
     'protocol {protocol} is not in the daemon-tested list; RPC shape is unverified.',
 
-  // store/integrationAutoInstall.ts
   '已在 {where} 自動安裝 herdr {name} integration': 'Automatically installed herdr {name} integration on {where}',
   '在 {where} 自動安裝 herdr {name} integration 失敗：{error}（不重試；到設定頁「更新檢查」按安裝再試，或重啟 daemon）':
     'Failed to automatically install herdr {name} integration on {where}: {error} (will not retry; click install in Settings Update check, or restart daemon)',
 
-  // api/herdrUpdate.ts
   '這顆 daemon 還沒有 herdr 一鍵更新（HTTP 404），或不認得主機 {host}': 'This daemon does not support herdr one-click update yet (HTTP 404), or does not recognize host {host}',
   '這顆 daemon 還沒有 herdr 一鍵更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon': 'This daemon does not support herdr one-click update yet (HTTP 405) — binary is older than frontend; rebuild and restart daemon',
   '{host} 是遠端主機，這版只支援更新本機的 herdr': '{host} is a remote host; this version only supports updating herdr on this machine',
@@ -85,7 +70,6 @@ const dict: Dict = {
   '已經有一次 herdr 更新在跑': 'A herdr update is already in progress',
   '只能從網頁按，Bot 不能自己觸發 herdr 更新': 'Can only be triggered from the web UI; bots cannot trigger herdr updates',
 
-  // components/AgyInstall.tsx
   '安裝 agy？': 'Install agy?',
   '{host} 尚未安裝 agy，要自動安裝嗎？': '{host} does not have agy installed yet. Install automatically?',
   '會從官方下載（約 50 MB）、驗 sha512 後放到 {path}；不跑官方 install.sh、不改 shell 設定。':
@@ -94,7 +78,6 @@ const dict: Dict = {
     'Download agy on {host} from official source (approx. 50 MB, verifies sha512) and put into ~/.local/bin/agy; does not run official install.sh or alter shell config',
   '安裝 agy': 'Install agy',
 
-  // components/UpdateAllBanner.tsx
   '重啟完成 · 成功 {ok} 顆': 'Restart done · {ok} succeeded',
   ' · 跳過 {skipped} 顆': ' · {skipped} skipped',
   ' · 失敗 {failed} 顆': ' · {failed} failed',
@@ -103,7 +86,6 @@ const dict: Dict = {
   '收起這則摘要': 'Dismiss this summary',
   '收起進度（不會中斷重啟）': 'Hide progress (restart will not be interrupted)',
 
-  // components/CodexUpdateHint.tsx & lib/codexUpdatePrompt.ts
   '畫面在這中間換過了，這一下沒有送出去——上面是重讀後的畫面，請再點一次。':
     'The screen changed in the meantime and this action was not sent — screen reloaded above, please click again.',
   '收起 changelog': 'Collapse changelog',
@@ -117,13 +99,11 @@ const dict: Dict = {
   '按 1 更新前先看新版的 release notes。': 'View release notes before pressing 1 to update.',
   '目前沒有對應的互動選單，只能查看新版 release notes。': 'No interactive menu currently available; view release notes only.',
 
-  // lib/agyUpdate.ts
   '更新 Antigravity（agy）CLI 到 {target}？': 'Update Antigravity (agy) CLI to {target}?',
   'agy 有新版 {target}（{hosts}）· 點一下更新：從官方下載、驗 sha512 後換掉 ~/.local/bin/agy；跑著的 agy bot 重啟後才換版':
     'agy has a new version {target} ({hosts}) · click to update: downloads from official source, verifies sha512, and replaces ~/.local/bin/agy; running agy bots switch version on restart',
   'agy {target}：{hosts} 可更新（點開確認）': 'agy {target}: {hosts} can update (click to confirm)',
 
-  // lib/toolInstallDone.ts
   '{where} 的安裝追蹤已失聯（主機連線或偵測已換代），請重新偵測並確認原安裝程序':
     'Lost installation tracking on {where} (host connection or detection changed); please re-check and verify installer process',
   '{where} 安裝 {kind} 等了 15 分鐘仍未確認結束（逾時）；請檢查保留的安裝終端':
@@ -135,7 +115,6 @@ const dict: Dict = {
   '{where} 沒裝成 {kind}：{why}；安裝終端已關閉，請再按一次「安裝」':
     'Failed to install {kind} on {where}: {why}; install terminal closed, please click Install again',
 
-  // lib/deployNow.ts
   '部署中{sha}：建置中或等換版窗口': 'Deploying{sha}: building or waiting for the swap window',
   '{owner}正握著 {resource} 窗口（重建或換版進行中）': '{owner} is holding {resource} window (rebuild or restart in progress)',
   '有人': 'Someone',

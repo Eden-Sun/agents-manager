@@ -1,9 +1,3 @@
-/**
- * 左上角「立即部署」的判斷與結果文字（使用者 2026-09-25）。純函式，元件只負責畫。
- *
- * 資料是 `GET /api/deploy/status`：線上 binary（`live_sha`）落後 origin/main 幾個 commit、有沒有會進 binary 的差異
- * （路徑同 `daemon-update-kick.sh` 的 build-inputs；docs-only 不算）、現在有沒有部署在跑。
- */
 import { ApiError } from '../api/types'
 import { t } from './i18n'
 
@@ -13,7 +7,6 @@ export interface DeployCommit {
 }
 
 export interface DeployRunning {
-  /** `requested`＝按過、kick 還沒吃到（或正在建置、在等安全窗口）；`lease`＝有人握著 rebuild／restart 窗口。 */
   kind: string
   sha?: string
   resource?: string
@@ -33,17 +26,14 @@ export interface DeployStatus {
   working: { bot_id: string; name: string }[]
   log_path: string
   kick_ready: boolean
-  /** daemon 說不出落後多少的原因（sha 是 unknown、讀不到 origin/main）。 */
   error: string | null
 }
 
-/** 按鈕要不要出現：有程式碼差異、或正在部署（讓使用者看得到「部署中」而不是按鈕突然消失）。 */
 export function deployVisible(s: DeployStatus | null): boolean {
   if (!s) return false
   return s.running !== null || (s.code_changed && s.behind > 0)
 }
 
-/** 正在跑的是哪一種，寫成一句人話（chip 的提示與確認框用）。 */
 export function runningText(r: DeployRunning): string {
   switch (r.kind) {
     case 'requested':
@@ -60,7 +50,6 @@ export interface DeployNotice {
   text: string
 }
 
-/** `POST /api/deploy/now` 的結果 → 一則通知。409／503 講清楚是哪一種，不要只說「失敗」。 */
 export function deployNowNotice(result: { short?: string; log_path?: string } | null, error: unknown): DeployNotice {
   if (result) {
     return {

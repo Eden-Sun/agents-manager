@@ -1,4 +1,3 @@
-/** 模型清單載入中／API 失敗時，先用最後抓到的清單，不退回寫死的（使用者 2026-11-09）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

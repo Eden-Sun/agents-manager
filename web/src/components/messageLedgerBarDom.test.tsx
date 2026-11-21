@@ -1,7 +1,3 @@
-/**
- * 使用者訊息下方的追蹤進度（SPEC 帳本第 1 階段 T5，2026-11-21 重做）：白話摘要、面板的「⋯」操作（不用做了／已經好了）、
- * 底部補一項、未整理時的「這則不用追蹤」，以及 `ledger_updated` 到達時重新拉這一則。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -49,7 +45,6 @@ const msg = (ledger?: LedgerItem[]): Message =>
 function setup() {
   const requests: { method: string; path: string; body: unknown }[] = []
   const bot = { id: 'b1', name: 'agy-bot', project_id: 'p1', kind: 'agy', model: null, effort: null, fast: false, identity: null, needs_restart: false } as unknown as Bot
-  // ledgerRev 是跨測試的全域狀態：上一則測試改過的值不能帶進來（否則這裡會多拉一次帳本）。
   useStore.setState({ bots: [bot], busy: {}, ledgerRev: {} } as never)
   mockApi({
     request: async (method: string, path: string, body?: unknown) => {
@@ -77,7 +72,6 @@ test('摘要：白話的三種狀態，不講帳本術語；不列已取消與�
   const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
   assert.equal(el.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 3 項：待你驗收 1・需要你回覆 1・進行中 1')
   const done = [item({ id: 'd1', status: 'done' }), item({ id: 'd2', code: 'L2', code_no: 2, status: 'cancelled' }), item({ id: 'd3', code: 'L3', code_no: 3, status: 'merged' })]
-  // 待驗收不算結案：還有 answered 就不是「追蹤完成」。
   const awaiting = [item({ id: 'a1', status: 'done' }), item({ id: 'a2', code: 'L2', code_no: 2, status: 'answered' })]
   const el3 = await mount(<MessageLedgerBar msg={msg(awaiting)} />)
   assert.equal(el3.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 2 項：待你驗收 1・已完成 1')
@@ -123,7 +117,6 @@ test('「⋯」→「不用做了」：PATCH op=cancel 帶 expected_version；�
   assert.match(cancel.path, /\/ledger\/li2$/)
   assert.deepEqual(cancel.body, { op: 'cancel', expected_version: 1, close_reason: 'cancelled by user' })
 
-  // 取消後 li2 不再列出；原本第三行（li3，version 2）現在排到第二行。
   await click(el.querySelectorAll<HTMLButtonElement>('.ledger-row')[1].querySelector('.ledger-more')!)
   await click(btn(el, '已經好了'))
   const done = requests.filter((r) => r.method === 'PATCH')[1]

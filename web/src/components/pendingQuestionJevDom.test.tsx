@@ -1,7 +1,3 @@
-/**
- * Jev 的選項建議（issue #1475）：真的掛 `PendingQuestionCard` 與 `BlockedChoices` 進 happy-dom。
- * 有建議時該選項旁有「Jev 建議」＋分數；沒有建議、多選題什麼都沒有；只提示，點選項照舊走原本的鍵。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -41,9 +37,7 @@ test('卡片：有建議時該選項旁標「Jev 建議」＋分數，其他選�
   assert.equal(items.length, 2)
   assert.match(items[0].textContent ?? '', /內網 http.*Jev 建議 91%/)
   assert.doesNotMatch(items[1].textContent ?? '', /Jev/)
-  // 收合列也提一聲（含百分比），不然預設收起時看不到。
   assert.match(root.querySelector('.pending-q-toggle .pending-q-jev')?.textContent ?? '', /^Jev 建議 91%$/)
-  // 展開後有「只是建議、不會代答」的說明。
   assert.match(root.querySelector('.pending-q-jev-note')?.textContent ?? '', /Jev.*只是建議，不會自動動作/)
 })
 
@@ -68,7 +62,6 @@ test('卡片：選項在上面的選單裡時，建議改成一行說明（卡�
   assert.match(root.querySelector('.pending-q-jev-line')?.textContent ?? '', /內網 http/)
 })
 
-// 2026-09-12 真機快照（bot `fabrik`，185 欄）的選單，選項一～四。
 const SCREEN = [
   ' ☐ 下一步',
   '',

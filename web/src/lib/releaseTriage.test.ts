@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { anyAnalysed, cmpVersion, parseTriageRows, triageForRange } from './releaseTriage.ts'
 import { updateRange } from './updateRange.ts'
 
-/** 2026-09-25 真 daemon `GET /api/release-triage?kind=codex` 的形狀（節錄）：`verdicts` 是交回來的整份。 */
 const RAW = {
   publish_enabled: false,
   repo: null,

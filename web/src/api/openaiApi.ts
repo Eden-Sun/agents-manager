@@ -1,7 +1,3 @@
-/**
- * 環境設定的「OpenAI API」（使用者 2026-11-18：「要跟 Claude 一樣可以設定」）：啟用開關、金鑰狀態與 key_file 路徑、總花費上限與起算時間、
- * OpenAI 累計花費。**key 永遠不回來**：讀到的只有 `key_present` 與不能用的原因（比照 Claude API，`api/claudeApi.ts`）。
- */
 import { t } from '../lib/i18n'
 import { rawTransport } from './index'
 import { judgeApiMissing } from './judge'
@@ -13,9 +9,7 @@ export interface OpenAiApiSettings {
   key_error: string | null
   total_cap_usd: number | null
   total_cap_since: string | null
-  /** 單回合成本上限（微美元）：`null`＝未設定（OpenAI bot 無法啟動）。 */
   max_turn_cost_microusd: number | null
-  /** OpenAI 累計花費（美元）：bot 帳本＋一次性用途（翻譯）的帳。 */
   spent_usd: number
   spent_bots_usd: number
   spent_uses_usd: number
@@ -24,9 +18,7 @@ export interface OpenAiApiSettings {
 export interface OpenAiApiPatch {
   enabled?: boolean
   key_file?: string
-  /** 帶 `null`＝清除上限（起算時間一起清）；沒帶＝不動。 */
   total_cap_usd?: number | null
-  /** 單回合成本上限（微美元，必須大於 0）；帶 `null`＝清除；沒帶＝不動。 */
   max_turn_cost_microusd?: number | null
 }
 
@@ -55,7 +47,6 @@ let mockState: OpenAiApiSettings | null = null
 const mockStateOf = (): OpenAiApiSettings =>
   (mockState ??= { enabled: false, key_file: '~/.config/agents-manager/openai-api-key', key_present: false, key_error: 'key file unreadable', total_cap_usd: null, total_cap_since: null, max_turn_cost_microusd: null, spent_usd: 0.0123, spent_bots_usd: 0.01, spent_uses_usd: 0.0023 })
 
-/** 舊 daemon 沒有這個端點（404／405）→ `null`，整區顯示「需要更新 daemon」。其餘錯誤往外丟。 */
 export async function fetchOpenAiApiSettings(): Promise<OpenAiApiSettings | null> {
   if (rawTransport.mock) return mockStateOf()
   try {

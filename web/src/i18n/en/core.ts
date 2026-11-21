@@ -1,9 +1,6 @@
 import type { Dict } from '../../lib/i18n/types'
 
-// 區塊：core（store、api、排程、分享頁、App 外殼與其餘小元件）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
-  // schedules/scheduleCopy.ts · lib/githubIssuePrompt.ts · components/kindMeta.ts · lib/browserMem.ts · schedules/ProjectAddMenu.tsx · lib/panes.ts · share/main.tsx · components/AgmDeleteConfirm.tsx · components/TabsBadge.tsx · components/RunElapsed.tsx · schedules/ScheduleRowMenu.tsx
-  // components/ProjectLineageSection.tsx
   'Session 血統與快取節省': 'Session Lineage & Cache Savings',
   'Session 血統': 'Session Lineage',
   '重新整理血統資料': 'Refresh lineage data',
@@ -62,7 +59,6 @@ export default {
   '編輯排程…': 'Edit schedule…',
   '讀取中…': 'Loading…',
   '複製排程…': 'Copy schedule…',
-  // components/ConfirmDialog.tsx · components/GitBar.tsx · components/Modal.tsx · components/MissionOptions.tsx · schedules/ProjectSchedules.tsx · share/ShareMarkdown.tsx · store/codexReset.ts
   '沒有可以 commit 的變更': 'Nothing to commit',
   '已 commit': 'Committed',
   '已 push': 'Pushed',
@@ -89,7 +85,6 @@ export default {
   '排程': 'Schedules',
   'Codex 額度新消息：{text}（資料：codex-reset.com）': 'Codex quota update: {text} (source: codex-reset.com)',
   '查看來源': 'View source',
-  // lib/cacheClock.ts · schedules/format.ts
   '（上次活動 {time}）': '(last activity {time})',
   '回合進行中，快取是熱的{when}': 'Turn in progress, cache is warm{when}',
   '上次活動 {time}，已保溫 {warm}': 'Last activity {time}, kept warm {warm}',
@@ -116,7 +111,6 @@ export default {
   '下次 {due}': 'Next: {due}',
   '等你回答': 'Needs your answer',
   '等額度': 'Waiting for quota',
-  // App.tsx · store/routeSync.ts · api/transport.ts · api/share.ts · api/schedules.ts · api/types.ts
   '正在重新連線 daemon…': 'Reconnecting to daemon…',
   '與 daemon 的連線中斷，正在重試…': 'Lost connection to daemon, retrying…',
   '狀態同步失敗，正在重試…': 'State sync failed, retrying…',
@@ -263,7 +257,6 @@ export default {
   '；': '; ',
   '上限': 'Cap',
   '請選擇': 'Select',
-  // schedules/ProjectSchedules.tsx · format.ts（專案排程三行列）· ScheduleRowMenu.tsx（列上停用／啟用）
   '今天': 'today',
   '明天': 'tomorrow',
   '昨天': 'yesterday',
@@ -287,7 +280,6 @@ export default {
   '非專屬 bot：照常執行；開啟編輯可轉成專屬或改綁到新專屬 bot': 'Not a dedicated bot: it runs as usual; open the editor to switch it to a dedicated bot or rebind to a new one',
   '停用排程失敗：{reason}': 'Failed to disable schedule: {reason}',
   '啟用排程失敗：{reason}': 'Failed to enable schedule: {reason}',
-  // components/ApiTurnCost.tsx · ApiTurnTimeline.tsx · ApiBotCostOverview.tsx（claude-api 回合可觀測性時間軸與花費拆分/概覽）
   'Claude API 花費概覽': 'Claude API Cost Overview',
   '花費概覽': 'Cost Overview',
   '今日花費': 'Today',
@@ -343,12 +335,10 @@ export default {
   '執行失敗': 'Execution failed',
   '回合結束': 'Turn finished',
   '原因：{reason}': 'Reason: {reason}',
-  // web/src/components/TimeZoneSettings.tsx（#2047）
   '目前 UTC{offset}': 'Current UTC{offset}',
   '時區名稱無效': 'Invalid time zone name',
   '已儲存': 'Saved',
   'bot 對話用的時區在新啟動的 bot 生效': 'The time zone for bot conversations takes effect for newly started bots',
-  // components/AddIdentityDialog.tsx（新增帳號對話框）
   'CLI': 'CLI',
   '完成': 'Done',
   '摘要': 'Summary',

@@ -33,22 +33,16 @@ import { reopenResetCreditOffer } from './store/resetCreditOffer'
 import { drawerShouldClose } from './lib/drawerNav'
 import { StaleBundleBanner } from './components/StaleBundleBanner'
 
-/** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
 const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title)
   .replace(/^\(\d+\+?\)\s*/, '')
-  // 也剝掉 `screenTitle` 的「畫面 · 」前綴，免得一路疊上去。
   .split(' · ')
   .slice(-1)[0]
 
-/** 分頁標題的 `(N)`，以及視窗回到前景時把開著的對話標為已讀（切走再回來才看到回覆的常見情境）。 */
-/** 網頁推播：點通知時 service worker 通知已開啟的視窗開排程。 */
 function usePushClickBridge() {
   useEffect(() => installPushClickBridge(), [])
-  // 點「主力 bot」通知：已開啟的視窗收 `agm:open-bot`，選到該 bot；並回報目前正看哪顆（daemon 不打擾正在看的人）。
   useEffect(() => {
     const onOpen = (ev: Event) => useStore.getState().selectBot((ev as CustomEvent<{ botId: string }>).detail.botId)
     window.addEventListener('agm:open-bot', onOpen)
-    // 點「重置券」通知：已開的視窗收事件，冷啟動帶 `?reset_offer=<key>`；都把該帳號的耗盡提示再開一次。
     const onOffer = (ev: Event) => reopenResetCreditOffer((ev as CustomEvent<{ key: string }>).detail.key)
     window.addEventListener('agm:open-reset-offer', onOffer)
     const initial = parseResetOfferUrl(window.location.href)
@@ -57,7 +51,6 @@ function usePushClickBridge() {
       try {
         window.history.replaceState(window.history.state, '', window.location.pathname)
       } catch {
-        /* 沒有 history 權限就留著參數 */
       }
     }
     const stop = installPresenceReporter(() => useStore.getState().selectedBotId)
@@ -88,8 +81,6 @@ function useUnread() {
   }, [markCurrentRead])
 }
 
-// live region 要先在 DOM 裡、之後內容變動才會被唸；所以容器一律 render，空的時候不佔位也不擋點擊（.notices 是 fixed，沒有 padding）（#1135）。
-// 錯誤用 alert（會打斷），一般的仍是 polite。
 export function Notices() {
   const t = useT()
   const notices = useStore((s) => s.notices)
@@ -126,7 +117,6 @@ function ConnBanner() {
   const socket = useStore((s) => s.socket)
   const stateStale = useStore((s) => s.stateStale)
   const refreshState = useStore((s) => s.refreshState)
-  // socket 通、herdr 斷：daemon 之後會推狀態，但別乾等——每 3 秒（和回到分頁時）自己抓一次。
   const herdrDown = socket === 'open' && !connected
   const shouldRetry = herdrDown || stateStale
   useEffect(() => {
@@ -165,18 +155,13 @@ export default function App() {
   const bootError = useStore((s) => s.bootError)
   const bootstrap = useStore((s) => s.bootstrap)
   const groupProjectId = useStore((s) => s.selectedProjectId)
-  // 主機 shell 與群組互斥且優先：它是使用者剛按出來的暫時性視圖。
   const shellView = useStore((s) => s.shellView)
   const botId = useStore((s) => s.selectedBotId)
-  // 設定面板開在主面板側，開了抽屜也要讓開。
   const settingsBotId = useStore((s) => s.settingsBotId)
   const [drawer, setDrawer] = useState(false)
-  // Below this width the sidebar is an off-canvas drawer (styles.css `@media (width <= 1024px)`).
   const isMobile = useMediaQuery(DRAWER_QUERY)
   useViewportPin()
-  // 螢幕保持亮著的鎖在 App 根部握（#1199）：關掉環境設定視窗不會放掉。
   useWakeLockHolder()
-  // 沒有 drop 區接的檔案拖放不讓瀏覽器打開（#1244）。
   useFileDropGuard()
   const sidebarRef = useRef<HTMLElement>(null)
   const drawerOpen = isMobile && drawer
@@ -190,11 +175,8 @@ export default function App() {
   useUnread()
   usePushClickBridge()
   useBlockedPrefetch()
-  // 抽屜借一格歷史：開著時按上一頁是關抽屜，不是離開這個畫面。
   useDrawerRoute(drawerOpen, () => setDrawer(false))
 
-  // Close the drawer when the selection or breakpoint changes. Compared during render, not in an
-  // effect, to avoid painting the stale open drawer for a frame.
   const selection = `${botId ?? ''}|${groupProjectId ?? ''}|${shellView ? `${shellView.host}:${shellView.paneId}` : ''}|${settingsBotId ?? ''}`
   const [lastNav, setLastNav] = useState({ selection, isMobile })
   if (lastNav.selection !== selection || lastNav.isMobile !== isMobile) {
@@ -206,7 +188,6 @@ export default function App() {
     if (!drawerOpen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
-      // A dialog on top owns Escape; it is the drawer's turn only when none is open.
       if (dialogOpen()) return
       e.preventDefault()
       setDrawer(false)
@@ -252,7 +233,6 @@ export default function App() {
       <aside
         ref={sidebarRef}
         className={`sidebar${drawer ? ' open' : ''}`}
-        // Only at the drawer breakpoint while closed: offscreen, Tab and screen readers would still walk it.
         inert={isMobile && !drawer}
         {...(drawerOpen ? { role: 'dialog' as const, 'aria-modal': true, 'aria-label': t('側邊欄') } : {})}
         onClickCapture={(e) => {
@@ -272,7 +252,7 @@ export default function App() {
         <CodexLoginReplaceDialog />
         <ApiModelConflictDialog />
         <OnboardingBanner compact={Boolean(botId || groupProjectId || shellView)} />
-        {/* 選著 bot 時 shell 是 ChatPanel 的分頁；group／沒選才整個換成 shell 面板。 */}
+        {}
         {shellView && (groupProjectId || !botId) ? (
           <HostShellPanel
             key={`${shellView.host}:${shellView.paneId}`}
@@ -284,11 +264,10 @@ export default function App() {
         ) : groupProjectId ? (
           <ProjectSettingsPanel key={groupProjectId} projectId={groupProjectId} onOpenSidebar={() => setDrawer(true)} />
         ) : (
-          // key：換 bot 重新掛載，未送出的附件與捲動位置才不會跑到下一顆（草稿在 store，不受影響）。
           <ChatPanel key={botId ?? 'none'} onOpenSidebar={() => setDrawer(true)} />
         )}
       </main>
-      {/* 刻意掛在 `main` 外：換 bot／project 不 unmount，暫存的檔案才跨得過去。 */}
+      {}
       <ImageShelf />
       <MobilePreview />
       <PreviewColumn />

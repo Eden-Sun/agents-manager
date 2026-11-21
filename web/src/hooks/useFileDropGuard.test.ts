@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { guardFileDrop } from './useFileDropGuard.ts'
 
-// 假事件：只留 guardFileDrop 會碰到的欄位。
 const fake = (type: string, types: string[], over: { defaultPrevented?: boolean } = {}) => {
   const dataTransfer = { types, dropEffect: 'copy' as string }
   const ev = {
@@ -16,7 +15,6 @@ const fake = (type: string, types: string[], over: { defaultPrevented?: boolean 
   }
   return ev
 }
-// 假事件只留 guardFileDrop 會碰到的欄位，型別在這裡補齊。
 const run = (ev: ReturnType<typeof fake>) => guardFileDrop(ev as unknown as Parameters<typeof guardFileDrop>[0])
 
 test('沒人接的檔案拖放被擋下：dragover 改成 none、drop 也擋（不讓瀏覽器在這個分頁打開檔案）', () => {

@@ -1,6 +1,3 @@
-/**
- * 確認框的鍵盤與連點審查：輸入法組字中的 Enter、連點確認、預設焦點。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, imeEnter, keydown, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'

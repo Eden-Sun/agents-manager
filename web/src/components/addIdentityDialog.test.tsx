@@ -1,7 +1,3 @@
-/**
- * 新增帳號對話框（真的掛進 happy-dom）：建議目錄、與既有共用的警告、切 CLI 時自訂 env 的提示、
- * 送出後等登入→檢查中→已登入。登入與狀態由測試的假函式提供，不碰後端。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'

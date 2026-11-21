@@ -1,12 +1,5 @@
 import { msg, t, tr } from './i18n'
 
-/**
- * 輸入框的 placeholder 與送出鍵的字（`ChatPanel` 的 `Composer`）。
- *
- * `composerState.queued` 有三種來源，字不能共用：回合還在跑（送出排到結束後）、已經有一則在等 bot 起來（排在它後面）、
- * bot 根本沒在跑（`autoStart`，issue #122：送出＝交給 daemon 先啟動再送）。第三種以前沿用第一種的字，
- * 對一顆停著的 bot 說「這回合還在跑」、按鈕寫「排隊送出」。
- */
 export interface ComposerLabelState {
   disabled: boolean
   reason: string
@@ -25,11 +18,9 @@ export function composerPlaceholder(state: ComposerLabelState, o: { phone: boole
       ? t('先打下一則…（bot 起來、前一則送出後才輪到它）')
       : t('這回合還在跑，先打下一則…（送出會排隊）')
   }
-  // noFiles（或 phone）：不提示拖放檔案。
   return o.phone || o.noFiles ? t('輸入訊息…') : t('輸入訊息…（檔案可直接拖放或貼上）')
 }
 
-/** 有附件上傳失敗時按送出（或 Enter）的提示；送出會少了那個檔案（issue #917）。 */
 export const ATTACHMENT_FAILED_NOTICE = msg('有附件上傳失敗：按卡片上的「重試」或把它移除，再送')
 
 export function sendButtonLabel(state: ComposerLabelState, o: { phone: boolean; sending: boolean; uploading: boolean; failed?: boolean }): string {

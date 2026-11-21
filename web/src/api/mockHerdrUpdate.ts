@@ -1,8 +1,3 @@
-/**
- * mock 的 herdr 一鍵更新（SPEC §6.9，API `POST /api/hosts/{name}/herdr-update`）：只演示進度、結果與上游快照，不碰任何 herdr。
- * `__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local 與 mac_builder 都落後；mac_builder 是遠端，按鈕那台只會是 local），header 就會出現徽章；
- * `__amMock.herdrUpdate({ failOne: true })` 演一顆沒接回，`{ reason: 'busy_timeout' }` 演整次沒做、`{ reason: 'restart_failed' }` 演換回舊版（多一步 `rolling_back`，bot 照樣接回）。
- */
 import { later } from './mockClock'
 import { ApiError } from './types'
 import { L } from './mockText'
@@ -11,11 +6,9 @@ type Rec = Record<string, unknown>
 
 export interface MockHerdrCtx {
   emit: (type: string, data: unknown) => void
-  /** 那台在跑的 bot（有 active run）。 */
   liveBots: (host: string) => { bot_id: string; name: string; parent_bot_id: string | null; run_id: string }[]
   setUpstream: (item: Rec) => void
   hostKnown: (host: string) => boolean
-  /** 演示用：把本機還沒在跑的 bot 都開起來，確認框才有「接回／子 agent」名單可看。 */
   startLocal: () => void
 }
 
@@ -24,7 +17,6 @@ export interface MockHerdrOpts {
   installed?: string
   failOne?: boolean
   reason?: string
-  /** 停在某個階段不往下走（截進度圖用）。 */
   hold?: string
 }
 
@@ -53,7 +45,6 @@ export class MockHerdrUpdate {
     this.ctx = ctx
   }
 
-  /** `GET /api/state` 的 `herdr_updates`。 */
   rows() {
     return this.running ? [{ ...this.running }] : []
   }
@@ -68,7 +59,6 @@ export class MockHerdrUpdate {
       kind: 'herdr', latest_version: this.target, target_version: this.target, source_url: 'https://github.com/herdrdev/herdr/releases',
       checked_at: new Date().toISOString(), error: null, has_update: behind.length > 0, notified_version: this.target, notify: null,
       hosts,
-      // 同 daemon `upstream_update::notice_text` 的 herdr 那句。
       text: behind.length
         ? L(
             `herdr 上游有新版 ${this.target}（${behind.map((h) => `${h.host} 是 ${h.installed_version}`).join('、')}）：更新會重啟 herdr server，所有 bot 中斷約 1 分鐘後自動接回`,
@@ -88,7 +78,6 @@ export class MockHerdrUpdate {
 
   start(host: string, b: Rec): Rec {
     if (!this.ctx.hostKnown(host)) throw new ApiError(404, { error: 'not_found', what: `host ${host}` }, 'not found')
-    // 形狀與訊息照 daemon `herdr_upgrade.rs`（API.md §12.7b）。
     if (host !== 'local') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_host', host, message: 'herdr 一鍵更新目前只支援本機' }, 'conflict')
     const target = String(b.target_version ?? '')
     if (target !== this.target) {
@@ -129,7 +118,6 @@ export class MockHerdrUpdate {
       const fail = this.opts.failOne && will_resume.length > 0 ? will_resume[will_resume.length - 1] : null
       const resumed = reason && reason !== 'restart_failed' ? [] : live.filter((x) => !x.parent_bot_id && x.bot_id !== fail?.bot_id).map((x) => ({ bot_id: x.bot_id, name: x.name, run_id: x.run_id }))
       if (ok) this.ctx.setUpstream(this.item(this.target))
-      // daemon 的 `to` 一律是目標版（失敗也是）。
       this.ctx.emit('herdr_update_done', {
         update_id, host, ok, from: this.installed, to: this.target,
         ...(reason ? { reason, detail: detail()[reason] ?? reason } : {}),

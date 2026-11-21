@@ -1,7 +1,3 @@
-/**
- * 環境設定 → Jev 第二意見 的帳本區（issue #1327）：有資料、還沒觸發過、舊 daemon（404）、讀失敗可重試。
- * 真的掛 `JudgePanel` 進 happy-dom；fetch 換成本地替身，回的狀態碼與內容由每個測試決定。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot } from '../api/types'
@@ -19,7 +15,6 @@ after(() => {
 const SETTINGS = { enabled: false, projects: [], model: 'jev-1.13.0', key_present: false, key_error: null }
 const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString()
 
-/** 本地 fetch 替身：`routes` 以不含 query 的路徑為鍵；`hits` 記下每個路徑被打了幾次。 */
 function stubApi(routes: Record<string, { status: number; body?: unknown }>) {
   const hits: Record<string, number> = {}
   globalThis.fetch = (async (input: string) => {
@@ -82,7 +77,6 @@ test('有資料：五個場景各一列計數、超過門檻照 SPEC 算、最�
   await settle()
   const ledger = root.querySelector('.judge-ledger')!
   assert.ok(ledger, '帳本區要出現')
-  // issue #1912：帳本明講是 Jev（TypeSafe）的判斷，只是建議。
   assert.equal(ledger.querySelector('.jev-label-tag')?.textContent, 'Jev 建議', '帳本標「Jev 建議」')
   assert.match(ledger.querySelector('.hint')?.textContent ?? '', /只是建議|不會自動動作/)
   const scenes = ledger.querySelectorAll('.judge-ledger-table')[0]!.querySelectorAll('tbody tr')

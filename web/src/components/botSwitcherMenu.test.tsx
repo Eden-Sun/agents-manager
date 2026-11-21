@@ -7,7 +7,6 @@ import type { Bot, Project } from '../api/types'
 const project = { id: 'p1', label: 'proj' } as Project
 const bots = [{ id: 'b1', name: 'one', kind: 'claude', project_id: 'p1' }, { id: 'b2', name: 'two', kind: 'codex', project_id: 'p1' }] as Bot[]
 
-// listbox／option 承諾方向鍵導覽與 aria-activedescendant，這裡是 button 清單；改成 menu 才有 useMenuKeys 的鍵盤行為。
 test('換 bot 選單：menu＋menuitemradio，目前那顆 aria-checked，項目 tabIndex=-1（由 useMenuKeys 管焦點）', () => {
   const html = renderToStaticMarkup(<BotSwitcherMenu groups={[{ project, bots }]} botId="b2" onPick={() => {}} />)
   assert.match(html, /role="menu"/)

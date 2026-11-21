@@ -155,7 +155,6 @@ test('切換專案時第一次 render 就不顯示「已變更」且正確反映
   await act(async () => {
     setP(p2)
   })
-  // 切換至 p2（specialist_dispatch: true），第一次 render 就不應殘留 p1 的 false 導致按鈕啟用或勾選狀態不符
   assert.equal(cb().checked, true)
   assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })

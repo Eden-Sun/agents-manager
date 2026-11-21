@@ -1,7 +1,3 @@
-/**
- * 分隔線不再折成兩三列（2026-10-05 使用者截圖）：終端分頁與 `linkifyTerm` 的其他使用者都把「整列只有分隔線」的列縮到 32 個，
- * 內文一個字都不動（真的掛元件進 happy-dom）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

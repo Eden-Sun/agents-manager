@@ -5,7 +5,6 @@ import { EMPTY_INPUT, asyncPanelText, inputEquals, panelInput, panelShows, parse
 import { keysToSelect, parseChoiceMenu, typedAnswerHere } from './tuiChoices.ts'
 import { KEYPAD, herdrKeyFromEvent } from '../hooks/usePaneKeys.ts'
 
-// 2026-10-21 真機（codex 0.163.0，隔離 tmux session；路徑與模型列已簡化）：issue #1879。
 const fx = (name: string) => readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), 'utf8')
 const COLLAPSED = fx('codex-0.163-async-collapsed.txt')
 const EXPANDED = fx('codex-0.163-async-expanded.txt')
@@ -13,7 +12,6 @@ const OF_TWO = fx('codex-0.163-async-expanded-of2.txt')
 const FREE_TEXT = fx('codex-0.163-async-free-text.txt')
 const OTHER_TYPED = fx('codex-0.163-async-other-typed.txt')
 
-// Rust's codex_async_question test consumes this exact manifest and every listed file.
 const screenCases = JSON.parse(fx('codex-async-screen-cases.json')) as {
   file: string
   expected: { expanded: boolean; count: number } | null
@@ -116,19 +114,15 @@ test('panelShows：展開中、題目完整等於這一題才算；對話紀錄�
   assert.ok(asyncPanelText(FREE_TEXT)?.includes('Your name?'))
 })
 
-// 複審反例（P2）：子字串比對會讓「Name?」對上「Full Name?」。
 test('panelShows：題目是完整比對，不是子字串（舊題 Name? 不會對上新題 Full Name?，反之亦然）', () => {
   const panel = (q: string) => `• Queued follow-up inputs\n  ${q}\n  Type your answer\n  enter submit   ^] skip   shift+→ main prompt\n`
   assert.equal(panelShows(panel('Full Name?'), 'Name?'), false)
   assert.equal(panelShows(panel('Name?'), 'Full Name?'), false)
   assert.equal(panelShows(panel('Full Name?'), 'Full Name?'), true)
-  // 折行的長題目：空白不計。
   assert.equal(panelShows(panel('這是很長的題目\n  折成兩行？'), '這是很長的題目折成兩行？'), true)
-  // 多題的 `1 of 2` 頁碼行不是題目的一部分。
   assert.equal(panelShows(panel('1 of 2\n  Full Name?'), 'Full Name?'), true)
 })
 
-// 複審反例（P3）：輸入框原本有 Alice、貼 Bob 後是 AliceBob，只比後綴會通過。
 test('panelInput：輸入框的完整內容，空的時候是佔位字；完整比對不是後綴', () => {
   const typed = (t: string) => FREE_TEXT.replace('Type your answer', t)
   assert.equal(panelInput(FREE_TEXT, 'Your name?'), EMPTY_INPUT)

@@ -1,9 +1,5 @@
 import { t } from './i18n'
 
-/**
- * 目錄選擇器「新資料夾」的名字規則（跟 daemon 的 `bot_input::check_new_dir_name` 同一份）：單一一段，不是路徑。
- * 前端先擋是為了立刻給使用者看得懂的提示；真正的把關在 daemon。回 `null`＝可以；否則是要顯示的原因。
- */
 export function newDirNameProblem(raw: string): string | null {
   const name = raw.trim()
   if (!name) return t('請輸入資料夾名稱')

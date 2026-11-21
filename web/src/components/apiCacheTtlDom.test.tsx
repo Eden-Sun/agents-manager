@@ -1,4 +1,3 @@
-/** claude-api 的快取時間：狀態列剩餘、冷提示（含重寫量與估價）、設定面板的 5 分鐘／1 小時。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -25,7 +24,6 @@ function seed(opts: { model?: string; ttl: 300 | 3600; last: string; agent?: str
   } as never)
 }
 
-/** 最近一次呼叫讀到 10 萬 token（input 1k＋cache_read 90k＋cache_creation 9k）。 */
 async function withLast<T>(fn: () => Promise<T>): Promise<T> {
   const orig = rawTransport.request.bind(rawTransport)
   rawTransport.request = (async (method: string, path: string, body?: unknown) => {
@@ -57,7 +55,7 @@ test('1 小時 TTL 用 1 小時寫入價、fast 2 倍；70 分鐘前才算冷', 
   await withLast(async () => {
     await mount(<ComposerCostHint botId="a1" />)
     await settle(50)
-    assert.equal(warn(), '快取已冷：下一則約重寫 100K token（約 $3.20）') // 100k × $16/M × 2
+    assert.equal(warn(), '快取已冷：下一則約重寫 100K token（約 $3.20）')
   })
 })
 
@@ -99,7 +97,6 @@ test('狀態列「快取」欄對 claude-api 也顯示剩餘時間（依這顆 b
   assert.equal(cacheView(input)?.state, 'cold', '5 分鐘 TTL 過 20 分鐘就冷')
 })
 
-
 function seedChat(kind: 'claude-api' | 'claude') {
   useStore.setState({
     connected: true, defaultConnected: true, selectedBotId: 'c1',
@@ -128,7 +125,6 @@ test('claude-api 的輸入框有兩顆送出鍵：「快取 5 分」「快取 1 
   await settle(50)
   assert.equal(promptBody(requests)[1]?.cache_ttl, '5m')
 
-  // Enter＝5 分鐘（不沿用上次點的 1 小時）。
   useStore.setState({ drafts: { 'bot:c1': 'enter' }, turns: { c1: {} } } as never)
   await settle(20)
   const ta = document.querySelector<HTMLTextAreaElement>('textarea')!
@@ -169,7 +165,6 @@ test('手機版（393×852 / PHONE_QUERY）：claude-api 兩顆按鈕左右並�
     const btns = [...document.querySelectorAll<HTMLButtonElement>('.send-btns .send-btn')]
     assert.equal(btns.length, 2)
 
-    // DOM 結構與 class 檢查：每顆包含 .send-btn-label，內有 .send-btn-action ("送出") 與 .send-btn-ttl ("(5 分)" / "(1 小時)")
     const labelWraps = [...document.querySelectorAll<HTMLElement>('.send-btns .send-btn-label')]
     assert.equal(labelWraps.length, 2)
 
@@ -184,12 +179,10 @@ test('手機版（393×852 / PHONE_QUERY）：claude-api 兩顆按鈕左右並�
     assert.equal(btns[1]!.getAttribute('data-ttl'), '1h')
     assert.ok(btns[1]!.classList.contains('long'))
 
-    // 點擊手機版 1 小時按鈕
     await click(btns[1]!)
     await settle(50)
     assert.equal(promptBody(requests)[0]?.cache_ttl, '1h')
 
-    // 點擊手機版 5 分鐘按鈕
     useStore.setState({ drafts: { 'bot:c1': 'mobile-again' }, turns: { c1: {} } } as never)
     await settle(20)
     await click(btns[0]!)
@@ -202,15 +195,13 @@ test('手機版（393×852 / PHONE_QUERY）：claude-api 兩顆按鈕左右並�
 
 test('styles.css：桌面 .send-btns 上下排（column），手機 ≤640px 左右並排（row）且文字換行', () => {
   const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
-  // 桌面規則：上下排
   const desktopIdx = css.indexOf('.send-btns {')
   assert.ok(desktopIdx > 0, '需有桌面 .send-btns 規則')
   const desktopBlock = css.slice(desktopIdx, css.indexOf('}', desktopIdx))
   assert.match(desktopBlock, /flex-direction:\s*column/)
   assert.match(desktopBlock, /align-self:\s*flex-end/)
 
-  // 手機規則（≤640px）：左右並排、換行、字級與結構
-  const mobileStart = css.indexOf('claude-api：手機維持左右並排')
+  const mobileStart = css.indexOf('@media (width <= 640px)', desktopIdx)
   assert.ok(mobileStart > 0)
   const mobileIdx = css.indexOf('.send-btns {', mobileStart)
   assert.ok(mobileIdx > 0, '需有手機 .send-btns 規則')

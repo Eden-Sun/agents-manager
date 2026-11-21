@@ -1,4 +1,3 @@
-/** 回合中斷後重送上一則要一併送出原本的附件 id。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -63,7 +62,6 @@ test('只有附件的上一則仍可重送', async () => {
 })
 
 test('重送提示文字截 60 字：截點落在 emoji 代理對中間時不留落單的代理字元', async () => {
-  // 59 個 a 加一顆 😀：UTF-16 的第 60 個單位剛好是 😀 的高位代理，以 code point 計才會整顆留下或整顆拿掉。
   setup(`${'a'.repeat(59)}😀bc`)
   await mount(<TurnErrorBadge botId="b1" />)
   await act(() => document.querySelector<HTMLButtonElement>('.turn-error-badge')!.click())

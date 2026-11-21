@@ -1,7 +1,3 @@
-/**
- * 專家（specialist）在設定框：角色是表單的一欄（pill 按鈕），選「專家」才出現「負責任務（track）」，
- * 空白時底部的「儲存」停用；存的是一次 PATCH {role, track}。錯誤碼 track_required／user_only 顯示成人話。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, typeInto, setupDom, teardownDom, unmountAll, click } from '../testing/domHarness'

@@ -1,14 +1,9 @@
-/**
- * 多語系的靜態掃描（只給 `i18nDict.test.ts` 與 `scripts/i18n-report.ts` 用，不進 bundle）。
- * 用 TypeScript AST 找 `t('…')`／`msg('…')` 的 key 與插值名稱，以及還沒抽出去的寫死中文。
- */
 import ts from 'typescript'
 
 export interface KeyUse {
   file: string
   line: number
   key: string
-  /** 第二個參數是物件字面值時的插值名稱；不是字面值（變數、含 spread）為 null＝不檢查。 */
   vars: string[] | null
 }
 export interface Problem {
@@ -23,7 +18,7 @@ export interface CjkHit {
 }
 
 const CJK = /[㐀-鿿＀-￯　-〿]/
-const I18N_IMPORT = /from\s+['"][^'"]*(?:\/i18n(?:\/index)?(?:\.ts)?|\/shareI18n(?:\.ts)?)['"]/ // 分享頁用自己的 shareI18n
+const I18N_IMPORT = /from\s+['"][^'"]*(?:\/i18n(?:\/index)?(?:\.ts)?|\/shareI18n(?:\.ts)?)['"]/
 const PLACEHOLDER = /\{([A-Za-z_]\w*)\}/g
 
 export function placeholderNames(s: string): string[] {
@@ -39,7 +34,6 @@ const lineOf = (sf: ts.SourceFile, node: ts.Node) => sf.getLineAndCharacterOfPos
 const literalText = (n: ts.Node | undefined): string | null =>
   n && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) ? n.text : null
 
-/** `t(…)`、`msg(…)`、`t.x(…)`（句子裡塞元件）。`tr` 是動態查詢、不檢查。 */
 const isKeyCall = (e: ts.Expression): boolean =>
   (ts.isIdentifier(e) && (e.text === 't' || e.text === 'msg')) || (ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === 't' && e.name.text === 'x')
 
@@ -54,7 +48,6 @@ function varNames(arg: ts.Expression | undefined): string[] | null {
   return out
 }
 
-/** 不是來自 lib/i18n 的檔案（沒 import）不掃：只有 import 了 i18n 模組的檔案裡的 `t(…)`／`msg(…)` 才算。 */
 export function scanKeys(file: string, text: string): { uses: KeyUse[]; problems: Problem[] } {
   const uses: KeyUse[] = []
   const problems: Problem[] = []
@@ -83,11 +76,6 @@ export function scanKeys(file: string, text: string): { uses: KeyUse[]; problems
   return { uses, problems }
 }
 
-/**
- * 還沒抽出去的寫死中文：JSX 文字、字串字面值、樣板字串的各段，只要含中日韓字元或全形標點。
- * 排除 `t()`／`msg()`／`tr()` 的引數與 import／export 的路徑。註解不算（AST 本來就看不到）。
- * 刻意不翻的（語言自稱、要跟 daemon 回的文字比對的字串）在該行行尾、或獨立的上一行寫 `// i18n-ignore`（JSX 文字旁放一個含 i18n-ignore 的 JSX 註解）。
- */
 export function findHardcodedCjk(file: string, text: string): CjkHit[] {
   if (!CJK.test(text)) return []
   const sf = parse(file, text)
@@ -118,10 +106,9 @@ export function findHardcodedCjk(file: string, text: string): CjkHit[] {
   return hits
 }
 
-/** 要翻譯的原始碼：略過測試、字典本身、i18n 工具、mock 假 daemon 的資料與測試輔助。 */
 export function isUiSource(path: string): boolean {
   if (!/\.(ts|tsx)$/.test(path)) return false
   if (/\.(test|harness)\.(ts|tsx)$/.test(path)) return false
-  if (/(^|\/)api\/mock[A-Za-z]*\.ts$|(^|\/)share\/shareMock\.ts$|(^|\/)share\/shareI18n\.ts$/.test(path)) return false // 分享頁字典本身（字典不掃）
+  if (/(^|\/)api\/mock[A-Za-z]*\.ts$|(^|\/)share\/shareMock\.ts$|(^|\/)share\/shareI18n\.ts$/.test(path)) return false
   return !/(^|\/)(testing|i18n|__fixtures__)\//.test(path)
 }

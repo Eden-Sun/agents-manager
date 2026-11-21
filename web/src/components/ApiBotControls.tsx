@@ -6,7 +6,6 @@ import { plainErrMsg, reasonTextBySubstring, RETIRE_REASON_TEXT } from '../lib/e
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/** claude-api bot 的停止與清除對話（沒有終端與重啟，這兩個是它僅有的生命週期操作；2026-11-01）。 */
 export function ApiBotControls({ botId, name }: { botId: string; name: string }) {
   const t = useT()
   const notify = useStore((s) => s.notify)

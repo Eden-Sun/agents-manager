@@ -1,9 +1,3 @@
-/**
- * 主機工作環境一致性收合（BaselineLine，#1922）：
- * - 嚴重項維持展開
- * - 提醒項進 <details class="env-fold">，有嚴重項時 summary 為「還有 N 項提醒」，無嚴重項時為「列出 N 項」
- * - 未知與尚未檢查不上色、不收進摺疊
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -49,7 +43,6 @@ it('嚴重項展開，提醒項收進 details summary「還有 N 項提醒」', 
   assert.ok(root)
   assert.match(root.querySelector('.host-baseline-head')?.textContent ?? '', /4 項不一致（2 項嚴重）/)
 
-  // 嚴重項直接在外層 ul
   const critUl = root.querySelector('ul.host-baseline-items')!
   assert.ok(critUl)
   const critLis = critUl.querySelectorAll('li')
@@ -59,7 +52,6 @@ it('嚴重項展開，提醒項收進 details summary「還有 N 項提醒」', 
   assert.equal(critLis[1].textContent, 'settings.json 沒有 hooks')
   assert.equal(critLis[1].className, 'critical')
 
-  // 提醒項在 details.env-fold 裡
   const details = root.querySelector<HTMLDetailsElement>('details.env-fold')!
   assert.ok(details)
   assert.equal(details.open, false, '預設關')
@@ -86,8 +78,7 @@ it('沒有嚴重項、只有提醒項時：清單整段放進 details「列出 N
   assert.ok(root)
   assert.match(root.querySelector('.host-baseline-head')?.textContent ?? '', /2 項提醒/)
 
-  // 外層沒有直接展開的 items
-  assert.equal(root.children.length, 2) // .host-baseline-head + details.env-fold
+  assert.equal(root.children.length, 2)
 
   const details = root.querySelector<HTMLDetailsElement>('details.env-fold')!
   assert.ok(details)
@@ -128,7 +119,6 @@ it('#719 階段 2：每項尾端標「可自動補／需手動」；沒有 fixab
   await mount(<BaselineLine baseline={baseline} />)
   const crit = document.querySelector('ul.host-baseline-items li')!
   assert.equal(crit.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix manual')
-  // 缺工具項內嵌安裝引導（ToolInstallGuide），所以只比對開頭的說明文字。
   assert.ok(crit.textContent?.startsWith('缺工具 rtk（需手動）'), crit.textContent ?? '')
   const warn = document.querySelector('details.env-fold li')!
   assert.equal(warn.querySelector('.host-baseline-fix')?.className, 'host-baseline-fix auto')

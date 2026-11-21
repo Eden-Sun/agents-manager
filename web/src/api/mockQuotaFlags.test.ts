@@ -1,4 +1,3 @@
-/** mock 的額度讀數要帶 daemon 算好的 `low`／`critical`（API.md §12.4：剩餘 <30% 是 low、<5% 是 critical），前端只讀旗標、不自己算。 */
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

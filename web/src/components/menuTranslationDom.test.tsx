@@ -1,7 +1,3 @@
-/**
- * 終端畫面解析出來的問卷（即時選單、多分頁預載）也走原題卡同一套譯文：英文自動翻、可切回原文，
- * 送出的鍵與原文一致（譯文只換顯示）；多分頁預載完後整份只打一次翻譯。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -56,7 +52,6 @@ const SURVEY_SECOND = SURVEY_FIRST.replace('Who writes the articles?', 'Which fe
 const isTranslate = (p: string) => p.endsWith('/pending-questions/translate')
 const SETTINGS = { enabled: true, key_present: true, key_error: null, models: [], efforts: [], uses: [{ id: 'message_translate', enabled: true, auto: true }] }
 
-/** 假翻譯：每個欄位前面加「譯:」，好分辨顯示的是譯文。 */
 function echo(body: unknown) {
   const qs = (body as { questions: { header: string; question: string; options: { label: string; description: string }[] }[] }).questions
   return {

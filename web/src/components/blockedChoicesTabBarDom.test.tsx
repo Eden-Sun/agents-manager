@@ -5,7 +5,6 @@ import { BlockedChoices } from './BlockedChoices.tsx'
 import { parseChoiceMenu } from '../lib/tuiChoices.ts'
 import type { PendingAt } from '../lib/pendingQuestion.ts'
 
-/** 分頁列上標「目前分頁」的那顆（`bc-tab-at`／`aria-current`）的文字。 */
 function currentTab(html: string): string | null {
   const m = /<button[^>]*class="bc-tab bc-tab-at[^"]*"[^>]*>(.*?)<\/button>/.exec(html)
   if (!m) return null

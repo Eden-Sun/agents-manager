@@ -2,7 +2,6 @@ import type { RestartBatch } from '../api/types'
 import { t, tr } from './i18n'
 import { CLI_UPDATE_PHASE_LABEL, type CliUpdate } from '../store/cliUpdate'
 
-/** 合成那顆的兩項選單文案與按鈕的 aria-label（純函式，好測）。 */
 export function mergedUpdateLabels(x: {
   batch: RestartBatch | null
   cli: CliUpdate[] | CliUpdate | null
@@ -16,11 +15,8 @@ export function mergedUpdateLabels(x: {
   claudeShown?: boolean
   restartShown?: boolean
   codexShown?: boolean
-  /** herdr 那一項（`herdrMenuItem`）；沒有就不列。 */
   herdrItem?: string | null
-  /** grok 那一項（只提示）；沒有就不列。 */
   grokItem?: string | null
-  /** agy 那一項（有一鍵安裝，issue #1921）；沒有就不列。 */
   agyItem?: string | null
 }): { restartItem: string; codexItem: string; claudeItem: string; label: string } {
   const { batch, readyCount, busyCount, installCount, to } = x

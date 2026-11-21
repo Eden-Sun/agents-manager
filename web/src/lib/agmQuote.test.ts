@@ -21,6 +21,5 @@ test('使用者自己的話不算', () => {
   assert.equal(quotedFrom('問一下 AGM 這件事要不要做'), null)
   assert.equal(quotedFrom('修 header 的 kind 文字'), null)
   assert.equal(quotedFrom('AGM 好像掛了，幫我看一下它的 health 然後回報給我知道'), null)
-  // 「來自」不在開頭就不是抬頭。
   assert.equal(quotedFrom('這段是 [來自 c1-主要功能] 抄來的'), null)
 })

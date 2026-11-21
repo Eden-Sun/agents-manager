@@ -1,8 +1,3 @@
-/**
- * #770：一條 DOM 測試在負載下逾時，bun 不等它、但它的 body 還在跑。它的 `act()` 跟下一條測試的 `act()` 重疊時，
- * React 的 act 深度錯位，之後整個行程的 render 都不 flush（一條逾時拖紅 10 條）。這裡不真的讓測試逾時（那會讓整套紅），
- * 而是照 shim 的做法手動開一個 scope、留一個沒收的 act、把它標成結束，看 harness 有沒有擋住。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useEffect, useState } from 'react'
@@ -34,8 +29,8 @@ test('已結束測試的 body：半路的 act 先收掉才開下一個；之後�
   const outcome = leftover.then(
     () => null,
     (e: unknown) => e,
-  ) // 馬上接住：沒接住的 rejection bun 會當成這條測試的錯
-  endCurrentTest() // shim 的 afterEach／unmountAll 在逾時那一刻做的事
+  )
+  endCurrentTest()
 
   setTimeout(release, 30)
   await act(async () => {
@@ -105,7 +100,6 @@ test('#1920 teardownDom 等連鎖 timer 與 Promise 收束後才拆 window', asy
   const host = await mount(<LateComponent />)
   assert.ok(host.textContent?.includes('value: 0'))
 
-  // 第一個 timer 的 Promise continuation 再排第二個 timer；teardown 必須等整條非同步收尾鏈完成。
   let lateFired = false
   const realNow = Date.now
   Date.now = () => realNow() + 10_000

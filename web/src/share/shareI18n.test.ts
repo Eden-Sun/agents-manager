@@ -1,7 +1,3 @@
-/**
- * 分享頁字典對帳（issue #1932）：字典 key 與分享頁原始碼的 `t('…')` 互相對得上，插值名稱中英一致。
- * 主 UI 的對帳在 `lib/i18n/i18nDict.test.ts`；分享頁字典不在 EN_PARTS 裡，所以在這裡另做。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'

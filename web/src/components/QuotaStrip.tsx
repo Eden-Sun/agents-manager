@@ -39,19 +39,10 @@ import { limitHitWhen } from '../lib/limitHitWhen'
 import './quotaStrip.css'
 import { useUserTimeZone } from '../lib/userTime'
 
-/**
- * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
- * when the strip is too narrow each cell stacks all its windows vertically (2026-10-10 使用者，#1158). Fill length carries the level so it survives greyscale.
- * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
- * grok 只有週窗；agy 只顯示 Gemini 組的 5h／7d，量表沿用 claude 的完整、手機與收合規則。
- * 額度按主機分開（SPEC §14），一次只顯示一台；遠端 key 帶 `<host>/` 前綴，先投影成裸 key。
- */
-
 const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok', 'agy']
 
 type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
 
-/** `mac_builder/claude:cc1` → `claude:cc1`，只留屬於 `host` 的。 */
 function scopeToHost(quota: QuotaMap, host: string): QuotaMap {
   const out: QuotaMap = {}
   const prefix = `${host}/`
@@ -74,17 +65,13 @@ function quotaTitle(host: string, t: ReturnType<typeof useT>): string {
 }
 
 function useEntryQuota(entry: QuotaEntry): KindQuota | null {
-  // 落點已經由 `collectEntries`（`quotaBaseKey`）定好：不能先看「自己那一格有沒有數字」，共用預設帳號的身份殘留的舊 `claude:<id>` 會蓋過裸 key。
   const raw = useStore((s) => s.quota[entry.fullKey] ?? null)
-  // codex 的方案沒有 5 小時窗時，沿用下來的舊 5h 與升級前的撞上限橫幅不畫（見 quotaNoFiveHour）。
   return useMemo(() => projectNoFiveHour(entry.kind, raw), [entry.kind, raw])
 }
 
-/** 看該 host 的 `identity_status`（同名身份在各主機可能是不同帳號）；Gauge 與 PopRow 共用以免判斷漂移。 */
 function useLoggedOut(entry: QuotaEntry, host: string): boolean {
   return useStore((s) => {
     const name = entry.identity
-    // 預設帳號看 `tools.<kind>.logged_in`，否則沒登入會永遠顯示「背景查詢中」。
     if (!name) return toolsOfHost(s, host)[entry.kind]?.logged_in === false
     return identityStatusOfHost(s, host)[name]?.logged_in === false
   })
@@ -92,21 +79,15 @@ function useLoggedOut(entry: QuotaEntry, host: string): boolean {
 
 type Level = 'crit' | 'warn' | 'ok'
 
-/** 不到 10 留一位小數：快用完時 9.8 與 9.1 差一整回合（2026-09-08）。 */
 function remaining(w: QuotaWindow | null | undefined): number | null {
   if (!w) return null
   return leftPct(w.used_pct)
 }
 
-/**
- * 讀數 0 不是真的 0：CLI 回報的 used_pct 是整數，100 只代表剩不到 1%，bot 還在正常回合（2026-10-23 使用者：codex 7d 寫 0
- * 但 codex-sol 還在回）。沒有撞限紀錄就寫 `<1`；真的 0 只在 daemon 記到 limit_hit 之後。
- */
 function fmtPct(pct: number, hit = false): string {
   return pct === 0 && !hit ? '<1' : String(pct)
 }
 
-/** 顏色吃 daemon 旗標（docs/API.md §12.4），前端不另寫 pct 門檻以免跟側欄警告不一致。 */
 function levelOf(w: { low: boolean; critical: boolean } | null | undefined): Level {
   if (!w) return 'ok'
   if (w.critical) return 'crit'
@@ -179,8 +160,7 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: 
   }
   if (q?.fable?.resets_at) parts.push(t('Fable {time} 重置', { time: fmtTime(q.fable.resets_at) }))
   if (q?.argon_weekly?.resets_at) parts.push(t('Argon {time} 重置', { time: fmtTime(q.argon_weekly.resets_at) }))
-  // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale`講的是另一件事（開機從快取回填）。
-  for (const [name, w] of [[t('5 小時'), q?.five_hour], [weekLabel(entry.kind) === '週' ? t('每週') : t('7 天'), q?.seven_day], ['Fable', q?.fable], ['Argon', q?.argon_weekly]] as const) { // i18n-ignore: 內部窗口名
+  for (const [name, w] of [[t('5 小時'), q?.five_hour], [weekLabel(entry.kind) === '週' ? t('每週') : t('7 天'), q?.seven_day], ['Fable', q?.fable], ['Argon', q?.argon_weekly]] as const) {
     const at = carriedOverAt(w, q?.updated_at)
     if (!at) continue
     const age = staleAge(at, now, t)
@@ -206,7 +186,6 @@ function claudeIdentities(identities: Identity[]): Identity[] {
     .sort((a, b) => {
       if (a.name === 'cc0') return -1
       if (b.name === 'cc0') return 1
-      // numeric：cc2 排在 cc10 前面（字典序會把 cc10 排到 cc2 前）。
       return a.name.localeCompare(b.name, undefined, { numeric: true })
     })
 }
@@ -215,7 +194,6 @@ function entryReactKey(entry: Omit<QuotaEntry, 'fullKey'>): string {
   return entry.identity ? `${entry.kind}:${entry.identity}` : entry.key
 }
 
-/** Fixed order, never by remaining %: cc0 → cc1 → other claude → codex → grok. */
 function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string): QuotaEntry[] {
   const quota = scopeToHost(quotaAll, host)
   const out: QuotaEntry[] = []
@@ -230,13 +208,11 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
   }
 
   if (claudeIds.length > 0) {
-    // 落點（含裸 key 的互斥）只有 `store/quotaLookup` 一份規則，側欄的反灰與黃燈查的是同一支。
     for (const idn of claudeIds) push({ key: quotaBaseKey(quotaAll, host, 'claude', idn.name, claudeIds), kind: 'claude', identity: idn.name })
   } else if ('claude' in quota) {
     push({ key: 'claude', kind: 'claude', identity: null })
   }
 
-  // Orphan claude:<id> keys not in the identities list
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
     if (!entry || entry.kind !== 'claude' || !entry.identity) continue
@@ -248,13 +224,11 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     if (kind in quota) push({ key: kind, kind, identity: null })
   }
 
-  // agy 身份（每個有自己的 HOME）：一格一個，落點規則同 claude（`quotaBaseKey`）；還沒有讀數也列出來（「背景查詢中」）。
   const agyIds = identities.filter((i) => i.kind === 'agy')
   for (const idn of agyIds) push({ key: quotaBaseKey(quotaAll, host, 'agy', idn.name, agyIds), kind: 'agy', identity: idn.name })
 
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
-    // agy 只認 Gemini 的裸 key；忽略舊版 Claude/GPT 子 key 快照。
     if (!entry || !entry.identity || entry.kind === 'claude' || entry.kind === 'agy') continue
     if (quota[key] == null) continue
     push(entry)
@@ -263,23 +237,20 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
   return out
 }
 
-/** Shape + colour, so the level survives greyscale and colour blindness. */
 function RiskDot({ level }: { level: Level }) {
   return <span className={`quota-risk ${level}`} aria-hidden="true" />
 }
 
-/** `F` 是 Max 方案的 Fable 週窗，只有 claude 有；`Ar` 是 agy 的 Gemini 4 Argon 獨立週窗。 */
-type WindowName = '5h' | '7d' | '週' | 'F' | 'Ar' // i18n-ignore
+type WindowName = '5h' | '7d' | '週' | 'F' | 'Ar'
 
 const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
-  '週': 7 * 86_400_000, // i18n-ignore
+  '週': 7 * 86_400_000,
   F: 7 * 86_400_000,
   Ar: 7 * 86_400_000,
 }
 
-/** 重置刻度位置＝剩餘時間 ÷ 窗口長度（剩 3h／5h → 60%）。 */
 function resetMark(resetsAt: string | null | undefined, span: number, now: number): number | null {
   if (!resetsAt) return null
   const t = new Date(resetsAt).getTime()
@@ -289,12 +260,10 @@ function resetMark(resetsAt: string | null | undefined, span: number, now: numbe
   return Math.min(100, (left / span) * 100)
 }
 
-/** 什麼時候把百分比換成倒數：5h 用完且三小時內；週窗口（7d／週／Fable）剩不到 10% 且 24 小時內（2026-09-17 使用者）。 */
 function resetRule(name: WindowName) {
   return name === '5h' ? RULE_5H : RULE_WEEKLY
 }
 
-/** 5h 不到一小時就重置時窗口名換成剩幾分（`12m`），讓使用者提早準備（2026-09-09）；只做 5h。 */
 function soonLabel(name: WindowName, resetsAt: string | null, now: number): string | null {
   if (name !== '5h' || !resetsAt) return null
   const left = new Date(resetsAt).getTime() - now
@@ -311,10 +280,6 @@ function useMinuteNow(): number {
   return now
 }
 
-/**
- * 沿用上一份讀數的那一格（#540）：窗口名後面掛一個「舊」，提示寫出它自己的年齡。
- * 只用顏色不行（UI-DECISIONS：狀態一律還有文字、形狀或記號），所以是字不是點。
- */
 function StaleWindowMark({ at, name, now }: { at: string; name: WindowName; now: number }) {
   const t = useT()
   const age = staleAge(at, now, t)
@@ -332,7 +297,6 @@ function StaleWindowMark({ at, name, now }: { at: string; name: WindowName; now:
   )
 }
 
-/** Health bar; colour follows daemon `low` / `critical` (docs/API.md §12.4). */
 function Bar({
   pct,
   low,
@@ -347,16 +311,11 @@ function Bar({
   critical: boolean
   mark: number | null
   markTitle?: string
-  /** 這個身份有撞限紀錄：讀數 0 才真的印 0（見 `fmtPct`）。 */
   hit?: boolean
-  /** 百分比帶 `%`：這一列在倒數模式，底下那一行寫的是時間，裸的 `0` 讀不出是百分比（2026-10-02 使用者）。 */
   unit?: boolean
 }) {
   const t = useT()
   const lv = levelOf({ low, critical })
-  // 剩量和重置刻度都在 10% 以下：改畫 0–10% 刻度的連續條（2026-10-16 第三版，方案 B；取代 #1785 的 10 格點陣）。
-  // 刻度範圍用整條外框（`.zoomed` 的 CSS）表示，不畫兩端豎線：豎線跟別列的重置黑針分不出來（2026-10-23 使用者）。
-  // 這個模式不畫黑針（時間由底下那一行負責），百分比帶 `%`。
   const zoom = pct !== null && pct < 10 && (mark === null || mark < 10)
   const bar = zoom ? (
     <span className="quota-bar-wrap zoomed" title={t('剩 {pct}%（條的刻度是 0–10%）', { pct: fmtPct(pct, hit) })}>
@@ -375,7 +334,7 @@ function Bar({
   return (
     <span className="quota-bar-row">
       {bar}
-      {/* 數字一律印（UI-DECISIONS：百分比始終保留；2026-09-09 使用者截圖）。 */}
+      {}
       <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}${unit || zoom ? ' has-unit' : ''}`} aria-hidden="true">
         {pct === null ? '—' : unit || zoom ? `${fmtPct(pct, hit)}%` : fmtPct(pct, hit)}
       </span>
@@ -383,10 +342,6 @@ function Bar({
   )
 }
 
-/** 倒數模式的列都不在列內寫倒數，統一在所有窗口下方另起一行（2026-10-16 第三版，方案 B）：
- *  重置時刻彼此相差 ≤ 60 秒的列算同一刻，只寫第一列的窗口名與時間——F 跟 7d 同一刻時 F 不另寫
- *  （2026-10-16 使用者：「不需要 fable 的餘時間因為與 7d 是一樣的」）。全部同一刻就只寫時間（`└ 3h05`），
- *  否則 `└ 5h 1h21 · 7d 0h51`。完整對照在 title。 */
 const SHARED_RESET_MS = 60_000
 function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[], t: ReturnType<typeof useT>): { text: string; title: string } | null {
   if (rows.length === 0) return null
@@ -396,15 +351,12 @@ function resetLineOf(rows: { name: WindowName; back: string; resetsAt: string }[
     if (!groups.some((g) => Math.abs(g.at - at) <= SHARED_RESET_MS)) groups.push({ name: r.name, back: r.back, at })
   }
   const title = rows.map((r) => t('{name} 還有 {back} 重置', { name: r.name, back: r.back })).join(t('；'))
-  // 一律一行：格子高度只放得下三列加這一行（2026-10-16 使用者截圖：換成兩行就蓋到底下那排）。兩組時間時省掉空白，`└5h 1h14·7d 0h44`。
   if (groups.length === 1) return { text: `└\u00a0${groups[0]!.back}`, title }
   return { text: `└${groups.map((g) => `${g.name}\u00a0${g.back}`).join('·')}`, title }
 }
 
-/** `staleAt`：這一桶是沿用上一份讀數時，它自己的觀測時間（#540）；不是沿用就 `null`。 */
 type WindowBar = { name: WindowName; pct: number | null; resetsAt: string | null; low: boolean; critical: boolean; staleAt: string | null }
 
-/** 六個建構點共用：`low`／`critical` 一律照 daemon 的旗標，沿用與否照 `observed_at`。 */
 function windowBar(name: WindowName, pct: number | null, w: QuotaWindow | null | undefined, updatedAt: string | undefined): WindowBar {
   return {
     name,
@@ -416,26 +368,22 @@ function windowBar(name: WindowName, pct: number | null, w: QuotaWindow | null |
   }
 }
 
-/** 手機一格只放一個數字：先比 daemon 旗標再比 pct；平手留現任，免得數字在窗口間跳。 */
 function moreUrgent(w: WindowBar, best: WindowBar): boolean {
   const rank = (x: WindowBar) => (x.critical ? 2 : x.low ? 1 : 0)
   if (rank(w) !== rank(best)) return rank(w) > rank(best)
   return (w.pct ?? 100) < (best.pct ?? 100)
 }
 
-/** 窗口名顯示字：grok 的「週」在英文介面寫 7d，Ar 為 'Ar'，其餘窗口名（5h／7d／F）本來就是英文。 */
 function windowText(name: WindowName, t: ReturnType<typeof useT>): string {
-  if (name === '週') return t('週') // i18n-ignore
+  if (name === '週') return t('週')
   if (name === 'Ar') return t('Ar')
   return name
 }
 
-/** grok reports a weekly-only window and labels it 週; agy shows its week as 7d like claude. */
-function weekLabel(kind: BotKind): '7d' | '週' { // i18n-ignore
-  return kind === 'grok' ? '週' : '7d' // i18n-ignore
+function weekLabel(kind: BotKind): '7d' | '週' {
+  return kind === 'grok' ? '週' : '7d'
 }
 
-/** 手機有倒數的格子：百分比移到 logo 列的資料；沒倒數回 null（照舊寫在第二行）。 */
 function headPctOf(w: WindowBar | undefined, now: number, hit: boolean, t: ReturnType<typeof useT>) {
   if (!w) return null
   const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
@@ -454,7 +402,6 @@ function Gauge({
 }: {
   entry: QuotaEntry
   host: string
-  /** 手機：條子縮成 chip，剩餘量用數字寫。 */
   compact: boolean
   focused: boolean
   open: boolean
@@ -465,22 +412,17 @@ function Gauge({
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
-  // 上下邊框量表只有手機畫（2026-09-11 使用者：桌機已有 bar），且每一格都畫（2026-09-13 使用者）。
   const now = useMinuteNow()
   const borderWindows = compact ? [
     { edge: 'top', label: '5H', window: q?.five_hour, pct: five, mark: null },
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven, mark: resetMark(q?.seven_day?.resets_at, WINDOW_MS[weekLabel(entry.kind)], now) },
   ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
-  // agy 的 Gemini 4 Argon 週額度：獨立一段寫在晶片末端，不併入 7d／5h（它不扣 Gemini 額度）。
   const argon = entry.kind === 'agy' ? remaining(q?.argon_weekly) : null
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
-  // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
-  // 5h／F 被 daemon 標 low／critical 且更急時才取代，不並列；完整數字在 tooltip 與 sheet。
   if (compact && seven !== null) {
     const shown: WindowBar = windowBar(weekLabel(entry.kind), seven, q?.seven_day, q?.updated_at)
-    // 門檻見 docs/API.md §12.4。
     const rivals: WindowBar[] = []
     if (five !== null && (q?.five_hour?.low || q?.five_hour?.critical)) {
       rivals.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
@@ -488,20 +430,18 @@ function Gauge({
     if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
       rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
-    // Ar 比照 F：只在 low／critical 且比 7d 更急時取代；上下邊框量表不加 Ar。
     if (argon !== null && (q?.argon_weekly?.low || q?.argon_weekly?.critical)) {
       rivals.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
     }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
   } else if (compact && seven === null && (five !== null || fable !== null || argon !== null)) {
-    // 7d 沒有值時手機仍只寫一個窗口：從 5h／F 取最急的那個（#1179：只有 Fable 有值時不能畫成「5h —」）。
     const cands: WindowBar[] = []
     if (five !== null) cands.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
     if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
     if (argon !== null) cands.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
     windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
   } else if (five === null && seven === null && fable === null && argon === null) {
-    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
+    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
   } else {
     windows = []
     if (five !== null) {
@@ -522,7 +462,6 @@ function Gauge({
     const span = WINDOW_MS[w.name]
     const mark = resetMark(w.resetsAt, span, now)
     const left = msUntil(w.resetsAt, now)
-    // 那一列已經在底下那一行寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次。
     const soon = countdown ? null : soonLabel(w.name, w.resetsAt, now)
     const rowTitle = w.name === 'Ar'
       ? left !== null
@@ -561,7 +500,6 @@ function Gauge({
   const level = worst(q)
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}${t('（已暫時停用，底下的 Bot 收在側欄外）')}` : title
-  // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
   const blocked = q?.limit_hit ?? null
   const accessibleTitle = focused
     ? `${t('目前選取的 {title}', { title: withOff })}${borderWindows.map((w) => t('；{edge}邊框：{label} 剩餘 {pct}%', { edge: w.edge === 'top' ? t('上') : t('下'), label: w.label, pct: fmtPct(w.pct!, hit) })).join('')}`
@@ -572,7 +510,6 @@ function Gauge({
       className={`quota-hp ${entry.kind} ${level}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}${q?.stale ? ' stale' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked, t)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
-      // input／button 的點擊放行，否則量表按鈕會一次開一次關。
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('input, button, a')) return
         onOpen()
@@ -589,7 +526,7 @@ function Gauge({
           aria-valuenow={Math.min(100, Math.max(0, w.pct!))}
         >
           <span className="quota-border-fill" style={{ width: `${Math.min(100, Math.max(0, w.pct!))}%` }} />
-          {/* 7d／週那條帶重置黑針（2026-11-07 使用者：原本的樣式加上時間標記）；位置＝剩餘時間 ÷ 一週，同桌機 Bar。 */}
+          {}
           {w.edge === 'bottom' && w.mark !== null ? <span className="quota-border-mark" style={{ left: `${w.mark}%` }} /> : null}
         </span>
       ))}
@@ -606,13 +543,12 @@ function Gauge({
           </span>
         )}
         {headPct ? (
-          // 方案 A（2026-11-04 使用者）：有倒數的格子，百分比上移到 logo 列，第二行只剩「窗口＋倒數」，格子不再過寬。
           <span className={`quota-compact-pct quota-head-pct ${levelOf(headPct.win)}`} title={headPct.title}>
             {headPct.text}
           </span>
         ) : null}
         {entry.kind === 'codex' ? <CodexResetHint now={now} compact={compact} /> : null}
-        {/* 開關放左欄名稱下方，整格不會因它變高。 */}
+        {}
         <StripDisableToggle entry={entry} host={host} />
       </span>
       <button
@@ -624,12 +560,9 @@ function Gauge({
         onClick={onOpen}
       >
       {compact ? (
-        /* 手機風險不能只剩顏色（UI-DECISIONS：百分比始終保留），寫成數字。 */
         <span className="quota-compact">
           {windows.map((w) => {
-            // 快回來了就寫倒數（2026-09-14／09-17 使用者）：5h 用完且三小時內；週窗口剩不到 10% 且 24 小時內。
             const back = resetBadge(w.pct, w.resetsAt, now, resetRule(w.name))
-            // 已經寫倒數就別再把窗口名換成剩幾分（同桌機那邊）：手機上會變成「40m 0h40」同一個時間寫兩次（2026-10-16 使用者）。
             const soon = back ? null : soonLabel(w.name, w.resetsAt, now)
             return (
             <span key={w.name} className={`quota-compact-win ${levelOf(w)}`}>
@@ -638,7 +571,6 @@ function Gauge({
                 {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               {back ? (
-                // 倒數時百分比也留著（2026-10-02 使用者），但放在 logo 列（headPct），這裡只寫倒數。
                 <span className="quota-reset-at" title={w.pct !== null && (w.pct > 0 || !hit) ? t('剩 {pct}%，還有 {back} 重置', { pct: fmtPct(w.pct, hit), back }) : t('用完了，還有 {back} 重置', { back })}>
                   {back}
                 </span>
@@ -672,7 +604,6 @@ function Gauge({
   )
 }
 
-/** popover 裡的暫時停用勾選格（見 docs/UI-DECISIONS.md）；卡片點擊由 `PopRow` 轉呼叫。 */
 function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: string; onToggle: () => void }) {
   const t = useT()
   return (
@@ -690,7 +621,6 @@ function DisableToggle({ on, label: name, onToggle }: { on: boolean; label: stri
   )
 }
 
-/** 條上的停用開關（主要入口）；條子擠只留方塊，說明走 aria-label 與 `.icon-tip`。 */
 function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }) {
   const t = useT()
   const q = useEntryQuota(entry)
@@ -718,7 +648,6 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
   )
 }
 
-/** 未登入時的登入入口：codex 走 shell／身份登入，其餘走 `/login` 或身份登入。 */
 function PopLogin({ entry, host }: { entry: QuotaEntry; host: string }) {
   const t = useT()
   return entry.kind === 'codex' ? (
@@ -728,7 +657,6 @@ function PopLogin({ entry, host }: { entry: QuotaEntry; host: string }) {
   )
 }
 
-/** Codex 預設帳號開 shell 登入；命名身份走 daemon 展開該主機的設定。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
   const t = useT()
   const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
@@ -767,10 +695,6 @@ function PopLimitHit({ hit }: { hit: QuotaLimitHit | null | undefined }) {
   )
 }
 
-/**
- * 額度晶片上的重置券徽章（2026-11-07 使用者）：排在 codex logo 左上角的「小票券圖示＋數字」＝可用張數（不用絕對定位：手機額度列是捲動容器，會裁掉超出上緣的東西），>0 才畫；
- * 最近一張快到期（<48h）換警示色；tooltip 寫最近到期日。桌面與手機都畫。細節在彈窗。
- */
 function CreditBadge({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   const t = useT()
   if (!credits || credits.available <= 0) return null
@@ -790,7 +714,6 @@ function CreditBadge({ credits, now }: { credits: QuotaResetCredits | null | und
   )
 }
 
-/** codex 額度重置券（2026-09-10 使用者）；daemon 只讀不用，要用在 codex `/status` → Reset usage。 */
 function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null | undefined; now: number }) {
   const t = useT()
   if (!credits || credits.available <= 0) return null
@@ -816,7 +739,7 @@ function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null |
           {rows.length === 0 && credits.title ? <span className="quota-reset-title">{credits.title}</span> : null}
         </span>
       </div>
-      {/* 每張券的到期日＋倒數（2026-11-07 使用者）；不到 48 小時標警示色。舊 daemon 沒 credits 時沒有這幾列。 */}
+      {}
       {rows.map((r) => (
         <div key={r.id || r.expiresAt || r.title} className={`quota-pop-line reset-credit-row${creditUrgent(r.left) ? ' urgent' : ''}`}>
           <span className="quota-reset-title">{r.title ?? titleText}</span>
@@ -830,7 +753,6 @@ function PopResetCredits({ credits, now }: { credits: QuotaResetCredits | null |
   )
 }
 
-/** 共用 `Bar`：手機點開也要看得到圖示化進度（2026-09-09 使用者）。 */
 function PopWindow({
   icon,
   name,
@@ -866,7 +788,7 @@ function PopWindow({
         markTitle={left === null ? undefined : t('{name} 還有 {back} 重置', { name, back: fmtLeft(left) })}
         hit={hit}
       />
-      {/* 寫「還有多久」不寫時刻（2026-09-09 使用者要求）；絕對時刻留在 tooltip。 */}
+      {}
       <span className="quota-reset" title={w?.resets_at ? t('重置時刻 {time}', { time: fmtTime(w.resets_at) }) : undefined}>
         <span className="quota-ico" aria-hidden="true">
           ↻
@@ -887,9 +809,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   })
   const supported = QUERYABLE.includes(entry.kind)
   const loggedOut = useLoggedOut(entry, host)
-  // 這台沒裝 agy：額度永遠不會有讀數，不要一直寫「背景查詢中」，給安裝鈕。
   const agyMissing = useAgyMissing(host) && entry.kind === 'agy' && !entry.identity
-  // 已登入、但這一輪額度探測失敗：把原因講出來（登入與否是另一件事，不再混成「背景查詢中」）。
   const agyQuotaError = useStore((s) => (entry.kind === 'agy' && !entry.identity ? toolsOfHost(s, host).agy?.quota_error ?? null : null))
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
@@ -902,7 +822,6 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   return (
     <div
       className={`quota-pop-row${off ? ' off' : ''}`}
-      // 點卡片＝切換 checkbox；控制項自己的點擊放行，免得切兩下或吃掉登入鈕。
       onClick={(e) => {
         if (!e.currentTarget.contains(e.target as Node)) return
         if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
@@ -978,7 +897,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         </>
         )
       )}
-      {/* 留著舊讀數的帳號登出了（2026-10-30 本機 cc1：10-25 登出後一直灰著，登入鈕卻只在「完全沒讀數」時才出現）：照樣給登入。 */}
+      {}
       {loggedOut && supported && !agyMissing && known && (five !== null || seven !== null || fable !== null) ? (
         <>
           <p className="quota-pop-note warn">{t('{host} 上這個帳號未登入，上面是登出前的舊讀數。', { host: hostLabel(host, t) })}</p>
@@ -990,42 +909,32 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   )
 }
 
-/** Quota row for one host: desktop cells fill the remaining header width; phone cells scroll. */
 export function QuotaStrip({
   focusKind,
   focusIdentity,
   host = LOCAL_HOST,
 }: {
   focusKind?: BotKind | null
-  /** null = default / cc0 account. */
   focusIdentity?: string | null
-  /** 顯示哪一台主機的額度（SPEC §14），預設本機。 */
   host?: string
 }) {
   const t = useT()
   const quota = useStore((s) => s.quota)
   const configured = useStore((s) => s.identities)
-  // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
   const identities = useMemo(() => identitiesOfHost(configured, idStatus, host ?? 'local'), [configured, idStatus, host])
-  // 桌機讓位階段（`lib/quotaLayout.ts`）：量標題列扣掉其他東西後的寬，不是 window.innerWidth（少算側欄與暫存欄約 500px，
-  // 2026-09-11 分頁被推出畫面）。格子或主機一換就從頭量。
   const [fitState, setFitState] = useState<{ key: string; s: QuotaFitState }>({ key: '', s: QUOTA_FIT_START })
   const [open, setOpen] = useState(false)
-  // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
-  // 餘額是全域的（不分主機）：沒有額度格的主機也要看得到（使用者 2026-11-19）。
   const claudeBalanceVisible = useClaudeBalanceVisible()
   const openaiBalanceVisible = useOpenAiBalanceVisible()
   const phone = useMediaQuery(PHONE_QUERY)
-  // 手機明細貼在額度列正下方（2026-09-09 使用者：跳在底下太遠）。
   const [popTop, setPopTop] = useState<number | null>(null)
   const measure = () => {
     const r = wrap.current?.getBoundingClientRect()
     setPopTop(phone && r ? Math.round(r.bottom + 6) : null)
   }
   const wrap = useRef<HTMLDivElement>(null)
-  // 手機：從明細按了登入／開 shell，畫面切到 shell 時收起明細——它正好蓋住登入協助條（桌機不擋，留著看狀態）。
   const shellPane = useStore((s) => s.shellView?.paneId ?? null)
   const [seenShellPane, setSeenShellPane] = useState(shellPane)
   if (seenShellPane !== shellPane) {
@@ -1042,23 +951,16 @@ export function QuotaStrip({
 
   const disabledIdentities = useStore((s) => s.disabledIdentities)
   const disabledKinds = useStore((s) => s.disabledKinds)
-  // 停用的身份不上額度條：連它自己那把 `claude:<name>` 孤兒 key 也不列（使用者 2026-09-16）。
   const ordered = useMemo(() => {
-    // 落點的認領清單跟側欄同一支（`quotaClaimantsOf`）。
     const live = quotaClaimantsOf(configured, idStatus, disabledIdentities, host)
     return collectEntries(quota, live, host).filter(
-      // 沒有身份名的是該 kind 的預設帳號那格：預設帳號被隱藏（設定 → 身份 → 預設帳號）就不列（使用者 2026-11-14：grok 已不訂閱）。
       (e) => !disabledIdentities.includes(identityPrefKey(host, e.kind, e.identity || DEFAULT_ACCOUNT)),
-    // kind 整個停用（grok 不訂閱，使用者 2026-11-14）：額度條與總計都不列，歷史用量留在後端。
     ).filter((e) => !disabledKinds.includes(kindPrefKey(host, e.kind)))
   }, [quota, configured, idStatus, host, disabledIdentities, disabledKinds])
 
   const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
   const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START
 
-  // layout effect：首次繪製前量到並收斂（每換一階段就同步重畫、再量），不會先閃一次全部攤開或疊字。
-  // 沒有任何額度時整條不畫（`wrap` 是 null）；deps 要跟著「有沒有畫」走，不然額度晚到時永遠不會開始量寬度。
-  // 格子變寬（倒數字變長）、標題列或旁邊的分頁變寬都要重量，所以連同它們一起觀察。
   const drawn = ordered.length > 0
   useLayoutEffect(() => {
     const strip = wrap.current
@@ -1066,12 +968,9 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
-      // 餘額群組跟量表同排、不收合：可用寬度先扣掉它（`.quota-api-group`，使用者 2026-11-19）。
       const groupEl = strip.querySelector<HTMLElement>('[data-k="quota-api-group"]')
       const groupGap = parseFloat(getComputedStyle(strip).columnGap) || 0
       const avail = Math.max(0, measureQuotaAvail(head, strip) - (groupEl ? groupEl.getBoundingClientRect().width + groupGap : 0))
-      // Full layout must fit count × widest active cell, not the sum of unequal cell widths.
-      // Measure it even after a narrow viewport or late data made the row collapse.
       const wasCollapsed = row.classList.contains('collapsed')
       row.classList.remove('collapsed')
       let full
@@ -1092,8 +991,6 @@ export function QuotaStrip({
     remeasure()
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(remeasure)
     for (const el of [head, ...head.children, ...row.children]) ro?.observe(el)
-    // Equal-width cells can stay the same size when their text changes. ResizeObserver
-    // alone cannot notice new quota text or a loaded font changing the natural minimum.
     const fonts = document.fonts
     fonts?.addEventListener('loadingdone', remeasure)
     return () => {
@@ -1104,7 +1001,6 @@ export function QuotaStrip({
 
   const popEntries = ordered
 
-  // 沒有任何額度格時仍畫出餘額晶片（只畫晶片，不畫空的量表）；兩個餘額都不可見才整條不畫。
   if (ordered.length === 0 && !claudeBalanceVisible && !openaiBalanceVisible) return null
 
   const freshest = popEntries
@@ -1114,24 +1010,20 @@ export function QuotaStrip({
     .pop()
 
   const collapsed = !phone && fit.level === 2
-  /** CSS 也是 640px 那條線。 */
   const compact = phone
-  // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
   const shown = ordered
   return (
     <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host, t)}>
-      {/* 容器而非 button：checkbox 不能塞在 button 裡。 */}
+      {}
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
-        {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
+        {}
         {phone ? null : <UpdateQuotaChip />}
-        {/* 不掛主機名牌（2026-09-29 使用者）：標題列左邊的 `@host` 已經說了是哪台；tooltip／popover 標題仍寫主機。 */}
+        {}
         {shown.map((entry) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {
             if (entry.kind !== 'claude') {
-              // 同一個 kind 可能有好幾格（codex＋codex:work）：只亮這顆 bot 的額度實際落的那一格。
               const target = quotaBaseKey(quota, host, entry.kind, focusIdentity?.trim() || null, identities)
-              // 那一格還沒有讀數（沒畫出來）時退回預設帳號那格，免得整列沒有任何一格被標。
               focused = shown.some((e) => e.kind === entry.kind && e.key === target) ? entry.key === target : !entry.identity
             } else {
               const focusId =
@@ -1180,7 +1072,7 @@ export function QuotaStrip({
               {t('看全部（{count}）', { count: popEntries.length })}
             </button>
           ) : null}
-          {/* API 餘額區：全域、不分主機，手機 setOnly 時也顯示（使用者 2026-11-19）。各列自己判斷可見，都不可見就整塊不畫。 */}
+          {}
           {claudeBalanceVisible || openaiBalanceVisible ? (
             <div className="quota-pop-api" data-k="quota-pop-api">
               <div className="quota-pop-api-title">{t('API 餘額')}</div>

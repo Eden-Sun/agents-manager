@@ -5,7 +5,6 @@ export function hostLabel(host: string): string {
   return host === 'local' ? t('本機') : host
 }
 
-/** Missing tools that affect the current bot or group members. */
 export function relevantMissing(
   all: { host: string; kind: BotKind }[],
   focusHost: string | null | undefined,

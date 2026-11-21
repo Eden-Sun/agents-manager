@@ -7,11 +7,6 @@ interface Sentinel {
   addEventListener: (type: 'release', cb: () => void) => void
 }
 
-/**
- * 「螢幕保持亮著」（`lib/wakeLock.ts`）。偏好與「現在有沒有握住」放在模組層，真正去要／還鎖的只有 App 根部的
- * `useWakeLockHolder`；環境設定的開關（`useWakeLock`）只讀寫偏好。所以關掉設定視窗不會放掉鎖（#1199）。
- * 鎖會在分頁切走時被系統收回，所以回到前景要自己重拿，不然使用者以為還開著、螢幕卻睡了。
- */
 let pref = loadKeepAwake()
 let holding = false
 let lastError: string | null = null
@@ -49,7 +44,6 @@ const clearError = () => {
   }
 }
 
-/** 開關：存偏好，並叫醒握鎖的那一處。 */
 export function setKeepAwake(v: boolean): void {
   saveKeepAwake(v)
   pref = v
@@ -62,17 +56,13 @@ export function setKeepAwake(v: boolean): void {
 const GESTURE_EVENTS = ['pointerdown', 'touchend', 'keydown'] as const
 const GESTURE_OPTS = { capture: true, passive: true } as const
 
-/** 掛在 App 根部（整個 app 活著就在）：依偏好拿鎖、關掉就還。 */
 export function useWakeLockHolder(): void {
   const on = useSyncExternalStore(subscribe, getPref, getPref)
   const support = wakeSupport()
   useEffect(() => {
-    // 關著就什麼都不做。
     if (!on || support !== 'ok') return
     let alive = true
     let held: Sentinel | null = null
-    /** 同時只准一個 request 在路上：兩次 `visibilitychange` 夾在同一次 request 裡的話，
-     *  第二次會再要一顆，先拿到的那顆從此沒人 release——開關關掉了螢幕還是不睡（#548 順帶，稽核時發現）。 */
     let inflight: Promise<Sentinel> | null = null
     let listeningGestures = false
 
@@ -110,8 +100,6 @@ export function useWakeLockHolder(): void {
         clearError()
         setHolding(true)
         removeGestureListeners()
-        // 系統收回（切走分頁、鎖屏）時要知道，不然下次 `acquire` 以為還握著。
-        // 只有被收回的正是目前握著的那顆才清狀態；舊生命週期的鎖事件晚到（快速關→開）不能蓋掉新鎖。
         lock.addEventListener('release', () => {
           if (held !== lock) return
           held = null
@@ -121,7 +109,6 @@ export function useWakeLockHolder(): void {
           }
         })
       } catch (err) {
-        // 使用者拒絕、WebKit 無手勢被拒（NotAllowedError）、或系統省電模式不給：當成沒開，開關留在原處讓人再試。
         recordError(err)
         setHolding(false)
         if (alive && document.visibilityState === 'visible') {
@@ -146,12 +133,10 @@ export function useWakeLockHolder(): void {
       setHolding(false)
       clearError()
       if (lock && !lock.released) void lock.release().catch(() => {})
-      // 還在路上的那一顆由 `acquire` 自己收（它 await 完會看到 `alive === false` 就 release）。
     }
   }, [on, support])
 }
 
-/** 開關元件用：讀寫偏好、顯示現在有沒有握住；不自己拿鎖。 */
 export function useWakeLock(): {
   on: boolean
   setOn: (v: boolean) => void

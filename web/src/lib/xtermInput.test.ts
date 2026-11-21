@@ -1,6 +1,3 @@
-/**
- * xterm onData → herdr text／keys 操作（xtermInput.ts）。鍵名對照見該檔頂端註解。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createInputBatcher, dataToOps, type ShellOp } from './xtermInput.ts'
@@ -33,7 +30,6 @@ test('Ctrl-A..Z 對應 ctrl+a..ctrl+z；Tab、Enter、Backspace 不算 Ctrl 字�
   assert.deepEqual(dataToOps('\x03'), [K('ctrl+c')])
   assert.deepEqual(dataToOps('\x12'), [K('ctrl+r')])
   assert.deepEqual(dataToOps('\x1a'), [K('ctrl+z')])
-  // \x08 = Backspace、\x09 = Tab、\x0d = Enter，不是 ctrl+h／ctrl+i／ctrl+m。
   assert.deepEqual(dataToOps('\x08\x09\x0d'), [K('backspace', 'tab', 'enter')])
 })
 
@@ -83,7 +79,6 @@ test('Home／End／Insert／Delete／PgUp／PgDn 與 F13 以上：herdr 無可�
   assert.deepEqual(dataToOps('\x1b[5~'), [T('\x1b[5~')])
   assert.deepEqual(dataToOps('\x1b[6~'), [T('\x1b[6~')])
   assert.deepEqual(dataToOps('\x1b[25~'), [T('\x1b[25~')])
-  // 認不得的 CSI 也一樣退回 text，不吞掉後面的字元（相鄰 text 合併）。
   assert.deepEqual(dataToOps('\x1b[99qz'), [T('\x1b[99qz')])
 })
 
@@ -112,10 +107,8 @@ test('Ctrl-\\、Ctrl-]、Ctrl-@ 等沒有可驗證鍵名的控制字元：原樣
 test('貼上：bracketed paste 整段當 text，外層標記不送', () => {
   assert.deepEqual(dataToOps('\x1b[200~hello world\x1b[201~'), [T('hello world')])
   assert.deepEqual(dataToOps('\x1b[200~\x1b[201~'), [])
-  // 貼上的 \r 轉 Enter 鍵，\n 留在 text 裡；\r\n 只算一次 Enter。
   assert.deepEqual(dataToOps('\x1b[200~hello\rworld\x1b[201~'), [T('hello'), K('enter'), T('world')])
   assert.deepEqual(dataToOps('\x1b[200~a\r\nb\nc\x1b[201~'), [T('a'), K('enter'), T('b\nc')])
-  // 貼上前後的一般字元、控制字元照常轉換並與 text 合併。
   assert.deepEqual(dataToOps('x\x1b[200~y\x1b[201~z'), [T('xyz')])
   assert.deepEqual(dataToOps('\x1b[200~ls\x1b[201~\r'), [T('ls'), K('enter')])
 })

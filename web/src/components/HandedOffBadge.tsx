@@ -3,7 +3,6 @@ import { handedOffTo } from '../lib/handoff'
 import { t, useT } from '../lib/i18n'
 import './handedOffBadge.css'
 
-/** #708：側欄專案標題上的「由 <host> 管理」。這個專案的 bot／pane 歸那台主機的 daemon，這裡只顯示最後的狀態。 */
 export function HandedOffBadge({ projectId }: { projectId: string }) {
   useT()
   const host = useStore((s) => handedOffTo(s.projects, projectId))

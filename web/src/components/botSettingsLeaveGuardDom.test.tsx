@@ -1,7 +1,3 @@
-/**
- * #925：桌機 Bot 設定卡是非模態的，`dialogOpen()` 看不到它。有未儲存變更時，鍵盤導覽（⌥↑／⌥↓）
- * 要先問「放棄未儲存的變更？」，跟滑鼠點外面一致；沒有變更或放棄之後才換 bot。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, click, keydown, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -22,7 +18,6 @@ after(async () => {
 const mk = (id: string, name: string) =>
   ({ id, name, project_id: 'p1', kind: 'claude', model: 'opus', effort: 'medium', fast: false, identity: null, persona: null, live_apply_deferred: false, needs_restart: false }) as unknown as Bot
 
-/** 跟 App 一樣：設定卡只在 `settingsBotId` 指到它時掛著，關掉就卸載（守門跟著解除）。 */
 function Harness() {
   useBotSwitchKeys()
   const open = useStore((s) => s.settingsBotId === 'b1')
@@ -55,7 +50,6 @@ test('有未儲存變更時 ⌥↓ 先彈「放棄未儲存的變更？」、不
   })
   await mount(<Harness />)
 
-  // 沒有變更：不擋。
   const free = await altDown()
   assert.deepEqual(switched, [1], '沒有未儲存變更：⌥↓ 照常換 bot')
   assert.equal(free.defaultPrevented, true)

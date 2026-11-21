@@ -1,4 +1,3 @@
-/** 環境設定 →「OpenAI API」區（使用者 2026-11-18）：開關、金鑰狀態（絕不顯示 key）、總上限存檔呼叫 PUT；帳本的供應商篩選與短名。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
@@ -13,7 +12,6 @@ after(() => {
   teardownDom()
 })
 
-/** happy-dom 的按鈕點擊不會送出表單：直接送 submit 事件（跟 claudeApiPanelDom.test 同一招）。 */
 const submit = (root: Element) => root.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
 
 const SENTINEL = 'sk-test-SENTINEL-XYZ'
@@ -123,8 +121,6 @@ test('帳本：供應商篩選帶 provider 參數；模型欄用短名（Luna）
   await settle()
   assert.deepEqual(cells().map((c) => c.title), ['gpt-6-luna'])
 })
-
-// ───── 獨立分頁（使用者 2026-11-18：「設定裡面不是只有 Claude API，也要有 OpenAI 的 API」） ─────
 
 test('OpenAI API 是和 Claude API 並列的獨立分頁；Claude 那一頁不再內嵌 OpenAI 設定區', async () => {
   const { EnvShell } = await import('./EnvShell')

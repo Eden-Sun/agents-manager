@@ -1,8 +1,3 @@
-/**
- * 一鍵重啟確認框的名單（#998）：名字可以含「、」，名單不能先用「、」「\n」串成一個字串、畫的時候再拆回來——
- * 名字含「、」會被拆成兩列；兩顆同名的 bot 用名字當 React key 會 duplicate key。真的掛 `RestartChip` 進 happy-dom，
- * 開確認框，數畫出來的 `<li>`。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

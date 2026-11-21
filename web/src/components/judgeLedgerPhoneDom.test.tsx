@@ -1,7 +1,3 @@
-/**
- * Jev 帳本在手機（issue #1466）：表格外層一定有自己的橫向捲動容器（整頁不橫捲），每格帶 `data-label`
- * 讓 ≤640px 的 CSS 把一列攤成「標籤：值」的卡片，數字欄標 `num` 不折行。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, settle, teardownDom, unmountAll } from '../testing/domHarness'
@@ -39,7 +35,6 @@ test('帳本兩張表都在捲動容器裡，每個 td 有 data-label，數字�
       cells.forEach((td, i) => assert.equal(td.getAttribute('data-label'), heads[i], `第 ${i} 格的標籤要等於表頭`))
     }
   }
-  // 最近 20 筆：時間、機率、耗時是數字欄。
   const recent = tables[1]!.querySelector('tbody tr')!
   for (const label of ['時間', 'Jev 機率', '耗時 ms']) {
     assert.ok(recent.querySelector(`td[data-label="${label}"]`)?.classList.contains('num'), `${label} 要標 num`)

@@ -3,7 +3,6 @@ import type { RestartBatch } from '../api/types'
 import { useT } from '../lib/i18n'
 import './updateAllBanner.css'
 
-/** 「claude 有更新」按下去之後側欄的進度／失敗與跳過名單（SPEC §6.9）；觸發鈕在 `UpdateQuotaChip`。 */
 export function UpdateAllBanner() {
   const batch = useStore((s) => s.restartBatch)
   const clear = useStore((s) => s.clearRestartBatch)
@@ -11,12 +10,9 @@ export function UpdateAllBanner() {
   return <BatchRow batch={batch} onClear={clear} />
 }
 
-/** 收 props（不自己讀 store）才測得到，同 `JudgeLoadNotice`／`BotSwitcherMenu`。 */
 export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () => void }) {
   const t = useT()
   const { total, done, current, ok, failed, skipped, finished } = batch
-  // 接回別人按出來的那一批（`already_running` 只給 batch_id）時總數是 0，要等事件補。以前這裡把
-  // 「除不了」當成 100%，等於一接上就畫滿格、還寫「重啟中 0/0」——看起來像做完了（issue #492）。
   const unknownTotal = total <= 0
   const pct = total > 0 ? Math.round((done / total) * 100) : 0
 
@@ -30,9 +26,7 @@ export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () 
               }`
             : `${t('重啟中 {progress}', { progress: unknownTotal ? t('{done} 顆（總數未知）', { done }) : `${done}/${total}` })}${current ? ` · ${current}` : ''}`}
         </strong>
-        {/* 未完成也要關得掉（issue #492）：`bots_restart_done` 收不到（批次中途 daemon 重啟、或落到全量
-            resync）時，以前這裡沒有 ✕、晶片又是停用的，使用者只能重新整理分頁。收起不會中斷批次——
-            它在 daemon 背景跑，再按一次會拿到 `already_running` 並重新接上同一批。 */}
+        {}
         <button
           type="button"
           className="update-all-x"
@@ -47,13 +41,12 @@ export function BatchRow({ batch, onClear }: { batch: RestartBatch; onClear: () 
           className={`update-all-bar${unknownTotal ? ' unknown' : ''}`}
           role="progressbar"
           aria-valuemin={0}
-          // 總數還不知道時不報 now／max：ARIA 的不定量進度條就是「沒有 valuenow」，報 0/0 會被讀成已完成。
           {...(unknownTotal ? {} : { 'aria-valuenow': done, 'aria-valuemax': total })}
         >
           <span style={unknownTotal ? undefined : { width: `${pct}%` }} />
         </div>
       )}
-      {/* 失敗的先列：那是要動手的。跳過的接在後面，理由用 daemon 給的那句。 */}
+      {}
       {failed.length > 0 ? (
         <ul className="update-all-list bad">
           {failed.map((f) => (

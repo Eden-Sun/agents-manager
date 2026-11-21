@@ -1,4 +1,3 @@
-/* 手機入口下方的小 popup；不套用全螢幕 modal 或桌面的橫列裁切。 */
 .mobile-context-panel {
   position: fixed;
   z-index: 910;

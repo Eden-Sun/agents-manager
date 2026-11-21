@@ -16,7 +16,6 @@ test('動過但值相等（改回去）也不送', () => {
 
 test('面板開著時別處把 effort 改成 max：沒動過的欄位跟著 store，不會拿舊值蓋回去', () => {
   const updated = { ...base, effort: 'max' }
-  // 表單 state 還停在開啟當下的 high。
   const stale = { ...same, effort: 'high' }
   assert.deepEqual(computeBotPatch(updated, stale, t(), 'claude'), {})
   assert.equal(effectiveForm(updated, stale, t()).effort, 'max')
@@ -36,7 +35,6 @@ test('fast 在 codex 與 claude-api 都會送（開與關都能存），其他 k
   assert.deepEqual(computeBotPatch(base, f, t('fast'), 'codex'), { fast: true })
   assert.deepEqual(computeBotPatch(base, f, t('fast'), 'claude-api'), { fast: true })
 
-  // 取消勾選（從 true 變成 false）
   const withFast: BotFormBase = { ...base, fast: true }
   const disabled = { ...same, fast: false }
   assert.deepEqual(computeBotPatch(withFast, disabled, t('fast'), 'claude'), {})
@@ -62,7 +60,6 @@ test('面板開著時別處改了，沒動過的跟著 store，不會拿開啟�
   const updated: BotFormBase = { ...base, persona: '別處改的人設' }
   assert.deepEqual(computeBotPatch(updated, same, t(), 'claude'), {})
   assert.equal(effectiveForm(updated, same, t()).persona, '別處改的人設')
-  // 使用者自己改了就以使用者的為準。
   assert.deepEqual(computeBotPatch(updated, { ...same, persona: '我的人設' }, t('persona'), 'claude'), { persona: '我的人設' })
 })
 
@@ -75,7 +72,6 @@ test('store 還沒追上：存值照留（避免誤跳放棄未儲存）', () =>
   const saved = { model: 'sonnet' }
   assert.equal(pruneSaved(saved, base), saved)
 })
-
 
 test('存過 null（清回預設）與 fast：以 store 的值相等為準', () => {
   assert.deepEqual(pruneSaved({ effort: null, fast: true }, { ...base, effort: null, fast: true }), {})

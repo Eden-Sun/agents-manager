@@ -1,7 +1,3 @@
-/**
- * 附件沒傳上去（413、415、重試也失敗）時，按送出不能靜悄悄只送文字：bot 會以為那張照片沒有被送來。
- * 主 UI 的同類情況會擋下來並說明（`ATTACHMENT_FAILED_NOTICE`）；分享頁也要擋，讓人去移除或再試一次。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, settle, setupDom, teardownDom, unmountAll, typeInto } from '../testing/domHarness'

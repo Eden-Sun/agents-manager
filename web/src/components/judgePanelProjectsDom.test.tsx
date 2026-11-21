@@ -1,4 +1,3 @@
-/** Jev 全域專案選項在設定表單中的勾選與停用狀態（issue #1509）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Project } from '../api/types'

@@ -1,14 +1,5 @@
-/**
- * 按鍵的送出佇列：**依序、合批、不重疊**。
- *
- * 一鍵一個 POST 會同時在路上，抵達順序不保證——打 `ls` 可能變成 `sl`。所以同一時間只有一個
- * 請求在飛，飛的期間按的鍵累積起來，下一輪一次送完。鍵盤同步模式下這不是最佳化，是正確性：
- * 使用者是照順序按的，pane 收到的順序就必須一樣。
- */
-/** 排在佇列裡的一項：一串鍵，或一段貼上的文字（貼上不能拆成鍵——換行會變成 Enter 直接執行）。 */
 type Item = { kind: 'keys'; keys: string[] } | { kind: 'text'; text: string }
 
-/** 單次 send 最多幾個鍵：必須等於 daemon `shell::MAX_KEYS`，超過會整批被 400。 */
 export const MAX_KEYS_PER_SEND = 64
 
 export class KeyQueue {
@@ -18,7 +9,6 @@ export class KeyQueue {
   private readonly sendText?: (text: string) => Promise<void>
   private readonly onSettled?: (error: unknown | null) => void
 
-  // 參數屬性（`private readonly send: …` 直接寫在 constructor 上）在 `erasableSyntaxOnly` 下不能用。
   constructor(
     send: (keys: string[]) => Promise<void>,
     onSettled?: (error: unknown | null) => void,
@@ -29,7 +19,6 @@ export class KeyQueue {
     this.sendText = sendText
   }
 
-  /** 排進去並（必要時）開始送。不等待：呼叫端是 keydown handler，不能被網路拖住。 */
   push(keys: string[]): void {
     if (keys.length === 0) return
     this.pending.push({ kind: 'keys', keys })
@@ -37,7 +26,6 @@ export class KeyQueue {
     void this.drain()
   }
 
-  /** 貼上：走同一個佇列才保得住「打一半貼一段」的順序。沒給 `sendText` 就丟掉（呼叫端不支援貼上）。 */
   pushText(text: string): void {
     if (!text || !this.sendText) return
     this.pending.push({ kind: 'text', text })
@@ -45,7 +33,6 @@ export class KeyQueue {
     void this.drain()
   }
 
-  /** 還沒送出去的鍵（換 pane 時要丟掉：那是給上一個 pane 的輸入）。 */
   clear(): void {
     this.pending = []
   }
@@ -59,13 +46,11 @@ export class KeyQueue {
     let error: unknown | null = null
     try {
       while (this.pending.length) {
-        // 連著的鍵合成一批；碰到貼上就先斷開（順序比批次大小重要）。
         const first = this.pending.shift()!
         let job: Promise<void>
         if (first.kind === 'text') {
           job = this.sendText!(first.text)
         } else {
-          // 一批最多 MAX_KEYS_PER_SEND 個：超出的部分切開留在 pending 開頭，順序不變。
           const keys = first.keys.slice(0, MAX_KEYS_PER_SEND)
           if (first.keys.length > MAX_KEYS_PER_SEND) {
             this.pending.unshift({ kind: 'keys', keys: first.keys.slice(MAX_KEYS_PER_SEND) })
@@ -81,8 +66,6 @@ export class KeyQueue {
         try {
           await job
         } catch (e) {
-          // 這一批沒送成功就停：後面的鍵接在一段沒進去的輸入後面，多半只會讓畫面更亂。
-          // 剩下的一起丟掉，讓使用者看到錯誤自己決定要不要重打。
           error = e
           this.pending = []
           break

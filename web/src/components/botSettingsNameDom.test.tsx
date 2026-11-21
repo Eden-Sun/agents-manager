@@ -1,7 +1,3 @@
-/**
- * Bot 設定表單的名稱欄：跟 daemon `valid_bot_name` 同一套規則（1–32 字、不含 `@ , : ;`、不前後空白、空白不連續）。
- * 規則不符時「儲存」要停用、畫面要講原因；不能讓使用者按了才被 daemon 回 400。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, typeInto, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

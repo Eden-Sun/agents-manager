@@ -1,4 +1,3 @@
-/** claude-api bot 每則回覆的單價與進行中的進度。 */
 import { isApiKind } from './kindMeta'
 import { useEffect, useState } from 'react'
 import type { ApiTurnCost } from '../api/apiBotUsage'
@@ -6,7 +5,6 @@ import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { useApiTurnCosts } from '../hooks/useApiTurnCosts'
 
-/** 每則 assistant 回覆時間旁的單價。可展開看時間軸與拆分。 */
 export function ApiTurnCostTag({
   botId,
   turnId,
@@ -46,10 +44,6 @@ export function ApiTurnCostTag({
   return <span className="msg-cost mono" title={tip}>${turn.cost_usd.toFixed(3)}</span>
 }
 
-/**
- * openai-api 回合的實際費用（回合後才有；不做即時估價，也不套 Claude 的快取 TTL）：金額為 daemon 依 OpenAI 價表結算的值，
- * 下面拆成輸入／快取讀／快取寫／輸出，reasoning 另列（已含在輸出裡）。
- */
 function OpenAiTurnCost({ turn, onToggle, expanded }: { turn: ApiTurnCost; onToggle?: () => void; expanded?: boolean }) {
   const t = useT()
   const breakdown = t('輸入 {i} · 快取讀 {r} · 快取寫 {w} · 輸出 {o}', {
@@ -87,15 +81,6 @@ function OpenAiTurnCost({ turn, onToggle, expanded }: { turn: ApiTurnCost; onTog
   )
 }
 
-/**
- * live bubble 的進度列：第 N 次請求 · 已花 $X（已結算）＋預留 $Y（進行中請求的上限，不算進 X）。
- * 串流中（`turn_progress.est_cost_microusd`）改顯示「≈ $X 目前為止」：已結算的請求＋這一次請求到目前為止的估價，取代預留；
- * 估價只是畫面用的，結算後回到帳上的真實數字。
- */
-/**
- * 進行中回合的時鐘：已進行多久／時限、第幾次／呼叫上限。回合可能一口氣跑好幾分鐘、十幾次呼叫都沒有文字輸出，
- * 沒有這行使用者只看到「等待回覆」，分不出是在跑還是被吞掉（2026-11-15 pt-hub）。到軟期限（時限的 85%）模型會先收尾寫摘要。
- */
 function ApiTurnClock({ turn }: { turn: ApiTurnCost }) {
   const t = useT()
   const [now, setNow] = useState(() => Date.now())
@@ -130,7 +115,6 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
   })
   const turns = useApiTurnCosts(botId, true)
   const turn = turnSig ? turns.find((x) => x.turn_id === turnSig) : undefined
-  // 速度每回合開始時讀一次設定、整回合固定：設定在回合中途改了，這一回合仍是舊速度，下一回合才換。
   const configured = useStore((s) => {
     const b = s.bots.find((x) => x.id === botId)
     return b ? (b.fast ? 'fast' : 'standard') : null
@@ -141,7 +125,6 @@ export function ApiTurnProgress({ botId }: { botId: string }) {
         {t('本回合仍是 {cur}，下一回合起改為 {next}', { cur: turn.speed, next: configured })}
       </span>
     ) : null
-  // openai-api 沒有即時估價（價表只在回合結算後才算）：不顯示 ≈，只顯示已結算＋預留。
   const openai = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'openai-api')
   if (est !== null && !openai) {
     const x = (turn?.cost_usd ?? 0) + est / 1_000_000

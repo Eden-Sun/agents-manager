@@ -1,7 +1,3 @@
-/**
- * outbox 下載中切到另一顆 bot（issue #1805）：舊 bot 的下載晚回 404，不能動目前 bot 的清單、重讀、或下載中狀態。
- * 同名檔案（`report.txt`）在兩顆 bot 底下都有，這正是會誤刪的情境。手動控制回應時機，不靠牆鐘。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -15,9 +11,7 @@ interface Pending {
 }
 
 const pending: Pending[] = []
-/** 清單的讀取（不含下載）：用來看有沒有被重讀。 */
 const listHits: string[] = []
-/** 每顆 bot 的清單還有沒有這個檔（false＝已經被清掉）。 */
 const serves: Record<string, boolean> = {}
 const realFetch = globalThis.fetch
 const realCreate = URL.createObjectURL
@@ -38,7 +32,6 @@ let openCalledWith: { url: string; target?: string }[] = []
 let shouldBlockPopup = false
 const revokedUrls: string[] = []
 const activeIntervals: (() => void)[] = []
-// 模組載入時不能碰 window：前一個測試檔 teardownDom 之後全域沒有 DOM，要等 before 裡 setupDom 再抓（shard 平行跑時會輪到）。
 let realOpen: typeof window.open
 const realSetInterval = globalThis.setInterval
 
@@ -67,7 +60,6 @@ before(async () => {
     if (url.includes('/outbox/file')) {
       return new Promise<Response>((respond, reject) => pending.push({ path: url, respond, reject }))
     }
-    // 清單：兩顆 bot 都有同名檔。立刻回。
     listHits.push(url)
     const bot = /\/bots\/(\w+)\/outbox/.exec(url)?.[1] ?? ''
     return Promise.resolve(json(serves[bot] === false ? { ...listBody, files: [] } : listBody))
@@ -80,7 +72,6 @@ before(async () => {
 
 afterEach(async () => {
   await unmountAll()
-  // 檔案切換測試刻意讓舊下載掛住；拒絕它，避免 transport 的逾時 callback 跑進下一個測試。
   for (const request of pending) request.reject(new Error('test cleanup'))
   await settle()
   pending.length = 0
@@ -111,7 +102,6 @@ const bots = [
 
 const fileButton = () => document.querySelector<HTMLButtonElement>('button.outbox-file')
 const fileCount = () => document.querySelectorAll('button.outbox-file').length
-/** 清單是這顆 bot 的：元件的「重新讀取」只在 `loadedFor === botId` 時才可按。 */
 const listLoaded = () => fileCount() === 1 && !document.querySelector<HTMLButtonElement>('.outbox-refresh')!.disabled
 const busyText = () => document.querySelector('.outbox-meta')?.textContent ?? ''
 const pendingFor = (botId: string) => {
@@ -125,27 +115,22 @@ test('下載中切到另一顆 bot，舊 bot 晚回 404：新 bot 的同名檔�
   await mount(<OutboxFiles />)
   await until(listLoaded, 'bot a 的清單載入')
 
-  // A 開始下載 report.txt，還沒回。
   await click(fileButton()!)
   await until(() => pending.length === 1, 'A 的下載請求送出')
   assert.equal(busyText().includes('下載中'), true, 'A 下載中')
 
-  // 切到 B：B 的同名檔載入，B 自己開始下載，也還沒回。
   useStore.setState({ selectedBotId: 'b' } as never)
-  // 先讓切換 render 出來：否則 `listLoaded` 還看得到 A 的清單。
   await settle(50)
   await until(listLoaded, 'bot b 的清單載入')
   await click(fileButton()!)
   await until(() => pending.length === 2, 'B 的下載請求送出')
 
-  // A 的下載這時才回 404（檔案已被清掉）。
   pendingFor('a').respond(json({ error: 'not_found' }, 404))
   await settle(30)
 
   assert.equal(fileCount(), 1, 'B 的同名檔不能被舊 bot 的 404 拿掉')
   assert.ok(busyText().includes('下載中'), 'B 自己的下載狀態不能被舊請求清掉')
 
-  // B 完成，busy 才清掉。
   pendingFor('b').respond(new Response('bee', { status: 200, headers: { 'content-type': 'text/plain' } }))
   await until(() => !busyText().includes('下載中'), 'B 下載完成後 busy 清掉')
   assert.equal(fileCount(), 1)
@@ -159,10 +144,8 @@ test('A 下載中切到 B，A 先完成：A 的 busy 不影響 B 的同名檔', 
   await until(() => pending.length === 1, 'A 的下載請求送出')
 
   useStore.setState({ selectedBotId: 'b' } as never)
-  // 先讓切換 render 出來：否則 `listLoaded` 還看得到 A 的清單。
   await settle(50)
   await until(listLoaded, 'bot b 的清單載入')
-  // B 的列表此刻不該因為 A 還在下載就顯示下載中。
   assert.equal(busyText().includes('下載中'), false, 'A 的下載中不該畫在 B 的同名檔上')
   assert.equal(fileButton()!.disabled, false, 'B 的同名檔可以按')
 
@@ -206,7 +189,6 @@ test('舊 bot 晚回 404：通知寫明是哪顆 bot 的檔；目前 bot 的 404
   assert.equal(staleNotices.length, 1, '舊 bot 的失敗要跳一則通知')
   assert.ok(staleNotices[0].text.includes('alpha'), `通知要寫明是 alpha 的檔：${staleNotices[0].text}`)
 
-  // 目前的 bot（B）自己 404：那一列要移除，並發通知。
   serves.b = false
   await click(fileButton()!)
   await until(() => pending.length === 2, 'B 的下載請求送出')
@@ -243,7 +225,6 @@ test('可預覽格式（如 PDF/文字）顯示預覽按鈕，點擊同步開窗
   assert.ok(previewBtn, '應該要有預覽按鈕')
 
   await click(previewBtn)
-  // 開窗先於 fetch 完成（同步開窗以保留 transient activation）
   assert.equal(openCalledWith.length, 1, '點擊當下應立即 window.open')
   assert.equal(openCalledWith[0].url, '', '應開啟空白頁')
   assert.equal(openCalledWith[0].target, '_blank', 'target 應為 _blank')
@@ -306,12 +287,10 @@ test('關窗後每 30 秒輪詢時才釋放 Blob URL', async () => {
   const url = mockWindow!.location.href
   assert.equal(revokedUrls.length, 0, '分頁未關閉前不應 revoke')
 
-  // 分頁未關閉時，觸發 interval 也不應 revoke
   assert.equal(activeIntervals.length > 0, true, '應註冊 interval 檢查')
   activeIntervals.forEach((fn) => fn())
   assert.equal(revokedUrls.includes(url), false, '分頁未關閉前 trigger interval 不得 revoke')
 
-  // 關閉分頁後觸發輪詢，應釋放 Blob URL
   mockWindow!.closed = true
   activeIntervals.forEach((fn) => fn())
   assert.equal(revokedUrls.includes(url), true, '分頁關閉後應 revoke Blob URL')

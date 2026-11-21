@@ -13,9 +13,7 @@ test('daemon 補的名字：活著照樣顯示，已收掉才標', () => {
 
 test('先有名字 → bot 從清單消失 → 仍顯示「名字（已收掉）」而不是 ID', () => {
   const id = '01M4VV32AKTE3AFYMFZP30KDA9'
-  // 收掉前：SSE 進來、清單找得到，順手記住
   assert.equal(relayFromName({ fromId: id, liveName: 'lx1752' }), 'lx1752')
-  // 收掉後：清單沒有、daemon 也沒補名字（SSE 訊息沒有 relay_from_name）
   assert.equal(relayFromName({ fromId: id, liveName: '', savedName: undefined }), 'lx1752（已收掉）')
 })
 

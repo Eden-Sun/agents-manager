@@ -1,9 +1,7 @@
-/** DOM measurement for the desktop quota row, independent of its allocated flex width. */
 export function shownChildren(el: Element): HTMLElement[] {
   return [...el.children].filter((c): c is HTMLElement => c instanceof HTMLElement && c.getClientRects().length > 0)
 }
 
-/** Actual remaining header width. Every visible sibling counts, including any memory badge. */
 export function measureQuotaAvail(head: HTMLElement, strip: HTMLElement): number {
   const cs = getComputedStyle(head)
   const kids = shownChildren(head)
@@ -20,17 +18,11 @@ export interface QuotaRowSize {
   cellMin: number
 }
 
-/** Active accounts share one width; update chips and disabled accounts keep their own width. */
 export function quotaRowSize(widths: number[], fixed: number, gap: number, count: number): QuotaRowSize {
   const cellMin = Math.max(0, ...widths)
   return { cellMin, width: cellMin * widths.length + fixed + gap * Math.max(0, count - 1) }
 }
 
-/**
- * `flex-grow: 0` alone still leaves basis:0 and shrink enabled. Measure natural, unshrunk
- * cells, then reserve the widest cell for every active account (summing unequal widths
- * would claim the equal-width layout fits too early). Restore inline styles exactly.
- */
 export function measureQuotaRow(row: HTMLElement): QuotaRowSize {
   const kids = shownChildren(row)
   const saved = kids.map(k => k.getAttribute('style'))

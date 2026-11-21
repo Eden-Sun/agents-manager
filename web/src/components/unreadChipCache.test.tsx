@@ -1,6 +1,3 @@
-/**
- * 主力晶片的快取倒數（SPEC §6.5j）：底色本身就是倒數——只加 class 與 `--cache-fill`，不多一個元素。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -44,10 +41,8 @@ function seed() {
 }
 
 const chip = (id: string) => document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${id}"]`)!
-/** 電腦不再 hover 開狀態卡（2026-10-08）：快取倒數只在原生 tooltip（`title`）裡；hover 之後也不該冒出狀態卡。 */
 async function hoverText(id: string): Promise<string> {
   const el = chip(id)
-  // 以前 hover 開卡有一段延遲：換成手動時鐘走 450ms（hover 排的任何 timer 都會到期），不睡牆鐘。
   const timers = installManualTimers()
   try {
     await act(async () => {
@@ -75,17 +70,13 @@ test('主力晶片：底色依剩餘時間填色、綠黃紅分級；已涼回�
   assert.match(await hoverText('fresh'), /快取約 45 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）/)
   assert.ok(chip('warn').classList.contains('cache-warn'))
   assert.ok(chip('low').classList.contains('cache-low'))
-  // 已涼：沒有任何 cache- class、沒有填色，tooltip 講已涼。
   assert.ok(![...chip('cold').classList].some((c) => c.startsWith('cache-')))
   assert.equal(chip('cold').style.getPropertyValue('--cache-fill'), '')
   assert.match(await hoverText('cold'), /快取已涼/)
-  // 回合進行中＝滿條。
   assert.ok(chip('busy').classList.contains('cache-fresh'))
   assert.equal(chip('busy').style.getPropertyValue('--cache-fill'), '100.0%')
-  // grok 不顯示。
   assert.ok(![...chip('grok').classList].some((c) => c.startsWith('cache-')))
   assert.doesNotMatch(await hoverText('grok'), /快取/)
-  // 非主力（沒釘、在跑）不畫。
   const other = [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((el) => el.textContent?.includes('other'))!
   assert.ok(![...other.classList].some((c) => c.startsWith('cache-')))
 })
@@ -101,7 +92,6 @@ test('codex 主力晶片：未知用量維持淡藍、標明未知，不多加�
   assert.ok(!el.classList.contains('cache-warn') && !el.classList.contains('cache-fresh'), '不帶倒數等級 class')
   assert.equal(el.style.getPropertyValue('--cache-fill'), '0.0%', '未知時不假裝滿格')
   assert.match(el.title, /context.*未知/)
-  // 子元素結構與一般主力晶片一致
   const shape = (e: HTMLElement) => [...e.children].map((c) => c.className).join('|')
   assert.equal(shape(el), shape(chip('cold')), '不多加元素、不改尺寸結構')
 })
@@ -133,7 +123,6 @@ test('不用保溫（keep_warm_skip）：晶片不畫倒數底色、tooltip 講�
   assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '75.0%')
   assert.match(await hoverText('fresh'), /快取約 45 分後到期/)
 })
-
 
 test('codex 主力依實際 session token 比例填色，超界與缺值安全處理', async () => {
   seed()
@@ -182,42 +171,31 @@ test('claude-api 主力晶片：底色依 expires_at 與 ttl 倒數填色、綠�
 
   await mount(<UnreadChip />)
 
-  // fresh: 45 / 60 = 75.0%
   assert.ok(chip('api-fresh').classList.contains('cache-fresh'))
   assert.equal(chip('api-fresh').style.getPropertyValue('--cache-fill'), '75.0%')
   assert.match(await hoverText('api-fresh'), /快取約 45 分後到期（上次活動 (?:\d+\/\d+ )?\d\d:\d\d）/)
 
-  // warn: 10 / 60
   assert.ok(chip('api-warn').classList.contains('cache-warn'))
 
-  // low: 3 / 5 = 60.0%
   assert.ok(chip('api-low').classList.contains('cache-low'))
   assert.equal(chip('api-low').style.getPropertyValue('--cache-fill'), '60.0%')
 
-  // cold: 回一般底色，沒有 cache- class，沒有填色，tooltip 標快取已涼
   assert.ok(![...chip('api-cold').classList].some((c) => c.startsWith('cache-')))
   assert.equal(chip('api-cold').style.getPropertyValue('--cache-fill'), '')
   assert.match(await hoverText('api-cold'), /快取已涼/)
 
-  // working: 滿條
   assert.ok(chip('api-busy').classList.contains('cache-fresh'))
   assert.equal(chip('api-busy').style.getPropertyValue('--cache-fill'), '100.0%')
   assert.match(await hoverText('api-busy'), /回合進行中，快取是熱的/)
 
-  // 非主力（沒釘）不畫
   const other = [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((el) => el.textContent?.includes('api-other'))!
   assert.ok(![...other.classList].some((c) => c.startsWith('cache-')))
 
-  // 子元素結構與 CLI 主力完全一致，不多加元素
   const shape = (e: HTMLElement) => [...e.children].map((c) => c.className).join('|')
   assert.equal(shape(chip('api-fresh')), shape(chip('fresh')))
   assert.equal(shape(chip('api-cold')), shape(chip('cold')))
 })
 
-/**
- * claude-api 沒有 pane／hook，daemon 用回合狀態寫 `run.agent_status`（開始 working、結束 idle）；前端膠囊跟 CLI bot 走同一條：
- * working＝轉圈，已回答的未讀＝數字徽章。沒有 pane_id 也一樣（不分支）。
- */
 test('claude-api 主力膠囊：回合進行中（agent_status working、無 pane）轉圈；回答完（idle、未讀 1）有未讀徽章、沒有轉圈', async () => {
   const bot = (id: string) => ({
     id, name: id, project_id: 'p1', kind: 'claude-api', identity: null, model: null, effort: null, args: [], env: {}, autostart: false,
@@ -236,7 +214,6 @@ test('claude-api 主力膠囊：回合進行中（agent_status working、無 pan
   assert.equal(ring('api-done'), null, '回答完：不轉')
   assert.equal(chip('api-done').querySelector('.unread-chip-n')?.textContent, '1', '已回答未讀：徽章')
   assert.equal(chip('api-run').querySelector('.unread-chip-n'), null)
-  // 使用者點進去看過就清掉（跟 CLI bot 同一個帳）。
   await act(async () => { useStore.setState({ botUnread: {} } as never) })
   assert.equal(chip('api-done').querySelector('.unread-chip-n'), null)
 })

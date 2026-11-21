@@ -1,11 +1,9 @@
-/** mock 的「補充」「插隊」要跟 daemon 同形：補充帶 `record` 才記、掛在進行中的回合；插隊真的打斷才標。 */
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
 import { useManualMockClock } from './mockClock.ts'
 import { mockClaudeBot, mockMessages } from './mockBotHarness.ts'
 
-// mock 的 bot 啟動／回合是 timer：用虛擬時間，不在牆鐘上輪詢等它（高負載下 5 秒的 test timeout 會先到）。
 before(() => void useManualMockClock(true))
 after(() => void useManualMockClock(false))
 const mock = new MockTransport()
@@ -28,7 +26,6 @@ test('補充帶 record：記成進行中回合的使用者訊息；不帶就不�
 
 test('插隊真的打斷進行中的回合才標 send_now', async () => {
   const id = await claudeBot()
-  // 先確定有一輪在跑（上一條的那輪還沒結束的話這句 409，一樣是在跑）。
   await mock.request('POST', `/bots/${id}/prompt`, { text: 'retry 再跑一輪', client_request_id: 'sv-busy' }).catch(() => {})
   const out = (await mock.request('POST', `/bots/${id}/prompt`, { text: '改做這個', client_request_id: 'sv-2', send_now: true })) as { turn_id: string }
   const [m] = await messages(id, `?turn_id=${out.turn_id}&role=user`)

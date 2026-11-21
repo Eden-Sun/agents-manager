@@ -1,18 +1,4 @@
 import { msg, tr, useT, type TFn } from "../lib/i18n"
-/**
- * 標題列下面一列：等你、在跑、或釘選的 bot；一顆 bot 一顆晶片，狀態疊在同一顆上。
- *
- * 排序＝緊急度（2026-09-12 使用者／AGM，推翻 9/11 分組）：needs-reply → 未讀 → waits-kids → current → 其餘；
- * 同級照 `bots` 順序。不分組標籤：分組會把第 9 顆 needs-reply 擠出視野（使用者 2026-09-12 錯過 blocked bot）。
- * 手機不排序（2026-09-13 使用者：「手機版星號列不要任意改變順序」）：單行橫捲靠位置肌肉記憶。
- * 版面（同日）：桌機換行、有行數上限（主力三行，其餘一到兩行，2026-09-23）、`+N` 展開；手機單行橫捲要看得出能捲（陰影＋◂ ▸、滾輪映射、scroll-snap）。
- * 兩排（2026-09-15 使用者：「非標主力之現執行中與剛完成的 bot 要出現在主力的下一排」）：★ 主力一排，
- * 沒釘的（在跑、剛跑完、要回答）一定換到下一排；各排裡照上面的排序。桌機收合時主力最多三行、
- * 其餘那組照舊一行（只有它時兩行），主力再多也擠不掉沒釘的「要你回答」（`lib/chipOverflow.ts`）。手機單行橫捲放不下兩排，照同樣分組
- * 分成上下兩排，各自橫捲（2026-09-16 使用者：「已完成放下一排，方便我點選」）。
- * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
- * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
- */
 import { chipStateText, kidsText, KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
 import { keepWarmReplied } from '../lib/keepWarm'
 import { CAPACITY_LABEL, modelAtCapacity } from '../lib/modelCapacity'
@@ -43,14 +29,11 @@ import './keepWarmChip.css'
 import { FrozenBadge } from './FrozenBadge'
 import { useUserTimeZone } from '../lib/userTime'
 
-/** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
 
-/** 主力晶片的操作說明（`aria-describedby` 指到它）；畫面上看不到。 */
 const PIN_HINT_ID = 'unread-pin-hint'
 const PIN_HINT = msg('主力順序是固定的：可以拖曳晶片重排，鍵盤按 Ctrl 加左右方向鍵移動一格，觸控請長按後拖。')
 
-/** 桌機的兩組：★ 主力一組、其餘（在跑、剛跑完、要回答）一組，各自換行、各自裁切。 */
 type GroupName = 'pinned' | 'others'
 const GROUPS: { name: GroupName; pinned: boolean }[] = [
   { name: 'pinned', pinned: true },
@@ -61,39 +44,26 @@ interface ChipItem {
   id: string
   name: string
   go: () => void
-  /** 主力組排序用（#344）：`primary_position`＋原順序。 */
   position: number
   index: number
   current: boolean
   pinned: boolean
   unread: number
   needsReply: boolean
-  /** codex 模型滿載（#1674）：紫色，排在 needs-reply 之後、未讀之前。 */
   atCapacity: boolean
   waitsKids: boolean
-  /** parent_bot_id 指到這顆、且 working／blocked 的子 bot 數（#344 補充 4）；不受自己狀態影響。 */
   kidsRunning: number
   working: boolean
   title: string
-  /** 主力晶片的快取倒數（`lib/cacheClock.ts`）；grok、沒紀錄、非主力是 `null`。 */
   cache: CacheState | null
-  /** 主力 codex 晶片（快取不冷、不倒數；改用淺藍色底代替，SPEC §6.5j）。 */
   codexPrimary?: boolean
-  /** Codex context 已用比例；null 代表沒有可用的實測數據。 */
   codexUsage: number | null
   codexUsageTitle: string | null
-  /** 主力：保溫回覆到了、使用者還沒送新 prompt → 晶片框換色（`keepWarmChip.css`）。 */
   keepWarmReplied: boolean
-  /** 主力：已按「不用保溫」→ 不畫倒數底色，tooltip 講「不保溫中」。 */
   noWarm: boolean
-  /** 主力撞限中（#1899）：有值就在右上角畫角標，文字併進 title 與 sr-only label；過了 `until` 是 `null`。 */
   limitTitle: string | null
 }
 
-/**
- * 主力撞限的文字（#1899）：`<kind> 已達用量上限，<時間> 恢復`。撞限還沒過 `until` 才有值（沒寫時間的照掛，等 daemon 清掉）。
- * 只比時間；判斷在 daemon（`bot.limit_hit` 由 `/api/state` 與 `bot_status` 帶來）。
- */
 function limitTitleOf(kind: Bot['kind'], hit: BotLimitHit | null | undefined, now: number, t: TFn): string | null {
   if (!hit) return null
   const until = hit.until ? Date.parse(hit.until) : NaN
@@ -103,7 +73,6 @@ function limitTitleOf(kind: Bot['kind'], hit: BotLimitHit | null | undefined, no
   return t('{kind} 已達用量上限{detail}', { kind: KIND_LABEL[kind], detail })
 }
 
-/** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
 function KidsBadge({ n }: { n: number }) {
   return (
     <span className="unread-chip-kids" aria-hidden="true" title={kidsText(n)}>
@@ -118,15 +87,11 @@ function KidsBadge({ n }: { n: number }) {
   )
 }
 
-/** 手機主力晶片只畫「值得注意」的狀態；idle（常態）、離線、啟動／停止中都不畫，全亮是雜訊（#344 補充 3）。 */
 const LAMP_SHOWN = new Set<Lamp>(['working', 'blocked', 'unknown', 'disconnected'])
 
-/** 側欄同一顆燈（`botLamp`）：working 會脈動、blocked 紅、斷線灰。 */
 function ChipLamp({ id }: { id: string }) {
   const { lamp, background, kids } = useBotLamp(id)
-  // 執行中改由整個晶片外框提示，手機也不重複畫小燈。
   if (lamp === 'working' || (lamp === 'idle' && kids > 0)) return null
-  // idle 平常不畫；子 agent 還在跑（轉圈）或背景還有工作（一般綠點，#714）才畫，不能看起來像停了。
   return LAMP_SHOWN.has(lamp) || background > 0 || kids > 0 ? <StatusLamp lamp={lamp} background={background} kids={kids} /> : null
 }
 
@@ -134,9 +99,7 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
   const drag = it.pinned ? dnd : undefined
   const dragging = drag?.dragId != null && drag.dragId !== it.id
   const shifted = dragging && drag.shifted.includes(it.id)
-  // 落點標示：讓位的那一格（`drop-before`，標示畫在這顆左邊的空位）；落在行尾則畫在那一行最後一顆右邊（`drop-after`）。
   const mark = dragging && drag.before !== undefined ? (drag.after === it.id ? ' drop-after' : drag.after == null && drag.before === it.id ? ' drop-before' : '') : ''
-  // Claude 是快取剩餘時間；Codex 保留淡藍底，深藍長度表示實際 context 已用比例。
   const cache = it.cache && it.cache.level !== 'cold' ? it.cache : null
   const fill = it.codexPrimary ? ({ '--cache-fill': `${((it.codexUsage ?? 0) * 100).toFixed(1)}%` } as CSSProperties) : cache ? ({ '--cache-fill': `${(cache.frac * 100).toFixed(1)}%` } as CSSProperties) : undefined
   const cacheCls = it.codexPrimary ? ' cache-codex' : cache ? ` cache-${cache.level}` : ''
@@ -144,7 +107,6 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
     <button
       type="button"
       className={`${chipClass(it)}${cacheCls}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
-      // 電腦只有原生 tooltip，不 hover 開狀態卡（2026-10-08 使用者：桌面版不要 hover 就跳出）。
       title={[it.title, it.limitTitle, it.codexUsageTitle, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
@@ -178,19 +140,13 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
       ) : null}
       {it.limitTitle ? <span className="unread-chip-limit" aria-hidden="true" /> : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
-      {/* 撞限文字併進既有的 label（角標本身 aria-hidden），螢幕閱讀器只念一次。 */}
+      {}
       <span className="sr-only">{[chipStateText({ ...it, kids: it.kidsRunning }), it.limitTitle, it.codexUsageTitle].filter(Boolean).join(' · ')}</span>
     </button>
   )
 }
 
-/**
- * 手機的一排：自己橫捲、自己一組箭頭。★ 主力一排、在跑／剛完成的另一排（2026-09-16 使用者：
- * 「已完成放下一排，方便我點選」），不必先把主力捲過去才點得到剛跑完的那顆。
- */
 function ScrollRow({ items, label, selectedBotId, dnd }: { items: ChipItem[]; label: string; selectedBotId: string | null; dnd?: PinnedDnd }) {
-  // 空的那排整個不掛：捲動 hook 的 effect 只在掛載時讀 `barRef`，空著掛上去讀到 null 就再也不接
-  // scroll／wheel／ResizeObserver——之後晶片出現、溢出了也沒有 ◂ ▸（review3 c5 L1）。
   if (items.length === 0) return null
   return <ScrollRowBar items={items} label={label} selectedBotId={selectedBotId} dnd={dnd} />
 }
@@ -230,14 +186,11 @@ export function UnreadChip() {
   const projects = useStore((s) => s.projects)
   const botUnread = useStore((s) => s.botUnread)
   const runs = useStore((s) => s.runs)
-  // 燈號走 `botLamp`（同側欄與 `useBotLamp`）：run 已 exited、主機斷線時不算在跑／要你回答。只看 agent_status 會讓死掉的 pane 永遠黃燈。
   const lamps = useStore(useShallow((s) => Object.fromEntries(s.bots.map((b) => [b.id, botLamp(s, b.id)])) as Record<string, Lamp>))
   const selectedBotId = useStore((s) => s.selectedBotId)
-  // 側欄收起來的 bot 不畫晶片：點下去會選到一顆側欄裡找不到的 bot。
   const hiddenBotIds = useStore((s) => s.hiddenBotIds)
   const selectBot = useStore((s) => s.selectBot)
   const supervisorProjectId = useStore((s) => s.supervisorProjectId)
-  // `selectBot` 會同步清未讀，不記住的話晶片會在手指底下消失。
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
   const narrow = useMediaQuery(NARROW_QUERY)
@@ -259,13 +212,10 @@ export function UnreadChip() {
     prevLamps.current = { ...lamps }
   }, [lamps, pinnedApiBotIds])
 
-  // 快取倒數每 15 秒重算；沒有主力就不跑計時器。有主力在紅色（< 5 分）時改每 5 秒（使用者 2026-10-14）：
-  // 紅色的重算頻率看上一拍算出來的結果，下一拍就換頻率，所以從黃轉紅最多慢一拍（15 秒）。
   const [primaryRed, setPrimaryRed] = useState(false)
   const now = useCacheTick(bots.some((b) => b.primary), primaryRed)
   const redNow = bots.some((b) => {
     if (!b.primary) return false
-    // openai-api 沒有 Claude 的快取 TTL，也沒有 CLI 的 statusLine 快取時鐘：不畫倒數。
     const c = b.kind === 'claude-api'
       ? apiChipCache(getApiBotCache(b.id), now, lamps[b.id] === 'working')
       : b.kind === 'openai-api' ? null : chipCache(runs[b.id], now)
@@ -274,7 +224,6 @@ export function UnreadChip() {
   if (redNow !== primaryRed) setPrimaryRed(redNow)
 
   const items = useMemo(() => {
-    // 依賴 apiCacheVer 驅動快取重算（getApiBotCache 讀外部可變快取）
     void apiCacheVer
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
     const kidsRunning = (id: string) =>
@@ -284,7 +233,6 @@ export function UnreadChip() {
     const projectInitials = new Map(projects.map((p) => [p.id, Array.from((p.label ?? '').trim())[0]?.toUpperCase()]))
     for (const b of bots) {
       if (b.pending || hidden.has(b.id)) continue
-      // 釘選是使用者自己指定的，不受排除規則影響。
       const pinned = b.primary
       const n = botUnread[b.id] ?? 0
       const lamp = lamps[b.id]
@@ -306,7 +254,7 @@ export function UnreadChip() {
         name: pinned && projectInitials.get(b.project_id) ? `${projectInitials.get(b.project_id)}.${b.name}` : b.name,
         go: () => {
           selectBot(b.id)
-          if (pinned) requestBotToTop(b.id) // 主力晶片：側欄把那顆 bot 捲到頂端（#1676）
+          if (pinned) requestBotToTop(b.id)
         },
         position: b.primary_position,
         index: out.length,
@@ -335,7 +283,6 @@ export function UnreadChip() {
     return out
   }, [supervisorProjectId, botUnread, bots, projects, hiddenBotIds, keptId, lamps, runs, selectBot, selectedBotId, now, t, apiCacheVer])
 
-  // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])
   const sidebarRank = useStore((s) => s.botOrder)
   const projectOrder = useStore((s) => s.projectOrder)
@@ -344,13 +291,11 @@ export function UnreadChip() {
     return items.filter((it) => !it.pinned).sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity) || a.index - b.index)
   }, [items, projects, projectOrder, bots, sidebarRank])
 
-  // 存回 daemon 用完整的主力順序（含側欄收起來、沒畫成晶片的）。
   const movePrimary = useStore((s) => s.movePrimary)
   const fullPinned = useMemo(
     () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
     [bots],
   )
-  // 手機：4 顆一排、收合時預設三排（下緣把手可拖，記在這台裝置）；放不下時最後一格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
   const [pinExpanded, setPinExpanded] = useState(false)
   const [pinRows, setPinRows] = useState(loadPinGridRows)
   const pinLayout = pinGridLayout(pinnedItems.length, pinExpanded, pinRows)
@@ -362,7 +307,6 @@ export function UnreadChip() {
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const [legend, setLegend] = useState(false)
-  // 手機長按晶片 350ms 後才進入拖曳重排；長按不動放開什麼都不做（2026-11-07 使用者：主力長按的狀態卡不需要了，context 與「不用保溫」在 context popup）。
   const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
@@ -395,7 +339,6 @@ export function UnreadChip() {
       </>
     )
   }
-  // 主力一組、其餘一組，各自換行、各自裁切；收合時主力最多三行，其餘那組在主力也在時一行、只有它時兩行（`lib/chipOverflow.ts`）。
   return (
     <div className="unread-bar-wrap">
       <PinHint />
@@ -408,10 +351,9 @@ export function UnreadChip() {
               key={name}
               className="unread-group"
               data-group={name}
-              /* 裁切高度用量的，不寫死 px：晶片加了星號與徽章就會變高，寫死會把最後一行切一半（541afe7）。 */
               style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
             >
-              {/* 沒釘的那組跟主力分開標明，免得在跑的 bot 被看成主力（2026-10-31 使用者）。 */}
+              {}
               {!pinned && pinnedItems.length > 0 ? <span className="unread-group-label">{t('進行中')}</span> : null}
               {group.map((it) => (
                 <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} />
@@ -432,7 +374,7 @@ export function UnreadChip() {
           {expanded ? t('收合') : `+${hidden}`}
         </button>
       ) : null}
-      {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想；2026-10-08 hover 狀態卡拿掉後的唯一入口）。 */}
+      {}
       <button type="button" className="unread-bar-help" aria-label={t("顏色代表什麼？")} title={t("顏色代表什麼？")} onClick={() => setLegend(true)}>
         ?
       </button>
@@ -441,7 +383,6 @@ export function UnreadChip() {
   )
 }
 
-/** 手機的主力區：4 顆等寬一排、往下換行、收合時最多三排，不橫捲（#344）。 */
 function PinGrid({
   items,
   dnd,
@@ -455,16 +396,11 @@ function PinGrid({
 }: {
   items: ChipItem[]
   dnd: PinnedDnd
-  /** 收合時藏起來的主力（第 12 格變成「+N」）。 */
   hidden?: ChipItem[]
-  /** 展開中：最後多一格「收合」。 */
   collapsible?: boolean
   onToggle?: () => void
-  /** 收合時最多幾排；下緣把手上下拖改（2026-10-03 使用者）。 */
   rows?: number
-  /** 主力總顆數（含藏起來的）：決定最多拖到幾排。 */
   total?: number
-  /** 拖動中即時回報（`done=false`），放開時 `done=true` 才記下來。 */
   onRows?: (n: number, done: boolean) => void
   resizable?: boolean
 }) {
@@ -472,14 +408,12 @@ function PinGrid({
   const gridRef = useRef<HTMLDivElement | null>(null)
   const drag = useRef<{ y: number; rows: number; rowPx: number } | null>(null)
   if (items.length === 0) return null
-  // 只有一排放得下全部時沒東西可調。
   const canResize = resizable && onRows && rows !== undefined && pinGridRowsNeeded(total) > 1
   const rowPx = () => {
     const chip = gridRef.current?.querySelector<HTMLElement>('.unread-chip')
     const gap = gridRef.current ? parseFloat(getComputedStyle(gridRef.current).rowGap) || 0 : 0
     return chip ? chip.offsetHeight + gap : 0
   }
-  // 藏起來的裡面有要你回答／未讀，+N 就吃那個顏色，不然看不出被藏的那顆在等你（跟桌機 `+N` 的提示同一個規則）。
   const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.atCapacity) ? ' at-capacity' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
   return (
     <div className={`unread-bar-wrap row${canResize ? ' pin-resizable' : ''}`}>
@@ -564,7 +498,6 @@ function PinHint() {
 }
 
 function chipClass(it: ChipItem): string {
-  // 緊急度：需要回應 → 模型滿載（#1674，要使用者換模型）→ 完成待看（未讀）→ 等子 agent → 在跑。
   const state = it.needsReply ? ' needs-reply' : it.atCapacity ? ' at-capacity' : it.unread > 0 ? ' unread' : it.waitsKids ? ' waits-kids' : it.working ? ' working' : ''
   return `unread-chip${it.pinned ? ' pinned' : ''}${state}${it.current ? ' current' : ''}`
 }
@@ -579,18 +512,11 @@ function botTitle(name: string, pinned: boolean, n: number, needsReply: boolean,
   return t('{who}。{tail}', { who, tail })
 }
 
-/**
- * 收合時被裁掉的晶片，以及每一組的裁切高度（分行規則見 `lib/chipOverflow.ts`）。永遠全畫、CSS 裁切，不切陣列——
- * render 依賴測量會震盪。裁切高度用量的：寫死 px 在晶片加了星號與徽章變高之後會把最後一行切一半
- * （2026-09-16 使用者截圖）；裁切改變的是那一組自己的高、不影響晶片在組內的位置，所以量得穩。
- * `ordered` 要跟 DOM 裡晶片的順序一致（主力組在前）。
- */
 function useOverflowChips(
   barRef: RefObject<HTMLDivElement | null>,
   active: boolean,
   ordered: ChipItem[],
 ): { hiddenItems: ChipItem[]; clipPx: Record<GroupName, number> } {
-  // 一份 state：兩份分開寫的話，同一次量測會寫兩次 state（oxlint `set-state-in-effect`），畫面也可能中間有一幀不一致。
   const [cut, setCut] = useState({ ids: '', clip: '0 0' })
   const measure = useCallback(() => {
     const bar = barRef.current
@@ -614,7 +540,6 @@ function useOverflowChips(
       at += chips.length
     }
     const next = { ids: ids.filter(Boolean).join(' '), clip: `${px.pinned} ${px.others}` }
-    // 值沒變就不寫 state，否則 layout effect 每幀重繪。
     setCut((prev) => (prev.ids === next.ids && prev.clip === next.clip ? prev : next))
   }, [active, barRef, ordered])
   useLayoutEffect(measure, [measure])
@@ -636,7 +561,6 @@ function useOverflowChips(
   return { hiddenItems, clipPx }
 }
 
-/** 手機橫捲：滾輪映射成橫捲；只在真的捲得動時 `preventDefault`，否則整頁被鎖住。 */
 function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: boolean) {
   const [edges, setEdges] = useState({ left: false, right: false })
   const sync = useCallback(() => {
@@ -649,7 +573,6 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
     const next = { left: bar.scrollLeft > 4, right: max > 4 && bar.scrollLeft < max - 4 }
     setEdges((e) => (e.left === next.left && e.right === next.right ? e : next))
   }, [active, barRef])
-  // 晶片增減只改 scrollWidth，bar 本身不會 resize、也不會 scroll：每次 render 後重算（setEdges 有相等判斷，不會迴圈）。
   useLayoutEffect(() => {
     sync()
   })
@@ -657,13 +580,12 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
     const bar = barRef.current
     if (!bar) return
     sync()
-    // 原生非 passive 掛：React onWheel 是 passive，preventDefault 無效。
     const onWheel = (e: WheelEvent) => {
       if (!active) return
       const max = bar.scrollWidth - bar.clientWidth
       if (max <= 4 || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
       const next = Math.min(max, Math.max(0, bar.scrollLeft + e.deltaY))
-      if (next === bar.scrollLeft) return // 已經到底：把滾動還給整頁
+      if (next === bar.scrollLeft) return
       e.preventDefault()
       bar.scrollLeft = next
     }
@@ -685,7 +607,6 @@ function useHorizontalScroll(barRef: RefObject<HTMLDivElement | null>, active: b
   return { ...edges, by }
 }
 
-/** 把 `current` 捲進畫面。不用 `scrollIntoView`（會連帶捲祖先、手機推走 `.app`）；看得見就不動。 */
 function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key: string) {
   useLayoutEffect(() => {
     const bar = barRef.current
@@ -699,10 +620,6 @@ function useScrollCurrentIntoView(barRef: RefObject<HTMLDivElement | null>, key:
   }, [barRef, key])
 }
 
-/**
- * 被選走前一刻有未讀就回它的 id，讓它留在列上。
- * 記在模組層：`<ChatPanel key={botId}>` 換 bot 會重新掛載，元件內記憶會被清空。
- */
 let lastUnread: Record<string, number> = {}
 let lastSelected: string | null = null
 let kept: string | null = null

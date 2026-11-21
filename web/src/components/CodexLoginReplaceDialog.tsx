@@ -2,10 +2,6 @@ import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/**
- * codex 登入會先刪掉那個帳號原本的登入（`lib/codexLoginGuard`）：已登入的身份要重新登入之前，這裡先問。
- * 所有會走 codex 登入的入口（身份列、額度、登入提示條、Bot 設定、新增身份、預設帳號的 shell）都經過 `confirmCodexLoginReplace`。
- */
 export function CodexLoginReplaceDialog() {
   const t = useT()
   const ask = useStore((s) => s.codexLoginAsk)

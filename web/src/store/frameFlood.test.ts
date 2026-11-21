@@ -1,7 +1,3 @@
-/**
- * 多顆 bot 同時 working 時的 WS 幀洪水：`turn_progress` 一個 run 每秒約 4 幀。
- * 每個 store 更新都會通知所有掛著的 selector（長對話開著時有幾百個），所以「每一幀各多一次 set」就是白白的 N 倍成本。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon } from './storeEnv.harness.ts'
@@ -93,10 +89,6 @@ test('progress 不再各自 set，但看過的 seq 一點都沒丟：下一個�
   assert.equal(useStore.getState().lastDurableSeq, 10, '耐久 seq 只跟著耐久幀走')
 })
 
-/**
- * 前一回合的 partial 還留在 `liveReply`（它的完成幀還沒到），新回合的頭幀在 250 ms 節流窗內：
- * 合併的尾幀要照套，不能因為 `liveReply` 還是前一回合就丟掉——否則新回合的 partial 要等下一幀才出現。
- */
 test('前一回合的 partial 還在時，新回合節流窗內的尾幀照樣套上', async () => {
   const timers = installManualTimers()
   try {

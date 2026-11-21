@@ -6,11 +6,6 @@ import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 import { shareSafeHref } from './shareModel'
 import { useT } from './shareI18n'
 
-/**
- * 分享頁的 bot 回覆：GFM，但不吃 HTML、不載圖片，連結一律開新分頁且不帶 referrer。
- * 複雜度上限跟主 UI 的 SafeMarkdown 同一套純函式。公開頁不提供「仍用 Markdown 渲染」。
- * 不 import 主 UI 元件（那些會帶管理 API）。
- */
 class ShareMarkdownBoundary extends Component<{ plain: ReactNode; children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
   static getDerivedStateFromError() {

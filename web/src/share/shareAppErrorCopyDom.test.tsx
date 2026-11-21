@@ -1,7 +1,3 @@
-/**
- * 外部使用者會遇到的錯誤文字：自動重試的錯誤要寫「正在重試」，手動的（載入較早訊息失敗）只能寫可以按重試的字，
- * 不能跟使用者說「正在重試」然後什麼都不做。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

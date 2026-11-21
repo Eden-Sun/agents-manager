@@ -1,13 +1,3 @@
-/**
- * herdr 一鍵更新（SPEC §6.9，完整重啟版；API `POST /api/hosts/{name}/herdr-update`）的前端狀態。
- *
- * 跟 codex／claude 的 `cliUpdate.ts` 同一套路：daemon 只回 `update_id`（加上要接回／會失去的名單），進度走 WS
- * `herdr_update_progress`（`downloading`→`waiting_idle`→`stopping`→`restarting`→`resuming`）、結果走 `herdr_update_done`，
- * 重整或漏幀時用 `GET /api/state` 的 `herdr_updates` 對帳。
- *
- * 自己一個 store、不塞進 `useStore`：同時只會有一次（daemon 409 `herdr_update_in_progress`），而且結果要留著讓人點開看
- * 「誰接回來、誰沒接回、哪些子 agent 沒了」，跟 `useStore` 的快照替換無關。
- */
 import { create } from 'zustand'
 import { arr, isRec, pick, str } from '../api/normalize'
 import { msg, t, tr } from '../lib/i18n'
@@ -32,7 +22,6 @@ export const HERDR_PHASE_LABEL: Record<HerdrPhase, string> = {
 const PHASES = new Set<HerdrPhase>(['downloading', 'waiting_idle', 'stopping', 'restarting', 'rolling_back', 'resuming'])
 
 export interface HerdrUpdateActive {
-  /** `''`＝POST 還沒回來。 */
   id: string
   host: string
   target: string
@@ -48,18 +37,14 @@ export interface HerdrUpdateResult {
   from: string | null
   to: string | null
   reason: string | null
-  /** daemon 的 `detail`：給人看的失敗說明（`ok:false` 才有）。 */
   detail: string | null
   resumed: (HerdrBotRef & { run_id: string })[]
   failed: (HerdrBotRef & { error: string })[]
   childrenLost: HerdrChildLost[]
-  /** 要在那台執行的手動升級指令（只有 daemon 帶了才有）；失敗時畫面顯示它。 */
   manualCommand: string | null
-  /** 那台上要處理的每一份 herdr（server 跑的、CLI／shim 解析到的；同一檔只列一次）。 */
   binaries: HerdrBinary[]
 }
 
-/** daemon `done.binaries[]`：`stale`＝更新前版本不是目標版（畫面講「哪一份舊」）。 */
 export interface HerdrBinary {
   role: 'server' | 'cli'
   path: string
@@ -67,7 +52,6 @@ export interface HerdrBinary {
   stale: boolean
 }
 
-/** 一則 `herdr_update_progress`。手上沒有（別的分頁按的）也收：header 要看得到正在更新。 */
 export function herdrProgress(cur: HerdrUpdateActive | null, data: Rec): HerdrUpdateActive | null {
   const id = str(pick(data, 'update_id'))
   const phase = str(pick(data, 'phase')) as HerdrPhase
@@ -114,7 +98,6 @@ export function parseHerdrDone(data: Rec): HerdrUpdateResult {
   }
 }
 
-/** 「server 跑的」「CLI／shim 解析到的」＋路徑＋版本；舊的那份標出來。 */
 export function herdrBinaryText(b: HerdrBinary): string {
   const who = b.role === 'server' ? t('server 跑的') : t('CLI／shim 解析到的')
   return t('{who} {path}：{version}{stale}', {
@@ -125,7 +108,6 @@ export function herdrBinaryText(b: HerdrBinary): string {
   })
 }
 
-/** daemon `herdr_upgrade.rs` 的 `reason`（API.md §12.7b）。`restart_failed` 以外都沒動到 server。 */
 const REASON: Record<string, string> = {
   install_path_unsupported: msg('server 跑的或 CLI 那份 herdr 是套件管理器的 symlink（或找不到），不能原地換，什麼都沒動；請在那台跑手動升級指令'),
   restart_unsupported: msg('herdr server 不是 systemd／launchd 管的，或服務跑的不是要換的 binary，什麼都沒動'),
@@ -144,7 +126,6 @@ export function herdrReasonText(reason: string | null): string {
   return reason ? tr(REASON[reason] ?? reason) : t('失敗')
 }
 
-/** 給 notify 的一句話。 */
 export function herdrDoneMessage(r: HerdrUpdateResult): string {
   const back = r.resumed.length || r.failed.length
     ? r.failed.length
@@ -164,10 +145,6 @@ export function herdrDoneMessage(r: HerdrUpdateResult): string {
   return `${head}${detail}${tail ? t('；{tail}', { tail }) : ''}`
 }
 
-/**
- * 快照的 `herdr_updates` 對帳（同 `reconcileCliUpdates`）：`undefined`＝舊 daemon 沒這欄＝不知道，不動；
- * daemon 有一筆在跑就採用（重整後接得回進度）；daemon 說沒有了，手上那份就是 `herdr_update_done` 漏掉留下的，清掉。
- */
 export function reconcileHerdr(cur: HerdrUpdateActive | null, rows: { update_id: string; host: string; target_version: string; phase: string }[] | undefined): HerdrUpdateActive | null {
   if (rows === undefined) return cur
   if (cur?.phase === 'starting') return cur
@@ -191,24 +168,19 @@ export interface HerdrPlanHost {
   installed: string | null
   error: string | null
   behind: boolean
-  /** 這台不能從這裡更新的原因；`null`＝可以。 */
   blocked: string | null
 }
 
 export interface HerdrUpdatePlan {
   target: string
   hosts: HerdrPlanHost[]
-  /** 按鈕會更新的那台（落後而且支援）；`null`＝沒有能按的，原因看 `blockedWhy`。 */
   host: string | null
   from: string | null
   blockedWhy: string | null
-  /** 前端估的名單（實際以 202 回的 `will_resume` 為準）：那台在跑的頂層 Bot。 */
   willResume: { botId: string; name: string }[]
-  /** 那台在跑的子 agent：herdr 重啟後一律沒了，要由母 Bot 重開。 */
   childrenLost: { botId: string; name: string; parentName: string }[]
 }
 
-/** 只有 shared_session 的主機不能從這裡更新（遠端主機也能，#1752）。 */
 export function herdrHostBlocked(host: string, sharedHosts: ReadonlySet<string>): string | null {
   if (sharedHosts.has(host)) {
     return t('共用 session：別的 daemon 也在用這台的 herdr，不能從這裡重啟；確認沒有別的 daemon 之後，到主機設定把「共用 session」關掉再試')
@@ -216,7 +188,6 @@ export function herdrHostBlocked(host: string, sharedHosts: ReadonlySet<string>)
   return null
 }
 
-/** header herdr 徽章的內容：上游有新版、而且至少一台落後才出現。 */
 export function herdrUpdatePlan(
   item: UpstreamItem | null | undefined,
   sharedHosts: ReadonlySet<string>,
@@ -253,7 +224,6 @@ export function herdrUpdatePlan(
 
 interface HerdrUpdateState {
   active: HerdrUpdateActive | null
-  /** 最近一次的結果；徽章點開看名單、看完收起。 */
   result: HerdrUpdateResult | null
 }
 
@@ -268,7 +238,6 @@ export async function startHerdr(host: string, target: string, notify: Notify): 
     const r = await startHerdrUpdate(host, target)
     useHerdrUpdate.setState((s) => {
       const cur = s.active
-      // 進度事件可能比回應先到（已經換成真的 id 與階段），那就只補名單。
       if (cur && (cur.id === '' || cur.id === r.update_id)) {
         return { active: { ...cur, id: r.update_id, willResume: r.will_resume, childrenLost: r.children_lost } }
       }
@@ -280,7 +249,6 @@ export async function startHerdr(host: string, target: string, notify: Notify): 
   }
 }
 
-/** WS 幀；回要跳的通知（只有 done 會有）。 */
 export function onHerdrFrame(type: string, data: Rec): { kind: 'info' | 'error'; text: string } | null {
   if (type === 'herdr_update_progress') {
     useHerdrUpdate.setState((s) => {
@@ -309,8 +277,6 @@ export function dismissHerdrResult() {
   useHerdrUpdate.setState({ result: null })
 }
 
-
-/** 手機合成那顆（`MergedUpdateChip`）選單裡 herdr 那一項的文案；`null`＝這顆不出現。 */
 export function herdrMenuItem(active: HerdrUpdateActive | null, result: HerdrUpdateResult | null, plan: HerdrUpdatePlan | null): string | null {
   if (active) return t('herdr 更新中：{phase}…', { phase: tr(HERDR_PHASE_LABEL[active.phase]) })
   if (result) {

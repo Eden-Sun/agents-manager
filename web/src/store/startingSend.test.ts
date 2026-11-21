@@ -8,7 +8,6 @@ const turn = (p: Partial<Turn>) =>
 const msg = (p: Partial<Message>) =>
   ({ id: 'm1', turn_id: 't1', role: 'user', content: '幫我跑測試', attachments: [], ...p }) as Message
 
-/** issue #122：重整之後 store 只有 daemon 給的 turn 與訊息——從那裡就認得出「有一則在等 bot 起來」。 */
 test('a queued turn the daemon took for a stopped bot is the one waiting for the start', () => {
   const s = startingSend({ t1: turn({}) }, [msg({}), msg({ id: 'm2', role: 'system', content: '別的' })])
   assert.deepEqual(s, { turnId: 't1', text: '幫我跑測試', attachments: 0, startError: null })
@@ -45,7 +44,6 @@ test('the daemon turn JSON carries awaits_start and start_error through to the s
 })
 
 test('兩則都在等 bot 起來：拿最早排的那一則，不是 map 插入順序的第一則（daemon 回的 turns 是 created_at 倒序）', () => {
-  // API.md §6：messages 頁的 turns 依 created_at 倒序回來，loadMessages 照這個順序插入 map。
   const newer = turn({ id: 't2', created_at: '2026-10-13T10:00:02.000Z' })
   const older = turn({ id: 't1', created_at: '2026-10-13T10:00:01.000Z' })
   const s = startingSend({ t2: newer, t1: older }, [

@@ -1,12 +1,3 @@
-/**
- * 專家模式「新增 Bot」DOM 測試（2026-11-01）：
- * - 一般模式不變
- * - 專家模式角色必選
- * - 專家缺 track 不能送
- * - 執行者提供依最新可用模型產生的建議預設
- * - 已有管理者灰掉
- * - 分享區隱藏
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
@@ -105,9 +96,7 @@ test('一般模式（parent_child）：對話框結構不變，含分享區，�
 
   await openAddBot()
 
-  // 應該沒有專家角色選擇卡
   assert.equal(document.querySelectorAll('.expert-role-picker').length, 0, '一般模式不應有角色選擇')
-  // 應該有分享區塊
   const share = [...document.querySelectorAll<HTMLElement>('.field')].find((f) => f.textContent?.includes('用途（分享）') || f.textContent?.includes('分享'))
   assert.ok(share, '一般模式應有分享區塊')
 })
@@ -122,12 +111,10 @@ test('專家模式：最上面選角色，分享區隱藏', async () => {
 
   await openAddBot()
 
-  // 出現角色卡片
   const picker = document.querySelector('.expert-role-picker')
   assert.ok(picker, '專家模式應有角色選擇卡')
   assert.equal(picker?.querySelectorAll('.expert-role-card').length, 4, '應有四種角色：管理者、顧問、執行者、專家')
 
-  // 分享區塊隱藏
   const share = [...document.querySelectorAll<HTMLElement>('.field')].find((f) => f.textContent?.includes('用途（分享）') || f.textContent?.includes('建立為分享用 Bot'))
   assert.equal(share, undefined, '專家模式應隱藏分享區塊')
 })
@@ -163,18 +150,15 @@ test('專家模式：選專家時出現必填 track 欄位，沒填不能送出�
   await click(specCard)
   await settle()
 
-  // 應該有 track 欄位
   const trackInput = [...document.querySelectorAll<HTMLInputElement>('input')].find((i) => i.placeholder?.includes('billing'))
   assert.ok(trackInput, '選專家應出現 track 輸入框')
 
   const submit = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '新增並啟動')!
   assert.equal(submit.disabled, true, '沒填 track 不能送出')
 
-  // 填寫 track
   await change(trackInput, 'billing', 'input')
   await change(trackInput, 'billing', 'change')
 
-  // 名字會預設為 billing
   const nameInput = [...document.querySelectorAll<HTMLInputElement>('input')].find((i) => i.value === 'billing')
   assert.ok(nameInput, '專家預設名稱應為 track')
 
@@ -256,7 +240,6 @@ test('專家模式：管理者角色不顯示「可被管理者使用」勾選',
   const mgrUse = [...document.querySelectorAll<HTMLSpanElement>('span')].find((s) => s.textContent?.trim() === '可被管理者使用')
   assert.equal(mgrUse, undefined, '管理者角色不顯示「可被管理者使用」')
 
-  // 切換到顧問
   const advCard = [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes('顧問'))!
   await click(advCard)
   await settle()
@@ -311,7 +294,6 @@ test('專家模式：選專家 → 強度預選 medium；手動改 high 後切�
 
   await openAddBot()
 
-  // 1. 選專家 → 強度預選 medium（儘管帳號預設是 high，仍應優先選建議值 medium，且標記「建議」）
   const specCard = [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes('專家'))!
   await click(specCard)
   await settle()
@@ -329,12 +311,10 @@ test('專家模式：選專家 → 強度預選 medium；手動改 high 後切�
   assert.equal(highBtn.getAttribute('aria-checked'), 'false', 'high 不應被預選')
   assert.ok(highBtn.querySelector('.effort-account')?.textContent?.includes('此帳號預設'), 'high 應保留「此帳號預設」標記')
 
-  // 2. 手動改 high 後切換模型仍是 high
   await click(highBtn)
   await settle()
   assert.equal(highBtn.getAttribute('aria-checked'), 'true', '手動點選後 high 應為 checked')
 
-  // 切換模型到 claude-opus-4-6
   const opusModelBtn = [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="模型"] .opt')].find(
     (b) => b.title?.includes('claude-opus-4-6') || b.textContent?.includes('Opus')
   )
@@ -347,7 +327,6 @@ test('專家模式：選專家 → 強度預選 medium；手動改 high 後切�
   )
   assert.equal(highBtnAfterModelSwitch?.getAttribute('aria-checked'), 'true', '切換模型後手動選擇的 high 仍應被保留')
 
-  // 3. 改選顧問 → 強度重設並預選顧問的建議值 high
   const advCard = [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes('顧問'))!
   await click(advCard)
   await settle()
@@ -369,7 +348,6 @@ test('專家模式：claude-api 只在顧問可選；其他角色 disabled 並�
   const apiBtn = () => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="kind"] .opt')].find((b) => b.textContent?.includes('claude-api'))!
   const card = (label: string) => [...document.querySelectorAll<HTMLLabelElement>('.expert-role-card')].find((c) => c.textContent?.includes(label))!
 
-  // 預設是執行者：顯示但 disabled，title 講原因。
   assert.ok(apiBtn(), 'claude-api 要列出來')
   assert.equal(apiBtn().disabled, true)
   assert.match(apiBtn().title, /只能當顧問/)
@@ -388,12 +366,10 @@ test('專家模式：claude-api 只在顧問可選；其他角色 disabled 並�
   await settle()
   assert.equal(apiBtn().getAttribute('aria-checked'), 'true')
 
-  // 選了 claude-api：不出 context／保溫、身份、分享用途、人設。
   const text = document.querySelector('form')!.textContent ?? ''
   assert.doesNotMatch(text, /context 與保溫/)
   assert.doesNotMatch(text, /分享/)
 
-  // 切到執行者：kind 改回建議（claude），claude-api 不再被選。
   await click(card('執行者'))
   await settle()
   assert.equal(apiBtn().getAttribute('aria-checked'), 'false')

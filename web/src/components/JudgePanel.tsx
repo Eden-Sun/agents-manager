@@ -1,9 +1,3 @@
-/**
- * 環境設定 →「Jev 建議」（SPEC §4.3c，issue #240）：貼 API key、開關、選哪些專案。
- *
- * 開了之後，這些專案的撞限畫面尾段（遮罩後）會送到 TypeSafe——所以開關旁邊直接寫清楚，不藏在說明裡。
- * key 貼上存檔後就清空輸入框；daemon 不會把它回給前端，這裡只看得到「已設定」。
- */
 import { useEffect, useState } from 'react'
 import { fetchJudgeSettings, saveJudgeSettings, type JudgeSettings } from '../api/judge'
 import { useT } from '../lib/i18n'
@@ -13,12 +7,6 @@ import { JevLabel } from './JevLabel'
 import { JudgeLedger } from './JudgeLedger'
 import './judgePanel.css'
 
-/**
- * 還沒讀到設定時這一格顯示什麼（issue #466）。三種狀態分開，不能共用同一句話：
- * `loading` 是還在讀，`unsupported` 是這顆 daemon 真的沒有這個端點（404／405），
- * `error` 是讀失敗——以前沒有第三種，daemon 斷線時 promise reject 沒有人接，
- * `settings` 永遠停在 `undefined`，整格就卡在「讀取中…」不動也不會重試。
- */
 export type JudgeLoad = { kind: 'loading' } | { kind: 'unsupported' } | { kind: 'error'; message: string }
 
 export function JudgeLoadNotice({ state, onRetry }: { state: JudgeLoad; onRetry: () => void }) {
@@ -41,7 +29,6 @@ export function JudgePanel() {
   const [subTab, setSubTab] = useState<'form' | 'book'>('form')
   const [settings, setSettings] = useState<JudgeSettings | null | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | null>(null)
-  /** 按「重試」就 +1，讓下面那個 effect 重跑一次。 */
   const [reload, setReload] = useState(0)
   const [enabled, setEnabled] = useState(false)
   const [picked, setPicked] = useState<string[]>([])
@@ -64,8 +51,6 @@ export function JudgePanel() {
         if (s) adopt(s)
         else setSettings(null)
       })
-      // 少了這一條，daemon 沒開／網路斷掉時 promise reject 沒有人接，`settings` 永遠是
-      // `undefined`，這一格就卡在「讀取中…」——而且 effect 的依賴不會再變，不會重試（issue #466）。
       .catch((e: unknown) => {
         if (!alive) return
         setLoadError(e instanceof Error ? e.message : String(e))
@@ -75,7 +60,6 @@ export function JudgePanel() {
     }
   }, [reload])
 
-  // 錯誤要排在 `undefined` 前面：讀失敗時 `settings` 本來就還是 `undefined`。
   if (loadError !== null || settings === undefined) {
     const state: JudgeLoad = loadError !== null ? { kind: 'error', message: loadError } : { kind: 'loading' }
     return (
@@ -91,7 +75,6 @@ export function JudgePanel() {
   }
   if (settings === null) return <JudgeLoadNotice state={{ kind: 'unsupported' }} onRetry={() => setReload((n) => n + 1)} />
 
-  // 名單裡可能是 id 也可能是 label（手寫 config）；勾選一律存 id。
   const allProjectsPicked = picked.includes('*')
   const isPicked = (p: { id: string; label: string }) => allProjectsPicked || picked.includes(p.id) || picked.includes(p.label)
   const toggle = (p: { id: string; label: string }) =>

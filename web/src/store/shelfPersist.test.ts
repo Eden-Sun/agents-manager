@@ -4,10 +4,6 @@ import { IDBFactory } from 'fake-indexeddb'
 
 import type { ShelfItem } from './shelf.ts'
 
-// 真的走 `shelfPersist`（IndexedDB 用 fake-indexeddb 假實作）。每個「分頁」是一份獨立的 shelf 模組實例
-// 加上一份獨立的 shelfPersist 模組實例，共用同一個假 DB（同源分頁共用 IndexedDB 的情況）。
-// 「重新整理」＝開一個新的分頁（新模組實例，新的隨機前綴）去還原同一個 DB。
-
 type Shelf = typeof import('./shelf.ts')
 type Persist = typeof import('./shelfPersist.ts')
 
@@ -31,12 +27,10 @@ afterEach(() => {
   else Reflect.deleteProperty(globalThis, 'indexedDB')
 })
 
-/** 模組載入時 `Math.random()` 只呼叫一次，讓它吐出的 base36 前六位正好是 `tab`。 */
 function tabRandom(tab: string): number {
   return (parseInt(tab, 36) + 0.25) / 36 ** 6
 }
 
-/** 用固定的隨機前綴載入一份獨立的 shelf 模組實例（同 `shelf.test.ts`）。 */
 async function loadShelf(tab: string): Promise<Shelf> {
   const real = Math.random
   Math.random = () => tabRandom(tab)
@@ -47,7 +41,6 @@ async function loadShelf(tab: string): Promise<Shelf> {
   }
 }
 
-/** 開一個分頁：獨立的 shelf 與獨立的 shelfPersist，persist 寫進共用的假 DB。 */
 async function openPage(tab: string): Promise<Shelf> {
   const shelf = await loadShelf(tab)
   const persist = (await import(`./shelfPersist.ts?persist-${tab}-${++seq}`)) as Persist
@@ -75,7 +68,6 @@ interface StoredRow {
   addedAt: number
 }
 
-/** 直接讀 DB 裡的列（不經過任何分頁），看的是真的寫進去的內容。 */
 async function rows(): Promise<StoredRow[]> {
   const db = await openDb()
   return new Promise((resolve, reject) => {
@@ -101,7 +93,6 @@ async function seed(list: StoredRow[]): Promise<void> {
   })
 }
 
-/** 等非同步的寫入／還原跑到條件成立：每輪只讓出一次事件迴圈，不靠牆鐘；上限到了就失敗。 */
 async function until(cond: () => boolean | Promise<boolean>, what: string): Promise<void> {
   for (let i = 0; i < 1000; i++) {
     if (await cond()) return
@@ -161,7 +152,6 @@ test('清空後 DB 是空的，重新整理後什麼都不還原', async () => {
   await until(async () => (await rows()).length === 0, '清空寫入 DB')
 
   const b = await openPage('bbbbbb')
-  // 還原是非同步的：讓它有機會跑完，再確認確實沒有東西回來。
   for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0))
   assert.equal(b.useShelf.getState().items.length, 0)
 })
@@ -173,7 +163,6 @@ test('兩個分頁共用同一個 DB，各自新增的檔案互不覆蓋，各�
   tabB.useShelf.getState().add([file('b', 'from-B')])
   await until(async () => (await rows()).length === 2, '兩個分頁都寫進 DB')
 
-  // 後寫的分頁不能蓋掉先寫的那一列：DB 裡兩列都在，內容也對得上。
   const stored = await rows()
   assert.deepEqual(stored.map((r) => r.name).sort(), ['a.pdf', 'b.pdf'])
   assert.deepEqual(await Promise.all(stored.map((r) => r.blob.text())).then((t) => t.sort()), ['from-A', 'from-B'])

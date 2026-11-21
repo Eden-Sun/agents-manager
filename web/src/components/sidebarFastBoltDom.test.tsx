@@ -1,8 +1,3 @@
-/**
- * #1682：側欄列（主列與子 agent 精簡列）上，codex 正在跑 fast 要一眼看得出來——model 標籤窄列會被截斷，
- * fast 只在 tooltip 等於看不見。照 UI-DECISIONS「codex fast 在 logo 上疊閃電」：閃電疊在 kind logo 上（不會被截），
- * 關著的不畫（不佔位）；來源是正在跑的那一份（`status.fast_mode` → `runtime_fast` → 設定值），不是只看設定。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -61,7 +56,6 @@ test('沒有 CLI 回報時看 runtime_fast（argv 收編來的），再退回設
     [bot('rt'), bot('cfg', { fast: true }), bot('stale', { fast: true })],
     {
       rt: run('rt', { runtime_fast: 1 }),
-      // 設定寫 fast、但實際在跑的沒有：看實際的，不看設定（設定改了還沒重啟時兩者不同）。
       stale: run('stale', { runtime_fast: 0 }),
     },
   )

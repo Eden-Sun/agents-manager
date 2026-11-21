@@ -1,7 +1,3 @@
-/**
- * 瀏覽器儲存受阻（無痕擋寫、配額滿、讀取被封鎖）時，預覽開關與寬度在這一頁仍要生效（issue #1809）；
- * 儲存正常時照舊寫入，別分頁的 storage 事件仍同步。正式 hook 掛進 happy-dom 驗。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act } from 'react'
@@ -20,7 +16,6 @@ const WIDTH_KEY = 'am.previewCol.width'
 
 type Mode = 'ok' | 'denied' | 'quota' | 'readDenied'
 
-/** 假的 localStorage：`mode` 決定寫入或讀取要丟例外；`data` 是「磁碟」內容，也拿來模擬別的分頁寫入。 */
 function installStorage(initial: Record<string, string> = {}) {
   const data = new Map(Object.entries(initial))
   const state = { mode: 'ok' as Mode }
@@ -48,7 +43,6 @@ function installStorage(initial: Record<string, string> = {}) {
     },
   }
   Object.defineProperty(window, 'localStorage', { configurable: true, value: fake })
-  // 記憶體快照是模組層的：前面的測試檔留下的值不能帶進來。
   resetPreviewLayoutForTest()
   resetMobilePreviewForTest()
   return { data, state }
@@ -63,7 +57,6 @@ function Probe({ bot }: { bot: string }) {
 
 const probe = () => document.querySelector('[data-testid="probe"]')!.textContent
 
-/** 讓寫入事件跑在 act 裡，React 的重繪照真的流程跑完才回來。 */
 const update = (fn: () => void) =>
   act(async () => {
     fn()
@@ -153,7 +146,6 @@ test('別分頁的 storage 事件會同步進來（跨分頁同步保留）', as
   await mount(<Probe bot="b1" />)
   assert.equal(probe(), 'false|null|false')
 
-  // 另一個分頁寫入後送出 storage 事件（同一個視窗裡直接寫不會送事件）。
   storage.data.set(OPEN_KEY, '{"b1":true}')
   storage.data.set(WIDTH_KEY, '600')
   storage.data.set('am.mobilePreview.open', '1')

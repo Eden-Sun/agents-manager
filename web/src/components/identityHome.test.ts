@@ -41,10 +41,8 @@ test('與既有身份共用目錄：只看同 kind、同一台主機；指到同
   ]
   const r = sharedHomeWith('claude', { CLAUDE_CONFIG_DIR: '$HOME/.claude-cc1/' }, 'local', existing)
   assert.deepEqual(r, { names: ['cc1'], defaultAccount: false })
-  // cc2 在 m4p，不是本機的：同一路徑在別台機器是另一份登入。
   assert.deepEqual(sharedHomeWith('claude', { CLAUDE_CONFIG_DIR: '$HOME/.claude-cc2' }, 'local', existing).names, [])
   assert.deepEqual(sharedHomeWith('claude', { CLAUDE_CONFIG_DIR: '$HOME/.claude-cc2' }, 'm4p', existing).names, ['cc2'])
-  // 不同 kind 的同名路徑不算。
   assert.deepEqual(sharedHomeWith('claude', { CLAUDE_CONFIG_DIR: '$HOME/.claude-cc3' }, 'local', existing).names, [])
 })
 

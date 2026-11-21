@@ -33,7 +33,7 @@ test('baseline and expired announcements are silent; fresh announcement still ar
   receiveCodexReset(oldNotice, notify)
   assert.equal(count, 0)
   receiveCodexReset(snapshot('old'), notify)
-  assert.equal(count, 1) // stale snapshot did not mark this announcement as delivered
+  assert.equal(count, 1)
   receiveCodexReset(snapshot('new'), notify)
   assert.equal(count, 2)
 })

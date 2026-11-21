@@ -1,8 +1,3 @@
-/**
- * herdr integration 更新總覽（SPEC §6.9c，issue #1772）：
- * `GET /api/integration-updates`（每台主機最近一輪 `herdr integration status` 的快照）、
- * `POST /api/hosts/{name}/herdr-integration`（使用者按「更新」才在那台跑 `herdr integration install <name>`）。
- */
 import { arr, isRec, pick, str } from './normalize'
 import { ApiError } from './types'
 import { rawTransport } from './index'
@@ -17,14 +12,12 @@ export interface IntegrationRow {
   required_version: number | null
   path: string | null
   detail: string | null
-  /** daemon 自動裝過這一列（grok／antigravity-cli 已登入時，#1871）；沒試過＝null。 */
   auto_install: { ok: boolean; error: string | null } | null
 }
 
 export interface IntegrationHost {
   host: string
   checked_at: string
-  /** 這一輪讀不到的原因；`items` 還是上一次成功的。 */
   error: string | null
   items: IntegrationRow[]
 }
@@ -70,10 +63,8 @@ export async function fetchIntegrationUpdates(): Promise<IntegrationHost[]> {
 export interface IntegrationInstallResult {
   host: string
   name: string
-  /** 裝完重讀的實際狀態；讀不到＝null。 */
   state: IntegrationState | null
   output: string
-  /** 裝完重讀狀態失敗的原因（此時 `state` 是 null，daemon 不拿舊資料當結果）。 */
   rereadError: string | null
 }
 
@@ -90,7 +81,6 @@ export async function installIntegration(host: string, name: string): Promise<In
   }
 }
 
-/** 409／403／404／502 → 給人看的一句；daemon 的 409 都帶寫好的 `message`。 */
 export function integrationErrText(e: unknown, host: string): string {
   if (e instanceof ApiError) {
     const human = e.body.message

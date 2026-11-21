@@ -3,7 +3,6 @@ import { useT } from '../lib/i18n'
 import { useCodexReset } from '../store/codexReset'
 import './codexResetHint.css'
 
-/** Public announcements belong to the Codex cell; account windows stay untouched. */
 export function CodexResetHint({ now, detail = false, compact = false }: { now: number; detail?: boolean; compact?: boolean }) {
   const t = useT()
   const info = useCodexReset((s) => s.info)

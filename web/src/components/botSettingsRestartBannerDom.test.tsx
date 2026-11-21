@@ -1,8 +1,3 @@
-/**
- * Bot 設定面板的「重啟後生效」橫幅只看 daemon 的判斷（PATCH 回應的 `needs_restart`，live_apply 成功就是 false）。
- * claude 改 effort 由 daemon 在跑著的 session 裡當場套用（`/effort`），不能一儲存就跳「已儲存，重啟 Bot 後生效」：
- * daemon 先寫 config 推 `bot_changed`、再套用，這段 state 的 `bot.needs_restart` 暫時是真的（2026-10-05 使用者截圖）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, click, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -25,7 +20,6 @@ const bot = {
 } as unknown as Bot
 const run = { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } as unknown as Run
 
-/** PATCH 卡住等測試放行；其他請求回空物件。`refreshState` 換成空的，state 由測試自己擺。 */
 function holdPatch(): { release: (body: unknown) => void; sent: unknown[] } {
   const sent: unknown[] = []
   let release: (body: unknown) => void = () => {}
@@ -57,7 +51,6 @@ test('claude 改 effort：儲存中（state 暫時 needs_restart）與套用成�
   await saveEffortHigh()
   await until(() => api.sent.length === 1, 'PATCH 送出')
   assert.deepEqual(api.sent[0], { effort: 'high' })
-  // daemon 套用前推的 bot_changed 讓 state 暫時算出 needs_restart
   await act(async () => {
     useStore.setState({ bots: [{ ...bot, effort: 'high', needs_restart: true } as Bot] })
   })

@@ -8,16 +8,9 @@ import { AwaitingActions } from './AwaitingActions'
 import { useNotSureNext } from '../lib/ledgerNotSure'
 import './messageLedgerBar.css'
 
-/** 使用者看到的白話狀態：不講「待跟進／已答」這類帳本術語。`merged`、`cancelled` 不列在摘要裡。 */
 const SUMMARY_ORDER: LedgerItemStatus[] = ['answered', 'clarifying', 'untriaged', 'following', 'done']
-/** 還可以按「⋯」操作的狀態（已完成、已回答的項目不再有操作）。 */
 const ACTIONABLE: LedgerItemStatus[] = ['untriaged', 'following', 'clarifying']
 
-/**
- * 使用者訊息下方一行的追蹤進度（SPEC 帳本第 1 階段 T5，2026-11-21 重做）：白話摘要；點開面板看這則訊息的追蹤任務。
- * 操作只在面板裡：每項「⋯」選「不用做了」或「已經好了」；面板底部可補一項。合併由管理者用 `agm ledger` 處理。
- * 初始資料來自 `msg.ledger_items`（daemon 附掛）；`ledger_updated` 事件到達（rev 變動）時重新拉這一則的項目。
- */
 export function MessageLedgerBar({ msg }: { msg: Message }) {
   const t = useT()
   const notSureNext = useNotSureNext()
@@ -38,7 +31,6 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
     if (msg.ledger_items) setItems(msg.ledger_items)
   }, [msg.ledger_items])
 
-  // 沒有附掛（daemon 只附有項目的訊息）就不發請求；只有 `ledger_updated` 到達（rev 變動）才重新拉這一則。
   useEffect(() => {
     if (!projectId || rev === 0) return
     let alive = true
@@ -52,7 +44,6 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
 
   if (!projectId) return null
 
-  // 要給使用者看的項目：排除併入別項的，以及已取消的（「不用做了」的不再計、也不列）。
   const all = items ?? []
   const live = all.filter((it) => it.status !== 'merged' && it.status !== 'cancelled')
   const allUntriaged = live.every((it) => it.status === 'untriaged')
@@ -86,7 +77,6 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
   const notSure = (item: LedgerItem) => runPatch(() => notSureLedgerItem(projectId, item, notSureNext))
   const dismiss = (item: LedgerItem) =>
     runPatch(() => patchLedgerItem(projectId, item.id, { op: 'cancel', expected_version: item.version, close_reason: 'cancelled by user' }))
-  // 「這則不用追蹤」：尚未整理時，把這則底下所有待整理的項目一起取消。
   const dismissAll = () =>
     runPatch(async () => {
       for (const it of live) await patchLedgerItem(projectId, it.id, { op: 'cancel', expected_version: it.version, close_reason: 'cancelled by user' })
@@ -110,7 +100,6 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
       ? t('追蹤完成')
       : t('追蹤 {n} 項：{parts}', { n: live.length, parts: parts.join('・') })
 
-  // 「加入追蹤」：預設不自動收件，要追蹤的人從這裡加（交管理者整理）。已有追蹤項就不再加。
   const addToTracking = () =>
     runPatch(async () => {
       const title = trackingTitle(msg.content)
@@ -243,7 +232,6 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
   )
 }
 
-/** 訊息的第一行、去頭尾空白、最多 80 字（字元數，與 daemon 的標題規則一致）。 */
 function trackingTitle(content: string): string {
   const first = (content.trim().split('\n')[0] ?? '').trim()
   return Array.from(first).slice(0, 80).join('')

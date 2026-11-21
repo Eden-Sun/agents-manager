@@ -1,8 +1,3 @@
-/**
- * mock 的單 bot 訊息端點要跟 `daemon/src/api.rs::messages` 同形（docs/FRONTEND.md）。
- * 少掉 `limit`／`before`／`turn_id`／`role` 的話，issue #25 的往前翻頁與群組未讀的回合確認
- * 在 `VITE_MOCK=1` 下走的都不是真 daemon 那條路：畫面全對，推上去才炸。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
@@ -36,7 +31,6 @@ test('`before` 往前翻，翻到的是更早的那一段且不重疊', async ()
   assert.equal(older.has_more, true)
   const seen = new Set(first.messages.map((m) => m.id))
   assert.ok(older.messages.every((m) => !seen.has(m.id)), '翻頁不能回同一批訊息')
-  // 再用最舊那一則往前翻，最後一頁 `has_more` 要收斂成 false。
   let cursor = older.messages[0].id
   let guard = 0
   let last = older

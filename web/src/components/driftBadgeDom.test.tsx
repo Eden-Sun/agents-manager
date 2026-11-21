@@ -1,7 +1,3 @@
-/**
- * ⟳ 重啟徽章（RuntimeDriftBadge）：daemon 的 `bot.needs_restart` 是「要重啟」的唯一來源（#353），徽章的落差明細只列已知欄位
- * （model／effort／fast／identity）。人設、args、env 改了沒有明細——徽章也不能因此消失，不然只有設定面板開著時看得到要重啟。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

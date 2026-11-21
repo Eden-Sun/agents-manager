@@ -20,12 +20,9 @@ test('專案設定顯示資料與主力列，展開模式設定，執行中的 b
     assert.match(document.body.textContent!, /專案甲/)
     assert.match(document.body.textContent!, /\/work\/p/)
     assert.match(document.body.textContent!, /專案模式設定/)
-    // 主力晶片列照樣顯示
     assert.ok(document.querySelector('.unread-bar-wrap'), '應保留主力晶片列')
-    // 成員清單已移除
     assert.equal(document.querySelector('.project-settings-members'), null, '不應再有專案成員清單')
     assert.equal(document.querySelector('.project-settings-member'), null, '不應再有成員按鈕')
-    // 專案模式設定非 details，直接展開
     assert.equal(document.querySelector('details.project-expert-settings-details'), null, '模式設定不應為 details 收合')
     assert.ok(document.querySelector('.project-expert-settings-section'), '模式設定應直接展開為區塊')
 

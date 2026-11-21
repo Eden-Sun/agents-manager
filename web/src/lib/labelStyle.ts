@@ -1,4 +1,3 @@
-/** Readable text colour for a GitHub label hex. */
 export function labelStyle(color: string | null) {
   if (!color) return undefined
   const r = parseInt(color.slice(0, 2), 16)

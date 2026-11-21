@@ -1,8 +1,3 @@
-/**
- * 終端畫面上「游標大概在哪」（2026-09-17 使用者：鍵盤直通要有閃爍游標提示）。
- * herdr 0.8.2 的 pane 讀取不回游標位置，所以用畫面推：最後一行有字的行尾就是 shell 在等輸入的地方。
- * 提示字元（`%`、`$`、`#`、`>`、`❯`）後面補一格：終端的行尾空白讀回來會被截掉，但 shell 的游標在空白後面。
- */
 export function splitAtCursor(text: string): { before: string; gap: string; after: string } {
   const lines = text.split('\n')
   let last = lines.length - 1

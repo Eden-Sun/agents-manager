@@ -6,11 +6,6 @@ import { DirPicker } from './DirPicker'
 import { useT } from '../lib/i18n'
 import './botShare.css'
 
-/**
- * 建 bot 表單的「用途」（SPEC §20）：不分享／分享用（受限）／信任分享，三選一；建好之後不能切換，要分享就新建一顆。
- * 受限：選它的資料夾（新資料夾 `~/shared-bots/<名稱>` 或本機既有資料夾），那就是它能碰的全部範圍。
- * 信任分享：只用既有資料夾（預設專案目錄），選的當下要在確認框裡勾「只分享給絕對信任的人」才算數。
- */
 export function ShareProfileField({
   kind,
   host,
@@ -28,12 +23,10 @@ export function ShareProfileField({
   botName: string
   folder: ShareFolderDraft
   onFolder: (f: ShareFolderDraft) => void
-  /** 信任分享的預設資料夾。 */
   projectPath?: string
 }) {
   const t = useT()
   const blocked = shareProfileBlocked(kind)
-  // 遠端專案：資料夾、outbox、籠子都在那台（R-S2）；表單照常，只把位置標出來。
   const remote = host && host !== 'local' ? host : null
   const [browsing, setBrowsing] = useState(false)
   const [asking, setAsking] = useState(false)
@@ -42,7 +35,6 @@ export function ShareProfileField({
   const on = profile !== null
   const trusted = profile === 'trusted'
   const checked = on ? shareFolderInput(folder, botName) : null
-  // 驗錯文字只有一段（兩種資料夾共用），關聯到目前這個模式的輸入框（#1607）。
   const folderErrId = useId()
   const folderErr = checked && 'error' in checked ? checked.error : null
   const pick = (p: ShareProfile | null) => {
@@ -101,7 +93,6 @@ export function ShareProfileField({
         onCancel={() => setAsking(false)}
         onConfirm={() => {
           setAsking(false)
-          // 信任分享只用既有資料夾；沒填過就帶專案目錄。
           onFolder({ ...folder, mode: 'existing', path: folder.path || projectPath || '' })
           onChange('trusted')
         }}

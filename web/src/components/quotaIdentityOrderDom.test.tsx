@@ -1,6 +1,3 @@
-/**
- * 額度列的 claude 身份順序：cc0 → cc1 → 其他（照名字的自然順序）。`cc10` 要排在 `cc2` 後面，不是字典序的前面。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

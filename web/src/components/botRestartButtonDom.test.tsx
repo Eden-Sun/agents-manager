@@ -1,7 +1,3 @@
-/**
- * 「重新啟動」常駐於 Bot 設定面板底部（不靠橫幅），側欄 bot 的 ⋯ 選單也有同一顆。
- * 沒有 live run 時面板改成「啟動」；child 與 claude-api 不給重啟（#1911）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, click, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

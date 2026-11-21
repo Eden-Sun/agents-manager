@@ -1,7 +1,3 @@
-/**
- * 輸入框上方的「背景執行中」：手機只畫一行摘要（2026-10-03 使用者：藍色那塊太佔空間），說明句收在可點開的區塊。
- * 版面本身靠 CSS（≤640px 藏 `.bg-jobs-detail`），這裡釘結構：摘要是按鈕、說明在摘要外、點了切 `open`。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

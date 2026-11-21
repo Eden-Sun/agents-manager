@@ -1,4 +1,3 @@
-/* components/MarkdownImage.tsx：對話 Markdown 裡的圖片。寬度跟著氣泡，不撐破版面。 */
 
 .md-image {
   display: block;
@@ -29,7 +28,6 @@
   overflow-wrap: anywhere;
 }
 
-/* 遠端圖片的佔位（#764）：不載入、只講網域，點了才抓。 */
 .md-image-remote {
   display: inline-flex;
   flex-wrap: wrap;

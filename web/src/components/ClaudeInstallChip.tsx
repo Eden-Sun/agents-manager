@@ -10,7 +10,6 @@ import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import type { DialogControl } from './MergedUpdateChip'
 
-/** Claude fleet 尚未統一到共同目標版的持續提示；使用者確認後才逐台執行 `claude install <version>`。 */
 export function ClaudeInstallChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
   const planKey = useStore((s) => {

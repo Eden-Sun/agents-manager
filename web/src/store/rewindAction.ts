@@ -5,10 +5,6 @@ import { prependDraft } from './queuedSend'
 import { useStore } from './store'
 import { t } from '../lib/i18n'
 
-/**
- * 倒回（SPEC §6.13，daemon 在終端驅動 claude 的 `/rewind`，不重啟）：成功就把那則的原文接回輸入框最前面（原本打到一半的字不丟），重拉這顆 bot 的訊息
- * （WS `messages_rewound` 也會標，這裡是斷線時的保險）。失敗只跳通知，輸入框不動。回是否成功。
- */
 export async function rewindAndRefill(
   botId: string,
   messageId: string,
@@ -19,7 +15,6 @@ export async function rewindAndRefill(
     const { drafts, setDraft, notify, loadMessages, messages } = useStore.getState()
     const key = `bot:${botId}` as const
     setDraft(key, prependDraft(r.text, drafts[key] ?? ''))
-    // daemon 只回文字：附件不會跟著回來，要講清楚（撤回排隊、取消啟動那兩條都這樣講）。
     const attachments = messages[botId]?.find((m) => m.id === messageId)?.attachments.length ?? 0
     const notice = r.paneCleared
       ? attachments > 0
@@ -35,7 +30,6 @@ export async function rewindAndRefill(
     void loadMessages(botId)
     return true
   } catch (e) {
-    // 終端輸入列有字（2026-10-01 使用者）：不只叫人去終端清，把那段字交給呼叫端，讓人看過再選「清掉再倒回」。
     const draft = e instanceof ApiError && e.status === 409 && e.body.reason === 'composer_busy' ? e.body.draft : undefined
     if (typeof draft === 'string' && draft.trim()) return { composerDraft: draft }
     useStore.getState().notify('error', t('倒回失敗：{reason}', { reason: rewindErrText(e) }))

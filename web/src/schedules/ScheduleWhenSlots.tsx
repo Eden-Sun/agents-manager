@@ -1,15 +1,10 @@
 import { t } from '../lib/i18n'
 
-/** 一天內的一個時段。`until === null` 是固定時間。 */
 export interface WhenSlot {
   time: string
   until: string | null
 }
 
-/**
- * 「何時執行」的時段列：一行 `開始 ~ 結束`、隨機／固定圓鈕、刪除。
- * 不碰 spec；呼叫端沿用原本的 time／until 與驗證。
- */
 export function ScheduleWhenSlots({
   slots,
   tz,

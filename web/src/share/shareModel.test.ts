@@ -6,7 +6,6 @@ const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
 
 test('一頁超過 100 則或單則超長文字會被截掉，不能整包塞進頁面', () => {
   const huge = 'x'.repeat(200_000)
-  // 契約 C 是舊→新：超長的那則放在最新（最後），保留在頁面上（上限只丟最舊的）。
   const messages = Array.from({ length: 250 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: i === 249 ? huge : 'ok', created_at: '2024-01-01T00:00:00Z' }))
   const page = toSharePage({ bot_name: 'b', status: 'idle', has_more: true, messages })
   assert.ok(page.messages.length <= 100)
@@ -105,7 +104,6 @@ test('fmtSize：MB 進位到 10 時寫整數，不寫 10.0 MB', () => {
 })
 
 test('截斷顯示的長訊息不切斷 emoji：截點落在代理對中間時，留下完整的字', () => {
-  // SHARE_TEXT_STORE_MAX 以 UTF-16 單位切；截點若落在 😀 的前半，會剩一個孤立的高位代理，畫面上是 �。
   const text = 'a'.repeat(SHARE_TEXT_STORE_MAX - 1) + '😀' + 'b'.repeat(10)
   const out = toShareMessage({ id: 'm1', role: 'assistant', text, created_at: '', attachments: [] })!.text
   assert.doesNotMatch(out, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, '不能留下孤立的高位代理')
@@ -121,7 +119,6 @@ test('toSharePage：一頁超過上限時丟掉的是最舊的（契約 C 是舊
 })
 
 test('一頁超過上限時留最新的，而且最新那則超長、截點落在 emoji 中間時也不留孤立代理', () => {
-  // 兩條都要成立：丟掉的是最舊的（#1564），截斷不切斷 emoji（#1605）。
   const text = 'a'.repeat(SHARE_TEXT_STORE_MAX - 1) + '😀' + 'b'.repeat(10)
   const msgs = Array.from({ length: SHARE_PAGE_MAX + 20 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: 'ok', created_at: '2026-10-12T00:00:00Z' }))
   msgs[msgs.length - 1] = { id: 'newest', role: 'assistant', text, created_at: '2026-10-12T00:00:00Z' } as (typeof msgs)[number]

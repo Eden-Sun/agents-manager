@@ -3,14 +3,12 @@ import { forgetBlocked, prefetchBlocked, PREFETCH_LINES, PREFETCH_SOURCE, type P
 import { parseChoiceMenu } from '../lib/tuiChoices'
 import { useStore } from '../store/store'
 
-/** blocked 期間多久重讀一次快取（視窗晚點才打開也拿得到新鮮的畫面；見 `PREFETCH_FRESH_MS`）。 */
 const REFRESH_MS = 4_000
 
 function deps(): PrefetchDeps {
   const s = () => useStore.getState()
   return {
     read: (botId) => s().readTerminal(botId, PREFETCH_SOURCE, PREFETCH_LINES),
-    // 與 `BlockedDraft` 的 io 同一套：讀 60 行就夠，選單只在畫面下半部。
     io: (botId) => ({
       read: async () => {
         try {
@@ -30,7 +28,6 @@ function deps(): PrefetchDeps {
   }
 }
 
-/** 哪些 bot 現在 blocked（純字串，selector 回陣列會每次都是新參考）。 */
 function blockedIds(s: ReturnType<typeof useStore.getState>): string {
   return Object.entries(s.runs)
     .filter(([, r]) => r?.agent_status === 'blocked')
@@ -39,7 +36,6 @@ function blockedIds(s: ReturnType<typeof useStore.getState>): string {
     .join(' ')
 }
 
-/** 掛在 App 一次：bot 一進 blocked 就在背景讀好問卷（`lib/blockedPrefetch.ts`）。 */
 export function useBlockedPrefetch(): void {
   const ids = useStore(blockedIds)
   useEffect(() => {
@@ -48,7 +44,6 @@ export function useBlockedPrefetch(): void {
     const d = deps()
     let alive = true
     const tick = () => {
-      // 分頁在背景整個略過（不只擋預載）：手機切走時每顆 blocked bot 不必每 4 秒讀一次終端；回前景時 `onVisible` 立刻補一次。
       if (!alive || document.visibilityState === 'hidden') return
       for (const id of list) void prefetchBlocked(id, d)
     }

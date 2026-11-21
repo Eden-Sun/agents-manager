@@ -1,10 +1,8 @@
 import type { BotKind, ModelInfo, ModelsMeta } from '../api/types'
 
-/** null = 上次抓取失敗（畫面用靜態清單）。 */
 export type ModelsCache = Record<string, ModelInfo[] | null>
 export type ModelsMetaCache = Record<string, ModelsMeta>
 
-/** issue #26：失敗多半是暫時的，冷卻後重試。 */
 export const MODELS_RETRY_MS = 30_000
 
 export function modelsKey(kind: BotKind, host: string, identity?: string | null): string {
@@ -25,7 +23,6 @@ export function shouldFetchModels(
   return failedAt === undefined || now - failedAt >= MODELS_RETRY_MS
 }
 
-/** 含失敗紀錄。 */
 export function dropHostModels<T>(cache: Record<string, T>, host: string): Record<string, T> {
   const target = host || 'local'
   let changed = false
@@ -37,7 +34,6 @@ export function dropHostModels<T>(cache: Record<string, T>, host: string): Recor
   return changed ? next : cache
 }
 
-/** 「最後抓到的」清單：每次 `fetchModels` 成功就存，API 載入中或失敗時畫面先用它，不退回寫死的清單（使用者 2026-11-09）。 */
 const LAST_PREFIX = 'am.models.last:'
 
 function storage(): Storage | null {
@@ -52,7 +48,6 @@ export function saveLastModels(key: string, list: ModelInfo[]): void {
   try {
     storage()?.setItem(LAST_PREFIX + key, JSON.stringify({ at: Date.now(), list }))
   } catch {
-    /* 滿了或被擋：當作沒存 */
   }
 }
 
@@ -66,7 +61,6 @@ function readLast(raw: string | null): { at: number; list: ModelInfo[] } | null 
   }
 }
 
-/** 同 key 的最後一份；沒有就同 kind 任一 key 最新的那份；都沒有（或讀不到）＝ null。 */
 export function lastKnownModels(kind: BotKind, key: string): ModelInfo[] | null {
   try {
     const st = storage()

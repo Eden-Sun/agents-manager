@@ -1,19 +1,3 @@
-/**
- * Composer attachment draft persistence (IndexedDB + memory cache).
- *
- * Persists un-sent composer attachments across:
- * - Switching bots in the sidebar
- * - Browser reload / navigation away and back
- * - Mobile browser backgrounding and waking
- * - Send failures (allowing retry or bot switching without losing attached files)
- *
- * Cleared when:
- * - The turn is successfully sent (`clearSent`)
- * - The composer is cleared (`clear`)
- * - An attachment card is removed (`remove`)
- * - Attachments expire past 24 hours (`DRAFT_ATTACHMENT_TTL_MS`)
- * - Total draft storage exceeds `MAX_TOTAL_DRAFT_BYTES` (LRU eviction)
- */
 
 export interface DraftAttachmentItem {
   key: string
@@ -28,7 +12,6 @@ export interface DraftAttachmentItem {
 }
 
 interface DraftAttachmentRow {
-  /** Compound key: `${botId}:${key}` */
   id: string
   botId: string
   key: string
@@ -44,10 +27,10 @@ interface DraftAttachmentRow {
 
 export const DRAFT_ATTACHMENT_DB_NAME = 'am-composer-attachment-drafts'
 export const DRAFT_ATTACHMENT_STORE = 'drafts'
-export const DRAFT_ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
-export const MAX_TOTAL_DRAFT_BYTES = 100 * 1024 * 1024 // 100 MiB total
+export const DRAFT_ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1000
+export const MAX_TOTAL_DRAFT_BYTES = 100 * 1024 * 1024
 export const MAX_ITEMS_PER_BOT = 20
-const SWEEP_INTERVAL_MS = 60 * 1000 // 1 minute
+const SWEEP_INTERVAL_MS = 60 * 1000
 
 const memoryDrafts = new Map<string, DraftAttachmentItem[]>()
 let dbLoaded = false
@@ -131,7 +114,6 @@ function evictIfOverCap(): void {
   let total = totalStoredBytes()
   if (total <= MAX_TOTAL_DRAFT_BYTES) return
 
-  // Gather all items sorted by addedAt ascending (oldest first)
   const all: { botId: string; item: DraftAttachmentItem }[] = []
   for (const [botId, list] of memoryDrafts.entries()) {
     for (const item of list) {
@@ -159,12 +141,10 @@ function evictIfOverCap(): void {
   }
 }
 
-/** Get current drafts for a bot from memory synchronously. */
 export function getAttachmentDrafts(botId: string): DraftAttachmentItem[] {
   return memoryDrafts.get(botId) ? [...memoryDrafts.get(botId)!] : []
 }
 
-/** Save a new attachment draft item for a bot. */
 export function saveAttachmentDraft(botId: string, item: DraftAttachmentItem): void {
   let list = memoryDrafts.get(botId)
   if (!list) {
@@ -175,7 +155,6 @@ export function saveAttachmentDraft(botId: string, item: DraftAttachmentItem): v
   if (existingIdx !== -1) {
     list[existingIdx] = item
   } else {
-    // If bot has reached item cap, evict oldest for this bot
     if (list.length >= MAX_ITEMS_PER_BOT) {
       const evicted = list.shift()
       if (evicted) {
@@ -202,7 +181,6 @@ export function saveAttachmentDraft(botId: string, item: DraftAttachmentItem): v
   evictIfOverCap()
 }
 
-/** Update the daemon attachment id once an upload finishes. */
 export function updateAttachmentDraftId(botId: string, key: string, attachmentId: string): void {
   const list = memoryDrafts.get(botId)
   if (!list) return
@@ -226,7 +204,6 @@ export function updateAttachmentDraftId(botId: string, key: string, attachmentId
   void putRow(row)
 }
 
-/** Remove a single attachment draft item. */
 export function removeAttachmentDraft(botId: string, key: string): void {
   const list = memoryDrafts.get(botId)
   if (!list) return
@@ -238,7 +215,6 @@ export function removeAttachmentDraft(botId: string, key: string): void {
   }
 }
 
-/** Remove attachments that were sent. */
 export function removeSentAttachmentDrafts(botId: string, sentIds: readonly string[]): void {
   const list = memoryDrafts.get(botId)
   if (!list || list.length === 0) return
@@ -261,7 +237,6 @@ export function removeSentAttachmentDrafts(botId: string, sentIds: readonly stri
   }
 }
 
-/** Clear all draft attachments for a bot (on explicit clear or prompt send without remaining attachments). */
 export function clearAttachmentDrafts(botId: string): void {
   const list = memoryDrafts.get(botId)
   if (!list || list.length === 0) return
@@ -270,7 +245,6 @@ export function clearAttachmentDrafts(botId: string): void {
   void deleteRows(toDeleteIds)
 }
 
-/** Notify callback once initial IndexedDB read completes. */
 export function onAttachmentDraftsLoaded(cb: () => void): () => void {
   if (dbLoaded) {
     cb()
@@ -356,7 +330,6 @@ export function startAttachmentDraftPersistence(): () => void {
   }
 }
 
-/** Reset in-memory state and clear timers for test isolation. */
 export function resetAttachmentDraftsForTest(): void {
   memoryDrafts.clear()
   loadListeners.clear()

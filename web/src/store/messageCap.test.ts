@@ -1,10 +1,3 @@
-/**
- * issue #457：按「載入更早的」補回來的那一段，不能在下一則新訊息進來時被 `MESSAGE_CAP` 從頭切掉。
- *
- * 這裡只測 `messageCap.ts` 的純函式。真的按下去那一段（`loadEarlierMessages` → 下一則新訊息
- * 剪不剪得到）在 `storeActions.test.ts`：驅動 `useStore` 的 harness 假設「一個行程只有一個擁有者」，
- * 兩個檔案同時操作那顆 singleton 會互相踩（實測會讓另一個檔案紅 51 條）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MESSAGE_CAP } from './lists.ts'
@@ -18,10 +11,8 @@ test('沒抬過就是 MESSAGE_CAP；抬過就用抬過的那個', () => {
 })
 
 test('補回歷史就抬下緣：留住現有的，另外給 MESSAGE_CAP 則新訊息的餘裕', () => {
-  // #457 的重現情境：清單已經在 500，補回 200 → 700。
   const floors = raiseFloor({}, 'b1', 200, 700)
   assert.equal(floors.b1, 700 + MESSAGE_CAP)
-  // 關鍵不變量：補完之後的長度嚴格小於上限，所以下一則新訊息剪不到任何東西。
   assert.ok(capFor(floors, 'b1') > 700)
 })
 

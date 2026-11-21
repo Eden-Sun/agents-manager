@@ -1,8 +1,6 @@
 import type { Dict } from '../../lib/i18n/types'
 
-// 區塊：hosts（額度、身份、主機、登入、Jev／監督面板）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
-  // 身份頁重做（第 1 階段）：主機分頁、CLI 卡、統一三態狀態
   '{n} 已登入': '{n} signed in',
   '有異常': 'Needs attention',
   '主機離線：以下是最後已知的狀態，這台暫時不能登入、登出或變更身份。': 'Host offline: showing the last known state. This host cannot sign in, sign out, or change identities for now.',
@@ -18,7 +16,6 @@ export default {
   '帳號': 'Account',
 
   '已停用': 'Disabled',
-  // lib/supervisorLabels.ts（AGM 面板標籤）
   '待送出': 'Queued',
   '已送達': 'Delivered',
   '送達未知': 'Delivery unknown',
@@ -45,7 +42,6 @@ export default {
   '事件分類器壞了': 'Event classifier is broken',
   '遠端 shim 過期': 'Remote shim is outdated',
   '遠端 spool 卡住': 'Remote spool is stuck',
-  // lib/judgeStats.ts（Jev 帳本）
   '撞限第二意見': 'Second opinion on limit hit',
   'codex／grok 撞到用量上限，畫面比對判定是新的撞限時，問一題：命中的那一行是介面畫的，還是 bot 印出來的內容。': 'When codex or grok hits its usage limit and screen matching judges it a new limit hit, ask one question: is the matched line drawn by the interface, or printed by the bot?',
   '卡在不認識的畫面': 'Stuck on an unrecognized screen',
@@ -63,7 +59,6 @@ export default {
   '建議 {score}': 'suggested {score}',
   '無建議（最高 {score}）': 'no suggestion (top {score})',
   '#{n}（開票）': '#{n} (ticket opened)',
-  // lib/hostBaseline.ts（一致性）
   '不明': 'Unknown',
   '一致性：尚未檢查': 'Consistency: not checked yet',
   '還沒量過這台主機（剛連上、或 daemon 是舊版）': 'Not measured on this host yet (just connected, or the daemon is an old version)',
@@ -75,7 +70,6 @@ export default {
   '一致性：與基準一致': 'Consistency: matches baseline',
   '一致性：{n} 項不一致（{critical} 項嚴重）': 'Consistency: {n} mismatched ({critical} critical)',
   '一致性：{n} 項提醒': 'Consistency: {n} warnings',
-  // lib/hostOffline.ts・quotaReset.ts（離線多久、倒數）
   '剛剛': 'just now',
   '{n} 分鐘': { one: '{n} minute', other: '{n} minutes' },
   '{n} 小時': { one: '{n} hour', other: '{n} hours' },
@@ -84,7 +78,6 @@ export default {
   '{n} 天 {h} 小時': { one: '{n} day {h} h', other: '{n} days {h} h' },
   '{n} 分': '{n} min',
   '即將重置': 'resetting soon',
-  // lib/loginPrompt.ts・loginAssist.ts（登入提示）
   '{identity}（{where}）已登出': '{identity} ({where}) signed out',
   '{n} 顆 bot 在用它，剛才有回合因為登入失效失敗': { one: '{n} bot is using it; a turn just failed because sign-in expired', other: '{n} bots are using it; a turn just failed because sign-in expired' },
   '偵測到已登出，{n} 顆 bot 在用它': { one: 'Signed-out state detected; {n} bot is using it', other: 'Signed-out state detected; {n} bots are using it' },
@@ -95,24 +88,19 @@ export default {
   '已送出，等 CLI 回應…': 'Submitted, waiting for the CLI to respond…',
   '登入失敗：重新按「登入」再來一次。': 'Sign-in failed: press "Sign in" to try again.',
   '登入程序已結束。': 'The sign-in process has ended.',
-  // lib/cliLogin.ts（開 shell 登入）
   'shell 已開好，請在裡面輸入 {command}': 'The shell is open. Type {command} in it.',
   '{host} 開著的 shell 太多{max}，請先關掉不用的再登入': '{host} has too many shells open{max}. Close the ones you do not need, then sign in again.',
   '（上限 {n} 個）': ' (limit {n})',
   '開 shell 失敗：{error}': 'Failed to open shell: {error}',
   '本機': 'This machine',
-  // lib/claudeReviewErr.ts
   '這顆 daemon 還沒有 /api/claude-update/review（HTTP {status}），二進位比前端舊；要重建並重啟 daemon 才會有這支 API。': 'This daemon does not have /api/claude-update/review yet (HTTP {status}); its binary is older than the frontend. Rebuild and restart the daemon to get this API.',
   '這台主機還讀不到 {kind} 的版本（等它回報之後再按一次）。': 'This host cannot read the {kind} version yet (press again after it reports back).',
-  // lib/netErr.ts
   '連線逾時：daemon 沒有回應，稍後再試（你打的字還在）': 'Connection timed out: the daemon did not respond. Try again later (what you typed is still there).',
   '連不上 daemon（可能正在重啟，或網路斷了），稍後再試（你打的字還在）': 'Cannot reach the daemon (it may be restarting, or the network is down). Try again later (what you typed is still there).',
   'daemon 暫時不可用（HTTP {status}），稍後再試': 'The daemon is temporarily unavailable (HTTP {status}). Try again later.',
-  // lib/shellAccess.ts
   '這顆 pane 正在跑 agent，請走 bot 對話': 'This pane is running an agent. Use the bot chat instead.',
   '這顆 pane 只能看不能打字': 'This pane is view-only.',
   '無法確認這顆 pane 現在的狀態，這次沒有送出，請稍後再試': 'Could not confirm this pane’s current state, so nothing was sent. Try again later.',
-  // lib/hostForm.ts・remoteCargoForm.ts（欄位檢查）
   'ssh 目標要是主機（或 user@host、ssh_config 別名）：不能空、不能以 - 開頭、不能有空白': 'The ssh target must be a host (or user@host, or an ssh_config alias): not empty, not starting with -, no spaces.',
   'herdr_session 要是 1–64 個字，英數開頭，只能有英數與 . _ -': 'herdr_session must be 1–64 characters, start with a letter or digit, and use only letters, digits, . _ -',
   'port 要是 1–65535 的整數': 'port must be an integer from 1 to 65535',
@@ -120,22 +108,18 @@ export default {
   'SSH 帳號只能有英數與 . _ -，不能以 - 開頭': 'The SSH user may only contain letters, digits, . _ -, and must not start with -',
   '遠端 cargo jobs 要是 1–64 的整數（超過 64 daemon 會截成 64）': 'Remote cargo jobs must be an integer from 1 to 64 (above 64, the daemon caps it at 64)',
   '遠端工作目錄只能有英數與 . _ - /，不能含 ..': 'The remote work directory may only contain letters, digits, . _ - /, and must not contain ..',
-  // lib/jevLabel.ts・quotaLogin.ts
   'Jev（TypeSafe 型別判斷）': 'Jev (TypeSafe type judgment)',
   '只是建議，不會自動動作': 'Advisory only, no automatic action',
   '終端會印出登入網址和一次性碼：用手機或任何裝置打開網址、輸入那組碼就好，不用貼回終端。': 'The terminal prints a sign-in URL and a one-time code: open the URL on your phone or any device and enter the code. No need to paste anything back into the terminal.',
   'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。': 'The agy TUI walks you through sign-in: over SSH it prints an authorization URL. Finish authorization in the browser, then paste the code back into that terminal. When signed in, type /quit to exit.',
-  // api/claudeApi.ts・judge.ts
   '還沒有可用的 API key，先貼上 key 再開。': 'No usable API key yet. Paste a key before turning this on.',
   'daemon 回了看不懂的內容': 'The daemon returned something unreadable',
-  // components/AgyLogout.tsx
   '{host}有 {n} 顆 Bot 沒指定身份、用的就是這個預設帳號': '{host} has {n} bot(s) with no identity set; they use this default account',
   '：正在跑的不受影響，之後重新啟動會用別的帳號或停在登入畫面。': ': running ones are not affected; after a restart they use another account or stop at the login screen.',
   '已隱藏': 'Hidden',
   '會在{host}開一個臨時 pane 執行 {kind} 自己的登出指令，清掉預設帳號的憑證；家目錄裡的其他檔案不會刪。': 'Opens a temporary pane on {host} and runs the {kind} logout command, clearing the default account credentials; no other files in the home directory are deleted.',
   '登出中…': 'Signing out…',
   '登出': 'Sign out',
-  // components/LoginPromptBanner.tsx・JevLabel.tsx
   '在 {host} 替 {identity} 開登入：打開登入網站、貼回 code': 'Sign in to {identity} on {host}: open the sign-in site and paste the code back',
   '開啟中…': 'Opening…',
   '立即登入': 'Sign in now',
@@ -145,7 +129,6 @@ export default {
   '{name}的建議；{note}': '{name} suggestion; {note}',
   'Jev 建議 {p}': 'Jev suggestion {p}',
   'Jev 建議': 'Jev suggestions',
-  // components/GhAuth.tsx
   '在瀏覽器打開 GitHub，輸入這組一次性代碼：': 'Open GitHub in your browser and enter this one-time code:',
   '代碼': 'Code',
   'GitHub 裝置碼': 'GitHub device code',
@@ -166,7 +149,6 @@ export default {
   '裝置碼登入': 'Sign in with device code',
   '登入': 'Sign in',
   '在 {host} 登入 gh': 'Sign in to gh on {host}',
-  // components/HostOffline.tsx
   '主機 {name} 離線': 'Host {name} offline',
   '（剛剛斷線）': ' (just disconnected)',
   '已 {dur}': 'down {dur}',
@@ -181,7 +163,6 @@ export default {
   '：訊息現在送不出去': ': messages cannot be sent right now',
   '輸入框可以先打，字會留著。{host} 連回來後 daemon 會自動對帳，燈號恢復、離線期間 bot 在那台寫下的回覆會補進對話，再按送出即可。': 'You can type in the input box and your text will stay. When {host} reconnects, the daemon reconciles automatically: the status recovers, and replies the bot wrote on that host while it was offline are added to the chat. Then just press send.',
   '主機離線': 'Host offline',
-  // components/Tools.tsx（agent CLI 安裝提示）
   '{host} 上沒有執行中的 Bot；請先啟動任一 Bot（任何 kind 都可以）再安裝 {kind}': '{host} has no running bot. Start any bot first (any kind works), then install {kind}.',
   '請 {host} 上一個執行中的 Bot 安裝並登入 {kind}（會在它的 pane 執行，登入 URL 出現在 blocked 面板）': 'Have a running bot on {host} install and sign in to {kind}. It runs in that bot’s pane, and the sign-in URL appears in the blocked panel.',
   '送出中…': 'Sending…',
@@ -202,13 +183,11 @@ export default {
   '主機 {host} 缺少 {tag} {kind}': 'Host {host} is missing {tag} {kind}',
   '關閉提示': 'Dismiss hint',
   '這次不再提示': 'Do not show this again',
-  // components/identityEnv.ts（身份 env 檢查）
   '第 {n} 行「{line}」沒有 =（要寫成 KEY=VALUE）': 'Line {n} “{line}” has no = (write it as KEY=VALUE)',
   '第 {n} 行的 key 是空的（要寫成 KEY=VALUE）': 'The key on line {n} is empty (write it as KEY=VALUE)',
   '第 {n} 行 key「{key}」不是合法的環境變數名稱（只能英數與 _，不能數字開頭）': 'Line {n}: key “{key}” is not a valid environment variable name (letters, digits and _ only; it cannot start with a digit)',
   '第 {n} 行 {key} 的值是空的（空值等於沒設，身份會悄悄用預設帳號；要就寫上值，不要就刪掉這一行）': 'The value of {key} on line {n} is empty. An empty value counts as unset, so the identity quietly uses the default account. Either give it a value or delete the line.',
   '第 {n} 行 key「{key}」重複了（前面已經有一行）': 'Line {n}: key “{key}” is repeated (an earlier line already sets it)',
-  // components/QuotaLoginSlash.tsx
   '對 {bot} 的 {kind} 送 /login': 'Send /login to {bot} ({kind})',
   '這個身份沒有正在跑的 Bot，先啟動一個': 'No running bot for this identity. Start one first.',
   '登入 / 切換帳號': 'Sign in / switch account',
@@ -225,7 +204,6 @@ export default {
   '在 {host} 開獨立終端，帶 {identity} 的設定跑 {command}': 'Open a separate terminal on {host} with the settings of {identity} and run {command}',
   '開終端中…': 'Opening terminal…',
   '開終端登入': 'Sign in via terminal',
-  // components/QuotaLoginShell.tsx
   '已在 {host} 的 shell 送出 {command}，請在那個終端完成登入': 'Sent {command} to the shell on {host}. Finish signing in in that terminal.',
   '{host} 尚未安裝 agy：先自動安裝，再開 shell 登入': '{host} does not have agy installed yet: install it automatically first, then open a shell to sign in',
   '在 {host} 開一個 shell 並輸入 {command}': 'Open a shell on {host} and type {command}',
@@ -242,7 +220,6 @@ export default {
   '在你完成登入之前，這個身份的 {kind} 還是不能工作。': 'Until you finish signing in, {kind} for this identity still cannot work.',
   '登入完成後回到這裡按「登入好了，重新偵測」，身份狀態才會更新。': 'After signing in, come back here and press “Signed in, re-check” to update the identity status.',
   '開 shell 並送出': 'Open shell and send',
-  // components/AuthLoginAction.tsx
   '預設帳號': 'Default account',
   '這個身份已有登入終端，已重新打開；接著完成授權就好': 'This identity already has a login terminal; reopened it. Just finish the authorization there.',
   '已在{where}開終端替 {who} 跑 {kind} 登入，完成瀏覽器授權後回來按「登入好了，重試」': 'Opened a terminal on {where} to sign {who} in with {kind}. After finishing browser authorization, come back and press “Signed in, retry”.',
@@ -258,7 +235,6 @@ export default {
   '在新開的終端完成瀏覽器授權（或把 code 貼回去），CLI 結束後終端會自己收掉。': 'Finish browser authorization in the new terminal (or paste the code back). The terminal closes by itself when the CLI exits.',
   '用 CLI 在獨立終端登入 {who}，不佔用這個 Bot 的畫面。': 'Sign {who} in with the CLI in a separate terminal, without taking over this bot’s screen.',
   '登入後重試': 'Retry after sign-in',
-  // components/ClaudeLoginAssist.tsx
   'CLI 回報登入失敗': 'The CLI reported a sign-in failure',
   '送不出去': 'Could not send',
   '登入 {identity}': 'Sign in {identity}',
@@ -271,7 +247,6 @@ export default {
   '貼上網站給的 code': 'Paste the code from the site',
   '登入 code': 'Sign-in code',
   '送出 code': 'Send code',
-  // components/CodexLoginReplaceDialog.tsx（codex 登入會取代已登入的帳號）
   '重新登入 codex？': 'Sign in to codex again?',
   '開始後這個帳號原本的登入會立即失效，用這個身份的 codex bot 要等你完成登入才能繼續。': 'Once it starts, this account’s current sign-in stops working right away. codex bots using this identity have to wait until you finish signing in.',
   '開始登入': 'Start sign-in',
@@ -283,7 +258,6 @@ export default {
   '已複製': 'Copied',
   '複製失敗，請選取上面的碼': 'Copy failed — select the code above',
   '到登入網站輸入上面的一次性碼，完成後這裡會自動更新。不用貼回終端。': 'Enter the one-time code above on the sign-in site. This updates here when it finishes. No need to paste it back into the terminal.',
-  // components/JudgePanel.tsx・JudgeLedger.tsx（Jev 設定與帳本）
   '讀取中…': 'Loading…',
   '這顆 daemon 還沒有這個功能（需要更新 daemon）。': 'This daemon does not have this feature yet (update the daemon).',
   '讀不到 Jev 設定：{message}': 'Cannot read Jev settings: {message}',
@@ -344,7 +318,6 @@ export default {
   'Jev 機率': 'Jev probability',
   '耗時 ms': 'Time (ms)',
   '錯誤': 'Error',
-  // components/ClaudeApiPanel.tsx（Claude API 設定與用量帳本）
   'key 被拒': 'Key rejected',
   '被限流': 'Rate limited',
   '伺服器錯誤': 'Server error',
@@ -411,7 +384,6 @@ export default {
   '耗時': 'Time',
   '結果': 'Result',
   'Claude API 分類': 'Claude API sections',
-  // components/HostShellPanel.tsx（主機 shell）
   '讀取終端失敗：{error}': 'Failed to read the terminal: {error}',
   '（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）': '(Nothing has scrolled out of view yet: this shell’s output is still on screen.)',
   '開啟側邊欄': 'Open sidebar',
@@ -455,7 +427,6 @@ export default {
   '這個 shell': 'this shell',
   '這顆 pane 還在做事': 'This pane is still working',
   '仍要關掉': 'Close anyway',
-  // components/SupervisorPanel.tsx（AGM 面板，目前未掛載）
   '尚未建立': 'Not set up',
   '已停止': 'Stopped',
   '啟動中': 'Starting',
@@ -518,9 +489,6 @@ export default {
   '交辦': 'Assignments',
   '目前沒有交辦。AGM 只有在你明確說「交給它」時才會派工。': 'No assignments right now. AGM only dispatches work when you explicitly say “hand it over”.',
   '設定裡有 AGM，但目前的清單找不到這顆 bot（可能還沒同步或已被移除）。': 'AGM is in the settings, but this bot is not in the current list (it may not have synced yet or was removed).',
-  // components/IdentitiesPanel.tsx（身份列表）
-  // HostBaselineApply.tsx（一致性一鍵補齊）
-  // HostBaselineRestore.tsx（一致性備份還原）
   '備份清單讀取失敗': 'Failed to load the backup list',
   '找不到這份備份': 'Backup not found',
   '備份識別碼無效': 'Invalid backup ID',
@@ -701,7 +669,6 @@ export default {
   '{n} 天前檢查': 'Checked {n} d ago',
   '檢查於': 'Checked on',
   '從登入 shell 的 {alias} alias 認出來的身份（{rc} 等），可以直接指派給 Bot；要改 alias 內容請編輯該主機的 shell 設定。「不再提供給新 Bot」只會把它從身份選單拿掉，「從 shell 設定移除」則會刪掉支援的 Claude ccN alias。': 'Identities recognized from the {alias} aliases in the login shell ({rc}, etc.). You can assign them to a bot directly. To change an alias, edit that host\'s shell config. "No longer offer to new bots" only removes it from the identity picker; "Remove from shell config" deletes the supported Claude ccN alias.',
-  // 身份頁接線（新增帳號對話框、背景登入）
   '打開登入終端': 'Open sign-in terminal',
   '已新增 {name}（尚未登入）': 'Added {name} (not signed in yet)',
 } satisfies Dict

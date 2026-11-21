@@ -1,4 +1,3 @@
-/** `useBlockedPrefetch`：分頁在背景時整個略過（不只擋預載），回前景立刻補一次（#909）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

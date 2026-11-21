@@ -1,7 +1,3 @@
-/**
- * 專案設定的一顆儲存：副管理者與角色設定共用儲存鈕；
- * 底部儲存把有變更的區塊合併成一次 PATCH，「還原」清掉所有草稿。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll, click } from '../testing/domHarness'

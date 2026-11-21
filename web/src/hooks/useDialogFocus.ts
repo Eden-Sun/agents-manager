@@ -17,7 +17,6 @@ function visible(el: HTMLElement) {
   return el.offsetParent !== null || el.getClientRects().length > 0
 }
 
-/** Return the tabbable descendants in the same order the browser uses for Tab. */
 export function focusableIn(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => {
     if ((el.getAttribute('tabindex') ?? '').trim().startsWith('-')) return false
@@ -41,14 +40,9 @@ function inForeignModal(target: Node, root: HTMLElement) {
 }
 
 export interface DialogFocusOptions {
-  /** A preferred opening target; the first tabbable descendant is the fallback. */
   initialFocus?: () => HTMLElement | null | undefined
 }
 
-/**
- * Moves focus into an open dialog, traps Tab within it, and restores the opener on close.
- * A stack lets a confirm dialog safely sit on top of another dialog.
- */
 export function useDialogFocus(
   open: boolean,
   rootRef: RefObject<HTMLElement | null>,
@@ -59,8 +53,6 @@ export function useDialogFocus(
     initialFocusRef.current = initialFocus
   })
 
-  // 彈窗開啟時記住觸發它的 opener。在 render 階段於 open: false -> true 轉換時捕捉，
-  // 避免子元件的 mount effect（如 NewBotForm autofocus）先奪走焦點而記錯成子元件自己。
   const prevOpenRef = useRef(open)
   const renderOpenerRef = useRef<HTMLElement | null>(null)
   if (!prevOpenRef.current && open) {

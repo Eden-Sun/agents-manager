@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 import { commit, locate, moveTab, pageNeedsCommit, preload, radioPick, readChoiceMenu, samePage, togglesFor, wantOf, type Draft, type DraftPage, type Io } from './choiceDraft.ts'
 import { parseChoiceMenu, typedAnswerHere, type TuiChoiceMenu, type TuiTab } from './tuiChoices.ts'
 
-// #1887：issue 裡的 repo 選項與說明縮排；保留打字列、Submit 與 Chat about this 分隔線。
 const REPO_MULTI = [
   '────────────────────────────────────────────────────────────',
   ' ☐ Repo  ✔ Submit',
@@ -62,30 +61,21 @@ test('#1887 多選說明分開存放，面板預載與送出重讀仍是同一�
   const reread = await io.read()
   assert.ok(reread)
   assert.equal(samePage(draft.pages[0], reread), true)
-  // 真正換標題仍須拒絕，不能靠刪掉說明或模糊比對放行。
   const changed = parseChoiceMenu(REPO_MULTI.replace('vehicleapi', 'different-api'))
   assert.ok(changed)
   assert.equal(samePage(draft.pages[0], changed), false)
 })
 
-/**
- * 假的 claude 問卷 TUI（兩題複選＋送出頁），版型照抄 `fabrik-multiselect.txt`。
- * 真 bot 上的題是使用者本人要答的，不能拿來按。
- */
 class FakeTui {
   tab = 0
   cursor = 0
-  /** 每頁的勾選狀態。 */
   checked = [
     [false, false, false],
     [false, false, false],
   ]
-  /** 收到過的鍵，順序原樣。 */
   sent: string[] = []
   submitted = false
-  /** 每頁按過自己的 Submit 沒有。 */
   pageDone = [false, false]
-  /** 每頁的 `[ ] Type something` 勾了沒；貼字會自己勾起來並把標題換成那段字，space 翻得動它（2026-09-25 真機）。 */
   typeChecked = [false, false]
   typed = ['', '']
   pasted: string[] = []
@@ -96,7 +86,6 @@ class FakeTui {
     { label: '功能', q: '除了看文章，還需要哪些功能？', opts: ['站內搜尋、分類、標籤', '訂閱電子報', 'SEO 是主要目的'] },
   ]
 
-  /** 這一頁游標走得到的列：3 個選項 ＋ `Type something` ＋ `Submit`。 */
   private rows(): number {
     return this.tab < 2 ? this.pages[this.tab].opts.length + 2 : 2
   }
@@ -176,11 +165,9 @@ class FakeTui {
       if (i < opts) this.checked[this.tab][i] = !this.checked[this.tab][i]
       return
     }
-    // 這一頁的 `Submit` 列：按 Enter 才算答完這一題。
     if (k === 'enter' && this.cursor === opts + 1) this.pageDone[this.tab] = true
   }
 
-  /** 真機：游標停在 `Type something` 上直接打字＝那列勾起來、標題換成這段字；停在別列的字這裡當沒發生。 */
   paste(text: string) {
     this.pasted.push(text)
     if (this.tab < 2 && this.cursor === this.pages[this.tab].opts.length) {
@@ -212,7 +199,7 @@ test('假 TUI 自己畫得出來的畫面，parseChoiceMenu 認得（三個分�
 test('預載把三頁都讀回來，而且走完停回原本那一頁', async () => {
   const tui = new FakeTui()
   tui.tab = 1
-  tui.pageDone[0] = true // 第一頁答過了 → tabAt 猜第二頁
+  tui.pageDone[0] = true
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
   assert.equal(start.tabAt, 1)
@@ -228,7 +215,6 @@ test('預載把三頁都讀回來，而且走完停回原本那一頁', async ()
   assert.equal(draft.pages[2].isSubmit, true)
   assert.equal(draft.pages[0].choices[0].title, '非工程師要能自己發')
   assert.deepEqual(steps, [1, 2, 3])
-  // 回到起點，而且全程沒有送任何會改到答案的鍵
   assert.equal(tui.tab, 1)
   assert.deepEqual(tui.checked, [
     [false, false, false],
@@ -288,7 +274,6 @@ test('走不動就整個放棄，不留讀了一半的草稿', async () => {
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
   const io = tui.io()
-  // 導覽鍵全部吃掉 → 畫面永遠不變
   const dead: Io = { ...io, send: async () => {} }
   assert.equal(await preload(dead, start), null)
 })
@@ -305,7 +290,7 @@ test('#908 預載中止：之後一顆導覽鍵都不再送，preload 回 null',
     send: async (keys) => {
       sends += 1
       await io.send(keys)
-      if (sends === 2) controller.abort() // 第 2 次 moveTab 進行中，bot 離開 blocked
+      if (sends === 2) controller.abort()
     },
   }
   assert.equal(await preload(counted, start, undefined, controller.signal), null)
@@ -329,19 +314,17 @@ test('差集：只翻要翻的那幾顆，已經對的不動', () => {
   const now = parseChoiceMenu(new FakeTui().screen())!.choices
   assert.deepEqual(togglesFor(now, [true, false, true]), [0, 2])
   assert.deepEqual(togglesFor(now, [false, false, false]), [])
-  // 沒有方框的那一列（Type something）不在差集裡——那是動作不是勾選
   assert.equal(togglesFor(now, [true, true, true, true]).includes(3), true)
 })
 
 test('一次送出：每頁只送差集、按過該頁的 Submit，最後停在 Submit answers', async () => {
   const tui = new FakeTui()
-  tui.checked[0] = [true, false, false] // 第一頁已經有一個勾
+  tui.checked[0] = [true, false, false]
   const start = parseChoiceMenu(tui.screen())
   assert.ok(start)
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
 
-  // 使用者要的：第一頁換成第 3 項、第二頁勾第 1 與第 3 項
   const want = [
     [false, false, true],
     [true, false, true],
@@ -356,7 +339,6 @@ test('一次送出：每頁只送差集、按過該頁的 Submit，最後停在 
   ])
   assert.deepEqual(tui.pageDone, [true, true])
   assert.equal(tui.submitted, true)
-  // 第一頁只翻了兩顆（1 取消、3 勾上），不是把三顆都送一遍
   assert.equal(tui.sent.filter((k) => k === 'space').length, 4)
 })
 
@@ -380,7 +362,6 @@ test('未送出的複選頁即使勾選沒變也要先按該頁 Submit', async (
   assert.ok(start)
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
-  // 使用者保留第一頁目前的勾選；第二頁與送出頁沒有答案。
   const want = [wantOf(draft.pages[0]), wantOf(draft.pages[1]), []]
 
   const res = await commit(tui.io(), draft, want)
@@ -396,7 +377,6 @@ test('送出前畫面換掉：整批不送，回一句看得懂的話', async ()
   assert.ok(start)
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
-  // 把草稿的第二頁題目換掉，模擬「終端上已經不是同一份問卷」
   draft.pages[1] = { ...draft.pages[1], question: '這題早就換掉了' }
   const res = await commit(tui.io(), draft, [[], [true, false, false], []])
   assert.equal(res.ok, false)
@@ -411,7 +391,6 @@ test('按不動就停在那裡，不會繼續送後面的鍵', async () => {
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
   const io = tui.io()
-  // space 與數字鍵都被吃掉：只剩導覽走得動
   const numb: Io = {
     ...io,
     send: async (keys) => {
@@ -425,10 +404,6 @@ test('按不動就停在那裡，不會繼續送後面的鍵', async () => {
   assert.deepEqual(tui.checked[0], [false, false, false])
 })
 
-/**
- * 多分頁單選：沒有 `[ ]`、沒有每頁的 Submit 列。Enter 選一項；送出頁才有 Submit answers。
- * 版型照 `opu-radio.txt`（真機 0-opu 那份，題目改成假的，不拿真人問卷來按）。
- */
 class FakeRadioTui {
   tab = 0
   cursor = 0
@@ -624,7 +599,7 @@ test('Type something：預載 → 貼中文多行 → Enter → 對帳出現在 
   assert.deepEqual(tui.chosen, [3, 0, 0, 0])
   assert.equal(tui.submitted, true)
   assert.deepEqual(tui.pasted, ['第一行\n第二行中文'])
-  tui.submitted = false // 交卷後畫面已離開 review，這裡要看 review 上的答案
+  tui.submitted = false
   const review = parseChoiceMenu(tui.screen())
   assert.ok(review)
   assert.ok(review.review[0]?.answer.includes('第一行'))
@@ -639,7 +614,6 @@ test('wantOf 拿讀到當下的勾選當預設；samePage 只比題目與選項�
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
   assert.deepEqual(wantOf(draft.pages[0]), [false, true, false, false])
-  // 勾選變了不算「換了一份選單」
   tui.checked[0] = [true, true, true]
   tui.tab = 0
   const now = parseChoiceMenu(tui.screen())
@@ -654,7 +628,6 @@ test('複選頁勾 Type something 並打字：貼字 → 那列勾起來換成�
   const draft = await preload(tui.io(), start)
   assert.ok(draft)
   assert.equal(typedAnswerHere(draft.pages[1], draft.pages[1].choices[3]), true, '複選頁也給打字框')
-  // 第 2 頁勾「站內搜尋」與「Type something」、打「另外要 RSS」。
   tui.sent = []
   const res = await commit(tui.io(), draft, [[], [true, false, false, true], []], undefined, ['', '另外要 RSS', ''])
   assert.equal(res.ok, true, res.error)
@@ -664,7 +637,6 @@ test('複選頁勾 Type something 並打字：貼字 → 那列勾起來換成�
   assert.deepEqual(tui.checked[1], [true, false, false])
   assert.equal(tui.pageDone[1], true)
   assert.equal(tui.submitted, true)
-  // 貼字之後那列不能再被 space／Enter 翻掉：貼完到按這頁 Submit 之間沒有落在那列上的翻轉鍵。
   const pasteAt = tui.sent.length
   assert.ok(pasteAt > 0)
 })
@@ -725,11 +697,6 @@ test('單選頁的 Type something 照舊可以打字', () => {
   assert.equal(typedAnswerHere(menu, row), true)
 })
 
-/**
- * 真機單選問卷（2026-10-02 事發：3 題單選＋送出頁，第 1 題自訂文字）。與 `FakeRadioTui` 的差別是照真機的鍵語意：
- * 單選頁 Enter 選定後**自己跳下一個分頁**（最後一題跳到 Review）；`Type something.` 游標停上去直接貼字，Enter 才答完並跳頁。
- * `wrap`：真機在最後一個分頁按 → 會不會繞回第一個。
- */
 class FakeAutoRadioTui {
   tab = 0
   cursor = 0
@@ -739,7 +706,6 @@ class FakeAutoRadioTui {
   pasted: string[] = []
   submitted = false
   wrap = false
-  /** Enter 之後畫面要再被讀幾次才換頁（模擬 TUI 重畫比 daemon 回得慢）。 */
   lag = 0
   private pending: { to: number; reads: number } | null = null
 
@@ -878,7 +844,6 @@ test('真機單選問卷：終端已經停在 Review（上一輪最後那顆 Ent
   const tui = new FakeAutoRadioTui()
   const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
   assert.ok(draft)
-  // 第一輪：除了最後的 Submit answers 都照真機走完，終端停在 Review。
   const lossy = tui.io()
   let lost = 0
   const first = await commit(
@@ -1017,7 +982,6 @@ test('交卷確認先 GET 失敗、之後成功讀到離開 Submit：才回成�
   assert.equal(confirmationReads, 2, '讀取錯誤後下一次有效觀測到離頁才算成功')
 })
 
-/** 翻頁偵測（2026-10-17，#1816）：兩頁題目都切掉（null）或問句相同時，只靠題目分不出換頁。 */
 const PAGE_TABS: TuiTab[] = [
   { label: 'server', done: false, submit: false },
   { label: 'client', done: false, submit: false },
@@ -1045,7 +1009,6 @@ function pageMenu(tab: number, question: string | null, option: string): TuiChoi
   }
 }
 
-/** 假 TUI：`moves` 內的鍵才真的換頁（右為 +1、左為 -1），其餘鍵沒反應。 */
 function pagedIo(pages: TuiChoiceMenu[], start: number, moves: string[]) {
   const sent: string[] = []
   let at = start
@@ -1121,7 +1084,6 @@ test('#1816 locate：兩頁完全一樣分不出來時回 null，不猜第一頁
 })
 
 test('#1816 review：導覽途中 locate 認不出在哪一頁 → 不再送導覽鍵，回錯誤', async () => {
-  // 起點（第 1 頁）有獨特的選項，導覽後的畫面同時像第 2、3 頁，分不出在哪一頁。
   const tabs: TuiTab[] = [...PAGE_TABS.slice(0, 2), { label: 'third', done: false, submit: false }, PAGE_TABS[2]]
   const menu = (tab: number, option: string): TuiChoiceMenu => ({ ...pageMenu(tab, 'Pick one?', option), tabs })
   const pageOf = (tab: number, option: string): DraftPage => {
@@ -1194,7 +1156,6 @@ test('#1816 起點停在 Review：起點照舊用 startTab，不走新的起點�
     return { tab, label: PAGE_TABS[tab].label, question: m.question, choices: m.choices, multi: false, hasSubmitRow: false, review: [], isSubmit: false }
   }
   const draft: Draft = { pages: [pageOfTwin(0), pageOfTwin(1)], startTab: 0, tabs }
-  // 終端停在 Review：分不出頁，但 isSubmitMenu 為真，照舊從 startTab 走向送出頁；畫面不動就在導覽時停下。
   const review: TuiChoiceMenu = {
     ...pageMenu(2, 'Review?', 'review'),
     review: [{ question: 'server', answer: 'A' }],
@@ -1256,7 +1217,6 @@ test('#1818 commit：多行自訂答案貼上後只出現第一行（沒有裁�
     },
     wait: async () => {},
     paste: async (text) => {
-      // 終端只留下第一行。
       typed = text.split('\n')[0]
     },
   }

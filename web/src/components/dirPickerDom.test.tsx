@@ -1,7 +1,3 @@
-/**
- * DirPicker 的鍵盤行為（真的掛進 happy-dom）：焦點在「取消」鈕時 Enter 屬於那顆按鈕（不能變成選目錄），
- * Esc 不管焦點在哪都是離開（輸入過濾字時先清過濾）、Enter／⌘Enter 在清單上是「進入」／「直接選」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import { act } from 'react'
 import assert from 'node:assert/strict'
@@ -82,8 +78,6 @@ test('沒被截斷就不顯示那句', async () => {
   await settle()
   assert.doesNotMatch(document.querySelector('[role=dialog]')!.textContent ?? '', /只列出前/)
 })
-
-// ───────── 新資料夾（issue #877） ─────────
 
 async function openNew(host?: string, route?: (req: { method: string; path: string; body: unknown }) => unknown) {
   const requests = fakeApi((req) => {
@@ -169,10 +163,7 @@ test('新資料夾：Esc 先收起表單、不是離開整個對話框；再按�
   assert.equal(d.cancelled(), 1)
 })
 
-// ───────── 讀目錄中按 Esc（issue #960） ─────────
-
 test('讀目錄中按 Esc：退出選擇器（onCancel），事件被 preventDefault，不會讓外層 Modal 關掉', async () => {
-  // listDirs 永不回應 → busy 一直為 true
   mockApi({
     async request(method, path) {
       if (method === 'GET' && path.includes('/fs/dirs')) return new Promise(() => {})
@@ -208,9 +199,6 @@ test('讀目錄中按 ArrowDown：busy 仍擋其他鍵，不 preventDefault', as
   assert.equal(e.defaultPrevented, false)
 })
 
-// ───────── 觸控裝置的焦點（issue #999） ─────────
-
-/** 觸控裝置：`matchMedia` 對 `(pointer: coarse)` 回 true。 */
 function asTouch(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('pointer: coarse'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -227,7 +215,6 @@ test('觸控：讀完一層不會把焦點搬進過濾框（不叫出軟鍵盤�
     const filter = dialog.querySelector<HTMLInputElement>('input.dirpicker-filter')!
     const cancel = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.startsWith('取消'))!
     cancel.focus()
-    // 進入 beta 再讀一次目錄：讀完不能把焦點拉回過濾框。
     await act(async () => dialog.querySelector('[role=option][data-idx="1"]')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
     await settle()
     assert.notEqual(document.activeElement, filter, '觸控讀完一層不能 focus 過濾框')
@@ -295,7 +282,6 @@ test('過濾框：組字中的 Esc 不清過濾也不離開', async () => {
 })
 
 test('選取的目錄名超過 14 個字：截斷不切壞 emoji 代理對（按鈕文字不能有落單的代理字元）', async () => {
-  // 「aaaaaaaaaaaa😀bc」以字元計 15 個（UTF-16 計 16 個）：截成 13 個字元加「…」，😀 整個留著。
   const name = `${'a'.repeat(12)}😀bc`
   fakeApi((req) => (req.path.includes('/fs/dirs') ? { ...listing('/home/u'), entries: [{ name, path: `/home/u/${name}`, git: false }] } : undefined))
   await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)

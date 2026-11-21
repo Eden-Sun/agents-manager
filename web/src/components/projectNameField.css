@@ -1,4 +1,3 @@
-/* components/ProjectNameField.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .project-label {
   font-size: 13px;
   font-weight: 700;
@@ -8,8 +7,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* 比照 `.bot-name`：選取中的專案再點標題才編輯，未選取時第一下是開專案。 */
 
 .project-label.renamable {
   cursor: text;
@@ -23,8 +20,6 @@
   border-color: var(--border-strong);
   background: var(--bg-panel);
 }
-
-/* 輸入框要剛好佔住標題那格，否則列變高、白框蓋到上一列。 */
 
 .project-label-input.row {
   grid-row: 1;

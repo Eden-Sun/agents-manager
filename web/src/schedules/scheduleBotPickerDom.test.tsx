@@ -1,6 +1,3 @@
-/**
- * 排程編輯器手機版：Bot 清單（資訊、灰掉的原因、已被用的標示）、時間衝突提示、儲存列固定在底部。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -80,7 +77,6 @@ test('Bot 清單：目前選的置頂；已被其他排程用的標「已有 N �
 
 test('選了已被排程用、時間相近的 Bot：顯示同一顆 Bot 依序執行的提示；換一顆就消失', async () => {
   await openNew([other({ next_due: '2030-01-01T09:00:00.000Z' })])
-  // 新排程的時刻表單預設不是 09:00；先把時間設成 09:05，再選 b2。
   const time = document.querySelector<HTMLInputElement>('.schedule-editor input[type="time"]')!
   assert.ok(time, '每天模式要有時間欄')
   await act(async () => {

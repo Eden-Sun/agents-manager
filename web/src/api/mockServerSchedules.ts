@@ -1,8 +1,3 @@
-/**
- * mock 的專案排程（`daemon/src/schedules/api.rs` 的行為，VITE_MOCK=1 用）：
- * CRUD、同 project＋client_request_id 的冪等（同內容回原筆、不同內容 409）、手動執行（排進 mock 佇列，幾秒後變 done）、
- * 停用／刪除時撤回未送出的排隊。不模擬真的時間觸發（那是 daemon 的 tick）。寫入後推 `schedules_changed`（只帶 id）。
- */
 import { ApiError, type ApiErrorBody } from './types'
 
 function fail(status: number, error: string, message: string): never {
@@ -61,14 +56,10 @@ const newId = (p: string) => `${p}${Date.now().toString(36)}${(seq++).toString(3
 export class MockServerSchedules {
   private schedules = new Map<string, MockSchedule>()
   private occs = new Map<string, MockOcc>()
-  /** 排程代號的計數器（遞增、不回收）。 */
   private codeSeq = 0
-  /** 手動執行的 key → 實際的 occurrence（與 daemon 的 schedule_manual_requests 同義：重放回同一筆）。 */
   private manualAlias = new Map<string, string>()
-  /** 手動執行送進 fetch 的次數（測試用，看有沒有多跑）。 */
   manualRunCalls = 0
 
-  /** `botOk(bot_id, project_id)`：同專案的一般 Bot（mock.ts 用它的 bots 表判斷）。 */
   private readonly botOk: (botId: string, projectId: string) => boolean
 
   constructor(botOk: (botId: string, projectId: string) => boolean) {
@@ -132,7 +123,6 @@ export class MockServerSchedules {
     const id = decodeURIComponent(sm[1])
     const sub = sm[2]
     if (!sub && method === 'GET') {
-      // 詳情照 daemon 的 get_one：帶 recent（最近 10 筆）。
       const recent = [...this.occs.values()].filter((o) => o.schedule_id === id).sort((x, y) => (x.created_at < y.created_at ? 1 : -1)).slice(0, 10)
       return { ...this.view(this.live(id)), recent: recent.map((o) => this.occView(o)) }
     }
@@ -228,13 +218,11 @@ export class MockServerSchedules {
     const previous = known ? this.occs.get(known) : undefined
     if (!previous && open && (dry || open.source === 'dry_run')) fail(409, 'schedule_open', '試跑與正式執行不能合併')
     const occ = previous ?? (open ? this.occs.get(open.id as string) : undefined) ?? this.insertManual(s, crid, dry)
-    // 不論合併進哪一筆，都記下這個 key → 實際那一筆（重試要回同一筆）。
     if (aliasKey) this.manualAlias.set(aliasKey, occ.id)
     if (occ.status === 'pending') {
       occ.status = 'queued'
       occ.turn_status = 'queued'
       occ.turn_delivery = 'pending'
-      // mock 的「送出」：幾秒後變 done，讓 parent 能看見 queued → done 的轉移。
       setTimeout(() => {
         if (occ.status !== 'queued') return
         occ.status = 'done'

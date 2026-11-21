@@ -3,10 +3,6 @@ import { copyText } from '../lib/copyText'
 import { useT } from '../lib/i18n'
 import { toolInstallInfo } from '../lib/toolInstall'
 
-/**
- * 缺工具的安裝引導：依 OS 列指令（可複製）、官方連結、裝完重新檢查的按鈕。
- * 只給指令，不自動執行。裝完要讓「登入 shell」的 PATH 找得到，這點一定要說。
- */
 export function ToolInstallGuide({ tool, os, onRecheck }: { tool: string; os: string | null; onRecheck: () => Promise<unknown> }) {
   const t = useT()
   const [busy, setBusy] = useState(false)

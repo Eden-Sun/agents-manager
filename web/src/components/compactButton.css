@@ -1,4 +1,3 @@
-/* context 旁的「壓縮」鈕（2026-10-04 使用者）：跟狀態列同高的小字按鈕，不搶版面。 */
 .compact-btn {
   margin-left: 6px;
   padding: 0 6px;
@@ -22,7 +21,6 @@
   cursor: default;
 }
 
-/* 「不用保溫」開著：實心 accent 底，跟沒開時的外框鈕分得出來（文字也不同，不只靠顏色）。 */
 .keep-warm-skip-btn.on {
   background: var(--accent);
   border-color: var(--accent);
@@ -35,7 +33,6 @@
   background: color-mix(in srgb, var(--accent) 85%, var(--text));
 }
 
-/* 手機（2026-10-08 使用者）：觸控目標 ≥ 40px，不跟 16px 高的狀態列小鈕混用；現在在主力的狀態卡裡（#1104）。 */
 .compact-btn.keep-warm-skip-btn.touch {
   min-width: 40px;
   min-height: 40px;
@@ -46,7 +43,6 @@
   line-height: 20px;
 }
 
-/* Keep the inline action usable on phones. */
 @media (width <= 640px) {
   .compact-btn:not(.keep-warm-skip-btn) { min-height: 40px; min-width: 40px; }
 }

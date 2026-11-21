@@ -1,7 +1,3 @@
-/**
- * issue #760：WS 沒有存活偵測，半開連線（睡眠、NAT／tailscale 逾時）下畫面凍住卻顯示已連線。
- * 這裡用假 WebSocket 與假時鐘驅動 `openSocket`：靜默太久、或切回前景時靜默超過心跳間隔，都要主動丟掉舊 socket 重連。
- */
 import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { HttpTransport } from './transport'
@@ -34,8 +30,6 @@ class FakeWS {
   }
 }
 
-// rig() 換掉的瀏覽器全域要還原：留著假的 `document`，同一個行程裡之後的 DOM 測試檔拆掉 happy-dom 時會還原成這個假物件，
-// 再 import `App`（讀 `document.title`）就炸（#1985，同 wsReconnect.test.ts 在 #719 階段 3b 的修法）。
 const BROWSER_GLOBALS = ['WebSocket', 'location', 'window', 'document'] as const
 const realBrowserG = Object.fromEntries(BROWSER_GLOBALS.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
 afterEach(() => {
@@ -102,7 +96,7 @@ test('心跳 ping 幀算存活證據但不丟給 store；一直有幀就不重�
 test('開著的 socket 靜默超過 60 秒：判定半開，關掉舊的、走既有重連（since 由 open handler 補洞）', () => {
   const r = rig()
   r.last().open()
-  r.last().push({ type: 'ping' }) // 新 daemon：連上後 20 秒內就會有第一個 ping（舊 daemon 見下面那一則）
+  r.last().push({ type: 'ping' })
   const first = r.last()
   r.advance(30_000)
   r.watchdog()
@@ -112,7 +106,6 @@ test('開著的 socket 靜默超過 60 秒：判定半開，關掉舊的、走�
   assert.equal(first.closed, true, '舊 socket 要關掉')
   assert.equal(FakeWS.instances.length, 2, '馬上開新的')
   assert.equal(r.statuses.at(-1), 'connecting')
-  // 舊 socket 的 onclose 晚到不能再排第二條連線。
   first.onclose?.()
   assert.equal(FakeWS.instances.length, 2)
   r.stop()
@@ -127,7 +120,7 @@ test('切回前景：readyState 雖是 OPEN，但靜默超過心跳間隔就重�
   r.fire('focus')
   r.fire('online')
   assert.equal(FakeWS.instances.length, 1, '10 秒內有活動，不必重連')
-  r.advance(30_000) // 共靜默 40 秒，>35 秒（心跳 20 秒＋餘裕）
+  r.advance(30_000)
   r.fireDoc('visibilitychange')
   assert.equal(FakeWS.instances.length, 2, '切回前景要重連，不能只看 readyState')
   r.stop()
@@ -169,7 +162,7 @@ test('見過 ping 之後才信靜默：重連後的新連線（還沒收到第�
   r.advance(61_000)
   r.watchdog()
   assert.equal(FakeWS.instances.length, 2, '見過 ping 的 daemon 靜默 61 秒＝半開')
-  r.last().open() // 新連線，還沒收到它的第一個 ping
+  r.last().open()
   r.advance(61_000)
   r.watchdog()
   assert.equal(FakeWS.instances.length, 3, '這個 daemon 會送 ping（同一個分頁已經見過），新連線也不能靜默 60 秒')

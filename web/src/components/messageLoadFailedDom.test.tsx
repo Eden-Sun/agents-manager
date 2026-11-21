@@ -1,7 +1,3 @@
-/**
- * #1240：第一次載入對話失敗後，畫面要給「重試」，不能一直停在「載入訊息中…」；按重試成功後訊息出現、按鈕消失。
- * 真的掛 `ChatPanel`，後端是共用的 mock，只有這一支 GET 訊息的請求在第一次時失敗。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -13,7 +9,7 @@ virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
 after(async () => {
-  resetStoreForTest() // 要在拆 DOM 之前
+  resetStoreForTest()
   await teardownDom()
 })
 

@@ -1,12 +1,9 @@
-// issue #1932：agy 並行分擔的 hosts 區塊字典（HostsPanel.tsx、QuotaStrip.tsx）。
 import type { Dict } from '../../lib/i18n/types'
 
 const dict: Dict = {
-  // src/components/HostShellPanel.tsx
   '{host} shell': '{host} shell',
   'pane {id}': 'pane {id}',
 
-  // src/components/ClaudeApiPanel.tsx
   '排程結果分類': 'Schedule outcome classification',
   'changelog 影響分析': 'Changelog impact analysis',
   '影響分析 changelog': 'Changelog impact analysis',
@@ -14,9 +11,6 @@ const dict: Dict = {
   '對話訊息翻譯': 'Chat message translation',
   '更新框翻譯': 'Changelog box translation',
 
-  // src/components/IdentitiesPanel.tsx
-
-  // HostsPanel.tsx
   '遠端主機 {host}（已連線）': 'Remote host {host} (connected)',
   '遠端主機 {host}（未連線）': 'Remote host {host} (not connected)',
   ' 離線': ' Offline',
@@ -107,7 +101,6 @@ const dict: Dict = {
   '✕ {name}：{error}': '✕ {name}: {error}',
   '連線失敗': 'connection failed',
 
-  // QuotaStrip.tsx
   '本機額度': 'Local quota',
   '{host} 的額度': '{host} quota',
   '這個方案沒有 5 小時上限，只看週額度': 'This plan has no 5-hour limit, only weekly quota',

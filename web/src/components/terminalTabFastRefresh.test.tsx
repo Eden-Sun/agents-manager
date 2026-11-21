@@ -1,7 +1,3 @@
-/**
- * 終端分頁的自動刷新節奏：bot 工作中每 1 秒、閒置 3 秒；背景分頁不抓；上一趟沒回來就跳過，不疊請求。
- * interval 用假的 `window.setInterval` 記下秒數、由測試手動觸發，不靠真實時間。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -16,7 +12,6 @@ interface FakeTimer {
   cleared: boolean
 }
 
-// 這些在 `before(setupDom)` 之後才抓（模組載入時 window 還不存在）。
 let realSetInterval: typeof window.setInterval
 let realClearInterval: typeof window.clearInterval
 let hiddenDescriptor: PropertyDescriptor | undefined
@@ -37,7 +32,6 @@ function installFakeInterval() {
   }) as unknown as typeof window.clearInterval
 }
 
-/** 目前有效的那顆 interval（沒被 clear 的最後一顆）。 */
 const live = () => timers.filter((t) => !t.cleared)
 const activeMs = () => {
   const l = live()
@@ -85,7 +79,6 @@ function setHidden(v: boolean) {
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
 }
 
-/** 掛上元件並讓初次抓取回來，好讓之後的自動刷新不會被「在途」擋住。 */
 async function mountReady(botId = 'A') {
   const { calls, read } = fakeReadTerminal()
   await act(() => useStore.setState({ readTerminal: read } as never))

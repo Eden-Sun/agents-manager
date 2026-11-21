@@ -1,4 +1,3 @@
-/** 新增 Project 的標籤自動帶入（#1084）：換目錄要跟著換，使用者自己打的不動。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { dirLabel, labelAfterPick } from './projectLabel'

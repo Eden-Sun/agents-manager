@@ -20,7 +20,6 @@ test('shouldFetchModels: a failure is retried only after the cooldown (issue #26
   assert.equal(shouldFetchModels(null, at, at + 1), false)
   assert.equal(shouldFetchModels(null, at, at + MODELS_RETRY_MS - 1), false)
   assert.equal(shouldFetchModels(null, at, at + MODELS_RETRY_MS), true)
-  // null with no timestamp (legacy shape) is retried right away
   assert.equal(shouldFetchModels(null, undefined, at), true)
 })
 

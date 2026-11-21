@@ -5,12 +5,10 @@ import { useDismiss } from '../lib/useDismiss'
 import { TerminalIcon } from './Icons'
 import './attachButton.css'
 
-/** v4.0 "open in terminal": one-click copy of the host's `herdr …` attach command; a popover shows what was copied. */
 export function AttachButton({ command, compact }: { command: string; compact?: boolean }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState<'ok' | 'fail' | null>(null)
-  /** 最近一次複製的結果：說明文字看這個（`copied` 1.6 秒後會被清掉，不能拿來講「已複製」）。 */
   const [lastCopy, setLastCopy] = useState<'ok' | 'fail' | null>(null)
   const wrap = useRef<HTMLSpanElement>(null)
 

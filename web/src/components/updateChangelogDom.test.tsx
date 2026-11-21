@@ -1,7 +1,3 @@
-/**
- * 更新框的翻譯（#1870）：原文一直在，翻譯是另外一層。翻譯鈕跟回應的 lang。
- * 輪詢上限用 `translationPollAction` 斷言，不真的等 40 次。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'

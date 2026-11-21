@@ -1,4 +1,3 @@
-/** #1833：repo／query 切換的 debounce 空窗不能讓舊 repo 搜尋結果重新出現或被插入。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useRef, useState } from 'react'
@@ -88,12 +87,10 @@ function installApi({ deferDetails = false }: { deferDetails?: boolean } = {}) {
   return { requests, mainSearches, details, restore: () => { globalThis.fetch = originalFetch } }
 }
 
-/** 讓 fetch／React 的後續工作跑完（只讓出 macrotask，不睡牆鐘；手動時鐘下 `settle()` 的 setTimeout 不會到期）。 */
 async function pump(rounds = 5) {
   for (let i = 0; i < rounds; i++) await act(async () => new Promise<void>((resolve) => setImmediate(resolve)))
 }
 
-/** 把手動時鐘推進 `ms`（debounce 300ms 到期）再讓後續工作跑完。 */
 async function advance(timers: { clock: { advance(ms: number): Promise<void> } }, ms: number) {
   await act(async () => timers.clock.advance(ms))
   await pump()
@@ -124,7 +121,7 @@ async function switchRepo(repo: string) {
 test('切 repo 後 debounce 期間丟棄舊結果，完整插入使用新 repo 的標題、URL 與內文', async () => {
   setupProject()
   const api = installApi()
-  const timers = installManualTimers() // 搜尋有 300ms debounce：用手動時鐘走，不睡牆鐘
+  const timers = installManualTimers()
   try {
     await startMainSearch(timers)
     assert.equal(api.mainSearches.length, 1, '主 repo 的 needle 請求仍在飛')
@@ -152,7 +149,7 @@ test('切 repo 後 debounce 期間丟棄舊結果，完整插入使用新 repo �
 test('切 repo 後舊搜尋失敗不覆蓋新 repo 狀態', async () => {
   setupProject()
   const api = installApi()
-  const timers = installManualTimers() // 搜尋有 300ms debounce：用手動時鐘走，不睡牆鐘
+  const timers = installManualTimers()
   try {
     await startMainSearch(timers)
     assert.equal(api.mainSearches.length, 1)
@@ -208,7 +205,7 @@ test('切換專案時第一次 render 就不顯示舊專案的 Issues 清單', a
     if (path.includes('/session')) return Promise.resolve(respond({ token: 'test-token' }))
     if (path.includes('/submodules')) return Promise.resolve(respond({ submodules: [] }))
     if (path.includes('/projects/p1/issues')) return Promise.resolve(respond({ issues: [MAIN_ISSUE] }))
-    if (path.includes('/projects/p2/issues')) return new Promise(() => {}) // p2 尚未回應
+    if (path.includes('/projects/p2/issues')) return new Promise(() => {})
     return Promise.resolve(respond({}))
   }) as typeof fetch
 
@@ -236,7 +233,6 @@ test('切換專案時第一次 render 就不顯示舊專案的 Issues 清單', a
     await act(async () => {
       setPid('p2')
     })
-    // 切換至 p2，第一次 render 就不應該殘留 p1 的 issue 列表
     assert.equal(document.querySelector('.issue-title'), null, '切換專案後第一次 render 不顯示舊專案資料')
   } finally {
     globalThis.fetch = originalFetch

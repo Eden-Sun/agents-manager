@@ -18,8 +18,6 @@ import { safeHttpUrl } from '../lib/safeUrl'
 import { agoLabel } from '../lib/agoLabel'
 import { t, useT } from '../lib/i18n'
 
-/** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
-
 const STATE_KEY = 'am.issueState'
 type IssueState = 'open' | 'closed'
 type IssueScope = { projectId: string; githubUrl: string; repo: string; state: IssueState; query: string; generation: number }
@@ -53,11 +51,9 @@ export function IssuesBar({
   projectId: string
   draftKey: DraftKey
   inputRef: RefObject<HTMLTextAreaElement | null>
-  /** 插完之後由外層處理（手機：彈窗收掉）。有給就不把焦點搶回輸入框（#1241）。 */
   onInserted?: () => void
 }) {
   const github = useStore((s) => s.projects.find((p) => p.id === projectId)?.github ?? null)
-  // deps 用字串：`github` 物件每次 normalize 都重建，當 deps 會讓任何 state 事件都重抓（快取冷了就是一次 gh）。
   const githubUrl = github?.url ?? null
   const host = useStore((s) => s.projects.find((p) => p.id === projectId)?.host ?? 'local')
   const setDraft = useStore((s) => s.setDraft)
@@ -73,7 +69,6 @@ export function IssuesBar({
   const [openCount, setOpenCount] = useState<number | null>(null)
   const [fetching, setFetching] = useState<number | null>(null)
   const [issuesScope, setIssuesScope] = useState<IssueScope | null>(null)
-  // `''` = 專案本身；掛在 projectId 上，換專案自然歸零，不用在 effect 裡 setState。
   const [subsFor, setSubsFor] = useState<{ pid: string; subs: ProjectSubmodule[] }>({ pid: '', subs: [] })
   const [repoFor, setRepoFor] = useState<{ pid: string; repo: string }>({ pid: '', repo: '' })
   const submodules = subsFor.pid === projectId ? subsFor.subs : []
@@ -168,7 +163,6 @@ export function IssuesBar({
     void load(state, q)
   }, [load, state, q])
 
-  // Query changes are debounced 300 ms; the state toggle refetches immediately.
   useEffect(() => {
     if (!open) return
     const t = setTimeout(() => void load(state, q), q ? 300 : 0)
@@ -194,11 +188,9 @@ export function IssuesBar({
     try {
       localStorage.setItem(STATE_KEY, st)
     } catch {
-      /* ignore */
     }
   }
 
-  /** Insert at the composer caret (or the end), then put the caret after the snippet. */
   const insert = (snippet: string) => {
     const el = inputRef.current
     const cur = useStore.getState().drafts[draftKey] ?? ''
@@ -214,8 +206,6 @@ export function IssuesBar({
     setDraftCursor(draftKey, pos)
     setOpen(false)
     if (onInserted) {
-      // 手機：這顆 IssuesBar 在彈窗裡，輸入框在彈窗外面；焦點 focus 過去會被焦點陷阱拉回來，看起來像沒反應（#1241）。
-      // 不自動叫出鍵盤，同 Composer 的 `autoFocus: !phone`。
       onInserted()
       return
     }
@@ -267,7 +257,7 @@ export function IssuesBar({
           <span className="issues-owner">{shown.owner}/</span>
           {shown.repo}
         </span>
-        {/* 沒有數字就不畫：藥丸裡放單字讀起來像壞掉的數字。 */}
+        {}
         {openCount === null ? null : (
           <span className="issues-count">{openCount >= 100 ? '100+' : openCount} open</span>
         )}

@@ -9,11 +9,6 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { UpstreamChangelogBox } from './UpstreamChangelogBox'
 import type { DialogControl } from './MergedUpdateChip'
 
-/**
- * header 的「grok 有新版」（issue #761）：跟 claude／codex／herdr 那幾顆同一個位置與樣子，但**只提示、不一鍵安裝**——
- * grok 的升級是在那台主機上跑 `grok update`（官方 installer，磁碟換版後跑著的 bot 要重啟才換），沒有我們能代跑的固定流程。
- * 持續顯示到每台主機都追上為止；按下去只是把指令與落後的主機講清楚。
- */
 export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
   const plan = useGrokPlan()
@@ -45,7 +40,7 @@ export function GrokUpdateChip({ control }: { control?: DialogControl } = {}) {
             <ul className="confirm-choices">
               {plan.hosts.map((h) => (
                 <li key={h.host}>
-                  {/* i18n-ignore */}
+                  {}
                   <strong>{h.host}</strong>：{h.from ?? t('讀不到版本')} → {plan.target}
                 </li>
               ))}

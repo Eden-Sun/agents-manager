@@ -1,4 +1,3 @@
-/** mock 的分享事件要跟 daemon 同形（API.md §8）：`bot_share_changed` 帶 `allow_embed`；輪換連結只換 token，不動 `allow_embed`（daemon 的 `rotate` 只寫 token 欄位）。 */
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
@@ -6,7 +5,6 @@ import { manualMockClock, useManualMockClock } from './mockClock.ts'
 
 interface Frame { type: string; data?: Record<string, unknown> }
 
-// 開 socket 要等 mock 的 120ms 上線延遲：用虛擬時間，不在牆鐘上等。
 before(() => void useManualMockClock(true))
 after(() => void useManualMockClock(false))
 const mock = new MockTransport()

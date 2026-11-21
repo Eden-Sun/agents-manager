@@ -1,4 +1,3 @@
-/* components/Sidebar.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .sidebar-head {
   position: relative;
   z-index: 6;
@@ -9,11 +8,9 @@
   min-height: 46px;
   padding: 6px 10px 6px 14px;
   border-bottom: 1px solid var(--border);
-  /* RAM 下拉是 absolute，不能 hidden（曾把下拉裁掉）。 */
   overflow: visible;
 }
 
-/* 標題列右欄：瀏覽器晶片。重建 chip 已搬到「AG Man」右上（見 `.head-brand`）。 */
 .head-right {
   display: flex;
   flex-direction: column;
@@ -23,12 +20,6 @@
   min-width: 0;
 }
 
-/*
- * 品牌那一欄兩行，右緣對齊（2026-09-14 使用者：「counter 數就放在 AG Man 的右上 = 燈號上面」）：
- *   AG Man ……… ⟳ 1/5
- *   pane 27 ………… ●
- * 兩行都撐滿這一欄、內容左右分開，重建申請數才會剛好疊在連線燈號正上方。
- */
 .head-brand {
   display: flex;
   flex-direction: column;
@@ -53,15 +44,11 @@
   margin-left: auto;
 }
 
-/* 側欄不夠寬時「剩 N」在這格折行，不去擠左右兩欄。 */
-
 .head-ram {
   justify-self: center;
   min-width: 0;
 }
 
-/* 本機＋遠端（@mac_builder）各一顆（2026-09-28 使用者）：並排放不下（側欄 288px 時第二顆被裁掉），
-   改成上下疊、每顆一行（已用＋剩），總高跟單顆兩行差不多。 */
 .head-ram.multi {
   display: flex;
   flex-direction: column;
@@ -90,7 +77,6 @@
   min-width: 0;
 }
 
-/* 每台的 pane 數只在手機 menu 出現（2026-09-28 使用者：menu 上方還空）；桌機左邊已有 pane 總數。 */
 .sidebar-head .head-ram .head-host-panes {
   display: none;
 }
@@ -108,34 +94,26 @@
     margin-right: 2px;
   }
 
-  /* 手機點擊區預設 40px（styles.css），兩台疊起來中間空一大段；疊放時每列 20px（整列都能點，徽章本身 17px）。 */
-  /* flex 置中：block 按鈕會帶 14px 字的行高，徽章被推低、跟 pane 數差 1.5px。 */
   .head-ram.multi .mem-open {
     display: flex;
     align-items: center;
     min-height: 20px;
   }
 
-  /* 手機的 `AG Man` 已視覺收掉，左欄只剩部署 chip 與主題／燈號：排成一列，標題列不必兩列高（2026-09-28 使用者）。 */
   .sidebar-head .head-brand {
     flex-direction: row;
     align-items: center;
     gap: 6px;
   }
 
-  /* 分主機的數字已經在 RAM 旁邊，總數那顆收掉，不讓 24／20／4 三個數字並列。 */
   .sidebar-head:has(.head-ram.multi) .head-brand-meta > .pane-badge {
     display: none;
   }
 }
 
-/* 側欄放不下「已連線」（會切成「已連」），燈＋title 就夠。 */
-
 .sidebar-head .conn-label {
   display: none;
 }
-
-/* herdr pane 數，與 RAM 同一種徽章；細節在 tooltip。 */
 
 .pane-badge {
   flex: none;
@@ -162,8 +140,6 @@
   font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-
-/* 標題縮成「AG Man」是為了讓徽章有位置，所以它不再被壓縮（`flex: 1` 會截成「A…」）；推空白改由徽章前的 auto margin。 */
 
 .sidebar-head h1 {
   margin: 0;
@@ -237,8 +213,6 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* 側欄只該有直捲軸：`overflow-y: auto` 會連帶 x 軸 auto，而貼右緣鍵的 `.icon-tip` 泡泡用 translateX(-50%)，
-     會多撐出橫捲軸（scrollWidth 324 vs 287）。x 軸關掉不影響泡泡顯示。 */
   overflow-x: hidden;
   padding: 8px 8px 16px;
 }
@@ -270,8 +244,6 @@
   color: var(--text-dim);
 }
 
-/* 收合後留一條可點細列，否則收起的專案看起來像沒有 bot。 */
-
 .project-folded {
   display: block;
   width: 100%;
@@ -289,8 +261,6 @@
   color: var(--text-dim);
 }
 
-/* 燈號在上、收合鈕在正下方（2026-09-13 使用者）：並排會讓有子 agent 的列右移一格，名字對不齊。 */
-
 .bot-gutter {
   display: flex;
   flex: none;
@@ -298,7 +268,6 @@
   align-items: center;
   justify-content: center;
   gap: 3px;
-  /* 固定寬度裝得下 `▶ 1 ●`：這欄是所有列的共同基準線，寬度一變就對不齊。 */
   width: 26px;
 }
 
@@ -308,16 +277,11 @@
   gap: 5px;
 }
 
-/* 小燈比列燈小一號，不搶父列自己那顆。 */
-
 .bot-kids-lamp {
   width: 6px;
   height: 6px;
   margin-left: 1px;
 }
-
-/* 父列「在等子 agent」記號（2026-09-12 使用者）。黃不是紅：紅只代表「要你本人回答」。
-   實心 = 還在跑，空心 = 子 agent 回報了還沒人看。 */
 
 .bot-kids-wait {
   flex: none;
@@ -363,7 +327,6 @@
   bottom: 50%;
 }
 
-/* 孫代：再往裡縮一格，線接在它自己的子列上（SPEC §6.5a）。 */
 .bot-child.deep {
   margin-left: 14px;
 }
@@ -489,8 +452,6 @@
   min-width: 0;
 }
 
-/* 跟頂端 QuotaStrip 同一組 low/critical 門檻。 */
-
 .bot-quota-chip {
   height: 20px;
   display: inline-flex;
@@ -514,8 +475,6 @@
   color: var(--danger);
 }
 
-/* The lamp already says idle / offline; only transitional or attention states get words. */
-
 .bot-state {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -525,8 +484,6 @@
 .bot-state.offline {
   display: none;
 }
-
-/* agent 自己的標題放第二行尾巴：擠在第一行時兩邊各剩六個字。仍會截，全文在 title。 */
 
 .bot-agent-title {
   min-width: 0;
@@ -552,8 +509,6 @@
 .bot-state.stopping {
   color: var(--warn);
 }
-
-/* forms */
 
 .sidebar-foot {
   border-top: 1px solid var(--border);
@@ -583,8 +538,6 @@
   padding: 8px 14px 12px;
 }
 
-/* 「N 個 Bot 已隱藏（額度不足）」：全隱藏時當 `.project-empty` 標題，還有剩時當卡片腳註。 */
-
 .project-quota-hidden {
   margin: 0;
   font-size: 12.5px;
@@ -610,8 +563,6 @@ p.project-quota-hidden {
   }
 }
 
-/* directory picker (new project) */
-
 .field-with-btn {
   display: flex;
   gap: 6px;
@@ -622,15 +573,11 @@ p.project-quota-hidden {
   min-width: 0;
 }
 
-/* 側欄「待升級」記號：綠色雙 chevron、沒有底（2026-09-10 使用者）。 */
-
 .bot-kind-wrap {
   position: relative;
   flex: none;
   display: inline-flex;
 }
-
-/* 側欄記號點不下去（列本身是按鈕），但要看得見，不能只有 tooltip。 */
 
 .bot-turn-error {
   flex: none;
@@ -643,8 +590,6 @@ p.project-quota-hidden {
   color: #fff;
   white-space: nowrap;
 }
-
-/* project group chat (SPEC §13) */
 
 .project-label-btn {
   display: grid;
@@ -732,8 +677,6 @@ p.project-quota-hidden {
   color: var(--accent-ink);
 }
 
-/* option rows (kind / effort / identity / project) */
-
 .opt-filter {
   width: 100%;
   font-size: 12px;
@@ -753,7 +696,6 @@ p.project-quota-hidden {
 }
 
 @media (width <= 640px) {
-  /* 搜尋框（側欄最常點）補到 40 高。 */
 
   .bot-search-input {
     min-height: 40px;
@@ -761,17 +703,13 @@ p.project-quota-hidden {
 }
 
 @media (width <= 640px) {
-  /* 收合鈕在燈號下面（2026-09-13）：負上下 margin 會疊到燈號上，改為欄寬 34px、鈕吃滿。 */
 
   .bot-gutter {
     width: 34px;
   }
 }
 
-/* 抽屜標題列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4）：兩列徽章撐到 100px，收成一列。 */
-
 @media (width <= 640px) {
-  /* 標題只視覺上收掉，不從 a11y 樹拿走：它是唯一的 `<h1>`。 */
 
   .sidebar-head h1 {
     position: absolute;
@@ -788,16 +726,12 @@ p.project-quota-hidden {
   }
 }
 
-/* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
-
 @media (width <= 640px) {
   .bot-quota-chip {
     font-size: 12px;
     min-height: 22px;
   }
 }
-
-/* 子 bot 用別的帳號：母 bot 的身份徽章照常，後面掛一個更小的字＝子 bot 用的帳號（2026-09-18 使用者）。 */
 
 .identity-diverged {
   display: inline-flex;
@@ -807,7 +741,6 @@ p.project-quota-hidden {
 }
 
 .identity-diverged-mark {
-  /* 比身份徽章小一號：它是附註，不是第二個身份（2026-09-18 使用者：「讓字更小」）。 */
   font-size: 9px;
   font-weight: 650;
   font-family: var(--font-mono);
@@ -815,7 +748,6 @@ p.project-quota-hidden {
   white-space: nowrap;
 }
 
-/* 左上角 RAM 徽章縮一號（2026-09-15 使用者：「ram 的顯示可以不用那麼大」）。 */
 .sidebar-head .head-ram .mem-badge {
   padding: 0 4px;
   font-size: 10px;
@@ -823,12 +755,10 @@ p.project-quota-hidden {
   gap: 3px;
 }
 
-/* 「剩 N」自己不折：最多兩行（RAM 已用／剩 N），不要折成三行把徽章撐高。 */
 .sidebar-head .head-ram .mem-free {
   white-space: nowrap;
 }
 
-/* 主題鈕跟連線燈號一起靠右，疊在重建申請數正下方（2026-09-15 使用者）。 */
 .head-brand-meta > .theme-toggle {
   margin-left: auto;
 }
@@ -837,8 +767,6 @@ p.project-quota-hidden {
   margin-left: 0;
 }
 
-/* 身份標籤在 kind 圖示正下方（2026-11-04 使用者：「再改 cc0 放回 logo 圖下面」；一般列與子 agent 精簡列相同，
-   取代同日稍早的「kind 右邊」）。小字、無框、置中、不換行。 */
 .bot-kind-wrap {
   flex-direction: column;
   align-items: center;
@@ -867,20 +795,15 @@ p.project-quota-hidden {
   white-space: nowrap;
 }
 
-/* 精簡列：kind 18px＋身份 9px 要塞進 32px 列高，中段上下留白從 5px 收到 2px（更新記號仍凸得出去）。
-   `.compact.compact`：main 的 styles.css 比這支晚載入，同權重的舊規則會蓋過來。 */
 .bot-row.compact.compact .bot-main {
   padding-top: 2px;
   padding-bottom: 2px;
 }
 
-/* 第二行拿掉身份後沒有內容就不留空行。 */
 .bot-sub:empty {
   display: none;
 }
 
-
-/* 專家模式專用「新增 Bot」樣式 */
 .new-expert-bot-form {
   display: flex;
   flex-direction: column;
@@ -954,7 +877,6 @@ p.project-quota-hidden {
   color: var(--danger, #ef4444);
 }
 
-
 .expert-runtime-summary {
   display: flex;
   flex-direction: column;
@@ -991,7 +913,6 @@ p.project-quota-hidden {
   border-top: 1px dashed var(--border);
 }
 
-/* 專案底下可收合的「排程 bot」區（預設收合）。 */
 .scheduler-bots-head {
   display: flex;
   align-items: center;
@@ -1010,7 +931,6 @@ p.project-quota-hidden {
   opacity: 0.7;
 }
 
-/* 排程 bot 區：收合時的提醒、bot 服務的排程代號、排程列的 bot 跳轉鈕。 */
 .scheduler-bots-attn { margin-left: auto; font-size: 11px; font-weight: 600; }
 .scheduler-bots-attn.blocked { color: var(--danger, #d33); }
 .scheduler-bots-attn.unread { color: var(--accent, #36c); }
@@ -1018,7 +938,6 @@ p.project-quota-hidden {
 .project-schedule-bot { background: none; border: 0; padding: 2px 6px; font-size: 11px; color: var(--text-dim, inherit); cursor: pointer; text-decoration: underline dotted; min-height: 24px; }
 @media (max-width: 720px) { .project-schedule-bot { min-height: 32px; } }
 
-/* 環境設定→顯示：網頁推播 */
 .push-settings { margin-top: 12px; }
 .push-settings-title { font-weight: 600; margin-bottom: 4px; }
 .push-settings-note { margin: 4px 0; font-size: 12px; opacity: 0.8; }

@@ -67,7 +67,6 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
   try {
     await mount(<ApiBotUsageBar botId="bot-1" />)
 
-    // 等待 useEffect 非同步載入完成
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
@@ -75,15 +74,11 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
     const bar = document.querySelector('[data-testid="api-usage-bar"]')
     assert.ok(bar, 'api-usage-bar should render')
 
-    // Balance 晶片唯讀渲染
-    // 餘額只放頂部額度列（BalanceQuotaChip），狀態列不重複。
     assert.equal(bar.querySelector('[data-k="balance"]'), null, '狀態列不重複餘額')
 
-    // 未設定上限時應顯示「設定上限」
     const capSetupBtn = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap-setup"]')
     assert.ok(capSetupBtn, 'cap setup button should render when cap is null')
 
-    // 點擊進行設定上限
     await act(async () => {
       capSetupBtn.click()
     })
@@ -94,7 +89,6 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
     const input = form.querySelector<HTMLInputElement>('#cap-input')
     assert.ok(input, 'cap input should render')
 
-    // 變更數值為 10.00 並送出
     await act(async () => {
       const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')!.set!
       set.call(input, '10.00')
@@ -107,12 +101,10 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
-    // 表單應關閉，並顯示新上限「上限 $0.00 / $10.00」
     const updatedCapChip = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap"]')
     assert.ok(updatedCapChip, 'cap chip should be visible after save')
     assert.ok(updatedCapChip.textContent?.includes('$0.00 / $10.00'), 'updated cap should be shown')
 
-    // 再次點擊打開表單並測試清除
     await act(async () => {
       updatedCapChip.click()
     })
@@ -127,7 +119,6 @@ test('ApiBotUsageBar 顯示唯讀 Balance 晶片與 Cap 晶片及編輯/清除�
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
-    // 清除後應變回「設定上限」
     const revertedSetupBtn = bar.querySelector<HTMLButtonElement>('.api-balance-chip[data-k="cap-setup"]')
     assert.ok(revertedSetupBtn, 'should revert to cap setup button after clear')
   } finally {
@@ -221,18 +212,15 @@ test('ApiBotUsageBar 的「回合」晶片：顯示每回合時間／呼叫上�
     assert.match(form.textContent ?? '', /回合時間（秒，1–3600）/)
     assert.match(form.textContent ?? '', /呼叫次數（1–64）/)
     assert.match(form.textContent ?? '', /下一回合起生效/)
-    // 超出範圍：不送出。
     await type(form.querySelector<HTMLInputElement>('#turn-timeout-input')!, '5000')
     await submit()
     assert.equal(puts.length, 0)
     assert.ok(document.querySelector('[role="alert"]'), '顯示範圍提示')
-    // daemon 拒絕：留在表單、顯示原因。
     await type(form.querySelector<HTMLInputElement>('#turn-timeout-input')!, '30')
     await submit()
     await settleUi()
     assert.equal(puts.length, 1)
     assert.match(document.querySelector('[role="alert"]')?.textContent ?? '', /turn_timeout_below_command_timeout/)
-    // 成功：只送每回合上限，不帶 cap_usd；晶片更新。
     await type(document.querySelector<HTMLInputElement>('#turn-timeout-input')!, '2400')
     await type(document.querySelector<HTMLInputElement>('#turn-calls-input')!, '30')
     await submit()
@@ -279,7 +267,6 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     await mount(<ApiBotUsageBar botId="bot-1" />)
     await settleUi()
 
-    // 手機預設：有 Cap、Turn、Spent 與展開鈕 ▾；Cache、Speed、Calls 收合
     assert.ok(document.querySelector('[data-k="cap"]'), 'Cap 晶片要在')
     assert.ok(document.querySelector('[data-k="turn-limits"]'), '回合晶片要在')
     assert.equal(document.querySelector('[data-k="cost"]'), null, '累計收進展開區')
@@ -290,7 +277,6 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     assert.ok(expandBtn, '手機展開按鈕要在')
     assert.equal(expandBtn.textContent, '▾')
 
-    // 點擊展開
     await act(async () => { expandBtn.click() })
     await settleUi()
 
@@ -300,7 +286,6 @@ test('ApiBotUsageBar 在手機寬度（PHONE_QUERY）時收合次要晶片，提
     assert.ok(document.querySelector('[data-k="calls"]'), '展開後 requests 晶片要在')
     assert.equal(expandBtn.textContent, '▴')
 
-    // 點擊收合
     await act(async () => { expandBtn.click() })
     await settleUi()
     assert.equal(document.querySelector('[data-k="cache"]'), null, '收合後快取晶片隱藏')
@@ -347,13 +332,12 @@ test('ApiBotUsageBar 的快取倒數：熱剩 m:ss、回合中「熱」、過期
   const at = (iso: string) => Date.parse(iso)
   const hot = apiCacheChip(base, at('2026-11-15T03:01:18.000Z'), 148_000, 'claude-opus-5-5', false)!
   assert.match(hot.label, /3:42/)
-  assert.equal(hot.level, 'low') // 剩不到 5 分鐘＝紅
+  assert.equal(hot.level, 'low')
   assert.equal(apiCacheChip({ ...base, working: true }, at('2026-11-15T03:30:00.000Z'), null, null, false)!.level, 'hot')
   const cold = apiCacheChip(base, at('2026-11-15T03:06:00.000Z'), 100_000, 'claude-opus-5-5', false)!
   assert.equal(cold.level, 'cold')
   assert.match(cold.label, /\$0\.50/, '10 萬 token × $5/M 的 5 分鐘寫入價')
   assert.equal(apiCacheChip({ ...base, last_request_at: null, expires_at: null, ttl_secs: null }, Date.now(), null, null, false), null)
-  // 1 小時 TTL 用 1h 寫入單價；未知模型只講已冷。
   assert.match(apiCacheChip({ ...base, ttl_secs: 3600, expires_at: '2026-11-15T04:00:00.000Z' }, at('2026-11-15T05:00:00.000Z'), 100_000, 'claude-opus-5-5', false)!.label, /\$0\.80/)
   assert.equal(apiCacheChip(base, at('2026-11-15T04:00:00.000Z'), 100_000, 'mystery', false)!.label, '已冷')
 })
@@ -424,7 +408,6 @@ test('累計只放已結算的估算花費；預留與結果不明另外標在�
     if (path.includes('/api-usage')) {
       return {
         attempts: { total: 6, recorded: 3, reserved: 1, unknown: 2, failed: 0 },
-        // 2026-11-15 P.api 的形狀：已結算 $35.90、進行中預留 $1.00、結果不明兩筆各以預留上限 $6.53 記。
         cost_microusd: { recorded: 35_898_529, reserved: 1_000_000, unknown: 13_060_000 },
         tokens: { input: 1, output: 1, cache_read: 0, cache_creation: 0 },
         cache_hit_rate: null,

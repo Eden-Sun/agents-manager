@@ -1,7 +1,3 @@
-/**
- * 保溫回覆不亮未讀（SPEC §6.5k）：保溫回合是 daemon 代送的，不管走 `message_added`、`turn_updated` 還是 working→idle 邊緣，
- * 都不能讓 `botUnread` 長出一筆；一般回合照樣記（對照組）。`client_request_id` 新前綴 `keep-warm:` 與舊資料的 `keepalive:` 都認。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { seed, runTurn, status, turn } from './unreadTurn.harness.ts'

@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 
 const css = readFileSync(new URL('./styles.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** 手機（≤640px）區塊裡，`selector {` 規則的內文；找不到回 null。 */
 function phoneRule(selector: string): { body: string; at: number } | null {
   const media = /@media \(width <= 640px\)\s*\{/g
   for (let m = media.exec(css); m; m = media.exec(css)) {

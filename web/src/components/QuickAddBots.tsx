@@ -9,7 +9,6 @@ import { KindTag } from './KindTag'
 import { useT } from '../lib/i18n'
 import './quickAddBots.css'
 
-/** 空專案的一鍵新增：只列這台主機上真的能開的 kind／已登入身份，點一下就建好並啟動。 */
 type Choice = {
   key: string
   kind: BotKind
@@ -17,7 +16,6 @@ type Choice = {
   label: string
   title: string
   loggedOut: boolean
-  /** 這個身份在額度條上被勾成「暫時停用」了（見 store/quotaHide.ts）。 */
   quotaOff: boolean
 }
 
@@ -51,7 +49,6 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
       if (!tools[kind]?.installed) continue
       const ids = enabledIdentities(disabledIdentities, host, identitiesOfHost(allIdentities, status, host)).filter((i) => i.kind === kind)
       if (ids.length === 0) {
-        // 沒登入的列出來，點了開登入流程（不是新增）。
         const loggedOut = tools[kind].logged_in === false
         const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, null))
         out.push({
@@ -70,7 +67,6 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
         continue
       }
       if (kind === 'agy') {
-        // agy 的預設帳號（ag0）不在身份表裡（它不是 `[[identities]]`）：有 ag1 時也要能直接開一顆 ag0。
         const loggedOut = tools[kind].logged_in === false
         const quotaOff = isQuotaDisabled(disabledQuota, quotaDisableKey(host, kind, null))
         out.push({
@@ -114,7 +110,6 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
   if (choices.length === 0) return null
 
   const pick = (c: Choice) => {
-    // 未登入的開出來只會停在登入畫面：點下去直接開登入流程（issue #1931），登好後再點一次就是新增。
     if (c.loggedOut) {
       void loginKindOnHost(host, c.kind, c.identity).then((opened) => {
         if (opened && !c.identity) setLoginPending(host)
@@ -125,7 +120,6 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
     setBusy(c.key)
     void addBot(projectId, {
       name: nextName(c.identity ?? c.kind, projectId, bots),
-      // 這裡算的名字是從瀏覽器的清單來的，剛新增完那一拍可能還沒同步；撞到就讓 daemon 往後找。
       name_auto: true,
       kind: c.kind,
       model: null,
@@ -152,7 +146,6 @@ export function QuickAddBots({ projectId }: { projectId: string }) {
           key={c.key}
           type="button"
           className={`quick-add-chip${c.quotaOff ? ' quota-off' : ''}`}
-          // 停用中的身份點下去只會多一顆同樣沒額度的 bot——列出來但不給點；未登入的點了去登入。
           disabled={busy !== null || c.quotaOff}
           title={c.title}
           onClick={() => pick(c)}

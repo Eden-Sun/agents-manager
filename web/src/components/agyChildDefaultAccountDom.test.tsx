@@ -1,7 +1,3 @@
-/**
- * 子 agent 跑在 kind 的預設帳號上（agy 的真家目錄、沒有空 env 身份）：側欄身份晶片要顯示「預設」，不是「未知」。
- * 「未知」只代表 run 還沒記到身份（runtime_identity＝NULL）；預設帳號是 daemon 查過之後記下的空字串。
- */
 import test, { afterEach, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

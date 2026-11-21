@@ -1,8 +1,3 @@
-/**
- * 主力的「保溫」在畫面上的兩個東西（真的掛元件進 happy-dom，後端是 `MockTransport`，走正式的 fetch 路徑）：
- * - 「壓縮」鈕旁的「不用保溫」開關：只主力的 claude 有（codex 的 cache 不會冷）、顯示目前狀態、再按一次取消。
- * - 保溫回覆到了：主力晶片帶 ♨ 標記（`keep-warm-replied`），不畫紫色外框；使用者送出新 prompt 才恢復；保溫回覆不亮未讀。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import type { FakeRequest } from '../testing/domHarness'
@@ -17,8 +12,6 @@ virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
 after(async () => {
-  // 共用的 mock 還留著本檔最後送出的回合（要 2.4 秒虛擬時間才收尾）；不等它結束的話，同一個行程裡之後的檔案
-  // （suggestionBarDom）看到的是「這回合還在跑」，建議那一條不顯示（#1964）。
   await advanceMockTime(3000)
   resetStoreForTest()
   await teardownDom()
@@ -28,7 +21,6 @@ const mock = sharedMock
 const btn = () => document.querySelector<HTMLButtonElement>('.keep-warm-skip-btn')
 const chip = (id: string) => document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${id}"]`)
 
-/** 起 `name` 並等它 running；回 bot id。 */
 async function running(name: string): Promise<{ id: string; requests: FakeRequest[] }> {
   const requests = mockApi(mock)
   await useStore.getState().refreshState()
@@ -36,7 +28,7 @@ async function running(name: string): Promise<{ id: string; requests: FakeReques
   assert.ok(bot, `mock 要有 ${name}`)
   if (useStore.getState().runs[bot.id]?.state !== 'running') {
     await mock.request('POST', `/bots/${bot.id}/start`)
-    await advanceMockTime(3000) // mock 的啟動要 2.5 秒虛擬時間
+    await advanceMockTime(3000)
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.state === 'running'
@@ -119,7 +111,7 @@ for (const [name, touch] of [['am-claude', false], ['am-claude', true]] as const
     await mock.request('POST', `/bots/${id}/prompt`, { text: '新活動', client_request_id: `warm-button-${id}-${touch}` })
     await act(() => useStore.getState().refreshState())
     assert.equal(btn()!.textContent, '不用保溫', '新 prompt 清除 ♨ 時同步回復')
-    await advanceMockTime(3000) // mock 的回合要 2.4 秒虛擬時間
+    await advanceMockTime(3000)
     await until(async () => {
       await act(() => useStore.getState().refreshState())
       return useStore.getState().runs[id]?.agent_status === 'idle'
@@ -162,7 +154,6 @@ test('保溫回覆：TTL 內帶 ♨ 提示、過 TTL 消失、送 prompt 立即�
   assert.ok(chip(id), '主力一定有晶片')
   assert.ok(!chip(id)!.classList.contains('keep-warm-replied'), '一開始沒提示')
 
-  // 1) 保溫後 TTL 內帶 ♨ 提示：晶片帶 ♨ 符號，不畫紫色外框，不亮未讀
   mock.simulateKeepWarmReply(id)
   await act(() => useStore.getState().refreshState())
   await until(() => chip(id)!.classList.contains('keep-warm-replied'), '保溫後 TTL 內晶片標記 keep-warm-replied')
@@ -170,29 +161,24 @@ test('保溫回覆：TTL 內帶 ♨ 提示、過 TTL 消失、送 prompt 立即�
   assert.match(chip(id)!.querySelector('.sr-only')!.textContent ?? '', /保溫回覆已到/)
   assert.equal(chip(id)!.classList.contains('unread'), false, '保溫回覆不亮未讀')
   assert.equal(useStore.getState().botUnread[id] ?? 0, 0)
-  // 顏色不跟快取倒數的底色 class、未讀、要回答撞：它是獨立的 class，倒數底色照樣在。
   assert.ok(![...chip(id)!.classList].some((c) => c === 'unread' || c === 'needs-reply'))
 
-  // 2) 過 TTL 提示消失：快取已涼（65 分鐘前，超過 3600 秒 TTL），即使 keep_warm_replied_at 仍在，♨ 也消失
   mock.setCacheAge(id, 65)
   await act(() => useStore.getState().refreshState())
   await until(() => !chip(id)!.classList.contains('keep-warm-replied'), '過 TTL 後提示消失')
   assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '過 TTL 後 ♨ 消失')
 
-  // 重新演一輪保溫回覆，讓提示再次出現
   mock.simulateKeepWarmReply(id)
   await act(() => useStore.getState().refreshState())
   await until(() => chip(id)!.classList.contains('keep-warm-replied'), '再次保溫後帶有提示')
   assert.ok(chip(id)!.querySelector('.unread-chip-warm'), '再次保溫後有 ♨')
 
-  // 3) 送 prompt 立即取消提示：使用者送 prompt 後 daemon 把 keep_warm_replied_at 清為 null
   await mock.request('POST', `/bots/${id}/prompt`, { text: '真的 prompt', client_request_id: `real-${Date.now()}` })
   await act(() => useStore.getState().refreshState())
   await until(() => !chip(id)!.classList.contains('keep-warm-replied'), '送 prompt 後提示立即恢復')
   assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '送 prompt 後 ♨ 消失')
 })
 
-/** 冰凍（不用保溫）：主力晶片畫雪花（inline SVG），tooltip 講 cache 到期前自動壓縮；取消後雪花消失。 */
 test('冰凍：按了「不用保溫」的主力晶片畫雪花圖示，取消後消失', async () => {
   const { id } = await running('am-claude')
   await act(() => useStore.getState().refreshState())
@@ -214,14 +200,12 @@ test('冰凍：按了「不用保溫」的主力晶片畫雪花圖示，取消�
   await until(() => chip(id)!.querySelector('.frozen-badge') === null, '取消後雪花消失')
 })
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true。 */
 function asPhone(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   return () => (window.matchMedia = original)
 }
 
-// 2026-11-07 使用者：手機 context popup 也要能設定不保溫（之前只在長按主力晶片的狀態卡裡）。
 test('手機版：context popup 裡主力也有「不用保溫」', async () => {
   const restore = asPhone()
   try {

@@ -67,7 +67,6 @@ test('同一張券（同 id）只提示一次：已記的不再提示，進入�
   assert.deepEqual(again.due, [])
   const later = resetCreditExpiries(again.next, { codex: withCredits([{ id: 'a', hours: 5 }, { id: 'b', hours: 30 }]) }, NOW + 15 * HOUR)
   assert.deepEqual(later.due.map((d) => d.id), ['b'], 'b 現在才進 24 小時內')
-  // 同一張券出現在兩個 key（預設與身份）也只提示一次。
   const twin = resetCreditExpiries({}, { codex: withCredits([{ id: 'a', hours: 5 }]), 'codex:co0': withCredits([{ id: 'a', hours: 5 }]) }, NOW)
   assert.equal(twin.due.length, 1)
 })

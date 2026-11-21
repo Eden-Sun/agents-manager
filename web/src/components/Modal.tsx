@@ -4,7 +4,6 @@ import { focusableIn, useDialogFocus } from '../hooks/useDialogFocus'
 import { isImeEnter } from '../lib/ime'
 import { useT } from '../lib/i18n'
 
-/** Centred popup for the sidebar's big forms. The body keeps `sheet-body` so the existing form styling still applies. */
 export function Modal({
   open,
   title,
@@ -15,7 +14,6 @@ export function Modal({
 }: {
   open: boolean
   title: string
-  /** Small dimmed line after the title — e.g. which project a new bot lands in. */
   subtitle?: ReactNode
   width?: number
   children: ReactNode
@@ -26,12 +24,10 @@ export function Modal({
   const bodyRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
 
-  // Land on the first field; `focusableIn` skips disabled controls, which would drop focus on the body.
   useDialogFocus(open, dialogRef, {
     initialFocus: () => (bodyRef.current ? focusableIn(bodyRef.current)[0] : null),
   })
 
-  // Ref so an inline `onClose` doesn't re-register the Escape listener every render.
   const onCloseRef = useRef(onClose)
   useEffect(() => {
     onCloseRef.current = onClose
@@ -41,11 +37,8 @@ export function Modal({
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      // 輸入法選字中的 Esc 是取消選字，不是關視窗（表單會整個丟掉）。
       if (isImeEnter(e)) return
-      // A picker or menu inside the body handles Escape first; only close when nothing did.
       if (e.defaultPrevented) return
-      // Stacked modals: the outer listener runs first, so decide ownership by the focus-trapped target.
       const dialog = dialogRef.current
       if (dialog && e.target instanceof Node && !dialog.contains(e.target)) return
       e.preventDefault()
@@ -66,7 +59,6 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        // A CSS var, not a fixed inline width: `.modal:has(.dirpicker)` needs to widen it.
         style={{ ['--modal-w' as string]: `${width}px` }}
         onMouseDown={(e) => e.stopPropagation()}
       >

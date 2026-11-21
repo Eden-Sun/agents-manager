@@ -1,8 +1,3 @@
-/**
- * 手機（≤640px）「Git / 專案資訊」彈窗（真的掛 `ChatPanel` 進 happy-dom，後端是 `MockTransport`）：
- * - #929 → 2026-11-03：「bot 給你的檔案」不在彈窗裡，改在對話下方的收合列（`PhoneOutboxTray`）。
- * - #930：帳號警告在手機不被藏，彈窗裡看得到、標題列的 Git 鈕帶 `warn`。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -23,7 +18,6 @@ after(async () => {
 const mock = sharedMock
 const gitBtn = () => document.querySelector<HTMLButtonElement>('.mobile-git-info')!
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true。 */
 function asPhone(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -146,7 +140,6 @@ test('手機：沒有帳號警告時 Git 鈕不帶 warn', async () => {
     )
     await mount(<ChatPanel onOpenSidebar={() => {}} />)
     assert.equal(gitBtn().classList.contains('warn'), false)
-    // 只有百分比、沒有 token：圖示在上、百分比在下（不捏一個假的 k）。
     assert.equal(gitBtn().getAttribute('aria-label'), 'Context 與專案 · context 12%')
     assert.equal(gitBtn().querySelector('.mobile-ctx')?.textContent, '12%')
     assert.equal(gitBtn().querySelector('.mobile-ctx-k'), null)

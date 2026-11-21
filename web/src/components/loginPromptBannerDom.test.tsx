@@ -1,7 +1,3 @@
-/**
- * 身份被登出的主動提示條（#838 補充）：真的掛 `LoginPromptBanner` 進 happy-dom，store 直接種資料。
- * 「立即登入」走 `loginIdentity`（打開登入協助面板）；「先關掉」只對這一次登出有效。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -66,17 +62,13 @@ test('先關掉：同一次登出不再出現；登入成功後提示消失，�
   await mount(<LoginPromptBanner />)
   await click(document.querySelector<HTMLButtonElement>('.lpb-dismiss')!)
   assert.equal(banner(), null, '關掉了')
-  // daemon 又推一次同一筆快照（例如別的事件觸發 host_changed）：還是關著，不洗版。
   await setStatus(st({ logged_in: null, login_needed: { since: 'T1', via: 'turn_auth_failure' } }))
   assert.equal(banner(), null)
-  // 登入成功：記號沒了。
   await setStatus(st())
   assert.equal(banner(), null)
   assert.deepEqual(useStore.getState().loginPromptDismissed, {}, '關掉的記錄跟著清掉')
-  // 之後探測說又被登出：再提示。
   await setStatus(st({ logged_in: false }))
   assert.ok(banner(), '新的一次登出：再提示')
-  // 同一個身份的另一次回合授權失敗（新的 since）也會再提示。
   await click(document.querySelector<HTMLButtonElement>('.lpb-dismiss')!)
   assert.equal(banner(), null)
   await setStatus(st({ logged_in: false, login_needed: { since: 'T2', via: 'turn_auth_failure' } }))
@@ -99,7 +91,6 @@ test('沒有 bot 綁著這個身份、或主機連不上：不提示', async () 
 
 test('按「立即登入」撞 409 identity_login_in_progress（帶既有登入 pane）：不報錯，直接重開那顆登入終端的面板', async () => {
   seed(st({ logged_in: false }))
-  // 用真的 loginIdentity（seed 換成假的了）：daemon 回 409 並指出原本那顆登入 pane。
   useStore.setState({ loginIdentity: realLoginIdentity })
   const realFetch = globalThis.fetch
   globalThis.fetch = (async () =>

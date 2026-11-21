@@ -2,10 +2,6 @@ import { useState } from 'react'
 import { copyText } from '../lib/copyText'
 import { useT } from '../lib/i18n'
 
-/**
- * 標題列的 pane id（2026-09-30 使用者）：只畫 pane id，點一下就複製；以前點開的識別列（agent／session／workspace／run id）
- * 實際上用不到，拿掉了。herdr agent 名等完整識別放 tooltip（`herdrIdentity` 的 title）。
- */
 export function PaneCopy({ paneId, detail, what = 'pane' }: { paneId: string; detail: string; what?: 'pane' | 'bot' }) {
   const t = useT()
   const [done, setDone] = useState<'ok' | 'fail' | null>(null)

@@ -1,11 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { PatchProjectInput } from '../api/types'
 
-/**
- * 專案設定的「一顆儲存」（2026-11-01 使用者：副管理者與角色設定共用一顆儲存）。
- * 各區塊把草稿登記進來（dirty／valid＋取 patch 與清草稿的函式），底部儲存列合併成一次 PATCH。
- * 不在群組裡（單獨掛載、測試）時，各區塊照舊用自己的儲存鈕。
- */
 export interface SavePart {
   label: string
   dirty: boolean
@@ -22,10 +17,8 @@ interface Group {
 }
 
 const Ctx = createContext<Group | null>(null)
-/** 包住要合併儲存的區塊；value 用 `useProjectSaveGroup().value`。 */
 export const SaveGroupProvider = Ctx.Provider
 
-/** 區塊用：在群組裡就登記草稿並回傳 true（區塊收掉自己的儲存鈕）。 */
 export function useSavePart(key: string, part: SavePart, fns: SaveFns): { grouped: boolean; saving: boolean } {
   const g = useContext(Ctx)
   if (g) g.fns.current[key] = fns

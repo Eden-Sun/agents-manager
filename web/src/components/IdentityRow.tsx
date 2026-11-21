@@ -22,7 +22,6 @@ export function IdentityBadge({
   name: string | null
   showDefault?: boolean
   kind?: BotKind
-  /** active run 有但 daemon 沒記 runtime_identity；不要拿設定值冒充實際值。 */
   unknown?: boolean
 }) {
   const t = useT()
@@ -33,7 +32,6 @@ export function IdentityBadge({
       </span>
     )
   }
-  // agy 的預設帳號叫 ag0（沒指定、`ag0`、舊資料 `agy` 都是它）：跟 ag1 並排時才分得出來。
   if (kind === 'agy' && (name ? isBuiltinDefaultIdentity(kind, name) : showDefault)) {
     return (
       <span className="identity-badge" title={t('身份：ag0（agy 預設帳號）')}>
@@ -41,10 +39,8 @@ export function IdentityBadge({
       </span>
     )
   }
-  // 沒指定身份也要標出來，不然本機預設和 cc1 在列表上長得一樣。
   if (!name) {
     if (!showDefault) return null
-    // claude 的本機預設帳號就是 cc0；其他 kind 沒有這套身份。
     if (kind && kind !== 'claude') {
       return (
         <span className="identity-badge is-default" title={t('身份：不指定（本機預設）')}>
@@ -65,7 +61,6 @@ export function IdentityBadge({
   )
 }
 
-/** 額度（5 小時窗）一眼可見：daemon 給的是「已用」百分比，這裡照樣顯示「已用」。沒有讀數就不標。 */
 export function IdentityQuotaChip({ host, kind, identity }: { host: string; kind: BotKind; identity: string | null }) {
   const t = useT()
   const q = useStore((s) => quotaForIdentity(s.quota, host, kind, identity, s.identities))
@@ -78,10 +73,6 @@ export function IdentityQuotaChip({ host, kind, identity }: { host: string; kind
   )
 }
 
-/**
- * cc0 設定檔 vs 預設帳號：同樣叫 cc0 不代表同一個帳號。預設帳號＝沒指定身份的 Bot 用的（不換設定目錄）；
- * cc0 設定檔＝有自己 CLAUDE_CONFIG_DIR 的身份，只給指定 cc0 的 Bot 用。列上寫明，不靠同名合併。
- */
 export function Cc0Note({ name, kind }: { name: string; kind: string }) {
   const t = useT()
   if (kind !== 'claude' || name !== 'cc0') return null
@@ -96,7 +87,6 @@ export function Cc0Note({ name, kind }: { name: string; kind: string }) {
   )
 }
 
-/** 「N 個 Bot」可點：展開列出使用中的 bot，每一顆都能前往改綁（先改綁才能刪身份）。 */
 export function IdentityUsers({ bots }: { bots: readonly Pick<Bot, 'id' | 'name'>[] }) {
   const t = useT()
   if (bots.length === 0) return <span className="host-count">{t('沒有 Bot 使用')}</span>
@@ -117,7 +107,6 @@ export function IdentityUsers({ bots }: { bots: readonly Pick<Bot, 'id' | 'name'
   )
 }
 
-/** 前往 bot 設定改綁身份：先收掉包著身份頁的環境設定彈窗，再開那顆 bot 的設定。 */
 function goRebind(from: HTMLElement, botId: string) {
   closeEnclosingPopup(from)
   const s = useStore.getState()
@@ -125,7 +114,6 @@ function goRebind(from: HTMLElement, botId: string) {
   s.openSettings(botId)
 }
 
-/** 「⋯」選單。一般區放可逆的設定；危險區放會清憑證或刪設定的動作，用危險色、點了還要再確認。 */
 export function IdentityMoreMenu({ general, danger }: { general?: ReactNode; danger?: ReactNode }) {
   const t = useT()
   if (!general && !danger) return null
@@ -150,13 +138,11 @@ export function IdentityMoreMenu({ general, danger }: { general?: ReactNode; dan
   )
 }
 
-/** 身份在每台主機各自的登入狀態（帳號是每台各自登入的）；`null` = 問不到，標「未知」而非「未登入」。 */
 export function IdentityHostLogins({ name, kind, only, danger }: { name: string; kind?: string; only?: string; danger?: ReactNode }) {
   const t = useT()
   const localStatus = useStore((s) => s.localIdentityStatus[name])
   const localConnected = useStore((s) => s.connected)
   const allHosts = useStore((s) => s.hosts)
-  // 明寫 host 的身份只屬於那一台：local 只看本機、遠端只看自己那台，別台同名的登入狀態是別的帳號。
   const rows: { host: string; label: string; state: boolean | null; account: string | null; reason: string | null; checkedAt: string | null | undefined; connected: boolean }[] = []
   if (!only || only === 'local') {
     rows.push({ host: 'local', label: t('本機'), state: localStatus?.logged_in ?? null, account: localStatus?.account ?? null, reason: localStatus?.reason ?? null, checkedAt: localStatus?.checked_at, connected: localConnected })
@@ -168,7 +154,6 @@ export function IdentityHostLogins({ name, kind, only, danger }: { name: string;
   return (
     <span className="identity-logins">
       {rows.map((r) => {
-        // 統一三態：已登入／未登入／無法確認；主機離線、最後檢查另外標。
         const cls = r.state === true ? 'ok' : r.state === false ? 'out' : 'unknown'
         const text = r.state === true ? t('已登入') : r.state === false ? t('未登入') : t('無法確認')
         const title =
@@ -215,7 +200,6 @@ function closeEnclosingPopup(from: HTMLElement) {
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
-/** 主要按鈕：未登入是「登入」，已登入是「重新登入…」；旁註說明會在哪台開終端（不開瀏覽器）。 */
 export function IdentityLoginButton({ host, identity, loggedIn }: { host: string; identity: string; loggedIn: boolean }) {
   const t = useT()
   const loginIdentity = useStore((s) => s.loginIdentity)
@@ -246,7 +230,6 @@ export function IdentityLoginButton({ host, identity, loggedIn }: { host: string
   )
 }
 
-/** 登出走跟登入同一條路（臨時 pane），但會清掉那個帳號的憑證，所以先問一次。確認框標題帶主機、CLI、身份名。 */
 export function IdentityLogoutButton({ host, identity, kind }: { host: string; identity: string; kind: string }) {
   const t = useT()
   const logoutIdentity = useStore((s) => s.logoutIdentity)
@@ -256,7 +239,6 @@ export function IdentityLogoutButton({ host, identity, kind }: { host: string; i
   const used = useMemo(() => identityBots(bots, projects, host, identity).length, [bots, projects, host, identity])
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState(false)
-  // 確認框的 onConfirm 沒有按鈕事件可用：先把按鈕元素存起來，登出成功後收掉包著這個面板的「環境設定」彈窗（跟登入同一條）。
   const btnRef = useRef<HTMLButtonElement>(null)
   return (
     <>
@@ -308,7 +290,6 @@ export function IdentityLogoutButton({ host, identity, kind }: { host: string; i
   )
 }
 
-/** 不再提供給新 Bot＝之後挑身份時看不到它（daemon 記在 `identity_prefs`），已經綁著它的 Bot 不動。 */
 export function IdentityDisableButton({ host, kind, name }: { host: string; kind: string; name: string }) {
   const t = useT()
   const disabled = useStore((s) => identityDisabled(s, host, kind, name))
@@ -331,7 +312,6 @@ export function IdentityDisableButton({ host, kind, name }: { host: string; kind
   )
 }
 
-/** 「不再提供給新 Bot」的身份在列表上要一眼看得出來。 */
 export function DisabledChip({ host, kind, name }: { host: string; kind: string; name: string }) {
   const t = useT()
   const disabled = useStore((s) => identityDisabled(s, host, kind, name))
@@ -425,12 +405,6 @@ export function IdentityRow({ host, name }: { host: string; name: string }) {
   )
 }
 
-
-/**
- * 每個 kind 的**預設帳號**（不換設定目錄的那個）：登入／登出／從額度列隱藏（使用者 2026-11-14：「例如現在 grok 已不訂閱」）。
- * 登出＝該 CLI 自己的登出指令（claude／codex／grok 開臨時 pane，agy 刪憑證檔），不刪家目錄的檔案；
- * 隱藏＝只影響額度列（`identity_prefs` 的 `@default`），登入不動，可以隨時顯示回來。
- */
 export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind }) {
   const t = useT()
   const tool = useStore((s) => (host === 'local' ? s.localTools : s.hosts.find((h) => h.name === host)?.tools)?.[kind])
@@ -553,7 +527,6 @@ export function DefaultAccountRow({ host, kind }: { host: string; kind: BotKind 
   )
 }
 
-/** 上次檢查：人話相對時間（尚未檢查／剛剛／N 分鐘前／N 小時前／N 天前），超過一週才寫日期。確切時間放在 title。 */
 function checkedAtText(iso: string | null | undefined, t: ReturnType<typeof useT>): string {
   if (!iso) return t('尚未檢查')
   const d = new Date(iso)

@@ -127,8 +127,6 @@ test('開票那條的 bot_id 是 issue:<號碼>：顯示成 #號碼（開票）�
   assert.equal(botLabel('issue:abc', []), 'issue:', '不是數字的照舊取前 6 碼')
 })
 
-// ── ask_option（AskUserQuestion 選項建議，issue #1475）──
-
 const askLine = (questions: unknown[]) => JSON.stringify({ tool_use_id: 'toolu_1', questions })
 
 test('ask_option：有任何一題 daemon 標了 suggested 才算超過門檻；沒建議、答案沒回來、錯誤都不算', () => {

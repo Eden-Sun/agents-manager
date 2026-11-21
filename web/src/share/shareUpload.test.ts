@@ -1,13 +1,9 @@
-/**
- * 分享頁上傳（SPEC §20.4）：照片轉 JPEG／縮小、429 照 Retry-After 自己重試。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { ShareClient } from './shareApi'
 import { ShareHttpError } from './shareModel'
 import { PhotoUnreadableError, PHOTO_MAX_EDGE, UploadCancelledError, preparePhoto, uploadErrorText, uploadPatiently, uploadRetryable, type ImageCodec } from './shareUpload'
 
-/** 假的解碼／編碼：記下畫成多大，回固定大小的 JPEG。 */
 function fakeCodec(width: number, height: number, opts: { decodable?: boolean; outBytes?: number } = {}) {
   const drawn: Array<[number, number]> = []
   const codec: ImageCodec = {
@@ -158,7 +154,6 @@ test('取消（#1661）：退避等待中被中止，sleep 還沒回也立刻丟
   await assert.rejects(
     uploadPatiently(client, file('a.txt', 'text/plain', 3), {
       signal: ctl.signal,
-      // 等的途中使用者按了移除：sleep 永遠不回，中止也要讓它立刻結束。
       sleep: () => {
         ctl.abort()
         return new Promise<void>(() => {})

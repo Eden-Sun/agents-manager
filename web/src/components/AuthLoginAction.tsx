@@ -9,11 +9,6 @@ import { resendTarget } from '../lib/resendTarget'
 import { hostLabel } from '../store/identityRows'
 import './authLoginAction.css'
 
-/**
- * 回合因為沒登入／授權失敗收尾的那則訊息底下的「立即登入」＋「登入好了，重試」。
- * 登入走獨立主機 shell 跑 CLI（`startCliLogin`），原 bot 的 pane 不被登入流程佔住；
- * 重試＝重新偵測身份，確定不是「沒登入」才重送上一則。只掛在最後一則 auth 失敗上（`authActionTargetId`）。
- */
 export function AuthLoginAction({ msg }: { msg: Message }) {
   const t = useT()
   const botId = msg.bot_id ?? null
@@ -60,7 +55,6 @@ export function AuthLoginAction({ msg }: { msg: Message }) {
     setRetrying(true)
     try {
       if (!(await refreshTools(host))) return
-      // 只有確定「沒登入」才擋；遠端 claude 問不出來（null）照樣放行，重送失敗會再長出一則。
       const loggedIn = identity ? identityStatusOfHost(useStore.getState(), host)[identity]?.logged_in : undefined
       if (loggedIn === false) {
         notify('error', t('{who} 在{where}還是沒登入：先在登入終端完成授權', { who, where }))

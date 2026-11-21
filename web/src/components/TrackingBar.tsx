@@ -11,7 +11,6 @@ import './messageLedgerBar.css'
 import './trackingBar.css'
 
 const COLLAPSE_KEY = 'am-tracking-collapsed'
-/** 面板裡的排序：需要你回覆最先，其次已加入追蹤，最後進行中。 */
 const RANK: Partial<Record<LedgerItemStatus, number>> = { answered: 0, clarifying: 1, untriaged: 2, following: 3 }
 
 function readCollapsed(): boolean {
@@ -26,11 +25,9 @@ function writeCollapsed(v: boolean) {
   try {
     localStorage.setItem(COLLAPSE_KEY, v ? '1' : '0')
   } catch {
-    /* 無痕模式或被擋：只是下次不記得，不影響使用 */
   }
 }
 
-/** 所屬訊息的時間（只在已載入的訊息裡找；找不到就不顯示）。 */
 function messageTime(messages: Record<string, Message[]>, messageId: string | null): { at: string | null; botId: string | null } {
   if (!messageId) return { at: null, botId: null }
   for (const [botId, list] of Object.entries(messages)) {
@@ -40,11 +37,6 @@ function messageTime(messages: Record<string, Message[]>, messageId: string | nu
   return { at: null, botId: null }
 }
 
-/**
- * 對話窗上方的「追蹤中」列（2026-11-21）：本專案所有未結的承諾事項，可收合；點開是底部 sheet（手機）或下拉（桌機）。
- * 資料：`GET /api/projects/{id}/ledger?status=open`，任何 `ledger_updated` 到達就重抓。沒有未結事項就整列不出現。
- * 操作只有「不用做了」「已經好了」（同訊息泡泡下的面板）；點項目＝捲到來源訊息，不在已載入範圍就給提示。
- */
 export function TrackingBar({ botId, onJump }: { botId: string; onJump: (messageId: string) => boolean }) {
   const t = useT()
   const notSureNext = useNotSureNext()

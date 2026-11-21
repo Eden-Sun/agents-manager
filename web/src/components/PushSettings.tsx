@@ -5,7 +5,6 @@ import { currentSubscription, disablePush, enablePush, pushSupport, type PushSup
 
 type View = { kind: 'loading' } | { kind: 'unsupported'; reason: Exclude<PushSupport, { ok: true }>['reason'] } | { kind: 'denied' } | { kind: 'off' } | { kind: 'on' }
 
-/** 環境設定→顯示：網頁推播（排程完成通知，手機鎖屏也收得到）。狀態＝這個瀏覽器有訂閱且 daemon 也記著。 */
 export function PushSettings() {
   const t = useT()
   const [view, setView] = useState<View>({ kind: 'loading' })

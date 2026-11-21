@@ -1,6 +1,3 @@
-/**
- * 側欄 Bot 列可以用 Alt＋↑／↓ 調整順序（鍵盤替代拖曳）：這個操作要有說明，讀屏使用者才找得到。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

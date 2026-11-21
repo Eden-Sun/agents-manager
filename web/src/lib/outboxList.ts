@@ -1,14 +1,10 @@
-/** 檔案暫存區裡「bot 給你的檔案」那一段的純邏輯：怎麼講一個檔案、還剩多久、怎麼講「沒得列」。 */
 import type { OutboxFile } from '../api'
 import { ApiError } from '../api/types'
 import type { Turn } from '../api/types'
 import { t } from './i18n'
 
-/** `18 KB` / `1.1 MB` / `1.0 GB`：一行要看得懂，個位數才給小數。跟 MemBadge 的 `humanBytes` 不同單位詞：
- *  那邊是一格寬度的 RAM（`1.4G`），這邊是檔案大小，使用者看的是「下載會多大」。 */
 export function fileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  // 先看「四捨五入後」落在哪：1023.6 KB 進位是 1024，要寫成 1.0 MB；9.96 進位是 10，不寫 10.0。
   const num = (v: number) => {
     const one = Math.round(v * 10) / 10
     return one < 10 ? one.toFixed(1) : String(Math.round(v))
@@ -17,36 +13,21 @@ export function fileSize(bytes: number): string {
   if (kb < 1) return `${Math.round(bytes)} B`
   if (Math.round(kb) < 1024) return `${num(kb)} KB`
   const mb = bytes / 1024 ** 2
-  // MB 四捨五入到 1024 也改寫成 GB（1023.6 MB 不寫 1024 MB），同 humanBytes 的 M→G。
   if (Math.round(mb) < 1024) return `${num(mb)} MB`
   return `${num(bytes / 1024 ** 3)} GB`
 }
 
-/**
- * 這個檔案現在還剩幾秒。daemon 給的是**讀清單那一刻**的剩餘秒數，這裡扣掉之後經過的時間——
- * 不拿 `expires_at` 跟瀏覽器的時鐘比，手機時鐘偏了幾分鐘也不會算錯。
- */
 export function remainingNow(file: OutboxFile, fetchedAt: number, now = Date.now()): number | null {
-  // 分享用 bot（SPEC §20）的檔案不會被清：沒有倒數。
   if (file.remainingSecs === null) return null
   const elapsed = Math.max(0, Math.floor((now - fetchedAt) / 1000))
   return Math.max(0, file.remainingSecs - elapsed)
 }
 
-/** `剩 42 分鐘`：無條件進位，剩 30 秒也講「剩 1 分鐘」；到期了講「即將清除」（清理每 10 分鐘才跑一次）。 */
 export function remainingLabel(secs: number): string {
   if (!Number.isFinite(secs) || secs <= 0) return t('即將清除')
   return t('剩 {n} 分鐘', { n: Math.ceil(secs / 60) })
 }
 
-/**
- * 下載失敗要講哪一句，以及這一列是不是已經沒了（issue #547）。
- *
- * 404 ＝ 檔案被清掉了：outbox 的檔案放進去一小時後由 AGM 的 gc 掃掉（每 10 分鐘一輪），而清單只在換 bot、
- * 按 ↻ 或回合結束時重讀，所以過期的那幾列會一直留在畫面上。`gone` 讓呼叫端當場把它拿掉並重讀一次。
- * 其餘的把 daemon 的原因講成人話——以前這裡只拿得到 `res.statusText`（「Not Found」「Conflict」）。
- * 分享用 bot（`kept`）的 outbox 不是一小時，保留 14 天、總量太大時從最舊的清；句子分開寫（同 `emptyReason`）。
- */
 export function downloadFailure(name: string, e: unknown, kept = false): { text: string; gone: boolean } {
   const plain = (text: string) => ({ text, gone: false })
   if (!(e instanceof ApiError)) return plain(t('下載「{name}」失敗：{reason}', { name, reason: e instanceof Error ? e.message : String(e) }))
@@ -69,16 +50,10 @@ export function downloadFailure(name: string, e: unknown, kept = false): { text:
   return plain(t('下載「{name}」失敗：{reason}（HTTP {status}）', { name, reason: e.message, status: e.status }))
 }
 
-/** 讀不到清單（網路、500、404）：畫面上的 `reason`，不是 daemon 回的（#234）。 */
 export const LOAD_FAILED = 'load_failed'
 
 export type OutboxList = { dir: string; reason: string | null; ttlSecs: number; kept?: boolean; files: OutboxFile[] }
 
-/**
- * 讀一次清單。讀不到回 `reason: 'load_failed'` 的空清單，**不是** `reason: null`：以前 catch 把任何錯誤都當成「還沒有檔案」，
- * bot 明明放了檔案，畫面卻叫使用者「把檔案放進 $AM_OUTBOX」，讀不到與真的沒檔分不開（#234）。
- * 這是附加資訊，不跳紅字（每個回合結束都會重讀，toast 會變成連珠炮）；畫面在空白處講清楚並指路去按 ↻。
- */
 export async function readOutbox(fetchList: () => Promise<OutboxList>): Promise<OutboxList> {
   try {
     const out = await fetchList()
@@ -88,40 +63,23 @@ export async function readOutbox(fetchList: () => Promise<OutboxList>): Promise<
   }
 }
 
-/**
- * 「這顆 bot 沒有可列的檔案」有好幾種原因，多半**不是錯誤**：講清楚是哪一種，
- * 使用者才不會對著空白區域猜自己是不是按錯了。讀不到清單（[`LOAD_FAILED`]）是唯一的例外，要講得跟「沒有檔案」不一樣。
- */
 export function emptyReason(reason: string | null, botSelected: boolean, kept = false): string {
   if (!botSelected) return t('先選一顆 bot，這裡會列出它交給你的檔案。')
   if (reason === LOAD_FAILED) return t('讀不到這顆 bot 的檔案清單（daemon 沒有回應或出錯），不代表沒有檔案。按上面的 ↻ 重新讀取。')
-  // 舊 daemon（遠端 outbox 之前）才會回這個。
   if (reason === 'outbox_remote') return t('這顆 bot 在遠端主機上，這版 daemon 還列不出它的檔案；更新 daemon 後就看得到。')
   if (reason === 'outbox_remote_unreachable') return t('連不上這顆 bot 所在的遠端主機，暫時列不出它的檔案。按上面的 ↻ 重試。')
-  // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
   if (reason === 'outbox_untrusted') return t('這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。')
   if (kept) return t('還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。')
   return t('還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。')
 }
 
-/**
- * 清單上的 `name` 是相對路徑（`報價/Q-1.pdf`，bot 把檔案放在 `$AM_OUTBOX` 的子資料夾裡）：拆成資料夾前綴（含結尾 `/`，沒有就空字串）
- * 與檔名。下載存檔用 `base`（瀏覽器不該拿到帶斜線的檔名），畫面把 `dir` 淡色顯示在前面。
- */
 export function splitOutboxName(name: string): { dir: string; base: string } {
   const i = name.lastIndexOf('/')
   return i < 0 ? { dir: '', base: name } : { dir: name.slice(0, i + 1), base: name.slice(i + 1) }
 }
 
-/** outbox 路徑裡的 bot id（ULID）與相對檔名。 */
 const OUTBOX_REF = /outbox\/([0-9A-HJKMNP-TV-Z]{26})\/([^\s`'"<>()[\]|*]+)/g
 
-/**
- * 這顆 bot 的訊息裡提到的**別顆 bot** 的 outbox 檔案：`{ 那顆的 id: [相對檔名…] }`。
- *
- * 管理者轉交子 agent／執行者的產出時，回覆裡寫的是對方 outbox 的路徑，檔案不在自己的 outbox；
- * 以前右側「bot 給你的檔案」只列自己那一份，使用者在管理者頁面找不到（2026-11-16 使用者：「我看就沒有」）。
- */
 export function relayedOutboxRefs(messages: ReadonlyArray<{ content: string }> | undefined, selfId: string): Record<string, string[]> {
   const out: Record<string, Set<string>> = {}
   for (const m of messages ?? []) {
@@ -132,7 +90,6 @@ export function relayedOutboxRefs(messages: ReadonlyArray<{ content: string }> |
       try {
         if (name.includes('%')) name = decodeURIComponent(name)
       } catch {
-        /* 不是合法的 % 編碼：照原樣 */
       }
       if (!name || name.endsWith('/')) continue
       ;(out[bot] ??= new Set()).add(name)
@@ -141,18 +98,10 @@ export function relayedOutboxRefs(messages: ReadonlyArray<{ content: string }> |
   return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v].sort()]))
 }
 
-/** 新的排前面；同一秒的依名字排，避免每次重整順序在跳。 */
 export function orderFiles(files: OutboxFile[]): OutboxFile[] {
   return [...files].sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name))
 }
 
-/**
- * 這顆 bot 最近一個**已經結束**的回合（`id:completed_at`），沒有就是空字串。
- *
- * 清單原本只在換 bot 或按 ↻ 時重讀：bot 回「放好了」的那一刻清單不會動，使用者要切個頁面才看得到
- * （2026-09-16 使用者：「為何沒有馬上出現／要切換頁面後才看見」）。bot 放檔一定發生在回合裡，
- * 所以回合一結束就重讀一次——這是事件，不是輪詢，「不每秒掃目錄」那條取捨不變。
- */
 export function lastSettledTurnKey(turns: Record<string, Pick<Turn, 'id' | 'status' | 'completed_at'>> | undefined): string {
   let best: { id: string; at: string } | null = null
   for (const t of Object.values(turns ?? {})) {
@@ -162,27 +111,10 @@ export function lastSettledTurnKey(turns: Record<string, Pick<Turn, 'id' | 'stat
   return best ? `${best.id}:${best.at}` : ''
 }
 
-/**
- * 滑過去就預覽的圖檔（使用者 2026-09-18：「圖檔我要可以 hover preview」）。
- * 只認 daemon 下載白名單裡的點陣圖（PNG/JPEG/GIF/WebP，API.md）；SVG 會被當 octet-stream，`<img>` 畫不出來，不列。
- */
 export function isPreviewableImage(name: string): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(name)
 }
 
-/**
- * 允許在瀏覽器新分頁預覽的副檔名白名單（issue #1866、#1868）。
- * 需與後端 `crates/am-base/src/outbox.rs` 的 `INLINE_PREVIEW_EXTENSIONS` 完全一致。
- *
- * **安全邊界提醒（issue #1868）**：
- * 前端以 `fetch` 取回後轉為 `blob:` URL 開啟新分頁，該 blob URL 與主應用同源，
- * 伺服器端 HTTP 回應帶的 CSP sandbox 對該分頁無效。實際防止 XSS 的關鍵防線為
- * 嚴格的 MIME 白名單（只映射到純文字、圖片、JSON 與 PDF，排除所有可執行類型）。
- * **HTML 不在這份名單**（#1868）：它走另一條路（`lib/htmlPreview.ts`、`api.outboxHtmlUrl`）。使用者 2026-11-18 決定 html 不沙箱化——
- * 要能正常打開 bot 產的報表（含 CDN 的 Chart.js 等），所以前端把檔案重包成 `text/html` 的 blob 在新分頁完整打開，不包 iframe、不加 CSP；
- * **接受 bot 產的 html 與主應用同源執行的風險**（讀得到 storage／token）。後端仍把 .html 當 octet-stream、inline 模式絕不回 text/html。
- * SVG 還沒有對應設計，不可直接列入。
- */
 export const INLINE_PREVIEW_EXTENSIONS: readonly string[] = [
   'pdf',
   'png',
@@ -198,11 +130,6 @@ export const INLINE_PREVIEW_EXTENSIONS: readonly string[] = [
   'json',
 ]
 
-/**
- * 瀏覽器能直接顯示且適合開新分頁預覽的格式（issue #1866、#1868）。
- * PDF 為主；圖片（PNG/JPEG/GIF/WebP）、純文字／記錄檔／Markdown／CSV／TSV、JSON。
- * 副檔名需在 INLINE_PREVIEW_EXTENSIONS 白名單內。
- */
 export function isBrowserPreviewable(name: string): boolean {
   const m = /\.([a-z0-9]+)$/i.exec(name)
   if (!m) return false
@@ -210,10 +137,6 @@ export function isBrowserPreviewable(name: string): boolean {
   return INLINE_PREVIEW_EXTENSIONS.includes(ext)
 }
 
-/**
- * 預覽框放在滑過的那一列**左邊**（清單貼著右側欄，右邊沒地方），上下夾在視窗內。
- * 左邊放不下（窄視窗）就改放在那一列下方。回傳 `left`/`top`，單位 px，給 `position: fixed` 用。
- */
 export function previewPlacement(
   anchor: { left: number; top: number; bottom: number },
   box: { width: number; height: number },

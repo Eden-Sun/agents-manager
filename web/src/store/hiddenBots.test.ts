@@ -1,7 +1,3 @@
-/**
- * 「側欄看得到哪些 bot」只有一份定義：額度停用收起來的那一批，鍵盤導覽與分頁標題的 `(N)`
- * 也要當它們不在，否則點得到一顆側欄找不到的 bot、數字也對不起來。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { quotaDisableKey, quotaHiddenBotIds } from './quotaHide.ts'
@@ -55,7 +51,6 @@ test('分頁標題的 (N) 不算收起來的未讀', () => {
   assert.equal(titleUnread({ ...book, hiddenBotIds: ['b1', 'b2'] }), 1)
 })
 
-// #1057：⌥↑／⌥↓ 的順序要跟側欄畫的一樣：子 agent 緊跟在父列後面。
 const tree = (botOrder: Record<string, string[]> = {}, hidden: string[] = []) =>
   ({
     ...state(null),

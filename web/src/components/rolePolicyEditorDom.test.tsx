@@ -1,7 +1,3 @@
-/**
- * 角色設定（B 期）：「加入建議」只帶入草稿、不送出；儲存才 PATCH 整份 role_policy（清掉的欄位不送）；超出範圍停用儲存。
- * Bot 設定的「執行期覆寫」：改動跟著底部的儲存一起送 runtime_override（清掉＝null）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -154,7 +150,6 @@ test('切換專案時第一次 render 就不顯示「已變更」且正確反映
   await act(async () => {
     setP(p2)
   })
-  // 切換至 p2（manager keep_warm: false），第一次 render 就應該反映新專案資料且不能誤判為已變更
   assert.equal(pill(card('管理者'), '關').getAttribute('aria-checked'), 'true')
   assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })

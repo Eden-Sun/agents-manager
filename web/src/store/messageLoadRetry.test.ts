@@ -1,7 +1,3 @@
-/**
- * #1240：第一次載入對話失敗之後不能永遠停在「載入訊息中…」——失敗要記下來（畫面換成重試鈕），
- * 重試成功就清掉；已經載入過的對話重載失敗照舊只跳通知；重連要補抓選取中、還沒載成功的那一顆。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'

@@ -1,10 +1,3 @@
-// 多語系進度報告（issue #1932）。在 web/ 底下跑：
-//   bun scripts/i18n-report.ts                  # 每個檔案還沒抽出去的寫死中文數（照數量排序）
-//   bun scripts/i18n-report.ts src/components   # 只看這個路徑前綴
-//   bun scripts/i18n-report.ts --area chat      # 只看某個分區（chat／bots／hosts／updates／core，見 src/lib/i18n/areas.ts）
-//   bun scripts/i18n-report.ts --lines <檔案>   # 列出該檔每一處寫死中文
-//   bun scripts/i18n-report.ts --missing        # t()／msg() 的 key 裡還沒有英文的
-// 規則見 docs/FRONTEND.md〈多語系〉。
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { AREA_IDS, areaOf, type AreaId } from '../src/lib/i18n/areas'

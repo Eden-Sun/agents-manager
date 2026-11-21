@@ -1,21 +1,11 @@
 import { t } from '../lib/i18n'
 
-/**
- * 「插隊」按鈕與結果說明的文案，依 bot kind 區分（issue #103 claude、#748 codex）。
- *
- * - claude：CLI 自己的 send-now 鍵（2.1.275 起），打斷目前那一輪、收掉它，再收下這句。
- * - codex：不按任何鍵、不打斷、不開新回合——字照一般方式打進忙碌的 TUI，由 codex 的 `instant_interrupt`（0.159 起）
- *   把它 steer 進**同一個**進行中的回合。daemon 端旗標（`[codex] instant_interrupt`）預設關，codex 自己那一側也要開。
- *
- * Composer 只在 daemon 回報 send_now_supported 時畫按鈕；送出時仍由 daemon 再確認。
- */
 export interface SendNowButton {
   label: string
   title: string
 }
 
 export function sendNowButton(kind: string | null | undefined, pending: string): SendNowButton | null {
-  // 以 code point 計：截點不能落在 emoji 代理對中間（同 relayPreview）。
   const chars = [...pending]
   const preview = `${chars.slice(0, 40).join('')}${chars.length > 40 ? '…' : ''}`
   if (kind === 'claude') {
@@ -35,11 +25,6 @@ export interface SendNowNotice {
   text: string
 }
 
-/**
- * 插隊送出的 200 裡，`send_now` 不是 `interrupted`／`idle`／`not_sent`／`unknown`（那四個另有處理，見 `sendNowOutcome.ts`）時要不要說話：
- * - `steered`：codex 把字併進進行中的回合（成功）。
- * - `send_now_*`：閘門拒絕的原因代碼——bot 當下閒著，所以訊息照一般方式送出了，只是沒有插隊可言；講清楚為什麼，依 kind 說。
- */
 export function sendNowNotice(sendNow: string | null | undefined, kind: string | null | undefined): SendNowNotice | null {
   if (!sendNow || sendNow === 'interrupted' || sendNow === 'idle') return null
   if (sendNow === 'steered') {

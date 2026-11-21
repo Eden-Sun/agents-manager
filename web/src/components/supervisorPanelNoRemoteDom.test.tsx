@@ -1,7 +1,3 @@
-/**
- * #1477：手機 Remote Control 已廢。總管面板不再畫「遠端入口」那一塊——就算舊 daemon 的 payload 還帶著
- * `remote: {status:'verified', url}`，畫面上也不能出現狀態燈、連線連結或 Remote Control 的說明。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -23,7 +19,6 @@ const payload = {
   identity: 'cc0',
   effort: 'low',
   status: 'running',
-  // 舊 daemon 還會回的欄位：新前端要忽略它。
   remote: { status: 'verified', url: 'https://claude.ai/code/session_1', observed_by: 'user', capability: { status: 'supported' } },
   pending_count: 0,
   assignments: [],

@@ -1,4 +1,3 @@
-/* agents-manager UI — hand-written CSS. Dark palette under prefers-color-scheme (SPEC §3.2). */
 
 :root {
   color-scheme: light dark;
@@ -15,8 +14,6 @@
   --text-dim: #5e6a78;
   --text-faint: #5e6a78;
   --accent: #2f6fe4;
-  /* --accent 當文字不到 4.5:1（淡底 4.00），文字另開一階深色；非文字只要 3:1 仍用 --accent。
-     深色 #7aa5f8 都在 6:1 以上，ink 即 accent。 */
   --accent-ink: #2a63cd;
   --accent-text: #ffffff;
   --accent-soft: #e6eeff;
@@ -37,7 +34,6 @@
   --lamp-greyyellow: #b7a55a;
   --lamp-offline: #b9bec7;
 
-  /* 燈號色當文字不到 4.5:1（黃 2.4、綠 3.3），狀態文字另開加深 token；燈號本身維持亮色。 */
   --status-working: #1a5fc8;
   --status-blocked: #c2311c;
   --status-ok: #166b3c;
@@ -51,8 +47,6 @@
   --term-bg: #f7f8fa;
   --term-text: #24272d;
 
-  /* 面板的 90%，但至少 1000px（2026-09-16 使用者：桌機訊息窗可以寬到 90% 比較好讀）。
-     composer 與停止列共用同一個值才對得齊。 */
   --chat-max: max(1000px, 90%);
 
   --radius: 8px;
@@ -63,10 +57,8 @@
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    /* 深色層級「畫布 < 側欄 < 沉陷 < 面板」四階都要看得出來；純白字在暗底會炫光，改 #e5e9f0。 */
     --bg: #12161c;
     --bg-panel: #1e242d;
     --bg-side: #171c23;
@@ -79,7 +71,6 @@
     --text-dim: #a3afbf;
     --text-faint: #96a2b3;
     --accent: #7aa5f8;
-    /* 深色 accent 當文字已夠亮（最低 6.1:1）。 */
     --accent-ink: #7aa5f8;
     --accent-text: #0f1115;
     --accent-soft: #26375c;
@@ -118,7 +109,6 @@
 }
 
 :root[data-theme="dark"] {
-  /* 深色層級「畫布 < 側欄 < 沉陷 < 面板」四階都要看得出來；純白字在暗底會炫光，改 #e5e9f0。 */
   --bg: #12161c;
   --bg-panel: #1e242d;
   --bg-side: #171c23;
@@ -131,7 +121,6 @@
   --text-dim: #a3afbf;
   --text-faint: #96a2b3;
   --accent: #7aa5f8;
-  /* 深色 accent 當文字已夠亮（最低 6.1:1）。 */
   --accent-ink: #7aa5f8;
   --accent-text: #0f1115;
   --accent-soft: #26375c;
@@ -171,8 +160,6 @@
 * {
   box-sizing: border-box;
 }
-
-/* 減少動態：集中一處，含打字點與全部 transition（分散寫曾漏掉）。 */
 
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -254,9 +241,6 @@ button:disabled {
   transform: translateX(-50%) translateY(0);
 }
 
-/* 側欄鍵貼右緣，置中泡泡會被裁：改靠右展開。`white-space: normal` 必要——
-   nowrap 下 max-width 無效，長提示會從側欄左緣漏出去。 */
-
 .bot-actions .icon-tip[data-tip]::after {
   left: auto;
   right: 0;
@@ -271,11 +255,8 @@ button:disabled {
   transform: translateY(0);
 }
 
-/* shell */
-
 .app {
   display: grid;
-  /* 右緣是圖片暫存區（`auto`：收合／展開寬度由它自己決定）。 */
   grid-template-columns: clamp(288px, 18vw, 344px) minmax(0, 1fr) auto;
   height: 100%;
   overflow: hidden;
@@ -310,8 +291,6 @@ button:disabled {
   padding: 1px 5px;
   border-radius: 4px;
 }
-
-/* sidebar */
 
 .sidebar {
   display: flex;
@@ -354,14 +333,11 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  /* 包著 select / checkbox 的整塊點擊區：至少 24px 高。 */
   min-height: 24px;
   font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;
 }
-
-/* 13×13 的勾選框在觸控上幾乎按不到，墊大。 */
 
 .conn select {
   min-height: 24px;
@@ -533,8 +509,6 @@ button:disabled {
   box-shadow: inset 0 0 0 1px var(--ring);
 }
 
-/* 無標籤圖示鍵只有字高（~20px）不好按：底線 28px，需要更大的地方自己加。 */
-
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -565,8 +539,6 @@ button:disabled {
   background: var(--accent-soft);
 }
 
-/* Keep ＋/✕ readable on row hover / selected: 14% 紅 wash 疊 --bg-active 時紅字只剩 2.93:1，改吃 ghost 的中性 wash。 */
-
 .project-head .icon-btn:hover:not(:disabled):not(.add) {
   background: var(--btn-danger-bg-soft);
   color: var(--btn-danger-fg-soft);
@@ -583,7 +555,6 @@ button:disabled {
   align-items: center;
   gap: 9px;
   width: 100%;
-  /* `min-height`, not `height`: a persona adds a third line (60px); fixed 52px made content paint outside the row. */
   min-height: 52px;
   padding: 4px 8px 4px 14px;
   border: 0;
@@ -621,15 +592,11 @@ button:disabled {
   bottom: -1px;
 }
 
-/* 分身 / 新增的佔位列：灰、不可點，daemon 建好後原地替換。 */
-
 .bot-row.pending {
   opacity: 0.45;
   pointer-events: none;
   cursor: default;
 }
-
-/* 收合時帶上數量，否則看不出底下有東西。 */
 
 .project-fold {
   display: inline-flex;
@@ -672,8 +639,6 @@ button:disabled {
   font-size: 9px;
 }
 
-/* 最後一列縱軌只畫到中線，變成 └。 */
-
 .bot-kids {
   margin: 0 6px 8px 22px;
   padding: 0 0 4px 12px;
@@ -686,8 +651,6 @@ button:disabled {
   gap: 6px;
 }
 
-/* 子列中段可左右滑（2026-09-10 使用者）：只有樹線、燈號、選單鈕固定；名字不截尾、chip 不縮，捲軸藏起來。 */
-
 .bot-row.compact .bot-main {
   display: flex;
   flex-direction: row;
@@ -695,7 +658,6 @@ button:disabled {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  /* 上緣與左緣留空：kind icon 右上角的更新記號凸出去，overflow 會切掉。 */
   padding: 5px 0 5px 4px;
   margin-left: -4px;
   overflow-x: auto;
@@ -717,8 +679,6 @@ button:disabled {
   font-size: 10.5px;
 }
 
-/* 32px 列高，往上開的泡泡會蓋到上一列，改開左邊。 */
-
 .bot-row.compact .bot-actions .icon-tip[data-tip]::after {
   left: auto;
   right: calc(100% + 6px);
@@ -738,7 +698,6 @@ button:disabled {
 .bot-row.selected {
   background: var(--bg-active);
   border-left-color: var(--accent);
-  /* 選取列上 `--text-faint` 只有 4.49:1（深色），弱化文字升到 --text-dim（5.22:1）。 */
   --text-faint: var(--text-dim);
 }
 
@@ -757,9 +716,6 @@ button:disabled {
   outline-offset: -2px;
 }
 
-/* 額度 critical（docs/API.md §12.4）：整列反灰但仍可點。只降子元素 opacity，不動 .bot-row 底色／左線，選取狀態才不被蓋；
-   模型標籤與額度晶片維持清楚。名字不用 opacity（15:1 → 4.4:1 讀不出是誰），改 --text-dim。 */
-
 .bot-row.quota-critical .lamp,
 .bot-row.quota-critical .bot-kind,
 .bot-row.quota-critical .kind-identity,
@@ -768,15 +724,11 @@ button:disabled {
   filter: saturate(0.35);
 }
 
-/* 但選單開著時不調淡（2026-09-18 使用者截圖：⋯ 選單被下面幾列蓋住、還半透明）：
-   `opacity`／`filter` 會開一個 stacking context，泡泡的 z-index 40 只在那一格裡算數，
-   後面幾列照 DOM 順序畫在它上面；連選單自己也跟著半透明。 */
 .bot-row.quota-critical .bot-actions:has(.head-menu-pop) {
   opacity: 1;
   filter: none;
 }
 
-/* 選單開著的那一列抬到其他列之上（`.bot-row` 本來就是 position: relative）。 */
 .bot-row:has(.head-menu-pop) {
   z-index: 40;
 }
@@ -792,8 +744,6 @@ button:disabled {
   display: grid;
   gap: 2px;
 }
-
-/* 名字第一順位，kind／model／身份退一階（--text-faint），狀態字才用彩色拉回視線。 */
 
 .bot-name {
   display: flex;
@@ -822,8 +772,6 @@ button:disabled {
   border-color: var(--border-strong);
   background: var(--bg-panel);
 }
-
-/* Sidebar field must occupy exactly the name's box: shared padding/border/-4px margin grew the row and painted over the row above. */
 
 .bot-name-input.row {
   align-self: flex-start;
@@ -875,15 +823,12 @@ button:disabled {
 }
 
 :root {
-  /* kind 品牌色（2026-09-12 使用者：header 的 kind logo 要有顏色）。codex 用 OpenAI 綠；xAI 官方黑白在深色底等於沒顏色，
-     使用者選了紫色。標題列、側欄、額度列共用。 */
   --kind-claude: #c2603c;
   --kind-codex: #10a37f;
   --kind-grok: #7c5cff;
   --kind-agy: #1a73e8;
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --kind-claude: #e08a6b;
@@ -900,8 +845,6 @@ button:disabled {
   --kind-agy: #7aa7ff;
 }
 
-/* 收成一顆 `⋯` 固定一格，不疊在名字上也不靠 hover：overlay + hover:none 兩份規則曾在寬度變化時壞一邊。 */
-
 .bot-actions {
   position: static;
   display: flex;
@@ -912,8 +855,6 @@ button:disabled {
   background: none;
   pointer-events: auto;
 }
-
-/* 名字列上的操作鈕（⋯、⚙、🔗）一律全不透明、不等 hover 才出現（2026-10-31 使用者裁示，取代先前「常駐但低調」的 0.78）。 */
 
 .bot-actions .icon-btn {
   opacity: 1;
@@ -973,8 +914,6 @@ button:disabled {
   background: var(--bg-hover);
 }
 
-/* 危險項目只在選單裡轉紅（下一步就是確認框）。 */
-
 .head-menu-item.danger {
   color: var(--danger);
 }
@@ -987,8 +926,6 @@ button:disabled {
   color: var(--text-faint);
   cursor: default;
 }
-
-/* lamps */
 
 .lamp {
   position: relative;
@@ -1163,16 +1100,9 @@ button:disabled {
   justify-content: flex-end;
 }
 
-/* buttons：一組色票、四變體（ghost / 實心 / primary / danger）＋ banner 覆寫。
-   起因：primary hover 被 `.btn:hover`（0,3,0）蓋成白底白字（1.18:1）；focus 環 #76a7ff 白底只有 2.4:1。
-   規則：文字 ≥ 4.5:1、圖示 ≥ 3:1、hover 底色差 ≥ 8 L*、focus 環 ≥ 3:1 且 2px offset。
-   量測見 `docs/screenshots/btn-contrast/audit.json`。 */
-
 :root {
-  /* focus 環加深一階，所有面都過 3:1（白 5.58、琥珀 banner 5.04）。 */
   --ring: #2a63cd;
 
-  /* ghost hover 用墨色 wash 而非固定 --bg-hover：坐在任何面上都是壓深 ~8 L*，不會反而變亮。 */
   --btn-ghost-bg: transparent;
   --btn-ghost-fg: var(--text-dim);
   --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 11%, transparent);
@@ -1185,7 +1115,6 @@ button:disabled {
   --btn-fg-hover: var(--text);
   --btn-border: var(--border-strong);
 
-  /* primary 只補加深的 hover（ΔL* 9.4、白字 5.9:1）：`filter: brightness()` 不算底色，會被 .btn:hover 蓋掉。 */
   --btn-primary-bg: var(--accent);
   --btn-primary-fg: var(--accent-text);
   --btn-primary-bg-hover: #1a56c7;
@@ -1197,38 +1126,31 @@ button:disabled {
   --btn-danger-bg-hover: #982d1f;
   --btn-danger-fg-hover: var(--accent-text);
   --btn-danger-border: var(--danger);
-  /* 刻意不透明：半透明紅 wash 疊在選取列上會愈疊愈深，紅字掉到 2.5–2.9:1。 */
   --btn-danger-bg-soft: color-mix(in srgb, var(--danger) 16%, var(--bg-panel));
   --btn-danger-fg-soft: var(--danger);
-  /* 選單刪除列是文字（4.5:1）；底色再壓就不夠，淺色留 --danger-soft（紅字 4.65:1）。 */
   --btn-danger-bg-menu: var(--danger-soft);
 
   --btn-accent-bg-hover: color-mix(in srgb, var(--accent) 16%, transparent);
   --btn-accent-fg-hover: var(--accent-ink);
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    /* 深色 --accent 當環已夠亮（面板 6.37、選取藍 4.74）。 */
     --ring: var(--accent);
     --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 15%, transparent);
     --btn-bg-hover: color-mix(in srgb, var(--text) 15%, var(--bg-panel));
     --btn-primary-bg-hover: #a3c0fa;
     --btn-danger-bg-hover: #ffb4a8;
-    /* 深色 --danger-soft 幾乎貼著面板色（ΔL* 2.5），才需要不透明混色。 */
     --btn-danger-bg-menu: var(--btn-danger-bg-soft);
   }
 }
 
 :root[data-theme="dark"] {
-  /* 深色 --accent 當環已夠亮（面板 6.37、選取藍 4.74）。 */
   --ring: var(--accent);
   --btn-ghost-bg-hover: color-mix(in srgb, var(--text) 15%, transparent);
   --btn-bg-hover: color-mix(in srgb, var(--text) 15%, var(--bg-panel));
   --btn-primary-bg-hover: #a3c0fa;
   --btn-danger-bg-hover: #ffb4a8;
-  /* 深色 --danger-soft 幾乎貼著面板色（ΔL* 2.5），才需要不透明混色。 */
   --btn-danger-bg-menu: var(--btn-danger-bg-soft);
 }
 
@@ -1258,8 +1180,6 @@ button:disabled {
   color: var(--btn-primary-fg-hover);
 }
 
-/* banner 上的鍵：白底 .btn 在有色條子上浮成一塊白、hover 更亮就消失；改透明底＋墨色 wash，文字邊框脫離 banner 繼承色。 */
-
 .bs-banner,
 .notice,
 .term-warn,
@@ -1272,8 +1192,6 @@ button:disabled {
   --btn-ghost-border: color-mix(in srgb, var(--text) 50%, transparent);
 }
 
-/* 這些鍵 hover 原本 ΔL* = 0，統一補 ghost wash。 */
-
 .tab:not([aria-selected='true']):hover:not(:disabled),
 .mem-open:hover:not(:disabled) .mem-badge,
 .mem-pop-refresh:hover:not(:disabled),
@@ -1285,8 +1203,6 @@ button.pane-toggle:hover:not(:disabled) {
   background: var(--btn-ghost-bg-hover);
   color: var(--btn-ghost-fg-hover);
 }
-
-/* 停用的主要鈕不該仍像主要動作（opacity 0.5 仍最搶眼），改中性沉底；`.send-btn` 同。 */
 
 .btn.primary:disabled,
 .send-btn:disabled {
@@ -1301,8 +1217,6 @@ button.pane-toggle:hover:not(:disabled) {
   color: var(--text-faint);
   font-family: var(--font-mono);
 }
-
-/* main */
 
 .main {
   display: flex;
@@ -1331,8 +1245,6 @@ button.pane-toggle:hover:not(:disabled) {
   flex: 0 1 auto;
   min-width: 0;
 }
-
-/* Model + effort ride the row below `.main-title` so they don't fight the name for width. */
 
 .main-title-row {
   display: flex;
@@ -1434,11 +1346,6 @@ button.pane-toggle:hover:not(:disabled) {
   gap: 6px;
 }
 
-/* 標題列收縮優先序（2026-09-11 使用者實測：1500px 時分頁被擠出右緣）：
-   1. 分頁不讓（導覽，被切就沒入口），並疊在最上層。
-   2. 名字第二：可截尾，不能消失。
-   3. 先讓：遠端記憶體與附屬 chip。量表不可讓（2026-09-11 使用者：「額度顯示是很重要的訊息…desktop 都要全顯示」），`flex: none`。 */
-
 .main-head > .tabs {
   flex: none;
   position: relative;
@@ -1450,19 +1357,13 @@ button.pane-toggle:hover:not(:disabled) {
   min-width: 0;
 }
 
-/* kind logo 排在 model 前（2026-09-11 使用者）。固定 20px 不參與縮放；字級同 `.model-tag` 不撐高。 */
-
 .bot-head .main-title-sub > .kind-tag {
   flex: none;
-  /* 2026-09-11 使用者：這顆不要框，要貼近 model／effort——框會讓它像另一顆按鈕。gap 在後面收掉一半。 */
   border: 0;
-  /* 2026-09-12 使用者「怎麼沒有顏色」：底色（kind 色）留著，只拿掉框；左右 4px，整顆仍 20px。 */
   width: auto;
   padding: 0 4px;
   margin-right: -3px;
 }
-
-/* The name *is* the rename field — renaming is frequent enough that the settings panel is the wrong default. */
 
 .bot-name-btn {
   display: inline-flex;
@@ -1506,8 +1407,6 @@ button.pane-toggle:hover:not(:disabled) {
   outline: none;
 }
 
-/* 名字規則見 `lib/botName.ts`（跟 daemon 同一份）。 */
-
 .bot-name-input.bad {
   border-color: var(--danger);
 }
@@ -1516,8 +1415,6 @@ button.pane-toggle:hover:not(:disabled) {
   max-width: 100%;
 }
 
-/* messages */
-
 .chat {
   position: relative;
   display: flex;
@@ -1525,8 +1422,6 @@ button.pane-toggle:hover:not(:disabled) {
   min-height: 0;
   flex: 1;
 }
-
-/* Jump-to-bottom must float over the list, not the composer, and not scroll with content. */
 
 .msg-list-wrap {
   position: relative;
@@ -1540,7 +1435,6 @@ button.pane-toggle:hover:not(:disabled) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  /* 保險：訊息列不產生水平捲動（根因修在各子元素；這裡只擋漏網的溢出）。 */
   overflow-x: hidden;
   width: 100%;
   max-width: var(--chat-max);
@@ -1632,8 +1526,6 @@ button.pane-toggle:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  /* 2026-09-16 使用者：對話窗放寬到 90% 之後，訊息仍被 680px 卡住，寬螢幕等於沒放寬。
-     改成跟著對話欄走（`--chat-max` 已經是 max(1000px, 90%)），只留一個讀得下去的上限。 */
   max-width: 90%;
   margin-top: 22px;
 }
@@ -1647,12 +1539,9 @@ button.pane-toggle:hover:not(:disabled) {
   margin-top: 12px;
 }
 
-/* 一行 60–75 字是舒服的閱讀寬度；助理段落長，給多一點。 */
-
 .msg.user {
   align-self: flex-end;
   align-items: flex-end;
-  /* 自己打的字通常短，維持窄一點才看得出左右分邊；長訊息照樣吃得到 90%。 */
   max-width: min(900px, 82%);
 }
 
@@ -1763,10 +1652,7 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* composer */
-
 .composer {
-  /* 永遠不縮：flex 子項預設會被壓扁，打到第三行就看不到（2026-09-09 使用者截圖，手機鍵盤彈出）。讓位的是訊息列。 */
   flex: none;
   width: 100%;
   max-width: var(--chat-max);
@@ -1791,15 +1677,11 @@ button.pane-toggle:hover:not(:disabled) {
   margin-bottom: 8px;
 }
 
-/* 正常做完也會關輸入框：做完用中性色，警示色留給中止與失敗。 */
-
 .composer-lock.ok {
   color: var(--status-ok);
   background: var(--bg-sunken);
   border-color: color-mix(in srgb, var(--status-ok) 35%, transparent);
 }
-
-/* 回合進行中那條只是中斷入口，不是警告，走中性色。 */
 
 .composer-lock.running {
   color: var(--text-dim);
@@ -1861,8 +1743,6 @@ button.pane-toggle:hover:not(:disabled) {
   filter: brightness(1.08);
 }
 
-/* claude-api：兩顆送出鍵（快取 5 分／1 小時）；1 小時那顆做成次要樣式，Enter 與主要鍵＝5 分鐘。 */
-/* 桌面（一般寬度）：兩顆上下排，維持寬度，高度合計與輸入框相近。 */
 .send-btns {
   display: flex;
   flex-direction: column;
@@ -1910,8 +1790,6 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* 從浮窗捲過去後閃一下，否則不知道停在哪則。 */
-
 .msg.flash .bubble {
   animation: msg-flash 1.6s ease-out;
 }
@@ -1926,10 +1804,6 @@ button.pane-toggle:hover:not(:disabled) {
     box-shadow: 0 0 0 3px transparent;
   }
 }
-
-/* The bot's own status bar, mirrored from the pane. */
-
-/* Only the status half scrolls: `.issues-pop` is absolute inside `.issues-bar`, an `overflow` ancestor would clip it. */
 
 .context-bar {
   display: flex;
@@ -1961,8 +1835,6 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* blocked / term */
-
 .blocked {
   border-bottom: 1px solid var(--border);
   background: var(--danger-soft);
@@ -1989,9 +1861,6 @@ button.pane-toggle:hover:not(:disabled) {
   margin: 0;
   tab-size: 4;
 }
-
-/* 折行模式（`termWrap.ts`，手機預設開）：會弄亂 TUI 框線，但 390px 不折就讀不到右半邊。
-   `break-all` 必要（無空白的長路徑仍會撐橫捲）；`overflow-x: hidden` 收掉殘留溢出。 */
 
 .term.term-wrap {
   white-space: pre-wrap;
@@ -2023,18 +1892,13 @@ button.pane-toggle:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
-/* 鍵盤直通被鎖住（#423 防誤刪框，issue #545）：開關照樣畫出來，但灰掉並說明原因——
-   不畫的話使用者不知道鍵盤現在是死的，也不知道為什麼。 */
 .blocked-modal-hints .conn.is-locked {
   opacity: 0.7;
   cursor: not-allowed;
 }
 
-/* blocked 全畫面終端（BlockedModal）：吃掉大半畫面是刻意的，要判斷的就是這張圖。 */
-
 .modal.blocked-modal {
   width: min(1100px, calc(100vw - 48px));
-  /* 高度跟內容走：TUI 對話框常只有十幾行，固定滿版會留一大片空白。 */
   height: auto;
   min-height: min(460px, calc(100vh - 48px));
   max-height: calc(100vh - 48px);
@@ -2062,8 +1926,6 @@ button.pane-toggle:hover:not(:disabled) {
   line-height: 1.5;
 }
 
-/* codex 升級提示（2026-09-10）：changelog 按了才長，手機上攤開會把終端推出視野。 */
-
 .blocked-modal-update {
   margin: 0 16px;
   display: flex;
@@ -2071,8 +1933,6 @@ button.pane-toggle:hover:not(:disabled) {
   align-items: center;
   gap: 8px;
 }
-
-/* 對話上方的 blocked 面板已有 16px 內距，不需要 modal 邊距。 */
 
 .blocked > .blocked-modal-update {
   margin: 0 0 8px;
@@ -2091,8 +1951,6 @@ button.pane-toggle:hover:not(:disabled) {
   font-size: 12.5px;
 }
 
-/* 桌機：一列放得下整個 pane 的欄數（`--term-cols`），不折行——並排的版面（選項＋預覽框）折了就全碎。
-   等寬字一格約 0.602em；視窗內寬扣掉左右邊距與內距（32＋26px）。縮到 9.5px 還放不下就橫捲。 */
 .modal.blocked-modal {
   container-type: inline-size;
 }
@@ -2106,8 +1964,6 @@ button.pane-toggle:hover:not(:disabled) {
   overflow-x: auto;
   font-size: clamp(9.5px, calc((100cqi - 60px) / var(--term-cols) / 0.602), 12.5px);
 }
-
-/* 焦點停在終端（可捲），但不畫成可打字的輸入框。 */
 
 .term.blocked-modal-term:focus-visible {
   outline: 2px solid var(--accent);
@@ -2140,8 +1996,6 @@ button.pane-toggle:hover:not(:disabled) {
   line-height: 1.5;
 }
 
-/* 桌機：認得出選單時終端收起，框只剩幾行選項，縮成一般確認框的寬度、不留空白高度（#1933）。
-   `is-menu`＝只有選單；展開終端原文（`showRaw`）仍走上面的寬版。 */
 @media (width > 640px) {
   .modal.blocked-modal.is-menu {
     width: min(640px, calc(100vw - 48px));
@@ -2149,8 +2003,6 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* 手機：跟其他對話框一樣是全螢幕 sheet（issue #559）。上面 `.modal.blocked-modal` 的特異性蓋掉了通用的 sheet 規則，
-   iOS 的 `100vh` 又比可視區高，框的標題與底部按鈕一起跑出畫面。 */
 @media (width <= 640px) {
   .modal.blocked-modal {
     width: 100%;
@@ -2168,7 +2020,6 @@ button.pane-toggle:hover:not(:disabled) {
     display: none;
   }
 
-  /* 終端是這個視窗的主角：吃掉剩下的高度。標題列那串 pane／欄數在手機上擠掉標題，收起來（標題 tooltip 仍有）。 */
   .term.blocked-modal-term {
     flex: 1 1 auto;
     margin: 0 10px;
@@ -2185,7 +2036,6 @@ button.pane-toggle:hover:not(:disabled) {
     text-overflow: ellipsis;
   }
 
-  /* 「原樣」開關：按下去（aria-pressed）＝看終端原樣。跟 ✕ 一起靠右。 */
   .blocked-modal-layout {
     flex: none;
     align-self: center;
@@ -2204,7 +2054,6 @@ button.pane-toggle:hover:not(:disabled) {
     margin-left: 0;
   }
 
-  /* 重排過的易讀版（`lib/termReflow.ts`）：字放大到內文大小、行距拉開，英文照字詞斷行（`break-all` 會把單字切一半）。 */
   .term.blocked-modal-term.is-reflow {
     font-size: 14px;
     line-height: 1.6;
@@ -2213,8 +2062,6 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* 手機＋只有選單（`is-menu`，終端原文收起）：底部 sheet，上方露出對話；高度跟內容走，最多 85% 可視高度，超過就捲 body。
-   背景照舊可點關閉。展開終端原文（不帶 `is-menu`）仍是上面的全螢幕，終端要空間（取代 #559 對問卷情境的全螢幕決定）。 */
 @media (width <= 640px) {
   .modal.blocked-modal.is-menu {
     align-self: flex-end;
@@ -2249,8 +2096,6 @@ button.pane-toggle:hover:not(:disabled) {
   color: var(--text-dim);
 }
 
-/* notices */
-
 .notice-action {
   flex: none;
   margin-right: 4px;
@@ -2275,7 +2120,6 @@ button.pane-toggle:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* 要蓋過右側檔案暫存區（z 40）；之前被它擋住，只露出半個字（2026-09-17 使用者截圖）。 */
   z-index: 1100;
   max-width: min(420px, calc(100vw - 32px));
   overflow-wrap: anywhere;
@@ -2313,8 +2157,6 @@ button.pane-toggle:hover:not(:disabled) {
   box-sizing: border-box;
 }
 
-/* 關閉鍵不用 opacity 0.6 繼承色（錯誤通知上紅字對比掉到 3.3），改固定次要文字色。 */
-
 .notice button {
   display: inline-flex;
   align-items: center;
@@ -2340,10 +2182,6 @@ button.pane-toggle:hover:not(:disabled) {
     opacity: 0;
   }
 }
-
-/* responsive */
-
-/* 窄視窗標題列分三段讓：先收邊距，再丟重複資訊（模型後綴、主機標），最後丟 pane 鍵。名字、燈號、設定、分頁全程保留。 */
 
 @media (width <= 1240px) {
   .main-head {
@@ -2401,33 +2239,23 @@ button.pane-toggle:hover:not(:disabled) {
   }
 }
 
-/* 手機（≤640px）標題列只回答「誰、在做什麼、去哪頁」：額度收成 chip（數字，風險不能只剩顏色）、模型徽章讓位；context bar 丟帳號欄與 repo owner。 */
-
 @media (width <= 640px) {
   .main-head {
     gap: 6px;
     padding: 0 8px;
   }
 
-  /* 模型在側欄與設定面板都看得到，手機不值標題列第二行。 */
-
   .bot-head .model-tag {
     display: none;
   }
-
-  /* 手機第二行是版本號不是 model，kind logo 沒對照物，只會多佔高度（桌面見 `.main-title-sub`）。 */
 
   .bot-head .main-title-sub > .kind-tag {
     display: none;
   }
 
-  /* 群組標題列在手機也讓掉額度，每個 bot 的標題列仍有。 */
-
   .group-head > .quota-strip {
     display: none;
   }
-
-  /* 氣泡百分比上限是為了限行長；390px 反而一行只剩三十幾字。收窄 padding、agent 氣泡放滿，使用者氣泡留縮排。 */
 
   .msg-list {
     padding-left: 14px;
@@ -2442,14 +2270,10 @@ button.pane-toggle:hover:not(:disabled) {
     max-width: 92%;
   }
 
-  /* 終端工具列在 390px 折成三行；pane 那顆標題列已有、結尾是說明，兩個都讓。 */
-
   .term-bar .term-pane-chip,
   .term-bar .term-bar-note {
     display: none;
   }
-
-  /* 手機不壓 vh 上限：卡片已被 max-height:100% 約束。 */
 
   .context-bar {
     gap: 8px;
@@ -2458,7 +2282,6 @@ button.pane-toggle:hover:not(:disabled) {
 }
 
 @media (width > 1024px) {
-  /* Must out-specify `.main-head .menu-btn` — a media query adds no specificity, so a bare `.menu-btn` loses. */
 
   .main-head .menu-btn {
     display: none;
@@ -2468,8 +2291,6 @@ button.pane-toggle:hover:not(:disabled) {
     display: none;
   }
 }
-
-/* The list stretches to the sheet bottom and only it scrolls, so crumb bar and actions stay in view. */
 
 .sheet-body:has(> .dirpicker) {
   display: flex;
@@ -2493,8 +2314,6 @@ button.pane-toggle:hover:not(:disabled) {
 .dirpicker > * {
   flex: 0 0 auto;
 }
-
-/* attach (在終端開啟) */
 
 .attach {
   position: relative;
@@ -2528,18 +2347,14 @@ button.pane-toggle:hover:not(:disabled) {
   padding: 2px 4px;
 }
 
-/* markdown inside assistant bubbles */
-
 .bubble.md {
   white-space: normal;
   font-size: 15px;
   line-height: 24px;
-  /* 手機水平超版（2026-11-19）：泡泡必須守在欄寬內，長內容只在 pre／table 自己的內部捲動。 */
   min-width: 0;
   max-width: 100%;
 }
 
-/* 太長／太深的訊息預設純文字（SafeMarkdown）。 */
 .bubble .md-plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 60vh; overflow: auto; }
 .bubble .md-plain-note { margin: 6px 0 0; font-size: 12px; opacity: 0.75; }
 
@@ -2570,11 +2385,8 @@ button.pane-toggle:hover:not(:disabled) {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--code-bg);
-  /* 行內長路徑沒有空白可斷，必須能在任意字元斷行；fenced pre 的 code 繼承 white-space:pre，不受影響。 */
   overflow-wrap: anywhere;
 }
-
-/* No border, so fenced blocks don't read as a box inside a box. */
 
 .bubble.md pre {
   margin: 4px 0 6px;
@@ -2631,8 +2443,6 @@ button.pane-toggle:hover:not(:disabled) {
 
 .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 
-/* remote hosts (§11.6) */
-
 .host-badge {
   flex: none;
   font-size: 11px;
@@ -2652,8 +2462,6 @@ button.pane-toggle:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--danger) 55%, transparent);
   color: var(--danger);
 }
-
-/* 可點，比 `.host-badge` 多一點內距與 hover；色沿用 accent-soft。 */
 
 .update-badge {
   flex: none;
@@ -2713,7 +2521,6 @@ button.pane-toggle:hover:not(:disabled) {
 }
 
 .host-form-hint {
-  /* Own line, so the submit button keeps its width in the 304px sidebar. */
   flex: 1 1 100%;
   margin-bottom: 2px;
   font-family: var(--font-ui);
@@ -2728,8 +2535,6 @@ button.pane-toggle:hover:not(:disabled) {
   font-size: 11.5px;
   resize: vertical;
 }
-
-/* bot settings (v3.3) */
 
 .model-tag {
   font-size: 11px;
@@ -2746,7 +2551,6 @@ button.pane-toggle:hover:not(:disabled) {
 
 button.model-tag {
   cursor: pointer;
-  /* 可點的按鈕：WCAG 2.2 最小目標 24×24，高度墊到 24。 */
   min-height: 24px;
   display: inline-flex;
   align-items: center;
@@ -2755,27 +2559,19 @@ button.model-tag {
   text-overflow: ellipsis;
 }
 
-/* Reported by the CLI rather than configured on the bot — quieter border. */
-
 .model-tag.reported {
   border-style: dashed;
 }
-
-/* `·` 由 CSS 生成而不寫在 JSX：省一個空白字元，側欄模型徽章差幾 px 就會被截。 */
 
 .model-tag-extra {
   color: var(--text-faint);
   font-weight: 500;
 }
 
-/* `-`，不是 `·`：使用者指名要這個字元（「effort不要那個。改用-」）。已來回改三次——要換之前先問他。 */
-
 .model-tag-extra::before {
   content: '-';
   margin: 0 1px 0 2px;
 }
-
-/* SPEC §4.4a：這格是「下次啟動才用的設定」，⟳ 後面接差異的欄位字（#1903），實際值在 tooltip（側欄放不下兩組數字）。 */
 
 .model-tag.stale {
   border-color: color-mix(in srgb, var(--warn) 60%, var(--border));
@@ -2785,7 +2581,6 @@ button.model-tag {
   margin-left: 3px;
   color: var(--warn);
   font-weight: 700;
-  /* 欄位字不要被切：model 名先被 ellipsis。 */
   flex: none;
 }
 
@@ -2801,8 +2596,6 @@ button.model-tag {
   text-overflow: ellipsis;
 }
 
-/* 同 `.update-badge` 形狀、換警示色：意思是「你看到的設定現在不是真的」。 */
-
 .drift-badge {
   background: var(--warn-soft);
   color: var(--warn);
@@ -2817,8 +2610,6 @@ button.model-tag[aria-expanded='true'] {
   border-color: var(--accent);
   color: var(--accent-ink);
 }
-
-/* hover 與「開著」分家：深色 --accent-ink 疊 wash 只有 4.14:1。 */
 
 button.model-tag:hover:not(:disabled) {
   border-color: var(--accent);
@@ -2896,8 +2687,6 @@ button.model-tag:hover:not(:disabled) {
   color: var(--text-dim);
   line-height: 1;
 }
-
-/* 「已完成（未讀）」：方角＋`!` 而非圓丸，跟狀態燈並排才不會被看成第二顆燈。 */
 
 .unread-turns {
   flex: none;
@@ -3001,8 +2790,6 @@ button.model-tag:hover:not(:disabled) {
   color: var(--accent-text);
 }
 
-/* confirm dialog */
-
 .confirm-backdrop {
   position: fixed;
   inset: 0;
@@ -3011,12 +2798,9 @@ button.model-tag:hover:not(:disabled) {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  /* 45% 在淺色主題背景仍完全可讀、跟對話框搶注意力：加深到 58% ＋輕模糊。 */
   background: rgb(16 20 28 / 58%);
   backdrop-filter: blur(2px);
 }
-
-/* 條子在標題列最上緣，泡泡改往下開；`white-space: normal` 必要（同 `.bot-actions` 的坑）。 */
 
 .quota-cell-toggle.icon-tip[data-tip]::after {
   bottom: auto;
@@ -3061,8 +2845,6 @@ button.model-tag:hover:not(:disabled) {
   font-size: 11px;
 }
 
-/* 新增 Project / Bot / 環境設定 popup — bot list stays visible behind; body keeps `.sheet-body` for the P1 form sizing. */
-
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -3071,7 +2853,6 @@ button.model-tag:hover:not(:disabled) {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  /* 同 `.confirm-backdrop`。 */
   background: rgb(16 20 28 / 58%);
   backdrop-filter: blur(2px);
 }
@@ -3089,8 +2870,6 @@ button.model-tag:hover:not(:disabled) {
   box-shadow: var(--shadow);
   overflow: hidden;
 }
-
-/* The directory picker wants every pixel, so a fixed-height popup instead of shrink-wrap. */
 
 .modal:has(.dirpicker) {
   width: min(660px, calc(100vw - 48px));
@@ -3170,13 +2949,9 @@ button.model-tag:hover:not(:disabled) {
   position: relative;
 }
 
-/* daemon 代轉的訊息用不同色，免得誤以為是自己送的。 */
-
 .msg-targets.relay {
   color: var(--accent-ink);
 }
-
-/* daemon 自己發的轉送跟 bot→bot 轉送分色。 */
 
 .msg-targets.relay.daemon {
   color: var(--text-dim);
@@ -3187,8 +2962,6 @@ button.model-tag:hover:not(:disabled) {
   border-color: var(--border-strong);
 }
 
-/* 窄面板下換行，不把按鈕壓扁。 */
-
 .bs-login-row {
   display: flex;
   align-items: center;
@@ -3196,10 +2969,7 @@ button.model-tag:hover:not(:disabled) {
   flex-wrap: wrap;
 }
 
-/* 「重新偵測」長得像連結，免得跟身份選項搶。 */
-
 .identity-recheck {
-  /* 可按的一律至少 24px 高（WCAG 2.2 最小目標）。 */
   display: inline-flex;
   align-items: center;
   min-height: 24px;
@@ -3276,12 +3046,8 @@ button.model-tag:hover:not(:disabled) {
   font-weight: 600;
 }
 
-/* image shelf — third grid cell of `.app` (not floating), so it never covers the timeline and survives bot switches.
-   See `docs/goals/image-drop-tray-2026-09-07.md`. */
-
 .shelf {
   position: relative;
-  /* 高於 `.drop-veil`（20）：拖曳遮罩不能蓋掉暫存區的 drop 目標。 */
   z-index: 30;
   display: flex;
   min-width: 0;
@@ -3290,13 +3056,9 @@ button.model-tag:hover:not(:disabled) {
   background: var(--bg-side);
 }
 
-/* 208px：剛好放得下標題＋張數＋三顆鍵，再窄標題會被裁。 */
-
 .shelf.open {
   width: 208px;
 }
-
-/* `.icon-btn`'s hover is red because most users delete; here only 「清空」 does. */
 
 .shelf-head .icon-btn:hover:not(:disabled) {
   background: var(--btn-ghost-bg-hover);
@@ -3308,15 +3070,11 @@ button.model-tag:hover:not(:disabled) {
   font-weight: 700;
 }
 
-/* ≤1024px: shelf becomes a bottom strip (still a grid cell). Touch has no HTML5 drag, so tapping a card is the way in. */
-
 @media (width <= 1024px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
   }
-
-  /* 抽屜開著時收掉暫存：同 z-index 30 且 DOM 在後，會蓋住側欄底部「環境設定」（2026-09-08 實測 390px）。同 `body:has(.modal-backdrop) .shelf`。 */
 
   body:has(.sidebar.open) .shelf {
     display: none;
@@ -3347,8 +3105,6 @@ button.model-tag:hover:not(:disabled) {
   cursor: pointer;
 }
 
-/* 同 BlockedModal 寬；沒按鍵列，底部 padding 收掉。 */
-
 .modal.mem-pane-modal {
   padding-bottom: 0;
 }
@@ -3358,8 +3114,6 @@ button.model-tag:hover:not(:disabled) {
   flex: 1 1 auto;
   min-height: 200px;
 }
-
-/* 終端 URL（termLinks.tsx）：點一下複製不開分頁——登入連結貼到別處才是使用者要的。 */
 
 .term-link {
   all: unset;
@@ -3387,10 +3141,6 @@ button.model-tag:hover:not(:disabled) {
   text-decoration: none;
 }
 
-/* 卡片最上緣的泡泡往上開會被 `.sidebar-scroll` 裁掉，改往下開、靠右。 */
-
-/* 往下開會被 `.bot-actions`（z-index 1、不透明底、DOM 在後）蓋掉；這排是 stacking context，泡泡的 40 無效，整排抬到 bot 列之上。 */
-
 .project-head-actions {
   z-index: 3;
 }
@@ -3411,24 +3161,15 @@ button.model-tag:hover:not(:disabled) {
   transform: translateY(0);
 }
 
-/* mobile (≤ 640px)。斷點只有兩個（`hooks/useMediaQuery.ts`）：≤1024 抽屜、≤640 手機；1240/1160/1080 只收邊距不算斷點。
-   版面與觸控通則集中在這裡（`docs/goals/mobile-rwd-2026-09-08.md`）。 */
-
-/* iOS／iPadOS 的鍵盤不縮 layout viewport，所以高度要跟著 `--vvh`；抽屜版面（含 iPad 直式）一樣中招（issue #548）。 */
-
 @media (width <= 1024px) {
   html,
   body,
   #root {
-    /* `--vvh` 是 `useViewportPin` 寫的 visualViewport 高度：iOS 鍵盤只動它，dvh 不動。 */
     height: var(--vvh, 100dvh);
   }
 }
 
 @media (width <= 640px) {
-  /* iOS 網址列伸縮時 `100%` 比可視區高，底部輸入區被推出去；用 `dvh`。 */
-
-  /* 標題列要一直在最上面（2026-09-08 使用者回報）：iOS 鍵盤會捲整個文件，body 釘 fixed 就沒東西可捲；`.main-head` sticky 當保險。 */
 
   html,
   body {
@@ -3445,13 +3186,9 @@ button.model-tag:hover:not(:disabled) {
     z-index: 5;
   }
 
-  /* 底部三樣都要避開 home indicator。 */
-
   .composer {
     padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
-
-  /* 打字時 `--vvh` 只剩三百多 px，200px 上限加暫存區會切掉游標行：上限改畫面三分之一。 */
 
   .composer textarea {
     max-height: calc(var(--vvh, 100dvh) * 0.33);
@@ -3460,8 +3197,6 @@ button.model-tag:hover:not(:disabled) {
   .shelf {
     padding-bottom: env(safe-area-inset-bottom);
   }
-
-  /* 觸控目標取 40 當下限（Apple/Material 44/48）：標題列只有 60px，再大撐不下。 */
 
   .main-head .icon-btn,
   .main-head .menu-btn,
@@ -3475,15 +3210,11 @@ button.model-tag:hover:not(:disabled) {
     min-height: 40px;
   }
 
-  /* `.tabs` 有 2px 內距，40 + 4 剛好塞進 60px。 */
-
   .tab {
     height: 40px;
     min-width: 40px;
     padding: 0 8px;
   }
-
-  /* 只放大真的會被讀的標籤，整體放大會撐破標題列與側欄。 */
 
   .term-bar,
   .git-bar,
@@ -3496,11 +3227,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 表單欄位手機一律 ≥16px（2026-09-08）：iOS Safari < 16px 聚焦會放大整頁，而 viewport 不該有 `maximum-scale`。
-   只管可輸入欄位，`docs/UI-DECISIONS.md` 的「其餘文字下限 12px」照舊。
-   `!important`：元件樣式（`.field input`、`.mini-input`、各 popover 的輸入框…）特異性比這條高，且常在它之後載入，
-   少了 `!important` 只要有一個元件把欄位寫成 13px，iOS 聚焦就又放大整頁（issue #934）。 */
-
 @media (width <= 640px) {
   input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']),
   textarea,
@@ -3509,11 +3235,7 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 觸控目標下限（2026-09-08 逐頁掃）：手指約 40px。兩種手法：1. 容器夠大就撐到 40；
-   2. 會推開別人的，用 padding + 等量負 margin 放大可按範圍。未處理的見 `docs/screenshots/mobile-walkthrough/WALKTHROUGH.md`。 */
-
 @media (width <= 640px) {
-  /* 1. `.bot-row.compact .bot-actions .head-menu-btn`（0,3,0）要寫全：media query 不加特異性，否則「⋯」維持 26×26。 */
 
   .bot-row.compact .bot-actions .head-menu-btn,
   .bot-row.compact .bot-actions .menu-btn,
@@ -3535,14 +3257,10 @@ button.model-tag:hover:not(:disabled) {
     min-height: 40px;
   }
 
-  /* 同一列可能三四顆，撐高不撐寬。 */
-
   .mini-btn {
     display: inline-flex;
     align-items: center;
   }
-
-  /* 2. 列首摺疊三角只放大可按範圍，右邊留給緊接的按鍵，不搶點擊。 */
 
   .project-fold {
     justify-content: center;
@@ -3559,11 +3277,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 手機通知改從上面出現：390px 右下是送出鍵，且 `.shelf`（30）高於 `.notices`（20）會切掉它（2026-09-08 實測）。
-   z-index 1100：全螢幕 sheet 在 900（`.modal-backdrop`）／1000（`.confirm-backdrop`），通知要在上面，否則 sheet 裡操作失敗的錯誤訊息被蓋住看不到（issue #932）。 */
-
-/* 手機通知放螢幕垂直中間（單手好點）。不用 transform 置中：`.notice-top-center` 是 fixed 子元素，祖先有 transform 會改以 `.notices` 為基準。
-   容器撐滿螢幕但 pointer-events: none，只有通知本身接收點擊。 */
 @media (width <= 640px) {
   .notices {
     top: 0;
@@ -3589,9 +3302,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* `.context-bar` 在 390px 橫捲到 700px，觸控無捲軸使用者以為按鈕壞了（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 2）。
-   拆兩行：repo／git 是會按的（照舊橫捲），context／花費只看（換行）。`.statusline-text` 是 pre 折不了，`overflow-x: auto` 留著。 */
-
 @media (width <= 640px) {
   .context-bar {
     flex-wrap: wrap;
@@ -3605,18 +3315,13 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 抽屜標題列（`docs/goals/mobile-rwd-round2-2026-09-08.md` 問題 4）：兩列徽章撐到 100px，收成一列。 */
-
 @media (width <= 640px) {
-  /* 排一列後每格縮：拿掉標籤與第二個數字（圖示即標籤，細節在 popover／tooltip）。 */
 
   .sidebar-head .pane-k,
   .sidebar-head .tabs-bytes {
     display: none;
   }
 
-  /* RAM 例外（2026-09-15 使用者：手機 menu 上方放得下）：「RAM 已用」與「剩 N」都留著。放得下排一列；
-     更窄的手機（360px）在兩段之間折成兩行，不擠到兩旁的徽章。 */
   .sidebar-head .head-ram .mem-badge {
     column-gap: 4px;
   }
@@ -3627,10 +3332,7 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 390px 被切掉時看不出右邊還有東西：會按的讓它捲得動，只看的允許換行。 */
-
 @media (width <= 640px) {
-  /* 統計列只看、也不能捲（整條是展開鍵，橫捲搶手勢）：換行，並取消 `margin-left: auto` 免得第二列靠右。 */
 
   .disclosure.sub {
     flex-wrap: wrap;
@@ -3642,28 +3344,20 @@ button.model-tag:hover:not(:disabled) {
     margin-left: 0;
     min-width: 0;
     white-space: normal;
-    /* 數字每秒跳，等寬才不晃。 */
     font-variant-numeric: tabular-nums;
   }
 }
 
-/* 終端分頁：固定字元格線，方向相反——收窄邊界、調小字級換視野。 */
-
 @media (width <= 640px) {
-  /* `wrap` 是保險：行數 select 在別的語系／字型下變寬時折行而非被切。 */
 
   .term-bar {
     flex-wrap: wrap;
     row-gap: 6px;
   }
 
-  /* ≤640「字級不低於 12px」的唯一例外：終端是等寬格線不是散文，11px 多看一成欄位。 */
-
   .term {
     font-size: 11px;
   }
-
-  /* 七顆鍵在 390px 差二十幾 px 就把 ctrl+c 擠到第二行——中斷鍵最不該折行。 */
 
   .keypad {
     gap: 5px;
@@ -3674,23 +3368,16 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 對話框在 ≤640 一律全螢幕 sheet：390px 上貼鍵開沒意義，24px 邊只縮表單、鍵盤一彈更擠。head / body / foot 三段式撐滿即成立。 */
-
 @media (width <= 640px) {
   .bs-scrim,
   .modal-backdrop {
     padding: 0;
   }
 
-  /* iOS 鍵盤不縮 layout viewport：sheet 跟 `--vvh`（`useViewportPin` 寫的可視高度）走，底部按鈕才不會被鍵盤蓋住（issue #933）。
-     `bottom: auto` 讓 `height` 生效（`inset: 0` 會把 bottom 釘死）。 */
-
   .modal-backdrop {
     bottom: auto;
     height: var(--vvh, 100dvh);
   }
-
-  /* 特異性要蓋過 `:has(.dirpicker)`。寬度 `100%` 不能 `auto`：backdrop 是置中 flex，`auto` 會縮成 262px。 */
 
   .modal,
   .modal:has(.dirpicker) {
@@ -3707,13 +3394,9 @@ button.model-tag:hover:not(:disabled) {
     padding-bottom: calc(16px + env(safe-area-inset-bottom));
   }
 
-  /* `.sidebar` 在 ≤1024 是 fixed z-index 30 的 stacking context，backdrop 900 蓋不過同 30 的暫存區；sheet 開著時收掉暫存。 */
-
   body:has(.modal-backdrop) .shelf {
     display: none;
   }
-
-  /* 關閉鍵是 sheet 唯一退路，不能是 24px 小叉。 */
 
   .modal-head .icon-btn,
   .bs-head .icon-btn {
@@ -3724,10 +3407,7 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
-
 @media (width <= 640px) {
-  /* 一顆 chip 只能代表目前 bot 的 kind，改成標題列下獨立一列，所有身份橫捲。 */
 
   .main-head {
     flex-wrap: wrap;
@@ -3740,8 +3420,6 @@ button.model-tag:hover:not(:disabled) {
     display: flex;
   }
 }
-
-/* 手機標題列第二行（2026-09-09 使用者截圖：三行吃 170px）：改兩行各 28px；git 動作整寬橫捲，標籤字只留數值。 */
 
 @media (width <= 640px) {
   .context-bar {
@@ -3763,8 +3441,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 手機的 repo / git / context 收成一顆（2026-09-09）：預設一列 28px 摘要，點了展開兩行。 */
-
 @media (width <= 640px) {
   .context-bar.collapsed {
     padding: 0 10px;
@@ -3776,8 +3452,6 @@ button.model-tag:hover:not(:disabled) {
   cursor: pointer;
   gap: 4px;
 }
-
-/* 手機「這回合還在跑」（2026-09-09 使用者截圖：四顆鍵擠得說明字一字一行）：說明一行、鍵換行、30px 高。`.composer-queued` 同理。 */
 
 @media (width <= 640px) {
   .composer-lock,
@@ -3796,8 +3470,6 @@ button.model-tag:hover:not(:disabled) {
     font-size: 12px;
   }
 
-  /* Bot 執行中只需一條緊湊工具列；完整錯誤原因仍沿用上面的換行規則。 */
-
   .bot-composer {
     padding: 6px 8px max(6px, env(safe-area-inset-bottom));
     min-height: 0;
@@ -3808,7 +3480,6 @@ button.model-tag:hover:not(:disabled) {
     padding: 8px;
   }
 
-  /* claude-api：手機維持左右並排，縮小寬度，文字換行（例如「送出」換行「(5 分)」），不擠壓輸入框。 */
   .send-btns {
     flex-direction: row;
     align-self: flex-end;
@@ -3843,10 +3514,7 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 手機：模型／強度／Fast（BotSettingsPanel、ModelQuickPicker） */
-
 @media (width <= 640px) {
-  /* 桌面 24px chip 手指點不到，撐到 36px：這是手機上**唯一**能改模型／強度／fast 的地方。 */
 
   .opt-group .opt {
     min-height: 36px;
@@ -3854,8 +3522,6 @@ button.model-tag:hover:not(:disabled) {
     font-size: 13px;
   }
 }
-
-/* 關閉鍵是唯一出口且在角落最易點偏（2026-09-09 使用者要求放大）。 */
 
 .bs-close {
   width: 40px;
@@ -3865,8 +3531,6 @@ button.model-tag:hover:not(:disabled) {
   font-size: 20px;
   line-height: 1;
 }
-
-/* 1100px 以下放不下整句（bot 名被截、徽章被切）：同手機只留箭頭。 */
 
 @media (width <= 1100px) {
   .main-head .update-badge {
@@ -3885,8 +3549,6 @@ button.model-tag:hover:not(:disabled) {
   vertical-align: -2px;
 }
 
-/* 最上排泡泡往上長會被視窗頂端裁成白條（2026-09-09 使用者截圖），一律往下長。 */
-
 .main-head .icon-tip[data-tip]::after {
   bottom: auto;
   top: calc(100% + 6px);
@@ -3897,8 +3559,6 @@ button.model-tag:hover:not(:disabled) {
 .main-head .icon-tip[data-tip]:focus-visible::after {
   transform: translateX(-50%) translateY(0);
 }
-
-/* 手機純圖示控制都要拇指點得到：補上較晚載入的圖示鍵，免得新頁面落回 18–30px；標題列維持 40px。 */
 
 @media (width <= 640px) {
   button.icon-btn,
@@ -3964,8 +3624,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 母 bot 的身份徽章不再描琥珀色（2026-09-18 使用者：「cc2 不要有 border」）：
-   那圈框看起來像另一種狀態，真正要說的是後面那個小字＝子 bot 用的帳號。 */
 .identity-diverged .identity-badge {
   border-color: transparent;
 }
@@ -3976,7 +3634,6 @@ button.model-tag:hover:not(:disabled) {
   }
 }
 
-/* 三段式主題鈕強制時，原生控制項（捲軸、表單）也跟著換。 */
 :root[data-theme="light"] {
   color-scheme: light;
 }
@@ -3985,7 +3642,6 @@ button.model-tag:hover:not(:disabled) {
   color-scheme: dark;
 }
 
-/* 環境設定→顯示：螢幕保持亮著（`components/KeepAwakeToggle.tsx`）。 */
 .keep-awake {
   display: flex;
   flex-direction: column;
@@ -4012,5 +3668,4 @@ button.model-tag:hover:not(:disabled) {
   color: var(--text-faint);
 }
 
-/* blocked 的原因（daemon 的 run.blocked_reason）：狀態字旁的小字，窄欄放不下就截斷，完整字在 hover。 */
 .bot-state-reason { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; font-weight: 400; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

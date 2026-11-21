@@ -1,14 +1,9 @@
-/**
- * Markdown 圖片換來源的生命週期（issue #1801）：換了 src 不能繼續畫上一張的 blob；失敗過一次後換成能載入的來源要恢復；
- * 晚到的舊請求不能污染新來源；遠端圖片換了 src 仍要重新手動授權。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useEffect, useState } from 'react'
 import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { MarkdownImage } from './MarkdownImage'
 
-/** 還沒回的本機圖片請求：測試決定什麼時候、以什麼結果回。 */
 interface LocalCall {
   path: string
   ok: (tag: string) => void
@@ -36,10 +31,8 @@ before(async () => {
         })
       })
     }
-    // 遠端：立刻回一張 PNG，讓測試只看 src 換了之後畫面怎麼變。
     return Promise.resolve(new Response(new Blob(['png'], { type: 'image/png' }), { status: 200, headers: { 'content-type': 'image/png' } }))
   }) as typeof fetch
-  // 本機的 blob 帶 tag，直接當成 URL 的一部分，方便斷言「畫的是哪一張」。
   URL.createObjectURL = ((b: unknown) => {
     const tag = (b as { tag?: string }).tag
     return tag ? `blob:${tag}` : `blob:remote-${++remoteN}`
@@ -51,7 +44,6 @@ before(async () => {
 
 afterEach(async () => {
   await unmountAll()
-  // 這組測試會刻意留下尚未回應的圖片 fetch；元件卸載後拒絕它們，讓 transport 清掉 30 秒逾時計時器。
   for (const call of localCalls) call.fail()
   await settle()
   localCalls.length = 0
@@ -65,7 +57,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** 一個可以從外面換 `src` 的宿主，模擬 bot 回覆的 Markdown 換了圖。 */
 function host(initial: string) {
   let setSrc: (s: string) => void = () => {}
   function Host() {
@@ -124,7 +115,6 @@ test('舊來源的請求晚到，不影響已經換成的新來源', async () =>
   localCall('new.png').ok('new')
   await until(() => shownSrc() === 'blob:new', '先畫出 new.png')
 
-  // old.png 這時才回：它的結果不能蓋掉 new.png，而且要被回收。
   localCall('old.png').ok('late')
   await settle(20)
   assert.equal(shownSrc(), 'blob:new', '晚到的舊結果不能蓋掉新圖')

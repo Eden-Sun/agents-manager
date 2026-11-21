@@ -24,7 +24,6 @@ export function ImageViewer({ pictures, index: initialIndex, onClose }: { pictur
   }
   useDialogFocus(true, root)
   useEffect(() => {
-    // Fixed body also locks Safari; retain the exact pre-viewer position/styles.
     const body = document.body
     const saved = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow }
     const x = window.scrollX, y = window.scrollY
@@ -38,7 +37,6 @@ export function ImageViewer({ pictures, index: initialIndex, onClose }: { pictur
         setZoom(false)
       }
     }
-    // App routeSync already handles browser Back by dispatching Escape to the top dialog.
     window.addEventListener('keydown', key)
     return () => {
       window.removeEventListener('keydown', key)

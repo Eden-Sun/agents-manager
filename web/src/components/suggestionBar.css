@@ -1,4 +1,3 @@
-/* components/SuggestionBar.tsx：claude 的「建議下一句」，輸入列上方一行，灰字、單行截斷、整條可點。 */
 
 .suggestion-bar {
   display: flex;
@@ -49,13 +48,11 @@
 }
 
 @media (width <= 640px) {
-  /* 手機：只佔一行，但整條都是點擊區（至少 36px 高）。 */
   .suggestion-bar-btn {
     min-height: 36px;
   }
 }
 
-/* 尾端的「點擊送出」：靠右、不縮，建議句太長時由中間那段截斷。 */
 .suggestion-bar-hint {
   flex: none;
   margin-left: auto;

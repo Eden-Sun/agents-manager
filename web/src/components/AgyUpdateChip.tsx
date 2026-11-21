@@ -11,11 +11,6 @@ import { AgyUpdateBody } from './AgyUpdateConfirm'
 import { UpstreamChangelogBox } from './UpstreamChangelogBox'
 import type { DialogControl } from './MergedUpdateChip'
 
-/**
- * header 的「agy 有新版」（issue #1921）：跟 grok／herdr 同一個位置與樣子。按下去跟設定頁「更新檢查」同一個確認框
- * （文字在 `AgyUpdateConfirm.tsx`），確認後每台落後的主機各跑一次 `installAgy`（`POST /api/hosts/{name}/agy/install`）。
- * 有主機正在裝時鈕停用、字改成「agy 更新中…」。
- */
 export function AgyUpdateChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
   const plan = useAgyPlan()

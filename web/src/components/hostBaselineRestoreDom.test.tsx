@@ -1,4 +1,3 @@
-/** 主機一致性備份列舉與破壞性還原確認（#719 A）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, keydown, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

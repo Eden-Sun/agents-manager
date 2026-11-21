@@ -1,6 +1,3 @@
-/**
- * 排程代號（S1、S2…）：列表每列、編輯器標題與「最近執行」、通知 toast 都帶代號（舊 daemon 沒有 code 就不顯示）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

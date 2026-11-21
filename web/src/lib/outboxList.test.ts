@@ -49,10 +49,6 @@ test('沒有檔案的每一種原因都要講清楚，不能只留一片空白',
   assert.ok(emptyReason('something_new', true).length > 0, '認不得的原因也要有話講')
 })
 
-/**
- * #234：`GET /api/bots/{id}/outbox` 失敗（網路、500、404）以前被當成「沒有檔案」：`reason: null` 的空清單，畫面寫「還沒有檔案。bot 把要給你的
- * 檔案放進 $AM_OUTBOX…」——bot 明明放了檔案，使用者卻被告知沒有，還照著說明重放一次。讀不到與真的沒檔分不開。
- */
 test('讀不到清單不是「還沒有檔案」：講讀不到、指路去按重新讀取', () => {
   const text = emptyReason('load_failed', true)
   assert.doesNotMatch(text, /還沒有檔案/)
@@ -68,7 +64,6 @@ test('讀清單失敗回 load_failed，不是 reason 為 null 的空清單；成
   const ok = await readOutbox(() => Promise.resolve({ dir: '/o', reason: null, ttlSecs: 3600, files: [file('a.md', 1), file('b.md', 9)] }))
   assert.deepEqual(ok.files.map((f) => f.name), ['b.md', 'a.md'])
   assert.equal(ok.reason, null)
-  // 遠端的 200 帶 reason：原樣帶著，不被當成失敗。
   assert.equal((await readOutbox(() => Promise.resolve({ dir: '', reason: 'outbox_remote', ttlSecs: 3600, files: [] }))).reason, 'outbox_remote')
 })
 
@@ -89,14 +84,11 @@ test('回合一結束清單就該重讀：鍵跟著最近一個結束的回合�
   assert.equal(lastSettledTurnKey({ a: t('a', 'in_flight', null) }), '', '還在跑：不重讀')
   const before = lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z') })
   assert.equal(before, 'a:2026-09-16T12:28:00Z')
-  // 下一則送出、還在跑：鍵不變。
   assert.equal(lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z'), b: t('b', 'in_flight', null) }), before)
-  // 跑完了：鍵變了 → 重讀。
   assert.equal(
     lastSettledTurnKey({ a: t('a', 'completed', '2026-09-16T12:28:00Z'), b: t('b', 'completed', '2026-09-16T12:36:30Z') }),
     'b:2026-09-16T12:36:30Z',
   )
-  // 失敗結束的回合也算（bot 可能放了一半）。
   assert.equal(lastSettledTurnKey({ c: t('c', 'failed', '2026-09-16T12:40:00Z') }), 'c:2026-09-16T12:40:00Z')
 })
 
@@ -109,9 +101,7 @@ test('預覽框放在那一列左邊、夾在視窗內；左邊放不下改放�
   const vp = { width: 1600, height: 1000 }
   const box = { width: 360, height: 300 }
   assert.deepEqual(previewPlacement({ left: 1250, top: 600, bottom: 660 }, box, vp), { left: 882, top: 600 })
-  // 靠近底部：往上推，不能超出視窗
   assert.deepEqual(previewPlacement({ left: 1250, top: 900, bottom: 960 }, box, vp), { left: 882, top: 692 })
-  // 窄視窗（手機）：左邊不夠 → 放下方，左緣夾在視窗內
   assert.deepEqual(previewPlacement({ left: 100, top: 100, bottom: 150 }, box, { width: 390, height: 800 }), { left: 22, top: 158 })
 })
 
@@ -127,7 +117,6 @@ test('下載失敗講人話：404 是「被清掉了」並要求呼叫端移除�
 
   assert.match(downloadFailure('a.txt', new ApiError(409, { error: 'conflict', reason: 'outbox_remote', host: 'mini' }, 'x')).text, /遠端主機/)
   assert.match(downloadFailure('a.txt', new ApiError(409, { error: 'conflict', reason: 'outbox_remote_unreachable', host: 'mini' }, 'x')).text, /連不上/)
-  // 認不出來的 reason 至少帶狀態碼；不是 ApiError 的照原樣。
   assert.match(downloadFailure('a.txt', new ApiError(500, { error: 'upstream', message: '壞了' }, 'x')).text, /HTTP 500/)
   assert.match(downloadFailure('a.txt', new Error('連線中斷')).text, /連線中斷/)
 })
@@ -160,7 +149,6 @@ test('isBrowserPreviewable：PDF、點陣圖、純文字與 JSON 可開新分頁
 })
 
 test('前端 isBrowserPreviewable 白名單與後端 is_inline_allowed 完全相同（issue #1868）', () => {
-  // 後端 crates/am-base/src/outbox.rs 定義的 INLINE_PREVIEW_EXTENSIONS
   const backendExtensions = [
     'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'txt', 'log', 'md', 'csv', 'tsv', 'json',
   ]
@@ -174,7 +162,6 @@ test('前端 isBrowserPreviewable 白名單與後端 is_inline_allowed 完全相
     assert.equal(isBrowserPreviewable(`file.${ext.toUpperCase()}`), true, `大寫副檔名 ${ext.toUpperCase()} 應被判定可預覽`)
   }
 })
-
 
 test('fileSize 邊界：進位後不出現「1024 KB」「10.0 KB」「10.0 MB」', () => {
   assert.equal(fileSize(1024 * 1024 - 1), '1.0 MB')

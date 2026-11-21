@@ -1,7 +1,3 @@
-/**
- * codex 升級成沒有 5 小時窗的方案（使用者 2026-10-12）：快照只剩週窗，或 5h 只是沿用的舊讀數時，
- * 要認成「5h 無上限」；plus（兩個窗一起來）與其他 kind 不受影響。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { KindQuota, QuotaWindow } from '../api/types'
@@ -65,7 +61,6 @@ test('側欄：沿用的舊 5h（critical）不再讓 codex 的 bot 整列反灰
   const stale = { codex: quota({ five_hour: { ...win(100, OLD), low: true, critical: true }, limit_hit: hit }) }
   assert.equal(botQuotaWarning(stale, 'codex', null), null)
   assert.equal(botQuotaLevel(stale, 'codex', null), null)
-  // plus：5h 真的用完時照舊警告
   const real = { codex: quota({ five_hour: { ...win(100, NEW), low: true, critical: true }, plan: 'plus' }) }
   assert.equal(botQuotaWarning(real, 'codex', null)?.window, '5h')
 })

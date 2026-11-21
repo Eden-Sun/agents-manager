@@ -1,4 +1,3 @@
-/** #1210：刷新失敗時保留最後一份成功終端快照。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

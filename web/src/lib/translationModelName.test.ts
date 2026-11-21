@@ -1,4 +1,3 @@
-/** 譯文來源短名（使用者 2026-11-18：「UI 不是 by gpt 而是 by luna」）：OpenAI 取名稱、Claude 規則不變。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { isLocalTranslation, translationModelName } from '../components/messageTranslationConstants'

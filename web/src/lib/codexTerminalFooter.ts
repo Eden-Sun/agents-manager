@@ -1,6 +1,5 @@
 import { trimClippedTail } from './statusLineTail'
 
-/** Parse the contiguous CLI footer at the end for the status bar; the terminal keeps every line (#1680). */
 export interface CodexTerminalFooter {
   modelLine: string | null
   warnings: number | null
@@ -19,9 +18,7 @@ export function splitCodexTerminalFooter(text: string): { body: string; footer: 
       warnings = Number(warning[1])
       found = true
     } else if (row === '? for shortcuts') {
-      // Keyboard help is chrome, not another status field: alone it is not a footer.
     } else if (/^[a-z0-9][\w.-]*-[\w.-]+(?:\s+[^·]+)?\s*·\s*[~/]/i.test(row)) {
-      // The warning can sit on the model row itself, set apart by 2+ spaces (#1671).
       const tail = /\s{2,}⚠ (\d+) warnings? · f2 to view$/.exec(row)
       if (tail) warnings = Number(tail[1])
       modelLine = tail ? row.slice(0, tail.index) : row
@@ -40,20 +37,16 @@ export interface TerminalFooterView {
   footer: CodexTerminalFooter | null
 }
 
-
 export interface CodexModelLineFields {
   model: string
   effort: string | null
   fast: boolean
   cwd: string | null
-  /** Codex's `Context N% used` segment; `null` when the user's footer config leaves it out. */
   contextUsedPct: number | null
   limits: { label: string; leftPct: number }[]
-  /** Whatever follows that is not a recognised field (the thread title). */
   title: string | null
 }
 
-/** Split a codex model row (`<model> <effort> [fast] · <cwd> · Context N% used · weekly N% left · <title>`) into fields. */
 export function parseCodexModelLine(modelLine: string): CodexModelLineFields {
   const [head = '', ...rest] = trimClippedTail(modelLine).split(/\s+·\s+/)
   const words = head.trim().split(/\s+/)

@@ -1,5 +1,3 @@
-/* 選單裡的 shell／服務 pane（SPEC §6.5e）。Bot 列已經夠重，這一區刻意做輕：
-   它是「這個專案還掛著這些東西」的交代，不是主角。class 用 `side-pane*`，不跟專案頁的 `project-pane*` 撞。 */
 
 .side-panes {
   display: flex;
@@ -15,7 +13,6 @@
   flex-wrap: wrap;
 }
 
-/* 關閉鍵：桌面滑過那一列才出現（不搶標籤的位置），觸控裝置沒有 hover，一直顯示。 */
 .side-pane-close {
   flex: none;
   margin-left: 2px;
@@ -103,7 +100,6 @@
   font-family: var(--font-mono, ui-monospace, monospace);
 }
 
-/* 路徑／用途可能很長，側欄寬度是固定的：截斷而不是把整列撐開。 */
 .side-pane-label {
   position: relative;
   z-index: 1;
@@ -164,7 +160,6 @@
   font-size: 10px;
 }
 
-/* 側欄底部那一組（沒有歸屬專案）：跟「開 shell」對齊，不縮排。 */
 .side-panes.unowned {
   padding: 0 0 4px;
 }

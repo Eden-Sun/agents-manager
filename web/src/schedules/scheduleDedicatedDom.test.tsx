@@ -1,7 +1,3 @@
-/**
- * 排程專屬 bot：編輯器只列專屬 bot、「＋ 建立專屬 bot」預設名稱用排程名稱並以 role=scheduler 建立；
- * 既有排程綁一般 bot 時照常顯示、提示並可「轉成專屬」；側欄把專屬 bot 收進預設收合的「排程 bot」區。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'

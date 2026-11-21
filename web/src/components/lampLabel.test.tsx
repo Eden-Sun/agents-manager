@@ -1,7 +1,3 @@
-/**
- * #714：回合結束但背景 shell 還在跑，不能「看起來像停了」。側欄以外的地方（標題燈、BotSwitcher、群組成員、
- * 手機主力晶片）原本只寫「閒置」；現在全部走 `botStateLabel`／`StatusLamp` 的 `background`，文案與側欄同一來源。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -26,7 +22,6 @@ test('只有燈號是 idle 才改字：執行中、等待回應、斷線不被�
 })
 
 test('StatusLamp：只有背景工作不轉圈（字寫背景執行中）；閒著但子 agent 在跑才轉', () => {
-  // 2026-10-04 使用者：「沒有 child 也在轉，轉個毛」。
   const html = renderToStaticMarkup(<StatusLamp lamp="idle" background={3} />)
   assert.doesNotMatch(html, /lamp-bg/, '只有背景 shell：一般綠點')
   assert.match(renderToStaticMarkup(<StatusLamp lamp="idle" kids={2} />), /lamp-bg[^>]*子 agent 還在跑（2）|子 agent 還在跑（2）[^>]*lamp-bg|lamp-bg/)
@@ -34,17 +29,11 @@ test('StatusLamp：只有背景工作不轉圈（字寫背景執行中）；閒�
   assert.doesNotMatch(renderToStaticMarkup(<StatusLamp lamp="working" kids={2} />), /lamp-bg/, '自己在跑就是 working 燈，不疊轉圈')
   assert.ok(html.includes(`aria-label="${backgroundLabel(3)}"`), html)
   assert.ok(html.includes(`title="${backgroundLabel(3)}"`), html)
-  // 沒有背景工作、或不是 idle：跟以前一樣。
   assert.doesNotMatch(renderToStaticMarkup(<StatusLamp lamp="idle" />), /lamp-bg/)
   assert.doesNotMatch(renderToStaticMarkup(<StatusLamp lamp="working" background={3} />), /lamp-bg/)
-  // 呼叫端給了 title（例如「名字：狀態」）就用它。
   assert.match(renderToStaticMarkup(<StatusLamp lamp="idle" background={3} title="a：背景執行中（3）" />), /title="a：背景執行中（3）"/)
 })
 
-/**
- * issue #1770：claude 壓縮對話（`PreCompact` 標成 `compacting_since`）時，側欄與對話區寫「壓縮中…」，跟「執行中」分開；
- * 燈號照舊（working／idle），斷線與等待回應不被蓋掉；沒有標記或舊 daemon（沒這個欄位）一律照舊文案。
- */
 test('壓縮中：執行中或閒置時文案是「壓縮中…」，燈號與其他狀態不被蓋掉', () => {
   const compacting = run({ agent_status: 'working', compacting_since: '2026-10-14T18:00:00.000Z' })
   assert.equal(botStateLabel('working', compacting), COMPACTING_LABEL)

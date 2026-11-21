@@ -1,5 +1,3 @@
-/* components/TurnErrorBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* 「回合被中斷（API 錯誤）」SPEC §4.3a：燈號說 idle 時這是唯一「沒做完」的訊號，不能是 tooltip，也不能用 accent（那是好消息色）。 */
 
 .turn-error-badge {
   flex: none;
@@ -19,8 +17,6 @@
   background: var(--danger);
   color: #fff;
 }
-
-/* portal 到 body 再 fixed（見 TurnErrorBadge）：標題列會被對話區蓋住。 */
 
 .turn-error-pop {
   position: fixed;

@@ -1,9 +1,3 @@
-/**
- * 「立即部署」的兩支端點（使用者 2026-09-25，SPEC §18.2）：`GET /api/deploy/status` 與 `POST /api/deploy/now`。
- *
- * 讀狀態一律不拋：daemon 回錯（舊 daemon 沒這支）＝`status: null`，按鈕不出現；連不上＝`offline`，
- * 留著上一次的狀態但不給按（跟重建申請 chip 同一套，issue #531）。
- */
 import { rawTransport } from './index'
 import { ApiError } from './types'
 import { L } from './mockText'
@@ -58,7 +52,6 @@ function toStatus(raw: unknown): DeployStatus | null {
   }
 }
 
-/** mock：落後 4 個、其中 2 個動到程式碼，有一顆 bot 在 working。按下去之後變成「部署中」。 */
 const mock = (): DeployStatus => ({
   live_sha: '74b6142e',
   target_sha: '9f3c2a1d0b7e4c5f8a6d2e1f0c9b8a7d6e5f4c3b',
@@ -67,10 +60,10 @@ const mock = (): DeployStatus => ({
   code_commits: 2,
   code_changed: true,
   commits: [
-    { sha: '9f3c2a1', subject: L('docs(spec): 補 §18.2 立即部署', 'docs(spec): add §18.2 deploy now') }, // i18n-ignore
+    { sha: '9f3c2a1', subject: L('docs(spec): 補 §18.2 立即部署', 'docs(spec): add §18.2 deploy now') },
     { sha: '5e8d7c6', subject: 'fix(daemon): keep queued prompts across a restart window' },
     { sha: '2b4a6c8', subject: 'fix(web): contain clipboard and DOM exceptions' },
-    { sha: '1a3b5c7', subject: L('docs: 截圖更新', 'docs: refresh screenshots') }, // i18n-ignore
+    { sha: '1a3b5c7', subject: L('docs: 截圖更新', 'docs: refresh screenshots') },
   ],
   commits_truncated: false,
   running: null,
@@ -100,7 +93,6 @@ export interface DeployStarted {
   log_path: string
 }
 
-/** 部署確認框上的那顆 commit（不是按下去那一刻的 origin/main）。錯誤照拋，交給 `deployNowNotice` 分類。 */
 export async function startDeployNow(sha: string): Promise<DeployStarted> {
   if (rawTransport.mock) {
     mockStarted = true

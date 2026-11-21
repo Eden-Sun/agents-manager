@@ -23,10 +23,6 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
 import './updateQuotaChip.css'
 
-/**
- * 「claude 有更新」擺在額度列最左邊（SPEC §6.9；位置與外觀 2026-09-11 使用者定）：更新與額度都是 kind 的全域狀態，
- * 側欄收起時也要看得到。對齊量表第一行並補 1px 分隔線（2026-09-11）。按下去先確認：批次重啟沒有取消，確認框是唯一反悔點。
- */
 export function UpdateQuotaChip() {
   const phone = useMediaQuery(PHONE_QUERY)
   const restartShown = useStore((s) => {
@@ -46,7 +42,6 @@ export function UpdateQuotaChip() {
   const herdrShown = useHerdrUpdate((s) => s.active !== null || s.result !== null) || herdrPlan
   const grokShown = useGrokPlan() !== null
   const agyShown = useAgyPlan() !== null
-  // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟、兩種 CLI 安裝與 herdr。
   if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown, grokShown, agyShown)) return <MergedUpdateChip />
   return (
     <>
@@ -54,24 +49,19 @@ export function UpdateQuotaChip() {
       <CodexInstallChip />
       <ClaudeInstallChip />
       <HerdrUpdateChip />
-      {/* grok 只提示、不一鍵安裝；手機單獨出現照舊一顆，跟別種並存時併進上面的合成選單。 */}
+      {}
       <GrokUpdateChip />
-      {/* agy 有一鍵安裝（issue #1921）；同樣的手機合併規則。 */}
+      {}
       <AgyUpdateChip />
     </>
   )
 }
 
-/** 更新內容（changelog）看哪一顆：第一顆等著套用的；沒有就第一顆在忙的（要安裝的 codex 不算，那邊有自己的 chip）。 */
 function firstTargetId(s: Parameters<Parameters<typeof useStore>[0]>[0]): string | undefined {
   const c = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
   return (c.ready[0] ?? c.busy.find((b) => !b.install))?.botId
 }
 
-/**
- * 名單每一列的字：bot 名稱 · 專案 · 身份（沒有就「預設」）· 主機（非 local 才寫）· 補充（在忙原因、背景狀態未知…）。
- * 範圍與 `updateBatchCounts` 一樣（不擴大也不縮小）；專案還沒載入就略過專案那一段。
- */
 function rowText(s: Parameters<Parameters<typeof useStore>[0]>[0], botId: string, name: string, tail: string[], noIdentity: string): string {
   const bot = s.bots.find((b) => b.id === botId)
   const project = s.projects.find((p) => p.id === bot?.project_id)
@@ -79,15 +69,12 @@ function rowText(s: Parameters<Parameters<typeof useStore>[0]>[0], botId: string
   return [name, project?.label, bot?.identity || noIdentity, host !== 'local' ? host : null, ...tail].filter((x): x is string => Boolean(x)).join(' · ')
 }
 
-/** `control`：手機合成的那顆（`MergedUpdateChip`）代為開框，這裡只畫確認框、不畫按鈕。 */
 export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
   const batch = useStore((s) => s.restartBatch)
   const restartIdleBots = useStore((s) => s.restartIdleBots)
   const clear = useStore((s) => s.clearRestartBatch)
   const sending = useStore((s) => Boolean(s.busy['restart-idle']))
-  // 各 selector 回純值或字串陣列：`updateBatchCounts` 每次回新陣列，包成物件連 `useShallow` 都擋不住（getSnapshot should be cached）；
-  // 字串陣列用 `useShallow` 逐項比就穩。名單不用「、」「\n」串成一個字串再拆（名字可以含「、」，#998）。
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const readyNames = useStore(
     useShallow((s) =>
@@ -97,9 +84,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     ),
   )
   const readyIds = useStore(useShallow((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.map((b) => b.botId)))
-  // 巡邏還沒看過它們的背景工作（#767）：沒有證據所以照樣會重啟，確認框要講清楚。
   const unknownCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.filter((b) => b.backgroundUnknown).length)
-  // 還沒裝新版的 codex 由旁邊的 `CodexInstallChip` 負責（安裝＋重啟），不再算進這顆的「在忙」。
   const busyLines = useStore(
     useShallow((s) =>
       updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
@@ -108,7 +93,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     ),
   )
   const busyCount = busyLines.length
-  // 在忙的 bot id（跟 busyLines 同一個過濾與順序）：「閒下來自動重啟」排的就是它們。
   const busyIds = useStore(
     useShallow((s) =>
       updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
@@ -122,7 +106,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const scheduledBusy = busyIds.filter((id) => scheduled.includes(id))
   const allScheduled = busyCount > 0 && scheduledBusy.length === busyCount
   const [alsoBusy, setAlsoBusy] = useState(false)
-  // 強制重啟（使用者 2026-11-18 明確要求，覆蓋先前「不提供強制中斷」）：先二次確認，才一顆顆走單顆重啟。
   const restartBot = useStore((s) => s.restartBot)
   const [force, setForce] = useState<{ ids: string[]; names: string[] } | null>(null)
   const busyOnly = readyCount === 0
@@ -132,7 +115,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     if (!v) setAlsoBusy(false)
     return control ? !v && control.close() : setLocalOpen(v)
   }
-  // changelog 用第一顆等著套用的 bot 所在主機、kind 與它跑著的版本；同一台同 kind 都是同一份。
   const changelogHost = useStore((s) => {
     const first = firstTargetId(s)
     return projectHostName(s, s.bots.find((b) => b.id === first)?.project_id ?? null)
@@ -149,7 +131,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
     const first = firstTargetId(s)
     return first ? (s.runs[first]?.update_notice ?? null) : null
   })
-  // codex 的版本區間從通知讀（磁碟已裝好的那種通知也寫著兩個版本），claude 照舊（issue #561）。
   const range = updateRange(changelogKind, changelogNotice, changelogFrom)
   const canReview = changelogKind === 'claude' || changelogKind === 'codex'
   const review = useReviewAsk(changelogKind, changelogHost, range.from, range.to, false)
@@ -162,8 +143,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
         : t('重啟完成 · 成功 {ok} 顆', { ok: ok.length })
       : t('重啟中 {done}/{total}', { done, total })
     return (
-      // 未完成也可以收起（issue #492）：以前 `disabled={!finished}`，`bots_restart_done` 收不到時
-      // 這顆會永遠停用，而它又蓋住一鍵重啟的觸發鈕，等於連再按一次都不行。收起不中斷批次。
       <button
         type="button"
         className={`quota-update running${finished ? ' done' : ''}${failed.length ? ' bad' : ''}`}
@@ -213,7 +192,7 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
             {confirming ? (
               <div className="update-split">
                 <UpdateChangelog kind={changelogKind} host={changelogHost} from={range.from} to={range.to} />
-                {/* 分析（上游分診＋影響分析）claude 與 codex 同一套（issue #561）。 */}
+                {}
                 {canReview ? (
                   <AgmReviewBox kind={changelogKind} host={changelogHost} from={range.from} to={range.to} refreshKey={review.reviewKey} />
                 ) : null}
@@ -279,9 +258,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
           </>
         }
         confirmLabel={busyOnly ? (allScheduled ? t('取消自動重啟') : t('閒下來自動重啟')) : t('重啟 {n} 顆', { n: readyCount })}
-        // 批次框跟單顆框同一顆按鈕：更新的解析是**版本層級**的事，跟要重啟幾顆無關。
-        // 單顆的 chip 在批次蓋得到時會自己隱藏，所以只做在 UpdateBadge 上等於多數情況看不到
-        // （使用者 2026-09-19：「還是沒見按鈕」）。claude 與 codex 同一套（issue #561）。
         secondaryLabel={canReview ? (review.asking ? t('派工中…') : t('分析影響')) : undefined}
         secondaryDisabled={review.asking}
         onSecondary={canReview ? review.ask : undefined}
@@ -291,7 +267,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
           const alsoIds = alsoBusy ? busyIds.filter((id) => !scheduled.includes(id)) : []
           setConfirming(false)
           if (busyOnly) {
-            // 全在忙：不重啟任何一顆；排成閒下來自動重啟，已經全排了就是取消。
             void (allScheduled ? cancelUpdateRestart(busyIds) : scheduleUpdateRestart(busyIds))
             return
           }
@@ -325,7 +300,6 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
           const ids = force?.ids ?? []
           setForce(null)
           setConfirming(false)
-          // 一顆顆來（per-bot 鎖與 pane 版面都假設一次一顆）；daemon 在重啟成功後清掉該顆「閒下來自動重啟」的旗標。
           void (async () => {
             for (const id of ids) await restartBot(id)
           })()

@@ -1,10 +1,8 @@
-/** 有使用者計數的 blob URL 快取（#2074）：還有人持有的 URL 不因擠出而 revoke。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createBlobUrlCache } from './blobUrlCache.ts'
 
 const revoked: string[] = []
-// 注入 revoke，不改全域 URL.revokeObjectURL（同 shard 其他測試檔會互相覆寫）。
 const revokeUrl = (u: string) => {
   revoked.push(u)
 }
@@ -21,7 +19,7 @@ test('超過上限時持有中的不擠出；放掉後才依最久沒用的順�
   await flush()
   assert.deepEqual(revoked, [])
   a.release()
-  a.release() // 重複 release 不能多扣
+  a.release()
   b.release()
   await flush()
   assert.deepEqual(revoked, [], '沒人用的 2 筆在上限內')
@@ -38,7 +36,7 @@ test('同 key 兩個使用者：一個放掉不影響另一個；命中算最近
   const load = async () => `blob:x${++loads}`
   const x1 = c.acquire('x', load)
   c.acquire('y', async () => 'blob:y').release()
-  const x2 = c.acquire('x', load) // 命中：x 變成比 y 新
+  const x2 = c.acquire('x', load)
   assert.equal(x1.url, x2.url)
   assert.equal(loads, 1)
   x1.release()

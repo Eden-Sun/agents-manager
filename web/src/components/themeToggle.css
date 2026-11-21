@@ -1,4 +1,3 @@
-/* components/ThemeToggle.tsx：左上角單顆主題鈕，點一下輪到下一段（自動 → 淺 → 深）。 */
 .theme-toggle {
   flex: none;
   display: inline-grid;

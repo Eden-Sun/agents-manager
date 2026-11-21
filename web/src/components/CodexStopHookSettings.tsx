@@ -3,7 +3,6 @@ import { fetchStopHook, trustStopHook, type StopHookEntry, type StopHookReport }
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/** #1989：顯示各主機 × codex 帳號目錄的 Stop hook 信任狀態；使用者確認後才寫入 trusted_hash。 */
 export function CodexStopHookSettings() {
   const t = useT()
   const [report, setReport] = useState<StopHookReport | null>(null)

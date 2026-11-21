@@ -1,7 +1,3 @@
-/**
- * daemon 自動裝了某台的 grok／antigravity-cli herdr integration（WS `herdr_integration_auto_install`，issue #1871）。
- * 每台每家每個 daemon 行程最多一次，所以 `host:name` 就是去重的鍵：重連重播同一筆不再跳第二次 toast。
- */
 import { isRec, pick, str } from '../api/normalize'
 import { hostLabel } from '../components/toolsHelpers'
 import { t } from '../lib/i18n'

@@ -1,11 +1,6 @@
 import type { ToolStatus } from '../api/types'
 import { t } from './i18n'
 
-/**
- * agy 額度探測這一輪失敗的原因（daemon 的 `tools.agy.quota_error`）翻成人話。
- * 只在「已登入、但額度暫時拿不到」那一格用：登入與否看 `logged_in`，兩件事分開顯示，
- * 不再讓探測失敗看起來像「背景查詢中」或「未登入」。
- */
 export function agyQuotaErrorText(err: NonNullable<ToolStatus['quota_error']>): string {
   switch (err.reason) {
     case 'timeout':

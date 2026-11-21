@@ -1,4 +1,3 @@
-/** mock 的 `start?resume=native`：接不回（這顆 bot 沒有記錄過的原生對話）→ 409 `cannot_resume`，不啟動（API.md §4）。 */
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
@@ -7,7 +6,6 @@ import { useManualMockClock } from './mockClock.ts'
 
 interface BotRow { id: string; kind: string; parent_bot_id?: string | null; run?: { state?: string } | null }
 
-// 不用虛擬時間：這條測試不等 bot 起來，連一個 timer 都不會排。
 before(() => void useManualMockClock(true))
 after(() => void useManualMockClock(false))
 const mock = new MockTransport()

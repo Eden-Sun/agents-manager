@@ -1,6 +1,3 @@
-/**
- * Bot 設定卡（桌機非模態）：開場焦點進表單；關掉（Esc／✕）之後焦點要回到開它的那個鈕，不掉到 body。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -21,7 +18,6 @@ after(async () => {
 const mk = (id: string, name: string) =>
   ({ id, name, project_id: 'p1', kind: 'claude', model: 'opus', effort: 'medium', fast: false, identity: null, persona: null, live_apply_deferred: false, needs_restart: false }) as unknown as Bot
 
-/** 開設定的鈕在卡片外面，跟真實畫面一樣（側欄齒輪、標題列）。 */
 function Page() {
   const open = useStore((s) => s.settingsBotId === 'b1')
   return (

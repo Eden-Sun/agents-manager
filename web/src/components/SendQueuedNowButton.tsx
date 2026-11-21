@@ -5,11 +5,6 @@ import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 
-/**
- * 「補充」被 claude CLI 排進終端佇列（正在跑工具）時，一鍵插隊送出（`POST /bots/:id/send-queued-now`）。
- * 只在：回合進行中、claude 支援 send-now、這一回合有補充、輸入框是空的（有字時「插隊」鈕已涵蓋）。
- * daemon 會讀畫面確認真的有排隊才按鍵；沒有就 409 `nothing_queued`。
- */
 export function SendQueuedNowButton({ botId, inFlightTurnId, inputEmpty }: { botId: string; inFlightTurnId: string | null | undefined; inputEmpty: boolean }) {
   const t = useT()
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
@@ -46,7 +41,6 @@ function useSendQueuedNow(botId: string, onSettled?: () => void) {
   return { busy, click }
 }
 
-/** 對話裡標「補充」的那則旁的小鈕：該則屬於進行中的回合、claude 才畫（子 agent 沒有 statusLine、版本未知，由 daemon 讀畫面判斷能不能插隊）；回 nothing_queued 就藏起來。 */
 export function SupplementSendNow({ msg: m }: { msg: Pick<Message, 'role' | 'sent_via' | 'turn_id' | 'bot_id'> }) {
   const t = useT()
   const botId = m.bot_id ?? ''
@@ -58,8 +52,6 @@ export function SupplementSendNow({ msg: m }: { msg: Pick<Message, 'role' | 'sen
   const [gone, setGone] = useState(false)
   const { busy, click } = useSendQueuedNow(botId, () => setGone(true))
   if (!eligible || gone) return null
-  // 掛在泡泡下緣、靠右的小 pill（2026-11-07 使用者：優化插隊的按鈕位置與樣式）：它是對「這則」排隊補充的動作，
-  // 不放 meta 列（原本一顆大方框撐高 meta、跟小字不同系統）。視覺小、觸控範圍由 CSS 偽元素撐到 ≥32px。
   return (
     <button
       type="button"

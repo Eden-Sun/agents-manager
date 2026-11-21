@@ -1,34 +1,28 @@
 import type { Dict } from '../../lib/i18n/types'
 
 export default {
-  // components/ApiTurnCost.tsx
   '{n} 次請求 · 輸入 {i} · 輸出 {o} · 快取讀 {r} · 快取寫 {w}': '{n} requests · input {i} · output {o} · cache read {r} · cache write {w}',
   '第 {n} 次請求 · ≈ ${x} 目前為止': 'Request #{n} · ≈ ${x} so far',
   '第 {n} 次請求 · 已花 ${x}': 'Request #{n} · spent ${x}',
   '沒送出：bot 停在對話框，不是輸入框': 'Not sent: the bot is on a dialog, not its input box',
   'bot 停在一個對話框，請到「終端」處理或重新啟動這顆 bot': 'The bot is on a dialog. Handle it in the terminal, or restart this bot.',
   '讀不到終端內容，請到終端檢查；目前訊息保留': 'Could not read the terminal content. Check the terminal; your current message is preserved.',
-  // components/PhoneOutboxTray.tsx
   'bot 給的檔案（{n}）': 'Files from bot ({n})',
   '點一下縮回整張': 'Tap to fit',
   '點一下放大': 'Tap to zoom',
   '收合後新進來的檔案': 'Files added while collapsed',
   '+{n} 新': '+{n} new',
   '預覽 {name}': 'Preview {name}',
-  // lib/agoLabel.ts
   '剛剛': 'just now',
   '{n} 分鐘前': { one: '{n} minute ago', other: '{n} minutes ago' },
   '{n} 小時前': { one: '{n} hour ago', other: '{n} hours ago' },
   '{n} 天前': { one: '{n} day ago', other: '{n} days ago' },
-  // lib/askAnswers.ts
   '沒有回答': 'No answer',
   '備註：{notes}': 'Notes: {notes}',
-  // lib/attachmentLoad.ts
   '已清除': 'Cleared',
   '無法載入': 'Could not load',
   '附件檔已清除（bot 刪除後只保留 7 天）；這裡只留檔名與當時的路徑。': 'The attachment was cleared (files are kept for 7 days after a bot is deleted). Only its name and original path remain here.',
   '附件暫時載入失敗，稍後再開一次。': 'Could not load the attachment. Try opening it again shortly.',
-  // lib/backgroundJobs.ts
   '背景執行中（{n}）': 'Running in background ({n})',
   '背景 {n}': 'Background {n}',
   '不到 1 分鐘': 'less than 1 minute',
@@ -47,19 +41,16 @@ export default {
   },
   '另有 {n} 個': '{n} more',
   '另有 {n} 個排程會叫醒它': { one: '{n} more schedule will wake it up', other: '{n} more schedules will wake it up' },
-  // lib/childNotice.ts
   '、': ', ',
   '；': '; ',
   '（{n}）': ' ({n})',
   'child {names} 回報完成': 'Sub-agent report complete: {names}',
   'child {names} 在等人回答': 'Sub-agent awaiting a reply: {names}',
   '↳ {parts}{count}': '↳ {parts}{count}',
-  // lib/compactRefusal.ts
   '它沒有在跑，沒辦法壓縮': 'It is not running, so it cannot be compacted',
   '它正在回合中，等這一回合做完再壓縮': 'It is in a turn. Wait for the turn to finish before compacting it',
   '它正在忙（回合中或停在等你回答），閒下來再壓縮': 'It is busy (in a turn or waiting for your answer). Compact it when it is idle',
   '找不到它的終端，沒辦法送': 'Its terminal could not be found, so the request cannot be sent',
-  // lib/composerCost.ts
   '已冷（約）': 'Cold (estimated)',
   '已冷': 'Cold',
   '剩 {time}': '{time} left',
@@ -71,7 +62,6 @@ export default {
   '快取已過期，送出這則會重寫約 {tokens}': 'The cache has expired. Sending this will rewrite about {tokens}',
   '快取已過期；剛壓縮或接回過，context 大小下一回合才知道': 'The cache has expired. It was just compacted or resumed, so the context size is known after the next turn',
   '快取已過期，送出這則會重寫整段 context': 'The cache has expired. Sending this will rewrite the full context',
-  // lib/composerLabels.ts
   '目前無法送出訊息': 'Cannot send a message right now',
   '{reason}——可以先打，恢復後再送': '{reason} — you can type now and send when it is available again',
   '輸入訊息…': 'Message…',
@@ -92,12 +82,9 @@ export default {
   '附件上傳中…': 'Uploading attachments…',
   '先啟動這顆 bot，起來後自動送出': 'Start this bot first; the message will send when it is ready',
   '這回合結束後自動送出': 'Send automatically when this turn ends',
-  // lib/deliveryNotice.ts
   '已打字送出，但這個 bot 沒有可以逐字核對的紀錄（grok、遠端主機、codex 尚未回報 session），而且不會自動重送——請到終端分頁確認它真的收到': 'This was typed into the bot, but there is no transcript to verify delivery (grok, remote hosts, and codex have not reported a session). It will not be resent automatically — check the Terminal tab to confirm it arrived.',
   '這一則交給 herdr 轉送，沒有逐字證據；萬一沒進到輸入框，daemon 會自己重送一次。': 'herdr relayed this message without character-by-character proof. If it did not reach the input, the daemon will retry once.',
-  // lib/handoff.ts
   '由 {host} 管理：這裡不送訊息，也不啟動或停止這顆 Bot': 'Managed by {host}. Messages cannot be sent here, and this Bot cannot be started or stopped here.',
-  // lib/outboxList.ts
   '即將清除': 'Clearing soon',
   '剩 {n} 分鐘': { one: '{n} minute left', other: '{n} minutes left' },
   '下載「{name}」失敗：{reason}': 'Could not download “{name}”: {reason}',
@@ -116,10 +103,8 @@ export default {
   '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。': 'This bot’s outbox is not a regular directory (it may be a symlink or have the wrong owner). For safety, its files are not listed or made available for download.',
   '還沒有檔案。這是分享用 bot：它放進 $AM_OUTBOX 的檔案會保留 14 天（總量太大時從最舊的清掉），外部使用者隔天回來也拿得到。': 'No files yet. This is a shared bot. Files it puts in $AM_OUTBOX are kept for 14 days (the oldest are removed when the total is too large), so external users can return later to get them.',
   '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。': 'No files yet. When the bot puts a file for you in $AM_OUTBOX, refresh to see it. Files are removed one hour after they are added.',
-  // lib/pendingQuestion.ts
   'Jev（TypeSafe 型別判斷）的建議，只是建議，不會自動動作，不會替你作答；請自己選。': 'Jev only suggests an option; it will not act or answer for you. Please choose for yourself.',
   '{name}的建議，{note}，不會替你作答；請自己選。': '{name} suggestion: {note}. Choose an answer yourself.',
-  // lib/queueSlot.ts
   '；{n} 個附件要重新加': { one: '; reattach {n} attachment', other: '; reattach {n} attachments' },
   'AGM 的交辦正在排隊，送出後才能排下一則；你這一則留在輸入框{note}': 'An AGM task is queued. You can queue another after it sends; this message remains in the input{note}',
   '「{name}」的訊息正在排隊，送出後才能排下一則；你這一則留在輸入框{note}': 'A message to “{name}” is queued. You can queue another after it sends; this message remains in the input{note}',
@@ -127,9 +112,7 @@ export default {
   '上一則訊息還在等這顆 bot 啟動，送出後才能排下一則；你這一則留在輸入框{note}': 'The previous message is waiting for this bot to start. You can queue another after it sends; this message remains in the input{note}',
   'daemon 的通知正在排隊，送出後才能排下一則；你這一則留在輸入框{note}': 'A daemon notification is queued. You can queue another after it sends; this message remains in the input{note}',
   '已有一則訊息排隊中，這一則已退回輸入框{note}': 'A message is already queued. This one was returned to the input{note}',
-  // lib/relayFromName.ts
   '（已收掉）': ' (closed)',
-  // lib/relaySource.ts
   'daemon 自動觸發': 'Triggered by daemon',
   'daemon 自動觸發的訊息（排程／自動化，不是人送的）': 'Message triggered automatically by the daemon (schedule or automation, not sent by a person)',
   '{from} → {to}（未驗證）': '{from} → {to} (unverified)',
@@ -138,11 +121,9 @@ export default {
   '{name}（{cluster} 群集）': '{name} ({cluster} cluster)',
   '寄件端自稱是這顆 bot，但沒有帶它自己的 bot token 證明（不是你送的；來源未驗證）': 'The sender claims to be this bot but did not prove its identity with its bot token (not sent by you; unverified source)',
   '由其他 agent 代為交辦的訊息（不是你送的）': 'Message relayed by another agent (not sent by you)',
-  // lib/remoteImage.ts
   '圖片太大': 'Image is too large',
   '不支援的圖片格式（SVG 等可以帶腳本的不收）': 'Unsupported image format (SVG and other formats that can contain scripts are not accepted)',
   '不是圖片': 'Not an image',
-  // lib/rewind.ts
   'bot 沒在跑：倒回要接著目前這段對話': 'The bot is not running. Rewind needs to continue this conversation.',
   '它正在跑這一回合，等它結束再倒回': 'It is in a turn. Wait for it to finish before rewinding.',
   '它卡在提問，先回答或中斷再倒回': 'It is waiting for an answer. Answer or interrupt it before rewinding.',
@@ -150,20 +131,16 @@ export default {
   '找不到這則訊息。': 'Message not found.',
   '找不到這顆 bot。': 'Bot not found.',
   '這顆 daemon 還沒有倒回功能（HTTP {status}），要重建並重啟 daemon。': 'This daemon does not support rewind yet (HTTP {status}). Rebuild and restart the daemon.',
-  // store/composerDraft.ts
   '框裡的字變了（可能有人正在終端打字），什麼都沒動；看一下新的內容再選一次': 'The text in the input changed (someone may be typing in the terminal). Nothing was changed; review the new text and choose again.',
   '沒清掉：按了清除鍵，框裡還是有字，所以沒有送出你這則；到「終端」分頁看一下': 'Could not clear the input: it still contains text after the clear key was sent, so your message was not sent. Check the Terminal tab.',
   '框裡已經沒有字了，沒有東西可以送出': 'The input is already empty. There is nothing to send.',
   '這種 bot 還沒驗過怎麼清輸入框，請到「終端」分頁處理': 'Clearing the input has not been tested for this bot type. Handle it in the Terminal tab.',
   '它正在跑一個回合，清輸入框會打斷它；等這一回合結束再清': 'It is in a turn. Clearing the input would interrupt it; wait for the turn to finish.',
-  // store/deliveryUnknown.ts
   '上一回合的送達狀態未知，請先「放棄該回合」或停止 Bot': 'Delivery for the previous turn is unknown. Use “Abandon turn” or stop the Bot first.',
   'Bot 正在處理，送達尚未確認；確認後輸入框會自動解鎖': 'The Bot is working. Delivery is not confirmed yet; the input will unlock automatically once it is.',
   '訊息已送出，送達尚未確認（delivery=unknown）：確認 bot 收到後輸入框會自動解鎖；若 bot 一直閒著、輸入框仍鎖著，才需要「放棄該回合」。': 'The message was sent, but delivery is unconfirmed (delivery=unknown). The input will unlock when the bot receives it. Use “Abandon turn” only if the bot stays idle and the input remains locked.',
-  // store/draftNotice.ts
   '這份草稿太長，沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices. It is still in this input.',
   '這份草稿太長（上限 {limit}），沒有同步到其他裝置；內容還留在這個輸入框裡。': 'This draft is too long to sync to other devices (limit: {limit}). It is still in this input.',
-  // store/promptSuggestion.ts
   '建議已經不在了（可能剛被用掉，或終端的輸入框裡有字），沒有送出': 'The suggestion is no longer available (it may have been used, or the terminal input may contain text). Nothing was sent.',
   '建議換成別句了，沒有送出；看一下新的再按': 'The suggestion changed. Nothing was sent; review the new suggestion and try again.',
   '終端沒有收下這句建議，沒有送出；到「終端」分頁看一下': 'The terminal did not accept this suggestion. Nothing was sent; check the Terminal tab.',
@@ -173,13 +150,11 @@ export default {
   'Claude 正忙，這句建議已過期，沒有送出': 'Claude is busy, so the suggestion expired. Nothing was sent.',
   '{base}（已按 Tab，框裡那句也清掉了）': '{base} (Tab was pressed and the input was cleared)',
   '{base}（已按 Tab，那句還留在終端的輸入框裡）': '{base} (Tab was pressed, but the text remains in the terminal input)',
-  // store/rewindAction.ts
   '已倒回；原文放回輸入框了，可以改寫再送': 'Rewound. The original text is back in the input and ready to edit and send.',
   '已倒回；原文放回輸入框了，可以改寫再送；{n} 個附件要重新加': { one: 'Rewound. The original text is back in the input and ready to edit and send. Reattach {n} file.', other: 'Rewound. The original text is back in the input and ready to edit and send. Reattach {n} files.' },
   '已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉': 'Rewound. The original text is back in the input. Clear the text in the terminal input before sending another message.',
   '已倒回；原文放回輸入框了。終端的輸入列裡還留著那段字，送下一則之前先到終端清掉；{n} 個附件要重新加': { one: 'Rewound. The original text is back in the input. Clear the text in the terminal input before sending another message. Reattach {n} file.', other: 'Rewound. The original text is back in the input. Clear the text in the terminal input before sending another message. Reattach {n} files.' },
   '倒回失敗：{reason}': 'Could not rewind: {reason}',
-  // store/sendNowCopy.ts
   '插隊': 'Interrupt and send',
   '插隊送出': 'Send now',
   '插隊送出：打斷目前這一輪，立刻送出這則排隊中的補充': 'Send now: interrupt the current turn and send this queued note immediately',
@@ -194,18 +169,13 @@ export default {
   '沒有插入：這顆 bot 跑的 codex 比 0.159.0 舊，沒有 instant_interrupt（重啟套用新版後才能插入），訊息照一般方式送出。': 'Could not insert: this bot runs an older codex without instant_interrupt (0.159.0 or later is required). Restart it after updating; the message was sent normally.',
   '沒有插入：還不知道這顆 bot 跑的 codex 版本（畫面上的版本行尚未讀到），不賭 instant_interrupt，訊息照一般方式送出。': 'Could not insert: this bot’s codex version is unknown (the version line has not appeared yet). The message was sent normally.',
   '沒有插隊（{reason}），訊息照一般方式送出。': 'Could not interrupt ({reason}). The message was sent normally.',
-  // store/sendNowOutcome.ts
   '插隊沒有生效：送出鍵沒有作用，這一則沒送出，正在跑的回合照常。字可能還留在終端的輸入框，先到「終端」分頁清掉再送。': 'Interrupting did not work: the send key had no effect, so this message was not sent and the current turn is still running. The text may remain in the terminal input; clear it in the Terminal tab before trying again.',
   '插隊送出的結果不明：送出鍵送出去了，但不知道有沒有生效。正在跑的回合先不動；這一則若其實送出去了，回覆會以外部回合出現。先別重送。': 'The interrupt result is unknown: the send key was pressed, but it may not have worked. The current turn is still running. If the message was sent, its reply will appear as an external turn. Do not resend it yet.',
-  // store/shelf.ts
   '檔案': 'File',
-  // store/startingSend.ts
   '沒能啟動（{reason}），還沒送出：': 'Could not start ({reason}); the message has not been sent:',
   '啟動中，起來後自動送出：': 'Starting; the message will send when ready:',
-  // store/uncommittedSend.ts
   '訊息沒送進去（herdr 拒收），但結果還沒寫進 daemon 的資料庫；daemon 會自己補上，確認 agent 狀態後可以再送。': 'The message was not sent (herdr rejected it), but the result has not been written to the daemon database yet. The daemon will reconcile it; check the agent status before trying again.',
   '訊息已送出，但送達結果還沒寫進 daemon 的資料庫（daemon 會自己補上）——不要重送。': 'The message was sent, but its delivery result has not been written to the daemon database yet. The daemon will reconcile it — do not resend.',
-  // components/ChatPanel.tsx
   '回覆': 'Reply',
   '終端擷取': 'Terminal capture',
   '對話紀錄': 'Conversation history',
@@ -348,7 +318,6 @@ export default {
   'Bot 未在執行中，沒有可讀取的終端。請先啟動 Bot。': 'The Bot is not running, so there is no terminal to read. Start the Bot first.',
   'Bot 未在執行中，無法送出訊息': 'The Bot is not running. Messages cannot be sent.',
   '啟動': 'Start',
-  // components/BlockedChoices.tsx
   '按鍵沒有送出去，請查看終端位置後再試。': 'The key was not sent. Check the terminal position and try again.',
   '這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。': 'This answer run has changed (the Bot may have restarted) or its screen could not be read. Nothing was sent.',
   '畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。': 'The screen changed, so that action was not sent. Review the refreshed menu above and try again.',
@@ -568,7 +537,6 @@ export default {
   '「對話訊息翻譯」被關掉了：到「環境設定 → Claude API」打開': '"Message translation" is turned off: turn it on in Settings → Claude API',
   'OpenAI 未啟用或未設定金鑰：翻譯的供應商設成 OpenAI，請啟用 OpenAI 並設定金鑰，或到「環境設定 → Claude API」把翻譯的供應商改回 Claude': 'OpenAI is not enabled or has no key: translation is set to use OpenAI. Enable OpenAI and set its key, or switch the translation provider back to Claude in Settings → Claude API',
   '翻譯沒有開：到「環境設定 → Claude API」打開總開關與「對話訊息翻譯」，並確認 API key 已設定': 'Translation is off: in Settings → Claude API, turn on the master switch and "Message translation", and check the API key',
-  // 承諾帳本進度列（MessageLedgerBar，SPEC 帳本第 1 階段）
   '承諾帳本進度': 'Commitment ledger progress',
   '已加入追蹤，等管理者整理': 'Added to tracking; waiting for the manager to sort it',
   '追蹤 {n} 項：{parts}': 'Tracking {n}: {parts}',
@@ -584,7 +552,6 @@ export default {
   '一句話說明漏了什麼': 'Describe the missed item in one sentence',
   '＋ 漏了什麼？補一項': '+ Missed something? Add an item',
   '這則不用追蹤': 'No need to track this',
-  // 對話窗上方的「追蹤中」列（TrackingBar）
   '追蹤中': 'Tracking',
   '追蹤中 {n} 項': 'Tracking {n}',
   '需要你回覆 {m}': 'Needs your reply {m}',
@@ -597,7 +564,6 @@ export default {
   '關閉': 'Close',
   '這一項已被別人更新，已重新載入，請再操作一次': 'This item was updated by someone else. It has been reloaded; please try again.',
   '帳本操作失敗': 'Ledger action failed',
-  // 待驗收（answered）與使用者驗收動作
   '待驗收': 'Awaiting your review',
   '待你驗收': 'Awaiting your review',
   '待你驗收 {a}': 'Awaiting your review {a}',

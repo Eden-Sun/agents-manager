@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { ApiError } from '../api/types.ts'
 import { reviewErrText } from './claudeReviewErr.ts'
 
-/** API.md：`POST /api/claude-update/review` 的 409 `message` 「就是給使用者看的原因」；`ApiError.message` 取的卻是 `reason` 代碼。 */
 test('沒有協調者／沒有任務檔：顯示 daemon 給使用者看的 message，不是 no_target 代碼', () => {
   const noTarget = new ApiError(
     409,

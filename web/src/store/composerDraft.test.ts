@@ -1,7 +1,3 @@
-/**
- * bot 的輸入框卡著草稿（409 `composer_busy`）：網頁要把框裡的字留在輸入列旁邊、讓使用者處理，不是 toast 一閃就沒了
- * （2026-09-26 w16T:p3）。草稿一律是中性假字。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'

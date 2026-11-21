@@ -11,9 +11,7 @@ test('那個 kind 只有一個帳號就不畫（codex：一個都沒有＝只有
 
 test('claude 有好幾個帳號才畫', () => {
   assert.equal(identityBadgeVisible('claude', ids(['cc0', 'claude'], ['cc1', 'claude'])), true)
-  // 只有一個具名身份時，「不指定」也是一種選擇，兩者分得出來才有意義 → 畫。
   assert.equal(identityBadgeVisible('claude', ids(['cc1', 'claude'])), true)
-  // 一個都沒有＝只有預設一種 → 不畫。
   assert.equal(identityBadgeVisible('claude', []), false)
 })
 

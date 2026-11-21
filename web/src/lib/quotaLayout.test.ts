@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { QUOTA_FIT_START, nextQuotaFit, withFreshNeed } from './quotaLayout.ts'
 import type { QuotaFitState } from './quotaLayout.ts'
 
-/** 模擬一次次量測直到穩定：`contentAt(level)` 是那個階段量到的內容寬。 */
 function settle(s: QuotaFitState, avail: number, contentAt: (l: number) => number, hasHostTag: boolean): QuotaFitState {
   for (let i = 0; i < 10; i++) {
     const next = nextQuotaFit(s, avail, contentAt(s.level), hasHostTag)
@@ -13,7 +12,6 @@ function settle(s: QuotaFitState, avail: number, contentAt: (l: number) => numbe
   throw new Error('量測沒有收斂（兩個階段來回跳）')
 }
 
-// 2026-09-28 使用者截圖（遠端 mac_builder、標題列約 1036px）：五格完整量表約 590px、名牌 44px，額度區只拿得到 612。
 const remote = (l: number) => (l === 0 ? 634 : l === 1 ? 590 : 420)
 
 test('遠端五格放不下名牌：先收名牌，量表照舊完整', () => {
@@ -37,7 +35,6 @@ test('本機沒有名牌：放不下就直接收合，不停在階段 1', () => 
 test('收合後要寬回上次量到的內容寬才展開（遲滯，不來回跳）', () => {
   const collapsed = settle(QUOTA_FIT_START, 560, remote, true)
   assert.equal(collapsed.level, 2)
-  // 收合後內容只剩 420，比可用寬窄很多，但沒到 590 就不展開。
   assert.equal(settle(collapsed, 589, remote, true).level, 2)
   assert.equal(settle(collapsed, 590, remote, true).level, 1)
   assert.equal(settle(collapsed, 640, remote, true).level, 0)
@@ -55,16 +52,13 @@ test('差不到半像素不算放不下（rect 寬是小數）', () => {
   assert.equal(nextQuotaFit(QUOTA_FIT_START, 590, 590.4, false).level, 0)
 })
 
-/** #1269：名字區不再固定 18em，左半縮到內容寬後，釋出的寬度要讓收合的額度列退回完整（名牌先回來）。 */
 test('左半縮到內容寬釋出的寬度，讓收合的額度列展開（#1269）', () => {
   const collapsed = settle(QUOTA_FIT_START, 560, remote, true)
   assert.equal(collapsed.level, 2)
-  // 釋出 72px（252 → 180）：先回到階段 1（名牌＋完整量表要 634，還差一點）。
   assert.equal(settle(collapsed, 632, remote, true).level, 1)
   assert.equal(settle(collapsed, 640, remote, true).level, 0)
 })
 
-/** #1777：收合後內容變窄，`need[0]` 是放不下那一刻的舊寬，要用現在量到的完整寬更新，不然永遠收合。 */
 test('收合時內容已變窄：用現在的完整寬更新需求，放得下就展開（#1777）', () => {
   const stale: QuotaFitState = { level: 2, need: [900, null] }
   assert.equal(nextQuotaFit(withFreshNeed(stale, 600), 760, 500, false).level, 0)

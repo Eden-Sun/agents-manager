@@ -1,4 +1,3 @@
-/** 換版橫幅（2026-11-21）：換版才出現、可收起且同一版不再跳、dev 模式不動作、節流。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

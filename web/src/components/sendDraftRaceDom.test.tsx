@@ -1,8 +1,3 @@
-/**
- * 送出途中草稿被別的裝置改過（#1811，真的掛 `ChatPanel`／`GroupChatPanel` 進 happy-dom，後端是 `fakeApi`）：
- * 草稿跨裝置共用，送出請求在路上時 WS 進來的新草稿會套到本機；舊的送出成功回來，只有草稿沒被改過才能清框，
- * 否則新草稿會被清掉，空字串還會同步回 daemon。四條送出路徑：一般、send-now（插隊）、併送（補充）、群組。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -21,11 +16,9 @@ after(teardownDom)
 const NEW = 'new text from another device'
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
 const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('.composer button')].find((b) => b.textContent === label)!
-/** 同步到草稿 key 的 PUT（空字串＝送出清框後同步回 daemon）。 */
 const draftPuts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
 const emptyPuts = (requests: FakeRequest[]) => draftPuts(requests).filter((r) => (r.body as { text?: string } | undefined)?.text === '')
 
-/** 送出函式手動放行：`resolve` 之前 `await` 的送出都還在途中。 */
 function gate<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: unknown) => void
@@ -36,7 +29,6 @@ function gate<T>() {
   return { promise, resolve, reject }
 }
 
-/** 另一台裝置經 WS 把新草稿套進來（同 `draftSync` 的 `write`：直接改 store，不再觸發本機同步）。 */
 async function remoteDraft(key: string, text: string) {
   await act(async () => useStore.setState((s) => ({ drafts: { ...s.drafts, [key]: text } })))
 }
@@ -54,8 +46,6 @@ function seedBot(draft: string, inFlight: boolean) {
     messages: { b: [] },
   } as never)
 }
-
-
 
 test('一般送出：送出途中別的裝置送來新草稿，成功回來後保留新草稿、不同步空字串', { timeout: 30_000 }, async () => {
   const requests = fakeApi(() => undefined)
@@ -149,7 +139,6 @@ test('併送（補充）：草稿沒被改過，成功後照常清空', { timeou
   assert.equal(useStore.getState().drafts['bot:b'] ?? '', '')
 })
 
-// 草稿追蹤的訂閱與 React 自己的訂閱都走 `useStore.subscribe`：包一層記下還活著的，數目回到原值就代表都解除了。
 const liveListeners = new Set<() => void>()
 const realSubscribe = useStore.subscribe
 before(() => {
@@ -218,7 +207,6 @@ test('一般送出：送出在途中卸載，回來後訂閱解除', { timeout: 
 test('一般送出：送出連線失敗（傳輸層 reject）不清框，訂閱解除', { timeout: 30_000 }, async () => {
   fakeApi(() => undefined)
   seedBot('first prompt', false)
-  // 不覆寫 `sendPrompt`：讓 store 的正式送出流程處理傳輸層的 reject（它自己接住，回 false），跟線上一樣。
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: string, init?: { method?: string }) => {
     if (init?.method === 'POST' && /\/prompt/.test(String(input))) throw new TypeError('network down')

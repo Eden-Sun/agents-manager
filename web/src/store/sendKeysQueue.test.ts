@@ -110,7 +110,6 @@ test('sendKeys 成功：佇列依序送下移與 Enter，沒有失敗通知', as
   assert.deepEqual(useStore.getState().notices, [])
 })
 
-// issue #1879 複審：作答流程固定的 Run（`pinRunId`）不符時直接失敗，不能像一般送鍵那樣改送新 Run。
 test('固定 Run 的 sendKeys／sendText：run mismatch 不重試新 Run，只送一次並通知', async () => {
   seed()
   routeDaemon((request) =>

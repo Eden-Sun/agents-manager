@@ -13,22 +13,17 @@ import {
   sameChoices,
 } from './tuiChoices.ts'
 
-/** 2026-09-12 第三輪真機（fabrik，185×54）多分頁＋多選：使用者回報第二個分頁解析不出來。 */
 const MULTI = readFileSync(new URL('./__fixtures__/fabrik-multiselect.txt', import.meta.url), 'utf8')
 
-/** 2026-09-12 第七輪真機 review 頁：使用者回報點不了其他分頁（分頁列與選項間隔著 Review 段）。 */
 const REVIEW = readFileSync(new URL('./__fixtures__/fabrik-review.txt', import.meta.url), 'utf8')
 
-/** 2026-09-13 真機：多分頁**單選**（沒有 `[ ]`）。草稿若把 `checked===null` 當 disabled 就勾不起來。 */
 const OPU_RADIO = readFileSync(new URL('./__fixtures__/opu-radio.txt', import.meta.url), 'utf8')
 const TYPE_IDLE = readFileSync(new URL('./__fixtures__/type-something-idle.txt', import.meta.url), 'utf8')
 
-/** 2026-09-25 真機（claude 2.1.281，隔離 herdr session）：複選頁在 `Type something` 上直接打字，那列自己勾起來、標題換成打的字。 */
 const MULTI_TYPED = readFileSync(new URL('./__fixtures__/claude-2.1.281-multiselect-typed.txt', import.meta.url), 'utf8')
 const TYPE_TYPED = readFileSync(new URL('./__fixtures__/type-something-typed.txt', import.meta.url), 'utf8')
 const TYPE_REVIEW = readFileSync(new URL('./__fixtures__/type-something-review.txt', import.meta.url), 'utf8')
 
-/** 2026-09-12 真機快照（bot `fabrik`，185 欄）。分隔線夾在 5 與 6 之間是原樣。 */
 const FABRIK = [
   '     9 OPEN [astro] .env.example 與實際用到的環境變數不同步',
   '────────────────────────────────────────────────────────────',
@@ -112,15 +107,10 @@ test('十項以上照樣算得出按幾次', () => {
 })
 
 test('認不出來的一律回 null：沒有游標、沒有連號、正文裡的清單、離畫面底太遠', () => {
-  // 游標捲出畫面 → 算不出 ↓ 幾次
   assert.equal(parseChoiceMenu(['  1. A', '  2. B', 'Enter to select'].join('\n')), null)
-  // 兩個 `>` 是引用不是選單
   assert.equal(parseChoiceMenu(['> 1. A', '> 2. B'].join('\n')), null)
-  // 不從 1 開始
   assert.equal(parseChoiceMenu(['❯ 2. A', '  3. B'].join('\n')), null)
-  // 只有一項
   assert.equal(parseChoiceMenu(['❯ 1. A'].join('\n')), null)
-  // 選單在畫面上方，底下還有一整頁輸出 → 那是正文，不是現在在等的東西
   assert.equal(
     parseChoiceMenu(['❯ 1. A', '  2. B', ...Array.from({ length: 12 }, (_, i) => `輸出第 ${i} 行`)].join('\n')),
     null,
@@ -155,7 +145,6 @@ test('codex 的 `> 1.` 也認得（游標記號只有一個）', () => {
   assert.equal(menu?.cursor, 0)
 })
 
-
 test('多選：分頁列讀得出每一題答過沒有（☒／☐／✔ Submit）', () => {
   const menu = parseChoiceMenu(MULTI)
   assert.ok(menu)
@@ -174,7 +163,6 @@ test('多選：`[ ]` 讀成 checked、本文不留方括號，整份是 multi', 
   assert.equal(menu.choices[0].title, '站內搜尋、分類、標籤')
   assert.equal(menu.choices[0].checked, false)
   assert.equal(menu.choices[0].current, true)
-  // `Chat about this` 沒有方框，不是可勾選的選項
   assert.equal(menu.choices[5].checked, null)
   assert.equal(menu.question, '除了看文章，還需要哪些功能？（這些是決定能不能純静態的關鍵）')
 })
@@ -192,7 +180,6 @@ test('多選：沒有編號的 `Submit` 列算進游標要走的格數，不然�
   const menu = parseChoiceMenu(MULTI)
   assert.ok(menu)
   assert.deepEqual(menu.submit, { after: 4, current: false })
-  // 游標在第 1 項：第 5 項 4 格、Submit 5 格、第 6 項 6 格（中間多一列 Submit）
   assert.equal(keysToMove(menu, 4)?.length, 4)
   assert.equal(keysToMove(menu, 'submit')?.length, 5)
   assert.equal(keysToMove(menu, 5)?.length, 6)
@@ -220,7 +207,6 @@ test('上一輪的單選那份沒有退步：沒有分頁、沒有方框、沒�
   assert.deepEqual(keysToSelect(menu, 3), ['down', 'down', 'down', 'enter'])
 })
 
-
 test('review 頁：分頁列跟選項之間隔著一整段 Review，照樣找得到（第七輪的根因）', () => {
   const menu = parseChoiceMenu(REVIEW)
   assert.ok(menu)
@@ -229,7 +215,6 @@ test('review 頁：分頁列跟選項之間隔著一整段 Review，照樣找得
     { label: '功能', done: true, submit: false },
     { label: 'Submit', done: false, submit: true },
   ])
-  // 全部答完了 → 現在這一格應該是送出頁
   assert.equal(menu.tabAt, 2)
 })
 
@@ -246,7 +231,6 @@ test('review 頁：每題的目前答案讀得出來，選項是 Submit answers 
   )
   assert.equal(menu.question, 'Ready to submit your answers?')
   assert.equal(menu.cursor, 0)
-  // review 那段不能被當成問題的一部分吃進來
   assert.equal(menu.multi, false)
 })
 
@@ -303,13 +287,10 @@ test('貼上之後標題被取代、換行進說明；customAnswerShown 認得�
 test('窄 pane 把長答案折行（中文折在字中間）也算出現過，不會卡住不按 Enter', () => {
   const wrapped = { number: 3, title: '要一個能讓非工程師自己發文章的後', detail: '台，順便把舊文章一起搬過去', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(wrapped, '要一個能讓非工程師自己發文章的後台，順便把舊文章一起搬過去'), true)
-  // 英文折在空格上，照樣認得。
   const latin = { number: 3, title: 'let editors publish posts', detail: 'without touching markdown', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(latin, 'let editors publish posts without touching markdown'), true)
-  // 完全不同的字仍然不算（不能因為比較寬鬆就亂認）。
   assert.equal(customAnswerShown(wrapped, '換一個完全不同的答案'), false)
   assert.equal(customAnswerShown(wrapped, '   '), false)
-  // 答完會多一個 ✔，照舊要認得。
   assert.equal(customAnswerShown({ ...wrapped, title: '要一個能讓非工程師自己發文章的後 ✔' }, '要一個能讓非工程師自己發文章的後台，順便把舊文章一起搬過去'), true)
 })
 
@@ -322,7 +303,6 @@ test('答完進 review：自訂答案（含換行）讀得出來', () => {
   assert.ok(menu.review[1].answer.includes('第二行中文'))
 })
 
-/** 2026-09-20 w16A:pQ 真機：`Do you want to proceed?` 只有一句問句，看不出在核准什麼。 */
 const BASH_PERMISSION = `⏺ Bash(D=$(cat /tmp/.origin_dir); P=northwinds-com-tw
       gcloud compute ssl-certificates create console-cf-origin-cert --project $P --global)
   ⎿  Waiting…
@@ -352,10 +332,8 @@ test('權限框：問句上面的指令與警語要一起帶出來（不然只�
   assert.ok(ctx.includes('Dangerous rm operation'), ctx)
   assert.ok(ctx.includes('shred -u'), ctx)
   assert.ok(ctx.includes('Install origin cert on LB'), ctx)
-  // 上一輪的 transcript（⏺ / ⎿）不能被搬進來。
   assert.ok(!ctx.includes('Waiting…'), ctx)
   assert.ok(!ctx.includes('⏺'), ctx)
-  // 指令要保持逐行，不接成一長串。
   assert.ok(menu.context.length >= 3)
 })
 
@@ -367,7 +345,6 @@ test('問句正上方就是分隔線／transcript 時 context 是空的，畫面
   assert.deepEqual(menu.context, [])
 })
 
-/** 2026-09-24 使用者截圖（claude 2.1.280）：問句跟選項之間夾著空白行＋`·` 條列說明，網頁只剩 1／2 兩個選項。 */
 const FULLSCREEN_OFFER = readFileSync(new URL('./__fixtures__/fullscreen-offer.txt', import.meta.url), 'utf8')
 
 test('問句跟選項中間夾著 · 條列說明：問題照樣讀得到，條列放進 notes', () => {
@@ -379,7 +356,6 @@ test('問句跟選項中間夾著 · 條列說明：問題照樣讀得到，條�
     '· Mouse support – click to move your cursor or expand results',
     '· Selected text auto-copies to your clipboard',
   ])
-  // 分隔線上面是上一輪的 transcript，不能被搬進來。
   assert.deepEqual(menu.context, [])
   assert.deepEqual(
     menu.choices.map((c) => c.title),
@@ -389,7 +365,6 @@ test('問句跟選項中間夾著 · 條列說明：問題照樣讀得到，條�
 })
 
 test('條列說明往上沒有分隔線（不在同一個提示框裡）：不跨過去找問句，照舊是 null', () => {
-  // 上一輪 transcript 的問句不能被抓成這份選單的題目。
   const noDivider = FULLSCREEN_OFFER.replace(/─+\n/, '')
   const menu = parseChoiceMenu(noDivider)
   assert.ok(menu)
@@ -475,10 +450,6 @@ test('複選頁打過字的 Type something：認成第 5 項、已勾、標題�
   assert.ok(m.submit, '這頁有 Submit 列')
 })
 
-/**
- * claude 2.1.281 的「Session paused」（2026-09-25 cf-ox-fork-fork，只取選單那段、說明換成假文字）：沒有問號，
- * 標題自己一行、底下是說明與 `Details:`，再接兩個編號選項；最底下還有一行 `✻ Waiting for API response`。
- */
 const SESSION_PAUSED = readFileSync(new URL('./__fixtures__/claude-2.1.281-session-paused.txt', import.meta.url), 'utf8')
 
 test('Session paused：1／2 兩個選項可點，標題當題目、說明與 Details 放 notes', () => {
@@ -509,10 +480,6 @@ test('Session paused 說明折成很多行：標題仍然是題目，不被擠�
   assert.equal(menu.notes.length, 5)
 })
 
-/**
- * 2.1.289 真畫面（2026-10-05，本機 claude 2.1.289＋假 API、tmux 重現；console-pm 截圖同一種框）：
- * 長 heredoc 指令夾在虛線之間，下面是警語兩列、`⚠` 倒數。以前網頁只剩 Yes／No，指令與原因都沒有。
- */
 const dangerFixture = (name: string) =>
   readFileSync(new URL(`../../../crates/am-lifecycle/src/lifecycle/fixtures/${name}`, import.meta.url), 'utf8')
 
@@ -550,7 +517,6 @@ test('警語與問句之間隔著兩列空白（2.1.289 截圖）：警語照樣
 })
 
 test('標題與上緣虛線已捲出 pane：只給看得到的後半段，並標記被截', () => {
-  // 前 6 列有字的（實線、標題、說明、上緣虛線、指令頭兩列）削掉，後面的空白列照舊。
   const lines = dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt').split('\n')
   let seen = 0
   const kept = lines.filter((l) => (l.trim() !== '' && seen++ < 6 ? false : true)).join('\n')
@@ -583,7 +549,6 @@ test('警語與問句之間沒有空白列：⚠ 倒數不會黏進題目', () =
   assert.equal(menu.command.length, 14)
 })
 
-/** 2026-10-12 真機（console-pm，213×55）：AskUserQuestion 帶 `preview`＝左邊編號選項、右邊是游標那一項的預覽框。 */
 const ASKQ_PREVIEW = readFileSync(new URL('./__fixtures__/claude-askq-preview-213x55.txt', import.meta.url), 'utf8')
 
 test('#1887 每個多選選項都有說明；各種方框與上輪表格不改變標題', () => {
@@ -682,7 +647,6 @@ test('並排預覽：預覽框裡的「1. …」編號行不會被當成選項',
 test('並排預覽：組合字元標籤與預覽編號行仍只解析左欄真實選項', () => {
   const lines = ASKQ_PREVIEW.split('\n')
   const first = lines.findIndex((l) => l.startsWith('❯ 1.'))
-  // 顯示寬度不變：把一個 ASCII 字元替換成 e + 組合重音，但 UTF-16 字串多一碼。
   lines[first] = lines[first].replace('200', 'e\u030100')
 
   const boxLine = (line: string, content: string) => {
@@ -747,7 +711,6 @@ test('沒有預覽框的既有選單：preview 一律是空字串', () => {
 })
 
 test('並排預覽：游標走到沒編號的 Chat about this 時不認（真機：第 2 項的 ❯ 還留著，會算成游標在第 2 項而答錯）', () => {
-  // 2026-10-12 真機（claude 2.1.296，tmux 213×55）：↓ 過最後一個選項後畫面是 `❯ 2. …` 與 `❯ Chat about this` 兩個記號。
   const onChat = ASKQ_PREVIEW.replace('  Chat about this', '❯ Chat about this')
   const lines = onChat.split('\n')
   const a = lines.findIndex((l) => l.startsWith('❯ 1.'))
@@ -758,7 +721,6 @@ test('並排預覽：游標走到沒編號的 Chat about this 時不認（真機
 })
 
 test('並排預覽框的左欄含 ✅／⭐（Emoji_Presentation、終端佔兩格）：框還是對得上，選項與預覽都認得出來', () => {
-  // ✅ 在左欄：左欄 14 格（"  ❯ 1. ✅ 批准" 的 ✅ 佔兩格），框從第 16 格開始。
   const lines = [
     'Which one?',
     '  ❯ 1. ✅ 批准  ┌──────────┐',
@@ -791,16 +753,13 @@ test('並排版面：標籤折行後的 `(Recommended)` 前面要有空白（CJK
 })
 
 test('引用的選單底下是空的輸入列：不是可以點的選單（同 daemon open_choice_menu 的 composer 守衛）', () => {
-  // 回覆逐行引用權限框；回合結束後畫面底下是空的輸入列。按鍵會直送終端，不能把引文當成選單。
   const quoted = '⏺ 權限框長這樣：\n  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do\n\n❯\n────────────\n  hunta | pt | 5h:96%\n'
   assert.equal(parseChoiceMenu(quoted), null)
-  // 同一張框真的開著（底下沒有空輸入列）照舊認得。
   const open = '  Do you want to proceed?\n  ❯ 1. Yes\n    2. No, and tell Claude what to do\n\n  Esc to cancel\n'
   assert.equal(parseChoiceMenu(open)?.choices.length, 2)
 })
 
 test('縮排更深的 `1.` 說明行不是選項：不能把它當成第一個選項，真正的選項反而消失', () => {
-  // 游標在第 2 項（❯ 在第 0 欄，編號欄與其他選項一樣）；第 1 項底下的說明以 `1.` 開頭、縮排更深。
   const menu = parseChoiceMenu('  Which approach?\n  1. Fast path\n       1. skip tests\n❯ 2. Safe path\n  3. Stop\n\n  Enter to select · Esc to cancel\n')
   assert.ok(menu)
   assert.deepEqual(
@@ -822,7 +781,6 @@ test('縮排更深的 `2.` 說明行夾在選項之間，不能讓整份選單�
 })
 
 test('選項說明裡縮排的 ❯ 行不是游標：不能因此認不出整份選單', () => {
-  // 第 1 項的說明是一行 shell 指令（以 ❯ 開頭）。游標只在第 1 項，這份選單仍要認得出來。
   const menu = parseChoiceMenu('  Which approach?\n❯ 1. Fast path\n       ❯ npm test\n  2. Safe path\n\n  Enter to select\n')
   assert.ok(menu)
   assert.deepEqual(
@@ -836,7 +794,6 @@ test('#1818 多行自訂答案只看到第一行（說明沒留、沒有裁切�
   const firstOnly = { number: 3, title: '第一行', detail: '', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(firstOnly, '第一行\n第二行很重要'), false)
   assert.equal(customAnswerShown(firstOnly, 'first line\nimportant second line'), false)
-  // 說明只留了一部分，但沒有裁切記號：不能判定是被裁，也不算出現。
   const partial = { number: 3, title: '第一行', detail: '第二', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(partial, '第一行\n第二行很重要'), false)
 })
@@ -844,10 +801,8 @@ test('#1818 多行自訂答案只看到第一行（說明沒留、沒有裁切�
 test('#1818 多行自訂答案被裁切（說明結尾是 …，已見部分是完整前綴）：算出現', () => {
   const cut = { number: 3, title: '第一行', detail: '第二…', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(cut, '第一行\n第二行很重要'), true)
-  // 第二行一個字都沒露（只剩一個 …）：首行之外沒有任何證據，不放行。
   const onlyEllipsis = { number: 3, title: '第一行', detail: '…', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(onlyEllipsis, '第一行\n第二行很重要'), false)
-  // 已見部分不是答案的前綴，就不算。
   const other = { number: 3, title: '別的字', detail: '第二…', checked: null, current: true, preview: '' }
   assert.equal(customAnswerShown(other, '第一行\n第二行很重要'), false)
 })
@@ -862,7 +817,6 @@ test('#1818 單行答案行為不變：完整出現算數、只出現一部分�
   assert.equal(customAnswerShown(one, 'let editors publish'), true)
   assert.equal(customAnswerShown(one, 'let editors publish posts'), false)
   const cutOne = { number: 3, title: 'let editors publish…', detail: '', checked: null, current: true, preview: '' }
-  // 單行被裁切：照舊不算出現。
   assert.equal(customAnswerShown(cutOne, 'let editors publish posts'), false)
 })
 

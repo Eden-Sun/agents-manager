@@ -1,9 +1,3 @@
-/**
- * 側欄在大量 bot 下的重繪：200 顆 bot、連續 20 次「單顆 run 狀態變化」，數每次變化重渲染幾列 BotRow、花多久。
- * 量測（50 次）：BotRow 沒有 memo 時每次變化 200 列全部重算（avg 200、max 200，約 318 ms／次）；
- * memo 化、回呼穩定之後每次只有那一列（avg 1、max 1，約 71 ms／次）。
- * 真的把 `Sidebar` 掛進 happy-dom（`react-dom/client`），用 `renderProbe` 數 `BotRow` 實際渲染次數。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

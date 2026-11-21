@@ -1,8 +1,3 @@
-/**
- * 環境設定 →「OpenAI API」區（使用者 2026-11-18：「要跟 Claude 一樣可以設定」）：啟用開關（`[openai_api] enabled`）、
- * 金鑰狀態與 key_file 路徑、總花費上限與起算時間（`[openai_api.api_bot]`）、OpenAI 累計花費。
- * **不顯示、不回傳 key 內容**：只看得到「已設定／讀不到＋原因」；key 請放進 key_file 指到的檔（權限 600）。
- */
 import { useEffect, useState } from 'react'
 import { fetchOpenAiApiSettings, saveOpenAiApiSettings, type OpenAiApiPatch, type OpenAiApiSettings as Settings } from '../api/openaiApi'
 import { useT } from '../lib/i18n'
@@ -55,7 +50,6 @@ export function OpenAiApiSettings() {
   const capNumber = cap.trim() === '' ? null : Number(cap)
   const capInvalid = capNumber !== null && (!Number.isFinite(capNumber) || capNumber < 0)
   const savedCap = settings.total_cap_usd
-  // 單回合上限：輸入美元、存微美元；留空＝未設定（清除），必須大於 0。
   const turnNumber = turnCap.trim() === '' ? null : Number(turnCap)
   const turnMicro = turnNumber === null || !Number.isFinite(turnNumber) ? null : Math.round(turnNumber * 1_000_000)
   const turnInvalid = turnNumber !== null && (!Number.isFinite(turnNumber) || (turnMicro ?? 0) < 1)

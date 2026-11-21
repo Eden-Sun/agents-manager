@@ -1,12 +1,3 @@
-/**
- * claude-api bot 回合時間軸與花費拆分面板（可觀測性）。
- *
- * 版面配置：
- * 1. 標題與結論（一句話結論例如「這回合 $5.01，82% 是快取冷掉重寫」，旁邊若有可省建議則並列顯示，無則不顯示框）。
- * 2. 堆疊條（4-5 色語意色票）。
- * 3. 花費拆分對齊表格（類別｜Token/次數｜金額｜占比，右對齊等寬數字，0 元類別排在最後淡化）。
- * 4. 可折疊的執行時間軸（每步一列，時間與花費垂直右對齊）。
- */
 import { useEffect, useMemo, useState } from 'react'
 import { fetchApiTurnTimeline, type ApiTurnTimelineData } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
@@ -66,7 +57,6 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
   const formatCost = (usd: number) => `$${usd.toFixed(4)}`
   const formatMs = (ms: number | null | undefined) => (ms != null ? (ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms}ms`) : '—')
 
-  // 將 6 大類別轉為陣列，並將有花費的排在前面、0 元的淡列在最後
   const categories = useMemo((): CategoryRow[] => {
     if (!data) return []
     const { breakdown } = data.summary
@@ -127,7 +117,6 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
       },
     ]
 
-    // 排序：金額大者在前；若金額為 0，淡列在最後
     return raw.sort((a, b) => {
       if (a.cost_usd > 0 && b.cost_usd === 0) return -1
       if (a.cost_usd === 0 && b.cost_usd > 0) return 1
@@ -172,7 +161,7 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
 
   return (
     <div className="api-timeline-panel" data-testid="api-turn-timeline">
-      {/* 頂部標題列 */}
+      {}
       <div className="api-timeline-header">
         <div className="api-timeline-title-row">
           <span className="api-timeline-title">
@@ -200,7 +189,7 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
         ) : null}
       </div>
 
-      {/* 結論與建議區塊（結論先行、建議在側；沒有建議不顯示框） */}
+      {}
       <div className="api-conclusion-card">
         <div className="api-conclusion-main">
           <span className="api-conclusion-badge">{t('結論')}</span>
@@ -230,7 +219,7 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
         ) : null}
       </div>
 
-      {/* 比例堆疊長條 */}
+      {}
       <div className="api-cost-bar-wrap" aria-label={t('費用比例分布')}>
         <div className="api-cost-bar">
           {categories
@@ -246,7 +235,7 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
         </div>
       </div>
 
-      {/* 費用拆分對齊表格 */}
+      {}
       <section className="api-breakdown-section" aria-label={t('花費拆分')}>
         <table className="api-breakdown-table">
           <thead>
@@ -282,7 +271,7 @@ export function ApiTurnTimeline({ botId, turnId, initialData, onClose }: ApiTurn
         </table>
       </section>
 
-      {/* 可折疊的回合執行時間軸 */}
+      {}
       <section className="api-timeline-section" aria-label={t('回合時間軸')}>
         <div className="timeline-header-bar">
           <button

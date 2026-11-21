@@ -1,7 +1,3 @@
-/* 保溫回覆提示（SPEC §6.5k，UI-DECISIONS「保溫回覆的晶片樣式」）：保溫回覆到了、使用者還沒送新 prompt 前，
-   不畫紫色外框（避免與主要 focus 藍外框混淆，2026-10-09 使用者：「主要的 focus border 用藍色，而保溫機制不要有紫色外框，易混淆」），
-   改以晶片內的小 ♨ 記號（`.unread-chip-warm`）與 tooltip 文字作為不靠外框的提示。
-   放在 `unreadChip.css`、`cacheClock.css` 之後載入。 */
 :root {
   --keep-warm: #a21caf;
 }
@@ -16,7 +12,6 @@
   --keep-warm: #e879f9;
 }
 
-/* 不用保溫（冰凍）：雪花用冷青色，跟 ♨ 的洋紅、未讀的藍數字分開（SPEC §6.5k）。 */
 :root {
   --frozen: #0e7490;
 }
@@ -45,7 +40,6 @@
   line-height: 1;
 }
 
-/* 實心紅（要回答 hover）底上洋紅字會糊掉：反白。未讀不塗底（2026-10-12），保溫記號維持 --keep-warm（#1402）。 */
 .unread-chip.needs-reply:hover .unread-chip-warm,
 .unread-chip.needs-reply:hover .frozen-badge {
   color: #fff;

@@ -77,7 +77,6 @@ test('按鈕與說明依 bot kind 區分：claude 講 send-now 鍵、codex 講 s
   assert.notEqual(codex.label, claude.label)
   assert.equal(sendNowButton('grok', 'x'), null)
   assert.equal(sendNowButton('shell', 'x'), null)
-  // 長文字截斷在 40 字。
   assert.ok(sendNowButton('claude', 'a'.repeat(60))!.title.endsWith('…'))
 })
 

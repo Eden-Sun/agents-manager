@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chipStateText, kidsText } from './chipStateText.ts'
 
-// 晶片的狀態只靠紅點／黃點／數字：按鈕的可及名稱是「名字 3」，讀屏聽不出是未讀、還是要回答。
 test('需要回答排第一，且不重複念未讀數', () => {
   assert.equal(chipStateText({ needsReply: true, unread: 2, waitsKids: false, working: false }), '（需要回應）')
 })

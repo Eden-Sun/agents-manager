@@ -1,7 +1,3 @@
-/**
- * 晶片列的「在跑／要你回答／等子 agent」跟燈號同一條判斷（#1000）：run 已 exited、主機斷線時不能還亮黃燈或紅燈。
- * 只看 `runs[id].agent_status` 的時候，子 agent 的 pane 死在回合中，父晶片會永遠黃色「等子 agent」。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -11,7 +7,6 @@ import { UnreadChip } from './UnreadChip'
 afterEach(unmountAll)
 before(setupDom)
 after(async () => {
-  // 這裡會改全域 store（遠端主機、專案），不還原的話同一個行程裡後面的測試會讀到。
   resetStoreForTest()
   await teardownDom()
 })
@@ -23,7 +18,6 @@ const bot = (id: string, projectId: string, primary: boolean, parent: string | n
 })
 const run = (botId: string, state: string, agentStatus: string) =>
   ({ id: `run-${botId}`, bot_id: botId, state, agent_status: agentStatus, workspace_id: null, pane_id: null, started_at: new Date().toISOString() }) as never
-// 主力晶片有 data-bot-id；其餘晶片沒有，就用 title 開頭的 bot 名認（`botTitle`：「bot-x。…」「bot-x 停在…」）。
 const chip = (id: string) =>
   document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${id}"]`) ??
   [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((e) => e.title.startsWith(`bot-${id}。`) || e.title.startsWith(`bot-${id} `)) ??
@@ -70,7 +64,6 @@ test('exited 的頂層 bot 不留在「在跑」那排；仍在跑時才出現�
   await act(async () => {
     useStore.setState({ runs: { b1: run('b1', 'running', 'idle'), x: run('x', 'running', 'working') } } as never)
   })
-  // 非主力晶片要等溢出量測的 effect 跑完才穩定，直接斷言會看到中間態。
   await settle(50)
   assert.ok(chip('x'), '真的在跑就要出現')
   assert.ok(chip('x')!.querySelector('.unread-chip-working-ring'), '在跑的整圈外框')

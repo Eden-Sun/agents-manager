@@ -1,16 +1,7 @@
-/**
- * 手機抽屜：點到側欄裡的 bot 列／專案頭就收抽屜（選取沒變的再點一次也要收）。
- * 用 capture 是因為收合鍵與 `⋯` 會 stopPropagation；會在抽屜裡開對話框的按鈕要留著抽屜，
- * 否則 `inert` 會把對話框一起關掉。
- *
- * 群集列的整組停派選單（`.bot-cluster-chip-wrap`）不是導覽，要留在 STAY，否則點下去抽屜就收了。
- * 成員的停派切換在列尾 `⋯`（`.bot-actions`，已在 STAY）。
- */
 export const DRAWER_NAV = '.bot-row, .project-head'
 export const DRAWER_STAY =
   '.bot-kids-toggle, .bot-actions, .bot-name-btn, .bot-name-input, .project-fold, .project-head-actions, .bot-cluster-chip-wrap'
 
-/** 這個點擊目標該不該收抽屜。 */
 export function drawerShouldClose(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
   if (!target.closest(DRAWER_NAV)) return false

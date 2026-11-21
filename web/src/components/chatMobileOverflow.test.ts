@@ -1,9 +1,3 @@
-/**
- * 手機（390 寬）對話區水平超版（2026-11-18 iPhone 截圖）：訊息列表整個左右可捲，助理泡泡與時間列被切。
- * 根因：`.msg-meta` 是 nowrap 且高度固定 20px，列內子項 min-width:auto 縮不下來，譯文狀態列（「譯文跟原文幾乎一樣…」）
- * 把整列撐出泡泡、再撐寬整個列表。修法在 chatPanel.css：列與左側子項可縮，有狀態列時列可換行、長字串斷行；
- * 表格與 code block 各自在自己內部橫向捲動（不靠整體 overflow-x:hidden）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -11,7 +5,6 @@ import { readFile } from 'node:fs/promises'
 const css = await readFile(new URL('./chatPanel.css', import.meta.url), 'utf8')
 const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8')
 
-/** 取出某個選擇器的第一個規則本體（不含選擇器）。 */
 function ruleBody(src: string, selector: string): string {
   const i = src.indexOf(`${selector} {`)
   assert.ok(i >= 0, `找不到規則 ${selector}`)
@@ -41,11 +34,6 @@ test('表格與 code block 在自己內部橫向捲動，不靠整體 overflow-x
   assert.match(ruleBody(styles, '.bubble.md pre'), /overflow(-x)?:\s*auto;/)
 })
 
-/*
- * 2026-11-19 iPhone 截圖（openai-api 回合）：OpenAI 回合的 token 拆解 `.api-openai-breakdown` 是 nowrap 的 flex 子項，
- * 撐到約 560px，整個 msg-list 左右橫捲；助理 markdown 的行內 code 長路徑沒有斷行點，也會撐寬泡泡。
- * 瀏覽器實測（390px）：修前 .msg-list scrollWidth 685 > clientWidth 390；修後應相等。
- */
 test('OpenAI 回合的 token 拆解列：有拆解時可換行、拆解本身可縮並斷行', () => {
   const meta = ruleBody(css, '.msg-meta:has(.api-openai-breakdown)')
   assert.match(meta, /flex-wrap:\s*wrap;/)

@@ -1,7 +1,3 @@
-/**
- * 訊息裡的圖片是內容，不是裝飾：沒寫替代文字（`![](x.png)`）時，圖片包在連結裡，alt 不能是空的——
- * 否則連結沒有任何可讀名稱，讀屏只唸「連結」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

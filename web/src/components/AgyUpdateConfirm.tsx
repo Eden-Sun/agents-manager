@@ -1,9 +1,5 @@
 import { useT } from '../lib/i18n'
 
-/**
- * agy 更新的確認框內文（設定頁「更新檢查」與 header 的 agy 徽章共用，issue #1921）：兩處按下去都是 `installAgy(host)`，
- * 說明要一字不差，所以內文從這裡出；標題在 `lib/agyUpdate.ts`。
- */
 export function AgyUpdateBody({ host, current, target }: { host: string; current: string | null; target: string }) {
   const t = useT()
   return (

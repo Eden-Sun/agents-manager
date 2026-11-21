@@ -1,4 +1,3 @@
-/* components/ChatPanel.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .src-tag.daemon {
   border-color: color-mix(in srgb, #d69e2e 70%, transparent);
   color: #d69e2e;
@@ -9,14 +8,9 @@
   background: color-mix(in srgb, #d69e2e 8%, var(--bg-panel));
 }
 
-/* tabpanel 殼只為語意存在（UI-DECISIONS #11），不參與排版。 */
-
 .tab-panel {
   display: contents;
 }
-
-/* `overflow: hidden` zeroes flex auto min-size, so the name disappears first without a floor; clip at the cluster.
-   Scoped to `.bot-head` — group headers keep a single-row `.main-title`. */
 
 .bot-head .main-title {
   flex-direction: column;
@@ -24,20 +18,14 @@
   justify-content: center;
   gap: 1px;
   overflow: hidden;
-  /* 空白先給名字（2026-09-11：2000px 時 spacer 空 127px 名字卻截尾）：`flex-grow: 1`、spacer 不搶；縮時權重 0.25，別人先讓。 */
   flex: 1 0.25 auto;
-  /* Not decoration: the `working` lamp ring draws 4px outside its box; padding moves the clip out, negative margin restores position. */
   padding-left: 5px;
   margin-left: -5px;
 }
 
-/* spacer 在 `.bot-head` 不再分空間；group 標題列的 `.main-title` 不伸縮，spacer 仍要推。 */
-
 .bot-head > .spacer {
   flex-grow: 0;
 }
-
-/* `.main-title` 是 overflow: hidden 直排，子元素會被硬切（2026-09-10 使用者截圖：`opus-Medium · thi`）；這行自己可壓縮、收成 `…`。 */
 
 .bot-head .main-title-sub {
   display: flex;
@@ -54,15 +42,10 @@
   text-overflow: ellipsis;
 }
 
-/* pane id 排在 model 後（2026-09-11 使用者）；擠到極限時只留 `▾`，完整值在 tooltip。 */
-
 .bot-head .main-title-sub > .main-status.pane-toggle {
   flex: 0 1 auto;
   min-width: 0;
 }
-
-/* 桌面名字下限 3em（2026-09-11，原 168px）：分頁不得被推出 > 名字不消失，量表又五格全開；1500–1560px 下 168px 會把分頁推出 56–116px。
-   真正要修的是 QuotaStrip 按剩餘寬度畫格數。 */
 
 @media (min-width: 721px) {
   .bot-head .main-title {
@@ -76,8 +59,6 @@
   flex: 0 1 auto;
   min-width: 4.5em;
 }
-
-/* issue #25：對話只留最近 500 則，更早的按這顆補回來（`LoadEarlier`）。 */
 
 .load-earlier {
   display: flex;
@@ -151,8 +132,6 @@
   color: var(--accent-ink);
 }
 
-/* 輸出中的半成品預設收著，這顆是唯一入口；連結樣式對齊狀態字。 */
-
 .live-peek {
   margin-left: 8px;
   padding: 0;
@@ -201,9 +180,6 @@
   margin-bottom: 0;
 }
 
-/* 2026-11-18 手機水平超版（iPhone 截圖）：meta 列是 nowrap 且高度固定 20px，列內子項 min-width:auto 縮不下來，
-   長的譯文狀態列（「譯文跟原文幾乎一樣…」）會把整列撐出泡泡、再把整個訊息列表撐寬，iOS 就整列左右捲。
-   修根因：列與左側子項可縮；有狀態列時列改成可換行、高度跟內容走；長字串斷行。 */
 .msg-meta-above,
 .msg-meta-below,
 .msg-meta-left {
@@ -223,8 +199,6 @@
   overflow-wrap: anywhere;
 }
 
-/* 同一類水平超版（iPhone 截圖 2026-11-19）：OpenAI 回合的 token 拆解（`.api-openai-breakdown`）是 nowrap 的 flex 子項，
-   min-width:auto 撐到約 560px，整個 msg-list 跟著左右捲、左側被切。改成可換行、可縮；有拆解時列高跟內容走。 */
 .msg-meta:has(.api-openai-breakdown) {
   flex-wrap: wrap;
   white-space: normal;
@@ -289,7 +263,6 @@
   background: #5c636b;
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .kind-mark.claude {
     background: #e0b483;
@@ -339,8 +312,6 @@
   color: var(--warn);
 }
 
-/* Not a warning: the turn is still running, but the message is safely parked. */
-
 .composer-queued {
   display: flex;
   align-items: center;
@@ -367,8 +338,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-/* 複製手勢不攔截長按、選取或捲動，iOS 仍可用原生文字選取選單。 */
 
 .bubble-copyable {
   -webkit-user-select: text;
@@ -401,12 +370,8 @@
   color: var(--accent-ink);
 }
 
-/* 「這回合的提問」浮窗（`LastAskPeek`）：貼 `.msg-list-wrap` 下緣（2026-09-08 使用者要它在視線處），不佔高度以免訊息跳動。
-   slot 不吃指標事件（兩側訊息仍可選取）；底色不透明，否則兩層字疊在一起。 */
-
 .lastq-slot {
   position: absolute;
-  /* top 一定要給：只釘 bottom 時長訊息會長出 .msg-list-wrap 外，把 × 頂出畫面；釘上下 + max-height:100%。 */
   top: 0;
   bottom: 0;
   left: 0;
@@ -417,7 +382,6 @@
   padding: 8px 28px 10px;
   box-sizing: border-box;
   pointer-events: none;
-  /* 靠右、同使用者氣泡寬（2026-09-08）：長得像剛送出的那則才讀得出「還在跑」，置中像系統通知。 */
   display: flex;
   justify-content: flex-end;
   align-items: flex-end;
@@ -430,7 +394,6 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  /* 超過的由 .lastq-body 自己捲，× 永遠在畫面內。 */
   max-height: 100%;
   max-width: min(560px, 82%);
   min-width: 260px;
@@ -443,8 +406,6 @@
   box-shadow: var(--shadow);
 }
 
-/* 「進行中」：亮光每 2.4 秒掃過；只掃光不動位置，不跟底下的輸出搶注意力。 */
-
 .lastq::after {
   content: '';
   position: absolute;
@@ -454,7 +415,6 @@
   width: 60%;
   pointer-events: none;
   background: linear-gradient(105deg, transparent 0%, rgb(255 255 255 / 0.18) 50%, transparent 100%);
-  /* 只動 transform（compositor），不動 background-position——後者每幀重繪整張氣泡。 */
   will-change: transform;
   animation: lastq-sweep 2.4s ease-in-out infinite;
 }
@@ -498,8 +458,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 兩個都 `margin-left: auto`：有提示時提示吃剩餘空間，沒有時 × 自己貼右。 */
-
 .lastq-hint,
 .lastq-x {
   margin-left: auto;
@@ -532,8 +490,6 @@
   color: #fff;
 }
 
-/* 夾成三行（長提問常是整段規格）；展開上限 40vh 自己捲。 */
-
 .lastq-body {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -562,7 +518,6 @@
 
 .lastq.open .lastq-body {
   display: block;
-  /* 用 flex 分配而非固定 vh：行動瀏覽器網址列收合會讓 vh 大於可視區。min-height:0 讓 flex 子項縮得下去。 */
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
@@ -577,8 +532,6 @@
   border-bottom: 0;
   background: transparent;
 }
-
-/* 版本固定貼這一列最右邊（2026-09-12 使用者）。 */
 
 .context-bar .sl-item.sl-version {
   margin-left: auto;
@@ -640,7 +593,6 @@
 }
 
 @media (width <= 1160px) {
-  /* 主機標在設定面板／側欄都看得到，先讓；模型後綴只在手機讓（1024–1160 還有空間）。 */
 
   .bot-head .host-badge {
     display: none;
@@ -648,13 +600,10 @@
 }
 
 @media (width <= 1080px) {
-  /* context bar 排不下時 `版本` 先讓。門檻不是 1024：1025–1080 側欄還在，主區域反而更擠。 */
 
   .context-bar .sl-item.sl-version {
     display: none;
   }
-
-  /* `.main-status.pane-toggle` has two classes later, so a bare `.main-status` here loses on specificity. */
 
   .main-status,
   .main-head .main-status.pane-toggle {
@@ -663,7 +612,6 @@
 }
 
 @media (width <= 640px) {
-  /* 手機沒有氣泡右邊的空白，「↓ 最新」會蓋在字上：縮成箭頭圓鈕（~130px → 34px）。 */
 
   .jump-bottom {
     right: 12px;
@@ -676,13 +624,10 @@
     display: none;
   }
 
-  /* 跟訊息區 14px padding 對齊；兩行就夠，三行加標題列會蓋掉近四分之一畫面。 */
-
   .lastq-slot {
     padding: 8px 14px 8px;
   }
 
-  /* 展開全文最高只到訊息區的三分之二（2026-09-15 使用者：手機太高會擋住畫面），其餘由 .lastq-body 自己捲。 */
   .lastq {
     max-height: calc(200% / 3);
   }
@@ -692,7 +637,6 @@
     line-clamp: 2;
   }
 
-  /* 只收 email：帳號警告（`sl-warn`，用的是預設帳號）不能跟著藏，手機使用者不然不會知道（#930）。 */
   .sl-item.sl-account:not(.sl-warn) {
     display: none;
   }
@@ -703,8 +647,6 @@
   line-height: 0;
   color: var(--text-dim);
 }
-
-/* Selected row's wash is accent-tinted, so resting state needs more contrast; same specificity as hover, so exclude hover/open explicitly. */
 
 .bot-row.selected .icon-btn.gear:not(:hover):not([aria-expanded='true']),
 .bot-row.selected .icon-btn.menu-btn:not(:hover) {
@@ -738,8 +680,6 @@
   color: var(--text-dim);
 }
 
-/* Retry / API-error banner (`turn_progress.alert`): spinner still spins, so this row must read as a warning, not status text. */
-
 .live-alert {
   display: flex;
   align-items: center;
@@ -769,12 +709,9 @@
   font-weight: 700;
 }
 
-/* pane id，點一下複製（PaneCopy）。中性色，燈號才是狀態。 */
-
 .main-status.pane-toggle {
   display: inline-flex;
   align-items: center;
-  /* 同 `button.model-tag`：17px 高按不太到。 */
   min-height: 24px;
   padding: 0 4px;
   border-radius: 5px;
@@ -803,8 +740,6 @@
   white-space: nowrap;
 }
 
-/* 逃生門刻意比 `.mini-btn` 更輕，不搶「中斷 / 停止」。 */
-
 .live-abandon {
   flex: none;
   padding: 0 6px;
@@ -823,8 +758,6 @@
   color: var(--danger);
 }
 
-/* `white-space` 必須寫死：對話框掛在 nowrap 的 `.msg-meta` 底下，否則說明一行拉出框外。 */
-
 .abandon-note {
   margin: 0 0 8px;
   white-space: normal;
@@ -840,7 +773,6 @@
 }
 
 @media (width <= 640px) {
-  /* `1 0 100%`：一定被擠到第二行。 */
 
   .context-bar > .statusline-bar {
     flex: 1 0 100%;
@@ -848,21 +780,15 @@
     row-gap: 2px;
   }
 
-  /* 11px 在手機是裝飾不是資訊（同 12px 下限）。 */
-
   .context-bar .sl-item,
   .context-bar .sl-k,
   .context-bar .sl-v {
     font-size: 12px;
   }
 
-  /* 換行後等寬數字，刷新不左右跳。 */
-
   .context-bar .sl-v {
     font-variant-numeric: tabular-nums;
   }
-
-  /* 目錄可能是整條路徑：縮、截尾，不把整列推出畫面。 */
 
   .context-bar .sl-item {
     flex: 0 1 auto;
@@ -870,8 +796,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-
-  /* 帳號／目錄欄 `display: none` 仍是 `.sl-item + .sl-item` 的兄弟，context 開頭會多一條分隔線。 */
 
   .context-bar .sl-item.sl-account:not(.sl-warn) + .sl-item,
   .context-bar .sl-item[data-k='目錄'] + .sl-item {
@@ -881,10 +805,7 @@
   }
 }
 
-/* 手機名字被截成五個字，旁邊卻是 190px 額度 chip（其他欄位 popover 已有），讓出寬度給名字。 */
-
 @media (width <= 640px) {
-  /* 名字**不能有下限**：它不肯縮時被切的是齒輪（手機進設定唯一入口）。曾寫 `min-width: 10ch`，齒輪被切成 17px（2026-09-08 於 390px 量到）。 */
 
   .bot-head .main-title-row > strong,
   .bot-head .main-title-row > .bot-name-btn,
@@ -894,7 +815,6 @@
 }
 
 @media (width <= 640px) {
-  /* 靠右、排不下自己橫捲（不會遮到 issues-pop：它不在這個 overflow 底下）。 */
 
   .context-bar > .statusline-bar {
     flex: 1 1 0;
@@ -913,8 +833,6 @@
   .context-bar .sl-k {
     display: none;
   }
-
-  /* 目錄在手機不看；版本本來就第一個讓。 */
 
   .context-bar .sl-item.sl-version,
   .context-bar .sl-item[data-k='目錄'] {
@@ -958,8 +876,6 @@
   }
 }
 
-/* 齒輪 36px 會把兩層叢集撐到 61px 超過標題列，chip 壓到底線（2026-09-10 使用者截圖）：縮到 28px 並封頂。 */
-
 .bot-head .main-title {
   max-height: 100%;
 }
@@ -997,8 +913,6 @@
     gap: 4px;
   }
 
-  /* 未讀數已在主力／剛跑完列顯示，名稱這排保留空間給 Git 與設定入口。 */
-
   .bot-head .main-title-row > .unread-turns {
     display: none;
   }
@@ -1014,15 +928,11 @@
     color: var(--text-dim);
   }
 
-  /* kind 圖示 → 模型 · effort → 版本號（2026-09-11 使用者指定順序）；太長時模型先省略。 */
-
   .mobile-bot-model {
     flex: 0 1 auto;
     min-width: 0;
     color: var(--text);
   }
-
-  /* 2026-09-12 使用者（手機實拍）：「name 下方的還是灰」。模型名吃 kind 品牌色（經 `--head-kind`），版本號維持淡灰（同桌面 pane id）。 */
 
   .mobile-kind-icon.claude ~ .mobile-bot-model {
     --head-kind: var(--kind-claude);
@@ -1037,7 +947,6 @@
   }
 
   .mobile-bot-version > .mobile-bot-model {
-    /* 無 chip 底，純品牌色在淺色只有 3.2–4.35:1（12px 要 4.5）：混一成多文字色過 4.5，色相仍看得出。 */
     color: color-mix(in srgb, var(--head-kind, var(--text)) 72%, var(--text));
     font-weight: 600;
   }
@@ -1058,8 +967,6 @@
     flex: none;
     font-size: 16px;
   }
-
-  /* kind 圖示原吃 --text-dim，跟桌面與額度列的彩色 kind 對不起來，改同一組品牌色。 */
 
   .mobile-kind-icon.claude {
     color: var(--kind-claude);
@@ -1097,7 +1004,6 @@
   }
 }
 
-/* 手機標題列的 Git 鈕：帳號有警告時右上一個小點（警告本身在彈窗的狀態列裡，#930）。 */
 .mobile-git-info.warn {
   position: relative;
 }
@@ -1115,7 +1021,6 @@
 
 .msg-cost { font-size: 11px; color: var(--muted, inherit); opacity: 0.8; margin-inline-start: 6px; }
 
-/* 英文訊息的「翻譯」鈕（TranslateButton）：跟時間同一排、低調的文字鈕。 */
 .msg-translate {
   flex: none;
   font-size: 11px;
@@ -1125,7 +1030,6 @@
   color: var(--text-faint);
   cursor: pointer;
 }
-/* 手機：字不變大，點擊範圍撐到 40px 高（觸控目標 ≥ 40px）；負 margin 抵掉，meta 列高度不變。 */
 @media (width <= 640px) {
   .msg-translate {
     min-height: 40px;
@@ -1134,7 +1038,6 @@
     margin: -12px 0;
   }
 }
-/* 譯文下方的費用行：小字、不搶內容。 */
 .msg-translation-foot {
   display: flex;
   flex-wrap: wrap;
@@ -1183,7 +1086,6 @@
   margin: 0;
 }
 
-/* 原文⇄譯文交換動畫（方案 A：微移淡入＋圖示轉半圈） */
 .msg-swap-forward {
   animation: msg-swap-in-fwd 150ms cubic-bezier(.2, .8, .2, 1);
   will-change: opacity, transform;
@@ -1253,13 +1155,11 @@
   to { transform: rotate(360deg); }
 }
 
-/* 譯文已就緒（醒目提示） */
 .msg-translate.ready {
   color: var(--accent);
   font-weight: 600;
 }
 
-/* 向下相容別名 */
 .msg-flip {
   animation: msg-swap-in-fwd 150ms cubic-bezier(.2, .8, .2, 1);
 }
@@ -1280,8 +1180,6 @@
   }
 }
 
-/* 排隊中補充的「插隊送出」：泡泡下緣靠右的小 pill，跟 .src-tag／meta 小字同一套（11px、淡邊框）。
-   視覺高約 20px，觸控範圍用偽元素撐到 32px 以上，不撐高任何列。 */
 .queued-jump {
   position: relative;
   display: inline-flex;

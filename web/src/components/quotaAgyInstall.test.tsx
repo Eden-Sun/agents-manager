@@ -1,9 +1,3 @@
-/**
- * 沒裝 agy 的主機（使用者 2026-10-06）：額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，不開 shell 打 agy
- * （那只會得到 `zsh: command not found: agy`）；使用者按確認才打 `POST /api/hosts/{name}/agy/install`
- * （daemon 讀官方 manifest、驗 sha512，不跑官方 install.sh），裝好再接著開 shell 登入。新 bot 的 kind 選單／缺少 CLI 提示
- * 用的 `AgyInstallButton` 同樣先問。已經裝了就走原本的開 shell 登入。真的掛 `QuotaStrip` 進 happy-dom，後端是 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -13,7 +7,6 @@ import { QuotaStrip } from './QuotaStrip'
 import { AgyInstallButton } from './AgyInstall'
 
 virtualMockTime()
-/** 共用的 mock 也記著開過的 shell；留著會讓別的測試的 `openHostShell` 接回舊的、不再 POST 開新的。 */
 async function closeShells() {
   const api = await import('../api')
   for (const sh of await api.fetchHostShells('local')) await api.closeHostShell('local', sh.pane_id, true)
@@ -26,7 +19,6 @@ before(setupDom)
 
 type MockAgy = { installed: boolean; path: string | null; version: string | null; logged_in: boolean | null }
 const mockState = () => sharedMock as unknown as { localTools: { agy: MockAgy }; quota: Record<string, unknown> }
-/** 共用的 mock 是行程單例（`bun test` 一個行程跑所有檔）：這支改了「沒裝 agy」，結束要放回去，免得別的 agy 測試看到沒裝。 */
 const original = { agy: { ...mockState().localTools.agy }, quota: mockState().quota.agy }
 after(async () => {
   mockState().localTools.agy = { ...original.agy }
@@ -39,7 +31,6 @@ const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_0
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.includes(text))
 const agyRow = () => [...document.querySelectorAll('.quota-pop-row')].find((r) => r.querySelector('.quota-kind.agy'))!
 
-/** 共用的 mock 是行程單例：每次開頭放回「本機沒裝 agy」。 */
 function mockMissingAgy() {
   mockState().localTools.agy = { installed: false, path: null, version: null, logged_in: null }
   mockState().quota.agy = null
@@ -68,7 +59,6 @@ it('沒裝 agy：寫「尚未安裝，要自動安裝嗎？」；取消什麼都
   assert.ok(go, '沒裝的 agy 入口是「安裝並登入」，不是直接開 shell')
   assert.equal(btn(agyRow(), '開 shell 登入'), undefined)
 
-  // 取消：不安裝、不開 shell。
   await click(go)
   await until(() => btn(document.body, '安裝並登入') !== undefined, '確認框出現')
   const dialog = document.body.textContent ?? ''
@@ -81,7 +71,6 @@ it('沒裝 agy：寫「尚未安裝，要自動安裝嗎？」；取消什麼都
   await act(async () => {})
   assert.equal(installPosts(requests).length + shellPosts(requests).length, 0, '取消後什麼都沒打')
 
-  // 確認：先裝，裝好再開 shell 送 agy。
   await click(btn(agyRow(), '安裝 agy 並登入')!)
   await until(() => btn(document.body, '安裝並登入') !== undefined, '確認框再次出現')
   await click(btn(document.body, '安裝並登入')!)
@@ -103,7 +92,6 @@ it('裝好之後（重讀快照）那格就是一般的未登入：開 shell 登
   await click(btn(document.body, '安裝並登入')!)
   await until(() => installPosts(requests).length === 1, '送出安裝')
   await until(() => useStore.getState().busy['agy-install:local'] !== true, '安裝請求結束')
-  // 這個 harness 沒有 WebSocket：daemon 的 host_changed 由重讀快照代替。
   await act(async () => {
     await useStore.getState().refreshState()
   })

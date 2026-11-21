@@ -20,17 +20,11 @@ import { agyMenuItem } from '../lib/agyUpdate'
 import { herdrMenuItem, useHerdrUpdate } from '../store/herdrUpdate'
 import { useT } from '../lib/i18n'
 
-/** 由外面代為開關的確認框（手機合成那顆用）。 */
 export interface DialogControl {
   open: boolean
   close: () => void
 }
 
-/**
- * 手機（≤640px）上「重啟套用」與「codex 安裝＋重啟」兩顆都要出現時合成的一顆 `⌃⌃ N`（UI-DECISIONS「header 的 codex 安裝」）。
- * 名字行在 390px 很擠（長名字實測：沒有 chip 名字 84px、一顆 44px、兩顆只剩 16px＝只看得到 ▾）；合成這顆只留圖示，名字 66px。
- * 點開是兩項的小選單，各自打開原本那個確認框——兩件事的代價不同，確認框照舊分開。
- */
 export function MergedUpdateChip() {
   const t = useT()
   const batch = useStore((s) => s.restartBatch)
@@ -78,7 +72,6 @@ export function MergedUpdateChip() {
   const agyBusy = useAgyBusy()
   const agyItem = agyPlan ? agyMenuItem(agyPlan) : null
   const [open, setOpen] = useState(false)
-  // 標題列一路有 overflow 裁切與 transform（fixed 也會被帶偏），選單用 portal 掛到 body、fixed 在按鈕下緣。
   const [at, setAt] = useState<CSSProperties>({})
   const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | 'grok' | 'agy' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
@@ -128,7 +121,6 @@ export function MergedUpdateChip() {
         aria-label={label}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect()
-          // 只在手機出現：貼螢幕右側 8px，最寬 300px，不會滑出左緣。
           setAt({ position: 'fixed', top: Math.round(r.bottom + 6), right: 8 })
           setOpen((v) => !v)
         }}
@@ -136,7 +128,7 @@ export function MergedUpdateChip() {
         <span aria-hidden="true">
           <UpgradeIcon />
         </span>
-        {/* 手機只留圖示：數字寫在 tooltip／選單裡，省下的寬度給名字。 */}
+        {}
       </button>
       {open
         ? createPortal(

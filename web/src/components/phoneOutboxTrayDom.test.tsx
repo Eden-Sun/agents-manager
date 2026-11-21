@@ -1,7 +1,3 @@
-/**
- * 手機「bot 給的檔案」收合列（使用者 2026-11-03）：有檔案才出現、預設收合、點開看得到圖檔縮圖、點縮圖開全螢幕預覽；
- * 沒有檔案整條不畫；桌面不掛。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -13,10 +9,8 @@ const realFetch = globalThis.fetch
 const realCreate = URL.createObjectURL
 let realMatchMedia: typeof window.matchMedia
 let phone = true
-/** 每顆 bot 的 outbox 清單。 */
 const served: Record<string, { name: string; size: number; modified: number; remaining_secs: number }[]> = {}
 
-/** 可控的 IntersectionObserver：預設一觀察就算進可視範圍；`holdVisible` 時留著，測試手動放行。 */
 let holdVisible = false
 const pending: Array<() => void> = []
 const realIO = (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver
@@ -97,12 +91,10 @@ test('有檔案：輸入框上方出現收合列，預設收合；點開出現�
   assert.equal(document.querySelectorAll('.phone-outbox-item').length, 1, '圖檔不列檔名，清單只剩 md')
   assert.equal(localStorage.getItem('am.phoneOutboxTray.open'), '1', '展開狀態記住')
 
-  // 按住看大圖、放開就回來，不開 modal（2026-11-07 使用者）。
   const thumb = document.querySelector<HTMLButtonElement>('.phone-outbox-thumb')!
   await act(() => thumb.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })))
   await until(() => document.querySelector('.phone-outbox-peek img') !== null, '按住時出現大圖')
   assert.equal(document.querySelector('.image-viewer'), null, '不開 modal')
-  // 滑到第二張就換成第二張。
   const second = document.querySelectorAll<HTMLButtonElement>('.phone-outbox-thumb')[1]!
   const firstAlt = document.querySelector('.phone-outbox-peek img')?.getAttribute('alt')
   const origFromPoint = document.elementFromPoint

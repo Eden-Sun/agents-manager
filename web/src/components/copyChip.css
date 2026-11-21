@@ -1,4 +1,3 @@
-/* components/CopyChip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .copy-chip {
   display: inline-flex;
   align-items: center;
@@ -59,10 +58,6 @@
   flex: none;
   color: var(--status-ok);
 }
-
-/* run 識別 / 逃生門（debug）：只加新 class，顏色全走既有 token。 */
-
-/* pane 晶片 shrink 較大，寬度不夠時先讓，不截 bot 名字。 */
 
 .main-head > .copy-chip {
   flex: 0 20 auto;

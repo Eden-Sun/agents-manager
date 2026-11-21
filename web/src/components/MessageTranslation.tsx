@@ -34,10 +34,6 @@ function RecordTrigger({ messageId }: { messageId: string }) {
   )
 }
 
-/**
- * 訊息翻譯按鈕與譯文呈現元件。
- * 讓訊息翻譯具備 React Refresh 邊界，改動只熱替換本身與使用處，不觸發全頁 reload。
- */
 export function MessageTranslationButton({
   eligible,
   off,
@@ -76,7 +72,6 @@ export function MessageTranslationButton({
   const isReady = status === 'done' && Boolean(ready) && !show
 
   const handleFlip = (e: React.MouseEvent) => {
-    // 錨定：原本貼底就保持貼底；手動點擊時以被點訊息的標頭為錨保持位置
     const btn = e.currentTarget as HTMLElement
     const box = (btn.closest('.msg-list') ?? btn.closest('[data-list]')) as HTMLElement | null
     const msgEl = btn.closest('[data-msg-id]') as HTMLElement | null

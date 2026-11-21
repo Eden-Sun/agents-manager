@@ -1,4 +1,3 @@
-/** Tolerant decoders for daemon payloads: accept plausible shapes (SQLite 0/1 booleans, JSON-string fields, nested or flat bots/runs). */
 
 import type {
   LedgerItem,
@@ -89,7 +88,6 @@ function asRecords(v: unknown): Record<string, unknown>[] | null {
   return Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)) : null
 }
 
-/** 沒帶／不是陣列＝null（沒報過）；空陣列是「報過：沒有」。 */
 function toBackgroundTasks(v: unknown): BackgroundTask[] | null {
   return (
     asRecords(v)?.map((t) => ({
@@ -157,7 +155,6 @@ const ROLES = ['user', 'assistant', 'system'] as const
 const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system', 'share'] as const
 const SENT_VIA = ['send_now', 'supplement', ''] as const
 
-/** 缺欄位＝舊 daemon，一律當未知（null），不猜。 */
 export function toHerdrVersion(v: unknown): HerdrVersion {
   if (!isRec(v)) return UNKNOWN_HERDR
   const nullableStr = (x: unknown) => (typeof x === 'string' && x.trim() ? x : null)
@@ -172,7 +169,6 @@ export function toHerdrVersion(v: unknown): HerdrVersion {
   }
 }
 
-/** `hosts[].baseline`（SPEC §16.7）。不是物件＝還沒量過＝null；`issues` 不是陣列＝探測沒跑完＝null（未知，不當全缺）。 */
 export function toHostBaseline(v: unknown): HostBaseline | null {
   if (!isRec(v)) return null
   const raw = pick(v, 'issues')
@@ -185,13 +181,11 @@ export function toHostBaseline(v: unknown): HostBaseline | null {
         return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')), ...(note ? { note } : {}) }]
       })
     : null
-  // `fixable`（#719 階段 2）：沒有（舊 daemon）或型別不對＝空陣列，不讓整份主機資料解析失敗。
   const rawFixable = pick(v, 'fixable')
   const fixable = Array.isArray(rawFixable) && rawFixable.every((x) => typeof x === 'string') ? (rawFixable as string[]) : []
   return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')), fixable }
 }
 
-/** SPEC §11.6 */
 export function toHost(v: unknown): Host | null {
   if (!isRec(v)) return null
   const name = str(pick(v, 'name'))
@@ -216,7 +210,6 @@ export function toHost(v: unknown): Host | null {
   }
 }
 
-/** 讀不懂的一律 `logged_in: null`，絕不把問不到說成未登入。 */
 export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
   const root = isRec(raw) ? raw : {}
   const out: IdentityStatusMap = {}
@@ -246,7 +239,6 @@ function toLoginNeeded(raw: unknown): { since: string; via: string } | null {
   return since ? { since, via: str(raw.via) } : null
 }
 
-/** 缺的 kind 視為未知，不誤報「缺少」。 */
 export function toToolMap(raw: unknown): ToolMap {
   const root = isRec(raw) ? raw : {}
   const one = (v: unknown): ToolStatus => {
@@ -264,7 +256,6 @@ export function toToolMap(raw: unknown): ToolMap {
   }
   const out = {} as ToolMap
   for (const k of BOT_KINDS) out[k] = one(root[k])
-  // claude-api 沒有 CLI 可探測：永遠視為可用（只讓 `tools[bot.kind]` 不炸；建立入口不看這格）。
   out['claude-api'] = { installed: true, path: null, version: null, logged_in: null }
   out['openai-api'] = { installed: true, path: null, version: null, logged_in: null }
   return out
@@ -274,7 +265,6 @@ export function toInstallResult(raw: unknown): InstallToolResult {
   return { turn_id: isRec(raw) ? str(pick(raw, 'turn_id')) : '' }
 }
 
-/** Array in `GET /api/state`, `{name: {...}}` map in `daemon_status` (SPEC §11.6). */
 export function hostArray(v: unknown): unknown[] {
   if (Array.isArray(v)) return v
   if (isRec(v)) return Object.entries(v).map(([name, val]) => (isRec(val) ? { name, ...val } : { name }))
@@ -385,11 +375,6 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
   }
 }
 
-/**
- * 主力 bot 撞限（#1899）：daemon 投影 `{until, message}`。非物件（含 child 的 `null`、舊 daemon 沒這欄）給 `null`；
- * `message` 不是字串、或 `until` 不是字串也不是 null，整筆給 `null`（不把來路不明的值塞進 store）。
- * 只取這兩個欄位，多出來的欄位不帶。`/api/state` 的 toBot 與 WS `bot_status` 都走這裡。
- */
 export function toBotLimitHit(v: unknown): BotLimitHit | null {
   if (!isRec(v)) return null
   const message = v.message
@@ -429,7 +414,6 @@ export function toIdentity(v: unknown): Identity | null {
   }
 }
 
-/** `runs.status_json` */
 export function toStatusInfo(v: unknown): StatusInfo | null {
   let raw: unknown = v
   if (typeof raw === 'string') {
@@ -456,12 +440,10 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
     model_id: optStr(pick(model, 'id')),
     effort: optStr(isRec(raw.effort) ? pick(raw.effort, 'level') : undefined),
     thinking: isRec(raw.thinking) ? bool(pick(raw.thinking, 'enabled')) : false,
-    // 沒有這個欄位（codex 的狀態列只有 context_window）＝null，不是 false：false 會蓋掉 runtime_fast（#1914）。
     fast_mode: typeof raw.fast_mode === 'boolean' ? raw.fast_mode : null,
     context_used_pct: numOrNull(pick(ctx, 'used_percentage')),
     context_used_tokens: numOrNull(pick(ctx, 'total_input_tokens')),
     context_size: numOrNull(pick(ctx, 'context_window_size')),
-    // daemon 把讀數失效的 status_json 遮成 null 並標這個旗標（CONTEXT_UNKNOWN_KEY）；0 不再代表真的 0%。
     context_unknown: raw._agm_context_unknown === true,
     five_hour_pct: numOrNull(pick(five, 'used_percentage')),
     five_hour_resets_at: numOrNull(pick(five, 'resets_at')),
@@ -475,14 +457,12 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
   }
 }
 
-/** `"1h"`／`"5m"`／`"300s"` → 秒；認不得回 null。 */
 function ttlSecsOf(v: unknown): number | null {
   if (typeof v === 'number' && v > 0) return v
   const m = typeof v === 'string' ? /^(\d+)\s*([smh])$/.exec(v.trim()) : null
   return m ? Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2] as 's' | 'm' | 'h'] : null
 }
 
-/** daemon 的 `run.prompt_cache`，或 claude statusLine 原 JSON 裡的 `prompt_cache`（`ttl:"1h"`）；沒有或形狀不對回 undefined。 */
 export function toPromptCache(v: unknown): PromptCacheInfo | undefined {
   if (!isRec(v)) return undefined
   const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null)
@@ -501,7 +481,6 @@ export function toPromptCache(v: unknown): PromptCacheInfo | undefined {
   }
 }
 
-/** `{code, text}` 兩個都是非空字串才算；其他（沒帶、null、形狀不對）一律 null——舊 daemon 沒有這個欄位。 */
 export function toBlockedReason(v: unknown): BlockedReason | null {
   if (!isRec(v)) return null
   const code = typeof v.code === 'string' ? v.code.trim() : ''
@@ -528,8 +507,6 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status: toStatusInfo(pick(v, 'status_json')),
     send_now_supported: v.send_now_supported === true,
     update_notice: optStr(pick(v, 'update_notice')),
-    // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
-    // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
     background_jobs: v.background_jobs === null ? null : Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
     background_since: optStr(pick(v, 'background_since')),
     background_stuck: bool(pick(v, 'background_stuck')),
@@ -540,11 +517,9 @@ export function toRun(v: unknown, botId?: string): Run | null {
     session_crons: toSessionCrons(v.session_crons),
     turn_error: optStr(pick(v, 'turn_error')),
     turn_error_kind: optStr(pick(v, 'turn_error_kind')),
-    // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),
     runtime_effort: optStr(pick(v, 'runtime_effort')),
     runtime_fast: pick(v, 'runtime_fast') == null ? null : bool(pick(v, 'runtime_fast')),
-    // 空字串是 daemon 明確記下的本機預設身份，不能用 optStr 折成「未知」的 null。
     runtime_identity: typeof pick(v, 'runtime_identity') === 'string' ? (pick(v, 'runtime_identity') as string) : null,
     native_session_id: optStr(v.native_session_id),
     transcript_path: optStr(v.transcript_path),
@@ -571,11 +546,9 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
     run_id: optStr(v.run_id),
     bot_id: optStr(v.bot_id) ?? botId ?? null,
     origin: oneOf<TurnOrigin>(v.origin, ORIGINS, 'web'),
-    // 未知 status 當終態：daemon 新增終態時退回 in_flight 會把輸入框鎖進排隊模式。
     status: oneOf<TurnStatus>(v.status, TURN_STATUSES, 'failed'),
     delivery: oneOf<TurnDelivery>(v.delivery, DELIVERIES, 'pending'),
     unverified: v.delivery_verified === 0,
-    // 舊 daemon 沒有這一欄：當作會重送，才不會把每一則都標成「沒人會再試」。
     autoResend: v.auto_resend !== 0,
     awaitsStart: v.awaits_start === 1 || v.awaits_start === true,
     awaitsIdle: v.awaits_idle === 1 || v.awaits_idle === true,
@@ -586,7 +559,6 @@ export function toTurn(v: unknown, botId?: string): Turn | null {
   }
 }
 
-/** `messages.attachments_json` (string or parsed array). */
 export function toAttachments(v: unknown): Attachment[] {
   let raw: unknown = v
   if (typeof raw === 'string') {
@@ -613,7 +585,6 @@ export function toAttachments(v: unknown): Attachment[] {
   return out
 }
 
-/** 容錯：欄位缺了就給預設，不讓舊 daemon 的回應整則訊息掉掉。 */
 export function toLedgerItem(v: unknown): LedgerItem | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id'))
@@ -672,12 +643,10 @@ export function toMessage(v: unknown, botId?: string): Message | null {
   }
 }
 
-/** SPEC §13.4 */
 export function sortByTime<T extends { created_at: string; id: string; seq?: number }>(items: T[]): T[] {
   return [...items].sort(byTime)
 }
 
-/** `host_baseline_sync`（#719 階段 3b）：只收 "ask"；其他值、缺欄（舊 daemon、bot 視圖）一律 off——缺值時不准預設可以寫。 */
 export function toHostBaselineSync(raw: unknown): Record<string, 'off' | 'ask'> {
   const out: Record<string, 'off' | 'ask'> = {}
   if (!isRec(raw)) return out
@@ -701,7 +670,6 @@ export function toState(raw: unknown): AppState {
   let localBaseline: HostBaseline | null = null
   let localIdentityStatus: IdentityStatusMap = {}
   for (const h of hostArray(pick(root, 'hosts'))) {
-    // `local` is modelled via `state.connected`; keep only its attach/tools/identities.
     const host = toHost(h)
     if (!host) continue
     if (host.name === 'local') {
@@ -757,9 +725,6 @@ export function toState(raw: unknown): AppState {
   return {
     daemon_seq: num(pick(root, 'daemon_seq'), 0),
     codex_reset: pick(root, 'codex_reset'),
-    // 三態（issue #492）：欄位不在＝`undefined`＝舊 daemon、不知道；在但空＝`null`＝沒有批次在跑。
-    // 存在與否**只能**用 `in` 判：`pick` 把 `null` 也收斂成 `undefined`（它的用途是「挑第一個有值的鍵」），
-    // 拿它判存在會把 daemon 說的「現在沒有批次」講成「不知道」——而那正是要用來清掉卡住的進度的那一格。
     restart_batch: 'restart_batch' in root ? str(pick(root, 'restart_batch')) || null : undefined,
     cli_updates:
       'cli_updates' in root
@@ -771,7 +736,6 @@ export function toState(raw: unknown): AppState {
             isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')), target_version: str(pick(v, 'target_version')), phase: str(pick(v, 'phase')), started_at: str(pick(v, 'started_at')) }] : [],
           )
         : undefined,
-    // `pick` 會把 null 收成 undefined，這裡要分得出「沒有」（null）與「舊 daemon 不知道」（欄位不在）。
     deploy_wait: 'deploy_wait' in root ? (root as Record<string, unknown>).deploy_wait : undefined,
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
@@ -797,7 +761,6 @@ export function toMessages(raw: unknown, botId: string): Message[] {
     const msg = toMessage(m, botId)
     if (msg) out.push(msg)
   }
-  // SPEC §7.2: endpoint is descending; UI renders ascending.
   return sortByTime(out)
 }
 
@@ -817,7 +780,6 @@ export function toMessagesPage(raw: unknown, botId: string): MessagesPage {
   }
 }
 
-/** SPEC §2.2 */
 export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
   if (!connected) return 'disconnected'
   if (!run) return 'offline'
@@ -836,14 +798,13 @@ export function lampOf(run: Run | undefined | null, connected: boolean): Lamp {
           ? 'working'
           : run.agent_status === 'blocked'
             ? 'blocked'
-            : // 實測 claude ~20 秒才回第一個狀態；90 秒內標 unknown 會像 bot 沒生出來。
+            :
               justStarted(run)
               ? 'starting'
               : 'unknown'
   }
 }
 
-/** 時間戳讀不出來時當作不是，寧可 unknown 也不要一直說「啟動中」。 */
 function justStarted(run: Run): boolean {
   const t = Date.parse(run.started_at)
   return Number.isNaN(t) ? false : Date.now() - t < 90_000
@@ -862,7 +823,6 @@ export function toTerminal(raw: unknown, source: TerminalSource): TerminalSnapsh
     truncated: bool(o.truncated),
     source: oneOf<TerminalSource>(pick(o, 'source'), ['visible', 'recent_unwrapped'], source),
     pane_id: optStr(pick(o, 'pane_id')),
-    // null rather than a wrong size
     columns: o.columns === undefined || o.columns === null ? null : num(o.columns, 0) || null,
     rows: o.rows === undefined || o.rows === null ? null : num(o.rows, 0) || null,
   }
@@ -880,7 +840,6 @@ export function toHostShell(raw: unknown, fallbackHost: string): HostShell {
   }
 }
 
-/** 沒有 `pane_id` 的列丟掉：面板靠它定位。 */
 export function toHostShells(raw: unknown, fallbackHost: string): HostShell[] {
   const o = isRec(raw) ? raw : {}
   return arr(o.shells)
@@ -954,9 +913,7 @@ function toQuotaWindow(v: unknown): KindQuota['five_hour'] {
   return {
     used_pct: Math.max(0, Math.min(100, num(pick(v, 'used_pct'), 0))),
     resets_at: optStr(pick(v, 'resets_at')),
-    // #540：沿用上一份的那一桶靠它才看得出是舊的（`updated_at` 是整筆的，會被蓋成現在）。
     observed_at: optStr(pick(v, 'observed_at')),
-    // 門檻由 daemon 算（API.md §12.4），前端不補算
     low: bool(pick(v, 'low'), false),
     critical: bool(pick(v, 'critical'), false),
   }
@@ -985,7 +942,6 @@ function toLimitHit(v: unknown): QuotaLimitHit | null {
   return { message, until: optStr(pick(v, 'until')), at: str(pick(v, 'at')), bucket: optStr(pick(v, 'bucket')) }
 }
 
-/** `key` 只用來在缺 `host` 時從前綴推回。 */
 export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   if (!isRec(v)) return null
   return {
@@ -1003,7 +959,6 @@ export function toKindQuota(v: unknown, key?: string): KindQuota | null {
   }
 }
 
-/** 停工 bot 的名稱清單；沒有或不是陣列就 `undefined`（舊 daemon 不送這欄）。 */
 function toHeldBots(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined
   return v.filter((x): x is string => typeof x === 'string')
@@ -1083,13 +1038,11 @@ function root_issue(raw: Record<string, unknown>): unknown {
   return raw.issue ?? raw
 }
 
-/** 不認得的一律 `unknown`，免得「可以砍嗎」變成猜的。 */
 function toOwner(v: unknown): MemOwner {
   const s = str(v)
   return s === 'bot' || s === 'pane' || s === 'herdr' ? s : 'unknown'
 }
 
-/** SPEC §15.2 */
 export function toMemProcesses(v: unknown): MemProcesses {
   const r = isRec(v) ? v : {}
   const rows: MemProcess[] = arr(r.processes)
@@ -1112,7 +1065,6 @@ export function toMemProcesses(v: unknown): MemProcesses {
   return { host: str(r.host), sampled_at: str(r.sampled_at), processes: rows }
 }
 
-/** SPEC §15 */
 export function toMemSnapshot(v: unknown): MemSnapshot {
   const r = isRec(v) ? v : {}
   const n = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0)
@@ -1129,7 +1081,6 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
       bytes: n(b.bytes),
       processes: n(b.processes),
     })),
-    // 讀不出 → null，不要畫成「剩 0」
     machine: isRec(h.machine) && n(h.machine.total_bytes) > 0
       ? { total_bytes: n(h.machine.total_bytes), available_bytes: n(h.machine.available_bytes) }
       : null,
@@ -1149,7 +1100,6 @@ export function toMemSnapshot(v: unknown): MemSnapshot {
   }
 }
 
-/** 一致性 dry-run 計畫（#719 階段 2 / 3b）。 */
 export function toHostBaselinePlan(v: unknown): HostBaselinePlan | null {
   if (!isRec(v)) return null
   const rawActions = pick(v, 'actions')
@@ -1180,7 +1130,6 @@ export function toHostBaselinePlan(v: unknown): HostBaselinePlan | null {
   }
 }
 
-/** 一致性差異補齊結果（#719 階段 3a / 3b）。 */
 export function toHostBaselineApplyResult(v: unknown): HostBaselineApplyResult | null {
   if (!isRec(v)) return null
   const rawResults = pick(v, 'results')
@@ -1229,7 +1178,6 @@ function hostBaselineBackupFile(v: unknown): { file: string; restore: 'overwrite
   return { file: file as string, restore }
 }
 
-/** 備份列舉：驗固定 ID、UTC 時間、檔名與還原動作，拒絕部分損壞的備份項目。 */
 export function toHostBaselineBackups(v: unknown): HostBaselineBackups | null {
   if (!isRec(v) || !Array.isArray(pick(v, 'backups'))) return null
   let invalid = 0
@@ -1268,7 +1216,6 @@ export function toHostBaselineBackups(v: unknown): HostBaselineBackups | null {
   }
 }
 
-/** 還原結果只接收固定檔名與固定狀態，不讓主機任意字串進入 UI。 */
 export function toHostBaselineRestoreResult(v: unknown): HostBaselineRestoreResult | null {
   if (!isRec(v) || typeof pick(v, 'backup_id') !== 'string' || !HOST_BASELINE_BACKUP_ID.test(pick(v, 'backup_id') as string)) return null
   const rawFiles = pick(v, 'files')

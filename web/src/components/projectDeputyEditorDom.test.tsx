@@ -1,6 +1,3 @@
-/**
- * 副管理者（專案設定）：下拉只列顧問／專家；門檻最小 60；儲存才 PATCH {deputy}（選「不設」＝null）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -101,7 +98,6 @@ test('切換專案時第一次 render 就不顯示「已變更」且清除舊專
   await act(async () => {
     setP(project(null, 'p2'))
   })
-  // 切換至 p2（deputy: null），第一次 render 就應該清除副管理者選擇，且不能誤判為已變更
   assert.equal(select().value, '')
   assert.equal(saveBtn().disabled, true, '切換專案後不應誤判已變更')
 })

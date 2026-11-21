@@ -23,9 +23,7 @@ test('進度照階段走；看不懂的階段、別的 id 都不動', () => {
   assert.deepEqual([cur?.id, cur?.phase, cur?.willResume.length], ['h1', 'downloading', 1])
   assert.equal(herdrProgress(cur, { ...base, phase: '???' }), cur)
   assert.equal(herdrProgress(cur, { ...base, update_id: 'h0', phase: 'restarting' }), cur)
-  // 同一階段重送不換物件（selector 不重畫）。
   assert.equal(herdrProgress(cur, { ...base, phase: 'downloading' }), cur)
-  // 別的分頁按的：手上沒有也收。
   assert.equal(herdrProgress(null, { ...base, phase: 'waiting_idle' })?.phase, 'waiting_idle')
   assert.equal(herdrProgress(cur, { ...base, phase: 'rolling_back' })?.phase, 'rolling_back')
 })
@@ -42,7 +40,6 @@ test('done 解析名單，訊息講接回幾顆、沒接回、子 agent', () => 
   const bad = parseHerdrDone({ ...base, ok: false, reason: 'busy_timeout' })
   assert.match(herdrDoneMessage(bad), /沒有升級（等了 30 分鐘還有 Bot 在忙，什麼都沒動）/)
   assert.match(herdrDoneMessage(parseHerdrDone({ ...base, ok: false, reason: 'weird', detail: 'x' })), /（weird）：x/)
-  // daemon 失敗時的說明在 `detail`（API.md §12.7b），`restart_failed` 照樣帶接回名單。
   const rolled = parseHerdrDone({ ...base, ok: false, reason: 'restart_failed', detail: '2 分鐘沒回來', resumed: [{ bot_id: 'b1', name: 'am', run_id: 'r1' }] })
   assert.match(herdrDoneMessage(rolled), /已換回舊版）：2 分鐘沒回來；接回 1 顆/)
 })
@@ -77,7 +74,6 @@ test('計畫：本機落後才可按；遠端、shared 停用並講原因；名�
   assert.deepEqual(p.childrenLost, [{ botId: 'kid', name: 'kid', parentName: 'top' }])
   assert.match(p.hosts[1].blocked ?? '', /^共用 session/)
 
-  // 非 shared 的遠端主機可以從這裡更新（#1752）；只有 shared_session 的才停用。
   const remoteOnly = herdrUpdatePlan(
     item([
       { host: 'local', installedVersion: '0.9.3', error: null, behind: false },
@@ -131,7 +127,6 @@ test('WS 幀走到 store：progress 更新、done 清掉進度並留結果', () 
   assert.equal(n?.kind, 'info')
   assert.equal(useHerdrUpdate.getState().active, null)
   assert.equal(useHerdrUpdate.getState().result?.to, '0.9.3')
-  // 別的 id 的 done 不清掉手上的進度。
   useHerdrUpdate.setState({ active: { id: 'h2', host: 'local', target: '0.9.3', phase: 'resuming', willResume: [], childrenLost: [] } })
   onHerdrFrame('herdr_update_done', { ...base, ok: false, reason: 'restart_failed' })
   assert.equal(useHerdrUpdate.getState().active?.id, 'h2')

@@ -1,9 +1,4 @@
 import { useT } from '../lib/i18n'
-/**
- * Image shelf: conversation-independent staging (lives outside `<main>`, survives bot switches).
- * Nothing uploads here — attachment ids are project-scoped, so the receiving panel uploads on hand-off.
- * See `docs/goals/image-drop-tray-2026-09-07.md`.
- */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
@@ -21,20 +16,15 @@ const OPEN_KEY = 'am.shelf.open'
 
 const PEEK_W = 300
 
-/** 預覽撐到對話欄（`.chat`）寬，量不到退回 PEEK_W。 */
 function peekWidth(): number {
   const w = document.querySelector('.chat')?.getBoundingClientRect().width ?? 0
   return w > PEEK_W ? Math.round(w - 24) : PEEK_W
 }
-/** Delay so sweeping down the rail does not flash every card. */
 const PEEK_HOVER_MS = 180
-/** Touch: a long press opens the preview — a plain tap still means 「放進對話」. */
 const PEEK_PRESS_MS = 450
 
-/** Preview anchor: the card (to align) and the shelf edge (to stay outside, else it covers the header buttons). */
 interface PeekAt {
   key: string
-  /** Opened by a long press, so the next tap closes it instead of handing the image over. */
   touch: boolean
   top: number
   left: number
@@ -53,7 +43,6 @@ function readOpen(fallback: boolean): boolean {
   }
 }
 
-/** `true` while an OS file drag is over the window; the 38px collapsed rail grows a drop pad. */
 function useFileDragActive(): boolean {
   const [active, setActive] = useState(false)
   useEffect(() => {
@@ -94,8 +83,6 @@ export function ImageShelf() {
   const addToShelf = useShelf((s) => s.add)
   const clear = useShelf((s) => s.clear)
   const notify = useStore((s) => s.notify)
-  // 預設展開。手機（≤640px）沒有這條托盤——`.app > .shelf` 在那個寬度是 `display: none`，
-  // 加附件走輸入列的 📎，所以這裡不再分手機／桌機（issue #484）。
   const [open, setOpen] = useState(() => readOpen(true))
   const atBottom = useMediaQuery(DRAWER_QUERY)
   const fileDrag = useFileDragActive()
@@ -148,11 +135,9 @@ export function ImageShelf() {
     const off = () => setPeek(null)
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
-      // 吃掉這一次 Escape，不然手機上會連著把側欄抽屜一起關掉。
       e.preventDefault()
       setPeek(null)
     }
-    // capture: 托盤自己那條捲動不會冒泡到 window。
     window.addEventListener('scroll', off, true)
     window.addEventListener('resize', off)
     window.addEventListener('keydown', onKey)
@@ -168,7 +153,6 @@ export function ImageShelf() {
     try {
       localStorage.setItem(OPEN_KEY, next ? '1' : '0')
     } catch {
-      // Blocked storage: preference just does not survive a reload.
     }
   }
 
@@ -178,13 +162,11 @@ export function ImageShelf() {
     return () => window.removeEventListener('am:shelf-collapse', onCollapse)
   }, [])
 
-  /** Report whatever was refused — a silently dropped image reads as a bug. */
   const take = (files: File[]) => {
     if (files.length === 0) return
     const r = addToShelf(files)
     for (const name of r.tooBig) notify('error', t('「{name}」超過 {max} 上限，沒有放進暫存區。', { name, max: formatSize(MAX_BYTES) }))
     if (r.overflow > 0) notify('error', t('暫存區最多 {max} 張，有 {overflow} 張沒放進去。', { max: SHELF_MAX, overflow: r.overflow }))
-    // Dropping onto the collapsed rail would otherwise look like nothing happened.
     if (r.added > 0 && !open) setOpenPersisted(true)
   }
 
@@ -216,8 +198,6 @@ export function ImageShelf() {
         }}
       />
       {open && !atBottom ? (
-        // 收合鍵做在右欄左邊那條分割線上（2026-09-14 使用者：「收合做在分割線上以節省空間」）：
-        // 一顆壓在線上的小耳朵，標題列就不必再擠一顆 »。
         <button
           type="button"
           className="shelf-edge-fold"
@@ -246,7 +226,7 @@ export function ImageShelf() {
               data-tip={t("加入檔案 · 暫存")}
               onClick={() => picker.current?.click()}
             >
-              ＋{/* i18n-ignore */}
+              ＋{}
             </button>
             {count > 0 ? (
               <button type="button" className="icon-btn shelf-clear icon-tip" aria-label={t("清空暫存區")} data-tip={t("清空 · 暫存")} onClick={clear}>
@@ -254,8 +234,7 @@ export function ImageShelf() {
               </button>
             ) : null}
             <MobilePreviewButton />
-            {/* 桌機的收合鍵掛在分割線上（見下面的 `.shelf-edge-fold`），標題列省一格；底部那條版面沒有
-                左分割線，照舊放在標題列。 */}
+            {}
             {atBottom ? (
               <button
                 type="button"
@@ -287,7 +266,7 @@ export function ImageShelf() {
               ))
             )}
           </div>
-          {/* 下半段是**從** bot 拿出來的檔案（唯讀、點了就下載）；上半段是要送進對話的暫存。 */}
+          {}
           <OutboxFiles />
           {drop.over ? (
             <div className="shelf-veil" aria-hidden="true">
@@ -321,7 +300,6 @@ export function ImageShelf() {
   )
 }
 
-/** One parked image: click hands over, drag carries its key. On touch a tap is the hand-over, so preview is long press. */
 function ShelfCard({
   item,
   sinkLabel,
@@ -339,8 +317,6 @@ function ShelfCard({
   const remove = useShelf((s) => s.remove)
   const handed = useShelf((s) => s.handed.includes(item.key))
   const notify = useStore((s) => s.notify)
-  // 鍵盤移除後焦點不掉到 body（#1136）：移除前先決定去哪（下一張、沒有就前一張；一張不剩回「＋ 加入檔案」），移除後下一個 frame 再給。
-  // 規格寫的 `.shelf` 根元素實際不存在，暫存區的容器是 `.shelf-body`。
   const removeKeepingFocus = (from: HTMLElement) => {
     const card = from.closest<HTMLElement>('.shelf-card')
     const next = (card?.nextElementSibling ?? card?.previousElementSibling)?.querySelector<HTMLElement>('.shelf-card-main') ?? null
@@ -368,9 +344,7 @@ function ShelfCard({
   }
 
   const onPointerDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
-    // 上一次長按沒有等到 click（被 pointercancel 收走）時旗標會留著，吞掉這一次的點擊。
     swallowClick.current = false
-    // 非圖片沒有預覽可開，長按就不該吃掉那一下點擊。
     if (e.pointerType === 'mouse' || !item.isImage) return
     const el = e.currentTarget
     endPress()
@@ -419,7 +393,6 @@ function ShelfCard({
             swallowClick.current = false
             return
           }
-          // 長按開著預覽時，再點一下是收起來，不是放進對話。
           if (peek === 'touch') {
             onPeekEnd()
             return
@@ -448,7 +421,6 @@ function ShelfCard({
         aria-label={t('從暫存區移除 {name}', { name: item.name })}
         title={t("移除")}
         onClick={(e) => {
-          // detail === 0：鍵盤（Enter／Space）觸發；滑鼠與觸控不搬焦點（免得預覽因 onFocus 彈出來）。
           if (e.detail === 0) removeKeepingFocus(e.currentTarget)
           else remove(item.key)
         }}
@@ -459,7 +431,6 @@ function ShelfCard({
   )
 }
 
-/** Floating preview outside the shelf; measured in a layout effect, height capped by `--peek-avail` so short landscape phones don't clamp it onto the strip. */
 function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: boolean }) {
   const box = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
@@ -485,7 +456,6 @@ function ShelfPeek({ item, at, above }: { item: ShelfItem; at: PeekAt; above: bo
 
   useLayoutEffect(place, [place])
 
-  // 上方（或左側）真正剩下的空間；圖片跟著縮，而不是被夾回托盤身上。
   const avail = above ? Math.max(96, at.boundTop - 18) : window.innerHeight - 16
   const style: CSSProperties = {
     '--peek-avail': `${avail}px`,

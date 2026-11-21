@@ -19,12 +19,6 @@ import { AgmReviewBox } from './AgmReviewBox'
 import type { DialogControl } from './MergedUpdateChip'
 import './herdrUpdate.css'
 
-/**
- * header 的「herdr 有新版」（SPEC §6.9，使用者 2026-10-01：「跟 claude/codex 一樣 header 出現徽章 → 確認框 → 一鍵更新」）。
- * 跟 codex／claude 那兩顆同一個樣子、同一種確認框（左 changelog、右 影響分析），但後果大得多：herdr server 整個重啟，
- * **所有 Bot 都會中斷**，子 agent 一律沒了。所以框裡最顯眼的是那句警告，下面列會接回的與會失去的。
- * 數字位置寫 `herdr` 而不是顆數：三顆並排時要一眼分得出這顆是哪一種。
- */
 export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   const t = useT()
   const plan = useHerdrPlan()
@@ -154,7 +148,7 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
                       host: h.host,
                       state: h.installed ?? (h.error ? t('讀取失敗（{error}）', { error: h.error }) : t('讀取失敗')),
                       arrow: h.behind ? ` → ${target}` : t('（已是最新）'),
-                      blocked: h.behind && h.blocked ? ` · ${h.blocked.split('：')[0]}` : '', // i18n-ignore：拆 daemon 的說明句，中文分隔符是資料格式
+                      blocked: h.behind && h.blocked ? ` · ${h.blocked.split('：')[0]}` : '',
                     })}
                   </li>
                 ))}
@@ -178,7 +172,6 @@ export function HerdrUpdateChip({ control }: { control?: DialogControl } = {}) {
   )
 }
 
-/** server／CLI 版本不同時，較舊的是哪一份。 */
 function herdrOlder(server: string | null, cli: string | null): string {
   const v = (x: string | null) => (x ?? '').split('.').map((n) => Number.parseInt(n, 10) || 0)
   const [a, b] = [v(server), v(cli)]
@@ -188,7 +181,6 @@ function herdrOlder(server: string | null, cli: string | null): string {
   return ''
 }
 
-/** 更新跑完：✓／⚠ 留在 header，點開看誰接回、誰沒接回、哪些子 agent 沒了；「知道了」才收起。 */
 function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: DialogControl }) {
   const t = useT()
   const bots = useStore((s) => s.bots)

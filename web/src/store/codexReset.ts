@@ -19,7 +19,6 @@ function news(v: unknown): CodexResetInfo['latest'] {
 }
 export const useCodexReset = create<{ info: CodexResetInfo | null }>(() => ({ info: null }))
 
-/** Shared ledger across quota cells, reconnects and browser reloads. */
 export function receiveCodexReset(raw: unknown, notify: (kind: 'info', text: string, action?: { label: string; run: () => void }) => void) {
   if (raw === null) { useCodexReset.setState({ info: null }); return }
   if (!record(raw) || typeof raw.checked_at !== 'string' || !Number.isFinite(Date.parse(raw.checked_at))) return
@@ -33,11 +32,11 @@ export function receiveCodexReset(raw: unknown, notify: (kind: 'info', text: str
   useCodexReset.setState({ info })
   if (!info.notice || !Number.isFinite(Date.parse(info.notice.at)) || Date.now() - Date.parse(info.checked_at) > 70 * 60_000 || Date.now() - Date.parse(info.notice.at) > 48 * 60 * 60_000) return
   let seen: string[] = []
-  try { const parsed: unknown = JSON.parse(localStorage.getItem(SEEN) ?? '[]'); if (Array.isArray(parsed)) seen = parsed.filter((x): x is string => typeof x === 'string') } catch { /* Storage can be unavailable. */ }
+  try { const parsed: unknown = JSON.parse(localStorage.getItem(SEEN) ?? '[]'); if (Array.isArray(parsed)) seen = parsed.filter((x): x is string => typeof x === 'string') } catch {  }
   if (seen.includes(info.notice.id) || delivered.has(info.notice.id)) return
   delivered.add(info.notice.id)
   if (delivered.size > 100) delivered.delete(delivered.values().next().value!)
-  try { localStorage.setItem(SEEN, JSON.stringify([...seen.slice(-99), info.notice.id])) } catch { /* In-memory dedupe still applies. */ }
+  try { localStorage.setItem(SEEN, JSON.stringify([...seen.slice(-99), info.notice.id])) } catch {  }
   notify('info', t('Codex 額度新消息：{text}（資料：codex-reset.com）', { text: info.notice.text }), {
     label: t('查看來源'), run: () => { window.open(SOURCE, '_blank', 'noopener,noreferrer') },
   })

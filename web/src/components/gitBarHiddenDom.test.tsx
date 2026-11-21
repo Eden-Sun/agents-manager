@@ -1,7 +1,3 @@
-/**
- * #1242：GitBar 在分頁背景時不抓 git 狀態（遠端專案每次一趟 ssh），回前景立刻補一次（同 #909／#1129 的輪詢）。
- * 真的掛 `GitBar` 進 happy-dom；15 秒一輪用手動時鐘推。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -52,7 +48,6 @@ test('前景時掛上就抓一次，之後照 15 秒一輪', async () => {
     timers.restore()
   }
 })
-
 
 test('Git 動作預設保留，手機可只顯示分支與狀態', async () => {
   fakeApi(() => ({ git: true, branch: 'main', upstream: 'origin/main', changed: 1, insertions: 0, deletions: 0, untracked: 8, ahead: 0, behind: 1 }))

@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { themeFromStorageEvent } from './theme.ts'
 
-/** 只記屬性的假 html 元素。 */
 function fakeRoot() {
   const attrs = new Map<string, string>()
   return {

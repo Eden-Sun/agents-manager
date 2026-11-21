@@ -1,4 +1,3 @@
-/** mock 的已讀標記要跟 API.md §6 同形：省略 `at`、帶 `message_id` 時，標記時間取那則訊息的 `created_at`，不是現在。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

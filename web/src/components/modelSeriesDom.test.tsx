@@ -69,13 +69,11 @@ test('設定頁目前用舊版：舊版仍列出、被選中，並標「舊版�
 })
 
 test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、快速改模型選單）與 stale 提示', async () => {
-  // 1. Bot 設定 (ApiModelFields with agy, API failed so models is null -> static fallback)
   await act(() => useStore.setState({ models: { 'agy@local@': null }, modelsFailedAt: { 'agy@local@': Date.now() } } as never))
   const settingEl = await mount(
     <ApiModelFields kind="agy" host="local" model="gemini-4-neon-medium" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
   )
   const radios = [...settingEl.querySelectorAll<HTMLElement>('[role="radio"]')]
-  // agy 拆成模型＋強度兩排：模型按鈕 4-Neon（整組不在清單）、強度按鈕 Medium 被選中。
   const neonRadio = radios.find((r) => r.textContent?.includes('4-Neon'))
   assert.ok(neonRadio, '目前模型的基礎模型 4-Neon 必須在選項中')
   assert.equal(neonRadio.getAttribute('aria-checked'), 'true', '目前模型所屬的模型必須被選中')
@@ -83,14 +81,12 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
   const mediumRadio = radios.find((r) => r.textContent === 'Medium')
   assert.equal(mediumRadio?.getAttribute('aria-checked'), 'true', '目前強度 Medium 被選中')
   assert.equal(mediumRadio?.getAttribute('title'), 'gemini-4-neon-medium')
-  // stale 提示
   const warnNote = settingEl.querySelector('.field-note.warn')
   assert.ok(warnNote, '應有警示小提示')
   assert.match(warnNote.textContent ?? '', /此主機的模型清單暫時讀不到，顯示的是備用清單/)
 
   await unmountAll()
 
-  // 2. 建立 bot 表單 (ApiModelFields with preselected model not in static list)
   const createEl = await mount(
     <ApiModelFields kind="agy" host="local" model="gemini-4-hydrogen-xhigh" onModel={() => {}} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />,
   )
@@ -104,7 +100,6 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
 
   await unmountAll()
 
-  // 3. 快速改模型選單 (ModelQuickPicker)
   const bot = { id: 'b-agy-1', name: 'agy-bot', project_id: 'p1', kind: 'agy', model: 'gemini-4-neon-medium', effort: null, fast: false, identity: null, needs_restart: false } as unknown as Bot
   useStore.setState({
     bots: [bot],
@@ -124,14 +119,12 @@ test('目前模型不在清單仍顯示且選中（Bot 設定、建立表單、�
   assert.equal(menuNeon.getAttribute('aria-checked'), 'true', '快速選單中所屬模型必須被選中')
   assert.ok(menuNeon.textContent?.includes(t('不在清單')), '快速選單中整組不在清單，模型按鈕標註')
   assert.equal(menuRadios.find((r) => r.textContent === 'Medium')?.getAttribute('aria-checked'), 'true', '快速選單中強度 Medium 被選中')
-  // 快速選單中的 stale 提示
   const popWarn = popover.querySelector('.hint.field-note.warn')
   assert.ok(popWarn, '快速選單應有 stale 提示')
   assert.match(popWarn.textContent ?? '', /此主機的模型清單暫時讀不到，顯示的是備用清單/)
 })
 
 test('模型清單來源 stale 提示：other-host 沿用其他主機清單、static 顯示備用清單、claude 正常 static 不顯示提示', async () => {
-  // 1. other-host 且 source_host 為 local
   await act(() =>
     useStore.setState({
       models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
@@ -146,7 +139,6 @@ test('模型清單來源 stale 提示：other-host 沿用其他主機清單、st
   assert.match(warn1.textContent ?? '', /此主機的模型清單暫時讀不到，沿用 本機 的清單/)
   await unmountAll()
 
-  // 2. other-host 且 source_host 為遠端主機
   await act(() =>
     useStore.setState({
       models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
@@ -161,7 +153,6 @@ test('模型清單來源 stale 提示：other-host 沿用其他主機清單、st
   assert.match(warn2.textContent ?? '', /此主機的模型清單暫時讀不到，沿用 remote-1 的清單/)
   await unmountAll()
 
-  // 3. static 回傳（agy 抓不到退回 static）
   await act(() =>
     useStore.setState({
       models: { 'agy@m4p@': [model('gemini-3.8-flash-medium')] },
@@ -176,7 +167,6 @@ test('模型清單來源 stale 提示：other-host 沿用其他主機清單、st
   assert.match(warn3.textContent ?? '', /此主機的模型清單暫時讀不到，顯示的是備用清單/)
   await unmountAll()
 
-  // 4. claude 正常 static 不應顯示警告
   await act(() =>
     useStore.setState({
       models: { 'claude@local@': [model('claude-sonnet-4-6')] },

@@ -1,7 +1,3 @@
-/**
- * 環境設定的「身份」面板（IdentitiesPanel）：登入／切換、登出（先確認）、停用、刪除。真的掛進 happy-dom，後端是 mock，
- * mock 的 WS 事件接到 store（`dispatchFrameForTest`），所以「登入完成之後這一列變已登入」「另一個分頁停用了它」走的是正式的事件路徑。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from '../api/mock'
@@ -28,7 +24,6 @@ after(async () => {
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
-/** 設定面板裡 config 定義的那一列（不是從 shell 認出來的唯讀列）。 */
 const row = (name: string) =>
   [...document.querySelectorAll('.identity-row:not(.is-shell)')].find((r) => r.querySelector('.identity-name')?.textContent?.includes(name))!
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent === text)
@@ -38,14 +33,13 @@ const shellRow = (host: string, identity: string) =>
   document.querySelector<HTMLElement>(`.identity-row.is-shell[data-shell-host="${host}"][data-shell-identity="${identity}"]`)
 const shellDeleteButton = (host: string, identity: string) =>
   shellRow(host, identity)?.querySelector<HTMLButtonElement>('button[aria-label*="shell alias"]')
-/** 身份頁是每台主機一個分頁：要看哪台的列先點那台的 tab。 */
 const pickHost = async (name: string) => click(document.querySelector<HTMLElement>(`#identity-tab-${name}`)!)
 const shellDeleteCalls = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'DELETE' && r.path.includes('/shell-identities/'))
 
 async function open(backend: MockTransport = mock) {
   const requests = mockApi(backend)
   stopEvents = backend.openSocket({ since: () => 0, onStatus: () => {}, onFrame: (f) => dispatchFrameForTest(f) })
-  await advanceMockTime(200) // openSocket 要等 120ms 才算連上，之前的事件不會送
+  await advanceMockTime(200)
   await useStore.getState().refreshState()
   await useStore.getState().loadIdentityPrefs()
   await mount(<IdentitiesPanel />)
@@ -66,7 +60,7 @@ it('登入：按「登入」開臨時 pane、切到那個 shell，事件進來�
 })
 
 it('登出：先跳確認、確認前不送；確認後送 logout，這一列變「未登入」、登出鍵消失', async () => {
-  await mock.request('POST', '/hosts/local/identities/cc1/login') // 不依賴前一個測試：自己先把它登入
+  await mock.request('POST', '/hosts/local/identities/cc1/login')
   const requests = await open()
   await until(() => /已登入/.test(chip('cc1')), '已登入')
   await click(btn(row('cc1'), '登出此帳號…')!)
@@ -96,7 +90,6 @@ it('登出：取消不送請求', async () => {
 it('登入失敗（daemon 回 502）：跳錯誤通知、不切 shell、按鈕回到可按', async () => {
   const requests = await open()
   mock.failNext('POST', '^/hosts/[^/]+/identities/cc1/login$', 502, { error: 'bad_gateway', message: 'herdr 沒回應' })
-  // 先登出，才有「登入」鍵可以按。
   await mock.request('POST', '/hosts/local/identities/cc1/logout')
   await useStore.getState().refreshState()
   await until(() => /未登入/.test(chip('cc1')), '回到未登入')
@@ -121,7 +114,6 @@ it('不再提供給新 Bot／重新提供：本機按下去列上出現「不提
   await until(() => chipOf() !== null, '本機停用後出現標記')
   assert.ok(requests.some((r) => r.method === 'PUT' && /\/identities\/cc1\/disabled/.test(r.path)))
   assert.ok(btn(row('cc1'), '重新提供給新 Bot'), '按鈕變「重新提供給新 Bot」')
-  // 另一個分頁把它啟用：這個分頁只靠 identity_prefs_changed 事件更新。
   await mock.request('PUT', '/identities/cc1/disabled', { kind: 'claude', disabled: false, host: 'local' })
   await until(() => chipOf() === null, '另一個分頁啟用後標記消失')
   assert.ok(btn(row('cc1'), '不再提供給新 Bot'))
@@ -153,7 +145,6 @@ async function mount_with_identities() {
   const { identities } = useStore.getState()
   await act(() => useStore.setState({ identities: [...identities, { name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] }] }))
 }
-
 
 const defaultRow = (host: string, kind: string) => document.querySelector(`[data-k="default-${host}-${kind}"]`)!
 
@@ -408,7 +399,6 @@ it('cc0 設定檔與預設帳號分開標示：同名不合併', async () => {
   assert.match(defaultRow('local', 'claude').textContent ?? '', /預設帳號（未指定身份的 Bot 使用；不是 cc0 設定檔）/)
 })
 
-/** 頁首「新增帳號」（不預選 CLI）。 */
 const openAddFromHeader = async () => click([...document.querySelectorAll<HTMLButtonElement>('.identity-page-actions button')][0]!)
 const dialog = () => document.querySelector<HTMLElement>('.add-identity-dialog')!
 const dialogButton = (text: string) => [...dialog().querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === text)!
@@ -455,7 +445,6 @@ it('新增後：標亮新列、顯示尚未登入＋立即登入；立即登入�
   await typeInto(dialogName(), 'cc12')
   await click(dialogButton('新增並登入'))
   await until(() => Boolean(document.querySelector('[data-fresh-row="true"]')), '新列標亮')
-  // mock 的登入會立刻變已登入；這裡模擬「還沒完成授權」的狀態。
   await act(() =>
     useStore.setState((s) => ({
       localIdentityStatus: { ...s.localIdentityStatus, cc12: { ...s.localIdentityStatus.cc12, logged_in: false } },

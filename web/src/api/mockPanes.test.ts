@@ -1,8 +1,3 @@
-/**
- * mock 的 pane 白名單要跟 daemon 的 `shell::registered` 一樣一直成立（第二輪 review M6）：
- * 以前被 trace 的 pane 看過一次就塞進「自己開的 shell」，之後打字不再 403、`GET …/shells` 還把它列出來，
- * 按「開 shell」就接到 dev server 那顆；而且每個專案底下都列同一組 pane，M4 的重複在 mock 下看不出來。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

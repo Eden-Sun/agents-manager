@@ -3,11 +3,6 @@ import { t } from '../lib/i18n'
 import { CREDIT_NOTICE_MS, fmtCreditDate } from '../lib/resetCredits'
 import { useStore } from './store'
 
-/**
- * codex 重置券（`reset_credits.available`）數量一變就跳通知（2026-11-01 使用者）。
- * 每個額度 key（`codex`、`codex:co0`、`mac_builder/codex:co0`）記住上次看到的張數（localStorage，重開頁面照樣比得出來）；
- * 第一次看到只當基準不通知；讀不到（null／stale）不算數，避免換方案暫缺欄或舊讀數誤報。
- */
 const STORE_KEY = 'agm.resetCredits.v1'
 
 export type CreditChange = { key: string; from: number; to: number }
@@ -25,7 +20,6 @@ export function resetCreditChanges(seen: Record<string, number>, quota: QuotaMap
   return { changes, next }
 }
 
-/** `mac_builder/codex:co0` → `codex · co0 @mac_builder`。 */
 export function creditKeyLabel(key: string): string {
   const slash = key.indexOf('/')
   const host = slash >= 0 ? key.slice(0, slash) : ''
@@ -46,7 +40,6 @@ function save(v: Record<string, number>) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(v))
   } catch {
-    // 私密視窗／封鎖儲存：只是下次重開不比對，不影響畫面。
   }
 }
 
@@ -72,11 +65,6 @@ export function startResetCreditsNotice(): () => void {
   }
 }
 
-/**
- * 到期前一天提示（2026-11-07 使用者）：每張券（用 id 去重）在到期前 24 小時內提示一次。
- * 不依賴網頁開著的那一份在 daemon（AGM inbox `ops_alert`，SPEC §16）；這裡是網頁開著時的 toast。
- * 去重記在 localStorage（`id → 提示時間`），超過 7 天的記錄清掉。
- */
 const EXPIRY_KEY = 'agm.resetCreditExpiry.v1'
 const EXPIRY_KEEP_MS = 7 * 24 * 3600_000
 
@@ -121,13 +109,11 @@ function saveExpiry(v: Record<string, number>) {
   try {
     localStorage.setItem(EXPIRY_KEY, JSON.stringify(v))
   } catch {
-    // 同上：存不了只是重開後可能再提示一次。
   }
 }
 
 let expiryTimer: ReturnType<typeof setInterval> | null = null
 
-/** 先記再跳：存不了就不跳，免得每一輪都重複打擾；單一 toast 一張券。 */
 export function startResetCreditExpiryNotice(now: () => number = Date.now): () => void {
   let seen = loadExpiry()
   const check = () => {
@@ -144,7 +130,6 @@ export function startResetCreditExpiryNotice(now: () => number = Date.now): () =
     last = s.quota
     check()
   })
-  // 頁面一直開著時，券會從 24 小時外走進 24 小時內，額度沒變也要重看。
   if (expiryTimer) clearInterval(expiryTimer)
   expiryTimer = setInterval(check, 10 * 60_000)
 

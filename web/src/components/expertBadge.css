@@ -1,4 +1,3 @@
-/* 專家模式標籤與角色標示 */
 
 .project-expert-tag {
   flex: none;
@@ -12,7 +11,6 @@
   white-space: nowrap;
 }
 
-/* 角色短標（管／顧／執） */
 .bot-role-tag {
   position: relative;
   display: inline-flex;
@@ -29,7 +27,6 @@
   vertical-align: middle;
 }
 
-/* 停派是狀態標記（icon＋字），不是開關。切換在 ⋯。 */
 .bot-nodispatch {
   display: inline-flex;
   align-items: center;
@@ -54,7 +51,6 @@
   height: 12px;
 }
 
-/* 整列淡化，標記留在原色，避免跟可派的列掃在一起。 */
 .bot-row.manager-disabled .bot-gutter,
 .bot-row.manager-disabled .bot-kind-wrap,
 .bot-row.manager-disabled .bot-name,
@@ -68,7 +64,6 @@
   box-shadow: inset 3px 0 0 var(--danger);
 }
 
-/* 群集列跟成員列同高（使用者 2026-11-04：狀態併進標題後，群集列也只剩兩行）。 */
 .bot-row.bot-cluster-row {
   min-height: 40px;
   padding: 2px 6px 2px 4px;
@@ -108,8 +103,6 @@
   line-height: 18px;
 }
 
-/* 專家成員列：兩行收成約 41px（原 bot 列 min-height 52px＋模型鈕 24px，約 54px）。
-   名稱維持 14px；chip 收到 18px。非專家列與精簡子列不帶 .expert-member。 */
 .bot-row.expert-member {
   min-height: 40px;
   gap: 4px;
@@ -154,7 +147,6 @@
 }
 
 @media (width <= 640px) {
-  /* 手機：⋯ 已是 40px，列高跟著約 44px。chip 回到 20px。 */
   .bot-row.expert-member {
     min-height: 44px;
     padding-top: 2px;
@@ -189,8 +181,6 @@
 
 }
 
-
-/* 柔和色票（亮暗主題透過 CSS 變數或 color-mix 自然適應） */
 .bot-role-tag.role-manager {
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
   color: var(--accent-ink);
@@ -215,7 +205,6 @@
   border: 1px solid color-mix(in srgb, var(--lamp-green) 34%, transparent);
 }
 
-/* role_pending 待套用提示點 */
 .bot-role-tag.pending .bot-role-dot {
   position: absolute;
   top: -2px;
@@ -227,7 +216,6 @@
   box-shadow: 0 0 0 1px var(--bg-panel);
 }
 
-/* 專家模式側欄分段標題 */
 .expert-section-head {
   display: flex;
   align-items: center;
@@ -236,7 +224,6 @@
   user-select: none;
 }
 
-/* 像分隔線不像清單項：小字、淡色、不帶人數（2026-11-01 使用者：太複雜）。 */
 .expert-section-title {
   font-size: 10px;
   font-weight: 600;
@@ -244,7 +231,6 @@
   letter-spacing: 0.04em;
 }
 
-/* 手機與 BotSwitcher 內的專家段落標題 */
 .bot-switcher-expert-head {
   display: flex;
   align-items: center;
@@ -259,7 +245,6 @@
   color: var(--text-dim);
 }
 
-/* 英文縮寫（Mgr／Spc／Adv／Wkr）：等寬小字、比標題再淡一階（2026-11-07 使用者）。 */
 .expert-section-abbr,
 .bot-switcher-expert-abbr {
   font-size: 9.5px;
@@ -274,7 +259,6 @@
   color: var(--text-faint);
 }
 
-/* 副管理者小標：跟 track 標同高，用管理者的強調色系。 */
 .bot-sub .bot-deputy-tag,
 .bot-switcher-item .bot-deputy-tag {
   flex: 0 0 auto;
@@ -291,7 +275,6 @@
   font-weight: 600;
 }
 
-/* 專家模式執行者群集列：不再留勾選欄，箭頭佔燈號欄，圖示跟單顆列同一條線。 */
 .bot-row.bot-cluster-row {
   display: flex;
   align-items: center;
@@ -330,7 +313,6 @@
   }
 }
 
-/* 第一行：群集名＋計數；第二行 `.bot-sub` 放身份與模型（同單顆列）；第三行是執行中／閒置。 */
 .bot-cluster-main .bot-main {
   flex: 1;
   min-width: 0;
@@ -372,7 +354,6 @@
   gap: 3px;
 }
 
-/* 標題列上的小燈：比單顆列的燈小，執行中的脈衝圈不畫（一列好幾顆會太吵）。 */
 .lamp.bot-cluster-dot {
   width: 7px;
   height: 7px;
@@ -415,7 +396,6 @@
 .bot-unset-role-menu button { padding: 5px 10px; border: 0; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }
 .bot-unset-role-menu button:hover { background: var(--hover, rgb(127 127 127 / 0.15)); }
 
-/* 群集停派：計數是狀態；⋯ 才是整組切換，不蓋 kind 圖示。 */
 .bot-cluster-chip-wrap {
   position: relative;
   flex: none;

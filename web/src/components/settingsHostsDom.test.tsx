@@ -1,10 +1,3 @@
-/**
- * 環境設定的「主機」面板（HostsPanel）：新增表單、重連、刪除。真的掛進 happy-dom，後端是 mock。
- * - 非法 ssh 目標（開頭 `-`、含空白）／非法 herdr_session：daemon 回 400（API.md §POST /api/hosts），畫面要看得到原因、
- *   表單內容留著讓人改、按鈕回到可按、清單不多出一台。
- * - 連不上的主機：200 但 `connected:false`，面板顯示失敗原因。
- * - 刪除要先確認；還有 Project 在用就不能按確認。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
@@ -17,7 +10,7 @@ import * as api from '../api'
 virtualMockTime()
 afterEach(async () => {
   await unmountAll()
-  useStore.setState({ notices: [] }) // 上一個測試的通知不能讓下一個測試的 `until` 誤以為已經出現
+  useStore.setState({ notices: [] })
 })
 before(setupDom)
 after(async () => {
@@ -26,7 +19,6 @@ after(async () => {
 })
 
 const mock = sharedMock
-// mock 的 ssh／重連各要等 0.6–0.7 秒，加上輪詢，bun 預設 5 秒太緊。
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 const hostNames = () => useStore.getState().hosts.map((h) => h.name)
 const input = (placeholder: string) => document.querySelector<HTMLInputElement>(`.hosts-panel form input[placeholder="${placeholder}"]`)!
@@ -46,7 +38,6 @@ async function fillAndSubmit(name: string, ssh: string) {
   await click(buttonByText(document.body, '新增並連線'))
 }
 
-// 這兩種 daemon 會 400；前端現在先擋（`lib/hostForm`，跟 `config::host_target_problem` 同一條規則）：說原因、不送請求、表單留著。
 for (const [label, ssh] of [
   ['開頭是 - 的 ssh 目標（會被 ssh 當選項）', '-oProxyCommand=touch /tmp/pwned'],
   ['含空白的 ssh 目標', 'host name'],
@@ -141,12 +132,10 @@ it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', asy
   assert.equal(confirm.disabled, true)
   await click(confirm)
   assert.equal(requests.some((r) => r.method === 'DELETE'), false)
-  // 共用的 mock 會留給後面的測試檔：把這台主機與它的 Project 收乾淨。
   await mock.request('DELETE', `/projects/${proj.project_id}`)
   await mock.request('DELETE', '/hosts/dom3used')
 })
 
-// #1220：每一列的按鈕名稱要帶主機名，讀屏與語音控制才分得出是哪一台。
 async function seedTwoHosts() {
   await mock.request('POST', '/hosts', { name: 'mac_builder', ssh: 'me@mac_builder' })
   await mock.request('POST', '/hosts', { name: 'box2', ssh: 'me@box2' })

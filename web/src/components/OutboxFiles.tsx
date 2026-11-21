@@ -7,25 +7,14 @@ import { OutboxImagePreview } from './OutboxImagePreview'
 import { useOutboxFiles } from './useOutboxFiles'
 import './outboxFiles.css'
 
-/**
- * 檔案暫存區裡的「{t("bot 給你的檔案")}」：bot 把要交給使用者的東西放進 `$AM_OUTBOX`（SPEC §6.5f），
- * 使用者在這裡點一下就下載得到——那些檔案在 daemon 這台機器上，手機上本來拿不到。
- *
- * **只讀 outbox，不讀 scratchpad**（使用者 2026-09-16 裁示：scratchpad 暴露過私鑰與正式 DB 複本）。
- * 檔案放進去 1 小時後由 AGM 清掉，所以每個檔案標出還剩多久；分享用 bot（SPEC §20）的不清，不畫倒數。
- *
- * 只讀：這一段不刪檔、不改檔。上面那半（拖進來的暫存）是要**送進**對話的東西，這半是**從** bot 拿出來的。
- */
 export function OutboxFiles() {
   const t = useT()
   const { botId, files, reason, dir, kept, fetchedAt, now, loadedFor, busy, refresh, download, openPreview } = useOutboxFiles()
-  /** 滑過（或鍵盤聚焦）的圖檔：浮出預覽。 */
   const [peek, setPeek] = useState<{ name: string; owner?: string; modified: number; anchor: DOMRect } | null>(null)
   const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const showPeek = (f: OutboxFile, el: HTMLElement) => {
     if (!isPreviewableImage(f.name)) return
     if (peekTimer.current) clearTimeout(peekTimer.current)
-    // 滑鼠只是劃過清單不該每張都抓一次：停 150ms 才算要看。
     peekTimer.current = setTimeout(() => setPeek({ name: f.name, owner: f.owner, modified: f.modified, anchor: el.getBoundingClientRect() }), 150)
   }
   const hidePeek = () => {
@@ -34,7 +23,6 @@ export function OutboxFiles() {
     setPeek(null)
   }
 
-  // 換 bot：浮出的預覽跟著收掉（清單本身由 hook 在 render 當下清）。
   const [peekBot, setPeekBot] = useState(botId)
   if (peekBot !== botId) {
     setPeekBot(botId)

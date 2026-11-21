@@ -6,7 +6,6 @@ import { humanBytes } from './memFormat'
 import { useT } from '../lib/i18n'
 import './memBadge.css'
 
-/** 一台主機上 herdr 進程樹的常駐記憶體（SPEC §15）。一格只講一台，不加總：跨機總和讀不懂。 */
 export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
   const t = useT()
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
@@ -14,7 +13,6 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
   if (!row) return null
 
   if (row.error) {
-    // 量不到就直說。這裡沒有「總和」可以被悄悄拉低，所以標示比隱藏有用。
     return (
       <span className="mem-badge partial" title={t('{host}：量不到 herdr 的記憶體（{error}）', { host, error: row.error })}>
         {remote ? <span className="mem-k">@{host}</span> : null}
@@ -26,7 +24,6 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
 
   const tabs = tabsTotal(row.browsers)
   const tabsHot = tabs >= TABS_WARN
-  // 整機剩餘（2026-09-12 使用者）：判斷還能不能開 bot 要看這個；null 就不畫，別畫成「剩 0」。
   const machine = row.machine
   const freePct = machine && machine.total_bytes > 0 ? (machine.available_bytes / machine.total_bytes) * 100 : null
   const low = freePct !== null && freePct < 15
@@ -76,7 +73,7 @@ export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
             {t('剩 {bytes}', { bytes: humanBytes(machine.available_bytes) })}
           </span>
         ) : null}
-        {/* 分頁數只在超線時冒出來：平常那格只講 herdr，超線才是「RAM 被瀏覽器吃掉」的訊號。 */}
+        {}
         {tabsHot ? <span className="mem-tabs" aria-label={t('{n} 個瀏覽器分頁', { n: tabs })}>⧉{tabs}</span> : null}
       </span>
     </MemPopover>

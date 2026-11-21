@@ -1,7 +1,3 @@
-/**
- * 主力晶片觸控長按（2026-11-07 使用者：「主力長按的功能可以不需要了」，狀態卡拿掉）：
- * 長按 350ms 後才進入拖曳（用來跟捲動分開）；長按不動放開＝什麼都不做，移動＝重排。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -9,7 +5,6 @@ import { installManualTimers } from '../testing/manualTimers'
 import { usePinnedDrag } from './usePinnedDrag'
 import { ChipLegend } from './ChipLegend'
 
-// 長按計時（~400ms）走手動時鐘：`wait` 只推進虛擬時間。
 let timers: ReturnType<typeof installManualTimers>
 
 before(setupDom)
@@ -17,12 +12,11 @@ beforeEach(() => {
   timers = installManualTimers()
 })
 afterEach(async () => {
-  timers.restore() // unmountAll 的 settle 要真 timer
+  timers.restore()
   await unmountAll()
 })
 after(teardownDom)
 
-// 記錄 commit 的版本：拖曳放開時新順序會經由 commit 寫回，用來斷言「別根手指放開」有沒有真的寫回。
 const commits: string[][] = []
 let consume: (() => boolean) | null = null
 function Strip() {
@@ -64,7 +58,6 @@ test('觸控長按不動放開：什麼都不做（不重排），且吞掉那�
   assert.equal(consume?.(), false, '下一個 task 放行')
 })
 
-// happy-dom 的晶片全是 0×0，排序算不出位置；這裡把 a、b 排成一列，讓落點有意義。
 function placeChips() {
   const at: Record<string, number> = { a: 0, b: 60 }
   for (const id of Object.keys(at)) {
@@ -83,7 +76,6 @@ test('拖曳中別根手指放開不算：不 commit，也不結束這次拖曳'
     chip.dispatchEvent(ptr('pointerdown', 10, 10, 1))
     await wait(420)
     window.dispatchEvent(ptr('pointermove', 200, 10, 1))
-    // 第二根手指碰一下放開：不能用它的座標 commit，也不能把拖曳收掉。
     window.dispatchEvent(ptr('pointerup', 10, 10, 2))
   })
   assert.equal(commits.length, 0, '別根手指放開不 commit')
@@ -102,7 +94,6 @@ test('拖曳中別根手指移動不改落點', async () => {
     chip.dispatchEvent(ptr('pointerdown', 10, 10, 1))
     await wait(420)
     window.dispatchEvent(ptr('pointermove', 86, 10, 1))
-    // 第二根手指拖到最左邊：不能把落點拉回 a 前面。86 是落在「b 前面」與「最後面」之間黏滯範圍內的位置，拿別根手指的座標就會黏到前面。
     window.dispatchEvent(ptr('pointermove', 5, 10, 2))
     window.dispatchEvent(ptr('pointerup', 86, 10, 1))
   })

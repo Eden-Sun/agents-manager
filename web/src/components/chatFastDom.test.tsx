@@ -1,7 +1,3 @@
-/**
- * #1914 追加：聊天標題列的「· fast」與手機 logo 的閃電，跟側欄與選單一樣看 `runningFast`（runtime → 設定）。
- * run 走真的 `toRun` 正規化（daemon 形狀的 `status_json` 字串），不手塞 status。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -26,7 +22,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true（同 `mobileGitInfoDom`）。 */
 function stubPhone(phone: boolean): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: phone && q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -49,7 +44,6 @@ test('終端實際讀取 low 時，手機標題同步顯示 L', async () => {
   }
 })
 
-/** 開聊天並把 bot 的設定與 run 換成這個測試要的樣子（run 經 `toRun` 正規化）。 */
 async function openWith(botName: string, opts: { phone: boolean; botFast: boolean; statusJson: unknown; runtimeFast: 0 | 1 }) {
   const restore = stubPhone(opts.phone)
   mockApi(sharedMock)
@@ -66,7 +60,6 @@ async function openWith(botName: string, opts: { phone: boolean; botFast: boolea
   }) as Run
   await act(async () => {
     useStore.setState((s) => ({
-      // 標題列的 model 標籤要有模型才會渲染（`bot.model || model_name`），這裡給一個設定值。
       bots: s.bots.map((b) => (b.id === bot.id ? { ...b, fast: opts.botFast, model: b.kind === 'codex' ? 'gpt-6-luna' : b.model } : b)),
       runs: { ...s.runs, [bot.id]: run },
     }))

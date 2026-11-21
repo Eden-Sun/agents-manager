@@ -1,8 +1,3 @@
-/**
- * 環境設定 →「Claude API」（SPEC §4.3d，issue #1919）：把一次性、不需要工具與 repo 的 LLM 工作改走 API key，
- * 不開 Claude Code session，省訂閱用量。貼 key、總開關、每個用途的開關／模型／effort／每小時上限，下面是用量帳本。
- * key 貼上存檔後就清空輸入框；daemon 不會把它回給前端，這裡只看得到「已設定」（比照 Jev，`JudgePanel`）。
- */
 import { useCallback, useEffect, useState } from 'react'
 import {
   fetchClaudeApiLedger,
@@ -44,7 +39,6 @@ const USE_LABELS: Record<string, string> = {
   changelog_translate: msg('更新框翻譯'),
 }
 
-/** 這個用途現在表單上的值與已存的值是否不同。 */
 function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
   return (
     (draft.enabled ?? saved.enabled) !== saved.enabled ||
@@ -57,7 +51,6 @@ function isUseDirty(draft: ClaudeApiUsePatch, saved: ClaudeApiGroup): boolean {
   )
 }
 
-/** `onOpenOpenAi`：翻譯組的供應商旁的連結——切到「OpenAI API」分頁（OpenAI 的設定與帳本在那裡，不塞在這一頁）。 */
 export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } = {}) {
   const t = useT()
   const [subTab, setSubTab] = useState<'form' | 'book' | 'records'>('form')
@@ -193,14 +186,12 @@ export function ClaudeApiPanel({ onOpenOpenAi }: { onOpenOpenAi?: () => void } =
           const effort = d.effort ?? u.effort
           const perHour = d.max_per_hour ?? u.max_per_hour
           const retryModel = d.retry_model ?? u.retry_model ?? ''
-          // 供應商：只有允許的組（翻譯）而且 daemon 有回 OpenAI 狀態才顯示選單。
           const openai = u.openai_allowed ? settings.openai ?? null : null
           const provider = d.provider ?? u.provider ?? 'anthropic'
           const onOpenAi = openai !== null && provider === 'openai'
           const models = onOpenAi ? (openai.models.includes(model) ? openai.models : [...openai.models, model]) : modelOptions(model)
           const efforts = onOpenAi ? openai.efforts : settings.efforts
           const defaultModel = onOpenAi ? openai.models[0] : u.default_model
-          // 換供應商時模型與思考強度一起換成那一家的預設（Claude 的模型不能送到 OpenAI，反之亦然）。
           const switchProvider = (next: string) =>
             patchUse(u.id, next === 'openai' && openai !== null
               ? { provider: 'openai', model: openai.models[0] ?? '', effort: 'low' }

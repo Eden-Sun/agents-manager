@@ -1,4 +1,3 @@
-/* components/AddIdentityDialog.tsx 專屬樣式。遮罩沿用 confirmDialog.css 的 .confirm-backdrop。 */
 .add-identity-dialog {
   width: min(440px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);

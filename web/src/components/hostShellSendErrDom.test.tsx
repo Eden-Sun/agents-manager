@@ -1,7 +1,3 @@
-/**
- * #1127：送字／送鍵失敗的說明要留在畫面上，不被下一拍輪詢清掉，也不能被寫成「最後一次讀取失敗」。
- * 真的掛 `HostShellPanel` 進 happy-dom，後端是 `MockTransport`；送出的 POST 由測試包一層強制回 502。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, setupDom, teardownDom, unmountAll, fakeWebSocket } from '../testing/domHarness'
@@ -11,18 +7,15 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
 
 virtualMockTime()
-// 共用的 mock 一個主機最多 8 個 shell，而且跨測試檔累積：自己開的自己關。
 const opened: string[] = []
-// HostShellPanel 的輪詢（250ms／1s 一次）走手動時鐘，等待只推進虛擬時間；mock 的 timer 在 `virtualMockTime` 的時鐘上，一起推。
 let timers: ReturnType<typeof installManualTimers>
-/** 讓輪詢與 mock 一起走 `ms` 虛擬毫秒。 */
 const elapse = (ms: number) =>
   act(async () => {
     await timers.clock.advance(ms)
     await advanceMockTime(ms)
   })
 afterEach(async () => {
-  timers.restore() // unmountAll 的 settle 要真 timer
+  timers.restore()
   await unmountAll()
   for (const pane of opened.splice(0)) await mock.request('DELETE', `/hosts/local/shells/${encodeURIComponent(pane)}?confirm=true`).catch(() => {})
 })
@@ -32,7 +25,6 @@ after(() => {
   teardownDom()
 })
 beforeEach(() => {
-  // 桌面直通會開 xterm 的推送 WebSocket；這裡假掉，免得真的去連（happy-dom 會把錯誤當成未處理的例外）。
   fakeWebSocket()
   timers = installManualTimers()
   localStorage.removeItem('am.shellKeySyncOff')
@@ -41,7 +33,6 @@ beforeEach(() => {
 
 const mock = sharedMock
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true，輸入列才會出現。 */
 function asPhone(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -87,7 +78,6 @@ test('送指令失敗：錯誤留在畫面上，不被下一次輪詢清掉，�
 
     await type('ls')
     await act(async () => enter())
-    // 至少兩輪 1 秒輪詢：成功的快照不能把送出錯誤清掉。
     await elapse(2500)
     const banner = sendErrBanner()
     assert.ok(banner, '送出失敗要有 role=alert 的 .shell-err')

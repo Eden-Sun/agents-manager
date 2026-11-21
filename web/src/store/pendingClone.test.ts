@@ -1,7 +1,3 @@
-/**
- * 分身的灰色佔位列只靠建立請求的冪等鍵（create_request_id）對到真 bot，不靠名字（#1796）：
- * 建立期間真 bot 被改名佔位不會殘留，同名的既有 bot 也吃不掉佔位。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon } from './storeEnv.harness.ts'

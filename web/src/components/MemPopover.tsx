@@ -10,13 +10,6 @@ import { MemPaneModal } from './MemPaneModal'
 import { useT, type TFn } from '../lib/i18n'
 import './memPopover.css'
 
-/**
- * 「RAM」點開的清單（SPEC §15.2）：依 `subtree_bytes` 降冪（砍掉能省多少）並列 owner。
- * bot 只給「停止 bot」（走 `POST /bots/{id}/stop`，直接送訊號會留下 daemon 以為還活著的 bot）；
- * 其餘兩段式 TERM → 再按才 KILL，KILL 會帶走沒存的東西所以要再確認。
- */
-
-/** 15 秒 = daemon 的取樣間隔（SPEC §15.1）；比它快只會拿到同一份數字。 */
 const REFRESH_MS = 15_000
 const LOAD_TIMEOUT_MS = 15_000
 
@@ -24,7 +17,6 @@ const CHILD_EXES = new Set(['bash', 'sh', 'zsh', 'fish', 'node'])
 
 function isChildProcess(p: MemProcess): boolean {
   if (p.owner !== 'bot') return false
-  // daemon 撈取的行程清單中，bot pane 內的子行程為 bash, sh, zsh, fish, node 等
   const exe = p.exe?.toLowerCase()
   return Boolean(exe && CHILD_EXES.has(exe))
 }
@@ -42,7 +34,6 @@ function ownerLabel(p: MemProcess, t: TFn): string {
   return '?'
 }
 
-/** 一列的動作按鈕：bot 走「停止 bot」，其餘 TERM → 「強制」。 */
 export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: () => void }) {
   const t = useT()
   const stopBot = useStore((s) => s.stopBot)
@@ -64,7 +55,6 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
         await fn()
         onDone()
       } catch (e) {
-        // daemon 的訊息照著顯示，不在前端另編一套。
         setErr(e instanceof Error ? e.message : t('失敗'))
       } finally {
         setBusy(false)
@@ -75,13 +65,12 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
 
   if (p.owner === 'bot') {
     const id = p.bot_id
-    // 子行程歸屬該 bot 但不由按鈕單獨終止，且不顯示重複的 Stop Bot 避免誤觸（issue review #10）
     if (isChildProcess(p)) {
       return null
     }
     return (
       <div className="mem-pop-act">
-        {/* 停掉一顆正在跑的 bot 會中斷它的回合：跟旁邊 TERM → 強制 一樣兩段式，第一下只武裝，3 秒內再按才執行；放著不動自己解除。 */}
+        {}
         <button
           type="button"
           className={stopArmed ? 'danger' : ''}
@@ -114,7 +103,6 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
         onClick={() =>
           void run(async () => {
             await killMemProcess(host, p.pid, armed ? 'KILL' : 'TERM')
-            // TERM 後按鈕換成「強制」：程序還在就是沒理 TERM。
             setArmed(!armed)
           })
         }
@@ -126,7 +114,6 @@ export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; on
   )
 }
 
-/** 點得開的 RAM 徽章。 */
 export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; children: React.ReactNode }) {
   const t = useT()
   const [open, setOpen] = useState(false)
@@ -139,9 +126,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
 
-  // 世代：只認最新一趟。舊的那趟晚回來（遠端慢、按了重新整理）不能把新清單蓋回去（#1347）。
   const gen = useRef(0)
-  /** 在路上的請求數（點開、重新整理、殺完重抓都算）：輪詢看它，不在路上才排下一趟。 */
   const inflight = useRef(0)
   const load = useCallback(async () => {
     const mine = ++gen.current
@@ -163,8 +148,6 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     }
   }, [host, t])
 
-  // 關著就不抓：每次是一趟 `ps`（遠端還要 ssh）；第一筆由點開的 `onClick` 抓。
-  // 上一趟回來才排下一趟（不疊）；分頁在背景不抓，回前景立刻補一次（#1347，同 useTerminalSnapshot）。
   useEffect(() => {
     if (!open) return
     let alive = true
@@ -225,7 +208,6 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
     if (!open) return
     const onDoc = (e: MouseEvent) => {
       const trgt = e.target as Node
-      // pane 視窗是 portal 到 body 的，不在 `wrap` 裡；點它不算「點到外面」。
       if ((trgt as Element).closest?.('.mem-pane-backdrop')) return
       if (btnRef.current?.contains(trgt) || popRef.current?.contains(trgt)) return
       setOpen(false)
@@ -243,7 +225,6 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
 
   const title = host === LOCAL_HOST ? t('本機') : host
   const rows = data?.processes ?? []
-  // 點「自己開的 pane」開的那個視窗（`MemPaneModal`）；清單留在後面不關。
   const [peek, setPeek] = useState<MemProcess | null>(null)
 
   const pop = open ? (

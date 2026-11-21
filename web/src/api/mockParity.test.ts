@@ -1,8 +1,3 @@
-/**
- * mock 的錯誤碼要跟 daemon（docs/API.md）一樣：用 `VITE_MOCK=1` 驗過的流程，在真環境碰到的是同一組 `reason`。
- * 以前 mock 自己發明了 `not_dev_server`、拿中文句子當 `reason`，前端專門接的 `not_vite`／`stale_selection`
- * 在 mock 底下永遠走不到；子 agent 的 start／restart 在 mock 裡照開，真 daemon 一律 409。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
@@ -71,7 +66,6 @@ test('預覽 attach 帶的 pid 對不上掃到的行程：409 stale_selection（
   assert.equal(e.status, 409)
   assert.equal(e.body.reason, 'stale_selection')
   assert.equal(e.body.port, other.port)
-  // pid 對得上就照常接上。
   const ok = (await m.request('POST', `/bots/${top.id}/preview`, { mode: 'attach', port: other.port, pid: other.pid })) as { status: string; source: string }
   assert.equal(ok.source, 'attached')
 })

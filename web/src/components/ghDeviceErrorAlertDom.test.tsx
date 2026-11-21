@@ -1,6 +1,3 @@
-/**
- * gh 裝置碼登入失敗的錯誤要當 alert 念出來：使用者按了登入、流程失敗時，畫面上的錯誤不能只是一段靜默的文字。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

@@ -15,7 +15,6 @@ describe('expertSections pure functions', () => {
     assert.equal(roleToExpertSection('advisor'), 'advisor')
     assert.equal(roleToExpertSection('executor'), 'executor')
     assert.equal(roleToExpertSection('specialist'), 'specialist')
-    // role 為空不再有「未分配」：被排程綁 → 排程區，否則歸執行者區。
     assert.equal(roleToExpertSection(null), 'executor')
     assert.equal(roleToExpertSection(undefined), 'executor')
     assert.equal(roleToExpertSection(null, true), 'scheduler')

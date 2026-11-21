@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { buildRoute, HOME, parseRoute, screenKey, type Route } from './routes.ts'
 
-/** build 一趟再 parse 回來要拿到同一個 Route。 */
 const roundTrip = (r: Route) => parseRoute(buildRoute(r))
 
 test('parse/build: 每個畫面都對稱', () => {

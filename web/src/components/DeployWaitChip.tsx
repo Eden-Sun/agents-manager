@@ -7,12 +7,6 @@ import { limitHitWhen } from '../lib/limitHitWhen'
 import { useT } from '../lib/i18n'
 import { useUserTimeZone } from '../lib/userTime'
 
-
-/**
- * 側欄標題列的「⏳ 部署等 N 分」（SPEC §18.10，使用者 2026-10-04：等待部署超過 3 分鐘，馬上通知 user 調度）。
- * 只在 daemon 通知過、還在等、沒按「先等」時出現。點開：要上的 commit、等了多久、被誰擋（點名字跳過去）、預計幾點自動放寬，
- * 以及「現在換版」（這次部署直接放寬）與「先等」（收起來）。
- */
 export function DeployWaitChip() {
   const t = useT()
   useUserTimeZone()
@@ -30,14 +24,12 @@ export function DeployWaitChip() {
     const t = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(t)
   }, [])
-  // 打開：焦點進浮層（role=dialog 要有人接住焦點）。
   useEffect(() => {
     if (open) pop.current?.focus({ preventScroll: true })
   }, [open])
   useEffect(() => {
     if (!open) return
     const close = (e: MouseEvent) => !wrap.current?.contains(e.target as Node) && setOpen(false)
-    // 焦點在浮層裡時 Esc 收起，焦點回徽章鈕，不掉到 body。
     const esc = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (pop.current?.contains(document.activeElement)) chip.current?.focus()

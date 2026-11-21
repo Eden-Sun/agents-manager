@@ -4,7 +4,6 @@ import { ApiError } from '../api/types.ts'
 import { initialKeySync, keySyncActive, paneReadOnly, shellForbidden, shellStateUnknown } from './shellAccess.ts'
 
 test('唯讀看 daemon 的 read_only；舊 daemon 沒這欄時退回看 port，不看 kind', () => {
-  // 跑著 vim 的 shell 被掃描分成 service，但沒有 port：要打得進去，不然人出不來。
   assert.equal(paneReadOnly({ listen_ports: [] }), false)
   assert.equal(paneReadOnly({ listen_ports: [3010] }), true)
   assert.equal(paneReadOnly({ read_only: false, listen_ports: [3010] }), false, 'daemon 說了算')

@@ -1,7 +1,3 @@
-/**
- * #1241：手機的 Git／專案資訊彈窗裡按 issue 的「插入」：插完要通知外層（彈窗收掉），不能把焦點拉回被蓋住的輸入框。
- * 沒有 `onInserted` 的（桌機、群組）照舊把焦點還給輸入框。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useRef } from 'react'
@@ -12,7 +8,7 @@ import { IssuesBar } from './IssuesBar'
 afterEach(unmountAll)
 before(setupDom)
 after(async () => {
-  resetStoreForTest() // 要在拆 DOM 之前
+  resetStoreForTest()
   await teardownDom()
 })
 

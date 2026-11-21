@@ -5,11 +5,6 @@ import { downFor, type OfflineHost } from '../lib/hostOffline'
 import { useStore } from '../store/store'
 import './hostOffline.css'
 
-/**
- * 遠端主機離線要一眼看得到（2026-10-02 使用者：「mac_builder offline，要更明顯一點」）：
- * 主畫面頂端的紅色警示條、聊天區頂端的橫幅、側欄整組反灰。判斷都在 `lib/hostOffline.ts`。
- */
-
 function RetryButton({ host, className }: { host: string; className: string }) {
   const t = useT()
   const busy = useStore((s) => Boolean(s.busy[`host:${host}`]))
@@ -80,7 +75,6 @@ function HostRow({ h, now }: { h: OfflineHost; now: number }) {
   )
 }
 
-/** 主畫面最上面那條：每台離線主機一行（哪台、多久、影響幾顆），點開列出受影響的 bot。 */
 export function HostOfflineBanner() {
   const down = useOfflineHosts()
   const now = useNow(down.length > 0)
@@ -94,7 +88,6 @@ export function HostOfflineBanner() {
   )
 }
 
-/** 打開離線主機上的 bot：聊天區頂端講清楚送不出去、主機回來後會怎樣。 */
 export function HostOfflineChatNotice({ botId }: { botId: string }) {
   const t = useT()
   const host = useBotOfflineHost(botId)
@@ -118,7 +111,6 @@ export function HostOfflineChatNotice({ botId }: { botId: string }) {
   )
 }
 
-/** 側欄 bot 列的狀態字：主機離線時取代「閒置／執行中」，不留最後一次的狀態誤導人。 */
 export function HostDownState() {
   const t = useT()
   return <span className="bot-state host-down">{t('主機離線')}</span>

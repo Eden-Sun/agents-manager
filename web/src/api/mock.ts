@@ -1,7 +1,3 @@
-/**
- * In-memory daemon simulator (`VITE_MOCK=1`) for SPEC §7 REST + §7.3 WS events.
- * Prompt keywords (`blocked`/`fallback`/`slow`) and `window.__amMock` helpers: see docs/FRONTEND.md.
- */
 
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { ApiError, BOT_KINDS } from './types'
@@ -26,8 +22,6 @@ import { L } from './mockText'
 import { DEFAULT_USER_TIME_ZONE, isValidTimeZone, utcOffsetLabel } from '../lib/timeZone'
 import { hasCodeIn } from '../lib/charCodes'
 
-/** 未知 kind 一律當 claude（與 daemon 的 400 不同，mock 寬鬆處理）。 */
-/** 2026-09-23 真機（pane 只有 14 行）：claude 把 AskUserQuestion 的題目裁掉，只剩捲動中的選項。 */
 const mockTinyAskScreen = () => [
   '',
   L('❯ 1. 內網 http (Recommended)', '❯ 1. Internal http (Recommended)'),
@@ -42,7 +36,6 @@ const mockTinyAskScreen = () => [
   'Enter to select · ↑/↓ to navigate · Esc to cancel',
 ]
 
-/** 2026-09-24 真機（claude 2.1.280）：問句跟選項之間夾著 `·` 條列說明（`__amMock.bulletAsk()`）。 */
 const MOCK_BULLET_ASK_SCREEN = [
   '✻ Cooked for 21s · done 01:40',
   '',
@@ -59,7 +52,6 @@ const MOCK_BULLET_ASK_SCREEN = [
   '  Enter to confirm · Esc to cancel',
 ]
 
-/** 同一題在 transcript 裡的樣子（daemon `GET /api/bots/{id}/pending-question`）。 */
 const mockTinyAskQuestions = () => [
   {
     question: L('prod console 連 prod RPA 要走哪條路？（現在失敗是因為 console 規定 RPA 位址必須 https，我設了內網 http）', 'Which route should the prod console take to the prod RPA? (It fails now because the console requires an https RPA address and I set an internal http one)'),
@@ -73,7 +65,6 @@ const mockTinyAskQuestions = () => [
   },
 ]
 
-/** 同一題 Jev 的選項建議（`jev_options`，只提示不代答）。 */
 const MOCK_TINY_ASK_JEV = {
   ledger_id: 'mock-ask-1',
   model: 'jev-1.13.0',
@@ -97,7 +88,6 @@ function ulid(prefix: string): string {
 }
 const now = () => new Date().toISOString()
 
-/** API.md §12.4：每窗的 `low`（剩餘 <30%）／`critical`（剩餘 <5%）由 daemon 算好，前端只讀旗標；mock 的讀數照樣算。 */
 function withQuotaFlags(q: Rec | null): Rec | null {
   if (!q) return q
   const out: Rec = { ...q }
@@ -110,12 +100,9 @@ function withQuotaFlags(q: Rec | null): Rec | null {
   return out
 }
 
-/** herdr workspace 總欄數（2026-09-06 實測 185）；同分頁 pane 平分，獨佔分頁全拿。 */
 const WORKSPACE_COLUMNS = 185
 
-/** mock 的 claude 登入網址（形狀同真的 `claude auth login`，state／challenge 是假值）。 */
 const MOCK_AGY_LOGIN_URL = 'https://accounts.example.test/o/oauth2/auth?client=agy-mock'
-/** codex 裝置碼登入的假資料（mock 用，碼不是真的）。 */
 const MOCK_CODEX_DEVICE_URL = 'https://auth.openai.com/codex/device'
 const MOCK_CODEX_DEVICE_CODE = 'MOCK-7K2Q'
 const MOCK_LOGIN_URL =
@@ -129,32 +116,22 @@ interface MockRun {
   agent_status: 'idle' | 'working' | 'blocked' | 'unknown'
   workspace_id: string | null
   pane_id: string | null
-  /** false = 跟其他 pane 擠預設分頁。 */
   own_tab: boolean
   adopted: number
   native_session_id: string | null
   transcript_path: string | null
-  /** claude statusLine hook payload（見 normalize.toStatusInfo）。 */
   status: Record<string, unknown> | null
-  /** 被終端寬度壓縮過的原文，當 tooltip / fallback。 */
   status_line: string | null
-  /** null = 沒有待重啟套用的新版。 */
   update_notice: string | null
-  /** 上一回合被 API 斷線截斷時的原文；null = 正常收尾。 */
   turn_error: string | null
-  /** SPEC §4.4a：run 實際跑的值，啟動時複製；PATCH 不動它，只有 slash 指令當場套用（grok/claude）才跟著改。 */
   runtime_model: string | null
   runtime_effort: string | null
   runtime_fast: boolean
-  /** 空字串＝本機預設帳號；null＝不知道。 */
   runtime_identity: string | null
   started_at: string
   ended_at: string | null
-  /** `agent_status` 最後一次真的改變的時間，只有 `setAgentStatus` 會動它（issue #93）。 */
   agent_status_since: string | null
-  /** claude 輸入框裡的灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 有，離開 idle 就清掉。 */
   prompt_suggestion?: string | null
-  /** 快取倒數（SPEC §6.5j）：最後一次 API 活動；claude／codex 才有 TTL。 */
   last_api_at?: string | null
   cache_ttl_secs?: number | null
   cache_kept_warm_at?: string | null
@@ -163,20 +140,16 @@ interface MockRun {
   keep_warm_replied_at?: string | null
 }
 
-/** mock 的快取倒數：各顆 bot 錯開「上次活動」幾分鐘前，綠／黃／紅／已涼都演得到。 */
 const MOCK_CACHE_AGE_MIN = [3, 48, 57, 30, 50, 75]
 
-/** 同值重寫不算改變：mock 也要跟 daemon 的 trigger 同一套規則，不然本地開發永遠測不到「跑了多久」。 */
 function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
   if (run.agent_status === status) return
-  // 回合收尾就是一次 API 活動（daemon 取回合 `completed_at`）。
   if (run.agent_status === 'working' && run.cache_ttl_secs) run.last_api_at = now()
   run.agent_status = status
   run.agent_status_since = now()
   if (status !== 'idle') run.prompt_suggestion = null
 }
 
-/** Real-session values so the status bar is exercised at a realistic width. */
 function claudeStatusJson(cwd: string): Record<string, unknown> {
   const inHours = (h: number) => Math.floor(Date.now() / 1000) + h * 3600
   return {
@@ -206,16 +179,13 @@ interface MockTurn {
   client_request_id: string | null
   created_at: string
   completed_at: string | null
-  /** issue #122：bot 沒在跑時收下、等它起來的那一則。 */
   awaits_start?: number
-  /** issue #733：bot 忙碌時收下、等它回到 idle 的那一則。 */
   awaits_idle?: number
   start_error?: string | null
 }
 
 interface MockMessage {
   id: string
-  /** SPEC §6.13 */
   rewound_at?: string | null
   conversation_id: string
   turn_id: string | null
@@ -224,19 +194,13 @@ interface MockMessage {
   content: string
   source: 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system' | 'share'
   incomplete: number
-  /** SPEC §13：null = 一般訊息 */
   group_id: string | null
-  /** 只存 metadata，位元組在 `blobs`。 */
   attachments_json: string | null
-  /** null = 使用者 / daemon 自己。 */
   relay_from: string | null
-  /** 群集派工（`bot:cluster:<名稱>`）：群集名與實際接手的成員（daemon 補的）。 */
   via_cluster?: string
   assignee_bot_id?: string
   assignee_name?: string
-  /** `send_now`＝插隊、`supplement`＝補充；沒有＝一般送出。 */
   sent_via?: 'send_now' | 'supplement' | null
-  /** 保溫回合的訊息（使用者那則與保溫回覆）：不算未讀。 */
   keep_warm?: boolean
   created_at: string
 }
@@ -252,12 +216,10 @@ interface MockBot {
   role_pending?: boolean
   daemon_url_pending?: boolean
   manager_use?: boolean
-  /** API.md v3.3：null = 不帶 `--model` */
   model: string | null
   effort: string | null
   fast: number
   persona: string | null
-  /** claude only（issue #213）；null = 沒設＝`claude-md`。 */
   args_json: string
   autostart: number
   inject_hooks: number
@@ -265,12 +227,9 @@ interface MockBot {
   identity: string | null
   env_json: string
   managed_by: 'user' | 'child'
-  /** child 才有：母 bot 的 id（側欄縮排在它底下）。 */
   parent_bot_id?: string
   cwd: string | null
-  /** 分享用 bot（SPEC §20）：受限或信任分享；省略＝一般 bot。 */
   share_profile?: 'restricted' | 'trusted'
-  /** 使用者釘選（`PATCH {primary}`）；省略 = 沒釘。 */
   is_primary?: number
   primary_position?: number
   created_at: string
@@ -291,9 +250,7 @@ interface MockProject {
   mode?: 'parent_child' | 'expert'
   workspace_id: string | null
   host: string
-  /** null = not a GitHub project */
   github: { owner: string; repo: string; url: string } | null
-  /** #708 */
   handed_off_to?: string | null
   deputy?: { bot_id: string; after_sec: number } | null
   specialist_dispatch?: boolean
@@ -311,7 +268,6 @@ const issues = (): Rec[] => [
   { number: 33, title: L('grok kind：hook 不走 argv', 'grok kind: hooks don\'t go through argv'), state: 'closed', labels: [{ name: 'daemon', color: '1d76db' }, { name: 'grok', color: '000000' }], author: 'edansun', updated_at: inHours(-140), body: L('改寫入 `<GROK_HOME>/hooks/agents-manager.json`。', 'Now written to `<GROK_HOME>/hooks/agents-manager.json`.') },
 ]
 
-/** SPEC §11.2 `[[hosts]]` + runtime connection state. */
 interface MockHost {
   name: string
   ssh: string
@@ -320,10 +276,8 @@ interface MockHost {
   remote_path: string
   connected: boolean
   error: string | null
-  /** API.md `hosts[].disconnected_since`：連著時 null。 */
   disconnected_since: string | null
   tools: Record<BotKind, MockTool>
-  /** Keyed by identity name. */
   identities: Record<string, MockIdentityStatus>
 }
 
@@ -342,7 +296,6 @@ interface MockShell {
   cwd: string
   created_at: string
   lines: string[]
-  /** 提示符後還沒按 Enter 的字。 */
   typed: string
 }
 
@@ -374,7 +327,6 @@ function mockGhLoggedIn(): MockGh {
   }
 }
 
-/** mac_builder 實測形狀：作用中 token 失效，另有一個有效但非 active 的帳號。 */
 function mockGhNeedsSwitch(): MockGh {
   return {
     installed: true,
@@ -397,9 +349,7 @@ interface MockIdentityStatus {
   reason?: string
   account?: string
   plan?: string
-  /** `shell` = 那台主機 zshrc 的 `ccN`（SPEC §16）。 */
   source: 'config' | 'shell'
-  /** shell 來源的 `CLAUDE_CONFIG_DIR`（預設帳號沒有）。 */
   config_dir?: string
 }
 
@@ -412,10 +362,8 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   'openai-api': { installed: true, path: null, version: null, logged_in: null },
 }
 
-/** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
-/** 函式：說明文字依語言，要等 `?lang=` 套用後才取。 */
 const models = (): Record<BotKind, Rec[]> => ({
   claude: [
     { id: 'opus', display_name: 'Opus', description: L('最強推理', 'Strongest reasoning'), is_default: false, default_effort: null, efforts: CLAUDE_EFFORTS, service_tiers: [] },
@@ -491,10 +439,6 @@ const models = (): Record<BotKind, Rec[]> => ({
   ],
 })
 
-/**
- * claude `default_effort` 是廠商內建預設；`account_default_effort` 來自帳號 settings.json 的全域＋per-model `effortLevel`（SPEC §17.1），數字照真機實測。
- * 廠推薦一律 `medium`（使用者 2026-10-13 裁示，不照模型分）。
- */
 const CLAUDE_BUILTIN_DEFAULT_EFFORT = 'medium'
 
 const CLAUDE_ACCOUNT_EFFORT: Record<string, { global?: string; overrides?: Record<string, string> }> = {
@@ -509,13 +453,10 @@ function claudeModelsForIdentity(identity: string): Rec[] {
   return models().claude.map((m) => {
     const builtin = CLAUDE_BUILTIN_DEFAULT_EFFORT
     const account = cfg.overrides?.[String(m.id)] ?? cfg.global ?? null
-    // 廠推薦每個帳號一樣；帳號記住的值另放 account_default_effort，跟內建相同就不給（#1679）。
     return { ...m, default_effort: builtin, account_default_effort: account !== builtin ? account : null }
   })
 }
 
-/** 幾小時前（ISO）：mock 用來造「沿用的那一桶」。 */
-/** `daemon/src/api.rs::cursor_not_found`：`before=` 游標指不到東西的 404（#766）。 */
 function lostCursor(reason: 'before_message_gone' | 'before_message_not_in_conversation', messageId: string): ApiError {
   return new ApiError(404, { error: 'not_found', what: 'before message', reason, message_id: messageId }, 'not found')
 }
@@ -528,7 +469,6 @@ function inHours(h: number): string {
   return new Date(Date.now() + h * 3600_000).toISOString()
 }
 
-/** 函式：要等 `?lang=` 固定語言套用後才取原文（模組載入時語言還沒定）。 */
 const replies = () => [
   L(
     '好的，我看了一下 `src/api/transport.ts`：token 會在 `GET /api/session` 之後快取，後續 REST 都帶 `X-AM-Token`。\n\n需要我把重連的退避上限調整成 30 秒嗎？',
@@ -543,14 +483,9 @@ const replies = () => [
     'The catch here is that `agent.start` is asynchronous: the socket returns `launch_pending:true` right away, so you need `agent.wait {until:[idle,done,blocked]}` to know it is ready.',
   ),
   'PONG',
-  // Fenced one-liner (what `echo 1` really produced).
   '```\n1\n```',
 ]
 
-/**
- * 假裝在傳：每 100ms 前進一段，照樣回報進度、吃 abort。檔名帶 `slow` 走慢速、`stall` 停在 25%、
- * `fail` 傳到 40% 回 502——截圖與手動驗上傳進度用。
- */
 function mockUploadProgress(name: string, total: number, { signal, onProgress }: UploadOptions): Promise<void> {
   const perTick = /slow/i.test(name) ? 20 * 1024 : 800 * 1024
   const stall = /stall/i.test(name)
@@ -578,7 +513,6 @@ function mockUploadProgress(name: string, total: number, { signal, onProgress }:
   })
 }
 
-/** mock 的 outbox 範例 html：用 CDN 的 Chart.js 畫長條圖（外部 script 要能載入，不沙箱化）。 */
 const MOCK_REPORT_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Sales report</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script></head>
 <body style="font-family:sans-serif"><h1>Sales report</h1><canvas id="c" width="480" height="240"></canvas>
@@ -595,7 +529,6 @@ export class MockTransport implements Transport {
   readonly mock = true
 
   private hosts: MockHost[] = []
-  /** grok missing, codex not logged in — exercises the hint UI. */
   private localTools: Record<BotKind, MockTool> = {
     claude: { ...TOOLS_ALL_OK.claude },
     codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
@@ -604,8 +537,6 @@ export class MockTransport implements Transport {
     'claude-api': { ...TOOLS_ALL_OK['claude-api'] },
     'openai-api': { ...TOOLS_ALL_OK['openai-api'] },
   }
-  /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
-  /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
   private disabledIdentities: string[] = []
 
   private localIdentityStatus: Record<string, MockIdentityStatus> = {
@@ -622,12 +553,8 @@ export class MockTransport implements Transport {
       config_dir: '/Users/me/.claude-cc2',
     },
   }
-  /** SPEC §14：裸 key 是本機，遠端加 `<host>/` 前綴（`seedHostQuota()` 故意給不同數字）。 */
   private quota: Record<string, Rec | null> = {
-    // 7d 剩 3%、F 剩 0%，同一刻（3 小時多後）重置：0–10% 長條＋底下一行共用倒數（#1787）。
     claude: { five_hour: { used_pct: 18, resets_at: inHours(2.4) }, seven_day: { used_pct: 97, resets_at: inHours(3.1) }, fable: { used_pct: 100, resets_at: inHours(3.1) }, plan: 'Max 20x', updated_at: now(), host: 'local' },
-    // 沿用上一份讀數的那一桶（issue #540）：`observed_at` 比 `updated_at` 舊＝狀態列這幾次沒帶 5h，
-    // mock 固定留一格這種狀態，量表上的「舊」標記才有東西可看。
     'claude:cc1': {
       five_hour: { used_pct: 85, resets_at: inHours(1.1), observed_at: hoursAgo(2) },
       seven_day: { used_pct: 30, resets_at: inHours(120), observed_at: now() },
@@ -635,10 +562,7 @@ export class MockTransport implements Transport {
       updated_at: now(),
       host: 'local',
     },
-    // zshrc 身份也有額度列（SPEC §16）。
-    // 5h 剩 5%、24 分後重置：0–10% 長條但不是倒數列（#1784）。
     'claude:cc2': { five_hour: { used_pct: 95, resets_at: inHours(0.4) }, seven_day: { used_pct: 51, resets_at: inHours(88) }, plan: 'Pro', updated_at: now(), host: 'local' },
-    // 重置券（codex `rateLimitResetCredits`）：固定給一張讓明細有東西可看。
     codex: {
       five_hour: { used_pct: 63, resets_at: inHours(3.2) },
       seven_day: { used_pct: 88, resets_at: inHours(41) },
@@ -656,7 +580,6 @@ export class MockTransport implements Transport {
       host: 'local',
     },
     grok: null,
-    // agy 只回報 Gemini 組的 5h 與 7d 窗。
     agy: { five_hour: { used_pct: 43, resets_at: inHours(3) }, seven_day: { used_pct: 22, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
   }
   private identities: MockIdentity[] = [
@@ -665,23 +588,18 @@ export class MockTransport implements Transport {
   ]
   private projects: MockProject[] = []
   private bots: MockBot[] = []
-  /** 「閒下來自動重啟套用更新」排著的 bot id（daemon 存 DB，這裡只放記憶體）。 */
   private updateRestart: string[] = []
   private baseSnapshots = new Map<string, string>()
-  /** 使用者顯示時區（`/settings/time-zone`）。 */
   private timeZone = DEFAULT_USER_TIME_ZONE
-  /** 軟刪的 bot（daemon `bots.deleted_at`）：刪除通知的「復原」走 `POST /bots/{id}/restore` 救回。 */
   private deletedBots: { bot: MockBot; deleted_at: string }[] = []
   private runs: MockRun[] = []
   private upstreamItems: Rec[] = []
-  /** 排到回合結束才套的 live 設定（daemon `lifecycle/deferred_live.rs`，#712）。 */
   private deferredLive = new Set<string>()
   private turns: MockTurn[] = []
   private messages: MockMessage[] = []
   private conversations = new Map<string, string>()
   private blobs = new Map<string, Blob>()
 
-  /** 更新框的 changelog／分診與 publish 重試／herdr 影響分析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
   readonly shares = new MockShares(
     (id) => {
@@ -692,14 +610,11 @@ export class MockTransport implements Transport {
     (id) => this.bots.find((x) => x.id === id)?.share_profile === 'trusted',
   )
   readonly serverDrafts = new MockServerDrafts()
-  /** 專案排程（`mockServerSchedules.ts`）：Bot 資格照 daemon 的規則（同專案、一般 Bot、非 child／分享／受限）。 */
   readonly serverSchedules = new MockServerSchedules(
     (botId, projectId) => this.bots.some((b) => b.id === botId && b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
   )
   readonly remoteCargo = new MockRemoteCargo()
-  /** 設定頁「更新檢查」的 herdr integration（`mockIntegrationUpdates.ts`，#1772）。 */
   readonly integrationUpdates = new MockIntegrationUpdates()
-  /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
   readonly herdrUpdate = new MockHerdrUpdate({
     emit: (type, data) => this.emit(type, data),
     liveBots: (host) =>
@@ -718,28 +633,19 @@ export class MockTransport implements Transport {
     },
   })
 
-  /** bot 輸入框卡著的草稿（`__amMock.composerDraft`，`mockComposerDraft.ts`）。 */
   readonly composerDrafts = new MockComposerDrafts()
 
-  /** 下一個符合的請求回指定的錯誤（`__amMock.failNext`）：手動看錯誤路徑、截圖用，用過一次就拿掉。 */
   private faults: { method: HttpMethod; pattern: RegExp; status: number; body: Rec }[] = []
   failNext(method: HttpMethod, pattern: string, status: number, body: Rec = {}) {
     this.faults.push({ method, pattern: new RegExp(pattern), status, body })
   }
 
-  /** 面板自己開的 shell（daemon 的 `app.host_shells`）。key = `<host>/<pane_id>`。 */
   private shells = new Map<string, MockShell>()
-  /**
-   * 被 trace 的 pane 的畫面緩衝。**不放進 `shells`**：放進去就會被 `GET …/shells` 列成「自己開的」、
-   * 之後 `shell()` 直接放行不再看唯讀——daemon 那邊這兩份白名單一直是分開的（第二輪 review M6）。
-   */
   private tracedScreens = new Map<string, MockShell>()
   private shellSeq = 0
 
-  /** 新遠端主機預設同 mac_builder 實測：active token 失效、另有可切帳號。 */
   private gh = new Map<string, MockGh>()
 
-  /** 預設分頁裡非 bot 的 pane 數；預設夠擠以演窄 pane 警示（`__amMock.paneSqueeze(n)` 調整）。 */
   private foreignPanes = 5
 
   private seq = 0
@@ -779,7 +685,6 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
-    // claude-api bot（#1944）：演 Add Bot／API 用量列／降級掉 pane 與 restart 的對話頁。
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -799,7 +704,6 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
-    // 第二顆 claude：SPEC §6.9 批次重啟要一閒一忙才演得出跳過規則。
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -820,7 +724,6 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
-    // 母 agent 自己開的子 agent（managed_by=child）：選單要有「升級成頂層」。
     this.bots.push({
       id: ulid('bot'),
       project_id: p.id,
@@ -881,7 +784,6 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
-    // 軟刪 bot 的示範資料（供刪除通知的「復原」用）。
     for (const [name, kind, ago] of [['am-old-review', 'codex', 3_600_000], ['scratch-claude', 'claude', 86_400_000 * 2]] as const) {
       this.deletedBots.push({
         bot: {
@@ -891,7 +793,6 @@ export class MockTransport implements Transport {
         deleted_at: new Date(Date.now() - ago).toISOString(),
       })
     }
-    // 先鋪歷史再鋪示範訊息：示範的那兩則要留在最新一頁，不然翻頁才看得到就失去意義。
     this.seedLongHistory(p.id)
     this.seedGroupRelay(p.id)
     this.seedSharedBot()
@@ -899,7 +800,6 @@ export class MockTransport implements Transport {
     installDevHelpers(this)
   }
 
-  /** 分享用的受限 bot（SPEC「分享 bot」）：已開分享，對話裡有分享使用者與你自己發的訊息，截圖與分享頁 mock 用。 */
   private seedSharedBot() {
     const p: MockProject = {
       id: ulid('proj'), path: '/Users/me/.local/share/agents-manager/shared-bots/support', label: L('客服分享', 'Support share'), workspace_id: null, host: 'local', github: null, created_at: now(),
@@ -918,7 +818,6 @@ export class MockTransport implements Transport {
     this.addMessage({ ...base, role: 'assistant', source: 'hook', content: L('看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。改成 `7789` 之後重開就好，我把改好的檔放在「bot 給你的檔案」裡。', 'I read your config: `listen = "127.0.0.1:7788"` collides with another service. Change it to `7789` and restart. I put the fixed file under "Files from the bot".') })
   }
 
-  /** 專家模式專案示範資料（1 管理者、1 顧問、2 執行者、1 未分配、管理者底下 1 個 child） */
   private seedExpertDemoProject() {
     const p: MockProject = {
       id: ulid('proj'),
@@ -1022,7 +921,6 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     this.bots.push(exec1)
-    // 群集示範：再加 2 顆同設定 haiku 執行者（連 exec1 共 3 顆）；其中一顆開著並在忙。
     const clusterIds = [exec1.id]
     for (const n of [2, 3]) {
       const twin: MockBot = { ...exec1, id: ulid('bot'), name: `expert-haiku-${n}`, role_pending: false, manager_use: false }
@@ -1040,7 +938,6 @@ export class MockTransport implements Transport {
       }, 3000)
     }, 50)
 
-    // 群集派工的兩端：成員收到的 relay 泡泡、管理者收到的結果通知（標出群集名與接手的成員）。
     const member = this.bots.find((b) => b.id === clusterIds[1])
     if (member) {
       const via = { via_cluster: this.clusterOf(member) ?? 'haiku', assignee_bot_id: member.id, assignee_name: member.name }
@@ -1118,7 +1015,6 @@ export class MockTransport implements Transport {
     this.bots.push(specialist)
   }
 
-  /** 專家模式執行者群集名（契約：同專案、role=executor、(kind,model,effort,identity) 相同、≥2 顆）；單顆回 null。 */
   private clusterOf(b: MockBot): string | null {
     if (b.role !== 'executor' || b.parent_bot_id) return null
     const key = (x: MockBot) => [x.kind, x.model ?? '', x.effort ?? '', x.identity ?? ''].join('\u0000')
@@ -1128,7 +1024,6 @@ export class MockTransport implements Transport {
     return short
   }
 
-  /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
   private seedGroupRelay(projectId: string) {
     const target = this.bots.find((b) => b.project_id === projectId)
     const agm = this.bots.find((b) => b.project_id === projectId && b.id !== target?.id)
@@ -1150,10 +1045,6 @@ export class MockTransport implements Transport {
     })
   }
 
-  /**
-   * 第一顆 bot 的對話塞超過一頁（`PAGE_SIZE` 200）：不然 `has_more` 永遠是 false，
-   * 「載入更早的訊息」在 mock 下根本長不出來，往前翻頁那條路也就從來沒被走過。
-   */
   private seedLongHistory(projectId: string) {
     const target = this.bots.find((b) => b.project_id === projectId)
     if (!target) return
@@ -1169,8 +1060,6 @@ export class MockTransport implements Transport {
       this.addMessage({ ...base, turn_id: turnId, role: 'assistant', content: L(`第 ${i} 輪：補好了，兩條都綠。`, `Round ${i}: done, both tests are green.`) })
     }
   }
-
-  // transport
 
   session(): Promise<string> {
     return Promise.resolve('mock-ui-token')
@@ -1195,11 +1084,9 @@ export class MockTransport implements Transport {
     const out = /^\/bots\/([^/]+)\/outbox\/file\?path=(.+)$/.exec(path)
     if (out) {
       const name = decodeURIComponent(out[2])
-      // .html：演 bot 產的報表（CDN 的 Chart.js）；後端對 .html 回 octet-stream，前端自己決定預覽 blob 的 type（使用者 2026-11-18：不沙箱化）。
       if (/\.html?$/i.test(name)) return URL.createObjectURL(new Blob([MOCK_REPORT_HTML], { type: 'application/octet-stream' }))
       return URL.createObjectURL(new Blob([`（mock）${name} 的內容\n`], { type: 'text/plain' }))
     }
-    // 對話裡的本機圖片：畫一張標出路徑的示意圖，`missing` 開頭的演 404。
     const local = path.match(/^\/bots\/[^/]+\/local-image\?path=(.*)$/)
     if (local) {
       const p = decodeURIComponent(local[1])
@@ -1221,7 +1108,6 @@ export class MockTransport implements Transport {
       this.socketOpen = true
       handlers.onStatus('open')
     }, 120)
-    // codex usage creeps up (WS `quota_updated`).
     const drift = setInterval(() => {
       if (this.handlers !== handlers) return clearInterval(drift)
       const q = this.quota.codex
@@ -1241,7 +1127,6 @@ export class MockTransport implements Transport {
   }
 
   async request(method: HttpMethod, path: string, body?: unknown): Promise<unknown> {
-    // A little latency so loading states are visible.
     await sleep(60)
     if (method === 'POST' && path === '/pending-questions/translate') return mockTranslateEcho(body)
     const fault = this.faults.findIndex((f) => f.method === method && f.pattern.test(path))
@@ -1280,11 +1165,8 @@ export class MockTransport implements Transport {
     { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
     { const r = this.integrationUpdates.handle(method, rawPath, seg, b); if (r !== undefined) return r }
     { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
-    // 前端已樂觀套用排序，mock 收下就好。
-    // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/api-usage$/); if (method === 'GET' && m) return this.apiUsage(decodeURIComponent(m[1])) }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: this.readMarkAt(b), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
-    // 全部被 trace 的 pane；`unowned=1` 只回對不到專案的，並標哪一顆是 scratch（§6.5e）。
     if (method === 'PUT' && /^\/panes\/[^/]+\/alias$/.test(rawPath)) {
       this.seedPanes()
       const pane = decodeURIComponent(rawPath.split('/')[2])
@@ -1352,7 +1234,6 @@ export class MockTransport implements Transport {
       if (method === 'GET' && seg[4] === 'terminal') {
         return this.shellTerminal(host, pane, q.get('source') ?? 'visible', Number(q.get('lines') ?? 200))
       }
-      // `echo=ansi`（xterm 送完立刻畫）：回 `{terminal}`；mock 沒有 ANSI，回的是同一份文字。
       const echo = (r: unknown) => (q.get('echo') === 'ansi' ? { terminal: this.shellTerminal(host, pane, 'visible', 200) } : r)
       if (method === 'POST' && seg[4] === 'text') return echo(this.shellText(host, pane, String(b.text ?? ''), b.enter !== false))
       if (method === 'POST' && seg[4] === 'keys') return echo(this.shellKeys(host, pane, b.keys))
@@ -1373,14 +1254,12 @@ export class MockTransport implements Transport {
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'lineage' && seg[3] === 'stats') return this.lineageStats(seg[1])
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'lineage') return { project_id: seg[1], sessions: [] }
 
-    // 須排在 `bots/{id}` 前：`update-restart` 不是 bot id。
     if (seg[0] === 'bots' && seg[1] === 'update-restart' && seg.length === 2) {
       const ids: string[] = Array.isArray(b?.bot_ids) ? b.bot_ids.filter((v: unknown): v is string => typeof v === 'string') : []
       if (method === 'POST') this.updateRestart = [...new Set([...this.updateRestart, ...ids])]
       if (method === 'DELETE') this.updateRestart = ids.length === 0 ? [] : this.updateRestart.filter((x) => !ids.includes(x))
       return { bot_ids: this.updateRestart }
     }
-    // SPEC §6.9：須排在 `bots/{id}` 前，否則 `restart-idle` 被當成 bot id。
     if (method === 'POST' && seg[0] === 'bots' && seg[1] === 'restart-idle' && seg.length === 2) {
       return this.restartIdle()
     }
@@ -1405,9 +1284,7 @@ export class MockTransport implements Transport {
       if (method === 'GET' && action === 'composer-draft') return { ...this.composerDrafts.snapshot(botId), run_id: this.activeRun(botId)?.id ?? null }
       if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
-        // 專案已移交給另一台主機的 daemon（#708）：開、關、重啟與 pane RPC 一律 409 `handed_off`（`daemon/src/handoff.rs::refuse`）。
         if (seg.length === 3 && ['start', 'stop', 'restart', 'keys', 'text', 'interrupt', 'login', 'abort'].includes(action)) this.refuseHandedOff(botId)
-        // 子 agent 一律由父 bot 用 herdr 重開：daemon 的 start／restart 不收（API.md §4、§10.3；一鍵重啟走內部原地重啟，不經這裡）。
         if ((action === 'start' || action === 'restart') && seg.length === 3) {
           const parent = this.bots.find((x) => x.id === botId)?.parent_bot_id
           if (parent) {
@@ -1424,7 +1301,6 @@ export class MockTransport implements Transport {
             )
           }
         }
-        // daemon：`resume=native` 接不回（這顆 bot 從來沒有記錄過原生對話）→ 409 `cannot_resume`，不啟動、不開新對話（API.md §4）。
         if ((action === 'start' || action === 'restart') && q.get('resume') === 'native' && !this.runs.some((r) => r.bot_id === botId && r.native_session_id)) {
           throw new ApiError(
             409,
@@ -1459,9 +1335,6 @@ export class MockTransport implements Transport {
     throw new ApiError(404, { reason: `mock: no route for ${method} ${rawPath}` }, 'not found')
   }
 
-  // helpers
-
-  /** `?q=gh-error` simulates a 502. */
   private issues(projectId: string, number: string | undefined, q: URLSearchParams) {
     const p = this.projects.find((x) => x.id === projectId)
     if (!p) throw new ApiError(404, { error: 'not_found', what: 'project' }, 'not found')
@@ -1489,7 +1362,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** Unknown kind → 400; down host → 502. */
   private models(kind: string, host: string, identity: string) {
     if (!BOT_KINDS.includes(kind as BotKind) && kind !== 'claude-api' && kind !== 'openai-api') {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
@@ -1502,21 +1374,18 @@ export class MockTransport implements Transport {
     return { kind, host: remote?.name ?? 'local', models: list }
   }
 
-  /** 官方安裝指令（API.md §12.7）；mock 的 shell pane 照這幾行演一遍。 */
   private static readonly INSTALL_CMD: Record<string, string> = {
     claude: 'curl -fsSL https://claude.ai/install.sh | bash',
     codex: 'npm i -g @openai/codex',
     grok: 'curl -fsSL https://x.ai/cli/install.sh | bash',
   }
 
-  /** 下一次直接安裝要演的失敗（`__amMock.installFail('claude', 'timeout')`；`null` 恢復成功）。 */
   private installFail = new Map<string, 'error' | 'timeout' | 'superseded'>()
   setInstallFail(kind: string, mode: 'error' | 'timeout' | 'superseded' | null) {
     if (mode) this.installFail.set(kind, mode)
     else this.installFail.delete(kind)
   }
 
-  /** 沒有 Bot 可借的安裝：開 shell、演安裝輸出，CLI 結束後那台的 tool 變已安裝・未登入並推 `host_changed`。 */
   private installToolInShell(host: string, kind: BotKind, install_id: string) {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
@@ -1527,7 +1396,6 @@ export class MockTransport implements Transport {
     const fail = this.installFail.get(kind)
     later(() => {
       if (fail) {
-        // 沒裝成：pane 保留讓使用者看錯誤（逾時＝等滿 15 分鐘），推 `tool_install_done`（API.md §8）。
         pane.lines.push(fail === 'timeout' ? `curl: (28) Operation timed out` : `curl: (6) Could not resolve host`, '')
         this.emit('tool_install_done', { host, kind, install_id, outcome: fail === 'timeout' ? 'timeout' : fail === 'superseded' ? 'superseded' : 'failed', installed: false, pane_id: fail === 'superseded' ? '' : shell.pane_id, pane_kept: fail !== 'superseded', timed_out: fail === 'timeout' })
         return
@@ -1535,14 +1403,12 @@ export class MockTransport implements Transport {
       pane.lines.push(`✔ ${kind} 1.0.13 installed to /usr/local/bin/${kind}`, '')
       tools[kind] = { installed: true, path: `/usr/local/bin/${kind}`, version: '1.0.13', logged_in: false }
       this.emit('host_changed', { name: host, connected: true, error: null, tools })
-      // 裝成功 daemon 關掉 pane。
       this.shells.delete(`${host}/${shell.pane_id}`)
       this.emit('tool_install_done', { host, kind, install_id, outcome: 'installed', installed: true, pane_id: shell.pane_id, pane_kept: false, timed_out: false })
     }, 2500)
     return { pane_id: shell.pane_id, cwd: shell.cwd, mode: 'shell', install_id }
   }
 
-  /** 預設帳號的 `<cli> login` 在 shell 裡跑完：登入好了，推 `host_changed`（真 daemon 是 CLI 結束後重新偵測）。 */
   private finishCliLogin(host: string, kind: BotKind) {
     const remote = host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
@@ -1550,7 +1416,6 @@ export class MockTransport implements Transport {
     this.emit('host_changed', { name: host, connected: true, error: null, tools })
   }
 
-  /** 截圖／手動看首次啟動（issue #1931）：沒有 Project 與 Bot、四種 CLI 都沒裝（`__amMock.freshStart()`）。 */
   freshStart() {
     this.runs.length = 0
     this.turns.length = 0
@@ -1563,14 +1428,12 @@ export class MockTransport implements Transport {
     this.forceResync()
   }
 
-  /** Instructions go to a running bot on that host as an ordinary prompt. */
   private installTool(hostName: string, b: Rec) {
     const kind = String(b.kind ?? '')
     if (!BOT_KINDS.includes(kind as BotKind)) {
       throw new ApiError(400, { error: 'bad_request', message: 'kind must be claude, codex or grok' }, 'bad request')
     }
     const remote = hostName && hostName !== 'local' ? this.host(hostName) : null
-    // issue #1931：省略 via_bot_id＝沒有 Bot 可借，daemon 開臨時 host-shell pane 直接跑官方安裝指令。
     if (b.via_bot_id === undefined || b.via_bot_id === null) return this.installToolInShell(hostName || 'local', kind as BotKind, typeof b.install_id === 'string' ? b.install_id : crypto.randomUUID())
     const botId = String(b.via_bot_id ?? '')
     const bot = this.bots.find((x) => x.id === botId)
@@ -1597,7 +1460,6 @@ export class MockTransport implements Transport {
     return { turn_id: res.turn_id }
   }
 
-  /** SPEC §15.2：固定五列演遍四種 owner，popover 要證明的是「哪些能砍」。 */
   private memPane(host: string, paneId: string) {
     const lines = [
       `$ claude --dangerously-skip-permissions`,
@@ -1680,7 +1542,6 @@ export class MockTransport implements Transport {
     return { host, sampled_at: new Date().toISOString(), processes: rows }
   }
 
-  /** 同 daemon：不在清單 400、bot 409。 */
   private killMemProcess(b: Rec) {
     const host = typeof b.host === 'string' ? b.host : 'local'
     const pid = typeof b.pid === 'number' ? b.pid : -1
@@ -1697,10 +1558,6 @@ export class MockTransport implements Transport {
     return { host, pid, signal: typeof b.signal === 'string' ? b.signal : 'TERM', exe: row.exe, freed_bytes: row.subtree_bytes }
   }
 
-  /**
-   * §6.5e：第一個專案底下一顆 bot 開的 dev server（有 port，唯讀）、一顆跑著 vim 的 shell（掃描分成 service，
-   * 但沒有 port，打得進去）、一顆使用者自己開的 shell；另外兩顆對不到專案：scratch 與「多出來的」。
-   */
   private panes: Array<Record<string, unknown>> = []
 
   private seedPanes() {
@@ -1726,7 +1583,6 @@ export class MockTransport implements Transport {
     ]
   }
 
-  /** daemon 的唯讀規則：有 listen port 才唯讀（`shell::allowed`），跟 kind 無關。 */
   private paneRow(p: Record<string, unknown>): Record<string, unknown> {
     return { ...p, read_only: Array.isArray(p.listen_ports) && p.listen_ports.length > 0 }
   }
@@ -1736,14 +1592,12 @@ export class MockTransport implements Transport {
     return this.panes.map((p) => this.paneRow(p))
   }
 
-  /** scratch＝對不到專案的 shell 裡 `first_seen` 最早的那顆，由 daemon 標，前端不重算。 */
   private unownedPanes() {
     const rows = this.allPanes().filter((p) => p.project_id === null)
     const scratch = rows.filter((p) => p.kind === 'shell').sort((a, b) => String(a.first_seen).localeCompare(String(b.first_seen)))[0]
     return rows.map((p) => ({ ...p, scratch: p === scratch }))
   }
 
-  /** SPEC §15：依執行中 bot 數推算，啟停 bot 時數字才會動。 */
   private mem() {
     const HERDR = 48 * 1024 * 1024
     const PER_BOT: Record<string, number> = { claude: 820, codex: 640, grok: 410 }
@@ -1755,7 +1609,6 @@ export class MockTransport implements Transport {
       const pids = new Set(this.projects.filter((p) => p.host === h.name).map((p) => p.id))
       const live = this.bots.filter((b) => pids.has(b.project_id) && this.activeRun(b.id))
       const agents = live.reduce((n, b) => n + (PER_BOT[b.kind] ?? 500) * 1024 * 1024, 0)
-      // herdr + 一個 shell + 每個 bot 一個 CLI
       const processes = live.length === 0 ? 1 : 1 + live.length * 2
       return {
         host: h.name,
@@ -1764,7 +1617,6 @@ export class MockTransport implements Transport {
         total_bytes: HERDR + agents,
         processes,
         error: null,
-        // 超線的瀏覽器分頁，演警示。
         browsers:
           h.name === 'local'
             ? [
@@ -1772,7 +1624,6 @@ export class MockTransport implements Transport {
                 { name: 'ego', tabs: 6, bytes: 700 * 1024 ** 2, processes: 9 },
               ]
             : [],
-        // 整機記憶體（2026-09-12）：遠端給吃緊的，演 `.mem-low`。
         machine:
           h.name === 'local'
             ? { total_bytes: 16 * 1024 ** 3, available_bytes: 5.5 * 1024 ** 3 }
@@ -1794,10 +1645,8 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** 「新資料夾」建出來的（key＝上層路徑）；`dirs()` 的固定樹之外的部分。 */
   private madeDirs = new Map<string, string[]>()
 
-  /** `POST /api/fs/dirs`（issue #877）：規則與 daemon 一致——單一一段名字、同名 409、憑證目錄 403。 */
   private makeDir(b: Record<string, unknown>) {
     const host = String(b.host ?? '')
     const name = String(b.name ?? '').trim()
@@ -1818,7 +1667,6 @@ export class MockTransport implements Transport {
     return { path, name, parent }
   }
 
-  /** SPEC §11.5. */
   private dirs(path: string, host: string, hidden = false) {
     const remote = host && host !== 'local' ? this.host(host) : null
     if (remote && !remote.connected) {
@@ -1846,7 +1694,6 @@ export class MockTransport implements Transport {
           '/Users/me/project': ['foo', 'bar', 'agents-manager'],
           '/Users/me/project/foo': ['src'],
           '/Users/me/Documents': [],
-          // Long level to exercise picker scrolling/filtering.
           '/Users/me/Downloads': Array.from({ length: 24 }, (_, i) => `dl-${String(i + 1).padStart(2, '0')}`),
         }
     const gitDirs = remote
@@ -1866,8 +1713,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  // identities
-
   private addIdentity(b: Rec) {
     const name = String(b.name ?? '').trim()
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
@@ -1884,7 +1729,6 @@ export class MockTransport implements Transport {
       env,
       args: Array.isArray(b.args) ? b.args.map(String) : [],
     })
-    // 新身份尚未偵測：mock 直接給「未知」。
     this.localIdentityStatus[name] = { name, kind: toKind(b.kind), logged_in: null, source: 'config' }
     for (const h of this.hosts) h.identities[name] = { name, kind: toKind(b.kind), logged_in: null, source: 'config' }
     this.emit('identities_changed', {})
@@ -1929,7 +1773,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** 答案與上次相同；重點是端點形狀與 busy 狀態。 */
   private refreshTools(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
@@ -1947,11 +1790,9 @@ export class MockTransport implements Transport {
     const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
     const command = st.kind === 'claude' ? `${dir}claude auth login` : `${dir}${st.kind} login`
     if (st.kind === 'claude') {
-      // 跟 daemon 的登入 pane 一樣：claude 2.1.289 `auth login` 的畫面（網址＋等 code 的提示），網頁從這裡取網址、送 code（#838）。
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Opening browser to sign in…', `If the browser didn't open, visit: ${MOCK_LOGIN_URL}`, 'Paste code here if prompted >')
       this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false })
     } else if (st.kind === 'codex') {
-      // 跟 daemon 的裝置碼流程一樣：固定網址、一次性碼在下一行，不用貼回終端（mock 的碼是假的）。
       pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, 'Follow these steps to sign in with ChatGPT using device code authorization:', '1. Open this link in your browser and sign in to your account', `   ${MOCK_CODEX_DEVICE_URL}`, '2. Enter this one-time code (expires in 15 minutes)', `   ${MOCK_CODEX_DEVICE_CODE}`, '')
       this.loginPanes.set(`${host || 'local'}/${shell.pane_id}`, { identity: name, codeSent: false, kind: 'codex' })
     } else {
@@ -1963,7 +1804,6 @@ export class MockTransport implements Transport {
     return shell
   }
 
-  /** 登入 pane（claude 身份登入開的臨時 shell）：`GET …/shells/:pane/login`，不是登入 pane 一律 404（跟 daemon 一樣）。 */
   private loginStatus(host: string, pane: string) {
     const lp = this.loginPanes.get(`${host}/${pane}`)
     if (!lp || !this.shells.has(`${host}/${pane}`)) throw new ApiError(404, { error: 'not_found', what: 'login pane' }, 'login pane not found')
@@ -1973,7 +1813,6 @@ export class MockTransport implements Transport {
     return { host, pane_id: pane, identity: lp.identity, kind: 'claude', flow: 'code', url: MOCK_LOGIN_URL, device_code: null, awaiting_code: !lp.codeSent, code_sent: lp.codeSent, failure: null }
   }
 
-  /** 送 code：畫面還在等才收（否則 409 `not_awaiting_code`）；收了就當 CLI 結束、pane 被收掉。 */
   private loginCode(host: string, pane: string, code: string) {
     const lp = this.loginPanes.get(`${host}/${pane}`)
     if (!lp || !this.shells.has(`${host}/${pane}`)) throw new ApiError(404, { error: 'not_found', what: 'login pane' }, 'login pane not found')
@@ -1984,7 +1823,6 @@ export class MockTransport implements Transport {
     }
     lp.codeSent = true
     if (code.trim().startsWith('bad')) {
-      // 演失敗：CLI 吐 Login failed。
       lp.codeSent = false
       return { sent: true, outcome: 'failed', message: 'Login failed: Request failed with status code 400' }
     }
@@ -1993,10 +1831,6 @@ export class MockTransport implements Transport {
     return { sent: true, outcome: 'finished', message: null }
   }
 
-  /**
-   * 額度欄 agy 那格的登出（`POST /api/hosts/{name}/agy/logout`）：daemon 刪掉 agy 的 OAuth 憑證檔，
-   * 清掉該主機 agy 的 Gemini 額度快照並廣播。`removed:false`＝本來就沒有憑證。
-   */
   private logoutAgy(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
@@ -2009,7 +1843,6 @@ export class MockTransport implements Transport {
     return { removed }
   }
 
-  /** 裝／更新 agy（`POST /api/hosts/{name}/agy/install`）：裝好後那台的 agy 變已安裝、未登入，daemon 推 `host_changed`。 */
   private installAgy(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
@@ -2021,10 +1854,8 @@ export class MockTransport implements Transport {
     return { host: remote ? remote.name : 'local', platform: 'darwin_arm64', from, to, path: tools.agy.path, already_latest: already }
   }
 
-  /** 在哪個 shell pane 跑著 agy 登入 TUI（`<host>/<pane>`）。 */
   private agyLoginPane: string | null = null
 
-  /** agy 登入完成：憑證回來，daemon 的 watcher 偵測到後翻已登入、補探 Gemini 的 5h／7d 額度。 */
   private finishAgyLogin(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
@@ -2041,7 +1872,6 @@ export class MockTransport implements Transport {
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
   }
 
-  /** 登出：跟登入同一條路，只是指令與結果相反（帳號憑證被清掉）。 */
   private logoutIdentity(host: string, name: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const identities = remote ? remote.identities : this.localIdentityStatus
@@ -2058,7 +1888,6 @@ export class MockTransport implements Transport {
     return shell
   }
 
-  /** 預設帳號登出（`POST /api/hosts/{name}/kinds/{kind}/logout`）：開臨時 pane 跑 `<cli> logout`，CLI 結束後該 kind 變未登入。 */
   private logoutKindDefault(host: string, kind: string) {
     if (kind === 'agy') return this.logoutAgy(host)
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -2084,15 +1913,12 @@ export class MockTransport implements Transport {
     return { host: host || 'local', kind, identity: name, disabled }
   }
 
-  /** 跟 daemon 同一個形狀（SPEC §6.5f）：新的排前面，每個檔案帶剩餘秒數；grok 這顆演遠端。 */
-  /** bot 在 mock 回合裡「放進 outbox」的檔名（`outbox` 關鍵字），依序累積。 */
   private outboxAdded = new Map<string, string[]>()
 
   private outbox(botId: string) {
     const bot = this.bot(botId)
     const ttl = 3600
     if (bot.kind === 'grok') return { files: [], ttl_secs: ttl, reason: 'outbox_remote' }
-    // 分享用 bot（SPEC §20）的 outbox 不清：`kept`、不帶到期。
     const kept = bot.share_profile != null
     const now = Math.floor(Date.now() / 1000)
     const file = (name: string, size: number, age: number) => ({
@@ -2209,8 +2035,6 @@ export class MockTransport implements Transport {
     return this.ghJson(key, 'cancel')
   }
 
-  // hosts (SPEC §11.6)
-
   private host(name: string): MockHost {
     const h = this.hosts.find((x) => x.name === name)
     if (!h) throw new ApiError(404, { error: 'not_found', what: 'host' }, 'host not found')
@@ -2225,7 +2049,6 @@ export class MockTransport implements Transport {
     return out
   }
 
-  /** Targets with `fail` / `bad` / unreachable-looking stay down. */
   private dial(h: MockHost) {
     const bad = /fail|bad|unreachable|0\.0\.0\.0/i.test(h.ssh)
     h.connected = !bad
@@ -2243,7 +2066,6 @@ export class MockTransport implements Transport {
     }
     const ssh = String(b.ssh ?? '').trim()
     if (!ssh) throw new ApiError(400, { error: 'bad_request', message: 'ssh 目標不可為空' }, 'bad request')
-    // 同 daemon `host_target_problem`（API.md POST /api/hosts）：ssh 原樣成為 argv、herdr_session 進遠端路徑與 plist，建立前就 400。
     const sessionWanted = String(b.herdr_session ?? '').trim() || 'agents-manager'
     if (ssh.startsWith('-') || /\s/.test(ssh) || hasCodeIn(ssh, 0, 0x1f) || hasCodeIn(ssh, 0x7f, 0x7f)) {
       throw new ApiError(400, { error: 'bad_request', message: 'ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters' }, 'bad request')
@@ -2260,7 +2082,6 @@ export class MockTransport implements Transport {
       connected: false,
       error: null,
       disconnected_since: now(),
-      // grok missing (exercises the tools hint).
       tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null }, 'claude-api': { ...TOOLS_ALL_OK['claude-api'] }, 'openai-api': { ...TOOLS_ALL_OK['openai-api'] } },
       identities: {
         ...Object.fromEntries(
@@ -2271,7 +2092,6 @@ export class MockTransport implements Transport {
               : { name: i.name, kind: i.kind, logged_in: false, source: 'config' as const },
           ]),
         ),
-        // 同名 `ccN` 指到那台自己的目錄（SPEC §16）。
         cc2: {
           name: 'cc2',
           kind: 'claude' as BotKind,
@@ -2282,10 +2102,9 @@ export class MockTransport implements Transport {
         },
       },
     }
-    // API.md: existing name = update (disconnect, reconnect).
     this.hosts = this.hosts.filter((x) => x.name !== name)
     this.hosts.push(h)
-    await sleep(700) // ssh master + remote `herdr session list` take a moment
+    await sleep(700)
     this.dial(h)
     this.seedHostQuota(h)
     this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
@@ -2293,7 +2112,6 @@ export class MockTransport implements Transport {
     return { name: h.name, connected: h.connected, error: h.error }
   }
 
-  /** 連上才有；斷線主機留空。 */
   private seedHostQuota(h: MockHost) {
     if (!h.connected) return
     const rows: Record<string, Rec | null> = {
@@ -2324,7 +2142,6 @@ export class MockTransport implements Transport {
       )
     }
     this.hosts = this.hosts.filter((x) => x.name !== name)
-    // 同 daemon：主機刪掉，額度列也移除（SPEC §14）。
     for (const k of Object.keys(this.quota)) {
       if (k.startsWith(`${name}/`)) delete this.quota[k]
     }
@@ -2355,7 +2172,6 @@ export class MockTransport implements Transport {
   setHostConnected(name: string, connected: boolean, downMinutes = 23) {
     const h = this.hosts.find((x) => x.name === name)
     if (!h) return
-    // 截圖要有「離線多久」：預設演 23 分鐘前斷的（`downMinutes` 可改）。
     h.disconnected_since = connected ? null : (h.disconnected_since ?? new Date(Date.now() - downMinutes * 60_000).toISOString())
     h.connected = connected
     h.error = connected ? null : 'ssh master 已退出（mock 模擬斷線）'
@@ -2369,7 +2185,6 @@ export class MockTransport implements Transport {
     return this.hosts.map((h) => h.name)
   }
 
-  /** 截圖用：遠端主機＋專案＋一顆在跑的 bot，額度五格都有（cc0／cc1／cc2／codex／grok），重現遠端標題列最擠的情況。回 bot id。 */
   async remoteDemo(host = 'mac_builder'): Promise<string> {
     if (!this.hosts.some((h) => h.name === host)) await this.request('POST', '/hosts', { name: host, ssh: `me@${host}` })
     const h = this.hosts.find((x) => x.name === host)
@@ -2387,8 +2202,6 @@ export class MockTransport implements Transport {
     if (!this.activeRun(bid)) await this.request('POST', `/bots/${bid}/start`, {})
     return bid
   }
-
-  // 群組任務
 
   remoteDraft(key: string, text: string) {
     this.serverDrafts.remote(key, text, (t, d) => this.emit(t, d))
@@ -2419,7 +2232,6 @@ export class MockTransport implements Transport {
     return Math.max(8, Math.floor(WORKSPACE_COLUMNS / Math.max(1, shared)))
   }
 
-  /** 搬既有 pane：`pane_id` 不變，run 不重開。 */
   private movePaneToTab(botId: string) {
     const run = this.activeRun(botId)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: '這個 bot 沒有在跑的 pane' }, 'conflict')
@@ -2438,7 +2250,6 @@ export class MockTransport implements Transport {
   }
 
   private emitBotStatus(botId: string) {
-    // API.md §8：`connected` 是 bot 所屬 host 的狀態，遠端要帶 `host`；送本機值會把斷線主機標回已連線。
     const bot = this.bots.find((x) => x.id === botId)
     const project = bot ? this.projects.find((p) => p.id === bot.project_id) : undefined
     const hostName = project?.host && project.host !== 'local' ? project.host : null
@@ -2449,11 +2260,9 @@ export class MockTransport implements Transport {
       connected: host ? host.connected : this.connected,
       ...(hostName ? { host: hostName } : {}),
     })
-    // Only run start/stop moves the number, so ride that instead of a `setInterval`.
     this.emit('mem_updated', this.mem())
   }
 
-  /** API.md §6：`at` 省略時，有 `message_id` 就取那則訊息的時間，沒有才取現在。 */
   private readMarkAt(b: Rec): string {
     if (typeof b.at === 'string') return b.at
     const hit = typeof b.message_id === 'string' ? this.messages.find((m) => m.id === b.message_id) : undefined
@@ -2488,9 +2297,6 @@ export class MockTransport implements Transport {
     this.emit('turn_updated', { bot_id: turn.bot_id, turn })
   }
 
-  // routes
-
-  /** Mirrors `daemon/src/api.rs::state_json`. */
   private state() {
     return {
       daemon_seq: this.seq,
@@ -2499,7 +2305,6 @@ export class MockTransport implements Transport {
       default_connected: false,
       herdr_session: 'agents-manager',
       identities: this.identities.map((i) => ({ ...i, env: { ...i.env }, args: [...i.args] })),
-      // API.md: reserved `local` entry first, null ssh fields.
       hosts: [
         {
           name: 'local',
@@ -2575,8 +2380,6 @@ export class MockTransport implements Transport {
               cwd: b.cwd,
               share_profile: b.share_profile ?? null,
               share_enabled: this.shares.isEnabled(b.id),
-              // #353：mock 也從目前 run 的啟動值投影 needs_restart，讓設定面板與真 daemon 同步。
-              // 排到回合結束的不算需重啟（#712）。
               live_apply_deferred: this.deferredLive.has(b.id),
               needs_restart:
                 run !== null &&
@@ -2585,12 +2388,9 @@ export class MockTransport implements Transport {
                   run.runtime_effort !== b.effort ||
                   run.runtime_fast !== (b.fast === 1) ||
                   (run.runtime_identity !== null && (run.runtime_identity || null) !== b.identity)),
-              // 同 daemon：`slug(label)-<bot id 末 6 碼>`。
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
               run,
-              // daemon 的 `/api/state` 不帶回合（沒有 `in_flight_turn`）：回合從訊息頁的 `turns` 與 WS 來。
               herdr_session: 'agents-manager',
-              // §6.12：有預覽在用才帶 `{status, port}`，沒開（或 off）是 `null`。
               preview: (() => {
                 const pv = this.previews.get(b.id)
                 return pv && pv.status !== 'off' ? { status: pv.status, port: pv.port } : null
@@ -2656,7 +2456,6 @@ export class MockTransport implements Transport {
       p.handed_off_to = to
     }
     if (b.role_policy !== undefined) {
-      // 整份覆寫；空物件＝全部跟預設。
       p.role_policy = b.role_policy && typeof b.role_policy === 'object' ? (b.role_policy as Record<string, RuntimeSettings>) : {}
     }
     if (typeof b.specialist_dispatch === 'boolean') p.specialist_dispatch = b.specialist_dispatch
@@ -2678,7 +2477,6 @@ export class MockTransport implements Transport {
     return { project_id: id, needs_restart: false }
   }
 
-  /** `GET /bots/{id}/api-usage`：演示用數字，每次有 assistant 回覆就多一筆（見 `apiUsageTurns`）。 */
   private apiUsageTurns = new Map<string, number>()
   private apiUsage(botId: string) {
     const bot = this.bot(botId)
@@ -2761,7 +2559,6 @@ export class MockTransport implements Transport {
     }
     if (b.kind === 'claude-api') {
       if (typeof b.model === 'string' && b.model.trim() && !['claude-opus-5-5', 'claude-fable-5-2'].includes(b.model.trim())) throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_model_unsupported' }, 'bad request')
-      // 照 daemon：CLI 欄位一律 400（本機與遠端專案都能建）。
       if (b.identity || b.autostart || b.share_profile || (Array.isArray(b.args) && b.args.length) || (b.env && Object.keys(b.env as Rec).length)) {
         throw new ApiError(400, { error: 'bad_request', reason: 'api_bot_cli_fields_unsupported' }, 'bad request')
       }
@@ -2787,11 +2584,9 @@ export class MockTransport implements Transport {
       created_at: now(),
     }
     if (b.share_profile === 'restricted') {
-      // 照契約 A：只做 claude；受限 bot 不帶 bypass permissions。
       if (bot.kind !== 'claude') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_kind' }, 'unsupported kind')
       bot.share_profile = 'restricted'
       bot.auto_approve = 0
-      // 同 daemon：資料夾（新資料夾＝`~/shared-bots/<name>`、既有＝絕對路徑）就是它的 cwd；沒選模型＝最新 Opus（`opus` 別名）。
       const f = (b.share_folder ?? { kind: 'new', name }) as Rec
       if (f.kind === 'existing' && !String(f.path ?? '').startsWith('/')) {
         throw new ApiError(400, { error: 'bad_request', reason: 'bad_share_folder', message: '既有資料夾要給絕對路徑' }, 'bad request')
@@ -2799,7 +2594,6 @@ export class MockTransport implements Transport {
       bot.cwd = f.kind === 'existing' ? String(f.path) : `/Users/me/shared-bots/${String(f.name ?? name)}`
       if (!bot.model) bot.model = 'opus'
     } else if (b.share_profile === 'trusted') {
-      // 同 daemon：要帶 confirm_trusted；只用既有資料夾（省略＝專案目錄）；權限照 bot 設定。
       if (b.confirm_trusted !== true) throw new ApiError(400, { error: 'bad_request', reason: 'confirm_trusted_required' }, 'bad request')
       if (bot.kind !== 'claude') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_kind' }, 'unsupported kind')
       const f = (b.share_folder ?? null) as Rec | null
@@ -2815,7 +2609,6 @@ export class MockTransport implements Transport {
     return { bot_id: bot.id, name: bot.name }
   }
 
-  /** `POST /order` 的 bots 部分：照給的 id 順序重排該專案的 bot（沒列到的留在後面）。 */
   private saveOrder(b: Rec) {
     const bots = b.bots && typeof b.bots === 'object' ? (b.bots as Record<string, unknown>) : {}
     for (const [pid, ids] of Object.entries(bots)) {
@@ -2826,7 +2619,6 @@ export class MockTransport implements Transport {
       let k = 0
       this.bots = this.bots.map((x) => (x.project_id === pid ? sorted[k++] : x))
     }
-    // #344：主力那列的順序，陣列位置寫進 primary_position；未知 bot id 回 400，不在陣列裡的維持原值。
     if (Array.isArray(b.primary)) {
       const ids = b.primary.map(String)
       const unknown = ids.find((id) => !this.bots.some((x) => x.id === id))
@@ -2838,7 +2630,6 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  /** 規則照 `daemon/src/promote.rs`：只收 child；同一顆升成頂層（保留對話），名字預設 `<名>-1`。 */
   private promote(botId: string, b: Rec) {
     const bot = this.bots.find((x) => x.id === botId)
     if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
@@ -2852,11 +2643,9 @@ export class MockTransport implements Transport {
     return { bot_id: bot.id, name, promoted_from: { bot_id: bot.id, session_id: 'mock-session' }, run_id: null }
   }
 
-  /** 規則照 `daemon/src/fork.rs`：只給頂層 bot；設定照抄、autostart 關、名字 `<來源>-fork` 撞名加尾碼。 */
   private fork(botId: string, b: Rec) {
     const src = this.bots.find((x) => x.id === botId)
     if (!src) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
-    // mock 沒有 child bot（`managed_by` 恆為 user），所以不必擋 `fork_child`。
     const wanted = typeof b.name === 'string' && b.name.trim() ? b.name.trim() : `${src.name.slice(0, 27)}-fork`
     let name = wanted
     for (let n = 1; this.bots.some((x) => x.name === name); n += 1) name = `${wanted}-${n}`
@@ -2882,7 +2671,6 @@ export class MockTransport implements Transport {
       source: 'system',
       incomplete: 0,
     })
-    // 跟 daemon 一樣排在來源正下方。
     const made = this.bots.findIndex((x) => x.id === created.bot_id)
     const [bot] = this.bots.splice(made, 1)
     this.bots.splice(this.bots.findIndex((x) => x.id === src.id) + 1, 0, bot)
@@ -2890,7 +2678,6 @@ export class MockTransport implements Transport {
     return { ...created, forked_from: { bot_id: src.id, session_id: 'mock-session' }, run_id, start_error: null }
   }
 
-  /** 須存在且 kind 相符（API.md identities）。 */
   private checkIdentity(name: string, kind: BotKind) {
     const ident = this.identities.find((x) => x.name === name)
     if (!ident) throw new ApiError(404, { error: 'not_found', what: 'identity' }, 'identity not found')
@@ -2903,7 +2690,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** API.md v3.3：有 active Run 時改名 → 409；其他欄位回 `needs_restart`。 */
   private patchBot(id: string, b: Rec) {
     const bot = this.bot(id)
     const run = this.activeRun(id)
@@ -2934,11 +2720,9 @@ export class MockTransport implements Transport {
       bot.effort = typeof b.effort === 'string' && b.effort.trim() ? b.effort.trim() : null
     }
     if (b.runtime_override !== undefined) {
-      // B 期：覆寫整份存（null＝跟角色）；欄位範圍的檢查以 daemon 為準。
       bot.runtime_override = b.runtime_override && typeof b.runtime_override === 'object' ? (b.runtime_override as RuntimeSettings) : null
     }
     if (b.track !== undefined) {
-      // 與 daemon 一致：track 只有專家用；清掉或空白就是 null。
       bot.track = typeof b.track === 'string' && b.track.trim() ? b.track.trim() : null
     }
     if (b.role !== undefined) {
@@ -2967,17 +2751,11 @@ export class MockTransport implements Transport {
     if (b.inject_hooks !== undefined) bot.inject_hooks = b.inject_hooks ? 1 : 0
     if (b.primary !== undefined) bot.is_primary = b.primary ? 1 : 0
     this.emit('bot_changed', { bot_id: id })
-    // API.md §10.2: 只有影響啟動 argv / env 的欄位才需要重啟。
     const LAUNCH_FIELDS = ['model', 'effort', 'fast', 'persona', 'args', 'identity', 'env', 'auto_approve', 'inject_hooks']
     let needs_restart = run !== undefined && LAUNCH_FIELDS.some((k) => b[k] !== undefined)
-    // 同 daemon `apply_live_setting`：slash 指令當場套用；清成 CLI 預設沒有對應指令。
     const only = (...fields: string[]) =>
       fields.every((f) => b[f] !== undefined) && LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
-    /** 改的欄位全在 `fields` 內。 */
     const within = (...fields: string[]) => LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
-    // SPEC §4.4a：codex `/model`、`/fast` 執行中可換（daemon 操作 TUI 再回讀），不用重啟。
-    // #393／#712：codex 忙的時候不重啟。只改 fast、agent working（不是 blocked）、輸入框沒字＝回合中直接送（daemon `live_gate`）；
-    // 其他排到回合結束再套（daemon lifecycle/deferred_live.rs），這段期間不算需重啟；mock 4 秒後演「回合結束」。
     let deferred = false
     if (needs_restart && bot.kind === 'codex' && within('model', 'effort', 'fast')) {
       const busy = run && (run.agent_status === 'working' || run.agent_status === 'blocked')
@@ -3002,7 +2780,6 @@ export class MockTransport implements Transport {
     if (needs_restart && bot.kind === 'grok' && (only('model') || only('model', 'effort')) && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('effort') && bot.effort) needs_restart = false
-    // SPEC §4.4a：當場套用成功才更新 runtime，否則標題列會卡著「需重啟」。
     if (!needs_restart && !deferred && run) {
       if (b.model !== undefined) run.runtime_model = bot.model
       if (b.effort !== undefined) run.runtime_effort = bot.effort
@@ -3018,7 +2795,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** SPEC §6.13：那則與之後的標成倒回、回原文；mock 沒有終端可以按 /rewind。 */
   private rewind(botId: string, b: Rec) {
     const bot = this.bot(botId)
     if (bot.kind !== 'claude') throw new ApiError(409, { reason: 'unsupported_kind', message: '只有 claude 能倒回。' }, 'conflict')
@@ -3057,8 +2833,6 @@ export class MockTransport implements Transport {
     return this.start(botId)
   }
 
-  /** SPEC §6.9，規則照 `daemon/src/bulk_restart.rs`；進度用 setTimeout 拉開，否則進度條一閃而過。 */
-  /** SPEC §6.9 的 CLI 安裝：只演示進度與持續通知，不執行任何主機指令。 */
   private cliUpdateRunning = new Set<string>()
   private cliUpdate(host: string, b: Rec) {
     const kind = String(b.kind ?? '')
@@ -3083,7 +2857,6 @@ export class MockTransport implements Transport {
       const notice = targets.map((x) => this.activeRun(x.id)?.update_notice ?? '').find(Boolean) ?? ''
       ;[from = '0.155.1', to = '0.157.0'] = notice.match(/\d+(?:\.\d+)+/g) ?? []
     }
-    // daemon 核對確認框寫的目標；Claude 使用 fleet 快照的共同目標。
     if (!to || String(b.target_version ?? '') !== to) {
       this.cliUpdateRunning.delete(host)
       throw new ApiError(409, { error: 'conflict', reason: 'stale_target', host, current_target: to || null, message: `${host} 的 ${kind} 現在要裝的是 ${to || '未知版本'}` }, 'conflict')
@@ -3171,7 +2944,6 @@ export class MockTransport implements Transport {
     return { batch_id, total, planned, skipped }
   }
 
-  /** 有 Run 先 stop；對話歷史保留。 */
   private deleteBot(id: string) {
     this.bot(id)
     const run = this.activeRun(id)
@@ -3186,7 +2958,6 @@ export class MockTransport implements Transport {
     const gone = this.bot(id)
     this.deletedBots.unshift({ bot: gone, deleted_at: now() })
     this.bots = this.bots.filter((x) => x.id !== id)
-    // 對話歷史刻意保留。
     this.emit('bot_changed', { bot_id: id, deleted: true })
     return {}
   }
@@ -3225,7 +2996,6 @@ export class MockTransport implements Transport {
       state: 'starting',
       agent_status: 'unknown',
       workspace_id: 'ws_demo',
-      // 照 herdr 短 pane id 形狀（非 ULID），才驗得出標題列擠不擠。
       pane_id: `w${this.runs.length + 1}:p${String.fromCharCode(65 + (this.runs.length % 26))}`,
       own_tab: false,
       adopted: 0,
@@ -3251,25 +3021,19 @@ export class MockTransport implements Transport {
       setAgentStatus(run, 'idle')
       run.native_session_id = ulid('sess')
       if (this.bot(botId).kind !== 'grok') {
-        // codex 的 cache 不因閒置冷掉：同 daemon，帶 last_api_at 不帶 TTL。
         run.cache_ttl_secs = this.bot(botId).kind === 'claude' ? 3600 : this.bot(botId).kind === 'claude-api' ? 300 : null
         const age = MOCK_CACHE_AGE_MIN[this.runs.indexOf(run) % MOCK_CACHE_AGE_MIN.length]
         run.last_api_at = new Date(Date.now() - age * 60_000).toISOString()
       }
-      // Only claude ships a statusLine hook; ChatPanel rebuilds others' from the store.
       if (this.bot(botId).kind === 'claude') {
         run.status = claudeStatusJson(this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? '~')
         run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
-        // 帶 update_notice，演 UpdateBadge。
         if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
-        // 演建議下一句（claude 回合結束後輸入框裡的灰字）。
         if (this.bot(botId).name === 'am-claude') run.prompt_suggestion = L('跑一次完整測試，確認都綠再收尾', 'Run the full test suite and wrap up once it is green')
-        // 這顆在忙，批次重啟會跳過（SPEC §6.9）。
         if (this.bot(botId).name === 'am-claude-2') {
           run.update_notice = 'Update installed · Restart to update'
           setAgentStatus(run, 'working')
         }
-        // 帶 turn_error，演 TurnErrorBadge。
         if (this.bot(botId).name === 'am-claude') {
           run.turn_error = 'API Error: Connection lost mid-response. The response above may be incomplete.'
         }
@@ -3288,7 +3052,6 @@ export class MockTransport implements Transport {
     return { run_id: run.id }
   }
 
-  /** 預覽模式（issue #253）：starting 1.2 秒後轉 running，跟 daemon 的 `preview_changed` 同形。 */
   private previews = new Map<string, { status: string; port: number | null; dir: string | null; pane_id: string | null; error: string | null; started_at: string | null; source?: string | null; pid?: number | null; command?: string | null }>()
 
   private previewOf(botId: string) {
@@ -3296,15 +3059,11 @@ export class MockTransport implements Transport {
     return { ...(this.previews.get(botId) ?? { status: 'off' }), ...this.previewHints(botId) }
   }
 
-  /** v2：候選目錄與本機在跑的 dev server（v4 含 kind／指令；只在沒接上／沒起時有意義）。 */
   private previewHints(botId: string) {
     const base = this.bot(botId).cwd ?? '/Users/me/project/agents-manager'
     const root = this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? base
     return {
-      // mock 的 iframe 走 srcDoc（沒有真的 dev server），所以這裡說「綁得對外」，
-      // 不然手機開 mock 會被 #527 的說明蓋掉那頁假畫面。
       lan: true,
-      // am-claude-2 演「偵測不到 dev server、只有 others」（wits-ops 的情境）。
       candidates: this.bot(botId).name === 'am-claude-2' ? [] : [{ dir: `${base}/web`, command: 'bunx vite' }, { dir: `${base}/apps/web`, command: 'bun run dev' }],
       others: [
         { port: 5241, dir: `${base}/web`, pid: 4101, relation: 'same_dir', kind: 'vite', repo: 'agents-manager' },
@@ -3342,8 +3101,6 @@ export class MockTransport implements Transport {
     if (body.mode === 'attach') {
       const port = Number(body.port)
       const other = this.previewHints(botId).others.find((o) => o.port === port)
-      // daemon（preview.rs）：port 上不是掃到的 dev server → not_vite；清單上挑的那顆已經換人（pid／dir 對不上）→ stale_selection，
-      // 兩個都帶 `{bot_id, port}`，stale_selection 另帶現在那顆的 pid／dir。
       if (!other) throw new ApiError(409, { error: 'conflict', reason: 'not_vite', bot_id: botId, port }, 'not_vite')
       const wantPid = typeof body.pid === 'number' ? body.pid : null
       const wantDir = typeof body.dir === 'string' ? body.dir : null
@@ -3399,7 +3156,6 @@ export class MockTransport implements Transport {
     const run = this.activeRun(botId)
     if (!run) throw new ApiError(409, { reason: 'Bot 未在執行中' }, 'conflict')
     const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
-    // daemon：帶 `turn_id` 而那一筆已不在飛 → 409，不按 esc、不動任何回合（API.md §4）。
     if (typeof b.turn_id === 'string' && b.turn_id !== inFlight?.id) {
       throw new ApiError(
         409,
@@ -3422,7 +3178,6 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  /** 不同於 `interrupt`：沒有 active run 也不是錯誤，掛著的回合照收。 */
   private abort(botId: string) {
     const run = this.activeRun(botId)
     const stuck = this.turns.filter((t) => {
@@ -3449,7 +3204,6 @@ export class MockTransport implements Transport {
     return { aborted: stuck.map((t) => t.id), keys_sent: Boolean(run), key_error: run ? null : 'no active run' }
   }
 
-  /** 擋下理由與 daemon 同一組 key；codex 沒有 TUI 登入指令，所以 400 而非 409。 */
   private login(botId: string) {
     const bot = this.bots.find((x) => x.id === botId)
     if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
@@ -3483,7 +3237,6 @@ export class MockTransport implements Transport {
     return { run_id: run.id, kind: bot.kind, command: '/login' }
   }
 
-  /** 移交出去的專案：daemon 不替它開、關、送 prompt 或操作 pane，409 `handed_off` 並說由誰管。 */
   private refuseHandedOff(botId: string) {
     const bot = this.bots.find((x) => x.id === botId)
     const to = this.projects.find((p) => p.id === bot?.project_id)?.handed_off_to
@@ -3503,7 +3256,6 @@ export class MockTransport implements Transport {
 
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
     this.refuseHandedOff(botId)
-    // 照 daemon：`cache_ttl` 只收 "5m"／"1h"，只限 claude-api；快取時鐘跟著最後一回合的 TTL。
     if (b.cache_ttl !== undefined) {
       if (b.cache_ttl !== '5m' && b.cache_ttl !== '1h') throw new ApiError(400, { error: 'bad_request', reason: 'cache_ttl_invalid' }, 'bad request')
       if (this.bot(botId).kind !== 'claude-api') throw new ApiError(400, { error: 'bad_request', reason: 'cache_ttl_api_bot_only' }, 'bad request')
@@ -3511,7 +3263,6 @@ export class MockTransport implements Transport {
       if (run) run.cache_ttl_secs = b.cache_ttl === '1h' ? 3600 : 300
     }
     const run = this.activeRun(botId)
-    // API.md §5：沒有 active run，或 run 還在 starting，都算「沒在跑」：先收下排隊（awaits_start），不 409。
     if (b.start_if_stopped === true && (!run || run.state === 'starting')) return this.promptStarting(botId, b)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
     if (run.state !== 'running') {
@@ -3526,8 +3277,6 @@ export class MockTransport implements Transport {
       if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.status === 'queued' ? 'queued' : dup.delivery }
     }
     const busy = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
-    // 插隊送出（issue #103）：只有 claude 有那顆鍵，其他 kind 照舊 409 並說明為什麼沒插隊。
-    // mock 不模擬版本閘門（沒有 statusLine），只分 kind——版本那條由 daemon 的單元測試把關。
     const wantSendNow = b.send_now === true
     const canSendNow = wantSendNow && this.bot(botId)?.kind === 'claude'
     if (busy && !canSendNow && b.queue_if_busy !== true) {
@@ -3539,7 +3288,6 @@ export class MockTransport implements Transport {
         : {}
       throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id, ...why }, 'conflict')
     }
-    // 使用者送出新 prompt＝真的活動：保溫回覆的晶片框色與「不用保溫」都恢復（daemon 同樣清掉並廣播）。
     if (run.keep_warm_replied_at || run.keep_warm_skip) {
       run.keep_warm_replied_at = null
       run.keep_warm_skip = false
@@ -3657,21 +3405,17 @@ export class MockTransport implements Transport {
 
     const lowered = text.toLowerCase()
     if (lowered.includes('twoask')) {
-      // 兩題 AskUserQuestion、分頁列與題目都被裁掉（issue #559，`mockTwoAsk.ts`）。
       this.twoAsk.set(botId, twoAskStart())
       later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('codexasync') && this.bots.find((b) => b.id === botId)?.kind === 'codex') {
-      // codex 非同步提問（issue #1879）：畫面只剩 `? 1 question`，題目在 rollout（`mockCodexAsync.ts`）。
       this.codexAsync.set(botId, codexAsyncStart())
       later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('tinyask')) {
-      // pane 太矮、claude 把 AskUserQuestion 的題目裁掉（2026-09-23 真機）：畫面只剩選項，題目只在 transcript。
       this.tinyAsk.add(botId)
       later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('blocked') || lowered.includes('rm -rf')) {
       later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('retry')) {
-      // CLI retrying upstream: turn stays in flight, only signal is `turn_progress.alert`.
       const banners = [
         'API error · Retrying in 0s · attempt 1/10',
         'API error · Retrying in 4s · attempt 2/10',
@@ -3692,27 +3436,22 @@ export class MockTransport implements Transport {
       })
       later(() => this.finishTurn(botId, turn, 'hook', '重試後成功了。'), 9000)
     } else if (lowered.includes('authfail')) {
-      // 回合收在 `authentication_failed`（hookrecv `FailureReason::Auth`）：對話裡那則要長出「立即登入」。
       later(() => this.failTurnAuth(botId, turn), 1200)
     } else if (lowered.includes('fallback')) {
       later(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
-      // A few `turn_progress` frames before the final reply.
-      // 「圖片」：演對話裡的本機圖片（專案內顯示、專案外只寫路徑）。
       const reply =
         replyOverride ??
         (lowered.includes('圖片')
           ? '截圖在這：\n\n![menu](docs/screenshots/project-mem/project-mem-390-menu.png)\n\n專案外的：![](/tmp/missing-shot.png)'
           : this.nextReply())
       const slow = lowered.includes('slow')
-      // 「outbox」：演 bot 在回合裡放檔，回合結束那一刻清單就該出現（不必切頁或按 ↻）。
       if (lowered.includes('outbox')) {
         const list = this.outboxAdded.get(botId) ?? []
         list.push(`download-test-${list.length + 1}.txt`)
         this.outboxAdded.set(botId, list)
       }
       const frames = slow ? 4 : 3
-      // Thinking phase: `activity` only, empty `text`. Real verb is random; only the counter shape matters.
       const thinking = ['Boogieing… (2s · ↑ 0.4k tokens)', 'Puttering… (4s · ↑ 1.2k tokens)']
       thinking.forEach((activity, i) => {
         later(() => {
@@ -3721,7 +3460,6 @@ export class MockTransport implements Transport {
         }, 200 * (i + 1))
       })
       const lines = reply.split('\n')
-      // Grow by whole lines when there are several (a fence never splits mid-way), else by chars.
       const partial = (i: number) =>
         lines.length > 1
           ? lines.slice(0, Math.max(1, Math.ceil((lines.length * i) / (frames + 1)))).join('\n')
@@ -3744,10 +3482,6 @@ export class MockTransport implements Transport {
     return { turn_id: turn.id, message_id: userMsg.id, delivery: 'ok' }
   }
 
-  /**
-   * Mirrors `daemon/src/lifecycle/start_send.rs`（issue #122）：bot 沒在跑時先收下（`queued`＋`awaits_start`），
-   * 再替它啟動，起來、閒下來才送。文字含「起不來」演啟動失敗：原因寫在 turn 上，按「重新啟動」（`POST /start`）照樣會送。
-   */
   private promptStarting(botId: string, b: Rec) {
     const clientRequestId = typeof b.client_request_id === 'string' ? b.client_request_id : null
     const dup = clientRequestId ? this.turns.find((t) => t.client_request_id === clientRequestId) : undefined
@@ -3790,14 +3524,12 @@ export class MockTransport implements Transport {
       try {
         this.start(botId)
       } catch {
-        // 別人先起了：一樣是起來了。
       }
       this.flushWaiting(botId)
     }, 600)
     return { turn_id: turn.id, message_id: msg.id, delivery: 'queued' }
   }
 
-  /** 起來或回合結束後把最早的 daemon-owned queued turn 送出。 */
   private flushWaiting(botId: string) {
     const turn = this.turns
       .filter((t) => t.bot_id === botId && t.status === 'queued' && (t.awaits_start === 1 || t.awaits_idle === 1))
@@ -3843,7 +3575,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** 跟 daemon `StopFailure` 那條一樣：回合收成 failed，system 訊息帶分類標籤。 */
   private failTurnAuth(botId: string, turn: MockTurn) {
     if (turn.status !== 'in_flight') return
     this.updateTurn(turn, { status: 'failed', completed_at: now() })
@@ -3864,12 +3595,10 @@ export class MockTransport implements Transport {
     }
   }
 
-  /** 截圖用：設定裡既有的空值 env 身份（真 daemon 的 POST 會擋，這是 #1750 之前存下或手寫的情況，#1883）。 */
   addEmptyEnvIdentity() {
     this.identities.push({ name: 'cc-empty', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '' }, args: [] })
   }
 
-  /** 截圖用：把 bot 綁到某個身份並把它標成沒登入（`__amMock.loggedOut('am-claude', 'cc1')`）。 */
   markLoggedOut(botId: string, identity: string) {
     const st = this.localIdentityStatus[identity]
     if (st) {
@@ -3881,16 +3610,12 @@ export class MockTransport implements Transport {
     this.emit('bot_changed', { bot_id: botId })
   }
 
-  /** Public so the dev helper can force a blocked state without a prompt. */
-  /** 走 tinyask 情境的 bot：畫面是裁過的選單、pending-question 回原題。 */
   private tinyAsk = new Set<string>()
   private twoAsk = new Map<string, TwoAskState>()
   private codexAsync = new Map<string, CodexAsyncState>()
   private bulletAsk = new Set<string>()
-  /** 英文多分頁問卷停在 Submit 分頁（`surveyEnReviewScreen`）。 */
   private surveyEn = new Map<string, number>()
 
-  /** 問句跟選項之間夾著條列說明的畫面（沒有 pending-question：這不是 AskUserQuestion）。回 bot id。 */
   enterBulletAsk(botId?: string): string | null {
     const running = botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
     const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
@@ -3911,11 +3636,9 @@ export class MockTransport implements Transport {
     return { questions: mockTinyAskQuestions(), jev_options: MOCK_TINY_ASK_JEV }
   }
 
-  /** 沒指定、或指定的那顆沒在跑：挑第一顆在跑的 claude。回實際用的 bot id（沒有就 null）。 */
   enterTinyAsk(botId?: string): string | null {
     let target =
       botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
-    // 一顆在跑的都沒有：起一顆 claude，等它跑起來再卡住。
     const toStart = target ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
     if (toStart) {
       this.start(toStart)
@@ -3928,7 +3651,6 @@ export class MockTransport implements Transport {
     return id
   }
 
-  /** codex 非同步提問（issue #1879）：沒指定就挑第一顆在跑的 codex，沒有就起一顆。回 bot id。 */
   enterCodexAsync(botId?: string): string | null {
     const running = botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'codex' && this.activeRun(b.id))?.id
     const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'codex')?.id)
@@ -3940,11 +3662,9 @@ export class MockTransport implements Transport {
     return id
   }
 
-  /** 兩題、第二題可複選、分頁列與題目被裁掉（issue #559）。沒指定就挑第一顆在跑的 claude。回 bot id。 */
   enterTwoAsk(botId?: string): string | null {
     const running =
       botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
-    // 一顆在跑的都沒有：起一顆 claude，等它跑起來再卡住（同 `enterTinyAsk`）。
     const toStart = running ? null : (botId ?? this.bots.find((b) => b.kind === 'claude')?.id)
     if (toStart) this.start(toStart)
     const id = running ?? toStart
@@ -3954,7 +3674,6 @@ export class MockTransport implements Transport {
     return id
   }
 
-  /** 英文多分頁問卷停在 Submit 分頁，並打開訊息翻譯（auto）。回 bot id。 */
   enterSurveyEn(botId?: string): string | null {
     const running =
       botId && this.activeRun(botId) ? botId : this.bots.find((b) => b.kind === 'claude' && this.activeRun(b.id))?.id
@@ -3963,7 +3682,6 @@ export class MockTransport implements Transport {
     const id = running ?? toStart
     if (!id) return null
     mockTranslateOn(true)
-    // 設定讀取有 60 秒快取：開完要立刻生效，清掉開啟前讀到的「未啟用」。
     resetTranslateReady()
     this.surveyEn.set(id, 2)
     later(() => this.enterBlocked(id), toStart ? 2500 : 0)
@@ -3987,7 +3705,6 @@ export class MockTransport implements Transport {
     const keys = (Array.isArray(b.keys) ? b.keys : []).map(String)
     const survey = run.agent_status === 'blocked' ? this.surveyEn.get(botId) : undefined
     if (survey !== undefined) {
-      // 導覽鍵只動分頁；Enter 等作答鍵在這個情境不改狀態（截圖用，不會交卷）。
       let tab = survey
       for (const k of keys) {
         if (k === 'left' || k === 'shift+tab') tab = Math.max(0, tab - 1)
@@ -4002,7 +3719,6 @@ export class MockTransport implements Transport {
       this.twoAsk.set(botId, state)
       if (outcome === null) return { ok: true, keys }
       this.twoAsk.delete(botId)
-      // 交卷走下面 Enter 那條、取消走 Esc 那條。
       keys.splice(0, keys.length, outcome === 'done' ? 'enter' : 'esc')
     }
     const asyncAsk = run.agent_status === 'blocked' ? this.codexAsync.get(botId) : undefined
@@ -4012,7 +3728,6 @@ export class MockTransport implements Transport {
         this.codexAsync.set(botId, state)
         return { ok: true, keys }
       }
-      // 作答：提問消失、回合繼續。
       this.codexAsync.delete(botId)
       setAgentStatus(run, 'working')
       this.emitBotStatus(botId)
@@ -4037,9 +3752,6 @@ export class MockTransport implements Transport {
     return { ok: true, keys }
   }
 
-  /** Enter 是分開的一顆鍵。 */
-  /** 一鍵送出建議下一句（`POST /bots/:id/suggestion/accept`）：對不上就 409、不送；對上了照一般 prompt 開回合。 */
-  /** `POST /bots/:id/keep-warm/skip`（User-only）：只有主力的 claude（codex 的 cache 不會冷，不保溫）；沒有 run 時沒有地方記，照回請求值。 */
   private setKeepWarmSkip(botId: string, b: Rec) {
     const bot = this.bots.find((x) => x.id === botId)
     if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
@@ -4055,7 +3767,6 @@ export class MockTransport implements Transport {
     return { keep_warm_skip: skip }
   }
 
-  /** 演一輪保溫回覆（`__amMock.keepWarmReply`，測試與截圖用）：保溫那則、bot 的回覆、回合收尾，run 帶 `keep_warm_replied_at`。 */
   simulateKeepWarmReply(botId: string) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -4080,7 +3791,6 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
-  /** 快取倒數的「上次活動」改成幾分鐘前（`__amMock.cacheAge`，截圖用）；沒有 run 或 grok 不動。 */
   setCacheAge(botId: string, minutesAgo: number, compacted = false) {
     const run = this.activeRun(botId)
     if (!run?.cache_ttl_secs) return
@@ -4091,7 +3801,6 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
-  /** 框裡卡著草稿：照 daemon，idle 邊讀到就推 `composer_draft`（網頁收到才 GET）。 */
   setComposerDraft(botId: string, text: string | null) {
     this.composerDrafts.set(botId, text)
     this.emit('composer_draft', { bot_id: botId, run_id: this.activeRun(botId)?.id ?? null, present: Boolean(text) })
@@ -4130,7 +3839,6 @@ export class MockTransport implements Transport {
     }
     const text = String(b.text ?? '')
     if (b.record !== true) return { ok: true, text, enter: b.enter !== false }
-    // 「補充」：跟 daemon 一樣，有進行中的回合才記成它的使用者訊息。
     const turn = text.trim() ? this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight') : undefined
     const msg = turn
       ? this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'user', content: text, source: 'web', incomplete: 0, sent_via: 'supplement' })
@@ -4146,7 +3854,6 @@ export class MockTransport implements Transport {
     this.flushWaiting(botId)
   }
 
-  /** Mirrors withdraw for the #122 start queue and #733 idle queue. */
   private withdraw(turnId: string) {
     const turn = this.turns.find((t) => t.id === turnId)
     if (!turn) throw new ApiError(404, { reason: 'turn not found' }, 'not found')
@@ -4182,7 +3889,6 @@ export class MockTransport implements Transport {
   private abandon(turnId: string) {
     const turn = this.turns.find((t) => t.id === turnId)
     if (!turn) throw new ApiError(404, { reason: 'turn not found' }, 'not found')
-    // daemon：只收在飛或送達未知的回合（API.md §4，#16 的 CAS）；已結束的不改寫、不動 bot 狀態。
     if (!(turn.status === 'in_flight' || turn.delivery === 'unknown')) {
       throw new ApiError(409, { error: 'conflict', reason: 'turn is neither in-flight nor of unknown delivery', turn_id: turnId }, 'conflict')
     }
@@ -4191,13 +3897,7 @@ export class MockTransport implements Transport {
     return { ok: true }
   }
 
-  /**
-   * Mirrors `daemon/src/api.rs::messages`：插入順序倒序分頁（`before` = 目前最舊一則的 id），
-   * `turn_id`／`role` 在同一段對話裡先過濾再分頁，回傳的 `messages` 已依時間正序。
-   * 不吃這些參數的話，issue #25 的往前翻頁與群組未讀的回合確認在 mock 下永遠走不到真 daemon 那條路。
-   */
   private messagesOf(botId: string, q: URLSearchParams) {
-    // daemon：不存在的 bot 404（已軟刪的仍讀得到歷史，API.md §10.4）；`limit` 解析失敗用 100，其餘夾在 1..500（`0` 變 1）。
     if (!this.bots.some((x) => x.id === botId) && !this.deletedBots.some((d) => d.bot.id === botId)) {
       throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
     }
@@ -4206,7 +3906,6 @@ export class MockTransport implements Transport {
     const before = q.get('before') ?? ''
     const turnId = q.get('turn_id') ?? ''
     const role = q.get('role') ?? ''
-    // 靜默忽略會讓呼叫端以為過濾過了，拿整段當成某個 role 的全部（同 daemon 回 400）。
     if (role && !['user', 'assistant', 'system'].includes(role)) {
       throw new ApiError(400, { error: 'bad_request', message: `bad role \`${role}\`` }, 'bad request')
     }
@@ -4214,7 +3913,6 @@ export class MockTransport implements Transport {
     let upto = mine.length
     if (before) {
       const at = mine.findIndex((m) => m.id === before)
-      // daemon（#766）：游標要是這段對話裡還在的訊息；被刪掉的／別顆 bot 的一律 404＋reason。
       if (at < 0) throw lostCursor(this.messages.some((m) => m.id === before) ? 'before_message_not_in_conversation' : 'before_message_gone', before)
       upto = at
     }
@@ -4230,10 +3928,6 @@ export class MockTransport implements Transport {
     }
   }
 
-  // 主機 shell
-
-  /** 有真的行緩衝，`shellText` 依指令追加輸出，mock 下才試得出輸入框與按鍵列。 */
-  /** claude 身份的登入 pane（key＝`host/pane_id`）。 */
   private readonly loginPanes = new Map<string, { identity: string; codeSent: boolean; kind?: 'codex' }>()
 
   private openShell(host: string, cwd: string) {
@@ -4270,10 +3964,6 @@ export class MockTransport implements Transport {
     return [...this.shells.values()].filter((s) => s.host === host).map((s) => this.shellJson(s))
   }
 
-  /**
-   * 白名單兩份（跟 daemon 的 `shell::registered` 一樣，§6.5e）：自己開的那幾顆，加上被 trace 的 pane。
-   * 被 trace 的**每一次**都照 pane 表判斷：有 listen port 的只能看，打字回 403；看過一次不會變成自己開的。
-   */
   private shell(host: string, paneId: string, access: 'view' | 'type' = 'view'): MockShell {
     const key = `${host}/${paneId}`
     const s = this.shells.get(key)
@@ -4340,7 +4030,6 @@ export class MockTransport implements Transport {
     }
     const echo = /^echo\s+(.*)$/.exec(cmd)
     if (cmd === '') {
-      /* 只按 Enter */
     } else if (echo) {
       s.lines.push(echo[1].replace(/^["']|["']$/g, ''))
     } else if (cmd === 'pwd') {
@@ -4350,12 +4039,10 @@ export class MockTransport implements Transport {
     } else if (cmd.startsWith('ls')) {
       s.lines.push('Cargo.toml  daemon      docs        web')
     } else if (/^(claude auth|codex|grok) login$/.test(cmd)) {
-      // 預設帳號的登入（issue #1931）：印網址，一下子就當作登好了。
       const kind = cmd.split(' ')[0] as BotKind
       s.lines.push('請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', 'Login successful.')
       later(() => this.finishCliLogin(host, kind), 1500)
     } else if (cmd === 'agy' || cmd === 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy') {
-      // agy 的 TUI 自己引導登入：SSH 底下印授權網址，授權碼貼回後登入完成（mock 直接當作下一步 `/quit` 時登好，見下）。
       s.lines.push('Antigravity CLI — please sign in', 'Open this URL to authorize:', MOCK_AGY_LOGIN_URL, 'Paste the authorization code here, then /quit to leave.')
       this.agyLoginPane = `${host}/${paneId}`
     } else if (cmd === '/quit' && this.agyLoginPane === `${host}/${paneId}`) {
@@ -4379,19 +4066,14 @@ export class MockTransport implements Transport {
         s.lines.push(`${s.cwd.split('/').pop() ?? '~'} % ${s.typed}^C`, '')
         s.typed = ''
       } else if (k === 'esc' || k === 'tab') {
-        /* 無效果，但不能是錯誤 */
       } else if (k === 'enter') {
         this.shellText(host, paneId, '', true)
       } else if (k === 'up' || k === 'down') {
-        /* 不模擬歷史 */
       } else if (k === 'backspace') {
-        // 以 code point 退一格：emoji 是兩個 UTF-16 單位，只砍一個會留下落單的代理字元。
         s.typed = [...s.typed].slice(0, -1).join('')
       } else if (k === 'space') {
-        // herdr 的鍵名：空白要寫 `space`（`usePaneKeys.herdrKeyFromEvent` 實測過）。
         s.typed += ' '
       } else if (Array.from(k).length === 1) {
-        // 鍵盤同步模式下每一下按鍵都是一個單字元鍵；不回顯的話 mock 看起來像壞掉。
         s.typed += k
       }
     }
@@ -4407,7 +4089,6 @@ export class MockTransport implements Transport {
       `  pane=${run?.pane_id ?? '-'}  run=${run?.id ?? '-'}  status=${status}`,
       '',
     ]
-    // SPEC §4.4a：codex 狀態列顯示啟動時的值（非 DB 設定），所以從 run 的 runtime 值畫。
     const codexStatusLine =
       bot.kind === 'codex' && run
         ? [
@@ -4450,7 +4131,6 @@ export class MockTransport implements Transport {
           : ['⏺ 已完成上一個回合。', '', '> ', '  ? for shortcuts']
     const all = [...head, ...body, ...codexStatusLine]
     const shown = all.slice(Math.max(0, all.length - lines))
-    // `format=ansi`：像真的 herdr 帶 SGR 色碼——標題列粗體、`⏺` 行綠字；純文字版逐字不變。
     const painted = ansi ? shown.map((l) => (l.startsWith('⏺') ? `\x1b[32m${l}\x1b[0m` : l.startsWith('$ ') || l.startsWith('  pane=') ? `\x1b[1m${l}\x1b[0m` : l)) : shown
     const text = painted.join('\n')
     return {
@@ -4464,8 +4144,6 @@ export class MockTransport implements Transport {
       ...(ansi ? { format: 'ansi' } : {}),
     }
   }
-
-  // dev helpers
 
   forceResync() {
     if (this.handlers && this.socketOpen) this.handlers.onFrame({ type: 'resync' })
@@ -4486,12 +4164,10 @@ export class MockTransport implements Transport {
 
   setConnected(v: boolean) {
     this.connected = v
-    // SPEC §11.6; `connected` kept for the pre-§11 shape.
     this.emit('daemon_status', { herdr_connected: v, connected: v, default_connected: false, hosts: this.hostMap() })
     for (const b of this.bots) this.emitBotStatus(b.id)
   }
 
-  /** 截圖用：改 active run 讀回的 runtime（演 codex 0.157 狀態列的顯示名、TUI 裡手切的 fast、在忙）。 */
   setRuntime(botId: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) {
     const run = this.runs.find((r) => r.bot_id === botId && r.state === 'running')
     if (!run) return
@@ -4507,11 +4183,9 @@ export class MockTransport implements Transport {
     this.foreignPanes = Math.max(0, Math.floor(n))
   }
 
-  /** 截圖用：給某顆 bot 的 run 掛更新通知（`__amMock.updateNotice('am-codex', 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟')`）。 */
   setUpdateNotice(botId: string, notice: string | null) {
     const run = this.activeRun(botId)
     if (!run) {
-      // 還沒啟動的先啟動，等它變 running（`start` 裡的計時器）再掛。
       this.start(botId)
       later(() => this.setUpdateNotice(botId, notice), 1500)
       return
@@ -4520,7 +4194,6 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
-  /** 截圖用：推並保存一筆 `upstream_update` 快照。 */
   emitUpstreamUpdate(kind: string, latest: string, disk: string) {
     const target = latest
     const item = {
@@ -4538,7 +4211,6 @@ export class MockTransport implements Transport {
     this.emit('upstream_update', item)
   }
 
-  /** 截圖用：Claude 上游已更新且 fleet 版本不一致，展示持續提示與逐台版本。 */
   emitClaudeFleetUpdate(target = '2.1.284', hosts: { host: string; installed_version: string | null; error: string | null; behind: boolean }[] = [
     { host: 'local', installed_version: target, error: null, behind: false },
     { host: 'mac_builder', installed_version: '2.1.281', error: null, behind: true },
@@ -4554,28 +4226,19 @@ export class MockTransport implements Transport {
   }
 }
 
-
 function installDevHelpers(mock: MockTransport) {
   ;(globalThis as unknown as Rec).__amMock = {
     resync: () => mock.forceResync(),
-    /** 首次啟動（issue #1931）：沒有 Project／Bot、四種 CLI 都沒裝；主畫面出現「環境準備」。 */
     freshStart: () => mock.freshStart(),
-    /** 直接安裝演失敗：`installFail('claude')` 沒裝成、pane 留著；`'timeout'` 演逾時；`installFail('claude', null)` 恢復。 */
     installFail: (kind: string, mode: 'error' | 'timeout' | 'superseded' | null = 'error') => mock.setInstallFail(kind, mode),
-    /** 設定頁的空值 env 身份警告（#1883）；加完到環境設定看（要重新整理身份清單）。 */
     emptyEnvIdentity: () => mock.addEmptyEnvIdentity(),
     dropSocket: () => mock.dropSocket(),
     block: (botIdOrName: string) => mock.enterBlocked(mock.botIdByName(botIdOrName) ?? botIdOrName),
-    /** 題目被裁掉的 AskUserQuestion（pane 太矮）：畫面只剩選項，題目只能從 pending-question 讀。回 bot id。 */
     tinyAsk: (botIdOrName?: string) => mock.enterTinyAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
-    /** codex 非同步提問：畫面只剩 `? 1 question`，題目在 pending-question（issue #1879）。回 bot id。 */
     codexAsync: (botIdOrName?: string) =>
       mock.enterCodexAsync(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
-    /** 兩題 AskUserQuestion、第二題可複選、分頁列與題目被裁掉（issue #559）。回 bot id。 */
-    /** 英文多分頁問卷停在 Submit（Review）分頁＋訊息翻譯 auto（桌機與手機截圖用）。回 bot id。 */
     surveyEn: (botIdOrName?: string) => mock.enterSurveyEn(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     twoAsk: (botIdOrName?: string) => mock.enterTwoAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
-    /** 問句跟選項之間夾著 `·` 條列說明（claude 2.1.280 fullscreen renderer 邀請）。回 bot id。 */
     bulletAsk: (botIdOrName?: string) =>
       mock.enterBulletAsk(botIdOrName ? (mock.botIdByName(botIdOrName) ?? botIdOrName) : undefined),
     loggedOut: (botIdOrName: string, identity = 'cc1') => mock.markLoggedOut(mock.botIdByName(botIdOrName) ?? botIdOrName, identity),
@@ -4584,41 +4247,25 @@ function installDevHelpers(mock: MockTransport) {
     hostDown: (name: string, downMinutes?: number) => mock.setHostConnected(name, false, downMinutes),
     hostUp: (name: string) => mock.setHostConnected(name, true),
     hosts: () => mock.hostNames(),
-    // 遠端主機＋專案＋在跑的 bot、五格額度（截圖用，重現遠端標題列最擠的情況）。回 bot id。
     remoteDemo: (host?: string) => mock.remoteDemo(host),
-    // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
-    // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
     failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
-    // claude 輸入框裡的灰字建議下一句：`__amMock.suggestion('am-claude', '跑完整測試')`（`null` 清掉；bot 要是 idle 才看得到）
     suggestion: (botIdOrName: string, text: string | null) => mock.setPromptSuggestion(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
-    // bot 的輸入框卡著一段沒送出的字：之後送 prompt 回 409 composer_busy（`null` 清掉）
     composerDraft: (botIdOrName: string, text: string | null) => mock.setComposerDraft(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
-    // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
-    // 假裝別的瀏覽器改了輸入框草稿：`__amMock.remoteDraft('bot:<id>', '手機上打的')`（空字串＝對方送出清空）
     remoteDraft: (key: string, text: string) => mock.remoteDraft(key, text),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
-    // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`；grok（#761，只提示的徽章）：`__amMock.upstreamUpdate('grok', '1.0.47', '1.0.46')`
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
-    // Claude fleet install chip；可指定目標或主機快照以做其他視覺案例。
     claudeFleetUpdate: (target?: string, hosts?: { host: string; installed_version: string | null; error: string | null; behind: boolean }[]) => mock.emitClaudeFleetUpdate(target, hosts),
-    // header 的 herdr 徽章：`__amMock.herdrUpdate()`；`{failOne: true}` 演沒接回、`{reason: 'busy_timeout'}` 演沒做、`{hold: 'waiting_idle'}` 停在那一步
     herdrUpdate: (opts?: MockHerdrOpts) => mock.herdrUpdate.seed(opts),
-    // 截圖用：`__amMock.runtime('am-codex', {runtime_model: 'GPT-6-Luna', runtime_fast: true, agent_status: 'working'})`
     runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),
-    // 截圖用：快取倒數的上次活動改成幾分鐘前（`__amMock.cacheAge('am-claude', 75)`＝已涼）。
     cacheAge: (botIdOrName: string, minutesAgo: number, compacted = false) => mock.setCacheAge(mock.botIdByName(botIdOrName) ?? botIdOrName, minutesAgo, compacted),
-    // 截圖用：演一輪保溫回覆（晶片框換色、不亮未讀）：`__amMock.keepWarmReply('am-claude')`。
     keepWarmReply: (botIdOrName: string) => mock.simulateKeepWarmReply(mock.botIdByName(botIdOrName) ?? botIdOrName),
-    // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。
     patchBot: (botIdOrName: string, body: Rec) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, body),
-    // 截圖用：按「不用保溫」（冰凍，晶片畫雪花）：`__amMock.keepWarmSkip('am-claude')`，`false` 取消。
     keepWarmSkip: (botIdOrName: string, skip = true) =>
       mock.request('POST', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}/keep-warm/skip`, { skip }),
-    // 截圖用：改名（演長名字在手機標題列被擠的情況）
     rename: (botIdOrName: string, name: string) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, { name }),
   }

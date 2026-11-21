@@ -1,4 +1,3 @@
-/* components/ConfirmDialog.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .confirm-dialog {
   max-width: calc(100vw - 48px);
   background: var(--bg-panel);
@@ -59,7 +58,6 @@
   gap: 8px;
 }
 
-/* 兩個選擇並列說明（開同類分身：接續 vs 全新）。 */
 .confirm-choices {
   margin: 8px 0 0;
   padding-left: 18px;
@@ -73,8 +71,6 @@
   margin: 8px 0 0;
   color: var(--text-faint);
 }
-
-/* 確認框封頂在畫面內、內文自己捲，按鈕才不被推出去（2026-09-10 使用者截圖）。用 dvh：iOS 網址列收合前後 100vh 不同。 */
 
 .confirm-dialog {
   display: flex;
@@ -105,7 +101,6 @@
   }
 }
 
-/* 重置券提示的「不再提醒 ▾」選單（ResetCreditOffer.tsx）。 */
 .reset-snooze { margin-top: 8px; }
 .reset-snooze-menu {
   list-style: none;

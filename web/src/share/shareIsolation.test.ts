@@ -1,8 +1,3 @@
-/**
- * 分享頁的打包邊界（SPEC「分享 bot」威脅模型 1）：拿到連結的人＝網路上任何人，
- * `src/share/` 不准 import 主 UI 的 store／api／components／hooks（那些會帶著管理 API 的路徑與 token 邏輯）。
- * client 只准打 `/s/<token>/api/…`，不帶 cookie。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
@@ -19,11 +14,8 @@ test('src/share 只 import 自己資料夾、react、markdown 套件', () => {
       const ok =
         spec.startsWith('./') ||
         spec === '../lib/markdownGuard' ||
-        // 送出的冪等鍵（#921）：純 sessionStorage 的小函式，自己不 import 任何東西（下面的測試守著這點）。
         spec === '../lib/createRequestId' ||
-        // 分享頁的訊息連結規則（#1556：同終端的網址規則）：純字串處理的 remark 外掛，不 import 任何東西（下面的測試守著這點）。
         spec === '../lib/markdownAutolink' ||
-        // 分享頁的多語系：只經這兩個純模組（不經 lib/i18n/index.ts，不帶主 UI 字典）；下面的測試守著它們的 import。
         spec === '../lib/i18n/translate' ||
         spec === '../lib/i18n/lang' ||
         ['react', 'react-dom/client', 'react-markdown', 'remark-gfm'].includes(spec)

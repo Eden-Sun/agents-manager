@@ -1,14 +1,9 @@
-/**
- * 部署等換版窗口的前端狀態（SPEC §18.10）。自己一個小 store（同 `herdrUpdate.ts`）：同時只會有一次部署，
- * 跟 `useStore` 的快照替換無關。來源：`/api/state` 的 `deploy_wait`（重整對帳）與 WS `deploy_wait`。
- */
 import { create } from 'zustand'
 import { BLOCKER_WHY, toDeployWait, type DeployWait } from '../api/deployWait'
 import { t, tr } from '../lib/i18n'
 
 export const useDeployWait = create<{ wait: DeployWait | null }>(() => ({ wait: null }))
 
-/** 快照：欄位不在（舊 daemon）＝不知道，不動；在而且是 null＝現在沒有。 */
 export function applyDeployWaitSnapshot(raw: unknown) {
   if (raw === undefined) return
   useDeployWait.setState({ wait: toDeployWait(raw) })
@@ -18,7 +13,6 @@ export function setDeployWait(w: DeployWait | null) {
   useDeployWait.setState({ wait: w })
 }
 
-/** WS `deploy_wait`：更新狀態，回傳要跳的通知（第一次通知、拿到窗口、換好、放棄）；擋的人換了只更新 header，不跳。 */
 export function deployWaitNotice(w: DeployWait, now = Date.now()): string {
   const blockers = w.blockers.map((b) => `${b.name}（${tr(BLOCKER_WHY[b.why] ?? b.why)}）`).join('、')
   const since = Date.parse(w.since)

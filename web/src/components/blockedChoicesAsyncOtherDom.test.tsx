@@ -9,7 +9,6 @@ import { skipTimerDelays } from '../testing/skipTimerDelays'
 
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
-// 元件送鍵後固定等 STEP（260ms）讓畫面反應；rig 的畫面是立刻換好的，不必睡過去。
 let fast: ReturnType<typeof skipTimerDelays>
 before(async () => {
   await setupDom()
@@ -22,7 +21,6 @@ after(async () => {
   await teardownDom()
 })
 
-// codex 0.163.0 真機的展開畫面（issue #1879）；游標與 Other 列的字由 `screen()` 換。
 const BASE = readFileSync(new URL('../lib/__fixtures__/codex-0.163-async-expanded.txt', import.meta.url), 'utf8')
 const screen = (o: { cursor?: number; other?: string; question?: string } = {}) => {
   const rows = ['red', 'blue', 'green', o.other ?? 'Other']
@@ -35,12 +33,10 @@ interface Rig {
   keys: string[][]
   texts: string[]
   text: string
-  /** 每次送出帶的固定 Run（`pinRunId`）。 */
   pins: (string | null | undefined)[]
   runId?: string
 }
 
-/** 畫面由測試控制：`react(rig, event)` 在 down／貼字／讀取時換畫面。 */
 async function setup(opts: { onKeys?: (r: Rig, keys: string[]) => void; onText?: (r: Rig, t: string) => void; onRead?: (r: Rig, n: number) => void }): Promise<Rig> {
   resetStoreForTest()
   const rig: Rig = { keys: [], texts: [], text: screen(), pins: [] }
@@ -91,7 +87,6 @@ test('Other：同一題、游標在 Other、字在這一列、提問面板展開
   assert.deepEqual(rig.texts, ['紫色'])
 })
 
-// 複審反例（P1）：只確認同索引那列出現文字不夠。
 test('反例：貼字後換成下一題（Other 列同樣出現那段字）：不按 Enter', async () => {
   const rig = await setup({
     onKeys: walk,
@@ -114,7 +109,6 @@ test('反例：貼字後游標不在 Other 列：不按 Enter', async () => {
 test('反例：游標走到 Other 後、貼字前就切回主輸入框：什麼字都不貼', async () => {
   const rig = await setup({ onKeys: (r, keys) => (keys.includes('down') ? (r.text = screen({ cursor: 3 })) : undefined) })
   const root = await openOther()
-  // walkTo 最後一次確認後、貼字前的重讀換成主輸入框。
   let armed = false
   await act(() =>
     useStore.setState({
@@ -140,7 +134,6 @@ test('反例：最後一讀時提問面板已經不在（切回主輸入框）�
       afterPaste = 1
     },
     onRead: (r) => {
-      // 貼字後第 1 讀（字出現的對帳）正常，第 2 讀（送 Enter 前的最後確認）換成主輸入框。
       if (afterPaste && ++afterPaste >= 3) r.text = MAIN_PROMPT
     },
   })
@@ -150,7 +143,6 @@ test('反例：最後一讀時提問面板已經不在（切回主輸入框）�
   assert.ok(!rig.keys.some((k) => k[0] === 'enter'))
 })
 
-// 複審：單選也不能把方向鍵與 Enter 一批送出去——移動期間可能換題，Enter 會答到別題。
 async function openAndPick(index: number): Promise<HTMLElement> {
   const root = await mount(<BlockedChoices botId="b1" menu={parseChoiceMenu(screen())!} />)
   await click(root.querySelectorAll<HTMLButtonElement>('.bc-item')[index])
@@ -186,7 +178,6 @@ test('反例：移動後切回主輸入框：不按 Enter', async () => {
   assert.deepEqual(rig.keys, [['down']])
 })
 
-// 複審：同題、游標在目標，但目標選項被改了字（其他列不變）——使用者點的不是現在這個內容。
 test('反例：移動後目標選項的標題變了（同題、游標在目標、其他列不變）：不按 Enter', async () => {
   const changed = screen({ cursor: 1 }).replace('2. blue', '2. 完全不同的選項')
   const rig = await setup({ onKeys: (r, keys) => (keys.includes('down') ? (r.text = changed) : undefined) })
@@ -195,7 +186,6 @@ test('反例：移動後目標選項的標題變了（同題、游標在目標�
   assert.deepEqual(rig.keys, [['down']])
 })
 
-// 複審 P3：貼字後那一列必須完整等於答案（不是只出現那段字）。
 test('反例：貼字後那一列變成「舊字＋答案」（後綴是答案但不是完整內容）：不按 Enter', async () => {
   const rig = await setup({ onKeys: walk, onText: (r, t) => (r.text = screen({ cursor: 3, other: `舊的${t}` })) })
   const root = await openOther()
@@ -204,7 +194,6 @@ test('反例：貼字後那一列變成「舊字＋答案」（後綴是答案�
   assert.ok(!rig.keys.some((k) => k[0] === 'enter'))
 })
 
-// 複審 P1：作答固定在同一個 Run，送鍵都帶 id；Run 換了就放棄。
 test('單選與 Other：每一次送出都帶這次作答固定的 Run', async () => {
   const pick = await setup({ onKeys: (r, keys) => (keys.includes('down') ? (r.text = screen({ cursor: 1 })) : undefined) })
   await openAndPick(1)

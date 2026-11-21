@@ -7,7 +7,6 @@ import { KIND_LABEL } from '../components/kindMeta'
 import { msg, useT } from '../lib/i18n'
 import { botLamp, useStore } from '../store/store'
 
-/** 不能接排程的原因（daemon 也會再驗一次）；`null` 就是可選。 */
 export function ineligibleReason(b: Bot, projectId: string): string | null {
   if (b.project_id !== projectId) return msg('屬於其他專案')
   if (b.kind === 'claude-api') return msg('claude-api 不能接排程')
@@ -19,10 +18,6 @@ export function ineligibleReason(b: Bot, projectId: string): string | null {
 
 const ROLE_LABEL: Record<string, string> = { manager: msg('管'), executor: msg('執'), advisor: msg('顧'), specialist: msg('專'), scheduler: msg('排') }
 
-/**
- * 執行的 Bot 清單（取代原生 select）：每列有名稱、kind、模型＋強度、身份、角色、狀態燈，
- * 已被其他排程用的標「已有 N 個排程」，不合格的灰掉寫原因。目前選的置頂。手機上每列 ≥ 44px。
- */
 export function ScheduleBotPicker({
   projectId,
   bots,
@@ -34,7 +29,6 @@ export function ScheduleBotPicker({
   projectId: string
   bots: Bot[]
   selectedId: string
-  /** 其他（不是這份）排程用了這顆 Bot 的列表。 */
   usageOf: (botId: string) => Schedule[]
   onSelect: (id: string) => void
   disabled?: boolean

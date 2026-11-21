@@ -1,8 +1,3 @@
-/**
- * 桌機 `.app` grid 最右邊那一欄（檔案暫存的右邊）：選著頂層 bot 時放它的預覽（issue #253 v3）。
- * 掛在 `main` 外（同 ImageShelf）：換 bot 不 unmount，同一顆的 iframe 不重載。
- * ≤1024px（抽屜版面／手機）沒有這欄，預覽回到 ChatPanel 的分頁。
- */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { DRAWER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -33,7 +28,6 @@ export function PreviewColumn() {
   const running = useStore((s) => (bot ? s.previews[bot.id]?.status === 'running' : false))
   const stored = usePreviewColWidth()
   const [viewport, setViewport] = useState(() => window.innerWidth)
-  // 拖曳中的即時寬度；放開才寫進 localStorage。
   const [drag, setDrag] = useState<number | null>(null)
   const start = useRef<{ x: number; w: number } | null>(null)
 
@@ -59,7 +53,6 @@ export function PreviewColumn() {
     (e: ReactPointerEvent<HTMLDivElement>) => {
       const s = start.current
       if (!s) return
-      // 手柄在欄的左緣：往左拖＝變寬。
       setDrag(clampPreviewWidth(s.w + (s.x - e.clientX), window.innerWidth))
     },
     [],
@@ -72,10 +65,8 @@ export function PreviewColumn() {
       return null
     })
   }, [])
-  // 上限與 clampPreviewWidth 同一條式子（視窗的一半，min 優先）：把手的 aria-valuemax 要跟它一致（#1137）。
   const maxWidth = Math.max(PREVIEW_COL_MIN, Math.floor(viewport * 0.5))
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    // APG window splitter：Home＝最窄、End＝最寬（值由小到大，跟 Home／End 的方向一致）。
     if (e.key === 'Home' || e.key === 'End') {
       e.preventDefault()
       setPreviewColWidth(e.key === 'Home' ? PREVIEW_COL_MIN : maxWidth)
@@ -89,7 +80,6 @@ export function PreviewColumn() {
 
   if (drawer || IN_MOBILE_PREVIEW || !bot || !isTopLevelBot(bot)) return null
 
-  // 預覽在跑時標題列併進 PreviewPanel 的網址列，省一整排（2026-09-20 使用者）。
   const merged = running
   const headStart = (
     <>

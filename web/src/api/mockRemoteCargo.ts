@@ -1,8 +1,3 @@
-/**
- * mock 的 `/build/remote*`（外部 Cargo 編譯主機，API.md「GET/PUT /api/build/remote」「POST …/test」「…/install-toolchain」）。
- * 規則照 daemon：PUT 的 `password` 省略＝沿用、`""`＝清掉、其他＝新密碼，且不回傳；`enabled` 卻沒填 host／user → 400；
- * `test` 測的是**已儲存**的設定。主機名帶 `nocargo`／`noclippy`／`unreach` 會演對應的結果（截圖與測試用）。
- */
 import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
@@ -19,7 +14,6 @@ interface Saved {
 
 export class MockRemoteCargo {
   private saved: Saved = { enabled: false, host: '', user: '', ssh_port: 22, remote_root: '.cache/agents-manager/remote-cargo', cargo_jobs: 4, password: null }
-  /** 裝過工具鏈的主機（`nocargo` 主機裝完就有）。 */
   private installed = new Set<string>()
 
   private view() {

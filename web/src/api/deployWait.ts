@@ -1,7 +1,3 @@
-/**
- * 部署等換版窗口超過 3 分鐘的通知與調度（SPEC §18.10，API.md「部署等太久」，使用者 2026-10-04）。
- * 狀態來源：`GET /api/state` 的 `deploy_wait` 與 WS `deploy_wait`。按鈕：`POST /api/deploy/wait/{escalate,dismiss}`（只收 UI token）。
- */
 import { rawTransport } from './index'
 import { msg } from '../lib/i18n'
 
@@ -10,7 +6,6 @@ export type DeployWaitPhase = 'waiting' | 'swapping' | 'done' | 'abandoned'
 export interface DeployWaitBlocker {
   bot_id: string | null
   name: string
-  /** `working`／`delivering`／`unreadable`／`lease`。 */
   why: string
 }
 
@@ -33,7 +28,6 @@ const rec = (v: unknown): Rec => (typeof v === 'object' && v !== null ? (v as Re
 const str = (v: unknown) => (typeof v === 'string' ? v : '')
 const PHASES: DeployWaitPhase[] = ['waiting', 'swapping', 'done', 'abandoned']
 
-/** 看不懂（沒有 id）就當沒有。 */
 export function toDeployWait(raw: unknown): DeployWait | null {
   const o = rec(raw)
   const id = str(o.id)

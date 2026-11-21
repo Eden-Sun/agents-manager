@@ -1,7 +1,3 @@
-/**
- * 輸入框上方的一行說明（#1674）：最新一個回合是 codex「模型滿載」時才出現；下一回合開始（再送或換模型）daemon 清掉
- * `turn_error`，這一行就跟著消失。只說明、不自動重送、不自動換模型。
- */
 import { useStore } from '../store/store'
 import { CAPACITY_LABEL, modelAtCapacity } from '../lib/modelCapacity'
 import { useT } from '../lib/i18n'

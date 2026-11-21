@@ -27,19 +27,15 @@ export function isImageFile(f: File): boolean {
 
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
-  // 先看四捨五入後落在哪：1023.6 KB 進位是 1024，要寫成 1.0 MB（同 `lib/outboxList.ts` 的 `fileSize`）。
   if (Math.round(bytes / 1024) < 1024) return `${Math.round(bytes / 1024)} KB`
-  // 一位小數進位到 10 時寫 10 MB（9.96 不寫 10.0 MB）。
   const mb = bytes / (1024 * 1024)
   return Math.round(mb * 10) / 10 === 10 ? '10 MB' : `${mb.toFixed(1)} MB`
 }
 
-/** 卡片上的大小：壓過的連原檔一起寫，看得出省了多少。 */
 export function sizeLabel(size: number, originalSize?: number): string {
   return originalSize && originalSize !== size ? t('{size}（原 {orig}）', { size: formatSize(size), orig: formatSize(originalSize) }) : formatSize(size)
 }
 
-/** Composer attachment state for one draft. `uploadTo`: any group member works (attachments are project-scoped). */
 export function useAttachments(uploadTo: string | null, resetKey: string | null) {
   const notify = useStore((s) => s.notify)
   const [items, dispatch] = useReducer(pendingReducer, [])
@@ -47,9 +43,7 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
   const seen = useRef(new Set<string>())
   const urls = useRef(new Set<string>())
   const itemsRef = useRef<Pending[]>([])
-  /** 每張卡片正在跑的那一次上傳；× 移除／清空／換對話都要真的 abort（issue #435）。 */
   const inflight = useRef(new Map<string, AbortController>())
-  /** 重試要傳的檔：`prepared` 表示已經壓過了，重試直接傳這份。 */
   const sources = useRef(new Map<string, { file: File; prepared: boolean }>())
 
   const abortOne = useCallback((key: string) => {
@@ -167,11 +161,9 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     [start, uploadTo],
   )
 
-  // Attachments belong to the conversation, not necessarily the bot that received the upload.
   useLayoutEffect(() => {
     abortAll()
     for (const it of itemsRef.current) revokePreview(it.previewUrl)
-    // 指紋一起清，否則換回原對話時同一張會被誤判重複。
     seen.current.clear()
     dispatch({ type: 'clear' })
 
@@ -202,7 +194,6 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
       for (const file of files) {
         const fp = `${file.name}|${file.size}|${file.lastModified}`
         const compress = compressible(file.type)
-        // 同一張不重複放入（2026-09-09 使用者：同一張暫存會重複放入對話）；收下的指紋由 `admitFile` 記。
         const verdict = admitFile(seen.current, fp, file.size, compress)
         if (verdict === 'duplicate') continue
         if (verdict === 'too-large') {
@@ -238,7 +229,6 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     [notify, resetKey, start, uploadTo],
   )
 
-  /** 失敗的卡片再傳一次：壓過的直接傳壓好的那份。 */
   const retry = useCallback(
     (key: string) => {
       const src = sources.current.get(key)
@@ -269,7 +259,6 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     dispatch({ type: 'clear' })
   }, [abortAll, items, resetKey, revokePreview])
 
-  /** 送出成功後只收掉這一則帶走的附件；送出期間新加的卡片留給下一則。 */
   const clearSent = useCallback((sentIds: readonly string[]) => {
     const sent = new Set(sentIds)
     if (resetKey) removeSentAttachmentDrafts(resetKey, sentIds)
@@ -282,7 +271,6 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     }
   }, [resetKey, revokePreview])
 
-  /** 撤回 daemon 已收下的 prompt：同一批已上傳附件直接回 composer，不再傳一次。 */
   const restoreAttachments = useCallback((attachments: Attachment[]) => {
     const known = new Set(itemsRef.current.map((item) => item.id).filter((id): id is string => Boolean(id)))
     for (const attachment of attachments) {
@@ -307,16 +295,13 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
 
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
-  /** 有卡片上傳失敗（還在托盤裡、沒有 id）：送出會少了那個檔案，要擋下來讓使用者重試或移除（issue #917）。 */
   const failed = items.some((it) => !it.id && Boolean(it.error))
 
   return { items, add, remove, retry, clear, clearSent, restoreAttachments, ids, uploading, failed }
 }
 
-/** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */
 export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boolean) {
   const [over, setOver] = useState(false)
-  // dragenter/dragleave fire per child; count so the overlay does not flicker.
   const depth = useRef(0)
 
   const shelfKeys = (e: DragEvent): string[] =>
@@ -330,7 +315,6 @@ export function useDropTarget(onFiles: (files: File[]) => void, disabled?: boole
     return types.includes('Files') || types.includes(SHELF_MIME)
   }
 
-  // Drags from outside the window (macOS screenshot thumbnail) may never send `dragleave`; reset at window level.
   useEffect(() => {
     const reset = () => {
       depth.current = 0

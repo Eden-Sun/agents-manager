@@ -1,5 +1,3 @@
-/* 主機 shell 鍵盤直通的 xterm 容器（HostShellXterm）。配色走全站 --term-*，不另定一套。
-   xterm 的列數行數等於 herdr pane 的實際大小；盒子放不下時在盒子裡捲動（字級先縮到下限）。 */
 .shell-pane .shell-xterm {
   flex: 1;
   min-height: 0;

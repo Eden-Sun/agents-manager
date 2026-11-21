@@ -1,7 +1,3 @@
-/**
- * `POST /api/hosts/{name}/herdr-update`（SPEC §6.9 herdr 一鍵更新，完整重啟版）。
- * 回 202 就表示背景開跑；進度走 WS `herdr_update_progress` / `herdr_update_done`，重整後靠 `GET /api/state` 的 `herdr_updates` 對帳。
- */
 import { arr, isRec, pick, str } from './normalize'
 import { ApiError } from './types'
 import { rawTransport } from './index'
@@ -48,7 +44,6 @@ export async function startHerdrUpdate(host: string, targetVersion: string): Pro
   }
 }
 
-/** 409／403／404 → 給人看的一句（API.md §12.7b）。daemon 的 409／403 都帶寫好的 `message`，有就用它；這裡只是舊 daemon 或沒帶時的退路。 */
 export function herdrStartErrText(e: unknown, host: string): string {
   if (e instanceof ApiError) {
     const human = e.body.message

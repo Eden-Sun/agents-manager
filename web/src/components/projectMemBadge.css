@@ -1,4 +1,3 @@
-/* components/ProjectMemBadge.tsx：側欄專案標題的 pane 數與 RAM。跟左上角 RAM 徽章同一種外觀，縮小一號。 */
 
 .project-mem {
   flex: none;
@@ -25,7 +24,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 觸控裝置的 ＋／⋯ 常駐（沒有 hover 可以叫出來），未選中時（沒有 padding-right: 80px）讓出兩顆 36px 按鈕＋右側 4px 寬度，避免蓋住 RAM（2026-09-15 使用者）。選中時已有 padding-right 避讓，不再疊加 margin 擠壓標題。 */
 @media (hover: none) {
   .project-head:not(.selected):not(:focus-within) .project-label-btn {
     margin-right: 76px;

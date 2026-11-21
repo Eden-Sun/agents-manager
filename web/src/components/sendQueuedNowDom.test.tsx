@@ -54,7 +54,6 @@ for (const [name, status, sentVia, supported, shown] of [
     const btn = document.querySelector<HTMLButtonElement>('.msg > .queued-jump')
     assert.equal(Boolean(btn), shown)
     if (btn) {
-      // 在泡泡下面、不在 meta 列裡（不撐高 meta）；可存取：有文字、aria-label、tooltip。
       assert.equal(document.querySelector('.msg-meta .queued-jump'), null)
       assert.equal(btn.previousElementSibling?.classList.contains('bubble'), true)
       assert.equal(btn.textContent, '⤴插隊送出')

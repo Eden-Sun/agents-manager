@@ -1,5 +1,3 @@
-/* codex「模型滿載」的專屬樣式（#1674）。顏色刻意跟既有狀態分開：needs-reply 紅（--danger）、等子 agent 黃（--lamp-yellow）、
-   撞額度的紅框（quota-blocked）、在跑的藍；這裡用紫，並且一律配「模型滿載」文字，不只靠顏色。 */
 :root {
   --capacity: #7a45c9;
   --capacity-soft: #efe7fb;
@@ -20,12 +18,10 @@
   --lamp-capacity: #a884e8;
 }
 
-/* 側欄燈：閒置的綠點換成紫（形狀不變，字在旁邊）。 */
 .lamp.lamp-capacity {
   background: var(--lamp-capacity);
 }
 
-/* 側欄列上的字。 */
 .bot-capacity {
   flex: none;
   font-size: 10px;
@@ -39,7 +35,6 @@
   white-space: nowrap;
 }
 
-/* 晶片：紫框紫字紫點；紅（要你本人回答）仍然比它急。 */
 .unread-chip.at-capacity {
   border-color: var(--capacity);
   background: var(--capacity-soft);
@@ -51,7 +46,6 @@
   animation: none;
 }
 
-/* 對話面板輸入框上方那一行。 */
 .composer-capacity {
   display: flex;
   flex-wrap: wrap;

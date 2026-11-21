@@ -1,6 +1,3 @@
-/**
- * codex bot 設定的「基準快照」：鎖定目前 context、清除、顯示鎖定時間；只有 codex bot 看得到。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

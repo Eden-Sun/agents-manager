@@ -12,14 +12,11 @@ import { KIND_LABEL } from './kindMeta'
 import './tools.css'
 
 import { hostLabel, relevantMissing } from './toolsHelpers'
-/** v4.0 agent-CLI detection and "install via a running bot": the daemon prompts that bot to install + log in inside its own pane. */
 
-/** agy 由 daemon 直接裝（官方 manifest ＋ sha512）；其他 CLI 請那台上一顆在跑的 bot 裝。 */
 export function InstallToolButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
   return kind === 'agy' ? <AgyInstallButton host={host} small={small} /> : <InstallViaBotButton host={host} kind={kind} small={small} />
 }
 
-/** The install button: picks a running bot on that host. */
 function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
   const t = useT()
   const candidates = useStore(useShallow((s) => runningBotsOnHost(s, host)))
@@ -66,7 +63,6 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
         {busy ? t('送出中…') : small ? t('安裝') : t('用現有 agent 安裝')}
       </button>
       {open ? (
-        // 點一下就送出、沒有「選取中」——是選單不是 listbox。
         <ul ref={menuRef} className="install-pop" role="menu" tabIndex={-1} aria-label={t('選擇執行安裝的 Bot（{host}）', { host: hostLabel(host) })} onKeyDown={menuKeys}>
           {candidates.map((b) => (
             <li
@@ -93,7 +89,6 @@ function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKin
   )
 }
 
-/** Three little badges (✓ installed / ✗ missing / ! not logged in) for a host's tools. */
 export function ToolBadges({ host, tools }: { host: string; tools: ToolMap }) {
   const t = useT()
   return (
@@ -101,7 +96,6 @@ export function ToolBadges({ host, tools }: { host: string; tools: ToolMap }) {
       {BOT_KINDS.map((k) => {
         const info = tools[k]
         const state = !info.installed ? 'missing' : info.logged_in === false ? 'nologin' : 'ok'
-        // agy 這一格只代表預設帳號（預設 HOME）；有 HOME 覆寫的身份各自在身份列上判斷。
         const label = k === 'agy' ? t('agy（預設帳號）') : k
         const title = !info.installed
           ? t('{kind}：未安裝', { kind: label })
@@ -137,7 +131,6 @@ function summarizeMissing(byHost: Map<string, BotKind[]>): string {
   return t('{hosts} 台主機缺少 {clis} 個 CLI', { hosts: hostCount, clis: cliCount })
 }
 
-/** Stable snapshot key — `missingTools()` returns fresh objects each call. */
 function missingKeyOf(state: Parameters<typeof missingTools>[0]): string {
   return missingTools(state)
     .map((m) => `${m.host}:${m.kind}`)
@@ -152,7 +145,6 @@ function missingFromKey(key: string): { host: string; kind: BotKind }[] {
   })
 }
 
-/** Banner under the header: only when the current bot / group recipients are affected. */
 export function ToolsHint({
   focusHost,
   focusKinds,

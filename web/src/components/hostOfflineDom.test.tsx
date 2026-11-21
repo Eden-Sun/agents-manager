@@ -1,8 +1,3 @@
-/**
- * 遠端主機離線要一眼看得到（2026-10-02 使用者「mac_builder offline，要更明顯一點」）：
- * 頂端紅條（哪台、多久、影響幾顆，點開列 bot、點 bot 會選它）、側欄整組標 host-down 且狀態字是「主機離線」、
- * 聊天區橫幅；主機連回來三處都收掉。
- */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

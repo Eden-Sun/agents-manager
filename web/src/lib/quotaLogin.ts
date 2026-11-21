@@ -2,26 +2,16 @@ import type { BotKind } from '../api/types'
 import { identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { msg } from './i18n'
 
-/** store 沒 export state 型別，就地取——不動共用的 `store.ts`。 */
 type StoreState = ReturnType<typeof useStore.getState>
 
-/**
- * TUI 內有沒有 `/login`：claude 2.1.263、grok 1.0.13 有；codex 0.153.4 沒有（只能外面跑
- * `codex login`）。須與 daemon `lifecycle::login_slash_command` 一致，否則回 400 `login_unsupported`。
- */
 export function canLoginInSession(kind: BotKind): boolean {
   return kind === 'claude' || kind === 'grok'
 }
 
-/** 額度列選了身份就走 daemon 的 host-aware 登入；只有預設帳號留在主機 shell／TUI 登入。 */
 export function shouldUseIdentityLogin(identity: string | null): identity is string {
   return identity !== null
 }
 
-/**
- * 「未登入」的 `/login` 要送進哪個活著的同 host／kind／身份 bot；沒有回 null（按鈕 disabled）。
- * 回 id 不回物件：當 selector 用，新物件會讓 useSyncExternalStore 每輪都判定變了。
- */
 export function findLoginTargetId(
   s: StoreState,
   host: string,
@@ -38,25 +28,21 @@ export function findLoginTargetId(
   return bot?.id ?? null
 }
 
-/** TUI 外登入指令（claude 2.1.263 `auth login`、grok 1.0.13 `login`）。 */
 const CLI_LOGIN: Record<BotKind, string> = {
   claude: 'claude auth login',
   codex: 'codex login --device-auth',
   grok: 'grok login',
-  // agy 沒有 `login` 子命令，登入只在 TUI 裡（使用者自己做，AG Man 不代按）。版本由 AG Man 管：登入用的這次也關背景自我更新。
   agy: 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy',
   'claude-api': '',
   'openai-api': '',
 }
 
-/** 打進主機 shell 的一行。身份本體是 env，不帶就登到預設帳號，所以有 env 就加 `env K=V …` 前綴。 */
 export function cliLoginCommand(kind: BotKind, env: Record<string, string>): string {
   const entries = Object.entries(env)
   if (entries.length === 0) return CLI_LOGIN[kind]
   return `env ${entries.map(([k, v]) => `${k}=${shellQuote(v)}`).join(' ')} ${CLI_LOGIN[kind]}`
 }
 
-/** config `[[identities]]` 優先，否則用主機回報的 `config_dir`（`ccN` alias），都沒有是預設帳號。 */
 export function identityEnv(s: StoreState, host: string, kind: BotKind, identity: string | null): Record<string, string> {
   if (!identity) return {}
   const cfg = s.identities.find((i) => i.kind === kind && i.name === identity)
@@ -69,7 +55,5 @@ function shellQuote(v: string): string {
   return `'${v.replaceAll("'", `'\\''`)}'`
 }
 
-/** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
-/** codex 用裝置碼登入（`codex login --device-auth`）：不會跳瀏覽器，終端印網址與碼。 */
 export const CODEX_LOGIN_GUIDE = msg('終端會印出登入網址和一次性碼：用手機或任何裝置打開網址、輸入那組碼就好，不用貼回終端。')
 export const AGY_LOGIN_GUIDE = msg('agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。')

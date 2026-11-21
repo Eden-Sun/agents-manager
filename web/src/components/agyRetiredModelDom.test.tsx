@@ -1,6 +1,3 @@
-/**
- * agy 只收 Gemini 3.8 含以上（2026-10-14；2026-10-05 起是只留 3.8 Flash 三檔）：不收的模型不進選單；已存在的 bot 設了它們，設定面板講清楚「啟動時改用 3.8 medium」並給一鍵改掉。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -19,7 +16,6 @@ after(async () => {
 const RETIRED = ['gemini-3.7-flash-high', 'gemini-3.6-flash-low', 'gemini-3.1-pro-high', 'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']
 
 async function picker(model: string | null, onModel: (v: string | null) => void = () => {}) {
-  // 不打 API：快取放一份 null（上次失敗），退回內建清單。
   await act(() => useStore.setState({ models: { 'agy@local@': null }, modelsFailedAt: { 'agy@local@': Date.now() } } as never))
   return mount(<ApiModelFields kind="agy" host="local" model={model} onModel={onModel} effort={null} onEffort={() => {}} fast={false} onFast={() => {}} />)
 }

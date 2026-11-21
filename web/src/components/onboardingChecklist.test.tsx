@@ -1,8 +1,3 @@
-/**
- * 首次啟動的環境準備清單（issue #1931）：沒裝／沒登入任何 CLI 時主畫面出現清單，每列有安裝／登入鈕；
- * claude／codex／grok 的安裝不帶 `via_bot_id`（daemon 開臨時 shell），agy 走既有 agy/install 的確認框；
- * 新增 Bot 的快速鈕裡未登入的項目可點、點了開登入流程。真的掛元件進 happy-dom，後端是 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -36,7 +31,6 @@ const row = (kind: string) => document.querySelector(`.onb-row[data-kind="${kind
 const none = { installed: false, path: null, version: null, logged_in: null }
 const fresh = (over: Partial<ToolMap> = {}): ToolMap => ({ claude: none, codex: none, grok: none, agy: none, 'claude-api': none, 'openai-api': none, ...over })
 
-/** 共用的 mock 是行程單例：這支把它的本機 tools 也換成同一份，之後 `refreshTools` 讀回來才對得上。 */
 type MockInternals = { localTools: ToolMap; localIdentityStatus: Record<string, unknown> }
 const internals = sharedMock as unknown as MockInternals
 const originalMock = { tools: { ...internals.localTools }, identities: internals.localIdentityStatus }
@@ -74,7 +68,6 @@ it('claude 安裝：不帶 via_bot_id，daemon 開 shell；裝好後那列翻成
   assert.equal((post.body as Record<string, unknown>).via_bot_id, undefined)
   assert.equal(typeof (post.body as Record<string, unknown>).install_id, 'string')
   assert.ok(useStore.getState().shellView, '畫面切到安裝的 shell pane')
-  // 測試沒有 socket：daemon 的 `host_changed` 用重新偵測代替。
   await until(async () => {
     await useStore.getState().refreshTools('local')
     return row('claude').getAttribute('data-state') === 'out'
@@ -168,7 +161,6 @@ it('tool_install_done 裝成功：放開鈕、不開 pane', async () => {
   assert.doesNotMatch(row('grok').textContent ?? '', /安裝中…/)
 })
 
-
 it('舊完成事件不能解除新安裝，superseded 只解除自己的請求且不開 pane', async () => {
   useStore.setState({ busy: {}, shellView: null })
   await setLocal(fresh())
@@ -191,7 +183,6 @@ it('舊完成事件不能解除新安裝，superseded 只解除自己的請求�
   await act(async () => { dispatchFrameForTest({ type: 'tool_install_done', data: { ...done, install_id: second } }) })
   assert.doesNotMatch(row('codex').textContent ?? '', /安裝中/)
 })
-
 
 it('完成事件先於 HTTP 回應到達，不重新打開已失效的安裝 pane', async () => {
   const { installKindOnHost } = await import('../lib/onboardingActions')

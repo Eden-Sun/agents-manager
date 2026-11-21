@@ -1,11 +1,3 @@
-/**
- * 主力那列（★）的拖曳與鍵盤重排（issue #344）。用 pointer events 而不是 HTML5 DnD：後者在觸控上不會動。
- * - 滑鼠：按住移動超過 5px 開始拖。
- * - 觸控：長按 350ms 才開始拖（之前手指移動超過 10px 視為捲動，取消）——手機那排本來就是橫捲。
- *   長按不動放開＝什麼都不做（2026-11-07 使用者：「主力長按的功能可以不需要了」，以前這裡會開主力狀態卡）。
- * - 鍵盤：聚焦晶片後 Ctrl+←／→ 移一格，並用 live region 報位置。
- * 順序計算在 `lib/pinnedOrder.ts`（純函式、有測試）。
- */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
@@ -18,29 +10,18 @@ const LONG_PRESS_MS = 350
 
 export interface PinnedDnd {
   dragId: string | null
-  /** 目前放開會插在誰前面（null＝這組最後）；沒在拖＝undefined。 */
   before: string | null | undefined
-  /** 畫面上最後一顆主力晶片（放到最後面時在它右邊畫落點線）。 */
   lastId: string | null
-  /** 落點讓位：這些晶片往右推 `gap` px（同一行、落點之後的）。 */
   shifted: string[]
   gap: number
-  /** 落點在行尾時，那一行最後一顆（標示畫在它右邊）。 */
   after: string | null
-  /** 拖曳中的晶片跟著游標的位移（px，相對它原本的位置）；沒在拖＝0,0。 */
   offset: { x: number; y: number }
-  /** 給 live region 的最新一句。 */
   announce: string
   onPointerDown: (e: ReactPointerEvent<HTMLElement>, id: string) => void
   onKeyDown: (e: ReactKeyboardEvent<HTMLElement>, id: string) => void
-  /** 剛拖完的那一下 click 要吞掉（否則放開會順便選到那顆 bot）。 */
   consumeClick: () => boolean
 }
 
-/**
- * @param fullOrder 所有主力 bot 的完整順序（含側欄收起來的），存回 daemon 用這份
- * @param visibleOrder 畫面上看得到的主力晶片順序，鍵盤移動與落點用這份
- */
 export function usePinnedDrag(
   fullOrder: string[],
   visibleOrder: string[],
@@ -49,11 +30,9 @@ export function usePinnedDrag(
 ): PinnedDnd {
   useT()
   const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
-  // 上一個鎖定的落點（遲滯）。
   const held = useRef<{ before: string | null | undefined }>({ before: undefined })
   const [announce, setAnnounce] = useState('')
   const suppress = useRef(false)
-  // 事件處理在 window 上，讀最新的順序要靠 ref。
   const latest = useRef({ fullOrder, visibleOrder, commit })
   useEffect(() => {
     latest.current = { fullOrder, visibleOrder, commit }
@@ -65,7 +44,6 @@ export function usePinnedDrag(
     const scope = from.closest('.unread-group, .unread-bar, .unread-pin-grid') ?? document
     return [...scope.querySelectorAll<HTMLElement>('.unread-chip.pinned[data-bot-id]')].map((c) => {
       const r = c.getBoundingClientRect()
-      // 量的是「沒被讓位推過」的位置：扣回它**目前實際**的 translateX（過渡到一半也對；減少動態時沒有位移就不扣）。
       const t = getComputedStyle(c).transform
       const back = t && t !== 'none' ? new DOMMatrixReadOnly(t).m41 : 0
       return { id: c.dataset.botId ?? '', left: r.left - back, top: r.top, right: r.right - back, bottom: r.bottom }
@@ -77,10 +55,8 @@ export function usePinnedDrag(
     const chip = e.currentTarget
     const touch = e.pointerType !== 'mouse'
     const start = { x: e.clientX, y: e.clientY }
-    // 只認按下這根手指（pointerId）：另一根手指的 move／up／cancel 不能拿來改落點或 commit 新順序。
     const pid = e.pointerId
     let dragging = false
-    // 長按進入拖曳之後有沒有真的移動：沒移動就放開＝什麼都不做，不是重排。
     let moved = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -108,7 +84,6 @@ export function usePinnedDrag(
       if (!dragging) {
         const far = Math.hypot(dx, dy)
         if (touch) {
-          // 長按之前就移動＝使用者在捲動，放棄這次。
           if (far > TOUCH_SLOP) end()
           return
         }
@@ -129,23 +104,19 @@ export function usePinnedDrag(
       if (!was) return
       if (touch && !moved) {
         setDrag(null)
-        // 放開後同一個 task 的 click 也吞掉，不然長按完放開會順便選到那顆 bot。
         setTimeout(() => {
           suppress.current = false
         }, 0)
         return
       }
       const picked = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
-      // 放到可見的最後面：插在被藏起來的第一顆前面，不跳到它們後面（手機主力區有 8 顆上限）。
       const { fullOrder: full, visibleOrder: shown } = latest.current
       const before = picked === null ? endBefore(full.filter((x) => x !== id), shown.filter((x) => x !== id)) : picked
       const next = moveBefore(full, id, before)
-      // 同一次渲染收起拖曳狀態與套用新順序：分兩次渲染的話，中間那一格會讓晶片先「彈回原位」再滑去新位置（useChipFlip 量的是每次渲染後的位置）。
       flushSync(() => {
         setDrag(null)
         if (next) latest.current.commit(next)
       })
-      // click 事件在 pointerup 之後同一個 task 內觸發；下一個 task 再放行。
       setTimeout(() => {
         suppress.current = false
       }, 0)
@@ -178,13 +149,11 @@ export function usePinnedDrag(
         setAnnounce(dir < 0 ? t('{name} 已經在最前面', { name: names[id] ?? '' }) : t('{name} 已經在最後面', { name: names[id] ?? '' }))
         return
       }
-      // 往左＝插在左邊那顆前面；往右＝插在右邊那顆的下一顆前面（沒有＝最後）。
       const before = dir < 0 ? visibleOrder[to] : (visibleOrder[to + 1] ?? endBefore(fullOrder, visibleOrder))
       const next = moveBefore(fullOrder, id, before)
       if (!next) return
       commit(next)
       setAnnounce(t('{name} 移到主力第 {position} 位，共 {total} 位', { name: names[id] ?? '', position: to + 1, total: visibleOrder.length }))
-      // 列重排後 DOM 節點換位，焦點可能掉；下一幀補回。
       const chip = e.currentTarget
       requestAnimationFrame(() => {
         const again = chip.isConnected ? chip : document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${CSS.escape(id)}"]`)

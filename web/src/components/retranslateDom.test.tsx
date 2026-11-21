@@ -1,7 +1,3 @@
-/**
- * 「重新翻譯」（2026-11-20）：譯文狀態才出現；按下只打一次 `?retranslate=true`，成功換成新譯文，
- * 被擋（422）就保留舊譯文。只用假的 fetch，不打真 API。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, settle, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -36,7 +32,6 @@ function Probe({ m }: { m: Message }) {
   )
 }
 
-/** 第一次手動翻回「舊譯文」；重新翻譯（`retranslate=true`）回 `redoReply`（422 時回被擋）。 */
 function stubFetch(redoReply: { status: number; body: Record<string, unknown> }, redoCalls: string[]) {
   const base = globalThis.fetch
   globalThis.fetch = (async (input: string, init?: { method?: string }) => {

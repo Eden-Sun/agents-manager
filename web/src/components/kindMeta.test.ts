@@ -1,4 +1,3 @@
-/** API kind 判斷（切片 E）：isApiKind／apiProvider 是唯一的集中判斷點。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apiProvider, isApiKind, KIND_LABEL } from './kindMeta'

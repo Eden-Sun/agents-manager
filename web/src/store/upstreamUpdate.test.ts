@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { applyUpstreamItem, loadUpstreamUpdates, parseUpstreamItem, upstreamNotice } from './upstreamUpdate.ts'
 
 const store = new Map<string, string>()
-// 模組載入時前一個檔的 happy-dom 可能還掛著（它的 teardownDom 在等 async 落地），那時 localStorage 是唯讀 getter，直接賦值會炸：用 defineProperty 蓋。
 Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   writable: true,
@@ -77,7 +76,6 @@ test('開機補讀：錯過推播的新版會跳，錯誤不會每次重整都�
   assert.equal(r.got.length, 1, '舊 daemon 沒有這支不炸')
 })
 
-/** daemon `should_notify` 只推「比上次通知更新」的版本：npm `latest` 被退回舊版再推回來，不重報（以版本號比，不比字串）。 */
 test('上游 latest 退回舊版（或字串比較順序不同）：同一瀏覽器不重報，以版本號比', () => {
   store.clear()
   const r = recorder()
@@ -87,7 +85,6 @@ test('上游 latest 退回舊版（或字串比較順序不同）：同一瀏覽
   assert.equal(r.got.length, 1, '退回 2.1.282 不重報已經看過 2.1.283 的瀏覽器')
   applyUpstreamItem({ ...CLAUDE, notify: null, latest_version: '2.1.283', text: 'claude 上游有新版 2.1.283' }, r.notify)
   assert.equal(r.got.length, 1, '推回 2.1.283 也不重報')
-  // 字串比較 "2.1.9" > "2.1.10"：先看過 2.1.10 的瀏覽器，退回 2.1.9 不能再跳。
   store.clear()
   const s = recorder()
   applyUpstreamItem({ ...CLAUDE, notify: null, latest_version: '2.1.10', text: 'claude 上游有新版 2.1.10' }, s.notify)

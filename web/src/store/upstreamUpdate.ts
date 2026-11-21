@@ -1,10 +1,3 @@
-/**
- * claude／codex「上游有新版、磁碟上還沒有」的通知（issue #707，daemon `upstream_update.rs`）。
- * 跟 header 的「重啟套用」是兩件事：這裡是還沒下載／還沒安裝，重啟換不到任何東西，所以只跳一則通知、不進批次重啟。
- *
- * 每個新版本每個瀏覽器只跳一次：看過的版本記在 localStorage。daemon 那邊也只推一次，但推的當下沒開網頁就會錯過，
- * 所以開機時再讀一次 `GET /api/upstream-updates` 補上。抓不到上游（`notify: "error"`）照樣講，只在 daemon 推的那一次。
- */
 import { writeShared } from './mobilePreview'
 import { t } from '../lib/i18n'
 
@@ -50,17 +43,12 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
   }
 }
 
-/** 版本號逐段拆開（同 daemon `parse_version`）；拆不出來回 `null`。 */
 function versionParts(v: string): number[] | null {
   const tok = (v.trim().split(/\s+/)[0] ?? '').replace(/^\[|\]$/g, '').replace(/^v/, '')
   const parts = tok.split('.').map((p) => (/^\d+$/.test(p) ? Number(p) : NaN))
   return parts.every(Number.isFinite) ? parts : null
 }
 
-/**
- * `latest` 比 `seen` 新（或還沒看過）才算。daemon 只在比上次通知更新時推（`should_notify`）：npm `latest` 被退回舊版
- * 再推回來，不能重報；所以比版本號，不比字串（`"2.1.9" > "2.1.10"` 在字串比較下是反的）。拆不出來才退回「不一樣就算」。
- */
 export function isNewerVersion(latest: string, seen: string | undefined): boolean {
   if (seen === undefined) return true
   const a = versionParts(latest)
@@ -74,7 +62,6 @@ export function isNewerVersion(latest: string, seen: string | undefined): boolea
   return false
 }
 
-/** 要跳哪一則；`seen` 是這個瀏覽器看過的版本（kind → 版本）。 */
 export function upstreamNotice(item: UpstreamItem, seen: Record<string, string>): { kind: 'info' | 'error'; text: string } | null {
   if (!item.text) return null
   if (item.notify === 'error') return { kind: 'error', text: item.text }
@@ -96,21 +83,18 @@ function markSeen(kind: string, version: string) {
     try {
       localStorage.setItem(KEY, JSON.stringify({ ...readSeen(), [kind]: version }))
     } catch {
-      /* 存不進去就是下次再跳一次 */
     }
   })
 }
 
 type Notify = (kind: 'info' | 'error', text: string, action?: { label: string; run: () => void }) => void
 
-/** `upstream_update` 幀或開機讀到的一筆。 */
 export function applyUpstreamItem(raw: unknown, notify: Notify): UpstreamItem | null {
   const item = parseUpstreamItem(raw)
   if (!item) return null
   const n = upstreamNotice(item, readSeen())
   if (!n) return item
   if (n.kind === 'info' && item.latest) markSeen(item.kind, item.latest)
-  // 帶一顆「知道了」讓它停久一點（純資訊通知 4 秒就消失，這則是要人去處理的）。
   notify(n.kind, n.text, { label: t('知道了'), run: () => {} })
   return item
 }
@@ -119,13 +103,11 @@ export async function loadUpstreamUpdates(fetchItems: () => Promise<unknown>, no
   try {
     const r = await fetchItems()
     const items = isRec(r) && Array.isArray(r.items) ? r.items : []
-    // 開機只補「有新版」：抓不到上游的那一則 daemon 已經在變化的當下推過，每次重整都跳會變成噪音。
     for (const raw of items) {
       if (!isRec(raw)) continue
       const item = applyUpstreamItem({ ...raw, notify: null }, notify)
       if (item) onItem?.(item)
     }
   } catch {
-    /* 舊 daemon 沒有這支、或暫時連不上：下一幀 `upstream_update` 會帶到 */
   }
 }

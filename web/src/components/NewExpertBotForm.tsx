@@ -82,19 +82,15 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const startBot = useStore((s) => s.startBot)
   const loadModels = useStore((s) => s.loadModels)
 
-  // 1. 角色
   const existingManager = useMemo(() => {
     return bots.find((b) => b.project_id === pid && b.role === 'manager' && !b.parent_bot_id)
   }, [bots, pid])
 
   const [role, setRole] = useState<ExpertRoleChoice>('executor')
 
-  // 專家 track
   const [track, setTrack] = useState('')
 
-  // kind / model / effort / fast
   const [kind, setKind] = useState<BotKind>('claude')
-  // 分享（使用者 2026-11-04：專家模式也要能建共享的 bot）：跟一般新增表單同一個欄位與規則。
   const [shareProfile, setShareProfile] = useState<ShareProfile | null>(null)
   const [shareFolder, setShareFolder] = useState<ShareFolderDraft>(EMPTY_SHARE_FOLDER)
   const [model, setModel] = useState<string | null>(null)
@@ -103,21 +99,17 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const [identity, setIdentity] = useState('')
   const [persona, setPersona] = useState('')
 
-  // context / 保溫自訂
   const [customizeRuntime, setCustomizeRuntime] = useState(false)
   const [runtimeDraft, setRuntimeDraft] = useState<RuntimeSettings>({})
 
-  // 可被管理者使用
   const [managerUse, setManagerUse] = useState(true)
 
-  // 名稱
   const [name, setName] = useState(() => computeDefaultName('executor', '', pid, bots))
   const nameTouched = useRef(false)
   const effortTouched = useRef(false)
   const modelTouched = useRef(false)
   const [busy, setBusy] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  // openai-api：沒啟用或沒金鑰就不能建（daemon 回 409 openai_not_configured）；讀設定失敗當作沒設定。
   const [openaiState, setOpenaiState] = useState<{ ready: boolean } | null>(null)
   useEffect(() => {
     let alive = true
@@ -132,7 +124,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const nameLabelId = useId()
   const nameHintId = useId()
 
-  // 預載各 kind 模型清單
   useEffect(() => {
     for (const k of CREATABLE_KINDS) {
       void loadModels(k, host)
@@ -141,7 +132,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   const modelsCache = useStore((s) => s.models)
 
-  // 挑選建議模型
   const pickRoleSuggested = (r: ExpertRoleChoice): { kind: BotKind; model: string | null; effort: string | null } => {
     if (r === 'executor') {
       const claudeKey = `claude@${host || 'local'}@`
@@ -162,7 +152,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       return { kind: 'codex', model: found ? found.id : null, effort: 'high' }
     }
     if (r === 'specialist') {
-      // claude sonnet medium 或 codex 最新 sol medium
       const claudeKey = `claude@${host || 'local'}@`
       const claudeList = modelsCache[claudeKey] ?? []
       const foundSonnet = pickLatestRoleModel(/sonnet/i, claudeList)
@@ -180,7 +169,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     return { kind: 'claude', model: null, effort: null }
   }
 
-  // 當 role 切換時
   const onPickRole = (r: ExpertRoleChoice) => {
     if (r === 'manager' && existingManager) return
     setRole(r)
@@ -200,7 +188,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     }
   }
 
-  // 預設角色是執行者：開表單就套用它的建議 kind／模型（不必先點一下角色卡）。
   useEffect(() => {
     if (!modelTouched.current) {
       const sugg = pickRoleSuggested(role)
@@ -210,14 +197,12 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelsCache, host])
 
-  // 專家 track 切換時更新預設名稱
   useEffect(() => {
     if (role === 'specialist' && !nameTouched.current) {
       setName(computeDefaultName('specialist', track, pid, bots))
     }
   }, [role, track, pid, bots])
 
-  // 角色預設政策
   const rolePolicy = project.role_policy?.[role] ?? {}
 
   const suggestedEffort = useMemo(() => {
@@ -228,9 +213,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     return null
   }, [role])
 
-  // 驗證
   const nameOk = isValidBotName(name.trim())
-  // claude-api 沒有 CLI 要裝（同一般新增表單）；只能當顧問：沒有 pane／終端工具，也不接派工。
   const apiKind = isApiKind(kind)
   const cliOk = kind === 'openai-api' ? openaiReady : apiKind || Boolean(tools[kind]?.installed)
   const trackOk = role !== 'specialist' || Boolean(track.trim())
@@ -239,19 +222,16 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
   const canSubmit = nameOk && cliOk && trackOk && !rangeError && !busy && !(folderIn && 'error' in folderIn)
 
-  // 送出
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!canSubmit) return
     setBusy(true)
     setErrorMsg(null)
 
-    // claude-api：daemon 沒有 context／保溫可調，也不收 CLI 欄位（identity、分享…，400 api_bot_cli_fields_unsupported）。
     const finalOverride = !apiKind && customizeRuntime && Object.keys(cleanSettings(runtimeDraft)).length > 0
       ? cleanSettings(runtimeDraft)
       : null
 
-    // 模型目前可用的強度清單與預設值
     const kindKey = `${kind}@${host || 'local'}@${identity || ''}`
     const modelsList = modelsCache[kindKey] ?? []
     const defaultM = modelsList.find((m) => m.is_default) ?? modelsList[0]
@@ -279,7 +259,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
       return
     }
 
-    // PATCH /api/bots/{id} with role, track, manager_use, runtime_override
     try {
       await patchBot(createdBotId, {
         role,
@@ -298,7 +277,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     }
   }
 
-  // 角色說明文字
   const roleDescriptions: Record<ExpertRoleChoice, string> = {
     manager: t('專案整體規劃、任務指派與進度管理（全專案僅一位）'),
     advisor: t('提供專業決策建議、架構評估與深度審查'),
@@ -306,7 +284,6 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
     specialist: t('專職負責特定領域或任務軌道（需指定 track）'),
   }
 
-  // 角色建議提示
   const roleRecommendation = (r: ExpertRoleChoice): string | null => {
     if (r === 'manager') return 'Claude Opus (high)'
     if (r === 'advisor') return 'Codex Astra (high) / Claude API Opus (high)'
@@ -317,7 +294,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
   return (
     <form className="form new-expert-bot-form" onSubmit={handleSubmit}>
-      {/* 1. 角色選擇 */}
+      {}
       <div className="field">
         <span>{t('角色')}</span>
         <div className="expert-role-picker" role="radiogroup" aria-label={t('角色')}>
@@ -353,7 +330,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </div>
       </div>
 
-      {/* 專家模式專屬：負責範圍 (track) */}
+      {}
       {role === 'specialist' ? (
         <label className="field">
           <span>
@@ -376,7 +353,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </label>
       ) : null}
 
-      {/* 2. kind / 模型 / 強度 */}
+      {}
       <div className="field">
         <span>
           Kind
@@ -387,10 +364,8 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         <div className="opt-group kinds" role="radiogroup" aria-label="kind">
           {CREATABLE_KINDS.map((k) => {
             const isApi = isApiKind(k)
-            // openai-api 沒啟用或沒金鑰：整顆停用（狀態讀完之前也停用）。
             const openaiOff = k === 'openai-api' && !openaiReady
             const missing = openaiOff ? true : isApi ? false : !tools[k]?.installed
-            // claude-api 只能當顧問：不能接派工、不能用終端工具，其他角色顯示但不能選。
             const roleBlocked = isApi && role !== 'advisor'
             const title = roleBlocked ? (k === 'claude-api' ? t('claude-api 只能當顧問：不能接派工、不能用終端工具') : t('openai-api 只能當顧問：不能接派工、不能用終端工具')) : openaiOff ? t('先到 環境設定 → OpenAI API 啟用並設定金鑰') : missing ? t('{host} 尚未安裝 {kind}', { host: host === 'local' ? t('本機') : host, kind: k }) : k
             return (
@@ -451,7 +426,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
 
       {apiKind ? null : <IdentityOptions kind={kind} host={host} value={identity} onChange={setIdentity} />}
 
-      {/* 3. context 與保溫（claude-api 沒有，BotSettingsPanel 也不出） */}
+      {}
       {apiKind ? null : <div className="field">
         <span>{t('Context 與保溫')}</span>
         <div className="expert-runtime-summary">
@@ -495,7 +470,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </div>
       </div>}
 
-      {/* 4. 可被管理者使用 */}
+      {}
       {role !== 'manager' ? (
         <label className="field row">
           <input
@@ -507,7 +482,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         </label>
       ) : null}
 
-      {/* 5. 名稱 */}
+      {}
       <label className="field">
         <span id={nameLabelId}>{t('名稱')}</span>
         <input
@@ -526,7 +501,7 @@ export function NewExpertBotForm({ project, onDone, onCreated }: NewExpertBotFor
         {name && !nameOk ? <span id={nameHintId} className="hint">{t.tr(BOT_NAME_HINT)}</span> : null}
       </label>
 
-      {/* 人設保留 */}
+      {}
       <PersonaField value={persona} onChange={setPersona} collapsible />
       {apiKind ? null : <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={project.path} />}
 

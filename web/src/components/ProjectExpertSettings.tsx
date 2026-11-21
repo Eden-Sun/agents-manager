@@ -14,7 +14,6 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   const patchProject = useStore((s) => s.patchProject)
   const [manager, setManager] = useState('')
   const [modeDraft, setModeDraft] = useState<'expert' | 'parent_child' | null>(null)
-  // 副管理者與角色設定合併成一顆儲存：一次 PATCH 送出有變更的區塊。
   const group = useProjectSaveGroup((patch) => patchProject(projectId, patch))
 
   if (!project) return null
@@ -22,7 +21,6 @@ export function ProjectExpertSettings({ projectId }: { projectId: string }) {
   const selected = manager || currentManager
   const isExpert = project.mode === 'expert'
   const mode = modeDraft ?? (isExpert ? 'expert' : 'parent_child')
-  // 一個「套用」：模式或管理者跟現況不同才可按（2026-11-01 使用者：專案設定要 review & 優化）。
   const changed = mode !== (isExpert ? 'expert' : 'parent_child') || (mode === 'expert' && selected !== currentManager)
   const apply = () => {
     void patchProject(projectId, mode === 'expert' ? { mode: 'expert', manager_bot_id: selected } : { mode: 'parent_child' }).then(() => {

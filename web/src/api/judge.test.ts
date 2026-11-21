@@ -3,11 +3,6 @@ import assert from 'node:assert/strict'
 import { judgeApiMissing } from './judge'
 import { ApiError } from './types'
 
-/**
- * issue #466：以前是 `e instanceof ApiError` 就當成「舊 daemon」，不分狀態碼，於是 500／403／502
- * 都被顯示成「這顆 daemon 還沒有這個功能（需要更新 daemon）」。約定跟 `previewApiMissing` 一樣：
- * 只有 404／405 算沒有這個端點。
- */
 test('judgeApiMissing：只有 404／405 算舊 daemon', () => {
   assert.equal(judgeApiMissing(new ApiError(404, {}, 'x')), true)
   assert.equal(judgeApiMissing(new ApiError(405, {}, 'x')), true)

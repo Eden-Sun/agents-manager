@@ -34,7 +34,6 @@ test('畫面上已經有這題就不疊卡；只看到選項、沒有題目（pa
   const pending = toPendingQuestions(RAW)
   assert.equal(questionVisibleOnScreen(pending, null), false, '畫面認不出問句')
   assert.equal(questionVisibleOnScreen(pending, '內網 http (Recommended)'), false, '只看到選項')
-  // 畫面折行會在中間插空白。
   assert.equal(questionVisibleOnScreen(pending, 'prod console 連 prod RPA 要走\n哪條路？（現在失敗是因為…'), true)
 })
 
@@ -70,8 +69,6 @@ test('畫面上是第幾題：選項只對上一部分、或兩題都對得上�
   assert.equal(pendingIndexOnScreen(TWO, null), -1)
   assert.equal(pendingIndexOnScreen([], { question: null, choices: choices('先不關') }), -1)
 })
-
-// ── Jev 的選項建議（issue #1475）：只提示；位置照 daemon 的原 questions[]／options[]，不重算門檻 ──
 
 const JEV_RAW = [
   { question: '連線方式？', multiSelect: false, options: [{ label: '內網' }, { label: '公網' }] },
@@ -125,7 +122,6 @@ test('前面的題目被丟掉、選項被濾掉時，建議仍掛在原位置�
   assert.equal(got.length, 1)
   assert.deepEqual(got[0].options.map((o) => o.label), ['甲', '乙'])
   assert.deepEqual(got[0].jev, { option: 1, label: '乙', score: 0.9 })
-  // 建議的是一個沒有 label 的選項：不掛。
   assert.equal(toPendingQuestions(raw, jevOpts([{ index: 1, scores: [0.9, 0.0, 0.1], suggested: 0 }]))[0].jev, null)
 })
 

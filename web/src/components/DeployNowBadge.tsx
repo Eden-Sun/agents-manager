@@ -1,10 +1,3 @@
-/**
- * 左上角「立即部署」（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）。
- *
- * 線上 binary 落後 origin/main、而且有會進 binary 的差異時才出現，寫落後幾個 commit；按下去先開確認框
- * （要上線的 commit 範圍、正在 working 的 bot），確認後 `POST /api/deploy/now`——daemon 寫下請求檔
- * 並叫起既有的自動部署（daemon-update-kick），直接部署那顆 commit、不等 ubuntu-ci，也不等 working 的 bot（送達臨界區等安全條件照舊）。部署在跑時 chip 改寫「部署中」、不給再按。
- */
 import { useCallback, useEffect, useState } from 'react'
 import { usePollWhileVisible } from '../hooks/usePollWhileVisible'
 import { fetchDeployStatus, startDeployNow } from '../api/deploy'
@@ -14,7 +7,6 @@ import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import './deployNow.css'
 
-/** origin/main 約 5 分鐘一個 push；一分鐘看一次夠了，開確認框時另外當場重讀。 */
 const POLL_MS = 60_000
 
 export function DeployNowBadge() {
@@ -28,11 +20,9 @@ export function DeployNowBadge() {
   const refresh = useCallback(async () => {
     const snap = await fetchDeployStatus()
     setOffline(snap.offline)
-    // 連不上就留著上一次的（標成過期、不給按）；daemon 自己說沒有才收掉。
     if (!snap.offline) setStatus(snap.status)
   }, [])
 
-  // `refresh` 不會拋（fetchDeployStatus 已經吞掉），這裡再接一次免得變成 unhandled rejection。
   const tick = useCallback(() => void refresh().catch(() => {}), [refresh])
   useEffect(() => {
     tick()
@@ -41,7 +31,6 @@ export function DeployNowBadge() {
 
   if (!deployVisible(status) || !status) return null
   const running = status.running
-  // 側欄標題列只放得下 `⇪N`；完整說法在 aria-label 與 title。
   const label = running ? t('部署中') : `${status.behind}`
   const title = offline
     ? t('連不上 daemon（可能正在重啟），這是斷線前的狀態。')
@@ -83,7 +72,6 @@ export function DeployNowBadge() {
             return
           }
           if (offline) return
-          // 框裡的範圍要是現況：當場重讀一次再打開。
           void refresh().catch(() => {}).finally(() => setOpen(true))
         }}
       >

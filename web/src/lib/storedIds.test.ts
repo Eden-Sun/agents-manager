@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { pruneStoredIds } from './storedIds.ts'
 
-/** 有 length／key 的假 localStorage（pruneStoredIds 要列舉鍵）。 */
 function stubStorage(init: Record<string, string> = {}) {
   const map = new Map<string, string>(Object.entries(init))
   ;(globalThis as unknown as { localStorage: unknown }).localStorage = {

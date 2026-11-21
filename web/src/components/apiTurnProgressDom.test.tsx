@@ -1,4 +1,3 @@
-/** claude-api 串流中：live bubble 的進度列顯示「≈ $x 目前為止」，結算後（無估價）回到「已花（含預留）」。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -37,12 +36,10 @@ test('串流估價存在時顯示「≈ $x 目前為止」（已結算＋這次�
     })
     await mount(<ApiTurnProgress botId="b1" />)
     const text = () => document.querySelector('.msg-cost')?.textContent ?? ''
-    // 空文字（只在思考）也要顯示估價；0.02 已結算 + 0.012345 估價 = 0.032。
     await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
     assert.match(text(), /≈ \$0\.032/)
     assert.doesNotMatch(text(), /預留/)
 
-    // 估價消失（回合結算、或換成別的 turn 的幀）：回到已花（含預留）。
     await act(async () => {
       useStore.setState({ liveReply: { b1: { turnId: 'other', text: '', activity: '', alert: '', revision: 1, estCostMicrousd: 5 } } })
     })
@@ -70,7 +67,6 @@ test('進行中回合的速度與目前設定不一致時，標出「本回合�
     await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
     const note = () => document.querySelector('.api-speed-note')?.textContent ?? ''
     assert.match(note(), /本回合仍是 fast，下一回合起改為 standard/)
-    // 設定與本回合速度一致：不提示。
     await act(async () => { useStore.setState({ bots: [{ id: 'b1', name: 'api', kind: 'claude-api', fast: true, project_id: 'p' }] } as never) })
     assert.equal(note(), '')
   } finally {

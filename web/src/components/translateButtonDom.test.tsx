@@ -1,6 +1,3 @@
-/**
- * 對話裡的「翻譯」鈕：英文 assistant 訊息有、中文沒有；點了打 daemon，譯文顯示在原文下方，可切換顯示。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -11,7 +8,6 @@ import { resetTranslateReady } from './useTranslateReady'
 
 before(async () => {
   await setupDom()
-  // 同一個程序裡前面的測試檔可能已經掛過英文訊息、把「未啟用」的讀取結果留在模組快取：從乾淨的開始。
   resetTranslateReady()
   resetTranslationStore()
 })
@@ -106,7 +102,6 @@ test('未啟用：按鈕事先標「翻譯（未啟用）」，按了只提示�
   assert.ok(!reqs.some((r) => r.path.includes('/translate')), '沒有打翻譯 API')
 })
 
-// 使用者 2026-11-04：「點過翻譯不要自動換回原文，維持譯文優先，除非 user 再次 click」
 const TR_ROUTE = (r: { path: string }) => (r.path.endsWith('/messages/m1/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {})
 const translateCalls = (reqs: { method: string; path: string }[]) => reqs.filter((r) => r.method === 'POST' && r.path.includes('/translate')).length
 
@@ -125,7 +120,6 @@ test('點翻譯 → unmount → 重新 mount 仍是譯文，沒有第二次 API 
 test('雙向切換：手動換面原→譯帶 msg-swap-forward 且圖示 spin-forward，譯→原帶 msg-swap-backward 且圖示 spin-backward', async () => {
   fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
-  // 原→譯
   await click(document.querySelector('.msg-translate')!)
   await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
   const fwdBody = document.querySelector('.msg-swap-forward')
@@ -133,7 +127,6 @@ test('雙向切換：手動換面原→譯帶 msg-swap-forward 且圖示 spin-fo
   const fwdIco = document.querySelector('.msg-translate-ico.spin-forward')
   assert.ok(fwdIco, '原→譯應有 spin-forward 圖示旋轉 class')
 
-  // 譯→原
   await click(document.querySelector('.msg-translate')!)
   await until(() => document.querySelector('.msg-translation') === null, '切回原文')
   const bwdBody = document.querySelector('.msg-swap-backward')
@@ -146,12 +139,10 @@ test('快速連點 3 下：以最後一次為準停在譯文，動畫為 msg-swa
   const reqs = fakeApi((r) => (r.path.includes('/translate') ? { translation: '我修好了解析器的 bug。', model: 'claude-haiku-5-5', cached: false, cost_usd: 0.00042 } : r.path.endsWith('/claude-api/settings') ? SETTINGS_ON : {}))
   await mount(<Probe m={msg(EN)} />)
   const btn = document.querySelector<HTMLElement>('.msg-translate')!
-  // 第一次點擊：打 API 並切到譯文
   await click(btn)
   await until(() => document.querySelector('.msg-translation') !== null, '第一次譯文顯示')
   assert.equal(translateCalls(reqs), 1)
 
-  // 快速連點：譯→原、原→譯、譯→原、原→譯
   await click(btn)
   await click(btn)
   await click(btn)
@@ -169,7 +160,6 @@ test('重掛不播動畫：初次掛載、偏好恢復與 remount 不帶 msg-swa
   await until(() => document.querySelector('.msg-translation') !== null, '譯文顯示')
   await unmountAll()
 
-  // 模擬虛擬列重掛／切換 bot 回來：記憶體狀態中 show 已經是 true
   await mount(<Probe m={msg(EN)} />)
   assert.ok(document.querySelector('.msg-translation'), '重掛後仍是譯文')
   assert.equal(document.querySelector('.msg-swap-forward'), null, '重掛不可帶 msg-swap-forward')
@@ -204,8 +194,6 @@ test('prefers-reduced-motion：直接換面，正文與圖示都不播放動畫'
     window.matchMedia = origMatchMedia
   }
 })
-
-
 
 test('localStorage 有記錄時 mount 自動翻（載入中顯示原文＋翻譯中…），快取命中仍顯示原本金額、不寫未扣費', async () => {
   localStorage.setItem('am.msgTranslate.want', JSON.stringify(['m1']))
@@ -257,5 +245,4 @@ test('按回原文後 remount 仍是原文，且從記憶清單移除', async ()
   assert.equal(document.querySelector('.msg-translate')?.textContent, '⇄ 譯文')
   assert.equal(translateCalls(reqs), 1)
 })
-
 

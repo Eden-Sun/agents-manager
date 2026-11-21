@@ -1,4 +1,3 @@
-/** #1246：側欄下緣的動作選單在可行時向上展開。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

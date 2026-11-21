@@ -1,8 +1,3 @@
-/**
- * 分享 bot（SPEC「分享 bot」）的主 UI：受限 bot 的設定裡才有分享區塊，分享中隨時顯示完整連結；
- * 聊天區頂端的分享鈕只給受限 bot（一顆圖示鈕：未分享＝開啟並複製、分享中＝開選單，第一項複製連結，重產／關閉都要確認；#1180）；側欄名字旁 🔗。
- * 重產要確認、新連結跟舊的不同；關閉要確認。分享使用者的訊息標「🔗 分享使用者」。mock 的端點規則同契約 B。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -22,8 +17,6 @@ afterEach(async () => {
   await unmountAll()
   resetStoreForTest()
 })
-// 預設當成 https（剪貼簿可用）；非 secure context 的行為由專門那條測試覆寫。要在 setupDom 之後設：
-// 整套一起跑時前一個測試檔 teardown 掉了 window，這裡才註冊新的（#1765：模組載入時設在舊的 window 上）。
 before(async () => {
   await setupDom()
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true })
@@ -49,7 +42,6 @@ async function setup() {
   return { mock, shared, plain }
 }
 
-/** 讓出 n 輪 macrotask（不進 act：給暫時關掉 act 環境、靠 React 自己排程的那幾段用）。 */
 const turns = async (n: number) => {
   for (let i = 0; i < n; i++) await new Promise((resolve) => setTimeout(resolve, 0))
 }
@@ -252,7 +244,6 @@ test('側欄：分享用 bot 名字旁 🔗，分享中亮起；一般 bot 沒�
   assert.ok(marks()[0].classList.contains('on'), '分享中亮起')
   assert.equal(marks()[0].getAttribute('aria-label'), '分享中')
   assert.equal(marks()[0].textContent, '🔗')
-  // 信任分享：🔓、另一個樣式，一眼跟受限的分得出來。
   await act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_profile: 'trusted' as const } : b)) })))
   assert.equal(marks()[0].textContent, '🔓')
   assert.ok(marks()[0].classList.contains('trusted'))
@@ -418,12 +409,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     const before = copied[0]
     assert.ok(before, '分享中選單的「複製連結」就複製手上那條')
 
-    // 別處（設定面板或另一個分頁）重產：share_enabled 不變，只來一幀 bot_share_changed。
     const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
-    // 重抓是 effect 裡的非同步回寫：整段包在同一個 act 裡，effect 才會在 act 裡跑、回寫才會被 flush 進 DOM。
-    // 第二次 store 更新逼 React 在 render 前先 flush 掛著的 effect（notify 是這個元件的 selector）。
-    // harness 的 act 環境會吞掉「不在 act 裡」的 fetch 回寫（effect 裡重抓連結的 setShare），DOM 永遠不換。
-    // 這一段暫時關掉 act 環境讓 React 照常排程，等重抓回來再還原（finally 也還原）。
     const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
     g.IS_REACT_ACT_ENVIRONMENT = false
     try {
@@ -438,7 +424,7 @@ test('別處重產連結（share_enabled 沒變）：聊天頂端的分享鈕複
     await until(() => copied.length === 2, '重產後複製新連結')
     assert.equal(copied.at(-1), r.url, '複製的是重產後的新連結')
     assert.notEqual(copied.at(-1), before)
-    await settle() // 把非 act 的排程收乾淨，不留給下一條測試
+    await settle()
   } finally {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
     document.execCommand = origExec
@@ -463,7 +449,6 @@ test('聊天分享鈕：複製連結重新讀取狀態，不會把別處剛關�
   }) as typeof rawTransport.request
   try {
     await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })
-    // 模擬另一個分頁的狀態尚未送到本分頁：UI 仍顯示 enabled=true。
     assert.equal(mainBtn().getAttribute('aria-label'), '複製分享連結')
     await act(async () =>
       useStore.setState((s) => ({ shareRev: { ...s.shareRev, [shared.id]: (s.shareRev[shared.id] ?? 0) + 1 } })),
@@ -542,9 +527,7 @@ test('別處重產連結（share_enabled 沒變）：設定面板換成新連結
   const before = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
   assert.ok(before, '分享中就看得到完整連結')
 
-  // 從聊天頂端或另一個分頁重產：share_enabled 不變，只來一幀 bot_share_changed。
   const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
-  // 同 #1098：harness 的 act 環境會吞掉 effect 裡重抓的非 act 回寫，這一段暫時關掉 act 環境，finally 還原。
   const g = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
   g.IS_REACT_ACT_ENVIRONMENT = false
   try {
@@ -656,13 +639,11 @@ test('分享設定：晚到的 POST 回應不覆蓋較新 WS/GET，且仍執行�
     await click(btn('重產'))
     assert.ok(resolvePost)
 
-    // 別處重產觸發 WS/GET 最新狀態
     current = state('https://example.invalid/s/latest-from-other-device')
     await act(async () => useStore.setState({ shareRev: { 'b-1826': 2 } } as never))
     await settle()
     assert.equal(value(), current.url)
 
-    // 晚到的 POST 放行，不覆蓋較新狀態，但通知仍有發出
     await act(async () => resolvePost(state('https://example.invalid/s/obsolete-local-post')))
     await settle()
     assert.equal(value(), 'https://example.invalid/s/latest-from-other-device')
@@ -817,20 +798,16 @@ test('分享按鈕與面板：自己 POST 時 WS 事件先到、POST 回應後�
     await mount(<ShareLinkButton botId="b-1826-b" />)
     await settle()
 
-    // 分享中點擊主按鈕開選單，點擊重產
     await click(mainBtn())
     await click(btn('重產連結'))
     await click(btn('重產'))
     assert.ok(resolvePost, 'POST /rotate 發出中')
 
-    // 模擬 daemon 先廣播 bot_share_changed，WS 讓 store 的 shareRev 推進
-    // 此時元件因 rev 推進發起新 GET（或者尚未完成套用）
     await act(async () => {
       useStore.setState({ shareRev: { 'b-1826-b': 1 } } as never)
     })
     await until(() => getCalls === 2, 'WS 事件後的 GET 已發出')
 
-    // 本頁 POST 的 WS 事件先到，但 POST 回應不能越過仍在途的 GET。
     await act(async () => resolvePost(state(newUrl)))
     await settle()
     assert.equal(copied.length, 0, '權威 GET 尚未完成時不能複製 POST 回應')

@@ -1,7 +1,3 @@
-/**
- * codex 回合進行中改 model／effort，儲存會先按 Esc 停下回合、套用後送 continue（#1681）：儲存前就要說明。
- * 只改 fast、回合沒在跑、不是 codex 都不出現這條說明。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, click, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

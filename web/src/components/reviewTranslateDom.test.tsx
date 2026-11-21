@@ -1,7 +1,3 @@
-/**
- * 終端 review 頁（Ready to submit…）的譯文：翻譯在飛的途中若父層換了（元件重掛），譯文仍要套上去；
- * auto 與手動翻譯都要顯示。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -23,7 +19,6 @@ beforeEach(() => {
 afterEach(async () => {
   await unmountAll()
   resetStoreForTest()
-  // 模組層級的快取（設定、譯文）不能帶到同一個 bun 程序的下一個檔案。
   resetTranslateReady()
   resetPendingQuestionTranslation()
 })

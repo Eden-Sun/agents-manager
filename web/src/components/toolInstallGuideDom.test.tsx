@@ -1,10 +1,3 @@
-/**
- * 缺工具安裝引導（ToolInstallGuide）與黃字提醒說明（BaselineLine）：
- * - 依 OS 只列對應指令；rtk 沒有指令就說明而不是猜
- * - 重新檢查按鈕會呼叫 onRecheck，執行中停用
- * - 黃字項附一句說明
- * - HostsPanel 的 placeholder 是通用範例，不是擁有者的私人主機
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll, act } from '../testing/domHarness'

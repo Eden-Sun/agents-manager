@@ -10,12 +10,6 @@ import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import './updateBadge.css'
 
-/**
- * claude 下載好新版只在 pane 底部印 `Update installed`；daemon 讀成 `runs.update_notice`，這顆 chip 點下去走重啟套用。
- * 2026-09-10：一律先開確認框並列 changelog。`variant="dot"`：側欄 bot 列上的小 ⌃⌃（2026-09-11 使用者：「click to update latest」）。
- * 2026-09-11 使用者：chip 版在批次（`UpdateQuotaChip`）蓋得到時不畫，省標題列第一排寬度；判斷只用 `updateBatch.ts` 與 daemon 同一份規則。
- * 2026-09-19：「蓋得到」含在忙那組——額度列 chip 一樣畫著它。
- */
 export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; variant?: 'chip' | 'dot' | 'inline' }) {
   const t = useT()
   const run = useStore((s) => s.runs[botId] ?? null)
@@ -26,31 +20,24 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const restartBot = useStore((s) => s.restartBot)
   const notify = useStore((s) => s.notify)
   const [restartingLocal, setRestarting] = useState(false)
-  // 這顆 bot 在別處（⟳ 徽章、設定面板）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
   const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
   const restarting = restartingLocal || restartingShared
   const [confirming, setConfirming] = useState(false)
 
-  // selector 回純布林：`updateBatchCounts` 每次回新陣列，連 `useShallow` 都擋不住（見 `UpdateQuotaChip.tsx`）。
-  // 忙碌的也算：額度列的 chip 把它列在「在忙」那組，照樣畫著；再畫一顆就是同一個 ⌃⌃ 兩次（2026-09-19 使用者：「logo 重工了」）。
-  // 這顆 bot 自己要套用走 context bar 版本號旁的「升級」（`inline`）。
   const coveredByBatch = useStore((s) => {
     const { ready, busy, passive } = updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
     return [ready, busy, passive].some((list) => list.some((b) => b.botId === botId))
   })
-  // 子 agent／default session 不在一鍵重啟裡（header 不算它）：新版資訊留在這一列的 tooltip（#1911）。
   const passiveHint = useStore((s) => {
     const bot = s.bots.find((b) => b.id === botId)
     return bot ? passiveUpdateHint(bot, s.runs[botId]) : null
   })
 
-  // 子 agent 由父 Bot 重開，`/restart` 會回 409：不給按鈕，只留被動提示（#1911）。
   const isChild = useStore((s) => {
     const bot = s.bots.find((b) => b.id === botId)
     return bot ? isChildBot(bot) : false
   })
   const notice = run?.update_notice ?? null
-  // 要看的版本區間：codex 的新版還沒裝、磁碟是舊的，兩個版本都從通知讀（issue #561）。
   const range = updateRange(botKind, notice, runningVersion)
   const review = useReviewAsk(botKind, host, range.from, range.to, false)
   if (!notice) return null
@@ -70,15 +57,12 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
         </span>
       )
     }
-    // chip：context bar 的 inline 已畫同一則提示，標題列不再重複（跟批次蓋得到時不畫同一條線）。
     return null
   }
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
-  // 「分析影響」claude 與 codex 同一套（issue #561）；其他 kind 沒有 changelog 來源也沒有任務檔。
   const canReview = botKind === 'claude' || botKind === 'codex'
-  // codex 的新版通常還沒安裝（issue #388）：重啟換不到任何東西，先講清楚要裝；裝好之後（通知寫「已安裝」）才是重啟套用。
-  const needsInstall = botKind !== 'claude' && !notice.includes('已安裝') // i18n-ignore：比對 daemon 通知原文
+  const needsInstall = botKind !== 'claude' && !notice.includes('已安裝')
   const restart = () => {
     if (needsInstall) {
       setConfirming(false)
@@ -91,9 +75,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
       if (ok) notify('info', t('{name} 已用新版 {kind} 重新啟動', { name: botName, kind: botKind }))
     })
   }
-
-  // 使用者不想現在重啟，但想知道「這版有沒有我們用得上的東西」：交給 影響分析，結論回更新框。
-  // 唯讀，所以按完就關框，不擋重啟那條路（使用者 2026-09-19）。
 
   const confirmDialog = (
     <ConfirmRestart
@@ -130,7 +111,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
           disabled={restarting}
           aria-label={t('{name}：有更新，點一下套用', { name: botName })}
           title={`${passivePrefix}${t('{notice}｜點一下先看新版改了什麼，確認後重啟這個 bot（session 會 --resume）{busy}', { notice, busy: busyNote })}`}
-          // 疊在 bot 列上：按更新不該順便觸發列的切換。
           onClick={(e) => {
             e.stopPropagation()
             setConfirming(true)
@@ -143,7 +123,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     )
   }
 
-  // `inline`：context bar 版本號右邊那顆（2026-09-12 使用者：「可升級就出現在版本號右邊以方便點選」）；不搶標題列寬度，一律畫。
   if (variant === 'inline') {
     return (
       <>
@@ -162,7 +141,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
     )
   }
 
-  // 批次蓋得到就不畫（見檔頭）；但確認框開著或重啟中要留著，否則對話框會被抽走。
   if (coveredByBatch && !confirming && !restarting) return null
 
   return (
@@ -182,14 +160,6 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   )
 }
 
-/**
- * 派不出去時要講得出**下一步**。
- *
- * 404／405：這顆 daemon 還沒有這支 API（POST 掉進前端的 catch-all，那條只收 GET 所以是 405——
- * 2026-09-19 使用者實測，當時線上是 a8b84a63、功能還沒上線）。其餘 409 的 `message` 本來就是
- * 「為什麼派不出去」（沒設協調者、沒裝 claude-release-task.md），原樣顯示。
- */
-/** 確認框：changelog 在上，忙碌警語在下。 */
 function ConfirmRestart({
   open,
   kind,

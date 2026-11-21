@@ -82,8 +82,6 @@ test('2026-09-22：codex 磁碟已裝好新版跟 claude 一樣可以重啟；�
 })
 
 test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：進 passive，不算 ready 也不算「在忙」（#1911）', () => {
-  // 2026-09-22 起 daemon 一律跳過子 agent；框裡若還把它算進「重啟 N 顆」，數字跟實際重啟的對不上。
-  // 它也不是「暫時在忙」：算進灰色 ⇑N 會讓鈕永遠 disabled、卻永遠等不到（#1911）。
   const bots = [bot('kid', { managed_by: 'child' }), bot('kid2', { parent_bot_id: 'mine' }), bot('mine')]
   const runs = { kid: run('kid'), kid2: run('kid2'), mine: run('mine') }
   const c = updateBatchCounts(bots, runs, none)
@@ -168,7 +166,6 @@ test('背景工作還在跑的 bot 不由一鍵重啟動（daemon Skip::Backgrou
     c.busy.map((x) => [x.name, x.why]),
     [['bg', '背景執行中（2）']],
   )
-  // 正在跑的先說「正在跑」，跟 daemon skip_reason 的順序一致。
   const working = updateBatchCounts([bot('w')], { w: run('w', { agent_status: 'working', background_jobs: 1 }) }, none)
   assert.equal(working.busy[0].why, '正在跑')
 })
@@ -178,7 +175,7 @@ test('巡邏還沒看過的 run（background_jobs 是 null）不擋，但在 rea
   const runs = {
     clean: run('clean', { background_jobs: 0 }),
     fresh: run('fresh', { background_jobs: null }),
-    legacy: run('legacy'), // 舊 daemon 沒帶這個欄位：跟以前一樣當 0，不標
+    legacy: run('legacy'),
   }
   const c = updateBatchCounts(bots, runs, none)
   assert.deepEqual(
@@ -205,8 +202,6 @@ test('確認框的名單：背景狀態未知的在名字後面標出來，看�
   assert.equal(readyLabel({ botId: 'a', name: 'a' }), 'a')
   assert.equal(readyLabel({ botId: 'b', name: 'b', backgroundUnknown: true }), 'b（背景狀態未知）')
 })
-
-// —— header 的 codex「安裝＋重啟」（SPEC §6.9，cli_update）——
 
 const PENDING = 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟'
 const INSTALLED = 'codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用'

@@ -1,4 +1,3 @@
-/** 瀏覽器 logo（12px，跟徽章字級同高）。畫成幾何簡圖就夠認，不用載原廠圖。 */
 export function ChromeIcon() {
   return (
     <svg className="browser-icon" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">

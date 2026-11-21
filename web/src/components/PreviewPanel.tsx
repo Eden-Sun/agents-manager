@@ -1,7 +1,3 @@
-/**
- * 右半面板的「預覽」分頁（issue #253）：頂層 bot 的專案起本機 dev server（vite／Next／…），iframe 內嵌顯示。
- * 狀態來自 store.previews（WS `preview_changed` 即時寫入）；進來與 daemon 重連時 GET 一次補齊 dir／error。
- */
 import { useCallback, useEffect, useState } from 'react'
 import { orderRows, showRepo } from '../lib/previewList'
 import { shownPreviewErr } from '../lib/previewErr'
@@ -15,26 +11,18 @@ import './previewPanel.css'
 
 type PreviewTranslate = ReturnType<typeof useT>
 
-/** 錯誤訊息＋試過的路徑（路徑可能很長，收進可展開的細節）。 */
 interface PreviewErr {
   text: string
   tried: string[]
-  /** 偵測不到能起的 dev server：只是「AG Man 自己起不了」，不是死路——下面的 others 照樣能接。 */
   noConfig: boolean
 }
 
-/**
- * daemon 的 409 只帶機器代碼（`LcError::conflict` 的 body 沒有 `message`，而 `ApiError` 的 message 就是
- * 那個 `reason`），所以人話在 `api/preview.ts::previewReasonText`；認不出來的至少寫成「代碼（HTTP 狀態）」
- * 而不是只丟一個英文字（issue #524）。
- */
 function startError(e: unknown): PreviewErr {
   const plain = (text: string): PreviewErr => ({ text, tried: [], noConfig: false })
   if (previewApiMissing(e)) return plain(PREVIEW_API_MISSING)
   if (e instanceof ApiError) {
     const reason = String(e.body.reason ?? e.body.error ?? '')
     const text = previewReasonText(reason, e.body)
-    // 偵測不到設定檔：不是死路（下面的 others 照樣能接），另外標記並列出試過的路徑。
     if (NO_DEV_REASONS.has(reason)) {
       const tried = Array.isArray(e.body.tried) ? e.body.tried.map(String) : []
       return { text: text ?? e.message, tried, noConfig: true }
@@ -45,7 +33,6 @@ function startError(e: unknown): PreviewErr {
   return plain(e instanceof Error ? e.message : String(e))
 }
 
-/** 次要說明：降一級的小字，試過的路徑收進 <details>。 */
 function ErrNote({ err }: { err: PreviewErr }) {
   const t = useT()
   return (
@@ -67,50 +54,44 @@ function ErrNote({ err }: { err: PreviewErr }) {
   )
 }
 
-/**
- * 從手機或別台機器開的頁面連不到釘在 loopback 的 dev server（issue #527）：`running` 照舊，但 iframe
- * 換成這段說明——不然畫面就只是一片空白，而工具列還寫著網址。
- */
 export function OutOfReachNote({ hostname, https, t }: { hostname: string; https: boolean; t?: PreviewTranslate }) {
   return (
     <div className="preview-empty" role="status">
-      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      {}
       <h2 className="preview-title">{t ? t('這台裝置看不到這個預覽') : '這台裝置看不到這個預覽'}</h2>
       <p className="preview-body">
-        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {}
         {t ? t.x('dev server 只綁在跑 daemon 的那台機器上（{loopback}），而這一頁是從 {hostname} 開的，連不過去。', {
           loopback: <code>127.0.0.1</code>, hostname: <code>{hostname}</code>,
         }) : <>dev server 只綁在跑 daemon 的那台機器上（<code>127.0.0.1</code>），而這一頁是從 <code>{hostname}</code> 開的，連不過去。</> /* i18n-ignore */}{' '}
-        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {}
         {t ? t.x('要從手機或別台機器看，daemon 要開 {allowLan}（它才會讓 dev server 綁對外介面）。', {
           allowLan: <code>allow_lan</code>,
-        }) : <>要從手機或別台機器看，daemon 要開 <code>allow_lan</code>（它才會讓 dev server 綁對外介面）。</> /* i18n-ignore */}
-        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        }) : <>要從手機或別台機器看，daemon 要開 <code>allow_lan</code>（它才會讓 dev server 綁對外介面）。</> }
+        {}
         {https ? ` ${t ? t('這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。') : '這一頁還是 https，http 的 iframe 也會被瀏覽器當混合內容擋掉。'}` : ''}
       </p>
-      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      {}
       <p className="preview-body">{t ? t('預覽還在跑，在那台機器上開一樣的網址就看得到。') : '預覽還在跑，在那台機器上開一樣的網址就看得到。'}</p>
     </div>
   )
 }
 
-/** https 頁面嵌 http 的 iframe 會被瀏覽器當混合內容擋掉：一片空白沒有說明（#1212）。講清楚，「在新分頁開」照常可按。 */
 export function MixedContentNote({ url, t }: { url: string; t?: PreviewTranslate }) {
   return (
     <div className="preview-empty" role="status">
-      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      {}
       <h2 className="preview-title">{t ? t('這一頁沒辦法內嵌這個預覽') : '這一頁沒辦法內嵌這個預覽'}</h2>
       <p className="preview-body">
-        {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+        {}
         {t ? t.x('這一頁是 https，而 dev server 是 http（{url}）：瀏覽器會把 http 的 iframe 當混合內容擋掉。', { url: <code>{url}</code> }) : <>這一頁是 https，而 dev server 是 http（<code>{url}</code>）：瀏覽器會把 http 的 iframe 當混合內容擋掉。</>}
       </p>
-      {/* i18n-ignore: standalone server-render tests use the Traditional Chinese fallback. */}
+      {}
       <p className="preview-body">{t ? t('預覽還在跑，按上面的「在新分頁開」直接看。') : '預覽還在跑，按上面的「在新分頁開」直接看。'}</p>
     </div>
   )
 }
 
-/** mock 模式沒有真的 dev server：iframe 放一頁說明，截圖與手動驗才看得到「running」長相。 */
 const mockDoc = () => `<!doctype html><meta charset="utf-8"><body style="font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f6f8fa;color:#1b2430"><div style="text-align:center"><h2 style="margin:0 0 6px">Dev server</h2><p style="margin:0;color:#5e6a78">${t('（mock 預覽畫面）')}</p></div>`
 
 const RELATION_TITLE: Record<PreviewRelation, string> = {
@@ -125,7 +106,6 @@ const RELATION_NOTE: Record<PreviewRelation, string> = {
   other: msg('不是這顆 bot 的程式碼'),
 }
 
-/** 本機所有在跑的 dev server，依 relation 分組；一筆一行、整列可點＝接上（斷開時不會關掉對方）。unknown（多半是後端）預設收起。 */
 function OthersList({
   others,
   root,
@@ -205,15 +185,11 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   const notify = useStore((s) => s.notify)
   const [pending, setPending] = useState<'start' | 'stop' | null>(null)
   const [startErr, setErr] = useState<PreviewErr | null>(null)
-  // 背景讀預覽狀態（GET）失敗的那條：跟按鈕的錯誤分開存，下一次讀成功就清掉，不然紅色警示會一直釘在跑起來的預覽上。
   const [loadErr, setLoadErr] = useState<PreviewErr | null>(null)
   const err = shownPreviewErr(startErr, loadErr)
-  // GET 失敗：不能拿 state 帶的 starting 當真，否則分頁會永遠卡在「啟動中」。
   const [loadFailed, setLoadFailed] = useState(false)
-  // 「重新整理」換 key 強制重載 iframe；跨 origin 拿不到 contentWindow.location.reload。
   const [nonce, setNonce] = useState(0)
 
-  // 首屏先用 /api/state 帶的簡版，GET 回來再蓋掉。
   const root = useStore((s) => s.projects.find((x) => x.id === bot?.project_id)?.path ?? bot?.cwd ?? null)
   const fromState = bot?.preview
   const p0: Preview =
@@ -221,7 +197,6 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   const p: Preview = loadFailed && p0.status === 'starting' ? PREVIEW_OFF : p0
 
   const seenStatus = stored?.status
-  // 快照（`refreshState`，重連與 resync 都會跑）的 status／port 變了，代表漏掉了 `preview_changed`：重讀一次（#1211）。
   const snapStatus = bot?.preview?.status ?? null
   const snapPort = bot?.preview?.port ?? null
   useEffect(() => {
@@ -269,13 +244,11 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
     }
   }, [botId, notify, setPreview, t])
 
-  // 多個候選目錄時讓使用者挑；沒挑＝不帶 dir，由 daemon 用第一個。
   const [pickDir, setPickDir] = useState('')
   const attached = p.source === 'attached'
   const busy = pending !== null
   const url = p.port ? previewUrl(p.port) : null
 
-  // 啟動按鈕會跑什麼：選中的候選目錄（沒挑＝第一個）＋它的指令；沒有候選時退回 daemon 回的 command。
   const chosen = p.candidates.find((c) => c.dir === pickDir) ?? p.candidates[0] ?? null
   const willRun = chosen ? { dir: chosen.dir, command: chosen.command ?? p.command } : p.dir ? { dir: p.dir, command: p.command } : null
   const startBlock = (
@@ -313,13 +286,11 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   )
 
   if (p.status === 'running' && url) {
-    // `allow_lan` 關著時 daemon 把 dev server 釘在 loopback（#434／#452），這個頁面不是從那台機器開的就連不到（#527）。
     const outOfReach = previewOutOfReach(p.lan, location.hostname)
-    // https 頁面嵌 http 的 iframe 會被擋（#1212）：換成說明，「在新分頁開」照常可按。
     const mixed = !outOfReach && previewMixedContent(location.protocol, location.hostname)
     return (
       <div className="preview-pane">
-        {/* 跑起來之後這一列就是預覽欄的標題列（2026-09-20 使用者：「兩排 header 可併在同一排」）。 */}
+        {}
         <div className="preview-bar merged">
           {headStart}
           <span className="preview-url" title={url}>
@@ -401,7 +372,7 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
             ) : null}
             {p.error ? <pre className="preview-log">{p.error}</pre> : null}
             <div className="preview-actions">
-              {/* 重試就是重試失敗的那個目錄（#1103）；不是候選就不帶，免得 daemon 以 400 拒絕。 */}
+              {}
               <button type="button" className="btn primary" disabled={busy} onClick={() => void start(p.dir && p.candidates.some((c) => c.dir === p.dir) ? { dir: p.dir } : undefined)}>
                 {pending === 'start' ? t('重試中…') : t('重試')}
               </button>
@@ -416,7 +387,6 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
             <h2 className="preview-title">{t('預覽')}</h2>
             {p.others.length > 0 ? (
               p.others.some((o) => o.relation === 'same_dir') ? (
-                // 本機已有同目錄的 dev server 在跑：直接接上是主角，自己起放次要。
                 <>
                   <OthersList
                     others={p.others}
@@ -431,7 +401,6 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
                   </details>
                 </>
               ) : (
-                // 本 bot 目錄沒有 dev server（全是其他 worktree 或專案）：預設讓使用者啟動預覽，其他 servers 收進摺疊。
                 <>
                   <p className="preview-body">
                     {t.x('替 {bot} 的專案起 dev server（vite、Next 等），畫面直接顯示在這裡。會在 {directory} 底下找 {viteConfig} 或帶 {dev} script 的 {packageJson}。', {

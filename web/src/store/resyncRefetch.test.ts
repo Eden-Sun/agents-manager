@@ -1,7 +1,3 @@
-/**
- * `resync`／重連之後，只靠 WS 事件維持的資料也要整份重拉：事件漏掉就沒有別的來源會補。
- * 身份停用（`identity_prefs_changed`）以前整個分頁只在第一次 `refreshState` 抓一次。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
@@ -30,7 +26,6 @@ test('resync 之後身份停用名單整份重拉：別的分頁停用／恢復�
   await settle()
   assert.deepEqual(useStore.getState().disabledIdentities, [], '第一次載入：沒有人被停用')
 
-  // 斷線期間別的瀏覽器停用了 cc1，`identity_prefs_changed` 沒收到。
   disabled = [{ host: 'local', kind: 'claude', identity: 'cc1' }]
   requests.length = 0
   dispatchFrameForTest({ type: 'resync', seq: 5 })
@@ -101,7 +96,6 @@ test('resync 之後重抓 upstream-updates：斷線期間出的新版補得回�
   await settle()
   assert.equal(useStore.getState().upstreamUpdates.codex, undefined, '一開始沒有新版')
 
-  // 斷線期間 codex 出了新版，`upstream_update` 幀漏掉了。
   items = [{ kind: 'codex', latest_version: '9.9.9', target_version: '9.9.9', has_update: true, hosts: [], text: 'codex 9.9.9 可安裝' }]
   requests.length = 0
   dispatchFrameForTest({ type: 'resync', seq: 5 })
@@ -140,7 +134,6 @@ test('identity-prefs 在路上時收到的 identity_prefs_changed 不被舊快�
   routeDaemon(async (r) => {
     if (r.path.endsWith('/identity-prefs')) {
       calls += 1
-      // 第一次是變更之前讀的舊名單，等到 WS 事件已經套進去之後才回來。
       if (calls === 1) {
         await gate
         return json({ disabled: [] })

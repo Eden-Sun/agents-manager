@@ -13,7 +13,6 @@ import './identitiesPanel.css'
 
 export { IdentityBadge } from './IdentityRow'
 
-/** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 const SWITCHABLE_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
 const LAST_TAB_KEY = 'agm.identities.host-tab'
 const FRESH_MS = 6000
@@ -22,7 +21,7 @@ function readLastTab(): string | null {
   try {
     return globalThis.localStorage?.getItem(LAST_TAB_KEY) ?? null
   } catch {
-    return null // 讀不到（隱私模式、被擋）就當沒記住
+    return null
   }
 }
 
@@ -30,7 +29,6 @@ function writeLastTab(name: string) {
   try {
     globalThis.localStorage?.setItem(LAST_TAB_KEY, name)
   } catch {
-    // 寫不進去不影響功能
   }
 }
 
@@ -49,9 +47,7 @@ export function IdentitiesPanel() {
   const hostNames = ['local', ...hosts.map((h) => h.name)]
   const [picked, setPicked] = useState<string | null>(() => readLastTab())
   const active = picked && hostNames.includes(picked) ? picked : 'local'
-  // 新增對話框：nullable＝關著；kind 是從哪張 CLI 卡打開的（頁首打開＝不預選）。
   const [adding, setAdding] = useState<{ kind?: BotKind } | null>(null)
-  // 剛建好的身份：切到那台主機、捲到那一列並標亮一下，列上顯示尚未登入＋立即登入。
   const [fresh, setFresh] = useState<{ host: string; name: string } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -78,7 +74,6 @@ export function IdentitiesPanel() {
     ...hosts.map((h) => summarize(h.name, h.name, h.connected, h.tools, h.identity_status)),
   ]
   const activeConnected = active === 'local' ? localConnected : hosts.find((h) => h.name === active)?.connected !== false
-  // 只有一台主機時不顯示分頁；其他情況有幾台就幾個 tab。
   const kinds: BotKind[] = [
     ...SWITCHABLE_KINDS,
     ...BOT_KINDS.filter((k) => !SWITCHABLE_KINDS.includes(k) && identities.some((i) => identityHost(i) === active && i.kind === k)),
@@ -125,7 +120,6 @@ export function IdentitiesPanel() {
               type="button"
               className="mini-btn primary"
               onClick={() => {
-                // 已有登入終端時 store 會接到那一顆，不會開第二顆。
                 void loginIdentity(fresh.host, fresh.name, { background: true }).finally(() => void refreshState())
               }}
             >

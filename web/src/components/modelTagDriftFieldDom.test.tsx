@@ -1,7 +1,3 @@
-/**
- * #1903：model chip 的 ⟳ 要寫出是哪一欄跟設定不同——強度 drift 曾被使用者看成 fast。
- * 窄列（精簡列、多欄落差）每欄只寫一個字，完整欄位名在 aria-label 與 tooltip 首行。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

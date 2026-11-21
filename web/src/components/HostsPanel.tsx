@@ -23,9 +23,6 @@ import { ToolBadges } from './Tools'
 import './hostsPanel.css'
 import { useUserTimeZone } from '../lib/userTime'
 
-/** SPEC §11.6 host management: configured remote hosts plus the "new host" form; §11.2 tuning fields sit behind 進階. */
-
-/** SPEC §11.6: remote projects carry an `@<host>` badge; local ones show nothing. */
 export function HostBadge({ host, connected }: { host: string; connected: boolean }) {
   const t = useT()
   if (!host || host === 'local') return null
@@ -40,16 +37,11 @@ export function HostBadge({ host, connected }: { host: string; connected: boolea
   )
 }
 
-/**
- * 收掉包著這個面板的「環境設定」彈窗，否則新開的 shell 面板被蓋在後面。模擬 `Modal` 自己的 Escape 關閉路徑
- * （只收最內層），不另拉 store 狀態：彈窗開關是 `Sidebar` 本地狀態。
- */
 function closeEnclosingPopup(from: HTMLElement | null) {
   if (!from?.closest('.modal-backdrop')) return
   from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
 
-/** 「開 shell」並切到 `HostShellPanel`；主機斷線時停用而非隱藏，讓人看得出為什麼不能按。 */
 function OpenShellButton({ host, connected }: { host: string; connected: boolean }) {
   const t = useT()
   const busy = useStore((s) => Boolean(s.busy[`shell:${host}`]))
@@ -63,7 +55,6 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
       title={connected ? t('在這台主機開一個 shell，直接下指令') : t('主機未連線，開不了 shell')}
       onClick={(e) => {
         const btn = e.currentTarget
-        // 失敗就把彈窗留著：原因（通知）與「重連」都在這一頁上。
         void openHostShell(host).then((ok) => {
           if (ok) closeEnclosingPopup(btn)
         })
@@ -74,7 +65,6 @@ function OpenShellButton({ host, connected }: { host: string; connected: boolean
   )
 }
 
-/** 這台主機開著的 shell（`GET /api/hosts/:name/shells`）：點一下接回，或直接結束；主機沒連線時不畫。 */
 function HostShellList({ host, connected }: { host: string; connected: boolean }) {
   const t = useT()
   const current = useStore((s) => s.shellView)
@@ -84,7 +74,6 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
   const opening = Boolean(busy[`shell:${host}`])
   const [shells, setShells] = useState<HostShell[]>([])
   const [tick, setTick] = useState(0)
-  // daemon 擋下「結束」（服務 pane／讀不到它在跑什麼）：不是失敗，要人看過再確認一次（跟 `HostShellPanel` 同一段說明）。
   const [needs, setNeeds] = useState<{ paneId: string; why: CloseNeedsConfirm } | null>(null)
   const enabled = connected
 
@@ -96,7 +85,6 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
         if (alive) setShells(list)
       },
       () => {
-        /* 讀不到就當沒有：開 shell 那顆按鈕自己會報錯 */
       },
     )
     return () => {
@@ -169,14 +157,12 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
   )
 }
 
-/** 每項差異尾端的 dry-run 標記（#719 階段 2）：只是顯示，沒有按鈕。舊 daemon 沒給 `fixable` 就不標。 */
 function BaselineFix({ fix }: { fix: 'auto' | 'manual' | null }) {
   const t = useT()
   if (fix === null) return null
   return <span className={`host-baseline-fix ${fix}`}>{fix === 'auto' ? t('（可自動補）') : t('（需手動）')}</span>
 }
 
-/** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
 export function BaselineLine({ host = 'local', baseline, syncMode }: { host?: string; baseline: HostBaseline | null; syncMode?: 'off' | 'ask' }) {
   const t = useT()
   useUserTimeZone()
@@ -350,12 +336,10 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   const [busy, setBusy] = useState(false)
 
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name) && name !== 'local'
-  // 跟 daemon 同一條規則（`lib/hostForm`）：放行了卻被 400，或打錯的 port 悄悄變成 22，都不行。
   const sshHint = ssh.trim() ? sshTargetProblem(ssh.trim()) : null
   const portHint = portProblem(sshPort)
   const sessionHint = sessionProblem(session.trim() || HOST_DEFAULTS.herdr_session)
   const ok = nameOk && ssh.trim().length > 0 && !sshHint && !portHint && !sessionHint
-  // 打了一半的新主機：關分頁會丟掉。
   useUnsavedGuard(
     name !== '' ||
       ssh !== '' ||
@@ -420,7 +404,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
         <span className="chev">{advanced ? '▼' : '▶'}</span> {t('進階（都有預設值）')}
       </button>
-      {/* 收起時進階欄位不掛載，但它的錯誤仍會鎖住送出：原因要留在這一列上，不然只剩一顆灰鈕。 */}
+      {}
       {!advanced && (portHint || sessionHint) ? <span className="hint">{t('進階欄位：{hints}', { hints: [portHint, sessionHint].filter(Boolean).join(t('；')) })}</span> : null}
       {advanced ? (
         <>
@@ -466,7 +450,6 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   )
 }
 
-/** The daemon's own machine: connection lamp, attach command, tool badges (v4.0). */
 function LocalHostRow() {
   const t = useT()
   const connected = useStore((s) => s.connected)
@@ -499,8 +482,6 @@ function LocalHostRow() {
   )
 }
 
-
-/** 線上 daemon 比前端舊時這條路徑根本不存在，回的是 404／405 空 body；照原樣顯示只會看到空白理由。 */
 function remoteCargoErr(e: unknown, t: ReturnType<typeof useT>): string {
   if (e instanceof ApiError && (e.status === 404 || e.status === 405)) {
     return t('這顆 daemon 還沒有 /api/build/remote（HTTP {status}），二進位比前端舊；要 cargo build --release 後重啟 daemon 才會有這個 API。', { status: e.status })
@@ -516,7 +497,6 @@ function RemoteCargoPanel() {
   const [user, setUser] = useState('')
   const [port, setPort] = useState('22')
   const [root, setRoot] = useState(DEFAULT_REMOTE_ROOT)
-  /** daemon 目前存著的那一份：「測試連線」測的是它，不是表單（`lib/remoteCargoForm`）。 */
   const [saved, setSaved] = useState<RemoteCargoSettings | null>(null)
   const [needsToolchain, setNeedsToolchain] = useState(false)
   const [jobs, setJobs] = useState('4')
@@ -525,11 +505,8 @@ function RemoteCargoPanel() {
   const [clearPassword, setClearPassword] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
-  /** 讀取失敗：表單還是元件初值，不是 daemon 的設定（#1343）。這時不准直接儲存，要先「重新讀取」。 */
   const [loadFailed, setLoadFailed] = useState(false)
-  /** 按「重新讀取」就 +1，讓下面那個 effect 重跑一次。 */
   const [reload, setReload] = useState(0)
-  // `test()` 內部借用 `save`：兩者共用同一個參照計數鎖，裡層 `save` 做完不會提早把 busy 撥回 false。
   const lock = useRef(nestableBusy(setBusy)).current
 
   useEffect(() => {
@@ -565,21 +542,16 @@ function RemoteCargoPanel() {
   const form = { enabled, host, user, port, root, jobs, password, clearPassword }
   const problems = remoteCargoProblems(form)
   const blocked = problems.length > 0
-  // 改了沒存就關分頁會丟掉：跟「按儲存會送出的值」比（空白、`022` 這種打法不同、存下去一樣的不算）。
-  // 初次讀取失敗時仍可編輯；用表單初值當比較基準，不能讓 saved=null 關掉保護。
   const unsaved = saved
     ? remoteCargoUnsaved(saved, form)
     : enabled || host !== '' || user !== '' || port !== '22' || root !== DEFAULT_REMOTE_ROOT || jobs !== '4' || password !== '' || clearPassword
   useUnsavedGuard(unsaved)
 
-  // `test()` 借用這段來先存表單；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
-  // 這裡不碰 busy，才不會在 `test()` 還沒做完時就把旗標撥回 false（見 `lib/nestableBusy.ts`）。
   const persist = async (): Promise<boolean> => {
     setMessage('')
     const submitted = form
     try {
       const cfg = await api.saveRemoteCargoSettings(toRemoteCargoInput(submitted))
-      // While the request is in flight, keep a newer password or clear toggle the user typed.
       setPassword((current) => (current === submitted.password ? '' : current))
       setClearPassword((current) => (current === submitted.clearPassword ? false : current))
       setPasswordSet(cfg.password_set)
@@ -605,15 +577,12 @@ function RemoteCargoPanel() {
     lock.begin()
     setMessage('')
     try {
-      // 測試連線測的是 daemon 已儲存的設定（`POST /build/remote/test` 不收 body）：表單有沒存的改動（新密碼、換主機、
-      // 第一次設定）就先存，不然測到的是舊的主機／舊 credential，還報「可用」。
       const unsaved = !saved || remoteCargoUnsaved(saved, form)
       if (unsaved && !(await persist())) return
       const r = await api.testRemoteCargo()
       const how = r.password_auth ? t('密碼') : 'SSH key/agent'
       const target = `${user.trim()}@${host.trim()}${(Number(port) || 22) === 22 ? '' : `:${Number(port)}`}`
       const first = unsaved ? t('（已先儲存表單裡的設定）') : ''
-      // 連得上但沒有 cargo 是最常見的下一關：講清楚並給一顆按鈕，不要只丟原始輸出（使用者 2026-09-18）。
       setNeedsToolchain(r.cargo_missing || r.clippy_missing)
       setMessage(
         r.cargo_missing
@@ -654,7 +623,6 @@ function RemoteCargoPanel() {
       const head = r.already_installed
         ? t('✓ 這台本來就有了：{version}', { version: r.cargo_version })
         : t('✓ 已安裝：{version}', { version: r.cargo_version })
-      // rustup 不裝 linker；少了 cc，cargo test 會在連結那一步才爆掉。clippy 補不上（不是 rustup 裝的工具鏈）也當場講。
       const warnings = [
         r.cc_missing ? t('⚠ 這台沒有 C 編譯器（cc／gcc），cargo test 連結會失敗。請在遠端裝 build-essential（Debian/Ubuntu）或 gcc。') : '',
         r.clippy_missing ? t('⚠ 這台的 cargo 沒有 clippy、也補不上（不是 rustup 裝的？），cargo clippy 轉過去會失敗。請在遠端裝 clippy。') : '',
@@ -679,7 +647,7 @@ function RemoteCargoPanel() {
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         <span>{t('啟用外部 Cargo verification')}</span>
       </label>
-      {/* 沒勾選就只留標題、說明與勾選框；隱藏不等於清空，欄位 state 與已存值原樣保留。 */}
+      {}
       {enabled ? (
         <>
           <div className="remote-cargo-grid">
@@ -734,7 +702,7 @@ function RemoteCargoPanel() {
             {t('測試連線')}
           </button>
         ) : null}
-        {/* 讀失敗、表單又沒動過：按了只會用初值整份取代 daemon 的設定（#1343）。 */}
+        {}
         <button
           type="button"
           className="btn primary"
@@ -757,7 +725,7 @@ function RemoteCargoPanel() {
           ))}
         </ul>
       ) : null}
-      {/* live region 要先在 DOM 裡，內容之後才填（#1135）；失敗用 alert，其餘 polite。 */}
+      {}
       <div role="status" aria-live="polite">
         {message ? (
           <pre className="host-result" role={/^(讀取外部 Cargo 設定|儲存|測試|安裝)失敗：/.test(message) ? 'alert' : undefined}>

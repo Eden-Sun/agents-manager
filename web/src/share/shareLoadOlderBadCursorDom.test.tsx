@@ -1,7 +1,3 @@
-/**
- * 載入較早訊息時游標那一則已經不在對話裡（daemon 回 400 `bad_cursor`，API.md §5.7）：
- * 照 API.md 的正解重載第一頁，不拿同一個游標反覆重試，也不顯示「連不上」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -28,7 +24,6 @@ test('載入較早訊息遇到 400 bad_cursor：重載第一頁，不顯示「�
   const client: ShareClient = {
     async messages(before) {
       calls.push(before)
-      // 游標那一則之後被撤回／刪掉：daemon 拒收這個游標。
       if (before) throw new ShareHttpError(400, null, 'bad_cursor')
       return { bot_name: 'b', status: 'idle', messages: recent, has_more: true }
     },

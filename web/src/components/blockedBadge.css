@@ -1,4 +1,3 @@
-/* 「● 需要回應」chip（BlockedBadge.tsx）：對齊 `.turn-error-badge`，同是 --danger「你以為在跑其實停著等你」那一級。 */
 .blocked-badge {
   flex: none;
   display: inline-flex;
@@ -40,7 +39,6 @@
   }
 }
 
-/* 手機：放名字後會截掉名字，擺到第二行最右邊（本來有空位），觸控高 24px。 */
 @media (width <= 640px) {
   .bot-head .main-title-row > .blocked-badge,
   .bot-head .main-title-row > .turn-error-badge {
@@ -54,13 +52,11 @@
     margin-left: auto;
   }
 
-  /* ★／⚙ 絕對定位跨兩行貼右，第二行也要讓 84px，chip 才不被壓在星號底下。只在有 chip 時讓。 */
   .bot-head .mobile-bot-version:has(> .blocked-badge),
   .bot-head .mobile-bot-version:has(> .turn-error-badge) {
     padding-right: 84px;
   }
 
-  /* 那行只剩約 150px，chip 進來模型名會被截成「o.」：版本號最不急（tooltip／設定面板都有），先讓。 */
   .bot-head .mobile-bot-version:has(> .blocked-badge) > .mobile-bot-ver,
   .bot-head .mobile-bot-version:has(> .turn-error-badge) > .mobile-bot-ver {
     display: none;
@@ -72,8 +68,6 @@
     display: none;
   }
 
-  /* 桌機：放第二行最前面。1440px＋側欄時名字列只剩約 161px 塞不下 71px chip。pane id 不再整顆藏掉（2026-09-25 使用者：
-     「這窗怎麼沒有 pane name」）：它本來就會先縮成 `…▾`（`desktopBotHead.css` 的 flex-shrink 1000），有空間就照常顯示。 */
   .bot-head .main-title-sub > .blocked-badge {
     margin-right: 2px;
   }

@@ -1,7 +1,3 @@
-/**
- * messages 的 HTTP 快照與 SSE status 的先後（#1667）：快照發出後若已有新的 SSE status，快照的 status 比較舊，
- * 不能把已經 idle 的分享頁改回「思考中」、鎖住送出鈕。訊息仍照常合併，合法的歷史不會因此漏掉。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -25,7 +21,6 @@ const msg = (id: string, role: 'user' | 'assistant', n: number): ShareMessage =>
 })
 const page = (status: SharePage['status'], ms: ShareMessage[]): SharePage => ({ bot_name: 'b', status, has_more: false, messages: ms })
 
-/** 第一趟立刻回；之後每趟都排著，由測試決定何時、以什麼內容回來。 */
 function gatedClient(): { client: ShareClient; events: () => ShareEvents; pending: ((p: SharePage) => void)[] } {
   let ev!: ShareEvents
   const pending: ((p: SharePage) => void)[] = []
@@ -46,7 +41,6 @@ function gatedClient(): { client: ShareClient; events: () => ShareEvents; pendin
   return { client, events: () => ev, pending }
 }
 
-/** 開頁後回到前景，發出第二趟 messages GET（先不回）。 */
 async function triggerPendingGet(): Promise<void> {
   await act(async () => document.dispatchEvent(new Event('visibilitychange')))
 }
@@ -73,7 +67,6 @@ test('HTTP 快照較早發出、較晚回來，且期間 SSE 已報 idle：回�
   const answer = msg('answer-1', 'assistant', 1)
   await act(async () => events().onMessage(answer))
   await act(async () => events().onStatus('idle'))
-  // 這趟快照是 bot 還在做時組的：status 仍是 working，但回覆已經在上面。
   await act(async () => pending[0](page('working', [msg('base', 'user', 0), answer])))
 
   assert.ok(document.body.textContent!.includes('answer-1'), '回覆要顯示')
@@ -94,7 +87,6 @@ test('HTTP 快照較早發出、較晚回來，且期間 SSE 已報 working：�
   assert.equal(sendButton().disabled, true, 'SSE 說 working 時送出鈕要停用')
   assert.ok(thinking(), '要顯示思考中')
 
-  // 發出時還是 idle 的舊快照，晚到：不能把 SSE 剛報的 working 蓋掉。
   await act(async () => pending[0](page('idle', [msg('base', 'user', 0)])))
   assert.equal(sendButton().disabled, true, '舊 idle 快照不能放開送出鈕')
   assert.ok(thinking(), '思考中仍要顯示')

@@ -1,7 +1,3 @@
-/**
- * 額度卡片上停用某身份／kind：其 bot 從側欄收起，到 reset 時間自動解除（見 docs/UI-DECISIONS.md）。
- * 純前端偏好、不進 zustand（免得被 WS 覆寫），用 `useSyncExternalStore` 共用。
- */
 import { useSyncExternalStore } from 'react'
 import { LOCAL_HOST } from '../api/types'
 import type { BotKind } from '../api/types'
@@ -9,13 +5,8 @@ import { projectHostName, useStore, type StoreState } from './store'
 
 export const QUOTA_DISABLED_KEY = 'am.disabledQuotaKeys'
 
-/** key → 自動解除的時刻（epoch ms）；null = 那組額度沒有 reset 時間，只能手動解除。 */
 export type DisabledMap = Readonly<Record<string, number | null>>
 
-/**
- * 以 host+kind+identity 記，刻意不用額度 map 的 key：落點會變（`quotaLookup.quotaBaseKey`——
- * 共用預設帳號的身份會退回裸 `claude`），拿會變的東西當偏好的鍵，數字一落位偏好就對不回來。
- */
 export function quotaDisableKey(host: string, kind: BotKind, identity: string | null): string {
   return `${host || LOCAL_HOST}|${kind}|${identity ?? ''}`
 }
@@ -36,7 +27,6 @@ function load(): Record<string, number | null> {
   }
 }
 
-/** 沒變動就回原物件（快照 identity 要穩）。 */
 function prune(map: Record<string, number | null>, now: number): Record<string, number | null> {
   const live = Object.entries(map).filter(([, until]) => until === null || until > now)
   return live.length === Object.keys(map).length ? map : Object.fromEntries(live)
@@ -46,7 +36,6 @@ let disabled: Record<string, number | null> = prune(load(), Date.now())
 const listeners = new Set<() => void>()
 let expiryTimer: ReturnType<typeof setTimeout> | null = null
 
-/** 用 timer 讓所有訂閱者同一刻解除，否則側欄放回 bot 了、額度格還灰著。 */
 function scheduleExpiry() {
   if (expiryTimer !== null) {
     clearTimeout(expiryTimer)
@@ -58,7 +47,6 @@ function scheduleExpiry() {
     if (next === null || until < next) next = until
   }
   if (next === null) return
-  // setTimeout 超過 2^31-1 ms 會立刻觸發。
   const delay = Math.min(Math.max(next - Date.now(), 250), 2 ** 31 - 1)
   expiryTimer = setTimeout(() => {
     expiryTimer = null
@@ -68,10 +56,6 @@ function scheduleExpiry() {
   }, delay)
 }
 
-/**
- * 多分頁（同 `persistSetDiff`／`persistDiff`）：整份覆寫會把別的分頁剛勾的停用洗掉（分頁 A 勾 cc1、分頁 B 的記憶體沒有它，
- * B 再勾 cc2 就寫回不含 cc1 的整份）。只把相對 `prev` 有增減或改值的鍵套到磁碟現有那份。
- */
 export function mergeDisabled(
   prev: Record<string, number | null>,
   next: Record<string, number | null>,
@@ -88,11 +72,9 @@ function sameMap(a: Record<string, number | null>, b: Record<string, number | nu
   return ak.length === Object.keys(b).length && ak.every((k) => k in b && a[k] === b[k])
 }
 
-/** 套用新的 map、重排到期 timer、推投影、叫醒訂閱者；不寫磁碟。 */
 function adopt(next: Record<string, number | null>) {
   disabled = next
   scheduleExpiry()
-  // 勾停用只動這裡的 map，store 不會自己變，投影要自己推一次。
   syncHiddenBots()
   for (const fn of listeners) fn()
 }
@@ -103,19 +85,16 @@ function publish(next: Record<string, number | null>) {
     merged = prune(mergeDisabled(disabled, next, load()), Date.now())
     localStorage.setItem(QUOTA_DISABLED_KEY, JSON.stringify(merged))
   } catch {
-    /* 隱私模式：不記得而已 */
   }
   adopt(merged)
 }
 
-// 別的分頁勾了／解除了：照磁碟上的現況跟上（同一個瀏覽器的分頁看到同一份停用）。
 function onStorage(e: StorageEvent) {
   if (e.key !== null && e.key !== QUOTA_DISABLED_KEY) return
   const disk = prune(load(), Date.now())
   if (!sameMap(disk, disabled)) adopt(disk)
 }
 
-// 模組可能在 window 建立前載入；訂閱時補綁，DOM 測試重建後也要重新確認 listener。
 let storageWindow: Window | null = null
 function listenStorage() {
   if (typeof window === 'undefined') return
@@ -123,7 +102,6 @@ function listenStorage() {
     storageWindow?.removeEventListener('storage', onStorage)
     storageWindow = window
   }
-  // happy-dom 可能在 unregister/register 後沿用同一個 Window 物件，卻清掉事件 listener；同 callback 重複註冊會去重。
   window.addEventListener('storage', onStorage)
 }
 listenStorage()
@@ -144,7 +122,6 @@ export function useDisabledQuota(): DisabledMap {
   return useSyncExternalStore(subscribe, snapshot, snapshot)
 }
 
-/** `expiresAt`（epoch ms）在勾的當下定案，daemon 之後推新數字也不跳。 */
 export function setQuotaDisabled(key: string, on: boolean, expiresAt: number | null): void {
   const next = { ...disabled }
   if (on) next[key] = expiresAt
@@ -152,23 +129,18 @@ export function setQuotaDisabled(key: string, on: boolean, expiresAt: number | n
   publish(next)
 }
 
-/** 過期的已被 prune／timer 掃掉，呼叫端不必比時間。 */
 export function isQuotaDisabled(map: DisabledMap, key: string): boolean {
   return key in map
 }
 
-/** 排序過（`useShallow` 才穩）。父列要自己與所有子 agent 都可收才收，免得子列沒地方掛。 */
 export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[] {
   if (Object.keys(map).length === 0) return []
   const hideable = new Set<string>()
   for (const b of state.bots) {
-    // 正在看的那顆永遠留著：主面板還開著它的對話，側欄那一列卻不見了，只能打字搜尋才找得回來。
     if (b.id === state.selectedBotId) continue
-    // 執行中／有未讀的也收：留著的話整批 cc1 有未讀時勾了等於沒反應（見 docs/UI-DECISIONS.md）。
     const key = quotaDisableKey(projectHostName(state, b.project_id), b.kind, b.identity)
     if (isQuotaDisabled(map, key)) hideable.add(b.id)
   }
-  // 父列要留著，只要底下（含孫子以下）還有一顆不收的：子列掛在被收起的父列底下就沒地方掛（#1510）。
   const childrenOf = new Map<string, string[]>()
   for (const b of state.bots) {
     if (b.parent_bot_id) childrenOf.set(b.parent_bot_id, [...(childrenOf.get(b.parent_bot_id) ?? []), b.id])
@@ -181,11 +153,6 @@ export function quotaHiddenBotIds(state: StoreState, map: DisabledMap): string[]
   return [...hideable].filter((id) => !keepsDescendant(id, new Set())).sort()
 }
 
-/**
- * 「側欄看得到哪些 bot」要有單一定義。寫入端仍是這個模組（不進 zustand 就不會被 WS 覆寫），
- * 但結果要投影進 store：⌥↑／⌥↓ 走的是 `orderedBotIds`、標題列晶片與分頁標題的 `(N)` 走的是
- * `botUnread`，它們以前都不知道側欄少了一批 bot——點得到卻找不到那一列、數字也對不起來。
- */
 function syncHiddenBots() {
   const st = useStore.getState()
   const next = quotaHiddenBotIds(st, disabled)

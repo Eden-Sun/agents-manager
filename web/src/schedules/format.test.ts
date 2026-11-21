@@ -23,9 +23,8 @@ test('側欄短時間：同時區只有月日時分；不同時區補縮寫', as
 })
 
 test('列上的日期：今天／明天／昨天；7 天內帶星期；更遠只到月日；跨年加年；24 小時制', () => {
-  const now = new Date('2026-11-12T04:00:00Z') // 週四
+  const now = new Date('2026-11-12T04:00:00Z')
   const here = defaultTimeZone()
-  // 排程時區＝瀏覽器時區時不補縮寫；不同時區時補上縮寫（UTC 的 short name 是 UTC）。
   const tag = here === 'UTC' ? '' : ' UTC'
   assert.equal(whenText('2026-11-12T09:30:00Z', 'UTC', now), `今天 09:30${tag}`)
   assert.equal(whenText('2026-11-13T09:30:00Z', 'UTC', now), `明天 09:30${tag}`)
@@ -40,7 +39,6 @@ test('列上的日期：排程時區跟瀏覽器不同才補縮寫（時間仍�
   const now = new Date('2026-11-12T04:00:00Z')
   const here = defaultTimeZone()
   if (here === 'Asia/Taipei') return
-  // 台北 17:30 ＝ UTC 09:30；同一瞬間用台北時區顯示，時間是 17:30 且補了縮寫。
   assert.equal(whenText('2026-11-12T09:30:00Z', 'Asia/Taipei', now).startsWith('今天 17:30'), true)
   assert.notEqual(whenText('2026-11-12T09:30:00Z', 'Asia/Taipei', now), whenText('2026-11-12T09:30:00Z', here, now))
 })

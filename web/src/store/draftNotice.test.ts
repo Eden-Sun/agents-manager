@@ -19,7 +19,6 @@ test('提示文字：有上限就寫出來（KB），沒有就只說太長、沒
 })
 
 test('store：mark 記下被拒的 key 與上限，clear 只收掉那一個 key', () => {
-  // 同一個行程裡別的測試檔也會寫這個 store（例如 shell 草稿），所以只看這裡自己用的 key，不比整張表。
   const { mark, clear } = useDraftNotice.getState()
   mark('bot:a', new ApiError(400, { error: 'draft_too_large', max_bytes: 262144 }, 'x'))
   mark('group:p', new ApiError(413, {}, 'too large'))

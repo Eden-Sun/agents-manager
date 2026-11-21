@@ -4,15 +4,12 @@ export interface HostTabItem {
   name: string
   label: string
   connected: boolean
-  /** 已登入的帳號數（各 kind 的預設帳號＋config／shell 身份）；斷線時不顯示。 */
   loggedIn: number
-  /** 異常：主機斷線，或 daemon 標了「要重新登入」。 */
   anomaly: boolean
 }
 
 const PANEL_ID = 'identity-host-panel'
 
-/** 身份頁的主機分頁：每台主機一個 tab；斷線的 tab 仍在，標「斷線」。 */
 export function IdentityHostTabs({ tabs, value, onChange }: { tabs: HostTabItem[]; value: string; onChange: (name: string) => void }) {
   const t = useT()
   return (

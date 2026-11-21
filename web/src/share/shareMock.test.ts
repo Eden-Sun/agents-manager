@@ -1,7 +1,3 @@
-/**
- * mock 分享頁的回覆會把使用者那句的前 40 格原樣引回來；40 是 UTF-16 單位，截點落在 emoji 中間就會留下落單的代理字元。
- * 時間用手動時鐘推，不靠牆鐘。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { installManualClockTimers } from '../testing/manualClockTimers.ts'

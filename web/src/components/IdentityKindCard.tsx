@@ -8,12 +8,10 @@ import { KIND_LABEL } from './kindMeta'
 import { ConfirmDialog } from './ConfirmDialog'
 import { kindBots } from '../store/identityRows'
 
-/** 某台主機某個 kind 的工具狀態（本機用 localTools，遠端用 hosts[].tools）。 */
 function useKindTool(host: string, kind: BotKind) {
   return useStore((s) => (host === 'local' ? s.localTools : s.hosts.find((h) => h.name === host)?.tools)?.[kind])
 }
 
-/** kind 啟用開關（只在本機）：停用＝不挑、不派、不啟動、不探測；已經在跑的 Bot 不殺。停用前先告訴使用者會影響幾顆 Bot。 */
 function KindSwitch({ kind }: { kind: BotKind }) {
   const t = useT()
   const disabledKinds = useStore((s) => s.disabledKinds)
@@ -54,10 +52,6 @@ function KindSwitch({ kind }: { kind: BotKind }) {
   )
 }
 
-/**
- * 一張 CLI 卡：標頭是 kind（圖示＋名稱）與（本機）啟用開關；內容依序是預設帳號、自訂身份、shell 偵測身份。
- * 沒安裝時標一行說明；身份（綁著它的 config 身份）仍照列。
- */
 export function IdentityKindCard({ host, kind, children, onAdd }: { host: string; kind: BotKind; children: ReactNode; onAdd?: () => void }) {
   const t = useT()
   const tool = useKindTool(host, kind)

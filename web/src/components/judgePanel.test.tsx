@@ -5,7 +5,6 @@ import { JudgeLoadNotice, type JudgeLoad } from './JudgePanel.tsx'
 
 const render = (state: JudgeLoad) => renderToStaticMarkup(<JudgeLoadNotice state={state} onRetry={() => {}} />)
 
-/** issue #466：三種狀態要分得開，不能都長成「讀取中…」或都長成「需要更新 daemon」。 */
 test('404／405：說的是 daemon 沒有這個功能', () => {
   const html = render({ kind: 'unsupported' })
   assert.match(html, /需要更新 daemon/)

@@ -1,7 +1,3 @@
-/**
- * Bot 名稱欄的錯誤提示（#1524 加的那句）要跟欄位關聯：輸入不合規時欄位 aria-invalid，提示字用 aria-describedby 指到，
- * 欄位名稱仍只是「名稱」（提示字不能混進 label 的名字裡唸兩次）。Bot 設定表單與新增 Bot 表單都要對。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
@@ -20,7 +16,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** 欄位本身：`label.field` 裡第一個 span 是「名稱」的那個。 */
 function nameField(): HTMLInputElement {
   const label = [...document.querySelectorAll<HTMLLabelElement>('label.field')].find((l) => l.querySelector('span')?.textContent?.trim() === '名稱')!
   return label.querySelector<HTMLInputElement>('input')!

@@ -1,10 +1,5 @@
 import type { BotKind, PatchBotInput } from '../api/types'
 
-/**
- * Bot 設定面板的純函式（docs/reviews/2026-09-12/web.md §1）。只有 `touched` 欄位算數，其餘跟 `base`：
- * 別處改了同一顆 bot 時，儲存才不會用開啟當下的舊值蓋回去。
- */
-
 export type BotFormKey = 'name' | 'model' | 'effort' | 'fast' | 'persona' | 'identity'
 
 export interface BotFormValues {
@@ -12,9 +7,7 @@ export interface BotFormValues {
   model: string | null
   effort: string | null
   fast: boolean
-  /** 表單裡的原文；比對時空白 → null。 */
   persona: string
-  /** `''` = 不指定。 */
   identity: string
 }
 
@@ -27,7 +20,6 @@ export interface BotFormBase {
   identity: string | null
 }
 
-/** 畫面上要顯示的值：動過的用表單的，沒動過的跟 base 走。 */
 export function effectiveForm(base: BotFormBase, form: BotFormValues, touched: ReadonlySet<BotFormKey>): BotFormValues {
   return {
     name: touched.has('name') ? form.name : base.name,
@@ -39,7 +31,6 @@ export function effectiveForm(base: BotFormBase, form: BotFormValues, touched: R
   }
 }
 
-/** 動過且跟 base 不同的欄位才進 patch。`fast` 支援 codex 與 claude-api；`identity` 三種 kind 都收。 */
 export function computeBotPatch(
   base: BotFormBase,
   form: BotFormValues,
@@ -59,10 +50,6 @@ export function computeBotPatch(
   return patch
 }
 
-/**
- * 存檔回來後哪些欄位可以放掉 `touched`：送出之後使用者又改過的那一欄要留著（不然後打的字會被還原成剛存的值）。
- * `now` 是面板 state 裡的原文（跟 `BotFormValues` 同一份）；比對規則跟 `computeBotPatch` 送出時的正規化一致。
- */
 export function settledKeys(sent: PatchBotInput, now: BotFormValues): BotFormKey[] {
   const out: BotFormKey[] = []
   if ('name' in sent && now.name === sent.name) out.push('name')
@@ -76,11 +63,6 @@ export function settledKeys(sent: PatchBotInput, now: BotFormValues): BotFormKey
 
 const SAVED_KEYS: readonly BotFormKey[] = ['name', 'model', 'effort', 'fast', 'persona', 'identity']
 
-/**
- * `saved`（已存成功、store 還沒跟上的欄位）只該撐到 store 追上為止。留著不清的話，之後別處
- * 把同一欄改掉（例如標題列的模型快速選單），面板仍照 `saved` 顯示舊值。
- * store 的值等於存過的值就把那一欄從 `saved` 拿掉；沒有東西可拿就回傳同一個物件（讓 render 期 setState 不會迴圈）。
- */
 export function pruneSaved(saved: PatchBotInput, bot: BotFormBase): PatchBotInput {
   let next: PatchBotInput | null = null
   for (const k of SAVED_KEYS) {

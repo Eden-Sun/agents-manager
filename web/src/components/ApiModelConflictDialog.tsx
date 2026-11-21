@@ -2,10 +2,6 @@ import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/**
- * claude-api bot 換模型後，舊對話的 checkpoint 不能接續（daemon 回 409 `api_model_changed`）：
- * 讓使用者選「換回原模型接續」或「清除對話，以新模型開始」，不是丟一個沒說明的啟動失敗。
- */
 export function ApiModelConflictDialog() {
   const t = useT()
   const conflict = useStore((s) => s.apiModelConflict)

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
 import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isExpertBot, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, prunePersistedMarks, projectUnread, pruneIdleEdges, recordReadMark, relayTurnIds, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
-/** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
   const map = new Map<string, string>()
   ;(globalThis as unknown as { localStorage: unknown }).localStorage = {
@@ -97,7 +96,6 @@ test('同一個回合的 message_added 與 turn_updated 只跳一次', () => {
   resetTurnCompletions()
   assert.equal(takeTurnCompletion('b1', 't1'), true)
   assert.equal(takeTurnCompletion('b1', 't1'), false)
-  // 不同 bot 的同名 turn 是不同回合。
   assert.equal(takeTurnCompletion('b2', 't1'), true)
 })
 
@@ -156,12 +154,10 @@ test('連一個回合都不知道時才退回 msg:<id>', () => {
   assert.equal(completionKey(msg('m1', 'assistant', '2026-09-07T00:00:01Z'), []), 'msg:m1')
 })
 
-/** 防重複計數：沒 turn_id 的回覆兩種 frame 的 key 曾對不上，一則回覆跳兩下。 */
 test('message_added 與 turn_updated 不管誰先到，同一個回合只記一次', () => {
   for (const messageFirst of [true, false]) {
     resetTurnCompletions()
     const m = msg('m1', 'assistant', '2026-09-07T00:00:01Z')
-    // `turn_updated`（in_flight）已經讓 store 認得這個回合，兩條路都看得到它。
     const known = ['t1']
     const hits = messageFirst
       ? [takeTurnCompletion('b1', completionKey(m, known)), takeTurnCompletion('b1', 't1')]
@@ -183,14 +179,12 @@ test('idle 邊緣：hook 那條路已先記過（turn_updated 先到），這次
   resetIdleEdges()
   markHookCompletion('b1')
   assert.equal(idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' }), null)
-  // 標記只用一次。
   assert.equal(idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' }), 'run:r1:1')
 })
 
 test('idle 邊緣：已有 web 回合但這次是終端直接輸入 → 獨立 key，每次都算一則新的', () => {
   resetIdleEdges()
   resetTurnCompletions()
-  // 之前從網頁送過的回合已經記過 t9。
   takeTurnCompletion('b1', 't9')
   const k1 = idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' })
   const k2 = idleEdgeCompletionKey('b1', 'r1', { id: 't9', status: 'completed' })
@@ -217,7 +211,6 @@ test('分頁標題不算總管專案的未讀：側欄不顯示的，標題也�
   assert.equal(titleUnread(s), 2)
   assert.equal(unreadShown(bots[0], 'p-agm'), false)
   assert.equal(unreadShown(bots[2], 'p-agm'), true)
-  // 還不知道總管專案是哪個（`GET /api/supervisor` 讀不到）：不排除。
   assert.equal(titleUnread({ ...s, supervisorProjectId: null }), 45)
   assert.equal(unreadShown(undefined, 'p-agm'), true)
 })
@@ -235,17 +228,11 @@ test('專案收合的 !N 與分頁標題同一份排除：額度隱藏與總管�
     hiddenBotIds: ['quota-hidden'],
     supervisorProjectId: 'p-agm',
   }
-  // 側欄收合 p1 時掛的數字：只有展開後點得到的那一筆。
   assert.equal(projectUnread(s, 'p1'), 2)
   assert.equal(projectUnread(s, 'p2'), 5)
-  // 總管專案的收合加總也是 0（側欄本來就不顯示它們的未讀）。
   assert.equal(projectUnread(s, 'p-agm'), 0)
-  // 兩邊同一份排除：分頁標題與各專案加總對得起來。
   assert.equal(titleUnread(s), projectUnread(s, 'p1') + projectUnread(s, 'p2'))
-  // 額度停用解除後那三筆就回來了。
   assert.equal(projectUnread({ ...s, hiddenBotIds: [] }, 'p1'), 5)
-  // 剛刪掉、`bots` 裡已經沒有但帳還沒 prune 的：兩邊掃的都是 `bots`，所以標題也不算——
-  // 不然同一個點不掉的數字只是從側欄換到標題上（i92b 的複看）。
   const stale = { ...s, botUnread: { ...s.botUnread, gone: 7 } }
   assert.equal(titleUnread(stale), 2 + 5)
   assert.equal(projectUnread(stale, 'p1'), 2)
@@ -255,12 +242,11 @@ test('pruneIdleEdges：刪掉的 bot 的 idle 邊緣帳被帶走，還在的不�
   resetIdleEdges()
   for (const id of ['b-live', 'b-gone']) {
     markHookCompletion(id)
-    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' }) // 吃掉 hook 標記
-    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' }) // 第一次真正的 idle 邊緣
+    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' })
+    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' })
   }
   markHookCompletion('b-gone')
   pruneIdleEdges(new Set(['b-live']))
-  // b-live 的計數還在：下一次是第 2 次；b-gone 從頭來（第 1 次），hook 標記也沒了。
   assert.equal(idleEdgeCompletionKey('b-live', 'r1', { id: 't', status: 'completed' }), 'run:r1:2')
   assert.equal(idleEdgeCompletionKey('b-gone', 'r1', { id: 't', status: 'completed' }), 'run:r1:1')
   resetIdleEdges()
@@ -307,7 +293,7 @@ test('專家專案：往來回合（user 都帶 relay_from）的回覆不算未�
     msg('a2', 'assistant', '2026-09-07T00:00:04Z', 't2'),
     relayed('r3', 't3', '2026-09-07T00:00:05Z'),
     relayed('r3b', 't3', '2026-09-07T00:00:06Z'),
-    msg('h3', 'user', '2026-09-07T00:00:06Z', 't3'), // 使用者補話
+    msg('h3', 'user', '2026-09-07T00:00:06Z', 't3'),
     msg('a3', 'assistant', '2026-09-07T00:00:07Z', 't3'),
   ]
   assert.deepEqual([...relayTurnIds(ms)], ['t2'], '只有全部 user 都 relay 的回合是往來')

@@ -6,11 +6,6 @@ import { useStore } from '../store/store'
 import { t, useT } from '../lib/i18n'
 import './projectNameField.css'
 
-/**
- * In-place project rename, same gesture as `BotNameField`; safe while bots run (docs/API.md §3).
- * `variant="row"`: only an already-selected project arms the rename. Editing is controlled from
- * outside because the sidebar row is a `<button>` and cannot contain an `<input>`.
- */
 export function ProjectNameField({
   projectId,
   label,
@@ -31,7 +26,6 @@ export function ProjectNameField({
   const [draft, setDraft] = useState(label)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // A rename from anywhere else (another tab, the daemon's config) must win over a stale draft.
   const [lastLabel, setLastLabel] = useState(label)
   if (lastLabel !== label) {
     setLastLabel(label)
@@ -43,7 +37,6 @@ export function ProjectNameField({
   }, [editing])
 
   const trimmed = draft.trim()
-  // 改名打到一半（輸入框開著、字跟原本不同）：關分頁會丟掉。
   useUnsavedGuard(editing && trimmed !== '' && trimmed !== label)
 
   const commit = () => {
@@ -54,7 +47,6 @@ export function ProjectNameField({
     }
     void patchProject(projectId, { label: trimmed })
   }
-  // 手機的軟鍵盤 Enter 不走 keydown，見 `useEnterCommit`。
   const enter = useEnterCommit(inputRef, commit)
 
   if (editing) {
@@ -70,18 +62,15 @@ export function ProjectNameField({
         size={Math.max(8, draft.length + 1)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
-        // The sidebar row is a click target for selection; it must not see these.
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          // Stop here: ↑/↓ switch bot and Esc closes dialogs further up the tree.
           e.stopPropagation()
           if (e.key === 'Enter') {
             if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             commit()
           } else if (e.key === 'Escape') {
-            // 輸入法選字中的 Esc 是取消選字，不是放棄改名。
             if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             setDraft(label)

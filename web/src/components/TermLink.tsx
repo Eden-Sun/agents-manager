@@ -3,7 +3,6 @@ import { useStore } from "../store/store"
 import { copyText } from "../lib/copyText"
 import { useT } from "../lib/i18n"
 
-/** 終端畫面裡的一條 URL：點一下複製。拆成獨立檔是為了 fast refresh（檔案只 export 元件）。 */
 export function TermLink({ url, text }: { url: string; text: string }) {
   const t = useT()
   const [done, setDone] = useState(false)

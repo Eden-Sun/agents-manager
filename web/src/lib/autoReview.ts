@@ -1,6 +1,5 @@
 import type * as api from '../api'
 
-/** 開框先 GET 資格，再以明確 POST 補分析；daemon 依指紋去重，failed 不自動重試。 */
 export async function loadReviewOnOpen(
   input: { kind: string; host: string; from: string | null; to: string | null },
   client: Pick<typeof api, 'fetchUpdateReview' | 'requestUpdateReview'>,

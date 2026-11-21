@@ -5,7 +5,6 @@ import { jumpTargetId } from './useProjectJumpKeys.ts'
 const all = [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }, { id: 'p4' }, { id: 'p5' }]
 
 test('搜尋時 Control+n 跳到側欄畫出來的第 n 個，不是被藏起來的那個（review3 c5 L4）', () => {
-  // 搜「codex」之後側欄只剩原本第 2、第 5 個專案。
   const shown = ['p2', 'p5']
   assert.equal(jumpTargetId(0, shown, all), 'p2')
   assert.equal(jumpTargetId(1, shown, all), 'p5')

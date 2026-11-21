@@ -10,16 +10,9 @@ import './claudeLoginAssist.css'
 
 const POLL_MS = 2000
 
-/**
- * claude 身份的登入 pane 上方的協助條（#838）：「打開登入網站」（daemon 從登入畫面取出的 OAuth 網址，新分頁打開）＋
- * code 輸入框（daemon 確認畫面還在等 code 才打進 pane 並按 Enter）。手機上不必選取終端裡的長網址、也不必把 code 貼回終端。
- * 這顆 pane 不是 daemon 開的登入 pane（一般 shell、別種 CLI 的登入）就什麼都不畫。CLI 結束後 pane 會被 daemon 收掉，
- * 之後顯示重新偵測後的登入狀態。網址與 code 不存任何地方（不進 store、不進 localStorage）。
- */
 export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: string }) {
   const t = useT()
   const [status, setStatus] = useState<api.LoginStatus | null>(null)
-  /** 這顆 pane 是不是登入 pane（第一次問到才知道；404＝不是）。 */
   const [isLogin, setIsLogin] = useState(false)
   const [ended, setEnded] = useState(false)
   const [code, setCode] = useState('')
@@ -44,20 +37,17 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
         if (s) {
           if (!seen.current) dropShellKeyboard()
           seen.current = true
-          // 這顆是登入 pane：CLI 結束後 pane 被收掉，面板也不能跟著拆（`lib/loginPaneHold`）。
           release ??= holdLoginPane(host, paneId)
           setIsLogin(true)
           setStatus(s)
         } else if (seen.current) {
-          // 看過、現在 404：CLI 結束、daemon 收掉了 pane。重驗登入狀態讓身份列更新。
           setEnded(true)
           void refreshTools(host)
           return
         } else {
-          return // 從頭就不是登入 pane：不再問。
+          return
         }
       } catch {
-        /* 暫時讀不到（連線抖一下）：下一輪再問 */
       }
       if (!stop) timer = setTimeout(() => void tick(), POLL_MS)
     }
@@ -83,7 +73,6 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
       if (out.outcome === 'failed') setFailure(out.message ?? t('CLI 回報登入失敗'))
       else if (out.outcome === 'finished') setEnded(true)
     } catch (e) {
-      // 409 not_awaiting_code：daemon 說了人話（畫面不在等 code，一個字都沒送）。
       const msg = e instanceof ApiError && typeof e.body.message === 'string' ? e.body.message : e instanceof Error ? e.message : t('送不出去')
       setFailure(msg)
       notify('error', msg)
@@ -174,22 +163,14 @@ export function ClaudeLoginAssist({ host, paneId }: { host: string; paneId: stri
   )
 }
 
-/**
- * 觸控裝置上，shell 一打開就把焦點放進指令列，鍵盤彈出來蓋住協助條（網址鈕、碼）。登入 pane 不需要打字，收掉焦點。
- */
 function dropShellKeyboard() {
   if (typeof window === 'undefined' || !window.matchMedia?.('(pointer: coarse)').matches) return
   const el = document.activeElement
   if (el instanceof HTMLElement && el.closest('.shell-pane')) el.blur()
 }
 
-/**
- * codex 裝置碼：一次性碼大字顯示，手機上一整列好按（≥40px）；複製失敗（沒有剪貼簿權限）就只剩大字讓人抄。
- * 碼只在這個元件的 state 裡，不進 store、不進 localStorage。
- */
 function DeviceCode({ code }: { code: string | null }) {
   const t = useT()
-  // 'fail'：瀏覽器不給寫剪貼簿（少見；http 位址靠 copyText 的同步 execCommand 已經能複製）——提示改成手動選取。
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle')
   if (!code) return <div className="login-assist-hint" role="status">{t('等 CLI 印出一次性碼…')}</div>
   return (
@@ -201,7 +182,6 @@ function DeviceCode({ code }: { code: string | null }) {
         type="button"
         className="btn login-assist-copy"
         onClick={() => {
-          // 同步呼叫（不 await 在前）：execCommand('copy') 只在點擊手勢當下有效。
           copyText(code).then(
             (ok) => setCopied(ok ? 'ok' : 'fail'),
             () => setCopied('fail'),

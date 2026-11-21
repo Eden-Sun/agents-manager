@@ -29,7 +29,6 @@ function KindRowView({ row }: { row: OnbKindRow }) {
       </span>
       {row.state === 'missing' ? (
         row.kind === 'agy' ? (
-          // agy 由 daemon 讀官方 manifest 裝（先確認），沿用既有按鈕。
           <div className="onb-act">
             <AgyInstallButton host="local" />
           </div>
@@ -53,10 +52,6 @@ function KindRowView({ row }: { row: OnbKindRow }) {
   )
 }
 
-/**
- * 環境準備清單（issue #1931）：herdr、四種 CLI 的安裝／登入現況＋按鈕，以及接下來「新增 Project → 新增 Bot」的引導。
- * 主畫面（`OnboardingBanner`）與環境設定的「環境準備」分頁共用這一份。安裝 agy 用既有的確認框（`AgyInstallButton` 那一套），其他 CLI 由 daemon 開臨時 shell 裝。
- */
 export function OnboardingChecklist() {
   const t = useT()
   const m = useOnboarding()
@@ -109,10 +104,6 @@ export function OnboardingChecklist() {
   )
 }
 
-/**
- * 主畫面的環境準備提示：沒有 Project、或本機沒有任何可用（已裝且已登入／問不到）的 kind、或 herdr 連不上時顯示；
- * 都好了自動收起。選著 Bot／群組／shell 時收成一行（點開才展開），空畫面時整張攤開。
- */
 export function OnboardingBanner({ compact }: { compact: boolean }) {
   const t = useT()
   const m = useOnboarding()

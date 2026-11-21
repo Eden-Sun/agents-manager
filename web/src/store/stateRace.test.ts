@@ -1,6 +1,3 @@
-/**
- * 快照與 WS 交錯：較舊的 HTTP 頁不准蓋掉請求期間已經套上的終態（#649、#650、#651）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon } from './storeEnv.harness.ts'

@@ -10,17 +10,9 @@ import './blockedChoices.css'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** 送出一步之後等畫面反應：每 `STEP` 看一次，最多看 `TRIES` 次（同 `BlockedChoices`）。 */
 const STEP = 260
 const TRIES = 5
 
-/**
- * codex 非同步提問（`request_user_input_async`，issue #1879）：畫面只剩 `? 1 question · shift+← to answer`，題目與選項
- * 由上面的原題卡（daemon 讀 rollout）補；這裡只做「展開」與「自由輸入題」的作答，編號選單展開後交給 `BlockedChoices`。
- *
- * 每一步都重讀畫面、對不上就不送：展開要畫面還是收合的、貼字要畫面還是展開的自由輸入、Enter 要字真的出現在畫面上。
- * 使用者的 bot 只做使用者在這裡按下的那一下，不替任何人作答。
- */
 export function CodexAsyncQuestion({
 
   botId,
@@ -29,9 +21,7 @@ export function CodexAsyncQuestion({
   onAnswered,
 }: {
   botId: string
-  /** 每秒輪詢的終端快照。 */
   text: string | null | undefined
-  /** daemon 從 rollout 讀、且對得上畫面的題目（`pending-question`）；展開後恰好一題才知道「這題」是哪一題。 */
   questions?: PendingQuestion[]
   onAnswered?: () => void
 }) {
@@ -45,15 +35,12 @@ export function CodexAsyncQuestion({
   const [answer, setAnswer] = useState('')
 
   const screen = kind === 'codex' ? parseAsyncScreen(text) : null
-  // 展開後有編號選單的交給 `BlockedChoices`；沒有選單（自由輸入題）才在這裡打字。
   const freeText = screen?.expanded === true && parseChoiceMenu(text) === null
-  // 面板上的題目原文要跟 rollout 的題目對得上才知道這是哪一題；對不上（或有好幾題）就不給打字框，請使用者在終端作答。
   const target = questions.length === 1 ? questions[0].question : null
   if (!screen || (screen.expanded && !freeText)) return null
 
   const gone = t('這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。')
 
-  /** 每次作答一份：固定在開始讀畫面時的 Run（`lib/runPin.ts`），送鍵帶這個 id，Run 不符就放棄、不走 fresh-run 重試。 */
   const newPin = () => runPin(() => readTerminal(botId, 'visible', 200), () => useStore.getState().runs[botId]?.id)
 
   const run = async (fn: () => Promise<string | null>) => {
@@ -63,7 +50,6 @@ export function CodexAsyncQuestion({
     try {
       setNote(await fn())
     } catch {
-      // store.sendKeys／sendText 已經發通知；這裡只在旁邊提示，不再發第二則。
       setNote(t('沒有送出去（Run 可能已經換了），請查看終端畫面後再試。'))
     } finally {
       setBusy(false)
@@ -81,7 +67,6 @@ export function CodexAsyncQuestion({
     return false
   }
 
-  /** 收合 → 展開：只送一下 shift+←（無副作用，不會作答）。 */
   const expand = () =>
     run(async () => {
       const pin = newPin()
@@ -94,10 +79,6 @@ export function CodexAsyncQuestion({
       return ok ? null : pin.changed() ? gone : t('按了 shift+←，但畫面沒有展開；請查看終端畫面。')
     })
 
-  /**
-   * 自由輸入題：貼字前輸入框必須是空的（佔位字）、送 Enter 前輸入框的**完整內容**必須等於答案（不是後綴：原本有 Alice 再貼
-   * Bob 會是 AliceBob），而且兩次都要提問面板展開、題目完整等於這一題。送鍵都帶固定的 Run。
-   */
   const submitText = () =>
     run(async () => {
       const typed = answer.replace(/\s*\n\s*/g, ' ').trim()
@@ -106,7 +87,6 @@ export function CodexAsyncQuestion({
       const pin = newPin()
       const now = await pin.read()
       if (now === null) return gone
-      // 底下還有編號列＝其實是選項選單（只是認不出來）：貼字會落在游標那一列，什麼都不送。
       const numbered = now.split('\n').slice(-14).some((l) => /^\s*[›>]?\s*\d+\.\s/.test(l))
       if (!panelShows(now, target) || parseChoiceMenu(now) !== null || numbered) return t('畫面已經不是這一題的自由輸入（可能切回主輸入框或換題了），什麼都沒送出。')
       if (panelInput(now, target) !== EMPTY_INPUT) return t('這題的輸入框裡原本就有字，不在上面疊字（會變成「舊字＋新字」），什麼都沒送出；請先在終端清掉。')

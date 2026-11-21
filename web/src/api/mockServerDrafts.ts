@@ -1,13 +1,7 @@
-/**
- * mock 的 `/drafts`（輸入框草稿以 daemon 為準，`daemon/src/drafts.rs`）：照 daemon 的規則——rev 每個 key 單調遞增、
- * 空字串＝刪除（留墓碑）、內容沒變不加 rev；寫入後推 `draft_updated`（帶 `client_id`），所以 mock 也走得到「自己的回音」那條路。
- * 另開一個分頁就是另一個 mock：兩邊不互通，要看跨瀏覽器的同步用真 daemon。
- */
 import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
 
-// API.md「輸入框草稿」：bot／group 之外還收 host shell 面板的 `shell:<host>/<pane id>`（#758）。
 const KEY = /^((bot|group):[A-Za-z0-9._-]+|shell:[A-Za-z0-9._:@+-]+\/[A-Za-z0-9._:@+-]+)$/
 
 export class MockServerDrafts {
@@ -31,7 +25,6 @@ export class MockServerDrafts {
     return { key, rev: row.rev, updated_at: row.updated_at }
   }
 
-  /** 截圖／手動測：假裝別的瀏覽器寫了一份（`__amMock.remoteDraft('bot:x', '…')`）。 */
   remote(key: string, text: string, emit: (type: string, data: unknown) => void): void {
     this.handle('PUT', `/drafts/${encodeURIComponent(key)}`, { text, client_id: 'other-browser' }, emit)
   }

@@ -1,7 +1,3 @@
-/**
- * #931：手機（≤640px）開 host shell 要有輸入框可打字——鍵盤直通預設關（手機點 `<pre>` 叫不出軟鍵盤），
- * 桌機行為不變（沒有記錄＝直通開著、沒有輸入列）。真的掛 `HostShellPanel` 進 happy-dom，後端是 `MockTransport`。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until, type FakeRequest, fakeWebSocket } from '../testing/domHarness'
@@ -10,7 +6,6 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
 
 virtualMockTime()
-// 共用的 mock 一個主機最多 8 個 shell，而且跨測試檔累積：自己開的自己關，不然整套跑下來後面的檔案會 409 too_many_shells。
 const opened: string[] = []
 afterEach(async () => {
   await unmountAll()
@@ -22,7 +17,6 @@ after(() => {
   teardownDom()
 })
 beforeEach(() => {
-  // 桌面直通會開 xterm 的推送 WebSocket；這裡假掉，免得真的去連（happy-dom 會把錯誤當成未處理的例外）。
   fakeWebSocket()
   localStorage.removeItem('am.shellKeySyncOff')
   localStorage.removeItem('am.shellKeySyncOn')
@@ -30,14 +24,12 @@ beforeEach(() => {
 
 const mock = sharedMock
 
-/** 手機寬度：`matchMedia` 對 640px 斷點回 true。 */
 function asPhone(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
   return () => (window.matchMedia = original)
 }
 
-/** 面板掛上後第一趟快照讀完（元件一掛上就先讀一次）。 */
 async function firstSnapshot(requests: FakeRequest[]) {
   await until(() => requests.some((r) => r.method === 'GET' && r.path.includes('/shells/')), '第一趟快照')
   await settle()
@@ -83,7 +75,6 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
     const target = `local/${shell.pane_id}`
     assert.deepEqual(JSON.parse(localStorage.getItem('am.shellKeySyncOn') ?? '[]'), [target])
     assert.deepEqual(JSON.parse(localStorage.getItem('am.shellKeySyncOff') ?? '[]'), [])
-    // 同一顆 pane 重新掛上來：記著開就是開。
     const requests = mockApi(mock)
     await unmountAll()
     await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
@@ -91,7 +82,6 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
     assert.equal(input(), null, '記著開：手機也照記錄')
     await act(async () => (document.activeElement as HTMLElement | null)?.blur())
     assert.match(document.querySelector('.shell-sync-note')?.textContent ?? '', /手機沒有實體鍵盤：關掉鍵盤直通改用下方輸入框/, '焦點不在終端上：手機不叫人「點一下畫面收鍵盤」')
-    // 再關掉：on 移除、off 加入。
     await click(syncBtn())
     await until(() => input() !== null, '關掉後輸入列回來')
     assert.deepEqual(JSON.parse(localStorage.getItem('am.shellKeySyncOn') ?? '[]'), [])
@@ -104,12 +94,11 @@ test('手機明確打開直通：記進 am.shellKeySyncOn（並移出 off），�
 test('手機：送出中接著打的下一行不會被清掉（沒改字的送出照舊清空）', async () => {
   const restore = asPhone()
   const fetchBefore = globalThis.fetch
-  let posted = 0 // 送出的 POST 已經回來的次數
+  let posted = 0
   let release!: () => void
   const gate = new Promise<void>((r) => (release = r))
   try {
     const shell = await openShell()
-    // 送出的 POST 先等 gate 再真的送出：這段時間輸入框沒有停用，可以接著打字。
     const textPath = `/shells/${encodeURIComponent(shell.pane_id)}/text`
     const fetchNow = globalThis.fetch
     globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
@@ -140,7 +129,6 @@ test('手機：送出中接著打的下一行不會被清掉（沒改字的送�
     await settle()
     assert.equal(cmdInput().value, 'pwd', '送出期間打的下一行留著')
 
-    // 對照：沒有改字的送出，送完框是空的。
     await type('uptime')
     await act(async () => enter())
     await until(() => posted === 2, '第二行送完')
@@ -153,7 +141,6 @@ test('手機：送出中接著打的下一行不會被清掉（沒改字的送�
   }
 })
 
-/** #1128：↑ 翻歷史會換掉輸入框，打到一半的那一行要在 ↓ 回到底時還回來。 */
 test('手機：↑ 翻歷史再 ↓ 回到底，打到一半的那一行還在', async () => {
   localStorage.setItem('am.shellHistory', JSON.stringify({ local: ['ls'] }))
   const restore = asPhone()
@@ -177,7 +164,6 @@ test('手機：↑ 翻歷史再 ↓ 回到底，打到一半的那一行還在',
     await key('ArrowDown')
     assert.equal(cmdInput().value, 'git st', '↓ 回到底：打到一半的字還在')
 
-    // 對照：空的輸入框 ↑ 再 ↓ 是空的，不會把前一次的 pending 帶回來。
     await setValue('')
     await key('ArrowUp')
     await key('ArrowDown')

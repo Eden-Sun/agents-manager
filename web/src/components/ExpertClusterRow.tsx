@@ -26,14 +26,9 @@ function writeOpen(key: string, open: boolean) {
   try {
     window.localStorage.setItem(key, open ? '1' : '0')
   } catch {
-    // localStorage 不可用就只在這次畫面記著。
   }
 }
 
-/**
- * 群集的停派計數是狀態，不是勾選框。整組切換在旁邊的 `⋯`。
- * 有人停派才顯示「{n} 停派」；選單不冒泡，免得同時展開群集。
- */
 function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[]; on: number; busy: boolean }) {
   useT()
   const [open, setOpen] = useState(false)
@@ -44,7 +39,6 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
 
   useDismiss(open, wrapRef, () => setOpen(false))
 
-  // 只送差異成員的 PATCH；失敗的計數回報，全部成功不跳通知。
   const setAll = (next: boolean) => {
     setOpen(false)
     const targets = members.filter((m) => (m.manager_use !== false) !== next)
@@ -100,7 +94,6 @@ function ClusterManagerUseChip({ members, on, busy }: { members: readonly Bot[];
   )
 }
 
-/** 一列「<name> 群集 ●1 ○2」：標題後面是各狀態的燈號＋數量，右邊是停派晶片；可展開看成員。 */
 export function ExpertClusterRow({
   projectId,
   name,
@@ -110,7 +103,6 @@ export function ExpertClusterRow({
   projectId: string
   name: string
   members: readonly Bot[]
-  /** 展開後的成員列（呼叫端用原本的 BotRow 畫）。 */
   children: ReactNode
 }) {
   useT()
@@ -127,7 +119,6 @@ export function ExpertClusterRow({
   const lamps = useStore(useShallow((s) => ids.map((id) => botLamp(s, id))))
   const busyPatch = useStore(useShallow((s) => ids.some((id) => Boolean(s.busy[`patch:${id}`]))))
 
-  // 列上的 kind／身份／模型取第一顆成員（群集同設定）；身份晶片的顯示規則同單顆列（BotRowImpl）。
   const first = members[0]
   const firstId = first?.id ?? ''
   const firstRun = useStore((s) => s.runs[firstId] ?? null)
@@ -169,7 +160,7 @@ export function ExpertClusterRow({
           <span className="bot-main">
             <span className="bot-cluster-head">
               <span className="bot-cluster-name">{t('{name} 群集', { name })}</span>
-              {/* 狀態與數量合併（使用者 2026-11-04）：不再另起一行「1 執行中 · 2 閒置」，燈色同單顆列。 */}
+              {}
               <span
                 className="bot-cluster-count"
                 role="img"

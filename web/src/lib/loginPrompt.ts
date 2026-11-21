@@ -1,21 +1,11 @@
-/**
- * 「被登出就主動提示我登入」（#838 補充，使用者 2026-10-04：「應該要偵測到有被登出就提示我登入，而不是去身份裡面點」）。
- * 哪些 claude 身份現在該提示、關掉的狀態怎麼比。全是純函式；顯示在 `components/LoginPromptBanner.tsx`。
- *
- * 一個身份要提示，需要同時：① 在那台主機上要重新登入——探測說 `logged_in === false`，或 daemon 記了 `login_needed`
- * （綁著它的 bot 回合授權失敗；遠端 claude 的探測問不出「未登入」，mac_builder 的 cc1 只有這條）；② 有 bot 綁著它（同一台主機）；
- * ③ 那台主機連得上（連不上時登入也開不了 pane，離線警示條已經在講）。
- */
 import type { Bot, Host, IdentityStatusMap, Project } from '../api/types'
 import { t } from './i18n'
 
 export interface PendingLogin {
   host: string
   identity: string
-  /** 這一次登出的識別：daemon 的 `login_needed.since`；只有探測說未登入時用固定字 `probe`。 */
   episode: string
   via: 'probe' | 'turn'
-  /** 綁著這個身份、在這台主機的 bot。 */
   bots: { id: string; name: string }[]
 }
 
@@ -24,7 +14,6 @@ export interface LoginPromptInput {
   projects: Pick<Project, 'id' | 'host'>[]
   hosts: Pick<Host, 'name' | 'connected' | 'identity_status'>[]
   localIdentityStatus: IdentityStatusMap
-  /** 本機（daemon 與 herdr）連著。 */
   localConnected: boolean
 }
 
@@ -39,7 +28,6 @@ export function pendingLogins(s: LoginPromptInput): PendingLogin[] {
   const out: PendingLogin[] = []
   for (const { host, status } of sources) {
     for (const [identity, st] of Object.entries(status)) {
-      // claude（回合授權失敗＝`Not logged in`）與 codex（回合整則是 401／refresh token 失效）；其他 kind 沒有這條提示。
       if (st.kind !== 'claude' && st.kind !== 'codex') continue
       const turn = st.login_needed ?? null
       if (st.logged_in !== false && !turn) continue
@@ -53,12 +41,10 @@ export function pendingLogins(s: LoginPromptInput): PendingLogin[] {
   return out
 }
 
-/** 關掉過的是同一次登出就不再顯示；換了一次（`since` 變了）或之前登入成功過（帳被 [`pruneDismissed`] 清掉）就會再提示。 */
 export function visibleLogins(pending: PendingLogin[], dismissed: Record<string, string>): PendingLogin[] {
   return pending.filter((p) => dismissed[dismissKey(p.host, p.identity)] !== p.episode)
 }
 
-/** 已經不需要登入的身份，把它關掉過的記錄清掉：下一次又被登出時才會重新提示。 */
 export function pruneDismissed(dismissed: Record<string, string>, pending: PendingLogin[]): Record<string, string> {
   const live = new Set(pending.map((p) => dismissKey(p.host, p.identity)))
   const keys = Object.keys(dismissed)
@@ -66,7 +52,6 @@ export function pruneDismissed(dismissed: Record<string, string>, pending: Pendi
   return Object.fromEntries(keys.filter((k) => live.has(k)).map((k) => [k, dismissed[k]]))
 }
 
-/** 給 prune 用的 pending：來源斷線的那幾台，已關掉的 key 原樣保留（斷線≠登入成功）。 */
 export function pendingForPrune(
   s: Pick<LoginPromptInput, 'hosts' | 'localConnected'>,
   pending: PendingLogin[],

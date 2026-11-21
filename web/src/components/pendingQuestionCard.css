@@ -1,5 +1,3 @@
-/* 從 transcript 讀出來的原題（`PendingQuestionCard.tsx`）：唯讀摘要，預設收成一行（issue #559）。
-   長相刻意跟選項（`.bc-item`：有框、編號、粗體、44px）分開——這裡沒有一樣東西按了會作答。 */
 .pending-q {
   display: flex;
   flex-direction: column;
@@ -9,7 +7,6 @@
   border-top: 1px dashed var(--border-strong);
 }
 
-/* 收合列：跟 `.bc-more` 同一種中性小按鈕的份量，不是選項。 */
 .pending-q-toggle {
   display: flex;
   align-items: baseline;
@@ -92,7 +89,6 @@
   color: var(--text);
 }
 
-/* 選項是散文清單：不編號、不加粗、跟說明同一段。 */
 .pending-q-opts {
   margin: 0;
   padding-left: 16px;
@@ -106,8 +102,6 @@
   color: var(--text-faint);
 }
 
-/* 認不出選單時卡片排在終端快照上面：自己捲，不把底部按鍵擠出去。不可跟終端一起縮：手機上終端
-   `flex: 1 1 auto` 會把它壓成一條縫、題目看不見；改成固定高度、上限 40% 視窗高，超出自己捲。 */
 .blocked-modal > .pending-q {
   flex: 0 0 auto;
   max-height: 40vh;
@@ -117,7 +111,6 @@
   margin: 0 16px;
 }
 
-/* Jev 的選項建議（issue #1475）：標籤本身是 `JevLabel`（issue #1912），這裡只管位置。 */
 .pending-q-jev {
   margin-left: 6px;
 }

@@ -2,8 +2,6 @@ import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/** 刪 AGM 的 bot 的第二次確認（issue #406）。第一次刪除被 daemon 409 `supervisor_owned` 擋下時才出現；
- *  取消什麼都不做，確認才帶 `?confirm=supervisor` 重送。掛在 App 根層：兩個刪除入口（側欄 ⋯、Bot 設定）共用。 */
 export function AgmDeleteConfirm() {
   const t = useT()
   const ask = useStore((s) => s.agmDeleteAsk)

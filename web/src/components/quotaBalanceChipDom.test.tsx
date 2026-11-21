@@ -1,7 +1,3 @@
-/**
- * 全域額度列的 Anthropic API 餘額（BalanceQuotaChip）：估算／Console 實際、tooltip 放不確定與更新時間、手機短格式、
- * 沒設定不畫、點下去到第一顆 claude-api bot。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
@@ -175,10 +171,6 @@ test('樣式：膠囊 CSS 不用 absolute／fixed 定位，也不是會被壓縮
   assert.match(css, /\.quota-balance\s*\{[^}]*flex-direction:\s*column/, '桌機兩行堆疊')
 })
 
-/**
- * 2026-11-15：錨點還是 11/02 的 $98.14，官方記到的花費已超過它（$71.4 官方＋$28.9 本機）→ 估算 −$2.77。
- * 逐段拆過（官方小時桶總和、本機帳只算官方涵蓋之後）沒有重複計算：負數是因為期間有儲值，錨點過舊。膠囊不顯示負數，改提示需校正。
- */
 test('估算成負數：膠囊顯示「需校正」而不是負的金額，視窗說明原因；tooltip 沒有 markdown 星號', async () => {
   useStore.setState({ bots: [] } as never)
   await withBalance({ ...estimate, remaining_usd: -2.12, remaining_floor_usd: -2.77, spent_usd: 100.2575 }, async () => {

@@ -1,9 +1,5 @@
 import type { KeyboardEvent } from 'react'
 
-/**
- * `role="tablist"` 的方向鍵（WAI-ARIA APG tabs，自動啟用），透過 click 切換。
- * 不做 roving tabindex：UI-DECISIONS 的驗收條件是只用 Tab 就能切聊天／終端。
- */
 export function onTabListKeyDown(e: KeyboardEvent<HTMLElement>) {
   const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key]
   if (step === undefined && e.key !== 'Home' && e.key !== 'End') return

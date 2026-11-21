@@ -1,14 +1,3 @@
-/**
- * 環境設定子分頁（issue #1922，SPEC §4.3）：
- * 供「Jev 建議」與「Claude API」共用的二層分頁切換器。
- * 樣式採用沉底軌道與選中卡片（比照 .tabs／.tab，定義於 envSubTabs.css）。
- *
- * 無障礙需求（見 1922-design.md）：
- * - role="tablist" 與 aria-label
- * - 每顆按鈕 role="tab", aria-selected, aria-controls
- * - 鍵盤導覽：ArrowRight / ArrowDown 切換至下一項，ArrowLeft / ArrowUp 切換至上一項，Home / End 到首尾，自動選中並 focus
- * - 切換子分頁時將所在主 tabpanel 的捲軸位置重設為 0
- */
 import { useRef, type KeyboardEvent, type ReactNode } from 'react'
 import './envSubTabs.css'
 
@@ -20,13 +9,9 @@ export interface EnvSubTabItem<T extends string = string> {
 }
 
 export interface EnvSubTabsProps<T extends string = string> {
-  /** tablist 的 aria-label，例如「Jev 建議分類」或「Claude API 分類」 */
   ariaLabel: string
-  /** 目前選中的子分頁 id */
   value: T
-  /** 切換子分頁回呼 */
   onChange: (id: T) => void
-  /** 子分頁清單 */
   items: EnvSubTabItem<T>[]
 }
 
@@ -40,7 +25,6 @@ export function EnvSubTabs<T extends string = string>({
 
   const selectTab = (id: T) => {
     onChange(id)
-    // 依設計說明：切換子分頁時把該主分頁的捲軸設回 0
     const scroller = listRef.current?.closest<HTMLElement>('[role="tabpanel"]')
     if (scroller) {
       scroller.scrollTop = 0

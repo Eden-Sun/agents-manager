@@ -1,7 +1,3 @@
-/**
- * #1899：`limit_hit` 要在兩條真的路徑上活下來——`/api/state`（toBot 正規化）與 WS `bot_status`（逐欄 patch）。
- * 之前 toBot 沒帶這個欄位，DOM 測試直接塞 store 所以沒抓到。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon } from './storeEnv.harness.ts'
@@ -12,7 +8,6 @@ import type { Bot } from '../api/types.ts'
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 const HIT = { message: "You've hit your usage limit", until: '2026-10-29T11:24:00Z' }
 
-/** daemon 的 bot 形狀（`/api/state` 裡一顆）。 */
 const rawBot = (id: string, parent: string | null, limit_hit: unknown) => ({
   id,
   project_id: 'p1',
@@ -35,14 +30,11 @@ test('toBotLimitHit：物件保留 message 與 until；非物件一律 null', ()
 })
 
 test('toBotLimitHit：型別不對整筆給 null，不把任意物件塞進 store；多出來的欄位不帶', () => {
-  // message 不是字串（數字、物件、缺欄位）：整筆 null。
   assert.equal(toBotLimitHit({ message: 42, until: HIT.until }), null)
   assert.equal(toBotLimitHit({ message: { text: 'x' }, until: HIT.until }), null)
   assert.equal(toBotLimitHit({ until: HIT.until }), null)
-  // until 不是字串也不是 null（數字、物件）：整筆 null，不能退成「沒寫時間」而一直掛著。
   assert.equal(toBotLimitHit({ message: 'x', until: 1761737040 }), null)
   assert.equal(toBotLimitHit({ message: 'x', until: { at: 'now' } }), null)
-  // 合法的物件只取 message 與 until，其餘欄位（甚至是巢狀物件）不進 store。
   const parsed = toBotLimitHit({ ...HIT, bucket: 'five_hour', extra: { deep: [1, 2] } })
   assert.deepEqual(parsed, HIT)
   assert.ok(parsed && !('extra' in parsed) && !('bucket' in parsed), '只留 message 與 until')

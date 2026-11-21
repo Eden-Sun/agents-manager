@@ -1,6 +1,3 @@
-/**
- * RAM 清單的 pane 畫面視窗（issue #1138）：上一趟沒回來就不發下一趟，畫面是最後回來的那一張，背景分頁不抓。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { installManualClockTimers } from '../testing/manualClockTimers'
@@ -17,7 +14,6 @@ after(async () => {
 const proc = { pane_id: 'p1', socket_path: null, argv: 'claude' } as unknown as MemProcess
 const frame = (text: string) => new Response(JSON.stringify({ text, pane_id: 'p1', columns: 80, rows: 24 }), { status: 200 })
 
-/** 換掉 fetch：只接 `/mem/processes/pane`，每一趟的回應由測試自己決定什麼時候回來。 */
 function holdPaneReads() {
   const orig = globalThis.fetch
   const calls = { n: 0 }

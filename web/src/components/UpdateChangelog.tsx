@@ -14,12 +14,6 @@ import {
 import { msg, t, tr, useT } from '../lib/i18n'
 import './updateChangelog.css'
 
-/**
- * 「有更新 · 重啟套用」確認框裡的 changelog（2026-09-10 使用者需求：先看改了什麼才重啟）。
- * 抓不到不擋重啟——那是使用者的決定，這裡只講清楚原因。
- * 翻譯是另外一層（#1870）：沒開、或還在查狀態時，不畫翻譯按鈕、也不畫錯誤。
- * 翻譯鈕跟回應的 `lang`：沒有或不認得就不寫目標語言。
- */
 export function UpdateChangelog({
   kind,
   host,
@@ -30,14 +24,10 @@ export function UpdateChangelog({
   kind: string
   host: string
   from: string | null
-  /** 已知的目標版本；codex 的更新是 TUI 當場問的、磁碟上還是舊版，只能從畫面讀。 */
   to?: string | null
-  /** 只有 install／upstream 類的框開這個（#1948）：開框 absent 自動補翻、退避到期自動再試。
-   *  per-bot 的 badge（running→installed）不開，只留按鈕，避免幾顆 bot 各付一次。 */
   autoTranslate?: boolean
 }) {
   const t = useT()
-  // 以「這次請求的 key」配對結果：key 換了就等於重新載入，不必在 effect 裡同步清狀態。
   const key = `${kind}|${host}|${from ?? ''}|${to ?? ''}`
   const [state, setState] = useState<{ key: string; reply: ChangelogReply } | null>(null)
   const [tr, setTr] = useState<{ key: string; view: TranslationView } | null>(null)
@@ -98,8 +88,6 @@ export function UpdateChangelog({
     return () => clearInterval(id)
   }, [retryAfter])
 
-  // 自動翻（#1948）：每個 key 在這個框裡最多自動送一次 absent；之後的失敗靠下面的退避計時再試。
-  // 帳本在 daemon，同一份內容就算重開框也只會送一次（指紋去重）。
   const [autoSentKey, setAutoSentKey] = useState<string | null>(null)
   const shouldAuto = autoTranslate && shouldAutoTranslate(view, autoSentKey === key)
   useEffect(() => {
@@ -108,8 +96,6 @@ export function UpdateChangelog({
     void postTranslation(kind, host, from, to).then((next) => setTr({ key, view: next }))
   }, [shouldAuto, key, kind, host, from, to])
 
-  // 退避到期自動再試（沒有使用者上限時）。每收到一次回應就依 retry_after 重算剩餘時間：
-  // 瀏覽器時鐘快、daemon 還在退避時，回來的還是同一個未來時間，這裡照樣重排，不會停住；地板值擋住緊密迴圈。
   useEffect(() => {
     if (!autoTranslate) return
     const ms = autoRetryDelay(view, Date.now())
@@ -220,7 +206,6 @@ const TRANSLATE_TARGET: Record<string, string> = {
   ko: msg('韓文'),
 }
 
-/** 只採用回應裡的 lang。沒有或不認得就寫「翻譯」，不猜成繁中。 */
 function translateButtonLabel(lang: string | null): string {
   if (!lang) return t('翻譯')
   const name = TRANSLATE_TARGET[lang]

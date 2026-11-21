@@ -1,8 +1,3 @@
-/**
- * 單顆 bot 的重啟鈕（#重啟連點）：⟳ 徽章、設定面板的「立即重啟」、更新徽章是三個各自有本地 `restarting` 狀態的按鈕，
- * 同一顆 bot 只要有任何一處在重啟（store 的 `busy['restart:<id>']`），所有按鈕都要 disable——不然使用者換一個鈕再按，
- * store 的 `guarded` 會悄悄吞掉第二下（回 false、什麼都不說），畫面卻像沒反應。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

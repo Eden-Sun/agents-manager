@@ -1,4 +1,3 @@
-/* components/QuotaStrip.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .main-head > .quota-strip {
   flex: none;
 }
@@ -13,13 +12,9 @@
     gap: 5px;
   }
 
-  /* `.quota-open` 已有 5px gap，再加分隔線會變成表格。 */
-
   .main-head .quota-hp + .quota-hp {
     border-left-color: transparent;
   }
-
-  /* 手機身份名與停用方塊都讓位，標籤欄寬收回自動。 */
 
   .main-head .quota-head {
     flex-direction: row;
@@ -28,16 +23,12 @@
   }
 }
 
-/* quota (sol decision, 2026-09-06): at most two queryable kinds; grok never takes strip space. Risk = shape + colour. */
-
 .quota-strip {
   position: relative;
   display: flex;
   align-items: center;
   flex: 0 0 auto;
 }
-
-/* 格與格之間不留空白（2026-09-11 使用者）：五格各 8px 白吃 40px；分界改用 7px 內距＋1px 細線。 */
 
 .quota-open {
   display: flex;
@@ -63,8 +54,6 @@
   outline-offset: 2px;
 }
 
-/* 停用方塊只有方塊沒文字（說明走 aria-label／`.icon-tip`）；負 margin-top 塞進圖示欄比量表矮的空白（27 vs 36px），高度不變。 */
-
 .quota-cell-toggle {
   display: inline-flex;
   margin-top: -1px;
@@ -79,8 +68,6 @@
   cursor: pointer;
 }
 
-/* 格子裡不用 gap（2026-09-11 使用者）：改量表自己 3px 左內距。 */
-
 .quota-hp {
   display: inline-flex;
   align-items: center;
@@ -91,7 +78,6 @@
   transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
-/* #392：開機先畫 DB 裡的上一輪讀數，不要把等待探測誤畫成斜線空白；淡色＋標題／明細的年齡表示它仍是 stale。 */
 .quota-hp.stale {
   opacity: 0.64;
   filter: saturate(0.72);
@@ -103,22 +89,14 @@
   font-size: 11px;
 }
 
-/* 只染 1px 透明外框的左邊，拿掉 gap 後格寬不變；選取格整圈上色會蓋掉這條。 */
-
 .quota-hp + .quota-hp {
   border-left-color: var(--border);
 }
-
-/* 目前那格桌機不做成第二張卡片：旁邊若有 limit_hit 紅框，淡底圓角會互打（2026-09-16）。
-   手機用 `.quota-framed` 的上下邊框量表。 */
 
 .quota-hp.focused {
   border-color: transparent;
   background: transparent;
 }
-
-/* 桌機也要標出「畫面在哪顆 bot」（2026-09-21 使用者：桌機板也要同手機板）。**黃色外框**（2026-09-28 使用者：「focus 不夠明顯」，
-   接著「不要下面藍色條，與血條搞混，黃外框好了」）。用 outline 不用 border：limit_hit 的紅框是 border，兩個同時出現各畫各的。 */
 
 @media (width > 640px) {
   .quota-hp.focused {
@@ -127,8 +105,6 @@
     border-radius: 7px;
   }
 }
-
-/* 上邊 5H、下邊 7D 表示剩餘量。2026-09-11 起**只有手機**掛 `.quota-framed`（桌機已有 bar 與數字，重畫是重複）。 */
 
 .quota-hp.focused.quota-framed {
   position: relative;
@@ -148,7 +124,6 @@
   color: var(--accent);
 }
 
-/* 帶黑針的那條不能裁切，否則針只剩 2px。 */
 .quota-border-meter.bottom {
   overflow: visible;
 }
@@ -168,7 +143,6 @@
   background: currentColor;
 }
 
-/* 7d／週邊框上的重置黑針（同桌機 `.quota-bar-mark`）：比 2px 的條高，才看得出是刻度不是填色。 */
 .quota-border-mark {
   position: absolute;
   bottom: -2px;
@@ -187,8 +161,6 @@
 .quota-border-meter.critical {
   color: var(--danger);
 }
-
-/* 身份名欄**固定寬度**（2026-09-11 使用者）：寬度跟內容跑時 bar 起點不同，五個帳號的 5h 無法橫比。3.2em = `codex` 寬。 */
 
 .quota-head {
   flex: none;
@@ -212,8 +184,6 @@
   font-family: var(--font-mono);
 }
 
-/* 沒登入：條子永遠空，名字上講清楚，免得以為還沒回報。 */
-
 .quota-identity.logged-out {
   color: var(--warn);
   text-decoration: underline dotted;
@@ -233,9 +203,6 @@
   color: var(--text-dim);
 }
 
-/* 三個 kind 都用品牌色（2026-09-13 使用者：grok 沒顏色很像用盡）——灰色是 `quotaLimitHit.css` 的「擋住」畫法。
-   **嚴重程度不畫在 logo 上**：由量表與數字說，否則跟量表重複、讓「灰 = 擋住」失焦。 */
-
 .quota-hp.claude .quota-kind {
   color: var(--kind-claude);
 }
@@ -251,8 +218,6 @@
 .quota-hp.agy .quota-kind {
   color: var(--kind-agy);
 }
-
-/* Selection is shown by the gauge frame only; never replace the kind's brand colour with accent. */
 
 .quota-hp.focused.claude .quota-kind {
   color: var(--kind-claude);
@@ -276,7 +241,6 @@
 
 .quota-bars {
   display: grid;
-  /* Match the height of a 5h+7d stack so a lone grok "週" bar doesn't float like a missing 5h. */
   min-height: 20px;
   align-content: start;
 }
@@ -291,8 +255,6 @@
   align-items: center;
 }
 
-/* `5h` / `7d`：唯一允許 10.5px 的一類。 */
-
 .quota-window-name {
   padding-right: 2px;
   font-size: 10.5px;
@@ -304,8 +266,6 @@
   text-align: right;
 }
 
-/* 沿用上一份讀數的那一格（issue #540）：窗口名後面掛一個小「舊」。字而不是只有顏色——
-   狀態不能只靠顏色（UI-DECISIONS），而且這一格的數字本身還是要照常讀得到。 */
 .quota-window-stale {
   margin-left: 1px;
   font-size: 8px;
@@ -319,15 +279,11 @@
   color: var(--text-dim);
 }
 
-/* 條與數字之間 3px：使用者點名「不能黏在一起」，間距不減。 */
-
 .quota-bar-row {
   display: inline-flex;
   align-items: center;
   min-width: 38px;
 }
-
-/* 手機 chip：窗口名＋剩餘 %，取代 38px 量表（QuotaStrip `compact`）。 */
 
 .quota-compact {
   display: inline-flex;
@@ -339,8 +295,6 @@
 .quota-compact .quota-window-name {
   text-align: left;
 }
-
-/* 等級顏色掛在每個窗口上而非整格：5h 綠 7d 黃時整格一色就得說謊。 */
 
 .quota-compact-win {
   display: inline-flex;
@@ -371,8 +325,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 方案 A：有倒數的格子，百分比在 logo 列，顏色跟窗口等級（同第二行的規則）。 */
-
 .quota-head-pct.warn {
   color: var(--warn);
 }
@@ -388,8 +340,6 @@
 .quota-hp.crit .quota-compact-pct {
   color: var(--danger);
 }
-
-/* 針要凸出條的上下緣，定位掛外層（條有 overflow: hidden）。 */
 
 .quota-bar-wrap {
   position: relative;
@@ -416,8 +366,6 @@
   transition: width 240ms ease;
 }
 
-/* 黑針＝下次 reset：剩餘時間 ÷ 窗口長度。 */
-
 .quota-bar-mark {
   position: absolute;
   top: -3px;
@@ -438,8 +386,6 @@
 .quota-bar.crit .quota-bar-fill {
   background: var(--danger);
 }
-
-/* 剩餘 < 30% 才出現：條太短時它是唯一看得清的訊息，字要夠大。 */
 
 .quota-bar-pct {
   flex: none;
@@ -462,8 +408,6 @@
   font-weight: 600;
 }
 
-/* no data: hatched track, no fill */
-
 .quota-bar.nodata {
   background: repeating-linear-gradient(
     135deg,
@@ -478,8 +422,6 @@
   right: 0;
   z-index: 40;
   width: 336px;
-  /* 一眼看完（使用者 2026-09-19）：本機常有 claude×3＋codex＋grok，固定 420px 會把最後一兩個
-     供應商切在捲軸外，得捲才知道有沒有用盡。改成吃得到的視窗高度，並把行距收緊。 */
   max-height: min(78vh, 640px);
   overflow-y: auto;
   display: grid;
@@ -506,8 +448,6 @@
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-
-/* 停用態整格降透明＋名字劃掉；量表不劃線——數字正是使用者停用它的理由。 */
 
 .quota-pop-row.off {
   opacity: 0.5;
@@ -538,8 +478,6 @@
   color: var(--text-faint);
 }
 
-/* 停用中的格降透明＋劃掉，不必開 popover 就知道側欄少了誰。 */
-
 .quota-hp.off {
   opacity: 0.45;
 }
@@ -560,7 +498,6 @@
   min-height: 22px;
 }
 
-/* 展開後的額度卡：kind logo 跟額度列、標題列一樣吃品牌色（2026-09-22 使用者：「額度圖裡 kind logo 也該有顏色」）。 */
 .quota-pop-head .quota-kind.claude {
   color: var(--kind-claude);
 }
@@ -601,7 +538,6 @@
   align-items: baseline;
   gap: 8px;
   font-size: 11.5px;
-  /* 每一列少幾 px，五個供應商就省掉一整塊捲動。 */
   line-height: 1.35;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
@@ -611,8 +547,6 @@
   width: 44px;
   flex: none;
 }
-
-/* `align-items: baseline` 會把條壓在基線上，改 center 才跟兩邊字對齊。 */
 
 .quota-pop-line {
   align-items: center;
@@ -639,8 +573,6 @@
   height: 12px;
 }
 
-/* 條上省 `%`，彈出層補回：否則 `97` 像次數。`—` 不加。 */
-
 .quota-pop-line .quota-bar-pct:not(.nodata, .has-unit)::after {
   content: '%';
   opacity: 0.7;
@@ -658,7 +590,6 @@
 }
 
 @media (width <= 640px) {
-  /* `.quota-hp` 是一列 flex，撐高會讓圖示與數字分兩行：只放大可按範圍（手法 2）。 */
 
   .main-head .quota-bars-open,
   .sidebar .quota-bars-open {
@@ -669,18 +600,13 @@
   }
 }
 
-/* 手機名字被截成五個字，旁邊卻是 190px 額度 chip（其他欄位 popover 已有），讓出寬度給名字。 */
-
 @media (width <= 640px) {
-  /* 身份名與停用方塊讓位（側欄與 popover 都有，10px 方塊也不是觸控目標）；視窗名留下——沒 hover 分不出 5h／7d／Fable。 */
 
   .main-head .quota-hp .quota-identity,
   .main-head .quota-hp .quota-cell-toggle {
     display: none;
   }
 }
-
-/* 手機額度：chip 寫窗口剩多少，明細在 sheet。 */
 
 @media (width <= 640px) {
   .main-head .quota-compact .quota-window-name {
@@ -693,13 +619,9 @@
     color: var(--text-dim);
   }
 
-  /* 一格只有一個窗口（compact：7d 常駐，更急的取代），單行；column 排法曾讓額度列長高，390px 塞不下五個帳號（2026-09-12）。 */
-
   .main-head .quota-compact {
     flex-wrap: nowrap;
   }
-
-  /* 顏色跟每個窗口自己的等級，否則健康的也被染黃。 */
 
   .main-head .quota-compact-win.warn .quota-compact-pct,
   .main-head .quota-compact-win.warn .quota-window-name {
@@ -710,10 +632,6 @@
   .main-head .quota-compact-win.critical .quota-window-name {
     color: var(--danger);
   }
-
-  /* 貼額度列正下方而非底部 sheet：底部要滑很遠且擋輸入框（2026-09-09 使用者）。 */
-  /* 寬度等於視窗（2026-10-09 使用者：手機按額度的 pop up 要全螢幕寬）：左右貼齊、只讓出 safe-area（瀏海、圓角螢幕），
-     不再留 8px 邊；`position: fixed` 直接對視窗定位，寬度由左右兩個 inset 決定，超過的內容在 max-height 內捲動。 */
 
   .quota-pop {
     position: fixed;
@@ -733,8 +651,6 @@
   .quota-pop .quota-pop-foot {
     display: none;
   }
-
-  /* 手機 chip 是純文字，圖形版只在彈出層：條高一點、黑針粗一點。 */
 
   .quota-pop .quota-pop-line {
     font-size: 13px;
@@ -760,8 +676,6 @@
     width: 1.3em;
     color: var(--text-faint);
   }
-
-  /* 「✦ Fable」在 44px 會折成兩行。 */
 
   .quota-pop .quota-pop-line > :first-child {
     width: 64px;
@@ -794,7 +708,6 @@
     padding: 0 8px 6px;
   }
 
-  /* 緊湊卡片（2026-11-20，方案 1）：拿掉壓在文字上的黑色邊緣漸層，只留乾淨底；超過五顆帳號仍可橫捲。 */
   .main-head .quota-open {
     overflow-x: auto;
     flex-wrap: nowrap;
@@ -808,8 +721,6 @@
     display: none;
   }
 
-  /* 額度格跟桌面一樣動態增寬（2026-09-16 使用者）：basis 0 均分整列；min-width 保底是內容寬，
-     帳號多到塞不下時仍照舊橫向捲動，不會把字擠斷。 */
   .main-head .quota-open {
     flex: 1 1 auto;
     min-width: 0;
@@ -819,8 +730,6 @@
     flex: 1 0 0;
     min-width: max-content;
   }
-
-  /* 同列三個 claude 身份時，沒有 cc0／cc1／cc2 會一模一樣。 */
 
   .main-head .quota-hp .quota-identity {
     display: inline;
@@ -840,8 +749,6 @@
   width: 100%;
 }
 
-/* 手機額度 chip 改上下兩行（2026-09-09 使用者：黃字要在 kind 下方，不是右邊）：整顆變窄，一列擠更多。 */
-
 @media (width <= 640px) {
   .main-head .quota-hp {
     flex-direction: column;
@@ -853,8 +760,6 @@
     align-items: center;
     gap: 2px;
   }
-
-  /* 兩行 chip 已夠高，不再用負 margin 撐可按範圍。 */
 
   .main-head .quota-bars-open {
     padding: 0;
@@ -868,8 +773,6 @@
   }
 }
 
-/* 5h 不到一小時重置：窗口名換剩幾分並用 accent 提亮；欄寬放寬塞得下三字元。 */
-
 .quota-window {
   grid-template-columns: minmax(16px, auto) auto;
 }
@@ -879,7 +782,6 @@
 }
 
 @media (width <= 640px) {
-  /* 額度按鈕含多行數字，不套固定方形或負邊距。 */
 
   .main-head .quota-bars-open {
     width: auto;
@@ -890,8 +792,6 @@
     margin: 0;
   }
 }
-
-/* codex 額度重置券（`PopResetCredits`）不是進度條只有字；券數強調色——額度歸零時是唯一能做的動作。 */
 
 .quota-pop-line.reset-credits .quota-reset-credit {
   display: flex;
@@ -914,18 +814,11 @@
   color: var(--text-faint);
 }
 
-/*
- * 額度格的提示被下面那排晶片蓋住（2026-09-14 使用者截圖）。停用方塊的提示往下開（標題列貼著視窗上緣），
- * 而 `.unread-bar-wrap` 是 `position: relative`、DOM 又排在標題列後面，於是整條晶片列畫在提示上面。
- * 標題列自己開一個比它高的疊層；標題列裡其他往下開的東西（額度明細、模型選單）也一併不再被晶片列蓋住。
- */
 .main-head {
   position: relative;
   z-index: 4;
 }
 
-/* 標題列的額度區吃掉剩下的空白（2026-09-16 使用者：「額度的寬度 flex 以用盡空間」）：
-   自己可長，量表條跟著長，手機的 compact chip 不受影響（見上面 640px 區塊）。 */
 @media (width > 640px) {
   .main-head > .quota-strip {
     flex: 1 1 0;
@@ -953,7 +846,6 @@
     min-width: 0;
   }
 
-  /* 量表那一欄吃掉剩下的寬度（原本是 auto＝跟著 38px 的條）。 */
   .main-head .quota-window {
     grid-template-columns: minmax(16px, auto) 1fr;
     min-width: 0;
@@ -963,7 +855,6 @@
     flex: 1 1 auto;
   }
 
-  /* 條跟著等寬格增長，剩餘空間不留在格內。 */
   .main-head .quota-bar-wrap {
     flex: 1 1 38px;
     width: auto;
@@ -976,16 +867,12 @@
   }
 }
 
-/* 剩不到 10%：條改成 0–10% 的刻度（2026-10-16 第三版，方案 B；取代 #1785 的 10 格點陣）。條寬與一般列相同、上下對齊。
-   刻度範圍畫成**整條的細外框**（2026-10-23 使用者截圖：原本兩端 2px 豎線跟 5h／F 列的重置黑針分不出來，
-   F 的黑針剛好落在 0% 時三根線並排；換個形狀——框是框、針是針），0% 時也看得到框裡是空的。 */
 .quota-bar-wrap.zoomed .quota-bar {
   outline: 1px solid var(--text-faint);
   outline-offset: 1px;
   background: transparent;
 }
 
-/* 倒數模式的列不在列內寫倒數：所有窗口下方另起一行，開頭是 └，靠窗口名欄寬縮排到條的左緣。 */
 .quota-reset-line {
   font-weight: 650;
   line-height: 1;
@@ -993,9 +880,6 @@
   color: var(--text-dim);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  /* 這行不能決定格子寬度：#1780 的等寬是「最寬那格 × 格數」，這行一長所有格子都被撐寬，
-     窄一點的視窗右邊的 grok／agy 就被擠出畫面（2026-10-16 使用者）。寬度 0、最少撐滿格子。
-     一律一行：換成兩行會掉出 header、蓋到底下那排（同日使用者截圖）；真的放不下才截，完整時間在 title。 */
   width: 0;
   min-width: 100%;
   padding-left: 0;
@@ -1014,9 +898,6 @@
   color: var(--danger);
 }
 
-/* 勾了停用的帳號不分剩餘寬度，空間留給啟用的（2026-09-18 使用者）。量表整排收掉，只留 logo、名稱與停用方塊
-   （2026-09-25 使用者：「若有已被 disable 的 identity 就讓寬度小一點」——只縮條寬時，倒數那列 `min-width: max-content`
-   照樣把格子撐到 230px）。點格子照樣開 popover 看明細。 */
 @media (width > 1024px) {
   .main-head .quota-hp.off {
     flex: 0 0 auto;
@@ -1027,15 +908,10 @@
   }
 }
 
-/* 額度 popover（2026-09-19 使用者：「name 在左邊、整體窄一點」）：
-   方案（MAX／PLUS）緊貼帳號名，不再被兩個 margin-left:auto 擠到正中間；重置時間固定欄寬、靠右，
-   各列的條才一樣長；整體從 336px 收到 300px。 */
 .quota-pop .quota-plan {
   margin-left: 0;
 }
 
-/* 只在非手機套用：這條排在手機 media query 之後、權重相同，不包起來會把手機的 `width: auto` 蓋回 300px
-   （2026-10-10 使用者：手機 popover 仍沒有等寬）。 */
 @media (width > 640px) {
   .quota-pop {
     width: 300px;
@@ -1050,25 +926,16 @@
   white-space: nowrap;
 }
 
-/* 百分比也固定欄寬：「0%」比「100%」窄，條就會跟著變長。 */
 .quota-pop .quota-bar-pct {
   min-width: 2.8em;
   text-align: right;
 }
 
-/* 收合（寬度不夠放完整量表）時每格**直向疊出全部窗口**（一列一個：窗口名＋至少 24px 條＋數字／倒數，2026-10-10 使用者，#1158；
-   取代 #314 的單窗口收合）：條下限 24px、字級收小到三列塞得進 60px 的標題列，格不縮到比內容小，放不下的尾巴直接裁掉（明細點開看）；
-   `clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。 */
 @media (width > 640px) {
-  /* 完整量表的格子也不縮到比內容小（2026-09-28 使用者截圖：遠端主機時五格互相疊字）：放不下由
-     `nextQuotaFit` 量到後收合，不再靠格子擠壓把字疊到下一格。 */
   .main-head .quota-open:not(.collapsed) .quota-hp {
-    /* 不是 min-content：格內的 grid 項目是 `min-width: 0`，min-content 會算成比條加數字還窄（實測 90 vs 118px）。 */
     min-width: var(--quota-cell-min, max-content);
   }
 
-  /* 收合只縮窗口與字級；格子仍均分剩餘寬。原本 flex:0 0 auto 讓容器已填滿、agy 右邊卻空一段（#1780）。
-     量測提供最寬格的下限，真的連收合格都放不下時才裁掉尾巴。 */
   .main-head .quota-open.collapsed {
     overflow-x: clip;
     justify-content: flex-start;
@@ -1084,8 +951,6 @@
     min-width: max-content;
   }
 
-  /* 圖示欄收成內容寬：3.2em 是完整量表時的欄寬；收合後 cc0 這種短名只佔一小段，留著就是左邊的空白。
-     右邊留 8px 給窗口名，不然 5h／7d 會貼著 cc0 的欄。 */
   .main-head .quota-open.collapsed .quota-head {
     width: auto;
     padding-right: 8px;
@@ -1112,14 +977,12 @@
   }
 }
 
-/* agy 那格的登出：popover 底下一顆小鈕；手機的 40px 觸控高度走全站 `.mini-btn`。 */
 .quota-pop-actions {
   display: flex;
   justify-content: flex-end;
   margin-top: 6px;
 }
 
-/* codex 的方案沒有 5 小時窗：那一格不畫條，寫「無上限」（quotaNoFiveHour）。 */
 .quota-no-cap {
   flex: none;
   font-size: 10.5px;
@@ -1132,8 +995,6 @@
 .quota-pop .quota-no-cap {
   font-size: 12px;
 }
-
-/* 重置券到期（2026-11-07 使用者）：彈窗每張一列，不到 48 小時用警示色；晶片上只有一個很小的 ⟳24d。 */
 
 .quota-pop-line.reset-credit-row {
   display: flex;
@@ -1173,20 +1034,17 @@
   display: inline-flex;
 }
 
-/* logo 左邊的重置券徽章＝直排：票券圖示在上、張數在正下方置中（無底色，避免像未讀訊息數；2026-11-07 使用者：券在上、數字在下）；
-   排在 logo 左邊、頂端對齊（logo 右移一點），整組高度壓在 logo ＋ 一行小字內，不蓋下方的 7d／倒數文字；
-   手機額度列是捲動容器，絕對定位疊在上緣會被裁掉。快到期（<48h）只換文字色。 */
 .quota-credit-badge {
   align-self: flex-start;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
   gap: 0;
-  margin: -2px 2px -2px 0; /* 上下各吃 2px：整組 15px 高、不撐高 head，logo 與 7d 文字仍跟其他晶片同一條水平線 */
+  margin: -2px 2px -2px 0;
   font-size: 8px;
   font-weight: 600;
   line-height: 8px;
-  color: currentColor; /* 跟 logo 同色（.quota-kind 的品牌色），降低不透明度讓它低調 */
+  color: currentColor;
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
   cursor: help;

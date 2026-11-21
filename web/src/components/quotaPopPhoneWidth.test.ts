@@ -4,11 +4,9 @@ import { readFile } from 'node:fs/promises'
 
 const css = await readFile(new URL('./quotaStrip.css', import.meta.url), 'utf8')
 
-/** 手機（≤640px）的額度 popover 規則：`position: fixed` 那一條，必須掛在 640 斷點裡。 */
 const phoneIdx = css.indexOf('  .quota-pop {\n    position: fixed;')
 const phoneBody = phoneIdx >= 0 ? css.slice(phoneIdx, css.indexOf('}', phoneIdx)) : ''
 
-/** 2026-10-09 使用者：手機按額度的 pop up 要全螢幕寬，左右貼齊視窗、只讓出 safe-area。 */
 test('手機斷點的額度 popover 寬度等於視窗（左右貼齊、扣 safe-area）', () => {
   assert.ok(phoneIdx > 0, 'quotaStrip.css 要有手機 .quota-pop（position: fixed）規則')
   const media = css.slice(0, phoneIdx).lastIndexOf('@media')
@@ -21,9 +19,6 @@ test('手機斷點的額度 popover 寬度等於視窗（左右貼齊、扣 safe
   assert.match(phoneBody, /max-height:\s*min\(60dvh,\s*480px\);/, '內容超出時在 max-height 內捲動')
 })
 
-
-
-/** 2026-10-10：檔尾那條頂層 `.quota-pop { width: 300px }` 排在手機斷點之後、權重相同，會把手機的 `width: auto` 蓋掉。 */
 test('手機斷點之後沒有頂層 .quota-pop 再寫死 width，蓋掉手機的等寬', () => {
   const after = css.slice(phoneIdx + phoneBody.length)
   assert.doesNotMatch(after, /\n\.quota-pop \{[^}]*\bwidth:\s*\d+px/, '窄版 300px 要包在 width > 640px 裡')

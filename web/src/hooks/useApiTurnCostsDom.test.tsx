@@ -48,7 +48,6 @@ test('useApiBotCacheSub：多顆 bot 共用一份輪詢，同 bot 複數訂閱�
   }
 
   try {
-    // 同時掛載兩個 consumer，都包含 bot-a
     await mount(
       <>
         <Consumer botIds={['bot-a', 'bot-b']} />
@@ -60,16 +59,13 @@ test('useApiBotCacheSub：多顆 bot 共用一份輪詢，同 bot 複數訂閱�
       await new Promise((r) => setTimeout(r, 50))
     })
 
-    // bot-a 只打一次，bot-b 打一次，共兩次（沒有因為兩個元件訂閱 bot-a 而打兩次）
     assert.equal(calls.filter((c) => c.includes('bot-a')).length, 1)
     assert.equal(calls.filter((c) => c.includes('bot-b')).length, 1)
 
-    // getApiBotCache 可同步取得
     const cachedA = getApiBotCache('bot-a')
     assert.equal(cachedA?.ttl_secs, 300)
     assert.equal(cachedA?.expires_at, '2026-11-15T04:05:00Z')
 
-    // refreshApiBotUsage 會觸發重抓
     await act(async () => {
       refreshApiBotUsage('bot-a')
       await new Promise((r) => setTimeout(r, 50))

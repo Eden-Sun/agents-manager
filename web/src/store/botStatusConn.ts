@@ -1,7 +1,3 @@
-/**
- * Which flag `bot_status.connected` may touch (#20): it is the bot's host/session state
- * (`App::bot_connected`), not the local herdr link.
- */
 export type BotStatusConnTarget =
   | { kind: 'none' }
   | { kind: 'global'; connected: boolean }
@@ -10,7 +6,6 @@ export type BotStatusConnTarget =
 
 export function botStatusConnTarget(input: {
   connected: boolean | undefined
-  /** `host` from the frame, falling back to the bot's project host. */
   host: string
   defaultSession: boolean
 }): BotStatusConnTarget {

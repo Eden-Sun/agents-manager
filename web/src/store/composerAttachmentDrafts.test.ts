@@ -150,7 +150,6 @@ test('超過 MAX_ITEMS_PER_BOT 時自動淘汰該 bot 最舊的草稿', () => {
 
   const drafts = getAttachmentDrafts('bot1')
   assert.equal(drafts.length, MAX_ITEMS_PER_BOT)
-  // 最早的 a0, a1 應已被淘汰，最早保留的是 a2
   assert.equal(drafts[0].key, 'a2')
 })
 
@@ -182,7 +181,6 @@ test('sweepExpiredAttachmentDrafts 清除超過 24 小時的過期草稿', () =>
 })
 
 test('startAttachmentDraftPersistence 啟動時從 IndexedDB 還原並淘汰過期檔案', async () => {
-  // 1. 寫入假 DB
   const now = Date.now()
   const dbReq = factory.open(DRAFT_ATTACHMENT_DB_NAME, 1)
   await new Promise<void>((resolve, reject) => {
@@ -222,10 +220,8 @@ test('startAttachmentDraftPersistence 啟動時從 IndexedDB 還原並淘汰過�
     }
   })
 
-  // 2. 啟動 persistence
   const stop = startAttachmentDraftPersistence()
   try {
-    // 等候非同步讀取完成
     for (let i = 0; i < 20; i++) {
       if (getAttachmentDrafts('bot_idb').length > 0) break
       await new Promise((r) => setTimeout(r, 10))

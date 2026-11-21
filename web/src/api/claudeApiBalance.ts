@@ -15,7 +15,6 @@ export interface ConsolePromotion {
 
 export type ConsoleBalanceStatus = 'ok' | 'logged_out' | 'parse_failed' | 'error' | 'not_configured'
 
-/** daemon 用 agent-browser 讀 Console Billing 頁拿到的實際餘額（沒有 Anthropic API 可查）。 */
 export interface ConsoleBalance {
   status: ConsoleBalanceStatus
   purchased_usd?: number
@@ -32,13 +31,9 @@ export interface ClaudeApiBalance {
   anchor?: ClaudeApiBalanceAnchor
   spent_usd?: number
   remaining_usd?: number
-  /** 還沒被官方報表取代的不確定 attempt（以預留上限計的最壞情況）合計。 */
   uncertain_usd?: number
-  /** 最壞情況下限餘額＝remaining_usd − uncertain_usd。 */
   remaining_floor_usd?: number
-  /** 推算值（官方數字只到 report_through，之後靠本機帳）。 */
   estimate?: boolean
-  /** 官方數字來源：analytics＝小時粒度（今天也有）；cost_report＝每日；local＝沒有官方資料。 */
   source?: 'analytics' | 'cost_report' | 'local'
   report_through?: string | null
   local_since?: string | null
@@ -119,19 +114,13 @@ export async function putClaudeApiBalanceAnchor(usd: number, at?: string): Promi
   return toClaudeApiBalance(await rawTransport.request('PUT', '/claude-api/balance-anchor', body))
 }
 
-/** 最近一筆促銷幾天內到期就警示。 */
 export const PROMO_WARN_DAYS = 7
 
 export interface BalanceView {
-  /** 要顯示的金額；沒有任何來源可用時是 `undefined`（不畫晶片）。 */
   usd?: number
-  /** `console`＝Console 實際值；`estimate`＝錨點推算（含 Console 讀不到而退回）。 */
   source: 'console' | 'estimate'
-  /** Console 登入態過期，已退回推算值（有推算值時）。 */
   loggedOut: boolean
-  /** 最近到期的促銷（remaining > 0）。 */
   nextExpiry?: ConsolePromotion
-  /** 最近一筆促銷 7 天內到期。 */
   expiringSoon: boolean
 }
 
@@ -140,7 +129,6 @@ const parseDay = (iso: string): number => {
   return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : Number.NaN
 }
 
-/** 把回應整理成晶片要的資訊：有 console.ok 用實際值，否則退回推算值。`now` 供測試注入。 */
 export function balanceView(b: ClaudeApiBalance | null | undefined, now: Date = new Date(), zone: string = DEFAULT_USER_TIME_ZONE): BalanceView {
   const c = b?.console
   const estimate = b?.configured && b.remaining_usd !== undefined ? b.remaining_usd : undefined

@@ -1,4 +1,3 @@
-/* 「⏳ 部署等 N 分」（SPEC §18.10）：跟「⇪ 部署」同一列同一種外型，琥珀色＝在等你調度。 */
 .deploy-wait {
   position: relative;
   display: inline-flex;

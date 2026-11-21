@@ -7,10 +7,6 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { AgyInstallDialog } from './AgyInstall'
 import { useAgyMissing } from './agyInstallState'
 
-/**
- * 額度 popover「未登入」列的開 shell 登入：codex 沒有 `/login`，或 claude / grok 沒有在跑的 Bot。
- * CLI 狀態不會自己回來，所以送出後補「重新偵測」（同 `BotSettingsPanel`）。
- */
 export function QuotaLoginShell({
   host,
   hostLabel,
@@ -19,11 +15,9 @@ export function QuotaLoginShell({
   guide,
 }: {
   host: string
-  /** 已經算好的主機顯示名（本機 / 主機名），免得這裡再抄一份規則。 */
   hostLabel: string
   kind: BotKind
   command: string
-  /** 這個 CLI 的登入過程跟「跳出瀏覽器」不一樣時，換掉確認框裡那段說明（agy：TUI 自己引導）。 */
   guide?: ReactNode
 }) {
   const t = useT()
@@ -35,13 +29,10 @@ export function QuotaLoginShell({
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
   const installAgy = useStore((s) => s.installAgy)
   const installBusy = useStore((s) => s.busy[`agy-install:${host || 'local'}`] === true)
-  // 這台沒有 agy：開 shell 只會得到 `command not found`，先問要不要自動安裝，裝好才接著登入（使用者 2026-10-06）。
   const agyMissing = useAgyMissing(host) && kind === 'agy'
 
   async function run() {
-    // codex 會先刪掉已登入帳號的 auth.json：已登入就先問（`lib/codexLoginGuard`）。
     if (!(await useStore.getState().confirmCodexLoginReplace(host, kind, null))) return
-    // 一律新開（不接回舊 shell，#915）：指令不會被打進別人前景的 vim／sudo／手動開的 claude。
     const { opened, typed } = await openFreshShellAndType(host, command)
     if (!opened) return
     setSent(true)

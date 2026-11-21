@@ -7,10 +7,6 @@ const running = { disabled: false, reason: '這回合還在跑，送出會排到
 const stopped = { disabled: false, reason: 'Bot 沒在跑：送出會先啟動它，起來後自動送出', queued: true, autoStart: true }
 const starting = { disabled: false, reason: '啟動中，起來後自動送出', queued: true }
 
-/**
- * #122 之後沒在跑的 bot 是 `queued:true＋autoStart:true`，輸入框與送出鍵卻沿用「回合還在跑、送出會排隊」那套字——
- * 對一顆停著的 bot 說「這回合還在跑」、按鈕寫「排隊送出」（真畫面：AM-1-L 離線，狀態列說「Bot 沒在跑」，輸入框說「這回合還在跑」）。
- */
 test('沒在跑的 bot（autoStart）：不說「這回合還在跑」、送出鍵說會先啟動', () => {
   assert.doesNotMatch(composerPlaceholder(stopped, { phone: false, starting: false }), /還在跑/)
   assert.match(composerPlaceholder(stopped, { phone: false, starting: false }), /啟動/)

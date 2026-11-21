@@ -1,7 +1,6 @@
 import type { CloseNeedsConfirm } from "../api"
 import { useT } from "../lib/i18n"
 
-/** 關 pane／結束 shell 被 daemon 擋下（服務 pane、或讀不到它在跑什麼）時，第二道確認框的說明（AGM 驗收 9f05b03）。 */
 export function ServicePaneNote({ needs }: { needs: CloseNeedsConfirm | null }) {
   const t = useT()
   if (needs?.unverified) {

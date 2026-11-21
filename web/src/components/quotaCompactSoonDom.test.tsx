@@ -1,7 +1,3 @@
-/**
- * 手機（compact）：5h 用完、40 分鐘後重置時，已經寫倒數（0h40）就不再把窗口名換成「40m」——
- * 同一個時間寫兩次（2026-10-16 使用者：「手機版倒數 分鐘顯示就重複了」）。真的掛 `QuotaStrip` 進 happy-dom。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -54,7 +50,6 @@ test('手機：5h 用完 40 分鐘後重置，只寫一次時間（窗口名維�
     assert.equal(win.querySelector('.quota-window-name')?.textContent, '5h', '窗口名不換成剩幾分')
     assert.match(win.querySelector('.quota-reset-at')?.textContent ?? '', /^0h(39|40)$/, '倒數寫一次')
     assert.doesNotMatch(win.textContent ?? '', /\d+m/, '不再出現「40m」')
-    // 方案 A：有倒數時百分比在 logo 列，第二行沒有 %。
     const head = cellOf('cc0')!.querySelector<HTMLElement>('.quota-head')!
     assert.match(head.querySelector('.quota-head-pct')?.textContent ?? '', /^(<1|\d+)%$/, '百分比在 logo 列')
     assert.equal(win.querySelector('.quota-compact-pct'), null, '第二行不再寫百分比')

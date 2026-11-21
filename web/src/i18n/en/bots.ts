@@ -1,6 +1,6 @@
 import type { Dict } from '../../lib/i18n/types'
 
-export default {  // 共用 Bot／Project 狀態與驗證提示
+export default {
   '建議': 'Suggested',
   '{name} 群集': '{name} cluster',
   '{n} 執行中': '{n} running',
@@ -84,7 +84,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '圖示': 'Icons',
   '以文字顯示 claude / codex / grok / agy': 'Show claude / codex / grok / agy as text',
   '文字': 'Text',
-  // Bot settings and identity status
   '人設（選填）': 'Persona (optional)',
   '人設': 'Persona',
   '（選填）': ' (optional)',
@@ -167,7 +166,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   'Run 識別資訊': 'Run identifiers',
   '識別': 'Identifier',
   'herdr pane id：herdr pane send / capture 用的就是它': 'herdr pane id: used by herdr pane send / capture',
-  // Sidebar, Bot rows, and Project forms
   'herdr 中斷': 'herdr disconnected',
   '連線中': 'Connecting',
   '重連中': 'Reconnecting',
@@ -255,7 +253,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '，底下 {n} 個 Bot 的設定會一起移除': { one: '; settings for {n} Bot below it will also be removed', other: '; settings for {n} Bots below it will also be removed' },
   '仍有 {n} 個 Bot 在跑': { one: '{n} Bot is still running', other: '{n} Bots are still running' },
   '，需先停止才能刪除。': ' and must be stopped before deletion.',
-  // Model picker
   '模型': 'Model',
   '載入中…': 'Loading…',
   '此主機的模型清單暫時讀不到，顯示的是備用清單': 'Model list for this host cannot be loaded right now; showing the fallback list',
@@ -292,7 +289,6 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '執行中改模型或強度會即時套用': 'Model and effort changes apply immediately while running',
   '預設帳號': 'Default account',
   '子 agent 還在跑（{n}）': { one: 'Sub-agent still running ({n})', other: 'Sub-agents still running ({n})' },
-  // Preview panel
   '{reason}（HTTP {status}）': '{reason} (HTTP {status})',
   '試過的路徑（{n}）': 'Tried paths ({n})',
   '這台裝置看不到這個預覽': 'This device cannot reach the preview',
@@ -440,11 +436,9 @@ export default {  // 共用 Bot／Project 狀態與驗證提示
   '換回模型失敗：{reason}': 'Switching the model back failed: {reason}',
   '已清除對話，下一則從新模型開始': 'Conversation cleared; the next message starts with the new model',
   "共 {n} 顆：{stat}": "{n} total: {stat}",
-  // 專家派工總開關（專家模式，2026-11-06）
   '專家派工': 'Specialist dispatch',
   '專家可直接派工給執行者': 'Specialists can dispatch to workers directly',
   '開著時專家可直接派工給本專案的執行者並驗收結果（同時派給同一顆照佇列排隊）；關掉就只有管理者能派。': "When on, specialists can dispatch work to this project's workers directly and review the results (simultaneous dispatches to one worker queue up); when off, only the manager can dispatch.",
-  // 專家模式新增表單：claude-api 只能當顧問
   'claude-api 只能當顧問：不能接派工、不能用終端工具': 'claude-api can only be an advisor: it cannot take dispatched work or use terminal tools',
   'openai-api 只能當顧問：不能接派工、不能用終端工具': 'openai-api can only be an advisor: it cannot take dispatched work or use terminal tools',
   '先到 環境設定 → OpenAI API 啟用並設定金鑰': 'First go to Settings → OpenAI API, enable it, and set the key',

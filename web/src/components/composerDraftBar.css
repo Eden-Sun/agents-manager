@@ -1,4 +1,3 @@
-/* components/ComposerDraftBar.tsx：bot 的輸入框卡著草稿（409 composer_busy）時，輸入列上方常駐的那一條。 */
 
 .composer-draft {
   display: flex;

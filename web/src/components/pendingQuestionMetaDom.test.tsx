@@ -1,6 +1,3 @@
-/**
- * 譯文快取只存文字：翻譯完成後才到的 Jev 建議、或同文字題目的 multiSelect 改變，畫面要立刻反映，且不再打翻譯。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -64,7 +61,6 @@ test('翻譯完成後才出現的 Jev 與 multiSelect 改變：立即顯示，�
   assert.equal(root.querySelector('.pending-q-jev'), null, '翻譯前沒有 Jev')
   assert.ok(!root.querySelector('.pending-q')?.textContent?.includes('可複選'))
 
-  // 同一份文字，但 Jev 建議與複選後來才到。
   await act(async () => setQs([{ ...BASE, multiSelect: true, jev: { option: 1, label: 'All projects', score: 0.9 } }]))
   await until(() => root.querySelector('.pending-q')?.textContent?.includes('可複選') === true, '複選立即反映')
   assert.ok(root.querySelector('.pending-q-jev'), 'Jev 立即反映')

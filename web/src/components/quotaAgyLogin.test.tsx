@@ -1,7 +1,3 @@
-/**
- * 額度欄 agy 那格的登入（使用者 2026-10-05）：未登入時 popover 出現「開 shell 登入」→ 確認框（TUI 引導登入的說明）
- * → 在該 host 開 shell、打 `agy` 並切過去。登好（TUI `/quit`）之後那格回到 5h／7d 額度。真的掛 `QuotaStrip` 進 happy-dom，後端是 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -21,7 +17,6 @@ const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_0
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.includes(text))
 const agyRow = () => [...document.querySelectorAll('.quota-pop-row')].find((r) => r.querySelector('.quota-kind.agy'))!
 
-/** 共用的 mock 是行程單例：每次開頭放回「agy 未登入、沒有讀數」。 */
 function mockLoggedOutAgy() {
   const m = sharedMock as unknown as {
     localTools: { agy: { logged_in: boolean | null } }
@@ -53,7 +48,6 @@ it('未登入：agy 那格有「開 shell 登入」鈕，說明 TUI 會引導登
   assert.ok(login, '未登入的 agy 要有登入入口')
   assert.equal(login.title, '在 本機 開一個 shell 並輸入 AGY_CLI_DISABLE_AUTO_UPDATE=true agy')
   assert.equal(btn(agyRow(), '登出 agy'), undefined, '未登入沒有登出鈕')
-  // 登入狀態翻成已登入（例如 daemon 偵測到憑證檔）→ 登入鈕消失。
   await act(async () => {
     useStore.setState((st) => ({ localTools: { ...st.localTools, agy: { ...st.localTools.agy, logged_in: true } } }))
   })
@@ -81,10 +75,8 @@ it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認
   assert.ok(view, '畫面切到那個 shell')
   assert.equal(useStore.getState().localTools.agy.logged_in, false, '還沒登好')
 
-  // 使用者在 TUI 裡授權完、輸入 /quit：mock 的 daemon 這時偵測到憑證，翻已登入並補探額度。
   const api = await import('../api')
   await api.sendHostShellText('local', view.paneId, '/quit', true)
-  // 這個 harness 沒有 WebSocket，daemon 的 host_changed／quota_updated 推送改由重讀快照代替（跟重連後一樣）。
   await act(async () => {
     await useStore.getState().refreshState()
     await useStore.getState().loadQuota()
@@ -114,7 +106,6 @@ it('已經有一顆活著的 host shell：登入仍然新開一顆，指令不�
   assert.ok(!requests.some((r) => isText(r) && r.path.includes(oldPath)), '舊 shell 沒收到任何字')
   const view = useStore.getState().shellView
   assert.ok(view && view.paneId !== existing.pane_id, 'shellView 是新的那顆')
-  // 共用的 mock 是行程單例、shell 上限 8 顆：收掉這個測試開的，別讓後面的測試撞 `too_many_shells`。
   for (const sh of await api.fetchHostShells('local')) await api.closeHostShell('local', sh.pane_id, true)
 })
 

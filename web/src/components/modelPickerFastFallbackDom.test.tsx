@@ -1,7 +1,3 @@
-/**
- * 模型 API 失敗時（退回內建清單）換模型，不可以因為內建清單「不知道」能力就把 Fast 關掉（issue #1810）。
- * 只有清單來自 API、而且新模型明確沒有 priority tier，才自動關 Fast（同 `modelSwitchPatch` 的 fromApi 規則）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

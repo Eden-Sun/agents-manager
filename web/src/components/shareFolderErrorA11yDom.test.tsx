@@ -1,7 +1,3 @@
-/**
- * 分享的資料夾欄位驗錯（既有路徑要絕對路徑、新資料夾名稱的規則）：錯誤要關聯到輸入框（aria-invalid＋aria-describedby），
- * 讀屏才會在焦點停在欄位時唸出錯在哪；不能只是欄位底下一段沒有關係的文字。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

@@ -1,19 +1,10 @@
-/**
- * 總管 payload 的契約測試。
- *
- * 重點不是「正常資料能不能解析」，而是**畸形資料不能把面板打掛，也不能被畫成健康**。
- * 這個面板存在的理由就是 daemon 不對勁的時候給人看；它要能撐住 daemon 回半殘 JSON、
- * 舊版欄位、或整個型別都不對的情況。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fetchAssignments, toAssignment, toIncident, toResponder } from './supervisor.ts'
 
 test('集合欄位不是陣列時不會 throw（.map 白屏的那個 bug）', () => {
-  // 這些都是 `(x as unknown[]) ?? []` 擋不住的：?? 只認 null/undefined。
   for (const junk of [{}, 'nope', 42, true, { length: 3 }]) {
     const payload = { assignments: junk, incidents: junk }
-    // 模擬 toInfo/fetch* 內部的取法：不是陣列就當空的。
     const listed = Array.isArray(payload.assignments) ? payload.assignments : []
     assert.deepEqual(listed, [], `${JSON.stringify(junk)} 應該被當成空集合`)
   }
@@ -41,8 +32,6 @@ test('舊 daemon 沒給 open/awaiting_review 時，由狀態自己推，且不�
   const done = toAssignment({ id: 'a4', status: 'completed' })
   assert.equal(done?.open, false)
 
-  // 狀態本身是垃圾：正規化成 'unknown'，而 'unknown'（送達未知）本來就是未結案的一種，
-  // 所以它會被算成還欠著。方向是對的——讀不懂的狀態寧可留在待辦裡，也不要當成做完了。
   const weird = toAssignment({ id: 'a5', status: 12345 })
   assert.equal(weird?.status, 'unknown')
   assert.equal(weird?.open, true, '讀不懂就當還沒結案，不要假裝 completed')
@@ -56,7 +45,6 @@ test('daemon 有給 open 就以它為準', () => {
 test('legacy_closed 只在 daemon 明說時才是 true', () => {
   assert.equal(toAssignment({ id: 'a1', status: 'completed' })?.legacy_closed, false)
   assert.equal(toAssignment({ id: 'a1', status: 'completed', legacy_closed: true })?.legacy_closed, true)
-  // 不是布林就不算：'false' 這種字串曾經在別的地方被當成 true。
   assert.equal(toAssignment({ id: 'a1', legacy_closed: 'false' })?.legacy_closed, false)
 })
 
@@ -75,7 +63,6 @@ test('review 欄位缺了或型別不對時是 null，不是空字串或 undefin
 test('evidence_complete 是三態：true / false / 不知道', () => {
   assert.equal(toAssignment({ id: 'a1', evidence_complete: true })?.evidence_complete, true)
   assert.equal(toAssignment({ id: 'a1', evidence_complete: false })?.evidence_complete, false)
-  // 沒給就是不知道，**不可以**當成 true——那等於替沒看過的證據背書。
   assert.equal(toAssignment({ id: 'a1' })?.evidence_complete, null)
   assert.equal(toAssignment({ id: 'a1', evidence_complete: 'yes' })?.evidence_complete, null)
 })
@@ -108,13 +95,10 @@ test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，
     assert.equal(r.status, 'not_configured')
     assert.equal(r.stats.wakes, 0)
   }
-  // 登記過但 bot 被刪掉：狀態是 missing，不是「沒建立」——事件還在它的佇列裡。
   const gone = toResponder({ configured: true, bot_present: false, bot_id: 'b-resp', status: 'missing' })
   assert.equal(gone.configured, true)
   assert.equal(gone.bot_present, false)
-  // 舊 daemon 沒有 bot_present：有 bot_id 就當它還在。
   assert.equal(toResponder({ configured: true, bot_id: 'b-resp', status: 'idle' }).bot_present, true)
-  // 實際跑的模型跟設定值分開讀；沒給就是 null，不要拿設定值冒充。
   const live = toResponder({ configured: true, bot_id: 'b', model: 'opus', runtime: { model: 'fable', effort: 'low' } })
   assert.equal(live.runtime.model, 'fable')
   assert.equal(toResponder({ configured: true }).runtime.model, null)
@@ -125,14 +109,6 @@ test('協調者：舊 daemon 沒這一塊、或是垃圾，都當成沒建立，
   assert.equal(r.stats.duplicates, 99)
 })
 
-
-/**
- * issue #537：`GET /api/supervisor/assignments` 在 #515 之後是分頁的，一頁預設 200 筆。
- * 只拿第一頁的話，卡最久的未結案交辦（`blocked` 天生活得比一頁久）會從清單裡消失，
- * 而回傳型別讓呼叫端看不出來被截斷過。
- *
- * 自己架假 daemon，不借 `store/storeEnv.harness.ts`（跨目錄 import 會多一份模組實例）。
- */
 const g = globalThis as unknown as Record<string, unknown>
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
@@ -153,7 +129,6 @@ async function withDaemon<T>(handler: (url: string) => Response, body: () => Pro
   }
 }
 
-/** 三筆、每頁兩筆的假 daemon。游標形狀跟 daemon 一樣是 `["<created_at>","<id>"]` 的 JSON。 */
 const ROWS = [
   { id: 'a3', status: 'completed', created_at: '2026-09-24T00:00:00.000Z' },
   { id: 'a2', status: 'completed', created_at: '2026-09-23T00:00:00.000Z' },
@@ -169,7 +144,6 @@ function paged(url: string): Response {
         return r.created_at < at || (r.created_at === at && r.id < id)
       })
     : ROWS
-  // 這台 daemon 每頁上限 2（比呼叫端要的小）：要照 has_more 翻，不能因為自己要了 200 就當拿完了。
   const chunk = rows.slice(0, 2)
   const has_more = rows.length > 2
   const last = chunk[chunk.length - 1]
@@ -207,8 +181,6 @@ test('has_more 是垃圾或游標掉了都當成沒撈完，而且不會無窮�
   for (const body of [
     { assignments: [ROWS[0]], has_more: 'yes' },
     { assignments: [ROWS[0]], has_more: 1 },
-    // 游標是好的、只有 has_more 型別不對：`!has_more` 這種寫法會照翻下去，把讀不懂
-    // 當成「還有更多」。三態的意思是「不是 true 就不翻」。
     { assignments: [ROWS[0]], has_more: 'yes', next_cursor: '["2026-09-24T00:00:00.000Z","a3"]' },
     { assignments: [ROWS[0]], has_more: 1, next_cursor: '["2026-09-24T00:00:00.000Z","a3"]' },
     { assignments: [ROWS[0]], has_more: true, next_cursor: null },

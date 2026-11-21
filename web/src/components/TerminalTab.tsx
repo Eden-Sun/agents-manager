@@ -10,25 +10,18 @@ import { setTermWrap, useTermWrap } from './termWrap'
 import './terminalTab.css'
 import { ESC } from '../lib/charCodes'
 
-/** Below this many columns a TUI agent's output is fragmented beyond repair (31-column grok pane, 2026-09-06). */
 const READABLE_COLUMNS = 60
 
-/** 自動刷新間隔（2026-09-28 使用者）。分頁在背景（`document.hidden`）時不抓。 */
 const AUTO_REFRESH_MS = 3000
 
-/** bot 正在工作（`agent_status=working`）時的自動刷新間隔：輸出在跑，3 秒太慢。閒置仍維持 `AUTO_REFRESH_MS`。 */
 const AUTO_REFRESH_WORKING_MS = 1000
 
-/** 空白列（只有空白或色碼）連續的那一段。 */
 const SQUEEZE_BLANK_ROWS = new RegExp(`\\n(?:[ \\t]|${ESC}\\[[0-9;:]*m)*(?:\\n(?:[ \\t]|${ESC}\\[[0-9;:]*m)*)+`, 'g')
 
-/** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
-  // 只有空白（或只剩 SGR 色碼）的列都算空列：上色的快照裡空列常帶著重設碼。
   return text.replace(SQUEEZE_BLANK_ROWS, '\n\n')
 }
 
-/** SPEC §3.2: read-only `recent_unwrapped` snapshot, auto-refreshed every 3s plus a manual button (no xterm.js). */
 export function TerminalTab({ botId }: { botId: string }) {
   const t = useT()
   const readTerminal = useStore((s) => s.readTerminal)
@@ -38,21 +31,13 @@ export function TerminalTab({ botId }: { botId: string }) {
   const [lines, setLines] = useState(200)
   const [tight, setTight] = useState(true)
   const [moving, setMoving] = useState(false)
-  /** 記 bot id 而非布林：換 bot 不一定重掛載，這樣不用 effect 清掉上一個 bot 的結果。 */
   const [movedBot, setMovedBot] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
   const wrap = useTermWrap()
-  /** 自動刷新節奏看 store 的 run 狀態（daemon 推來的 `agent_status`），不看快照：快照回來前狀態就已經變了。 */
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
 
-  /** 一次只抓一份：上一趟還沒回來時，自動那趟就跳過，不疊請求。 */
   const inFlight = useRef(false)
-  /**
-   * 請求世代（#918）：每趟 `refresh` 領一個號碼，回來時號碼不是最新的就整趟丟掉。換 bot／改行數會重跑 effect，
-   * 它第一件事就是一趟非 quiet 的 `refresh()`，所以舊的在途回應自然作廢（不需要 cleanup 裡動 ref）。
-   */
   const gen = useRef(0)
-  /** `quiet`：自動刷新不切「刷新中…」，按鈕不會每 3 秒閃一次。 */
   const refresh = useCallback(async (quiet = false) => {
     if (quiet && inFlight.current) return
     const mine = ++gen.current
@@ -67,7 +52,6 @@ export function TerminalTab({ botId }: { botId: string }) {
       if (mine !== gen.current) return
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
-      // 被取代的那趟不碰旗標與「刷新中」：新的那趟（或 effect 的 cleanup）會管。
       if (mine === gen.current) {
         inFlight.current = false
         if (!quiet) setLoading(false)
@@ -75,7 +59,6 @@ export function TerminalTab({ botId }: { botId: string }) {
     }
   }, [botId, lines, readTerminal])
 
-  // 換 bot 在 render 當下清畫面（同 `useTerminalSnapshot`，不用 effect）：上一顆的快照與錯誤不能留到下一趟回來。
   const [lastBot, setLastBot] = useState(botId)
   if (lastBot !== botId) {
     setLastBot(botId)
@@ -84,12 +67,10 @@ export function TerminalTab({ botId }: { botId: string }) {
     setLoading(false)
   }
 
-  // 進分頁／換 bot／改行數時抓一次（非 quiet，會顯示「刷新中…」）。
   useEffect(() => {
     void refresh()
   }, [refresh])
 
-  // 自動刷新：工作中 1 秒、閒置 3 秒；狀態切換時重排這個 interval（不重抓）。背景分頁不抓。
   const autoMs = working ? AUTO_REFRESH_WORKING_MS : AUTO_REFRESH_MS
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -104,7 +85,6 @@ export function TerminalTab({ botId }: { botId: string }) {
     try {
       await movePaneToTab(botId)
       setMovedBot(botId)
-      // 搬完立刻重讀：columns 會從幾十欄跳回整個 workspace 的寬度，警示自己就消失了。
       await refresh()
     } catch (e) {
       setMoveErr({ botId, text: e instanceof Error ? e.message : String(e) })
@@ -122,7 +102,6 @@ export function TerminalTab({ botId }: { botId: string }) {
     return tight ? squeeze(terminal.body) : terminal.body
   }, [err, snap, tight, terminal.body, t])
 
-  // 貼底顯示最新輸出，除非使用者自己往上捲（`useScrollTail`）。
   const tail = useScrollTail<HTMLPreElement>([body])
 
   return (
@@ -144,7 +123,7 @@ export function TerminalTab({ botId }: { botId: string }) {
         {snap?.pane_id ? (
           <span
             className="hint term-pane-chip"
-            title={t('抓法 recent_unwrapped') + `${ // i18n-ignore
+            title={t('抓法 recent_unwrapped') + `${
 
               snap.revision !== null && snap.revision !== undefined ? `・revision ${snap.revision}` : ''
             }`}
@@ -165,7 +144,7 @@ export function TerminalTab({ botId }: { botId: string }) {
           <input type="checkbox" checked={tight} onChange={(e) => setTight(e.target.checked)} />
           {t('壓縮空行')}
         </label>
-        {/* 預設折行（2026-09-28 使用者，桌機也折）；按過就記在 localStorage。 */}
+        {}
         <label className="conn" title={t('折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。')}>
           <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
           {t('換行')}
@@ -193,7 +172,7 @@ export function TerminalTab({ botId }: { botId: string }) {
         </div>
       ) : moved ? (
         <div className="term-warn is-done" role="status">
-          {/* 搬完之後 daemon 有時回不出 columns（實測 2026-09-06），寬度就別硬掰。 */}
+          {}
           {snap?.columns
             ? t('已把這個 pane 移到自己的分頁，現在有 {cols} 欄；bot 沒有重啟，回合也沒中斷。', { cols: snap.columns })
             : t('已把這個 pane 移到自己的分頁；bot 沒有重啟，回合也沒中斷。')}
@@ -212,7 +191,7 @@ export function TerminalTab({ botId }: { botId: string }) {
           {t('讀取終端失敗：{err}（下面是上一次成功讀到的畫面，會自動重試）', { err })}
         </div>
       ) : null}
-      {/* 內容全部在一行：`<pre>` 會照實吐出換行與縮排，JSX 的排版不能溜進終端畫面。 */}
+      {}
       <pre className={`term${wrap ? ' term-wrap' : ''}`} ref={tail.ref} onScroll={tail.onScroll}><AnsiTerm text={body} columns={snap?.columns} /></pre>
     </div>
   )

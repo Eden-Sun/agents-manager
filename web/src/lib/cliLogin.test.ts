@@ -1,7 +1,3 @@
-/**
- * #915：沒綁身份的 CLI 登入要在**新開**的 host shell 打指令，不能接回最近一個還活著的 shell
- * （那顆的前景可能是 vim／sudo／手動開的 claude）。綁了身份的走 daemon 的 identity login。後端是 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -10,7 +6,6 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { startCliLogin } from './cliLogin'
 
 virtualMockTime()
-/** 共用的 mock 是行程單例、shell 上限 8 顆：開過的收掉，別讓後面的測試撞 `too_many_shells`。 */
 async function closeLocalShells() {
   const api = await import('../api')
   for (const sh of await api.fetchHostShells('local')) await api.closeHostShell('local', sh.pane_id, true)
@@ -36,7 +31,7 @@ function seedBot(identity: string | null) {
 
 it('沒綁身份：新開一顆 shell 打登入指令，不查也不接回既有的 shell', async () => {
   const requests = mockApi(sharedMock)
-  await closeLocalShells() // 前面的測試可能已把共用 mock 的 shell 開到上限
+  await closeLocalShells()
   seedBot(null)
   const api = await import('../api')
   const existing = await api.openHostShell('local')

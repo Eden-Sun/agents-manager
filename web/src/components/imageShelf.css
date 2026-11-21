@@ -1,4 +1,3 @@
-/* components/ImageShelf.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .shelf-body {
   position: relative;
   display: flex;
@@ -7,8 +6,6 @@
   min-width: 0;
   min-height: 0;
 }
-
-/* Same 60px as `.main-head`, so the two headers read as one line. */
 
 .shelf-head {
   display: flex;
@@ -74,8 +71,6 @@
   flex: none;
 }
 
-/* Long press opens the preview, so the iOS callout / text selection has to go. */
-
 .shelf-card-main {
   -webkit-touch-callout: none;
   user-select: none;
@@ -106,8 +101,6 @@
   pointer-events: none;
 }
 
-/* 非圖片的卡：跟縮圖同高的圖示塊，一排看下來高度才一致（2026-09-14 暫存區收任何檔案）。 */
-
 .shelf-card-file {
   display: grid;
   place-items: center;
@@ -133,8 +126,6 @@
   font-size: 10.5px;
   color: var(--text-faint);
 }
-
-/* Image stays parked (often sent to several bots), so the only feedback is this flash. */
 
 .shelf-card.handed .shelf-card-main {
   border-color: var(--status-ok);
@@ -209,9 +200,6 @@
   letter-spacing: 1px;
 }
 
-/* A 38px handle is hard to hit while dragging a file, so the collapsed rail grows this pad.
-   Absolute on purpose: widening the grid column mid-drag would reflow the chat under the pointer. */
-
 .shelf-pad {
   position: absolute;
   top: 50%;
@@ -277,8 +265,6 @@
   }
 }
 
-/* 放大預覽刻意浮在托盤**外面**，永不蓋住卡片的移除鍵；`pointer-events: none`。位置由 `ShelfPeek` 量，`--peek-avail` 是上方剩餘高度。 */
-
 .shelf-peek {
   position: fixed;
   z-index: 40;
@@ -292,10 +278,8 @@
 
 .shelf-peek img {
   display: block;
-  /* 圖只到原尺寸（小圖放大只會糊）。 */
   max-width: 100%;
   margin: 0 auto;
-  /* 34px 是檔名那行 + padding。 */
   max-height: min(60vh, calc(var(--peek-avail, 60vh) - 34px));
   object-fit: contain;
   border-radius: 6px;
@@ -312,24 +296,10 @@
   white-space: nowrap;
 }
 
-/* 預覽中的卡片標一下，否則看不出正在看哪張。 */
-
 .shelf-card.peeking .shelf-card-main {
   border-color: var(--accent);
 }
 
-/* 手機暫存區預設收起（`ImageShelf` `readOpen` fallback）：展開在 390px 吃掉約 120px。 */
-
-/*
- * 右欄標題列擠不下（2026-09-14 使用者截圖）：多了手機預覽那顆之後，標題被切成「檔…」，而且
- * 滑到 ＋ 上的提示往上彈、被視窗上緣裁掉一半。
- *
- * - 圖示鍵收窄到 26px、間距 2px，四顆鍵省下約 40px 給標題。觸控不在這一欄（≤1024px 右欄變底部
- *   那一條，另有自己的尺寸），桌機游標 26px 仍好點。
- * - 標題前面那個檔案圖示在桌機拿掉：旁邊就寫著「檔案暫存」，圖示只是重複，而且在 207px 寬的欄裡
- *   它先被 flex 擠成 0 寬（實測），等於一個看不見卻佔位的元素。
- * - 提示改往**下**、靠右展開：這一列貼著視窗上緣，往上一定被裁；最右邊那幾顆置中展開也會超出右緣。
- */
 @media (width > 1024px) {
   .shelf-head {
     gap: 2px;
@@ -365,12 +335,6 @@
   transform: translateY(0);
 }
 
-/*
- * 收合鍵做在分割線上（2026-09-14 使用者：「收合做在分割線上以節省空間」）。
- *
- * 右欄的 `border-left` 就是那條分割線；一顆 16×40 的小耳朵壓在線的正中、垂直置中於標題列下緣，
- * 一半在對話區、一半在右欄。平常淡，滑上去才亮——它是版面控制，不該跟內容搶眼。
- */
 .shelf-edge-fold {
   position: absolute;
   top: 72px;

@@ -1,7 +1,3 @@
-/**
- * IssuesBar 切到另一個專案：第一幀不能還顯示舊專案的未結案數（`.issues-count`）。
- * 用 <Profiler> 記下每一次 commit 當下的 DOM（連子元件自己的 state 更新也算）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { Profiler, useState } from 'react'

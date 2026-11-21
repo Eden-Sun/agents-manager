@@ -1,4 +1,3 @@
-/* components/DirPicker.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .dirpicker-top {
   display: flex;
   gap: 4px;
@@ -281,7 +280,6 @@
   color: var(--text-dim);
 }
 
-/* 「新資料夾」內嵌表單（issue #877）：夾在工具列與清單之間，不開第二層對話框。 */
 .dirpicker-newbtn {
   flex: 0 0 auto;
   white-space: nowrap;

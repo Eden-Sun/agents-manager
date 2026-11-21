@@ -1,7 +1,3 @@
-/* 桌機 `.bot-head` 名字截太早、量表前卻有空白（2026-09-11 使用者截圖）：`align-items: flex-start` 讓兩行只取內容寬，
-   `.main-title` 搶回的寬度沒人用。改 stretch。名字 `max-width: 22em` 防撐成空按鈕；名字與 pane id 只縮不長
-   （`0 1 auto`）：長了會把 ★⚙ 與名字之間撐出一大段空白（#1269）。
-   styles.css 的 min-width 下限不動（分頁 > 名字的優先序）。量測與截圖：`docs/screenshots/desktop-head/`。 */
 .bot-head .main-title {
   align-items: stretch;
 }
@@ -17,13 +13,10 @@
   flex: 0 1 auto;
 }
 
-/* 額度格水平內距收一點（2026-09-11 使用者：「全顯示」不翻案，但留白可收），讓給名字／pane id；垂直 3px 不動。 */
 .quota-hp {
   padding: 3px 5px;
 }
 
-/* 額度列留白再收（2026-09-11 使用者截圖：「額度 box 左邊、周圍的邊界都留太大了」），約 80px 還給名字：
-   spacer 永遠 0 寬卻吃一個 gap（拿掉）；`.quota-head` 3.2em → 2.5em（codex 實際 33px）；chevron 外距與格內距收小。 */
 .bot-head > .spacer {
   display: none;
 }
@@ -45,13 +38,10 @@
   padding: 3px 4px;
 }
 
-/* 名字長回來後分頁被推出右緣（1500px scrollWidth 1023 > 1004）：flex shrink 總和 < 1 時只吸收該比例溢位，
-   `flex: 1 0.25 auto` 永遠只讓 25%。改回 1；mem badge 先讓靠它們的 1000。 */
 .bot-head .main-title {
   flex-shrink: 1;
 }
 
-/* 分隔線染外框左邊會因 7px 圓角變成「(」（2026-09-11 使用者截圖），改 `::before` 直線；選取格不畫。 */
 .quota-hp + .quota-hp {
   position: relative;
   border-left-color: transparent;
@@ -68,27 +58,17 @@
   pointer-events: none;
 }
 
-/* 紅框自己有邊，隔壁再畫分隔線會疊成雙線。 */
 .quota-hp.quota-blocked + .quota-hp::before,
 .quota-hp + .quota-hp.quota-blocked::before {
   display: none;
 }
 
-/* 手機格間有 5px gap，不畫線（見 styles.css ≤640）。 */
 @media (width <= 640px) {
   .quota-hp + .quota-hp::before {
     display: none;
   }
 }
 
-/*
- * 名字與 model 那一塊要大一點（2026-09-14 使用者截圖：「這塊要大一點，保留 max-width for showing name and
- * model name」）。實拍時 model 被切成 `opus –L…`、pane id 切成 `w168…`，額度格卻整排攤開。
- *
- * - `.main-title` 的基準寬給 16em（名字＋`opus – Low`＋kind 圖示放得下），最小 12em；量表與分頁仍然
- *   `flex: none` 不讓（UI-DECISIONS 的收縮優先序不翻），所以真的不夠寬時它照舊可以縮，只是不再一開始就縮。
- * - 同一塊裡先讓的是 pane id（debug 用的識別碼），model 標籤不縮——使用者要看的是 model。
- */
 @media (width > 1024px) {
   .bot-head .main-title {
     flex: 1 1 16em;
@@ -105,8 +85,6 @@
   }
 }
 
-/* 名字那一塊只佔內容寬（2026-10-11 #1269：原本固定 18em，名字與 ★⚙ 之間、@mac_builder 與額度之間都是它吃掉的空白，
-   額度列反而被擠成收合）。上限仍是 18em：名字再長也不把額度列擠出去，超出的名字照常截尾。 */
 @media (width > 1024px) {
   .bot-head .main-title {
     flex: 0 0 auto;

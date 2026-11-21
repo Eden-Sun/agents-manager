@@ -43,7 +43,6 @@ test('寬字佔兩格：網址的欄位照格子算', () => {
 })
 
 test('pane 比 xterm 欄數窄：折行的列最後幾格是空的，仍從任一列拿到整串', () => {
-  // 實測：xterm 213 欄、pane 實際 212 欄；204 字網址 + 長 a 串折成 212 + 餘。
   const cols = 213
   const url = `https://example.com/${'a'.repeat(300)}?x=1`
   const rows: CellRow[] = [cells(url.slice(0, 212), cols), cells(url.slice(212), cols), cells('ubuntu@ubuntu:~$ ', cols)]

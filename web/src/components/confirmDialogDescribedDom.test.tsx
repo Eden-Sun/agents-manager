@@ -1,6 +1,3 @@
-/**
- * 確認框（role=alertdialog）的說明文字要關聯到對話框：打開時讀屏要唸出「會發生什麼」，不能只唸標題。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

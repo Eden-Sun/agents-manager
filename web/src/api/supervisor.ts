@@ -1,24 +1,12 @@
-/**
- * AGM 總管的 API。獨立成一個檔，`index.ts` 只借它 transport。
- *
- * 兩件事這裡要負責：
- *
- * - **舊 daemon 要靜默降級。** 端點還沒部署時回 404，`fetchSupervisor` 回 `null`，
- *   UI 顯示「這個 daemon 還沒有總管功能」而不是一片紅色錯誤。
- * - **mock 模式不能有 live 副作用。** `VITE_MOCK=1` 時整組走本檔內的假狀態機，
- *   一個請求都不會出去；點 setup／start 只改記憶體裡的狀態。
- */
 
 import { rawTransport } from './index'
 import { ApiError } from './types'
 
-/** 總管的模型候補順序是**固定**的：先 fable low，不行才 opus low。UI 不提供改。 */
 export const SUPERVISOR_CANDIDATES = [
   { model: 'fable', effort: 'low', label: 'cc0 fable low' },
   { model: 'opus', effort: 'low', label: 'cc0 opus low' },
 ] as const
 
-/** daemon 回的總管狀態。 */
 export interface SupervisorInfo {
   configured: boolean
   bot_id: string
@@ -29,13 +17,10 @@ export interface SupervisorInfo {
   status: string
   pending_count: number
   assignments: SupervisorAssignment[]
-  /** 巡檢（就是上面這顆 AGM）的喚醒統計。 */
   stats: SupervisorRoleStats
-  /** 協調者：只回應 bot 的第二顆 AGM（SPEC §18.15）。舊 daemon 沒有這一塊 → `configured: false`。 */
   responder: SupervisorResponder
 }
 
-/** 一個角色被叫醒過幾次、為什麼。驗「fable 不會因為 bot 申請被叫醒」看的就是這幾個數。 */
 export interface SupervisorRoleStats {
   wakes: number
   events_delivered: number
@@ -47,9 +32,7 @@ export interface SupervisorRoleStats {
 }
 
 export interface SupervisorResponder {
-  /** 登記過沒有（路由只看這個）。 */
   configured: boolean
-  /** 登記的那顆 bot 還在不在。`configured && !bot_present` = 被刪掉了，事件仍在它的佇列裡。 */
   bot_present: boolean
   bot_id: string
   identity: string
@@ -60,11 +43,9 @@ export interface SupervisorResponder {
   quota_reset_at: string | null
   inbox_open: number
   stats: SupervisorRoleStats
-  /** 它**現在實際**跑在什麼上面（`/model` 換過就會跟設定值不一樣）。沒在跑就都是 null。 */
   runtime: { model: string | null; effort: string | null }
 }
 
-/** 系統層級的故障。跟「AGM 起沒起來」是兩件事，所以分開拿、分開畫。 */
 export interface SupervisorIncident {
   id: string
   kind: string
@@ -83,21 +64,15 @@ export interface SupervisorAssignment {
   text: string
   created_at: string
   result?: string | null
-  /** 回合自己的結局（completed / completed_fallback / failed / dispatch_failed）。 */
   turn_status?: string | null
-  /** false = 回覆是從終端擷取的，可能被截斷；驗收時要自己再查證據。 */
   evidence_complete?: boolean | null
-  /** 還沒結案：還在跑、等驗收，或被標成阻塞。 */
   open: boolean
   awaiting_review: boolean
-  /** 驗收前就被舊語意關掉的舊資料——關掉了，但沒有人驗收過。 */
   legacy_closed: boolean
   review: { decision: string | null; by: string | null; reason: string | null }
 }
 
 export type SupervisorAction = 'setup' | 'start' | 'stop' | 'fallback'
-
-// ------------------------------------------------------------------ 正規化
 
 function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -111,18 +86,10 @@ function n(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
-/**
- * 任何「應該是一組東西」的欄位都從這裡取。
- *
- * `(o.assignments as unknown[]) ?? []` 擋不住真正會出事的那幾種：daemon 回 `{}`、回字串、回
- * 一個錯誤物件時，`??` 只認 null/undefined，後面的 `.map` 就直接 throw，整個面板變成白屏——
- * 而這個面板的用處正是在 daemon 不對勁的時候給人看。不是陣列就當空的。
- */
 function list(v: unknown): unknown[] {
   return Array.isArray(v) ? v : []
 }
 
-/** 還沒結案的狀態。回合跑完只到 `awaiting_review`，那不是結案。 */
 const OPEN_STATUSES = ['queued', 'delivered', 'unknown', 'awaiting_review', 'blocked']
 
 export function toAssignment(v: unknown): SupervisorAssignment | null {
@@ -141,7 +108,6 @@ export function toAssignment(v: unknown): SupervisorAssignment | null {
     result: typeof v.result === 'string' ? v.result : null,
     turn_status: typeof v.turn_status === 'string' ? v.turn_status : null,
     evidence_complete: typeof v.evidence_complete === 'boolean' ? v.evidence_complete : null,
-    // daemon 有給就用它的；舊 daemon 沒給就照狀態自己判，不要預設成「已結案」。
     open: typeof v.open === 'boolean' ? v.open : OPEN_STATUSES.includes(status),
     awaiting_review: v.awaiting_review === true || status === 'awaiting_review',
     legacy_closed: v.legacy_closed === true,
@@ -185,9 +151,7 @@ function toStats(v: unknown): SupervisorRoleStats {
 export function toResponder(v: unknown): SupervisorResponder {
   const o = isRec(v) ? v : {}
   return {
-    // 沒有這一塊（舊 daemon）或讀壞了：當成「沒建立」，不要畫成一顆在跑的協調者。
     configured: o.configured === true,
-    // 舊 daemon 沒有這個欄位：有 bot_id 就當它還在，不要憑空說它不見了。
     bot_present: typeof o.bot_present === 'boolean' ? o.bot_present : s(o.bot_id) !== '',
     bot_id: s(o.bot_id),
     identity: s(o.identity, 'cc0'),
@@ -211,7 +175,6 @@ function toInfo(v: unknown): SupervisorInfo {
     configured: o.configured === true,
     bot_id: s(o.bot_id),
     project_id: s(o.project_id),
-    // 身份／強度是寫死的，daemon 沒給就用固定值填，別讓畫面空一格。
     identity: s(o.identity, 'cc0'),
     model: s(o.model, SUPERVISOR_CANDIDATES[0].model),
     effort: s(o.effort, 'low'),
@@ -223,12 +186,6 @@ function toInfo(v: unknown): SupervisorInfo {
   }
 }
 
-// ---------------------------------------------------------------- mock 狀態
-
-/**
- * mock 模式的假總管。刻意從「還沒建立」開始：這是使用者第一次點進來會看到的畫面，
- * 也是最需要被 demo／截圖驗到的那個狀態。
- */
 const mockState: SupervisorInfo = {
   configured: false,
   bot_id: '',
@@ -251,7 +208,6 @@ const mockState: SupervisorInfo = {
 
 function mockAct(action: SupervisorAction): SupervisorInfo {
   if (action === 'setup') {
-    // setup 是冪等的，而且**只建立**——建完仍然是 stopped，要另外按啟動。
     if (!mockState.configured) {
       mockState.configured = true
       mockState.bot_id = 'bot-agm'
@@ -266,7 +222,7 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
         target_bot_id: 'bot-1',
         turn_id: 'turn-1',
         status: 'delivered',
-        text: '重現並修正手機登入流程卡在驗證遠端身份的問題', // i18n-ignore：假資料
+        text: '重現並修正手機登入流程卡在驗證遠端身份的問題',
         created_at: new Date().toISOString(),
         result: null,
         turn_status: null,
@@ -276,15 +232,14 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
         legacy_closed: false,
         review: { decision: null, by: null, reason: null },
       },
-      // 回合跑完、等驗收的那一筆：mock 也要看得到這個狀態，不然它永遠沒被畫過。
       {
         id: 'asg-2',
         target_bot_id: 'bot-2',
         turn_id: 'turn-2',
         status: 'awaiting_review',
-        text: '把 daemon 重建成 release 並回報結果', // i18n-ignore：假資料
+        text: '把 daemon 重建成 release 並回報結果',
         created_at: new Date().toISOString(),
-        result: '還在等編譯，好了再回報', // i18n-ignore：假資料
+        result: '還在等編譯，好了再回報',
         turn_status: 'completed',
         evidence_complete: true,
         open: true,
@@ -297,15 +252,11 @@ function mockAct(action: SupervisorAction): SupervisorInfo {
   } else if (action === 'stop') {
     mockState.status = 'stopped'
   } else {
-    // 候補：切到第二順位。切不動就維持原樣，不假裝成功。
     mockState.model = mockState.model === SUPERVISOR_CANDIDATES[0].model ? SUPERVISOR_CANDIDATES[1].model : SUPERVISOR_CANDIDATES[0].model
   }
   return { ...mockState, assignments: [...mockState.assignments] }
 }
 
-// -------------------------------------------------------------------- 呼叫
-
-/** 這個 daemon 有沒有總管 API。`null` = 端點不存在（舊 daemon），不是錯誤。 */
 export async function fetchSupervisor(): Promise<SupervisorInfo | null> {
   if (rawTransport.mock) return { ...mockState, assignments: [...mockState.assignments] }
   try {
@@ -316,18 +267,11 @@ export async function fetchSupervisor(): Promise<SupervisorInfo | null> {
   }
 }
 
-/** `setup` / `start` / `stop` / `fallback`，各自回新的狀態。 */
 export async function supervisorAction(action: SupervisorAction): Promise<SupervisorInfo> {
   if (rawTransport.mock) return mockAct(action)
   return toInfo(await rawTransport.request('POST', `/supervisor/${action}`, {}))
 }
 
-/**
- * 未恢復的系統故障。`null` = 這台 daemon 沒有這個端點（404）。
- *
- * 特地不回空陣列：空陣列的意思是「問過了，沒有故障」，而 404 的意思是「問不到」。把兩者混成
- * 同一個值，畫面就會在量不到的時候顯示綠燈。其他錯誤照樣往外丟，由呼叫端顯示。
- */
 export async function fetchIncidents(): Promise<SupervisorIncident[] | null> {
   if (rawTransport.mock) return []
   try {
@@ -341,26 +285,14 @@ export async function fetchIncidents(): Promise<SupervisorIncident[] | null> {
   }
 }
 
-/** 一次撈完的交辦清單。`complete: false` = 沒撈完，上面的筆數只是下限。 */
 export interface AssignmentPage {
   assignments: SupervisorAssignment[]
   complete: boolean
 }
 
-/** 每頁跟 daemon 要幾筆，以及最多翻幾頁（壞游標不該變成無窮迴圈）。 */
 const ASSIGNMENT_PAGE = 200
 const MAX_ASSIGNMENT_PAGES = 50
 
-/**
- * 交辦清單。單獨拉一次是為了在不重整整個狀態的情況下刷新結果。
- *
- * **翻到底**：`GET /api/supervisor/assignments` 是分頁的（issue #515），一頁預設 200 筆。
- * 只拿第一頁的話，未結案的交辦會從清單裡消失——`blocked` 的定義就是「還在等，保持未結案」，
- * 它天生活得比一頁久（正式庫 1287 筆裡 5 筆未結案，3 筆在最新 200 之外）。
- *
- * 撈不完時回 `complete: false` 而不是靜靜地少給：舊 daemon 不回 `has_more`（沒有游標可翻），
- * 游標壞掉或翻到上限也一樣。半份清單跟完整清單長得一樣的話，呼叫端只會把「看不到」讀成「沒有」。
- */
 export async function fetchAssignments(): Promise<AssignmentPage> {
   if (rawTransport.mock) return { assignments: [...mockState.assignments], complete: true }
   const assignments: SupervisorAssignment[] = []
@@ -373,7 +305,6 @@ export async function fetchAssignments(): Promise<AssignmentPage> {
     for (const a of list(body.assignments).map(toAssignment)) {
       if (a !== null) assignments.push(a)
     }
-    // 三態，不是兩態：`true` 才繼續翻，`false` 才算撈完，其他（沒這個欄位、型別是垃圾）都是「不知道」。
     if (body.has_more === false) return { assignments, complete: true }
     if (body.has_more !== true) return { assignments, complete: false }
     before = typeof body.next_cursor === 'string' ? body.next_cursor : ''

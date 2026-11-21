@@ -14,7 +14,6 @@ test('hook 分類成帳號或授權的失敗收尾算 auth 失敗', () => {
 test('agent 回覆只有整則就是 Not logged in 那一行才算（兩種寫法）', () => {
   assert.ok(isAuthFailure(bot('Not logged in · Please run /login')))
   assert.ok(isAuthFailure(bot('⎿  Not logged in · Run /login')))
-  // 回報裡引用那句話的 bot 是登入好好的（SPEC §18 協調者登入偵測同理）。
   assert.equal(isAuthFailure(bot('協調者畫面是「Not logged in · Please run /login」，我已經請使用者處理。')), false)
   assert.equal(isAuthFailure({ role: 'user', content: 'Not logged in · Please run /login' }), false)
 })

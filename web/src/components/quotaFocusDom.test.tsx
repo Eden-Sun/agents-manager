@@ -1,4 +1,3 @@
-/** 額度列只把焦點標在目前 bot 實際使用的帳號格。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

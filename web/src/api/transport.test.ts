@@ -23,7 +23,6 @@ function stubFetch(handler: (c: Call) => { status: number; body: unknown }) {
   return calls
 }
 
-/** 2026-09-20 使用者：blocked 面板卡在「讀取終端失敗：missing or bad X-AM-Token」，重整才好。 */
 test('GET 撞 401 會重拿一次 token 再送一次', async () => {
   const t = new HttpTransport()
   const calls = stubFetch((c) => {
@@ -35,7 +34,6 @@ test('GET 撞 401 會重拿一次 token 再送一次', async () => {
     calls.map((c) => c.url),
     ['/api/bots/b1/terminal', '/api/session', '/api/bots/b1/terminal'],
   )
-  // 拿到之後的請求直接帶著新 token，不用每次都補一趟 session。
   await t.request('GET', '/state')
   assert.equal(calls[calls.length - 1].token, 'good')
   assert.equal(calls.filter((c) => c.url === '/api/session').length, 1)
@@ -47,7 +45,6 @@ test('重拿 token 之後還是 401 就照實丟 ApiError，不會一直重試',
     c.url === '/api/session' ? { status: 200, body: { token: 'stale' } } : { status: 401, body: { error: 'missing or bad X-AM-Token' } },
   )
   await assert.rejects(() => t.request('GET', '/state'), (e: unknown) => e instanceof ApiError && e.status === 401)
-  // 第一次（空 token）→ session → 帶 stale 再一次；就這三通。
   assert.equal(calls.length, 3)
 })
 
@@ -64,7 +61,6 @@ test('寫入請求不重送：401 也只送一次（重送可能變成送兩次�
   assert.equal(calls.length, 1)
 })
 
-/** 假的計時器：`fireAll` 手動觸發，不靠牆鐘。 */
 function fakeTimers() {
   let next = 1
   const live = new Map<number, () => void>()
@@ -120,7 +116,6 @@ test('/api/session 回的是網頁（代理或前端的退回頁、200）：不�
   }) as unknown as typeof fetch
   await assert.rejects(() => t.session(), (e: unknown) => e instanceof Error && !(e instanceof ApiError))
   await t.request('GET', '/state').catch(() => {})
-  // 沒有拿到 token 就不帶 X-AM-Token；HTML 整頁絕不會出現在任何請求的 header 裡。
   assert.ok(sentTokens.every((tok) => tok === undefined || !tok.includes('<')), JSON.stringify(sentTokens))
 })
 
@@ -143,11 +138,6 @@ function jsonRes(status: number, body: unknown): Response {
   } as unknown as Response
 }
 
-/**
- * 假的 fetch：`/api/state` 只認 token `good`，其餘 401。`/api/session` 第一次呼叫會掛住（`where` 指定掛在
- * headers 還是 body），直到測試呼叫 `release()`；掛住時不理 signal（最壞情況：代理把連線吊著）。第二次之後立即回 `good`。
- * `started` 讓測試等到真的送出第一次 session 才往下，不靠固定毫秒。
- */
 function refreshFetch(where: 'headers' | 'body') {
   let sessionCalls = 0
   let markStarted!: () => void
@@ -180,10 +170,6 @@ function refreshFetch(where: 'headers' | 'body') {
   return { started, release, sessionCalls: () => sessionCalls }
 }
 
-/**
- * 等 event loop 轉完一圈再看 `p` 的結果（只清一輪 macrotask，不是等牆鐘）。
- * `'hung'` 表示 `p` 還沒結束：紅測時回報失敗，不讓測試永遠掛住。
- */
 async function outcomeAfterTick(p: Promise<unknown>): Promise<unknown> {
   const done = p.then(
     (v) => v,
@@ -192,7 +178,6 @@ async function outcomeAfterTick(p: Promise<unknown>): Promise<unknown> {
   return Promise.race([done, new Promise((r) => setTimeout(() => r('hung'), 0))])
 }
 
-/** 2026-10-13 #1629：401 後的 token 更新（`GET /api/session`）掛住，GET 會永遠不結束，`refreshing` 也永遠清不掉。 */
 for (const where of ['headers', 'body'] as const) {
   test(`token 更新掛住（${where} 不回）：GET 有期限會逾時，之後 refreshing 可重建、下一次 GET 能成功`, async () => {
     const timers = fakeTimers()
@@ -229,10 +214,6 @@ test('呼叫端中止只放掉自己那一趟：共用的 token 更新還在，�
   assert.equal(timers.pending(), 0)
 })
 
-/**
- * blobUrl（附件縮圖、outbox 預覽、對話裡的本機圖）也是 GET：掛住不回就要有期限。否則那個 promise 永遠不結束，
- * 而呼叫端把它快取住（`outboxPreviewCache`、`Attachments` 的 urlCache），之後每次滑過都是同一個轉圈，直到重整頁面。
- */
 test('blobUrl 掛住不回：GET 有期限會逾時丟錯，計時器清掉', async () => {
   const timers = fakeTimers()
   const t = new HttpTransport({ timers })

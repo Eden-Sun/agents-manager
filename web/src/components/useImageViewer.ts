@@ -1,7 +1,6 @@
 import { createElement, useState, type MouseEvent } from 'react'
 import { ImageViewer, type Picture } from './ImageViewer'
 
-/** Only collect already authorized, loaded thumbnails within this message/tray. */
 export function useImageViewer(scope?: string | null) {
   const [gallery, setGallery] = useState<{ pictures: Picture[]; index: number; scope?: string | null } | null>(null)
   if (gallery && gallery.scope !== scope) setGallery(null)

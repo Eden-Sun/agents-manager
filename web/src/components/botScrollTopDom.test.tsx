@@ -1,8 +1,3 @@
-/**
- * #1676（2026-10-13 使用者）：點了主力（★）晶片，側欄要捲到讓那顆 bot 的列貼齊側欄可視區頂端；
- * 父專案收合、祖先子列收合時先展開再捲（孫代也要能置頂）。jsdom 量不到版面，
- * 所以量測用 stub 的 getBoundingClientRect，斷言捲動容器被捲到「列頂 − 容器頂」。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -33,7 +28,6 @@ beforeEach(() => {
   } as never)
 })
 
-/** 版面 stub：容器頂在 100，目標列頂在 460（目前捲動 50）。回傳捲動呼叫的記錄。 */
 function stubLayout() {
   const calls: { top: number | undefined; behavior: unknown }[] = []
   const scroller = document.querySelector<HTMLElement>('.sidebar-scroll')!
@@ -70,7 +64,6 @@ test('點主力晶片：專案與祖先子列收合時先展開，再把那一�
     })
     assert.equal(useStore.getState().selectedBotId, 'C')
     assert.ok(document.querySelector('.bot-row[data-bot-id="C"]'), '祖先與專案都要展開，孫代列才畫得出來')
-    // scrollTop 50 + (列頂 460 − 容器頂 100) = 410
     assert.deepEqual(calls.at(-1), { top: 410, behavior: 'smooth' }, JSON.stringify(calls))
   } finally {
     restore()
@@ -100,7 +93,6 @@ test('已經選著的主力 bot 再點一次晶片也要捲到頂端（選取沒
 })
 
 test('主力晶片的置頂請求先被處理掉，選取換了的 nearest 捲動也不能打斷置頂（#1786）', async () => {
-  // jsdom／happy-dom 的 scrollIntoView 不會動版面：記下是哪一列被叫到，才看得出 nearest 有沒有跑。
   const intoView: string[] = []
   const origIntoView = Element.prototype.scrollIntoView
   Element.prototype.scrollIntoView = function (this: Element) {
@@ -113,10 +105,9 @@ test('主力晶片的置頂請求先被處理掉，選取換了的 nearest 捲�
       await frame()
       await frame()
     })
-    intoView.length = 0 // 掛載時選 a 的 nearest 不算
+    intoView.length = 0
     const { calls, restore } = stubLayout()
     try {
-      // 照 UnreadChip.go()：先 selectBot、再 requestBotToTop，同一個事件裡完成；effect 在這之後才跑。
       await act(async () => {
         useStore.getState().selectBot('C')
         requestBotToTop('C')

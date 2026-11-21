@@ -1,7 +1,3 @@
-/**
- * 「這回合的提問」浮窗的展開鈕：只有真的被夾掉、會展開全文時才宣告 aria-expanded；
- * 沒夾掉的（點了是捲到那則）不能宣告成「收合中的折疊鈕」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -29,7 +25,6 @@ test('沒被夾掉的提問：展開鈕不宣告 aria-expanded（點了是捲到
 })
 
 test('被夾掉的提問：收合時 aria-expanded=false，點開後變 true', async () => {
-  // happy-dom 沒有版面：模擬內容高度超過可見高度，讓浮窗判定為「被夾掉」。
   const proto = HTMLElement.prototype
   Object.defineProperty(proto, 'scrollHeight', { configurable: true, get: () => 200 })
   Object.defineProperty(proto, 'clientHeight', { configurable: true, get: () => 40 })

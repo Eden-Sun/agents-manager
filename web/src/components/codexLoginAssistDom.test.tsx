@@ -1,7 +1,3 @@
-/**
- * codex 身份的登入協助（裝置碼）：登入 pane 上方是「打開登入網站」＋大字一次性碼（＋複製），沒有貼 code 的輸入框。
- * 真的掛 `HostShellPanel` 進 happy-dom，後端是 `MockTransport`（照 daemon 的樣子：裝置碼流程不接受送 code）。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount } from '../testing/domHarness'
@@ -11,7 +7,6 @@ import { HostShellPanel } from './HostShellPanel'
 
 const { mock, until, elapse } = setupLoginAssistDomTest()
 const assist = () => document.querySelector<HTMLElement>('.login-assist')
-/** 跟 `ChatPanel` 一樣：面板只在 `shellView` 指到它時才畫；pane 被判定不見、`shellView` 清掉，面板就跟著拆掉。 */
 function ShellViewHost({ host, paneId, cwd }: { host: string; paneId: string; cwd: string }) {
   const view = useStore((s) => s.shellView)
   if (!view || view.host !== host || view.paneId !== paneId) return null
@@ -42,7 +37,6 @@ test('CLI 結束、pane 收掉：協助條切到結果（已登入），面板�
   await mount(<ShellViewHost host="local" paneId={shell.pane_id} cwd={shell.cwd} />)
   await elapse(300)
   await until(() => document.querySelector('.login-assist-devcode') !== null, '一次性碼出現')
-  // 使用者到網站授權後，CLI 結束、daemon 收掉登入 pane。
   await mock.request('DELETE', `/hosts/local/shells/${encodeURIComponent(shell.pane_id)}`)
   await until(() => document.querySelector('.login-assist-done') !== null, '協助條切到結果狀態')
   assert.match(document.querySelector('.login-assist-done')!.textContent ?? '', /已登入|登入程序已結束/)

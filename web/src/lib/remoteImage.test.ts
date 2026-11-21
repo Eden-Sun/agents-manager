@@ -63,8 +63,6 @@ test('點了才載入：不帶 cookie、不帶 Referer，要是 image/* 且不�
   await assert.rejects(fetchRemoteImageBlob('https://example.com/a', fakeFetch({ size: REMOTE_IMAGE_MAX_BYTES + 1 })), /太大/)
 })
 
-// ── #764 對抗式審查 ──
-
 test('SVG 不能收：blob 在新分頁（<a target=_blank>）開啟時會在 app 的 origin 執行 SVG 裡的 <script>', async () => {
   for (const type of ['image/svg+xml', 'IMAGE/SVG+XML; charset=utf-8', 'image/svg']) {
     await assert.rejects(fetchRemoteImageBlob('https://example.com/a.svg', fakeFetch({ type })), /不支援|不是圖片/, type)
@@ -104,7 +102,6 @@ test('不跟轉址：佔位只寫了原網址的網域，redirect 要是 error�
   const seen: { init?: RequestInit }[] = []
   await fetchRemoteImageBlob('https://example.com/a.png', fakeFetch({}, seen))
   assert.equal(seen[0].init?.redirect, 'error')
-  // 瀏覽器遇到 redirect:'error' 的轉址會讓 fetch 以 TypeError reject：照樣往上丟，畫面改成「在新分頁開啟」。
   const redirected = (async () => {
     throw new TypeError('Failed to fetch')
   }) as unknown as typeof fetch
@@ -112,7 +109,6 @@ test('不跟轉址：佔位只寫了原網址的網域，redirect 要是 error�
 })
 
 test('IPv4-mapped IPv6 指到本機／內網時也要標成內網（URL 會正規化成十六進位，不能漏判）', () => {
-  // `http://[::ffff:127.0.0.1]/` 的 hostname 是 `[::ffff:7f00:1]`：點下去仍是這台機器發請求。
   for (const u of ['http://[::ffff:127.0.0.1]/a.png', 'http://[::ffff:10.0.0.1]/a.png', 'http://[::ffff:192.168.1.5]/a.png']) {
     assert.equal(remoteImageInfo(u)?.internal, true, u)
   }

@@ -1,6 +1,3 @@
-/**
- * 分享頁的 bot 回覆走跟主 UI 一樣的複雜度上限（#797），不提供「仍用 Markdown 渲染」把公開頁卡住。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

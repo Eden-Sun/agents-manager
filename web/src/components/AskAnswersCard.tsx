@@ -8,10 +8,6 @@ import type { AskAnswers } from '../lib/askAnswers'
 import { useT } from '../lib/i18n'
 import './askAnswers.css'
 
-/**
- * 「Claude 問／你答」：claude 的 `AskUserQuestion` 與使用者的回答（網頁或終端答的都一樣）。
- * 只讀的一張卡：不是使用者打的 prompt，沒有倒回鍵、來源標、送達標，也不碰任何送出或排隊。
- */
 export function AskAnswersCard({ msg, ask }: { msg: Message; ask: AskAnswers }) {
   const t = useT()
   const today = useLocalDay()

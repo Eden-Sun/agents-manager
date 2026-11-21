@@ -1,8 +1,3 @@
-/**
- * `GET /api/bots/{id}/messages` 要跟 `daemon/src/api.rs::get_messages` 一樣：不存在的 bot 是 404（已軟刪的仍讀得到歷史，
- * API.md §10.4），`limit` 夾在 1..500（`0` 變 1，不是變 100）。以前 mock 對不存在的 id 回一頁空的，
- * 前端對這個 404 的處理在 `VITE_MOCK=1` 底下看不到。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

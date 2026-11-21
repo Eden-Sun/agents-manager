@@ -1,7 +1,3 @@
-/**
- * codex 的方案沒有 5 小時窗（使用者 2026-10-12）：桌機量表的 5h 那一格寫「無上限」，
- * 不畫 daemon 沿用下來的舊 5h（「5h 舊 … 0%」）也不畫升級前的撞上限。真的掛 `QuotaStrip` 進 happy-dom。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

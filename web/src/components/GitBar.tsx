@@ -8,10 +8,6 @@ import './gitBar.css'
 import { t, useT } from '../lib/i18n'
 import { plainErrMsg } from '../lib/errText'
 
-/**
- * 專案 checkout 的 git 一眼看（2026-09-08）：行數差、upstream 差，與 commit / push / pull 快捷鍵。
- * 不是 git client，只服務「agent 剛改完，立刻推出去」這個手勢。
- */
 const POLL_MS = 15_000
 
 function errText(e: unknown): string {
@@ -40,7 +36,6 @@ export function GitBar({ projectId, showBranch = false, showActions = true }: { 
   }, [projectId])
 
   const refresh = useCallback(async () => {
-    // A late action from the previous project must not invalidate its successor's poll.
     if (currentProjectId.current !== projectId) return
     const request = latestRefresh.begin()
     try {
@@ -49,7 +44,6 @@ export function GitBar({ projectId, showBranch = false, showActions = true }: { 
         setSummaryFor({ projectId, summary })
       }
     } catch {
-      // 讀不到就維持上一次的值；下一輪再試。
     }
   }, [latestRefresh, projectId])
 
@@ -58,11 +52,9 @@ export function GitBar({ projectId, showBranch = false, showActions = true }: { 
     let timer: ReturnType<typeof setTimeout> | null = null
     const visible = () => document.visibilityState === 'visible'
     const tick = async () => {
-      // 背景不抓；timer 照排，回前景後自然接上。
       if (visible()) await refresh()
       if (alive) timer = setTimeout(() => void tick(), POLL_MS)
     }
-    // 回前景立刻補一次，不等下一個 tick。
     const onVisible = () => {
       if (visible()) void refresh()
     }
@@ -122,7 +114,7 @@ export function GitBar({ projectId, showBranch = false, showActions = true }: { 
           {sum.behind ? <span title={t('比 upstream 少 {n} 個 commit', { n: sum.behind })}>↓{sum.behind}</span> : null}
         </span>
       ) : null}
-      {/* 桌面 hover 才彈出（2026-09-12 使用者）；打 commit 訊息時 `.open` 常駐。 */}
+      {}
       {showActions ? <span className={`git-actions${composing ? ' open' : ''}`}>
       {composing ? (
         <form

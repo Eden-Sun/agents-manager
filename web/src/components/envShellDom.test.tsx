@@ -1,8 +1,3 @@
-/**
- * 環境設定的分頁外殼（EnvShell，issue #1922）：
- * 桌機（>640px）左側分頁 + 內頁單一捲軸；手機（≤640px）標題下折行分頁。
- * 七個分頁維持掛載，切換時以 hidden 隱藏，保持填寫中的表單與捲動位置。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

@@ -8,11 +8,6 @@ import { FrozenBadge } from './FrozenBadge'
 import './modelCapacity.css'
 import { useT } from '../lib/i18n'
 
-/**
- * 主力晶片的顏色說明（2026-10-04 使用者）。
- * 範例直接套晶片與燈號的真 class，顏色永遠跟晶片列一致，不另外寫一份色票。
- * 從電腦版晶片列尾端的「?」打開（手機不放「?」，2026-11-07 使用者）。
- */
 export function ChipLegend({ onClose }: { onClose: () => void }) {
   const t = useT()
   const dialogRef = useRef<HTMLDivElement>(null)

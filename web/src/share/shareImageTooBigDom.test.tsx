@@ -1,7 +1,3 @@
-/**
- * 超過分享下載上限（64 MiB，am-base `outbox::MAX_BYTES`，回 413 `too_large`）的圖：重試不會好，不能寫「還在修，請稍等」。
- * 不發預覽請求、縮圖不掛 `<img>`、按鈕位置寫「這張圖太大了，沒辦法分享」。
- */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

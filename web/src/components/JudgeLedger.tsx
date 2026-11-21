@@ -1,7 +1,3 @@
-/**
- * 環境設定 → Jev 建議 底下的「帳本」（SPEC §4.3c，issue #1327）：四個場景各一列的計數，加最近 20 筆。
- * 只讀；不顯示遮罩後的命中行（那是給 daemon 對帳用的）。舊 daemon 沒有這個端點 → 說明，不報錯。
- */
 import { fmtDateTime } from '../lib/userTime'
 import { useEffect, useState } from 'react'
 import { fetchJudgeShadow, type JudgeShadow } from '../api/judge'
@@ -10,7 +6,6 @@ import { useStore } from '../store/store'
 import { JevLabel } from './JevLabel'
 import { botLabel, JUDGE_SCENES, JUDGE_WINDOWS, overThreshold, probabilityText, recentRows, sceneStats, type JudgeWindow } from '../lib/judgeStats'
 
-/** 帳本一次拿的筆數（`fetchJudgeShadow` 預設值）；到了這個數字，統計只算得到這麼多筆。 */
 const LEDGER_LIMIT = 200
 
 type LedgerLoad = { kind: 'loading' } | { kind: 'unsupported' } | { kind: 'error'; message: string } | { kind: 'ok'; shadow: JudgeShadow }
@@ -29,7 +24,6 @@ export function JudgeLedger() {
   const t = useT()
   const bots = useStore((s) => s.bots)
   const [load, setLoad] = useState<LedgerLoad>({ kind: 'loading' })
-  /** 按「重試」就 +1，讓下面那個 effect 重跑一次。 */
   const [reload, setReload] = useState(0)
 
   useEffect(() => {

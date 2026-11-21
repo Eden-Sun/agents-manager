@@ -1,8 +1,3 @@
-/**
- * 專案移交給另一台主機（#708）：daemon 對那個專案的 bot 一律 409 `handed_off`（`daemon/src/handoff.rs::refuse`，
- * 開／關／重啟、送 prompt、pane RPC 都擋）。mock 以前什麼都不擋，前端沒停用的路徑在 `VITE_MOCK=1` 底下照樣成功，
- * 真環境才跳 409。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

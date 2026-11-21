@@ -1,10 +1,3 @@
-/**
- * header 一鍵安裝 CLI 更新（SPEC §6.9，API `POST /api/hosts/{name}/cli-update`）的進度怎麼累加。
- * 拆出來是因為事件處理在 socket 裡，store 動作測不到它。
- *
- * daemon 只回 `update_id`，進度走 WS：`cli_update_progress`（`checking`→`installing`→`verifying`→`restarting`）、
- * `cli_update_done`（`ok`＋版本；失敗帶 `reason`／`error`；成功帶 `restart`＝一鍵重啟的計畫，之後照一鍵重啟的事件走）。
- */
 import { arr, isRec, num, pick, str } from '../api/normalize'
 import type { RestartBatch, RestartPlan } from '../api/types'
 import { toRestartSkips } from '../api'
@@ -31,12 +24,10 @@ export const CLI_UPDATE_PHASE_LABEL: Record<CliUpdate['phase'], string> = {
 
 const PHASES = new Set<CliUpdate['phase']>(['checking', 'installing', 'verifying', 'restarting'])
 
-/** 一則 `cli_update_progress`。手上沒有（別的分頁按的）也收：header 要看得到那台正在裝。 */
 export function cliUpdateProgress(cur: CliUpdate | null, data: Rec): CliUpdate | null {
   const id = str(pick(data, 'update_id'))
   const phase = str(pick(data, 'phase')) as CliUpdate['phase']
   if (!id || !PHASES.has(phase)) return cur
-  // 手上那一次已經換成另一個 id（後按的）：舊的事件不蓋掉它。
   if (cur && cur.id !== id && cur.phase !== 'starting') return cur
   return {
     id,
@@ -48,7 +39,6 @@ export function cliUpdateProgress(cur: CliUpdate | null, data: Rec): CliUpdate |
   }
 }
 
-/** 多主機安裝時依 update id 合併進度；同一台的起始佔位會被 daemon id 接手。 */
 export function cliUpdateProgressMany(cur: CliUpdate[], data: Rec): CliUpdate[] {
   const next = cliUpdateProgress(null, data)
   if (!next) return cur
@@ -63,11 +53,8 @@ export function cliUpdateProgressMany(cur: CliUpdate[], data: Rec): CliUpdate[] 
 export interface CliUpdateResult {
   id: string
   ok: boolean
-  /** 給 notify 的一句話。 */
   message: string
-  /** 成功而且真的開了一批：把它當成一鍵重啟的進度接手。 */
   batch: RestartBatch | null
-  /** 正在跑的那一批確實排著這台的 codex（`already_covered`）：接那一批的進度。排在後面（`deferred`）不接。 */
   joinBatchId: string | null
 }
 
@@ -97,7 +84,6 @@ function toPlan(v: unknown): RestartPlan | null {
   }
 }
 
-/** 一鍵重啟的計畫 → header 的進度（跟 `restartIdleBots` 同一份形狀）。 */
 export function batchFromPlan(plan: RestartPlan): RestartBatch {
   return {
     id: plan.batch_id,
@@ -111,7 +97,6 @@ export function batchFromPlan(plan: RestartPlan): RestartBatch {
   }
 }
 
-/** 一則 `cli_update_done`。失敗一律沒有重啟任何 bot（daemon 的保證），訊息照 `reason` 講。 */
 export function cliUpdateDone(data: Rec): CliUpdateResult {
   const id = str(pick(data, 'update_id'))
   const host = str(pick(data, 'host'), 'local')
@@ -126,7 +111,6 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
   }
   const plan = toPlan(pick(data, 'restart'))
   const up = from && to && from !== to ? `${from} → ${to}` : to || t('新版')
-  // 磁碟上本來就是那一版（#569）：沒有跑安裝指令，只改通知、開重啟。
   const verb = pick(data, 'already_installed') === true ? t('本來就是') : t('已升到')
   if (kind === 'claude' && pick(data, 'restart_required') === true) {
     return { id, ok: true, message: t('{host} 的 claude {verb} {up}；請按 header 的更新按鈕，在確認框按「重啟套用」', { host, verb, up }), batch: null, joinBatchId: null }
@@ -136,7 +120,6 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
     const whyText = why ? t('：{why}', { why }) : ''
     return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}，但重啟沒排起來{why}；請再按一次 header 的更新按鈕', { host, kind, verb, up, why: whyText }), batch: null, joinBatchId: null }
   }
-  // #566：有一批在跑不等於 codex 被排進去了——daemon 用 `restart_status` 講清楚是哪一種。
   const status = str(pick(data, 'restart_status'))
   if (status === 'deferred') {
     return { id, ok: true, message: t('{host} 的 {kind} {verb} {up}；已經有一批重啟在跑，codex 排在那批後面，跑完會自動接著重啟', { host, kind, verb, up }), batch: null, joinBatchId: null }
@@ -156,10 +139,6 @@ export function cliUpdateDoneMany(cur: CliUpdate[], data: Rec): CliUpdate[] {
   return id ? cur.filter((item) => item.id !== id) : cur
 }
 
-/**
- * 快照的 `cli_updates` 跟手上這一份對帳（同 #492 的 `restart_batch`）：`undefined`＝舊 daemon 沒這欄＝不知道，不動；
- * daemon 說那台沒在裝了，手上那份就是 `cli_update_done` 收不到留下的，清掉（chip 變回可以按）。
- */
 export function reconcileCliUpdate(cur: CliUpdate | null, running: { update_id: string; host: string }[] | undefined): CliUpdate | null {
   if (!cur || running === undefined || cur.phase === 'starting') return cur
   return running.some((r) => r.update_id === cur.id) ? cur : null

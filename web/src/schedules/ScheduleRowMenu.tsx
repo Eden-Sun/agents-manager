@@ -10,7 +10,6 @@ function errorReason(e: unknown): string {
   return e instanceof Error ? e.message : t('操作失敗')
 }
 
-/** 複製先取最新設定，開新建表單；只有使用者儲存後才建立副本。 */
 export function ScheduleRowMenu({ schedule, onOpen, onChanged }: { schedule: Schedule; onOpen: (id: string) => void; onChanged: () => void }) {
   const t = useT()
   const notify = useStore((s) => s.notify)
@@ -41,7 +40,6 @@ export function ScheduleRowMenu({ schedule, onOpen, onChanged }: { schedule: Sch
     }
   }
 
-  // 列上直接停用／啟用（與編輯器同一支 API）；停用先確認，和編輯器一致。
   const toggle = async () => {
     if (busy) return
     setBusy(true)

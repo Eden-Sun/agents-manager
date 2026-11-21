@@ -1,8 +1,3 @@
-/**
- * #1661：分享頁移除正在上傳的附件，要中止它、釋放上傳的序列名額，下一張才能開始；
- * 舊的上傳晚回不能清掉新工作的名額；卸載時還在傳的要中止。
- * 這裡的 client.upload 故意不看 signal（由測試決定何時回），所以名額釋放不能靠底層真的中止。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -13,7 +8,6 @@ import type { ShareClient } from './shareApi'
 import { mockShareClient } from './shareMock'
 
 afterEach(unmountAll)
-// share mock 每個請求固定睡 120ms（`guard()`）：那是假的網路延遲，不是要測的行為，略過它。
 let fast: ReturnType<typeof skipTimerDelays>
 before(async () => {
   await setupDom()
@@ -33,7 +27,6 @@ interface Call {
   reject: (e: Error) => void
 }
 
-/** 每次 upload 都停在這裡，等測試決定結果；收下的 signal 記在 `calls` 裡。 */
 function gatedUploads(): { client: ShareClient; calls: Call[] } {
   const calls: Call[] = []
   const client = mockShareClient(TOKEN)
@@ -44,7 +37,6 @@ function gatedUploads(): { client: ShareClient; calls: Call[] } {
   return { client, calls }
 }
 
-/** 掛上 ShareApp 並等到載入完（不再是「載入中…」）。 */
 async function mountReady(client: ShareClient): Promise<void> {
   await mount(<ShareApp client={client} />)
   await until(() => !document.body.textContent?.includes('載入中…'), 'ShareApp 載入完')

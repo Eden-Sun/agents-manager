@@ -35,30 +35,25 @@ import './scheduleEditor.css'
 
 const WEEKDAYS = [msg('週一'), msg('週二'), msg('週三'), msg('週四'), msg('週五'), msg('週六'), msg('週日')]
 
-/** 一天內的一個時段：本地時間 `HH:MM`（不再有標籤，使用者 2026-11-09；後端 `slot_label` 欄位保留相容）。 */
 interface ScheduleSlot {
   time: string
-  /** 隨機區間的結束時間 `HH:MM`；null＝固定時間（開關關著）。 */
   until: string | null
 }
 
 const MAX_SLOTS = 8
 const MAX_RANGE_MINUTES = 12 * 60
 
-/** `HH:MM[:SS]` 轉一天中的秒數；格式不對回 null。 */
 function secondsOfDay(v: string): number | null {
   const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(v)
   return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3] ?? 0) : null
 }
 
-/** 打開隨機區間時預設的結束時間：開始後 5 分鐘（不跨午夜）。 */
 function defaultUntil(time: string): string {
   const start = secondsOfDay(time) ?? 9 * 3600
   const end = Math.min(start + 300, 24 * 3600 - 60)
   return `${String(Math.floor(end / 3600)).padStart(2, '0')}:${String(Math.floor((end % 3600) / 60)).padStart(2, '0')}`
 }
 
-/** 隨機區間的錯誤文字；沒問題回 null（對應 daemon 的 slot_range_* 驗證）。 */
 function rangeError(s: ScheduleSlot): string | null {
   if (s.until == null) return null
   const a = secondsOfDay(s.time)
@@ -69,7 +64,6 @@ function rangeError(s: ScheduleSlot): string | null {
   return null
 }
 
-/** 新增時段時預設的時間：第一個還沒用到的整點（09:00 起），都用了就 09:00。 */
 function nextFreeTime(slots: ScheduleSlot[]): string {
   const used = new Set(slots.map((s) => s.time))
   for (let h = 9; h < 24; h++) {
@@ -87,9 +81,7 @@ interface FormState {
   notify: ScheduleNotify
   mode: ScheduleMode | 'weekdays'
   at: string
-  /** 間隔的秒數：保留 API 收的精度（例如 61 秒）；分鐘欄只是顯示與改分鐘用，沒動就沿用原值。 */
   everySecs: number
-  /** daily／weekly 的時段（至少一個）。 */
   slots: ScheduleSlot[]
   weekdays: number[]
   clearAfter: boolean
@@ -98,7 +90,6 @@ interface FormState {
   retryInterval: number
 }
 
-/** 預設的專屬 bot 名稱＝排程名稱（去掉 bot 名稱不收的字元、最長 32）；清完是空的就讓表單自己排。 */
 function botNameFrom(scheduleName: string): string {
   return scheduleName.replace(/[@,:;]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 32).trim()
 }
@@ -118,7 +109,6 @@ function fromDetail(d: Schedule): FormState {
     mode: d.mode === 'weekly' && spec.weekdays?.length === 5 && [0, 1, 2, 3, 4].every((day) => spec.weekdays!.includes(day)) ? 'weekdays' : d.mode,
     at: spec.at ?? '',
     everySecs: spec.every_secs || 3600,
-    // 舊排程只有單一 `time`，讀成沒有標籤的一個時段。
     slots: spec.slots?.length ? spec.slots.map((s) => ({ time: s.time, until: s.until ?? null })) : [{ time: spec.time ?? '09:00', until: null }],
     weekdays: spec.weekdays ?? [0],
     clearAfter: d.clear_after === true,
@@ -129,7 +119,6 @@ function fromDetail(d: Schedule): FormState {
 
 function specOf(f: FormState): ScheduleSpecIn {
   const slots = f.slots.map((s) => ({ time: s.time, ...(s.until != null ? { until: s.until } : {}) }))
-  // 單一、沒標籤、沒隨機區間的時段仍送舊格式（只有 time），跟既有排程的 spec 一致。
   const extra = slots.length > 1 || slots.some((s) => s.until) ? { slots } : {}
   switch (f.mode) {
     case 'once':
@@ -145,7 +134,6 @@ function specOf(f: FormState): ScheduleSpecIn {
   }
 }
 
-/** 某時刻在指定時區的「一天中的分鐘數」；解析失敗回 null。 */
 function minutesOfDayIn(iso: string, tz: string): number | null {
   try {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(iso))
@@ -161,7 +149,6 @@ function errText(e: unknown): string {
   return e instanceof Error ? e.message : t('操作失敗')
 }
 
-/** 新增或編輯排程。建立後只存排程，不立即執行；要執行請按「立即執行」。 */
 export function ScheduleEditor({
   projectId,
   scheduleId,
@@ -172,7 +159,6 @@ export function ScheduleEditor({
 }: {
   projectId: string
   scheduleId: string | null
-  /** 複製只預填新建表單；狀態、執行紀錄與來源 id 都不帶入。 */
   copyOf?: Schedule
   focusBot?: boolean
   onClose: () => void
@@ -184,14 +170,11 @@ export function ScheduleEditor({
   const selectBot = useStore((s) => s.selectBot)
   const [detail, setDetail] = useState<ScheduleDetail | null>(null)
   const recentNow = useNowMs((detail?.recent ?? []).some((o) => !!o.running_since))
-  // 綁定 turn 的即時狀態（queued→in_flight→終態）：變了就重抓詳情；排程自己的事件也重抓。
   const liveStatus = useLiveTurnStatus(detail?.open?.bot_id, detail?.open?.turn_id)
   const liveTurn = useStore((s) => detail?.open?.turn_id ? s.turns[detail.open.bot_id]?.[detail.open.turn_id] : undefined)
   const [form, setForm] = useState<FormState>(() =>
     copyOf && !scheduleId ? { ...fromDetail(copyOf), name: copyScheduleName(copyOf.name) } : emptyForm(''),
   )
-  // 載入當下的排程（id）、時區與時間（`specOf`）：存檔時跟表單比，沒變就不送 spec（#1807）。
-  // 帶 id：換了排程、還沒載入完成時對不上，保守送 spec（#1812）。
   const [baseline, setBaseline] = useState<{ id: string; tz: string; spec: ScheduleSpecIn } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -202,7 +185,6 @@ export function ScheduleEditor({
   const [confirmRun, setConfirmRun] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(() => Boolean(scheduleId))
-  // 建立的冪等 key：重送同一張表單用同一個；後端說 key 已用在別的內容上才換新的。
   const [createKey, setCreateKey] = useState(() => newClientRequestId())
   const detailRequestSequence = useRef(0)
   const formLoadedFor = useRef<string | null>(null)
@@ -214,7 +196,6 @@ export function ScheduleEditor({
       const d = await getSchedule(scheduleId)
       if (detailRequestSequence.current !== requestId) return null
       setDetail(d)
-      // 若初次載入被較新的重抓取代，由第一筆最新成功的回應初始化表單。
       if (formLoadedFor.current !== scheduleId) {
         formLoadedFor.current = scheduleId
         const loaded = fromDetail(d)
@@ -239,7 +220,6 @@ export function ScheduleEditor({
     void loadLatestDetail().catch(() => undefined)
   }, [loadLatestDetail])
 
-  // 重連／resync 時重抓詳情；只更新 detail，不覆蓋使用者正在編輯的 form。
   const seenScheduleRev = useRef({ scheduleId, rev: schedulesRev })
   useEffect(() => {
     const previous = seenScheduleRev.current
@@ -257,18 +237,15 @@ export function ScheduleEditor({
     return () => window.removeEventListener('agm:schedules_changed', onChanged)
   }, [scheduleId, reload])
 
-  // 只列能接收排程的 Bot：同專案、一般 Bot、非 child／分享／受限（daemon 也會再驗一次）。
   const eligible = useMemo(
     () => bots.filter((b) => b.project_id === projectId && b.managed_by === 'user' && !b.parent_bot_id && !b.share_profile),
     [bots, projectId],
   )
-  // 一律用排程專屬 bot（role = scheduler）；只有既有排程綁著的一般 Bot 例外（照常執行，旁邊提示轉成專屬）。
   const pickable = useMemo(
     () => eligible.filter((b) => b.role === 'scheduler' || b.id === detail?.bot_id),
     [eligible, detail?.bot_id],
   )
 
-  // 同專案的其他排程：挑 Bot 時看它已經被哪些排程用、有沒有時間衝突（只讀，不影響存檔）。
   const [projectSchedules, setProjectSchedules] = useState<Schedule[]>([])
   useEffect(() => {
     let alive = true
@@ -300,9 +277,7 @@ export function ScheduleEditor({
     }
   }, [loadLatestDetail, scheduleId])
 
-  // 建立時預設第一顆可用 Bot（之後使用者可改）：推導出來，不用 effect 寫回表單。
   const effectiveBotId = form.botId || (scheduleId ? '' : (pickable[0]?.id ?? ''))
-  // 既有排程綁的 Bot（可能是一般 Bot／執行者）：提示轉成專屬。
   const boundBot = detail ? (bots.find((b) => b.id === detail.bot_id) ?? null) : null
   const refreshState = useStore((s) => s.refreshState)
   const convertToDedicated = async (botId: string) => {
@@ -314,7 +289,6 @@ export function ScheduleEditor({
       setError(errText(e))
     }
   }
-  // 選到的 Bot 有基準快照才能開「每次從基準快照開始」。
   const [baseLocked, setBaseLocked] = useState(false)
   useEffect(() => {
     let live = true
@@ -326,7 +300,6 @@ export function ScheduleEditor({
       live = false
     }
   }, [effectiveBotId])
-  // 執行端只讀已存的排程；表單有變動時不得用舊 Bot 或舊內容執行。
   const unsaved = detail !== null && (
     form.name.trim() !== detail.name || form.prompt !== detail.prompt || effectiveBotId !== detail.bot_id ||
     form.tz !== detail.tz || form.notify !== detail.notify || form.clearAfter !== (detail.clear_after === true) || form.fromBase !== (detail.from_base === true) ||
@@ -341,7 +314,6 @@ export function ScheduleEditor({
     turn_awaits_start: liveTurn ? Number(liveTurn.awaitsStart) : detail.open.turn_awaits_start,
   } : null
   const hasStartError = openForDisplay?.status === 'queued' && (liveStatus ?? openForDisplay.turn_status) === 'queued' && openForDisplay.turn_awaits_start === 1 && Boolean(openForDisplay.turn_start_error)
-  // `last` 是已結束的最近一筆；舊回應沒有這個欄位時，用 recent 裡第一筆已結束的，畫面才跟紀錄一致。
   const lastDone = detail?.last ?? (detail?.recent ?? []).find((o) => o.status !== 'pending' && o.status !== 'queued') ?? null
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => {
@@ -350,7 +322,6 @@ export function ScheduleEditor({
   }
   const setSlot = (i: number, patch: Partial<ScheduleSlot>) => set('slots', form.slots.map((s, j) => (j === i ? { ...s, ...patch } : s)))
 
-  // 任務內容框只在內容超出目前高度時長高（最少 8 行由 rows 決定，最多 60vh 由 CSS 限制）；使用者手動拉高的不會被縮回去。
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useLayoutEffect(() => {
     const el = promptRef.current
@@ -374,7 +345,6 @@ export function ScheduleEditor({
       if (badRange) return setError(badRange)
     }
     const retrySettings = { retry_count: form.retryCount, retry_interval_mins: form.retryInterval }
-    // 建立一律送（daemon 沒帶才用 2／1，這裡要把使用者選的 0 也帶過去）；編輯只在真的改了才送，不碰既有的截止值。
     const retryChanged = !scheduleId || form.retryCount !== (detail?.retry_count ?? 0) || form.retryInterval !== (detail?.retry_interval_mins ?? 3)
     setBusy(true)
     try {
@@ -394,7 +364,6 @@ export function ScheduleEditor({
         setNotice(t('已建立。排程不會立即執行，到時間才會排進 Bot。'))
         onSelect(s.id)
       } else {
-        // 只有排程時間真的變了才送 spec：後端每收到一次 spec 就重新錨定間隔、升 generation（#1807）。
         const timing = { tz: form.tz, spec: specOf(form) }
         const same = baseline !== null && baseline.id === scheduleId && JSON.stringify(timing) === JSON.stringify({ tz: baseline.tz, spec: baseline.spec })
         const timingChanged = !same
@@ -410,30 +379,23 @@ export function ScheduleEditor({
           ...(retryChanged ? retrySettings : {}),
         })
         if (timingChanged) setBaseline({ id: scheduleId, ...timing })
-        // 儲存回來的是 Schedule（不帶 recent）：合進既有詳情，不取代成缺欄位的物件。
         setDetail((prev) => (prev ? { ...prev, ...d, recent: prev.recent } : prev))
         setNotice(t('已儲存。已排的未送出執行會被撤回，已送出的照跑。'))
       }
     } catch (e) {
       setError(errText(e))
-      // 409 ＝同一個冪等 key 已用在別的內容上：換新 key 再送（同內容的重送本來就會回原筆）。
       if (!scheduleId && e instanceof ApiError && e.status === 409) setCreateKey(newClientRequestId())
     } finally {
       setBusy(false)
     }
   }
 
-  // 手動執行的冪等 key 走共用的 createRequestId（存在 sessionStorage，重整、關掉再開也沿用）：
-  // 回應遺失、網路錯誤後再按，送的是同一個 key，伺服器回原來那一筆，不會再跑一次。
-  // 伺服器收下（回應成功）才 settle，下一次明確的手動執行才換新的；明確的 4xx 拒絕也 settle（不能讓舊 key 重放舊結果）。
   const runKey = scheduleId ? `schedule-run:${scheduleId}` : null
   const runNow = async (dryRun = false) => {
     const key = dryRun && scheduleId ? `schedule-dry-run:${scheduleId}` : runKey
     if (!scheduleId || !key || unsaved || botUnavailable) return
     setBusy(true)
     setError(null)
-    // 伺服器收下（POST 成功）之後，key 仍保留到詳情也重抓成功才 settle：詳情 503 時再按，送的還是同一個 key，
-    // 伺服器回同一筆 occurrence。只有 POST 本身的 4xx 拒絕才 settle（那次根本沒被收下）。
     let accepted = false
     try {
       const r = await runScheduleNow(scheduleId, createRequestId(key), dryRun)
@@ -474,7 +436,6 @@ export function ScheduleEditor({
   }
 
   const otherSchedules = projectSchedules.filter((x) => x.id !== scheduleId && x.enabled)
-  // 同一顆 Bot、同一時刻或相差 < 10 分：已有 next_due 就比絕對時間；新排程用表單的每天時刻比（週次只比時刻，較粗）。
   const sameSlot = (x: Schedule): boolean => {
     const mine = detail?.next_due ?? null
     if (mine && x.next_due) return Math.abs(Date.parse(mine) - Date.parse(x.next_due)) < 10 * 60_000
@@ -575,7 +536,6 @@ export function ScheduleEditor({
             className="btn"
             disabled={loading}
             onClick={() => {
-              // 到 Bot 對話看執行與額度、離線原因；不另建 API。
               selectBot(effectiveBotId)
               onClose()
             }}
@@ -699,7 +659,6 @@ export function ScheduleEditor({
           disabled={loading}
           onChange={(e) => set('prompt', e.target.value)}
           onKeyDown={(e) => {
-            // 跟「儲存」按鈕同一支函式；輸入法選字中的 Enter 不算。
             if (busy || loading || e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             void save()
@@ -733,7 +692,6 @@ export function ScheduleEditor({
         ) : null}
       </div>
 
-
       {detail ? (
         <details className="schedule-recent">
           <summary>
@@ -762,7 +720,6 @@ export function ScheduleEditor({
     </div>
   )
 
-  // 掛到 body：側欄是 transform 容器，裡面的 fixed 遮罩會被它限在側欄寬度內（手機上彈窗被裁）。只這裡處理，不動全站 Modal。
   return createPortal(
     <>
       <Modal open width={760} title={scheduleId ? (detail?.code ? `${t('排程')} ${detail.code}` : t('排程')) : copyOf ? t('複製排程') : t('新增排程')} onClose={onClose}>

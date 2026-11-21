@@ -28,7 +28,6 @@ function ChildNoticeGroup({ row, renderMessage }: {
   </section>
 }
 
-/** parent 對通知的回覆（含串流）照一般訊息顯示，只有通知本身收成一行。 */
 export function ChildNoticeMessages({ messages, renderMessage, liveReply }: {
   messages: readonly Message[]; renderMessage: (msg: Message, expanded?: boolean) => ReactNode; liveReply?: ReactNode
 }) {

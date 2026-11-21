@@ -1,8 +1,3 @@
-/**
- * 串流中展開的半成品（#1236）：文字每 250ms 換一個新字串，`SafeMarkdown` 不能因此把整棵 Markdown 樹卸掉重掛。
- * 重掛會讓本機圖片每一幀重抓 `/local-image`、已載入的圖退回佔位，選取的文字也會消失。
- * 轉換失敗後的復原靠 `MarkdownBoundary` 的 `resetKey`，不靠把 boundary 整個 `key` 掉。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -16,7 +11,6 @@ after(teardownDom)
 const realFetch = globalThis.fetch
 let localImageHits = 0
 
-/** `/local-image` 回一張假圖（計次）；其餘路徑 404，`/session` 給 token。 */
 function stubLocalImage() {
   localImageHits = 0
   globalThis.fetch = (async (input: string) => {

@@ -138,7 +138,6 @@ test('ApiBotCostOverview 渲染一句話結論與堆疊百分比長條', async (
 })
 
 test('ApiBotCostOverview 可省建議放在結論旁，沒有建議時不顯示框', async () => {
-  // 1. 有建議時：顯示建議框且有內容
   const rootWith = await mount(
     <ApiBotCostOverview botId="bot-claude-api" initialData={mockOverviewData} />,
   )
@@ -146,7 +145,6 @@ test('ApiBotCostOverview 可省建議放在結論旁，沒有建議時不顯示�
   assert.ok(suggWith, '有建議時應渲染建議框')
   assert.match(suggWith.textContent ?? '', /快取冷掉重寫花費 \$4\.108/)
 
-  // 2. 沒有建議時：完全不顯示建議框（不留空框）
   const dataWithoutSuggestions: ApiBotCostOverviewData = {
     ...mockOverviewData,
     suggestions: [],
@@ -170,7 +168,6 @@ test('ApiBotCostOverview 渲染 4 欄對齊表格（等寬右對齊，0 元淡�
   assert.match(ths[2].textContent ?? '', /金額/)
   assert.match(ths[3].textContent ?? '', /占比/)
 
-  // 檢查金額與占比在 th-num 且為右對齊 class
   assert.ok(ths[1].classList.contains('th-num'), '用量欄標頭為數值右對齊 class')
   assert.ok(ths[2].classList.contains('th-num'), '金額欄標頭為數值右對齊 class')
   assert.ok(ths[3].classList.contains('th-num'), '占比欄標頭為數值右對齊 class')
@@ -178,12 +175,10 @@ test('ApiBotCostOverview 渲染 4 欄對齊表格（等寬右對齊，0 元淡�
   const rows = root.querySelectorAll('.api-overview-table tbody tr')
   assert.equal(rows.length, 6, '應有 6 種類別列')
 
-  // 第一列為金額最大項快取寫入
   assert.match(rows[0].textContent ?? '', /快取寫入/)
   assert.match(rows[0].textContent ?? '', /\$4\.1083/)
   assert.match(rows[0].textContent ?? '', /82(\.0)?%/)
 
-  // 最後兩列為 0 元（對話壓縮、伺服器工具），應排在最後且標註 is-zero
   const rowCompaction = rows[4]
   const rowServerTool = rows[5]
   assert.ok(rowCompaction.classList.contains('is-zero'), '0 元壓縮列排在後且帶 is-zero')

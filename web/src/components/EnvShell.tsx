@@ -37,13 +37,10 @@ export function EnvShell() {
 
   const onboarding = useOnboarding()
 
-  // 狀態字收集
   const [integrationSnap, setIntegrationSnap] = useState<IntegrationHost[] | null>(null)
 
-  // 1. 主機未連線數（與側欄同一式）
   const hostsDown = hosts.filter((h) => !h.connected).length
 
-  // 2. 更新檢查：載入 integration 快照以精確計算可更新數
   useEffect(() => {
     let live = true
     fetchIntegrationUpdates()
@@ -51,7 +48,6 @@ export function EnvShell() {
         if (live) setIntegrationSnap(hosts)
       })
       .catch(() => {
-        // 失敗時保持 null，不崩潰
       })
     return () => {
       live = false
@@ -83,14 +79,12 @@ export function EnvShell() {
     }
   }
 
-  // 整理 badges
   const badges: EnvTabBadges = {
     setup: onboarding.needed && onboarding.pending > 0 ? { text: t('{n} 待處理', { n: onboarding.pending }), tone: 'warn' } : null,
     hosts: hostsDown > 0 ? { text: t('{n} 未連線', { n: hostsDown }), tone: 'bad' } : null,
     updates: updatesCount > 0 ? { text: t('{n} 可更新', { n: updatesCount }), tone: 'warn' } : null,
   }
 
-  // 決定當前分頁（初次載入由 resolveInitialEnvTab 計算）
   const [activeTab, setActiveTab] = useState<EnvTabId>(() => resolveInitialEnvTab(badges, getRememberedTab()))
   const [guideDismissed, setGuideDismissed] = useState(() => {
     try {
@@ -105,7 +99,6 @@ export function EnvShell() {
     try {
       localStorage.setItem('am:env-guide-dismissed', '1')
     } catch {
-      // 忽略
     }
   }
 
@@ -114,7 +107,6 @@ export function EnvShell() {
     rememberTab(id)
   }
 
-  // 鍵盤導覽：ArrowUp / ArrowDown / ArrowLeft / ArrowRight / Home / End
   const handleKeyDown = (e: KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
     let nextIndex = currentIndex
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {

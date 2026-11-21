@@ -1,4 +1,3 @@
-/* components/MemPopover.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .mem-pop-machine {
   margin: 0 0 6px;
   font-size: 12px;
@@ -23,16 +22,12 @@
   color: var(--danger);
 }
 
-/* 紅框小鍵 hover 直接填滿：只壓深底色時紅字剩 4.3:1。 */
-
 .mini-btn.danger:hover:not(:disabled),
 .mem-pop-act button.danger:hover:not(:disabled) {
   background: var(--btn-danger-bg);
   border-color: var(--btn-danger-bg);
   color: var(--btn-danger-fg);
 }
-
-/* RAM 程序清單（SPEC §15.2）：語彙沿用 `.quota-pop`；是表格，因為使用者要在幾十列裡比大小找能砍的。 */
 
 .mem-wrap {
   position: relative;
@@ -111,8 +106,6 @@
   vertical-align: baseline;
 }
 
-/* bot 列淡一點：重點是「可以砍的」。 */
-
 .mem-pop-table tr.is-bot {
   color: var(--text-faint);
 }
@@ -124,8 +117,6 @@
   font-weight: 650;
   white-space: nowrap;
 }
-
-/* argv 一行，全文在 tooltip——換行難掃大小。 */
 
 .mem-pop-argv {
   max-width: 240px;

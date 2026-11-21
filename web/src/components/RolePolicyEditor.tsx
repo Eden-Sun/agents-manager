@@ -6,7 +6,6 @@ import { useStore } from '../store/store'
 import { RuntimeSettingsFields } from './RuntimeSettingsFields'
 import { useSavePart } from './projectSaveGroup'
 
-/** 專案內每個角色的 Bot 的 `run.prompt_cache.hit_ratio`（0–1）平均；沒有任何讀數＝null（畫「—」）。 */
 function roleHitRatios(bots: Bot[], runs: Record<string, Run | null | undefined>, projectId: string): Record<RuntimeRole, number | null> {
   const out = {} as Record<RuntimeRole, number | null>
   for (const r of RUNTIME_ROLES) {
@@ -19,7 +18,6 @@ function roleHitRatios(bots: Bot[], runs: Record<string, Run | null | undefined>
   return out
 }
 
-/** 專案設定的「角色設定」：每個角色一張卡（context、保溫、保溫分鐘、進階）。只存草稿，按「儲存」才送 PATCH（User-only）。 */
 export function RolePolicyEditor({ project }: { project: Project }) {
   const t = useT()
   const patchProject = useStore((s) => s.patchProject)
@@ -32,7 +30,6 @@ export function RolePolicyEditor({ project }: { project: Project }) {
   const [draft, setDraft] = useState<Record<string, RuntimeSettings>>(saved)
   const [saving, setSaving] = useState(false)
 
-  // 專案在別處被改了（或換了專案）：草稿跟著存的值走。
   if (fullKey !== prevKey) {
     setPrevKey(fullKey)
     setDraft(saved)
@@ -73,7 +70,7 @@ export function RolePolicyEditor({ project }: { project: Project }) {
     <div className="role-policy-editor" aria-label={t('角色設定')}>
       <div className="rp-head">
         <h4 className="rp-title">{t('角色設定')}</h4>
-        {/* 一顆就好：建議值四個角色一起帶入草稿（原本每張卡各一顆）。 */}
+        {}
         <button type="button" className="btn" disabled={saving} onClick={() => setDraft((d) => {
           const next = { ...d }
           for (const r of RUNTIME_ROLES) next[r] = { ...ROLE_SUGGESTIONS[r] }

@@ -1,8 +1,3 @@
-/**
- * 額度條／popover 的「暫時停用」勾選（#755）：勾了之後該帳號底下的 bot 從側欄收起來、到額度 reset 自動解除；偏好存在
- * localStorage（`am.disabledQuotaKeys`），同一個瀏覽器的別的分頁靠 `storage` 事件跟上，而且一個分頁的寫入不能洗掉另一個分頁剛勾的。
- * 真的掛 `QuotaStrip` 進 happy-dom，額度來自 mock；「別的分頁」就是直接寫 localStorage 再發 `storage` 事件。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, act, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -16,11 +11,9 @@ const STRIP_KEY = 'local|claude|cc0'
 const OTHER_KEY = 'local|claude|cc1'
 
 const disk = (): Record<string, number | null> => JSON.parse(localStorage.getItem(QUOTA_DISABLED_KEY) ?? '{}')
-/** 條上 cc0 那顆停用勾選（主要入口）。 */
 const stripBox = () => document.querySelector<HTMLInputElement>('.quota-cell-toggle input[aria-label$="本機 · claude · cc0（底下的 Bot 先從側欄收起來，額度 reset 後自動回來）"], .quota-cell-toggle input[aria-label^="解除停用 本機 · claude · cc0"]')!
 const popBox = () => document.querySelector<HTMLInputElement>('.quota-pop input[type=checkbox]')!
 
-/** 「另一個分頁」寫了磁碟並通知這一頁。 */
 async function otherTabWrites(map: Record<string, number | null>) {
   localStorage.setItem(QUOTA_DISABLED_KEY, JSON.stringify(map))
   await act(async () => {
@@ -38,7 +31,6 @@ async function open() {
 
 virtualMockTime()
 afterEach(async () => {
-  // 停用清單是模組層級的偏好：每個測試收尾都解除，下一個測試從空的開始。
   if (Object.keys(disk()).length || stripBox()?.checked) await otherTabWrites({})
   await unmountAll()
   localStorage.clear()
@@ -52,7 +44,6 @@ after(async () => {
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
 
 it('條上勾停用：存進 localStorage（到期時間＝用完的那個窗口的 reset）、勾選與提示變成已停用；再勾一次解除', async () => {
-  // #920：7d 用完、5h 還有——到期要等 7d 的 reset，不是比較早的 5h。
   const quotas = (mock as unknown as { quota: Record<string, { five_hour: Record<string, unknown>; seven_day: Record<string, unknown> }> }).quota
   const q = quotas.claude
   const saved = { five: { ...q.five_hour }, seven: { ...q.seven_day } }
@@ -116,7 +107,6 @@ it('#755 happy-dom 重建後仍接收別的分頁 storage 事件', async () => {
 
 it('#755 這個分頁勾 cc0，不能洗掉別的分頁剛勾、這個分頁還沒收到事件的 cc1', async () => {
   await open()
-  // 別的分頁勾了 cc1，但這一頁沒收到 storage 事件（背景分頁事件被節流）：磁碟上有、記憶體沒有。
   localStorage.setItem(QUOTA_DISABLED_KEY, JSON.stringify({ [OTHER_KEY]: null }))
   await click(stripBox())
   await until(() => STRIP_KEY in disk(), '寫進 localStorage')

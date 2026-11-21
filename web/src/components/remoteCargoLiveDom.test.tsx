@@ -1,7 +1,3 @@
-/**
- * 外部 Cargo 面板的結果區塊是 live region（#1221）：容器要一開始就在 DOM 裡，儲存／測試／安裝的結果填進去時螢幕閱讀器才唸得到；
- * 失敗用 role=alert，成功只是 status。真的掛進 happy-dom，後端是 mock；PUT 失敗用 globalThis.fetch 包一層模擬。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -31,7 +27,6 @@ async function open(saved: Record<string, unknown> = {}) {
   await until(() => document.querySelector('.remote-cargo-settings') !== null, '面板讀完設定')
 }
 
-/** 只讓 PUT /build/remote 回 status，其餘照常走 mock。 */
 function failPutWith(status: number): () => void {
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: string, init?: RequestInit) => {

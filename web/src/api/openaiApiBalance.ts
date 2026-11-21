@@ -6,7 +6,6 @@ export interface OpenAiApiBalanceAnchor {
 }
 
 export interface OpenAiApiBalance {
-  /** `[openai_api] enabled`：未啟用整格不畫。 */
   enabled: boolean
   configured: boolean
   error?: string

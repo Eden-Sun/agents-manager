@@ -1,7 +1,3 @@
-/**
- * claude 的「建議下一句」一鍵送出（2026-10-03）：顯示條件（純函式）、`run.prompt_suggestion` 的讀入、
- * 按下去對 daemon 說什麼、失敗時講什麼。建議文字一律是中性假字。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'

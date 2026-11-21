@@ -3,7 +3,6 @@ import { test } from 'node:test'
 import type { Bot, Run } from '../api/types'
 import { projectDeleteBlockers } from './projectDeleteGuard.ts'
 
-/** 只填測試會看的欄位；其餘用 cast 帶過。 */
 export function projectDeleteGuardFixture(): { bots: Bot[]; runs: Record<string, Run | null> } {
   const bot = (id: string, project_id: string) => ({ id, project_id }) as Bot
   const run = (bot_id: string, state: Run['state']) => ({ id: `r-${bot_id}`, bot_id, state }) as Run

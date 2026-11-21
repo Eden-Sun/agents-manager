@@ -1,7 +1,3 @@
-/**
- * 側欄「新增 Bot」送出的身份（#1079）：codex／grok 選了身份也要帶出去，不能只有 claude 才送 identity。
- * 真的掛 `Sidebar` 進 happy-dom，點 kind 與身份、送出，看 POST 的 body。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
@@ -35,7 +31,6 @@ beforeEach(() => {
   } as never)
 })
 
-/** 開新增 Bot 表單，點 kind，（可選）點身份，送出；回傳送出的那筆 POST body。 */
 async function submitNewBot(kind: string, identity: string | null) {
   await mount(<Sidebar />)
   await settle()
@@ -89,7 +84,6 @@ test('換 kind 會清掉身份：先選 claude 的 cc1 再切 codex 直接送出
   assert.equal((post?.body as { identity: string | null } | undefined)?.identity, null)
 })
 
-
 test('kind 選項是 radio，選中的那顆 aria-checked=true', async () => {
   useStore.setState({ localTools: Object.fromEntries(BOT_KINDS.map((k) => [k, { installed: true, path: null, version: null, logged_in: true }])) } as never)
   await mount(<Sidebar />)
@@ -106,7 +100,6 @@ test('kind 選項是 radio，選中的那顆 aria-checked=true', async () => {
 })
 
 const LOGGED_OUT_HINT = '預設帳號還沒登入'
-/** 本機 codex 已安裝、登入狀態由參數決定；其他 kind 都照常。 */
 const toolsWithCodex = (logged_in: boolean | null) =>
   Object.fromEntries(BOT_KINDS.map((k) => [k, { installed: true, path: null, version: null, logged_in: k === 'codex' ? logged_in : true }]))
 async function openNewBotWithKind(kind: string) {
@@ -173,7 +166,6 @@ test('claude-api 本機與遠端專案都能建：遠端專案那顆 kind 按鈕
   assert.equal(btn.disabled, false)
 })
 
-
 test('claude-api：選 Fable 5.2 時 POST 保留完整模型 id', async () => {
   await openNewBotWithKind('claude-api')
   const option = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('fable-5-2'))
@@ -193,16 +185,13 @@ test('切換專案時第一次 render 就反映新專案的預設 kind 與 name�
   } as never)
   await mount(<NewBotForm onDone={() => {}} />)
 
-  // 一開始預設為 p1，kind 是 claude
   const kindOpt = () => document.querySelector<HTMLElement>('[aria-label="kind"] .opt.on .opt-label')?.textContent?.trim()
   const nameInput = () => document.querySelector<HTMLInputElement>('input[type="text"]:not(.opt-filter)')!
   assert.equal(kindOpt(), 'claude')
 
-  // 點擊切換至 p2（p2 的最新 bot 是 codex，預設 kind 應切為 codex）
   const p2Btn = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Project"] .opt')].find((b) => b.textContent?.includes('proj-p2'))!
   assert.ok(p2Btn, '有 proj-p2 按鈕')
   await click(p2Btn)
-  // 切換專案後第一次 render 就應該更新 kind 與 name，不應殘留舊專案的 claude
   assert.equal(kindOpt(), 'codex', '第一次 render 即反映新專案預設 kind')
   assert.match(nameInput().value, /^codex/, '第一次 render 即反映新專案名稱')
 })

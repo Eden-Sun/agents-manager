@@ -78,7 +78,6 @@ test('v4：candidates 可帶指令、others 帶 kind、kind 標籤', () => {
 })
 
 test('預覽的 409 講人話，不是丟一個英文代碼給使用者（issue #524）', () => {
-  // daemon 的 conflict body 沒有 message 欄，ApiError 的 message 就是 reason 本身。
   assert.equal(previewReasonText('bot_not_running'), '這顆 bot 沒在跑：dev server 要開在它的 pane 裡，先啟動 bot 再按一次。')
   assert.match(previewReasonText('remote_host', { host: 'mini' }) ?? '', /這台機器.*mini/)
   assert.match(previewReasonText('stale_selection', { port: 5173, pid: 1234 }) ?? '', /:5173.*pid 1234/)
@@ -104,7 +103,6 @@ test('lan 三態：布林照收，舊 daemon 沒這格＝null（issue #527）', 
   assert.equal(toPreview({ status: 'running', port: 5180, lan: true }).lan, true)
   assert.equal(toPreview({ status: 'running', port: 5180 }).lan, null)
   assert.equal(PREVIEW_OFF.lan, null)
-  // WS 的 preview_changed 不帶 lan：沿用上一份，不要被事件洗成 null。
   assert.equal(toPreviewEvent({ status: 'running', port: 5180 }, { ...PREVIEW_OFF, lan: false }).lan, false)
 })
 
@@ -114,7 +112,6 @@ test('連不連得到：allow_lan 關著又不是本機開的才擋（issue #527
   assert.equal(previewOutOfReach(false, 'localhost'), false)
   assert.equal(previewOutOfReach(false, '127.0.0.1'), false)
   assert.equal(previewOutOfReach(false, '[::1]'), false)
-  // allow_lan 開著＝daemon 讓它綁對外，照舊嵌 iframe；null＝舊 daemon，不知道就不擋。
   assert.equal(previewOutOfReach(true, 'mac.tailnet.ts.net'), false)
   assert.equal(previewOutOfReach(null, 'mac.tailnet.ts.net'), false)
 })

@@ -1,9 +1,3 @@
-/**
- * mock 的「codex 非同步提問」情境（`__amMock.codexAsync()`／prompt 含 `codexasync`，issue #1879）。
- *
- * 畫面照 codex 0.163.0 真機：收合時只有 `? 1 question · 7s / shift+← to answer`，題目與選項只在 `pending-question`（rollout）；
- * shift+← 展開成編號選單（`› 1.`，最後一列 `Other`），↑／↓ 移游標，Enter 作答（作答後提問消失）。
- */
 
 export interface CodexAsyncState {
   expanded: boolean
@@ -12,7 +6,6 @@ export interface CodexAsyncState {
 
 export const CODEX_ASYNC_OPTIONS = ['左側專案／bot 清單', 'bot 的「⋯」選單', '終端裡的選單']
 
-/** daemon `GET /api/bots/{id}/pending-question` 對 codex 回的形狀（SPEC：codex 非同步提問）。 */
 export const CODEX_ASYNC_QUESTIONS = [
   {
     question: '你說的「智選 hub 的 menu 最下方」是哪個選單？',
@@ -47,7 +40,6 @@ export function codexAsyncScreen(s: CodexAsyncState): string[] {
   ]
 }
 
-/** 一批鍵之後的狀態；`outcome==='done'`＝Enter 在選項上作答了。 */
 export function codexAsyncKeys(s: CodexAsyncState, keys: string[]): { state: CodexAsyncState; outcome: 'done' | null } {
   let state = s
   for (const k of keys) {

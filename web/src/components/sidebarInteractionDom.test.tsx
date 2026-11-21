@@ -1,8 +1,3 @@
-/**
- * 側欄的鍵盤／滑鼠互動（真的掛 `Sidebar` 進 happy-dom，發事件、看 store 與 DOM）：
- * - #694 bot 列只處理「列本身」發出的 Enter／Space；列裡的 ⋯ 按鈕、選單項、確認框的按鍵與點擊不被攔、不選取這顆 bot。
- * - project ⋯ 選單與它的確認框不會連帶選取專案。
- */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
@@ -106,7 +101,6 @@ test('project 標題列選中時名稱正常顯示不被隱藏或擠壓', async 
   const label = header.querySelector<HTMLElement>('.project-label')!
   assert.ok(label, '應有專案名稱元素')
   assert.equal(label.textContent, 'proj-p1')
-  // 驗證按鈕與標題保留 aria-current 與名稱
   const btn = header.querySelector<HTMLButtonElement>('.project-label-btn.selected')!
   assert.equal(btn.getAttribute('aria-current'), 'true')
 })
@@ -167,7 +161,6 @@ test('額度晶片的提示點名實際在跑的身份', async () => {
   assert.ok(chip.title.includes('cc2'), `title 應含 cc2: ${chip.title}`)
   assert.ok(!chip.title.includes('cc1'), `title 不應含 cc1: ${chip.title}`)
 
-  // 對照：把 run 拿掉（runs: {}）、quota 改放 claude:cc1 → title 含 cc1
   await act(async () => {
     useStore.setState({
       runs: {},
@@ -180,7 +173,6 @@ test('額度晶片的提示點名實際在跑的身份', async () => {
   assert.ok(chipWithoutRun.title.includes('cc1'), `title 應含 cc1: ${chipWithoutRun.title}`)
 })
 
-/** 側欄底部「新增 Bot」開哪個專案的表單（#1085）：選著 bot 就用那顆 bot 所在的專案，不是清單第一個。 */
 const addBotButton = () => [...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!
 const sheetProject = () => document.querySelector('.modal .modal-sub')?.textContent
 

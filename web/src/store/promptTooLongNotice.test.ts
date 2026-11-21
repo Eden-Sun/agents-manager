@@ -1,8 +1,3 @@
-/**
- * 主對話送出超過 daemon 能證明送達的長度（`MAX_PROVABLE_CHARS`，20 萬字）：daemon 回 422
- * `{error:"delivery_unprovable", reason:"prompt_too_long_to_prove", run_id, sent:false}`（不帶 message）。
- * 網頁的通知不能把 API 路徑（`POST /api/bots/…/prompt failed (422)`）或代碼原樣印出來。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon } from './storeEnv.harness.ts'

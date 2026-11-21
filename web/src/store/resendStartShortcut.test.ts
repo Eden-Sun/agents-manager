@@ -1,9 +1,3 @@
-/**
- * 送 prompt 時重複 start（使用者 2026-11-19：對已 running 的 openai-api bot 按送出，出現「啟動失敗：daemon 無法確認…」）：
- * - 前端以為停著、daemon 其實已經 running：捷徑 start 會收到 409 `api_run_already_active`，不是錯誤，同步 run 後只送一次 prompt；
- * - 捷徑 start 成功後 store 立刻有這顆 bot 的 run（不會下一次送出又再 start）；
- * - 真的無法確認（502）仍是失敗：不送 prompt、顯示啟動失敗。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, requests, routeDaemon } from './storeEnv.harness.ts'
@@ -14,7 +8,6 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 const RUN = { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'unknown', started_at: '2026-11-19T10:00:00Z', host: 'local' }
 
-/** daemon 的狀態：`running` 之後 `/api/state` 會帶著那顆 run；start 的回應依情境給。 */
 function daemon(start: () => Response) {
   let running = false
   routeDaemon((req) => {

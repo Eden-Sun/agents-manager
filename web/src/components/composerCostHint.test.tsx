@@ -1,4 +1,3 @@
-/** 快取狀態：狀態列「快取」欄常駐、輸入框只在冷時警示、不擋送出。 */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

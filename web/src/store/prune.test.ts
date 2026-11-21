@@ -1,6 +1,3 @@
-/**
- * 長時間開著的分頁：刪掉的 bot／專案不能在 store 的各張表裡留一輩子（`prune.ts`）。直接操作 store，不需要 DOM。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, requests, routeDaemon } from './storeEnv.harness.ts'
@@ -28,12 +25,6 @@ function seed() {
     shareRev: { 'b-live': 1, 'b-gone': 3 },
     composerDrafts: {},
     previews: {},
-
-
-
-
-
-
 
     sidePanes: { 'p-live': [], 'p-gone': [] },
     botOrder: { 'p-live': ['b-live'], 'p-gone': ['b-gone'] },
@@ -78,7 +69,6 @@ test('pruneDeadKeys：三張回合相關的表都只剩活著的 bot 時回 null
 
 test('已刪 bot 留著的 queued 回合被帶走後，重連不再重抓它', async () => {
   seed()
-  // 只留這顆已刪 bot 的 queued 回合；沒有已載入的對話、沒有選取，重連補抓只能靠 turns 把它列進去。
   useStore.setState({ loadedBots: {}, selectedBotId: null, turns: { 'b-gone': { t9: { id: 't9', status: 'queued' } as never } } } as never)
   useStore.getState().pruneDead()
   assert.equal(useStore.getState().turns['b-gone'], undefined, '已刪 bot 的回合表要帶走')
@@ -92,7 +82,6 @@ test('已刪 bot 留著的 queued 回合被帶走後，重連不再重抓它', a
   )
 })
 
-/** bot 已刪、快照裡沒有了，它的遲到幀（完成訊息、回合更新）不能把訊息／回合／未讀重新建出來。 */
 test('已刪 bot 遲到的 message_added／turn_updated：不重建 messages、turns、botUnread', () => {
   seed()
   useStore.setState({ bots: [bot('b-live'), bot('b-gone')] })

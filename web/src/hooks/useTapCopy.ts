@@ -5,7 +5,6 @@ import { copyText } from '../lib/copyText'
 const INTERACTIVE = 'a, button, input, textarea, select, [role="button"], .msg-attachments, .msg-snapshot, .lightbox'
 const hasSelection = () => Boolean(window.getSelection()?.toString())
 
-/** 短按複製；長按、拖選、捲動與訊息內的連結／按鈕保留瀏覽器原生行為。 */
 export function useTapCopy(text: string, onCopied: (ok: boolean) => void) {
   const press = useRef<{ id: number; x: number; y: number; at: number; cancelled: boolean } | null>(null)
   const cancel = () => { press.current = null }
@@ -25,7 +24,6 @@ export function useTapCopy(text: string, onCopied: (ok: boolean) => void) {
     onPointerMove: move,
     onPointerUp: move,
     onPointerCancel: cancel,
-    // 觸控／筆放開後瀏覽器必送 pointerleave，早於 click；只有滑鼠移出才取消（觸控拖走由 move 處理）。
     onPointerLeave: (e: PointerEvent<HTMLElement>) => { if (e.pointerType === 'mouse') cancel() },
     onContextMenu: cancel,
     onClick: (e: MouseEvent<HTMLElement>) => {

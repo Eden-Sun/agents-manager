@@ -1,4 +1,3 @@
-/** 介面語言切換（issue #1932）：環境設定的三選一、切換後已掛載的元件即時重繪、html lang 與儲存跟著換。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, keydown, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -67,7 +66,6 @@ test('方向鍵在三個選項間循環並移動焦點', async () => {
 test('t.x：句子裡塞元件，英文語序不同也能放對位置；切語言即時重繪', async () => {
   function Demo() {
     const t = useT()
-    // 借用 ThemeToggle 已翻好的句子（字典的 key 要真的在原始碼裡）。
     return <p>{t.x('主題：{name}（點一下換成{next}）', { name: <b>A</b>, next: <i>B</i> })}</p>
   }
   const root = await mount(<Demo />)

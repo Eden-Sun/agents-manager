@@ -1,4 +1,3 @@
-/* 主力晶片顏色說明（2026-10-04 使用者）：手機是底部彈出、電腦是置中小卡。範例沿用晶片與燈號的 class。 */
 .chip-legend-backdrop {
   position: fixed;
   inset: 0;

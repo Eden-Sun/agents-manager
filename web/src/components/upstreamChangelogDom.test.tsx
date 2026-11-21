@@ -1,9 +1,3 @@
-/**
- * agy、grok 更新框的 changelog 與分析（#1930）。真的掛進 happy-dom：upstream 快照走真的 `parseUpstreamItem`，
- * 後端是模擬的 `/api/changelog`（還沒認得 agy／grok 時回 `found:false`＋claude 的連結）；review／triage 預設 400（舊 daemon）。
- * 分析區跟 claude／codex／herdr 一樣：兩邊都讀不到整塊不畫；讀得到但沒分析寫「尚未分析——按下方「分析影響」」，
- * 確認框底有「分析影響」，只有按下去才會 POST（開框只讀，#1928）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { setupDom, teardownDom, unmountAll, mount, click, until } from '../testing/domHarness'
@@ -28,13 +22,8 @@ const control = { open: true, close: () => {} }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
-/** 收到的非 GET 請求（方法與路徑）：開框只讀，按「分析影響」才會有 POST。 */
 let writes: { method: string; path: string; body: Record<string, unknown> }[] = []
 
-/**
- * 只有 `/changelog` 有東西可回；翻譯沒開。`reviewable=false`（預設）：review／triage 一律 400（舊 daemon 不收這個 kind）；
- * `true`：帳本讀得到但是空的（沒分析過），review 讀得到、POST 派得出去。
- */
 function backend(changelog: unknown, reviewable = false): string[] {
   const seen: string[] = []
   writes = []
@@ -199,7 +188,6 @@ test('agy：只有按「分析影響」才 POST（kind、from、to 帶對），�
   assert.equal(written().length, 1, '只 POST 一次')
 })
 
-// 區間起點的判斷（純函式，跟 DOM 測試同一檔，避免多一個測試檔就把 shard 切點挪走）。
 test('多台落後：取最舊那台當區間起點', () => {
   assert.deepEqual(
     changelogRange([

@@ -12,7 +12,6 @@ test('只有非空字串才算移交出去', () => {
   assert.equal(handedOffTo([project('agm-host')], 'p2'), null, '別的專案')
 })
 
-/** #708：移交出去的 bot 輸入框鎖住並說明由誰管，不提供「送出＝啟動」。 */
 test('a handed-off bot locks the composer and says who manages it', () => {
   const base = useStore.getState()
   const state = {

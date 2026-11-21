@@ -9,23 +9,17 @@ function itemsOf(menu: HTMLElement): HTMLElement[] {
   )
 }
 
-/** 已勾選的那一項（menuitemradio），沒有就第一項；一項都點不了就停在選單本身。 */
 function focusStart(menu: HTMLElement) {
   const items = itemsOf(menu)
   const start = items.find((el) => el.getAttribute('aria-checked') === 'true') ?? items[0] ?? menu
   start.focus({ preventScroll: true })
 }
 
-/**
- * `role="menu"` 彈窗鍵盤行為（WAI-ARIA APG menu button）：方向鍵／Home/End 移動，Esc／Tab 關掉並還焦點給觸發鍵。
- * 項目用 `tabIndex={-1}`。處理過的鍵要 `stopPropagation`：portal 的 React 事件仍會冒泡回觸發鍵那一列。
- */
 export function useMenuKeys(
   open: boolean,
   menuRef: RefObject<HTMLElement | null>,
   triggerRef: RefObject<HTMLElement | null>,
   close: () => void,
-  /** 選單內容的版本（例如載入完的清單）；變了而焦點掉出去時，重新把焦點放回選單。 */
   contentKey?: unknown,
 ) {
   useEffect(() => {
@@ -33,7 +27,6 @@ export function useMenuKeys(
     const menu = menuRef.current
     const trigger = triggerRef.current
     if (!menu) return
-    // 等一格：第一次 render 還是 `visibility: hidden`，focus() 會落空。
     const raf = requestAnimationFrame(() => focusStart(menu))
     return () => {
       cancelAnimationFrame(raf)
@@ -42,7 +35,6 @@ export function useMenuKeys(
     }
   }, [open, menuRef, triggerRef])
 
-  // 內容重建（如模型清單載入完）焦點掉回 body 時撿回來，否則方向鍵沒反應。
   useEffect(() => {
     const menu = menuRef.current
     if (!open || !menu) return
@@ -60,7 +52,6 @@ export function useMenuKeys(
       return
     }
     if (e.key === 'Tab') {
-      // portal 在 body 尾端，放 Tab 會掉到頁尾。
       e.preventDefault()
       e.stopPropagation()
       close()

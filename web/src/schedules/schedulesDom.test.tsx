@@ -1,9 +1,3 @@
-/**
- * 專案排程的 DOM 測試（真的掛 `Sidebar` 進 happy-dom）：
- * - 專案「＋」展開成「新增 Bot／新增排程」，不再直接開 Bot 表單。
- * - 排程編輯器只列可接收排程的 Bot（同專案、一般 Bot；child 不列）。
- * - 建立時帶 client_request_id（冪等 key），後端回 409 時換新 key。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, keydown, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
@@ -13,7 +7,6 @@ import { Sidebar } from '../components/Sidebar'
 import { ProjectSchedules } from './ProjectSchedules'
 
 afterEach(unmountAll)
-// 時區下拉約 445 個 <option>，在 happy-dom 裡每次開／重繪編輯器要 ~0.2 秒；這個檔案不測時區選項本身。
 let tzList: ReturnType<typeof shortTimeZoneList>
 before(async () => {
   await setupDom()
@@ -75,7 +68,6 @@ test('選單「新增排程」開編輯器，Bot 下拉只列同專案的一般 
   assert.ok(dialog, '要開出「新增排程」對話框')
   const options = [...dialog.querySelectorAll<HTMLElement>('.sched-bot-row')].map((e) => e.dataset.botId ?? '')
   assert.ok(options.includes('b1') && options.includes('b2'), '同專案的排程專屬 Bot 要列出')
-  // 別的專案、child 的 Bot 不列（只列本專案的排程專屬 bot）。
   assert.ok(!options.includes('b3') && !options.includes('b4'), '別專案與 child 不列')
 })
 
@@ -199,7 +191,6 @@ test('列表新 GET 先回時，較舊的排程回應不能覆蓋新資料', asy
 })
 
 test('綁定 turn 的狀態：queued→in_flight→終態，列表即時跟上（不靠 schedules_changed）', async () => {
-  // 後端 tick 只在終態才推 schedules_changed；occurrence 在 in_flight 期間仍是 queued，所以列要看自己綁的 turn。
   let backend: { open: Record<string, unknown> | null; next: string | null } = {
     open: { id: 'o1', schedule_id: 's1', source: 'scheduled', scheduled_for: '', generation: 1, bot_id: 'b1', prompt: 'x', status: 'queued', waiting_reason: null, turn_id: 't1', turn_status: 'queued', turn_delivery: 'pending', merged_count: 0, error: null, created_at: '', updated_at: '' },
     next: null,
@@ -224,7 +215,6 @@ test('綁定 turn 的狀態：queued→in_flight→終態，列表即時跟上�
   assert.match(rowText(), /執行中/, 'turn 開始送出後要改成執行中，不能一直顯示排隊')
   assert.ok(listGets > before, '綁定 turn 變了才重抓這一列')
 
-  // 終態：後端 settle 之後 open 清空；前端 turn 一變就要抓到這個結果。
   backend = { open: null, next: '2030-01-02T00:00:00.000Z' }
   await act(async () => useStore.setState({ turns: { b1: { t1: { id: 't1', status: 'completed', delivery: 'ok' } } } } as never))
   await settle()
@@ -252,7 +242,6 @@ test('別的 Bot 的 turn 更新不會讓這一列重抓（只看自己綁的 tu
 
 test('非 secure（LAN http）沒有 crypto.randomUUID：整個側欄開排程編輯器不能炸（白屏）', async () => {
   const realCrypto = globalThis.crypto
-  // LAN IP 開網頁時 randomUUID 不存在；getRandomValues 仍在。
   Object.defineProperty(globalThis, 'crypto', {
     configurable: true,
     value: { getRandomValues: (a: never) => realCrypto.getRandomValues(a) },
@@ -273,7 +262,6 @@ test('非 secure（LAN http）沒有 crypto.randomUUID：整個側欄開排程�
 })
 
 test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建立→開詳情→修改→儲存，全程不白屏', async () => {
-  // 有狀態的假後端，回應形狀照 daemon：建立／儲存回 Schedule（不帶 recent），詳情才帶 recent。
   const rows: Record<string, unknown>[] = []
   fakeApi((req) => {
     const p = req.path
@@ -300,7 +288,6 @@ test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建
   await mount(<Sidebar />)
   await settle()
 
-  // 1) 新增排程，選 am-codex，填名稱與內容，建立。
   await click(addButton('proj-p1'))
   await click(menuItem('新增排程'))
   await settle()
@@ -312,7 +299,6 @@ test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建
   await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '建立排程')!)
   await settle()
 
-  // 2) 建立後編輯器轉成編輯模式，詳情載得進來，整頁還在。
   assert.equal(rows.length, 1, '後端要收到一筆')
   assert.equal((rows[0].bot_id as string), 'b5')
   assert.ok(document.querySelector('.sidebar, nav, body'), '整頁不能空白')
@@ -320,7 +306,6 @@ test('完整流程（整個 Sidebar）：＋→新增排程→選 am-codex→建
   assert.ok(dialog, '建立後排程 modal 還要在')
   assert.match(dialog.textContent ?? '', /還沒有執行紀錄|啟用中|已停用/, '詳情區要渲染（不能因為缺 recent 炸掉）')
 
-  // 3) 修改名稱並儲存。
   await typeInto(dialog.querySelector<HTMLInputElement>('input')!, '每日摘要 v2')
   await click([...dialog.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === '儲存')!)
   await settle()
@@ -478,7 +463,6 @@ test('手動執行：POST 已送達但回應遺失 → 重按用同一個 key，
     if (method === 'POST' && path.endsWith('/schedules/s1/run')) {
       const key = (JSON.parse(init?.body ?? '{}') as { client_request_id: string }).client_request_id
       runKeysSent.push(key)
-      // 伺服器：同一個 key 只跑一次（回原來那一筆）。
       if (!seenKeys.has(key)) {
         seenKeys.add(key)
         jobs += 1
@@ -508,7 +492,6 @@ test('手動執行：POST 已送達但回應遺失 → 重按用同一個 key，
     assert.equal(runKeysSent.length, 2, '兩次送出都到了伺服器')
     assert.equal(runKeysSent[0], runKeysSent[1], '重按要用同一個 key')
     assert.equal(jobs, 1, '同一個 key 只產生一次執行')
-    // 收到回應後，下一次按才換新的 key。
     await click(runBtn())
     await confirmManualRun()
     await settle()
@@ -547,7 +530,6 @@ test('手動執行 key 存在共用 createRequestId：關掉編輯器再開（�
     await click(runIn())
     await confirmManualRun()
     await settle()
-    // 關掉編輯器（Escape），再從列表開回來（同一個分頁；sessionStorage 留著 key）。
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
@@ -580,7 +562,6 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
     if (method === 'POST' && path.endsWith('/schedules/s3/run')) {
       const key = (JSON.parse(init?.body ?? '{}') as { client_request_id: string }).client_request_id
       keys.push(key)
-      // 伺服器：同一個 key 只產生一筆、之後都回同一筆。
       if (!processed.has(key)) {
         processed.add(key)
         jobs += 1
@@ -591,7 +572,6 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
     if (method === 'GET' && path.endsWith('/projects/p1/schedules')) return new Response(JSON.stringify({ schedules: [schedule] }), { status: 200 })
     if (method === 'GET' && path.endsWith('/schedules/s3')) {
       detailCalls += 1
-      // 第 1 次是開編輯器載入詳情；第 2 次是 POST 收下之後的重抓 → 503；之後正常。
       if (detailCalls === 2) return new Response('{"error":"unavailable"}', { status: 503 })
       return new Response(JSON.stringify({ ...schedule, recent: [] }), { status: 200 })
     }
@@ -615,7 +595,6 @@ test('手動執行：POST 已收下、詳情 GET 503 → 再按用同一個 key�
     assert.equal(keys[0], keys[1], '詳情 503 後再按，沿用同一個 key')
     assert.deepEqual(occIdsReturned, ['occ-503', 'occ-503'], '回同一筆 occurrence')
     assert.equal(jobs, 1, '只產生一次執行')
-    // 這次成功收下（含詳情）之後，下一次明確執行換新的 key。
     await click(runBtn())
     await confirmManualRun()
     await settle()
@@ -717,7 +696,6 @@ test('編輯器：Ctrl+Enter 在輸入法選字中不儲存', async () => {
   await settle()
   const dialog = dialogs().find((d) => d.textContent?.includes('排程'))!
   const prompt = dialog.querySelector<HTMLTextAreaElement>('textarea')!
-  // 選字中的 Ctrl+Enter：isComposing 為真，不能當成儲存。
   const composing = new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true })
   Object.defineProperty(composing, 'isComposing', { value: true })
   await act(async () => {
@@ -750,7 +728,6 @@ test('「跑完就清空對話」勾選：建立送出 clear_after:true；編輯
   const post = requests.find((r) => r.method === 'POST')!
   assert.equal((post.body as { clear_after: boolean }).clear_after, true, '建立要送 clear_after:true')
 
-  // 編輯既有排程：GET 回 true → 勾選框是勾的；取消勾選後 PATCH 送 false。
   await unmountAll()
   const editRequests = fakeApi((req) => {
     if (req.method === 'GET' && req.path.endsWith('/projects/p1/schedules')) return { schedules: [scheduleRow({ clear_after: true })] }

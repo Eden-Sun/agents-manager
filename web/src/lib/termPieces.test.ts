@@ -47,7 +47,6 @@ test('輸出是在比 columns 窄的時候印的：拿最長的一行當折行�
   assert.equal(rows[3][0].text, l4)
 })
 
-/** 2026-09-08 實際壞掉的畫面：OAuth URL 在 93 欄折 5 行，但快照有 600+ 欄的行，拿最長行當寬度就只連到第一段。 */
 const OAUTH_URL =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e' +
   '&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' +
@@ -55,7 +54,6 @@ const OAUTH_URL =
   '+user%3Amcp_servers+user%3Afile_upload&code_challenge=aRZiMv8rovhGSTmvi9q5X-0DUq2VwgL4qzFvi0YimMQ' +
   '&code_challenge_method=S256&state=rxA0wQpSnYlV3xFmeJFy0Dvay-kMij1_CzrOqBYUi38'
 
-/** 把 URL 依終端寬度切成一段段，模擬軟折行。 */
 const wrapAt = (s: string, w: number) => {
   const out: string[] = []
   for (let i = 0; i < s.length; i += w) out.push(s.slice(i, i + w))
@@ -66,7 +64,6 @@ test('登入畫面：URL 在 93 欄折成 5 行，同一份快照裡另有 618 �
   const chunks = wrapAt(OAUTH_URL, 93)
   assert.deepEqual(chunks.map((c) => c.length), [93, 93, 93, 93, 78], '這條測資本來就要折成 5 行')
   const lines = [
-    // `recent_unwrapped` 把 shell 指令接回原長，比 URL 的折行寬度長得多。
     `mac_builder@mac_builder rt % claude --dangerously-skip-permissions --settings ${'x'.repeat(540)}`,
     '',
     " Browser didn't open? Use the url below to sign in (c to copy)",
@@ -78,12 +75,10 @@ test('登入畫面：URL 在 93 欄折成 5 行，同一份快照裡另有 618 �
   assert.equal(Math.max(...lines.map((l) => l.length)), 618)
   const rows = termPieces(lines.join('\n'), 185)
   const links = urlsOf(rows)
-  // 五段都在，每一段都指向同一條完整 URL；接起來等於原字串（複製出去就是這個）
   assert.equal(links.length, 5)
   assert.deepEqual(links.map(([text]) => text), chunks)
   for (const [, url] of links) assert.equal(url, OAUTH_URL)
   assert.equal(links.map(([text]) => text).join(''), OAUTH_URL)
-  // 尾巴沒有被吃進 URL
   assert.equal(rows[rows.length - 1][0].text, ' Paste code here if prompted >')
 })
 
@@ -105,7 +100,6 @@ test('句尾標點與不成對的括號混在一起：一起剝掉，不留下�
 test('括號包住的 URL 不把不成對的結尾括號算進去', () => {
   assert.equal(urlsOf(termPieces('see (https://example.com/docs/page) here', 80))[0][1], 'https://example.com/docs/page')
   assert.equal(urlsOf(termPieces('[docs](https://example.com/docs/page)', 80))[0][1], 'https://example.com/docs/page')
-  // 網址自己的括號是成對的，要留著。
   assert.equal(
     urlsOf(termPieces('https://en.wikipedia.org/wiki/Foo_(bar)', 80))[0][1],
     'https://en.wikipedia.org/wiki/Foo_(bar)',
@@ -113,8 +107,6 @@ test('括號包住的 URL 不把不成對的結尾括號算進去', () => {
 })
 
 test('URL 剛好在行尾結束、下一行是新的一行：不接（不是每個行尾 URL 都是折行）', () => {
-  // 這行 60 字（≥ MIN_WRAP_WIDTH）但既不等於 columns、也不是最長的一行，
-  // 下一行也不是同寬的續行 → 不能黏。
   const l1 = 'open https://a.example/' + 'q'.repeat(37)
   assert.equal(l1.length, 60)
   const rows = termPieces(['x'.repeat(185), l1, 'mac_builder@mac_builder %'].join('\n'), 185)
@@ -122,7 +114,6 @@ test('URL 剛好在行尾結束、下一行是新的一行：不接（不是每�
   assert.equal(rows[2][0].text, 'mac_builder@mac_builder %')
 })
 
-/** 2026-10-05 實測：agy 登入的 OAuth 網址（213 欄 pane 折在 212），續列開頭是 agy 的 1 格邊界。`herdr pane read --source visible` 原樣。 */
 const AGY_SCREEN = [
   " Your browser should open automatically. If not:",
   "",
@@ -145,7 +136,6 @@ test('agy 登入的長網址：續列開頭多一格空白也接回，每一段�
   assert.ok(AGY_URL.includes('code_challenge_method=S256'), '第一個接縫（code_c｜hallenge）')
   assert.ok(AGY_URL.includes('www.googleapis.com%2Fauth%2Fuserinfo.email'), '第二個接縫（googleapis.c｜om）')
   assert.ok(AGY_URL.includes('%3A%2F%2Fwww.googleapis.com%2Fauth%2Faicode'), '第三個接縫（%2F%2｜Fwww）')
-  // 版面不動：續列的開頭空白仍是純文字，前後文也沒被吃掉。
   assert.equal(joined(rows[0]), AGY_SCREEN[0])
   assert.equal(joined(rows[3]), AGY_SCREEN[3])
   assert.equal(joined(rows[7]), AGY_SCREEN[7])
@@ -200,7 +190,6 @@ test('中文全形標點緊接在網址後面：不算進網址（點一下複�
   assert.equal(urlsOf(termPieces('看 https://example.com/a！', 80))[0][1], 'https://example.com/a')
 })
 
-/** 改寫前的逐步實作（每輪重數整串、再 slice）：只拿來當對照，確認線性版的結果一樣。 */
 function trimPunctReference(url: string): string {
   let u = url
   let prev: string
@@ -230,7 +219,6 @@ function trimPunctReference(url: string): string {
   return u
 }
 
-/** 固定種子的 PRNG：每次跑都是同一組輸入（不靠 Math.random）。 */
 function seeded(seed: number): () => number {
   let s = seed >>> 0
   return () => {
@@ -242,7 +230,6 @@ function seeded(seed: number): () => number {
   }
 }
 
-/** main 現在的網址規則（#1533：結尾排除全形標點）；對照基準只換 trimPunct 的實作，URL 的切法照這份。 */
 const MAIN_URL_RE = /https?:\/\/[^\s<>"'`）」』、。，；：！？》〉】〕“”‘’]+/g
 
 test('termPieces 的網址結尾與改寫前的逐步實作一樣（含全形標點，固定種子）', () => {
@@ -259,7 +246,6 @@ test('termPieces 的網址結尾與改寫前的逐步實作一樣（含全形標
 })
 
 test('trimPunct 的步數隨長度線性：最壞情況的輸入長 N 與 2N，步數約兩倍（不是四倍）', () => {
-  // 以前 `).` 重複時每輪都重數整串再 slice：N＝8000 約 1 秒，步數是 N²。
   const worst = (n: number) => 'https://a.b/' + ').'.repeat(n)
   const small = trimPunctSteps(worst(1000)).steps
   const big = trimPunctSteps(worst(2000)).steps

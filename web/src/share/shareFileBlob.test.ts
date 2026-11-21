@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { httpShareClient } from './shareApi.ts'
 import { ShareHttpError } from './shareModel.ts'
 
-// #1089：分享入口的下載名額每個分享同時 2 個、不排隊；整檔下載要自己排隊、被擋了照 Retry-After 重試。
 const TOKEN = 'TOKEN_abcdefghijklmnop'
 const tick = () => new Promise<void>((r) => setTimeout(r, 0))
 

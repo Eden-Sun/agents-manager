@@ -9,12 +9,6 @@ import './apiBotUsageBar.css'
 
 const POLL_MS = 10_000
 
-/**
- * claude-api bot 沒有 CLI 的 statusLine／context／pane，狀態列改放 `GET /api/bots/{id}/api-usage`：
- * 累計花費、快取命中率、最近一次的 speed。回合結束後立刻補抓一次，其餘每 10 秒輪詢（沒有 WS 事件）。
- * 若配置了 Anthropic 預付餘額（ClaudeApiBalance.configured），亦顯示預估剩餘餘額（唯讀）。
- * 若設定了總上限，顯示「上限 $Y / $X」，點擊可修改或清除；未設定時顯示「設定上限」。
- */
 export function ApiBotUsageBar({
   botId,
   onToggleOverview,
@@ -39,7 +33,6 @@ export function ApiBotUsageBar({
   const [savingLimits, setSavingLimits] = useState(false)
   const [limitsError, setLimitsError] = useState('')
 
-  // 快取倒數每秒重算（時間點是 daemon 給的精確值，這裡只減「現在」）。
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000)
@@ -47,7 +40,6 @@ export function ApiBotUsageBar({
   }, [])
   const botModel = useStore((s) => s.bots.find((b) => b.id === botId))
 
-  // 最後一個回合的狀態改變（in_flight → completed）＝該重抓了。
   const turnSig = useStore((s) => {
     const turns = Object.values(s.turns[botId] ?? {})
     return `${turns.length}:${turns.filter((x) => x.status === 'in_flight').length}`
@@ -94,7 +86,6 @@ export function ApiBotUsageBar({
       setCap(updated)
       setEditingCap(false)
     } catch {
-      // 保持編輯狀態讓使用者重試或取消
     } finally {
       setSavingCap(false)
     }
@@ -139,7 +130,6 @@ export function ApiBotUsageBar({
       setCap(await putClaudeApiTurnLimits(payload))
       setEditingLimits(false)
     } catch (err) {
-      // 保持編輯狀態讓使用者改正（例如時間小於單一指令逾時）
       setLimitsError(err instanceof Error ? err.message : String(err))
     } finally {
       setSavingLimits(false)
@@ -153,7 +143,6 @@ export function ApiBotUsageBar({
       setCap(updated)
       setEditingCap(false)
     } catch {
-      // 保持編輯狀態
     } finally {
       setSavingCap(false)
     }
@@ -171,7 +160,6 @@ export function ApiBotUsageBar({
     cap.spent_usd >= cap.cap_usd * 0.9
 
   const cacheChip = apiCacheChip(usage.cache, nowMs, usage.context.tokens, botModel?.model ?? null, botModel?.fast === true)
-  // 常駐：上限、回合上限、context、快取倒數；累計／快取命中／speed／effort／請求數收進展開區（▴▾，桌機手機都有）。
   const showFullDetails = mobileExpanded || editingCap || editingLimits
 
   return (
@@ -186,7 +174,7 @@ export function ApiBotUsageBar({
           <span className="sl-v">{usage.stuck.reason}</span>
         </span>
       ) : null}
-      {/* 餘額只在頂部額度列（BalanceQuotaChip）放一份，狀態列不重複（使用者 2026-11-15：二擇一）。 */}
+      {}
 
       {cap ? (
         editingCap ? (

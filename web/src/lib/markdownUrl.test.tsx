@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import Markdown from 'react-markdown'
 import { markdownUrlTransform, readableImagePath } from './markdownUrl.ts'
 
-/** 照 ChatPanel 的方式渲染，收集 img 元件拿到的 src 與連結的 href。 */
 function render(md: string): { srcs: string[]; html: string } {
   const srcs: string[] = []
   const html = renderToStaticMarkup(
@@ -25,7 +24,6 @@ function render(md: string): { srcs: string[]; html: string } {
 
 test('file:// 圖片的 src 原樣交給元件，不被清成空字串（review3 c4 L3）', () => {
   assert.deepEqual(render('![shot](file:///Users/me/proj/docs/a.png)').srcs, ['file:///Users/me/proj/docs/a.png'])
-  // 相對路徑、網址照舊。
   assert.deepEqual(render('![a](docs/a.png)').srcs, ['docs/a.png'])
   assert.deepEqual(render('![a](https://example.com/a.png)').srcs, ['https://example.com/a.png'])
 })

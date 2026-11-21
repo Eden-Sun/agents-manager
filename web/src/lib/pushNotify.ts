@@ -1,4 +1,3 @@
-/** 網頁推播的瀏覽器端：支援度判斷、訂閱／取消、點通知開排程。service worker 在 `public/sw.js`（只處理 push 與 click）。 */
 import { deletePushSubscription, getVapidKey, reportPresence, savePushSubscription } from '../api/push'
 
 export type PushSupport = { ok: true } | { ok: false; reason: 'insecure' | 'unsupported' | 'ios-home-screen' }
@@ -7,7 +6,6 @@ function isIos(nav: Navigator): boolean {
   return /iPad|iPhone|iPod/.test(nav.userAgent) || (nav.platform === 'MacIntel' && (nav.maxTouchPoints ?? 0) > 1)
 }
 
-/** 可否使用推播：要 secure context、Service Worker、PushManager；iPhone 還要以主畫面（standalone）開啟。 */
 export function pushSupport(env: { win?: Window; nav?: Navigator } = {}): PushSupport {
   const win = env.win ?? window
   const nav = env.nav ?? navigator
@@ -29,13 +27,11 @@ async function registration(): Promise<ServiceWorkerRegistration> {
   return navigator.serviceWorker.ready
 }
 
-/** 這個瀏覽器目前的訂閱（沒有註冊過 service worker 就是 null，不會主動註冊）。 */
 export async function currentSubscription(): Promise<PushSubscription | null> {
   const reg = await navigator.serviceWorker.getRegistration('/')
   return reg ? reg.pushManager.getSubscription() : null
 }
 
-/** 要求權限 → 訂閱 → 送到 daemon。權限被拒回 'denied'。 */
 export async function enablePush(): Promise<'ok' | 'denied'> {
   const perm = await Notification.requestPermission()
   if (perm !== 'granted') return 'denied'
@@ -56,7 +52,6 @@ export async function disablePush(): Promise<void> {
   await deletePushSubscription(endpoint)
 }
 
-/** 通知的 url（`/?schedule=…&project=…&occurrence=…`）→ 開排程的事件參數。 */
 export function parseScheduleUrl(url: string): { projectId: string; scheduleId: string; occurrenceId?: string } | null {
   try {
     const q = new URL(url, 'http://x').searchParams
@@ -68,7 +63,6 @@ export function parseScheduleUrl(url: string): { projectId: string; scheduleId: 
   }
 }
 
-/** 通知的 url（`/bots/<id>`）→ bot id。 */
 export function parseBotUrl(url: string): string | null {
   try {
     const m = /^\/bots\/([^/]+)\/?$/.exec(new URL(url, 'http://x').pathname)
@@ -78,7 +72,6 @@ export function parseBotUrl(url: string): string | null {
   }
 }
 
-/** 通知的 url（`/?reset_offer=<額度 key>`）→ 額度 key。 */
 export function parseResetOfferUrl(url: string): string | null {
   try {
     return new URL(url, 'http://x').searchParams.get('reset_offer')
@@ -87,7 +80,6 @@ export function parseResetOfferUrl(url: string): string | null {
   }
 }
 
-/** service worker 在已開啟的視窗裡點通知時 postMessage：轉成 `agm:open-schedule`（側欄聽它）。 */
 export function installPushClickBridge(): () => void {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return () => {}
   const onMessage = (ev: MessageEvent) => {
@@ -104,10 +96,6 @@ export function installPushClickBridge(): () => void {
   return () => navigator.serviceWorker.removeEventListener('message', onMessage)
 }
 
-/**
- * 把「這個視窗可見、選中哪顆 bot、距上次互動幾秒」定期回報給 daemon（主力 bot 推播據此不打擾正在看的人）。
- * 沒有訂閱推播的瀏覽器也報，反正 daemon 只拿來抑制；失敗忽略（沒有 presence＝照推）。
- */
 export function installPresenceReporter(getBotId: () => string | null): () => void {
   if (typeof document === 'undefined') return () => {}
   const id = (() => {

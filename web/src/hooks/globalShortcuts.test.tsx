@@ -1,7 +1,3 @@
-/**
- * 全域快捷鍵（⌥↑/⌥↓ 換 bot、Ctrl+1…9 跳專案）的誤觸審查：選字中的按鍵、Shift 組合（選取文字）、
- * 疊在上面的對話框（含燈箱，它不是 .modal-backdrop）都不能穿透。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -116,7 +112,6 @@ test('側邊欄裡開的對話框（新增 Project／Bot、環境設定的 .moda
 test('抽屜開＋側欄內 modal 開時 Esc 只關 modal、抽屜留著；modal 關了之後 Esc 才關抽屜（#935；抽屜 Esc 條件照 App.tsx）', async () => {
   let drawerClosed = 0
   let modalClosed = 0
-  // 跟 App.tsx 的抽屜 Esc 同一個判斷，而且先註冊（抽屜先開、Modal 後掛）。
   const drawerEsc = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || e.defaultPrevented) return
     if (dialogOpen()) return

@@ -1,15 +1,10 @@
 import type { FormEvent, ReactNode } from 'react'
 
-/**
- * claude-api 總花費上限的編輯表單（輸入框＋儲存／清除／取消）。兩個呈現（狀態列的 `ApiBotUsageBar`、設定面板的 `ClaudeApiBotLimits`）
- * 只有 class 與文案不同，由呼叫端傳入；`footer` 放表單尾端的額外內容（設定面板的錯誤訊息）。
- */
 export interface CapEditorProps {
   formClassName: string
   formTestId?: string
   labelClassName?: string
   inputClassName?: string
-  /** 按鈕共用 class；清除／取消會再加 ` clear`／` cancel`。 */
   btnClassName: string
   labelText: string
   inputId: string

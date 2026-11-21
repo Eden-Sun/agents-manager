@@ -9,7 +9,6 @@ test('no connected field → touches nothing', () => {
 
 test('local manager-session bot writes the global flag', () => {
   assert.deepEqual(botStatusConnTarget({ connected: false, host: 'local', defaultSession: false }), { kind: 'global', connected: false })
-  // empty host means local
   assert.deepEqual(botStatusConnTarget({ connected: true, host: '', defaultSession: false }), { kind: 'global', connected: true })
 })
 

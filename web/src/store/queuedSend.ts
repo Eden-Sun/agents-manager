@@ -1,13 +1,11 @@
 import type { Message, Turn } from '../api/types'
 
-/** Server-owned queued turn projected into the shape the composer needs. */
 export interface QueuedSend {
   turnId: string
   text: string
   attachments: string[]
 }
 
-/** The composer-facing queued row is derived only from daemon turns and their user messages. */
 export function queuedSendFor(
   state: { turns: Record<string, Record<string, Turn>>; messages: Record<string, Message[]> },
   botId: string,
@@ -24,7 +22,6 @@ export function queuedSendFor(
   }
 }
 
-/** 退回的文字接在輸入框現有內容前面；空字串不多加換行。 */
 export function prependDraft(text: string, current: string): string {
   return text ? (current ? `${text}\n${current}` : text) : current
 }

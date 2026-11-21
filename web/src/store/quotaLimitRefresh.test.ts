@@ -1,7 +1,3 @@
-/**
- * #1899：撞限（`limit_hit`）出現、清掉、或 until 改變時重抓一次 /api/state（`bot.limit_hit` 在那裡）；
- * 一般讀數不重抓；沒有先前快取的 key 不因第一次收到就重抓；連續多筆被合併。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset } from './storeEnv.harness.ts'
@@ -78,7 +74,6 @@ test('整包 {kinds} 裡只有一筆撞限變了：只重抓一次；遠端 key 
 test('遠端 key 不會因為短 kind 相同而誤判：只看 mac_builder/codex 的前綴，local codex 沒變就不重抓', async () => {
   seed(quota(40, hit('2026-10-29T11:24:00Z')))
   useStore.setState({ quota: { ...useStore.getState().quota, 'mac_builder/codex': quota(10) as never } })
-  // 只更新遠端那把，且撞限沒變：不該因為 local 的 codex 有撞限就重抓。
   dispatchFrameForTest({ type: 'quota_updated', data: { kind: 'mac_builder/codex', host: 'mac_builder', quota: quota(11) } })
   await settle()
   assert.equal(stateFetches(), 0)

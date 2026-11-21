@@ -10,12 +10,6 @@ import './botShare.css'
 
 const fmt = (iso: string | null) => (iso ? fmtDateTime(new Date(iso), { dateStyle: 'short', timeStyle: 'short' }) : '—')
 
-/**
- * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用的 bot（受限或信任分享）才畫。
- * 開／關、隨時顯示完整連結＋複製、重產（舊的立刻失效）。舊版開的分享只有雜湊，提示重產一次。
- * 聊天區頂端的「🔗 分享」或別處的重產會發 `bot_share_changed`：開／關會讓 `share_enabled` 變，重產不會（前後都是分享中），
- * 所以另外看 `shareRev`（每收到一次加一）——兩者任一變了就重抓（#1099）。
- */
 export function BotShareSection({ botId }: { botId: string }) {
   const t = useT()
   const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
@@ -39,7 +33,6 @@ export function BotShareSection({ botId }: { botId: string }) {
   )
   const currentShare = share?.rev === rev ? share.state : null
 
-  /** 一次都沒讀到：開關是鎖著的，連回來要自己再抓。 */
   const loadFailed = currentShare === null && error !== null
   useEffect(() => {
     if (online && loadFailed) setAttempt((n) => n + 1)
@@ -170,7 +163,7 @@ export function BotShareSection({ botId }: { botId: string }) {
           </div>
         </div>
       ) : null}
-      {/* 兩個框分開：同一個框有 800ms 防連點，重產完馬上關閉會被吃掉。 */}
+      {}
       <ConfirmDialog
         open={confirm === 'rotate'}
         title={t('重產分享連結？')}

@@ -8,11 +8,9 @@ import { ConfirmDialog } from './ConfirmDialog'
 export interface HostBaselineApplyProps {
   host: string
   baseline: HostBaseline | null
-  /** 那台實際生效的模式（`/api/state` 的 `host_baseline_sync`）；缺值＝off，不畫鈕。 */
   syncMode?: 'off' | 'ask'
 }
 
-/** 錯誤碼到固定文案的對照，不顯示主機上的任何檔案內容或任意回傳字串。 */
 function errorText(t: ReturnType<typeof useT>, code: string): string {
   switch (code) {
     case 'sync_disabled':
@@ -36,7 +34,6 @@ function errorText(t: ReturnType<typeof useT>, code: string): string {
   }
 }
 
-/** 單項結果 result 到固定文案 */
 function itemResultText(t: ReturnType<typeof useT>, res: string, reason?: string): string {
   if (res === 'applied') return t('已補齊')
   if (res === 'present') return t('已存在')
@@ -70,12 +67,10 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [applyResult, setApplyResult] = useState<HostBaselineApplyResult | null>(null)
 
-  // 只有明確是 ask 才畫；off 或缺值（舊 daemon、bot 視圖）都不畫。daemon 已把 auto 輸出成 ask。
   if (syncMode !== 'ask') {
     return null
   }
 
-  // fixable 項目才可補
   const fixableCount = baseline?.fixable?.length ?? 0
   if (fixableCount === 0) {
     return null
@@ -115,12 +110,10 @@ export function HostBaselineApply({ host, baseline, syncMode }: HostBaselineAppl
       if (e instanceof ApiError) {
         const code = String(e.body.reason ?? e.body.error ?? 'error')
         if (e.status === 409 && code === 'plan_outdated') {
-          // ② 409（plan_rev 過期）：重新抓計畫，顯示「計畫已更新，請重新確認」，不准自動重送 apply。
           try {
             const freshPlan = await api.fetchHostBaselinePlan(host)
             setPlan(freshPlan)
           } catch {
-            // 抓新計畫失敗維持舊計畫
           }
           setErrorMsg(t('計畫已更新，請重新確認'))
           return

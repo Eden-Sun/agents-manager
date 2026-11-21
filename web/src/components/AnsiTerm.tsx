@@ -5,20 +5,12 @@ import { fitRules } from '../lib/termRules'
 import { TermLink } from './TermLink'
 import './ansiTerm.css'
 
-/**
- * 帶 ANSI 顏色的終端文字 → React 節點。`<pre className="term">` 裡直接放：`<AnsiTerm text={body} columns={snap.columns} />`。
- *
- * 流程：解析跳脫序列（`parseAnsi`）→ 逐行套 `fitRules`（分隔線縮短，跟 `linkifyTerm` 一致）→ 對去掉顏色的純文字跑 `termPieces` 找網址
- * → 再把網址範圍切回原本的色段。所以網址跨顏色也能點：每一段色段各自是一個 `TermLink`，點了都複製整條網址。
- * 網址與色段的切分都照字元位置做，不靠對齊的字串，所以 `termPieces` 的規則（折行接回、標點不算網址）原樣生效。
- */
 export function AnsiTerm({ text, columns }: { text: string; columns?: number | null }) {
   return <span className="ansi-term">{renderAnsi(text, columns)}</span>
 }
 
 type Run = AnsiSegment
 
-/** 片段依 `\n` 切成行；每一行是一串 run。 */
 function splitLines(segs: AnsiSegment[]): Run[][] {
   const lines: Run[][] = [[]]
   for (const s of segs) {
@@ -30,7 +22,6 @@ function splitLines(segs: AnsiSegment[]): Run[][] {
   return lines
 }
 
-/** 取 [start, end) 範圍內的 run（字元位置相對於整行）。 */
 function sliceRuns(runs: Run[], start: number, end: number): Run[] {
   const out: Run[] = []
   let at = 0
@@ -49,13 +40,6 @@ function colorCss(c: string | undefined): string | undefined {
   return c.startsWith('ansi:') ? `var(--ansi-${c.slice(5)})` : c
 }
 
-/**
- * 樣式 → className＋inline style。沒有任何樣式時回傳 undefined（直接放字串，不包 span）。
- *
- * 24-bit／256 色（不是 `ansi:` 那 16 色）是 CLI 照**深色終端**挑的（claude 的使用者訊息是 `48;2;55;55;55` 深灰底＋白字）：
- * 不改直接畫在淺色主題上會變成一條條黑底。所以只放進 `--ansi-fg`／`--ansi-bg`，由 `ansiTerm.css` 依主題決定：
- * 深色照原色，淺色把明度翻過來（白字→深字、深灰底→淺灰底）。16 色已經有淺深兩組調色盤，照舊直接給。
- */
 function styleProps(style: AnsiStyle): { className?: string; style?: CSSProperties } | undefined {
   let fg = colorCss(style.fg)
   let bg = colorCss(style.bg)
@@ -100,7 +84,6 @@ function renderRun(r: Run, url: string | null, key: number): ReactNode {
 function renderAnsi(raw: string, columns?: number | null): ReactNode[] {
   const lines = splitLines(parseAnsi(raw))
   const plainLines = lines.map((runs) => runs.map((r) => r.text).join(''))
-  // 分隔線縮短：`fitRules` 只保留前綴，所以截掉的部分就是 run 的尾端。
   plainLines.forEach((line, i) => {
     const fitted = fitRules(line)
     if (fitted.length !== line.length) {

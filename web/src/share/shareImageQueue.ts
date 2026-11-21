@@ -1,14 +1,10 @@
-/** 待開始的圖片下載／轉圖最多保留這麼多項，正在跑的那一項不算在內。 */
 export const SHARE_IMAGE_PENDING_LIMIT = 24
 
-/** 佇列容量暫滿或工作被取消時，呼叫端可以保留載入狀態並在容量釋出後重試。 */
 export class ImageWorkSkipped extends Error {}
 
 export interface ImageWork<V> {
   promise: Promise<V>
-  /** LIFO queue 中再次要求時，把尚未開始的工作移到最前面。 */
   promote(): void
-  /** 尚未開始時取消；已開始的工作不會被中斷。 */
   cancel(): boolean
 }
 
@@ -21,8 +17,6 @@ type Task = {
   state: 'pending' | 'active' | 'done' | 'cancelled'
 }
 
-/** 單 client 的圖片工作排程：一項執行、最多 24 項等待，新要求先做，同 key 共用同一工作。
- * 採 LIFO 不另量可視區：最新要求在當前工作結束後先跑；已開始的下載／轉圖不會中斷。 */
 export class ShareImageWorkQueue {
   private readonly pending: Task[] = []
   private readonly tasks = new Map<string, Task>()

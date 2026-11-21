@@ -1,7 +1,3 @@
-/**
- * `useEnterCommit` 接在真的 input 上：改名是點了才畫出 input（掛載時 ref 還是 null），
- * 監聽器必須在那之後仍然掛上（Android 軟鍵盤 Enter 走 beforeinput）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useRef, useState } from 'react'
@@ -12,7 +8,6 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-/** 先畫按鈕，點了才畫 input（同 BotNameField 的編輯流程）。 */
 function Probe({ onCommit }: { onCommit: () => void }) {
   const [editing, setEditing] = useState(false)
   const ref = useRef<HTMLInputElement>(null)
@@ -34,7 +29,6 @@ test('input 在掛載之後才出現（改名進入編輯）：beforeinput 的�
   assert.equal(ev.defaultPrevented, true)
 })
 
-/** 事件 fixture：瀏覽器真的組字時 `isComposing` 為 true；這裡只重現事件，不是實體手機驗證。 */
 test('組字中（isComposing）的換行事件不 commit、也不 preventDefault', async () => {
   for (const inputType of ['insertLineBreak', 'insertParagraph'] as const) {
     let commits = 0

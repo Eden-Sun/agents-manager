@@ -1,7 +1,3 @@
-/**
- * claude-api 換模型後舊對話接續不了（daemon 409 `api_model_changed`）：store 要開確認框（不是通用的「啟動失敗」），
- * 而且「換回原模型」「清除對話」兩個選項真的會打對的 API。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'

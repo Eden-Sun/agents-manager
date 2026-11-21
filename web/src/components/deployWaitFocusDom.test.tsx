@@ -1,6 +1,3 @@
-/**
- * 「⏳ 部署等 N 分」的浮層（role="dialog"）：打開時焦點進浮層，Esc 收起時焦點回到徽章鈕，不掉到 body。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, focusLikeBrowserClick, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -52,7 +49,6 @@ test('打開後焦點進浮層（role=dialog 要有人接住焦點）', async ()
 
 test('Esc 收起浮層，焦點回到徽章鈕（不掉到 body）', async () => {
   const { chip, pop } = await openChip()
-  // 前提：焦點已在浮層裡（使用者 Tab 進來或焦點進浮層）；這裡只測收起時的還焦點。
   pop!.querySelector<HTMLElement>('button')!.focus()
   await keydown(document.activeElement!, 'Escape')
   await settle(20)

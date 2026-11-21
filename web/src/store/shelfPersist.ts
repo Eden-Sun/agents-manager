@@ -1,7 +1,3 @@
-/**
- * Mirrors the image shelf into IndexedDB (localStorage can't hold blobs) so it survives reload;
- * expiry checked on load and every minute. IDB failures are swallowed → memory-only shelf.
- */
 
 import { SHELF_TTL_MS, useShelf } from './shelf'
 import type { ShelfItem } from './shelf'
@@ -76,7 +72,6 @@ function del(keys: string[]): Promise<void> {
 
 let started = false
 
-/** Idempotent. `shelf` defaults to the page's store; tests pass a second instance to play a second tab. */
 export function startShelfPersistence(shelf: typeof useShelf = useShelf): () => void {
   if (started) return () => {}
   started = true

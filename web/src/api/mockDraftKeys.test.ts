@@ -1,4 +1,3 @@
-/** mock 的 `PUT /drafts/{key}` 要收 host shell 面板的指令草稿 `shell:<host>/<pane id>`（API.md「輸入框草稿」，#758），不回 400。 */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'

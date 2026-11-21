@@ -82,11 +82,9 @@ test('關掉只對同一次登出有效；換一次或登入成功後再被登�
   assert.deepEqual(visibleLogins(first, dismissed), [], '同一次：不重複洗版')
   const second = pendingLogins(down({ logged_in: null, login_needed: { since: 'T2', via: 'turn_auth_failure' } }))
   assert.equal(visibleLogins(second, dismissed).length, 1, '新的一次登出：再提示')
-  // 登入成功：不需要登入了，關掉的記錄被清掉；之後探測又說未登入（episode probe）就會提示。
   const cleaned = pruneDismissed(dismissed, [])
   assert.deepEqual(cleaned, {})
   assert.equal(visibleLogins(pendingLogins(down({ logged_in: false })), cleaned).length, 1)
-  // 沒有要清的就回同一個物件（store 不必重畫）。
   assert.equal(pruneDismissed(dismissed, first), dismissed)
 })
 
@@ -128,7 +126,6 @@ test('codex：探測說未登入、有 codex bot 綁著：提示；綁的是 cla
   const p = pendingLogins(codexDown({ logged_in: false }))
   assert.equal(p.length, 1)
   assert.deepEqual({ identity: p[0].identity, via: p[0].via, bots: p[0].bots }, { identity: 'cx1', via: 'probe', bots: [{ id: 'bx', name: 'cx-ops' }] })
-  // 同名身份但綁的是 claude bot：codex 身份不靠它提示。
   const mismatch = base({ hosts: [{ name: 'mac_builder', connected: true, identity_status: { cx1: st({ kind: 'codex', name: 'cx1', logged_in: false }) } }] })
   assert.deepEqual(pendingLogins(mismatch), [])
 })

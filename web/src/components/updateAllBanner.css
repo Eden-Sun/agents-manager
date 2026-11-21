@@ -1,5 +1,3 @@
-/* components/UpdateAllBanner.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* SPEC §6.9：只在真的有更新時出現、做完收掉，所以放在顯眼處不擋事。 */
 
 .update-all {
   flex: none;
@@ -84,8 +82,6 @@
   color: var(--danger);
 }
 
-/* 總數還不知道（接回別人按出來的那一批，`already_running` 只給 batch_id，issue #492）：
-   不畫滿格假裝做完了，用一條來回跑的不定量進度條，等事件把總數補上。 */
 .update-all-bar.unknown span {
   width: 30%;
   animation: update-all-indeterminate 1.2s ease-in-out infinite;

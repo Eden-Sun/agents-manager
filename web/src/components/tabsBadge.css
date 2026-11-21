@@ -1,5 +1,3 @@
-/* components/TabsBadge.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* 本機瀏覽器分頁數 / RAM，超線才變琥珀色。 */
 
 .tabs-badge {
   flex: none;

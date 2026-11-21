@@ -1,7 +1,3 @@
-/**
- * 孫代（子 agent 底下再掛的子 agent，SPEC §6.5a：「孫代因此掛在子代下面」）：側欄的 bot 樹一定要畫得出來。
- * 以前 `Sidebar` 只畫兩層（頂層與它的直屬子列），孫代在 store 裡看得到、畫面上卻找不到一列。
- */
 import test, { after, afterEach, beforeEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeApi, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

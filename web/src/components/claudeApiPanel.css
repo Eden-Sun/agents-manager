@@ -1,4 +1,3 @@
-/* 環境設定 → Claude API（SPEC §4.3d）。樣式照 judgePanel.css 的做法，不去動共用檔。 */
 .claude-api-panel .claude-api-key {
   font-style: normal;
   color: var(--warn);
@@ -99,7 +98,6 @@
 .claude-api-ledger td.err {
   color: var(--danger);
 }
-/* 手機：表格攤成一列一張卡片（比照 Jev 帳本，issue #1466），不橫向撐破 sheet。 */
 @media (width <= 640px) {
   .claude-api-panel .claude-api-use-fields {
     grid-template-columns: 1fr;

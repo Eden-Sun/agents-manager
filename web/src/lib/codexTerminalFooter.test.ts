@@ -14,7 +14,6 @@ test('真實 pane、獨立 warning 行及 Context/weekly 新段均只切出尾�
   ]) {
     const raw = `歷史紀錄：\n${footer}\n\n• 正文不可刪除。\n\n${footer}\n\n`
     const split = splitCodexTerminalFooter(raw)
-    // 終端畫面照 pane 原樣顯示：footer 留在 body 裡，只另外解析給狀態列用（#1680）。
     assert.equal(split.body, raw)
     assert.deepEqual(split.footer, { modelLine: model, warnings: 2 })
   }
@@ -49,7 +48,6 @@ test('#1671 模型列右側 warning：複數與沒有 warning', () => {
 })
 
 test('只有 `? for shortcuts` 這行（沒有模型列、沒有 warning）不算 footer：它是 chrome，不是狀態欄位', () => {
-  // 空 footer 會讓 StatusLineBar 畫出一條空的狀態列、並蓋掉 status_line 的文字。
   const text = '• 正文\n  ? for shortcuts'
   assert.deepEqual(splitCodexTerminalFooter(text), { body: text, footer: null })
 })

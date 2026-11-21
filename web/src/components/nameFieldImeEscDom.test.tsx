@@ -1,6 +1,3 @@
-/**
- * 就地改名欄位（BotNameField／ProjectNameField）在輸入法選字中的 Esc 行為審查。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'
@@ -9,8 +6,6 @@ import { useStore } from '../store/store'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 
-// 測試把 store 的 patchBot／patchProject 換成假的；不還原的話同一個行程裡之後的 DOM 測試（newExpertBotFormDom 的 PATCH、
-// suggestionBarDom）打到的是這個假函式（#1964）。
 const realPatch = { patchBot: useStore.getState().patchBot, patchProject: useStore.getState().patchProject }
 
 before(setupDom)

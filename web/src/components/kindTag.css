@@ -1,4 +1,3 @@
-/* components/KindTag.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
 .kind-tag.icon {
   padding: 0;
   width: 20px;
@@ -11,7 +10,6 @@
   height: 12px;
 }
 
-/* claude-api / openai-api（viewBox 36×16，帶 2.25:1 的 API 實心長方形徽章）：放寬 tag 與 svg 寬度，不被 20px / 12×12 壓扁或裁切 */
 .kind-tag.claude-api.icon,
 .kind-tag.openai-api.icon {
   width: auto;
@@ -71,7 +69,6 @@
   color: var(--kind-codex);
 }
 
-/* openai-api（直打 API）：GPT 同色，虛線框區分（同 claude-api 的做法）。 */
 .kind-tag.openai-api {
   border-style: dashed;
 }
@@ -88,7 +85,6 @@
   color: var(--kind-agy);
 }
 
-/* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .kind-tag.claude,
   :root:not([data-theme="light"]) .kind-tag.claude-api {
@@ -155,8 +151,6 @@
   color: var(--text-dim);
 }
 
-/* codex fast：logo 右下角疊一個閃電（2026-09-22 使用者：「給 codex 的 fast 一個閃電明顯的標示在 logo 上」）。
-   琥珀色＋深色描邊，淺底深底都跳得出來；不改 logo 本身的品牌綠。 */
 .kind-tag.fast,
 .mobile-kind-icon.fast {
   position: relative;
@@ -188,13 +182,10 @@
   stroke-linejoin: round;
 }
 
-/* 桌機：讓出閃電的位置，不壓到右邊 model chip 的框。要比 styles.css 的 `.bot-head .main-title-sub > .kind-tag`
-   （margin-right: -3px）多一個 class——元件 CSS 比 styles.css 先載入，同特異度會輸。 */
 .bot-head .main-title-sub > .kind-tag.fast {
   margin-right: 6px;
 }
 
-/* 手機：logo 那一行底下緊貼額度列，閃電放右下會被額度列蓋掉（2026-09-22 實測）——改放右上，並讓出右邊的字。 */
 .mobile-kind-icon.fast {
   z-index: 1;
   margin-right: 6px;
@@ -206,8 +197,6 @@
   right: -7px;
 }
 
-/* 側欄列（#1682）：閃電疊在 logo 右下，縮成 11px 並少凸出去一點——列高固定（精簡列 32px、overflow-y: hidden），
-   凸出 5px 會被切掉，也會蓋到下一行的第一顆晶片。右下是因為右上已經是更新記號。 */
 .bot-kind-wrap .kind-fast {
   right: -4px;
   bottom: -4px;

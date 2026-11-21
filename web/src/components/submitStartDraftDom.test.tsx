@@ -1,7 +1,3 @@
-/**
- * 終端停在多分頁問卷的 Submit（Review）分頁：從那裡預載（不退回即時模式）、停在第一個未答題、
- * 英文自動翻成譯文，而且預載只送導覽鍵。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -31,7 +27,6 @@ const PAGES = [
   { label: 'Features', q: 'Which features do you need?', opts: ['Site search, categories, tags', 'Newsletter subscription'], answer: 'Newsletter subscription' },
 ]
 
-/** 假終端：分頁列、每頁的題目、Review 頁。導覽鍵只動 `tab`；其他鍵不改狀態。 */
 class FakeEnglishTui {
   tab = 0
   sent: string[] = []
@@ -98,7 +93,6 @@ test('停在 Submit 分頁：預載不退回即時模式，英文自動翻（整
   assert.equal(((reqs.find((r) => isTranslate(r.path))?.body as { questions?: unknown[] } | undefined)?.questions?.length), 2)
   assert.ok(tui.sent.length > 0 && tui.sent.every((k) => ['left', 'right', 'tab', 'shift+tab'].includes(k)), '只送導覽鍵')
   assert.equal(tui.tab, 0, '預載停在第一個未答題')
-  // 已答的題（Review 上的答案）預設帶入：第二題選了 Newsletter subscription
   const picked = [...root.querySelectorAll('.bc-page')].map((page) => page.querySelector('.bc-item[aria-checked="true"]')?.textContent ?? '')
   assert.match(picked[1] ?? '', /Newsletter/, '終端上已答的那一項預設選中')
   assert.match(picked[0] ?? '', /Engineers/, '第一題也答過，帶入')

@@ -110,7 +110,6 @@ import './chatPanel.css'
 
 const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
 
-// `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
 const SOURCE_LABEL: Record<string, string> = {
   hook: msg('回覆'),
   terminal_fallback: msg('終端擷取'),
@@ -119,8 +118,6 @@ const SOURCE_LABEL: Record<string, string> = {
   system: msg('系統通知'),
 }
 
-/** Codex 帳號提示是給 TUI 看的（`Run /usage`）；對話裡只說還有幾次重置。 */
-/** openai-api 不收附件：入口丟掉檔案（`files.add` 的替身）。 */
 function refuseAttachments(): void {}
 
 function systemNoticeText(content: string): string {
@@ -130,8 +127,6 @@ function systemNoticeText(content: string): string {
   return t('Codex 還有 {n} 次額度重置可用', { n: Number(n) })
 }
 
-/** `relay_from` 有值＝別的 bot 代為交辦，不標會被當成使用者自己派的工；對不到 bot 就退回 ID。
- * 來源已收掉時清單找不到它，改用 daemon 補的 `savedName`（見 `relayFromName`）。 */
 const RelayFrom = memo(function RelayFrom({
   fromId,
   toId,
@@ -149,7 +144,6 @@ const RelayFrom = memo(function RelayFrom({
   cluster?: string | null
   assigneeId?: string | null
 }) {
-  // Subscribe so this memoized source label rerenders when the UI language changes.
   useT()
   const names = useStore(
     useShallow((s) => ({
@@ -180,21 +174,17 @@ interface BubbleProps {
   fromClassName?: string
   fromTitle?: string
   kind?: BotKind
-  /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
   expandRelay?: boolean
-  /** 在對話最後 N 則內：英文訊息才會被自動翻譯（`useMessageTranslation`）。 */
   recent?: boolean
 }
 
-/** 一則訊息。claude 的提問與使用者的回答（`ask:` 系統訊息）畫成「Claude 問／你答」卡，其餘照一般泡泡。 */
 export const Bubble = memo(function Bubble(props: BubbleProps) {
   useT()
   const ask = parseAskAnswers(props.msg)
   return ask ? <AskAnswersCard msg={props.msg} ask={ask} /> : <PlainBubble {...props} />
 })
 
-/** 一般泡泡。`memo`：串流 tick 會重 render 清單，不 memo 就每則重解析 Markdown（issue #8）。 */
 const PlainBubble = memo(function PlainBubble({
   msg,
   from,
@@ -209,28 +199,21 @@ const PlainBubble = memo(function PlainBubble({
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'
-  const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]') // i18n-ignore: exact marker in relayed messages
-  // 使用者貼進來的 AGM 裁示（沒有 relay_from）另標（2026-09-12 使用者：「算在 AGM 訊息不算在 user」）。
-  // 只認開頭 `AGM …：` 或 `[AGM …]`，句中提到不算。
+  const daemonNotice = msg.role === 'user' && msg.content.trimStart().startsWith('[AG Man 通知]')
   const quoted = msg.role === 'user' && !msg.relay_from ? quotedFrom(msg.content) : null
-  // 打字送出但沒有無損證據（SPEC §4.4a）：留一個看得到的標記讓人核對。
-  // 只有「沒有證據**而且**不會自動重送」才是使用者要看到的警示（`deliveryNotice`）。
   const today = useLocalDay()
   const notice = useStore((s) =>
     msg.role === 'user' && msg.turn_id && msg.bot_id ? deliveryNotice(s.turns[msg.bot_id]?.[msg.turn_id]) : 'none',
   )
-  // 代發與轉述（AGM 交辦、bot 互轉）預設收合成一行（2026-09-14 使用者：「不用全顯示，收合就好」）。
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const translation = useMessageTranslation(msg, { recent })
   const [expanded, setExpanded] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded && !expandRelay
-  // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
     useStore.getState().notify(ok ? 'info' : 'error', ok ? t('已複製訊息') : t('複製失敗，請長按選取文字複製'))
   })
 
   return (
-    /* `data-msg-id`：從清單外（浮窗）指回這則訊息的把手；`data-turn-id` 供花費概覽跳轉。 */
     <article
       className={`msg ${msg.role}${rail ? ' rail' : ''}${daemonNotice ? ' daemon-notice' : ''}${flash ? ' flash' : ''}${msg.rewound_at ? ' rewound' : ''}`}
       data-msg-id={msg.id}
@@ -257,7 +240,7 @@ const PlainBubble = memo(function PlainBubble({
               {t('未驗證送達')}
             </span>
           ) : null}
-          {/* 來源只在非 `hook` 常態時才標（影響可信度的那幾種）。 */}
+          {}
           {system || msg.source === 'system' ? (
             <span className="src-tag mono" title={t('訊息來源：{source}', { source: msg.source })}>
               {SOURCE_LABEL[msg.source] ? t.tr(SOURCE_LABEL[msg.source]) : msg.source}
@@ -278,7 +261,7 @@ const PlainBubble = memo(function PlainBubble({
             turnId={msg.turn_id}
           />
         ) : null}
-        {/* 會自動重送的那種只放 hover：有安全網，不該佔使用者的注意力（AGM 2026-09-16）。 */}
+        {}
         {system ? null : (
           <time
             className="msg-time"
@@ -291,13 +274,11 @@ const PlainBubble = memo(function PlainBubble({
       </div>
       <div
         className={`bubble bubble-copyable${msg.role === 'assistant' && !fallback ? ' md' : ''}${rail ? ' rail' : ''}${folded ? ' folded' : ''}`}
-        /* 不放 title：原生 tooltip 會壓在正文上（2026-09-12 使用者截圖）。 */
         {...tapCopy}
       >
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>{t('（空白訊息）')}</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          // 譯文與原文同一個泡泡翻面切換（`useMessageTranslation`）；換面時播放微移淡入動效。
           <div key={translation.swapKey ?? (translation.flip ?? 'orig')} className={translation.animClass}>
             {translation.content ?? <SafeMarkdown text={msg.content} botId={msg.bot_id} />}
           </div>
@@ -309,7 +290,7 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
-      {/* 插隊鈕緊貼泡泡（它的測試與版面都依賴這個相鄰關係），帳本列與「⋯」放在它後面。 */}
+      {}
       <SupplementSendNow msg={msg} />
       {msg.role === 'user' ? <MessageLedgerBar msg={msg} /> : null}
       {preview?.truncated && !expandRelay ? (
@@ -325,10 +306,6 @@ const PlainBubble = memo(function PlainBubble({
   )
 })
 
-/**
- * Full pane at terminal-fallback capture time: the cut `content` can miss the real answer
- * (fallback fires 5s after working→idle). 只掛 `terminal_fallback`，系統 pill 不放（框中框）。
- */
 function TerminalSnapshot({ msg }: { msg: Message }) {
   const t = useT()
   const [open, setOpen] = useState(false)
@@ -347,10 +324,6 @@ function TerminalSnapshot({ msg }: { msg: Message }) {
   )
 }
 
-/**
- * In-flight turn tail (`turn_progress`, API.md v3.9). `activity` (v4.1) is raw terminal text —
- * never Markdown. `alert` (v4.2) gets its own row: a retrying CLI otherwise looks healthy.
- */
 export function LiveBubble({
   text,
   activity,
@@ -365,18 +338,14 @@ export function LiveBubble({
   alert?: string | null
   from?: string
   kind?: BotKind
-  /** 狀態列右端的逃生門（`AbandonTurnAction`）。 */
   action?: ReactNode
-  /** 本機圖片經這顆 bot 的 daemon 讀；遠端圖片同樣走 `MarkdownImage`（#764，不能用 react-markdown 預設的 `<img>`）。 */
   botId?: string
 }) {
   const t = useT()
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
-  // 半成品預設收起（2026-09-08）：逐字跳讀了白讀、還會一直推動清單。
   const [open, setOpen] = useState(false)
   const showText = Boolean(text) && open
-  // 不是 live region（#1237）：字數與活動列每 250ms 變一次，整顆宣告會讓讀屏一直重唸；階段字另外給。
   return (
     <article className={`msg assistant live${showText ? ' streaming' : ''}`}>
       <div className={`bubble${showText ? ' md' : ''}`}>
@@ -389,13 +358,13 @@ export function LiveBubble({
           <TypingDots />
         )}
       </div>
-      {/* Below the bubble: status sits at the growing edge, where the eye is. */}
+      {}
       <div className="msg-meta msg-meta-below">
         <div className="msg-meta-left">
           {kind ? <span className={`kind-mark ${kind}`} aria-hidden="true" /> : null}
           {from ? <span className="msg-from">{from}</span> : null}
           <span className="sr-only" role="status">{text ? t('正在輸出回覆') : t('等待回覆')}</span>
-          {/* 有半成品文字也顯示活動列（agy 的「正在讀檔／執行指令」），不然只剩「輸出中…」看不出在做什麼。 */}
+          {}
           <span>{text ? (act ? `${t('輸出中…')} · ${act}` : t('輸出中…')) : (act ?? t('等待回覆…'))}</span>
           {isApiKind(kind) && botId ? <ApiTurnProgress botId={botId} /> : null}
           {text ? (
@@ -418,7 +387,6 @@ export function LiveBubble({
   )
 }
 
-/** Owns the turn-progress subscriptions so history lists don't re-render on every tick. */
 export function LiveReplyBubble({
   botId,
   kind,
@@ -434,7 +402,6 @@ export function LiveReplyBubble({
   const text = useStore((s) => cleanLiveText(liveReplyOf(s, botId)?.text))
   const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
   const alert = useStore((s) => liveReplyOf(s, botId)?.alert ?? null)
-  // claude 壓縮對話中（#1770）：階段字換成「壓縮中…」，不假裝是在做事。
   const compacting = useStore((s) => Boolean(s.runs[botId]?.compacting_since))
 
   if (!active) return null
@@ -451,7 +418,6 @@ export function LiveReplyBubble({
   )
 }
 
-/** Shared empty / loading state for the main area (chat, group, terminal, no selection). */
 export function EmptyState({
   loading,
   title,
@@ -485,7 +451,6 @@ export function TypingDots() {
   )
 }
 
-/** 「載入更早的訊息」（issue #25）：store 只留最近 `MESSAGE_CAP` 則，走 `before=` 分頁接回。 */
 export function LoadEarlier({ id, onLoad }: { id: string; onLoad: (id: string) => void }) {
   const t = useT()
   const show = useStore((s) => Boolean(s.moreMessages[id]))
@@ -513,18 +478,12 @@ export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => 
   )
 }
 
-/**
- * 「這回合的提問」浮窗：輸出把提問推遠時不必往回捲。浮窗不佔高度，免得回合開始／結束讓清單跳動；
- * 貼 composer 下緣（2026-09-08 依使用者要求從上緣移下來，見 UI-DECISIONS）。手機只在回合完成後顯示。
- */
 export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: string; onJump: () => void }) {
   const t = useT()
   const today = useLocalDay()
-  // 狀態綁 turn：換回合自動重設，不需要 effect。
   const [ui, setUi] = useState({ turn: turnId, closed: false, open: false })
   if (ui.turn !== turnId) setUi({ turn: turnId, closed: false, open: false })
   const bodyRef = useRef<HTMLButtonElement>(null)
-  // 真的被夾掉才有「展開」這一段；只在夾行狀態下量。
   const [clamped, setClamped] = useState(false)
   useLayoutEffect(() => {
     const el = bodyRef.current
@@ -560,7 +519,6 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
           ref={bodyRef}
           type="button"
           className="lastq-body"
-          // 沒夾掉時點了是捲到那則、不展開：不宣告折疊狀態（#1596）。
           aria-expanded={clamped ? ui.open : undefined}
           title={jumpable ? t('捲到這則訊息') : t('展開全文')}
           onClick={() => {
@@ -579,7 +537,6 @@ export function LastAskPeek({ msg, turnId, onJump }: { msg: Message; turnId: str
   )
 }
 
-/** 回合跑多久才露出「強制中止」（秒）：開頭本來就會安靜一陣，太早出現只會誘導誤按。 */
 const ABANDON_AFTER_S = 60
 
 function elapsedLabel(sec: number): string {
@@ -590,21 +547,15 @@ function elapsedLabel(sec: number): string {
     : t('{hours} 小時 {minutes} 分', { hours: Math.floor(m / 60), minutes: m % 60 })
 }
 
-/**
- * 卡住時的逃生門：`POST /api/turns/:id/abandon` 標 failed 解鎖 composer。不碰 agent（不同於送 esc
- * 的「中斷」），只推翻 daemon 的 in-flight 認定。
- */
 export function AbandonTurnAction({ botId }: { botId: string }) {
   const t = useT()
   const turnId = useStore((s) => inFlightTurn(s, botId)?.id ?? null)
   const createdAt = useStore((s) => inFlightTurn(s, botId)?.created_at ?? null)
   const botName = useStore((s) => s.bots.find((b) => b.id === botId)?.name ?? t('這個 Bot'))
   const abandonTurn = useStore((s) => s.abandonTurn)
-  // 記 turn id 而非布林：回合換掉時確認框自動失效，不會套到下一回合。
   const [openFor, setOpenFor] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
-  // 換 turn 時 `now` 可能舊→elapsed 偏小、按鈕晚出現，這方向安全。
   useEffect(() => {
     if (!turnId) return
     const interval = setInterval(() => setNow(Date.now()), 5000)
@@ -655,7 +606,6 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
   )
 }
 
-/** 優先這回合自己的 user 訊息；bot 起頭的回合退回整串最後一則。 */
 function lastAskOf(list: Message[], turnId: string): Message | null {
   let newest: Message | null = null
   for (let i = list.length - 1; i >= 0; i--) {
@@ -667,10 +617,8 @@ function lastAskOf(list: Message[], turnId: string): Message | null {
   return newest
 }
 
-/** 捲過去之後那則訊息閃多久（毫秒）。 */
 const FLASH_MS = 1600
 
-/** 訊息是否在可視範圍：提問看得見就不浮浮窗，免得重複（2026-09-11 使用者）。 */
 function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string | null, listLen: number): boolean {
   const [visible, setVisible] = useState(false)
   useEffect(() => {
@@ -688,7 +636,6 @@ function useMsgVisible(boxRef: RefObject<HTMLDivElement | null>, msgId: string |
     )
     io.observe(el)
     return () => io.disconnect()
-    // `listLen`：訊息可能這一輪才掛上來，長度變就重綁。
   }, [boxRef, msgId, listLen])
   return visible
 }
@@ -697,7 +644,6 @@ function MessageList({ botId }: { botId: string }) {
   const t = useT()
   const messages = useStore((s) => s.messages[botId])
   const loaded = useStore((s) => Boolean(s.loadedBots[botId]))
-  // 第一次載入失敗：給重試，不讓它一直轉圈（#1240）。
   const failed = useStore((s) => Boolean(s.messageLoadFailed[botId]))
   const retryLoad = useStore((s) => s.loadMessages)
   const working = useStore((s) => s.runs[botId]?.agent_status === 'working')
@@ -721,7 +667,6 @@ function MessageList({ botId }: { botId: string }) {
   }, [flashId])
 
   const list = messages ?? []
-  // 手機只在已完成且有回覆的回合顯示；桌面在執行中顯示。
   const completedAnswered = latestCompletedTurnId !== null && list.some(
     (m) => m.role === 'assistant' && m.turn_id === latestCompletedTurnId,
   )
@@ -733,7 +678,6 @@ function MessageList({ botId }: { botId: string }) {
   const lastAsk = ask && !childNotice(ask) ? ask : null
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
 
-  // 用 rect 差：`offsetTop` 會差一個 wrap 的 padding；`scrollIntoView` 會連帶捲外層容器。
   const jumpTo = (id: string): boolean => {
     const box = tail.ref.current
     const el = box?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`)
@@ -741,7 +685,6 @@ function MessageList({ botId }: { botId: string }) {
     const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
     const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
     box.scrollTo({ top: Math.max(0, top - 72), behavior: still ? 'auto' : 'smooth' })
-    // 先關再開：class 一直掛著的話 CSS 動畫不會重播。
     setFlashId(null)
     requestAnimationFrame(() => setFlashId(id))
     return true
@@ -753,7 +696,6 @@ function MessageList({ botId }: { botId: string }) {
     <div className="msg-list" ref={tail.ref} onScroll={tail.onScroll}>
       <LoadEarlier id={botId} onLoad={loadEarlier} />
       {failed && !loaded && list.length > 0 ? (
-        // 失敗之後有新訊息進來：歷史還沒載到，要讓人知道、也能重試。
         <div className="load-earlier">
           <button type="button" className="btn" onClick={() => void retryLoad(botId)}>{t('先前的訊息沒載到，重試')}</button>
         </div>
@@ -797,20 +739,16 @@ function Composer({
 }: {
   botId: string
   inputRef: RefObject<HTMLTextAreaElement | null>
-  /** Parent already shows a stopped bar. */
   hideLock?: boolean
   forceFocus?: boolean
-  /** Owned by `ChatPanel` so a drop anywhere in the chat lands here. */
   files: ReturnType<typeof useAttachments>
 }) {
   const t = useT()
-  // Fresh object per call: raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
   const abortBot = useStore((s) => s.abortBot)
-  // 插隊／補充是 claude 專屬（使用者 2026-09-27）：send-now 鍵與「打進 pane 併進這一輪」只在 claude 上驗過。
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
   const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   const sendNowSupported = useStore((s) => s.runs[botId]?.send_now_supported === true)
@@ -831,14 +769,12 @@ function Composer({
       ? (s.messages[botId] ?? []).find((message) => message.turn_id === queued.turnId && message.role === 'user')?.attachments ?? NO_QUEUED_ATTACHMENTS
       : NO_QUEUED_ATTACHMENTS,
   )
-  // issue #122：交給 daemon、在等 bot 起來的那一則（重整之後也還在）。
   const starting = useStore(useShallow((s) => startingSend(s.turns[botId], s.messages[botId])))
   const cancelStartingSend = useStore((s) => s.cancelStartingSend)
   const withdrawQueuedSend = useStore((s) => s.withdrawQueuedSend)
   const withdrawing = useStore((s) => Boolean(s.busy[`withdraw:${botId}`]))
   const startingBot = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const hasRun = useStore((s) => Boolean(s.runs[botId]))
-  // Draft lives in the store (localStorage) so switching / reload keep it; cleared only on send.
   const draftKey = `bot:${botId}` as const
   const phone = useMediaQuery(PHONE_QUERY)
   const text = useStore((s) => s.drafts[draftKey] ?? '')
@@ -847,14 +783,12 @@ function Composer({
   const setText = (v: string) => setDraft(draftKey, v)
   const [sending, setSendingState] = useState(false)
   const ref = inputRef
-  // 送出期間輸入框 disabled、焦點掉到 body；送完還給輸入框（手機不還）。
   const noteSend = useRefocusAfterSend(sending, ref, phone)
   const setSending = (v: boolean) => {
     if (v) noteSend()
     setSendingState(v)
   }
 
-  // 手機不自動 focus（2026-09-09 使用者：切 bot 就彈鍵盤擋住視線，要打字自己點）。
   useComposerFocus({ draftKey, ref, forceFocus: forceFocus && !phone, autoFocus: !phone })
 
   useEffect(() => {
@@ -864,17 +798,14 @@ function Composer({
     el.style.height = `${Math.min(200, el.scrollHeight)}px`
   }, [text, ref, phone])
 
-  // `cacheTtl`：claude-api 這一回合的快取保留。Enter 一律走 5 分鐘（最便宜、不會因為上次點過 1 小時就默默多付）；要 1 小時按旁邊那顆。
   const submit = (cacheTtl?: '5m' | '1h') => {
     const body = text.trim()
     if (!body && files.ids.length === 0) return
-    // 打字沒鎖，Enter 可能送不出：說一聲，別默默吃掉。
     if (state.disabled) {
       notify('error', state.reason || t('目前無法送出訊息'))
       return
     }
     if (sending || files.uploading) return
-    // 失敗的附件不在 `files.ids` 裡：照送會少一個檔案，送成功後 `clear()` 還把失敗卡片與重試鈕一起丟掉（issue #917）。
     if (files.failed) {
       notify('error', t.tr(ATTACHMENT_FAILED_NOTICE))
       return
@@ -882,8 +813,6 @@ function Composer({
     setSending(true)
     const sent = files.ids
     const edits = trackDraftEdits(draftKey)
-    // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
-    // 「編輯後送出」：框裡那段已放進輸入框改過，先清掉終端那段（token 綁原本的完整草稿）再送改過的字。
     const editing = useStore.getState().composerDrafts[botId]
     const editRequest = editing?.editing && editing.token && editing.actions.includes('clear') ? ({ action: 'clear', token: editing.token } as const) : undefined
     void sendPrompt(botId, body, sent, false, editRequest ? false : Boolean(state.autoStart), editRequest, editRequest ? false : true, botKind === 'claude-api' ? (cacheTtl ?? '5m') : undefined).then((ok) => {
@@ -898,8 +827,6 @@ function Composer({
 
   const pending = text
 
-  // 插隊送出（issue #103）：照舊建一個新回合，但由 CLI 自己的 send-now 鍵打斷當下那一輪。
-  // 「中止並取代」拿掉了（使用者 2026-09-27：要換題會先按 ESC 中斷）。
   const sendNow = async () => {
     const body = pending.trim()
     const ids = files.ids
@@ -923,16 +850,13 @@ function Composer({
     }
   }
 
-  // 直接打進 pane、不建新回合：回覆併在目前這一輪。
   const sendAlongside = async () => {
     const body = pending.trim()
     if (!body) return
     setSending(true)
-    // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
     const edits = trackDraftEdits(draftKey)
     const ok = await typeAlongside({ sendText }, botId, body).finally(edits.stop)
     setSending(false)
-    // 併送帶不了附件：附件列留著。
     if (ok && edits.untouched()) setText('')
   }
 
@@ -943,7 +867,6 @@ function Composer({
     if (withdrawn) files.restoreAttachments(queuedAttachments)
   }
 
-  // in-flight 時輸入框不鎖，但仍要顯示這條，否則回合中沒有中斷入口（`.running`）。
   const showLock = !hideLock && Boolean(state.reason) && (state.disabled || Boolean(state.inFlightTurnId))
 
   const nothingToSend = !text.trim() && files.ids.length === 0
@@ -1017,14 +940,13 @@ function Composer({
       {showLock ? (
         <div className={`composer-lock${state.disabled ? '' : ' running'}`} role="status">
           <span title={state.reason}>{phone && !state.disabled && state.inFlightTurnId ? t('執行中 · 送出排隊') : state.reason}</span>
-          {/* bot 正在跑時 unknown 只是「還沒確認」（issue #1479）：不把「放棄該回合」擺成第一個選項，daemon 背景確認後自己解鎖。 */}
+          {}
           {state.unknownTurnId && !state.unknownWorking ? (
             <button type="button" className="mini-btn" onClick={() => void abandonTurn(botId, state.unknownTurnId!)}>
               {t('放棄該回合')}
             </button>
           ) : null}
           {state.inFlightTurnId ? (
-            // claude-api 沒有終端可按 Esc：這一鍵直接取消正在進行的 API 請求（daemon 立刻停止串流、不再計費增加），Bot 仍保持啟動。
             <button
               type="button"
               className="mini-btn"
@@ -1036,9 +958,7 @@ function Composer({
           ) : null}
           {state.inFlightTurnId && pending.trim() && (isClaude || sendNowSupported) && sendNowButton(botKind, pending) ? (
             <>
-              {/* 插隊＝claude 的 send-now 鍵（2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句；
-                  codex 是「插入」（#748）：不打斷、不開新回合，由 instant_interrupt 併進同一輪。文案在 sendNowCopy。
-                  只有 daemon 的同一個閘門確認支援時才顯示（#1672）；送出時仍由 daemon 再確認。 */}
+              {}
               {sendNowSupported ? <button
                 type="button"
                 className="mini-btn"
@@ -1048,7 +968,7 @@ function Composer({
               >
                 {sendNowButton(botKind, pending)!.label}
               </button> : null}
-              {/* 補充＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。只給 claude。 */}
+              {}
               {isClaude ? (
                 <button
                   type="button"
@@ -1063,7 +983,7 @@ function Composer({
             </>
           ) : null}
           <SendQueuedNowButton botId={botId} inFlightTurnId={state.inFlightTurnId} inputEmpty={!pending.trim()} />
-          {/* esc 送不進去時回合會卡死；這顆先解鎖，送鍵只是順帶。 */}
+          {}
           {state.inFlightTurnId || state.unknownTurnId ? (
             <button
               type="button"
@@ -1082,16 +1002,14 @@ function Composer({
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
       <DraftTooLargeNote draftKey={draftKey} />
       <div className="composer-box">
-        {/* openai-api：daemon 回 400 attachments_unsupported_for_kind，所以不給附件入口。 */}
+        {}
         {botKind === 'openai-api' ? null : <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />}
         <textarea
           ref={ref}
           data-draft-key={draftKey}
           rows={phone ? 1 : 2}
           value={text}
-          /* 斷線也讓人繼續打（草稿先留在這個分頁，連回來再同步）。 */
           disabled={sending}
-          /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
           placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting) })}
           title={t('Enter 送出，Shift+Enter 換行；檔案可拖放或貼上')}
           onChange={(e) => {
@@ -1117,8 +1035,6 @@ function Composer({
           {...enterToSend.props}
         />
         {botKind === 'claude-api' ? (
-          // claude-api：每回合送出時選快取保留（5 分鐘＝預設、寫入便宜；1 小時＝寫入貴 60%，適合下一次提問隔 5–60 分鐘）。
-          // 桌面上下排（維持寬度、高度合計不超過輸入框太多）；手機左右並排（換行縮小寬度、不擠壓輸入框）。
           <div className="send-btns" role="group" aria-label={t('送出')}>
             {(['5m', '1h'] as const).map((ttl) => {
               const idle = !sending && !files.uploading && !files.failed
@@ -1155,7 +1071,6 @@ function Composer({
             className="send-btn"
             disabled={state.disabled || sending || files.uploading || files.failed || nothingToSend}
             title={sendButtonTitle(state, files.uploading, files.failed)}
-            /* 手機失焦收鍵盤→版面位移→click 不成立；擋 mousedown 保住焦點（2026-09-10）。 */
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => submit()}
           >
@@ -1167,13 +1082,11 @@ function Composer({
   )
 }
 
-/** claude sends these as raw floats (28.000000000000004); one decimal at most. */
 function pct(n: number): string {
   const r = Math.round(n * 10) / 10
   return `${Number.isInteger(r) ? r : r.toFixed(1)}%`
 }
 
-/** `91k/500k`（`compactTokens`）→ 已用那一側 `91k`。手機 Git 鈕只放得下這個。 */
 function contextUsedShort(detail: string | null): string | null {
   if (!detail) return null
   const slash = detail.indexOf('/')
@@ -1190,7 +1103,6 @@ function SlItem({ k, children, title, className }: { k: string; children: ReactN
   )
 }
 
-/** Status bar for kinds without a statusLine hook (codex/grok draw theirs in the TUI): built from the store. */
 function derivedStatus(
   kind: BotKind,
   model: string | null,
@@ -1231,15 +1143,12 @@ function derivedStatus(
   }
 }
 
-/** `H · fast` — the model's settings, shown beside the model badge. */
 function modelExtraOf(effort: string | null, fast: boolean): string {
-  // 用 `·` 不用連字號（像 model id）；`thinking` 是常態不放（2026-09-11 使用者：「fable-Low 多一個 thinking 怪怪的」）。
   return [effort ? headerEffortLabel(effort) : null, fast ? 'fast' : null]
     .filter(Boolean)
     .join(' · ')
 }
 
-/** Repo chip + status row. `hasStatus` is explicit: `<StatusLineBar>` is truthy even when it renders null. */
 function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOpen, onClose, mobileStatus }: {
   issues: ReactNode
   status: ReactNode
@@ -1272,33 +1181,23 @@ function ContextBar({ issues, status, hasStatus, mobileContent, mobileOpen, onOp
   )
 }
 
-/**
- * 這顆 bot 現在的 context 讀數（百分比、`91k/500k`、tooltip）。`StatusLineBar` 與手機標題列的 git 鍵共用（2026-11-05 使用者：
- * 手機對話也要直接看得到 context，不是長按主力晶片才看得到）。
- */
 function useContextReading(botId: string, status: StatusInfo | null, text: string | null) {
   const t = useT()
   const kind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
-  // gpt-6.1-sol 的 context：有效模型（正在跑的優先，空白不算）＋實際 token，分母固定 500k，不沿用 CLI 的 475k 百分比。
   const effectiveModel = useStore((s) => {
     const r = s.runs[botId]
     return effectiveModelOf(r?.runtime_model, s.bots.find((b) => b.id === botId)?.model)
   })
   const runPromptCache = useStore((s) => s.runs[botId]?.prompt_cache ?? null)
-  // 設了自動壓縮門檻（角色／覆寫）：分母改用門檻，模型視窗放 tooltip（2026-11-01 使用者：「怎麼還是 /1M」）。
   const threshold = useStore((s) => {
     const b = s.bots.find((x) => x.id === botId)
     return compactThreshold(b, b ? s.projects.find((p) => p.id === b.project_id) : undefined)
   })
   const line = text?.trim() ?? ''
-  // 終端解析的 footer 優先（帶 warning）；沒掛終端時（對話分頁）用 daemon 寫進 run.status_line 的同一行（#1755）。
   const footer = useStore((s) => terminalFooterFor(s, botId)) ?? (kind === 'codex' && line ? splitCodexTerminalFooter(line).footer : null)
-  // codex 的 footer 拆成欄位，欄位交給下面跟 claude 同一套 SlItem 畫（模型與 effort 在頂端的主力晶片，額度在頂端額度列，這裡不重複）。
   const fields = useMemo(() => (footer?.modelLine ? parseCodexModelLine(footer.modelLine) : null), [footer?.modelLine])
   const solOn = solWindowApplies(kind, effectiveModel)
-  // token 先取 daemon 的 prompt_cache（rollout 實際值），沒有才用 statusLine 的實際值；都沒有就不畫（不退回 CLI 的 `Context N% used`）。
   const solCtx = solOn ? sol500kContext(kind, effectiveModel, runPromptCache?.context_used_tokens ?? status?.context_used_tokens) : null
-  // 讀數失效（剛 resume／壓縮）：連終端 footer 的百分比也不採用，免得把 0% 從另一條路又帶回來。
   const usedTokens = runPromptCache?.context_used_tokens ?? status?.context_used_tokens ?? null
   const windowSize = solOn ? GPT_61_SOL_CONTEXT_WINDOW : (status?.context_size ?? runPromptCache?.context_size ?? null)
   const limit = threshold !== null && usedTokens !== null && !status?.context_unknown && (windowSize === null || threshold < windowSize) ? threshold : null
@@ -1315,7 +1214,6 @@ function useContextReading(botId: string, status: StatusInfo | null, text: strin
       ? solCtx ? `${compactTokens(solCtx.tokens)}/${compactTokens(GPT_61_SOL_CONTEXT_WINDOW)}` : null
       : status && status.context_used_tokens !== null && status.context_size !== null
         ? `${compactTokens(status.context_used_tokens)}/${compactTokens(status.context_size)}`
-        // statusLine 沒帶 token（或還沒到）：退回 daemon 的 prompt_cache 讀數（手機 Git 鈕的 `91k` 靠它，2026-11-05 使用者：上版沒看到）。
         : !status?.context_unknown && usedTokens !== null && windowSize !== null && windowSize > 0
           ? `${compactTokens(usedTokens)}/${compactTokens(windowSize)}`
           : null
@@ -1333,7 +1231,7 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
     if (!line && kind !== 'codex') return null
     return (
       <div className="statusline-bar" title={line || undefined}>
-        {/* CLI 自己截掉的尾巴（`· …`）不畫：那三個點不說任何事。完整原文留在 title。 */}
+        {}
         {line ? <span className="statusline-text mono">{trimClippedTail(line)}</span> : null}
         {kind === 'codex' ? <StatusCache botId={botId} status={null} contextAction /> : null}
       </div>
@@ -1349,7 +1247,6 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
           {t('⚠ 未登入，用的是預設帳號')}
         </SlItem>
       ) : status?.account_email ? (
-        // `sl-account`：手機上 CSS 收掉（最長也最不急）。
         <SlItem k={t('帳號')} className="sl-account">
           {status.account_email}
         </SlItem>
@@ -1362,15 +1259,14 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
         <SlItem k="context" title={ctxTitle}>
           {pct(ctxPct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
-          {/* 手機在 context popup（MobileContextPanel）裡，這裡不重複。 */}
+          {}
           {phone ? null : <KeepWarmSkipButton botId={botId} />}
         </SlItem>
       ) : status?.context_unknown ? (
-        // 剛 resume／壓縮：讀數還沒有，顯示「—」而不是 0%（daemon 把失效的讀數遮成 null）。
         <SlItem k="context" title={t('剛 resume／壓縮，等下一回合更新')}>—</SlItem>
       ) : null}
       {status || (ctxPct === null && kind === 'codex') ? <StatusCache botId={botId} status={status} contextAction={ctxPct === null && kind === 'codex'} /> : null}
-      {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
+      {}
       {status?.version ? (
         <SlItem k={t('版本')} className="sl-version">
           {status.version}
@@ -1381,7 +1277,6 @@ export function StatusLineBar({ botId, status, text }: { botId: string; status: 
   )
 }
 
-/** blocked 到自動彈出全畫面終端的緩衝（見 armed）。 */
 const AUTO_OPEN_DELAY_MS = 1000
 
 export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
@@ -1391,7 +1286,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const run = useStore((s) => (s.selectedBotId ? (s.runs[s.selectedBotId] ?? null) : null))
   const terminalFooter = useStore((s) => terminalFooterFor(s, botId))
   const runningIdentity = runtimeIdentity(run)
-  // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
   const { lamp, background: bgJobs, label: stateLabel, kids: kidsRunning } = useBotLamp(botId)
@@ -1401,11 +1295,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     return name === 'local' || (s.hosts.find((h) => h.name === name)?.connected ?? false)
   })
   const rawTab0 = useStore((s) => s.rightTab)
-  // claude-api bot 沒有 pane／終端：終端分頁一律退回對話（舊網址、切 bot 時殘留的 terminal 分頁）。
   const apiBot = useStore((s) => isApiKind(s.bots.find((b) => b.id === s.selectedBotId)?.kind))
   const rawTab = apiBot && rawTab0 === 'terminal' ? 'chat' : rawTab0
-  // 預覽只給頂層 bot；切到子 agent 時 store 會回 chat，這裡再擋一次（例如舊網址）。
-  // 桌機預覽在 `.app` 最右欄（PreviewColumn）；只有抽屜版面（≤1024px，含手機）沒有那一欄，才留分頁。
   const drawerLayout = useMediaQuery(DRAWER_QUERY)
   const canPreview = drawerLayout && isTopLevelBot(bot ?? undefined)
   const tab = rawTab === 'preview' && !canPreview ? 'chat' : rawTab
@@ -1435,10 +1326,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const b = s.bots.find((x) => x.id === s.selectedBotId)
       if (!b) return null
       const r = s.runs[b.id] ?? null
-      // agy 的 `run.status` 只有模型與 context token 數（daemon 的精簡版，沒有額度）：5h／7d 仍由下方額度快照推導，再疊上 context。
       if (r?.status && b.kind !== 'agy') return r.status
       if (b.kind === 'claude') return null
-      // 額度按主機分（SPEC §14）：狀態列講的是這隻 bot，就看它那台的列。
       const host = projectHostName(s, b.project_id)
       const liveIdentity = runtimeIdentity(r)
       const identity = liveIdentity === undefined ? b.identity : liveIdentity
@@ -1446,7 +1335,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const q = s.quota[key] ?? s.quota[quotaKey(host, b.kind)] ?? null
       const tool = toolsOfHost(s, host)[b.kind]
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
-      // SPEC §4.4a：用 run 實際啟動值（`run.runtime_*`），不是下次啟動才生效的 bot 設定。
       const live = runtimeSettingsKnown(r)
       const derived = derivedStatus(
         b.kind,
@@ -1463,13 +1351,10 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     }),
   )
   const slugEffort = bot ? agyEffort(bot.kind, bot.model ?? statusInfo?.model_name ?? null) : null
-  // Codex 的終端 footer 是目前 run 的實際顯示；不把不認識的文字或其他 run 的畫面當成強度。
-  // 終端 footer 沒掛（遠端、對話分頁）時退回 daemon 寫進 `run.status_line` 的同一行（#1755）。
   const statusLineModelLine = bot?.kind === 'codex' && run?.state === 'running' && run.status_line
     ? splitCodexTerminalFooter(run.status_line).footer?.modelLine ?? null
     : null
   const codexRunning = bot?.kind === 'codex' && run?.state === 'running'
-  // 正在跑的強度：run 實際啟動值（有才用）→ bot 設定。
   const runEffort = codexRunning ? (runtimeSettingsKnown(run) ? run!.runtime_effort : bot?.effort ?? null) : null
   const headerEffort = codexRunning
     ? codexHeaderEffort({
@@ -1481,34 +1366,23 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         parse: parseCodexModelLine,
       })
     : (statusInfo?.effort ?? slugEffort)
-  // 正在跑的 fast：CLI 回報 → `run.runtime_fast` → 設定（`runningFast`）；codex 的狀態列沒有 fast_mode，不能只看它。
   const fast = bot ? runningFast(bot, run) : false
   const modelExtra = modelExtraOf(headerEffort, fast)
-  // logo 上的閃電跟 model chip 的「· fast」同一個來源：正在跑的那一份，不是設定值（設定改了還沒重啟時兩者不同）。
   const codexFast = bot?.kind === 'codex' && runningFast(bot, run)
   const herdrId = herdrIdentity(run, bot?.agent_name)
-  // Held here (not in the composer) so a drop anywhere in the chat area is accepted.
-  // openai-api：網頁直接擋在入口（拖放、貼上、按鈕都經 files.add），不靠 daemon 回 400。
   const noAttach = bot?.kind === 'openai-api'
   const attachments = useAttachments(botId, botId)
   const files = noAttach ? { ...attachments, add: refuseAttachments } : attachments
   const drop = useDropTarget(files.add, !botId)
-  // 暫存區縮圖落進這個托盤；終端分頁時托盤不在畫面上就不接收，免得圖憑空消失。
   useShelfSink(files.add, botId && bot && (tab === 'chat' || settingsBotId === botId) ? bot.name : null)
 
   const messages = useStore((s) => (botId ? s.messages[botId] : undefined))
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
   const chatEmpty = messagesLoaded && (messages?.length ?? 0) === 0
   const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
-  // #708：專案移交出去了，daemon 不替它開 pane；「啟動」鈕停用，理由在 composerReason。
   const handedOff = useStore((s) => handedOffTo(s.projects, s.bots.find((b) => b.id === botId)?.project_id) != null)
-  // issue #122：有一則交給 daemon、在等 bot 起來——輸入框上方那一條已經講了狀態、給了重新啟動／取消，這裡不再重複一條「啟動」。
   const waitingForStart = useStore((s) => (botId ? startingSend(s.turns[botId], s.messages[botId]) !== null : false))
 
-  /**
-   * 目前看的 bot blocked 時自動彈全畫面終端（要看完整對話框）；關掉後（`dismissed`）要離開 blocked
-   * 再進入才重彈。轉換在 render 中算，不放 effect：彈窗要跟紅燈同一幀。
-   */
   const blockedNow = run?.agent_status === 'blocked'
   const [blockedUi, setBlockedUi] = useState({ bot: botId ?? '', blocked: false, armed: false, open: false, dismissed: false })
   if (blockedUi.bot !== (botId ?? '') || blockedUi.blocked !== blockedNow) {
@@ -1517,16 +1391,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
     const armed = blockedNow && !dismissed
     setBlockedUi({ bot: botId ?? '', blocked: blockedNow, armed, open: armed && blockedUi.open, dismissed })
   }
-  // 延遲再彈：有些 blocked 一秒內會被 daemon 自己按掉（`tui_prompts`），免得閃一下全畫面。
   useEffect(() => {
     if (!blockedUi.armed) return
     const t = setTimeout(() => setBlockedUi((u) => (u.armed ? { ...u, armed: false, open: true } : u)), AUTO_OPEN_DELAY_MS)
     return () => clearTimeout(t)
   }, [blockedUi.armed])
   const blockedFull = blockedUi.open
-  // 手機標題列的 git 鍵直接寫 context（2026-11-05 使用者）：有 token 時上已用、下百分比；完整讀數與壓縮鈕仍在彈窗裡。
   const phoneCtx = useContextReading(botId ?? '', statusInfo, run?.status_line ?? null)
-  // 剛 resume 的 `—` 優先於殘留 token。有已用＋百分比才兩行（32px 再加圖示會擠）；否則維持圖示＋單一數字。
   const phoneUsed = phoneCtx.unknown ? null : contextUsedShort(phoneCtx.detail)
   const phonePctLabel = phoneCtx.pct !== null ? `${Math.round(phoneCtx.pct)}%` : null
   const phoneBoth = phoneUsed !== null && phonePctLabel !== null
@@ -1567,10 +1438,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const active = run !== null && run.state !== 'stopped' && run.state !== 'exited'
   const blocked = blockedNow
   const settingsOpen = settingsBotId === botId
-  /** 主機 shell 當第三個分頁：標題列不變，只有下面的內容換成終端（2026-09-08）。 */
   const shellOpen = shellView !== null && !settingsOpen
   const closeBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: false, dismissed: true }))
-  // 手動點 chip：立刻開，不管關過沒。
   const openBlockedFull = () => setBlockedUi((u) => ({ ...u, armed: false, open: true }))
 
   return (
@@ -1588,11 +1457,11 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         <div className="main-title">
           <div className="main-title-row">
             <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} />
-            {/* kind logo 放第二行 model 左邊（2026-09-11 使用者），不佔名字寬度。 */}
+            {}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
-            {/* 手機的「claude 有更新」放 ★ 左邊（2026-09-19 使用者）；桌面仍在額度列最左。 */}
+            {}
             {phone ? <UpdateQuotaChip /> : null}
-            {/* Ahead of the badges: the row clips its tail, and the gear is the only non-duplicated entry. */}
+            {}
             <PrimaryStar botId={botId} />
             <button
               type="button"
@@ -1615,7 +1484,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </span>
             ) : null}
           </div>
-          {/* `bot.model` null = CLI 預設，退回 statusLine 回報的實際模型。第二行：標題列已被額度條佔滿（2026-09-10 實測）。 */}
+          {}
           {phone ? (
             <div className="mobile-bot-version" title={t('{kind} · {version}', { kind: bot.kind, version: statusInfo?.version ?? t('版本未回報') })}>
               <span className={`mobile-kind-icon ${bot.kind}${codexFast ? ' fast' : ''}`} role="img" aria-label={codexFast ? t('{kind}（fast）', { kind: bot.kind }) : bot.kind}><KindIcon kind={bot.kind} />{codexFast ? <FastBolt /> : null}</span>
@@ -1628,13 +1497,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               {apiBot ? <ApiBalanceInline /> : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
-              {/* 手機不放「背景執行中」chip（2026-09-28 使用者：多餘）：輸入框上方那條說明已經講了。 */}
+              {}
               <TurnErrorBadge botId={botId} />
             </div>
           ) : <div className="main-title-sub">
-            {/* 放第二行：名字列在 1440px＋側欄時放不下 chip，會剪掉 ⚙（實測）；pane id 讓位（blockedBadge.css）。 */}
+            {}
             <BlockedBadge botId={botId} onOpen={openBlockedFull} />
-            {/* 同理：名字列會整顆剪掉，使用者「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
+            {}
             <TurnErrorBadge botId={botId} />
             <KindTag kind={bot.kind} fast={codexFast} />
             {apiBot ? (
@@ -1658,9 +1527,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
-            {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
+            {}
             {run?.pane_id && !apiBot ? <PaneCopy paneId={run.pane_id} detail={t('{pane}（{status}）', { pane: herdrId?.title ?? `pane ${run.pane_id}`, status: stateLabel })} /> : null}
-            {/* claude-api 沒有 pane：改放 bot id，讓人有個可以指稱的識別碼（2026-11-01 使用者）。 */}
+            {}
             {apiBot ? <PaneCopy what="bot" paneId={bot.id} detail={t('Claude API bot（{status}）', { status: stateLabel })} /> : null}
           </div>}
         </div>
@@ -1670,7 +1539,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               type="button"
               ref={mobileContextAnchor}
               className={`icon-btn mobile-git-info${statusInfo?.account_warning ? ' warn' : ''}${phoneHasCtx ? ' has-ctx' : ''}${phoneBoth ? ' has-both' : ''}`}
-              // 帳號警告（未登入、用的是預設帳號）在手機收進這個彈窗裡：鈕上加一個點，不然沒人會點開來看（#930）。
               aria-label={`${statusInfo?.account_warning ? t('Context 與專案（帳號警告）') : t('Context 與專案')}${phoneAriaCtx}`}
               title={phoneCtx.title}
               aria-haspopup="dialog"
@@ -1695,7 +1563,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 </>
               )}
             </button>
-            {/* 2026-09-11：暫時空著（`:empty` 藏起來）。 */}
+            {}
             <div className="mobile-primary-row" />
           </>
         ) : null}
@@ -1705,7 +1573,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           focusIdentity={runningIdentity === undefined ? bot.identity : runningIdentity}
           host={hostName}
         />
-        {/* UI-DECISIONS〈無障礙語意（#11）〉。 */}
+        {}
         <div className="tabs" role="tablist" aria-label={t('主面板')} onKeyDown={onTabListKeyDown}>
           <button
             type="button"
@@ -1768,7 +1636,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       </div>
       <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
-      {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}
+      {}
       <ContextBar
         mobileStatus={apiBot}
         mobileContent={<MobileContextPanel botId={botId} projectId={bot.project_id} status={statusInfo} reading={phoneCtx}
@@ -1805,10 +1673,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         hasStatus={apiBot || bot.kind === 'codex' || Boolean(statusInfo) || Boolean(run?.status_line?.trim()) || Boolean(terminalFooter)}
       />
 
-
       {blocked && blockedFull ? <BlockedModal key={botId} botId={botId} onClose={closeBlockedFull} /> : null}
 
-      {/* `.tab-panel` 是 display: contents，不改排版。 */}
+      {}
       <div
         className="tab-panel"
         role="tabpanel"
@@ -1874,7 +1741,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             </div>
           ) : null}
           <BackgroundJobsBar botId={botId} />
-          {/* 手機的「bot 給的檔案」：輸入框上方的收合列（使用者 2026-11-03）；桌面在右側欄托盤。 */}
+          {}
           <PhoneOutboxTray />
           {noAttach ? <div className="composer-cost" role="status" data-k="openai-no-attach">{t('OpenAI API bot 不支援附件')}</div> : null}
           <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />

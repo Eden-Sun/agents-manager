@@ -5,10 +5,6 @@ import type { MemProcess, TerminalSnapshot } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useT } from '../lib/i18n'
 
-/**
- * RAM 清單裡點 pane 後看它現在的畫面（唯讀）。用寬 modal 而不是列內攤開：
- * 560px 塞 185 欄會每行折斷，認不出是哪個 claude。
- */
 const REFRESH_MS = 2000
 const LINES = 200
 
@@ -22,7 +18,6 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
   const termRef = useRef<HTMLPreElement>(null)
   useDialogFocus(true, rootRef, { initialFocus: () => closeRef.current })
 
-  // 上一趟結束才排下一趟（同一時間最多一條請求在飛：回應不會亂序、請求不會疊起來，#1138）；背景分頁不抓，回到前景立刻補一次。
   useEffect(() => {
     let alive = true
     let busy = false
@@ -63,7 +58,6 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
     }
   }, [host, paneId, p.socket_path, t])
 
-  // 第一次載入後捲到底：終端的「現在」在最下面。
   const scrolled = useRef(false)
   useEffect(() => {
     if (snap && !scrolled.current && termRef.current) {
@@ -72,7 +66,6 @@ export function MemPaneModal({ host, p, onClose }: { host: string; p: MemProcess
     }
   }, [snap])
 
-  // Esc 只關這個 modal，不連清單一起關；捕獲階段吃掉，清單的 Esc 監聽就看不到。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return

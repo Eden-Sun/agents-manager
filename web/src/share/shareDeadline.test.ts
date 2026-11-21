@@ -3,14 +3,10 @@ import assert from 'node:assert/strict'
 import { httpShareClient, ShareTimeoutError } from './shareApi.ts'
 import { ShareHttpError } from './shareModel.ts'
 
-// #1804：分享頁的 GET／檔案下載要有期限（headers 加讀完 body）；第一張卡住不能堵住後面所有圖。
-// 計時器是手動觸發的，不靠牆鐘。
 const TOKEN = 'TOKEN_abcdefghijklmnop'
 const tick = () => new Promise<void>((r) => setTimeout(r, 0))
 const hang = () => new Promise<never>(() => {})
-/** body 永遠不來（headers 已回）：讀 body 會一直等。 */
 const stalled = () => new Response(new ReadableStream<Uint8Array>({}), { status: 200 })
-/** 手動推資料的 body，模擬慢但持續有資料進來的大檔。 */
 function controlledBody() {
   let ctl!: ReadableStreamDefaultController<Uint8Array>
   const body = new ReadableStream<Uint8Array>({ start: (c) => { ctl = c } })
@@ -39,7 +35,6 @@ function fakeTimers() {
   }
 }
 
-/** 等第一個期限計時器登記上去；沒有登記就丟錯，不要空轉到逾時。 */
 async function waitForDeadline(timers: ReturnType<typeof fakeTimers>) {
   for (let i = 0; timers.pending() === 0; i++) {
     if (i > 50) throw new Error('沒有任何請求期限被登記')

@@ -1,6 +1,5 @@
 import { t } from './i18n'
 
-/** 409 的理由（同 `/login` 的 gate）翻成一句人話；其他錯誤照原文。 */
 export function compactRefusal(reason: string): string {
   switch (reason) {
     case 'not_running':

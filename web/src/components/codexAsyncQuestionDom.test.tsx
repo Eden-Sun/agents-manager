@@ -11,11 +11,9 @@ import { parseChoiceMenu } from '../lib/tuiChoices.ts'
 
 const { resetStoreForTest, useStore } = await import('../store/store.ts')
 
-// 元件的 `sleep(STEP)`（等 codex 畫面反應）走手動時鐘：`until` 推進虛擬時間，不睡牆鐘。
 let timers: ReturnType<typeof installManualTimers>
 const until = (cond: () => boolean | Promise<boolean>, what: string, maxVirtualMs?: number) => untilVirtual(timers.clock, cond, what, { maxVirtualMs })
 
-/** 測試中途換掉整棵樹：`unmountAll` 的 settle 要真 timer，卸完再換回手動時鐘。 */
 async function unmountMid() {
   timers.restore()
   await unmountAll()
@@ -27,7 +25,7 @@ beforeEach(() => {
   timers = installManualTimers()
 })
 afterEach(async () => {
-  timers.restore() // unmountAll 的 settle 要真 timer
+  timers.restore()
   await unmountAll()
 })
 after(async () => {
@@ -35,7 +33,6 @@ after(async () => {
   await teardownDom()
 })
 
-// 2026-10-21 真機（codex 0.163.0，隔離 tmux session）：issue #1879。
 const fx = (name: string) => readFileSync(new URL(`../lib/__fixtures__/${name}`, import.meta.url), 'utf8')
 const COLLAPSED = fx('codex-0.163-async-collapsed.txt')
 const EXPANDED = fx('codex-0.163-async-expanded.txt')
@@ -48,13 +45,10 @@ const buttonByText = (label: string) =>
 interface Rig {
   keys: string[][]
   texts: { text: string; enter: boolean }[]
-  /** 每次送出時帶的固定 Run（`pinRunId`）。 */
   pins: (string | null | undefined)[]
-  /** 之後每次重讀畫面回的字。 */
   screen: { text: string; runId?: string }
 }
 
-/** 畫面由測試控制；`onKeys`／`onText` 讓測試在送出後換畫面（模擬 codex 的反應）。 */
 async function setup(
   kind: 'codex' | 'claude',
   screen: string,
@@ -150,10 +144,8 @@ test('編號選單展開後不畫任何東西（交給 BlockedChoices）；不�
   assert.equal((await mount(<CodexAsyncQuestion botId="b1" text={COLLAPSED} />)).innerHTML, '')
 })
 
-
 const NAME_Q = [{ question: 'Your name?', header: '', multiSelect: false, options: [] }]
 const typedScreen = (t: string) => FREE_TEXT.replace('Type your answer', t)
-/** 已切回主輸入框：提問面板沒了，字落在別處。 */
 const MAIN_PROMPT = '• Pick a size?\n  Your name?\n› Bob\n  GPT-6.1-Sol default · ~/x\n'
 const answerWith = (shown: string) => (r: Rig) => {
   r.screen.text = typedScreen(shown)
@@ -196,7 +188,6 @@ test('反例：最後一次確認時畫面又切走了（貼字確認之後、En
       r.screen.text = typedScreen('Bob')
       afterPaste = 1
     },
-    // 貼字後第 1 讀（對帳）正常，第 2 讀（送 Enter 前的最後確認）換成主輸入框。
     onRead: (r) => {
       if (afterPaste && ++afterPaste >= 3) r.screen.text = MAIN_PROMPT
     },
@@ -220,7 +211,6 @@ test('反例：面板上是別的題目：不貼字、不按 Enter', async () =>
   assert.deepEqual(rig.keys, [])
 })
 
-// 複審 P2：舊題「Name?」不能對上新題「Full Name?」（子字串比對會）。
 test('反例：面板上是「Full Name?」、預期的是「Name?」：不貼字、不按 Enter', async () => {
   const panel = FREE_TEXT.replace('Your name?\n  Type', 'Full Name?\n  Type')
   const rig = await setup('codex', panel)
@@ -232,7 +222,6 @@ test('反例：面板上是「Full Name?」、預期的是「Name?」：不貼�
   assert.deepEqual(rig.keys, [])
 })
 
-// 複審 P3：輸入框原本有 Alice、貼 Bob 變成 AliceBob，只比後綴會通過並提交。
 test('反例：輸入框裡原本就有字（Alice）：不在上面疊字', async () => {
   const withAlice = typedScreen('Alice')
   const rig = await setup('codex', withAlice)
@@ -253,7 +242,6 @@ test('反例：貼字前是空的、貼完卻變成 AliceBob（後綴是答案�
   assert.deepEqual(rig.keys, [])
 })
 
-// 複審 P1：讀畫面後 bot 重啟，文字與 Enter 不能送進新的 Run。
 test('反例：貼字後 Run 換了（bot 重啟）：不按 Enter，也不走 fresh-run 重試', async () => {
   const rig = await setup('codex', FREE_TEXT, {
     onText: (r) => {
@@ -272,7 +260,6 @@ test('反例：貼字後 Run 換了（bot 重啟）：不按 Enter，也不走 f
 
 test('反例：展開後 store 裡的 Run 換了（bot 重啟）：展開那一鍵帶的是固定的舊 Run，之後放棄並說明', async () => {
   const rig = await setup('codex', COLLAPSED)
-  // 第一讀固定在 r1；送出 shift+← 之後 store 顯示換成 r2。
   await act(() =>
     useStore.setState({
       readTerminal: async () => ({ text: COLLAPSED }) as TerminalSnapshot,

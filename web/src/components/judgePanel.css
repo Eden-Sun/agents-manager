@@ -1,4 +1,3 @@
-/* 環境設定 → Jev 第二意見（SPEC §4.3c） */
 .judge-panel .judge-key {
   font-style: normal;
   color: var(--warn);
@@ -32,7 +31,6 @@
 .judge-panel .judge-note.err {
   color: var(--danger);
 }
-/* styles.css 的 `.field input` 只認 type=text；key 是 password，樣式照抄同一組，不去動共用檔。 */
 .judge-panel .field input[type='password'] {
   width: 100%;
   padding: 5px 8px;
@@ -45,7 +43,6 @@
   border-color: var(--accent);
   outline: none;
 }
-/* 帳本（issue #1327）：表格橫向可捲，手機寬度不撐破版面。 */
 .judge-ledger {
   margin-top: 12px;
   min-width: 0;
@@ -90,12 +87,9 @@ details.env-fold summary {
   padding-left: 18px;
   font-size: 12px;
 }
-/* 數字欄不折行（桌機也一樣）；手機的卡片化在下面。 */
 .judge-ledger-table td.num {
   white-space: nowrap;
 }
-/* 手機（issue #1466）：480px 寬的表在 360px 要橫捲，一列要來回滑才看得完。≤640px 把每列攤成一張卡片：
-   表頭收掉（視覺上；螢幕閱讀器靠每格的 role 與 data-label 仍讀得到），每格「標籤：值」。 */
 @media (width <= 640px) {
   .judge-ledger-scroll {
     overflow-x: visible;

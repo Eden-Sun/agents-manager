@@ -6,17 +6,13 @@ test('nestableBusy: inner end() does not clear busy while an outer call is still
   const seen: boolean[] = []
   const lock = nestableBusy((b) => seen.push(b))
 
-  // 外層（例如「測試連線」）開始
   lock.begin()
   assert.deepEqual(seen, [true])
 
-  // 裡層（「測試連線」內部借用的「儲存」）整段跑完，自己也 begin/end 一次
   lock.begin()
   lock.end()
-  // 外層還沒做完：busy 不能被裡層的 end() 撥回 false
   assert.deepEqual(seen, [true], 'busy flipped false while the outer call was still pending')
 
-  // 外層真的做完了才會撥回 false
   lock.end()
   assert.deepEqual(seen, [true, false])
 })

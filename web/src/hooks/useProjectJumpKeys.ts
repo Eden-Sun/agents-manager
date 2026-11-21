@@ -5,27 +5,15 @@ import { scrollProjectIntoView } from '../lib/scrollProject'
 import { settingsBlocksLeave } from '../lib/settingsLeaveGuard'
 import { orderedProjects, useStore } from '../store/store'
 
-/** 1–9：`Digit1`…`Digit9`（看實體鍵位，不看輸入法或 Shift 打出什麼字）。 */
 function slotOf(code: string): number | null {
   const m = /^Digit([1-9])$/.exec(code)
   return m ? Number(m[1]) - 1 : null
 }
 
-/**
- * 第 n 個＝**側欄畫出來的**第 n 個（`shown`：側欄 `.project[data-project-id]` 的順序）。搜尋時沒命中的專案整塊不畫，
- * 照全部專案的順序算會選到一個被藏起來的專案，主面板換掉、側欄卻捲不到它（review3 c5 L4）。
- * 側欄根本不在畫面上（`shown === null`）才退回全部專案的順序。
- */
 export function jumpTargetId(slot: number, shown: readonly string[] | null, ordered: readonly { id: string }[]): string | null {
   return (shown ? shown[slot] : ordered[slot]?.id) ?? null
 }
 
-/**
- * Control+1…9 跳到側欄第 n 個專案設定（2026-09-16 使用者）。
- *
- * 用 Control 不用 ⌘：macOS 的 ⌘1…9 是瀏覽器換分頁，攔不下來也不該攔。`code` 認實體鍵位，中文輸入法照樣有效；
- * 對話框開著、正在組字、或已經被別人處理掉（`defaultPrevented`）就不動。
- */
 export function useProjectJumpKeys() {
   const selectProject = useStore((s) => s.selectProject)
   useEffect(() => {
@@ -34,7 +22,6 @@ export function useProjectJumpKeys() {
       const slot = slotOf(e.code)
       if (slot === null) return
       if (dialogOpen()) return
-      // 桌機設定卡有未儲存變更：先問（確認框已由守門函式打開），不換專案（#925）。
       if (settingsBlocksLeave()) {
         e.preventDefault()
         return
@@ -45,9 +32,7 @@ export function useProjectJumpKeys() {
       if (!id) return
       e.preventDefault()
       selectProject(id)
-      // 等這一輪 render 完再把焦點交給專案標題。
       requestAnimationFrame(() => {
-        // 側欄捲到這個專案並讓它貼齊頂端（2026-09-16 使用者：「menu 也要 scroll 到指定點」）。
         scrollProjectIntoView(id)
         document.querySelector<HTMLElement>('.project-label-btn.selected')?.focus({ preventScroll: true })
       })

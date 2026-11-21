@@ -25,7 +25,6 @@ test('設定與 runtime 一致時什麼都不標', () => {
 })
 
 test('codex 改了強度沒重啟：標出實際在跑的那個值', () => {
-  // 實況：AG Man 寫 High，終端裡 codex 印的是 xhigh。
   const d = runtimeDrift(bot({ effort: 'high' }), run({ runtime_effort: 'xhigh' }))
   assert.equal(d.length, 1)
   assert.equal(d[0].field, 'effort')
@@ -35,7 +34,6 @@ test('codex 改了強度沒重啟：標出實際在跑的那個值', () => {
 })
 
 test('模型與 fast 也一起比，清成 CLI 預設同樣算不一致', () => {
-  // 有值→清成 null 時 daemon 會把 `needs_restart` 標起來（launch_rev 變了），這時才是真的落差。
   const d = runtimeDrift(bot({ model: null, fast: false, needs_restart: true }), run())
   assert.deepEqual(
     d.map((x) => x.field),
@@ -45,12 +43,9 @@ test('模型與 fast 也一起比，清成 CLI 預設同樣算不一致', () => 
 })
 
 test('#940：設定是 CLI 預設（null）又沒有待重啟：runtime 記的實際值不算落差', () => {
-  // claude：設定 null，statusLine 讀回 CLI 實際挑的 fable。
   assert.deepEqual(runtimeDrift(bot({ kind: 'claude', model: null, effort: null, fast: false, needs_restart: false }), run({ runtime_model: 'claude-fable-5-1', runtime_effort: null, runtime_fast: false })), [])
-  // codex：強度設定 null、狀態列印 high；fast 的落差照列。
   const d = runtimeDrift(bot({ effort: null, fast: false, needs_restart: false }), run({ runtime_effort: 'high', runtime_fast: true }))
   assert.deepEqual(d.map((x) => x.field), ['fast'])
-  // 設定有值又真的不同：照列（跟 needs_restart 無關）。
   assert.deepEqual(
     runtimeDrift(bot({ model: 'gpt-6-luna', needs_restart: false }), run({ runtime_model: 'gpt-6.1-sol' })).map((x) => x.field),
     ['model'],
@@ -109,22 +104,18 @@ test('#712：codex 0.157 狀態列印顯示名 GPT-6-Luna，跟設定 gpt-6-luna
   const d = runtimeDrift(bot({ model: 'gpt-6-luna', fast: false }), run({ runtime_model: 'GPT-6-Luna', runtime_fast: true }))
   assert.deepEqual(d.map((x) => x.field), ['fast'], '截圖裡多列的「換成模型 gpt-6-luna」不該出現')
   assert.equal(isFastOnlyDrift('codex', d), true)
-  // 真的不同的模型照樣標。
   assert.deepEqual(runtimeDrift(bot({ model: 'gpt-6-luna' }), run({ runtime_model: 'GPT-6-Sol' })).map((x) => x.field), ['model'])
 })
 
 test('claude 等價別名與 context 變體不觸發模型 drift；真正不符才標', () => {
-  // sonnet 設定與 claude-sonnet-5-5 runtime 等價（常見於 statusLine 回報）
   assert.deepEqual(
     runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'claude-sonnet-5-5' })),
     [],
   )
-  // 設定為完整 id、runtime 為別名
   assert.deepEqual(
     runtimeDrift(bot({ kind: 'claude', model: 'claude-sonnet-5-5' }), run({ runtime_model: 'sonnet' })),
     [],
   )
-  // 500k context（>200k 啟動後綴 [1m]）不誤判為模型落差
   assert.deepEqual(
     runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'sonnet[1m]' })),
     [],
@@ -137,7 +128,6 @@ test('claude 等價別名與 context 變體不觸發模型 drift；真正不符�
     runtimeDrift(bot({ kind: 'claude', model: 'claude-sonnet-5-5' }), run({ runtime_model: 'sonnet[1m]' })),
     [],
   )
-  // 真的不同家族或不同指定版號照樣標 drift
   const diffFamily = runtimeDrift(bot({ kind: 'claude', model: 'sonnet' }), run({ runtime_model: 'claude-opus-5-5' }))
   assert.deepEqual(diffFamily.map((x) => x.field), ['model'])
   assert.equal(diffFamily[0].running, 'claude-opus-5-5')
@@ -148,11 +138,8 @@ test('claude 等價別名與 context 變體不觸發模型 drift；真正不符�
 })
 
 test('#541：查額度用 run 實際起來的身份，沒有 active run 才退回設定值', () => {
-  // 改成 cc2、還沒重啟：燒的仍是 cc1 的額度。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: 'cc1' })), 'cc1')
-  // daemon 記的空字串＝本機預設帳號（不是「不知道」）：要查裸 kind，不能用設定值 cc2。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: '' })), null)
-  // 收編的 pane／舊 daemon 沒記，以及停掉的 run：退回設定值，不要因此少畫警語。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: null as unknown as string })), 'cc2')
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ state: 'stopped' })), 'cc2')
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), null), 'cc2')
@@ -161,13 +148,11 @@ test('#541：查額度用 run 實際起來的身份，沒有 active run 才退�
 })
 
 test('SPEC §4.4a：runtime_effort 為 null＝未知，強度那一欄不比；其他真落差照列', () => {
-  // 收編／沒讀到強度：設定 high 不能拿來猜 runtime 的強度；但模型確實不同，照列。
   const d = runtimeDrift(bot({ model: 'gpt-6-luna', effort: 'high' }), run({ runtime_model: 'gpt-6-sol', runtime_effort: null }))
   assert.deepEqual(d.map((x) => x.field), ['model'])
 })
 
 test('SPEC §4.4a：明確 default 是 CLI 預設，跟設定 high 不同就標，並標成「（CLI 預設）」', () => {
-  // 未知→明確 default：child 設定保留 high（後端不跟隨），這裡必須警示實際是 CLI 預設。
   const d = runtimeDrift(bot({ effort: 'high', needs_restart: false }), run({ runtime_effort: 'default' }))
   assert.deepEqual(d.map((x) => [x.field, x.running, x.configured]), [['effort', '（CLI 預設）', 'High']])
   assert.equal(driftLine(d[0]), '強度 實際 （CLI 預設）、設定 High')
@@ -178,7 +163,6 @@ test('SPEC §4.4a：明確 default 跟設定 null（CLI 預設）一致，不標
 })
 
 test('SPEC §4.4a：default 與 high 都是落差時照列，不因 null 設定被靜音', () => {
-  // 設定清成 null 又待重啟：runtime 的 default 與 null 同義，不算；具體的 high 仍是真落差。
   assert.deepEqual(runtimeDrift(bot({ effort: null, needs_restart: true }), run({ runtime_effort: 'default' })), [])
   assert.deepEqual(
     runtimeDrift(bot({ effort: null, needs_restart: true }), run({ runtime_effort: 'high' })).map((x) => x.field),
@@ -193,7 +177,6 @@ test('SPEC §4.4a：CLI 預設的標籤不寫成首字大寫的 Default', () => 
 })
 
 test('grok 在 TUI 打 /effort low：child 設定已跟上就不標，一般 bot 標出實際值', () => {
-  // daemon 讀框底 `Grok 4.7 (low)` 寫 runtime；child 的設定一起改（SPEC §4.4a），一般 bot 設定不動。
   const grok: Partial<Bot> = { kind: 'grok', model: 'grok-4.7', fast: false }
   const live = run({ runtime_model: 'grok-4.7', runtime_effort: 'low', runtime_fast: null })
   assert.deepEqual(runtimeDrift(bot({ ...grok, effort: 'low', managed_by: 'child' }), live), [])

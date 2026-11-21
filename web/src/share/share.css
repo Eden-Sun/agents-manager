@@ -1,4 +1,3 @@
-/* 分享頁（share.html）：手機優先、跟系統深淺色走。跟主 UI 的 styles.css 完全分開，自己的 token。 */
 
 :root {
   --sh-bg: #f6f7f9;
@@ -322,7 +321,6 @@ input {
   }
 }
 
-/* 檔案清單：手機是從底部拉起的抽屜，桌機是右側欄。 */
 .sh-side {
   display: none;
 }
@@ -426,7 +424,6 @@ input {
   border: 1px solid var(--sh-border);
   border-radius: 20px;
   background: var(--sh-bg);
-  /* 16px：iOS 小於這個會在聚焦時自動放大整頁。 */
   font-size: 16px;
   line-height: 1.35;
 }
@@ -484,7 +481,6 @@ input {
   font-size: 13px;
 }
 
-/* 檔名可能是一長串沒有空白的英數：讓它在膠囊裡折行，不要把 ✕ 擠出畫面。 */
 .sh-pending li > span:first-child {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -586,7 +582,6 @@ input {
   text-align: right;
 }
 
-/* 圖片：縮圖、「分享／存到手機」大按鈕、放大檢視（SPEC §20.4 圖片）。向量圖一律經 <img> 顯示。 */
 .sh-thumb {
   display: grid;
   place-items: center;

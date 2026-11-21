@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { HttpTransport, isAbortError, xhrUpload } from './transport'
 import { ApiError } from './types'
 
-/** 夠 `xhrUpload` 用的假 XHR：記下 header、送出、中止，測試手動觸發進度與回應。 */
 class FakeXhr {
   static last: FakeXhr | null = null
   headers: Record<string, string> = {}

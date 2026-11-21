@@ -24,27 +24,15 @@ import { useLoginShellAutoClose } from './useLoginShellAutoClose'
 import { readFitScreen, writeFitScreen } from './shellFitScreen'
 import './hostShellPanel.css'
 
-/**
- * 對某台主機開著的 shell：終端快照 + 一行指令輸入；不是 bot（沒有 run／回合／訊息）。
- * 輪詢不重用 `useTerminalSnapshot`：它吃 `botId`，改簽名會動到 ChatPanel／BlockedModal；節奏與清畫面照它。
- */
-
-/**
- * 鍵盤直通（每個 pane 各記一份，localStorage）：開著時終端本身收鍵盤，每一下原樣送進那個 pane，
- * 就像坐在那台終端前面。**預設開著**（2026-09-17 使用者），只記「被關掉的」；關著時是「打一行、Enter 送出」。
- */
 const SYNC_OFF_KEY = 'am.shellKeySyncOff'
 const SYNC_ON_KEY = 'am.shellKeySyncOn'
-/** 同步時輪詢要快一點，不然自己打的字要等一秒才看得到。 */
 const SYNC_POLL_MS = 250
 const IDLE_POLL_MS = 1_000
 
-/** 明確關掉鍵盤直通的 pane（桌機預設開，所以只記被關掉的）。 */
 function readSyncOffSet(): Set<string> {
   return readTargetSet(SYNC_OFF_KEY)
 }
 
-/** 明確打開鍵盤直通的 pane（手機預設關，所以要記被打開的；#931）。 */
 function readSyncOnSet(): Set<string> {
   return readTargetSet(SYNC_ON_KEY)
 }
@@ -59,7 +47,6 @@ function readTargetSet(key: string): Set<string> {
   }
 }
 
-/** 兩份一起維護：開＝加進 on、移出 off；關＝加進 off、移出 on。哪個裝置的預設都不會蓋掉明確的選擇。 */
 function writeSync(target: string, on: boolean) {
   try {
     const off = readSyncOffSet()
@@ -74,11 +61,9 @@ function writeSync(target: string, on: boolean) {
     localStorage.setItem(SYNC_OFF_KEY, JSON.stringify([...off]))
     localStorage.setItem(SYNC_ON_KEY, JSON.stringify([...onSet]))
   } catch {
-    /* storage unavailable: 這一頁還記得 */
   }
 }
 
-/** 每台主機各記一份指令歷史（localStorage）。 */
 const HISTORY_KEY = 'am.shellHistory'
 const HISTORY_MAX = 20
 
@@ -103,11 +88,9 @@ function writeHistory(map: HistoryMap) {
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(map))
   } catch {
-    /* storage unavailable: 這一頁還記得，重整就沒了 */
   }
 }
 
-/** 標題列只放 cwd 最後兩段（完整路徑在 tooltip）；倒數第二段手機用 CSS 藏掉。 */
 function cwdTail(cwd: string): { parent: string; leaf: string } {
   const seg = cwd.split('/').filter(Boolean)
   if (seg.length === 0) return { parent: '', leaf: cwd || '/' }
@@ -125,12 +108,10 @@ export function HostShellPanel({
   paneId: string
   cwd: string
   onOpenSidebar?: () => void
-  /** 掛在 ChatPanel 標題列底下當分頁：不畫自己的 `main-head`，主機與關閉鍵改放抓法列。 */
   embedded?: boolean
 }) {
   const t = useT()
   const endHostShell = useStore((s) => s.endHostShell)
-  // 從選單點進來的 pane（§6.5e）：有 port 的唯讀；關閉鍵照樣給（叫「關閉 pane」），服務 pane 由 daemon 先 409 再問一次。
   const readOnly = useStore((s) => Boolean(s.shellView?.host === host && s.shellView.paneId === paneId && s.shellView.readOnly))
   const readOnlyReason = useStore((s) =>
     s.shellView?.host === host && s.shellView.paneId === paneId ? (s.shellView.readOnlyReason ?? null) : null,
@@ -142,40 +123,28 @@ export function HostShellPanel({
   const ending = useStore((s) => Boolean(s.busy[`shell:${host}:${paneId}`]))
 
   const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
-  // 讀取錯誤與送出錯誤分開：輪詢成功只清前者，送字／送鍵失敗的說明不會被下一拍輪詢清掉（#1127）。
   const [err, setErr] = useState<string | null>(null)
   const [sendErr, setSendErr] = useState<string | null>(null)
-  /** 改它就取消排著的那次、立刻重讀（送完指令要馬上看到反應）。 */
   const [nonce, setNonce] = useState(0)
-  /** `visible` = 終端現在長什麼樣（shell 的常態）；`recent_unwrapped` = 連捲上去的一起看。 */
   const [source, setSource] = useState<TerminalSource>('visible')
   const [lines, setLines] = useState(200)
   const wrap = useTermWrap()
   useLoginShellAutoClose(host, paneId)
   const target = `${host}/${paneId}`
-  // 未送出的指令跟對話輸入框同一套：存在 daemon、各瀏覽器共用（#758），切去看一眼對話也不會丟。
   const draftKey = shellDraftKey(host, paneId)
   const text = useStore((s) => s.drafts[draftKey] ?? '')
   const setDraft = useStore((s) => s.setDraft)
   const setText = useCallback((v: string) => setDraft(draftKey, v), [setDraft, draftKey])
   const [sending, setSending] = useState(false)
-  // 手機沒有實體鍵盤：直通預設關（出現輸入框），明確打開過的 pane 才記成開（#931）。
   const phone = useMediaQuery(PHONE_QUERY)
   const initialSync = () => initialKeySync(target, { phone, off: readSyncOffSet(), on: readSyncOnSet() })
   const [sync, setSyncState] = useState(initialSync)
-  // 唯讀時記著「開」也不算：不然按鍵照樣一下一下送出去、一下一下吃 403，按鈕還 disabled 關不掉。
   const syncOn = keySyncActive(sync, readOnly)
-  /** 有沒有真的握著鍵盤：同步開著但焦點在別處時，打字不會進到 pane，要講清楚。 */
   const [typing, setTyping] = useState(false)
-  /** 桌面鍵盤直通＝xterm.js 取代快照 `<pre>`（手機、唯讀、看捲動歷史仍走舊的畫面）。 */
   const xtermMode = syncOn && !phone && !readOnly && source === 'visible'
-  /** xterm 收到的畫面幾何（pane 的 cols×rows），給標題列的尺寸標籤用。 */
   const [xtermGeo, setXtermGeo] = useState<{ cols: number; rows: number } | null>(null)
-  /** xterm 目前是推送還是輪詢退回（狀態列用）。 */
   const [xtermStreaming, setXtermStreaming] = useState(false)
-  /** xterm 是否在 observe（串流）模式；這時面板大小由 fit 決定，「縮放至全螢幕」不作用，隱藏。 */
   const [xtermObserve, setXtermObserve] = useState(false)
-  /** 縮放至全螢幕（per-browser，預設關）。 */
   const [fitScreen, setFitScreenState] = useState(readFitScreen)
   const setFitScreen = (on: boolean) => {
     setFitScreenState(on)
@@ -183,16 +152,12 @@ export function HostShellPanel({
   }
   const termRef = useRef<HTMLPreElement>(null)
   const [confirmEnd, setConfirmEnd] = useState(false)
-  /** daemon 說要再確認（服務 pane 在 listen，或讀不到它在跑什麼）時帶回來的那一列。 */
   const [endNeedsConfirm, setEndNeedsConfirm] = useState<api.CloseNeedsConfirm | null>(null)
   const [history, setHistory] = useState<HistoryMap>(readHistory)
-  /** 在歷史裡的位置；`-1` = 正在編輯的那一行（還沒往上翻）。 */
   const [histAt, setHistAt] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
-  /** 開始往上翻歷史前正在打的那一行：↓ 回到底時還給它（#1128）。 */
   const pendingLine = useRef('')
 
-  // 換 shell 在 render 當下清畫面，不走 effect：留著另一台機器的畫面會被誤認成這一台。
   const [lastTarget, setLastTarget] = useState(target)
   if (lastTarget !== target) {
     setLastTarget(target)
@@ -208,17 +173,14 @@ export function HostShellPanel({
   }
 
   useEffect(() => {
-    // xterm 模式下畫面由 HostShellXterm 自己推／拉，這裡不再輪詢（免得兩邊各打一份）。
     if (xtermMode) return
     let alive = true
-    // 上一趟還沒回來：回前景時不另外再打一趟（#1129，同 useTerminalSnapshot）。
     let busy = false
     let timer: ReturnType<typeof setTimeout> | null = null
     const next = () => {
       if (alive) timer = setTimeout(() => void tick(), syncOn ? SYNC_POLL_MS : IDLE_POLL_MS)
     }
     const tick = async () => {
-      // 分頁在背景（切走、手機鎖屏）不打 API、不動 snap／err；回前景由 onVisible 立刻補讀一次。
       if (document.visibilityState === 'hidden') {
         next()
         return
@@ -232,9 +194,7 @@ export function HostShellPanel({
         }
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
-          // 點到已經不在的 pane（例如專案頁剛關掉）：講一聲，不是閃一下就沒了（review M3）。
           busy = false
-          // 登入協助正在看的登入 pane：CLI 結束就收掉是預期的，結果由協助條顯示，面板不拆（`lib/loginPaneHold`）。
           if (alive && !isHeldLoginPane(host, paneId)) paneGone(host, paneId)
           return
         }
@@ -262,7 +222,6 @@ export function HostShellPanel({
 
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 
-  /** xterm 的讀取結果：同舊輪詢的 catch 分支（404 pane 不見、403 唯讀、其他顯示在面板上）。 */
   const xtermRead = useCallback(
     (e: unknown | null) => {
       if (e === null) {
@@ -285,15 +244,10 @@ export function HostShellPanel({
     else inputRef.current?.focus()
   }, [host, paneId, syncOn])
 
-  /**
-   * 送字／送鍵失敗。daemon 回 403（有 port 的 pane、正在跑 agent）時不是「再試一次」的錯：
-   * 把面板鎖成唯讀、關掉同步，顯示 daemon 的說明，別讓人對著原始的 403 一直打。
-   */
   const failed = useCallback(
     (e: unknown) => {
       const denied = shellForbidden(e)
       if (!denied) {
-        // 讀不到狀態：這次沒送，但不是唯讀——顯示說明、不鎖面板。
         setSendErr(shellStateUnknown(e) ?? (e instanceof Error ? e.message : String(e)))
         return
       }
@@ -326,7 +280,6 @@ export function HostShellPanel({
       try {
         await api.sendHostShellText(host, paneId, cmd, true)
         remember(cmd)
-        // 送出期間又打了下一行：留著，不要清掉（輸入框送出中沒有停用）。
         if ((useStore.getState().drafts[draftKey] ?? '') === cmd) {
           setText('')
           setHistAt(-1)
@@ -356,7 +309,6 @@ export function HostShellPanel({
     ),
   )
 
-  /** xterm 送字／送鍵的結果：回應的畫面已經由 xterm 自己畫上，這裡只管錯誤。 */
   const xtermSend = useCallback(
     (e: unknown | null) => {
       if (e) failed(e)
@@ -375,11 +327,6 @@ export function HostShellPanel({
     [target],
   )
 
-  /**
-   * 同步模式的核心：每一下 keydown 直接變成 herdr 鍵名送進 pane。
-   * `herdrKeyFromEvent` 回 `null` 的（⌘ 系列、herdr 不收的 Delete／Home／End／PgUp）留給瀏覽器，
-   * 所以 ⌘C／⌘R／⌘V 照常，使用者不會被關在這個框裡出不去。
-   */
   const onTermKeyDown = (e: ReactKeyboardEvent<HTMLPreElement>) => {
     if (!syncOn) return
     const key = herdrKeyFromEvent(e.nativeEvent)
@@ -422,11 +369,9 @@ export function HostShellPanel({
 
   const body = useMemo(() => {
     if (!snap) return err ? t('讀取終端失敗：{error}', { error: err }) : t('讀取中…')
-    // herdr 的 `recent_unwrapped` 只給已捲出畫面的部分，剛開的 shell 回空字串（實測 2026-09-07）；明講以免看起來像壞掉。
     if (!snap.text.trim() && source === 'recent_unwrapped') {
       return t('（還沒有捲出畫面的內容——這個 shell 的輸出目前都還在「畫面」裡。）')
     }
-    // 鍵盤直通時在 shell 等輸入的地方畫一個閃爍游標（位置是從畫面推的，見 `splitAtCursor`）。
     if (syncOn && !readOnly && source === 'visible') {
       const { before, gap, after } = splitAtCursor(snap.text)
       return (
@@ -443,8 +388,7 @@ export function HostShellPanel({
 
   const headActions = (
     <div className="head-actions">
-      {/* 被 trace 的 pane 也給（2026-09-17 使用者：直接在這裡關 pane）：`endHostShell` 不在面板清單裡就走
-          `POST /api/panes/{id}/close`，服務 pane 會先 409、第二道確認框列出 port；pane 已經不在就當作關好了。 */}
+      {}
       <button
         type="button"
         className="mini-btn danger"
@@ -532,7 +476,7 @@ export function HostShellPanel({
           >
             {syncOn ? t('鍵盤直通') : t('鍵盤直通（關）')}
           </button>
-          {/* observe：herdr 已照面板寬折好行，「換行」沒有作用，跟「縮放至全螢幕」一樣隱藏。 */}
+          {}
           {xtermMode && xtermObserve ? null : (
           <label className="conn" title={t('折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。')}>
             <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
@@ -567,7 +511,7 @@ export function HostShellPanel({
 
         {err && snap ? (
           <div className="shell-err" role="status">
-            {/* 有快照卻讀失敗：畫面是舊的。 */}
+            {}
             {t('最後一次讀取失敗（{error}）——上面顯示的是先前的畫面。', { error: err })}
           </div>
         ) : null}
@@ -622,7 +566,7 @@ export function HostShellPanel({
           </div>
         ) : null}
 
-        {/* 鍵盤直通關掉時才有輸入框（手機沒有實體鍵盤就靠它）。 */}
+        {}
         {syncOn ? null : (
         <form
           className="shell-input"
@@ -679,7 +623,7 @@ export function HostShellPanel({
         }}
       />
 
-      {/* 第二道：daemon 擋下來了。講清楚是哪一種，看過 port 才能確認（AGM 驗收 9f05b03）。 */}
+      {}
       <ConfirmDialog
         open={endNeedsConfirm !== null}
         title={t('這顆 pane 還在做事')}

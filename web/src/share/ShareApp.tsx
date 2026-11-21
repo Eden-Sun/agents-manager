@@ -25,12 +25,9 @@ const ShareMarkdown = lazy(() => import('./ShareMarkdown'))
 
 const NO_IMAGES: ShareFile[] = []
 
-/** 推播斷了才輪詢；分頁在背景時放慢。 */
 const POLL_MS = 4000
-/** bot 可能在最後一則回覆後才完成寫檔；只在前景短暫補查 outbox。 */
 const FILE_POLL_AFTER_REPLY_MS = 60_000
 
-/** 選了的檔：一次只傳一個（`active`），其餘排著等；`id` 有了＝傳好了，`error`＝這張沒傳上去（`retry`＝可以再試一次）。 */
 interface Pending {
   key: string
   name: string
@@ -41,16 +38,12 @@ interface Pending {
   active: boolean
 }
 
-/** 重送同一句話的冪等鍵保留多久（同主 UI 的 `SEND_RETRY_WINDOW_MS` 量級）：回應遺失時使用者照提示再按一次要拿到同一個鍵。 */
 const SEND_RETRY_WINDOW_MS = 10 * 60_000
 
-/** 送出後多久還沒等到 working／回覆，就放開送出鈕（SSE 與輪詢都漏掉時的最後出口，#922）。 */
 const AWAIT_LIMIT_MS = 90_000
 
-/** 一則最多幾個附件（同 daemon `portal.rs` 的 `MAX_ATTACHMENTS`，超過回 400）。 */
 const ATTACH_MAX = 20
 
-/** daemon 的 `client_request_id` 只收 `[A-Za-z0-9-_.:]{1,64}`；`createRequestId` 回 UUID，加前綴後仍在範圍內。 */
 function sendRequestId(key: string): string {
   return `share-${createRequestId(key, { maxAgeMs: SEND_RETRY_WINDOW_MS })}`.replace(/[^A-Za-z0-9\-_.:]/g, '_').slice(0, 64)
 }
@@ -125,7 +118,6 @@ function FilesPanel({
             <li key={f.name} className={isImageName(f.name) ? 'img' : undefined}>
               {isImageName(f.name) ? <ShareThumb file={f} client={client} onOpen={onOpen} /> : null}
               {isImageName(f.name) ? (
-                // 圖對 end user 就是「一張圖」：不顯示副檔名、不給原檔，動作只有「分享／存到手機」。
                 <div className="sh-file-png">
                   <button type="button" className="sh-file-name sh-file-open" onClick={() => onOpen(f)}>
                     {displayName(f.name)}
@@ -152,7 +144,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [messages, setMessages] = useState<ShareMessage[]>([])
   const [status, setStatus] = useState<ShareStatus>('idle')
   const [files, setFiles] = useState<ShareFile[]>([])
-  // 清單換了（檔案被刪、改名）：不在清單裡的圖片快取整條淘汰，長開的頁面不會越積越多（#1175）。
   useEffect(() => pruneShareImages(client, files), [client, files])
   const [state, setState] = useState<'loading' | 'ready' | 'gone'>('loading')
   const [goneBlocked, setGoneBlocked] = useState(false)
@@ -164,53 +155,39 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [filesOpen, setFilesOpen] = useState(false)
   const [viewing, setViewing] = useState<ShareFile | null>(null)
   const closeViewer = useCallback(() => setViewing(null), [])
-  // 放大檢視跟著清單走：開著時檔案換版（bot 修好、重畫），檢視裡要看到新的那一版。清單裡已經沒有這個檔就留著手上的。
   const viewingFile = useMemo(() => (viewing ? (files.find((f) => f.name === viewing.name) ?? viewing) : null), [viewing, files])
   const [poll, setPoll] = useState(false)
   const [filePollUntil, setFilePollUntil] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | null>(null)
-  // 送出後到 daemon 說「思考中」之前也算在忙，不然按完送出畫面一片靜。
-  // 世代號：SSE 若在 POST resolve 之前先到，不能再被後到的 resolve 設回 true。
   const [awaiting, setAwaiting] = useState(false)
   const awaitGen = useRef(0)
-  /** SSE 每到一則 status 就加一。messages 快照發出時記下它；回來時若已變，快照的 status 比 SSE 舊，只採用訊息（#1667）。 */
   const statusEvents = useRef(0)
-  /** 這一輪送出的錨點：`at` 是瀏覽器時鐘（只在 POST 還沒回 `message_id` 之前當備用），`id` 是 daemon 回的那則 user 訊息。 */
   const anchor = useRef<{ at: string; id: string | null } | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  // 正在傳的那一張（序列佇列的名額）。移除時換掉，舊的上傳晚回就對不上、不碰下一張的名額（#1661）。
   const uploadJob = useRef<{ key: string; ctl: AbortController } | null>(null)
   const stick = useRef(true)
-  /** 載入較早訊息前的捲動位置：畫完之後把多出來的高度補回去，人留在原來那一則。 */
   const restore = useRef<{ height: number; top: number } | null>(null)
   const stopLive = useRef<() => void>(() => {})
   const sawOlder = useRef(false)
-  /** 已載入的較早頁不在最新訊息快照內；重同步時仍要保留。 */
   const loadedOlderMessages = useRef<ShareMessage[]>([])
-  /** `load` 連續失敗幾次（非 404）；> 0 而且沒在輪詢時，自己排下一次重試。 */
   const [loadFails, setLoadFails] = useState(0)
-  /** 訊息請求世代：較舊回應不更新 UI；待處理的 resync 由下一份成功快照消化。 */
   const messageLoadGen = useRef(0)
   const appliedMessageGen = useRef(0)
   const settledMessageGen = useRef(0)
   const linkGone = useRef(false)
   const messageResyncGen = useRef(0)
   const appliedResyncGen = useRef(0)
-  /** resync 還沒套用前，SSE 收到的新訊息，連同收到時的 resync 世代（#1684）。只在有待套用的 resync 時記。 */
   const resyncDelta = useRef<{ gen: number; msg: ShareMessage }[]>([])
-  /** SSE 斷過：重新連上時要補抓一次（斷線期間的事件不會重播）。 */
   const wasDown = useRef(false)
-  /** 手上看過的最新一則 bot 回覆；頁面帶來更新的一則＝bot 剛回完，檔案清單要重抓（輪詢模式沒有 SSE 的 message 事件）。 */
   const lastAssistant = useRef<string | null>(null)
   const pageSeen = useRef(false)
   const fileLoadGen = useRef(0)
   const appliedFileGen = useRef(0)
 
   const fail = useCallback((e: unknown) => {
-    // 401／403（來源被擋，am-share `security_headers`）：重試不會好，同 404 停掉輪詢，只是說明不一樣。
     if (e instanceof ShareHttpError && (e.status === 401 || e.status === 403)) {
       linkGone.current = true
       stopLive.current()
@@ -226,7 +203,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }
   }, [])
 
-  // 卸載後 files() 才回來就丟掉：測試收完 DOM 之後 setState 會在 react-dom 裡讀不到 window 而炸（shard 平行跑時撞到）。
   const alive = useRef(true)
   useEffect(() => () => {
     alive.current = false
@@ -250,7 +226,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
           setFiles(f)
         },
         () => {
-          /* 清單抓不到就留著上一份；連結失效由 load() 判斷 */
         },
       )
     },
@@ -262,8 +237,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setBotName(page.bot_name)
     if (statusFresh) setStatus(page.status)
     if (replace) {
-      // 快照是倒回之後才組的，但回來得晚：這個世代發出請求之後才從 SSE 收到的回覆照樣放回快照上面（#1684）。
-      // 更早世代收到的，是倒回前的狀態，快照已經不含它，丟掉；之後的世代還要用，留著。
       const replay = resyncDelta.current.filter((d) => d.gen >= resyncGen)
       resyncDelta.current = resyncDelta.current.filter((d) => d.gen > resyncGen)
       const snapshotTail = mergeMessages([], page.messages).at(-1)
@@ -278,7 +251,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     pageSeen.current = true
     if (newest !== lastAssistant.current) {
       lastAssistant.current = newest
-      // 第一頁不抓：開頁本來就抓了一次。
       if (!first && newest) {
         setFilePollUntil(Date.now() + FILE_POLL_AFTER_REPLY_MS)
         void loadFiles()
@@ -286,8 +258,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     }
     if (!sawOlder.current) setHasMore(page.has_more)
     const a = anchor.current
-    // 還沒看到這一輪的 working 或新 assistant 之前，idle 的舊頁不能把「思考中」清掉。
-    // 有 `message_id` 就看「那則 user 訊息之後有沒有 assistant」，不比時鐘（手機時鐘快過 daemon 時 created_at 永遠對不上）。
     if (a) {
       const at = a.id ? page.messages.findIndex((m) => m.id === a.id) : -1
       const answered = a.id
@@ -360,10 +330,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
       onStatus: (s) => {
         statusEvents.current++
         setStatus(s)
-        // 只在這一輪送出之後的 working／idle 清掉。POST resolve 不再把 awaiting 設回 true。
         if (anchor.current) setAwaiting(false)
       },
-      // 漏了事件或對話被倒回：整頁重抓，以重抓結果取代手上的清單（倒回的那幾則要消失，合併不會刪）。
       onResync: () => {
         messageResyncGen.current++
         void load().then(() => loadFiles())
@@ -394,7 +362,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     if (!poll || state === 'gone') return
     const id = setInterval(() => {
       if (document.visibilityState === 'visible') {
-        // 輪詢快照是目前可見對話的權威來源；斷線期間的倒回不會有 SSE resync 通知。
         if (messageResyncGen.current <= appliedResyncGen.current) messageResyncGen.current++
         void load()
       }
@@ -414,14 +381,12 @@ export function ShareApp({ client }: { client: ShareClient }) {
     return () => clearInterval(id)
   }, [state, filePollUntil, loadFiles])
 
-  // SSE 連著時 messages 抓失敗：輪詢沒開，沒有人會再抓。自己隔 POLL_MS 再試，成功（applyPage）就歸零。
   useEffect(() => {
     if (loadFails === 0 || poll || state === 'gone') return
     const t = setTimeout(() => void load(), POLL_MS)
     return () => clearTimeout(t)
   }, [loadFails, poll, state, load])
 
-  // 背景時不輪詢、SSE 也可能已經死了還沒報錯：回到前景先補抓一次。
   useEffect(() => {
     if (state === 'gone') return
     const onVisible = () => {
@@ -433,7 +398,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     return () => document.removeEventListener('visibilitychange', onVisible)
   }, [state, load, loadFiles])
 
-  // 90 秒上限：送出後一直沒等到 working／回覆（SSE 與輪詢都漏掉、或 bot 根本沒收到），不能讓送出鈕永遠灰著。
   useEffect(() => {
     if (!awaiting) return
     const timer = setTimeout(() => {
@@ -444,7 +408,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
   }, [awaiting, t])
 
   const busy = status === 'working' || awaiting
-  // bot 這一回合做的圖（與回覆裡提到的）直接畫在那則回覆下面。
   const imagesOf = useMemo(() => imagesByMessage(messages, files), [messages, files])
 
   useEffect(() => {
@@ -460,14 +423,12 @@ export function ShareApp({ client }: { client: ShareClient }) {
     el.scrollTop = r.top + (el.scrollHeight - r.height)
   }, [messages])
 
-  // 一次選好幾張照片：一張接一張傳（客訴 2026-10-04：同時送出時第三張起就「傳得太快了」）。429 在 `uploadPatiently` 裡自己等著重試。
   const pick = (list: FileList | null) => {
     const picked = Array.from(list ?? []).map((f) => ({ key: `${f.name}-${f.size}-${Math.random()}`, name: f.name, file: f, id: null, error: null, retry: false, active: false }))
     if (picked.length) setPending((p) => [...p, ...picked])
     if (fileInput.current) fileInput.current.value = ''
   }
 
-  // 移除：正在傳的那張先中止、放掉名額，下一張由下面的 effect 接著開始（#1661）。
   const removePending = (key: string) => {
     if (uploadJob.current?.key === key) {
       uploadJob.current.ctl.abort()
@@ -476,7 +437,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setPending((x) => x.filter((y) => y.key !== key))
   }
 
-  // 離開頁面：還在傳的那張中止，不讓它在沒人看的時候繼續送（#1661）。
   useEffect(
     () => () => {
       uploadJob.current?.ctl.abort()
@@ -513,7 +473,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
   }, [pending, client])
 
   const uploading = pending.some((p) => !p.id && !p.error)
-  // 「第幾張／共幾張」：這一批還沒送出的檔（傳好的、排著的、失敗的都算）。
   const pendingStatus = (p: Pending): string => {
     if (p.error) return p.error
     if (p.id) return ''
@@ -526,9 +485,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const textChars = shareTextChars(text)
   const tooLong = textChars > SHARE_TEXT_MAX
   const tooMany = ready.length > ATTACH_MAX
-  // 有附件沒傳上去：照送會少一個檔案、bot 以為沒有，擋下來講清楚（同主 UI 的 ATTACHMENT_FAILED_NOTICE）。
   const failedAttach = pending.some((p) => p.error !== null)
-  // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
   const canSend = !busy && !sending && !uploading && !failedAttach && !tooLong && !tooMany && (text.trim().length > 0 || ready.length > 0)
 
   const loadOlder = async () => {
@@ -541,10 +498,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
     try {
       const page = await client.messages(oldest)
       if (linkGone.current) return
-      // 請求在飛的時候對話被倒回（resync 已發出）：這頁是倒回前的快照，整份丟掉，以重抓的結果為準（#1659）。
       if (messageResyncGen.current !== resyncGen) return
       const el = listRef.current
-      // 較早的訊息插在上面：畫完之後把多出來的高度補回去，人留在原來那一則。
       restore.current = el ? { height: el.scrollHeight, top: el.scrollTop } : null
       sawOlder.current = true
       loadedOlderMessages.current = mergeMessages(loadedOlderMessages.current, page.messages)
@@ -557,7 +512,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
         stopLive.current()
         setState('gone')
       } else if (e instanceof ShareHttpError && e.status === 400 && e.reason === 'bad_cursor') {
-        // 游標那一則已經不在對話裡（撤回、刪掉）：照 API.md 重載第一頁，不拿同一個游標反覆重試。
         messageResyncGen.current++
         void load()
       } else setOlderError(shareErrorText(e, 'older'))
@@ -575,14 +529,11 @@ export function ShareApp({ client }: { client: ShareClient }) {
     setSendError(null)
     const body = text.trim()
     const ids = ready.map((p) => p.id!)
-    // 冪等鍵跟著「這句話＋這些附件」走（#921）：回應遺失（網路斷在 daemon 收下之後）時照提示再按一次，要拿到同一個鍵，
-    // daemon 才認得是重送。只有 daemon 明確回了（`ShareHttpError`）才作廢；改了字或附件就是新的一則、新的鍵。
     const reqKey = `share-send:${body}\u0000${ids.join(',')}`
     try {
       const res = await client.send(body, sendRequestId(reqKey), ids)
       settleCreateRequest(reqKey)
       if (res?.delivery === 'failed') {
-        // daemon 收下了、但 bot 沒收到（pane 打不進字、附件綁定失敗…）：不會有任何回覆事件，字與附件都留著讓人再送。
         anchor.current = null
         if (awaitGen.current === gen) setAwaiting(false)
         setSendError(t('bot 沒收到這一則，請再送一次；你打的字還在。'))
@@ -590,13 +541,10 @@ export function ShareApp({ client }: { client: ShareClient }) {
         return
       }
       if (res?.messageId && anchor.current && awaitGen.current === gen) anchor.current = { ...anchor.current, id: res.messageId }
-      // 送出期間又打了字：留著（輸入框送出中沒有停用）。
       setText((cur) => (cur.trim() === body ? '' : cur))
-      // 只拿掉這一則真的帶走的附件；送出期間才傳好的留著給下一則。
       setPending((p) => p.filter((x) => !(x.id && ids.includes(x.id))))
       stick.current = true
       if (res?.delivery === 'unknown') setSendError(t('送出了，但還不確定 bot 有沒有收到，稍等一下。'))
-      // 不在這裡 setAwaiting(true)：SSE 可能已經先把這一世代清掉。
       if (awaitGen.current === gen) void load()
     } catch (e) {
       if (e instanceof ShareHttpError) settleCreateRequest(reqKey)
@@ -606,7 +554,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
         stopLive.current()
         setState('gone')
       }
-      // 409：上一則還在排，字與附件都留著（setText／清附件只在成功時做），重抓一次讓「思考中」對上 daemon 的狀態。
       if (e instanceof ShareHttpError && e.status === 409) void load()
       setSendError(shareErrorText(e, 'send'))
     } finally {
@@ -746,8 +693,6 @@ export function ShareApp({ client }: { client: ShareClient }) {
             aria-label={t('訊息')}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
-              // 手機上 Enter 是換行；桌機 Enter 送出、Shift+Enter 換行。輸入法選字中不送。
-              // WebKit 在 compositionend 之後才送的那一下 keyCode 是 229（同主 UI #632），isComposing 已經是 false。
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && !window.matchMedia('(pointer: coarse)').matches) {
                 e.preventDefault()
                 void submit()

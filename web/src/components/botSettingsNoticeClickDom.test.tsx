@@ -1,7 +1,3 @@
-/**
- * #1218：桌機 Bot 設定卡是非模態的，點外面就關。通知（`.notices`）是疊在上面的浮層，不是「外面的畫面」：
- * 按通知的 ✕／動作鈕不能把設定卡關掉，也不能跳「放棄未儲存的變更？」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, typeInto, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -9,7 +5,6 @@ import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot } from '../api/types'
 import { BotSettingsPanel } from './BotSettingsPanel'
 
-// App.tsx 載入時就讀 document.title：取得 DOM lease 後才載入。
 let noticesComponent: typeof import('../App').Notices | undefined
 
 before(async () => {
@@ -27,7 +22,6 @@ after(async () => {
 const mk = (id: string, name: string) =>
   ({ id, name, project_id: 'p1', kind: 'claude', model: 'opus', effort: 'medium', fast: false, identity: null, persona: null, live_apply_deferred: false, needs_restart: false }) as unknown as Bot
 
-/** 跟 App 一樣：設定卡只在 `settingsBotId` 指到它時掛著。 */
 function Harness() {
   const open = useStore((s) => s.settingsBotId === 'b1')
   return open ? <BotSettingsPanel botId="b1" /> : null

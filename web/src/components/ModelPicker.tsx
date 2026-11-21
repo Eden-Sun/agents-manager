@@ -18,10 +18,7 @@ import { lastKnownModels, modelsKey } from '../store/modelsCache'
 import { KindTag } from './KindTag'
 import './modelPicker.css'
 
-/** v4.0 model / effort / fast from `GET /api/models?kind=&host=`; falls back to static `MODEL_OPTIONS` on failure. */
-
 function staticModels(kind: BotKind): ModelInfo[] {
-  // agy：強度已經在模型 slug 裡（`-high`／`-low`），沒有獨立的強度檔。
   const efforts =
     kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
   return MODEL_OPTIONS[kind].map((id, i) => ({
@@ -30,30 +27,20 @@ function staticModels(kind: BotKind): ModelInfo[] {
     description: '',
     is_default: kind === 'openai-api' ? id.includes('astra') : i === 0,
     default_effort: kind === 'claude-api' ? 'high' : kind === 'openai-api' ? 'medium' : null,
-    // openai-api：依模型（astra／sol 不收 none）。
     efforts: kind === 'openai-api' ? [...openAiApiEffortsFor(id)] : efforts,
-    // claude-api 的 fast 是固定可用的（speed=fast，單價 2 倍）；API 清單到了會被覆蓋成同一份。
     service_tiers: kind === 'claude-api' ? [{ id: 'fast', name: 'fast', description: t('speed=fast（單價 2 倍）') }] : [],
   }))
 }
 
-/** daemon 給的清單；agy 再照規則過濾一次（daemon 已經過濾，這裡是防舊快取）。 */
 function apiModelList(kind: BotKind, cached: ModelInfo[] | null | undefined): ModelInfo[] {
   if (!Array.isArray(cached)) return []
   return kind === 'agy' ? cached.filter((m) => agyModelAllowed(m.id)) : cached
 }
 
-/** 拿掉 `HIDDEN_MODELS` 但留下目前選的，否則看起來像設定被改掉。 */
 function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[] {
   return models.filter((m) => modelMatches(m.id, selected) || !HIDDEN_MODELS.includes(m.id))
 }
 
-/**
- * 按鈕顯示字（使用者 2026-11-19、2026-11-20）：
- * - codex 與 openai-api 由模型 id 推導（不用 display_name，統一格式「<版本>-<名稱首字大寫>」）。
- * - agy 比照 codex 由 id 推導「<版號>-<家族首字大寫> <強度>」（例：gemini-3.8-flash-low → 3.8-Flash Low、gemini-4-neon-xhigh → 4-Neon XHigh）。
- * - 認不得格式的 id 照舊原樣顯示，完整 id 在 `title`。
- */
 function modelLabel(m: ModelInfo, kind?: BotKind): string {
   if (kind === 'codex' || kind === 'openai-api' || /^gpt-\d/i.test(m.id)) {
     const formatted = formatGptModelLabel(m.id)
@@ -67,12 +54,6 @@ function modelLabel(m: ModelInfo, kind?: BotKind): string {
   return name.replace(/^gpt-/i, '')
 }
 
-/**
- * 排序：
- * - codex 與 openai-api：依家族由便宜到貴（luna < terra < sol < astra；同家族由舊到新，2026-11-19 使用者要求）。
- * - agy：依家族由便宜到貴（flash < hydrogen < argon < neon；未知家族排最後照原順序；同家族依版號由舊到新、再依強度 low < medium < high < xhigh；認不得的 id 排最後原樣，2026-11-20 使用者要求）。
- * - 其餘 kind：照 `MODEL_OPTIONS` 排序，新模型接在後面。
- */
 function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
   if (kind === 'codex' || kind === 'openai-api') {
     return models
@@ -88,7 +69,6 @@ function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
       .map((x) => x.m)
   }
   const want = MODEL_OPTIONS[kind] ?? []
-  // `want` 寫的是正式 id，daemon 的清單可能還是別名（claude 目前就回 `opus`）：對過去再排（#539）。
   const rank = (id: string) => {
     const at = want.indexOf(canonicalModel(kind, id))
     return at < 0 ? want.length : at
@@ -99,15 +79,8 @@ function sortModels(kind: BotKind, models: ModelInfo[]): ModelInfo[] {
     .map((x) => x.m)
 }
 
-/** codex 的 fast 是 `priority`；claude-api 的是 `fast`（speed=fast，單價 2 倍）。 */
 const isFastTier = (id: string) => id === FAST_TIER || id === 'fast'
 
-/**
- * 提示清單來源為備用清單：
- * - other-host: 「此主機的模型清單暫時讀不到，沿用 {source_host} 的清單」
- * - static (非 claude) 或完全沒讀到 API: 「此主機的模型清單暫時讀不到，顯示的是備用清單」
- * - 同主機上次抓到的 stale 或使用 localStorage lastKnown: 「此主機的模型清單暫時讀不到，顯示的是上次取得的備用清單」
- */
 function fallbackWarning(
   t: ReturnType<typeof useT>,
   kind: BotKind,
@@ -144,7 +117,6 @@ export function ApiModelFields({
 }: {
   kind: BotKind
   host: string
-  /** claude only：身份，只影響預設強度提示（SPEC §17.1）。 */
   identity?: string | null
   model: string | null
   onModel: (v: string | null) => void
@@ -160,12 +132,10 @@ export function ApiModelFields({
   const meta = useStore((s) => s.modelsMeta[key])
   const loadModels = useStore((s) => s.loadModels)
   useEffect(() => {
-    // null = last fetch failed; the store retries once the cooldown has passed (issue #26).
     if (cached == null) void loadModels(kind, host, identity)
   }, [cached, kind, host, identity, loadModels])
 
   const loading = cached === undefined
-  // 載入中／失敗：先用最後抓到的清單（它就是 API 給過的），都沒有才退回寫死的。
   const last = Array.isArray(cached) ? null : lastKnownModels(kind, modelsKey(kind, host, identity))
   const apiModels = apiModelList(kind, Array.isArray(cached) ? cached : last)
   const usingLast = last !== null && apiModels.length > 0
@@ -177,12 +147,10 @@ export function ApiModelFields({
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
   const selectedModel = model ?? defaultModel?.id ?? null
-  // agy：模型與強度拆兩排（reports/plan-agy-model-effort.md）；存值仍是完整 slug。
   const agy = kind === 'agy'
   const agyGroups = agy ? groupAgyModels(shownModels) : []
   const selGroup = agy ? (agyGroupOf(agyGroups, selectedModel) ?? agyGroups.find((g) => g.isDefault) ?? agyGroups[0] ?? null) : null
   const selGroupEffort = agyEffortOf(selGroup, selectedModel)
-  // 整組都不在清單時「不在清單」標在模型按鈕上，強度按鈕就不再重複標。
   const selGroupAllMissing = selGroup ? agyGroupMembers(selGroup).every((v) => missingIds.has(v.id)) : false
   const efforts = agy ? (selGroup?.efforts ?? []) : (current?.efforts ?? [])
   const fallbackEffort = (suggestedEffort && efforts.includes(suggestedEffort)) ? suggestedEffort : effectiveDefaultEffort(current)
@@ -190,19 +158,15 @@ export function ApiModelFields({
   const hasFast = current?.service_tiers.some((t) => isFastTier(t.id)) ?? false
   const warnText = fallbackWarning(t, kind, meta, usingLast, cached === null, fromApi)
 
-  // 不支援的存值只標出來、不自動清（自動清會讓表單無故 dirty，docs/reviews/2026-09-12/web.md §1 ModelPicker）。
-  // 只認 API 清單：靜態退路會把好的值誤標不支援。
   const effortUnsupported = fromApi && effort !== null && efforts.length > 0 && !efforts.includes(effort)
   const fastUnsupported = fromApi && fast && !hasFast
 
-  // agy 不收的模型（只收 Gemini 3.8 含以上）：存著的值照舊標出來、daemon 啟動時換成 3.8 medium，這裡講清楚並給一鍵改掉。
   const retiredTo = kind === 'agy' && model ? canonicalModel(kind, model) : null
   const retiredModel = retiredTo !== null && retiredTo !== model ? { from: model as string, to: retiredTo } : null
 
   const pickModel = (id: string | null) => {
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
-    // 只有清單來自 API 才能斷定「不支援」；內建清單的 service_tiers 是空的，不代表沒有 Fast（同 modelSwitchPatch）。
     if (fromApi && fast && next && !next.service_tiers.some((t) => isFastTier(t.id))) onFast(false)
     if (effort !== null && next && next.efforts.length > 0 && !next.efforts.includes(effort)) {
       const fallback = (suggestedEffort && next.efforts.includes(suggestedEffort)) ? suggestedEffort : next.default_effort
@@ -220,9 +184,9 @@ export function ApiModelFields({
           ) : warnText ? (
             <span className="field-note warn">{warnText}</span>
           ) : null}
-          {/* 不標「即時套用」（2026-09-13 使用者：模型與強度不用特別說明）。 */}
+          {}
         </span>
-        {/* 不放「預設」「自訂…」（2026-09-09 使用者決定）；沒設就標 CLI 預設那顆。 */}
+        {}
         <div className="opt-group models" role="radiogroup" aria-label={t('模型')}>
           {agy ? agyGroups.map((g) => {
             const on = selGroup === g
@@ -265,11 +229,11 @@ export function ApiModelFields({
         <div className="field">
           <span>
             {t('強度')}
-            {/* claude 的強度與模型無關，標「依 <模型>」是假資訊。 */}
+            {}
             {current && current.id !== model && kind !== 'claude' && !agy ? (
               <span className="field-note">{t('依 {model}', { model: current.display_name })}</span>
             ) : null}
-            {/* claude／codex 切強度會存成帳號預設（SPEC §17、§4.4a）。 */}
+            {}
           </span>
           <div className="opt-group" role="radiogroup" aria-label={t('強度')}>
             {efforts.map((e) => {
@@ -325,9 +289,9 @@ export function ApiModelFields({
             <span className="field-note">
               {current?.service_tiers.find((t) => isFastTier(t.id))?.description || t('優先佇列（service_tier=priority）')}
             </span>
-            {/* codex `/fast` 執行中可切（SPEC §4.4a）。 */}
+            {}
             {liveFast(kind) ? <span className="field-note live-note">{t('執行中改會即時套用，不用重啟')}</span> : null}
-            {/* claude-api 每回合開始讀一次設定：進行中的回合維持原速度，下一回合起才換（單價與預留都綁回合）。 */}
+            {}
             {isApiKind(kind) ? <span className="field-note live-note">{t('下一回合起生效；進行中的回合維持原速度')}</span> : null}
           </span>
         </label>
@@ -341,13 +305,10 @@ export function ApiModelFields({
   )
 }
 
-/** 沒指定強度時實際會跑的那一級：帳號 settings.json 記住的值（有的話），否則廠商預設（SPEC §17.1、#1679）。 */
 function effectiveDefaultEffort(m: ModelInfo | undefined): string | null {
   return m?.account_default_effort ?? m?.default_effort ?? null
 }
 
-/** 「廠推薦」只標廠商內建預設（每個帳號一樣）；帳號記住的值另標「此帳號預設」，不冒充廠推薦。
- * 若有角色建議強度（suggestedEffort），則在該強度標「建議」，取代廠推薦。 */
 function effortBadges(m: ModelInfo | undefined, e: string, suggestedEffort?: string | null): ReactNode {
   return (
     <>
@@ -381,7 +342,6 @@ function liveFast(kind: BotKind): boolean {
   return kind === 'codex'
 }
 
-/** Compact picker for status line / header; PATCHes immediately. */
 export function ModelQuickPicker({
   botId,
   kind,
@@ -477,11 +437,8 @@ export function ModelQuickPicker({
   const latest = latestModels(kind, visibleModels(models, model), model)
   const shownModels = sortModels(kind, latest.models)
   const effort = bot?.effort ?? null
-  // 完整 id（`claude-sonnet-5-5`）要對到別名（`sonnet`）：同 `ApiModelFields`，先完全相等再 `modelMatches`（#939）。
   const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || models.find((m) => m.is_default) || models[0]
-  // 沒設就標 CLI 預設那顆（同 ApiModelFields；2026-09-09 使用者決定不放「預設」選項）。
   const selectedModel = model ?? current?.id ?? null
-  // agy：模型與強度拆兩排（同 ApiModelFields）；強度點了就切到那個變體，不送 effort。
   const agy = kind === 'agy'
   const agyGroups = agy ? groupAgyModels(shownModels) : []
   const selGroup = agy ? (agyGroupOf(agyGroups, selectedModel) ?? agyGroups.find((g) => g.isDefault) ?? agyGroups[0] ?? null) : null
@@ -531,7 +488,6 @@ export function ModelQuickPicker({
   const menuKeys = useMenuKeys(open, popRef, btnRef, () => setOpen(false), cached)
   const hintId = useId()
 
-  // role=menu 非 listbox：點一下即 PATCH 並關閉；方向鍵只移焦點，否則每按一下送一次 PATCH。
   const pop = open ? (
       <div
         ref={popRef}

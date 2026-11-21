@@ -1,11 +1,4 @@
 import { t } from '../lib/i18n'
-/**
- * 多分頁問卷：先讀完、離線作答、最後一次送出（2026-09-12 第六輪，使用者指定：「一開始就先
- * 預載入所有的分頁，而不是每一次連動，最後送出前再確認就好」）。
- *
- * preload 只送導覽鍵、走完回原頁，不能改到答案；作答只動本地 state；commit 逐頁比對同一份
- * 選單、只送差集（複選是 toggle），任何一步對不上就停。I/O 走 `Io` 注入以便測試。
- */
 import {
   customAnswerChecked,
   customAnswerShown,
@@ -17,15 +10,12 @@ import {
 } from './tuiChoices.ts'
 
 export interface Io {
-  /** 成功讀取但沒有可解析的選單回 `null`；I/O 失敗 reject。 */
   read: () => Promise<TuiChoiceMenu | null>
   send: (keys: string[]) => Promise<void>
   wait: (ms: number) => Promise<void>
-  /** `POST /bots/{id}/text`（`enter: false`）；`Type something.` 游標停上去直接貼，不必先 Enter（2026-09-13 真機）。 */
   paste: (text: string) => Promise<void>
 }
 
-/** 將成功讀到的終端文字解析為選單；讀取失敗要保留 reject，不能混成「沒有選單」。 */
 export async function readChoiceMenu(read: () => Promise<string>): Promise<TuiChoiceMenu | null> {
   return parseChoiceMenu(await read())
 }
@@ -34,20 +24,16 @@ export interface DraftPage {
   tab: number
   label: string
   question: string | null
-  /** 讀到當下的選項與勾選狀態。 */
   choices: TuiChoiceMenu['choices']
   multi: boolean
-  /** 清單裡有沒編號的 `Submit` 列。 */
   hasSubmitRow: boolean
   review: TuiChoiceMenu['review']
   isSubmit: boolean
-  /** 終端上已經答過的那一項（單選，從 Review 的「→ 答案」對回來）；沒有是 `-1`。複選看 `choices[].checked`。 */
   answered?: number
 }
 
 export interface Draft {
   pages: DraftPage[]
-  /** 預載結束時停的分頁：第一個未答的題（全答完或分不出就是第一題）。 */
   startTab: number
   tabs: TuiChoiceMenu['tabs']
 }
@@ -55,7 +41,6 @@ export interface Draft {
 const SETTLE_TRIES = 6
 const SETTLE_STEP = 120
 
-/** 一頁的問卷照舊走即時模式。 */
 export const MIN_TABS = 2
 
 function pageOf(menu: TuiChoiceMenu, tab: number, label: string): DraftPage {
@@ -71,15 +56,10 @@ function pageOf(menu: TuiChoiceMenu, tab: number, label: string): DraftPage {
   }
 }
 
-/** 合成的送出頁：草稿裡的送出頁照本地作答畫，不需要從終端讀。 */
 function submitPage(tab: number, label: string): DraftPage {
   return { tab, label, question: null, choices: [], multi: false, hasSubmitRow: false, review: [], isSubmit: true }
 }
 
-/**
- * 頁面身份：題目、選項（編號與標題）、分頁列（名稱與答過與否）、review。游標位置不算，它在同一頁裡也會動。
- * 只比題目分不出換頁：pane 太矮時題目會被切成 `null`，兩頁問句相同的也分不出（2026-10-17，#1816）。
- */
 export function pageKey(menu: TuiChoiceMenu): string {
   return JSON.stringify([
     menu.question,
@@ -89,11 +69,6 @@ export function pageKey(menu: TuiChoiceMenu): string {
   ])
 }
 
-/**
- * 走一格分頁並確認畫面換了。先 ←／→（別處無副作用），沒反應才 `tab`／`shift+tab`；走不動回 `null`。
- * 身份換了才算翻頁（見 `pageKey`）。題目是 `null` 時分不出「翻了」與「沒翻」，這時不補第二顆鍵（補了會跳題），直接回 `null`。
- * `signal` 中止後不再送任何鍵（issue #908：bot 已經離開 blocked，導覽鍵會打進正在工作的 TUI）。
- */
 export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?: AbortSignal): Promise<TuiChoiceMenu | null> {
   const before = pageKey(from)
   for (const key of dir > 0 ? ['right', 'tab'] : ['left', 'shift+tab']) {
@@ -110,21 +85,6 @@ export async function moveTab(io: Io, dir: 1 | -1, from: TuiChoiceMenu, signal?:
   return null
 }
 
-/**
- * 左到頭、右到最後一題、再走回起點，每頁讀一次。走不動就回 `null`（不留半份草稿），呼叫端退回即時模式。
- * 副作用：真終端的分頁會跳來跳去，但不送任何會改答案的鍵。
- *
- * **不走進 `✔ Submit` 頁**（2026-09-25 使用者：「輸入窗太怪了」）：送出頁在草稿裡是照本地作答畫的，不需要讀；走進去時
- * 畫面變成「Submit answers / Cancel」，好幾個瀏覽器同時開著時，另一個的預載會把那裡當起點、最後「走回」那裡，
- * 終端就被晾在送出頁。送出頁改成合成的一頁；只有一題的問卷因此完全不用換頁。起點本身就是送出頁（`tabAt` 是推的、
- * 不是真的游標所在）時不預載，退回即時模式。
- *
- * `signal` 中止（持有者都放手了、或 bot 已不在 blocked）就立刻停、回 `null`，之後不再送鍵（issue #908）。
- */
-/**
- * 預載一次只跑一份：同一個 module 裡的預載（背景預取與視窗各一份）共用同一條終端，導覽鍵會互相插隊，
- * 兩邊都對不上、整份退回即時模式（真機與 mock 都看得到）。排隊；輪到自己時先重讀畫面當起點，不信排隊前的快照。
- */
 let queue: Promise<unknown> = Promise.resolve()
 
 export function preload(
@@ -152,18 +112,14 @@ async function preloadOnce(
   const tabs = start.tabs
   const n = tabs.length
   if (n < MIN_TABS) return null
-  // 送出頁一律在最後；只走到最後一題為止。
   let last = n - 1
   while (last > 0 && tabs[last].submit) last -= 1
-  // Review 上「→ 答案」是終端已答的內容；先存下來，走離送出頁之後也還用得到。
   const reviewNow = start.review
 
-  // 起點：畫面在送出頁時就是送出分頁（猜的 `tabAt` 不可靠）；否則用猜的目前分頁。
   let cur: TuiChoiceMenu = start
   const submitAt = tabs.findIndex((t) => t.submit)
   let at = isSubmitMenu(start) ? (submitAt >= 0 ? submitAt : n - 1) : (start.tabAt ?? -1)
   if (at < 0 || at >= n) return null
-  // 起點在送出頁（或更右）：先往左走到最後一題再預載（送出頁不讀、不當起點）。
   while (at > last || isSubmitMenu(cur)) {
     const next = await moveTab(io, -1, cur, signal)
     if (!next) return null
@@ -186,7 +142,6 @@ async function preloadOnce(
   }
 
   for (const dir of [-1, 1] as const) {
-    // 第二圈經過讀過的頁照樣重讀：便宜，順便確認畫面沒變。
     const stop = dir < 0 ? 0 : last
     while (at !== stop) {
       const next = await moveTab(io, dir, cur, signal)
@@ -199,7 +154,6 @@ async function preloadOnce(
     }
   }
 
-  // 結束停在第一個未答的題：使用者從那裡開始作答，不必從第一頁找。
   let target = tabs.findIndex((t, k) => k <= last && !t.submit && !t.done)
   if (target < 0) target = 0
   while (at > target) {
@@ -218,7 +172,6 @@ async function preloadOnce(
   }
 }
 
-/** 單選：Review 上這題的「→ 答案」對回哪一項（對不上、Type something、複選都是 `-1`）。 */
 function answeredIndex(page: DraftPage, review: TuiChoiceMenu['review']): number {
   if (page.multi || page.isSubmit || !page.question) return -1
   const row = review.find((r) => squash(r.question) === squash(page.question ?? ''))
@@ -227,14 +180,11 @@ function answeredIndex(page: DraftPage, review: TuiChoiceMenu['review']): number
   return page.choices.findIndex((c) => !isTypeSomething(c) && squash(c.title) === got)
 }
 
-/** 預設＝讀到當下的勾選；單選預設全沒選。 */
 export function wantOf(page: DraftPage): boolean[] {
-  // 單選：終端上已經答過的那一項預設選中（從 Review 對回來的）；沒有就全沒選。
   if (!page.multi) return page.choices.map((_, j) => j === page.answered)
   return page.choices.map((c) => c.checked === true)
 }
 
-/** 沒點過是 `-1`。 */
 export function radioPick(want: boolean[] | undefined): number {
   if (!want) return -1
   const i = want.findIndex(Boolean)
@@ -243,17 +193,14 @@ export function radioPick(want: boolean[] | undefined): number {
 
 export function pageNeedsCommit(page: DraftPage, want: boolean[] | undefined): boolean {
   if (page.isSubmit) return false
-  // 單選：跟終端上已答的一樣就不必再送（同一項再按會跳題）。
   if (!page.multi) return radioPick(want) >= 0 && radioPick(want) !== (page.answered ?? -1)
   return togglesFor(page.choices, want ?? wantOf(page)).length > 0
 }
 
-/** 複選頁要貼字的那一列：想勾 `Type something`、而終端上還沒勾；沒有回 `-1`。 */
 export function typeToPaste(page: DraftPage, want: boolean[] | undefined): number {
   return page.choices.findIndex((c, j) => Boolean(want?.[j]) && !c.checked && isTypeSomething(c))
 }
 
-/** 要翻轉的 index。複選是 toggle，一定比差集、不照點擊次數送；沒方框的列是動作，不算。 */
 export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): number[] {
   const out: number[] = []
   now.forEach((c, i) => {
@@ -263,23 +210,15 @@ export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): numb
   return out
 }
 
-/**
- * 從畫面題目反查分頁位置。別用 `tabAt`：它照 ☒ 猜，按過 Submit 會跳但終端還在原地。
- * 先比整頁（題目加選項）；只有整頁對不上、且題目加選項數只對到一頁時才用它。兩頁都對得上就回 `null`，不猜。
- */
 export function locate(draft: Draft, now: TuiChoiceMenu): number | null {
   const pages = draft.pages.filter((p) => !p.isSubmit)
   const exact = pages.filter((p) => samePage(p, now))
-  // 題目是 null 時只剩選項數，對到一頁不代表是那一頁：不靠它猜（#1816 review）。
   const loose = now.question === null ? [] : pages.filter((p) => p.question === now.question && p.choices.length === now.choices.length)
   const hits = exact.length ? exact : loose
   if (hits.length === 1) return hits[0].tab
-  // 送出頁在草稿裡是合成的（沒有題目、沒有選項），照題目比永遠對不上：看畫面長得像送出頁就算（2026-10-02 事發：
-  // 最後一題 Enter 之後終端已經跳到 Review，`at` 卻還停在最後一題，再按 → 就「走不到送出頁」）。
   return isSubmitMenu(now) ? (draft.pages.find((p) => p.isSubmit)?.tab ?? null) : null
 }
 
-/** 畫面是送出頁（Review your answers／Submit answers／Cancel）。 */
 export function isSubmitMenu(now: TuiChoiceMenu): boolean {
   return now.review.length > 0 || now.choices.some((c) => /^submit answers$/i.test(c.title))
 }
@@ -292,7 +231,6 @@ export function samePage(page: DraftPage, now: TuiChoiceMenu): boolean {
   )
 }
 
-/** 走一步驗一步：清單裡可能有認不得但游標走得到的列。 */
 async function walkTo(io: Io, target: WalkTarget, page: DraftPage): Promise<TuiChoiceMenu | null> {
   for (let i = 0; i < 3; i++) {
     const now = await io.read()
@@ -316,10 +254,6 @@ async function pressUntil(io: Io, key: string, done: (now: TuiChoiceMenu | null)
   return false
 }
 
-/**
- * Enter 之後等畫面跳頁：真機單選頁 Enter 選定會自己跳下一個分頁（最後一題跳到 Review），重畫比 daemon 回得慢，
- * 固定等一拍就讀會讀到舊頁，後面的位置全是錯的。題目或 review 變了就算跳了；一直沒變（不跳頁的選單）回最後讀到的那份。
- */
 async function settleAfterEnter(io: Io, before: TuiChoiceMenu): Promise<TuiChoiceMenu | null> {
   let last: TuiChoiceMenu | null = null
   for (let i = 0; i < SETTLE_TRIES; i++) {
@@ -334,7 +268,6 @@ async function settleAfterEnter(io: Io, before: TuiChoiceMenu): Promise<TuiChoic
 
 const squash = (s: string) => s.replace(/\s+/g, '')
 
-/** 從 Review 頁開始時，單選題終端上已經是想要的答案就不必再走一遍（使用者在 Review 頁又按了一次送出）。 */
 function alreadyAnswered(page: DraftPage, want: boolean[] | undefined, custom: string, review: TuiChoiceMenu['review']): boolean {
   if (page.multi || page.isSubmit) return false
   const idx = radioPick(want)
@@ -350,14 +283,9 @@ function alreadyAnswered(page: DraftPage, want: boolean[] | undefined, custom: s
 export interface CommitResult {
   ok: boolean
   error?: string
-  /** 失敗在 `pages` 的哪個 index。 */
   at?: number
 }
 
-/**
- * 逐頁：走到 → 比對同一份 → 送差集 → 重讀對帳 → 有 Submit 列就按 → 最後按 `Submit answers`。
- * 任一步對不上就停。Enter 不落在核取方塊上：翻轉只用 `space`，不行才數字鍵。
- */
 export async function commit(
   io: Io,
   draft: Draft,
@@ -367,7 +295,6 @@ export async function commit(
 ): Promise<CommitResult> {
   const wanted = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => {
     if (pageNeedsCommit(p, want[i])) return true
-    // 目前勾選可能是 TUI 還沒按該頁 Submit 的暫存答案；即使使用者保留原樣，也要先提交這頁。
     return (
       p.multi &&
       p.hasSubmitRow &&
@@ -377,7 +304,6 @@ export async function commit(
   })
 
   for (const { p, i } of wanted) {
-    // `Type something` 要打字才送得出去：單選是那一項被選；複選是想勾、而終端上還沒勾（已勾的是終端打好的，留著）。
     const typing = p.multi ? typeToPaste(p, want[i]) : radioPick(want[i])
     if (typing >= 0 && isTypeSomething(p.choices[typing] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()) {
       return {
@@ -393,14 +319,12 @@ export async function commit(
   if (cur.tabs.length !== draft.tabs.length) {
     return { ok: false, error: t('畫面已經變了（分頁數不一樣），整批都沒送出，請重新讀取。') }
   }
-  // 起點分不出在哪一頁：不是 Review 就不猜，直接停（猜了會先送第一頁的答案、到導覽才停下，送了一部分）。
   const start = locate(draft, cur)
   if (start === null && !isSubmitMenu(cur)) {
     return { ok: false, error: t('分不出終端停在哪一頁，什麼都沒送出，請重新讀取'), at: 0 }
   }
   let at = start ?? draft.startTab
 
-  // 終端已經停在 Review：單選題終端上本來就是想要的答案的，不必再退回去重答。
   const onReview = isSubmitMenu(cur)
   const reviewNow = cur.review
   const todo = onReview
@@ -426,7 +350,6 @@ export async function commit(
       return { ok: false, error: t('第 {n} 題（{label}）的選項跟讀進來時不一樣，沒有送出。', { n: p.tab + 1, label: p.label }), at: i }
     }
 
-    // 單選：走到再 Enter，畫面可能自己跳下一題。`Type something.` 先貼字、確認出現再 Enter。
     if (!p.multi) {
       const idx = radioPick(want[i])
       if (idx < 0) continue
@@ -457,8 +380,6 @@ export async function commit(
       continue
     }
 
-    // 複選頁的 `Type something`：走到 → 貼字，那列會自己勾起來並換成這段字（2026-09-25 真機）；
-    // 對帳「出現且已勾」才往下，之後這一頁都拿換過標題的那份比。
     let page = p
     const typeIdx = typeToPaste(p, want[i])
     if (typeIdx >= 0) {
@@ -503,7 +424,6 @@ export async function commit(
     cur = after
     onProgress?.(++done, total)
 
-    // 多選要按這頁的 Submit 列才算答完。
     if (p.hasSubmitRow) {
       const landed = await walkTo(io, 'submit', page)
       if (!landed?.submit?.current) {
@@ -538,7 +458,6 @@ export async function commit(
   if (!landed || landed.cursor !== idx) return { ok: false, error: t('游標沒有停在「Submit answers」上，沒有按下去。') }
   await io.send(['enter'])
   onProgress?.(++done, total)
-  // 按完要看到送出頁真的離開才算交卷；鍵沒送到（網路、daemon）或沒被吃掉時，別讓畫面靜靜停在 Review。
   let lastReadFailed = false
   for (let i = 0; i < SETTLE_TRIES; i++) {
     await io.wait(SETTLE_STEP * 2)
@@ -546,7 +465,6 @@ export async function commit(
     try {
       now = await io.read()
     } catch {
-      // 讀取失敗代表結果不明，不可當成送出頁已離開；剩餘次數再試。
       lastReadFailed = true
       continue
     }
@@ -569,7 +487,6 @@ export function parse(text: string | null | undefined): TuiChoiceMenu | null {
   return parseChoiceMenu(text)
 }
 
-/** 值得走預載：≥2 分頁且猜得出目前那格。 */
 export function isSurvey(menu: TuiChoiceMenu): boolean {
   return menu.tabs.length >= MIN_TABS && menu.tabAt !== null
 }

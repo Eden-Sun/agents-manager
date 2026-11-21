@@ -1,7 +1,3 @@
-/**
- * agy 模型與強度拆兩排（reports/plan-agy-model-effort.md §5）：切模型保留強度、強度只換變體、Orchestrator 不畫強度列，
- * 快速選單的點擊只送 `{ model }`（不送 effort）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -41,7 +37,6 @@ async function fields(model: string, onModel: (v: string | null) => void, onEffo
   await act(() => useStore.setState({ models: { 'agy@local@': API } } as never))
   return mount(<ApiModelFields kind="agy" host="local" model={model} onModel={onModel} effort={null} onEffort={onEffort} fast={false} onFast={() => {}} />)
 }
-
 
 const labels = (el: HTMLElement, group: 'models' | 'efforts') =>
   [...el.querySelectorAll(group === 'models' ? '.opt-group.models .opt' : '.opt-group:not(.models) .opt')].map((b) => b.textContent ?? '')

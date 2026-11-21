@@ -1,7 +1,3 @@
-/**
- * 狀態列（context／快取倒數／版本）不是 live region：它會隨回合與快取倒數變，role=status 會讓讀屏每次都重念。
- * 要念的事（blocked、錯誤、回覆）各自有自己的 live 區。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

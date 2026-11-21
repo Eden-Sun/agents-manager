@@ -1,4 +1,3 @@
-/* components/BackgroundJobs.tsx（#714）：回合結束但背景工作還在跑。用 accent（還在動），不用 warn／danger（不是出錯）。 */
 
 .bg-jobs-dot {
   flex: none;
@@ -35,7 +34,6 @@
 }
 
 .bg-jobs-state {
-  /* 數字比名字尾巴重要：不讓名字把「（N）」擠掉，名字自己截。 */
   flex: none;
 }
 
@@ -67,7 +65,6 @@
   font-weight: 650;
 }
 
-/* hook 報的明細（shell：等遠端 build · …）：比說明句輕一階，太長就截。 */
 .bg-jobs-tasks {
   min-width: 0;
   overflow: hidden;
@@ -76,7 +73,6 @@
   opacity: 0.85;
 }
 
-/* #774：標太久（可能卡住）改用 warn 色，點也不再呼吸——它不是「還在動」的好消息。 */
 .bg-jobs-bar.bg-jobs-stuck {
   background: var(--warn-soft);
   color: var(--warn);
@@ -93,7 +89,6 @@
   color: var(--warn);
 }
 
-/* 摘要列是按鈕（手機點開說明），長相照舊是一行字。 */
 .bg-jobs-summary {
   display: flex;
   align-items: center;
@@ -117,7 +112,6 @@
   content: '· ';
 }
 
-/* 桌機：說明句接在同一列後面；摘要列裡的「跑多久」說明句已經講了，不重複。 */
 .bg-jobs-bar .bg-jobs-age {
   display: none;
 }
@@ -126,7 +120,6 @@
   min-width: 0;
 }
 
-/* 2026-10-03 使用者：手機上那塊藍色太佔空間——只留一行摘要，說明點開才看。 */
 @media (max-width: 640px) {
   .bg-jobs-bar {
     flex-wrap: wrap;
@@ -156,8 +149,6 @@
   }
 }
 
-/* 燈上的轉圈（StatusLamp 的 `kids`，2026-10-04 使用者：只為子 agent 轉）：idle 的綠點外圈轉一圈藍色的載入弧——「底下還在跑」一眼看得出來
-   （2026-10-04 使用者：原本那圈淡淡呼吸的細環「不夠明顯表達執行中」，看起來像靶心）。藍色＝跟 working 燈同一個「在動」的顏色。 */
 .lamp-bg::after {
   content: '';
   position: absolute;
@@ -175,7 +166,6 @@
   }
 }
 
-/* 不動畫時留一段靜止的弧：仍然看得出跟一般閒置不同。 */
 @media (prefers-reduced-motion: reduce) {
   .lamp-bg::after {
     animation: none;

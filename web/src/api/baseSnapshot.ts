@@ -1,4 +1,3 @@
-/** codex bot 的基準快照（`/api/bots/{id}/base-snapshot`）：鎖定目前 context、清除、查詢。 */
 import { rawTransport } from './index'
 import { isRec, optStr, pick } from './normalize'
 

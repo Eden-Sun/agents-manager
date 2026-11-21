@@ -1,4 +1,3 @@
-/* ShareLinkButton（分享用 bot 聊天區頂端的分享鈕，#1180 起只剩一顆圖示鈕）與側欄的 🔗 記號。 */
 
 .share-link {
   position: relative;
@@ -7,7 +6,6 @@
   align-items: center;
 }
 
-/* 跟 ★ ⚙ 同尺寸、同基線（#1180）：圖示大小與 ⚙ 一樣（16px，手機 20px），顏色表狀態，不要外框、不要底色塊。 */
 .icon-btn.share-link-main {
   width: 28px;
   height: 28px;
@@ -19,12 +17,10 @@
   color: var(--text-dim);
 }
 
-/* 分享中：用 accent 字色（不是 --accent-text，那是疊在 accent 底色上的白字；放在淺色標題列上會變成看不見，2026-10-31）。 */
 .icon-btn.share-link-main.on {
   color: var(--accent);
 }
 
-/* 信任分享（trusted）：分享中才上警示色，跟受限的 accent 一眼分得出來。 */
 .icon-btn.share-link-main.trusted.on {
   color: var(--warn);
 }
@@ -39,7 +35,6 @@
 }
 
 .share-link-menu {
-  /* 選單是 fixed、掛在 body 底下（ShareLinkButton）：z-index 要蓋過側欄與標題列的所有元素。寬度不超過視窗。 */
   position: fixed;
   z-index: 1000;
   box-sizing: border-box;
@@ -69,7 +64,6 @@
   color: var(--btn-primary-fg-hover);
 }
 
-/* 完整網址：自動換行、不截斷，可長按／雙擊選取。 */
 .share-link-url-text {
   box-sizing: border-box;
   width: 100%;

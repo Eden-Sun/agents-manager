@@ -1,7 +1,3 @@
-/**
- * 訊息泡泡的自動連結（remark-gfm 的 autolink literal）與終端的網址規則（`termPieces`，#1533）一致：
- * 網址後面緊接的全形標點不算進網址，點下去開的是網址本身，不是連同後面整句。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { unified } from 'unified'
@@ -47,7 +43,6 @@ test('句點跟全形標點連在一起：句點一起剝掉（`…/x.。` 與�
 test('ASCII 右括號不成對、後面接全形標點：括號不算網址（同終端；(https://…/a)。 的網址是 …/a）', () => {
   assert.deepEqual(linksOf('(https://example.com/a)。', true), ['https://example.com/a'])
   assert.deepEqual(linksOf('see (https://example.com/a)，好', true), ['https://example.com/a'])
-  // 成對的括號是網址自己的，要留著。
   assert.deepEqual(linksOf('https://en.wikipedia.org/wiki/Foo_(bar)。', true), ['https://en.wikipedia.org/wiki/Foo_(bar)'])
 })
 

@@ -33,7 +33,6 @@ test('parseScheduleUrl 與 base64url 轉換', () => {
 
 test('設定頁：不支援時顯示原因、不給啟用按鈕', async () => {
   fakeApi(() => ({}))
-  // happy-dom 沒有 PushManager／serviceWorker：落在「不支援」。
   await mount(<PushSettings />)
   await settle()
   assert.match(text(), /推播通知/)

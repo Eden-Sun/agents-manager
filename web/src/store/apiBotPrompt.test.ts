@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { useStore } from './store.ts'
 
-// claude-api（#1944）：daemon 只收純文字 prompt；送出時拿掉插隊／排隊／自動啟動旗標，停著先 start。
 test('claude-api 的 sendPrompt 停著先 start，prompt body 不帶不支援的旗標', async () => {
   const calls: { url: string; method: string; body: unknown }[] = []
   globalThis.fetch = (async (input: string, init?: RequestInit) => {

@@ -1,8 +1,3 @@
-/**
- * 重連之後該重抓的東西都要重抓（漏掉的 WS 事件沒有別的來源會補）：state（bot／run／turn／queued／未讀／主機）、額度、
- * 草稿、身份停用、已載入的對話，還有側欄的 pane 清單（只靠 `panes_changed` 事件＋30 秒輪詢，輪詢之間漏了事件就會舊最多 30 秒）。
- * 假 WebSocket、mock daemon，`openSocket` 的重連照真的跑。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeWebSocket, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

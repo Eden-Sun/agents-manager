@@ -20,17 +20,11 @@ function stubFetch(status: number, body: unknown) {
   return calls
 }
 
-/**
- * 清一輪 macrotask。store → transport → 假 fetch 這條路全是 promise，排進來的微任務在計時器回呼之前一定跑完，
- * 所以這不是「等夠久」，跟機器多忙無關。以前固定等 20／80／150ms，負載一高就等不到而假紅（#426）。
- */
 const settle = () => new Promise((r) => setTimeout(r, 0))
 const positions = () => Object.fromEntries(useStore.getState().bots.map((b) => [b.id, b.primary_position]))
-/** 跟畫面同一套：`primary_position === 0` 是「還沒排過」，排最後。 */
 const shown = () =>
   sortPinned(useStore.getState().bots.filter((b) => b.primary).map((b, index) => ({ id: b.id, position: b.primary_position, index }))).map((b) => b.id)
 
-/** 2026-09-20 使用者：拖了順序沒存起來，重整後回到原本的順序。放開就要 POST /api/order {primary}，整份順序。 */
 test('拖完立刻把整份主力順序送給 daemon，畫面先套用', async () => {
   useStore.setState({ bots: [bot('a', 0), bot('b', 0), bot('c', 0)] })
   const calls = stubFetch(200, { ok: true })
@@ -57,10 +51,6 @@ test('daemon 拒絕（舊版不認得 primary → 400）：回捲，並把原因
   assert.match(notice.text, /400|至少要有一個/, `通知要帶 daemon 的原因：${notice.text}`)
 })
 
-/**
- * 模擬 daemon，不靠計時（#426）：每個 `/api/order` POST 抵達就掛著，等測試放行（`drain`）才落庫並回應；
- * `fail[i]` 為真就回 502 不落庫。被 signal 中止的跟真的 fetch 一樣 reject。`maxWaiting`＝同一時間最多幾個掛在 daemon。
- */
 function stubDaemon(fail: boolean[] = []) {
   const server = {
     order: null as string[] | null,
@@ -93,10 +83,6 @@ function stubDaemon(fail: boolean[] = []) {
   return server
 }
 
-/**
- * 一直放行到沒有請求在等為止。同時有好幾個在等時先放**最新**的——這正是 #391 的壞情況（舊的晚到），
- * store 沒把同範圍的存檔排成一條的話，這裡就會讓舊順序最後落庫。
- */
 async function drain(server: ReturnType<typeof stubDaemon>) {
   for (let round = 0; round < 20; round++) {
     await settle()
@@ -107,10 +93,6 @@ async function drain(server: ReturnType<typeof stubDaemon>) {
   throw new Error('放行 20 輪還有請求在等')
 }
 
-/**
- * 逾時不用真的計時：每個 POST 的 signal 由測試手動 abort（`TimeoutError`，跟 `AbortSignal.timeout` 同一個 reason）。
- * 回傳「讓第 i 個 POST 逾時」的函式；用完要 `setOrderSaveSignalForTest(null)` 換回真的計時。
- */
 function manualTimeouts() {
   const controllers: AbortController[] = []
   setOrderSaveSignalForTest(() => {
@@ -121,7 +103,6 @@ function manualTimeouts() {
   return (i: number) => controllers[i].abort(new DOMException('The operation timed out.', 'TimeoutError'))
 }
 
-/** #391：快速拖兩次，第一個 POST 還在路上時第二個就該排隊——daemon 最後不能是舊順序。 */
 test('兩次主力排序請求亂序完成時，較新的順序不能被舊請求覆蓋', async () => {
   useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
   const server = stubDaemon()
@@ -135,7 +116,6 @@ test('兩次主力排序請求亂序完成時，較新的順序不能被舊請�
   assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0, '兩次都成功，不該有錯誤通知')
 })
 
-/** #275 在主力上的同一件事：舊的晚到失敗，不能把已存成功的新順序退回去。 */
 test('兩次主力排序、較舊的失敗而較新的成功：不回捲、不跳錯誤', async () => {
   useStore.setState({ bots: [bot('a', 0), bot('b', 1), bot('c', 2)], notices: [] })
   const server = stubDaemon([true, false])
@@ -162,7 +142,6 @@ test('兩次主力排序、較舊的成功而較新的失敗：回到 daemon 存
   assert.match(notice.text, /主力順序沒存起來.*daemon rebuilding/)
 })
 
-/** #391 追加：transport 沒有逾時，前一個 POST 永遠不回的話，同範圍後面的存檔不能跟著永遠排隊。 */
 test('前一個主力排序 POST 永遠不回：逾時後中止它、送出下一個，最後是新的順序', async () => {
   const fireTimeout = manualTimeouts()
   try {

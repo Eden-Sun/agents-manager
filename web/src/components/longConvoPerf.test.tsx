@@ -1,8 +1,3 @@
-/**
- * 長對話的渲染成本（一顆 bot 幾百則訊息、含大量 code block）：用可數的量證明，不用掛鐘時間。
- * - 每個 store 更新時，掛在清單上的 selector 讀了幾次訊息陣列（O(N²) 的 `倒回` 計數器）。
- * - 同一份 Markdown 在清單重掛（換 bot 再換回來）時不重新解析。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { useState } from 'react'

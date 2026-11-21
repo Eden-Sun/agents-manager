@@ -5,7 +5,6 @@ import { clusterStatCounts, clusterStatOf, clusterStatText } from './expertClust
 
 const ALL_LAMPS: Lamp[] = ['working', 'idle', 'blocked', 'starting', 'stopping', 'offline', 'disconnected', 'unknown']
 
-/** 把文字拆回 `N 標籤` 的段落，加總 N 應該等於成員數。 */
 const sumOf = (text: string) => (text === '' ? 0 : text.split(' · ').reduce((acc, part) => acc + Number(part.split(' ')[0]), 0))
 
 test('clusterStatText：例子「1 執行中 · 1 閒置 · 2 停止」，0 的項目省略', () => {

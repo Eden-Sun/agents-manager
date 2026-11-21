@@ -54,30 +54,25 @@ test('切換 bot：bot1 夾帶附件後切到 bot2，再切回 bot1 附件依然
 
   await mount(<MultiBotFixture />)
 
-  // 1. 在 bot1 加入圖片與 PDF
   const imgFile = new File([new Uint8Array([1, 2, 3])], 'photo.png', { type: 'image/png', lastModified: 100 })
   await act(async () => currentAttachments.add([imgFile]))
   await until(() => currentAttachments.items.length === 1 && Boolean(currentAttachments.items[0].id), 'bot1 附件上傳完成並取得 id')
   const bot1AttId = currentAttachments.items[0].id!
   assert.ok(bot1AttId)
 
-  // 2. 切換至 bot2
   await act(async () => setBot('bot2'))
   await until(() => currentAttachments.items.length === 0, '切到 bot2 時托盤為空')
 
-  // 在 bot2 放入另外一份附件
   const bot2Doc = new File([new Uint8Array([4, 5])], 'doc2.pdf', { type: 'application/pdf', lastModified: 200 })
   await act(async () => currentAttachments.add([bot2Doc]))
   await until(() => currentAttachments.items.length === 1 && Boolean(currentAttachments.items[0].id), 'bot2 附件上傳完成')
   assert.equal(currentAttachments.items[0].name, 'doc2.pdf')
 
-  // 3. 切回 bot1：bot1 原本的附件完整還原！
   await act(async () => setBot('bot1'))
   await until(() => currentAttachments.items.length === 1 && currentAttachments.items[0].name === 'photo.png', '切回 bot1 還原原本附件')
   assert.equal(currentAttachments.items[0].id, bot1AttId)
   assert.equal(currentAttachments.items[0].isImage, true)
 
-  // 4. 再切回 bot2：bot2 的附件也還原！
   await act(async () => setBot('bot2'))
   await until(() => currentAttachments.items.length === 1 && currentAttachments.items[0].name === 'doc2.pdf', '切回 bot2 還原 doc2')
 })
@@ -86,7 +81,6 @@ test('重新整理／重啟：從 IndexedDB 還原未送出的附件草稿', { t
   mockApi(sharedMock)
   const now = Date.now()
 
-  // 1. 事先將之前對話留下的附件寫進 IndexedDB（模擬上一分頁或關閉前的暫存）
   const dbReq = factory.open(DRAFT_ATTACHMENT_DB_NAME, 1)
   await new Promise<void>((resolve, reject) => {
     dbReq.onupgradeneeded = () => {
@@ -115,7 +109,6 @@ test('重新整理／重啟：從 IndexedDB 還原未送出的附件草稿', { t
     }
   })
 
-  // 2. 啟動草稿持久化
   const stop = startAttachmentDraftPersistence()
 
   let attachments!: ReturnType<typeof useAttachments>
@@ -126,7 +119,6 @@ test('重新整理／重啟：從 IndexedDB 還原未送出的附件草稿', { t
 
   await mount(<ReloadFixture />)
 
-  // 3. 驗證從 IndexedDB 自動載入並還原至 DOM
   await until(
     () => attachments.items.length === 1 && attachments.items[0].name === 'persisted.pdf' && attachments.items[0].id === 'att_persisted_id',
     '從 IndexedDB 還原附件'
@@ -154,12 +146,10 @@ test('清空草稿與送出成功：分別正確清除暫存', { timeout: 30_000
   const id1 = attachments.items[0].id!
   const id2 = attachments.items[1].id!
 
-  // 送出時 clearSent 指定 id1
   await act(async () => attachments.clearSent([id1]))
   assert.equal(attachments.items.length, 1)
   assert.equal(attachments.items[0].id, id2)
 
-  // 清空 composer
   await act(async () => attachments.clear())
   assert.equal(attachments.items.length, 0)
 })

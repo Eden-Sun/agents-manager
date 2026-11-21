@@ -1,8 +1,3 @@
-/**
- * openai-api bot kind（切片 E）DOM 測試：
- * - 新增表單：OpenAI 沒啟用或沒金鑰時整顆停用並提示；啟用＋有金鑰後可選
- * - 側欄 KindTag 標籤為 OpenAI（`.kind-tag.openai-api`）
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll, type FakeRequest } from '../testing/domHarness'
@@ -54,7 +49,6 @@ const openAddBot = async () => {
   const open = [...document.querySelectorAll<HTMLButtonElement>('.sidebar-foot-actions button')].find((b) => b.textContent?.trim() === '新增 Bot')!
   await click(open)
   await settle()
-  // openai-api 只能當顧問：先選顧問角色，kind 按鈕才會因設定而停用／啟用。
   const advisor = [...document.querySelectorAll<HTMLElement>('.expert-role-card')].find((c) => c.textContent?.includes('顧問'))
   assert.ok(advisor, '專家模式應有顧問角色卡')
   await click(advisor)

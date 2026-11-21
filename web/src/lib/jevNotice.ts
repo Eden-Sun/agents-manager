@@ -1,9 +1,4 @@
-/**
- * 聊天室裡 daemon 留的 Jev 系統訊息（SPEC §4.3c 完成回報等，issue #1912）：文字以「🤖 Jev 建議（TypeSafe 型別判斷，機率 N%，只是建議，不會自動動作）：」
- * 開頭（🤖、括號、機率都可省，也接受「Jev 建議 82%：」），整段開頭被吃掉，剩下的是正文。認得就回機率與剩下的正文，聊天室用統一的 `JevLabel` 取代那段開頭；不是就 `null`，照原文印。
- */
 export interface JevNotice {
-  /** 0–1；開頭沒寫機率就是 `null`。 */
   prob: number | null
   rest: string
 }

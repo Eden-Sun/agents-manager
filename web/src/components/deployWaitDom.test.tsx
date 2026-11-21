@@ -1,7 +1,3 @@
-/**
- * 部署等換版窗口超過 3 分鐘（SPEC §18.10，使用者 2026-10-04）：WS 第一次通知跳 toast、擋的人換了只更新不跳；
- * header 的「⏳ 部署等 N 分」只在還在等、沒按「先等」時出現；「現在換版」「先等」打對的端點；點擋住的 bot 跳過去。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

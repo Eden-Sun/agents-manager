@@ -1,4 +1,3 @@
-/** Shared line icons for the chrome: stroked SVGs, since ⚙ / ⋯ glyphs vanish against a selected row at sidebar sizes. */
 
 export function GearIcon() {
   return (
@@ -15,7 +14,6 @@ export function GearIcon() {
   )
 }
 
-/** Git 的菱形分支標誌，用於收合的專案資訊入口。 */
 export function GitIcon() {
   return (
     <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
@@ -26,7 +24,6 @@ export function GitIcon() {
   )
 }
 
-/** 溢位選單（`⋯`）：把不常按、又不該常駐在標題列上的動作收起來。 */
 export function MoreIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -37,7 +34,6 @@ export function MoreIcon() {
   )
 }
 
-/** 時鐘圖示：取代 emoji ⏱，避免 headless 環境缺字型顯示成 tofu 方塊。 */
 export function ClockIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -47,7 +43,6 @@ export function ClockIcon() {
   )
 }
 
-/** Bot 機器人圖示：取代 emoji 🤖，避免 headless 環境缺字型顯示成 tofu 方塊。 */
 export function BotIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -59,7 +54,6 @@ export function BotIcon() {
   )
 }
 
-/** 禁止派工：圓圈加斜線，跟其他 icon 同一套線寬。 */
 export function NoDispatchIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">
@@ -69,7 +63,6 @@ export function NoDispatchIcon() {
   )
 }
 
-/** 提示符加底線：終端的通用符號，跟其他 icon 同一套線寬。 */
 export function TerminalIcon() {
   return (
     <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true">

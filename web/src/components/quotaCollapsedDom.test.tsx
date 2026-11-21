@@ -1,7 +1,3 @@
-/**
- * 桌機標題列額度放不下時（收合，#1158）：每格仍直向畫出全部回報窗口，不再收成只剩最急的一個（2026-10-10 使用者：「額度鈕 怎麼又變剩下7d」）。
- * happy-dom 量不到版面寬，所以量測期間把元素寬度撐開、額度區縮到 100px，逼出收合；量完還原。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -11,7 +7,6 @@ import { QuotaStrip } from './QuotaStrip'
 
 const rect = (width: number) => ({ x: 0, y: 0, left: 0, top: 0, right: width, bottom: 0, width, height: 0, toJSON() { return this } }) as DOMRect
 
-/** 每個元素都 300px、額度區 100px：`nextQuotaFit` 一定放不下，回傳還原函式。 */
 function squeezeLayout(onRead?: () => void): () => void {
   const proto = HTMLElement.prototype as unknown as Record<string, unknown>
   const names = ['getBoundingClientRect', 'getClientRects', 'clientWidth'] as const

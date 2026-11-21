@@ -1,8 +1,3 @@
-/**
- * 2026-10-08 使用者兩項：
- * - 電腦版晶片列不再 hover 開狀態卡，顏色說明改由尾端「?」開。
- * - 點選左邊 menu 的專案，側欄跟著捲到那個專案（貼齊頂端）。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -45,7 +40,6 @@ test('電腦版：滑鼠停在主力晶片上不開狀態卡；尾端「?」開�
   assert.ok(document.querySelector('[role="dialog"][aria-label="主力晶片的顏色說明"]'))
 })
 
-// 2026-11-07 使用者：主力長按的狀態卡拿掉；手機版不需要「?」，主力區不放任何說明鈕。
 test('手機版：主力區沒有「?」，也沒有狀態卡', async () => {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 720px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia

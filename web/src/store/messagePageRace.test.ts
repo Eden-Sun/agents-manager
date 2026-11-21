@@ -1,8 +1,3 @@
-/**
- * #1802：整頁載入（`loadMessages`／`loadGroupMessages`）的競態——
- * 逆序回應時較早發出的舊頁不能蓋掉較新請求的整頁；請求在途時新排進的 queued 回合不能被整頁快照刪掉；
- * 本地已到終態的回合不能被舊頁蓋回 in_flight（#649）。回應順序由測試自己決定，不靠 sleep。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset, routeDaemon, type FakeRequest } from './storeEnv.harness.ts'
@@ -37,7 +32,6 @@ const turn = (id: string, status: string, created_at: string) => ({
   completed_at: null,
 })
 
-/** 指定路徑的 GET 先全部掛起；回傳的陣列依發出順序收集 resolver，由測試決定哪一頁先回。 */
 function holdPages(path: string): Array<(r: Response) => void> {
   const waiting: Array<(r: Response) => void> = []
   routeDaemon((r: FakeRequest) =>

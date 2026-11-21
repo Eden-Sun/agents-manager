@@ -1,7 +1,3 @@
-/**
- * codex 重置券到期日（2026-11-07 使用者）：彈窗每張券一列（標題、到期日、倒數），不到 48 小時標警示色；
- * logo 右上角有張數徽章（快到期警示色、tooltip 寫最近到期）；舊 daemon 沒 credits 時退回只寫張數。真的掛 `QuotaStrip` 進 happy-dom。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

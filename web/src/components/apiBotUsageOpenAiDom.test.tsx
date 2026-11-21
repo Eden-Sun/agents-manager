@@ -1,7 +1,3 @@
-/**
- * openai-api 的 api-usage 語意（D2b-4，e56a84f70）：input 不含快取，快取讀寫分開帶；context.compact_at 為 null。
- * 網頁不得再扣快取（否則重複扣），也不得在沒有門檻時顯示「壓縮門檻」。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, act, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -19,7 +15,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** openai 一回合：OpenAI 原始 input 1700 = 不快取 1000 ＋ 快取讀 600 ＋ 快取寫 100；網頁收到的已是拆開的值。 */
 const openAiUsage = {
   attempts: { total: 1, recorded: 1, reserved: 0, unknown: 0, failed: 0 },
   cost_microusd: { recorded: 50_000, reserved: 0, unknown: 0 },

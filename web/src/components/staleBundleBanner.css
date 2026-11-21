@@ -1,4 +1,3 @@
-/* 換版橫幅：固定在頂部（含手機瀏海安全區），蓋在一般浮層之上，只能按「重新載入」或收起。 */
 .stale-bundle-banner {
   position: fixed;
   top: 0;
@@ -44,7 +43,6 @@
   cursor: pointer;
 }
 
-/* 手機：垂直置中的浮動卡片，好用拇指點；不貼頂、不算瀏海安全區。 */
 @media (width <= 640px) {
   .stale-bundle-banner {
     top: 50%;

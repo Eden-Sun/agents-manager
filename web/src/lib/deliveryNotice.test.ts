@@ -24,8 +24,6 @@ test('unknown／failed 由 delivery 自己顯示，不走這條；沒有 turn �
   assert.equal(deliveryNotice(undefined), 'none')
 })
 
-// issue #1471：遠端 bot 補送過一次（auto_resend=0），之後 hook 回報並完成。daemon 在 hook 收尾那一刻把
-// delivery_verified 寫成 1，徽章跟著撤掉；沒完成或備援收尾沒有 hook 證據的照舊標。
 const wire = (p: Record<string, unknown>) =>
   toTurn({ id: 't1', conversation_id: 'c1', origin: 'web', status: 'in_flight', delivery: 'ok', delivery_verified: 0, auto_resend: 0, resend_count: 1, ...p })
 

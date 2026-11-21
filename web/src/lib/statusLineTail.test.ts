@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { trimClippedTail } from './statusLineTail.ts'
 
 test('整個項目被砍掉時連分隔號一起去掉', () => {
-  // 2026-09-14 使用者實拍：codex 在窄 pane 上把 weekly 那一項整個換成刪節號。
   assert.equal(
     trimClippedTail('gpt-6-astra high · ~/project · Context 57% used · 5h 96% left · …'),
     'gpt-6-astra high · ~/project · Context 57% used · 5h 96% left',

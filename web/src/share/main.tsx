@@ -6,10 +6,6 @@ import { ShareApp } from './ShareApp'
 import { tokenFromLocation } from './shareModel'
 import './share.css'
 
-/**
- * 分享頁的入口（`web/share.html` → `dist/share.html`，daemon 的分享入口在 `/s/<token>` 回這頁）。
- * 刻意不 import 主 UI 的 store／api／元件：拿到連結的人＝網路上任何人，這一包裡不能有管理介面的程式碼。
- */
 const MOCK = import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
 
 async function boot() {

@@ -1,7 +1,3 @@
-/**
- * 環境設定「更新檢查」（UpdateCheckPanel，#1772）：每台主機一張表，herdr／各 agent CLI／herdr integration 都在。
- * 真的掛進 happy-dom，後端是 mock。integration 的更新只在按下「更新…」並確認後才送 POST；沒裝的、已是最新的沒有按鈕。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -90,7 +86,6 @@ it('表頭：工具清單還沒讀到（localTools undefined）時不是「未�
   const head = document.querySelector('.update-host-count')?.textContent ?? ''
   assert.doesNotMatch(head, /都是最新/, `表頭 ${head}`)
   assert.match(head, /查不到/)
-  // integration 的未安裝來自 mock（那是真的沒裝）；這裡只看 herdr 與四家 CLI 這六列。
   const ids = ['local:herdr-cli', 'local:herdr-server', 'local:cli-claude', 'local:cli-codex', 'local:cli-grok', 'local:cli-agy']
   const statuses = ids.map((id) => row(id)?.querySelector('.update-badge')?.textContent)
   assert.ok(statuses.every((t) => t === '查不到'), `六列狀態 ${statuses}`)
@@ -156,14 +151,13 @@ it('agy 落後官方 manifest（#1908）：「更新」先問、確認後才送 
   assert.equal(post().length, 0, '還沒確認，不能送')
   const dialog = document.querySelector('[role="alertdialog"]')!
   assert.match(dialog.textContent ?? '', /sha512.*不跑官方 install\.sh.*agy update/)
-  // 「分析影響」（#1928）：開框不 POST，按下去才 POST 一次（kind、from、to 帶對），不會順手安裝。
   const reviewPost = () => requests.filter((r) => r.method === 'POST' && /\/claude-update\/review$/.test(r.path))
   assert.equal(reviewPost().length, 0, '開框只讀')
   await click([...dialog.querySelectorAll('button')].find((b) => b.textContent === '分析影響')!)
   await until(() => reviewPost().length === 1, '分析影響的 POST')
   assert.deepEqual({ kind: (reviewPost()[0].body as Record<string, unknown>).kind, from: (reviewPost()[0].body as Record<string, unknown>).from, to: (reviewPost()[0].body as Record<string, unknown>).to }, { kind: 'agy', from: '1.4.2', to: '1.4.5' })
   assert.equal(post().length, 0, '解析不等於安裝')
-  await new Promise((r) => setTimeout(r, 900)) // 確認框的連點保護（800ms）：真人不會在同一瞬間按兩顆
+  await new Promise((r) => setTimeout(r, 900))
   await click([...document.querySelector('[role="alertdialog"]')!.querySelectorAll('button')].find((b) => b.textContent === '更新')!)
   await until(() => post().length === 1, '送了 POST')
   assert.match(post()[0].path, /\/hosts\/local\/agy\/install$/)

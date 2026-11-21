@@ -1,8 +1,6 @@
 import type { Dict } from '../../lib/i18n/types'
 
-// 區塊：updates（更新／安裝／部署、環境準備、環境設定外殼、主題與顯示）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
-  // 環境準備（OnboardingChecklist／lib/onboarding）
   '環境準備': 'Setup',
   '在本機開 shell 執行 {kind} 的官方安裝指令': 'Open a shell on this machine and run the official {kind} installer',
   '安裝中…': 'Installing…',
@@ -31,7 +29,6 @@ export default {
   '已安裝・未登入': 'Installed · signed out',
   '已登入': 'Signed in',
   '已安裝・登入狀態問不到': 'Installed · sign-in status unknown',
-  // 環境設定外殼（EnvShell／lib/envTabs）
   '{n} 待處理': '{n} to do',
   '{n} 未連線': '{n} offline',
   '{n} 可更新': { one: '{n} update', other: '{n} updates' },
@@ -41,7 +38,6 @@ export default {
   '身份': 'Identities',
   'Jev 建議': 'Jev suggestions',
   '顯示': 'Display',
-  // 主題、保持亮著、語言
   '跟隨系統': 'Follow system',
   '淺色': 'Light',
   '深色': 'Dark',
@@ -57,7 +53,6 @@ export default {
   '跟隨瀏覽器': 'Follow browser',
   '介面語言': 'Interface language',
   '語言': 'Language',
-  // herdr 一鍵更新（store/herdrUpdate.ts）
   '下載新版': 'Downloading new version',
   '等所有 Bot 閒下來': 'Waiting for all Bots to go idle',
   '停下 herdr': 'Stopping herdr',
@@ -97,7 +92,6 @@ export default {
   'herdr 沒有升級（{reason}）': 'herdr was not upgraded ({reason})',
   '更新 herdr {target}（所有 Bot 中斷約 1 分鐘）': 'Update herdr {target} (all Bots disconnect for about 1 minute)',
   'herdr {target}：不能從這裡更新': 'herdr {target}: cannot update from here',
-  // herdr 一鍵更新 header 徽章與確認框（components/HerdrUpdateChip.tsx）
   'herdr 更新中：{phase}（{where}）{wait}{resume}': 'herdr updating: {phase} ({where}){wait}{resume}',
   '。等所有 Bot 都閒下來才重啟，最多 30 分鐘': '. Waiting for all Bots to go idle before restarting, up to 30 minutes',
   '\n重啟後接回：{names}': '\nResumes after restart: {names}',
@@ -141,7 +135,6 @@ export default {
   '已結束的子 agent（已通知母 Bot 視需要重開）：': 'Sub-agents that ended (their parent Bots were notified to restart them if needed):',
   '知道了': 'Got it',
   '先留著': 'Keep for now',
-  // Codex Stop hook 信任（components/CodexStopHookSettings.tsx）
   'Codex Stop hook 信任': 'Codex Stop hook trust',
   '信任後，AG Man 會停用會爆 argv 上限的舊通知，改用 stdin Stop hook。': 'Once trusted, AG Man turns off the legacy notify (which can exceed the argv limit) and uses the stdin Stop hook instead.',
   '尚未開啟（設定檔 [codex] stop_hook = false），目前不會安裝或使用。': 'Not enabled yet ([codex] stop_hook = false in the config); nothing is installed or used for now.',
@@ -153,7 +146,6 @@ export default {
   '信任此 hook': 'Trust this hook',
   '信任 AG Man 的 Codex Stop hook？': 'Trust the AG Man Codex Stop hook?',
   '這會讓 {target} 的 codex 在每個回合結束時執行 AG Man 的 stop hook，並在該帳號目錄的 config.toml 寫入一筆 trusted_hash（寫入前會備份）。': 'This lets codex on {target} run the AG Man stop hook at the end of every turn, and writes one trusted_hash entry to that account directory\'s config.toml (backed up first).',
-  // 更新檢查（components/UpdateCheckPanel.tsx）
   '自動更新（不通知）': 'Auto-update (no notifications)',
   '有新版自動安裝，不跳通知；跑著的 bot 重啟後才換版（codex 會重啟閒置的 codex bot）。失敗時仍會通知。': 'Automatically install new versions without notifications; running bots will only switch versions after restarting (codex will restart idle codex bots). You will still be notified upon failure.',
   '{kind} 自動更新': '{kind} auto-update',
@@ -190,7 +182,6 @@ export default {
   '更新…': 'Update…',
   'integration：還沒讀到這台的狀態（daemon 開機後約 1 分鐘第一輪）': 'integration: this host\'s status has not been read yet (first round about 1 minute after the daemon starts)',
   'integration：這一輪讀不到（{error}），上面是上次的結果': 'integration: this round could not read it ({error}); the results above are from last time',
-  // changelog 與翻譯列（components/UpdateChangelog.tsx）
   '正在取得新版 changelog…': 'Fetching the changelog for the new version…',
   '新版 {version}': 'New version {version}',
   '找不到這一版的更新說明': 'No release notes found for this version',
@@ -237,7 +228,6 @@ export default {
   '翻譯沒有完成': 'Translation did not finish',
   '{lead}：{reason}': '{lead}: {reason}',
   '再試一次': 'Try again',
-  // 更新徽章與重啟確認框（components/UpdateBadge.tsx）
   '這個 Bot': 'this Bot',
   '由父 Bot 安排重啟': 'Restart arranged by the parent Bot',
   '{name}：{hint}': '{name}: {hint}',
@@ -259,7 +249,6 @@ export default {
   '{name} 正在忙，現在重啟會打斷這一回合。新版 {kind} 會 {resume} 接著同一個 session 跑，但這一輪沒說完的話會斷在那裡。': '{name} is busy; restarting now will interrupt this turn. The new {kind} continues the same session with {resume}, but anything unfinished in this turn will be cut off.',
   '重啟 {name} 會用新版 {kind} 接著跑（session 會 {resume}，上下文不會掉）。': 'Restarting {name} continues on the new {kind} version (the session resumes with {resume}; context is kept).',
   '重啟套用': 'Apply restart',
-  // 更新檢查的狀態與說明（store/updateCheck.ts）
   '可更新': 'Update available',
   '查不到': 'Unknown',
   '更新會重啟 herdr server，所有 Bot 中斷約 1 分鐘後接回': 'Updating restarts the herdr server; all Bots disconnect for about 1 minute, then resume',
@@ -287,7 +276,6 @@ export default {
   'integration 還沒讀到': 'integration not read yet',
   'integration 讀取失敗': 'integration read failed',
   '都是最新': 'All up to date',
-  // CLI 一鍵更新進度（store/cliUpdate.ts）
   '準備安裝': 'Preparing install',
   '讀目前版本': 'Reading current version',
   '安裝中': 'Installing',
@@ -314,7 +302,6 @@ export default {
   '，重啟 {n} 顆閒置的 {kind}': ', restarting {n} idle {kind}',
   '；沒有閒置的 {kind} 可以重啟（在忙的等閒下來，再按 header 的更新按鈕）': '; no idle {kind} to restart (once the busy ones are idle, click the update button in the header)',
   '{host} 的 {kind} {verb} {up}{tail}': '{host}: {kind} {verb} {up}{tail}',
-  // 安裝 chip（components/CodexInstallChip.tsx、ClaudeInstallChip.tsx）
   '{host} 的 codex {phase}{span}…': '{host}: codex {phase}{span}…',
   '（{from}{to}）': ' ({from}{to})',
   '{host}，{n} 顆 Bot': '{host}, {n} Bots',
@@ -341,7 +328,6 @@ export default {
   '（{phase}）': ' ({phase})',
   '已在目標版的主機不重裝。各台安裝狀態會留在 header，直到全部到版。': 'Hosts already on the target version are not reinstalled. Each host\'s install status stays in the header until all are up to date.',
   '安裝到 {n} 台': 'Install on {n} host(s)',
-  // 額度列的批次重啟與 CLI 更新（components/UpdateQuotaChip.tsx）
   '重啟完成 · 成功 {ok} 顆 · 失敗 {failed} 顆': 'Restart done · {ok} succeeded · {failed} failed',
   '重啟完成 · 成功 {ok} 顆': 'Restart done · {ok} succeeded',
   '重啟中 {done}/{total}': 'Restarting {done}/{total}',
@@ -372,13 +358,11 @@ export default {
   '標「背景狀態未知」的 {n} 顆，daemon 還沒讀過它們畫面底部有沒有背景工作（剛重啟）；若有，重啟會一起結束。要保險就等 30 秒再按。': 'For the {n} marked "background status unknown", the daemon has not yet checked for background work at the bottom of their screens (just restarted). If there is any, the restart will end it too. To be safe, wait 30 seconds before pressing.',
   '另外 {n} 顆在忙，這次會跳過：': '{n} more are busy and will be skipped this time:',
   '重啟 {n} 顆': 'Restart {n}',
-  // 立即部署、部署等換版窗口、設定落差徽章（components/DeployNowBadge.tsx、DeployWaitChip.tsx、RuntimeDriftBadge.tsx）
   '連不上 daemon（可能正在重啟），這是斷線前的狀態。': 'Cannot reach the daemon (it may be restarting); this is the state from before the disconnect.',
   '{text}。': '{text}.',
   '線上 {live} 落後 origin/main {behind} 個 commit（{code} 個動到程式碼）：點一下立即部署。': 'Live {live} is {behind} commits behind origin/main ({code} touch code). Click to deploy now.',
   '部署中': 'Deploying',
   '部署中：{text}': 'Deploying: {text}',
-  // lib/mergedUpdateLabels.ts（合成更新鈕的選單與 aria-label）
   '重啟完成 · 成功 {ok} 顆{failed}（收起）': 'Restart finished · {ok} succeeded{failed} (collapse)',
   ' · 失敗 {n} 顆': ' · {n} failed',
   '重啟中 {done}/{total}（收起，不會中斷）': 'Restarting {done}/{total} (collapse; it will not be interrupted)',
@@ -389,7 +373,6 @@ export default {
   'claude 安裝中 {hosts}…': 'Installing claude: {hosts}…',
   '安裝 claude{target} 到 {n} 台': 'Install claude{target} on {n} hosts',
   '有更新：{items}。點開選要做哪一個': 'Updates available: {items}. Open to choose which one.',
-  // lib/updateBatch.ts（批次重啟的略過原因）
   '子 agent，由父 Bot 重開': 'Child agent; the parent Bot restarts it',
   '在你自己的 herdr default session 裡，daemon 不動它': 'Lives in your own herdr default session; the daemon leaves it alone',
   '新版還沒安裝，由父 Bot 安排安裝與重啟': 'The new version is not installed yet; the parent Bot arranges install and restart',

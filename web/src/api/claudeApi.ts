@@ -1,8 +1,3 @@
-/**
- * 環境設定的「Claude API」（SPEC §4.3d，issue #1919）：總開關、各用途的開關與模型、API key、用量帳本。
- *
- * key 只往 daemon 送、永遠不回來：讀到的只有 `key_present` 與不能用的原因（比照 Jev，`api/judge.ts`）。
- */
 import { t } from '../lib/i18n'
 import { L } from './mockText'
 import { rawTransport } from './index'
@@ -19,17 +14,13 @@ export interface ClaudeApiUse {
   default_model: string
   default_effort: string
   default_max_per_hour: number
-  /** 這個用途的設定本來在別的段（`[changelog_translate]`）；不受總開關管。 */
   legacy_section: string | null
-  /** 「自動」開關（訊息翻譯：英文訊息自動翻）；這個用途沒有這個開關是 null。 */
   auto: boolean | null
 }
 
-/** 設定頁的一列＝一組用途（同組共用模型／effort／開關／每小時上限；呼叫端與帳本仍按用途 id）。 */
 export interface ClaudeApiGroup {
   id: string
   label: string
-  /** 這組包含的用途 id。 */
   uses: string[]
   enabled: boolean
   model: string
@@ -38,17 +29,12 @@ export interface ClaudeApiGroup {
   default_model: string
   default_effort: string
   default_max_per_hour: number
-  /** 「自動」開關（翻譯組：英文訊息自動翻）；這組沒有就是 null。 */
   auto: boolean | null
-  /** 供應商：`anthropic`（Claude，預設）或 `openai`。舊 daemon 沒回就是 Claude。 */
   provider?: string
-  /** 這組能不能改用 OpenAI（目前只有翻譯）。 */
   openai_allowed?: boolean
-  /** 品質沒過時的重試模型（Claude 或核准的 OpenAI 模型）；空字串＝不升級。舊 daemon 沒有就是空。 */
   retry_model?: string
 }
 
-/** OpenAI 能不能選：沒開或沒 key 時選項仍在，但停用並顯示原因。 */
 export interface ClaudeApiOpenAi {
   available: boolean
   unavailable_reason: string | null
@@ -62,13 +48,9 @@ export interface ClaudeApiSettings {
   key_error: string | null
   models: string[]
   efforts: string[]
-  /** 以組為單位的設定（新 daemon）。舊 daemon 沒有時，由 `uses` 一個用途一組合成。 */
   groups: ClaudeApiGroup[]
-  /** 逐用途（相容欄位）：值是所屬組的生效值；帳本的用途名稱從這裡查。 */
   uses: ClaudeApiUse[]
-  /** daemon 有沒有回 `groups`；沒有就用逐用途寫法存檔。 */
   groupsApi: boolean
-  /** OpenAI 供應商的狀態；舊 daemon 沒有這個欄位就是 null（不顯示供應商選單）。 */
   openai?: ClaudeApiOpenAi | null
 }
 
@@ -78,9 +60,7 @@ export interface ClaudeApiUsePatch {
   effort?: string
   max_per_hour?: number
   auto?: boolean
-  /** 只有組收：`anthropic`／`openai`。 */
   provider?: string
-  /** 只有組收：品質沒過的重試模型；空字串＝不升級。 */
   retry_model?: string
 }
 
@@ -88,7 +68,6 @@ export interface ClaudeApiPatch {
   enabled?: boolean
   uses?: Record<string, ClaudeApiUsePatch>
   groups?: Record<string, ClaudeApiUsePatch>
-  /** 空字串＝不動現有的 key。 */
   token?: string
 }
 
@@ -96,7 +75,6 @@ export interface ClaudeApiLedgerRow {
   at: string
   use: string
   model: string
-  /** `anthropic`／`openai`；舊 daemon 沒回就當 Claude。 */
   provider?: string
   ms: number
   ok: boolean
@@ -123,19 +101,17 @@ export interface ClaudeApiLedger {
 const MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const mockUses = (): ClaudeApiUse[] => [
-  { id: 'changelog_review', label: L('影響分析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null }, // i18n-ignore：假資料
-  { id: 'release_triage', label: L('上游新版分診', 'Upstream release triage'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null }, // i18n-ignore：假資料
-  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: 'changelog_translate', auto: null }, // i18n-ignore：假資料
+  { id: 'changelog_review', label: L('影響分析 changelog', 'AGM changelog analysis'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null },
+  { id: 'release_triage', label: L('上游新版分診', 'Upstream release triage'), enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, legacy_section: null, auto: null },
+  { id: 'changelog_translate', label: L('更新框翻譯', 'Update box translation'), enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: 'changelog_translate', auto: null },
 ]
 const mockGroups = (): ClaudeApiGroup[] => [
-  { id: 'changelog_analysis', label: L('changelog 影響分析', 'Changelog analysis'), uses: ['changelog_review', 'release_triage'], enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, auto: null }, // i18n-ignore：假資料
-  { id: 'translate', label: L('翻譯', 'Translation'), uses: ['message_translate', 'changelog_translate'], enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, auto: true }, // i18n-ignore：假資料
+  { id: 'changelog_analysis', label: L('changelog 影響分析', 'Changelog analysis'), uses: ['changelog_review', 'release_triage'], enabled: false, model: 'claude-opus-5-5', effort: 'low', max_per_hour: 30, default_model: 'claude-opus-5-5', default_effort: 'low', default_max_per_hour: 30, auto: null },
+  { id: 'translate', label: L('翻譯', 'Translation'), uses: ['message_translate', 'changelog_translate'], enabled: false, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, auto: true },
 ]
-/** 延後建立：示範文字依語言，要等 `?lang=` 套用後才取。 */
 let mockStateValue: ClaudeApiSettings | null = null
 const initialMockState = (): ClaudeApiSettings => ({ enabled: false, key_present: false, key_error: 'key file unreadable', models: MODELS, efforts: EFFORTS, groups: mockGroups(), uses: mockUses(), groupsApi: true })
 const mockStateOf = (): ClaudeApiSettings => (mockStateValue ??= initialMockState())
-/** mock 用：打開訊息翻譯（總開關、用途、自動）。截圖與手動情境用，不影響預設。 */
 export function mockTranslateOn(auto = true): void {
   const st = mockStateOf()
   const msg: ClaudeApiUse = { id: 'message_translate', label: L('對話訊息翻譯', 'Message translation'), enabled: true, model: 'claude-haiku-5-5', effort: 'low', max_per_hour: 120, default_model: 'claude-haiku-5-5', default_effort: 'low', default_max_per_hour: 120, legacy_section: null, auto }
@@ -212,7 +188,6 @@ function parse(raw: unknown): ClaudeApiSettings | null {
   const o = raw as Record<string, unknown>
   const uses = Array.isArray(o.uses) ? o.uses.map(parseUse).filter((u): u is ClaudeApiUse => u !== null) : []
   const groupsApi = Array.isArray(o.groups)
-  // 舊 daemon 沒有 groups：一個用途當一組，存檔改走逐用途寫法。
   const groups = groupsApi
     ? (o.groups as unknown[]).map(parseGroup).filter((g): g is ClaudeApiGroup => g !== null)
     : uses.map((u): ClaudeApiGroup => ({ id: u.id, label: u.label, uses: [u.id], enabled: u.enabled, model: u.model, effort: u.effort, max_per_hour: u.max_per_hour, default_model: u.default_model, default_effort: u.default_effort, default_max_per_hour: u.default_max_per_hour, auto: u.auto }))
@@ -275,7 +250,6 @@ function parseLedger(raw: unknown): ClaudeApiLedger {
   }
 }
 
-/** 舊 daemon 沒有這個端點（404／405）→ `null`，整個區塊顯示「需要更新 daemon」。其餘錯誤往外丟。 */
 export async function fetchClaudeApiSettings(): Promise<ClaudeApiSettings | null> {
   if (rawTransport.mock) return mockStateOf()
   try {
@@ -286,7 +260,6 @@ export async function fetchClaudeApiSettings(): Promise<ClaudeApiSettings | null
   }
 }
 
-/** 帳本的供應商篩選：全部／Claude（anthropic）／OpenAI。 */
 export type LedgerProvider = 'all' | 'anthropic' | 'openai'
 
 export async function fetchClaudeApiLedger(limit = 10, provider: LedgerProvider = 'all'): Promise<ClaudeApiLedger> {

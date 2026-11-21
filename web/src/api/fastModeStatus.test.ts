@@ -1,7 +1,3 @@
-/**
- * #1914：`status_json` 沒有 `fast_mode`（codex 的狀態列只有 context_window）要是 `null`，不是 `false`；
- * `runningFast` 才會回退到 `run.runtime_fast`。走真的 `toRun` 正規化，不手寫 Run。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { toRun, toStatusInfo } from './normalize.ts'
@@ -10,7 +6,6 @@ import type { Bot, Run } from './types.ts'
 
 const bot = (fast: boolean) => ({ id: 'b1', kind: 'codex', fast }) as Bot
 
-/** daemon 的 run 形狀；`status_json` 是字串（DB 欄位原樣）。 */
 const run = (statusJson: unknown, runtimeFast: unknown): Run =>
   toRun({ id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle', status_json: statusJson, runtime_fast: runtimeFast }) as Run
 

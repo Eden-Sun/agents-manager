@@ -51,7 +51,6 @@ test('JudgePanel: 分「設定｜帳本」兩個子分頁，預設停在設定�
   const root = await mount(<JudgePanel />)
   await settle()
 
-  // 子分頁 tablist
   const tabs = root.querySelectorAll<HTMLButtonElement>('[role="tab"]')
   assert.equal(tabs.length, 2, '應有「設定」與「帳本」兩個子分頁')
   assert.equal(tabs[0].textContent?.trim(), '設定')
@@ -59,7 +58,6 @@ test('JudgePanel: 分「設定｜帳本」兩個子分頁，預設停在設定�
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true', '預設選中設定')
   assert.equal(tabs[1].getAttribute('aria-selected'), 'false')
 
-  // 面板顯示狀態
   const formPanel = root.querySelector('#jev-form')
   const bookPanel = root.querySelector('#jev-book')
   assert.ok(formPanel, '#jev-form 存在')
@@ -67,14 +65,12 @@ test('JudgePanel: 分「設定｜帳本」兩個子分頁，預設停在設定�
   assert.equal(formPanel.getAttribute('hidden'), null, '設定面板未隱藏')
   assert.notEqual(bookPanel.getAttribute('hidden'), null, '帳本面板已隱藏')
 
-  // 切換至帳本
   await click(tabs[1])
   assert.equal(tabs[0].getAttribute('aria-selected'), 'false')
   assert.equal(tabs[1].getAttribute('aria-selected'), 'true')
   assert.notEqual(formPanel.getAttribute('hidden'), null, '設定面板已隱藏')
   assert.equal(bookPanel.getAttribute('hidden'), null, '帳本面板未隱藏')
 
-  // 檢查「最近 20 筆」預設收起於 details.env-fold
   const fold = bookPanel.querySelector<HTMLDetailsElement>('details.env-fold')
   assert.ok(fold, '「最近 20 筆」包在 details.env-fold')
   assert.equal(fold.open, false, '預設為收起（open === false）')

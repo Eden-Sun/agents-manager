@@ -1,7 +1,6 @@
 import type { CodexTerminalFooter } from "../lib/codexTerminalFooter"
 import { useT } from "../lib/i18n"
 
-/** codex footer 上 claude 沒有的欄位（warning）；其餘欄位由 `StatusLineBar` 用共用的 `SlItem` 畫。 */
 export function CodexTerminalFooterItems({ footer }: { footer: CodexTerminalFooter | null }) {
   const t = useT()
   if (!footer) return null

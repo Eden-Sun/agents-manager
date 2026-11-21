@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchClaudeApiBalance, type ClaudeApiBalance } from '../api/claudeApiBalance'
 
-/**
- * 全域額度列的 Anthropic API 餘額（`GET /api/claude-api/balance`）：所有訂閱者共用一份、每分鐘更新一次，
- * 沒人訂閱就不打（daemon 端 cost_report 另有 10 分鐘快取，這裡不會打爆）。讀不到＝保留上一份；一次都沒讀到＝null。
- */
 const POLL_MS = 60_000
 let latest: ClaudeApiBalance | null = null
 let timer: ReturnType<typeof setInterval> | null = null
@@ -18,13 +14,11 @@ async function load() {
     latest = await fetchClaudeApiBalance()
     for (const s of subs) s(latest)
   } catch {
-    // 讀不到就沿用上一份
   } finally {
     inflight = false
   }
 }
 
-/** 校正錨點後立刻重讀。 */
 export function reloadClaudeApiBalance() {
   return load()
 }
@@ -46,7 +40,6 @@ export function useClaudeApiBalance(): ClaudeApiBalance | null {
   return b
 }
 
-/** 給測試：清掉共用快取。 */
 export function resetClaudeApiBalanceForTest() {
   latest = null
   inflight = false

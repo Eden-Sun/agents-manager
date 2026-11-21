@@ -5,7 +5,6 @@ import { useDismiss } from '../lib/useDismiss'
 import { MoreIcon } from './Icons'
 import './headMoreMenu.css'
 
-/** 標題列／側欄 project 列的 `⋯`：刪除收進來，照 UI-DECISIONS「一般畫面最多一個常駐危險操作」。 */
 export function HeadMoreMenu({
   children,
   label,
@@ -14,7 +13,6 @@ export function HeadMoreMenu({
 }: {
   children: ReactNode
   label: string
-  /** 觸發鈕的內容（預設 `⋯`）；專案「＋」等沿用同一套選單、鍵盤與定位時用。 */
   trigger?: ReactNode
   triggerClassName?: string
 }) {
@@ -22,10 +20,8 @@ export function HeadMoreMenu({
   const wrap = useRef<HTMLDivElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const btn = useRef<HTMLButtonElement>(null)
-  // role="menu" 的鍵盤行為（同 Tools／ModelPicker）。
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
 
-  // CSS 只能選一邊展開，`⋯` 在最右時選單滑出右緣（390px 實測 right=510）；打開時量一次推回來。
   useLayoutEffect(() => {
     const el = pop.current
     if (!open || !el) return
@@ -41,7 +37,6 @@ export function HeadMoreMenu({
     const ceil = (clipRect?.top ?? 0) + 8
     const r = el.getBoundingClientRect()
     const btnTop = wrap.current?.getBoundingClientRect().top ?? r.top
-    // 往下放不下、往上放得下才翻；上下都放不下就維持往下。
     if (r.bottom > floor && btnTop - 6 - r.height >= ceil) el.dataset.up = ''
   }, [open])
 

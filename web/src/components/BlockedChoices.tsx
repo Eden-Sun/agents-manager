@@ -1,7 +1,3 @@
-/**
- * agent 停在編號選單上時，畫成可直接點的清單（2026-09-12 使用者回報）；多分頁＋多選要走到 Submit 才交卷，說明預設收起。
- * 認不出選單就回 `null` 退回終端快照：按鍵直送別人終端，寧可少捷徑也不在認錯的畫面上替使用者答題。
- */
 import { useLayoutEffect, useRef, useState } from 'react'
 import { useT } from '../lib/i18n'
 import { usePaneKeys } from '../hooks/usePaneKeys'
@@ -30,7 +26,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 const squashText = (s: string) => s.replace(/\s+/g, '')
 
-/** 最近的捲動容器；`null` ＝整頁在捲，交給瀏覽器 scroll anchoring。 */
 function scroller(el: HTMLElement): HTMLElement | null {
   for (let p = el.parentElement; p; p = p.parentElement) {
     const o = getComputedStyle(p).overflowY
@@ -39,16 +34,13 @@ function scroller(el: HTMLElement): HTMLElement | null {
   return null
 }
 
-/** 送出一顆鍵之後等畫面反應：每 `STEP` 看一次，最多看 `TRIES` 次。 */
 const STEP = 260
 const TRIES = 3
 
-/** 走到目標列最多修正幾次（清單可能有認不得但游標走得到的列）。 */
 const WALK_TRIES = 3
 
 type Busy = { kind: 'choice' | 'submit' | 'tab'; key: string } | null
 
-/** claude「Session paused」選單的第二項：`Edit prompt and retry with <模型>`。 */
 const EDIT_PROMPT_CHOICE = /^Edit prompt and retry\b/i
 
 export function BlockedChoices({
@@ -60,11 +52,9 @@ export function BlockedChoices({
   botId: string
   menu: TuiChoiceMenu
   onAnswered?: () => void
-  /** pane 太矮、題目或分頁列被裁掉時，從原題補：沒畫出來的題目、第幾題與上一題／下一題。 */
   pendingAt?: PendingAt | null
 }) {
   const t = useT()
-  // Jev 對這一題的建議（issue #1475）：只在對得上畫面上的列時標，不影響任何按鍵。
   const jev = pendingAt?.jev ?? null
   const jevRowShown = jev !== null && menu.choices.some((c) => jevMatchesTitle(jev.label, c.title))
   const readTerminal = useStore((s) => s.readTerminal)
@@ -75,16 +65,12 @@ export function BlockedChoices({
   const [note, setNote] = useState<string | null>(null)
   const [typeText, setTypeText] = useState('')
   const [typeFor, setTypeFor] = useState<number | null>(null)
-  // 目前分頁讀不出來（終端用顏色標），先猜第一個 ☐、之後自己記；猜錯只是跳到別題。
   const [tabAt, setTabAt] = useState<number | null>(null)
-  // 畫面上的題目對得上原題時，第幾題以它為準（問句比猜的可靠）：原題依序對應非送出分頁。
-  // 猜的目前分頁若落在「提交」、但畫面其實是某一題（例如全部題都 ☒、回頭看第一題），就不標提交。
   const pageTabs = menu.tabs.flatMap((t, i) => (t.submit ? [] : [i]))
   const screenTab = !isSubmitMenu(menu) && pendingAt && pendingAt.total === pageTabs.length ? (pageTabs[pendingAt.at] ?? null) : null
   const guessTab = screenTab ?? menu.tabAt
   const guessOnSubmit = guessTab !== null && Boolean(menu.tabs[guessTab]?.submit) && !isSubmitMenu(menu)
   const atTab = tabAt ?? (guessOnSubmit ? null : guessTab)
-  // 這一頁的譯文（只換顯示；比對、送鍵都用上面的原文 `menu`）。header 用分頁列的名字。
   const tr = useMenuTranslation([
     {
       header: atTab === null ? '' : (menu.tabs[atTab]?.label ?? ''),
@@ -95,7 +81,6 @@ export function BlockedChoices({
   ])
   const disp = tr.page(0)
 
-  // 展開說明的項目，預設全收、換題清空（2026-09-12 第四輪：攤開要滑三四屏）。
   const [open, setOpen] = useState<number[]>([])
   const [openFor, setOpenFor] = useState(menu.question)
   if (openFor !== menu.question) {
@@ -104,7 +89,6 @@ export function BlockedChoices({
   }
 
   const listRef = useRef<HTMLOListElement>(null)
-  /** 收合前記下列的位置，重畫完補回去以免跳動。 */
   const anchor = useRef<{ el: HTMLElement; top: number } | null>(null)
   const lastCursor = useRef(menu.cursor)
 
@@ -117,7 +101,6 @@ export function BlockedChoices({
       if (box) box.scrollTop += now - a.top
       return
     }
-    // 標題截尾的列也要有 ▸；直接寫 `data-wide` 不進 state（省一輪 render，React 不會洗掉）。
     listRef.current?.querySelectorAll<HTMLElement>('.bc-row').forEach((li) => {
       if (li.querySelector('.bc-open')) return
       const t = li.querySelector('.bc-title')
@@ -126,7 +109,6 @@ export function BlockedChoices({
     })
   })
 
-  // 游標移動時捲進視野，否則 ↑／↓ 等於盲按。
   useLayoutEffect(() => {
     if (lastCursor.current === menu.cursor) return
     lastCursor.current = menu.cursor
@@ -149,10 +131,8 @@ export function BlockedChoices({
     }
   }
 
-  /** 不是同一份選單就什麼都不送——走幾格是相對的，換題會按到別的東西。 */
   const stillHere = (now: TuiChoiceMenu | null): now is TuiChoiceMenu => Boolean(now && sameChoices(now, menu))
 
-  /** 游標走到某列：每步重讀畫面重算（有認不得的列如 `Submit`，一次算會差一格）。 */
   const walkTo = async (target: WalkTarget): Promise<TuiChoiceMenu | null> => {
     for (let i = 0; i < WALK_TRIES; i++) {
       const now = await read()
@@ -172,7 +152,6 @@ export function BlockedChoices({
     for (let i = 0; i < TRIES; i++) {
       await sleep(STEP)
       const now = await read()
-      // 選單不見／換題＝鍵被收下了。
       if (!now || !sameChoices(now, menu)) return true
       if (done(now)) return true
     }
@@ -186,7 +165,6 @@ export function BlockedChoices({
     try {
       setNote(await fn())
     } catch {
-      // store.sendKeys 已經發通知；這裡只收住拒絕並在選單旁提示，不再發第二則通知。
       setNote(t('按鍵沒有送出去，請查看終端位置後再試。'))
     } finally {
       setBusy(null)
@@ -194,11 +172,6 @@ export function BlockedChoices({
     }
   }
 
-  /**
-   * codex 非同步提問選單（#1879 複審）的作答：整個流程固定在同一個 Run（`lib/runPin.ts`，送鍵帶 id、Run 換了就放棄、不走 fresh-run 重試），
-   * 每一步送鍵前都用這個守門重讀畫面：提問面板展開、題目完整等於這一題、游標在第 `i` 列、每一列標題跟原來一樣
-   * （只有 Other 貼字後第 `i` 列的標題可以是貼的字，而且必須完整等於答案）。
-   */
   const newPin = () => runPin(() => readTerminal(botId, 'visible', 200), () => useStore.getState().runs[botId]?.id)
   const goneMsg = t('這次作答的 Run 已經換了（bot 重啟過）或讀不到畫面，什麼都沒送出。')
   const asyncGuard = async (pin: RunPin, i: number, typed?: string): Promise<boolean> => {
@@ -228,7 +201,6 @@ export function BlockedChoices({
       const move = keysToMove(now, i)
       if (!move) return t('游標走不到這一項（畫面可能換了），什麼都沒送出。')
       if (move.length) await sendKeys(botId, move, pin.id())
-      // 先只移動；游標停在目標、仍是同一題、每列標題都沒變，才送 Enter（Enter 前再讀一次）。
       let there = false
       for (let t = 0; t < TRIES && !there; t++) {
         if (move.length) await sleep(STEP)
@@ -240,7 +212,6 @@ export function BlockedChoices({
       return null
     })
 
-  /** `Other` 打字列（codex 非同步提問）：貼字前那一列必須還是原本的 `Other`（沒有舊字可疊）、貼字後那一列完整等於答案才送 Enter。 */
   const typeAsync = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const text = typeText.trim()
@@ -250,7 +221,6 @@ export function BlockedChoices({
       if (raw === null) return goneMsg
       const first = parseChoiceMenu(raw)
       if (!stillHere(first)) return t('畫面在這中間換過了，什麼都沒送出；請再點一次。')
-      // 游標走到這一列：只移動，每步重讀。
       let at = first
       for (let attempt = 0; attempt < WALK_TRIES && at.cursor !== i; attempt++) {
         const move = keysToMove(at, i)
@@ -275,19 +245,15 @@ export function BlockedChoices({
       return null
     })
 
-  /** 單選：送出前重讀、走過去再 Enter 一批送完（2026-09-12 第一輪實測）。 */
   const pickOne = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const now = await read()
       if (!stillHere(now)) return t('畫面在這中間換過了，剛剛那一下沒有送出去——上面是重讀後的選單，請再點一次。')
       await sendKeys(botId, keysToSelect(now, i))
-      // Session paused 的「Edit prompt and retry…」：CLI 把上一則 prompt 放回輸入框；等它出現就把整段帶進網頁輸入框編輯
-      // （只讀、不按任何鍵；使用者點的就是這一項）。
       if (EDIT_PROMPT_CHOICE.test(menu.choices[i]?.title ?? '')) void loadComposerDraft(botId, { editNow: true, tries: 8, delayMs: 500 })
       return null
     })
 
-  /** 真機：停在 Type something. 上直接貼字，不必先 Enter；貼完 Enter 才答完。 */
   const sendTyped = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const text = typeText.trim()
@@ -306,7 +272,6 @@ export function BlockedChoices({
         }
       }
       if (!shown) return t('自訂文字沒有出現在畫面上，沒有按 Enter。')
-      // 複選頁：貼字那列會自己勾起來（2026-09-25 真機），Enter 只會把勾翻掉；勾完按下面的「送出」。
       if (menu.multi) {
         const now = await read()
         if (!(now?.choices[i] && customAnswerChecked(now.choices[i], text))) return t('自訂文字出現了但那列沒勾起來，沒有再按鍵；請看終端。')
@@ -317,7 +282,6 @@ export function BlockedChoices({
       return null
     })
 
-  /** 多選切換：絕不按 Enter（可能是交卷）；試 space 再試數字鍵，成功與否看畫面 `[x]`。 */
   const toggle = (i: number) =>
     run({ kind: 'choice', key: String(i) }, async () => {
       const landed = await walkTo(i)
@@ -331,7 +295,6 @@ export function BlockedChoices({
     })
 
   const activate = (i: number) => {
-    // 複選頁終端上已勾好的 Type something 是使用者打好的字：只翻轉勾，不再給打字框。
     if (typedAnswerHere(menu, menu.choices[i]) && !(menu.multi && menu.choices[i].checked)) {
       setTypeFor(i)
       setNote(null)
@@ -341,7 +304,6 @@ export function BlockedChoices({
     return menu.multi && menu.choices[i].checked !== null ? toggle(i) : pickOne(i)
   }
 
-  /** 確認游標真的停在 `Submit` 上才按 Enter。 */
   const submit = () =>
     run({ kind: 'submit', key: 'submit' }, async () => {
       const landed = await walkTo('submit')
@@ -350,7 +312,6 @@ export function BlockedChoices({
       return null
     })
 
-  /** 換分頁：先 ←／→（無副作用）再退回 tab；絕不碰 space／數字／Enter，換頁不該改答案。 */
   const moveTabs = async (delta: number): Promise<boolean> => {
     const before = await read()
     if (!before) return false
@@ -363,7 +324,6 @@ export function BlockedChoices({
       for (let i = 0; i < TRIES; i++) {
         await sleep(STEP)
         const now = await read()
-        // 題目被裁掉時兩邊的問句都是 null，換頁只看得出選項變了。
         if (!now || !sameChoices(now, before) || now.tabAt !== before.tabAt) return true
       }
     }
@@ -390,7 +350,6 @@ export function BlockedChoices({
       return t('分頁沒有換。')
     })
 
-  /** 警語（`Dangerous rm …`）起算，它折下來的列與 `⚠` 倒數都跟著標紅。 */
   const warnFrom = (() => {
     const i = menu.context.findIndex((l) => /^\s*(dangerous|warning|⚠)/i.test(l))
     return i < 0 ? Number.POSITIVE_INFINITY : i
@@ -398,12 +357,11 @@ export function BlockedChoices({
 
   const previewAt = menu.choices.findIndex((c) => c.current && c.preview !== '')
 
-  /** review 列對應的分頁（送出頁不算一題）。 */
   const reviewTab = (i: number) => menu.tabs.findIndex((t, k) => !t.submit && menu.tabs.slice(0, k).filter((x) => !x.submit).length === i)
 
   return (
     <div className="blocked-choices">
-      {/* 夾在虛線之間的指令（長 heredoc 也完整給）：要核准的就是它，折行不橫捲；被 pane 高度截掉上半就照實說（2026-10-05 console-pm）。 */}
+      {}
       {menu.command.length ? (
         <div className="bc-command">
           <pre className="bc-context bc-cmd">{menu.command.join('\n')}</pre>
@@ -457,7 +415,6 @@ export function BlockedChoices({
             </button>
           </div>
         ) : pendingAt && pendingAt.total > 1 ? (
-          // 分頁列被裁掉（pane 太矮），但原題說有好幾題：照樣給上一題／下一題，第幾題照原題對出來的講。
           <div className="bc-tabs" role="group" aria-label={t('這份問卷的各題')}>
             <button
               type="button"
@@ -484,11 +441,10 @@ export function BlockedChoices({
             </button>
           </div>
         ) : null}
-        {/* 問句上面的警語、倒數與說明：不給這段，`Do you want to proceed?` 根本看不出在核准什麼（2026-09-20 使用者）。 */}
+        {}
         {menu.context.length ? (
           <pre className="bc-context bc-notes">
             {menu.context.map((l, i) => (
-              // 警語（`Dangerous rm …`）與它折下來的列、`⚠` 倒數都要看得出來：它常排在最後、又最容易被捲走。
               <span key={`${i}-${l}`} className={i >= warnFrom ? 'bc-ctx-warn' : undefined}>
                 {l}
                 {'\n'}
@@ -504,11 +460,11 @@ export function BlockedChoices({
           </p>
         ) : null}
         {tr.button ? <div className="bc-tr">{tr.button}</div> : null}
-        {/* 問句底下的條列說明（`Try the new fullscreen renderer?` 的三行 `·`），照畫面順序排在問句後面。 */}
+        {}
         {menu.notes.length ? <pre className="bc-context bc-notes">{menu.notes.join('\n')}</pre> : null}
       </div>
 
-      {/* review 頁「每題 → 目前答案」，點一題跳回去改（2026-09-12 第七輪）。 */}
+      {}
       {menu.review.length ? (
         <ul className="bc-review">
           {menu.review.map((r, i) => (
@@ -559,7 +515,7 @@ export function BlockedChoices({
               <span className="bc-num" aria-hidden="true">
                 {c.number}
               </span>
-              {/* 沒方框的列也占住這欄，否則本文往左凸。 */}
+              {}
               <span className="bc-box" aria-hidden="true">
                 {menu.multi
                   ? c.checked === null
@@ -580,7 +536,7 @@ export function BlockedChoices({
               </span>
               {shown && c.detail ? <span className="bc-detail">{disp?.details[i] ?? c.detail}</span> : null}
             </button>
-            {/* ▸ 是兄弟不是子元素：button 內不能再包 button。 */}
+            {}
             <button
                 type="button"
                 className="bc-chev"
@@ -610,7 +566,7 @@ export function BlockedChoices({
       </ol>
       {jevRowShown ? <p className="bc-jev-note">{jevAskNote()}</p> : null}
 
-      {/* 並排預覽版面（issue #1473）：終端只畫游標所在那一項的預覽，所以只有那一項有，不替其他項補。 */}
+      {}
       {previewAt >= 0 ? (
         <figure className="bc-preview">
           <figcaption>
@@ -626,7 +582,7 @@ export function BlockedChoices({
         </button>
       ) : null}
 
-      {/* 平常不留說明文字，只在沒送出去時提示（2026-09-12 第二輪回饋）。 */}
+      {}
       {note ? (
         <p className="bc-hint bc-stale" role="status">
           {note}
@@ -636,7 +592,6 @@ export function BlockedChoices({
   )
 }
 
-/** 選單模式底下：`Esc 取消`＋收起終端原文與按鍵的開關（2026-09-12 第二輪回饋：選單本身就是操作方式）。 */
 export function BlockedExtrasBar({
   botId,
   open,

@@ -6,8 +6,6 @@
 .project-expert-settings-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .project-expert-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 
-/* 手機：專案設定的標題列（固定 60px）塞不下額度條，額度條換到第二行、標題列依內容撐高，
-   否則額度條會溢出到下面的未讀晶片列上（2026-11 使用者截圖）。對照 bot 對話頁的 `.bot-head`（grid，額度在第二列）。 */
 @media (width <= 640px) {
   .main-head.project-settings-head {
     flex: none;

@@ -7,12 +7,9 @@ import { useStore } from '../store/store'
 import { MessageTranslationButton } from './MessageTranslation'
 import { resetTranslateReady, useTranslateReady } from './useTranslateReady'
 
-/** 這次頁面生命週期已自動試過的問卷（鍵＝送出去的內容）：失敗不一直重試，重新掛載也不重打。 */
 const autoTried = new Set<string>()
-/** 使用者手動點回原文的問卷：自動翻譯不再翻回去，再點「翻譯」才解除（同訊息翻譯）。 */
 const declined = new Set<string>()
 
-/** 給測試：清掉本頁的「試過／點回原文」記憶。 */
 export function resetPendingQuestionTranslation() {
   autoTried.clear()
   declined.clear()
@@ -20,7 +17,6 @@ export function resetPendingQuestionTranslation() {
   listeners.forEach((l) => l())
 }
 
-/** 譯文字段（只存文字，不存 Jev／複選等 metadata：那些每次 render 都取目前的 `questions`）。 */
 interface TextSet {
   header: string
   question: string
@@ -31,10 +27,6 @@ type Entry =
   | { status: 'idle' | 'loading' | 'error'; key: string }
   | { status: 'done'; key: string; texts: TextSet[]; show: boolean }
 
-/**
- * 譯文狀態放在模組層級（以內容 key 為鍵），不放在元件裡：同一份問卷在畫面上可能因父層切換而重掛
- * （例如 BlockedDraft 的 live 分支與直接的 BlockedChoices），重掛時翻譯還在飛的結果不能丟掉、也不能重打。
- */
 const entries = new Map<string, Entry>()
 const listeners = new Set<() => void>()
 const IDLE: Entry = { status: 'idle', key: '' }
@@ -49,7 +41,6 @@ function subscribe(l: () => void) {
   }
 }
 
-/** 送去翻的內容：只含要翻的文字，順序與 index 跟 `questions` 一致，daemon 依位置產生 id。 */
 function payloadOf(questions: PendingQuestion[]) {
   return questions.map((q) => ({
     header: q.header,
@@ -58,7 +49,6 @@ function payloadOf(questions: PendingQuestion[]) {
   }))
 }
 
-/** 從回應取出譯文字段（依位置對 `q{n}`／`q{n}-o{m}`）；缺的欄位是空字串，套用時退回原文。 */
 function textsOf(orig: PendingQuestion[], tr: Awaited<ReturnType<typeof translatePendingQuestions>>): TextSet[] {
   const byId = new Map(tr.questions.map((q) => [q.id, q]))
   return orig.map((q, qi) => {
@@ -75,10 +65,6 @@ function textsOf(orig: PendingQuestion[], tr: Awaited<ReturnType<typeof translat
   })
 }
 
-/**
- * 把譯文套到「目前」的題目上：只換顯示的字；選項位置（數字鍵）與 label 原值（送回 CLI 的）不動。
- * Jev 建議、複選等 metadata 一律取目前的 `questions`，不跟著譯文快取凍結。
- */
 function applyTexts(questions: PendingQuestion[], texts: TextSet[]): PendingQuestion[] {
   return questions.map((q, qi) => {
     const t = texts[qi]
@@ -97,11 +83,6 @@ function applyTexts(questions: PendingQuestion[], texts: TextSet[]): PendingQues
   })
 }
 
-/**
- * 待答問卷（「需要回應」面板的原題卡）的譯文：題目與選項主要是英文時，跟對話訊息一樣有「翻譯」鈕。
- * auto 開著、用途啟用有 key 時新掛載就自動翻一次（daemon 有快取，同一份不重扣費）；`display` 是要顯示的題目（譯文或原文）。
- * 只影響顯示：呼叫端的 `questions`（作答對得上畫面、送鍵用的）不換。
- */
 export function usePendingQuestionTranslation(questions: PendingQuestion[]): { button: React.ReactNode; display: PendingQuestion[] } {
   const t = useT()
   const payload = payloadOf(questions)
@@ -110,7 +91,6 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
   const eligible = questions.length > 0 && isMostlyEnglish(text)
   const ready = useTranslateReady(eligible)
   const off = ready && !ready.ok ? ready : null
-  // 內容變了（新題目）就是另一個 key，舊的結果不沿用。
   const snap = () => entries.get(key) ?? IDLE
   const cur = useSyncExternalStore(subscribe, snap, snap)
 
@@ -126,7 +106,6 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
         resetTranslateReady()
         if (kind !== 'manual') return
         const reason = e instanceof Error ? e.message : String(e)
-        // 翻譯設成用 OpenAI 但沒開或沒有金鑰：講清楚原因，daemon 不會悄悄改用 Claude。
         useStore.getState().notify('error', reason.includes('openai_not_configured')
           ? t('OpenAI 未啟用或未設定金鑰：翻譯的供應商設成 OpenAI，請啟用 OpenAI 並設定金鑰，或到「環境設定 → Claude API」把翻譯的供應商改回 Claude')
           : reason.includes('claude_api_not_configured')
@@ -136,11 +115,9 @@ export function usePendingQuestionTranslation(questions: PendingQuestion[]): { b
     )
   }
 
-  // 自動翻：設定讀到、auto 開著、還沒試過這份問卷、使用者沒手動點回原文。
   const fresh = eligible && !!ready?.ok && ready.auto && cur.status === 'idle' && !declined.has(key) && !autoTried.has(key)
   useEffect(() => {
     if (!fresh) return
-    // 執行時重查：同一輪渲染裡兩個元件都看到 `fresh=true`，先跑的已經標記、或已經在飛／已經有結果，後跑的就不再起一份。
     if (autoTried.has(key) || declined.has(key) || (entries.get(key)?.status ?? 'idle') !== 'idle') return
     autoTried.add(key)
     run('fresh')

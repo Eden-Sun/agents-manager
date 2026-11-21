@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises'
 
 const css = await readFile(new URL('./quotaStrip.css', import.meta.url), 'utf8')
 
-/** 取出「選擇器 {…}」那條規則的內容（只認行首的選擇器，避免 `.main-head .quota-hp` 被當成 `.quota-hp`）。 */
 function ruleBody(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const m = css.match(new RegExp(`^\\s*${escaped}\\s*\\{([^}]*)\\}`, 'm'))
@@ -12,7 +11,6 @@ function ruleBody(selector: string): string {
   return m[1]
 }
 
-/** #1780：收合後仍填滿剩餘寬，不能把省下的空間留在 agy 右邊。 */
 test('收合格均分剩餘寬，量過的內容寬是下限', () => {
   const body = ruleBody('.main-head .quota-open.collapsed .quota-hp')
   assert.match(body, /flex:\s*1 0 0;/)

@@ -1,7 +1,3 @@
-/**
- * 全域額度列的 OpenAI API 餘額（OpenAiBalanceChip）：未啟用不畫、啟用無錨點畫「設定 OpenAI 餘額」、
- * 有錨點畫金額（帶 OpenAI 字樣）、位置在 Claude 晶片之後、點開設定呼叫 PUT balance-anchor。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mount, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
@@ -26,7 +22,6 @@ after(async () => {
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30)) })
 const chip = () => document.querySelector<HTMLElement>('[data-k="openai-balance"]')
 
-/** 同時替換 OpenAI 與 Claude 的餘額回應；PUT 會記到 puts。 */
 async function withBalances<T>(openai: unknown, fn: (puts: unknown[]) => Promise<T>, claude: unknown = { configured: false }): Promise<T> {
   const orig = rawTransport.request.bind(rawTransport)
   const puts: unknown[] = []

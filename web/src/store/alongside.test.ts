@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { typeAlongside } from './alongside.ts'
 
-/** 記下每一通 IO，好斷言「送出去的就是使用者打的那一整段」。 */
 function recorder(ok = true) {
   const calls: { botId: string; text: string; enter: boolean; record: boolean }[] = []
   return {

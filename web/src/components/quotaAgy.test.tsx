@@ -1,4 +1,3 @@
-/** agy 額度（SPEC §12a.7）：只顯示 Gemini key 的 5h／7d，完整、手機與收合規則沿用 claude 格。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
@@ -146,7 +145,6 @@ test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提�
   }
 })
 
-/** 手機視圖（max-width 640）；跑完還原 matchMedia。 */
 async function withPhone(run: () => Promise<void>) {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia

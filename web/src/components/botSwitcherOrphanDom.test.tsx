@@ -1,7 +1,3 @@
-/**
- * 換 bot 選單與側欄一樣：子 agent 不單獨列（它掛在母 bot 底下），但父列不在清單裡的孤兒子 agent 沒有地方掛，
- * 要照頂層 bot 列出來；不然手機上這顆 bot 只剩鍵盤找得到（側欄的孤兒處理見 #1538）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

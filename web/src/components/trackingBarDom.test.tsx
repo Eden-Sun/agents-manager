@@ -1,7 +1,3 @@
-/**
- * 對話窗上方的「追蹤中」列（TrackingBar，2026-11-21）：只在有未結事項時出現、摘要計數、收合記在 localStorage、
- * 面板排序（需要你回覆 → 已加入追蹤 → 進行中）、點項目捲到來源訊息（不在已載入範圍給提示）、「⋯」操作，以及 `ledger_updated` 重抓。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'

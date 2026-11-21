@@ -1,16 +1,13 @@
 import type { BotKind, ShareFolderIn, ShareProfile } from '../api/types'
 import { t } from './i18n'
 
-/** 能不能建成分享用的 bot（受限或信任分享）：目前只做 claude（SPEC §20）。null＝可以。遠端專案也能（資料夾與籠子都在那台）。 */
 export function shareProfileBlocked(kind: BotKind): string | null {
   if (kind !== 'claude') return t('分享用的 bot 目前只支援 claude')
   return null
 }
 
-/** 側欄與聊天頂端的標記：受限 🔗、信任分享 🔓（顏色另外區分，`share-mark trusted`）。 */
 export const shareIcon = (p: ShareProfile | null | undefined): string => (p === 'trusted' ? '🔓' : '🔗')
 
-/** 建 bot 表單裡「它的資料夾」的草稿：新資料夾（名字，空的＝用 bot 名）或既有資料夾（絕對路徑）。 */
 export interface ShareFolderDraft {
   mode: 'new' | 'existing'
   name: string
@@ -19,10 +16,8 @@ export interface ShareFolderDraft {
 
 export const EMPTY_SHARE_FOLDER: ShareFolderDraft = { mode: 'new', name: '', path: '' }
 
-/** 同 daemon `share::folder::check_new_name`。 */
 const FOLDER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
-/** 草稿 → `share_folder`；填得不對回 `{error}`（表單擋下送出並顯示）。 */
 export function shareFolderInput(d: ShareFolderDraft, botName: string): { value: ShareFolderIn } | { error: string } {
   if (d.mode === 'existing') {
     const path = d.path.trim()
@@ -34,10 +29,6 @@ export function shareFolderInput(d: ShareFolderDraft, botName: string): { value:
   return { value: { kind: 'new', name } }
 }
 
-/**
- * 新增 bot 時跟分享有關的欄位（一般與專家模式的新增表單共用）：受限 bot 不帶 bypass permissions，`auto_approve` 一起關；
- * 信任分享照一般 bot；沒選分享＝一般 bot（`auto_approve: true`）。
- */
 export function shareCreateFields(
   profile: ShareProfile | null,
   folderIn: { value: ShareFolderIn } | { error: string } | null,

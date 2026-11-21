@@ -14,7 +14,6 @@ afterEach(async () => {
 })
 after(teardownDom)
 
-/** 讓出一輪 macrotask（act 裡面用；不睡牆鐘）。 */
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
 
 const ptr = (type: string, x = 10, y = 10, pointerId = 1) =>
@@ -26,7 +25,6 @@ test('長按後沒有 click（pointercancel）：下一次點擊要能收起預�
   useShelf.getState().setSink({ add: (f) => handed.push(f), label: 'x' })
 
   await mount(<ImageShelf />)
-  // 長按是 450ms 的 window.setTimeout：手動時鐘走過去，不睡牆鐘。
   const timers = installManualTimers()
   try {
     const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!
@@ -42,7 +40,6 @@ test('長按後沒有 click（pointercancel）：下一次點擊要能收起預�
       card.dispatchEvent(ptr('pointercancel'))
     })
 
-    // 下一次點擊（pointerdown, pointerup, click）收起預覽
     await act(async () => {
       card.dispatchEvent(ptr('pointerdown'))
       card.dispatchEvent(ptr('pointerup'))
@@ -62,7 +59,6 @@ test('長按後有 click 的正常順序：那個 click 被吞、預覽留著', 
   useShelf.getState().setSink({ add: (f) => handed.push(f), label: 'x' })
 
   await mount(<ImageShelf />)
-  // 長按是 450ms 的 window.setTimeout：手動時鐘走過去，不睡牆鐘。
   const timers = installManualTimers()
   try {
     const card = document.querySelector<HTMLButtonElement>('.shelf-card-main')!

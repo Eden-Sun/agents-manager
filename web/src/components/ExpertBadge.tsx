@@ -8,7 +8,6 @@ import './expertBadge.css'
 
 export function ExpertBadge() {
   useT()
-  // 專案徽章是「專家模式」，不是角色「專家」（英文 Specialist）：同一個中文字，英文要分開。
   return (
     <span className="project-expert-tag" title={t('專家模式專案')}>
       {t('專家模式').replace(/模式$| mode$/, '')}
@@ -38,7 +37,6 @@ export function ExpertRoleTag({
   )
 }
 
-/** 副管理者：成員列第二行的小標。 */
 export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
   useT()
   const title = afterSec
@@ -47,7 +45,6 @@ export function ExpertDeputyTag({ afterSec }: { afterSec?: number | null }) {
   return <span className="bot-deputy-tag" title={title}>{t('副')}</span>
 }
 
-/** 停派狀態，不是開關。切換在列尾 `⋯`。 */
 export function ExpertDisabledMark() {
   useT()
   return (
@@ -67,10 +64,6 @@ export function ExpertSectionHeader({ title, abbr }: { title: string; abbr?: str
   )
 }
 
-/**
- * 專家模式下 role 為空的頂層 bot（歸在執行者區）的小徽章「未設角色」：點了直接選角色（執行者／顧問／排程專用），
- * 走既有 `PATCH /api/bots/{id}` 的 role（權限同 bot 設定；管理者、專家要在 bot 設定裡指派，因為專家需要 track）。
- */
 export function UnsetRoleBadge({ botId }: { botId: string }) {
   useT()
   const [open, setOpen] = useState(false)

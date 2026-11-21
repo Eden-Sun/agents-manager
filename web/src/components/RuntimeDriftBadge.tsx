@@ -6,11 +6,6 @@ import { isChildBot } from '../lib/updateBatch'
 import { driftLine, isFastOnlyDrift, runtimeDrift } from '../lib/runtimeDrift'
 import { useT } from '../lib/i18n'
 
-/**
- * 「設定改了，但 bot 還跑在舊值上」的常駐 chip，點下去重啟（SPEC §4.4a）。
- * 啟動相關欄位只在啟動時吃得到，比對的是 daemon 記下的 `run.runtime_*` 與設定；
- * daemon 的 `bot.needs_restart` 仍是全域重啟狀態的唯一來源，這顆只列已知欄位細節。
- */
 export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const t = useT()
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
@@ -18,17 +13,13 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const restartBot = useStore((s) => s.restartBot)
   const notify = useStore((s) => s.notify)
   const [restartingLocal, setRestarting] = useState(false)
-  // 這顆 bot 在別處（設定面板、更新徽章、別的分頁送的請求）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
   const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
   const restarting = restartingLocal || restartingShared
   const [confirming, setConfirming] = useState(false)
-  // codex 的 fast（#393）：按下去當場套用，回合中也是（#712）；輸入框有字才排到回合結束，這時徽章改寫「回合結束後套用」。
   const refreshState = useStore((s) => s.refreshState)
   const [applying, setApplying] = useState(false)
 
   const drift = runtimeDrift(bot, run)
-  // daemon 說要重啟（`needs_restart`），但改的是「已知落差欄位」以外的東西（人設、args、env…）：沒有落差明細也要留徽章，
-  // 不然只有設定面板開著時才看得到「要重啟」（#353：這個旗標從資料算，不依賴 PATCH 回應）。
   const unlisted = Boolean(bot?.needs_restart) && !drift.length
   if (!bot || (!drift.length && !unlisted)) return null
 
@@ -37,7 +28,6 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const driftLabels = unlisted ? t('設定已改') : drift.map((d) => d.label).join(t('、'))
   const driftTitle = unlisted ? t('人設、args、env 等設定改了，執行中的 CLI 只在啟動時載入') : drift.map(driftLine).join('\n')
   const deferred = bot.live_apply_deferred
-  // 重送同一個 fast 值：冪等，daemon 會當場套用（回合中也是）、碰不得畫面就排到回合結束、都不行才回 needs_restart。
   const applyFast = async () => {
     setApplying(true)
     try {
@@ -49,7 +39,6 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
       } else if (la?.deferred) {
         notify('info', t('{name} 回合結束後會自動套用 fast', { name: bot.name }))
       } else {
-        // 套不上（不是忙、是別的原因）：退回重啟，維持原本的確認流程。
         if (busy) setConfirming(true)
         else restart()
       }
@@ -59,7 +48,6 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
       setApplying(false)
     }
   }
-  // 子 agent 由父 Bot 重開，`/restart` 會回 409（#1911）：不給重啟，fast 當場套用（PATCH）照舊。
   const child = isChildBot(bot)
   const restart = () => {
     if (child) {

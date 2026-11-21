@@ -6,10 +6,6 @@ import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
 import { useT } from '../lib/i18n'
 
-/**
- * The bot's name, renamed in place (click, type, Enter). `PATCH /bots/:id {name}` is safe while running
- * (docs/API.md §「bot.name 是暱稱」). `variant="row"` edits only when already selected (`armed`); otherwise the click selects the row.
- */
 export function BotNameField({
   botId,
   name,
@@ -22,9 +18,7 @@ export function BotNameField({
   name: string
   variant?: 'head' | 'row'
   armed?: boolean
-  /** 接在 tooltip 第二行，例如 herdr agent 名與 pane id（#572）。 */
   hint?: string
-  /** Extra content that rides inside the name (persona mark, agent title …). */
   children?: ReactNode
 }) {
   const t = useT()
@@ -33,14 +27,12 @@ export function BotNameField({
   const [draft, setDraft] = useState(name)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // A rename from anywhere else (settings panel, another tab) must win over a stale draft.
   const [lastName, setLastName] = useState(name)
   if (lastName !== name) {
     setLastName(name)
     if (!editing) setDraft(name)
   }
 
-  // Deselecting the row while its name is open would strand the input; close it.
   if (editing && !armed) setEditing(false)
 
   useEffect(() => {
@@ -48,7 +40,6 @@ export function BotNameField({
   }, [editing])
 
   const trimmed = draft.trim()
-  // Same rule as the daemon (`lib/botName.ts`): 1–32 chars, no `@ , : ;`, single inner spaces only.
   const valid = isValidBotName(trimmed)
 
   const commit = () => {
@@ -59,7 +50,6 @@ export function BotNameField({
     }
     void patchBot(botId, { name: trimmed })
   }
-  // 手機的軟鍵盤 Enter 走 `beforeinput`，不是 keydown（Android 是 keyCode 229）。
   const enter = useEnterCommit(inputRef, commit)
 
   if (editing) {
@@ -76,18 +66,15 @@ export function BotNameField({
         size={Math.max(6, draft.length + 1)}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
-        // The sidebar row is a listbox option and a drag source; neither may see these.
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          // Stop here: ↑/↓ switch bot and Esc closes dialogs further up the tree.
           e.stopPropagation()
           if (e.key === 'Enter') {
             if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             commit()
           } else if (e.key === 'Escape') {
-            // 輸入法選字中的 Esc 是取消選字，不是放棄改名。
             if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             setDraft(name)
@@ -104,7 +91,6 @@ export function BotNameField({
   }
 
   if (variant === 'row') {
-    // Not a <button>: a button inside a listbox option is invalid and un-draggable.
     return (
       <span
         className={`bot-name${armed ? ' renamable' : ''}`}

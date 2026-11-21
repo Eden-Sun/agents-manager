@@ -4,11 +4,6 @@ import { visibleSuggestion } from '../store/promptSuggestion'
 import { useT } from '../lib/i18n'
 import './suggestionBar.css'
 
-/**
- * claude 回合結束後輸入框裡那句灰字「建議下一句」（終端 Tab 收下、Enter 送出）。顯示在輸入列上方一行（灰色、單行截斷），
- * 點一下就送：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣，不是把字打進去（2026-10-03 使用者）。
- * 輸入框裡有字、有附件、回合在跑、框裡卡著草稿時不顯示；送出中按鈕禁用，失敗的原因由 store 跳通知。
- */
 export function SuggestionBar({ botId, attachments }: { botId: string; attachments: number }) {
   const t = useT()
   const draftKey = `bot:${botId}` as const
@@ -34,7 +29,7 @@ export function SuggestionBar({ botId, attachments }: { botId: string; attachmen
         title={`${text}\n\n${t('點一下就送出這句（等同在終端按 Tab 收下、再按 Enter）')}`}
         onClick={() => void accept(botId)}
       >
-        {/* 不寫「Tab ⏎」：那是終端的按鍵，網頁上看不懂（2026-10-12 使用者：「這不叫 tab，提示字為 claude 建議：… 點擊送出」）。 */}
+        {}
         <span className="suggestion-bar-keys">{t('claude 建議：')}</span>
         <span className="suggestion-bar-text">{busy ? t('送出中…') : text}</span>
         {busy ? null : <span className="suggestion-bar-hint">{t('點擊送出')}</span>}

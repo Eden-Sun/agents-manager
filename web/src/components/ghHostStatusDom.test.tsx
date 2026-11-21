@@ -1,6 +1,3 @@
-/**
- * GhHostStatus 裝置碼登入輪詢彈性審查（issue #1087）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -13,7 +10,6 @@ afterEach(async () => {
   await unmountAll()
 })
 
-/** 手動時鐘下的「等到條件成立」：每輪先讓 promise／React 跑完，條件還沒成立就把時鐘推進 `stepMs`（輪詢的拍子）。 */
 async function untilTicking(clock: { advance(ms: number): Promise<void> }, cond: () => boolean, what: string, stepMs = 2000, maxSteps = 20) {
   for (let i = 0; i <= maxSteps; i++) {
     for (let r = 0; r < 5; r++) await act(async () => new Promise<void>((resolve) => setImmediate(resolve)))
@@ -55,7 +51,6 @@ test('輪詢中一次讀失敗：代碼面板留著、之後繼續輪詢到登�
     return undefined
   })
 
-  // 輪詢是每 2 秒一次的 setInterval：用手動時鐘推進，不睡牆鐘。
   const { clock, restore } = installManualClockTimers()
   try {
     await mount(<GhHostStatus host="local" />)

@@ -1,10 +1,3 @@
-/**
- * bot 的輸出是不可信的內容（可能被 prompt injection）：Markdown 呈現不能讓它執行程式、把整個 app 換頁、或把畫面卡死。
- * - 協定：javascript:／data:／vbscript: 不能成為 href／src，原始 HTML 不能變成元素（react-markdown 預設擋，這裡釘住）。
- * - 連結一律新分頁＋noopener noreferrer：不然 bot 給的連結一按就整個 app 換頁（連同記憶體裡的 token）。
- * - 太長的訊息（remark 的某些輸入是平方時間）預設純文字，使用者按了才用 Markdown 展開。
- * - 巢狀太深（`> > > …`）：預設純文字；轉換真的丟了例外也由 error boundary 接住（整個 app 沒有 error boundary，沒接住就白畫面）。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -118,7 +111,7 @@ test('正常的巢狀（引用 5 層、清單 6 層）照常渲染', async () =>
 
 test('轉換中丟了例外：error boundary 接住、退回純文字，不是整個 app 白畫面', async () => {
   const origError = console.error
-  console.error = () => {} // React 會把被接住的例外印出來
+  console.error = () => {}
   try {
     function Boom(): never {
       throw new RangeError('Maximum call stack size exceeded')
@@ -140,6 +133,5 @@ test('自動連結的全形標點：連結只包網址，句尾的「。」「�
   assert.deepEqual(hrefs, ['https://example.com/login', 'https://example.com/a'], JSON.stringify(hrefs))
   assert.ok(root.textContent?.includes('請開 https://example.com/login。然後'), root.textContent ?? '')
   const explicit = await render('[https://example.com/x。](https://example.com/x。)')
-  // react-markdown 把非 ASCII 的 href 編碼成 %E3%80%82；解碼後目標必須仍含「。」（連結沒被改寫）。
   assert.equal(decodeURI(explicit.querySelector('a')?.getAttribute('href') ?? ''), 'https://example.com/x。')
 })

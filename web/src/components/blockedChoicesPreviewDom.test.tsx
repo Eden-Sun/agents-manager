@@ -16,7 +16,6 @@ test('並排預覽版面：選項照舊可點，游標那一項的預覽用等�
   assert.match(html, /<pre class="bc-context bc-notes bc-preview-text">HTTP 200\n\{/)
   assert.match(html, /&quot;status&quot;: &quot;insurer_not_supported&quot;/)
   assert.match(html, /第 1 項的預覽/)
-  // 預覽在清單之後。
   assert.ok(html.indexOf('bc-preview-text') > html.lastIndexOf('bc-item'))
   assert.doesNotMatch(html, /[│┌└]/)
 })

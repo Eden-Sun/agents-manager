@@ -1,4 +1,3 @@
-/* BotShareSection（Bot 設定裡的分享區塊）與建 bot 表單的「分享用（受限）」選項。 */
 
 .bs-share {
   margin-top: 24px;
@@ -152,7 +151,6 @@
 .share-folder-err {
   color: var(--danger);
 }
-
 
 .share-profile-choices {
   display: flex;

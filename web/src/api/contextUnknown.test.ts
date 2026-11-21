@@ -1,7 +1,3 @@
-/**
- * resume／壓縮後的讀數失效：daemon 把 `status_json` 遮成 `used_percentage: null`、並標 `_agm_context_unknown`。
- * 網頁要照 null 顯示「未知」（`context_unknown`），不能把 0 當成 0%；真讀數照常。
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { toStatusInfo } from './normalize.ts'

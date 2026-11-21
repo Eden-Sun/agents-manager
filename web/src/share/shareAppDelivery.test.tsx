@@ -1,8 +1,3 @@
-/**
- * #922：分享頁要看 `POST /messages` 回的 `delivery`／`message_id`——
- * `failed` 時不能把字清掉又卡在「思考中」；回覆的判斷用 `message_id` 當錨點、不比手機時鐘；
- * 最後還有 90 秒的出口，SSE 與輪詢都漏掉時送出鈕不會永遠灰著。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { installManualClockTimers } from '../testing/manualClockTimers'
@@ -37,7 +32,6 @@ function client(opts: {
     ...shareFileStubs,
     fileBlob: async () => new Blob([]),
     subscribe(ev: ShareEvents) {
-      // 推播起不來：只能靠輪詢（`onDown`）；沒設就是連上了但什麼事件都不會來。
       if (opts.down) ev.onDown()
       else ev.onUp?.()
       return () => {}
@@ -107,7 +101,7 @@ test('用 message_id 當錨點：回覆的 created_at 比手機時鐘早 10 分�
     await act(async () => timers.clock.advance(50))
     assert.ok(thinking(), '回覆還沒來')
     replied = true
-    await act(async () => timers.clock.advance(4400)) // 輪詢（POLL_MS 4000）抓到 u1 之後的 assistant
+    await act(async () => timers.clock.advance(4400))
     assert.equal(thinking(), null, 'u1 之後有 assistant 就清掉，不比 created_at')
   } finally {
     timers.restore()

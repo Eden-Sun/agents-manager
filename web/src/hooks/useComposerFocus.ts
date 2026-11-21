@@ -9,7 +9,6 @@ interface UseComposerFocusOptions {
   autoFocus?: boolean
 }
 
-/** Restore a draft selection without letting background state changes move focus. */
 export function useComposerFocus({ draftKey, ref, forceFocus = false, autoFocus = true }: UseComposerFocusOptions) {
   useLayoutEffect(() => {
     const el = ref.current

@@ -1,16 +1,3 @@
-/**
- * AGM 總管的入口面板。
- *
- * **目前沒有掛在任何地方**（2026-10-04 使用者：這個功能沒用、從來沒點過，側欄入口與 Modal 拿掉）。元件、
- * `api/supervisor.ts` 與 daemon 端點都留著；要的話把 `<SupervisorPanel />` 放進 Modal 就回來。
- * 同樣的操作 CLI 都有：`agm supervisor`（狀態）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`。
- *
- * 這裡**不做**新的聊天室：總管就是一顆 bot，要跟它說話請開它既有的對話。這個面板只
- * 負責「環境在什麼狀態、要不要建立／啟動、手上有哪些交辦」。
- *
- * 端點還沒部署的 daemon 會讓 `fetchSupervisor()` 回 `null`——那不是錯誤，是「這台
- * daemon 還沒有這個功能」，畫面上要講清楚要做什麼才會有。
- */
 
 import { useCallback, useEffect, useState } from 'react'
 import { SUPERVISOR_CANDIDATES, fetchIncidents, fetchSupervisor, supervisorAction } from '../api/supervisor'
@@ -20,7 +7,6 @@ import { ASSIGN_LABEL, INCIDENT_LABEL } from '../lib/supervisorLabels'
 import { useStore } from '../store/store'
 import './supervisor.css'
 
-/** bot 起沒起來。 */
 const STATUS_LABEL: Record<string, string> = {
   not_configured: msg('尚未建立'),
   stopped: msg('已停止'),
@@ -34,7 +20,6 @@ const STATUS_LABEL: Record<string, string> = {
   unknown: msg('狀態不明'),
 }
 
-/** 樂觀色：只有真的在跑才給綠燈，`unknown` 一律當灰的。 */
 const STATUS_TONE: Record<string, string> = {
   running: 'ok',
   busy: 'ok',
@@ -54,24 +39,16 @@ const ASSIGN_TONE: Record<string, string> = {
   unknown: 'warn',
 }
 
-
-/** 故障清單有三種狀態，而「還沒讀到」跟「讀到了，沒有故障」絕對不能畫成同一種。 */
 type IncidentState =
   | { kind: 'loading' }
   | { kind: 'ok'; items: SupervisorIncident[] }
   | { kind: 'error'; message: string }
-  /** 這台 daemon 還沒有這個端點：不是沒故障，是量不到。 */
   | { kind: 'unsupported' }
 
-/** 標籤表的值是 `msg()` 標記過的 key，顯示時查翻譯；沒有對到就原樣顯示。 */
 function label(map: Record<string, string>, key: string): string {
   return map[key] === undefined ? key : tr(map[key])
 }
 
-/**
- * 兩個角色各做什麼、各被叫醒幾次。巡檢就是上面那顆 AGM（使用者入口）；協調者只回應
- * bot。協調者停了或沒額度時事件留在 inbox，不會改由巡檢處理——這一行要讓人看得出「在等」而不是「壞了」。
- */
 function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: string) => void }) {
   const t = useT()
   const r = live.responder
@@ -98,7 +75,7 @@ function RoleSummary({ live, onOpen }: { live: SupervisorInfo; onOpen: (botId: s
         {r.configured ? (
           <>
             <span className={`agm-chip ${STATUS_TONE[r.status] ?? ''}`}>{label(STATUS_LABEL, r.status)}</span>
-            {/* 設定值；實際在跑的不一樣時兩個都畫出來，不要只給一個會騙人的數字。 */}
+            {}
             <span className="agm-chip mono">{r.identity} · {r.model} · {r.effort}</span>
             {r.runtime.model && (r.runtime.model !== r.model || (r.runtime.effort && r.runtime.effort !== r.effort)) ? (
               <span className="agm-chip warn mono">
@@ -144,11 +121,11 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
       <div className="agm-assign-head">
         <span className="agm-assign-to">{botName || item.target_bot_id || t('（未知 bot）')}</span>
         <span className={`agm-chip ${ASSIGN_TONE[item.status] ?? ''}`}>{label(ASSIGN_LABEL, item.status)}</span>
-        {/* 舊資料是在有驗收狀態之前就關掉的：關掉了，但沒有人驗收過，不要讓它看起來像有。 */}
+        {}
         {item.legacy_closed ? <span className="agm-chip">{t('舊資料·未經驗收')}</span> : null}
       </div>
       <p className="agm-assign-text">{item.text}</p>
-      {/* turn_id 是這筆交辦唯一能拿去對帳的把手，短短一行也要留著。 */}
+      {}
       {item.turn_id ? <p className="agm-assign-meta mono">turn {item.turn_id}</p> : null}
       {item.result ? <p className="agm-assign-meta">{item.result}</p> : null}
       {item.awaiting_review ? (
@@ -168,13 +145,6 @@ function AssignmentRow({ item, botName }: { item: SupervisorAssignment; botName:
   )
 }
 
-/**
- * 讀不到就說讀不到。
- *
- * 原本 incidents 初始是 `[]`、`fetchIncidents` 的 catch 又把錯誤吃掉，於是 API 掛掉時這一格
- * 顯示「0 筆未恢復」配綠燈——在系統最可能真的出事的時候，畫面最像沒事。這正是這個面板要修的
- * 那個毛病本身。
- */
 function IncidentList({ state }: { state: IncidentState }) {
   const t = useT()
   if (state.kind !== 'ok') {
@@ -224,7 +194,6 @@ function IncidentList({ state }: { state: IncidentState }) {
 export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   const t = useT()
   const [info, setInfo] = useState<SupervisorInfo | null | undefined>(undefined)
-  /** `null` 有兩種意思，要分開存：還沒載完 vs. 這台 daemon 沒有這個 API。 */
   const [unsupported, setUnsupported] = useState(false)
   const [busy, setBusy] = useState<SupervisorAction | null>(null)
   const [error, setError] = useState('')
@@ -233,10 +202,6 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   const bots = useStore((s) => s.bots)
   const rev = useStore((s) => s.supervisorRev)
 
-  /**
-   * 讀一次狀態。回傳而不是自己寫進 state，掛載時的那一次才能在面板已經關掉之後
-   * 把結果丟掉（Modal 一關就 unmount，慢回來的請求不該再去戳已死的元件）。
-   */
   const read = useCallback(async (): Promise<{ info: SupervisorInfo | null; unsupported: boolean; error: string }> => {
     try {
       const next = await fetchSupervisor()
@@ -257,8 +222,6 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
     void read().then((r) => {
       if (alive) apply(r)
     })
-    // 故障清單獨立拉：它跟總管狀態是兩個問題，一邊掛了另一邊還要看得到。
-    // 失敗不能靜靜吞掉——吞掉就會變成「0 筆未恢復」的綠燈。
     void fetchIncidents()
       .then((r) => {
         if (alive) setIncidents(r === null ? { kind: 'unsupported' } : { kind: 'ok', items: r })
@@ -271,14 +234,11 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
     }
   }, [read, apply])
 
-  // 面板開著時 daemon 推 `supervisor_changed`（交辦、驗收、額度、看門狗…）：重讀狀態與故障清單。以前只在掛載時讀一次，
-  // 開著面板等 AGM 起來或交辦跑完，畫面一直停在按開的那一刻。節流成一秒一次（一陣事件只讀一輪）；第一次由上面的掛載 effect 讀。
   useEffect(() => {
     if (rev === 0) return
     let alive = true
     const timer = setTimeout(() => {
       void read().then((r) => {
-        // 讀失敗不蓋掉已經在畫面上的狀態（暫時性的錯誤不該把面板換成「讀不到」）。
         if (alive && r.info) apply(r)
       })
       void fetchIncidents().then(
@@ -301,7 +261,6 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
       setInfo(await supervisorAction(action))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      // 失敗後重讀一次：daemon 那邊可能已經改了一半，畫面不能停在按下去前的樣子。
       const r = await read()
       if (r.info) setInfo(r.info)
     } finally {
@@ -350,7 +309,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
         </span>
       </div>
 
-      {/* 候補順序是固定的，直接把兩個候選都畫出來，使用者才知道壞掉時會換去哪。 */}
+      {}
       <ol className="agm-candidates">
         {SUPERVISOR_CANDIDATES.map((c, i) => (
           <li key={c.model} className={i === activeIndex ? 'on' : ''}>

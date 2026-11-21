@@ -7,7 +7,6 @@ import { useSavePart } from './projectSaveGroup'
 const MIN_AFTER_SEC = 60
 const DEFAULT_AFTER_SEC = 180
 
-/** 專案設定的「副管理者」：管理者回合中太久時，排隊給它的請求改送這位。只存草稿，按「儲存」才送 PATCH（User-only）。 */
 export function ProjectDeputyEditor({ project, bots }: { project: Project; bots: Bot[] }) {
   const t = useT()
   const patchProject = useStore((s) => s.patchProject)
@@ -24,7 +23,6 @@ export function ProjectDeputyEditor({ project, bots }: { project: Project; bots:
     setAfterSec(String(saved?.after_sec ?? DEFAULT_AFTER_SEC))
   }
 
-  // 只有顧問、專家能當副管理者（管理者與執行者不行）。
   const candidates = bots.filter((b) => b.role === 'advisor' || b.role === 'specialist')
   const sec = Number(afterSec)
   const secOk = Number.isInteger(sec) && sec >= MIN_AFTER_SEC

@@ -5,14 +5,6 @@ import { JevLabel } from './JevLabel'
 import { usePendingQuestionTranslation } from './usePendingQuestionTranslation'
 import './pendingQuestionCard.css'
 
-/**
- * 畫面上看不到題目時（pane 太矮、claude 把選單裁掉），把 transcript 裡的題目與選項列出來（2026-09-23 使用者）。
- *
- * **唯讀摘要，不是選項區**（issue #559）：作答一律走畫面上認出來的那份選單（`BlockedChoices`）——送鍵前要重讀畫面、
- * 對得上才送，游標在哪、有沒有 `Type something`／`Submit` 列都只有畫面知道，transcript 不知道。所以這裡的選項
- * 不編號、不加粗、不畫框，畫面上正在答的那一題不再列一次選項（`current`）。
- * 認得出選單時預設收成一行（`defaultOpen=false`）：2026-09-25 使用者手機上整張攤開把選項擠到只剩半列，點不到。
- */
 export function PendingQuestionCard({
 
   questions,
@@ -21,19 +13,15 @@ export function PendingQuestionCard({
   answerWhere = 'above',
 }: {
   questions: PendingQuestion[]
-  /** 畫面上正在答的是第幾題（`pendingIndexOnScreen`）；-1 ＝對不上。 */
   current?: number
   defaultOpen?: boolean
-  /** 作答的地方在這張卡的上面（選單模式）還是下面（終端快照＋按鍵）。 */
   answerWhere?: 'above' | 'below'
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const t = useT()
-  // 譯文只換顯示；作答對得上的是呼叫端原本的 `questions`（`current` 與送鍵都按原文）。
   const tr = usePendingQuestionTranslation(questions)
   if (questions.length === 0) return null
   const shown = tr.display
-  // Jev 的選項建議（issue #1475）：只提示、不代答；沒有建議（沒開、失敗、分數太接近、多選題）就什麼都不顯示。
   const jevPicks = questions.filter((q) => q.jev)
   const anyJev = jevPicks.length > 0
   return (
@@ -64,7 +52,6 @@ export function PendingQuestionCard({
               </p>
               <p className="pending-q-text">{q.question}</p>
               {qi === current && answerWhere === 'above' ? (
-                // 選項在上面的選單裡、這裡不再列：建議改成一行說明，不然選單與這張卡都看不到它。
                 q.jev ? (
                   <p className="pending-q-jev-line">
                     <JevLabel className="pending-q-jev" prob={q.jev.score} />

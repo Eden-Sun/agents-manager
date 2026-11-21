@@ -1,5 +1,3 @@
-/* components/BotSwitcher.tsx 專屬樣式：自 styles.css 拆出（行為不變，僅換檔案）。 */
-/* 手機標題列 bot 切換下拉（BotSwitcher，2026-09-09），只在 ≤640px。 */
 
 .bot-switcher {
   position: relative;
@@ -60,7 +58,6 @@
 }
 
 .bot-switcher-name {
-  /* `min-width: 0` 必要：預設 `min-width: auto` 會撐開泡泡，ellipsis 永不發生。 */
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;

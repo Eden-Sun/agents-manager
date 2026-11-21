@@ -5,9 +5,7 @@ import './kindTag.css'
 
 import { KIND_LABEL, KIND_DESC } from './kindMeta'
 import { t, useT } from '../lib/i18n'
-/** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 
-/** OpenAI（GPT）商標的路徑，codex 與 openai-api 共用；不要複製 path。 */
 function OpenAiPath() {
   return (
     <path
@@ -17,12 +15,6 @@ function OpenAiPath() {
   )
 }
 
-/**
- * 直打 API 的 bot（claude-api / openai-api）實心長方形徽章：
- * 放在主圖示（左邊 16×16）右側、垂直置中，兩者間距約 1.5。
- * 寬 18、高 12（圓角 2.5），字級約 10、字重 800、字距 0.3，白字置中。
- * 兩個 case 共用同一個 ApiBadge 小元件，保持兩者視覺一致。
- */
 export function ApiBadge() {
   return (
     <g className="api-badge">
@@ -44,9 +36,6 @@ export function ApiBadge() {
   )
 }
 
-/**
- * 額度列／餘額列用的小圖示標（符號取代文字標籤）：顏色跟 kind 色（--kind-claude／--kind-codex），aria-label 與 title 仍是文字。
- */
 export function KindGlyph({ kind, label }: { kind: BotKind; label: string }) {
   return (
     <span className={`kind-glyph ${kind}`} role="img" aria-label={label} title={label}>
@@ -55,7 +44,6 @@ export function KindGlyph({ kind, label }: { kind: BotKind; label: string }) {
   )
 }
 
-/** 單純的 GPT 商標圖示（codex）。 */
 function OpenAiMark() {
   return (
     <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
@@ -64,7 +52,6 @@ function OpenAiMark() {
   )
 }
 
-/** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark, agy = the Antigravity arch. */
 export function KindIcon({ kind }: { kind: BotKind }) {
   switch (kind) {
     case 'claude':
@@ -74,7 +61,6 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'claude-api':
-      // claude 星芒＋右側「API」實心長方形徽章，一眼分得出是直打 API 的 bot。
       return (
         <svg viewBox="0 0 36 16" width="2.25em" height="1em" aria-hidden="true">
           <path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
@@ -82,10 +68,8 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'codex':
-      // OpenAI mark — codex is the GPT CLI, so it wears the GPT logo.
       return <OpenAiMark />
     case 'openai-api':
-      // openai-api（直打 API）：同一個 GPT 商標，右側「API」實心長方形徽章（同 claude-api 的做法）。
       return (
         <svg viewBox="0 0 36 16" width="2.25em" height="1em" aria-hidden="true">
           <g transform="translate(0.8, 0.8) scale(0.6)">
@@ -95,7 +79,6 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'grok':
-      // xAI mark: an angular X whose second diagonal is broken at the crossing.
       return (
         <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="4.6" strokeLinecap="butt">
           <path d="M2.8 2.5 21.2 21.5" />
@@ -104,7 +87,6 @@ export function KindIcon({ kind }: { kind: BotKind }) {
         </svg>
       )
     case 'agy':
-      // Google Antigravity 官方 logo 的拱形外框（antigravity.google/favicon.svg，原圖是彩色漸層），單色化。
       return (
         <svg viewBox="11 12 90 90" width="1em" height="1em" aria-hidden="true">
           <path
@@ -116,10 +98,6 @@ export function KindIcon({ kind }: { kind: BotKind }) {
   }
 }
 
-/**
- * codex 開著 fast（priority service tier）時疊在 logo 右下角的閃電（2026-09-22 使用者：「給 codex 的 fast
- * 一個閃電明顯的標示在 logo 上」）。fast 的額度燒得快，只寫在 model chip 尾巴的「· fast」太容易漏看。
- */
 export function FastBolt() {
   return (
     <span className="kind-fast" aria-hidden="true">
@@ -139,7 +117,6 @@ export function KindTag({
   kind: BotKind
   title?: string
   className?: string
-  /** 正在跑的 codex 是 fast：logo 上疊一個閃電。 */
   fast?: boolean
 }) {
   const t = useT()
@@ -157,12 +134,10 @@ export function KindTag({
   )
 }
 
-/** The icon / text switch (sidebar foot). */
 export function KindDisplayToggle() {
   useT()
   const mode = useStore((s) => s.kindDisplay)
   const setKindDisplay = useStore((s) => s.setKindDisplay)
-  // radio 只用 aria-checked（aria-selected 是 tab / option 的）；整組一個 Tab 停點，←/→ 換選項。
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return
     e.preventDefault()

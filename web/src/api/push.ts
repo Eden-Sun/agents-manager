@@ -1,6 +1,5 @@
 import { rawTransport } from './index'
 
-/** 網頁推播（API.md「網頁推播」）；全部 User-only。 */
 export async function getVapidKey(): Promise<string> {
   const r = (await rawTransport.request('GET', '/push/vapid-key')) as { public_key?: string }
   if (!r?.public_key) throw new Error('no vapid key')
@@ -47,7 +46,6 @@ export async function setPushSettings(s: Partial<PushSettingsValue>): Promise<Pu
   return (await rawTransport.request('PUT', '/push/settings', s)) as PushSettingsValue
 }
 
-/** 回報「這個視窗正看著哪顆 bot」：daemon 據此不對正在看的 bot 推播。 */
 export async function reportPresence(p: { client_id: string; bot_id: string | null; visible: boolean; idle_secs: number }): Promise<void> {
   await rawTransport.request('POST', '/push/presence', p)
 }

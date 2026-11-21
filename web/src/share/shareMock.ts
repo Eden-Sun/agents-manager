@@ -1,7 +1,3 @@
-/**
- * 分享頁的 mock（VITE_MOCK=1）：跟 `httpShareClient` 同一個介面，資料只在記憶體。
- * 開法：`VITE_MOCK=1 npx vite` 後開 `/share.html?token=demo_share_token_0123456789`；token 換成 `expired_…` 開頭演「連結已失效」。
- */
 import type { ShareClient, ShareEvents } from './shareApi'
 import { ShareHttpError, SHARE_FILE_MAX, SHARE_TEXT_MAX, shareTextChars, type ShareFile, type ShareMessage, type ShareStatus } from './shareModel'
 
@@ -9,7 +5,6 @@ const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
 let n = 0
 const id = () => `msg_mock_${Date.now().toString(36)}_${(n++).toString(36)}`
 
-/** 受限 bot 做的圖卡長這樣：只能寫 SVG，含中文與 emoji。 */
 const MOCK_CARD = `<svg xmlns="http://www.w3.org/2000/svg" width="540" height="540" viewBox="0 0 540 540">
 <rect width="540" height="540" rx="36" fill="#fff4d6"/>
 <circle cx="430" cy="120" r="70" fill="#ffc94d"/>
@@ -54,7 +49,6 @@ export function mockShareClient(token: string): ShareClient {
   }
   const uploads = new Map<string, string>()
 
-  // 截圖用：`__shareMock.thinking()` 讓 bot 停在「思考中」。
   ;(globalThis as Record<string, unknown>).__shareMock = { thinking: () => setStatus('working'), idle: () => setStatus('idle') }
 
   return {
@@ -66,7 +60,6 @@ export function mockShareClient(token: string): ShareClient {
       await guard()
       if (shareTextChars(text) > SHARE_TEXT_MAX) throw new ShareHttpError(413)
       if (text.includes('429')) throw new ShareHttpError(429, 30)
-      // 同 daemon：一段對話同時只排一則，上一則還沒回完就 409 not_accepted。
       if (status === 'working' || replying) throw new ShareHttpError(409)
       replying = true
       push({ id: id(), role: 'user', text, created_at: new Date().toISOString(), attachments: attachments.map((a) => ({ name: uploads.get(a) ?? a })) })

@@ -23,7 +23,6 @@ const status = (o: Partial<DeployStatus>): DeployStatus => ({
 test('落後且有程式碼差異才出現按鈕', () => {
   assert.equal(deployVisible(null), false)
   assert.equal(deployVisible(status({})), true)
-  // docs-only 的落後不算（kick 同一條規則）。
   assert.equal(deployVisible(status({ code_changed: false })), false)
   assert.equal(deployVisible(status({ behind: 0, code_changed: false })), false)
 })
@@ -38,7 +37,6 @@ test('送出的結果分得清楚：開始了／已經在跑／不用部署／�
   const ok = deployNowNotice({ short: 'bbbbbbbb', log_path: '/x/log' }, null)
   assert.equal(ok.level, 'info')
   assert.match(ok.text, /bbbbbbbb/)
-  // 使用者看不到伺服器上的檔案：通知不寫 log 路徑（2026-10-31）。
   assert.ok(!ok.text.includes('/x/log'), ok.text)
   const busy = deployNowNotice(null, new ApiError(409, { error: 'conflict', reason: 'deploy_in_progress', message: '已經有部署在跑' }, 'x'))
   assert.deepEqual([busy.level, /沒有再開一趟/.test(busy.text), /已經有部署在跑/.test(busy.text)], ['error', true, true])

@@ -1,6 +1,3 @@
-/* 環境設定子分頁（issue #1922）：
-   Jev 與 Claude API 共用的沉底軌道＋選中卡片分頁樣式。
-   桌面版為行內軌道，手機版（≤640px）為寬度 100% 均分並符合觸控高度 ≥44px。 */
 .env-subtabs.subtabs {
   display: inline-flex;
   gap: 2px;

@@ -2,7 +2,6 @@ import { useWakeLock } from '../hooks/useWakeLock'
 import { useT } from '../lib/i18n'
 import { whyUnavailable } from '../lib/wakeLock'
 
-/** 環境設定→顯示：手機盯著畫面等回話時不要鎖屏（2026-09-20 使用者）。預設關——一直亮著很耗電。 */
 export function KeepAwakeToggle() {
   const t = useT()
   const { on, setOn, support, active } = useWakeLock()

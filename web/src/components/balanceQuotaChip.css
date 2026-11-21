@@ -1,7 +1,5 @@
-/* 額度列的 Anthropic API 餘額（BalanceQuotaChip.tsx）：跟量表同一排、不搶寬度；手機只放短數字。 */
 .quota-balance {
   flex: none;
-  /* 桌機兩行（使用者 2026-11-15）：上行小字「API」、下行數字，像其他額度格上下堆疊、寬度只剩數字那麼寬；手機只有數字一行。 */
   display: inline-flex;
   flex-direction: column;
   align-items: center;
@@ -47,7 +45,6 @@ button.quota-balance {
   }
 }
 
-/* 餘額列的小圖示標（KindGlyph）：claude 星芒、OpenAI 商標，顏色跟 kind 色；不用文字標籤。 */
 .kind-glyph {
   display: inline-flex;
   flex: none;
@@ -67,7 +64,6 @@ button.quota-balance {
   color: var(--kind-codex);
 }
 
-/* 全域 API 餘額群組（使用者 2026-11-19）：放在 `.quota-open` 外、跟量表同排，不收合、不被裁；Claude 與 OpenAI 上下兩行，只有一家有值就一行。 */
 .quota-api-group {
   flex: none;
   display: flex;
@@ -86,7 +82,6 @@ button.quota-balance {
   font-size: 11px;
 }
 
-/* 額度選單底部「API 餘額」區（使用者 2026-11-19）：手機與遠端主機都看得到，一列一家。 */
 .quota-pop-api {
   display: flex;
   flex-direction: column;
@@ -124,8 +119,6 @@ button.quota-balance {
   color: var(--warn, #c77700);
 }
 
-/* 手機緊湊卡片（2026-11-20，方案 1）：兩家 API 餘額合成單一 36px 小卡，跟額度格同高、一屏放得下；
-   各家仍各自點擊開原本校正視窗，只拿掉各自的外框。 */
 @media (width <= 640px) {
   .quota-api-group {
     margin-left: 4px;

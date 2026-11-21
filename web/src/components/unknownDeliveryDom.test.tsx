@@ -1,8 +1,3 @@
-/**
- * issue #1479：`delivery=unknown` 的提示要看 bot 有沒有在跑。
- * - 在跑（`agent_status=working`）：中性的「送達尚未確認」，沒有「放棄該回合」這顆按鈕；
- * - 閒著、輸入框仍鎖著：維持原本的「請先放棄該回合」＋按鈕。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'

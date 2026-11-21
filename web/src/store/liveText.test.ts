@@ -37,7 +37,6 @@ test('codex warning footer stays out of live text in narrow and wide panes', () 
 })
 
 test('spinner 完成行才刷掉：一般英文句子含「for N s」不能整句被當成 spinner', () => {
-  // 刷掉的只有 `Cogitated for 5m 53s · done …`、`Thought for 12s` 這種；散文照留。
   for (const prose of ['Wait for 30s before retrying the request.', 'Retry for 5s before giving up', 'Waiting for 30s before retrying']) {
     assert.equal(cleanLiveText(prose), prose)
   }
@@ -70,7 +69,6 @@ test('codex 狀態列的模型名不限於清單裡的 effort（minimal／none�
   for (const row of ['gpt-5.6-sol minimal · ~/p', 'gpt-5.6-sol none · ~/p', 'GPT-6.1-Sol default · ~/project/agents-manager · 接手修復 GitHub issue #1486']) {
     assert.equal(cleanLiveText(row), null, row)
   }
-  // 項目符號不是模型名（#1555 在 daemon 的同一條）。
   assert.equal(cleanLiveText('- 設定檔 · ~/.codex/config.toml 已更新'), '- 設定檔 · ~/.codex/config.toml 已更新')
 })
 
@@ -79,7 +77,6 @@ test('舊版 spinner（`⠦ Thinking… 52s`，沒有括號）是雜訊，同 da
   assert.equal(cleanLiveText('好的，我來處理。\n⠦ Thinking… 52s'), '好的，我來處理。')
 })
 
-// issue #1664: exact screenshot shape, including the empty composer and weekly quota.
 test('issue 1664 screenshot chrome never becomes a live reply', () => {
   const screenshot = `› Ask Codex to do anything
 
@@ -112,7 +109,6 @@ test('issue 1846: Unicode languages are preserved in live text and live activity
     assert.equal(cleanLiveText(text), text, `cleanLiveText failed for: ${text}`)
     assert.equal(cleanLiveActivity(text), text, `cleanLiveActivity failed for: ${text}`)
   }
-  // Pure chrome / punctuation without letters should still be filtered out
   assert.equal(cleanLiveText('─── ··· ───'), null)
   assert.equal(cleanLiveActivity('─── ··· ───'), null)
 })

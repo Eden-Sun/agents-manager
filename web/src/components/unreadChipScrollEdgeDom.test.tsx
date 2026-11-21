@@ -1,8 +1,3 @@
-/**
- * 手機晶片列（單行橫捲）的 ◂ ▸：內容變多、開始溢出時，右邊的箭頭要出現。
- * `useHorizontalScroll` 的邊緣狀態只在 scroll／bar 尺寸改變時重算；晶片增加只會改 scrollWidth，不能靠它。
- * happy-dom 不排版：`.unread-bar` 的 scrollWidth 照晶片數量算，clientWidth 固定 300。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, fakeApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -16,7 +11,6 @@ after(async () => {
   await teardownDom()
 })
 
-/** 窄於 720px：matchMedia 對 `max-width: 720px` 回 true，其餘回 false。 */
 function narrowWindow(): () => void {
   const original = window.matchMedia
   window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 720px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
@@ -41,7 +35,6 @@ function setBots(ids: string[]) {
   } as never)
 }
 
-/** 排版：每顆晶片 100px，列寬 300px（happy-dom 量不到，這裡自己給）。 */
 function stubBar(): HTMLElement {
   const bar = document.querySelector<HTMLElement>('.unread-bar')!
   Object.defineProperty(bar, 'scrollWidth', { configurable: true, get: () => bar.querySelectorAll('.unread-chip').length * 100 })

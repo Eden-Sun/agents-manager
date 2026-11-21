@@ -1,7 +1,3 @@
-/**
- * claude 的「建議下一句」那一條（真的掛 `ChatPanel` 進 happy-dom，後端是 `MockTransport`）：
- * 輸入框空的、claude 閒著才顯示；打字就收起；點一下送 `POST /suggestion/accept`，之後開一個回合、那一條消失。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
@@ -26,7 +22,6 @@ const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer te
 
 const SUGGESTION = '跑一次完整測試，確認都綠再收尾'
 
-/** 整個行程共用一個 mock：別的測試檔可能已經讓這顆 bot 跑過回合，所以等它閒下來再明確放一句建議。 */
 async function openChat(name: string, suggestion: string | null = null) {
   const requests = mockApi(mock)
   await useStore.getState().refreshState()
@@ -34,14 +29,14 @@ async function openChat(name: string, suggestion: string | null = null) {
   assert.ok(bot, `mock 要有 ${name}`)
   if (useStore.getState().runs[bot.id]?.state !== 'running') {
     await mock.request('POST', `/bots/${bot.id}/start`)
-    await advanceMockTime(3000) // mock 的啟動要 2.5 秒虛擬時間
+    await advanceMockTime(3000)
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.state === 'running'
     }, `${name} running`)
   }
   if (suggestion) {
-    await advanceMockTime(3000) // 前一個測試檔留下的回合（2.4 秒）收尾
+    await advanceMockTime(3000)
     await until(async () => {
       await useStore.getState().refreshState()
       return useStore.getState().runs[bot.id]?.agent_status === 'idle'
@@ -82,7 +77,6 @@ test('點一下：送 accept（帶那句與 run id），開回合、那一條消
   await useStore.getState().loadMessages(bot.id)
   const user = (useStore.getState().messages[bot.id] ?? []).filter((m) => m.role === 'user').at(-1)
   assert.equal(user?.content, SUGGESTION)
-  // 共用的 mock：讓這一回合收尾、bot 回到閒著，別拖累後面用同一顆 bot 的測試檔。
   await advanceMockTime(3000)
   await until(async () => {
     await useStore.getState().refreshState()

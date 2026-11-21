@@ -21,10 +21,6 @@ import { useTermWrap } from './termWrap'
 import { useStore } from '../store/store'
 import './blockedPanel.css'
 
-/**
- * SPEC §3.2：agent `blocked` 時對話上方的快照＋按鍵面板，`BlockedModal` 關掉後的留守；
- * 全畫面開著時 `paused` 停掉這裡的輪詢。認得出編號選單時走選單模式（2026-09-12 第二輪回饋）。
- */
 export function BlockedPanel({
   botId,
   paused = false,
@@ -39,20 +35,15 @@ export function BlockedPanel({
   const { snap, err, refresh } = useTerminalSnapshot(botId, { source: 'visible', lines: 40, paused })
   const terminal = useCodexTerminalFooter(botId, snap)
   const press = usePaneKeys(botId, refresh)
-  // 折不折行跟終端分頁共用一個開關（切換鍵在那條 term-bar 上）。
   const wrap = useTermWrap()
   const menu = useChoiceMenu(botId, snap?.text)
-  // 畫面上看不到題目（pane 太矮、claude 把選單裁掉）時，從 transcript 補題目（2026-09-23 使用者）。
   const { questions: pending, status: pendingStatus } = usePendingQuestion(botId, paused)
   const showPending = pending.length > 0 && !questionVisibleOnScreen(pending, menu?.question)
-  // 畫面上是原題的第幾題：補題目、補「第幾題／上一題下一題」（issue #559）。
   const pendingAt = pendingAtOnScreen(pending, menu)
   const [extras, setExtras] = useState(false)
-  // `pre` 是 white-space: pre，內容一律當成一個字串算好再放進去，免得 JSX 的排版縮排跑進畫面。
   const body = err
     ? t('讀取終端失敗：{err}', { err })
     : (snap ? terminal.body : (paused ? t('（全畫面終端開著，這裡暫停更新）') : t('讀取中…')))
-  /** 選單模式預設把這兩樣收起來；認不出選單時它們就是這塊面板本身。 */
   const dedicatedOptions = kind === 'codex' && (
     isCodexUpdateMenu(snap?.text) || (
       pendingStatus === 'ready' && parseAsyncScreen(snap?.text)?.expanded === false &&
@@ -61,7 +52,6 @@ export function BlockedPanel({
   )
   const showTerm = (!menu && !dedicatedOptions) || extras
   const showKeys = !menu || extras
-  // 選項在畫面最下面：300px 截角的 `pre` 跟著捲到底，不停在頂端的工具輸出（`useStickToBottom`）。
   const termRef = useRef<HTMLPreElement>(null)
   const { onScroll: onTermScroll } = useStickToBottom(termRef, snap?.text, showTerm)
 
@@ -94,9 +84,9 @@ export function BlockedPanel({
       <CodexUpdateHint botId={botId} text={snap?.text} onAnswered={refresh} />
       <CodexAsyncQuestion botId={botId} text={snap?.text} questions={pending} onAnswered={refresh} />
       {pendingStatus === 'unavailable' ? <div role="status">{t("暫時無法確認待答題目，請參考終端畫面。")}</div> : null}
-      {/* 同 `BlockedModal`：認得出選單時原題收成一行排在選項後面，認不出才攤開在最上面（issue #559）。 */}
+      {}
       {showPending && !menu ? <PendingQuestionCard questions={pending} defaultOpen answerWhere="below" /> : null}
-      {/* 全畫面視窗開著時面板不再掛問卷：兩邊各預載一份會搶同一條終端的導覽鍵（見 `lib/draftPreload`）。 */}
+      {}
       {menu && !paused ? (
         <>
           {surveyDraftAllowed(isSurvey(menu)) ? (

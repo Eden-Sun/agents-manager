@@ -7,7 +7,6 @@ const now = new Date(2026, 8, 14, 0, 44, 0).getTime()
 
 test('歸零且三小時內重置：只寫倒數（使用者 2026-09-14：不要重置時刻）', () => {
   assert.equal(resetBadge(0, at(3, 25), now), '2h41')
-  // 不到一小時也寫 `0h12`：旁邊全是百分比，裸的 `12` 會被讀成 12%。
   assert.equal(resetBadge(0, at(0, 56), now), '0h12')
 })
 
@@ -29,12 +28,10 @@ test('週窗口 24 小時內就寫倒數（使用者 2026-09-17）', () => {
   assert.equal(resetBadge(0, inHours(23.5), now, RULE_WEEKLY), '23h30')
   assert.equal(resetBadge(0, inHours(4), now, RULE_WEEKLY), '4h00')
   assert.equal(resetBadge(0, inHours(25), now, RULE_WEEKLY), null)
-  // 剩不到 10% 也寫（同日使用者）；10% 以上照舊寫百分比
   assert.equal(resetBadge(9, inHours(4), now, RULE_WEEKLY), '4h00')
   assert.equal(resetBadge(9.5, inHours(4), now, RULE_WEEKLY), '4h00')
   assert.equal(resetBadge(10, inHours(4), now, RULE_WEEKLY), null)
   assert.equal(resetBadge(9, inHours(25), now, RULE_WEEKLY), null)
-  // 5h 門檻不變：要用完、三小時內
   assert.equal(resetBadge(0, inHours(4), now), null)
   assert.equal(resetBadge(5, inHours(1), now), null)
 })

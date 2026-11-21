@@ -32,7 +32,6 @@ test('keyboard shortcuts of a container leave the keys of focused buttons / chec
   assert.equal(keyBelongsToControl(el('TEXTAREA')), true)
   assert.equal(keyBelongsToControl(el('INPUT', 'checkbox')), true)
   assert.equal(keyBelongsToControl(el('INPUT', 'radio')), true)
-  // 文字輸入框（篩選格）與容器本身仍歸容器的快捷鍵管。
   assert.equal(keyBelongsToControl(el('INPUT', 'text')), false)
   assert.equal(keyBelongsToControl(el('DIV')), false)
   assert.equal(keyBelongsToControl(null), false)

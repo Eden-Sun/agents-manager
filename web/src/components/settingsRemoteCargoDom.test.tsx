@@ -1,7 +1,3 @@
-/**
- * 環境設定「主機」頁底下的外部 Cargo 編譯主機（RemoteCargoPanel）：讀回已存設定、儲存、測試連線（測的是**已存**的，
- * 表單有沒存的改動要先存）、缺 cargo／clippy 時的安裝、密碼的「沿用／換新／清掉」。真的掛進 happy-dom，後端是 mock。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
@@ -28,7 +24,6 @@ const btn = (text: string) => [...panel().querySelectorAll('button')].find((b) =
 const message = () => panel().querySelector('pre.host-result')?.textContent ?? ''
 const sent = (requests: FakeRequest[], method: string, re: RegExp) => requests.filter((r) => r.method === method && re.test(r.path))
 
-/** 先把 daemon 端存成已知的樣子，再掛面板。 */
 async function open(saved: Record<string, unknown> = {}) {
   await mock.request('PUT', '/build/remote', { enabled: false, host: '', user: '', ssh_port: 22, remote_root: '', cargo_jobs: 4, password: '', ...saved })
   const requests = mockApi(mock)
@@ -228,7 +223,6 @@ it('外部 Cargo 初始讀取失敗後仍可編輯；未儲存值要攔 beforeun
   }
 })
 
-/** 讀取依序回 `steps`（最後一個重複）；其他請求照 mock 走。記下 PUT 的次數，確認有沒有把表單整份送進 daemon。 */
 function flakyLoad(steps: { status: number; body?: unknown }[]) {
   const before = globalThis.fetch
   mockApi(mock)

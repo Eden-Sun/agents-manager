@@ -1,7 +1,3 @@
-/**
- * #1129：host shell 面板在分頁背景時不輪詢快照（同 #909 的 blocked 輪詢），回前景立刻補讀一次。
- * 桌機寬度、鍵盤直通開著＝原本每 0.25 秒一趟，正是最需要停下來的情況。真的掛 `HostShellPanel` 進 happy-dom。
- */
 import test, { after, afterEach, before, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mockApi, mount, setupDom, teardownDom, unmountAll, fakeWebSocket } from '../testing/domHarness'
@@ -11,7 +7,6 @@ import { resetStoreForTest, useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
 
 virtualMockTime()
-// 共用的 mock 一個主機最多 8 個 shell，而且跨測試檔累積：自己開的自己關。
 const opened: string[] = []
 afterEach(async () => {
   await unmountAll()
@@ -23,7 +18,6 @@ after(() => {
   teardownDom()
 })
 beforeEach(() => {
-  // 桌面直通會開 xterm 的推送 WebSocket；這裡假掉，免得真的去連（happy-dom 會把錯誤當成未處理的例外）。
   fakeWebSocket()
   localStorage.removeItem('am.shellKeySyncOff')
   localStorage.removeItem('am.shellKeySyncOn')
@@ -36,7 +30,6 @@ test('分頁在背景時不輪詢快照，回前景立刻補讀', async () => {
   await useStore.getState().refreshState()
   const shell = (await mock.request('POST', '/hosts/local/shells', {})) as { pane_id: string; cwd: string }
   opened.push(shell.pane_id)
-  // 面板的輪詢 timer 走虛擬時間：背景 2.5 秒＝推進 2500ms，不等牆鐘。
   const vt = virtualTime()
   try {
     await mount(<HostShellPanel host="local" paneId={shell.pane_id} cwd={shell.cwd} embedded />)
@@ -47,7 +40,6 @@ test('分頁在背景時不輪詢快照，回前景立刻補讀', async () => {
       setVisibility('hidden')
       const n0 = snapReads()
       await vt.tick(2500)
-      // 容許正在飛的那一趟。
       assert.ok(snapReads() <= n0 + 1, `背景不該再讀快照：${n0} → ${snapReads()}`)
 
       setVisibility('visible')

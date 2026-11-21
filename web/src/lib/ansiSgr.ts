@@ -1,15 +1,5 @@
-/**
- * 終端文字（含 ANSI 跳脫序列）→ 帶樣式的片段（純函式，沒有 JSX）。
- *
- * 只認 SGR（`ESC [ … m`）：重設、粗體、淡、斜、底線、反白、刪除線、16 色、256 色、truecolor。
- * OSC 8 超連結保留成 `href`；其他 OSC、游標移動、清除行、DCS／APC 等一律丟掉，`\r` 與其他控制字元也丟，
- * 所以原始的 ESC 不會出現在畫面上。`\n`、`\t` 原樣保留。
- *
- * 顏色：0–15 是 `ansi:N`（由 CSS 變數 `--ansi-N` 決定，才能跟著淺／深主題走）；256 色的 16–255 與 truecolor 直接換成 `#rrggbb`。
- */
 
 export type AnsiStyle = {
-  /** `ansi:0`–`ansi:15` 或 `#rrggbb`。 */
   fg?: string
   bg?: string
   bold?: boolean
@@ -23,7 +13,6 @@ export type AnsiStyle = {
 export type AnsiSegment = {
   text: string
   style: AnsiStyle
-  /** OSC 8 超連結的目標；沒有超連結就沒有這個欄位。 */
   href?: string
 }
 
@@ -43,7 +32,6 @@ function sameStyle(a: AnsiStyle, b: AnsiStyle): boolean {
 
 const clamp255 = (v: number) => (Number.isFinite(v) ? Math.min(255, Math.max(0, Math.trunc(v))) : 0)
 
-/** 256 色調色盤的顏色：0–15 用主題變數，16–255 是固定的色塊與灰階。 */
 function color256(n: number): string | undefined {
   if (!Number.isInteger(n) || n < 0 || n > 255) return undefined
   if (n < 16) return `ansi:${n}`
@@ -55,16 +43,12 @@ function color256(n: number): string | undefined {
   return hex(v, v, v)
 }
 
-/**
- * 解析一串終端文字。回傳的片段依序串起來就是 `stripAnsi(text)`；同樣樣式的相鄰字元會合併成一段。
- */
 export function parseAnsi(input: string): AnsiSegment[] {
   const out: AnsiSegment[] = []
   const style: AnsiStyle = {}
   let href: string | undefined
   let text = ''
 
-  // 把目前累積的文字收成一段（先收、再改樣式，所以段內的樣式是切換前的快照）。
   const cut = () => {
     if (!text) return
     const last = out[out.length - 1]
@@ -82,13 +66,11 @@ export function parseAnsi(input: string): AnsiSegment[] {
     else style[which] = c
   }
 
-  /** 套用一個 SGR 參數串（`ESC [ <params> m` 裡的 `<params>`）。 */
   const applySgr = (params: string) => {
     cut()
     const parts = params === '' ? [''] : params.split(';')
     for (let k = 0; k < parts.length; k++) {
       const part = parts[k]
-      // 冒號子參數：`38:5:n`、`38:2::r:g:b`（也有 `38:2:cs:r:g:b`）。
       if (part.includes(':')) {
         const sub = part.split(':')
         const head = Number(sub[0])
@@ -139,10 +121,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
     }
   }
 
-  /**
-   * 從 `start`（CSI 的參數起點）讀到最終位元組；回傳下一個要讀的位置。
-   * 參數、中間位元組（0x20–0x3F）整段收掉；只有內容純粹是數字、冒號、分號且結尾是 `m` 才當 SGR 套用，其他一律丟掉。
-   */
   const readCsi = (start: number): number => {
     let j = start
     while (j < input.length && input.charCodeAt(j) >= 0x20 && input.charCodeAt(j) <= 0x3f) j++
@@ -152,7 +130,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
     return j + 1
   }
 
-  /** 讀到字串結尾（BEL 或 ESC \）；回傳結尾之後的位置，並把 body 交給 onBody。 */
   const readString = (start: number, onBody?: (body: string) => void): number => {
     let j = start
     while (j < input.length) {
@@ -179,7 +156,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
         i = readCsi(i + 2)
       } else if (next === ']') {
         i = readString(i + 2, (body) => {
-          // OSC 8：`8;<params>;<uri>`，uri 為空代表結束超連結。
           if (body.startsWith('8;')) {
             const semi = body.indexOf(';', 2)
             const uri = semi >= 0 ? body.slice(semi + 1) : ''
@@ -190,7 +166,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
       } else if (next === 'P' || next === 'X' || next === '^' || next === '_') {
         i = readString(i + 2)
       } else if (next !== undefined && next >= ' ' && next <= '/') {
-        // 中間位元組（例如 `ESC ( B`）後接一個最終位元組。
         let j = i + 1
         while (j < input.length && input[j] >= ' ' && input[j] <= '/') j++
         i = j + 1
@@ -207,7 +182,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
       text += ch
     } else {
       const code = ch.charCodeAt(0)
-      // 其他 C0／DEL／C1 控制字元（含 `\r`）丟掉。
       if (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) text += ch
     }
     i++
@@ -216,7 +190,6 @@ export function parseAnsi(input: string): AnsiSegment[] {
   return out
 }
 
-/** 去掉所有跳脫序列與控制字元，只留可見文字（OSC 8 的顯示文字保留）。 */
 export function stripAnsi(text: string): string {
   return parseAnsi(text).map((s) => s.text).join('')
 }

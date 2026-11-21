@@ -15,11 +15,6 @@ import { AutoUpdateSettings } from './AutoUpdateSettings'
 import { CodexStopHookSettings } from './CodexStopHookSettings'
 import './updateCheck.css'
 
-/**
- * 設定頁「更新檢查」（issue #1772）：每台主機一張表，列出所有要檢查升級的項目——herdr、各 agent CLI、herdr integration。
- * 這張表是總覽：資料與動作都沿用既有的（header 徽章、`cli-update`、`herdr-update`），只有 integration 是新的；
- * integration 的「更新」只在這裡按才會在那台跑 `herdr integration install`，沒裝的只顯示（grok／agy 已登入時 daemon 會自動裝一次）。
- */
 export function UpdateCheckPanel() {
   const t = useT()
   const hosts = useStore((s) => s.hosts)
@@ -38,11 +33,9 @@ export function UpdateCheckPanel() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busy, setBusy] = useState<Set<string>>(new Set())
   const [ask, setAsk] = useState<{ host: string; row: CheckRow; action: CheckAction } | null>(null)
-  // agy 的確認框有「分析影響」（#1928）；只有按下去才會花 API，開框只讀。
   const agyAsk = ask?.action.kind === 'agy' ? { host: ask.host, from: changelogRange([{ host: ask.host, from: ask.row.current }]).from, target: ask.action.target } : null
   const agyReview = useReviewAsk('agy', agyAsk?.host ?? 'local', agyAsk?.from ?? null, agyAsk?.target ?? null)
 
-  // 舊 daemon 沒有這支：其他列照常顯示，只有 integration 那段講「讀不到」。
   const load = useCallback(
     () =>
       fetchIntegrationUpdates().then(
@@ -71,7 +64,6 @@ export function UpdateCheckPanel() {
         herdrBlocked: herdrHostBlocked(host, shared),
       })
     return [one('local', localTools, localHerdr), ...hosts.map((h) => one(h.name, h.tools, h.herdr))]
-  // `t` 進依賴：切語言時 buildHostCheck 裡的說明文字要重算。
   }, [hosts, localTools, localHerdr, upstream, snap, t])
 
   const running = (host: string, a: CheckAction): boolean => {

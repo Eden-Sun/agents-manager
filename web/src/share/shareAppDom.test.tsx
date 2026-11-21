@@ -1,7 +1,3 @@
-/**
- * 分享頁（SPEC「分享 bot」）：對話、送出後「思考中」→ 回覆、上傳附件跟著訊息送、bot 給的檔案清單、連結失效畫面；
- * 頁面上沒有任何通往主 UI 的連結。
- */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
@@ -18,11 +14,6 @@ afterEach(unmountAll)
 before(setupDom)
 after(teardownDom)
 
-/**
- * 用 `mockShareClient` 的測試：mock 的 120ms 守門、思考中 300ms、回覆 2600ms，以及元件自己的 timer（429 重試等）
- * 都走手動時鐘，`settleV`／`untilV` 才往前，不等牆鐘。換上去後 `settle`／`until` 會卡住（它們靠真 timer），所以這些測試用 V 版；
- * 測試結束先還原真 timer，`unmountAll` 才能用 `settle`。
- */
 let vclock!: ReturnType<typeof installManualClockTimers>['clock']
 function vtest(name: string, fnOrOpts: (() => Promise<void>) | { timeout: number }, maybeFn?: () => Promise<void>) {
   const fn = typeof fnOrOpts === 'function' ? fnOrOpts : maybeFn!
@@ -38,14 +29,12 @@ function vtest(name: string, fnOrOpts: (() => Promise<void>) | { timeout: number
   if (typeof fnOrOpts === 'function') test(name, wrapped)
   else test(name, fnOrOpts, wrapped)
 }
-/** 虛擬 `settle(ms)`：手動時鐘往前 `ms`，再讓 promise 鏈跑完。 */
 async function settleV(ms = 0): Promise<void> {
   await act(async () => {
     await vclock.advance(ms)
     await new Promise<void>((resolve) => setImmediate(resolve))
   })
 }
-/** 虛擬 `until`：每輪往前 50ms，最多 `ms`（虛擬）；失敗訊息同 `until`。 */
 async function untilV(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
   for (let spent = 0; spent <= ms; spent += 50) {
     if (await cond()) return
@@ -287,7 +276,6 @@ test('輪詢恢復後 EventSource 又 open，就不要一直打 messages', { tim
         sources[0].emitOpen()
       })
       await act(async () => timers.clock.advance(50))
-      // #1093：斷過又連上補抓一次（訊息＋檔案各一發）。
       const afterUp = n
       assert.equal(afterUp, mid + 2, 'SSE 重新連上補抓一次訊息與檔案')
       await act(async () => timers.clock.advance(POLL_WAIT))
@@ -357,7 +345,6 @@ vtest('連結失效（404）：只有失效說明，沒有輸入框', async () =
 })
 
 vtest('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「分享／存到手機」，畫面上沒有格式名稱或技術字', async () => {
-  // 轉檔停在進行中：按鈕先出現（轉好前 disabled）。happy-dom 沒有 canvas，不讓它走到失敗。
   await mount(<ShareApp client={{ ...mockShareClient(TOKEN), fileBlob: () => new Promise<Blob>(() => {}) }} />)
   await settleV(300)
   const bubble = [...document.querySelectorAll('.sh-msg.assistant')].at(-1)!
@@ -378,7 +365,6 @@ vtest('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「
   assert.equal(viewer.querySelector('.sh-viewer-name')!.textContent, '星期日早安圖卡')
   assert.equal(viewer.querySelector('.sh-png-btn')!.textContent, '存到手機')
   assert.equal(viewer.querySelector('a'), null, '放大檢視也不給原檔')
-  // 長輩看的畫面：任何格式名稱或技術字都不准出現（看得到的字與按鈕說明）。
   const visible = `${document.body.textContent} ${[...document.querySelectorAll('[aria-label],[title]')].map((x) => `${x.getAttribute('aria-label') ?? ''} ${x.getAttribute('title') ?? ''}`).join(' ')}`
   for (const word of ['PNG', 'SVG', 'png', 'svg', '下載', '格式', '擁有者', '管理者', '後台', '分享使用者']) {
     assert.ok(!visible.includes(word), `畫面上出現了「${word}」`)
@@ -426,7 +412,6 @@ vtest('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', a
 
 vtest('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇人、不給按鈕；跟引用外部資源的講法不同', async () => {
   const base = mockShareClient(TOKEN)
-  // 標籤沒配好（測試環境的 DOMParser 認得的那種壞法；真瀏覽器連屬性之間少空格也認得）。
   const broken = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g><text x="5" y="5">嗨</text></svg>'
   const evil = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://evil.example/x.png"/></svg>'
   const client: ShareClient = {
@@ -600,7 +585,6 @@ vtest('resync（對話被倒回）：整頁重抓並取代手上的清單；前�
   assert.equal(document.querySelectorAll('.sh-msg').length, 1, '倒回掉的那則要消失')
 })
 
-/** 客訴 2026-10-04：一次選 5 個檔，原本同時送出、第三張起「傳得太快了」。現在一張接一張、看得到第幾張／共幾張，429 自己重試。 */
 vtest('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試、不顯示「太快」', async () => {
   let inFlight = 0
   let maxInFlight = 0
@@ -628,7 +612,6 @@ vtest('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試
   await settleV(20)
   assert.match(document.querySelector('.sh-pending')!.textContent!, /第 1 張／共 5 張/)
   assert.match(document.querySelector('.sh-pending')!.textContent!, /等待中/)
-  // act 外完成的上傳要到下一個 act 才 render：分段等，每段都讓佇列往前走。
   for (let i = 0; i < 40 && document.querySelectorAll('.sh-pending li.ok').length < 5; i++) await settleV(100)
   assert.equal(maxInFlight, 1, '一次只傳一張')
   assert.deepEqual(order, ['p1.txt', 'p2.txt', 'p3.txt', 'p4.txt', 'p5.txt'])
@@ -662,7 +645,6 @@ vtest('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」�
   assert.equal(document.querySelector('.sh-retry'), null)
 })
 
-/** 送出的 POST 先等 gate 才交給 mock：送出期間輸入框與📎都沒有停用，可以接著打字、選檔。 */
 function gatedSendClient(): { client: ShareClient; release: () => void; sent: Array<{ text: string; attachments: string[] }>; uploaded: string[] } {
   let release!: () => void
   const gate = new Promise<void>((r) => (release = r))
@@ -723,7 +705,6 @@ vtest('送出中才傳好的附件留著', async () => {
     })
     await click(document.querySelector('.sh-send')!)
     await settleV(50)
-    // 送出期間才選的檔：傳好（拿到 id）但沒有跟這一則送出。
     const fi = document.querySelector<HTMLInputElement>('input[type="file"]')!
     Object.defineProperty(fi, 'files', { configurable: true, value: [new File(['hi'], 'late.png', { type: 'image/png' })] })
     await act(async () => fi.dispatchEvent(new Event('change', { bubbles: true })))
@@ -733,7 +714,6 @@ vtest('送出中才傳好的附件留著', async () => {
     assert.equal(sent[0].attachments.length, 0, '第一則送出時沒帶附件')
     assert.equal(document.querySelectorAll('.sh-pending li').length, 1, '送出期間才傳好的附件還在清單上')
     assert.equal(document.querySelector('.sh-pending li')!.className, 'ok')
-    // 等 bot 回完、送出鈕恢復，再按送出：這次附件要跟上。
     await untilV(() => !document.querySelector<HTMLButtonElement>('.sh-send')!.disabled, '可以再送')
     await click(document.querySelector('.sh-send')!)
     await settleV(300)
@@ -743,7 +723,6 @@ vtest('送出中才傳好的附件留著', async () => {
   }
 })
 
-/** #1092 的測試共用：一頁訊息，與只有 messages 會變的自製 client。 */
 const page = (ms: ShareMessage[]) => ({ bot_name: 'b', status: 'idle' as const, has_more: false, messages: ms })
 const msgAt = (id: string, role: 'user' | 'assistant', n: number): ShareMessage => ({
   id,
@@ -1197,7 +1176,6 @@ test('輪詢開著時失敗不另外多排一條重試', { timeout: 20_000 }, as
   }
 })
 
-/** #1093：SSE 在背景斷線又連上、回到前景：訊息與檔案各補抓一次（斷線期間的事件不會重播）。 */
 function reconnectHarness() {
   const sources: { emitOpen: () => void; emitError: () => void }[] = []
   class FakeSource {
@@ -1318,7 +1296,6 @@ test('回到前景補抓一次；背景時不補', { timeout: 20_000 }, async ()
   }
 })
 
-/** #1094：bot 做的圖要畫在那則回覆下面；輪詢模式沒有 SSE 的 message 事件，新回覆到了也要重抓檔案清單。 */
 test('輪詢模式：新回覆到了也重抓檔案清單，圖出現在那則回覆下面', async () => {
   const timers = installManualClockTimers()
   const originalNow = Date.now
@@ -1420,7 +1397,6 @@ test('SSE 模式不重複抓：收到回覆事件已經抓過，載入頁面不�
   assert.equal(filesCalls, 2, '開頁一次＋這一則回覆一次，不是三次')
 })
 
-/** #1095：超過 20 個附件在送出前就擋（daemon 會回 400，畫面原本只寫「送出失敗」）；移到 20 個就能送。 */
 vtest('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20 個就能送', { timeout: 20_000 }, async () => {
   const client = mockShareClient(TOKEN)
   client.upload = async (f) => ({ id: `att-${f.name}`, name: f.name })
@@ -1455,7 +1431,6 @@ vtest('超過 20 個附件：送出鈕停用並說明要移除幾個；移到 20
   assert.equal(sent[0].length, 20)
 })
 
-/** #1096：載入較早訊息後留在原來那一則，不跳到最舊（scrollHeight 變大、scrollTop 要跟著補）。 */
 test('載入較早訊息後留在原來那一則，不跳到最舊', { timeout: 20_000 }, async () => {
   const older = [0, 1].map((i) => ({
     id: `old-${i}`,
@@ -1549,7 +1524,6 @@ vtest('放大檢視開著時檔案換版：檢視裡的「還在修」也變回�
   assert.equal(document.querySelector('.sh-viewer .sh-png-note'), null)
 })
 
-/** #1659：載入較早訊息在飛的時候對話被倒回、resync 已經套用；遲到的舊頁不能把倒回的訊息加回來，也不能改 has_more。 */
 test('載入較早訊息在飛時對話被倒回（resync 已套用）：遲到的舊頁整份丟掉 (issue #1659)', async () => {
   let ev!: ShareEvents
   let head = [msgAt('m5', 'user', 5), msgAt('m6', 'assistant', 6)]
@@ -1619,7 +1593,6 @@ test('resync 之後才開始的載入較早訊息照常套用 (issue #1659)', as
   assert.equal(document.querySelector('.sh-older'), null)
 })
 
-/** #1684：resync 的快照在飛的時候，bot 在倒回後又回了一則（SSE 先到）；快照晚回，不能把這則新回覆蓋掉。 */
 test('resync 快照在飛時 SSE 收到的新回覆不被快照蓋掉 (issue #1684)', async () => {
   let ev!: ShareEvents
   const pending: ((value: ReturnType<typeof page>) => void)[] = []
@@ -1649,7 +1622,6 @@ test('resync 快照在飛時 SSE 收到的新回覆不被快照蓋掉 (issue #16
   assert.deepEqual(ids(), ['m1', 'm3'], '倒回的 m2 要消失，快照之後才到的 m3 要留著')
 })
 
-/** #1684：兩次 resync 中間收到的回覆，是倒回前的狀態；後一次快照已經不含它，就不能因為前一次的 SSE 又冒出來。 */
 test('兩次 resync 之間收到的回覆不跨世代復活 (issue #1684)', async () => {
   let ev!: ShareEvents
   const pending: ((value: ReturnType<typeof page>) => void)[] = []
@@ -1678,7 +1650,6 @@ test('兩次 resync 之間收到的回覆不跨世代復活 (issue #1684)', asyn
   assert.deepEqual(ids(), ['m1'], '第二次快照已經不含 m3，舊的 SSE 不能讓它復活')
 })
 
-/** #1684：resync 的重抓失敗後，SSE 收到的回覆要留到重試成功的快照套用時。 */
 test('resync 重抓失敗後重試成功：期間收到的回覆仍保留 (issue #1684)', async () => {
   let ev!: ShareEvents
   const pending: { resolve: (value: ReturnType<typeof page>) => void; reject: (e: unknown) => void }[] = []
@@ -1710,7 +1681,6 @@ test('resync 重抓失敗後重試成功：期間收到的回覆仍保留 (issue
   assert.deepEqual(ids(), ['m1', 'm3'], '重試拿到的快照套用時，m3 仍在')
 })
 
-/** #1684：快照與 SSE 同一則（同 id）只畫一次；SSE 後到的內容覆蓋快照裡的同 id。 */
 test('resync 快照與 SSE 收到同一則訊息：同 id 只畫一次', async () => {
   let ev!: ShareEvents
   const pending: ((value: ReturnType<typeof page>) => void)[] = []

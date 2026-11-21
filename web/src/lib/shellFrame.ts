@@ -1,16 +1,6 @@
-/**
- * 主機 shell 的 ANSI 畫面怎麼畫進 xterm（純函式，沒有 DOM，給測試直接跑）。
- *
- * 目標三件事：
- * - 只重畫變了的列（每一列先 `\x1b[2K` 清掉再寫，不整屏清，所以不閃）；
- * - 整張畫面往上捲（新輸出把舊的頂上去）時，被捲出去的列要真的進 xterm 的捲動歷史，回看才看得到；
- * - 整批寫進一次 `term.write`，中間不會露出半張畫面。
- */
 
-/** 把 herdr 的畫面文字切成列；尾端的換行不算一列；有給 `rows` 就補空列到那個高度。 */
 import { ESC } from './charCodes'
 
-/** SGR／CSI 轉義序列（去色碼、算顯示寬度用）。 */
 const ANSI_SGR = new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, 'g')
 
 export function splitFrame(text: string, rows: number | null): string[] {
@@ -22,26 +12,14 @@ export function splitFrame(text: string, rows: number | null): string[] {
 }
 
 export interface FramePlan {
-  /** 要寫進 xterm 的 VT 序列（可能是空字串＝畫面沒變）。 */
   out: string
-  /** 寫完之後 xterm 視窗裡的列；下一張拿它當 `prev`。 */
   lines: string[]
 }
 
 const pos = (row: number) => `\x1b[${row + 1};1H\x1b[2K`
 const SGR_RESET = '\x1b[0m'
-/** 去掉 CSI 序列後是不是空白列（空白列不算「內容相符」，免得兩張空白畫面被誤判成捲動）。 */
-// 去 CSI 序列要用控制字元 ESC，這裡是刻意的。
-// oxlint-disable-next-line no-control-regex
 const isBlank = (line: string) => line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').trim() === ''
 
-/**
- * `prev`＝xterm 視窗目前的列，`next`＝這一張；兩者長度一樣才做增量（長度不同＝resize，整屏重畫）。
- *
- * 捲動偵測：找一個位移 s 讓 `next[i] === prev[i + s]` 的非空白列最多（s=0 就是原地重畫）。
- * 只有 s>0 的命中數**多過** s=0 才當成「往上捲了 s 列」：先在最底列換行 s 次，把頂上的 s 列推進捲動歷史，
- * 再把剩下的差異列原地重畫。
- */
 export function planFrame(prev: string[], next: string[]): FramePlan {
   const n = next.length
   if (prev.length !== n || n === 0) {
@@ -72,13 +50,11 @@ export function planFrame(prev: string[], next: string[]): FramePlan {
   for (let i = 0; i < n; i++) {
     if (cur[i] !== next[i]) changed.push(i)
   }
-  // 變動太多（全螢幕程式：vim、less、top…）就不做增量：增量很容易留下殘影（舊列沒被清到），整屏重畫才保證正確。
   if (best === 0 && changed.length * 3 > n) return fullRedraw(next)
   for (const i of changed) out += pos(i) + next[i] + SGR_RESET
   return { out, lines: next }
 }
 
-/** 整屏重畫：清掉整個視窗再從頭畫（回捲動歷史不動）。 */
 function fullRedraw(next: string[]): FramePlan {
   return {
     out: `\x1b[H\x1b[2J` + next.map((line, i) => pos(i) + line + SGR_RESET).join(''),
@@ -86,7 +62,6 @@ function fullRedraw(next: string[]): FramePlan {
   }
 }
 
-/** 顯示寬度（去 SGR、中日韓全形算 2）。 */
 function displayWidth(line: string): number {
   const plain = line.replace(ANSI_SGR, '')
   let w = 0
@@ -105,12 +80,6 @@ function displayWidth(line: string): number {
   return w
 }
 
-/**
- * 游標擺哪：herdr 的畫面不帶游標位置，所以放在最後一個有字的列的字尾（shell 的提示後面就是打字的地方）。
- * 行尾空白不算字尾：zsh 退格是用空白蓋掉舊字，畫面會留下一串空白，算進去游標就跑到後面。
- * 例外是使用者自己剛打的空白（`typedSpaces`，見 [`typedSpacesAfter`]），最多補回那麼多格。
- * 全部是空白＝擺在左上。
- */
 export function cursorSeq(lines: string[], typedSpaces = 0): string {
   let row = lines.length - 1
   while (row > 0 && isBlank(lines[row])) row--
@@ -118,11 +87,9 @@ export function cursorSeq(lines: string[], typedSpaces = 0): string {
   const plain = lines[row].replace(ANSI_SGR, '')
   const trimmed = plain.replace(/ +$/, '')
   const col = displayWidth(trimmed) + Math.min(typedSpaces, plain.length - trimmed.length)
-  // TUI 的畫面文字裡可能夾了「隱藏游標」，這裡一律打開。
   return `\x1b[${row + 1};${col + 1}H\x1b[?25h`
 }
 
-/** 送出一個輸入後，「使用者自己打在行尾的空白」還剩幾格：打空白累加、打其他字歸零、退格減一、其他按鍵歸零。 */
 export function typedSpacesAfter(prev: number, op: { kind: 'text'; text: string } | { kind: 'keys'; keys: string[] }): number {
   if (op.kind === 'text') {
     if (/[\r\n]/.test(op.text)) return 0

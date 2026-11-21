@@ -1,17 +1,3 @@
-/**
- * 輸入框草稿與 daemon 同步（使用者 2026-10-01）：以 daemon 為準，各瀏覽器共用，不再存 localStorage。
- *
- * 這個類別只管「什麼時候送、收到別人的要不要套」，不碰 store／DOM／網路——都從 `deps` 進來，測試才能用假的。規則：
- * - 本機打字：debounce 之後 `PUT`；清空（送出）不等 debounce，馬上送，別的瀏覽器才不會留著一份會被再送一次的字。
- *   同一個 key 同時只有一個 PUT 在飛，後面的等前一個回來，daemon 看到的順序就是本機的順序（最後寫入者贏）。
- * - 收到別的 client 的 `draft_updated`：輸入框**有焦點而且本機有還沒同步的修改**就不蓋（等本機那次 PUT 送出去）；
- *   其餘都套用。自己的回音（同 `client_id`）只記 rev，不重套。
- * - `rev` 是 daemon 每個 key 單調遞增的版本：小於等於已知的 rev 一律當舊事件丟掉（WS 重播、GET 與事件交錯都靠它）。
- * - PUT 失敗（斷線）：維持 dirty、稍後重試；重連時 `load()` 重拉全部、再把還 dirty 的送出去。
- * - PUT 被 daemon 拒絕（400／404 目標已刪／413，例如超過 256 KB）：重試也不會成功，不再排重送、記進 `rejected`（草稿只留在本機），
- *   `load()` 不把它當「daemon 沒有」清掉；本機再改字、或別台寫了新版本才解除。PUT 在飛時本機又改過的，拒絕的只是舊那版，
- *   新的字照樣排隊送出（#1514）。
- */
 
 import { ApiError } from '../api/types'
 
@@ -29,19 +15,13 @@ export interface DraftSyncDeps {
   clientId: string
   put: (key: string, text: string, clientId: string) => Promise<{ rev: number }>
   fetchAll: () => Promise<DraftWire[]>
-  /** 目前本機輸入框的字。 */
   read: (key: string) => string
-  /** 把別人的字套到本機（不可再觸發 `localChange`）。 */
   write: (key: string, text: string) => void
-  /** 那個輸入框現在是不是游標所在、而且視窗在前景。 */
   focused: (key: string) => boolean
-  /** 目前本機有字的所有 key（`load()` 用來找出 daemon 已經刪掉的）。 */
   keys: () => string[]
   debounceMs?: number
   retryMs?: number
-  /** PUT 被 daemon 拒絕、重試無意義（400／413）。呼叫端據此在輸入框上方顯示說明。 */
   onRejected?: (key: string, error: unknown) => void
-  /** 先前 `onRejected` 的那份提示不再適用（送成功、別台寫入、bot 被刪）：呼叫端收掉說明。只在真的通知過的 key 上呼叫。 */
   onRejectedCleared?: (key: string) => void
 }
 
@@ -53,17 +33,13 @@ type Timer = ReturnType<typeof setTimeout>
 export class DraftSync {
   private readonly rev = new Map<string, number>()
   private readonly dirty = new Set<string>()
-  /** 本機輸入次數，以及最後接受的遠端版本接受時所見的輸入次數。 */
   private readonly localEpoch = new Map<string, number>()
   private readonly acceptedEpoch = new Map<string, number>()
   private readonly forgetEpoch = new Map<string, number>()
   private readonly timers = new Map<string, Timer>()
   private readonly inflight = new Set<string>()
-  /** daemon 拒收（太大…）的 key：草稿只在本機，不重送、`load()` 也不清。 */
   private readonly rejected = new Set<string>()
-  /** 已經 `onRejected` 通知過、還沒 `onRejectedCleared` 收掉的 key（比 `rejected` 晚收：打字改短不算收，送成功才算）。 */
   private readonly shown = new Set<string>()
-  /** `load()` 在飛的時候本機碰過的 key：GET 的回應比這些寫入舊，不能拿來判「daemon 沒有它＝被刪了」。 */
   private touched: Set<string> | null = null
   private loading: Promise<void> | null = null
   private readonly deps: DraftSyncDeps
@@ -80,7 +56,6 @@ export class DraftSync {
     return this.deps.clientId
   }
 
-  /** 本機改了這個輸入框（打字、倒回放回原文、退回排隊那則…）。 */
   localChange(key: string, text: string): void {
     this.localEpoch.set(key, (this.localEpoch.get(key) ?? 0) + 1)
     this.rejected.delete(key)
@@ -89,7 +64,6 @@ export class DraftSync {
     this.schedule(key, text === '' ? 0 : this.debounceMs)
   }
 
-  /** 這個 key 本機還有沒送進 daemon 的修改。 */
   isDirty(key: string): boolean {
     return this.dirty.has(key)
   }
@@ -98,14 +72,11 @@ export class DraftSync {
     return this.rev.get(key) ?? 0
   }
 
-  /** WS `draft_updated`。 */
   remote(ev: DraftEvent): void {
-    // `load()` 在飛時進來的事件比那份快照新：不能再拿快照判它「daemon 沒有＝被刪了」。
     this.touched?.add(ev.key)
     this.applyServer(ev.key, ev.text, ev.rev, ev.client_id === this.deps.clientId)
   }
 
-  /** 開頁與每次 WS 重連：拉全部、套用、再把還沒送出的送出去。同時只跑一個。 */
   load(): Promise<void> {
     if (this.loading) return this.loading
     this.touched = new Set()
@@ -118,7 +89,6 @@ export class DraftSync {
           seen.add(d.key)
           this.applyServer(d.key, d.text, d.rev, false)
         }
-        // daemon 沒有的＝已刪（清空送出、bot 被刪）：本機沒有待送的修改才跟著清。
         for (const key of this.deps.keys()) {
           if (seen.has(key) || touched.has(key) || this.dirty.has(key) || this.inflight.has(key) || this.rejected.has(key)) continue
           this.deps.write(key, '')
@@ -132,12 +102,10 @@ export class DraftSync {
     return this.loading
   }
 
-  /** 把所有還 dirty 的馬上送（重連、回到前景）。 */
   flushAll(): void {
     for (const key of [...this.dirty]) this.schedule(key, 0)
   }
 
-  /** bot／專案被刪、草稿被清掉：不用再送。 */
   forget(key: string): void {
     this.cancel(key)
     this.forgetEpoch.set(key, (this.forgetEpoch.get(key) ?? 0) + 1)
@@ -166,7 +134,6 @@ export class DraftSync {
     if (this.deps.read(key) !== text) this.deps.write(key, text)
   }
 
-  /** 這個 key 的被拒提示已經不適用：有通知過才呼叫 `onRejectedCleared`。 */
   private settle(key: string): void {
     if (this.shown.delete(key)) this.deps.onRejectedCleared?.(key)
   }
@@ -190,7 +157,6 @@ export class DraftSync {
 
   private async flush(key: string): Promise<void> {
     if (!this.dirty.has(key)) return
-    // 前一個 PUT 還在飛：它回來之後會看到本機又變了、自己再排一次。
     if (this.inflight.has(key)) return
     const text = this.deps.read(key)
     const forgetEpoch = this.forgetEpoch.get(key) ?? 0
@@ -204,29 +170,23 @@ export class DraftSync {
       this.settle(key)
       if ((this.forgetEpoch.get(key) ?? 0) !== forgetEpoch && (this.localEpoch.get(key) ?? 0) === 0) return
       if (this.deps.read(key) === text) {
-        // 在飛期間來的遠端版本比這次寫入新、又因為有焦點被略過：daemon 是遠端那版，本機這段字不能當成已同步，依本機優先再送一次（#1665）。
         if (observedRev > rev && observedRev > knownAtSend && this.dirty.has(key)) this.schedule(key, text === '' ? 0 : this.debounceMs)
         else this.dirty.delete(key)
       } else if ((this.localEpoch.get(key) ?? 0) > (this.acceptedEpoch.get(key) ?? 0)) {
-        // 新的本機輸入尚未被接受的遠端版本取代，仍要排隊送出。
         this.dirty.add(key)
         this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
       } else if (observedRev <= rev) {
-        // 在飛期間接受過的遠端版本比這次 PUT 舊；PUT 成功才是較新的 server 內容。
         this.deps.write(key, text)
         this.dirty.delete(key)
       } else {
-        // 已知有更高 rev 的 server 版本，保留已套用的遠端內容。
         this.dirty.delete(key)
       }
     } catch (e) {
       if (e instanceof ApiError && (e.status === 400 || e.status === 404 || e.status === 413)) {
-        // 拒絕的是送出去那一版；拒絕之前本機又改了（PUT 在飛時打的字）就照新的字排隊送，不標成被拒（#1514）。
         if (this.deps.read(key) !== text) {
           this.schedule(key, this.deps.read(key) === '' ? 0 : this.debounceMs)
           return
         }
-        // 重送一模一樣的字只會一直被拒：停下來，等本機改字再試。
         this.dirty.delete(key)
         this.rejected.add(key)
         this.shown.add(key)

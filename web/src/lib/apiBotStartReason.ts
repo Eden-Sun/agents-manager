@@ -1,9 +1,5 @@
 import { msg, tr } from './i18n'
 
-/**
- * claude-api bot 啟動被 daemon 在「確定沒有副作用」時拒絕的原因（API.md `POST /api/bots/{id}/start`）。
- * 沒見過的 reason 回 null，呼叫端退回 daemon 原文。
- */
 const TEXT: Record<string, string> = {
   api_bot_disabled: msg('Claude API 沒有開：config 要同時打開 [claude_api] enabled 與 [claude_api.api_bot] enabled，再重新載入設定。'),
   api_bot_turn_cost_cap_missing: msg('沒有設定單次成本上限：在 [claude_api.api_bot] 填 max_turn_cost_microusd（必須大於 0）。'),
@@ -30,13 +26,8 @@ const TEXT: Record<string, string> = {
   api_run_already_active: msg('這顆 bot 已經在執行中（已有一個進行中的 run）。'),
 }
 
-/**
- * openai-api bot 的同名原因要講 OpenAI 的設定位置（使用者 2026-11-19：缺單回合上限時寫成 [claude_api.api_bot] 是錯的）。
- * daemon 的 reason 名稱跟 Claude 共用，所以依 bot 的 kind 選句；沒有對應的 OpenAI 句就退回通用句。
- */
 const OPENAI_TEXT: Record<string, string> = {
   api_native_start_unconfirmed: msg('daemon 無法確認 OpenAI bot 的啟動狀態；請稍後再試。'),
-  // 單回合上限留空就是不設上限（daemon 不再因此拒絕），所以 cap_missing 對 openai 不會出現；萬一出現也不講 Claude 的設定位置。
   api_bot_turn_cost_cap_missing: msg('[openai_api.api_bot] 的單回合成本上限設定有誤：留空＝不設上限，或填大於 0 的數字（到 設定 → OpenAI API 修改）。'),
   api_bot_config_invalid: msg('[openai_api.api_bot] 的設定值超出允許範圍，請檢查各項上限。'),
   api_bot_key_unavailable: msg('讀不到 OpenAI API key：請確認 [openai_api] key_file 指向存在、權限正確且非空的檔案。'),

@@ -1,5 +1,3 @@
-/** 「有新版可升級」的圖示：雙層向上的 chevron（2026-09-09 使用者指定這種符號，取代文字 ⬆）。
- *  用 currentColor，跟著所在 badge / chip 的字色走；大小用 CSS `.upgrade-icon` 或 `size` 控。 */
 export function UpgradeIcon({ size = 12, className }: { size?: number; className?: string }) {
   return (
     <svg

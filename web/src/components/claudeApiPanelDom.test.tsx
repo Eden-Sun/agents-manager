@@ -1,4 +1,3 @@
-/** 環境設定 → Claude API：沒 key 不給開、key 只送不收、用途各自開關與模型、帳本顯示累計 token（issue #1919）。 */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mount, setupDom, settle, teardownDom, unmountAll } from '../testing/domHarness'
@@ -96,7 +95,6 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   const root = await mount(<ClaudeApiPanel />)
   await settle()
 
-  // 驗證 subtabs 結構
   const subtabs = root.querySelector('.env-subtabs[role="tablist"]')
   assert.ok(subtabs, 'subtabs tablist should exist')
   assert.equal(subtabs.getAttribute('aria-label'), 'Claude API 分類')
@@ -110,7 +108,6 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(tabs[1].getAttribute('aria-selected'), 'false')
   assert.equal(tabs[2].getAttribute('aria-selected'), 'false')
 
-  // 設定 panel 可見，帳本 panel hidden
   const formPanel = root.querySelector('#api-form')
   const bookPanel = root.querySelector('#api-book')
   assert.ok(formPanel, 'api-form panel exists')
@@ -118,7 +115,6 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(formPanel.hasAttribute('hidden'), false, 'formPanel should be visible')
   assert.equal(bookPanel.hasAttribute('hidden'), true, 'bookPanel should be hidden')
 
-  // 點擊「帳本」分頁
   tabs[1].click()
   await settle()
 
@@ -127,7 +123,6 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   assert.equal(formPanel.hasAttribute('hidden'), true, 'formPanel should be hidden')
   assert.equal(bookPanel.hasAttribute('hidden'), false, 'bookPanel should be visible')
 
-  // 驗證帳本內容
   assert.match(bookPanel.textContent ?? '', /一次性用途（翻譯／changelog 等）用量帳本/)
   assert.ok(bookPanel.querySelector('[data-testid=claude-api-ledger-notice]'))
   assert.match(bookPanel.textContent ?? '', /claude-api bot 的用量記錄在資料庫/)
@@ -135,7 +130,6 @@ test('ClaudeApiPanel: 子分頁切換「設定｜帳本」，預設設定，點�
   const rows = bookPanel.querySelectorAll('tbody tr')
   assert.equal(rows.length, 1)
 
-  // 切回「設定」分頁
   tabs[0].click()
   await settle()
   assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
@@ -259,8 +253,6 @@ test('每小時上限非 0 時說明寫清楚 0＝不限', async () => {
   await settle()
   assert.match(root.querySelector(`[data-testid=claude-api-limit-hint-${g.id}]`)?.textContent ?? '', /0 ＝ 不限/)
 })
-
-// ── 翻譯組的供應商選單（openai-api 切片 F）──────────────────────────────
 
 const translateGroup = (over: Record<string, unknown>) => groups(true).map((g) => (g.id === 'translate' ? { ...g, enabled: true, provider: 'anthropic', openai_allowed: true, ...over } : g))
 const openai = (available: boolean) => ({

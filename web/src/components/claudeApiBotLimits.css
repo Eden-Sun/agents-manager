@@ -1,4 +1,3 @@
-/* components/ClaudeApiBotLimits.tsx：claude-api bot 的總花費上限與每回合上限設定（共用於 Settings 與 BotSettingsPanel） */
 .claude-api-bot-limits {
   display: flex;
   flex-direction: column;

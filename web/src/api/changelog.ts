@@ -1,7 +1,3 @@
-/**
- * `GET /api/changelog`：重啟套用前先看新版改了什麼（2026-09-10 使用者需求）。
- * 傳輸層錯誤也收成 `found:false` + `error`，UI 不會靜默略過。
- */
 import { rawTransport } from './index'
 
 export interface ChangelogSection {
@@ -17,7 +13,6 @@ export interface ChangelogReply {
   found: boolean
   sections: ChangelogSection[]
   sourceUrl: string
-  /** 主要來源之外的備援連結（agy 的 releases 頁）；沒有就是 null。 */
   altUrl: string | null
   error: string | null
 }
@@ -26,23 +21,19 @@ const CLAUDE_SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANG
 const CODEX_SOURCE = 'https://github.com/openai/codex/releases'
 const HERDR_SOURCE = 'https://github.com/herdrdev/herdr/releases'
 
-// agy、grok 的官方來源，跟後端 `changelog.rs` 的常數一致，且只用這三個主機。
 const AGY_SOURCE = 'https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/CHANGELOG.md'
 const AGY_ALT_SOURCE = 'https://github.com/google-antigravity/antigravity-cli/releases'
 const GROK_SOURCE_BASE = 'https://storage.googleapis.com/grok-build-public-artifacts/cli/changelogs/'
 
-/** agy、grok 的連結一律用前端自己的：後端還沒認得這兩個 kind 時，回應的 `source_url` 會是 claude 的。 */
 export function hasOwnSource(kind: string): boolean {
   return kind === 'agy' || kind === 'grok'
 }
 
-/** grok 一版一個檔，要有純數字版本才組得出網址；其餘退回該版以前的目錄。 */
 function grokSource(to: string | null): string {
   const v = to?.trim().replace(/^v/, '') ?? ''
   return /^\d+(\.\d+)*$/.test(v) ? `${GROK_SOURCE_BASE}${v}.external.md` : GROK_SOURCE_BASE
 }
 
-/** codex 沒有 CHANGELOG.md，只有 releases。 */
 function sourceFor(kind: string, to: string | null = null): string {
   if (kind === 'herdr') return HERDR_SOURCE
   if (kind === 'agy') return AGY_SOURCE
@@ -83,7 +74,6 @@ export async function fetchChangelog(
 ): Promise<ChangelogReply> {
   const q = new URLSearchParams({ kind, host })
   if (from) q.set('from', from)
-  // codex 新版還沒進磁碟，目標版本取自 pane 上的 `a -> b`。
   if (to) q.set('to', to)
   try {
     return toReply(await rawTransport.request('GET', `/changelog?${q.toString()}`), kind, host, to)
@@ -93,11 +83,9 @@ export async function fetchChangelog(
   }
 }
 
-/** 輪詢只查狀態。超過這個次數就停，畫面上改按「再查一次」（仍是 GET）。 */
 export const TRANSLATION_POLL_MS = 1500
 export const TRANSLATION_POLL_MAX = 40
 
-/** `tick` 從 1 起算。第 41 次起停止，避免視窗開著就一直打。 */
 export function translationPollAction(tick: number): 'poll' | 'stop' {
   return tick > TRANSLATION_POLL_MAX ? 'stop' : 'poll'
 }
@@ -117,7 +105,6 @@ export interface TranslationAttempt {
   usage: TranslationUsage | null
 }
 
-/** `unavailable` 只有瀏覽器自己用：翻譯這條連不上時，原文照舊，不當成 daemon 的狀態。 */
 export type TranslationStatus =
   | 'unconfigured'
   | 'skipped'
@@ -142,7 +129,6 @@ export interface TranslationView {
   model: string | null
   requestedModel: string | null
   lang: string | null
-  /** `[changelog_translate] auto`：新版偵測時背景會翻，開框時 absent 也會自動補翻一次（#1948）。 */
   auto: boolean
   attempts: TranslationAttempt[]
 }
@@ -158,7 +144,6 @@ function translationQuery(kind: string, host: string, from: string | null, to: s
   return q.toString()
 }
 
-/** 缺欄或不是有限數字維持 null。明確的 0 是真的讀數，不改成「沒有」。 */
 function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
@@ -228,13 +213,10 @@ function unavailableTranslation(): TranslationView {
   }
 }
 
-/** 開框時該不該自動送出一次：只有 absent（沒有任何帳本）、auto 開著、這個 key 還沒送過（#1948）。 */
 export function shouldAutoTranslate(view: TranslationView | null, alreadySent: boolean): boolean {
   return !!view && view.enabled && view.auto && view.status === 'absent' && !alreadySent
 }
 
-/** 退避到期後自動再試的等待毫秒數；不該自動再試時回傳 null。次數用盡（`attempts`）只給使用者按「再試一次」。
- *  預算擋下（`budget`：in_flight、hourly）也不排計時：GET 看不到預算，會變成每隔一段就重打，改由使用者再按。 */
 export function autoRetryDelay(view: TranslationView | null, now: number): number | null {
   if (!view || !view.enabled || !view.auto || view.status !== 'failed' || view.error === 'attempts' || view.errorKind === 'budget' || !view.retryAfter) return null
   const at = Date.parse(view.retryAfter)
@@ -242,10 +224,8 @@ export function autoRetryDelay(view: TranslationView | null, now: number): numbe
   return Math.max(AUTO_RETRY_MIN_MS, at - now)
 }
 
-/** 地板值：就算daemon回了過去的時間，也不會連續緊密重打。 */
 export const AUTO_RETRY_MIN_MS = 5000
 
-/** 只讀。開視窗、輪詢、再查一次都走這支，不會開始翻譯。 */
 export async function fetchTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
   try {
     return toTranslation(await rawTransport.request('GET', `/changelog/translation?${translationQuery(kind, host, from, to)}`))
@@ -254,7 +234,6 @@ export async function fetchTranslation(kind: string, host: string, from: string 
   }
 }
 
-/** 使用者按翻譯或「再試一次」。 */
 export async function postTranslation(kind: string, host: string, from: string | null, to: string | null): Promise<TranslationView> {
   try {
     return toTranslation(await rawTransport.request('POST', `/changelog/translation?${translationQuery(kind, host, from, to)}`, {}))
