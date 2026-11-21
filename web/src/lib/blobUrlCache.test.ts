@@ -4,14 +4,16 @@ import assert from 'node:assert/strict'
 import { createBlobUrlCache } from './blobUrlCache.ts'
 
 const revoked: string[] = []
-URL.revokeObjectURL = (u: string) => {
+// 注入 revoke，不改全域 URL.revokeObjectURL（同 shard 其他測試檔會互相覆寫）。
+const revokeUrl = (u: string) => {
   revoked.push(u)
 }
+const createBlobUrlCacheWithStub = (max: number) => createBlobUrlCache(max, revokeUrl)
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
 test('超過上限時持有中的不擠出；放掉後才依最久沒用的順序 revoke', async () => {
   revoked.length = 0
-  const c = createBlobUrlCache(2)
+  const c = createBlobUrlCacheWithStub(2)
   const a = c.acquire('a', async () => 'blob:a')
   const b = c.acquire('b', async () => 'blob:b')
   const d = c.acquire('d', async () => 'blob:d')
@@ -31,7 +33,7 @@ test('超過上限時持有中的不擠出；放掉後才依最久沒用的順�
 
 test('同 key 兩個使用者：一個放掉不影響另一個；命中算最近用過', async () => {
   revoked.length = 0
-  const c = createBlobUrlCache(1)
+  const c = createBlobUrlCacheWithStub(1)
   let loads = 0
   const load = async () => `blob:x${++loads}`
   const x1 = c.acquire('x', load)
@@ -49,7 +51,7 @@ test('同 key 兩個使用者：一個放掉不影響另一個；命中算最近
 
 test('失敗的不留在快取；clear 之後舊租約 release 不影響新請求', async () => {
   revoked.length = 0
-  const c = createBlobUrlCache(0)
+  const c = createBlobUrlCacheWithStub(0)
   const bad = c.acquire('k', () => Promise.reject(new Error('net')))
   await bad.url.catch(() => {})
   assert.equal(c.size(), 0)

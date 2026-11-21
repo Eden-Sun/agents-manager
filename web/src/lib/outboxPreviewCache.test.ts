@@ -2,7 +2,7 @@
  * 圖檔預覽快取：舊請求晚到的失敗不能把同 key 的新請求從快取刪掉（否則重抓一次、新 blob URL 洩漏）。
  * 載入函式由測試注入（`blobFor` 的第 4 個參數），每個請求由測試決定何時 resolve／reject。
  */
-import test from 'node:test'
+import { test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { blobFor, clearOutboxPreviews } from './outboxPreviewCache.ts'
 
@@ -14,9 +14,20 @@ const load = () =>
     requests.push({ resolve, reject })
   })
 
-URL.revokeObjectURL = (u: string) => {
+// 每條測試內裝 stub、結束還原；不在模組載入時改全域（同 shard 其他測試檔會互相覆寫）。
+const stubRevoke = (u: string) => {
   revoked.push(u)
 }
+const test = (name: string, fn: () => Promise<void>) =>
+  nodeTest(name, async () => {
+    const prev = URL.revokeObjectURL
+    URL.revokeObjectURL = stubRevoke
+    try {
+      await fn()
+    } finally {
+      URL.revokeObjectURL = prev
+    }
+  })
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
 

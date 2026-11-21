@@ -11,9 +11,13 @@ export type BlobLease = { url: Promise<string>; release: () => void }
 
 type Entry = { url: Promise<string>; users: number }
 
-export function createBlobUrlCache(max: number) {
+/** `revokeUrl` 預設在擠出／clear 時才查 `URL.revokeObjectURL`（測試可注入自己的 stub，不改全域）。 */
+export function createBlobUrlCache(
+  max: number,
+  revokeUrl: (url: string) => void = (u) => URL.revokeObjectURL(u),
+) {
   const cache = new Map<string, Entry>()
-  const revoke = (e: Entry) => void e.url.then((u) => URL.revokeObjectURL(u), () => {})
+  const revoke = (e: Entry) => void e.url.then((u) => revokeUrl(u), () => {})
 
   function trim() {
     let idle = 0
