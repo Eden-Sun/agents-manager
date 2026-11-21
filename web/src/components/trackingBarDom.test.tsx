@@ -140,7 +140,7 @@ test('ledger_updated（任何變動）到達就重抓 status=open', async () => 
   assert.equal(requests.filter((r) => r.method === 'GET').length, before + 1)
 })
 
-test('待驗收（answered）排最前面，並有完成／還沒好按鈕；摘要列出待你驗收數', async () => {
+test('待驗收（answered）排最前面，並有完成／不知道按鈕；摘要列出待你驗收數', async () => {
   const requests = setup([...OPEN, item({ id: 'lA', code: 'L9', code_no: 9, status: 'answered', title: '已交件的事', deliverable: '改好了 CI', source_message_id: 'msg_1' })])
   const el = await mount(<TrackingBar botId="b1" onJump={() => true} />)
   assert.equal(el.querySelector('.track-summary')?.textContent?.trim(), '📋 追蹤中 4 項・待你驗收 1・需要你回覆 1')

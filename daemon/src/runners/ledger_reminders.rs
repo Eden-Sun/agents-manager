@@ -128,6 +128,10 @@ fn notice_text(items: &[Reminder]) -> String {
             _ => format!("沒有承辦人，請認領：agm ledger claim L{} --expect-version {}", r.code_no, r.version),
         };
         lines.push(format!("- L{}（{}）{}", r.code_no, what, r.title));
+        // 有下一步就帶上（例如「使用者按了不知道」的複查指示），管理者下一輪照著做。
+        if !r.next_step.trim().is_empty() {
+            lines.push(format!("  下一步：{}", r.next_step.trim()));
+        }
     }
     if items.len() > MAX_LINES {
         lines.push(format!("…另 {} 件", items.len() - MAX_LINES));
@@ -162,6 +166,20 @@ mod tests {
             .fetch_all(&app.db)
             .await
             .unwrap()
+    }
+
+    /// 「不知道」的項目（進行中、有下一步、到期時間＝現在）：提醒帶上下一步，管理者下一輪照著複查。
+    #[tokio::test]
+    async fn a_not_sure_item_reminds_the_manager_with_its_recheck_step() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mgr = manager(&env).await;
+        let note = "使用者不確定是否完成：請複查完成度並附驗證證據（commit、測試、截圖或實測結果）後再交件";
+        let item = am_base::ledger::commit_item(&app.db, &env.project_id, "user", None, &am_base::ledger::LedgerSplitInput { title: "修 CI".into(), status: Some("following".into()), owner_bot_id: Some(mgr.clone()), next_step: note.into(), due_at: Some(db::now()), ..Default::default() }).await.unwrap();
+        sweep(app).await;
+        let got = notices(app, &mgr).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains(&format!("L{}", item.code_no)) && got[0].contains(&format!("下一步：{note}")), "{}", got[0]);
     }
 
     /// 沒有承辦人的事項：管理者收到一則提醒；同一版同一階段再掃不會再發；版本變了才再提醒。

@@ -191,20 +191,20 @@ test('標題：只取第一行、最多 80 字', async () => {
   assert.equal((post.body as { title: string }).title, '一'.repeat(80))
 })
 
-test('待驗收：完成／還沒好按鈕；還沒好可附一句原因（PATCH status=following、wait_for）', async () => {
+test('待驗收：完成／不知道兩顆按鈕；不知道 PATCH 回到進行中、換成複查指示、清掉等待條件、到期時間設為現在', async () => {
   const requests = setup()
   const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
   await click(el.querySelector('.ledger-bar-summary')!)
   const row = el.querySelectorAll<HTMLElement>('.ledger-row')[0]
   assert.equal(row.querySelector('.ledger-more'), null, '待驗收沒有 ⋯')
-  assert.ok(row.querySelector('.ledger-awaiting'))
+  assert.equal(btn(row, '還沒好'), undefined, '沒有「還沒好」')
   await click(btn(row, '完成'))
-  const done = requests.find((r) => r.method === 'PATCH')!
-  assert.deepEqual(done.body, { op: 'update', expected_version: 3, status: 'done' })
-  await click(btn(row, '還沒好'))
-  const input = row.querySelector<HTMLInputElement>('.ledger-awaiting-reason input')!
-  await act(() => setInput(input, '測試還沒過'))
-  await click(btn(row, '送出'))
-  const notYet = requests.filter((r) => r.method === 'PATCH')[1]
-  assert.deepEqual(notYet.body, { op: 'update', expected_version: 3, status: 'following', wait_for: '測試還沒過' })
+  assert.deepEqual(requests.find((r) => r.method === 'PATCH')!.body, { op: 'update', expected_version: 3, status: 'done' })
+  await click(btn(row, '不知道'))
+  const notSure = requests.filter((r) => r.method === 'PATCH')[1]
+  assert.match(notSure.path, /\/ledger\/li1$/)
+  const body = notSure.body as { op: string; expected_version: number; status: string; next_step: string; wait_for: string; due_at: string }
+  assert.deepEqual([body.op, body.expected_version, body.status, body.wait_for], ['update', 3, 'following', ''])
+  assert.equal(body.next_step, '使用者不確定是否完成：請複查完成度並附驗證證據（commit、測試、截圖或實測結果）後再交件')
+  assert.ok(!Number.isNaN(Date.parse(body.due_at)) && Date.parse(body.due_at) <= Date.now() + 1000, 'due_at 是現在')
 })

@@ -30,7 +30,7 @@ export async function createLedgerItems(
 
 /** 單項操作：`update`（改狀態／內容）、`merge`（併入另一項）、`cancel`。一律帶 `expected_version`。 */
 export type LedgerPatch =
-  | { op?: 'update'; expected_version: number; status?: string; title?: string; wait_for?: string }
+  | { op?: 'update'; expected_version: number; status?: string; title?: string; next_step?: string; wait_for?: string; due_at?: string }
   | { op: 'merge'; expected_version: number; merged_into_id: string }
   | { op: 'cancel'; expected_version: number; close_reason?: string }
 
@@ -44,12 +44,14 @@ export async function completeLedgerItem(projectId: string, item: LedgerItem): P
   return patchLedgerItem(projectId, item.id, { op: 'update', expected_version: item.version, status: 'done' })
 }
 
-/** 使用者驗收：`還沒好` → following；`reason` 有值就寫進 `wait_for`（還在等什麼），沒填就只改狀態。 */
-export async function reopenLedgerItem(projectId: string, item: LedgerItem, reason: string): Promise<LedgerItem | null> {
+/** 使用者驗收：`不知道` → 進行中，換成複查指示（`nextStep`，由呼叫端用 i18n 給），清掉等待條件，到期時間設為現在，下一輪巡檢就會提醒管理者複查。 */
+export async function notSureLedgerItem(projectId: string, item: LedgerItem, nextStep: string): Promise<LedgerItem | null> {
   return patchLedgerItem(projectId, item.id, {
     op: 'update',
     expected_version: item.version,
     status: 'following',
-    ...(reason ? { wait_for: reason } : {}),
+    next_step: nextStep,
+    wait_for: '',
+    due_at: new Date().toISOString(),
   })
 }

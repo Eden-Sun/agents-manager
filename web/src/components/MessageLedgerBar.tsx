@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { completeLedgerItem, createLedgerItems, fetchProjectLedger, patchLedgerItem, reopenLedgerItem } from '../api/ledger'
+import { completeLedgerItem, createLedgerItems, fetchProjectLedger, notSureLedgerItem, patchLedgerItem } from '../api/ledger'
 import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { AwaitingActions } from './AwaitingActions'
+import { useNotSureNext } from '../lib/ledgerNotSure'
 import './messageLedgerBar.css'
 
 /** 使用者看到的白話狀態：不講「待跟進／已答」這類帳本術語。`merged`、`cancelled` 不列在摘要裡。 */
@@ -19,6 +20,7 @@ const ACTIONABLE: LedgerItemStatus[] = ['untriaged', 'following', 'clarifying']
  */
 export function MessageLedgerBar({ msg }: { msg: Message }) {
   const t = useT()
+  const notSureNext = useNotSureNext()
   const projectId = useStore((s) => s.bots.find((b) => b.id === msg.bot_id)?.project_id ?? null)
   const bots = useStore((s) => s.bots)
   const botName = (id: string | null) => (id ? bots.find((b) => b.id === id)?.name ?? id : '')
@@ -81,7 +83,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
   }
 
   const markDone = (item: LedgerItem) => runPatch(() => completeLedgerItem(projectId, item))
-  const notYet = (item: LedgerItem, reason: string) => runPatch(() => reopenLedgerItem(projectId, item, reason))
+  const notSure = (item: LedgerItem) => runPatch(() => notSureLedgerItem(projectId, item, notSureNext))
   const dismiss = (item: LedgerItem) =>
     runPatch(() => patchLedgerItem(projectId, item.id, { op: 'cancel', expected_version: item.version, close_reason: 'cancelled by user' }))
   // 「這則不用追蹤」：尚未整理時，把這則底下所有待整理的項目一起取消。
@@ -187,7 +189,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
                     {it.next_step ? <div className="ledger-row-note">{t('下一步')}：{it.next_step}</div> : null}
                     {it.owner_bot_id ? <div className="ledger-row-owner">{t('承辦')}：{botName(it.owner_bot_id)}</div> : null}
                     {it.status === 'answered' ? (
-                      <AwaitingActions busy={busy} onDone={() => void markDone(it)} onNotYet={(reason) => void notYet(it, reason)} />
+                      <AwaitingActions busy={busy} onDone={() => void markDone(it)} onNotSure={() => void notSure(it)} />
                     ) : null}
                     {menuFor === it.id ? (
                       <div className="ledger-menu" role="menu">

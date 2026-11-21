@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { completeLedgerItem, fetchProjectLedger, patchLedgerItem, reopenLedgerItem } from '../api/ledger'
+import { completeLedgerItem, fetchProjectLedger, notSureLedgerItem, patchLedgerItem } from '../api/ledger'
 import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { AwaitingActions } from './AwaitingActions'
+import { useNotSureNext } from '../lib/ledgerNotSure'
 import './messageLedgerBar.css'
 import './trackingBar.css'
 
@@ -45,6 +46,7 @@ function messageTime(messages: Record<string, Message[]>, messageId: string | nu
  */
 export function TrackingBar({ botId, onJump }: { botId: string; onJump: (messageId: string) => boolean }) {
   const t = useT()
+  const notSureNext = useNotSureNext()
   const projectId = useStore((s) => s.bots.find((b) => b.id === botId)?.project_id ?? null)
   const bots = useStore((s) => s.bots)
   const anyRev = useStore((s) => s.ledgerAnyRev)
@@ -182,7 +184,7 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
                       <AwaitingActions
                         busy={busy}
                         onDone={() => void run(() => completeLedgerItem(projectId, it))}
-                        onNotYet={(reason) => void run(() => reopenLedgerItem(projectId, it, reason))}
+                        onNotSure={() => void run(() => notSureLedgerItem(projectId, it, notSureNext))}
                       />
                     ) : null}
                     <div className="ledger-row-meta">

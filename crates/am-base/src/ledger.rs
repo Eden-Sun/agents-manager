@@ -498,8 +498,9 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str,
             if let Some(n) = next_step {
                 next.next_step = n.clone();
             }
-            if wait_for.is_some() {
-                next.wait_for = wait_for.clone();
+            // `Some("")` 清掉等待條件（NULL）；`None` 不動。
+            if let Some(w) = wait_for {
+                next.wait_for = if w.is_empty() { None } else { Some(w.clone()) };
             }
             if due_at.is_some() {
                 next.due_at = due_at.clone();
@@ -1204,5 +1205,20 @@ mod tests {
         assert!(VISIBLE_OPEN_STATUSES.contains(&"answered") && !OPEN_STATUSES.contains(&"answered"));
         let visible: Vec<(String,)> = sqlx::query_as(&format!("SELECT id FROM ledger_items WHERE project_id = 'p1' AND status IN {VISIBLE_OPEN_SQL}")).fetch_all(&pool).await.unwrap();
         assert_eq!(visible.len(), 1, "the user still sees it in the open list");
+    }
+
+    #[tokio::test]
+    async fn not_sure_rechecks_the_item_through_the_reminder_with_its_next_step() {
+        let pool = pool().await;
+        let item = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "交件".into(), owner_bot_id: Some("b1".into()), wait_for: Some("等 CI".into()), ..Default::default() }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("改好了".into()), next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let note = "使用者不確定是否完成：請複查完成度並附驗證證據（commit、測試、截圖或實測結果）後再交件";
+        let now = db::now();
+        // 「不知道」：回到進行中、換成複查的下一步、清掉等待條件、到期時間設為現在（下一輪巡檢就會提醒）。
+        let again = patch_item_cas(&pool, "p1", &item.id, answered.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: Some(note.into()), wait_for: Some(String::new()), due_at: Some(now.clone()), owner_bot_id: None, close_reason: None }).await.unwrap();
+        assert_eq!((again.status.as_str(), again.next_step.as_str(), again.wait_for.clone()), ("following", note, None));
+        let reminders = due_reminders(&pool, chrono::Utc::now() + chrono::Duration::minutes(1)).await.unwrap();
+        let r = reminders.iter().find(|r| r.item_id == item.id).expect("a not-sure item is reminded");
+        assert_eq!((r.stage, r.next_step.as_str()), ("due", note));
     }
 }

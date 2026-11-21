@@ -305,7 +305,8 @@ pub(crate) async fn patch(
             status: opt(body.status.clone()),
             deliverable: body.deliverable.clone(),
             next_step: body.next_step.clone(),
-            wait_for: opt(body.wait_for.clone()),
+            // 空字串＝清掉等待條件（見 `patch_item_cas`）。
+            wait_for: body.wait_for.clone(),
             due_at: opt(body.due_at.clone()),
             owner_bot_id: opt(body.owner_bot_id.clone()),
             close_reason: opt(body.close_reason.clone()),
