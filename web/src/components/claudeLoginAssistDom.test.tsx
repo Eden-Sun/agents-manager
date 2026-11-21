@@ -2,46 +2,14 @@
  * 手機版重新登入 claude 身份（#838）：登入 pane 上方的「打開登入網站」與 code 輸入框（真的掛 `HostShellPanel` 進 happy-dom，
  * 後端是 `MockTransport`，它照 daemon 的樣子只認登入 pane、畫面不在等 code 就 409）。
  */
-import test, { after, afterEach, before, beforeEach } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, fakeWebSocket } from '../testing/domHarness'
-import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
-import { installManualTimers } from '../testing/manualTimers'
-import { untilVirtual } from '../testing/untilVirtual'
-import { resetStoreForTest, useStore } from '../store/store'
+import { click, mockApi, mount, typeInto } from '../testing/domHarness'
+import { setupLoginAssistDomTest } from '../testing/loginAssistSetup'
+import { useStore } from '../store/store'
 import { HostShellPanel } from './HostShellPanel'
 
-virtualMockTime()
-// HostShellPanel 的輪詢（250ms／1s 一次）走手動時鐘，等待只推進虛擬時間；mock 的 timer 在 `virtualMockTime` 的時鐘上，一起推。
-let timers: ReturnType<typeof installManualTimers>
-const until = (cond: () => boolean | Promise<boolean>, what: string) => untilVirtual(timers.clock, cond, what, { stepMs: 250, alsoAdvance: advanceMockTime })
-/** 讓輪詢與 mock 一起走 `ms` 虛擬毫秒。 */
-const elapse = (ms: number) =>
-  act(async () => {
-    await timers.clock.advance(ms)
-    await advanceMockTime(ms)
-  })
-beforeEach(() => {
-  // 桌面直通會開 xterm 的推送 WebSocket；假掉，免得真的去連。
-  fakeWebSocket()
-  timers = installManualTimers()
-})
-afterEach(async () => {
-  timers.restore() // unmountAll 的 settle 要真 timer
-  await unmountAll()
-})
-before(setupDom)
-const mock = sharedMock
-// 登入 cc1 會在共用 mock 上留下「已登入」；整個行程只有一個 mock，後面要「cc1 未登入」前提的檔（settingsIdentitiesDom）會被它弄紅。
-type MockIds = { localIdentityStatus: Record<string, unknown> }
-const idsBefore = structuredClone((mock as unknown as MockIds).localIdentityStatus)
-after(() => {
-  const m = mock as unknown as MockIds
-  for (const k of Object.keys(m.localIdentityStatus)) delete m.localIdentityStatus[k]
-  Object.assign(m.localIdentityStatus, structuredClone(idsBefore))
-  resetStoreForTest()
-  teardownDom()
-})
+const { mock, until, elapse } = setupLoginAssistDomTest()
 const assist = () => document.querySelector<HTMLElement>('.login-assist')
 const openLink = () => document.querySelector<HTMLAnchorElement>('a.login-assist-open')
 const codeInput = () => document.querySelector<HTMLInputElement>('.login-assist-code')!

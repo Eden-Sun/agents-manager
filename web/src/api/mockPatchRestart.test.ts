@@ -2,26 +2,14 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
-import { manualMockClock, useManualMockClock } from './mockClock.ts'
-
-interface BotRow { id: string; kind: string; run?: { state?: string } | null }
+import { useManualMockClock } from './mockClock.ts'
+import { startMockBot } from './mockBotHarness.ts'
 
 // mock 的 bot 啟動是 timer：用虛擬時間，不在牆鐘上輪詢等它。
 before(() => void useManualMockClock(true))
 after(() => void useManualMockClock(false))
 const mock = new MockTransport()
-const bots = async () => ((await mock.request('GET', '/state')) as { projects: { bots: BotRow[] }[] }).projects.flatMap((p) => p.bots)
-/** seed 的 bot 都沒在跑：啟動指定 kind 的一顆，等 mock 把它推到 running。 */
-const runningBot = async (kind: string) => {
-  const b = (await bots()).find((x) => x.kind === kind)
-  assert.ok(b, `seed 要有 ${kind}`)
-  await mock.request('POST', `/bots/${b.id}/start`, {})
-  for (let i = 0; i < 100; i++) {
-    if ((await bots()).find((x) => x.id === b.id)?.run?.state === 'running') return b.id
-    await manualMockClock.advance(250)
-  }
-  throw new Error(`mock 的 ${kind} 沒起來`)
-}
+const runningBot = (kind: string) => startMockBot(mock, kind)
 
 test('grok 只改 effort：有在跑的 run 也要 needs_restart:true（不送 /effort）', async () => {
   const id = await runningBot('grok')
