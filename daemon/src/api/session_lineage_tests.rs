@@ -1,6 +1,6 @@
 //! session 血統 API（issue #1943 子票 A）：權限（讀＝同專案；寫＝manager／AGM／User）、跨專案拒絕、狀態轉移與錯誤碼。
 use super::*;
-use crate::session_lineage::{abandon, advance, claim, create, list, retire, ClaimBody, ListQuery, RetireBody, SessionBody};
+use crate::session_lineage::{abandon, advance, claim, create, list, retire, stats, ClaimBody, ListQuery, RetireBody, SessionBody};
 
 struct Cast {
     env: crate::testing::Env,
@@ -357,4 +357,106 @@ async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissi
     let closed = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap_err();
     assert!(matches!(&closed, LcError::Conflict(v) if v["reason"] == "lineage_claim_closed"), "{closed:?}");
     assert_eq!(listed(&c, &pid, bot(&c.executor), ListQuery { line: Some("web".into()), state: Some("checkpoint".into()) }).await.unwrap(), vec![row("web", "w1", "checkpoint")]);
+}
+
+#[tokio::test]
+async fn lineage_stats_aggregates_checkpoints_open_claims_and_tokens() {
+    let c = cast().await;
+    let (app, pid) = (c.env.app.clone(), c.env.project_id.clone());
+    let claim_body = |v: Value| Json(serde_json::from_value::<ClaimBody>(v).unwrap());
+
+    // 1. Advance checkpoint for line "web" with tokens
+    advance(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "web",
+            "session_id": "web-s1",
+            "head_sha": "aaaaaaa",
+            "input_tokens": 100_000,
+            "cached_input_tokens": 80_000,
+            "output_tokens": 2_000,
+        })),
+    )
+    .await
+    .unwrap();
+
+    // 2. Add an active session on line "web" with more tokens
+    create(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "web",
+            "session_id": "web-s2",
+            "input_tokens": 50_000,
+            "cached_input_tokens": 40_000,
+            "output_tokens": 1_000,
+        })),
+    )
+    .await
+    .unwrap();
+
+    // 3. Open a claim on line "web"
+    let Json(cl) = claim(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        claim_body(json!({"line": "web", "mode": "fork", "work_session_id": "web-w1"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cl["claim"]["state"].as_str(), Some("open"));
+
+    // 4. Advance line "quota" with no cache hits
+    advance(
+        State(app.clone()),
+        Path(pid.clone()),
+        bot(&c.manager),
+        body(json!({
+            "line": "quota",
+            "session_id": "quota-s1",
+            "head_sha": "bbbbbbb",
+            "input_tokens": 20_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 500,
+        })),
+    )
+    .await
+    .unwrap();
+
+    // 5. Query stats as User and as Executor (both in same project)
+    let Json(res) = stats(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User)).await.unwrap();
+    let lines = res["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2);
+
+    let quota_line = &lines[0];
+    assert_eq!(quota_line["line"].as_str(), Some("quota"));
+    assert_eq!(quota_line["checkpoint"]["session_id"].as_str(), Some("quota-s1"));
+    assert_eq!(quota_line["open_claims_count"].as_i64(), Some(0));
+    assert_eq!(quota_line["tokens"]["input_tokens"].as_i64(), Some(20_000));
+    assert_eq!(quota_line["tokens"]["cached_input_tokens"].as_i64(), Some(0));
+    assert_eq!(quota_line["tokens"]["output_tokens"].as_i64(), Some(500));
+    assert_eq!(quota_line["tokens"]["hit_ratio"].as_f64(), Some(0.0));
+    assert_eq!(quota_line["tokens"]["saved_input_tokens"].as_i64(), Some(0));
+
+    let web_line = &lines[1];
+    assert_eq!(web_line["line"].as_str(), Some("web"));
+    assert_eq!(web_line["checkpoint"]["session_id"].as_str(), Some("web-s1"));
+    assert_eq!(web_line["open_claims_count"].as_i64(), Some(1));
+    assert_eq!(web_line["recent_claims"].as_array().unwrap().len(), 1);
+    assert_eq!(web_line["tokens"]["input_tokens"].as_i64(), Some(150_000));
+    assert_eq!(web_line["tokens"]["cached_input_tokens"].as_i64(), Some(120_000));
+    assert_eq!(web_line["tokens"]["output_tokens"].as_i64(), Some(3_000));
+    assert_eq!(web_line["tokens"]["hit_ratio"].as_f64(), Some(0.8));
+    assert_eq!(web_line["tokens"]["saved_input_tokens"].as_i64(), Some(120_000));
+
+    // Executor can read
+    let Json(res_exec) = stats(State(app.clone()), Path(pid.clone()), bot(&c.executor)).await.unwrap();
+    assert_eq!(res_exec["lines"].as_array().unwrap().len(), 2);
+
+    // Cross-project bot is forbidden
+    let err = stats(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager)).await.unwrap_err();
+    assert_eq!(reason(&err), "cross_project");
 }

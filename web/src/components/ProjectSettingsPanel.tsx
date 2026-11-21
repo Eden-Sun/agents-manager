@@ -5,6 +5,7 @@ import { projectHostName, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { ProjectExpertSettings } from './ProjectExpertSettings'
+import { ProjectLineageSection } from './ProjectLineageSection'
 import { ProjectNameField } from './ProjectNameField'
 import { projectDeleteBlockers } from './projectDeleteGuard'
 import { QuotaStrip } from './QuotaStrip'
@@ -35,6 +36,7 @@ export function ProjectSettingsPanel({ projectId, onOpenSidebar }: { projectId: 
       <h2>{t('專案設定')}</h2>
       <p>{t('路徑')}：<code>{project.path}</code></p>
       <ProjectExpertSettings projectId={projectId} />
+      <ProjectLineageSection projectId={projectId} />
       <button type="button" className="btn" onClick={() => setDeleting(true)}>{t('刪除專案…')}</button>
     </div>
     <ConfirmDialog open={deleting} title={t('刪除 Project')} confirmLabel={t('刪除 Project')} danger confirmDisabled={blockers.active > 0}

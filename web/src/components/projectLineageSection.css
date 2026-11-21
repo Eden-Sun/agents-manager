@@ -1,0 +1,188 @@
+.project-lineage-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: var(--bg-card, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+}
+
+.project-lineage-header {
+  margin-bottom: 1rem;
+}
+
+.project-lineage-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.project-lineage-title-row h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.project-lineage-header .hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+}
+
+.project-lineage-loading,
+.project-lineage-empty {
+  padding: 1.25rem 0;
+  text-align: center;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  font-size: 0.9rem;
+}
+
+.project-lineage-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  color: #ef4444;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+.project-lineage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.project-lineage-head-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 0.9fr 1fr 0.8fr 0.9fr 1fr;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim, rgba(255, 255, 255, 0.6));
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.project-lineage-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 0.9fr 1fr 0.8fr 0.9fr 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  background: var(--bg-row, rgba(255, 255, 255, 0.02));
+  font-size: 0.85rem;
+  transition: background 0.15s ease;
+}
+
+.project-lineage-row:hover {
+  background: var(--bg-row-hover, rgba(255, 255, 255, 0.06));
+}
+
+.lineage-line-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #60a5fa;
+  font-weight: 600;
+  font-size: 0.82rem;
+  font-family: monospace;
+}
+
+.lineage-sid,
+.lineage-sha {
+  font-size: 0.82rem;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+}
+
+.lineage-empty-val {
+  color: var(--text-muted, rgba(255, 255, 255, 0.35));
+}
+
+.lineage-claim-chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 12px;
+  font-size: 0.78rem;
+}
+
+.lineage-claim-chip.active {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  font-weight: 600;
+}
+
+.lineage-claim-chip.zero {
+  color: var(--text-muted, rgba(255, 255, 255, 0.4));
+}
+
+.lineage-ratio.high {
+  color: #10b981;
+  font-weight: 600;
+}
+
+.lineage-saved {
+  font-weight: 500;
+  color: #34d399;
+}
+
+/* 390px 手機寬度適應：卡片式流式排版 */
+@media (max-width: 600px) {
+  .project-lineage-head-row {
+    display: none;
+  }
+
+  .project-lineage-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.75rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+    margin-bottom: 0.25rem;
+  }
+
+  .project-lineage-row .col-line {
+    width: 100%;
+    margin-bottom: 0.15rem;
+  }
+
+  .project-lineage-row .col-checkpoint::before {
+    content: "CP: ";
+    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+
+  .project-lineage-row .col-sha::before {
+    content: "SHA: ";
+    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+
+  .project-lineage-row .col-claims::before {
+    content: "認領: ";
+    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+
+  .project-lineage-row .col-ratio::before {
+    content: "快取: ";
+    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+
+  .project-lineage-row .col-saved::before {
+    content: "省下: ";
+    color: var(--text-dim, rgba(255, 255, 255, 0.5));
+    font-size: 0.75rem;
+  }
+}

@@ -38,6 +38,9 @@ pub(crate) struct SessionBody {
     pub kind: Option<String>,
     pub parent_session_id: Option<String>,
     pub context_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
     pub last_api_at: Option<String>,
     pub head_sha: Option<String>,
     pub summary: Option<String>,
@@ -137,6 +140,15 @@ fn fields(b: SessionBody, allow_empty_line: bool) -> Result<(String, Option<Stri
     if b.context_tokens.is_some_and(|n| n < 0) {
         return Err(bad("context_tokens", "must not be negative"));
     }
+    if b.input_tokens.is_some_and(|n| n < 0) {
+        return Err(bad("input_tokens", "must not be negative"));
+    }
+    if b.cached_input_tokens.is_some_and(|n| n < 0) {
+        return Err(bad("cached_input_tokens", "must not be negative"));
+    }
+    if b.output_tokens.is_some_and(|n| n < 0) {
+        return Err(bad("output_tokens", "must not be negative"));
+    }
     let last_api_at = opt(b.last_api_at);
     if last_api_at.as_deref().is_some_and(|t| chrono::DateTime::parse_from_rfc3339(t).is_err()) {
         return Err(bad("last_api_at", "RFC 3339 timestamp"));
@@ -150,7 +162,23 @@ fn fields(b: SessionBody, allow_empty_line: bool) -> Result<(String, Option<Stri
         Some(Ok(s)) => s,
         Some(Err(())) => return Err(bad("summary", "one line, at most 500 chars")),
     };
-    Ok((line, session_id, claim_id, Fields { role, kind, parent_session_id, context_tokens: b.context_tokens, last_api_at, head_sha, summary }))
+    Ok((
+        line,
+        session_id,
+        claim_id,
+        Fields {
+            role,
+            kind,
+            parent_session_id,
+            context_tokens: b.context_tokens,
+            input_tokens: b.input_tokens,
+            cached_input_tokens: b.cached_input_tokens,
+            output_tokens: b.output_tokens,
+            last_api_at,
+            head_sha,
+            summary,
+        },
+    ))
 }
 
 async fn live_project(app: &Arc<App>, project_id: &str) -> Result<db::Project, LcError> {
@@ -235,6 +263,17 @@ pub(crate) async fn list(
     }
     let sessions = lineage::list(&app.db, &project_id, line.as_deref(), state.as_deref()).await.map_err(up)?;
     Ok(Json(json!({"project_id": project_id, "sessions": sessions})))
+}
+
+pub(crate) async fn stats(
+    State(app): State<Arc<App>>,
+    Path(project_id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    caller_in_project(&app, &principal, &project_id).await?;
+    live_project(&app, &project_id).await?;
+    let lines = lineage::stats(&app.db, &project_id).await.map_err(up)?;
+    Ok(Json(json!({"project_id": project_id, "lines": lines})))
 }
 
 pub(crate) async fn create(

@@ -24,6 +24,9 @@ pub struct LineageSession {
     pub session_id: String,
     pub parent_session_id: Option<String>,
     pub context_tokens: Option<i64>,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
     pub last_api_at: Option<String>,
     pub head_sha: Option<String>,
     pub state: String,
@@ -55,6 +58,9 @@ pub struct Fields {
     pub kind: Option<String>,
     pub parent_session_id: Option<String>,
     pub context_tokens: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
     pub last_api_at: Option<String>,
     pub head_sha: Option<String>,
     pub summary: Option<String>,
@@ -115,6 +121,24 @@ impl std::fmt::Display for LineageError {
 
 impl std::error::Error for LineageError {}
 
+#[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
+pub struct LineTokens {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub hit_ratio: f64,
+    pub saved_input_tokens: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LineStat {
+    pub line: String,
+    pub checkpoint: Option<LineageSession>,
+    pub open_claims_count: i64,
+    pub recent_claims: Vec<LineageClaim>,
+    pub tokens: LineTokens,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Advanced {
     /// 這條線現在的檢查點。
@@ -151,6 +175,79 @@ pub async fn list(pool: &SqlitePool, project_id: &str, line: Option<&str>, state
     .await
 }
 
+/// 專案各血統線統計：每條線的檢查點、open claim 數、近期 claim 與 token 節省合計。
+pub async fn stats(pool: &SqlitePool, project_id: &str) -> Result<Vec<LineStat>, sqlx::Error> {
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT line FROM ( \
+            SELECT line FROM lineage_sessions WHERE project_id = ? \
+            UNION \
+            SELECT line FROM lineage_claims WHERE project_id = ? \
+         ) ORDER BY line",
+    )
+    .bind(project_id)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let cp: Option<LineageSession> = sqlx::query_as(
+            "SELECT * FROM lineage_sessions WHERE project_id = ? AND line = ? AND state = 'checkpoint' LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(&line)
+        .fetch_optional(pool)
+        .await?;
+
+        let open_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lineage_claims WHERE project_id = ? AND line = ? AND state = 'open'",
+        )
+        .bind(project_id)
+        .bind(&line)
+        .fetch_one(pool)
+        .await?;
+
+        let recent_claims: Vec<LineageClaim> = sqlx::query_as(
+            "SELECT * FROM lineage_claims WHERE project_id = ? AND line = ? ORDER BY created_at DESC, id DESC LIMIT 5",
+        )
+        .bind(project_id)
+        .bind(&line)
+        .fetch_all(pool)
+        .await?;
+
+        let (input, cached, output): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(output_tokens), 0) \
+             FROM lineage_sessions WHERE project_id = ? AND line = ?",
+        )
+        .bind(project_id)
+        .bind(&line)
+        .fetch_one(pool)
+        .await?;
+
+        let hit_ratio = if input > 0 {
+            (cached as f64) / (input as f64)
+        } else {
+            0.0
+        };
+
+        out.push(LineStat {
+            line,
+            checkpoint: cp,
+            open_claims_count: open_count,
+            recent_claims,
+            tokens: LineTokens {
+                input_tokens: input,
+                cached_input_tokens: cached,
+                output_tokens: output,
+                hit_ratio,
+                saved_input_tokens: cached,
+            },
+        });
+    }
+
+    Ok(out)
+}
+
 /// 某條線目前的檢查點。
 pub async fn checkpoint(pool: &SqlitePool, project_id: &str, line: &str) -> Result<Option<LineageSession>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM lineage_sessions WHERE project_id = ? AND line = ? AND state = 'checkpoint'").bind(project_id).bind(line).fetch_optional(pool).await
@@ -179,8 +276,8 @@ pub async fn create(pool: &SqlitePool, project_id: &str, line: &str, session_id:
 async fn insert(conn: &mut sqlx::SqliteConnection, project_id: &str, line: &str, session_id: &str, state: &str, f: &Fields) -> Result<(), sqlx::Error> {
     let now = crate::db::now();
     sqlx::query(
-        "INSERT INTO lineage_sessions (id, project_id, line, role, kind, session_id, parent_session_id, context_tokens, last_api_at, head_sha, state, summary, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO lineage_sessions (id, project_id, line, role, kind, session_id, parent_session_id, context_tokens, input_tokens, cached_input_tokens, output_tokens, last_api_at, head_sha, state, summary, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(crate::db::ulid())
     .bind(project_id)
@@ -190,6 +287,9 @@ async fn insert(conn: &mut sqlx::SqliteConnection, project_id: &str, line: &str,
     .bind(session_id)
     .bind(&f.parent_session_id)
     .bind(f.context_tokens)
+    .bind(f.input_tokens.unwrap_or(0))
+    .bind(f.cached_input_tokens.unwrap_or(0))
+    .bind(f.output_tokens.unwrap_or(0))
     .bind(&f.last_api_at)
     .bind(&f.head_sha)
     .bind(state)
@@ -231,12 +331,16 @@ async fn advance_in_tx(
             sqlx::query(
                 "UPDATE lineage_sessions SET state = 'checkpoint', role = COALESCE(?, role), kind = COALESCE(?, kind), \
                  parent_session_id = COALESCE(?, parent_session_id), context_tokens = COALESCE(?, context_tokens), \
+                 input_tokens = COALESCE(?, input_tokens), cached_input_tokens = COALESCE(?, cached_input_tokens), output_tokens = COALESCE(?, output_tokens), \
                  last_api_at = COALESCE(?, last_api_at), head_sha = COALESCE(?, head_sha), summary = COALESCE(?, summary), updated_at = ? WHERE id = ?",
             )
             .bind(&f.role)
             .bind(&f.kind)
             .bind(&f.parent_session_id)
             .bind(f.context_tokens)
+            .bind(f.input_tokens)
+            .bind(f.cached_input_tokens)
+            .bind(f.output_tokens)
             .bind(&f.last_api_at)
             .bind(&f.head_sha)
             .bind(&f.summary)

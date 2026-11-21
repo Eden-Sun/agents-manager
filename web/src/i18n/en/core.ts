@@ -3,6 +3,22 @@ import type { Dict } from '../../lib/i18n/types'
 // 區塊：core（store、api、排程、分享頁、App 外殼與其餘小元件）。檔案歸屬見 lib/i18n/areas.ts。
 export default {
   // schedules/scheduleCopy.ts · lib/githubIssuePrompt.ts · components/kindMeta.ts · lib/browserMem.ts · schedules/ProjectAddMenu.tsx · lib/panes.ts · share/main.tsx · components/AgmDeleteConfirm.tsx · components/TabsBadge.tsx · components/RunElapsed.tsx · schedules/ScheduleRowMenu.tsx
+  // components/ProjectLineageSection.tsx
+  'Session 血統與快取節省': 'Session Lineage & Cache Savings',
+  'Session 血統': 'Session Lineage',
+  '重新整理血統資料': 'Refresh lineage data',
+  '按模組切線的 codex 血統檢查點、進行中認領與快取節省統計。': 'Module-based codex lineage checkpoints, active claims, and prompt cache savings.',
+  '目前尚無血統紀錄。由 codex 派工或 agm lineage 建立檢查點後會顯示於此。': 'No lineage records yet. Checkpoints created via codex dispatch or agm lineage will appear here.',
+  '載入失敗：{error}': 'Failed to load: {error}',
+  '血統線清單': 'Lineage lines list',
+  '線名': 'Line',
+  '檢查點': 'Checkpoint',
+  'HEAD': 'HEAD',
+  '最後更新': 'Updated',
+  '認領中': 'Claims',
+  '快取命中': 'Cache hit',
+  '省下 Token': 'Saved tokens',
+  '快取省下 {n} input tokens（共 {total} tokens）': 'Cache saved {n} input tokens (out of {total} tokens)',
   '（副本）': ' (copy)',
   'claude · Anthropic 的 CLI（Claude 模型）': 'claude · Anthropic\'s CLI (Claude models)',
   'codex · OpenAI 的 CLI（GPT 模型，標誌是 OpenAI 的）': 'codex · OpenAI\'s CLI (GPT models; the logo is OpenAI\'s)',

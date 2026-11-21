@@ -1366,6 +1366,8 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'projects' && seg[2] === 'bots') return this.addBot(seg[1], b)
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'submodules') return { project_id: seg[1], submodules: [] }
     if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'issues') return this.issues(seg[1], seg[3], q)
+    if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'lineage' && seg[3] === 'stats') return this.lineageStats(seg[1])
+    if (method === 'GET' && seg[0] === 'projects' && seg[2] === 'lineage') return { project_id: seg[1], sessions: [] }
 
     // 須排在 `bots/{id}` 前：`update-restart` 不是 bot id。
     if (seg[0] === 'bots' && seg[1] === 'update-restart' && seg.length === 2) {
@@ -2701,6 +2703,45 @@ export class MockTransport implements Transport {
     this.bots = this.bots.filter((x) => x.project_id !== id)
     this.emit('project_changed', { project_id: id, deleted: true })
     return null
+  }
+
+  private lineageStats(projectId: string) {
+    return {
+      project_id: projectId,
+      lines: [
+        {
+          line: 'web',
+          checkpoint: {
+            id: 'mock-cp-1',
+            project_id: projectId,
+            line: 'web',
+            role: 'worker',
+            kind: 'codex',
+            session_id: '019a16b82ea4f7062ada9d3c819e0e738',
+            parent_session_id: null,
+            context_tokens: 145000,
+            input_tokens: 280000,
+            cached_input_tokens: 238000,
+            output_tokens: 6500,
+            last_api_at: '2026-11-21T10:00:00.000Z',
+            head_sha: 'c3e49701c4',
+            state: 'checkpoint',
+            summary: 'web checkpoint',
+            created_at: '2026-11-21T08:00:00.000Z',
+            updated_at: '2026-11-21T10:00:00.000Z',
+          },
+          open_claims_count: 1,
+          recent_claims: [],
+          tokens: {
+            input_tokens: 280000,
+            cached_input_tokens: 238000,
+            output_tokens: 6500,
+            hit_ratio: 0.85,
+            saved_input_tokens: 238000,
+          },
+        },
+      ],
+    }
   }
 
   private addBot(projectId: string, b: Rec) {

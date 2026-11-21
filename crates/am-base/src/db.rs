@@ -480,6 +480,9 @@ CREATE TABLE IF NOT EXISTS lineage_sessions (
   session_id TEXT NOT NULL,
   parent_session_id TEXT,
   context_tokens INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
   last_api_at TEXT,
   head_sha TEXT,
   state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('checkpoint','active','retired')),
@@ -799,6 +802,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (100, "d159d420a712b673"),
     // codex session 血統認領（issue #1943 子票 B1，2026-11-21）：`lineage_claims`（CREATE TABLE）與 open resume 部分唯一索引。
     (101, "bdaf849a9896d73f"),
+    // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：`lineage_sessions` input_tokens／cached_input_tokens／output_tokens。
+    (102, "ff718b0b270a7fc9"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -1118,6 +1123,10 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("messages", "relay_auth", "ALTER TABLE messages ADD COLUMN relay_auth TEXT"),
         // 專家派工總開關：`ProjectCfg.specialist_dispatch` 的投影（1＝專家可直接派工給本專案執行者）。
         ("projects", "specialist_dispatch", "ALTER TABLE projects ADD COLUMN specialist_dispatch INTEGER NOT NULL DEFAULT 1"),
+        // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：lineage_sessions.input_tokens / cached_input_tokens / output_tokens
+        ("lineage_sessions", "input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"),
+        ("lineage_sessions", "cached_input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"),
+        ("lineage_sessions", "output_tokens", "ALTER TABLE lineage_sessions ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;

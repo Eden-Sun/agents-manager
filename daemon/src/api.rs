@@ -171,6 +171,7 @@ pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route("/projects/{id}/peers", get(crate::expert_peers::list))
         .route("/projects/{id}/lineage", get(crate::session_lineage::list).post(crate::session_lineage::create))
+        .route("/projects/{id}/lineage/stats", get(crate::session_lineage::stats))
         .route("/projects/{id}/lineage/advance", post(crate::session_lineage::advance))
         .route("/projects/{id}/lineage/retire", post(crate::session_lineage::retire))
         .route("/projects/{id}/ledger", get(crate::ledger_api::list).post(crate::ledger_api::create))

@@ -151,6 +151,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | GET | `/api/projects/{id}/lineage` | User 或同專案 Bot（含 child）；跨專案 403；codex session 血統（見「Session 血統」） |
+| GET | `/api/projects/{id}/lineage/stats` | User 或同專案 Bot（含 child）；跨專案 403；codex session 血統統計與快取節省（見「Session 血統」） |
 | GET | `/api/projects/{id}/ledger` | User 或同專案 Bot（含 child）；跨專案 403；承諾帳本（#1862 第 1 階段）。`?status=open\|all\|a,b&owner=<bot_id>\|unassigned&source_message_id=`；`open` 包含 `answered`（待驗收）；回 `{items, counts}`，每項帶 `code`（`L<code_no>`） |
 | HEAD | `/api/projects/{id}/ledger` | 同 GET |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
@@ -252,6 +253,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | HEAD | `/api/projects/{id}/lineage` | 同 GET |
+| HEAD | `/api/projects/{id}/lineage/stats` | 同 GET |
 | HEAD | `/api/spawn-authority` | 僅限 Bot，按目前角色核對 |
 | HEAD | `/api/model-mode` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | HEAD | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -3416,6 +3418,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 按專案、模組線（`line`）記 CLI session 的帳本（表 `lineage_sessions`、`lineage_claims`，SCHEMA 101；實作 `crates/am-base/src/db/lineage.rs`、`daemon/src/session_lineage.rs`）。只記帳：不開 session、不碰 pane；派工挑線與 since-diff 注入是後續子票。`lineage_sessions` 每列 `{id, project_id, line, role, kind, session_id, parent_session_id, context_tokens, last_api_at, head_sha, state, summary, created_at, updated_at}`：`role` 是 `worker`／`thinker`（預設 `worker`），`kind` 只收 `codex`（預設；表上有 CHECK，血統只管 codex），`state` 是 `checkpoint`／`active`／`retired`。同一 `(project_id, line)` 最多一顆 `checkpoint`（部分唯一索引）；同一專案同一個 `session_id` 只有一列。`lineage_claims` 每列 `{id, project_id, line, mode, holder_bot_id, base_session_id, base_head_sha, backup_session_id, work_session_id, state, created_at, updated_at}`：`mode` 是 `resume`／`fork`，`state` 是 `open`／`advanced`／`abandoned`；同一 `(project_id, line)` 最多一筆 `mode='resume' AND state='open'`（部分唯一索引），`fork` 可多筆並存。
 
 - `GET /api/projects/{id}/lineage[?line=<線>&state=<狀態>]` → `{project_id, sessions:[…]}`，依線名排序，每條線檢查點排最前、其餘新的在前。User 或同專案 Bot（含 child）可讀。
+- `GET /api/projects/{id}/lineage/stats` → `{project_id, lines:[{line, checkpoint, open_claims_count, recent_claims, tokens:{input_tokens, cached_input_tokens, output_tokens, hit_ratio, saved_input_tokens}}]}`：列出專案各血統線統計，含檢查點 session（若無則為 `null`）、open claim 數、近期 claim 清單與快取節省統計。User 或同專案 Bot（含 child）可讀。
 - `POST /api/projects/{id}/lineage {line, session_id, role?, kind?, parent_session_id?, context_tokens?, last_api_at?, head_sha?, summary?}` → `{session}`：登記一顆進行中（`active`）的 session。同專案已登記過 → 409 `{reason:"lineage_session_exists", session}`（不覆寫）。
 - `POST /api/projects/{id}/lineage/claim {line, mode, backup_session_id?, work_session_id?}` → `{claim, checkpoint}`：認領一條線。`holder_bot_id` 由呼叫端 Bot 填入（User 發起時為 `null`），`base_session_id`／`base_head_sha` 鎖定認領當下的檢查點。該線沒有檢查點 → 404 `{error:"not_found", reason:"lineage_checkpoint_not_found"}`；已有 `open` 的 `resume` 認領且 `mode="resume"` → 409 `{reason:"lineage_line_busy", claim}`（回傳佔用中的 claim）。
 - `PATCH /api/projects/{id}/lineage/claim/{claim_id} {work_session_id}` → `{claim}`：補記 `open` 狀態 `fork` 認領的 `work_session_id`（`resume` 模式拒絕 400；已關閉回 409 `lineage_claim_closed`）。
