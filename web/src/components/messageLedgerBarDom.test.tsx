@@ -1,6 +1,6 @@
 /**
- * 使用者訊息旁的承諾帳本進度列（SPEC 帳本第 1 階段 T5）：一訊三事的摘要、展開、補漏／取消的 PATCH／POST，
- * 以及 `ledger_updated` 到達時重新拉這一則。
+ * 使用者訊息下方的追蹤進度（SPEC 帳本第 1 階段 T5，2026-11-21 重做）：白話摘要、面板的「⋯」操作（不用做了／已經好了）、
+ * 底部補一項、未整理時的「這則不用追蹤」，以及 `ledger_updated` 到達時重新拉這一則。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,7 +8,6 @@ import { act, click, mockApi, mount, setupDom, teardownDom, unmountAll } from '.
 import { resetStoreForTest, useStore } from '../store/store'
 import type { Bot, LedgerItem, Message } from '../api/types'
 import { MessageLedgerBar } from './MessageLedgerBar'
-import { ledgerSummary } from '../lib/ledgerSummary'
 
 before(setupDom)
 afterEach(unmountAll)
@@ -70,20 +69,21 @@ function setInput(el: HTMLInputElement, value: string) {
   el.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
-test('摘要：一訊三事顯示 已答／待跟進／待釐清 的計數（不含已併入）', () => {
-  assert.deepEqual(ledgerSummary([...THREE, item({ id: 'x', status: 'merged' })]), { answered: 1, following: 1, clarifying: 1 })
+const btn = (root: ParentNode, text: string) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text)!
+
+test('摘要：白話的三種狀態，不講帳本術語；不列已取消與已併入', async () => {
   setup()
-  return (async () => {
-    const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
-    const text = el.querySelector('.ledger-bar-summary')?.textContent ?? ''
-    assert.match(text, /3 件：已答 1／待跟進 1／待釐清 1/)
-  })()
+  const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
+  assert.equal(el.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 3 項：進行中 1・需要你回覆 1・已回答 1')
+  const done = [item({ id: 'd1', status: 'done' }), item({ id: 'd2', code: 'L2', code_no: 2, status: 'cancelled' }), item({ id: 'd3', code: 'L3', code_no: 3, status: 'merged' })]
+  const el2 = await mount(<MessageLedgerBar msg={msg(done)} />)
+  assert.equal(el2.querySelector('.ledger-bar-summary')?.textContent?.trim(), '✓ 追蹤完成')
 })
 
-test('只有一筆未分流：顯示「📋 加入追蹤任務」', async () => {
+test('全部尚未整理：「📋 已加入追蹤，等管理者整理」', async () => {
   setup()
   const el = await mount(<MessageLedgerBar msg={msg([item({ status: 'untriaged' })])} />)
-  assert.equal((el.querySelector('.ledger-bar-summary')?.textContent ?? '').trim(), '📋 加入追蹤任務')
+  assert.equal(el.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 已加入追蹤，等管理者整理')
 })
 
 test('沒有附掛的訊息不畫進度列、也不發請求', async () => {
@@ -93,50 +93,60 @@ test('沒有附掛的訊息不畫進度列、也不發請求', async () => {
   assert.equal(requests.length, 0)
 })
 
-test('展開：逐項列出 L 編號、狀態、承辦人與操作；初次沒有附掛時不發請求', async () => {
+test('面板：每項一行（標題＋白話狀態＋下一步），操作收在「⋯」裡；已回答的沒有「⋯」，沒有合併', async () => {
   const requests = setup()
   const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
   await click(el.querySelector('.ledger-bar-summary')!)
-  const rows = [...el.querySelectorAll('.ledger-item')]
+  assert.ok(el.querySelector('[role="dialog"]'), '面板開著')
+  const rows = [...el.querySelectorAll('.ledger-row')]
   assert.equal(rows.length, 3)
-  assert.match(rows[1].textContent ?? '', /L2/)
   assert.match(rows[1].textContent ?? '', /把檢查腳本改成 60 秒/)
-  assert.match(rows[0].textContent ?? '', /agy-bot/, '承辦人顯示 bot 名字')
+  assert.match(rows[2].textContent ?? '', /需要你回覆/)
+  assert.equal(rows[0].querySelector('.ledger-more'), null, '已回答的不再有操作')
+  assert.ok(rows[1].querySelector('.ledger-more'))
+  assert.equal(el.textContent?.includes('合併'), false, '合併不在使用者端')
   assert.equal(requests.length, 0, '有附掛就不發請求')
 })
 
-test('取消：PATCH op=cancel 帶 expected_version；補漏：POST 帶 source_message_id', async () => {
+test('「⋯」→「不用做了」：PATCH op=cancel 帶 expected_version；「已經好了」：PATCH status=done', async () => {
   const requests = setup()
   const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
   await click(el.querySelector('.ledger-bar-summary')!)
-  const cancel = [...el.querySelectorAll<HTMLButtonElement>('.ledger-item')[1].querySelectorAll('button')].find((b) => b.textContent === '取消')!
-  await click(cancel)
-  const patch = requests.find((r) => r.method === 'PATCH')!
-  assert.match(patch.path, /\/ledger\/li2$/)
-  assert.deepEqual(patch.body, { op: 'cancel', expected_version: 1, close_reason: 'cancelled by user' })
+  await click(el.querySelectorAll<HTMLButtonElement>('.ledger-row')[1].querySelector('.ledger-more')!)
+  await click(btn(el, '不用做了'))
+  const cancel = requests.find((r) => r.method === 'PATCH')!
+  assert.match(cancel.path, /\/ledger\/li2$/)
+  assert.deepEqual(cancel.body, { op: 'cancel', expected_version: 1, close_reason: 'cancelled by user' })
 
-  const add = [...el.querySelectorAll<HTMLButtonElement>('.ledger-actions button')].find((b) => b.textContent === '＋補漏')!
-  await click(add)
-  const input = el.querySelector<HTMLInputElement>('.ledger-inline input')!
+  // 取消後 li2 不再列出；原本第三行（li3，version 2）現在排到第二行。
+  await click(el.querySelectorAll<HTMLButtonElement>('.ledger-row')[1].querySelector('.ledger-more')!)
+  await click(btn(el, '已經好了'))
+  const done = requests.filter((r) => r.method === 'PATCH')[1]
+  assert.match(done.path, /\/ledger\/li3$/)
+  assert.deepEqual(done.body, { op: 'update', expected_version: 2, status: 'done' })
+})
+
+test('底部「＋ 漏了什麼？補一項」：一句話 → POST 帶 source_message_id', async () => {
+  const requests = setup()
+  const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
+  await click(el.querySelector('.ledger-bar-summary')!)
+  await click(btn(el, '＋ 漏了什麼？補一項'))
+  const input = el.querySelector<HTMLInputElement>('.ledger-add input')!
   await act(() => setInput(input, '補漏的一件'))
-  const confirm = [...el.querySelectorAll<HTMLButtonElement>('.ledger-inline button')].find((b) => b.textContent === '新增')!
-  await click(confirm)
+  await click(btn(el, '新增'))
   const post = requests.find((r) => r.method === 'POST')!
   assert.deepEqual(post.body, { source_message_id: 'msg_3things', title: '補漏的一件', status: 'following' })
 })
 
-test('合併：填入目標短碼（L3）送 PATCH op=merge', async () => {
+test('尚未整理：面板只說明＋「補一項」＋「這則不用追蹤」（取消這則底下待整理的項目）', async () => {
   const requests = setup()
-  const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
+  const el = await mount(<MessageLedgerBar msg={msg([item({ status: 'untriaged', version: 2 })])} />)
   await click(el.querySelector('.ledger-bar-summary')!)
-  const merge = [...el.querySelectorAll<HTMLElement>('.ledger-item')[0].querySelectorAll('button')].find((b) => b.textContent === '合併')!
-  await click(merge)
-  const input = el.querySelector<HTMLInputElement>('.ledger-inline input')!
-  await act(() => setInput(input, 'l3'))
-  const confirm = [...el.querySelectorAll<HTMLButtonElement>('.ledger-inline button')].find((b) => b.textContent === '確定合併')!
-  await click(confirm)
+  assert.equal(el.querySelectorAll('.ledger-row').length, 0)
+  assert.match(el.querySelector('.ledger-hint')?.textContent ?? '', /管理者還沒整理/)
+  await click(btn(el, '這則不用追蹤'))
   const patch = requests.find((r) => r.method === 'PATCH')!
-  assert.deepEqual(patch.body, { op: 'merge', expected_version: 3, merged_into_id: 'li3' })
+  assert.deepEqual(patch.body, { op: 'cancel', expected_version: 2, close_reason: 'cancelled by user' })
 })
 
 test('ledger_updated 到達（rev 變動）才重新拉這一則', async () => {

@@ -1,4 +1,4 @@
-/* 使用者訊息旁的承諾帳本進度列：緊湊、靠右，展開後逐項列出（390px 寬也要能換行）。 */
+/* 使用者訊息下方的追蹤進度：一行白話摘要，點開是面板（手機＝底部滑出，桌機＝摘要下方展開）。 */
 .ledger-bar {
   margin-top: 4px;
   font-size: 12px;
@@ -6,85 +6,205 @@
 }
 
 .ledger-bar-summary {
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6e7781);
+  padding: 2px 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.ledger-bar-summary:hover {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.ledger-backdrop {
+  display: none;
+}
+
+.ledger-panel {
+  margin-top: 6px;
+  max-width: 440px;
+  background: var(--surface, #fff);
   border: 1px solid var(--line, #d0d7de);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.12);
+  padding: 10px 12px 12px;
+  color: inherit;
+  font-size: 13px;
+}
+
+.ledger-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.ledger-close {
+  border: 0;
   background: transparent;
   color: inherit;
-  border-radius: 999px;
-  padding: 2px 10px;
+  font-size: 20px;
+  line-height: 1;
+  min-width: 36px;
+  min-height: 36px;
   cursor: pointer;
-  max-width: 100%;
-  text-align: left;
 }
 
-.ledger-list {
+.ledger-hint {
+  margin: 4px 0 10px;
+  color: var(--muted, #6e7781);
+}
+
+.ledger-rows {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 0 0 8px;
   padding: 0;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
-.ledger-item {
+.ledger-row {
   border-left: 3px solid var(--line, #d0d7de);
-  padding: 4px 8px;
-  background: var(--surface-2, rgb(0 0 0 / 0.03));
-  border-radius: 4px;
+  padding: 4px 4px 4px 8px;
 }
+.ledger-row.status-untriaged { border-left-color: var(--muted, #6e7781); }
+.ledger-row.status-following { border-left-color: #0969da; }
+.ledger-row.status-clarifying { border-left-color: #bf8700; }
+.ledger-row.status-answered,
+.ledger-row.status-done { border-left-color: #1a7f37; }
 
-.ledger-item-head {
+.ledger-row-main {
   display: flex;
-  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 6px;
-  align-items: baseline;
 }
 
-.ledger-code {
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.ledger-status {
-  font-size: 11px;
-  padding: 0 6px;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-}
-
-.ledger-title {
-  flex: 1 1 160px;
+.ledger-row-title {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.ledger-item-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.ledger-chip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+.ledger-chip.status-following { color: #0969da; }
+.ledger-chip.status-clarifying { color: #9a6700; }
+.ledger-chip.status-answered,
+.ledger-chip.status-done { color: #1a7f37; }
+.ledger-chip.status-untriaged { color: var(--muted, #6e7781); }
+
+.ledger-more {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  min-width: 36px;
+  min-height: 36px;
+  margin: -6px -6px -6px 0;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.ledger-row-note,
+.ledger-row-owner {
   color: var(--muted, #6e7781);
+  font-size: 12px;
   margin-top: 2px;
+  overflow-wrap: anywhere;
 }
 
-.ledger-actions {
+.ledger-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 4px;
+  border: 1px solid var(--line, #d0d7de);
+  border-radius: 8px;
+  background: var(--surface-2, rgb(0 0 0 / 0.03));
+}
+.ledger-menu button {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  min-height: 40px;
+  padding: 0 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ledger-add {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 4px;
+  margin-top: 8px;
 }
-
-.ledger-actions .mini-btn.danger {
-  color: var(--danger, #cf222e);
-}
-
-.ledger-inline {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.ledger-inline input {
-  flex: 1 1 160px;
+.ledger-add input {
+  flex: 1 1 180px;
   min-width: 0;
+  min-height: 36px;
   padding: 4px 8px;
   font: inherit;
+}
+.ledger-add button {
+  min-height: 36px;
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ledger-add-open,
+.ledger-dismiss {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 8px;
+  border: 1px dashed var(--line, #d0d7de);
+  background: transparent;
+  color: inherit;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.ledger-dismiss {
+  border-style: solid;
+  color: var(--muted, #6e7781);
+}
+
+/* 手機：底部滑出的 sheet，遮罩蓋住其餘內容；安全區 inset 不被切到。 */
+@media (max-width: 600px) {
+  .ledger-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 0.35);
+    z-index: 1000;
+  }
+  .ledger-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1001;
+    max-width: none;
+    max-height: 75vh;
+    overflow: auto;
+    margin: 0;
+    border-radius: 16px 16px 0 0;
+    border-width: 1px 0 0;
+    padding: 14px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -8px 28px rgb(0 0 0 / 0.18);
+  }
 }
