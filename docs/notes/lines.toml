@@ -1,0 +1,33 @@
+# docs/notes/lines.toml
+#
+# codex session 血統線定義（issue #1943）：
+# 依改動路徑挑選模組線，對應到該線目前的檢查點 session。
+# 每條線定義其涵蓋的檔案路徑 glob（支援 * 不跨目錄、** 跨目錄）。
+# 線名限制：1–64 個字元，由 [A-Za-z0-9._-] 組成，且必須以英數開頭。
+
+[lines.web]
+paths = [
+    "web/**",
+]
+
+[lines.lifecycle]
+paths = [
+    "crates/am-lifecycle/**",
+    "daemon/src/lifecycle_tests/**",
+]
+
+[lines.quota]
+paths = [
+    "crates/am-base/src/quota*",
+    "crates/am-ports/src/quota*",
+    "daemon/src/runners/quota*",
+    "daemon/src/runners/am_base_tests/quota*",
+    "daemon/src/api/quota*",
+]
+
+[lines.ops]
+paths = [
+    "scripts/**",
+    ".github/**",
+    "ops/**",
+]

@@ -1556,6 +1556,174 @@ class ExpertBotCommandsTest(CliCase):
             missing = self.bad("lineage", "retire", "nope")
             self.assertIn("lineage_session_not_found", json.dumps(missing))
 
+    def test_lineage_pick_single_cross_and_unmatched(self):
+        # 單線
+        res = self.ok("lineage", "pick", "web/src/App.tsx", "web/package.json")
+        self.assertEqual(res["line"], "web")
+        self.assertEqual(res["lines"], {"web": ["web/src/App.tsx", "web/package.json"]})
+        self.assertEqual(res["unmatched"], [])
+
+        # 跨線
+        res = self.ok("lineage", "pick", "web/src/App.tsx", "scripts/agm.py")
+        self.assertIsNone(res["line"])
+        self.assertEqual(res["lines"], {"web": ["web/src/App.tsx"], "ops": ["scripts/agm.py"]})
+        self.assertEqual(res["unmatched"], [])
+
+        # 有 unmatched
+        res = self.ok("lineage", "pick", "web/src/App.tsx", "unknown/path.txt")
+        self.assertIsNone(res["line"])
+        self.assertEqual(res["lines"], {"web": ["web/src/App.tsx"]})
+        self.assertEqual(res["unmatched"], ["unknown/path.txt"])
+
+        # 全 unmatched
+        res = self.ok("lineage", "pick", "unknown/a.txt", "unknown/b.txt")
+        self.assertIsNone(res["line"])
+        self.assertEqual(res["lines"], {})
+        self.assertEqual(res["unmatched"], ["unknown/a.txt", "unknown/b.txt"])
+
+        # 重複路徑去重
+        res = self.ok("lineage", "pick", "web/a.ts", "web/a.ts")
+        self.assertEqual(res["line"], "web")
+        self.assertEqual(res["lines"]["web"], ["web/a.ts"])
+
+    def test_lineage_pick_glob_rules_and_error_cases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            cfg = tmppath / "lines.toml"
+            cfg.write_text("""
+[lines.quota]
+paths = ["crates/am-base/src/quota*", "daemon/src/quota*.rs"]
+
+[lines.single_star]
+paths = ["dir/*"]
+""", encoding="utf-8")
+            # quota glob
+            res = self.ok("lineage", "pick", "--lines-file", str(cfg), "crates/am-base/src/quota_claude.rs")
+            self.assertEqual(res["line"], "quota")
+            self.assertEqual(res["lines"]["quota"], ["crates/am-base/src/quota_claude.rs"])
+
+            # * 不跨目錄
+            res = self.ok("lineage", "pick", "--lines-file", str(cfg), "dir/sub/file.txt", "dir/file.txt")
+            self.assertIsNone(res["line"])
+            self.assertEqual(res["lines"]["single_star"], ["dir/file.txt"])
+            self.assertEqual(res["unmatched"], ["dir/sub/file.txt"])
+
+            # 找不到 lines.toml
+            err = self.bad("lineage", "pick", "--lines-file", str(tmppath / "missing.toml"), "a.txt")
+            self.assertEqual(err["error"], "no_lines_config")
+
+            # 錯誤 TOML
+            bad_cfg = tmppath / "bad.toml"
+            bad_cfg.write_text("not a valid toml = [", encoding="utf-8")
+            err = self.bad("lineage", "pick", "--lines-file", str(bad_cfg), "a.txt")
+            self.assertEqual(err["error"], "invalid_lines_toml")
+
+            # 非法線名
+            invalid_name_cfg = tmppath / "invalid_name.toml"
+            invalid_name_cfg.write_text("""
+[lines."_invalid"]
+paths = ["web/**"]
+""", encoding="utf-8")
+            err = self.bad("lineage", "pick", "--lines-file", str(invalid_name_cfg), "a.txt")
+            self.assertEqual(err["error"], "invalid_line_name")
+
+    def test_lineage_since_diff_and_prompt_prefix(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            root = Path(repo_dir)
+            for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+            lines_file = root / "lines.toml"
+            lines_file.write_text("""
+[lines.web]
+paths = ["web/**"]
+
+[lines.ops]
+paths = ["scripts/**"]
+""", encoding="utf-8")
+
+            # 第一個 commit：作為 checkpoint
+            (root / "web").mkdir(parents=True, exist_ok=True)
+            (root / "web" / "App.tsx").write_text("export const App = 1;\n", encoding="utf-8")
+            (root / "scripts").mkdir(parents=True, exist_ok=True)
+            (root / "scripts" / "tool.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "checkpoint commit"], check=True, capture_output=True)
+            chk_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+            # 第二個 commit：修改 web 檔案與 scripts 檔案
+            (root / "web" / "App.tsx").write_text("export const App = 2;\n", encoding="utf-8")
+            (root / "web" / "index.html").write_text("<html/>\n", encoding="utf-8")
+            (root / "scripts" / "tool.sh").write_text("#!/bin/sh\necho 1\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "update web and scripts"], check=True, capture_output=True)
+
+            session = {"line": "web", "session_id": "sess-chk-1", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [session]})
+
+            env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+            with patch.dict(os.environ, env):
+                res = self.ok("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(res["line"], "web")
+                self.assertEqual(res["checkpoint_session"], "sess-chk-1")
+                self.assertEqual(res["head_sha"], chk_sha)
+                self.assertIn("web/App.tsx", res["diff_stat"])
+                self.assertIn("web/index.html", res["diff_stat"])
+                self.assertNotIn("scripts/tool.sh", res["diff_stat"])
+                self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", res["prompt_prefix"])
+                self.assertIn("涉及的請重讀。", res["prompt_prefix"])
+
+                # 無變動情況
+                head_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+                session_ops = {"line": "ops", "session_id": "sess-chk-ops", "state": "checkpoint", "head_sha": head_sha}
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [session_ops]})
+                res_ops = self.ok("lineage", "since", "ops", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(res_ops["diff_stat"], "")
+                self.assertIn("（無變動）", res_ops["prompt_prefix"])
+
+    def test_lineage_since_error_cases(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            root = Path(repo_dir)
+            for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+            (root / "dummy.txt").write_text("hello", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "init"], check=True, capture_output=True)
+
+            lines_file = root / "lines.toml"
+            lines_file.write_text("""
+[lines.web]
+paths = ["web/**"]
+""", encoding="utf-8")
+
+            env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
+            with patch.dict(os.environ, env):
+                # 1. 無法通過名稱規則
+                code, out, err = self.run_cli("lineage", "since", "_invalid", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(code, 2)
+                self.assertEqual(json.loads(err)["error"], "invalid_line")
+
+                # 2. 沒有 checkpoint
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": []})
+                err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "no_checkpoint")
+
+                # 3. 沒有 head_sha
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "web", "session_id": "s1", "state": "checkpoint"}]})
+                err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "no_head_sha")
+
+                # 4. lines.toml 未定義該線
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "unknown", "session_id": "s2", "state": "checkpoint", "head_sha": "abc1234"}]})
+                err = self.bad("lineage", "since", "unknown", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "unknown_line")
+
+                # 5. sha 不在本地 (提示 git fetch)
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "web", "session_id": "s3", "state": "checkpoint", "head_sha": "0123456789abcdef0123456789abcdef01234567"}]})
+                err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "sha_not_found")
+                self.assertIn("git fetch", err["message"])
+
     def test_peers_and_requests_use_only_bot_proof_without_runtime(self):
         FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": []})
         FakeDaemon.routes["GET /api/projects/p1/peers?for=ticket-1"] = (200, {"candidates": []})

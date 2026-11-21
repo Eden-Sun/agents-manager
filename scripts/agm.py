@@ -1846,6 +1846,234 @@ def cmd_lineage_retire(client: Client, cfg: dict, args) -> object:
     return client.post(_lineage_path("/retire"), {"session_id": args.session_id})
 
 
+def _valid_line(line: str) -> bool:
+    return (
+        bool(line)
+        and 1 <= len(line) <= 64
+        and line[0].isalnum()
+        and all(c.isalnum() or c in "._-" for c in line)
+    )
+
+
+def _glob_to_regex(pat: str) -> str:
+    pat = pat.replace("\\", "/").strip()
+    while pat.startswith("/"):
+        pat = pat[1:]
+    parts: list[str] = []
+    i = 0
+    n = len(pat)
+    while i < n:
+        if pat[i:i + 3] == "/**":
+            parts.append("(?:/.*)?")
+            i += 3
+        elif pat[i:i + 3] == "**/":
+            parts.append("(?:.*/)?")
+            i += 3
+        elif pat[i:i + 2] == "**":
+            parts.append(".*")
+            i += 2
+        elif pat[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        elif pat[i] == "[":
+            j = i + 1
+            if j < n and pat[j] in "!^":
+                j += 1
+            if j < n and pat[j] == "]":
+                j += 1
+            while j < n and pat[j] != "]":
+                j += 1
+            if j >= n:
+                parts.append("\\[")
+                i += 1
+            else:
+                stuff = pat[i + 1:j]
+                if stuff.startswith(("!", "^")):
+                    stuff = "^" + stuff[1:]
+                parts.append(f"[{stuff}]")
+                i = j + 1
+        else:
+            parts.append(re.escape(pat[i]))
+            i += 1
+    return r"^" + "".join(parts) + r"$"
+
+
+def _match_glob(path: str, pat: str) -> bool:
+    path = path.replace("\\", "/").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return bool(re.match(_glob_to_regex(pat), path))
+
+
+def _load_lines_toml(path: Path) -> dict:
+    try:
+        import importlib
+        tomllib = importlib.import_module("tomllib")
+    except ImportError:
+        try:
+            import importlib
+            tomllib = importlib.import_module("tomli")
+        except ImportError:
+            raise AgmError("no_tomllib", "讀取 toml 需要標準庫 tomllib（Python 3.11+）", 1)
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except Exception as e:
+        raise AgmError("invalid_lines_toml", f"解析 {path} 失敗：{e}", 1)
+
+
+def _resolve_repo(explicit: str | None = None) -> Path:
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if p.is_dir():
+            return p
+        raise AgmError("no_repo", f"指定的 repo 目錄不存在：{explicit}", 2)
+    env_repo = os.environ.get("AGM_REPO")
+    if env_repo:
+        p = Path(env_repo).expanduser().resolve()
+        if p.is_dir():
+            return p
+    here = Path(__file__).resolve().parent
+    if here.parent.is_dir() and (here.parent / ".git").exists():
+        return here.parent
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False)
+        if r.returncode == 0 and r.stdout.strip():
+            return Path(r.stdout.strip()).resolve()
+    except Exception:
+        pass
+    return Path(DEFAULT_REPO).expanduser().resolve()
+
+
+def _resolve_lines_file(explicit: str | None, repo: Path) -> Path:
+    if explicit:
+        p = Path(explicit).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        if not p.is_file():
+            raise AgmError("no_lines_config", f"找不到 lines.toml 定義檔：{p}", 1)
+        return p
+    env_lines = os.environ.get("AGM_LINES_FILE") or os.environ.get("LINES_TOML")
+    if env_lines:
+        p = Path(env_lines).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        if not p.is_file():
+            raise AgmError("no_lines_config", f"找不到 lines.toml 定義檔：{p}", 1)
+        return p
+    default_p = repo / "docs" / "notes" / "lines.toml"
+    if not default_p.is_file():
+        raise AgmError("no_lines_config", f"找不到 lines.toml 定義檔：{default_p}", 1)
+    return default_p
+
+
+def cmd_lineage_pick(client: Client | None, cfg: dict, args) -> object:
+    """依 lines.toml 把路徑對到線（#1943 子票 B2）；全同線回 line，跨線或 unmatched 回 null。"""
+    repo = _resolve_repo(getattr(args, "repo", None))
+    lines_file = _resolve_lines_file(getattr(args, "lines_file", None), repo)
+    lines_cfg = _load_lines_toml(lines_file)
+    lines_dict = lines_cfg.get("lines", {})
+    if not isinstance(lines_dict, dict):
+        raise AgmError("invalid_lines_config", "lines.toml 格式錯誤：缺少 [lines] 表格", 1)
+
+    compiled_lines: list[tuple[str, list[str]]] = []
+    for line_name, line_info in lines_dict.items():
+        if not _valid_line(line_name):
+            raise AgmError("invalid_line_name", f"模組線名稱不合規則：{line_name}（須為 1–64 個英數字元或 ._-，且以英數開頭）", 1, line=line_name)
+        if not isinstance(line_info, dict) or "paths" not in line_info:
+            raise AgmError("invalid_lines_config", f"模組線 `{line_name}` 缺少 paths 設定", 1, line=line_name)
+        paths_patterns = line_info["paths"]
+        if not isinstance(paths_patterns, list) or not all(isinstance(p, str) for p in paths_patterns):
+            raise AgmError("invalid_lines_config", f"模組線 `{line_name}` 的 paths 必須是字串清單", 1, line=line_name)
+        compiled_lines.append((line_name, paths_patterns))
+
+    lines_matched: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+
+    for raw_p in args.paths:
+        p = raw_p.strip()
+        norm_p = p.replace("\\", "/")
+        while norm_p.startswith("./"):
+            norm_p = norm_p[2:]
+        matched_any = False
+        for line_name, patterns in compiled_lines:
+            if any(_match_glob(norm_p, pat) for pat in patterns):
+                target = lines_matched.setdefault(line_name, [])
+                if p not in target:
+                    target.append(p)
+                matched_any = True
+        if not matched_any:
+            if p not in unmatched:
+                unmatched.append(p)
+
+    line = list(lines_matched.keys())[0] if len(lines_matched) == 1 and not unmatched else None
+
+    return {
+        "lines": lines_matched,
+        "unmatched": unmatched,
+        "line": line,
+    }
+
+
+def cmd_lineage_since(client: Client, cfg: dict, args) -> object:
+    """取該線檢查點 head_sha，計算自檢查點以來的 git diff --stat 與 prompt_prefix（#1943 子票 B2）。"""
+    line = args.line.strip()
+    if not _valid_line(line):
+        raise AgmError("invalid_line", f"模組線名稱不合規則：{line}（須為 1–64 個英數字元或 ._-，且以英數開頭）", 2, line=line)
+
+    res = client.get(_lineage_path(), {"line": line, "state": "checkpoint"})
+    sessions = res.get("sessions", []) if isinstance(res, dict) else []
+    checkpoint = next((s for s in sessions if s.get("state") == "checkpoint" and s.get("line") == line), None)
+    if not checkpoint:
+        raise AgmError("no_checkpoint", f"模組線 `{line}` 目前沒有檢查點 session", 1, line=line)
+
+    checkpoint_session = checkpoint.get("session_id")
+    head_sha = checkpoint.get("head_sha")
+    if not head_sha or not str(head_sha).strip():
+        raise AgmError("no_head_sha", f"模組線 `{line}` 的檢查點 `{checkpoint_session}` 沒有記錄 head_sha", 1, line=line, checkpoint_session=checkpoint_session)
+    head_sha = str(head_sha).strip()
+
+    repo = _resolve_repo(getattr(args, "repo", None))
+    lines_file = _resolve_lines_file(getattr(args, "lines_file", None), repo)
+    lines_cfg = _load_lines_toml(lines_file)
+    lines_dict = lines_cfg.get("lines", {})
+    if line not in lines_dict:
+        raise AgmError("unknown_line", f"lines.toml 未定義模組線 `{line}`", 1, line=line)
+
+    line_entry = lines_dict[line]
+    paths = line_entry.get("paths", [])
+    if not isinstance(paths, list):
+        raise AgmError("invalid_lines_config", f"lines.toml 中模組線 `{line}` 的 paths 必須是清單", 1, line=line)
+
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{head_sha}^{{commit}}"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AgmError("sha_not_found", f"commit {head_sha} 不在本地儲存庫中，請先執行 `git fetch`", 1, line=line, head_sha=head_sha)
+
+    git_cmd = ["git", "-C", str(repo), "diff", "--stat", f"{head_sha}..HEAD"]
+    if paths:
+        git_cmd.extend(["--", *paths])
+    diff_proc = subprocess.run(git_cmd, capture_output=True, text=True)
+    if diff_proc.returncode != 0:
+        raise AgmError("git_diff_failed", f"git diff 執行失敗：{diff_proc.stderr.strip()}", 1, line=line, head_sha=head_sha)
+
+    diff_stat = diff_proc.stdout.strip()
+    if diff_stat:
+        prompt_prefix = f"上次之後這條線動過的檔案（{head_sha}..HEAD）：\n{diff_stat}\n\n涉及的請重讀。"
+    else:
+        prompt_prefix = f"上次之後這條線動過的檔案（{head_sha}..HEAD）：（無變動），涉及的請重讀。"
+
+    return {
+        "line": line,
+        "checkpoint_session": checkpoint_session,
+        "head_sha": head_sha,
+        "diff_stat": diff_stat,
+        "prompt_prefix": prompt_prefix,
+    }
+
+
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
@@ -2904,6 +3132,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = lineage.add_parser("retire", help="退役一顆 session（做壞／放棄，或重種後的舊檢查點）")
     s.add_argument("session_id")
     s.set_defaults(func=cmd_lineage_retire)
+    s = lineage.add_parser("pick", help="依 lines.toml 把路徑對到線；全同線回 line，跨線或 unmatched 回 null")
+    s.add_argument("paths", nargs="+", help="檔案路徑清單")
+    s.add_argument("--config", "--lines-file", dest="lines_file", help="指定 lines.toml 路徑（預設 docs/notes/lines.toml）")
+    s.add_argument("--repo", help="指定 git repo 路徑")
+    s.set_defaults(func=cmd_lineage_pick, needs_client=False)
+    s = lineage.add_parser("since", help="取該線檢查點 head_sha，計算自檢查點以來的 git diff --stat 與 prompt_prefix")
+    s.add_argument("line", help="模組線名（例 web、lifecycle、quota、ops）")
+    s.add_argument("--config", "--lines-file", dest="lines_file", help="指定 lines.toml 路徑（預設 docs/notes/lines.toml）")
+    s.add_argument("--repo", help="指定 git repo 路徑")
+    s.set_defaults(func=cmd_lineage_since)
     s = sub.add_parser("role", help="專家模式管理者：設同專案頂層 bot 的角色（executor／advisor／specialist／none）")
     s.add_argument("bot_id")
     s.add_argument("role", choices=["executor", "advisor", "specialist", "none"])
