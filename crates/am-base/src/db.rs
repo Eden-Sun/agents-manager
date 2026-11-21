@@ -490,6 +490,23 @@ CREATE TABLE IF NOT EXISTS lineage_sessions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_sessions_checkpoint ON lineage_sessions(project_id, line) WHERE state = 'checkpoint';
 CREATE INDEX IF NOT EXISTS idx_lineage_sessions_line ON lineage_sessions(project_id, line, state);
+-- codex session 血統認領（issue #1943 子票 B1）：每條線同一時間最多一筆 open resume 認領（部分唯一索引）；fork 可並存。
+CREATE TABLE IF NOT EXISTS lineage_claims (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  line TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('resume','fork')),
+  holder_bot_id TEXT,
+  base_session_id TEXT NOT NULL,
+  base_head_sha TEXT,
+  backup_session_id TEXT,
+  work_session_id TEXT,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','advanced','abandoned')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lineage_claims_open_resume ON lineage_claims(project_id, line) WHERE mode = 'resume' AND state = 'open';
+CREATE INDEX IF NOT EXISTS idx_lineage_claims_line ON lineage_claims(project_id, line, state);
 
 -- 承諾帳本（防遺忘，第 1 階段 T1，2026-11-21）：專案私有事項主表與交接稽核事件，見 am-base ledger 模組。
 -- 1. 專案私有承諾帳本主表
@@ -780,6 +797,8 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (99, "8392961c08c2cf76"),
     // 防遺忘承諾帳本 T1（2026-11-21）：`ledger_items`、`ledger_events` 與索引（CREATE TABLE）。
     (100, "d159d420a712b673"),
+    // codex session 血統認領（issue #1943 子票 B1，2026-11-21）：`lineage_claims`（CREATE TABLE）與 open resume 部分唯一索引。
+    (101, "bdaf849a9896d73f"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

@@ -1,6 +1,6 @@
 //! session 血統 API（issue #1943 子票 A）：權限（讀＝同專案；寫＝manager／AGM／User）、跨專案拒絕、狀態轉移與錯誤碼。
 use super::*;
-use crate::session_lineage::{advance, create, list, retire, ListQuery, RetireBody, SessionBody};
+use crate::session_lineage::{abandon, advance, claim, create, list, retire, ClaimBody, ListQuery, RetireBody, SessionBody};
 
 struct Cast {
     env: crate::testing::Env,
@@ -275,6 +275,12 @@ async fn over_http_bot_credentials_are_scoped_by_project_then_by_role() {
 
     let out = send("POST", own("/advance"), &c.manager, json!({"line": "web", "session_id": "sess-1", "head_sha": "0b43a28e4"})).await;
     assert!(out.starts_with("HTTP/1.1 200") && out.contains("\"state\":\"checkpoint\""), "{out}");
+    let out = send("POST", own("/claim"), &c.manager, json!({"line": "web", "mode": "resume", "backup_session_id": "bak-1"})).await;
+    assert!(out.starts_with("HTTP/1.1 200") && out.contains("\"mode\":\"resume\""), "{out}");
+    let out = send("POST", own("/claim"), &c.executor, json!({"line": "web", "mode": "fork"})).await;
+    assert!(out.starts_with("HTTP/1.1 403") && out.contains("role_required"), "executor claim: {out}");
+    let out = send("POST", theirs("/claim"), &c.manager, json!({"line": "web", "mode": "fork"})).await;
+    assert!(out.starts_with("HTTP/1.1 403") && out.contains("bot_resource_scope"), "outsider claim: {out}");
     let out = send("GET", own("?line=web"), &c.executor, Value::Null).await;
     assert!(out.starts_with("HTTP/1.1 200") && out.contains("\"session_id\":\"sess-1\""), "executor reads: {out}");
     for tail in ["", "/advance", "/retire"] {
@@ -292,4 +298,63 @@ async fn over_http_bot_credentials_are_scoped_by_project_then_by_role() {
     assert!(out.starts_with("HTTP/1.1 200") && out.contains("\"state\":\"retired\""), "{out}");
     server.abort();
     assert_eq!(listed(&c, &other, Extension(RequestPrincipal::User), ListQuery::default()).await.unwrap(), vec![], "別的專案什麼都沒被寫進去");
+}
+
+#[tokio::test]
+async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissions() {
+    let c = cast().await;
+    let (app, pid, other) = (c.env.app.clone(), c.env.project_id.clone(), c.other_project.clone());
+    let claim_body = |v: Value| Json(serde_json::from_value::<ClaimBody>(v).unwrap());
+
+    // 沒有檢查點不能認領。
+    let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
+    assert!(matches!(e, LcError::NotFoundValue(_)) && reason(&e) == "lineage_checkpoint_not_found", "{e:?}");
+
+    advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "session_id": "s1", "head_sha": "aaaaaaa"}))).await.unwrap();
+
+    // 權限：executor 只讀，不能 claim／abandon；outsider 跨專案被擋。
+    let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.executor), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
+    assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "{e:?}");
+    let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
+    assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "cross_project", "{e:?}");
+
+    // 單寫者 resume 認領；第二筆 409 lineage_line_busy（回傳佔用中的 claim）。
+    let Json(c1) = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "resume", "backup_session_id": "bak-1"}))).await.unwrap();
+    let c1_id = c1["claim"]["id"].as_str().unwrap().to_string();
+    assert_eq!((c1["claim"]["holder_bot_id"].as_str(), c1["checkpoint"]["session_id"].as_str()), (Some(c.manager.id.as_str()), Some("s1")));
+    let busy = claim(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
+    assert!(matches!(&busy, LcError::Conflict(v) if v["reason"] == "lineage_line_busy" && v["claim"]["id"] == c1_id), "{busy:?}");
+
+    // fork 認領可多筆並存。
+    let Json(f1) = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "fork", "work_session_id": "w1"}))).await.unwrap();
+    let Json(f2) = claim(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), claim_body(json!({"line": "web", "mode": "fork", "work_session_id": "w2"}))).await.unwrap();
+    let f1_id = f1["claim"]["id"].as_str().unwrap().to_string();
+    let f2_id = f2["claim"]["id"].as_str().unwrap().to_string();
+
+    // executor 不能 abandon；跨專案不能 abandon；正確 abandon 回傳 backup_session_id 且可再認領。
+    let e = abandon(State(app.clone()), Path((pid.clone(), c1_id.clone())), bot(&c.executor)).await.unwrap_err();
+    assert!(reason(&e) == "role_required", "{e:?}");
+    let e = abandon(State(app.clone()), Path((other, c1_id.clone())), bot(&c.outsider_manager)).await.unwrap_err();
+    assert!(matches!(e, LcError::NotFoundValue(_)) && reason(&e) == "lineage_claim_not_found", "{e:?}");
+    let Json(ab) = abandon(State(app.clone()), Path((pid.clone(), c1_id.clone())), bot(&c.manager)).await.unwrap();
+    assert_eq!((ab["claim"]["state"].as_str(), ab["backup_session_id"].as_str()), (Some("abandoned"), Some("bak-1")));
+
+    let Json(c2) = claim(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), claim_body(json!({"line": "web", "mode": "resume", "backup_session_id": "bak-2"}))).await.unwrap();
+    assert!(c2["claim"]["holder_bot_id"].is_null());
+    let c2_id = c2["claim"]["id"].as_str().unwrap().to_string();
+
+    // 帶 claim_id 前移：resume 模式前移 base session 本身（可省略 session_id）；fork 模式前移 work_session_id。
+    let Json(adv_res) = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "claim_id": c2_id, "head_sha": "bbbbbbb"}))).await.unwrap();
+    assert_eq!((adv_res["session"]["session_id"].as_str(), adv_res["claim"]["state"].as_str()), (Some("s1"), Some("advanced")));
+    assert!(adv_res["retired"].is_null());
+
+    let Json(adv_f1) = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap();
+    assert_eq!((adv_f1["session"]["session_id"].as_str(), adv_f1["retired"]["session_id"].as_str()), (Some("w1"), Some("s1")));
+
+    // 過期 claim 前移被拒（409 lineage_checkpoint_moved，回傳目前檢查點 w1）且什麼都沒改；關閉後也不能再前移。
+    let stale = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "claim_id": f2_id}))).await.unwrap_err();
+    assert!(matches!(&stale, LcError::Conflict(v) if v["reason"] == "lineage_checkpoint_moved" && v["checkpoint"]["session_id"] == "w1"), "{stale:?}");
+    let closed = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap_err();
+    assert!(matches!(&closed, LcError::Conflict(v) if v["reason"] == "lineage_claim_closed"), "{closed:?}");
+    assert_eq!(listed(&c, &pid, bot(&c.executor), ListQuery { line: Some("web".into()), state: Some("checkpoint".into()) }).await.unwrap(), vec![row("web", "w1", "checkpoint")]);
 }
