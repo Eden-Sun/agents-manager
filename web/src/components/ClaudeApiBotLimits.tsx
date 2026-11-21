@@ -3,6 +3,7 @@ import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type Claude
 import { apiBotConfirmedUsd, fetchApiBotUsage, type ApiBotUsage } from '../api/apiBotUsage'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { CapEditor } from './CapEditor'
 import './claudeApiBotLimits.css'
 
 export interface ClaudeApiBotLimitsProps {
@@ -152,42 +153,24 @@ export function ClaudeApiBotLimits({ botId, onSelectBot }: ClaudeApiBotLimitsPro
       {/* 總花費上限 */}
       <div className="claude-api-bot-limits-section">
         {editingCap ? (
-          <form className="claude-api-bot-limits-form" data-testid="cap-edit-form" onSubmit={(e) => void handleSaveCap(e)}>
-            <label htmlFor="bot-cap-input">{t('總花費上限 $')}</label>
-            <input
-              id="bot-cap-input"
-              type="number"
-              step="0.01"
-              min="0"
-              autoFocus
-              value={newCapVal}
-              disabled={savingCap}
-              onChange={(e) => setNewCapVal(e.target.value)}
-              placeholder="0.00"
-            />
-            <button className="claude-api-bot-limits-btn" type="submit" disabled={savingCap}>
-              {t('儲存')}
-            </button>
-            {cap?.cap_usd !== null && cap?.cap_usd !== undefined ? (
-              <button
-                className="claude-api-bot-limits-btn clear"
-                type="button"
-                disabled={savingCap}
-                onClick={() => void handleClearCap()}
-              >
-                {t('清除上限')}
-              </button>
-            ) : null}
-            <button
-              className="claude-api-bot-limits-btn cancel"
-              type="button"
-              disabled={savingCap}
-              onClick={() => setEditingCap(false)}
-            >
-              {t('取消')}
-            </button>
-            {capError ? <span className="warn" role="alert">{capError}</span> : null}
-          </form>
+          <CapEditor
+            formClassName="claude-api-bot-limits-form"
+            formTestId="cap-edit-form"
+            btnClassName="claude-api-bot-limits-btn"
+            labelText={t('總花費上限 $')}
+            inputId="bot-cap-input"
+            value={newCapVal}
+            saving={savingCap}
+            showClear={cap?.cap_usd !== null && cap?.cap_usd !== undefined}
+            saveText={t('儲存')}
+            clearText={t('清除上限')}
+            cancelText={t('取消')}
+            onChange={setNewCapVal}
+            onSubmit={(e) => void handleSaveCap(e)}
+            onClear={() => void handleClearCap()}
+            onCancel={() => setEditingCap(false)}
+            footer={capError ? <span className="warn" role="alert">{capError}</span> : null}
+          />
         ) : (
           <div className={`claude-api-bot-limits-row${isCapExceededOrClose ? ' warn' : ''}`}>
             <span className="k">{t('總花費上限：')}</span>

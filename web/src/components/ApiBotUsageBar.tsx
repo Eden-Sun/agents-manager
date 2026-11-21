@@ -4,6 +4,7 @@ import { apiBotConfirmedUsd, fetchApiBotUsage, formatTokensK, type ApiBotUsage }
 import { fetchClaudeApiCap, putClaudeApiCap, putClaudeApiTurnLimits, type ClaudeApiCap } from '../api/claudeApiCap'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { CapEditor } from './CapEditor'
 import './apiBotUsageBar.css'
 
 const POLL_MS = 10_000
@@ -189,42 +190,24 @@ export function ApiBotUsageBar({
 
       {cap ? (
         editingCap ? (
-          <form className="api-balance-form" onSubmit={(e) => void handleSaveCap(e)}>
-            <label className="sl-k" htmlFor="cap-input">{t('上限 $')}</label>
-            <input
-              id="cap-input"
-              className="api-balance-input"
-              type="number"
-              step="0.01"
-              min="0"
-              autoFocus
-              value={newCapVal}
-              disabled={savingCap}
-              onChange={(e) => setNewCapVal(e.target.value)}
-              placeholder="0.00"
-            />
-            <button className="api-balance-btn" type="submit" disabled={savingCap}>
-              {t('儲存')}
-            </button>
-            {cap.cap_usd !== null ? (
-              <button
-                className="api-balance-btn clear"
-                type="button"
-                disabled={savingCap}
-                onClick={() => void handleClearCap()}
-              >
-                {t('清除')}
-              </button>
-            ) : null}
-            <button
-              className="api-balance-btn cancel"
-              type="button"
-              disabled={savingCap}
-              onClick={() => setEditingCap(false)}
-            >
-              {t('取消')}
-            </button>
-          </form>
+          <CapEditor
+            formClassName="api-balance-form"
+            labelClassName="sl-k"
+            inputClassName="api-balance-input"
+            btnClassName="api-balance-btn"
+            labelText={t('上限 $')}
+            inputId="cap-input"
+            value={newCapVal}
+            saving={savingCap}
+            showClear={cap.cap_usd !== null}
+            saveText={t('儲存')}
+            clearText={t('清除')}
+            cancelText={t('取消')}
+            onChange={setNewCapVal}
+            onSubmit={(e) => void handleSaveCap(e)}
+            onClear={() => void handleClearCap()}
+            onCancel={() => setEditingCap(false)}
+          />
         ) : cap.cap_usd === null || cap.cap_usd === undefined ? (
           <button
             type="button"
