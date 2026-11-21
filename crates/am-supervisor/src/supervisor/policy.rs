@@ -177,6 +177,7 @@ mod tests {
             five_hour: five,
             seven_day: seven,
             fable,
+            argon_weekly: None,
             reset_credits: None,
             limit_hit: None,
             plan: None,
