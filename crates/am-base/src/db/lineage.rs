@@ -293,7 +293,16 @@ pub async fn claim(
         .fetch_optional(&mut *tx)
         .await?;
         if let Some(existing) = busy {
-            return Err(LineageError::LineBusy(Box::new(existing)));
+            // 檢查點已經被別的寫入者（fork 前移、或沒帶 claim 的 advance）移走：這筆 resume 認領再也前移不了，
+            // 留著只會讓這條線永遠 busy。當場改 abandoned 再接受新的認領；還在同一顆檢查點上的才算真的佔用。
+            if existing.base_session_id == cp.session_id {
+                return Err(LineageError::LineBusy(Box::new(existing)));
+            }
+            sqlx::query("UPDATE lineage_claims SET state = 'abandoned', updated_at = ? WHERE id = ?")
+                .bind(crate::db::now())
+                .bind(&existing.id)
+                .execute(&mut *tx)
+                .await?;
         }
     }
     let id = crate::db::ulid();
@@ -421,6 +430,21 @@ mod tests {
 
     fn pair(a: &str, b: &str) -> (String, String) {
         (a.to_string(), b.to_string())
+    }
+
+    /// fork 把檢查點移走之後，舊檢查點上那筆 open 的 resume 認領不再擋新的 resume 認領（自動改 abandoned）。
+    #[tokio::test]
+    async fn a_resume_claim_left_on_a_moved_checkpoint_does_not_block_the_line() {
+        let pool = pool().await;
+        advance(&pool, "p1", "web", "s1", Fields::default()).await.unwrap();
+        let stale = claim(&pool, "p1", "web", "resume", None, Some("bak"), None).await.unwrap().claim;
+        let fork = claim(&pool, "p1", "web", "fork", None, None, Some("w1")).await.unwrap().claim;
+        assert!(matches!(claim(&pool, "p1", "web", "resume", None, None, None).await, Err(LineageError::LineBusy(_))));
+        advance_with_claim(&pool, "p1", "web", &fork.id, None, Fields::default()).await.unwrap();
+        let fresh = claim(&pool, "p1", "web", "resume", None, None, None).await.unwrap();
+        assert_eq!(fresh.checkpoint.session_id, "w1");
+        let old: LineageClaim = sqlx::query_as("SELECT * FROM lineage_claims WHERE id = ?").bind(&stale.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(old.state, "abandoned");
     }
 
     #[tokio::test]
