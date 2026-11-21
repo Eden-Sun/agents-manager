@@ -19,7 +19,6 @@ mod pane_text;
 mod paste_check;
 mod prelude;
 mod prompt;
-mod resume_context;
 mod resume_gate;
 mod resume_nudge;
 mod screen;

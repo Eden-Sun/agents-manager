@@ -39,7 +39,7 @@ module_has_tests() { # module_has_tests <src 根目錄> <用 / 分隔的模組�
 
 # #1862 L2-1：這些 am-lifecycle 模組裡需要真 App 的測試搬進 daemon/src/lifecycle_tests/<名>.rs（模組路徑 lifecycle_tests::<名>::）。
 # 改它們的 crate 原始碼（含 *_tests.rs）要加選搬走的那一份；crate 內留下的純測試由 check.sh 的 `cargo test -p am-lifecycle` 跑。
-LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate resume_context composer_draft unsent_draft suggestion "
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion "
 emit_lifecycle_moved() { # emit_lifecycle_moved <repo 相對路徑>
     local n
     n="$(basename "${1%.rs}")"

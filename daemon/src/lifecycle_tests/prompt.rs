@@ -2928,22 +2928,3 @@ mod restamp_tests {
         assert_eq!((delivery.as_str(), verified, auto_resend), ("ok", 1, 0), "第二條 evidence 仍更新送達欄位");
     }
 }
-
-// 兩邊重複的純函式測試（crate 側原樣留在 am-lifecycle，只在 crate-only 編）：daemon 側保留複本，維持各自一次執行。
-mod stack_shape_tests {
-    use crate::lifecycle_tests::prelude::*;
-    use crate::lifecycle::prompt::rearm_queued_prompt_restamps;
-    use crate::lifecycle::prompt::test_seams::*;
-    // parent-uses
-    use crate::lifecycle::*;
-    use crate::state::App;
-    use crate::lifecycle::send_now::ports::AttachConnPort;
-    use crate::lc_error::PromptOut;
-    use crate::lc_error::QueueClass;
-    #[test]
-    fn the_prompt_stage_hand_off_stays_small() {
-        const LIMIT: usize = 16 * 1024;
-        assert!(std::mem::size_of::<crate::lifecycle::prompt::Ready>() <= LIMIT, "Ready 有 {} 位元組，超過 {LIMIT}", std::mem::size_of::<crate::lifecycle::prompt::Ready>());
-        assert!(std::mem::size_of::<crate::lifecycle::prompt::Gated>() <= LIMIT);
-    }
-}
