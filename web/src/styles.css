@@ -3562,14 +3562,30 @@ button.model-tag:hover:not(:disabled) {
 /* 手機通知改從上面出現：390px 右下是送出鍵，且 `.shelf`（30）高於 `.notices`（20）會切掉它（2026-09-08 實測）。
    z-index 1100：全螢幕 sheet 在 900（`.modal-backdrop`）／1000（`.confirm-backdrop`），通知要在上面，否則 sheet 裡操作失敗的錯誤訊息被蓋住看不到（issue #932）。 */
 
+/* 手機通知放螢幕垂直中間（單手好點）。不用 transform 置中：`.notice-top-center` 是 fixed 子元素，祖先有 transform 會改以 `.notices` 為基準。
+   容器撐滿螢幕但 pointer-events: none，只有通知本身接收點擊。 */
 @media (width <= 640px) {
   .notices {
-    top: calc(env(safe-area-inset-top) + 8px);
+    top: 0;
     right: 8px;
-    bottom: auto;
+    bottom: 0;
     left: 8px;
     z-index: 1100;
     max-width: none;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .notices > .notice {
+    pointer-events: auto;
+    animation: notice-fade-in 0.18s ease-out;
+  }
+}
+
+@keyframes notice-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
   }
 }
 

@@ -44,10 +44,34 @@
   cursor: pointer;
 }
 
+/* 手機：垂直置中的浮動卡片，好用拇指點；不貼頂、不算瀏海安全區。 */
+@media (width <= 640px) {
+  .stale-bundle-banner {
+    top: 50%;
+    transform: translateY(-50%);
+    left: 12px;
+    right: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--warn-border, #e8c76a);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+  }
+
+  .stale-bundle-reload {
+    min-height: 44px;
+    padding: 0 16px;
+  }
+
+  .stale-bundle-dismiss {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) .stale-bundle-banner {
     background: #3a2f10;
     color: #ffe9a8;
-    border-bottom-color: #6b5520;
+    border-color: #6b5520;
   }
 }
