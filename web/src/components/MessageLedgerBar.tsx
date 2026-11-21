@@ -100,7 +100,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
     <div className="ledger-bar" aria-label={t('承諾帳本進度')}>
       <button type="button" className="ledger-bar-summary" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <span aria-hidden="true">📋</span>{' '}
-        {untriagedOnly ? `${t('待分流')} 1` : t('{n} 件：{parts}', { n: visible.length, parts: parts.join('／') })}
+        {untriagedOnly ? t('加入追蹤任務') : t('{n} 件：{parts}', { n: visible.length, parts: parts.join('／') })}
       </button>
       {open ? (
         <ul className="ledger-list">
@@ -163,7 +163,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
 function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
   switch (s) {
     case 'untriaged':
-      return t('待分流')
+      return t('加入追蹤任務')
     case 'answered':
       return t('已答')
     case 'following':

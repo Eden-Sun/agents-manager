@@ -80,10 +80,10 @@ test('摘要：一訊三事顯示 已答／待跟進／待釐清 的計數（不
   })()
 })
 
-test('只有一筆待分流：顯示「待分流 1」', async () => {
+test('只有一筆未分流：顯示「📋 加入追蹤任務」', async () => {
   setup()
   const el = await mount(<MessageLedgerBar msg={msg([item({ status: 'untriaged' })])} />)
-  assert.match(el.querySelector('.ledger-bar-summary')?.textContent ?? '', /待分流 1/)
+  assert.equal((el.querySelector('.ledger-bar-summary')?.textContent ?? '').trim(), '📋 加入追蹤任務')
 })
 
 test('沒有附掛的訊息不畫進度列、也不發請求', async () => {

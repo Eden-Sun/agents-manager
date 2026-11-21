@@ -542,7 +542,7 @@ export default {
   // 承諾帳本進度列（MessageLedgerBar，SPEC 帳本第 1 階段）
   '承諾帳本進度': 'Commitment ledger progress',
   '{n} 件：{parts}': '{n} items: {parts}',
-  '待分流': 'Untriaged',
+  '加入追蹤任務': 'Added to tracking',
   '已答': 'Answered',
   '待跟進': 'Following',
   '待釐清': 'Clarifying',
