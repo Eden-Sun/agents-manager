@@ -317,6 +317,8 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/messages/{id}/translate", post(crate::message_translate::post_translate))
         .route("/messages/{id}/translate-report", post(crate::message_translate::post_translate_report))
+        .route("/messages/{id}/translate-retros", get(crate::message_translate::get_message_translate_retros))
+        .route("/translate-retros", get(crate::message_translate::list_translate_retros))
         .route("/pending-questions/translate", post(crate::message_translate::post_pending_question_translate))
         .route("/quota", get(get_quota))
         .route("/quota/probe", post(probe_quota))
@@ -903,6 +905,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/send-queued-now", BotRoutePolicy::UserOnly),
     ("POST", "/api/messages/{id}/translate", BotRoutePolicy::UserOnly),
     ("POST", "/api/messages/{id}/translate-report", BotRoutePolicy::UserOnly),
+    ("GET", "/api/messages/{id}/translate-retros", BotRoutePolicy::UserOnly),
+    ("GET", "/api/translate-retros", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/read", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/suggestion/accept", BotRoutePolicy::UserOnly),
     ("POST", "/api/bots/{id}/text", BotRoutePolicy::UserOnly),

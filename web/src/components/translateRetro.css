@@ -1,0 +1,97 @@
+/* 譯文「複盤」記錄（TranslateRetroRecords.tsx）：清單與單筆卡片。390px 寬不橫向捲動。 */
+.retro-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.retro-item {
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.retro-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 6px;
+}
+
+.retro-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.retro-facts {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.retro-facts > div {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr);
+  gap: 8px;
+}
+
+.retro-facts dt {
+  color: var(--muted, #57606a);
+  font-size: 0.9em;
+}
+
+.retro-facts dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.retro-attempts {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.retro-texts {
+  margin-top: 8px;
+}
+
+.retro-texts summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.retro-pair {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.retro-pair h5 {
+  margin: 0 0 4px;
+  font-size: 0.9em;
+}
+
+.retro-pair pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
+  font: inherit;
+  font-size: 0.9em;
+}
+
+.retro-more {
+  align-self: center;
+  min-height: 32px;
+}
+
+@media (min-width: 520px) {
+  .retro-pair {
+    grid-template-columns: 1fr 1fr;
+  }
+}

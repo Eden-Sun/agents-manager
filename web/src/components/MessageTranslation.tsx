@@ -3,6 +3,7 @@ import { useT } from '../lib/i18n'
 import { msgTimeLabel } from '../lib/msgTime'
 import { useStore } from '../store/store'
 import { SafeMarkdown } from './SafeMarkdown'
+import { MessageRetroSheet } from './TranslateRetroRecords'
 import { isLocalTranslation, translationModelName, usd } from './messageTranslationConstants'
 import type { RejectDetail } from '../lib/messageTranslationStore'
 
@@ -16,34 +17,27 @@ function costLine(t: ReturnType<typeof useT>, st: { cost: number | null; model: 
   return t('(by {model} {cost})', { model, cost: usd(st.cost) })
 }
 
-/** 複盤的 10 分鐘去重窗（與 daemon `REPORT_WINDOW_SECS` 同值）：窗內再按只顯示已開的時間。 */
-const RETRO_WINDOW_MS = 10 * 60_000
-
 /**
- * 「複盤」：譯文已完成、使用者覺得翻得不好時，開一個複盤任務給本專案的管理者（分析為什麼翻不好、該怎麼改規則）。
- * 按下展開小輸入框（選填「哪裡翻得不好」）；送出後顯示已開的時間，10 分鐘內再按也只顯示時間、不重送。
+ * 「複盤」：譯文已完成、使用者覺得翻得不好時，記下這一版的紀錄（只給使用者自己看，不送管理者）。
+ * 按下展開小輸入框（選填「哪裡翻得不好」）；送出後顯示「已記錄複盤（時間）」與「查看」。
  */
-function RetroControl({ t, sentAt, onSend }: { t: ReturnType<typeof useT>; sentAt: string | null; onSend: (note: string) => void }) {
+function RetroControl({ t, sentAt, messageId, onSend }: { t: ReturnType<typeof useT>; sentAt: string | null; messageId: string; onSend: (note: string) => void }) {
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState('')
-  const [showSent, setShowSent] = useState(false)
-  const recent = sentAt !== null && Date.now() - new Date(sentAt).getTime() < RETRO_WINDOW_MS
-  const onClick = () => {
-    if (recent) setShowSent(true)
-    else setOpen((v) => !v)
-  }
+  const [viewing, setViewing] = useState(false)
   return (
     <>
       <button
         type="button"
         className="msg-translate msg-translate-retro"
         data-k="translate-retro"
-        onClick={onClick}
-        title={t('請管理者分析這則為什麼翻不好、該怎麼改規則')}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title={t('記下這則為什麼翻不好（只給你自己看，不送管理者）')}
       >
         {t('複盤')}
       </button>
-      {open && !recent ? (
+      {open ? (
         <form
           className="msg-translate-retro-form"
           data-k="translate-retro-form"
@@ -52,7 +46,6 @@ function RetroControl({ t, sentAt, onSend }: { t: ReturnType<typeof useT>; sentA
             onSend(note)
             setOpen(false)
             setNote('')
-            setShowSent(true)
           }}
         >
           <input
@@ -67,11 +60,17 @@ function RetroControl({ t, sentAt, onSend }: { t: ReturnType<typeof useT>; sentA
           <button type="submit" className="msg-translate" data-k="translate-retro-send">{t('送出')}</button>
         </form>
       ) : null}
-      {recent && showSent && sentAt ? (
+      {sentAt ? (
         <span className="msg-translate-retro-sent" data-k="translate-retro-sent">
-          {t('已開複盤給管理者（{time}）', { time: msgTimeLabel(sentAt) })}
+          {t('已記錄複盤（{time}）', { time: msgTimeLabel(sentAt) })}
         </span>
       ) : null}
+      {sentAt ? (
+        <button type="button" className="msg-translate" data-k="translate-retro-view" onClick={() => setViewing(true)}>
+          {t('查看')}
+        </button>
+      ) : null}
+      {viewing ? <MessageRetroSheet messageId={messageId} open onClose={() => setViewing(false)} /> : null}
     </>
   )
 }
@@ -97,6 +96,7 @@ export function MessageTranslationButton({
   redoing,
   onRetro,
   retroSentAt,
+  retroMessageId,
 }: {
   eligible: boolean
   off: { reason: string } | null
@@ -119,6 +119,8 @@ export function MessageTranslationButton({
   /** 「複盤」（譯文狀態才顯示）：送出使用者的備註（可空字串）；`retroSentAt` 是上次開複盤的時間。 */
   onRetro?: (note: string) => void
   retroSentAt?: string | null
+  /** 「查看」複盤記錄用的訊息 id（有 `onRetro` 時才需要）。 */
+  retroMessageId?: string
 }) {
   const t = useT()
   if (!eligible) return null
@@ -207,7 +209,7 @@ export function MessageTranslationButton({
       </button>
     ) : null
   const retroNode =
-    status === 'done' && onRetro && !off ? <RetroControl t={t} sentAt={retroSentAt ?? null} onSend={onRetro} /> : null
+    status === 'done' && onRetro && !off ? <RetroControl t={t} sentAt={retroSentAt ?? null} messageId={retroMessageId ?? ''} onSend={onRetro} /> : null
   if (off || status !== 'rejected') {
     return redoButton || retroNode ? (
       <>

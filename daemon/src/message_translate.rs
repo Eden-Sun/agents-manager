@@ -81,6 +81,52 @@ struct CacheEntry {
     /// 這則譯文實際打了幾次模型（含重試）；舊快取沒有。複盤用它判斷「是否重翻過」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attempts: Option<usize>,
+    /// 每一次嘗試的模型與結果（含被升級重翻的那幾次）；舊快取沒有。複盤記錄用。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attempt_log: Vec<AttemptLog>,
+    /// 複盤記錄（使用者按「複盤」時的快照，append-only）。存在同一個快取檔，不另開 DB。
+    /// [`save`] 重寫時若呼叫端沒帶，會沿用檔案裡既有的，所以重新翻譯不會把它洗掉。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retros: Vec<Retro>,
+}
+
+/// 單次模型嘗試的紀錄（複盤用）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AttemptLog {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// 本地檢查沒過的原因（`untranslated`／`japanese_output`／`markdown_structure`…）；過了就 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_prob: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// 一筆複盤記錄：使用者按「複盤」當下，這版譯文的快照（模型、嘗試、檢查、備註、原文／譯文前 1500 字）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Retro {
+    pub at: String,
+    pub message_id: String,
+    pub bot_id: String,
+    pub project_id: String,
+    /// 使用者的一句話（trim 後；沒寫就 None）。
+    pub note: Option<String>,
+    /// 實際產出這版譯文的模型（例 `gpt-6-luna`、`claude-haiku-5-5`）。
+    pub model: String,
+    pub effort: Option<String>,
+    pub prompt_version: String,
+    pub cost_usd: Option<f64>,
+    /// 每次嘗試；舊快取沒有紀錄時是空陣列。
+    pub attempts: Vec<AttemptLog>,
+    pub jev_prob: Option<f64>,
+    pub low_confidence: bool,
+    /// 四項本地檢查各自的結果（`untranslated`／`partially_untranslated`／`markdown_structure`／`japanese_output`）。
+    pub local_checks: Value,
+    pub source: String,
+    pub translation: String,
 }
 
 pub(crate) use crate::claude_api::cost_usd;
@@ -226,7 +272,12 @@ fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let data = serde_json::to_vec(entry).map_err(std::io::Error::other)?;
+    // 複盤記錄跟著快取檔走：呼叫端沒帶就沿用檔案裡既有的（重新翻譯、負面標記覆寫都不會丟掉）。
+    let mut out = entry.clone();
+    if out.retros.is_empty() {
+        out.retros = load_entry(path).map(|e| e.retros).unwrap_or_default();
+    }
+    let data = serde_json::to_vec(&out).map_err(std::io::Error::other)?;
     am_base::atomic_file::write(path, &data, am_base::atomic_file::Mode::Exact(0o600))
 }
 
@@ -484,6 +535,16 @@ struct Attempt {
     jev: Option<f64>,
 }
 
+fn attempt_log_of(a: &Attempt) -> AttemptLog {
+    AttemptLog {
+        model: a.model.clone(),
+        effort: a.effort.clone(),
+        reason: a.reason.map(str::to_string),
+        jev_prob: a.jev,
+        cost_usd: a.cost,
+    }
+}
+
 /// `model`：`Some` 時這一次改用它（品質沒過的升級重試）；`None` 照設定的模型。
 async fn attempt(app: &App, id: &str, content: &str, effort: Option<&str>, prev_reason: Option<&str>, model: Option<&str>) -> Result<Attempt, LcError> {
     let req = match prev_reason {
@@ -585,6 +646,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
         low_confidence: low,
         effort: best.effort.clone(),
         attempts: Some(attempts.len()),
+        attempt_log: attempts.iter().map(attempt_log_of).collect(),
         ..Default::default()
     };
     if let Err(e) = save(path, &entry) {
@@ -686,7 +748,7 @@ fn parse_retro_note(body: &[u8]) -> Result<Option<String>, LcError> {
     Ok(note)
 }
 
-/// 譯文的四項本地檢查各自的結果（逐項，不像 `local_reason` 只回第一個）：複盤給管理者看「哪一項有問題」用。
+/// 譯文的四項本地檢查各自的結果（逐項，不像 `local_reason` 只回第一個）：複盤記錄用（`true`＝這一項有問題）。
 fn local_check_flags(source: &str, reply: &str) -> Value {
     json!({
         "untranslated": is_mostly_english(source) && is_mostly_english(reply),
@@ -718,12 +780,39 @@ async fn file_translate_report(app: &App, event_key_prefix: &str, id: &str, mana
     Ok(())
 }
 
+/// 複盤（譯文已完成）：在這則譯文的快取檔裡存一筆 [`Retro`]，**不送管理者**（複盤只給使用者自己看）。
+/// 同一版譯文（譯文文字相同）＋同一句備註不重複存，回 `sent: false, reason: duplicate`。
+fn record_retro(path: &Path, mut entry: CacheEntry, id: &str, bot_id: &str, project_id: &str, content: &str, note: Option<String>) -> Result<Value, LcError> {
+    let translation: String = entry.translation.chars().take(RETRO_TEXT_MAX_CHARS).collect();
+    if let Some(last) = entry.retros.iter().rev().find(|r| r.note == note && r.translation == translation) {
+        return Ok(json!({"sent": false, "reason": "duplicate", "sent_at": last.at}));
+    }
+    let at = crate::db::now();
+    entry.retros.push(Retro {
+        at: at.clone(),
+        message_id: id.to_string(),
+        bot_id: bot_id.to_string(),
+        project_id: project_id.to_string(),
+        note,
+        model: entry.model.clone(),
+        effort: entry.effort.clone(),
+        prompt_version: entry.prompt_version.clone(),
+        cost_usd: entry.cost_usd,
+        attempts: entry.attempt_log.clone(),
+        jev_prob: entry.jev_prob,
+        low_confidence: entry.low_confidence,
+        local_checks: local_check_flags(content, &entry.translation),
+        source: content.chars().take(RETRO_TEXT_MAX_CHARS).collect(),
+        translation,
+    });
+    save(path, &entry).map_err(|e| LcError::Upstream(format!("translate retro write failed: {e}")))?;
+    Ok(json!({"sent": true, "kind": "translate_retro", "sent_at": at}))
+}
+
 /// `POST /api/messages/{id}/translate-report`（User-only）。兩種用法：
 /// - 譯文被品質檢查擋下（rejected）：把原因摘要以 `kind: translate_report` 送給本專案的管理者 bot（不含整段原文，只附前 200 字）。
-/// - 譯文已完成（done）：「複盤」，`kind: translate_retro`，附原文／譯文前 1500 字、模型、成本、是否重翻過、Jev、四項本地檢查、
-///   使用者的一句話（body `{"note": "..."}`，選填，≤500 字），請管理者分析為什麼翻不好、該怎麼改規則。
-///
-/// 同一則訊息 10 分鐘內只送一次（送出時間記在快取的 `report_sent_at`，重啟也不會重送）。
+///   同一則訊息 10 分鐘內只送一次（送出時間記在快取的 `report_sent_at`，重啟也不會重送）。
+/// - 譯文已完成（done）：「複盤」，存一筆複盤記錄（[`record_retro`]），**不送管理者**；body `{"note": "..."}` 選填（≤500 字）。
 pub async fn post_translate_report(
     State(app): State<Arc<App>>,
     AxPath(id): AxPath<String>,
@@ -746,13 +835,14 @@ pub async fn post_translate_report(
     }
     let path = cache_path(&app.data_dir, &cache_key(&id, &content));
     let mut entry = load_entry(&path).unwrap_or_default();
-    let rejected = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty());
-    let done = !entry.translation.trim().is_empty();
-    if rejected.is_none() && !done {
-        return Err(LcError::conflict("not_rejected", json!({"message_id": id})));
+    if !entry.translation.trim().is_empty() {
+        // 複盤的備註格式錯就是 400（在任何去重之前驗）。
+        let note = parse_retro_note(&body)?;
+        return Ok(Json(record_retro(&path, entry, &id, &bot_id, &project_id, &content, note)?));
     }
-    // 複盤的備註在去重之前就要驗（格式錯就是 400，不該被「重複」吃掉）。
-    let note = if done { parse_retro_note(&body)? } else { None };
+    let Some(reason) = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty()) else {
+        return Err(LcError::conflict("not_rejected", json!({"message_id": id})));
+    };
     if let Some(sent) = entry.report_sent_at.as_deref() {
         let recent = chrono::DateTime::parse_from_rfc3339(sent).map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < REPORT_WINDOW_SECS).unwrap_or(false);
         if recent {
@@ -762,64 +852,91 @@ pub async fn post_translate_report(
     let Some(manager_id) = project_manager(&app, &project_id).await? else {
         return Err(LcError::conflict("no_manager", json!({"project_id": project_id})));
     };
-    let payload = match rejected {
-        Some(reason) => {
-            let detail = entry.reject_detail.clone();
-            let summary = match &detail {
-                Some(d) => format!(
-                    "翻譯品質檢查未通過：{}；原文拉丁 {}／CJK {}，譯文拉丁 {}／CJK {}，譯文與原文相同：{}，嘗試 {} 次，模型 {}",
-                    d.check, d.src_latin, d.src_cjk, d.reply_latin, d.reply_cjk, d.identical, d.attempts, d.models.join(" → ")
-                ),
-                None => format!("翻譯品質檢查未通過：{reason}"),
-            };
-            json!({
-                "kind": "translate_report",
-                "message_id": id,
-                "bot_id": bot_id,
-                "project_id": project_id,
-                "reason": reason,
-                "detail": detail,
-                "summary": summary,
-                "source_head": content.chars().take(200).collect::<String>(),
-            })
-        }
-        None => {
-            let translation = entry.translation.clone();
-            json!({
-                "kind": "translate_retro",
-                "message_id": id,
-                "bot_id": bot_id,
-                "project_id": project_id,
-                "source": content.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>(),
-                "translation": translation.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>(),
-                "model": entry.model,
-                "prompt_version": entry.prompt_version,
-                "cost_usd": entry.cost_usd,
-                "attempts": entry.attempts,
-                "retried": entry.attempts.map(|n| n > 1),
-                "jev_prob": entry.jev_prob,
-                "low_confidence": entry.low_confidence,
-                "local_checks": local_check_flags(&content, &translation),
-                "user_note": note,
-                "summary": format!(
-                    "翻譯複盤（使用者要求）：模型 {}，嘗試 {} 次，Jev {}{}",
-                    entry.model,
-                    entry.attempts.map_or("未知".to_string(), |n| n.to_string()),
-                    entry.jev_prob.map_or("無".to_string(), |p| format!("{p:.2}")),
-                    note.as_deref().map(|n| format!("；使用者說：{n}")).unwrap_or_default(),
-                ),
-                "ask": "分析這次翻不好的原因，並提出規則或提示詞修正",
-            })
-        }
+    let detail = entry.reject_detail.clone();
+    let summary = match &detail {
+        Some(d) => format!(
+            "翻譯品質檢查未通過：{}；原文拉丁 {}／CJK {}，譯文拉丁 {}／CJK {}，譯文與原文相同：{}，嘗試 {} 次，模型 {}",
+            d.check, d.src_latin, d.src_cjk, d.reply_latin, d.reply_cjk, d.identical, d.attempts, d.models.join(" → ")
+        ),
+        None => format!("翻譯品質檢查未通過：{reason}"),
     };
-    let prefix = if payload["kind"] == "translate_retro" { "translate-retro" } else { "translate-report" };
-    file_translate_report(&app, prefix, &id, &manager_id, &payload).await?;
+    let payload = json!({
+        "kind": "translate_report",
+        "message_id": id,
+        "bot_id": bot_id,
+        "project_id": project_id,
+        "reason": reason,
+        "detail": detail,
+        "summary": summary,
+        "source_head": content.chars().take(200).collect::<String>(),
+    });
+    file_translate_report(&app, "translate-report", &id, &manager_id, &payload).await?;
     let sent_at = crate::db::now();
     entry.report_sent_at = Some(sent_at.clone());
     if let Err(e) = save(&path, &entry) {
         tracing::warn!("message translate report marker write failed: {e}");
     }
     Ok(Json(json!({"sent": true, "manager_bot_id": manager_id, "sent_at": sent_at, "kind": payload["kind"]})))
+}
+
+/// 掃描翻譯快取目錄，收集所有複盤記錄（跳過 `pq-` 的待答問卷快取與讀不懂的檔）。目錄不存在就是空。
+fn collect_retros(dir: &Path) -> Vec<Retro> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in read.flatten() {
+        let name = f.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".json") || name.starts_with(PQ_CACHE_PREFIX) {
+            continue;
+        }
+        if let Some(e) = load_entry(&f.path()) {
+            out.extend(e.retros);
+        }
+    }
+    out
+}
+
+#[derive(Deserialize, Default)]
+pub struct RetroListQuery {
+    /// 只列這個專案的複盤。
+    project_id: Option<String>,
+    /// 筆數（預設 50，上限 200）。
+    limit: Option<usize>,
+    /// 分頁游標：只列 `at` 早於這個時間（RFC3339）的。上一頁回傳的 `next_before` 原樣帶回。
+    before: Option<String>,
+}
+
+/// `GET /api/translate-retros`（User-only）：複盤記錄，新到舊。回 `{"retros": [...], "next_before": "<at>"|null}`。
+pub async fn list_translate_retros(Extension(principal): Extension<crate::api::RequestPrincipal>, axum::extract::Query(q): axum::extract::Query<RetroListQuery>, State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    if principal != crate::api::RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let dir = app.data_dir.join(CACHE_DIR);
+    let mut all = tokio::task::spawn_blocking(move || collect_retros(&dir)).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    all.retain(|r| q.project_id.as_deref().is_none_or(|p| r.project_id == p) && q.before.as_deref().is_none_or(|b| crate::db::cmp_ts(&r.at, b).is_lt()));
+    all.sort_by(|a, b| b.at.cmp(&a.at));
+    let has_more = all.len() > limit;
+    all.truncate(limit);
+    let next_before = if has_more { all.last().map(|r| r.at.clone()) } else { None };
+    Ok(Json(json!({"retros": all, "next_before": next_before})))
+}
+
+/// `GET /api/messages/{id}/translate-retros`（User-only）：這則訊息的複盤記錄，舊到新（沒有就空陣列）。
+pub async fn get_message_translate_retros(State(app): State<Arc<App>>, AxPath(id): AxPath<String>, Extension(principal): Extension<crate::api::RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    if principal != crate::api::RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
+    let row: Option<(String,)> = sqlx::query_as("SELECT content FROM messages WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let (content,) = row.ok_or_else(|| LcError::NotFound("message".into()))?;
+    let entry = load_entry(&cache_path(&app.data_dir, &cache_key(&id, &content))).unwrap_or_default();
+    Ok(Json(json!({"message_id": id, "retros": entry.retros})))
 }
 
 /// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`；
@@ -2352,9 +2469,9 @@ mod retry_model_tests {
         assert!(matches!(not_rejected, Err(LcError::Conflict(_))), "沒有被擋的譯文不能回報");
     }
 
-    /// 複盤：已完成的譯文也能送（User-only）；payload 欄位齊全；10 分鐘內同一則只送一次。
+    /// 複盤：已完成的譯文按了就存一筆複盤記錄（不送管理者）；payload 欄位齊全；同一版同一句備註不重複存。
     #[tokio::test]
-    async fn retro_on_a_finished_translation_carries_the_fields_and_is_sent_once() {
+    async fn retro_on_a_finished_translation_is_stored_not_sent_to_manager() {
         let e = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&e.app, &e.project_id, "retro-bot").await;
         sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
@@ -2367,12 +2484,16 @@ mod retry_model_tests {
         let path = cache_path(&e.app.data_dir, &cache_key(&msg, &content));
         let done = CacheEntry {
             translation: "這是譯文".into(),
-            model: "claude-sonnet-5-5".into(),
+            model: "gpt-6-luna".into(),
             prompt_version: PROMPT_VERSION.into(),
             cost_usd: Some(0.02),
             jev_prob: Some(0.61),
             low_confidence: true,
             attempts: Some(2),
+            attempt_log: vec![
+                AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.005) },
+                AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.61), cost_usd: Some(0.015) },
+            ],
             ..Default::default()
         };
         save(&path, &done).unwrap();
@@ -2380,24 +2501,132 @@ mod retry_model_tests {
         let body = axum::body::Bytes::from(r#"{"note":"  專有名詞沒保留  "}"#);
         let first = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), body.clone()).await.unwrap().0;
         assert_eq!((first["sent"].clone(), first["kind"].clone()), (json!(true), json!("translate_retro")));
-        let raw: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='bot_request' AND bot_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
-        let p: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(p["kind"], json!("translate_retro"));
-        assert_eq!(p["message_id"], json!(msg));
-        assert_eq!(p["source"], json!(content.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>()));
-        assert_eq!(p["translation"], json!("這是譯文"));
-        assert_eq!((p["model"].clone(), p["prompt_version"].clone(), p["cost_usd"].clone()), (json!("claude-sonnet-5-5"), json!(PROMPT_VERSION), json!(0.02)));
-        assert_eq!((p["attempts"].clone(), p["retried"].clone(), p["jev_prob"].clone()), (json!(2), json!(true), json!(0.61)));
-        assert_eq!(p["user_note"], json!("專有名詞沒保留"), "備註 trim 後存");
-        for k in ["untranslated", "partially_untranslated", "markdown_structure", "japanese_output"] {
-            assert!(p["local_checks"][k].is_boolean(), "local_checks.{k} 要是 bool");
-        }
-        assert!(p["ask"].as_str().is_some_and(|s| !s.is_empty()));
+        let inbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE bot_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(inbox, 0, "複盤不送管理者的收件匣");
+
+        let stored = load_entry(&path).unwrap().retros;
+        assert_eq!(stored.len(), 1);
+        let r = &stored[0];
+        assert_eq!((r.message_id.as_str(), r.bot_id.as_str(), r.project_id.as_str()), (msg.as_str(), bot.id.as_str(), e.project_id.as_str()));
+        assert_eq!(r.note.as_deref(), Some("專有名詞沒保留"), "備註 trim 後存");
+        assert_eq!((r.model.as_str(), r.effort.as_deref(), r.prompt_version.as_str()), ("gpt-6-luna", None, PROMPT_VERSION));
+        assert_eq!((r.cost_usd, r.jev_prob, r.low_confidence), (Some(0.02), Some(0.61), true));
+        assert_eq!(r.attempts, done.attempt_log, "每次嘗試的模型與結果都留著");
+        assert_eq!(r.source, content.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>());
+        assert_eq!(r.translation, "這是譯文");
+        assert!(r.local_checks["untranslated"].is_boolean() && r.local_checks["japanese_output"].is_boolean());
 
         let again = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), body).await.unwrap().0;
-        assert_eq!((again["sent"].clone(), again["reason"].clone()), (json!(false), json!("duplicate")), "10 分鐘內只送一次");
+        assert_eq!((again["sent"].clone(), again["reason"].clone()), (json!(false), json!("duplicate")), "同一版譯文同一句備註不重複存");
+        let other = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), axum::body::Bytes::new()).await.unwrap().0;
+        assert_eq!(other["sent"], json!(true), "備註不同就再存一筆");
+        assert_eq!(load_entry(&path).unwrap().retros.len(), 2);
 
         let bot_caller = post_translate_report(State(e.app.clone()), AxPath(msg), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone())), axum::body::Bytes::new()).await;
+        assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
+    }
+
+    /// 重新翻譯寫回譯文時，既有的複盤記錄不會被洗掉（save 沿用檔案裡的 retros）。
+    #[test]
+    fn save_keeps_existing_retros_when_entry_has_none() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("retro-save-{}", crate::db::ulid())));
+        let path = dir.join("k.json");
+        let retro = Retro {
+            at: crate::db::now(),
+            message_id: "m".into(),
+            bot_id: "b".into(),
+            project_id: "p".into(),
+            note: None,
+            model: "claude-haiku-5-5".into(),
+            effort: None,
+            prompt_version: PROMPT_VERSION.into(),
+            cost_usd: None,
+            attempts: vec![],
+            jev_prob: None,
+            low_confidence: false,
+            local_checks: json!({}),
+            source: "s".into(),
+            translation: "t".into(),
+        };
+        save(&path, &CacheEntry { translation: "舊譯文".into(), retros: vec![retro.clone()], ..Default::default() }).unwrap();
+        save(&path, &CacheEntry { translation: "新譯文".into(), ..Default::default() }).unwrap();
+        let got = load_entry(&path).unwrap();
+        assert_eq!(got.translation, "新譯文");
+        assert_eq!(got.retros, vec![retro]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 複盤列表：User-only、依 project_id 篩、新到舊、分頁游標 `before` 與 `next_before`。
+    #[tokio::test]
+    async fn retro_list_filters_orders_and_pages() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "retro-list-bot").await;
+        let dir = e.app.data_dir.join(CACHE_DIR);
+        let mk = |at: &str, project: &str| Retro {
+            at: at.into(),
+            message_id: format!("m-{at}"),
+            bot_id: bot.id.clone(),
+            project_id: project.into(),
+            note: None,
+            model: "claude-haiku-5-5".into(),
+            effort: None,
+            prompt_version: PROMPT_VERSION.into(),
+            cost_usd: None,
+            attempts: vec![],
+            jev_prob: None,
+            low_confidence: false,
+            local_checks: json!({}),
+            source: String::new(),
+            translation: "譯".into(),
+        };
+        save(&dir.join(format!("{}.json", crate::db::ulid())), &CacheEntry { translation: "a".into(), retros: vec![mk("2026-11-21T01:00:00.000Z", &e.project_id), mk("2026-11-21T03:00:00.000Z", "other")], ..Default::default() }).unwrap();
+        save(&dir.join(format!("{}.json", crate::db::ulid())), &CacheEntry { translation: "b".into(), retros: vec![mk("2026-11-21T02:00:00.000Z", &e.project_id)], ..Default::default() }).unwrap();
+        std::fs::write(dir.join(format!("{PQ_CACHE_PREFIX}junk.json")), b"{}").unwrap();
+
+        let q = |project: Option<&str>, limit: Option<usize>, before: Option<&str>| RetroListQuery {
+            project_id: project.map(str::to_string),
+            limit,
+            before: before.map(str::to_string),
+        };
+        let user = || Extension(crate::api::RequestPrincipal::User);
+        let all = list_translate_retros(user(), axum::extract::Query(q(None, None, None)), State(e.app.clone())).await.unwrap().0;
+        let ats: Vec<&str> = all["retros"].as_array().unwrap().iter().map(|r| r["at"].as_str().unwrap()).collect();
+        assert_eq!(ats, ["2026-11-21T03:00:00.000Z", "2026-11-21T02:00:00.000Z", "2026-11-21T01:00:00.000Z"], "新到舊");
+
+        let mine = list_translate_retros(user(), axum::extract::Query(q(Some(&e.project_id), Some(1), None)), State(e.app.clone())).await.unwrap().0;
+        assert_eq!(mine["retros"].as_array().unwrap().len(), 1);
+        assert_eq!(mine["retros"][0]["at"], json!("2026-11-21T02:00:00.000Z"), "只列本專案");
+        let cursor = mine["next_before"].as_str().unwrap().to_string();
+        let rest = list_translate_retros(user(), axum::extract::Query(q(Some(&e.project_id), Some(1), Some(&cursor))), State(e.app.clone())).await.unwrap().0;
+        assert_eq!(rest["retros"][0]["at"], json!("2026-11-21T01:00:00.000Z"));
+        assert_eq!(rest["next_before"], json!(null), "最後一頁沒有游標");
+
+        let bot_caller = list_translate_retros(Extension(crate::api::RequestPrincipal::Bot(bot.id.clone())), axum::extract::Query(q(None, None, None)), State(e.app.clone())).await;
+        assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
+    }
+
+    /// 單則訊息的複盤記錄：沒有就空陣列；有就回傳。
+    #[tokio::test]
+    async fn message_retros_endpoint_returns_that_messages_records() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "retro-msg-bot").await;
+        let conv = crate::db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&bot.id).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let content = SRC.repeat(3);
+        let msg = crate::db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'hook',?)")
+            .bind(&msg).bind(&conv).bind(&content).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let user = || Extension(crate::api::RequestPrincipal::User);
+        let none = get_message_translate_retros(State(e.app.clone()), AxPath(msg.clone()), user()).await.unwrap().0;
+        assert_eq!(none["retros"], json!([]));
+
+        save(&cache_path(&e.app.data_dir, &cache_key(&msg, &content)), &CacheEntry { translation: "譯".into(), model: "claude-haiku-5-5".into(), ..Default::default() }).unwrap();
+        post_translate_report(State(e.app.clone()), AxPath(msg.clone()), user(), axum::body::Bytes::new()).await.unwrap();
+        let got = get_message_translate_retros(State(e.app.clone()), AxPath(msg.clone()), user()).await.unwrap().0;
+        assert_eq!(got["retros"].as_array().unwrap().len(), 1);
+        assert_eq!(got["retros"][0]["message_id"], json!(msg));
+
+        let bot_caller = get_message_translate_retros(State(e.app.clone()), AxPath(msg), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await;
         assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
     }
 

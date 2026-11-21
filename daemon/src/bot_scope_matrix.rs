@@ -615,6 +615,8 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/messages/{id}/translate", Expect::Forbidden, None),
         rule("POST", "/api/pending-questions/translate", Expect::Forbidden, None),
         rule("POST", "/api/messages/{id}/translate-report", Expect::Forbidden, None),
+        rule("GET", "/api/messages/{id}/translate-retros", Expect::Forbidden, None),
+        rule("GET", "/api/translate-retros", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/messages", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/messages", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/messages", Expect::Forbidden, None),

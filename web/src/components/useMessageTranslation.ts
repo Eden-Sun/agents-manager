@@ -58,7 +58,7 @@ export function useMessageTranslation(
   const [spin, setSpin] = useState<'forward' | 'backward' | null>(null)
   const [swapSeq, setSwapSeq] = useState(0)
   const [redoing, setRedoing] = useState(false)
-  // 複盤：這次開的時間（daemon 回的 sent_at；重複時也是那次送出的時間）。
+  // 複盤：這次記錄的時間（daemon 回的 sent_at；重複時是那筆既有紀錄的時間）。
   const [retroSentAt, setRetroSentAt] = useState<string | null>(null)
 
   // 狀態在 store（以 msg.id 為鍵）：remount 不會掉回原文。
@@ -234,11 +234,12 @@ export function useMessageTranslation(
         )
       },
       retroSentAt,
+      retroMessageId: msg.id,
       onRetro: (note: string) => {
         reportTranslation(msg.id, note).then(
           (r) => {
             if (r.sentAt) setRetroSentAt(r.sentAt)
-            useStore.getState().notify('info', r.sent ? t('已開複盤給管理者') : t('10 分鐘內已開過複盤，不重複送出'))
+            useStore.getState().notify('info', r.sent ? t('已記錄複盤') : t('這句備註已記錄過，不重複存'))
           },
           (e: unknown) => useStore.getState().notify('error', t('複盤失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
         )
