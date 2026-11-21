@@ -371,4 +371,16 @@ mod tests {
         let q = quota(w(99.0, LATER), w(40.0, MUCH_LATER), w(10.0, MUCH_LATER));
         assert!(matches!(decide(&sup("sonnet", "", None, None), Some(&q), "idle", now()), Decision::WaitQuota { .. }));
     }
+
+    #[test]
+    fn argon_weekly_quota_field_does_not_interfere_with_supervisor_decisions() {
+        let mut q = healthy();
+        q.argon_weekly = Some(Box::new(Window {
+            observed_at: None,
+            used_pct: 99.0,
+            resets_at: Some(MUCH_LATER.into()),
+        }));
+        // argon 是 agy 專屬週額度，不影響 supervisor 對 fable 的決策
+        assert_eq!(decide(&sup("fable", "", None, None), Some(&q), "idle", now()), Decision::Keep);
+    }
 }
