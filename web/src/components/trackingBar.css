@@ -1,0 +1,104 @@
+/* 對話窗上方的「追蹤中」列：單行、不吃高度；不擋輸入列（它在訊息清單上方，不是固定層）。 */
+.track-bar {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 4px 12px 0;
+  font-size: 12px;
+  z-index: 2;
+}
+
+.track-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+}
+
+.track-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--line, #d0d7de);
+  background: var(--surface, #fff);
+  color: inherit;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.track-collapse,
+.track-pill {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #6e7781);
+  font: inherit;
+  min-height: 28px;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+.track-bar-collapsed {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.track-pill {
+  border: 1px solid var(--line, #d0d7de);
+  border-radius: 999px;
+  color: inherit;
+}
+
+.track-jump {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.track-jump:disabled {
+  cursor: default;
+}
+
+.track-hint {
+  margin-top: 4px;
+  color: var(--danger, #cf222e);
+  font-size: 12px;
+}
+
+.track-panel .ledger-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+/* 桌機：下拉，貼在列的下方；手機沿用底部 sheet（messageLedgerBar.css 的 media query）。 */
+@media (min-width: 601px) {
+  .track-panel {
+    position: absolute;
+    top: 100%;
+    left: 12px;
+    right: 12px;
+    margin-top: 4px;
+    max-width: 560px;
+    max-height: 60vh;
+    overflow: auto;
+    z-index: 50;
+  }
+}
+
+/* 手機：窄寬度下列要單行，只留摘要與收合鈕。 */
+@media (max-width: 600px) {
+  .track-bar {
+    padding: 2px 8px 0;
+  }
+}

@@ -1,5 +1,6 @@
 import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
 import { MessageLedgerBar } from './MessageLedgerBar'
+import { TrackingBar } from './TrackingBar'
 import { isApiKind } from './kindMeta'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
@@ -732,20 +733,22 @@ function MessageList({ botId }: { botId: string }) {
   const askVisible = useMsgVisible(tail.ref, lastAsk?.id ?? null, list.length)
 
   // 用 rect 差：`offsetTop` 會差一個 wrap 的 padding；`scrollIntoView` 會連帶捲外層容器。
-  const jumpTo = (id: string) => {
+  const jumpTo = (id: string): boolean => {
     const box = tail.ref.current
     const el = box?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`)
-    if (!box || !(el instanceof HTMLElement)) return
+    if (!box || !(el instanceof HTMLElement)) return false
     const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
     const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
     box.scrollTo({ top: Math.max(0, top - 72), behavior: still ? 'auto' : 'smooth' })
     // 先關再開：class 一直掛著的話 CSS 動畫不會重播。
     setFlashId(null)
     requestAnimationFrame(() => setFlashId(id))
+    return true
   }
 
   return (
     <div className="msg-list-wrap">
+    <TrackingBar botId={botId} onJump={jumpTo} />
     <div className="msg-list" ref={tail.ref} onScroll={tail.onScroll}>
       <LoadEarlier id={botId} onLoad={loadEarlier} />
       {failed && !loaded && list.length > 0 ? (

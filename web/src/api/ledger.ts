@@ -12,8 +12,11 @@ function itemsOf(raw: unknown): LedgerItem[] {
 }
 
 /** 專案帳本（可限定某一則訊息）。 */
-export async function fetchProjectLedger(projectId: string, opts: { sourceMessageId?: string } = {}): Promise<LedgerItem[]> {
-  const q = opts.sourceMessageId ? `?source_message_id=${encodeURIComponent(opts.sourceMessageId)}` : ''
+export async function fetchProjectLedger(projectId: string, opts: { sourceMessageId?: string; status?: 'open' } = {}): Promise<LedgerItem[]> {
+  const params = new URLSearchParams()
+  if (opts.sourceMessageId) params.set('source_message_id', opts.sourceMessageId)
+  if (opts.status) params.set('status', opts.status)
+  const q = params.toString() ? `?${params.toString()}` : ''
   return itemsOf(await rawTransport.request('GET', `/projects/${encodeURIComponent(projectId)}/ledger${q}`))
 }
 
