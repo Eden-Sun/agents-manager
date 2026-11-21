@@ -1978,7 +1978,15 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
                 "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
                 "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
                 "AGM_CODEX_BIN": str(fake_codex),
+                "CODEX_HOME": str(root / "codex-home"),
             }
+            # 父 session 的 rollout：ephemeral fork 的 turn.completed 含父歷史累計，consult 要扣掉這段。
+            day = root / "codex-home" / "sessions" / "2026" / "11" / "21"
+            day.mkdir(parents=True)
+            (day / "rollout-2026-11-21T00-00-00-lead-chk-1.jsonl").write_text(
+                json.dumps({"payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 100000, "cached_input_tokens": 90000, "output_tokens": 50}}}}) + "\n",
+                encoding="utf-8",
+            )
             with patch.dict(os.environ, env):
                 out = self.ok("consult", "這張票怎麼拆？", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(out["line"], "lead")
@@ -1986,7 +1994,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
                 self.assertEqual(out["model"], "gpt-6.2-sol")
                 self.assertEqual(out["effort"], "xhigh")
                 self.assertEqual(out["answer"], "請拆成小步重構，先驗單元測試。")
-                self.assertEqual(out["usage"], {"input": 145000, "cached": 144000, "output": 320})
+                self.assertEqual(out["usage"], {"input": 45000, "cached": 54000, "output": 270})
+                self.assertEqual(out["usage_scope"], "this_call")
                 argv = json.loads(argv_log.read_text(encoding="utf-8"))
                 self.assertEqual(argv, ["exec", "-s", "read-only", "-m", "gpt-6.2-sol", "-c", "model_reasoning_effort=xhigh", "--json", "--ephemeral", "fork", "lead-chk-1", "-"])
                 prompt_text = stdin_log.read_text(encoding="utf-8")

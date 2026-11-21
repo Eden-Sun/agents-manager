@@ -2460,6 +2460,31 @@ def _parse_codex_exec_json(stdout: str) -> tuple[str | None, dict[str, int], str
     return answer, usage, err_msg
 
 
+def _codex_session_totals(session_id: str) -> dict[str, int] | None:
+    """父 session 的 rollout 最後一筆 `total_token_usage`（#1943 實測：ephemeral fork 的 `turn.completed` 用量是連父歷史一起累計的）。"""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    files = sorted((home / "sessions").glob(f"**/rollout-*{session_id}.jsonl"))
+    if not files:
+        return None
+    last = None
+    try:
+        with open(files[-1], encoding="utf-8") as f:
+            for raw in f:
+                if '"token_count"' not in raw:
+                    continue
+                try:
+                    info = (json.loads(raw).get("payload") or {}).get("info") or {}
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(info.get("total_token_usage"), dict):
+                    last = info["total_token_usage"]
+    except OSError:
+        return None
+    if last is None:
+        return None
+    return {"input": int(last.get("input_tokens") or 0), "cached": int(last.get("cached_input_tokens") or 0), "output": int(last.get("output_tokens") or 0)}
+
+
 def cmd_consult(client: Client, cfg: dict, args) -> object:
     """唯讀諮詢 thinker 血統（#1943 C）：ephemeral fork 問一題，不登記、不 claim、不前移。"""
     q_arg = getattr(args, "question", None)
@@ -2543,6 +2568,10 @@ def cmd_consult(client: Client, cfg: dict, args) -> object:
         msg = ev_err or "codex exec 未回傳 agent_message"
         raise AgmError("consult_no_answer", msg, 1, line=line, checkpoint_session=checkpoint_session)
 
+    # ephemeral fork 的 turn.completed 是「父歷史＋這一題」的累計；扣掉父 session 的累計才是這次問答的用量。
+    parent = _codex_session_totals(checkpoint_session)
+    if parent is not None:
+        usage = {k: max(0, usage[k] - parent[k]) for k in usage}
     return {
         "line": line,
         "checkpoint_session": checkpoint_session,
@@ -2550,6 +2579,7 @@ def cmd_consult(client: Client, cfg: dict, args) -> object:
         "effort": effort,
         "answer": answer,
         "usage": usage,
+        "usage_scope": "this_call" if parent is not None else "cumulative_with_parent",
     }
 
 
