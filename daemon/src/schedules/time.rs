@@ -502,24 +502,37 @@ mod tests {
 
     #[test]
     fn range_draw_stays_inside_the_window_and_covers_it_uniformly() {
-        // 台北 08:55–09:00 = UTC 00:55–01:00。抽 2000 次：全落在區間內、整秒、頭尾都抽得到、分布大致均勻。
         let spec = range_spec("08:55", "09:00");
         let after = utc(2026, 11, 9, 0, 0);
         let lo = utc(2026, 11, 9, 0, 55).timestamp();
         let hi = utc(2026, 11, 9, 1, 0).timestamp();
+
+        let (at_lo, _) = next_slot_after_with(&spec, "Asia/Taipei", after, &mut |lo, _| lo).unwrap().unwrap();
+        let (at_hi, _) = next_slot_after_with(&spec, "Asia/Taipei", after, &mut |_, hi| hi).unwrap().unwrap();
+        assert_eq!(at_lo.timestamp(), lo);
+        assert_eq!(at_hi.timestamp(), hi);
+
         let mut buckets = [0u32; 5];
-        let (mut saw_lo, mut saw_hi) = (false, false);
         for _ in 0..2000 {
             let (when, _) = next_slot_after(&spec, "Asia/Taipei", after).unwrap().unwrap();
             let t = when.timestamp();
             assert!((lo..=hi).contains(&t), "{when}");
             assert_eq!(when.timestamp_subsec_nanos(), 0);
-            saw_lo |= t == lo;
-            saw_hi |= t == hi;
             buckets[(((t - lo) * 5 / 301) as usize).min(4)] += 1;
         }
-        assert!(saw_lo && saw_hi, "兩端都該抽得到");
         assert!(buckets.iter().all(|&c| c > 250), "五等分都該約 400 次：{buckets:?}");
+
+        let short_spec = range_spec("08:59:59", "09:00:00");
+        let short_lo = utc(2026, 11, 9, 0, 59).timestamp() + 59;
+        let short_hi = utc(2026, 11, 9, 1, 0).timestamp();
+        let (mut saw_lo, mut saw_hi) = (false, false);
+        for _ in 0..100 {
+            let (when, _) = next_slot_after(&short_spec, "Asia/Taipei", after).unwrap().unwrap();
+            let t = when.timestamp();
+            saw_lo |= t == short_lo;
+            saw_hi |= t == short_hi;
+        }
+        assert!(saw_lo && saw_hi);
     }
 
     #[test]
