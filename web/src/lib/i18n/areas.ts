@@ -121,7 +121,6 @@ export const AREA_FILES: Readonly<Record<AreaId, readonly string[]>> = {
     'api/claudeApi.ts',
     'api/judge.ts',
     'api/supervisor.ts',
-    'components/AgyLogout.tsx',
     'components/ApiModelConflictDialog.tsx',
     'components/AuthLoginAction.tsx',
     'components/ClaudeApiPanel.tsx',

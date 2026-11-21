@@ -27,7 +27,6 @@ import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
-import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { agyQuotaErrorText } from '../lib/agyQuotaError'
 import { useAgyMissing } from './agyInstallState'
 import { creditRows, creditUrgent, fmtCreditDate, fmtCreditIn, nearestCreditLeft } from '../lib/resetCredits'
@@ -878,7 +877,7 @@ function PopWindow({
   )
 }
 
-function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string; onAgyLogout: () => void }) {
+function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const t = useT()
   const q = useEntryQuota(entry)
   const now = useMinuteNow()
@@ -890,7 +889,6 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   const loggedOut = useLoggedOut(entry, host)
   // 這台沒裝 agy：額度永遠不會有讀數，不要一直寫「背景查詢中」，給安裝鈕。
   const agyMissing = useAgyMissing(host) && entry.kind === 'agy' && !entry.identity
-  const agyLogoutBusy = useStore((s) => s.busy[`agy-logout:${host || 'local'}`] === true)
   // 已登入、但這一輪額度探測失敗：把原因講出來（登入與否是另一件事，不再混成「背景查詢中」）。
   const agyQuotaError = useStore((s) => (entry.kind === 'agy' && !entry.identity ? toolsOfHost(s, host).agy?.quota_error ?? null : null))
   const five = remaining(q?.five_hour)
@@ -988,12 +986,6 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
         </>
       ) : null}
       {entry.kind === 'codex' ? <CodexResetHint now={now} detail /> : null}
-      {/* agy 沒有 CLI 登出，daemon 直接清憑證；已經未登入就沒東西可清。 */}
-      {entry.kind === 'agy' && !entry.identity && !loggedOut ? (
-        <div className="quota-pop-actions">
-          <AgyLogoutButton host={host} onOpen={onAgyLogout} busy={agyLogoutBusy} />
-        </div>
-      ) : null}
     </div>
   )
 }
@@ -1020,8 +1012,6 @@ export function QuotaStrip({
   // 2026-09-11 分頁被推出畫面）。格子或主機一換就從頭量。
   const [fitState, setFitState] = useState<{ key: string; s: QuotaFitState }>({ key: '', s: QUOTA_FIT_START })
   const [open, setOpen] = useState(false)
-  /** agy 登出的確認框；開關放在這層（見 `AgyLogout.tsx`）。 */
-  const [agyLogoutOpen, setAgyLogoutOpen] = useState(false)
   // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
   // 餘額是全域的（不分主機）：沒有額度格的主機也要看得到（使用者 2026-11-19）。
@@ -1183,7 +1173,7 @@ export function QuotaStrip({
         <div className="quota-pop" role="dialog" aria-label={t('所有{title}', { title: quotaTitle(host, t) })} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host, t)}</div>
           {(only ? popEntries.filter((e) => entryReactKey(e) === only) : popEntries).map((entry) => (
-            <PopRow key={entryReactKey(entry)} entry={entry} host={host} onAgyLogout={() => setAgyLogoutOpen(true)} />
+            <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
           ))}
           {only && popEntries.length > 1 ? (
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
@@ -1201,7 +1191,6 @@ export function QuotaStrip({
           {freshest ? <p className="quota-pop-foot">{t('更新於 {time} · ↻ 是距離重置還有多久', { time: fmtTime(freshest) })}</p> : null}
         </div>
       ) : null}
-      <AgyLogoutDialog host={host} open={agyLogoutOpen} onClose={() => setAgyLogoutOpen(false)} />
     </div>
   )
 }

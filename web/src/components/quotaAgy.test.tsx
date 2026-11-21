@@ -86,7 +86,6 @@ test('agy 顯示 Gemini 的 5h／7d，忽略舊 Claude/GPT key，popover 保留�
   assert.deepEqual([...detail.querySelectorAll('.quota-pop-line:not(.limit-hit) > .quota-win')].map((n) => n.textContent?.replace(/[⏱📅]/gu, '').trim()), ['5h', '7d'])
   assert.doesNotMatch(text, /Claude\+GPT|C\+G/)
   assert.match(text, /CLI 回報額度上限/)
-  assert.ok([...detail.querySelectorAll('button')].some((b) => b.textContent?.includes('登出 agy')), '登出按鈕保留')
 })
 
 async function mountAgyWith(extra: Record<string, unknown>) {

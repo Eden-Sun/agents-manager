@@ -93,7 +93,6 @@ it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認
   await until(() => useStore.getState().quota.agy?.five_hour != null && useStore.getState().quota.agy?.seven_day != null, 'Gemini 的 5h／7d 額度回來')
   await act(async () => {})
   assert.doesNotMatch(agyRow().textContent ?? '', /未登入/)
-  assert.ok(btn(agyRow(), '登出 agy'), '已登入又有登出鈕')
   assert.equal(btn(agyRow(), '開 shell 登入'), undefined)
 })
 
