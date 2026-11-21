@@ -51,6 +51,8 @@ pub(crate) struct CreateIn {
     pub next_step: Option<String>,
     pub wait_for: Option<String>,
     pub due_at: Option<String>,
+    /// 綁定的 relay 請求（副管理者代班對帳用，選填）。
+    pub relay_request_id: Option<String>,
     pub items: Option<Vec<ChildIn>>,
 }
 
@@ -121,6 +123,7 @@ fn split_input(c: ChildIn) -> Result<LedgerSplitInput, LcError> {
         next_step: opt(c.next_step).unwrap_or_default(),
         wait_for: opt(c.wait_for),
         due_at: opt(c.due_at),
+        relay_request_id: None,
     })
 }
 
@@ -274,6 +277,7 @@ pub(crate) async fn create(
                 next_step: opt(body.next_step).unwrap_or_default(),
                 wait_for: opt(body.wait_for),
                 due_at: opt(body.due_at),
+                relay_request_id: opt(body.relay_request_id),
             };
             vec![ledger::commit_item(&app.db, &project_id, &actor, source.as_deref(), &input).await.map_err(ledger_err)?]
         }

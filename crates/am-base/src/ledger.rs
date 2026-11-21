@@ -69,6 +69,8 @@ pub struct LedgerSplitInput {
     pub next_step: String,
     pub wait_for: Option<String>,
     pub due_at: Option<String>,
+    /// 這筆事項綁的 relay 請求（副管理者代班改派對帳用）；`None` 不綁。
+    pub relay_request_id: Option<String>,
 }
 
 /// 對既有事項的一次異動（每種對應一個 `ledger_events.action`）。
@@ -281,6 +283,9 @@ pub async fn split_message(
     if items.is_empty() {
         return Err(LedgerError::Invalid("拆項至少要一項".into()));
     }
+    for item in items {
+        check_owner(pool, project_id, item.owner_bot_id.as_deref()).await?;
+    }
     let mut tx = db::begin_write(pool).await?;
     let base: LedgerItem = sqlx::query_as("SELECT * FROM ledger_items WHERE project_id = ? AND source_message_id = ? AND ordinal = 0")
         .bind(project_id)
@@ -360,6 +365,7 @@ pub async fn split_message(
 pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, source_message_id: Option<&str>, input: &LedgerSplitInput) -> Result<LedgerItem, LedgerError> {
     let status = input.status.clone().unwrap_or_else(|| "following".into());
     check_status(&status)?;
+    check_owner(pool, project_id, input.owner_bot_id.as_deref()).await?;
     let mut tx = db::begin_write(pool).await?;
     // 追加項從 1 起跳：`ordinal = 0` 留給 `ingest_user_message` 的原始收件項。
     let ordinal: i64 = match source_message_id {
@@ -386,8 +392,8 @@ pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, sourc
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
-        "INSERT INTO ledger_items (id, project_id, code_no, source_message_id, ordinal, title, status, accountable_role, owner_bot_id, deliverable, next_step, wait_for, due_at, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        "INSERT INTO ledger_items (id, project_id, code_no, source_message_id, ordinal, title, status, accountable_role, owner_bot_id, deliverable, next_step, wait_for, due_at, relay_request_id, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
     )
     .bind(&id)
     .bind(project_id)
@@ -402,6 +408,7 @@ pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, sourc
     .bind(&input.next_step)
     .bind(&input.wait_for)
     .bind(&input.due_at)
+    .bind(&input.relay_request_id)
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
@@ -410,6 +417,16 @@ pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, sourc
     let item = fetch(&mut tx, &id).await?;
     tx.commit().await?;
     Ok(item)
+}
+
+/// 承辦人若指定，必須是專案管理入口（管理者或副管理者）：執行者不承辦帳本項目（2026-11-21 裁示）。
+async fn check_owner(pool: &SqlitePool, project_id: &str, owner: Option<&str>) -> Result<(), LedgerError> {
+    if let Some(o) = owner {
+        if !is_project_management_actor(pool, project_id, o).await? {
+            return Err(LedgerError::Invalid("承辦人必須是這個專案的管理入口（管理者或副管理者），執行者不承辦帳本項目".into()));
+        }
+    }
+    Ok(())
 }
 
 fn check_status(status: &str) -> Result<(), LedgerError> {
@@ -664,19 +681,50 @@ pub async fn query_actionable_for_actor(pool: &SqlitePool, project_id: &str, bot
 }
 
 
-/// 副管理者代班改派（`relay_deputy::redirect`）：把綁在這筆 relay 請求上、仍由管理者承辦的未結事項改給副管理者（`version + 1`）。
-/// 副手已經是承辦人、或已結案的不動；主已經在處理的事項也不動（改派只針對主還沒接手的）。
-pub async fn redirect_to_deputy(pool: &SqlitePool, project_id: &str, manager_id: &str, deputy_id: &str, relay_request_id: &str) -> Result<Vec<LedgerItem>, LedgerError> {
+/// 副管理者代班改派（`relay_deputy::redirect`）：綁在這則 relay 請求上的未結事項改給副管理者（`version + 1`）。
+/// 還沒有任何綁定事項時，以 `relay_request_id` 冪等建一筆（標題取 `prompt_text`，直接由副手承辦）。
+/// 只動主管理者名下或沒有承辦人的未結事項；副手已經接的、已結案的不動。
+pub async fn redirect_to_deputy(pool: &SqlitePool, project_id: &str, manager_id: &str, deputy_id: &str, relay_request_id: &str, prompt_text: &str) -> Result<Vec<LedgerItem>, LedgerError> {
     let mut tx = db::begin_write(pool).await?;
+    let linked: Option<i64> = sqlx::query_scalar("SELECT 1 FROM ledger_items WHERE project_id = ? AND relay_request_id = ? LIMIT 1")
+        .bind(project_id)
+        .bind(relay_request_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let now = db::now();
+    if linked.is_none() {
+        let code = next_code(&mut tx, project_id).await?;
+        let id = db::ulid();
+        let t = title_from(prompt_text);
+        let title = if t.is_empty() { "代班請求".to_string() } else { t };
+        sqlx::query(
+            "INSERT INTO ledger_items (id, project_id, code_no, source_message_id, ordinal, title, status, accountable_role, owner_bot_id, deliverable, next_step, wait_for, due_at, relay_request_id, version, created_at, updated_at)
+             VALUES (?, ?, ?, NULL, 0, ?, 'untriaged', ?, ?, '', '', NULL, NULL, ?, 1, ?, ?)",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(code)
+        .bind(&title)
+        .bind(ACCOUNTABLE_ROLE)
+        .bind(deputy_id)
+        .bind(relay_request_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        record(&mut tx, Event { item_id: &id, project_id, actor: "daemon", action: "redirect", from_owner: Some(manager_id), to_owner: Some(deputy_id), from_status: None, to_status: Some("untriaged"), version: 1 }).await?;
+        let item = fetch(&mut tx, &id).await?;
+        tx.commit().await?;
+        return Ok(vec![item]);
+    }
     let rows: Vec<LedgerItem> = sqlx::query_as(&format!(
-        "SELECT * FROM ledger_items WHERE project_id = ? AND relay_request_id = ? AND owner_bot_id = ? AND status IN {OPEN_SQL} ORDER BY ordinal, id"
+        "SELECT * FROM ledger_items WHERE project_id = ? AND relay_request_id = ? AND (owner_bot_id = ? OR owner_bot_id IS NULL) AND status IN {OPEN_SQL} ORDER BY ordinal, id"
     ))
     .bind(project_id)
     .bind(relay_request_id)
     .bind(manager_id)
     .fetch_all(&mut *tx)
     .await?;
-    let now = db::now();
     let mut out = Vec::with_capacity(rows.len());
     for cur in rows {
         let version = cur.version + 1;
@@ -691,7 +739,7 @@ pub async fn redirect_to_deputy(pool: &SqlitePool, project_id: &str, manager_id:
         if res.rows_affected() != 1 {
             continue;
         }
-        record(&mut tx, Event { item_id: &cur.id, project_id, actor: "daemon", action: "redirect", from_owner: Some(manager_id), to_owner: Some(deputy_id), from_status: Some(&cur.status), to_status: Some(&cur.status), version }).await?;
+        record(&mut tx, Event { item_id: &cur.id, project_id, actor: "daemon", action: "redirect", from_owner: cur.owner_bot_id.as_deref(), to_owner: Some(deputy_id), from_status: Some(&cur.status), to_status: Some(&cur.status), version }).await?;
         out.push(fetch(&mut tx, &cur.id).await?);
     }
     tx.commit().await?;
@@ -918,6 +966,7 @@ mod tests {
         let pool = pool().await;
         let item = ingest_user_message(&pool, "p1", "b1", "m1", None, "x").await.unwrap().unwrap();
         assert_eq!(item.version, 1);
+        sqlx::query("UPDATE projects SET deputy_bot_id = 'b2' WHERE id = 'p1'").execute(&pool).await.unwrap();
         let won = patch_item_cas(&pool, "p1", &item.id, 1, "bot:b1", LedgerPatchOp::Claim { owner_bot_id: "b1".into() }).await.unwrap();
         assert_eq!(won.version, 2);
         let lost = patch_item_cas(&pool, "p1", &item.id, 1, "bot:b2", LedgerPatchOp::Claim { owner_bot_id: "b2".into() }).await;
@@ -929,6 +978,7 @@ mod tests {
     #[tokio::test]
     async fn deleted_bot_reclaims_item_to_unassigned_queue() {
         let pool = pool().await;
+        sqlx::query("UPDATE projects SET deputy_bot_id = 'b2' WHERE id = 'p1'").execute(&pool).await.unwrap();
         let item = commit_item(&pool, "p1", "bot:b2", None, &LedgerSplitInput { title: "追蹤".into(), owner_bot_id: Some("b2".into()), ..Default::default() }).await.unwrap();
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b2'").bind(db::now()).execute(&pool).await.unwrap();
         let reclaimed = reclaim_orphaned_items(&pool).await.unwrap();
@@ -1053,7 +1103,7 @@ mod tests {
         let linked = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "連到請求".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
         sqlx::query("UPDATE ledger_items SET relay_request_id='rq1' WHERE id=?").bind(&linked.id).execute(&pool).await.unwrap();
         let other = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "別的".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
-        let moved = redirect_to_deputy(&pool, "p1", "b1", "b3", "rq1").await.unwrap();
+        let moved = redirect_to_deputy(&pool, "p1", "b1", "b3", "rq1", "x").await.unwrap();
         assert_eq!(moved.len(), 1);
         assert_eq!((moved[0].owner_bot_id.as_deref(), moved[0].version), (Some("b3"), linked.version + 1));
         let (owner,): (Option<String>,) = sqlx::query_as("SELECT owner_bot_id FROM ledger_items WHERE id=?").bind(&other.id).fetch_one(&pool).await.unwrap();
@@ -1106,6 +1156,35 @@ mod tests {
         unmark_reminded(&pool, &r).await.unwrap();
         assert_eq!(due_reminders(&pool, chrono::Utc::now()).await.unwrap().len(), 1, "送不出去還原後下一輪還會提醒");
         let _ = item;
+    }
+
+    #[tokio::test]
+    async fn creating_or_splitting_with_an_executor_owner_is_rejected() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let made = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "給執行者".into(), owner_bot_id: Some("b2".into()), ..Default::default() }).await;
+        assert!(matches!(made, Err(LedgerError::Invalid(_))), "{made:?}");
+        ingest_user_message(&pool, "p1", "b1", "m1", None, "A、B").await.unwrap();
+        let split = split_message(&pool, "p1", "user", "m1", &[input("A"), LedgerSplitInput { title: "B".into(), owner_bot_id: Some("b2".into()), ..Default::default() }]).await;
+        assert!(matches!(split, Err(LedgerError::Invalid(_))), "{split:?}");
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ledger_items WHERE project_id = 'p1'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "only the ingested message item; the rejected writes left nothing");
+        let ok = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "給副手".into(), owner_bot_id: Some("b3".into()), ..Default::default() }).await.unwrap();
+        assert_eq!(ok.owner_bot_id.as_deref(), Some("b3"), "副手可以");
+    }
+
+    #[tokio::test]
+    async fn redirect_creates_the_item_once_when_nothing_is_linked_yet() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let first = redirect_to_deputy(&pool, "p1", "b1", "b3", "rq9", "請看 CI 失敗的原因").await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].owner_bot_id.as_deref(), first[0].status.as_str(), first[0].title.as_str()), (Some("b3"), "untriaged", "請看 CI 失敗的原因"));
+        assert_eq!(first[0].relay_request_id.as_deref(), Some("rq9"));
+        let again = redirect_to_deputy(&pool, "p1", "b1", "b3", "rq9", "請看 CI 失敗的原因").await.unwrap();
+        assert!(again.is_empty(), "已經由副手承辦，再改派什麼都不動");
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ledger_items WHERE relay_request_id = 'rq9'").fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "冪等：不重複建項");
     }
 
 }

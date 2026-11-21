@@ -70,9 +70,11 @@ async fn target_for(app: &Arc<App>, r: &Reminder) -> Option<String> {
         return r.owner_bot_id.clone();
     }
     let top = ledger::top_manager(&app.db, &r.project_id).await.ok().flatten()?;
-    if r.owner_bot_id.as_deref() == Some(top.as_str()) {
+    // 副手自己名下的到期事項逾期升級：一律給頂層管理者，絕不退回給副手本人（否則主忙時會被副手吃掉、主永遠收不到）。
+    if r.owner_bot_id.is_some() {
         return Some(top);
     }
+    // 孤兒（無承辦人）：頂層忙、且代班副手真的在代班（acting）且在跑，才給代班副手；其他情況給頂層。
     if busy(app, &top).await {
         let deputy: Option<String> = sqlx::query_scalar("SELECT deputy_bot_id FROM projects WHERE id=? AND mode='expert' AND deleted_at IS NULL")
             .bind(&r.project_id)
@@ -82,7 +84,7 @@ async fn target_for(app: &Arc<App>, r: &Reminder) -> Option<String> {
             .flatten()
             .flatten();
         if let Some(d) = deputy {
-            if running(app, &d).await {
+            if crate::runners::relay_deputy::acting(app, &d).await && running(app, &d).await {
                 return Some(d);
             }
         }
@@ -195,5 +197,48 @@ mod tests {
             .bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
         sweep(app).await;
         assert_eq!(notices(app, &mgr).await.len(), 2, "處理完、版本變了才再提醒");
+    }
+    /// 副手名下的到期事項：剛到期只提醒副手；逾期超過 30 分鐘升級給頂層管理者（絕不退回副手本人）。
+    #[tokio::test]
+    async fn deputy_due_item_reminds_the_deputy_then_escalates_to_the_manager_after_thirty_minutes() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mgr = manager(&env).await;
+        let dep = crate::testing::claude_bot(app, &env.project_id, "lg-dep").await;
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&dep.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&dep.id).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let drun = crate::testing::fake_run(app, &dep.id).await;
+        let dconv = db::conversation_id(&app.db, &dep.id).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('t-dep-live',?,?,'web','in_flight','ok',?)").bind(&dconv).bind(&drun).bind(db::now()).execute(&app.db).await.unwrap();
+        let ago = |m: i64| (chrono::Utc::now() - chrono::Duration::minutes(m)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let item = am_base::ledger::commit_item(&app.db, &env.project_id, "user", None, &am_base::ledger::LedgerSplitInput { title: "副手的到期事".into(), status: Some("following".into()), owner_bot_id: Some(dep.id.clone()), due_at: Some(ago(5)), ..Default::default() }).await.unwrap();
+
+        sweep(app).await;
+        assert_eq!(notices(app, &dep.id).await.len(), 1, "剛到期：只提醒承辦的副手");
+        assert!(notices(app, &mgr).await.is_empty(), "還沒逾期 30 分鐘，不升級");
+
+        // 逾期 35 分鐘（版本推進，才算新的一次）。
+        sqlx::query("UPDATE ledger_items SET due_at=?, version=version+1 WHERE id=?").bind(ago(35)).bind(&item.id).execute(&app.db).await.unwrap();
+        sweep(app).await;
+        assert_eq!(notices(app, &mgr).await.len(), 1, "逾期超過 30 分鐘升級給頂層管理者");
+        assert_eq!(notices(app, &dep.id).await.len(), 1, "升級後副手不再收到第二則");
+    }
+
+    /// 副手自己名下的逾期事項：目標一定是頂層管理者，即使管理者忙、副手在代班也不退回副手本人。
+    #[tokio::test]
+    async fn an_escalated_item_never_bounces_back_to_the_deputy_who_owns_it() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let mgr = manager(&env).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=? AND state='running'").bind(&mgr).execute(&app.db).await.unwrap();
+        let dep = crate::testing::claude_bot(app, &env.project_id, "lg-dep2").await;
+        sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&dep.id).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&dep.id).bind(&env.project_id).execute(&app.db).await.unwrap();
+        crate::testing::fake_run(app, &dep.id).await;
+        let ago = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        am_base::ledger::commit_item(&app.db, &env.project_id, "user", None, &am_base::ledger::LedgerSplitInput { title: "副手逾期".into(), status: Some("following".into()), owner_bot_id: Some(dep.id.clone()), due_at: Some(ago), ..Default::default() }).await.unwrap();
+        let r = am_base::ledger::due_reminders(&app.db, chrono::Utc::now()).await.unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(target_for(app, &r[0]).await.as_deref(), Some(mgr.as_str()), "逾期升級：目標是頂層管理者，不是副手");
     }
 }

@@ -113,10 +113,10 @@ async fn redirect(app: &Arc<App>, manager_id: &str, deputy_id: &str, after_sec: 
     let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_requests WHERE to_bot_id=? AND redirected_from IS NOT NULL AND state IN ('pending','delivered'))")
         .bind(deputy_id).fetch_one(&app.db).await?;
     if busy { return Ok(()) }
-    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM relay_requests WHERE to_bot_id=? AND state='pending' AND to_turn_id IS NULL AND redirected_from IS NULL AND from_bot_id<>? AND julianday(created_at)<=julianday('now')-?/86400.0 ORDER BY created_at LIMIT ?")
+    let ids: Vec<(String, String)> = sqlx::query_as("SELECT id, prompt_text FROM relay_requests WHERE to_bot_id=? AND state='pending' AND to_turn_id IS NULL AND redirected_from IS NULL AND from_bot_id<>? AND julianday(created_at)<=julianday('now')-?/86400.0 ORDER BY created_at LIMIT ?")
         .bind(manager_id).bind(deputy_id).bind(i64::from(after_sec)).bind(REDIRECT_PER_SWEEP as i64).fetch_all(&app.db).await?;
     let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM bots WHERE id=?").bind(manager_id).fetch_optional(&app.db).await?;
-    for id in ids {
+    for (id, prompt_text) in ids {
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{id}"));
         let Ok(_guard) = lock.try_lock() else { continue };
         // CAS：這段時間若已經送出（有 turn）或被別人改掉，就不動；改派後 UNIQUE(from,to,client_request_id) 撞到也略過。
@@ -127,7 +127,7 @@ async fn redirect(app: &Arc<App>, manager_id: &str, deputy_id: &str, after_sec: 
             tracing::info!(request = %id, manager = %manager_id, deputy = %deputy_id, "relay request redirected to the deputy manager");
             // 綁在這則請求上、主還沒接手的帳本事項一起改承辦給副手（只改承辦，不動狀態）。
             if let Some(pid) = project_id.as_deref() {
-                if let Err(e) = am_base::ledger::redirect_to_deputy(&app.db, pid, manager_id, deputy_id, &id).await {
+                if let Err(e) = am_base::ledger::redirect_to_deputy(&app.db, pid, manager_id, deputy_id, &id, &prompt_text).await {
                     tracing::warn!(request = %id, error = ?e, "ledger items could not follow the redirect");
                 }
             }
@@ -458,4 +458,40 @@ mod tests {
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// 改派＋代班摘要端到端：改派時綁定事項建給副手；副手答完、另開一件、交回一件後，摘要三組都列出，且副手名下的承辦不被轉移。
+    #[tokio::test]
+    async fn redirect_and_digest_reconcile_ledger_across_all_three_groups() {
+        let f = fx().await;
+        let app = &f.env.app;
+        let pid = f.env.project_id.clone();
+        let id = request(&f, 600, "k-ledger").await;
+        status(&f, &f.manager, "working").await;
+        status(&f, &f.deputy, "idle").await;
+        sweep(app).await;
+        assert_eq!(target(&f, &id).await.0, f.deputy, "改派了");
+        let (l1, owner1): (String, Option<String>) = sqlx::query_as("SELECT id, owner_bot_id FROM ledger_items WHERE project_id=? AND relay_request_id=?").bind(&pid).bind(&id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(owner1.as_deref(), Some(f.deputy.as_str()), "綁定事項直接由副手承辦");
+        let dep_actor = format!("bot:{}", f.deputy);
+        let answered = am_base::ledger::patch_item_cas(&app.db, &pid, &l1, 1, &dep_actor, am_base::ledger::LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        // 副手另開一件仍在做（承辦仍是副手）、再交回一件待主接手（承辦 NULL）。
+        am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "副仍在做的事".into(), status: Some("following".into()), owner_bot_id: Some(f.deputy.clone()), ..Default::default() }).await.unwrap();
+        am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "要主接手的事".into(), status: Some("following".into()), ..Default::default() }).await.unwrap();
+        // 管理者閒下來，摘要排進它的佇列（同 digest 測試：先放一個進行中的回合）。
+        sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();
+        let conv = db::conversation_id(&app.db, &f.manager).await.unwrap();
+        let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&f.manager).fetch_one(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('t-ledger-live',?,?,'web','in_flight','ok',?)").bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
+        status(&f, &f.manager, "idle").await;
+        sweep(app).await;
+        let content: String = sqlx::query_scalar("SELECT m.content FROM turns t JOIN messages m ON m.turn_id=t.id WHERE t.conversation_id=? AND t.status='queued' AND m.content LIKE '%副管理者代你處理%'").bind(&conv).fetch_one(&app.db).await.unwrap();
+        let l1_no: i64 = sqlx::query_scalar("SELECT code_no FROM ledger_items WHERE id=?").bind(&l1).fetch_one(&app.db).await.unwrap();
+        assert!(content.contains("【副已完成且已回覆】") && content.contains(&format!("L{l1_no} ")), "{content}");
+        assert!(content.contains("【副仍在做（承辦仍為副手，主勿重做）】") && content.contains("副仍在做的事"), "{content}");
+        assert!(content.contains("【待主接手（請用 agm ledger claim L<no> --expect-version <v> 認領）】") && content.contains("要主接手的事"), "{content}");
+        assert!(content.contains("--expect-version"), "{content}");
+        let (owner_following,): (Option<String>,) = sqlx::query_as("SELECT owner_bot_id FROM ledger_items WHERE project_id=? AND title='副仍在做的事'").bind(&pid).fetch_one(&app.db).await.unwrap();
+        assert_eq!(owner_following.as_deref(), Some(f.deputy.as_str()), "摘要不轉移副手名下的承辦");
+        assert_eq!(answered.version, 2);
+    }
+
 }
