@@ -1520,10 +1520,18 @@
         pool.close().await;
         let again = open(&path).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots").fetch_one(&again).await.unwrap(), 2);
+        let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(&again).await.unwrap();
+        assert_eq!(checkpoint, (0, 0, 0), "restore requires a complete WAL checkpoint");
         again.close().await;
-
-        // 真 `.bak` 還原：兩個連線都已關閉、WAL 已收回，整檔覆蓋回去。
-        assert!(!dir.join("fixture.sqlite3-wal").exists(), "還原前不能有殘留的 WAL");
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = path.with_file_name(format!("fixture.sqlite3{suffix}"));
+            match std::fs::remove_file(&sidecar) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => panic!("cannot remove synthetic restore sidecar: {error}"),
+            }
+            assert!(!sidecar.exists(), "old sidecars cannot accompany the backup");
+        }
         std::fs::copy(&backup, &path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), original, "還原的必須是升版前的完整映像");
         std::fs::remove_file(&backup).unwrap();
