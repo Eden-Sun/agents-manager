@@ -300,6 +300,13 @@ pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Resu
         member.quota_blocked = quota.is_some_and(|q| {
             q.exhausted(crate::quota::Bucket::FiveHour, now) || q.exhausted(crate::quota::Bucket::SevenDay, now)
         });
+        // 畫面還是 idle、但剛被派了工作（turn 已建立、排隊或進行中，agent 還沒開始動）的成員不算閒置：
+        // 連續派好幾份到同一群集時，不然都會挑到同一顆，後面的排在它後面，閒著的成員接不到（排隊的 turn 也不會再被改派）。
+        if member.idle {
+            let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('queued','in_flight'))")
+                .bind(&member.id).fetch_one(&app.db).await?;
+            if busy { member.idle = false; }
+        }
     }
     Ok(members)
 }
@@ -578,6 +585,31 @@ mod tests {
         sqlx::query("UPDATE runs SET state='running', agent_status=?, runtime_role_policy=? WHERE id=?")
             .bind(status).bind(format!("{}:local:expert:{role}", env.project_id)).bind(run).execute(&env.app.db).await.unwrap();
         bot
+    }
+
+    /// 畫面 idle 但已有排隊／進行中 turn 的成員（剛被派工、agent 還沒動）不算閒置：連派第二份要交給另一顆閒著的成員。
+    #[tokio::test]
+    async fn a_member_with_a_queued_turn_is_not_picked_as_idle() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let manager = expert_member(&env, "mgr-q", "manager", "idle").await;
+        let a = expert_member(&env, "q-a", "executor", "idle").await;
+        let b = expert_member(&env, "q-b", "executor", "idle").await;
+        let first = crate::api::resolve_cluster_target(&env.app, &manager.id, "haiku").await.unwrap().0["to_bot_id"].as_str().unwrap().to_string();
+        let (taken, other) = if first == a.id { (&a, &b) } else { (&b, &a) };
+        let run = db::active_run(&env.app.db, &taken.id).await.unwrap().unwrap();
+        let conv = db::ulid();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES(?,?,?)").bind(&conv).bind(&taken.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        for status in ["queued", "in_flight"] {
+            sqlx::query("DELETE FROM turns WHERE conversation_id=?").bind(&conv).execute(&env.app.db).await.unwrap();
+            sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES(?,?,?,'web',?,'pending',?)")
+                .bind(db::ulid()).bind(&conv).bind(&run.id).bind(status).bind(db::now()).execute(&env.app.db).await.unwrap();
+            assert!(!member_idle(&env.app, &taken.id).await, "{status}: a member that was just handed work is not idle");
+            let next = crate::api::resolve_cluster_target(&env.app, &manager.id, "haiku").await.unwrap().0;
+            assert_eq!(next["to_bot_id"], other.id, "{status}: the next request goes to the other idle member");
+        }
+        sqlx::query("UPDATE turns SET status='completed' WHERE conversation_id=?").bind(&conv).execute(&env.app.db).await.unwrap();
+        assert!(member_idle(&env.app, &taken.id).await, "finished turns do not keep a member busy");
     }
 
     #[tokio::test]
