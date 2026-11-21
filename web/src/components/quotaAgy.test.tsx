@@ -101,16 +101,27 @@ async function mountAgyWith(extra: Record<string, unknown>) {
   await until(() => document.querySelector('.quota-hp.agy') !== null, '一格 agy')
 }
 
-test('agy 有 Gemini 4 Argon 週額度時晶片末端多一段 Argon 7d（剩餘）', { timeout: 30_000 }, async () => {
+test('agy 有 Gemini 4 Argon 週額度時晶片出現第三條血條（標籤 Ar，剩餘）', { timeout: 30_000 }, async () => {
   await mountAgyWith({ argon_weekly: quotaWindow(88, 100) })
-  const argon = document.querySelector<HTMLElement>('.quota-hp.agy .quota-argon')
-  assert.equal(argon?.textContent, 'Argon 7d 88%', '剩餘方向，照狀態列慣例')
-  assert.match(argon?.getAttribute('title') ?? '', /Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/)
+  const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+  const windows = [...cell.querySelectorAll('.quota-window')]
+  assert.equal(windows.length, 3, '有 5h、7d、Ar 三條血條')
+  const names = windows.map((w) => w.querySelector('.quota-window-name')?.textContent)
+  assert.deepEqual(names, ['5h', '7d', 'Ar'])
+  const arWindow = windows[2]
+  assert.equal(arWindow.querySelector('.quota-bar-pct')?.textContent, '88', '剩餘方向，照狀態列慣例')
+  assert.match(arWindow.getAttribute('title') ?? '', /Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/)
+  assert.match(arWindow.querySelector('.quota-window-name')?.getAttribute('title') ?? '', /Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/)
 })
 
-test('agy 沒有 Argon 組（ag1）時晶片不出現 Argon 段', { timeout: 30_000 }, async () => {
+test('agy 沒有 Argon 組（ag1）時晶片不出現 Argon 段（只有 5h／7d 兩列）', { timeout: 30_000 }, async () => {
   await mountAgyWith({})
-  assert.equal(document.querySelector('.quota-hp.agy .quota-argon'), null)
+  const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+  const windows = [...cell.querySelectorAll('.quota-window')]
+  assert.equal(windows.length, 2, '只有兩列血條')
+  const names = windows.map((w) => w.querySelector('.quota-window-name')?.textContent)
+  assert.deepEqual(names, ['5h', '7d'])
+  assert.equal(cell.querySelector('.quota-argon'), null)
 })
 
 test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提示', { timeout: 30_000 }, async () => {

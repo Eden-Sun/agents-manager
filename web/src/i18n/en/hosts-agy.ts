@@ -112,7 +112,7 @@ const dict: Dict = {
   '{host} 的額度': '{host} quota',
   '這個方案沒有 5 小時上限，只看週額度': 'This plan has no 5-hour limit, only weekly quota',
   'Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制': 'Gemini 4 Argon weekly quota, separate from Gemini quota; no 5-hour limit',
-  'Argon 7d {pct}%': 'Argon 7d {pct}%',
+  Ar: 'Ar',
   '不到 1 分鐘': 'less than 1 minute',
   '{n} 分鐘': { one: '{n} minute', other: '{n} minutes' },
   '{hours} 小時{minutes} 分鐘': '{hours}h {minutes}m',

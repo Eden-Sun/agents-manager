@@ -263,14 +263,15 @@ function RiskDot({ level }: { level: Level }) {
   return <span className={`quota-risk ${level}`} aria-hidden="true" />
 }
 
-/** `F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
-type WindowName = '5h' | '7d' | '週' | 'F' // i18n-ignore
+/** `F` 是 Max 方案的 Fable 週窗，只有 claude 有；`Ar` 是 agy 的 Gemini 4 Argon 獨立週窗。 */
+type WindowName = '5h' | '7d' | '週' | 'F' | 'Ar' // i18n-ignore
 
 const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
   '週': 7 * 86_400_000, // i18n-ignore
   F: 7 * 86_400_000,
+  Ar: 7 * 86_400_000,
 }
 
 /** 重置刻度位置＝剩餘時間 ÷ 窗口長度（剩 3h／5h → 60%）。 */
@@ -417,9 +418,11 @@ function moreUrgent(w: WindowBar, best: WindowBar): boolean {
   return (w.pct ?? 100) < (best.pct ?? 100)
 }
 
-/** 窗口名顯示字：grok 的「週」在英文介面寫 7d，其餘窗口名（5h／7d／F）本來就是英文。 */
+/** 窗口名顯示字：grok 的「週」在英文介面寫 7d，Ar 為 'Ar'，其餘窗口名（5h／7d／F）本來就是英文。 */
 function windowText(name: WindowName, t: ReturnType<typeof useT>): string {
-  return name === '週' ? t('週') : name // i18n-ignore
+  if (name === '週') return t('週') // i18n-ignore
+  if (name === 'Ar') return t('Ar')
+  return name
 }
 
 /** grok reports a weekly-only window and labels it 週; agy shows its week as 7d like claude. */
@@ -487,7 +490,7 @@ function Gauge({
     if (five !== null) cands.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
     if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
     windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
-  } else if (five === null && seven === null && fable === null) {
+  } else if (five === null && seven === null && fable === null && argon === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
   } else {
     windows = []
@@ -500,6 +503,9 @@ function Gauge({
     if (fable !== null) {
       windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
+    if (argon !== null) {
+      windows.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
+    }
   }
   const hit = Boolean(q?.limit_hit)
   const winRow = (w: WindowBar, countdown: boolean) => {
@@ -508,9 +514,16 @@ function Gauge({
     const left = msUntil(w.resetsAt, now)
     // 那一列已經在底下那一行寫倒數了，窗口名就別再換成剩幾分——同一個時間寫兩次。
     const soon = countdown ? null : soonLabel(w.name, w.resetsAt, now)
+    const rowTitle = w.name === 'Ar'
+      ? left !== null
+        ? `${t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制')} (${t('{name} 還有 {back} 重置', { name: w.name, back: fmtLeft(left) })})`
+        : t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制')
+      : soon
+        ? t('{name} 還有 {soon} 重置', { name: w.name, soon })
+        : undefined
     return (
-      <span key={w.name} className="quota-window">
-        <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={soon ? t('{name} 還有 {soon} 重置', { name: w.name, soon }) : undefined}>
+      <span key={w.name} className="quota-window" title={w.name === 'Ar' ? rowTitle : undefined}>
+        <span className={`quota-window-name${soon ? ' soon' : ''}${w.staleAt ? ' carried' : ''}`} title={rowTitle}>
           {soon ?? windowText(w.name, t)}
           {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
         </span>
@@ -637,11 +650,6 @@ function Gauge({
           </span>
         ) : null}
         {windows.map((w) => winRow(w, countdownRows.some((r) => r.name === w.name)))}
-        {argon !== null ? (
-          <span className="quota-argon" title={t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制')}>
-            {t('Argon 7d {pct}%', { pct: fmtPct(argon, hit) })}
-          </span>
-        ) : null}
         {resetLine ? (
           <span className={`quota-reset-line ${resetLineLevel}`} title={resetLine.title}>
             {resetLine.text}
