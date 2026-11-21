@@ -269,6 +269,103 @@ pub fn write_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 /// Create (or find) the AGM project and bot in config.toml, then project it into SQLite.
 /// Never starts anything — `POST /api/supervisor/start` is a separate, explicit step.
+/// 找或建一個角色 bot（巡檢與協調者共用）。專案依 `project_ids` 的順序找（`None` 略過），再退到同路徑的本機專案，
+/// 都沒有才建新的；bot 只認記下的 id，沒有才找帶 `mark` 記號的那一顆（issue #181），同名卻沒記號的是別人建的，回 `name-taken`。
+/// 回傳 `(project_id, bot_id)`；名字不動（使用者可以在側欄改名）。`args` 收各角色自己的 args 規則。
+pub(super) struct RoleBotPick<'a> {
+    pub project_ids: &'a [Option<String>],
+    pub known_bot: Option<&'a str>,
+    pub mark: &'a str,
+    pub fresh_project: &'a str,
+    pub fresh_bot: &'a str,
+    pub path: &'a str,
+    pub bot_name: &'a str,
+    pub identity: &'a str,
+    pub model: &'a str,
+    pub effort: &'a str,
+    pub persona: &'a str,
+}
+
+pub(super) fn ensure_role_bot(
+    cfg: &mut crate::config::ConfigFile,
+    pick: RoleBotPick<'_>,
+    args: impl FnOnce(&mut BotCfg),
+) -> anyhow::Result<(String, String)> {
+    let by_id = pick
+        .project_ids
+        .iter()
+        .flatten()
+        .find_map(|id| cfg.projects.iter().position(|p| p.id.as_deref() == Some(id.as_str())));
+    let pidx = by_id.or_else(|| cfg.projects.iter().position(|p| p.path == pick.path && p.host == crate::config::LOCAL_HOST));
+    let pidx = match pidx {
+        Some(i) => i,
+        None => {
+            cfg.projects.push(ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
+                handed_off_to: None,
+                id: Some(pick.fresh_project.to_string()),
+                path: pick.path.to_string(),
+                label: pick.bot_name.to_string(),
+                host: crate::config::LOCAL_HOST.to_string(),
+                bots: vec![],
+            });
+            cfg.projects.len() - 1
+        }
+    };
+    if cfg.projects[pidx].id.is_none() {
+        cfg.projects[pidx].id = Some(pick.fresh_project.to_string());
+    }
+    let project_id = cfg.projects[pidx].id.clone().expect("set above");
+    let proj = &mut cfg.projects[pidx];
+    let bidx = match pick.known_bot {
+        Some(id) => proj.bots.iter().position(|b| b.id.as_deref() == Some(id)),
+        // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 bot 只可能是上一次設定寫進 config、
+        // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
+        // 只認 setup 自己留了記號的那一顆，不看名字：同名但沒記號的是別人建的，而這顆被使用者改了名之後重跑也要找得回來。
+        None => proj.bots.iter().position(|b| b.create_request_id.as_deref() == Some(pick.mark)),
+    };
+    let bidx = match bidx {
+        Some(i) => i,
+        None => {
+            if proj.bots.iter().any(|b| b.name == pick.bot_name) {
+                anyhow::bail!("name-taken");
+            }
+            proj.bots.push(BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
+                id: Some(pick.fresh_bot.to_string()),
+                name: pick.bot_name.to_string(),
+                kind: "claude".into(),
+                model: None,
+                effort: None,
+                fast: false,
+                persona: None,
+                args: vec![],
+                autostart: false,
+                inject_hooks: true,
+                auto_approve: true,
+                identity: None,
+                env: Default::default(),
+                herdr_session: None,
+                create_request_id: Some(pick.mark.into()),
+                create_fingerprint: None,
+                ..Default::default()
+            });
+            proj.bots.len() - 1
+        }
+    };
+    let bot = &mut proj.bots[bidx];
+    if bot.id.is_none() {
+        bot.id = Some(pick.fresh_bot.to_string());
+    }
+    bot.kind = "claude".into();
+    bot.model = Some(pick.model.to_string());
+    bot.effort = Some(pick.effort.to_string());
+    bot.identity = Some(pick.identity.to_string());
+    bot.persona = Some(pick.persona.to_string());
+    args(bot);
+    bot.autostart = false;
+    bot.inject_hooks = true;
+    Ok((project_id, bot.id.clone().expect("set above")))
+}
+
 pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ListenPort + crate::supervisor::ports::HostProbes + ConfigProjection)) -> Result<(String, String, Deployed), LcError> {
     let sup = store::get_or_init(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let dir = agm_dir(app);
@@ -309,89 +406,28 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
     let p2 = path.clone();
 
     let (project_id, bot_id) = app.update_and_project(move |cfg| {
-            // Project: persisted id first, then the directory, then a new one.
-            let pidx = cfg
-                .projects
-                .iter()
-                .position(|p| known_project.is_some() && p.id == known_project)
-                .or_else(|| cfg.projects.iter().position(|p| p.path == p2 && p.host == crate::config::LOCAL_HOST));
-            let pidx = match pidx {
-                Some(i) => i,
-                None => {
-                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
-                        handed_off_to: None,
-                        id: Some(fresh_project.clone()),
-                        path: p2.clone(),
-                        label: BOT_NAME.to_string(),
-                        host: crate::config::LOCAL_HOST.to_string(),
-                        bots: vec![],
-                    });
-                    cfg.projects.len() - 1
+        ensure_role_bot(
+            cfg,
+            RoleBotPick {
+                project_ids: &[known_project],
+                known_bot: known_bot.as_deref(),
+                mark: super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL,
+                fresh_project: &fresh_project,
+                fresh_bot: &fresh_bot,
+                path: &p2,
+                bot_name: BOT_NAME,
+                identity: &identity,
+                model: &model,
+                effort: &effort,
+                persona: &persona_for_cfg,
+            },
+            |bot| {
+                // 手機 Remote Control 已廢（#1477）：舊安裝留下的 `--remote-control <name>` 在這裡拿掉，使用者自己加的其他 args 不動。
+                if let Some(args) = without_remote_control(&bot.args) {
+                    bot.args = args;
                 }
-            };
-            if cfg.projects[pidx].id.is_none() {
-                cfg.projects[pidx].id = Some(fresh_project.clone());
-            }
-            let project_id = cfg.projects[pidx].id.clone().expect("set above");
-
-            // Bot: only the persisted id identifies the manager. Without one, the name must be
-            // free — an existing `AGM` we have never managed belongs to someone else.
-            let proj = &mut cfg.projects[pidx];
-            let bidx = match known_bot.as_ref() {
-                Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
-                // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM` 只可能是上一次設定寫進 config、
-                // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
-                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`），不看名字：同名但沒記號的是別人建的，
-                // 而這顆被使用者改了名之後重跑也要找得回來。
-                None => proj.bots.iter().position(|b| b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL)),
-            };
-            let bidx = match bidx {
-                Some(i) => i,
-                None => {
-                    if proj.bots.iter().any(|b| b.name == BOT_NAME) {
-                        anyhow::bail!("name-taken");
-                    }
-                    proj.bots.push(BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
-                        id: Some(fresh_bot.clone()),
-                        name: BOT_NAME.to_string(),
-                        kind: "claude".into(),
-                        model: None,
-                        effort: None,
-                        fast: false,
-                        persona: None,
-                        args: vec![],
-                        autostart: false,
-                        inject_hooks: true,
-                        auto_approve: true,
-                        identity: None,
-                        env: Default::default(),
-                        herdr_session: None,
-                        create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_PATROL.into()),
-                        create_fingerprint: None,
-                        ..Default::default()
-                    });
-                    proj.bots.len() - 1
-                }
-            };
-            let bot = &mut proj.bots[bidx];
-            if bot.id.is_none() {
-                bot.id = Some(fresh_bot.clone());
-            }
-            // The name is left alone on purpose: a rename in the sidebar is the user's, and the
-            // supervisor is identified by its id, not by what it is called.
-            bot.kind = "claude".into();
-            bot.model = Some(model.clone());
-            bot.effort = Some(effort.clone());
-            bot.identity = Some(identity.clone());
-            bot.persona = Some(persona_for_cfg.clone());
-            // 手機 Remote Control 已廢（#1477）：舊安裝留下的 `--remote-control <name>` 在這裡拿掉，使用者自己加的其他 args 不動。
-            if let Some(args) = without_remote_control(&bot.args) {
-                bot.args = args;
-            }
-            // Verified by hand before it is allowed to come back by itself.
-            bot.autostart = false;
-            bot.inject_hooks = true;
-        Ok((project_id, bot.id.clone().expect("set above")))
+            },
+        )
     })
     .await
     .map_err(|e| {

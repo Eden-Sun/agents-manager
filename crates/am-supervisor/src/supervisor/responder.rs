@@ -10,7 +10,6 @@
 //!   `approval_requested` 開超過 5 分鐘而協調者不可用（含撞限）時改派給巡檢，見 `failover.rs`
 //!   與 SPEC §18.15。其餘種類（bot 的申請）照舊留在協調者佇列等它回來。
 
-use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
 use crate::supervisor::ports::ConfigProjection;
 use sqlx::SqlitePool;
@@ -19,6 +18,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use super::roles::{self, Role};
+use super::setup::{ensure_role_bot, RoleBotPick};
 use super::{store, watchdog};
 
 pub const PERSONA_DOC: &str = include_str!("../../../../docs/goals/agm-responder-persona.md");
@@ -198,82 +198,27 @@ pub async fn ensure_env(
     let fresh_bot = crate::db::ulid();
     let (m2, e2, i2, p2, persona2) = (model.clone(), effort.clone(), identity.clone(), path.clone(), persona.clone());
     let (project_id, bot_id) = app.update_and_project(move |cfg| {
-            // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
-            let pidx = cfg
-                .projects
-                .iter()
-                .position(|p| manager_project.is_some() && p.id == manager_project)
-                .or_else(|| cfg.projects.iter().position(|p| known_project.is_some() && p.id == known_project))
-                .or_else(|| cfg.projects.iter().position(|p| p.path == p2 && p.host == crate::config::LOCAL_HOST));
-            let pidx = match pidx {
-                Some(i) => i,
-                None => {
-                    cfg.projects.push(ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
-                        handed_off_to: None,
-                        id: Some(fresh_project.clone()),
-                        path: p2.clone(),
-                        label: BOT_NAME.to_string(),
-                        host: crate::config::LOCAL_HOST.to_string(),
-                        bots: vec![],
-                    });
-                    cfg.projects.len() - 1
-                }
-            };
-            if cfg.projects[pidx].id.is_none() {
-                cfg.projects[pidx].id = Some(fresh_project.clone());
-            }
-            let project_id = cfg.projects[pidx].id.clone().expect("set above");
-            let proj = &mut cfg.projects[pidx];
-            let bidx = match known_bot.as_ref() {
-                Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
-                // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM-responder` 只可能是上一次設定寫進 config、
-                // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
-                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`），不看名字：同名但沒記號的是別人建的，
-                // 而這顆被使用者改了名之後重跑也要找得回來。
-                None => proj.bots.iter().position(|b| b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER)),
-            };
-            let bidx = match bidx {
-                Some(i) => i,
-                None => {
-                    if proj.bots.iter().any(|b| b.name == BOT_NAME) {
-                        anyhow::bail!("name-taken");
-                    }
-                    proj.bots.push(BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
-                        id: Some(fresh_bot.clone()),
-                        name: BOT_NAME.to_string(),
-                        kind: "claude".into(),
-                        model: None,
-                        effort: None,
-                        fast: false,
-                        persona: None,
-                        args: vec![],
-                        autostart: false,
-                        inject_hooks: true,
-                        auto_approve: true,
-                        identity: None,
-                        env: Default::default(),
-                        herdr_session: None,
-                        create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER.into()),
-                        create_fingerprint: None,
-                        ..Default::default()
-                    });
-                    proj.bots.len() - 1
-                }
-            };
-            let bot = &mut proj.bots[bidx];
-            if bot.id.is_none() {
-                bot.id = Some(fresh_bot.clone());
-            }
-            bot.kind = "claude".into();
-            bot.model = Some(m2.clone());
-            bot.effort = Some(e2.clone());
-            bot.identity = Some(i2.clone());
-            bot.persona = Some(persona2.clone());
-            // 使用者入口只有巡檢一個：協調者不帶任何額外 args。
-            bot.args = vec![];
-            bot.autostart = false;
-            bot.inject_hooks = true;
-        Ok((project_id, bot.id.clone().expect("set above")))
+        // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
+        ensure_role_bot(
+            cfg,
+            RoleBotPick {
+                project_ids: &[manager_project, known_project],
+                known_bot: known_bot.as_deref(),
+                mark: super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER,
+                fresh_project: &fresh_project,
+                fresh_bot: &fresh_bot,
+                path: &p2,
+                bot_name: BOT_NAME,
+                identity: &i2,
+                model: &m2,
+                effort: &e2,
+                persona: &persona2,
+            },
+            |bot| {
+                // 使用者入口只有巡檢一個：協調者不帶任何額外 args。
+                bot.args = vec![];
+            },
+        )
     })
     .await
     .map_err(|e| {
