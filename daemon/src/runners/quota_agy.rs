@@ -217,9 +217,25 @@ pub(crate) async fn refresh_agy_fenced(app: &Arc<App>, host: &str) -> (Option<cr
     (Some(fence), result)
 }
 
+/// 工具快取沒有這台時跑的偵測，回 `Superseded`＝另一個並行的偵測先發布了（它的 ticket 比較新，這一輪的結果被丟掉）。
+/// 這時快取若已經有這台，就沿用它繼續探測，不把「別人搶先」當成這一輪失敗（2026-11-21 ag0 一直 stale 的根因）。
+pub(crate) fn may_reuse_tools_after(outcome: &Result<crate::tools::HostTools, anyhow::Error>, cache_has_host: bool) -> bool {
+    matches!(outcome, Err(e) if e.downcast_ref::<crate::tools::Superseded>().is_some()) && cache_has_host
+}
+
 async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<bool, RefreshFail> {
-    if !app.tools.lock().await.contains_key(host) {
-        crate::tools::detect(app, host).await?;
+    let cached = app.tools.lock().await.contains_key(host);
+    // 每分鐘一次的輪詢，這行只留 debug；真的要跑偵測才用 info。
+    tracing::debug!(host, cached, "agy quota refresh started");
+    if !cached {
+        tracing::info!(host, "agy quota refresh: no cached tools for this host; running detection");
+        let outcome = crate::tools::detect(app, host).await;
+        let cache_has_host = app.tools.lock().await.contains_key(host);
+        if may_reuse_tools_after(&outcome, cache_has_host) {
+            tracing::info!(host, "agy quota refresh: a concurrent detection published first; reusing its cached tools");
+        } else {
+            outcome?;
+        }
     }
     if !app.hosts.is_current(fence).await {
         return Err(RefreshFail { error: anyhow!("host `{host}` changed before its agy quota probe"), superseded: true });
@@ -557,6 +573,21 @@ pub fn spawn_agy_identity_poller(app: Arc<App>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod agy_detect_race_tests {
+    use super::*;
+
+    /// 並行的偵測先發布（快取已有這台）：偵測回 `Superseded` 時沿用快取，不算失敗。
+    #[test]
+    fn a_superseded_detection_is_reused_when_a_concurrent_one_already_published() {
+        let superseded: Result<crate::tools::HostTools, anyhow::Error> = Err(anyhow::Error::new(crate::tools::Superseded { host: "local".into() }));
+        assert!(may_reuse_tools_after(&superseded, true), "快取有這台：沿用");
+        assert!(!may_reuse_tools_after(&superseded, false), "快取仍沒有這台：照舊失敗");
+        let other: Result<crate::tools::HostTools, anyhow::Error> = Err(anyhow!("ssh timeout"));
+        assert!(!may_reuse_tools_after(&other, true), "其他錯誤不沿用");
+    }
 }
 
 #[cfg(test)]
