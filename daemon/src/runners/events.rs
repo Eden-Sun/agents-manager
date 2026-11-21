@@ -164,9 +164,7 @@ pub async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate
                 let host = host.to_string();
                 tokio::spawn(Box::pin(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Err(e) = app.reconcile_host(&host).await {
-                        tracing::debug!(host = %host, error = ?e, "reconcile after agent detection failed");
-                    }
+                    crate::runners::reconcile::request_immediate_pass(&app, &host);
                 }));
             }
         }

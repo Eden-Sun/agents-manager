@@ -255,3 +255,31 @@ async fn retrying_a_cluster_request_after_it_moved_returns_the_original() {
     assert_eq!(turns, 0);
     assert!(matches!(send("different").await, Err(LcError::Conflict(_))), "same key with different text stays a conflict");
 }
+
+#[tokio::test]
+async fn a_just_started_child_resolves_on_the_first_prompt() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+    let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+    let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+    let parent = crate::testing::claude_bot(&app, &env.project_id, "relay-parent").await;
+    let parent_agent = "am-relay-parent";
+    let kid_agent = format!("{parent_agent}-lastq");
+    sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,workspace_id,pane_id,agent_name,herdr_session,started_at) VALUES(?,?,'running','idle',?,?,?,'test',?)")
+        .bind(db::ulid()).bind(&parent.id).bind(&ws.workspace_id).bind(&root.pane_id).bind(parent_agent).bind(db::now())
+        .execute(&app.db).await.unwrap();
+    *env.herdr.agents.lock().unwrap() = vec![
+        json!({"name": parent_agent, "agent": "claude", "agent_status": "idle",
+               "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+        json!({"name": kid_agent, "agent": "claude", "agent_status": "idle",
+               "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"}),
+    ];
+    crate::spawn_hints::claim(&app, &parent.id, &kid_pane.pane_id).await.unwrap();
+    let adopted = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent.id).fetch_one(&app.db).await.unwrap() };
+    assert_eq!(adopted().await, 0, "not yet adopted: the periodic reconcile has not run");
+    let Json(result) = resolve_relay_target(State(app.clone()), Extension(RequestPrincipal::Bot(parent.id.clone())), Query(RelayResolveQuery { target: kid_agent.clone() })).await.unwrap();
+    assert_eq!(adopted().await, 1);
+    let kid = db::bot(&app.db, result["to_bot_id"].as_str().unwrap()).await.unwrap().unwrap();
+    assert_eq!(kid.parent_bot_id.as_deref(), Some(parent.id.as_str()));
+}

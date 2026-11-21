@@ -25,6 +25,64 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
     Ok(())
 }
 
+const IMMEDIATE_PASS_GAP: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(5) };
+
+#[derive(Default)]
+struct ImmediateState {
+    last: HashMap<String, std::time::Instant>,
+    queued: HashSet<String>,
+}
+
+fn immediate_state() -> &'static std::sync::Mutex<ImmediateState> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<ImmediateState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+fn immediate_key(app: &Arc<App>, host: &str) -> String {
+    format!("{}\u{0}{host}", app.data_dir.display())
+}
+
+pub async fn reconcile_host_throttled(app: &Arc<App>, host: &str) -> Result<bool> {
+    let lock = crate::reconcile::host_pass_lock(app.as_ref(), host).await;
+    let _pass = lock.lock().await;
+    let key = immediate_key(app, host);
+    {
+        let mut st = immediate_state().lock().unwrap_or_else(|e| e.into_inner());
+        if st.last.get(&key).is_some_and(|t| t.elapsed() < IMMEDIATE_PASS_GAP) {
+            drop(st);
+            request_immediate_pass(app, host);
+            return Ok(false);
+        }
+        st.last.insert(key, std::time::Instant::now());
+    }
+    let lost = crate::reconcile::reconcile_host_locked(app, host).await?;
+    crate::runners::autostart_revive::spawn_revive(app, host, lost);
+    Ok(true)
+}
+
+pub fn request_immediate_pass(app: &Arc<App>, host: &str) {
+    let key = immediate_key(app, host);
+    let wait = {
+        let mut st = immediate_state().lock().unwrap_or_else(|e| e.into_inner());
+        if !st.queued.insert(key.clone()) {
+            return;
+        }
+        st.last.get(&key).map_or(std::time::Duration::ZERO, |t| IMMEDIATE_PASS_GAP.saturating_sub(t.elapsed()))
+    };
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
+        immediate_state().lock().unwrap_or_else(|e| e.into_inner()).queued.remove(&key);
+        if let Err(e) = reconcile_host_throttled(&app, &host).await {
+            if app.session_for_host(&host).await.is_some() && app.host_connected(&host).await {
+                tracing::warn!(host = %host, error = ?e, "immediate reconcile pass failed; trying again");
+                schedule_deferred_pass(&app, &host);
+            }
+        }
+    });
+}
+
 pub fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
     static PENDING: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
     let pending = PENDING.get_or_init(Default::default);
@@ -296,5 +354,27 @@ mod tests {
         assert!(autostart_pass(&env.app, LOCAL_HOST, &mut owed, &claim.since).await);
         assert!(db::active_run(&env.app.db, &failed).await.unwrap().is_some(), "重試之後起來了");
         claim.complete();
+    }
+}
+
+#[cfg(test)]
+mod immediate_pass_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_immediate_pass_inside_the_gap_is_skipped() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        immediate_state().lock().unwrap().last.insert(immediate_key(&app, LOCAL_HOST), std::time::Instant::now());
+        assert!(!reconcile_host_throttled(&app, LOCAL_HOST).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_immediate_pass_after_the_gap_runs() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let stale = std::time::Instant::now() - IMMEDIATE_PASS_GAP * 2;
+        immediate_state().lock().unwrap().last.insert(immediate_key(&app, LOCAL_HOST), stale);
+        assert!(reconcile_host_throttled(&app, LOCAL_HOST).await.unwrap());
     }
 }

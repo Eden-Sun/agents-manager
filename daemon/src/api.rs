@@ -520,7 +520,10 @@ async fn relay_pane(
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "bot host unreadable; retry"})));
     };
     match crate::panes::note_purpose(&app, &host, &body.pane_id, &bot, body.purpose.trim()).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "purpose": body.purpose}))),
+        Ok(()) => {
+            crate::runners::reconcile::request_immediate_pass(&app, &host);
+            (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "purpose": body.purpose})))
+        }
         Err(e) => {
             tracing::warn!(pane = %body.pane_id, error = ?e, "could not record a pane purpose");
             (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "recorded": false})))
@@ -6518,6 +6521,33 @@ struct RelayRequestsQuery {
 #[derive(Deserialize)]
 struct RelayResolveQuery { target: String }
 
+type RelayCandidate = (String, Option<String>, Option<String>, Option<String>, String);
+
+async fn relay_name_candidates(app: &Arc<App>, sender: &str, target: &str) -> Result<Vec<RelayCandidate>, LcError> {
+    let host = db::bot_host(&app.db, &sender).await.map_err(any_err)?;
+    let fallback = app.session_for_host(&host).await.ok_or_else(|| LcError::NotFound("host session".into()))?;
+    let sender_run = db::active_run(&app.db, &sender).await.map_err(any_err)?;
+    let session = sender_run.as_ref().and_then(|r| r.herdr_session.as_deref()).unwrap_or(&fallback);
+    let mut candidates: Vec<RelayCandidate> = sqlx::query_as(
+        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
+    ).bind(&host).bind(&fallback).bind(session).bind(target).bind(target).bind(target)
+        .fetch_all(&app.db).await.map_err(any_err)?;
+    // Display names are project-scoped and remain usable when the member is stopped.
+    let members: Vec<RelayCandidate> = sqlx::query_as(
+        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM bots b JOIN projects p ON p.id=b.project_id LEFT JOIN runs r ON r.bot_id=b.id AND r.state='running' WHERE b.project_id=(SELECT project_id FROM bots WHERE id=?) AND b.name=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL"
+    ).bind(sender).bind(target).fetch_all(&app.db).await.map_err(any_err)?;
+    for member in members {
+        if !candidates.iter().any(|candidate| candidate.0 == member.0) { candidates.push(member); }
+    }
+    if candidates.is_empty() {
+        // 跨主機：只用 agent 名稱（帶 $AM_AGENT_NAME 前綴，全域應唯一）找；pane id 與 bot 名稱各主機自己的，不做跨主機比對。
+        candidates = sqlx::query_as(
+            "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
+        ).bind(target).fetch_all(&app.db).await.map_err(any_err)?;
+    }
+    Ok(candidates)
+}
+
 async fn resolve_relay_target(
     State(app): State<Arc<App>>,
     Extension(principal): Extension<RequestPrincipal>,
@@ -6541,25 +6571,14 @@ async fn resolve_relay_target(
         return Ok(Json(json!({"to_bot_id": bot.id, "to_run_id": run.as_ref().map(|r| &r.id), "to_agent": run.as_ref().and_then(|r| r.agent_name.as_ref())})));
     }
     let host = db::bot_host(&app.db, &sender).await.map_err(any_err)?;
-    let fallback = app.session_for_host(&host).await.ok_or_else(|| LcError::NotFound("host session".into()))?;
-    let sender_run = db::active_run(&app.db, &sender).await.map_err(any_err)?;
-    let session = sender_run.as_ref().and_then(|r| r.herdr_session.as_deref()).unwrap_or(&fallback);
-    let mut candidates: Vec<(String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
-        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
-    ).bind(&host).bind(&fallback).bind(session).bind(&q.target).bind(&q.target).bind(&q.target)
-        .fetch_all(&app.db).await.map_err(any_err)?;
-    // Display names are project-scoped and remain usable when the member is stopped.
-    let members: Vec<(String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
-        "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM bots b JOIN projects p ON p.id=b.project_id LEFT JOIN runs r ON r.bot_id=b.id AND r.state='running' WHERE b.project_id=(SELECT project_id FROM bots WHERE id=?) AND b.name=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL"
-    ).bind(&sender).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
-    for member in members {
-        if !candidates.iter().any(|candidate| candidate.0 == member.0) { candidates.push(member); }
-    }
-    if candidates.is_empty() {
-        // 跨主機：只用 agent 名稱（帶 $AM_AGENT_NAME 前綴，全域應唯一）找；pane id 與 bot 名稱各主機自己的，不做跨主機比對。
-        candidates = sqlx::query_as(
-            "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
-        ).bind(&q.target).fetch_all(&app.db).await.map_err(any_err)?;
+    let mut candidates = relay_name_candidates(&app, &sender, &q.target).await?;
+    let sender_agent = db::active_run(&app.db, &sender).await.map_err(any_err)?.and_then(|r| r.agent_name);
+    let child_of_sender = sender_agent.as_deref().is_some_and(|parent| q.target.strip_prefix(parent).is_some_and(|rest| rest.starts_with('-')));
+    if candidates.is_empty() && child_of_sender {
+        if let Err(e) = crate::runners::reconcile::reconcile_host_throttled(&app, &host).await {
+            tracing::warn!(host = %host, error = ?e, "immediate reconcile for a just-started child failed");
+        }
+        candidates = relay_name_candidates(&app, &sender, &q.target).await?;
     }
     let mut rows = Vec::new();
     let mut denied_reason: Option<serde_json::Value> = None;
@@ -6575,7 +6594,7 @@ async fn resolve_relay_target(
         // 候選存在但全被政策擋掉：回 403 帶原因，不要吞成 404。
         return Err(match denied_reason {
             Some(body) => LcError::Forbidden(body),
-            None => LcError::NotFound("relay target".into()),
+            None => LcError::NotFoundValue(json!({"error":"not_found","what":"relay target","message":"找不到目標；剛啟動的 child 約數秒內會被認領，請稍後重試"})),
         });
     }
     if rows.len() != 1 {
