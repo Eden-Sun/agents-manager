@@ -179,16 +179,16 @@ fi
 # issue #753: a Stop hook carries no user message, and the daemon cannot read this machine's
 # transcript, so a Stop that arrives after the daemon's terminal fallback closed the turn could not
 # be shown to belong to that turn. Read the last human message out of the LOCAL transcript here and
-# carry it as `agm_user_text`; the daemon replaces the fallback reply only when it matches the turn's
-# prompt. Best effort: no python3, an unreadable transcript, or a non-Stop event leaves the payload
-# untouched (no evidence, so the daemon keeps the fallback reply as before).
-# issue #754: also carry `agm_origin_kind`, who started the turn (`origin.kind` of the newest entry that
-# has one: `human`, `task-notification`, ...). A turn claude starts by itself (background job done) has
-# no new prompt, so its last user message is the previous one; the daemon stores the carried text only
-# when the origin is `human`.
+# carry it as `agm_user_text` (plus `agm_origin_kind`, issue #754: who started the turn, `origin.kind`
+# of the newest entry that has one; the daemon stores the carried text only when it is `human`).
+# 2026-10-02: the same read carries the finished `AskUserQuestion` answers of the last 512 KiB as
+# `agm_asks` (Stop and StopFailure). issue #1759: claude compacting its conversation sends no Stop, only
+# `SessionStart` with `source: "compact"`, so the newest `compact_boundary` goes out as `agm_compact`.
+# All of it runs in ONE python3 and reads the transcript ONCE. Best effort: no python3, an unreadable
+# transcript, or a stage that finds nothing leaves the payload as it was (the daemon then falls back as before).
 if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
-    *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*)
+    *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*|*'"hook_event_name":"StopFailure"'*|*'"hook_event_name": "StopFailure"'*|*'"source":"compact"'*|*'"source": "compact"'*)
       if command -v python3 >/dev/null 2>&1; then
         WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
 def _am_transcript(path):
@@ -244,12 +244,7 @@ def _am_transcript(path):
     finally:
         if fd is not None:
             os.close(fd)
-try:
-    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
-    path=p.get("transcript_path") or p.get("transcriptPath")
-    if p.get("hook_event_name")!="Stop" or not path:
-        raise SystemExit
-    data=_am_transcript(path)
+def _am_user(p,data):
     users=[]
     for line in reversed(data.splitlines()):
         try:
@@ -282,82 +277,10 @@ try:
             p["agm_user_text"]=c
             if kind is not None:
                 p["agm_origin_kind"]=kind
-            sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
+            return True
         break
-except Exception:
-    pass' 2>/dev/null)
-        case "$WITH" in '{'*) PAYLOAD="$WITH" ;; esac
-      fi ;;
-  esac
-fi
-# 2026-10-02: the same trick for `AskUserQuestion`. Questions claude asked and the user answered (or cancelled)
-# live in the LOCAL transcript only; carry the finished ones of the last 512 KiB as `agm_asks` (`id`, `at`, `items`
-# of `header`/`question`/`answer`) so the daemon can put them in the conversation (`ask_answers.rs`). Both Stop and
-# StopFailure; best effort like the block above (no python3 or an unreadable transcript leaves the payload as is).
-if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
-  case "$PAYLOAD" in
-    *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*|*'"hook_event_name":"StopFailure"'*|*'"hook_event_name": "StopFailure"'*)
-      if command -v python3 >/dev/null 2>&1; then
-        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
-def _am_transcript(path):
-    cfg=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    proj=os.path.join(os.path.realpath(cfg),"projects")
-    nofollow=getattr(os,"O_NOFOLLOW",None)
-    directory=getattr(os,"O_DIRECTORY",0)
-    if not isinstance(path,str) or not os.path.isabs(path) or nofollow is None:
-        raise SystemExit
-    project_stat=os.lstat(proj)
-    if stat.S_ISLNK(project_stat.st_mode) or not stat.S_ISDIR(project_stat.st_mode) or os.path.islink(path):
-        raise SystemExit
-    dir_flags=os.O_RDONLY|directory|nofollow|os.O_NONBLOCK
-    dirfd=os.open(proj,dir_flags)
-    try:
-        opened=os.fstat(dirfd)
-        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(project_stat.st_dev,project_stat.st_ino):
-            raise SystemExit
-        absolute=os.path.abspath(path)
-        ancestor=absolute
-        rel=None
-        while True:
-            if os.path.realpath(ancestor)==proj:
-                rel=os.path.relpath(absolute,ancestor)
-                break
-            parent=os.path.dirname(ancestor)
-            if parent==ancestor:
-                break
-            ancestor=parent
-        if rel in (None,"", "."):
-            raise SystemExit
-        parts=rel.split(os.sep)
-        if not parts or any(part in ("",".","..") for part in parts):
-            raise SystemExit
-        for part in parts[:-1]:
-            nextfd=os.open(part,dir_flags,dir_fd=dirfd)
-            if not stat.S_ISDIR(os.fstat(nextfd).st_mode):
-                os.close(nextfd)
-                raise SystemExit
-            os.close(dirfd)
-            dirfd=nextfd
-        fd=os.open(parts[-1],os.O_RDONLY|os.O_NONBLOCK|nofollow,dir_fd=dirfd)
-    finally:
-        os.close(dirfd)
-    try:
-        st=os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
-            raise SystemExit
-        with os.fdopen(fd,"rb") as f:
-            fd=None
-            f.seek(max(0,st.st_size-524288))
-            return f.read(524288).decode("utf-8","replace")
-    finally:
-        if fd is not None:
-            os.close(fd)
-try:
-    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
-    path=p.get("transcript_path") or p.get("transcriptPath")
-    if p.get("hook_event_name") not in ("Stop","StopFailure") or not path:
-        raise SystemExit
-    data=_am_transcript(path)
+    return False
+def _am_asks(p,data):
     asked={}
     out=[]
     def ans(a):
@@ -414,80 +337,9 @@ try:
     out=out[-20:]
     if out and len(json.dumps(out,ensure_ascii=False).encode("utf-8"))<=262144:  # a lone surrogate raises here: carry nothing rather than a line serde_json cannot read
         p["agm_asks"]=out
-        sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
-except Exception:
-    pass' 2>/dev/null)
-        case "$WITH" in '{'*) PAYLOAD="$WITH" ;; esac
-      fi ;;
-  esac
-fi
-# issue #1759: claude compacting its conversation sends no Stop, only `SessionStart` with `source: "compact"`, and the
-# daemon cannot read this machine's transcript to tell an idle compaction from a manual `/compact`. Read the newest
-# `compact_boundary` of the LOCAL transcript and carry it as `agm_compact` (`trigger`, `idle`, `pre_tokens`, `post_tokens`).
-# Best effort like the blocks above: without it the daemon still writes a plain "compacted" note.
-if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
-  case "$PAYLOAD" in
-    *'"source":"compact"'*|*'"source": "compact"'*)
-      if command -v python3 >/dev/null 2>&1; then
-        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
-def _am_transcript(path):
-    cfg=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    proj=os.path.join(os.path.realpath(cfg),"projects")
-    nofollow=getattr(os,"O_NOFOLLOW",None)
-    directory=getattr(os,"O_DIRECTORY",0)
-    if not isinstance(path,str) or not os.path.isabs(path) or nofollow is None:
-        raise SystemExit
-    project_stat=os.lstat(proj)
-    if stat.S_ISLNK(project_stat.st_mode) or not stat.S_ISDIR(project_stat.st_mode) or os.path.islink(path):
-        raise SystemExit
-    dir_flags=os.O_RDONLY|directory|nofollow|os.O_NONBLOCK
-    dirfd=os.open(proj,dir_flags)
-    try:
-        opened=os.fstat(dirfd)
-        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(project_stat.st_dev,project_stat.st_ino):
-            raise SystemExit
-        absolute=os.path.abspath(path)
-        ancestor=absolute
-        rel=None
-        while True:
-            if os.path.realpath(ancestor)==proj:
-                rel=os.path.relpath(absolute,ancestor)
-                break
-            parent=os.path.dirname(ancestor)
-            if parent==ancestor:
-                break
-            ancestor=parent
-        if rel in (None,"", "."):
-            raise SystemExit
-        parts=rel.split(os.sep)
-        if not parts or any(part in ("",".","..") for part in parts):
-            raise SystemExit
-        for part in parts[:-1]:
-            nextfd=os.open(part,dir_flags,dir_fd=dirfd)
-            if not stat.S_ISDIR(os.fstat(nextfd).st_mode):
-                os.close(nextfd)
-                raise SystemExit
-            os.close(dirfd)
-            dirfd=nextfd
-        fd=os.open(parts[-1],os.O_RDONLY|os.O_NONBLOCK|nofollow,dir_fd=dirfd)
-    finally:
-        os.close(dirfd)
-    try:
-        st=os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
-            raise SystemExit
-        with os.fdopen(fd,"rb") as f:
-            fd=None
-            f.seek(max(0,st.st_size-524288))
-            return f.read(524288).decode("utf-8","replace")
-    finally:
-        if fd is not None:
-            os.close(fd)
-try:
-    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
-    path=p.get("transcript_path") or p.get("transcriptPath")
-    if p.get("hook_event_name")!="SessionStart" or p.get("source")!="compact" or not path:
-        raise SystemExit
+        return True
+    return False
+def _am_compact(p,path):
     found=None
     for line in _am_transcript(path).splitlines():
         try:
@@ -506,8 +358,31 @@ try:
                     found[o]=m[k]
         elif found is not None and isinstance(v.get("content"),str) and v["content"].startswith("Compacted while idle"):
             found["idle"]=True
-    if found is not None:
-        p["agm_compact"]=found
+    if found is None:
+        return False
+    p["agm_compact"]=found
+    return True
+def _am_try(fn,*args):
+    try:
+        return fn(*args)
+    except (Exception,SystemExit):
+        return None
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
+    ev=p.get("hook_event_name")
+    path=p.get("transcript_path") or p.get("transcriptPath")
+    changed=False
+    if path and ev in ("Stop","StopFailure"):
+        data=_am_try(_am_transcript,path)
+        if data is not None:
+            if ev=="Stop" and _am_try(_am_user,p,data):
+                changed=True
+            if _am_try(_am_asks,p,data):
+                changed=True
+    if path and ev=="SessionStart" and p.get("source")=="compact":
+        if _am_try(_am_compact,p,path):
+            changed=True
+    if changed:
         sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
 except Exception:
     pass' 2>/dev/null)
@@ -2798,6 +2673,36 @@ mod remote_hook_tests {
         let p = spooled(&sb);
         assert_eq!(p["agm_user_text"].as_str(), Some("舊版"), "{p}");
         assert!(p.get("agm_origin_kind").is_none(), "{p}");
+    }
+
+    /// 去重 B：Stop 的 transcript 只讀一次、`_am_transcript` 只由一顆 python3 執行（使用者文字與 AskUserQuestion 共用）。
+    #[cfg(all(unix, not(feature = "daemon-test-harness")))]
+    #[test]
+    fn a_stop_reads_the_transcript_in_one_python_run() {
+        let sb = Sandbox::new(false);
+        let shim = sb.dir.join("shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        let count = sb.dir.join("py-transcript.count");
+        write_exec(
+            &shim.join("python3"),
+            &format!(
+                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *_am_transcript*) echo x >> '{}';; esac; done\nexec /usr/bin/python3 \"$@\"\n",
+                count.display()
+            ),
+        );
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let t = project_dir.join("once.jsonl");
+        let human = serde_json::json!({"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "只讀一次"}});
+        std::fs::write(&t, format!("{human}\n")).unwrap();
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": t.to_string_lossy(), "stop_hook_active": false}).to_string();
+        let path = format!("{}:/usr/bin:/bin", shim.display());
+        sb.run_with_env(&["claude", &sb.bot, "-"], &stop, &[("PATH", &path)]);
+        let runs = std::fs::read_to_string(&count).unwrap_or_default().lines().count();
+        assert_eq!(runs, 1, "Stop 應只啟動一次讀 transcript 的 python3");
+        let spool = spool_events(&sb.bot_dir());
+        let p: serde_json::Value = serde_json::from_str(spool.lines().next().unwrap_or_default()).unwrap_or_default();
+        assert_eq!(p["payload"]["agm_user_text"].as_str(), Some("只讀一次"), "{spool}");
     }
 
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
