@@ -1,4 +1,5 @@
 import { SendQueuedNowButton, SupplementSendNow } from './SendQueuedNowButton'
+import { MessageLedgerBar } from './MessageLedgerBar'
 import { isApiKind } from './kindMeta'
 import { terminalFooterFor } from '../hooks/useCodexTerminalFooter'
 import { ApiTurnCostTag, ApiTurnProgress } from './ApiTurnCost'
@@ -307,6 +308,7 @@ const PlainBubble = memo(function PlainBubble({
         {msg.attachments.length && !folded ? <MessageAttachments items={msg.attachments} /> : null}
         <TerminalSnapshot msg={msg} />
       </div>
+      {msg.role === 'user' ? <MessageLedgerBar msg={msg} /> : null}
       <SupplementSendNow msg={msg} />
       {preview?.truncated && !expandRelay ? (
         <button type="button" className="disclosure sub relay-fold" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>

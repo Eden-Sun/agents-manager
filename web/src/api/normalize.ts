@@ -1,6 +1,8 @@
 /** Tolerant decoders for daemon payloads: accept plausible shapes (SQLite 0/1 booleans, JSON-string fields, nested or flat bots/runs). */
 
 import type {
+  LedgerItem,
+  LedgerItemStatus,
   RuntimeSettings,
   BackgroundTask,
   BotLimitHit,
@@ -611,6 +613,33 @@ export function toAttachments(v: unknown): Attachment[] {
   return out
 }
 
+/** 容錯：欄位缺了就給預設，不讓舊 daemon 的回應整則訊息掉掉。 */
+export function toLedgerItem(v: unknown): LedgerItem | null {
+  if (!isRec(v)) return null
+  const id = str(pick(v, 'id'))
+  if (!id) return null
+  const codeNo = num(pick(v, 'code_no'))
+  return {
+    id,
+    code: str(pick(v, 'code')) || (codeNo ? `L${codeNo}` : id),
+    code_no: codeNo,
+    project_id: str(pick(v, 'project_id')),
+    source_message_id: optStr(pick(v, 'source_message_id')),
+    ordinal: num(pick(v, 'ordinal')),
+    title: str(pick(v, 'title')),
+    status: oneOf<LedgerItemStatus>(pick(v, 'status'), ['untriaged', 'answered', 'following', 'clarifying', 'done', 'cancelled', 'merged'], 'untriaged'),
+    owner_bot_id: optStr(pick(v, 'owner_bot_id')),
+    deliverable: str(pick(v, 'deliverable')),
+    next_step: str(pick(v, 'next_step')),
+    wait_for: optStr(pick(v, 'wait_for')),
+    due_at: optStr(pick(v, 'due_at')),
+    merged_into_id: optStr(pick(v, 'merged_into_id')),
+    close_reason: optStr(pick(v, 'close_reason')),
+    version: num(pick(v, 'version')),
+    updated_at: str(pick(v, 'updated_at')),
+  }
+}
+
 export function toMessage(v: unknown, botId?: string): Message | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id'))
@@ -638,6 +667,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     rewound_at: optStr(pick(v, 'rewound_at')),
     sent_via: oneOf<'send_now' | 'supplement' | ''>(pick(v, 'sent_via'), SENT_VIA, '') || null,
     seq: num(pick(v, 'seq')) || undefined,
+    ledger_items: Array.isArray(pick(v, 'ledger_items')) ? (pick(v, 'ledger_items') as unknown[]).map(toLedgerItem).filter((x): x is LedgerItem => x !== null) : undefined,
     ...(pick(v, 'keep_warm') === true ? { keep_warm: true } : {}),
   }
 }

@@ -631,6 +631,29 @@ export interface Attachment {
   path: string
 }
 
+/** 承諾帳本項目（SPEC 帳本第 1 階段；daemon `GET /api/projects/{id}/ledger`）。`code` 是 `L<code_no>`。 */
+export type LedgerItemStatus = 'untriaged' | 'answered' | 'following' | 'clarifying' | 'done' | 'cancelled' | 'merged'
+
+export interface LedgerItem {
+  id: string
+  code: string
+  code_no: number
+  project_id: string
+  source_message_id: string | null
+  ordinal: number
+  title: string
+  status: LedgerItemStatus
+  owner_bot_id: string | null
+  deliverable: string
+  next_step: string
+  wait_for: string | null
+  due_at: string | null
+  merged_into_id: string | null
+  close_reason: string | null
+  version: number
+  updated_at: string
+}
+
 export interface Message {
   id: string
   conversation_id: string
@@ -653,6 +676,8 @@ export interface Message {
   via_cluster?: string | null
   assignee_bot_id?: string | null
   assignee_name?: string | null
+  /** 承諾帳本：這則使用者訊息拆出的項目（daemon 附掛，依 `ordinal`）；沒附就是 `undefined`。 */
+  ledger_items?: LedgerItem[]
   /** true = 代發來源的 bot 已收掉（`deleted_at` 有值），顯示名字時標「已收掉」。 */
   relay_from_deleted?: boolean
   /** `terminal_fallback` 當下的整個 pane 畫面；`content` 裁錯時真正的回覆還在這裡。其他來源為 null。 */

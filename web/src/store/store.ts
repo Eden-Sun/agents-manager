@@ -440,6 +440,8 @@ export interface StoreState {
   mem: MemSnapshot | null
   /** key = kind or `kind:identity`. */
   quota: QuotaMap
+  /** 承諾帳本：每則使用者訊息（`source_message_id`）收到 `ledger_updated` 就 +1，泡泡下的進度列據此重新拉取。 */
+  ledgerRev: Record<string, number>
   /** keyed `kind@host@identity`; null = fetch failed (use static list). */
   models: ModelsCache
   modelsMeta: ModelsMetaCache
@@ -985,6 +987,7 @@ export const useStore = create<StoreState>((set, get) => {
   disabledIdentities: [],
   disabledKinds: [],
   quota: {},
+  ledgerRev: {},
   mem: null,
   models: {},
   modelsMeta: {},
@@ -3558,6 +3561,14 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     }
     case 'codex_reset_updated': {
       receiveCodexReset(data, get().notify)
+      return
+    }
+    case 'ledger_updated': {
+      // 承諾帳本（T5）：只記「哪一則訊息的項目變了」，各自的進度列自己去拉最新的（不在這裡打 HTTP）。
+      if (!isRec(data)) return
+      const mid = str(pick(data, 'source_message_id'))
+      if (!mid) return
+      set((s) => ({ ledgerRev: { ...s.ledgerRev, [mid]: (s.ledgerRev[mid] ?? 0) + 1 } }))
       return
     }
     case 'quota_updated': {

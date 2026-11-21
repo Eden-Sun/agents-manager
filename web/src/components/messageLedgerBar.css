@@ -1,0 +1,90 @@
+/* 使用者訊息旁的承諾帳本進度列：緊湊、靠右，展開後逐項列出（390px 寬也要能換行）。 */
+.ledger-bar {
+  margin-top: 4px;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.ledger-bar-summary {
+  border: 1px solid var(--line, #d0d7de);
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  max-width: 100%;
+  text-align: left;
+}
+
+.ledger-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.ledger-item {
+  border-left: 3px solid var(--line, #d0d7de);
+  padding: 4px 8px;
+  background: var(--surface-2, rgb(0 0 0 / 0.03));
+  border-radius: 4px;
+}
+
+.ledger-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.ledger-code {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-status {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.ledger-title {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ledger-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted, #6e7781);
+  margin-top: 2px;
+}
+
+.ledger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ledger-actions .mini-btn.danger {
+  color: var(--danger, #cf222e);
+}
+
+.ledger-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ledger-inline input {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 4px 8px;
+  font: inherit;
+}
