@@ -3447,8 +3447,11 @@ button.model-tag:hover:not(:disabled) {
 
   /* 底部三樣都要避開 home indicator。 */
 
+  /* 圓角補償：iPhone 15/16 螢幕圓角約 55pt，貼底的按鈕離底邊約 8px 時，曲線會侵入約 26px。
+     左右內距＝safe-area 底部值 − 6px（34px → 28px），沒有 safe-area 的螢幕仍是 12px。 */
   .composer {
     padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-inline: max(12px, calc(env(safe-area-inset-bottom) - 6px));
   }
 
   /* 打字時 `--vvh` 只剩三百多 px，200px 上限加暫存區會切掉游標行：上限改畫面三分之一。 */
@@ -3799,7 +3802,8 @@ button.model-tag:hover:not(:disabled) {
   /* Bot 執行中只需一條緊湊工具列；完整錯誤原因仍沿用上面的換行規則。 */
 
   .bot-composer {
-    padding: 6px 8px max(6px, env(safe-area-inset-bottom));
+    /* 左右同樣避開圓角（見 .composer）；沒有 safe-area 時維持 8px。 */
+    padding: 6px max(8px, calc(env(safe-area-inset-bottom) - 6px)) max(6px, env(safe-area-inset-bottom));
     min-height: 0;
   }
 
