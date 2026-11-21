@@ -956,6 +956,24 @@ mod prompt_tests {
         assert_eq!(notes, vec![UNRETRACTED_NOTE.to_string()]);
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
     }
+    /// 管理入口收到使用者的一句：入帳，並推 `ledger_updated`（網頁不用重整就看得到「待分流」）。
+    #[tokio::test]
+    async fn a_user_prompt_to_the_management_bot_is_ingested_and_announced() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let mut events = app.subscribe();
+        let out = prompt_with(&app, &f.bot_id, "請查 CI 失敗", "prompt-ledger-ingest", &[]).await.unwrap();
+        let mut announced = None;
+        while let Ok(Ok(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await {
+            if ev.kind == "ledger_updated" {
+                announced = Some(ev.data.clone());
+            }
+        }
+        let ev = announced.expect("ledger_updated is announced after the ingest");
+        assert_eq!(ev["source_message_id"].as_str(), Some(out.message_id.as_str()));
+        let (title, status): (String, String) = sqlx::query_as("SELECT title, status FROM ledger_items WHERE source_message_id = ?").bind(&out.message_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((title.as_str(), status.as_str()), ("請查 CI 失敗", "untriaged"));
+    }
     /// Binding can fail after the turn commits; the UI must still get a terminal turn event.
     #[tokio::test]
     async fn an_attachment_bind_failure_closes_the_pending_turn() {

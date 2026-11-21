@@ -80,6 +80,7 @@ pub mod composer_draft;
 pub mod suggestion;
 pub mod queued_send_now;
 pub mod busy_send;
+pub(crate) mod ledger_ingest;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub use delivery::{plain_without_hints, read_styled};
 #[allow(unused_imports)]

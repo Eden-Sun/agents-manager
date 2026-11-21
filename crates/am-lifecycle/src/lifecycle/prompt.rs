@@ -1433,13 +1433,11 @@ async fn prompt_commit_and_deliver_body(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    if relay.from.is_none() {
-        if let Err(e) = am_base::ledger::ingest_if_management_message(app.db(), bot_id, &msg_id, Some(&turn_id), text).await {
-            tracing::warn!(bot = %bot_id, error = %e, "帳本收件失敗（訊息已經收下）");
-        }
-    }
     if let Err(e) = app.bind_attachments(&msg_id, &files).await {
         publish_prompt_message(app, bot_id, &msg_id).await;
+        if relay.from.is_none() {
+            super::ledger_ingest::ingest_user_prompt(app, bot_id, &msg_id, &turn_id, text).await;
+        }
         // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
         // DB 還是 in_flight＋pending 時不回普通的 `failed`。
         let note = format!("delivery failed: attachment binding failed: {e}");
@@ -1463,6 +1461,11 @@ async fn prompt_commit_and_deliver_body(
             Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
             Err(u) => return Err(u.answer(&run.id, &turn_id, &msg_id, "a maintenance window opened and the turn could not be withdrawn")),
         }
+    }
+
+    // 這一則確定留下來（沒有被撤回）才入帳；撤回的訊息不會留下指向它的承諾項。
+    if relay.from.is_none() {
+        super::ledger_ingest::ingest_user_prompt(app, bot_id, &msg_id, &turn_id, text).await;
     }
 
     // 打第一個字之前的那一瞬：人在終端裡打字、CLI 跳出新框，都不受 bot 鎖管（#120 測試插在這裡）。
