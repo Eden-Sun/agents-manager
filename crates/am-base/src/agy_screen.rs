@@ -158,6 +158,11 @@ pub fn is_busy(screen: &str) -> bool {
     }
     let above: Vec<String> = lines[..top].iter().map(|l| crate::composer_parse::strip_ansi(l)).filter(|l| !l.trim().is_empty()).collect();
     let Some(at) = above.iter().rposition(|l| l.trim_start().starts_with("○ Running (")) else { return false };
+    if above[at..].iter().any(|l| l.to_lowercase().contains("interrupted"))
+        || below.iter().any(|l| crate::composer_parse::strip_ansi(l).to_lowercase().contains("interrupted"))
+    {
+        return false;
+    }
     above[at + 1..].iter().all(|l| {
         let t = l.trim_start();
         t.starts_with('●') || t.starts_with('○') || t.starts_with('└') || t.starts_with('…') || t.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
@@ -417,5 +422,89 @@ Antigravity CLI can make mistakes and is vulnerable to prompt injection and supp
         assert!(!is_busy(IDLE_QUOTE), "正文引用 Running、只剩常駐 daemon task 且無 esc to cancel");
         assert!(!is_busy(IDLE_AFTER_RUNNING), "Running 之後已有新的正文");
         assert!(!is_busy("no composer here\n○ Running (x)\n"), "找不到輸入框不判忙");
+    }
+
+    #[test]
+    fn interrupted_screens_do_not_misjudge_busy_or_blocking_dialog() {
+        let teardown_footer = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+Interrupted · esc to cancel      Gemini 3.8 Flash · high
+";
+        let teardown_above = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+Interrupted
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+esc to cancel      Gemini 3.8 Flash · high
+";
+        assert!(is_busy(teardown_footer));
+        assert_eq!(blocking_dialog(teardown_footer), None);
+        assert!(is_busy(teardown_above));
+        assert_eq!(blocking_dialog(teardown_above), None);
+
+        let idle_footer = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+Interrupted                                                  Gemini 3.8 Flash · high
+";
+        let idle_above_bullet = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+● Interrupted
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+        let idle_above_plain = "\
+Interrupted by user.
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash · high
+";
+        let idle_placeholder = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+────────────────────────────────────────────────────────
+> Mode: default (shift+tab to cycle)
+────────────────────────────────────────────────────────
+Interrupted                                                  Gemini 3.8 Flash · high
+";
+        for screen in [idle_footer, idle_above_bullet, idle_above_plain, idle_placeholder] {
+            assert!(!is_busy(screen));
+            assert_eq!(blocking_dialog(screen), None);
+            assert_eq!(crate::composer_parse::box_state("agy", screen), crate::composer_parse::BoxState::Empty);
+        }
+
+        let queued_convo = "\
+● Edited 1 file (src/lib.rs)
+Interrupted
+> please check git status
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+Interrupted · 1 queued message                               Gemini 3.8 Flash · high
+";
+        let queued_footer = "\
+● Edited 1 file (src/lib.rs)
+○ Running (cargo test · 5s)
+● Interrupted
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+Queued: please check git status                              Gemini 3.8 Flash · high
+";
+        assert_eq!(blocking_dialog(queued_convo), None);
+        assert_eq!(blocking_dialog(queued_footer), None);
     }
 }
