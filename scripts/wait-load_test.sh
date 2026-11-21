@@ -1,8 +1,4 @@
 #!/bin/bash
-# scripts/wait-load.sh 與 check.sh 負載閘的隔離測試（issue #813）：負載從假檔案讀（WAIT_LOAD_FILE），不看真機器。
-# 重點是「逾時一定回非 0、`&&` 後面的指令不會跑」——#789 的手寫迴圈逾時卻回成功，在 load≈152 時照跑。
-#
-#   bash scripts/wait-load_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WAIT="${HERE}/wait-load.sh"
@@ -43,7 +39,6 @@ ran=no
 WAIT_LOAD_FILE="${LOAD}" bash "${WAIT}" --max 40 --timeout 1 --interval 1 >/dev/null 2>&1 && ran=yes
 equals "逾時時 \`wait-load.sh && 指令\` 的指令不會跑" "${ran}" no
 
-# 等的途中負載降下來：放行。
 echo "90.00 1 1" > "${LOAD}"
 ( sleep 1; echo "10.00 1 1" > "${LOAD}" ) &
 out="$(WAIT_LOAD_FILE="${LOAD}" bash "${WAIT}" --max 40 --timeout 20 --interval 1 2>&1)"; rc=$?
@@ -63,7 +58,6 @@ for bad in "--max abc" "--timeout -1" "--interval 0" "--bogus"; do
   equals "參數錯（${bad}）回 2" "${rc}" 2
 done
 
-# 記憶體閘（issue #1783）：可用記憶體從假檔案讀（WAIT_MEM_FILE：第一欄 free%、第二欄壓力等級），負載固定很低。
 MEM="${ROOT}/mem"
 echo "1.00 1 1" > "${LOAD}"
 echo "80 1" > "${MEM}"
@@ -88,7 +82,6 @@ echo "152.30 1 1" > "${LOAD}"
 WAIT_LOAD_FILE="${LOAD}" WAIT_MEM_FILE="${MEM}" bash "${WAIT}" --max 40 --min-free-mem 30 --timeout 0 >/dev/null 2>&1; rc=$?
 equals "記憶體夠但負載太高：兩個條件都要過（124）" "${rc}" 124
 echo "1.00 1 1" > "${LOAD}"
-# 等的途中記憶體回來：假的 sleep（PATH 最前面）一被叫就把記憶體檔改成夠，不靠牆鐘。
 fakebin="${ROOT}/fakebin"
 mkdir -p "${fakebin}"
 printf '#!/bin/sh
@@ -118,7 +111,6 @@ for bad in "--min-free-mem abc" "--min-free-mem 101" "--min-free-mem -5"; do
   equals "參數錯（${bad}）回 2" "${rc}" 2
 done
 
-# check.sh 的負載閘：在任何一步之前就擋下（這裡用一個不存在的模式，閘放行才會走到「用法」的 exit 2）。
 echo "152.30 1 1" > "${LOAD}"
 out="$(cd "${HERE}/.." && WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
 equals "check.sh：負載太高、逾時就整輪失敗，不往下跑" "${rc}" 124
@@ -126,7 +118,6 @@ has "check.sh：講明是負載閘擋下" "${out}" "負載閘"
 echo "1.00 1 1" > "${LOAD}"
 out="$(cd "${HERE}/.." && WAIT_LOAD_FILE="${LOAD}" CHECK_MAX_LOAD=40 CHECK_LOAD_TIMEOUT=0 bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
 equals "check.sh：負載夠低就照常往下（走到用法錯誤）" "${rc}" 2
-# 只在最外層等：閘放行後子行程看不到 CHECK_MAX_LOAD（ops 測試會在沙盒裡再叫 check.sh，那裡沒有 wait-load.sh）。
 fake="${ROOT}/fake-check"
 mkdir -p "${fake}/scripts"
 cp "${HERE}/check.sh" "${HERE}/wait-load.sh" "${fake}/scripts/"
@@ -137,7 +128,6 @@ has "check.sh：閘放行後子行程不再看到 CHECK_MAX_LOAD" "${out}" "nest
 out="$(cd "${HERE}/.." && env -u CHECK_MAX_LOAD WAIT_LOAD_FILE="${ROOT}/nope" bash scripts/check.sh no-such-mode 2>&1)"; rc=$?
 equals "check.sh：沒設 CHECK_MAX_LOAD 就不看負載" "${rc}" 2
 
-# changed 先判斷有沒有要跑的檢查：文件與 git 比較失敗都不應被高負載閘擋住。
 changed_repo="${ROOT}/changed-repo"
 mkdir -p "${changed_repo}/scripts" "${changed_repo}/bin"
 cp "${HERE}/check.sh" "${HERE}/wait-load.sh" "${HERE}/ci-changed-parts.sh" "${changed_repo}/scripts/"
@@ -169,7 +159,6 @@ out="$(cd "${changed_repo}" && PATH="${changed_repo}/bin:${PATH}" WAIT_LOAD_FILE
 equals "check.sh changed：base 不存在回 2" "${rc}" 2
 case "${out}" in *"負載閘"*) echo "FAIL - check.sh changed：base 錯誤仍跑負載閘"; FAIL=$((FAIL + 1)) ;; *) echo "ok   - check.sh changed：base 錯誤不跑負載閘"; PASS=$((PASS + 1)) ;; esac
 
-# --help 與參數錯誤印的說明是整段檔頭，不能印到程式碼（issue #1022）。
 out="$(bash "${WAIT}" --help 2>&1)"; rc=$?
 equals "--help 回 2" "${rc}" 2
 has "--help 印出旗標說明" "${out}" "--timeout"

@@ -10,7 +10,6 @@ import sys
 import tempfile
 import time
 
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true', help='run real compiler invocations')
@@ -46,8 +45,6 @@ def main():
         subprocess.run(['git', *command], cwd=base, check=True)
     runtime_base = root / 'runtime'
     runtime = runtime_base / 'native-base-v1'
-    # Deliberately conflicting aliases test that the ENTRYPOINT enforces the guard.
-    # All paths are private even if that enforcement regresses.
     env = os.environ | dict(
         AGM_RUST_ENGINE='blaze', AGM_BLAZE_RUNTIME_HOME=str(runtime_base),
         AGM_BLAZE_IDLE_SECS='60', RA_JIT_HOME=str(root / 'old-ra'),
@@ -63,7 +60,6 @@ def main():
         except OSError:
             return []
 
-    # Include the two private decoy namespaces so failed enforcement still cleans up.
     namespaces = [runtime, runtime_base, root / 'old-ra', root / 'old-blaze']
 
     def private(pid):
@@ -86,7 +82,7 @@ def main():
                 return proc.wait(timeout=1200)
             finally:
                 if proc.poll() is None:
-                    proc.terminate()  # Only this invocation's recorded PID.
+                    proc.terminate()
                     proc.wait(timeout=5)
                 collect()
 
@@ -143,7 +139,6 @@ def main():
                     os.kill(pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-        # Only cleanup waits: never delay or repeat a build to hide stale output.
         deadline = time.monotonic() + 5
         survivors = [pid for pid in owned if private(pid)]
         while survivors and time.monotonic() < deadline:
@@ -153,7 +148,6 @@ def main():
         if survivors:
             raise RuntimeError(f'private processes survived SIGTERM: {survivors}; {root}')
     print(f'12 cases passed; private processes exited; evidence retained: {root}', flush=True)
-
 
 if __name__ == '__main__':
     main()

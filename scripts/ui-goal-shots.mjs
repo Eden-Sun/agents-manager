@@ -1,5 +1,3 @@
-// Seven screenshots of the live dev UI (5173, real daemon) for the UI polish goal:
-// chat dark/light, terminal, bot settings, 1024px, mobile. `OUT=dir node scripts/ui-goal-shots.mjs`.
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 const TOKEN = process.env.AM_TOKEN ?? readFileSync(process.env.HOME + '/.config/agents-manager/ui-token', 'utf8').trim()

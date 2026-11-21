@@ -1,12 +1,4 @@
 #!/bin/sh
-# issue #719 階段 3a：主機一致性補齊（apply）與還原（restore）腳本的原生驗證（macOS 的 /bin/sh、BSD 工具；Linux 也能跑）。
-#
-# 用法：sh scripts/ops/host-baseline-sync-mac-verify.sh
-#
-# 下面三段 heredoc 是 daemon 產生、送到主機上跑的同一份腳本（`crates/am-base/src/host_baseline/apply.rs`；
-# `cargo test -p am-base the_mac_verify_script_embeds_the_current_scripts` 守著它跟目前產生的一致）。
-# 全部在 mktemp -d 的假 HOME 裡跑、env -i 清掉環境，結束（含中斷）就整個刪掉；不碰真的 HOME。
-# 驗：列舉唯讀與壞備份／symlink 略過、只補不蓋、寫前備份與 manifest、權限、還原後逐 byte 相同、不可信 manifest 整個拒絕、10 份輪替、輸出不帶路徑。
 set -u
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/am-bl-verify.XXXXXX") || exit 1
 trap 'rm -rf "$WORK"' EXIT
@@ -448,7 +440,6 @@ has() { printf '%s\n' "$1" | grep -qx -- "$2"; }
 lacks() { ! printf '%s\n' "$1" | grep -q -- "$2"; }
 perm() { ls -ld "$1" | cut -c1-10; }
 newhome() { mktemp -d "$WORK/home.XXXXXX"; }
-# run_apply <HOME> <backup id>：換掉 ba_id 那一行後在乾淨環境跑。
 run_apply() {
   sed "s/^ba_id=.*/ba_id='$2'/" "$WORK/apply.sh" > "$WORK/a.sh"
   env -i HOME="$1" PATH=/usr/bin:/bin /bin/sh "$WORK/a.sh"
@@ -477,7 +468,6 @@ BK=.config/agents-manager/baseline-backup
 
 printf '# %s\n' "$(uname -srm)"
 
-# 1. symlink：目標、目標的目錄、備份根目錄。
 H=$(newhome)
 mkdir -p "$H/.codex"
 printf 'a = 1\n' > "$H/outside.toml"
@@ -500,7 +490,6 @@ check "symlink backup root stops everything" has "$out" 'AM_BA error backup_fail
 check "file untouched when the backup fails" test "$(cat "$H/.codex/config.toml")" = 'a = 1'
 check "nothing written through the backup symlink" test -z "$(ls "$H/bk")"
 
-# 2. 只補不蓋：鍵已在（各種寫法、不同值）。
 for existing in '[features]
 hooks = false' '[features] # c
   hooks=false # x' 'features.hooks = false
@@ -515,7 +504,6 @@ hooks = false' '[features] # c
   check "no backup when nothing written" test ! -e "$H/$BK"
 done
 
-# 3. 缺鍵：補上、寫前備份、manifest、權限。
 H=$(newhome)
 mkdir -p "$H/.codex"
 printf 'approval_policy = "AM-SECRET"\n\n[features]\nother = 1\n' > "$H/.codex/config.toml"
@@ -542,7 +530,6 @@ check "manifest records existed_before and mode" cmp -s "$WORK/want-manifest" "$
 out=$(run_apply "$H" "$(id_n 1)")
 check "second apply sees the key as present" has "$out" 'AM_BA key 0 present'
 
-# 4. 還原：逐 byte 相同、權限回來。
 out=$(run_restore "$H" "$ID1")
 check "restore reports the file" has "$out" 'AM_BR file codex/config.toml restored'
 check "restored byte-identical" cmp -s "$H/orig" "$H/.codex/config.toml"
@@ -551,7 +538,6 @@ check "restore output carries no path" lacks "$out" "$H"
 out=$(run_restore "$H" "$(id_n 9)")
 check "unknown backup is not_found" has "$out" 'AM_BR error not_found'
 
-# 4a. 唯讀列舉：好備份列出 allowlist metadata；壞 manifest 與 symlink 略過，目錄快照不變。
 H=$(newhome)
 mkdir -p "$H/.codex" "$H/.claude" "$H/$BK/$(id_n 0)/files" "$H/$BK/$(id_n 1)/files"
 printf 'current config\n' > "$H/.codex/config.toml"
@@ -572,7 +558,6 @@ check "listing output excludes file content and paths" lacks "$out" 'AM-SECRET'
 check "listing output excludes HOME path" lacks "$out" "$H"
 check "listing leaves directory, content, modes, and timestamps unchanged" test "$after" = "$before"
 
-# 5. 不可信 manifest：任一行不對整個拒絕，一個檔都不寫。
 for evil in 'file 2 1 600 /etc/passwd' 'file 2 1 600 claude-cc1/../../.ssh/settings.json' 'file 2 1 600 .ssh/id_rsa' 'exec rm -rf /' 'file 2 1 7777 claude-cc1/settings.json'; do
   H=$(newhome)
   mkdir -p "$H/.codex" "$H/.claude-cc1" "$H/$BK/$ID1/files"
@@ -594,7 +579,6 @@ out=$(run_restore "$H" "$ID1")
 check "symlinked backup file refused" has "$out" 'AM_BR error symlink'
 check "nothing restored from a symlinked backup" test "$(cat "$H/.codex/config.toml")" = 'features.hooks = true'
 
-# 6. 輪替：12 次之後只留最新 10 份，剛建的一定在，不是備份 id 形狀的不碰。
 H=$(newhome)
 mkdir -p "$H/.codex" "$H/$BK/keep-me"
 n=1

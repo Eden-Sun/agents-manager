@@ -1,8 +1,4 @@
 #!/bin/bash
-# kick-common.sh 缺席時的行為：每支 source 它的 kick 都不能靜默停擺——
-# 寫 log、不經 lib 直接 agm ops-alert、exit 1（agm 不在就只留 log，照樣 exit 1）。
-#
-#   bash scripts/ops/kick-common_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PASS=0; FAIL=0
@@ -12,7 +8,7 @@ bad() { echo "FAIL - $1"; FAIL=$((FAIL + 1)); }
 for k in ci-watch daemon-update herdr-update release-triage browser-gc; do
   for with_agm in 1 0; do
     R=$(mktemp -d); mkdir -p "$R/agm/bin"
-    cp "$HERE/$k-kick.sh" "$R/agm/bin/$k-kick.sh"      # 刻意不放 kick-common.sh
+    cp "$HERE/$k-kick.sh" "$R/agm/bin/$k-kick.sh"
     if [ "$with_agm" = 1 ]; then
       printf '#!/bin/bash\necho "$*" >> "%s/calls.log"\n' "$R" > "$R/agm/bin/agm"; chmod +x "$R/agm/bin/agm"
     fi

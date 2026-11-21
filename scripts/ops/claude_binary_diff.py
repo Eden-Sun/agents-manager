@@ -27,13 +27,12 @@ import tempfile
 import time
 
 CHUNK = 8 * 1024 * 1024
-OVERLAP = 1024  # 大於單一 describe 比對的最長長度（300 字元＋引號與括號）
+OVERLAP = 1024
 DESCRIBE_RE = re.compile(rb'\.describe\("((?:[^"\\]|\\.){20,300})"\)')
 ENV_RE = re.compile(rb"CLAUDE(?:_CODE)?_[A-Z0-9_]{3,40}")
 HELP_CAP = 1024 * 1024
 MAX_SUBCOMMANDS = 40
 FIELD_WIDTH = 240
-
 
 class Deadline:
     def __init__(self, seconds: float):
@@ -41,7 +40,6 @@ class Deadline:
 
     def left(self) -> float:
         return self.end - time.monotonic()
-
 
 def run_help(binary: str, args: list[str], deadline: Deadline, home: str) -> tuple[str | None, str]:
     """回傳 (輸出, 錯誤說明)；輸出為 None 代表沒跑成。"""
@@ -75,7 +73,6 @@ def run_help(binary: str, args: list[str], deadline: Deadline, home: str) -> tup
         return None, f"exit {proc.returncode} 且沒有輸出"
     return text, ""
 
-
 def subcommands(help_text: str) -> list[str]:
     names: list[str] = []
     in_commands = False
@@ -86,17 +83,15 @@ def subcommands(help_text: str) -> list[str]:
         if not in_commands:
             continue
         if line and not line.startswith(" "):
-            break  # 下一個區段
+            break
         m = re.match(r"^  ([a-z][a-z0-9-]*)(?:\|[a-z0-9|-]+)?(?:\s|$)", line)
         if m and m.group(1) != "help":
             names.append(m.group(1))
     return names
 
-
 def unified(old: str, new: str, label: str) -> list[str]:
     return list(difflib.unified_diff(old.splitlines(), new.splitlines(), f"OLD {label}", f"NEW {label}",
                                      lineterm="", n=0))
-
 
 def help_section(old: str, new: str, deadline: Deadline, home: str) -> list[str]:
     out = ["== HELP DIFF =="]
@@ -129,7 +124,6 @@ def help_section(old: str, new: str, deadline: Deadline, home: str) -> list[str]
             out += diff
     return out
 
-
 def scan(path: str, deadline: Deadline) -> tuple[set[str], set[str]]:
     fields: set[str] = set()
     envs: set[str] = set()
@@ -148,10 +142,8 @@ def scan(path: str, deadline: Deadline) -> tuple[set[str], set[str]]:
             tail = data[-OVERLAP:]
     return fields, envs
 
-
 def clip(text: str) -> str:
     return text if len(text) <= FIELD_WIDTH else text[:FIELD_WIDTH] + "…"
-
 
 def strings_section(old: str, new: str, deadline: Deadline) -> list[str]:
     try:
@@ -169,7 +161,6 @@ def strings_section(old: str, new: str, deadline: Deadline) -> list[str]:
     out.append(", ".join(sorted(old_envs - new_envs)) or "(無)")
     return out
 
-
 def cap(lines: list[str], max_lines: int, max_bytes: int) -> list[str]:
     result: list[str] = []
     size = 0
@@ -181,15 +172,12 @@ def cap(lines: list[str], max_lines: int, max_bytes: int) -> list[str]:
         result.append(line)
     return result
 
-
 def build_report(old: str, new: str, timeout: float, max_lines: int, max_bytes: int) -> str:
     with tempfile.TemporaryDirectory(prefix="claude-binary-diff-") as home:
         lines = ["Claude binary diff（決定性比較；唯讀，未實測任何新功能）", f"OLD={old}", f"NEW={new}"]
-        # 兩個區塊各自一份逾時：--help 卡住不該害 binary 字串掃描沒機會跑。
         lines += help_section(old, new, Deadline(timeout), home)
         lines += strings_section(old, new, Deadline(timeout))
     return "\n".join(cap(lines, max_lines, max_bytes)) + "\n"
-
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -205,7 +193,6 @@ def main(argv: list[str]) -> int:
             return 2
     sys.stdout.write(build_report(args.old, args.new, args.timeout, args.max_lines, args.max_bytes))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

@@ -1,10 +1,3 @@
-// AGM 總管面板的畫面證據（驗收狀態、系統故障）。
-//
-// **走 mock，不碰正式 daemon 也不碰 5173**：`VITE_MOCK=1`，自己起一個 vite（預設 5199）。
-// 這份改動會改交辦狀態的說法，用真 session 驗等於燒使用者的額度。
-//
-//   cd web && VITE_MOCK=1 bunx vite --port 5199 &
-//   OUT=docs/screenshots/agm-reliability node scripts/shots-agm-reliability.mjs
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
@@ -51,18 +44,15 @@ const openPanel = async () => {
 await openPanel()
 await shot('1-before-setup')
 
-// 建立 + 啟動：mock 的啟動會給一筆 delivered 與一筆 awaiting_review 的交辦。
 await ev(`[...document.querySelectorAll('.agm-panel button')].find(b=>b.textContent.includes('建立 AGM 環境'))?.click()`)
 await sleep(700)
 await ev(`[...document.querySelectorAll('.agm-panel button')].find(b=>b.textContent.trim().startsWith('啟動'))?.click()`)
 await sleep(900)
 await shot('2-awaiting-review')
 
-// 面板往下捲，看交辦清單與系統故障那一段。
 await ev(`document.querySelector('.agm-panel')?.scrollIntoView(false); document.querySelector('.modal-body,.agm-panel')?.scrollTo(0, 9999)`)
 await shot('3-assignments-and-incidents')
 
-// 檢查文案：等驗收那筆不能被畫成已完成。
 const text = await ev(`document.querySelector('.agm-panel')?.innerText ?? ''`)
 const checks = [
   ['面板不畫遠端入口（手機 Remote Control 已廢，#1477）', !/遠端入口|Remote Control/.test(text)],

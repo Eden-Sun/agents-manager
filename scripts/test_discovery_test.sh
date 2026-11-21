@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# 每一支測試檔都要有人會跑它：check.sh ops 只撈 scripts/*_test.sh 與 scripts/ops/*_test.sh，另外直接點名 agm_test.py／ob_test.py／ob_browser_test.mjs；
-# 其他測試檔（例如 .py）必須被某支會跑的腳本點名。放錯位置或命名不合（`foo-test.sh` 少了底線、放在子目錄）的測試檔
-# 會變成「看起來有測試、其實從來沒跑過」——這支把它擋下來。
-#
-# 例外只有兩支需要真的在跑的 daemon 才能執行的手動端到端腳本，在下面明列。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# 需要運作中的 daemon／sshd 的手動端到端腳本，不進 check.sh。
 MANUAL="scripts/hook-timing-test.sh scripts/remote-loop-test.sh"
 
 fail=0
@@ -20,7 +14,6 @@ runs_directly() {
     return 1
 }
 
-# 非直接入口的測試只能由明列的 wrapper 執行；新增 wrapper 時要在這裡登記。
 wrapper_for() {
     case "$1" in
         scripts/ops/browser_gc_linux_test.py) echo scripts/ops/browser-gc-linux_test.sh ;;

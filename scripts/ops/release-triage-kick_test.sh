@@ -1,9 +1,4 @@
 #!/bin/bash
-# release-triage-kick.sh 的隔離測試：自己的 AGM 目錄、假的 `bin/agm`／`agents-managerd`，完全不碰正式 AGM、
-# daemon 或 gh。測的是決策：什麼時候派、派幾次、派給誰、額度閘門、鎖回收、最小 PATH。
-# `release-triage-check` 本身（版本比較、切條、分桶）由 daemon 的 cargo test 釘住，這裡的假二進位只吐固定 JSON。
-#
-#   bash scripts/ops/release-triage-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/release-triage-kick.sh"
@@ -18,7 +13,6 @@ setup() {
   cp "$HERE/fixtures/patrol-runtime.json" "$AGM_DIR/runtime.json"
   echo "TASK-BODY-MARKER 交辦正文" > "$AGM_DIR/release-triage-task.md"
 
-  # 假 agm：assign／quota／state／ops-alert；未知旗標一律 exit 2（2026-09-16 `--request-id` 拼錯事故的教訓）。
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/calls.log"
@@ -79,8 +73,6 @@ GH
   chmod +x "$AGM_DIR/bin/gh"
   export GH_BIN="$AGM_DIR/bin/gh"
 
-  # 假 agents-managerd：只認 `release-triage-check --kind <k> --json`，吐 $ROOT/triage/<k>.json；
-  # 該檔不存在＝這個 kind 檢查失敗（exit 1）。
   cat > "$ROOT/fake-agents-managerd" <<'PYEOF'
 #!/bin/bash
 [ "${1:-}" = "release-triage-check" ] && [ "${2:-}" = "--kind" ] && [ "${4:-}" = "--json" ] || exit 2
@@ -106,7 +98,6 @@ teardown() {
   unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_PUBLISH_SLEEP STUB_OLD_AGM STUB_AUTO_ENABLED STUB_AUTO_FAIL STUB_AUTO_JSON
 }
 
-# mk_pending <kind> <to> <version…>：每版 2 條 kept、1 條 unmatched。
 mk_pending() {
   local kind="$1" to="$2"; shift 2
   python3 - "$kind" "$to" "$ROOT/triage/$kind.json" "$@" <<'PY'
@@ -145,7 +136,6 @@ start_live_runner() {
 assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 assignment_ids() { sed -n '/ assign /s/.*--request-id \([^ ]*\).*/\1/p' "$AGM_DIR/calls.log"; }
 
-# 1. 四個 kind 的 pending 都是空的：不派、不寫 log。
 setup
 mk_empty claude; mk_empty codex
 /bin/bash "$SCRIPT" >"$ROOT/empty.out" 2>"$ROOT/empty.err"
@@ -156,7 +146,6 @@ equals "pending 空：四個 kind 都檢查過" "$(wc -l < "$AGM_DIR/check.log" 
 check_no "pending 空：連額度都不查" "quota" "$AGM_DIR/calls.log"
 teardown
 
-# 2. 有 pending：派一次，request-id 正確，交辦帶正文與 JSON，派給協調者、不派給巡檢自己。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 bash "$SCRIPT"
@@ -171,8 +160,6 @@ check "交辦帶 unmatched" "2.1.278-u0" "$AGM_DIR/assign-body.txt"
 check "有記 log" "claude → 2.1.278：已派" "$AGM_DIR/release-triage.log"
 teardown
 
-# 2b. 兩版一批（#1043）：正文同時帶兩版的 JSON；dispatched 一次把兩版都標上、收件 bot 一起記，
-# 這樣 worker 之後 `show` 才看得到兩版的 dispatch_gen（模板要它一版一版交）。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 bash "$SCRIPT"
@@ -182,7 +169,6 @@ check "dispatched 一次帶兩版" "release-triage dispatched --kind claude --ve
 equals "dispatched 只打一次" "$(grep -c ' dispatched ' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 teardown
 
-# 3. 兩個 kind 各自獨立：各派一則、request-id 各自帶自己的 to；一個 kind 檢查失敗不影響另一個。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0
 bash "$SCRIPT"
@@ -191,7 +177,6 @@ check "claude 的 request-id" "\-\-request-id release-triage-claude-2.1.278-" "$
 check "codex 的 request-id" "\-\-request-id release-triage-codex-0.155.0-" "$AGM_DIR/calls.log"
 equals "額度一輪只查一次" "$(grep -c ' quota' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
 teardown
-# 3a. agy／grok（#1928）跟 claude／codex 同一條路：各派一則、request-id 與通知 id 帶自己的 kind 與版本。
 setup
 mk_pending agy 1.4.6 1.4.5 1.4.6; mk_pending grok 1.0.67 1.0.67
 bash "$SCRIPT"
@@ -212,7 +197,6 @@ check "codex 有派" "release-triage-codex-0.155.0" "$AGM_DIR/calls.log"
 check "claude 失敗有記 log" "release-triage-check --kind claude 失敗" "$AGM_DIR/release-triage.log"
 teardown
 
-# 4. 一則交辦最多 5 版：多的留給下一輪，request-id 用這批最後一版（不會跟下一批撞同一個 id）。
 setup
 mk_pending claude 2.1.290 2.1.281 2.1.282 2.1.283 2.1.284 2.1.285 2.1.290; mk_empty codex
 bash "$SCRIPT"
@@ -221,7 +205,6 @@ check "request-id 用這批最後一版" "release-triage-claude-2.1.285" "$AGM_D
 check "第 6 版不在正文的 pending" '"deferred_versions"' "$AGM_DIR/assign-body.txt"
 check_no "第 6 版的條目不在這則" "2.1.290-k0" "$AGM_DIR/assign-body.txt"
 teardown
-# 4b. kept+unmatched 合計 80 條：每版 3 條，27 版＝81 條，第 27 版留給下一輪（先受 5 版上限，改用大版本測 80 條）。
 setup
 python3 - "$ROOT/triage/claude.json" <<'PY'
 import json, sys
@@ -238,7 +221,6 @@ check "50＋40 超過 80：第二版留下一輪" "release-triage-claude-2.0.1" 
 check_no "第二版條目不在這則" "2.0.2-0" "$AGM_DIR/assign-body.txt"
 teardown
 
-# 5. 額度閘門：5h 86% → 不派；84% → 派；limit_hit → 不派；端點壞或找不到額度格 → 照派並記 log。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":86.0},"limit_hit":null}}}'
@@ -271,7 +253,6 @@ export STUB_QUOTA_JSON='{"kinds":{"codex":{"five_hour":{"used_pct":99.0},"limit_
 bash "$SCRIPT"
 equals "看別的 kind 的額度不影響 claude bot（找不到格＝照派）" "$(assigns)" "1"
 teardown
-# 5b. 額度認的是「被派的那顆 bot 的身份」：release_bot_id 的 identity 是 cc1 → 看 claude:cc1 這一格。
 setup
 cp "$HERE/fixtures/herdr-update-runtime.json" "$AGM_DIR/runtime.json"
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
@@ -279,14 +260,12 @@ export STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":5.0},"limit_
 bash "$SCRIPT"
 equals "cc1 那格 90%：不派" "$(assigns)" "0"
 teardown
-# 5c. 閘門擋下後兩個 kind 都不派，而且只查一次額度。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_pending codex 0.155.0 0.155.0
 export STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":95.0},"limit_hit":null}}}'
 bash "$SCRIPT"
 equals "擋下時兩個 kind 都不派" "$(assigns)" "0"
 teardown
-# 5d. 門檻可調。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export AGM_TRIAGE_QUOTA_MAX=95 STUB_QUOTA_JSON='{"kinds":{"claude":{"five_hour":{"used_pct":90.0},"limit_hit":null}}}'
@@ -294,7 +273,6 @@ bash "$SCRIPT"
 equals "門檻調到 95：90% 照派" "$(assigns)" "1"
 teardown
 
-# 6. 殘留鎖（pid 不存在）：回收並接手這一輪。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 mkdir "$AGM_DIR/release-triage.lock"; echo "999999 1" > "$AGM_DIR/release-triage.lock/owner"
@@ -304,7 +282,6 @@ equals "殘留鎖：回收後照派" "$(assigns)" "1"
 check "殘留鎖：有記回收 log" "清掉殘留鎖" "$AGM_DIR/release-triage.log"
 [ ! -d "$AGM_DIR/release-triage.lock" ] && { echo "ok   - 跑完鎖有釋放"; PASS=$((PASS + 1)); } || { echo "FAIL - 跑完鎖有釋放"; FAIL=$((FAIL + 1)); }
 teardown
-# 6b. 舊格式的鎖（沒有 owner 檔）也回收；剛建立的鎖（< STALE_SECS）先不動。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 mkdir "$AGM_DIR/release-triage.lock"
@@ -316,8 +293,6 @@ bash "$SCRIPT"
 equals "沒有 owner 檔的舊鎖：過了門檻就回收" "$(assigns)" "1"
 teardown
 
-# 7a. 剛拿到鎖的活鎖（同一秒內另一個排程也啟動了，例如 com.agm.release-triage 與相容入口 com.agm.claude-release
-#     兩個 timer 同時到點）：這是正常重疊，照樣擋下不派，但不寫 log——否則每個 tick 都洗一行「已有執行者（0 秒）」。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 start_live_runner
@@ -327,8 +302,6 @@ check_no "剛拿到的活鎖：不洗 log" "已有執行者" "$AGM_DIR/release-t
 check_no "剛拿到的活鎖：不喊人" "ops-alert" "$AGM_DIR/calls.log"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
-# 7. 活鎖（執行者還在、指令列是這支腳本）：擋下；卡太久推 ops-alert，仍不搶鎖。
-#    QUIET_SECS=0＝連剛拿到的鎖也記 log，才驗得到「有記」這一條。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 start_live_runner
@@ -343,8 +316,6 @@ check "活鎖卡太久：推 ops-alert" "ops-alert .*\-\-reason runner_hung" "$A
 equals "活鎖卡太久：仍不搶鎖、不派" "$(assigns)" "0"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
-# 7c. 鎖的時間在未來（時鐘倒退、鎖是搬來的）：年齡算出來是負的，不能因為「小於安靜門檻」就永遠安靜跳過——
-#     活鎖要記 log 說年齡不可信；執行者已死的鎖不能卡到時鐘追上才回收。
 future_lock() { python3 -c 'import os,sys,time; t=time.time()+7200; os.utime(sys.argv[1],(t,t))' "$AGM_DIR/release-triage.lock"; }
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
@@ -361,7 +332,6 @@ mkdir "$AGM_DIR/release-triage.lock"; echo "999999 $(date +%s)" > "$AGM_DIR/rele
 bash "$SCRIPT"
 equals "未來時間的死鎖：回收後照派" "$(assigns)" "1"
 teardown
-# 7b. pid 還活著但不是這支腳本（pid 被別的程序重用）：視為殘留，回收。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 bash -c 'sleep 30; :' & LIVE=$!
@@ -373,7 +343,6 @@ equals "pid 被別的程序重用：回收後照派" "$(assigns)" "1"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
-# guard 路徑若是 symlink 必須 fail closed，不能截斷外部目標或派工。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 printf 'preserve outside guard target\n' > "$ROOT/guard-target"
@@ -384,7 +353,6 @@ check "guard symlink 推 lock_unavailable" "lock_unavailable" "$AGM_DIR/calls.lo
 equals "guard symlink 下不派" "0" "$(assigns)"
 teardown
 
-# pid 重用後的 command line 可能帶著 kick 名稱，但只有 bash 真正以本腳本為入口才算活 runner。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 bash -c 'sleep 30; :' release-triage-kick & LIVE=$!
@@ -397,13 +365,11 @@ check "重用 PID 不再被判成活 runner" "清掉殘留鎖" "$AGM_DIR/release
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
-# 8. launchd 的最小環境：env -i、PATH 只有 /usr/bin:/bin，用系統 /bin/bash 跑（macOS 內建 3.2）也要跑得起來。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 env -i PATH=/usr/bin:/bin AGM_DIR="$AGM_DIR" AM_BINARY="$AM_BINARY" /bin/bash "$SCRIPT"
 equals "env -i 最小 PATH：照派" "$(assigns)" "1"
 teardown
-# 8b. 找不到 python3：log＋ops_alert，不是靜默 exit 0（PATH 只放少數幾個工具，AGM_EXTRA_PATH 清空）。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 mkdir "$ROOT/nopy"; for t in date cat seq dirname; do ln -s "$(command -v $t)" "$ROOT/nopy/$t"; done
@@ -413,12 +379,10 @@ check "缺 python3：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/ca
 equals "缺 python3：不派" "$(assigns)" "0"
 teardown
 
-# 9. 假 agm 對未知旗標要 exit 2（守住 stub 本身，`--client-request-id` 拼錯就會被抓到）。
 setup
 "$AGM_DIR/bin/agm" --compact assign --bot x --client-request-id y 2>/dev/null; equals "stub 對未知旗標 exit 2" "$?" "2"
 teardown
 
-# 10. 派工失敗：記 log，下一輪再試（沒有 state 檔要寫——同一批由 daemon 的 request-id 去重）。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_ASSIGN_FAIL=1
@@ -429,7 +393,6 @@ bash "$SCRIPT"
 equals "下一輪重派（同一個 request-id）" "$(grep -c 'release-triage-claude-2.1.278' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
-# 10c. stale dispatched 重排後是新一代交辦：request-id 改變，避免 daemon 去重回傳舊 assignment。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 cat > "$AGM_DIR/show-claude.json" <<'JSON'
@@ -437,7 +400,6 @@ cat > "$AGM_DIR/show-claude.json" <<'JSON'
 JSON
 bash "$SCRIPT"
 FIRST_ID=$(assignment_ids | tail -1)
-# requeue_stale 會把狀態改回 pending、保留 dispatch_gen=1；下一次要派第 2 代。
 cat > "$AGM_DIR/show-claude.json" <<'JSON'
 {"rows":[{"kind":"claude","version":"2.1.278","status":"pending","dispatch_gen":1}]}
 JSON
@@ -449,7 +411,6 @@ SECOND_ID=$(assignment_ids | tail -1)
 equals "stale requeue 實際重新派一次" "$(assigns)" "2"
 teardown
 
-# 10d. 同一目標版號改派不同 pending 子集時，request-id 也要不同。
 setup
 mk_pending claude 2.1.290 2.1.281; mk_empty codex
 bash "$SCRIPT"
@@ -466,7 +427,6 @@ else
 fi
 teardown
 
-# 10b. 連續派工失敗：一次不喊人，連續 N 輪推 ops_alert check_failing；成功一輪清零。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_ASSIGN_FAIL=1 AGM_FAIL_ALERT_AFTER=3
@@ -480,7 +440,6 @@ bash "$SCRIPT"
 unset AGM_FAIL_ALERT_AFTER
 teardown
 
-# 11. 派給誰：release_bot_id ＞ responder；AGM_RELEASE_BOT 蓋過；都沒有就跳過。
 setup
 cp "$HERE/fixtures/herdr-update-runtime.json" "$AGM_DIR/runtime.json"
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
@@ -501,7 +460,6 @@ check "找不到對象就跳過" "找不到要派給誰" "$AGM_DIR/release-triag
 equals "找不到對象不亂派" "$(assigns)" "0"
 teardown
 
-# 12. binary 或 task 不在：記 log 跳過，不當機。
 setup
 mk_pending claude 2.1.278 2.1.278
 export AM_BINARY="$ROOT/no-such-binary"
@@ -510,7 +468,6 @@ check "binary 不在就跳過" "找不到" "$AGM_DIR/release-triage.log"
 equals "binary 不在不派" "$(assigns)" "0"
 teardown
 
-# 13. 派成功 → 對這一則實際帶出去的版本標 dispatched（截斷時只標截斷後那批）；派失敗不標。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 bash "$SCRIPT"
@@ -539,7 +496,6 @@ mk_empty claude; mk_empty codex
 bash "$SCRIPT"
 check_no "沒 pending：不標 dispatched" "dispatched" "$AGM_DIR/calls.log"
 teardown
-# 13b. dispatched 失敗：記 log、不重派、exit 0。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_DISPATCHED_FAIL=1
@@ -548,7 +504,6 @@ equals "dispatched 失敗：不重派" "$(assigns)" "1"
 check "dispatched 失敗有記 log" "標記 dispatched 失敗" "$AGM_DIR/release-triage.log"
 teardown
 
-# 14. publish：每輪每個 kind 各一次（不論有沒有 pending）；沒東西要重試時安靜。
 setup
 mk_empty claude; mk_empty codex
 bash "$SCRIPT"
@@ -578,7 +533,6 @@ bash "$SCRIPT"
 check "publish 成功有記 log" "2.1.1：publish published" "$AGM_DIR/release-triage.log"
 teardown
 
-# 15. 舊 agm 不認得 release-triage（exit 2）：只講一次；無法讀帳本時不派。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_OLD_AGM=1
@@ -589,7 +543,6 @@ bash "$SCRIPT"; bash "$SCRIPT"
 equals "舊 agm：說明只寫一次" "$(grep -c '不認得 release-triage' "$AGM_DIR/release-triage.log" | tr -d ' ')" "1"
 teardown
 
-# agm CLI 不在：整輪不跑，但要留一行 log，不能安靜 exit 0（#375）。
 setup
 chmod -x "$AGM_DIR/bin/agm"
 bash "$SCRIPT"; RC=$?
@@ -597,7 +550,6 @@ equals "agm 不在：exit 0" "$RC" "0"
 check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/release-triage.log"
 teardown
 
-# issue #204：Claude binary diff 與 changelog 分診合併成同一則交辦。
 setup
 mk_empty claude; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"
@@ -624,7 +576,6 @@ check "合併交辦使用 changelog notice id" "通知 request-id（child 需原
 check_no "合併後不再指示第二則 binary 公告" "agm-claude-release-<新版號>-notice" "$AGM_DIR/assign-body.txt"
 teardown
 
-# Installed Claude binary can advance after its changelog row was already dispatched; still run one binary-only task.
 setup
 mk_empty claude; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"
@@ -642,7 +593,6 @@ check "binary-only 用專屬 notice id 避免撞上先前 changelog 通知" "通
 check_no "binary-only 不重用 changelog notice id" "通知 request-id（child 需原樣使用）：agm-release-triage-claude-2.1.279-notice" "$AGM_DIR/assign-body.txt"
 teardown
 
-# A successful assign followed by a failed ledger mark must retry the same combined body and only then advance binary state.
 setup
 mk_pending claude 2.1.279 2.1.279; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"
@@ -660,7 +610,6 @@ equals "同一份合併正文兩次都帶 binary diff" "$(grep -c 'CLAUDE_BINARY
 equals "dispatched 成功後才推進 binary state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
 teardown
 
-# A failed assignment leaves the binary state behind so the next scheduled run retries the same diff.
 setup
 mk_empty claude; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"
@@ -677,7 +626,6 @@ equals "下一輪 binary diff 重試成功後才前進" "$(cat "$AGM_DIR/claude-
 equals "binary diff assign 失敗後重試" "$(grep -c 'release-triage-claude-binary-2.1.279' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
-# 2026-10-03：分診開出的 issue 交給分診 bot 接手——未交接的交一次、留言型不交，久遠的漏交也補送；失敗下一輪再試。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -714,7 +662,6 @@ equals "交接檔遺失沿用相同 request-id 補送" "$(grep -c 'request-id re
 equals "補送成功恢復持久交接記錄" "$(paste -sd , "$AGM_DIR/release-issue-handed")" "901,903"
 teardown
 
-# Timestamp validity is irrelevant to durable handoff eligibility.
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -732,7 +679,6 @@ equals "缺建立時間也補送" "$(grep -c 'request-id release-issue-907' "$AG
 equals "時間戳不再影響交接成敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
 teardown
 
-# Missing handoff prerequisites must retain the new issue for retry and raise the normal failure status.
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -756,7 +702,6 @@ equals "交接成功清除失敗狀態" "$(cat "$AGM_DIR/release-triage.fails" 2
 equals "交接成功記錄 issue" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" "906"
 teardown
 
-# Assignment success without a durable handed marker must stay visible and retryable.
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -777,7 +722,6 @@ equals "狀態檔恢復後記錄 issue" "$(cat "$AGM_DIR/release-issue-handed")"
 equals "交接成功清掉狀態檔失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
 teardown
 
-# issue #519：合併分診只用一個通知 id；binary-only 留著獨立命名空間，避免舊 changelog 通知衝突。
 TRIAGE_TASK="$HERE/release-triage-task.md"
 CLAUDE_TASK="$HERE/claude-release-diff-task.md"
 check "一般／合併分診公告 id 帶管線與 kind" "agm-release-triage-<kind>-<新版號>-notice" "$TRIAGE_TASK"
@@ -785,12 +729,8 @@ check "binary-only 使用舊版獨立公告 id 命名空間" "agm-claude-release
 check "binary diff supplement 不另送通知" "不要另送通知" "$CLAUDE_TASK"
 check "binary-only kick 輸出獨立公告 id" 'NOTICE_ID="agm-claude-release-${TO}-notice"' "$SCRIPT"
 check "正常 kick 輸出分診公告 id" 'NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"' "$SCRIPT"
-# 派工本身的 crid 是另一回事，不能被這次改動波及：`claude_review.rs` 用 agm-claude-release-<ver>
-# 讓網頁按鈕與 kick 冪等地指到同一筆（見該檔 :10／:142），所以那個**沒有** -notice 尾巴的 id 要留著。
 check "kick 的 changelog 派工 request-id 含 kind、to 與代號指紋" 'prefix = f"release-triage-{kind}-{to}"' "$SCRIPT"
 
-# stale lock reclaim must be serialized: two ticks that both observed the dead owner
-# must not delete each other's newly acquired lock and dispatch the same batch twice.
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 mkdir -p "$ROOT/bin" "$AGM_DIR/release-triage.lock"
@@ -815,8 +755,6 @@ exec /bin/rm "$@"
 STUB
 chmod +x "$ROOT/bin/rm"
 export AGM_EXTRA_PATH="$ROOT/bin" AGM_LOCK_STALE_SECS=0 STUB_PUBLISH_SLEEP=2
-# ops 的 destructive-canary 把 `rm` 做成 export -f 的函式（#1964：macOS 夜間印出 `rm is a function`）：函式比 PATH 上的 stub 優先，
-# 所以 stub 一次都沒被呼叫、兩輪沒有被卡住而是先後各跑一次。這一段把 rm 暫時換成「轉給 stub」的函式，跑完還原原本的（canary 的）定義。
 _saved_rm=$(declare -f rm 2>/dev/null || true)
 export ROOT
 rm() { "$ROOT/bin/rm" "$@"; }
@@ -832,7 +770,6 @@ unset -f rm
 if [ -n "$_saved_rm" ]; then eval "$_saved_rm"; export -f rm; fi
 equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "$AGM_DIR/race-b-started" ] && echo 1 || echo 0)"
 equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
-# 診斷（#1964：macOS 夜間派了兩次，原因未定）：不一致時把兩輪的 log 與呼叫紀錄印出來，下一輪 macOS 就看得到是 guard 沒擋住還是 rm stub 沒攔到。
 if [ "$(assigns)" != "1" ]; then
   for f in "$ROOT/race-a.log" "$ROOT/race-b.log" "$AGM_DIR/calls.log" "$AGM_DIR/release-triage.log" "$AGM_DIR/rm-stub.log"; do echo "--- $f"; sed 's/^/    /' "$f" 2>/dev/null | head -20; done
   ls "$AGM_DIR" | sed 's/^/    ls: /'
@@ -841,7 +778,6 @@ if [ "$(assigns)" != "1" ]; then
 fi
 teardown
 
-# 9. daemon 的 Claude API 分診（#1919）：API 全包＝不派協調者、不查額度、不標 dispatched。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"empty","status":"empty","quiet":false}],"binary_used":false}'
@@ -853,7 +789,6 @@ check "API 分診有記 log" "API 分診完成 2.1.277" "$AGM_DIR/release-triage
 check "auto 帶兩個版本" "release-triage auto --kind claude --version 2.1.277 --version 2.1.278" "$AGM_DIR/calls.log"
 teardown
 
-# 9b. 沒開（--check 回 false）：不呼叫 auto，照舊派協調者，log 安靜。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 bash "$SCRIPT"
@@ -862,7 +797,6 @@ check_no "沒開：不呼叫 auto 本體" "auto --kind claude --version" "$AGM_D
 check_no "沒開：log 不吵" "API 分診" "$AGM_DIR/release-triage.log"
 teardown
 
-# 9c. 部分退回：成功的版本不再進交辦，退回的照派，request-id 與 TO 用剩下的最後一版。
 setup
 mk_pending claude 2.1.278 2.1.277 2.1.278; mk_empty codex
 export STUB_AUTO_ENABLED=true STUB_AUTO_JSON='{"results":[{"version":"2.1.277","outcome":"judged","status":"judged","quiet":false},{"version":"2.1.278","outcome":"failed","reason":"驗證不過：缺 verdict","quiet":false}]}'
@@ -872,7 +806,6 @@ check_no "API 失敗不標 dispatched" "dispatched --kind" "$AGM_DIR/calls.log"
 check "失敗原因進 log" "API 分診失敗 2.1.278：驗證不過：缺 verdict" "$AGM_DIR/release-triage.log"
 teardown
 
-# 9d. auto 本身失敗（舊 daemon 404／逾時）：照派協調者。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 export STUB_AUTO_ENABLED=true STUB_AUTO_FAIL=1
@@ -881,7 +814,6 @@ equals "auto 失敗：不派協調者" "$(assigns)" "0"
 check "auto 失敗有記 log" "release-triage auto --kind claude 失敗" "$AGM_DIR/release-triage.log"
 teardown
 
-# 9e. binary diff：產出報告交給 API；API 併進通知（binary_used）後推進 claude-release.last，不再派 binary-only。
 setup
 mk_pending claude 2.1.279 2.1.279; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"; sleep 1; mkdir -p "$ROOT/claude-versions/2.1.279"
@@ -896,7 +828,6 @@ check "報告用 OLD／NEW 兩個路徑" "2.1.278" "$AGM_DIR/auto-diff.txt"
 equals "binary_used 後推進 binary state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
 teardown
 
-# 9f. binary diff 沒被 API 用到（binary_used=false）：changelog 由 API 判完，binary 留給一則 binary-only 交辦，state 不前進直到派成功。
 setup
 mk_pending claude 2.1.279 2.1.279; mk_empty codex
 mkdir -p "$ROOT/claude-versions/2.1.278"; sleep 1; mkdir -p "$ROOT/claude-versions/2.1.279"
@@ -909,10 +840,9 @@ check_no "不標 dispatched" "dispatched --kind" "$AGM_DIR/calls.log"
 check_no "不查 bot 額度" " quota" "$AGM_DIR/calls.log"
 teardown
 
-# API -> gh publish -> 同輪 release-issue-task；不用另派 AGM 做分析或等下一輪。
 setup
 cp "$HERE/fixtures/herdr-update-runtime.json" "$AGM_DIR/runtime.json"
-rm "$AGM_DIR/release-triage-task.md" # API prompt 內建，不應要求舊 AGM 分診任務檔。
+rm "$AGM_DIR/release-triage-task.md"
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -930,7 +860,6 @@ bash "$SCRIPT"
 equals "已交接 issue 重跑不重派實作" "$(assigns)" "1"
 teardown
 
-# 前後兩次 handoff 與不同 kind 的所有待交接票都在同輪送出。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -955,7 +884,6 @@ equals "跨前後掃描與下輪仍不重查關閉票" "$(grep -c 'issue view ht
 check "已送 1006" "request-id release-issue-1006" "$AGM_DIR/calls.log"
 teardown
 
-# 交辦失敗不截斷待交接清單，保留所有失敗項目供後續重試。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -969,7 +897,6 @@ equals "交辦失敗仍嘗試全部七張" "$(assigns)" "7"
 equals "失敗的票不標記已交" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" ""
 teardown
 
-# CLOSED 持久略過；狀態查詢失敗不當作 OPEN，恢復後補送；缺 URL 可用帳本 repo。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
@@ -991,7 +918,6 @@ equals "已關閉 issue 下輪不再查詢" "$(grep -c 'issue view https://x/120
 check "查詢恢復後補送" "request-id release-issue-1202" "$AGM_DIR/calls.log"
 teardown
 
-# 已關閉但持久紀錄寫不進去：不交接、下輪重查並補寫。
 setup
 mk_empty claude; mk_empty codex
 cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"

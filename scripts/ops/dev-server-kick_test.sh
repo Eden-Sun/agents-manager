@@ -1,14 +1,4 @@
 #!/bin/bash
-# dev-server-kick.ts 的隔離測試（issue #418）：假的 lsof／ps／git／bun／node，測試用的 port 與
-# 暫存目錄當 REPO，**絕對不碰真的 5173 與真的 vite**。
-#
-# 安全規則（issue #422）：
-# - 副本的 PORT 換成測試 port，跑之前先斷言副本裡一個 5173 都不剩。
-# - 這支腳本用 `Bun.spawn` 叫外部指令，**shell 函式攔不住**，所以危險指令一律靠 PATH 上的替身，
-#   而且假 lsof 只肯回報「測試自己 spawn 出來的 pid」（記在 fix/spawned）——腳本的 process.kill
-#   因此永遠只可能殺到測試自己的 sleep，殺不到任何真的行程。
-#
-#   bash scripts/ops/dev-server-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${HERE}/dev-server-kick.ts"
@@ -20,8 +10,6 @@ check() {
   else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null | head -20; FAIL=$((FAIL + 1)); fi
 }
 
-# 真 binary 的絕對路徑要先抓：跑腳本時 PATH 換成 fakebin，用名字找會拿到假的
-# （第一版就是這樣讓 `bun "$SCRIPT"` 打到假 bun，整組測試空跑成假綠）。
 BUN="$(command -v bun || true)"
 PY3="$(command -v python3 || true)"
 [ -n "$BUN" ] || { echo "skip - 沒有 bun，跳過 dev-server-kick.ts 的測試"; echo "0 passed, 0 failed"; exit 0; }
@@ -31,19 +19,13 @@ for pat in 'const PORT = 5173' "const pinned = join(HOME, '.local/bin/node')"; d
   grep -q -- "${pat}" "${SRC}" || { echo "FAIL - 原腳本找不到 '${pat}'，測試的替換要更新"; exit 1; }
 done
 
-# 測試用 port：挑一個沒人在聽、也沒有別份這支測試佔著的。5173 絕對不准用。
-# 只看「現在有沒有人在聽」不夠：各段之間 port 是空的，同一台機器上兩份測試（CI 跟某顆 bot 的
-# check.sh）會挑到同一個 port，一份的 serve／teardown 打到另一份的情境——健康那組被當成
-# 「沒人聽」去起 vite，log 多出別份測試 curl 進來的存取紀錄（#836）。所以整支跑完前用鎖目錄
-# 佔住這個 port（mkdir 是原子的；macOS 沒有 flock），鎖的主人死了就收回。
 PORT_LOCK=""
 release_port() { [ -n "$PORT_LOCK" ] && rm -rf "$PORT_LOCK"; }
 trap release_port EXIT
-claim_port() { # <port>：拿到鎖回 0
+claim_port() {
   local lock="${TMPDIR:-/tmp}/agm-dev-server-kick_test.$1.lock" owner
   if ! mkdir "$lock" 2>/dev/null; then
     owner="$(cat "$lock/pid" 2>/dev/null)"
-    # 剛 mkdir、還沒寫 pid 的那一瞬間也算有人在用；只有寫了 pid 而且那顆已經不在才收回。
     [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null || return 1
     rm -rf "$lock"
     mkdir "$lock" 2>/dev/null || return 1
@@ -53,7 +35,7 @@ claim_port() { # <port>：拿到鎖回 0
   PORT_LOCK="$lock"
 }
 PORT=""
-for _ in $(seq 1 120); do   # 別份在跑就等它（最多約 2 分鐘），不要直接跳過整組
+for _ in $(seq 1 120); do
   for p in 53173 53174 53175 53176; do
     if claim_port "$p"; then PORT="$p"; break 2; fi
   done
@@ -68,13 +50,10 @@ setup() {
   LOG="$ROOT/agm/dev-server.log"; : > "$LOG"
   : > "$FIX/spawned"; : > "$FIX/lsof.txt"; : > "$FIX/calls.log"
   SCRIPT="$ROOT/agm/bin/dev-server-kick.ts"
-  # REPO 不改原始碼：跑的時候由 AGM_DEV_REPO 指到暫存目錄（run()），推導規則另外測（第 12 組）。
   sed -e "s#const PORT = 5173#const PORT = ${PORT}#" \
       -e "s#const pinned = join(HOME, '.local/bin/node')#const pinned = '${BIN}/node'#" \
       "$SRC" > "$SCRIPT"
 
-  # 假 lsof：只回報 fix/lsof.txt 裡、而且「還活著且是測試自己 spawn 的」pid。
-  # 這是硬守衛：腳本的 process.kill 只可能打到測試自己的行程。
   cat > "$BIN/lsof" <<STUB
 #!/bin/bash
 while read -r pid addr; do
@@ -86,8 +65,6 @@ while read -r pid addr; do
 done < "${FIX}/lsof.txt"
 exit 0
 STUB
-  # 假 ss（Linux 路徑，#676）：同一份 fix/lsof.txt、同一條硬守衛，輸出成 `ss -Hltnp` 的格式。
-  # lsof 的 `*:<port>` 在 ss 是 `0.0.0.0:<port>`（IPv4 萬用）。
   cat > "$BIN/ss" <<STUB
 #!/bin/bash
 while read -r pid addr; do
@@ -127,7 +104,6 @@ echo "bun \$*" >> "${FIX}/calls.log"
 [ -f "${FIX}/install-fail" ] && exit 1
 exit 0
 STUB
-  # 假 node：記下 argv；帶 vite 參數時真的起一個 HTTP server（讓 alive() 成立）。
   cat > "$BIN/node" <<STUB
 #!/bin/bash
 echo "node \$*" >> "${FIX}/calls.log"
@@ -135,7 +111,6 @@ case "\$1" in --version) echo "v22.0.0"; exit 0 ;; esac
 echo \$\$ >> "${FIX}/spawned"
 exec "${PY3}" -m http.server "${PORT}" --bind 127.0.0.1 --directory "${ROOT}"
 STUB
-  # 假 agm（issue #859）：只記呼叫，不碰真的 daemon；腳本靠 AGM_BIN 找它。
   cat > "$BIN/agm" <<STUB
 #!/bin/bash
 echo "agm \$*" >> "${FIX}/agm.log"
@@ -143,32 +118,24 @@ exit 0
 STUB
   : > "$FIX/agm.log"
   chmod 755 "$BIN"/*
-  # 情境迴圈裡只留當輪的那一支：腳本選錯工具就叫不到，測試才看得出來。
   case "${TOOL:-}" in lsof) rm -f "$BIN/ss" ;; ss) rm -f "$BIN/lsof" ;; esac
   echo "aaaaaaa" > "$FIX/head"; echo "lock1" > "$FIX/lock"
   : > "$REPO/web/node_modules/vite/bin/vite.js"
   ( cd "$REPO" && mkdir -p .git )
 }
-# 只殺測試自己登記過的 pid。不用 `pkill -f <字串>`：那種通用比對會掃到別顆 agent
-# 的同名行程（issue #422 的規則之一）。
 teardown() {
   while read -r pid; do [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; done < "$FIX/spawned"
   rm -rf "$ROOT"
 }
-# 起一個測試自己的行程當「占用 port 的人」，pid 登記進 spawned。
-fake_listener() { # <addr> [ppid] [cmd]
-  # stdout／stderr 一定要導掉：這個函式常在 `$( )` 裡呼叫，背景行程若還握著
-  # command substitution 的管線，外層會一直等到它結束（sleep 300 就是卡 5 分鐘）。
+fake_listener() {
   sleep 300 >/dev/null 2>&1 & local pid=$!
-  disown 2>/dev/null || true   # teardown kill -9 時不要噴 job control 訊息
+  disown 2>/dev/null || true
   echo "$pid" >> "$FIX/spawned"
   echo "$pid $1" >> "$FIX/lsof.txt"
   printf '%s %s\n' "${2:-1}" "${3:-node /x/vite.js --host 0.0.0.0}" > "$FIX/ps.$pid"
   echo "$pid"
 }
 serve() { "$PY3" -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >/dev/null 2>&1 & local pid=$!; disown 2>/dev/null || true; echo "$pid" >> "$FIX/spawned"; echo "$pid"; }
-# 等它真的在聽才能往下跑。原本固定 sleep 1，在 CI 的 runner 上不夠——server 還沒 bind，
-# 被測腳本的 alive() 就回 false，於是「健康」那組變成「沒人聽」，測試假紅（run 35958418022）。
 wait_ready() {
   local i
   for i in $(seq 1 60); do
@@ -180,25 +147,20 @@ wait_ready() {
 }
 run() { ( cd "$ROOT" && AGM_BIN="$BIN/agm" AGM_DEV_LISTEN_TOOL="$TOOL" AGM_DEV_REPO="$REPO" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
 
-# 0. 安全前提：副本裡不准再有 5173，假 lsof 只回報自己 spawn 的 pid。
 setup
-# PORT 是唯一的 port 來源（URL 與 lsof 都從它來），所以只要這一行換掉，
-# 副本就不可能碰到真的 5173；其餘提到 5173 的是註解與一行 log 字串。
 equals "副本的 const PORT 換成測試 port" "$(grep -c "^const PORT = ${PORT}\$" "$SCRIPT")" "1"
 equals "副本裡沒有 const PORT = 5173" "$(grep -c '^const PORT = 5173$' "$SCRIPT")" "0"
 equals "副本裡剩下的 5173 都不是可執行的 port（只在註解與 log 字串）" \
   "$(grep -n '5173' "$SCRIPT" | grep -vE ':[[:space:]]*(//|/\*\*|\*)' | grep -vc 'log(`')" "0"
 equals "副本裡沒有寫死的 /Users 路徑" "$(grep -v '^ *//' "$SCRIPT" | grep -c '/Users/')" "0"
-echo "99999" > "$FIX/lsof.txt"   # 沒登記、也不存在的 pid
+echo "99999" > "$FIX/lsof.txt"
 equals "假 lsof 不回報沒登記的 pid" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BIN/lsof" -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpn | wc -l | tr -d ' ')" "0"
 equals "假 ss 不回報沒登記的 pid" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BIN/ss" -Hltnp | wc -l | tr -d ' ')" "0"
 teardown
 
-# 取 port 的工具兩種各跑一次整套情境：lsof（macOS）與 ss（Linux，#676）。
 for TOOL in lsof ss; do
 echo "# listen tool: ${TOOL}"
 
-# 1. 健康（綁 *、有 HTTP 回應、HEAD 沒變）→ 什麼都不做、log 不寫。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
@@ -209,7 +171,6 @@ check_no "健康時不會去起 vite" "vite.js --host" "$FIX/calls.log"
 equals "健康時不呼叫 agm（#859）" "$(wc -c < "$FIX/agm.log" | tr -d ' ')" "0"
 teardown
 
-# 2. port 被非 vite 的程序占用 → 只記錄，絕不殺。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 1 "python3 -m http.server")
@@ -218,7 +179,6 @@ check "記下被非 vite 占用" "被非 vite 的 pid ${PID}" "$LOG"
 equals "非 vite 的程序沒被殺" "$(kill -0 "$PID" 2>/dev/null && echo alive)" "alive"
 teardown
 
-# 3. loopback-only 但父程序還活著（ppid≠1）→ 某個 bot 正在用，只記錄「需人工處理」。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 4242 "node /x/vite.js")
@@ -227,7 +187,6 @@ check "記下需人工處理" "需人工處理" "$LOG"
 equals "別人的 vite 沒被殺" "$(kill -0 "$PID" 2>/dev/null && echo alive)" "alive"
 teardown
 
-# 4. loopback-only 的孤兒 vite（ppid=1）→ 收掉換一顆綁 0.0.0.0 的。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 1 "node /x/vite.js")
@@ -238,8 +197,6 @@ equals "孤兒 vite 真的被殺掉" "$(kill -0 "$PID" 2>/dev/null && echo alive
 check "接著用 node 拉起 vite" "用 node v22.0.0 拉起 vite" "$LOG"
 teardown
 
-# 4b. loopback-only 的孤兒 vite 本機有 HTTP 回應也不算健康（手機連不到）→ 照樣收掉。
-#     這組讓「位址欄讀錯」（例如把 ss 的對端欄 `0.0.0.0:*` 當成本地位址）看得出來。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 1 "node /x/vite.js")
@@ -248,7 +205,6 @@ run >/dev/null
 check "本機有回應的 loopback-only 孤兒也收掉" "收掉孤兒 loopback-only vite pid ${PID}" "$LOG"
 teardown
 
-# 4c. Linux（#1176）：loopback-only 的 vite 被 systemd --user 收養（ppid≠1）也是孤兒 → 收掉換一顆。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 4242 "node /x/vite.js")
@@ -258,7 +214,6 @@ check "父程序是 systemd --user 的 loopback-only vite 當孤兒收掉" "收�
 check_no "不再寫需人工處理" "需人工處理" "$LOG"
 teardown
 
-# 4d. 父程序是別的活著的程序（例如某個 bot 的 shell）→ 照舊不碰（#1176 只放寬 systemd --user）。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 PID=$(fake_listener "127.0.0.1:${PORT}" 4242 "node /x/vite.js")
@@ -268,7 +223,6 @@ check "父程序不是 systemd --user 時照舊只記錄" "需人工處理" "$LO
 equals "別人的 vite 沒被殺" "$(kill -0 "$PID" 2>/dev/null && echo alive)" "alive"
 teardown
 
-# 5. 缺依賴：找不到 node → 明確放棄這輪，不拿 bun 代跑。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 : > "$FIX/no-node"; rm -f "$BIN/node"
@@ -278,7 +232,6 @@ check_no "沒有真的去 spawn 任何東西" "vite.js --host" "$FIX/calls.log"
 check "找不到 node 有喊人（#859）" "agm --compact ops-alert --source dev-server --reason dev_node_missing" "$FIX/agm.log"
 teardown
 
-# 6. 缺依賴：node 在、但 web/ 還沒 install（vite.js 不存在）→ 放棄這輪並指出缺的檔。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 rm -f "$REPO/web/node_modules/vite/bin/vite.js"
@@ -289,7 +242,6 @@ check "找不到 vite.js 有喊人（#859）" "agm --compact ops-alert --source 
 equals "只喊一次" "$(grep -c 'ops-alert' "$FIX/agm.log")" "1"
 teardown
 
-# 7. 沒人聽 → 用 node 拉起，參數要綁 0.0.0.0＋strictPort，起來了要寫進 log。
 setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 equals "沒人聽時 exit 0" "$(run)" "0"
@@ -300,7 +252,6 @@ check "帶測試用的 port" "\-\-port ${PORT}" "$FIX/calls.log"
 check "確認起來了才收工" "dev server 已起來" "$LOG"
 teardown
 
-# 8. 同步：REPO 不是 git worktree → 記一行跳過，不碰 git。
 setup
 rm -rf "$REPO/.git"
 run >/dev/null
@@ -309,7 +260,6 @@ check_no "跳過時不會叫 git" "git fetch" "$FIX/calls.log"
 check "worktree 不在有喊人（#859）" "agm --compact ops-alert --source dev-server --reason dev_worktree_missing" "$FIX/agm.log"
 teardown
 
-# 9. 同步：HEAD 變了但 bun.lock 沒變 → 只記同步，不 bun install（靠 HMR）。
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
@@ -319,7 +269,6 @@ check "記下同步到 origin/main" "同步到 origin/main aaaaaaa..bbbbbbb" "$L
 check_no "lock 沒變就不 bun install" "bun install" "$FIX/calls.log"
 teardown
 
-# 10. 同步：bun.lock 也變了 → bun install 並重啟 vite。
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
 fake_listener "*:${PORT}" 1 "node /x/vite.js --host 0.0.0.0" >/dev/null
@@ -329,7 +278,6 @@ check "lock 變了就 bun install" "bun install --frozen-lockfile" "$FIX/calls.l
 check "log 說明要重啟 vite" "web/bun.lock 變了" "$LOG"
 teardown
 
-# 10b. Linux（#1176）：bun.lock 變了、對外的 vite 被 systemd --user 收養 → 也要重啟（以前被當成「不是孤兒」而跳過）。
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
 PID=$(fake_listener "*:${PORT}" 4242 "node /x/vite.js --host 0.0.0.0")
@@ -342,7 +290,6 @@ equals "舊的 vite 真的被收掉" "$(kill -0 "$PID" 2>/dev/null && echo alive
 check_no "不寫需人工處理" "需人工處理" "$LOG"
 teardown
 
-# 11. bun install 失敗：不砍還在跑的 vite，HEAD 之後沒變也要重試（#645）。
 setup
 echo "bbbbbbb" > "$FIX/head.after"; echo "lock2" > "$FIX/lock.after"
 : > "$FIX/install-fail"
@@ -358,7 +305,6 @@ equals "HEAD 沒變也再裝一次" "$(grep -c 'bun install --frozen-lockfile' "
 [ ! -f "$ROOT/agm/dev-server.pending-install" ] && { echo "ok   - 裝成功就清標記"; PASS=$((PASS + 1)); } || { echo "FAIL - 裝成功就清標記"; FAIL=$((FAIL + 1)); }
 teardown
 
-# 12. REPO 由共用樹推導：沒有 AGM_DEV_REPO 時是 `${AGM_REPO}-main`（#676：以前寫死 /Users/me/…）。
 setup
 ( cd "$ROOT" && AGM_BIN="$BIN/agm" AGM_DEV_LISTEN_TOOL="$TOOL" AGM_REPO="$ROOT/shared" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1 )
 check "REPO＝AGM_REPO 旁邊的 -main" "$ROOT/shared-main 不是 git worktree" "$LOG"
@@ -367,7 +313,6 @@ check_no "沒指定時不會去碰測試 REPO" "git -C $REPO" "$FIX/calls.log"
 teardown
 done
 
-# 13. ss 的 IPv6 萬用位址 `[::]:<port>` 也算對外可達（健康，不動它）。
 TOOL=ss; setup
 echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
 fake_listener "[::]:${PORT}" 1 "node /x/vite.js --host ::" >/dev/null

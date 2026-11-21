@@ -1,9 +1,6 @@
-# Invoked through sh/ssh. Keep all reads relative to pinned directory fds;
-# checking a path and then calling tail would reopen it after a possible swap.
 import os
 import stat
 import sys
-
 
 def open_dir(path):
     if not os.path.isabs(path) or '..' in path.split('/'):
@@ -19,7 +16,6 @@ def open_dir(path):
     except BaseException:
         os.close(fd)
         raise
-
 
 def read_file(cwd_fd, filename, path, limit):
     fd = None
@@ -41,7 +37,6 @@ def read_file(cwd_fd, filename, path, limit):
     finally:
         if fd is not None:
             os.close(fd)
-
 
 def read_recorded(root, recorded, sid, limit):
     root_path = root.rstrip('/') or '/'
@@ -65,7 +60,6 @@ def read_recorded(root, recorded, sid, limit):
             os.close(projects)
     finally:
         os.close(root_fd)
-
 
 def read_root(root, sid, limit, seen_paths, matches):
     root_fd = open_dir(root)
@@ -95,7 +89,6 @@ def read_root(root, sid, limit, seen_paths, matches):
     finally:
         os.close(root_fd)
     return False
-
 
 sid, limit, marker, recorded = sys.argv[1:5]
 limit = int(limit)

@@ -1,30 +1,4 @@
 #!/bin/bash
-# 例行自動部署（使用者 2026-09-29 簡化）：腳本自己直接做，不經 LLM、不要核准單、不派建置 child。
-# 由 systemd timer／launchd com.agm.daemon-update 每 5 分鐘跑一次。
-#
-#   1. 從 origin/main 沿 first-parent 往回找最新一顆 `ubuntu-ci` commit status＝success 的 sha
-#      （ubuntu-ci 只跑最新 HEAD、會跳過中間的 sha，所以往回找有限幾顆）。
-#   2. 跟 `daemon-update.built`（上次上線的 short sha）比：沒有會進 binary 的差異就結束
-#      （路徑清單同 daemon 的 `agm build-inputs`，SPEC §18.11）。
-#   3. 在**專用**的乾淨 checkout（預設 ~/.cache/agents-manager/deploy-checkout，不碰主樹與別人的 worktree）
-#      checkout 那顆 sha，`bun run build` 再 `cargo build --release -p agents-managerd`。
-#   4. 換版交給 `scripts/ops/daemon-swap.sh`（備份 binary 與 DB、沒人 working／送達中才換、換前再查一次、
-#      重啟驗證、失敗回滾或升過 schema 往前修、寫 `.built`）。窗口由 daemon 的
-#      `POST /api/services/daemon-swap/restart-window` 自己開，不需要核准單。
-#   5. 「立即部署」（`POST /api/deploy/now` 寫 `daemon-update.now.json`，再叫起這個 job）：讀到請求檔就部署
-#      那顆 sha，不等 ubuntu-ci（使用者按下就是裁示）；做完（或那顆 sha 不能部署）才刪檔，
-#      等不到安全窗口就留著，下一輪再來。
-#   6. 任何失敗照舊推 ops_alert（同 source+reason 由 daemon 節流），並寫 `daemon-update.log`。
-#   6b. 換版成功後，以及「沒有會進 binary 的差異」那一輪，同步主樹（`sync_main_tree`）：快轉，或本地 commit 已全在上游時對齊 origin/main；其餘不動、推 ops_alert。
-#
-#   7. （旗標，**預設關**）已安裝的 ops 腳本自動換新：旗標＝環境變數 `AGM_OPS_AUTO_INSTALL=1` 或檔案 `<AGM>/ops-auto-install.enabled`。
-#      開著時，換版成功之後、以及「沒有會進 binary 的差異」那一輪（ops 腳本改了不會產生新 binary，只靠換版後那一步會永遠漏掉），
-#      用該 sha 的 `scripts/ops/ops-install.sh` 把「已經裝了、跟 repo 不同」的 ops 腳本裝進 AGM bin：備份、原子替換、
-#      自檢、壞了還原；只更新不新增，不碰排程 unit。後者要該 sha 的 ubuntu-ci 綠燈才裝。失敗推 ops_alert（`ops_install_failed`）。
-#
-# 邊界（老實說清楚）：建置與整樹測試不在這裡重跑——推 main 前 `scripts/check.sh changed` 已過、ubuntu-ci 在背景跑
-# 整樹；這裡只認 ubuntu-ci 的綠燈。窗口（沒人在忙）是協調，不是 OS 層的鎖：這台機器上任何 shell 仍可直接
-# kill daemon。安裝方式與排程 unit 見同目錄 README.md；這支腳本本身不安裝自己。
 set -u
 set -o pipefail
 
@@ -32,28 +6,27 @@ SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
 WEB_BUILDER="${SELF%/*}/build-web-bundle.py"
 
 DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
-REPO="${AGM_REPO:-$HOME/project/agents-manager}"      # 正式 daemon 跑的那份（daemon-swap 換它的 target/release）
-DEPLOY="${AGM_DEPLOY_CHECKOUT:-$HOME/.cache/agents-manager/deploy-checkout}"   # 專用乾淨 checkout，只有這支腳本動它
+REPO="${AGM_REPO:-$HOME/project/agents-manager}"
+DEPLOY="${AGM_DEPLOY_CHECKOUT:-$HOME/.cache/agents-manager/deploy-checkout}"
 CLONE_STAGE=""
 GH_REPO="${AGM_GH_REPO:-Eden-Sun/agents-manager}"
 CI_CONTEXT="${AGM_CI_CONTEXT:-ubuntu-ci}"
-CI_LOOKBACK="${AGM_CI_LOOKBACK:-30}"                  # 沿 first-parent 往回最多看幾顆
-CI_ROOT="${AGM_CI_ROOT:-${HOME}/.cache/agents-manager/ci}"   # ubuntu-ci 的狀態目錄；last-sha 在這裡（#1449，同 ubuntu-ci.sh）
+CI_LOOKBACK="${AGM_CI_LOOKBACK:-30}"
+CI_ROOT="${AGM_CI_ROOT:-${HOME}/.cache/agents-manager/ci}"
 AGM="$DIR/bin/agm"
 LOG="$DIR/daemon-update.log"
-BUILT="$DIR/daemon-update.built"                      # 上次真的換上正式 binary 的 short sha（daemon-swap 寫）
-REJECTED="$DIR/daemon-update.rejected"                # 換上去後被回滾的 sha：自動路徑不再挑它
+BUILT="$DIR/daemon-update.built"
+REJECTED="$DIR/daemon-update.rejected"
 NOW_FILE="$DIR/daemon-update.now.json"
 OWNER="${AM_AGENT_NAME:-daemon-update-kick}"
 GIT="${GIT_BIN:-/usr/bin/git}"
 GH="${GH_BIN:-gh}"
 BUN="${BUN_BIN:-bun}"
 CARGO="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
-SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"   # 從要換上的那顆 checkout 跑（不裝到 AGM 目錄）
+SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"
 NICE="${NICE_BIN:-nice}"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
 . "${0%/*}/kick-common.sh" 2>/dev/null || {
   _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
   echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
@@ -62,13 +35,8 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
   exit 1
 }
 
-# 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
-# 只寫 log 的話，正式 daemon 從此不再自動換版而沒有任何人知道。
-
-# ── ops 腳本自動換新（旗標，預設關；見檔頭 7）──
 OPS_AUTO_FLAG="$DIR/ops-auto-install.enabled"
 ops_auto_on() { [ "${AGM_OPS_AUTO_INSTALL:-0}" = 1 ] || [ -f "$OPS_AUTO_FLAG" ]; }
-# ops_install_step <sha> <要不要 ubuntu-ci 綠燈 0|1>：永遠回 0（這一步壞了不能影響部署的結果）。
 ops_install_step() {
   ops_auto_on || return 0
   _osha="$1"; _ogreen="$2"
@@ -76,7 +44,6 @@ ops_install_step() {
   _oplan=$(printf '%s\n' "$_oscript" | bash -s -- --repo "$DEPLOY" --ref "$_osha" --dir "$DIR" --dry-run 2>>"$LOG")
   _on=$(printf '%s\n' "$_oplan" | sed -n 's/.*changes=\([0-9][0-9]*\) failed=.*/\1/p' | tail -1)
   case "$_on" in ''|*[!0-9]*) log "ops 自動安裝：看不懂 dry-run 的結果，這輪不裝"; return 0 ;; esac
-  # 手改過的安裝檔不覆蓋（ops-install 報 drifted）：不算失敗，但要有人看，不然那支永遠停在舊版而沒人知道（同 source+reason daemon 每小時只收一則）。
   if printf '%s\n' "$_oplan" | grep -q '^drifted '; then
     alert ops_install_drift "已安裝的 ops 腳本被手改過（不是 repo 任何一版），自動換新不會覆蓋它：$(printf '%s\n' "$_oplan" | grep '^drifted ' | cut -d' ' -f2 | head -5 | tr '\n' ' ')。先看差在哪（agm ops-sync --check），要換就手動 ops-install.sh --force（舊檔會備份）"
   fi
@@ -99,9 +66,6 @@ ops_install_step() {
   return 0
 }
 
-# 主樹同步（bot 啟動時讀的 AGENTS.md／.mcp.json 來自主樹，主樹不會自己跟上 origin/main）。
-# 只做兩件安全的事：快轉；或本地 commit 全都已在上游（patch 等價，例如上游已 rebase）時對齊到 origin/main。
-# 其他（有上游沒有的 commit、有已追蹤檔的未提交改動、不在 main 上）一律不動，推 ops_alert。永遠回 0：不影響部署結果。
 sync_main_tree() {
   _br=$("$GIT" -C "$REPO" symbolic-ref -q --short HEAD 2>/dev/null) || _br=""
   [ "$_br" = main ] || { log "主樹 ${REPO} 在「${_br:-分離的 HEAD}」，不是 main，不同步"; return 0; }
@@ -129,12 +93,10 @@ sync_main_tree() {
   return 0
 }
 
-# A second runner must not build or swap at the same time. OS advisory lock 串行化建立／回收目錄鎖，
-# 避免兩個同時醒來的 runner 各自刪掉對方剛重建的 lock。目錄裡仍寫 pid 與時間供 hung 診斷；SIGKILL 後 OS lock 自動釋放。
 LOCK="$DIR/daemon-update.lock"
 LOCK_GUARD="$DIR/daemon-update.lock.guard"
-LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
-LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-7200}     # 執行者還活著但卡了這麼久：喊人（冷建置要十幾分鐘，給寬）
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-7200}
 acquire_guard() {
   [ ! -L "$LOCK_GUARD" ] || return 2
   exec 9>>"$LOCK_GUARD" || return 2
@@ -146,7 +108,7 @@ except OSError as e:
     sys.exit(1 if e.errno in (errno.EACCES, errno.EAGAIN) else 2)
 ' >/dev/null 2>&1
 }
-is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
+is_self_runner() {
   _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
   RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '
 import os, shlex, sys
@@ -159,13 +121,11 @@ if len(argv) < 2 or os.path.basename(argv[0]).lstrip("-") not in ("bash", "sh"):
 sys.exit(0 if os.path.normpath(argv[1]) == os.environ["RUNNER_SCRIPT"] else 1)
 ' >/dev/null 2>&1
 }
-# 連續「沒能完成」不能永遠只有 local log：連續 FAIL_ALERT_AFTER 輪（預設 6＝約 30 分鐘）推 ops_alert，
-# 完整跑完一輪清零。「還有人在跑、等安全窗口」「沒有新的綠燈 commit」是正常的等，不算失敗。
 FAILS="$DIR/daemon-update.fails"
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}
 ROUND_FAIL=""
 note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }
-record_rejected() { # record_rejected <full sha>; atomic rewrite so an interrupted append cannot leave a partial row
+record_rejected() {
   local target="$1" tmp
   [ ! -L "$REJECTED" ] || return 1
   if [ -e "$REJECTED" ] && [ ! -f "$REJECTED" ]; then return 1; fi
@@ -177,7 +137,7 @@ record_rejected() { # record_rejected <full sha>; atomic rewrite so an interrupt
   if ! mv -f "$tmp" "$REJECTED"; then rm -f "$tmp"; return 1; fi
   return 0
 }
-write_built_marker() { # write_built_marker <short sha>; atomically advance the deployed commit gate
+write_built_marker() {
   local sha="$1" tmp
   [ ! -L "$BUILT" ] || return 1
   if [ -e "$BUILT" ] && [ ! -f "$BUILT" ]; then return 1; fi
@@ -237,14 +197,12 @@ if ! take_lock; then
     alert runner_clock_skew "部署鎖 ${LOCK} 的時間戳在未來，無法安全判斷持有者是否逾時；本輪不回收鎖，請檢查系統時鐘與鎖狀態"
     exit 0
   fi
-  # 還活著的執行者（pid 在，而且真的是這支腳本）：正常重疊就安靜跳過；卡太久才喊人。
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
     fi
     exit 0
   fi
-  # 執行者不在了：等一小段時間再回收，避開「別人剛 mkdir、還沒寫 owner」的那幾毫秒。
   if [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
     log "鎖剛建立（${_age} 秒）但讀不到執行者，這輪跳過"
     exit 0
@@ -259,14 +217,11 @@ if ! take_lock; then
 fi
 log "== check"
 
-# 立即部署請求（SPEC §18.2）：daemon 的 `POST /api/deploy/now` 寫下要部署的 sha 再叫起這個 job。
 NOW=0; NOW_SHA=""
-NOW_FAILS="$DIR/daemon-update.now.fails"            # 立即部署對同一顆 sha 連續失敗的次數：「<sha> <次數>」
+NOW_FAILS="$DIR/daemon-update.now.fails"
 NOW_FAIL_MAX=${AGM_NOW_FAIL_MAX:-3}
 drop_now() { rm -f "$NOW_FILE" "$NOW_FAILS"; log "收掉立即部署請求（$1）"; }
-# 立即部署的一次「不會自己好」的失敗（換版 rc=3／5／10／11／其他、建置失敗）：同一顆 sha 累計到上限就喊人並收掉請求，
-# 不然這種請求會每 5 分鐘重建、重失敗，永遠不收（issue #883）。等窗口（rc=4）不算，成功或收掉時清零。
-now_fail() { # now_fail <失敗描述>
+now_fail() {
   [ "$NOW" = 1 ] || return 0
   _nsha=""; _nn=0
   [ -e "$NOW_FAILS" ] && read -r _nsha _nn < "$NOW_FAILS" || true
@@ -279,8 +234,6 @@ now_fail() { # now_fail <失敗描述>
   fi
   return 0
 }
-# 請求有時效（issue #2033）：timer 停著時留下的舊請求，會讓之後的手動觸發換成不是剛核准的那一版。
-# 超過 NOW_TTL 秒（看 requested_at；沒有這欄的舊檔不算過期）就收掉並喊人。
 NOW_TTL=${AGM_NOW_TTL_SECS:-7200}
 if [ -f "$NOW_FILE" ]; then
   NOW_RC=0
@@ -315,7 +268,6 @@ if isinstance(at,str) and at.strip():
   fi
 fi
 
-# ── 專用 checkout：不存在就 clone（來源＝主樹的 origin URL），之後每輪只 fetch ──
 ORIGIN_URL=$("$GIT" -C "$REPO" remote get-url origin 2>/dev/null) || { note_fail "讀不到 ${REPO} 的 origin URL，建不出專用 checkout"; exit 0; }
 if [ -e "$DEPLOY" ] && [ ! -d "$DEPLOY/.git" ]; then
   alert deploy_checkout_invalid "專用 checkout 路徑 ${DEPLOY} 已存在但不是 git clone，自動部署停住；請確認該路徑內容後移開它"
@@ -343,7 +295,6 @@ fi
 "$GIT" -C "$DEPLOY" fetch -q origin main >> "$LOG" 2>&1 || { note_fail "fetch origin/main 失敗，這輪不動"; exit 0; }
 HEAD_SHA=$("$GIT" -C "$DEPLOY" rev-parse origin/main) || { note_fail "無法讀取 origin/main，跳過"; exit 0; }
 
-# 會影響 binary 的路徑。問 daemon 拿（它知道自己 include_str! 了什麼）；問不到再用保底清單。
 PATHS=""
 [ -x "$AGM" ] && PATHS=$("$AGM" --compact build-inputs 2>/dev/null | python3 -c '
 import json,sys
@@ -355,7 +306,7 @@ print(" ".join(d.get("paths") or []))
 ' 2>/dev/null)
 [ -n "$PATHS" ] || PATHS="daemon crates web Cargo.toml Cargo.lock docs/goals/agm-supervisor-persona.md docs/goals/agm-responder-persona.md scripts/agm.py"
 # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
-binary_same() { "$GIT" -C "$DEPLOY" diff --quiet "$1" "$2" -- $PATHS; }   # exit 1＝有差；128＝讀不到（當成有差）
+binary_same() { "$GIT" -C "$DEPLOY" diff --quiet "$1" "$2" -- $PATHS; }
 
 BUILT_SHA=""
 [ -f "$BUILT" ] && BUILT_SHA=$(tr -d '[:space:]' < "$BUILT")
@@ -365,7 +316,6 @@ if [ -z "$BUILT_SHA" ] || ! "$GIT" -C "$DEPLOY" cat-file -e "${BUILT_SHA}^{commi
 fi
 BUILT_FULL=$("$GIT" -C "$DEPLOY" rev-parse "${BUILT_SHA}^{commit}")
 
-# ── 挑要部署的 sha ──
 TARGET=""
 if [ "$NOW" = 1 ]; then
   TARGET=$("$GIT" -C "$DEPLOY" rev-parse --verify --quiet "${NOW_SHA}^{commit}") || TARGET=""
@@ -381,17 +331,12 @@ if [ "$NOW" = 1 ]; then
     drop_now "${BUILT_SHA} 到 ${NOW_SHA} 只動到不進 binary 的檔，已經是最新"; exit 0
   fi
 else
-  # 線上那顆到 origin/main 之間沒有會進 binary 的差異就結束，不去問 GitHub。
   if binary_same "$BUILT_FULL" "$HEAD_SHA"; then
     log "${BUILT_SHA} 之後沒有會進 binary 的差異，跳過（origin/main ${HEAD_SHA}）"
     sync_main_tree
     ops_install_step "$HEAD_SHA" 1
     exit 0
   fi
-  # ubuntu-ci 每輪結束把剛測完的 sha 寫進 last-sha（ubuntu-ci.sh）：那是「最新一顆有最終結果的 sha」。
-  # 下面的迴圈只往回看 CI_LOOKBACK 顆；ubuntu-ci 一輪 34～45 分，main 在那段期間前進超過 30 顆時，綠燈的 sha
-  # 會落在範圍外、永遠挑不到（#1449）。所以先問它一顆。不是 40 碼 hex、不存在、不是 origin/main 的祖先、
-  # 是線上那顆（或它的祖先）、跟線上 binary 內容一樣、被回滾過，就不問；紅燈、沒有狀態、gh 失敗也不下結論，照舊走迴圈。
   LAST_SHA=$(tr -d '[:space:]' < "${CI_ROOT}/last-sha" 2>/dev/null) || LAST_SHA=""
   LAST_FULL=""
   if printf '%s' "$LAST_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -409,8 +354,6 @@ else
       log "挑到 ${TARGET}（${CI_CONTEXT} success，來自 ${CI_CONTEXT} 的 last-sha；origin/main ${HEAD_SHA}，線上 ${BUILT_SHA}）"
     fi
   fi
-  # 沿 first-parent 往回找最新一顆 ubuntu-ci 綠燈；走到線上那顆（或它的祖先）為止——再往回都是舊的。
-  # REACHED＝有走到那一顆（或沒有比它新、又有 binary 差異的候選了）；沒走到就是回看上限用完。
   REACHED=0
   SEEN=0
   if [ -z "$TARGET" ]; then
@@ -418,7 +361,7 @@ else
       SEEN=$((SEEN + 1))
       [ "$CAND" = "$BUILT_FULL" ] && { REACHED=1; break; }
       "$GIT" -C "$DEPLOY" merge-base --is-ancestor "$CAND" "$BUILT_FULL" 2>/dev/null && { REACHED=1; break; }
-      binary_same "$BUILT_FULL" "$CAND" && { REACHED=1; break; }            # 這顆以下都沒有新的 binary 內容
+      binary_same "$BUILT_FULL" "$CAND" && { REACHED=1; break; }
       if [ -f "$REJECTED" ] && grep -qx "$CAND" "$REJECTED"; then
         log "${CAND} 之前換上去被回滾過，不再挑它"; continue
       fi
@@ -447,20 +390,17 @@ else
 fi
 SHORT=$(printf '%s' "$TARGET" | cut -c1-8)
 
-# ── 建置（同一顆 sha 已經建好就不重建：等安全窗口那幾輪不要每 5 分鐘編一次）──
 BUILD_MARK="$DEPLOY/target/release/.built-for"
 if [ "$(cat "$BUILD_MARK" 2>/dev/null)" = "$TARGET" ] && [ -x "$DEPLOY/target/release/agents-managerd" ]; then
   log "${SHORT} 已經建好，直接換版"
 else
   rm -f "$BUILD_MARK"
   "$GIT" -C "$DEPLOY" checkout -q --force --detach "$TARGET" >> "$LOG" 2>&1 || { note_fail "checkout ${SHORT} 失敗"; exit 0; }
-  "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true   # 沒有 -x：target／node_modules（被 ignore）留著，增量建置才快
+  "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true
   log "建置 ${SHORT}：web"
   [ -r "$WEB_BUILDER" ] || { note_fail "找不到配對的 web helper：${WEB_BUILDER}；請同時安裝 kick 與 helper"; now_fail "缺少 web helper"; exit 0; }
   python3 "$WEB_BUILDER" --web "$DEPLOY/web" --bun "$BUN" >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; now_fail "web 建置失敗"; exit 0; }
   log "建置 ${SHORT}：daemon（cargo build --release）"
-  # 部署建置要快（短期）：不做跨 crate thin LTO、開 release incremental（只套在這一條 cargo build，不動 workspace 的
-  # [profile.release]，package-dmg.sh 等正式打包照舊）。AGM_DEPLOY_FAST_BUILD=0 恢復原行為。第一次切換會整包重編一次。
   FAST_ENV=()
   [ "${AGM_DEPLOY_FAST_BUILD:-1}" = 0 ] || FAST_ENV=(CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_INCREMENTAL=true)
   ( cd "$DEPLOY" && AM_REAL_CARGO="$CARGO" PATH="$(dirname "$CARGO"):$PATH" "$NICE" -n 10 env ${FAST_ENV[@]+"${FAST_ENV[@]}"} "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
@@ -470,7 +410,6 @@ else
   log "建好 ${SHORT}"
 fi
 
-# ── 換版 ──
 LIVE_BIN="$REPO/target/release/agents-managerd"
 OLDHASH=$(shasum -a 256 "$LIVE_BIN" 2>/dev/null | cut -c1-16)
 [ -n "$OLDHASH" ] || { note_fail "讀不到正式 binary ${LIVE_BIN}，不換版"; exit 0; }
@@ -486,12 +425,10 @@ case "$SWAP_RC" in
     ops_install_step "$TARGET" 0
     ;;
   4)
-    # 有人在忙／窗口拿不到：正常的等。立即部署的請求留著，下一輪再試。
     log "還有人在忙（或複查不安全），這輪沒換版（daemon-swap rc=4）；下一輪再試"
     rm -f "$NOW_FAILS"
     ;;
   6)
-    # 新版起來了、只是升過 schema 所以往前修；daemon-swap 沒寫 .built，這裡補上，否則下一輪會對同一顆重做一遍。
     if write_built_marker "$SHORT"; then
       alert swap_forward_fixed "換上 ${SHORT} 後驗證沒過，但升過 schema 不能放回舊 binary，已往前修：新 binary 服務中。請看 ${DIR}/daemon-swap.log 確認"
     else
@@ -514,10 +451,8 @@ case "$SWAP_RC" in
     [ "$NOW" = 1 ] && drop_now "已部署 ${SHORT}（窗口沒交還）"
     ;;
   10)
-    # 換版之前就擋下、什麼都沒動：這次建出來的 binary 不是 ${SHORT} 這顆 commit 的（沒重建？髒樹？），不是 commit 本身有問題，所以不記進 rejected。
     alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
     ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
-    # 下一輪要整個重來（checkout --force＋clean＋建置），不能還認這顆「已經建好」的 binary。
     rm -f "$BUILD_MARK"
     now_fail "rc=10"
     ;;
@@ -541,7 +476,6 @@ case "$SWAP_RC" in
     now_fail "rc=${SWAP_RC}"
     ;;
 esac
-# 3b 自測對象沒有 run、被連續略過：換版前的送達自測形同沒做，要有人去設 swap_probe_bot_id（issue #882）。
 _skips=$(cat "$DIR/daemon-swap.probe-skips" 2>/dev/null)
 case "$_skips" in ''|*[!0-9]*) _skips=0 ;; esac
 if [ "$_skips" -ge 3 ]; then

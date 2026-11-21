@@ -1,8 +1,4 @@
 #!/bin/bash
-# disk-gc.sh 的隔離測試（issue #835）：HOME 指到暫存目錄，腳本原樣複製進去跑；假 df／agm；
-# 用 touch -d 造舊檔。破壞性那一條：只刪明確路徑、主樹的 target/ 永不整個刪、有行程在用就不動、symlink 一律拒絕。
-#
-#   bash scripts/ops/disk-gc_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PASS=0
@@ -23,7 +19,6 @@ setup() {
   FIX="$ROOT/fix"; BIN="$ROOT/fakebin"
   REPO="$HOME/project/agents-manager"
   mkdir -p "$AGM_DIR/bin" "$HOME/.cache/agents-manager" "$REPO/target/debug" "$REPO/.claude/worktrees" "$FIX" "$BIN"
-  # 主樹是真的 git repo（#1450：worktree 清單來自 git worktree list）。
   git -C "$REPO" init -q -b main
   git -C "$REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
   cp "$HERE/disk-gc.sh" "$AGM_DIR/bin/disk-gc.sh"
@@ -35,7 +30,6 @@ setup() {
 echo "agm \$*" >> "$FIX/agm.log"
 exit 0
 STUB
-  # 假 df：FIX/pct 的百分比（預設 50），剩餘 500 GB。
   cat > "$BIN/df" <<STUB
 #!/bin/bash
 pct=\$(cat "$FIX/pct" 2>/dev/null || echo 50)
@@ -48,14 +42,12 @@ teardown() {
   for p in $SLEEPERS; do kill "$p" 2>/dev/null; done; SLEEPERS=""
   rm -rf "$ROOT"
 }
-# BSD touch（macOS）沒有 `-d '30 days ago'`（#1964：夜間 macos-latest 全是 illegal time specification），改用 date -v 算出 -t。
 if touch -d '30 days ago' "$(mktemp)" 2>/dev/null; then
   old() { touch -d '30 days ago' "$@"; }
 else
   old() { touch -t "$(date -v-30d +%Y%m%d%H%M)" "$@"; }
 fi
-# 一棵有 target/debug/incremental/{old,new} 與 .fingerprint 的樹
-mk_target() { # mk_target <樹> [舊 fingerprint?yes]
+mk_target() {
   local t="$1"
   mkdir -p "$t/target/debug/incremental/oldcrate-aaa" "$t/target/debug/incremental/newcrate-bbb" "$t/target/debug/.fingerprint"
   echo x > "$t/target/debug/incremental/oldcrate-aaa/f"; echo x > "$t/target/debug/incremental/newcrate-bbb/f"
@@ -64,8 +56,6 @@ mk_target() { # mk_target <樹> [舊 fingerprint?yes]
 }
 run() { PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" AGM_REPO="$REPO" DF_BIN="$BIN/df" AGM_BIN="$BIN/agm" DISK_GC_LOG="$LOG" bash "$AGM_DIR/bin/disk-gc.sh" >/dev/null 2>&1; echo $?; }
 
-# 沒有 /proc（macOS）：disk-gc.sh 按設計一律不刪（無法證明沒人在用，見腳本開頭），底下依賴「真的刪得掉」的案例在那種環境
-# 不可能成立（#1964），所以只在這裡驗那個不依賴環境的行為——舊檔都在、log 記下原因、exit 0——然後收尾。有 /proc 的環境照舊跑完整套。
 if [ ! -r /proc/self/cwd ] && [ ! -L /proc/self/cwd ]; then
   echo "skip - 此環境沒有 /proc：刪除類案例略過（disk-gc.sh 在這裡不刪任何東西），只驗拒絕行為"
   setup
@@ -81,7 +71,6 @@ if [ ! -r /proc/self/cwd ] && [ ! -L /proc/self/cwd ]; then
   exit $?
 fi
 
-# 1. remote-cargo：舊的刪、新的留。
 setup
 mkdir -p "$RC/oldproj/x" "$RC/newproj/x"; echo x > "$RC/oldproj/x/f"; old "$RC/oldproj"
 equals "正常跑 exit 0" "$(run)" "0"
@@ -89,10 +78,9 @@ gone   "舊的 remote-cargo 目錄被刪" "$RC/oldproj"
 exists "新的 remote-cargo 目錄留著" "$RC/newproj"
 teardown
 
-# 2. worktree 舊的 incremental 刪、新的留；主樹的 incremental 同規則，但主樹整個 target/ 永不刪。
 setup
 WT="$REPO/.claude/worktrees/wt1"; mkdir -p "$WT"; mk_target "$WT"
-mk_target "$REPO" yes     # 主樹的 .fingerprint 很舊：worktree 會整個刪，主樹不會
+mk_target "$REPO" yes
 equals "exit 0" "$(run)" "0"
 gone   "worktree 舊的 incremental 被刪" "$WT/target/debug/incremental/oldcrate-aaa"
 exists "worktree 新的 incremental 留著" "$WT/target/debug/incremental/newcrate-bbb"
@@ -101,7 +89,6 @@ exists "主樹新的 incremental 留著" "$REPO/target/debug/incremental/newcrat
 exists "主樹的 target/ 永不整個刪" "$REPO/target"
 teardown
 
-# 3. worktree 的 .fingerprint 都很舊 → 整個 target/ 刪；.fingerprint 新 → 留。
 setup
 OLDWT="$REPO/.claude/worktrees/stale"; NEWWT="$REPO/.claude/worktrees/active"; mkdir -p "$OLDWT" "$NEWWT"
 mk_target "$OLDWT" yes; mk_target "$NEWWT"
@@ -112,7 +99,6 @@ exists "worktree 的原始碼不碰" "$OLDWT/keep.rs"
 exists "最近有編譯的 worktree target/ 留著" "$NEWWT/target"
 teardown
 
-# 3b. unit 目錄很舊、但裡面的檔最近才被改寫（cargo 重編既有 unit）→ 不算久沒用，target/ 留著（issue #1177）。
 setup
 REBUILT="$REPO/.claude/worktrees/rebuilt"; mkdir -p "$REBUILT"; mk_target "$REBUILT"
 mkdir -p "$REBUILT/target/debug/.fingerprint/foo-abc"
@@ -122,7 +108,6 @@ equals "exit 0" "$(run)" "0"
 exists "最近重編過既有 unit 的 worktree：target/ 留著" "$REBUILT/target"
 teardown
 
-# 3c. unit 目錄與裡面的檔都很舊 → 照舊整個刪。
 setup
 STALE="$REPO/.claude/worktrees/stale-unit"; mkdir -p "$STALE"; mk_target "$STALE"
 mkdir -p "$STALE/target/debug/.fingerprint/foo-abc"
@@ -132,13 +117,12 @@ equals "exit 0" "$(run)" "0"
 gone "unit 與檔都很舊的 worktree：target/ 整個刪" "$STALE/target"
 teardown
 
-# 3d. 舊的目錄看得到、但一個 unit 子樹讀不進去（權限／I/O），裡面卻有近期的檔 → 讀不完就不能證明久沒用：target/ 整棵保留，log 說明原因（issue #1261）。
 setup
 UNREAD="$REPO/.claude/worktrees/unreadable"; mkdir -p "$UNREAD"; mk_target "$UNREAD" yes
 mkdir -p "$UNREAD/target/debug/.fingerprint/bar-xyz"
 echo x > "$UNREAD/target/debug/.fingerprint/bar-xyz/invoked.timestamp"
 old "$UNREAD/target/debug/.fingerprint/bar-xyz" "$UNREAD/target/debug/.fingerprint"
-echo x > "$UNREAD/target/keep-me"; old "$UNREAD/target/keep-me"   # 可讀、很舊的哨兵：整棵刪的話它會跟著被刪
+echo x > "$UNREAD/target/keep-me"; old "$UNREAD/target/keep-me"
 chmod 000 "$UNREAD/target/debug/.fingerprint/bar-xyz"
 if [ -r "$UNREAD/target/debug/.fingerprint/bar-xyz" ]; then
   echo "FAIL - 無法模擬讀不到（以 root 跑？）：這條測試需要非 root 身份"; FAIL=$((FAIL + 1))
@@ -149,7 +133,6 @@ check  "log 記下讀不完的原因" "讀不完" "$LOG"
 chmod 755 "$UNREAD/target/debug/.fingerprint/bar-xyz" 2>/dev/null
 teardown
 
-# 4. 有行程的 cwd 在某 worktree → 那棵完全不動（即使 target 很舊）。
 setup
 BUSY="$REPO/.claude/worktrees/busy"; mkdir -p "$BUSY"; mk_target "$BUSY" yes
 ( cd "$BUSY" && exec sleep 30 ) >/dev/null 2>&1 & SLEEPERS="$SLEEPERS $!"
@@ -160,7 +143,6 @@ exists "有行程在用的 worktree：舊 incremental 也不動" "$BUSY/target/d
 check  "log 記下跳過的原因" "有行程的 cwd 在底下" "$LOG"
 teardown
 
-# 5. remote-cargo 是 symlink 指到別處 → 拒絕、不刪任何東西。
 setup
 mkdir -p "$ROOT/elsewhere/oldproj"; old "$ROOT/elsewhere/oldproj"
 ln -s "$ROOT/elsewhere" "$RC"
@@ -170,7 +152,6 @@ exists "symlink 本身還在" "$RC"
 check  "log 記下拒絕" "remote-cargo（路徑不符預期" "$LOG"
 teardown
 
-# 5b. worktrees 目錄或某個 worktree 是 symlink → 不跟。
 setup
 mkdir -p "$ROOT/outside"; mk_target "$ROOT/outside" yes
 ln -s "$ROOT/outside" "$REPO/.claude/worktrees/linked"
@@ -178,15 +159,12 @@ equals "exit 0" "$(run)" "0"
 exists "symlink 的 worktree 不碰" "$ROOT/outside/target"
 teardown
 
-# 5c. AGM_REPO 含 `..` → 整步放棄。
 setup
 mkdir -p "$ROOT/home/x"; mk_target "$REPO" yes
 PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" AGM_REPO="$REPO/../project/agents-manager" DF_BIN="$BIN/df" AGM_BIN="$BIN/agm" DISK_GC_LOG="$LOG" bash "$AGM_DIR/bin/disk-gc.sh" >/dev/null 2>&1
 exists "AGM_REPO 帶 .. 時不刪" "$REPO/target/debug/incremental/oldcrate-aaa"
 teardown
 
-# 5d. （#1450）登記在 ~/project/agm-*（不在 .claude/worktrees 底下）的 worktree：舊的 incremental 刪、新的留；
-#     .fingerprint 全舊的整個 target/ 刪。agm issue claim --worktree 給的就是這種路徑，以前一棵都掃不到。
 setup
 REG="$HOME/project/agm-x"; git -C "$REPO" worktree add -q "$REG" -b agm-x
 mk_target "$REG"
@@ -202,20 +180,17 @@ equals "exit 0" "$(run)" "0"
 gone   "登記的 worktree（非 .claude）.fingerprint 全舊：整個 target/ 刪" "$REGOLD/target"
 teardown
 
-# 5e. （#1450）登記的 worktree 有行程的 cwd 在底下 → 整棵不動（同 case 4 的規則套到登記路徑）。
 setup
 BUSYREG="$HOME/project/agm-busy"; git -C "$REPO" worktree add -q "$BUSYREG" -b agm-busy
 mk_target "$BUSYREG" yes
 ( cd "$BUSYREG" && exec sleep 30 ) >/dev/null 2>&1 & SLEEPERS="$SLEEPERS $!"
 BUSYPID=$!
-# 等子行程真的 cd 進去（讀 /proc 的 cwd；有上限，不靠時間）。
 for _ in $(seq 1 2000); do [ "$(readlink "/proc/$BUSYPID/cwd" 2>/dev/null)" = "$BUSYREG" ] && break; done
 equals "exit 0" "$(run)" "0"
 exists "登記的 worktree 有行程在用：target/ 不動" "$BUSYREG/target"
 check  "log 記下跳過的原因" "有行程的 cwd 在底下" "$LOG"
 teardown
 
-# 5f. （#1450）登記在 $HOME 之外的 worktree：不碰（不在 $HOME 底下就 skip）。
 setup
 OUTREG="$ROOT/outside-home-wt"; git -C "$REPO" worktree add -q "$OUTREG" -b outside
 mk_target "$OUTREG" yes
@@ -223,7 +198,6 @@ equals "exit 0" "$(run)" "0"
 exists "登記在 HOME 之外的 worktree：target/ 不動" "$OUTREG/target/debug/incremental/oldcrate-aaa"
 teardown
 
-# 5g. （#1450）ubuntu-ci 的常駐 clone：舊的 incremental 刪、新的留；.fingerprint 全舊也不刪整個 target/（它是 CI 的暖快取）。
 setup
 CIREPO="$HOME/.cache/agents-manager/ci/repo"; mkdir -p "$CIREPO"
 mk_target "$CIREPO" yes
@@ -233,7 +207,6 @@ exists "CI clone 新的 incremental 留著" "$CIREPO/target/debug/incremental/ne
 exists "CI clone 的 target/ 整個不刪（即使 .fingerprint 全舊）" "$CIREPO/target"
 teardown
 
-# 5h. （#1450）git worktree list 失敗：只掃 .claude/worktrees，log 記一行 skip，不會整支不跑。
 setup
 cat > "$BIN/git-fail" <<'STUB'
 #!/bin/bash
@@ -246,9 +219,7 @@ gone   "git 失敗時 .claude/worktrees 照舊掃" "$WT2/target/debug/incrementa
 check  "log 記下 worktree list 失敗" "worktree list 失敗" "$LOG"
 teardown
 
-# 5i. （熱池）remote-cargo/<hash>/shared*/target/*/incremental 底下的 crate 層目錄：整棵久沒動才刪；新的、裡面有近期檔的、
-#     deps、熱池本身、symlink 都不動；有行程在用的也不動（issue：熱池 shared-3 累積 60 GB 而 (a) 永遠碰不到）。
-age_tree() { # age_tree <目錄>：目錄與底下所有東西都改成舊的
+age_tree() {
   local f
   while IFS= read -r f; do old "$f"; done < <(find "$1")
 }
@@ -258,9 +229,7 @@ mkdir -p "$POOL/incremental/oldcrate-aaa/s1" "$POOL/incremental/newcrate-bbb" "$
 echo x > "$POOL/incremental/oldcrate-aaa/s1/f"; echo x > "$POOL/incremental/newcrate-bbb/f"; echo x > "$POOL/incremental/mixed-ccc/s1/f"; echo x > "$POOL/deps/libold.rlib"
 echo x > "$RC/hashA/shared/target/release/incremental/oldrel-ddd/f"
 age_tree "$POOL/incremental/oldcrate-aaa"; age_tree "$POOL/deps"; age_tree "$RC/hashA/shared/target/release/incremental/oldrel-ddd"
-# mixed-ccc：目錄與舊檔都舊，但裡面有一個剛寫的檔 → 有近期的東西，保留。
 age_tree "$POOL/incremental/mixed-ccc"; echo y > "$POOL/incremental/mixed-ccc/s1/fresh"
-# symlink crate 指到別處的舊目錄 → 不跟、不刪
 mkdir -p "$ROOT/outside-crate"; echo x > "$ROOT/outside-crate/f"; age_tree "$ROOT/outside-crate"
 ln -s "$ROOT/outside-crate" "$POOL/incremental/linkcrate-eee"
 equals "exit 0" "$(run)" "0"
@@ -274,7 +243,6 @@ exists "熱池：symlink crate 本身留著" "$POOL/incremental/linkcrate-eee"
 exists "熱池：symlink 指到的目錄沒被刪" "$ROOT/outside-crate/f"
 teardown
 
-# 5j. 熱池裡有行程的 cwd 在舊 crate 目錄底下 → 那個目錄不動，其他舊的照刪。
 setup
 POOL="$RC/hashB/shared/target/debug"
 mkdir -p "$POOL/incremental/busycrate-fff" "$POOL/incremental/idle-ggg"
@@ -289,7 +257,6 @@ gone   "熱池：沒人用的舊 crate 目錄照刪" "$POOL/incremental/idle-ggg
 check  "熱池：log 記下跳過的原因" "有行程在用" "$LOG"
 teardown
 
-# 5k. 熱池的 shared 目錄是 symlink 指到別處 → 整個不跟，那邊的東西不動。
 setup
 mkdir -p "$ROOT/elsewhere-pool/target/debug/incremental/oldx-hhh"; echo x > "$ROOT/elsewhere-pool/target/debug/incremental/oldx-hhh/f"
 age_tree "$ROOT/elsewhere-pool"
@@ -299,7 +266,6 @@ exists "熱池 shared 是 symlink：指到的目錄不被刪" "$ROOT/elsewhere-p
 check  "熱池 shared 是 symlink：log 記下拒絕" "路徑不符預期" "$LOG"
 teardown
 
-# 6. 磁碟水位：90% → 呼叫 ops-alert 一次；50% → 不呼叫。
 setup
 echo 90 > "$FIX/pct"
 equals "90% exit 0" "$(run)" "0"

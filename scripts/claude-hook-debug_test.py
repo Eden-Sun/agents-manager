@@ -9,9 +9,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "claude-hook-debug.py")
-# 官方文件 #debug-hooks 的範例行（逐字）。
 OFFICIAL = "Hooks: PostToolUse:Write [.claude/hooks/log-write.sh] finished with status 0 (31ms)"
-
 
 def load_tool():
     import importlib.util
@@ -20,17 +18,14 @@ def load_tool():
     spec.loader.exec_module(mod)
     return mod
 
-
 def run(data, *args):
     p = subprocess.run([sys.executable, "-B", TOOL, *(args or ("-",))], input=data, capture_output=True)
     return p.returncode, p.stdout.decode(), p.stderr.decode()
-
 
 def summary(text):
     code, out, _ = run(text.encode())
     assert code == 0
     return json.loads(out)
-
 
 class ClaudeHookDebug(unittest.TestCase):
     def test_official_sample(self):
@@ -57,7 +52,7 @@ class ClaudeHookDebug(unittest.TestCase):
         self.assertEqual(set(by), {("PreToolUse", "timed_out"), ("PreToolUse", "cancelled"),
                                    ("SessionStart", "failed_to_start"), ("Stop", "backgrounded"),
                                    ("Notification", "completed"), ("Stop", "finished")})
-        for g in by.values():  # 這些行都沒有實測耗時：不得出現 0 或任何百分位
+        for g in by.values():
             self.assertEqual(g["with_duration"], 0)
             self.assertNotIn("p50_ms", g)
         self.assertEqual(by[("Notification", "completed")]["nonzero_status"], 1)
@@ -66,8 +61,8 @@ class ClaudeHookDebug(unittest.TestCase):
     def test_unknown_lines_are_skipped(self):
         text = "\n".join([
             "random debug line", "Hooks: NotARealEvent [x] finished with status 0 (5ms)",
-            "Hooks: Stop finished with status 0 (5ms)",  # 少了 [command]
-            "Hooks: Stop [x] finished with status 0 (99999999999ms)",  # 超過一天
+            "Hooks: Stop finished with status 0 (5ms)",
+            "Hooks: Stop [x] finished with status 0 (99999999999ms)",
             "Hooks: Stop [x] exploded (5ms)", OFFICIAL,
         ])
         s = summary(text)
@@ -107,12 +102,12 @@ class ClaudeHookDebug(unittest.TestCase):
         data = b"".join(b"Hooks: Stop [x] finished with status 0 (%dms)\n" % n for n in (5, 5, 5, 5, 5, 900, 5))
         g = tool.summarize(io.BytesIO(data))["groups"][0]
         self.assertEqual((g["count"], g["with_duration"], g["percentile_sample"]), (7, 7, 3))
-        self.assertEqual((g["max_ms"], g["p95_ms"]), (900, 5))  # max 是全體；百分位只來自前 3 筆
+        self.assertEqual((g["max_ms"], g["p95_ms"]), (900, 5))
 
     def test_unbounded_stream_without_newline_stops_at_byte_cap(self):
         import io
 
-        class Endless(io.RawIOBase):  # 永遠不換行、永遠有資料；多讀的 byte 數要能量出來
+        class Endless(io.RawIOBase):
             served = 0
 
             def readable(self):
@@ -128,7 +123,7 @@ class ClaudeHookDebug(unittest.TestCase):
         out = tool.summarize(io.BufferedReader(Endless(), buffer_size=4096))
         self.assertTrue(out["truncated"])
         self.assertEqual(out["lines"], 0)
-        self.assertLess(Endless.served, 100_000 + 3 * tool.MAX_LINE)  # 不能多讀無界資料
+        self.assertLess(Endless.served, 100_000 + 3 * tool.MAX_LINE)
 
     def test_long_line_crossing_byte_cap_stops_mid_line(self):
         import io
@@ -166,7 +161,6 @@ class ClaudeHookDebug(unittest.TestCase):
         note = summary(OFFICIAL + "\n")["note"]
         self.assertIn("MCP", note)
         self.assertIn("不能區分", note)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

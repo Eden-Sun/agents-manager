@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# M4 fake-hook timing tests (SPEC §4.4, §6.7, appendix D / M4).
-#
-# Drives the running daemon with hand-rolled `curl` hooks so the hook/Turn matching
-# rules can be checked without waiting on a real agent:
-#
-#   A  hook arrives before the prompt RPC returns  -> one assistant message, Turn completed
-#   B  the same native turn id twice               -> still one assistant message
-#   C  SessionStart / a non-turn event             -> no new Turn, no new Message
-#   D  daemon unreachable                          -> <= 3 s, exit 0, empty stdout, spool +1
-#   E  a Stop with no in-flight Turn               -> origin=external Turn + assistant message
-#
-# Requires: a daemon on 127.0.0.1:<port> and one bot with a *running* Run.
-# Usage:
-#   scripts/hook-timing-test.sh [--bot BOT_ID] [--port N] [--bot-token T]
-#                               [--ui-token T] [--binary PATH] [--keep]
-# Anything not given is discovered from ~/.config/agents-manager/.
 set -uo pipefail
 
 DATA_DIR="${AM_DATA_DIR:-$HOME/.config/agents-manager}"
@@ -45,13 +29,10 @@ die()  { printf '\033[31mfatal:\033[0m %s\n' "$1" >&2; exit 1; }
 command -v python3 >/dev/null || die "python3 is required"
 command -v curl    >/dev/null || die "curl is required"
 
-# Evaluate `expr` with `d` = the JSON document on stdin and `a` = the extra argv.
 pyq() { python3 -c 'import sys,json;d=json.load(sys.stdin);a=sys.argv[2:];print(eval(sys.argv[1],{"d":d,"a":a,"json":json,"len":len,"sum":sum,"set":set,"sorted":sorted}))' "$@"; }
 now_iso() { python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]+"Z")'; }
 rand_id() { python3 -c 'import uuid;print(uuid.uuid4())'; }
 epoch()   { python3 -c 'import time;print(time.time())'; }
-
-# ---------------------------------------------------------------- discovery
 
 if [ -z "$PORT" ]; then
   PORT="$(python3 - "$DATA_DIR/config.toml" <<'PY'
@@ -116,18 +97,15 @@ fi
 # ---------------------------------------------------------------- helpers
 
 # The native session id we pretend to be. Reusing the run's real one would collide
-# with the live agent's own dedup key, so we use a distinct synthetic session.
 SESSION_ID="timing-test-$(rand_id)"
 
 msgs() { api "$BASE/api/bots/$BOT_ID/messages?limit=500"; }
 count_msgs()  { msgs | pyq 'len(d["messages"])'; }
 count_turns() { msgs | pyq 'len(d["turns"])'; }
 
-# assistant messages attached to a given turn id
 assistants_of() { msgs | pyq 'len([m for m in d["messages"] if m.get("turn_id")==a[0] and m["role"]=="assistant"])' "$1"; }
 turn_field()    { msgs | pyq '(([t for t in d["turns"] if t["id"]==a[0]] or [{}])[0]).get(a[1],"")' "$1" "$2"; }
 
-# $1 = native turn id, $2 = assistant text
 turn_payload() {
   if [ "$KIND" = "codex" ]; then
     python3 -c 'import json,sys;print(json.dumps({"type":"agent-turn-complete","thread-id":sys.argv[1],"turn-id":sys.argv[2],"cwd":"/","input-messages":[],"last-assistant-message":sys.argv[3]}))' "$SESSION_ID" "$1" "$2"
@@ -137,14 +115,12 @@ turn_payload() {
 }
 session_payload() {
   if [ "$KIND" = "codex" ]; then
-    # Codex has no SessionStart; an unrelated event type must be ignored the same way.
     python3 -c 'import json,sys;print(json.dumps({"type":"agent-turn-started","thread-id":sys.argv[1],"turn-id":"ignored"}))' "$SESSION_ID"
   else
     python3 -c 'import json,sys;print(json.dumps({"hook_event_name":"SessionStart","session_id":sys.argv[1],"transcript_path":"/dev/null","cwd":"/"}))' "$SESSION_ID"
   fi
 }
 
-# POST a hook body exactly as the child process would. Prints the HTTP status.
 post_hook() {
   local payload="$1" body
   body="$(python3 -c 'import json,sys;print(json.dumps({"bot_id":sys.argv[1],"provider":sys.argv[2],"payload":json.loads(sys.argv[3]),"received_at":sys.argv[4],"truncated":False}))' \
@@ -153,7 +129,6 @@ post_hook() {
     -H "X-AM-Bot-Token: $BOT_TOKEN" -H 'Content-Type: application/json' -d "$body"
 }
 
-# Wait until `turn_field <id> status` stops being in_flight (or the timeout expires).
 wait_turn_settled() {
   local id="$1" deadline=$(( $(date +%s) + ${2:-25} )) st
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -173,8 +148,6 @@ wait_no_in_flight() {
   return 1
 }
 
-# ---------------------------------------------------------------- A
-
 head1 "A. hook lands before the prompt RPC returns"
 if ! wait_no_in_flight 20; then
   skip "A" "the bot already has an in-flight Turn; abandon it and retry"
@@ -183,13 +156,10 @@ else
   NATIVE_A="timing-a-$(rand_id)"
   CRID="timing-a-$(rand_id)"
   PROMPT_OUT="$(mktemp)"
-  # Fire the prompt without waiting for the RPC to come back...
   api -X POST "$BASE/api/bots/$BOT_ID/prompt" -H 'Content-Type: application/json' \
       -d "{\"text\":\"[hook timing test A] ignore this\",\"client_request_id\":\"$CRID\"}" \
       > "$PROMPT_OUT" 2>&1 &
   PROMPT_PID=$!
-  # ...and immediately deliver the Stop hook. The Turn is already in_flight (SPEC §6.3.3),
-  # so this must match rather than create an external Turn.
   sleep 0.05
   CODE_A="$(post_hook "$(turn_payload "$NATIVE_A" "PONG-A")")"
   wait "$PROMPT_PID" 2>/dev/null
@@ -214,8 +184,6 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------- B
-
 head1 "B. the same native turn id twice"
 if [ -z "${TURN_A:-}" ]; then
   skip "B" "scenario A did not produce a Turn"
@@ -234,8 +202,6 @@ else
   fi
 fi
 
-# ---------------------------------------------------------------- C
-
 head1 "C. SessionStart (claude) / non-turn event (codex) creates nothing"
 wait_no_in_flight 20 >/dev/null
 T_BEFORE="$(count_turns)"; M_BEFORE="$(count_msgs)"
@@ -249,15 +215,10 @@ else
   fail "C no Turn and no Message created" "turns $T_BEFORE->$T_AFTER, messages $M_BEFORE->$M_AFTER"
 fi
 
-# ---------------------------------------------------------------- D
-
 head1 "D. daemon unreachable: <= 3 s, exit 0, empty stdout, one spool line"
 if [ -z "$BINARY" ]; then
   skip "D" "agents-managerd binary not found (pass --binary)"
 else
-  # A closed port is indistinguishable from a stopped daemon for the child process,
-  # and it lets the rest of the suite keep running. A throwaway bot id keeps the
-  # spool out of any real bot's directory (the daemon only replays live bots).
   DEAD_PORT=1
   for p in 45231 45232 45233 45234; do
     nc -z 127.0.0.1 "$p" >/dev/null 2>&1 || { DEAD_PORT="$p"; break; }
@@ -294,8 +255,6 @@ else
   if [ "$KEEP" = "0" ]; then rm -rf "$DATA_DIR/bots/$FAKE_BOT"; else info "kept $DATA_DIR/bots/$FAKE_BOT"; fi
 fi
 
-# ---------------------------------------------------------------- E
-
 head1 "E. Stop with no in-flight Turn -> origin=external"
 if ! wait_no_in_flight 25; then
   skip "E" "a Turn is still in flight"
@@ -324,8 +283,6 @@ else
     [ "$N_E" = "1" ] && pass "E one assistant message" || fail "E one assistant message" "found $N_E"
   fi
 fi
-
-# ---------------------------------------------------------------- summary
 
 head1 "summary"
 printf '  %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"

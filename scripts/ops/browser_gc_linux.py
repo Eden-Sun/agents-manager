@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-
 @dataclass(frozen=True)
 class ChromeProcess:
     pid: int
@@ -25,13 +24,11 @@ class ChromeProcess:
     profile: str | None
     debug_port: int | None
 
-
 @dataclass
 class GCResult:
     killed_pids: list[int] = field(default_factory=list)
     kept_pids: list[int] = field(default_factory=list)
     removed_profiles: list[Path] = field(default_factory=list)
-
 
 def _proc_stat(path: Path) -> tuple[int, int] | None:
     """Return ppid and start ticks, parsing comm from its final ')' (it can contain spaces)."""
@@ -45,7 +42,6 @@ def _proc_stat(path: Path) -> tuple[int, int] | None:
     except (OSError, ValueError):
         return None
 
-
 def _uid_from_status(status: str) -> int | None:
     for line in status.splitlines():
         if line.startswith("Uid:"):
@@ -55,13 +51,11 @@ def _uid_from_status(status: str) -> int | None:
                 return None
     return None
 
-
 def _proc_uid(path: Path) -> int | None:
     try:
         return _uid_from_status((path / "status").read_text(encoding="ascii"))
     except (OSError, ValueError):
         return None
-
 
 def _profile_arg(argv: tuple[str, ...]) -> str | None:
     for index, arg in enumerate(argv):
@@ -70,7 +64,6 @@ def _profile_arg(argv: tuple[str, ...]) -> str | None:
         if arg == "--user-data-dir" and index + 1 < len(argv):
             return argv[index + 1]
     return None
-
 
 def _debug_port_arg(argv: tuple[str, ...]) -> int | None:
     for index, arg in enumerate(argv):
@@ -87,7 +80,6 @@ def _debug_port_arg(argv: tuple[str, ...]) -> int | None:
                 return None
     return None
 
-
 def _is_orphan_parent(ppid: int, proc_root: Path, uid: int) -> bool:
     """孤兒的父程序：pid 1，或這個使用者自己的 `systemd --user`（Linux user session 的 subreaper；孤兒掛在它底下、不是 pid 1）。"""
     if ppid == 1:
@@ -100,7 +92,6 @@ def _is_orphan_parent(ppid: int, proc_root: Path, uid: int) -> bool:
     except OSError:
         return False
     return bool(argv) and Path(argv[0]).name == "systemd" and "--user" in argv[1:]
-
 
 def _chrome_process(path: Path, uptime: float, ticks_per_second: int, uid: int) -> ChromeProcess | None:
     try:
@@ -135,7 +126,6 @@ def _chrome_process(path: Path, uptime: float, ticks_per_second: int, uid: int) 
         debug_port=_debug_port_arg(argv),
     )
 
-
 def _read_processes(proc_root: Path, uptime_path: Path, uid: int) -> list[ChromeProcess]:
     try:
         uptime = float(uptime_path.read_text(encoding="ascii").split()[0])
@@ -154,7 +144,6 @@ def _read_processes(proc_root: Path, uptime_path: Path, uid: int) -> list[Chrome
         if process is not None:
             found.append(process)
     return found
-
 
 def _active_chrome_profiles(proc_root: Path, tmp_root: Path, uid: int) -> set[Path] | None:
     """Include non-headless Chrome too, so a marked profile is not removed while any Chrome uses it.
@@ -191,7 +180,6 @@ def _active_chrome_profiles(proc_root: Path, tmp_root: Path, uid: int) -> set[Pa
             profiles.add(profile)
     return profiles
 
-
 def has_established_cdp_connection(port: int) -> bool | None:
     """True/False if ss answered; None means unknown and callers must preserve the process."""
     try:
@@ -206,7 +194,6 @@ def has_established_cdp_connection(port: int) -> bool | None:
     if result.returncode != 0:
         return None
     return bool(result.stdout.strip())
-
 
 def _safe_profile(raw: str | None, tmp_root: Path) -> Path | None:
     if not raw:
@@ -224,10 +211,8 @@ def _safe_profile(raw: str | None, tmp_root: Path) -> Path | None:
         return None
     return candidate
 
-
 def _has_profile_marker(path: Path) -> bool:
     return (path / "Local State").exists() or (path / "Default").is_dir() or (path / "DevToolsActivePort").exists()
-
 
 def _remove_profile(path: Path, tmp_root: Path, log: Callable[[str], None]) -> bool:
     safe = _safe_profile(str(path), tmp_root)
@@ -242,7 +227,6 @@ def _remove_profile(path: Path, tmp_root: Path, log: Callable[[str], None]) -> b
         log(f"  保留 profile {safe}（移除失敗：{exc}）")
         return False
 
-
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -251,7 +235,6 @@ def _pid_exists(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-
 
 def _terminate(process: ChromeProcess, proc_root: Path, uid: int, send_signal, pid_exists, sleep_fn) -> bool:
     pid = process.pid
@@ -266,7 +249,6 @@ def _terminate(process: ChromeProcess, proc_root: Path, uid: int, send_signal, p
     sleep_fn(3)
     if not pid_exists(pid):
         return True
-    # The kernel may reuse a PID after TERM. Never send KILL to a new process.
     if not _same_process(process, proc_root, uid):
         return True
     try:
@@ -275,7 +257,6 @@ def _terminate(process: ChromeProcess, proc_root: Path, uid: int, send_signal, p
         return False
     sleep_fn(0.1)
     return not _same_process(process, proc_root, uid)
-
 
 def _same_process(snapshot: ChromeProcess, proc_root: Path, uid: int) -> bool:
     current = _chrome_process(proc_root / str(snapshot.pid), uptime=0, ticks_per_second=1, uid=uid)
@@ -286,7 +267,6 @@ def _same_process(snapshot: ChromeProcess, proc_root: Path, uid: int) -> bool:
         and current.ppid == snapshot.ppid
         and current.argv == snapshot.argv
     )
-
 
 def run_once(
     *,
@@ -347,8 +327,6 @@ def run_once(
         if _remove_profile(profile, tmp_root, log):
             result.removed_profiles.append(profile)
 
-    # Reap old, marked profiles left by an earlier interrupted run. Never follow a symlink,
-    # touch a profile still used by a Chrome process, or remove a directory younger than an hour.
     cutoff = time.time() - 3600
     try:
         candidates = sorted(tmp_root.glob("am-*")) if active_profiles is not None else []
@@ -373,10 +351,9 @@ def run_once(
             rc = pane_gc()
             if isinstance(rc, int) and rc != 0:
                 log(f"pane-gc 失敗（rc={rc}）")
-        except Exception as exc:  # keep local browser cleanup independent from pane tooling
+        except Exception as exc:
             log(f"pane-gc 失敗（{exc}）")
     return result
-
 
 def main() -> int:
     agm_dir = Path(__file__).resolve().parent.parent
@@ -402,7 +379,6 @@ def main() -> int:
     append_log("== browser-gc Linux kick")
     run_once(log=append_log, pane_gc=run_pane_gc)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

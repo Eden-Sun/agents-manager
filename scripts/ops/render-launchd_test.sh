@@ -1,6 +1,4 @@
 #!/bin/bash
-# render-launchd.sh 的隔離測試：樣板的 `@HOME@` 換成 ${HOME}（XML 轉義），結果能被 plistlib 解析、路徑正確。
-#   bash scripts/ops/render-launchd_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RENDER="$HERE/render-launchd.sh"

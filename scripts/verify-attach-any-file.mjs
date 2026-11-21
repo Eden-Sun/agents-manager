@@ -1,4 +1,3 @@
-// 驗證：暫存區與托盤收任意檔（mock UI, 5174）。OUT=dir node verify.mjs
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 const OUT = process.env.OUT ?? '/tmp/am-attach-any/shots'
@@ -22,9 +21,7 @@ const setFiles = async (selector, files) => {
   await send('DOM.setFileInputFiles', { nodeId, files })
 }
 await send('Page.navigate', { url: URL_BASE }); await sleep(3000)
-// 開一個 bot，托盤才有收件對象
 await ev(`document.querySelector('.bot-row')?.click()`); await sleep(1200)
-// 暫存區展開
 await ev(`document.querySelector('.shelf-handle')?.click()`); await sleep(500)
 await setFiles('.shelf input[type=file]', ['/tmp/am-attach-any/note.md', '/tmp/am-attach-any/data.csv', '/tmp/am-attach-any/shot.png'])
 await sleep(900)
@@ -32,13 +29,11 @@ console.log('shelf cards:', await ev(`[...document.querySelectorAll('.shelf-card
 console.log('file glyphs:', await ev(`document.querySelectorAll('.shelf-card-file').length`))
 console.log('thumbnails:', await ev(`document.querySelectorAll('.shelf-card-main img').length`))
 await shot('shelf-any-file')
-// 點兩張卡放進對話托盤
 await ev(`[...document.querySelectorAll('.shelf-card-main')].slice(0,3).forEach(b=>b.click())`)
 await sleep(1200)
 console.log('tray names:', await ev(`[...document.querySelectorAll('.attach-thumb-name')].map(n=>n.textContent).join(' | ')`))
 console.log('tray glyphs:', await ev(`document.querySelectorAll('.attach-thumb-file').length`))
 await shot('tray-any-file')
-// 3) 直接把非圖片檔拖進對話（不經暫存區）
 await ev(`(() => {
   const el = document.querySelector('.chat')
   const dt = new DataTransfer()

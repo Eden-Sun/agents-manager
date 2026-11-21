@@ -1,6 +1,3 @@
-// SPEC §13 project group chat — mock-mode walkthrough with headless Chrome (CDP).
-// Prereq (in web/): VITE_MOCK=1 npx vite --port 5185
-// Run: node scripts/demo-group.mjs   → docs/screenshots/140-*.png
 import { spawn } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -34,7 +31,6 @@ const send = (m, p = {}) => {
   ws.send(JSON.stringify({ id: i, method: m, params: p }))
   return new Promise((res, rej) => pending.set(i, { res, rej }))
 }
-// Refuse to drive somebody else's Chrome: the port must be ours (our process is alive).
 chrome.on('exit', (code) => {
   console.error(`chrome exited early (code ${code}); is port ${PORT} already in use?`)
   process.exit(2)
@@ -78,7 +74,6 @@ const shot = async (name) => {
   writeFileSync(`${OUT}/${name}.png`, Buffer.from(data, 'base64'))
   console.log('saved', name)
 }
-// React-controlled textarea: set the value through the prototype setter so onChange fires.
 const type = (sel, value) =>
   ev(
     `(()=>{const el=document.querySelector(${JSON.stringify(sel)});if(!el)return 'no el';` +
@@ -94,7 +89,6 @@ const timeline = () =>
     `[...document.querySelectorAll('.msg-list.group .msg')].map(a=>{const f=a.querySelector('.msg-from')?.textContent?.trim()??'';const b=a.querySelector('.bubble')?.textContent?.trim().slice(0,50)??'';return a.className.replace('msg ','')+' | '+f+' | '+b}).join('\\n')`,
   )
 
-// 1. start both bots (the second one from the sidebar), then open the group view
 console.log('bots:', await ev(`[...document.querySelectorAll('.bot-name')].map(e=>e.textContent).join(', ')`))
 await ev(`[...document.querySelectorAll('.bot-row .mini-btn.primary')].forEach(b=>b.click())`)
 await sleep(2200)
@@ -104,13 +98,11 @@ await sleep(700)
 console.log('group head:', await ev(`document.querySelector('.group-head .main-title')?.textContent`), '| members:', await ev(`document.querySelectorAll('.members .member').length`))
 await shot('140-group-empty')
 
-// 2. no mention → send disabled + hint
 await type('.group-composer textarea', 'hello everyone')
 await sleep(300)
 console.log('send disabled w/o mention:', await ev(`document.querySelector('.group-composer .send-btn').disabled`), '| hint:', await ev(`document.querySelector('.group-hint')?.textContent`))
 await shot('141-group-no-mention')
 
-// 3. autocomplete: type "@" → popup; ArrowDown, Enter picks am-codex
 await type('.group-composer textarea', '')
 await type('.group-composer textarea', '@')
 await sleep(300)
@@ -125,7 +117,6 @@ await key('Enter')
 await sleep(300)
 console.log('after pick:', JSON.stringify(await ev(`document.querySelector('.group-composer textarea').value`)))
 
-// 4. @all → both bots working, folded user bubble "→ @am-claude, @am-codex"
 await type('.group-composer textarea', '@all Reply with exactly GROUP-OK')
 await sleep(200)
 console.log('targets hint:', await ev(`document.querySelector('.group-targets')?.textContent`))
@@ -137,7 +128,6 @@ await sleep(2200)
 console.log('timeline (replied):\n' + (await timeline()))
 await shot('144-group-all-replied')
 
-// 5. @am-claude only
 await type('.group-composer textarea', '@am-claude, only you: reply PONG')
 await sleep(200)
 await ev(`document.querySelector('.group-composer .send-btn').click()`)
@@ -145,7 +135,6 @@ await sleep(2600)
 console.log('timeline (single):\n' + (await timeline()))
 await shot('145-group-single-target')
 
-// 6. stop am-codex → @all → skipped note in the timeline
 await ev(`(()=>{const rows=[...document.querySelectorAll('.bot-row')];const r=rows.find(x=>x.querySelector('.bot-name').textContent==='am-codex');r.querySelector('.mini-btn.danger').click();return 'stopped am-codex'})()`)
 await sleep(1200)
 await type('.group-composer textarea', '@all one of you is offline')
@@ -158,7 +147,6 @@ console.log('timeline (skipped):\n' + (await timeline()))
 console.log('notice:', await ev(`[...document.querySelectorAll('.notice')].map(n=>n.textContent).join(' || ')`))
 await shot('147-group-skipped')
 
-// 7. unread: open am-claude's own chat, send from there, reply lands while the group view is closed
 await ev(`(()=>{const rows=[...document.querySelectorAll('.bot-row')];rows.find(x=>x.querySelector('.bot-name').textContent==='am-claude').click();return 'selected am-claude'})()`)
 await sleep(500)
 await type('.composer textarea', 'direct message to claude')
@@ -173,7 +161,6 @@ console.log('unread after open:', await ev(`document.querySelector('.unread-badg
 console.log('timeline (with direct msg):\n' + (await timeline()))
 await shot('149-group-after-direct')
 
-// 8. dark + narrow
 await metrics(1280, 860, true)
 await sleep(400)
 await shot('14a-group-dark')

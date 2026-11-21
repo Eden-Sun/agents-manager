@@ -1,4 +1,3 @@
-# Bash test helpers. The caller owns PASS and FAIL; source before any suite-specific checks.
 check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
   else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi

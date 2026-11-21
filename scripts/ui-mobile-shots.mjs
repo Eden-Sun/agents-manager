@@ -26,7 +26,6 @@ await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textCont
 await shot('m4-terminal')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='對話')?.click()`); await sleep(500)
 const openDrawer = () => ev(`document.querySelector('button[aria-label*="選單"], .menu-btn, button.hamburger')?.click()`)
-// 設定是 **bot** 標題列上的齒輪，所以先回到一顆 bot，再點齒輪。
 await openDrawer(); await sleep(600)
 await ev(`[...document.querySelectorAll('.bot-row')].find(r=>/C1-fable|c1\\b/i.test(r.textContent))?.click()`); await sleep(1500)
 const gearHit = await ev(`(() => { const b = document.querySelector('.main-head .icon-btn.gear'); if (!b) return false; b.click(); return true })()`)

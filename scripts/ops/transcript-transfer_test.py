@@ -16,10 +16,8 @@ SRC_PROJ = "/Users/me/project/am"
 DST_PROJ = "/home/user/project/am"
 WT = SRC_PROJ + "/.claude/worktrees/am-x1"
 
-
 def claude_key(p):
     return "".join(c if c.isalnum() else "-" for c in p)
-
 
 class Env:
     def __init__(self, tmp):
@@ -57,7 +55,6 @@ class Env:
         with open(os.path.join(self.dst, rel), encoding="utf-8") as f:
             return f.read()
 
-
 def claude_session(env, cwd, sid, cfg=".claude"):
     lines = [
         {"type": "user", "cwd": cwd, "sessionId": sid, "message": {"content": f"read {cwd}/note.txt"}},
@@ -67,20 +64,16 @@ def claude_session(env, cwd, sid, cfg=".claude"):
     ]
     return env.put(f"{cfg}/projects/{claude_key(cwd)}/{sid}.jsonl", "".join(json.dumps(l) + "\n" for l in lines))
 
-
 def bot(bid, kind):
     return {"id": bid, "kind": kind}
 
-
 def run(rid, bid, sid, path):
     return {"id": rid, "bot_id": bid, "native_session_id": sid, "transcript_path": path}
-
 
 class TranscriptTransfer(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="agm-717-")
         self.env = Env(self._tmp.name)
-        # 內容裡的 `/Users/me` 要換成目標 $HOME；測試的來源 $HOME 是暫存目錄，所以另外把 /Users/me 也對到目標。
         self.maps = (f"{SRC_PROJ}={DST_PROJ}", f"/Users/me={self.env.dst}")
 
     def tearDown(self):
@@ -226,8 +219,6 @@ class TranscriptTransfer(unittest.TestCase):
         for d, _, names in os.walk(e.dst):
             self.assertEqual(names, [])
 
-    # ---- 對抗式審查（資料安全）----
-
     def test_a_symlinked_session_file_is_refused_not_followed(self):
         """`transcript_path` 是 DB 記的字串：位置對但是個符號連結（指到憑證之類），不能被讀進 bundle 搬到別台機器。"""
         e = self.env
@@ -283,7 +274,6 @@ class TranscriptTransfer(unittest.TestCase):
         r, _, _ = e.run(b, maps=("relative=/x",))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--map", r.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

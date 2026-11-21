@@ -1,14 +1,4 @@
 #!/bin/bash
-# codegraph 索引落後告警（週期）：主 checkout 的索引落後 HEAD 超過門檻就喊 ops-alert（reason=codegraph_index_lag）。
-#
-# 根因：主 checkout 曾停在舊分支，索引停在 11/10 好幾天，沒人發現；codegraph 的 watcher 只在 daemon 裡跑，壞了不會叫。
-# 由 systemd user timer `com.agm.codegraph-lag.timer` 每 600 秒跑一次（Linux），純機械不花 LLM。
-# 判斷與門檻見 codegraph-lag.py（落後 commit 數 > CG_LAG_MAX_COMMITS 或最舊未反映 commit 超過 CG_LAG_MAX_MINUTES 分鐘）。
-# 只讀：不跑 sync、不改索引。要補索引請人手跑 `codegraph sync`（在主樹）。
-#
-# 喊人走 kick-common.sh 的 alert()（同 source+reason daemon 每小時去重）。索引缺席回 exit 2 也喊。
-#
-#   AGM_REPO、AGM_BIN、CG_LAG_PY、CG_LAG_LOG、CG_LAG_MAX_COMMITS、CG_LAG_MAX_MINUTES 可覆寫（測試用）。
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,7 +11,6 @@ MAX_COMMITS="${CG_LAG_MAX_COMMITS:-20}"
 MAX_MINUTES="${CG_LAG_MAX_MINUTES:-30}"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-# 共用函式庫（缺席時的處理同其他 kick：寫 log、直接 ops-alert、exit 1）。
 . "${0%/*}/kick-common.sh" 2>/dev/null || {
   _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
   echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2

@@ -1,8 +1,4 @@
 #!/bin/bash
-# ci-watch-kick.sh 的隔離測試：假的 `gh`、假的 `bin/agm`，完全不碰 GitHub、正式 AGM 或 launchd。
-# 測的是決策：什麼時候開 issue、派幾次、失敗清單變了留言、恢復綠、狀態檔遺失、gh 失敗、鎖回收、最小 PATH。
-#
-#   bash scripts/ops/ci-watch-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/ci-watch-kick.sh"
@@ -18,7 +14,6 @@ setup() {
   echo "TASK-BODY-MARKER 交辦正文" > "$AGM_DIR/ci-watch-task.md"
   : > "$AGM_DIR/calls.log"; : > "$GHDIR/calls.log"; : > "$GHDIR/created.log"; : > "$GHDIR/comments.log"; : > "$AGM_DIR/assign-body.txt"
 
-  # 假 agm：assign／ops-alert；未知旗標一律 exit 2（2026-09-16 `--request-id` 拼錯事故的教訓）。
   cat > "$AGM_DIR/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/calls.log"
@@ -41,8 +36,6 @@ esac
 STUB
   chmod +x "$AGM_DIR/bin/agm"
 
-  # 假 gh：run list 吐 $GHDIR/runs.json；run view --log-failed 吐 $GHDIR/log-<id>.txt；issue list 吐 $GHDIR/issues.txt（編號，可空）；
-  # issue create／comment／label create 只記錄。STUB_GH_FAIL=1 全部失敗；未知子命令或旗標 exit 2。
   cat > "$ROOT/fakebin/gh" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$GHDIR/calls.log"
@@ -87,9 +80,8 @@ case "$1 $2" in
 esac
 STUB
   chmod +x "$ROOT/fakebin/gh"
-  export PATH="$ROOT/fakebin:$PATH" AGM_EXTRA_PATH=""   # 不讓腳本把真的 /opt/homebrew/bin/gh 排到假 gh 前面
+  export PATH="$ROOT/fakebin:$PATH" AGM_EXTRA_PATH=""
   unset AGM_CI_BOT STUB_GH_FAIL STUB_LOG_FAIL STUB_CREATE_FAIL STUB_ASSIGN_FAIL
-  # 既有情境都是 GitHub Actions 那條來源；ubuntu-ci 來源在檔尾另測（issue #716）。
   export AGM_CI_SOURCE=actions AGM_CI_LOG_DIR="$ROOT/cilogs" AGM_CI_HOST=""
 }
 teardown() {
@@ -98,7 +90,6 @@ teardown() {
   export PATH="${PATH#"$ROOT/fakebin:"}"
 }
 
-# mk_runs <id:conclusion:status>…：最新的排前面，headSha 用 sha<id>，createdAt 隨 id 遞增。
 mk_runs() {
   python3 - "$GHDIR/runs.json" "$@" <<'PY'
 import json, sys
@@ -112,7 +103,6 @@ out.sort(key=lambda r: r["createdAt"], reverse=True)
 json.dump(out, open(path, "w"))
 PY
 }
-# mk_log <run-id> <name…>：cargo 那一種＋一條 python 的。
 mk_log() {
   local id="$1"; shift
   : > "$GHDIR/log-$id.txt"
@@ -124,7 +114,6 @@ mk_log() {
   printf 'daemon\tRun tests\t2026-09-19T01:00:02.0000000Z \n' >> "$GHDIR/log-$id.txt"
 }
 
-# ops 測試的 log：`==> ops: <檔>` 之後跟著 harness 的 `ok   - …` / `FAIL - …`（issue #449）。
 mk_ops_log() {
   local id="$1" file="$2"; shift 2
   : > "$GHDIR/log-$id.txt"
@@ -141,7 +130,6 @@ creates() { grep -c '^TITLE ' "$GHDIR/created.log" 2>/dev/null | tr -d ' '; }
 comments() { grep -c '^COMMENT' "$GHDIR/comments.log" 2>/dev/null | tr -d ' '; }
 state() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print(json.dumps(v) if isinstance(v,(list,bool)) else v)' "$AGM_DIR/ci-watch.state.json" "$1" 2>/dev/null; }
 
-# 1. 一直綠：安靜（不寫 log、不開、不派、不留言）。
 setup
 mk_runs 3:success 2:success 1:success
 bash "$SCRIPT"
@@ -151,7 +139,6 @@ equals "綠：不寫 log" "$(cat "$AGM_DIR/ci-watch.log" 2>/dev/null)" ""
 [ ! -e "$AGM_DIR/ci-watch.state.json" ] && { echo "ok   - 綠：不建狀態檔"; PASS=$((PASS + 1)); } || { echo "FAIL - 綠：不建狀態檔"; FAIL=$((FAIL + 1)); }
 teardown
 
-# 2. 綠→紅：開一張＋派一次；標題、標籤、內文、request-id、派給誰、狀態檔。
 setup
 ( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
   for n in 1 2 3; do echo $n > f; git add f; git commit -q -m "commit $n"; done )
@@ -186,7 +173,6 @@ equals "狀態：assigned" "$(state assigned)" "true"
 check "有補建標籤" "label" "$GHDIR/labels.log"
 teardown
 
-# 2b. 大量紅（#1174）：失敗清單有上限，票開得出來（內文不能超過 GitHub 的 65536 字），截斷後的清單要穩定。
 setup
 ( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
   for n in 1 2 3; do echo $n > f; git add f; git commit -q -m "commit $n"; done )
@@ -200,7 +186,7 @@ for r in d:
     if r["databaseId"] == 4: r["headSha"] = f
 json.dump(d, open(p, "w"))
 PY
-mk_log 5 $(seq -f 'mod::t%03g' 150 -1 1)      # 150 條，倒序給
+mk_log 5 $(seq -f 'mod::t%03g' 150 -1 1)
 bash "$SCRIPT"
 equals "大量紅也開得出一張" "$(creates)" "1"
 check "標題寫超過 100 條" "^TITLE CI 紅了：${F:0:8} 起超過 100 條失敗" "$GHDIR/created.log"
@@ -213,7 +199,6 @@ bash "$SCRIPT"
 equals "同一份 log 再跑不留言（截斷後的清單要穩定）" "$(comments)" "0"
 teardown
 
-# 3. 同一段紅連跑三輪：只有一張、一派、零留言。
 setup
 mk_runs 5:failure 4:failure 3:success; mk_log 5 mod::a
 bash "$SCRIPT"; bash "$SCRIPT"; bash "$SCRIPT"
@@ -222,7 +207,6 @@ equals "三輪只派一次" "$(assigns)" "1"
 equals "沒變就不留言" "$(comments)" "0"
 teardown
 
-# 4. 失敗清單變了（多了新的測試）：同一張 issue 留言一次；再跑不重複留言。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 bash "$SCRIPT"
@@ -235,7 +219,6 @@ equals "仍只一張、一派" "$(creates)$(assigns)" "11"
 check "狀態記下新清單" "mod::c" "$AGM_DIR/ci-watch.state.json"
 teardown
 
-# 5. 紅→綠：在 issue 留言「sha 起恢復綠」並清狀態、不關 issue；之後綠安靜。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 bash "$SCRIPT"
@@ -246,14 +229,12 @@ check "綠了留言（sha＋run）" "COMMENT 100 :: sha6 起恢復綠，run 6" "
 check_no "不自動關 issue" "issue close" "$GHDIR/calls.log"
 bash "$SCRIPT"
 equals "之後再綠不重複留言" "$(comments)" "1"
-# 再紅一次是新的一段：重新開一張、重新派（request-id 是新的 sha）。
 mk_runs 8:failure 7:success 6:success; mk_log 8 mod::z
 bash "$SCRIPT"
 equals "新的一段紅：再開一張" "$(creates)" "2"
 check "新的一段紅：新 request-id" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
 teardown
 
-# 6. 狀態檔遺失但 issue 還開著：不重開，但要留言並用這段的 sha 再派（#644）。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 echo 77 > "$GHDIR/issues.txt"
@@ -265,7 +246,6 @@ check "接手要留言" "COMMENT 77 :: 新的一段紅" "$GHDIR/comments.log"
 check "接手的 request-id 是這段的 sha" "\-\-request-id ci-red-sha5" "$AGM_DIR/calls.log"
 teardown
 
-# 6b. 上一段轉綠後 issue 還開著、狀態已清：新的一段紅不能默默接手（#644 情境 A）。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 bash "$SCRIPT"
@@ -281,7 +261,6 @@ check "留言點名新的 sha" "sha8" "$GHDIR/comments.log"
 check "再派的 request-id 是新 sha" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
 teardown
 
-# 6c. 兩輪之間先綠後紅、腳本沒看過 latest=green、舊狀態還在（#644 情境 B）：補轉綠留言並另開。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 bash "$SCRIPT"
@@ -295,7 +274,6 @@ check "新票的 request-id" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
 equals "狀態指到新票" "$(state issue)" "101"
 teardown
 
-# 7. gh 失敗（rate limit）：什麼都不做、不改狀態、記一行 log。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 bash "$SCRIPT"
@@ -314,7 +292,6 @@ bash "$SCRIPT"
 equals "gh 失敗且沒狀態：不開" "$(creates)" "0"
 [ ! -e "$AGM_DIR/ci-watch.state.json" ] && { echo "ok   - gh 失敗：不誤建狀態"; PASS=$((PASS + 1)); } || { echo "FAIL - gh 失敗：不誤建狀態"; FAIL=$((FAIL + 1)); }
 teardown
-# 7b. 取失敗 log 失敗、開 issue 失敗：不動狀態，下一輪再來。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 export STUB_LOG_FAIL=1
@@ -328,7 +305,6 @@ bash "$SCRIPT"
 equals "下一輪重試就開成功" "$(creates)" "1"
 teardown
 
-# 7c. 連續 gh 失敗：一次抖動不吵人，連續 N 輪就推 ops_alert（不能永遠只有 log）；成功一輪就清零。
 setup
 mk_runs 5:success 4:success
 export STUB_GH_FAIL=1 AGM_FAIL_ALERT_AFTER=3
@@ -345,7 +321,6 @@ check_no "清零後重新累計" "ops-alert" "$AGM_DIR/calls.log"
 unset AGM_FAIL_ALERT_AFTER
 teardown
 
-# 8. cancelled／skipped／進行中不算紅也不算綠。
 setup
 mk_runs 6:cancelled 5:skipped 4:success 3:failure:in_progress
 bash "$SCRIPT"
@@ -365,7 +340,6 @@ equals "紅段中來了 cancelled：不當綠、不留言" "$(comments)" "0"
 [ -e "$AGM_DIR/ci-watch.state.json" ] && { echo "ok   - cancelled：狀態還在"; PASS=$((PASS + 1)); } || { echo "FAIL - cancelled：狀態還在"; FAIL=$((FAIL + 1)); }
 teardown
 
-# 9. 派工失敗：issue 已開、狀態記 assigned=false，下一輪補派（同 request-id），不重開。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 export STUB_ASSIGN_FAIL=1
@@ -380,7 +354,6 @@ equals "補派不重開" "$(creates)" "1"
 check "補派用同一個 request-id" "ci-red-sha5" "$AGM_DIR/calls.log"
 teardown
 
-# 10. 派給誰：AGM_CI_BOT ＞ runtime.json 的 ci_bot_id ＞ responder_bot_id；找不到就不派（issue 仍開）。
 setup
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["ci_bot_id"]="bot-ci"; json.dump(d,open(sys.argv[1],"w"))' "$AGM_DIR/runtime.json"
 mk_runs 5:failure 4:success; mk_log 5 mod::a
@@ -402,7 +375,6 @@ equals "找不到對象：不亂派" "$(assigns)" "0"
 equals "找不到對象：issue 仍開" "$(creates)" "1"
 teardown
 
-# 11. 殘留鎖（pid 不存在）：回收並接手；剛建立的鎖先不動；活鎖擋下、卡太久喊人；pid 被別的程序重用視為殘留。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 mkdir "$AGM_DIR/ci-watch.lock"; echo "999999 1" > "$AGM_DIR/ci-watch.lock/owner"
@@ -443,14 +415,12 @@ equals "pid 被別的程序重用：回收後照開" "$(creates)" "1"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
-# 12. launchd 的最小環境：env -i、PATH 只有 /usr/bin:/bin（加上假 gh 的目錄），系統 /bin/bash 也要跑得起來。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 env -i PATH="$ROOT/fakebin:/usr/bin:/bin" AGM_EXTRA_PATH="" AGM_CI_SOURCE=actions AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" GHDIR="$GHDIR" /bin/bash "$SCRIPT"
 equals "env -i 最小 PATH：照開" "$(creates)" "1"
 equals "env -i 最小 PATH：照派" "$(assigns)" "1"
 teardown
-# 12b. 找不到 gh／python3：log＋ops_alert，不是靜默 exit 0。
 setup
 mk_runs 5:failure 4:success
 mkdir "$ROOT/nogh"; for t in date cat seq dirname sed head cut; do ln -s "$(command -v $t)" "$ROOT/nogh/$t"; done
@@ -467,8 +437,6 @@ check "缺 python3：有記 log" "找不到 python3" "$AGM_DIR/ci-watch.log"
 check "缺 python3：推 ops-alert" "\-\-reason missing_dependency" "$AGM_DIR/calls.log"
 teardown
 
-# 12b. 間歇紅（issue #445）：失敗的測試在上一個綠之前就存在 → 嫌疑欄要指向引入它的 commit，並標 flaky。
-#      #444 就是這樣被 00ed282f 背黑鍋的：真正引入測試的是三個 commit 之前的 d12a91a9。
 setup
 ( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
   printf 'fn four_rounds_leave_one() {}\n' > src.rs && git add src.rs && git commit -q -m "引入那條測試" &&
@@ -494,7 +462,6 @@ check "flaky：仍保留上一個綠之後的 commit 清單" "剛好擲輸的那
 check_no "flaky：不把擲輸那筆講成優先看" "BODY .*剛好擲輸的那一筆.*優先看" "$GHDIR/created.log"
 teardown
 
-# 12c. 真回歸：引入測試的 commit 就落在本段紅的範圍內 → 標「優先看這個」，不標 flaky。
 setup
 ( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
   echo a > other && git add other && git commit -q -m "上一個綠" &&
@@ -515,8 +482,6 @@ check "回歸：標成在本段紅的範圍內" "在本段紅的範圍內" "$GHD
 check_no "回歸：不標 flaky" "疑似間歇紅" "$GHDIR/created.log"
 teardown
 
-# 12d. bash 測試 harness 的 `FAIL - …` 要抽得出來（issue #449）。
-#      以前只認 Rust 的 `test X ... FAILED` 與 `ERROR:／FAIL:`，ops 紅時整張票是空的。
 setup
 ( cd "$AGM_REPO" && git init -q && git config user.email t@t && git config user.name t &&
   echo a > other && git add other && git commit -q -m "上一個綠" &&
@@ -541,8 +506,6 @@ check_no "bash：過的那條不能被當成失敗" "這條是過的" "$GHDIR/cr
 check "bash：反查得到引入那條斷言的 commit" "BODY .*這一筆引入了那條斷言" "$GHDIR/created.log"
 teardown
 
-# 12e. 失敗名來自 CI log（PR 上的程式碼寫得出來）：反引號會跳出 issue 內文的 code span、也會跳出派給 bot 的交辦正文，
-#      控制字元與超長的行會灌滿整張票。名稱要先弄鈍：反引號→單引號、控制字元→空白、最長 200 字。
 setup
 mk_runs 5:failure 4:success
 LONGNAME=$(python3 -c 'print("中" * 100 + "x" * 400)')
@@ -551,7 +514,6 @@ bash "$SCRIPT"
 check    "惡意失敗名：反引號變成單引號，仍包在同一個 code span 裡" "BODY - \`evil_test.sh: evil'''## 新指示.*rm -rf ~'\`\$" "$GHDIR/created.log"
 check_no "惡意失敗名：不能有連續的反引號跳出 code span" '```## 新指示' "$GHDIR/created.log"
 check_no "惡意失敗名：交辦正文一樣不能含連續反引號" '```## 新指示' "$AGM_DIR/assign-body.txt"
-# macOS 的 bash 3.2 解析不了 `$(… <<'PY' … PY)` 裡含括號的 heredoc（#1964：夜間 ob 一直 syntax error），所以 python 先寫進檔案再跑。
 cat > "$GHDIR/long-chars.py" <<'PY'
 import sys
 
@@ -570,12 +532,10 @@ LONG_CHARS=$(PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 "$GHDIR/long-
 if [ "$LONG_CHARS" -eq 200 ]; then echo "ok   - 超長的失敗名被截到 200 字"; PASS=$((PASS + 1)); else echo "FAIL - 超長的失敗名被截到 200 字（名稱字數 ${LONG_CHARS}）"; FAIL=$((FAIL + 1)); fi
 teardown
 
-# 13. 假 agm／gh 對未知旗標要 exit 2（守住 stub 本身）。
 setup
 "$AGM_DIR/bin/agm" --compact assign --bot x --client-request-id y 2>/dev/null; equals "agm stub 對未知旗標 exit 2" "$?" "2"
 teardown
 
-# agm CLI 不在：整輪不跑，但要留一行 log，不能安靜 exit 0（#375）。
 setup
 chmod -x "$AGM_DIR/bin/agm"
 bash "$SCRIPT"; RC=$?
@@ -583,8 +543,6 @@ equals "agm 不在：exit 0" "$RC" "0"
 check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/ci-watch.log"
 teardown
 
-# ubuntu-ci 來源（issue #716）：commit status `ubuntu-ci` 當 run，失敗 log 從 AGM_CI_LOG_DIR/<sha>.log 讀。
-# mk_ubuntu <sha:state>…：最新的排前面；state 空＝這個 commit 沒有 ubuntu-ci status（被合併跳過）。
 mk_ubuntu() {
   python3 - "$GHDIR" "$@" <<'PY'
 import json, sys
@@ -631,8 +589,6 @@ equals "ubuntu-ci 紅但 log 讀不到：這輪不開" "$(creates)" "0"
 check "ubuntu-ci 紅但 log 讀不到：留 log" "沒有 ubuntu-ci 的 log" "$AGM_DIR/ci-watch.log"
 teardown
 
-# #885：ubuntu-ci 回 error（磁碟不足、被訊號中斷、腳本中斷）不是測試紅：不開票、不派工、不改狀態；
-# 連續 3 輪最新結果都是 error 才推 ci_infra_error（ops-alert），計數遇到非 error 就清掉。
 setup
 export AGM_CI_SOURCE=ubuntu-ci
 mk_ubuntu ddd4:error ccc3:success bbb2:success
@@ -652,7 +608,6 @@ bash "$SCRIPT"
 [ ! -e "$AGM_DIR/ci-watch.errors" ] && echo "ok   - 非 error 清掉計數" && PASS=$((PASS + 1)) || { echo "FAIL - 非 error 沒清計數"; FAIL=$((FAIL + 1)); }
 teardown
 
-# error 夾在兩次失敗之間：error 不算紅也不算綠，紅的那段照舊開一張票（failure 的既有行為不變）。
 setup
 export AGM_CI_SOURCE=ubuntu-ci
 mkdir -p "$AGM_CI_LOG_DIR"
@@ -664,9 +619,6 @@ equals "error 之下的真 failure：派一次" "$(assigns)" "1"
 equals "error 之下的真 failure：起點是 failure 的 sha" "$(state first_red_sha)" "ccc3"
 teardown
 
-# #1287：判定只看 commit 順序（main 上越新越前面），不看 status／run 的建立時間。
-# 較舊的 commit 可能晚補狀態（delayed／retry／offline flush），按時間排會把舊的紅／綠當成目前的結論。
-# skew <sha|state|created_at>…（用 | 分，時間戳記本身有冒號）：commit 由新到舊排（前面的較新），created_at 照給的值（可以故意倒過來）。
 skew_ubuntu() {
   python3 - "$GHDIR" "$@" <<'PY'
 import json, sys
@@ -680,7 +632,6 @@ json.dump(commits, open(d + "/commits.json", "w"))
 PY
 }
 
-# 1. 舊 commit 晚補綠：最新的 new2 是綠的，就不能因為 old1 的 failure 比較晚才寫進來就開紅票。
 setup
 export AGM_CI_SOURCE=ubuntu-ci
 mkdir -p "$AGM_CI_LOG_DIR"
@@ -691,7 +642,6 @@ equals "舊 commit 晚補紅：最新是綠，不開票" "$(creates)" "0"
 equals "舊 commit 晚補紅：不派工" "$(assigns)" "0"
 teardown
 
-# 2. 舊 commit 晚補綠、最新的 new2 是紅：紅不能被蓋掉，照開一張（漏報的那一面）。
 setup
 export AGM_CI_SOURCE=ubuntu-ci
 mkdir -p "$AGM_CI_LOG_DIR"
@@ -702,7 +652,6 @@ equals "最新 commit 紅、舊的晚補綠：照開一張（不漏報）" "$(cr
 equals "最新 commit 紅：第一個紅的 sha 是 new2" "$(state first_red_sha)" "new2"
 teardown
 
-# 3. GitHub Actions 來源：run 的建立時間與 commit 順序相反，判定要照 commit 順序。
 setup
 python3 - "$GHDIR" <<'PY'
 import json, sys

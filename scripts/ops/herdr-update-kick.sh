@@ -1,26 +1,5 @@
 #!/bin/bash
-# herdr 有新版時，整理出對 agents-manager 有沒有用、會不會壞，派給 AGM 排程處理（issue #66）。
-# launchd `com.agm.herdr-update` 每天跑一次；唯讀，只派工，**不升級、不重啟 herdr server**。
-#
-# 版本比較與 CHANGELOG 段落擷取全部交給 `agents-managerd herdr-update-check`
-# （`daemon/src/herdr_update.rs`）：這支腳本只負責三件事——問本機 herdr 版本、問 GitHub 最新穩定版、
-# 抓 CHANGELOG 全文——然後照它印出的 JSON 決定要不要派工。不在這裡重做版本比較（`457dd14` 的
-# `0.9.0` 判成比 `0.10.0` 新那個坑，字串比較一定會再踩一次）。
-#
-#   AGM_DIR、AGM_REPO、AM_BINARY、HERDR_REPO、HERDR_CHANGELOG_URL、AGM_HERDR_UPDATE_BOT、AGM_EXTRA_PATH、
-#   AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
-#
-# launchd 預設 PATH 不含 Homebrew（#66 留言／#204 C）：開頭自補 PATH；缺 herdr／gh／python3／curl
-# 不靜默 exit 0，log＋ops_alert，否則 job「已排程」但永遠不派。
-#
-# 另外兩個「24 小時內一定收到交辦」的洞（#66 review 留言）：
-#   1. 鎖是純 `mkdir`：拿鎖後被 SIGKILL／斷電，目錄永久殘留，之後每天都跳過。改成 pid＋時間的鎖，
-#      執行者不在就回收；還活著卻卡太久才喊人（同 release-triage-kick.sh）。
-#   2. 每個「這輪沒能完成檢查」的出口都只寫 local log：連續失敗會永遠沒人知道。連續 AGM_FAIL_ALERT_AFTER 輪就推 ops_alert。
 set -u
-# launchd 用系統 /bin/bash（macOS 內建 3.2）跑這支：只用 3.2 有的語法（沒有 mapfile、關聯陣列、${x,,}）。
-# 補在 PATH 前面；順序照使用者登入 shell 的 `which herdr`（~/.local/bin 在 /opt/homebrew/bin 前）。
-# AGM_EXTRA_PATH 只給測試蓋掉（空字串＝不補，不會在 PATH 前面留一個空的「目前目錄」）。
 _extra="${AGM_EXTRA_PATH-${HOME:-/nonexistent}/.local/bin:/opt/homebrew/bin:/usr/local/bin}"
 [ -n "$_extra" ] && PATH="$_extra:$PATH"
 export PATH
@@ -32,11 +11,9 @@ AGM="$DIR/bin/agm"
 BIN="${AM_BINARY:-$REPO/target/release/agents-managerd}"
 CHANGELOG_URL="${HERDR_CHANGELOG_URL:-https://raw.githubusercontent.com/${HERDR_REPO}/master/CHANGELOG.md}"
 LOG="$DIR/herdr-update.log"
-STATE="$DIR/herdr-update.last"       # 已經派過工的版本（should_notify 的去重就是靠比對這個檔）
-FAILS="$DIR/herdr-update.fails"      # 連續幾輪沒能完成檢查（完成一次就清掉）
+STATE="$DIR/herdr-update.last"
+FAILS="$DIR/herdr-update.fails"
 OWNER="${AM_AGENT_NAME:-herdr-update-kick}"
-# darwin／linux：升級後的驗收只有 macOS 有「本機網路」授權這回事（#886）。AGM_OPS_PLATFORM 只給測試蓋掉（同 daemon-swap.sh）。
-# 要用的時候才問 uname（派工正文）：測試與 launchd 的最小 PATH 裡不一定有 uname／tr，不能讓開頭就因此出錯。
 platform() {
   if [ -n "${AGM_OPS_PLATFORM:-}" ]; then printf '%s' "$AGM_OPS_PLATFORM"; return; fi
   case "$(uname -s 2>/dev/null)" in Darwin) printf darwin ;; Linux) printf linux ;; *) printf '%s' "$(uname -s 2>/dev/null)" ;; esac
@@ -44,7 +21,6 @@ platform() {
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-2}
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
 . "${0%/*}/kick-common.sh" 2>/dev/null || {
   _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
   echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
@@ -53,9 +29,7 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
   exit 1
 }
 
-# 狀態檔一律先寫暫存檔再 rename（同一目錄＝同一檔案系統）：`echo > $STATE` 被中斷（斷電、SIGKILL）會留下空檔，
-# 空的狀態檔在這裡等於「第一次執行」，會漏掉一次該派的工。寫不成功就保留舊檔並回非 0。
-write_state() { # write_state <內容>
+write_state() {
   _t="$STATE.tmp.$$"
   if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$STATE" 2>/dev/null; then return 0; fi
   rm -rf "$_t" 2>/dev/null
@@ -64,10 +38,7 @@ write_state() { # write_state <內容>
 
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
-
-# 這一輪沒能完成檢查。一次網路抖動不吵人，但連續 FAIL_ALERT_AFTER 輪（每天一輪＝隔天還是不行）就推 ops_alert，
-# 不能永遠只有 local log。收尾（trap）照跑。
-fail_run() { # fail_run <log 訊息>
+fail_run() {
   log "$1"
   _n=$(cat "$FAILS" 2>/dev/null)
   case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
@@ -84,15 +55,11 @@ command -v gh >/dev/null 2>&1 || { alert missing_dependency "找不到 gh（PATH
 command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
 command -v curl >/dev/null 2>&1 || { alert missing_dependency "找不到 curl（PATH=${PATH}），herdr 新版偵測停住"; exit 0; }
 
-# 鎖：兩個執行者同時派會送出兩筆一樣的交辦。鎖裡寫 pid 與時間（同 release-triage-kick.sh／daemon-update-kick.sh）：
-# SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手；還活著但卡太久才喊人。
 LOCK="$DIR/herdr-update.lock"
-LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時（含舊版腳本留下、沒有 owner 檔的鎖），超過這麼久就算殘留
-LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}
 TMPS=()
 TMPS_COUNT=0
-# bash 3.2 expands an empty array's length as an unbound variable under set -u.
-# Keep a scalar count so early failures can run EXIT cleanup before any mktemp.
 cleanup() {
   rm -rf "$LOCK" 2>/dev/null || true
   if [ "$TMPS_COUNT" -gt 0 ]; then rm -f "${TMPS[@]}" 2>/dev/null || true; fi
@@ -123,15 +90,10 @@ if ! take_lock; then
   fi
 fi
 
-# 本機版本：`herdr --version` 印 "herdr 0.8.2"。這裡只剝掉固定的程式名前綴（純文字操作，
-# 不是版本解析），數字怎麼比、位數不同要不要緊，一律留給 Rust CLI 的 version_string。
 INSTALLED_LINE=$(herdr --version 2>/dev/null | head -1)
 INSTALLED=$(printf '%s' "$INSTALLED_LINE" | sed -E 's/^[Hh]erdr[[:space:]]*//')
 [ -n "$INSTALLED" ] || fail_run "讀不到本機 herdr 版本（herdr --version 沒輸出）"
 
-# 最新穩定版：GitHub release，排除 pre-release。Homebrew（brew info --json=v2 herdr）同樣查得到，
-# 但這台機器上 `herdr` 實際跑的二進位是 bot 目錄裡的私有拷貝、不是 brew 連結那份（PATH shadow），
-# 兩邊本來就可能不同步；release 清單是兩邊最後都會對齊的那個真相來源，改用它就不用管哪邊快哪邊慢。
 LATEST_JSON=$(gh release list -R "$HERDR_REPO" --exclude-pre-releases -L 1 --json tagName 2>>"$LOG")
 LATEST_TAG=$(printf '%s' "$LATEST_JSON" | python3 -c '
 import json,sys
@@ -159,17 +121,10 @@ if [ -f "$STATE" ]; then
   [ -n "$LAST" ] && LAST_ARGS=(--last-notified "$LAST")
 fi
 
-# `${LAST_ARGS[@]+"${LAST_ARGS[@]}"}`：launchd 用系統 `/bin/bash`（macOS 還是 3.2）跑這支腳本，
-# 舊 bash 的 `set -u` 對**空陣列**的 `"${arr[@]}"` 會直接 unbound variable 死掉（daemon-update-kick.sh
-# 的 `${REVIEW[@]+"${REVIEW[@]}"}` 就是為了繞這個坑；這裡第一次跑、`$STATE` 還不存在時 `LAST_ARGS`
-# 就是空的，一定會踩到）。
 REPORT=$("$BIN" herdr-update-check --installed "$INSTALLED" --latest "$LATEST_TAG" \
   --changelog-file "$CHANGELOG" ${LAST_ARGS[@]+"${LAST_ARGS[@]}"} 2>>"$LOG") ||
   fail_run "版本比較失敗（installed='${INSTALLED}' latest='${LATEST_TAG}'）"
 
-# 沒有更新、或這一版已經派過：安靜退出，不留 log（每天一次，「沒事」不值得留一行）。
-# 報告看不懂（不是 JSON、沒有布林的 should_notify）是這輪沒能完成檢查，不是「沒有新版」（#226）：
-# 以前 `|| SHOULD=0` 把它當成沒事，安靜退出還把連續失敗清零，CLI 換了輸出形狀就永遠沒人知道。
 SHOULD=$(printf '%s' "$REPORT" | python3 -c '
 import json,sys
 v = json.load(sys.stdin).get("should_notify")
@@ -183,9 +138,6 @@ LATEST_VERSION=$(printf '%s' "$REPORT" | python3 -c 'import json,sys; print(json
 BRIEF=$(printf '%s' "$REPORT" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["brief"])')
 [ -n "$LATEST_VERSION" ] && [ -n "$BRIEF" ] || fail_run "報告缺 latest_version 或 brief，跳過（${REPORT}）"
 
-# 派給誰：**不能是巡檢自己**（daemon 擋「總管對自己下交辦」，同 claude-release-kick.sh 那個坑）。
-# 順序：明指的 AGM_HERDR_UPDATE_BOT ＞ runtime.json 的 herdr_update_bot_id（專用 child）＞
-# release_bot_id（跟 claude 換版通知同一顆分析型 child 也合理）＞ 協調者（兜底，一定有人看得到）。
 BOT="${AGM_HERDR_UPDATE_BOT:-}"
 if [ -z "$BOT" ] && [ -f "$DIR/runtime.json" ]; then
   BOT=$(python3 -c '
@@ -209,10 +161,6 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY"); TMPS_
   fi
 } > "$BODY"
 
-# 旗標是 `--request-id`（不是 --client-request-id）：拼錯 argparse 直接 exit 2
-# （2026-09-16 claude-release-kick 出過這個事故，這裡照抄教訓）。
-# 同一個 id 也是更新框「請 AGM 解析」（kind=herdr，`daemon/src/claude_review.rs`）用的：使用者先按了，
-# 這裡再送就是同 id、不同正文的 409（帶 assignment_id／inbox_event_id）——那一版已經派過，不是失敗。
 ASSIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-assign.XXXXXX"); TMPS+=("$ASSIGN_ERR"); TMPS_COUNT=$((TMPS_COUNT + 1))
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
      --request-id "agm-herdr-update-$LATEST_VERSION" >> "$LOG" 2>"$ASSIGN_ERR"; then

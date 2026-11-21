@@ -6,12 +6,10 @@ import sys
 
 CAP = 8 * 1024 * 1024
 
-
 def locate(home, session):
     """The canonical rollout file for `session` under `home`, or None. Never leaves `home/sessions`."""
     if not session or not all(c.isascii() and (c.isalnum() or c == "-") for c in session):
         return None
-    # Expand against this host, never the daemon's home. Require an absolute home.
     home = home.strip() or "~/.codex"
     remote_home = os.path.expanduser("~")
     if home == "~" or home.startswith("~/"):
@@ -28,7 +26,6 @@ def locate(home, session):
     suffix = "-" + session + ".jsonl"
 
     def directories(path):
-        # Do not descend through symlinks, including intermediate date directories.
         return sorted((p for p in path.iterdir() if not p.is_symlink() and p.is_dir()), reverse=True)
 
     for year in directories(root):
@@ -44,7 +41,6 @@ def locate(home, session):
                 return real
     return None
 
-
 def tail(home, session, limit):
     real = locate(home, session)
     if real is None:
@@ -53,7 +49,6 @@ def tail(home, session, limit):
         stream.seek(0, os.SEEK_END)
         stream.seek(max(0, stream.tell() - min(int(limit), CAP)))
         return stream.read(min(int(limit), CAP))
-
 
 def delta(home, session, limit, offset):
     """Whole lines after `offset`, prefixed by one `AM_ROLLOUT <next>` line; `next` is where the reader resumes.
@@ -73,7 +68,6 @@ def delta(home, session, limit, offset):
         start = int(offset)
         if start > size or size - start > cap:
             start = max(0, size - cap)
-        # One read of the window; a mid-line start is detected from the byte before it, not by re-reading.
         previous = b"\n"
         if start > 0:
             stream.seek(start - 1)
@@ -82,7 +76,6 @@ def delta(home, session, limit, offset):
         buf = stream.read(size - start)
     body_start = 0
     if previous != b"\n":
-        # Mid-line starts (a rotated file, or the cap cut into a line) skip to the next line break.
         newline = buf.find(b"\n")
         if newline < 0:
             return b"AM_ROLLOUT %d\n" % start
@@ -91,7 +84,6 @@ def delta(home, session, limit, offset):
     text = buf[body_start:end] if end > body_start else b""
     return b"AM_ROLLOUT %d\n" % (start + end) + text
 
-
 if __name__ == "__main__":
     try:
         if len(sys.argv) == 5:
@@ -99,4 +91,4 @@ if __name__ == "__main__":
         else:
             sys.stdout.buffer.write(tail(*sys.argv[1:]).decode("utf-8", errors="ignore").encode("utf-8"))
     except (OSError, ValueError):
-        pass  # Missing/unreadable paths degrade to the screen's question count.
+        pass

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# check.sh 失敗時磁碟幾乎滿了：要明講是磁碟（No space left on device），不是叫人去看程式碼；磁碟夠的時候不吵；
-# 成功時不吵。假 git／cargo／df 放在暫存 fixture 裡。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

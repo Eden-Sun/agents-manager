@@ -1,15 +1,4 @@
 #!/bin/sh
-# dev-sshd.sh — a throwaway sshd on 127.0.0.1:2222, run with the current user's
-# privileges (SPEC §11.8 R5). Nothing outside ~/.config/agents-manager/dev-sshd is
-# touched: no sudo, no changes to the system sshd, no new system users.
-#
-#   scripts/dev-sshd.sh start     start it (idempotent) and print the host config
-#   scripts/dev-sshd.sh stop      stop it
-#   scripts/dev-sshd.sh status    is it up?
-#   scripts/dev-sshd.sh ssh-opts  print the ssh_opts JSON array for POST /api/hosts
-#
-# The generated key pair lets *this* user ssh back into their own account, so a
-# `[[hosts]]` entry pointing at 127.0.0.1:2222 behaves exactly like a real remote.
 
 set -eu
 
@@ -29,14 +18,10 @@ is_running() {
   pid=$(cat "$PIDFILE" 2>/dev/null || echo "")
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  # pid 檔會留過重開機：那個 pid 可能已經是別的行程，要確認真的是 sshd（Linux 的 comm 是 `sshd`，macOS 是完整路徑）。
   case "$(ps -p "$pid" -o comm= 2>/dev/null)" in *sshd*) return 0 ;; *) return 1 ;; esac
 }
 
 ensure_material() {
-  # 呼叫端是 `ensure_material || …`，那裡 set -e 不作用；每一步都要自己 return。
-  # 不然 dash（Linux 的 sh）會一路跑到下面 `: > "$KNOWN"`——特殊內建指令的重導向失敗
-  # 會讓整支 shell 直接退出，呼叫端的錯誤訊息印不出來（ubuntu-ci 首輪抓到，#716）。
   mkdir -p "$DIR" || return 1
   chmod 700 "$DIR" || return 1
   [ -f "$HOSTKEY" ] || ssh-keygen -q -t ed25519 -N '' -C am-dev-sshd-host -f "$HOSTKEY" || return 1
@@ -60,7 +45,6 @@ GatewayPorts no
 UsePAM no
 Subsystem sftp /usr/libexec/sftp-server
 EOF
-  # Pin the host key so BatchMode ssh never has to ask.
   : > "$KNOWN"
   sed "s|^|[127.0.0.1]:$PORT |" "$HOSTKEY.pub" > "$KNOWN"
 }
@@ -76,7 +60,6 @@ case "${1:-}" in
       echo "dev sshd already running on 127.0.0.1:$PORT (pid $(cat "$PIDFILE"))"
     else
       "$SSHD" -f "$CFG" -E "$LOG"
-      # sshd daemonizes; give it a moment to write the pid file.
       i=0
       while [ $i -lt 20 ] && ! is_running; do i=$((i+1)); sleep 0.2; done
       is_running || { echo "dev sshd failed to start; see $LOG" >&2; tail -5 "$LOG" >&2 || true; exit 1; }
@@ -88,8 +71,6 @@ case "${1:-}" in
     fi
     echo
     echo "POST /api/hosts body:"
-    # hook_port must differ from the daemon's own port: the reverse forward binds
-    # 127.0.0.1:<hook_port> on the "remote", which here is this very machine.
     printf '{"name":"loop","ssh":"%s@127.0.0.1","ssh_port":%s,"herdr_session":"am-loop","remote_path":"%s","hook_port":17788,"ssh_opts":%s}\n' \
       "$(id -un)" "$PORT" "/opt/homebrew/bin:\$HOME/.local/bin" "$(ssh_opts_json)"
     ;;

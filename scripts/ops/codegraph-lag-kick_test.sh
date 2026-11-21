@@ -1,7 +1,4 @@
 #!/bin/bash
-# codegraph-lag.py／codegraph-lag-kick.sh 的隔離測試：暫存 git repo＋假 codegraph.db＋假 agm，不碰真的索引。
-#
-#   bash scripts/ops/codegraph-lag-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PASS=0
@@ -36,7 +33,6 @@ OLD_TS=$(( $(date +%s) - 3600 ))
 echo 'fn a2() {}' > "$REPO/a.rs"; GIT_COMMITTER_DATE="@$OLD_TS" $G commit -q -am c2
 echo 'fn a3() {}' > "$REPO/a.rs"; GIT_COMMITTER_DATE="@$OLD_TS" $G commit -q -am c3
 
-# 假索引：a.rs 停在 c1 的內容、b.rs 與 HEAD 一致。
 mkdir -p "$REPO/.codegraph"
 python3 - "$REPO" <<'PY'
 import hashlib, sqlite3, sys, os
@@ -59,7 +55,6 @@ $PY_BIN --repo "$REPO" --max-commits 20 --max-minutes 600 >/dev/null; equals "�
 $PY_BIN --repo "$REPO" --max-commits 1 --max-minutes 30 >/dev/null; equals "超過 commit 門檻回 exit 1" "$?" 1
 $PY_BIN --repo "$REPO" --max-commits 20 --max-minutes 1 >/dev/null; equals "超過分鐘門檻回 exit 1" "$?" 1
 
-# 主樹的未提交改動：索引跟著主樹走，就不算過期。
 echo 'fn a3() {}' > "$REPO/a.rs"
 echo 'fn a2() {}' > "$REPO/a.rs"
 python3 - "$REPO" <<'PY'
@@ -73,7 +68,6 @@ equals "主樹與索引一致（未提交）不算落後" "$(echo "$OUT" | pytho
 $PY_BIN --repo "$REPO" --max-commits 1 --max-minutes 1 >/dev/null; equals "一致時 exit 0" "$?" 0
 git -C "$REPO" checkout -q -- a.rs
 
-# kick：落後就喊 codegraph_index_lag；沒落後不喊；沒有索引喊 unreadable。
 : > "$FIX/agm.log"
 CG_LAG_MAX_COMMITS=1 CG_LAG_MAX_MINUTES=1 AGM_REPO="$REPO" AGM_BIN="$BIN/agm" CG_LAG_PY="$BIN/codegraph-lag.py" \
   CG_LAG_LOG="$ROOT/lag.log" bash "$BIN/codegraph-lag-kick.sh"; equals "kick 落後時 exit 0（失敗由 ops-alert 表達）" "$?" 0

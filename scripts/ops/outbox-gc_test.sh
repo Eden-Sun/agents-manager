@@ -1,8 +1,4 @@
 #!/bin/bash
-# outbox-gc.sh 的隔離測試（issue #318）：HOME 指到暫存目錄，腳本原樣複製進去跑，不碰真的 outbox。
-# 測的是破壞性那一條：只刪 outbox 底下（含 bot 子目錄）超過保留期的檔，其他一律不動。
-#
-#   bash scripts/ops/outbox-gc_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PASS=0
@@ -11,17 +7,12 @@ FAIL=0
 exists() { [ -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "FAIL - $1（$2 不見了）"; FAIL=$((FAIL + 1)); }; }
 gone() { [ ! -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "FAIL - $1（$2 還在）"; FAIL=$((FAIL + 1)); }; }
 
-# 分享名單的資料庫檔名以 daemon 的原始碼為準（#1419）：startup.rs 開帳本的那一行、release_triage::default_db_path 兩處必須同名，
-# 腳本的 SHARE_DB 也要跟它一樣。測試不再把檔名抄成字面值（那樣 daemon 改名時 fixture 與腳本會一起綠）。
-# `OUTBOX_GC_TEST_REPO` 指到別的 repo 根目錄：刻意改 daemon 的常數、看測試會不會紅時用（不改真的 .rs）。
 REPO="${OUTBOX_GC_TEST_REPO:-$HERE/../..}"
 STARTUP_RS="$REPO/daemon/src/startup.rs"
 TRIAGE_RS="$REPO/crates/am-base/src/release_triage/mod.rs"
 extract_startup_name() { grep 'open_with(&prepared.dir.join(' | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//'; }
 extract_triage_name() { grep -A3 'pub fn default_db_path' | grep -o 'join("[^"]*\.sqlite3")' | head -1 | sed 's/^join("//; s/")$//'; }
-# 讀檔名的順序（背景檢查時 agent 可能正在改、rebase 這個檔，讀到空白）：先讀工作目錄（未提交的改名以它為準）；
-# 讀不到檔名就等 1 秒重試一次；仍空才退回 git HEAD（假 repo 不是 git 時 HEAD 也讀不到，就是空）。
-db_name_from() { # $1 工作目錄的檔、$2 repo 相對路徑（給 git HEAD 用）、$3 抽取函式
+db_name_from() {
   local name
   name=$(cat "$1" 2>/dev/null | "$3")
   [ -n "$name" ] || { sleep 1; name=$(cat "$1" 2>/dev/null | "$3"); }
@@ -30,7 +21,6 @@ db_name_from() { # $1 工作目錄的檔、$2 repo 相對路徑（給 git HEAD �
 }
 SHARE_DB_NAME=$(db_name_from "$STARTUP_RS" daemon/src/startup.rs extract_startup_name)
 TRIAGE_DB_NAME=$(db_name_from "$TRIAGE_RS" crates/am-base/src/release_triage/mod.rs extract_triage_name)
-# 讀不到分享名單的檔名：只印一行 FAIL，跳過依賴 SHARE_DB_NAME 的整段測試（不拿空名去開資料目錄當 DB，不會連鎖出一串 FAIL）。
 SKIP_SUITE=""
 if [ -z "$SHARE_DB_NAME" ]; then
   echo "FAIL - could not read the DB file name from startup.rs（${STARTUP_RS}；工作目錄與 git HEAD 都讀不到），跳過依賴分享名單資料庫的測試"; FAIL=$((FAIL + 1))
@@ -45,14 +35,12 @@ if [ -n "$SHARE_DB_NAME" ]; then
   check "outbox-gc.sh 的 SHARE_DB 與 daemon 同名" "^SHARE_DB=.*/${SHARE_DB_NAME}\"" "$HERE/outbox-gc.sh"
 fi
 
-# 自我測試：讀檔名的 fallback、缺行時只出一個 FAIL 不連鎖。內層執行帶 OUTBOX_GC_TEST_INNER=1 不再跑自我測試（避免遞迴）。
 if [ -z "${OUTBOX_GC_TEST_INNER:-}" ]; then
   SELF="$HERE/outbox-gc_test.sh"
   SELF_FAKE=$(mktemp -d)
   mkdir -p "$SELF_FAKE/daemon/src" "$SELF_FAKE/crates/am-base/src/release_triage"
   printf '// 這個假的 startup.rs 沒有開帳本的那一行\n' > "$SELF_FAKE/daemon/src/startup.rs"
   cp "$TRIAGE_RS" "$SELF_FAKE/crates/am-base/src/release_triage/mod.rs"
-  # (a) 假 repo（非 git）的 startup.rs 缺那一行：整個測試只能有一個 FAIL，且是讀不到檔名那一行。
   out=$(OUTBOX_GC_TEST_REPO="$SELF_FAKE" OUTBOX_GC_TEST_INNER=1 bash "$SELF" 2>&1); rc=$?
   nfail=$(printf '%s\n' "$out" | grep -c '^FAIL' || true)
   if [ "$rc" -ne 0 ] && [ "$nfail" -eq 1 ] && printf '%s\n' "$out" | grep -q '^FAIL - could not read the DB file name from startup.rs'; then
@@ -60,14 +48,12 @@ if [ -z "${OUTBOX_GC_TEST_INNER:-}" ]; then
   else
     echo "FAIL - 自我測試：缺行的假 repo 應只出一個 FAIL（rc=${rc}，FAIL=${nfail}）"; printf '%s\n' "$out" | sed 's/^/      /'; FAIL=$((FAIL + 1))
   fi
-  # (b) 正常 repo 讀得到、兩處同名、通過。
   out=$(OUTBOX_GC_TEST_NAMES_ONLY=1 OUTBOX_GC_TEST_INNER=1 bash "$SELF" 2>&1); rc=$?
   if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^ok   - daemon 兩處開帳本的檔名一致'; then
     echo "ok   - 自我測試：正常 repo 讀得到檔名並通過"; PASS=$((PASS + 1))
   else
     echo "FAIL - 自我測試：正常 repo 應通過（rc=${rc}）"; printf '%s\n' "$out" | sed 's/^/      /'; FAIL=$((FAIL + 1))
   fi
-  # (c) 工作目錄的 startup.rs 暫時沒有那一行、git HEAD 有：退回 HEAD 讀得到，仍通過。
   G=$(mktemp -d)
   mkdir -p "$G/daemon/src" "$G/crates/am-base/src/release_triage"
   cp "$STARTUP_RS" "$G/daemon/src/startup.rs"
@@ -92,24 +78,17 @@ setup() {
   cp "$HERE/outbox-gc.sh" "$ROOT/agm/bin/outbox-gc.sh"
   OB="$HOME/.config/agents-manager/outbox"; LOG="$ROOT/agm/outbox-gc.log"; : > "$LOG"
   unset AM_OUTBOX_ROOT AM_DATA_DIR OUTBOX_MAX_AGE_MIN OUTBOX_SHARE_KEEP_DAYS OUTBOX_SHARE_CAP_BYTES OUTBOX_SHARE_CAP_FILES
-  # 分享名單的資料庫（#1291）：檔名是 daemon 的（${SHARE_DB_NAME}，見上面從 startup.rs 取得的值），放在資料目錄底下。
-  # 不從腳本拿，腳本寫錯檔名測試才抓得到（#1391）。結構只取 gc 會查的欄位。
   sqlite3 "$HOME/.config/agents-manager/${SHARE_DB_NAME}" "CREATE TABLE projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
 }
 teardown() { rm -rf "$ROOT"; }
-# 把 bot 登記成正在分享（shared_bots 有列、bot 與專案都沒刪）／把 bot 標成刪掉。
 share_bot() { sqlite3 "$HOME/.config/agents-manager/${SHARE_DB_NAME}" "INSERT OR IGNORE INTO projects (id) VALUES ('p-$1'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('$1', 'p-$1'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('$1');"; }
 del_bot() { sqlite3 "$HOME/.config/agents-manager/${SHARE_DB_NAME}" "UPDATE bots SET deleted_at = 'x' WHERE id = '$1';"; }
-old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期（只能往回改 mtime；ctime 一定是「現在」）
-# 「搬進來的時間」是 ctime（mv／cp -p 會保留舊 mtime，ctime 卻是搬入那一刻），測試沒辦法把 ctime 往回改，
-# 所以改成把腳本的時鐘往後撥：`run_at <分鐘>`＝假裝現在是 <分鐘> 分鐘之後（OUTBOX_GC_NOW 是腳本給測試的時鐘接縫）。
+old() { touch -t 202601010000 "$@"; }
 run_at() { OUTBOX_GC_NOW=$(( $(date +%s) + $1 * 60 )) zsh "$ROOT/agm/bin/outbox-gc.sh"; echo $?; }
-run() { run_at 120; }                      # 兩小時後：剛寫好的檔（ctime＝現在）也已經過期
-# 兩小時後（`run`）的時鐘看起來「剛改過」的檔：mtime 設在假時鐘的一分鐘前。
+run() { run_at 120; }
 fresh() { touch -t "$(date -v+119M +%Y%m%d%H%M 2>/dev/null || date -d '119 minutes' +%Y%m%d%H%M)" "$@"; }
 run_now() { zsh "$ROOT/agm/bin/outbox-gc.sh"; echo $?; }
 
-# 1. 只刪超過保留期的檔；新檔、根目錄直屬檔、有檔的目錄都留下；空目錄收掉。
 setup
 mkdir -p "$OB/botA/sub" "$OB/botB" "$OB/botC" "$OB/botD"
 echo x > "$OB/botA/old.txt"; old "$OB/botA/old.txt"
@@ -131,8 +110,6 @@ exists "outbox 根目錄本身還在" "$OB"
 check  "有刪就記 log（3 個）" "清掉 3 個超過 60 分鐘" "$LOG"
 teardown
 
-# 1b. bot 把產出放在子資料夾裡（`$AM_OUTBOX/報價_Q-1/*.pdf`，UI 現在也列得到）：每個檔各自照自己的時間清，
-#     同一個子資料夾裡新的留、舊的刪、資料夾只在清空後才收；更深一層也一樣。
 setup
 mkdir -p "$OB/botE/報價_Q-1/附件" "$OB/botE/空的/更空"
 echo x > "$OB/botE/報價_Q-1/old.pdf"; old "$OB/botE/報價_Q-1/old.pdf"
@@ -149,7 +126,6 @@ gone   "本來就空的巢狀子資料夾（含更深一層）被收掉" "$OB/bo
 check  "log 記刪了 2 個" "清掉 2 個超過 60 分鐘" "$LOG"
 teardown
 
-# 2. 保留期邊界與覆寫：30 分鐘的檔在 60 分鐘期限內留著；OUTBOX_MAX_AGE_MIN=5 就刪。
 setup
 mkdir -p "$OB/b"; echo x > "$OB/b/f.txt"; touch -t "$(date -v-30M +%Y%m%d%H%M 2>/dev/null || date -d '30 minutes ago' +%Y%m%d%H%M)" "$OB/b/f.txt"
 run_now >/dev/null
@@ -160,8 +136,6 @@ gone   "OUTBOX_MAX_AGE_MIN=5 時 30 分鐘的檔被刪" "$OB/b/f.txt"
 check  "log 寫的是實際的保留期" "超過 5 分鐘" "$LOG"
 teardown
 
-# 2b. 以「搬進 outbox 的時間」（ctime）起算，不是檔案內容的 mtime：`mv`／`cp -p` 進來的舊檔 mtime 還是很久以前，
-# 以前下一輪（最慢 10 分鐘）就被清掉，bot 剛交出去的檔使用者來不及拿。mtime 與 ctime 都過了才刪。
 setup
 mkdir -p "$OB/b"; echo x > "$OB/b/moved-in.pdf"; old "$OB/b/moved-in.pdf"
 run_now >/dev/null
@@ -173,8 +147,6 @@ run_at 61 >/dev/null
 gone   "搬進來超過 60 分鐘才刪" "$OB/b/moved-in.pdf"
 teardown
 
-# 2c. 分享用 bot 的 outbox（daemon 放了 `.am-share-keep`）走分享保留政策（#850）：保留 14 天，不是 1 小時
-# （end user 隔天才回來拿是常態，使用者 2026-10-04）；標記檔本身不清。
 setup
 mkdir -p "$OB/share/sub" "$OB/plain"
 share_bot share
@@ -196,7 +168,6 @@ exists "刪光之後標記檔還在（分享目錄不被收掉）" "$OB/share/.a
 check  "log 記分享保留政策刪了 2 個" "分享保留政策清掉 2 個檔案" "$LOG"
 teardown
 
-# 2d. 分享用 bot 的總量上限（#850）：超過檔數或位元組，從最舊的 mtime 開始刪，標記檔不算量也不刪。
 setup
 mkdir -p "$OB/share"
 share_bot share
@@ -234,8 +205,6 @@ OUTBOX_SHARE_CAP_FILES=1 run_at $((60 * 24 * 15)) >/dev/null
 exists "分享目錄裡的符號連結目標不被刪" "$ROOT/outside/precious.txt"
 teardown
 
-# 2e. 分享保留以 daemon 的分享名單（DB）為準（#1291）：bot 自己在 outbox 建 `.am-share-keep` 不算數；
-# 真的在分享的 bot 不用標記也保留；分享停了（bot 或專案刪掉）就回到 1 小時。
 setup
 mkdir -p "$OB/fake" "$OB/live" "$OB/gone" "$OB/proj"
 : > "$OB/fake/.am-share-keep"
@@ -254,7 +223,6 @@ gone   "分享停了（bot 刪掉）的檔照一小時清" "$OB/gone/report.pdf"
 gone   "分享停了（專案刪掉）的檔照一小時清" "$OB/proj/report.pdf"
 teardown
 
-# 2f. 分享名單讀不到（沒有 DB、DB 壞掉）：整輪什麼都不刪、exit 1、記錄原因（#1291）。寧可多留，不可把分享中的檔清掉。
 setup
 mkdir -p "$OB/plain"
 echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
@@ -272,7 +240,6 @@ exists "DB 壞掉：一般檔也不刪" "$OB/plain/old.txt"
 check  "DB 壞掉：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
 
-# 3. 不碰不該碰的：outbox 外面的私鑰、DB、scratchpad、別的 bot 資料，即使很舊。
 setup
 mkdir -p "$OB/b" "$HOME/.config/agents-manager/bots/x" "$ROOT/scratch"
 echo x > "$OB/b/old.txt"; old "$OB/b/old.txt"
@@ -292,7 +259,6 @@ exists "bots/ 底下的檔不碰" "$HOME/.config/agents-manager/bots/x/claude-se
 exists "scratchpad 不碰" "$ROOT/scratch/note.md"
 teardown
 
-# 4. symlink：指到 outbox 外面的連結不被跟進去刪目標。
 setup
 mkdir -p "$OB/b" "$ROOT/outside"
 echo x > "$ROOT/outside/precious.txt"; old "$ROOT/outside/precious.txt"
@@ -305,7 +271,6 @@ gone   "outbox 的 hardlink 項目只解除自己那個連結" "$OB/b/shared"
 exists "外部 hardlink 仍指向原檔" "$ROOT/outside/precious.txt"
 teardown
 
-# 4b. outbox 根目錄自己被換成 symlink 時，拒絕工作並明確記錄，不可靜默跳過清理。
 setup
 mv "$OB" "$ROOT/real-outbox"
 mkdir -p "$ROOT/outside/botA"
@@ -316,7 +281,6 @@ check "symlinked outbox root refusal is logged" "OUTBOX 路徑含 symlink" "$LOG
 exists "symlinked outbox root target is untouched" "$ROOT/outside/botA/precious.txt"
 teardown
 
-# 4c. 任一父目錄 symlink 都會讓 lexical path guard 指向 outbox 外的真實目錄；拒絕後不能刪那裡的檔。
 setup
 REAL_CONFIG="$ROOT/real-config"
 mv "$HOME/.config/agents-manager" "$REAL_CONFIG"
@@ -328,7 +292,6 @@ check "symlinked outbox parent refusal is logged" "OUTBOX 路徑含 symlink" "$L
 exists "symlinked outbox parent target is untouched" "$REAL_CONFIG/outbox/botA/precious.txt"
 teardown
 
-# 5. 護欄：AM_OUTBOX_ROOT 不在預期路徑就拒絕、exit 1、什麼都不刪、記 log。
 setup
 mkdir -p "$ROOT/elsewhere/b"; echo x > "$ROOT/elsewhere/b/old.txt"; old "$ROOT/elsewhere/b/old.txt"
 AM_OUTBOX_ROOT="$ROOT/elsewhere" ; export AM_OUTBOX_ROOT
@@ -343,7 +306,6 @@ exists "DB 所在目錄的檔沒被刪" "$OB"
 unset AM_OUTBOX_ROOT
 teardown
 
-# 6. outbox 不存在：靜默 exit 0，不建目錄、不寫 log。
 setup
 rmdir "$OB"
 equals "outbox 不存在 exit 0" "$(run)" "0"
@@ -351,7 +313,6 @@ gone   "不會替它建目錄" "$OB"
 check_no "不寫 log" "拒絕\|清掉" "$LOG"
 teardown
 
-# 護欄是「剛好等於該路徑或在它底下」，不是前綴比對（issue #372）：outbox-evil 這種同前綴的兄弟路徑要被拒，不能刪。
 setup
 EVIL="$HOME/.config/agents-manager/outbox-evil"
 mkdir -p "$EVIL/botA"; echo x > "$EVIL/botA/old.txt"; old "$EVIL/botA/old.txt"
@@ -365,16 +326,12 @@ equals "尾端帶斜線的正確路徑照跑 exit 0" "$(AM_OUTBOX_ROOT="$OB/" ru
 gone   "尾端帶斜線的正確路徑照刪" "$OB/botA/old.txt"
 teardown
 
-# 帶 .. 的路徑前綴上像 outbox，實際指到別處（#373）。
 setup
 mkdir -p "$HOME/.ssh/keys"; echo x > "$HOME/.ssh/keys/old"; old "$HOME/.ssh/keys/old"
 equals "帶 .. 的路徑 exit 1" "$(AM_OUTBOX_ROOT="$OB/../../../.ssh" run)" "1"
 exists "帶 .. 指到 outbox 之外的過期檔不刪" "$HOME/.ssh/keys/old"
 teardown
 
-# 4. 分享名單的資料庫檔名要跟 daemon 寫的一致（#1391、#1419）。#1291 把腳本的檔名寫成 db.sqlite3，daemon 實際寫的是
-#    ${SHARE_DB_NAME}：讀不到名單就整輪拒絕清理，outbox 每 10 分鐘都停。這裡只放 daemon 原始碼裡的檔名（setup 用 ${SHARE_DB_NAME}），
-#    分享中的 bot 的過期檔要留、一般過期檔照刪、整輪不能因為名單讀不到而拒絕。
 setup
 mkdir -p "$OB/shared" "$OB/plain"
 echo x > "$OB/shared/old.txt"; touch -t "$(date -d '3 days ago' +%Y%m%d%H%M 2>/dev/null || date -v-3d +%Y%m%d%H%M)" "$OB/shared/old.txt"; share_bot shared
@@ -385,7 +342,6 @@ gone   "一般的過期檔照刪" "$OB/plain/old.txt"
 check_no "log 沒有拒絕整輪" "拒絕" "$LOG"
 teardown
 
-# 5. 資料目錄裡只有別的檔名的 DB（#1391 之前腳本讀的 db.sqlite3）：名單讀不到，整輪拒絕，一般過期檔一個都不刪。
 setup
 rm -f "$HOME/.config/agents-manager/${SHARE_DB_NAME}"
 sqlite3 "$HOME/.config/agents-manager/db.sqlite3" "CREATE TABLE shared_bots (bot_id TEXT PRIMARY KEY);"
@@ -396,10 +352,7 @@ exists "只有別的檔名的 DB：一般過期檔也不刪" "$OB/plain/old.txt"
 check  "只有別的檔名的 DB：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
 
-# 6. 資料目錄跟 daemon 同一個來源（#1430）：AM_DATA_DIR、設定檔的 [server] data_dir、預設值，順序與 daemon 的 data_dir() 一致
-#    （[server] data_dir > AM_DATA_DIR > ~/.config/agents-manager）。資料目錄改過時，分享名單照讀得到、outbox 也在那裡清；
-#    名單讀不到就整輪拒絕，不回頭去讀預設位置的 DB（那一份可能是別的環境的）。
-dd_make() { # 在資料目錄 $1 建 DB（shared 分享中、plain 不分享）與兩個 bot 目錄，各放一個過期檔
+dd_make() {
   local dd=$1
   mkdir -p "$dd/outbox/shared" "$dd/outbox/plain"
   sqlite3 "$dd/${SHARE_DB_NAME}" "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, deleted_at TEXT); CREATE TABLE IF NOT EXISTS bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT); CREATE TABLE IF NOT EXISTS shared_bots (bot_id TEXT PRIMARY KEY); INSERT OR IGNORE INTO projects (id) VALUES ('p-shared'); INSERT OR IGNORE INTO bots (id, project_id) VALUES ('shared', 'p-shared'); INSERT OR IGNORE INTO shared_bots (bot_id) VALUES ('shared');"
@@ -458,7 +411,7 @@ exists "沒讀到名單：資料目錄的一般過期檔也不刪" "$ROOT/empty-
 check  "沒讀到名單：log 寫明拒絕整輪" "拒絕整輪清理" "$LOG"
 teardown
 
-fi  # SKIP_SUITE
+fi
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

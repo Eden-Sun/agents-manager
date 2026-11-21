@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Regenerate desktop/icons/icon.icns from web/public/favicon.svg.
-# Only needed when the mark changes — the .icns is committed, so packaging never runs this.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# Compose a 1024px artboard: rounded plate + the favicon mark, centred.
 python3 - "$ROOT/web/public/favicon.svg" "$WORK/icon.svg" <<'PY'
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]

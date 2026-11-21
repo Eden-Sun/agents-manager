@@ -1,13 +1,9 @@
 #!/bin/bash
-# herdr-lan-check.sh 的隔離測試：假的 codesign／plutil／node，完全不碰真 binary、
-# 真授權表或網路。測 identifier、授權表與 node TCP 三步都有回報。
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/herdr-lan-check.sh"
-# 解成實際路徑：macOS 的 /var 是 /private/var 的連結，腳本會 readlink -f，假 codesign 比的是完整路徑。
 ROOT=$(cd "$(mktemp -d)" && pwd -P)
-# 驗收只在 macOS 有意義（#886）；既有案例是 macOS 的，固定成 darwin，linux 另測。
 export AGM_OPS_PLATFORM=darwin
 trap 'rm -rf "$ROOT"' EXIT
 
@@ -41,8 +37,6 @@ set -u
 printf '%s\n' "$SKIP_OUTPUT" | grep -F '3/3 LAN: SKIP 找不到 node' >/dev/null || fail "node 缺少時沒有明確 skip 原因"
 ok "node 缺少時明確 skip，沒有嘗試真網路"
 
-# 不帶參數：驗「正在跑的 herdr server 的執行檔」。ps／lsof 換成假的，列出指定的 server 行程與它們的 txt。
-# codesign 依路徑回不同 identifier：cellar＝有授權那顆、local＝PATH 上另一份簽章不同的副本（授權表沒有）。
 mkdir -p "$ROOT/cellar" "$ROOT/local/bin" "$ROOT/.config/agents-manager/bots/b1/bin"
 printf '%s\n' 'fake cellar binary' > "$ROOT/cellar/herdr"
 printf '%s\n' 'fake local copy' > "$ROOT/local/bin/herdr"
@@ -57,13 +51,12 @@ esac
 echo "\$2: code object is not signed at all" >&2; exit 1
 EOF
 chmod +x "$ROOT/bin/codesign"
-# 假 ps：$HERDR_FAKE_PS 的內容就是 `ps -axo pid=,args=` 的輸出。假 lsof：-p <pid> 查 $HERDR_FAKE_TXT 裡 `<pid> <path>`。
 printf '%s\n' '#!/bin/bash' 'cat "$HERDR_FAKE_PS"' > "$ROOT/bin/fake-ps"
 printf '%s\n' '#!/bin/bash' 'pid=""; while [ $# -gt 0 ]; do [ "$1" = "-p" ] && pid="$2"; shift; done' \
   'awk -v p="$pid" '"'"'$1==p { print "n" $2 }'"'"' "$HERDR_FAKE_TXT"' > "$ROOT/bin/fake-lsof"
 chmod +x "$ROOT/bin/fake-ps" "$ROOT/bin/fake-lsof"
 
-run_noarg() { # run_noarg <ps 內容> <txt 對照> [fallback]
+run_noarg() {
   printf '%s\n' "$1" > "$ROOT/ps.txt"
   printf '%s\n' "$2" > "$ROOT/txt.txt"
   PATH="$ROOT/.config/agents-manager/bots/b1/bin:$ROOT/local/bin:$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" \
@@ -72,8 +65,6 @@ run_noarg() { # run_noarg <ps 內容> <txt 對照> [fallback]
     LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 bash "$SCRIPT" "" 192.168.1.1 80 2>&1
 }
 
-# 2026-09-22 這台的實況：PATH 上最前面的真 binary 是另一份簽章不同的副本（授權表沒有），但 server 跑的是
-# cellar 那顆。要選 server 那顆 → PASS；以前選到 PATH 那顆 → FAIL。另夾一支 claude，argv 裡提到 herdr 與 server，不能被當成 server。
 set +e
 SERVER_OUT=$(run_noarg "  101 /opt/homebrew/bin/herdr server
   102 herdr --session am-quota server
@@ -90,7 +81,6 @@ printf '%s\n' "$SERVER_OUT" | grep -F 'herdr-2ae2bd8e9c54788e' >/dev/null && fai
 printf '%s\n' "$SERVER_OUT" | grep -F '（1 個）' >/dev/null || fail "兩顆 server 同一個執行檔要去重成 1 個、claude／vim 不能算：$SERVER_OUT"
 ok "不帶參數時驗 server 的執行檔，不管 PATH 上另一份簽章不同的副本；去重、不誤認 claude"
 
-# 好幾顆 server 跑不同路徑：逐一驗，任何一顆沒授權就 FAIL，而且指名是哪一顆。
 set +e
 MULTI_OUT=$(run_noarg "  201 /opt/homebrew/bin/herdr server
   202 $ROOT/local/bin/herdr --session x server" "201 $ROOT/cellar/herdr
@@ -103,7 +93,6 @@ printf '%s\n' "$MULTI_OUT" | grep -F '2/3 authorization: found identifier herdr-
 printf '%s\n' "$MULTI_OUT" | grep -F "2/3 authorization: FAIL 授權表沒有新版 identifier herdr-2ae2bd8e9c54788e（$ROOT/local/bin/herdr）" >/dev/null || fail "沒授權那顆沒指名：$MULTI_OUT"
 ok "好幾顆 server 跑不同路徑：逐一驗，指名沒授權的那顆並 FAIL"
 
-# 沒有在跑的 server：退回 fallback 並解 symlink（/opt/homebrew/bin/herdr → Cellar）。
 mkdir -p "$ROOT/brew/bin"
 ln -sf "$ROOT/cellar/herdr" "$ROOT/brew/bin/herdr"
 set +e
@@ -114,7 +103,6 @@ set -u
 printf '%s\n' "$FB_OUT" | grep -F "退回 $ROOT/brew/bin/herdr → $ROOT/cellar/herdr" >/dev/null || fail "fallback 沒解 symlink：$FB_OUT"
 ok "沒有在跑的 server：退回 fallback 並解 symlink"
 
-# 沒有 server、fallback 也不存在：明確 FAIL、rc=1，不可 crash（PATH 上的 shim／副本都不能拿來湊數）。
 set +e
 NONE_OUT=$(run_noarg "  401 /usr/bin/vim notes" "401 /usr/bin/vim")
 NONE_RC=$?
@@ -124,8 +112,6 @@ printf '%s\n' "$NONE_OUT" | grep -F '1/3 identifier: FAIL 找不到在跑的 her
 printf '%s\n' "$NONE_OUT" | grep -F 'unbound variable' >/dev/null && fail "crash 在 unbound variable：$NONE_OUT"
 ok "沒有 server、沒有 fallback：明確 FAIL、rc=1"
 
-# codesign 對指定路徑失敗（沒簽章）：在 UTF-8 locale 下要印得出 FAIL 那一行、rc=1，不能死在 unbound variable
-# （bash 3.2＋set -u 會把 `${BINARY}（` 的全形括號併進變數名）。
 printf '%s\n' '#!/bin/bash' 'echo "code object is not signed at all" >&2' 'exit 1' > "$ROOT/bin/codesign"
 set +e
 BAD_OUTPUT=$(LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" HERDR_NETWORK_AUTH_PLIST="$ROOT/network.plist" HERDR_NODE_LOG="$ROOT/node.log" \
@@ -138,8 +124,6 @@ printf '%s\n' "$BAD_OUTPUT" | grep -F 'unbound variable' >/dev/null && fail "還
 printf '%s\n' "$BAD_OUTPUT" | grep -F '結果：FAIL' >/dev/null || fail "沒走到結尾的 FAIL 結論：$BAD_OUTPUT"
 ok "codesign 失敗：UTF-8 locale 下印出 FAIL、rc=1，沒 crash"
 
-# 新版 identifier 是授權表裡某個 identifier 的子字串（例如 codesign 沒給 -i，預設用檔名＝`herdr`，而表裡只有
-# `herdr-1672acdeb8e5ac40`）：不能因為子字串相符就判成「已授權」，要整個 identifier 相等才算。
 mkdir -p "$ROOT/substr"
 printf '%s\n' 'fake substring binary' > "$ROOT/substr/herdr"
 printf '%s\n' '#!/bin/bash' 'case "$2" in *substr/herdr) echo "Identifier=herdr" >&2; exit 0 ;; esac' 'echo "not signed" >&2; exit 1' > "$ROOT/bin/codesign"
@@ -153,7 +137,6 @@ set -u
 printf '%s\n' "$SUB_OUTPUT" | grep -F '2/3 authorization: FAIL 授權表沒有新版 identifier herdr' >/dev/null || fail "子字串誤判成已授權：$SUB_OUTPUT"
 ok "新版 identifier 只是授權表 identifier 的子字串：FAIL，不誤判成已授權"
 
-# #886：非 macOS 沒有「本機網路」授權可驗：SKIP、exit 0，且不碰 codesign／plutil／node（假的全部換成會炸的）。
 printf '%s\n' '#!/bin/bash' 'echo "不該被叫到：$0" >&2' 'exit 99' > "$ROOT/bin/codesign"
 cp "$ROOT/bin/codesign" "$ROOT/bin/plutil"; cp "$ROOT/bin/codesign" "$ROOT/bin/node"
 chmod +x "$ROOT/bin/codesign" "$ROOT/bin/plutil" "$ROOT/bin/node"

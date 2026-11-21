@@ -41,42 +41,27 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 30.0
-# daemon 這一側本來就會跑很久的操作（`release-triage publish`：一串 gh 呼叫、每個最久 40 秒）：
-# 沿用 30 秒的話 CLI 先逾時、daemon 卻繼續做完，呼叫端以為失敗。只有沒用 `--timeout` 明講時才放寬。
 SLOW_TIMEOUT = 300.0
-# `release-triage auto`：daemon 單次呼叫最久 15 分鐘（驗證退回最多再 2 次），還可能先排在 AUTO_LOCK 後面，
-# 一次最壞遠超過 300 秒；CLI 先逾時會讓 kick 以為失敗卻繼續跑。直接放到上限。
 AUTO_TIMEOUT = 3600.0
 MAX_TIMEOUT = 3600.0
-# 一頁最多幾筆：daemon 自己也會夾，但 0／負數／天文數字在這裡就擋，不要原樣送出去。
 MAX_LIMIT = 1000
 MAX_ID_CHARS = 200
 MAX_DETAIL_CHARS = 2000
-# 跟 daemon 的 MAX_PROVABLE_CHARS 同一個數字：超過的內容派送時一定送不出去，daemon 入口回 422 text_too_long（#335）。
 MAX_TEXT_CHARS = 200_000
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
 DEFAULT_RUNTIME_DIR = "~/.config/agents-manager/supervisor/AGM"
-# issue 認領（#425）。`gh` 是唯一的對外通道；label 與這兩個標記就是整個協定。
 CLAIM_LABEL = "wip"
 CLAIM_MARK = "agm:issue-claim"
 RELEASE_MARK = "agm:issue-release"
 PROGRESS_MARK = "agm:issue-progress"
-#: 只清 label、沒有認領可交回時的 claim_id：不會對上任何一筆認領（見 cmd_issue 的 release）。
 LABEL_ONLY_RELEASE = "label-only"
-# 認領多久沒有任何動靜就算放掉了（票上的裁示）。
 CLAIM_STALE_SECS = 24 * 3600
-# 認領／交回標記只認 repo 自己人寫的留言：GitHub 上誰都能在公開 repo 的 issue 底下留言，貼一個
-# `<!-- agm:issue-claim … -->` 就能把別人的票鎖住，或貼 `issue-release` 把正在做的認領撤掉，標記裡的 bot／worktree／branch 文字還會
-# 原樣印給讀的 bot。REST 留言帶 `author_association`；沒帶這個欄位的（測試資料、舊格式）照舊採信。
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 GH_TIMEOUT = 60.0
-
-
 
 def path_segment(value: object) -> str:
     """URL 路徑的**一段**：`/`、`?`、`#`、`..` 都編碼，id 不能改變打到哪一個端點。"""
     return urllib.parse.quote(str(value), safe="")
-
 
 class AgmError(Exception):
     """帶結構的失敗；`main` 會把它印成 JSON 並用非 0 離開。"""
@@ -93,10 +78,6 @@ class AgmError(Exception):
         out.update({k: v for k, v in self.extra.items() if v is not None})
         return out
 
-
-# ---------------------------------------------------------------- runtime 設定
-
-
 def runtime_dir(explicit: str | None = None) -> Path:
     """設定目錄。env 優先給測試 override 用，不必動部署好的檔案。"""
     env = os.environ.get("AGM_RUNTIME_DIR")
@@ -104,12 +85,10 @@ def runtime_dir(explicit: str | None = None) -> Path:
         return Path(env).expanduser()
     if explicit:
         return Path(explicit).expanduser()
-    # 部署後這支腳本住在 <cwd>/bin/agm，設定檔在它的上一層。
     here = Path(__file__).resolve().parent
     if here.name == "bin" and (here.parent / "runtime.json").is_file():
         return here.parent
     return Path(DEFAULT_RUNTIME_DIR).expanduser()
-
 
 def load_runtime(explicit: str | None = None) -> dict:
     d = runtime_dir(explicit)
@@ -129,13 +108,11 @@ def load_runtime(explicit: str | None = None) -> dict:
     cfg["_dir"] = str(d)
     return cfg
 
-
 def daemon_url(cfg: dict) -> str:
     url = cfg.get("daemon_url") or "http://127.0.0.1:7788"
     if not isinstance(url, str):
         raise AgmError("bad_runtime", "runtime.json 的 daemon_url 必須是字串", 2)
     return check_loopback(url)
-
 
 def check_loopback(url: str) -> str:
     """擋掉非本機的 daemon_url。token 只能留在這台機器上。"""
@@ -143,7 +120,6 @@ def check_loopback(url: str) -> str:
     if parts.scheme not in ("http", "https"):
         raise AgmError("not_loopback", f"daemon_url 的協定不支援：{parts.scheme or '(空)'}", 2)
     if parts.username or parts.password:
-        # URL 裡的帳密會被 urllib 塞進 Authorization header；不接受這種夾帶。
         raise AgmError("not_loopback", "daemon_url 不可帶帳號密碼", 2)
     host = (parts.hostname or "").lower()
     if host not in LOOPBACK_HOSTS:
@@ -155,7 +131,6 @@ def check_loopback(url: str) -> str:
         )
     return f"{parts.scheme}://{parts.netloc}"
 
-
 def self_bot_id(cfg: dict) -> str:
     """這支 CLI 代表誰說話。雙角色部署寫 `self_bot_id`；舊的只有 manager_bot_id（那時只有一顆 AGM）。"""
     v = cfg.get("self_bot_id")
@@ -163,12 +138,10 @@ def self_bot_id(cfg: dict) -> str:
         return v
     return manager_bot_id(cfg)
 
-
 def runtime_role(cfg: dict) -> str:
     """`patrol`（巡檢，使用者入口）或 `responder`（協調者）。舊的 runtime.json 沒寫就是巡檢。"""
     v = cfg.get("role")
     return v if v in ("patrol", "responder") else "patrol"
-
 
 def bot_auth_headers(cfg: dict) -> dict:
     """角色身份的證明：pane 環境裡的 `AM_BOT_ID` + `AM_BOT_TOKEN`（既有 per-bot token）。
@@ -189,18 +162,12 @@ def bot_auth_headers(cfg: dict) -> dict:
         return headers
     return {}
 
-
 def manager_bot_id(cfg: dict) -> str:
-    # `manager_bot_id` 是正式欄位；`bot_id` 是早期部署寫的名字，一起吃掉。
     for key in ("manager_bot_id", "bot_id"):
         v = cfg.get(key)
         if isinstance(v, str) and v:
             return v
     raise AgmError("no_manager_bot", "runtime.json 沒有 manager_bot_id", 2)
-
-
-# ------------------------------------------------------------------ HTTP 客戶端
-
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     """一律不跟 redirect。跟了就可能把 X-AM-Token 送到別的 host 去。"""
@@ -208,10 +175,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
         raise AgmError("redirect_refused", f"daemon 回了 {code} 轉址到別處；不跟隨以免帶著 token 出去", 4)
 
-
 class Client:
     def __init__(self, base: str, timeout: float = DEFAULT_TIMEOUT, extra_headers: dict | None = None, *, bot_remote: bool = False) -> None:
-        # 再擋一次 loopback：Client 可能被別的路徑（測試、之後的呼叫端）直接建出來。
         if bot_remote:
             parts = urllib.parse.urlsplit(base)
             if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
@@ -221,10 +186,7 @@ class Client:
             self.base = check_loopback(base).rstrip("/")
         self.timeout = timeout
         self._token: str | None = None
-        # 角色身份（見 bot_auth_headers）。只跟著需要驗證的 API 請求走，不送去 /api/session。
         self._extra = dict(extra_headers or {})
-        # ProxyHandler({}) 是關鍵：urllib 預設吃 HTTP_PROXY/ALL_PROXY，那會把帶著
-        # token 的請求整包送去代理伺服器。本機 daemon 不需要任何 proxy。
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def token(self) -> str:
@@ -246,8 +208,6 @@ class Client:
                 tok = body["token"]
             elif isinstance(body, str):
                 tok = body.strip()
-            # token 要是單一一段可見字元：放進 HTTP header 的值，含換行就是 header 注入、含空白或 HTML 就根本不是 token
-            # （也避免之後 http.client 的 `Invalid header value` 錯誤把整段字印出來）。
             if not tok or len(tok) > 512 or not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", tok):
                 raise AgmError("no_token", "GET /api/session 沒有回一個合法的 token（空的、含空白／控制字元，或不是 token 的樣子）", 3)
             self._token = tok
@@ -261,7 +221,6 @@ class Client:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         if auth:
-            # daemon 把寫入型請求的呼叫端記進 log／刪除 intent（issue #406）：自報是 agm，事後查得出來。
             headers["X-AM-Caller"] = "agm"
             service_id = os.environ.get("AM_SERVICE_ID", "")
             service_file = os.environ.get("AM_SERVICE_TOKEN_FILE", "")
@@ -273,7 +232,6 @@ class Client:
                 headers["X-AM-Service-Id"] = service_id
                 headers["X-AM-Service-Token"] = self._read_private_token(service_file)
             elif any(k in self._extra for k in ("X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token")):
-                # Exactly one principal per request: a proven bot does not also send the shared UI token.
                 headers.update(self._extra)
             else:
                 headers["X-AM-Token"] = self.token()
@@ -286,17 +244,13 @@ class Client:
         try:
             with self._opener.open(req, timeout=self.timeout) as res:
                 parsed = _redact_credentials(_parse(res.read()), credential_values)
-            # 2xx 卻不是 JSON：多半是別的服務佔了這個埠（或前面的代理回了一頁 HTML）。當成功印出去、exit 0 的話，
-            # 呼叫端會把一頁 HTML 當成 daemon 的答案；只有舊式的 `/api/session`（回純文字 token）明講收字串。
             if isinstance(parsed, str) and parsed.strip() and not allow_text:
                 raise AgmError("bad_response", f"{method} {path} 回的不是 JSON（前 80 字：{parsed.strip()[:80]!r}）", 4, status=200)
             return parsed
         except urllib.error.HTTPError as e:
-            # HTTPError 本身是個 response，讀完要關掉；不關的話連線會留著等 GC。
             with e:
                 payload = _redact_credentials(_parse(e.read()), credential_values)
             detail = payload if isinstance(payload, (dict, list)) else str(payload or "")
-            # 前面擋了一頁 HTML、或 daemon 吐了整份 stderr：整段灌進輸出會洗掉呼叫端要看的東西，也可能把不該印的字帶出來。
             if isinstance(detail, str) and len(detail) > MAX_DETAIL_CHARS:
                 detail = detail[:MAX_DETAIL_CHARS] + f"…（已截斷，共 {len(detail)} 字）"
             elif not isinstance(detail, str) and len(json.dumps(detail, ensure_ascii=False, default=str)) > MAX_DETAIL_CHARS * 4:
@@ -311,13 +265,10 @@ class Client:
         except socket.timeout:
             raise AgmError("timeout", f"{method} {path} 逾時（{self.timeout:g}s）", 5)
         except (ConnectionError, http.client.HTTPException) as e:
-            # 回應讀到一半連線被掐斷：請求已經送出去了，對 mutation 是「送達未知」（#333）。
             raise AgmError("connection_lost", f"{method} {path} 送出後連線中斷：{e}", 5)
         except urllib.error.URLError as e:
-            # `reason` 可能是 socket.timeout 包起來的。
             if isinstance(e.reason, socket.timeout):
                 raise AgmError("timeout", f"{method} {path} 逾時（{self.timeout:g}s）", 5)
-            # 連線被拒／名字解不開：請求根本沒送出去，才是「連不上」。reset／對端沒回就關掉是送出後才斷（#333）。
             if isinstance(e.reason, (ConnectionError, http.client.HTTPException)) and not isinstance(e.reason, ConnectionRefusedError):
                 raise AgmError("connection_lost", f"{method} {path} 送出後連線中斷：{e.reason}", 5)
             raise AgmError("connect_failed", f"連不上 daemon：{e.reason}", 6)
@@ -387,7 +338,6 @@ class Client:
     def put(self, path: str, body: object = None) -> object:
         return self._raw("PUT", path, body if body is not None else {})
 
-
 def _parse(raw: bytes) -> object:
     if not raw:
         return None
@@ -396,7 +346,6 @@ def _parse(raw: bytes) -> object:
         return json.loads(text)
     except json.JSONDecodeError:
         return text
-
 
 def _redact_credentials(value: object, credentials: tuple[str, ...]) -> object:
     """Never print a credential just because a local API error or response reflected its auth header."""
@@ -413,7 +362,6 @@ def _redact_credentials(value: object, credentials: tuple[str, ...]) -> object:
         }
     return value
 
-
 def optional_get(client: Client, path: str, query: dict | None = None) -> object | None:
     """端點還沒部署（404）時回 None，讓呼叫端退回舊介面而不是整支掛掉。"""
     try:
@@ -423,13 +371,8 @@ def optional_get(client: Client, path: str, query: dict | None = None) -> object
             return None
         raise
 
-
-# ------------------------------------------------------------------- 輸出精簡
-
-
 def _s(v: object) -> str:
     return v if isinstance(v, str) else ""
-
 
 def _lamp(b: dict, run: dict) -> str:
     """側欄上那顆複合燈號。
@@ -457,7 +400,6 @@ def _lamp(b: dict, run: dict) -> str:
     status = _s(run.get("agent_status") or run.get("status"))
     return status if status in ("idle", "working", "blocked") else "unknown"
 
-
 def _queued_count(b: dict, queued_turn: object) -> int | None:
     """排隊中的工作有幾筆。`None` = 不知道確切筆數，**不是 0**。
 
@@ -474,7 +416,6 @@ def _queued_count(b: dict, queued_turn: object) -> int | None:
         return 0
     return None
 
-
 def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
     """一顆 bot 的精簡投影。`run` 裡帶的是**執行期**真值（可能與設定不同）。
 
@@ -490,18 +431,14 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         "project_id": _s(b.get("project_id")) or project_id,
         "kind": _s(b.get("kind")),
         "identity": _s(b.get("identity")),
-        # 設定值；實際跑起來用的在 run.runtime_model / runtime_effort。
         "model": _s(b.get("model")),
         "effort": _s(b.get("effort")),
         "managed_by": _s(b.get("managed_by")),
         "parent_bot_id": _s(b.get("parent_bot_id")),
         "cwd": _s(b.get("cwd")),
-        # 側欄那顆複合燈號：有 daemon 算好的就照抄，沒有就照它同一套規則算（見 `_lamp`）。
         "lamp": _lamp(b, run),
         "is_manager": bool(manager_id) and bid == manager_id,
     }
-    # 排隊中的 web prompt：`/api/state` 的 `queued_turn` 是一筆 turn（不是數字），
-    # prompt_text 不外傳。型別不混——`queued_turn` 永遠是 turn 或 null，筆數另外放 `queued_turns`。
     qt = b.get("queued_turn")
     if isinstance(qt, dict):
         row["queued_turn"] = _turn_row(qt)
@@ -514,11 +451,9 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         row["run"] = {
             "id": _s(run.get("id") or run.get("run_id")),
             "state": _s(run.get("state") or run.get("run_state")),
-            # 燈號＝使用者在側欄看到的那顆：忙碌 / 等輸入 / 閒置。
             "agent_status": _s(run.get("agent_status") or run.get("status")),
             "runtime_model": _s(run.get("runtime_model")),
             "runtime_effort": _s(run.get("runtime_effort")),
-            # 有 native_session_id 才談得上「恢復原 session」。
             "native_session_id": _s(run.get("native_session_id")),
             "adopted": run.get("adopted"),
             "terminal_id": run.get("terminal_id"),
@@ -529,22 +464,18 @@ def _bot_row(b: dict, project_id: str, manager_id: str) -> dict:
         }
     else:
         row["run"] = None
-    # §6.11 被收起來省 RAM 的那幾顆：`run` 是 null 但叫得醒。少了這個欄位，睡著的跟停掉的、
-    # 掛掉的在 `agm state` 裡長得一模一樣（issue #514）。
     asleep = b.get("asleep")
     row["asleep"] = (
         {"since": _s(asleep.get("since")), "idle_minutes": asleep.get("idle_minutes")}
         if isinstance(asleep, dict)
         else None
     )
-    # 主機連不連得上。`None` = 這份 state 沒講（`/api/state` 就沒有這個欄位）。
     hc = b.get("host_connected")
     row["host_connected"] = hc if isinstance(hc, bool) else None
     turn = b.get("in_flight_turn") if isinstance(b.get("in_flight_turn"), dict) else b.get("turn")
     if isinstance(turn, dict):
         row["in_flight_turn"] = _turn_row(turn)
     return row
-
 
 def _turn_row(t: dict) -> dict:
     """一筆 turn。真欄位是 `status` / `completed_at`（不是 state / ended_at）。"""
@@ -558,7 +489,6 @@ def _turn_row(t: dict) -> dict:
         "created_at": _s(t.get("created_at")),
         "completed_at": _s(t.get("completed_at") or t.get("ended_at")),
     }
-
 
 def slim_state(state: object, manager_id: str = "") -> dict:
     """把 `/api/state` 砍成總管需要的欄位。
@@ -602,7 +532,6 @@ def slim_state(state: object, manager_id: str = "") -> dict:
         out["manager_bot_id"] = manager_id
     return out
 
-
 def slim_message(m: object) -> dict:
     if not isinstance(m, dict):
         return {}
@@ -615,52 +544,36 @@ def slim_message(m: object) -> dict:
         "bot_deleted": bool(m.get("bot_deleted")),
         "turn_id": _s(m.get("turn_id")),
         "role": _s(m.get("role")),
-        # `source` 與 `incomplete` 決定這段文字能不能當證據：終端擷取來的可能被裁掉，
-        # 少了這兩個欄位，截斷的片段會被當成完整回覆。
         "source": _s(m.get("source")),
         "incomplete": bool(m.get("incomplete")),
         "truncated": bool(m.get("truncated")),
-        # 倒回標掉的訊息仍在歷史裡；有值＝使用者撤銷了那一段，不能當成真的發生過的決定引用。
         "rewound_at": _s(m.get("rewound_at")) or None,
-        # 舊 daemon 的 evidence 端點沒有這個欄位；未知來源不能偽裝成使用者訊息。
         "relay_from": _s(m.get("relay_from")) if m.get("relay_from") is not None else None,
         "relay_unverified": bool(m.get("relay_unverified")) if "relay_unverified" in m else None,
         "content": _s(m.get("content") or m.get("text")),
         "created_at": _s(m.get("created_at") or m.get("ts")),
     }
-    # 舊 daemon 沒有 seq；保留新 daemon 提供的插入序，讓 CLI 輸出符合分頁契約。
     if "seq" in m:
         slimmed["seq"] = m["seq"]
     return slimmed
 
-
-# -------------------------------------------------------------------- 子命令
-
-
 def cmd_state(client: Client, cfg: dict, args) -> object:
-    # 有 supervisor 專用的 sanitized state 就用它；舊 daemon 退回 /api/state。
-    # 兩條路都過 slim_state：`/api/state` 帶著 env 與 args，原樣印出來等於把秘密
-    # 倒進總管的對話紀錄裡，所以沒有「不精簡」這個選項。
     manager = ""
     try:
         manager = manager_bot_id(cfg)
     except AgmError:
-        pass  # 還沒部署完的 runtime.json 也要能看狀態。
+        pass
     sup = optional_get(client, "/api/supervisor/state")
     return slim_state(sup if sup is not None else client.get("/api/state"), manager)
-
 
 def cmd_supervisor(client: Client, cfg: dict, args) -> object:
     return client.get("/api/supervisor")
 
-
 def cmd_health(client: Client, cfg: dict, args) -> object:
     return client.get("/api/supervisor/health")
 
-
 def cmd_supervisor_action(client: Client, cfg: dict, args) -> object:
     return client.post(f"/api/supervisor/{args.action}", {})
-
 
 def cmd_search(client: Client, cfg: dict, args) -> object:
     """證據搜尋。優先用新的 evidence 介面（有 message ID、分頁、專案過濾）。"""
@@ -677,7 +590,6 @@ def cmd_search(client: Client, cfg: dict, args) -> object:
             "has_more": bool(ev.get("has_more")),
             "next_cursor": ev.get("next_cursor"),
         }
-    # 舊介面只有 bot_id + hits + snippet，沒有 message ID：明講清楚，別讓模型當成證據 ID。
     hits = client.get("/api/search/messages", {"q": args.query})
     return {
         "source": "legacy_search",
@@ -685,7 +597,6 @@ def cmd_search(client: Client, cfg: dict, args) -> object:
         "note": "舊搜尋介面只有片段，沒有 message/turn ID；要引用證據請再用 `agm messages <bot-id>` 讀原文",
         "hits": hits,
     }
-
 
 def cmd_messages(client: Client, cfg: dict, args) -> object:
     page = client.get(
@@ -697,9 +608,6 @@ def cmd_messages(client: Client, cfg: dict, args) -> object:
     raw_messages = page.get("messages") or []
     msgs = [slim_message(m) for m in raw_messages]
     has_more = bool(page.get("has_more"))
-    # daemon 不回 cursor。回傳訊息依時間正序，但 before 依插入序切頁；有完整 seq 時
-    # 必須取最小 seq 的 id，不能假設時間第一筆就是本頁最早插入的訊息。舊 daemon
-    # 沒有 seq（或回 0）時沿用時間正序第一筆，維持相容。
     valid_seqs = [
         (m["seq"], m)
         for m in raw_messages
@@ -721,10 +629,8 @@ def cmd_messages(client: Client, cfg: dict, args) -> object:
         "messages": msgs,
         "has_more": has_more,
         "next_cursor": next_cursor,
-        # turns 用來判斷某一則交辦到底跑完了沒——只靠訊息看不出回合是否終結。
         "turns": [_turn_row(t) for t in page.get("turns") or [] if isinstance(t, dict)],
     }
-
 
 def _check_length(text: str) -> None:
     if len(text) > MAX_TEXT_CHARS:
@@ -735,7 +641,6 @@ def _check_length(text: str) -> None:
             chars=len(text),
             max_chars=MAX_TEXT_CHARS,
         )
-
 
 def read_text_file(path: str, flag: str) -> str:
     """把 `--…-file` 的內容讀進來。讀不到／不是 UTF-8 都是**呼叫端的參數錯**（`bad_args`／exit 2）。
@@ -751,7 +656,6 @@ def read_text_file(path: str, flag: str) -> str:
     except UnicodeDecodeError:
         raise AgmError("bad_args", f"{flag}（{path}）不是 UTF-8 文字", 2, path=path)
 
-
 def _text_of(args, flag: str, file_attr: str, text_attr: str, what: str) -> str:
     """`--<x>-file` 或 `--<x>`，二選一，回 strip 過、長度檢查過的內容。"""
     path = getattr(args, file_attr, None)
@@ -762,10 +666,8 @@ def _text_of(args, flag: str, file_attr: str, text_attr: str, what: str) -> str:
     _check_length(text)
     return text
 
-
 def _assign_text(args) -> str:
     return _text_of(args, "--text", "text_file", "text", "交辦內容")
-
 
 def cmd_assign(client: Client, cfg: dict, args) -> object:
     body = {
@@ -775,20 +677,13 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
     }
     if args.source_turn_id:
         body["source_turn_id"] = args.source_turn_id
-    # 交辦時就把檔案／模組範圍記下來，daemon 才有東西可以比對重疊；它只會「回報」衝突，
-    # 不會替你決定，真正的協調還是你的事。
     if args.owns:
         body["ownership"] = list(args.owns)
-    # 回報給哪個角色驗收。不寫就是「誰派的誰驗」（daemon 依 bot token 認角色）；巡檢的例行
-    # 維運（gc、健康追查）寫 patrol，其餘交給協調者。
     if getattr(args, "review_by", None):
         body["review_role"] = args.review_by
-    # 通知：只是把話說給 bot 聽（「收到」「進 idle」「看完即可」），送到就結案。
-    # 不加這個旗標的一律照舊：回合結束停在 awaiting_review 等你驗收。
     if getattr(args, "notice", False):
         body["kind"] = "notice"
         body["expects_review"] = False
-    # 交接給另一個 AGM 角色時明講「這是回覆」：沒帶就當新的事、叫醒對方（SPEC §18.15）。
     if getattr(args, "ack", False):
         body["ack"] = True
     if getattr(args, "reply_to", None):
@@ -797,7 +692,6 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
         return client.post("/api/supervisor/assignments", body)
     except AgmError as e:
         if e.kind in ("timeout", "connection_lost"):
-            # 送達未知。**不要**換一個 request id 重試——那會派出第二份同樣的工。
             raise AgmError(
                 "delivery_unknown",
                 "交辦請求逾時，送達狀態未知。請用同一個 client_request_id 先 `agm assignments` 對帳，"
@@ -808,12 +702,8 @@ def cmd_assign(client: Client, cfg: dict, args) -> object:
             )
         raise
 
-
-# `quota_blocked`：帳號撞到用量上限，daemon 會在額度回來後自己重送——工作還沒完，所以算 open。
 OPEN_STATUSES = ("queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked")
-# 一次跟 daemon 要幾筆，以及最多翻幾頁（避免壞掉的游標把這裡變成無窮迴圈）。
 ASSIGNMENT_PAGE = 200
-
 
 def _all_assignments(client: Client, status: str = "") -> tuple[list, bool]:
     """翻完整份（或 `status` 那一份）交辦清單。回 `(items, complete)`。
@@ -845,16 +735,13 @@ def _all_assignments(client: Client, status: str = "") -> tuple[list, bool]:
             return items, False
         items.extend(a for a in page.get("assignments") or [] if isinstance(a, dict))
         if "has_more" not in page:
-            # 舊 daemon：沒有游標可以翻，拿到的就只有最新那一頁。
             return items, False
         if not page.get("has_more"):
             return items, True
         cursor = page.get("next_cursor")
         if not isinstance(cursor, str) or not cursor or cursor in seen:
-            # 游標沒往前走：再問一次只會拿到同一頁。停下來並說自己沒撈完。
             return items, False
         seen.add(cursor)
-
 
 def _server_status(args) -> str:
     """交給 daemon 的 `?status=`。**下面那些客戶端過濾照舊全部留著**：舊 daemon 忽略這個參數，
@@ -873,16 +760,11 @@ def _server_status(args) -> str:
         return "awaiting_review"
     return ""
 
-
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
-    # `--id` 先問單筆端點（有 review 歷程）：答得出來就直接回，不必先把整份清單翻完——正式機上動輒上百頁，
-    # 而且清單那支壞了、詳情那支好好的，指令也不該跟著失敗。只有它 404（舊 daemon、或拿的是 client_request_id）
-    # 才往下掃全量清單找。
     if args.id:
         one = optional_get(client, f"/api/supervisor/assignments/{path_segment(args.id)}")
         if one is not None:
             return one
-    # 有過濾條件就一定要翻完：只看第一頁的過濾結果會把頁外的未結案講成「沒有」。
     filtered = bool(args.id or args.status or args.open or args.awaiting_review)
     if filtered or args.all:
         items, complete = _all_assignments(client, _server_status(args))
@@ -891,10 +773,8 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
         if not isinstance(out, dict):
             return out
         items = [a for a in out.get("assignments") or [] if isinstance(a, dict)]
-        # 舊 daemon 沒有 `has_more`：那就是「不知道還有沒有」，不是「沒有了」。
         complete = "has_more" in out and not out.get("has_more")
     if args.id:
-        # 單筆端點上面問過了（404）；它只吃 assignment id，拿 client_request_id 來查一定 404，所以退路掃的是**全量**清單。
         for a in items:
             if a.get("id") == args.id or a.get("client_request_id") == args.id:
                 return a
@@ -911,13 +791,10 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
             items = [a for a in items if a.get("status") in OPEN_STATUSES]
         else:
             items = [a for a in items if a.get("status") == args.status]
-    # 未結案 = 還在跑 + 等驗收 + 被標阻塞。回合跑完不等於結案，所以 awaiting_review 也算。
     if args.open:
         items = [a for a in items if a.get("status") in OPEN_STATUSES]
     if args.awaiting_review:
         items = [a for a in items if a.get("status") == "awaiting_review"]
-    # 一直在重試的那種（bot 停了、在忙、要重登）最容易被看漏：它 updated_at 每次都動，
-    # 看起來很忙，其實從來沒送出去過。把它單獨數出來，並附上最後一個理由。
     stuck = [
         {
             "id": a.get("id"),
@@ -934,7 +811,6 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
         "assignments": items,
         "open": len([a for a in items if a.get("status") in OPEN_STATUSES]),
         "awaiting_review": len([a for a in items if a.get("status") == "awaiting_review"]),
-        # 這份清單是不是全部。False = 還有沒撈到的，上面每一個數字都只是下限。
         "complete": complete,
     }
     if not complete:
@@ -942,7 +818,6 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
     if stuck:
         out["retrying_undelivered"] = stuck
     return out
-
 
 def cmd_review(client: Client, cfg: dict, args) -> object:
     """驗收／阻塞／續作／取消一筆交辦。
@@ -959,8 +834,6 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", "followup 要用 --followup-text 或 --followup-file 說明接下來做什麼", 2)
         if not args.followup_request_id:
             raise AgmError("bad_args", "followup 要一個穩定的 --followup-request-id（重試沿用同一個）", 2)
-        # 續作會變成一筆新的交辦，所以跟 `assign` 走同一組檢查：非 UTF-8、空白、超長都在這裡擋，
-        # 不要送出去等 daemon 回 400／422（issue #516）。
         body["followup_text"] = _text_of(args, "--followup", "followup_file", "followup_text", "續作內容")
         body["followup_request_id"] = args.followup_request_id
         if args.followup_bot:
@@ -970,8 +843,6 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
         return client.post(path, body)
     except AgmError as e:
         if e.kind in ("timeout", "connection_lost"):
-            # 跟 assign 同一條規則：逾時是「送達未知」。決定本身是冪等的（同一個
-            # decision 重送會回同一筆），followup 也綁同一個 request id，所以先對帳再重試。
             raise AgmError(
                 "delivery_unknown",
                 "驗收請求逾時，狀態未知。先用 `agm assignments --id <id>` 對帳；"
@@ -982,7 +853,6 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
             )
         raise
 
-
 def cmd_approval(client: Client, cfg: dict, args) -> object:
     """重建／重啟核准。申請寫成紀錄（誰、範圍、哪個 commit、到期），AGM 直接核駁。
 
@@ -990,7 +860,6 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     不會變成兩筆讓 AGM 一筆核一筆駁（2026-09-16 的事故）。`list` 的輸出帶 `client_request_id` 可以對帳。
     """
     if args.op == "list":
-        # `--id`：清單只回最新 100 筆，排程腳本要確認的那筆可能早就被擠出去了。
         if getattr(args, "id", None):
             return client.get("/api/supervisor/approvals", {"id": args.id})
         return client.get("/api/supervisor/approvals")
@@ -1002,14 +871,10 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
             body["target_commit"] = args.commit
         if args.expires_in is not None:
             body["expires_in_secs"] = args.expires_in
-        # 重送同一個 request id 回原本那一筆（回應的 created=false）；換了 purpose／scope／commit 回 409。
         if args.request_id:
             body["request_id"] = args.request_id
-        # 同一個申請者換 commit 重新申請：舊的那筆標 superseded，等待起點接過來（SPEC §18.10）。
         if args.supersedes:
             body["supersedes"] = args.supersedes
-        # 申請理由要**真的送出去**：以前只有 `approval decide` 帶 reason，request 寫了等於沒寫，
-        # AGM 看到空欄位就以「未附理由」駁回（2026-09-19，連三張）。
         if args.reason:
             body["reason"] = args.reason
         return client.post("/api/supervisor/approvals", body)
@@ -1023,7 +888,6 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
     if args.expires_in is not None:
         body["expires_in_secs"] = args.expires_in
     return client.post(f"/api/supervisor/approvals/{path_segment(args.approval_id)}/decide", body)
-
 
 def single_line_token(raw: str, where: str) -> str:
     """把讀進來的內容收成「單獨一行」的 token；多行直接拒絕。
@@ -1042,7 +906,6 @@ def single_line_token(raw: str, where: str) -> str:
         )
     return lines[0].strip() if lines else ""
 
-
 def lease_token_of(args) -> str:
     """`--lease-token-file` / `--lease-token -`（stdin）/ `--lease-token <值>`，取一個。
 
@@ -1058,18 +921,10 @@ def lease_token_of(args) -> str:
     if path and inline:
         raise AgmError("bad_args", "--lease-token 與 --lease-token-file 只能給一個", 2)
     if path:
-        # 先 open 再 fstat，不要先 stat 再 open（issue #89 修過的同一個 TOCTOU 形狀）：兩步之間
-        # 路徑可以被換掉，驗過的跟讀到的就不是同一個檔；而且 os.stat 跟隨 symlink，驗到的會是
-        # 目標的權限。O_NOFOLLOW 連「路徑本身是 symlink」都擋掉，只認我們自己寫的那個真檔。
         try:
-            # `O_NONBLOCK`：路徑指到 fifo 時 open 會一直等寫端，整支 CLI 就這樣掛著不動；
-            # 帶著它 open 馬上回來，下面的 `S_ISREG` 再把它擋掉。普通檔不受影響。
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as e:
             raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
-        # 型別要在 `fdopen` **之前**問：目錄在 macOS 上 open 得起來，而 `fdopen` 自己就會丟
-        # `IsADirectoryError`，落到 `main` 的兜底變成 internal／exit 1。不是普通檔（目錄、
-        # fifo、裝置）都是呼叫端給錯路徑，該回 `bad_args`；fifo 還會讓 read 直接卡住。
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             os.close(fd)
@@ -1084,8 +939,6 @@ def lease_token_of(args) -> str:
                 )
 
             try:
-                # 用二進位讀再自己解碼：以文字模式開的話，非 UTF-8 的檔會在 `read()` 就丟
-                # `UnicodeDecodeError`，落到 `main` 的兜底變成 internal／exit 1。
                 raw = fh.read().decode("utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 raise AgmError("bad_args", f"讀不到 lease token 檔 {path}：{e}", 2) from e
@@ -1100,7 +953,6 @@ def lease_token_of(args) -> str:
         return tok
     return inline or ""
 
-
 def cmd_lease(client: Client, cfg: dict, args) -> object:
     """執行租約：等安全窗口用 `safety`（唯讀），真的要動手用 `acquire`。
 
@@ -1110,28 +962,21 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     if args.op == "status":
         return client.get("/api/supervisor/leases")
     if args.op == "safety":
-        # --approval：問「這一筆核准現在開得了窗口嗎」。升級（等太久就縮小封鎖面）的計時綁在它身上；
-        # 不帶就是純查詢，看最早那筆還活著的核准。
         query = {}
         if args.exclude_bot:
             query["exclude"] = ",".join(args.exclude_bot)
         if args.approval:
             query["approval"] = args.approval
-        # --owner：以這個人的身份問，他自己握的租約不算擋（SPEC §18.10「自己的租約不擋自己」）。
-        # 只有明確帶了才送：不帶就是舊行為，每一把租約都算擋。
         if args.owner:
             query["owner"] = args.owner
         return client.get("/api/supervisor/maintenance/safety", query or None)
     if not args.resource:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
-    # acquire／renew／release 一定要有 owner：沒帶就用穩定的 $AM_BOT_ID（外部人類為 principal:user；safety 則刻意不補，見上）。
     owner = args.owner or os.environ.get("AM_BOT_ID", "principal:user")
     path = f"/api/supervisor/leases/{path_segment(args.resource)}/{args.op}"
     if args.op == "acquire":
         if not args.approval:
             raise AgmError("bad_args", "lease acquire 需要 --approval（核准 id）", 2)
-        # 冪等鍵：`lease_token` 只在這支的回應出現一次，回應丟了（逾時、連線斷）租約就開了、token 卻沒了，
-        # 窗口握到 TTL。沒給 `--request-id` 就自己產一個（高熵祕密、每次不同），逾時時印出來讓呼叫端原樣重送。
         request_id = args.request_id or uuid.uuid4().hex
         body: dict = {"owner": owner, "approval_id": args.approval, "require_idle": not args.allow_busy, "request_id": request_id}
         if args.commit:
@@ -1144,8 +989,6 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
             return client.post(path, body)
         except AgmError as e:
             if e.kind in ("timeout", "connection_lost"):
-                # 送達未知：租約可能已經開了。**不要**換 request_id 重送——那會被 lease_held 擋住、窗口握到 TTL；
-                # 同一個 request_id 重送，daemon 會把還握著的那一張（同 fence、同 lease_token）原樣回來（`replayed: true`）。
                 raise AgmError(
                     "delivery_unknown",
                     f"acquire 逾時或連線中斷，租約可能已經開了、lease_token 卻沒收到。用**同一個** --request-id {request_id} "
@@ -1158,8 +1001,6 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
             raise
     if args.fence is None:
         raise AgmError("bad_args", f"lease {args.op} 需要 --fence（acquire 回傳的那個）", 2)
-    # renew／release 要出示 acquire 當下發的一次性憑證：owner 與 fence 是公開欄位
-    # （`lease status` 就看得到），只靠它們等於誰都能把別人正在換 binary 的窗口收掉。
     body = {"owner": owner, "fence": args.fence}
     if args.ttl is not None:
         body["ttl_secs"] = args.ttl
@@ -1172,7 +1013,6 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         body["force"] = True
         body["reason"] = args.reason
     return client.post(path, body)
-
 
 def cmd_persona(client: Client, cfg: dict, args) -> object:
     """人設：持久版本是權威，內嵌版只在首次安裝當種子。
@@ -1187,7 +1027,6 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
         out = optional_get(client, base)
         if out is None:
             raise AgmError("unsupported", "這台 daemon 還沒有 persona 介面（需要更新 agents-managerd）", 6)
-        # 預設不要把整段人設倒進對話；要全文才加 --full。
         if not args.full and isinstance(out, dict) and isinstance(out.get("stored"), dict):
             out["stored"] = {k: v for k, v in out["stored"].items() if k != "text"}
         return out
@@ -1196,7 +1035,6 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
         if args.reason:
             body["reason"] = args.reason
         return client.post("/api/supervisor/persona/adopt-embedded", body)
-    # set
     if args.file:
         text = read_text_file(args.file, "--file")
     elif args.text:
@@ -1208,7 +1046,6 @@ def cmd_persona(client: Client, cfg: dict, args) -> object:
         body["expected_version"] = args.expected_version
     return client.put(base, body)
 
-
 def cmd_build_inputs(client: Client, cfg: dict, args) -> object:
     """哪些路徑會被編進 binary（含 include_str! 的 persona 與這支 CLI）。
 
@@ -1218,7 +1055,6 @@ def cmd_build_inputs(client: Client, cfg: dict, args) -> object:
     if out is None:
         raise AgmError("unsupported", "這台 daemon 還沒有 build-inputs 介面（需要更新 agents-managerd）", 6)
     return out
-
 
 def cmd_incidents(client: Client, cfg: dict, args) -> object:
     """系統層級的故障（host 掉線、bot 該開沒開、交辦卡住、通知送不出去）。
@@ -1230,15 +1066,11 @@ def cmd_incidents(client: Client, cfg: dict, args) -> object:
         raise AgmError("unsupported", "這台 daemon 還沒有 incident 介面（需要更新 agents-managerd）", 6)
     return out
 
-
 def cmd_inbox(client: Client, cfg: dict, args) -> object:
-    # 預設是「工作視圖」：只有還沒 ack 的（pending + delivered），最舊的在前，所以照順序
-    # ack 真的清得掉。--all 才是含 handled 的稽核視圖（最新在前）。
     role = getattr(args, "role", None)
     if role == "mine":
         role = runtime_role(cfg)
     return client.get("/api/supervisor/inbox", {"all": "1" if args.all else None, "limit": args.limit, "role": role})
-
 
 def cmd_whoami(client: Client, cfg: dict, args) -> object:
     """這支 CLI 以哪個角色、哪顆 bot 說話，以及 daemon 能不能驗證（不印 token）。"""
@@ -1250,7 +1082,6 @@ def cmd_whoami(client: Client, cfg: dict, args) -> object:
         "bot_token_present": bool(headers.get("X-AM-Bot-Token") or headers.get("X-AM-Child-Token")),
     }
 
-
 def cmd_responder(client: Client, cfg: dict, args) -> object:
     """協調者（responder）：狀態、建立、啟停。建立不會啟動，要再 start 一次。"""
     if args.op == "show":
@@ -1259,7 +1090,6 @@ def cmd_responder(client: Client, cfg: dict, args) -> object:
         body = {k: v for k, v in (("identity", args.identity), ("model", args.model), ("effort", args.effort)) if v}
         return client.post("/api/supervisor/responder/setup", body)
     return client.post(f"/api/supervisor/responder/{args.op}", {})
-
 
 def cmd_ack(client: Client, cfg: dict, args) -> object:
     """結案一則 inbox 通知。**只有 AGM 角色結得掉**（issue #432）。
@@ -1276,8 +1106,6 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
         reason = detail.get("reason") if isinstance(detail, dict) else None
         if reason not in ("role_required", "bot_proof_mismatch"):
             raise
-        # 兩個 reason 的下一步不一樣，不要收斂成同一句：`bot_proof_mismatch` 的人已經在角色
-        # pane 裡了，叫他「去角色 pane 裡跑」等於白說一步。
         if reason == "role_required":
             hint = (
                 "ack 只有 AGM 角色做得到：要在巡檢或協調者自己的 pane 裡跑 bin/agm，"
@@ -1297,7 +1125,6 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
             detail=detail,
         )
 
-
 def cmd_ops_alert(client: Client, cfg: dict, args) -> object:
     """排程腳本卡住了、自己解不開：推一則 durable 通知給 AGM 巡檢。
 
@@ -1309,13 +1136,8 @@ def cmd_ops_alert(client: Client, cfg: dict, args) -> object:
         body["detail"] = args.detail
     return client.post("/api/supervisor/ops-alerts", body)
 
-
-# ---------------------------------------------------------------- ops-sync（issue #418）
-
-# 來源 → 安裝位置的對照表只寫在這一處；`--check` 讀的是 `--ref`（預設 origin/main）那一版。
 OPS_MANIFEST = "scripts/ops/install-manifest.tsv"
 DEFAULT_REPO = "~/project/agents-manager"
-
 
 class Exit:
     """指令照常輸出 JSON，但用非 0 離開（例如 `ops-sync --check` 有落差）。"""
@@ -1324,18 +1146,15 @@ class Exit:
         self.out = out
         self.code = code
 
-
 def _git(repo: Path, *args: str) -> str:
     r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
     if r.returncode != 0:
         raise AgmError("git_failed", f"git {' '.join(args)}：{r.stderr.strip()}", 2)
     return r.stdout.strip()
 
-
 def _blob_at(repo: Path, rev: str, path: str) -> str | None:
     r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", f"{rev}:{path}"], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
-
 
 def _path_history(repo: Path, ref: str, path: str) -> list[tuple[str, str]]:
     """Return commits and the path that existed there, following source-file renames."""
@@ -1348,7 +1167,6 @@ def _path_history(repo: Path, ref: str, path: str) -> list[tuple[str, str]]:
         elif commit and line:
             rows.append((commit, line))
     return rows
-
 
 def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list[tuple[str, str]]:
     """Return this install target's source history, including manifest-recorded source renames.
@@ -1368,8 +1186,6 @@ def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list
                 capture_output=True,
                 text=True,
             )
-            # The manifest may not exist yet in older history. Such a commit cannot establish that
-            # a source was published for this target, so it contributes no mapping.
             content = result.stdout if result.returncode == 0 else ""
             mapping = {}
             for line in content.splitlines():
@@ -1394,8 +1210,6 @@ def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list
         for commit, historical_path in _path_history(repo, ref, historical_source):
             if mapped_source(commit) == historical_path and _blob_at(repo, commit, historical_path) is not None:
                 candidates.add((commit, historical_path))
-    # A manifest can start mapping a target to an existing source without changing that source in
-    # the same commit. Include that publication point as a candidate version too.
     for commit in manifest_revs:
         historical_source = mapped_source(commit)
         if historical_source and _blob_at(repo, commit, historical_source) is not None:
@@ -1404,33 +1218,13 @@ def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list
     order = {commit: i for i, commit in enumerate(_git(repo, "rev-list", "--topo-order", ref).split())}
     return sorted(candidates, key=lambda item: (order.get(item[0], len(order)), item[1]))
 
-
 LAUNCHD_PREFIX = "LaunchAgents/"
-#: plist 比對**只忽略這些**，其餘全部算語意（issue #499）。
-#:
-#: 原本反過來寫成白名單（`Label`／`ProgramArguments`／`StartInterval`／`RunAtLoad`），理由是「launchd
-#: 會自己改寫 plist」——**那個理由是錯的**：實機那八份都是純 XML 文字檔，launchd 只讀不回寫，我當初
-#: 看到的「鍵順序不同」是 `PlistBuddy -c Print` 把 dict 印出來的順序，不是檔案被改過。而且這裡比的是
-#: `plistlib` parse 過的 dict，順序本來就不影響。
-#:
-#: 白名單的代價是**沒列到的鍵被靜默忽略**：八份 plist 全都有的 `StandardOutPath`／`StandardErrorPath`
-#: 就這樣不在比對範圍裡。那兩個是 log 的落點，而 `browser-gc-kick.sh` 沒有 ops-alert 的管道、失敗只留
-#: log——log 路徑漂掉卻報「同步」，等於證據來源斷了還顯示綠燈。
-#:
-#: `EnvironmentVariables` 留在忽略清單：裡面是這台機器的 `PATH` 與 bot id，每台不同。
-#: 忽略的只有**值**——鍵在不在兩邊還是要一樣，不然安裝端整份掉了 `EnvironmentVariables`
-#: （job 因此少了 `PATH`）會被報成同步（issue #499，i264 review）。
 PLIST_IGNORED_KEYS = ("EnvironmentVariables",)
 
-
-#: Linux 主機的排程是 systemd user unit（issue #677）：安裝位置以 `systemd/` 開頭的解析成 `~/.config/systemd/user/`。
 SYSTEMD_PREFIX = "systemd/"
-#: unit 比對**只忽略這些鍵的值**，理由同 [`PLIST_IGNORED_KEYS`]：`Environment=` 是這台機器的 PATH 與 bot id。
 UNIT_IGNORED_KEYS = ("Environment",)
-#: 對照表第三欄（可省略＝每個平台都裝）。排程列一定要標：plist 只在 macOS、unit 只在 Linux 有意義。
 OPS_PLATFORMS = ("darwin", "linux")
 _PREFIX_PLATFORM = {LAUNCHD_PREFIX: "darwin", SYSTEMD_PREFIX: "linux"}
-
 
 def _ops_platform() -> str:
     """這台是哪個平台（對照表第三欄的值）；`AGM_OPS_PLATFORM` 只給測試蓋掉。"""
@@ -1439,12 +1233,10 @@ def _ops_platform() -> str:
         return override
     return "linux" if sys.platform.startswith("linux") else sys.platform
 
-
 def _launch_agents_dir() -> Path:
     """`~/Library/LaunchAgents`；`AGM_LAUNCHAGENTS_DIR` 只給測試蓋掉（不要讓測試讀到真的 plist）。"""
     override = os.environ.get("AGM_LAUNCHAGENTS_DIR", "").strip()
     return pathlib.Path(override) if override else pathlib.Path.home() / "Library" / "LaunchAgents"
-
 
 def _systemd_user_dir() -> Path:
     """systemd 讀 user unit 的目錄（`$XDG_CONFIG_HOME/systemd/user`）；`AGM_SYSTEMD_USER_DIR` 只給測試蓋掉。"""
@@ -1454,7 +1246,6 @@ def _systemd_user_dir() -> Path:
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     return (pathlib.Path(xdg) if xdg else pathlib.Path.home() / ".config") / "systemd" / "user"
 
-
 def _install_path(agm_dir: Path, target: str) -> Path:
     """對照表的安裝位置：預設相對 AGM 目錄，`LaunchAgents/` 開頭的走 [`_launch_agents_dir`]（issue #487），
     `systemd/` 開頭的走 [`_systemd_user_dir`]（issue #677）。"""
@@ -1463,7 +1254,6 @@ def _install_path(agm_dir: Path, target: str) -> Path:
     if target.startswith(SYSTEMD_PREFIX):
         return _systemd_user_dir() / target[len(SYSTEMD_PREFIX):]
     return agm_dir / target
-
 
 def _unit_semantics(raw: bytes) -> dict:
     """systemd unit 的語意：`{"<Section>.<Key>": [值, …]}`，註解、空行、行尾 `\\` 接續都攤平（issue #677）。
@@ -1480,7 +1270,6 @@ def _unit_semantics(raw: bytes) -> dict:
     pending = ""
     for n, line in enumerate(text.splitlines(), 1):
         line = line.strip()
-        # systemd 在反斜線續行中允許完整註解行；跳過時不能清掉待接續的值。
         if line and line[0] in "#;":
             continue
         line = pending + line
@@ -1503,21 +1292,16 @@ def _unit_semantics(raw: bytes) -> dict:
             out[k] = "<ignored>"
     return out
 
-
 def _git_bytes(repo: Path, ref: str, source: str) -> bytes:
     return subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{source}"], capture_output=True, check=True).stdout
 
-
-#: launchd 樣板的家目錄佔位（scripts/ops/launchd/*.plist）；安裝時由 `render-launchd.sh` 換成這台的 $HOME。
 HOME_PLACEHOLDER = b"@HOME@"
-
 
 def _render_home(raw: bytes) -> bytes:
     """樣板的 `@HOME@` 換成這台的家目錄（XML 轉義，與 render-launchd.sh 同一套），沒有佔位就原樣。"""
     if HOME_PLACEHOLDER not in raw:
         return raw
     return raw.replace(HOME_PLACEHOLDER, html.escape(str(Path.home()), quote=False).encode("utf-8"))
-
 
 def _plist_semantics(raw: bytes) -> dict:
     """parse 過的 plist，除了 [`PLIST_IGNORED_KEYS`] 的**值**以外全部保留（issue #499）。
@@ -1529,11 +1313,9 @@ def _plist_semantics(raw: bytes) -> dict:
         d = plistlib.loads(_render_home(raw))
     except Exception as e:  # noqa: BLE001 - 壞掉的 plist 要報成落差，不是炸掉整份報告
         return {"_error": f"{type(e).__name__}: {e}"}
-    # 合法的 plist 根也可以是 array／string 等；沒有鍵值表就沒有語意可比，當成讀不懂（#1717）。
     if not isinstance(d, dict):
         return {"_error": f"plist 根節點不是 dict（是 {type(d).__name__}）"}
     return {k: ("<ignored>" if k in PLIST_IGNORED_KEYS else v) for k, v in d.items()}
-
 
 def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     """唯讀比對已安裝的 ops 腳本與 repo：只跑 git 與讀檔，不改任何安裝檔。
@@ -1552,14 +1334,11 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        # 列尾旗標：[darwin|linux] [shared]（shared＝被 kick source 的共用檔，ops-install 缺了也會裝；這裡只比對，不影響）
         flags = parts[2:]
         platforms = [t for t in flags if t != "shared"]
         if len(parts) < 2 or len(platforms) > 1 or flags.count("shared") > 1 or any(t not in OPS_PLATFORMS for t in platforms):
             raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置 [darwin|linux] [shared]」）：{line}", 2)
         only = platforms[0] if platforms else None
-        # 排程列標錯平台（plist 標 linux、unit 沒標）不是「這台不裝」而是對照表寫錯：一律拒絕，
-        # 否則 Linux 上會去 `~/Library/LaunchAgents` 找 plist、報一堆 missing（issue #677）。
         for prefix, want in _PREFIX_PLATFORM.items():
             if parts[1].startswith(prefix) and only != want:
                 raise AgmError("bad_manifest", f"{OPS_MANIFEST}：{prefix}… 只在 {want} 上有意義，第三欄要寫 {want}：{line}", 2)
@@ -1576,9 +1355,6 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         if not path.is_file():
             report["missing"].append(row)
             continue
-        # plist 不按 blob 比（issue #487、#499）：比的是 `plistlib` parse 過的 dict，
-        # 所以同樣內容換個鍵序不算 drift。忽略的只有 `PLIST_IGNORED_KEYS`。
-        # systemd unit 同理：比 `_unit_semantics`，註解與空白不算（issue #677）。
         semantics = _plist_semantics if target.startswith(LAUNCHD_PREFIX) else (
             _unit_semantics if target.startswith(SYSTEMD_PREFIX) else None)
         if semantics is not None:
@@ -1587,18 +1363,10 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
             if want == got:
                 report["ok"].append(row)
             else:
-                # 兩邊的鍵取聯集：少一個鍵跟改一個值同樣是落差，只看其中一邊會漏掉「安裝端整個少了
-                # StandardOutPath」這種。`_error`（plist 讀不懂）也在裡面，不然報告只會說每個欄位都是
-                # None，看的人查不出真正的原因是那個檔壞了。
-                # 安裝的若是 repo 以前某一版的語意，那是「repo 較新、還沒裝」（behind），不是被人手改過（drift）：
-                # 跟下面的腳本一樣回頭找歷史。以前這裡只跟最新一版比，unit／plist 一落後就報成 drift，
-                # 而 ops-install 對 drift 的處理是「絕不覆蓋」（避免蓋掉手改的檔）——正常落後的檔也被擋下來。
                 found = None
                 history = _target_path_history(repo, ref, target, source)
                 if "_error" not in got:
                     for c, historical_source in history:
-                        # A path may be deleted and later re-added. Its deletion commit is in the
-                        # path history but has no <commit>:<path> blob to parse; keep walking back.
                         if semantics(_git_bytes(repo, c, historical_source)) == got:
                             found = c
                             break
@@ -1624,10 +1392,7 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         titles = _git(repo, "log", "--follow", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
         row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})
         report["behind"].append(row)
-    # `agm` 本身由 daemon 部署（內嵌在 binary 裡），備份檔與快取不算。
     listed = {t for _, t in entries}
-    # 沒有列進對照表的 `com.agm.*` job：那就是「沒有版控的排程」，正是 #487 要抓的那種。
-    # 只掃這個平台的排程目錄（issue #677）：另一邊的目錄本來就不該存在，也不歸這台管。
     if platform == "linux":
         sched_dir, prefix, globs = _systemd_user_dir(), SYSTEMD_PREFIX, ("com.agm.*.service", "com.agm.*.timer")
     else:
@@ -1641,12 +1406,10 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     if bin_dir.is_dir():
         for f in sorted(bin_dir.iterdir()):
             rel = f"bin/{f.name}"
-            # `ops-install.sh` 換檔前的暫存檔 `<檔名>.new.<pid>`：被 SIGKILL 時會留下，下次執行就清掉，不算沒有版控的腳本。
             if f.is_file() and f.name != "agm" and ".bak" not in f.name and not re.search(r"\.new\.\d+$", f.name) and rel not in listed:
                 report["extra"].append({"target": rel})
     report["in_sync"] = not any(report[k] for k in ("behind", "drift", "missing", "extra"))
     return report
-
 
 def short_hash(content: bytes) -> str:
     """FNV-1a 64、取前 12 碼十六進位——跟 daemon 的 `cli_refresh::short_hash` 是同一個算法。
@@ -1659,12 +1422,10 @@ def short_hash(content: bytes) -> str:
         h = (h * 0x100000001B3) & 0xFFFF_FFFF_FFFF_FFFF
     return f"{h:016x}"[:12]
 
-
 def _blob_bytes(repo: Path, rev: str, path: str) -> bytes | None:
     """`git show <rev>:<path>` 的**原始位元組**（`_git` 會 strip，雜湊就對不上了）。"""
     r = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{path}"], capture_output=True)
     return r.stdout if r.returncode == 0 else None
-
 
 def cli_sync_report(client: Client, repo: Path, ref: str) -> dict:
     """已安裝的 `bin/agm` 跟得上嗎（issue #532）。
@@ -1685,7 +1446,7 @@ def cli_sync_report(client: Client, repo: Path, ref: str) -> dict:
     out["repo_hash"] = short_hash(blob) if blob is not None else None
     try:
         info = client.get("/api/supervisor/cli")
-    except Exception as e:  # daemon 沒開、token 不對：講出來，但不影響 ops 腳本那半邊的結論
+    except Exception as e:
         out.update({"state": "unknown", "error": str(e)})
         return out
     if not isinstance(info, dict):
@@ -1705,25 +1466,19 @@ def cli_sync_report(client: Client, repo: Path, ref: str) -> dict:
         out["action"] = "；".join(bits)
     return out
 
-
 def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
     repo = Path(args.repo or os.environ.get("AGM_REPO") or DEFAULT_REPO).expanduser()
     report = ops_sync_report(repo, args.ref, runtime_dir(args.runtime_dir))
     cli = cli_sync_report(client, repo, args.ref)
     if args.refresh_cli and cli["stale_roles"]:
-        # 只換得動的那一半修得掉：binary 落後要重建，這裡動不了。
         cli["refreshed"] = client.post("/api/supervisor/cli", {})
         cli = cli_sync_report(client, repo, args.ref)
     report["cli"] = cli
-    # `unknown`（daemon 沒開）不翻紅：這支的本業是比對安裝端，daemon 沒開是另一件事，
-    # 而且那種時候什麼排程都沒在跑。
     report["in_sync"] = report["in_sync"] and cli["state"] != "drift"
     if report["in_sync"]:
         return report
     if args.alert:
         counts = "、".join(f"{k} {len(report[k])}" for k in ("drift", "behind", "missing", "extra") if report[k])
-        # plist 的 drift 要講出**哪個鍵、哪一邊**：只寫檔名的話，「log 落點漂掉」跟「腳本落後兩個 commit」
-        # 在通知裡長得一模一樣，收到的人得自己再跑一次才知道要不要緊（issue #499，i264 review）。
         def _name(row: dict) -> str:
             diff = row.get("diff")
             if not diff:
@@ -1736,13 +1491,11 @@ def cmd_ops_sync(client: Client, cfg: dict, args) -> object:
             detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）不一致：{counts}（{names}）。`agm ops-sync --check` 看明細，照 scripts/ops/README.md 重新 install"
         else:
             detail = f"已安裝的 ops 腳本跟 {args.ref}（{report['commit']}）一致。"
-        # CLI 那半邊要講清楚是哪一種落差：一種換個檔案就好，另一種非重啟 daemon 不可（issue #532）。
         if cli["state"] == "drift":
             stale = "、".join(f"{r['role']}({r['state']})" for r in cli["stale_roles"]) or "無"
             detail += f" bin/agm：{cli['action']}（安裝端落後的角色：{stale}）"
         report["alert"] = client.post("/api/supervisor/ops-alerts", {"source": "ops-sync", "reason": "installed_out_of_sync", "detail": detail})
     return Exit(report, 1)
-
 
 def cmd_release_triage(client: Client, cfg: dict, args) -> object:
     """上游新版分診（issue #204）：模型交回 verdict、查帳本、標記派出、重試 publish。
@@ -1763,7 +1516,6 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", f"{args.file} 要是一個 JSON 物件（{{kind,version,verdicts,issues}}）", 2)
         return client.post("/api/release-triage/verdicts", body)
     if args.op == "auto":
-        # daemon 自己用 Claude API 分診（#1919）。--check 只問開了沒有；沒開／失敗的版本留在 pending，由 kick 派協調者。
         if not args.kind:
             raise AgmError("bad_args", "auto 要 --kind", 2)
         if args.check:
@@ -1786,11 +1538,9 @@ def cmd_release_triage(client: Client, cfg: dict, args) -> object:
         body["kind"] = args.kind
     if args.version:
         body["version"] = args.version[0]
-    # --dry-run：打開 [release_triage] publish 之前先看會開哪幾張（只讀 gh，不開 issue、不寫帳本）。
     if getattr(args, "dry_run", False):
         body["dry_run"] = True
     return client.post("/api/release-triage/publish", body)
-
 
 def cmd_handoff(client: Client, cfg: dict, args) -> object:
     if args.summary is None and args.summary_file is None:
@@ -1802,20 +1552,15 @@ def cmd_handoff(client: Client, cfg: dict, args) -> object:
     summary = _text_of(args, "--summary", "summary_file", "summary", "管理摘要")
     return client.put("/api/supervisor/handoff", {"summary": summary})
 
-
-# 強制 `/usage` 探測：daemon 要先等同一台的 probe_lock（背景輪詢一個一個探身份時會佔著），再自己探最久 40 秒。
 QUOTA_PROBE_TIMEOUT = 300.0
-
 
 def cmd_peers(client: Client, cfg: dict, args) -> object:
     project_id = _project_id()
     query = {"for": args.for_track} if getattr(args, "for_track", None) else None
     return client.get("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/peers", query)
 
-
 def _lineage_path(tail: str = "") -> str:
     return "/api/projects/" + urllib.parse.quote(_project_id(), safe="") + "/lineage" + tail
-
 
 def _lineage_body(args) -> dict:
     """advance／add 共用：只送有給的欄位（daemon 對沒給的欄位不動或用預設）。"""
@@ -1826,25 +1571,20 @@ def _lineage_body(args) -> dict:
             body[key] = value
     return body
 
-
 def cmd_lineage_list(client: Client, cfg: dict, args) -> object:
     """列出本專案的 session 血統（#1943）；--line／--state 篩選。"""
     return client.get(_lineage_path(), {"line": args.line, "state": args.state})
-
 
 def cmd_lineage_add(client: Client, cfg: dict, args) -> object:
     """登記一顆進行中（active）的 session；之後做完用 advance 前移、放棄用 retire。"""
     return client.post(_lineage_path(), _lineage_body(args))
 
-
 def cmd_lineage_advance(client: Client, cfg: dict, args) -> object:
     """把 session 設為該線的檢查點；原檢查點改 retired（回應的 `retired`）。"""
     return client.post(_lineage_path("/advance"), _lineage_body(args))
 
-
 def cmd_lineage_retire(client: Client, cfg: dict, args) -> object:
     return client.post(_lineage_path("/retire"), {"session_id": args.session_id})
-
 
 def _valid_line(line: str) -> bool:
     return (
@@ -1853,7 +1593,6 @@ def _valid_line(line: str) -> bool:
         and line[0].isalnum()
         and all(c.isalnum() or c in "._-" for c in line)
     )
-
 
 def _glob_to_regex(pat: str) -> str:
     pat = pat.replace("\\", "/").strip()
@@ -1900,13 +1639,11 @@ def _glob_to_regex(pat: str) -> str:
             i += 1
     return r"^" + "".join(parts) + r"$"
 
-
 def _match_glob(path: str, pat: str) -> bool:
     path = path.replace("\\", "/").strip()
     while path.startswith("./"):
         path = path[2:]
     return bool(re.match(_glob_to_regex(pat), path))
-
 
 def _load_lines_toml(path: Path) -> dict:
     try:
@@ -1923,7 +1660,6 @@ def _load_lines_toml(path: Path) -> dict:
             return tomllib.load(f)
     except Exception as e:
         raise AgmError("invalid_lines_toml", f"解析 {path} 失敗：{e}", 1)
-
 
 def _resolve_repo(explicit: str | None = None) -> Path:
     if explicit:
@@ -1947,7 +1683,6 @@ def _resolve_repo(explicit: str | None = None) -> Path:
         pass
     return Path(DEFAULT_REPO).expanduser().resolve()
 
-
 def _resolve_lines_file(explicit: str | None, repo: Path) -> Path:
     if explicit:
         p = Path(explicit).expanduser()
@@ -1968,7 +1703,6 @@ def _resolve_lines_file(explicit: str | None, repo: Path) -> Path:
     if not default_p.is_file():
         raise AgmError("no_lines_config", f"找不到 lines.toml 定義檔：{default_p}", 1)
     return default_p
-
 
 def cmd_lineage_pick(client: Client | None, cfg: dict, args) -> object:
     """依 lines.toml 把路徑對到線（#1943 子票 B2）；全同線回 line，跨線或 unmatched 回 null。"""
@@ -2016,7 +1750,6 @@ def cmd_lineage_pick(client: Client | None, cfg: dict, args) -> object:
         "unmatched": unmatched,
         "line": line,
     }
-
 
 def cmd_lineage_since(client: Client, cfg: dict, args) -> object:
     """取該線檢查點 head_sha，計算自檢查點以來的 git diff --stat 與 prompt_prefix（#1943 子票 B2）。"""
@@ -2073,7 +1806,6 @@ def cmd_lineage_since(client: Client, cfg: dict, args) -> object:
         "prompt_prefix": prompt_prefix,
     }
 
-
 def _extract_session_id_from_text(text: str) -> str | None:
     """從 `codex exec fork --json` 輸出（或文字訊息）抓新產生的 session/thread id。"""
     for raw_line in text.splitlines():
@@ -2094,7 +1826,6 @@ def _extract_session_id_from_text(text: str) -> str | None:
     if m:
         return m.group(1)
     return None
-
 
 def _codex_backup_fork(session_id: str, repo: Path) -> str:
     """跑無 prompt 的 `codex exec fork --json <session_id>` 留乾淨備份，不呼叫模型。"""
@@ -2119,10 +1850,8 @@ def _codex_backup_fork(session_id: str, repo: Path) -> str:
         raise AgmError("backup_fork_failed", "codex exec fork 未回傳備份 session id", 1, base_session_id=session_id)
     return backup_id
 
-
 def _herdr_bin() -> str:
     return os.environ.get("AGM_HERDR_BIN") or "herdr"
-
 
 def _herdr_run(cmd_args: list[str], err_kind: str, err_prefix: str) -> str:
     try:
@@ -2135,7 +1864,6 @@ def _herdr_run(cmd_args: list[str], err_kind: str, err_prefix: str) -> str:
         msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
         raise AgmError(err_kind, f"{err_prefix}：{msg}", 1)
     return proc.stdout.strip()
-
 
 def _herdr_split_pane(parent_pane: str) -> str:
     out = _herdr_run(["pane", "split", "--pane", parent_pane], "herdr_split_failed", "herdr pane split 失敗")
@@ -2151,13 +1879,11 @@ def _herdr_split_pane(parent_pane: str) -> str:
         return lines[-1].split()[-1]
     raise AgmError("herdr_split_failed", "herdr pane split 未回傳 pane id", 1)
 
-
 def _herdr_close_pane(pane_id: str) -> None:
     try:
         subprocess.run([_herdr_bin(), "pane", "close", pane_id], capture_output=True, text=True, timeout=15)
     except Exception:
         pass
-
 
 def _herdr_agent_session(target: str) -> str | None:
     out = _herdr_run(["agent", "get", target], "herdr_get_failed", "herdr agent get 失敗")
@@ -2174,7 +1900,6 @@ def _herdr_agent_session(target: str) -> str | None:
                 return obj["session_id"].strip()
     return None
 
-
 def _find_bot_in_state(client: Client, cfg: dict, bot_id: str) -> dict | None:
     manager = ""
     try:
@@ -2188,7 +1913,6 @@ def _find_bot_in_state(client: Client, cfg: dict, bot_id: str) -> dict | None:
             return b
     return None
 
-
 def _poll_fork_session(client: Client, cfg: dict, bot_id: str, base_session_id: str) -> str | None:
     for attempt in range(6):
         b = _find_bot_in_state(client, cfg, bot_id)
@@ -2199,7 +1923,6 @@ def _poll_fork_session(client: Client, cfg: dict, bot_id: str, base_session_id: 
         if attempt < 5:
             time.sleep(0.5)
     return None
-
 
 def cmd_lineage_dispatch(client: Client, cfg: dict, args) -> object:
     """血統派工（#1943 B3）：pick → claim →（resume 先備份）→ 啟動 worker → 前綴 since → 送 prompt。"""
@@ -2377,7 +2100,6 @@ def cmd_lineage_dispatch(client: Client, cfg: dict, args) -> object:
         "worker": worker_info,
     }
 
-
 def cmd_lineage_finish(client: Client, cfg: dict, args) -> object:
     """結束血統認領（#1943 B3）：--merged 帶 claim_id 前移；--abandon 放棄並回要接手的備份 session。"""
     if args.merged:
@@ -2389,12 +2111,10 @@ def cmd_lineage_finish(client: Client, cfg: dict, args) -> object:
         return client.post(_lineage_path("/advance"), body)
     return client.post(_lineage_path(f"/claim/{path_segment(args.claim_id)}/abandon"), {})
 
-
 def _sol_version_key(model_id: str) -> tuple[int, ...]:
     """從模型 ID 抽數字版本組做比較（例如 gpt-6.2-sol -> (6, 2)），不寫死版號。"""
     nums = [int(x) for x in re.findall(r"\d+", model_id)]
     return tuple(nums)
-
 
 def _resolve_latest_sol_model(client: Client, host: str) -> str:
     resp = client.get("/api/models", {"kind": "codex", "host": host})
@@ -2420,7 +2140,6 @@ def _resolve_latest_sol_model(client: Client, host: str) -> str:
         )
     sols.sort(reverse=True)
     return sols[0][2]
-
 
 def _parse_codex_exec_json(stdout: str) -> tuple[str | None, dict[str, int], str | None]:
     answer: str | None = None
@@ -2459,7 +2178,6 @@ def _parse_codex_exec_json(stdout: str) -> tuple[str | None, dict[str, int], str
                 err_msg = ev["message"].strip()
     return answer, usage, err_msg
 
-
 def _codex_session_totals(session_id: str) -> dict[str, int] | None:
     """父 session 的 rollout 最後一筆 `total_token_usage`（#1943 實測：ephemeral fork 的 `turn.completed` 用量是連父歷史一起累計的）。"""
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
@@ -2483,7 +2201,6 @@ def _codex_session_totals(session_id: str) -> dict[str, int] | None:
     if last is None:
         return None
     return {"input": int(last.get("input_tokens") or 0), "cached": int(last.get("cached_input_tokens") or 0), "output": int(last.get("output_tokens") or 0)}
-
 
 def cmd_consult(client: Client, cfg: dict, args) -> object:
     """唯讀諮詢 thinker 血統（#1943 C）：ephemeral fork 問一題，不登記、不 claim、不前移。"""
@@ -2568,7 +2285,6 @@ def cmd_consult(client: Client, cfg: dict, args) -> object:
         msg = ev_err or "codex exec 未回傳 agent_message"
         raise AgmError("consult_no_answer", msg, 1, line=line, checkpoint_session=checkpoint_session)
 
-    # ephemeral fork 的 turn.completed 是「父歷史＋這一題」的累計；扣掉父 session 的累計才是這次問答的用量。
     parent = _codex_session_totals(checkpoint_session)
     if parent is not None:
         usage = {k: max(0, usage[k] - parent[k]) for k in usage}
@@ -2582,7 +2298,6 @@ def cmd_consult(client: Client, cfg: dict, args) -> object:
         "usage_scope": "this_call" if parent is not None else "cumulative_with_parent",
     }
 
-
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
@@ -2590,7 +2305,6 @@ def cmd_role(client: Client, cfg: dict, args) -> object:
     if getattr(args, "track", None):
         body["track"] = args.track
     return client.put("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/role", body)
-
 
 def cmd_hire(client: Client, cfg: dict, args) -> object:
     """專家模式 manager 增聘成員（頂層；預設 executor，--role specialist 時必帶 --track；不自動啟動）。"""
@@ -2605,23 +2319,19 @@ def cmd_hire(client: Client, cfg: dict, args) -> object:
             body[key] = getattr(args, key)
     return client.post("/api/projects/" + urllib.parse.quote(project_id, safe="") + "/members", body)
 
-
 def _project_id() -> str:
     project_id = os.environ.get("AM_PROJECT_ID", "")
     if not project_id:
         raise AgmError("no_project", "缺少 AM_PROJECT_ID", 2)
     return project_id
 
-
 def cmd_member(client: Client, cfg: dict, args) -> object:
     """把 expert 專案裡留下的 child 原地轉成成員（pane 與對話不動）。"""
     body = {key: getattr(args, key) for key in ("role", "effort", "session_id") if getattr(args, key)}
     return client.post("/api/bots/" + urllib.parse.quote(args.bot_id, safe="") + "/member", body)
 
-
 def cmd_requests(client: Client, cfg: dict, args) -> object:
     return client.get("/api/relay-requests", {"from": args.from_bot, "to": args.to_bot, "open": "1" if args.open else None})
-
 
 def cmd_models(client: Client, cfg: dict, args) -> object:
     """模型查詢／刷新沿用 Client 的角色憑證，權限由 daemon 判定。"""
@@ -2629,21 +2339,15 @@ def cmd_models(client: Client, cfg: dict, args) -> object:
              "refresh": "1" if args.refresh else None}
     return client.get("/api/models", query)
 
-
 def cmd_quota(client: Client, cfg: dict, args) -> object:
     if not getattr(args, "probe", False):
         if args.account or args.host:
             raise AgmError("bad_args", "--account／--host 只配 --probe 用", 2)
         return client.get("/api/quota")
-    # 蓋掉 statusLine 鎖住的錯值（#404）：結果 source=claude-usage，直接寫進 cache。
     query = {k: v for k, v in (("kind", args.kind), ("account", args.account), ("host", args.host)) if v}
     if getattr(args, "timeout", None) is None:
         client.timeout = QUOTA_PROBE_TIMEOUT
     return client.post(f"/api/quota/probe?{urllib.parse.urlencode(query)}")
-
-
-# ------------------------------------------------------ issue 認領（#425，不經 daemon）
-
 
 def gh(argv: list[str], *, allow_fail: bool = False) -> str:
     """跑一次 `gh`，回 stdout。這條路不碰 daemon、不碰 token。"""
@@ -2656,16 +2360,13 @@ def gh(argv: list[str], *, allow_fail: bool = False) -> str:
     if r.returncode != 0 and not allow_fail:
         detail = r.stderr.strip()[:300]
         if re.search(r"rate limit|HTTP 429|too many requests", r.stderr, re.I):
-            # 限流不是『沒人認領』也不是『沒有這張票』：呼叫端要等一等再試，不能當成可以直接派工。
             raise AgmError("gh_rate_limited", f"gh {' '.join(argv[:2])} 被限流（rc={r.returncode}）：{detail}。這不是『沒人認領』，稍後重試，不要先派工", 1, retryable=True)
         raise AgmError("gh_failed", f"gh {' '.join(argv[:2])} 失敗（rc={r.returncode}）：{detail}", 1)
     return r.stdout
 
-
 def repo_args(args) -> list[str]:
     """`--repo` 有給就指名，沒給就讓 gh 自己從 cwd 的 remote 推。"""
     return ["-R", args.repo] if getattr(args, "repo", None) else []
-
 
 def claiming_bot(args) -> str:
     """認領人是誰。managed pane 有 `AM_AGENT_NAME`（herdr 的 agent 名）；不在 pane 裡就要自己講。"""
@@ -2674,7 +2375,6 @@ def claiming_bot(args) -> str:
             return v
     raise AgmError("no_identity", "認不出這是誰在認領：不在 managed pane 裡（沒有 AM_AGENT_NAME／AM_BOT_ID）就要帶 --bot", 2)
 
-
 def parse_iso(t: str | None) -> datetime.datetime | None:
     if not isinstance(t, str) or not t:
         return None
@@ -2682,7 +2382,6 @@ def parse_iso(t: str | None) -> datetime.datetime | None:
         return datetime.datetime.fromisoformat(t.replace("Z", "+00:00"))
     except ValueError:
         return None
-
 
 def mark_of(body: str) -> tuple[str, dict] | None:
     """一則留言裡的認領／交回／進度標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。
@@ -2698,7 +2397,6 @@ def mark_of(body: str) -> tuple[str, dict] | None:
         return None
     return (m.group(1), payload) if isinstance(payload, dict) else None
 
-
 def all_comments(args, number: int) -> list:
     """這張票的所有留言。
 
@@ -2706,7 +2404,6 @@ def all_comments(args, number: int) -> list:
     決定競爭順序。也要讀完所有頁，避免最新的認領／交回標記落在 inline 的 100 則以外。
     """
     repo = getattr(args, "repo", None)
-    # `gh api` 不吃 `-R`；沒指定 repo 時用 gh 自己的 `{owner}`／`{repo}` 佔位符從 cwd 推。
     path = f"repos/{repo}/issues/{number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{number}/comments"
     raw = gh(["api", "--paginate", f"{path}?per_page=100"])
     try:
@@ -2714,7 +2411,6 @@ def all_comments(args, number: int) -> list:
     except ValueError:
         raise AgmError("gh_failed", f"gh api {path} 回的不是 JSON：{raw.strip()[:200]}", 1)
     return rows
-
 
 def _json_array_pages(raw: str) -> list:
     """`gh api --paginate` 不加 `--slurp` 時，每一頁各自是一個 JSON 陣列（`[…]\\n[…]`）。逐段解開接成一份清單；
@@ -2732,7 +2428,6 @@ def _json_array_pages(raw: str) -> list:
             idx += 1
     return rows
 
-
 def read_issue(args, number: int) -> dict:
     fields = "number,title,state,url,labels,updatedAt,comments"
     raw = gh(["issue", "view", str(number), *repo_args(args), "--json", fields])
@@ -2743,7 +2438,6 @@ def read_issue(args, number: int) -> dict:
     if not isinstance(data, dict):
         raise AgmError("gh_failed", f"gh issue view {number} 回的不是一筆 issue", 1)
     return data
-
 
 def current_claim(issue: dict) -> dict | None:
     """目前的認領狀態：每個認領期的第一則有效認領勝出，交回標記會結束認領期。
@@ -2767,8 +2461,6 @@ def current_claim(issue: dict) -> dict | None:
             numeric_id = int(raw_id)
         except (TypeError, ValueError):
             numeric_id = None
-        # REST IDs are monotonically assigned. API order is the fallback only for legacy/test data
-        # without IDs; production comment reads always use REST via all_comments().
         order_id = (0, numeric_id) if numeric_id is not None else (1, index)
         ordered.append((at, order_id, index, c, mark_of(c.get("body") or "")))
     ordered.sort(key=lambda row: (row[0], row[1], row[2]))
@@ -2778,8 +2470,6 @@ def current_claim(issue: dict) -> dict | None:
         if parsed and parsed[0] == CLAIM_MARK:
             _kind, payload = parsed
             if active is not None:
-                # A later claim can start a new epoch only after the previous claim had already gone
-                # stale at the time it was attempted. Near-simultaneous claims remain ordered by REST ID.
                 holder = active["payload"].get("bot")
                 holder_child = active["payload"].get("child")
                 if payload.get("bot") in (holder, holder_child):
@@ -2842,17 +2532,14 @@ def current_claim(issue: dict) -> dict | None:
         "stale": (now - last).total_seconds() > CLAIM_STALE_SECS,
     }
 
-
 def issue_claim_state(args, number: int) -> tuple[dict, dict | None]:
     issue = read_issue(args, number)
     issue["comments"] = all_comments(args, number)
     return issue, current_claim(issue)
 
-
 def ensure_claim_label(args) -> None:
     """repo 裡要有 wip label 才能 `--add-label`（不存在時 gh 硬失敗）。已存在就失敗，無妨。"""
     gh(["label", "create", CLAIM_LABEL, *repo_args(args), "--color", "FBCA04", "--description", "有 bot 正在做（agm issue claim）"], allow_fail=True)
-
 
 def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
     """Treat the ordered comment history as the claim source of truth and repair its `wip` projection.
@@ -2883,7 +2570,6 @@ def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
         )
     return issue, claim
 
-
 def claim_scope_mismatch(claim: dict, args) -> bool:
     """同一顆 bot 底下，child／worktree／branch 有講而且跟現況不同，就算另一筆認領。沒講的欄位當重試。"""
     for key in ("child", "worktree", "branch"):
@@ -2891,7 +2577,6 @@ def claim_scope_mismatch(claim: dict, args) -> bool:
         if requested and requested != claim.get(key):
             return True
     return False
-
 
 def held_by_other(claim: dict | None, me: str, args) -> dict | None:
     """別人還按著這張票就回那筆認領；沒人、是我自己且範圍沒變、或已經放到過期都回 None。
@@ -2901,7 +2586,6 @@ def held_by_other(claim: dict | None, me: str, args) -> dict | None:
     if claim.get("bot") == me and (args is None or not claim_scope_mismatch(claim, args)):
         return None
     return claim
-
 
 def claim_conflict(number: int, claim: dict) -> AgmError:
     who = claim.get("bot") or "(沒寫名字的 bot)"
@@ -2921,14 +2605,10 @@ def claim_conflict(number: int, claim: dict) -> AgmError:
         claim=claim,
     )
 
-
-#: 撞題提示（#1330）是附帶的：認領成功後最多等這麼久，逾時或任何失敗都不影響認領的結果。
 COLLISION_TIMEOUT = 2.0
-
 
 _SERVER_SECTION = re.compile(r"\[\s*server\s*\]\s*(#.*)?\Z")
 _DATA_DIR_LINE = re.compile(r"""data_dir\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(#.*)?\Z""")
-
 
 def configured_data_dir(cfg_dir: Path) -> Path | None:
     """讀 `<cfg_dir>/config.toml` 的 `[server] data_dir`，規則同 daemon `startup::data_dir`：`~` 展開，相對路徑接在設定檔所在目錄後面。
@@ -2954,11 +2634,9 @@ def configured_data_dir(cfg_dir: Path) -> Path | None:
             return p if p.is_absolute() else cfg_dir / p
     return None
 
-
 def claim_identity_fields(payload: dict) -> dict:
     """撞題檢查靠 child 的 bot ID 與這次認領的 claim ID 認人認單；`child`（名字）只做顯示。有才帶。"""
     return {k: payload[k] for k in ("child_bot_id", "claim_id") if payload.get(k)}
-
 
 def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> None:
     """遠端 pane 沒有本機 daemon runtime 時，把認領提示交給該 bot 的 hook spool。"""
@@ -2980,7 +2658,6 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
         if instance:
             root = root / "instances" / instance
         else:
-            # 遠端 bot 的 env 沒有 AM_DATA_DIR：照遠端 daemon 的規則，`[server] data_dir` 指到哪裡就寫哪裡（#1497）。
             root = configured_data_dir(root) or root
     spool_dir = root / "bots" / bot_id / "hook-spool.d"
     try:
@@ -3015,7 +2692,6 @@ def spool_claim_collision(number: int, title: str, me: str, payload: dict) -> No
     except OSError:
         return
 
-
 def collision_check_hint(args, number: int, title: str, me: str, payload: dict) -> None:
     """認領成功後 best-effort 問一次撞題，不擋認領。無法確認 daemon 收件時排入 bot spool。"""
     try:
@@ -3044,16 +2720,13 @@ def collision_check_hint(args, number: int, title: str, me: str, payload: dict) 
         print(f"agm: collision check failed ({type(e).__name__}); not spooled", file=sys.stderr)
         return
 
-
 def cmd_issue(_client, _cfg: dict, args) -> object:
     number = args.number
     me = claiming_bot(args)
     issue = read_issue(args, number)
-    # 認領判定要讀 REST 的全部留言，取數字 ID 排序並避免 GraphQL inline comments 截斷。
     issue["comments"] = all_comments(args, number)
     claim = current_claim(issue)
     labels = [l.get("name") for l in issue.get("labels") or []]
-    # 關掉的票沒有什麼好派的。`release` 還是放行：關票之後清掉留著的 label 是正常的收尾。
     if args.op == "claim" and (issue.get("state") or "").upper() != "OPEN":
         raise AgmError(
             "issue_closed",
@@ -3062,9 +2735,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             issue=number,
             state=issue.get("state"),
         )
-    # A label without a parseable live claim is an ambiguous handoff: it may be a damaged marker
-    # or a partially completed previous claim. Do not let another bot erase that evidence and start;
-    # `release` remains the explicit repair path for this orphaned projection.
     if args.op == "claim" and claim is None and CLAIM_LABEL in labels:
         raise AgmError(
             "issue_claim_state_unknown",
@@ -3073,11 +2743,9 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             issue=number,
             claimed_by="unknown",
         )
-    # Repair a missing projection before reporting a conflict or returning an idempotent success.
     if claim is not None and CLAIM_LABEL not in labels and not claim.get("stale"):
         issue, claim = reconcile_claim_label(args, number)
         labels = [l.get("name") for l in issue.get("labels") or []]
-    # 交回不比範圍：`--child`／`--worktree`／`--branch` 只有 claim 用得到（#1720）。
     blocker = held_by_other(claim, me, None if args.op == "release" else args)
     if blocker is not None:
         raise claim_conflict(number, blocker)
@@ -3099,7 +2767,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         }
         body = f"{me} 仍在處理 #{number}。\n\n<!-- {PROGRESS_MARK} {json.dumps(touch_payload, ensure_ascii=False, sort_keys=True)} -->"
 
-        # 優先尋找持有人自己留過的 progress marker 留言進行 PATCH
         existing_progress_comment = None
         for c in reversed(issue.get("comments") or []):
             if not isinstance(c, dict):
@@ -3140,8 +2807,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             out["already"] = True
             return out
         release_payload = {"bot": me, "at": now}
-        # 沒有 claim_id 的交回標記是『交回當下有效的任何一筆』（舊資料的相容）。這次沒有看到任何認領（只是清 label），
-        # 就不能寫成那個形狀：讀完留言到寫入之間，別人剛搶到的新認領會被它清掉。寫一個不會對上任何認領的標記。
         release_payload["claim_id"] = claim["claim_id"] if claim and claim.get("claim_id") else LABEL_ONLY_RELEASE
         body = f"{me} 交回 #{number}。\n\n<!-- {RELEASE_MARK} {json.dumps(release_payload, ensure_ascii=False, sort_keys=True)} -->"
         gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
@@ -3150,7 +2815,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         reconcile_claim_label(args, number)
         return out
 
-    # claim：同一顆 bot 重跑不再留第二則（重試不該洗版），但 label 掉了會補回去。
     if claim is not None and claim.get("bot") == me and not claim.get("stale"):
         if CLAIM_LABEL not in labels:
             ensure_claim_label(args)
@@ -3163,7 +2827,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             raise claim_conflict(number, blocker)
         if claim.get("bot") == me and not claim.get("stale"):
             return {"issue": number, "title": issue.get("title"), "claimed": True, "already": True, "bot": me, "claim": claim}
-        # 狀態已改變；以重新讀到的 issue/claim 繼續走一次新的 claim。
         labels = [l.get("name") for l in issue.get("labels") or []]
 
     payload = {"bot": me, "at": now, "claim_id": uuid.uuid4().hex}
@@ -3186,7 +2849,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     if took_over:
         lead += f"。接手 {claim.get('bot')} 超過 24 小時沒動靜的認領（最後動靜 {claim['last_activity']}）"
     body = f"{lead}。\n\n<!-- {CLAIM_MARK} {json.dumps(payload, ensure_ascii=False, sort_keys=True)} -->"
-    # label 不存在時 `--add-label` 會失敗，先建一次（已存在會失敗，無妨；同 ci-watch-kick 的做法）。
     ensure_claim_label(args)
     gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
 
@@ -3247,7 +2909,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     collision_check_hint(args, number, issue.get("title") or f"#{number}", me, payload)
     return out
 
-
 def cmd_bot(client: Client, cfg: dict, args) -> object:
     if args.op == "create":
         if not args.project or not args.name:
@@ -3265,17 +2926,11 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", "bot set 至少需要 --model、--effort、--name 或 --identity 其中一個", 2)
         return client.patch(f"/api/bots/{path_segment(args.bot_id)}", body)
     if args.op == "delete":
-        # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
-        # AGM 的 bot（總管專案裡的、總管的 child）不帶 --confirm-supervisor 會 409 supervisor_owned（issue #406）。
         query = "?confirm=supervisor" if getattr(args, "confirm_supervisor", False) else ""
         return client.delete(f"/api/bots/{path_segment(args.bot_id)}{query}")
     if args.op == "restore":
-        # 還原被軟刪的 bot（API §10.4a；子 agent 只清 deleted_at、不開 run，pane 由父 bot 用 herdr 重開）。
         return client.post(f"/api/bots/{path_segment(args.bot_id)}/restore", {})
     path = f"/api/bots/{path_segment(args.bot_id)}/{args.op}"
-    # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
-    # `--resume fork`：從 `--session` 指定的既有 codex 對話持久分岔。
-    # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
     if getattr(args, "session", None) and not getattr(args, "resume", None):
         raise AgmError("bad_args", "--session 要跟 --resume native 或 --resume fork 一起用", 2)
     if getattr(args, "session", None) and args.resume not in ("native", "fork"):
@@ -3287,14 +2942,9 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
             raise AgmError("bad_args", "--resume 只有 bot start / restart 收", 2)
         query = {"resume": args.resume}
         if getattr(args, "session", None):
-            # 救援：DB 記錯 session 時指名接回哪一段（只有 agm 露出；網頁沒有）。
             query["session"] = args.session
         path = f"{path}?{urllib.parse.urlencode(query)}"
     return client.post(path, {})
-
-
-# ------------------------------------------------------------------ 參數解析
-
 
 class JsonArgumentParser(argparse.ArgumentParser):
     """用法錯誤也走 `AgmError`（JSON 進 stderr、exit 2）：呼叫端（排程腳本、模型）只解析一種錯誤形狀。`--help` 不受影響。"""
@@ -3302,16 +2952,14 @@ class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str):  # noqa: D102
         raise AgmError("bad_args", message, 2, usage=self.format_usage().strip())
 
-
 def _timeout_arg(raw: str) -> float:
     try:
         v = float(raw)
     except ValueError:
         raise argparse.ArgumentTypeError(f"--timeout 要是數字，收到 {raw!r}")
-    if not (v == v) or v <= 0 or v > MAX_TIMEOUT:  # NaN、0、負數、inf、過大
+    if not (v == v) or v <= 0 or v > MAX_TIMEOUT:
         raise argparse.ArgumentTypeError(f"--timeout 要在 0 到 {MAX_TIMEOUT:g} 秒之間，收到 {raw!r}")
     return v
-
 
 def _limit_arg(raw: str) -> int:
     try:
@@ -3321,7 +2969,6 @@ def _limit_arg(raw: str) -> int:
     if not 1 <= v <= MAX_LIMIT:
         raise argparse.ArgumentTypeError(f"要在 1 到 {MAX_LIMIT} 之間，收到 {v}")
     return v
-
 
 def _positive_int_arg(raw: str) -> int:
     """正整數（秒數、issue 編號）：0、負數和非整數在解析階段拒絕。"""
@@ -3333,10 +2980,7 @@ def _positive_int_arg(raw: str) -> int:
         raise argparse.ArgumentTypeError(f"要是正整數（≥ 1），收到 {value}")
     return value
 
-
-#: 租約長度上限，跟 daemon 的 `MAX_TTL_SECS`（crates/am-supervisor）同值。daemon 會把超過的悄悄夾到這裡，CLI 先拒絕（#1723）。
 MAX_TTL_SECS = 3600
-
 
 def _ttl_arg(raw: str) -> int:
     value = _positive_int_arg(raw)
@@ -3344,13 +2988,11 @@ def _ttl_arg(raw: str) -> int:
         raise argparse.ArgumentTypeError(f"要在 1 到 {MAX_TTL_SECS} 之間，收到 {value}")
     return value
 
-
 def _id_arg(raw: str) -> str:
     v = raw.strip()
     if not v or len(v) > MAX_ID_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in v):
         raise argparse.ArgumentTypeError(f"id 不能是空的、含控制字元或超過 {MAX_ID_CHARS} 字")
     return v
-
 
 def build_parser() -> argparse.ArgumentParser:
     p = JsonArgumentParser(
@@ -3464,8 +3106,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["accept", "block", "followup", "fail", "cancel"],
         help="accept=驗收結案／block=還在等，保持未結案／followup=派續作／fail=判定失敗／cancel=取消",
     )
-    # cancel 是唯一能在回合還在跑時用的決定，但它停的是「追蹤」，不是那顆 bot：
-    # daemon 不會中止回合，delivered／unknown 的 delivery 與 turn_id 都會原樣留著。
     s.add_argument("--reason", help="為什麼這樣決定")
     s.add_argument("--evidence", help="依據（turn id、commit、測試數字）")
     s.add_argument("--actor", default="AGM", help="決定的人／bot（預設 AGM）")
@@ -3766,23 +3406,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     return p
 
-
 def _is_slow_command(args) -> bool:
     op = getattr(args, "op", None)
     return args.cmd == "release-triage" and op in ("publish", "auto")
-
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
         args = build_parser().parse_args(argv)
-    except AgmError as e:  # 用法錯誤：形狀跟其他錯誤一樣（JSON 進 stderr、exit 2）
+    except AgmError as e:
         json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=None if "--compact" in raw_argv else 2)
         sys.stderr.write("\n")
         return e.exit_code
     indent = None if args.compact else 2
     try:
-        # `issue` 只用 gh，不連 daemon：沒有 runtime.json 的 pane（一般的父 bot）也要能 claim。
         cfg: dict = {}
         client = None
         if getattr(args, "needs_client", True):
@@ -3801,7 +3438,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 cfg = load_runtime(args.runtime_dir)
                 client = Client(daemon_url(cfg), timeout, bot_auth_headers(cfg))
-            # 沒用 --timeout 明講、而且是 daemon 這一側本來就跑得久的操作：放寬預設（見 SLOW_TIMEOUT）。
             if args.timeout is None and _is_slow_command(args):
                 client.timeout = AUTO_TIMEOUT if getattr(args, "op", None) == "auto" else SLOW_TIMEOUT
         out = args.func(client, cfg, args)
@@ -3821,7 +3457,6 @@ def main(argv: list[str] | None = None) -> int:
     json.dump(out, sys.stdout, ensure_ascii=False, indent=indent, default=str)
     sys.stdout.write("\n")
     return code
-
 
 if __name__ == "__main__":
     sys.exit(main())

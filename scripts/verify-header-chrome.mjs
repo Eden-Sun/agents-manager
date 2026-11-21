@@ -1,18 +1,3 @@
-// 標題列底下那三列（額度、未讀、context/git）的版面約束，量給人看的數字。
-//
-// 2026-09-12 的 goal（docs/goals/header-chrome-2026-09-12.md）定了三條，這支腳本就是它們的
-// 回歸測試——單看截圖分不出「被捲軸剪掉」跟「被上面那列蓋住」，得看數字：
-//
-//   1. 手機額度每一格**只寫一個**窗口，不折行（`.quota-compact-win` 一格一顆）。
-//   2. 未讀列最多**一列**高，放不下往右捲（`.unread-bar` 的高度 ≈ 一顆晶片 + 內距）。
-//   3. `.context-bar` 不用 `position` 蓋住 `.msg-list`（兩者 static，訊息從 context bar 的
-//      下緣才開始）。
-//   4. 390px 沒有整頁橫向捲動（`documentElement.scrollWidth === innerWidth`）。
-//
-// 跑法（要有真 daemon 的 dev server，見 AGENTS.md）：
-//   cd web && npx vite            # 5173
-//   node scripts/verify-header-chrome.mjs
-//   OUT=docs/screenshots/header-chrome node scripts/verify-header-chrome.mjs   # 順便存圖
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
@@ -62,7 +47,6 @@ const shot = async (name) => {
 }
 const size = async (width, height, mobile = false) => {
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile })
-  // 額度列的收合是掛在 resize 上的，headless 改 metrics 不會自己派事件。
   await ev("window.dispatchEvent(new Event('resize'))")
   await sleep(500)
 }

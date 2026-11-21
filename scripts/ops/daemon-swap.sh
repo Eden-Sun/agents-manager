@@ -1,23 +1,4 @@
 #!/bin/bash
-# 換掉正式 daemon 的 release binary 並重啟（例行自動部署 daemon-update-kick.sh 的換版那一段）。
-#
-# 為什麼進 repo：2026-09-20 那趟 33 秒停機的根因是「每趟臨時寫一份腳本」——上一輪把
-# `user_version` 寫死成 10，這輪 schema 升到 11，腳本就誤判成失敗、回滾、舊 binary 被版本閘
-# 擋下、daemon 起不來。腳本有版本控制與測試才擋得住這種事。
-#
-#   scripts/ops/daemon-swap.sh --sha <full sha> --old <short sha> --old-hash <sha256 前 16 碼> \
-#       --owner <窗口持有者名稱> --checkout <乾淨 checkout> [--approval <舊流程核准 id>]
-#
-# 前提（呼叫端負責）：checkout 已經建好 release binary，而且那顆 commit 已經過 ubuntu-ci（或使用者按了立即部署）。
-# 不需要核准單（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開——
-# daemon-swap 服務身份自己開一筆立即核准的 restart 單，再走同一個 acquire：沒有人 working／送達中、沒有別人的
-# 租約才拿得到，拿到時 assignment 派送暫停。這支只做「拿窗口 → 備份 → 換 binary → 重啟 → 驗證」，任何一步
-# 不對就照 §18.13 的方向處理（升過 schema 預設往前修，不把舊 binary 放回去）。
-#
-# 結束碼：0 換版完成；3 前置核對不過；4 沒拿到窗口（有人在忙，下一輪再來）；5 備份失敗；
-#         10 新 binary 內嵌的 sha 不是 --sha（換版之前就中止，什麼都沒動）；
-#         11 無法證明舊 daemon 已退出（binary 與 DB 都不動）。
-#         6 新版起來了但升過 schema 所以往前修；7 已回滾；8 換好但窗口沒交還；9 daemon 太舊，沒有 restart-window 路由。
 set -u
 
 AGM_DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
@@ -33,18 +14,10 @@ SQLITE="${SQLITE_BIN:-sqlite3}"
 CURL="${CURL_BIN:-curl}"
 LAUNCHCTL="${LAUNCHCTL_BIN:-launchctl}"
 SYSTEMD_RUN="${SYSTEMD_RUN_BIN:-systemd-run}"
-# darwin／linux：決定重啟走 launchd 還是 systemd（issue #677）。AGM_OPS_PLATFORM 只給測試蓋掉。
 PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
 HERDR="${HERDR_BIN:-herdr}"
-# 3b 自測對象，順序：SWAP_PROBE_BOT ＞ $AGM_DIR/runtime.json 的 swap_probe_bot_id ＞ 同檔的 responder_bot_id（協調者：常駐、haiku，便宜）
-# ＞ 同檔的 manager_bot_id（巡檢 AGM 本人）。自測是真的送一則 prompt 驗送達線，每趟換版一次（一天可達數十次）：
-# 以前直接落到 manager_bot_id，等於每趟都叫醒 sonnet 的巡檢、背著它 20 多萬 token 的 context（使用者 2026-11-02 裁示改送協調者）。
-# 協調者沒有在跑（no active run）、或暫時不能收 prompt（409 agent is blocked／busy／needs permission／run is not running）時，
-# 退回 manager_bot_id 再試一次，送達自測不因此少做；全部都不能收就略過並計數（不 ABORT：協調者卡在權限提示，會讓每趟換版都白跑，2026-11-13 連 35 輪）。
-# 以前最後一順位是寫死的 browser-gc child id（issue #882）：那顆早就不跑，自測連續略過上百次（使用者 2026-10-12 裁示改指 AGM）。
-# 都拿不到就留空，3b 照「對象沒有 run」的既有路徑略過並計數。
 PROBE_BOT="${SWAP_PROBE_BOT:-}"
 PROBE_FALLBACK=""
 if [ -z "$PROBE_BOT" ]; then
@@ -66,17 +39,16 @@ print(ids[-1] if len(ids) > 1 else "")' "$AGM_DIR/runtime.json" 2>/dev/null) || 
     PROBE_BOT=$(printf '%s\n' "$_probe_ids" | sed -n 1p)
     PROBE_FALLBACK=$(printf '%s\n' "$_probe_ids" | sed -n 2p)
 fi
-PROBE_SKIPS="$AGM_DIR/daemon-swap.probe-skips"   # 連續略過 3b 自測的次數（daemon-update-kick 讀它喊人）
-PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"   # 對方正在跑回合時，等它結束重送的次數上限
-SETTLE="${SWAP_SETTLE_SECS:-45}"          # 重啟後等多久再看 supervisor／名單（測試會調小）
-WINDOW_TRIES="${SWAP_WINDOW_TRIES:-12}"   # 拿不到窗口時重試幾次（12 × 15 秒＝3 分鐘；一次 409 就 DEFER 會
-                                          # 讓「某顆 bot 剛好翻回 working 那一瞬」變成整趟白跑，2026-09-21 實際發生過）
+PROBE_SKIPS="$AGM_DIR/daemon-swap.probe-skips"
+PROBE_TRIES="${SWAP_PROBE_TRIES:-12}"
+SETTLE="${SWAP_SETTLE_SECS:-45}"
+WINDOW_TRIES="${SWAP_WINDOW_TRIES:-12}"
 WINDOW_WAIT="${SWAP_WINDOW_WAIT_SECS:-15}"
-SETTLE_TRIES="${SWAP_PROBE_SETTLE_TRIES:-12}"      # 自測回合收尾最多等幾次（12 × 5 秒＝1 分鐘）
+SETTLE_TRIES="${SWAP_PROBE_SETTLE_TRIES:-12}"
 SETTLE_WAIT="${SWAP_PROBE_SETTLE_WAIT_SECS:-5}"
 
 SHA=""; OLD=""; OLDHASH=""; APPROVAL=""; OWNER=""; CHECKOUT=""
-WINDOW_APPROVAL=""   # restart-window 模式下 daemon 開窗口用的核准 id（從窗口回應讀；舊 task 傳的 --approval 不算）
+WINDOW_APPROVAL=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --sha) SHA="$2"; shift 2 ;;
@@ -95,8 +67,6 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
-# --sha is a trust boundary: abbreviated ids must not make the checkout, built
-# binary, or post-start daemon appear to be approved.
 case "$SHA" in
     ''|*[!0123456789abcdef]*) log "ABORT: --sha 必須是完整 40 碼小寫 commit id（收到 '${SHA}'）"; exit 10 ;;
 esac
@@ -109,8 +79,6 @@ if [ ! -f "$START_PY" ] || [ ! -r "$START_PY" ]; then
 fi
 hash16() { shasum -a 256 "$1" 2>/dev/null | cut -c1-16; }
 
-# 把新 binary 放到正式路徑（issue #944）：先 cp 到同目錄暫存檔、驗 hash 等於 $NEWBIN 才 mv 蓋過去。
-# 直接 cp 到正式路徑時，磁碟滿了／被打斷會留下截斷的 binary，而 daemon 已經停了。成功回 0。
 install_new_binary() {
     local dest=target/release/agents-managerd tmp="target/release/agents-managerd.new.$$"
     if cp "$NEWBIN" "$tmp" && [ "$(hash16 "$tmp")" = "$(hash16 "$NEWBIN")" ] && mv -f "$tmp" "$dest"; then
@@ -120,8 +88,6 @@ install_new_binary() {
     return 1
 }
 
-# 把舊 binary 放回正式路徑並驗 ${OLDHASH}（issue #944）。優先搬這趟換下來的 ${PREV}（rename，不吃磁碟），沒有或不對才 cp ${BAK}
-# 到暫存檔、驗過再 mv。兩條都驗不過回 1：呼叫端不能起一顆截斷的 binary，也不能假裝回滾成功。
 restore_old_binary() {
     local dest=target/release/agents-managerd tmp="target/release/agents-managerd.restore.$$"
     if [ -f "$PREV" ] && [ "$(hash16 "$PREV")" = "$OLDHASH" ] && mv -f "$PREV" "$dest" && [ "$(hash16 "$dest")" = "$OLDHASH" ]; then
@@ -146,7 +112,7 @@ prune_old_db_backups() {
         fi
     done
 }
-write_built_marker() { # write_built_marker <short sha>; publish by same-directory atomic rename
+write_built_marker() {
     local sha="$1" marker="$AGM_DIR/daemon-update.built" tmp
     [ ! -L "$marker" ] || return 1
     if [ -e "$marker" ] && [ ! -f "$marker" ]; then return 1; fi
@@ -155,7 +121,7 @@ write_built_marker() { # write_built_marker <short sha>; publish by same-directo
     if ! mv -f "$tmp" "$marker"; then rm -f "$tmp"; return 1; fi
     return 0
 }
-write_rejected_marker() { # write_rejected_marker <full sha>; persist rollback decision before stopping services
+write_rejected_marker() {
     local sha="$1" marker="$AGM_DIR/daemon-update.rejected" tmp trailing_newlines
     [ ! -L "$marker" ] || return 1
     if [ -e "$marker" ] && [ ! -f "$marker" ]; then return 1; fi
@@ -172,7 +138,6 @@ write_rejected_marker() { # write_rejected_marker <full sha>; persist rollback d
     return 0
 }
 service_capability() {
-    # 測試用：注入假的能力探測，才不用真的打 daemon。
     [ -n "${SWAP_CAP_CMD:-}" ] && { "$SWAP_CAP_CMD"; return; }
     "$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.error, urllib.request
@@ -199,8 +164,6 @@ except Exception:
     print("unknown")
 PY
 }
-# 新 daemon 只認 daemon-swap service principal。尚未提供 restart-window 的舊 daemon，僅接受明確帶來的舊核准 id，
-# 並用本機 User token 走原本的 lease acquire；一般自動部署不帶核准，仍安全中止，需按文件先做一次核准 bootstrap。
 if [ -L "$SERVICE_TOKEN_DIR" ] || { [ -e "$SERVICE_TOKEN_DIR" ] && [ ! -d "$SERVICE_TOKEN_DIR" ]; } \
     || [ -L "$SERVICE_TOKEN_FILE" ] || { [ -e "$SERVICE_TOKEN_FILE" ] && [ ! -f "$SERVICE_TOKEN_FILE" ]; }; then
     log "ABORT: daemon-swap service credential 不是一般檔案"
@@ -235,17 +198,11 @@ case "$CAP" in
         exit 3 ;;
 esac
 
-# lease_token 不進 argv（issue #477）：argv 對同一個 uid 的行程是公開的（`ps`），而這顆 token 是
-# 「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證——抄走就能收掉別人正在換 binary 的窗口。
-# 寫進 0600 的檔，`agm` 用 --lease-token-file 讀；離開時不管成敗都刪掉。
 TOKEN_FILE=""
 cleanup_token() { [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"; return 0; }
 trap cleanup_token EXIT
 
-save_token() { # $1=token
-    # 路徑要不可預測、而且**不要落在全域可寫的 /tmp**：umask 077 只在「這個檔是我們建的」時有用，
-    # 同 uid 的行程（正是這張票的威脅模型）先建好同名檔或擺一條 symlink，`>` 就會沿用它的 owner／mode。
-    # mktemp 的 XXXXXX ＋ O_EXCL 建在 AGM 自己的私有目錄（daemon-update-kick.sh 的 token 檔也放這）。
+save_token() {
     TOKEN_FILE=$(mktemp "$AGM_DIR/daemon-swap.lease-token.XXXXXX") || {
         log "ABORT: 建不出 lease token 檔，不能在沒有辦法交還窗口的情況下往下走"
         exit 4
@@ -257,10 +214,6 @@ save_token() { # $1=token
     }
 }
 
-# 成功換版後清舊 binary 備份（issue #943）：每趟都留 `agents-managerd.bak-<舊 sha>` 與 `.prev-<舊 sha>-<時間>-<六碼隨機>`，
-# 只清 DB 備份的話它們會一路長（實測 155＋157 份、16.7 GB）。只留這趟的 ${BAK}（下一趟回滾要用的是新的備份，
-# 但這趟的還是「剛換掉的那一版」）與 ${PREV}；其餘固定前綴 glob 下的一般檔全刪，符號連結與目錄不碰，刪不掉只 WARN。
-# 只在成功路徑呼叫：回滾／中止時舊備份全留著（可能就是要靠它們手動還原）。
 prune_old_binary_backups() {
     local f
     for f in target/release/agents-managerd.bak-* target/release/agents-managerd.prev-*; do
@@ -275,10 +228,7 @@ prune_old_binary_backups() {
     done
 }
 
-# 交還窗口。**rc 不吞**（issue #477）：以前這三處都是 `>/dev/null 2>&1` 然後無條件 log「窗口已交還」，
-# release 真的失敗時（daemon 不在、fence 過期、token 對不上）窗口會一直握到 TTL 到期，而紀錄說已經還了，
-# 下一個人照著 log 判斷就會判錯。回傳 release 自己的 rc，由呼叫端決定要不要因此換結束碼。
-release_window() { # $1=為什麼要還（寫進 log）
+release_window() {
     local out rc
     out=$(agm lease release restart --owner "$OWNER" --fence "$FENCE" --lease-token-file "$TOKEN_FILE" 2>&1)
     rc=$?
@@ -303,8 +253,6 @@ lease_safety() {
     if [ "$WINDOW_MODE" = legacy ]; then
         agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER"
     elif [ -n "$WINDOW_APPROVAL" ]; then
-        # 拿到窗口之後的 §3a 複查：綁 restart-window 開窗口用的**那一張**核准，跟 acquire 同一套判斷（issue #840）。
-        # 不帶的話放寬要靠「最早那筆活著的核准」與使用者的「現在換版」碰巧對上，複查會把 acquire 剛給的放寬推翻。
         agm lease safety --approval "$WINDOW_APPROVAL" --owner "$OWNER"
     else
         agm lease safety --owner "$OWNER"
@@ -312,15 +260,12 @@ lease_safety() {
 }
 daemon_pids() { "$PGREP" -f '^\./target/release/agents-managerd serve$' 2>/dev/null || true; }
 dpid() { daemon_pids | head -1; }
-# 停 daemon：TERM、最多等 30 秒、還在就 KILL。換版主線與 rollback 共用——rollback 以前只 TERM 後固定 sleep 5，
-# 新 daemon 還沒退就覆蓋 binary、刪 -wal／-shm、蓋掉 DB，等於在活著的 daemon 底下動它的資料。
-stop_daemon() { # stop_daemon <pid>（空的就什麼都不做）
+stop_daemon() {
     local pid="$1" j=0
     [ -n "$pid" ] || return 0
     kill -TERM "$pid" 2>/dev/null
     while [ $j -lt 30 ]; do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; j=$((j + 1)); done
     kill -KILL "$pid" 2>/dev/null; sleep 1
-    # SIGKILL 也可能無法立刻收掉卡在核心 I/O 的行程。不要只靠固定 sleep 就覆蓋 binary 或還原 DB。
     j=0
     while [ $j -lt 5 ]; do
         kill -0 "$pid" 2>/dev/null || return 0
@@ -341,8 +286,7 @@ stop_daemon_for_rollback() {
     stop_daemon "$pids"
 }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
-agm_probe() { # agm_probe <bot id> → "<http code> <body>"
-    # 測試用：注入一支假的送達器，才不用真的打 daemon。
+agm_probe() {
     [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
     "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$1" "$SERVICE_MODE" <<'PY'
 import json, os, stat, sys, urllib.error, urllib.parse, urllib.request
@@ -388,14 +332,11 @@ except Exception as e:
 PY
 }
 
-# 開 restart 窗口：daemon-swap 服務身份打 restart-window，daemon 自己開一筆立即核准的單再走 acquire
-# （安全檢查、暫停派送、fence／lease_token 都照舊）。印出回應本文（成功與被拒都是 JSON，下面同一份解析）。
 restart_window() {
     if [ "$WINDOW_MODE" = legacy ]; then
         agm lease acquire restart --owner "$OWNER" --approval "$APPROVAL" --commit "$SHA" --ttl 900 --exclude-bot "$OWNER" 2>&1
         return
     fi
-    # 測試用：注入假的窗口回應（同樣印出回應本文）。
     [ -n "${SWAP_WINDOW_CMD:-}" ] && { "$SWAP_WINDOW_CMD" "$OWNER" "$SHA"; return; }
     "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$OWNER" "$SHA" <<'PY'
 import json, os, stat, sys, urllib.error, urllib.request
@@ -429,14 +370,9 @@ PY
 NEWBIN="$CHECKOUT/target/release/agents-managerd"
 SHORT=$(echo "$SHA" | cut -c1-8)
 
-# ── 1. 前置核對 ──────────────────────────────────────────────────────────────
 HEAD_SHA=$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)
 [ "$HEAD_SHA" = "$SHA" ] || { log "ABORT: checkout HEAD=$HEAD_SHA 不是 $SHA"; exit 3; }
 [ -x "$NEWBIN" ] || { log "ABORT: 找不到新 binary $NEWBIN"; exit 3; }
-# 要換上去的這顆 binary 真的是核准的那個 commit 建出來的嗎？daemon 自己驗不了（換上去的檔案只有這支腳本摸得到），
-# 所以換之前先問 binary 自己：`--version` 印 `<name> <版本> <完整 sha>[-dirty]`（clap 在進 main 之前就結束，不啟動服務）。
-# 對不上／髒樹建的／舊 binary 沒內嵌 sha（讀不出來）一律中止（rc=10）：窗口都還沒拿、舊 daemon 沒停、binary 沒動。
-# 上面的 HEAD 檢查只證明 checkout 在那一顆；binary 是不是從那個 checkout 建的，是這一步才證明。
 BIN_VERSION_LINE=$("$NEWBIN" --version 2>/dev/null | head -n 1)
 BIN_NAME=""; BIN_PKG=""; BIN_SHA=""; BIN_EXTRA=""
 read -r BIN_NAME BIN_PKG BIN_SHA BIN_EXTRA <<EOF_VERSION
@@ -454,7 +390,6 @@ if [ "$BIN_SHA_CLEAN" != "$BIN_SHA" ]; then
 fi
 [ "$BIN_SHA" = "$SHA" ] && log "binary sha ok: 內嵌 ${BIN_SHA} 符合核准的 ${SHA}" \
     || { log "ABORT: 新 binary 內嵌的 sha 是 ${BIN_SHA}，不是核准的 ${SHA}（checkout HEAD 對、但這顆 binary 不是從它建的？）；不拿窗口、不換"; exit 10; }
-# 線上 (--old) 必須是要換上的 commit 的祖先或同一顆。無法證明不是降版就拒絕（#638）。
 if ! git -C "$CHECKOUT" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
     log "ABORT: 線上版本 $OLD 不在 checkout 裡，無法確認不是降版"
     exit 3
@@ -467,7 +402,6 @@ fi
 cd "$AGM_REPO" || { log "ABORT: 進不去 $AGM_REPO"; exit 3; }
 BAK="target/release/agents-managerd.bak-$OLD"
 if [ ! -e "$BAK" ]; then
-    # 先寫暫存檔、驗 hash 才 mv（issue #944）：半截的 $BAK 會讓之後每一輪都在下面的核對 rc=3，永遠不自癒。
     BAKTMP="$BAK.tmp.$$"
     if ! cp -p target/release/agents-managerd "$BAKTMP" || [ "$(hash16 "$BAKTMP")" != "$OLDHASH" ] || ! mv "$BAKTMP" "$BAK"; then
         rm -f "$BAKTMP"
@@ -479,7 +413,6 @@ GOT=$(hash16 "$BAK")
 [ "$GOT" = "$OLDHASH" ] || { log "ABORT: 回滾用的 $BAK sha256=${GOT}，不是 $OLDHASH"; exit 3; }
 log "rollback binary $BAK verified ($OLDHASH)"
 
-# 預期的 schema 版本**從 checkout 讀**，不寫死：SCHEMA_HISTORY 的最後一項就是這顆 binary 認得的版本。
 EXP_UV=$("$PYTHON" - "$CHECKOUT/crates/am-base/src/db.rs" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
@@ -491,8 +424,6 @@ case "$EXP_UV" in
     ''|*[!0-9]*) log "ABORT: 讀不到 checkout 的 SCHEMA_VERSION（拿到 '$EXP_UV'）——不要用上一輪的數字猜"; exit 3 ;;
 esac
 PRE_UV=$("$SQLITE" "$DB" "pragma user_version")
-# 讀不到（sqlite3 壞了、DB 開不了）不能當成「升過 schema」往下跑；DB 比要換上的 binary 還新的話，
-# 換上去的 binary 一定被版本閘擋下（db.rs `apply_migrations`），停機之後才發現就晚了——停 daemon 之前就拒絕。
 case "$PRE_UV" in
     ''|*[!0-9]*) log "ABORT: 讀不到 DB 的 user_version（拿到 '$PRE_UV'）——不換版"; exit 3 ;;
 esac
@@ -503,10 +434,6 @@ fi
 BUMPED=no; [ "$EXP_UV" != "$PRE_UV" ] && BUMPED=yes
 log "schema: checkout SCHEMA_VERSION=$EXP_UV, db user_version=$PRE_UV, bumped=$BUMPED"
 
-# ── 1b. 3b：對真 herdr 驗（換 binary 之前，腳本自己做，不由呼叫端帶值）──────────
-# pane id 一律當場取：${HERDR_PANE_ID}（pane 裡本來就有），沒有才 `herdr pane current`。
-# 2026-09-16 與 2026-09-20 兩次都是呼叫端把自己的 pane id 寫死，pane 換了以後讀到
-# pane_not_found；第二次還照樣換了 binary。所以這一段不接受外部傳進來的 pane id。
 PANE="${HERDR_PANE_ID:-}"
 if [ -z "$PANE" ]; then
     PANE=$("$HERDR" pane current 2>/dev/null | "$PYTHON" -c 'import json,sys
@@ -517,7 +444,6 @@ except Exception:
 print(((d.get("result") or {}).get("pane") or {}).get("pane_id") or ((d.get("result") or {}).get("pane") or {}).get("id") or "")')
 fi
 if [ -z "$PANE" ]; then
-    # 排程（systemd timer／launchd）跑的沒有自己的 pane：退而確認 herdr socket 通、協定對得上。
     LIST=$("$HERDR" pane list 2>&1); LRC=$?
     case "$LRC:$LIST" in
         0:*protocol_mismatch*|[!0]*)
@@ -533,13 +459,8 @@ else
     log "3b herdr pane read $PANE ok"
 fi
 
-# 自測 prompt：對方正在跑回合（a turn is already in flight）是結構性的，等它結束重送；
-# 其他非 200 一律當成送達線有問題，不換 binary。
-# 例外：自測對象根本沒有在跑（`no active run`，例如 Linux 主機上沒有桌面所以 offline 的 browser-gc child）——
-# 沒有東西可以送，不是送達線壞了；這一步略過（上面的 herdr 讀取仍然做了），不能讓每趟自動換版都卡在這。
 PROBE_SKIPPED=no; PROBE_SKIP_WHY=""; PROBE_BLOCKED_REPLY=""
 i=0
-# 沒有任何自測對象（runtime.json 讀不到）：跟「對象沒有 run」同一條路略過並計數，不是送達線壞了。
 if [ -z "$PROBE_BOT" ]; then
     PROBE="no active run (沒有設定自測對象)"; PROBE_SKIPPED=yes; PROBE_SKIP_WHY="no active run"; i="$PROBE_TRIES"; PROBE_BOT="（未設定）"
 fi
@@ -556,8 +477,6 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
                 continue
             fi
             PROBE_SKIPPED=yes; PROBE_SKIP_WHY="no active run"; break ;;
-        # 輸入框有未送出的字（409 draft，例如 Claude 滿意度問卷的「0」落進輸入框，2026-11-09 事故）：
-        # 不是送達線壞了，也不替別人清輸入框（可能是使用者打到一半）；改送 fallback，沒有就略過並計數。
         409*'"draft'*)
             if [ -n "$PROBE_FALLBACK" ] && [ "$PROBE_FALLBACK" != "$PROBE_BOT" ]; then
                 log "3b 自測對象 $PROBE_BOT 輸入框有未送出的字，改送 fallback $PROBE_FALLBACK"
@@ -565,8 +484,6 @@ while [ "$i" -lt "$PROBE_TRIES" ]; do
                 continue
             fi
             PROBE_SKIPPED=yes; PROBE_SKIP_WHY="輸入框有字"; break ;;
-        # 目標暫時不能收 prompt（卡在權限／選擇提示 blocked、busy、needs permission、run 還沒進 running）：跟 draft 同一條路，
-        # 不是送達線壞了；改送 fallback，沒有就略過並計數。其他 409 與錯誤仍 ABORT。
         409*"agent is blocked"*|409*"agent is busy"*|409*"agent_busy"*|409*"needs permission"*|409*"needs_permission"*|409*"run is not running"*)
             if [ -n "$PROBE_FALLBACK" ] && [ "$PROBE_FALLBACK" != "$PROBE_BOT" ]; then
                 log "3b 自測對象 $PROBE_BOT 暫時不能收 prompt（$(printf '%s' "$PROBE" | head -c 120)），改送 fallback $PROBE_FALLBACK"
@@ -596,9 +513,6 @@ case "$PROBE" in
        fi ;;
 esac
 
-# 等自測那個回合收尾再拿窗口：它還在飛的時候 acquire 一定吃 409 not_idle（working 名單還是空的），
-# 等於腳本自己擋自己——2026-09-21 連兩趟第 1 次 acquire 都是這樣被拒。上限用完就照樣往下走，
-# 交給下面的窗口重試處理，不在這裡 DEFER。
 i=0; SETTLED=no; BUSY=no
 [ "$PROBE_SKIPPED" = yes ] && SETTLE_TRIES=0
 while [ "$i" -lt "$SETTLE_TRIES" ]; do
@@ -621,7 +535,6 @@ done
 [ "$SETTLED" = yes ] && log "3b self probe turn settled (check $i/$SETTLE_TRIES)"
 [ "$BUSY" = yes ] && log "自測回合等了 $SETTLE_TRIES 次還在飛，照樣去拿窗口（被拒會重試）"
 
-# ── 2. 拿 restart 窗口，換 binary 前一刻再查一次（§3a）────────────────────────
 TOKEN=""; FENCE=""
 i=0
 while [ "$i" -lt "$WINDOW_TRIES" ]; do
@@ -665,18 +578,8 @@ done
 [ "$HELD" = True ] || { log "DEFER: 拿不到 restart 窗口（試了 $WINDOW_TRIES 次，最後 reason=${WHY:-unparsed}）"; exit 4; }
 log "restart lease fence=$FENCE token=$([ "$TOKEN" != - ] && echo saved || echo MISSING)"
 save_token "$TOKEN"
-# 舊 daemon 的窗口回應沒有 approval：照舊不帶，複查退回「最早那筆活著的核准」。
 [ "$WINDOW_MODE" = service ] && [ "${WAP:--}" != - ] && WINDOW_APPROVAL="$WAP"
 
-# 跟 acquire 同一套判斷：放寬生效（同一張核准等滿門檻，或使用者按了「現在換版」）時 working 不擋，
-# 送達臨界區、別人的租約、讀不到狀態照擋。
-#
-# 放寬沿用 acquire 的結論（issue #840 第二輪，2026-10-04 08:02／08:07／08:12 實測）：線上還是舊 daemon 時，它的放寬
-# 只認「還在等」——窗口一拿到（Swapping）使用者的「現在換版」就不算了；每輪 3a ABORT 交還窗口又把核准消耗掉，等待計時
-# 每輪重來（acquire 的 waited 永遠是 15 秒）。修好的 daemon 要先換上去才生效，等於永遠換不上。所以：
-# daemon 在鎖內給這張窗口時已經判定放寬（回應的 `safety.escalated`，而且計時綁的就是開窗口的那張核准），放寬在同一次部署裡
-# 只會增加、不會收回——複查只再確認放寬後**仍然要擋**的三樣：送達臨界區、別人的租約、讀不到狀態的 bot。這三樣舊 daemon 都有回。
-# 任何一個欄位缺了就不沿用（fail closed）。
 SAFE=$(lease_safety | ACQ_ESC="$ACQ_ESC" ACQ_ESC_AP="${ACQ_ESC_AP:--}" ACQ_AP="${WAP:--}" "$PYTHON" -c 'import json,os,sys
 d = json.load(sys.stdin)
 safe = d.get("safe") is True
@@ -694,12 +597,10 @@ log "3a recheck: $SAFE"
 case "$SAFE" in
     True*) ;;
     *) log "ABORT: 換 binary 前複查不安全"
-       # 交還失敗不改結束碼：4 的意思（沒窗口／複查不安全）沒變，而「有沒有還成」log 裡講得很清楚。
        release_window "3a 複查不安全" || true
        exit 4 ;;
 esac
 
-# 前置的祖先檢查與備份發生在拿窗口之前。拿到 restart 窗口後，確認正式 binary 沒在等待期間被另一趟換掉。
 LIVEHASH=$(shasum -a 256 target/release/agents-managerd 2>/dev/null | cut -c1-16)
 if [ -z "$LIVEHASH" ] || [ "$LIVEHASH" != "$OLDHASH" ]; then
     log "ABORT: 取得 restart 窗口後線上 binary 已改變（原版本 ${OLD}、目前 sha256=${LIVEHASH:-unknown}），重新讀取 live 版本後再試"
@@ -707,16 +608,12 @@ if [ -z "$LIVEHASH" ] || [ "$LIVEHASH" != "$OLDHASH" ]; then
     exit 3
 fi
 
-# ── 3. 備份 DB 與舊 binary ───────────────────────────────────────────────────
-# 檔名到秒，而且已經存在就拒絕：`.backup` 對既有檔是整個覆蓋，同一分鐘的第二趟會把上一趟換版前唯一的好備份蓋成「已經 migrate 過的」。
-# SWAP_BACKUP_STAMP 只給測試固定檔名。
 DBB="$DB.bak-${SWAP_BACKUP_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 if [ -e "$DBB" ]; then
     log "ABORT: DB 備份 $DBB 已經存在，不覆蓋它（可能是上一趟換版前唯一的好備份）"
     release_window "DB 備份檔已存在" || true
     exit 5
 fi
-# DB 裡有 bot 的 hook token 等憑證：備份只給自己讀（600），不看呼叫端的 umask。
 ( umask 077 && "$SQLITE" "$DB" ".backup $DBB" ) || {
     log "ABORT: DB 備份失敗"
     release_window "DB 備份失敗" || true
@@ -730,10 +627,6 @@ log "db backup $DBB integrity=$IC user_version=$BUV"
                     exit 5; }
 
 OFF=$(wc -c < "$DLOG" 2>/dev/null || echo 0)
-# 名單用「id<TAB>名字」：比對看 id（同名的新 bot 蓋不掉舊的那顆），log 印名字。
-# 沒有 id 的列退回用名字比（`name:` 開頭，也就不可能被當成刻意刪除）。
-# SWAP_T0 是換版窗口的起點，格式跟 daemon 的 db::now() 一樣（RFC3339、毫秒、Z），才能在 SQL 裡直接比字串；
-# 取整到秒只會讓窗口往前多算不到一秒。
 bot_rows() { set -o pipefail; agm state | "$PYTHON" -c 'import json,sys
 print("\n".join(sorted("%s\t%s" % (b.get("id") or "name:%s" % b.get("name"), b.get("name")) for b in json.load(sys.stdin).get("bots") or [])))'; }
 SWAP_T0=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
@@ -743,27 +636,12 @@ if ! BEFORE_ROWS=$(bot_rows) || [ -z "$BEFORE_ROWS" ]; then
     exit 3
 fi
 
-# ── 4. 換 binary 並重啟 ──────────────────────────────────────────────────────
-# 啟動一律經過 launchd：pane 忙的時候會被 renice 到 5，子行程繼承後降不回去
-# （非 root 不能降 nice）。launchd 跑的啟動器是 nice 0，啟動器 fork+setsid 後結束，
-# daemon 就是 ppid=1、nice 0 的獨立行程；job 自己結束後 remove 不會殺到它。
-#
-# Linux（issue #677）：同一件事交給 systemd user manager（nice 0），`systemd-run --user` 就是
-# `launchctl submit` 的對應——一次性的 transient unit，不必另外安裝 unit 檔，AGM_REPO／DAEMON_LOG
-# 照樣從這裡傳。兩個屬性缺一不可：
-#   - `Type=forking`：啟動器 fork 之後父行程就結束，systemd 把留下來的 daemon 認成 main PID；
-#     預設的 simple 會在啟動器一結束就判定 unit 結束。
-#   - `KillMode=process`：systemd 收 unit 時看的是整個 cgroup，不是程序群，setsid 脫離不了；
-#     預設 control-group 會在 daemon 停下時連它起的子行程一起殺。只殺 main PID 才跟 macOS 一樣。
-# unit 名每次不同（`-$START_N`）：往前修／回滾時上一顆的 unit 可能還沒被 `--collect` 收掉。
 START_N=0
 start() {
     L="am-daemon-swap-$$"
     if [ "$PLATFORM" = linux ]; then
         START_N=$((START_N + 1))
-        # 不是從登入 session 叫起來（沒有 pam_systemd）就沒有 XDG_RUNTIME_DIR，systemd-run --user 連不到 user bus。
         [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        # 直譯器寫成絕對路徑：transient unit 的 PATH 是 user manager 的，不是這個 pane 的。
         "$SYSTEMD_RUN" --user --collect --unit="$L-$START_N" -p Type=forking -p KillMode=process \
             -- "$(command -v "$PYTHON" || echo "$PYTHON")" "$START_PY" "$AGM_REPO" "$DLOG" >> "$LOG" 2>&1 || log "WARN: systemd-run rc=${?}（下面的 /api/session 驗證會接手判斷）"
         return
@@ -774,8 +652,7 @@ start() {
     "$LAUNCHCTL" remove "$L" 2>/dev/null
 }
 
-# `rollback()` runs before the later top-level child inventory, so define its query helper before any rollback can execute.
-rollback_new_children() { # 印出備份後新收編、還活著且不在換版前清單的 child；讀取錯誤交給呼叫端警示
+rollback_new_children() {
     set -o pipefail
     rows=$("$SQLITE" -readonly "$DB" "SELECT id || char(9) || COALESCE(name, '') FROM bots
       WHERE managed_by = 'child' AND deleted_at IS NULL AND created_at >= '$SWAP_T0' ORDER BY created_at, id") || return 1
@@ -790,7 +667,6 @@ for line in sys.stdin:
         print("%s (%s)" % (name, ident))' "$BEFORE_ROWS"
 }
 
-# 回滾起回舊 binary 之後等 /api/session（同換版主線與 forward-fix 的 30 秒）：起不來就不能說「已回滾」（issue #1102）。
 wait_session_after_rollback() {
     local j=0
     while [ $j -lt 30 ]; do api /api/session && return 0; sleep 1; j=$((j + 1)); done
@@ -799,17 +675,12 @@ wait_session_after_rollback() {
 
 rollback() {
     log "ROLLBACK requested: $*"
-    # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
-    # the DB restore, so at minimum report the exact rows that will become untracked.
-    # 只有真的會還原 DB（升過 schema、往前修又失敗）才需要盤點；沒升 schema 的回滾不碰 DB（issue #902）。
     ROLLBACK_CHILDREN_KNOWN=yes
     ROLLBACK_NEW_CHILDREN=""
     if [ "$BUMPED" = yes ] && ! ROLLBACK_NEW_CHILDREN=$(rollback_new_children); then
         ROLLBACK_CHILDREN_KNOWN=no
         ROLLBACK_NEW_CHILDREN=""
     fi
-    # 升過 schema 就不能把舊 binary 放回去：v(N+1) 開過的 DB，v(N) 的 binary 會被版本閘擋下、
-    # 起不來（2026-09-20 實際發生過）。預設往前修，只有新 binary 真的起不來才動 DB。
     if [ "$BUMPED" = yes ]; then
         log "schema bumped $PRE_UV -> ${EXP_UV}：先往前修（舊 binary 開不了這個 DB）"
         if ! stop_daemon_for_rollback; then
@@ -828,8 +699,6 @@ rollback() {
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     else
-        # 沒升 schema：舊 binary 直接開得了現在的 DB，只換 binary 回去。DB 在新 daemon 跑的這段時間
-        # 已經寫進新資料（回合、訊息、child 收編…），還原備份會把這些全部抹掉（issue #902）。
         if write_rejected_marker "$SHA"; then
             log "候選 sha 已在 rollback 前寫入 rejected 清單"
         else
@@ -867,13 +736,8 @@ rollback() {
         log "ERROR: 舊 binary 還原失敗（${PREV}／${BAK} 都放不回或驗不過 ${OLDHASH}）；不起 daemon，DB 與備份原樣保留，要人工處理"
         exit 11
     fi
-    # The old daemon cannot load or accept service principals. Remove credentials it generated before
-    # the rollback so a stale token file is not mistaken for a working credential.
     rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
     rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
-    # DB 還原：daemon 已停；主檔與 -wal／-shm 要一起處理——新版留下的 WAL 配舊主檔會變成半新半舊。
-    # **原子**：先寫同目錄的暫存檔（600）、fsync，再暫存 -wal／-shm，最後 rename 覆蓋主檔；同一檔案系統的 rename 是原子的。
-    # 複製或 rename 失敗時原 DB 與 sidecar 都要留住，備份也還在，可以手動還原。
     RESTORE_TMP="$DB.restore.$$"
     WAL_HOLD="$RESTORE_TMP-wal"
     SHM_HOLD="$RESTORE_TMP-shm"
@@ -930,7 +794,6 @@ finally:
     elif [ -n "$ROLLBACK_NEW_CHILDREN" ]; then
         log "WARN: rollback restored the DB but these newly adopted children may still have live panes: $ROLLBACK_NEW_CHILDREN"
     fi
-    # DB 還原失敗：DB 還是 v(N+1)，舊 binary 開不了；新 binary 剛剛 forward-fix 也起不來。不起任何 daemon，留給人處理（issue #1102）。
     if [ "$RESTORE_READY" != done ]; then
         log "不起任何 daemon：舊 binary 開不了已升 schema 的 DB，要先人工還原 DB 再啟動"
         exit 11
@@ -944,8 +807,6 @@ finally:
     exit 7
 }
 
-# 換版前先讀一次 supervisor status（issue #771）：額度等待（waiting_quota）是換版前就存在的狀態，跟新 binary 無關。
-# 換版後只拿來判斷「這一刻起沒有變壞」：換版前讀不到或不是 waiting_quota，就沒有這個前提，不放寬。
 read_supervisor_status() {
     set -o pipefail
     agm supervisor | "$PYTHON" -c 'import json,sys
@@ -961,8 +822,6 @@ if not isinstance(status, str) or not status.strip():
     raise SystemExit(1)
 print(status.strip())'
 }
-# 換版後的 waiting_quota 有 daemon 記下的未來重置時間（quota_reset_at）＝額度閘門擋著，跟 binary 無關（issue #2033）：
-# 舊 daemon 換版前可能還報 idle（還沒碰到額度），新 daemon 一啟動讀到額度就轉 waiting_quota。讀不到重置時間就不放寬。
 supervisor_quota_gated() {
     set -o pipefail
     agm supervisor | "$PYTHON" -c 'import json,sys
@@ -1001,7 +860,6 @@ if [ "$OLDPID_COUNT" -ne 1 ]; then
     exit 11
 fi
 OLDPID=$(printf '%s\n' "$OLDPIDS" | head -1); log "old pid $OLDPID"
-# 停 daemon 前先確定放得下：換版要多一份新 binary（暫存檔＋換下來的舊檔），不夠就在 daemon 還活著時放棄（issue #944）。
 NEWKB=$(( ($(wc -c < "$NEWBIN") + 1023) / 1024 ))
 AVAILKB=$(df -Pk target/release 2>/dev/null | awk 'NR == 2 { print $4 }')
 case "$AVAILKB" in
@@ -1014,9 +872,6 @@ case "$AVAILKB" in
         fi ;;
 esac
 
-# DB backup and inventory collection may outlive the 15-minute lease. Revalidate the same fenced
-# lease immediately before stopping the daemon; if it expired or changed owners, leave the live
-# service untouched and defer this deployment.
 RENEW_OUT=$(agm lease renew restart --owner "$OWNER" --fence "$FENCE" --ttl 900 --lease-token-file "$TOKEN_FILE" 2>&1)
 RENEW_RC=$?
 if [ "$RENEW_RC" -ne 0 ]; then
@@ -1031,10 +886,7 @@ if ! stop_daemon "$OLDPID"; then
     release_window "線上 daemon 無法停止" || true
     exit 11
 fi
-# PREV 用 mktemp 原子建出唯一檔名：以前是「時間-$$」再 `-e` 檢查，同一秒、同一程序連換兩趟就撞名（rc=5）。
-# mktemp 的六碼隨機字元保證不撞；建出來的空佔位檔由下面的 mv -f 覆蓋。
 if ! PREV=$(mktemp "target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
-    # 舊 daemon 已經停了、舊 binary 還在原位：先把它起回來，再交還窗口，不能留一個停著的 daemon（issue #902）。
     log "ABORT: 建不出換下來的舊 binary 備份檔；把舊 daemon 起回來"
     start; sleep 3
     release_window "備份檔建立失敗，沒換版" || true
@@ -1042,7 +894,6 @@ if ! PREV=$(mktemp "target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M
 fi
 mv -f target/release/agents-managerd "$PREV"
 if ! install_new_binary; then
-    # 舊 daemon 已經停了：把舊 binary 搬回原位、起回來，再交還窗口（issue #944）。
     log "ABORT: 新 binary 複製到 target/release 失敗（磁碟滿了？）；把舊 daemon 起回來"
     if ! mv -f "$PREV" target/release/agents-managerd; then
         log "ERROR: 舊 binary 搬不回 $PREV → target/release/agents-managerd；daemon 沒起來，要人工處理"
@@ -1058,7 +909,6 @@ sleep 2
 NEWPID=$(dpid)
 log "new pid $NEWPID binary=$(date -r target/release/agents-managerd '+%F %T' 2>/dev/null)"
 
-# ── 5. 驗證 ─────────────────────────────────────────────────────────────────
 ok=""; j=0
 while [ $j -lt 30 ]; do api /api/session && { ok=1; break; }; sleep 1; j=$((j + 1)); done
 [ -n "$ok" ] || rollback "/api/session 30 秒內沒起來"
@@ -1066,9 +916,6 @@ log "session ok"
 agm health >/dev/null 2>&1 || rollback "health 失敗"
 log "health ok"
 
-# 新 daemon 起來之後再用它自己的 API 複核一次（上面驗的是檔案，這裡驗的是跑起來的那個行程）：
-# `agm supervisor` 的 last_deploy.sha_full / dirty。binary 驗過了、起來的卻不是它（啟動器拉起別顆、舊行程沒停掉）也要回滾。
-# agm 自己失敗（daemon 讀不到）不在這裡判：下面讀 supervisor status 時同一個失敗會回滾，原因講得更準。
 SUP_JSON=$(agm supervisor 2>/dev/null) || rollback "新 daemon 的 agm supervisor 讀取失敗，無法複核 sha"
 DEPLOYED=$(printf '%s' "$SUP_JSON" | "$PYTHON" -c 'import json,sys
 try:
@@ -1094,7 +941,6 @@ HELD_AFTER=$(agm lease status | "$PYTHON" -c 'import json,sys
 L = [l for l in json.load(sys.stdin).get("leases") or [] if l.get("resource") == "restart"]
 print(L[0].get("held") if L else "?")')
 log "restart lease held=$HELD_AFTER"
-# 換版本身成功了，但窗口沒交還就是下一個人拿不到窗口：整輪以 8 結束，不要靜靜走完（issue #477）。
 RELEASE_FAILED=0
 [ "$HELD_AFTER" = True ] && { release_window "daemon 沒有自動放掉，手動交還" || RELEASE_FAILED=1; }
 
@@ -1104,8 +950,6 @@ log "supervisor status: $SUP"
 case "$SUP" in
     starting|idle|busy) ;;
     waiting_quota)
-        # 換版前就是 waiting_quota、換版後仍是：額度等待不是新版造成的（2026-10-02 兩顆無辜 commit 因此被回滾並進了 .rejected）。
-        # 換版前健康、換版後才 waiting_quota 仍然回滾。
         if [ "$PRE_SUP" = waiting_quota ]; then
             log "supervisor status waiting_quota：換版前就是 waiting_quota，額度等待與這顆 binary 無關，不回滾"
         elif RESET_AT=$(supervisor_quota_gated 2>/dev/null); then
@@ -1119,28 +963,7 @@ esac
 if ! AFTER_ROWS=$(bot_rows) || [ -z "$AFTER_ROWS" ]; then
     rollback "新版後 agm state 讀取失敗或 bot 名單為空"
 fi
-# 窗口內**刻意刪掉**的 bot 不算重啟弄丟的（2026-09-24 22:53 ca9a0330：父 bot 在這 45 秒裡刪了 child i263，
-# 整趟被誤判回滾）。「刻意」只認刪除 API 留下的 intent：DELETE /api/bots|projects 在定案前先寫一筆
-# delete_bot／delete_project（payload 帶當時的子孫 id），done 之後保留 24 小時。光有 deleted_at 不夠——
-# 重啟後 reconcile 找不到 pane 而退役 child、或投影軟刪，也會寫 deleted_at，那正是這一步要抓的遺失。
-# 父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆 child 會寫一筆 retire_child 紀錄（#554）；
-# 一般只認 subject 就是它、而且 cause 是 pane_closed（herdr 報過關閉事件、當下 pane 也不在）或 promoted 的。
-# `unconfirmed`／`parent_replaced_child` 原本只有在父 bot 仍有 active run、且窗口內收編新 child 時才放過。
-# 開機 reconcile 的另一種窄例外是：有 parent 的 child 確認 pane 已 gone、父 bot 仍有 active run 且仍在 after 名單；
-# 最多重查 5 秒等同一輪 reconcile 的 intent 落地。母 bot 消失、pane 還在的 agent_missing、herdr_restarted 與其他 unconfirmed 仍回滾。
-# 換版前就已經死掉的 child（2026-10-16 13:52 66378ada：run 13:27 就 pane gone 結束，pane 後來被別顆 agent 佔用，
-# 新 daemon 的 reconcile 以 reconcile_run_already_ended／agent_missing 退役）也不算：換版沒弄丟它，它早就不在了。
-# 只認 retire_child 的 last_run 在 SWAP_T0 之前就已結束、而且它現在沒有任何 active run；run 換版前還活著的 agent_missing 照樣回滾。
-# 父 bot 在窗口內替換 child、沒有新 child 時：cause=parent_replaced_child 也放過，但要 last_run.state=exited、pane=gone，
-# exit_reason 是 herdr 事件寫的 'pane exited'（2026-10-17 16:10Z 回滾 978cf980，#1820），或對帳才發現的 'agent not found during reconcile'
-# （2026-10-24 07:31Z 回滾 4f1703df，wait1937，#1962：替換當下新 child 還沒 adopt）；且父 bot 未刪、仍有 active run。
-# reconcile.rs 的 parent_replaced_child 只在 herdr 確認舊 pane 不在、父 bot active、herdr 帶 ownership hint 的 successor 時才寫這個 cause，
-# 所以這裡的 exit_reason 放寬不會放過一般的 child 消失。
-# 換版只重啟 daemon、herdr 不動，關不掉 pane；空的 herdr 也不會替沒有的 pane 發事件（child_retire.rs OBSERVED_CLOSE）。
-# delete_bot／delete_project intent 可能在 SWAP_T0 前開始、窗口內才完成；只有 intent 的建立或更新時間在窗口內，或它仍是 pending/running，才配合窗口內 deleted_at 算刻意刪除。窗口前已完成的舊 intent 不算。
-# 判準見 SPEC §6.5a。
-# 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
-deleted_on_purpose() { # $1=bot id → 印 1 才算
+deleted_on_purpose() {
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT count(*) FROM bots b WHERE b.id = '$1'
       AND b.deleted_at IS NOT NULL AND b.deleted_at >= '$SWAP_T0'
@@ -1179,7 +1002,7 @@ deleted_on_purpose() { # $1=bot id → 印 1 才算
         AND COALESCE(json_extract(i.payload_json, '\$.last_run.state'), '') NOT IN ('starting', 'running', 'stopping')
         AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting', 'running', 'stopping'))))" 2>/dev/null
 }
-reconcile_retired_child_parent() { # $1=bot id → 印出經 reconcile 退役、pane 已 gone 且 parent 還 active 的 parent id
+reconcile_retired_child_parent() {
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT p.id FROM bots b
       JOIN intents i ON i.kind = 'retire_child' AND i.status = 'done' AND i.subject_id = b.id
@@ -1194,19 +1017,18 @@ reconcile_retired_child_parent() { # $1=bot id → 印出經 reconcile 退役、
         AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = p.id AND r.state IN ('starting', 'running', 'stopping'))
       LIMIT 1" 2>/dev/null
 }
-live_child_parent() { # $1=bot id → 印出 live parent id，供短暫重查 intent
+live_child_parent() {
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT p.id FROM bots b JOIN bots p ON p.id = b.parent_bot_id
       WHERE b.id = '$1' AND b.managed_by = 'child' AND p.deleted_at IS NULL LIMIT 1" 2>/dev/null
 }
-# 這顆 bot 自己的退役／刪除紀錄已經看得到（不管合不合格）。不合格就不必再空等 intent 落地。
-retire_record_visible() { # $1=bot id → 印出筆數；讀失敗印空，呼叫端當成「已有紀錄」不再等
+retire_record_visible() {
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT count(*) FROM intents i WHERE i.subject_id = '$1'
       AND i.created_at >= '$SWAP_T0' AND i.status != 'abandoned'
       AND i.kind IN ('retire_child', 'delete_bot', 'delete_project')" 2>/dev/null
 }
-after_has_bot() { # $1=bot id
+after_has_bot() {
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     printf '%s\n' "$AFTER_ROWS" | cut -f1 | grep -qxF -- "$1"
 }
@@ -1224,7 +1046,6 @@ classify_missing() {
                 DELETED="$DELETED$name "
             else
                 parent_id=$(live_child_parent "$id")
-                # 只等「紀錄還沒落地」。agent_missing 這類已經寫明的不合格原因立刻回滾。
                 if [ -n "$parent_id" ] && after_has_bot "$parent_id" && [ "$(retire_record_visible "$id")" = 0 ]; then
                     WAITING="$WAITING$name "
                     WAITING_IDS="$WAITING_IDS$id "
@@ -1262,6 +1083,5 @@ else
     BUILT_WRITE_FAILED=1
     log "ERROR: 部署成功但寫入 daemon-update.built 失敗；新 binary 已通過驗證並在線，DB 備份保留在 $DBB"
 fi
-# 換版成功、但窗口沒交還：下一個人拿不到窗口，要看得出來（issue #477）。
 [ "$RELEASE_FAILED" = 0 ] || { log "EXIT 8: 換版成功，但 restart 窗口沒有交還成功（見上面的 rc）"; exit 8; }
 [ "$BUILT_WRITE_FAILED" = 0 ] || { log "EXIT 11: 新 binary 健康在線，但部署 sha 標記沒有更新"; exit 11; }

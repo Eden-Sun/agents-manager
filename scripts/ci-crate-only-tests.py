@@ -8,7 +8,6 @@ GATE = re.compile(r'#\[cfg\(all\(test,\s*not\(feature\s*=\s*"daemon-test-harness
 RAW = re.compile(r'(?:[bc])?r(#{0,255})"')
 CHAR = re.compile(r"'(?:\\(?:u\{[^}]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
 
-
 def mask_rust(source: str) -> str:
     """Blank strings/comments without shifting offsets, so fixture text cannot act as a gate."""
     masked = list(source)
@@ -57,7 +56,6 @@ def mask_rust(source: str) -> str:
             pos = end
     return "".join(masked)
 
-
 def crate_only(source: str) -> bool:
     masked = mask_rust(source)
     retained = list(masked)
@@ -78,14 +76,11 @@ def crate_only(source: str) -> bool:
                 return False
         retained[gate.start():end] = " " * (end - gate.start())
         found = True
-    # Other test attributes or module mounts might contain App-backed cases; never suppress them.
     return found and not re.search(r'#\[(?:tokio::)?test\b|\bmod\s+\w+\s*[;{]', "".join(retained))
-
 
 def owned_path(path: Path) -> bool:
     if crate_only(path.read_text()):
         return True
-    # External test files inherit the cfg on their parent module declaration.
     for parent in (path.parent / "mod.rs", path.parent.with_suffix(".rs")):
         if not parent.is_file() or parent == path:
             continue
@@ -100,7 +95,6 @@ def owned_path(path: Path) -> bool:
                 (parent.parent / declaration[1] / "mod.rs").resolve(),
             }:
                 return True
-    # 同目錄的兄弟檔以 `#[cfg(all(test, not(...)))] #[path = "<this file>"] mod x;` 掛上（如 share/portal.rs 掛 portal_upload_tests.rs）。
     for sibling in sorted(path.parent.glob("*.rs")):
         if sibling == path:
             continue
@@ -112,7 +106,6 @@ def owned_path(path: Path) -> bool:
             declaration = re.match(r'\s*#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;', source[gate.end():])
             if declaration and (sibling.parent / declaration[1]).resolve() == path.resolve():
                 return True
-    # `<name>_tests/<file>.rs` 由 `<name>.rs` 以 `#[cfg(all(test, not(...)))] #[path = "<name>_tests/<file>.rs"] mod x;` 掛上。
     if path.parent.name.endswith("_tests"):
         parent = path.parent.parent / (path.parent.name[: -len("_tests")] + ".rs")
         if parent.is_file():
@@ -126,7 +119,6 @@ def owned_path(path: Path) -> bool:
                 if declaration and declaration[1] == rel:
                     return True
     return False
-
 
 if __name__ == "__main__":
     try:

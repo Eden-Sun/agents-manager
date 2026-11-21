@@ -1,12 +1,4 @@
 #!/bin/bash
-# cutover-to-host.sh 的隔離測試（issue #721）。
-#
-# 不碰正式 daemon／DB／agm-host：兩顆假 daemon（python http.server，各自一份 state、記下每個寫入請求）、
-# 假 ssh（把「遠端指令」在本機的暫存目錄裡跑，PATH 前面放 ss／systemd-run／curl 的 stub）、
-# 假 rsync／launchctl／lsof／project-transfer／transcript-transfer，daemon 行程是改名成 agents-managerd 的 sleep。
-# 從各自的 log 檢查腳本做了什麼、順序對不對。
-#
-#   bash scripts/ops/cutover-to-host_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/cutover-to-host.sh"
@@ -14,7 +6,7 @@ HELPER="$HERE/cutover-helper.py"
 PASS=0
 FAIL=0
 
-check() { # check <描述> <要出現的字串> <檔案>
+check() {
     if grep -q -- "$2" "$3" 2>/dev/null; then
         echo "ok   - $1"; PASS=$((PASS + 1))
     else
@@ -28,7 +20,6 @@ check_no() {
         echo "ok   - $1"; PASS=$((PASS + 1))
     fi
 }
-# 獨立 bot id。BSD grep 的 BRE 不把 `\|` 當「或」，用 ERE 才跟 GNU 一樣。
 check_no_ere() {
     if grep -E -q -- "$2" "$3" 2>/dev/null; then
         echo "FAIL - $1"; echo "      不該出現 '$2'："; grep -E -n -- "$2" "$3" | sed 's/^/      /'; FAIL=$((FAIL + 1))
@@ -41,7 +32,7 @@ check_eq() {
     if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1)); else echo "FAIL - $1（預期 '$2'，實際 '$3'）"; FAIL=$((FAIL + 1)); fi
 }
 line_of() { grep -n -- "$1" "$2" | head -1 | cut -d: -f1; }
-check_before() { # check_before <描述> <先出現的> <後出現的> <檔案>
+check_before() {
     local a b; a=$(line_of "$2" "$4"); b=$(line_of "$3" "$4")
     if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
         echo "ok   - $1"; PASS=$((PASS + 1))
@@ -50,7 +41,6 @@ check_before() { # check_before <描述> <先出現的> <後出現的> <檔案>
     fi
 }
 
-# 識別字自己先對過，不依賴後面整份 dry-run。暫存路徑中段的 H1 不是 bot；獨立的 H1、以及路徑成分剛好是 H1，才算。
 IDCHK="$(mktemp -d "${TMPDIR:-/tmp}/am-cutover-id.XXXXXX")"
 printf '%s\n' "/tmp/am-check.XH1Y/out" "bot H10 stays" "prefixH1" > "$IDCHK/substr"
 printf '%s\n' "stop bot H1 now" "/api/bots/H1/stop" "/tmp/H1/data" > "$IDCHK/whole"
@@ -67,8 +57,6 @@ fi
 rm -rf "$IDCHK"
 
 PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B "$HERE/host-state-transfer_test.py"
-
-# ---------------------------------------------------------------- 假 daemon
 
 FAKE_DAEMON='
 import http.server, json, os, re, sys, threading
@@ -119,16 +107,14 @@ open(port_path + ".tmp", "w").write(str(s.server_address[1])); os.replace(port_p
 s.serve_forever()
 '
 
-start_daemon() { # start_daemon <名字>：起假 daemon，port 寫在 $ROOT/<名字>.port
-    # stdout 也要接走：這個函式在 $(…) 裡叫，背景行程握著那條 pipe 的話 $(…) 會等到它結束。
+start_daemon() {
     python3 -c "$FAKE_DAEMON" "$ROOT/$1-state.json" "$ROOT/$1-api.log" "$ROOT/$1.port" >/dev/null 2>>"$ROOT/$1-daemon.err" &
     PIDS="$PIDS $!"
     local i
     for i in $(seq 100); do [ -s "$ROOT/$1.port" ] && break; sleep 0.05; done
 }
 
-# state：Agents Manager（P1 在跑、P2 沒跑、P1 的 child C1 在跑）＋ AGM-DM-GRUP（AGM、巡檢、browser-gc 在跑，build 沒跑）。
-write_state() { # write_state <檔> <src|dst>
+write_state() {
     python3 - "$1" "$2" "$SRC_REPO" "$DST_REPO" "$SRC_DATA" "$DST_DATA" <<'EOF'
 import json, sys
 out, side, src_repo, dst_repo, src_data, dst_data = sys.argv[1:7]
@@ -150,8 +136,6 @@ json.dump({"projects": [am, agm, other]}, open(out, "w"))
 EOF
 }
 
-# 「daemon 行程」在子 shell 裡起：父行程馬上結束，它被 init 收養，被殺之後不會變成測試 shell 的殭屍
-# （殭屍 kill -0 仍然成功，lsof／ss stub 會以為它還在聽）。
 spawn_daemon() {
     ( "$ROOT/bin/agents-managerd" 300 > /dev/null 2>&1 & echo $! )
 }
@@ -179,9 +163,7 @@ setup() {
     start_daemon src; start_daemon dst
     SRC_PORT=$(cat "$ROOT/src.port"); DST_PORT=$(cat "$ROOT/dst.port")
 
-    # 兩顆「daemon 行程」：改名的 sleep，ps 的 comm 會是 agents-managerd。
     cp /bin/sleep "$ROOT/bin/agents-managerd"
-    # macOS 複製出來的系統 binary 簽章對不上會被 SIGKILL，重簽 ad-hoc。
     command -v codesign > /dev/null && codesign -s - -f "$ROOT/bin/agents-managerd" 2>/dev/null
     SRC_PID=$(spawn_daemon); DST_PID=$(spawn_daemon)
     export SRC_PID DST_PID
@@ -240,7 +222,6 @@ EOF
 kill -0 "$SRC_PID" 2>/dev/null && echo "$SRC_PID"
 exit 0
 EOF
-    # 真的 curl 連不上會以非零結束（exit 7）；`curl -sf … && exit 0` 的等待迴圈靠這個判斷，不能一律回 0。
     cat > "$ROOT/bin/curl" <<'EOF'
 #!/bin/bash
 echo "curl $*" >> "$ROOT/curl.log"
@@ -258,13 +239,11 @@ echo "systemd-run $*" >> "$ROOT/systemd-run.log"
 [ -n "${DST_ERROR_AFTER_START:-}" ] && printf '2026-09-28T00:00:00Z ERROR boom\n' >> "$DST_DATA_T/daemon.log"
 exit 0
 EOF
-    # preflight 只用 `systemctl --user cat herdr@.service` 看有沒有裝，當作有裝。
     cat > "$ROOT/rbin/systemctl" <<'EOF'
 #!/bin/bash
 echo "systemctl $*" >> "$ROOT/systemctl.log"; exit 0
 EOF
     cp "$ROOT/bin/curl" "$ROOT/rbin/curl"
-    # stub 故意不叫 project-transfer：傳到目標要改成固定檔名，import 才叫得到。
     cat > "$ROOT/bin/pt-stub" <<'EOF'
 #!/usr/bin/env python3
 import json, os, sys
@@ -331,7 +310,7 @@ teardown() {
     rm -rf "$ROOT"
 }
 
-run() { # run <輸出檔> <參數…>
+run() {
     local out="$1"; shift
     if [ -n "${CUTOVER_CRASH_AFTER_SHIP_MARKER:-}" ]; then
         PATH="$ROOT/bin:$PATH" bash "$SCRIPT" "$@" > "$out" 2>&1
@@ -340,8 +319,6 @@ run() { # run <輸出檔> <參數…>
     fi
     echo $? > "$out.rc"
 }
-
-# ---------------------------------------------------------------- dry-run 一個字都不寫
 
 echo "# dry-run：只讀、只印"
 setup
@@ -363,7 +340,6 @@ check "在跑的 child 列出來" "在跑的 child 1 顆" "$ROOT/out"
 check "已移交的 hub 不在名單" "Agents Manager（PAM" "$ROOT/out"
 check "dry-run 列出完整設定移交" "host-state-transfer.py" "$ROOT/out"
 check_no "不再要求手動補來源 config 段落" "切換後在目標補上" "$ROOT/out"
-# mktemp 目錄名可能含 H1 這個子字串；只擋獨立的 bot id。ERE：BSD grep 的 BRE 沒有 `\|`。
 check_no_ere "已移交的 hub 不碰" "$standalone_bot_id" "$ROOT/out"
 teardown
 
@@ -394,8 +370,6 @@ check "指出來源需要 Python 3.11" "來源 python3 要 3.11 以上" "$ROOT/o
 check_no "舊版來源 python3 時沒有寫 API" "POST\|PATCH" "$ROOT/src-api.log"
 unset PYTHON_BIN
 teardown
-
-# ---------------------------------------------------------------- 完整切換
 
 echo "# --execute：完整切換的順序與內容"
 setup
@@ -446,8 +420,6 @@ check "驗證通過" "驗證通過" "$ROOT/out"
 check "印出停機窗口" "停機窗口：" "$ROOT/out"
 check "記下每步耗時" "	import	" "$(ls -d "$ROOT"/src-data/cutover/*)/timings.tsv"
 teardown
-
-# ---------------------------------------------------------------- 閘門
 
 echo "# 閘門：#720 還沒進來就不做"
 setup
@@ -547,19 +519,15 @@ run "$ROOT/out3" cutover --execute --foreground --from nope --state-dir "$ST"
 check_eq "不存在的步驟直接拒絕" 1 "$(cat "$ROOT/out3.rc")"
 teardown
 
-# ---------------------------------------------------------------- 背景
-
 echo "# --execute 預設脫離成背景（會停掉叫它起來的 bot pane）"
 setup
-export PT_OLD=1   # 讓背景那一份在 preflight 就停，不必真的跑完
+export PT_OLD=1
 bash "$SCRIPT" cutover --execute > "$ROOT/out" 2>&1
 check "印出背景 pid 與 log" "背景執行（pid" "$ROOT/out"
 ST=$(ls -d "$ROOT"/src-data/cutover/*)
 for i in $(seq 50); do grep -q FATAL "$ST/run.log" 2>/dev/null && break; sleep 0.1; done
 check "背景那一份帶著同一個狀態目錄在跑" "#720" "$ST/run.log"
 teardown
-
-# ---------------------------------------------------------------- ship retry after partial local cleanup
 
 echo "# ship 寫完 transferred marker、清理到一半遭中斷：重跑同一步"
 setup
@@ -585,8 +553,6 @@ RSTATE="$DST_DATA/cutover/$(basename "$ST")"
     check_eq "重跑清完剩餘來源副本" 0 $?
 teardown
 
-# ---------------------------------------------------------------- ship failure must stop before deleting recovery material
-
 echo "# ship 中途 rsync 失敗：保留來源 bundle 並停在 ship"
 setup
 export RSYNC_FAIL_MATCH="host-state/"
@@ -610,8 +576,6 @@ check_eq "結束碼非 0" 1 "$(cat "$ROOT/out.rc")"
 check "說明目標 daemon 起不來" "目標 daemon 起不來" "$ROOT/out"
 check "給續跑的指令（--from start-dst）" "--from start-dst --state-dir" "$ROOT/out"
 teardown
-
-# ---------------------------------------------------------------- rollback
 
 echo "# rollback：還原目標到第一次 import 之前、Mac 接回"
 setup
@@ -647,8 +611,6 @@ run "$ROOT/out" rollback --execute --foreground
 check_eq "沒有 --state-dir 就拒絕" 1 "$(cat "$ROOT/out.rc")"
 teardown
 
-# ---------------------------------------------------------------- drill
-
 echo "# drill：目標 config 有 data_dir（複本會寫回正式資料目錄）就不做，做完一定清掉"
 setup
 printf '[server]\ndata_dir = "/somewhere"\n' > "$DST_DATA/config.toml"
@@ -658,8 +620,6 @@ check "講明 data_dir" "data_dir" "$ROOT/out"
 compgen -G "$ROOT/src-data/cutover/drill-*" > /dev/null; check_eq "Mac 狀態目錄清掉" 1 $?
 compgen -G "$HOME/agm-drill-*" > /dev/null; check_eq "目標沒留演練目錄" 1 $?
 teardown
-
-# ---------------------------------------------------------------- helper
 
 echo "# helper：lock-free 認得 daemon 拿著的鎖"
 T=$(mktemp -d)
@@ -718,8 +678,6 @@ printf '[[projects]]\nid = "P"\npath = "/dst/repo"\nhost = "local"\n[[projects.b
 check_eq "config 有 autostart＝1" 1 "$(dv)"
 rm -rf "$T"
 
-# print_times 在沒跑任何步驟（TIMES 空）時不能死：macOS 的 /bin/bash 3.2 對 set -u 下空陣列的 "${arr[@]}" 會 unbound variable。
-# 用系統 /bin/bash 跑（Linux 上是新版 bash，等於只驗輸出；在 Mac 上才真的守住）。
 pt_out=$(/bin/bash -c 'set -u; log() { echo "$*"; }; TIMES=(); '"$(sed -n '/^print_times() {/,/^}/p' "$SCRIPT")"'; print_times' 2>&1)
 check_eq "沒跑任何步驟：print_times 印出合計、不死" 1 "$(printf '%s\n' "$pt_out" | grep -c '合計')"
 unset pt_out

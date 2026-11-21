@@ -1,23 +1,4 @@
 #!/bin/bash
-# 回收編譯快取（issue #835）：遠端編譯的 remote-cargo 快取、各 worktree 的 target/incremental 與久沒用的整個 target/。
-#
-# 根因：沒有任何排程回收磁碟；daemon 的 `select_gc` 只在 `[build.remote] enabled` 時才跑，worktree 的 target/ 更是越堆越多，
-# 磁碟滿了才有人發現。由 systemd user timer `com.agm.disk-gc.timer` 每小時跑一次（Linux），純機械不花 LLM。
-#
-#   (a) ~/.cache/agents-manager/remote-cargo/* 頂層目錄超過 DISK_GC_REMOTE_CARGO_DAYS 天沒動、而且沒有行程在用 → 刪（不論 build.remote 開關）
-#   (e) ~/.cache/agents-manager/remote-cargo/*/shared*/target/*/incremental/ 底下的 crate 層目錄：整棵（目錄與裡面的檔）都超過
-#       DISK_GC_POOL_INCREMENTAL_HOURS 小時沒動、而且沒有行程在用 → 刪。熱池本身不刪、deps 不刪（熱池永遠在用，(a) 碰不到它）。
-#   (b) 主樹、各登記 worktree（`git worktree list`，含 ~/project/agm-* 那種不在 .claude 底下的）與 ubuntu-ci 的常駐 clone
-#       （`${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`）的 target/*/incremental：超過 DISK_GC_INCREMENTAL_DAYS 天的子目錄 → 刪
-#   (c) 各 worktree（不含主樹、不含 CI clone）的 target/：.fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過 DISK_GC_TARGET_DAYS 天沒動 → 整個 target/ 刪
-#       CI clone 的 target/ 是暖快取，整個不刪（#1450）。
-#   (d) 事後看 $HOME 所在磁碟：使用率 ≥ DISK_GC_ALERT_PCT 或剩餘 < DISK_GC_ALERT_FREE_GB → ops-alert disk_low
-#
-# 破壞性，所以：只刪上面這幾個明確路徑；路徑含 `..`、不在 $HOME 底下、任何一層是 symlink、實際位置跟預期不符，
-# 就整步放棄（不擴大範圍）；cd 進去以後只用相對路徑刪。worktree 底下有行程的 cwd，或 target/ 底下有行程開著檔，整棵不動。
-# 讀不到 /proc 就不做任何刪除（無法證明沒人在用）。
-#
-# 可覆寫（測試用）：AGM_REPO、DF_BIN、AGM_BIN、DISK_GC_LOG、DISK_GC_* 門檻。
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,8 +27,7 @@ FREED_KB=0
 SKIPPED=""
 skip() { SKIPPED="${SKIPPED}${SKIPPED:+；}$1"; }
 
-# 路徑要在 $HOME 底下、不含 `..`、從 $HOME 往下每一層都不是 symlink、而且實際位置跟字面一致。
-safe_dir() { # safe_dir <絕對路徑>：通過回 0
+safe_dir() {
   local p="${1%/}" rest cur comp
   case "$p" in *..*) return 1 ;; "$HOME"/*) ;; *) return 1 ;; esac
   rest="${p#"$HOME"/}"; cur="$HOME"
@@ -62,7 +42,6 @@ safe_dir() { # safe_dir <絕對路徑>：通過回 0
   [ "$(cd "$p" 2>/dev/null && pwd -P)" = "$HOME_REAL${p#"$HOME"}" ]
 }
 
-# 誰在用：行程的 cwd 與開著的檔案。收集一次，之後逐棵比對；讀不到 /proc 就整支不刪。
 CWDS=$(mktemp "${TMPDIR:-/tmp}/disk-gc-cwd.XXXXXX") || exit 1
 FDS=$(mktemp "${TMPDIR:-/tmp}/disk-gc-fd.XXXXXX") || exit 1
 trap 'rm -f "$CWDS" "$FDS"' EXIT
@@ -77,12 +56,12 @@ if [ -r /proc/self/cwd ] || [ -L /proc/self/cwd ]; then
 else
   PROC_OK=0
 fi
-phys() { echo "$HOME_REAL${1#"$HOME"}"; }   # /proc 給的是實體路徑，比對前先換成實體
-under() { # under <清單檔> <目錄>：清單裡有任何路徑等於或在該目錄底下
+phys() { echo "$HOME_REAL${1#"$HOME"}"; }
+under() {
   awk -v d="$2" '$0 == d || index($0, d "/") == 1 { f = 1; exit } END { exit !f }' "$1"
 }
 kb_of() { du -sk -- "$1" 2>/dev/null | awk '{print $1}'; }
-remove() { # remove <相對路徑>：呼叫端已 cd 進驗證過的目錄
+remove() {
   local kb
   [ ! -L "$1" ] && [ -e "$1" ] || return 1
   kb=$(kb_of "$1"); kb=${kb:-0}
@@ -94,7 +73,6 @@ if [ "$PROC_OK" != 1 ]; then
   log "讀不到 /proc，無法確認有沒有行程在用，這輪不刪任何東西"
   skip "沒有 /proc"
 else
-  # (a) remote-cargo 快取
   RC="$HOME/.cache/agents-manager/remote-cargo"
   if [ -e "$RC" ] || [ -L "$RC" ]; then
     if safe_dir "$RC" && cd "$RC" 2>/dev/null; then
@@ -108,9 +86,6 @@ else
     fi
   fi
 
-  # (e) 熱池（remote-cargo/<hash>/shared*）的 target/*/incremental：只刪 crate 層目錄，而且整棵都沒動才刪。
-  #     cargo 重編既有 unit 只改寫裡面的檔、不一定動目錄 mtime（#1177），所以判斷的是「目錄與底下任何一層有沒有近期的東西」。
-  #     讀不完（find 失敗）一律當成有近期的東西，保留（#1261）。
   if [ -d "$RC" ] && [ ! -L "$RC" ] && safe_dir "$RC" && cd "$RC" 2>/dev/null; then
     for h in ./*/; do
       h="${h%/}"; [ -d "$h" ] && [ ! -L "$h" ] || continue
@@ -134,8 +109,7 @@ else
     done
   fi
 
-  # (b)(c) 主樹與各 worktree 的 target/
-  gc_tree() { # gc_tree <樹的絕對路徑> <main|worktree>
+  gc_tree() {
     local tree="$1" kind="$2" prof inc profname
     [ -e "$tree/target" ] || return 0
     if ! safe_dir "$tree" || ! safe_dir "$tree/target"; then skip "${tree}（路徑不符預期或含 symlink）"; return 0; fi
@@ -144,9 +118,6 @@ else
     cd "$tree/target" || return 0
     [ "$(pwd -P)" = "$HOME_REAL${tree#"$HOME"}/target" ] || { skip "${tree}（實際位置不符）"; return 0; }
     if [ "$kind" = worktree ]; then
-      # .fingerprint、它的 unit 目錄與 unit 目錄裡的檔都超過門檻才算久沒用；cargo 重編既有 unit 只改寫裡面的檔，不動目錄 mtime（issue #1177）。
-      # 一個 .fingerprint 都沒有就不判斷。
-      # find 的錯誤不能當成「沒有近期檔」：讀不完（權限、I/O）就無法證明久沒用，整棵 target/ 保留（issue #1261）。
       local have=0 recent=0 unreadable=0 fp out rc
       for fp in ./*/.fingerprint; do
         [ -d "$fp" ] && [ ! -L "$fp" ] || continue
@@ -177,8 +148,6 @@ else
 
   if safe_dir "$AGM_REPO"; then
     gc_tree "${AGM_REPO%/}" main
-    # 登記的 worktree：git 自己的清單（#1450）。agm issue claim --worktree 給的多半是 ~/project/agm-* 這種路徑，
-    # 不在 .claude/worktrees 底下；以前一棵都掃不到。主樹自己不在這裡處理（上面已經做過）。
     GT_DONE=""
     if WTS=$("$GIT" -C "$AGM_REPO" worktree list --porcelain 2>/dev/null); then
       while IFS= read -r line; do
@@ -194,7 +163,6 @@ EOF_WTS
     else
       skip "git worktree list 失敗，只掃 .claude/worktrees"
     fi
-    # 沒登記的殘留目錄：照舊掃 .claude/worktrees/*（兩邊去重）。
     WT="${AGM_REPO%/}/.claude/worktrees"
     if [ -e "$WT" ] || [ -L "$WT" ]; then
       if safe_dir "$WT"; then
@@ -210,7 +178,6 @@ EOF_WTS
   else
     skip "${AGM_REPO}（路徑不符預期，整步放棄）"
   fi
-  # ubuntu-ci 的常駐 clone：只套 incremental 那條規則，整個 target/ 永不刪（它是 CI 的暖快取，跟主樹一樣）（#1450）。
   CI_REPO="${CI_ROOT}/repo"
   if [ -e "$CI_REPO" ] || [ -L "$CI_REPO" ]; then
     gc_tree "$CI_REPO" main
@@ -221,7 +188,6 @@ fi
 freed_mb=$((FREED_KB / 1024))
 log "釋放 ${freed_mb} MB${SKIPPED:+；跳過：$SKIPPED}"
 
-# (d) 磁碟水位
 cd / || true
 line=$("$DF" -Pk "$HOME" 2>/dev/null | awk 'NR == 2')
 if [ -n "$line" ]; then

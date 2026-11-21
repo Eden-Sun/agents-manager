@@ -1,6 +1,3 @@
-// 刪 AGM 的 bot 的第二次確認（issue #406）截圖：mock 模式的 vite（`cd web && VITE_MOCK=1 npx vite --port 5199`）＋headless Chrome。
-// `OUT=docs/screenshots/agm-delete-confirm node scripts/agm-delete-shots.mjs`（手機：`MOBILE=1`）。
-// daemon 的 409 `supervisor_owned` 用 `__amMock.failNext` 模擬；暫存 profile 用完就刪。
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -26,7 +23,6 @@ try {
   await send('Emulation.setDeviceMetricsOverride', mobile ? { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } : { width: 1280, height: 860, deviceScaleFactor: 2, mobile: false })
   await send('Page.navigate', { url: BASE }); await sleep(3000)
   if (mobile) { await ev(`document.querySelector('button[aria-label*="側邊欄"],button[aria-label*="選單"]')?.click()`); await sleep(600) }
-  // 那一列的 ⋯ → 刪除… → 第一個確認框的「刪除」。daemon 對 AGM 的 bot 回 409 supervisor_owned（第一次、不帶 confirm 的那一發）。
   const opened = await ev(`(()=>{const b=document.querySelector('button[aria-label=${JSON.stringify(BOT + ' 的操作')}]');if(!b)return false;b.click();return true})()`)
   console.log('menu', opened); await sleep(300)
   await ev(`[...document.querySelectorAll('.head-menu-item')].find(b=>b.textContent.trim()==='刪除…')?.click()`); await sleep(400)

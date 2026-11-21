@@ -14,7 +14,6 @@ daemon-swap.sh 的 start()）：systemd 看的是 cgroup 不是程序群，setsi
 import os
 import sys
 
-# pane 專用、不該被 daemon 繼承的環境變數（AM_DATA_DIR 會讓它開到別的資料目錄）。
 DROP = (
     "AM_DATA_DIR", "AM_RUN_ID", "AM_EFFORT", "AM_HOOK_TOKEN", "AM_KIND", "AM_MODEL",
     "AM_PORT", "AM_BOT_ID", "AM_BOT_TOKEN", "AM_AGENT_NAME", "AM_OUTBOX", "AM_CONFIG_PATH",
@@ -24,10 +23,8 @@ DROP = (
     "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
 )
 
-
 def daemon_path(home: str) -> str:
     return ":".join([f"{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
-
 
 def main() -> int:
     repo, log = sys.argv[1], sys.argv[2]
@@ -37,15 +34,12 @@ def main() -> int:
     os.chdir(repo)
     for key in DROP:
         os.environ.pop(key, None)
-    # launchd 給的是 /usr/bin:/bin:/usr/sbin:/sbin：daemon 起的子行程（herdr、gh、brew、claude…）全找不到，
-    # daemon.log 會一直累積「could not install the herdr skill … No such file or directory」（2026-09-22）。
     os.environ["PATH"] = daemon_path(os.environ.get("HOME", ""))
     out = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
     os.dup2(out, 1)
     os.dup2(out, 2)
     os.execv("./target/release/agents-managerd", ["./target/release/agents-managerd", "serve"])
-
 
 if __name__ == "__main__":
     sys.exit(main())

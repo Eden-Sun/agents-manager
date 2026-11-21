@@ -1,22 +1,8 @@
 #!/bin/bash
-# 上游新版分診（issue #204）：claude／codex 每出一版，把「該採用或該提防」的 changelog 條目派給專責 bot 判斷。
-# launchd `com.agm.release-triage` 每 30 分鐘跑一次；唯讀，只派工，**不升級、不改設定、不重啟**。
-#
-# 版本比較、切 changelog、分桶（dropped／kept／unmatched）全部交給
-# `agents-managerd release-triage-check --kind <k> --json`；這支腳本不做版本比較也不切段
-# （同 herdr-update-kick.sh 的原則），只照回來的 JSON 決定要不要派、派給誰、額度夠不夠。
-# 輸出契約：{"kind","from","to","pending":[{"version","kept":[{"id","text","categories":[]}],
-#            "unmatched":[{"id","text"}],"dropped_count"}]}；pending 是空的就安靜結束。
-#
-# 補的兩個 #66 留言的洞：殘留鎖永久停擺（鎖裡寫 pid＋時間，執行者不在就回收）、launchd PATH 找不到依賴
-# （開頭自補 PATH；缺依賴不靜默，log＋ops_alert）。
-#
-#   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、GH_BIN、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
-#   AGM_LOCK_HUNG_SECS、AGM_LOCK_QUIET_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
 
 SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
-PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
+PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH
 
 DIR="${AGM_DIR:-${HOME:-/nonexistent}/.config/agents-manager/supervisor/AGM}"
 REPO="${AGM_REPO:-${HOME:-/nonexistent}/project/agents-manager}"
@@ -29,17 +15,16 @@ CLAUDE_STATE="$DIR/claude-release.last"
 CLAUDE_DIFF_TASK="$DIR/claude-release-diff-task.md"
 CLAUDE_DIFF_OLD=""
 CLAUDE_DIFF_NEW=""
-BINDIFF="$DIR/bin/claude_binary_diff.py"   # 決定性 binary diff（#1919）；API 分診路徑用它的文字結果
+BINDIFF="$DIR/bin/claude_binary_diff.py"
 OWNER="${AM_AGENT_NAME:-release-triage-kick}"
 QUOTA_MAX="${AGM_TRIAGE_QUOTA_MAX:-85}"
-MAX_VERSIONS=5      # 一則交辦最多帶幾版
-MAX_ENTRIES=80      # 一則交辦 kept+unmatched 合計上限；超過的留給下一輪
-FAILS="$DIR/release-triage.fails"             # 連續幾輪沒能完成（完成一輪就清掉）
-FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-4}   # 每 30 分鐘一輪＝連續約 2 小時
-ROUND_FAIL=""                                 # 這一輪有沒有出過「沒能完成」的事（收尾時統一結算）
+MAX_VERSIONS=5
+MAX_ENTRIES=80
+FAILS="$DIR/release-triage.fails"
+FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-4}
+ROUND_FAIL=""
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
 . "${0%/*}/kick-common.sh" 2>/dev/null || {
   _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
   echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
@@ -50,11 +35,7 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 [ -x "$AGM" ] || { log "agm CLI 不在 ${AGM}，跳過"; exit 0; }
 
-# 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
-
-# Claude binary diff 曾由 claude-release-kick 獨立派工。現在只由這支 kick 把它附進 changelog
-# 分診交辦；版本狀態仍沿用 claude-release.last，派工成功後才推進。
-write_claude_state() { # write_claude_state <version>
+write_claude_state() {
   _t="$CLAUDE_STATE.tmp.$$"
   if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$CLAUDE_STATE" 2>/dev/null; then return 0; fi
   rm -f "$_t" 2>/dev/null
@@ -83,9 +64,7 @@ prepare_claude_diff() {
   CLAUDE_DIFF_NEW="$_new"
 }
 
-# 連續沒能完成（check／assign／publish 失敗、找不到派給誰、binary 不在）不能永遠只有 local log：
-# 一次抖動不吵人，連續 FAIL_ALERT_AFTER 輪推 ops_alert，完成一輪清零（同 herdr-update-kick.sh）。
-bump_fail() { # bump_fail <訊息>
+bump_fail() {
   _n=$(cat "$FAILS" 2>/dev/null)
   case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
   _n=$((_n + 1))
@@ -95,21 +74,15 @@ bump_fail() { # bump_fail <訊息>
 }
 settle() { if [ -n "$ROUND_FAIL" ]; then bump_fail "$ROUND_FAIL"; else rm -f "$FAILS" 2>/dev/null; fi; }
 
-# launchd 的預設 PATH 不含 Homebrew；缺依賴不能只靜默 exit 0，否則「已排程」但永遠不做（#66 留言）。
 command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 python3（PATH=${PATH}），上游新版分診停住"; exit 0; }
 [ -x "$BIN" ] || { log "找不到 ${BIN}，跳過（需要先建好 release binary）"; bump_fail "找不到 ${BIN}（需要先建好 release binary）"; exit 0; }
 
-# 鎖：兩個執行者同時派會送出重複交辦。鎖裡寫 pid 與時間（抄 daemon-update-kick.sh 的格式）：
-# SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手；還活著但卡太久才喊人。
 LOCK="$DIR/release-triage.lock"
 LOCK_GUARD="$DIR/release-triage.lock.guard"
-LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
-LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
-# 執行者剛拿到鎖不到這麼久就撞上＝同一秒內兩個排程一起到點（com.agm.release-triage 與相容入口
-# claude-release-kick.sh 的 com.agm.claude-release 兩個 timer，exec 進同一支腳本）：正常重疊，照擋不派，不寫 log
-# （原本每個 tick 都洗一行「已有執行者（0 秒）」）。超過這個時間還在跑才記，卡太久仍照舊喊人。
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}
 LOCK_QUIET_SECS=${AGM_LOCK_QUIET_SECS:-60}
-is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
+is_self_runner() {
   _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
   RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '
 import os, shlex, sys
@@ -169,8 +142,6 @@ fi
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
-  # 鎖的 mtime 在未來（時鐘倒退、鎖是搬來的）：年齡是負的，不可信。不能掉進「小於安靜門檻」而永遠安靜跳過
-  # （runner_hung 要等時間追上才推），執行者已死的鎖也不能卡到那時才回收：記一行，死鎖照回收。
   _age_bad=0
   if [ "$_age" -lt 0 ]; then
     _age_bad=1
@@ -178,7 +149,7 @@ if ! take_lock; then
   fi
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age_bad" = 1 ]; then
-      :   # 上面已記 log；執行者還活著，不搶、不派
+      :
     elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，上游新版分診停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
     elif [ "$_age" -ge "$LOCK_QUIET_SECS" ]; then
@@ -199,8 +170,6 @@ if ! take_lock; then
   fi
 fi
 
-# 派給誰：明指的 AGM_RELEASE_BOT ＞ runtime.json 的 release_bot_id（專用 child）＞ responder_bot_id（協調者）。
-# **不能是巡檢自己**——daemon 擋「總管對自己下交辦」（同 claude-release-kick.sh）；查不到就跳過，不亂派。
 BOT="${AGM_RELEASE_BOT:-}"
 if [ -z "$BOT" ] && [ -f "$DIR/runtime.json" ]; then
   BOT=$(python3 -c '
@@ -210,7 +179,6 @@ print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 ' "$DIR/runtime.json" 2>/dev/null)
 fi
 
-# 實作交辦交給能派 child 的協調者；release_bot_id 可能是禁止再派工的專用 child。
 ISSUE_BOT="${AGM_RELEASE_BOT:-}"
 if [ -z "$ISSUE_BOT" ] && [ -f "$DIR/runtime.json" ]; then
   ISSUE_BOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("responder_bot_id") or "")' "$DIR/runtime.json" 2>/dev/null)
@@ -218,9 +186,6 @@ fi
 
 prepare_claude_diff
 
-# 重試 gh 失敗、停在 judged 的版本（daemon 端刻意不做定時器，靠這裡每輪叫一次）。與有沒有 pending、額度夠不夠無關，
-# 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled）時安靜，不寫 log。
-# 舊的 bin/agm 沒有 release-triage 子命令（argparse exit 2）：只講一次，用 state 檔記「已經講過」，不每 30 分鐘洗 log。
 NO_PUBLISH_NOTE="$DIR/release-triage-publish-unsupported"
 for KIND in claude codex agy grok; do
   OUT=$("$AGM" --compact release-triage publish --kind "$KIND" 2>&1); RC=$?
@@ -246,9 +211,6 @@ for r in res:
 ' 2>/dev/null | while IFS= read -r _l; do log "$_l"; done
 done
 
-# 開出去的 issue 交給 AGM 接手實作（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）。
-# 帳本裡每張**新開**的 issue（`comment`＝只在既有 issue 留言的不算）交辦一次：request-id `release-issue-<編號>` 由 daemon 去重，
-# 交辦成功才記進狀態檔，下一輪不再送；不以建立時間截斷，停機或缺前置條件再久都補送。交給協調者 responder_bot_id（或明確覆寫），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
 SKIPPED="$DIR/release-issue-skipped"
@@ -299,7 +261,6 @@ for r in rows:
     note_fail "release-triage ${KIND} 有尚未交接的 issue，但找不到 ${ISSUE_TASK}"
     continue
   fi
-  # 不接在管線後面：管線裡的 while 是 subshell，`note_fail` 設的 ROUND_FAIL 會丟掉。
   while IFS=$'\t' read -r _state _num _url _kind _ver; do
     if [ "$_state" != ready ]; then
       note_fail "release-triage show --kind ${KIND} 產生無法識別的交接列，留待下一輪"
@@ -343,11 +304,8 @@ done
 }
 handoff_issues claude codex agy grok
 
-# 額度閘門（issue #204 §3）：該 bot 身份的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
-# 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。
-# 只在真的有 pending 時才查（沒事的輪次不打 API），且一輪只查一次（兩個 kind 派給同一顆 bot）。
-QUOTA_STATE=""   # ""＝還沒查；ok／blocked
-quota_gate() { # → 0 可派、1 擋下
+QUOTA_STATE=""
+quota_gate() {
   if [ -z "$QUOTA_STATE" ]; then
     _q=$("$AGM" --compact quota 2>/dev/null) || _q=""
     _s=$("$AGM" --compact state 2>/dev/null) || _s=""
@@ -380,11 +338,6 @@ except Exception:
   [ "$QUOTA_STATE" = ok ]
 }
 
-# daemon 自己用 Claude API 分診（#1919）：這批 pending 先丟 `agm release-triage auto`，daemon 驗過就直接落帳並通知使用者入口，
-# 不派協調者。僅用途停用或缺 key 才走協調者；API 模式失敗由 daemon 記 failed，UI 重試。
-# 全域：KIND、PAYLOAD、TO、CLAUDE_DIFF_*。回傳 0＝還有東西要派 bot（PAYLOAD／TO 已改成剩下的）、3＝API 全包了。
-# API 成功分診完的版本離開 pending，下一輪 `release-triage-check` 不會再回它，同一版不會重派 bot。
-# 注意：`agm release-triage auto` 不帶 --timeout 時 CLI 等最多 3600 秒（AUTO_TIMEOUT），涵蓋 daemon 單次 15 分鐘＋驗證重試＋排鎖。
 api_triage() {
   _en=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || { log "查不到 API 模式，這輪不派協調者"; return 3; }
   _enabled=$(printf '%s' "$_en" | python3 -c 'import json,sys; v=json.load(sys.stdin)["enabled"]; assert isinstance(v,bool); print(1 if v else 0)' 2>/dev/null) || return 3
@@ -446,11 +399,10 @@ print(json.dumps(payload, ensure_ascii=False, indent=2))
   if [ "$_left" = 0 ]; then return 3; fi
   TO=$(printf '%s\n' "$_rest" | sed -n 2p)
   PAYLOAD=$(printf '%s\n' "$_rest" | sed 1,2d)
-  return 3 # 這批開始時 API 模式已開；任何結果都不派協調者。
+  return 3
 }
 
 for KIND in claude codex agy grok; do
-  # 抓不到／CLI 壞掉就是這輪不做這個 kind，不當成「沒有新版」；另一個 kind 照跑。
   BINARY_ONLY=0
   REPORT=$("$BIN" release-triage-check --kind "$KIND" --json 2>>"$LOG") || {
     note_fail "release-triage-check --kind ${KIND} 失敗，這輪跳過 changelog 派工"
@@ -460,9 +412,6 @@ for KIND in claude codex agy grok; do
     PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
   }
   if [ "$BINARY_ONLY" -eq 0 ]; then
-  # 只挑這一則交辦要帶的版本（最多 MAX_VERSIONS 版、kept+unmatched 合計 MAX_ENTRIES 條，順序照 JSON，
-  # 第一版一定帶——單版超量也不能永遠卡住）。輸出第一行是這一批的 "to"，其後是精簡 JSON。
-  # 沒被截斷時 "to" 就是 JSON 的 to；截斷時用這批最後一版，避免下一輪同 request-id 被 daemon 去重吞掉。
   PICK=$(printf '%s' "$REPORT" | MAXV="$MAX_VERSIONS" MAXE="$MAX_ENTRIES" python3 -c '
 import json, os, sys
 d = json.load(sys.stdin)
@@ -493,7 +442,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
         TO="$CLAUDE_DIFF_NEW"
         PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
       else
-        continue   # pending 是空的：安靜，不寫 log
+        continue
       fi
       ;;
     *)
@@ -516,12 +465,10 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   if [ "$BINARY_ONLY" -eq 0 ]; then
     api_triage; _api_rc=$?
     if [ "$_api_rc" -eq 3 ]; then
-      # accept_submission 已直接 gh publish；同輪把新票送去實作，不等下一個 30 分鐘 tick。
       handoff_issues "$KIND"
       continue
     fi
   else
-    # 只有 binary、缺 changelog 時也不可繞過 API 模式去派 AGM。
     _mode=$("$AGM" --compact release-triage auto --kind "$KIND" --check 2>>"$LOG") || continue
     _enabled=$(printf '%s' "$_mode" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("enabled") else 0)' 2>/dev/null) || continue
     if [ "$_enabled" = 1 ]; then
@@ -537,8 +484,6 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY"); TMPS_COUNT=$((TMPS_COUNT + 1))
   NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"
   if [ "$BINARY_ONLY" -eq 1 ]; then
-    # A changelog notice for this version may already have been sent before the installed binary changed.
-    # Keep the legacy binary namespace in that case so daemon notice idempotency does not reject different text.
     NOTICE_ID="agm-claude-release-${TO}-notice"
   fi
   {
@@ -556,8 +501,6 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
     printf '\n\n通知 request-id（child 需原樣使用）：%s\n' "$NOTICE_ID"
   } > "$BODY"
 
-  # request-id 固定代表這批版本的目前一代；重排後 dispatch_gen 變了，便會取得新 id。
-  # 這也讓 assign 成功但 dispatched 記帳失敗時，重試同一代仍由 daemon 冪等去重。
   SHOW_ASSIGN='{"rows":[]}'
   if [ "$BINARY_ONLY" -eq 0 ]; then
     SHOW_ASSIGN=$("$AGM" --compact release-triage show --kind "$KIND" 2>>"$LOG") || {
@@ -601,13 +544,9 @@ except Exception as exc:
     note_fail "讀不到 ${KIND} 帳本目前代號，這輪不派工"
     continue
   }
-  # 旗標叫 `--request-id`（不是 --client-request-id）：拼錯的話 argparse 直接 exit 2，
-  # 而 stub 吃掉未知旗標的測試看不出來（2026-09-16 的事故，見 claude-release-kick.sh）。
   if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
        --request-id "$ASSIGN_ID" >> "$LOG" 2>&1; then
     log "${KIND} → ${TO}：已派 ${BOT} 分診"
-    # 只標這一則實際帶出去的版本（截斷後那批）。標失敗不重派：request-id 會擋住重複交辦；
-    # 帳本這輪停在 pending 只代表下一輪 check 又回同一批，下一輪同 request-id 由 daemon 去重。
     VERS=$(printf '%s' "$PAYLOAD" | python3 -c '
 import json, sys
 for p in json.load(sys.stdin)["pending"]:
@@ -621,7 +560,6 @@ for p in json.load(sys.stdin)["pending"]:
     done <<< "$VERS"
     DISPATCHED_OK=1
     if [ "$VARGS_COUNT" -gt 0 ]; then
-      # #801：收件 bot 一起記下，daemon 只收它（或它底下的 child）交這一批的 verdict。
       if "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" --bot "$BOT" >> "$LOG" 2>&1; then
         :
       else

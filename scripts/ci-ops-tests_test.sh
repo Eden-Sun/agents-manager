@@ -14,7 +14,6 @@ check "$(printf '%s\nscripts/ops/outbox-gc_test.sh\nscripts/ops/pane-gc_test.sh\
 check "$(printf '%s\nscripts/ops/browser-gc-linux_test.sh\n' "$guards" | sort)" scripts/ops/browser_gc_linux.py
 check "$(printf '%s\nscripts/ops/claude_binary_diff_test.sh\n' "$guards" | sort)" scripts/ops/claude_binary_diff.py
 check "$(printf '%s\nscripts/ops/project-transfer_test.sh\n' "$guards" | sort)" scripts/ops/project-transfer_test.py
-# 只有 README＋AGENTS.md（或 scripts/ 底下的文件）時不得全跑：AGENTS.md 只選 lint_scope_test.sh（#1077 釘住的那一支）。
 check "$(printf '%s\nscripts/lint_scope_test.sh\n' "$guards" | sort)" AGENTS.md
 check "$(printf '%s\nscripts/ops/cutover-helper_test.sh\n' "$guards" | sort)" scripts/ops/cutover-helper.py
 check "$(printf '%s\nscripts/wait-load_test.sh\n' "$guards" | sort)" scripts/wait-load.sh
@@ -28,12 +27,10 @@ for path in scripts/check.sh scripts/ops/destructive-canary.sh scripts/ops/insta
 done
 check __all__ scripts/ops/outbox-gc.sh scripts/ops/unknown.sh
 check __all__ scripts/ops/outbox-gc.sh crates/am-base/src/db.rs
-# A deleted entrypoint or missing suite must never silently skip the suite.
 tmp=$(mktemp -d)
 trap '/bin/rm -rf "$tmp"' EXIT
 deleted_entry=$(cd "$tmp" && printf 'scripts/ops/outbox-gc.sh\n' | python3 -B "$selector")
 grep -qx __all__ <<<"$deleted_entry"
-# Run check.sh's real dispatch against harmless suites, not just the selector in isolation.
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/bin"
 cp scripts/check.sh scripts/ci-ops-tests.py scripts/ci-rules.tsv "$fx/scripts/"
@@ -71,17 +68,13 @@ if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: unrelat
 full=$(run_changed scripts/check.sh)
 grep -q unrelated-suite <<<"$full"
 grep -q agm-suite <<<"$full"
-# 挑選結果要印出來：選中的數量與名單；全跑時要有明顯的 __all__ 標示。
 grep -q 'ops 測試：選中 ' <<<"$selected"
 grep -q 'ops 測試：__all__' <<<"$full"
-# AGENTS.md 只選 lint_scope；夾帶一支不認識的 ops 檔就全跑（不能被 AGENTS.md 的小範圍蓋掉）。
 agents_only=$(printf '%s\n' AGENTS.md | python3 -B "$selector")
 grep -qx scripts/lint_scope_test.sh <<<"$agents_only"
 if grep -qx __all__ <<<"$agents_only"; then echo 'FAIL: AGENTS.md alone ran everything'; exit 1; fi
 mixed_agents=$(printf '%s\n' AGENTS.md scripts/ops/unknown.sh | python3 -B "$selector")
 grep -qx __all__ <<<"$mixed_agents"
-# PR range dispatch must use the full-success baseline, keep guards, and fail open to all
-# tests when git cannot compare. No args (Ubuntu/daily/manual) must remain full.
 cat > "$fx/bin/git" <<'SH'
 #!/bin/bash
 case "$*" in
@@ -99,7 +92,6 @@ for guard in rust_test_mount db_filename test_discovery; do
     grep -q "guard-$guard" <<<"$selected"
 done
 if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: PR ran unrelated suite'; exit 1; fi
-# main-tip side joins the selection: docs-only main keeps the subset, unverified shared-script changes widen it.
 selected=$(run_ops full-success docs-main pr-head)
 grep -q selected-outbox <<<"$selected"
 if grep -Eq 'unrelated-suite|agm-suite' <<<"$selected"; then echo 'FAIL: docs-only main widened selection'; exit 1; fi

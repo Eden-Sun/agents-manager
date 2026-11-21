@@ -18,7 +18,6 @@ DESC = 'x.describe("a field description long enough to match")'
 ENV_A = "CLAUDE_CODE_OLD_FLAG"
 ENV_B = "CLAUDE_CODE_NEW_FLAG"
 
-
 def fake(root: Path, name: str, help_text: str, subs: dict[str, str] | None = None, trailer: str = "") -> str:
     """假 binary：shell script，檔尾 `#` 註解裡夾 describe／環境變數字串供掃描。"""
     cases = "".join(f'  {k}) cat <<\'EOT\'\n{v}\nEOT\n;;\n' for k, v in (subs or {}).items())
@@ -29,11 +28,9 @@ def fake(root: Path, name: str, help_text: str, subs: dict[str, str] | None = No
     path.chmod(0o755)
     return str(path)
 
-
 HELP_OLD = "Usage: claude [options] [command]\n\nOptions:\n  --old  gone\n\nCommands:\n  mcp  Manage MCP\n  help  x\n"
 HELP_NEW = ("Usage: claude [options] [command]\n\nOptions:\n  --new  fresh\n\nCommands:\n  mcp  Manage MCP\n"
             "  plugin|plugins  Plugins\n  help  x\n")
-
 
 class BinaryDiffTest(unittest.TestCase):
     def setUp(self):
@@ -66,7 +63,7 @@ class BinaryDiffTest(unittest.TestCase):
         b = fake(self.root, "b", HELP_OLD, trailer=f"{ENV_A} {DESC}")
         text = self.report(a, b)
         self.assertIn("(頂層 --help 無差異)", text)
-        self.assertEqual(text.count("(無)"), 2 + 4)  # 兩行子命令＋四個區塊
+        self.assertEqual(text.count("(無)"), 2 + 4)
 
     def test_output_is_deterministic(self):
         a = fake(self.root, "a", HELP_OLD, trailer=f"{ENV_A} {ENV_B}")
@@ -96,7 +93,7 @@ class BinaryDiffTest(unittest.TestCase):
         slow.chmod(0o755)
         text = cbd.build_report(str(slow), str(slow), 1.0, 600, 60000)
         self.assertIn("ERROR: OLD --help：", text)
-        self.assertIn("== NEW ENV ==", text)  # --help 卡住，字串掃描照樣產出
+        self.assertIn("== NEW ENV ==", text)
 
     def test_output_cap_truncates(self):
         old = fake(self.root, "old", HELP_OLD)
@@ -132,7 +129,6 @@ class BinaryDiffTest(unittest.TestCase):
 
     def test_subcommands_parser(self):
         self.assertEqual(cbd.subcommands(HELP_NEW), ["mcp", "plugin"])
-
 
 if __name__ == "__main__":
     unittest.main()

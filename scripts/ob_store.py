@@ -9,19 +9,14 @@ import time
 import uuid
 from pathlib import Path
 
-
 class OBError(Exception):
     pass
-
 
 def project_id(value):
     if not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", value or ""):
         raise OBError("project_id 必須是 AG Man project ID，不接受名稱或 worktree 名")
     return value
 
-
-# AGENTS.md：不貼 token／密碼／客戶資料。題目會一字不漏送到第三方的網頁，所以在入口擋明確長得像憑證的內容；
-# 規則刻意窄（要有夠長的值），一般的技術討論（「sk-xxx 格式」「X-AM-Token header」）不會被誤擋。
 SECRET_PATTERNS = (
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})")),
@@ -29,12 +24,10 @@ SECRET_PATTERNS = (
     ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}")),
     ("am_token_header", re.compile(r"X-AM-(?:Bot-|Service-)?Token\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}", re.I)),
-    # pane 的環境變數與 hook／service 憑證：只擋「名字 = 夠長的值」，單提名字不擋。
     ("am_env_token", re.compile(r"\bAM_(?:BOT|HOOK)_TOKEN\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}")),
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
 )
-
 
 def secret_in_question(text):
     """題目裡有憑證就回它的種類（不回值，錯誤訊息不能把祕密再印一次），否則 None。"""
@@ -50,17 +43,13 @@ def secret_in_question(text):
             return kind
     return None
 
-
 def conversation_url(value):
     if not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+", value or ""):
         raise OBError("需要 https://chatgpt.com/c/<conversation-id>")
     return value
 
-
 @contextlib.contextmanager
 def exclusive(path, wait=0):
-    # Never unlink lock files: an old fd and a new inode could both hold the lock.
-    # wait: seconds to retry, so a short status/recover probe cannot turn a fresh kick away.
     with open(path, "a") as fd:
         deadline = time.monotonic() + wait
         while True:
@@ -76,18 +65,15 @@ def exclusive(path, wait=0):
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
 
-
 class Store:
     CLAIMABLE = """SELECT * FROM requests r WHERE status IN ('pending','waiting_quota')
         AND NOT EXISTS (SELECT 1 FROM requests u WHERE u.project_id=r.project_id AND u.status IN ('unknown','running'))"""
 
-    # 一題的長度上限：整段會原樣 insertText 進網頁輸入框（再大就是卡死分頁），也會一直留在 DB 裡。
     MAX_QUESTION_CHARS = 100_000
 
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # `mkdir(exist_ok)` 不會改既有目錄的權限：題目與回答（可能是設計、程式碼）都在這裡，一律收成只有自己能進。
         if self.root.stat().st_mode & 0o077:
             os.chmod(self.root, 0o700)
         self.db = sqlite3.connect(self.root / "ob.sqlite3", timeout=30, isolation_level=None)
@@ -120,17 +106,12 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS conversations_live ON conversations(project_id, retired_at);
         """)
-        # Binds sends and results to the claim that started them; an orphan of an old claim cannot act for a new one.
-        # Check and ALTER in one write transaction: concurrent first runs of a new CLI must not both add it.
         with self.transaction():
             cols = {r[1] for r in self.db.execute("PRAGMA table_info(requests)")}
             if "claim_token" not in cols:
                 self.db.execute("ALTER TABLE requests ADD COLUMN claim_token TEXT")
-            # 這一單是不是「要開新的一串」。存在列上而不是記在記憶體：`remember_url`／`finish` 要靠它
-            # 分辨「輪替換串」與「別的分頁冒充這個 project」——後者仍然一律拒絕。
             if "rotate" not in cols:
                 self.db.execute("ALTER TABLE requests ADD COLUMN rotate INTEGER NOT NULL DEFAULT 0")
-            # 升級：既有 project 的那一串補一列，turns 用已完成的單數回填，才不會一升級就立刻輪替。
             for row in self.db.execute("SELECT id, url FROM projects WHERE url IS NOT NULL"):
                 if self.db.execute("SELECT 1 FROM conversations WHERE url=?", (row[1],)).fetchone():
                     continue
@@ -174,9 +155,7 @@ class Store:
             raise OBError("request_not_found")
         return dict(row)
 
-    #: 一串問滿這麼多題就換下一串。20 題的對話已經夠長到讓 GPT 開始「記得太多」。
     ROTATE_TURNS = int(os.environ.get("OB_ROTATE_TURNS") or 20)
-    #: 或者放了這麼多天——放久的那一串裡的背景多半已經不是現況了。
     ROTATE_DAYS = float(os.environ.get("OB_ROTATE_DAYS") or 14)
 
     def current_conversation(self, pid):
@@ -273,20 +252,17 @@ class Store:
                 raise OBError("project_already_linked：不覆寫既有對話")
             if self.db.execute("SELECT 1 FROM requests WHERE project_id=? AND status IN ('running','unknown')", (pid,)).fetchone():
                 raise OBError("project_busy_or_unknown")
-            # projects.url 只擋「現在正在用」的那一串；別的專案已輪替退役的舊對話也屬於它，要在這裡擋（與 _bind_url 一致）。
             owner = self.db.execute("SELECT project_id FROM conversations WHERE url=?", (url,)).fetchone()
             if owner and owner[0] != pid:
                 raise OBError("conversation_already_owned：其他 project 已使用此對話")
             try:
                 self.db.execute("INSERT INTO projects VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET label=excluded.label,url=excluded.url", (pid, label, url))
-                # 手動接回來的那串也要進輪替計時，否則它永遠不會換。
                 if not self.db.execute("SELECT 1 FROM conversations WHERE url=?", (url,)).fetchone():
                     self.db.execute("INSERT INTO conversations(project_id,url,started_at) VALUES (?,?,?)", (pid, url, time.time()))
             except sqlite3.IntegrityError:
                 raise OBError("conversation_already_owned：其他 project 已使用此對話")
 
     def recover(self):
-        # Only under worker.lock. A crashed operation may already have sent to GPT.
         with self.transaction():
             ids = [r[0] for r in self.db.execute("SELECT id FROM requests WHERE status='running'")]
             self.db.execute("UPDATE requests SET status='unknown',claim_token=NULL,error='worker_interrupted; inspect original conversation',updated_at=? WHERE status='running'", (time.time(),))
@@ -312,7 +288,6 @@ class Store:
                 return job
             if job["status"] not in ("running", "unknown"):
                 raise OBError("request_not_running")
-            # running belongs to its claim; only unknown may be finished without one (manual collect).
             if job["status"] == "running" and (not token or job["claim_token"] != token):
                 raise OBError("claim_lost：原單已被重新 claim，不覆寫")
             self._bind_url(job, url)
@@ -353,7 +328,6 @@ class Store:
         return self.get(ident)
 
     def claimable(self):
-        # Same eligibility as claim(), ignoring retry_after (a kicked worker just waits it out).
         return self.db.execute(self.CLAIMABLE + " LIMIT 1").fetchone() is not None
 
     def list(self, pid=None):

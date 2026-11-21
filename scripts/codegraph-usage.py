@@ -36,16 +36,14 @@ FILE_TOKEN = re.compile(r'[\w./-]*[\w-]+\.(?:rs|ts|tsx|js|mjs|py|sh|md|go|toml|j
 FIND_KINDS = ('codegraph', 'grep', 'read')
 FOLLOW_WINDOW = 5
 
-
 @dataclass
 class Call:
-    kind: str       # claude／codex／grok
+    kind: str
     bot: str
     session: str
     ts: dt.datetime
     tool: str
     text: str
-
 
 def classify(tool: str, text: str) -> str | None:
     """一次工具呼叫算哪一類；不是找程式回 None。`tool` 是工具名，`text` 是指令或參數。"""
@@ -64,7 +62,6 @@ def classify(tool: str, text: str) -> str | None:
             return 'read'
     return None
 
-
 def bot_of(cwd: str) -> str:
     if not cwd:
         return '?'
@@ -75,13 +72,11 @@ def bot_of(cwd: str) -> str:
         return 'main'
     return os.path.basename(cwd.rstrip('/')) or '?'
 
-
 def _ts(s: str) -> dt.datetime | None:
     try:
         return dt.datetime.fromisoformat(s.replace('Z', '+00:00'))
     except (ValueError, AttributeError):
         return None
-
 
 def _claude(path: str, since: dt.datetime):
     sess = os.path.basename(path)
@@ -101,7 +96,6 @@ def _claude(path: str, since: dt.datetime):
                 text = str(inp.get('command') or inp.get('file_path') or inp.get('pattern') or inp)
                 yield Call('claude', bot_of(cwd), sess, ts, c.get('name', ''), text)
 
-
 def _codex(path: str, since: dt.datetime):
     sess = os.path.basename(path)
     cwd = ''
@@ -119,7 +113,6 @@ def _codex(path: str, since: dt.datetime):
         if p.get('type') in ('function_call', 'custom_tool_call', 'mcp_tool_call'):
             text = str(p.get('arguments') or p.get('input') or '')
             yield Call('codex', bot_of(cwd), sess, ts, str(p.get('name') or ''), text)
-
 
 def _grok(path: str, since: dt.datetime):
     sess = os.path.basename(os.path.dirname(path))
@@ -142,16 +135,13 @@ def _grok(path: str, since: dt.datetime):
         text = str(raw.get('command') or raw) if tool == 'Bash' else json.dumps(raw, ensure_ascii=False)
         yield Call('grok', bot, sess, ts, tool, text)
 
-
 def _classify_call(c: Call) -> str | None:
     if c.kind == 'grok' and c.tool in ('grep', 'list_dir'):
         return 'grep'
     return classify(c.tool, c.text)
 
-
 def _files_in(c: Call) -> set[str]:
     return set(FILE_TOKEN.findall(c.text))
-
 
 def collect(days: float):
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
@@ -179,7 +169,6 @@ def collect(days: float):
     calls.sort(key=lambda c: c.ts)
     return calls, agy
 
-
 def followups(calls: list[Call]) -> dict[str, list[int]]:
     """kind → [帶檔名的 codegraph 呼叫數, 其後同檔又 grep／Read 的次數]。"""
     out: dict[str, list[int]] = defaultdict(lambda: [0, 0])
@@ -201,10 +190,8 @@ def followups(calls: list[Call]) -> dict[str, list[int]]:
                 out[c.kind][1] += 1
     return out
 
-
 def _pct(a: int, b: int) -> str:
     return f'{a / b:6.1%}' if b else '   n/a'
-
 
 def report(calls: list[Call], agy: int, days: float, top: int) -> None:
     per_kind: dict[str, Counter] = defaultdict(Counter)
@@ -240,7 +227,6 @@ def report(calls: list[Call], agy: int, days: float, top: int) -> None:
     for (bot, kind), c in rows:
         print(f'{bot[:22]:22} {kind:7} {c["all"]:8}  {c["codegraph"]:9}  {_pct(c["codegraph"], c["all"]):>10}')
 
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--days', type=float, default=7)
@@ -248,7 +234,6 @@ def main() -> None:
     a = ap.parse_args()
     calls, agy = collect(a.days)
     report(calls, agy, a.days, a.top)
-
 
 if __name__ == '__main__':
     main()

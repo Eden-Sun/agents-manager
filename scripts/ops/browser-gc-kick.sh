@@ -1,15 +1,10 @@
 #!/bin/zsh
-# 定期喚醒 agm-pxf2pv-browser-gc（sonnet）清理殭屍瀏覽器視窗。
-# launchd `com.agm.browser-gc`，`StartInterval 1800`（30 分鐘，見 scripts/ops/launchd/）。
-#
-#   AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS 可覆寫（測試用）。
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BOT=01M248GA4H1TAHJCZRKVR73S3C
 LOG="$DIR/browser-gc.log"
 cd "$DIR" || exit 1
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
-# 共用函式庫。找不到不能靜默停擺：寫 log、用不依賴 lib 的方式直接 agm ops-alert（agm 不在就只留 log），exit 1 讓排程看得到。
 . "${0%/*}/kick-common.sh" 2>/dev/null || {
   _m="找不到 ${0%/*}/kick-common.sh，${0##*/} 停擺（它要和 kick 一起裝進 bin/）"
   echo "$(date '+%F %T') ALERT kick_common_missing：$_m" >> "$LOG"; echo "$_m" >&2
@@ -19,19 +14,14 @@ log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 }
 echo "== $(date '+%F %T') kick" >> "$LOG"
 
-# 鎖（issue #490）：這一支會殺 Chrome、`rm -rf` profile、關 pane、派工，卻是 kick 家族裡唯一沒有鎖的。
-# 一輪跑超過 `StartInterval` 下一輪就疊上去，最明確的後果是重複派工。形狀抄 release-triage-kick.sh：
-# 鎖裡寫 pid 與時間；SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手，
-# 還活著但卡太久只記一行（這支沒有 ops-alert 的管道，不在這張票的範圍裡加）。
 LOCK="$DIR/browser-gc.lock"
-LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
-LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：記一行醒目的
+LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}
+LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}
 cleanup() { rm -rf "$LOCK" 2>/dev/null || true; true; }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
-  # `kill -0` 之外再比對指令名：pid 被回收之後，光看「還活著」會把別人的行程當成自己的執行者。
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'browser-gc-kick'; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       log "WARN: 上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，瀏覽器清理停住；必要時結束它並移除 ${LOCK}"
@@ -53,13 +43,6 @@ if ! take_lock; then
   fi
 fi
 
-# ── bot 的 headless Chrome（CDP 截圖用）────────────────────────────────────────
-# 這段用 shell 直接做，不花 LLM：判斷純機械（孤兒 + 沒有 CDP 連線 + 活超過 2 分鐘）。
-# 使用者自己的 Chrome 沒有 --headless，永遠不會進這個清單。
-# 注意 ppid=1 不等於「沒人在用」：bot 用 nohup/detached 起的實例，bot 還活著時 ppid 也是 1。
-# 所以再要求「debug port 上沒有 ESTABLISHED 連線」——正在截圖的實例一定有一條。
-# CDP 連線狀態三態（#1304）：`connected`＝有 ESTABLISHED、`none`＝lsof 正常結束且沒有輸出、其餘一律 `unknown`。
-# lsof 不存在、權限不足、輸出不完整都是 unknown：不能因為 grep 數到 0 就當成「沒有人在用」。
 cdp_state() {
   local out rc
   out=$(lsof -nP -iTCP:"$1" -sTCP:ESTABLISHED 2>&1); rc=$?
@@ -69,11 +52,8 @@ cdp_state() {
   fi
 }
 
-# 行程身份指紋（#1305）：啟動時間＋命令列。PID 會被回收，光靠 kill -0 分不出是原來那個還是新的行程。
 proc_fingerprint() { ps -o lstart=,command= -p "$1" 2>/dev/null; }
 
-# 路徑是不是有歧義（#1310）：ps 給的命令列是拍平的字串，路徑含空白時 sed 只能拿到前半段。
-# 截出來的前綴同時是另一個 /tmp/am-* 目錄的前綴，就不能據此刪（可能刪到別人的 profile）。
 dir_ambiguous() {
   local c
   for c in /tmp/am-*(N); do
@@ -89,7 +69,6 @@ reap_headless() {
     local pid ppid secs dir port fp after
     pid=$(echo "$line" | awk '{print $1}')
     ppid=$(echo "$line" | awk '{print $2}')
-    # macOS 的 ps 沒有 etimes，只有 etime（[[D-]HH:]MM:SS），自己換算成秒。
     secs=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' | awk -F'[-:]' '{
       if (NF==4) print (($1*24+$2)*60+$3)*60+$4;
       else if (NF==3) print (($1*60)+$2)*60+$3;
@@ -106,11 +85,9 @@ reap_headless() {
         unknown) echo "  keep headless pid ${pid}（port $port 的 CDP 連線狀態無法判定，保守保留）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue ;;
       esac
     fi
-    # 算不出年齡就當成「剛起」保守保留，寧可下一輪再收。
     if [ -z "${secs:-}" ] || [ "$secs" -lt 120 ]; then
       echo "  keep headless pid ${pid}（剛起 ${secs}s，client 可能還沒連上）dir=$dir" >> "$LOG"; kept=$((kept+1)); continue
     fi
-    # 身份（#1305）：送 TERM 之前，指紋要對得上剛才列舉到的那個行程；送 KILL 之前，要還是同一個。
     fp=$(proc_fingerprint "$pid")
     case "$fp" in
       *--headless*) ;;
@@ -118,7 +95,6 @@ reap_headless() {
     esac
     kill -TERM "$pid" 2>/dev/null
     sleep 3
-    # TERM 後指紋是空的＝行程已經結束（正常情況，不用 KILL、不用記）；還在而指紋相同才送 KILL；變了才是 PID 被回收。
     after=$(proc_fingerprint "$pid")
     if [ -z "$after" ]; then
       :
@@ -128,8 +104,6 @@ reap_headless() {
       echo "  pid ${pid} 已不是原來的行程（TERM 後身份改變，PID 可能被回收），不送 KILL" >> "$LOG"
     fi
     echo "  reap headless pid ${pid}（孤兒、無 CDP 連線、活了 ${secs:-?}s）dir=$dir" >> "$LOG"
-    # 帶 .. 的不刪：/tmp/am-x/../../foo 前綴上像 /tmp/am-*，實際指到別處（#373）。
-    # 路徑含空白而被截斷的不刪（#1310）：下一輪 reap_profiles 會用完整比對處理。
     case "$dir" in *..*) ;; /tmp/am-*)
       if dir_ambiguous "$dir"; then echo "    保留 ${dir}（路徑可能含空白、無法確定，交給 profile 清理）" >> "$LOG"
       else rm -rf "$dir" && echo "    rm -rf $dir" >> "$LOG"
@@ -142,10 +116,6 @@ EOF2
   echo "headless Chrome：收掉 ${reaped}／保留 $kept" >> "$LOG"
 }
 
-# 沒有 Chrome 在用的 /tmp/am-* profile 目錄（上次跑完沒刪的殘留）。1 小時內動過的不碰，
-# 免得殺到正在起的實例。
-# 這個目錄有沒有被任何 Chrome 命令列引用（#1306、#1310）：headless 與使用者自己的 GUI Chrome 都算；
-# 比對是「--user-data-dir=<目錄>」後面接空白或行尾，不用空白切（路徑可能含空白）。寧可多留，不可漏刪。
 profile_in_use() {
   D="$1" awk 'BEGIN { k = "--user-data-dir=" ENVIRON["D"] }
     { s = $0; while ((i = index(s, k)) > 0) { r = substr(s, i + length(k)); if (r == "" || substr(r, 1, 1) == " ") found = 1; s = substr(s, i + 1) } }
@@ -154,14 +124,10 @@ profile_in_use() {
 
 reap_profiles() {
   local n=0 sz psout cmds d
-  # 列不出行程就什麼都不刪：不知道誰在用，就當成都在用（#1306）。
   if ! psout=$(ps -axo command 2>/dev/null); then
     echo "profile 目錄：略過（無法列出行程）" >> "$LOG"; return
   fi
   cmds=$(printf '%s\n' "$psout" | grep 'Google Chrome' | grep -v grep)
-  # 任何 /tmp/am-* 只要長得像 Chrome profile（有 Local State / Default / DevToolsActivePort）就算；
-  # 截圖、build target 之類的目錄沒有這些標記，不會被碰。
-  # (N)＝沒符合就展開成空；只放寬這一個 glob，不對整支 setopt nonomatch（#371）。
   for d in /tmp/am-*(N); do
     [ -d "$d" ] || continue
     { [ -e "$d/Local State" ] || [ -d "$d/Default" ] || [ -e "$d/DevToolsActivePort" ]; } || continue
@@ -176,7 +142,6 @@ reap_profiles() {
 reap_headless
 reap_profiles
 "$DIR/bin/pane-gc.sh"
-# 若尚未 running 就啟動（逾時不算失敗，daemon 會繼續起）
 if ! bin/agm --compact state | python3 -c "
 import json,sys;d=json.load(sys.stdin)
 b=[x for x in d['bots'] if x['id']=='$BOT'][0]
@@ -184,9 +149,5 @@ sys.exit(0 if (b.get('run') or {}).get('state')=='running' else 1)"; then
   bin/agm bot start "$BOT" >> "$LOG" 2>&1
   sleep 20
 fi
-# `--request-id` **刻意保持分鐘級**（issue #490）：`turns_client_req` 是
-# `(conversation_id, client_request_id)` 上**沒有時間範圍**的唯一索引（`crates/am-base/src/db.rs:105`），
-# 所以換成日期級的「穩定 key」會讓一天 48 輪只有第一輪派得出去，其餘全被當成重試擋掉。
-# 防重複派工靠的是上面那把鎖——鎖擋住重疊之後，每一輪本來就只會有一個 key。
 bin/agm --compact assign --review-by patrol --bot "$BOT" --text-file browser-gc-task.md \
   --request-id "agm-browser-gc-$(date +%Y%m%d-%H%M)" >> "$LOG" 2>&1

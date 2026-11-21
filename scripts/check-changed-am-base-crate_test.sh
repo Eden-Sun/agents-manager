@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# check.sh changed 對 `__am_base_crate__`（ci-daemon-filters.sh 印的）的編排（#2072）：只改了 am-base crate 自己的測試會讀的
-# 非 Rust 檔（baseline.toml、host-baseline-sync-mac-verify.sh、codex-async fixtures）時，要補跑 `cargo test -p am-base`。
 set -euo pipefail
 unset CHECK_TESTS CHECK_MAX_LOAD
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,7 +7,6 @@ trap '/bin/rm -rf "$tmp"' EXIT
 repo="$tmp/repo"
 mkdir -p "$repo/scripts" "$repo/web" "$tmp/bin"
 cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
-# 假的選測腳本要讀完 stdin（#1986，同 check-changed-release-triage_test.sh）。
 printf '#!/bin/bash\ncat >/dev/null\necho daemon\n' > "$repo/scripts/ci-changed-parts.sh"
 printf '#!/bin/bash\ncat >/dev/null\nprintf "%%s\\n" $AM_TEST_FILTERS\n' > "$repo/scripts/ci-daemon-filters.sh"
 cat > "$tmp/bin/git" <<'SH'

@@ -23,9 +23,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 TOOL = os.path.join(HERE, "project-transfer")
 PID, OTHER = "01PROJTRANSFER0000000000P1", "01PROJTRANSFER0000000000Q1"
 B1, B2, C1, QB = "01BOT000000000000000000B01", "01BOT000000000000000000B02", "01BOT000000000000000000C01", "01BOT000000000000000000Q01"
-D1 = "01BOT000000000000000000D01"  # 已軟刪的 child
+D1 = "01BOT000000000000000000D01"
 DELETED_ROWS = {"r-dead", "r-dead-kid", "t-dead", "m-dead", "m-dead-kid", "a-dead", B2, D1, "cv-" + B2, "cv-" + D1}
-
 
 def schema_statements():
     with open(os.path.join(ROOT, "crates/am-base/src/db.rs"), encoding="utf-8") as f:
@@ -39,11 +38,7 @@ def schema_statements():
         "PRAGMA user_version = 29",
     ]
 
-
-# 協調者的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
-# 先建表、再補欄、最後建索引（有些索引用到 ALTER 才加的欄，例如 supervisor_inbox.role）。
 MODULES = ["crates/am-supervisor/src/supervisor/store.rs", "crates/am-supervisor/src/supervisor/roles.rs"]
-
 
 def module_statements():
     tables, alters, indexes = [], [], []
@@ -58,11 +53,9 @@ def module_statements():
     assert len(tables) >= 12 and len(alters) >= 40, (len(tables), len(alters))
     return tables + alters + indexes
 
-
 def make_db(path):
     conn = sqlite3.connect(path)
     for s in schema_statements():
-        # 跟 db::apply_migrations 一樣：已經有這一欄就不加（SCHEMA 裡本來就有的欄位 ALTER 名單也列著）。
         m = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", s)
         if m and m.group(2) in [r[1] for r in conn.execute(f"PRAGMA table_info({m.group(1)})")]:
             continue
@@ -70,9 +63,7 @@ def make_db(path):
     conn.commit()
     return conn
 
-
 T0 = "2026-09-28T01:00:00.000Z"
-
 
 def seed_source(conn, att_file):
     x = conn.execute
@@ -92,7 +83,6 @@ def seed_source(conn, att_file):
         x("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)", ("cv-" + bid, bid, T0))
     run = ("INSERT INTO runs (id, bot_id, state, native_session_id, transcript_path, pane_id, started_at, ended_at)"
            " VALUES (?,?,?,?,?,?,?,?)")
-    # 同一毫秒起的兩個 run：挑最後一個靠 rowid（issue #461），插入順序必須保住。
     x(run, ("r-z-old", B1, "exited", "sess-old", "/t/old.jsonl", "p1", T0, T0))
     x(run, ("r-a-new", B1, "running", "sess-new", "/t/new.jsonl", "p2", T0, None))
     x(run, ("r-kid", C1, "running", "sess-kid", None, "p3", T0, None))
@@ -122,14 +112,11 @@ def seed_source(conn, att_file):
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B2, T0, "m-dead"))
     conn.commit()
 
-
 def ago(days):
     t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-
 AGM_CWD = "/Users/me/.config/agents-manager/supervisor/AGM"
-
 
 def seed_supervisor(conn):
     """協調者（#720）：每一種挑選規則各一筆要搬、一筆不搬的。"""
@@ -167,9 +154,7 @@ def seed_supervisor(conn):
              " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
     x(inbox, ("i-old-handled", "AGM", "k-old-handled", "bot_turn_done", "handled", None, 1, None, old, old))
     x(inbox, ("i-old-target", "AGM", "k-old-target", "bot_turn_done", "handled", None, 1, None, old, old))
-    # 舊版寫的秒格式：跟毫秒格式比要先正規化，不然字串比較會把它當成「比 cutoff 新」。
     x(inbox, ("i-old-seconds", "AGM", "k-old-seconds", "bot_turn_done", "handled", None, 1, None, old[:19] + "Z", old))
-    # SQLite `datetime()` 的空白格式、落在截止那一天但晚於截止時刻：直接比字串的話空白排在 `T` 前面，會被當成比較舊而漏掉。
     edge = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7, hours=-1)).strftime("%Y-%m-%d %H:%M:%S")
     x(inbox, ("i-edge-space", "AGM", "k-edge-space", "bot_turn_done", "handled", None, 1, None, edge, edge))
     x(inbox, ("i-old-pending", "AGM", "k-old-pending", "bot_turn_done", "pending", None, 2, now, old, old))
@@ -178,7 +163,6 @@ def seed_supervisor(conn):
     x(inbox, ("i-new-merged", "AGM", "k-new-merged", "bot_turn_done", "handled", "i-old-target", 1, None, now, now))
     x(inbox, ("i-collide", "AGM", "persona:3:changed", "persona_changed", "pending", None, 0, None, now, now))
     conn.commit()
-
 
 TARGET_CONFIG = """[server]
 listen = "127.0.0.1:7788"
@@ -196,32 +180,26 @@ label = "r"
 idle_close_secs = 600
 """
 
-
 def run(*argv, env=None, check=True):
     p = subprocess.run([sys.executable, "-B", TOOL, *argv], capture_output=True, text=True, env=env)
     if check and p.returncode != 0:
         raise AssertionError(f"{argv} rc={p.returncode}\nstdout={p.stdout}\nstderr={p.stderr}")
     return p
 
-
 def slurp(path, mode="rb"):
     with open(path, mode) as f:
         return f.read()
-
 
 def put(path, data):
     with open(path, "wb" if isinstance(data, bytes) else "w") as f:
         f.write(data)
 
-
 def digest(path):
     return hashlib.sha256(slurp(path)).hexdigest()
-
 
 def counts(conn):
     return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
             for t in ("projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads")}
-
 
 class ProjectTransferTest(unittest.TestCase):
     def setUp(self):
@@ -311,7 +289,6 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(runs["r-a-new"]["exit_reason"], "project transfer")
         self.assertIsNotNone(runs["r-a-new"]["ended_at"])
         self.assertIsNone(runs["r-z-old"]["exit_reason"], "本來就結束的 run 不改")
-        # 跟 db::last_native_session 同一句：接回要挑到最後那段。
         last = c.execute("SELECT native_session_id FROM runs WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL"
                          " ORDER BY started_at DESC, rowid DESC LIMIT 1", (B1,)).fetchone()[0]
         self.assertEqual(last, "sess-new")
@@ -485,10 +462,8 @@ class ProjectTransferTest(unittest.TestCase):
         out = self.local_import(transcripts_here=False)
         w = [x for x in out["warnings"] if "transcript" in x]
         self.assertEqual(len(w), 1, out["warnings"])
-        self.assertIn("2 段", w[0])  # r-kid 沒記 transcript_path：沒得看
+        self.assertIn("2 段", w[0])
         self.assertIn("transcript-transfer", w[0])
-
-    # ------------------------------------------------ #720 協調者
 
     def sup_export(self):
         src = sqlite3.connect(self.src_path)
@@ -606,7 +581,6 @@ class ProjectTransferTest(unittest.TestCase):
 
     def test_failed_insert_rolls_back_db_and_config(self):
         self.export()
-        # 目標已有同一個 native turn（UNIQUE turns_native）：插到一半失敗，前面插過的也要回滾。
         c = self.tgt()
         c.execute("INSERT INTO projects (id, path, label, host, created_at) VALUES ('px','/x','x','local',?)", (T0,))
         c.execute("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('bx','px','x','claude','t',?)", (T0,))
@@ -633,7 +607,6 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(digest(self.cfg), cfg0)
 
     def test_config_with_daemon_empty_projects_array(self):
-        # daemon 在專案清單為空時寫的是頂層 `projects = []`；直接 append `[[projects]]` 是 duplicate key（智選hub 實測）。
         put(self.cfg, "projects = []\n\n[server]\nlisten = \"127.0.0.1:7788\"\n\n[[hosts]]\nname = \"mac_builder\"\nssh = \"mac_builder\"\n\n[panes]\nidle_close_secs = 600\n")
         self.export()
         cfg0 = digest(self.cfg)
@@ -652,9 +625,7 @@ class ProjectTransferTest(unittest.TestCase):
     def test_refuses_config_whose_projects_cannot_take_an_append(self):
         hosts = '\n[[hosts]]\nname = "mac_builder"\nssh = "mac_builder"\n'
         cases = {
-            # inline 陣列：append `[[projects]]` 直接 duplicate key，解析不了。
             "inline": 'projects = [{ id = "01TARGETPROJ00000000000R01", path = "/home/u/r", label = "r" }]\n' + hosts,
-            # 解析得過但內容變了：多行字串裡剛好有一行 `projects = []`，刪掉它會改到別的值。
             "in-string": 'note = """\nprojects = []\n"""\n' + hosts,
         }
         self.export()
@@ -675,7 +646,6 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual([f for f in os.listdir(self.tgt_dir) if "pre-transfer" in f and "config" in f], [])
 
     def add_legacy_team_columns(self, team_id):
-        # 已移除的 Team 功能留在舊 DB 的欄位（db.rs：`teams`／`team_*` may exist; nothing reads them）。
         s = sqlite3.connect(self.src_path)
         s.execute("ALTER TABLE bots ADD COLUMN team_id TEXT")
         s.execute("ALTER TABLE bots ADD COLUMN team_role TEXT")
@@ -715,7 +685,6 @@ class ProjectTransferTest(unittest.TestCase):
         p = self.imp(check=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("sent_via", p.stderr)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

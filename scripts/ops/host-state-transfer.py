@@ -17,19 +17,15 @@ import tempfile
 import tomllib
 from pathlib import Path, PurePosixPath
 
-
 FORMAT = "agm-host-state/1"
 HOME_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "grok": "GROK_HOME"}
 DEFAULT_DIRS = {"claude": ".claude", "codex": ".codex", "grok": ".grok"}
 
-
 class TransferError(Exception):
     pass
 
-
 def fail(message):
     raise TransferError(message)
-
 
 def regular_file(path, label):
     try:
@@ -39,7 +35,6 @@ def regular_file(path, label):
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         fail(f"{label} 必須是一般檔案（不跟隨 symlink）：{path}")
 
-
 def directory(path, label):
     try:
         mode = path.lstat().st_mode
@@ -47,7 +42,6 @@ def directory(path, label):
         fail(f"{label}: {exc}")
     if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
         fail(f"{label} 必須是一般目錄（不跟隨 symlink）：{path}")
-
 
 def parse_maps(items):
     maps = []
@@ -61,17 +55,14 @@ def parse_maps(items):
         maps.append((src, dst))
     return sorted(maps, key=lambda pair: len(pair[0]), reverse=True)
 
-
 def rewrite_paths(text, maps):
     reports = []
     for src, dst in maps:
-        # 只換完整路徑前綴，不把 /Users/me-old 或一般單字當成路徑。
         pattern = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(src) + r"(?=$|[/\\\"'\s,:;\]\}\)])")
         text, count = pattern.subn(dst, text)
         if count:
             reports.append({"from": src, "to": dst, "occurrences": count})
     return text, reports
-
 
 def expand_home(value, home):
     raw = str(value)
@@ -81,7 +72,6 @@ def expand_home(value, home):
     elif raw.startswith("~/"):
         raw = str(home / raw[2:])
     return os.path.normpath(raw) if raw.startswith("/") else raw
-
 
 def identity_inventory(config, home):
     """只列 identity 使用的設定目錄路徑與是否存在，絕不讀目錄內容。"""
@@ -111,13 +101,11 @@ def identity_inventory(config, home):
         raw = env.get(HOME_VARS[kind]) if isinstance(env, dict) else None
         add(name, kind, raw or str(home / DEFAULT_DIRS[kind]), "config")
 
-    # shell alias identities (ccN) 可能不在 config.toml；只列家目錄下同類目錄名稱。
     for kind in HOME_VARS:
         for path in sorted(home.glob(f".{kind}*")):
             if path.is_dir() and not path.is_symlink():
                 add(None, kind, str(path), "home-directory")
     return {"format": FORMAT, "directories": sorted(rows.values(), key=lambda row: row["path"])}
-
 
 def copy_tree_no_links(source, destination):
     files = []
@@ -144,10 +132,8 @@ def copy_tree_no_links(source, destination):
             files.append({"path": rel, "sha256": digest(data), "size": len(data)})
     return sorted(files, key=lambda row: row["path"])
 
-
 def digest(data):
     return hashlib.sha256(data).hexdigest()
-
 
 def write_new(path, data, mode):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -166,10 +152,8 @@ def write_new(path, data, mode):
         except FileNotFoundError:
             pass
 
-
 def write_json(path, value):
     write_new(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode(), 0o600)
-
 
 def read_json(path, label):
     regular_file(path, label)
@@ -177,7 +161,6 @@ def read_json(path, label):
         return json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         fail(f"{label} 讀取失敗：{exc}")
-
 
 def load_bundle(path):
     directory(path, "bundle")
@@ -198,7 +181,6 @@ def load_bundle(path):
         safe_relative(row.get("path"))
         regular_file(outbox / row["path"], "bundle outbox 項目")
     return manifest, config
-
 
 def snapshot(args):
     source = Path(args.source_data)
@@ -251,7 +233,6 @@ def snapshot(args):
                       "identity_directories": manifest["identity_directories"],
                       "path_rewrites": rewrite_report}, ensure_ascii=False))
 
-
 def safe_relative(raw):
     if not isinstance(raw, str):
         fail("outbox manifest path 必須是字串")
@@ -259,7 +240,6 @@ def safe_relative(raw):
     if p.is_absolute() or not p.parts or any(part in ("", ".", "..") for part in p.parts):
         fail(f"不安全的 outbox 相對路徑：{raw!r}")
     return p
-
 
 def check_outbox_target(target, files):
     root = target / "outbox"
@@ -284,7 +264,6 @@ def check_outbox_target(target, files):
             plan.append({"path": rel.as_posix(), "action": "copy"})
     return plan
 
-
 def config_blocks(text):
     """把 TOML 依 table header 分塊，便於將 project-transfer 寫好的 projects 保留下來。"""
     blocks = []
@@ -303,7 +282,6 @@ def config_blocks(text):
         blocks.append((root, "".join(current)))
     return blocks
 
-
 def merge_config(source_text, target_text):
     try:
         source = tomllib.loads(source_text)
@@ -312,7 +290,6 @@ def merge_config(source_text, target_text):
         fail(f"config.toml 無法解析：{exc}")
     source_other = [block for root, block in config_blocks(source_text) if root != "projects"]
     target_projects = [block for root, block in config_blocks(target_text) if root == "projects"]
-    # project sections 只保留目標現有定義；沒有的留給後續 project-transfer append。
     project_blocks = target_projects
     merged = "\n".join(part.rstrip("\n") for part in source_other + project_blocks).rstrip() + "\n"
     try:
@@ -320,7 +297,6 @@ def merge_config(source_text, target_text):
     except tomllib.TOMLDecodeError as exc:
         fail(f"合併後 config.toml 無法解析：{exc}")
     return merged, source, target, merged_obj
-
 
 def take_lock(target):
     path = target / "daemon.lock"
@@ -333,12 +309,10 @@ def take_lock(target):
         fail(f"目標 daemon.lock 仍被持有，拒絕移交設定：{path}")
     return fd
 
-
 def atomic_write(path, data, mode=0o600):
     if path.exists() or path.is_symlink():
         regular_file(path, str(path))
     write_new(path, data, mode)
-
 
 def prepare_backup(backup, target):
     if backup.exists() or backup.is_symlink():
@@ -357,7 +331,6 @@ def prepare_backup(backup, target):
             write_new(backup / name, (target / name).read_bytes(), 0o600)
     write_json(backup / "backup.json", meta)
     return meta
-
 
 def remove_added_outbox(target, meta):
     removed, preserved = [], []
@@ -381,7 +354,6 @@ def remove_added_outbox(target, meta):
             pass
     return removed, preserved
 
-
 def restore_locked(target, backup, meta, mark_restored=True):
     errors = []
     for name, key in (("config.toml", "had_config"), ("ui-token", "had_ui_token")):
@@ -399,7 +371,6 @@ def restore_locked(target, backup, meta, mark_restored=True):
         meta["restored"] = True
     write_json(backup / "backup.json", meta)
     return {"restored": True, "outbox_removed": removed, "warnings": errors}
-
 
 def install(args):
     bundle = Path(args.bundle)
@@ -429,10 +400,6 @@ def install(args):
             fail("這份 backup 已 rollback，請為新的移交使用新的 backup 目錄")
         copied_now = []
         try:
-            # Journal every missing outbox path before its first write. If the process is killed
-            # after os.replace but before returning, a retry and later rollback still know which
-            # matching file belongs to this transfer. Paths already present before this install
-            # stay unclaimed so rollback never removes target-owned files.
             planned = {item["path"] for item in meta.get("outbox_added") or []}
             for row, item in zip(manifest.get("outbox_files") or [], outbox_plan):
                 if item["action"] == "copy" and row["path"] not in planned:
@@ -467,7 +434,6 @@ def install(args):
                 path = target / "outbox" / Path(*rel.parts)
                 if path.is_file() and not path.is_symlink() and digest(path.read_bytes()) == item["sha256"]:
                     path.unlink()
-            # 若是既有 backup，恢復目標原始 config/token；否則使用剛建立的 backup。
             restore_locked(target, backup, meta, mark_restored=False)
             meta["outbox_added"] = []
             meta["installed"] = False
@@ -477,7 +443,6 @@ def install(args):
         print(json.dumps({"installed": True, **report}, ensure_ascii=False))
     finally:
         os.close(fd)
-
 
 def verify(args):
     bundle, target = Path(args.bundle), Path(args.target_data)
@@ -508,7 +473,6 @@ def verify(args):
     if problems:
         fail("host-state 驗證失敗")
 
-
 def restore(args):
     target, backup = Path(args.target_data), Path(args.backup_dir)
     directory(target, "target data")
@@ -529,10 +493,8 @@ def restore(args):
         os.close(fd)
     print(json.dumps(report, ensure_ascii=False))
 
-
 def add_maps(parser):
     parser.add_argument("--map", action="append", default=[], metavar="SRC=DST")
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -564,7 +526,6 @@ def main():
         print(f"host-state-transfer: {exc}", file=sys.stderr)
         return 1
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

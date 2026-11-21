@@ -38,14 +38,11 @@ UTC = dt.timezone.utc
 FIELDS = (("in", "input_tokens"), ("w", "cache_creation_input_tokens"),
           ("r", "cache_read_input_tokens"))
 
-
 class AuditError(Exception):
     pass
 
-
 def signature(value, prefix):
     return prefix + hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12]
-
 
 def project_tag(value):
     for tag in ("supervisor-AGM-responder", "supervisor-AGM"):
@@ -53,14 +50,12 @@ def project_tag(value):
             return tag
     return signature(value, "p-")
 
-
 def parse_ts(value):
     try:
         stamp = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
         return stamp.astimezone(UTC) if stamp.tzinfo is not None else None
     except (ValueError, AttributeError, OverflowError):
         return None
-
 
 def positive_int(value):
     try:
@@ -71,7 +66,6 @@ def positive_int(value):
         raise argparse.ArgumentTypeError("requires a positive integer")
     return number
 
-
 def positive_float(value):
     try:
         number = float(value)
@@ -80,7 +74,6 @@ def positive_float(value):
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("requires a positive finite number")
     return number
-
 
 def session_files(root, projects, max_files):
     base = os.path.expanduser(root)
@@ -109,7 +102,6 @@ def session_files(root, projects, max_files):
             seen.add(identity)
             yield path, project_tag(project), sub
 
-
 def user_text(record, message):
     if record.get("type") != "user" or record.get("isMeta") or message.get("role") != "user":
         return False
@@ -118,12 +110,10 @@ def user_text(record, message):
         return bool(content.strip())
     if not isinstance(content, list):
         return False
-    # A tool response may include explanatory text; it is still not a user turn.
     if any(isinstance(x, dict) and x.get("type") == "tool_result" for x in content):
         return False
     return any(isinstance(x, dict) and x.get("type") == "text"
                and isinstance(x.get("text"), str) and x["text"].strip() for x in content)
-
 
 def collect(args, since, until):
     quality = collections.Counter()
@@ -217,29 +207,23 @@ def collect(args, since, until):
     quality["user_turns"] = len(user_keys)
     return records, users, quality
 
-
 def complete(record):
     return all(record[name] is not None for name, _ in FIELDS)
-
 
 def context(record):
     return sum(record[name] for name, _ in FIELDS)
 
-
 def percentile(values, fraction):
     return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)] if values else None
 
-
 def number(value, scale=1, digits=1):
     return "NA" if value is None else f"{value / scale:.{digits}f}"
-
 
 def metrics(records):
     measured = [x for x in records if complete(x)]
     total = {name: sum(x[name] for x in measured) for name, _ in FIELDS}
     contexts = [context(x) for x in measured]
     return measured, total, contexts
-
 
 def cmd_summary(args, records, users):
     by = collections.defaultdict(list)
@@ -263,7 +247,6 @@ def cmd_summary(args, records, users):
         row(project, rs)
     if records:
         row("TOTAL", records)
-
 
 def cmd_sessions(args, records, users):
     by = collections.defaultdict(list)
@@ -318,7 +301,6 @@ def cmd_sessions(args, records, users):
         print(f"  N={threshold/1e3:.0f}K theoretical_context_truncation={truncated/1e6:.1f}M"
               f" measured={len(contexts)}")
 
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["summary", "sessions"])
@@ -354,7 +336,6 @@ def main(argv=None):
     print("# quality " + " ".join(f"{key}={quality[key]}" for key in names), file=sys.stderr)
     {"summary": cmd_summary, "sessions": cmd_sessions}[args.cmd](args, records, users)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

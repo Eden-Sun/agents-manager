@@ -47,24 +47,19 @@ printf '{}' > "$CI_BASE_STATUS"
 check "$all" docs/readme.md
 printf 'invalid' > "$CI_BASE_STATUS"
 check "$all" docs/readme.md
-# Resolve a docs-only main status back to the full ancestor, never inherit its skip as evidence.
 printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"success","description":"docs-only skip（沿用完整成功基準 33333333）"}]}' "$CI_BASE" > "$CI_BASE_STATUS"
 [ "$(baseline_ref)" = 33333333 ]
 check "$all" docs/readme.md
 printf '{"sha":"3333333333333333333333333333333333333333","statuses":[{"context":"ubuntu-ci","state":"success","description":"ob+ops+web+daemon 全綠"}]}' > "$CI_BASE_STATUS"
 check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
 check $'ob=false\nops=true\nweb=false\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh 3333333333333333333333333333333333333333
-# Main moved on after the verified baseline: PR head does not contain base (diverged), yet docs-only stays docs-only.
 check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
 CI_TEST_PATHS_BASE=docs/other.md check $'ob=false\nops=false\nweb=false\ndaemon=false\nlint=false' docs/readme.md
-# ...but unverified main code changes between baseline and base must still run, even when the PR itself is docs-only.
 CI_TEST_PATHS_BASE=daemon/src/x.rs check $'ob=false\nops=false\nweb=false\ndaemon=true\nlint=true' docs/readme.md
 CI_TEST_PATHS_BASE=web/src/x.ts check $'ob=false\nops=true\nweb=true\ndaemon=false\nlint=false' scripts/ops/outbox-gc.sh 3333333333333333333333333333333333333333
 CI_TEST_PATHS_BASE=unknown-input check "$all" docs/readme.md
-# Failing to compare either side, or a baseline that is no longer a main ancestor, fails open.
 CI_TEST_DIFF_FAIL_BASE=1 check "$all" docs/readme.md
 CI_TEST_ANCESTOR_RC=1 CI_TEST_PATHS_BASE=docs/other.md check "$all" docs/readme.md
-# A scoped (partial) main success is never full evidence: resolve it to the cited full ancestor instead.
 printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"success","description":"scoped web+daemon（沿用完整成功基準 33333333）"}]}' "$CI_BASE" > "$CI_BASE_STATUS"
 check "$all" docs/readme.md
 [ "$(baseline_ref)" = 33333333 ]
@@ -79,7 +74,6 @@ printf '{"sha":"%s","statuses":[{"context":"ubuntu-ci","state":"failure","descri
 printf '{"sha":"3333333333333333333333333333333333333333","statuses":[{"context":"ubuntu-ci","state":"success","description":"ob+ops+web+daemon 全綠"}]}' > "$CI_BASE_STATUS"
 printf '#!/bin/bash\nexit 1\n' > "$tmp/scripts/ci-changed-parts.sh"
 check "$all" docs/readme.md
-# Required jobs remain present with stable names and an explicit classification failure gate.
 python3 - "$repo/.github/workflows/ci.yml" <<'PY'
 import sys
 import re
@@ -109,8 +103,6 @@ assert 'scripts/check.sh daemon' in daemon
 assert text.count('scripts/check.sh web-bundle') == 1  # one bundle build per run
 assert 'workflow_dispatch:' in text and 'schedule:' in text
 PY
-# check.sh splits web into bundle (install + build) and verify (tsc, oxlint, test): a red unit test must come
-# after the bundle, and verify must not rebuild it.
 fx="$tmp/webfx"
 mkdir -p "$fx/scripts" "$fx/web" "$fx/bin"
 cp "$repo/scripts/check.sh" "$fx/scripts/"

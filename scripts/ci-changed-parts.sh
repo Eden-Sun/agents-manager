@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# 讀 stdin 的改動檔案清單（一行一個 repo 相對路徑），印出 `scripts/check.sh changed` 要跑的部分
-# （web／daemon／ops／ob，一行一個、去重、照這個順序）。認不得的路徑一律印 `full`，寧可多跑。
-# issue #716：小修改不必每次跑完整 CI；完整驗證交給 ubuntu 的背景 CI（scripts/ops/ubuntu-ci.sh）。
-# 路徑規則（含跨界讀取的緣由）全在 scripts/ci-rules.tsv 的第 2 欄；ci-daemon-filters.sh、ci-ops-tests.py 讀同一份。
 set -euo pipefail
 
 rules="${CI_RULES_FILE:-$(dirname "${BASH_SOURCE[0]}")/ci-rules.tsv}"

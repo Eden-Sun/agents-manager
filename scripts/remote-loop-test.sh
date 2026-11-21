@@ -1,20 +1,4 @@
 #!/bin/sh
-# remote-loop-test.sh — automated R1–R3 (SPEC §11.8) against a loopback "remote".
-#
-# Brings up scripts/dev-sshd.sh on 127.0.0.1:2222, registers it as host `loop`
-# (herdr session `am-loop`), creates a remote Project + Bot, starts it, answers the
-# trust prompt, sends a prompt, checks the reply came from a **hook** over the reverse
-# tunnel, then stops and removes everything it created. Safe to run repeatedly.
-#
-#   scripts/remote-loop-test.sh
-#
-# Environment:
-#   AM_BASE=http://127.0.0.1:7788   daemon base URL
-#   AM_KIND=claude|codex            agent to run (default claude)
-#   AM_PROJECT_DIR=/tmp/...         reuse a fixed (already trusted) project directory
-#   AM_KEEP=1                       keep the host / project / dev sshd afterwards
-#   AM_HOOK_PORT=17788              reverse-forwarded port (must differ from the
-#                                   daemon's own port: the "remote" is this machine)
 
 set -eu
 
@@ -23,8 +7,6 @@ KIND="${AM_KIND:-claude}"
 HOOK_PORT="${AM_HOOK_PORT:-17788}"
 HOST=loop
 SESSION=am-loop
-# A fresh directory per run so the trust prompt (R2's `blocked` step) is actually exercised;
-# pin it with AM_PROJECT_DIR to reuse an already-trusted folder.
 PROJECT_DIR="${AM_PROJECT_DIR:-$(mktemp -d /tmp/am-loop-test.XXXXXX)}"
 PROJECT_BASE=$(basename "$PROJECT_DIR")
 BOT_NAME="loop-$KIND"
@@ -38,12 +20,11 @@ step()  { printf '\n=== %s\n' "$*"; }
 fail()  { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 ok()    { printf 'ok: %s\n' "$*"; }
 
-# py '<expression over the parsed json in `d`>'  < file
 py() { python3 -c 'import json,sys
 d=json.load(open(sys.argv[2]))
 print(eval(sys.argv[1]))' "$1" "$2"; }
 
-api() { # api METHOD PATH [JSON-BODY] -> body on stdout, status in $API_STATUS
+api() {
   _m=$1; _p=$2; _b=${3:-}
   if [ -n "$_b" ]; then
     API_STATUS=$(curl -s -o "$TMP/resp" -w '%{http_code}' -X "$_m" \
@@ -54,24 +35,17 @@ api() { # api METHOD PATH [JSON-BODY] -> body on stdout, status in $API_STATUS
   cat "$TMP/resp"
 }
 
-# ---------------------------------------------------------------- 0. daemon
-
 step "0. daemon reachable at $BASE"
 curl -s -o "$TMP/sess" "$BASE/api/session" || fail "daemon not reachable at $BASE"
 TOKEN=$(py 'd["token"]' "$TMP/sess") || fail "could not read the UI token"
 ok "token acquired"
 
-# ---------------------------------------------------------------- 1. dev sshd (R5)
-
 step "1. dev sshd on 127.0.0.1:2222"
 HOST_BODY=$("$DEV_SSHD" start | tail -1)
 [ -n "$HOST_BODY" ] || fail "dev-sshd.sh start printed no host body"
-# Override the hook port (the reverse forward lands on this very machine).
 HOST_BODY=$(printf '%s' "$HOST_BODY" | python3 -c 'import json,sys,os
 b=json.load(sys.stdin); b["hook_port"]=int(os.environ["HOOK_PORT"]); print(json.dumps(b))' )
 ok "dev sshd up"
-
-# ---------------------------------------------------------------- 2. host (R1)
 
 step "2. POST /api/hosts ($HOST -> $SESSION)"
 api POST /api/hosts "$HOST_BODY" > "$TMP/host"
@@ -88,8 +62,6 @@ py '[e["name"] for e in d["entries"]].count("'"$PROJECT_BASE"'")' "$TMP/dirs" | 
   || fail "remote listing of /tmp did not contain $PROJECT_BASE"
 ok "remote listing works"
 
-# ---------------------------------------------------------------- 3. clean slate
-
 step "3. remove leftovers from a previous run"
 api GET /api/state > "$TMP/state"
 OLD=$(py '" ".join(p["id"] for p in d["projects"] if p["host"]=="'"$HOST"'")' "$TMP/state")
@@ -99,8 +71,6 @@ for pid in $OLD; do
   api DELETE "/api/projects/$pid" >/dev/null
   ok "removed old project $pid"
 done
-
-# ---------------------------------------------------------------- 4. project + bot (R2)
 
 step "4. POST /api/projects (host=$HOST, path=$PROJECT_DIR)"
 api POST /api/projects "{\"path\":\"$PROJECT_DIR\",\"label\":\"loop-test\",\"host\":\"$HOST\"}" > "$TMP/proj"
@@ -124,7 +94,7 @@ lamp() {
   py '([b["lamp"] for p in d["projects"] for b in p["bots"] if b["id"]=="'"$BID"'"] or ["gone"])[0]' "$TMP/state"
 }
 
-wait_lamp() { # wait_lamp <seconds> <lamp>...
+wait_lamp() {
   _t=$1; shift
   _i=0
   while [ "$_i" -lt "$_t" ]; do
@@ -160,8 +130,6 @@ else
   step "8. no trust prompt (folder already trusted)"
 fi
 
-# ---------------------------------------------------------------- 9. prompt (R3)
-
 step "9. POST /api/bots/$BID/prompt"
 api POST "/api/bots/$BID/prompt" '{"text":"Reply with exactly PONG","client_request_id":"loop-test-1"}' > "$TMP/p"
 [ "$API_STATUS" = 200 ] || { cat "$TMP/p"; fail "prompt -> $API_STATUS"; }
@@ -180,8 +148,6 @@ BODY=$(py '([m["content"] for m in d["messages"] if m["role"]=="assistant"] or [
 printf 'reply source=%s body=%s\n' "$SRC" "$BODY"
 [ "$SRC" = hook ] || fail "reply source was $SRC, expected hook (the reverse tunnel is not working)"
 ok "reply arrived over the remote hook"
-
-# ---------------------------------------------------------------- 10. stop + cleanup
 
 step "10. POST /api/bots/$BID/stop"
 api POST "/api/bots/$BID/stop" >/dev/null

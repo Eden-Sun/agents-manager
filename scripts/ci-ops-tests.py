@@ -9,11 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-# 路徑 → ops 測試的規則在 scripts/ci-rules.tsv 第 4 欄（跟 ci-changed-parts.sh、ci-daemon-filters.sh 同一份）：
-#   <suite> 該路徑獨立的測試檔；__all__ 分派器／護欄／跨 crate 輸入，改了要全跑；@default 走下面的預設推導。
-# Shared helpers, manifests, CI machinery, fixtures and new/unknown scripts deliberately have no entry: they require the full suite.
 RULES_FILE = Path(os.environ.get("CI_RULES_FILE") or Path(__file__).resolve().parent / "ci-rules.tsv")
-
 
 def load_rules() -> list[tuple[str, str]]:
     rules = []
@@ -24,16 +20,13 @@ def load_rules() -> list[tuple[str, str]]:
         rules.append((pat, ops))
     return rules
 
-
 def rule_for(rules: list[tuple[str, str]], path: str) -> str:
     for pat, ops in rules:
         if fnmatch.fnmatchcase(path, pat):
             return ops
     return "@default"
 
-
 ALWAYS = {"scripts/test_discovery_test.sh", "scripts/rust_test_mount_test.sh", "scripts/db_filename_test.sh"}
-
 
 def sibling_suite(path: str):
     """A plain script or Python module in scripts/ or scripts/ops with its own `<stem>_test.sh` next to it."""
@@ -47,7 +40,6 @@ def sibling_suite(path: str):
         if cand.is_file():
             return str(cand)
     return None
-
 
 def select(paths: list[str]) -> list[str]:
     rules = load_rules()
@@ -64,7 +56,7 @@ def select(paths: list[str]) -> list[str]:
         if rule == "__all__":
             return full(path, "分派器／護欄，改了要全跑" if in_ops else "跨 crate 輸入")
         if not in_ops:
-            continue  # Other changed parts (web/Rust/docs) have their own checks.
+            continue
         saw_ops = True
         if rule != "@default":
             suite = rule
@@ -84,7 +76,6 @@ def select(paths: list[str]) -> list[str]:
     if not saw_ops:
         return full("（無 ops 輸入）", "沒有任何 ops 路徑")
     return sorted(selected)
-
 
 if __name__ == "__main__":
     print("\n".join(select([line.rstrip("\n") for line in sys.stdin])))

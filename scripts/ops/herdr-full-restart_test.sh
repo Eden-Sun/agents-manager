@@ -1,20 +1,4 @@
 #!/bin/bash
-# herdr-full-restart.sh 的隔離測試（issue #418）：測試裡不會真的 bootout 任何 launchd job、
-# 不碰真的 herdr socket、不殺任何行程。
-#
-# **危險指令一律用注入的 shell 函式攔截，不靠 PATH 上的替身**：原腳本自己 `export PATH=…`，
-# 用 PATH 擋的話只要某個替身沒放好就會 fallthrough 打到 /bin/launchctl 真貨。
-#（2026-09-24 就是這樣真的把 gui/501 的兩個 herdr job bootout 掉，連自己的 pane 都被收掉。）
-# 函式優先於 PATH 查找，而且 `export PATH=` 蓋不掉函式，所以 launchctl／pkill／pgrep／herdr／sleep
-# 一律在副本開頭定義成函式；「缺依賴」的情境也是讓函式回 127，不是把替身拿掉。
-#
-# 測試用的副本另外只換路徑（原腳本的判斷一字不改）：LOG、herdr 設定目錄、herdr binary、
-# plist 目錄、cd 的目標、/tmp/herdr-default.log。
-#
-# 測的是主要決策路徑：先 bootout 再殺 server（順序反了 launchd 會把 server 拉回來）、
-# TERM 之後補 KILL、只刪清單上的 unix socket、缺依賴時 rc 有進 log。
-#
-#   bash scripts/ops/herdr-full-restart_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${HERE}/herdr-full-restart.sh"
@@ -24,7 +8,6 @@ FAIL=0
 exists() { [ -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "FAIL - $1（$2 不見了）"; FAIL=$((FAIL + 1)); }; }
 gone() { [ ! -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "FAIL - $1（$2 還在）"; FAIL=$((FAIL + 1)); }; }
 
-# 路徑替換的前提：原腳本裡真的有這些字串。沒有就是腳本改過，測試要跟著更新，不要默默跑一個空殼。
 for pat in '/Users/me/.config/agents-manager/supervisor/AGM/herdr-full-restart.log' \
            '/Users/me/.config/herdr' '/opt/homebrew/bin/herdr' \
            '/Users/me/Library/LaunchAgents' '/tmp/herdr-default.log' 'cd /Users/me'; do
@@ -39,8 +22,6 @@ setup() {
   FIX="$ROOT/fix"; HERDR="$ROOT/herdr"
   BIN="$ROOT/fakebin"
   mkdir -p "$FIX" "$HERDR/sessions/a" "$HERDR/sessions/b" "$ROOT/LaunchAgents" "$ROOT/agm/bin" "$BIN"
-  # nohup／setsid 是外部指令，看不到下面注入的 shell 函式，所以 herdr 另外放一個檔案樁；
-  # PATH 也換成只有這個樁＋系統工具，真的 herdr／launchctl 不在裡面。
   printf '#!/bin/bash\necho "herdr $*" >> "%s/calls.log"\n' "$FIX" > "$BIN/herdr"
   chmod 755 "$BIN/herdr"
   LOG="$ROOT/agm/herdr-full-restart.log"
@@ -53,12 +34,8 @@ setup() {
   : > "$FIX/units"; echo 0 > "$FIX/active.rc"
   {
     echo '#!/bin/bash'
-    # 危險指令的攔截器。全部只記錄，rc 由 fixture 決定；真的 binary 一次都碰不到。
     echo "FIX='${FIX}'"
     echo 'launchctl() { echo "launchctl $*" >> "$FIX/calls.log"; return "$(cat "$FIX/launchctl.rc")"; }'
-    # kill／ps 也是注入的函式（bash 內建的 kill 一樣被函式蓋掉）：TERM 預設讓 server 全消失，STUB_TERM_IGNORED 時裝死，
-    # 這樣 KILL 那一輪才有東西可殺。ps 除了真的 server 之外，永遠多印幾顆「argv 裡剛好有 herdr…server」的別人：
-    # 腳本不能動它們（issue：pkill -f 'herdr.*server' 會把帶長 persona 的 claude／codex bot 一起殺）。
     echo 'kill() { echo "kill $*" >> "$FIX/calls.log"; case "$1" in -TERM) [ -n "${STUB_TERM_IGNORED:-}" ] || : > "$FIX/servers" ;; esac; return 0; }'
     echo 'ps() { while read -r p; do [ -n "$p" ] && echo "$p herdr --session s$p server"; done < "$FIX/servers"
       echo "9001 claude --dangerously-skip-permissions --append-system-prompt 你是 bot，要用 herdr 開 pane、不要碰 server"
@@ -66,12 +43,8 @@ setup() {
       echo "9003 /usr/bin/ssh agm-host herdr --session x server-log"
       echo "9004 herdr pane list server"; }'
     echo 'sleep() { :; }'
-    # 平台由 fixture 決定（issue #677）：Darwin 走原本的 launchd 段，Linux 走 systemd 段。
     echo 'uname() { cat "$FIX/uname"; }'
-    # systemctl 同樣只記錄：list-units 吐 fixture 的 unit、is-active 的 rc 由 fixture 決定。
     echo 'systemctl() { echo "systemctl $* XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}" >> "$FIX/calls.log"; case "$2" in list-units) cat "$FIX/units" ;; is-active) return "$(cat "$FIX/active.rc")" ;; esac; return 0; }'
-    # `session list` 的狀態由 fixture 決定：#455 之後腳本要靠它判斷 default 到底起來了沒有，
-    # 兩個方向（running／stopped）都要測得到。
     echo 'herdr() { echo "herdr $*" >> "$FIX/calls.log"; case "$*" in "session list") echo "default              $(cat "$FIX/default.status")" ;; esac; return 0; }'
     tail -n +2 "$SRC" \
       | sed -e "s#/Users/me/.config/agents-manager/supervisor/AGM/herdr-full-restart.log#${LOG}#g" \
@@ -88,29 +61,20 @@ setup() {
 teardown() { rm -rf "$ROOT"; }
 run() { bash "$SCRIPT"; echo $?; }
 
-# 副本真的攔住了嗎：跑之前先確認沒有任何一行會叫到 PATH 上的 launchctl／pkill。
 setup
 equals "副本裡 launchctl 已被函式攔截" "$(grep -c '^launchctl() {' "$SCRIPT")" "1"
 equals "副本裡 kill／ps 已被函式攔截" "$(grep -cE '^(kill|ps)\(\) \{' "$SCRIPT")" "2"
 # canary-gap: 這一行是**斷言字串**，不是指派——它在檢查副本裡被改寫成的 PATH 長什麼樣。
-# 這支測試本來就不靠 PATH 擋（檔頭寫了理由）：launchctl／pkill／pgrep／herdr 都用注入的
-# shell 函式攔，函式優先於 PATH 查找，被測腳本自己 `export PATH=` 也蓋不掉。
 equals "副本的 PATH（macOS 與 Linux 兩段）都只指到測試用的 fakebin" "$(grep '^export PATH=' "$SCRIPT" | sort -u)" "export PATH=${BIN}:/usr/bin:/bin"
 equals "副本裡 systemctl 已被函式攔截" "$(grep -c '^systemctl() {' "$SCRIPT")" "1"
-# nohup 看不到函式，所以那一行必須指到檔案樁，不能留真 binary 的路徑。
 equals "nohup 起 server 那行指到測試樁" "$(grep -c "^nohup ${BIN}/herdr server" "$SCRIPT")" "1"
-# issue #455：macOS 沒有 setsid，`nohup setsid …` 是 nohup 找不到 setsid 直接失敗、herdr 從沒被執行。
 equals "不再用 macOS 沒有的 setsid（只看會被執行的行，註解照樣可以解釋原因）" \
   "$(grep -cE '^[^#]*[^[:alnum:]_]setsid|^setsid' "$SCRIPT")" "0"
-# `&` 綁整個 `cd … && nohup … &` 清單時，`$!` 是 subshell 的 pid，起不起得來都有值。
-# 對**原始檔**斷言，不是對副本：副本的路徑被 sed 改寫過，`cd /Users/me` 已經不在了。
 equals "起 server 那行沒有跟 cd 串成 && 清單" "$(grep -cE '^[^#]*cd .* && nohup' "$SRC")" "0" 
-# 副本裡還提到 /opt/homebrew 的，只准是假 pgrep 印出來的那行字串（不是會被執行的指令）。
 equals "副本裡提到真 binary 路徑的只剩假 pgrep 的輸出字串" \
   "$(grep -c '/opt/homebrew' "$SCRIPT")" "0"
 teardown
 
-# 1. 正常路徑：兩個 job 都 bootout、TERM 之後補 KILL、兩個 plist 都 bootstrap、log 有完整段落。
 setup
 equals "正常跑 exit 0" "$(run)" "0"
 check "log 有開頭" "== full restart start" "$LOG"
@@ -127,13 +91,11 @@ check "bootstrap agents-manager" "bootstrap gui/501 $ROOT/LaunchAgents/dev.agent
 check "bootstrap am-attach-remote" "bootstrap gui/501 $ROOT/LaunchAgents/dev.agents-manager.herdr-am-attach-remote.plist" "$FIX/calls.log"
 check "收尾問 session list" "herdr session list" "$FIX/calls.log"
 check "log 有結尾" "== done" "$LOG"
-# 順序：bootout 一定要在 kill 之前，否則 launchd 會馬上把 server 拉回來又被殺。
 equals "bootout 排在 kill 前面" \
   "$(awk '{print $1}' "$FIX/calls.log" | head -3 | tr '\n' ',')" \
   "launchctl,launchctl,kill,"
 teardown
 
-# 1b. TERM 被忽略時才補 KILL：只對真的 server 的 pid，別人的長 argv 行程不能被 KILL（pkill -f 的老問題）。
 setup
 export STUB_TERM_IGNORED=1
 run >/dev/null
@@ -143,7 +105,6 @@ check "另一顆 server 也補 KILL" "kill -KILL 7459" "$FIX/calls.log"
 check_no "KILL 沒有波及 argv 恰好有 herdr／server 的 claude／codex／ssh／client" "kill .* 900[1-4]" "$FIX/calls.log"
 teardown
 
-# 2. socket 只刪清單上的那四種，而且只刪真的 unix socket。
 setup
 mksock "$HERDR/herdr.sock"
 mksock "$HERDR/herdr-client.sock"
@@ -160,8 +121,6 @@ exists "清單外的 socket 不刪" "$HERDR/sessions/b/other.sock"
 exists "根目錄其他 socket 不刪" "$HERDR/keep.sock"
 teardown
 
-# 3. 缺依賴：launchctl 不在（回 127）時不會中止（原腳本沒有 set -e），但 rc 會進 log——
-#    出事看得出來是哪一步。注意這裡是讓攔截函式回 127，不是把替身拿掉：拿掉會打到真 binary。
 setup
 echo 127 > "$FIX/launchctl.rc"
 equals "launchctl 回 127 仍 exit 0（現況）" "$(run)" "0"
@@ -170,13 +129,8 @@ check "bootstrap 的 rc=127 也記下來" "bootstrap agents-manager rc=127" "$LO
 check "缺依賴不影響後面的收尾" "== done" "$LOG"
 teardown
 
-# 4. issue #455：以前這裡釘的是 bug 本身（macOS 沒有 setsid，`nohup setsid …` 起不來，
-#    下一行卻照樣寫「default server started」）。現在釘的是修好之後的行為——**不依賴這台機器
-#    有沒有 setsid**：腳本裡已經沒有 setsid 了，所以兩種機器上結果都一樣。
 setup
 run >/dev/null
-# 那一行是真的背景行程（nohup … &），腳本結束時它不一定已經被排到——這裡等它，
-# 不是放寬斷言：等不到就照樣 FAIL。
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   grep -q 'herdr server' "$FIX/calls.log" && break
   sleep 0.1
@@ -186,8 +140,6 @@ check_no "log 不再用「started」宣稱成功" "default server started pid=" 
 check "改成確認過 default 真的 running 才記 up" "default server up pid=" "$LOG"
 teardown
 
-# 5. issue #455：default 起不來時要非零退出並留下可以查的 log，不能像以前那樣靜默宣告成功。
-#    daemon 的 `ensure_session` 明文拒絕代起 `default`，所以這是唯一沒有自癒路徑的 session。
 setup
 echo stopped > "$FIX/default.status"
 equals "default 起不來要非零退出" "$(run)" "1"
@@ -197,8 +149,6 @@ check_no "不能同時又說 up" "default server up pid=" "$LOG"
 check "收尾仍然標明結束" "== done (failed)" "$LOG"
 teardown
 
-# ---------------------------------------------------------------- Linux（issue #677）
-# herdr server 由 systemd user unit 看管：路徑從 $HOME 推，停 unit → 殺殘留 → 清 socket → 起回原本 active 的 unit。
 LHOME=""
 setup_linux() {
   setup
@@ -210,7 +160,6 @@ setup_linux() {
 }
 run_linux() { ( unset XDG_RUNTIME_DIR; HOME="$LHOME" bash "$SCRIPT"; echo $? ) | tail -1; }
 
-# L1. 正常路徑：先停 unit 再殺 server、起回同一批 unit、default 原本在跑就補起；launchctl 一次都不叫。
 setup_linux
 mksock "$LHOME/.config/herdr/sessions/a/herdr.sock"
 mksock "$LHOME/.config/herdr/keep.sock"
@@ -234,7 +183,6 @@ check "default 原本在跑就補起" "default server up pid=" "$LLOG"
 check "log 有結尾" "== done" "$LLOG"
 teardown
 
-# L2. default 原本沒在跑就不補起（Linux 主機多半沒人用它）。
 setup_linux
 echo stopped > "$FIX/default.status"
 equals "default 沒在跑也 exit 0" "$(run_linux)" "0"
@@ -243,7 +191,6 @@ sleep 0.3
 check_no "沒有起 default" "herdr server" "$FIX/calls.log"
 teardown
 
-# L3. unit 沒回到 active：非零退出，log 點名是哪一個。
 setup_linux
 echo 3 > "$FIX/active.rc"
 equals "unit 起不回來要非零退出" "$(run_linux)" "1"

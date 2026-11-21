@@ -24,13 +24,11 @@ CHUNK = 65536
 MAX_LINE = 1024 * 1024
 MAX_TAIL_BYTES = 65536
 
-
 def positive(value):
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError('must be finite and positive')
     return number
-
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -44,7 +42,6 @@ def parser():
     p.add_argument('--tail', type=int, default=20, help='last 0..200 lines')
     p.add_argument('--max-output', type=int, default=4000, help='last 1..65536 output characters')
     return p
-
 
 def wait(args, clock=time.monotonic, sleep=time.sleep, out=sys.stdout, err=sys.stderr):
     deadline = clock() + args.timeout
@@ -67,7 +64,6 @@ def wait(args, clock=time.monotonic, sleep=time.sleep, out=sys.stdout, err=sys.s
         if clock() >= deadline:
             return finish(124, 'wait-log: deadline reached')
         try:
-            # Nonblocking open avoids hanging on FIFOs; fstat also rejects devices.
             fd = os.open(args.log, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
             with os.fdopen(fd, 'rb') as stream:
                 info = os.fstat(stream.fileno())
@@ -112,17 +108,14 @@ def wait(args, clock=time.monotonic, sleep=time.sleep, out=sys.stdout, err=sys.s
                 elif args.contains and any(x in text for x in args.contains):
                     rc = 0
                 if rc is not None:
-                    # Do not print bytes after the matched record from the same chunk.
                     partial = b''
                     return finish(rc, 'wait-log: matched completion record')
             if len(partial) > MAX_LINE:
                 return finish(2, 'wait-log: line exceeds 1 MiB')
             if args.contains and any(x.encode() in partial for x in args.contains):
                 return finish(0, 'wait-log: matched literal')
-            # Drain a growing file without sleeping between chunks, bounded by deadline.
             continue
         sleep(min(args.interval, max(0, deadline - clock())))
-
 
 def main(argv=None):
     p = parser()
@@ -136,7 +129,6 @@ def main(argv=None):
         return wait(args)
     except KeyboardInterrupt:
         return 130
-
 
 if __name__ == '__main__':
     sys.exit(main())

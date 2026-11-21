@@ -1,41 +1,4 @@
 #!/bin/bash
-# AG Man 從 Mac 整套切到 agm-host（issue #721，#675）：`Agents Manager` 與 `AGM-DM-GRUP` 兩個專案
-# 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開。runbook 見 docs/SPEC.md §11.9c。
-#
-#   cutover-to-host.sh cutover  [--execute] [--foreground] [--from <步驟>] [--state-dir <目錄>]
-#   cutover-to-host.sh rollback --state-dir <目錄> [--execute] [--foreground] [--from <步驟>]
-#   cutover-to-host.sh drill
-#
-# 在 Mac（來源）跑。**預設 dry-run**：唯讀的檢查照做（打 GET、ssh 看一眼），會改東西的每一步只印出來；
-# `--execute` 才真的做。真的做時預設自己脫離成背景行程（setsid＋nohup，log 在狀態目錄）：
-# 第 4 步會停掉這兩個專案的每一顆 bot，從 bot 的 pane 裡叫起來的腳本會跟著那顆 bot 一起被收掉。
-# 在一般終端機跑、確定不會被收掉才用 `--foreground`。中途失敗就修好再 `--from <那一步> --state-dir <同一個>`。
-#
-# cutover 的步驟（停機窗口＝stop-bots 到 resume）：
-#   preflight  唯讀檢查兩邊（工具版本、目標 checkout、systemd、在跑的 child、沒推的分支…）
-#   freeze     Mac：bootout launchd 的 com.agm.*（換版 kick 不能在切換中途把 daemon 換掉／拉起來），記下原本載入的
-#   record     Mac：快照兩個專案（在跑名單＝要在目標接回的 user bot）
-#   stop-bots  Mac：協調者／巡檢標「不要它跑」、child 先停、再停 user bot，等 run 全部結束
-#   hand-off   Mac：兩個專案設 handed_off_to（Mac daemon 萬一被拉起來也不會動它們）
-#   stop-src   Mac：停 daemon（7788 那顆），等 daemon.lock 放開
-#   export     Mac：project-transfer export（協調者專案加 --with-supervisor，#720）＋host-state config/token/outbox/identity inventory 快照
-#   transcripts Mac→目標：transcript-transfer 搬原生對話（#717）、rsync supervisor 目錄
-#   ship       bundle、工具、快照傳到目標的狀態目錄，刪 Mac 上的 bundle
-#   stop-dst   目標：停 daemon，等 daemon.lock 放開
-#   import     目標：project bundles 全部先 --dry-run（有 transcript 警告就停），host-state 安全合併後再正式 import
-#   start-dst  目標：systemd-run 起 daemon（#677 的 Type=forking＋KillMode=process），等 /api/session
-#   resume     目標：supervisor setup 重寫部署檔、在跑名單逐顆 start?resume=native、協調者／巡檢標回要它跑
-#   verify     目標：專案 host=local、path 換過、user bot 一顆不少、在跑名單都活著、daemon.log 沒有新的 ERROR；Mac 7788 沒人聽
-#   timers     目標：enable ~/.config/systemd/user/com.agm.*.timer（#677 的 unit 要先由 agm ops-sync 裝好）
-#
-# rollback：stop-dst → restore（第一次 import 前的 DB／config 與 host-state 備份放回）→ start-dst → start-src（launchctl submit）
-#   → hand-back（清 handed_off_to）→ resume-src（Mac 上照在跑名單接回）→ thaw（bootstrap 回 com.agm.*）。
-#   目標那邊切換後長出來的對話不會帶回 Mac（Mac 從切換前那一刻接回）。
-#
-# drill：演練。**兩顆正式 daemon 都不停、不起第二顆、不碰目標的 ~/.config/agents-manager**：
-#   Mac 的 DB 由 project-transfer export 唯讀快照；目標在 ~/agm-drill-<時間>/ 另開資料目錄，放正式 DB 的
-#   sqlite3 .backup 複本與 config.toml 複本，transcript 寫進同一個目錄底下的假 ${HOME}；匯入、驗證、量每一步的秒數，
-#   做完當下刪掉整個演練目錄與 Mac 上的 bundle。
 set -u -o pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,19 +19,16 @@ DST_REPO="${CUTOVER_DST_REPO:-/home/user/project/agents-manager}"
 SRC_DATA="${CUTOVER_SRC_DATA:-$HOME/.config/agents-manager}"
 DST_DATA="${CUTOVER_DST_DATA:-/home/user/.config/agents-manager}"
 SRC_API="${CUTOVER_SRC_API:-http://127.0.0.1:7788}"
-DST_API="${CUTOVER_DST_API:-http://127.0.0.1:7788}"   # 在目標上看的位址（helper 經 ssh 在目標跑）
+DST_API="${CUTOVER_DST_API:-http://127.0.0.1:7788}"
 PORT="${CUTOVER_PORT:-7788}"
-# 兩個專案用 label 找（id 以 state 為準）。`|` 分隔。
 IFS='|' read -r -a LABELS <<< "${CUTOVER_PROJECTS:-Agents Manager|AGM-DM-GRUP}"
 SUP_LABEL="${CUTOVER_SUPERVISOR_PROJECT:-AGM-DM-GRUP}"
 SUP_BOT="${CUTOVER_SUPERVISOR_BOT:-AGM}"
 RESP_BOT="${CUTOVER_RESPONDER_BOT:-AGM-responder}"
-# 不在目標接回的 bot（空白分隔）：browser-gc 操作 ego-browser，Linux 主機沒有桌面（SPEC §18.2e）。
 NO_RESUME="${CUTOVER_NO_RESUME:-agm-pxf2pv-browser-gc}"
 DAEMON_WAIT="${CUTOVER_DAEMON_WAIT_SECS:-60}"
 STOP_WAIT="${CUTOVER_STOP_WAIT_SECS:-180}"
 MAPS=("$SRC_REPO=$DST_REPO" "$SRC_DATA=$DST_DATA")
-# daemon.log 是 tracing 的彩色輸出：先去掉 ANSI 色碼再看「時間戳之後的等級欄」，payload 裡剛好有 ERROR 字樣的 INFO 不算（在目標的 GNU sed 跑）。
 ERROR_COUNT="sed 's/\\x1b\\[[0-9;]*m//g' | grep -cE '^[0-9TZ:.-]+ +ERROR '"
 
 CMD="${1:-}"
@@ -92,8 +52,6 @@ warn() { log "WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 die() { log "FATAL: $*" >&2; exit 1; }
 WARNINGS=0
 
-# x <指令…>：會改東西的一律走這裡。dry-run 只印。
-# 訊息走 stderr：呼叫端常把 stdout 丟進 /dev/null 或檔案，dry-run 的那一行不能跟著被吞掉。
 x() {
     if [ "$EXECUTE" = 1 ]; then
         log "RUN: $*" >&2
@@ -105,7 +63,6 @@ x() {
 
 q() { printf '%q ' "$@"; }
 rsh() { "$SSH" -o BatchMode=yes "$TARGET" "$@"; }
-# 目標上跑 helper：原始碼從 stdin 餵，不必先傳檔。
 rhelper() { "$SSH" -o BatchMode=yes "$TARGET" "python3 - $(q --base "$DST_API" --token-file "$DST_DATA/ui-token" "$@")" < "$HELPER"; }
 shelper() { "$PY" "$HELPER" --base "$SRC_API" --token-file "$SRC_DATA/ui-token" "$@"; }
 map_args() { local m; for m in "${MAPS[@]}"; do printf '%s\n' "$1" "$m"; done; }
@@ -122,7 +79,6 @@ step_end() {
 print_times() {
     local line total=0
     log "每步耗時（秒）："
-    # `${TIMES[@]+…}`：沒跑任何步驟（--from 把全部跳過）時 TIMES 是空的，macOS 的 /bin/bash 3.2 在 set -u 下對空陣列的 "${arr[@]}" 會 unbound variable。
     for line in ${TIMES[@]+"${TIMES[@]}"}; do printf '    %-12s %s\n' "${line%%	*}" "${line#*	}"; total=$((total + ${line#*	})); done
     printf '    %-12s %s\n' "合計" "$total"
 }
@@ -130,7 +86,6 @@ print_times() {
 STEPS_cutover="preflight freeze record stop-bots hand-off stop-src export transcripts ship stop-dst import start-dst resume verify timers"
 STEPS_rollback="stop-dst restore start-dst start-src hand-back resume-src thaw"
 
-# --from 之前的步驟跳過（preflight 例外：唯讀，每次都跑）。
 should_run() {
     [ -z "$FROM" ] && return 0
     [ "$1" = preflight ] && return 0
@@ -139,13 +94,10 @@ should_run() {
     return 1
 }
 
-# ---------------------------------------------------------------- 共用
-
 project_ids() { "$PY" -c 'import json,sys; [print(p["id"]) for p in json.load(open(sys.argv[1]))["projects"]]' "$1"; }
 project_id_of() { "$PY" -c 'import json,sys; print(next(p["id"] for p in json.load(open(sys.argv[1]))["projects"] if p["label"]==sys.argv[2]))' "$1" "$2"; }
 
-# 在跑名單：要在目標接回的 user bot、協調者／巡檢原本是否在跑、在跑但不會自動接回的 child。
-write_running() { # write_running <snapshot> <out>
+write_running() {
     "$PY" - "$1" "$2" "$SUP_LABEL" "$SUP_BOT" "$RESP_BOT" "$NO_RESUME" <<'EOF'
 import json, os, sys
 snap, out, sup_label, sup_bot, resp_bot, no_resume = sys.argv[1:7]
@@ -192,7 +144,6 @@ wait_src_lock() {
     die "Mac 的 daemon.lock ${DAEMON_WAIT} 秒內沒放開"
 }
 
-# 目標上停 daemon：7788 的 listener 是 agents-managerd 才殺，等 daemon.lock 放開。
 stop_dst_daemon() {
     rsh "set -u; P=\$(ss -Hltnp 'sport = :$PORT' | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
 if [ -z \"\$P\" ]; then echo 'target daemon not listening'; else
@@ -206,15 +157,13 @@ fi" || return 1
     log "目標 daemon.lock ${DAEMON_WAIT} 秒內沒放開"; return 1
 }
 
-start_dst_daemon() { # start_dst_daemon <unit 名>
+start_dst_daemon() {
     rsh "set -u; export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}
 N=\$(wc -l < $(q "$DST_DATA/daemon.log") 2>/dev/null || echo 0); echo \"\$N\" > $(q "$DST_DATA/.cutover-log-mark")
 systemd-run --user --collect --unit=$(q "$1") -p Type=forking -p KillMode=process -- /usr/bin/python3 $(q "$DST_REPO/scripts/ops/daemon-start.py") $(q "$DST_REPO") $(q "$DST_DATA/daemon.log")
 for i in \$(seq $DAEMON_WAIT); do curl -sf -o /dev/null http://127.0.0.1:$PORT/api/session && exit 0; sleep 1; done
 echo 'target daemon did not answer /api/session' >&2; exit 1"
 }
-
-# ---------------------------------------------------------------- cutover 各步
 
 do_preflight() {
     command -v "$PY" >/dev/null || die "找不到 $PY"
@@ -252,13 +201,11 @@ do_preflight() {
     fi
     local snap="$pre" id
     [ -f "$snap" ] || snap="$STATE/snapshot.json"
-    # 協調者專案要在快照裡找得到：找不到時 sup_id 會是空的，export／import 就靜默不帶 --with-supervisor（#1714）。
     project_id_of "$snap" "$SUP_LABEL" >/dev/null 2>&1 \
         || die "快照裡找不到協調者專案（CUTOVER_SUPERVISOR_PROJECT=${SUP_LABEL}）：它要在 CUTOVER_PROJECTS 裡，否則協調者資料會漏搬"
     for id in $(project_ids "$snap"); do
         rsh "grep -q -F $(q "\"$id\"") $(q "$DST_DATA/config.toml")" && warn "目標 config.toml 已有專案 ${id}：之前 import 過（import 冪等、會跳過已有的列）"
     done
-    # 目標只有自己的 checkout：Mac 上各 worktree 沒推的 commit 與沒提交的改動（別顆 bot 的 WIP）都不會跟過去。
     local wt left=""
     while read -r wt; do
         [ -d "$wt" ] || continue
@@ -293,7 +240,6 @@ do_record() {
 
 do_stop_bots() {
     DOWN_T0=$(date +%s); echo "$DOWN_T0" > "$STATE/down-since"
-    # 先把「不要它跑」寫進去：不然看門狗會在我們停掉之後把協調者／巡檢拉回來（SPEC §18.9）。
     x shelper api POST /api/supervisor/stop || die "協調者停不下來"
     x shelper api POST /api/supervisor/responder/stop || die "巡檢停不下來"
     local id
@@ -343,8 +289,6 @@ do_transcripts() {
     local id m margs=()
     for m in "${MAPS[@]}"; do margs+=(--map "$m"); done
     for id in $(project_ids "$STATE/snapshot.json"); do
-        # 結束碼 2＝有 missing／refused／conflicts：transcript-gate 判斷能不能放行（只有舊 session 找不到才行），
-        # 放行的段數記下來給 import 的閘門比對。擋下來就看 $STATE/transcripts-<id>.json，處理好再 --from transcripts。
         if [ "$EXECUTE" = 1 ]; then
             local rc=0 allowed=0
             "$PY" "$TT" --bundle "$(bundle_of "$id")" --out "$(moved_of "$id")" --target "$TARGET" "${margs[@]}" > "$STATE/transcripts-$id.json" || rc=$?
@@ -360,7 +304,6 @@ do_transcripts() {
             x "$PY" "$TT" --bundle "$(bundle_of "$id")" --out "$(moved_of "$id")" --target "$TARGET" "${margs[@]}"
         fi
     done
-    # 協調者的工作目錄（persona、handoff.md、log）。部署檔（CLAUDE.md、runtime.json、bin/agm）由 resume 的 setup 用目標路徑重寫。
     x "$RSYNC" -a --exclude '*.lease-token.*' --exclude '*.lock' "$SRC_DATA/supervisor/" "$TARGET:$DST_DATA/supervisor/" \
         || die "supervisor 目錄傳輸失敗：$STATE 可重跑 transcripts"
 }
@@ -377,24 +320,18 @@ do_ship() {
         x rsh "mkdir -p -m 700 $(q "$(rstate)")" || die "目標 cutover 目錄建立失敗"
         x "$RSYNC" -a "${files[@]}" "$HELPER" "$STATE/snapshot.json" "$STATE/running.json" "$TARGET:$(rstate)/" \
             || die "專案 bundle 傳輸失敗：$STATE 可重跑 ship"
-        # 固定檔名：import 叫的是 project-transfer，PROJECT_TRANSFER 指到別的檔名時也一樣。
         x "$RSYNC" -a "$PT" "$TARGET:$(rstate)/project-transfer" || die "project-transfer 工具傳輸失敗：$STATE 可重跑 ship"
         x "$RSYNC" -a "$STATE/host-state/" "$TARGET:$(rstate)/host-state/" || die "host-state 傳輸失敗：$STATE 可重跑 ship"
         x "$RSYNC" -a "$HOST_STATE_TOOL" "$TARGET:$(rstate)/host-state-transfer.py" || die "host-state 工具傳輸失敗：$STATE 可重跑 ship"
         x touch "$STATE/host-state-shipped" || die "host-state 傳輸標記寫入失敗"
-        # Write this before cleanup. If cleanup dies after removing only some local bundles,
-        # retrying ship must finish cleanup without rsync reading those removed sources.
         x touch "$STATE/ship-transferred" || die "傳輸完成標記寫入失敗"
     fi
-    # bundle 內含對話：傳過去就刪 Mac 這份（回滾用的是 Mac 沒動過的 DB，不是 bundle）。
     for id in $(project_ids "$STATE/snapshot.json"); do
         x rm -f "$(bundle_of "$id")" "$(moved_of "$id")" || die "已傳 bundle 的本機清理失敗：$STATE 可重跑 ship"
     done
-    # 輔助狀態包含 UI token，只保留目標端的安全副本。
     x rm -rf "$STATE/host-state" || die "已傳 host-state 的本機清理失敗：$STATE 可重跑 ship"
 }
 
-# 這幾支失敗時只 return 1、不自己 die：step 迴圈會印「修好後用 --from <步驟> --state-dir …」，自己 die 就跳過那行。
 do_stop_dst() { x stop_dst_daemon || { log "停不了目標 daemon" >&2; return 1; }; }
 
 do_import() {
@@ -408,7 +345,6 @@ do_import() {
         ids+=("$id"); cmds+=("$cmd")
         if [ "$EXECUTE" = 1 ]; then
             rsh "$cmd --dry-run" > "$STATE/import-dry-$id.json" || die "import --dry-run $id 失敗：看 $STATE/import-dry-$id.json"
-            # 目標上 transcript 不在的段數，只能是上一步放行的舊 session；多出來的＝對話沒搬到。
             gone=$("$PY" -c 'import json, re, sys
 for w in json.load(open(sys.argv[1])).get("warnings") or []:
     m = re.match(r"(\d+) 段原生對話的 transcript 不在這台", w)
@@ -449,10 +385,8 @@ do_resume() {
     x rhelper api POST /api/supervisor/setup >/dev/null || warn "目標 supervisor setup 失敗"
     x rhelper api POST /api/supervisor/responder/setup >/dev/null || warn "目標 responder setup 失敗"
     for id in $(running_field "$run" resume); do
-        # 一顆一顆來：同時開一堆 claude 會一起搶 herdr 與 API。
         x rhelper api POST "/api/bots/$id/start?resume=native" >/dev/null || warn "接回 $id 失敗"
     done
-    # 已經被上面接回的 409（already running）也算好：要的是 desired_running=1 讓看門狗接手。
     local rc
     if [ -n "$(running_field "$run" supervisor)" ]; then
         x rhelper api POST /api/supervisor/start >/dev/null; rc=$?
@@ -486,8 +420,6 @@ do_timers() {
         || warn "目標的例行 job 沒啟用（#677）"
 }
 
-# ---------------------------------------------------------------- rollback 各步
-
 do_restore() {
     local rs; rs=$(rstate)
     if [ -s "$STATE/imports.txt" ]; then
@@ -495,7 +427,6 @@ do_restore() {
         local db cfg
         db=$("$PY" -c 'import json,sys; print(next(b for b in json.load(open(sys.argv[1]))["backups"] if ".sqlite3.pre-transfer-" in b))' "$STATE/import-$first.json") || die "import-$first.json 裡找不到 DB 備份"
         cfg=$("$PY" -c 'import json,sys; print(next((b for b in json.load(open(sys.argv[1]))["backups"] if "config.toml.pre-transfer-" in b), ""))' "$STATE/import-$first.json")
-        # 第一次 import 之前的樣子＝切換前的目標。daemon 停著，-wal／-shm 一起清掉才不會被重放。
         x rsh "set -e; cp $(q "$db") $(q "$DST_DATA/agents-manager.sqlite3"); rm -f $(q "$DST_DATA/agents-manager.sqlite3-wal") $(q "$DST_DATA/agents-manager.sqlite3-shm")" \
             || die "目標 DB 還原失敗"
         if [ -n "$cfg" ]; then
@@ -546,10 +477,7 @@ do_thaw() {
     done < "$STATE/launchd.txt"
 }
 
-# ---------------------------------------------------------------- drill
-
 run_drill() {
-    # ddir 不用 local：EXIT trap 在函式返回之後才跑，要讀得到。
     local drill="\$HOME/agm-$(basename "$STATE")" dhome
     DDIR=""
     DDIR=$(rsh "echo $drill") || die "ssh ${TARGET} 不通"; local ddir="$DDIR"
@@ -585,14 +513,11 @@ run_drill() {
     step_end export
 
     step_begin copy-db
-    # 目標正式 DB 的一致快照（sqlite3 .backup，唯讀開）＋ config 複本，放進演練資料目錄。daemon 照跑。
     rsh "set -e; mkdir -p -m 700 $(q "$ddir/data") $(q "$dhome"); sqlite3 $(q "$DST_DATA/agents-manager.sqlite3") \".backup '$ddir/data/agents-manager.sqlite3'\"; cp $(q "$DST_DATA/config.toml") $(q "$ddir/data/config.toml"); chmod 600 $(q "$ddir/data/agents-manager.sqlite3")" || die "目標複本失敗"
     step_end copy-db
 
     step_begin transcripts
-    # transcript-transfer 的 SshTarget 以遠端 ~ 為目標 ${HOME}：包一層 ssh 把 HOME 換成演練目錄，正式的 ~/.claude 一個檔都不寫。
     mkdir -p "$wrap"
-    # 真 ssh 要寫絕對路徑：包裝器自己就叫 ssh、又排在 PATH 最前面，寫 `ssh` 會一直叫回自己。
     local real_ssh; real_ssh=$(command -v "$SSH") || die "找不到 ${SSH}"
     cat > "$wrap/ssh" <<EOF
 #!/bin/bash
@@ -600,7 +525,6 @@ args=("\$@"); n=\${#args[@]}; last=\${args[\$((n - 1))]}; unset "args[\$((n - 1)
 exec $(q "$real_ssh") "\${args[@]}" "env HOME=$(q "$dhome") \$last"
 EOF
     chmod +x "$wrap/ssh"
-    # 跟 transcript-transfer 的 SshTarget 同一個問法（`echo $HOME` 會在 env 設好之前就被遠端 shell 展開）。
     [ "$("$wrap/ssh" -o BatchMode=yes "$TARGET" "python3 -c 'import os; print(os.path.expanduser(\"~\"))'")" = "$dhome" ] || die "ssh 包裝器沒把目標 HOME 換成 ${dhome}，不搬（會寫進正式的 ~/.claude）"
     for id in $(project_ids "$STATE/snapshot.json"); do
         PATH="$wrap:$PATH" "$PY" "$TT" --bundle "$(bundle_of "$id")" --out "$(moved_of "$id")" --target "$TARGET" "${margs[@]}" > "$STATE/transcripts-$id.json"
@@ -630,7 +554,6 @@ EOF
     local bad=0
     log "  搬到目標的對話：$(rsh "du -sh $(q "$dhome") | cut -f1; find $(q "$dhome") -type f | wc -l" | tr '\n' ' ')（大小、檔數）"
     for id in $(project_ids "$STATE/snapshot.json"); do
-        # drill-verify 在目標讀 bundle 與 DB 複本，transcript 在不在也在目標看。
         rhelper drill-verify --db "$ddir/data/agents-manager.sqlite3" --config "$ddir/data/config.toml" --bundle "$ddir/$id-moved.json.gz" "${margs[@]}" \
             | sed 's/^/    /' || bad=1
     done
@@ -640,8 +563,6 @@ EOF
     log "演練結束（WARN ${WARNINGS} 則）"
     [ "$bad" = 0 ] || die "演練驗證沒過（見上）"
 }
-
-# ---------------------------------------------------------------- main
 
 case "$CMD" in
     cutover|rollback|drill) ;;
@@ -673,7 +594,6 @@ if [ -z "$STATE" ]; then
 fi
 [ -d "$STATE" ] || die "沒有狀態目錄 $STATE"
 
-# 真的做：先脫離成背景（第 4 步會收掉叫起這支腳本的 bot pane）。
 if [ "$EXECUTE" = 1 ] && [ "$FOREGROUND" = 0 ] && [ -z "${CUTOVER_DETACHED:-}" ]; then
     export CUTOVER_DETACHED=1
     has_state=0; for a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do [ "$a" = --state-dir ] && has_state=1; done

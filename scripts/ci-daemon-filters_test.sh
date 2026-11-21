@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# scripts/ci-daemon-filters.sh 的路徑 → cargo test 過濾字串對應（2026-10-02 閘門審查）。純函式：stdin 檔案清單 → 過濾字串（一行一個）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,16 +13,9 @@ check() {
     fi
 }
 
-# 模組路徑：daemon/src/a/b.rs → a::b::；mod.rs 就是目錄本身；頂層 x.rs → x::。
-# daemon/src/**/*.rs 內非 _tests.rs 的 production 檔同時會觸發跨檔守門 timestamp_compat_tests::（#1983）。
-# daemon/src 下所有 .rs 檔（只排除 testing.rs 自己）改動時會觸發 testing::scratch_leak_guard::（#1983）。
 check "lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle/queue.rs"
 check "api:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api.rs"
-# 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
-# 檔名不是 _tests.rs 結尾的測試檔（如 tests.rs）也屬於 production_sources 掃描範圍，因此帶有 timestamp_compat_tests::。
 check "host_baseline::tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/host_baseline/tests.rs"
-# 用 #[path] 掛成別的模組名的測試檔：照檔名推會選到零個（同 #1033 的 child_done）。#1169。
-# 以 _tests.rs 結尾者不加選 timestamp_compat_tests::，但會加選 testing::scratch_leak_guard::。
 check "child_alerts::tests:: testing::scratch_leak_guard::" "daemon/src/child_alerts_tests.rs"
 check "judge::tests:: testing::scratch_leak_guard::" "daemon/src/judge_tests.rs"
 check "lifecycle::grok_transcript::tests::" "crates/am-lifecycle/src/lifecycle/grok_transcript_tests.rs"
@@ -31,54 +23,36 @@ check "lifecycle::claude_child_log::tests::" "crates/am-lifecycle/src/lifecycle/
 check "lifecycle::suggestion::tests:: lifecycle_tests::suggestion::" "crates/am-lifecycle/src/lifecycle/suggestion_tests.rs"
 check "lifecycle::composer_draft::tests:: lifecycle_tests::composer_draft::" "crates/am-lifecycle/src/lifecycle/composer_draft_tests.rs"
 check "lifecycle::stop::force_abort_tests::" "crates/am-lifecycle/src/lifecycle/force_abort_tests.rs"
-# poller.rs 把 poller_tests/<mod>.rs 以 #[path] 掛成 poller::<mod>_tests：改測試檔與改 poller.rs 都要跑到這批。
 check "lifecycle::poller::issue_17_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/issue_17_tests.rs"
 check "lifecycle::poller::folded_paste_tests::" "crates/am-lifecycle/src/lifecycle/poller_tests/folded_paste_tests.rs"
 check "lifecycle::poller::" "crates/am-lifecycle/src/lifecycle/poller.rs"
 check "lifecycle::claude_resume_menu::tests:: lifecycle_tests::claude_resume_menu::" "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs"
 check "lifecycle::unsent_draft::tests:: lifecycle_tests::unsent_draft::" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
 check "lifecycle::codex_rollout::turn_boundary::" "crates/am-lifecycle/src/lifecycle/codex_rollout_turn.rs"
-# 混合：兩支新路徑＋既有有效路徑（judge_tests.rs）同進來，各自的真實過濾字串都要在，且排序去重（#1961）。
 check "judge::tests:: lifecycle::claude_resume_menu::tests:: lifecycle::unsent_draft::tests:: lifecycle_tests::claude_resume_menu:: lifecycle_tests::unsent_draft:: testing::scratch_leak_guard::" \
     "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs" "daemon/src/judge_tests.rs" \
     "crates/am-lifecycle/src/lifecycle/claude_resume_menu_tests.rs" "crates/am-lifecycle/src/lifecycle/unsent_draft_tests.rs"
-# #1862 C1：share 的 tests.rs／trusted_tests.rs 搬成 daemon 自己的測試檔（daemon/src/share_tests/），不再靠 share 的 #[path] 掛載編譯；
-# 照 daemon 模組路徑推（share_tests::、share_tests::trusted::），並帶 daemon/src 底下一律會加選的跨檔守門。
 check "share_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/mod.rs"
 check "share_tests::trusted:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/trusted.rs"
-# #1862 C2：remote_cage_tests 搬成 daemon/src/share_tests/remote_cage.rs；portal_remote_tests 整檔 crate-only，只留 1 條要 daemon 的搬成 remote_svg.rs。
 check "share_tests::remote_cage:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/remote_cage.rs"
 check "share_tests::remote_svg:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/share_tests/remote_svg.rs"
 check "" "crates/am-share/src/share/portal_remote_tests.rs"
-# #1862 遷移 B：portal_upload_tests（整檔）與 budget_remote_tests（整檔）搬到 am-share 自己跑，daemon 不再有這兩組；
-# portal_remote_tests 留 1 條要 daemon prompt 路徑的測試（壞 SVG 提醒），改它仍要選到 daemon 的過濾字串。test_env.rs 是 crate-only 的測試環境。
 check "" "crates/am-share/src/share/portal_upload_tests.rs"
 check "" "crates/am-share/src/share/test_env.rs"
-# #1862 C3：share 不再掛進 daemon。改 am-share 的 production 檔（含自己測試是 crate-only 的 svg_check／budget）一律加選 daemon 的 share_tests::；
-# 改 crate 的 Cargo.toml 仍是 __all__；已刪的舊測試檔路徑（remote_cage_tests、tests.rs）也只選 share_tests::，不再選到零個的 share::tests::。
 check "share_tests::" "crates/am-share/src/share/budget.rs" "crates/am-share/src/share/remote_fs.rs"
 check "__all__" "crates/am-share/Cargo.toml"
 check "share_tests::" "crates/am-share/src/share/remote_cage_tests.rs"
-# 模組自己（含子目錄）沒有測試：照檔名推的字串會選到零個，退到上一層（#1338）。
 check "share_tests::" "crates/am-share/src/share/store.rs"
 check "lifecycle::" "crates/am-lifecycle/src/lifecycle/codex_steer.rs"
-# #1862 遷移 A：screen.rs／setup.rs 的純解析測試模組改為 crate-only，但兩檔仍有 daemon 測試（limit_hit_quota_tests、remote_hook_tests 等）；
-# 改這兩檔仍要選到 daemon 的 lifecycle::screen::／lifecycle::setup::，不能因部分測試搬走就退成零選。
 check "lifecycle_tests::screen::" "crates/am-lifecycle/src/lifecycle/screen.rs"
 check "lifecycle::setup:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs"
-# #1862 遷移 B：resume_context 的測試全是 crate-only（與 daemon 複本重複，已刪），改它不選 daemon 測試（crate 自己的 cargo test -p am-lifecycle 跑）。
-# codex_history 的 DB／純解析測試改 crate-only，但仍留 daemon 測試（codex_history::tests::the_hook_defaults_off_in_tests 只在 daemon harness），改它仍要選到 daemon 的過濾字串。
-# 共用的測試輔助 am_base::test_dirs 改動走 am-base 自己的測試。
 check "" "crates/am-lifecycle/src/lifecycle/resume_context.rs"
 check "codex_history:: lifecycle_tests::codex_history::" "crates/am-lifecycle/src/codex_history.rs"
 check "runners::am_base_tests::" "crates/am-base/src/test_dirs.rs"
 check "lifecycle::setup:: lifecycle_tests::screen:: lifecycle_tests::setup::" "crates/am-lifecycle/src/lifecycle/setup.rs" "crates/am-lifecycle/src/lifecycle/screen.rs"
 check "runners::supervisor:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/supervisor/health.rs"
-# 檔案自己沒有測試、但同名子目錄有測試：不退，留在這一層（runners::supervisor:: 底下有測試）。
 check "runners::supervisor:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/runners/supervisor.rs"
-# 頂層檔自己沒有測試：不出自身的模組字串，但若是 production 檔仍會選入跨檔守門（#1983）。
 check "cli:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/cli.rs"
-# 用 #[path] 掛在別的模組底下的檔：照掛載點給字串（api.rs、runners/s6_l.rs、remote_cargo.rs、state.rs）；照檔名推會選到零個（#1338、#1983）。
 check "api::shell:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/shell.rs"
 check "api::bot_scope_matrix:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/bot_scope_matrix.rs"
 check "api::shell_identity_delete:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/shell_identity_delete.rs"
@@ -89,24 +63,17 @@ check "remote_cargo::guard_tests:: testing::scratch_leak_guard::" "daemon/src/re
 check "remote_cargo::hosts:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/remote_cargo_hosts.rs"
 check "state::limit_hit_tests:: testing::scratch_leak_guard::" "daemon/src/state_limit_hit_tests.rs"
 check "api_bot::startup_recovery_tests::startup_abandonment_tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/startup_abandonment_tests.rs"
-# runtime.rs 把 runtime_tests.rs 以 #[path] 掛成 runtime::tests：改測試檔與改 runtime.rs 都要跑到這批。
 check "api_bot::runtime::tests:: testing::scratch_leak_guard::" "daemon/src/api_bot/runtime_tests.rs"
 check "api_bot::runtime:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api_bot/runtime.rs"
-# hookrecv.rs 把 hookrecv_tests/<名>.rs 以 #[path] 掛成 hookrecv::<名>：改測試檔與改 hookrecv.rs 都要跑到。
 check "hookrecv::classify_tests::" "crates/am-lifecycle/src/hookrecv_tests/classify_tests.rs"
 check "hookrecv::agy_tests::" "crates/am-lifecycle/src/hookrecv_tests/agy_tests.rs"
-# api.rs 的測試 mod 搬到 daemon/src/api/<mod>_tests.rs（`#[cfg(test)] mod x_tests;`，模組路徑不變）：改測試檔與改 api.rs 都要跑到這批。
 check "api::prompt_route_tests:: testing::scratch_leak_guard::" "daemon/src/api/prompt_route_tests.rs"
 check "api:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/api.rs"
-# 一般 production 檔加選跨檔守門，_tests.rs 測試檔不加選跨檔守門（#1983）。
 check "changelog_translate:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate.rs"
-# Translation streaming is nested via #[path], not a top-level module.
 check "changelog_translate::stream:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/changelog_translate_stream.rs"
 check "testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/timestamp_compat_tests.rs"
-# 直接 `mod x_tests;` 宣告的不受影響。
 check "lifecycle_tests::agy_tests::" "crates/am-lifecycle/src/lifecycle/agy_tests.rs"
 check "" "crates/am-share/src/share/remote_fs_tests.rs"
-# Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
 check "__all__" "daemon/build.rs"
 check "__all__" "Cargo.toml"
 check "__all__" "Cargo.lock"
@@ -127,67 +94,50 @@ check "__all__" "crates/am-lifecycle/src/lifecycle/fixtures/capture.txt"
 check "share_tests::" "crates/am-share/src/share/portal.rs"
 check "share_tests::" "crates/am-share/src/share/mod.rs"
 check "__all__ lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
-# 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"
-# daemon 以外、但 daemon 的測試會讀的檔案（跟 ci-changed-parts.sh 同一份清單）。
 check "cargo_shim::" "scripts/check.sh"
 check "herdr_shim::" "scripts/ops/lint-shell-vars.sh"
 check "claude_review::" "scripts/ops/codex-release-task.md"
 check "__daemon_release_triage_submission__" "scripts/ops/release-triage-task.md"
 check "supervisor_tests::setup::" "scripts/ops/fixtures/patrol-runtime.json"
 check "supervisor_tests::setup::" "scripts/agm.py"
-# #2072：am-base 讀的非 Rust 檔。測試掛在 daemon harness 的直接選；只在 am-base crate 裡的印 __am_base_crate__（check.sh 補跑 cargo test -p am-base）。
 check "runners::am_base_tests::outbox::" "web/src/lib/outboxList.ts"
 check "runners::am_base_tests::cargo_shim::" "scripts/project-cargo.sh"
 check "__am_base_crate__" "ops/host-baseline/baseline.toml"
 check "__am_base_crate__" "scripts/ops/host-baseline-sync-mac-verify.sh"
 check "__am_base_crate__" "web/src/lib/__fixtures__/codex-async-screen-cases.json"
 check "supervisor_tests::responder:: supervisor_tests::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
-# docs/API.md：路由對照（api_doc_parity，整合測試沒有模組前綴）與 WS 事件表（ws_event_docs_tests）。#1170。
 check "api_route_methods_match_documented_inventory ws_event_docs_tests::" "docs/API.md"
-# 跟 daemon 無關的檔案不產生過濾字串。
 check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
-# crate 的 lib.rs 是接線檔（#[path] 進 daemon），不能對成 lib:: 這種選不到測試的過濾字串（issue #1018）。
 check "share_tests::" "crates/am-share/src/lib.rs"
 check "__all__" "crates/am-lifecycle/src/lib.rs"
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/lib.rs"
-# crate 的 build.rs／Cargo.toml 改動要跑 daemon 全套，不能印「沒有可挑的測試子集」就綠燈。
 check "__all__" "crates/am-supervisor/build.rs"
 check "__all__" "crates/am-core/Cargo.toml"
 check "share_tests::" "crates/am-share/src/lib.rs" "crates/am-share/src/share/portal.rs"
 check "runners::am_base_tests::" "crates/am-base/src/lib.rs"
 
 check "lifecycle::start::ports::" "crates/am-lifecycle/src/session_ports.rs"
-# store.rs 的 harness 測試掛在 store_tests/tests.rs；crate-only 的 store_tests/tests_crate_only.rs 不進 daemon 篩選。
 check "" "crates/am-supervisor/src/supervisor/store_tests/tests_crate_only.rs"
 check "lifecycle::start::tab_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/tab_tests.rs"
 check "lifecycle::start::resume_args_tests::" "crates/am-lifecycle/src/lifecycle/start_tests/resume_args_tests.rs"
 check "lifecycle::send_now::ports::" "crates/am-lifecycle/src/send_ports.rs"
 check "" "crates/am-share/src/share/budget_remote_tests.rs"
-# Crate-owned pure modules need no daemon subset; App/mixed modules still select their tests.
 check "" "crates/am-lifecycle/src/ask_answers.rs"
 check "share_tests::" "crates/am-share/src/share/svg_check.rs"
-# #1862 D：bot_requests（26→3）、assignment_state（2→0）、incidents（27→9）的資料／流程測試搬到 am-supervisor 自己跑（test_env 窄環境）；
-# bot_requests／incidents 仍各留要 TurnOps／QuotaOps／HostsAccess 等的 daemon 測試，改它們仍要選到各自的 daemon 過濾字串；
-# assignment_state 的 daemon 測試全搬走（只剩 crate target）；test_env.rs 是 crate-only 的測試環境。
-# #1862 S1：health／setup／watchdog／cli_refresh／role_faults／failover／store 的 daemon 測試搬到 daemon/src/supervisor_tests/，改這些檔選搬過去的那組；
-# mod.rs 兩組都選；搬過去的測試檔本身照 daemon 模組路徑推。
 for m in health setup watchdog cli_refresh role_faults failover store responder controller idle_sleep maintenance incidents bot_requests timing; do
     check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/$m.rs"
     check "supervisor_tests::$m:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/$m.rs"
 done
-# #1862 S4：supervisor 不再掛進 daemon：改 am-supervisor 的非整檔測試檔一律選 supervisor_tests:: 與 runners::supervisor::（test_env／store_tests 的 crate-only 測試檔不選）。
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/mod.rs"
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/roles.rs"
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/controller.rs"
-# #1862 S3b：build_info.rs 的 daemon_wiring_smoke 搬到 supervisor_tests::build_info::；flow_fixture 沒有自己的測試，改它選它所有的使用者。
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/build_info.rs"
 check "supervisor_tests::build_info:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/build_info.rs"
 check "api::relay_announce_tests:: api::relay_from_auth_tests:: runners::supervisor::api:: runners::supervisor::responder_api:: supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/flow_fixture.rs"
 check "supervisor_tests:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/supervisor_tests/mod.rs"
 check "runners::supervisor:: supervisor_tests::" "crates/am-supervisor/src/supervisor/assignment_state.rs"
 check "" "crates/am-supervisor/src/supervisor/test_env.rs"
-# am-base uses the actual composition mount table, including aliases and shared fallbacks.
 check "runners::am_base_tests::attach::" "crates/am-base/src/attach.rs"
 check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture.rs"
 check "runners::am_base_tests::capture_claude::" "crates/am-base/src/capture/claude.daemon-tests-reply_boundary_tests.rs"
@@ -197,7 +147,6 @@ check "runners::am_base_tests::release_triage::" "crates/am-base/src/release_tri
 for f in lib.rs db.rs db/schema_guard.rs shared_host.rs race_point.rs unrecognised.rs; do
     check "runners::am_base_tests::" "crates/am-base/src/$f"
 done
-# A different alias is read from the table, and missing/broken mounts fall back broadly.
 MOUNTS=$(mktemp -d)
 mkdir -p "$MOUNTS/daemon/src/runners/am_base_tests" "$MOUNTS/crates/am-base/src"
 printf '#[path = "am_base_tests/alias.rs"]\nmod renamed;\n' > "$MOUNTS/daemon/src/runners/am_base_tests.rs"
@@ -210,8 +159,6 @@ rm "$MOUNTS/daemon/src/runners/am_base_tests.rs"
 [ "$(am_filter)" = 'runners::am_base_tests::' ] || fail=1
 rm -rf "$MOUNTS"
 
-# 巢狀、自己與上層都沒有測試的模組（zz/yy/xx.rs；zz 與 zz/yy 都沒有 #[test]）：只退一層還是 zz::yy::（選到零個，check.sh 拒絕放行，#1338 的同一件事）。
-# 要一路退到真的有測試的那一層；一直退到頂層都沒有就不出過濾字串。用 mktemp 的假目錄跑，不碰真的 repo 檔案。
 REPO_ROOT="$(pwd)"
 NEST=$(mktemp -d)
 mkdir -p "$NEST/daemon/src/zz/yy" "$NEST/daemon/src/ww"
@@ -230,7 +177,6 @@ if [ "$got" != "testing::scratch_leak_guard:: timestamp_compat_tests:: ww::" ]; 
     printf 'FAIL: 同層檔沒有測試、上一層 ww/mod.rs 有測試 → got [%s] want [testing::scratch_leak_guard:: timestamp_compat_tests:: ww::]\n' "$got" >&2
     fail=1
 fi
-# #1517 的形狀：a/mod.rs 有測試，a/b/c.rs 與 a/b/ 都沒有：要退到 a::，不能停在 a::b::（選到零個）。
 mkdir -p "$NEST/daemon/src/aa/bb"
 printf '#[test]\nfn t() {}\n' > "$NEST/daemon/src/aa/mod.rs"
 printf 'pub fn k() {}\n' > "$NEST/daemon/src/aa/bb/c.rs"
@@ -240,8 +186,6 @@ if [ "$got" != "aa:: testing::scratch_leak_guard:: timestamp_compat_tests::" ]; 
     fail=1
 fi
 
-# 自動掃描 daemon/src 下所有 #[path = ...] mod 宣告（#1983 條件 C）。
-# 對每個被掛載的目標檔跑 selector，斷言輸出等於其真實模組路徑（不可退回或照檔名推錯）。
 python3 -B - <<'EOF' || fail=1
 import os, re, subprocess, sys
 

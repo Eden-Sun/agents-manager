@@ -1,17 +1,4 @@
 #!/bin/bash
-# daemon-update-kick.sh 的隔離測試（例行自動部署，使用者 2026-09-29 簡化）。
-#
-# 完全不碰正式 daemon／AGM 目錄／GitHub：每個 case 開暫存目錄，放一個假 origin（真的 git）、
-# 假主樹、假 AGM 目錄，再把 gh／bun／cargo／agm／daemon-swap.sh 換成 stub，從它們的 log 檢查腳本做了什麼決定。
-#
-# 釘住的行為：
-#   1. 沿 first-parent 往回找最新一顆 ubuntu-ci＝success 的 sha；沒有會進 binary 的差異就不問 GitHub、不建置。
-#   2. 在專用 checkout 建置，不動主樹；同一顆等安全窗口那幾輪不重建。
-#   3. 換版交給 daemon-swap.sh，**不帶核准單**、也不派工給任何 bot。
-#   4. 立即部署請求檔：部署那顆 sha（不等 ubuntu-ci），做完才刪；等不到窗口就留著。
-#   5. 失敗照舊推 ops_alert；被回滾的 sha 不再挑。
-#
-#   bash scripts/ops/daemon-update-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/daemon-update-kick.sh"
@@ -20,7 +7,7 @@ export GITBIN
 PASS=0
 FAIL=0
 
-check() { # check <描述> <要出現的字串> <檔案>
+check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then
     echo "ok   - $1"; PASS=$((PASS + 1))
   else
@@ -34,7 +21,7 @@ check_no() {
     echo "ok   - $1"; PASS=$((PASS + 1))
   fi
 }
-check_eq() { # check_eq <描述> <期望> <實際>
+check_eq() {
   if [ "$2" = "$3" ]; then
     echo "ok   - $1"; PASS=$((PASS + 1))
   else
@@ -43,7 +30,7 @@ check_eq() { # check_eq <描述> <期望> <實際>
 }
 count() { grep -c -- "$1" "$2" 2>/dev/null || true; }
 
-commit() { # commit <檔案> <訊息>：在 WORK 提交並推到 origin，回 sha
+commit() {
   mkdir -p "$(dirname "$WORK/$1")"
   echo "$2" >> "$WORK/$1"
   "$GITBIN" -C "$WORK" add -A >/dev/null
@@ -57,17 +44,16 @@ setup() {
   ORIGIN="$ROOT/origin.git"; WORK="$ROOT/work"
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_DEPLOY_CHECKOUT="$ROOT/deploy"
   mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci" "$ROOT/cistate"
-  export AGM_CI_ROOT="$ROOT/cistate"          # ubuntu-ci 寫 last-sha 的地方（#1449）
+  export AGM_CI_ROOT="$ROOT/cistate"
   "$GITBIN" init -q --bare -b main "$ORIGIN"
   "$GITBIN" clone -q "$ORIGIN" "$WORK" 2>/dev/null
   "$GITBIN" -C "$WORK" config user.email t@t; "$GITBIN" -C "$WORK" config user.name t
-  mkdir -p "$WORK/web"; : > "$WORK/web/.keep"     # 每顆 commit 都要有 web/（腳本會 cd 進去建置）
-  C0=$(commit daemon/src/a.rs "live")            # 線上那顆
-  C1=$(commit daemon/src/a.rs "fix one")          # 會進 binary
-  C2=$(commit docs/x.md "docs only")              # 不進 binary
-  C3=$(commit web/src/b.ts "web change")          # 會進 binary（HEAD）
+  mkdir -p "$WORK/web"; : > "$WORK/web/.keep"
+  C0=$(commit daemon/src/a.rs "live")
+  C1=$(commit daemon/src/a.rs "fix one")
+  C2=$(commit docs/x.md "docs only")
+  C3=$(commit web/src/b.ts "web change")
   export C0 C1 C2 C3
-  # 主樹：只用來取 origin URL 與放線上 binary。
   "$GITBIN" clone -q "$ORIGIN" "$AGM_REPO" 2>/dev/null
   mkdir -p "$AGM_REPO/target/release"
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
@@ -145,10 +131,9 @@ STUB
 }
 teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; }
 run() { bash "$SCRIPT" >/dev/null 2>"$AGM_DIR/stderr.log"; echo $?; }
-ci() { echo "$2" > "$ROOT/ci/$1"; }   # ci <sha> <state>
+ci() { echo "$2" > "$ROOT/ci/$1"; }
 LOG() { echo "$AGM_DIR/daemon-update.log"; }
 
-# 1. 沒有會進 binary 的差異：不問 GitHub、不建置、不換版。
 setup
 "$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
 D=$(commit docs/y.md "docs only again")
@@ -160,7 +145,6 @@ check_eq "沒建置" "0" "$(wc -l < "$AGM_DIR/build.log" | tr -d ' ')"
 check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 2. HEAD 綠燈：專用 checkout 建置、換版，不帶核准單、不派工。
 setup
 ci "$C3" success
 rc=$(run)
@@ -181,7 +165,6 @@ check_no "不申請核准、不派工" "approval\|assign\|lease" "$AGM_DIR/agm.l
 check_eq "主樹 HEAD 沒被動" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
 teardown
 
-# 2b. AGM_DEPLOY_FAST_BUILD=0：恢復原本的建置（不帶 LTO／incremental 環境變數）。
 setup
 ci "$C3" success
 export AGM_DEPLOY_FAST_BUILD=0
@@ -191,7 +174,6 @@ check "開關為 0 時兩個環境變數都不帶" "LTO=unset INC=unset" "$AGM_D
 unset AGM_DEPLOY_FAST_BUILD
 teardown
 
-# clone 中途失敗必須清掉 staging checkout，不能把殘缺目錄留在正式 cache 路徑阻塞後續輪。
 setup
 ci "$C3" success
 export STUB_GIT_CLONE_FAIL=1
@@ -200,7 +182,6 @@ check_eq "clone 失敗不留下正式 deploy-checkout" "no" "$([ -e "$ROOT/deplo
 check_eq "clone 失敗清掉 staging 目錄" "0" "$(find "$ROOT" -maxdepth 1 -name 'deploy.clone.*' -print | wc -l | tr -d ' ')"
 teardown
 
-# deploy checkout 的 origin 即使仍含線上祖先，也只能取自 repo 指向的 upstream，不能部署同祖先 fork 的 main。
 setup
 FORK_ORIGIN="$ROOT/fork.git"; FORK_WORK="$ROOT/fork-work"
 "$GITBIN" init -q --bare -b main "$FORK_ORIGIN"
@@ -221,7 +202,6 @@ check_eq "不同 upstream 的 checkout 不部署" "0" "$(wc -l < "$AGM_DIR/swap.
 check "不同 upstream 明確告警" "deploy_checkout_origin_mismatch" "$AGM_DIR/alerts.log"
 teardown
 
-# 3. HEAD 還在跑（pending）：往前一顆找到綠燈的那顆；中間 docs-only 不會被當成候選。
 setup
 ci "$C3" pending
 ci "$C1" success
@@ -231,7 +211,6 @@ check "HEAD 不是綠燈就往前找" "${C3}.*pending" "$(LOG)"
 check "換的是綠燈那顆" "--sha $C1" "$AGM_DIR/swap.log"
 teardown
 
-# 4. 沒有任何綠燈：不建置、不換版，也不算失敗（等下一輪）。
 setup
 ci "$C3" failure
 rc=$(run)
@@ -241,7 +220,6 @@ check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check_eq "沒有失敗計數" "no" "$([ -f "$AGM_DIR/daemon-update.fails" ] && echo yes || echo no)"
 teardown
 
-# 5. GitHub 問不到：這輪不動、記成失敗；連續 3 輪推 ops_alert。
 setup
 export STUB_GH_FAIL=1
 for _ in 1 2; do run >/dev/null; done
@@ -256,7 +234,6 @@ run >/dev/null
 check_eq "恢復後失敗計數清零" "no" "$([ -f "$AGM_DIR/daemon-update.fails" ] && echo yes || echo no)"
 teardown
 
-# 6. 等安全窗口（swap rc=4）：不算失敗、不重建；下一輪同一顆直接再換。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=4
@@ -270,7 +247,6 @@ check_eq "換版試了兩次" "2" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check "第二輪說已經建好" "已經建好" "$(LOG)"
 teardown
 
-# 7. 換上去被回滾（swap rc=7）：推 ops_alert，之後不再挑那顆；往前一顆綠燈就退而求其次也不行（那顆才是被拒的）。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=7
@@ -285,7 +261,6 @@ check "下一輪略過被回滾的那顆" "之前換上去被回滾過" "$(LOG)"
 check "改換往前的綠燈" "--sha $C1" "$AGM_DIR/swap.log"
 teardown
 
-# 7b. rollback list writes are durable deploy state: report a failed rejection write instead of claiming this sha is safely skipped.
 setup
 ci "$C3" success
 export STUB_SWAP_RC=7
@@ -296,7 +271,6 @@ check "回滾通知指出下一輪可能重試" "可能重新挑選" "$(LOG)"
 check_eq "rejected 寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
 teardown
 
-# 8. 往前修（rc=6）：補寫 .built，推 ops_alert。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=6
@@ -305,7 +279,6 @@ check_eq ".built 補上" "$(echo "$C3" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-upd
 check "推 swap_forward_fixed" "swap_forward_fixed" "$AGM_DIR/alerts.log"
 teardown
 
-# 8b. Forward-fix succeeded but the .built marker cannot be updated: raise an actionable alert and keep the failure visible.
 setup
 ci "$C3" success
 export STUB_SWAP_RC=6 STUB_BUILT_BLOCK=1
@@ -315,7 +288,6 @@ check "built marker 寫入失敗推 ops_alert" "swap_built_marker_failed" "$AGM_
 check_eq "built marker 寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
 teardown
 
-# 8c. daemon-swap reports marker persistence failure after successful verification; kick retries the marker and alerts if it still cannot persist.
 setup
 ci "$C3" success
 export STUB_SWAP_RC=11 STUB_BUILT_BLOCK=1
@@ -325,7 +297,6 @@ check "swap rc=11 標記寫入失敗推 ops_alert" "swap_built_marker_failed" "$
 check_eq "swap rc=11 標記寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
 teardown
 
-# 9. 建置失敗：不換版、記失敗。
 setup
 ci "$C3" success
 export STUB_CARGO_FAIL=1
@@ -336,7 +307,6 @@ check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 teardown
 
-# 10. 立即部署：不等 ubuntu-ci（那顆是 pending），換完才刪請求檔。
 setup
 ci "$C3" pending
 printf '{"sha":"%s","live_sha":"x","requested_at":"%s","requested_by":"ui"}' "$C1" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$AGM_DIR/daemon-update.now.json"
@@ -348,7 +318,6 @@ check_eq "做完刪請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] &
 check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
 teardown
 
-# 11. 立即部署等不到窗口（rc=4）：請求檔留著，下一輪再試。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 export STUB_SWAP_RC=4
@@ -360,7 +329,6 @@ check_eq "下一輪換完才刪" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" 
 check_eq "只建置一次" "1" "$(count 'cargo build' "$AGM_DIR/build.log")"
 teardown
 
-# 12. 立即部署：sha 不在 origin/main、壞掉的請求檔 → alert 並收掉，不建置。
 setup
 printf '{"sha":"deadbeef00000000000000000000000000000000"}' > "$AGM_DIR/daemon-update.now.json"
 run >/dev/null
@@ -371,7 +339,6 @@ printf 'not json' > "$AGM_DIR/daemon-update.now.json"
 run >/dev/null
 check "推 now_request_corrupt" "now_request_corrupt" "$AGM_DIR/alerts.log"
 check_eq "壞檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-# issue #2033：超過時效的請求（timer 停著時留下的）收掉並喊人，不拿它換版。
 printf '{"sha":"%s","requested_at":"2000-01-01T00:00:00.000Z"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 run >/dev/null
 check "推 now_request_expired" "now_request_expired" "$AGM_DIR/alerts.log"
@@ -379,7 +346,6 @@ check_eq "過期請求收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] &
 check_eq "過期請求不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 13. 立即部署：只動到不進 binary 的檔（C2 相對線上 C0 之間有 C1，所以改成把線上設成 C1 再要 C2）。
 setup
 echo "$(echo "$C1" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 printf '{"sha":"%s"}' "$C2" > "$AGM_DIR/daemon-update.now.json"
@@ -389,7 +355,6 @@ check_eq "請求檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && e
 check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 14. 立即部署：目標比線上舊 → 拒絕降版。
 setup
 echo "$(echo "$C3" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
@@ -398,7 +363,6 @@ check "推 now_target_older" "now_target_older" "$AGM_DIR/alerts.log"
 check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 15. 讀不到線上版本（.built 不在）：喊人，不動。
 setup
 rm -f "$AGM_DIR/daemon-update.built"
 ci "$C3" success
@@ -407,7 +371,6 @@ check "推 built_unknown" "built_unknown" "$AGM_DIR/alerts.log"
 check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 16. daemon 太舊（swap rc=9）：推 swap_daemon_too_old，算失敗。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=9
@@ -416,8 +379,6 @@ check "推 swap_daemon_too_old" "swap_daemon_too_old" "$AGM_DIR/alerts.log"
 check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 teardown
 
-# 16b. 新 binary 內嵌的 sha 不是核准的那顆（swap rc=10，換版之前就擋下、什麼都沒動）：推 swap_binary_sha_mismatch，算失敗，
-#      但不記進 rejected（commit 本身沒問題，是這次建出來的 binary 不對，下一輪重建就可能好）。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=10
@@ -427,7 +388,6 @@ check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 check_no "sha 不符不記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
 teardown
 
-# 16c. rc=10（binary 內嵌的 sha 對不上）要清掉 .built-for：下一輪重新 checkout＋建置，不認那顆壞 binary（issue #883）。
 setup
 ci "$C3" success
 export STUB_SWAP_RC=10
@@ -437,7 +397,6 @@ run >/dev/null
 check_eq "rc=10 的下一輪重新建置" "2" "$(count 'cargo build' "$AGM_DIR/build.log")"
 teardown
 
-# 16d. 立即部署連續失敗（rc=3，不會自己好）：滿 3 次推 now_failed 並收掉請求；之前請求檔留著、計數累加（issue #883）。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 export STUB_SWAP_RC=3
@@ -455,7 +414,6 @@ check_eq "到上限只推一次 now_failed" "1" "$(count '^now_failed$' "$AGM_DI
 check_eq "收掉後計數檔也清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
 teardown
 
-# 16d2. 新 sha 不沿用舊 sha 的失敗次數；成功後清掉請求與計數。
 setup
 echo "$C1 2" > "$AGM_DIR/daemon-update.now.fails"
 printf '{"sha":"%s"}' "$C3" > "$AGM_DIR/daemon-update.now.json"
@@ -469,7 +427,6 @@ check_eq "成功後請求檔清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.jso
 check_eq "成功後失敗計數清掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.fails" ] && echo yes || echo no)"
 teardown
 
-# 16d3. 計數路徑存在但讀取失敗須看得見；目錄下的既有 mv／計數行為不在這裡修。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 mkdir "$AGM_DIR/daemon-update.now.fails"
@@ -487,7 +444,6 @@ check_no "目錄計數無法累加而未推 now_failed（既有行為）" "^now_
 check_eq "目錄故障四輪後仍留請求（既有行為）" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
 teardown
 
-# 16e. 立即部署一直等窗口（rc=4）：不算失敗，請求檔留著、不累計。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 export STUB_SWAP_RC=4
@@ -502,7 +458,6 @@ check_eq "rc=4 有舊計數時仍保留請求" "yes" "$([ -f "$AGM_DIR/daemon-up
 check_no "rc=4 有舊計數也不推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
 teardown
 
-# 16f. 立即部署遇到 daemon 太舊（rc=9）：做不了，立刻收掉。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 export STUB_SWAP_RC=9
@@ -511,7 +466,6 @@ check_eq "rc=9 立刻收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.j
 check "仍推 swap_daemon_too_old" "swap_daemon_too_old" "$AGM_DIR/alerts.log"
 teardown
 
-# 16g. 立即部署的建置一直失敗：也算失敗，滿 3 次收掉。
 setup
 printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
 export STUB_CARGO_FAIL=1
@@ -522,7 +476,6 @@ check_eq "建置失敗 3 次收掉請求檔" "no" "$([ -f "$AGM_DIR/daemon-updat
 check "建置失敗推 now_failed" "now_failed" "$AGM_DIR/alerts.log"
 teardown
 
-# 16h. 3b 自測連續略過（daemon-swap 寫的計數檔）≥3：換版回來後推 swap_probe_skipped；不到 3 不推（issue #882）。
 setup
 ci "$C3" success
 echo 3 > "$AGM_DIR/daemon-swap.probe-skips"
@@ -548,7 +501,6 @@ check "blocked 略過 3 次推 swap_probe_skipped" "swap_probe_skipped" "$AGM_DI
 check "alert 內容講卡在 blocked／busy" "卡在 blocked／busy" "$(LOG)"
 teardown
 
-# 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
 setup
 ci "$C3" success
 mkdir -p "$AGM_DIR/daemon-update.lock"; echo "999999 1" > "$AGM_DIR/daemon-update.lock/owner"
@@ -578,7 +530,6 @@ check_eq "活著的執行者：這輪不動" "0" "$(wc -l < "$AGM_DIR/swap.log" 
 check_eq "活著的執行者：沒有重複建置" "1" "$(count 'bun install' "$AGM_DIR/build.log")"
 teardown
 
-# guard 路徑被換成 symlink 時 fail closed，不可截斷其目標或繼續部署。
 setup
 ci "$C3" success
 printf 'preserve outside guard target\n' > "$ROOT/guard-target"
@@ -589,8 +540,6 @@ check "guard symlink 推 lock_unavailable" "lock_unavailable" "$AGM_DIR/alerts.l
 check_eq "guard symlink 下不部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# A child left holding the advisory lock after the runner PID disappeared must not turn
-# into an endless quiet skip: aged, unverified guard ownership raises an alert.
 setup
 ci "$C3" success
 mkdir -p "$AGM_DIR/daemon-update.lock"
@@ -603,7 +552,6 @@ check_eq "guard 持有人未知時不重複部署" "0" "$(wc -l < "$AGM_DIR/swap
 kill "$GUARD_HOLDER" 2>/dev/null; wait "$GUARD_HOLDER" 2>/dev/null
 teardown
 
-# A dead owner with a future-dated lock cannot be safely reclaimed, but must not be silently skipped forever.
 setup
 ci "$C3" success
 mkdir -p "$AGM_DIR/daemon-update.lock"
@@ -615,7 +563,6 @@ check "未來 mtime 的鎖有明確記錄" "時間在未來" "$(LOG)"
 check_eq "未來 mtime 的鎖不重複部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 活 PID 的 command line 只含同名片語、不是真正 kick：不能把被重用的 PID 誤認成執行者而永遠保留鎖。
 setup
 ci "$C3" success
 bash -c 'sleep 30; : # daemon-update-kick' & SLEEPER=$!
@@ -626,10 +573,8 @@ check "重用 PID 不再被判成活 runner" "清掉殘留鎖" "$(LOG)"
 kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null
 teardown
 
-# 18. 腳本本身：不再有建置 child／核准／門檻這些東西；daemon 的 kick_ready 靠這個檔名判斷；全形標點前要有大括號。
 check "認得立即部署請求檔（kick_ready 靠這個字）" "daemon-update.now.json" "$SCRIPT"
-# ── ops 腳本自動換新（旗標，預設關）：假 repo 裡放真的 ops-install.sh＋一份對照表＋一支 x-kick.sh；安裝端先裝好 v1 ──
-seed_ops() { # 在 WORK 加上 ops-install.sh、對照表、x-kick.sh（v1）並推上去；安裝端的 x-kick.sh 是 v1
+seed_ops() {
   mkdir -p "$WORK/scripts/ops"
   cp "$HERE/ops-install.sh" "$WORK/scripts/ops/ops-install.sh"
   printf 'scripts/ops/x-kick.sh  bin/x-kick.sh\n' > "$WORK/scripts/ops/install-manifest.tsv"
@@ -637,19 +582,18 @@ seed_ops() { # 在 WORK 加上 ops-install.sh、對照表、x-kick.sh（v1）並
   "$GITBIN" -C "$WORK" add -A >/dev/null; "$GITBIN" -C "$WORK" commit -q -m "seed ops"; "$GITBIN" -C "$WORK" push -q origin HEAD:main
   install -m 755 "$WORK/scripts/ops/x-kick.sh" "$AGM_DIR/bin/x-kick.sh"
 }
-bump_x() { # bump_x <內容>：改 x-kick.sh 並推上去，回 sha
+bump_x() {
   printf '%s' "$1" > "$WORK/scripts/ops/x-kick.sh"
   "$GITBIN" -C "$WORK" add -A >/dev/null; "$GITBIN" -C "$WORK" commit -q -m "bump x"; "$GITBIN" -C "$WORK" push -q origin HEAD:main
   "$GITBIN" -C "$WORK" rev-parse HEAD
 }
-only_ops_since_built() { # 線上那顆之後只剩 ops 的改動（不進 binary）
+only_ops_since_built() {
   "$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
   seed_ops
-  "$GITBIN" -C "$AGM_REPO" reset -q --hard "$C0"   # 主樹停在舊的 C0（落後，可快轉），不是分岔
+  "$GITBIN" -C "$AGM_REPO" reset -q --hard "$C0"
 }
 x_line() { sed -n 2p "$AGM_DIR/bin/x-kick.sh"; }
 
-# 8. 旗標沒開（預設）：ops 腳本改了也不動安裝端，也不為它問 GitHub。
 setup
 only_ops_since_built
 H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
@@ -659,7 +603,6 @@ check_eq "沒問 GitHub" "0" "$(wc -l < "$AGM_DIR/gh.log" | tr -d ' ')"
 check_no "log 沒提 ops 自動安裝" "ops 自動安裝" "$(LOG)"
 teardown
 
-# 9. 旗標開（檔案）、沒有會進 binary 的差異、HEAD 綠燈：只換 ops 腳本，不建置、不換版；先備份。
 setup
 only_ops_since_built
 touch "$AGM_DIR/ops-auto-install.enabled"
@@ -673,7 +616,6 @@ check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check_eq "沒有 ops_alert" "0" "$(wc -l < "$AGM_DIR/alerts.log" | tr -d ' ')"
 teardown
 
-# 10. 旗標開、HEAD 的 ubuntu-ci 還沒綠：等，不裝。
 setup
 only_ops_since_built
 touch "$AGM_DIR/ops-auto-install.enabled"
@@ -683,7 +625,6 @@ check_eq "安裝端沒動" "echo x-v1" "$(x_line)"
 check "log 說等綠燈" "等綠燈" "$(LOG)"
 teardown
 
-# 11. 旗標開（環境變數）、有 binary 要換：換版成功之後才裝 ops 腳本；順序是先換版。
 setup
 seed_ops
 H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
@@ -694,7 +635,6 @@ check "有換版" "--sha $H" "$AGM_DIR/swap.log"
 check_eq "換版後 ops 腳本也換了" "echo x-v2" "$(x_line)"
 teardown
 
-# 12. 換版沒成功（daemon-swap rc=7 回滾）：不裝 ops 腳本。
 setup
 seed_ops
 touch "$AGM_DIR/ops-auto-install.enabled"
@@ -703,7 +643,6 @@ STUB_SWAP_RC=7 run >/dev/null
 check_eq "安裝端沒動" "echo x-v1" "$(x_line)"
 teardown
 
-# 13. 新版自檢沒過：還原舊版、推 ops_install_failed，部署本身的結果不受影響（照常寫「已換上」）。
 setup
 seed_ops
 touch "$AGM_DIR/ops-auto-install.enabled"
@@ -714,7 +653,6 @@ check "推了 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
 check "部署照常完成" "已換上" "$(LOG)"
 teardown
 
-# 14. 安裝端的檔被人手改過（不是 repo 任何一版）：不覆蓋、推 ops_install_drift 叫人看，部署照常完成、不算失敗。
 setup
 seed_ops
 touch "$AGM_DIR/ops-auto-install.enabled"
@@ -727,7 +665,6 @@ check_no "不是 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
 check "部署照常完成" "已換上" "$(LOG)"
 teardown
 
-# 15. 問不到 build-inputs 時保底清單也認 crates/。
 setup
 "$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
 E=$(commit crates/am-share/src/x.rs "crate only")
@@ -750,9 +687,7 @@ else
 fi
 rm -f "/tmp/daemon-update-unbraced.$$"
 
-# 8. （#1449）origin/main 比線上多 40 顆、綠燈的 sha 落在往回 30 顆之外：ubuntu-ci 寫的 last-sha 把它挑出來；
-#    往回 30 顆都沒有綠燈時，log 要講清楚是「回看上限用完」，不是「還沒綠」。
-bulk() { # bulk <顆數>：在 WORK 的 daemon/ 連續提交 N 顆（會進 binary），最後推一次
+bulk() {
   local i
   for i in $(seq 1 "$1"); do
     echo "bulk $i" >> "$WORK/daemon/src/a.rs"
@@ -763,7 +698,7 @@ bulk() { # bulk <顆數>：在 WORK 的 daemon/ 連續提交 N 顆（會進 bina
 }
 setup
 bulk 40
-S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)     # 往回第 35 顆
+S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)
 ci "$S35" success
 echo "$S35" > "$ROOT/cistate/last-sha"
 rc=$(run)
@@ -772,7 +707,6 @@ check "挑到 last-sha 那顆（回看範圍之外）" "--sha $S35" "$AGM_DIR/sw
 check "log 說來源是 last-sha" "來自 ubuntu-ci 的 last-sha" "$(LOG)"
 teardown
 
-# 8b. 同樣情境但沒有 last-sha 檔：照舊只看 30 顆，log 講明是回看上限用完。
 setup
 bulk 40
 ci "$("$GITBIN" -C "$WORK" rev-parse HEAD~34)" success
@@ -782,7 +716,6 @@ check_eq "沒換版（綠燈在回看範圍之外、也沒有 last-sha）" "0" "
 check "log 講明是回看上限用完" "回看上限 30 顆用完" "$(LOG)"
 teardown
 
-# 8c. last-sha 那顆是紅的：不挑它，走迴圈（迴圈裡也沒有綠燈）。
 setup
 bulk 40
 S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)
@@ -794,7 +727,6 @@ check_eq "紅燈的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr 
 check "log 講明是回看上限用完" "回看上限 30 顆用完" "$(LOG)"
 teardown
 
-# 8d. last-sha 內容是垃圾（不是 40 碼 hex，或 40 碼但不存在）：忽略，照舊走迴圈，不報錯。
 setup
 ci "$C3" success
 echo "not-a-sha" > "$ROOT/cistate/last-sha"
@@ -811,7 +743,6 @@ check_eq "不存在的 40 碼 rc=0" "0" "$rc"
 check "不存在的 40 碼也忽略，照舊挑到 HEAD" "--sha $C3" "$AGM_DIR/swap.log"
 teardown
 
-# 8e. last-sha 不是 origin/main 的祖先（在別的分支上）：忽略，不挑它。
 setup
 "$GITBIN" -C "$WORK" checkout -q -b side "$C0"
 echo "side" >> "$WORK/daemon/src/side.rs"
@@ -826,7 +757,6 @@ check_eq "rc=0" "0" "$rc"
 check_eq "不是 main 祖先的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 8f. last-sha 在被回滾名單裡：不挑它。
 setup
 bulk 40
 S35=$("$GITBIN" -C "$WORK" rev-parse HEAD~34)
@@ -838,7 +768,6 @@ check_eq "rc=0" "0" "$rc"
 check_eq "被回滾過的 last-sha 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# 8g. last-sha 就是線上那顆：不多問 GitHub（那一顆不問）。
 setup
 ci "$C3" pending
 echo "$C0" > "$ROOT/cistate/last-sha"
@@ -847,7 +776,6 @@ check_eq "rc=0" "0" "$rc"
 check_no "線上那顆不問 GitHub" "commits/$C0/status" "$AGM_DIR/gh.log"
 teardown
 
-# #1939: the installed kick uses its adjacent helper, not the target checkout.
 setup
 ci "$C3" success
 cp "$HERE/daemon-update-kick.sh" "$AGM_DIR/bin/daemon-update-kick.sh"
@@ -887,13 +815,11 @@ check_eq "helper build failure prevents swap" "0" "$(wc -l < "$AGM_DIR/swap.log"
 check_eq "helper build failure removes staging" "0" "$(find "$ROOT/deploy/web" -name '.dist-stage-*' | wc -l | tr -d ' ')"
 teardown
 
-# 9. 換版成功後同步主樹（bot 啟動讀的 AGENTS.md／.mcp.json 來自主樹）。主樹先停在 C0（落後上游 C3）。
 sync_setup() {
   setup
   ci "$C3" success
   "$GITBIN" -C "$AGM_REPO" reset -q --hard "$C0"
 }
-# 9a. 落後、可以快轉：主樹快轉到 origin/main。
 sync_setup
 rc=$(run)
 check_eq "快轉 rc=0" "0" "$rc"
@@ -901,7 +827,6 @@ check_eq "快轉：主樹到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-
 check "快轉：log 說快轉" "主樹快轉到" "$(LOG)"
 teardown
 
-# 9b. 本地 commit 內容已被上游 rebase 進去（patch 等價、hash 不同）：對齊到 origin/main，本地那顆不留。
 sync_setup
 echo "fix one" >> "$AGM_REPO/daemon/src/a.rs"
 "$GITBIN" -C "$AGM_REPO" add daemon >/dev/null
@@ -912,7 +837,6 @@ check_eq "已 rebase：主樹對齊到 origin/main" "$C3" "$("$GITBIN" -C "$AGM_
 check "已 rebase：log 說對齊" "對齊到" "$(LOG)"
 teardown
 
-# 9c. 有上游沒有的本地 commit：不動主樹、推 ops_alert。部署本身照常成功。
 sync_setup
 echo "local only" > "$AGM_REPO/daemon/src/local.rs"
 "$GITBIN" -C "$AGM_REPO" add daemon >/dev/null
@@ -924,9 +848,8 @@ check_eq "有本地獨有 commit：主樹不動" "$LOCAL" "$("$GITBIN" -C "$AGM_
 check "有本地獨有 commit：推 main_tree_diverged" "main_tree_diverged" "$AGM_DIR/alerts.log"
 teardown
 
-# 9d. 沒有會進 binary 的差異那一輪（只有 AGENTS.md／.mcp.json 這類文件改動）：不建置、不換版，主樹照樣快轉。
 sync_setup
-echo "$(echo "$C3" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"   # 線上已是 C3：C3 之後沒有 binary 差異
+echo "$(echo "$C3" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 rc=$(run)
 check_eq "no-diff rc=0" "0" "$rc"
 check_eq "no-diff：沒有換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"

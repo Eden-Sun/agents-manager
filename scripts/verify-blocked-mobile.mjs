@@ -1,17 +1,3 @@
-// 「需要回應」框在手機上點得到選項（issue #559）：量版面、真的點一輪，量不過 exit 1。
-//
-// 2026-09-25 使用者手機截圖：兩題 AskUserQuestion、終端太矮把分頁列與第二題的題目裁掉，從對話紀錄補回來的原題卡把整個框吃掉，
-// 能按的選項只露出半列。單看截圖分不出「在捲軸外」還是「被底部按鈕蓋住」，所以量數字：
-//
-//   1. 第一個可點選項整列落在可視範圍內（視窗、`.blocked-modal-body` 的捲軸都要），而且點它的中心點到的就是它
-//      （沒被釘住的題目或底部按鈕列蓋住）——390×844、390×640（iOS 瀏覽器扣掉網址列與工具列）、1440×900 三種。
-//   2. 手機上一題一題答完：第一題點選項 → 第二題（可複選）勾一項 → 送出（Submit）→ review 頁 Submit answers，
-//      每一步要點的東西都在第一屏、點得到，最後框自己關掉（mock 收到交卷）。
-//
-// 走 mock（`VITE_MOCK=1`，`__amMock.twoAsk()`），不碰正式 daemon 也不碰 5173；vite 與 Chrome 都自己起、用完就收，
-// 暫存 profile 用完就刪。
-//   node scripts/verify-blocked-mobile.mjs
-//   OUT=docs/screenshots/blocked-mobile SHOT_PREFIX=after node scripts/verify-blocked-mobile.mjs   # 順便存圖
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -104,10 +90,6 @@ try {
   await send('Runtime.enable')
   await send('Page.enable')
 
-  /**
-   * 這個元素整個在視窗裡、在每一層會裁切的祖先裡，而且點它的中心點到的是它自己（沒被別的東西蓋住）。
-   * 回 `{ ok, why, rect }`；`sel` 是 CSS selector，`text` 有給就挑內容含這段字的那一個。
-   */
   const reach = (sel, text = null) =>
     ev(`(() => {
       const els = [...document.querySelectorAll(${JSON.stringify(sel)})]
@@ -135,7 +117,6 @@ try {
     }
   }
 
-  /** 開一顆新的 mock、進兩題情境、選到那顆 bot，等全畫面框與原題都出來。 */
   const openAsk = async (w, h, mobile) => {
     await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 2, mobile })
     await send('Page.navigate', { url: BASE })
@@ -156,14 +137,12 @@ try {
     return r
   }
 
-  // 1. 三種尺寸量第一個選項。
   for (const [w, h, mobile, name] of [[390, 844, true, 'phone-390x844'], [390, 640, true, 'phone-390x640'], [1440, 900, false, 'desktop-1440x900']]) {
     if (!(await openAsk(w, h, mobile))) continue
     await firstOption(name)
     const q = await ev(`document.querySelector('.blocked-modal .bc-question')?.textContent ?? ''`)
     check(q.includes('要關票嗎'), `${name}: 選項上面看得到這一題的題目`)
     await shot(name)
-    // 原題預設收成一行；展開之後排在選項下面，第一個選項不能被推走。
     const collapsed = await ev(`document.querySelector('.blocked-modal .pending-q-toggle')?.getAttribute('aria-expanded') === 'false' && !document.querySelector('.blocked-modal .pending-q-item')`)
     check(collapsed, `${name}: 原題預設收成一行`)
     await ev(`document.querySelector('.blocked-modal .pending-q-toggle')?.click()`)
@@ -173,10 +152,8 @@ try {
     await shot(`${name}-expanded`)
   }
 
-  // 2. 手機一題一題答完（390×640，最擠的那個）。
   if (await openAsk(390, 640, true)) {
     const step = async (label, sel, text) => {
-      // 上一步的按鍵還在送（選單整份 disabled）時點下去會被吃掉：等它能按。
       const pick = text === null || text === undefined ? 'els[0]' : `els.find((e) => e.textContent.includes(${JSON.stringify(text)}))`
       await waitFor(`(() => { const els = [...document.querySelectorAll(${JSON.stringify(sel)})]; const el = ${pick}; return Boolean(el && !el.disabled) })()`)
       const r = await reach(sel, text)

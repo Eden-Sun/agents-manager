@@ -8,7 +8,6 @@ BROAD = "runners::am_base_tests::"
 PATH_MOD = re.compile(r'#\[path\s*=\s*"([^"]+)"\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;')
 PATH = re.compile(r'#\[path\s*=\s*"([^"]+)"\]')
 
-
 def select(root: Path, changed: str) -> list[str]:
     relative = Path(changed).relative_to("crates/am-base/src")
     module = relative.parts[0].split(".")[0]
@@ -31,10 +30,9 @@ def select(root: Path, changed: str) -> list[str]:
             mapping.setdefault(owner, set()).add(f"{BROAD}{alias}::")
     return sorted(mapping.get(module, {BROAD}))
 
-
 if __name__ == "__main__":
     try:
         filters = select(Path.cwd().resolve(), sys.argv[1])
     except (OSError, ValueError):
-        filters = [BROAD]  # Missing/moved/unknown wiring must never narrow the suite.
+        filters = [BROAD]
     print("\n".join(filters))

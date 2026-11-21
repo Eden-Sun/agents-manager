@@ -1,9 +1,4 @@
 #!/bin/bash
-# ops-install.sh 的隔離測試：假 repo（真的 git，帶 install-manifest.tsv）＋暫存的假 AGM 目錄，不碰正式的 AGM bin。
-# 釘住：只動「已經裝了、內容跟 repo 不同」的清單內檔案；先備份、原子替換；裝完自檢（bash -n／py 語法），
-# 沒過就還原那一支、其他照裝；新檔、排程 unit、清單外的檔一律不動；--dry-run 什麼都不寫。
-#
-#   bash scripts/ops/ops-install_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/ops-install.sh"
@@ -41,7 +36,6 @@ M
   printf '#!/bin/bash\necho linux\n' > "$REPO/scripts/ops/linux-only.sh"
   printf '[Timer]\nOnCalendar=daily\n' > "$REPO/scripts/ops/systemd/x.timer"
   "$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m v1
-  # 安裝端：照 v1 裝好（new-one、mac-only 沒裝；x.timer 裝的是跟 repo 不同的舊版）
   install -m 755 "$REPO/scripts/ops/a-kick.sh" "$DIR/bin/a-kick.sh"
   install -m 755 "$REPO/scripts/ops/b-tool.py" "$DIR/bin/b-tool.py"
   install -m 644 "$REPO/scripts/ops/c-task.md" "$DIR/c-task.md"
@@ -50,20 +44,18 @@ M
   printf 'unversioned\n' > "$DIR/bin/not-in-manifest.sh"
 }
 teardown() { rm -rf "$ROOT"; }
-bump() { # bump <檔> <內容>：repo 裡改一支並 commit
+bump() {
   printf '%s' "$2" > "$REPO/scripts/ops/$1"
   "$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m "bump $1"
 }
 run() { bash "$SCRIPT" --repo "$REPO" --ref HEAD --dir "$DIR" --platform linux "$@" >"$OUT" 2>&1; echo $?; }
 
-# 1. 沒有變動：什麼都不寫，changes=0。
 setup
 equals "一致時 exit 0" "$(run)" "0"
 check "changes=0" "changes=0" "$OUT"
 gone "沒有備份目錄" "$DIR/ops-install-backups"
 teardown
 
-# 2. 有變動：先備份舊檔、換成新的、保留權限；清單外／新檔／排程 unit／別的平台不動。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 bump c-task.md $'task v2\n'
@@ -92,7 +84,6 @@ equals "沒有留下 .new 殘檔" "$(ls "$DIR/bin" | grep -c '\.new' || true)" "
 check "記下裝的是哪個 commit" "$("$GITBIN" -C "$REPO" rev-parse HEAD | cut -c1-8)" "$DIR/ops-install.last"
 teardown
 
-# 3. --dry-run：列出會裝什麼，什麼都不寫。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 equals "dry-run exit 0" "$(run --dry-run)" "0"
@@ -103,7 +94,6 @@ gone "沒有備份目錄" "$DIR/ops-install-backups"
 gone "沒有 last 記錄" "$DIR/ops-install.last"
 teardown
 
-# 4. 自檢失敗：語法壞掉的新版要還原成舊檔、exit 1、點名；其他支照裝。
 setup
 bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
 bump b-tool.py $'print("b-v2")\n'
@@ -117,7 +107,6 @@ equals "md 的新版照裝" "$(cat "$DIR/c-task.md")" "task v2"
 check "彙總 2 個裝了、1 失敗" "changes=3 failed=1" "$OUT"
 teardown
 
-# 5. python 語法壞掉也要擋，而且自檢不能在安裝目錄留 __pycache__。
 setup
 bump b-tool.py $'def (:\n'
 equals "py 語法壞 exit 1" "$(run)" "1"
@@ -126,7 +115,6 @@ equals "py 還原" "$(cat "$DIR/bin/b-tool.py")" 'print("b-v1")'
 gone "沒有 __pycache__" "$DIR/bin/__pycache__"
 teardown
 
-# 6. 來源在這個 ref 讀不到（清單寫了、repo 裡沒有）：報 failed、不動安裝端。
 setup
 printf 'scripts/ops/ghost.sh  bin/ghost.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 "$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m ghost
@@ -135,7 +123,6 @@ equals "來源缺 exit 1" "$(run)" "1"
 check "點名" "failed bin/ghost.sh" "$OUT"
 teardown
 
-# 7. 用法錯誤：缺必要參數 exit 2。
 setup
 equals "沒帶 --dir exit 2" "$(bash "$SCRIPT" --repo "$REPO" >"$OUT" 2>&1; echo $?)" "2"
 run_missing_value() {
@@ -155,8 +142,6 @@ for _option in --repo --ref --dir --platform; do
 done
 teardown
 
-# 8. drift：安裝端的檔不是 repo 任何一版（有人手改過）＝不覆蓋，報 drifted，其他支照裝；--force 才換（照樣先備份）。
-#    判斷跟 `agm ops-sync --check` 的 drift 同一條（安裝檔的 blob 不在 `git log <ref> -- <來源>` 的任何一版裡）。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 bump c-task.md $'task v2\n'
@@ -170,13 +155,10 @@ run --dry-run >/dev/null
 equals "dry-run 也不把它算進會裝的" "$(grep -c '^would-install bin/a-kick.sh' "$OUT" || true)" "0"
 equals "--force 才換" "$(run --force)" "0"
 equals "強制換成 v2" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
-# 同一秒內的兩趟備份是 `<STAMP>/` 與 `<STAMP>-2/`，`ls | tail -1` 的字典序在 C locale 會挑到較舊的那個（macOS 上跑得快、必中）；
-# a-kick.sh 只有 --force 那趟備過，直接用它找。
 B=$(ls -d "$DIR"/ops-install-backups/*/bin/a-kick.sh | tail -1)
 equals "手改的版本在備份裡" "$(sed -n 2p "$B")" "echo a-hand-edited"
 teardown
 
-# 9. 自檢在**暫存檔**上做、過了才換：自檢跑的那一刻，安裝位置上還是舊檔（不能讓 cron／launchd 撞到沒驗過的新版）。
 setup
 FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
 printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
@@ -197,7 +179,6 @@ equals "失敗後還是舊檔" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v1"
 check "點名" "failed bin/t-tool.ts" "$OUT"
 teardown
 
-# 9b. 自檢期間安裝端被人手改過：不能拿檢查前的版本判斷，然後覆蓋剛寫入的內容。
 setup
 printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf 'console.log("t-v1")\n' > "$REPO/scripts/ops/t-tool.ts"
@@ -216,7 +197,6 @@ equals "自檢期間手改的檔保留" 'console.log("hand-edited during install
 check "自檢期間手改有回報 drifted" "drifted bin/t-tool.ts" "$OUT"
 teardown
 
-# 9c. 安裝端在最後一次比對後、備份期間被手改：不能讓後續 mv 覆蓋這份修改。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
@@ -233,8 +213,6 @@ equals "備份期間手改的檔保留" "echo hand-edited-during-backup" "$(sed 
 check "備份期間手改有回報 drifted" "drifted bin/a-kick.sh" "$OUT"
 teardown
 
-# 9d. #942：bun 依副檔名挑 loader——自檢的檔名不是 `.ts` 結尾（例如 `bin/t-tool.ts.new.<pid>`）就會把它當 asset、必定失敗。
-# 自檢要對一份副檔名跟安裝位置一樣的暫存檔做；假 bun 在最後一個引數的 basename 不是 `*.ts` 時 exit 1。
 setup
 printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf 'console.log("t-v1")\n' > "$REPO/scripts/ops/t-tool.ts"
@@ -257,7 +235,6 @@ equals "新內容換進去" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v2")'
 gone "自檢暫存檔沒有留在安裝目錄" "$DIR/bin/t-tool.ts.new.$$"
 teardown
 
-# 11. 安裝位置是 symlink（使用者把它連到別處）：不換、不把連結吃掉，報 skipped。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 cp "$DIR/bin/a-kick.sh" "$ROOT/elsewhere.sh"; rm "$DIR/bin/a-kick.sh"; ln -s "$ROOT/elsewhere.sh" "$DIR/bin/a-kick.sh"
@@ -267,7 +244,6 @@ equals "連結還在" "$([ -L "$DIR/bin/a-kick.sh" ] && echo link)" "link"
 equals "連結指到的檔沒動" "$(sed -n 2p "$ROOT/elsewhere.sh")" "echo a-v1"
 teardown
 
-# 11b. 安裝位置的父目錄是 symlink：既不能沿它寫到 --dir 外，也不能沿它清外部孤兒暫存檔。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 mkdir -p "$ROOT/outside"
@@ -281,7 +257,6 @@ equals "父目錄 symlink 不能覆蓋外部檔" "echo a-v1" "$(sed -n 2p "$ROOT
 equals "父目錄 symlink 不能刪外部孤兒檔" "outside orphan" "$(cat "$ROOT/outside/bin/a-kick.sh.new.$DEAD")"
 teardown
 
-# 12. 對照表的安裝位置跑出 AGM 目錄（絕對路徑、`..`）：不寫，報 failed。
 setup
 printf '#!/bin/bash\necho outside\n' > "$ROOT/escape.sh"
 printf 'scripts/ops/esc.sh  ../escape.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
@@ -292,7 +267,6 @@ check "點名" "failed ../escape.sh" "$OUT"
 equals "目錄外的檔沒動" "$(sed -n 2p "$ROOT/escape.sh")" "echo outside"
 teardown
 
-# 13. 同一秒內連裝兩次（兩個 ref）：第二次的備份不能蓋掉第一次留下的原始檔。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 equals "第一次裝 exit 0" "$(run)" "0"
@@ -301,7 +275,6 @@ equals "第二次裝 exit 0" "$(run)" "0"
 equals "兩份備份都在（v1 沒被 v2 蓋掉）" "$(cat "$DIR"/ops-install-backups/*/bin/a-kick.sh | grep -c 'echo a-v1\|echo a-v2')" "2"
 teardown
 
-# 10. 同時只能有一個在裝：鎖被活著的行程握著就不動任何檔（exit 3）；握鎖的行程死了（殘留的鎖）就接手。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 sleep 30 & HOLDER=$!
@@ -315,7 +288,6 @@ equals "裝上了" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
 gone "裝完放掉鎖" "$DIR/ops-install.lock"
 teardown
 
-# 10a. guard 路徑若被換成 symlink，必須 fail closed，不能截斷連結目標。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 printf 'preserve outside guard target\n' > "$ROOT/guard-target"
@@ -325,7 +297,6 @@ equals "guard symlink 目標原封不動" "$(cat "$ROOT/guard-target")" "preserv
 equals "guard symlink 下安裝檔不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
 teardown
 
-# 10b. 第一個 runner 建好鎖目錄、尚未寫 pid 時被排程停住，第二個 runner 不可把它當殘鎖搶走。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
@@ -366,7 +337,6 @@ else
 fi
 teardown
 
-# 14. kick 自己更新自己：正在跑的那支腳本被換掉（`mv` 換 inode，bash 手上還是舊檔），後面的行照常跑完，不會讀到新檔的中段。
 setup
 cat > "$REPO/scripts/ops/a-kick.sh" <<K
 #!/bin/bash
@@ -387,11 +357,10 @@ check_no "沒有讀到新檔的內容" "new-version-short" "$OUT"
 equals "換上去的是新版" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo new-version-short"
 teardown
 
-# 15. 被 SIGKILL 的上一次留下的暫存檔（<安裝位置>.new.<pid>，pid 已不在）：下次執行清掉；pid 還活著的、名字不是 .new.<數字> 的、清單外的不碰。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 sleep 30 & LIVE=$!
-DEAD=$(sh -c 'echo $$')   # 這個 shell 已經結束，pid 不在了
+DEAD=$(sh -c 'echo $$')
 printf 'half' > "$DIR/bin/a-kick.sh.new.$DEAD"
 printf 'half' > "$DIR/c-task.md.new.$DEAD"
 printf 'live' > "$DIR/bin/a-kick.sh.new.$LIVE"
@@ -407,7 +376,6 @@ check "有說清了幾個" "cleaned 2" "$OUT"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
-# 15b. --dry-run 什麼都不清。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 DEAD=$(sh -c 'echo $$')
@@ -416,8 +384,6 @@ run --dry-run >/dev/null
 equals "dry-run 不清暫存檔" "$(cat "$DIR/bin/a-kick.sh.new.$DEAD")" "half"
 teardown
 
-# 16. `.last` 只記「整輪都裝成功」的那次：有失敗就不更新（舊的留著），另記 `.last-failed`；之後整輪成功才更新並清掉 `.last-failed`。
-#     （目前沒有程式讀這兩個檔，是給人查「裝到哪一版了」用的，所以它不能把部分失敗的那次說成裝好了。）
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
 equals "第一次整輪成功 exit 0" "$(run)" "0"
@@ -435,7 +401,6 @@ check ".last 換成這次的 commit" "$("$GITBIN" -C "$REPO" rev-parse HEAD | cu
 gone "成功之後清掉 .last-failed" "$DIR/ops-install.last-failed"
 teardown
 
-# 16b. 第一次就失敗：沒有 .last（從沒整輪成功過），有 .last-failed。
 setup
 bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
 equals "第一次就失敗 exit 1" "$(run)" "1"
@@ -443,7 +408,6 @@ gone "沒有 .last" "$DIR/ops-install.last"
 check "有 .last-failed" "failed=1" "$DIR/ops-install.last-failed"
 teardown
 
-# 17. zsh 腳本自檢通過：依 shebang 用 zsh -n 自檢（含 zsh glob qualifier 等特性語法），成功換新。
 setup
 printf 'scripts/ops/z-gc.sh  bin/z-gc.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf '#!/bin/zsh\necho z-v1\n' > "$REPO/scripts/ops/z-gc.sh"
@@ -455,7 +419,6 @@ check "zsh 腳本裝了" "installed bin/z-gc.sh" "$OUT"
 equals "zsh 腳本內容是 v2" "$(sed -n 3p "$DIR/bin/z-gc.sh")" "echo z-v2"
 teardown
 
-# 18. 系統沒裝 zsh 時：依 shebang 認出是 zsh，該檔報 skipped（不是 failed），舊版原封不動，exit 0。
 setup
 printf 'scripts/ops/z-gc.sh  bin/z-gc.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf '#!/usr/bin/env zsh\necho z-v1\n' > "$REPO/scripts/ops/z-gc.sh"
@@ -480,7 +443,6 @@ equals "舊版原封不動" "$(sed -n 2p "$DIR/bin/z-gc.sh")" "echo z-v1"
 gone "沒有留下暫存檔" "$DIR/bin/z-gc.sh.new"
 teardown
 
-# 19. 壞的 bash 腳本仍自檢失敗（exit 1，舊版原封不動）；壞的 zsh 腳本有 zsh 時也自檢失敗。
 setup
 printf 'scripts/ops/z-bad.sh  bin/z-bad.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf '#!/bin/zsh\necho z-v1\n' > "$REPO/scripts/ops/z-bad.sh"
@@ -495,8 +457,6 @@ equals "bash 舊檔原封不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
 equals "zsh 舊檔原封不動" "$(sed -n 2p "$DIR/bin/z-bad.sh")" "echo z-v1"
 teardown
 
-# 20. shared 列（被 kick source 的共用檔）：安裝端沒有 lib、有舊 kick → 跑完 lib 與新 kick 都在，lib 先於 kick；
-#     沒標 shared 的新檔仍報 not-installed；--dry-run 列 would-install 但不寫；跑第二次 unchanged。
 setup
 printf 'scripts/ops/lib-common.sh  bin/lib-common.sh  shared\n' >> "$REPO/scripts/ops/install-manifest.tsv"
 printf 'echo lib\n' > "$REPO/scripts/ops/lib-common.sh"

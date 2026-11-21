@@ -91,7 +91,6 @@ export AM_TEST_LOCAL_CARGO_LOG="$tmp/local-cargo.log"
 export AM_TEST_REMOTE_CARGO="$tmp/remote-cargo.log"
 export AM_TEST_REAL_SLEEP="$(command -v sleep)"
 export PATH="$bin:$PATH"
-# 記憶體閘與看門狗都讀這個假檔（第一欄 free%、第二欄壓力等級），不看這台機器的真記憶體。
 export WAIT_MEM_FILE="$tmp/mem"
 printf '80 1\n' >"$WAIT_MEM_FILE"
 
@@ -165,7 +164,6 @@ if [[ "$output" != *"required cohort cli_update::tests selected zero tests"* ]];
     exit 1
 fi
 
-# 記憶體閘（issue #1783）：可用記憶體不夠就不開編，逾時 124。
 /bin/rm -f "$AM_TEST_LOCAL_CARGO_LOG"
 printf '10 1\n' >"$WAIT_MEM_FILE"
 rc=0
@@ -187,7 +185,6 @@ AM_TEST_UNAME=Darwin CHECK_MIN_FREE_MEM=5 CHECK_LOAD_TIMEOUT=0 "$ROOT/scripts/ch
     exit 1
 }
 
-# 看門狗：編譯中壓力升到 critical 就砍掉整個 cargo 行程群組。假的 sleep（看門狗每輪呼叫）等假 cargo 起來後把壓力改成 4。
 watch_bin="$tmp/watch-bin"
 mkdir -p "$watch_bin"
 cat >"$watch_bin/sleep" <<'SH'
@@ -235,7 +232,6 @@ for pid in "$(cat "$tmp/long-cargo.pid")" "$(cat "$tmp/long-cargo.pid.grandchild
     fi
 done
 
-# 正常結束要收掉看門狗（連它正在睡的 sleep）。
 printf '80 1\n' >"$WAIT_MEM_FILE"
 export AM_TEST_WATCH_SLEEP="$tmp/watch-sleep.pid"
 PATH="$watch_bin:$PATH" AM_TEST_UNAME=Darwin AM_TEST_CARGO_WAITS_FOR="$AM_TEST_WATCH_SLEEP" \

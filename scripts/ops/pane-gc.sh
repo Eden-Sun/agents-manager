@@ -1,10 +1,4 @@
 #!/bin/zsh
-# 收掉 herdr 的殭屍 pane。由 browser-gc-kick.sh 每次 kick 呼叫（macOS launchd 與 Linux systemd timer 都是每 30 分鐘），也可手動跑。
-# 規則（純機械，不花 LLM）：
-#   1. 前景程式是卡住的互動式登入（claude auth login / gcloud auth login / codex login）
-#      且活超過 MAX_AGE 秒（預設 24h）→ 關 pane。
-#   2. pane list 有、pane get 卻 pane_not_found 的幽靈紀錄 → 只記錄（herdr 內部殘留，關不掉）。
-#   3. 只有 -zsh 沒前景程式的閒置 shell、以及 bot 的 claude/codex 行程 → 不動。
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$DIR/browser-gc.log"
@@ -22,7 +16,6 @@ if [ "${#MAX_AGE}" -gt 9 ]; then
   echo "pane-gc: PANE_GC_MAX_AGE 超出範圍，跳過 pane 回收" >> "$LOG"
   exit 0
 fi
-# launchd 的 PATH 只有 /usr/bin:/bin；herdr 裝在 homebrew 或 ~/.local/bin。
 export PATH="/opt/homebrew/bin:/Users/me/.local/bin:$PATH"
 command -v herdr >/dev/null || { echo "pane-gc: herdr 不在 PATH" >> "$LOG"; exit 0; }
 
@@ -33,12 +26,6 @@ etime_secs() {
     else if (NF==2) print $1*60+$2; }'
 }
 
-# 先把 pane list 整份收下來再解析：排程環境（systemd）沒有 pane 的環境變數，沒帶 HERDR_SESSION 時 herdr 找的是
-# default session 的 socket，回的不是 JSON 或是 server_not_running 的 error JSON；這種情況記一行清楚的錯誤就收，
-# 不能讓 python 的 traceback 灌進 log，也不能把它當成「0 個 pane」正常收尾。
-# 只拿 stdout 解析（stderr 的警告不能混進 JSON）；用 printf 不用 echo（zsh 的 echo 會展開 JSON 裡的 \n、\\）。
-# 解析程式一定先印 OK 或 ERR：什麼都沒印＝解析程式自己壞了，不是「0 個 pane」。
-# 這支腳本 macOS 用 zsh 跑、Linux 的 browser_gc_linux.py 用 bash 跑，所以只能用兩邊都一樣的語法。
 errf=$(mktemp "${TMPDIR:-/tmp}/pane-gc.XXXXXX" 2>/dev/null) || errf=""
 if [ -n "$errf" ]; then errf_owned=1; else errf=/dev/null; errf_owned=0; fi
 cleanup_errf() { if [ "$errf_owned" = 1 ]; then rm -f "$errf"; fi; }
@@ -76,7 +63,6 @@ for pid_pane in $(printf '%s\n' "$pane_ids"); do
     fi
     continue
   fi
-  # herdr 偶爾吐出不合法 JSON（cmdline 內含引號），解析失敗就跳過這個 pane。
   read -r fpid cmd <<<"$(echo "$info" | python3 -c '
 import json,sys
 try:

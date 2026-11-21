@@ -1,10 +1,6 @@
 #!/bin/bash
-# 驗證 herdr 升級後 macOS「本機網路」授權與區網 TCP 連線。
-# 這支腳本必須從 herdr pane 執行；Apple 內建 nc/python3/curl 不可作為驗證工具。
 set -u
 
-# macOS 的「本機網路」授權只有 macOS 需要（#886）：其他平台沒有東西可驗，不能讓 Linux 上的派工驗收被它擋成紅。
-# AGM_OPS_PLATFORM 只給測試蓋掉（同 daemon-swap.sh）。
 PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 if [ "$PLATFORM" != darwin ]; then
   echo "SKIP: macOS 本機網路授權只在 macOS 需要（平台 ${PLATFORM}）"
@@ -25,12 +21,7 @@ PS="${PS_BIN:-ps}"
 LSOF="${LSOF_BIN:-lsof}"
 FALLBACK="${HERDR_FALLBACK_BIN:-/opt/homebrew/bin/herdr}"
 
-# 不帶參數時驗「正在跑的 herdr server 的執行檔」：授權表記的是 server 那顆 binary 的 identifier。
-# 以前是 PATH 上第一顆真 binary，但 PATH 上可能有另一份簽章不同的副本（2026-09-22 這台的 ~/.local/bin/herdr，
-# identifier 不同、授權表沒有）→ 回報 FAIL，其實所有 server 跑的都是 Cellar 那顆、有授權。
-# 認 server 用 argv：第一個字的 basename 是 herdr，且有一個參數剛好是 `server`（`pgrep -f` 會連 claude 的
-# 長 argv 裡恰好提到 herdr／server 的字串一起抓進來）。實際路徑用 lsof 的 txt（解掉 symlink 與 `herdr` 這種相對名）。
-server_binaries() { # 每行一個不重複的執行檔路徑
+server_binaries() {
   "$PS" -axo pid=,args= 2>/dev/null | awk '
     { cmd=$2; n=split(cmd, parts, "/"); base=parts[n]
       if (base != "herdr") next
@@ -61,7 +52,6 @@ else
   fi
 fi
 
-# 逐一驗：好幾個 server 跑不同路徑時，每一顆都要有授權，任何一顆沒有就 FAIL。
 IDENTIFIERS=()
 IDENTIFIER_COUNT=0
 if [ "$BINARY_COUNT" -eq 0 ]; then
@@ -104,7 +94,6 @@ else
     for _pair in "${IDENTIFIERS[@]}"; do
       IDENTIFIER=${_pair%%|*}
       BINARY=${_pair#*|}
-      # 整個 identifier 相等才算：plutil -p 的鍵是 `"<identifier>" => …`。只用子字串比對的話，`herdr` 會命中 `herdr-<hash>`。
       if printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "\"$IDENTIFIER\" =>" >/dev/null 2>&1; then
         echo "2/3 authorization: found identifier $IDENTIFIER"
       elif printf '%s\n' "$AUTH_OUTPUT" | grep -F -- "$BINARY" >/dev/null 2>&1; then

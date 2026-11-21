@@ -9,7 +9,8 @@
 - AGM 忙碌或尚未核准時，等待 AGM 調度，不把例行申請退回使用者。此授權限於原任務；刪除設定／歷史等原本明訂需使用者確認的操作仍依既有規則。
 
 ## 回覆語言
-繁體中文（zh-TW）。程式註解與 commit 訊息可中可英，禁止日文。
+繁體中文（zh-TW）。commit 訊息可中可英，禁止日文。
+- **禁止在程式碼裡寫註解**（功能性指示除外：Rust `///`／`//!`／`// scratch-guard: allow`、TS/JS `@ts-expect-error`／`@ts-ignore`／`eslint-disable`／`biome-ignore`／`/// <reference`／`@vite-ignore`／`webpackChunkName`／`#__PURE__`、Shell/Python shebang `#!`／`shellcheck`／`coding`／`type: ignore`／`noqa`）；說明寫在 commit 訊息、docs 或 issue。
 
 ## 專案長相
 - `daemon/`：Rust（axum + sqlx/SQLite），唯一狀態源；透過 herdr socket 管 pane，hook 為主、終端快照為備援。
@@ -100,7 +101,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 不加沒人要的抽象、包裝、型別轉換、選項、設定、「以後用得到」的程式；刪除勝過新增；沿用既有的分層與慣例。一行要解碼才看得懂不算短。
 - 修 bug：動手前 grep 該函式的所有呼叫端，在共用的地方一次修掉根因。搬移或合併的程式保留原本的錯誤處理與驗證。同樣大小的選項，選邊界情況正確的那個。
 - 新的非平凡邏輯（分支、迴圈、解析、金額或安全、整支新腳本）至少留一個小測試或 assert 自檢；瑣碎改動不用。
-- 已知限制的捷徑要留註解：`shortcut: <限制>, <何時該升級>`。
+- 已知限制的捷徑要寫在 commit 訊息或 issue：`shortcut: <限制>, <何時該升級>`。
 - **絕不省**：信任邊界的驗證、防止資料遺失的錯誤處理、安全、無障礙、使用者要求的任何東西。
 - 回報最後一兩行寫明略過或沒檢查的地方與使用者該知道的風險（併入下面的回報格式）。
 

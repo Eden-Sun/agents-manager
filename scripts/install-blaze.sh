@@ -1,19 +1,15 @@
 #!/bin/sh
-# Install verified tools privately; never alter user Cargo configuration.
 set -eu
 blaze_home=${AGM_BLAZE_INSTALL_HOME:-${HOME}/.local/share/agents-manager/blaze}
 revision=c8e5f6a88ae3eb61179d3fd20bd6afc871ca48e5
 work=$(mktemp -d "${TMPDIR:-/tmp}/agm-blaze-install.XXXXXX")
 trap 'rm -r "$work"' EXIT
 trap 'exit 130' INT TERM
-# Append rustup without displacing the managed Cargo shim.
 PATH="${PATH}:${HOME}/.cargo/bin"
 export PATH
 if [ "${1:-}" = --source ]; then
     shift
     [ "$#" -eq 0 ] || { echo 'install-blaze: --source takes no additional arguments' >&2; exit 2; }
-    # The published 2026-10-20 nightly predates the memory budget. Build the exact
-    # reviewed source revision when no capability-checked archive is available.
     git init -q "$work/source"
     git -C "$work/source" -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
         fetch -q --depth 1 https://github.com/indexable-inc/blaze.git "$revision"
@@ -32,7 +28,6 @@ if [ "${1:-}" = --source ]; then
         mv "$blaze_home/bin/.$name.new.$$" "$blaze_home/bin/$name"
     done
 else
-    # The upstream installer verifies its archive against release SHA256SUMS.
     curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 \
         "https://raw.githubusercontent.com/indexable-inc/blaze/$revision/install.sh" -o "$work/installer"
     CARGO_HOME="$blaze_home" sh "$work/installer" "$@"

@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the injected hooks (SPEC §4.1, appendix B).
-#
-# Runs the *real* Claude Code and Codex CLIs once each with our hook / notify wiring
-# and checks that `agents-managerd hook ...` actually fired with a usable payload.
-#
-# Two modes:
-#   spool (default)  point the hook at a closed port; the payload lands in
-#                    <data dir>/bots/<bot>/hook-spool.jsonl. Needs no daemon.
-#   live  (--live)   point the hook at a running daemon with a real bot id + token;
-#                    the daemon's own capture is checked via GET /api/bots/:id/messages.
-#
-# Usage:
-#   scripts/hook-smoke.sh [--claude-only|--codex-only] [--binary PATH] [--keep]
-#   scripts/hook-smoke.sh --live --bot BOT_ID --bot-token T [--ui-token T] [--port N]
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,12 +48,9 @@ if [ "$MODE" = "live" ]; then
   [ -n "$UI_TOKEN" ] || die "--live needs a UI token to read back messages"
   DATA_DIR="$REAL_DATA_DIR"
 else
-  # A throwaway data dir keeps the real bots' spools untouched. The hook child reads
-  # AM_DATA_DIR, and the agent CLIs pass their environment straight through.
   DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/am-hook-smoke.XXXXXX")"
   BOT_ID="${BOT_ID:-smoke-$(python3 -c 'import uuid;print(uuid.uuid4().hex[:12])')}"
   BOT_TOKEN="${BOT_TOKEN:-smoke-token}"
-  # Nothing listens here, so every hook call must fall through to the spool.
   PORT=45999
   for p in 45999 45998 45997; do
     nc -z 127.0.0.1 "$p" >/dev/null 2>&1 || { PORT="$p"; break; }
@@ -107,7 +90,6 @@ live_assistant_count() {
 
 before_count() { if [ "$MODE" = "live" ]; then live_assistant_count; else spool_lines; fi; }
 
-# $1 = label, $2 = count before, $3 = python predicate over one spool payload dict
 check_after() {
   local label="$1" before="$2" pred="${3:-True}" after
   if [ "$MODE" = "live" ]; then
@@ -148,9 +130,6 @@ print(json.dumps(new[-1], ensure_ascii=False)[:400])
   fi
 }
 
-# $1 = label, $2 = before count, $3 = predicate, $4 = CLI exit code, $5 = CLI stderr file
-# A non-zero CLI exit with no hook activity is the CLI's problem (auth, quota,
-# network), not the hook's — report it as SKIP so it cannot mask a real failure.
 check_or_skip() {
   if [ "$4" != "0" ] && [ "$(before_count)" = "$2" ]; then
     skip "$1" "the $1 CLI exited $4 without firing a hook: $(tail -c 200 "$5" | tr '\n' ' ')"
@@ -158,8 +137,6 @@ check_or_skip() {
     check_after "$1" "$2" "$3"
   fi
 }
-
-# ---------------------------------------------------------------- claude
 
 head1 "claude"
 if [ "$RUN_CLAUDE" = "0" ]; then
@@ -178,8 +155,6 @@ json.dump({"hooks": {"SessionStart": entry, "Stop": entry}}, open(out, "w"), ind
   info "settings  $SETTINGS"
 
   BEFORE="$(before_count)"
-  # CLAUDE_CODE_CHILD_SESSION / CLAUDECODE leak in when this runs inside Claude Code
-  # and suppress the transcript (appendix A); drop them.
   ( cd "$WORK" && env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE \
       claude -p "Reply with exactly PONG" --settings "$SETTINGS" ) \
     > "$WORK/claude.out" 2> "$WORK/claude.err"
@@ -188,8 +163,6 @@ json.dump({"hooks": {"SessionStart": entry, "Stop": entry}}, open(out, "w"), ind
   [ -s "$WORK/claude.err" ] && info "stderr: $(head -c 200 "$WORK/claude.err" | tr '\n' ' ')"
   check_or_skip claude "$BEFORE" 'b.get("provider")=="claude" and ("prompt_id" in p or "session_id" in p)' "$EC" "$WORK/claude.err"
 fi
-
-# ---------------------------------------------------------------- codex
 
 head1 "codex"
 if [ "$RUN_CODEX" = "0" ]; then
@@ -212,8 +185,6 @@ print("notify=" + json.dumps([sys.argv[1],"hook","codex","--bot",sys.argv[2],"--
   [ -s "$WORK/codex.err" ] && info "stderr: $(tail -c 200 "$WORK/codex.err" | tr '\n' ' ')"
   check_or_skip codex "$BEFORE" 'b.get("provider")=="codex" and p.get("type")=="agent-turn-complete"' "$EC" "$WORK/codex.err"
 fi
-
-# ---------------------------------------------------------------- summary
 
 head1 "summary"
 printf '  %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"

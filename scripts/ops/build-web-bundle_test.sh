@@ -1,5 +1,4 @@
 #!/bin/bash
-# Isolated bundle publication tests; no real Bun, daemon, or deployment.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B - "$HERE/build-web-bundle.py" <<'PY'

@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.ops.browser_gc_linux import run_once
 
-
 class BrowserGcLinuxTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="browser-gc-linux-test-")
@@ -105,15 +104,12 @@ class BrowserGcLinuxTest(unittest.TestCase):
         self.add_parent(900, ["/usr/lib/systemd/systemd", "--user"])
         self.add_process(311, 900, 300, ["/usr/bin/chromium", "--headless=new",
                                         f"--user-data-dir={reaped_profile}", "--remote-debugging-port=9400"])
-        # 父程序是一個活著的 shell：真的有人在管它，不能收。
         self.add_parent(901, ["/bin/bash", "-lc", "run-bot"])
         self.add_process(312, 901, 300, ["/usr/bin/chromium", "--headless=new",
                                         "--user-data-dir=/tmp/am-has-parent", "--remote-debugging-port=9401"])
-        # 別的使用者的 `systemd --user` 不是我們的 subreaper。
         self.add_parent(902, ["/usr/lib/systemd/systemd", "--user"], uid=os.getuid() + 1)
         self.add_process(313, 902, 300, ["/usr/bin/chromium", "--headless=new",
                                         "--user-data-dir=/tmp/am-other-reaper", "--remote-debugging-port=9402"])
-        # 沒有 --user 的 systemd 不是 user subreaper。
         self.add_parent(903, ["/usr/lib/systemd/systemd", "--system"])
         self.add_process(314, 903, 300, ["/usr/bin/chromium", "--headless=new",
                                         "--user-data-dir=/tmp/am-system-systemd", "--remote-debugging-port=9403"])
@@ -179,7 +175,7 @@ class BrowserGcLinuxTest(unittest.TestCase):
         self.add_process(401, 80, 300, ["/usr/bin/chromium", f"--user-data-dir={live}"])
         cmdline = self.proc / "401" / "cmdline"
         cmdline.unlink()
-        cmdline.mkdir()   # 讀取會丟 IsADirectoryError（OSError），模擬暫時讀不到
+        cmdline.mkdir()
 
         result = self.run_gc()
 
@@ -215,7 +211,6 @@ class BrowserGcLinuxTest(unittest.TestCase):
         )
 
         pane_gc.assert_called_once_with()
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

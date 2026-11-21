@@ -11,10 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "host-state-transfer.py"
-
 
 class HostStateTransferTests(unittest.TestCase):
     def setUp(self):
@@ -173,7 +171,7 @@ module.main()
         partial = self.target / "outbox" / "bot-a" / "report.txt"
         self.assertEqual(partial.read_text(), "deliverable")
 
-        self.install()  # `--from import` retry must safely complete this interrupted install.
+        self.install()
         self.command("restore", "--backup-dir", self.backup, "--target-data", self.target)
         self.assertFalse(partial.exists(), "rollback must remove the file installed before the crash")
         self.assertFalse((self.target / "outbox" / "root.bin").exists())
@@ -246,7 +244,6 @@ module.main()
         p = self.command(*args, ok=False)
         self.assertIn("symlink", p.stderr.lower())
         self.assertFalse(self.bundle.exists())
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

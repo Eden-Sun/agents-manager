@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# scripts/codegraph-usage.py 的分類規則測試：只呼叫 classify()，不讀 ~/.claude*／~/.codex*。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # canary-gap: PATH 原樣繼承；只用 python 標準庫。

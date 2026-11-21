@@ -1,10 +1,4 @@
 #!/bin/bash
-# pane-gc.sh 的隔離測試（issue #318）：假的 herdr、假的 ps，測試裡不會真的關任何 pane。
-# 腳本開頭那行 export PATH（把 /opt/homebrew/bin、~/.local/bin 排到最前面）在測試用的副本裡拿掉，
-# 否則真的 herdr 會蓋過假的；其餘一字不改，並先確認那行還在，腳本改了形狀測試要跟著改。
-# 測的是破壞性那一條：只關「卡住太久的互動式登入」，選不到就什麼都不做。
-#
-#   bash scripts/ops/pane-gc_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PASS=0

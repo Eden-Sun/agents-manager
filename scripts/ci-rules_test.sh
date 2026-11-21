@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# scripts/ci-rules.tsv 的對拍與結構測試：
-#   1. 每列四欄、不留空，欄位值合法，ops 指定的測試檔存在；最後一列是 `*`→FULL（沒有路徑掉出表外）。
-#   2. scripts/ci-rules-golden.tsv：改成單一對照表之前，三支腳本對近 300 個 commit 的改動檔輸出的快照；
-#      現在的 ci-changed-parts.sh／ci-daemon-filters.sh（非 @rust 的列）要逐例相同。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 rules=scripts/ci-rules.tsv
@@ -34,7 +30,6 @@ while IFS='|' read -r f want_parts want_daemon; do
     n=$((n + 1))
 done <"$golden"
 [ "$n" -gt 50 ] || fail "快照只讀到 $n 列"
-# #2000 回歸：Rust-only 改動（daemon/src/cli.rs）要跑 ci-daemon-filters_test.sh。ops 段選不到它，所以必須由 check.sh 的 daemon 部分直接跑。
 grep -q 'bash scripts/ci-daemon-filters_test.sh' scripts/check.sh || fail "check.sh 的 daemon 部分沒有跑 ci-daemon-filters_test.sh"
 [ "$(printf '%s\n' daemon/src/cli.rs | bash scripts/ci-changed-parts.sh | paste -sd, -)" = daemon ] || fail "daemon/src/cli.rs 沒有選到 daemon 部分"
 echo "ci-rules_test: ok（$n 個對拍路徑）"

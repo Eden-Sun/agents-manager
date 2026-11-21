@@ -1,7 +1,4 @@
 #!/bin/bash
-# lint-shell-vars.sh 的隔離測試（issue #412）：在暫存目錄裡放假的 .sh，驗「該中的中、不該中的不中」。
-#
-#   bash scripts/ops/lint-shell-vars_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LINT="${HERE}/lint-shell-vars.sh"
@@ -25,11 +22,8 @@ ROOT="$(mktemp -d)"
 trap 'rm -rf "${ROOT}"' EXIT
 mkdir -p "${ROOT}/dirty" "${ROOT}/clean/nested"
 
-# 壞寫法的字面值直接寫在這裡會被這支 lint 自己掃到（這個檔也是 scripts/**/*.sh），
-# 所以錢字號用 ${D} 拼出來，heredoc 不加引號讓它展開，其他的錢字號用反斜線跳脫。
 D='$'
 
-# 會中的：第 2 行全形括號、第 6 行全形斜線。
 cat > "${ROOT}/dirty/bad.sh" <<EOF
 #!/bin/bash
 echo "keep pid ${D}pid（父程序還活著）"
@@ -39,7 +33,6 @@ echo "\$ascii, ASCII 標點不算"
 echo "收掉 ${D}reaped／保留 \${kept}"
 EOF
 
-# 不會中的：全部都是 ${VAR} 或後面接 ASCII。
 cat > "${ROOT}/dirty/good.sh" <<'EOF'
 #!/bin/bash
 echo "${pid}（好寫法）"
@@ -48,7 +41,6 @@ V="$HOME/x"
 echo "$V"
 EOF
 
-# 同樣的壞寫法但不是 .sh，不該被掃到。
 cp "${ROOT}/dirty/bad.sh" "${ROOT}/dirty/bad.txt"
 cp "${ROOT}/dirty/good.sh" "${ROOT}/clean/nested/good.sh"
 
@@ -67,13 +59,11 @@ out="$(bash "${LINT}" "${ROOT}/clean" 2>&1)"; rc=$?
 equals "全乾淨時 exit 0" "${rc}" "0"
 has    "全乾淨時回報掃了幾個檔" "${out}" "1 個 .sh 檔乾淨"
 
-# 也接受直接指定單一檔案。
 out="$(bash "${LINT}" "${ROOT}/dirty/bad.sh" 2>&1)"; rc=$?
 equals "單一壞檔 exit 1" "${rc}" "1"
 out="$(bash "${LINT}" "${ROOT}/dirty/good.sh" 2>&1)"; rc=$?
 equals "單一好檔 exit 0" "${rc}" "0"
 
-# 沒帶參數就掃 repo 自己的 scripts/**/*.sh，現況必須是乾淨的。
 out="$(bash "${LINT}" 2>&1)"; rc=$?
 equals "repo 現況乾淨（預設掃 scripts/）" "${rc}" "0"
 

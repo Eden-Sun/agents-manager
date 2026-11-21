@@ -13,9 +13,7 @@ from pathlib import Path
 from ob_store import OBError, Store, exclusive, project_id
 
 HERE = Path(__file__).resolve().parent
-# `ask --file` 最多讀這麼多：題目整段送去第三方網頁，不是拿來傳大檔。
 MAX_FILE_BYTES = 256 * 1024
-
 
 def read_question_file(path):
     """只讀有大小上限的一般文字檔。先 `O_NONBLOCK` 開、再用同一個 fd `fstat`：FIFO（會永遠擋住）、`/dev/zero`、目錄、
@@ -41,7 +39,6 @@ def read_question_file(path):
     except UnicodeDecodeError:
         raise OBError("file_not_text：--file 必須是 UTF-8 文字")
 
-
 def daemon_project(pid):
     from agm import Client
     state = Client("http://127.0.0.1:7788").get("/api/supervisor/state")
@@ -55,7 +52,6 @@ def daemon_project(pid):
     if project.get("host") not in (None, "local"):
         raise OBError("remote_project：請在提供此 project 的本機 OB worker 提交")
     return project
-
 
 def legacy_url(key):
     """舊 chatgpt-consult.json 指定 entry 的對話網址。找不到、沒有 url、檔案不在／壞掉都**各自說清楚**：
@@ -80,25 +76,21 @@ def legacy_url(key):
         raise OBError(f"legacy_entry_has_no_url：舊登錄 {path} 的 '{key}' 沒有 url 欄位")
     return url
 
-
 def kick(store):
     if not store.setting("operator"):
         return False
-    # The process-level lock makes concurrent kicks harmless; no model call when busy.
     with open(store.root / "worker.log", "a") as log:
         subprocess.Popen([sys.executable, "-B", str(HERE / "ob.py"), "--data-dir", str(store.root), "work"],
                          cwd=store.root, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                          start_new_session=True, close_fds=True)
     return True
 
-
 def recover(store, start=True):
     from ob_operator import recover_orphaned
     recovered = recover_orphaned(store)
     if start and recovered and store.claimable():
-        kick(store)  # queued work behind the dead worker; recovered rows stay unknown and are never claimed
+        kick(store)
     return recovered
-
 
 def resolve_unknown(store, ident, not_sent=False):
     from ob_operator import journal_for
@@ -110,11 +102,9 @@ def resolve_unknown(store, ident, not_sent=False):
             raise OBError("先檢查原對話；確定沒送出才可 --confirmed-not-sent")
         journal = journal_for(store, ident)
         if journal.exists():
-            # Keep the original evidence rather than silently erase a possibly sent request.
             journal.rename(journal.with_name(journal.name + f".resolved-{time.time_ns()}"))
         store.db.execute("UPDATE requests SET status='pending',error='operator_confirmed_not_sent',updated_at=? WHERE id=?", (time.time(), ident))
     return store.get(ident)
-
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -156,10 +146,7 @@ def main(argv=None):
     try:
         return _run(args, store)
     finally:
-        # 不關的話，連線留到 GC 才收：Python 3.13+ 會在那一刻對 stderr 印 ResourceWarning，
-        # 混進呼叫端要解析的 JSON 錯誤輸出（GitHub macOS runner 的 3.15 就是這樣紅的）。
         store.close()
-
 
 def _run(args, store):
     if args.command == "configure":
@@ -171,14 +158,13 @@ def _run(args, store):
     elif args.command == "ask":
         if bool(args.file) == bool(args.text):
             raise OBError("只提供文字或 --file 其中一個")
-        # nan 跟任何數比都是 False：寫成「在範圍內才放行」，不然 nan 會悄悄等於 --wait 0。
         if not 0 <= args.wait <= 3600:
             raise OBError("--wait 必須在 0..3600 秒")
         project = daemon_project(args.project_id)
         question = read_question_file(args.file) if args.file else args.text
         result = store.submit(project["id"], project["label"], args.request_id, question, os.environ.get("AM_BOT_ID"))
         if result["status"] == "running" and recover(store, not args.no_start):
-            result = store.get(result["id"])  # replay after a worker crash: unknown, not resent
+            result = store.get(result["id"])
         if not args.no_start and result["status"] in ("pending", "waiting_quota"):
             kick(store)
         deadline = time.monotonic() + args.wait
@@ -189,7 +175,6 @@ def _run(args, store):
                 result = store.get(result["id"])
         result["operator_configured"] = bool(store.setting("operator"))
     elif args.command == "status":
-        # 跟 ask／link／rotate 同一條規則：label、worktree 名查不到東西，不能回一份看起來合法的空清單。
         if args.project_id:
             project_id(args.project_id)
         from ob_operator import recover_orphaned
@@ -198,7 +183,6 @@ def _run(args, store):
                                                    "worker_running": recovered is None, "recovered": recovered or [],
                                                    "stop_requested": store.setting("stop_requested", False),
                                                    "retry_after": store.setting("retry_after")}
-        # 現在在用哪一串、問過幾題、下一題會不會換串——不然「怎麼又是同一個對話」只能自己去翻 DB。
         if not args.id and args.project_id:
             live = store.current_conversation(args.project_id)
             due, why = store.rotate_due(args.project_id)
@@ -206,7 +190,6 @@ def _run(args, store):
             result["rotate_next"] = {"due": due, "why": why, "turns_limit": Store.ROTATE_TURNS, "days_limit": Store.ROTATE_DAYS}
             result["conversations"] = store.conversations(args.project_id)
     elif args.command == "rotate":
-        # 不是現在就去開一串空的（那會留下一個沒人問過問題的對話）：標起來，下一題送出時才換。
         result = store.request_rotation(args.project_id)
     elif args.command == "recover":
         recovered = recover(store)
@@ -221,7 +204,6 @@ def _run(args, store):
         except OBError as e:
             if str(e) != "busy":
                 raise
-            # 已經有一顆 worker 在跑：被 kick 出來的重複 worker 安靜退場，這是正常狀況（只有 `work` 這樣）。
             print(json.dumps({"busy": True, "note": "另一顆 worker 正在跑"}, ensure_ascii=False), file=sys.stderr)
         return 0
     elif args.command == "retry":
@@ -247,7 +229,6 @@ def _run(args, store):
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
-
 def cli(argv=None):
     """`main` 加上結束碼。`busy` 只有 `work` 算正常（那條自己吞掉並回 0）：其他子命令撞到忙碌時 stdout
     是空的，再回 0 的話，用退出碼判斷的呼叫端會以為對帳成功（review3 c4 L6）。"""
@@ -258,7 +239,6 @@ def cli(argv=None):
     except Exception as e:
         print(json.dumps({"error": str(e)}, ensure_ascii=False), file=sys.stderr)
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(cli())

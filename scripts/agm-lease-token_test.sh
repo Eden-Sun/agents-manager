@@ -1,11 +1,4 @@
 #!/bin/bash
-# agm.py 讀 lease_token 的那段（issue #477）。
-#
-# lease_token 是「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證：拿到就能收掉別人
-# 正在換 binary 的窗口。所以它不能進 argv（同一個 uid 的行程用 `ps` 就看得到），只能走 600 的檔
-# 或 stdin。這支直接呼叫 `lease_token_of`，驗的是那層取用規則本身，不連任何 daemon。
-#
-#   bash scripts/agm-lease-token_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 if ! command -v python3 >/dev/null 2>&1; then
@@ -26,22 +19,18 @@ spec.loader.exec_module(agm)
 PASS = 0
 FAIL = 0
 
-
 def ok(desc):
     global PASS
     PASS += 1
     print(f"ok   - {desc}")
-
 
 def bad(desc, detail):
     global FAIL
     FAIL += 1
     print(f"FAIL - {desc}\n      {detail}")
 
-
 def args(**kw):
     return types.SimpleNamespace(lease_token=kw.get("inline"), lease_token_file=kw.get("path"))
-
 
 def expect_error(desc, ns, needle, stdin=None):
     try:
@@ -53,7 +42,6 @@ def expect_error(desc, ns, needle, stdin=None):
             bad(desc, f"訊息或結束碼不對：exit={e.exit_code} message={e.message}")
     else:
         bad(desc, f"沒有拒絕，回了 {got!r}")
-
 
 tmp = tempfile.mkdtemp()
 good = os.path.join(tmp, "tok600")

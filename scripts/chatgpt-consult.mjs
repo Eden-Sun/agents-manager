@@ -1,5 +1,3 @@
-// OB browser transport, invoked only by ob.py's project-bound MCP tool.
-// The worker owns the SQLite registry and serializes browser access.
 const fs = await import("node:fs/promises");
 const args = globalThis.CONSULT_ARGS;
 const { project_id: project, project_label: label, question, request_key: requestKey, url: known,
@@ -28,11 +26,7 @@ if (progress?.phase === "done") {
     if (u && !/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(u)) throw new Error("invalid_conversation_url");
   }
   const tabs = await task.tabs();
-  // 換一串（url 空、previous 有值）時**重用這個 project 自己的分頁**，只是把它導到新對話：
-  // 每換一串就開一個新分頁的話，一個 project 會累積一堆分頁，RAM 也是這樣吃光的。
   const findTab = (u) => (u ? tabs.find(t => t.url.split("?")[0] === u) : null);
-  // 同一單送出前就失敗（沒登入、等輸入框逾時…）後重試：journal 記著上一次開的那個分頁（停在首頁，網址對不上任何對話），
-  // 要重用它，不然每重試一次就多開一個分頁。只認**這一單 journal 自己記的 label**，不收編別人的首頁分頁。
   const own = progress?.page ? tabs.find(t => t.label === progress.page) : null;
   const mine = findTab(url) || (url ? null : own || findTab(previous));
   let page;
@@ -43,7 +37,6 @@ if (progress?.phase === "done") {
       await save({ phase: "opened", page: page.label, url: null });
     }
   } else {
-    // Do not adopt a generic ChatGPT home tab: another project/user might be composing there.
     page = await task.newPage();
     await page.goto(url || "https://chatgpt.com/");
     if (!url) await save({ phase: "opened", page: page.label, url: null });
@@ -61,20 +54,16 @@ if (progress?.phase === "done") {
     await save({ phase: "preparing", url: url || null, page: page.label });
     await page.keyboard.insertText(`[OB request=${requestKey}]\n` + intro + question);
     await page.waitForSelector('[data-testid="send-button"]', { state: "visible", timeout: 30000 });
-    // Journal BEFORE sending. A crash from here onwards must never blindly resend.
     await save({ phase: "dispatching", url: url || null, page: page.label });
     await page.click('[data-testid="send-button"]', { label: "send OB project question" });
     await page.waitForFunction(() => location.pathname.startsWith("/c/"), undefined, { timeout: 60000 });
     await save({ phase: "sent", url: (await page.url()).split("?")[0] });
   }
-  // Wait on the request marker and its completed answer only. The assistant DOM count saved in
-  // progress.before is not comparable after reopening: ChatGPT may render less history (100 -> 20).
   const boundAnswer = marker => {
     if (document.querySelector('[data-testid="stop-button"]')) return "";
     const all = [...document.querySelectorAll('[data-message-author-role]')];
     const index = all.findIndex(n => n.getAttribute('data-message-author-role') === 'user' && n.innerText.includes(marker));
     if (index < 0) return "";
-    // Pair with this request, never an unrelated later answer after a manual message.
     for (const node of all.slice(index + 1)) {
       if (node.getAttribute('data-message-author-role') === 'user') break;
       if (node.getAttribute('data-message-author-role') === 'assistant') {
@@ -91,4 +80,3 @@ if (progress?.phase === "done") {
   await save({ phase: "done", answer, url: (await page.url()).split("?")[0] });
   console.log("OB_RESULT " + JSON.stringify(progress));
 }
-// Keep this shared space and all project tabs for subsequent OB requests.

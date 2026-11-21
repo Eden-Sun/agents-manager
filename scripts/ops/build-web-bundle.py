@@ -7,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 
-
 def inventory(root):
     files, directories = set(), set()
     if root.exists():
@@ -16,7 +15,6 @@ def inventory(root):
             directories.update(relative / name for name in dirs)
             files.update(relative / name for name in names)
     return files, directories
-
 
 def same_bytes(left, right):
     with left.open('rb') as a, right.open('rb') as b:
@@ -27,7 +25,6 @@ def same_bytes(left, right):
             if not chunk:
                 return True
 
-
 def publish(stage, dist):
     new_files, new_dirs = inventory(stage)
     old_files, old_dirs = inventory(dist)
@@ -36,14 +33,10 @@ def publish(stage, dist):
         print('web bundle unchanged: preserved dist and all directory/file mtimes', flush=True)
         return
 
-    # Staging is a sibling on the destination filesystem. Cargo runs only after
-    # this helper returns successfully. Each rename exposes complete file bytes;
-    # this is intentionally not a transaction across the whole directory tree.
     dist.mkdir(exist_ok=True)
     if stage.stat().st_dev != dist.stat().st_dev:
         raise OSError('staging and dist must be on the same filesystem')
 
-    # Resolve file/directory shape changes before installing their replacements.
     for path in old_files & new_dirs:
         (dist / path).unlink()
     for path in sorted(old_dirs, key=lambda p: len(p.parts), reverse=True):
@@ -54,7 +47,6 @@ def publish(stage, dist):
     for path in sorted(new_dirs, key=lambda p: len(p.parts)):
         (dist / path).mkdir(exist_ok=True)
 
-    # Assets first, HTML entrypoints last; stale assets remain until then.
     for path in sorted(new_files, key=lambda p: (p.suffix.lower() == '.html', str(p))):
         target = dist / path
         if target.parent.stat().st_dev != stage.stat().st_dev:
@@ -70,10 +62,8 @@ def publish(stage, dist):
             target.rmdir()
     print('web bundle changed: published assets, then HTML, then removed stale files', flush=True)
 
-
 def build(web, bun):
     web = web.resolve()
-    # Do not create staging under dist: that alone would invalidate Cargo's watch.
     with tempfile.TemporaryDirectory(prefix='.dist-stage-', dir=web) as temporary:
         stage = Path(temporary) / 'bundle'
         subprocess.run([bun, 'install', '--frozen-lockfile'], cwd=web, check=True)
@@ -81,7 +71,6 @@ def build(web, bun):
         if not (stage / 'index.html').is_file():
             raise RuntimeError('web build did not produce staging/index.html')
         publish(stage, web / 'dist')
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -94,7 +83,6 @@ def main():
         print('web bundle build/publish failed: {}'.format(error), file=sys.stderr)
         return 1
     return 0
-
 
 if __name__ == '__main__':
     sys.exit(main())

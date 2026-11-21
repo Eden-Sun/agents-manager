@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# #1987：check.sh 跑在 `set -euo pipefail` 下，`printf … | grep -q` 的 grep 一命中就退，輸入夠大時 printf 會 EPIPE、
-# 整條 pipeline 非零（#1986）。判斷一律走 here-string；這支守住兩件事：check.sh 不再有 `| grep -q` 管線，
-# 以及上萬行變更檔下 check.sh changed 照樣跑完、part 判斷不變。假 git／cargo 放在暫存 fixture 裡。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail=0
 bad() { printf 'FAIL: %s\n' "$*" >&2; fail=1; }
 
-# 1. 靜態：判斷式不經 pipe（註解行不算）。不管來源是 echo、printf 還是別的指令，也不管 q 跟哪些旗標黏在一起
-# （-q、-Eq、-qx、-qxF、-qE、-E -q、--quiet／--silent），一律抓。
 pipe_q='\|[[:space:]]*grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)([[:space:]]|$)'
 for sample in "echo \"\$x\" | grep -q a" "printf '%s\\n' \"\$x\" | grep -Eq a" "echo \"\$x\" | grep -qx a" \
     "printf '%s\\n' \"\$x\" | grep -qxF -- a" "echo \"\$x\" |grep -qE a" "echo \"\$x\" | grep -E -q a" "echo \"\$x\" | grep --quiet a"; do
@@ -22,7 +17,6 @@ hits="$(grep -nE "$pipe_q" "$ROOT/scripts/check.sh" | grep -vE '^[0-9]+:[[:space
 [ -z "$hits" ] || bad "check.sh 仍有 '| grep -q…' 管線，pipefail 下大量輸入會 EPIPE：
 $hits"
 
-# 2. 行為：兩萬行變更檔下，check.sh changed 要跑完且只選 daemon。
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-pipe-grep.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT
 fx="$tmp/repo"

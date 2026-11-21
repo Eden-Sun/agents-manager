@@ -29,11 +29,9 @@ import urllib.request
 ACTIVE = ("starting", "running", "stopping")
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
 
-
 def die(msg, code=1):
     print(f"cutover-helper: {msg}", file=sys.stderr)
     sys.exit(code)
-
 
 def token(args):
     path = os.path.expanduser(args.token_file)
@@ -42,7 +40,6 @@ def token(args):
             return f.read().strip()
     except OSError as e:
         die(f"讀不到 UI token {path}：{e}")
-
 
 def check_loopback(base):
     try:
@@ -57,7 +54,6 @@ def check_loopback(base):
         die("daemon base URL 不可帶 query 或 fragment")
     return base.rstrip("/")
 
-
 def redact(value, secret):
     if not secret:
         return value
@@ -69,11 +65,9 @@ def redact(value, secret):
         return {redact(key, secret): redact(item, secret) for key, item in value.items()}
     return value
 
-
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
         return None
-
 
 def call(args, method, path, body=None):
     """回 (http code, 解析過的 JSON 或原文)。連不上回 (0, 錯誤字串)。"""
@@ -96,13 +90,11 @@ def call(args, method, path, body=None):
         parsed = raw.decode(errors="replace")
     return code, redact(parsed, secret)
 
-
 def get_state(args):
     code, st = call(args, "GET", "/api/state")
     if code != 200 or not isinstance(st, dict):
         die(f"GET /api/state 失敗（HTTP {code}）：{str(st)[:200]}")
     return st
-
 
 def pick(state, labels):
     out = []
@@ -120,27 +112,19 @@ def pick(state, labels):
         })
     return out
 
-
 def load(path):
     with open(path) as f:
         return json.load(f)
-
 
 def active_ids(projects, user_only=False):
     bots = [b for p in projects for b in p["bots"] if b["run_state"] in ACTIVE]
     if user_only:
         bots = [b for b in bots if b["managed_by"] != "child"]
-    # child 先停：先停 parent 的話，它的 child 會以為 parent 還在叫它做事。
     bots.sort(key=lambda b: (b["managed_by"] != "child",))
     return [b["id"] for b in bots]
 
-
-# ---------------------------------------------------------------- 子命令
-
-
 def cmd_api(args):
     method = args.method.upper()
-    # POST／PATCH 沒給 body 就送 `{}`：supervisor start／stop 這類 handler 收 JSON，空 body 會被 axum 擋成 4xx。
     body = json.loads(args.body) if args.body else ({} if method in ("POST", "PATCH", "PUT") else None)
     code, out = call(args, method, args.path, body)
     print(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False))
@@ -148,7 +132,6 @@ def cmd_api(args):
         return 0
     print(f"HTTP {code}", file=sys.stderr)
     return 3 if code == 409 else 1
-
 
 def cmd_snapshot(args):
     projects = pick(get_state(args), args.label)
@@ -161,12 +144,10 @@ def cmd_snapshot(args):
               f"{len(p['bots'])} 顆 bot，在跑 {len(run)}：{', '.join(run) or '—'}")
     return 0
 
-
 def cmd_active(args):
     for i in active_ids(load(args.snapshot)["projects"], args.user_only):
         print(i)
     return 0
-
 
 def cmd_wait_idle(args):
     want = {b["id"] for p in load(args.snapshot)["projects"] for b in p["bots"]}
@@ -182,7 +163,6 @@ def cmd_wait_idle(args):
             return 1
         time.sleep(2)
 
-
 def cmd_lock_free(args):
     path = os.path.join(os.path.expanduser(args.data_dir), "daemon.lock")
     if not os.path.exists(path):
@@ -193,9 +173,8 @@ def cmd_lock_free(args):
     except BlockingIOError:
         return 1
     finally:
-        os.close(fd)  # 關 fd 就放鎖：只是看一眼，不拿著
+        os.close(fd)
     return 0
-
 
 def parse_maps(items):
     out = []
@@ -206,13 +185,11 @@ def parse_maps(items):
         out.append((src.rstrip("/"), dst.rstrip("/")))
     return sorted(out, key=lambda m: len(m[0]), reverse=True)
 
-
 def map_path(path, maps):
     for src, dst in maps:
         if path == src or (path or "").startswith(src + "/"):
             return dst + path[len(src):]
     return path
-
 
 def latest_sessions(runs):
     """每顆 bot 最後一段原生對話（started_at、再照原本順序；接回挑的就是它，§11.9／#461）。"""
@@ -225,7 +202,6 @@ def latest_sessions(runs):
         if r["bot_id"] not in last or key >= last[r["bot_id"]][0]:
             last[r["bot_id"]] = (key, sid)
     return {b: v[1] for b, v in last.items()}
-
 
 def cmd_transcript_gate(args):
     """transcript-transfer 結束碼 2 之後：conflicts／refused 一律擋；missing 只有在「在跑名單裡的 bot 最後一段」時擋
@@ -249,7 +225,6 @@ def cmd_transcript_gate(args):
         print(m, file=sys.stderr)
     print(len(missing))
     return 1 if bad else 0
-
 
 def cmd_verify(args):
     """目標 daemon 起來、接回之後：專案在、本機、path 換過、user bot 一顆不少、在跑名單都活著。"""
@@ -285,7 +260,6 @@ def cmd_verify(args):
                        "running": sum(1 for b in tb.values() if (b.get("run") or {}).get("state") in ACTIVE)})
     print(json.dumps({"ok": not problems, "projects": report, "problems": problems}, ensure_ascii=False, indent=2))
     return 0 if not problems else 1
-
 
 def cmd_drill_verify(args):
     """演練：匯入後的 DB 複本與 config 對不對得上 bundle（不起 daemon，直接讀檔）。"""
@@ -326,8 +300,6 @@ def cmd_drill_verify(args):
         ok = conn.execute("PRAGMA integrity_check").fetchone()[0]
         if ok != "ok":
             problems.append(f"integrity_check：{ok}")
-        # 每段原生對話最後一個 run 的 transcript：目標 daemon 接回前會先看它在不在（SPEC §11.9a）。
-        # 擋的是每顆 bot 最後一段（接回挑的那段）；更早的舊 session 在來源已經沒有檔的只列數字。
         last, by_bot = {}, {}
         for bot, sid, path in conn.execute(
                 "SELECT r.bot_id, r.native_session_id, r.transcript_path FROM runs r JOIN bots b ON b.id = r.bot_id "
@@ -354,7 +326,6 @@ def cmd_drill_verify(args):
                       "sessions": len(last), "transcripts_missing_old": len(gone) - len(gone_latest), "problems": problems},
                      ensure_ascii=False, indent=2))
     return 0 if not problems else 1
-
 
 def main():
     ap = argparse.ArgumentParser(prog="cutover-helper", description=__doc__.split("\n\n")[0])
@@ -395,7 +366,6 @@ def main():
           "lock-free": cmd_lock_free, "verify": cmd_verify, "transcript-gate": cmd_transcript_gate,
           "drill-verify": cmd_drill_verify}[args.cmd]
     sys.exit(fn(args))
-
 
 if __name__ == "__main__":
     main()

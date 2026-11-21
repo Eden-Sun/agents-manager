@@ -1,5 +1,3 @@
-// 每個畫面都有自己的 URL：對著 5173（真 daemon）走一遍路由，順便留下截圖。
-// `BOT=<id> PROJECT=<id> OUT=dir node scripts/ui-routes-shots.mjs`
 import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 const TOKEN = process.env.AM_TOKEN ?? readFileSync(process.env.HOME + '/.config/agents-manager/ui-token', 'utf8').trim()
@@ -29,21 +27,18 @@ const check = async (label, got, want) => { const ok = got === want; console.log
 await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
 
-// 1. 直接開 /bots/<id>?token=…：落在那個 bot，token 從網址上消失。
 await goto(`/bots/${BOT}?token=${TOKEN}`)
 await check('open /bots/<id> 停在同一個路徑', await url(), `/bots/${BOT}`)
 await check('選到的就是那個 bot', await ev(`document.querySelector('.bot-row.selected')?.dataset.botId`), BOT)
 console.log('      title:', await title())
 await shot('r1-bot-direct')
 
-// 2. 對話 → 終端：同一個畫面，用 replaceState（上一頁不該多一格）。
 const depth0 = await ev('history.length')
 await ev(`[...document.querySelectorAll('.main-head button')].find(b=>b.textContent.trim()==='終端')?.click()`); await sleep(1200)
 await check('點終端 → /terminal', await url(), `/bots/${BOT}/terminal`)
 await check('對話↔終端不多一格歷史', await ev('history.length'), depth0)
 await shot('r2-terminal')
 
-// 3. 換一個 bot（push）再上一頁：回到終端那個畫面。
 await goto(`/bots/${BOT}/terminal`, 3500)
 await ev(`[...document.querySelectorAll('.bot-row')].filter(r=>r.dataset.botId!=='${BOT}')[0]?.click()`); await sleep(1200)
 const other = await ev(`document.querySelector('.bot-row.selected')?.dataset.botId`)
@@ -53,7 +48,6 @@ await check('上一頁回到終端分頁', await url(), `/bots/${BOT}/terminal`)
 await check('分頁真的切回終端', await ev(`document.querySelector('[role=tab][aria-selected=true]')?.textContent.trim()`), '終端')
 await shot('r3-back-to-terminal')
 
-// 4. 設定浮窗：開著 push、關掉是上一頁。
 await goto(`/bots/${BOT}`)
 await ev(`document.querySelector('.main-head .icon-btn.gear')?.click()`); await sleep(1200)
 await check('開設定 → /settings', await url(), `/bots/${BOT}/settings`)
@@ -63,7 +57,6 @@ await ev('history.back()'); await sleep(1200)
 await check('上一頁關掉設定', await url(), `/bots/${BOT}`)
 await check('設定浮窗收起來了', await ev(`!document.querySelector('.bot-settings')`), true)
 
-// 5. Project 群組聊天。
 if (PROJECT) {
   await goto(`/projects/${PROJECT}`)
   await check('open /projects/<id>', await url(), `/projects/${PROJECT}`)
@@ -71,13 +64,11 @@ if (PROJECT) {
   await shot('r5b-project')
 }
 
-// 6. 壞連結：回首頁並說一聲。
 await goto('/bots/does-not-exist', 2200)
 await check('不存在的 bot 回首頁', (await url()).startsWith('/bots/does-not-exist'), false)
 await shot('r7-missing-bot')
 await check('有跳通知', await ev(`[...document.querySelectorAll('.notice')].some(n=>n.textContent.includes('已回到首頁'))`), true)
 
-// 7. 手機抽屜：開著時按上一頁 = 關抽屜，不換畫面。
 await goto(`/bots/${BOT}`)
 await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }); await sleep(900)
 await ev(`[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')?.includes('側邊欄')||b.textContent.trim()==='☰')?.click()`); await sleep(700)

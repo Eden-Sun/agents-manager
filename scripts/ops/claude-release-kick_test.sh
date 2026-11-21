@@ -1,5 +1,4 @@
 #!/bin/bash
-# Compatibility entry point must hand the existing schedule to the unified release-triage kick.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT=$(mktemp -d)

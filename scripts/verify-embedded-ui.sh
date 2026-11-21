@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# 打包前確認 daemon 嵌進去的前端就是 web/dist 現在的內容（#1071）。
-#
-#   scripts/verify-embedded-ui.sh <agents-managerd> [web/dist]
-#
-# rust-embed 是把檔案原樣編進二進位，所以 `index.html` 的每個位元組、以及它引用的 `assets/` 檔，都必須原封不動
-# 出現在 binary 裡。前端重建了但 binary 還是舊的（或 web/dist 缺檔、沒建過前端而嵌成 404）→ exit 1，
-# 不讓 .dmg 帶著舊 UI 出去。
 set -euo pipefail
 
 BIN="${1:?usage: verify-embedded-ui.sh <agents-managerd> [web/dist]}"

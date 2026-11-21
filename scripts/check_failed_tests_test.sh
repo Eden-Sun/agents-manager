@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# check.sh 在 daemon 測試紅的時候要把「哪幾條」列在最後（整樹輸出幾千行，高負載偶發紅時要一眼看到），
-# 而且 exit 碼要照舊非零；CHECK_TESTS 在沒有 daemon 部分時不能默默被忽略。假 git／cargo 放在暫存 fixture 裡。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +33,6 @@ chmod +x "$fx/bin/git" "$fx/bin/cargo"
 
 run() { (cd "$fx" && AM_TEST_CHANGED="$1" CHECK_TESTS="${2:-}" PATH="$fx/bin:$PATH" bash scripts/check.sh changed origin/main 2>&1) ; }
 
-# 1. 有 daemon 部分、CHECK_TESTS 紅：非零、最後列出紅的測試。
 rc=0; out="$(run daemon/src/main.rs x)" || rc=$?
 [ "$rc" != 0 ] || bad "daemon 測試紅時 check.sh 要非零"
 case "$out" in *"2 條測試紅"*) ;; *) bad "沒有列出紅的測試數：$out" ;; esac
@@ -43,7 +40,6 @@ case "$out" in *"cli_update::tests::flaky_one"*"b::tests::flaky_two"*) ;; *) bad
 tail_part="$(printf '%s\n' "$out" | tail -5)"
 case "$tail_part" in *"cli_update::tests::flaky_one"*) ;; *) bad "紅的測試要在輸出最後面，不是埋在中間：$tail_part" ;; esac
 
-# 2. CHECK_TESTS 沒有 daemon 部分可以掛：要說出來，不能讓人以為測試跑過。
 out="$(run scripts/ops/foo_test.sh x 2>&1 || true)"
 case "$out" in *"CHECK_TESTS"*"沒有"*) ;; *) bad "ops 單獨改動帶 CHECK_TESTS 時沒有警告：$out" ;; esac
 

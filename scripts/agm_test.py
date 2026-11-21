@@ -30,8 +30,6 @@ import agm  # noqa: E402
 
 TOKEN = "test-token-do-not-leak"
 
-
-
 class ChildAuthHeadersTest(unittest.TestCase):
     def test_child_credential_takes_precedence_and_never_falls_back(self):
         with patch.dict(os.environ, {"AM_BOT_ID": "parent", "AM_BOT_TOKEN": "parent-token", "AM_CHILD_SPAWN_ID": "spawn", "AM_CHILD_TOKEN": "child-token"}, clear=True):
@@ -44,16 +42,14 @@ class Raw:
         self.text = text
         self.content_type = content_type
 
-
 class FakeDaemon(BaseHTTPRequestHandler):
     routes: dict = {}
     seen: list = []
     slow: set = set()
     drop: set = set()
-    # slow 的 handler 等這個 Event（最多 1.5 秒）：測試收尾時放行，handler 才不會活過它的測試（#560）。
     release: threading.Event = threading.Event()
 
-    def log_message(self, *_args):  # 別把測試輸出洗掉
+    def log_message(self, *_args):
         pass
 
     def _run(self, method: str) -> None:
@@ -69,20 +65,17 @@ class FakeDaemon(BaseHTTPRequestHandler):
         if path in type(self).slow:
             type(self).release.wait(1.5)
         if path in type(self).drop:
-            # 收到請求後不回應就把連線掐掉（送達未知的那種故障）。
             self.request.shutdown(socket.SHUT_RDWR)
             return
         entry = type(self).routes.get(f"{method} {path.split('?')[0]}")
         if entry is None:
             self._send(404, {"error": "not_found"})
             return
-        # 分頁要看 query 才答得出來，所以路由也收一個 `path -> (status, payload)` 的函式。
         if callable(entry):
             entry = entry(path)
         self._send(*entry)
 
     def _send(self, status: int, payload: object) -> None:
-        # `Raw` = 原樣送出的文字（HTML、純文字…），測「daemon 回非 JSON」用。
         if isinstance(payload, Raw):
             raw, ctype = payload.text.encode(), payload.content_type
         else:
@@ -108,10 +101,7 @@ class FakeDaemon(BaseHTTPRequestHandler):
     def do_DELETE(self):  # noqa: N802
         self._run("DELETE")
 
-
 class FakeServer(ThreadingHTTPServer):
-    # 不設 daemon_threads 的話 `server_close()` 會去 join 還掛在 keep-alive 上的
-    # handler 執行緒，每個 TestCase 類別的收尾都要卡好幾秒。
     daemon_threads = True
     allow_reuse_address = True
 
@@ -121,7 +111,6 @@ class FakeServer(ThreadingHTTPServer):
         self.inflight = 0
         self.errors: list = []
 
-    # daemon_threads 的 handler 沒人等：數著還在跑的，收尾才能等它們跑完（#560）。
     def process_request(self, request, client_address):
         with self._idle:
             self.inflight += 1
@@ -136,9 +125,6 @@ class FakeServer(ThreadingHTTPServer):
                 self._idle.notify_all()
 
     def handle_error(self, request, client_address):
-        # 標準版把 traceback 印到**呼叫當下的** `sys.stderr`：handler 執行緒出錯時若別的指令正在
-        # `bad()` 裡接 stderr，那段字會混在 CLI 的 JSON 前面（#560）。逾時／掐線測試本來就會讓
-        # handler 寫到關掉的連線，記在這裡給要看的測試查。
         self.errors.append(sys.exc_info()[1])
 
     def drain(self, timeout: float) -> bool:
@@ -146,12 +132,9 @@ class FakeServer(ThreadingHTTPServer):
             return self._idle.wait_for(lambda: self.inflight == 0, timeout)
 
     def server_bind(self):
-        # HTTPServer.server_bind 會呼叫 socket.getfqdn()，在沒有反解的機器上要等
-        # 三十秒才逾時。測試不需要 server_name，跳過那一步。
         socketserver.TCPServer.server_bind(self)
         self.server_name = "127.0.0.1"
         self.server_port = self.server_address[1]
-
 
 class CliCase(unittest.TestCase):
     """跑真的 `agm.main(argv)`，把 stdout/stderr 接下來當 JSON 讀。"""
@@ -180,12 +163,9 @@ class CliCase(unittest.TestCase):
         self.write_runtime({"daemon_url": f"http://127.0.0.1:{self.port}", "manager_bot_id": "bot-agm"})
         os.environ["AGM_RUNTIME_DIR"] = self.dir.name
         self.addCleanup(lambda: os.environ.pop("AGM_RUNTIME_DIR", None))
-        # 若 CLI 忘了關 proxy，這個位址不存在 → 連線失敗，測試會炸。
         for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
             os.environ[var] = "http://127.0.0.1:9"
             self.addCleanup(lambda v=var: os.environ.pop(v, None))
-        # 在 bot 的 pane 裡跑測試時這些都有值：agm 一看到 AM_BOT_ID 就改用 Bot 身份（#556），
-        # 期望「一般 shell＝User token」的測試會紅。每個測試從乾淨的身份環境開始，要的自己設。
         for var in ("AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_CHILD_SPAWN_ID", "AM_CHILD_TOKEN", "AM_SERVICE_ID", "AM_SERVICE_TOKEN_FILE"):
             old = os.environ.pop(var, None)
             if old is not None:
@@ -212,7 +192,7 @@ class CliCase(unittest.TestCase):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     code = agm.main(list(argv))
-                except SystemExit as e:  # argparse 的用法錯誤
+                except SystemExit as e:
                     code = e.code if isinstance(e.code, int) else 2
         finally:
             sys.stdin = real_stdin
@@ -228,7 +208,6 @@ class CliCase(unittest.TestCase):
         self.assertNotEqual(code, 0, f"expected failure, stdout={out}")
         return json.loads(err)
 
-
 def _wait_until(cond, timeout: float = 5.0) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -236,7 +215,6 @@ def _wait_until(cond, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return cond()
-
 
 class FakeServerIsolationTest(CliCase):
     """假 daemon 的 handler 執行緒不能漏到別的指令、別的測試（issue #560）。
@@ -265,7 +243,6 @@ class FakeServerIsolationTest(CliCase):
         self.assertTrue(_wait_until(lambda: self.server.inflight == 1), "那一發要先卡在 handler 裡")
 
         def listing(_path):
-            # 在 agm 正在跑、stderr 被接走的這個時間點放行那個 handler，並等它連錯誤處理都做完。
             gate.set()
             _wait_until(lambda: self.server.inflight == 1)
             return (200, {"assignments": [], "has_more": False})
@@ -288,10 +265,6 @@ class FakeServerIsolationTest(CliCase):
         self.assertEqual(self.server.inflight, 0)
         self.assertLess(time.monotonic() - started, 1.0, "收尾要放行它，不是乾等 1.5 秒")
 
-
-# --------------------------------------------------------------- loopback 防護
-
-
 class LoopbackTest(unittest.TestCase):
     def test_accepts_loopback_forms(self):
         for url in ("http://127.0.0.1:7788", "http://localhost:7788", "http://[::1]:7788"):
@@ -303,7 +276,6 @@ class LoopbackTest(unittest.TestCase):
         self.assertEqual(cm.exception.kind, "not_loopback")
 
     def test_rejects_userinfo(self):
-        # `http://127.0.0.1@evil.tld/` 的 hostname 其實是 evil.tld；帳密形式一律擋掉。
         with self.assertRaises(agm.AgmError):
             agm.check_loopback("http://user:pw@127.0.0.1:7788")
         with self.assertRaises(agm.AgmError):
@@ -317,7 +289,6 @@ class LoopbackTest(unittest.TestCase):
         with self.assertRaises(agm.AgmError):
             agm.Client("http://evil.example:7788")
 
-
 class RuntimeTest(unittest.TestCase):
     def test_env_overrides_explicit(self):
         os.environ["AGM_RUNTIME_DIR"] = "/tmp/agm-env"
@@ -330,10 +301,6 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaises(agm.AgmError):
             agm.manager_bot_id({})
 
-
-# ------------------------------------------------------------------- 精簡投影
-
-
 class SlimTest(unittest.TestCase):
     def test_state_reads_bots_nested_under_projects(self):
         out = agm.slim_state(
@@ -343,8 +310,6 @@ class SlimTest(unittest.TestCase):
                         "id": "p1",
                         "label": "AG Man",
                         "path": "/x",
-                        # 這裡照 `GET /api/state` 真的會給的欄位：queued_turn 是一筆 turn，
-                        # 燈號是 daemon 算好的 lamp。舊 daemon 可能還帶 team／teams，要被忽略。
                         "bots": [
                             {
                                 "id": "b1",
@@ -405,7 +370,6 @@ class SlimTest(unittest.TestCase):
                         "host_connected": True,
                         "queued_turns": 2,
                         "asleep": None,
-                        # daemon 算好的（`bot_connected` 比 CLI 看得到的 host_connected 細）。
                         "lamp": "working",
                         "run": {
                             "id": "r1",
@@ -425,7 +389,6 @@ class SlimTest(unittest.TestCase):
                         "name": "AM-2",
                         "host_connected": True,
                         "queued_turns": 0,
-                        # §6.11 收起來省 RAM：run 是 null，但它叫得醒。
                         "asleep": {"since": "2026-09-24T01:03:25.662Z", "idle_minutes": 92},
                         "run": None,
                     },
@@ -434,14 +397,12 @@ class SlimTest(unittest.TestCase):
             "b1",
         )
         busy, asleep = out["bots"]
-        # `lamp` 這個欄位不存在 → 照 daemon 的 `fn lamp` 從 host_connected + run 算，不是空字串。
         self.assertEqual(busy["lamp"], "working")
         self.assertEqual(busy["queued_turns"], 2)
         self.assertIsNone(busy["queued_turn"], "筆數不塞進 turn 欄位")
         self.assertIs(busy["host_connected"], True)
         self.assertIsNone(busy["asleep"])
         self.assertEqual(busy["run"]["native_session_id"], "sess-1")
-        # 睡著的跟停掉的不能長一樣：run 都是 null，差別只在 asleep。
         self.assertEqual(asleep["lamp"], "offline")
         self.assertEqual(asleep["asleep"], {"since": "2026-09-24T01:03:25.662Z", "idle_minutes": 92})
         self.assertEqual(asleep["queued_turns"], 0)
@@ -451,7 +412,6 @@ class SlimTest(unittest.TestCase):
         out = agm.slim_state({"bots": [{"id": "b1", "host_connected": False, "run": {"state": "running", "agent_status": "working"}}]})
         self.assertEqual(out["bots"][0]["lamp"], "disconnected")
         self.assertIs(out["bots"][0]["host_connected"], False)
-        # daemon 給了就照抄，不要用比較粗的輸入覆寫它。
         out = agm.slim_state({"bots": [{"id": "b1", "lamp": "blocked", "host_connected": False, "run": None}]})
         self.assertEqual(out["bots"][0]["lamp"], "blocked")
 
@@ -529,10 +489,6 @@ class SlimTest(unittest.TestCase):
         self.assertEqual(m["rewound_at"], "2026-09-10T00:00:00.000Z")
         self.assertIsNone(agm.slim_message({"id": "m2", "role": "user"})["rewound_at"])
 
-
-# -------------------------------------------------------------------- 子命令
-
-
 class StateCommandTest(CliCase):
     def test_prefers_supervisor_state_and_marks_manager(self):
         FakeDaemon.routes["GET /api/supervisor/state"] = (200, {"bots": [{"id": "bot-agm", "name": "AGM"}]})
@@ -551,9 +507,9 @@ class StateCommandTest(CliCase):
             (1, None, "missing_instance_identity"),
             (1, " ", "missing_instance_identity"),
             (1, "terminal", None),
-            (1, None, None),  # Native identity present upstream.
+            (1, None, None),
             (0, None, None),
-            (None, None, None),  # Older daemons omit the new fields.
+            (None, None, None),
         ]
         bots = [{"id": f"b{i}", "env": {"SECRET": "private-fixture"}, "args": ["private-fixture"],
                  "hook_token": "private-fixture", "run": {"id": f"r{i}", "state": "running",
@@ -585,14 +541,11 @@ class StateCommandTest(CliCase):
         code, out, err = self.run_cli("state")
         self.assertEqual(code, 0)
         self.assertNotIn(TOKEN, out + err)
-        # …但請求上有帶。
         self.assertIn(TOKEN, [r["token"] for r in FakeDaemon.seen if r["path"].startswith("/api/state")])
 
     def test_no_raw_flag(self):
-        # `--raw` 會把 env 原樣倒出來，所以不該存在。
         code, _out, _err = self.run_cli("state", "--raw")
         self.assertEqual(code, 2)
-
 
 class SearchCommandTest(CliCase):
     def test_uses_evidence_endpoint(self):
@@ -614,7 +567,6 @@ class SearchCommandTest(CliCase):
         out = self.ok("search", "登入")
         self.assertEqual(out["source"], "legacy_search")
         self.assertIn("沒有 message/turn ID", out["note"])
-
 
 class MessagesCommandTest(CliCase):
     def test_cursor_uses_oldest_seq_when_created_at_order_differs(self):
@@ -657,7 +609,6 @@ class MessagesCommandTest(CliCase):
                 "bot_id": "b1",
                 "conversation_id": "c1",
                 "messages": [{"id": "m5", "role": "user"}, {"id": "m6", "role": "assistant"}],
-                # db::Turn 的真欄位：status / completed_at（不是 state / ended_at）。
                 "turns": [
                     {
                         "id": "t1",
@@ -675,7 +626,6 @@ class MessagesCommandTest(CliCase):
             },
         )
         out = self.ok("messages", "b1")
-        # 訊息是正序，往前翻要用第一則（最舊）的 id。
         self.assertEqual(out["next_cursor"], "m5")
         turn = out["turns"][0]
         self.assertEqual(turn["delivery"], "confirmed")
@@ -686,7 +636,6 @@ class MessagesCommandTest(CliCase):
     def test_no_cursor_when_no_more(self):
         FakeDaemon.routes["GET /api/bots/b1/messages"] = (200, {"messages": [{"id": "m5"}], "has_more": False})
         self.assertIsNone(self.ok("messages", "b1")["next_cursor"])
-
 
 class AssignCommandTest(CliCase):
     def test_posts_the_given_request_id(self):
@@ -783,7 +732,6 @@ class AssignCommandTest(CliCase):
         body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][0]
         self.assertEqual(body["text"], "從檔案來的交辦")
 
-
 class AssignmentsCommandTest(CliCase):
     def setUp(self):
         super().setUp()
@@ -807,13 +755,11 @@ class AssignmentsCommandTest(CliCase):
     def test_open_includes_awaiting_review_and_blocked(self):
         """回合跑完不等於結案：等驗收與被標阻塞的都還算未結案。"""
         out = self.ok("assignments", "--open")
-        # `quota_blocked` 也算未結案：工作沒做完，只是在等額度回來（daemon 會自己重送）。
         self.assertEqual([a["id"] for a in out["assignments"]], ["a1", "a3", "a4", "a5"])
         self.assertEqual(out["awaiting_review"], 1)
         self.assertEqual([a["id"] for a in self.ok("assignments", "--awaiting-review")["assignments"]], ["a3"])
 
     def test_status_open_matches_open_flag_when_old_daemon_ignores_filter(self):
-        # 舊 daemon 可能不篩 `status=open`；CLI 的備援過濾仍要認得這個集合別名。
         FakeDaemon.routes["GET /api/supervisor/assignments"] = (
             200,
             {
@@ -897,7 +843,6 @@ class AssignmentsCommandTest(CliCase):
     def test_no_retrying_section_when_nothing_is_stuck(self):
         self.assertNotIn("retrying_undelivered", self.ok("assignments", "--open"))
 
-
 class AssignmentsPagingTest(CliCase):
     """issue #515：過濾要對**全量**做。
 
@@ -909,7 +854,6 @@ class AssignmentsPagingTest(CliCase):
         {"id": "a5", "client_request_id": "crid-5", "status": "completed", "created_at": "2026-09-24T00:00:00.000Z"},
         {"id": "a4", "client_request_id": "crid-4", "status": "completed", "created_at": "2026-09-23T00:00:00.000Z"},
         {"id": "a3", "client_request_id": "crid-3", "status": "completed", "created_at": "2026-09-22T00:00:00.000Z"},
-        # 頁外的兩筆：舊、而且還沒結案。
         {"id": "a2", "client_request_id": "crid-2", "status": "blocked", "created_at": "2026-09-19T00:00:00.000Z"},
         {"id": "a1", "client_request_id": "crid-1", "status": "awaiting_review", "created_at": "2026-09-16T00:00:00.000Z"},
     ]
@@ -921,8 +865,6 @@ class AssignmentsPagingTest(CliCase):
     @classmethod
     def _page(cls, path: str):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
-        # 這台 daemon 的每頁上限是 2（比呼叫端要的小）：客戶端要照 `has_more` 翻，
-        # 不能因為自己要了 200 筆就當成一次拿完。
         limit = min(int((q.get("limit") or ["2"])[0]), 2)
         before = (q.get("before") or [None])[0]
         rows = cls.ROWS
@@ -950,19 +892,16 @@ class AssignmentsPagingTest(CliCase):
             (("assignments", "--open"), "open"),
             (("assignments", "--awaiting-review"), "awaiting_review"),
             (("assignments", "--status", "blocked"), "blocked"),
-            # 兩個一起給：送比較寬的那個，剩下的交給客戶端那層收。
             (("assignments", "--open", "--awaiting-review"), "open"),
         ):
             FakeDaemon.seen.clear()
             self.ok(*argv)
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
             self.assertEqual(q.get("status"), [want], f"{argv}")
-        # `--id` 要掃全部，不能先被狀態篩掉。
         FakeDaemon.seen.clear()
         self.ok("assignments", "--id", "crid-1")
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
         self.assertNotIn("status", q)
-        # 沒有過濾條件時也不要送。
         FakeDaemon.seen.clear()
         self.ok("assignments", "--all")
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self._reads()[0]["path"]).query)
@@ -984,8 +923,6 @@ class AssignmentsPagingTest(CliCase):
 
         def stuck(_path: str):
             calls["n"] += 1
-            # 守衛壞掉時要**紅**，不能掛在這裡讓 CI 跑到逾時：第 6 次之後自己收手，
-            # 讓下面的次數斷言去講話。
             more = calls["n"] < 6
             return (200, {"assignments": [self.ROWS[0]], "has_more": more, "next_cursor": "same-cursor" if more else None})
 
@@ -1022,7 +959,6 @@ class AssignmentsPagingTest(CliCase):
         self.assertIs(err["complete"], False)
         self.assertEqual(err["searched"], 2)
 
-
 class ReviewCommandTest(CliCase):
     def setUp(self):
         super().setUp()
@@ -1051,7 +987,6 @@ class ReviewCommandTest(CliCase):
             self.bad("review", "a1", "--decision", "followup", "--followup-text", "把 A 做完")["error"],
             "bad_args",
         )
-        # 兩次都在送出任何請求之前就擋下來。
         self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
         self.ok(
             "review",
@@ -1103,7 +1038,6 @@ class ReviewCommandTest(CliCase):
         code, _out, _err = self.run_cli("review", "a1", "--decision", "looks-fine")
         self.assertEqual(code, 2)
 
-
 class RelayPrincipalOwnerTest(unittest.TestCase):
     def test_nr_relay_default_owner_survives_agent_rename_and_name_reuse(self):
         class Capture:
@@ -1115,7 +1049,6 @@ class RelayPrincipalOwnerTest(unittest.TestCase):
             with patch.dict(os.environ, {"AM_BOT_ID": "stable-bot-id", "AM_AGENT_NAME": name}):
                 body = agm.cmd_lease(Capture(), {}, args)
             self.assertEqual(body["owner"], "stable-bot-id")
-
 
 class ApprovalLeaseCommandTest(CliCase):
     def setUp(self):
@@ -1226,7 +1159,6 @@ class ApprovalLeaseCommandTest(CliCase):
                 "--exclude-bot", "builder", "--exclude-bot", "manager")
         self.assertEqual(self._last_body()["exclude_bot_ids"], ["builder", "manager"])
 
-
 class CliSyncReportTest(unittest.TestCase):
     """issue #532：`ops-sync --check` 也要看 `bin/agm`。
 
@@ -1262,14 +1194,13 @@ class CliSyncReportTest(unittest.TestCase):
         return root
 
     def test_the_repo_hash_is_the_same_algorithm_as_the_daemon(self):
-        # daemon 的 cli_refresh::short_hash 有一樣的兩個向量；算錯就永遠對不上。
         self.assertEqual(agm.short_hash(b""), "cbf29ce48422")
         self.assertEqual(agm.short_hash(b"a"), "af63dc4c8601")
 
     def test_an_installed_cli_that_is_not_the_embedded_one_is_drift(self):
         body = b"# repo version\n"
         repo = self.repo(body)
-        embedded = agm.short_hash(body)  # binary 是照這一版建的
+        embedded = agm.short_hash(body)
         client = self.Fake({"embedded_hash": embedded,
                             "roles": [{"role": "patrol", "state": "stale", "installed_hash": "deadbeef1234"}]})
         r = agm.cli_sync_report(client, repo, "HEAD")
@@ -1298,11 +1229,9 @@ class CliSyncReportTest(unittest.TestCase):
         self.assertEqual(r["stale_roles"], [])
 
     def test_a_daemon_that_cannot_be_reached_is_unknown_not_a_failure(self):
-        # 本業是比對安裝端：daemon 沒開是另一件事，不該讓整支 ops-sync 變紅。
         r = agm.cli_sync_report(self.Fake(error="connection refused"), self.repo(b"x\n"), "HEAD")
         self.assertEqual(r["state"], "unknown")
         self.assertIn("connection refused", r["error"])
-
 
 class LeaseTokenTest(CliCase):
     """issue #517（守 #477）：`lease_token` 不可以走 argv，而守衛本身以前一條測試都沒有。
@@ -1328,7 +1257,6 @@ class LeaseTokenTest(CliCase):
         code, _out, err = self.run_cli(*argv)
         self.assertEqual(code, 0, err)
         self.assertEqual(self._bodies()[-1]["lease_token"], "one-shot-secret")
-        # argv 同一台機器上誰都看得到（`ps`）：檔案路徑可以在裡面，token 本身不行。
         self.assertNotIn("one-shot-secret", " ".join(argv))
 
     def test_a_file_anyone_else_can_read_is_treated_as_already_leaked(self):
@@ -1346,10 +1274,8 @@ class LeaseTokenTest(CliCase):
         self.assertTrue(link.is_symlink() and link.exists(), "前提：symlink 真的建起來而且指得到東西")
         err = self.bad("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(link))
         self.assertEqual(err["error"], "bad_args")
-        # 「路徑打錯」也是 bad_args：擋下來的必須是 symlink 這件事本身，不是找不到檔。
         self.assertNotIn("No such file", err["message"])
         self.assertEqual(self._bodies(), [])
-        # 對照組：同一個目標用真路徑讀得到，證明擋的是 symlink 不是內容或權限。
         self.ok("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--lease-token-file", str(self.tok))
         self.assertEqual(self._bodies()[-1]["lease_token"], "one-shot-secret")
 
@@ -1403,7 +1329,6 @@ class LeaseTokenTest(CliCase):
             urllib.parse.parse_qs(urllib.parse.urlparse(read["path"]).query),
             {"exclude": ["builder"], "approval": ["ap-1"], "owner": ["bot-a"]},
         )
-        # 不帶就不要送：那是「每一把租約都算擋」的舊行為，送空字串會變成另一個意思。
         self.ok("lease", "safety")
         read = [r for r in FakeDaemon.seen if r["method"] == "GET" and "/maintenance/safety" in r["path"]][-1]
         self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(read["path"]).query), {})
@@ -1414,7 +1339,6 @@ class LeaseTokenTest(CliCase):
         self.assertEqual(self._bodies(), [])
         self.ok("lease", "release", "rebuild", "--owner", "b", "--fence", "3", "--force", "--reason", "持有者的 pane 沒了")
         self.assertEqual((self._bodies()[-1]["force"], self._bodies()[-1]["reason"]), (True, "持有者的 pane 沒了"))
-
 
 class PersonaCommandTest(CliCase):
     def setUp(self):
@@ -1472,14 +1396,12 @@ class PersonaCommandTest(CliCase):
         FakeDaemon.routes.pop("GET /api/supervisor/persona")
         self.assertEqual(self.bad("persona", "show")["error"], "unsupported")
 
-
 class RemoteCommandRemovedTest(CliCase):
     def test_remote_is_no_longer_a_subcommand(self):
         """手機 Remote Control 已廢（#1477）：`agm remote` 不存在，也不會再打 /api/supervisor/remote。"""
         code, _out, _err = self.run_cli("remote", "show")
         self.assertEqual(code, 2, "argparse 不認得的子命令")
         self.assertEqual(FakeDaemon.seen, [], "什麼請求都不該送出")
-
 
 class BuildInputsCommandTest(CliCase):
     def test_lists_the_embedded_paths(self):
@@ -1493,7 +1415,6 @@ class BuildInputsCommandTest(CliCase):
     def test_old_daemon_says_unsupported(self):
         self.assertEqual(self.bad("build-inputs")["error"], "unsupported")
 
-
 class IncidentsCommandTest(CliCase):
     def test_lists_open_incidents(self):
         FakeDaemon.routes["GET /api/supervisor/incidents"] = (
@@ -1506,7 +1427,6 @@ class IncidentsCommandTest(CliCase):
 
     def test_old_daemon_says_unsupported_rather_than_pretending(self):
         self.assertEqual(self.bad("incidents")["error"], "unsupported")
-
 
 class ExpertBotCommandsTest(CliCase):
     def test_lineage_subcommands_call_the_project_routes_with_bot_proof(self):
@@ -1557,31 +1477,26 @@ class ExpertBotCommandsTest(CliCase):
             self.assertIn("lineage_session_not_found", json.dumps(missing))
 
     def test_lineage_pick_single_cross_and_unmatched(self):
-        # 單線
         res = self.ok("lineage", "pick", "web/src/App.tsx", "web/package.json")
         self.assertEqual(res["line"], "web")
         self.assertEqual(res["lines"], {"web": ["web/src/App.tsx", "web/package.json"]})
         self.assertEqual(res["unmatched"], [])
 
-        # 跨線
         res = self.ok("lineage", "pick", "web/src/App.tsx", "scripts/agm.py")
         self.assertIsNone(res["line"])
         self.assertEqual(res["lines"], {"web": ["web/src/App.tsx"], "ops": ["scripts/agm.py"]})
         self.assertEqual(res["unmatched"], [])
 
-        # 有 unmatched
         res = self.ok("lineage", "pick", "web/src/App.tsx", "unknown/path.txt")
         self.assertIsNone(res["line"])
         self.assertEqual(res["lines"], {"web": ["web/src/App.tsx"]})
         self.assertEqual(res["unmatched"], ["unknown/path.txt"])
 
-        # 全 unmatched
         res = self.ok("lineage", "pick", "unknown/a.txt", "unknown/b.txt")
         self.assertIsNone(res["line"])
         self.assertEqual(res["lines"], {})
         self.assertEqual(res["unmatched"], ["unknown/a.txt", "unknown/b.txt"])
 
-        # 重複路徑去重
         res = self.ok("lineage", "pick", "web/a.ts", "web/a.ts")
         self.assertEqual(res["line"], "web")
         self.assertEqual(res["lines"]["web"], ["web/a.ts"])
@@ -1597,28 +1512,23 @@ paths = ["crates/am-base/src/quota*", "daemon/src/quota*.rs"]
 [lines.single_star]
 paths = ["dir/*"]
 """, encoding="utf-8")
-            # quota glob
             res = self.ok("lineage", "pick", "--lines-file", str(cfg), "crates/am-base/src/quota_claude.rs")
             self.assertEqual(res["line"], "quota")
             self.assertEqual(res["lines"]["quota"], ["crates/am-base/src/quota_claude.rs"])
 
-            # * 不跨目錄
             res = self.ok("lineage", "pick", "--lines-file", str(cfg), "dir/sub/file.txt", "dir/file.txt")
             self.assertIsNone(res["line"])
             self.assertEqual(res["lines"]["single_star"], ["dir/file.txt"])
             self.assertEqual(res["unmatched"], ["dir/sub/file.txt"])
 
-            # 找不到 lines.toml
             err = self.bad("lineage", "pick", "--lines-file", str(tmppath / "missing.toml"), "a.txt")
             self.assertEqual(err["error"], "no_lines_config")
 
-            # 錯誤 TOML
             bad_cfg = tmppath / "bad.toml"
             bad_cfg.write_text("not a valid toml = [", encoding="utf-8")
             err = self.bad("lineage", "pick", "--lines-file", str(bad_cfg), "a.txt")
             self.assertEqual(err["error"], "invalid_lines_toml")
 
-            # 非法線名
             invalid_name_cfg = tmppath / "invalid_name.toml"
             invalid_name_cfg.write_text("""
 [lines."_invalid"]
@@ -1642,7 +1552,6 @@ paths = ["web/**"]
 paths = ["scripts/**"]
 """, encoding="utf-8")
 
-            # 第一個 commit：作為 checkpoint
             (root / "web").mkdir(parents=True, exist_ok=True)
             (root / "web" / "App.tsx").write_text("export const App = 1;\n", encoding="utf-8")
             (root / "scripts").mkdir(parents=True, exist_ok=True)
@@ -1651,7 +1560,6 @@ paths = ["scripts/**"]
             subprocess.run(["git", "-C", str(root), "commit", "-qm", "checkpoint commit"], check=True, capture_output=True)
             chk_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
 
-            # 第二個 commit：修改 web 檔案與 scripts 檔案
             (root / "web" / "App.tsx").write_text("export const App = 2;\n", encoding="utf-8")
             (root / "web" / "index.html").write_text("<html/>\n", encoding="utf-8")
             (root / "scripts" / "tool.sh").write_text("#!/bin/sh\necho 1\n", encoding="utf-8")
@@ -1673,7 +1581,6 @@ paths = ["scripts/**"]
                 self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", res["prompt_prefix"])
                 self.assertIn("涉及的請重讀。", res["prompt_prefix"])
 
-                # 無變動情況
                 head_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
                 session_ops = {"line": "ops", "session_id": "sess-chk-ops", "state": "checkpoint", "head_sha": head_sha}
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [session_ops]})
@@ -1698,27 +1605,22 @@ paths = ["web/**"]
 
             env = {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1", "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent"}
             with patch.dict(os.environ, env):
-                # 1. 無法通過名稱規則
                 code, out, err = self.run_cli("lineage", "since", "_invalid", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(code, 2)
                 self.assertEqual(json.loads(err)["error"], "invalid_line")
 
-                # 2. 沒有 checkpoint
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": []})
                 err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err["error"], "no_checkpoint")
 
-                # 3. 沒有 head_sha
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "web", "session_id": "s1", "state": "checkpoint"}]})
                 err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err["error"], "no_head_sha")
 
-                # 4. lines.toml 未定義該線
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "unknown", "session_id": "s2", "state": "checkpoint", "head_sha": "abc1234"}]})
                 err = self.bad("lineage", "since", "unknown", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err["error"], "unknown_line")
 
-                # 5. sha 不在本地 (提示 git fetch)
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [{"line": "web", "session_id": "s3", "state": "checkpoint", "head_sha": "0123456789abcdef0123456789abcdef01234567"}]})
                 err = self.bad("lineage", "since", "web", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err["error"], "sha_not_found")
@@ -1776,10 +1678,8 @@ paths = ["web/**"]
             self.assertEqual(out["backup_session_id"], "bak-sess-1")
             self.assertEqual(out["work_session_id"], "chk-sess-1")
             self.assertEqual(out["worker"], {"kind": "bot", "bot_id": "b-exec"})
-            # 確認無 prompt 的 codex exec fork
             codex_argv = json.loads(codex_log.read_text(encoding="utf-8").strip())
             self.assertEqual(codex_argv, ["exec", "fork", "--json", "chk-sess-1"])
-            # 確認 prompt 前面加了 since 的 prompt_prefix
             prompt_call = [r for r in FakeDaemon.seen if r["path"] == "/api/bots/b-exec/prompt"][0]
             self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", prompt_call["body"]["text"])
             self.assertTrue(prompt_call["body"]["text"].endswith("請修好 App.tsx 的按鈕"))
@@ -1814,12 +1714,10 @@ paths = ["web/**"]
                 "AGM_CODEX_BIN": str(fake_codex),
             }
             with patch.dict(os.environ, env):
-                # 1. busy 改走 fork
                 out = self.ok("lineage", "dispatch", "--paths", "web/App.tsx", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(out["mode"], "fork")
                 self.assertIsNone(out["backup_session_id"])
                 self.assertEqual(out["work_session_id"], "fork-sess-1")
-                # 2. 強制 --fork 不呼叫 codex exec fork
                 FakeDaemon.seen.clear()
                 out2 = self.ok("lineage", "dispatch", "--line", "web", "--fork", "--prompt-file", str(prompt_file), "--bot", "b-exec", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(out2["mode"], "fork")
@@ -1980,7 +1878,6 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
                 "AGM_CODEX_BIN": str(fake_codex),
                 "CODEX_HOME": str(root / "codex-home"),
             }
-            # 父 session 的 rollout：ephemeral fork 的 turn.completed 含父歷史累計，consult 要扣掉這段。
             day = root / "codex-home" / "sessions" / "2026" / "11" / "21"
             day.mkdir(parents=True)
             (day / "rollout-2026-11-21T00-00-00-lead-chk-1.jsonl").write_text(
@@ -2002,10 +1899,8 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
                 self.assertIn("唯讀諮詢：禁止修改任何檔案", prompt_text)
                 self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", prompt_text)
                 self.assertIn("這張票怎麼拆？", prompt_text)
-                # 確認沒有登記/claim/advance
                 self.assertFalse(any(r["method"] == "POST" for r in FakeDaemon.seen))
 
-                # --prompt-file 與 --model / --effort 覆寫
                 qfile = root / "q.txt"
                 qfile.write_text("幫我看這個 diff", encoding="utf-8")
                 out2 = self.ok("consult", "--prompt-file", str(qfile), "--model", "custom-sol", "--effort", "high", "--repo", str(root), "--lines-file", str(lines_file))
@@ -2027,21 +1922,18 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
                 "AGM_CODEX_BIN": str(slow_codex),
             }
             with patch.dict(os.environ, env):
-                # 1. 無 thinker 檢查點 → 提示如何種下
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": []})
                 err = self.bad("consult", "hello", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err["error"], "no_thinker_checkpoint")
                 self.assertIn("agm lineage advance lead", err["message"])
                 self.assertIn("--role thinker", err["message"])
 
-                # 2. /api/models 無 sol 模型
                 cp = {"line": "lead", "session_id": "lead-chk-1", "role": "thinker", "state": "checkpoint", "head_sha": chk_sha}
                 FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
                 FakeDaemon.routes["GET /api/models"] = (200, {"kind": "codex", "host": "local", "models": [{"id": "gpt-6.3-terra"}]})
                 err2 = self.bad("consult", "hello", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err2["error"], "no_sol_model")
 
-                # 3. 逾時清楚回報
                 FakeDaemon.routes["GET /api/models"] = (200, {"kind": "codex", "host": "local", "models": [{"id": "gpt-6.2-sol"}]})
                 err3 = self.bad("consult", "hello", "--exec-timeout", "0.2", "--repo", str(root), "--lines-file", str(lines_file))
                 self.assertEqual(err3["error"], "consult_timeout")
@@ -2115,7 +2007,6 @@ print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 
         with patch.dict(os.environ, {"AM_BOT_ID": "bot-a", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1"}, clear=True):
             self.assertEqual(self.bad("peers")["error"], "no_daemon_url")
 
-
 class ModelsCommandTest(CliCase):
     @patch.dict(os.environ, {"AM_BOT_ID": "bot-agm", "AM_BOT_TOKEN": "model-test-proof"})
     def test_remote_refresh_preserves_host_identity_and_bot_auth(self):
@@ -2145,7 +2036,6 @@ class ModelsCommandTest(CliCase):
                 self.assertEqual(err["status"], status)
                 self.assertEqual(err["detail"]["error"], error)
                 self.assertEqual(len(FakeDaemon.seen), 1)
-
 
 class MiscCommandTest(CliCase):
     def test_handoff_read_and_write(self):
@@ -2197,7 +2087,6 @@ class MiscCommandTest(CliCase):
         self.assertEqual(err["error"], "role_required")
         self.assertIn("pane", err["message"])
         self.assertIn("AM_HOOK_TOKEN", err["message"])
-        # 另一個 reason 的下一步不一樣：人已經在角色 pane 裡了，別再叫他換 pane（i407 審出來的）。
         FakeDaemon.routes["POST /api/supervisor/inbox/e3/ack"] = (
             403,
             {"error": "forbidden", "reason": "bot_proof_mismatch", "message": "對不上"},
@@ -2207,7 +2096,6 @@ class MiscCommandTest(CliCase):
         self.assertIn("token", err["message"])
         self.assertNotIn("去角色", err["message"])
         self.assertNotIn("裡跑 bin/agm", err["message"])
-        # 其他 403 不要被這條吃掉：照原本的 http_error 冒出來。
         FakeDaemon.routes["POST /api/supervisor/inbox/e2/ack"] = (403, {"error": "forbidden", "reason": "something_else"})
         self.assertEqual(self.bad("ack", "e2")["error"], "http_error")
 
@@ -2219,7 +2107,6 @@ class MiscCommandTest(CliCase):
         body = [r["body"] for r in FakeDaemon.seen if r["method"] == "POST"][-1]
         self.assertEqual((body["source"], body["reason"], body["detail"]), ("daemon-update-kick", "stale_lock", "鎖清不掉"))
 
-        # 清單只回最新 100 筆，舊的那筆要用 `--id` 查（query string 走在同一支端點上）。
         FakeDaemon.routes["GET /api/supervisor/approvals"] = (200, {"approvals": [{"id": "ap-1", "status": "approved"}]})
         self.assertEqual(self.ok("approval", "list", "--id", "ap-1")["approvals"][0]["status"], "approved")
         self.assertEqual([r["path"] for r in FakeDaemon.seen if r["method"] == "GET"][-1], "/api/supervisor/approvals?id=ap-1")
@@ -2373,7 +2260,6 @@ class MiscCommandTest(CliCase):
         self.assertEqual(self.bad("state")["error"], "not_loopback")
         self.assertEqual(FakeDaemon.seen, [])
 
-
 class DualRoleTest(CliCase):
     """AGM 雙角色（SPEC §18.15）：CLI 知道自己是哪個角色，身份靠 pane 的 bot token，不靠字串。"""
 
@@ -2397,13 +2283,11 @@ class DualRoleTest(CliCase):
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
         self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-resp", "hook-secret"))
         self.assertIsNone(seen["token"], "a bot request must not also carry the shared User token")
-        # 同一支 CLI 在別顆 bot 的 pane 裡跑：改用那顆 bot 自己的 proof，不能借 AGM 的身份。
         os.environ["AM_BOT_ID"], os.environ["AM_BOT_TOKEN"] = "bot-worker", "worker-secret"
         self.ok("ack", "e1")
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
         self.assertEqual((seen["bot_id"], seen["bot_token"]), ("bot-worker", "worker-secret"))
         self.assertIsNone(seen["token"], "a Bot principal must never carry the shared User token")
-        # A mismatched token remains a Bot request and must fail at the daemon; it is never retried as User.
         os.environ["AM_BOT_TOKEN"] = "hook-secret"
         self.ok("ack", "e1")
         seen = self.last("POST", "/api/supervisor/inbox/e1/ack")
@@ -2464,7 +2348,6 @@ class DualRoleTest(CliCase):
         self.assertEqual(self.last("PUT", "/api/supervisor/responder/persona")["body"], {"text": "你是 AGM 的協調者"})
         self.assertEqual(self.bad("persona", "adopt-embedded", "--role", "responder")["error"], "bad_args")
 
-
 class ServicePrincipalClientTest(CliCase):
     def setUp(self):
         super().setUp()
@@ -2502,7 +2385,6 @@ class ServicePrincipalClientTest(CliCase):
         self.assertEqual(err["error"], "bad_service_auth")
         self.assertEqual(FakeDaemon.seen, [], "an exposed service-token directory must fail before sending any request")
 
-
 class RemovedMissionCommandTest(CliCase):
     def test_removed_command_and_assign_flags_are_rejected(self):
         for argv in (("mission", "list"),
@@ -2510,7 +2392,6 @@ class RemovedMissionCommandTest(CliCase):
                      ("assign", "--bot", "b1", "--text", "x", "--request-id", "r", "--role", "executor")):
             self.assertEqual(self.bad(*argv)["error"], "bad_args")
         self.assertEqual(FakeDaemon.seen, [])
-
 
 class HelpTest(unittest.TestCase):
     def test_help_mentions_the_no_retry_rule(self):
@@ -2533,7 +2414,6 @@ class HelpTest(unittest.TestCase):
         code, root_help, err = CliCase().run_cli("--help")
         self.assertEqual(code, 0, err)
         self.assertIn("自行決定 kind／model／effort", root_help)
-
 
 class QuotaCommandTest(CliCase):
     def test_plain_quota_only_reads(self):
@@ -2585,7 +2465,6 @@ class QuotaCommandTest(CliCase):
         self.assertEqual(err["error"], "bad_args")
         self.assertFalse([r for r in FakeDaemon.seen if r["path"] != "/api/session"], "用法錯誤不該打任何 API")
 
-
 class OpsSyncTest(CliCase):
     """issue #418：已安裝的 ops 腳本跟 repo 比對。真的 git repo，安裝目錄就是 AGM_RUNTIME_DIR。"""
 
@@ -2605,14 +2484,10 @@ class OpsSyncTest(CliCase):
 
     def setUp(self):
         super().setUp()
-        # `ops_sync_report` 會掃 `~/Library/LaunchAgents` 找沒有版控的 `com.agm.*`（issue #487）。
-        # 每個測試都先指到自己的空目錄：不指的話會讀到這台機器真的 plist，測試結果跟著機器跑。
         self.agents = Path(self.dir.name) / "LaunchAgents"
         self.agents.mkdir(parents=True, exist_ok=True)
         os.environ["AGM_LAUNCHAGENTS_DIR"] = str(self.agents)
         self.addCleanup(os.environ.pop, "AGM_LAUNCHAGENTS_DIR", None)
-        # Linux 那一邊（issue #677）同理：systemd user 目錄也指到暫存目錄，平台預設 darwin——
-        # 既有的 plist 測試寫的是 macOS 的行為，不能因為換到 Linux 機器跑就變成「plist 列被略過」。
         self.units = Path(self.dir.name) / "systemd-user"
         self.units.mkdir(parents=True, exist_ok=True)
         for var, val in (("AGM_SYSTEMD_USER_DIR", str(self.units)), ("AGM_OPS_PLATFORM", "darwin")):
@@ -2688,12 +2563,12 @@ class OpsSyncTest(CliCase):
         })
 
     def test_each_kind_of_gap_is_reported_separately_and_exits_nonzero(self):
-        self.install("bin/a.sh", "a v1\n")            # 落後兩個 commit
-        self.install("bin/b.sh", "b 有人直接改了\n")    # repo 任何一版都不是
-        self.install("bin/c.sh", "c v1\n")            # 最新
-        self.install("bin/agm", "cli")                 # daemon 部署的，不算多出來
-        self.install("bin/a.sh.bak-20260920", "old")   # 備份不算
-        self.install("bin/dev-server-kick.ts", "x")    # 沒有版控
+        self.install("bin/a.sh", "a v1\n")
+        self.install("bin/b.sh", "b 有人直接改了\n")
+        self.install("bin/c.sh", "c v1\n")
+        self.install("bin/agm", "cli")
+        self.install("bin/a.sh.bak-20260920", "old")
+        self.install("bin/dev-server-kick.ts", "x")
         code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
         self.assertEqual(code, 1, err)
         r = json.loads(out)
@@ -2705,13 +2580,11 @@ class OpsSyncTest(CliCase):
         [behind] = r["behind"]
         self.assertEqual((behind["target"], behind["behind"]), ("bin/a.sh", 2))
         self.assertEqual([c.split(" ", 1)[1] for c in behind["commits"]], ["a 改第三版", "a 改第二版"])
-        # 這支現在多問一件**唯讀**的事：已安裝的 bin/agm 跟不跟得上（issue #532）。除此之外不碰 API。
         self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"], "沒帶 --alert 不寫任何東西")
         self.assertEqual(
             {x["path"] for x in FakeDaemon.seen if x["path"] != "/api/session"},
             {"/api/supervisor/cli"},
         )
-        # 只讀：安裝檔一個字都沒動。
         self.assertEqual((Path(self.dir.name) / "bin/b.sh").read_text(encoding="utf-8"), "b 有人直接改了\n")
 
     def test_a_stale_installed_cli_alone_turns_the_check_red(self):
@@ -2733,10 +2606,8 @@ class OpsSyncTest(CliCase):
         self.assertFalse(r["in_sync"])
         self.assertEqual(r["cli"]["state"], "drift")
         self.assertEqual([x["role"] for x in r["cli"]["stale_roles"]], ["patrol"])
-        # 沒給 --refresh-cli 就不會去換（唯讀）。
         self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"])
 
-        # 給了才換，而且換完重問一次。
         FakeDaemon.routes["POST /api/supervisor/cli"] = (200, {"embedded_hash": "aaaaaaaaaaaa", "roles": []})
         FakeDaemon.seen = []
         FakeDaemon.routes["GET /api/supervisor/cli"] = (200, {
@@ -2746,7 +2617,6 @@ class OpsSyncTest(CliCase):
         code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo), "--refresh-cli")
         self.assertEqual(code, 0, out)
 
-    # ── launchd plist（issue #487）────────────────────────────────────────────
     PLIST = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
@@ -2808,7 +2678,6 @@ class OpsSyncTest(CliCase):
         self.with_plists()
         (self.agents / "com.agm.x.plist").write_text(
             self.PLIST.format(
-                # 故意打亂順序，而且多一個只有安裝端才有的 EnvironmentVariables。
                 "<key>StartInterval</key><integer>1800</integer>"
                 "<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict>"
                 "<key>StandardOutPath</key><string>/tmp/x.log</string>"
@@ -2923,7 +2792,6 @@ class OpsSyncTest(CliCase):
         self.install("t.md", "task\n")
         r = self.ok("ops-sync", "--check", "--repo", str(self.repo), "--alert")
         self.assertTrue(r["in_sync"])
-        # 這支現在多問一件**唯讀**的事：已安裝的 bin/agm 跟不跟得上（issue #532）。除此之外不碰 API。
         self.assertFalse([x for x in FakeDaemon.seen if x["method"] != "GET"], "一致就不喊人")
         self.assertEqual(
             {x["path"] for x in FakeDaemon.seen if x["path"] != "/api/session"},
@@ -2944,7 +2812,6 @@ class OpsSyncTest(CliCase):
                 source = line.split()[0]
                 self.assertTrue((repo / source).is_file(), f"對照表指到不存在的來源：{source}")
 
-    # ── systemd user unit（issue #677，Linux 主機）──────────────────────────────
     SERVICE = (
         "# 註解不算語意\n[Unit]\nDescription=x\n\n[Service]\nType=oneshot\n"
         "Environment=PATH=/opt/repo\nOOMPolicy=continue\nExecStart=/bin/bash %h/AGM/bin/x.sh\n"
@@ -3061,7 +2928,6 @@ class OpsSyncTest(CliCase):
         self.with_units()
         old_service = self.SERVICE.replace("Environment=PATH=/opt/repo\n", "")
         old_plist = self.plist("com.agm.x", 900)
-        # 歷史：unit 先沒有 Environment、plist 先是 900 秒；之後才改成現在的樣子。
         self.put("scripts/ops/systemd/com.agm.x.service", old_service)
         self.put("scripts/ops/launchd/com.agm.x.plist", old_plist)
         self.git("commit", "-qam", "unit/plist 舊版")
@@ -3079,13 +2945,11 @@ class OpsSyncTest(CliCase):
         self.assertTrue(behind["installed_commit"])
         self.assertFalse(r["in_sync"])
 
-        # 手改過的（不是 repo 任何一版）仍然是 drift，跟 behind 分得開。
         (self.units / "com.agm.x.service").write_text(old_service.replace("Type=oneshot", "Type=simple"), encoding="utf-8")
         r = self.report()
         self.assertEqual([x["target"] for x in r["drift"]], ["systemd/com.agm.x.service"])
         self.assertEqual(r["behind"], [])
 
-        # plist 同理（macOS）。
         os.environ["AGM_OPS_PLATFORM"] = "darwin"
         (self.agents / "com.agm.x.plist").write_text(old_plist, encoding="utf-8")
         r = self.report()
@@ -3211,7 +3075,6 @@ class OpsSyncTest(CliCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn("bad_manifest", err)
 
-
 class SystemdParityTest(unittest.TestCase):
     """issue #677：每支 launchd job 都有 systemd .service＋.timer；GUI 工作可用 Linux 專用 worker。
 
@@ -3221,7 +3084,6 @@ class SystemdParityTest(unittest.TestCase):
     """
 
     REPO = Path(__file__).resolve().parent.parent
-    #: Linux 與 macOS 的工作內容不同，但排程仍成對；GUI child 留在 macOS。
     LINUX_EXEC = {
         "browser-gc": ["/usr/bin/python3", "%h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py"],
     }
@@ -3229,13 +3091,7 @@ class SystemdParityTest(unittest.TestCase):
         "browser-gc": ("scripts/ops/browser-gc-kick.sh", "scripts/ops/browser-gc-task.md",
                        "scripts/ops/launchd/com.agm.browser-gc.plist"),
     }
-    #: 只有 systemd 需要講的屬性。dev-server 的 kick 用 detached 拉起 vite：launchd 看程序群，脫離了就活著；
-    #: systemd 看 cgroup，預設 KillMode=control-group 會在 kick 一結束就把 vite 一起收掉。
     SYSTEMD_ONLY = {"dev-server": {"Service.KillMode": ["process"]}}
-    #: 只有 unit 帶的環境變數。Linux 主機只跑 daemon 用的 `agents-manager` session，沒有 default server；
-    #: 排程沒有 pane 環境，daemon-swap 的 `herdr pane list` 不指定 session 會回 server_not_running。
-    #: macOS 使用者自己的 default session 一直開著，plist 不需要。
-    #: browser-gc 的 Linux worker 尾端會跑 pane-gc.sh（`herdr pane list`），同樣需要指到那個 session。
     SYSTEMD_ONLY_ENV = {"daemon-update": {"HERDR_SESSION"}, "browser-gc": {"HERDR_SESSION"}}
 
     @staticmethod
@@ -3288,7 +3144,6 @@ class SystemdParityTest(unittest.TestCase):
                 if name in self.LINUX_EXEC:
                     self.assertEqual(got, self.LINUX_EXEC[name])
                 else:
-                    # 直譯器在兩個平台的位置不同（Homebrew 的 bun vs ~/.bun/bin），比名字；其餘逐字。
                     self.assertEqual(Path(got[0]).name, Path(want[0]).name)
                     self.assertEqual(got[1:], want[1:])
                 self.assertEqual(tmr["Timer.OnUnitActiveSec"], [f"{pl['StartInterval']}s"])
@@ -3297,7 +3152,6 @@ class SystemdParityTest(unittest.TestCase):
                 log = self.home_relative(pl["StandardOutPath"]).replace(".launchd.log", ".systemd.log")
                 self.assertEqual(svc["Service.StandardOutput"], [f"append:{log}"])
                 self.assertEqual(svc["Service.StandardError"], [f"append:{log}"])
-                # 值被 `_unit_semantics` 忽略了，這裡直接讀原文比變數名。
                 raw = (self.REPO / f"scripts/ops/systemd/com.agm.{name}.service").read_text(encoding="utf-8")
                 env = sorted(m.split("=", 1)[0] for m in re.findall(r"^Environment=(\S+)", raw, re.M))
                 extra = self.SYSTEMD_ONLY_ENV.get(name, set())
@@ -3335,13 +3189,6 @@ class SystemdParityTest(unittest.TestCase):
                 with self.subTest(src=src):
                     self.assertEqual(rows.get(src), "darwin")
 
-
-# ------------------------------------------------------------- issue 認領（#425）
-
-# 假 gh：`issue view` 吐 $GH_STATE/issue-<n>.json，其餘子命令只記進 $GH_STATE/calls.log。
-# GH_FAIL=<子命令> 讓那一個子命令失敗；GH_NO_LABEL=1 模擬 label 還不存在（`issue edit --add-label` 先失敗）。
-# GH_INJECT_* 模擬 claim/release 的留言與 label API 之間有另一個操作插隊。
-# 真的 gh 不可達：PATH 只留這個目錄與 /usr/bin:/bin，而且這支 stub 不認得的子命令一律 exit 2。
 FAKE_GH = r"""#!/usr/bin/env python3
 import datetime, json, os, re, sys
 state = os.environ["GH_STATE"]
@@ -3471,12 +3318,10 @@ else:
     sys.exit(2)
 """
 
-
 def _iso(delta_secs: float) -> str:
     import datetime
     t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delta_secs)
     return t.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
 
 class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
@@ -3486,7 +3331,6 @@ class IssueClaimTest(unittest.TestCase):
                 "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE", "AM_DATA_DIR", "HOME", "AGM_RUNTIME_DIR")
 
     def setUp(self):
-        # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
         saved = {k: os.environ.get(k) for k in self.ENV_KEYS}
         self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v) for k, v in saved.items()])
         self.dir = tempfile.TemporaryDirectory()
@@ -3499,10 +3343,6 @@ class IssueClaimTest(unittest.TestCase):
         (bindir / "gh").chmod(0o755)
         self.state = Path(self.dir.name) / "state"
         self.state.mkdir()
-        # 真的 gh 不可達：PATH 只有假的那一個目錄加上系統工具。
-        # canary 的護欄（`check.sh ops` arm 起來的那個）要留在最前面：python 的 subprocess 走
-        # execvp，不經過 shell 的指令查找，所以三層防護只剩 PATH 這一層；整個蓋掉就等於在沒有
-        # 保護的情況下跑（scripts/ops/destructive-canary.sh）。沒 arm 時這個變數是空的，照舊。
         guard = os.environ.get("AM_CANARY_DIR", "")
         os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
@@ -3511,10 +3351,7 @@ class IssueClaimTest(unittest.TestCase):
                   "AM_BOT_ID", "AM_BOT_TOKEN", "AM_HOOK_TOKEN", "AM_KIND", "AM_INSTANCE", "AM_DATA_DIR"):
             os.environ.pop(k, None)
         os.environ["HOME"] = str(self.home)
-        # runtime.json 故意不存在：issue 這條路不該去讀它。
         os.environ["AGM_RUNTIME_DIR"] = str(Path(self.dir.name) / "no-such-runtime")
-
-    # --- 造題 ---
 
     def issue(self, number: int, *, labels=(), comments=(), updated: str | None = None, title="某張票"):
         comments = [dict(c, id=c.get("id", 100 + i), created_at=c.get("created_at", c.get("createdAt")))
@@ -3568,8 +3405,6 @@ class IssueClaimTest(unittest.TestCase):
                 code = e.code if isinstance(e.code, int) else 2
         return code, out.getvalue(), err.getvalue()
 
-    # --- 測試 ---
-
     def test_claim_labels_and_comments_with_worktree_and_branch(self):
         self.issue(425)
         code, out, err = self.run_cli("issue", "claim", "425", "--child", "i425",
@@ -3609,10 +3444,8 @@ class IssueClaimTest(unittest.TestCase):
         stamp = _iso(-10)
         outsider = lambda i, body, who="NONE": {"id": i, "created_at": stamp, "author_association": who, "body": body}
         insider = lambda i, body, who="COLLABORATOR": {"id": i, "created_at": _iso(-60), "author_association": who, "body": body}
-        # 只有陌生人的標記：沒人認領。
         self.assertIsNone(agm.current_claim({"comments": [outsider(1, '<!-- agm:issue-claim {"bot":"evil"} -->')], "updatedAt": stamp}))
         self.assertIsNone(agm.current_claim({"comments": [outsider(1, '<!-- agm:issue-claim {"bot":"evil"} -->', "CONTRIBUTOR")], "updatedAt": stamp}))
-        # 自己人認領之後，陌生人貼交回／搶認領都沒用。
         comments = [
             insider(10, '<!-- agm:issue-claim {"bot":"real"} -->', "OWNER"),
             outsider(11, '<!-- agm:issue-release {"bot":"real"} -->'),
@@ -3620,7 +3453,6 @@ class IssueClaimTest(unittest.TestCase):
         ]
         claim = agm.current_claim({"comments": comments, "updatedAt": stamp})
         self.assertEqual(claim["bot"], "real")
-        # MEMBER／COLLABORATOR／OWNER 都算自己人；沒帶欄位的舊格式照舊採信。
         for who in ("MEMBER", "COLLABORATOR", "OWNER"):
             self.assertEqual(agm.current_claim({"comments": [insider(1, '<!-- agm:issue-claim {"bot":"x"} -->', who)], "updatedAt": stamp})["bot"], "x")
 
@@ -3693,7 +3525,6 @@ class IssueClaimTest(unittest.TestCase):
         return list((root / "bots" / bot_id / "hook-spool.d").glob("*.json"))
 
     def test_a_successful_claim_asks_the_collision_check_with_the_claim_facts(self):
-        # #1330：認領成功後附帶問一次撞題；請求本文帶票號、題目、child、分支。
         self._hint_daemon({"POST /api/judge/collision-check": (202, {"queued": True})})
         self.issue(1330, title="撞題提示要接上認領")
         code, out, err = self.run_cli("issue", "claim", "1330", "--bot", "newbie", "--child", "newbie", "--branch", "fix/newbie-g1330")
@@ -3708,7 +3539,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(self._claim_spools(), [], "202 已確認收件，不再寫一份 spool")
 
     def test_a_claim_with_a_child_bot_id_sends_it_to_the_collision_check_and_the_spool(self):
-        # 名稱不當參照：child 的名字只做顯示，撞題檢查靠 bot ID。
         self._hint_daemon({"POST /api/judge/collision-check": (202, {"queued": True})})
         self.issue(1331, title="child 用 ID 認")
         code, out, err = self.run_cli("issue", "claim", "1331", "--bot", "newbie", "--child", "newbie", "--child-bot-id", "01CHILDBOTID")
@@ -3731,7 +3561,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertRegex(payload["claim_id"], r"^[0-9a-f]{32}$")
 
     def test_a_failing_collision_check_never_changes_the_claim_result(self):
-        # #1330：舊 daemon 沒有這條路由（404）、或收了請求不回應：認領照樣成功、exit 0，撞題那一步什麼都不影響。
         self._hint_daemon()
         os.environ["AM_BOT_ID"] = "remote-bot"
         os.environ["AM_KIND"] = "codex"
@@ -3844,8 +3673,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(len(list(spool_dir.glob("*.json"))), 1, "remote instance root must match daemon spool scan")
 
     def test_a_remote_claim_follows_the_remote_daemon_server_data_dir(self):
-        # #1497 的殘留缺口：遠端 bot 的 env 沒有 AM_DATA_DIR，遠端 daemon 若在 `[server] data_dir` 指到別處，
-        # spool 要跟著寫到那裡（同 daemon `startup::data_dir`），不是寫死家目錄預設路徑。
         custom = Path(self.dir.name) / "remote-custom-data"
         cfg = self.home / ".config" / "agents-manager"
         cfg.mkdir(parents=True, exist_ok=True)
@@ -3896,7 +3723,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(agm.current_claim(json.loads((self.state / "issue-413.json").read_text()))["bot"], "vvyyg1")
 
     def test_a_stale_claim_with_recent_activity_is_still_held(self):
-        # 認領留言是三天前，但當事人在一小時前有 touch/progress：那顆 bot 還在做。
         self.issue(413, labels=["wip"], comments=[
             self.claim_comment("kd61te", age_secs=72 * 3600),
             self.progress_comment("kd61te", age_secs=3600),
@@ -3907,7 +3733,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertIn("對方已 1 小時沒 touch；超過 24 小時才能接手", json.loads(err)["message"])
 
     def test_issue_updated_at_or_other_comments_do_not_refresh_stale(self):
-        # 認領留言是三天前，issue.updatedAt 是剛剛，他人留了一般留言或甚至偽造 progress：舊認領依然過期可接手
         self.issue(413, labels=["wip"], comments=[
             self.claim_comment("kd61te", age_secs=72 * 3600),
             {"createdAt": _iso(-600), "body": "接手說明：我來做這張票"},
@@ -3919,7 +3744,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(got["took_over_stale_claim_from"], "kd61te")
 
     def test_touch_updates_progress_comment_via_patch_or_creates_new(self):
-        # 先認領
         self.issue(500, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=3600, claim_id="c-500")])
         code, out, err = self.run_cli("issue", "touch", "500")
         self.assertEqual(code, 0, err)
@@ -3927,7 +3751,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertTrue(got["touched"])
         self.assertFalse(got["patched"])
 
-        # 第二次 touch 應找到前一次 progress 留言並 PATCH
         code2, out2, err2 = self.run_cli("issue", "touch", "500")
         self.assertEqual(code2, 0, err2)
         got2 = json.loads(out2)
@@ -4085,7 +3908,6 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(got["bot"], "kd61te")
 
     def test_a_closed_issue_is_not_claimed(self):
-        # 派工前才 claim；票關掉之後再貼 wip 只會誤導下一個人。
         self.issue(406)
         self.close(406)
         code, _out, err = self.run_cli("issue", "claim", "406")
@@ -4095,15 +3917,12 @@ class IssueClaimTest(unittest.TestCase):
                          "關掉的票不貼 label、不留言")
 
     def test_release_still_works_on_a_closed_issue(self):
-        # 關票之後清掉留著的 wip 是正常收尾，不能被上面那道擋住。
         self.issue(406, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
         self.close(406)
         code, out, err = self.run_cli("issue", "release", "406")
         self.assertEqual(code, 0, err)
         self.assertTrue(json.loads(out)["released"])
         self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
-
-    # --- 對抗式審查（認領協定） ---
 
     def test_a_quoted_marker_in_a_reply_is_not_a_claim_or_a_release(self):
         """GitHub 的「引用回覆」會把原留言的原始 markdown（含 HTML 註解）貼進新留言。引用別人的交回標記不能把那顆的認領清掉，
@@ -4182,10 +4001,8 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
 
     def test_claim_never_touches_the_daemon_runtime(self):
-        # AGM_RUNTIME_DIR 指向不存在的目錄：真的去讀 runtime.json 就會是 no_runtime／exit 2。
         self.issue(425)
         self.assertEqual(self.run_cli("issue", "claim", "425")[0], 0)
-
 
 class AckPathTest(unittest.TestCase):
     """`agm ack <id>` 的 id 是一段路徑：不能讓 `/`、`?`、`#`、`..` 改變它打到哪一個端點。"""
@@ -4215,7 +4032,6 @@ class AckPathTest(unittest.TestCase):
 
     def test_a_real_ulid_is_unchanged(self):
         self.assertEqual(self.ack("01M3YJ0S4V0Y9004VFV0YJ386C"), "/api/supervisor/inbox/01M3YJ0S4V0Y9004VFV0YJ386C/ack")
-
 
 class CliHardeningTest(CliCase):
     """審查補的：錯誤輸出的形狀、參數驗證、逾時、非 JSON 回應、Python 3.9 相容。"""
@@ -4367,7 +4183,6 @@ class CliHardeningTest(CliCase):
             self.ok("health")
         self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, 7.0, 30.0, agm.DEFAULT_TIMEOUT], seen)
 
-
 class PythonThreeNineTest(unittest.TestCase):
     """mac_builder 只有 Python 3.9：agm.py 不能用 3.10+ 的語法或 API（`match`、執行期的 `X | Y`、`pairwise`…）。"""
 
@@ -4380,7 +4195,6 @@ class PythonThreeNineTest(unittest.TestCase):
     def test_no_runtime_union_syntax_or_3_10_apis(self):
         import ast
         tree = ast.parse(self.SRC)
-        # 註記裡的 `str | None` 靠 `from __future__ import annotations` 不會被求值，所以只看註記**以外**的地方。
         annotation_nodes: set = set()
         for node in ast.walk(tree):
             anns = []
@@ -4410,7 +4224,6 @@ class PythonThreeNineTest(unittest.TestCase):
                 problems.append(f"第 {node.lineno} 行：tomllib（3.11+）")
         self.assertEqual(problems, [])
 
-
 class IssueCommentPagesTest(unittest.TestCase):
     """`gh api --paginate` 多頁時，每一頁各自輸出一個 JSON 陣列（`[…]\\n[…]`），不是合成一個陣列。
     超過 100 則留言的票（最需要認領判斷的那種）要能讀完所有頁，不能因為 json 解不開就認領失敗。"""
@@ -4432,7 +4245,6 @@ class IssueCommentPagesTest(unittest.TestCase):
             with self.assertRaises(agm.AgmError) as cm:
                 agm.all_comments(self._Args(), 5)
         self.assertEqual(cm.exception.kind, "gh_failed")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

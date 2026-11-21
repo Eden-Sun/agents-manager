@@ -24,10 +24,8 @@ import subprocess
 import sys
 import time
 
-
 def git(repo: str, *args: str, input_bytes: bytes | None = None) -> bytes:
     return subprocess.run(['git', '-C', repo, *args], input=input_bytes, capture_output=True, check=True).stdout
-
 
 def head_blobs(repo: str) -> dict[str, str]:
     """path → blob sha（HEAD 的 tracked 檔）。"""
@@ -41,7 +39,6 @@ def head_blobs(repo: str) -> dict[str, str]:
         if parts[1] == b'blob':
             res[path.decode()] = parts[2].decode()
     return res
-
 
 def blob_hashes(repo: str, shas: list[str]) -> dict[str, str]:
     """blob sha → sha256(內容)，一次 cat-file --batch 讀完。"""
@@ -57,7 +54,6 @@ def blob_hashes(repo: str, shas: list[str]) -> dict[str, str]:
         res[sha] = hashlib.sha256(data).hexdigest()
         pos = nl + 1 + size + 1
     return res
-
 
 def unindexed_commits(repo: str, stale: list[str], idx: dict[str, str]) -> dict[str, int]:
     """過期檔各自：索引版本之後（不含）碰過它的 commit → {sha: committer 時間}。
@@ -91,7 +87,6 @@ def unindexed_commits(repo: str, stale: list[str], idx: dict[str, str]) -> dict[
         for sha, ct in rows[:n]:
             commits[sha] = ct
     return commits
-
 
 def check(repo: str, max_commits: int, max_minutes: float) -> dict:
     db = os.path.join(repo, '.codegraph', 'codegraph.db')
@@ -132,7 +127,6 @@ def check(repo: str, max_commits: int, max_minutes: float) -> dict:
                 if h == hashlib.sha256(f.read()).hexdigest():
                     continue
         stale.append(p)
-    # 索引有、HEAD 沒有、主樹也沒有的檔（已刪）才算過期；主樹還在的是未追蹤檔，索引照主樹走，不算。
     stale += [p for p in idx if p not in scope and p not in blobs and not os.path.exists(os.path.join(repo, p))]
     res['stale'] = len(stale)
     if not stale:
@@ -145,7 +139,6 @@ def check(repo: str, max_commits: int, max_minutes: float) -> dict:
     if res['lag_commits'] > max_commits or res['lag_minutes'] > max_minutes:
         res['status'] = 'lag'
     return res
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -161,7 +154,6 @@ def main() -> int:
     print(json.dumps(r, ensure_ascii=False) if a.json else
           ' '.join(f'{k}={v}' for k, v in r.items()))
     return {'ok': 0, 'lag': 1, 'no_index': 2, 'error': 2}[r['status']]
-
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -1,5 +1,4 @@
 #!/bin/sh
-# Development Cargo entrypoint. Re-enter the managed Cargo shim so Blaze keeps its build slot.
 set -eu
 engine=${AGM_RUST_ENGINE:-blaze}
 case "$engine" in auto|blaze|cargo) ;; *) echo "project-cargo: AGM_RUST_ENGINE must be auto, blaze or cargo" >&2; exit 2 ;; esac
@@ -8,8 +7,6 @@ export AGM_RUST_DISPATCHED
 sub=${1:-}
 use_blaze=0
 case "$sub" in build|run) use_blaze=1 ;; esac
-# Only the default development profiles use the JIT. Compiler tools, explicit
-# toolchains, cross targets and release/custom profiles retain their original Cargo semantics.
 for arg in "$@"; do
     [ "$arg" != -- ] || break
     case "$arg" in --release|-r|--profile|--profile=*|--target|--target=*|--message-format|--message-format=*|-Z*) use_blaze=0 ;; esac
@@ -23,17 +20,13 @@ case "$host_os:$(uname -m)" in Linux:x86_64|Linux:aarch64|Darwin:arm64) ;; *)
     exec cargo "$@"
     ;;
 esac
-# Append the private installation: never put a second Cargo ahead of the managed shim.
 blaze_bin=${AGM_BLAZE_BIN:-${HOME}/.local/share/agents-manager/blaze/bin}
 PATH="${PATH}:${blaze_bin}"
 export PATH
-# The published engine uses Rust 1.99.0's ABI. Never splice its code into another rustc's output.
 if ! command -v rustup >/dev/null 2>&1; then
     PATH="${PATH}:${HOME}/.cargo/bin"
     export PATH
 fi
-# Resolve the fixed toolchain without starting rustc for every warm build. `which`
-# can return a missing path, so also require a regular, executable compiler file.
 if ! blaze_rustc=$(rustup which --toolchain 1.99.0 rustc 2>/dev/null) || [ ! -f "$blaze_rustc" ] || [ ! -x "$blaze_rustc" ]; then
     if [ "$engine" = blaze ]; then echo "project-cargo: Rust 1.99.0 is required; run scripts/install-blaze.sh" >&2; exit 127; fi
     echo "project-cargo: Blaze needs Rust 1.99.0; using Cargo (install: scripts/install-blaze.sh)" >&2
@@ -46,8 +39,6 @@ else
     echo "project-cargo: Blaze is not installed; using Cargo (install: scripts/install-blaze.sh)" >&2
     exec cargo "$@"
 fi
-# The pre-rename nightly ignores MEMORY_MAX. Only a capability-checked installation
-# may start a daemon; unsupported tools must never silently use an unbounded budget.
 plugin_path=$(command -v "cargo-$plugin")
 engine_path="$(dirname "$plugin_path")/ra-jit"
 capability="$(dirname "$plugin_path")/.agm-blaze-memory-v1"
@@ -58,11 +49,6 @@ if [ ! -f "$capability" ] || [ ! -x "$engine_path" ] || [ "$engine_path" -nt "$c
 fi
 RUSTUP_TOOLCHAIN=1.99.0
 export RUSTUP_TOOLCHAIN
-# A project-owned namespace prevents an existing, unbounded user daemon from
-# silently ignoring these startup settings. All project worktrees share it.
-# c8's saved dep-info omits modules: a newly loaded worker can mistake old rustc
-# code for current source. Build a native baseline before patching (#1997).
-# This switch is absent from upstream's worker identity; isolate old workers too.
 RA_JIT_HOME=${AGM_BLAZE_RUNTIME_HOME:-${HOME}/.cache/agents-manager/blaze}/native-base-v1
 BLAZE_HOME=$RA_JIT_HOME
 RA_JIT_RUSTC_BASE=0
@@ -73,5 +59,4 @@ RA_JIT_IDLE_SECS=${AGM_BLAZE_IDLE_SECS:-600}
 BLAZE_MEMORY_MAX=$RA_JIT_MEMORY_MAX
 BLAZE_IDLE_SECS=$RA_JIT_IDLE_SECS
 export RA_JIT_HOME RA_JIT_MEMORY_MAX RA_JIT_IDLE_SECS BLAZE_MEMORY_MAX BLAZE_IDLE_SECS
-# No retry on failure: a compiler error or failed test must remain a failure.
 exec cargo "$plugin" "$@"

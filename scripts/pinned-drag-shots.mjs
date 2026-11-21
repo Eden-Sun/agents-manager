@@ -1,5 +1,3 @@
-// 主力那列拖曳的截圖（#344）：mock 模式的 vite（VITE_MOCK=1 npx vite --port 5199）＋headless Chrome，用真的滑鼠事件拖。
-// `OUT=docs/screenshots/pinned-drag node scripts/pinned-drag-shots.mjs`。暫存 profile 用完就刪。
 import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -30,7 +28,6 @@ try {
   const first = before[0], last = before[before.length - 1]
   const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra })
   await mouse('mousePressed', first.x + first.w / 2, first.y + first.h / 2)
-  // 放開點故意不對準：落在最後一顆左邊約 18px（前一顆的右緣附近），仍要鎖定「最後一顆之前」這個落點（命中區放寬）。
   const tx = last.x - 18, ty = last.y + last.h / 2 + 14
   for (let i = 1; i <= 12; i++) { await mouse('mouseMoved', first.x + first.w / 2 + ((tx - first.x - first.w / 2) * i) / 12, ty); await sleep(16) }
   await sleep(250)
@@ -41,7 +38,6 @@ try {
   await sleep(500)
   await shot('4-after', bar)
   console.log('after', (await chips()).map((c) => c.n).join(' | '))
-  // 減少動態：不位移、不縮放，落點只有主色線。
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] })
   const now = await chips(); const f2 = now[0], l2 = now[now.length - 1]
   await mouse('mousePressed', f2.x + f2.w / 2, f2.y + f2.h / 2)

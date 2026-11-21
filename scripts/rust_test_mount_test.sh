@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
-# 每一個 Rust 測試檔都要有人把它編進去：crate 拆分時 6 個測試檔（150 條）與 5 個 harness 檔沒有掛回任何模組，
-# 從 2026-10-07 起沒編過，整樹 CI 照樣綠（#1334、#1335、#1336）。這支只做純文字比對（git 追蹤的檔），不編譯。
-# 真樹檢查與假樹自我檢查都在這支裡：check.sh ops 的 scripts/*_test.sh 迴圈會撈到它。
-#
-#   scripts/rust_test_mount_test.sh                      # 檢查 repo（或 AM_TEST_MOUNT_ROOT 指的樹）＋自我檢查
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 已知未掛載清單。目前測試檔都已從 crate 根可達；新未掛載測試直接失敗。
 KNOWN=(
 )
-# 已知尚未在 daemon/src/runners/am_base_tests.rs 宣告的 harness 檔。
 HARNESS_DIR=daemon/src/runners/am_base_tests
 HARNESS_ROOT=daemon/src/runners/am_base_tests.rs
 KNOWN_HARNESS=(
 )
 
-# 候選：daemon/src 與 crates/*/src 底下檔名是 tests.rs、tests_*.rs、*_tests.rs、*.daemon-tests-*.rs 的檔。
 is_candidate() {
     case "$1" in
         tests.rs | tests_*.rs | *_tests.rs | *.daemon-tests-*.rs) return 0 ;;
@@ -25,7 +17,7 @@ is_candidate() {
     return 1
 }
 
-in_list() {  # <needle> <item>…
+in_list() {
     local needle="$1" item
     shift
     for item in "$@"; do
@@ -34,7 +26,6 @@ in_list() {  # <needle> <item>…
     return 1
 }
 
-# normpath <路徑>：去掉 . 與 ..（純字串，不碰檔案系統），輸出 repo 相對路徑。
 normpath() {
     local -a parts=()
     local IFS=/ p q out=""
@@ -49,14 +40,10 @@ normpath() {
     printf '%s' "$out"
 }
 
-# check_tree <root>：印 FAIL 行到 stdout，回傳失敗數。
 check_tree() {
     local root="$1" fail=0 tracked f base mounted work edges roots reach
     tracked="$(git -C "$root" ls-files -- '*.rs')"
 
-    # 掛載圖（#1423）：從 crate 根（lib.rs／main.rs／bin／tests／build.rs）沿 `mod X;` 與 `#[path]` 走；走得到的檔才算掛上。
-    # `mod X;` 的子檔＝宣告檔所在目錄下的 X.rs 或 X/mod.rs（宣告檔是 mod.rs／lib.rs／main.rs 時目錄就是它的目錄，否則是 <檔名去掉 .rs>/）。
-    # `#[path = "v"]` 依**宣告檔所在目錄**解析成 repo 內路徑，精確比對（不做結尾比對）。
     work="$(mktemp -d "${TMPDIR:-/tmp}/rust-test-mount.XXXXXX")"
     edges="$work/edges"
     roots="$work/roots"

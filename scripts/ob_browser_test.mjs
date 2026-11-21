@@ -10,20 +10,15 @@ const pid = '01M1Y7BNVPQHSFAY3KYBR922Z6';
 const key = '1234567890abcdef1234567890abcdef';
 const url = 'https://chatgpt.com/c/project-a';
 const marker = `[OB request=${key}]`;
-// Rows are [role, text, completed?]; completed turns carry copy-turn-action-button.
 const boundTurn = [['user', marker + ' question'], ['assistant', 'BOUND_ANSWER', true],
   ['user', 'unrelated later question'], ['assistant', 'WRONG_LATER_ANSWER', true]];
 const olderHistory = n => Array.from({length: n}, (_, i) => [['user', `old ${i}`], ['assistant', `old answer ${i}`, true]]).flat();
 
-// The mock DOM is stateful and waitForFunction really polls the page condition against it:
-// `rows` is the initial conversation, `afterSend` is appended when send is clicked and
-// `events` ([{at, rows?, stop?}]) change the DOM at a given poll to simulate streaming.
 function run(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ob-browser-test-'));
   try {
     const journal = join(dir, 'journal.json');
     if (options.progress) writeFileSync(journal, JSON.stringify(options.progress));
-    // rotate = 這個 project 已經有一串（`previous_url`），但這一題要開新的一串（`url` 空）。
     const args = {project_id: pid, project_label: 'AM', question: 'review this', request_key: key,
       url: 'url' in options ? options.url : options.newProject || options.rotate ? null : url,
       previous_url: 'previous_url' in options ? options.previous_url : options.rotate ? url : null,
@@ -119,7 +114,6 @@ test('collect only retrieves the bound answer and never sends another question',
   assert.equal(r.journal.answer,'BOUND_ANSWER');
 });
 test('collect after reopening with less rendered history still finds the finished answer', () => {
-  // Sent when 100 assistant turns were rendered; the reopened tab only renders the latest few.
   const r=collect({progress:{phase:'sent',project_id:pid,url,before:100},
     rows:[...olderHistory(8),...boundTurn]});
   assert.equal(r.code,0,r.error);
@@ -187,7 +181,6 @@ test('換一串時重用這個 project 自己的分頁，不是再開一個', ()
   assert.ok(!r.actions.some(a => a[0] === 'new'), '不該再開一個分頁：一個 project 一個分頁');
   assert.deepEqual(r.actions.find(a => a[0] === 'goto'), ['goto', 'https://chatgpt.com/'], '導到新對話');
   assert.equal(r.journal.url, 'https://chatgpt.com/c/new-project', '記下來的是新那一串');
-  // 新的一串要重新自我介紹：不然那串裡沒有任何東西說得出它屬於哪個 project。
   assert.ok(r.actions.some(a => a[0] === 'insert' && a[1].includes(`OB｜AM｜${pid}`)), JSON.stringify(r.actions));
 });
 
@@ -198,7 +191,6 @@ test('沒有舊分頁可重用時才開新分頁', () => {
 });
 
 test('retrying a first question that failed before sending reuses the tab that attempt opened, not a new tab per retry', () => {
-  // 第一次：沒登入、等 #prompt-textarea 逾時。journal 停在 opened，記著開的那個分頁（p3，停在 chatgpt.com 首頁）。
   const r = run({newProject: true, progress: {phase: 'opened', page: 'p3', url: null, project_id: pid}});
   assert.equal(r.code, 0, r.error);
   assert.deepEqual(r.actions[0], ['reuse', 'p3']);

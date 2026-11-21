@@ -26,7 +26,6 @@ C = "01M1Y7BNVP843V9MFEDJ2KW9NR"
 UA = "https://chatgpt.com/c/project-a"
 UB = "https://chatgpt.com/c/project-b"
 
-
 class QueueTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -66,7 +65,6 @@ class QueueTests(unittest.TestCase):
                     for needle in ("a-live-ui-token", "ghp_", "sk-ant", "AKIAIOSFODNN", "8f3c9d2b"):
                         self.assertNotIn(needle, str(caught.exception), "錯誤訊息不能把祕密再回顯一次")
             self.assertEqual(self.s.list(), [], "被擋的題目不能留在佇列")
-            # 一般的技術討論不誤擋：短的 sk-、沒有值的 header 名稱、token 這個字本身。
             ok = self.ask(rid="fine", text="UI token 放 header X-AM-Token，格式像 sk-xxx 嗎？ghp_ 開頭是 GitHub 的前綴。")
             self.assertEqual(ok["status"], "pending")
 
@@ -105,13 +103,12 @@ class QueueTests(unittest.TestCase):
     def test_link_refuses_a_conversation_another_project_already_retired(self):
         ua2 = "https://chatgpt.com/c/project-a2"
         self.s.link(A, "a", UA)
-        # A 輪替到 ua2：UA 退役但仍屬於 A。
         self.s.db.execute("UPDATE conversations SET retired_at=?, retired_why='rotated' WHERE url=?", (time.time(), UA))
         self.s.db.execute("INSERT INTO conversations(project_id,url,started_at) VALUES (?,?,?)", (A, ua2, time.time()))
         self.s.db.execute("UPDATE projects SET url=? WHERE id=?", (ua2, A))
         with self.assertRaisesRegex(OBError, "conversation_already_owned"):
             self.s.link(B, "b", UA)
-        self.assertIsNone(self.s.project(B))          # 整筆回滾，B 沒被建出來
+        self.assertIsNone(self.s.project(B))
         self.assertEqual(self.s.project(A)["url"], ua2)
 
     def test_external_or_malformed_url_is_refused(self):
@@ -169,8 +166,6 @@ class QueueTests(unittest.TestCase):
         self.s.link(B, "b", UB)
         a = self.ask()
         token = self.s.claim()["claim_token"]
-        # 以前這裡漏出 sqlite 的 IntegrityError（靠 projects.url 的 UNIQUE）；現在先查 conversations
-        # 再寫，錯誤跟 `link` 同一個具名的那顆。要守的性質沒變：拒絕並整筆回滾。
         with self.assertRaises(OBError) as caught:
             self.s.finish(a["id"], "answer", UB, token)
         self.assertIn("conversation_already_owned", str(caught.exception))
@@ -186,20 +181,17 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.s.current_conversation(A)["turns"], 1)
         self.assertEqual(self.s.rotate_due(A)[0], False, "才一題不該換")
 
-        # 題數到了：下一單要換串。
         self.s.db.execute("UPDATE conversations SET turns=? WHERE url=?", (Store.ROTATE_TURNS, UA))
         due, why = self.s.rotate_due(A)
         self.assertTrue(due)
         self.assertIn("turns", why)
 
-        # 沒有 rotate 旗標的單仍然不准換對話（別的分頁冒充這個 project）。
         b = self.ask(rid="q2", text="another")
         self.s.claim()
         with self.assertRaises(OBError) as caught:
             self.s.finish(b["id"], "ans", "https://chatgpt.com/c/project-a2", self.s.get(b["id"])["claim_token"])
         self.assertIn("conversation_changed", str(caught.exception))
 
-        # 標了才准，而且舊的那串被收起來、歷史留著。
         self.s.mark_rotate(b["id"])
         self.s.finish(b["id"], "ans", "https://chatgpt.com/c/project-a2", self.s.get(b["id"])["claim_token"])
         self.assertEqual(self.s.project(A)["url"], "https://chatgpt.com/c/project-a2")
@@ -219,7 +211,7 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(self.s.rotate_due(A)[0], "下一題會換")
         self.assertEqual(self.s.current_conversation(A)["url"], UA, "現在還是用舊那串——不預先開一個空對話")
         with self.assertRaises(OBError):
-            self.s.request_rotation(B)  # 還沒有對話的 project
+            self.s.request_rotation(B)
 
     def test_a_conversation_also_rotates_when_it_gets_old(self):
         a = self.ask(rid="q1")
@@ -246,7 +238,6 @@ class QueueTests(unittest.TestCase):
             seen.update(json.loads(kw["stdin"].split("globalThis.CONSULT_ARGS = ", 1)[1].split(";\n", 1)[0]))
             return (0, '{"result":"ok"}', "")
 
-        # 派送前 browser_consult 會查行程表有沒有 ego lite；CI 的 runner 沒有，假 dispatch 就永遠沒被呼叫。
         with patch.object(operator, "ego_lite_running", return_value=True), \
                 patch.object(operator, "run_process", side_effect=fake):
             cfg = dict(ego_binary="/fake/ego")
@@ -267,8 +258,6 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(len(self.s.list()), 1)
 
     def test_recovery_keeps_the_journal_url_of_an_unknown_older_than_the_list_window(self):
-        # recover_under_lock 要替每筆 unknown 保住 journal 裡學到的 url；它不能靠 store.list()（只回最新 100 筆），
-        # 否則 unknown 排到第 101 筆以後時 url 不會被記下來。
         a = self.ask()
         self.s.claim()
         operator.journal_for(self.s, a["id"]).write_text(json.dumps({"phase": "dispatching", "url": UA}))
@@ -298,7 +287,6 @@ class QueueTests(unittest.TestCase):
         ob.resolve_unknown(self.s, a["id"], True)
         self.assertEqual(self.s.get(a["id"])["status"], "pending")
         self.assertEqual(len(list(Path(self.tmp.name).glob('*.resolved-*'))), 1)
-
 
 class OperatorTests(unittest.TestCase):
     setUp = QueueTests.setUp
@@ -374,7 +362,6 @@ class OperatorTests(unittest.TestCase):
             self.assertEqual(self.s.get(job["id"])["status"], "failed")
             with self.assertRaisesRegex(OBError, operator.ATTEMPT_MARK):
                 operator.attempt(self.s, job["id"], self.config(), job["claim_token"])
-            # 第二次 operate（例如同一個 claim 被重複交進來）也不會再叫瀏覽器。
             operator.operate(self.s, job, self.config())
         self.assertEqual(consult_mock.call_count, 1)
 
@@ -410,7 +397,6 @@ class OperatorTests(unittest.TestCase):
             with self.assertRaisesRegex(OBError, operator.BUSY_MARK):
                 operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
             self.assertEqual(self.s.get(job["id"])["status"], "running", "只是等不到鎖，不動這筆的狀態")
-            # 沒有收據、也沒送出：放回佇列重排，不是 failed。
             operator.operate(self.s, job, self.config())
         row = self.s.get(job["id"])
         self.assertEqual(row["status"], "pending")
@@ -424,7 +410,6 @@ class OperatorTests(unittest.TestCase):
         self.s.set_setting("operator", self.config())
         job = self.s.claim()
         self.s.fail(job["id"], "unknown", "可能已送出；用 collect 取回", job["claim_token"])
-        # `ob.cli` 每次自己開一份 Store（就是真的命令列行為），這裡只驗結束碼，不管它留下的連線。
         warnings.simplefilter("ignore", ResourceWarning)
         with exclusive(self.s.root / "browser.lock"), patch.object(operator, "BROWSER_LOCK_WAIT", 0.05), \
                 contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
@@ -432,7 +417,6 @@ class OperatorTests(unittest.TestCase):
         self.assertIn(operator.BUSY_MARK, err.getvalue(), "撞到的要是瀏覽器忙碌，不是別的錯")
         self.assertEqual(code, 1)
         self.assertEqual(out.getvalue().strip(), "")
-        # 被 kick 出來的第二顆 worker 照舊安靜退場（0）。
         with exclusive(self.s.root / "worker.lock"), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(ob.cli(["--data-dir", self.tmp.name, "work", "--once"]), 0)
 
@@ -529,7 +513,6 @@ except subprocess.TimeoutExpired:
             try:
                 out, err = proc.communicate(timeout=8)
             except subprocess.TimeoutExpired:
-                # Isolate and reap any broken implementation's helper tree without endangering the test runner.
                 os.killpg(proc.pid, 9)
                 out, err = proc.communicate(timeout=3)
                 self.fail(f"run_process hung after its timeout; stdout={out!r}, stderr={err!r}")
@@ -602,7 +585,6 @@ except subprocess.TimeoutExpired:
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "unknown")
 
-
 MIGRATE = r"""
 import sys, time
 from ob_store import Store
@@ -611,13 +593,12 @@ time.sleep(max(0, at - time.time()))
 Store(root).db.close()
 """
 
-
 class MigrationTests(unittest.TestCase):
     def test_concurrent_first_runs_upgrade_an_old_database_once(self):
         for _ in range(3):
             with tempfile.TemporaryDirectory() as tmp:
                 db = sqlite3.connect(Path(tmp) / "ob.sqlite3")
-                db.execute("PRAGMA journal_mode=WAL")  # as every existing OB database was created
+                db.execute("PRAGMA journal_mode=WAL")
                 db.executescript("""CREATE TABLE projects (id TEXT PRIMARY KEY, label TEXT NOT NULL, url TEXT UNIQUE);
                     CREATE TABLE requests (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
                         request_id TEXT NOT NULL, question TEXT NOT NULL, source_bot_id TEXT,
@@ -638,9 +619,8 @@ class MigrationTests(unittest.TestCase):
                 self.addCleanup(s.db.close)
                 cols = [r[1] for r in s.db.execute("PRAGMA table_info(requests)")]
                 self.assertEqual(cols.count("claim_token"), 1)
-                self.assertEqual(s.get("r")["status"], "running")  # upgrade alone never touches requests
+                self.assertEqual(s.get("r")["status"], "running")
                 s.db.close()
-
 
 class CLITests(unittest.TestCase):
     def test_configure_preserves_stable_cli_symlinks_across_updates(self):
@@ -667,7 +647,6 @@ class CLITests(unittest.TestCase):
             self.assertFalse(row['operator_configured'])
 
     def test_status_refuses_a_label_as_project_id(self):
-        # label、worktree 名查不到東西時不能回一份看起來合法的空清單：查單的人會以為原單不見了，換 request ID 重送。
         with tempfile.TemporaryDirectory() as tmp:
             for bad in ('agents-manager', '../../oops', A + '-prefix'):
                 out, err = io.StringIO(), io.StringIO()
@@ -688,10 +667,8 @@ class CLITests(unittest.TestCase):
             self.assertIn('requests', json.loads(out.getvalue()))
 
     def test_cli_closes_its_store_so_stderr_stays_json(self):
-        # Python 3.13+ 對沒關的 sqlite 連線在 GC 時往 stderr 印 ResourceWarning；成功與失敗路徑都不能留著連線，
-        # 不然呼叫端解析 JSON 錯誤輸出會被警告字樣打斷（GitHub macOS runner 的 3.15 就是這樣紅的）。
         opened = []
-        class Tracking(ob.Store):  # 子類別：ob.py 會讀 Store.ROTATE_TURNS 這類類別屬性
+        class Tracking(ob.Store):
             def __init__(self, *a, **k):
                 super().__init__(*a, **k)
                 opened.append(self)
@@ -705,7 +682,6 @@ class CLITests(unittest.TestCase):
                     s.db.execute('select 1')
 
     def test_ask_wait_rejects_nan(self):
-        # nan 跟任何數比都是 False：舊的範圍檢查放過它，等於 --wait 0 又不報錯。
         with tempfile.TemporaryDirectory() as tmp, patch.object(ob, 'daemon_project', return_value={"id": A, "label": "AM"}), patch.dict(os.environ, {"AM_BOT_ID": "caller"}):
             for wait in ('nan', '-1', '3601'):
                 err = io.StringIO()
@@ -716,7 +692,6 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(check.list(A), [])
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ob.cli(['--data-dir', tmp, 'ask', '--request-id', 'w0', '--no-start', '--wait', '0', 'Question']), 0)
-
 
 HOLDER = r"""
 import os, sys, json
@@ -732,7 +707,6 @@ with exclusive(Path(root) / "worker.lock"):
     if sys.stdin.readline().strip() == "die":
         os.kill(os.getpid(), 9)  # no cleanup, no finally: a crashed or rebooted worker
 """
-
 
 class WorkerLossTests(unittest.TestCase):
     """Real worker processes and flock; only daemon lookup and process spawning are stubbed."""
@@ -788,16 +762,14 @@ class WorkerLossTests(unittest.TestCase):
         again = self.ask()
         self.assertEqual((again["id"], again["status"]), (first["id"], "unknown"))
         self.assertNotIn("claim_token", again)
-        self.assertEqual(self.kicks, [])  # nothing claimable: no worker started for a possibly sent request
+        self.assertEqual(self.kicks, [])
         self.assertEqual(len(self.s.list()), 1)
-        self.assertEqual(self.s.project(A)["url"], UA)  # URL learned before the crash kept for collect
+        self.assertEqual(self.s.project(A)["url"], UA)
         with self.assertRaisesRegex(OBError, "unknown"):
             self.cli("retry", ident)
-        # A restarted worker does not pick it up; a later request of the same project waits behind it.
         self.ask("q2")
         with exclusive(Path(self.tmp.name) / "worker.lock"):
             self.assertIsNone(self.s.claim())
-        # collect only reads back the original answer.
         operator.journal_for(self.s, ident).write_text(json.dumps({"phase": "done", "answer": "original", "url": UA}))
         self.assertEqual(self.cli("collect", ident)["answer"], "original")
 
@@ -812,7 +784,7 @@ class WorkerLossTests(unittest.TestCase):
         with self.assertRaisesRegex(OBError, "request_not_claimed"):
             self.cli("collect", ident)
         self.assertEqual(self.s.get(ident)["status"], "running")
-        proc.stdin.write("exit\n")  # a clean exit that skipped finish/fail also leaves running
+        proc.stdin.write("exit\n")
         proc.stdin.flush()
         self.assertEqual(proc.wait(10), 0)
         self.assertEqual(self.cli("recover"), {"worker_running": False, "recovered": [ident]})
@@ -826,17 +798,17 @@ class WorkerLossTests(unittest.TestCase):
         status = self.cli("status")
         self.assertEqual((status["worker_running"], status["recovered"]), (False, [ident]))
         self.assertEqual(self.s.get(ident)["status"], "unknown")
-        self.assertEqual(self.kicks, [1])  # only the original ask kicked; status never starts a worker
+        self.assertEqual(self.kicks, [1])
         c = self.s.submit(C, "C", "q", "project c")
         proc, claimed = self.worker()
         self.assertEqual(claimed, c["id"])
         self.kill(proc)
         self.assertEqual(self.cli("recover"), {"worker_running": False, "recovered": [c["id"]]})
-        self.assertEqual(self.kicks, [1])  # A and C are both blocked: nothing a worker could claim
+        self.assertEqual(self.kicks, [1])
         b = self.s.submit(B, "B", "q", "project b")
-        self.s.db.execute("UPDATE requests SET status='running' WHERE id=?", (c["id"],))  # a second lost claim
+        self.s.db.execute("UPDATE requests SET status='running' WHERE id=?", (c["id"],))
         self.assertEqual(self.cli("recover")["recovered"], [c["id"]])
-        self.assertEqual(self.kicks, [1, 1])  # queued work of another project is restarted
+        self.assertEqual(self.kicks, [1, 1])
         self.assertEqual(self.s.get(b["id"])["status"], "pending")
 
     def test_orphaned_operator_cannot_send_for_a_later_claim(self):
@@ -845,7 +817,7 @@ class WorkerLossTests(unittest.TestCase):
         old_token = self.s.get(ident)["claim_token"]
         self.kill(proc)
         self.cli("recover")
-        ob.resolve_unknown(self.s, ident, True)  # operator checked the conversation: not sent
+        ob.resolve_unknown(self.s, ident, True)
         with exclusive(Path(self.tmp.name) / "worker.lock"):
             self.assertEqual(self.s.claim()["id"], ident)
         self.assertNotEqual(self.s.get(ident)["claim_token"], old_token)
@@ -857,14 +829,13 @@ class WorkerLossTests(unittest.TestCase):
     def test_results_of_a_lost_claim_never_overwrite_the_new_claim(self):
         first = self.ask()
         proc, ident = self.worker()
-        stale = self.s.get(ident)  # what the dead worker's operate() was holding
+        stale = self.s.get(ident)
         self.kill(proc)
         self.cli("recover")
         ob.resolve_unknown(self.s, ident, True)
         with exclusive(Path(self.tmp.name) / "worker.lock"):
             fresh = self.s.claim()
         self.assertEqual(fresh["id"], first["id"])
-        # Late post-processing of the old claim: quota, no receipt, exception with a journal, and a done journal.
         for out in ('{"is_error":true,"result":"usage limit"}', '{"result":"no receipt"}'):
             with patch.object(operator, "run_process", return_value=(1, out, "")):
                 operator.operate(self.s, stale, {})
@@ -889,7 +860,6 @@ class WorkerLossTests(unittest.TestCase):
         real_exclusive = operator.exclusive
         @contextlib.contextmanager
         def resolve_first(path, wait=0):
-            # collect passed its unlocked unknown check; resolve and a new claim win browser.lock first.
             if path.name == "browser.lock" and self.s.get(ident)["status"] == "unknown":
                 ob.resolve_unknown(self.s, ident, True)
                 with real_exclusive(Path(self.tmp.name) / "worker.lock"):
@@ -903,10 +873,10 @@ class WorkerLossTests(unittest.TestCase):
         row = self.s.get(ident)
         self.assertEqual((row["status"], row["answer"]), ("running", None))
         with self.assertRaisesRegex(OBError, "claim_lost"):
-            self.s.finish(ident, "stale", UA)  # no token: never over a running claim
+            self.s.finish(ident, "stale", UA)
         self.s.db.execute("UPDATE requests SET status='unknown' WHERE id=?", (ident,))
         self.assertEqual(self.s.finish(ident, "collected", UA)["status"], "done")
-        self.assertEqual(self.cli("collect", ident)["answer"], "collected")  # done returns the original result
+        self.assertEqual(self.cli("collect", ident)["answer"], "collected")
 
     def test_no_start_replay_recovers_without_starting_a_worker(self):
         self.ask()
@@ -941,7 +911,6 @@ class WorkerLossTests(unittest.TestCase):
                 with exclusive(lock, wait=0.3):
                     pass
         self.assertGreaterEqual(time.monotonic() - start, 0.3)
-
 
 class LegacyLinkTests(unittest.TestCase):
     """`link --legacy-key`：舊 chatgpt-consult.json 的指定 entry 找不到時，錯誤要講「是哪個 key／哪個檔出了問題」，
@@ -993,7 +962,6 @@ class LegacyLinkTests(unittest.TestCase):
         self.legacy(json.dumps({"am": {"url": self.URL}}))
         self.assertEqual(self.link("am")["url"], self.URL)
 
-
 class HardeningTests(unittest.TestCase):
     """對抗式審查：送去網頁的網址與內容、`--file` 讀什麼、資料目錄權限、憑證擋得住哪些。不啟動任何瀏覽器。"""
 
@@ -1001,7 +969,6 @@ class HardeningTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.data = Path(self.tmp.name) / "ob"
-        # 不碰真的 daemon，也不讀真實 HOME 的 ui-token。
         for p in (patch.object(ob, "daemon_project", lambda pid: {"id": A, "label": "AM", "host": "local"}),
                   patch.dict(os.environ, {"AM_UI_TOKEN_FILE": str(Path(self.tmp.name) / "no-ui-token")})):
             p.start()
@@ -1029,7 +996,6 @@ class HardeningTests(unittest.TestCase):
                     with self.assertRaises(OBError):
                         call()
         self.assertIsNone(s.project(B))
-        # 瀏覽器那邊寫的 journal 帶了壞網址：讀進來就拒絕，不記到 DB。
         journal = operator.journal_for(s, job["id"])
         journal.write_text(json.dumps({"phase": "sent", "url": "javascript:alert(1)", "project_id": A}))
         with self.assertRaises(OBError):
@@ -1088,10 +1054,8 @@ class HardeningTests(unittest.TestCase):
                 with self.assertRaisesRegex(OBError, "secret_in_question"):
                     s.submit(A, "AM", "s-" + kind, text)
         self.assertEqual(s.list(), [])
-        # 講這些詞本身不誤擋。
         for ok in ("AM_BOT_TOKEN 是 pane 的環境變數", "X-AM-Service-Token header 的格式？", "Bearer token 怎麼放", "JWT 的 eyJ 開頭是 base64"):
             s.submit(A, "AM", "ok-" + ok[:6], ok)
-
 
 if __name__ == '__main__':
     unittest.main()

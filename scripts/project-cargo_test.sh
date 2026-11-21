@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Backend selection, argument fidelity and failed-build propagation without starting a compiler.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$ROOT" <<'PY'

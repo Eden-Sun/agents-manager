@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# scripts/claude-cache-stats.py 的隔離測試：只用自造 jsonl（--root 指到暫存目錄），不讀 ~/.claude*。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! command -v python3 >/dev/null 2>&1; then
@@ -30,7 +29,6 @@ S="python3 -B $HERE/claude-cache-stats.py"
 out="$($S summary --root "$TMP" --project 'supervisor-AGM$' 2>/dev/null)"
 grep -q "supervisor-AGM " <<<"$out" || { echo "FAIL: summary 沒列出 supervisor-AGM"; echo "$out"; exit 1; }
 grep -q "responder" <<<"$out" && { echo "FAIL: \$ 結尾比對把 responder 也算進去"; exit 1; }
-# 3 筆去重後請求：write 6000、read 2000 → hit = 2000/(3+6000+2000)=25.0%
 grep -q "TOTAL .* 3 " <<<"$out" && grep -q "25.0" <<<"$out" || { echo "FAIL: 去重或命中率不對"; echo "$out"; exit 1; }
 out="$($S sessions --root "$TMP" --project 'supervisor-AGM$' --min-turns 1 2>/dev/null)"
 grep -Eq "s-[0-9a-f]+ +3 +.* 1 +0\.0" <<<"$out" || { echo "FAIL: sessions 輪數／冷喚醒次數不對"; echo "$out"; exit 1; }
@@ -56,7 +54,6 @@ sys.argv = [sys.argv[0]]
 STAMP = "2026-10-21T12:00:00Z"
 SECRET = "SENTINEL_PRIVATE_PROMPT_TOOL_PATH"
 
-
 def request(mid="m", rid="r", usage=None, stamp=STAMP):
     return {"type": "assistant", "timestamp": stamp, "requestId": rid,
             "message": {"id": mid, "role": "assistant",
@@ -64,7 +61,6 @@ def request(mid="m", rid="r", usage=None, stamp=STAMP):
                             "input_tokens": 10, "cache_creation_input_tokens": 20,
                             "cache_read_input_tokens": 30},
                         "content": [{"type": "tool_use", "input": {"command": SECRET}}]}}
-
 
 class StatsTests(unittest.TestCase):
     def setUp(self):
@@ -228,7 +224,6 @@ class StatsTests(unittest.TestCase):
         rc, out, err = self.call("--max-records", "1")
         self.assertEqual((rc, out), (2, ""))
         self.assertIn("user turns exceeded", err)
-
 
 unittest.main()
 PY
