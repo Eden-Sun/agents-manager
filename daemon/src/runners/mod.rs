@@ -20,6 +20,7 @@ pub(crate) mod claude_child_log;
 pub mod child_done;
 pub mod relay_requests;
 pub mod relay_deputy;
+pub mod ledger_reminders;
 pub mod child_retire;
 pub mod new_models;
 pub mod codex_async_question;

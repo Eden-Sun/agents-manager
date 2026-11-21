@@ -115,6 +115,7 @@ async fn redirect(app: &Arc<App>, manager_id: &str, deputy_id: &str, after_sec: 
     if busy { return Ok(()) }
     let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM relay_requests WHERE to_bot_id=? AND state='pending' AND to_turn_id IS NULL AND redirected_from IS NULL AND from_bot_id<>? AND julianday(created_at)<=julianday('now')-?/86400.0 ORDER BY created_at LIMIT ?")
         .bind(manager_id).bind(deputy_id).bind(i64::from(after_sec)).bind(REDIRECT_PER_SWEEP as i64).fetch_all(&app.db).await?;
+    let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM bots WHERE id=?").bind(manager_id).fetch_optional(&app.db).await?;
     for id in ids {
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{id}"));
         let Ok(_guard) = lock.try_lock() else { continue };
@@ -122,7 +123,15 @@ async fn redirect(app: &Arc<App>, manager_id: &str, deputy_id: &str, after_sec: 
         let moved = sqlx::query("UPDATE OR IGNORE relay_requests SET to_bot_id=?,redirected_from=?,redirected_at=?,attempts=0,error=NULL WHERE id=? AND state='pending' AND to_turn_id IS NULL AND to_bot_id=? AND redirected_from IS NULL AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id='relay-request:'||relay_requests.id)")
             .bind(deputy_id).bind(manager_id).bind(db::now()).bind(&id).bind(manager_id).bind(manager_id)
             .execute(&app.db).await?.rows_affected();
-        if moved == 1 { tracing::info!(request = %id, manager = %manager_id, deputy = %deputy_id, "relay request redirected to the deputy manager"); }
+        if moved == 1 {
+            tracing::info!(request = %id, manager = %manager_id, deputy = %deputy_id, "relay request redirected to the deputy manager");
+            // 綁在這則請求上、主還沒接手的帳本事項一起改承辦給副手（只改承辦，不動狀態）。
+            if let Some(pid) = project_id.as_deref() {
+                if let Err(e) = am_base::ledger::redirect_to_deputy(&app.db, pid, manager_id, deputy_id, &id).await {
+                    tracing::warn!(request = %id, error = ?e, "ledger items could not follow the redirect");
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -133,10 +142,26 @@ async fn digest(app: &Arc<App>, manager_id: &str) -> anyhow::Result<()> {
         "SELECT r.id,(SELECT name FROM bots WHERE id=r.from_bot_id),r.prompt_text,r.state,r.error,(SELECT m.content FROM messages m WHERE m.turn_id=r.to_turn_id AND m.role='assistant' ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1) FROM relay_requests r WHERE r.redirected_from=? AND r.digest_at IS NULL AND r.state IN ('answered','notified','failed') ORDER BY r.created_at LIMIT ?")
         .bind(manager_id).bind(DIGEST_MAX as i64).fetch_all(&app.db).await?;
     if rows.is_empty() { return Ok(()) }
-    let message = compose_digest(&rows);
+    let mut message = compose_digest(&rows);
     let crid = format!("{DIGEST_PREFIX}{}", rows[0].0);
     // 通知的寄件者記成處理的那位副管理者（UI 把泡泡畫在左邊）。
     let sender: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id=?").bind(&rows[0].0).fetch_one(&app.db).await?;
+    // 帳本對帳三組（只列、不轉移承辦）。
+    let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM bots WHERE id=?").bind(manager_id).fetch_optional(&app.db).await?;
+    if let Some(pid) = project_id {
+        let groups = match am_base::ledger::digest_groups(&app.db, &pid, &sender).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(manager = %manager_id, error = ?e, "ledger digest groups failed");
+                am_base::ledger::DigestGroups::default()
+            }
+        };
+        let extra = am_base::ledger::digest_lines(&groups);
+        if !extra.is_empty() {
+            message.push('\n');
+            message.push_str(&extra.join("\n"));
+        }
+    }
     match app.prompt_relayed_queueable(manager_id, &message, &crid, Some(&sender), crate::lifecycle::QueueClass::DaemonNotice).await {
         Ok(_) => {
             let now = db::now();

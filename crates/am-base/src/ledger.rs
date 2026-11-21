@@ -438,6 +438,18 @@ async fn resolve_id(tx: &mut Transaction<'_, Sqlite>, project_id: &str, raw: &st
 /// 樂觀鎖異動：`expected_version` 與目前不符就回 [`LedgerError::VersionConflict`]，什麼都不寫。
 /// `item_ref` 可以是 ULID，也可以是 `L<code_no>`；`Merge` 的目標同樣接受兩種寫法，寫進 `merged_into_id` 的一律是解析後的 ULID。
 pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str, expected_version: i64, actor: &str, op: LedgerPatchOp) -> Result<LedgerItem, LedgerError> {
+    // 承辦人只能是專案管理入口（管理者或副管理者）：帳本是管理者對使用者的承諾，派給執行者是另一回事（2026-11-21 裁示）。
+    let new_owner = match &op {
+        LedgerPatchOp::Claim { owner_bot_id } => Some(owner_bot_id.as_str()),
+        LedgerPatchOp::Handback { to } => to.as_deref(),
+        LedgerPatchOp::Update { owner_bot_id, .. } => owner_bot_id.as_deref(),
+        _ => None,
+    };
+    if let Some(owner) = new_owner {
+        if !is_project_management_actor(pool, project_id, owner).await? {
+            return Err(LedgerError::Invalid("承辦人必須是這個專案的管理入口（管理者或副管理者），執行者不承辦帳本項目".into()));
+        }
+    }
     let mut tx = db::begin_write(pool).await?;
     let item_id = resolve_id(&mut tx, project_id, item_ref).await?;
     let cur: LedgerItem = sqlx::query_as("SELECT * FROM ledger_items WHERE id = ? AND project_id = ?")
@@ -651,6 +663,207 @@ pub async fn query_actionable_for_actor(pool: &SqlitePool, project_id: &str, bot
     Ok((rows, counts))
 }
 
+
+/// 副管理者代班改派（`relay_deputy::redirect`）：把綁在這筆 relay 請求上、仍由管理者承辦的未結事項改給副管理者（`version + 1`）。
+/// 副手已經是承辦人、或已結案的不動；主已經在處理的事項也不動（改派只針對主還沒接手的）。
+pub async fn redirect_to_deputy(pool: &SqlitePool, project_id: &str, manager_id: &str, deputy_id: &str, relay_request_id: &str) -> Result<Vec<LedgerItem>, LedgerError> {
+    let mut tx = db::begin_write(pool).await?;
+    let rows: Vec<LedgerItem> = sqlx::query_as(&format!(
+        "SELECT * FROM ledger_items WHERE project_id = ? AND relay_request_id = ? AND owner_bot_id = ? AND status IN {OPEN_SQL} ORDER BY ordinal, id"
+    ))
+    .bind(project_id)
+    .bind(relay_request_id)
+    .bind(manager_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let now = db::now();
+    let mut out = Vec::with_capacity(rows.len());
+    for cur in rows {
+        let version = cur.version + 1;
+        let res = sqlx::query("UPDATE ledger_items SET owner_bot_id = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?")
+            .bind(deputy_id)
+            .bind(version)
+            .bind(&now)
+            .bind(&cur.id)
+            .bind(cur.version)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() != 1 {
+            continue;
+        }
+        record(&mut tx, Event { item_id: &cur.id, project_id, actor: "daemon", action: "redirect", from_owner: Some(manager_id), to_owner: Some(deputy_id), from_status: Some(&cur.status), to_status: Some(&cur.status), version }).await?;
+        out.push(fetch(&mut tx, &cur.id).await?);
+    }
+    tx.commit().await?;
+    Ok(out)
+}
+
+/// 代班摘要要附的三組對帳（只列、不轉移承辦：副手名下的事項要顯式 `handback`／`claim` 才會換人）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DigestGroups {
+    /// 副已完成且已回覆：`answered`／`done`，承辦仍是副手。
+    pub done_replied: Vec<LedgerItem>,
+    /// 副仍在做（承辦仍為副手，主勿重做）：`following`／`clarifying`。
+    pub still_doing: Vec<LedgerItem>,
+    /// 待主接手：未結、沒有承辦人（副手交回或孤兒回收）。
+    pub awaiting_claim: Vec<LedgerItem>,
+}
+
+pub async fn digest_groups(pool: &SqlitePool, project_id: &str, deputy_id: &str) -> Result<DigestGroups, LedgerError> {
+    let rows: Vec<LedgerItem> = sqlx::query_as(&format!(
+        "SELECT * FROM ledger_items WHERE project_id = ? AND ((owner_bot_id = ? AND status IN ('answered','done','following','clarifying')) OR (owner_bot_id IS NULL AND status IN {OPEN_SQL})) ORDER BY code_no"
+    ))
+    .bind(project_id)
+    .bind(deputy_id)
+    .fetch_all(pool)
+    .await?;
+    let mut g = DigestGroups::default();
+    for it in rows {
+        match (it.owner_bot_id.as_deref(), it.status.as_str()) {
+            (None, _) => g.awaiting_claim.push(it),
+            (Some(_), "answered" | "done") => g.done_replied.push(it),
+            (Some(_), _) => g.still_doing.push(it),
+        }
+    }
+    Ok(g)
+}
+
+/// 摘要尾端的三組文字（沒有項目的組不出現；每組最多 10 行）。
+pub fn digest_lines(g: &DigestGroups) -> Vec<String> {
+    const MAX: usize = 10;
+    let mut out = Vec::new();
+    let mut section = |head: &str, items: &[LedgerItem], line: &dyn Fn(&LedgerItem) -> String| {
+        if items.is_empty() {
+            return;
+        }
+        out.push(head.to_string());
+        for it in items.iter().take(MAX) {
+            out.push(line(it));
+        }
+        if items.len() > MAX {
+            out.push(format!("…另 {} 件", items.len() - MAX));
+        }
+    };
+    section("【副已完成且已回覆】", &g.done_replied, &|it| format!("- L{} {}", it.code_no, it.title));
+    section("【副仍在做（承辦仍為副手，主勿重做）】", &g.still_doing, &|it| format!("- L{} {}", it.code_no, it.title));
+    section("【待主接手（請用 agm ledger claim L<no> --expect-version <v> 認領）】", &g.awaiting_claim, &|it| {
+        let next = if it.next_step.is_empty() { String::new() } else { format!("，下一步：{}", it.next_step) };
+        format!("- L{} --expect-version {}：{}{}", it.code_no, it.version, it.title, next)
+    });
+    out
+}
+
+/// 專案的頂層管理者（`expert`：`managed_by='user'`、無父層、`role='manager'`；`parent_child`：頂層主力 bot）。
+pub async fn top_manager(pool: &SqlitePool, project_id: &str) -> Result<Option<String>, LedgerError> {
+    let id: Option<String> = sqlx::query_scalar(
+        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id
+         WHERE b.project_id = ? AND b.managed_by = 'user' AND b.parent_bot_id IS NULL AND b.deleted_at IS NULL AND p.deleted_at IS NULL
+           AND ((p.mode = 'expert' AND b.role = 'manager') OR p.mode = 'parent_child')
+         ORDER BY b.created_at, b.id LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(id)
+}
+
+/// 去重提醒的一筆候選（§1.6）：`stage` 是 `untriaged`／`due`／`orphaned`；`prev_*` 是標記前的值（送不出去時還原）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reminder {
+    pub item_id: String,
+    pub project_id: String,
+    pub code_no: i64,
+    pub title: String,
+    pub status: String,
+    pub owner_bot_id: Option<String>,
+    pub next_step: String,
+    pub version: i64,
+    pub stage: &'static str,
+    pub due_at: Option<String>,
+    pub prev_version: Option<i64>,
+    pub prev_stage: Option<String>,
+    pub prev_at: Option<String>,
+}
+
+/// 未分流需等這麼久（收件回合已結束）才提醒；到期後逾時超過這個時間才升級給頂層管理者。
+pub const UNTRIAGED_AFTER_SECS: i64 = 600;
+pub const ESCALATE_AFTER_SECS: i64 = 1800;
+
+/// 找出現在該提醒的事項，依 `(item, stage, version)` 去重：同一組已提醒過（`last_reminded_*` 相同）就跳過。
+pub async fn due_reminders(pool: &SqlitePool, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Reminder>, LedgerError> {
+    let rows: Vec<LedgerItem> = sqlx::query_as(&format!("SELECT * FROM ledger_items WHERE status IN {OPEN_SQL} ORDER BY created_at, id"))
+        .fetch_all(pool)
+        .await?;
+    let mut out = Vec::new();
+    for it in rows {
+        let stage: Option<&'static str> = if it.status == "untriaged" {
+            let created = chrono::DateTime::parse_from_rfc3339(&it.created_at).map(|d| d.with_timezone(&chrono::Utc)).ok();
+            let old = created.is_some_and(|c| (now - c).num_seconds() >= UNTRIAGED_AFTER_SECS);
+            let turn_done = match &it.source_turn_id {
+                None => true,
+                Some(t) => {
+                    let st: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(t).fetch_optional(pool).await?;
+                    st.is_none_or(|s| matches!(s.as_str(), "completed" | "completed_fallback" | "failed"))
+                }
+            };
+            (old && turn_done).then_some("untriaged")
+        } else if it.due_at.as_deref().and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok()).is_some_and(|d| d.with_timezone(&chrono::Utc) <= now) {
+            Some("due")
+        } else if it.owner_bot_id.is_none() {
+            Some("orphaned")
+        } else {
+            None
+        };
+        let Some(stage) = stage else { continue };
+        if it.last_reminded_version == Some(it.version) && it.last_reminded_stage.as_deref() == Some(stage) {
+            continue;
+        }
+        out.push(Reminder {
+            item_id: it.id.clone(),
+            project_id: it.project_id.clone(),
+            code_no: it.code_no,
+            title: it.title.clone(),
+            status: it.status.clone(),
+            owner_bot_id: it.owner_bot_id.clone(),
+            next_step: it.next_step.clone(),
+            version: it.version,
+            stage,
+            due_at: it.due_at.clone(),
+            prev_version: it.last_reminded_version,
+            prev_stage: it.last_reminded_stage.clone(),
+            prev_at: it.last_reminded_at.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// 標記已提醒（CAS：版本還是 `r.version` 才寫）。回傳是否真的寫入；沒寫入代表它已經在別處變了。
+pub async fn mark_reminded(pool: &SqlitePool, r: &Reminder) -> Result<bool, LedgerError> {
+    let res = sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ? WHERE id = ? AND version = ?")
+        .bind(r.version)
+        .bind(r.stage)
+        .bind(db::now())
+        .bind(&r.item_id)
+        .bind(r.version)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// 送不出去（管理者忙、佇列滿）：還原標記，下一輪再提醒。
+pub async fn unmark_reminded(pool: &SqlitePool, r: &Reminder) -> Result<(), LedgerError> {
+    sqlx::query("UPDATE ledger_items SET last_reminded_version = ?, last_reminded_stage = ?, last_reminded_at = ? WHERE id = ? AND version = ? AND last_reminded_stage = ?")
+        .bind(r.prev_version)
+        .bind(&r.prev_stage)
+        .bind(&r.prev_at)
+        .bind(&r.item_id)
+        .bind(r.version)
+        .bind(r.stage)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,4 +1005,107 @@ mod tests {
         let foreign = commit_item(&pool, "p1", "bot:b1", Some("m9"), &LedgerSplitInput { title: "外人的".into(), ..Default::default() }).await;
         assert!(matches!(foreign, Err(LedgerError::Invalid(_))), "{foreign:?}");
     }
+
+    /// 管理者 b1（expert 頂層 manager）、副手 b3（projects.deputy_bot_id）、執行者 b2。
+    async fn with_management(pool: &SqlitePool) {
+        sqlx::query("UPDATE projects SET mode='expert' WHERE id='p1'").execute(pool).await.unwrap();
+        sqlx::query("UPDATE bots SET role='manager', managed_by='user' WHERE id='b1'").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at,role,managed_by) VALUES('b3','p1','b3','claude','t',?,'advisor','user')")
+            .bind(db::now()).execute(pool).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id='b3' WHERE id='p1'").execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_management_entrants_can_own_ledger_items() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let item = commit_item(&pool, "p1", "user", None, &input("追蹤")).await.unwrap();
+        let to_executor = patch_item_cas(&pool, "p1", &item.id, 1, "user", LedgerPatchOp::Claim { owner_bot_id: "b2".into() }).await;
+        assert!(matches!(to_executor, Err(LedgerError::Invalid(_))), "{to_executor:?}");
+        let handed = patch_item_cas(&pool, "p1", &item.id, 1, "user", LedgerPatchOp::Claim { owner_bot_id: "b3".into() }).await.unwrap();
+        assert_eq!(handed.owner_bot_id.as_deref(), Some("b3"), "副手可以承辦");
+        let to_exec = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Handback { to: Some("b2".into()) }).await;
+        assert!(matches!(to_exec, Err(LedgerError::Invalid(_))), "交回給執行者也不行：{to_exec:?}");
+        let upd = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: Some("b2".into()), close_reason: None }).await;
+        assert!(matches!(upd, Err(LedgerError::Invalid(_))), "Update 指定執行者也不行：{upd:?}");
+        let back = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Handback { to: Some("b1".into()) }).await.unwrap();
+        assert_eq!(back.owner_bot_id.as_deref(), Some("b1"));
+        let unassigned = patch_item_cas(&pool, "p1", &item.id, back.version, "user", LedgerPatchOp::Handback { to: None }).await.unwrap();
+        assert_eq!(unassigned.owner_bot_id, None, "交回待接手（NULL）正常");
+    }
+
+    #[tokio::test]
+    async fn removed_deputy_items_are_reclaimed_to_the_unassigned_queue() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let item = commit_item(&pool, "p1", "user", None, &input("副手的事")).await.unwrap();
+        patch_item_cas(&pool, "p1", &item.id, 1, "user", LedgerPatchOp::Claim { owner_bot_id: "b3".into() }).await.unwrap();
+        sqlx::query("UPDATE projects SET deputy_bot_id=NULL WHERE id='p1'").execute(&pool).await.unwrap();
+        let moved = reclaim_orphaned_items(&pool).await.unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].owner_bot_id, None, "卸任的副手名下回到待接手");
+    }
+
+    #[tokio::test]
+    async fn redirect_moves_the_linked_open_items_to_the_deputy_only() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let linked = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "連到請求".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+        sqlx::query("UPDATE ledger_items SET relay_request_id='rq1' WHERE id=?").bind(&linked.id).execute(&pool).await.unwrap();
+        let other = commit_item(&pool, "p1", "user", None, &LedgerSplitInput { title: "別的".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+        let moved = redirect_to_deputy(&pool, "p1", "b1", "b3", "rq1").await.unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!((moved[0].owner_bot_id.as_deref(), moved[0].version), (Some("b3"), linked.version + 1));
+        let (owner,): (Option<String>,) = sqlx::query_as("SELECT owner_bot_id FROM ledger_items WHERE id=?").bind(&other.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(owner.as_deref(), Some("b1"), "沒綁這則請求的事項不動");
+        let (action,): (String,) = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id=? AND action='redirect'").bind(&linked.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(action, "redirect");
+    }
+
+    #[tokio::test]
+    async fn digest_groups_list_without_moving_ownership() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let mk = |t: &str, o: Option<&str>| LedgerSplitInput { title: t.into(), owner_bot_id: o.map(str::to_string), ..Default::default() };
+        let done = commit_item(&pool, "p1", "user", None, &mk("已回", Some("b3"))).await.unwrap();
+        patch_item_cas(&pool, "p1", &done.id, 1, "user", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        commit_item(&pool, "p1", "user", None, &mk("還在做", Some("b3"))).await.unwrap();
+        commit_item(&pool, "p1", "user", None, &mk("交回的", None)).await.unwrap();
+        let g = digest_groups(&pool, "p1", "b3").await.unwrap();
+        assert_eq!((g.done_replied.len(), g.still_doing.len(), g.awaiting_claim.len()), (1, 1, 1));
+        let lines = digest_lines(&g).join("\n");
+        assert!(lines.contains("【副已完成且已回覆】") && lines.contains("【待主接手"), "{lines}");
+        let (owner,): (Option<String>,) = sqlx::query_as("SELECT owner_bot_id FROM ledger_items WHERE id=?").bind(&done.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(owner.as_deref(), Some("b3"), "摘要不轉移承辦");
+    }
+
+    #[tokio::test]
+    async fn reminders_dedupe_by_item_stage_and_version() {
+        let pool = pool().await;
+        with_management(&pool).await;
+        let item = commit_item(&pool, "p1", "user", None, &input("未分流")).await.unwrap();
+        sqlx::query("UPDATE ledger_items SET status='untriaged', created_at=? WHERE id=?")
+            .bind("2020-01-01T00:00:00.000Z").bind(&item.id).execute(&pool).await.unwrap();
+        let now = chrono::Utc::now();
+        let first = due_reminders(&pool, now).await.unwrap();
+        assert_eq!(first.iter().map(|r| r.stage).collect::<Vec<_>>(), vec!["untriaged"]);
+        assert!(mark_reminded(&pool, &first[0]).await.unwrap());
+        assert!(due_reminders(&pool, now).await.unwrap().is_empty(), "同 (item, stage, version) 不再提醒");
+        // 版本變了（有人動過）就可以再提醒一次。
+        sqlx::query("UPDATE ledger_items SET version = version + 1 WHERE id=?").bind(&item.id).execute(&pool).await.unwrap();
+        assert_eq!(due_reminders(&pool, now).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unmark_restores_the_previous_reminder_state() {
+        let pool = pool().await;
+        let item = commit_item(&pool, "p1", "user", None, &input("孤兒")).await.unwrap();
+        let r = due_reminders(&pool, chrono::Utc::now()).await.unwrap().remove(0);
+        assert_eq!(r.stage, "orphaned");
+        assert!(mark_reminded(&pool, &r).await.unwrap());
+        unmark_reminded(&pool, &r).await.unwrap();
+        assert_eq!(due_reminders(&pool, chrono::Utc::now()).await.unwrap().len(), 1, "送不出去還原後下一輪還會提醒");
+        let _ = item;
+    }
+
 }
