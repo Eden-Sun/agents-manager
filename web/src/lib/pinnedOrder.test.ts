@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PIN_GRID_MAX, rowsFromDrag, pinGridRowsNeeded, dropBefore, endBefore, moveBefore, moveStep, pickSlot, pinGridLayout, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
+import { PIN_GRID_MAX, rowsFromDrag, pinGridRowsNeeded, endBefore, moveBefore, moveStep, pickSlot, pinGridLayout, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
 
 test('sortPinned: 照 primary_position，同值照原順序', () => {
   const items = [
@@ -28,23 +28,6 @@ test('moveStep: 鍵盤左右一格，頭尾不動', () => {
 })
 
 const box = (id: string, left: number, top: number): Box => ({ id, left, top, right: left + 80, bottom: top + 24 })
-
-test('dropBefore: 單行看中心點、行尾接最後', () => {
-  const boxes = [box('a', 0, 0), box('b', 90, 0), box('c', 180, 0)]
-  assert.equal(dropBefore(boxes, 10, 10, 'c'), 'a')
-  assert.equal(dropBefore(boxes, 100, 10, 'c'), 'b')
-  assert.equal(dropBefore(boxes, 250, 10, 'a'), null)
-  // 拖的那顆自己不算：a 拖到 b 的左半邊＝原位，由 moveBefore 擋成 null
-  assert.equal(dropBefore(boxes, 95, 10, 'a'), 'b')
-})
-
-test('dropBefore: 換行時依游標所在的行；行尾接到下一行第一顆之前', () => {
-  const boxes = [box('a', 0, 0), box('b', 90, 0), box('c', 0, 30), box('d', 90, 30)]
-  assert.equal(dropBefore(boxes, 10, 35, 'a'), 'c')
-  assert.equal(dropBefore(boxes, 200, 5, 'd'), 'c')
-  assert.equal(dropBefore(boxes, 200, 35, 'a'), null)
-  assert.equal(dropBefore(boxes, 300, 200, 'a'), null)
-})
 
 test('pickSlot: 選最近的插入縫隙，命中區到相鄰晶片的中線；縫隙以右的同行晶片要讓位', () => {
   const boxes = [box('a', 0, 0), box('b', 90, 0), box('c', 180, 0)]

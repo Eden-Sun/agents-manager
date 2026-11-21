@@ -14,20 +14,6 @@ export function msgTimeLabel(iso: string, now: number = Date.now(), zone: string
   return time
 }
 
-/**
- * 任意時刻的 `M/D HH:mm`（任務完成時間這類不分今天的欄位）：同年只寫月日，跨年才帶年。
- * 不加年份時，1 月的 `1/1 00:10` 會被讀成今年已經過去的那一天。讀不懂回空字串。
- */
-export function dateTimeLabel(iso: string, now: number = Date.now(), zone: string = userTimeZone()): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const a = zonedParts(d, zone)
-  const b = zonedParts(now, zone)
-  const time = `${p(a.hour)}:${p(a.minute)}`
-  const head = a.year !== b.year ? `${a.year}/` : ''
-  return `${head}${a.month}/${a.day} ${time}`
-}
-
 /** 使用者時區「今天」的開始（0 點）。跨日時它會變，拿來當 [`msgTimeLabel`] 的 `now`，標籤才會跟著換天。 */
 export function startOfLocalDay(now: number, zone: string = userTimeZone()): number {
   return zonedDayStart(now, zone)

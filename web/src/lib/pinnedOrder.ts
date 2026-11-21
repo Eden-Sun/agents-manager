@@ -48,34 +48,6 @@ export interface Box {
   bottom: number
 }
 
-/**
- * 放開位置對應的「插在誰前面」。晶片會換行，所以不只看 x：先找同一行（y 落在該列的上下界，找不到就挑垂直距離最近的一行），
- * 再在那一行裡找第一顆中心點在游標右邊的——它就是 `beforeId`，都沒有就是接在這行最後一顆之後
- * （＝下一行第一顆之前，全列最後則 null）。拖的那一顆自己不參與比較。
- */
-export function dropBefore(boxes: Box[], x: number, y: number, dragId: string): string | null {
-  const others = boxes.filter((b) => b.id !== dragId)
-  if (others.length === 0) return null
-  // 依 top 分行。
-  const rows: Box[][] = []
-  for (const b of [...others].sort((p, q) => p.top - q.top || p.left - q.left)) {
-    const row = rows[rows.length - 1]
-    if (row && Math.abs(row[0].top - b.top) < (b.bottom - b.top) / 2) row.push(b)
-    else rows.push([b])
-  }
-  const dist = (row: Box[]) => {
-    const top = Math.min(...row.map((b) => b.top))
-    const bottom = Math.max(...row.map((b) => b.bottom))
-    return y < top ? top - y : y > bottom ? y - bottom : 0
-  }
-  let bi = 0
-  for (let i = 1; i < rows.length; i++) if (dist(rows[i]) < dist(rows[bi])) bi = i
-  const row = [...rows[bi]].sort((p, q) => p.left - q.left)
-  const hit = row.find((b) => (b.left + b.right) / 2 > x)
-  if (hit) return hit.id
-  return rows[bi + 1]?.[0]?.id ?? null
-}
-
 /** 換手的遲滯（px）：游標離目前鎖定的落點不比離新落點遠超過這個距離，就維持原落點——拖到附近就鎖定、不在兩個落點的交界抖動。 */
 export const DROP_STICKY_PX = 16
 
@@ -89,7 +61,7 @@ export interface Slot {
 }
 
 /**
- * 放開位置對應的落點（#344 第二輪：使用者「drop 點放開大一點」）。跟 `dropBefore` 同一套分行，但改成**最近的插入縫隙**：
+ * 放開位置對應的落點（#344 第二輪：使用者「drop 點放開大一點」）。跟 `moveBefore` 的插入語意一致，但改成**最近的插入縫隙**：
  * 每顆晶片之間（與行首、行尾）各一個插入點，游標選離它最近的一個，命中區從縫隙往兩邊各延伸到相鄰晶片的中線（不要求對準縫隙）；
  * 再加遲滯（`prev`＝目前鎖定的落點）。`boxes` 要是**沒被落點讓位推過**的位置（呼叫端把讓位的位移扣掉），不然讓位一開、量到的位置一動就會來回抖。
  */
