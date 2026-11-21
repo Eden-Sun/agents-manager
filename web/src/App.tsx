@@ -81,7 +81,7 @@ function useUnread() {
   }, [markCurrentRead])
 }
 
-import { collectClaudeExpiryAlerts, expiryNoticeText } from './lib/claudeLoginExpiry'
+import { collectClaudeExpiryAlerts, formatExpiryTime } from './lib/claudeLoginExpiry'
 export function Notices() {
   const t = useT()
   const notices = useStore((s) => s.notices)
@@ -101,13 +101,21 @@ export function Notices() {
       {expiryAlerts.map((a) => {
         const key = `${a.host}:${a.account}`
         const hostName = a.host === 'local' ? t('本機') : a.host
+        const noticeText =
+          a.stage === 'expired'
+            ? t('{account}（{host}）的 Claude 登入已過期', { account: a.account, host: hostName })
+            : t('{account}（{host}）的 Claude 登入將於 {time} 到期', {
+                account: a.account,
+                host: hostName,
+                time: formatExpiryTime(a.expiresAtMs),
+              })
         return (
           <div
             key={`expiry:${key}`}
-            className={`notice ${a.stage === 'expired' ? 'error' : 'warn'} notice-top-center`}
+            className={`notice ${a.stage === 'expired' ? 'error' : 'warn'}`}
             role={a.stage === 'expired' ? 'alert' : undefined}
           >
-            <span style={{ flex: 1 }}>{expiryNoticeText(a, hostName)}</span>
+            <span style={{ flex: 1 }}>{noticeText}</span>
             <button
               type="button"
               className="notice-action"

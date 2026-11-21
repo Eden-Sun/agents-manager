@@ -370,4 +370,6 @@ export default {
   '這個目錄就是預設帳號用的目錄：新身份會和預設帳號共用同一份登入。': 'This directory is the default account\'s directory: the new account would share its sign-in.',
   '這個目錄已被 {names} 使用：兩個身份會共用同一份登入。': 'This directory is already used by {names}: the two accounts would share one sign-in.',
   '重新登入': 'Sign in again',
+  '{account}（{host}）的 Claude 登入已過期': '{account} ({host}) Claude sign-in has expired',
+  '{account}（{host}）的 Claude 登入將於 {time} 到期': '{account} ({host}) Claude sign-in expires at {time}',
 } satisfies Dict
