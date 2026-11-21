@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { putClaudeApiBalanceAnchor } from '../api/claudeApiBalance'
 import { reloadClaudeApiBalance } from '../hooks/useClaudeApiBalance'
-import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
 import { anchorAge, balanceTooltipLines } from './balanceTooltip'
@@ -29,7 +28,6 @@ const hhmm = (iso: string | null | undefined): string => {
  */
 export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row' } = {}) {
   const t = useT()
-  const phone = useMediaQuery(PHONE_QUERY)
   const { balance, view } = useClaudeBalanceView()
   const apiBotId = useStore((s) => s.bots.find((b) => b.kind === 'claude-api')?.id ?? null)
   const selectBot = useStore((s) => s.selectBot)
@@ -42,7 +40,7 @@ export function BalanceQuotaChip({ variant = 'chip' }: { variant?: 'chip' | 'row
   const usd = view.usd
   // 估算成負數＝錨點已經過舊（期間有儲值或贈送額度：官方查得到花費、查不到儲值）：顯示「需校正」，不要把一個必錯的負數當餘額。
   const stale = !exact && usd < 0
-  const text = stale ? t('需校正') : phone ? `$${usd.toFixed(1)}` : `$${usd.toFixed(2)}`
+  const text = stale ? t('需校正') : `$${usd.toFixed(1)}`
   const lines = balanceTooltipLines(balance, view, t)
   const stamp = exact ? balance?.console?.fetched_at : balance?.as_of
   const title = [

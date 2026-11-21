@@ -62,7 +62,7 @@ export function OpenAiBalanceChip({ variant = 'chip' }: { variant?: 'chip' | 'ro
       <button type="button" className={cls} data-k={variant === 'row' ? 'openai-balance-row' : 'openai-balance'} title={title} onClick={() => setOpen(true)}>
         <KindGlyph kind="codex" label={t('OpenAI API 餘額')} />
         <span className={variant === 'row' ? 'quota-pop-balance-v' : 'quota-balance-v'}>
-          {configured ? `$${usd.toFixed(2)}` : t('設定 OpenAI 餘額')}
+          {configured ? `$${usd.toFixed(1)}` : t('設定 OpenAI 餘額')}
         </span>
       </button>
       <Modal open={open} title={t('OpenAI API 餘額')} width={420} onClose={() => setOpen(false)}>
