@@ -58,6 +58,8 @@ export function useMessageTranslation(
   const [spin, setSpin] = useState<'forward' | 'backward' | null>(null)
   const [swapSeq, setSwapSeq] = useState(0)
   const [redoing, setRedoing] = useState(false)
+  // 複盤：這次開的時間（daemon 回的 sent_at；重複時也是那次送出的時間）。
+  const [retroSentAt, setRetroSentAt] = useState<string | null>(null)
 
   // 狀態在 store（以 msg.id 為鍵）：remount 不會掉回原文。
   // manual＝使用者按的；restore＝重整後重抓以前選過看譯文的；fresh＝自動翻譯新訊息。後兩者失敗不跳錯誤也不重試。
@@ -229,6 +231,16 @@ export function useMessageTranslation(
         reportTranslation(msg.id).then(
           (r) => useStore.getState().notify('info', r.sent ? t('已回報給管理者') : t('10 分鐘內已回報過這則，不重複送出')),
           (e: unknown) => useStore.getState().notify('error', t('回報失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
+        )
+      },
+      retroSentAt,
+      onRetro: (note: string) => {
+        reportTranslation(msg.id, note).then(
+          (r) => {
+            if (r.sentAt) setRetroSentAt(r.sentAt)
+            useStore.getState().notify('info', r.sent ? t('已開複盤給管理者') : t('10 分鐘內已開過複盤，不重複送出'))
+          },
+          (e: unknown) => useStore.getState().notify('error', t('複盤失敗：{reason}', { reason: e instanceof Error ? e.message : String(e) })),
         )
       },
       onShowAnyway: st.status === 'rejected' && st.text

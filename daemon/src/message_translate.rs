@@ -78,6 +78,9 @@ struct CacheEntry {
     /// 品質沒過後重試時用的 effort（往上提一階）；沒重試就沒有，照設定的 effort 翻。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
+    /// 這則譯文實際打了幾次模型（含重試）；舊快取沒有。複盤用它判斷「是否重翻過」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempts: Option<usize>,
 }
 
 pub(crate) use crate::claude_api::cost_usd;
@@ -581,6 +584,7 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
         jev_prob: best.jev,
         low_confidence: low,
         effort: best.effort.clone(),
+        attempts: Some(attempts.len()),
         ..Default::default()
     };
     if let Err(e) = save(path, &entry) {
@@ -658,9 +662,74 @@ fn load_entry(path: &Path) -> Option<CacheEntry> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// `POST /api/messages/{id}/translate-report`（User-only）：翻譯品質沒過時，把原因摘要以 `bot_request` 送給本專案的管理者 bot。
-/// 同一則訊息 10 分鐘內只送一次（送出時間記在快取的負面標記上，重啟也不會重送）。不含整段原文，只附前 200 字。
-pub async fn post_translate_report(State(app): State<Arc<App>>, AxPath(id): AxPath<String>, Extension(principal): Extension<crate::api::RequestPrincipal>) -> Result<Json<Value>, LcError> {
+/// 複盤的備註上限（字元）。
+const RETRO_NOTE_MAX_CHARS: usize = 500;
+/// 複盤 payload 給管理者的原文／譯文長度上限（字元）。
+const RETRO_TEXT_MAX_CHARS: usize = 1_500;
+
+#[derive(Deserialize, Default)]
+struct RetroIn {
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// 複盤的 body 可空（沒帶就沒有備註）；有帶就必須是 `{"note": "..."}`，備註 trim 後空字串當沒有，超過 500 字 400。
+fn parse_retro_note(body: &[u8]) -> Result<Option<String>, LcError> {
+    if body.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+    let v: RetroIn = serde_json::from_slice(body).map_err(|_| LcError::Bad("invalid translate-report body".into()))?;
+    let note = v.note.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if note.as_ref().is_some_and(|s| s.chars().count() > RETRO_NOTE_MAX_CHARS) {
+        return Err(LcError::Bad("note too long (max 500 chars)".into()));
+    }
+    Ok(note)
+}
+
+/// 譯文的四項本地檢查各自的結果（逐項，不像 `local_reason` 只回第一個）：複盤給管理者看「哪一項有問題」用。
+fn local_check_flags(source: &str, reply: &str) -> Value {
+    json!({
+        "untranslated": is_mostly_english(source) && is_mostly_english(reply),
+        "partially_untranslated": partially_untranslated(source, reply),
+        "markdown_structure": !markdown_structure_matches(source, reply),
+        "japanese_output": !has_japanese_kana(source) && has_japanese_kana(reply),
+    })
+}
+
+/// 本專案的管理者 bot（沒有就 None）。
+async fn project_manager(app: &App, project_id: &str) -> Result<Option<String>, LcError> {
+    let manager: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM bots WHERE project_id = ? AND role = 'manager' AND parent_bot_id IS NULL AND deleted_at IS NULL ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok(manager.map(|(id,)| id))
+}
+
+/// 送一則翻譯回報給管理者的**唯一入口**。現在是既有 supervisor inbox 的 `bot_request`；承諾帳本第 1 階段上線後，
+/// 改成在這裡開帳本事項（呼叫端不用動）。
+async fn file_translate_report(app: &App, event_key_prefix: &str, id: &str, manager_id: &str, payload: &Value) -> Result<(), LcError> {
+    let event_key = format!("{event_key_prefix}:{id}:{}", crate::db::ulid());
+    crate::supervisor_inbox::push_inbox(&app.db, &event_key, "bot_request", None, Some(manager_id), None, payload)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    Ok(())
+}
+
+/// `POST /api/messages/{id}/translate-report`（User-only）。兩種用法：
+/// - 譯文被品質檢查擋下（rejected）：把原因摘要以 `kind: translate_report` 送給本專案的管理者 bot（不含整段原文，只附前 200 字）。
+/// - 譯文已完成（done）：「複盤」，`kind: translate_retro`，附原文／譯文前 1500 字、模型、成本、是否重翻過、Jev、四項本地檢查、
+///   使用者的一句話（body `{"note": "..."}`，選填，≤500 字），請管理者分析為什麼翻不好、該怎麼改規則。
+///
+/// 同一則訊息 10 分鐘內只送一次（送出時間記在快取的 `report_sent_at`，重啟也不會重送）。
+pub async fn post_translate_report(
+    State(app): State<Arc<App>>,
+    AxPath(id): AxPath<String>,
+    Extension(principal): Extension<crate::api::RequestPrincipal>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, LcError> {
     if principal != crate::api::RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
@@ -677,53 +746,80 @@ pub async fn post_translate_report(State(app): State<Arc<App>>, AxPath(id): AxPa
     }
     let path = cache_path(&app.data_dir, &cache_key(&id, &content));
     let mut entry = load_entry(&path).unwrap_or_default();
-    let Some(reason) = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty()) else {
+    let rejected = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty());
+    let done = !entry.translation.trim().is_empty();
+    if rejected.is_none() && !done {
         return Err(LcError::conflict("not_rejected", json!({"message_id": id})));
-    };
+    }
+    // 複盤的備註在去重之前就要驗（格式錯就是 400，不該被「重複」吃掉）。
+    let note = if done { parse_retro_note(&body)? } else { None };
     if let Some(sent) = entry.report_sent_at.as_deref() {
         let recent = chrono::DateTime::parse_from_rfc3339(sent).map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < REPORT_WINDOW_SECS).unwrap_or(false);
         if recent {
             return Ok(Json(json!({"sent": false, "reason": "duplicate", "sent_at": sent})));
         }
     }
-    let manager: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM bots WHERE project_id = ? AND role = 'manager' AND parent_bot_id IS NULL AND deleted_at IS NULL ORDER BY created_at, id LIMIT 1",
-    )
-    .bind(&project_id)
-    .fetch_optional(&app.db)
-    .await
-    .map_err(|e| LcError::Upstream(e.to_string()))?;
-    let Some((manager_id,)) = manager else {
+    let Some(manager_id) = project_manager(&app, &project_id).await? else {
         return Err(LcError::conflict("no_manager", json!({"project_id": project_id})));
     };
-    let detail = entry.reject_detail.clone();
-    let summary = match &detail {
-        Some(d) => format!(
-            "翻譯品質檢查未通過：{}；原文拉丁 {}／CJK {}，譯文拉丁 {}／CJK {}，譯文與原文相同：{}，嘗試 {} 次，模型 {}",
-            d.check, d.src_latin, d.src_cjk, d.reply_latin, d.reply_cjk, d.identical, d.attempts, d.models.join(" → ")
-        ),
-        None => format!("翻譯品質檢查未通過：{reason}"),
+    let payload = match rejected {
+        Some(reason) => {
+            let detail = entry.reject_detail.clone();
+            let summary = match &detail {
+                Some(d) => format!(
+                    "翻譯品質檢查未通過：{}；原文拉丁 {}／CJK {}，譯文拉丁 {}／CJK {}，譯文與原文相同：{}，嘗試 {} 次，模型 {}",
+                    d.check, d.src_latin, d.src_cjk, d.reply_latin, d.reply_cjk, d.identical, d.attempts, d.models.join(" → ")
+                ),
+                None => format!("翻譯品質檢查未通過：{reason}"),
+            };
+            json!({
+                "kind": "translate_report",
+                "message_id": id,
+                "bot_id": bot_id,
+                "project_id": project_id,
+                "reason": reason,
+                "detail": detail,
+                "summary": summary,
+                "source_head": content.chars().take(200).collect::<String>(),
+            })
+        }
+        None => {
+            let translation = entry.translation.clone();
+            json!({
+                "kind": "translate_retro",
+                "message_id": id,
+                "bot_id": bot_id,
+                "project_id": project_id,
+                "source": content.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>(),
+                "translation": translation.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>(),
+                "model": entry.model,
+                "prompt_version": entry.prompt_version,
+                "cost_usd": entry.cost_usd,
+                "attempts": entry.attempts,
+                "retried": entry.attempts.map(|n| n > 1),
+                "jev_prob": entry.jev_prob,
+                "low_confidence": entry.low_confidence,
+                "local_checks": local_check_flags(&content, &translation),
+                "user_note": note,
+                "summary": format!(
+                    "翻譯複盤（使用者要求）：模型 {}，嘗試 {} 次，Jev {}{}",
+                    entry.model,
+                    entry.attempts.map_or("未知".to_string(), |n| n.to_string()),
+                    entry.jev_prob.map_or("無".to_string(), |p| format!("{p:.2}")),
+                    note.as_deref().map(|n| format!("；使用者說：{n}")).unwrap_or_default(),
+                ),
+                "ask": "分析這次翻不好的原因，並提出規則或提示詞修正",
+            })
+        }
     };
-    let payload = json!({
-        "kind": "translate_report",
-        "message_id": id,
-        "bot_id": bot_id,
-        "project_id": project_id,
-        "reason": reason,
-        "detail": detail,
-        "summary": summary,
-        "source_head": content.chars().take(200).collect::<String>(),
-    });
-    let event_key = format!("translate-report:{id}:{}", crate::db::ulid());
-    crate::supervisor_inbox::push_inbox(&app.db, &event_key, "bot_request", None, Some(&manager_id), None, &payload)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let prefix = if payload["kind"] == "translate_retro" { "translate-retro" } else { "translate-report" };
+    file_translate_report(&app, prefix, &id, &manager_id, &payload).await?;
     let sent_at = crate::db::now();
     entry.report_sent_at = Some(sent_at.clone());
     if let Err(e) = save(&path, &entry) {
         tracing::warn!("message translate report marker write failed: {e}");
     }
-    Ok(Json(json!({"sent": true, "manager_bot_id": manager_id, "sent_at": sent_at})))
+    Ok(Json(json!({"sent": true, "manager_bot_id": manager_id, "sent_at": sent_at, "kind": payload["kind"]})))
 }
 
 /// 本地廉價檢查：譯文出現日文假名（原文沒有）→ `japanese_output`；原文為英文且譯文仍主要是英文 → `untranslated`；
@@ -2237,23 +2333,83 @@ mod retry_model_tests {
         let path = cache_path(&e.app.data_dir, &cache_key(&msg, &content));
         let _ = mark_rejected(&path, "untranslated", &content, &content, vec!["claude-haiku-5-5".into(), "claude-sonnet-5-5".into()], 2);
 
-        let first = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User)).await.unwrap().0;
+        let first = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), axum::body::Bytes::new()).await.unwrap().0;
         assert_eq!(first["sent"], json!(true));
         assert_eq!(first["manager_bot_id"], json!(bot.id));
         let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='bot_request' AND bot_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(n.0, 1, "送進管理者的收件匣");
 
-        let again = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User)).await.unwrap().0;
+        let again = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), axum::body::Bytes::new()).await.unwrap().0;
         assert_eq!((again["sent"].clone(), again["reason"].clone()), (json!(false), json!("duplicate")), "10 分鐘內只送一次");
 
-        let bot_caller = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone()))).await;
+        let bot_caller = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone())), axum::body::Bytes::new()).await;
         assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
 
         let plain = crate::db::ulid();
         sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant','plain reply',?,?)")
             .bind(&plain).bind(&conv).bind("hook").bind(crate::db::now()).execute(&e.app.db).await.unwrap();
-        let not_rejected = post_translate_report(State(e.app.clone()), AxPath(plain), Extension(crate::api::RequestPrincipal::User)).await;
+        let not_rejected = post_translate_report(State(e.app.clone()), AxPath(plain), Extension(crate::api::RequestPrincipal::User), axum::body::Bytes::new()).await;
         assert!(matches!(not_rejected, Err(LcError::Conflict(_))), "沒有被擋的譯文不能回報");
+    }
+
+    /// 複盤：已完成的譯文也能送（User-only）；payload 欄位齊全；10 分鐘內同一則只送一次。
+    #[tokio::test]
+    async fn retro_on_a_finished_translation_carries_the_fields_and_is_sent_once() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "retro-bot").await;
+        sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let conv = crate::db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&bot.id).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let content = SRC.repeat(3);
+        let msg = crate::db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'hook',?)")
+            .bind(&msg).bind(&conv).bind(&content).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
+        let path = cache_path(&e.app.data_dir, &cache_key(&msg, &content));
+        let done = CacheEntry {
+            translation: "這是譯文".into(),
+            model: "claude-sonnet-5-5".into(),
+            prompt_version: PROMPT_VERSION.into(),
+            cost_usd: Some(0.02),
+            jev_prob: Some(0.61),
+            low_confidence: true,
+            attempts: Some(2),
+            ..Default::default()
+        };
+        save(&path, &done).unwrap();
+
+        let body = axum::body::Bytes::from(r#"{"note":"  專有名詞沒保留  "}"#);
+        let first = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), body.clone()).await.unwrap().0;
+        assert_eq!((first["sent"].clone(), first["kind"].clone()), (json!(true), json!("translate_retro")));
+        let raw: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='bot_request' AND bot_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        let p: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(p["kind"], json!("translate_retro"));
+        assert_eq!(p["message_id"], json!(msg));
+        assert_eq!(p["source"], json!(content.chars().take(RETRO_TEXT_MAX_CHARS).collect::<String>()));
+        assert_eq!(p["translation"], json!("這是譯文"));
+        assert_eq!((p["model"].clone(), p["prompt_version"].clone(), p["cost_usd"].clone()), (json!("claude-sonnet-5-5"), json!(PROMPT_VERSION), json!(0.02)));
+        assert_eq!((p["attempts"].clone(), p["retried"].clone(), p["jev_prob"].clone()), (json!(2), json!(true), json!(0.61)));
+        assert_eq!(p["user_note"], json!("專有名詞沒保留"), "備註 trim 後存");
+        for k in ["untranslated", "partially_untranslated", "markdown_structure", "japanese_output"] {
+            assert!(p["local_checks"][k].is_boolean(), "local_checks.{k} 要是 bool");
+        }
+        assert!(p["ask"].as_str().is_some_and(|s| !s.is_empty()));
+
+        let again = post_translate_report(State(e.app.clone()), AxPath(msg.clone()), Extension(crate::api::RequestPrincipal::User), body).await.unwrap().0;
+        assert_eq!((again["sent"].clone(), again["reason"].clone()), (json!(false), json!("duplicate")), "10 分鐘內只送一次");
+
+        let bot_caller = post_translate_report(State(e.app.clone()), AxPath(msg), Extension(crate::api::RequestPrincipal::Bot(bot.id.clone())), axum::body::Bytes::new()).await;
+        assert!(matches!(bot_caller, Err(LcError::Forbidden(_))), "bot 呼叫回 403");
+    }
+
+    #[test]
+    fn retro_note_is_optional_trimmed_and_capped() {
+        assert_eq!(parse_retro_note(b"").unwrap(), None);
+        assert_eq!(parse_retro_note(b"  \n").unwrap(), None);
+        assert_eq!(parse_retro_note(br#"{"note":"   "}"#).unwrap(), None);
+        assert_eq!(parse_retro_note(r#"{"note":" 好 "}"#.as_bytes()).unwrap().as_deref(), Some("好"));
+        let long = format!(r#"{{"note":"{}"}}"#, "字".repeat(RETRO_NOTE_MAX_CHARS + 1));
+        assert!(matches!(parse_retro_note(long.as_bytes()), Err(LcError::Bad(_))), "超過 500 字 400");
+        assert!(matches!(parse_retro_note(b"not json"), Err(LcError::Bad(_))));
     }
 
     #[test]

@@ -599,12 +599,17 @@ export async function translateMessage(
   }
 }
 
-/** `POST /messages/:id/translate-report`：翻譯品質沒過時，把原因摘要送給本專案的管理者（10 分鐘內同一則只送一次；`sent: false` 就是重複）。 */
-export async function reportTranslation(messageId: string): Promise<{ sent: boolean; reason: string | null }> {
-  const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate-report`)
+/**
+ * `POST /messages/:id/translate-report`：品質沒過（不帶 note）→ 回報原因；譯文已完成 → 「複盤」（帶 `note`，選填，≤500 字）。
+ * 送給本專案的管理者，10 分鐘內同一則只送一次（`sent: false` 就是重複，`sentAt` 是那次送出的時間）。
+ */
+export async function reportTranslation(messageId: string, note?: string): Promise<{ sent: boolean; reason: string | null; sentAt: string | null }> {
+  const body = note === undefined ? undefined : { note }
+  const raw = await transport.request('POST', `/messages/${encodeURIComponent(messageId)}/translate-report`, body)
   const o = isRec(raw) ? raw : {}
   const reason = pick(o, 'reason')
-  return { sent: pick(o, 'sent') === true, reason: typeof reason === 'string' ? reason : null }
+  const sentAt = pick(o, 'sent_at')
+  return { sent: pick(o, 'sent') === true, reason: typeof reason === 'string' ? reason : null, sentAt: typeof sentAt === 'string' ? sentAt : null }
 }
 
 /** `POST /pending-questions/translate`：整份待答問卷一次翻成繁中（只翻顯示；送回 CLI 的仍是原選項）。`id` 由 daemon 產生（`q{n}`、`q{n}-o{m}`）。 */
