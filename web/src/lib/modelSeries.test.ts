@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { ModelInfo } from '../api/types.ts'
+import { agyModelAllowed, type ModelInfo } from '../api/types.ts'
 import { compareVersion, ensureCurrentModel, latestModels, parseModelSeries } from './modelSeries.ts'
 import { compareAgyModels, formatAgyEffortLabel, formatAgyModelLabel, parseAgyModel, sortAgyModelIds } from './agyModel.ts'
 
@@ -261,4 +261,28 @@ test('ensureCurrentModel：目前模型不在清單時補上虛擬項目並標�
   const resRetired = ensureCurrentModel(staticList, 'gemini-3.1-pro-high', 'agy')
   assert.equal(resRetired.models.length, 3)
   assert.equal(resRetired.missingIds.size, 0)
+})
+
+test('Orchestrator：標籤「Orchestrator Neon」「Orchestrator Argon」（g1-pro 即 Argon）', () => {
+  assert.equal(formatAgyModelLabel('gemini-pro-orchestrator-neon'), 'Orchestrator Neon')
+  assert.equal(formatAgyModelLabel('gemini-pro-orchestrator-g1-pro'), 'Orchestrator Argon')
+})
+
+test('sortAgyModelIds：Orchestrator 排在 Gemini 4 之後、認不得的之前，組內保持原順序', () => {
+  const input = ['unknown-x', 'gemini-pro-orchestrator-neon', 'gemini-4-neon-high', 'gemini-3.8-flash-low', 'gemini-pro-orchestrator-g1-pro']
+  assert.deepEqual(sortAgyModelIds(input), [
+    'gemini-3.8-flash-low',
+    'gemini-4-neon-high',
+    'gemini-pro-orchestrator-neon',
+    'gemini-pro-orchestrator-g1-pro',
+    'unknown-x',
+  ])
+})
+
+test('agyModelAllowed：Orchestrator slug 放行；第三方與 3.7 以下仍擋', () => {
+  assert.equal(agyModelAllowed('gemini-pro-orchestrator-neon'), true)
+  assert.equal(agyModelAllowed('gemini-pro-orchestrator-g1-pro'), true)
+  for (const no of ['gemini-pro-orchestrator-', 'gemini-pro-orchestrator', 'gemini-pro-orchestrator-Neon', 'claude-opus-5-5-high', 'claude-sonnet-5-5-medium', 'gpt-oss-120b-medium', 'gemini-3.7-flash-high']) {
+    assert.equal(agyModelAllowed(no), false, no)
+  }
 })

@@ -989,6 +989,8 @@ export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
 
 /** agy 的模型 slug 收不收（2026-10-14 使用者：「agy 只收 Gemini，版本 3.8 含以上」）：`gemini-<主>[.<次>]-…` 的版本 ≥ 3.8。daemon `agy_model_allowed` 同一條，兩邊要一起改。 */
 export function agyModelAllowed(id: string): boolean {
+  // Orchestrator（2026-11-21 實機 slug `gemini-pro-orchestrator-<家族>`，不帶版號）；daemon `agy_is_orchestrator` 同一條。
+  if (/^gemini-pro-orchestrator-[a-z0-9-]+$/.test(id)) return true
   const m = /^gemini-(\d+)(?:\.(\d+))?(?=-|$)/.exec(id)
   if (!m) return false
   const major = Number(m[1])

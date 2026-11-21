@@ -109,6 +109,9 @@ pub const AGY_DEFAULT_MODEL: &str = "gemini-3.8-flash-medium";
 /// 例：`gemini-3.8-flash-high`、`gemini-4-argon`、`gemini-3.10-…` 收；`gemini-3.7-…`、`gemini-3-…`、`claude-*`、`gpt-oss-*` 不收。
 /// 權威在這裡，web 的 `agyModelAllowed`（`web/src/api/types.ts`）是同一條判斷式，兩邊要一起改。
 pub fn agy_model_allowed(slug: &str) -> bool {
+    if agy_is_orchestrator(slug) {
+        return true;
+    }
     let Some(ver) = slug.strip_prefix("gemini-").and_then(|rest| rest.split('-').next()) else { return false };
     let mut parts = ver.split('.').map(|p| p.parse::<u32>());
     let Some(Ok(major)) = parts.next() else { return false };
@@ -118,6 +121,13 @@ pub fn agy_model_allowed(slug: &str) -> bool {
         Some(Err(_)) => return false,
     };
     parts.next().is_none() && (major, minor) >= (3, 8)
+}
+
+/// Orchestrator（付費 Google AI Pro，planner 為 Neon／Argon；2026-11-21 實機 `agy models`）：slug 為 `gemini-pro-orchestrator-<家族>`，不帶版號。
+/// 只認這個前綴（`claude-*`、`gpt-oss-*` 不會符合）。
+pub fn agy_is_orchestrator(slug: &str) -> bool {
+    slug.strip_prefix("gemini-pro-orchestrator-")
+        .is_some_and(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
 }
 
 /// 解析 `agy models` 的輸出（每行 `slug<TAB>顯示名`，純文字）：只留 [`agy_model_allowed`] 的，預設排第一。

@@ -29,6 +29,19 @@ export interface ParsedAgyModel {
   effortRank: number
 }
 
+/** Orchestrator 的 planner 家族別名：實機 slug `gemini-pro-orchestrator-g1-pro` 的顯示名是 Argon（`agy models`，2026-11-21）。 */
+const ORCHESTRATOR_FAMILY_ALIAS: Record<string, string> = {
+  'g1-pro': 'argon',
+}
+
+/**
+ * 是不是 Orchestrator slug（`gemini-pro-orchestrator-<家族>`，不帶版號）。
+ * 與 daemon `agy_is_orchestrator`、web `agyModelAllowed` 同一條判斷。
+ */
+export function isAgyOrchestrator(id: string): boolean {
+  return /^gemini-pro-orchestrator-[a-z0-9-]+$/.test(id)
+}
+
 /**
  * 解析 agy 模型 id：`gemini-<版號>-<家族>[-<強度>]`
  * 認不得格式時回 null。
@@ -73,9 +86,15 @@ export function formatAgyEffortLabel(effort: string): string {
  * 例：`gemini-3.8-flash-low` → 「3.8-Flash Low」
  *     `gemini-4-neon-xhigh` → 「4-Neon XHigh」
  *     `gemini-4-argon` → 「4-Argon」
+ *     `gemini-pro-orchestrator-neon` → 「Orchestrator Neon」
  * 認不得格式的 id 照舊原樣顯示。
  */
 export function formatAgyModelLabel(id: string): string {
+  if (isAgyOrchestrator(id)) {
+    const raw = id.slice('gemini-pro-orchestrator-'.length)
+    const family = ORCHESTRATOR_FAMILY_ALIAS[raw] ?? raw
+    return `Orchestrator ${family.charAt(0).toUpperCase()}${family.slice(1)}`
+  }
   const parsed = parseAgyModel(id)
   if (!parsed) return id
   const capitalizedFamily = parsed.family.charAt(0).toUpperCase() + parsed.family.slice(1)
@@ -118,6 +137,7 @@ export function buildAgyFamilyOrder(ids: readonly string[]): Map<string, number>
  * agy 模型排序：
  * - 家族由便宜到貴：flash < hydrogen < argon < neon（未知家族排最後、照原順序）
  * - 同家族依版號由舊到新、再依強度 low < medium < high < xhigh
+ * - Orchestrator 排在所有 Gemini 版號之後、認不得的 id 之前（同組內保持原順序）
  * - 認不得的 id 排最後原樣
  */
 export function compareAgyModels(
@@ -148,6 +168,10 @@ export function compareAgyModels(
   }
   if (pa && !pb) return -1
   if (!pa && pb) return 1
+  const oa = isAgyOrchestrator(aId)
+  const ob = isAgyOrchestrator(bId)
+  if (oa && !ob) return -1
+  if (!oa && ob) return 1
   return 0
 }
 

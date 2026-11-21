@@ -346,6 +346,28 @@
         }
     }
 
+    /// 2026-11-21：Orchestrator（實機 slug `gemini-pro-orchestrator-neon`、`gemini-pro-orchestrator-g1-pro`）放行；其他第三方與前綴不完整的仍擋。
+    #[test]
+    fn agy_orchestrator_slugs_are_allowed_but_third_party_stays_blocked() {
+        for ok in ["gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-g1-pro"] {
+            assert!(agy_model_allowed(ok), "{ok} 該收");
+            assert!(agy_is_orchestrator(ok), "{ok} 該認成 orchestrator");
+        }
+        for no in [
+            "gemini-pro-orchestrator-",
+            "gemini-pro-orchestrator",
+            "gemini-pro-orchestrator-Neon",
+            "gemini-pro-orchestrator-neon/x",
+            "claude-opus-5-5-high",
+            "claude-sonnet-5-5-medium",
+            "gpt-oss-120b-medium",
+            "gemini-pro-3.1-neon",
+        ] {
+            assert!(!agy_model_allowed(no), "{no} 不該收");
+            assert!(!agy_is_orchestrator(no), "{no} 不該認成 orchestrator");
+        }
+    }
+
     /// 不收的 agy 模型一律換成預設（啟動、寫設定、adopted 的 argv 都是同一支 `canonical_model`）；收的原樣。
     #[test]
     fn agy_models_outside_the_rule_fall_back_to_the_default() {
