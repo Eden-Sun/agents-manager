@@ -27,6 +27,7 @@ pub struct LineageSession {
     pub input_tokens: i64,
     pub cached_input_tokens: i64,
     pub output_tokens: i64,
+    pub tokens_include_parent: bool,
     pub last_api_at: Option<String>,
     pub head_sha: Option<String>,
     pub state: String,
@@ -128,6 +129,7 @@ pub struct LineTokens {
     pub output_tokens: i64,
     pub hit_ratio: f64,
     pub saved_input_tokens: i64,
+    pub includes_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -215,8 +217,10 @@ pub async fn stats(pool: &SqlitePool, project_id: &str) -> Result<Vec<LineStat>,
         .fetch_all(pool)
         .await?;
 
-        let (input, cached, output): (i64, i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(output_tokens), 0) \
+        let (input, cached, output, saved, includes_parent_i): (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+                    COALESCE(SUM(CASE WHEN tokens_include_parent = 0 THEN cached_input_tokens ELSE 0 END), 0), \
+                    COALESCE(MAX(tokens_include_parent), 0) \
              FROM lineage_sessions WHERE project_id = ? AND line = ?",
         )
         .bind(project_id)
@@ -240,12 +244,94 @@ pub async fn stats(pool: &SqlitePool, project_id: &str) -> Result<Vec<LineStat>,
                 cached_input_tokens: cached,
                 output_tokens: output,
                 hit_ratio,
-                saved_input_tokens: cached,
+                saved_input_tokens: saved,
+                includes_parent: includes_parent_i != 0,
             },
         });
     }
 
     Ok(out)
+}
+
+/// 將 rollout 最後一筆 `total_token_usage` 寫回 `lineage_sessions`（覆寫，不累加；#1943 D2）。
+///
+/// 若該 session 有 `parent_session_id`：
+/// - 沿祖先鏈加總已記錄的 token（因為 codex fork 的 rollout `total_token_usage` 含父歷史）；
+/// - 若直接父 session 已有記錄（任一欄位 > 0），扣除整個祖先鏈的累計，記為「自己的用量」（`tokens_include_parent = 0`）；
+/// - 若直接父尚未記錄（不存在或三欄皆 0），照原值寫入並標記 `tokens_include_parent = 1`，避免 stats 把父歷史當成本線省下的量。
+///
+/// 找不到該 `(project_id, session_id)` 時回 `Ok(false)`。
+pub async fn record_rollout_tokens(
+    pool: &SqlitePool,
+    project_id: &str,
+    session_id: &str,
+    total_input: i64,
+    total_cached: i64,
+    total_output: i64,
+    context_tokens: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    let Some(row) = by_session(&mut tx, project_id, session_id).await? else {
+        return Ok(false);
+    };
+    let (own_in, own_cached, own_out, include_parent) = match row.parent_session_id.as_deref() {
+        None => (total_input.max(0), total_cached.max(0), total_output.max(0), false),
+        Some(first_parent) => {
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(session_id.to_string());
+            let mut cur_id = Some(first_parent.to_string());
+            let mut anc_in: i64 = 0;
+            let mut anc_cached: i64 = 0;
+            let mut anc_out: i64 = 0;
+            let mut direct_parent_recorded = false;
+            let mut is_first = true;
+            while let Some(pid) = cur_id {
+                if visited.len() >= 64 || !visited.insert(pid.clone()) {
+                    break;
+                }
+                let Some(parent) = by_session(&mut tx, project_id, &pid).await? else {
+                    break;
+                };
+                if is_first && (parent.input_tokens > 0 || parent.cached_input_tokens > 0 || parent.output_tokens > 0) {
+                    direct_parent_recorded = true;
+                }
+                is_first = false;
+                anc_in = anc_in.saturating_add(parent.input_tokens.max(0));
+                anc_cached = anc_cached.saturating_add(parent.cached_input_tokens.max(0));
+                anc_out = anc_out.saturating_add(parent.output_tokens.max(0));
+                cur_id = parent.parent_session_id;
+            }
+            if direct_parent_recorded {
+                (
+                    total_input.saturating_sub(anc_in).max(0),
+                    total_cached.saturating_sub(anc_cached).max(0),
+                    total_output.saturating_sub(anc_out).max(0),
+                    false,
+                )
+            } else {
+                (total_input.max(0), total_cached.max(0), total_output.max(0), true)
+            }
+        }
+    };
+    let ctx = context_tokens.filter(|&n| n >= 0);
+    let now = crate::db::now();
+    sqlx::query(
+        "UPDATE lineage_sessions \
+         SET input_tokens = ?, cached_input_tokens = ?, output_tokens = ?, tokens_include_parent = ?, \
+             context_tokens = COALESCE(?, context_tokens), updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(own_in)
+    .bind(own_cached)
+    .bind(own_out)
+    .bind(i64::from(include_parent))
+    .bind(ctx)
+    .bind(&now)
+    .bind(&row.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// 某條線目前的檢查點。
@@ -818,5 +904,48 @@ mod tests {
             advance_with_claim(&pool, "p1", "web", &f2.id, None, Fields::default()).await,
             Err(LineageError::ClaimClosed(ref c)) if c.state == "abandoned"
         ));
+    }
+
+    #[tokio::test]
+    async fn record_rollout_tokens_subtracts_ancestors_is_idempotent_and_flags_unrecorded_parent() {
+        let pool = pool().await;
+        // 1. 根檢查點 s0（無父）
+        advance(&pool, "p1", "web", "s0", Fields::default()).await.unwrap();
+        assert!(record_rollout_tokens(&pool, "p1", "s0", 100_000, 80_000, 2_000, Some(50_000)).await.unwrap());
+        let r0 = by_session(&mut *pool.acquire().await.unwrap(), "p1", "s0").await.unwrap().unwrap();
+        assert_eq!((r0.input_tokens, r0.cached_input_tokens, r0.output_tokens, r0.tokens_include_parent), (100_000, 80_000, 2_000, false));
+        assert_eq!(r0.context_tokens, Some(50_000));
+
+        // 2. 第一層 fork s1（父 s0）：扣掉 s0、只記自己用量
+        create(&pool, "p1", "web", "s1", Fields { parent_session_id: Some("s0".into()), ..Default::default() }).await.unwrap();
+        assert!(record_rollout_tokens(&pool, "p1", "s1", 120_000, 95_000, 2_500, Some(60_000)).await.unwrap());
+        let r1 = by_session(&mut *pool.acquire().await.unwrap(), "p1", "s1").await.unwrap().unwrap();
+        assert_eq!((r1.input_tokens, r1.cached_input_tokens, r1.output_tokens, r1.tokens_include_parent), (20_000, 15_000, 500, false));
+
+        // 冪等覆寫：再讀同一筆 total 不會累加
+        assert!(record_rollout_tokens(&pool, "p1", "s1", 120_000, 95_000, 2_500, Some(60_000)).await.unwrap());
+        let r1_again = by_session(&mut *pool.acquire().await.unwrap(), "p1", "s1").await.unwrap().unwrap();
+        assert_eq!((r1_again.input_tokens, r1_again.cached_input_tokens, r1_again.output_tokens), (20_000, 15_000, 500));
+
+        // 3. 第二層 fork s2（父 s1）：扣掉 s1 + s0 = 120k，不重複扣也不漏扣
+        create(&pool, "p1", "web", "s2", Fields { parent_session_id: Some("s1".into()), ..Default::default() }).await.unwrap();
+        assert!(record_rollout_tokens(&pool, "p1", "s2", 135_000, 108_000, 2_800, Some(65_000)).await.unwrap());
+        let r2 = by_session(&mut *pool.acquire().await.unwrap(), "p1", "s2").await.unwrap().unwrap();
+        assert_eq!((r2.input_tokens, r2.cached_input_tokens, r2.output_tokens, r2.tokens_include_parent), (15_000, 13_000, 300, false));
+
+        // 4. 父未記錄時照原值寫入並標記 tokens_include_parent=true；stats 不計入 saved_input_tokens
+        create(&pool, "p1", "quota", "orphan", Fields { parent_session_id: Some("missing-parent".into()), ..Default::default() }).await.unwrap();
+        assert!(record_rollout_tokens(&pool, "p1", "orphan", 50_000, 40_000, 1_000, None).await.unwrap());
+        let ro = by_session(&mut *pool.acquire().await.unwrap(), "p1", "orphan").await.unwrap().unwrap();
+        assert_eq!((ro.input_tokens, ro.cached_input_tokens, ro.output_tokens, ro.tokens_include_parent), (50_000, 40_000, 1_000, true));
+
+        let st = stats(&pool, "p1").await.unwrap();
+        let web_st = st.iter().find(|s| s.line == "web").unwrap();
+        assert_eq!((web_st.tokens.input_tokens, web_st.tokens.cached_input_tokens, web_st.tokens.saved_input_tokens, web_st.tokens.includes_parent), (135_000, 108_000, 108_000, false));
+        let quota_st = st.iter().find(|s| s.line == "quota").unwrap();
+        assert_eq!((quota_st.tokens.input_tokens, quota_st.tokens.cached_input_tokens, quota_st.tokens.saved_input_tokens, quota_st.tokens.includes_parent), (50_000, 40_000, 0, true));
+
+        // 5. 未登記在 lineage_sessions 的 session 回 false
+        assert!(!record_rollout_tokens(&pool, "p1", "unregistered", 10_000, 8_000, 100, None).await.unwrap());
     }
 }

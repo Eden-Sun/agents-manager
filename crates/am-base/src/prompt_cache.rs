@@ -43,12 +43,21 @@ pub struct CodexUsage {
     pub window: i64,
 }
 
+/// rollout 一筆 `token_count` 的 `total_token_usage`（該 session 累計）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexTotalUsage {
+    pub input: i64,
+    pub cached: i64,
+    pub output: i64,
+}
+
 #[derive(Debug, Default)]
 pub struct Entry {
     session_id: String,
     path: Option<PathBuf>,
     offset: u64,
     usage: Option<CodexUsage>,
+    total: Option<CodexTotalUsage>,
     /// 遠端 run 上次打 host 的時間（[`REMOTE_EVERY`] 節流）。位移與本機共用 `offset`，只放記憶體。
     remote_at: Option<Instant>,
     /// 這個 session 是否已經試過往前補（[`REMOTE_BACKWARD_BYTES`]）。試過就不再試，失敗也不逐輪重傳。
@@ -89,7 +98,7 @@ pub fn retain_runs(active: &[String]) {
 }
 
 /// rollout 的一行；不是 `token_count`、`info` 是 null（開頭常見）、缺欄位都回 `None`。
-pub fn parse_token_count(line: &str) -> Option<CodexUsage> {
+pub fn parse_token_count_with_total(line: &str) -> Option<(CodexUsage, Option<CodexTotalUsage>)> {
     if !line.contains("\"token_count\"") {
         return None;
     }
@@ -103,12 +112,26 @@ pub fn parse_token_count(line: &str) -> Option<CodexUsage> {
     let cached = last.get("cached_input_tokens").and_then(Value::as_i64).unwrap_or(0);
     let window = info.get("model_context_window")?.as_i64()?;
     let at_ms = db::parse_ts(v.get("timestamp")?.as_str()?)?.timestamp_millis();
-    Some(CodexUsage { at_ms, input, cached, window })
+    let total = info.get("total_token_usage").and_then(|t| {
+        let total_in = t.get("input_tokens")?.as_i64()?;
+        let total_cached = t.get("cached_input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let total_out = t.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+        Some(CodexTotalUsage { input: total_in, cached: total_cached, output: total_out })
+    });
+    Some((CodexUsage { at_ms, input, cached, window }, total))
+}
+
+pub fn parse_token_count(line: &str) -> Option<CodexUsage> {
+    parse_token_count_with_total(line).map(|(u, _)| u)
 }
 
 /// 一段（整行）rollout 文字裡最後一筆 `token_count`。
 pub fn last_token_count(text: &str) -> Option<CodexUsage> {
     text.lines().rev().find_map(parse_token_count)
+}
+
+pub fn last_token_count_with_total(text: &str) -> Option<(CodexUsage, Option<CodexTotalUsage>)> {
+    text.lines().rev().find_map(parse_token_count_with_total)
 }
 
 /// 讀 `path` 從 `offset` 起新增的**整行**：回 `(文字, 新位移)`。
@@ -136,14 +159,29 @@ pub fn read_new(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
 pub const BACKWARD_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `path` 在 `end` 之前（往前最多 [`BACKWARD_BYTES`]）最後一筆 `token_count`。讀不到回 `None`。
-pub fn last_token_count_before(path: &Path, end: u64) -> Option<CodexUsage> {
+pub fn last_token_count_with_total_before(path: &Path, end: u64) -> Option<(CodexUsage, Option<CodexTotalUsage>)> {
     let mut f = std::fs::File::open(path).ok()?;
     let start = end.saturating_sub(BACKWARD_BYTES);
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::with_capacity((end - start) as usize);
     f.take(end - start).read_to_end(&mut buf).ok()?;
     let from = if start > 0 { buf.iter().position(|b| *b == b'\n').map_or(buf.len(), |i| i + 1) } else { 0 };
-    last_token_count(&String::from_utf8_lossy(&buf[from..]))
+    last_token_count_with_total(&String::from_utf8_lossy(&buf[from..]))
+}
+
+pub fn last_token_count_before(path: &Path, end: u64) -> Option<CodexUsage> {
+    last_token_count_with_total_before(path, end).map(|(u, _)| u)
+}
+
+async fn sync_lineage_tokens(
+    pool: &SqlitePool,
+    run: &db::Run,
+    session_id: &str,
+    total: CodexTotalUsage,
+    context_tokens: Option<i64>,
+) {
+    let Ok(Some(bot)) = db::bot(pool, &run.bot_id).await else { return };
+    let _ = db::lineage::record_rollout_tokens(pool, &bot.project_id, session_id, total.input, total.cached, total.output, context_tokens).await;
 }
 
 /// Run-scoped Codex cache observation. The App wrapper supplies only the database, local rollout
@@ -163,7 +201,10 @@ pub async fn refresh_codex_with_ports<R, E>(
         Ok(host) if host == crate::config::LOCAL_HOST => {}
         // 遠端 codex：rollout 在那台主機，經 host 通道增量讀；讀數有變才投影。
         Ok(_) => {
-            let changed = refresh_remote(&run.id, &session_id, |offset, cap| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset, cap)).await;
+            let (changed, total_to_sync) = refresh_remote_inner(&run.id, &session_id, |offset, cap| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset, cap)).await;
+            if let Some((total, ctx)) = total_to_sync {
+                sync_lineage_tokens(database.pool(), run, &session_id, total, ctx).await;
+            }
             if changed {
                 emit_bot_status(events, &run.bot_id).await;
             }
@@ -189,13 +230,13 @@ pub async fn refresh_codex_with_ports<R, E>(
     };
     let p2 = path.clone();
     let known = store().lock().unwrap_or_else(|e| e.into_inner()).get(&run.id).is_some_and(|e| e.usage.is_some());
-    let Ok(Ok((text, new_offset, latest))) = tokio::task::spawn_blocking(move || {
+    let Ok(Ok((text, new_offset, latest_pair))) = tokio::task::spawn_blocking(move || {
         let (text, new_offset) = read_new(&p2, offset)?;
-        let mut latest = last_token_count(&text);
+        let mut latest = last_token_count_with_total(&text);
         // 還沒有任何讀數（daemon 剛重啟、第一次看到這個 run），檔尾又剛好全是工具輸出：往前多找一段，
         // 不然冷掉之後永遠不知道冷前用了多少 context（使用者 2026-10-14）。
         if latest.is_none() && !known {
-            latest = last_token_count_before(&p2, new_offset);
+            latest = last_token_count_with_total_before(&p2, new_offset);
         }
         Ok::<_, std::io::Error>((text, new_offset, latest))
     })
@@ -204,7 +245,9 @@ pub async fn refresh_codex_with_ports<R, E>(
         return;
     };
     let _ = text;
-    let changed = {
+    let latest = latest_pair.map(|(u, _)| u);
+    let latest_total = latest_pair.and_then(|(_, t)| t);
+    let (changed, total_to_sync) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let Some(e) = s.get_mut(&run.id).filter(|e| e.session_id == session_id) else { return };
         e.path = Some(path);
@@ -213,8 +256,18 @@ pub async fn refresh_codex_with_ports<R, E>(
         if latest.is_some() {
             e.usage = latest;
         }
-        changed
+        let total_to_sync = match latest_total {
+            Some(t) if e.total != Some(t) => {
+                e.total = Some(t);
+                Some((t, latest.map(|u| u.input)))
+            }
+            _ => None,
+        };
+        (changed, total_to_sync)
     };
+    if let Some((total, ctx)) = total_to_sync {
+        sync_lineage_tokens(database.pool(), run, &session_id, total, ctx).await;
+    }
     if changed {
         emit_bot_status(events, &run.bot_id).await;
     }
@@ -229,6 +282,14 @@ where
     F: Fn(Option<u64>, u64) -> Fut,
     Fut: Future<Output = Option<RemoteRollout>>,
 {
+    refresh_remote_inner(run_id, session, read).await.0
+}
+
+async fn refresh_remote_inner<F, Fut>(run_id: &str, session: &str, read: F) -> (bool, Option<(CodexTotalUsage, Option<i64>)>)
+where
+    F: Fn(Option<u64>, u64) -> Fut,
+    Fut: Future<Output = Option<RemoteRollout>>,
+{
     let (offset, known) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(run_id.to_owned()).or_default();
@@ -237,27 +298,36 @@ where
             *e = Entry { session_id: session.to_owned(), ..Default::default() };
         }
         if e.remote_at.is_some_and(|at| at.elapsed() < REMOTE_EVERY) {
-            return false;
+            return (false, None);
         }
         e.remote_at = Some(Instant::now());
         ((e.offset > 0).then_some(e.offset), e.usage.is_some())
     };
-    let Some(mut now) = read(offset, TAIL_BYTES).await else { return false };
-    let mut latest = last_token_count(&now.text);
-    if latest.is_none() && !known && claim_wide(run_id, session) {
+    let Some(mut now) = read(offset, TAIL_BYTES).await else { return (false, None) };
+    let mut latest_pair = last_token_count_with_total(&now.text);
+    if latest_pair.is_none() && !known && claim_wide(run_id, session) {
         if let Some(wide) = read(None, REMOTE_BACKWARD_BYTES).await {
-            latest = last_token_count(&wide.text);
+            latest_pair = last_token_count_with_total(&wide.text);
             now = wide;
         }
     }
+    let latest = latest_pair.map(|(u, _)| u);
+    let latest_total = latest_pair.and_then(|(_, t)| t);
     let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(e) = s.get_mut(run_id).filter(|e| e.session_id == session) else { return false };
+    let Some(e) = s.get_mut(run_id).filter(|e| e.session_id == session) else { return (false, None) };
     e.offset = now.next;
     let changed = latest.is_some() && latest != e.usage;
     if latest.is_some() {
         e.usage = latest;
     }
-    changed
+    let total_to_sync = match latest_total {
+        Some(t) if e.total != Some(t) => {
+            e.total = Some(t);
+            Some((t, latest.map(|u| u.input)))
+        }
+        _ => None,
+    };
+    (changed, total_to_sync)
 }
 
 /// 這個 session 的往前補還沒試過：是就標成試過並回 `true`。
@@ -438,4 +508,86 @@ pub fn annotate(run_json: &mut Value, kind: &str, now_ms: i64) {
         _ => Value::Null,
     };
     o.insert("prompt_cache".into(), pc);
+}
+
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
+mod lineage_sync_tests {
+    use super::*;
+
+    struct FakeRollout {
+        path: Option<PathBuf>,
+    }
+
+    impl CodexRolloutAccess for FakeRollout {
+        async fn local_rollout_path<'a>(&'a self, _bot: &'a String, _session: &'a String) -> Option<PathBuf> {
+            self.path.clone()
+        }
+        async fn remote_rollout_read<'a>(&'a self, _run: &'a String, _bot: &'a String, _session: &'a String, _offset: Option<u64>, _cap: u64) -> Option<RemoteRollout> {
+            None
+        }
+    }
+
+    struct NullEvents;
+    impl EventSink for NullEvents {
+        async fn emit<'a>(&'a self, _event: am_ports::EventEnvelope) -> Result<am_ports::EventSeq, am_ports::PortError> {
+            Ok(0)
+        }
+        async fn bot_status_changed<'a>(&'a self, _bot: &'a str) -> Result<(), am_ports::PortError> {
+            Ok(())
+        }
+    }
+
+    struct TempFile(PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_codex_writes_rollout_total_to_lineage_sessions_and_skips_when_missing() {
+        let db_path = std::env::temp_dir().join(format!("am-lineage-db-{}.sqlite3", db::ulid())); // scratch-guard: allow TempFile Drop removes the temp DB file
+        let _db_guard = TempFile(db_path.clone());
+        let pool = db::open_with(&db_path, &[]).await.unwrap();
+        sqlx::query("INSERT INTO projects(id,path,label,created_at)VALUES('p1','/tmp/p1','p1','t')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('b1','p1','worker','codex','tok','t')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO runs(id,bot_id,state,agent_status,workspace_id,pane_id,native_session_id,started_at)VALUES('run-sync-1','b1','running','idle','ws','pane','sess-child','t')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let run: db::Run = sqlx::query_as("SELECT * FROM runs WHERE id = 'run-sync-1'").fetch_one(&pool).await.unwrap();
+
+        db::lineage::advance(&pool, "p1", "web", "sess-parent", db::lineage::Fields::default()).await.unwrap();
+        db::lineage::record_rollout_tokens(&pool, "p1", "sess-parent", 100_000, 80_000, 2_000, None).await.unwrap();
+        db::lineage::create(&pool, "p1", "web", "sess-child", db::lineage::Fields { parent_session_id: Some("sess-parent".into()), ..Default::default() }).await.unwrap();
+
+        let rollout_path = std::env::temp_dir().join(format!("am-lineage-sync-{}.jsonl", db::ulid())); // scratch-guard: allow TempFile Drop removes the temp rollout file
+        let _guard = TempFile(rollout_path.clone());
+        std::fs::write(
+            &rollout_path,
+            concat!(
+                r#"{"timestamp":"2026-11-21T10:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130000,"cached_input_tokens":105000,"output_tokens":2400},"last_token_usage":{"input_tokens":30000,"cached_input_tokens":25000,"output_tokens":400},"model_context_window":258400}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let db_ctx = DbContext::new(pool.clone());
+
+        // 1. 找不到 rollout：不寫入
+        refresh_codex_with_ports(&db_ctx, &FakeRollout { path: None }, &NullEvents, &run).await;
+        let before = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
+        assert_eq!((before[0].input_tokens, before[0].cached_input_tokens, before[0].output_tokens), (0, 0, 0));
+
+        // 2. 讀到假 rollout：扣掉父 session (100k, 80k, 2k) 後寫入 (30k, 25k, 400)
+        refresh_codex_with_ports(&db_ctx, &FakeRollout { path: Some(rollout_path) }, &NullEvents, &run).await;
+        let after = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
+        assert_eq!((after[0].input_tokens, after[0].cached_input_tokens, after[0].output_tokens), (30_000, 25_000, 400));
+        assert_eq!(after[0].context_tokens, Some(30_000));
+
+        // 3. 冪等：再跑一次不累加
+        refresh_codex_with_ports(&db_ctx, &FakeRollout { path: None }, &NullEvents, &run).await;
+        let again = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
+        assert_eq!((again[0].input_tokens, again[0].cached_input_tokens, again[0].output_tokens), (30_000, 25_000, 400));
+    }
 }
