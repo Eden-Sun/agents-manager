@@ -45,12 +45,14 @@ pub struct LedgerItem {
     pub updated_at: String,
 }
 
-/// 注入摘要用的計數（只算「需要這個 bot 行動」的未結事項）。
+/// 計數。`query_actionable_for_actor` 只填未結狀態（`answered`、`done` 為 0）；全專案的計數用 [`count_project`]。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct LedgerCounts {
     pub untriaged: i64,
     pub following: i64,
     pub clarifying: i64,
+    pub answered: i64,
+    pub done: i64,
     /// 沒有承辦人（待接手）。
     pub orphaned: i64,
     /// 已到期（`due_at <= now`）。
@@ -80,6 +82,10 @@ pub enum LedgerPatchOp {
         next_step: Option<String>,
         wait_for: Option<String>,
         due_at: Option<String>,
+        /// 指定承辦人（`None` 不動）。要交回待接手請用 `Handback`。
+        owner_bot_id: Option<String>,
+        /// 結案／取消的原因（`done` 時帶上，`None` 不動）。
+        close_reason: Option<String>,
     },
     /// 認領：承辦人設為 `owner_bot_id`（action=`claim`）。
     Claim { owner_bot_id: String },
@@ -92,8 +98,10 @@ pub enum LedgerPatchOp {
 }
 
 impl LedgerPatchOp {
-    fn action(&self) -> &'static str {
+    /// `ledger_events.action`：從 `untriaged` 離開的 `Update` 記為 `triage`（§1.2），其餘狀態變更記 `status`。
+    fn action(&self, from_status: &str, to_status: &str) -> &'static str {
         match self {
+            Self::Update { .. } if from_status == "untriaged" && to_status != "untriaged" => "triage",
             Self::Update { .. } => "status",
             Self::Claim { .. } => "claim",
             Self::Handback { .. } => "handback",
@@ -353,12 +361,25 @@ pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, sourc
     let status = input.status.clone().unwrap_or_else(|| "following".into());
     check_status(&status)?;
     let mut tx = db::begin_write(pool).await?;
+    // 追加項從 1 起跳：`ordinal = 0` 留給 `ingest_user_message` 的原始收件項。
     let ordinal: i64 = match source_message_id {
-        Some(m) => sqlx::query_scalar("SELECT COALESCE(MAX(ordinal), -1) + 1 FROM ledger_items WHERE project_id = ? AND source_message_id = ?")
-            .bind(project_id)
+        Some(m) => {
+            let owned: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM messages msg JOIN conversations c ON c.id = msg.conversation_id JOIN bots b ON b.id = c.bot_id WHERE msg.id = ? AND b.project_id = ?",
+            )
             .bind(m)
-            .fetch_one(&mut *tx)
-            .await?,
+            .bind(project_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if owned.is_none() {
+                return Err(LedgerError::Invalid("source_message_id 不屬於這個專案".into()));
+            }
+            sqlx::query_scalar("SELECT COALESCE(MAX(ordinal), 0) + 1 FROM ledger_items WHERE project_id = ? AND source_message_id = ?")
+                .bind(project_id)
+                .bind(m)
+                .fetch_one(&mut *tx)
+                .await?
+        }
         None => 0,
     };
     let code = next_code(&mut tx, project_id).await?;
@@ -399,11 +420,28 @@ fn check_status(status: &str) -> Result<(), LedgerError> {
     }
 }
 
+/// 解析事項定位：`L<正整數>`（大小寫皆可）走同專案的 `code_no`；其餘當作 ULID `id`。都找不到回 `NotFound`。
+/// 只給 tx 內用，讓 CAS 與 `Merge` 的目標看到同一份資料。
+async fn resolve_id(tx: &mut Transaction<'_, Sqlite>, project_id: &str, raw: &str) -> Result<String, LedgerError> {
+    let code = if raw.len() <= 12 {
+        raw.strip_prefix('L').or_else(|| raw.strip_prefix('l')).and_then(|n| n.parse::<i64>().ok()).filter(|n| *n > 0)
+    } else {
+        None
+    };
+    let id: Option<String> = match code {
+        Some(n) => sqlx::query_scalar("SELECT id FROM ledger_items WHERE project_id = ? AND code_no = ?").bind(project_id).bind(n).fetch_optional(&mut **tx).await?,
+        None => sqlx::query_scalar("SELECT id FROM ledger_items WHERE project_id = ? AND id = ?").bind(project_id).bind(raw).fetch_optional(&mut **tx).await?,
+    };
+    id.ok_or(LedgerError::NotFound)
+}
+
 /// 樂觀鎖異動：`expected_version` 與目前不符就回 [`LedgerError::VersionConflict`]，什麼都不寫。
-pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, expected_version: i64, actor: &str, op: LedgerPatchOp) -> Result<LedgerItem, LedgerError> {
+/// `item_ref` 可以是 ULID，也可以是 `L<code_no>`；`Merge` 的目標同樣接受兩種寫法，寫進 `merged_into_id` 的一律是解析後的 ULID。
+pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str, expected_version: i64, actor: &str, op: LedgerPatchOp) -> Result<LedgerItem, LedgerError> {
     let mut tx = db::begin_write(pool).await?;
+    let item_id = resolve_id(&mut tx, project_id, item_ref).await?;
     let cur: LedgerItem = sqlx::query_as("SELECT * FROM ledger_items WHERE id = ? AND project_id = ?")
-        .bind(item_id)
+        .bind(&item_id)
         .bind(project_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -413,7 +451,7 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, 
     }
     let mut next = cur.clone();
     match &op {
-        LedgerPatchOp::Update { title, status, deliverable, next_step, wait_for, due_at } => {
+        LedgerPatchOp::Update { title, status, deliverable, next_step, wait_for, due_at, owner_bot_id, close_reason } => {
             if let Some(s) = status {
                 check_status(s)?;
                 next.status = s.clone();
@@ -433,19 +471,25 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, 
             if due_at.is_some() {
                 next.due_at = due_at.clone();
             }
+            if owner_bot_id.is_some() {
+                next.owner_bot_id = owner_bot_id.clone();
+            }
+            if close_reason.is_some() {
+                next.close_reason = close_reason.clone();
+            }
         }
         LedgerPatchOp::Claim { owner_bot_id } => next.owner_bot_id = Some(owner_bot_id.clone()),
         LedgerPatchOp::Handback { to } => next.owner_bot_id = to.clone(),
         LedgerPatchOp::Merge { into_id } => {
-            if into_id == item_id {
+            let target = resolve_id(&mut tx, project_id, into_id).await.map_err(|e| match e {
+                LedgerError::NotFound => LedgerError::Invalid("併入的目標不在這個專案".into()),
+                other => other,
+            })?;
+            if target == item_id {
                 return Err(LedgerError::Invalid("不能併入自己".into()));
             }
-            let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM ledger_items WHERE id = ? AND project_id = ?").bind(into_id).bind(project_id).fetch_optional(&mut *tx).await?;
-            if exists.is_none() {
-                return Err(LedgerError::Invalid("併入的目標不在這個專案".into()));
-            }
             next.status = "merged".into();
-            next.merged_into_id = Some(into_id.clone());
+            next.merged_into_id = Some(target);
             next.close_reason = Some("merged".into());
         }
         LedgerPatchOp::Cancel { reason } => {
@@ -470,7 +514,7 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, 
     .bind(&next.close_reason)
     .bind(version)
     .bind(&now)
-    .bind(item_id)
+    .bind(&item_id)
     .bind(expected_version)
     .execute(&mut *tx)
     .await?;
@@ -480,10 +524,10 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, 
     record(
         &mut tx,
         Event {
-            item_id,
+            item_id: &item_id,
             project_id,
             actor,
-            action: op.action(),
+            action: op.action(&cur.status, &next.status),
             from_owner: cur.owner_bot_id.as_deref(),
             to_owner: next.owner_bot_id.as_deref(),
             from_status: Some(&cur.status),
@@ -492,19 +536,31 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_id: &str, 
         },
     )
     .await?;
-    let item = fetch(&mut tx, item_id).await?;
+    let item = fetch(&mut tx, &item_id).await?;
     tx.commit().await?;
     Ok(item)
 }
 
-/// 孤兒承辦回收：承辦 bot 已軟刪（`deleted_at`）或硬刪（列不存在）的未結事項，改回待接手佇列（`owner_bot_id = NULL`，版本 +1）。
+/// 孤兒承辦回收：承辦 bot 已軟刪、已硬刪，或已不再是專案管理入口（`is_project_management_actor` 的判準：卸任的副手也算）的未結事項，改回待接手佇列（`owner_bot_id = NULL`，版本 +1）。
 /// 事項本身不會消失。回傳被回收的事項。
 pub async fn reclaim_orphaned_items(pool: &SqlitePool) -> Result<Vec<LedgerItem>, LedgerError> {
     let mut tx = db::begin_write(pool).await?;
     let orphans: Vec<LedgerItem> = sqlx::query_as(&format!(
         "SELECT * FROM ledger_items li
          WHERE li.status IN {OPEN_SQL} AND li.owner_bot_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM bots b WHERE b.id = li.owner_bot_id AND b.deleted_at IS NULL)
+           AND NOT EXISTS (
+               SELECT 1 FROM bots b
+               JOIN projects p ON p.id = b.project_id
+               WHERE b.id = li.owner_bot_id
+                 AND b.project_id = li.project_id
+                 AND b.deleted_at IS NULL
+                 AND p.deleted_at IS NULL
+                 AND (
+                     p.deputy_bot_id = b.id
+                     OR (b.managed_by = 'user' AND b.parent_bot_id IS NULL
+                         AND ((p.mode = 'expert' AND b.role = 'manager') OR p.mode = 'parent_child'))
+                 )
+           )
          ORDER BY li.created_at, li.id"
     ))
     .fetch_all(&mut *tx)
@@ -525,6 +581,32 @@ pub async fn reclaim_orphaned_items(pool: &SqlitePool) -> Result<Vec<LedgerItem>
     }
     tx.commit().await?;
     Ok(out)
+}
+
+/// 專案全部事項的計數（`GET` 用）：每個狀態各計一次；`orphaned` ＝未結且沒有承辦人；`due` ＝未結且已到期。
+pub async fn count_project(pool: &SqlitePool, project_id: &str) -> Result<LedgerCounts, LedgerError> {
+    let now = db::now();
+    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as("SELECT status, owner_bot_id, due_at FROM ledger_items WHERE project_id = ?").bind(project_id).fetch_all(pool).await?;
+    let mut c = LedgerCounts::default();
+    for (status, owner, due) in rows {
+        match status.as_str() {
+            "untriaged" => c.untriaged += 1,
+            "following" => c.following += 1,
+            "clarifying" => c.clarifying += 1,
+            "answered" => c.answered += 1,
+            "done" => c.done += 1,
+            _ => {}
+        }
+        if OPEN_STATUSES.contains(&status.as_str()) {
+            if owner.is_none() {
+                c.orphaned += 1;
+            }
+            if due.as_deref().is_some_and(|d| db::cmp_ts(d, &now) != std::cmp::Ordering::Greater) {
+                c.due += 1;
+            }
+        }
+    }
+    Ok(c)
 }
 
 /// 注入摘要用：這個 bot 需要行動的未結事項（自己的，加上待接手的），以及計數。
@@ -610,7 +692,7 @@ mod tests {
         let all = split_message(&pool, "p1", "bot:b1", "m1", &[input("A"), input("B"), input("C")]).await.unwrap();
         assert_eq!(all.iter().map(|i| i.code_no).collect::<Vec<_>>(), vec![1, 2, 3]);
         let a = all[0].clone();
-        let answered = patch_item_cas(&pool, "p1", &a.id, a.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &a.id, a.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
         assert_eq!(answered.status, "answered");
         let (open, counts) = query_actionable_for_actor(&pool, "p1", "b1", Some("m1"), 10).await.unwrap();
         assert_eq!(open.iter().map(|i| i.code_no).collect::<Vec<_>>(), vec![2, 3], "only the unanswered two stay open");
@@ -645,5 +727,69 @@ mod tests {
         let (open, counts) = query_actionable_for_actor(&pool, "p1", "b1", None, 10).await.unwrap();
         assert_eq!(open.len(), 1, "a manager sees the unassigned item");
         assert_eq!(counts.orphaned, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retired_deputy_loses_its_items_and_the_manager_keeps_them() {
+        let pool = pool().await;
+        sqlx::query("UPDATE projects SET mode = 'expert' WHERE id = 'p1'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE bots SET role = 'manager' WHERE id = 'b1'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE bots SET role = 'executor' WHERE id = 'b2'").execute(&pool).await.unwrap();
+        assert!(is_project_management_actor(&pool, "p1", "b1").await.unwrap(), "expert manager");
+        assert!(!is_project_management_actor(&pool, "p1", "b2").await.unwrap(), "executor is not");
+        sqlx::query("UPDATE projects SET deputy_bot_id = 'b2' WHERE id = 'p1'").execute(&pool).await.unwrap();
+        assert!(is_project_management_actor(&pool, "p1", "b2").await.unwrap(), "acting deputy");
+        let deputy_item = commit_item(&pool, "p1", "bot:b2", None, &LedgerSplitInput { title: "代班".into(), owner_bot_id: Some("b2".into()), ..Default::default() }).await.unwrap();
+        let mgr_item = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "自己的".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+
+        sqlx::query("UPDATE projects SET deputy_bot_id = NULL WHERE id = 'p1'").execute(&pool).await.unwrap();
+        let reclaimed = reclaim_orphaned_items(&pool).await.unwrap();
+        assert_eq!(reclaimed.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec![deputy_item.id.as_str()], "only the retired deputy's item goes back");
+        let (owner,): (Option<String>,) = sqlx::query_as("SELECT owner_bot_id FROM ledger_items WHERE id = ?").bind(&mgr_item.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(owner.as_deref(), Some("b1"));
+    }
+
+    #[tokio::test]
+    async fn short_codes_resolve_and_merge_and_done_carry_their_reason() {
+        let pool = pool().await;
+        let first = ingest_user_message(&pool, "p1", "b1", "m1", None, "第一件").await.unwrap().unwrap();
+        let second = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "第二件".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+        assert_eq!(second.code_no, 2);
+        let merged = patch_item_cas(&pool, "p1", "L2", second.version, "bot:b1", LedgerPatchOp::Merge { into_id: "L1".into() }).await.unwrap();
+        assert_eq!((merged.status.as_str(), merged.merged_into_id.as_deref()), ("merged", Some(first.id.as_str())), "the target is stored as the ULID");
+        let done = patch_item_cas(
+            &pool,
+            "p1",
+            "l1",
+            first.version,
+            "user",
+            LedgerPatchOp::Update { title: None, status: Some("done".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: Some("已確認".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!((done.status.as_str(), done.close_reason.as_deref()), ("done", Some("已確認")));
+        let actions: Vec<(String,)> = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at, rowid").bind(&first.id).fetch_all(&pool).await.unwrap();
+        // 從 untriaged 直接結案：算一次 triage（離開待分流），不另記 status。
+        assert_eq!(actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["ingest", "triage"]);
+        // 之後從已分流的狀態再改，才記 status。
+        let reopened = patch_item_cas(&pool, "p1", &first.id, done.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let last: (String,) = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(&first.id).fetch_one(&pool).await.unwrap();
+        assert_eq!((last.0.as_str(), reopened.status.as_str()), ("status", "following"));
+        assert!(patch_item_cas(&pool, "p1", "L1", done.version, "bot:b1", LedgerPatchOp::Merge { into_id: "L1".into() }).await.is_err(), "cannot merge into itself");
+        assert!(matches!(patch_item_cas(&pool, "p1", "L9", 1, "user", LedgerPatchOp::Cancel { reason: "x".into() }).await, Err(LedgerError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn a_commitment_source_must_belong_to_the_project_and_extra_items_start_at_one() {
+        let pool = pool().await;
+        ingest_user_message(&pool, "p1", "b1", "m1", None, "原始").await.unwrap();
+        let extra = commit_item(&pool, "p1", "bot:b1", Some("m1"), &LedgerSplitInput { title: "追加".into(), ..Default::default() }).await.unwrap();
+        assert_eq!(extra.ordinal, 1, "ordinal 0 stays with the ingested item");
+        sqlx::query("INSERT INTO projects(id,path,label,created_at) VALUES('p2','/test/p2','p2',?)").bind(db::now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('b9','p2','b9','claude','t',?)").bind(db::now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations(id,bot_id,created_at) VALUES('c9','b9',?)").bind(db::now()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages(id,conversation_id,role,content,source,created_at) VALUES('m9','c9','user','x','web',?)").bind(db::now()).execute(&pool).await.unwrap();
+        let foreign = commit_item(&pool, "p1", "bot:b1", Some("m9"), &LedgerSplitInput { title: "外人的".into(), ..Default::default() }).await;
+        assert!(matches!(foreign, Err(LedgerError::Invalid(_))), "{foreign:?}");
     }
 }

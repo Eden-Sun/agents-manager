@@ -283,13 +283,6 @@ pub(crate) async fn create(
     Ok(Json(json!({"items": items.iter().map(out).collect::<Vec<_>>()})))
 }
 
-/// `item_id` 可以是 id，也可以是 `L<code_no>`（同專案內的短碼）。
-async fn resolve_item(pool: &SqlitePool, project_id: &str, raw: &str) -> Result<String, LcError> {
-    let Some(n) = raw.strip_prefix('L').and_then(|n| n.parse::<i64>().ok()) else { return Ok(raw.to_string()) };
-    let id: Option<String> = sqlx::query_scalar("SELECT id FROM ledger_items WHERE project_id = ? AND code_no = ?").bind(project_id).bind(n).fetch_optional(pool).await.map_err(up)?;
-    id.ok_or_else(|| LcError::NotFoundValue(json!({"error": "not_found", "reason": "ledger_item_not_found"})))
-}
-
 pub(crate) async fn patch(
     State(app): State<Arc<App>>,
     Path((project_id, item_ref)): Path<(String, String)>,
@@ -298,7 +291,6 @@ pub(crate) async fn patch(
 ) -> Result<Json<Value>, LcError> {
     live_project(&app, &project_id).await?;
     let actor = require_writer(&app, &principal, &project_id).await?;
-    let item_id = resolve_item(&app.db, &project_id, &item_ref).await?;
     let caller_bot = match &principal {
         RequestPrincipal::Bot(id) => Some(id.clone()),
         _ => None,
@@ -311,6 +303,8 @@ pub(crate) async fn patch(
             next_step: body.next_step.clone(),
             wait_for: opt(body.wait_for.clone()),
             due_at: opt(body.due_at.clone()),
+            owner_bot_id: opt(body.owner_bot_id.clone()),
+            close_reason: opt(body.close_reason.clone()),
         },
         "claim" => {
             let owner = opt(body.owner_bot_id.clone()).or(caller_bot).ok_or_else(|| bad("owner_bot_id", "required for claim"))?;
@@ -321,7 +315,7 @@ pub(crate) async fn patch(
         "cancel" => LedgerPatchOp::Cancel { reason: opt(body.close_reason.clone()).unwrap_or_else(|| "cancelled".into()) },
         _ => return Err(bad("op", "update, claim, handback, merge or cancel")),
     };
-    let item = ledger::patch_item_cas(&app.db, &project_id, &item_id, body.expected_version, &actor, op).await.map_err(ledger_err)?;
+    let item = ledger::patch_item_cas(&app.db, &project_id, &item_ref, body.expected_version, &actor, op).await.map_err(ledger_err)?;
     notify(&app, &project_id, item.source_message_id.as_deref(), std::slice::from_ref(&item.id)).await;
     Ok(Json(out(&item)))
 }
