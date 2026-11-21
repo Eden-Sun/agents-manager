@@ -67,5 +67,26 @@ mod explicit_retirement;
 mod explicit_retirement_tests;
 #[cfg(test)]
 mod provider_seam_tests;
+
+/// 測試用 tracing writer：把 log 收進記憶體，讓測試斷言「敏感值不出現在 log」（adapter／openai 的 key、leak 測試共用）。
 #[cfg(test)]
-mod legacy_golden_tests;
+#[derive(Clone, Default)]
+pub(crate) struct LogSink(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+#[cfg(test)]
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+#[cfg(test)]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> LogSink {
+        self.clone()
+    }
+}
+

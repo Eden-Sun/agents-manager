@@ -6,6 +6,7 @@ use super::cap;
 use am_base::db::api_bot::{self as db_api, Attempt, Checkpoint, Fence, Receipt};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
+use crate::api_bot::LogSink;
 
 const SENTINEL: &str = "sk-test-SENTINEL-XYZ";
 const CLAUDE_SENTINEL: &str = "sk-ant-test-CLAUDE-KEY-123456";
@@ -62,25 +63,6 @@ async fn each_provider_reads_only_its_own_key_file_and_failures_say_nothing() {
     // key_file 自己的錯誤文字也不含 key。
     let status = am_base::key_file::key_status(&openai_path).unwrap_err();
     assert!(!status.contains(SENTINEL) && !format!("{status:?}").contains(SENTINEL));
-}
-
-/// 收 log 的 writer。
-#[derive(Clone, Default)]
-struct LogSink(Arc<Mutex<Vec<u8>>>);
-impl std::io::Write for LogSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-    type Writer = LogSink;
-    fn make_writer(&'a self) -> LogSink {
-        self.clone()
-    }
 }
 
 #[tokio::test]

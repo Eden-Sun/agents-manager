@@ -260,6 +260,31 @@ mod tests {
         }
     }
 
+    /// 測試用 `ApiBotAdapter::new` 樣板：預設 options／system／limits、5 秒逾時、1 MiB、`FixedTestKey`；每個測試只傳真正在變的欄位。
+    async fn make_adapter(
+        pool: SqlitePool,
+        identity: AdapterIdentity,
+        quote: Arc<dyn QuoteProvider>,
+        endpoint: String,
+    ) -> Result<ApiBotAdapter, crate::api_bot::http::Error> {
+        ApiBotAdapter::new(
+            pool,
+            identity,
+            test_options(),
+            serde_json::json!("System"),
+            test_limits(),
+            quote,
+            AdapterHttpConfig {
+                endpoint,
+                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
+                timeout: std::time::Duration::from_secs(5),
+                max_response_bytes: 1024 * 1024,
+            },
+            None,
+        )
+        .await
+    }
+
     fn test_options() -> Options {
         Options {
             model: crate::config::API_BOT_MODEL.into(),
@@ -312,30 +337,16 @@ mod tests {
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            AdapterIdentity {
+        let adapter = make_adapter(pool.clone(), AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run,
                 turn_id: turn,
                 generation: 1,
-            },
-            test_options(),
-            serde_json::json!("System"),
-            test_limits(),
-            Arc::new(TestQuoteProvider {
+            }, Arc::new(TestQuoteProvider {
                 reserved_amount: 10_000,
                 estimated_amount: 5_000,
-            }),
-            AdapterHttpConfig {
-                endpoint: server.endpoint.clone(),
-                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                timeout: std::time::Duration::from_secs(5),
-                max_response_bytes: 1024 * 1024,
-            },
-            None,
-        )
+            }), server.endpoint.clone())
         .await
         .unwrap();
 
@@ -471,27 +482,13 @@ mod tests {
             spawn_mock_server(wire_calls.clone(), serde_json::json!({}), None, None, None).await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            AdapterIdentity {
+        let adapter = make_adapter(pool.clone(), AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run,
                 turn_id: turn,
                 generation: 1,
-            },
-            test_options(),
-            serde_json::json!("System"),
-            test_limits(),
-            Arc::new(FailClosedQuoteProvider),
-            AdapterHttpConfig {
-                endpoint: server.endpoint.clone(),
-                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                timeout: std::time::Duration::from_secs(5),
-                max_response_bytes: 1024 * 1024,
-            },
-            None,
-        )
+            }, Arc::new(FailClosedQuoteProvider), server.endpoint.clone())
         .await
         .unwrap();
 
@@ -517,30 +514,16 @@ mod tests {
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
 
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            AdapterIdentity {
+        let adapter = make_adapter(pool.clone(), AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run,
                 turn_id: turn.clone(),
                 generation: 1,
-            },
-            test_options(),
-            serde_json::json!("System"),
-            test_limits(),
-            Arc::new(TestQuoteProvider {
+            }, Arc::new(TestQuoteProvider {
                 reserved_amount: 10_000,
                 estimated_amount: 5_000,
-            }),
-            AdapterHttpConfig {
-                endpoint: server.endpoint.clone(),
-                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                timeout: std::time::Duration::from_secs(5),
-                max_response_bytes: 1024 * 1024,
-            },
-            None,
-        )
+            }), server.endpoint.clone())
         .await
         .unwrap();
 
@@ -588,30 +571,16 @@ mod tests {
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            AdapterIdentity {
+        let adapter = make_adapter(pool.clone(), AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run,
                 turn_id: turn.clone(),
                 generation: 1,
-            },
-            test_options(),
-            serde_json::json!("System"),
-            test_limits(),
-            Arc::new(TestQuoteProvider {
+            }, Arc::new(TestQuoteProvider {
                 reserved_amount: 10_000,
                 estimated_amount: 5_000,
-            }),
-            AdapterHttpConfig {
-                endpoint: server.endpoint.clone(),
-                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                timeout: std::time::Duration::from_secs(5),
-                max_response_bytes: 1024 * 1024,
-            },
-            None,
-        )
+            }), server.endpoint.clone())
         .await
         .unwrap();
 
@@ -662,21 +631,7 @@ mod tests {
                 None, None, None,
             ).await;
             let (pool, bot, run, turn, session) = setup_test_db().await;
-            let adapter = ApiBotAdapter::new(
-                pool.clone(),
-                AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 },
-                test_options(),
-                serde_json::json!("System"),
-                test_limits(),
-                Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }),
-                AdapterHttpConfig {
-                    endpoint: server.endpoint.clone(),
-                    key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                    timeout: std::time::Duration::from_secs(5),
-                    max_response_bytes: 1024 * 1024,
-                },
-                None,
-            ).await.unwrap();
+            let adapter = make_adapter(pool.clone(), AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn.clone(), generation: 1 }, Arc::new(TestQuoteProvider { reserved_amount: 10_000, estimated_amount: 5_000 }), server.endpoint.clone()).await.unwrap();
             let cancel = CancellationToken::new();
             let mut state = State::default();
             state.messages = vec![Message { role: "user".into(), content: serde_json::json!("go") }];
@@ -983,30 +938,16 @@ mod tests {
         .await;
 
         let (pool, bot, run, turn, session) = setup_test_db().await;
-        let adapter = ApiBotAdapter::new(
-            pool.clone(),
-            AdapterIdentity {
+        let adapter = make_adapter(pool.clone(), AdapterIdentity {
                 session_id: session,
                 bot_id: bot,
                 run_id: run.clone(),
                 turn_id: turn.clone(),
                 generation: 1,
-            },
-            test_options(),
-            serde_json::json!("System"),
-            test_limits(),
-            Arc::new(TestQuoteProvider {
+            }, Arc::new(TestQuoteProvider {
                 reserved_amount: 10_000,
                 estimated_amount: 5_000,
-            }),
-            AdapterHttpConfig {
-                endpoint: server.endpoint.clone(),
-                key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                timeout: std::time::Duration::from_secs(5),
-                max_response_bytes: 1024 * 1024,
-            },
-            None,
-        )
+            }), server.endpoint.clone())
         .await
         .unwrap();
 
@@ -1439,30 +1380,16 @@ mod tests {
             let registry = Arc::new(ApiBotRegistry::new());
 
             let adapter = Arc::new(
-                ApiBotAdapter::new(
-                    pool.clone(),
-                    AdapterIdentity {
+                make_adapter(pool.clone(), AdapterIdentity {
                         session_id: session,
                         bot_id: bot,
                         run_id: run.clone(),
                         turn_id: turn.clone(),
                         generation: 1,
-                    },
-                    test_options(),
-                    serde_json::json!("System"),
-                    test_limits(),
-                    Arc::new(TestQuoteProvider {
+                    }, Arc::new(TestQuoteProvider {
                         reserved_amount: 10_000,
                         estimated_amount: 5_000,
-                    }),
-                    AdapterHttpConfig {
-                        endpoint: server.endpoint.clone(),
-                        key_source: Arc::new(super::super::adapter::FixedTestKey("sk-ant-test-key".into())),
-                        timeout: std::time::Duration::from_secs(5),
-                        max_response_bytes: 1024 * 1024,
-                    },
-                    None,
-                )
+                    }), server.endpoint.clone())
                 .await
                 .unwrap(),
             );
@@ -1940,24 +1867,6 @@ mod tests {
     }
 
     // ---- Journal 失敗的具名原因與統一出口 log（2026-11-19）----
-
-    #[derive(Clone, Default)]
-    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for LogSink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-        type Writer = LogSink;
-        fn make_writer(&'a self) -> LogSink {
-            self.clone()
-        }
-    }
 
     fn one_message_state(text: &str, pending: bool) -> State {
         State {

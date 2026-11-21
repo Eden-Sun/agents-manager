@@ -24,6 +24,25 @@ fn native_start_prompt_dispatch_fits_one_mib_stack() {
     std::thread::Builder::new().stack_size(1024 * 1024).spawn(native_start_and_prompt_dispatch_to_fake_provider).unwrap().join().unwrap();
 }
 
+/// 輪詢 turn 狀態直到變成 `status`；超過 `DEADLOCK_TIMEOUT` 就 panic（取代各測試重複的 timeout+loop）。
+async fn wait_turn_status(db: &sqlx::SqlitePool, turn_id: &str, status: &str) {
+    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
+        loop {
+            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+                .bind(turn_id)
+                .fetch_optional(db)
+                .await
+                .unwrap();
+            if s.as_deref() == Some(status) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn native_start_and_prompt_dispatch_to_fake_provider() {
     let env = crate::testing::env().await;
@@ -5561,21 +5580,7 @@ async fn two_turns_with_unchanged_agent_md_send_identical_system_field() {
         .await
         .unwrap();
 
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn1)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn1, "completed").await;
 
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second prompt',?)")
         .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
@@ -5589,21 +5594,7 @@ async fn two_turns_with_unchanged_agent_md_send_identical_system_field() {
         .await
         .unwrap();
 
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn2)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn2, "completed").await;
 
     shutdown.cancel();
     server.await.unwrap();
@@ -5668,21 +5659,7 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn1)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn1, "completed").await;
 
     // Now change agent_md
     std::fs::write(&instructions_file, "V2 UPDATED INSTRUCTIONS").unwrap();
@@ -5699,21 +5676,7 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn2)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn2, "completed").await;
 
     // Turn 3 (still with V2)
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 3 prompt',?)")
@@ -5727,21 +5690,7 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn3)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn3, "completed").await;
 
     shutdown.cancel();
     server.await.unwrap();
@@ -5818,21 +5767,7 @@ async fn new_session_picks_up_new_system_text() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn1)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn1, "completed").await;
 
     shutdown.cancel();
     server.await.unwrap();
@@ -5879,21 +5814,7 @@ async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn1)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn1, "completed").await;
 
     // Remove "system" field from checkpoint_json in DB
     let old_chk_json: String =
@@ -5926,21 +5847,7 @@ async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified())
         .await
         .unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let s: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
-                .bind(&turn2)
-                .fetch_optional(&env.app.db)
-                .await
-                .unwrap();
-            if matches!(s.as_deref(), Some("completed")) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_turn_status(&env.app.db, &turn2, "completed").await;
 
     shutdown.cancel();
     server.await.unwrap();
@@ -6345,13 +6252,7 @@ async fn api_bot_next_turn_after_a_mid_stream_abort_resends_and_completes() {
     insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "first question").await;
     let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
     env.app.api_turn_spawn(&key1).await.unwrap();
-    tokio::time::timeout(DEADLOCK_TIMEOUT, async {
-        loop {
-            let st: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn1).fetch_optional(&env.app.db).await.unwrap();
-            if st.as_deref() == Some("failed") { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_turn_status(&env.app.db, &turn1, "failed").await;
     let pending: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?").bind(&bot).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(serde_json::from_str::<Value>(&pending).unwrap()["api_pending"], true, "中途 error：checkpoint 留著 api_pending");
 

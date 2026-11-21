@@ -7,30 +7,12 @@ use crate::api_bot::provider::{Codec, Provider, ProviderExtras, SessionOptions, 
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
+use crate::api_bot::LogSink;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const SENTINEL: &str = "sk-test-SENTINEL-XYZ";
 const ENC: &str = "ENC-SENTINEL-reasoning-blob-42";
-
-/// 收 log 的 writer（與 key_tests 同一招）。
-#[derive(Clone, Default)]
-struct LogSink(Arc<Mutex<Vec<u8>>>);
-impl std::io::Write for LogSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-    type Writer = LogSink;
-    fn make_writer(&'a self) -> LogSink {
-        self.clone()
-    }
-}
 
 /// 假 server：每次 POST 照順序回一份腳本（status、body）；腳本用完回 500。
 struct Server {
