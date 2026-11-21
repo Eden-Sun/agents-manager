@@ -78,9 +78,6 @@ struct CacheEntry {
     /// 品質沒過後重試時用的 effort（往上提一階）；沒重試就沒有，照設定的 effort 翻。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
-    /// 這則譯文實際打了幾次模型（含重試）；舊快取沒有。複盤用它判斷「是否重翻過」。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    attempts: Option<usize>,
     /// 每一次嘗試的模型與結果（含被升級重翻的那幾次）；舊快取沒有。複盤記錄用。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attempt_log: Vec<AttemptLog>,
@@ -373,7 +370,8 @@ async fn translate_core(app: &App, id: &str, content: &str, force: bool, redo: b
 /// 簡體 → 台灣繁體（本地，不呼叫 API）。結果寫進同一份快取，之後命中即 `cached:true`。
 fn local_convert(content: &str, path: &Path) -> Value {
     let translation = crate::zh_convert::to_traditional(content);
-    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0), jev_prob: None, ..Default::default() };
+    let attempt = AttemptLog { model: crate::zh_convert::MODEL.into(), effort: None, reason: None, jev_prob: None, cost_usd: Some(0.0) };
+    let entry = CacheEntry { translation: translation.clone(), model: crate::zh_convert::MODEL.into(), prompt_version: PROMPT_VERSION.into(), cost_usd: Some(0.0), jev_prob: None, attempt_log: vec![attempt], ..Default::default() };
     if let Err(e) = save(path, &entry) {
         tracing::warn!("message translate cache write failed: {e}");
     }
@@ -645,7 +643,6 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
         jev_prob: best.jev,
         low_confidence: low,
         effort: best.effort.clone(),
-        attempts: Some(attempts.len()),
         attempt_log: attempts.iter().map(attempt_log_of).collect(),
         ..Default::default()
     };
@@ -781,6 +778,21 @@ async fn file_translate_report(app: &App, event_key_prefix: &str, id: &str, mana
 }
 
 /// 複盤（譯文已完成）：在這則譯文的快取檔裡存一筆 [`Retro`]，**不送管理者**（複盤只給使用者自己看）。
+async fn record_retro_locked(path: &Path, id: &str, bot_id: &str, project_id: &str, content: &str, note: Option<String>) -> Result<Value, LcError> {
+    let slot = flight_slot(path);
+    let out = {
+        let _guard = slot.lock().await;
+        let entry = load_entry(path).unwrap_or_default();
+        if entry.translation.trim().is_empty() {
+            Err(LcError::conflict("not_rejected", json!({"message_id": id})))
+        } else {
+            record_retro(path, entry, id, bot_id, project_id, content, note)
+        }
+    };
+    flight_forget(path, slot);
+    out
+}
+
 /// 同一版譯文（譯文文字相同）＋同一句備註不重複存，回 `sent: false, reason: duplicate`。
 fn record_retro(path: &Path, mut entry: CacheEntry, id: &str, bot_id: &str, project_id: &str, content: &str, note: Option<String>) -> Result<Value, LcError> {
     let translation: String = entry.translation.chars().take(RETRO_TEXT_MAX_CHARS).collect();
@@ -834,12 +846,11 @@ pub async fn post_translate_report(
         return Err(LcError::Bad("only assistant messages can be reported".into()));
     }
     let path = cache_path(&app.data_dir, &cache_key(&id, &content));
-    let mut entry = load_entry(&path).unwrap_or_default();
-    if !entry.translation.trim().is_empty() {
-        // 複盤的備註格式錯就是 400（在任何去重之前驗）。
+    if load_entry(&path).is_some_and(|e| !e.translation.trim().is_empty()) {
         let note = parse_retro_note(&body)?;
-        return Ok(Json(record_retro(&path, entry, &id, &bot_id, &project_id, &content, note)?));
+        return Ok(Json(record_retro_locked(&path, &id, &bot_id, &project_id, &content, note).await?));
     }
+    let mut entry = load_entry(&path).unwrap_or_default();
     let Some(reason) = entry.rejected.clone().filter(|_| entry.translation.trim().is_empty()) else {
         return Err(LcError::conflict("not_rejected", json!({"message_id": id})));
     };
@@ -917,7 +928,7 @@ pub async fn list_translate_retros(Extension(principal): Extension<crate::api::R
     let dir = app.data_dir.join(CACHE_DIR);
     let mut all = tokio::task::spawn_blocking(move || collect_retros(&dir)).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     all.retain(|r| q.project_id.as_deref().is_none_or(|p| r.project_id == p) && q.before.as_deref().is_none_or(|b| crate::db::cmp_ts(&r.at, b).is_lt()));
-    all.sort_by(|a, b| b.at.cmp(&a.at));
+    all.sort_by(|a, b| crate::db::cmp_ts(&b.at, &a.at));
     let has_more = all.len() > limit;
     all.truncate(limit);
     let next_before = if has_more { all.last().map(|r| r.at.clone()) } else { None };
@@ -2489,7 +2500,6 @@ mod retry_model_tests {
             cost_usd: Some(0.02),
             jev_prob: Some(0.61),
             low_confidence: true,
-            attempts: Some(2),
             attempt_log: vec![
                 AttemptLog { model: "claude-haiku-5-5".into(), effort: None, reason: Some("untranslated".into()), jev_prob: None, cost_usd: Some(0.005) },
                 AttemptLog { model: "gpt-6-luna".into(), effort: Some("high".into()), reason: None, jev_prob: Some(0.61), cost_usd: Some(0.015) },

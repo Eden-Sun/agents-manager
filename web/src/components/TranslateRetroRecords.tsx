@@ -59,14 +59,14 @@ export function RetroDetail({ r, bots }: { r: TranslateRetro; bots: readonly { i
     <article className="retro-item" data-k="retro-item">
       <header className="retro-head">
         <time dateTime={r.at} className="retro-time">{msgTimeLabel(r.at)}</time>
-        <strong className="retro-model" data-k="retro-model">{translationModelName(r.model)}</strong>
+        <strong className="retro-model" data-k="retro-model" title={r.model}>{translationModelName(r.model)}</strong>
         {r.effort ? <span className="hint">{r.effort}</span> : null}
         <span className="hint retro-bot">{botLabel(r.botId, bots)}</span>
       </header>
       <dl className="retro-facts">
         <div>
           <dt>{t('重翻過')}</dt>
-          <dd data-k="retro-retried">{retried ? t('是（{n} 次嘗試）', { n: r.attempts.length }) : t('否')}</dd>
+          <dd data-k="retro-retried">{r.attempts.length === 0 ? '—' : retried ? t('是（{n} 次嘗試）', { n: r.attempts.length }) : t('否')}</dd>
         </div>
         {r.attempts.length > 0 ? (
           <div>
@@ -74,7 +74,7 @@ export function RetroDetail({ r, bots }: { r: TranslateRetro; bots: readonly { i
             <dd>
               <ol className="retro-attempts" data-k="retro-attempts">
                 {r.attempts.map((a, i) => (
-                  <li key={i}>{attemptText(t, a)}</li>
+                  <li key={i} title={a.model}>{attemptText(t, a)}</li>
                 ))}
               </ol>
             </dd>
@@ -142,6 +142,7 @@ export function MessageRetroSheet({ messageId, open, onClose }: { messageId: str
 
   return (
     <Modal open={open} title={t('複盤記錄')} subtitle={t('只給你自己看，不送管理者。')} width={560} onClose={onClose}>
+      <div className="retro-body">
       {state.kind === 'loading' ? <p className="hint">{t('讀取中…')}</p> : null}
       {state.kind === 'error' ? <p className="hint" role="alert">{t('複盤記錄讀取失敗：{reason}', { reason: state.message })}</p> : null}
       {state.kind === 'ok' && state.retros.length === 0 ? <p className="hint">{t('還沒有複盤記錄。')}</p> : null}
@@ -152,6 +153,7 @@ export function MessageRetroSheet({ messageId, open, onClose }: { messageId: str
           ))}
         </div>
       ) : null}
+      </div>
     </Modal>
   )
 }
@@ -201,6 +203,7 @@ export function RetroRecordModal({ open, onClose }: { open: boolean; onClose: ()
 
   return (
     <Modal open={open} title={t('複盤記錄')} subtitle={t('只給你自己看，不送管理者。')} width={600} onClose={onClose}>
+      <div className="retro-body">
       {status.kind === 'loading' ? <p className="hint">{t('讀取中…')}</p> : null}
       {status.kind === 'error' ? <p className="hint" role="alert">{t('複盤記錄讀取失敗：{reason}', { reason: status.message })}</p> : null}
       {status.kind === 'ok' && retros.length === 0 ? <p className="hint">{t('還沒有複盤記錄。')}</p> : null}
@@ -216,6 +219,7 @@ export function RetroRecordModal({ open, onClose }: { open: boolean; onClose: ()
           ) : null}
         </div>
       ) : null}
+      </div>
     </Modal>
   )
 }

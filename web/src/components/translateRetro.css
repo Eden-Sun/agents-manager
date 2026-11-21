@@ -59,15 +59,26 @@
 
 .retro-texts summary {
   cursor: pointer;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
+  min-height: 40px;
+  display: list-item;
 }
 
 .retro-pair {
   display: grid;
   gap: 8px;
   margin-top: 6px;
+}
+
+.retro-pair section {
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+.retro-body {
+  padding: 12px 16px;
+  min-width: 0;
 }
 
 .retro-pair h5 {
