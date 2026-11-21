@@ -1,6 +1,3 @@
-// daemon/build.rs 與 crates/am-supervisor/build.rs 共用的建置資訊（#884、#1861）。
-// 兩支都用 `include!` 引入：引入前各自定義 `WORKSPACE_WATCH`（release 時要監看的 workspace 路徑，相對於該 crate 目錄）。
-// `SHARED_SRC`：這個檔本身的路徑（相對於該 crate 目錄），改了就重跑。
 
 use std::process::Command;
 
@@ -28,16 +25,10 @@ fn dirty_for(status: Option<&str>, in_git: bool, release: bool) -> bool {
 }
 
 fn main() {
-    // 共用檔改了也要重跑（兩支 build script 各自的 `SHARED_SRC` 指到它）。
     println!("cargo:rerun-if-changed={SHARED_SRC}");
-    // 部署用的 release build 才需要整個 workspace 的髒樹判斷（#884）；dev／test 不會被部署，只看自己的 `src`（#1861）。
     let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
-    // 完整 sha：`--version` 印它，daemon-swap 換 binary 之前拿它跟核准的 sha 比（`build_info::VERSION`）。
     let full = git(&["rev-parse", "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".to_string());
     let short = git(&["rev-parse", "--short", "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".to_string());
-    // 髒樹（有未提交的改動）建出來的 binary 不是任何一個 commit：標記出來，不能冒充乾淨的 sha。
-    // 只看追蹤中的檔案（`-uno`）：沒追蹤的檔案進不了 binary。讀不到 status 就 fail closed 標髒，避免不確定的 binary 冒充乾淨 commit。
-    // `--no-optional-locks`：只讀，不去刷新／寫 index（自動部署的 checkout 同時還有別的 git 指令在跑，不要跟它搶 index.lock）。
     let in_git = git(&["rev-parse", "--git-dir"]).is_some();
     let status = git(&["--no-optional-locks", "status", "--porcelain", "-uno"]);
     let dirty = dirty_for(status.as_deref(), in_git, release);
@@ -46,7 +37,6 @@ fn main() {
     }
     let changed = status.unwrap_or_default();
     if dirty {
-        // 部署會因為 `-dirty` 中止（daemon-swap.sh rc=10）：把是哪些檔案寫進 build log，才查得到是誰弄髒的。
         let files: Vec<&str> = changed.lines().take(8).collect();
         println!("cargo:warning=build tree is dirty ({} tracked file(s) changed): {}", changed.lines().count(), files.join(" | "));
     }
@@ -54,8 +44,6 @@ fn main() {
     println!("cargo:rustc-env=AM_BUILD_SHA_FULL={full}");
     println!("cargo:rustc-env=AM_BUILD_DIRTY={}", if dirty { "1" } else { "0" });
     println!("cargo:rustc-env=AM_BUILD_DIRTY_SUFFIX={}", if dirty { "-dirty" } else { "" });
-    // HEAD 換了就重編（不然 sha 會停在第一次編譯那個）；原始碼動了也重跑（不然 dirty 會停在上一次）。
-    // 用 `git rev-parse --git-path`：worktree 裡 `.git` 是檔案，寫死 `../.git/HEAD` 指到不存在的路徑。
     for p in ["HEAD", "index"] {
         if let Some(path) = git(&["rev-parse", "--git-path", p]) {
             println!("cargo:rerun-if-changed={path}");
@@ -63,9 +51,6 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
-    // 髒樹判斷看的是整個 workspace 的追蹤檔：binary 由 daemon／其他 crate 的程式碼組成，只看自己的 `src` 時，
-    // 改了別的 crate 重建不會重跑這支，`-dirty`／sha 就停在上一次的答案，防線可被繞過（#884）。
-    // dev／test 不監看整個 workspace：改 daemon 一行不該讓 am-supervisor 跟著重編（#1861）。
     if release {
         for p in WORKSPACE_WATCH {
             println!("cargo:rerun-if-changed={p}");

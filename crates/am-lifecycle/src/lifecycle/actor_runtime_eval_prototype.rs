@@ -29,7 +29,6 @@ impl ToyBotActor {
         let task = tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 accepted.lock().unwrap().push(cmd.clone());
-                // 模擬「還在處理，還沒寫進 DB」的那段時間。
                 tokio::time::sleep(Duration::from_millis(60)).await;
                 persisted.lock().unwrap().push(cmd);
             }
@@ -69,17 +68,15 @@ mod tests {
         let actor = ToyBotActor::spawn(persisted.clone(), accepted.clone());
         actor.send("type this prompt").await;
 
-        // 等到訊息確定被 actor 收下（進了 mailbox），但還沒等它處理完（60ms 的模擬工作）。
         tokio::time::sleep(Duration::from_millis(15)).await;
         assert_eq!(accepted.lock().unwrap().as_slice(), ["type this prompt"], "訊息已經被 actor 收下");
         assert!(persisted.lock().unwrap().is_empty(), "但還沒寫進『DB』——這就是那段空窗");
 
-        actor.kill(); // 模擬 daemon 在這個空窗期被砍掉重啟：task 在下一個 await 點被腰斬。
+        actor.kill();
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(persisted.lock().unwrap().is_empty(), "訊息真的沒了——新開的 actor 只能從 DB 重建狀態，DB 裡沒有這一筆");
 
-        // 對照：沒被砍掉的 actor 過了那 60ms 就會落地——上面看不到，是因為被砍，不是因為等得不夠久。
         let persisted2 = Arc::new(Mutex::new(Vec::new()));
         let alive = ToyBotActor::spawn(persisted2.clone(), Arc::new(Mutex::new(Vec::new())));
         alive.send("type this prompt").await;
@@ -110,7 +107,6 @@ mod tests {
 
         let outcome = crate::lifecycle::turn_controller::set_status(&e.app.db, "ar-turn", "in_flight", "failed", "actor eval").await.unwrap();
         assert_eq!(outcome, crate::lifecycle::turn_controller::Outcome::Applied);
-        // 呼叫回來的當下 DB 已經是新狀態，不像上面的 actor 原型還要再等一段處理時間才落地。
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id='ar-turn'").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(status, "failed");
     }
@@ -137,8 +133,6 @@ mod tests {
         for (name, src) in sources {
             assert!(src.contains("bot_lock("), "設計文件說 {name} 有呼叫 bot_lock，現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算");
         }
-        // `lifecycle/prompt.rs`（文件列的第 11 個檔案）經 `StartServices::lock_bot_for_start` 取得 per-bot 鎖；
-        // runners adapter 委派到 `lock_bot_owned`，仍是同一個 `BotLocks::bot_lock` ingress。
         assert!(
             include_str!("prompt.rs").contains("StartServices::lock_bot_for_start("),
             "設計文件說 lifecycle/prompt.rs 持有 bot 鎖（現在經 `StartServices::lock_bot_for_start`），現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算"

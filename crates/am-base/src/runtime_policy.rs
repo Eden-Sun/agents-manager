@@ -117,21 +117,17 @@ mod tests {
         let role = s(r#"{"context_tokens": 200000, "keep_warm": true, "keep_warm_after_min": 30}"#);
         let ov = s(r#"{"context_tokens": 512000, "keep_warm_after_min": 40}"#);
 
-        // 0. 預設：什麼都沒設＝全 None，保溫用現有常數。
         let none = effective(None, None);
         assert_eq!(none, Effective::default());
         let t = none.keep_warm_tuning(58 * 60, 110 * 60, Some(30.0));
         assert_eq!((t.enabled, t.keep_warm_after_secs, t.warm_compact_after_secs, t.min_context_pct), (None, 58 * 60, 110 * 60, Some(30.0)));
 
-        // 1. 只有角色 policy。
         let r = effective(None, Some(&role));
         assert_eq!((r.context_tokens, r.keep_warm, r.keep_warm_after_min), (Some(200_000), Some(true), Some(30)));
 
-        // 2. bot 覆寫最大：context 與分鐘都以覆寫為準。
         let o = effective(Some(&ov), Some(&role));
         assert_eq!((o.context_tokens, o.keep_warm, o.keep_warm_after_min), (Some(512_000), Some(true), Some(40)));
 
-        // 覆寫沒寫的欄位往下找（keep_warm 來自角色）。
         let partial = s(r#"{"keep_warm": false}"#);
         assert_eq!(effective(Some(&partial), Some(&role)).keep_warm, Some(false));
     }
@@ -142,7 +138,6 @@ mod tests {
         let t = e.keep_warm_tuning(58 * 60, 110 * 60, None);
         assert_eq!((t.keep_warm_after_secs, t.warm_compact_after_secs, t.min_context_pct), (30 * 60, 50 * 60, Some(60.0)));
 
-        // 熱壓分鐘不大於保溫分鐘：退回預設（驗證擋掉，這裡保險）。
         let bad = effective(None, Some(&s(r#"{"keep_warm_after_min": 30, "hot_compact_after_min": 20}"#)));
         assert_eq!(bad.keep_warm_tuning(58 * 60, 110 * 60, None).warm_compact_after_secs, 110 * 60);
     }

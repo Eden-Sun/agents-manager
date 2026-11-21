@@ -90,8 +90,6 @@ pub(super) fn for_prompt(
         };
     };
     let prove = || -> Option<NativeOutcome> {
-        // The unchanged caller searches the last matching prompt. A second matching
-        // submission in a different native task must not steal an older AGM turn.
         let mut matched_texts = Vec::new();
         for (index, line) in lines[..=prompt].iter().enumerate() {
             let Some(text) = crate::lifecycle::delivery::codex_user_text(line) else {
@@ -114,8 +112,6 @@ pub(super) fn for_prompt(
         let native = id(&start)?;
         let mut clock = at(&start)?;
         let mut matched = 0;
-        // Repeated identical submissions inside the recovery window cannot prove
-        // which AGM turn owns the response. A later turn's since can exclude the old one.
         for line in &lines[begin + 1..=prompt] {
             let v = row(line)?;
             if event(&v) == Some("task_started")
@@ -166,8 +162,6 @@ pub(super) fn for_prompt(
                     }
                 }
                 ordered_after(&lines[prompt + 1 + offset + 1..], t, native)?;
-                // A later *different* native task does not invalidate this proven
-                // completion. The caller already selected the last matching prompt.
                 let reply = v.pointer("/payload/last_agent_message").and_then(Value::as_str).filter(|s| !s.trim().is_empty());
                 let error = v.pointer("/payload/error").filter(|e| !e.is_null());
                 return match (reply, error) {

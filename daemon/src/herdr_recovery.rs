@@ -177,9 +177,6 @@ async fn recover_after_reconnect_inner(
         return None;
     }
 
-    // Recovery must win the reconnect race with reconcile. The global watcher calls us before its
-    // own reconcile pass; sharing the pass lock also keeps a periodic/deferred pass from retiring
-    // the old runs while the recovery backoff is waiting.
     let pass_lock = crate::reconcile::host_pass_lock(app.as_ref(), crate::config::LOCAL_HOST).await;
     let _pass = pass_lock.lock().await;
 
@@ -202,7 +199,6 @@ async fn recover_after_reconnect_inner(
 
     let mut report = RecoveryReport::empty(first_plan.children);
     if first_plan.resume.is_empty() {
-        // There are no top-level bots to recreate; the normal reconcile pass retires the children.
         return Some(report);
     }
 
@@ -219,8 +215,6 @@ async fn recover_after_reconnect_inner(
     };
     tokio::time::sleep(delay).await;
 
-    // Recheck after backoff: an update may have opened its maintenance window or another actor
-    // may have restored panes while we waited. Never race that work with a native resume.
     if maintenance_owns_reconnect(app).await {
         report.skipped = Some("maintenance_started_during_backoff".into());
         return Some(report);
@@ -249,8 +243,6 @@ async fn recover_after_reconnect_inner(
         }
     }
 
-    // Count the episode before attempting the first bot; a partial batch followed by another OOM
-    // must consume a strike as well.
     guard.record(Instant::now());
     tracing::warn!(
         bots = plan.resume.len(),
@@ -478,8 +470,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Simulate the real restart shape: herdr restores its workspace/tab/pane ids, but the
-        // agent that used to occupy the run's pane has died and the pane is now an empty shell.
         let (workspace, old_pane) = env
             .app
             .herdr
@@ -562,8 +552,6 @@ mod tests {
                 method == "pane.close" && args["pane_id"] == old_pane.pane_id
             }));
 
-        // This is the same order as the global event loop: recovery finishes before reconnect
-        // reconcile. The subsequent pass sees the resumed agent and keeps its new run alive.
         crate::reconcile::reconcile_host(&env.app, crate::config::LOCAL_HOST)
             .await
             .unwrap();

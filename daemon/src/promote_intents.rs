@@ -61,8 +61,6 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
         Ok(false) => match intents::get(&app.db, id).await {
-            // 這顆 boot 自己留下的 running（上一輪記不下失敗）：不經 claim 直接續做（#1060，同 delete_intents #1059）。
-            // 安全性靠 resume：它自己拿 child 的 bot 鎖後重驗 status == running，每一步先驗世界、重跑安全。
             Ok(Some(i)) if i.status == "running" && i.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
                 tracing::warn!(intent = id, "promote intent was left running by this boot; resuming it");
             }
@@ -90,7 +88,6 @@ async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
         }
         Ok(false) => Outcome::Retry(why),
         Err(e) => {
-            // 記不下失敗：intent 會停在 `running`。只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到（#1060）。
             match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
                 Ok(_) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
                 Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；改寫回 pending 也失敗：{e2:#}）")),
@@ -172,7 +169,6 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     }
     let child = db::bot(&app.db, &child_id).await.map_err(e)?;
     let child_live = child.as_ref().is_some_and(|c| c.deleted_at.is_none());
-    // child 還在跑：停 child 從沒發生（承諾之前）。
     if child_live && db::active_run(&app.db, &child_id).await.map_err(e)?.is_some() {
         for path in created.iter().rev() {
             let _ = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
@@ -181,7 +177,6 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         return Ok(());
     }
 
-    // Recovery must refresh the staged copy after the child has stopped and before seed/start.
     let (source_path, dest_path, session) = (PathBuf::from(source), PathBuf::from(&dest), session_id.clone());
     tokio::task::spawn_blocking(move || {
         crate::promote::finalize_staged_transcript(&source_path, &dest_path, &session, source_identity, staged_identity)
@@ -190,7 +185,6 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     .map_err(|x| format!("cannot join final transcript sync: {x}"))?
     .map_err(|x| format!("cannot finalize the promoted transcript: {x:?}"))?;
 
-    // 往前補完。1. 目標 bot 沒建就建。
     let in_cfg = app.cfg.get().await.projects.iter().any(|q| q.bots.iter().any(|b| b.id.as_deref() == Some(new_id.as_str())));
     let row = db::bot(&app.db, &new_id).await.map_err(e)?;
     if !in_cfg && row.is_none() {
@@ -207,12 +201,10 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         .await
         .map_err(|x| format!("cannot create the promoted bot: {x:#}"))?;
     }
-    // 2. 沒種過 session 就種（native resume 讀「最近一個結束的 run 的 native_session_id」）。
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ?").bind(&new_id).fetch_one(&app.db).await.map_err(|x| x.to_string())?;
     if runs == 0 {
         seed_session_run(&app.db, &child_id, &new_id, &session_id, &dest).await.map_err(|x| format!("cannot seed the session: {x}"))?;
     }
-    // 3. 還沒起過（沒有 active run、也沒有一個真的起過的 run；種下的那列 started_at＝ended_at）就 native resume 起。
     let started_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = ? AND (ended_at IS NULL OR ended_at <> started_at)").bind(&new_id).fetch_one(&app.db).await.map_err(|x| x.to_string())?;
     if started_before == 0 {
@@ -220,7 +212,6 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
             .await
             .map_err(|x| format!("cannot start the promoted bot: {x:?}"))?;
     }
-    // 4. 收掉 child 紀錄（它的 run 已經停了）。
     if child_live {
         let outcome = crate::child_retire::retire(app, &child_id, "promote_recovered", crate::child_retire::Mode::Explicit)
             .await

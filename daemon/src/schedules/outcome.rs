@@ -17,7 +17,6 @@ impl Model for ApiModel<'_> {
     fn classify<'a>(&'a self, reply: &'a str) -> Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>> {
         Box::pin(async move {
             let mut cfg = self.0.cfg.get().await;
-            // Same enable/key readiness boundary as release_triage::ApiModel and claude_review_api::ready.
             if !(cfg.claude_api.enabled && cfg.claude_use_state("schedule_outcome").is_some_and(|s| s.enabled)
                 && crate::key_file::read_key(&cfg.claude_api.key_file).is_ok()) { return None; }
             let safe = redact(reply);
@@ -28,8 +27,6 @@ impl Model for ApiModel<'_> {
                 prompt: safe,
                 format: Some(json!({"type":"object","additionalProperties":false,"required":["outcome"],"properties":{"outcome":{"type":"string","enum":["success","failed","refused","unknown"]}}})),
             };
-            // Enabled but unavailable/invalid classification is unknown, never a success fallback.
-            // Bound the transport itself so complete_with still records timeout/accounting; do not drop it mid-call.
             cfg.claude_api.timeout_ms = cfg.claude_api.timeout_ms.min(10_000);
             let result = crate::claude_api::complete_with(&cfg, &self.0.claude_api, request).await;
             let value = match result {
@@ -51,7 +48,6 @@ pub(super) fn rules(reply: &str) -> &'static str {
     let failed = ["失敗", "未完成", "沒有完成", "未成功", "無法完成", "failed", "failure", "not completed", "not successful", "could not", "error:", "連線被重置", "連線中斷", "找不到按鈕", "connection reset", "timed out"].iter().any(|x| s.contains(x));
     let success = matches!(s.trim(), "success" | "done" | "completed") || ["已完成", "已成功", "執行成功", "completed successfully", "successfully completed"].iter().any(|x| s.contains(x));
     if ["無法確認", "待確認", "不確定", "not sure"].iter().any(|x| s.contains(x)) { return "unknown"; }
-    // A partial success plus a failure must not cause the successful external action to be repeated.
     match (success, failed) { (true, false) => "success", (false, true) => "failed", _ => "unknown" }
 }
 /// Mask assignment-style credentials, bearer tokens, known key prefixes, and long opaque strings before persistence/API.
@@ -64,7 +60,6 @@ pub(super) fn redact(text: &str) -> String {
             return "[redacted]".into();
         }
         let lower = line.to_ascii_lowercase();
-        // Conservative: a credential label hides the rest of that line, including quoted/multiword secrets.
         let at = ["password", "passwd", "pwd", "token", "api_key", "api key", "api-key", "secret", "username", "account", "帳號", "密碼", "口令", "權杖", "bearer "]
             .iter().filter_map(|label| lower.find(label).map(|i| (i, label.len()))).min_by_key(|(i, _)| *i);
         hide_next = at.is_some_and(|(i, len)| line[i + len..].trim_matches(|c: char| c.is_whitespace() || "=:：\"'".contains(c)).is_empty());

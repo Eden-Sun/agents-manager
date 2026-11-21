@@ -84,21 +84,15 @@ CREATE INDEX IF NOT EXISTS supervisor_inbox_role_open
 /// 從 `store::migrate` 最後呼叫。可重入：每一步都有 `IF NOT EXISTS` 或欄位檢查。
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     for (col, ddl) in [
-        // NULL = 還沒分類（剛寫進來、或這個欄位出現以前的舊列）；controller 每個 tick 先補上。
         ("role", "ALTER TABLE supervisor_inbox ADD COLUMN role TEXT"),
-        // 0 = 只記錄、不喚醒：回覆、ack、純通知、恢復。會跟下一次喚醒一起送，但自己不叫醒誰。
         ("wake", "ALTER TABLE supervisor_inbox ADD COLUMN wake INTEGER"),
         ("acked_by", "ALTER TABLE supervisor_inbox ADD COLUMN acked_by TEXT"),
-        // 被合併掉的事件指向留下來的那一筆（例如同一段時間的多次 health_changed）。
         ("merged_into", "ALTER TABLE supervisor_inbox ADD COLUMN merged_into TEXT"),
     ] {
         if !super::store::has_column(pool, "supervisor_inbox", col).await? {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
-    // `claimed_by`：實際送給哪個角色（送出那一刻寫下）。ack 以它為準，兩個角色不會各收一次。
-    // 加欄與回填**同一個 transaction**：分兩步的話，加欄成功、回填失敗之後重啟會看到欄位已經在，
-    // 回填就永遠被跳過，舊巡檢收過的事件從此被當成沒人收過。
     if !super::store::has_column(pool, "supervisor_inbox", "claimed_by").await? {
         let mut tx = pool.begin().await?;
         sqlx::query("ALTER TABLE supervisor_inbox ADD COLUMN claimed_by TEXT").execute(&mut *tx).await?;
@@ -113,7 +107,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     }
     repair_unsent_patrol_claims(pool).await?;
     if !super::store::has_column(pool, "supervisor_assignments", "review_role").await? {
-        // 回報給誰驗收。NULL = 協調者（巡檢自己的例行派工會明寫 patrol）。
         sqlx::query("ALTER TABLE supervisor_assignments ADD COLUMN review_role TEXT").execute(pool).await?;
     }
     for stmt in DDL.split(";\n") {
@@ -159,8 +152,6 @@ async fn repair_unsent_patrol_claims(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- routing table
-
 /// 一個事件歸誰、要不要叫醒人。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
@@ -183,35 +174,21 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
     let reviewer = review_role.and_then(Role::parse).unwrap_or(Role::Responder);
     let r = |role, wake| Some(Route { role, wake });
     match kind {
-        // bot 的申請：寫入時已決定收件角色（`bot_requests::intercept`）。
         "bot_request" => r(
             payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Responder),
             payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
         ),
         "assignment_completed" | "assignment_failed" => r(reviewer, needs_review != Some(false)),
-        // #558：完成回報的證據旗標（shadow）。歸這筆交辦的驗收者，**不叫醒**：約一半的回報會標
-        // 「缺驗證」，叫醒等於每則回報多一回合；旗標搭下一次送達一起看就好。
         "judge_report_evidence" => r(reviewer, false),
-        // 送不進去、停在 blocked：要驗收角色決定改派、followup 或放掉（controller::undeliverable）。
         "assignment_undeliverable" => r(reviewer, true),
-        // 通知型交辦送到了、額度擋住／恢復：controller 自己會處理，這些只是記錄。
-        // 排隊中（`assignment_queued`）同理：它還在路上，等回合結束自己會送出。
         "assignment_noticed" | "assignment_queued" | "assignment_quota_blocked" | "assignment_quota_resumed" => r(reviewer, false),
-        // 核准：預設協調者，但**改派過的認 payload 的 `to_role`**（issue #421）。協調者不可用而核准
-        // 等超過 5 分鐘時 `failover` 會把它改成巡檢；恢復之後不搶回，靠的是 `classify` 只補
-        // `role IS NULL` 的列，這裡多認一個欄位是為了讓「重讀 payload 也答巡檢」這件事不只靠那個條件。
         "approval_requested" => r(
             payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Responder),
             true,
         ),
-        // Keep routing historical inbox entries created before missions were removed.
         "mission_created" | "mission_question" | "mission_answered" | "mission_resumed"
         | "mission_identity_switch" | "mission_paused" | "mission_cancelled" | "mission_next" => r(Role::Responder, true),
-        // 倒下的就是巡檢自己：它的看門狗放棄、或它的通知一直送不出去（`notify_exhausted`）。送給巡檢等於
-        // 送進已知壞掉的那條路——活著的協調者才收得到（review 2026-09-16 c1 M2、L4）。反方向對稱：
-        // 協調者倒了是 `responder_watchdog_gave_up` 給巡檢。協調者沒建立時巡檢的 `due_for` 照樣撈得到。
         "watchdog_gave_up" => r(Role::Responder, true),
-        // 一則通知補送到放棄：交給**另一個**角色看（寫入時就決定好了，`controller::give_up_on`）。
         "inbox_gave_up" => r(
             payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Patrol),
             true,
@@ -219,9 +196,6 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         "incident_opened" | "incident_resolved" if payload.pointer("/incident/kind").and_then(Value::as_str) == Some("notify_exhausted") => {
             r(Role::Responder, kind == "incident_opened")
         }
-        // #459：故障的就是角色 bot 自己（`resource` 是角色名）。送給故障的那一顆等於送進已知壞掉的
-        // 那條路，跟上面 `watchdog_gave_up` 是同一個反模式——壞的是巡檢就給協調者，反之給巡檢。
-        // 協調者沒建立時 `incidents::notifiable` 會先把巡檢那一筆擋掉，不會繞回它自己。
         "incident_opened" | "incident_resolved"
             if payload.pointer("/incident/kind").and_then(Value::as_str) == Some(super::incidents::ROLE_UNAVAILABLE_KIND) =>
         {
@@ -229,35 +203,20 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
             let to = if broken == Some(Role::Patrol) { Role::Responder } else { Role::Patrol };
             r(to, kind == "incident_opened")
         }
-        // 系統層的故障：巡檢收、叫醒。`ops_alert` 是排程腳本自己喊的（例行更新卡住），也是巡檢的事。
-        // `judge_stuck_screen`：prompt 排著送不出去、畫面底部疑似有 daemon 不認得的框（SPEC §4.3c），要人去終端看一眼。
-        // `child_retire_refused`：對帳／維護收尾要隱式退役 AGM 的 child，daemon 擋下來了（#413），要人決定刪不刪。
         "incident_opened" | "responder_watchdog_gave_up" | "responder_bot_missing" | "bot_restart_failed" | "intent_failed"
-        // `bot_shim_stale`：某顆 bot 的 herdr／cargo shim 換不動（issue #533），跟 `agm_cli_stale` 同一種事。
         | "supervisor_restart_retry" | "agm_cli_stale" | "bot_shim_stale" | "pane_unowned" | "pane_orphaned" | "judge_stuck_screen"
-        // `judge_same_work`：派工／開票時疑似撞上同專案在跑的工作（#557）。只提示，不阻擋。
         | "judge_same_work"
-        // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身份的呼叫端也改得動
-        // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
-        // `bot_lost`：herdr 掉了一顆 autostart bot 的 agent（重啟／斷線），對帳收成 exited 後 daemon 已照退避再起一次或放棄（`autostart_revive`）。
         | "child_retire_refused" | "persona_changed" | "bot_lost" => r(Role::Patrol, true),
-        // Most operational alerts go to Patrol. A component that is itself Patrol may explicitly
-        // route its alert to the healthy responder instead.
         "ops_alert" => r(
             payload.get("to_role").and_then(Value::as_str).and_then(Role::parse).unwrap_or(Role::Patrol),
             true,
         ),
-        // `deploy_waiting`：部署等換版窗口超過 3 分鐘要立刻告訴使用者、請使用者調度（SPEC §18.10）。只記錄類的更新不設 wake（issue #856）。
         "deploy_waiting" => r(
             Role::Patrol,
             payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
         ),
-        // `release_triage_notice`：daemon 用 Claude API 分診完一版，結論直接給巡檢（使用者入口），不經協調者（#1919）。
         "release_triage_notice" => r(Role::Patrol, payload.get("wake").and_then(Value::as_bool).unwrap_or(true)),
-        // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
-        // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
-        // 舊 payload 沒有 `responder_health` 就當 healthy。
         "health_changed" => {
             let status = payload.pointer("/manager_health/status").and_then(Value::as_str).unwrap_or("unknown");
             let responder = payload.pointer("/responder_health/status").and_then(Value::as_str).unwrap_or("healthy");
@@ -347,8 +306,6 @@ pub async fn classify(pool: &SqlitePool) -> Result<usize> {
     }
     Ok(rows.len())
 }
-
-// ---------------------------------------------------------------- role rows
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, FromRow)]
@@ -457,7 +414,6 @@ pub async fn set_runtime(pool: &SqlitePool, role: Role, identity: &str, model: &
 /// 所以沒寫到任何列一樣是失敗（issue #84，跟 [`crate::supervisor::store::set_desired_running`] 同一個約定）。
 pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) -> Result<()> {
     get(pool, role).await?;
-    // 人手啟動就是新的一輪：前一次 watchdog 放棄的紀錄與計數一起清掉。
     let wrote = sqlx::query(
         "UPDATE supervisor_roles SET desired_running=?, watchdog_attempts=0, watchdog_next_at=NULL,
                 watchdog_gave_up_at=NULL, watchdog_last_error=NULL, updated_at=? WHERE role=?",
@@ -475,7 +431,6 @@ pub async fn set_desired_running(pool: &SqlitePool, role: Role, wanted: bool) ->
 
 pub async fn set_status(pool: &SqlitePool, role: Role, status: &str, detail: Option<&str>, reset_at: Option<&str>) -> Result<()> {
     let now = crate::db::now();
-    // `waiting_since` 只在**進入**等待（額度或登入，#420）時記一次，之後刷新 detail／reset 不改它；離開等待就清掉。
     sqlx::query(
         "UPDATE supervisor_roles
             SET status=?, status_detail=?, quota_reset_at=?, updated_at=?,
@@ -636,8 +591,6 @@ pub async fn record(pool: &SqlitePool, role: Role) -> Result<RoleRecord> {
                 bot_id: row.bot_id,
                 status: row.status,
                 status_detail: row.status_detail,
-                // Patrol has no `waiting_since` column; faults detected by the health tick carry
-                // their own in-memory `since` timestamp.
                 waiting_since: None,
             })
         }
@@ -652,8 +605,6 @@ pub async fn record(pool: &SqlitePool, role: Role) -> Result<RoleRecord> {
         }
     }
 }
-
-// ---------------------------------------------------------------- per-role inbox
 
 /// 一筆事件「歸誰」的唯一定義：送出去之後看 `claimed_by`，還沒送就看路由表寫的 `role`。
 ///
@@ -711,8 +662,6 @@ pub async fn due_for(
         ),
         (Role::Responder, _) => (format!("{OWNER}='responder'"), "?1 = ?1".to_string()),
     };
-    // 編號參數：三種組合用同一組 bind，不必各自對齊順序。
-    // `notify_next_at` 可能是舊版寫的秒格式：正規化成毫秒再比，同一秒內才判得對（issue #101）。
     let next_at = crate::db::ts_sql("notify_next_at");
     let sql = format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=?2 AND state='pending' AND {owned}
@@ -734,8 +683,6 @@ pub async fn list_for(pool: &SqlitePool, role: Option<Role>, all: bool, limit: i
         Some(r) => format!("AND {OWNER}='{}'", r.as_str()),
         None => String::new(),
     };
-    // 稽核視圖（`all`）最新在前；工作視圖只列沒結案的、最舊在前，照順序 ack 才清得掉。第二鍵用
-    // `rowid`（寫入順序），不是 `id`（issue #100，理由同 `due_for`：同一毫秒內 ULID 的亂數段不保證遞增）。
     let (state, order) = if all { ("", "created_at DESC, rowid DESC") } else { ("AND state!='handled'", "created_at ASC, rowid ASC") };
     let sql = format!(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? {state} {owned} ORDER BY {order} LIMIT ?"
@@ -788,10 +735,7 @@ pub enum AckOutcome {
 ///
 /// 協調者還沒建立時，巡檢可以結協調的事件（因為那時就是它在收）。
 pub async fn ack(pool: &SqlitePool, id: &str, actor: Role, responder_configured: bool) -> Result<AckOutcome> {
-    // 守衛跟寫入在同一句 SQL：先 SELECT 再 UPDATE 的話，兩者之間送出的那一次 `mark_delivered`
-    // 會把 claim 換成另一個角色，而這一句照樣寫下去——等於跨角色結了別人的案。
     let allowed = match actor {
-        // 協調者還沒建立時，協調的事件就是巡檢在收，所以巡檢結得了。
         Role::Patrol if !responder_configured => format!("{OWNER} IN ('patrol','responder')"),
         r => format!("{OWNER}='{}'", r.as_str()),
     };
@@ -810,7 +754,6 @@ pub async fn ack(pool: &SqlitePool, id: &str, actor: Role, responder_configured:
     if res.rows_affected() > 0 {
         return Ok(AckOutcome::Acked);
     }
-    // 沒寫到：說得出是哪一種——不存在、已經結過，還是別的角色的。
     let row: Option<(String, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT state, role, claimed_by FROM supervisor_inbox WHERE supervisor_id=? AND id=?")
             .bind(super::store::SUPERVISOR_ID)
@@ -858,7 +801,6 @@ pub async fn coalesce_patrol(pool: &SqlitePool) -> Result<usize> {
             .rows_affected() as usize;
         }
     }
-    // `incident:<id>:opened` / `incident:<id>:resolved`（incidents.rs 的 event_key）。
     let flaps: Vec<(String, String)> = sqlx::query_as(
         "SELECT o.id, r.id FROM supervisor_inbox o
            JOIN supervisor_inbox r
@@ -925,19 +867,14 @@ mod tests {
         };
         let mut pending: Vec<(&str, &str)> = Vec::new();
         for (key, next_at) in [
-            // 舊格式（秒），早就過了 → 該出來。
             ("legacy-past", "2026-09-18T07:00:00Z"),
-            // 新格式（毫秒），早就過了 → 該出來。
             ("new-past", "2026-09-18T07:00:00.000Z"),
-            // 舊格式，還沒到 → 不該出來。
             ("legacy-future", "2026-09-18T07:10:00Z"),
-            // 新格式，還沒到 → 不該出來。
             ("new-future", "2026-09-18T07:10:00.000Z"),
         ] {
             super::super::store::push_inbox(&p, key, "approval_requested", None, None, None, &json!({})).await.unwrap();
             pending.push((key, next_at));
         }
-        // 先分類（決定歸誰），再蓋上到期時間：`due_for` 只看有主人的那些。
         classify(&p).await.unwrap();
         for (key, next_at) in pending {
             sqlx::query("UPDATE supervisor_inbox SET notify_next_at=? WHERE event_key=?")
@@ -947,13 +884,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // 「現在」是毫秒格式，跟兩種到期時間都差超過一秒。
         let now = "2026-09-18T07:05:00.000Z";
         let mut got = due_ids(due_for(&p, Role::Patrol, false, now, 5).await.unwrap());
         got.sort();
         assert_eq!(got, vec!["legacy-past".to_string(), "new-past".to_string()], "新舊格式混存時要一起判對");
 
-        // 同一秒內：`07:00:00.000`（舊格式）早於 `07:00:00.500`，兩種格式都已到期。
         let same_second = "2026-09-18T07:00:00.500Z";
         let got = due_ids(due_for(&p, Role::Patrol, false, same_second, 5).await.unwrap());
         assert!(got.contains(&"new-past".to_string()), "新格式同一秒內判得對");
@@ -975,7 +910,6 @@ mod tests {
         }
         assert_eq!(route("assignment_completed", &json!({"needs_review": true}), None), Route { role: Role::Responder, wake: true });
         assert_eq!(route("assignment_failed", &json!({"needs_review": true}), Some("patrol")), Route { role: Role::Patrol, wake: true }, "巡檢自己的例行派工回到巡檢");
-        // 寫入端真正用的名字（store::park_quota_blocked／resume_quota_blocked），不是表上以前寫的 `quota_blocked`。
         for kind in ["assignment_noticed", "assignment_queued", "assignment_quota_blocked", "assignment_quota_resumed", "judge_report_evidence"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Responder, wake: false }, "{kind} 只記錄、歸驗收角色");
             assert_eq!(route(kind, &p, Some("patrol")).role, Role::Patrol, "{kind} 跟著交辦的驗收角色");
@@ -985,7 +919,6 @@ mod tests {
         for kind in ["incident_opened", "bot_restart_failed", "supervisor_restart_retry", "responder_watchdog_gave_up", "ops_alert", "brand_new_kind"] {
             assert_eq!(route(kind, &p, None), Route { role: Role::Patrol, wake: true }, "{kind}");
         }
-        // 巡檢自己倒了：送給巡檢等於沒送。活著的協調者收（review 2026-09-16 c1 M2、L4）。
         assert_eq!(route("watchdog_gave_up", &p, None), Route { role: Role::Responder, wake: true });
         let exhausted = json!({"incident": {"kind": "notify_exhausted"}});
         assert_eq!(route("incident_opened", &exhausted, None), Route { role: Role::Responder, wake: true });
@@ -1150,7 +1083,6 @@ mod tests {
                 }
             }
         }
-        // 執行期讀，不是 `include_str!`：那會把整棵原始碼變成這個測試的建置輸入。
         let repo = workspace_root();
         let roots = [repo.join("daemon/src"), repo.join("crates/am-supervisor/src")];
         let owner_file = repo.join("crates/am-supervisor/src/supervisor/roles.rs");
@@ -1160,8 +1092,6 @@ mod tests {
         }
         assert!(files.len() > 10, "掃不到檔案就不算掃過");
         let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        // 比對的字串**由 `OWNER` 現算**，不在這裡再打一次：打出來的話這個檔案自己就有兩份字面，
-        // 而「只准有一份」的那條斷言會被自己弄紅（也等於又多抄了一份，正是要擋的事）。
         let needle = squash(OWNER);
         let mut sql_here = 0usize;
         let mut strays: Vec<String> = Vec::new();
@@ -1171,7 +1101,6 @@ mod tests {
             for (n, line) in std::fs::read_to_string(f).unwrap().lines().enumerate() {
                 let flat = squash(line);
                 let sql = flat.contains(&needle);
-                // Rust 側自己補 NULL fallback 的三種寫法都算（`.or(`／`.or_else(`）。
                 let rust = flat.contains("claimed_by") && (flat.contains(".or(") || flat.contains(".or_else("));
                 if !(sql || rust) {
                     continue;
@@ -1183,7 +1112,6 @@ mod tests {
                 strays.push(format!("{at}:{}: {}", n + 1, line.trim()));
             }
         }
-        // 撈取本身要撈得到東西：否則哪天比對字串壞掉，這個測試會安靜地變成恆真。
         assert_eq!(sql_here, 1, "roles.rs 裡應該剛好只有 OWNER 那一行是字面的 SQL");
         assert!(
             strays.is_empty(),
@@ -1196,11 +1124,9 @@ mod tests {
     #[test]
     fn every_kind_written_to_the_inbox_has_its_own_routing_branch() {
         let kinds = inbox_kinds_written_in_source();
-        // 撈取本身要撈得到東西：否則 regex 一壞，這個測試會安靜地變成恆真。
         for must in ["assignment_quota_blocked", "assignment_quota_resumed", "assignment_undeliverable", "assignment_completed", "approval_requested", "bot_request", "incident_opened"] {
             assert!(kinds.contains_key(must), "source scan lost {must}: {kinds:?}");
         }
-        // 撈不到的寫法（panes.rs 用 tuple 陣列決定 kind）逐一列在這裡，免得新 kind 又從預設路由溜走。
         for written_via_table in ["pane_orphaned", "pane_unowned"] {
             assert!(known_route(written_via_table, &json!({}), None).is_some(), "{written_via_table} 沒有明寫的分支");
         }
@@ -1228,7 +1154,6 @@ mod tests {
     /// 判斷「這件事舊的單顆 AGM 已經收走了」。
     async fn pre_dual_pool() -> SqlitePool {
         let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        // 雙角色以前的 supervisor_inbox：沒有 role／wake／claimed_by／acked_by／merged_into。
         for stmt in [
             "CREATE TABLE supervisors (id TEXT PRIMARY KEY, bot_id TEXT, project_id TEXT, cwd TEXT,
                identity TEXT NOT NULL DEFAULT 'cc0', effort TEXT NOT NULL DEFAULT 'low',
@@ -1246,13 +1171,11 @@ mod tests {
         ] {
             sqlx::query(stmt).execute(&p).await.unwrap();
         }
-        // 舊庫裡的四種列：送出過（等 ack）、送過但通知回合失敗被 recover 成 pending、已結案、從沒送過。
         let rows = [
             ("old-delivered", "approval_requested", "delivered", Some("t-old-1"), 1, Some("2026-09-01T00:00:00Z")),
             ("old-recovered", "assignment_completed", "pending", Some("t-old-2"), 2, Some("2026-09-01T00:05:00Z")),
             ("old-handled", "approval_requested", "handled", None, 0, None),
             ("old-untouched", "approval_requested", "pending", None, 0, None),
-            // 送了三次都沒送出去（`defer_notify` 也會加 attempts），沒有回合、沒有 delivered_at。
             ("old-deferred-unsent", "approval_requested", "pending", None, 3, None),
         ];
         for (key, kind, state, turn, attempts, delivered) in rows {
@@ -1290,23 +1213,20 @@ mod tests {
     async fn upgrading_a_real_pre_dual_database_keeps_the_old_managers_events_with_patrol() {
         let p = pre_dual_pool().await;
         super::super::store::migrate(&p).await.unwrap();
-        super::super::store::migrate(&p).await.unwrap(); // 可重入：跑兩次結果一樣
+        super::super::store::migrate(&p).await.unwrap();
         classify(&p).await.unwrap();
 
-        // 送過的（含 recover 成 pending 的）仍是巡檢的，即使路由表把這些種類分給協調者。
         for key in ["old-delivered", "old-recovered"] {
             let (claimed_by, role, _) = claimed(&p, key).await;
             assert_eq!(claimed_by.as_deref(), Some("patrol"), "{key} 舊 AGM 已經收走了");
             assert_eq!(role.as_deref(), Some("responder"), "{key} 的種類照新路由表仍屬協調者");
         }
-        // 沒有送達痕跡的交給新路由表：從沒送過的、嘗試過但一次都沒送出去的，以及沒有送達痕跡就結案的。
         for key in ["old-untouched", "old-deferred-unsent", "old-handled"] {
             let (claimed_by, role, _) = claimed(&p, key).await;
             assert_eq!(claimed_by, None, "{key} 沒有送達證據，不能記給巡檢（attempts 不算）");
             assert_eq!(role.as_deref(), Some("responder"));
         }
 
-        // 雙角色啟用之後：協調者只拿沒送過的，送過的留給巡檢，不會兩邊各送一次。
         set_env(&p, Role::Responder, "resp", "proj", "/tmp").await.unwrap();
         let now = "2999-01-01T00:00:00Z";
         let mut resp: Vec<String> = due_for(&p, Role::Responder, true, now, 0).await.unwrap().into_iter().map(|e| e.event_key).collect();
@@ -1315,7 +1235,6 @@ mod tests {
         let patrol: Vec<String> = due_for(&p, Role::Patrol, true, now, 5).await.unwrap().into_iter().map(|e| e.event_key).collect();
         assert_eq!(patrol, vec!["old-recovered".to_string()], "recover 成 pending 的那件回到原收件者");
 
-        // 原收件者才 ack 得動；協調者送不進去也結不掉。
         let id: String = sqlx::query_scalar("SELECT id FROM supervisor_inbox WHERE event_key='old-recovered'").fetch_one(&p).await.unwrap();
         assert_eq!(mark_delivered(&p, std::slice::from_ref(&id), Role::Responder, "t-new", "ok").await.unwrap(), 0);
         assert_eq!(ack(&p, &id, Role::Responder, true).await.unwrap(), AckOutcome::ClaimedByOther("patrol".into()));
@@ -1327,7 +1246,6 @@ mod tests {
     #[tokio::test]
     async fn a_failed_backfill_leaves_no_half_migrated_column_and_the_rerun_finishes_it() {
         let p = pre_dual_pool().await;
-        // 故障注入：回填那句 UPDATE 會被擋下來。
         sqlx::query(
             "CREATE TRIGGER fail_backfill BEFORE UPDATE ON supervisor_inbox
              BEGIN SELECT RAISE(ABORT, 'injected backfill failure'); END",
@@ -1352,7 +1270,6 @@ mod tests {
     async fn events_mis_claimed_by_the_old_backfill_are_released_without_touching_real_claims() {
         let p = pre_dual_pool().await;
         super::super::store::migrate(&p).await.unwrap();
-        // 模擬舊版回填的結果＋部署之後的真實工作。
         sqlx::query("UPDATE supervisor_inbox SET claimed_by='patrol' WHERE event_key='old-deferred-unsent'").execute(&p).await.unwrap();
         for (key, state, claimed, turn, delivered, acked) in [
             ("live-resp-delivered", "delivered", "responder", Some("t-r"), Some("2026-09-14T00:00:00Z"), None),
@@ -1367,7 +1284,7 @@ mod tests {
             .execute(&p).await.unwrap();
         }
         super::super::store::migrate(&p).await.unwrap();
-        super::super::store::migrate(&p).await.unwrap(); // 可重入
+        super::super::store::migrate(&p).await.unwrap();
 
         assert_eq!(claimed(&p, "old-deferred-unsent").await.0, None, "沒送達證據的誤歸屬被放回");
         assert_eq!(claimed(&p, "old-recovered").await.0.as_deref(), Some("patrol"), "有送達證據的不動");
@@ -1388,7 +1305,6 @@ mod tests {
         assert_eq!(patrol.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), vec!["incident_opened"]);
         let resp = due_for(&p, Role::Responder, true, now, 5).await.unwrap();
         assert_eq!(resp.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), vec!["approval_requested"]);
-        // 協調者送不出去很多次，也不會掉回巡檢、也不會被當成用完重試。
         sqlx::query("UPDATE supervisor_inbox SET notify_attempts=99").execute(&p).await.unwrap();
         assert_eq!(due_for(&p, Role::Responder, true, now, 5).await.unwrap().len(), 1);
         assert!(due_for(&p, Role::Patrol, true, now, 5).await.unwrap().is_empty());
@@ -1416,8 +1332,6 @@ mod tests {
         let p = pool().await;
         let id = super::super::store::push_inbox(&p, "k1", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
         classify(&p).await.unwrap();
-        // 同一個角色的兩次同時結（協調者的兩個回合）：守衛與寫入在同一句 SQL，只有一個 Acked。
-        // 以前這裡一側是 `None`＝使用者，那條路在 issue #432 之後不存在了。
         let (a, b) = tokio::join!(ack(&p, &id, Role::Responder, true), ack(&p, &id, Role::Responder, true));
         let outcomes = [a.unwrap(), b.unwrap()];
         assert_eq!(outcomes.iter().filter(|o| **o == AckOutcome::Acked).count(), 1, "{outcomes:?}");
@@ -1428,7 +1342,6 @@ mod tests {
         let p = pool().await;
         for (i, s) in ["degraded", "healthy", "degraded"].iter().enumerate() {
             super::super::store::push_inbox(&p, &format!("health:{i}"), "health_changed", None, None, None, &json!({"manager_health": {"status": s}})).await.unwrap();
-            // created_at 精度是秒；排序要穩定就把時間往後推。
             sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE event_key=?")
                 .bind(format!("2026-09-13T00:00:0{i}Z"))
                 .bind(format!("health:{i}"))
@@ -1588,7 +1501,6 @@ mod tests {
             .unwrap();
         }
 
-        // 把 i1 那則改成送達過又放回
         sqlx::query(
             "UPDATE supervisor_inbox SET notify_turn_id='t1', delivered_at='2026-10-01T00:00:00.000Z', state='pending'
               WHERE event_key='incident:i1:opened'",
@@ -1597,7 +1509,6 @@ mod tests {
         .await
         .unwrap();
 
-        // 推 incident:i1:resolved 與 incident:i2:resolved
         for (id, key) in [
             ("01INBOX00000000000000000003", "incident:i1:resolved"),
             ("01INBOX00000000000000000004", "incident:i2:resolved"),
@@ -1618,7 +1529,6 @@ mod tests {
 
         assert_eq!(coalesce_patrol(&p).await.unwrap(), 2, "只合併 i2 那一對（opened+resolved 共 2 筆）");
 
-        // i1 的 opened／resolved 兩則仍是 pending、merged_into IS NULL
         let i1_opened: (String, Option<String>) = sqlx::query_as("SELECT state, merged_into FROM supervisor_inbox WHERE event_key='incident:i1:opened'")
             .fetch_one(&p)
             .await
@@ -1633,7 +1543,6 @@ mod tests {
         assert_eq!(i1_resolved.0, "pending");
         assert_eq!(i1_resolved.1, None);
 
-        // i2 的兩則是 handled、acked_by='daemon'
         let i2_opened: (String, Option<String>) = sqlx::query_as("SELECT state, acked_by FROM supervisor_inbox WHERE event_key='incident:i2:opened'")
             .fetch_one(&p)
             .await
@@ -1683,13 +1592,10 @@ mod tests {
         let p = pool().await;
         let t = |h: i64, m: i64| format!("2026-10-10T{:02}:{:02}:00.000Z", h, m);
         raw_event(&p, "first", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 70 次略過"), &t(0, 5)).await;
-        // 一小時後同一件事、計數不同、event_key 不同（小時格）。
         raw_event(&p, "hour-later", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 71 次略過"), &t(1, 5)).await;
         raw_event(&p, "eleven-later", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 80 次略過"), &t(11, 5)).await;
-        // 新種類（reason 不同）、別支腳本（source 不同）：不是重複。
         raw_event(&p, "new-reason", "ops_alert", None, alert("daemon-update-kick", "swap_rolled_back", "回滾"), &t(1, 10)).await;
         raw_event(&p, "new-source", "ops_alert", None, alert("ops-sync", "swap_probe_skipped", "別支腳本"), &t(1, 15)).await;
-        // 同 source／reason 但是另一顆 bot 的：不是同一件事。
         raw_event(&p, "bot-a", "ops_alert", Some("bot-a"), alert("daemon", "agent_md_unreadable", "a"), &t(2, 0)).await;
         raw_event(&p, "bot-b", "ops_alert", Some("bot-b"), alert("daemon", "agent_md_unreadable", "b"), &t(2, 1)).await;
         raw_event(&p, "bot-a-again", "ops_alert", Some("bot-a"), alert("daemon", "agent_md_unreadable", "a 又來"), &t(3, 0)).await;
@@ -1704,7 +1610,6 @@ mod tests {
         assert_eq!(wake_of(&p, "bot-b").await, 1, "別顆 bot 的同一個 reason 照常叫醒");
         assert_eq!(wake_of(&p, "bot-a-again").await, 0, "同一顆 bot 的同一件事退避");
 
-        // 窗外：距離上一次**真的叫醒**滿 12 小時就再提醒一次（被退避壓掉的不算，窗不會被自己延後）。
         raw_event(&p, "after-window", "ops_alert", None, alert("daemon-update-kick", "swap_probe_skipped", "已連續 90 次略過"), &t(12, 10)).await;
         classify(&p).await.unwrap();
         assert_eq!(wake_of(&p, "after-window").await, 1, "距上次叫醒超過 12 小時：再提醒一次");
@@ -1712,7 +1617,6 @@ mod tests {
         classify(&p).await.unwrap();
         assert_eq!(wake_of(&p, "after-window-2").await, 0, "再提醒之後又進入新的窗");
 
-        // 退避只壓 wake，角色照分，事件照入列、照送：稽核與 UI 看得到。
         let role: String = sqlx::query_scalar("SELECT role FROM supervisor_inbox WHERE event_key='hour-later'").fetch_one(&p).await.unwrap();
         assert_eq!(role, "patrol");
         let due = due_for(&p, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
@@ -1731,7 +1635,6 @@ mod tests {
                 raw_event(&p, &format!("{kind}-{n}"), kind, None, payload, &at((i * 2 + n) as i64)).await;
             }
         }
-        // 核准單 failover：改派給巡檢的核准要照常叫醒。
         raw_event(&p, "approval-0", "approval_requested", None, json!({"to_role": "patrol"}), &at(20)).await;
         raw_event(&p, "approval-1", "approval_requested", None, json!({"to_role": "patrol"}), &at(21)).await;
         classify(&p).await.unwrap();

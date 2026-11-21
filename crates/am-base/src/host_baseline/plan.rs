@@ -286,7 +286,6 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        // settings.json 少 statusLine／hooks／defaultMode，另有一個不合法的身份；codex 少 approval_policy、features.hooks 是 false。
         write(".claude/settings.json", r#"{"permissions":{"allow":["AM-SECRET-perm"]},"env":{"TOKEN":"AM-SECRET-env"}}"#);
         write(".claude/CLAUDE.md", "AM-SECRET-md");
         write(".claude-cc3/settings.json", "{ AM-SECRET-broken");

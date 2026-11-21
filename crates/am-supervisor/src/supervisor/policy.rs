@@ -44,7 +44,6 @@ pub enum Decision {
 pub fn past(iso: &str, now: DateTime<Utc>) -> bool {
     match DateTime::parse_from_rfc3339(iso) {
         Ok(t) => t <= now,
-        // An unreadable timestamp must not park the manager forever.
         Err(_) => true,
     }
 }
@@ -71,8 +70,6 @@ fn effective_remaining(w: &Window, now: DateTime<Utc>) -> f64 {
     }
 }
 
-
-
 fn cooldown_over(sup: &Supervisor, now: DateTime<Utc>) -> bool {
     sup.cooldown_until.as_deref().map(|t| past(t, now)).unwrap_or(true)
 }
@@ -83,23 +80,18 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
         return Decision::Keep;
     }
     let Some(q) = quota else {
-        // No reading is not a full account. The one thing a missing reading may end is a
-        // wait whose recorded reset has come and gone.
         if sup.status == "waiting_quota" && sup.quota_reset_at.as_deref().is_some_and(|t| past(t, now)) {
             return Decision::Resume;
         }
         return Decision::Keep;
     };
 
-    // Shared windows first: with the 5-hour or 7-day bucket gone there is nothing to switch to.
-    // issue #475：用 `Quota::exhausted`（含「讀數比窗長還舊就不算用盡」），不要各自判。
     let critical: Vec<&Window> = [Bucket::FiveHour, Bucket::SevenDay]
         .into_iter()
         .filter(|b| q.exhausted(*b, now))
         .filter_map(|b| q.usable_window(b, now))
         .collect();
     if !critical.is_empty() {
-        // 比時刻不比字串：`resets_at` 有的是 CLI 回報的原樣字串（秒、`+00:00`），跟毫秒格式混在一起。
         let reset_at = critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b));
         if sup.status == "waiting_quota" && crate::db::same_instant(sup.quota_reset_at.as_deref(), reset_at.as_deref()) {
             return Decision::Keep;
@@ -107,16 +99,11 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
         return Decision::WaitQuota { reset_at };
     }
     if sup.status == "waiting_quota" {
-        // `waiting_quota` is also where `switch_candidate` parks after both candidates were
-        // tried inside one cooldown. The shared windows being fine says nothing about that
-        // wait (Fable is the empty one), and ending it early would just re-enter it on the
-        // next tick; it ends with the cooldown or the reset it wrote down, whichever first.
         let budget_spent = sup.fallback_tries >= 1 && !cooldown_over(sup, now);
         let reset_passed = sup.quota_reset_at.as_deref().map(|t| past(t, now)).unwrap_or(true);
         return if budget_spent && !reset_passed { Decision::Keep } else { Decision::Resume };
     }
 
-    // 使用者指定的固定模型（sonnet）：Fable 週桶跟它無關，不自動切走。
     if !matches!(sup.active_model.as_str(), "fable" | "opus") {
         return Decision::Keep;
     }
@@ -136,7 +123,6 @@ pub fn decide(sup: &Supervisor, quota: Option<&Quota>, liveness: &str, now: Date
             reset_at: w.resets_at.clone(),
         };
     }
-    // On opus: go home once Fable is back and the cooldown from the last switch is over.
     let Some(w) = fable else { return Decision::Keep };
     if effective_remaining(w, now) < FABLE_RETURN_REMAINING_PCT || !cooldown_over(sup, now) {
         return Decision::Keep;
@@ -230,22 +216,18 @@ mod tests {
     fn no_reading_is_not_a_full_account() {
         assert_eq!(decide(&sup("fable", "", None, None), None, "idle", now()), Decision::Keep);
         assert_eq!(decide(&sup("opus", "", None, None), None, "idle", now()), Decision::Keep);
-        // …but a wait whose recorded reset has passed does end.
         assert_eq!(decide(&sup("opus", "waiting_quota", None, Some(EARLIER)), None, "idle", now()), Decision::Resume);
         assert_eq!(decide(&sup("opus", "waiting_quota", None, Some(LATER)), None, "idle", now()), Decision::Keep);
     }
 
     #[test]
     fn a_critical_shared_window_parks_the_manager_with_the_nearest_reset() {
-        // 5h at 97% used, 7d at 96% used: both critical, the 5h window resets first.
         let q = quota(w(97.0, LATER), w(96.0, MUCH_LATER), w(10.0, MUCH_LATER));
         assert_eq!(
             decide(&sup("fable", "", None, None), Some(&q), "idle", now()),
             Decision::WaitQuota { reset_at: Some(LATER.into()) }
         );
-        // Already waiting on that reset: nothing to re-announce.
         assert_eq!(decide(&sup("fable", "waiting_quota", None, Some(LATER)), Some(&q), "idle", now()), Decision::Keep);
-        // A fresh reading with a different reset updates the wait.
         let q2 = quota(w(97.0, MUCH_LATER), None, None);
         assert_eq!(
             decide(&sup("fable", "waiting_quota", None, Some(LATER)), Some(&q2), "idle", now()),
@@ -259,16 +241,13 @@ mod tests {
     fn resets_in_different_precisions_are_compared_by_instant() {
         let secs = "2026-09-11T09:00:00Z";
         let millis_later = "2026-09-11T09:00:00.500Z";
-        // 兩格都見底：09:00:00.000 比 09:00:00.500 早，最近的是秒格式那個。
         let q = quota(w(97.0, millis_later), w(96.0, secs), None);
         assert_eq!(
             decide(&sup("fable", "", None, None), Some(&q), "idle", now()),
             Decision::WaitQuota { reset_at: Some(secs.into()) }
         );
-        // 已經記著同一個時刻（舊資料是秒、新讀數是毫秒 `.000`）：什麼都不用重寫。
         let q = quota(w(97.0, "2026-09-11T09:00:00.000Z"), None, None);
         assert_eq!(decide(&sup("fable", "waiting_quota", None, Some(secs)), Some(&q), "idle", now()), Decision::Keep);
-        // 真的不同的時刻照舊要更新。
         assert_eq!(
             decide(&sup("fable", "waiting_quota", None, Some(secs)), Some(&quota(w(97.0, millis_later), None, None)), "idle", now()),
             Decision::WaitQuota { reset_at: Some(millis_later.into()) }
@@ -277,24 +256,18 @@ mod tests {
 
     #[test]
     fn a_shared_limit_outranks_any_candidate_switch() {
-        // Fable at 4% *and* the 5h window gone: switching to opus would find no quota either.
         let q = quota(w(99.0, LATER), w(40.0, MUCH_LATER), w(96.0, MUCH_LATER));
         assert!(matches!(decide(&sup("fable", "", None, None), Some(&q), "idle", now()), Decision::WaitQuota { .. }));
     }
 
     #[test]
     fn the_wait_ends_when_the_shared_windows_are_back() {
-        // Fresh reading, usable again.
         assert_eq!(decide(&sup("fable", "waiting_quota", None, Some(LATER)), Some(&healthy()), "idle", now()), Decision::Resume);
-        // Stale reading still says 99% used, but its reset has passed: refilled.
         let stale = quota(w(99.0, EARLIER), w(40.0, MUCH_LATER), w(10.0, MUCH_LATER));
         assert_eq!(decide(&sup("fable", "waiting_quota", None, Some(EARLIER)), Some(&stale), "idle", now()), Decision::Resume);
-        // Parked by "both candidates tried" (budget spent, cooldown running) with the reset
-        // still ahead: keep waiting — resuming would only re-enter the wait next tick.
         let mut both = sup("opus", "waiting_quota", Some(LATER), Some(LATER));
         both.fallback_tries = 1;
         assert_eq!(decide(&both, Some(&healthy()), "idle", now()), Decision::Keep);
-        // …until the cooldown is over, which gives the next switch its own budget.
         let mut over = sup("opus", "waiting_quota", Some(EARLIER), Some(LATER));
         over.fallback_tries = 1;
         assert_eq!(decide(&over, Some(&healthy()), "idle", now()), Decision::Resume);
@@ -307,12 +280,10 @@ mod tests {
             decide(&sup("fable", "", None, None), Some(&q), "idle", now()),
             Decision::SwitchTo { model: "opus", reason: "fable 剩餘額度低於 5%".into(), reset_at: Some(MUCH_LATER.into()) }
         );
-        // Not running: the config switch is safe, the next start comes up on opus.
         assert!(matches!(decide(&sup("fable", "", None, None), Some(&q), "stopped", now()), Decision::SwitchTo { model: "opus", .. }));
         for l in ["busy", "starting"] {
             assert_eq!(decide(&sup("fable", "", None, None), Some(&q), l, now()), Decision::Defer { model: "opus" }, "{l}");
         }
-        // 5% exactly is not "below 5%".
         let edge = quota(w(24.0, LATER), w(40.0, MUCH_LATER), w(95.0, MUCH_LATER));
         assert_eq!(decide(&sup("fable", "", None, None), Some(&edge), "idle", now()), Decision::Keep);
     }
@@ -331,11 +302,8 @@ mod tests {
             Decision::SwitchTo { model: "fable", reason: "fable 剩餘額度回到 30%".into(), reset_at: None }
         );
         assert!(matches!(decide(&sup("opus", "", None, None), Some(&back), "stopped", now()), Decision::SwitchTo { model: "fable", .. }));
-        // Cooldown still running: the plan's bound, one switch per window.
         assert_eq!(decide(&sup("opus", "", Some(LATER), None), Some(&back), "idle", now()), Decision::Keep);
-        // Mid-turn: wait.
         assert_eq!(decide(&sup("opus", "", Some(EARLIER), None), Some(&back), "busy", now()), Decision::Defer { model: "fable" });
-        // 19% is not enough; 20% is.
         let low = quota(w(24.0, LATER), w(40.0, MUCH_LATER), w(81.0, MUCH_LATER));
         assert_eq!(decide(&sup("opus", "", None, None), Some(&low), "idle", now()), Decision::Keep);
         let edge = quota(w(24.0, LATER), w(40.0, MUCH_LATER), w(80.0, MUCH_LATER));
@@ -344,8 +312,6 @@ mod tests {
 
     #[test]
     fn a_passed_fable_reset_counts_as_refilled_even_if_the_reading_is_stale() {
-        // The 2026-09-11 case: switched away at 98% used, the bucket reset at 06:00Z, the
-        // probe has not answered since. The reset passing is the signal.
         let stale = quota(w(24.0, LATER), w(40.0, MUCH_LATER), w(98.0, EARLIER));
         assert_eq!(
             decide(&sup("opus", "", Some(EARLIER), Some(EARLIER)), Some(&stale), "idle", now()),
@@ -362,12 +328,10 @@ mod tests {
 
     #[test]
     fn a_pinned_sonnet_is_never_switched_but_still_waits_on_quota() {
-        // Fable 見底、或 Fable 又滿了：sonnet 都不動。
         for fable in [w(99.0, MUCH_LATER), w(0.0, MUCH_LATER)] {
             let q = quota(w(24.0, LATER), w(40.0, MUCH_LATER), fable);
             assert_eq!(decide(&sup("sonnet", "", None, None), Some(&q), "idle", now()), Decision::Keep);
         }
-        // 共用窗見底照樣等額度。
         let q = quota(w(99.0, LATER), w(40.0, MUCH_LATER), w(10.0, MUCH_LATER));
         assert!(matches!(decide(&sup("sonnet", "", None, None), Some(&q), "idle", now()), Decision::WaitQuota { .. }));
     }
@@ -380,7 +344,6 @@ mod tests {
             used_pct: 99.0,
             resets_at: Some(MUCH_LATER.into()),
         }));
-        // argon 是 agy 專屬週額度，不影響 supervisor 對 fable 的決策
         assert_eq!(decide(&sup("fable", "", None, None), Some(&q), "idle", now()), Decision::Keep);
     }
 }

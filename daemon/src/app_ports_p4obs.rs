@@ -11,8 +11,6 @@ use crate::db;
 use crate::state::App;
 use anyhow::Result;
 
-// --- Screen & Cursor Bookkeeping ---
-
 /// 讀取 pane recent unwrapped 文字。
 pub async fn read_pane_recent_unwrapped(
     app: &impl crate::capabilities::HerdrRoutes,
@@ -89,8 +87,6 @@ pub async fn apply_codex_limit_hit_quota(
     hit
 }
 
-// --- Codex Banner Adapter ---
-
 /// 發送 codex 安全提醒通知訊息至聊天室。
 pub async fn post_codex_security_banner_notice(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, notice: &str) {
     match db::conversation_id(app.db(), &run.bot_id).await {
@@ -127,8 +123,6 @@ pub async fn push_codex_security_banner_alert(app: &(impl crate::capabilities::D
         Err(e) => tracing::warn!(run = %run.id, error = %e, "could not queue the codex security banner ops_alert"),
     }
 }
-
-// --- Transcript Origin Adapter ---
 
 struct AppTranscriptRoots<'a> {
     app: &'a Arc<App>,
@@ -168,10 +162,6 @@ pub async fn started_by_the_cli_itself(app: &Arc<App>, bot: &db::Bot, transcript
     let roots = AppTranscriptRoots { app, bot };
     crate::lifecycle::transcript_origin::started_by_the_cli_itself_with(&roots, &bot.kind, transcript_path).await
 }
-
-// --- Poller & Turn Error Adapters ---
-
-// --- Grok Transcript Host & Process Adapters ---
 
 /// 在 host 上執行 script。
 pub async fn host_sh(app: &impl crate::hosts::HostsAccess, host: &str, script: &str) -> Result<String> {
@@ -234,8 +224,6 @@ pub async fn consume_resume_session(
 ) -> Result<()> {
     crate::hookrecv::consume_resume_session(app, bot, run, session_id).await
 }
-
-// --- Testing Helpers ---
 
 #[cfg(test)]
 pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &db::Bot) -> Result<Option<crate::quota::LimitHit>> {

@@ -26,7 +26,6 @@ fn quoting(kind: &str, footer: &str) -> String {
     let quoted = match kind {
         "cat" => format!("  └ {BANNER}"),
         "plain" => "  └ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2099 6:43 PM.".to_string(),
-        // 回覆散文裡逐行貼出來的橫幅：行首就是 `■`，單行判斷認得，只能靠「它不是最後一個 cell」分辨。
         "bullet" => format!("  {BANNER}"),
         "diff" => "  └ +ERROR: You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2099 6:43 PM.".to_string(),
         "source" => "  └ daemon/src/lifecycle/screen.rs:566:    let hit = lower.contains(\"hit your usage limit\")".to_string(),
@@ -101,10 +100,8 @@ fn a_wrapped_banner_followed_by_the_reply_is_a_quote() {
 /// 真橫幅前面捲著引用同一句的輸出，還是要認，而且只記真的那一張。
 #[test]
 fn the_real_banner_is_read_under_quoted_scrollback() {
-    // 引用的日期跟真橫幅不同，才分得出 `codex_usage_notice_lines` 記的是哪一張（同一句會被去重）。
     let quoted = quoting("bullet", FOOTER_0155).replace("Sep 19th, 2099 6:43 PM", "Sep 1st, 2026 1:00 AM");
     let screen = format!("{}\n\n■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2099 6:43 PM.\n\n\n› Ask Codex to do anything\n\n{FOOTER_0155}\n", quoted.trim_end());
-    // 引用（`bullet`）後面接著 codex 自己的回覆，不算；最後那張才是。
     let lines = codex_usage_notice_lines(&screen);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("hit your usage limit") && lines[0].contains("2099 6:43 PM"), "{lines:?}");
@@ -119,7 +116,6 @@ fn is_screen_busy_recognizes_a_live_spinner_but_not_a_finished_one() {
     assert!(is_screen_busy("• Reviewing (1h 02m 03s • ctrl + c to interrupt)\n"));
     assert!(is_screen_busy("✢ Baking… (3m 18s · ↓ 11.0k tokens)\n❯\n"), "換一個動詞與 glyph 也認得");
 
-    // 過去已完成的回覆或空框不是 busy。
     assert!(!is_screen_busy("✻ Crunched for 9s · done 11:35 PM\n❯ \n"));
     assert!(!is_screen_busy("────────────────────\n❯ \n────────────────────\n"));
     assert!(!is_screen_busy("使用者貼了一句 Thinking (about X)\n"));

@@ -97,7 +97,6 @@ mod tests {
     async fn a_responder_persona_change_is_noted_even_when_projection_fails() {
         let app = crate::supervisor_tests::flow_fixture::app().await;
         crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
-        // 測試 app 的 config.toml 沒有這顆 responder bot，`apply_persona` 必然失敗（persona.md 也故意做成目錄，寫不進去）。
         std::fs::create_dir_all(responder::dir(&app).join("persona.md")).unwrap();
         let err = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn { text: "新的".into(), expected_version: None }))
             .await
@@ -120,7 +119,6 @@ mod tests {
         crate::supervisor_tests::flow_fixture::configure_responder(&app).await;
         sqlx::query("UPDATE supervisors SET persona_version=5").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisor_roles SET persona_version=5 WHERE role='responder'").execute(&app.db).await.unwrap();
-        // 兩邊的 `persona_sync_incomplete` 都算成功：這裡只要留痕寫完。
         let tolerate = |r: Result<Json<Value>, LcError>| match r {
             Ok(_) => (),
             Err(LcError::Conflict(v)) if v["reason"] == "persona_sync_incomplete" => (),
@@ -173,7 +171,6 @@ async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError
     let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
     let embedded = responder::persona_body();
     let embedded_hash = super::persona::hash(&embedded);
-    // A row without a stored hash is judged by the text it actually holds.
     let stored_hash = row.persona_hash.clone().unwrap_or_else(|| super::persona::hash(&text));
     let run_started = match row.bot_id.as_deref() {
         Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
@@ -216,8 +213,6 @@ async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): J
     let _g = super::lock().await;
     let previous = roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_text;
     let version = responder::set_persona(&app.db, text, b.expected_version).await?;
-    // 留痕擺在 projection 之前（同巡檢的 `put_persona`）：DB 那一份才是權威，`apply_persona` 寫不出去時文字已經生效，
-    // 留痕若放在後面，部分失敗就沒人知道、重送時 `previous == text` 也補不回（#968）。
     if previous.as_deref() != Some(text) {
         super::api::note_persona_change(&app.db, &actor, previous.as_deref(), text, version, "responder_api").await;
     }

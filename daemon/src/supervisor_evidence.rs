@@ -73,7 +73,6 @@ async fn query(pool: &SqlitePool, q: EvidenceQuery) -> Result<Value, LcError> {
         rows.last().map(|r| serde_json::to_string(&(&r.created_at, &r.id)).expect("string tuple"))
     } else { None };
     let messages: Vec<Value> = rows.into_iter().map(|r| {
-        // Bound model input without hiding that the API returned only part of a source.
         let truncated = r.content.chars().count() > 16_000;
         let mut v = serde_json::to_value(&r).expect("evidence serialization");
         if truncated { v["content"] = json!(r.content.chars().take(16_000).collect::<String>()); }

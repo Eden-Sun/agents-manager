@@ -151,7 +151,6 @@ async fn apply_then_restore_round_trips_and_restore_works_while_off() {
     assert_eq!(body, json!({"host": host, "backup_id": backup_id, "files": [{"file": "codex/config.toml", "result": "restored"}]}));
     assert_eq!(std::fs::read(home.join(".codex/config.toml")).unwrap(), orig.as_bytes());
 
-    // 主機上的 manifest 被改壞：整個拒絕。
     let m = home.join(crate::host_baseline::apply::BACKUP_ROOT_REL).join(&backup_id).join("manifest");
     let bad = std::fs::read_to_string(&m).unwrap().replace("codex/config.toml", "../../.ssh/config");
     std::fs::write(&m, bad).unwrap();

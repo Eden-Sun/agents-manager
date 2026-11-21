@@ -5,7 +5,6 @@
 //! （`GET /api/supervisor` 的 `last_deploy`，SPEC §18.2／§18.15）。
 //!
 //! 拿不到 git（打包來源、tarball）就寫 `unknown`——寧可說不知道，也不要編一個假的 sha。
-// 同 `crates/am-supervisor/build.rs`：release 的 build_info env 要跟著整個 workspace 重算（#884）；dev／test 不監看（#1861）。
 const WORKSPACE_WATCH: &[&str] = &["../crates", "../Cargo.toml", "../Cargo.lock"];
 const SHARED_SRC: &str = "../crates/am-supervisor/build_common.rs";
 include!("../crates/am-supervisor/build_common.rs");

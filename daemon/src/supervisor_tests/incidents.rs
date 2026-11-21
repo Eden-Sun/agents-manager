@@ -12,7 +12,6 @@ use crate::supervisor::incidents::notifiable_for_test as notifiable;
 mod tests {
     use super::*;
 
-    // 測試本地輔助（#1862 S3b）：與 am-supervisor crate-only 版同一份本體（`obs` 這 9 條沒用到，不複製）。
     fn thresholds() -> Thresholds {
         Thresholds {
             host_disconnected_secs: 120,
@@ -36,21 +35,17 @@ mod tests {
 
         let has = |p: &Probed| p.seen.iter().any(|o| o.kind == CLASSIFY_FAILING_KIND);
 
-        // 沒失敗過：不該有。
         assert!(!has(&observe(&app, &t).await));
 
-        // 差一次：還不到門檻。
         app.classify_failures.store(CLASSIFY_FAILURE_LIMIT - 1, Ordering::Relaxed);
         assert!(!has(&observe(&app, &t).await), "門檻以下不開票");
 
-        // 到門檻：開，而且 detail 要帶得出次數（查事故的人要看得到連續幾拍）。
         app.classify_failures.store(CLASSIFY_FAILURE_LIMIT, Ordering::Relaxed);
         let probed = observe(&app, &t).await;
         let o = probed.seen.iter().find(|o| o.kind == CLASSIFY_FAILING_KIND).expect("到門檻要開");
         assert_eq!(o.severity, "critical", "期間所有新事件都送不出去");
         assert!(o.detail.contains("consecutive_failures"), "{}", o.detail);
 
-        // 成功一次歸零：下一拍就不該再看到。
         app.classify_failures.store(0, Ordering::Relaxed);
         assert!(!has(&observe(&app, &t).await), "恢復之後不該還在");
     }
@@ -78,17 +73,14 @@ mod tests {
         assert_eq!(o.severity, "critical");
         assert!(o.detail.contains("claim_bytes"), "查事故的人要知道卡著多少：{}", o.detail);
 
-        // 同一台的另一顆也卡住：各開各的。
         app.spool_fold_stuck.lock().await.insert("mac2/b2".into(), (SPOOL_FOLD_STUCK_LIMIT, 7));
         let mut both = of(&observe(&app, &t).await);
         both.sort();
         assert_eq!(both, vec!["mac2/b1".to_string(), "mac2/b2".to_string()]);
 
-        // 併回去了：計數被移除，下一拍就不該再看到。
         app.spool_fold_stuck.lock().await.clear();
         assert!(of(&observe(&app, &t).await).is_empty(), "恢復之後不該還在");
 
-        // 這一類要推進 inbox：壞的是那台機器的磁碟，不是通知那條路自己（對照 #472）。
         assert!(notifiable(SPOOL_FOLD_STUCK_KIND, "mac2/b1", false));
     }
 
@@ -111,11 +103,9 @@ mod tests {
         assert_eq!(o.severity, "degraded");
         assert!(o.detail.contains("connection refused"), "查的人要看得到最後那個錯誤：{}", o.detail);
 
-        // 下一次補成了：計數被移除，這一拍就不該再看到。
         app.remote_shim_stale.lock().await.clear();
         assert!(of(&observe(&app, &t).await).is_empty(), "補成之後不該還在");
 
-        // 壞的是那台機器，不是通知那條路：這一類要推進 inbox（對照 #472）。
         assert!(notifiable(REMOTE_SHIM_STALE_KIND, "mac2", false));
     }
 
@@ -141,8 +131,6 @@ mod tests {
         sweep(&app, &mut d).await;
         assert!(store::open_incidents(&app.db).await.unwrap().is_empty(), "通知寫不進去：incident 不開，下一輪再來");
 
-        // Fault disappears before storage recovers. The threshold was already met; losing the
-        // in-memory observation here must not erase the owed notification.
         sqlx::query("UPDATE supervisor_inbox SET notify_attempts=0 WHERE id=?")
             .bind(&stuck)
             .execute(&app.db)
@@ -164,12 +152,10 @@ mod tests {
         #[tokio::test]
     async fn a_stalled_approval_opens_an_incident_and_closes_when_someone_decides() {
         use crate::supervisor::failover;
-        // `crate::testing::env()` 的 Env 一 drop 就把暫存目錄收掉，只留 app 會讓 DB 檔消失。
         let app = crate::supervisor_tests::flow_fixture::app().await;
         let a = store::create_approval(&app.db, "agm-kick", "rebuild", "release rebuild", Some("c1"), None, None).await.unwrap().approval.id;
         let t = thresholds();
 
-        // 剛申請：沒有觀測。
         assert!(observe(&app, &t).await.seen.iter().all(|o| o.kind != failover::STALLED_KIND), "剛申請的不算卡住");
 
         sqlx::query("UPDATE supervisor_approvals SET created_at=? WHERE id=?")
@@ -184,17 +170,14 @@ mod tests {
         assert_eq!(obs.severity, "critical", "卡住的是別人的部署");
         assert!(obs.detail.contains("waiting_secs"), "{}", obs.detail);
 
-        // 真的寫進去，而且會叫醒人（`incident_opened` → 巡檢）。
         let mut detector = Detector::default();
         sweep(&app, &mut detector).await;
-        // 寫入時不分類（`role`／`wake` 是 NULL），controller 每一拍先補上——跟其他 inbox 事件一樣。
         crate::supervisor::roles::classify(&app.db).await.unwrap();
         let woken: Vec<(String, Option<String>, Option<i64>)> =
             sqlx::query_as("SELECT kind, role, wake FROM supervisor_inbox WHERE kind='incident_opened'").fetch_all(&app.db).await.unwrap();
         assert_eq!(woken.len(), 1, "{woken:?}");
         assert_eq!((woken[0].1.as_deref(), woken[0].2), (Some("patrol"), Some(1)), "使用者入口要被叫醒：{woken:?}");
 
-        // 有人裁示了 → 觀測消失，sweep 把 incident 關掉。
         store::decide_approval(&app.db, &a, "approved", "AGM:patrol", None, None).await.unwrap();
         assert!(observe(&app, &t).await.seen.iter().all(|o| o.kind != failover::STALLED_KIND));
         sweep(&app, &mut detector).await;
@@ -260,7 +243,6 @@ mod tests {
         let detail: Value = serde_json::from_str(&mine[0].detail_json).unwrap();
         assert_eq!(detail["events"], 5, "筆數要寫在 detail 上：{detail}");
         assert_eq!(detail["max_attempts"], max);
-        // 叫醒協調者的也只有一則。
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_opened'")
             .fetch_one(&app.db)
             .await
@@ -286,7 +268,6 @@ mod tests {
         .unwrap();
 
         let at = crate::db::now();
-        // 真正較舊（先寫入）的用字典序比較大的假 ULID；真正最新（後寫入、使用者主動停的）用比較小的。
         for (id, state) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "exited"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "stopped")] {
             sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at) VALUES (?,?,?,'unknown',?)")
                 .bind(id)

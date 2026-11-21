@@ -60,7 +60,6 @@ static BANNER_TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::Hash
 /// 折在空白上的字會黏在一起，解析時在數字與字母交界補回分隔。只在橫幅後面 300 字內找 `Gemini`，換出的 slug 要是 agy 收的模型。
 pub fn parse_banner(scrollback: &str) -> Option<String> {
     let joined: String = scrollback.lines().map(str::trim).collect();
-    // 折在 `Antigravity` 與 `CLI` 之間的空白上時，空白被吃掉。
     let (at, len) = ["Antigravity CLI", "AntigravityCLI"].iter().filter_map(|m| joined.rfind(m).map(|i| (i, m.len()))).max()?;
     let rest = &joined[at + len..];
     if !rest.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
@@ -209,7 +208,6 @@ mod tests {
 
     #[test]
     fn conversation_text_and_the_banner_are_not_the_footer() {
-        // 啟動橫幅寫的是 `Gemini 3.8 Flash (High)`，在分隔線上面，不算。
         let banner = format!("    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)\n{RULE}\n> 你好\n");
         assert_eq!(parse_footer(&banner), None);
         let quoted = format!("我們用 Gemini 3.8 Flash · low 試過\n{RULE}\n>\n{RULE}\n  esc to cancel\n");
@@ -239,7 +237,6 @@ mod tests {
         assert_eq!(parse_banner(narrow).as_deref(), Some("gemini-3.8-flash-high"));
         let wide = "      ▄▀▀▄        Antigravity CLI 1.3.5\n     ▀▀▀▀▀▀       me@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Low)\n";
         assert_eq!(parse_banner(wide).as_deref(), Some("gemini-3.8-flash-low"));
-        // 折在空白上，空白被吃掉：`Gemini 3.8` / `Flash (High)`。
         assert_eq!(parse_banner("Antigravity CLI 1.4.0\nx@y (Google AI Pro)\nGemini 3.8\nFlash (High)\n").as_deref(), Some("gemini-3.8-flash-high"));
         assert_eq!(parse_banner("Antigravity\nCLI 1.4.0\nGemini 3.8 Flash (High\n)\n").as_deref(), Some("gemini-3.8-flash-high"));
     }

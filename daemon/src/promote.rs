@@ -74,8 +74,6 @@ async fn locate_live(app: &Arc<App>, run: &db::Run) -> Result<Located, LcError> 
     let client = app.herdr_for_run(run).await.ok_or_else(|| LcError::Upstream("herdr unavailable".into()))?;
     let procs = match client.pane_process_info(&pane).await {
         Ok(procs) => procs,
-        // #1455：pane 已經不在（herdr 回 pane_not_found）＝裡面找不到 claude session，跟「pane 裡沒有 claude 行程」同一類：409，什麼都不動。
-        // 其他 herdr 錯誤仍是 502（不知道 pane 還在不在）。
         Err(e) if e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "pane_not_found") => {
             return Err(refuse("session_not_found", json!({"why": "pane_gone", "message": "這顆子 agent 的 pane 已經不在，找不到它的 claude session。"})));
         }
@@ -241,7 +239,6 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
     }
     staged.created.push(dest.clone());
     staged.dest_identity = Some(file_identity(&crate::trusted_open::open_entry_in(&dest_fd, dest_name).map_err(bad)?).map_err(bad)?);
-    // 同名附屬目錄（subagent 對話等）：沒有就跳過，複製失敗不影響主對話，但不留下半份目錄。
     if let (Some(parent), Some(stem)) = (src.parent(), src.file_stem()) {
         let cs = parent.join(stem);
         let source_is_dir = std::fs::symlink_metadata(&cs).is_ok_and(|m| m.file_type().is_dir());
@@ -320,7 +317,6 @@ pub(crate) fn finalize_staged_transcript(
         Ok(ts::is_prefix_of(left, right).map_err(bad)? && ts::is_prefix_of(right, left).map_err(bad)?)
     };
 
-    // Already-final copies make retries idempotent; source==destination is a no-op too.
     if contents_equal(&source, &existing)? {
         validate_complete_transcript(&mut source).map_err(bad)?;
         if file_version(&source).map_err(bad)? != before {
@@ -386,7 +382,6 @@ async fn checkpoint_session(app: &impl crate::capabilities::Db, r: &db::Run, loc
     if res.rows_affected() > 0 {
         return Ok(());
     }
-    // 沒更新到任何列：只有這個 run 早就記著同一段 session 才算數。
     let (sid, path) = sqlx::query_as::<_, (Option<String>, Option<String>)>("SELECT native_session_id, transcript_path FROM runs WHERE id = ?")
         .bind(&r.id)
         .fetch_optional(app.db())
@@ -401,7 +396,6 @@ async fn checkpoint_session(app: &impl crate::capabilities::Db, r: &db::Run, loc
 
 /// 新 bot 起來之後才失敗的收回：停掉它、從 config 拿掉、複製的檔刪掉。回傳是否收乾淨。
 async fn roll_back_new_bot(app: &Arc<App>, new_id: &str, staged: &Staged) -> bool {
-    // 停不下來（`stop_bot` 寫不進 `stopping`、agent 可能還在跑）就不算收乾淨，回傳要反映它。
     let stopped = lifecycle::stop_bot(app, new_id).await.is_ok();
     let removed = crate::projection::delete_from_config(&app.cfg, &app.db, crate::projection::DeleteTarget::Bot(new_id)).await;
     if removed.is_ok() {
@@ -455,10 +449,7 @@ pub async fn promote_bot(
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    // #1425：移交出去的專案在複製對話、停 child 之前就拒絕（以前要等 start_bot_with 被擋才回收）。
     crate::handoff::refuse(&app.db, &id).await?;
-    // 脫離請求（#1358）：複製、停 child、建 user bot、啟動都在脫離出去的 task 裡做完；client 斷線不會停在半路。
-    // bot 鎖也在裡面拿，握著直到做完。
     let response = crate::api::detach(&id, {
         let (app, id) = (app.clone(), id.clone());
         async move { promote_detached(app, id, req).await }
@@ -491,7 +482,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
         return Err(refuse("has_children", json!({"message": "它自己還有子 agent；先處理掉孫 agent 再升級。"})));
     }
 
-    // 名字、模型、強度：全部在動任何東西之前驗完。
     let live_names: Vec<String> = db::live_bots(&app.db).await.map_err(up)?.into_iter().filter(|b| b.project_id == child.project_id).map(|b| b.name).collect();
     let cfg_names: Vec<String> = app
         .cfg
@@ -513,7 +503,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     } else if explicit.is_some() {
         return Err(refuse("bot name already in use", json!({"name": wanted})));
     } else {
-        // 預設沿用 child 的名字，而它自己還占著這個名字（同專案 live 唯一），所以退到 `-N`。
         crate::runners::app_ports_p11::next_free_name(&wanted, &taken)
     };
     let requested_model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).or(child.model.as_deref());
@@ -521,7 +510,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     let model = requested_model.map(|m| crate::models::canonical_model("claude", m).to_string());
     let effort = crate::config::normalize_effort("claude", req.effort.as_deref().or(child.effort.as_deref())).map_err(LcError::Bad)?;
 
-    // 找 session：活著就看 pane 的行程；已經停了（上一次做到一半）就用記下來的。
     let run = db::active_run(&app.db, &id).await.map_err(up)?;
     let located = match &run {
         Some(r) => locate_live(&app, r).await?,
@@ -531,8 +519,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
         .join("projects")
         .join(cwd_key(&project.path));
 
-    // 3. 複製 transcript。
-    // transcript 可能有幾百 MB：複製放到 blocking pool，不占 tokio worker。
     let staged = {
         let (src, dest_dir, sid) = (located.src.clone(), dest_dir.clone(), located.session_id.clone());
         tokio::task::spawn_blocking(move || stage_transcript(&src, &dest_dir, &sid))
@@ -540,8 +526,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
             .map_err(|e| refuse("transcript_copy_failed", json!({"message": e.to_string()})))??
     };
 
-    // 持久 intent（#355 P4）：第一個回不去的一步（停 child）**之前**先 commit；承諾點＝目標 user bot 進 config。承諾點之後 daemon 死掉，
-    // 開機由 `promote_intents::recover_host` **往前補完**（不回滾，使用者 2026-09-20 裁示）；停 child 之前死掉＝`abandoned`（收回複製）。寫不進去就不繼續。
     let new_id = db::ulid();
     let payload = json!({
         "child_id": id, "new_id": new_id, "project_id": child.project_id, "name": name, "model": model, "effort": effort,
@@ -559,9 +543,7 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_intent", &id).await;
 
-    // 4. 停 child：先把 session 記在它的 run 上（讓這個請求停到一半還能重送），停不掉就收回複製、不動。
     if let Some(r) = &run {
-        // 檢查點是停 child 的硬前提：寫不進去（或寫進去的不是這段 session）就收回複製、child 照跑，可重送。
         if let Err(why) = checkpoint_session(&app, r, &located).await {
             staged.undo();
             crate::delete_intents::abandon(&app, &intent, "checkpoint failed; rolled back").await;
@@ -578,7 +560,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_before_final_transcript", &id).await;
 
-    // 確認 writer 已停止後再讀來源，並原子更新本次 promote 擁有的 staged 檔。
     let (src, dest, session, source_identity, dest_identity) = (
         located.src.clone(), staged.dest.clone(), located.session_id.clone(), staged.source_identity, staged.dest_identity,
     );
@@ -597,7 +578,6 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_stop", &id).await;
 
-    // 5. 建 user bot（設定見 `user_bot_cfg`）。#2002：身份引用寫入前先 admit 並重驗，持有到 config 提交完。
     let identity_admit = crate::identity_fence::admit(LOCAL_HOST, "claude", child.identity.as_deref()).await;
     let created = match admit_identity_still_exists(&app, &child).await {
         Err(e) => Err(e),
@@ -622,19 +602,16 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_create", &id).await;
 
-    // 種下 session：native resume 讀「這顆 bot 最近一個結束的 run 的 native_session_id」。
     let seeded = crate::promote_intents::seed_session_run(&app.db, &id, &new_id, &located.session_id, &staged.dest.to_string_lossy()).await;
     let mut failure: Option<String> = seeded.err().map(|e| e.to_string());
     let mut run_id = None;
     if failure.is_none() {
-        // 6. native resume：接不回原本的對話就整個不啟動。
         match lifecycle::start_bot_with(&app, &new_id, StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await {
             Ok(r) => run_id = Some(r),
             Err(e) => failure = Some(format!("{e:?}")),
         }
     }
     if let Some(why) = failure {
-        // 收回：child 已經停了，紀錄還在，可以重送。
         let rolled_back = roll_back_new_bot(&app, &new_id, &staged).await;
         crate::delete_intents::abandon(&app, &intent, "start failed; rolled back").await;
         return Err(refuse(
@@ -646,14 +623,11 @@ async fn promote_detached(app: Arc<App>, id: String, req: PromoteReq) -> Result<
     #[cfg(test)]
     lifecycle::race_point::hit("promote_after_start", &id).await;
 
-    // 分叉前的訊息留在 child 那顆的紀錄裡；新 bot 的對話寫一則說明。
     if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
         let note = format!("從子 agent {} 升級成頂層 bot：接續它的 claude session `{}`。", child.name, located.session_id);
         let _ = lifecycle::insert_message(&app, &conv, None, "system", &note, "system", false, None).await;
     }
 
-    // 7. 收掉 child 紀錄（它的 run 已經停了）。瞬間的 DB 錯誤重試幾次；還是寫不進去就把新 bot 收回，
-    // 不留「兩顆都活著」的半套——child 已停、session 記在它的 run 上，同一個請求可以原樣重送。
     let mut retired = Err(String::new());
     for attempt in 0..3 {
         if attempt > 0 {
@@ -742,7 +716,6 @@ mod tests {
             self.dir.join("projects").join(cwd_key(CHILD_CWD)).join(format!("{SID}.jsonl"))
         }
         fn dest(&self) -> PathBuf {
-            // 專案路徑入庫時會 canonicalize（macOS 的 /var → /private/var），claude 的 cwd 也是真實路徑。
             let repo = std::fs::canonicalize(&self.e.repo).unwrap_or_else(|_| self.e.repo.clone());
             self.dir.join("projects").join(cwd_key(&repo.to_string_lossy())).join(format!("{SID}.jsonl"))
         }
@@ -824,7 +797,6 @@ mod tests {
             .execute(&r.e.app.db)
             .await
             .unwrap();
-        // 移交狀態要寫進設定檔：projection 每次寫 config 都會照它重寫 projects 表，只改 DB 的話會在 promote 中途被洗掉。
         let pid = r.e.project_id.clone();
         r.e.app
             .cfg
@@ -883,7 +855,6 @@ mod tests {
 
     /// 完整一趟：session 從 pane 行程找到 → transcript 複製到專案路徑的 projects 目錄（來源還在）→ child 停掉 →
     /// user bot 進 config.toml、以 `--resume <session>` 啟動 → child 紀錄收掉。
-    // An independent API child is a sentinel for the global retention scan; the promoted child remains Claude CLI.
     async fn r2_api_sentinel(r: &Rig) {
         let now = db::now();
         sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,managed_by,created_at) VALUES('r2-sentinel',?,'r2-sentinel','claude-api','fake','child',?)").bind(&r.e.project_id).bind(&now).execute(&r.e.app.db).await.unwrap();
@@ -1327,7 +1298,6 @@ mod tests {
         let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE deleted_at IS NULL AND managed_by = 'user'").fetch_one(&r.e.app.db).await.unwrap();
         assert_eq!(live, 0, "沒有留下半套的第二顆 bot");
 
-        // 修好之後同一個請求原樣再送一次就成功（session 已記在 child 的 run 上，pane 行程已經不在了）。
         let out = promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
         assert_eq!(out["promoted_from"]["session_id"], SID);
         assert!(r.dest().is_file());
@@ -1367,8 +1337,6 @@ mod tests {
         promote(&r, PromoteReq { name: Some("kid-top".into()), ..Default::default() }).await.unwrap();
         assert_eq!(child_state(&r).await, (true, None));
     }
-
-    // ---- #355 P4：promote 在承諾點前後行程死掉，開機補完 ----
 
     /// 模擬行程死亡：promote 走到 `point` 就卡住，再把整個 future abort 掉。
     async fn die_at(r: &Rig, point: &'static str) {
@@ -1411,14 +1379,8 @@ mod tests {
             let new_bots = app2.cfg.get().await.projects[0].bots.clone();
             assert_eq!(new_bots.len(), 1, "{point}：config 裡只有一顆新的 user bot");
             let new_id = new_bots[0].id.clone().unwrap();
-            // `recover_host` 只同步跑第一次嘗試；那一次若因為暫時原因（例如高負載下的一次性錯誤）失敗，
-            // intent 仍是 `running`、背景的重試迴圈才會真的把 native resume 起起來（`drive_once` 回 `Retry`
-            // 時 `recover_host` 會 spawn `retry_loop`，不等它）。等的是這個**最後一個副作用**（run 起來），
-            // 不是固定睡一段時間；已經成功的話這裡幾乎立刻就過。
             let ok = crate::testing::eventually!(db::active_run(&app2.db, &new_id).await.unwrap().is_some());
             if !ok {
-                // 30 秒都等不到：把 intent 記的重試狀態與 last_error 一起丟進斷言訊息（整樹高負載下曾經連著重試都失敗過一次，
-                // 沒抓到根因；下次真的再紅，訊息裡就有東西可查，不用只看到「新 bot 起來了」）。
                 let intent_row: Option<(String, i64, Option<String>)> = sqlx::query_as("SELECT status, attempts, last_error FROM intents WHERE subject_id=? AND kind='promote'")
                     .bind(&r.child).fetch_optional(&app2.db).await.unwrap();
                 let runs_dump: Vec<(String, String, Option<String>)> = sqlx::query_as("SELECT id, state, ended_at FROM runs WHERE bot_id=?")
@@ -1450,7 +1412,7 @@ mod tests {
         let (app, id) = (r.e.app.clone(), r.child.clone());
         let h = tokio::spawn(async move { promote_bot(State(app), Path(id), Extension(crate::api::RequestPrincipal::User), None).await.map(|_| ()) });
         reached.notified().await;
-        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        h.abort();
         let _ = h.await;
         release.notify_one();
         crate::api::wait_work_done_for_test(&r.child).await;
@@ -1480,9 +1442,7 @@ mod tests {
     async fn a_promote_that_cannot_be_completed_gives_up_and_tells_agm() {
         let r = rig(true).await;
         die_at(&r, "promote_after_stop").await;
-        // 之後 native resume 一定接不回：複製過去的 transcript 沒了。
         let _ = std::fs::remove_file(r.dest());
-        // #401：種 run 的時間戳之後拉開一段，確定性地跨過毫秒邊界（以前兩欄各叫一次 now()，偶發被當成「起過了」→ done）。
         straddle_the_seed(&r);
         let app2 = crate::testing::restart_app(&r.e).await;
         crate::promote_intents::recover_host(&app2, LOCAL_HOST).await;

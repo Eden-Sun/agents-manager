@@ -51,7 +51,6 @@ pub fn install_executable(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(contents)?;
         f.sync_all()?;
-        // fd 上設權限：rename 進去的那一刻就已經是 0755，沒有「存在但不能執行」的窗口。
         f.set_permissions(std::fs::Permissions::from_mode(0o755))?;
         std::fs::rename(&tmp, path)
     })();
@@ -135,7 +134,6 @@ pub async fn status(app: &(impl crate::capabilities::DataDir + crate::capabiliti
             .is_some_and(|metadata| metadata.permissions().mode() & 0o777 == 0o755);
         let state = match &installed_hash {
             Some(h) if *h == embedded_hash && executable => "ok",
-            // 換得動：`POST /api/supervisor/cli` 或下一次開機就會補上，不必重建 binary。
             Some(_) => "stale",
             None if bin_dir.is_dir() => "missing",
             None => "not_set_up",

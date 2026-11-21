@@ -45,7 +45,6 @@ pub fn hook_token(arg: &str) -> String {
 
 /// Never panics, never touches stdout.
 pub fn run(args: HookArgs) {
-    // A panic would print a multi-line backtrace-ish message to stderr; keep it to one line.
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|info| {
         let _ = writeln!(std::io::stderr(), "agents-managerd hook: panic: {info}");
@@ -53,7 +52,6 @@ pub fn run(args: HookArgs) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner(args)));
     std::panic::set_hook(prev);
     if r.is_err() {
-        // Nothing more we can do — the caller still exits 0.
     }
 }
 
@@ -101,9 +99,6 @@ fn inner(args: HookArgs) {
         None => read_stdin_capped(STDIN_BUDGET),
     };
 
-    // PreToolUse 是守門、不是事件（#1884）：擋廣域 kill，**不** POST、不 spool；只有要擋時才印 stdout（決策 JSON）。
-    // 子 agent 的 pane 也要擋（事故就是子 bot 跑的），所以放在下面那個 child 判斷之前；解析不了一律放行。
-    // 「判不出來所以放行」的原因除了 stderr（agy 的 dispatcher 會丟掉它）也記進 hook.log。
     let mut guard_log = |m: &str| {
         let _ = writeln!(std::io::stderr(), "agents-managerd hook: kill_guard: {m}");
         log_line_in(&data_dir, &args.bot, &format!("kill_guard: {m}"));
@@ -117,7 +112,6 @@ fn inner(args: HookArgs) {
             return;
         }
     }
-    // 子 agent 的 hook 不送、也不 spool（#1004）：stdout 照舊空的。
     if child {
         return;
     }
@@ -132,14 +126,12 @@ fn inner(args: HookArgs) {
     let port = if args.port != 0 {
         args.port
     } else {
-        // SPEC §4.4.5: env is only a fallback for a missing --port.
         std::env::var("AM_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(7788)
     };
 
     let token = hook_token(&args.token);
     match post(&body, &args.provider, &token, port, deadline) {
         Ok(()) => {}
-        // 永久拒絕：重放也一定被丟，spool 只會把已刪 bot 的目錄建回來（#1005）。不寫 hook.log、不 spool。
         Err(PostError::Rejected(code)) if !worth_spooling(code) => {
             let _ = writeln!(std::io::stderr(), "agents-managerd hook: http {code}; dropped");
         }
@@ -232,7 +224,6 @@ fn read_stdin_capped(budget: Duration) -> (String, bool) {
     let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
     std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(8192);
-        // Read one byte past the cap so we can tell "exactly 1 MiB" from "truncated".
         let mut handle = std::io::stdin().lock().take((MAX_PAYLOAD + 1) as u64);
         let _ = handle.read_to_end(&mut buf);
         let truncated = buf.len() > MAX_PAYLOAD;
@@ -275,7 +266,6 @@ fn post(
     }
     let total = HTTP_TIMEOUT.min(remaining);
 
-    // reqwest has no `blocking` feature in this build.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -354,7 +344,6 @@ pub fn lock_spool_dir(dir: &std::path::Path) -> std::io::Result<SpoolDirLock> {
 /// SPEC §4.4.4: one JSON line, `O_APPEND`, same body as the failed POST.
 pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Value) {
     let dir = data_dir.join("bots").join(bot_id);
-    // 目錄 0700、spool 0600：裡面是完整的 hook payload（issue #494）。
     if let Err(e) = crate::private_files::create_private_dir(&dir) {
         log_line_in(data_dir, bot_id, &format!("spool mkdir failed: {e}"));
         return;
@@ -367,7 +356,6 @@ pub fn spool_to(data_dir: &std::path::Path, bot_id: &str, body: &serde_json::Val
             return;
         }
     };
-    // #1256：超量檢查、丟棄、附加整段都在鎖裡做。鎖拿不到就照舊附加——寧可超一點，也不丟事件。
     let _lock = match lock_spool_dir(&dir) {
         Ok(l) => Some(l),
         Err(e) => {
@@ -427,7 +415,6 @@ fn trim_front(dir: &std::path::Path, keep: u64) -> std::io::Result<(u64, u64)> {
     if len <= keep {
         return Ok((0, 0));
     }
-    // 從 `len - keep` 往後找第一個換行，截點就在它後面：不留半行。尾巴裡一個換行都沒有就全丟。
     let mut at = len - keep;
     src.seek(SeekFrom::Start(at))?;
     let mut buf = vec![0u8; 64 * 1024];

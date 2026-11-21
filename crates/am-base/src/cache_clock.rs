@@ -27,7 +27,6 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 pub fn ttl_secs(kind: &str) -> Option<i64> {
     match kind {
         "claude" => Some(3600),
-        // 實測冷掉點 12 分（見檔頭）；Gemini 沒有保證時間，這是經驗值不是合約。
         "agy" => Some(720),
         _ => None,
     }
@@ -105,8 +104,6 @@ fn api_fingerprint(status_json: &str) -> Option<String> {
 
 /// statusLine 換了內容：API 指紋前後都讀得到而且不同，才記下 `at`（閒置重繪、剛起來的第一份都不算）。
 pub fn on_statusline(run_id: &str, old: Option<&str>, new: Option<&str>, at: &str) -> bool {
-    // 保溫回合造成的指紋變化不算活動，否則保溫一次年齡就歸零（`primary_keep_warm`）；視窗收掉後的回音期（背景 API 呼叫、
-    // 遠端 statusLine 晚到，#1885）一樣不算，真的活動以回合紀錄為準。
     if crate::primary_keep_warm::window_open(run_id) || crate::primary_keep_warm::echo_open(run_id) {
         return false;
     }
@@ -173,7 +170,6 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     let api_ttl = last_turn.and_then(|t| t.cache_ttl_secs);
     let Some(o) = run_json.as_object_mut() else { return };
     let mut status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
-    // 保溫回合在跑（沒有真的回合在飛）：它不算活動，年齡照樣往上數，不因 `working` 歸零。
     let run_id = o.get("id").and_then(Value::as_str).map(str::to_owned);
     if status.as_deref() == Some("working")
         && last_turn.is_none_or(|t| t.status != "in_flight")
@@ -187,10 +183,8 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     o.insert("last_api_at".into(), at.clone().into());
     let ttl = ttl_secs_for(kind, api_ttl);
     o.insert("cache_ttl_secs".into(), ttl.into());
-    // 壓縮後 cache 作廢：網頁不畫倒數（回合進行中 `at`＝現在，不會成立）。codex 不倒數，照舊不帶。
     let compacted = ttl.is_some() && status.as_deref() != Some("working") && compacted_since(at.as_deref(), last_turn);
     o.insert("cache_compacted".into(), compacted.into());
-    // 只有保溫過的主力才帶（網頁拿它算顏色；數字仍是 `last_api_at` 的真實年齡）。
     o.insert("cache_kept_warm_at".into(), last_turn.and_then(|t| t.kept_warm_at.clone()).into());
     o.insert("keep_warm_skip".into(), last_turn.is_some_and(|t| t.keep_warm_skip).into());
     o.insert("keep_warm_replied_at".into(), last_turn.and_then(|t| t.keep_warm_replied_at.clone()).into());
@@ -272,7 +266,6 @@ mod tests {
         assert_eq!(ttl_secs("codex"), None, "codex 的 cache 不會因閒置冷掉");
         assert!(never_cools("codex") && !never_cools("claude") && !never_cools("grok"));
         assert_eq!(ttl_secs("grok"), None);
-        // agy 的 transcript 有 cache_read_tokens，實測冷掉點約 12 分（見檔頭的數據），所以有 TTL。
         assert_eq!(ttl_secs("agy"), Some(720), "agy 12 分冷掉");
     }
 
@@ -288,21 +281,17 @@ mod tests {
     #[test]
     fn takes_the_latest_of_turn_statusline_and_blocked() {
         let t = done("2026-10-04T11:00:00.000Z");
-        // statusLine 比回合晚：取 statusLine（格式不同也照時刻比，輸出統一成 db::iso_at）。
         assert_eq!(
             derive("claude", Some("idle"), None, Some(&t), Some("2026-10-04T19:10:00+08:00"), NOW).as_deref(),
             Some("2026-10-04T11:10:00.000Z")
         );
-        // 回合比 statusLine 晚：取回合。
         assert_eq!(
             derive("claude", Some("idle"), None, Some(&t), Some("2026-10-04T10:00:00.000Z"), NOW).as_deref(),
             Some("2026-10-04T11:00:00.000Z")
         );
-        // blocked 的起點最晚：取它；不是 blocked 時同一個 since 不算。
         let since = Some("2026-10-04T11:30:00.000Z");
         assert_eq!(derive("codex", Some("blocked"), since, Some(&t), None, NOW).as_deref(), Some("2026-10-04T11:30:00.000Z"));
         assert_eq!(derive("codex", Some("idle"), since, Some(&t), None, NOW).as_deref(), Some("2026-10-04T11:00:00.000Z"));
-        // 什麼來源都沒有：不編時間。
         assert_eq!(derive("claude", Some("idle"), None, None, None, NOW), None);
     }
 
@@ -319,7 +308,6 @@ mod tests {
         let mut run = serde_json::json!({"id": "r-grok", "agent_status": "idle"});
         annotate(&mut run, "grok", Some(&done(NOW)));
         assert!(run["last_api_at"].is_null() && run["cache_ttl_secs"].is_null());
-        // 沒有 run 不補欄位。
         let mut none = Value::Null;
         annotate(&mut none, "claude", Some(&done(NOW)));
         assert!(none.is_null());
@@ -350,13 +338,11 @@ mod tests {
         let redraw = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5},"session_name":"改名"}"#;
         let b = r#"{"cost":{"total_api_duration_ms":180},"context_window":{"total_output_tokens":9}}"#;
         let run = "r-statusline-fp";
-        // 第一份（沒有舊的可比）、閒置重繪都不算。
         assert!(!on_statusline(run, None, Some(a), "2026-10-04T11:00:00.000Z"));
         assert!(!on_statusline(run, Some(a), Some(redraw), "2026-10-04T11:01:00.000Z"));
         assert_eq!(statusline_at(run), None);
         assert!(on_statusline(run, Some(redraw), Some(b), "2026-10-04T11:02:00.000Z"));
         assert_eq!(statusline_at(run).as_deref(), Some("2026-10-04T11:02:00.000Z"));
-        // 沒有任何指紋欄位（舊版 claude）：不算。
         assert!(!on_statusline("r-statusline-empty", Some("{}"), Some(r#"{"model":{}}"#), NOW));
     }
 
@@ -400,13 +386,10 @@ mod tests {
         .await
         .unwrap();
         let all = last_turns_by_bot(&pool).await.unwrap();
-        // 保溫回合（keep-warm: 前綴，舊資料 keepalive:）不算「最近一筆回合」，只留下「保溫時間」（失敗的不算）。
         let b1 = LastTurn { kept_warm_at: Some("2026-10-04T11:21:00.000Z".into()), cache_ttl_secs: Some(300), ..done("2026-10-04T11:04:00.000Z") };
         assert_eq!(all.get("b1"), Some(&b1));
-        // 熱壓不算讓 cache 變熱（只有熱壓訊息的 b2 沒有保溫時間）；只有保溫回合在飛的 bot（b3）沒有「最近回合」可報。
         assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_warm_at.as_deref())), Some(("in_flight", None)));
         assert!(!all.contains_key("b3"));
-        // 保溫回覆：保溫回合完成後還沒有非保溫回合（b4）才有；之後使用者又送了回合（b1 排隊中的 t3、b5 的 t8）就清成 None。
         assert_eq!(b1.keep_warm_replied_at, None);
         let b4 = all.get("b4").unwrap();
         assert_eq!(b4.keep_warm_replied_at.as_deref(), Some("2026-10-04T11:21:00.000Z"));
@@ -415,7 +398,6 @@ mod tests {
         let b5 = all.get("b5").unwrap();
         assert_eq!((b5.keep_warm_replied_at.as_deref(), b5.completed_at.as_deref()), (None, Some("2026-10-04T11:31:00.000Z")));
         assert_eq!(b5.kept_warm_at, None, "熱壓（11:45）比保溫（11:21）晚：熱壓後視為涼掉，保溫不再算");
-        // 熱壓之後真的活動（t10），新一輪的保溫（k6b）又算；熱壓之前的保溫（k6a）不算。
         assert_eq!(all.get("b6").and_then(|t| t.kept_warm_at.as_deref()), Some("2026-10-04T12:59:00.000Z"));
         assert_eq!(last_turn_for_bot(&pool, "b1").await.unwrap(), Some(b1));
         assert_eq!(last_turn_for_bot(&pool, "b3").await.unwrap(), None);
@@ -442,7 +424,6 @@ mod tests {
     #[tokio::test]
     async fn same_millisecond_turns_are_ordered_by_insertion_not_ulid() {
         let pool = bare_pool().await;
-        // 'tz' 先寫、'ta' 後寫；'tz' > 'ta'（字典序故意相反）。
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES
                ('tz','c','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:01:00.000Z',NULL),
@@ -477,7 +458,6 @@ mod tests {
         annotate(&mut codex, "codex", Some(&last));
         assert_eq!(codex["cache_compacted"], false, "codex 沒有倒數");
 
-        // 壓縮後使用者送了新回合：倒數恢復。
         sqlx::query("INSERT INTO turns (id, conversation_id, status, created_at, completed_at, client_request_id) VALUES ('t1','c','completed','2026-10-04T11:10:00.000Z','2026-10-04T11:12:00.000Z',NULL)")
             .execute(&pool)
             .await
@@ -487,7 +467,6 @@ mod tests {
         annotate(&mut run, "claude", Some(&last));
         assert_eq!(run["cache_compacted"], false);
 
-        // 回合進行中永遠不算壓縮過。
         let working = LastTurn { compacted_at: Some("2026-10-04T11:00:00.000Z".into()), ..done("2026-10-04T10:05:00.000Z") };
         let mut busy = serde_json::json!({"id": "r-compact-busy", "agent_status": "working"});
         annotate(&mut busy, "claude", Some(&working));
@@ -526,7 +505,6 @@ mod tests {
         let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
         assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("completed", Some("2026-10-04T13:00:00.000Z")));
 
-        // 送出去之後才失敗（delivery 不是 failed，例如 StopFailure）照舊算活動。
         sqlx::query("UPDATE turns SET delivery = 'ok' WHERE id = 'y'").execute(&pool).await.unwrap();
         let last = last_turn_for_bot(&pool, "b").await.unwrap().unwrap();
         assert_eq!((last.status.as_str(), last.completed_at.as_deref()), ("failed", Some("2026-10-04T10:06:00.000Z")));
@@ -556,10 +534,8 @@ mod tests {
         assert_eq!(ttl_secs_for("claude-api", Some(999)), Some(300), "不認得的值回預設");
         assert_eq!(ttl_secs_for("claude", Some(300)), Some(3600), "其他 kind 不受 bot 設定影響");
         assert_eq!(ttl_secs_for("codex", Some(3600)), None);
-        // keep-warm 等只認 CLI claude 的地方不能把 claude-api 當成可保溫。
         assert_eq!(ttl_secs("claude-api"), None);
 
-        // TTL 取最後一回合送出時選的。
         let t = LastTurn { cache_ttl_secs: Some(3600), ..done("2026-10-04T11:58:00.000Z") };
         let mut run = serde_json::json!({"agent_status": "idle"});
         annotate(&mut run, "claude-api", Some(&t));
@@ -568,7 +544,6 @@ mod tests {
         let mut five = serde_json::json!({"agent_status": "idle"});
         annotate(&mut five, "claude-api", Some(&done("2026-10-04T11:58:00.000Z")));
         assert_eq!(five["cache_ttl_secs"], 300);
-        // 回合進行中＝熱，last_api_at 給現在。
         let mut busy = serde_json::json!({"agent_status": "working"});
         let working = LastTurn { status: "in_flight".into(), cache_ttl_secs: Some(300), ..Default::default() };
         annotate(&mut busy, "claude-api", Some(&working));

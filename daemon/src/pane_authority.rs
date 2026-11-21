@@ -95,7 +95,6 @@ pub(crate) async fn authorize_caller(
         .herdr_for_session(&project.host, session)
         .await
         .ok_or_else(|| LcError::Upstream("herdr session unavailable".into()))?;
-    // A name is resolved by daemon, and the returned pane id is the only transport target.
     let pane_id = if input.kind == "agent" {
         client
             .agent_get(selector)
@@ -240,7 +239,6 @@ mod tests {
             .execute(&e.app.db)
             .await
             .unwrap();
-        // Even if mapped to a parent bot, a child principal never inherits its child exception.
         for (target, allowed) in [
             (&own, true),
             (&"shell-pane".to_string(), true),
@@ -262,7 +260,6 @@ mod tests {
             .await;
             assert_eq!(result.is_ok(), allowed, "{target}");
         }
-        // Child principals cannot obtain the parent exception for descendants.
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?")
             .bind(&child.id)
             .bind(&peer.id)

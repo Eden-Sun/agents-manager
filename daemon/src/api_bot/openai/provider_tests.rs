@@ -15,8 +15,6 @@ use tokio_util::sync::CancellationToken;
 const FAKE_KEY: &str = "sk-test-FAKE-not-a-real-key";
 const ENC: &str = "ENC-SECRET-reasoning-blob";
 
-// ───────────────────────────── 假 server ─────────────────────────────
-
 struct Reply {
     status: u16,
     headers: Vec<(&'static str, String)>,
@@ -81,8 +79,6 @@ async fn serve(replies: Vec<Reply>) -> Server {
     Server { endpoint, seen, stop }
 }
 
-// ───────────────────────────── SSE 腳本 ─────────────────────────────
-
 fn sse(events: &[Value]) -> Vec<u8> {
     let mut out = String::new();
     for e in events {
@@ -139,8 +135,6 @@ fn final_text_stream(text: &str) -> Vec<u8> {
         json!({"type": "response.completed", "response": {"id": "resp_2", "status": "completed", "output": [msg], "usage": usage(900, 300, 100, 30, 0)}}),
     ])
 }
-
-// ───────────────────────────── runner 的三個接點 ─────────────────────────────
 
 fn luna_options() -> SessionOptions {
     SessionOptions { model: "gpt-6-luna".into(), effort: "medium".into(), max_output_tokens: 4096, extras: ProviderExtras::None }
@@ -231,19 +225,15 @@ async fn full_turn() -> (Vec<Value>, Vec<Vec<u8>>, State, Vec<String>, Vec<ToolC
     (bodies, wire.sent(), state, snapshots, executed)
 }
 
-// ───────────────────────────── 測試 ─────────────────────────────
-
 #[tokio::test]
 async fn a_turn_with_two_interleaved_tool_calls_sends_the_results_back_and_ends_with_text() {
     let (bodies, _, state, _, executed) = full_turn().await;
     assert_eq!(bodies.len(), 2);
 
-    // 兩個工具照回應的順序執行，參數是組起來的完整 JSON，id 是 call_id（不是 output item 的 id）。
     assert_eq!(executed.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect::<Vec<_>>(), [("call_A", "bash"), ("call_B", "str_replace_based_edit_tool")]);
     assert_eq!(executed[0].input, json!({"command": "ls"}));
     assert_eq!(executed[1].input, json!({"command": "view", "path": "/work/a.txt"}));
 
-    // 第一次請求：無狀態、串流、要求回傳加密 reasoning、宣告兩個工具。
     let first = &bodies[0];
     assert_eq!((first["store"].clone(), first["stream"].clone(), first["model"].clone()), (json!(false), json!(true), json!("gpt-6-luna")));
     assert_eq!(first["include"], json!(["reasoning.encrypted_content"]));
@@ -253,7 +243,6 @@ async fn a_turn_with_two_interleaved_tool_calls_sends_the_results_back_and_ends_
     assert!(first.get("previous_response_id").is_none());
     assert_eq!(first["input"].as_array().unwrap().len(), 1);
 
-    // 第二次請求：完整重播（user → 加密 reasoning 原樣 → 兩個 function_call 原樣），再接兩個用 call_id 配對的工具結果。
     let input = bodies[1]["input"].as_array().unwrap();
     assert_eq!(input.iter().map(|i| i["type"].as_str().unwrap()).collect::<Vec<_>>(), ["message", "reasoning", "function_call", "function_call", "function_call_output", "function_call_output"]);
     assert_eq!(input[1], reasoning_item(), "the reasoning item is replayed byte-for-byte, encrypted content included");
@@ -261,7 +250,6 @@ async fn a_turn_with_two_interleaved_tool_calls_sends_the_results_back_and_ends_
     assert_eq!(input[4], json!({"type": "function_call_output", "call_id": "call_A", "output": "a.txt\nb.txt"}));
     assert_eq!(input[5], json!({"type": "function_call_output", "call_id": "call_B", "output": "no such file"}));
 
-    // 最終文字是可見文字；transcript 裡的工具結果保留 is_error。
     assert_eq!(state.responses.len(), 2);
     assert_eq!(OpenAiCodec.visible_text(state.responses.last().unwrap()), "workspace has two files");
     let batch = state.messages.iter().find(|m| m.role == "tool_results").unwrap();
@@ -275,7 +263,6 @@ async fn a_turn_with_two_interleaved_tool_calls_sends_the_results_back_and_ends_
 #[tokio::test]
 async fn resuming_from_a_checkpoint_sends_the_same_bytes_as_the_uninterrupted_turn() {
     let (_, sent, finished, snapshots, _) = full_turn().await;
-    // 工具批次結清、還沒開始下一次模型呼叫的那一份（之後 daemon 掛掉）。
     let durable = snapshots
         .iter()
         .rev()
@@ -295,7 +282,6 @@ async fn resuming_from_a_checkpoint_sends_the_same_bytes_as_the_uninterrupted_tu
     assert!(tools.0.lock().unwrap().is_empty(), "tools that already completed are never run again");
     assert_eq!(wire.sent(), vec![sent[1].clone()], "the resumed request is byte-identical to the uninterrupted second request");
     assert_eq!(serde_json::to_string(&state.messages).unwrap(), serde_json::to_string(&finished.messages).unwrap());
-    // 同一份 transcript 再編一次，hash 也相同（報價、送出、核對用的是同一份）。
     let again = wire.provider.encode("medium", &json!("You are a careful assistant."), &finished.messages[..finished.messages.len() - 1], None).unwrap();
     assert_eq!(again.hash(), wire.encoded.lock().unwrap()[0].hash());
 }
@@ -304,12 +290,10 @@ async fn resuming_from_a_checkpoint_sends_the_same_bytes_as_the_uninterrupted_tu
 async fn a_checkpoint_or_request_of_another_provider_is_refused_without_any_network_call() {
     let server = serve(vec![]).await;
     let quote: Arc<dyn QuoteProvider> = Arc::new(OpenAiQuote);
-    // 選項不屬於這個 provider：建不出來。
     assert!(provider::for_id(ID, crate::api_bot::anthropic::session_options(Options::default()), quote.clone()).is_err());
     assert!(provider::for_id(crate::api_bot::anthropic::ID, luna_options(), quote.clone()).is_err());
     assert!(provider::for_id("nope", luna_options(), quote.clone()).is_err());
 
-    // Claude 的 checkpoint（有標籤或沒標籤的舊格式）不能用 OpenAI 接續，Claude 形狀的 transcript 也編不出請求。
     let openai = luna();
     let claude_messages = vec![
         Message { role: "user".into(), content: json!("hi") },
@@ -320,14 +304,12 @@ async fn a_checkpoint_or_request_of_another_provider_is_refused_without_any_netw
     assert!(!openai.checkpoint_matches_model(&legacy) && !openai.checkpoint_matches_model(&tagged));
     assert!(openai.encode("medium", &json!("sys"), &claude_messages, None).is_err());
 
-    // 反過來：OpenAI 的 checkpoint 與請求也進不了 Claude 那一支。
     let claude = provider::for_id(crate::api_bot::anthropic::ID, crate::api_bot::anthropic::session_options(Options::default()), Arc::new(crate::api_bot::quote::FailClosed)).unwrap();
     let openai_request = openai.encode("medium", &json!("sys"), &fresh_state().messages, None).unwrap();
     let cancel = CancellationToken::new();
     assert_eq!(claude.send(transport(&server.endpoint), openai_request.as_ref(), &cancel, None).await.unwrap_err(), http::Error::InvalidRequest);
     let claude_request = RequestEnvelope::new(Options::default(), json!("sys"), vec![Message { role: "user".into(), content: json!("hi") }]).unwrap();
     assert_eq!(openai.send(transport(&server.endpoint), &claude_request, &cancel, None).await.unwrap_err(), http::Error::InvalidRequest);
-    // 報價也不跨 provider。
     assert!(matches!(OpenAiQuote.reserve(&claude_request), Err(QuoteError::InvalidRequest)));
     assert!(matches!(crate::api_bot::pricing::DirectGlobal.reserve(openai_request.as_ref()), Err(QuoteError::InvalidRequest)));
     assert!(server.seen.lock().unwrap().bodies.is_empty(), "nothing reached the network");
@@ -342,12 +324,10 @@ async fn encrypted_reasoning_is_replayed_but_never_visible_or_debug_printed() {
     for response in &state.responses {
         assert!(!OpenAiCodec.visible_text(response).contains(ENC));
     }
-    // 錯誤與中立視圖都不帶內容：QuotedRequest 只露出 hash／tier／model。
     let request = luna().encode("medium", &json!("sys"), &state.messages[..state.messages.len() - 1], None).unwrap();
     assert!(!format!("{} {} {}", request.hash(), request.speed(), request.model()).contains(ENC));
     let replay = super::codec::ReplayItem::new(reasoning_item()).unwrap();
     assert!(!format!("{replay:?}").contains(ENC));
-    // 上游把內容塞進錯誤訊息也不會原樣帶出超過 500 字，且錯誤型別不含請求內容。
     let server = serve(vec![Reply::json(400, json!({"error": {"code": "invalid_request_error", "message": "bad input"}}))]).await;
     let cancel = CancellationToken::new();
     let err = luna().send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
@@ -361,21 +341,18 @@ async fn quotes_reserve_an_upper_bound_and_settle_on_the_actual_usage() {
     let request = provider.encode("medium", &json!("You are a careful assistant."), &state.messages[..1], None).unwrap();
     let wire_len = request.as_any().downcast_ref::<OpenAiRequest>().unwrap().wire().len() as u64;
     let reserved = OpenAiQuote.reserve(request.as_ref()).unwrap();
-    // 上界：（位元組數＋固定餘裕）× 最貴的輸入單價（12 小時快取寫入）＋ max_output × 輸出單價，進位到微美元。
     let bound = wire_len + super::pricing::INPUT_MARGIN_TOKENS;
     let expected = (bound as u128 * 250_000 + 4096_u128 * 500_000).div_ceil(1_000_000) as i64;
     assert_eq!(Ok(expected as u64), super::pricing::quote_upper_bound("gpt-6-luna", bound, 4096));
     assert_eq!((reserved.reserved_microusd, reserved.pricing_version.as_str()), (expected, "gpt-6-luna-standard-2026-11-18"));
     assert_eq!((request.speed(), request.model()), ("standard", "gpt-6-luna"));
 
-    // 結算：普通輸入 900、快取讀 200、快取寫 100、輸出 80（reasoning 30 已含在輸出裡，不重算）。
     let settled = OpenAiQuote.settle(request.as_ref(), &state.responses[0]).unwrap();
     let cost = (900_u128 * 100_000 + 200 * 10_000 + 100 * 125_000 + 80 * 500_000).div_ceil(1_000_000) as i64;
     assert_eq!((settled.estimated_microusd, settled.actual_speed), (cost, Some("standard")));
     assert!(settled.estimated_microusd <= reserved.reserved_microusd);
     assert!(provider.usage_problem(request.as_ref(), &state.responses[0]).is_none());
 
-    // 不可信的用量不結算：超出請求上界、超出 max_output、模型不符。
     let with_usage = |u: Value| Response { usage: u, ..state.responses[0].clone() };
     let too_much_input = with_usage(json!({"input_tokens": bound + 1, "cached_tokens": 0, "cache_write_tokens": 0, "cache_write_12h_tokens": 0, "output_tokens": 1, "reasoning_tokens": 0}));
     let too_much_output = with_usage(json!({"input_tokens": 10, "cached_tokens": 0, "cache_write_tokens": 0, "cache_write_12h_tokens": 0, "output_tokens": 5000, "reasoning_tokens": 0}));
@@ -385,7 +362,6 @@ async fn quotes_reserve_an_upper_bound_and_settle_on_the_actual_usage() {
     }
     let other_model = Response { model: "gpt-other".into(), ..state.responses[0].clone() };
     assert!(matches!(OpenAiQuote.settle(request.as_ref(), &other_model), Err(QuoteError::UntrustedUsage)));
-    // 非標準的 service tier 沒有核准的價：費用未知，不照標準價結算。
     let mut priority = state.responses[0].clone();
     priority.usage["service_tier"] = json!("priority");
     assert!(matches!(OpenAiQuote.settle(request.as_ref(), &priority), Err(QuoteError::UntrustedUsage)));
@@ -418,10 +394,8 @@ async fn the_reserved_amount_equals_pricing_quote_request_for_the_same_request()
         assert_eq!(OpenAiQuote.reserve(encoded.as_ref()).unwrap().reserved_microusd, expected as i64, "{label}");
     }
     assert_eq!(provider.request_for("medium", &system, &state.messages[..state.messages.len() - 1]).unwrap().body().unwrap(), sent[1], "and it is what went on the wire");
-    // 長文門檻真的被跨過了（否則上面那一例沒有測到長文價）。
     let long_bound = super::pricing::input_token_bound("gpt-6-luna", provider.request_for("low", &system, &long).unwrap().body().unwrap().len()).unwrap();
     assert!(long_bound > super::pricing::GPT_6_LUNA_2026_11_18.long_context_over);
-    // 位元組超過 context window：不在送出前拒絕（上游會以 context 上限拒絕、不計費），預留以 context window 封頂。
     let huge = vec![Message { role: "user".into(), content: json!("x".repeat(1_100_000)) }];
     let encoded = provider.encode("medium", &system, &huge, None).expect("oversized bytes are reserved, not refused");
     let expected = super::pricing::quote_request(&provider.request_for("medium", &system, &huge).unwrap()).expect("priced at the context window");
@@ -438,7 +412,6 @@ async fn a_completed_response_without_usage_is_refused_and_never_settled_as_free
     let err = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
     assert!(matches!(&err, http::Error::InvalidResponseDetail(why) if why.contains("usage")), "{err:?}");
     assert!(!provider.definitive_rejection(&err), "the model may have run and billed");
-    // 未完成的回應可能沒有用量（存成 null）：內容可以收，但結算拒絕。
     let unbilled = Response { id: "r".into(), model: "gpt-6-luna".into(), content: vec![message_item("partial")], stop_reason: "incomplete:max_output_tokens".into(), usage: Value::Null };
     assert!(provider.invalid_content_reason(&unbilled, &State::default()).is_none(), "the content itself is fine");
     assert!(matches!(OpenAiQuote.settle(request.as_ref(), &unbilled), Err(QuoteError::UntrustedUsage)));
@@ -487,7 +460,6 @@ async fn upstream_failures_are_classified_and_only_clear_rejections_are_definiti
     let (model, _) = send(Reply::json(404, json!({"error": {"code": "model_not_found"}}))).await;
     assert_eq!(kind_of(&model.unwrap_err()), (404, Some("model_not_found".into())));
 
-    // 送沒送到不確定的都不算確定拒絕：5xx、408、HTTP 200 之後的 failed、沒有終態就斷流。
     let (server_error, _) = send(Reply::json(503, json!({"error": {"code": "server_error"}}))).await;
     assert!(!provider.definitive_rejection(&server_error.unwrap_err()));
     let (timeout, _) = send(Reply::json(408, json!({}))).await;
@@ -502,7 +474,6 @@ async fn upstream_failures_are_classified_and_only_clear_rejections_are_definiti
     assert_eq!(cut, http::Error::TransportUnknown);
     assert!(!provider.definitive_rejection(&cut));
 
-    // 被 max_output_tokens 截斷：可辨識的未完成，半截的工具呼叫不執行。
     let cut_call = json!({"type": "function_call", "id": "fc_x", "call_id": "call_X", "name": "bash", "arguments": "{\"comm", "status": "incomplete"});
     let incomplete = sse(&[
         json!({"type": "response.created", "response": {"id": "r"}}),
@@ -537,7 +508,6 @@ async fn a_failure_after_the_stream_started_is_never_a_definitive_rejection_what
         assert!(matches!(&err, http::Error::StreamAborted { kind: Some(_), .. }), "{label}: {err:?}");
         assert!(!provider.definitive_rejection(&err), "{label}: the reservation must be kept");
     }
-    // 對照：同樣的代碼出現在 HTTP 回應本身（串流開始之前）才是明確拒絕。
     for (status, code) in [(401, "invalid_api_key"), (403, "permission_denied"), (400, "invalid_request_error")] {
         let server = serve(vec![Reply::json(status, json!({"error": {"code": code, "message": "x"}}))]).await;
         let err = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap_err();
@@ -554,7 +524,6 @@ async fn usage_without_cache_details_settles_as_zero_but_missing_input_or_output
     let request = provider.encode("medium", &json!("sys"), &fresh_state().messages, None).unwrap();
     let cancel = CancellationToken::new();
 
-    // 沒有任何快取分項：快取讀寫都當 0，全部是普通輸入。
     let server = serve(vec![Reply::sse(two_tools_stream(json!({"input_tokens": 1000, "output_tokens": 40})))]).await;
     let response = provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap();
     assert_eq!((response.usage["cached_tokens"].as_u64(), response.usage["cache_write_tokens"].as_u64()), (Some(0), Some(0)));
@@ -588,7 +557,6 @@ async fn a_redirect_is_never_followed() {
     assert!(matches!(err, http::Error::Http { status: 307, .. }), "{err:?}");
     assert!(!provider.definitive_rejection(&err));
     assert!(elsewhere.seen.lock().unwrap().bodies.is_empty(), "the redirect target never saw the request or the key");
-    // 非 loopback、帶帳密或 fragment 的 endpoint 在送出前就拒絕。
     for bad in ["http://example.com/v1/responses", "http://user:pw@127.0.0.1:9/v1/responses", "http://127.0.0.1:9/v1/responses#x", OFFICIAL_ENDPOINT] {
         assert_eq!(provider.send(transport(bad), request.as_ref(), &cancel, None).await.unwrap_err(), http::Error::InvalidRequest, "{bad}");
     }
@@ -600,7 +568,6 @@ async fn a_redirect_is_never_followed() {
 fn the_provider_reports_its_identity_effort_ladder_and_refuses_unapproved_options() {
     let provider = luna();
     assert_eq!((provider.id(), provider.model(), provider.effort(), provider.official_endpoint()), ("openai", "gpt-6-luna", "medium", "https://api.openai.com/v1/responses"));
-    // 依 luna 的清單一級一級往下，到底就停。
     let ladder: Vec<String> = std::iter::successors(Some("max".to_string()), |e| Some(provider.lower_effort(e)).filter(|lower| lower != e)).collect();
     assert_eq!(ladder, ["max", "xhigh", "high", "medium", "low", "none"]);
     assert_eq!(provider.lower_effort("bogus"), "bogus");
@@ -611,7 +578,6 @@ fn the_provider_reports_its_identity_effort_ladder_and_refuses_unapproved_option
     ] {
         assert!(OpenAiProvider::with_standard_pricing(bad).is_err());
     }
-    // 不支援的 effort、空的 transcript、配對不上的工具結果都在 HTTP 之前拒絕。
     assert!(provider.encode("ultra", &json!("sys"), &fresh_state().messages, None).is_err());
     assert!(provider.encode("medium", &json!("sys"), &[], None).is_err());
     let orphan = vec![
@@ -636,7 +602,6 @@ fn the_codec_rejects_duplicate_or_already_completed_call_ids_and_keeps_notes_wit
     assert!(OpenAiCodec.accept(&mut state, response(vec![call_item("fc_1", "call_A", "bash", ARGS_A)])).is_err());
     assert_eq!((state.messages.len(), state.responses.len()), (before, 0), "a rejected response leaves the transcript untouched");
 
-    // 提示跟著工具結果走：送出時接在結果後面當一則 user 訊息。
     state.completed_tool_ids.clear();
     OpenAiCodec.accept(&mut state, response(vec![call_item("fc_1", "call_A", "bash", ARGS_A)])).unwrap();
     let result = provider::ToolResult { call_id: "call_A".into(), output: "ok".into(), is_error: false };
@@ -669,14 +634,12 @@ async fn the_model_the_upstream_reports_is_carried_out_and_a_different_one_is_re
     for _ in 0..5 {
         got.push(provider.send(transport(&server.endpoint), request.as_ref(), &cancel, None).await.unwrap());
     }
-    // 快照名／同名／沒回報：都是要求的模型，可以結算。
     for (response, upstream) in got[..3].iter().zip([json!("gpt-6-luna-2026-10-01"), json!("gpt-6-luna"), Value::Null]) {
         assert_eq!(response.model, "gpt-6-luna");
         assert_eq!(response.usage.get("upstream_model").cloned().unwrap_or(Value::Null), upstream);
         assert!(provider.invalid_content_reason(response, &State::default()).is_none());
         assert!(OpenAiQuote.settle(request.as_ref(), response).is_ok());
     }
-    // 別的模型（包含只是字首相同的）：帶出原名，內容與結算都不收。
     for (response, upstream) in got[3..].iter().zip(["gpt-6-lunatic", "gpt-5"]) {
         assert_eq!(response.model, upstream);
         assert!(provider.invalid_content_reason(response, &State::default()).is_some_and(|why| why.contains(upstream)), "{upstream}");
@@ -689,13 +652,11 @@ async fn the_model_the_upstream_reports_is_carried_out_and_a_different_one_is_re
 #[test]
 fn the_codec_settles_every_tool_call_an_interrupted_turn_left_without_a_result() {
     let response = Response { id: "r".into(), model: "gpt-6-luna".into(), content: vec![reasoning_item(), call_item("fc_1", "call_A", "bash", ARGS_A), call_item("fc_2", "call_B", "bash", ARGS_A), call_item("fc_3", "call_C", "bash", ARGS_A)], stop_reason: "completed".into(), usage: Value::Null };
-    // (1) 一個結果都還沒有。
     let mut none_ran = fresh_state();
     OpenAiCodec.accept(&mut none_ran, response.clone()).unwrap();
     assert_eq!(OpenAiCodec.unpaired_tool_calls(&none_ran).unwrap(), ["call_A", "call_B", "call_C"]);
     assert!(luna().encode("medium", &json!("sys"), &none_ran.messages, None).is_err(), "沒結清的 transcript 送不出去");
     assert_eq!(OpenAiCodec.settle_unpaired_tool_calls(&mut none_ran, "not executed: turn ended"), 3);
-    // (2) 第一個跑完了，第二個執行到一半。
     let mut one_ran = fresh_state();
     OpenAiCodec.accept(&mut one_ran, response).unwrap();
     OpenAiCodec.put_tool_results(&mut one_ran, &[provider::ToolResult { call_id: "call_A".into(), output: "ok".into(), is_error: false }], None, false);
@@ -712,11 +673,9 @@ fn the_codec_settles_every_tool_call_an_interrupted_turn_left_without_a_result()
         assert!(outputs.iter().filter(|o| o.0 != "call_A" || std::ptr::eq(state, &none_ran)).all(|o| o.1.contains("not executed: turn ended")), "{outputs:?}");
     }
     assert_eq!(OpenAiCodec.settle_unpaired_tool_calls(&mut one_ran, "again"), 0, "已結清的再跑一次不會多補");
-    // 形狀壞掉的 transcript 不猜。
     let mut broken = fresh_state();
     broken.messages.push(Message { role: "tool_results".into(), content: json!({"results": "oops"}) });
     assert!(OpenAiCodec.unpaired_tool_calls(&broken).is_err());
-    // provider 的識別字查得到 codec；不認得的沒有。
     assert!(provider::is_known("openai") && provider::is_known("anthropic") && !provider::is_known("gemini"));
 }
 

@@ -59,8 +59,6 @@ export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 pub async fn sh(app: &impl HostsAccess, host: &str, script: &str, timeout: Duration) -> Result<Out> {
     let full = format!("{PATH_FIX}{script}");
     if host == LOCAL_HOST {
-        // `sh_local` kills the whole process group on timeout, so a hung git does not keep
-        // holding `index.lock` / `MERGE_HEAD` after we have reported it as failed.
         let o = crate::hosts::sh_local(&full, timeout)
             .await?
             .ok_or_else(|| anyhow!("git command timed out after {}s", timeout.as_secs()))?;
@@ -70,8 +68,6 @@ pub async fn sh(app: &impl HostsAccess, host: &str, script: &str, timeout: Durat
             stderr: String::from_utf8_lossy(&o.stderr).to_string(),
         });
     }
-    // Remote: ssh_exec_path already fails the whole call on a non-zero status, so the status
-    // is carried back in stdout instead.
     let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let wrapped = wrap_remote_script(&full);
     let raw = conn.ssh_exec_path_timeout(&wrapped, timeout).await?;

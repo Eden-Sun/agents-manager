@@ -20,9 +20,6 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 
-
-// ───────────── 時間（測試縮短） ─────────────
-
 #[cfg(not(any(test, feature = "test-hooks")))]
 mod timing {
     pub const POLL_MS: u64 = 150;
@@ -54,8 +51,6 @@ const MAX_STEPS: usize = 400;
 /// 確認頁只印了原文的前一段（沒有截斷記號）時，要看起來**確實是被截斷的長度**才接受：至少這麼多行。
 /// 2.1.280 實測截斷時一定有 4 行以上（多行的前 4 行、長的一行折成約 6 行）；比這短卻只對到前綴＝不是同一則。
 const TRUNCATED_MIN_LINES: usize = 4;
-
-// ───────────── 讀畫面（純函式） ─────────────
 
 /// 選單的樣子。`selected` 是游標那一則的顯示文字，`None`＝在 `(current)`。`block` 用來判斷游標有沒有真的移動。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +89,6 @@ fn rewind_region(screen: &str) -> Option<Vec<&str>> {
 /// `Enter to continue · Esc to cancel` 會被擠出畫面（2026-09-23 實機，14 列的 pane），不能靠它。
 pub fn parse_menu(screen: &str) -> Option<Menu> {
     let below = rewind_region(screen)?;
-    // 確認頁也在 `Rewind` 標題底下：有它的標題或選項就不是選單。
     if below.iter().any(|l| is_option_one(l) || body(l).starts_with("Confirm you want to restore")) {
         return None;
     }
@@ -124,7 +118,6 @@ pub fn parse_confirm(screen: &str) -> Option<Confirm> {
         return None;
     }
     let mut i = anchor;
-    // 往上走到 `│` 區塊的最後一行（中間只能隔空行與說明，最多幾行）。
     while i > 0 && !body(lines[i - 1]).starts_with('│') {
         i -= 1;
         if anchor - i > 6 {
@@ -208,18 +201,14 @@ fn confirm_matches_with_identity(quoted: &[String], target: &str, unique_target:
         return true;
     }
     if let Some((text, header, paths)) = attachment_tail(target) {
-        // The CLI can spend its four visible lines on the image placeholder, body,
-        // blank line and attachment heading, hiding every path. Only accept this
-        // shape only with independently verified identity, the full body and heading.
         if squash(text).is_empty() {
-            return false; // Image-only prompts need the complete path identity.
+            return false;
         }
         let heading = squash(header);
         if let Some((body, tail)) = shown.rsplit_once(&heading) {
             let body_matches = body == squash(text);
             return body_matches && ((!tail.is_empty() && tail == squash(paths)) || (tail.is_empty() && unique_target));
         }
-        // Only the body can supply the existing long-message truncation proof.
         return unique_target && squash(text).starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES;
     }
     want.starts_with(&shown) && quoted.len() >= TRUNCATED_MIN_LINES
@@ -252,8 +241,6 @@ pub fn same_first_line(a: &str, b: &str) -> bool {
     squash(first_line(a)) == squash(first_line(b))
 }
 
-// ───────────── pane（可注入） ─────────────
-
 pub trait Pane: Send + Sync {
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>>;
     fn send_text<'a>(&'a self, text: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
@@ -285,8 +272,6 @@ impl Pane for HerdrPane {
         Box::pin(async move { self.client.pane_send_keys(&self.pane_id, keys).await })
     }
 }
-
-// ───────────── 狀態機 ─────────────
 
 /// 為什麼沒倒成。`reason()` 是 409 的機器可讀理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,8 +390,6 @@ pub async fn drive_with_identity(pane: &dyn Pane, target: &str, skip: usize, uni
     tokio::time::sleep(Duration::from_millis(TYPE_SETTLE_MS)).await;
     keys(pane, &["Enter"]).await?;
     let Some(mut menu) = wait_for(pane, MENU_WAIT_MS, parse_menu).await? else {
-        // 選單沒認出來：畫面上有 rewind 的東西就 Esc 關掉；沒有的話 `/rewind` 可能還躺在輸入列，清掉
-        // （輸入列原本是空的，清的只會是我們打的字）。不在 rewind 畫面上按 ctrl+c：那裡的 `❯` 列不是輸入列。
         let s = read(pane).await?;
         if in_rewind_ui(&s) {
             back_out(pane).await;
@@ -425,7 +408,6 @@ pub async fn drive_with_identity(pane: &dyn Pane, target: &str, skip: usize, uni
     for _ in 0..MAX_STEPS {
         keys(pane, &["Up"]).await?;
         let prev = menu.block.clone();
-        // A stationary cursor is the top; without reaching it uniqueness is unproven.
         let Some(next) = wait_for(pane, STEP_WAIT_MS, |s| parse_menu(s).filter(|m| m.block != prev)).await? else {
             reached_top = true;
             break;
@@ -450,7 +432,6 @@ pub async fn drive_with_identity(pane: &dyn Pane, target: &str, skip: usize, uni
         back_out(pane).await;
         return Err(Fail::NotInMenu);
     };
-    // Return to the chosen entry after inspecting older, possibly identical entries.
     for _ in found_at..steps {
         keys(pane, &["Down"]).await?;
         let prev = menu.block.clone();
@@ -478,7 +459,6 @@ pub async fn drive_with_identity(pane: &dyn Pane, target: &str, skip: usize, uni
         back_out(pane).await;
         return Err(Fail::TextMismatch(confirm.quoted.join("\n")));
     }
-    // 對過字才選。按 `1` 而不是 Enter：選項是編號的，`1` 直接選 Restore，不靠游標位置，也不用看得到選項（矮 pane 會被擠掉）。
     keys(pane, &["1"]).await?;
     let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| crate::composer_parse::composer_text_whole("claude", s))).await? else {
         return Err(Fail::Unconfirmed);
@@ -494,8 +474,6 @@ async fn clear_refill(pane: &dyn Pane, refill: Option<String>, target: &str) -> 
         Some(text) if is_refill_of(&text, target) => {
             keys(pane, &["ctrl+c"]).await?;
             let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| crate::composer_parse::composer_text_whole("claude", s).is_none().then_some(())).await?.is_some();
-            // 清掉之後 claude 會顯示幾秒「Press Ctrl-C again to exit」：這段時間再來一個 ctrl+c（停機、中斷）就把它關掉了。
-            // 握著 bot 鎖等提示消失才放手（2026-09-23 實機：約 3 秒）。
             let _ = wait_for(pane, HINT_WAIT_MS, |s| (!s.contains(CTRL_C_HINT)).then_some(())).await?;
             cleared
         }
@@ -530,8 +508,6 @@ pub async fn rewind_dropped(pane: &dyn Pane, target: &str, next: Option<(String,
         None => Err(Fail::ComposerBusy),
     }
 }
-
-// ───────────── 端點 ─────────────
 
 #[derive(Debug, Deserialize)]
 pub struct RewindIn {

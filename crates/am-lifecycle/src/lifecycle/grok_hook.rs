@@ -59,7 +59,6 @@ fn hooks_json_merged_with_legacy(existing: Option<&str>, dispatcher: &str, prove
                     kept.push(hook);
                     continue;
                 }
-                // 已證實屬於 daemon 的留第一份（順序不動才冪等），並修回完整 entry。
                 if !have_exact {
                     hook = our_hook(dispatcher);
                     kept.push(hook);
@@ -68,7 +67,6 @@ fn hooks_json_merged_with_legacy(existing: Option<&str>, dispatcher: &str, prove
             }
             *hooks = kept;
         }
-        // 只剩空殼的群組（我們拿掉之後沒東西了）整個丟掉；使用者的群組有別的 hook 就留著。
         groups.retain(|g| g.get("hooks").and_then(Value::as_array).is_none_or(|h| !h.is_empty()));
         if !have_exact {
             groups.push(json!({"hooks": [our_hook(dispatcher)]}));
@@ -91,7 +89,6 @@ fn proven_legacy_dispatchers(existing: Option<&str>, dispatcher: &str) -> std::c
                 if command == dispatcher || Path::new(command).file_name().and_then(|n| n.to_str()) != Some(GROK_DISPATCH_SH) {
                     continue;
                 }
-                // 跟 hook 檔同一條：不跟著 symlink 讀，硬連結與過大檔也不算證明。
                 let Ok(Some(text)) = read_hook_file(Path::new(command)) else { continue };
                 if is_local_daemon_dispatcher(&text) {
                     owned.insert(command.to_string());

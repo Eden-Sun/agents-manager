@@ -72,8 +72,6 @@ fn user_query(v: &Value) -> Option<String> {
 
 pub fn parse_chat_history(text: &str) -> Vec<Exchange> {
     let mut out: Vec<Exchange> = Vec::new();
-    // `tail -c` 會從一行中間切開。切剩的半行解析失敗後，後面的 assistant 仍是那一問的，
-    // 不能接到上一問把回覆蓋掉。下一個完整的 user 才重新接上。
     let mut gap = false;
     for line in text.lines() {
         if line.trim().is_empty() {
@@ -138,7 +136,6 @@ pub fn parse_active(text: &str) -> Vec<ActiveSession> {
 /// 而且要剛好一個、沒被別的 run 綁走。
 pub fn pick_session(active: &[ActiveSession], pane_pids: &[i32], cwd: Option<&str>, taken: &HashSet<String>) -> Option<String> {
     if !pane_pids.is_empty() {
-        // 別的在跑 run 已經綁走的 session 不算：pid 重用時，過期的 active_sessions 仍會指著那顆。
         let mut hits: Vec<&str> = active
             .iter()
             .filter(|s| pane_pids.iter().any(|p| i64::from(*p) == s.pid) && !taken.contains(&s.session_id))
@@ -161,8 +158,6 @@ pub fn prompt_matches(seen: &str, prompt: &str) -> bool {
 
 /// grok 啟動畫面的選單（`New worktree ctrl+w`／`Resume session ctrl+r`／`Quit ctrl+q`）不是回覆。
 pub fn is_startup_screen(text: &str) -> bool {
-    // 寬 pane 的選單外面有 `│` 框，label 前面還有吉祥物的字（1.0.70 實測）：每行先去掉框與空白，label 在行內任何位置都算，
-    // 但 label 到 key 之間只能是空白，而且 key 要在行尾。
     let rows: Vec<&str> = text.lines().map(|l| l.trim().trim_matches('│').trim()).collect();
     let has = |label: &str, key: &str| {
         rows.iter().any(|row| row.match_indices(label).any(|(i, _)| row[i + label.len()..].trim_start() == key))
@@ -266,9 +261,7 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
     }
     let host = db::bot_host(app.db(), &bot.id).await?;
     let (sid, exchanges) = if bot.kind == "agy" {
-        // agy（SPEC §12a.9）：session 從 pane 裡行程開著的對話資料庫認，對話在 `transcript_full.jsonl`。
         let Some((sid, text)) = app.agy_session_load(&run, &host).await? else { return Ok(Synced::Unavailable) };
-        // 沒有 hook 的 agy 子 agent：pane 行程實際開著的對話就是回報；跟 `resume_native` 要接的不是同一段＝`resume_mismatch`。
         app.consume_resume_session(&bot, &run, Some(&sid)).await?;
         app.agy_session_record_status(&bot, &run, &text).await;
         let turns = crate::agy_support::parse_turns(&text)
@@ -277,7 +270,6 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
             .collect();
         (sid, turns)
     } else if bot.kind == "claude" {
-        // claude（SPEC §12.5b）：session 從 herdr 的 agent_session 來，對話在 `projects/*/<session>.jsonl`；本機與遠端同一條路。
         let Some((sid, text)) = super::claude_child_log::load(app, &bot, &run, &host).await? else { return Ok(Synced::Unavailable) };
         super::claude_child_log::record_runtime(app, &bot, &run, &text).await;
         (sid, super::claude_child_log::parse_exchanges(&text))
@@ -296,8 +288,6 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
             .into_iter()
             .collect();
     let last_closed = exchanges.iter().rposition(|e| e.closed);
-    // claude 的對話檔是整段 session：第一次接上時（重啟換版、重新認領）裡面早就有已經處理過的歷史，不能當成新回合重發 child_done
-    // （issue #879）。第一次只建基準，之後只記基準之後才開始的問。
     let cutoff = if bot.kind == "claude" { baseline_at(app, &run.id).await? } else { None };
     let first = bot.kind == "claude" && cutoff.is_none();
     let mut imported = 0;
@@ -312,7 +302,6 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
         }
         let mut key = ex.key();
         if done.contains(&key) {
-            // 同一把 pN 底下換了另一句（壓縮後 index 從頭用）：改用內容鑰匙，不要把新問題吞掉。
             if recorded_prompt_matches(app, &sid, &key, &ex.prompt).await? {
                 continue;
             }
@@ -321,7 +310,6 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
                 continue;
             }
         }
-        // 基準那一輪還在問的那一句（pending）才是現在的工作：檔裡最新的歷史問答不能收下 working 時開的那筆在飛回合。
         let newest = Some(i) == last_closed && !(first && pending.is_some());
         if import(app, &bot, &run, &host, &sid, ex, &key, newest, first).await? {
             imported += 1;
@@ -329,7 +317,6 @@ pub async fn sync_locked(app: &impl GrokTranscriptContext, run_id: &str) -> anyh
         }
     }
     if first {
-        // 基準＝這一輪讀到、已經結束的最後一問的時間；空字串＝檔裡還沒有任何一問（之後的問都算新的）。
         let at = exchanges.iter().filter(|e| e.closed).filter_map(|e| e.at.as_deref()).max().unwrap_or("");
         sqlx::query("UPDATE runs SET transcript_baseline_at = ? WHERE id = ? AND transcript_baseline_at IS NULL").bind(at).bind(&run.id).execute(app.db()).await?;
         tracing::info!(run = %run.id, session = %sid, baseline = %at, "claude transcript: baseline taken; existing exchanges are not turns");
@@ -383,10 +370,8 @@ const RUN_USER_PROMPTS_SQL: &str = "SELECT t.id, m.content FROM turns t JOIN mes
           WHERE t.run_id = ? AND m.role = 'user' ORDER BY m.created_at, m.rowid";
 
 async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool, baseline: bool) -> anyhow::Result<bool> {
-    // 壓縮重寫會丟掉 prompt_index，同一句換成內容鑰匙。已經記在這個 run 的不再開一筆。
     let prior_users: Vec<(String, String)> = sqlx::query_as(RUN_USER_PROMPTS_SQL).bind(&run.id).fetch_all(app.db()).await?;
     if let Some((turn_id, _)) = prior_users.iter().find(|(_, c)| c.trim() == ex.prompt.trim()) {
-        // SQLite 的 NULL 用 `String` 解會變成 `Some("")`（#833），未綁鑰匙的回合就被當成已綁。
         let bound: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT native_turn_id FROM turns WHERE id = ?")
             .bind(turn_id)
             .fetch_optional(app.db())
@@ -395,13 +380,11 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
             .filter(|s| !s.is_empty());
         let replies: Vec<String> =
             sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(turn_id).fetch_all(app.db()).await?;
-        // 已綁鑰匙又有回覆：壓縮重播。還沒綁的交給下面，照舊補回合狀態。
         if bound.is_some() {
             if !replies.is_empty() || ex.reply.is_none() {
                 return Ok(false);
             }
             let conv = db::conversation_id(app.db(), &bot.id).await?;
-            // 先讀狀態再寫回覆：deferred 的話讀完之後別的 writer 一 commit 就 517，回覆補不上（#831）。
             let mut tx = db::begin_write(app.db()).await?;
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
             #[cfg(test)]
@@ -423,19 +406,15 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
             users.iter().any(|(_, c, _)| prompt_matches(c, &ex.prompt))
                 || t.prompt_text.as_deref().is_some_and(|p| prompt_matches(p, &ex.prompt))
         })
-        // 檔裡最新結束的那一問，可以收下 working 時開的、還沒有任何 prompt 的那筆在飛回合。
         .or_else(|| {
             candidates.iter().find(|(t, users)| {
                 newest && t.status == "in_flight" && t.origin == "external" && users.is_empty() && t.prompt_text.is_none()
             })
         });
-    // 第一次接上對話檔：對不上任何既有回合的歷史問答只算基準，不開新回合、不通知（issue #879）。
     if baseline && matched.is_none() {
         return Ok(false);
     }
     let conv = db::conversation_id(app.db(), &bot.id).await?;
-    // 已經收好的回合（`completed_fallback`、使用者那句已是原文）第一句是讀它的回覆、之後才寫：deferred 的話讀完之後
-    // 別的 writer 一 commit 就 517，這一問這一輪記不進去（#831）。
     let mut tx = db::begin_write(app.db()).await?;
     let mut added: Vec<db::Message> = Vec::new();
     let turn_id = match matched {
@@ -446,7 +425,6 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                     return Ok(false);
                 }
             }
-            // 畫面刮的回音可能被截斷：換成原文。
             for (id, content, source) in users {
                 if source == "terminal_fallback" && content.trim() != ex.prompt.trim() {
                     sqlx::query("UPDATE messages SET content = ?, source = 'transcript', updated_at = ? WHERE id = ?")
@@ -474,7 +452,6 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
                 super::race_point::hit("grok_transcript_after_reply_read", &t.id).await;
                 match replies.first() {
                     None => added.push(insert_message_tx(&mut tx, &conv, Some(&t.id), "assistant", reply, "transcript", false, None).await?),
-                    // 備援抓的（折行、`…` 截斷）換成原文，id 不變；hook 寫的不動。
                     Some((id, _)) if replies.iter().all(|(_, s)| s == "terminal_fallback") => {
                         if t.status == "completed_fallback" {
                             turn_controller::set_status_on(&mut tx, &t.id, "completed_fallback", "completed", "grok chat_history.jsonl 取代備援回覆").await?;
@@ -507,7 +484,6 @@ async fn import(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, 
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-            // relay 在收件方忙的時候先記下、還沒有回合的那則（`relay_watch`）：收進這一回合，不再記一份。
             let orphans: Vec<(String, String)> = sqlx::query_as(
                 "SELECT id, content FROM messages WHERE conversation_id = ? AND turn_id IS NULL AND role = 'user' AND created_at >= ?
                   ORDER BY created_at, rowid",
@@ -578,7 +554,6 @@ pub async fn settle_in_flight(app: &impl GrokTranscriptContext, bot: &db::Bot, r
         if pending.is_some() {
             return Some(false);
         }
-        // working 時開的、沒有 prompt 的回合，檔裡也沒有還在跑的一問：每一問都已經各自記好了，只收回合、不存畫面。
         let mut tx = app.db().begin().await.ok()?;
         let out = turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", "completed_fallback", "grok chat_history.jsonl 沒有新的一問").await.ok()?;
         tx.commit().await.ok()?;

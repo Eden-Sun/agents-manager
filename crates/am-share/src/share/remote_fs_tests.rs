@@ -84,7 +84,6 @@ async fn create_folder_normal_and_exists() {
     assert!(created.ends_with("bot-a"));
     assert!(Path::new(&created).is_dir());
 
-    // 再次建立同名資料夾 → Exists
     let err = RemoteSite::create_folder(&site.conn, &root.to_string_lossy(), "bot-a").await.unwrap_err();
     assert_eq!(err, RfsError::Exists);
 }
@@ -96,11 +95,9 @@ async fn remove_created_folder_only_rmdir_inbox_and_self() {
     let inbox = Path::new(&site.workspace).join("inbox");
     fs::create_dir_all(&inbox).unwrap();
 
-    // 空的 inbox 與資料夾本體應被移除
     site.remove_created_folder().await.unwrap();
     assert!(!Path::new(&site.workspace).exists());
 
-    // 若非空（有檔案），不應刪除非空資料夾
     let site2 = make_test_remote_site(&scratch, "host-rm-2");
     let file = Path::new(&site2.workspace).join("keep.txt");
     fs::write(&file, b"content").unwrap();
@@ -118,7 +115,6 @@ async fn ensure_inbox_normal_and_folder_missing() {
     let inbox = Path::new(&site.workspace).join("inbox");
     assert!(inbox.is_dir());
 
-    // 資料夾不見時回 NotFound，不重建
     fs::remove_dir_all(&site.workspace).unwrap();
     let err = site.ensure_inbox().await.unwrap_err();
     assert_eq!(err, RfsError::NotFound);
@@ -206,12 +202,10 @@ async fn inbox_write_normal_and_quota() {
     let site = make_test_remote_site(&scratch, "host-inbox-write-1");
     site.ensure_inbox().await.unwrap();
 
-    // 正常寫入
     site.inbox_write("file1.png", b"image-data", 1000, 10).await.unwrap();
     let written = Path::new(&site.workspace).join("inbox/file1.png");
     assert_eq!(fs::read(&written).unwrap(), b"image-data");
 
-    // 超過配額 (max_bytes)
     let err = site.inbox_write("file2.png", b"too-big-data", 15, 10).await.unwrap_err();
     assert_eq!(err, InboxError::Full);
 }
@@ -242,7 +236,6 @@ async fn inbox_write_never_follows_a_name_swapped_after_the_identity_check() {
     let name = "upload.bin";
     let written = Path::new(&site.workspace).join("inbox").join(name);
 
-    // 1. 換成指向 canary 的符號連結
     let race = format!("rm -f \"$N\"; ln -s {q} \"$N\"");
     let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, &race).await.unwrap_err();
     assert_eq!(err, InboxError::Unavailable);
@@ -250,14 +243,12 @@ async fn inbox_write_never_follows_a_name_swapped_after_the_identity_check() {
     assert!(fs::symlink_metadata(&written).unwrap().file_type().is_symlink(), "攻擊者換進來的連結不是我們建的檔：清理不碰它");
     fs::remove_file(&written).unwrap();
 
-    // 2. 換成 canary 的硬連結（同一個 inode）
     let race = format!("rm -f \"$N\"; ln {q} \"$N\"");
     let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, &race).await.unwrap_err();
     assert_eq!(err, InboxError::Unavailable);
     assert_eq!(fs::read(&canary).unwrap(), b"CANARY", "硬連結也不能讓寫入改到 canary");
     fs::remove_file(&written).unwrap();
 
-    // 3. 改名，再放一個新檔：上傳回失敗，而且清理不刪攻擊者放的檔
     let race = "mv \"$N\" \"$N.moved\"; printf attacker > \"$N\"";
     let err = site.inbox_write_racing(name, b"PAYLOAD", 1000, 10, race).await.unwrap_err();
     assert_eq!(err, InboxError::Unavailable);
@@ -304,12 +295,10 @@ async fn outbox_stream_and_read() {
     let test_data = b"Hello, stream and read test!";
     fs::write(ob.join("test.txt"), test_data).unwrap();
 
-    // 1. outbox_read
     let read = site.outbox_read("test.txt", 100).await.unwrap();
     assert_eq!(read.name, "test.txt");
     assert_eq!(read.data, test_data);
 
-    // 2. outbox_stream
     let stream_file = site.outbox_stream("test.txt", 100).await.unwrap();
     assert_eq!(stream_file.len, test_data.len() as u64);
     assert_eq!(stream_file.head, test_data.as_slice());
@@ -359,7 +348,7 @@ async fn measure_calculates_and_ignores_keep_mark() {
 
     let m = site.measure().await.unwrap();
     assert!(m.workspace_bytes > 0);
-    assert_eq!(m.files, 1); // .am-share-keep 排除
+    assert_eq!(m.files, 1);
 }
 
 #[tokio::test]
@@ -372,12 +361,10 @@ async fn measure_fails_closed_when_workspace_or_outbox_has_unreadable_descendant
     fs::write(ws.join("ok.txt"), b"readable").unwrap();
     fs::write(ob.join("out.txt"), b"outbox-ok").unwrap();
 
-    // 0. Fully readable workspace below limit is valid
     let m = site.measure().await.unwrap();
     assert!(!m.truncated && !m.full(), "正常可讀且未滿");
     assert_eq!(m.files, 2);
 
-    // 1. Workspace contains an unreadable subdirectory
     let priv_ws = ws.join("private_ws");
     fs::create_dir_all(&priv_ws).unwrap();
     fs::write(priv_ws.join("large.bin"), vec![0u8; 1024 * 1024]).unwrap();
@@ -388,11 +375,9 @@ async fn measure_fails_closed_when_workspace_or_outbox_has_unreadable_descendant
     let err_ws = site.measure().await.unwrap_err();
     assert_eq!(err_ws, RfsError::Untrusted, "unreadable subtree in workspace must fail closed");
 
-    // Restore permissions
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ws, 0o700);
     fs::set_permissions(&priv_ws, perms_ws).unwrap();
 
-    // 2. Outbox contains an unreadable subdirectory
     let priv_ob = ob.join("private_ob");
     fs::create_dir_all(&priv_ob).unwrap();
     fs::write(priv_ob.join("secret.bin"), b"secret").unwrap();
@@ -403,11 +388,9 @@ async fn measure_fails_closed_when_workspace_or_outbox_has_unreadable_descendant
     let err_ob = site.measure().await.unwrap_err();
     assert_eq!(err_ob, RfsError::Untrusted, "unreadable subtree in outbox must fail closed");
 
-    // Restore permissions
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms_ob, 0o700);
     fs::set_permissions(&priv_ob, perms_ob).unwrap();
 
-    // 3. Restored again: measure succeeds
     let m_restored = site.measure().await.unwrap();
     assert!(!m_restored.truncated && !m_restored.full());
 }
@@ -422,7 +405,6 @@ async fn measure_fails_closed_when_permissions_change_between_du_and_find() {
     fs::create_dir_all(&sub).unwrap();
     fs::write(sub.join("f.txt"), b"file-content").unwrap();
 
-    // Race hook changes permission on sub after du and before find
     let race = "chmod 000 sub 2>/dev/null || true";
     let err = site.measure_racing(race).await.unwrap_err();
     assert_eq!(err, RfsError::Untrusted, "find error must fail closed even if du succeeded");
@@ -438,9 +420,7 @@ async fn prune_outbox_policy() {
     let site = make_test_remote_site(&scratch, "host-prune-1");
     let ob = Path::new(&site.outbox);
 
-    // 建立 keep 標記檔
     fs::write(ob.join(".am-share-keep"), b"keep").unwrap();
-    // 建立普通檔
     fs::write(ob.join("f1.txt"), b"file1").unwrap();
 
     let removed = site.prune_outbox(14, 1000, 100).await.unwrap();
@@ -451,15 +431,12 @@ async fn prune_outbox_policy() {
 
 #[test]
 fn protocol_framing_fail_closed() {
-    // 缺少 AM_RFS_DONE
     let incomplete = b"AM_RFS1\nPATH 4\n/abc\n";
     assert_eq!(parse_rfs_frames(incomplete, &["PATH"]).unwrap_err(), RfsError::Unavailable);
 
-    // 長度不符
     let bad_len = b"AM_RFS1\nPATH 10\n/abc\nAM_RFS_DONE\n";
     assert_eq!(parse_rfs_frames(bad_len, &["PATH"]).unwrap_err(), RfsError::Unavailable);
 
-    // 未宣告的 TAG
     let unknown_tag = b"AM_RFS1\nEVIL 4\n/abc\nAM_RFS_DONE\n";
     assert_eq!(parse_rfs_frames(unknown_tag, &["PATH"]).unwrap_err(), RfsError::Untrusted);
 }
@@ -467,17 +444,14 @@ fn protocol_framing_fail_closed() {
 #[tokio::test]
 async fn host_slots_limit_and_download_rejection() {
     let host = "host-slots-test";
-    // 拿光 4 個 permit
     let p1 = acquire_slot(host, Duration::from_millis(100)).await.unwrap();
     let p2 = acquire_slot(host, Duration::from_millis(100)).await.unwrap();
     let p3 = acquire_slot(host, Duration::from_millis(100)).await.unwrap();
     let p4 = acquire_slot(host, Duration::from_millis(100)).await.unwrap();
 
-    // 第 5 個 slot 拿不到立即 429
     let sem = host_slot(host);
     assert!(sem.try_acquire_owned().is_err());
 
-    // 逾時測試
     let err = acquire_slot(host, Duration::from_millis(50)).await.unwrap_err();
     assert_eq!(err, RfsError::Unavailable);
 
@@ -543,28 +517,23 @@ async fn site_resolve_tests() {
         .await
         .unwrap();
 
-    // 1. 本地分享 bot
     sqlx::query("INSERT INTO projects VALUES ('p-local', 'local', '/tmp/p-local', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO bots VALUES ('blocal1', 'p-local', '/tmp/p-local', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO shared_bots VALUES ('blocal1', 'restricted', '/tmp/ws-local', 'now')").execute(&pool).await.unwrap();
 
-    // 2. 遠端正常分享 bot
     sqlx::query("INSERT INTO projects VALUES ('p-remote', 'rem-1', '/home/u/p-rem', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO bots VALUES ('bremote1', 'p-remote', '/home/u/p-rem', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO shared_bots VALUES ('bremote1', 'restricted', '/home/u/ws-rem', 'now')").execute(&pool).await.unwrap();
 
-    // 3. 遠端斷線分享 bot
     sqlx::query("INSERT INTO projects VALUES ('p-down', 'rem-down', '/home/u/p-down', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO bots VALUES ('bdown1', 'p-down', '/home/u/p-down', NULL)").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO shared_bots VALUES ('bdown1', 'restricted', '/home/u/ws-down', 'now')").execute(&pool).await.unwrap();
 
     let mut fences = std::collections::HashMap::new();
 
-    // 連線中的主機
     let rem_site = make_test_remote_site(&scratch, "rem-1");
     fences.insert("rem-1".to_string(), rem_site.conn.fence().clone());
 
-    // 斷線的主機
     let cfg_down = HostCfg { name: "rem-down".to_string(), ssh: "fake-down".to_string(), herdr_session: "sess-down".to_string(), ..Default::default() };
     let conn_down = HostConn::remote(cfg_down, None);
     conn_down.connected.store(false, Ordering::SeqCst);
@@ -576,7 +545,6 @@ async fn site_resolve_tests() {
         data_dir: scratch.join("data_dir"),
     };
 
-    // 解析本機 bot
     let site_local = super::site::resolve(&env, "blocal1").await.unwrap();
     match site_local {
         super::site::ShareSite::Local { workspace, .. } => {
@@ -585,7 +553,6 @@ async fn site_resolve_tests() {
         _ => panic!("expected Local site"),
     }
 
-    // 解析遠端 bot
     let site_remote = super::site::resolve(&env, "bremote1").await.unwrap();
     match site_remote {
         super::site::ShareSite::Remote(r) => {
@@ -596,11 +563,9 @@ async fn site_resolve_tests() {
         _ => panic!("expected Remote site"),
     }
 
-    // 斷線遠端主機
     let err_down = super::site::resolve(&env, "bdown1").await.unwrap_err();
     assert_eq!(err_down, super::site::SiteError::Unavailable);
 
-    // 不存在的 bot
     let err_missing = super::site::resolve(&env, "bghost1").await.unwrap_err();
     assert_eq!(err_missing, super::site::SiteError::NotShareBot);
 }
@@ -617,7 +582,6 @@ fn outbox_frames(lines: &[&str]) -> Vec<u8> {
 
 #[test]
 fn remote_outbox_withholds_uppercase_secret_names() {
-    // 大小寫混寫的憑證檔名不能靠大小寫敏感的黑名單漏過去（#981）。
     let out = outbox_frames(&[
         "10 1 1\t00\tID_RSA",
         "10 1 1\t00\tKey.PEM",
@@ -635,14 +599,12 @@ async fn remote_outbox_download_refuses_uppercase_secret_names() {
     let site = make_test_remote_site(&scratch, "host-upper-secret-1");
     fs::write(Path::new(&site.outbox).join("SECRET.PEM"), b"hi").unwrap();
 
-    // `RemoteFile`／`ReadWithStat` 沒有 Debug，不能用 unwrap_err，改成比對錯誤種類。
     assert!(matches!(site.outbox_stream("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
     assert!(matches!(site.outbox_read("SECRET.PEM", 100).await, Err(ShareFileError::NotFound)));
 }
 
 #[tokio::test]
 async fn remote_instructions_survive_a_cut_multibyte_char() {
-    // 36000 位元組的中文檔：`head -c 32768` 會切在多位元組字中間（#983）。
     let scratch = test_dirs::scratch_dir("rfs-instr-utf8");
     let site = make_test_remote_site(&scratch, "host-instr-utf8-1");
     fs::write(Path::new(&site.workspace).join("CLAUDE.md"), "中".repeat(12000)).unwrap();
@@ -669,7 +631,6 @@ async fn remote_outbox_list_skips_only_the_non_utf8_name() {
     let site = make_test_remote_site(&scratch, "host-list-nonutf8-1");
     let ob = Path::new(&site.outbox);
     fs::write(ob.join("ok.txt"), b"ok").unwrap();
-    // APFS（macOS）不收非 UTF-8 的檔名（EILSEQ），那邊根本造不出這種檔：只驗正常檔照列、不 panic，不在 macOS 造不出的前提上斷言略過行為（#1964）。
     if let Err(e) = fs::write(ob.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt")), b"x") {
         assert!(cfg!(target_os = "macos"), "只有 macOS 的檔案系統會拒絕這個檔名：{e}");
         eprintln!("skip - 此檔案系統不收非 UTF-8 檔名（{e}），只驗正常檔照列");
@@ -686,7 +647,6 @@ async fn remote_outbox_list_skips_only_the_non_utf8_name() {
 
 #[tokio::test]
 async fn remote_photo_fetch_stops_at_the_total_before_sending() {
-    // 合計上限 7000：前兩張（各 3000）送得出去，第三張會超過，遠端就不能把它送出來（#987）。
     let scratch = test_dirs::scratch_dir("rfs-photo-total");
     let site = make_test_remote_site(&scratch, "host-photo-total-1");
     let inbox = Path::new(&site.workspace).join("inbox");
@@ -700,7 +660,6 @@ async fn remote_photo_fetch_stops_at_the_total_before_sending() {
     let sizes: Vec<Result<usize, &str>> = got.iter().map(|r| r.as_ref().map(|v| v.len()).map_err(|e| *e)).collect();
     assert_eq!(sizes, vec![Ok(3000), Ok(3000), Err("source_too_large")]);
 
-    // 腳本本身：第三張根本沒有送出來，stdout 只剩前兩張＋框頭。
     let script = photo_fetch_script(&site.workspace, &rels, 5000, 7000);
     let out = std::process::Command::new("/bin/sh")
         .arg("-c")
@@ -727,7 +686,6 @@ fn remote_outbox_list_carries_an_opaque_version() {
     let entries = parse_outbox_list(frames.as_bytes(), 0).unwrap();
     let a = entries.iter().find(|e| e["name"] == "a.svg").expect("a.svg 要列出");
     assert_eq!(a["version"], "42-10-100.000000001-100.000000002");
-    // 舊腳本只有前三欄：仍列出，版本是空字串（字串型別）。
     let b = entries.iter().find(|e| e["name"] == "b.svg").expect("b.svg 要列出");
     assert_eq!(b["version"], "");
 }
@@ -743,7 +701,6 @@ async fn remote_outbox_list_version_changes_on_same_second_rewrite() {
     let v1 = before[0]["version"].as_str().unwrap().to_string();
     assert!(!v1.is_empty(), "{before:?}");
 
-    // 同長度、同一秒內改寫（新 inode、新奈秒時間）：版本要跟著變。
     fs::remove_file(ob.join("a.svg")).unwrap();
     fs::write(ob.join("a.svg"), b"<svg>two</svg>").unwrap();
     let after = site.outbox_list(100).await.unwrap();
@@ -758,13 +715,11 @@ async fn remote_downloads_leave_a_slot_for_other_share_ops() {
     let ob = Path::new(&site.outbox);
     fs::write(ob.join("big.bin"), vec![7u8; 4096]).unwrap();
 
-    // 下載串流最多拿到 HOST_SHARE_SLOTS - HOST_STREAM_RESERVE 格；之後的下載拿不到，但清單等其他動作仍能用。
     let mut held = Vec::new();
     for _ in 0..(HOST_SHARE_SLOTS - HOST_STREAM_RESERVE) {
         held.push(site.outbox_stream("big.bin", 1 << 20).await.unwrap());
     }
     assert!(matches!(site.outbox_stream("big.bin", 1 << 20).await, Err(ShareFileError::Busy)));
-    // 壞掉時清單卡在名額上，會等到 acquire_slot 的 TIMEOUT_QUICK 才回 Err；這個上限要小於它（#1281）。
     let list = tokio::time::timeout(TIMEOUT_QUICK / 2, site.outbox_list(100)).await.expect("清單不能被下載占住");
     assert!(list.is_ok());
     drop(held);
@@ -809,8 +764,6 @@ async fn concurrent_remote_downloads_bounded_to_stream_reserve() {
     assert_eq!(successes, HOST_SHARE_SLOTS - HOST_STREAM_RESERVE, "最多只能有 3 個下載成功");
     assert_eq!(busies, 1, "第 4 個併發下載必須回傳 Busy");
 
-    // 此時仍有 1 個 slot 留給非下載操作（如 outbox_list）
-    // 同上：上限要小於 acquire_slot 的 TIMEOUT_QUICK（#1281）。
     let list = tokio::time::timeout(TIMEOUT_QUICK / 2, site.outbox_list(100))
         .await
         .expect("清單操作不應被併發下載占滿阻塞");
@@ -849,19 +802,16 @@ async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
     let site = make_test_remote_site(&scratch, "host-photo-fd-1");
     let ws = Path::new(&site.workspace);
 
-    // 1. 外部目錄與 canary 照片
     let outside = scratch.join("outside");
     fs::create_dir_all(&outside).unwrap();
     let canary = outside.join("canary.png");
     fs::write(&canary, b"CANARY_SECRET_BYTES").unwrap();
 
-    // 2. 正常兩層巢狀目錄與圖片
     let nested = ws.join("photos/2026");
     fs::create_dir_all(&nested).unwrap();
     let nested_img = nested.join("pic.png");
     fs::write(&nested_img, b"nested-ok-bytes").unwrap();
 
-    // 3. 一層與兩層 ancestor symlink
     let sym_ancestor = ws.join("sym_dir");
     unix_fs::symlink(&outside, &sym_ancestor).unwrap();
 
@@ -869,17 +819,14 @@ async fn remote_photo_fd_bound_traversal_prevents_symlink_swap_and_hardlink() {
     fs::create_dir_all(&nested_outside).unwrap();
     unix_fs::symlink(&outside, nested_outside.join("sub")).unwrap();
 
-    // 4. Leaf symlink
     let sym_leaf = ws.join("sym_leaf.png");
     unix_fs::symlink(&canary, &sym_leaf).unwrap();
 
-    // 5. Hardlink (st_nlink > 1)
     let hl1 = ws.join("hardlink1.png");
     let hl2 = ws.join("hardlink2.png");
     fs::write(&hl1, b"hardlink-bytes").unwrap();
     fs::hard_link(&hl1, &hl2).unwrap();
 
-    // 執行 photo_stats 與 photo_fetch
     let rel_ok = vec!["photos".to_string(), "2026".to_string(), "pic.png".to_string()];
     let rel_sym_anc = vec!["sym_dir".to_string(), "canary.png".to_string()];
     let rel_sym_anc2 = vec!["nested_sym".to_string(), "sub".to_string(), "canary.png".to_string()];
@@ -922,19 +869,16 @@ fn a_photo_that_changed_while_reading_is_not_a_permanent_not_found() {
 
 #[test]
 fn parse_photo_stats_subsecond_gnu_and_bsd_formats() {
-    // 1. 純整數奈秒
     let p_int = b"0\t42 100 1700000000123456789";
     let raw_int = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_int.len(), std::str::from_utf8(p_int).unwrap());
     let stats = parse_photo_stats(raw_int.as_bytes(), 1).unwrap();
     assert_eq!(stats[0].as_ref().unwrap().mtime_ns, 1700000000123456789);
 
-    // 2. GNU stat %.9Y 小數格式
     let p_gnu = b"0\t42 100 1700000000.123456789";
     let raw_gnu = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_gnu.len(), std::str::from_utf8(p_gnu).unwrap());
     let stats = parse_photo_stats(raw_gnu.as_bytes(), 1).unwrap();
     assert_eq!(stats[0].as_ref().unwrap().mtime_ns, 1700000000123456789);
 
-    // 3. BSD stat %Fm 小數格式（較少位數需補齊到 9 位）
     let p_bsd = b"0\t42 100 1700000000.5";
     let raw_bsd = format!("AM_RFS1\nSTAT {}\n{}\nAM_RFS_DONE\n", p_bsd.len(), std::str::from_utf8(p_bsd).unwrap());
     let stats = parse_photo_stats(raw_bsd.as_bytes(), 1).unwrap();
@@ -974,12 +918,10 @@ async fn remote_photo_same_second_rewrite_different_subsecond_invalidates_cache(
 
     let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/pic.jpg"/></svg>"#.as_bytes().to_vec();
 
-    // 第一次 embed
     let embedded1 = crate::share::remote_io::embed_remote(&site, svg_content.clone()).await;
     let s1 = String::from_utf8(embedded1).unwrap();
     assert!(!s1.contains("data-am-embed"), "第一次 embed 必須成功: {s1}");
 
-    // 同一秒改寫為 img_b，設定不同奈秒
     fs::write(&pic_path, &img_b).unwrap();
     let _ = std::process::Command::new("touch")
         .arg("-m")
@@ -988,7 +930,6 @@ async fn remote_photo_same_second_rewrite_different_subsecond_invalidates_cache(
         .arg(&pic_path)
         .status();
 
-    // 第二次 embed：必須快取失效並輸出 img_b
     let embedded2 = crate::share::remote_io::embed_remote(&site, svg_content).await;
     let s2 = String::from_utf8(embedded2).unwrap();
     assert!(!s2.contains("data-am-embed"), "第二次 embed 必須成功: {s2}");
@@ -1013,11 +954,9 @@ async fn standalone_compose_is_cached_authority_isolation() {
     let rel = vec!["inbox".to_string(), "a.png".to_string()];
     let meta = crate::share::compose::PhotoMeta { ino: 1234, len: 5678, mtime_ns: 999999 };
 
-    // 尚未快取
     assert!(!crate::share::compose::is_cached(&scope_a, &rel, &meta));
     assert!(!crate::share::compose::is_cached(&scope_b, &rel, &meta));
 
-    // 使用 scope_a 執行一次 embed
     let img_bytes = {
         let img = image::RgbImage::from_fn(10, 10, |_, _| image::Rgb([100, 100, 100]));
         let mut out = Vec::new();
@@ -1034,7 +973,6 @@ async fn standalone_compose_is_cached_authority_isolation() {
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/a.png"/></svg>"#.as_bytes();
     let _ = crate::share::compose::embed_with(svg, &src_a);
 
-    // scope_a 命中快取，但 scope_b 絕不命中
     assert!(crate::share::compose::is_cached(&scope_a, &rel, &meta), "同一個 authority 必須 cache hit");
     assert!(!crate::share::compose::is_cached(&scope_b, &rel, &meta), "不同 authority 絕不可誤命中舊快取");
 }
@@ -1067,27 +1005,20 @@ async fn repoint_host_invalidates_remote_svg_photo_cache() {
     fs::write(&p_a, &img_a).unwrap();
     fs::write(&p_b, &img_b).unwrap();
 
-    // 刻意將兩台主機上的檔案時間設定為完全相同
     let _ = std::process::Command::new("touch").arg("-m").arg("-d").arg("@1700000000.500000000").arg(&p_a).status();
     let _ = std::process::Command::new("touch").arg("-m").arg("-d").arg("@1700000000.500000000").arg(&p_b).status();
 
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/pic.jpg"/></svg>"#.as_bytes().to_vec();
 
-    // 主機 A render
     let out_a = crate::share::remote_io::embed_remote(&site_a, svg.clone()).await;
     let s_a = String::from_utf8(out_a).unwrap();
     assert!(!s_a.contains("data-am-embed"), "主機 A embed 成功: {s_a}");
 
-    // Repoint 到主機 B render：即便路徑、大小、mtime 完全一樣，但主機不同，必須輸出主機 B 的圖片，絕不可沿用主機 A 的快取
     let out_b = crate::share::remote_io::embed_remote(&site_b, svg).await;
     let s_b = String::from_utf8(out_b).unwrap();
     assert!(!s_b.contains("data-am-embed"), "主機 B embed 成功: {s_b}");
     assert_ne!(s_a, s_b, "repoint 後的圖片必須來自新主機 B，不得沿用舊主機 A 的快取");
 }
-
-
-
-
 
 /// #1280：假 ssh 的 stdin 寫入不能因為腳本先結束（不讀 stdin）而失敗——跟正式的 `run_with_stdin` 一樣，結果看 stdout。
 /// 1 MiB 大於 pipe 緩衝，腳本不讀就結束，每次都會 EPIPE（不靠時序）。

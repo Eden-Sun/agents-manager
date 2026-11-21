@@ -18,7 +18,6 @@ pub fn spawn(app: Arc<App>) {
                         _ = app.shutdown.cancelled() => return,
                         _ = tokio::time::sleep(POLL) => {}
                     }
-                    // Do not add a query or a waiting borrower to a healthy pool.
                     if app.db.num_idle() > 0 {
                         continue;
                     }

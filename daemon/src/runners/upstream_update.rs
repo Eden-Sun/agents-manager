@@ -182,17 +182,14 @@ async fn run_auto_installs(app: &Arc<App>, auto_cfg: &am_config::UpdatesCfg) {
             }
             let host = &host_disk.host;
 
-            // 被 kind 停用的主機不更新
             if crate::identity_prefs::kind_disabled(&app.db, host, kind).await {
                 continue;
             }
 
-            // 同一 (host, kind, target) 只嘗試一次
             if has_attempted(&attempts_file, host, kind, target) {
                 continue;
             }
 
-            // 記下嘗試記錄（即使失敗或重啟也不重試同一版）
             record_attempt(&attempts_file, host, kind, target);
 
             auto_install_one(app, host, kind, target).await;
@@ -223,7 +220,7 @@ pub async fn fetch_latest(kind: &str) -> Result<String> {
     match kind {
         "claude" => npm_latest(&raw),
         "grok" => grok_latest(&raw),
-        _ => herdr_latest(&raw), // GitHub Releases (also handles codex's rust-v tags).
+        _ => herdr_latest(&raw),
     }
 }
 
@@ -241,7 +238,6 @@ impl Sources for Live {
 
     fn hosts<'a>(&'a self, kind: &'a str) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
-            // 先拿主機清單再鎖 tools：不要拿著 tools 鎖去等別的鎖。
             let conns = self.0.hosts.list().await;
             let mut disabled_hosts = std::collections::HashSet::new();
             if kind != "herdr" {
@@ -274,8 +270,6 @@ impl Sources for Live {
         if kind == "herdr" {
             return Box::pin(async move {
                 let cli = self.0.tools.lock().await.get(host).and_then(|t| t.herdr_cli.clone()).ok_or_else(|| anyhow!("讀不到 `herdr --version`"))?;
-                // 同機常有兩份 herdr（launchd 跑的 server 與 login shell／shim 的 CLI 是不同檔，#1752）：
-                // 只看 CLI 會把「CLI 新、server 舊」當成已是最新。server 只在連著時才有可信的版本。
                 let server = match self.0.hosts.get(host).await {
                     Some(conn) => {
                         let connected = if conn.is_local() { self.0.connected.load(std::sync::atomic::Ordering::SeqCst) } else { conn.is_connected() };
@@ -327,11 +321,9 @@ pub struct CachedLive(pub Live);
 impl Sources for CachedLive {
     fn upstream<'a>(&'a self, kind: &'a str) -> BoxFuture<'a, Result<String>> {
         Box::pin(async move {
-            // 看 Watch 有沒有快取的 upstream：若有，直接沿用（不重抓網路）
             if let Some((_, v, _)) = self.0.0.upstream_watch.upstream.lock().await.get(kind) {
                 return Ok(v.clone());
             }
-            // 若快取無紀錄但既有快照有 latest_version，沿用快照版本
             if let Some(status) = self.0.0.upstream_watch.snapshot().await.into_iter().find(|s| s.kind == kind) {
                 if let Some(latest) = status.latest_version {
                     return Ok(latest);
@@ -351,7 +343,6 @@ impl Sources for CachedLive {
 }
 
 pub fn spawn(app: Arc<App>) {
-    // 開機先等工具探測跑完（第一輪延後 60 秒），不然第一輪一台主機都沒有。
     crate::background_loop::spawn_periodic(&app, "upstream update watcher", SWEEP, Duration::from_secs(60), |app| async move {
         tick_and_auto_install(&app).await;
     });
@@ -405,13 +396,11 @@ mod disabled_kind_tests {
 
         let live = Live(env.app.clone());
 
-        // 預設未停用：grok 與 herdr 都在 hosts 清單
         let grok_hosts = live.hosts("grok").await;
         assert!(grok_hosts.contains(&"local".to_string()), "預設應含 local: {grok_hosts:?}");
         let herdr_hosts = live.hosts("herdr").await;
         assert!(herdr_hosts.contains(&"local".to_string()), "herdr 應含 local: {herdr_hosts:?}");
 
-        // 停用 local 的 grok
         crate::identity_prefs::put_kind_disabled(
             State(env.app.clone()),
             axum::extract::Path("grok".into()),
@@ -423,13 +412,11 @@ mod disabled_kind_tests {
         .await
         .unwrap();
 
-        // 停用後：grok 排除 local，herdr 依然包含 local
         let grok_hosts = live.hosts("grok").await;
         assert!(!grok_hosts.contains(&"local".to_string()), "停用後不應含 local: {grok_hosts:?}");
         let herdr_hosts = live.hosts("herdr").await;
         assert!(herdr_hosts.contains(&"local".to_string()), "herdr 不受影響: {herdr_hosts:?}");
 
-        // 重新啟用 grok
         crate::identity_prefs::put_kind_disabled(
             State(env.app.clone()),
             axum::extract::Path("grok".into()),
@@ -441,7 +428,6 @@ mod disabled_kind_tests {
         .await
         .unwrap();
 
-        // 啟用後：grok 重新出現
         let grok_hosts = live.hosts("grok").await;
         assert!(grok_hosts.contains(&"local".to_string()), "啟用後重新含 local: {grok_hosts:?}");
     }
@@ -450,7 +436,6 @@ mod disabled_kind_tests {
     #[tokio::test]
     async fn cached_live_sources_uses_watch_upstream_without_network() {
         let env = crate::testing::env().await;
-        // Watch.upstream 有快取時，CachedLive 直接回傳快取版本
         env.app.upstream_watch.upstream.lock().await.insert(
             "grok".into(),
             (std::time::Instant::now(), "1.0.88".into(), crate::db::now()),
@@ -459,13 +444,11 @@ mod disabled_kind_tests {
         let ver = src.upstream("grok").await.unwrap();
         assert_eq!(ver, "1.0.88");
 
-        // Watch.upstream 無快取但 snapshot 有時，沿用 snapshot 版本
         let status = crate::upstream_update::build_status("codex", &Ok("0.99.0".into()), &[], None);
         crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, status).await;
         let ver2 = src.upstream("codex").await.unwrap();
         assert_eq!(ver2, "0.99.0");
 
-        // 兩者皆無時回傳 Err，不連網
         assert!(src.upstream("claude").await.is_err());
     }
 }
@@ -483,14 +466,11 @@ mod auto_update_tests {
         record_attempt(&path, "local", "codex", "0.158.0");
         assert!(has_attempted(&path, "local", "codex", "0.158.0"));
 
-        // 新版本不視為已嘗試
         assert!(!has_attempted(&path, "local", "codex", "0.159.0"));
 
-        // 其他主機或其他 kind 不受影響
         assert!(!has_attempted(&path, "remote1", "codex", "0.158.0"));
         assert!(!has_attempted(&path, "local", "claude", "0.158.0"));
 
-        // 手動更新清除後，可以重新嘗試
         clear_attempt(&path, "local", "codex");
         assert!(!has_attempted(&path, "local", "codex", "0.158.0"));
     }

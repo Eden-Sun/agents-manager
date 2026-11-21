@@ -20,13 +20,11 @@ pub fn dir() -> &'static std::path::Path {
 }
 
 extern "C" fn redirect() {
-    // `track`：行程結束時刪掉（同 `testing::scratch_leak_guard` 的規定）。
     let home = crate::testing::track(std::env::temp_dir().join(format!("am-test-home-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&home);
     if std::fs::create_dir_all(&home).is_err() {
         return;
     }
-    // SAFETY（執行緒）：在 `main` 之前、單執行緒的時候呼叫。
     std::env::set_var("HOME", &home);
     let _ = HOME.set(home);
 }

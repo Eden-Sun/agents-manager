@@ -204,11 +204,9 @@ mod tests {
                 .unwrap(),
             "claude"
         );
-        // Initially no snapshot exists
         let snap = app.snapshot(&key).await.unwrap();
         assert_eq!(snap, None);
 
-        // Record a limit hit through the port
         let hit = CoreLimitHit {
             message: "Usage limit reached".to_string(),
             until: Some(crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(2))),
@@ -217,26 +215,21 @@ mod tests {
         };
         app.record_limit_hit(&key, hit.clone()).await.unwrap();
 
-        // Snapshot now exists and contains the limit hit
         let snap = app.snapshot(&key).await.unwrap();
         assert!(snap.is_some());
         let q = snap.unwrap();
         assert_eq!(q.limit_hit, Some(hit));
 
-        // Clear limit through the port
         app.clear_limit(&key).await.unwrap();
         let snap = app.snapshot(&key).await.unwrap().unwrap();
         assert_eq!(snap.limit_hit, None);
 
-        // Should probe check
         let probe = app.should_probe(&key).await.unwrap();
         assert!(probe);
 
-        // Retired agy key returns false
         let retired = "agy:claude-gpt".to_string();
         assert!(!app.should_probe(&retired).await.unwrap());
 
-        // Test with AppQuotaAccess adapter
         let access = app_quota_access(&app);
         let snap2 = access.snapshot(&key).await.unwrap().unwrap();
         assert_eq!(snap2.limit_hit, None);

@@ -13,7 +13,6 @@ fn remove_at_exit(path: &std::path::Path) {
     }
     LIST.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
     HOOK.call_once(|| {
-        // SAFETY: `sweep` 是沒有參數的 `extern "C"` 函式，整個行程生命週期內都有效。
         unsafe { libc::atexit(sweep) };
     });
 }

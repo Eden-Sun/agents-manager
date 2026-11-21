@@ -26,7 +26,6 @@ pub async fn execute(
     cancel: &CancellationToken,
 ) -> Result<String, String> {
     limits.validate()?;
-    // Use exactly the same #1884 static policy as the existing CLI PreToolUse hook.
     if let am_base::kill_guard::Verdict::Deny(reason) = am_base::kill_guard::check_command(command)
     {
         return Err(reason);
@@ -40,8 +39,6 @@ pub async fn execute(
     #[cfg(target_os = "linux")]
     {
         let bwrap = Path::new("/usr/bin/bwrap");
-        // No fallback to a host shell. A namespace/mount failure also fails closed: bubblewrap
-        // won't reach the shell unless every isolation operation has succeeded.
         if !bwrap.is_file() {
             return Err("bash isolation unavailable".into());
         }
@@ -54,9 +51,6 @@ pub async fn execute(
         let expected = format!("{}:{}", metadata.dev(), metadata.ino());
         let check = format!("test \"$(/usr/bin/stat -Lc '%d:%i' /workspace)\" = \"$1\" || exit 125; exec {fd}<&-; exec /bin/bash --noprofile --norc -c \"$2\"");
         let mut cmd = Command::new(bwrap);
-        // In the child only, mark every nonstandard descriptor close-on-exec, then
-        // allow exactly the pinned directory descriptor through the bwrap exec.
-        // An unsupported close_range or bind-fd fails closed before the command.
         unsafe { cmd.pre_exec(move || {
             if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 4u32) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -68,7 +62,6 @@ pub async fn execute(
         }); }
         cmd.args([
             "--unshare-all",
-            // 使用者 2026-11-02 裁示全部開放網路：只共用 net namespace，其餘照舊隔離。
             "--share-net",
             "--die-with-parent",
             "--new-session",
@@ -79,7 +72,6 @@ pub async fn execute(
                 cmd.args(["--ro-bind", path, path]);
             }
         }
-        // 網路要能用：DNS、TLS 憑證、使用者名稱解析。只唯讀掛這幾個，不掛整個 /etc。
         for path in NETWORK_ETC {
             cmd.args(["--ro-bind-try", path, path]);
         }
@@ -120,8 +112,6 @@ pub async fn execute(
 struct OwnedGroup(u32);
 impl Drop for OwnedGroup {
     fn drop(&mut self) {
-        // The leader has not been waited/reaped yet when the guard is dropped, so its PID/PGID
-        // cannot be reused. Only this command's freshly created process group is signalled.
         unsafe {
             libc::kill(-(self.0 as i32), libc::SIGKILL);
         }
@@ -154,7 +144,6 @@ async fn supervise(
     limits: Limits,
     cancel: &CancellationToken,
 ) -> Result<String, String> {
-    // Nothing from daemon's environment, including AM_*, API keys, BASH_ENV, or key_file paths.
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C.UTF-8")
@@ -171,10 +160,8 @@ async fn supervise(
     let group = OwnedGroup(pid);
     let stdout = child.stdout.take().ok_or("missing stdout")?;
     let stderr = child.stderr.take().ok_or("missing stderr")?;
-    // The two pipes share a combined budget: split it in half; neither side can allocate unboundedly.
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     let waiter = tokio::task::spawn_blocking(move || {
-        // Observe exit WITHOUT reaping: keep PID ownership until group cleanup is complete.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let result = loop {
             let rc =
@@ -201,7 +188,6 @@ async fn supervise(
         _ = cancel.cancelled() => Err("cancelled".into()),
         result = tokio::time::timeout(limits.timeout, collect) => result.unwrap_or_else(|_| Err("command timed out".into())),
     };
-    // Kill/reap on every path, also after normal output EOF (background tasks may have closed pipes).
     drop(group);
     let _ = child.start_kill();
     let _ = waiter.await;
@@ -242,7 +228,7 @@ mod tests {
         assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let names = ["user", "mnt", "pid"]; // net 共用（--share-net），不比
+        let names = ["user", "mnt", "pid"];
         let host_inodes: Vec<u64> = names.iter().map(|name| std::fs::metadata(format!("/proc/self/ns/{name}")).unwrap().ino()).collect();
         let python = format!("import os,socket; print(' '.join(str(os.stat('/proc/self/ns/'+n).st_ino) for n in ('user','mnt','pid'))); assert os.environ.get('KX090P_FAKE_SENTINEL') is None; assert set(os.environ)<=set(('PATH','HOME','LANG','PWD','SHLVL','_'));\ntry:\n s=os.fstat({fd}); assert (s.st_dev,s.st_ino)!=({dev},{ino})\nexcept OSError: pass\ns=socket.socket(); s.settimeout(1); assert s.connect_ex(('127.0.0.1',{port}))==0", dev=meta.dev(), ino=meta.ino());
         let command = format!("test ! -e /workspace/escape && test ! -e /home && printf synthetic > /workspace/writable && /usr/bin/python3 -c \"{}\"", python.replace('\"', "\\\""));

@@ -62,13 +62,9 @@ pub fn decide(bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) 
     if run.resume_outcome.is_some() {
         return Gate::Open;
     }
-    // 三個期限取最晚的那個；全都過了才算到期（見 [`UNBLOCK_GRACE`]）。
     let left = [
         remaining(&run.started_at, VERIFY_WINDOW, now),
-        // 還卡在要人回答的提示：不可能有回報，永遠不到期。
         (run.agent_status == "blocked").then_some(UNBLOCK_GRACE),
-        // 狀態剛真的變過（例如人剛把信任提示按掉）：留一輪遠端 spool 掃描的時間再說。
-        // `agent_status_since` 是 daemon 自己記的變更時刻（issue #93），NULL＝沒變過或升級前的舊列，不額外延。
         run.agent_status_since.as_deref().and_then(|since| remaining(since, UNBLOCK_GRACE, now)),
     ]
     .into_iter()
@@ -95,7 +91,6 @@ pub async fn check(app: &(impl crate::capabilities::Db + crate::capabilities::Em
     match decide(bot, run, now) {
         Gate::Expired { expected } => {
             if let Err(e) = give_up_waiting(app, bot, run, conv, &expected, waited_secs(&run.started_at, now)).await {
-                // 寫不進去也要放行：卡在這裡比少一則說明更糟，下一次呼叫會再試著寫。
                 tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "could not record the unverified resume");
             }
             Gate::Open
@@ -129,7 +124,6 @@ async fn give_up_waiting(
     .bind(&run.id)
     .execute(&mut *tx)
     .await?;
-    // 另一條路剛好先寫了結論（hook 在這一瞬間到了、或另一次 check）：那一條負責說明，這裡什麼都不加。
     if marked.rows_affected() == 0 {
         return Ok(());
     }

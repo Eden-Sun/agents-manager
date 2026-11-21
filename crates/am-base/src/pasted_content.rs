@@ -59,7 +59,6 @@ fn unwrap(e: &str) -> Option<String> {
         };
         let c = s + 4 + 3;
         let close = format!("</pasted_content id=\"{id}\">");
-        // 從開頭標籤最後那個換行找起：空的區塊（`…">\n</…`）也認得。
         let Some(t) = e[c - 1..].find(&format!("\n{close}")).map(|i| c - 1 + i + 1) else { break };
         let mut l = a;
         for _ in 0..2 {

@@ -35,7 +35,6 @@ pub(crate) async fn authenticate(app: &Arc<App>, id: &str, token: &str) -> Resul
         return Err(StatusCode::UNAUTHORIZED);
     }
     let run = crate::db::active_run(&app.db, &child_id).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?.filter(|r| r.id == run_id && r.pane_id.as_deref() == Some(pane_id.as_str()) && r.herdr_session.as_deref() == Some(session.as_str())).ok_or(StatusCode::UNAUTHORIZED)?;
-    // A recycled pane/name is not proof that this is still the same child instance.
     if run.terminal_id.as_deref().filter(|v| !v.is_empty()).is_none() && run.native_session_id.as_deref().filter(|v| !v.is_empty()).is_none() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -114,7 +113,6 @@ mod tests {
         assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
         let state: String = sqlx::query_scalar("SELECT state FROM child_credentials WHERE spawn_id=?").bind(&spawn).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(state, "revoked");
-        // Separately exercise the run-close trigger.
         sqlx::query("UPDATE child_credentials SET state='active' WHERE spawn_id=?").bind(&spawn).execute(&e.app.db).await.unwrap();
         e.herdr.set_agent(name, &pane, true);
         sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();

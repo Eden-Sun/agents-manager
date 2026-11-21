@@ -75,16 +75,13 @@ async fn observing_a_styled_screen_publishes_the_suggestion_and_follows_it() {
     assert_eq!(frames.len(), 1, "變了才推一次");
     assert_eq!(frames[0].data["run"]["prompt_suggestion"], "跑一次完整測試");
 
-    // 讀到同一句：不再推。
     assert_eq!(observe(&env.app, &run).await, Some(true));
     assert!(std::iter::from_fn(|| rx.try_recv().ok()).all(|f| f.kind != "bot_status"), "同一句不重推");
 
-    // 換了一句。
     env.herdr.live.lock().unwrap().get_mut(&pane).unwrap().suggestion = Some("再補一個測試".into());
     assert_eq!(observe(&env.app, &run).await, Some(true));
     assert_eq!(run_json_of(&env, &bot_id).await["prompt_suggestion"], "再補一個測試");
 
-    // 使用者在終端打字：灰字沒了、框裡是實字 → 清掉。
     {
         let mut live = env.herdr.live.lock().unwrap();
         let p = live.get_mut(&pane).unwrap();
@@ -99,13 +96,11 @@ async fn observing_a_styled_screen_publishes_the_suggestion_and_follows_it() {
 #[tokio::test]
 async fn it_is_null_for_other_kinds_and_busy_runs() {
     let env = tt::env().await;
-    // codex：什麼都不讀。
     let (codex_bot, codex_run) = idle_claude(&env, "sugg-codex", Some("甲")).await;
     sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&codex_bot).execute(&env.app.db).await.unwrap();
     assert_eq!(observe(&env.app, &codex_run).await, Some(false));
     assert_eq!(of(&codex_run.id), None);
 
-    // 回合中：不是 idle，忘掉。
     let (_, run) = idle_claude(&env, "sugg-busy", Some("乙")).await;
     assert_eq!(observe(&env.app, &run).await, Some(true));
     sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run.id).execute(&env.app.db).await.unwrap();

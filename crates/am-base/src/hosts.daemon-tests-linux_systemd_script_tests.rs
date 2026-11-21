@@ -47,7 +47,6 @@ exit 0"#,
                 start = if start_ok { 0 } else { 1 },
             ),
         );
-        // nohup 分支是背景起的：真的睡一下，等待迴圈才不會在假 herdr 起來之前就跑完（最多 20 × 50ms）。
         fake(&bin, "sleep", "/bin/sleep 0.05");
         let cfg = HostCfg { name: "lx1".into(), ssh: "lx1.invalid".into(), herdr_session: "test".into(), ..Default::default() };
         let out = std::process::Command::new("/bin/sh")
@@ -69,7 +68,6 @@ exit 0"#,
         let (out, calls) = run(true, true, false);
         assert!(out.contains("AM_MODE=systemd\n") && out.contains("AM_OK=1"), "{out}");
         assert!(calls.contains("systemctl --user start herdr@test.service"), "{calls}");
-        // 沒有登入 session 的 ssh 也連得到 user bus。
         assert!(calls.contains("XDG_RUNTIME_DIR=/run/user/"), "{calls}");
         assert!(!calls.contains("--session test server"), "unit 起了就不能再 nohup 一顆：{calls}");
     }

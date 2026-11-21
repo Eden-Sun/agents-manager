@@ -117,7 +117,6 @@ async fn a_patch_mixing_primary_with_a_config_field_is_rejected_and_changes_noth
     assert!(matches!(err, LcError::Bad(_)), "混送要 400：{err:?}");
     assert_eq!(pin_state(&e, &id).await, (0, 0), "primary 不能單獨生效");
     assert_eq!(model_of(&e, &id).await, before, "config 欄位也沒動");
-    // 分開送各自照常成功。
     patch(&e, &id, json!({"primary": true})).await.unwrap();
     assert_eq!(pin_state(&e, &id).await.0, 1);
     patch(&e, &id, json!({"model": "opus"})).await.unwrap();

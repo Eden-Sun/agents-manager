@@ -40,7 +40,6 @@ mod tests {
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('q',?,'q','claude','tok-q',?)")
             .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('cq','q',?)").bind(&now).execute(&app.db).await.unwrap();
-        // 閒著的 run（flush 隨時會領）；working 的情形見 `a_queued_prompt_behind_a_working_turn_does_not_hold_the_window`。
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq','q','running','idle',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tq','cq','web','queued','pending','x',?)")
@@ -52,7 +51,6 @@ mod tests {
         let s = safety(app, &[]).await.unwrap();
         assert!(s["delivering"].as_array().unwrap().is_empty(), "{s}");
 
-        // in_flight＋pending（打字中）照舊算，不因為這條放寬。（遺留那筆先照 stop 的流程撤掉。）
         sqlx::query("UPDATE turns SET status='failed', delivery='failed' WHERE id='tq'").execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('rq2','q','running','idle',?)")
             .bind(&now).execute(&app.db).await.unwrap();
@@ -73,7 +71,6 @@ mod tests {
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ca','ask',?)").bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('ra','ask','running','working',?)")
             .bind(&now).execute(&app.db).await.unwrap();
-        // 正在問使用者的那一回合（已送達）＋排在後面的 AGM 派工。
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tq_ask','ca','ra','web','in_flight','ok',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,created_at) VALUES ('tq_next','ca','web','queued','pending','x',?)")
@@ -84,27 +81,22 @@ mod tests {
             async move { sqlx::query("UPDATE runs SET agent_status=? WHERE id='ra'").bind(status).execute(&db).await.unwrap(); }
         };
 
-        // 閒下來（flush 隨時會開始打字）：queued 算臨界區，窗口拿不到。（working 的情形見
-        // `a_queued_prompt_behind_a_working_turn_does_not_hold_the_window`。）
         set("idle").await;
         assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
         let refused = acquire(app, "rebuild", "ops", &waited, None, 300, true, &[]).await.unwrap_err();
         let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
         assert_eq!(detail["safety"]["delivering"][0]["turn_id"], "tq_next", "{detail}");
 
-        // 停在 blocked（AskUserQuestion 開著）：不擋，同一筆核准在鎖內重判就拿得到。
         set("blocked").await;
         assert_eq!(delivery_critical(&app.db, "ask").await.unwrap(), None);
         let s = safety_for(app, &[], Some(&waited)).await.unwrap();
         assert_eq!((s["safe"].as_bool(), s["delivering"].as_array().map(Vec::len)), (Some(true), Some(0)), "{s}");
         assert_eq!(s["blocked_waiting_for_user"][0]["bot_id"], "ask", "照實回報在等使用者");
 
-        // 使用者回答了（離開 blocked）：立刻回到臨界區，不沿用剛才的判定。
         set("idle").await;
         assert_eq!(delivery_critical(&app.db, "ask").await.unwrap().as_deref(), Some("tq_next"));
         assert_eq!(safety_for(app, &[], Some(&waited)).await.unwrap()["safe"], false);
 
-        // flush 已經開始送（in_flight＋pending）：就算又跳回 blocked 也照擋。
         sqlx::query("UPDATE turns SET status='completed' WHERE id='tq_ask'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='in_flight', run_id='ra' WHERE id='tq_next'").execute(&app.db).await.unwrap();
         set("blocked").await;
@@ -142,12 +134,10 @@ mod tests {
         assert!(lease(true).await.is_some(), "acquire 那一句的條件也放過它");
         store::release_lease(&app.db, "restart", "ops", 1).await.unwrap();
 
-        // 閒下來：flush 隨時會領，照擋。
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='w'").execute(&app.db).await.unwrap();
         assert_eq!(delivery_critical(&app.db, "w").await.unwrap().as_deref(), Some("tw_next"));
         assert!(lease(true).await.is_none(), "閒著的 bot 排著一則：窗口拿不到（raced）");
 
-        // 已經開始送（打字中）：不管 working 與否照擋。
         sqlx::query("UPDATE turns SET status='completed' WHERE id='w'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='in_flight', run_id='w' WHERE id='tw_next'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id='w'").execute(&app.db).await.unwrap();
@@ -196,12 +186,10 @@ mod tests {
         assert_eq!(detail["reason"], "approval_expired", "{detail}");
         assert!(store::lease(&app.db, "rebuild").await.unwrap().is_none());
 
-        // 有明寫有效期的，不套預設（呼叫端自己決定了）。
         let l = acquire(app, "rebuild", "ops", &explicit, None, 300, true, &[]).await.expect("明寫的有效期照算");
         let fence = l["lease"]["fence"].as_i64().unwrap();
         release(app, "rebuild", "ops", fence, store::LeaseProof::Token(l["lease_token"].as_str().unwrap())).await.unwrap();
 
-        // 一天內的照常；租約不會活得比隱含的有效期久。
         let l = acquire(app, "rebuild", "ops", &fresh, None, 3 * 3600, true, &[]).await.expect("23 小時前的核准還有效");
         let expires = l["lease"]["expires_at"].as_str().unwrap();
         let implied = store::approval(&app.db, &fresh).await.unwrap().unwrap().effective_expiry().unwrap();
@@ -260,12 +248,10 @@ mod tests {
         sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='rebuild'").bind(&past).execute(&app.db).await.unwrap();
         let deadline = iso_in(300);
         assert!(!store::renew_lease(&app.db, "rebuild", "ops", fence, &deadline).await.unwrap(), "過期的租約不能續");
-        // 別人接手（另一張核准、另一個 owner）。
         let b = store::create_approval(&app.db, "other", "rebuild", "x", None, None, None).await.unwrap().approval;
         store::decide_approval(&app.db, &b.id, "approved", "AGM", None, None).await.unwrap();
         let second = acquire(app, "rebuild", "other", &b.id, None, 300, true, &[]).await.unwrap();
         assert!(second["lease"]["fence"].as_i64().unwrap() > fence);
-        // 舊持有者的 owner＋fence＋token 全都過期作廢：release 不會動到新的租約。
         let released = release(app, "rebuild", "ops", fence, store::LeaseProof::Token(&token)).await;
         assert!(matches!(released, Ok(false)) || released.is_err(), "{released:?}");
         assert!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().held_at(&crate::db::now()), "新持有者的租約還在");
@@ -362,13 +348,11 @@ mod tests {
         let (app, pid) = (&e.app, e.project_id.clone());
         thinking_bot(app, &pid, "user").await;
 
-        // 1. 沒有任何已核准的窗口：照舊，working 就是不安全。
         let s = safety(app, &[]).await.unwrap();
         assert_eq!((s["safe"].as_bool(), s["escalated"].as_bool()), (Some(false), Some(false)));
         assert_eq!(s["waited_secs"], serde_json::Value::Null);
         assert_eq!(s["working"].as_array().unwrap().len(), 1);
 
-        // 2. 剛核准 2 分鐘：還沒到門檻（5 分鐘），一樣不安全。
         let id = approved_window(app, 2).await;
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["escalated"], false, "還沒到門檻就放寬的話這條規則等於沒有界線");
@@ -376,7 +360,6 @@ mod tests {
         assert!(s["waited_secs"].as_i64().unwrap() >= 120);
         assert_eq!(s["escalation_approval_id"], id);
 
-        // 3. 等超過門檻：思考中不再擋。
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?")
             .bind((chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .bind(&id).execute(&app.db).await.unwrap();
@@ -400,7 +383,6 @@ mod tests {
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('ri','idle','running','idle',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('ci','idle',?)").bind(&now).execute(&app.db).await.unwrap();
-        // 畫面擋住被放回佇列、正在等退避的那一則：bot 閒著、沒有 in_flight。
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,prompt_text,next_flush_at,created_at) VALUES ('tb','ci','web','queued','pending','x','2099-01-01T00:00:00Z',?)")
             .bind(&now).execute(&app.db).await.unwrap();
 
@@ -414,7 +396,6 @@ mod tests {
         assert_eq!(relaxed["delivering"].as_array().unwrap().len(), 1, "照實列出那一則");
         assert_eq!(relaxed["safe"], true, "等得越久不能越難開：{relaxed}");
 
-        // 對照：有人在思考、又有送達中的那一則 → 全靜止不成立，縮小封鎖面也不成立，照擋。
         thinking_bot(app, &pid, "busy").await;
         let blocked = safety_for(app, &[], Some(&waited)).await.unwrap();
         assert_eq!(blocked["safe"], false, "{blocked}");
@@ -430,7 +411,6 @@ mod tests {
         let old = approved_window(app, 40).await;
         let fresh = approved_window(app, 0).await;
 
-        // 綁在哪一筆，就看哪一筆等了多久。
         let by_old = safety_for(app, &[], Some(&old)).await.unwrap();
         assert_eq!((by_old["escalated"].as_bool(), by_old["safe"].as_bool()), (Some(true), Some(true)));
         assert_eq!(by_old["escalation_approval_id"], old);
@@ -439,11 +419,9 @@ mod tests {
         assert_eq!(by_fresh["escalation_approval_id"], fresh);
         assert!(by_fresh["waited_secs"].as_i64().unwrap() < 60);
 
-        // 不帶 approval id 的純查詢維持舊行為：看最早那筆還活著的。
         let plain = safety(app, &[]).await.unwrap();
         assert_eq!((plain["escalated"].as_bool(), plain["escalation_approval_id"].as_str()), (Some(true), Some(old.as_str())));
 
-        // 認不得、已消耗、已過期的核准都不算數：不放寬，也不會炸。
         for bad in [crate::db::ulid().as_str(), ""] {
             let s = safety_for(app, &[], Some(bad)).await.unwrap();
             assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(false), Some(false)), "{bad:?}");
@@ -468,7 +446,6 @@ mod tests {
         assert_eq!(detail["safety"]["escalated"], false, "B 自己才剛核下來");
         assert!(store::leases(&app.db).await.unwrap().is_empty(), "拿不到就什麼都不該留下");
 
-        // 換成等很久的那一筆：同一個盤面就開得了窗口。
         let taken = acquire(app, "rebuild", "ops", &old, None, 300, true, &[]).await.unwrap();
         assert_eq!(taken["safety"]["escalated"], true);
         assert_eq!(taken["safety"]["escalation_approval_id"], old);
@@ -484,26 +461,22 @@ mod tests {
         approved_window(app, 40).await;
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], true, "先確認這個盤面本來是安全的");
 
-        // a) daemon 正在往 pane 打字／送出：turn 還在 in_flight 而 delivery 是 pending。
         sqlx::query("UPDATE turns SET delivery='pending' WHERE id='user'").execute(&app.db).await.unwrap();
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["safe"], false, "送達臨界區不能被打斷");
         assert_eq!(s["delivering"][0]["bot_id"], "user");
 
-        // b) 送完了，但還有一筆排隊中的 prompt 等著進去。bot 還在 working：flush 這時不會打字，不算臨界區（issue #1677）。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='user'").execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('q','user','web','queued','pending',?)")
             .bind(crate::db::now()).execute(&app.db).await.unwrap();
         let s = safety(app, &[]).await.unwrap();
         assert_eq!((s["safe"].as_bool(), s["delivering"].as_array().map(Vec::len)), (Some(true), Some(0)), "working 的 bot 身上排隊的不擋：{s}");
-        // 閒下來之後 flush 隨時會領它去打字：排隊中待送的 prompt 算臨界區。
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE id='user'").execute(&app.db).await.unwrap();
         let s = safety(app, &[]).await.unwrap();
         assert_eq!(s["safe"], false, "閒著的 bot 排隊中待送的 prompt 也算臨界區");
         assert_eq!(s["delivering"][0]["turn_id"], "q");
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id='user'").execute(&app.db).await.unwrap();
 
-        // c) 沒有任何待送，但別人還握著窗口。
         sqlx::query("DELETE FROM turns WHERE id='q'").execute(&app.db).await.unwrap();
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], true);
         store::acquire_lease(&app.db, "rebuild", "someone-else", None, None,
@@ -553,7 +526,6 @@ mod tests {
             .bind(&now).execute(&app.db).await.unwrap();
         let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-        // 就在拿租約之前，一則 prompt commit 了它的 turn（in_flight＋pending＝正在送）。
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('tt','ct','rt','web','in_flight','pending',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         assert!(store::delivery_critical_anywhere(&app.db).await.unwrap());
@@ -561,7 +533,6 @@ mod tests {
         assert!(taken.is_none(), "有人在送達臨界區：窗口拿不走");
         assert!(window_held(app).await.unwrap().is_none(), "沒拿到就不該有閘門");
 
-        // 那一則送完了（`delivery` 不再是 pending）：窗口就拿得到。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='tt'").execute(&app.db).await.unwrap();
         assert!(!store::delivery_critical_anywhere(&app.db).await.unwrap());
         let taken = store::acquire_lease(&app.db, "restart", "k8bw2f", None, None, &until, true, None, &json!({})).await.unwrap();
@@ -570,7 +541,6 @@ mod tests {
         assert_eq!((w.resource, w.owner.as_str()), ("restart", "k8bw2f"));
         assert!(w.retry_after_secs(&crate::db::now()) > 0);
 
-        // `rebuild` 不中斷任何人，不帶這個條件（`acquire` 只對 EXCLUSIVE 帶）。
         sqlx::query("UPDATE turns SET delivery='pending' WHERE id='tt'").execute(&app.db).await.unwrap();
         let rebuild = store::acquire_lease(&app.db, "rebuild", "k8bw2f", None, None, &until, false, None, &json!({})).await.unwrap();
         assert!(rebuild.is_some(), "rebuild 不看送達臨界區");
@@ -597,7 +567,6 @@ mod tests {
         }
         let until = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-        // 申請者自己正在送達臨界區（就是這一回合）。
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t1','cm','rm','web','in_flight','pending',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, None, &json!({})).await.unwrap().is_none(),
@@ -606,13 +575,11 @@ mod tests {
         assert!(taken.is_some(), "放過申請者自己那顆之後就拿得到");
         sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource='restart'").bind(&now).execute(&app.db).await.unwrap();
 
-        // 別顆 bot 也在臨界區：照擋，排除自己不會把別人一起放過去。
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('t2','co','ro','web','in_flight','pending',?)")
             .bind(&now).execute(&app.db).await.unwrap();
         assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, Some("mine"), &json!({})).await.unwrap().is_none(),
             "別顆 bot 正在送達臨界區，窗口就不該拿得到");
 
-        // 別人送完了就拿得到（自己那一筆還在 pending）。
         sqlx::query("UPDATE turns SET delivery='ok' WHERE id='t2'").execute(&app.db).await.unwrap();
         assert!(store::acquire_lease(&app.db, "restart", "mine", None, None, &until, true, Some("mine"), &json!({})).await.unwrap().is_some());
     }
@@ -637,7 +604,6 @@ mod tests {
         assert_eq!(v.get("reason").and_then(|r| r.as_str()), Some("exclude_not_requester"), "{v}");
         assert_eq!(v.get("excluded").and_then(|r| r.as_str()), Some("other"), "{v}");
 
-        // 排除自己是允許的（這一步沒有任何 bot 在臨界區，所以會真的拿到窗口）。
         let ok = acquire(app, "restart", "mine", &a.id, None, 300, true, &["mine".to_string()]).await.unwrap();
         assert_eq!(ok.get("lease").and_then(|l| l.get("owner")).and_then(|o| o.as_str()), Some("mine"), "{ok}");
     }
@@ -680,7 +646,6 @@ mod tests {
                 .bind(format!("run-{id}")).bind(id).bind(agent).bind(&now).execute(&app.db).await.unwrap();
         }
         assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), None, "唯一 agent 名也不是身份");
-        // 同一個 agent 名可能出現在不同 live bot 的 run 上，也必須拒絕猜第一筆。
         sqlx::query("UPDATE runs SET agent_name='shared-agent' WHERE bot_id IN ('fixer-a','fixer-b')")
             .execute(&app.db).await.unwrap();
 
@@ -754,7 +719,6 @@ mod tests {
         let fence = store::lease(&app.db, "restart").await.unwrap().unwrap().fence;
         assert!(window_held(app).await.unwrap().is_some(), "明確有窗口：擋");
 
-        // 1. DB 讀取出錯（表讀不到）：`Err`，不是 `Ok(None)`。
         fault::break_lease_reads(&app.db).await;
         let u = window_held(app).await.expect_err("讀不到要回 Err，不能當成沒有窗口");
         assert_eq!(u.resource, "restart");
@@ -763,19 +727,16 @@ mod tests {
         fault::restore_lease_reads(&app.db).await;
         assert!(window_held(app).await.unwrap().is_some(), "DB 恢復後重新判斷：窗口還在就擋，沒有卡在 Err");
 
-        // 2. 那一列讀得到、但解不開。
         fault::corrupt_lease_row(&app.db).await;
         assert!(window_held(app).await.is_err(), "解不開＝讀不到");
         sqlx::query("UPDATE supervisor_leases SET fence=? WHERE resource='restart'").bind(fence).execute(&app.db).await.unwrap();
         assert!(window_held(app).await.unwrap().is_some(), "修好之後恢復");
 
-        // 3. 沒放掉、卻沒有讀得懂的到期時間：不知道它什麼時候結束，不能當它不存在。
         for bad in [None, Some("not-a-time")] {
             sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(bad).execute(&app.db).await.unwrap();
             let u = window_held(app).await.expect_err("到期時間讀不懂＝讀不到");
             assert!(u.error.contains("expires_at"), "{}", u.error);
         }
-        // 已經放掉的租約，到期時間怎樣都不重要。
         sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource='restart'").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert!(window_held(app).await.unwrap().is_none(), "放掉了就是放掉了");
     }
@@ -829,7 +790,6 @@ mod tests {
     async fn my_own_rebuild_lease_does_not_block_my_escalated_restart() {
         let e = crate::testing::env().await;
         let (app, pid) = (&e.app, e.project_id.clone());
-        // 有人在思考中：全靜止模式會擋，所以拿得到窗口只可能是走升級那條路。
         thinking_bot(app, &pid, "user").await;
         hold_rebuild(app, "k8bw2f").await;
         let restart = approved_restart(app, 40).await;
@@ -881,7 +841,6 @@ mod tests {
 
         assert_eq!(safety_as(app, &[], Some(&restart), Some("someone-else")).await.unwrap()["safe"], false, "別人問照擋");
 
-        // 全靜止模式本來就不看租約：沒有可升級的核准時，帶了 owner 也照樣由 working 決定。
         sqlx::query("DELETE FROM supervisor_approvals").execute(&app.db).await.unwrap();
         let strict = safety_as(app, &[], None, Some("k8bw2f")).await.unwrap();
         assert_eq!(strict["escalated"], false);
@@ -896,7 +855,6 @@ mod tests {
         for id in ["manager", "responder", "builder"] {
             thinking_bot(app, &pid, id).await;
         }
-        // 連 AGM 自己正在送出的一筆也照排除：它就是那個要換 binary 的人。
         sqlx::query("UPDATE turns SET delivery='pending' WHERE id='builder'").execute(&app.db).await.unwrap();
         let exclude = ["manager".to_string(), "responder".to_string(), "builder".to_string()];
 
@@ -908,7 +866,6 @@ mod tests {
         let relaxed = safety(app, &exclude).await.unwrap();
         assert_eq!((relaxed["escalated"].as_bool(), relaxed["safe"].as_bool()), (Some(true), Some(true)));
         assert!(relaxed["delivering"].as_array().unwrap().is_empty(), "被排除的 bot 連送達中都不算數");
-        // 沒排除的話，那筆正在送出的就會擋下來。
         assert_eq!(safety(app, &[]).await.unwrap()["safe"], false);
     }
 
@@ -917,7 +874,7 @@ mod tests {
     async fn someone_elses_approval_does_not_open_my_window() {
         let e = crate::testing::env().await;
         let app = &e.app;
-        let a = approved_window(app, 40).await; // 申請者 ops
+        let a = approved_window(app, 40).await;
         let refused = acquire(app, "rebuild", "bot-b", &a, None, 300, true, &[]).await.unwrap_err();
         let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
         assert_eq!(detail["reason"], "approval_owner_mismatch");
@@ -946,7 +903,6 @@ mod tests {
         let notes = store::approval_decisions(&app.db).await.unwrap();
         assert!(notes.get(&a).is_some_and(|v| v.iter().any(|n| n["to"] == "consumed")), "誰在什麼時候消耗的記在歷程裡");
 
-        // 新申請的核准照常能接手那個過期的窗口。
         let b = approved_window(app, 0).await;
         acquire(app, "rebuild", "ops", &b, None, 300, true, &[]).await.expect("別張核准照常接手");
     }
@@ -992,20 +948,16 @@ mod tests {
         assert_eq!(again["lease"]["expires_at"], first["lease"]["expires_at"], "重送不延長租約");
         assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().fence, 1);
 
-        // 換一個 request_id、或不帶：不是同一個申請，租約握在自己手上也照舊 lease_held。
         for rid in [Some("req-other"), None] {
             let refused = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], rid).await.unwrap_err();
             let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
             assert_eq!(detail["reason"], "lease_held", "{rid:?}");
         }
-        // 空白的 request_id 是呼叫端的錯，不是「沒帶」。
         assert!(matches!(
             acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("   ")).await,
             Err(LcError::Bad(_))
         ));
 
-        // 窗口還掉之後，同一個 request_id 不能把已經還掉的租約救回來：走完整的 acquire，而一張核准只開一個窗口
-        // （release／過期都算用掉），所以是 approval_already_used，不是 replayed。
         assert!(store::release_lease(&app.db, "rebuild", "ops", 1).await.unwrap());
         let refused = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-secret-1")).await.unwrap_err();
         let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
@@ -1021,7 +973,6 @@ mod tests {
         let a = approved_window(app, 0).await;
         let first = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-exp")).await.unwrap();
         assert!(first.get("replayed").is_none());
-        // 這一秒稍早已過期，而且是秒格式：…:SS.000 < now，但 `…:SSZ` 在字串上大於 `…:SS.mmmZ`。
         let now = chrono::Utc::now();
         let earlier_this_second = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         assert!(crate::db::cmp_ts(&earlier_this_second, &crate::db::now()).is_le(), "前提");
@@ -1052,13 +1003,11 @@ mod tests {
         assert_eq!(o.refusal(&crate::db::now(), "rebuild", None), Some("approval_superseded"));
         assert_eq!(o.decided_at.as_deref(), Some(decided_old.as_str()), "取代不覆寫核准時間");
 
-        // 新的剛被核准（decided_at = 現在），但等待從 40 分鐘前算：直接升級。
         store::decide_approval(&app.db, &new.id, "approved", "AGM", None, None).await.unwrap();
         let s = safety_for(app, &[], Some(&new.id)).await.unwrap();
         assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(true), Some(true)), "{s}");
         assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
 
-        // 接力可以一直往下傳；別人的、或用途不同的不能取代。
         let third = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h3"), None, None, Some(&new.id), None).await.unwrap().approval;
         assert_eq!(third.wait_since.as_deref(), Some(decided_old.as_str()));
         for (who, purpose) in [("bot-b", "rebuild"), ("ops", "restart")] {
@@ -1067,7 +1016,6 @@ mod tests {
         }
         assert_eq!(store::approval(&app.db, &third.id).await.unwrap().unwrap().status, "pending", "被拒的取代什麼都不動");
 
-        // 舊的已經不能用（被駁）：新的照開，但不接等待。
         store::decide_approval(&app.db, &third.id, "denied", "AGM", None, None).await.unwrap();
         let fresh = store::create_approval_superseding(&app.db, "ops", "rebuild", "release", Some("h5"), None, None, Some(&third.id), None).await.unwrap();
         assert_eq!((fresh.superseded, fresh.approval.wait_since), (None, None));
@@ -1118,7 +1066,6 @@ mod tests {
     fn only_an_approved_unexpired_approval_for_this_commit_counts() {
         let ok = approval("approved", "rebuild", Some("abc123"), Some("2026-09-12T13:00:00Z"));
         assert_eq!(ok.refusal(NOW, "rebuild", Some("abc123")), None);
-        // The same yes does not carry to a different tree, a different operation, or tomorrow.
         assert_eq!(ok.refusal(NOW, "rebuild", Some("def456")), Some("approval_commit_mismatch"));
         assert_eq!(ok.refusal(NOW, "restart", Some("abc123")), Some("approval_purpose_mismatch"));
         assert_eq!(ok.refusal(NOW, "rebuild", None), Some("approval_commit_required"));
@@ -1137,8 +1084,6 @@ mod tests {
             let a = approval(status, "rebuild", None, None);
             assert_eq!(a.refusal(NOW, "rebuild", None), Some(why), "{status}");
         }
-        // No deadline is allowed — it is the approval's author's choice — and no commit means
-        // the approval was written for a resource, not a tree.
         assert_eq!(approval("approved", "rebuild", None, None).refusal(NOW, "rebuild", Some("x")), None);
     }
 
@@ -1161,7 +1106,6 @@ mod tests {
             "2026-09-12T12:10:00Z",
             "approval lapses first: the lease ends with it"
         );
-        // An approval with no deadline is the author's choice; it does not shorten anything.
         assert_eq!(lease_deadline(asked, None), asked);
     }
 }

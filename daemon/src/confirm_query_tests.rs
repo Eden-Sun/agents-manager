@@ -68,7 +68,6 @@ async fn delete_route_rechecks_the_principal_when_confirm_is_present() {
     let denied = api::delete_bot_route_for_test(State(e.app.clone()), Path(executor.id.clone()), confirm, manager_principal).await;
     assert!(denied.is_err(), "non-AGM Bot principal with confirm must be refused in the handler");
     assert!(!deleted(db::bot(&e.app.db, &executor.id).await.unwrap()));
-    // 使用者帶 confirm 不被 principal 閘擋（這個假資料的 bot 不在 config.toml，所以後面會以 not_in_config 拒絕，但不是 403）。
     let user = Some(Extension(api::RequestPrincipal::User));
     let passed = api::delete_bot_route_for_test(State(e.app.clone()), Path(executor.id.clone()), Query(api::DeleteQuery { confirm: Some("supervisor".into()) }), user).await;
     assert!(!matches!(passed, Err(crate::lc_error::LcError::Forbidden(_))), "User principal must pass the confirm gate");

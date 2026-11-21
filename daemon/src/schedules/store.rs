@@ -359,7 +359,6 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
         let mut tx = crate::db::begin_write(pool).await?;
         let Some(cur) = get_occurrence_tx(&mut tx, &occ.id).await?.filter(|o| o.status == "queued" && o.turn_id == occ.turn_id && o.attempt_no == occ.attempt_no) else { continue };
         let Some(sched) = get_schedule_tx(&mut tx, &occ.schedule_id).await? else { continue };
-        // Turn evidence may have changed while awaiting the classifier. Retry next tick, never guess.
         let current: Option<(String, String)> = sqlx::query_as("SELECT status, delivery FROM turns WHERE id = ?").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
         if current != turn { continue; }
         let current_reply: Option<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id = ? AND role = 'assistant' AND rewound_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1").bind(&occ.turn_id).fetch_optional(&mut *tx).await?;
@@ -383,7 +382,6 @@ async fn settle_body(pool: &SqlitePool, now: &str, model: &impl super::outcome::
 
 /// Only known failures retry. Deadline is measured from the original scheduled time, not each retry.
 pub(super) fn retry_at(s: &Schedule, o: &Occurrence, outcome: &str, now: &str) -> Option<String> {
-    // 試跑不重試：只回結果，不排下一次（P1 第 2 部分）。
     if o.source == "dry_run" { return None; }
     use chrono::{DateTime, Duration, SecondsFormat};
     if outcome != "failed" || s.enabled != 1 || s.deleted_at.is_some() || s.generation != o.generation || o.attempt_no > s.retry_count { return None; }
@@ -416,8 +414,6 @@ pub async fn occurrence_view(pool: &SqlitePool, occ: &Occurrence) -> Result<serd
         serde_json::json!({"attempt_no":attempt_no,"turn_id":turn_id,"reply_message_id":reply_message_id,"outcome":outcome,"outcome_summary":outcome_summary,"started_at":started_at,"finished_at":finished_at,"duration_ms":ms})
     }).collect();
     v["attempts"] = serde_json::json!(list);
-    // 總花費時間＝各 attempt（開始→結束）加總；重試等待不算。還沒結束的這次 attempt 另給 `running_since`，由畫面加上已進行時間。
-    // 沒有 attempt 列就收成終態的（例如取消）：用最後更新時間當結束。
     let open = matches!(occ.status.as_str(), "pending" | "queued");
     let mut running_since: Option<String> = None;
     if let Some(start) = occ.attempt_started_at.as_deref() {

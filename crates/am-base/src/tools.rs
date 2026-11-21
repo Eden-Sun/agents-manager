@@ -20,8 +20,6 @@ pub struct ToolInfo {
     pub logged_in: Option<bool>,
 }
 
-
-
 /// 偵測（`detect*`）、身份登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
 /// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身份表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
 pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks + crate::capabilities::BgTasks + crate::capabilities::Shutdown {
@@ -244,7 +242,6 @@ pub fn parse_probe(out: &str) -> BTreeMap<String, ToolInfo> {
             _ => {}
         }
     }
-    // Keep a not-installed tool's login answer only when positive (credentials may survive an uninstall).
     for t in m.values_mut() {
         if !t.installed && t.logged_in == Some(false) {
             t.logged_in = None;
@@ -270,7 +267,6 @@ fn unquote(s: &str) -> &str {
 fn config_dir_of(cmd: &str) -> Option<String> {
     const KEY: &str = "CLAUDE_CONFIG_DIR=";
     let at = cmd.find(KEY)?;
-    // Only `VAR=value` before it; `env …` or a dir set after the binary is skipped, not guessed.
     if cmd[..at].split_whitespace().any(|w| !w.contains('=')) {
         return None;
     }
@@ -304,12 +300,9 @@ pub fn parse_shell_identities(out: &str) -> Vec<crate::config::IdentityCfg> {
             Some(dir) => {
                 env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
             }
-            // Picks a config dir in a shape we don't read: treating it as default would run bots
-            // on the wrong login — skip rather than guess.
             None if cmd.contains("CLAUDE_CONFIG_DIR=") => continue,
             None => {}
         }
-        // Later definitions win, like the shell.
         found.insert(
             name.to_string(),
             crate::config::IdentityCfg { name: name.to_string(), kind: "claude".into(), host: None, env, args: vec![] },
@@ -411,7 +404,6 @@ pub async fn identity_for_host_ref<H: ToolsEnv>(app: &H, host: &str, name: &str)
     if let Some(found) = list.iter().find(|i| i.name == name) {
         return Some(found.clone());
     }
-    // 舊資料：agy 預設帳號曾被記成 `agy`。照內建的 ag0 解析（沒有 env），不讓既有 bot 因「不認得的身份」起不來。
     (name.trim() == "agy").then(|| crate::config::IdentityCfg { name: name.to_string(), kind: "agy".into(), host: None, env: BTreeMap::new(), args: vec![] })
 }
 
@@ -424,7 +416,6 @@ pub fn login_status_args(kind: &str) -> Option<&'static [&'static str]> {
     match kind {
         "codex" => Some(&["login", "status"]),
         "grok" => Some(&["models"]),
-        // agy 沒有 status 子命令：`models` 未登入時 exit 1 並印「Please sign in」（2026-11-14 實測）。
         "agy" => Some(&["models"]),
         _ => None,
     }
@@ -458,7 +449,6 @@ pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Opt
         "claude" => "claude auth login",
         "codex" => "codex login --device-auth",
         "grok" => "grok login",
-        // agy 的登入只有互動式：不帶參數啟動，在 TUI 裡走登入；登完離開（Ctrl+C）後 watcher 重驗。
         "agy" => "agy",
         _ => return None,
     };
@@ -472,7 +462,6 @@ pub fn identity_logout_command(kind: &str, env: &BTreeMap<String, String>) -> Op
         "claude" => "claude auth logout",
         "codex" => "codex logout",
         "grok" => "grok logout",
-        // agy 沒有登出子命令：刪掉這個身份 HOME 底下的 OAuth token（Linux 是檔案；macOS 的 Keychain 項目是全機共用的，不動）。
         "agy" => "sh -c 'rm -f \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"'",
         _ => return None,
     };
@@ -509,7 +498,6 @@ pub async fn record_identity_login_fenced<H: ToolsEnv>(
     }
     let Some(ht) = all.get_mut(host) else { return false };
     let Some(info) = ht.identities.get_mut(name) else { return false };
-    // A pane answer of "could not tell" must not erase what we already knew.
     if logged_in.is_none() && account.is_none() && plan.is_none() {
         return false;
     }
@@ -526,7 +514,6 @@ pub async fn record_identity_login_fenced<H: ToolsEnv>(
         info.plan = plan;
     }
     let changed = before != (info.logged_in, info.account.clone(), info.plan.clone());
-    // 從非已登入變成已登入：回合授權失敗記下的「要重新登入」（`login_prompt`）到此為止。呼叫端因為 `changed` 會推快照。
     if info.logged_in == Some(true) && before.0 != Some(true) {
         app.clear_login_prompt(host, name);
     }
@@ -649,8 +636,6 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         let mut saw_cli = false;
-        // agy 是互動 TUI：登完常常不退出（只是回到主畫面），CLI 不結束就永遠等不到收尾重驗。
-        // 所以 agy 登入中每隔一段時間重驗一次，一旦問到已登入就停（之後只等 pane 收尾）。
         let mut agy_logged_in_seen = false;
         let mut next_agy_check = tokio::time::Instant::now() + AGY_LOGIN_RECHECK_EVERY;
         loop {
@@ -667,13 +652,11 @@ pub fn spawn_identity_login_watch<H: ToolsEnv>(
                         std::path::Path::new(arg).file_name().and_then(|v| v.to_str()) == Some(kind.as_str())
                     })
                 }),
-                // 探不到 pane：不算 CLI 已結束，等到 deadline 再收。
                 Err(_) => saw_cli,
             };
             saw_cli |= cli_active;
             let ended = (saw_cli && !cli_active) || (!saw_cli && now >= startup_deadline);
             if ended || now >= deadline {
-                // 不論是 CLI 結束、從未出現、或撐到 deadline，都重驗一次再收 pane（deadline 以前是直接關、不重驗）。
                 finish_identity_login_pane(&app, &host, &name, &fence, &pane_id, logout).await;
                 return;
             }
@@ -706,7 +689,6 @@ async fn finish_identity_login_pane<H: ToolsEnv>(
     logout: bool,
 ) {
     let after = recheck_identity_login_fenced(app, host, name, fence).await;
-    // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
     if !logout && after == Some(true) {
         H::clear_login_prompt_and_push(app, host, name).await;
     }
@@ -725,8 +707,6 @@ async fn finish_identity_login_pane<H: ToolsEnv>(
 /// 「Select login method」 despite being logged in (cc2, 2026-09-08). Local host only.
 pub fn ensure_claude_onboarded(config_dir: &std::path::Path) -> bool {
     let path = config_dir.join(".claude.json");
-    // 走信任檔那一套（#1126）：同一把鎖、讀到寫之間被改就重讀、同目錄暫存檔＋fsync＋rename、沿用原檔權限（0600 不被 umask 放寬）。
-    // 沒有檔、讀不懂、不是物件、已經有旗標、沒有登入帳號：不動，也不建檔。
     crate::trust::update_file(&path, |existing| {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(existing) else { return Ok(None) };
         let Some(obj) = v.as_object_mut() else { return Ok(None) };
@@ -781,7 +761,6 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
         s.push_str(&format!(" {} </dev/null ); __AM_IDENT_RC=$?;", login_probe_stderr(&it.kind)));
         s.push_str(" printf '%s\\n' \"$__AM_IDENT_BODY\" | sed 's/^/AM_IDENT_OUT /'; printf '\\nAM_IDENT_RC %s %s\\n' ");
         s.push_str(&format!("{} \"$__AM_IDENT_RC\" )\n", sh_quote(&it.name)));
-        // The leading newline keeps the fence on its own line when the CLI ends without one.
         s.push_str(&format!("printf '\\nAM_IDENT_END %s\\n' {}\n", sh_quote(&it.name)));
     }
     s
@@ -832,7 +811,6 @@ pub fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option<String
             if low.contains("please sign in") || low.contains("sign in to") {
                 return (Some(false), None, None);
             }
-            // 已登入時 `agy models` 列出「<slug>\t<名稱>」每行一個模型。
             if text.lines().any(|l| l.contains('\t')) {
                 return (Some(true), None, None);
             }
@@ -979,7 +957,6 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
                 (None, Some(false)) => Some("auth status 回報未登入".into()),
                 (None, None) => None,
             };
-            // `source` / `config_dir` are filled in by the caller.
             m.insert(
                 open.clone(),
                 IdentityInfo {
@@ -1014,8 +991,6 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
             continue;
         }
         if cur.is_some() {
-            // Raw lines inside a block are not CLI output. The shell wrapper prefixes each
-            // captured CLI line so its text cannot impersonate these control records.
             continue;
         }
     }
@@ -1036,8 +1011,6 @@ pub async fn detect_identities<H: ToolsEnv>(
     shell: &[crate::config::IdentityCfg],
 ) -> BTreeMap<String, IdentityInfo> {
     let identities = app.config_identities().await;
-    // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
-    // **每一台**的身份都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
     let all = merge_identities(&identities, host, Some(shell));
     if all.is_empty() {
         return BTreeMap::new();
@@ -1071,7 +1044,6 @@ pub async fn detect_identities<H: ToolsEnv>(
             let mut info = IdentityInfo::unknown(&i.name, &i.kind, src, dir_of(i));
             info.reason = Some(match tools.get(&i.kind).and_then(|t| t.path.as_ref()) {
                 Some(_) if login_probe_args(&i.kind, host).is_some() => "auth status 尚未取得結果".into(),
-                // 遠端 claude 讀不到 Keychain，只能等 pane 探測（`quota_claude`）。
                 Some(_) if i.kind == "claude" => "遠端 claude 的登入狀態要等 pane 探測".into(),
                 Some(_) => "這個 kind 沒有可用的 auth status 探測".into(),
                 None => format!("{} CLI 不在 PATH", i.kind),
@@ -1102,11 +1074,8 @@ pub async fn detect_identities<H: ToolsEnv>(
     let res = if host == LOCAL_HOST {
         run_local(&script, IDENTITY_PROBE_TIMEOUT).await
     } else {
-        // The 30 s default is too short for many identities, and a timeout marks *every* one unprobed.
         fence.conn().ssh_exec_path_timeout(&script, IDENTITY_PROBE_TIMEOUT).await
     };
-    // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身份
-    // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
     let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     match res {
         Ok(o) => {
@@ -1138,7 +1107,6 @@ pub async fn detect_identities<H: ToolsEnv>(
 pub fn carry_over(info: &mut IdentityInfo, prev: Option<&IdentityInfo>) {
     let Some(prev) = prev else { return };
     if info.logged_in.is_none() && prev.logged_in.is_some() {
-        // 這次問不到：狀態沿用上次，時間也保留上次的，並說明這次為什麼沒問到，UI 才看得出是舊的。
         let now_basis = info.reason.clone().unwrap_or_else(|| "本次檢查沒有結果".into());
         info.logged_in = prev.logged_in;
         info.reason = prev.reason.clone().or_else(|| info.reason.clone());
@@ -1176,14 +1144,11 @@ pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &cr
     if fence.conn().name != host {
         anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
     }
-    // 一趟探測帶著 #719 的一致性檢查（只讀），不多一次 ssh。
     let script = format!("{PROBE_SH}\n{}", crate::host_baseline::baseline_sh());
     let probed = if host == LOCAL_HOST { run_local(&script, PROBE_TIMEOUT).await } else { fence.conn().ssh_exec_path(&script).await };
     let out = match probed {
         Ok(out) => out,
         Err(e) => {
-            // 連不上／逾時：留著的舊 baseline 標上失敗（不能讓它看起來像剛量的），並推給網頁。
-            // 這次偵測開始後主機已重連／改指：它的失敗不是現在這台的事，不能把新連線量到的結果標成過期（同 #347 的成功路徑，#1371）。
             if app.hosts().is_current(fence).await {
                 crate::host_baseline::note_failure(&**app, host, &e).await;
             }
@@ -1355,8 +1320,6 @@ pub fn install_prompt(kind: &str) -> Option<String> {
     ))
 }
 
-
-// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
 /// 每台主機的 CLI／身份偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ToolsTable: Send + Sync {
     fn tools(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tools::HostTools>>;

@@ -4,7 +4,6 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::owed_delivery::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::capabilities::Db;
     use crate::lifecycle::s6_ports::OwedDeliveryContext;
@@ -199,7 +198,6 @@ mod tests {
         let body = uncommitted(prompt(&app, &bot, "跑一下測試", "crid-recovery").await);
         let turn_id = body["turn_id"].as_str().unwrap().to_string();
 
-        // 開機恢復（的背景重試）這時走到這個 run：欠著的那一句還寫不進去，就先不碰。
         crate::reconcile::rearm_progress(&app).await;
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
@@ -278,7 +276,6 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         heal_delivery_writes(&app).await;
-        // 下一則 prompt 先把欠著的補上（回合真的還在跑，所以它自己照舊 409）。
         let _ = prompt(&app, &bot, "下一句", "crid-next").await;
         let t = turn(&app, &turn_id).await;
         assert_eq!((t.delivery.as_str(), t.delivery_verified, t.auto_resend), ("ok", 0, 0));
@@ -329,7 +326,6 @@ mod tests {
         assert_eq!(row.attempts, 0, "不花重試額度");
         assert!(row.error.as_deref().is_some_and(|e| e.contains("delivery_state_uncommitted")), "{:?}", row.error);
 
-        // 重試額度早就用完的那種也一樣：不判 dispatch_failed。
         sqlx::query("UPDATE supervisor_assignments SET attempts=5, next_attempt_at=NULL WHERE id=?").bind(&a.id).execute(app.db()).await.unwrap();
         crate::supervisor::controller::dispatch(&app, &a.id).await;
         assert_eq!(store::assignment(app.db(), &a.id).await.unwrap().unwrap().status, "queued", "工作可能在跑：不判失敗");
@@ -432,7 +428,6 @@ mod tests {
         assert_eq!(owed_answer(&turn_id), None, "寫成了就不再欠：舊帳跟著清掉");
         assert_eq!(turn(&app, &turn_id).await.delivered_at.as_deref(), Some(sent_at.as_str()), "送達時間是最早送出的那一刻，不是後來寫的時候");
 
-        // 之後別的路寫進較新的證據（重送證不明，poller 改記 unknown）：定時重試不能把它蓋回舊的。
         sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&turn_id).execute(app.db()).await.unwrap();
         settle(&app, &bot).await.expect("定時重試");
         let t = turn(&app, &turn_id).await;
@@ -446,7 +441,6 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, t1, _a) = queued(&env, "claude", "P1").await;
-        // 放回佇列（in_flight → queued）那一句寫不進去：認領照常，放回去失敗。
         sqlx::query(
             "CREATE TRIGGER refuse_requeue BEFORE UPDATE OF status ON turns WHEN OLD.status='in_flight' AND NEW.status='queued' \
              BEGIN SELECT RAISE(ABORT,'injected'); END",
@@ -454,7 +448,6 @@ mod tests {
         .execute(app.db())
         .await
         .unwrap();
-        // 畫面沒準備好（停在登入選單）：flush 認領後放棄、要放回佇列。
         env.herdr.set_screen("pane-api", "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account\n");
 
         assert!(flush_queued_locked(&app, &bot).await.is_err(), "放不回去：flush 不回普通的成功");
@@ -462,7 +455,6 @@ mod tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "pending"));
         assert_eq!(owed(&bot).len(), 1, "記成欠著");
 
-        // T1 還欠著的時候，後來的 P2 排進佇列，佔走名額。
         let p2 = prompt_relayed_queueable(&app, &bot, "P2", "crid-p2", Some(crate::agent_relay::DAEMON_SENDER), crate::lc_error::QueueClass::Relay).await.expect("P2 排進佇列");
         assert_eq!(turn(&app, &p2.turn_id).await.status, "queued");
 
@@ -476,7 +468,6 @@ mod tests {
         assert!(owed(&bot).is_empty(), "帳清掉");
         assert_eq!(typed(&env), 0, "從頭到尾沒送過字");
 
-        // 擋住佇列的東西沒了：P2 被認領（要嘛已經離開 queued，要嘛至少算了一次放回的重試）。
         flush_queued_locked(&app, &bot).await.ok();
         let p = turn(&app, &p2.turn_id).await;
         assert!(p.status != "queued" || p.flush_retries > 0, "P2 被認領了：{:?}", (p.status, p.flush_retries));

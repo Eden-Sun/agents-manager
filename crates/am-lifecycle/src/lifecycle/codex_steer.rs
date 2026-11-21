@@ -107,13 +107,11 @@ pub async fn steer(
     client_request_id: &str,
 ) -> LcResult<PromptOut> {
     let key = (bot.id.clone(), client_request_id.to_string());
-    // 順手清掉過期的帳（steer 很少發生，不需要另外的巡邏）；失敗不影響這次 steer。
     if let Err(e) = sqlx::query("DELETE FROM codex_steers WHERE created_at < ?").bind(db::iso_in(-KEEP_STEERS_SECS)).execute(app.db()).await {
         tracing::debug!(error = %e, "codex_steers prune failed");
     }
     let mut prior = memo().lock().unwrap().get(&key).cloned();
     if prior.is_none() {
-        // 記憶體沒有（daemon 重啟、被淘汰）：以 DB 為準。
         if let Some((turn_id, hash, delivery, message_id)) = load(app.db(), &key).await.map_err(up)? {
             if hash != text_hash(text) {
                 return Err(LcError::conflict("client_request_id was already used for a different prompt", json!({"turn_id": turn_id})));
@@ -125,15 +123,12 @@ pub async fn steer(
         if prior.text != text {
             return Err(LcError::conflict("client_request_id was already used for a different prompt", json!({"turn_id": prior.turn_id})));
         }
-        // 字已經在 pane 裡：只補還沒寫成的那則訊息，絕不再打一次。
         return finish(app, bot, key, prior).await;
     }
-    // 一般送出的同一套圍籬：框裡有人的草稿就不打（`composer_busy`），讀不到框就不打。
     let plan = match app.plan_delivery(client, run, bot, deliver, true, false).await.map_err(up)? {
         Ok(plan) => plan,
         Err(not) => return Err(super::composer_draft::with_draft(client, run, bot, not_attempted_error(&run.id, not)).await),
     };
-    // 先記帳再打字：打到一半 daemon 掛了，重送看得到這一列、不會再打第二次（#916）。寫不進去就不打。
     sqlx::query("INSERT INTO codex_steers (bot_id, client_request_id, turn_id, text_hash, delivery, message_id, created_at) VALUES (?,?,?,?,'pending',NULL,?)")
         .bind(&key.0)
         .bind(&key.1)
@@ -150,7 +145,6 @@ pub async fn steer(
             tracing::warn!(bot = %bot.name, reason = why, "codex steer 送出了，但證不出來");
             "unknown"
         }
-        // 一個字都沒進 pane：可重試的 409，不留任何紀錄。
         Ok(not @ Delivered::NotAttempted { .. }) => {
             forget_pending(app, &key).await;
             return Err(super::composer_draft::with_draft(client, run, bot, not_attempted_error(&run.id, not)).await);

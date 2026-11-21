@@ -5,7 +5,6 @@ mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::start_send::test_seams::*;
     use crate::lifecycle::start_send::test_seams::StartingGuard as Starting;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::lifecycle::send_now::ports::AttachTxPort;
@@ -102,7 +101,6 @@ mod tests {
         assert_eq!((again.turn_id.as_str(), again.delivery.as_str()), (t.id.as_str(), "queued"), "同一個請求回同一筆");
         assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE role='user' AND content=?", TEXT).await, 1, "沒有多一則");
 
-        // daemon 重啟：記憶體全空，定時的撤孤兒掃描照常跑——這一則不是孤兒。
         let fresh = tt::restart_app(&e).await;
         crate::lifecycle::revoke_all_orphaned_queued_turns(&fresh).await;
         let t = turn_of(&fresh, "crid-1").await;
@@ -134,11 +132,9 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "no-identity").await;
-        // 這台沒有這個身份：`start_bot` 在碰任何 pane 之前就 409。
         sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         prompt_starting(&app, &bot.id, TEXT, "crid-fail", &[], RelaySrc::default()).await.unwrap();
         {
-            // 正在替它起（run 還沒建出來）：不拿 bot 鎖的定時掃描剛好跑過，不能把原因寫成「run 已經結束」。
             let _mark = Starting::begin(&bot.id).expect("沒有別人在起");
             crate::lifecycle::revoke_all_orphaned_queued_turns(&app).await;
             assert_eq!(turn_of(&app, "crid-fail").await.start_error, None, "起到一半不算沒能啟動");
@@ -154,7 +150,6 @@ mod tests {
         let t = turn_of(&app, "crid-fail").await;
         assert_eq!((t.status.as_str(), t.start_error.as_deref()), ("queued", Some(why.as_str())), "掃描不撤、也不蓋掉原因");
 
-        // 取消：撤回、寫明理由，這個對話的排隊名額空出來。
         withdraw_turn(&app, &t.id).await.unwrap();
         let t = turn_of(&app, "crid-fail").await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("failed", "failed"));
@@ -246,7 +241,6 @@ mod tests {
         assert_eq!(t.status, "failed", "再按一次：撤回跟停一起成立");
         assert_eq!(count(&app, "SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='system' AND content LIKE 'bot 已被停止%'", &t.id).await, 1);
 
-        // 使用者又把它起來了、閒著：flush 不會把那一則送出去。
         let run2 = tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
         e.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
@@ -263,9 +257,7 @@ mod tests {
         let app = e.app.clone();
         let running = tt::claude_bot(&app, &e.project_id, "running").await;
         tt::fake_run(&app, &running.id).await;
-        // run 的 pane 真 herdr 上一定存在（#1452）：替身要認得它，讀得到 composer。
         e.herdr.know_pane(&format!("pane-{}", running.id));
-        // 假的 run 沒有 transcript：一般那條路照它自己的規則回 409 `transcript_not_ready`——重點是沒有被「收下再啟動」。
         let normal = prompt_starting(&app, &running.id, "照常送", "crid-running", &[], RelaySrc::default()).await;
         assert!(
             matches!(&normal, Err(LcError::Conflict(v)) if v["reason"] == "transcript_not_ready"),
@@ -313,7 +305,6 @@ mod tests {
         assert!(watching_for_running(&run.id), "排了「收成 running 就叫 flush」");
         assert!(!flush_if_running(&app, &bot.id, &run.id).await, "還在 starting：繼續等");
 
-        // DB 恢復，對帳照 herdr 的證據收成 running。
         crate::lifecycle::run_state::accept_run_state(&app, "running").await;
         let stuck = crate::lifecycle::run_state::Settle::Reconcile { stuck: "starting".into() };
         assert!(crate::lifecycle::run_state::settle_once(&app, &run.id, &stuck).await);

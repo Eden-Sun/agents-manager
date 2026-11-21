@@ -61,8 +61,6 @@ pub async fn send_text_recorded(
             json!({"run_id": run.id, "pane_id": pane_id, "sent": false}),
         ));
     }
-    // 併送也是 daemon 直接打進 pane（#648）。沒先記下的話，下一則 prompt 仍走 agent.prompt，
-    // 那條路會回 ok 但字沒進去。寫不進去就不打。
     if !text.is_empty() || enter {
         mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
     }
@@ -111,8 +109,6 @@ pub(super) async fn insert_supplement(app: &(impl crate::capabilities::Db + crat
 /// TUI slash command for a live setting, or `None` (caller reports `needs_restart`).
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
     match (kind, field) {
-        // grok 1.0.46：`/effort` 立刻把 `[models] default_reasoning_effort` 寫進 `GROK_HOME` 的
-        // config.toml（使用者自己開的 grok 也會沿用）。等級只走啟動參數 `--reasoning-effort`。
         ("grok", "effort") => None,
         ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
         ("grok", "model") => {
@@ -176,8 +172,6 @@ async fn apply_live_setting_with_run(
         Err(error) => return LiveApplyOutcome::Failed(format!("bot_read_failed: {error}")),
     };
     let target_rev = crate::launch_rev::of(&bot);
-    // 呼叫端沒有「改設定前」的版本：不知道 run 原本的落差是不是只來自這次的欄位，所以只落 runtime，
-    // 不寫 `live_rev` 豁免（SPEC §4.4a 第 4 點）。空字串不會等於任何 `launch_rev`。
     apply_live_setting_locked(app, bot_id, fields, "", &target_rev, None).await
 }
 
@@ -296,7 +290,6 @@ async fn apply_live_setting_inner(
     let in_flight = !matches!(db::in_flight_turn(app.db(), &run.id).await, Ok(None));
     let (pane_id, during_turn) = match live_gate(&run, in_flight, &bot.kind, fields) {
         Ok(gate) => gate,
-        // 回合中改 codex 的 model／effort（#1681）：PATCH 那條路打斷回合立刻套用，其餘（idle 邊補套、blocked）照舊排著。
         Err(why @ (SlashBlocked::AgentBusy | SlashBlocked::TurnInFlight)) => {
             let interruptible = bot.kind == "codex"
                 && run.agent_status != "blocked"
@@ -313,9 +306,7 @@ async fn apply_live_setting_inner(
     };
 
     if bot.kind == "codex" {
-        // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
-        // 跑著的 codex 版本（不是磁碟上的）：決定一行套用或走選單（`codex_live::oneshot_supported`）。
         let running = crate::codex_update::running_version_of(&run.id);
         let default_effort = crate::codex_live::model_default_effort(app, &bot, run.runtime_model.as_deref()).await;
         mark_pane_typed(app, &run.id).await?;
@@ -348,26 +339,21 @@ async fn apply_live_setting_inner(
         "model" => bot.model.as_deref(),
         _ => None,
     };
-    // `/effort`、`/model` 都一定要帶值，清成「不指定」沒有 slash 指令。
     let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(format!("{field}_cleared_to_default"));
     };
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
         return Err(format!("no_slash_command_for_{field}"));
     };
-    // 不管套用成不成功，pane 都被直接打過字了。
     mark_pane_typed(app, &run.id).await?;
     if let Err(e) = send_slash_line(&client, &pane_id, &line).await {
         return Err(format!("slash_send_failed: {e:?}"));
     }
-    // 還握著 bot 鎖：`prompt_grouped` 拿同一把鎖，所以下一則 prompt 一定排在 TUI 回到輸入列之後。
     let settled_screen = match wait_for_composer_settled(&client, &pane_id, &bot.kind).await {
         Ok(Some(screen)) => screen,
         Ok(None) => return Err("slash_composer_not_settled".into()),
         Err(e) => return Err(format!("slash_settle_read_failed: {e:?}")),
     };
-    // Grok prints its active model and effort in the status frame. Use that read-back before
-    // clearing the drift marker; a closed picker alone does not prove the requested value landed.
     if bot.kind == "grok" {
         let expected_model = bot
             .model
@@ -457,11 +443,9 @@ async fn interrupt_and_apply(
         Ok(Some(t)) => t,
         _ => return Err(busy()),
     };
-    // 送達臨界區：這一回合的送達結果還沒定案（pending／unknown）、或上一次打斷欠著的收尾還沒補——不再按鍵。
     if turn.delivery != "ok" || super::interruption::owes(&bot.id, &turn.id) {
         return Err(busy());
     }
-    // 維護窗口握著（讀不到也算）：正要被重啟的 session 不要再去碰它。
     match crate::lifecycle::send_now::ports::MaintenancePort::window_held(app).await {
         Ok(None) => {}
         _ => return Err(busy()),
@@ -475,7 +459,6 @@ async fn interrupt_and_apply(
     }
     interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    // 從這裡起 Esc 已經停下了回合：不論套用成不成功都要讓它接著跑。
     let was_fast = run.runtime_fast.map(|v| v != 0);
     let running = crate::codex_update::running_version_of(&run.id);
     let default_effort = crate::codex_live::model_default_effort(app, bot, run.runtime_model.as_deref()).await;
@@ -837,8 +820,6 @@ pub async fn compact(app: &impl LcHost, bot_id: &str, expected_run_id: Option<&s
     mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
     send_slash_line(&client, &pane_id, line).await?;
     if bot.kind == "codex" {
-        // The bot lock prevents the working edge from opening an anonymous turn
-        // before we record which command this daemon actually sent.
         let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
         let turn = db::ulid();
         sqlx::query(
@@ -860,7 +841,6 @@ mod compact_tests {
         assert_eq!(compact_slash_command("claude"), Some("/compact"));
         assert_eq!(compact_slash_command("codex"), Some("/compact"));
         assert_eq!(compact_slash_command("claude-api"), Some("/compact"));
-        // openai-api 沒有壓縮：不提供 /compact（`compact` 回 400 `compact_unsupported`），也不映射成別的指令。
         assert_eq!(compact_slash_command("openai-api"), None);
         assert_eq!(compact_slash_command("grok"), None);
     }
@@ -898,13 +878,10 @@ mod live_slash_tests {
 ";
     #[test]
     fn a_slash_counts_as_settled_only_on_two_identical_empty_composer_reads() {
-        // 第一次讀到還沒有可比的上一張：不算穩。
         assert!(!composer_settled("claude", None, EFFORT_MAX_SETTLED));
         assert!(composer_settled("claude", Some(EFFORT_MAX_SETTLED), EFFORT_MAX_SETTLED));
-        // 畫面還在變（回饋文字剛印出來、token 數在跳）：不算穩。
         let earlier = EFFORT_MAX_SETTLED.replace("615330 tokens", "615201 tokens");
         assert!(!composer_settled("claude", Some(&earlier), EFFORT_MAX_SETTLED));
-        // 輸入列裡還有字：不是空的，不算穩。
         let typing = EFFORT_MAX_SETTLED.replace("\n❯\n", "\n❯ /effort max\n");
         assert!(!composer_settled("claude", Some(&typing), &typing));
     }
@@ -939,7 +916,6 @@ mod live_slash_tests {
             live_slash_command("claude", "effort", "MAX", None).as_deref(),
             Some("/effort max")
         );
-        // codex has no slash for either (0.153.4).
         assert_eq!(live_slash_command("codex", "model", "gpt-5.5", None), None);
         assert_eq!(live_slash_command("codex", "effort", "high", None), None);
     }
@@ -998,7 +974,6 @@ mod login_slash_tests {
     #[test]
     fn an_idle_running_pane_is_typeable() {
         assert_eq!(slash_gate(&run("running", "idle", Some("w1:p1")), false), Ok("w1:p1".into()));
-        // 「不知道」不是「在忙」：擋掉它只會讓按鈕在正常狀態下也按不動。
         assert_eq!(slash_gate(&run("running", "unknown", Some("w1:p1")), false), Ok("w1:p1".into()));
     }
     #[test]
@@ -1009,7 +984,6 @@ mod login_slash_tests {
         assert_eq!(slash_gate(&run("running", "blocked", Some("w1:p1")), false), Err(SlashBlocked::AgentBusy));
         assert_eq!(slash_gate(&run("running", "idle", Some("w1:p1")), true), Err(SlashBlocked::TurnInFlight));
         assert_eq!(slash_gate(&run("running", "idle", None), false), Err(SlashBlocked::NoPane));
-        // 空字串的 pane id 和沒有 pane 是同一件事。
         assert_eq!(slash_gate(&run("running", "idle", Some("  ")), false), Err(SlashBlocked::NoPane));
     }
     /// #712：codex 回合中只切 fast 直接送（0.157.1 `/fast` 回合中照樣生效）；其他組合照舊擋。
@@ -1018,7 +992,6 @@ mod login_slash_tests {
         let working = run("running", "working", Some("w1:p1"));
         assert_eq!(live_gate(&working, true, "codex", &["fast"]), Ok(("w1:p1".into(), true)));
         assert_eq!(live_gate(&run("running", "idle", Some("w1:p1")), true, "codex", &["fast"]), Ok(("w1:p1".into(), true)), "回合在飛");
-        // 閒著走一般路徑（可以按 Esc 關選單、改 model／effort）。
         assert_eq!(live_gate(&run("running", "idle", Some("w1:p1")), false, "codex", &["fast"]), Ok(("w1:p1".into(), false)));
         assert_eq!(live_gate(&working, true, "codex", &["model", "fast"]), Err(SlashBlocked::AgentBusy), "model 要開選單，回合中不碰");
         assert_eq!(live_gate(&working, true, "codex", &["effort"]), Err(SlashBlocked::AgentBusy));

@@ -18,7 +18,7 @@ pub use crate::config::is_invisible_format_char;
 pub fn check_model(model: &str) -> Result<(), LcError> {
     let m = model.trim();
     if m.is_empty() {
-        return Ok(()); // 清掉＝用 CLI 預設
+        return Ok(());
     }
     if m.len() > MAX_MODEL_BYTES {
         return Err(LcError::Bad(format!("model is too long (max {MAX_MODEL_BYTES} bytes)")));

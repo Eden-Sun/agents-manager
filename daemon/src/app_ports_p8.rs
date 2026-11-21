@@ -238,8 +238,6 @@ impl BotOpsRepo for App {
     }
 }
 
-
-
 impl SupervisorSignals for App {
     fn observe_idle_status(&self, run_id: &str, status: &str) {
         crate::supervisor::idle_sleep::observe_status(run_id, status)
@@ -266,10 +264,6 @@ impl BotOpsPort for App {
         crate::panes::notify_unowned_and_orphans(&self.shared(), host).await
     }
 }
-
-
-
-
 
 impl HostSidePort for App {
     async fn refresh_herdr_version(&self, host: &str) {
@@ -380,7 +374,6 @@ impl IngressCommands for App {
         crate::spawn_hints::prune_stale(self).await
     }
     async fn spawn_hints_for_host(&self, host: &str, session: &str) -> Result<HashMap<String, String>> {
-        // issue #1790：shim 登記的 claim 與 hook 撈到的 hint 都是「這個 pane 是這顆 bot 開的」；兩者不一致時 claim 為準。
         let app = self.shared();
         let mut owners = crate::spawn_hints::for_host(&app, host).await?;
         owners.extend(crate::spawn_hints::claims_for_session(&app, host, session).await?);

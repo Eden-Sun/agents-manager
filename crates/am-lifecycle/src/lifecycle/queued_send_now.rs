@@ -32,7 +32,6 @@ pub async fn send_queued_now(
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
         }
     }
-    // 子 agent 沒有 statusLine，版本未知（VersionUnknown）：改由畫面上 CLI 自己印的 send-now 提示證明它認得這顆鍵。
     let support = super::send_now::supported(&bot.kind, run.status_json.as_deref());
     if matches!(support, Err(ref r) if !matches!(r, super::send_now::Refusal::VersionUnknown)) {
         return Err(LcError::conflict("send_now_unsupported", json!({"run_id": run.id, "sent": false})));

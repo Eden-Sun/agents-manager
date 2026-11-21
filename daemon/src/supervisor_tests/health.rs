@@ -16,36 +16,25 @@ mod tests {
         let app = env.app.clone();
         let role = crate::supervisor::roles::Role::Responder;
 
-        // 還沒建立：核准本來就歸巡檢，沒有東西要改派。
         assert_eq!(role_state(&app, role).await, RoleState::NotConfigured);
         assert!(!role_state(&app, role).await.is_unavailable());
 
         crate::supervisor::roles::set_env(&app.db, role, "resp-bot", "proj", "/tmp").await.unwrap();
-        // 登記了、但沒有 active run：它不會裁示任何東西。
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
 
-        // #420 在送不出去時看畫面寫下的那個字，要被讀成 needs_login（字不一樣就永遠判不出來）。
         crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
-        // 撞限是另一個原因，但一樣是不可用。
         crate::supervisor::roles::set_status(&app.db, role, "waiting_quota", None, None).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_WAITING_QUOTA));
 
-        // 狀態清掉之後又回到「沒有 active run」——不是 Available：這一層只讀 DB，
-        // 「沒有 needs_login」的意思是沒有證據說它壞了，不是證明它是好的。
         crate::supervisor::roles::set_status(&app.db, role, "", None, None).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
 
-        // 真的種一顆 bot＋一個 running 的 run，這時候才會是 Available。
-        // project_id 要用 env 真的建出來的那一個：`bots.project_id` 有外鍵，寫死字串會在 INSERT 就炸。
         let bot = crate::testing::claude_bot(&app, &env.project_id, "AGM-responder").await;
         crate::testing::fake_run(&app, &bot.id).await;
         crate::supervisor::roles::set_env(&app.db, role, &bot.id, &env.project_id, "/tmp").await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Available);
 
-        // bot 被軟刪、但 run 那一列還掛著 running（刪除到停機之間的窗口，#421 指出）：
-        // `db::active_run` 只看 runs，不看 bot 還在不在，所以這裡如果不另外查一次，
-        // 閘門會說「它可以裁示」而它根本不存在，核准就靜靜躺著——正是這支函式要擋的那種錯。
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
             .bind(crate::db::now())
             .bind(&bot.id)
@@ -54,10 +43,8 @@ mod tests {
             .unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN), "軟刪掉的 bot 不能被當成還能裁示");
 
-        // 巡檢是另一列，不會被協調者的狀態汙染。
         assert_eq!(role_state(&app, crate::supervisor::roles::Role::Patrol).await, RoleState::NotConfigured);
 
-        // #421 呼叫的是 responder_state()，它就是 role_state(Responder) 的別名，不能有第二套判斷。
         assert_eq!(responder_state(&app).await, role_state(&app, role).await);
     }
 
@@ -71,7 +58,6 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let role = crate::supervisor::roles::Role::Responder;
-        // `runs` 對 `bots` 有 FK，所以這裡要真的把那顆 bot 建出來（不像只讀 DB 那條測試）。
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('proj','/tmp','proj',?)")
             .bind(crate::db::now())
             .execute(&app.db)
@@ -89,10 +75,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 表還沒被填過＝還沒有結論，不是「它壞了」。
         assert_eq!(role_state(&app, role).await, RoleState::Available);
 
-        // 記憶體說 notify 一直沒跑完（那條路不會為巡檢寫 DB，只有這張表看得到）。
         let failed = ["t1", "t2", "t3"].into_iter().map(str::to_string).collect();
         crate::supervisor::role_faults::note_notify_round(&app, "responder", failed, false).await;
         crate::supervisor::role_faults::refresh(&app).await;
@@ -100,11 +84,9 @@ mod tests {
         assert_eq!(state, RoleState::Unavailable(crate::supervisor::role_faults::REASON_NOTIFY_STALLED));
         assert!(state.is_unavailable(), "#421 靠這個改派");
 
-        // bot 停掉：記憶體那份還留著上一輪的結論，但答案必須是 no_run，不是那個陳舊的原因。
         sqlx::query("UPDATE runs SET state='stopped' WHERE id='run-resp'").execute(&app.db).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NO_RUN));
 
-        // DB 的 needs_login 仍然最權威（送不出去時寫的），排在記憶體那份前面。
         sqlx::query("UPDATE runs SET state='running' WHERE id='run-resp'").execute(&app.db).await.unwrap();
         crate::supervisor::roles::set_status(&app.db, role, "needs_login", None, None).await.unwrap();
         assert_eq!(role_state(&app, role).await, RoleState::Unavailable(REASON_NEEDS_LOGIN));
@@ -114,8 +96,6 @@ mod tests {
     #[test]
     fn the_unavailable_reasons_are_a_stable_contract() {
         assert_eq!([REASON_NEEDS_LOGIN, REASON_WAITING_QUOTA, REASON_NO_RUN], ["needs_login", "waiting_quota", "no_run"]);
-        // `needs_login` 與 `waiting_quota` 必須跟 `supervisor_roles.status` 寫進去的字一模一樣，
-        // 否則 `role_state` 會永遠判不出不可用（#420 寫的是這兩個字）。
         assert_eq!(REASON_NEEDS_LOGIN, "needs_login");
         assert_eq!(REASON_WAITING_QUOTA, "waiting_quota");
     }
@@ -136,7 +116,6 @@ mod tests {
     fn counters_do_not_make_events_only_state_does() {
         let mut d = Debounce::default();
         assert!(observe_and_ack(&mut d, "healthy", "idle"), "the first reading after boot is news");
-        // Ticks with different bot counts land here as the same (severity, state): nothing.
         assert!(!observe_and_ack(&mut d, "healthy", "idle"));
         assert!(!observe_and_ack(&mut d, "healthy", "busy"), "the manager's own busy/idle is not a state change");
         assert!(observe_and_ack(&mut d, "degraded", "idle"));
@@ -195,7 +174,6 @@ mod tests {
     fn nothing_is_queued_while_the_manager_is_down_and_one_snapshot_when_it_is_back() {
         let mut d = Debounce::default();
         assert!(observe_and_ack(&mut d, "healthy", "idle"));
-        // 5.5 hours of 30-second ticks against a dead manager: zero events, not 464.
         for _ in 0..660 {
             assert!(!observe_and_ack(&mut d, "degraded", "stopped"));
         }
@@ -219,7 +197,6 @@ mod tests {
         assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "idle"), "responder waiting_quota must queue an event");
         assert!(!observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "busy"));
         assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
-        // 舊 snapshot 沒有 responder_health：當 healthy，不會憑空多一則。
         assert_eq!(inbox_severity(&snap("healthy", None)), inbox_severity(&snap("healthy", Some("healthy"))));
     }
 
@@ -243,22 +220,17 @@ mod tests {
     #[test]
     fn a_responder_that_is_being_bypassed_is_never_healthy() {
         let with = |status: &str, reason: Value| json!({"status": status, "unavailable_reason": reason, "wake_pending": 0});
-        // notify 連續沒完成：status 照樣是 idle，只有原因看得出來。
         assert_eq!(responder_severity(&with("idle", json!("notify_stalled"))), "degraded");
         assert_eq!(responder_severity(&with("busy", json!("notify_stalled"))), "degraded");
-        // `no_run` 交還給既有那兩條規則：停著、沒有人在等，本來就不是故障（別把剛 setup 完的當壞的）。
         assert_eq!(responder_severity(&with("stopped", json!("no_run"))), "healthy");
         assert_eq!(
             responder_severity(&json!({"status": "stopped", "unavailable_reason": "no_run", "wake_pending": 2})),
             "degraded",
             "有人在等就還是 degraded"
         );
-        // 停在登入要人動手、不會自己好：跟 incident 那邊一樣算 critical（兩個面板同一件事同一個嚴重度）。
         assert_eq!(responder_severity(&with("needs_login", json!("needs_login"))), "critical");
         assert_eq!(responder_severity(&with("idle", json!("needs_login"))), "critical", "原因先於 status");
-        // 撞限是等得到的，維持 degraded。
         assert_eq!(responder_severity(&with("waiting_quota", json!("waiting_quota"))), "degraded");
-        // 沒有原因就照舊。
         assert_eq!(responder_severity(&with("idle", Value::Null)), "healthy");
     }
 

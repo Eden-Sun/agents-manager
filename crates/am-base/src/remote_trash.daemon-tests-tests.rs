@@ -61,7 +61,6 @@
         let (env, root) = remote("trashbox-roundtrip").await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
-        // child：還原只清 `deleted_at`，不必動 config.toml。
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&bot.id).execute(&app.db).await.unwrap();
         let dir = root.join("bots").join(&bot.id);
         std::fs::create_dir_all(dir.join("spool")).unwrap();
@@ -82,14 +81,12 @@
         let row: Option<String> = sqlx::query_scalar("SELECT bot_id FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
         assert!(row.is_none(), "還原後忘掉記號：再刪一次，掃描才會再搬");
 
-        // 還原時目錄已經在（重建過）就不動回收區那份。
         assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         std::fs::create_dir_all(&dir).unwrap();
         restore_for(&app, &bot.id).await;
         assert_eq!(entries(&root.join("bots-trash")).len(), 1, "不蓋掉已經在的目錄");
         assert!(!dir.join("spool").exists());
 
-        // 目錄本來就不在：什麼都不搬，照樣算處理完。
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         assert_eq!(entries(&root.join("bots-trash")).len(), 1);
@@ -178,11 +175,9 @@
         let keep_long = Duration::from_secs(3600);
         let (old, mid, new) = (seed(&trash, "b1", now - 3_000, 64), seed(&trash, "b2", now - 2_000, 64), seed(&trash, "b3", now - 1_000, 64));
 
-        // 沒超量、也沒過期：一個都不動。
         assert_eq!(gc(&conn, &test_remote_root(), keep_long, 100 * 1024 * 1024).await.unwrap(), (0, 0));
         assert!(old.exists() && mid.exists() && new.exists());
 
-        // 上限只容得下一份：最舊的兩份走，最新那份留著。
         assert_eq!(gc(&conn, &test_remote_root(), keep_long, 100 * 1024).await.unwrap(), (0, 2));
         assert!(!old.exists() && !mid.exists(), "最舊的先清");
         assert!(new.exists(), "最新那一份永遠留著");
@@ -195,7 +190,7 @@
         let conn = env.app.hosts.get("trashbox-both").await.unwrap();
         let trash = root.join("bots-trash");
         let now = now_ms();
-        seed(&trash, "b1", now - 10_000, 64); // 過期
+        seed(&trash, "b1", now - 10_000, 64);
         let mid = seed(&trash, "b2", now - 2_000, 64);
         let new = seed(&trash, "b3", now - 1_000, 64);
 
@@ -308,7 +303,6 @@
         std::fs::write(spaced.join("blob"), vec![b'x'; 64 * 1024]).unwrap();
         let ours = seed(&trash, "b1", now - 1_000, 64);
 
-        // 上限 0：我們自己的只剩最新那一份（永遠留著），帶空白的那個一個位元組都沒被動到。
         assert_eq!(gc(&conn, &test_remote_root(), Duration::from_secs(3600), 0).await.unwrap(), (0, 0));
         assert!(spaced.exists() && ours.exists());
     }
@@ -320,7 +314,6 @@
     async fn a_host_that_never_reconnects_still_has_its_expired_trash_cleaned() {
         let (env, root) = remote("trashbox-poll").await;
         let app = env.app.clone();
-        // 回收區只認 DB 裡的 bot（#1313）：fixture 用真的 bot id。bot 活著、遠端目錄也在：補還原看到目錄在就不動（#1307）。
         let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
         std::fs::create_dir_all(root.join("bots").join(&bot.id)).unwrap();
         let trash = root.join("bots-trash");
@@ -329,7 +322,6 @@
         std::fs::create_dir_all(trash.join(format!("{}.{old}", bot.id))).unwrap();
         std::fs::create_dir_all(trash.join(format!("{}.{fresh}", bot.id))).unwrap();
 
-        // 5 分鐘那一輪對每台已連線的遠端主機做的事，就是這一行（`remote_purge::spawn_poller`）。
         assert_eq!(crate::runners::remote_purge::sweep(&app, "trashbox-poll").await, (0, 0), "沒有欠著的目錄");
 
         assert_eq!(entries(&trash), vec![format!("{}.{fresh}", bot.id)], "過期的清掉、沒過期的留著");
@@ -371,7 +363,6 @@
         assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "空的回收區：連結還在");
         assert_eq!(std::fs::read_to_string(dir.join("victim.txt")).unwrap(), "keep-me");
 
-        // 同名但不是目錄的東西不算備份，也不能讓連結被拆掉。
         std::fs::write(trash.join(format!("{}.1000", bot.id)), "not a dir").unwrap();
         restore_for(&app, &bot.id).await;
         assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "不是目錄的條目：連結還在");
@@ -395,7 +386,6 @@
         let backup = trash.join(format!("{}.1000", bot.id));
         std::fs::create_dir_all(&backup).unwrap();
         std::fs::write(backup.join("keep.txt"), "secret").unwrap();
-        // 回收區唯讀：讀得到備份，但 `mv` 出去會 EACCES。
         std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o500)).unwrap();
 
         let result = crate::remote_trash::restore(&env.app.hosts.get("trashbox-link-mvfail").await.unwrap(), &bot.id, &dir.to_string_lossy(), &test_remote_root()).await;
@@ -531,7 +521,6 @@
         std::fs::create_dir_all(dir.join("spool")).unwrap();
         std::fs::write(dir.join("spool/ev.json"), "pending").unwrap();
         assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-offline-restore").await);
-        // 回收區那份的毫秒改成已經過期：下一輪 GC 會清它，所以重連時一定要先還原。
         let trash = root.join("bots-trash");
         let backup = std::fs::read_dir(&trash).unwrap().next().unwrap().unwrap().path();
         let aged = trash.join(format!("{}.{}", bot.id, now_ms() - Duration::from_secs(8 * 86_400).as_millis()));
@@ -543,7 +532,6 @@
         assert!(!dir.exists(), "離線：還沒還原");
         assert_eq!(entries(&trash).len(), 1, "備份留著");
 
-        // 主機回來：走一般的重連路徑（gc_host）。
         crate::hosts::set_ssh_fake("trashbox-offline-restore", run_sh);
         crate::runners::remote_trash::gc_host(&app, "trashbox-offline-restore").await;
         assert_eq!(std::fs::read_to_string(dir.join("spool/ev.json")).unwrap(), "pending", "重連時先還原");

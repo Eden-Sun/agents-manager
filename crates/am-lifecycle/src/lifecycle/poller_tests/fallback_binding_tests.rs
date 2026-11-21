@@ -122,7 +122,6 @@ async fn a_later_idle_edge_arms_the_timer_for_the_new_turn() {
 
     assert_eq!(turn_status(&app, &b).await, "completed_fallback");
     assert_eq!(assistant_messages(&f).await, vec![(Some(b), "B 的回覆 BRAVO".to_string())]);
-    // 舊的那一代（400ms）到點時已經被換掉，什麼都不動。
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(assistant_messages(&f).await.len(), 1);
 }

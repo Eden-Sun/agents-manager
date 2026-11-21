@@ -4,12 +4,9 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::composer_draft::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use sha2::{Digest, Sha256};
-    // 輸入框卡著草稿（409 `composer_busy`）的兩個動作：送出框裡那段、清掉再送我這則。
-    // 草稿一律用中性假字；真畫面來自 2026-09-26 隔離 herdr session 的實抓（`fixtures/*-draft.ansi`／`*-cleared.ansi`）。
 
     use crate::lifecycle::composer_draft::*;
     use crate::testing as tt;
@@ -37,7 +34,6 @@ mod tests {
         let proof = draft_proof(&app, &client, &run, &bot, &format!("pane-{}", bot.id), "draft").await;
         assert!(proof.is_err(), "out-of-root file cannot become composer submission proof: {proof:?}");
     }
-    // ---- 走 prompt API：fake herdr 的框 ----
 
     struct Fx {
         env: tt::Env,
@@ -263,8 +259,6 @@ mod tests {
             let f = idle(kind, &["一段留在框裡的假草稿"], false).await;
             let token = current_draft_token(&f, "observe").await;
             if kind == "grok" {
-                // Clear is planned on an idle screen. The subsequent normal-delivery fixture
-                // needs its working row to delimit the echo from Grok's boxed composer.
                 let live = f.env.herdr.live.clone();
                 crate::lifecycle::race_point::arm("draft_after_clear_key", &f.bot_id, move || async move {
                     live.lock().unwrap().get_mut("pane-d").unwrap().no_spinner = false;
@@ -431,7 +425,6 @@ mod tests {
         assert_eq!(f.user_message().await, "一段留在框裡的假草稿");
         let delivery: String = sqlx::query_scalar("SELECT delivery FROM turns WHERE id = ?").bind(&out.turn_id).fetch_one(&f.env.app.db).await.unwrap();
         assert_eq!(delivery, "ok");
-        // 同一個 request id 再問：拿到同一筆，不再按一次。
         let again = submit(&f.env.app, &f.bot_id, &token, "s1").await.unwrap();
         assert_eq!(again.turn_id, out.turn_id);
         assert_eq!(f.keys().len(), 1);
@@ -770,7 +763,6 @@ mod tests {
         assert_eq!(snap["draft_token"], Value::Null);
         assert_eq!(snap["draft_actions"], json!([]));
 
-        // 舊分頁手上還留著當時那份「草稿」的 token：照樣拒絕。
         let stale = draft_token(&run.id, "pane-review", "1. Review hooks\n2. Trust all and continue\n3. Continue without trusting (hooks won't run)");
         let cleared = clear(&env.app, &client, &run, &bot, &stale, false).await;
         assert!(matches!(&cleared, Err(LcError::Conflict(v)) if v["reason"] == "dialog_open" && v["dialog"] == "codex_hook_review"), "clear 要回 dialog_open");
@@ -802,7 +794,6 @@ mod tests {
         let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
         let snap = snapshot(&client, &run, &bot).await.unwrap();
-        // GET 回完整草稿（不截，網頁「編輯後送出」要整段）；token 綁的也是整段。
         assert_eq!(snap["draft"], json!(CODEX_LONG_DRAFT_TEXT.trim_end_matches('\n')));
         assert_eq!(snap["draft_truncated"], json!(false));
         assert_eq!(snap["draft_token"].as_str().map(str::len), Some(64), "有 token＝網頁出現「送出」黃條: {snap}");

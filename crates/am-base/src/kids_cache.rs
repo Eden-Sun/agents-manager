@@ -157,7 +157,6 @@ mod tests {
         let kid = kid("c".into(), "claude", run(), Some(&turn), now);
         assert_eq!(kid.warm_secs, Some(2400));
         assert_eq!(kid.idle_secs, Some(1200));
-        // grok 不知道 TTL；codex 沒有 TTL 但不會冷。
         assert_eq!(super::kid("g".into(), "grok", run(), Some(&turn), now).warm_secs, None);
         let codex = super::kid("x".into(), "codex", run(), Some(&turn), now);
         assert_eq!((codex.warm_secs, codex.idle_secs, codex.never_cools), (None, Some(1200), true));

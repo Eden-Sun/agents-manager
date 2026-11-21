@@ -90,7 +90,6 @@ pub fn announce_delivery(host: &str, from_bot: &str, run_id: &str, delivery_id: 
     if s.iter().any(|p| p.host == host && p.from_bot == from_bot && p.delivery_id == delivery_id) {
         return false;
     }
-    // 上限（#1352）：這顆寄件 bot 滿了就先丟它自己最舊的（`Vec` 是插入順序，第一筆就是最舊的）；整張表滿了丟最舊的。
     if s.iter().filter(|p| p.from_bot == from_bot).count() >= MAX_PER_SENDER {
         if let Some(i) = s.iter().position(|p| p.from_bot == from_bot) {
             s.remove(i);
@@ -143,14 +142,10 @@ mod tests {
 
     const H: &str = "local";
 
-    // 表是行程全域、測試平行跑：每個測試用自己的 run id。
-
     #[test]
     fn an_echo_is_attributed_to_the_agent_that_typed_it() {
         announce(H, "bot-agm", "t-echo", "AGM 裁示：重建這個 daemon，條件如下……", None);
-        // TUI 的回音換了行、縮了排。
         assert_eq!(claim(H, "t-echo", "AGM 裁示：重建這個 daemon，\n  條件如下……"), Some("bot-agm".into()));
-        // 同一句只認一次。
         assert_eq!(claim(H, "t-echo", "AGM 裁示：重建這個 daemon，條件如下……"), None);
     }
 
@@ -187,8 +182,6 @@ mod tests {
         announce(H, "bot-agm", "t-agent", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的", None);
         assert_eq!(claim(H, "t-agent-other", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的"), None);
     }
-
-    // 下面兩條用的上限與 `MAX_PER_SENDER`（64）、`MAX_TEXT_CHARS`（4000）同值；寫成字面數字，修正前才會是行為紅，而不是編不過。
 
     /// #1352：同一顆寄件 bot 最多留 64 筆未認領的；超過就丟它自己最舊的，別的寄件者不受影響。
     #[test]

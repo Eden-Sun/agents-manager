@@ -74,7 +74,6 @@ pub async fn limit_hits_for_bots(app: &Arc<App>, bots: &[crate::db::Bot]) -> Vec
             identities.insert(host.clone(), list);
         }
     }
-    // 撞限欠著的那一筆（`owed_limit_hit`）逐顆先算：沒欠著時只查記憶體，不碰 DB 或 quotas。
     let mut owed = Vec::with_capacity(bots.len());
     let mut identity_of = Vec::with_capacity(bots.len());
     for bot in bots {
@@ -180,7 +179,6 @@ pub async fn clear_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) {
             return;
         }
     };
-    // 清的是答完這一回合的那個帳號（issue #238）：run 起來時的身份，不是剛改、還沒生效的設定。
     let identity = match billing_identity(app, bot).await {
         Ok(i) => i,
         Err(e) => {
@@ -248,12 +246,8 @@ pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: ch
 /// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），CLI 狀態列才是它當下擋你的
 /// 依據。與 app-server 共用同一格；什麼時候採用 pane 上的數字見 [`pane_window_used`]。
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
-    // 讀 pane 要好幾趟 RPC：途中同名主機被換掉，舊機器 pane 上的讀數不能寫進新機器的 key（#347），所以先記下權威。
     let Some(fence) = app.hosts.fence(host).await else { return 0 };
     let rows: Vec<(String, String, Option<String>, Option<String>)> = match sqlx::query_as(
-        // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
-        // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
-        // run 實際的身份（issue #238）：記了就用它，沒記才用 bot 設定的。
         "SELECT r.id, r.pane_id, CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE NULLIF(TRIM(r.runtime_identity), '') END,
                 COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
            FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
@@ -277,10 +271,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let base = quota_base_for_host(&**app, host, "codex", identity.as_deref()).await;
         let client = fence.conn().client.clone();
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
-        // 每顆 pane 的模型列都寫進它自己的 run（網頁狀態列、context 用量，#1671），不受下面「同帳號讀一次」限制。
         crate::codex_live::record_footer_from_screen(app, &run_id, &read.text).await;
-        // 額度：同一個身份讀到一次就夠——但要「讀到」才算：那顆 pane 正在壓縮對話、捲動中讀不到狀態列時，
-        // 換同帳號的下一顆，而不是整個帳號這輪都停在 app-server 落後的數字（2026-09-15）。
         if seen.contains(&base) {
             continue;
         }
@@ -311,8 +302,6 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
 pub async fn refresh_codex(app: &Arc<App>, host: &str) -> Result<bool> {
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if host != crate::config::LOCAL_HOST {
-        // 同 refresh_grok／refresh_claude_account：偵測快照說沒裝就不連線（遠端的「沒裝」只會以 `codex: not found` 被 2>/dev/null 吃掉）。
-        // 空快照＝還沒偵測，不是沒裝。本機照舊走下面的 `is not installed` 判斷。
         if !app.tools.lock().await.contains_key(host) {
             crate::tools::detect(app, host).await?;
         }
@@ -383,8 +372,6 @@ pub fn spawn_codex_poller(app: Arc<App>) {
         let shutdown = app.shutdown.clone();
         let mut last_server: Option<std::time::Instant> = None;
         loop {
-            // app-server 每 CODEX_POLL 問一次；狀態列每 CODEX_PANE_POLL 讀一次。同一輪兩個都做時先問 app-server，
-            // 狀態列後到蓋前（CLI 狀態列較即時且分得出身份）。
             let ask_server = last_server.map_or(true, |t| t.elapsed() >= CODEX_POLL);
             if ask_server {
                 last_server = Some(std::time::Instant::now());
@@ -741,7 +728,6 @@ mod tests {
         app.hosts
             .insert_remote_for_test(crate::config::HostCfg { name: host.into(), ssh: "unused".into(), herdr_session: "am-test".into(), ..Default::default() })
             .await;
-        // 偵測快照有這台、但沒有 `codex` 這一格＝沒裝。
         app.tools.lock().await.insert(
             host.into(),
             crate::tools::HostTools {

@@ -34,8 +34,6 @@ const SHARED_BOTS_SQL: &str = "CREATE TABLE IF NOT EXISTS shared_bots (
 pub const TOKEN_LEN: usize = 43;
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    // 只收 'restricted' 的舊表：SQLite 改不了 CHECK，換名、照新定義建、搬資料、刪舊表（同一個交易）。
-    // 先換名再建，新表的定義才跟全新 DB 一字不差（schema_guard 比的是它）。
     let old_sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'shared_bots'").fetch_optional(pool).await?;
     if old_sql.is_some_and(|sql| !sql.contains("'trusted'")) {
         let mut tx = db::begin_write(pool).await?;
@@ -73,7 +71,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // #1038：遠端保留標記欠著沒放或沒拿掉的主機（ssh 失敗時記下，之後的巡邏補做）。不靠 bot／專案那一列：收尾時它們可能已經刪了。
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS share_keep_pending (
            host TEXT NOT NULL,
@@ -292,7 +289,6 @@ pub async fn set_share_enabled(
     bot_id: &str,
     allow_embed: Option<bool>,
 ) -> Result<SetShareOutcome, sqlx::Error> {
-    // 先讀後寫：用 `BEGIN IMMEDIATE` 從一開始就拿寫鎖（deferred 讀完才升級，撞到別的 writer 的快照過期不跑 busy handler，#1397）。
     let mut tx = db::begin_write(pool).await?;
     let existing: Option<(bool,)> = sqlx::query_as(
         "SELECT allow_embed FROM bot_shares WHERE bot_id = ?",

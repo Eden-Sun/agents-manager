@@ -31,7 +31,6 @@
             host: "local".into(),
         };
         let v = serde_json::to_value(&q).unwrap();
-        // 這裡用真的現在時間：重置設在 10 小時後，剩 16% 一定比剩餘時間比例多。
         let soon = (chrono::Utc::now() + chrono::Duration::hours(10)).to_rfc3339();
         let q2 = Quota { seven_day: Some(w(84.0, Some(&soon))), ..q };
         let v2 = serde_json::to_value(&q2).unwrap();
@@ -51,7 +50,6 @@
         assert!(w(100.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "見底、窗還沒到 → 用盡");
         assert!(!w(100.0, Some("2026-09-13T10:00:00Z")).exhausted_at(now), "見底但窗兩小時前就重置了 → 不算用盡");
         assert!(!w(10.0, Some("2026-09-13T15:00:00Z")).exhausted_at(now), "沒見底就不是用盡");
-        // 解不開＝已重置（不永久擋）；沒有時間＝不知道（繼續擋）。
         assert!(!w(100.0, Some("not-a-timestamp")).exhausted_at(now), "壞掉的時間戳不該把身份永久排除");
         assert!(w(100.0, None).exhausted_at(now), "沒有重置時間就無從判斷，保守繼續擋");
         assert!(w(100.0, Some("not-a-timestamp")).reset_passed(now));
@@ -67,7 +65,6 @@
     async fn a_fresh_critical_statusline_is_not_excused_by_an_inherited_past_reset() {
         let app = crate::testing::env().await.app.clone();
         let key = quota_key(LOCAL_HOST, "codex");
-        // 1. app-server：還有額度，重置時間在「一小時前」（模擬那次探測之後時間就跨過去了）。
         let mut probe = codex_q("codex-app-server", None);
         probe.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(3));
         probe.seven_day = Some(Window {
@@ -77,7 +74,6 @@
         });
         set(&app, LOCAL_HOST, "codex", probe).await;
 
-        // 2. 之後只有狀態列：真的見底、沒有 resets_at。這一刻才觀測到。
         let mut status = codex_q("codex-statusline", None);
         status.updated_at = crate::db::now();
         status.seven_day = Some(Window { used_pct: 97.0, resets_at: None, observed_at: None });
@@ -91,7 +87,6 @@
             "剛讀到的 97% 不能因為繼承了一個過去的重置時間就被放行：{:?}",
             got.seven_day
         );
-        // 順帶：已經過去的重置時間本來就不該被沿用（對顯示也沒意義）。
         assert_eq!(got.seven_day.as_ref().and_then(|w| w.resets_at.clone()), None, "過去的 resets_at 不沿用");
     }
 
@@ -103,13 +98,11 @@
         let app = crate::testing::env().await.app.clone();
         let key = quota_key(LOCAL_HOST, "codex");
 
-        // 第一輪：某個來源帶進一個解不開的 resets_at。
         let mut first = codex_q("codex-app-server", None);
         first.updated_at = crate::db::now();
         first.seven_day = Some(Window { used_pct: 20.0, resets_at: Some("not-a-timestamp".into()), observed_at: None });
         set(&app, LOCAL_HOST, "codex", first).await;
 
-        // 第二輪：狀態列讀數（沒有自己的 resets_at）而且真的見底。
         let mut status = codex_q("codex-statusline", None);
         status.updated_at = crate::db::now();
         status.seven_day = Some(Window { used_pct: 97.0, resets_at: None, observed_at: None });
@@ -139,7 +132,7 @@
         sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
             .bind(&key)
             .bind(serde_json::to_string(&q).unwrap())
-            .bind("not-a-timestamp") // 連整筆的 updated_at 都壞掉
+            .bind("not-a-timestamp")
             .execute(&app.db)
             .await
             .unwrap();
@@ -149,7 +142,6 @@
         let five = got.five_hour.as_ref().expect("窗留著");
         assert_eq!(five.resets_at, None, "壞的重置時間丟掉");
         assert_eq!(five.observed_at, None, "壞的觀測時間也丟掉");
-        // 三個時間戳全壞 → 這筆讀數說不出年齡，不能拿它永久擋住一個身份。
         assert!(!got.exhausted(Bucket::FiveHour, chrono::Utc::now()), "全壞的讀數不可以永久算用盡");
         assert!(got.usable_window(Bucket::FiveHour, chrono::Utc::now()).is_none(), "當成沒有讀數");
     }
@@ -172,11 +164,8 @@
             host: LOCAL_HOST.into(),
         };
         let fresh = crate::db::iso_at(now);
-        // 正常：剛觀測到、見底 → 算用盡。
         assert!(mk(Some(&fresh), &fresh).exhausted(Bucket::FiveHour, now));
-        // observed_at 解不開 → 退回 updated_at（還新）→ 仍算用盡。
         assert!(mk(Some("garbage"), &fresh).exhausted(Bucket::FiveHour, now));
-        // 兩個都解不開 → 說不出年齡 → 不算用盡（不永久擋人）。
         assert!(!mk(Some("garbage"), "also-garbage").exhausted(Bucket::FiveHour, now));
         assert!(!mk(None, "also-garbage").exhausted(Bucket::FiveHour, now));
     }
@@ -190,9 +179,7 @@
         let key = quota_key(LOCAL_HOST, "claude");
         let mut q = codex_q("boot", None);
         q.updated_at = crate::db::now();
-        // 見底 ＋ 解不開的重置時間：載回來不能變成「有額度」。
         q.five_hour = Some(Window { used_pct: 100.0, resets_at: Some("not-a-timestamp".into()), observed_at: Some(crate::db::now()) });
-        // 好的那個要留著。
         let good = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(3));
         q.seven_day = Some(Window { used_pct: 10.0, resets_at: Some(good.clone()), observed_at: Some(crate::db::now()) });
         sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?,?,?)")
@@ -217,15 +204,11 @@
     #[test]
     fn a_reset_time_string_must_parse_before_it_is_accepted() {
         let at = |v: serde_json::Value| unix_to_rfc3339(Some(&v));
-        // 正常的 RFC3339 照收，原樣留著。
         assert_eq!(at(json!("2026-09-10T00:26:40Z")), Some("2026-09-10T00:26:40Z".into()));
-        // 帶時區位移的也收，原樣留著（下游一律比時刻，不比字串）。
         assert_eq!(at(json!("2026-09-10T08:26:40+08:00")), Some("2026-09-10T08:26:40+08:00".into()));
-        // 解不開的丟掉，不要變成 resets_at。
         assert_eq!(at(json!("not-a-timestamp")), None);
         assert_eq!(at(json!("2026-13-99T99:99:99Z")), None);
         assert_eq!(at(json!("")), None);
-        // 數字分支不受影響（秒與毫秒）。
         assert_eq!(at(json!(1_789_000_000)), Some("2026-09-10T00:26:40.000Z".into()));
         assert_eq!(at(json!(1_789_000_000_000i64)), Some("2026-09-10T00:26:40.000Z".into()));
     }
@@ -242,7 +225,6 @@
         let key = quota_key(LOCAL_HOST, "codex");
         let mut probe = codex_q("codex-app-server", None);
         probe.updated_at = crate::db::now();
-        // 窗剛翻過去一分鐘，而這一刻讀到的就是 97% 用掉。
         probe.seven_day = Some(Window {
             used_pct: 97.0,
             resets_at: Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1))),
@@ -267,19 +249,13 @@
             resets_at: Some("2026-09-13T10:00:00Z".into()),
             observed_at: observed.map(String::from),
         };
-        // 觀測在重置之前 → 這筆讀數跨過了重置 → 不算用盡（#464）。
         assert!(w(Some("2026-09-13T09:00:00Z")).reset_passed(now));
         assert!(!w(Some("2026-09-13T09:00:00Z")).exhausted_at(now));
-        // 剛好等於重置時刻也算跨過（邊界）。
         assert!(w(Some("2026-09-13T10:00:00Z")).reset_passed(now));
-        // 觀測在重置之後 → 它已經反映重置後的狀態，說見底就是見底（#489）。
         assert!(!w(Some("2026-09-13T11:00:00Z")).reset_passed(now));
         assert!(w(Some("2026-09-13T11:00:00Z")).exhausted_at(now));
-        // 完全不知道觀測時間 → 退回只看重置時刻（＝#464 的行為；舊快取列就是這種，本來就是舊讀數）。
-        // 刻意不拿 `Quota::updated_at` 當備援，理由見 `reset_passed` 的註解。
         assert!(w(None).reset_passed(now));
         assert!(!w(None).exhausted_at(now));
-        // 重置還沒到 → 無論觀測時間都不算跨過。
         let future = Window { used_pct: 100.0, resets_at: Some("2026-09-13T15:00:00Z".into()), observed_at: Some("2026-09-13T11:00:00Z".into()) };
         assert!(!future.reset_passed(now));
         assert!(future.exhausted_at(now));
@@ -296,14 +272,12 @@
         let key = quota_key(LOCAL_HOST, "claude");
         let win = |used: f64| Some(Window { used_pct: used, resets_at: None, observed_at: None });
 
-        // 第一筆：5h 見底、7d 還有，兩個都沒有 resets_at。觀測時間是 6 小時前。
         let mut first = codex_q("statusline", None);
         first.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(6));
         first.five_hour = win(100.0);
         first.seven_day = win(10.0);
         set(&app, LOCAL_HOST, "claude", first).await;
 
-        // 之後 statusline 只帶 7d（被截斷）：5h 被 `set` 沿用，`updated_at` 是現在。
         for _ in 0..3 {
             let mut later = codex_q("statusline", None);
             later.updated_at = crate::db::now();
@@ -321,7 +295,6 @@
         let now = chrono::Utc::now();
         assert!(!got.exhausted(Bucket::FiveHour, now), "5h 的讀數 6 小時前觀測、又沒有 resets_at → 不算用盡");
         assert!(got.usable_window(Bucket::FiveHour, now).is_none(), "當成沒有讀數");
-        // 7d 每次都真的帶進來，年齡是現在，照舊算數。
         assert!(got.usable_window(Bucket::SevenDay, now).is_some());
     }
 
@@ -367,14 +340,11 @@
             x.seven_day = Some(Window { observed_at: None, used_pct: 10.0, resets_at: None });
             x
         };
-        // 沒有 resets_at：窗長（5h）之內照舊算用盡，超過就不算。
         assert!(q(chrono::Duration::hours(1), None).exhausted(Bucket::FiveHour, now), "1 小時前的讀數還算數");
         assert!(!q(chrono::Duration::hours(6), None).exhausted(Bucket::FiveHour, now), "6 小時前＋沒有重置時間 → 必定跨過一次重置");
-        // 回的是「沒有讀數」，不是「沒見底」：`responder` 靠這個分辨「不知道」與「有額度」。
         assert!(q(chrono::Duration::hours(6), None).usable_window(Bucket::FiveHour, now).is_none());
         assert!(q(chrono::Duration::hours(1), None).usable_window(Bucket::FiveHour, now).is_some());
 
-        // 有 resets_at 就**不套**這條：7d 的讀數本來就可能好幾天前更新、窗卻還沒到。
         let future = Some(crate::db::iso_at(now + chrono::Duration::hours(2)));
         assert!(q(chrono::Duration::hours(6), future).exhausted(Bucket::FiveHour, now), "有重置時間就交給 reset_passed 判");
     }
@@ -416,7 +386,6 @@
         q.updated_at = "not-a-timestamp".into();
         q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
         assert!(!q.exhausted(Bucket::FiveHour, now), "說不出年齡的讀數不可以永久算用盡");
-        // 但 `updated_at` 讀得出來時照舊算數（這一半沒有變）。
         q.updated_at = crate::db::now();
         assert!(q.exhausted(Bucket::FiveHour, now), "年齡說得出來、又在窗長內 → 照舊算用盡");
     }
@@ -426,16 +395,11 @@
     #[test]
     fn a_millisecond_timestamp_is_not_read_as_seconds() {
         let at = |v: serde_json::Value| unix_to_rfc3339(Some(&v));
-        // 秒：照舊。
         assert_eq!(at(json!(1_789_000_000)), Some("2026-09-10T00:26:40.000Z".into()));
-        // 毫秒：同一個時刻，不是西元五萬年。
         assert_eq!(at(json!(1_789_000_000_000i64)), Some("2026-09-10T00:26:40.000Z".into()));
         assert_eq!(at(json!(1_789_000_000_123i64)), Some("2026-09-10T00:26:40.123Z".into()));
-        // 字串形式的毫秒一樣。
         assert_eq!(at(json!("1789000000000")), Some("2026-09-10T00:26:40.000Z".into()));
-        // 已經是時間字串的原樣留著。
         assert_eq!(at(json!("2026-09-10T00:26:40Z")), Some("2026-09-10T00:26:40Z".into()));
-        // 兩種都不該落在很遠的未來。
         for v in [json!(1_789_000_000_000i64), json!(1_789_000_000)] {
             let s = at(v).unwrap();
             assert!(s.starts_with("2026-"), "{s}");
@@ -514,7 +478,6 @@
         let fresh = || claude_statusline(Some((6.0, five_reset)), (12.0, seven_reset));
         for idle in [
             claude_statusline(None, (97.0, seven_reset)),
-            // 同一個 5h 窗、但 5h 用量比較低：也是比較舊的回合。
             claude_statusline(Some((2.0, five_reset)), (97.0, seven_reset)),
         ] {
             for position in [0, 9, 17] {
@@ -535,7 +498,6 @@
         let now = chrono::Utc::now();
         let seven_reset = now + chrono::Duration::days(2);
         let five_reset = now + chrono::Duration::hours(3);
-        // 沒人用了 5 小時：沒有有效的 5h 窗可比，照舊收（同窗取大）。
         set(&app, LOCAL_HOST, "claude", claude_statusline(None, (97.0, seven_reset))).await;
         assert_eq!(claude_seven_day(&app).await, 97.0);
         set(&app, LOCAL_HOST, "claude", claude_statusline(Some((1.0, five_reset)), (12.0, seven_reset))).await;
@@ -577,10 +539,6 @@
     #[tokio::test]
     async fn the_status_line_updates_the_numbers_without_losing_the_reset_time() {
         let app = crate::testing::env().await.app.clone();
-        // 重置時間用**還沒到**的相對時刻：原本寫死 2026-09-13／18，那兩個日期早就過去了，
-        // 於是這條測試其實是在釘「連已經過去的重置時間也照樣沿用」——而那正是 #489 的破口
-        // （繼承來的過期時刻會把新鮮的見底讀數判成已重置）。這裡的本意是「app-server 的重置時間
-        // 不會被狀態列更新洗掉」，改成未來的時刻才測得到本意。
         let five_reset = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::hours(4));
         let seven_reset = crate::db::iso_at(chrono::Utc::now() + chrono::Duration::days(6));
         let from_server = Quota {
@@ -613,26 +571,20 @@
         assert!(q.reset_credits.is_some(), "重置券只有 app-server 讀得到，不能被洗掉");
     }
 
-
     #[test]
     fn a_pane_window_is_used_only_when_it_belongs_to_the_current_window() {
         let now = chrono::Utc::now();
         let h = chrono::Duration::hours;
         let len = h(5);
         let w = |used: f64, resets: chrono::DateTime<chrono::Utc>| Window { observed_at: None, used_pct: used, resets_at: Some(iso(resets)) };
-        let cur = w(20.0, now + h(4)); // 窗從 1 小時前開始
-        // 剛看著它變：照寫，連比較小的數字也寫（CLI 當下的說法，例如用了重置券）。
+        let cur = w(20.0, now + h(4));
         assert_eq!(pane_window_used(Some(5.0), Some(&cur), len, Some(now), Sighting::Changed, now), Some(5.0));
-        // 同一個窗：只增不減。
         assert_eq!(pane_window_used(Some(30.0), Some(&cur), len, Some(now - h(0)), Sighting::Same, now), Some(30.0));
         assert_eq!(pane_window_used(Some(10.0), Some(&cur), len, Some(now), Sighting::Same, now), None);
-        // 畫面比這個窗還舊：不管 New 還是 Same 都不採用。
         assert_eq!(pane_window_used(Some(90.0), Some(&cur), len, Some(now - h(2)), Sighting::New, now), None);
-        // 記著的窗已經過了重置：畫面要晚於那次重置才採用。
         let ended = w(90.0, now - h(1));
         assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - h(2)), Sighting::Same, now), None);
         assert_eq!(pane_window_used(Some(3.0), Some(&ended), len, Some(now - chrono::Duration::minutes(30)), Sighting::Same, now), Some(3.0));
-        // 沒有重置時間：只收這個行程第一次看到的畫面。
         let bare = Window { observed_at: None, used_pct: 20.0, resets_at: None };
         assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::New, now), Some(7.0));
         assert_eq!(pane_window_used(Some(7.0), Some(&bare), len, Some(now), Sighting::Same, now), None);
@@ -691,7 +643,6 @@
             q.five_hour = Some(Window { observed_at: None, used_pct: pct, resets_at: None });
             q
         };
-        // 身份還沒偵測到：cc0 寧可分開。
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc0")).await, "claude:cc0");
         set(&app, LOCAL_HOST, "claude:cc0", reading(1.0)).await;
         set(&app, LOCAL_HOST, "claude:cc1", reading(40.0)).await;
@@ -714,7 +665,6 @@
                 utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
             },
         );
-        // 偵測完：cc0 收斂到裸 key。下一筆讀數寫裸 key 的同時把殘留的那一格清掉。
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc0")).await, "claude");
         set(&app, LOCAL_HOST, "claude", reading(25.0)).await;
         let q = app.quotas.lock().await;
@@ -745,7 +695,6 @@
                     ident("cc0", &[]),
                     ident("cc1", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-ccompany")]),
                     ident("cc2", &[("CLAUDE_CONFIG_DIR", "$HOME/.claude-cc2"), ("CODEX_HOME", "$HOME/.codex-cc2")]),
-                    // codex 自己的身份（kind = codex）才可能分開成 `codex:<name>`。
                     crate::config::IdentityCfg {
                         name: "cx2".into(),
                         kind: "codex".into(),
@@ -759,14 +708,11 @@
         );
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc1")).await, "codex");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc0")).await, "codex");
-        // 2026-09-14 使用者指正：ccN 是 Claude Code 的帳號代號，就算 cc2 設了 CODEX_HOME，它仍是 claude 的身分，
-        // codex 不該有 `codex:cc2`。
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cc2")).await, "codex");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("cx2")).await, "codex:cx2", "codex 自己的身份才分開");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc1")).await, "claude:cc1");
         assert_eq!(quota_base_for_host(&app, LOCAL_HOST, "codex", Some("nobody")).await, "codex:nobody", "查不到的身份寧可分開");
 
-        // 裸 codex 撞限：cc1 的 codex bot 讀得到，cc2 的讀不到（它有自己的帳號）。
         let hit = LimitHit { message: "You've hit your usage limit.".into(), until: Some("2999-01-01T00:00:00Z".into()), at: crate::db::now(), bucket: None };
         let mut q = codex_q("codex-limit-hit", Some(hit));
         q.five_hour = Some(Window { observed_at: None, used_pct: 100.0, resets_at: None });
@@ -807,14 +753,12 @@
         let base = quota_base("codex", Some("astra"));
         assert_eq!(base, "codex:astra");
         assert_eq!(quota_base("codex", None), "codex");
-        // 2026-09-14 使用者：額度列冒出第二個 codex。對 codex 共用預設帳號的身份寫裸 key。
         assert_eq!(quota_base_default_aware("codex", Some("cc0"), true), "codex");
         assert_eq!(quota_base_default_aware("codex", Some("cc2"), false), "codex:cc2");
         assert_eq!(quota_base_default_aware("codex", None, true), "codex");
         assert_eq!(quota_base_default_aware("claude", Some("cc1"), false), "claude:cc1");
         assert_eq!(quota_base("codex", Some("  ")), "codex", "空白身份就是沒指定");
 
-        // 清掉的話 assignment 會立刻又派工過去（718d025 的 quota_blocked 靠這一格）。
         let hit = LimitHit {
             message: "You've hit your usage limit.".into(),
             until: Some("2999-01-01T00:00:00Z".into()),
@@ -908,7 +852,6 @@
             (Some("fable"), Some("sonnet"), false),
             (Some("fable"), None, true),
             (Some("fable"), Some("default"), true),
-            // Opus／Sonnet 的週桶同理（review3 c4 M1）。
             (Some("opus"), Some("opus"), true),
             (Some("opus"), Some("claude-opus-5"), true),
             (Some("opus"), Some("fable"), false),
@@ -945,7 +888,6 @@
     #[tokio::test]
     async fn a_codex_limit_hit_outlives_an_older_app_server_poll() {
         let app = crate::testing::env().await.app.clone();
-        // 時間寫死：2026-09-13 用 `db::now()` 時 6 跑 2 敗（跨毫秒變成另一情境）。
         let hit = LimitHit {
             message: "ERROR: You've hit your usage limit.".into(),
             until: None,
@@ -963,14 +905,12 @@
             let app = got_app.clone();
             async move { app.quotas().lock().await.get(&quota_key(LOCAL_HOST, "codex")).cloned().unwrap() }
         };
-        // 舊讀數不能解除較新的撞限。
         assert!(got().await.limit_hit.is_some(), "量表滿了不代表 CLI 收得下一句話");
         clear_limit_hit(&app, LOCAL_HOST, "codex").await;
         assert!(got().await.limit_hit.is_none());
     }
 
     fn iso(t: chrono::DateTime<chrono::Utc>) -> String {
-        // 跟生產端同一支：格式只有一種（issue #101）。
         crate::db::iso_at(t)
     }
 
@@ -999,20 +939,17 @@
             }
         };
 
-        // 撞限後讀到的 Fable 窗：還見底，明天 08:00 重置 → 撞限最晚到那時，不是下週。
         let tomorrow = now + chrono::Duration::hours(20);
         let mut usage = codex_q("claude-usage", None);
         usage.fable = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some(iso(tomorrow)) });
         set(&app, LOCAL_HOST, "claude:cc1", usage.clone()).await;
         assert_eq!(until().await, Some(iso(tomorrow)), "保底的 7 天要被那一桶自己的重置時間截短");
 
-        // 不相干的桶（statusLine 只有 5h／7d）不算那一桶的讀數。
         let mut status = codex_q("statusline", None);
         status.five_hour = Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(iso(now + chrono::Duration::hours(4))) });
         set(&app, LOCAL_HOST, "claude:cc1", status).await;
         assert_eq!(until().await, Some(iso(tomorrow)));
 
-        // 重置之後的讀數：窗的起點在撞限之後 → 撞限作廢。
         let mut after = codex_q("claude-usage", None);
         after.fable = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(at + chrono::Duration::days(7) + chrono::Duration::minutes(1))) });
         set(&app, LOCAL_HOST, "claude:cc1", after).await;
@@ -1123,7 +1060,6 @@
         let run = crate::db::active_run(&app.db, &bot.id).await.unwrap().unwrap();
         assert_eq!(run.started_identity(), Some(Some("cc1".to_string())), "起來時的身份蓋在 run 上");
 
-        // 使用者把身份改成 cc2、還沒重啟：pane 還是 cc1 的帳號。
         sqlx::query("UPDATE bots SET identity='cc2' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         let bot = crate::db::bot(&app.db, &bot.id).await.unwrap().unwrap();
         let status = crate::hookrecv::HookBody {
@@ -1149,7 +1085,6 @@
         clear_limit_hit_for_bot(&app, &bot).await;
         assert!(app.quotas.lock().await["claude:cc1"].limit_hit.is_none(), "成功回合清的是 cc1");
 
-        // 重啟之後才是 cc2：cc1 的撞限不再擋它，cc2 的才擋。
         crate::turn_error::mark_claude_limit_hit(&app, &bot, "You've hit your session limit · resets 5pm").await.unwrap();
         crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap();
         crate::lifecycle::start_bot(&app, &bot.id).await.unwrap();
@@ -1336,7 +1271,6 @@
         assert_eq!(host_of_key("gone/claude", &hosts), ("local", "gone/claude"));
     }
 
-
     /// issue #392：讀數寫入快取，重啟後先以 stale 回填；新的探測成功後才恢復 fresh，過期的舊撞限也不能卡住派送。
     #[tokio::test]
     async fn quota_cache_survives_restart_as_stale_until_a_fresh_reading_arrives() {
@@ -1367,7 +1301,6 @@
         assert_eq!(snapshot(&restarted).await["kinds"]["claude"]["stale"], false);
         assert_eq!(restarted.quotas.lock().await["claude"].five_hour.as_ref().unwrap().used_pct, 52.0);
 
-        // 模擬快取裡還留著一筆已過 reset 的舊「用完了」；開機回填時照既有規則清掉，不能阻擋新的工作。
         let expired = reading(
             99.0,
             Some(LimitHit {
@@ -1440,7 +1373,6 @@
         assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r1", hit(&t(-90), Some(t(600)), None)).await, "已經黏著：不蓋");
         assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r2", hit(&t(-90), Some(t(-1)), None)).await, "過期的不種");
 
-        // 重啟後、回填前就進來的讀數：5 小時窗是撞限之後才開的——撞限作廢，不種。
         let reading = |resets: String| Quota {
             five_hour: Some(Window { observed_at: None, used_pct: 3.0, resets_at: Some(resets) }),
             seven_day: None,
@@ -1457,15 +1389,12 @@
         set(&app, LOCAL_HOST, "claude:r3", reading(t(5 * 60 - 1))).await;
         assert!(!restore_limit_hit(&app, LOCAL_HOST, "claude:r3", hit(&t(-90), Some(t(120)), Some("five_hour"))).await);
         assert_eq!(got("claude:r3").await, None);
-        // 窗在撞限之前就開了：照種，但到期時間收斂到那個窗的重置。
         let resets = t(30);
         set(&app, LOCAL_HOST, "claude:r4", reading(resets.clone())).await;
         assert!(restore_limit_hit(&app, LOCAL_HOST, "claude:r4", hit(&t(-90), Some(t(120)), Some("five_hour"))).await);
         assert_eq!(got("claude:r4").await.and_then(|h| h.until), Some(resets));
         assert_eq!(app.quotas.lock().await["claude:r4"].five_hour.as_ref().map(|w| w.used_pct), Some(3.0), "讀數不動");
     }
-
-
 
     /// 寫撞限要落在查詢端之後讀的那把 key：身份表還沒偵測完、又不是手寫的身份時算不準，回錯（不猜 `claude:cc0`）。
     #[tokio::test]
@@ -1586,7 +1515,6 @@
                 assert!(wire["limit_hit"].is_null());
                 assert_eq!(wire["seven_day"]["critical"], false);
                 assert_eq!(wire["seven_day"]["low"], false);
-                // A queued old hold must not resurrect the cleared hit.
                 assert!(!restore_limit_hit(&app, host, "codex:cx1", hit).await);
                 fresh.seven_day.as_mut().unwrap().used_pct = 100.0;
                 fresh.limit_hit = Some(LimitHit { message: "weekly limit".into(), until: None,
@@ -1628,7 +1556,6 @@
         let reading = grok_reading("2026-10-22T15:31:00Z", None, Some(55.0), Some("2026-10-26T23:42:00Z"));
         let now = parse_utc("2026-10-22T15:35:00Z").unwrap();
         assert!(grok_reading_clears_hit(&hit, &reading, now), "讀數晚於撞限、非 critical：清除");
-        // 前提：窗在撞限之前就開了，舊規則（窗起點）不清，只會把 until 對齊到 resets_at。換掉來源避開真實時鐘。
         let mut old_rule = reading.clone();
         old_rule.source = "agy-usage".into();
         assert_eq!(recalibrate_limit_hit(hit.clone(), &old_rule), Some(hit.clone()));
@@ -1672,7 +1599,6 @@
         let app = crate::testing::env().await.app.clone();
         let now = chrono::Utc::now();
         let at = now - chrono::Duration::hours(2);
-        // 週窗在撞限之前就開了（resets_at − 7d < hit.at），所以只剩 #1900 這條能清。
         let resets = iso(now + chrono::Duration::days(4));
         let hit = LimitHit { message: "weekly limit".into(), until: Some(iso(now + chrono::Duration::days(4))),
             at: iso(at), bucket: Some("seven_day".into()) };
@@ -1715,7 +1641,6 @@
         let key = quota_key(LOCAL_HOST, "grok");
         let mark = cleared_at_key(&app, &key);
         let resets = iso(chrono::Utc::now() + chrono::Duration::days(4));
-        // 跟 `record_grok` 寫進來的一樣：那一桶標 100%、帶著撞限。週窗在撞限之前就開了，只剩百分比這條能清。
         let record = |at: chrono::DateTime<chrono::Utc>| {
             let mut q = grok_reading(&iso(at), None, Some(100.0), Some(&resets));
             q.source = "grok-limit-hit".into();
@@ -1756,7 +1681,6 @@
         set(&app, LOCAL_HOST, "grok", reading()).await;
         assert!(hit_of!(app).is_none(), "成功回合之後再撞：百分比又能清");
 
-        // 過了那一桶的窗長（從上次清掉起算 7 天），紀錄作廢：重撞又能被百分比清掉。
         tick().await;
         set(&app, LOCAL_HOST, "grok", record(chrono::Utc::now())).await;
         tick().await;
@@ -1764,7 +1688,6 @@
         assert!(hit_of!(app).is_some(), "前提：重撞被擋");
         let at = parse_utc(&hit_of!(app).unwrap().at).unwrap();
         grok_pct_clears().lock().unwrap().get_mut(&mark).unwrap().cleared_at = at - SEVEN_DAY_LEN - chrono::Duration::seconds(1);
-        // 窗長還沒到的對照：差一秒都不准。
         let mut probe = grok_pct_clears().lock().unwrap().clone();
         probe.get_mut(&mark).unwrap().cleared_at = chrono::Utc::now() - SEVEN_DAY_LEN + chrono::Duration::seconds(60);
         assert!(!grok_pct_clear_allowed(&mut probe, &mark, &hit_of!(app).unwrap(), chrono::Utc::now()), "窗長之內：不准");
@@ -1772,7 +1695,6 @@
         set(&app, LOCAL_HOST, "grok", reading()).await;
         assert!(hit_of!(app).is_none(), "過了 7 天：紀錄作廢，百分比又能清");
 
-        // until 到期：撞限照 `limit_hit_expired` 掉了，紀錄跟著刪。
         let past = chrono::Utc::now() - chrono::Duration::minutes(1);
         let mut expired = record(past - chrono::Duration::hours(1));
         expired.limit_hit.as_mut().unwrap().until = Some(iso(past));
@@ -1831,21 +1753,18 @@
         let now = t0 + chrono::Duration::days(1);
         let fresh = hit(now - chrono::Duration::minutes(10), now + chrono::Duration::days(3));
 
-        // 全部還有效（窗長 7 天沒過、until 也還沒到）：照樣保守不准、不新增。
         let mut valid = fill(t0 + chrono::Duration::days(5));
         assert!(!grok_pct_clear_allowed(&mut valid, "new", &fresh, now), "全部有效：保守不清");
         note_grok_pct_clear(&mut valid, "new", &fresh, now);
         assert_eq!(valid.len(), GROK_PCT_CLEARS_MAX, "全部有效：不新增");
         assert!(!valid.contains_key("new"));
 
-        // 全部都是 until 已到期的（窗長還沒過）：先清掉，新的 key 可以用百分比清、可以登記。
         let mut until_passed = fill(t0 + chrono::Duration::hours(12));
         assert!(grok_pct_clear_allowed(&mut until_passed, "new", &fresh, now), "until 都到期：清掉後准");
         assert!(until_passed.is_empty(), "作廢的紀錄都清掉了");
         note_grok_pct_clear(&mut until_passed, "new", &fresh, now);
         assert_eq!(until_passed.get("new").map(|m| (m.cleared_at, m.rehits)), Some((now, 0)), "新的 key 登記進去");
 
-        // 全部都是過了窗長的：同上。登記走 `note` 自己的清理，不靠前面那次判斷。
         let mut window_passed = fill(t0 + chrono::Duration::days(30));
         let later = t0 + SEVEN_DAY_LEN;
         note_grok_pct_clear(&mut window_passed, "new", &fresh, later);
@@ -1880,7 +1799,6 @@
     /// #1907 第 5 項：`restore_limit_hit` 拿表裡現有那筆校正，開機回填（stale 旗標還掛著）的 grok 讀數不准用百分比清掉種回來的撞限。
     #[tokio::test]
     async fn a_restored_grok_hit_is_not_cleared_by_a_boot_backfilled_reading() {
-        // env 要活著：它收掉時資料目錄跟著刪，快取寫不進 DB。
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let key = quota_key(LOCAL_HOST, "grok");
@@ -1896,7 +1814,6 @@
         assert!(restore_limit_hit(&app, LOCAL_HOST, "grok", hit.clone()).await, "回填的讀數不准拿來清：撞限種回去");
         assert_eq!(app.quotas.lock().await[&key].limit_hit.as_ref(), Some(&hit));
 
-        // 對照：同一份讀數是真探測寫進來的（旗標拿掉）就照 #1900 清。
         app.quotas.lock().await.get_mut(&key).unwrap().limit_hit = None;
         app.quota_stale.lock().await.remove(&key);
         assert!(!restore_limit_hit(&app, LOCAL_HOST, "grok", hit).await, "新讀數：百分比清得掉，不種回");
@@ -1909,7 +1826,6 @@
             at: "2026-10-12T13:48:00Z".into(), bucket: bucket.map(String::from) };
         let mut q = codex_q("codex-app-server", None);
         q.updated_at = "2026-10-12T13:55:00Z".into();
-        // 有重置時間的無桶名撞限（codex 5 小時橫幅）：窗不滿就解除。沒寫時間的是 credits 用完，見下一個測試。
         let timed = LimitHit { until: Some("2026-10-12T15:00:00Z".into()), ..hit(None) };
         assert!(recalibrate_limit_hit(timed, &q).is_none(), "new non-full windows clear an unscoped hit");
         q.five_hour.as_mut().unwrap().used_pct = 100.0;

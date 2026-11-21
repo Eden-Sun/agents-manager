@@ -128,11 +128,9 @@ async fn a_resent_create_with_the_same_request_id_returns_the_original_bot() {
     crate::testing::seed_project_config(&e).await;
     let body = |name: &str| json!({"name": name, "name_auto": true, "kind": "claude", "client_request_id": "req-1"});
     let first = create(&e, body("cc1-1")).await.unwrap();
-    // 回應遺失後重送：瀏覽器清單已同步，`nextName` 算出來的名字變成 cc1-2——名字只是 name_auto 的提示，不算請求內容。
     let again = create(&e, body("cc1-2")).await.unwrap();
     assert_eq!((again["bot_id"].clone(), again["name"].clone()), (first["bot_id"].clone(), first["name"].clone()), "重送拿回原本那顆：{again}");
     assert_eq!(bots_in_config(&e).await, 1, "只有一顆 bot");
-    // 持久在 config.toml（瀏覽器重整、daemon 重啟都在）。
     let text = std::fs::read_to_string(&e.app.cfg.path).unwrap();
     assert!(text.contains("req-1"), "request id 要寫進 config.toml：{text}");
 }

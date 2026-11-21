@@ -30,8 +30,6 @@
             super::install_local(&dir).unwrap();
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
-            // `agent get <name>` answers from `AM_TEST_AGENTS`; everything else echoes argv.
-            // `agent start` 跟 herdr ≥0.9.0 一樣擋控制字元（`char::is_control`：換行、tab、ESC…，#772），整套測試都在驗 herdr 收得下。
             write_script(
                 &fake.join("herdr"),
                 "if [ -n \"${AM_TEST_CALL_LOG:-}\" ]; then printf '%s %s\\n' \"$1\" \"$2\" >> \"$AM_TEST_CALL_LOG\"; fi\n\
@@ -160,24 +158,14 @@
                 )
             });
             cmd.env("PATH", path).args(args);
-            // Don't inherit the test runner's own pane model settings.
-            // 在 bot 的 pane 裡跑測試時，AM_BOT_ID／AM_HOOK_TOKEN／AM_PORT 都有值，shim 會真的去打
-            // 正在跑的 daemon——而雙角色上線之後，daemon 會把寫給 AGM 的那句攔進佇列、shim 不再轉給
-            // herdr，測試就看到空輸出。需要這幾個值的測試自己設。
-            // 字首清掉，不列清單：名單會漏（2026-09-19 `cargo_shim` 就是漏了 `AM_DAEMON_EXE`／
-            // `AM_CONFIG_PATH`，在 bot pane 裡必定紅）。需要值的測試自己設。
             for (key, _) in std::env::vars() {
                 if key.starts_with("AM_") {
                     cmd.env_remove(key);
                 }
             }
             cmd.env_remove("HERDR_PANE_ID");
-            // env 補送的暫存檔預設寫進沙盒，不要在 /tmp 留一堆（2026-10-01 一次測試留下幾十個 am-env.*）；測試自己給的 TMPDIR 照用。
             cmd.env("TMPDIR", &self.dir);
-            // HOME 也進沙盒：claude child 的 hook 補裝（am_ensure_claude_hook）預設看 `$HOME/.claude`，測試絕不能碰真的。
             cmd.env("HOME", &self.dir);
-            // Existing child-start fixtures model a reachable remote daemon unless they
-            // explicitly exercise a missing address. The shim itself never fills this in.
             if args.starts_with(&["agent", "start"]) && env.iter().any(|(k, _)| *k == "AM_BOT_ID")
                 && !env.iter().any(|(k, _)| matches!(*k, "AM_PORT" | "AM_DAEMON_URL" | "AM_TEST_NO_DAEMON")) {
                 cmd.env("AM_DAEMON_URL", "http://daemon:7788").env("AM_BOT_TOKEN", "test-token");
@@ -185,10 +173,6 @@
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            // shim 的 `trap … INT TERM` 要有效，行程進來時 INT／TERM 不能是「忽略」：POSIX shell 不能 trap 開機時就被忽略的訊號。
-            // 測試被丟到背景跑（`cmd &`、nohup、ubuntu-ci／cron 之類非互動啟動）時，SIGINT 會被忽略並一路繼承到這裡，
-            // `an_interrupted_agent_start_releases_the_spawn_permit` 就收到 rc 1 而不是 130（跟負載無關，#flaky-spawn-permit）。
-            // 正式環境的 pane 沒有這個狀況，所以測試明講：每次跑 shim 前把兩個訊號還原成預設。
             unsafe {
                 use std::os::unix::process::CommandExt as _;
                 cmd.pre_exec(|| {
@@ -241,7 +225,6 @@ esac"#, calls.display()));
         assert!(out.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w1HJ"), "{out:?}");
         assert!(out.windows(2).any(|w| w[0] == "--env" && w[1] == "AM_PROJECT_ID=proj-1"), "{out:?}");
 
-        // 自己指定 workspace 就尊重，不補第二個。
         let (out, _) = s.run(
             &[("AM_WORKSPACE_ID", "w1HJ")],
             &["tab", "create", "--workspace", "w168", "--purpose=shell"],
@@ -250,7 +233,6 @@ esac"#, calls.display()));
         assert!(out.iter().any(|a| a == "w168"), "{out:?}");
         assert!(!out.iter().any(|a| a.starts_with("--purpose")), "{out:?}");
 
-        // `pane split` 以母 pane 為基準，本來就同 workspace：不補。
         let (out, _) = s.run(&[("AM_WORKSPACE_ID", "w1HJ")], &["pane", "split", "--pane", "w168:p1"]);
         assert!(!out.iter().any(|a| a == "--workspace"), "{out:?}");
     }
@@ -269,7 +251,6 @@ esac"#, calls.display()));
             assert_eq!(out.iter().filter(|a| *a == "--workspace").count(), 1, "{out:?}");
             assert_eq!(env_values(&out, "AM_WORKSPACE_ID"), vec!["w5".to_string()], "子 pane 繼承實際落點：{out:?}");
         }
-        // herdr 問不到（母 pane 不在、舊 herdr）：退回 AM_WORKSPACE_ID。
         let (out, _) = s.run(&[("HERDR_PANE_ID", "w5:p1"), ("AM_WORKSPACE_ID", "w1HJ")], &["tab", "create"]);
         assert!(out.windows(2).any(|w| w[0] == "--workspace" && w[1] == "w1HJ"), "{out:?}");
     }
@@ -330,7 +311,6 @@ esac"#, calls.display()));
         assert_eq!(rc, 3, "exit code 照 herdr");
         assert!(err.contains("p-a  idle  cache 熱"), "{err}");
 
-        // 子 agent 不能派工，不必看；daemon 問不到也只是不印。
         let (_, err, _) = s.run_full(&[("AM_CHILD_OF", "p"), env[0], env[1], env[2]], &["agent", "list"]);
         assert!(!err.contains("cache"), "{err}");
         s.install_fake_curl("exit 7");
@@ -370,10 +350,8 @@ esac"#, calls.display()));
                 assert_eq!(env_values(&out, k), vec![v.to_string()], "{argv:?} 要把 {k} 傳給子 pane：{out:?}");
             }
         }
-        // 母 pane 沒有就不帶（不要生出空值）。
         let (out, _) = s.run(&[], &["pane", "split", "--pane", "w168:p1"]);
         assert!(env_values(&out, "AM_DAEMON_EXE").is_empty() && env_values(&out, "AM_CONFIG_PATH").is_empty(), "{out:?}");
-        // 呼叫者自己給了就尊重，不補第二份。
         let (out, _) = s.run(&helper, &["pane", "split", "--pane", "w168:p1", "--env", "AM_DAEMON_EXE=/mine/agents-managerd"]);
         assert_eq!(env_values(&out, "AM_DAEMON_EXE"), vec!["/mine/agents-managerd".to_string()], "{out:?}");
         assert_eq!(env_values(&out, "AM_CONFIG_PATH"), vec![helper[1].1.to_string()], "沒自己給的那個照母 pane：{out:?}");
@@ -404,7 +382,6 @@ esac"#, calls.display()));
     /// 下一個新增 pane 環境變數的人不改 shim 就會在這裡紅。
     #[test]
     fn every_env_key_the_daemon_injects_reaches_child_panes_or_is_deliberately_left_out() {
-        // 刻意不傳。
         const LEFT_OUT: [(&str, &str); 4] = [
             ("CLAUDE_CODE_CHILD_SESSION", "空字串：daemon 用來洗掉它自己環境裡的 claude 標記；herdr server 開的子 pane 本來就沒有"),
             ("CLAUDECODE", "同上"),
@@ -590,11 +567,8 @@ esac"#, calls.display()));
             &[("AM_AGENT_NAME", "proj-abc123"), ("AM_TEST_AGENTS", "proj-abc123-review")],
             &["agent", "prompt", "review", "把 daemon 重建一次，然後回報"],
         );
-        // 整段文字仍是**一個**參數。
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
     }
-
-
 
     /// 既有目標（AGM、頂層 bot）不改名，否則 unknown_target。
     #[test]
@@ -607,7 +581,6 @@ esac"#, calls.display()));
         let (out, _) = s.run(&env, &["agent", "prompt", "review", "hi"]);
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "hi"]);
     }
-
 
     /// daemon 說「這是寫給 AGM 的，但現在排不進佇列」（issue #143，5xx＋`routing_unavailable`）：不能照舊直送——
     /// 那會繞過協調佇列、打進 AGM 的 pane。明確失敗，讓寄件的 bot 自己重試。
@@ -623,7 +596,6 @@ esac"#, calls.display()));
         assert!(out.is_empty(), "排不進協調佇列不能退回直送：{out:?}");
         assert!(err.contains("routing_unavailable") || err.contains("稍後重試"), "{err}");
     }
-
 
     /// 這台機器上有的 shell（沒有的略過）。macOS 的 `/bin/sh`／`/bin/bash` 是 3.2——腳本改動要在那個版本也驗。
     fn shells() -> Vec<&'static str> {
@@ -666,7 +638,6 @@ esac"#, calls.display()));
         }
     }
 
-
     /// 受管的 bot（有 bot 身份與 `AM_PORT`）而這台機器沒有 curl：問不了 daemon 這句要不要走佇列——一樣不直送，明確失敗。
     /// 沒有 bot 身份的人工 shell 照舊直送（daemon 根本不知道它）。
     #[test]
@@ -690,11 +661,9 @@ esac"#, calls.display()));
         assert!(out.is_empty(), "{out:?} {err}");
         assert_eq!(rc, 75, "{err}");
         assert!(err.contains("沒有 curl"), "{err}");
-        // 人工 shell：沒有 bot 身份，直送。
         let (out, _, rc) = s.run_with_path(None, Some(path), &[("AM_TEST_AGENTS", "agm-pxf2pv")], &["agent", "prompt", "agm-pxf2pv", "hi"]);
         assert_eq!((rc, out), (0, vec!["agent".to_string(), "prompt".into(), "agm-pxf2pv".into(), "hi".into()]));
     }
-
 
     #[test]
     fn an_agent_prompt_with_flags_first_requires_a_stable_target() {
@@ -767,7 +736,6 @@ esac"#, calls.display()));
             let sent = std::fs::read_to_string(&log).unwrap();
             assert!(sent.lines().any(|l| l == want), "{args:?} → {sent}");
             if want != "timeout_ms=" {
-                // `--timeout` 的值不能被當成 agent 名字改名。
                 assert!(!sent.contains("p-1-120000") && !sent.contains("p-1-90000"), "{sent}");
             }
         }
@@ -892,7 +860,6 @@ esac"#, calls.display()));
     fn a_long_name_is_cut_to_herdrs_32_characters() {
         let s = Sandbox::new();
         let parent = "proj-abc123";
-        // POSIX cksum(40 個 x) % 1_000_000 = 320016；40 個 y → 890150。放不下就用這個尾碼，不是截前綴。
         let (out, _) = s.run(&[("AM_AGENT_NAME", parent)], &["agent", "start", &"x".repeat(40)]);
         assert_eq!(out[2], "proj-abc123-320016");
         assert_ne!(out[2], parent);
@@ -1227,13 +1194,11 @@ esac"#, calls.display()));
                 "{out:?}"
             );
         }
-        // 多個 `-c`、`--config=`、值含空白：全部原樣補在子命令後面；呼叫者子命令後自己的 `-c` 排在補的那份之後（同 key 以它為準）。
         let (out, _) = s.run(
             &env,
             &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "-c", "a=1", "--config=b=\"x y\"", "resume", "sid-1", "-c", "a=2"],
         );
         assert_eq!(&out[8..], ["-c", "a=1", "--config=b=\"x y\"", "resume", "-c", "a=1", "-c", "b=\"x y\"", "sid-1", "-c", "a=2", "-c", "project_doc_max_bytes=0", "--no-daemon"], "{out:?}");
-        // 子命令前沒有 `-c`、沒有子命令、`resume` 是別個選項的值、別的 kind：不補。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "resume", "sid-1"]);
         assert_eq!(out.iter().filter(|a| *a == "-c").count(), 1, "{out:?}");
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "-c", effort, "go"]);
@@ -1263,20 +1228,17 @@ esac"#, calls.display()));
         let yolo = |out: &[String]| out.iter().filter(|a| *a == "--yolo").count();
         let out = start(&env, "codex", &[]);
         assert_eq!(&out[7..], ["--", "--no-daemon", "--yolo"], "{out:?}");
-        // 有 `-m` 之類自己的參數、`resume`／`fork`：補在最後面，子命令前的 `-c` 照舊搬到子命令後。
         let out = start(&env, "codex", &["-m", "o3"]);
         assert_eq!(&out[7..], ["--", "-m", "o3", "--no-daemon", "--yolo"], "{out:?}");
         let out = start(&env, "codex", &["-c", "model_reasoning_effort=medium", "fork", "--last"]);
         assert_eq!(&out[7..], ["--", "-c", "model_reasoning_effort=medium", "fork", "-c", "model_reasoning_effort=medium", "--last", "--no-daemon", "--yolo"], "{out:?}");
         let out = start(&env, "codex", &["resume", "sid-1"]);
         assert_eq!(&out[7..], ["--", "resume", "sid-1", "--no-daemon", "--yolo"], "{out:?}");
-        // 呼叫者自己決定了沙箱／核准：不補（也不重複）。
         for own in [&["--sandbox", "danger-full-access"][..], &["--sandbox=read-only"], &["-s", "read-only"], &["--yolo"], &["--dangerously-bypass-approvals-and-sandbox"], &["--full-auto"], &["-c", "sandbox_mode=\"read-only\""]] {
             let out = start(&env, "codex", own);
             assert_eq!(yolo(&out), usize::from(own[0] == "--yolo"), "{own:?} → {out:?}");
             assert!(out.iter().any(|a| a == "--no-daemon"), "{out:?}");
         }
-        // 沒有 AM_BOT_ID（人工 shell）、別的 kind：不補。
         let out = start(&[("AM_AGENT_NAME", "p-1")], "codex", &[]);
         assert_eq!(yolo(&out), 0, "{out:?}");
         let out = start(&env, "claude", &[]);
@@ -1301,7 +1263,6 @@ esac"#, calls.display()));
             assert_eq!(rc, 0, "{err}");
             assert_eq!(skip(&out), usize::from(own[0] == "--dangerously-skip-permissions"), "{own:?} → {out:?}");
         }
-        // 人工 shell（沒有 AM_BOT_ID）、別的 kind：不補。
         let (out, _, _) = s.run_full(&[("AM_AGENT_NAME", "p-1")], &["agent", "start", "kid", "--kind", "agy", "--pane", "w1:p9"]);
         assert_eq!(skip(&out), 0, "{out:?}");
         let (out, _, _) = s.run_full(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
@@ -1313,7 +1274,6 @@ esac"#, calls.display()));
     fn a_child_agent_gets_the_parents_instructions_file() {
         let s = Sandbox::new();
         let f = s.dir.join("instructions.md");
-        // 真的指示檔是多行、可能有 tab：整份當一個參數，herdr ≥0.9.0 回 invalid_agent_argument（#772，假 herdr 照樣擋）。
         let body = "RULES say \"hi\" \\ done\n\n\t- second line 中文";
         std::fs::write(&f, format!("{body}\n")).unwrap();
         let fp = f.to_str().unwrap();
@@ -1324,11 +1284,9 @@ esac"#, calls.display()));
             assert!(!out.is_empty() && !err.contains("invalid_agent_argument"), "{out:?} {err}");
             assert!(out.iter().all(|a| !a.chars().any(char::is_control) && a.len() < 300), "{out:?}");
         };
-        // claude：只傳路徑。
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         every_arg_fits_herdr(&out, &err);
         assert_eq!(&out[..10], ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt-file", fp]);
-        // codex：沒有讀檔參數，指示寫進 `$CODEX_HOME/<profile>.config.toml`，argv 只帶 `-p <profile>`。
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go"]);
         every_arg_fits_herdr(&out, &err);
         assert_eq!(
@@ -1337,28 +1295,23 @@ esac"#, calls.display()));
         );
         let profile = std::fs::read_to_string(codex_home.join("am-child-b1.config.toml")).unwrap();
         assert_eq!(profile, format!("developer_instructions = '''{body}'''\n"));
-        // 呼叫者自己帶了 profile：不再補第二個 `-p`（clap 會報重覆），提醒指示檔沒帶到。
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "--profile", "mine"]);
         assert_eq!(out.iter().filter(|a| *a == "-p" || *a == "--profile").count(), 1, "{out:?}");
         assert!(err.contains("沒帶指示檔"), "{err}");
-        // grok：沒有讀檔參數，`--rules` 給一行指向檔案的指示。
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9"]);
         every_arg_fits_herdr(&out, &err);
         let rules = out.iter().position(|a| a == "--rules").expect("--rules");
         assert!(out[rules + 1].contains(fp), "{out:?}");
-        // 自己帶了指示就不補；codex 沒有檔也照樣不讀 AGENTS.md。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt", "mine"]);
         assert_eq!(out.iter().filter(|a| a.starts_with("--append-system-prompt")).count(), 1, "{out:?}");
         let gone = s.dir.join("gone.md");
         let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("CODEX_HOME", ch)], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
         assert_eq!(&out[out.len() - 4..], ["--", "-c", "project_doc_max_bytes=0", "--no-daemon"]);
-        // 母 bot 有指示檔讀不到（#769）：daemon 給 `AM_KEEP_CLI_DOCS`，這一輪不關 AGENTS.md，其餘照舊。
         let (out, _) = s.run(
             &[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("AM_KEEP_CLI_DOCS", "1"), ("CODEX_HOME", ch)],
             &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"],
         );
         assert!(!out.iter().any(|a| a.contains("project_doc_max_bytes")), "{out:?}");
-        // 內容有三個連續單引號：codex 不帶（TOML 表示不了），也不會因此失敗。
         std::fs::write(&f, "a '''b'''").unwrap();
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
         assert!(!out.iter().any(|a| a == "-p"), "{out:?}");
@@ -1609,7 +1562,6 @@ esac"#, calls.display()));
         s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
         let (_, sent) = s.sourced_env();
         assert!(sent.contains(r"export AM_OUTBOX='/data/o'\''tbox'"), "{sent}");
-        // 暫存檔路徑本身含單引號也不會斷在半路。
         let quoted = s.dir.join("q'dir");
         std::fs::create_dir_all(&quoted).unwrap();
         std::fs::remove_file(&log).unwrap();
@@ -1710,7 +1662,6 @@ esac"#, calls.display()));
         assert_eq!(rc, 2, "{err}");
         assert!(out.is_empty() && err.contains("已經在跑 claude"), "{out:?} {err}");
         assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "那顆 agent 一個字都不能收到");
-        // 空的 shell pane（agent 是 null）照常開。
         let shell = r#"{"id":"cli:pane:get","result":{"pane":{"agent":null,"agent_status":"unknown","pane_id":"w2:p4"}}}"#;
         let env = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_PANE_JSON", shell), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
         let (_, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w2:p4"]);
@@ -1724,17 +1675,14 @@ esac"#, calls.display()));
         let s = Sandbox::new();
         let log = s.dir.join("sendtext.log");
         let base = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
-        // 人工 shell（沒有 bot 身份）：照舊轉給 herdr（它自己會因為缺 --pane 報錯），但不補送。
         let (out, _) = s.run(&base, &["agent", "start", "kid", "--kind", "claude", "--pane", ""]);
         assert_eq!(&out[..3], ["agent", "start", "p-1-kid"]);
-        // 受管的 bot：沒帶／空的 --pane 直接拒絕，herdr 也不叫。
         let managed: Vec<(&str, &str)> = base.iter().copied().chain([("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")]).collect();
         for argv in [&["agent", "start", "kid", "--kind", "claude", "--pane", ""][..], &["agent", "start", "kid", "--kind", "claude"][..]] {
             let (out, err, rc) = s.run_full(&managed, argv);
             assert_eq!(rc, 2, "{argv:?} {err}");
             assert!(out.is_empty() && err.contains("pane split"), "{argv:?} {out:?} {err}");
         }
-        // 指到自己的 pane：誰都不行。
         let (out, err, rc) = s.run_full(&base, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p1"]);
         assert_eq!(rc, 2, "{err}");
         assert!(out.is_empty(), "{out:?}");
@@ -1776,7 +1724,6 @@ esac"#, calls.display()));
                 let (mut out, _) = s.run(parent, args);
                 let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
                 out.insert(at, "--am-dry-parse".into());
-                // 不把呼叫者的 AM_*／HERDR_* 帶進正式 herdr：就算哪天 parser 放行假旗標，也只會連到沙盒裡不存在的 socket（#1149）。
                 let mut cmd = std::process::Command::new(&real);
                 cmd.args(&out);
                 for (key, _) in std::env::vars() {
@@ -1883,7 +1830,6 @@ esac"#, calls.display()));
             "begin, finish, begin, abort must receive the header over stdin: {headers}"
         );
 
-        // Debug tracing is often enabled while diagnosing a shim. It must not print token values.
         let shim = s.dir.join("bin/herdr");
         let sourced_shim = s.dir.join("bin/herdr-sourced");
         std::fs::rename(&shim, &sourced_shim).unwrap();
@@ -2148,8 +2094,6 @@ esac"#, calls.display()));
         assert_eq!(out.get(2).map(String::as_str), Some(names[0].as_str()), "prompt 用的名字要跟 start 一樣：{out:?}");
     }
 
-    // ───────── #772 注入方式的對抗式審查（fix/herdr-shim-inject-review） ─────────
-
     /// 子 agent 的 codex 環境：回 `(sandbox, instructions 檔, CODEX_HOME)`。
     fn codex_child(s: &Sandbox, body: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
         let f = s.dir.join("instructions.md");
@@ -2178,7 +2122,6 @@ esac"#, calls.display()));
             b"C1 controls \xc2\x80\xc2\x85\xc2\x9f between text\n",
         ];
         let expected = |raw: &[u8]| -> String {
-            // TOML 字面字串只保留 tab／換行；Cc 類別的其餘 Unicode 字元也要濾掉。
             String::from_utf8(raw.to_vec())
                 .unwrap()
                 .chars()
@@ -2196,7 +2139,6 @@ esac"#, calls.display()));
             let text = std::fs::read_to_string(home.join("am-child-b1.config.toml")).unwrap();
             let parsed: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("case {i}: profile 不是合法 TOML：{e}\n{text:?}"));
             let got = parsed["developer_instructions"].as_str().unwrap();
-            // TOML 會吃掉開頭緊接的那一個換行，所以比對時兩邊都去掉開頭換行。
             assert_eq!(got.trim_start_matches('\n'), expected(raw).trim_start_matches('\n'), "case {i}");
         }
     }
@@ -2282,8 +2224,6 @@ esac"#, calls.display()));
         let ro = s.dir.join("ro-home");
         std::fs::create_dir_all(&ro).unwrap();
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
-        // Root can bypass directory mode bits. Make mktemp model the OS denial for this CODEX_HOME,
-        // while leaving the shim's unrelated env temp file available to the test.
         write_script(
             &s.dir.join("real/mktemp"),
             "case \"$1\" in *ro-home/am-child-*) exit 1 ;; esac\nexec /usr/bin/mktemp \"$@\"\n",

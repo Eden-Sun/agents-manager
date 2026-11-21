@@ -30,7 +30,6 @@ pub enum LcError {
     Uncommitted(Value),
 }
 
-
 impl From<crate::github::GithubError> for LcError {
     fn from(error: crate::github::GithubError) -> Self {
         match error {
@@ -118,9 +117,6 @@ pub struct PromptOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_now: Option<&'static str>,
 }
-
-// ───────── #1862 S0：從 am-lifecycle 搬下來的純值型別（簽名要跨 crate 共用，不能有兩份）─────────
-// 原定義位置（`lifecycle::queue`／`lifecycle::start`／`lifecycle::prompt`）都 `pub use` 這裡，所有舊路徑不變。
 
 /// 撤銷已經 commit 之後要推的東西（訊息、turn 事件）。
 pub struct Revoked {

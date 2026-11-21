@@ -105,7 +105,6 @@ mod tests {
         let bot = test_bot("claude-api-opus", Some("你是一位專業的程式碼審查專家。"));
         let prompt = compose_api_bot_system_prompt(&bot, "claude-api-opus", "/home/u/proj/", None, Some("# 專案說明\n這是測試專案。"));
 
-        // Must contain sandbox environment facts
         assert!(prompt.contains("str_replace_based_edit_tool"));
         assert!(prompt.contains("每次呼叫"));
         assert!(prompt.contains("可以連網"));
@@ -124,7 +123,6 @@ mod tests {
         assert!(prompt.contains("你是一位專業的程式碼審查專家。"));
         assert!(prompt.contains("# 專案說明\n這是測試專案。"));
 
-        // Must NOT contain CLI-specific instructions
         assert!(!prompt.contains("$AM_AGENT_NAME"));
         assert!(!prompt.contains("herdr agent start"));
         assert!(!prompt.contains("herdr pane split"));
@@ -162,11 +160,9 @@ mod tests {
         assert!(prompt.contains("先向使用者說明再做"));
         assert!(prompt.contains("# 專案說明") && prompt.contains("你是遠端助手。"));
         assert!(prompt.contains("名稱是 `api-remote`"));
-        // 本機沙箱的說法與路徑對應不能混進來
         for gone in ["bwrap", "bubblewrap", "HOME=/tmp", "tmpfs", "唯讀", "路徑對應"] {
             assert!(!prompt.contains(gone), "remote prompt must not mention {gone}");
         }
-        // 本機版不受影響
         let local = compose_api_bot_system_prompt(&bot, "api-remote", "/home/u/proj", None, None);
         assert!(local.contains("bubblewrap") && local.contains("路徑對應") && !local.contains("沒有沙箱"));
     }

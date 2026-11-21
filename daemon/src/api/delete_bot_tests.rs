@@ -98,7 +98,7 @@ async fn a_refused_delete_stops_and_removes_nothing() {
     let child = a_bot(&e, "alfa-kid", "child").await;
     sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&b1).bind(&child).execute(&app.db).await.unwrap();
     let (r1, rc) = (a_running_run(&app, &b1).await, a_running_run(&app, &child).await);
-    in_config(&e, &[(&b1, "alfa")]).await; // bravo 被外部拿掉了
+    in_config(&e, &[(&b1, "alfa")]).await;
 
     let err = delete_bot(State(app.clone()), Path(b1.clone())).await.unwrap_err();
     assert_eq!(reason(err), "delete_refused");
@@ -118,7 +118,7 @@ async fn the_toml_changing_while_the_bot_stops_does_not_strand_it() {
     let app = e.app.clone();
     let (b1, b2) = (a_bot(&e, "alfa", "user").await, a_bot(&e, "bravo", "user").await);
     in_config(&e, &[(&b1, "alfa"), (&b2, "bravo")]).await;
-    let run = crate::testing::fake_run(&app, &b1).await; // session `test`＝mock herdr，stop 會真的送鍵
+    let run = crate::testing::fake_run(&app, &b1).await;
 
     let task = tokio::spawn({
         let (app, b1) = (app.clone(), b1.clone());
@@ -126,7 +126,6 @@ async fn the_toml_changing_while_the_bot_stops_does_not_strand_it() {
     });
     let _ = crate::testing::eventually!(e.herdr.methods().iter().any(|m| m == "agent.send_keys"));
     assert!(e.herdr.methods().iter().any(|m| m == "agent.send_keys"), "stop 應該已經開始");
-    // 停機進行中，外面把 bravo 從 TOML 拿掉。
     let text = std::fs::read_to_string(&app.cfg.path).unwrap();
     let pruned: crate::config::ConfigFile = {
         let mut c: crate::config::ConfigFile = toml::from_str(&text).unwrap();
@@ -162,7 +161,7 @@ async fn a_project_delete_never_removes_a_bot_that_just_started() {
                 if db::bot(&app.db, &b1).await.unwrap().unwrap().deleted_at.is_some() {
                     return false;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await; // 開 workspace 那段
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 a_running_run(&app, &b1).await;
                 true
             }
@@ -200,7 +199,6 @@ async fn a_child_whose_soft_delete_write_fails_keeps_its_runtime_dir() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("marker"), b"keep me").unwrap();
 
-    // 故障注入：只讓這顆 child 的軟刪 UPDATE 失敗，其他查詢不受影響。
     sqlx::query(&format!(
         "CREATE TRIGGER am_test_fail_child_delete BEFORE UPDATE OF deleted_at ON bots
              WHEN NEW.id = '{child}' BEGIN SELECT RAISE(ABORT, 'boom'); END"
@@ -226,9 +224,6 @@ async fn a_child_that_fails_to_soft_delete_does_not_strand_its_siblings() {
     for n in ["alfa-k1", "alfa-k2", "alfa-k3"] {
         kids.push(a_bot(&e, n, "child").await);
     }
-    // 「寫不進去」要綁在 intent 的嘗試次數上，不能等測試自己 DROP TRIGGER：測試模式背景重試每 20ms 一次、
-    // 最多 MAX_ATTEMPTS 次，負載一高，斷言還沒跑完就把次數用光、intent 收成 failed，之後再也沒人補（#773）。
-    // handler 認領＝第 1 次、背景第 1 次重試＝第 2 次都失敗；第 3 次才寫得進去。
     sqlx::query(&format!(
         "CREATE TRIGGER am_test_fail_first BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{}'
                AND (SELECT attempts FROM intents WHERE kind = 'delete_project' AND subject_id = '{}') < 3
@@ -466,7 +461,6 @@ async fn deleting_a_project_purges_its_user_bot_dirs_and_reports_failures() {
     assert!(!dir.exists(), "user bot 的目錄要跟著清掉");
     assert!(out.get("kept_dirs").is_none(), "{out}");
 
-    // 遠端專案、主機不明：ssh 清不了，不能回成「清掉了」。
     let e2 = crate::testing::env().await;
     let app2 = e2.app.clone();
     let b2 = a_bot(&e2, "beta", "user").await;
@@ -487,7 +481,6 @@ async fn a_child_adopted_after_the_snapshot_is_soft_deleted_with_the_project() {
     let late = db::ulid();
     {
         let (app, pid, late) = (app.clone(), e.project_id.clone(), late.clone());
-        // 快照與定案之間（持久 intent 寫完、config 還沒改）：另一條路認領了一顆新的 child。
         crate::lifecycle::race_point::arm("delete_after_intent", &e.project_id, move || async move {
             sqlx::query(
                 "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
@@ -541,8 +534,6 @@ async fn a_child_adopted_before_the_locks_are_taken_joins_the_snapshot() {
     assert!(snap.contains(&early), "重列之後它在持久 intent 的快照裡：{snap}");
 }
 
-// ---- #355 P3：刪除在定案之後（或之前）行程死掉，開機補完 ----
-
 /// 模擬行程死亡：刪除走到 `point` 就卡住，再把整個 future abort 掉。
 async fn die_in_delete(e: &crate::testing::Env, key: &str, point: &'static str, project: bool) {
     let reached = Arc::new(tokio::sync::Notify::new());
@@ -560,7 +551,6 @@ async fn die_in_delete(e: &crate::testing::Env, key: &str, point: &'static str, 
         }
     });
     reached.notified().await;
-    // 行程死亡：定案之後的工作已脫離 handler，要連它一起殺掉（否則它握著鎖，卡在 pending 上）。
     for _ in 0..200 {
         if kill_delete_work_for_test(key) {
             break;
@@ -617,7 +607,6 @@ async fn a_delete_interrupted_by_a_daemon_outage_longer_than_the_ttl_is_still_co
     let (parent, kid) = parent_and_child(&e).await;
     die_in_delete(&e, &parent, "delete_bot_after_decided", false).await;
     assert!(deleted(&e.app, &parent).await && !deleted(&e.app, &kid).await, "前提：定案了、child 還活著");
-    // daemon 躺了一整夜：expires_at 早就過了。
     sqlx::query("UPDATE intents SET expires_at = '2020-01-01T00:00:00.000Z' WHERE subject_id = ?")
         .bind(&parent)
         .execute(&e.app.db)
@@ -731,7 +720,7 @@ async fn a_bot_delete_whose_handler_is_dropped_after_the_decision_still_finishes
     let (app, p) = (e.app.clone(), parent.clone());
     let h = tokio::spawn(async move { delete_bot(State(app), Path(p)).await.map(|_| ()) });
     reached.notified().await;
-    h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+    h.abort();
     let _ = h.await;
     release.notify_one();
     assert!(crate::testing::eventually!(intent_states(&e.app, &parent).await == vec!["done"]), "{:?}", intent_states(&e.app, &parent).await);
@@ -777,7 +766,7 @@ async fn a_restart_whose_handler_is_dropped_between_stop_and_start_still_finishe
     let (app, id) = (e.app.clone(), bot.id.clone());
     let h = tokio::spawn(async move { restart_bot(State(app), Path(id), Query(Default::default())).await.map(|_| ()) });
     reached.notified().await;
-    h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+    h.abort();
     let _ = h.await;
     release.notify_one();
     wait_work_done_for_test(&bot.id).await;
@@ -804,7 +793,7 @@ async fn a_start_whose_handler_is_dropped_while_the_agent_comes_up_still_records
     let (app, id) = (e.app.clone(), bot.id.clone());
     let h = tokio::spawn(async move { start_bot(State(app), Path(id), Query(Default::default())).await.map(|_| ()) });
     reached.notified().await;
-    h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+    h.abort();
     let _ = h.await;
     release.notify_one();
     wait_work_done_for_test(&bot.id).await;
@@ -828,7 +817,7 @@ async fn a_stop_whose_handler_is_dropped_before_the_stopped_record_still_records
     let (app, id) = (e.app.clone(), bot.id.clone());
     let h = tokio::spawn(async move { stop_bot(State(app), Path(id)).await.map(|_| ()) });
     reached.notified().await;
-    h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+    h.abort();
     let _ = h.await;
     release.notify_one();
     wait_work_done_for_test(&bot.id).await;
@@ -952,7 +941,6 @@ async fn project_delete_and_parent_delete_never_deadlock() {
         })
         .await
         .unwrap_or_else(|_| panic!("round {round}: delete_bot 與 delete_project 互等卡死"));
-        // 至少有一邊成功，parent 一定刪掉了；另一邊看到的是「已經不在」而不是卡住。
         assert!(both.0.is_ok() || both.1.is_ok(), "round {round}: {both:?}");
         assert!(db::bot(&app.db, &parent).await.unwrap().unwrap().deleted_at.is_some(), "round {round}");
     }
@@ -1054,7 +1042,6 @@ async fn a_remote_project_delete_never_purges_local_dirs_when_the_host_cannot_be
     sqlx::query("UPDATE projects SET host='remote1' WHERE id=?").bind(&e.project_id).execute(&app.db).await.unwrap();
     let dir = runtime_dir(&app, &kid);
 
-    // 定案前讀不到：整支失敗、bot 沒軟刪。
     crate::testing::make_table_unreadable(&app, "projects").await;
     let err = delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap_err();
     crate::testing::make_table_readable(&app, "projects").await;
@@ -1062,7 +1049,6 @@ async fn a_remote_project_delete_never_purges_local_dirs_when_the_host_cannot_be
     assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none());
     assert!(dir.exists());
 
-    // 定案之後才讀不到（重讀的舊寫法在這裡退回 local）：本機目錄必須還在。
     let a = app.clone();
     crate::lifecycle::race_point::arm("delete_project_after_commit", &e.project_id, move || async move {
         crate::testing::make_table_unreadable(&a, "projects").await
@@ -1106,7 +1092,7 @@ async fn a_failed_stop_that_cannot_read_the_run_keeps_the_dir() {
     let app = e.app.clone();
     let id = a_bot(&e, "alfa", "user").await;
     in_config(&e, &[(&id, "alfa")]).await;
-    let run = a_running_run(&app, &id).await; // session 不存在：stop 一定失敗
+    let run = a_running_run(&app, &id).await;
     let dir = runtime_dir(&app, &id);
     let a = app.clone();
     crate::lifecycle::race_point::arm("delete_bot_after_decided", &id, move || async move {
@@ -1177,7 +1163,7 @@ async fn a_confirmed_stop_purges_the_dir() {
     let app = e.app.clone();
     let id = a_bot(&e, "alfa", "user").await;
     in_config(&e, &[(&id, "alfa")]).await;
-    let run = crate::testing::fake_run(&app, &id).await; // session `test`＝mock herdr，stop 會真的送鍵
+    let run = crate::testing::fake_run(&app, &id).await;
     let dir = runtime_dir(&app, &id);
 
     let out = body_of(delete_bot(State(app.clone()), Path(id.clone())).await.unwrap()).await;

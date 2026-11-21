@@ -63,7 +63,6 @@ mod tests {
     #[test]
     fn a_manager_the_user_stopped_stays_stopped() {
         assert_eq!(plan(&sup(false, "", 0, None), "stopped", |_| true), Plan::Idle);
-        // Never started at all (fresh setup): not the watchdog's to bring up.
         let mut s = sup(false, "", 0, None);
         s.generation = 0;
         assert_eq!(plan(&s, "stopped", |_| true), Plan::Idle);
@@ -102,18 +101,12 @@ mod tests {
     /// `store::mark_watchdog_gave_up`).
     #[test]
     fn a_start_that_succeeded_and_then_died_still_ends_in_give_up_on_every_later_tick() {
-        // Attempt 5 returned Ok, so the row holds attempts=5 with a backoff deadline.
         let after_ok = sup(true, "", 5, Some("2026-09-13T00:00:00Z"));
-        // The CLI died: the manager is stopped again, and the deadline has since passed.
         for _ in 0..10 {
             assert_eq!(plan(&after_ok, "stopped", |_| true), Plan::GaveUp, "no more automatic starts");
         }
-        // Seen alive again → `tick` resets the streak (Plan::Idle), which is what clears the
-        // give-up marker, so a later outage is reported as a new one.
         assert_eq!(plan(&after_ok, "idle", |_| true), Plan::Idle);
         assert_eq!(plan(&after_ok, "busy", |_| true), Plan::Idle);
-        // And a human starting it by hand resets `watchdog_attempts` to 0 (see
-        // `store::set_desired_running`), which puts it back in the ordinary flow.
         assert_eq!(plan(&sup(true, "", 0, None), "stopped", |_| true), Plan::Wait { schedule: true });
     }
     /// #249：讀不到 manager liveness（`runs`／`turns` 的 SELECT 壞掉）不能當成「已停止」。
@@ -142,7 +135,6 @@ mod tests {
             assert_eq!(s.watchdog_attempts, 0, "{table} 讀不到：不可計次");
             assert!(s.watchdog_gave_up_at.is_none());
 
-            // 恢復後下一個 tick 看到活著的 manager，照常沒事。
             tick(&app).await;
             let s = store::get_or_init(&app.db).await.unwrap();
             assert_eq!(s.watchdog_next_at, None, "{table} 恢復後 manager 是活的");
@@ -164,7 +156,6 @@ mod tests {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 0, "故障那一輪沒有事件");
 
-        // 下一個 tick、沒有人介入：補上。再多幾輪也只有一則。
         for _ in 0..3 {
             report_gave_up(&app, "boom").await;
         }

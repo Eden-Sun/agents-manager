@@ -7,7 +7,6 @@
 async fn an_invalid_config_is_a_400_that_says_nothing_was_written() {
     let env = crate::testing::env().await;
     let app = &env.app;
-    // `kind = 'nope'` 不是合法的 kind：投影一定擋。
     let broken = "[server]\nlisten = '127.0.0.1:7788'\n\n                      [[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n                      [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = 'nope'\n";
     std::fs::write(&app.cfg.path, broken).unwrap();
 

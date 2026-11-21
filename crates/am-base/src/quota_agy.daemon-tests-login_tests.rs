@@ -125,8 +125,6 @@
     #[tokio::test]
     async fn the_watcher_does_nothing_without_a_token_file_or_a_known_login_state() {
         let _lock = token_test_lock().await;
-        // 登入冷卻是行程全域的（key 是本機）：別條測試（例如 agy 回合授權失敗）可能已經留下一個，watcher 就不會翻旗標。
-        // `Fresh::new()` 進場先清掉（冷卻、退避、探測錯誤、憑證檔），離場也清。
         let fresh = Fresh::new();
         let e = tt::env().await;
         let app = e.app.clone();
@@ -217,7 +215,6 @@
         login_watch_once(&app, LOCAL_HOST).await;
         assert_eq!(call_count(&calls), 1, "失敗冷卻內不再探測（不然每 20 秒起一次 200 MB 的執行檔）");
 
-        // 保持現值也包括「已登入」：已登入的主機遇到網路類失敗不會被翻成未登入（那是 refresh 的老行為）。
         install_agy_at(&app, Some(true), &exe).await;
         backoff().lock().unwrap().remove(&crate::quota::quota_key(LOCAL_HOST, "agy"));
         let _ = refresh_agy(&app, LOCAL_HOST).await;

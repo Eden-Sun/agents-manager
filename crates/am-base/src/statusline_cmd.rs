@@ -36,7 +36,6 @@ fn inner(args: StatuslineArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
     let (input, truncated) = read_stdin_capped(STDIN_BUDGET);
 
-    // Before the POST so the text can ride along; it is the pane's own output, so no delay.
     let status_line = user_statusline_command().and_then(|cmd| relay_user_command(&cmd, &input, deadline));
 
     let poster = if truncated { None } else { slim_payload(&input, status_line.as_deref()) }.map(|payload| {
@@ -71,14 +70,12 @@ pub fn slim_payload(input: &str, status_line: Option<&str>) -> Option<serde_json
     let v: serde_json::Value = serde_json::from_str(input).ok()?;
     let o = v.as_object()?;
     let mut out = serde_json::Map::new();
-    // The daemon tracks the transcript path elsewhere.
     for (k, v) in o {
         if k == "transcript_path" {
             continue;
         }
         out.insert(k.clone(), v.clone());
     }
-    // 放在複製之後：輸入裡同名的 `hook_event_name` 不能蓋掉它（daemon 靠這個欄位分辨 StatusLine 與其他事件，#1734）。
     out.insert("hook_event_name".into(), serde_json::json!("StatusLine"));
     if let Some(t) = status_line.map(str::trim).filter(|t| !t.is_empty()) {
         out.insert("status_line".into(), serde_json::json!(t));
@@ -105,7 +102,6 @@ pub fn statusline_command_from_settings(text: &str) -> Option<String> {
         }
     }
     let cmd = sl.get("command")?.as_str()?.trim().to_string();
-    // Refuses to recurse into ourselves.
     if cmd.is_empty() || cmd.contains("agents-managerd statusline") || cmd.contains("hook.sh statusline") {
         return None;
     }
@@ -177,8 +173,6 @@ fn run_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<Command
             match child.try_wait() {
                 Ok(Some(_)) => {
                     child_exited = true;
-                    // The shell can exit while a background descendant still holds stdout open.
-                    // Reap the whole group before waiting for the reader's EOF.
                     kill_process_group(pgid);
                 }
                 Ok(None) => {}
@@ -202,7 +196,6 @@ fn run_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<Command
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        // stdout 已讀到 EOF：輸出是完整的，不等指令結束（它可能還睡很久）；還活著的行程收掉。#1741
         if child_exited || output.is_some() {
             if let Some(buf) = output {
                 if !child_exited {
@@ -225,7 +218,6 @@ fn run_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<Command
 }
 
 fn kill_process_group(pgid: i32) {
-    // SAFETY: `pgid` is the pid of the child spawned with `process_group(0)` above.
     let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
 }
 
@@ -308,7 +300,6 @@ mod tests {
         assert_eq!(v["status_line"], "me | proj | 5h:12%");
         assert!(slim_payload("not json", None).is_none());
         assert!(slim_payload("[1]", None).is_none());
-        // Blank / whitespace-only output is not a status line.
         assert!(slim_payload(r#"{"session_id":"s"}"#, Some("  ")).unwrap().get("status_line").is_none());
     }
 
@@ -330,7 +321,6 @@ mod tests {
     fn a_user_command_cannot_escape_the_deadline_after_closing_stdout() {
         let deadline = Instant::now() + Duration::from_millis(100);
         let started = Instant::now();
-        // 子行程睡 30 秒、門檻 10 秒：沒綁住 deadline 時會等滿 30 秒而紅；綁住時 100ms 就回，高負載下拖到幾秒也不會誤判（#950）。
         let _ = relay_user_command("exec 1>&-; sleep 30", "{}", deadline);
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -340,7 +330,6 @@ mod tests {
 
     #[test]
     fn user_command_output_is_bounded_while_stdout_is_still_drained() {
-        // deadline 不是這條要驗的東西：指令自己會結束（head -c 讀完就收），給得很寬，高負載下起三個行程才不會被它打斷（#1153）。
         let output = run_user_command(
             "head -c 131072 /dev/zero | tr '\\000' x",
             "{}",
@@ -391,8 +380,6 @@ mod tests {
 
     #[test]
     fn output_written_before_stdout_closed_is_kept_even_if_the_command_lingers() {
-        // 指令印完、關掉 stdout 之後還睡 30 秒：輸出已經讀到 EOF，不能等到 deadline 才整個丟掉（pane 的 statusLine 會空白）。
-        // deadline 給 10 秒（遠大於讀到 EOF 所需），高負載下不誤判（#1153）。
         let output = run_user_command("printf statusline; exec 1>&-; sleep 30", "{}", Instant::now() + Duration::from_secs(10))
             .expect("stdout 已經關了、輸出完整，該回傳，不該等到 deadline 才丟掉");
         assert_eq!(output.bytes, b"statusline");

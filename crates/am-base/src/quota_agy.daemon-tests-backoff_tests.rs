@@ -14,7 +14,6 @@
     }
 
     async fn add_host(app: &Arc<App>, host: &str) -> Arc<crate::hosts::HostConn> {
-        // 不連線：探測在 `client_for_fence` 就失敗，不會真的開 ssh。
         let conn = app.hosts.insert_remote_for_test(remote_cfg(host)).await;
         conn.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         conn
@@ -45,7 +44,6 @@
         let host = fresh_host();
         add_host(&app, &host).await;
         let a = app.hosts.fence(&host).await.unwrap();
-        // H 改指到 B。
         add_host(&app, &host).await;
         let b = app.hosts.fence(&host).await.unwrap();
 
@@ -97,7 +95,6 @@
         assert!(!backoff_active(&key_of(&host), &fence));
         assert!(note_failure(&app, &host, &fence).await);
         assert!(backoff_active(&key_of(&host), &fence));
-        // 同世代的新 fence（ticket 不同）也認得。
         let again = app.hosts.fence(&host).await.unwrap();
         assert!(backoff_active(&key_of(&host), &again));
         assert!(matches!(refresh_agy_if_due(&app, &host).await, Ok(None)), "冷卻中：這一輪跳過");

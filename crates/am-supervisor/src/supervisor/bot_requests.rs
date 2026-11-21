@@ -12,8 +12,6 @@ use am_base::agent_relay::ct_eq;
 use crate::lifecycle::LcError;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
-// #1862 D：這批資料／流程測試大多只需要 DB／config，不需要 daemon `App`：crate-only 版用 am-supervisor 自己的窄環境（同名同形的 `App`）；
-// 要 `assign`（TurnOps／QuotaOps／JudgeOps）的 3 條留 daemon，所以 `flow_tests` 兩邊都編譯、各用各的 `App`。
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 use super::test_env::App;
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
@@ -97,8 +95,6 @@ async fn window_anchor(db: &SqlitePool, from_bot_id: &str, fingerprint: &str, no
     match found {
         Ok(Some(at)) => match chrono::DateTime::parse_from_rfc3339(&at) {
             Ok(t) => t.timestamp(),
-            // 無聲退路會讓整個修法失效而沒有任何訊號：`created_at` 的格式一旦飄掉（#101 的前科），
-            // 每次都落回「現在」，就等於退回固定格子，而唯一的線索是 AGM 又被叫醒兩次（i264 review）。
             Err(e) => {
                 tracing::warn!(created_at = %at, error = %e, "bot_request 的 created_at 解不開，去重視窗退回「現在」（#442 的錨點失效）");
                 now_unix
@@ -190,8 +186,6 @@ async fn quiet_reason(
 /// `X-AM-Bot-Token` 是寄件 bot 自己的 hook token 才算驗證過。沒有也照收，只是記下來。
 pub async fn sender_verified(db: &SqlitePool, token: Option<&str>, from: &str) -> bool {
     let Some(t) = token.filter(|t| !t.is_empty()) else { return false };
-    // 常數時間比對，跟其他 token 驗證入口同一套；
-    // 這裡以前是 `==`，是六處裡唯一的例外（issue #415）。
     matches!(crate::db::bot(db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && ct_eq(t, &b.hook_token))
 }
 
@@ -232,7 +226,6 @@ pub async fn actor_role(app: &impl crate::capabilities::Db, headers: &axum::http
 /// 只是回 bot id 而不是角色：申請重建／重啟窗口的是一般的修正 bot，沒有角色，`actor_role` 對它回的
 /// `None` 跟「沒宣告身份」分不出來——而「這筆申請是誰送的」正是要分出來的東西。
 pub async fn verified_bot_id(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
-    // 「有這個標頭但讀不出值」也算宣告了身份：空字串與非 UTF-8 都要驗，不能當沒帶。
     if !headers.contains_key("X-AM-Bot-Id") {
         return Ok(None);
     }
@@ -309,8 +302,6 @@ pub async fn intercept(
     via: &str,
     mark: ReplyMark<'_>,
 ) -> Result<Option<Value>, LcError> {
-    // 協調者「建立過」就一直攔：它停了、沒額度、bot 被刪掉，申請都排進它的佇列等，
-    // 不會因為它不在就倒回巡檢（SPEC §18.15）。
     if from_bot_id == crate::agent_relay::DAEMON_SENDER || !roles::responder_configured(app.db()).await.map_err(up)? {
         return Ok(None);
     }
@@ -340,8 +331,6 @@ pub async fn queue(
     let (quiet, reply_matched) = quiet_reason(app.db(), from_bot_id, sender, to_bot.as_deref(), mark).await?;
     let from_bot = crate::db::bot(app.db(), from_bot_id).await.map_err(up)?;
     let fp = fingerprint(to, target_bot_id, text, attachments);
-    // 錨點：還開著的同一句申請用它的 `created_at`，不然用現在（issue #442）。帶了 request id 時
-    // 錨點用不到（鍵就是那個 id），所以不必多查一次 DB。
     let now_unix = chrono::Utc::now().timestamp();
     let anchor = match client_request_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) => now_unix,
@@ -366,15 +355,11 @@ pub async fn queue(
         "sender_verified": verified,
         "via": via,
     });
-    // 沒帶 request id 的重送去重只擋「前一筆**還沒處理完**」：已經結案（協調者看過、ack 了）之後同一句
-    // 再送一次，是 bot 照裁示改完又來申請，不是重播（review 2026-09-16 c3 L1）。這時換一把鍵
-    // （`#2`、`#3`…）重新入列。帶了 request id 的照舊：同一個 id 就是同一件事，結案了也回原本那筆。
     let mut key = key;
     let mut round = 1;
     let (id, duplicate) = loop {
         let new_id = store::push_inbox(app.db(), &key, "bot_request", None, Some(from_bot_id), None, &payload).await.map_err(up)?;
         if let Some(id) = new_id {
-            // 寫入就分類，不等下一個 tick：去重與角色從這一刻起就是確定的。
             let rt = roles::route("bot_request", &payload, None);
             sqlx::query("UPDATE supervisor_inbox SET role=?, wake=? WHERE id=?")
                 .bind(rt.role.as_str())
@@ -385,8 +370,6 @@ pub async fn queue(
                 .map_err(up)?;
             break (id, false);
         }
-        // 這個 key 已經有一筆了。只有**內容也一樣**才算重播；同一個 request id 換一段話會被
-        // 讀成「我的新申請送到了」，但它其實沒有進任何人的佇列。
         let (id, existing, state): (String, String, String) =
             sqlx::query_as("SELECT id, payload_json, state FROM supervisor_inbox WHERE supervisor_id=? AND event_key=?")
                 .bind(store::SUPERVISOR_ID)
@@ -409,7 +392,6 @@ pub async fn queue(
             ));
         }
         let no_crid = client_request_id.map(str::trim).is_none_or(str::is_empty);
-        // 上限只是防呆：同一個十分鐘格子裡同一句被結案又重送幾十次，不是正常的申請。
         if no_crid && state == "handled" && round < 50 {
             round += 1;
             key = format!("{}#{round}", key.split('#').next().unwrap_or(&key));
@@ -431,7 +413,6 @@ pub async fn queue(
         "inbox_event_id": id,
         "state": state,
         "fingerprint": fp,
-        // 與 prompt 的回應同形：沒有 turn，因為這一刻沒有任何模型被叫醒。
         "delivery": "queued",
         "turn_id": null,
         "message_id": null,
@@ -465,12 +446,9 @@ mod tests {
     #[test]
     fn a_request_id_names_a_retry_and_the_content_still_has_to_match() {
         let fp = |text: &str| fingerprint(Role::Responder, "agm", text, &[]);
-        // 同一個 request id 就是同一個鍵（重試沿用它）——但內容指紋不同，`queue` 會擋下來。
         assert_eq!(event_key("b1", Some("r-1"), &fp("x"), 0), event_key("b1", Some(" r-1 "), &fp("y"), 999_999));
         assert_ne!(fp("x"), fp("y"));
         assert_ne!(event_key("b1", Some("r-1"), &fp("x"), 0), event_key("b2", Some("r-1"), &fp("x"), 0), "不同寄件者不互相吃掉");
-        // 沒帶 id：同寄件者、同內容、同一個十分鐘視窗算一件。這裡測的是純函式（餵錨點進去）；
-        // 「重問要落在同一個視窗」由 `window_anchor` 負責，見 `dedupe_window_tests`（issue #442）。
         let t = 1_757_750_400;
         assert_eq!(event_key("b1", None, &fp("請核准重建"), t), event_key("b1", None, &fp("請核准重建"), t + 599));
         assert_ne!(event_key("b1", None, &fp("請核准重建"), t), event_key("b1", None, &fp("請核准重建"), t + 600));
@@ -537,7 +515,7 @@ mod dedupe_window_tests {
         let first_at = BOUNDARY - 1;
         open_request(&app, "w1", &fp, first_at, "pending").await;
 
-        let now = BOUNDARY + 19; // 相隔 20 秒的重問，但跨過了邊界
+        let now = BOUNDARY + 19;
         let anchor = window_anchor(&app.db, "w1", &fp, now).await;
         assert_eq!(anchor, first_at, "錨點是既有那筆的 created_at，不是現在");
         assert_eq!(
@@ -545,7 +523,6 @@ mod dedupe_window_tests {
             event_key("w1", None, &fp, first_at),
             "重問跟既有那筆同一把鍵 → INSERT OR IGNORE 命中 → 仍只有一筆"
         );
-        // 舊行為（拿 now 當錨）就是這裡分岔的：同一句、相隔 20 秒，卻是兩把鍵。
         assert_ne!(
             event_key("w1", None, &fp, now),
             event_key("w1", None, &fp, first_at),
@@ -585,7 +562,6 @@ mod dedupe_window_tests {
         open_request(&app, "w1", &fp, exactly, "pending").await;
         assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, exactly, "剛好一個視窗長度：還算同一件");
 
-        // 再老一秒就不算了（把上面那筆往前挪一秒，避免兩筆互相干擾）。
         sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE bot_id='w1'")
             .bind(crate::db::iso_at(chrono::DateTime::from_timestamp(exactly - 1, 0).unwrap()))
             .execute(&app.db)
@@ -633,8 +609,8 @@ mod dedupe_window_tests {
         let mine = fp_of("請核准重建 abc123");
         let other = fp_of("請核准重啟 abc123");
         let now = BOUNDARY + 19;
-        open_request(&app, "w2", &mine, BOUNDARY - 1, "pending").await; // 別的寄件者
-        open_request(&app, "w1", &other, BOUNDARY - 1, "pending").await; // 別的內容
+        open_request(&app, "w2", &mine, BOUNDARY - 1, "pending").await;
+        open_request(&app, "w1", &other, BOUNDARY - 1, "pending").await;
         assert_eq!(window_anchor(&app.db, "w1", &mine, now).await, now, "不是同一個寄件者＋同一句就不算重問");
     }
 
@@ -653,8 +629,6 @@ pub(crate) mod flow_tests {
     use super::*;
 
     pub(crate) async fn app() -> Arc<App> {
-        // #1862 S3b：daemon 版的 `app()`／`configure_responder()` 搬到 `daemon/src/supervisor_tests/flow_fixture.rs`；這裡只剩 crate-only 版
-        // （暫存目錄＋真 DB＋真 config，沒有 herdr）。
         let app = {
             let dir = super::super::test_env::scratch_dir("agm-bot-requests");
             super::super::test_env::app_in(&dir).await
@@ -721,7 +695,6 @@ pub(crate) mod flow_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].2.as_deref(), Some("responder"));
         assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().duplicates, 99);
-        // 巡檢這邊：沒有任何它該被叫醒的事件，也沒有任何 turn。
         assert!(roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap().is_empty());
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&app.db).await.unwrap();
         assert_eq!(turns, 0, "攔下來的申請不會開任何回合");
@@ -750,7 +723,6 @@ pub(crate) mod flow_tests {
         assert_eq!(out["routed"], "responder");
         assert_eq!(out["wake"], true);
 
-        // w1 正在跑一件協調者發給它的通知（「已核准，可以建置」）。
         let now = crate::db::now();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('run-w1','w1','running','working',?)").bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-w1','w1',?)").bind(&now).execute(&app.db).await.unwrap();
@@ -758,7 +730,6 @@ pub(crate) mod flow_tests {
         let a = store::insert_assignment(&app.db, None, "w1", "note-1", "已核准，可以建置", &[], None, false).await.unwrap();
         store::mark_delivered(&app.db, &a.id, "t-w1", "ok").await.unwrap();
 
-        // 同一個 notice 回合裡的新申請：沒有標記 → 叫醒，不寫成「只記錄」。
         let restart = intercept(&app, "resp", "w1", "建置完成，請核准重啟 daemon", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(restart["wake"], true, "notice 回合裡的新申請不是回覆");
         let p: Value = serde_json::from_str(
@@ -771,13 +742,10 @@ pub(crate) mod flow_tests {
         .unwrap();
         assert!(p["quiet_reason"].is_null(), "{p}");
 
-        // 寄件端明講 `--ack`：只記錄。
         let ack = intercept(&app, "resp", "w1", "收到，開始建置", None, &[], true, "shim", ReplyMark { ack: true, reply_to: None }).await.unwrap().unwrap();
         assert_eq!(ack["wake"], false);
-        // `--reply-to <交辦>`：對得上派給它的那一件 → 只記錄。
         let reply = intercept(&app, "resp", "w1", "照 note-1 開始", None, &[], true, "shim", ReplyMark { ack: false, reply_to: Some("note-1") }).await.unwrap().unwrap();
         assert_eq!(reply["wake"], false);
-        // 對不上的 id（打錯或編的）不能拿來讓申請安靜。
         let bogus = intercept(&app, "resp", "w1", "請核准重啟（編的 id）", None, &[], true, "shim", ReplyMark { ack: false, reply_to: Some("nope") }).await.unwrap().unwrap();
         assert_eq!(bogus["wake"], true);
 
@@ -818,7 +786,6 @@ pub(crate) mod flow_tests {
         let replay = intercept(&app, "patrol", "w1", "請核准重建", None, &[], true, "shim", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!(replay["inbox_event_id"], after["inbox_event_id"], "新的那筆沒處理前，重送仍然併進它");
 
-        // 帶 request id：結案了也是同一件事。
         let with_id = intercept(&app, "patrol", "w2", "請核准重啟", Some("r-7"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         let wid = with_id["inbox_event_id"].as_str().unwrap().to_string();
         roles::ack(&app.db, &wid, Role::Responder, true).await.unwrap();
@@ -847,7 +814,6 @@ pub(crate) mod flow_tests {
         }
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows, 1, "被擋下來的那一筆不會偷偷寫進去");
-        // 附件也算內容。
         let err = intercept(&app, "patrol", "w1", "請核准重建 abc123", Some("r-1"), &["img-1".into()], true, "api", ReplyMark::default()).await;
         assert!(err.is_err());
     }
@@ -860,7 +826,7 @@ pub(crate) mod flow_tests {
     async fn a_replay_of_a_compacted_request_is_still_a_replay() {
         let app = app().await;
         configure_responder(&app).await;
-        let text = format!("請核准重建 abc123\n{}", "細節 ".repeat(8 * 1024)); // > 16 KB
+        let text = format!("請核准重建 abc123\n{}", "細節 ".repeat(8 * 1024));
         let first = intercept(&app, "patrol", "w1", &text, Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         let id = first["inbox_event_id"].as_str().unwrap().to_string();
         roles::ack(&app.db, &id, Role::Responder, true).await.unwrap();
@@ -870,7 +836,6 @@ pub(crate) mod flow_tests {
 
         let again = intercept(&app, "patrol", "w1", &text, Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
         assert_eq!((again["duplicate"].as_bool(), again["inbox_event_id"].as_str()), (Some(true), Some(id.as_str())), "{again}");
-        // 壓掉之後內容不同的重用仍然要擋。
         let err = intercept(&app, "patrol", "w1", "完全不同的一句", Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap_err();
         assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "request_mismatch"), "{err:?}");
     }
@@ -883,7 +848,6 @@ pub(crate) mod flow_tests {
         let app = app().await;
         let id = store::push_inbox(&app.db, "approval:A1:requested", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
         roles::classify(&app.db).await.unwrap();
-        // 單角色時代：巡檢收走了它，但還沒 ack（通知回合失敗 → recover 放回 pending）。
         roles::mark_delivered(&app.db, &[id.clone()], Role::Patrol, "t-old", "ok").await.unwrap();
         assert!(store::requeue_inbox(&app.db, &id, "notify turn did not complete").await.unwrap());
         configure_responder(&app).await;

@@ -389,7 +389,6 @@ mod hook_cmd_parts_tests {
             }
             let payload = serde_json::json!({"hook_event_name":"Stop", "transcript_path":path.to_string_lossy()}).to_string();
             let mut command = std::process::Command::new("/bin/sh");
-            // 不繼承跑測試那個行程的 AM_CHILD_OF（子 agent 的 pane 裡跑會被 hook 閘擋掉）。
             command.env_remove("AM_CHILD_OF");
             command
                 .arg(&script)
@@ -474,11 +473,9 @@ mod hook_cmd_parts_tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::hard_link(&path, &alias).unwrap();
         write_private(&path, b"new-secret").unwrap();
-        // 舊 inode（另一個名字指著它）不能被寫進新內容，也不能被改權限之外的動作影響
         assert_eq!(std::fs::read(&alias).unwrap(), b"old", "不可在舊 inode 上原地截斷寫入");
         assert_eq!(std::fs::read(&path).unwrap(), b"new-secret");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        // 發布失敗（目的地是非空目錄）：回錯、不留暫存檔
         let bad = dir.join("d");
         std::fs::create_dir_all(bad.join("x")).unwrap();
         assert!(write_private(&bad, b"secret").is_err());
@@ -638,7 +635,7 @@ mod pane_env_tests {
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener); // 沒人在聽：連線一定失敗，不會碰到真的主機。
+        drop(listener);
         let host_cfg = crate::config::HostCfg { name: "box".into(), ssh: "127.0.0.1".into(), ssh_port: port, ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()], herdr_session: "agents-manager".into(), remote_path: "/opt/tools/bin:$HOME/.local/bin".into(), ..Default::default() };
         env.app.hosts.apply_config(&env.app, &[host_cfg]).await;
         *env.app.hosts.get("box").await.unwrap().remote_home.lock().await = Some("/home/u".into());
@@ -698,12 +695,10 @@ mod pane_env_tests {
         assert_eq!(e["AM_DATA_DIR"], json!(env.app.data_dir.to_string_lossy()));
         assert_ne!(e["AM_DATA_DIR"], json!(""));
 
-        // 遠端 pane 的 bot 目錄在遠端家目錄，注入本機路徑只會誤導（§11.4）。
         remote_home(&env.app, "box", "/home/remote").await;
         let remote = pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap();
         assert!(remote.get("AM_DATA_DIR").is_none());
 
-        // 正式實例不設 AM_INSTANCE（舊 pane 也沒有，兩者一致）；隔離實例本機、遠端都要帶。
         assert!(e.get("AM_INSTANCE").is_none());
         env.app.set_instance(Some("a1b2".into()));
         for host in [LOCAL_HOST, "box"] {
@@ -711,7 +706,6 @@ mod pane_env_tests {
             assert_eq!(iso["AM_INSTANCE"], json!("a1b2"), "{host}");
         }
 
-        // identity.env 寫保留鍵：設定寫入就被擋（驗證在 config 層）。
         let refused = env
             .app
             .cfg
@@ -728,12 +722,9 @@ mod pane_env_tests {
             .await;
         assert!(format!("{refused:?}").contains("reserved"), "identity.env 的 AM_* 要在寫入時被擋：{refused:?}");
 
-        // bot.env 的偽造值蓋不過去、identity 的一般鍵照舊生效：真的走 pane_env 的合併順序。
         env.app
             .cfg
             .update(|cfg| {
-                // 這個測試測的是 pane_env 的合併順序，不是身份的 host 範圍：兩台各放一份同名的，
-                // 本機那份不寫 host（＝現行 config.toml 的形狀），遠端那份明寫 host（SPEC §16.2）。
                 let forged = || -> std::collections::BTreeMap<String, String> {
                     [("ID_ONLY", "kept")]
                         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -824,7 +815,6 @@ mod remote_install_permission_tests {
 
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
         let dir = home.join(crate::hosts::REMOTE_ROOT).join("bots").join(&bot.id);
-        // 升級前留下來的：目錄 0755、spool 0644。
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let spool = dir.join("hook-spool.jsonl");
@@ -1072,11 +1062,9 @@ mod codex_stop_args_tests {
         assert_eq!(untrusted, legacy);
         assert!(!untrusted.contains(&"notify=[]".into()));
         assert!(!home.join("config.toml").exists(), "installer never creates trust state");
-        // 啟動不註冊未信任的 handler（#1989）：hooks.json 不會因為啟動而出現。
         let hooks_path = home.join("hooks.json");
         assert!(!hooks_path.exists(), "a start never registers an untrusted Stop handler");
         let key = format!("{}:stop:0:0", hooks_path.display());
-        // A user-owned trust record must remain untouched and must not disable legacy.
         let reviewed = format!("[hooks.state.{key:?}]\ntrusted_hash=\"user-owned-sentinel\"\n");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), &reviewed).unwrap();
@@ -1085,9 +1073,7 @@ mod codex_stop_args_tests {
         assert!(!trusted.contains(&"notify=[]".into()));
         assert!(!hooks_path.exists());
         assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), reviewed);
-        // Exact trusted hash (what Codex records after review): legacy notify is replaced by notify=[] (phase two, #1989).
         let command = am_base::hosts::sh_quote(&env.app.data_dir.join("codex-hook.sh").to_string_lossy());
-        // 使用者確認後才註冊（與 POST /api/codex/stop-hook/trust 同一條路徑）；之後的 config 就是確認時寫的那一鍵。
         am_base::codex_hook::install_and_trust_local(&home, &env.app.data_dir, env.app.instance().as_deref()).unwrap();
         let good = format!("[hooks.state.{key:?}]\ntrusted_hash={:?}\n", am_base::codex_hook::stop_hook_trust_hash(&command));
         std::fs::write(home.join("config.toml"), &good).unwrap();
@@ -1207,18 +1193,15 @@ mod codex_stop_args_tests {
         assert_eq!(std::fs::read_to_string(dir.join("config.toml")).unwrap(), third_party);
         assert_eq!(backups(&dir, "hooks.json.am-bak-"), 1);
         assert_eq!(backups(&dir, "config.toml.am-bak-"), 0);
-        // 沒有我們的項目：再跑一次什麼都不寫。
         let settled = std::fs::read(&hooks_path).unwrap();
         assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, false).await);
         assert_eq!(std::fs::read(&hooks_path).unwrap(), settled);
         assert_eq!(backups(&dir, "hooks.json.am-bak-"), 1);
 
-        // 使用者確認後安裝並信任：開關開著時保留。
         am_base::codex_hook::install_and_trust_remote(&conn, &codex_home, &root, env.app.instance().as_deref()).await.unwrap();
         let trusted = std::fs::read(&hooks_path).unwrap();
         assert!(reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, true).await, "trusted: kept");
         assert_eq!(std::fs::read(&hooks_path).unwrap(), trusted);
-        // 開關關掉：handler 與它自己的信任項一起移除，第三方的信任還在。
         assert!(!reconcile_remote_stop_hook(&conn, &host, &codex_home, &command, false).await);
         let after = std::fs::read_to_string(&hooks_path).unwrap();
         assert!(!after.contains(&command) && after.contains("user-first") && after.contains("user-last"));

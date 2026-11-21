@@ -101,7 +101,6 @@ pub(crate) fn record_guarded(key: &str, gone: Gone, now: Instant) -> Option<(Vec
     }
     let mut table = table().lock().unwrap_or_else(|e| e.into_inner());
     let st = table.entry(key.to_string()).or_default();
-    // 待評估、或有評估正在進行（等維護 DB 查詢）的期間不照年齡清：它們還沒被評估完，不能先被保留期吃掉；筆數仍有 MAX_RECORDS 上限。
     if !st.recheck && st.evaluating == 0 {
         st.exits.retain(|g| now.saturating_duration_since(g.seen) < RETAIN);
     }
@@ -120,7 +119,6 @@ pub(crate) fn record_guarded(key: &str, gone: Gone, now: Instant) -> Option<(Vec
         return None;
     }
     st.quiet_until = None;
-    // 有待評估旗標：評估整份累積的記帳（旗標不管有沒有找到都清掉，找不到就是沒有東西欠著）。
     let must = if std::mem::take(&mut st.recheck) { None } else { Some(seen) };
     let wave = find_wave(&st.exits, must)?;
     st.quiet_until = Some(now + COOLDOWN);
@@ -313,7 +311,6 @@ fn note_later(app: &Arc<App>, runs: Vec<(String, String)>) {
 }
 
 fn note(app: &Arc<App>, who: Who, run_id: String, at: String) {
-    // 轉移當下到現在過了多久；時間戳壞了就當剛剛。
     let age = crate::db::parse_ts(&at).and_then(|t| (chrono::Utc::now() - t).to_std().ok()).unwrap_or_default();
     let now = Instant::now();
     let seen = now.checked_sub(age).unwrap_or(now);
@@ -325,7 +322,6 @@ fn note(app: &Arc<App>, who: Who, run_id: String, at: String) {
     crate::background_loop::spawn_named(
         &app.background_tasks.clone(),
         "gone burst alert",
-        // 達門檻才讀維護歷史（不在記帳的路徑上）。
         Box::pin(async move { alert(&app, &key, &host, wave, guard).await }),
     );
 }
@@ -445,7 +441,6 @@ async fn push(app: &Arc<App>, host: &str, wave: &[Gone]) -> anyhow::Result<()> {
         detail,
         "不是 daemon 的 stop／restart、也不是計畫中的 herdr 維護：查那台 host 上有沒有範圍過大的 pkill／killall／kill -9 -1、OOM 或整台重啟，也可能是使用者一次手動關了多個 pane（daemon.log 搜 `agent gone`／`pane exited`）；autostart 的 bot 照原本規則補開，其餘要人手 `start?resume=native`。",
     );
-    // key 帶窗內最早那顆 run：daemon 重啟後同一波重推也會被 INSERT OR IGNORE 吞掉。
     let first_run = wave.first().map(|g| g.run_id.as_str()).unwrap_or_default();
     let key = format!("ops_alert:daemon:agents_gone_burst:{host}:{first_run}");
     if crate::supervisor_inbox::push_ops_alert(&app.db, &key, None, &payload).await?.is_some() {
@@ -466,8 +461,6 @@ mod tests {
     fn gone(bot: &str, at: Instant) -> Gone {
         Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: String::new(), seen: at }
     }
-
-    // ---- 記帳（純記憶體，時間由測試給）----
 
     #[test]
     fn individual_exits_do_not_alert_and_the_third_distinct_bot_does_once() {
@@ -507,7 +500,6 @@ mod tests {
         let k = "t-late";
         let t = Instant::now();
         let at = |s: u64| t + Duration::from_secs(s);
-        // 事件時間 0／14／28，第三顆到第 31 秒才確認到：前兩顆還在歷史裡。
         assert!(record_at(k, gone("a", at(0)), at(3)).is_none());
         assert!(record_at(k, gone("b", at(14)), at(17)).is_none());
         let wave = record_at(k, gone("c", at(28)), at(31)).expect("28 秒內三顆");
@@ -533,7 +525,6 @@ mod tests {
         let now = Instant::now();
         let ago = |s: u64| now - Duration::from_secs(s);
         let at = |s: i64| db::iso_in(-s);
-        // 維護窗口：100 秒前開、20 秒前到期（還沒被關）；M 在窗內、A–C 在窗後。
         sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
             .bind(at(100))
             .bind(at(20))
@@ -601,7 +592,6 @@ mod tests {
             let st = t.get(k).unwrap();
             assert!(st.recheck && st.quiet_until.is_none(), "留下待評估旗標、冷卻解除");
         }
-        // 下一次記帳：D 離 A–C 超過一個窗口，不靠旗標只會看到 D 一顆。
         let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
         let wave = record_at(k, mk("d", 5), now).expect("旗標讓累積的 A–C 被評估");
         let mut names: Vec<_> = wave.iter().map(|g| g.bot_id.clone()).filter(|b| !b.starts_with('m')).collect();
@@ -615,7 +605,6 @@ mod tests {
         let env = tt::env().await;
         let (k, now) = ("t-outlast", Instant::now());
         let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: db::iso_in(-(s as i64)), seen: now - Duration::from_secs(s) };
-        // 維護窗口：100 秒前開、57 秒前到期；M（59 秒前）在窗內，A–C（25 秒前）在窗後，離 M 超過一個窗口。
         sqlx::query("INSERT OR REPLACE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,'patrol','test')")
             .bind(db::iso_in(-100))
             .bind(db::iso_in(-57))
@@ -629,7 +618,6 @@ mod tests {
         for b in ["a", "b", "c"] {
             assert!(record_at(k, mk(b, 25), now).is_none(), "冷卻中");
         }
-        // 讀維護歷史的 DB 查詢「花了 40 秒」：A–C 已經比保留期（60 秒）還舊。
         crate::race_point::arm("gone_burst_round", k, || async { SKEW.with(|s| s.set(Duration::from_secs(40))) });
         alert(&env.app, k, config::LOCAL_HOST, candidate, Evaluating::enter(k)).await;
         SKEW.with(|s| s.set(Duration::ZERO));
@@ -646,10 +634,9 @@ mod tests {
     fn the_evaluation_guard_is_taken_with_the_wave_so_another_record_cannot_expire_it() {
         let t = Instant::now();
         let mk = |bot: &str, s: u64| Gone { bot_id: bot.into(), name: bot.into(), run_id: format!("run-{bot}"), at: String::new(), seen: t - Duration::from_secs(s) };
-        let later = t + Duration::from_secs(40); // A–C 這時已經 65 秒前
+        let later = t + Duration::from_secs(40);
         let remaining = |k: &str| table().lock().unwrap().get(k).unwrap().exits.iter().filter(|g| ["a", "b", "c"].contains(&g.bot_id.as_str())).count();
 
-        // 路徑一：背景重評估領走待辦。
         let k = "t-handoff-pending";
         for b in ["a", "b", "c"] {
             record_at(k, mk(b, 25), t);
@@ -662,11 +649,10 @@ mod tests {
         }
         let (wave, guard) = take_pending(k, t).expect("待辦領得到");
         assert_eq!(wave.len(), 3);
-        record_at(k, mk("x", 0), later); // 另一個執行緒的記帳在這個空檔進來
+        record_at(k, mk("x", 0), later);
         assert_eq!(remaining(k), 3, "領取當下就有保護：A–C 沒被清");
         drop(guard);
 
-        // 路徑二：記帳湊成一波，交給 alert 之前。
         let k = "t-handoff-record";
         record_at(k, mk("a", 25), t);
         record_at(k, mk("b", 25), t);
@@ -740,8 +726,6 @@ mod tests {
         assert!(table().lock().unwrap().get(k).unwrap().exits.len() <= MAX_RECORDS);
     }
 
-    // ---- 端到端（wrapper → 記帳 → spawn 推 inbox）----
-
     async fn alerts(app: &Arc<crate::state::App>) -> Vec<serde_json::Value> {
         crate::supervisor::store::inbox(&app.db, 100)
             .await
@@ -803,7 +787,6 @@ mod tests {
     async fn the_dead_pane_sweep_wrapper_counts_the_runs_it_ended() {
         use crate::lifecycle::s6_ports::RelayWatchServices;
         let env = tt::env().await;
-        // fake_run 的 pane 在 herdr 裡不存在：sweep 會把它們收成 `pane gone`。
         let runs = running(&env, &["a", "b", "c"]).await;
         let swept = env.app.sweep_dead_panes().await;
         assert_eq!(swept.len(), 3, "{swept:?} for {runs:?}");
@@ -836,7 +819,6 @@ mod tests {
         let swept: Vec<(String, ExitProof)> = runs
             .iter()
             .enumerate()
-            // 一顆在一分鐘前、其餘剛剛：窗是 30 秒，不能因為同一輪掃描一起回傳就算同一波。
             .map(|(n, (_, id))| (id.clone(), ExitProof { from_stopping: false, at: db::iso_in(if n == 0 { -60 } else { 0 }) }))
             .collect();
         after_sweep(&env.app, swept);
@@ -857,7 +839,6 @@ mod tests {
             });
             assert_eq!(env.app.mark_run_exited(run, "pane exited").await, RunExit::Recorded);
             if n == 0 {
-                // stop：之後改標回 stopped；其餘（restart）一直是 exited。
                 crate::lifecycle::run_state::relabel(&env.app.db, run, "exited", "stopped").await.unwrap();
             }
         }
@@ -908,7 +889,6 @@ mod tests {
         for (_, run) in &during {
             env.app.mark_run_exited(run, "agent not found during reconcile").await;
         }
-        // 窗口在背景確認讀到之前就被關掉（列已刪）：證據要從關窗的稽核 note 找回來。
         crate::runners::herdr_maintenance::close_as(&env.app, &w, "patrol", None).await.unwrap();
         let after = running(&env, &["p1", "p2", "p3"]).await;
         env.app.mark_run_exited(&after[0].1, "pane exited").await;

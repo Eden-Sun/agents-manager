@@ -86,7 +86,6 @@ pub async fn sweep(app: &Arc<App>) {
             tracing::warn!(project = %project_id, error = ?e, "relay deputy sweep failed");
         }
     }
-    // 摘要不看專案現在有沒有副管理者：換人、清掉設定之前代處理過的也要回報給管理者。
     let managers: Vec<String> = sqlx::query_scalar("SELECT DISTINCT redirected_from FROM relay_requests WHERE redirected_from IS NOT NULL AND digest_at IS NULL AND state IN ('answered','notified','failed')")
         .fetch_all(&app.db).await.unwrap_or_default();
     for manager_id in managers {
@@ -119,13 +118,11 @@ async fn redirect(app: &Arc<App>, manager_id: &str, deputy_id: &str, after_sec: 
     for (id, prompt_text) in ids {
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{id}"));
         let Ok(_guard) = lock.try_lock() else { continue };
-        // CAS：這段時間若已經送出（有 turn）或被別人改掉，就不動；改派後 UNIQUE(from,to,client_request_id) 撞到也略過。
         let moved = sqlx::query("UPDATE OR IGNORE relay_requests SET to_bot_id=?,redirected_from=?,redirected_at=?,attempts=0,error=NULL WHERE id=? AND state='pending' AND to_turn_id IS NULL AND to_bot_id=? AND redirected_from IS NULL AND NOT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id='relay-request:'||relay_requests.id)")
             .bind(deputy_id).bind(manager_id).bind(db::now()).bind(&id).bind(manager_id).bind(manager_id)
             .execute(&app.db).await?.rows_affected();
         if moved == 1 {
             tracing::info!(request = %id, manager = %manager_id, deputy = %deputy_id, "relay request redirected to the deputy manager");
-            // 綁在這則請求上、主還沒接手的帳本事項一起改承辦給副手（只改承辦，不動狀態）。
             if let Some(pid) = project_id.as_deref() {
                 if let Err(e) = am_base::ledger::redirect_to_deputy(&app.db, pid, manager_id, deputy_id, &id, &prompt_text).await {
                     tracing::warn!(request = %id, error = ?e, "ledger items could not follow the redirect");
@@ -144,9 +141,7 @@ async fn digest(app: &Arc<App>, manager_id: &str) -> anyhow::Result<()> {
     if rows.is_empty() { return Ok(()) }
     let mut message = compose_digest(&rows);
     let crid = format!("{DIGEST_PREFIX}{}", rows[0].0);
-    // 通知的寄件者記成處理的那位副管理者（UI 把泡泡畫在左邊）。
     let sender: String = sqlx::query_scalar("SELECT to_bot_id FROM relay_requests WHERE id=?").bind(&rows[0].0).fetch_one(&app.db).await?;
-    // 帳本對帳三組（只列、不轉移承辦）。
     let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM bots WHERE id=?").bind(manager_id).fetch_optional(&app.db).await?;
     if let Some(pid) = project_id {
         let groups = match am_base::ledger::digest_groups(&app.db, &pid, &sender).await {
@@ -169,7 +164,6 @@ async fn digest(app: &Arc<App>, manager_id: &str) -> anyhow::Result<()> {
                 sqlx::query("UPDATE relay_requests SET digest_at=? WHERE id=? AND digest_at IS NULL").bind(&now).bind(id).execute(&app.db).await?;
             }
         }
-        // 管理者的佇列格被別的通知占著、或輸入框有草稿：下一輪再試。
         Err(LcError::Conflict(_)) => {}
         Err(e) => tracing::warn!(manager = %manager_id, error = ?e, "deputy digest could not be queued"),
     }
@@ -179,7 +173,6 @@ async fn digest(app: &Arc<App>, manager_id: &str) -> anyhow::Result<()> {
 /// 代班中的副管理者可以 start／restart，也可以改同專案成員的模型／強度／快速／名稱（管理者本人與自己除外）；停止、刪除、設角色、hire 都不行。
 pub async fn may_restart(app: &Arc<App>, caller: &str, method: &str, parts: &[impl AsRef<str>], target: &db::Bot) -> bool {
     let sub = parts.get(3).map(|p| p.as_ref());
-    // 代班副管理者：跟管理者同層級，可啟動／重啟，也可改模型／強度／快速／名稱（PATCH 欄位範圍在 patch_bot 驗）。
     let restart = method == "POST" && parts.len() == 4 && matches!(sub, Some("start" | "restart"));
     let patch = method == "PATCH" && parts.len() == 3;
     if !(restart || patch) { return false }
@@ -283,25 +276,20 @@ mod tests {
         let app = &f.env.app;
         let old = request(&f, 120, "k-old").await;
         let young = request(&f, 5, "k-young").await;
-        // 管理者閒著：不動。
         status(&f, &f.manager, "idle").await;
         sweep(app).await;
         assert_eq!(target(&f, &old).await, (f.manager.clone(), None));
-        // 管理者忙、副管理者也忙：不動。
         status(&f, &f.manager, "working").await;
         status(&f, &f.deputy, "working").await;
         sweep(app).await;
         assert_eq!(target(&f, &old).await.0, f.manager);
-        // 副管理者閒著：只動排超過門檻的那則。
         status(&f, &f.deputy, "idle").await;
         sweep(app).await;
         assert_eq!(target(&f, &old).await, (f.deputy.clone(), Some(f.manager.clone())));
         assert_eq!(target(&f, &young).await, (f.manager.clone(), None), "還沒到門檻");
-        // 已改派的請求還沒做完，不再加第二則。
         sqlx::query("UPDATE relay_requests SET created_at=? WHERE id=?").bind((chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).bind(&young).execute(&app.db).await.unwrap();
         sweep(app).await;
         assert_eq!(target(&f, &young).await.0, f.manager);
-        // 已經有 turn 的（送出中）不改派。
         sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&old).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE relay_requests SET to_turn_id=NULL WHERE id=?").bind(&young).execute(&app.db).await.unwrap();
         let conv = db::conversation_id(&app.db, &f.manager).await.unwrap();
@@ -328,21 +316,16 @@ mod tests {
         let f = fx().await;
         let app = &f.env.app;
         let id = request(&f, 600, "k").await;
-        // 改派前：asker 不能直接找 deputy 以外的……且 deputy 不能對執行者派工。
         assert!(matches!(relay_prompt_allowed(app, &f.deputy, &f.worker, Admission::NewRequest).await, Err(RelayDenied::Denied(_))));
         status(&f, &f.manager, "working").await;
         sweep(app).await;
         assert_eq!(target(&f, &id).await.0, f.deputy);
-        // 送達授權：asker（specialist）本來不能找 specialist／顧問以外，但這是改派來的。
         sqlx::query("UPDATE bots SET role='specialist', track='x' WHERE id=?").bind(&f.deputy).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET runtime_role_policy=? WHERE bot_id=?").bind(format!("{}:local:expert:specialist", f.env.project_id)).bind(&f.deputy).execute(&app.db).await.unwrap();
-        // 專家派工開關關掉：這裡只驗代班本身給的派工權限（開著時專家本來就能派給執行者）。
         sqlx::query("UPDATE projects SET specialist_dispatch=0 WHERE id=?").bind(&f.env.project_id).execute(&app.db).await.unwrap();
         assert!(relay_prompt_allowed(app, &f.asker, &f.deputy, Admission::Deliver).await.is_ok());
-        // 代班中：可對執行者派工。
         assert!(acting(app, &f.deputy).await);
         assert!(relay_prompt_allowed(app, &f.deputy, &f.worker, Admission::NewRequest).await.is_ok());
-        // 可 start／restart 成員，不能 stop／刪除，也不能動管理者。
         let worker = db::bot(&app.db, &f.worker).await.unwrap().unwrap();
         let manager = db::bot(&app.db, &f.manager).await.unwrap().unwrap();
         let parts = |bot: &str, sub: &str| vec!["api".to_string(), "bots".to_string(), bot.to_string(), sub.to_string()];
@@ -350,7 +333,6 @@ mod tests {
         assert!(may_restart(app, &f.deputy, "POST", &parts(&f.worker, "start"), &worker).await);
         assert!(!may_restart(app, &f.deputy, "POST", &parts(&f.worker, "stop"), &worker).await);
         assert!(!may_restart(app, &f.deputy, "POST", &parts(&f.manager, "restart"), &manager).await);
-        // 請求做完：不再代班，派工權限收回。
         sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();
         assert!(!acting(app, &f.deputy).await);
         assert!(matches!(relay_prompt_allowed(app, &f.deputy, &f.worker, Admission::NewRequest).await, Err(RelayDenied::Denied(_))));
@@ -380,11 +362,9 @@ mod tests {
         status(&f, &f.manager, "working").await;
         sweep(app).await;
         sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();
-        // 管理者還在回合中：不送摘要。
         sweep(app).await;
         let pending: bool = sqlx::query_scalar("SELECT digest_at IS NULL FROM relay_requests WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap();
         assert!(pending);
-        // 閒下來（hook 的 idle 比回合結尾早一拍，所以這裡讓管理者還有一個 in_flight 的回合）：摘要排進它的佇列。
         let conv = db::conversation_id(&app.db, &f.manager).await.unwrap();
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&f.manager).fetch_one(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('t-live',?,?,'web','in_flight','ok',?)").bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
@@ -420,11 +400,9 @@ mod tests {
         let col = |pool: &sqlx::SqlitePool| { let pool = pool.clone(); async move { sqlx::query_as::<_, (Option<String>, Option<i64>)>("SELECT deputy_bot_id,deputy_after_sec FROM projects WHERE id='p1'").fetch_one(&pool).await.unwrap() } };
         assert_eq!(col(&pool).await, (Some("adv".into()), Some(90)), "設定投影進 DB");
 
-        // 換一個仍然合格的人：保留（不被誤清）。
         crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].deputy = Some(DeputyCfg { bot_id: "adv2".into(), after_sec: 120 }); Ok(()) }).await.unwrap();
         assert_eq!(col(&pool).await, (Some("adv2".into()), Some(120)));
 
-        // 被設成執行者／管理者 → 清掉。
         for role in ["executor", "manager"] {
             crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].deputy = Some(DeputyCfg { bot_id: "adv".into(), after_sec: 90 }); Ok(()) }).await.unwrap();
             crate::projection::update_and_project(&store, &pool, |cfg| {
@@ -446,12 +424,10 @@ mod tests {
             }).await.unwrap();
         }
 
-        // 被刪 → 清掉。
         crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].deputy = Some(DeputyCfg { bot_id: "adv".into(), after_sec: 90 }); Ok(()) }).await.unwrap();
         crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].bots.retain(|b| b.id.as_deref() != Some("adv")); Ok(()) }).await.unwrap();
         assert_eq!(col(&pool).await, (None, None), "bot 被刪");
 
-        // 離開專家模式 → 清掉。
         crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].deputy = Some(DeputyCfg { bot_id: "adv2".into(), after_sec: 90 }); Ok(()) }).await.unwrap();
         crate::projection::update_and_project(&store, &pool, |cfg| { cfg.projects[0].mode = "parent_child".into(); Ok(()) }).await.unwrap();
         assert_eq!(col(&pool).await, (None, None), "專案不再是專家模式");
@@ -473,10 +449,8 @@ mod tests {
         assert_eq!(owner1.as_deref(), Some(f.deputy.as_str()), "綁定事項直接由副手承辦");
         let dep_actor = format!("bot:{}", f.deputy);
         let answered = am_base::ledger::patch_item_cas(&app.db, &pid, &l1, 1, &dep_actor, am_base::ledger::LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
-        // 副手另開一件仍在做（承辦仍是副手）、再交回一件待主接手（承辦 NULL）。
         am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "副仍在做的事".into(), status: Some("following".into()), owner_bot_id: Some(f.deputy.clone()), ..Default::default() }).await.unwrap();
         am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "要主接手的事".into(), status: Some("following".into()), ..Default::default() }).await.unwrap();
-        // 管理者閒下來，摘要排進它的佇列（同 digest 測試：先放一個進行中的回合）。
         sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();
         let conv = db::conversation_id(&app.db, &f.manager).await.unwrap();
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&f.manager).fetch_one(&app.db).await.unwrap();

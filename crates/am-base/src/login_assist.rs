@@ -131,11 +131,9 @@ fn failure_line<S: AsRef<str>>(lines: &[S]) -> Option<String> {
 pub fn parse_screen(text: &str) -> LoginScreen {
     let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
     let mut out = LoginScreen::default();
-    // 網址：由下往上找最後一個 https:// 起頭的 token，後面沒有空白的整列都是被硬折下來的尾巴。
     'find: for (i, line) in lines.iter().enumerate().rev() {
         let Some(at) = line.find("https://") else { continue };
         let mut url: String = line[at..].split_whitespace().next().unwrap_or("").to_string();
-        // 這個 token 後面還有字（空白之後）＝整個網址就在這一列、不會折到下一列。
         let token_ends_line = line[at..].trim_end().len() == url.len();
         if token_ends_line {
             for next in &lines[i + 1..] {
@@ -185,13 +183,9 @@ pub fn claim_code_send(app: &impl crate::login_assist::LoginPanes, host: &str, p
     if entry.code_sent {
         return Err(code_already_sent());
     }
-    // Claim before the RPC: concurrent POSTs must not both reach the pane. On an ambiguous RPC
-    // failure the User closes/reopens the pane instead of risking a duplicate one-time code.
     entry.code_sent = true;
     Ok(())
 }
-
-
 
 /// 登入輔助開出的 pane。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait LoginPanes: Send + Sync {

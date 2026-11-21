@@ -154,7 +154,6 @@ mod tests {
         let bot = tt::claude_bot(&app, &env.project_id, "left-down").await;
         start_bot(&app, &bot.id).await.unwrap();
         let queued = queued_turn(&app, &bot.id).await;
-        // 換成這台沒有的身份：stop 做完之後 start 會拒絕（不會退回預設帳號，GH #83）。
         sqlx::query("UPDATE bots SET identity='ghost' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         assert!(restart_bot_with(&app, &bot.id, StartOpts::default()).await.is_err());
         assert!(db::active_run(&app.db, &bot.id).await.unwrap().is_none(), "bot 沒回來");

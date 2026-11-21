@@ -5,7 +5,6 @@
 //! （`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`、codex `project_doc_max_bytes=0`），內容只有一個來源：設定指到的檔，
 //! 接在 AG Man 規則後面注入。子 agent 經 herdr shim 拿同一份（`AM_INSTRUCTIONS_FILE`）。
 
-
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::hosts::sh_quote;
@@ -82,7 +81,6 @@ async fn load_documents(app: &(impl crate::capabilities::Cfg + crate::hosts::Hos
     }
     collect(reads)
 }
-
 
 /// Stable per-source fingerprints make startup snapshots identifiable without changing the
 /// prompt on every restart. Empty documents must still reach `collect` as empty documents.
@@ -230,7 +228,6 @@ fn patch_codex_profile(
             .filter(|&&b| b == b'\n')
             .count()
             + 1;
-        // TomlError's Display/Debug includes the source; only expose a safe location.
         profile_error(
             path,
             &format!("第 {line} 行無法解析；請修好這個檔或刪掉它，就會重新產生"),
@@ -261,8 +258,6 @@ fn patch_codex_profile(
             doc.insert("developer_instructions", toml_edit::value(instructions));
         }
     }
-    // DocumentMut's whole-document formatter normalizes CRLF. Render only the edited value;
-    // the original byte slices retain all other nodes, comments, decor, ordering and line endings.
     let mut edited = doc["developer_instructions"].as_value().unwrap().clone();
     edited.decor_mut().clear();
     let token = edited.to_string();
@@ -275,7 +270,6 @@ fn patch_codex_profile(
             .ok_or_else(|| profile_error(path, "無法安全定位指示欄位，請檢查檔案後重試"))?;
         Ok(format!("{prefix}{token}{suffix}"))
     } else {
-        // A new root key must precede existing tables. Keep every pre-existing byte in order.
         let newline = if previous.contains("\r\n") {
             "\r\n"
         } else {
@@ -319,7 +313,6 @@ fn decode_remote_profile(path: &str, reply: &str) -> Result<String, ProfileError
         .strip_prefix("AM_PROFILE_PRESENT\n")
         .and_then(|body| body.strip_suffix("\nAM_PROFILE_END\n"))
         .ok_or_else(decode_error)?;
-    // The ASCII envelope avoids lossy UTF-8 conversion in the SSH transport.
     let compact: String = encoded.split_whitespace().collect();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(compact)
@@ -486,7 +479,6 @@ mod tests {
         assert!(s.starts_with("## 使用者時區\n"), "{s}");
         assert!(s.contains("使用者時區：Asia/Taipei（目前 UTC+8）"), "{s}");
         assert!(s.contains("`(+8)`"), "{s}");
-        // 設定壞掉（手改成不認得的名稱）就退回預設時區，不讓 bot 沒有時區段。
         let bad = time_zone_section("Mars/Olympus");
         assert!(bad.contains("使用者時區：Asia/Taipei（目前 UTC+8）"), "{bad}");
     }
@@ -544,7 +536,6 @@ mod tests {
         assert_eq!(got.problems.len(), 1, "{:?}", got.problems);
         assert_eq!(got.unreadable.len(), 1, "{:?}", got.unreadable);
         assert!(!got.cli_docs_disabled(), "有一份讀不到：CLI 自己的指示檔不關（#769 方案 A），不然 bot 兩邊都沒規則");
-        // 每一份都讀到才關；空檔不是「讀不到」（檔在、只是沒內容），照舊關。
         let all = collect(vec![read_local(ok.to_str().unwrap()).await]);
         assert!(all.cli_docs_disabled());
         let empty = collect(vec![Ok("GLOBAL".into()), Ok("  \n".into())]);

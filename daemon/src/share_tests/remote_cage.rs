@@ -37,7 +37,6 @@ impl FakeHost {
 /// `version`：空字串＝找不到 claude。
 async fn fake_host(e: &tt::Env, tag: &str, version: &str, managed: bool) -> FakeHost {
     let home = tt::scratch_dir(&format!("rs2-{tag}"));
-    // 主機名稱上限 32 字（`[a-z][a-z0-9_-]{0,31}`）：標籤＋ULID 前 8 碼。
     let host = format!("rs2-{tag}-{}", &db::ulid().to_lowercase()[..8]);
     remote_fs::test_support::local_sh_fake(&host, &home);
     let version = Arc::new(Mutex::new(version.to_string()));
@@ -87,8 +86,6 @@ async fn bind_project_host(e: &tt::Env, host: &str) {
     sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&e.project_id).execute(&e.app.db).await.unwrap();
 }
 
-// ───────────────────────── 版本與 managed settings（純函式） ─────────────────────────
-
 #[test]
 fn claude_versions_compare_segment_by_segment() {
     assert_eq!(remote_fs::parse_claude_version("2.1.288 (Claude Code)\n").as_deref(), Some("2.1.288"));
@@ -100,8 +97,6 @@ fn claude_versions_compare_segment_by_segment() {
     assert!(!remote_fs::version_at_least("", "2.1.288"));
     assert!(!remote_fs::version_at_least("abc", "2.1.288"));
 }
-
-// ───────────────────────── 建資料夾 ─────────────────────────
 
 /// 新資料夾建在遠端家目錄的 `shared-bots/` 底下，inbox 0700，`shared_bots` 記的是遠端的實體路徑。
 #[tokio::test]
@@ -213,8 +208,6 @@ async fn an_unreachable_host_is_409_and_writes_nothing() {
     assert!(!f.home.join("shared-bots/x").exists());
 }
 
-// ───────────────────────── preflight（受限才查 claude 與 managed） ─────────────────────────
-
 /// claude 太舊或讀不到、有 managed settings：受限建立 409；信任分享不查（本來就沒有籠子）。
 #[tokio::test]
 async fn preflight_refuses_old_claude_and_managed_settings_for_restricted_only() {
@@ -270,8 +263,6 @@ async fn preflight_does_not_read_claude_version_from_a_banner() {
     );
 }
 
-// ───────────────────────── 啟動 ─────────────────────────
-
 /// 每次啟動都重跑 preflight：建好之後 claude 被換成舊版，這次啟動就不起來；換回新版又能起。
 #[tokio::test]
 async fn starting_a_remote_restricted_bot_reruns_the_preflight() {
@@ -323,8 +314,6 @@ async fn the_remote_system_prompt_is_written_privately_and_verified() {
     assert_eq!(mode(&want_dir), 0o700);
 }
 
-// ───────────────────────── 刪 bot ─────────────────────────
-
 /// 刪遠端分享 bot：遠端資料夾不搬、不刪，也沒有任何腳本碰到它（替身斷言）。
 #[tokio::test]
 async fn deleting_a_remote_share_bot_never_touches_its_folder() {
@@ -343,8 +332,6 @@ async fn deleting_a_remote_share_bot_never_touches_its_folder() {
     assert!(after[before..].iter().all(|s| !s.contains(&ws)), "沒有任何腳本碰到遠端的資料夾");
     assert_eq!(std::fs::read(Path::new(&ws).join("notes.txt")).unwrap(), b"mine", "資料夾與裡面的檔案都還在");
 }
-
-// ───────────────────────── HTTP：建 bot 的 409 ─────────────────────────
 
 async fn serve(router: axum::Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -414,25 +401,20 @@ async fn remote_share_rollback_never_deletes_a_local_dir_with_the_same_path() {
     let f = fake_host(&e, "rb", cage::MIN_CLAUDE, false).await;
     let b = tt::claude_bot(&e.app, &e.project_id, "rs2-rb").await;
 
-    // 先 reserve_share_bot_on(..New{name:"keepme"}..) 拿到遠端 ws
     let folder = folder::ShareFolderIn::New { name: "keepme".into() };
     let (ws, made) = admin::reserve_share_bot_on(&e.app, &f.host, &b.id, store::PROFILE_RESTRICTED, &folder, false).await.unwrap();
     assert!(made);
     let ws_path = PathBuf::from(&ws);
     assert!(ws_path.is_dir(), "假遠端的 ws 目錄已建立");
 
-    // 在 tempdir 建本機目錄 P/keep.txt
     let p_dir = tt::scratch_dir("local-same-path");
     let keep_file = p_dir.join("keep.txt");
     std::fs::write(&keep_file, "must not be deleted").unwrap();
     let p_str = p_dir.to_str().unwrap();
 
-    // 呼叫 finish_share_bot_on(&e.app, &f.host, &b.id, &ws, true, false)，
-    // 另外把 P 當 workspace 再呼叫一次 finish_share_bot_on(&e.app, &f.host, &b.id, P, true, false)。
     admin::finish_share_bot_on(&e.app, &f.host, &b.id, &ws, true, false).await;
     admin::finish_share_bot_on(&e.app, &f.host, &b.id, p_str, true, false).await;
 
-    // 斷言：本機 P/keep.txt 仍在；假遠端的 ws 目錄已不存在（被 rmdir）；shared_bots 沒有這顆。
     assert!(keep_file.exists(), "本機 P/keep.txt 仍在");
     assert!(!ws_path.exists(), "假遠端的 ws 目錄已不存在（被 rmdir）");
     assert!(!store::is_share_bot(&e.app.db, &b.id).await.unwrap(), "shared_bots 沒有這顆");

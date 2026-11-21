@@ -94,7 +94,6 @@ fn check_text(field: &str, s: &str, max: usize, single_line: bool, errs: &mut Ve
     if single_line && t.contains('\n') {
         errs.push(format!("issue 提案的 {field} 只能一行"));
     }
-    // 隱藏標記是去重的鍵，只有 daemon 能寫。
     if t.contains("<!--") || t.contains(MARKER_PREFIX) {
         errs.push(format!("issue 提案的 {field} 不能含 `<!--` 或 `{MARKER_PREFIX}`（去重標記由 daemon 產生）"));
     }

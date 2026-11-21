@@ -48,7 +48,6 @@ pub fn record(key: &str, took: Duration) {
     let mut g = samples().lock().unwrap_or_else(|e| e.into_inner());
     let q = g.entry(key.to_string()).or_default();
     q.push_back((now, took.as_millis().min(u64::MAX as u128) as u64));
-    // 先丟窗口外的，再丟超量的最舊那幾筆。
     while q.front().is_some_and(|(at, _)| now.duration_since(*at) > WINDOW) {
         q.pop_front();
     }
@@ -62,7 +61,6 @@ fn pct(sorted: &[u64], p: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    // 最近鄰：p95 要的是「95% 的樣本不比它大」，不是內插出一個沒發生過的數字。
     let idx = (sorted.len() * p).div_ceil(100).saturating_sub(1);
     sorted[idx.min(sorted.len() - 1)]
 }
@@ -75,7 +73,6 @@ fn pct(sorted: &[u64], p: usize) -> u64 {
 /// 複製的成本是一次 memcpy，比排序便宜得多，而且不擋別人寫。
 pub fn snapshot() -> Value {
     let now = Instant::now();
-    // 鎖內只做這一件事：把窗口內的數字抄出來。
     let copied: Vec<(String, Vec<u64>)> = {
         let g = samples().lock().unwrap_or_else(|e| e.into_inner());
         g.iter()
@@ -156,7 +153,6 @@ pub fn note_lock_wait(at: &'static std::panic::Location<'static>, waited: Durati
 
 /// 放掉全域鎖了。持有時間本身不寫 log（握久不一定是問題，等的人久才是），只進統計。
 pub fn note_lock_hold(at: &'static std::panic::Location<'static>, held: Duration) {
-    // 測試探針：讓測試看得到「進到記帳這一步的當下」全域鎖放了沒。正式 build 沒有這段。
     #[cfg(test)]
     {
         let probe = hold_probe().lock().unwrap_or_else(|e| e.into_inner());
@@ -236,7 +232,6 @@ mod tests {
         assert_eq!(pct(&[7], 50), 7);
         assert_eq!(pct(&[7], 95), 7);
         assert_eq!(pct(&[], 50), 0, "沒有樣本回 0，不是 panic");
-        // 樣本數不整除時 p95 仍要落在實際樣本上（不內插）。
         assert_eq!(pct(&[1, 2, 3], 95), 3);
         assert_eq!(pct(&[1, 2, 3], 50), 2);
     }
@@ -278,11 +273,8 @@ mod tests {
         }
         let s = stats("tick:flood");
         assert_eq!(s["count"], json!(MAX_SAMPLES), "超量時丟最舊的");
-        // 丟掉的是最舊（最小）那幾筆，最大值還在。
         assert_eq!(s["max_ms"], json!((MAX_SAMPLES + 499) as u64));
     }
-
-    // ── 「只記超標的」：用 `config_audit::capture` 真的去讀寫出來的那幾行 ──
 
     /// 等鎖：超過 1 秒才寫，而且要寫出是**哪個拿鎖點**。持有時間只進統計、不寫 log。
     #[cfg(not(feature = "daemon-test-harness"))]
@@ -291,8 +283,6 @@ mod tests {
         let (logs, _guard) = crate::config_audit::capture::start();
         const SLOW_LINE: &str = "waited a long time for the supervisor lock";
         let at = std::panic::Location::caller();
-        // key 現在只有檔名（i204 審 #473），所以同一個檔裡的別條測試（那條 drop 順序的會真的拿一次鎖）
-        // 會寫進同一格：比增量，不比絕對值。
         let count = |key: String| snapshot()["stats"][key]["count"].as_u64().unwrap_or(0);
         let wait_key = format!("lock:wait:{}", site(at));
         let before = count(wait_key.clone());
@@ -308,7 +298,6 @@ mod tests {
         assert!(line.contains("waited_ms="), "{line}");
 
         assert_eq!(count(wait_key) - before, 2, "兩次都要進統計，只有一次進 log");
-        // hold 的 30 秒遠比別條測試寫進來的任何一筆大，比 max 仍然穩。
         assert_eq!(snapshot()["stats"][format!("lock:hold:{}", site(at))]["max_ms"], json!(30_000));
     }
 
@@ -327,7 +316,6 @@ mod tests {
         let mine = std::panic::Location::caller();
         let (sink, at) = (seen.clone(), mine);
         let _probe = probe_lock_hold(Box::new(move |who| {
-            // 只管自己那一把：平行跑的別的測試也會 drop guard，進來的不是我的就不看。
             if who.file() != at.file() {
                 return;
             }

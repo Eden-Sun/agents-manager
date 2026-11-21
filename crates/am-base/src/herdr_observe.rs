@@ -205,7 +205,6 @@ mod tests {
         let pane = std::env::var("AM_OBS_PANE").expect("AM_OBS_PANE");
         let client = crate::herdr::HerdrClient::new(sock);
         if let Ok(target) = std::env::var("AM_OBS_SSH_TARGET") {
-            // 遠端：送字走中繼、畫面走 ssh 起的 observe，與 hosts 連上後設的一樣。
             let ssh_opts: Vec<String> = std::env::var("AM_OBS_SSH_OPTS").unwrap_or_default().split_whitespace().map(str::to_string).collect();
             let remote_sock = std::env::var("AM_OBS_REMOTE_SOCK").expect("AM_OBS_REMOTE_SOCK");
             let mut relay_opts = ssh_opts.clone();
@@ -222,7 +221,6 @@ mod tests {
         let mut stream = ObserveStream::start(&client.observe_cmd(&pane, 80, 24)).expect("起 observe");
         let first = tokio::time::timeout(Duration::from_secs(20), stream.next()).await.expect("20 秒內要有第一幀");
         println!("first frame: {:?}", first.map(|m| matches!(m, ObserveMsg::Frame { full: true, .. })));
-        // 讓 shell 的提示字元與開機訊息靜下來，免得量到的是背景輸出。
         loop {
             if tokio::time::timeout(Duration::from_millis(800), stream.next()).await.is_err() {
                 break;
@@ -231,7 +229,6 @@ mod tests {
         let mut lat_ms = Vec::new();
         for i in 0..30 {
             let (key, text): (&str, Option<&str>) = if i % 2 == 0 { ("", Some("x")) } else { ("Backspace", None) };
-            // 送出的同時就開始計時；之後第一個進來的幀就是這次的回應。
             let t0 = Instant::now();
             match text {
                 Some(t) => client.pane_send_text(&pane, t).await.expect("send_text"),

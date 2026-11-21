@@ -25,7 +25,6 @@ async fn pre_additive_schema() -> SqlitePool {
 #[tokio::test]
 async fn inbox_lookups_by_state_walk_the_supervisor_state_index() {
     let p = pool().await;
-    // 歸屬的定義只有 `roles::OWNER` 一份（#504 的守門測試不准再抄一份），這裡照 `exhausted_inbox` 的寫法組出來。
     let owner = super::super::roles::OWNER;
     for (name, sql) in [
         (
@@ -49,14 +48,6 @@ async fn inbox_lookups_by_state_walk_the_supervisor_state_index() {
     }
 }
 
-// ------------------------------------------------ issue #831：先讀後寫的交易從 BEGIN 就拿寫鎖
-
-
-
-
-
-// ------------------------------------------------ issue #421：重申請不再累積 pending
-
 async fn request(p: &SqlitePool, commit: &str) -> ApprovalOutcome {
     create_approval_notifying(p, "agm-kick", "rebuild", "release rebuild", Some(commit), None, None, None, None, true).await.unwrap()
 }
@@ -79,10 +70,8 @@ async fn a_repeat_request_supersedes_the_pending_one_instead_of_piling_up() {
     assert!(second.created, "第二次是新的一筆");
     assert_eq!(second.superseded.as_deref(), Some(first.approval.id.as_str()), "舊的那筆被自動取代");
     assert_eq!(statuses(&p).await, vec![("c1".into(), "superseded".into()), ("c2".into(), "pending".into())]);
-    // 只剩一筆 pending，所以 AGM 只有一則要裁示的。
     let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals WHERE status='pending'").fetch_one(&p).await.unwrap();
     assert_eq!(pending, 1);
-    // 作廢那筆還沒送出的 `approval_requested` 一起收掉，不要叫人裁示一筆已經不算的申請。
     let open: Vec<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE state='pending' ORDER BY created_at")
         .fetch_all(&p)
         .await
@@ -128,7 +117,6 @@ async fn deciding_a_pending_approval_closes_the_inbox_event_that_asked_for_the_d
         let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE event_key=?").bind(&key).fetch_one(&p).await.unwrap();
         assert_eq!(state, "handled", "{status}：裁示完就不用再叫人裁示");
     }
-    // 消耗（approved→consumed）不是裁示：不動別筆的事件。
     let b = request(&p, "c-other").await.approval;
     decide_approval_from(&p, &b.id, "pending", "approved", "someone", None, None).await.unwrap().unwrap();
     let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE state!='handled'").fetch_one(&p).await.unwrap();
@@ -178,7 +166,6 @@ async fn approvals_written_in_the_same_millisecond_are_listed_in_write_order() {
 async fn the_auto_supersede_picks_the_last_written_pending_not_the_larger_ulid() {
     let p = pool().await;
     let at = "2026-09-24T05:00:00.000Z";
-    // 先寫的 ULID 比較大：舊排序（id DESC）會挑到它，插入序（rowid DESC）會挑到後寫的那筆。
     for (id, commit) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "older"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "newer")] {
         sqlx::query(
             "INSERT INTO supervisor_approvals
@@ -228,7 +215,6 @@ async fn an_approved_decision_is_never_superseded_automatically() {
     let second = request(&p, "c2").await;
     assert_eq!(second.superseded, None, "沒帶 --supersedes 就不該動那筆核准");
     assert_eq!(statuses(&p).await, vec![("c1".into(), "approved".into()), ("c2".into(), "pending".into())]);
-    // 明講就還是取代得掉（原本的機制沒有變）。
     let third = create_approval_superseding(&p, "agm-kick", "rebuild", "release rebuild", Some("c3"), None, None, Some(&first.approval.id), None)
         .await
         .unwrap();
@@ -255,8 +241,6 @@ async fn the_automatic_supersede_only_touches_my_own_requests() {
 async fn an_automatic_target_that_slipped_away_does_not_fail_the_request() {
     let p = pool().await;
     let first = request(&p, "c1").await;
-    // 模擬那一瞬間：狀態已經不是 pending 了，但自動查詢是在同一個交易裡讀的，
-    // 這裡直接把它改成 cancelled，相當於自動挑中之後才發現不能取代。
     sqlx::query("UPDATE supervisor_approvals SET status='cancelled' WHERE id=?").bind(&first.approval.id).execute(&p).await.unwrap();
     let second = request(&p, "c2").await;
     assert!(second.created, "還是要開得出新的一筆");
@@ -367,7 +351,6 @@ async fn a_notice_closes_itself_when_the_turn_ends() {
     assert_eq!(after.status, "completed", "通知不需要驗收");
     assert!(after.completed_at.is_some());
     assert_eq!(awaiting_review_count(&p).await.unwrap(), 0);
-    // inbox 事件還是有（AGM 想看得到），但它不是待辦。
     let ev = pending_inbox(&p).await.unwrap();
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].kind, "assignment_noticed");
@@ -416,7 +399,6 @@ async fn a_quota_block_parks_and_then_resumes_with_a_fresh_crid() {
     assert_eq!(blocked.status, "quota_blocked");
     assert_eq!(blocked.resume_at.as_deref(), Some("2026-09-13T01:00:00Z"));
     assert!(blocked.is_open(), "工作還沒做完，只是在等額度");
-    // 這一段時間內它不算「卡住」——incident 探針看不到它。
     assert!(assignments_idle_since(&p, "2999-01-01T00:00:00Z").await.unwrap().iter().all(|x| x.id != a.id));
 
     let resumed = resume_quota_blocked(&p, &a.id, "qr:1", &json!({})).await.unwrap();
@@ -425,10 +407,8 @@ async fn a_quota_block_parks_and_then_resumes_with_a_fresh_crid() {
     assert_eq!(back.status, "queued");
     assert_eq!(back.quota_retries, 1);
     assert!(back.turn_id.is_none(), "下一次是新的 turn");
-    // crid 換過了，否則 `lifecycle::prompt` 會直接把上一個撞牆的 turn 還回來。
     assert_eq!(back.dispatch_crid(), "job-1#r1");
     assert_eq!(a.dispatch_crid(), "job-1");
-    // 兩則通知都在（擋下 / 重送），而且都不是待辦。
     let kinds: Vec<String> = pending_inbox(&p).await.unwrap().into_iter().map(|e| e.kind).collect();
     assert!(kinds.contains(&"assignment_quota_blocked".to_string()));
     assert!(kinds.contains(&"assignment_quota_resumed".to_string()));
@@ -575,20 +555,17 @@ async fn the_watchdog_reports_giving_up_once_and_a_recovery_re_arms_it() {
     assert!(s.watchdog_gave_up_at.is_some());
     assert_eq!(s.watchdog_last_error.as_deref(), Some("CLI 起來就死"));
 
-    // Seen answering again: the streak resets and so does the give-up record.
     set_watchdog(&p, 0, None).await.unwrap();
     let s = get_or_init(&p).await.unwrap();
     assert!(s.watchdog_gave_up_at.is_none(), "a recovery clears it");
     assert!(s.watchdog_last_error.is_none());
     assert!(mark_watchdog_gave_up(&p, "第二次").await.unwrap(), "so a later outage is reported again");
 
-    // A human deciding (start / stop) also clears it.
     set_desired_running(&p, true).await.unwrap();
     let s = get_or_init(&p).await.unwrap();
     assert!(s.watchdog_gave_up_at.is_none());
     assert_eq!((s.watchdog_attempts, s.watchdog_next_at), (0, None));
 
-    // A non-zero update must *not* clear it: that is the retry bookkeeping, not a recovery.
     mark_watchdog_gave_up(&p, "第三次").await.unwrap();
     set_watchdog(&p, 5, Some("2099-01-01T00:00:00Z")).await.unwrap();
     assert!(get_or_init(&p).await.unwrap().watchdog_gave_up_at.is_some());
@@ -602,9 +579,6 @@ async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
     let p = pool().await;
     get_or_init(&p).await.unwrap();
     let a = insert_assignment(&p, None, "stopped-bot", "req-r", "做事", &[], None, true).await.unwrap();
-    // Created long ago; retried 20 times, the last one just now. `defer` stamps
-    // `updated_at` off the real clock, so the cutoff has to sit between the two: older than
-    // "now" (or the idle probe would match anything) and newer than `created_at`.
     sqlx::query("UPDATE supervisor_assignments SET created_at='2020-01-01T00:00:00.000Z' WHERE id=?")
         .bind(&a.id)
         .execute(&p)
@@ -626,7 +600,6 @@ async fn work_that_keeps_retrying_is_visible_even_though_it_never_looks_idle() {
     assert_eq!(seen[0].error.as_deref(), Some("bot has no active run"), "with the real reason, not `conflict`");
     assert_eq!(seen[0].to_json()["next_attempt_at"], "2099-01-01T00:00:00Z", "and when it will try again");
 
-    // Once it actually goes out it is no longer undelivered, whatever happens next.
     mark_delivered(&p, &a.id, "t1", "ok").await.unwrap();
     assert!(assignments_undelivered_since(&p, cutoff).await.unwrap().is_empty());
 }
@@ -647,7 +620,6 @@ async fn cancelling_unknown_delivery_keeps_the_evidence_that_it_may_be_running()
     let a = assignment(&p, &a.id).await.unwrap().unwrap();
     assert_eq!(a.status, "cancelled");
     assert!(!a.is_open());
-    // The two facts that stop `cancelled` from being read as "it never went out".
     assert_eq!(a.delivery.as_deref(), Some("unknown"), "delivery is not rewritten by the decision");
     assert_eq!(a.turn_id.as_deref(), Some("t7"), "and the turn is still named, so it can be checked");
     let log = reviews(&p, &a.id).await.unwrap();
@@ -688,7 +660,6 @@ async fn a_finished_turn_waits_for_acceptance_instead_of_closing_itself() {
     assert!(open_assignments(&p).await.unwrap().is_empty(), "not on the controller's work list");
     assert_eq!(unsettled_assignments(&p).await.unwrap().len(), 1, "but on the manager's");
 
-    // "Still waiting on the build" is not an acceptance: blocking keeps it open.
     review(&p, &a.id, "block", "AGM", "cli", Some("等編譯"), None, None).await.unwrap();
     let a = assignment(&p, &a.id).await.unwrap().unwrap();
     assert_eq!(a.status, "blocked");
@@ -765,8 +736,6 @@ async fn two_concurrent_followups_on_one_parent_create_exactly_one_continuation(
     assert_eq!(first.updated.status, "superseded");
     let first_child = first.followup.expect("a continuation was created");
 
-    // The second caller read the same `awaiting_review` and is deciding with a *different*
-    // request id — the case that used to produce two continuations.
     let second = review_with_followup(
         &p, &parent.id, "awaiting_review", "followup", "AGM", "web", Some("我也覺得要續作"), None,
         Some(spec("bot1", "follow-B", "另一份續作", &[])),
@@ -784,8 +753,6 @@ async fn two_concurrent_followups_on_one_parent_create_exactly_one_continuation(
         Some(first_child.id.as_str())
     );
 
-    // A byte-identical retry of the winner is idempotent at the assignment level: the same
-    // request id finds the row that already exists rather than making a second one.
     let retry = review_with_followup(
         &p, &parent.id, "superseded", "followup", "AGM", "cli", Some("重送"), None,
         Some(spec("bot1", "follow-A", "把 A 做完", &[])),
@@ -807,7 +774,6 @@ async fn a_failed_followup_rolls_back_and_leaves_no_orphan_queued_row() {
     settle_and_notify(&p, &parent.id, "completed", true, Some("做一半"), None, "k", "assignment_completed", &json!({}))
         .await
         .unwrap();
-    // Somebody else's assignment already owns this client_request_id.
     let other = insert_assignment(&p, None, "bot2", "taken-crid", "別人的工作", &[], None, true).await.unwrap();
 
     let err = review_with_followup(
@@ -928,8 +894,6 @@ async fn a_cancelled_assignment_is_not_resurrected_by_a_late_settle() {
         .expect("cancel 先落地");
     assert_eq!(cancelled.updated.status, "cancelled");
 
-    // 遲到的回合收尾這時候才進來：它讀到的還是 dispatch 當下那顆舊的 assignment（`delivered`），
-    // 但 `settle_and_notify` 自己會用當下 DB 裡的值當 guard，不是呼叫端傳的參數。
     let settled = settle_and_notify(&p, &a.id, "completed", true, Some("完成"), None, "k-race", "assignment_completed", &json!({}))
         .await
         .unwrap();
@@ -993,7 +957,6 @@ async fn a_replayed_source_turn_is_the_same_request() {
     let a = upsert_request(&p, "manager_turn", Some("turn-1"), "幫我處理登入").await.unwrap();
     let b = upsert_request(&p, "manager_turn", Some("turn-1"), "幫我處理登入").await.unwrap();
     assert_eq!(a, b);
-    // Without a stable id there is nothing to dedupe on, and two asks stay two asks.
     let c = upsert_request(&p, "assignment_text_fallback", None, "同樣的字").await.unwrap();
     let d = upsert_request(&p, "assignment_text_fallback", None, "同樣的字").await.unwrap();
     assert_ne!(c, d);
@@ -1028,7 +991,6 @@ async fn the_open_inbox_is_oldest_first_and_drains_with_acks() {
             .await
             .unwrap()
             .unwrap();
-        // Distinct timestamps: `now()` has millisecond resolution and the loop is faster.
         sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE id=?")
             .bind(format!("2026-09-11T00:00:0{i}Z"))
             .bind(&id)
@@ -1053,7 +1015,6 @@ async fn the_open_inbox_is_oldest_first_and_drains_with_acks() {
 #[tokio::test]
 async fn migration_backfills_desired_running_from_a_previous_start() {
     let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-    // The pre-watchdog schema: the same DDL minus the three columns.
     for stmt in DDL.split(";\n") {
         let s = stmt.trim();
         if !s.is_empty() {
@@ -1071,7 +1032,7 @@ async fn migration_backfills_desired_running_from_a_previous_start() {
     }
     assert!(!has_column(&p, "supervisors", "desired_running").await.unwrap());
     migrate(&p).await.unwrap();
-    migrate(&p).await.unwrap(); // idempotent
+    migrate(&p).await.unwrap();
     let wanted: Vec<(String, i64)> = sqlx::query_as("SELECT id, desired_running FROM supervisors ORDER BY id")
         .fetch_all(&p)
         .await
@@ -1170,13 +1131,10 @@ async fn notifications_are_retried_a_bounded_number_of_times_and_never_dropped()
     let id = push_inbox(&p, "k1", "assignment_completed", None, None, None, &json!({})).await.unwrap().unwrap();
     let ids = [id.clone()];
 
-    // A send that failed: still pending, but not due until the backoff passes.
     defer_notify(&p, &ids, "2099-01-01T00:00:00Z", "delivery failed").await.unwrap();
     assert!(due_inbox(&p, "2026-09-12T00:00:00Z", 5).await.unwrap().is_empty(), "backoff holds it");
     assert_eq!(due_inbox(&p, "2099-06-01T00:00:00Z", 5).await.unwrap().len(), 1, "and then releases it");
 
-    // Delivered, unanswered, handed back: the notify turn is kept so the next attempt can
-    // check it instead of blindly sending a second copy.
     mark_delivered_inbox(&p, &ids, "turn-7", "unknown").await.unwrap();
     assert!(pending_inbox(&p).await.unwrap().is_empty());
     assert_eq!(delivered_inbox(&p).await.unwrap().len(), 1);
@@ -1186,7 +1144,6 @@ async fn notifications_are_retried_a_bounded_number_of_times_and_never_dropped()
     assert_eq!(e.notify_delivery.as_deref(), Some("unknown"), "unknown delivery stays unknown");
     assert!(!requeue_inbox(&p, &id, "again").await.unwrap(), "only a delivered event can be requeued");
 
-    // Spend the budget. The event never leaves the inbox; what stops is the pushing.
     for _ in 0..5 {
         defer_notify(&p, &ids, "2000-01-01T00:00:00Z", "nope").await.unwrap();
     }
@@ -1208,17 +1165,13 @@ async fn notifications_are_retried_a_bounded_number_of_times_and_never_dropped()
 async fn a_patrol_claimed_event_that_routes_to_the_responder_is_the_patrols_when_it_runs_out_of_retries() {
     let p = pool().await;
     get_or_init(&p).await.unwrap();
-    // 三種列，`notify_attempts` 都已經用完巡檢的 5 次額度。
     let claimed = push_inbox(&p, "k-claimed", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
     let responders = push_inbox(&p, "k-responder", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
     let unclassified = push_inbox(&p, "k-none", "approval_requested", None, None, None, &json!({})).await.unwrap().unwrap();
-    // 巡檢收走的協調類事件：路由表說協調者，實際收的是巡檢。
     sqlx::query("UPDATE supervisor_inbox SET role='responder', claimed_by='patrol', notify_attempts=5 WHERE id=?")
         .bind(&claimed).execute(&p).await.unwrap();
-    // 真的在協調者手上的（還沒送出，所以 claimed_by 還是 NULL）。
     sqlx::query("UPDATE supervisor_inbox SET role='responder', notify_attempts=5 WHERE id=?")
         .bind(&responders).execute(&p).await.unwrap();
-    // 還沒分類的：兩欄都是 NULL，照舊算巡檢的。
     sqlx::query("UPDATE supervisor_inbox SET notify_attempts=5 WHERE id=?")
         .bind(&unclassified).execute(&p).await.unwrap();
 
@@ -1311,7 +1264,7 @@ async fn the_migration_marks_old_rows_legacy_instead_of_reopening_them() {
     }
     assert!(!has_column(&p, "supervisor_assignments", "legacy_closed").await.unwrap());
     migrate(&p).await.unwrap();
-    migrate(&p).await.unwrap(); // idempotent
+    migrate(&p).await.unwrap();
     let rows: Vec<(String, String, i64, Option<String>)> =
         sqlx::query_as("SELECT id, status, legacy_closed, turn_status FROM supervisor_assignments ORDER BY id")
             .fetch_all(&p)
@@ -1322,7 +1275,6 @@ async fn the_migration_marks_old_rows_legacy_instead_of_reopening_them() {
     assert_eq!(rows[2], ("a3".into(), "delivered".into(), 0, None), "work in flight is untouched");
     assert_eq!(rows[3], ("a4".into(), "cancelled".into(), 1, None));
     assert_eq!(open_assignment_count(&p).await.unwrap(), 1, "the backfill does not re-open closed work");
-    // And the sweep leaves them alone: nobody wants a month of old results pushed at AGM.
     assert!(settled_without_event(&p, 10).await.unwrap().is_empty());
 }
 
@@ -1354,12 +1306,10 @@ async fn two_executors_race_for_one_window_and_only_one_gets_it() {
     assert_eq!(first.owner.as_deref(), Some("bot-a"));
     assert!(first.held_at(&crate::db::now()));
 
-    // The holder can renew; nobody else can, and neither can a stale fence.
     assert!(renew_lease(&p, "rebuild", "bot-a", first.fence, soon).await.unwrap());
     assert!(!renew_lease(&p, "rebuild", "bot-b", first.fence, soon).await.unwrap(), "not your lease");
     assert!(!renew_lease(&p, "rebuild", "bot-a", first.fence - 1, soon).await.unwrap(), "stale fence");
 
-    // Released: the next executor gets it, with a higher fence.
     assert!(release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap());
     assert!(!release_lease(&p, "rebuild", "bot-a", first.fence).await.unwrap(), "releasing twice is a no-op");
     let second = acquire_lease(&p, "rebuild", "bot-b", Some("ap2"), Some("abc"), soon, false, None, &json!({}))
@@ -1412,13 +1362,11 @@ async fn one_request_id_is_one_approval() {
     assert_eq!(again.approval.id, first.approval.id);
     assert_eq!(approvals(&p, 10).await.unwrap().len(), 1, "DB 裡還是只有一列");
 
-    // 不同 id 就是不同的申請。
     let other = ask(&p, Some("restart-ca7b22d-retry")).await;
     assert!(other.created);
     assert_ne!(other.approval.id, first.approval.id);
     assert_eq!(approvals(&p, 10).await.unwrap().len(), 2);
 
-    // 沒帶 id 的照舊：每次都開一筆新的（既有腳本不受影響）。
     let a = ask(&p, None).await;
     let b = ask(&p, None).await;
     assert!(a.created && b.created);
@@ -1494,12 +1442,11 @@ async fn an_old_database_gains_the_column_without_losing_rows() {
     .unwrap();
 
     migrate(&p).await.unwrap();
-    migrate(&p).await.unwrap(); // 可重入
+    migrate(&p).await.unwrap();
 
     let old = approval(&p, "old-1").await.unwrap().expect("舊列還在");
     assert_eq!(old.client_request_id, None, "既有列留白");
     assert_eq!(old.status, "approved");
-    // 新的還是能帶 id 進來，而且不會跟留白的舊列撞唯一鍵。
     let a = create_approval(&p, "bot", "rebuild", "daemon", None, None, Some("r-1")).await.unwrap();
     assert!(a.created);
     assert!(!create_approval(&p, "bot", "rebuild", "daemon", None, None, Some("r-1")).await.unwrap().created);
@@ -1521,7 +1468,6 @@ async fn every_open_state_shows_up_where_ownership_is_checked() {
     for st in OPEN_STATES {
         assert!(unsettled.iter().any(|s| s == st), "{st} 不在 ownership 衝突看的清單裡：{unsettled:?}");
     }
-    // 「卡住沒人管」是另一張表，而且刻意不含這兩個（都在等一個確定的東西）。
     assert!(!STALLED_STATES.contains(&"quota_blocked"));
     assert!(!STALLED_STATES.contains(&"blocked"));
 }
@@ -1538,7 +1484,6 @@ async fn taking_over_an_expired_lease_consumes_the_approval_it_rested_on() {
     acquire_lease(&p, "restart", "runner-1", Some(&first.id), None, &past, false, None, &json!({})).await.unwrap().unwrap();
     assert_eq!(approval(&p, &first.id).await.unwrap().unwrap().status, "approved");
 
-    // 沒有人 release，租約自己過期，下一個人接手。
     let second = create_approval(&p, "bot-a", "restart", "daemon", None, None, None).await.unwrap().approval;
     decide_approval(&p, &second.id, "approved", "AGM", None, None).await.unwrap();
     let later = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1556,7 +1501,6 @@ async fn decisions_written_in_the_same_millisecond_keep_their_order() {
     let p = pool().await;
     get_or_init(&p).await.unwrap();
     let at = "2026-09-16T12:00:00.000Z";
-    // id 故意跟寫入順序相反：第一筆的 ULID 比第二筆大。
     for (id, from, to) in [("01ZZZZZZZZZZZZZZZZZZZZZZZZ", "pending", "approved"), ("01AAAAAAAAAAAAAAAAAAAAAAAA", "approved", "revoked")] {
         sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
             .bind(id)
@@ -1659,7 +1603,6 @@ async fn a_stored_persona_is_never_overwritten_by_the_embedded_default() {
     let s = get_or_init(&p).await.unwrap();
     assert_eq!((s.persona_version, s.persona_text.clone()), (0, None), "a fresh install has none");
 
-    // First install: the embedded text seeds it.
     assert!(seed_persona_if_empty(&p, "內嵌版 v1").await.unwrap());
     let s = get_or_init(&p).await.unwrap();
     assert_eq!(s.persona_text.as_deref(), Some("內嵌版 v1"));
@@ -1667,21 +1610,16 @@ async fn a_stored_persona_is_never_overwritten_by_the_embedded_default() {
     assert_eq!(s.persona_source.as_deref(), Some("embedded"));
     assert_eq!(s.persona_seed_hash, s.persona_hash, "it remembers which embedded text it came from");
 
-    // Somebody updates it through the API.
     assert_eq!(set_persona(&p, "使用者改過的 v2", "api", None).await.unwrap(), 2);
 
-    // An older binary runs `setup` again: it must not win.
     assert!(!seed_persona_if_empty(&p, "內嵌版 v1").await.unwrap(), "seeding is refused once there is a persona");
     let s = get_or_init(&p).await.unwrap();
     assert_eq!(s.persona_text.as_deref(), Some("使用者改過的 v2"));
     assert_eq!(s.persona_version, 2, "and the version does not move");
     assert_eq!(s.persona_source.as_deref(), Some("api"));
     assert_eq!(s.persona_hash.as_deref(), Some(super::super::persona::hash("使用者改過的 v2").as_str()));
-    // The seed hash still points at the embedded text it started from, which is what makes
-    // "there is a newer embedded version" a different question from "this was customised".
     assert_eq!(s.persona_seed_hash.as_deref(), Some(super::super::persona::hash("內嵌版 v1").as_str()));
 
-    // An explicit migration is the one way the embedded text takes over.
     let v = set_persona(&p, "內嵌版 v3", "embedded", Some(&super::super::persona::hash("內嵌版 v3"))).await.unwrap();
     let s = get_or_init(&p).await.unwrap();
     assert_eq!((v, s.persona_text.as_deref()), (3, Some("內嵌版 v3")));
@@ -1752,9 +1690,7 @@ async fn old_handled_log_events_are_pruned_but_dedupe_keys_and_open_work_stay() 
         ["k:recent_request", "k:old_assignment", "k:old_pending_request", "k:old_delivered_ops", "k:old_gave_up_request"],
         "交辦結果的去重鍵、沒處理完的、比較新的都留著"
     );
-    // 冪等。
     assert_eq!(prune_handled_events(&p, PRUNE_HANDLED_AFTER_SECS).await.unwrap(), 0);
-    // 被刪掉的那種申請，之後同一句再來就是新的一則（不會被當成重播吞掉）。
     assert!(push_inbox(&p, "k:old_request", "bot_request", None, None, None, &serde_json::json!({})).await.unwrap().is_some());
 }
 
@@ -1818,6 +1754,5 @@ async fn old_large_handled_inbox_payloads_are_compacted_but_nothing_else_is_touc
         assert_eq!(serde_json::from_str::<serde_json::Value>(&payload(untouched).await).unwrap(), big, "{untouched} 不動");
     }
     assert_eq!(serde_json::from_str::<serde_json::Value>(&payload("old_small_handled").await).unwrap(), small, "小的不動");
-    // 冪等：再跑一次什麼都不會再動（壓過的已經很小）。
     assert_eq!(compact_handled_payloads(&p, 24 * 3600, 16 * 1024).await.unwrap(), 0);
 }

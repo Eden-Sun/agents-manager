@@ -253,7 +253,6 @@ mod turn_limit_tests {
         assert_eq!(out["cap_usd"], json!(7.5), "沒帶 cap_usd 不動總上限");
         let got = get_claude_api_cap(app.clone()).await.unwrap();
         assert_eq!((got["turn_timeout_secs"].clone(), got["max_api_calls_per_turn"].clone()), (json!(2400), json!(30)));
-        // 舊用法：只帶 cap_usd:null 照樣清除。
         let cleared = put_claude_api_cap(app.clone(), req(json!({"cap_usd": null}))).await.unwrap();
         assert_eq!(cleared["cap_usd"], Value::Null);
         assert_eq!(cleared["turn_timeout_secs"], json!(2400));

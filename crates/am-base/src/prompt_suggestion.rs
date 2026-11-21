@@ -119,7 +119,6 @@ pub async fn observe_sweep(app: &(impl crate::capabilities::Emit + crate::capabi
         }
         return;
     }
-    // 輸入列是空的：沒有建議可言，不必再讀。
     if crate::composer_parse::composer_text("claude", plain).is_none() {
         if forget(&run.id) {
             let _ = app.emit_bot_status(&run.bot_id).await;

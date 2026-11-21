@@ -31,13 +31,11 @@ fn pre_1960_read_handshake(r: &mut impl BufRead) -> anyhow::Result<Handshake> {
 
 #[test]
 fn pre_1960_parser_equivalence_on_new_outcome_fixtures() {
-    // 包含新 OUTCOME 結構化行的 fixture 輸入
     let out = "Welcome!\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t2\t3\nD\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\nF\t500\t1000\nOUTCOME\tshared\t153\t0\nEND\n";
 
     let old_res = pre_1960_read_handshake(&mut std::io::Cursor::new(out)).unwrap();
     let new_res = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
 
-    // 逐欄驗證舊 parser 與新 parser 回傳完全一致（新 OUTCOME 控制行被舊 parser 依 _ => {} 乾淨略過）
     assert_eq!(old_res.root, new_res.root);
     assert_eq!(old_res.dir, new_res.dir);
     assert_eq!(old_res.token, new_res.token);
@@ -56,7 +54,6 @@ fn read_handshake_backward_compatibility_without_outcome() {
     assert_eq!(obs.shared_wait_secs, None);
     assert_eq!(obs.slot_wait_secs, None);
 
-    // 舊 wrapper 原樣成功
     let h_old = read_handshake(&mut std::io::Cursor::new(out)).unwrap();
     assert_eq!(h_old.dir, "/r/0123456789abcdef/shared");
 }
@@ -286,15 +283,12 @@ fn without_sshpass_the_password_goes_through_ssh_askpass() {
     assert_eq!(e.get("AM_SSH_PASSWORD").map(String::as_str), Some("hunter2"));
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     assert!(args.iter().any(|a| a == "NumberOfPasswordPrompts=1"), "密碼錯要當場失敗，不能卡在提示上：{args:?}");
-    // 密碼不進 argv——`ps` 看得到別人的 argv。
     assert!(!args.iter().any(|a| a.contains("hunter2")), "{args:?}");
 
-    // 有 sshpass 的機器照舊。
     let cmd = ssh_cmd(&remote(), Some("hunter2"), Some(&PwMode::Sshpass));
     assert_eq!(cmd.get_program(), "sshpass");
     assert_eq!(envs(&cmd).get("SSHPASS").map(String::as_str), Some("hunter2"));
 
-    // 沒有密碼的一律不碰這些環境變數。
     let cmd = ssh_cmd(&remote(), None, None);
     assert_eq!(cmd.get_program(), "ssh");
     assert!(envs(&cmd).is_empty(), "{:?}", envs(&cmd));
@@ -304,8 +298,6 @@ fn without_sshpass_the_password_goes_through_ssh_askpass() {
 /// 再在同一個子目錄下跑。以前一律同步 cwd 本身：遠端沒有鎖檔、重新解析依賴，驗的不是本機那份。
 #[test]
 fn a_subdirectory_call_syncs_the_workspace_root_and_runs_in_the_same_subdirectory() {
-    // macOS 的 TMPDIR 在 /var/folders/…（/var → /private/var）。source_root 回的是 canonical 路徑，
-    // 所以測試的基底也要先 canonicalize，兩邊才是同一種寫法；否則就只有 macOS 紅。
     let t = crate::testing::track(std::env::temp_dir().canonicalize().unwrap().join(format!("am-r177-{}", crate::db::ulid())));
     let mk = |rel: &str, manifest: Option<&str>| {
         let d = t.join(rel);
@@ -322,10 +314,8 @@ fn a_subdirectory_call_syncs_the_workspace_root_and_runs_in_the_same_subdirector
     let solo = mk("solo", Some(pkg));
     let solo_src = mk("solo/src", None);
     let bare = mk("bare/x", None);
-    // 自己就是另一個工作區根的目錄（不歸外層管）：它自己當根。
     let inner = mk("ws/tools", Some("[workspace]\n"));
     let inner_src = mk("ws/tools/src", None);
-    // manifest 壞掉的目錄不算工作區根，也不能讓 helper 出事。
     let broken = mk("broken", Some("[workspace\n"));
 
     assert_eq!(source_root(&ws), (ws.clone(), String::new()), "就在根：不變");
@@ -409,7 +399,6 @@ fn the_overall_limit_defaults_to_twelve_minutes_and_is_configurable() {
     let unlimited = Deadline::new(0);
     unlimited.arm();
     assert!(unlimited.stop().is_none(), "0＝不設上限");
-    // issue #104：上限從拿到名額與目錄（arm）才開始算，排隊的時間不算。
     let d = Deadline::new(1);
     assert!(d.limit.is_some() && d.at.get().is_none(), "還沒 arm：不計時");
     d.arm();
@@ -486,12 +475,9 @@ fn a_probe_without_cargo_is_reported_as_a_missing_toolchain() {
 fn every_remote_command_puts_cargo_bin_on_the_path() {
     assert!(PROBE_SH.contains("$HOME/.cargo/bin:$PATH"), "{PROBE_SH}");
     assert!(INSTALL_SH.contains("$HOME/.cargo/bin:$PATH"), "{INSTALL_SH}");
-    // 安裝是冪等的：已經有就只回版本，不會再跑一次 rustup-init。
     assert!(INSTALL_SH.contains("if command -v cargo >/dev/null 2>&1; then\nprintf 'ALREADY='"), "{INSTALL_SH}");
-    // minimal（另外帶 clippy，issue #104），而且不去動使用者的 shell profile。
     assert!(INSTALL_SH.contains("--profile minimal --component clippy"), "{INSTALL_SH}");
     assert!(INSTALL_SH.contains("--no-modify-path"), "{INSTALL_SH}");
-    // rustup 不裝 linker：沒有 cc 的機器要當場講，不要等到 cargo test 連結失敗才看到天書。
     assert!(INSTALL_SH.contains("CC_MISSING=1"), "{INSTALL_SH}");
 }
 
@@ -527,7 +513,6 @@ fn run_remote_sh(script: &str, fakes: &str) -> String {
     std::fs::create_dir_all(sandbox.join("bin")).unwrap();
     let uname = String::from_utf8(Command::new("sh").arg("-c").arg("command -v uname").output().unwrap().stdout).unwrap();
     std::os::unix::fs::symlink(uname.trim(), sandbox.join("bin/uname")).unwrap();
-    // PATH 換掉之後 `sh` 也照新的 PATH 找：用絕對路徑。
     let out = Command::new("/bin/sh")
         .arg("-c")
         .arg(format!("{fakes}\n{script}"))
@@ -563,7 +548,6 @@ fn the_probe_tells_a_missing_clippy_apart_from_a_missing_cargo() {
 /// issue #104：本來就有 cargo（只是 minimal、沒有 clippy）的機器按「安裝」要補上 clippy；補不上（不是 rustup 裝的）就回報 `CLIPPY_MISSING=1`。
 #[test]
 fn installing_on_a_host_that_already_has_cargo_adds_clippy() {
-    // `rustup component add clippy` 會真的讓 `cargo clippy` 變成可用。
     let cargo = "cargo() { case \"$1\" in --version) echo 'cargo 1.90.0' ;; clippy) [ -e \"$AM_TEST_SANDBOX/clippy\" ] && echo 'clippy 0.1.90' ;; esac; }";
     let rustup = "rustup() { [ \"$*\" = 'component add clippy' ] && : > \"$AM_TEST_SANDBOX/clippy\"; }";
     let out = run_remote_sh(INSTALL_SH, &format!("{cargo}\n{rustup}"));
@@ -582,7 +566,6 @@ fn only_cross_platform_verification_commands_are_offloaded() {
     for cmd in ["build", "run", "bench", "doc", "install", "metadata"] {
         assert!(!eligible(&[cmd.into()]), "{cmd}");
     }
-    // issue #195：子指令前面的全域旗標。搬得走的（原樣搬過去意思不變）照樣轉；`+toolchain`／本機路徑／取決於本機快取的留在本機。
     let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     for ok in [&["--locked", "test"][..], &["-q", "check"], &["--color", "always", "clippy"], &["--color=never", "t"], &["-v", "--locked", "test", "--", "x"]] {
         assert!(eligible(&v(ok)), "{ok:?}");
@@ -590,7 +573,6 @@ fn only_cross_platform_verification_commands_are_offloaded() {
     for no in [&["+nightly", "test"][..], &["-C", "x", "test"], &["--offline", "test"], &["--frozen", "check"], &["-Z", "unstable-options", "check"], &["--config", "a=b", "test"], &["--locked", "build"], &["--locked"], &[]] {
         assert!(!eligible(&v(no)), "{no:?}");
     }
-    // issue #104：`clippy --fix` 會改原始碼——改到的是遠端那份、不會同步回來，所以留在本機跑。`--` 後面是給 clippy-driver 的，不算。
     for local in [&["clippy", "--fix"][..], &["clippy", "--all-targets", "--fix", "--allow-dirty"], &["-q", "clippy", "--fix", "--", "-D", "warnings"]] {
         assert!(!eligible(&v(local)), "{local:?}");
     }
@@ -703,7 +685,6 @@ fn blaze_accepts_only_safe_test_check_and_fails_closed_before_remote_work() {
 fn cargo_engine_uses_the_legacy_remote_script_unchanged() {
     let args = vec!["test".into(), "-p".into(), "xtask".into()];
     let token = LeaseToken::parse("feedfacefeedfacefeedfacefeedface").unwrap();
-    // Golden wire script from before the engine protocol, independent of either wrapper.
     let expected = r#"d=/r/job; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\n' "$g" > "$d.pgid-feedfacefeedfacefeedfacefeedface" && [ "$(cat "$d.owner" 2>/dev/null)" = feedfacefeedfacefeedfacefeedface ] || { echo 'agents-manager: 遠端工作目錄已經還回去了（helper 中途被砍？），不跑 cargo' >&2; exit 126; }; cd "$d"/'' && PATH="$HOME/.cargo/bin:$PATH" CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=4 env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR cargo --config 'build.target-dir="/r/job/target"' --config 'build.build-dir="/r/job/target"' test -p xtask"#;
     assert_eq!(run_script("/r/job", "", &token, 2, 4, &args), expected);
     assert_eq!(
@@ -816,7 +797,6 @@ exit "${{FAKE_EXIT:-0}}"
         run_with_cargo_home(rustc_path, fake_exit, &home.join(".cargo"))
     };
 
-    // Cargo searches CARGO_HOME/bin before PATH, even with the verified private bin first.
     let unexpected_plugin = cargo_bin.join("cargo-blaze");
     crate::testing::write_exec(&unexpected_plugin, "#!/bin/sh\nexit 98\n");
     let out = run(&rustc, "0");
@@ -941,12 +921,12 @@ fn gc_picks_idle_orphans_and_never_touches_a_directory_in_use() {
     let old = ORPHAN_IDLE_SECS + 1;
     let h = hs(
         vec![
-            rdir("00000000000000aa/111", false, false, old),         // 舊版留下的 <pid>，閒置 → 收
-            rdir("00000000000000aa/job-9-1", false, false, old),     // 守門死在遠端的 job → 收
-            rdir("00000000000000aa/222", false, true, old * 50),     // 有行程在裡面 → 不收
-            rdir("00000000000000aa/job-9-2", true, false, old * 50), // 鎖被持有 → 不收
-            rdir("00000000000000aa/333", false, false, ORPHAN_IDLE_SECS - 1), // 剛動過 → 不收
-            rdir("0123456789abcdef/shared", false, false, old * 50), // 自己這次的 → 不收
+            rdir("00000000000000aa/111", false, false, old),
+            rdir("00000000000000aa/job-9-1", false, false, old),
+            rdir("00000000000000aa/222", false, true, old * 50),
+            rdir("00000000000000aa/job-9-2", true, false, old * 50),
+            rdir("00000000000000aa/333", false, false, ORPHAN_IDLE_SECS - 1),
+            rdir("0123456789abcdef/shared", false, false, old * 50),
         ],
         Some((80, 100)),
     );
@@ -981,16 +961,16 @@ fn a_shared_target_is_kept_as_cache_unless_the_disk_is_running_out() {
 fn shared_targets_are_reclaimed_by_a_configurable_age_and_by_a_count_cap_oldest_first() {
     let h = |n: &str| format!("{ROOT}/00000000000000{n}/shared");
     let dirs = vec![
-        rdir("00000000000000a1/shared", false, false, 7 * 3600), // 7 小時：超過 6 小時 → 依時間收
+        rdir("00000000000000a1/shared", false, false, 7 * 3600),
         rdir("00000000000000a2/shared", false, false, 5 * 3600),
         rdir("00000000000000a3/shared", false, false, 4 * 3600),
         rdir("00000000000000a4/shared", false, false, 3 * 3600),
         rdir("00000000000000a5/shared", false, false, 2 * 3600),
         rdir("00000000000000aa/shared", false, false, 3600),
         rdir("00000000000000a6/shared", false, false, 30 * 60),
-        rdir("00000000000000a7/shared", false, false, 5 * 60), // 剛用完：就算超過數量上限也不動
-        rdir("00000000000000a8/shared", true, false, 20 * 3600), // 鎖被持有：不動
-        rdir("00000000000000a9/shared", false, true, 20 * 3600), // 有行程在裡面：不動
+        rdir("00000000000000a7/shared", false, false, 5 * 60),
+        rdir("00000000000000a8/shared", true, false, 20 * 3600),
+        rdir("00000000000000a9/shared", false, true, 20 * 3600),
     ];
     let pick = |policy: &GcPolicy| {
         let mut got = select_gc(&hs(dirs.clone(), Some((80, 100))), policy);
@@ -998,13 +978,9 @@ fn shared_targets_are_reclaimed_by_a_configurable_age_and_by_a_count_cap_oldest_
         got
     };
     let names = |ns: &[&str]| ns.iter().map(|n| h(n)).collect::<Vec<_>>();
-    // 共 10 份＋這次自己的一份。數量不限：只依時間收超過 6 小時的。
     assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 0 }), names(&["a1"]));
-    // 上限 10：依時間收掉 a1 之後剩 10 份，剛好在上限內。
     assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 10 }), names(&["a1"]));
-    // 上限 6：還要再收 4 份——**最久沒用的先收**（a2、a3、a4、a5），不是最新的。
     assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 6 }), names(&["a1", "a2", "a3", "a4", "a5"]));
-    // 上限 1：能收的都收（a2～a6、aa），但不碰鎖住的（a8）、有行程的（a9）、**剛用完的（a7）**、也不碰自己——留下的比上限多也沒關係。
     assert_eq!(pick(&GcPolicy { shared_idle_secs: 6 * 3600, max_shared: 1 }), names(&["a1", "a2", "a3", "a4", "a5", "a6", "aa"]));
 }
 
@@ -1045,7 +1021,6 @@ fn gc_only_ever_names_directories_in_its_own_layout() {
 
 #[test]
 fn the_handshake_skips_login_noise_and_fails_if_the_guard_dies_first() {
-    // 排隊時的心跳（`Q`）也是雜訊，略過。
     let out = "Welcome!\nQ\nQ\nROOT\t/r\nDIR\t/r/0123456789abcdef/shared\tfeedfacefeedfacefeedfacefeedface\nSLOT\t3\t6\n\
                    D\t/r/00000000000000aa/111\t0\t1\t-3\nD\t/r/00000000000000aa/222\t1\t0\t900\n\
                    F\t500\t1000\nEND\nD\t/late\t0\t0\t9\n";
@@ -1062,7 +1037,6 @@ fn the_handshake_skips_login_noise_and_fails_if_the_guard_dies_first() {
             RemoteDir { path: "/r/00000000000000aa/222".into(), locked: true, busy: false, idle_secs: 900 },
         ]
     );
-    // 守門在交出目錄前就死了（沒 flock、磁碟滿…）：不能當成拿到目錄。
     assert!(read_handshake(&mut std::io::Cursor::new("ROOT\t/r\nEND\n")).is_err());
     assert!(read_handshake(&mut std::io::Cursor::new("")).is_err());
 }
@@ -1083,7 +1057,6 @@ fn the_remote_run_records_its_group_before_checking_the_lease() {
     assert!(s.contains("build.build-dir=\"/r/0123456789abcdef/shared/target\""), "{s}");
     assert!(!s.contains("CARGO_TARGET_DIR="), "nested Cargo calls must not inherit this cache: {s}");
     assert!(s.contains("env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR"), "remote cache environment must not escape the lease: {s}");
-    // 0＝不設：不帶這個環境變數（libtest 用自己的預設）。
     let s = run_script("/r/0123456789abcdef/shared", "", &tok, 4, 0, &["test".into()]);
     assert!(!s.contains("RUST_TEST_THREADS"), "{s}");
 }
@@ -1116,14 +1089,14 @@ fn a_lease_token_is_fixed_format_random_and_never_repeats() {
 
     for bad in [
         "",
-        "4242",                                     // 舊版的 `$$`
-        "0123456789ABCDEF0123456789ABCDEF",         // 大寫
-        "0123456789abcdef0123456789abcde",          // 少一個
-        "0123456789abcdef0123456789abcdef0",        // 多一個
-        "0123456789abcdef0123456789abcde;",         // shell 字元
-        "../../../../../../../../../../etc/passwd", // 路徑穿越
-        "0123456789abcdef0123456789abcd\n",         // 換行
-        "0123456789abcdef0123456789abcd'x",         // 引號
+        "4242",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "0123456789abcdef0123456789abcde;",
+        "../../../../../../../../../../etc/passwd",
+        "0123456789abcdef0123456789abcd\n",
+        "0123456789abcdef0123456789abcd'x",
     ] {
         assert!(LeaseToken::parse(bad).is_none(), "{bad:?}");
     }
@@ -1188,7 +1161,6 @@ fn the_remote_cap_defaults_to_what_the_hosts_cores_and_ram_can_take() {
         assert!(script.contains(want), "{want}");
     }
     assert!(!script.contains('@'), "沒替換乾淨");
-    // #1937：24 小時統計要 grep 的四種字樣（拿到 shared 並等了幾秒、shared 逾時、改用獨立目錄、轉本機）都在守門裡，彼此分得開。
     for want in [
         "等了 $hw 秒拿到共用遠端 target",
         "秒共用遠端 target 還沒空出來",
@@ -1224,7 +1196,7 @@ fn an_orphaned_helper_stops_when_its_parent_shim_is_gone() {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg("exec sleep 60");
     let mut ctl = Deadline::new(0);
-    ctl.parent = Some((4242, || 1)); // 啟動時的父行程是 4242，現在變成 1（被 init 收養）
+    ctl.parent = Some((4242, || 1));
     let t0 = std::time::Instant::now();
     let err = Lease::start(cmd, LeaseToken::new(), &ctl).err().expect("interrupted");
     assert!(matches!(err.downcast_ref::<Stopped>(), Some(Stopped::Interrupted(_))), "{err:#}");
@@ -1341,7 +1313,6 @@ async fn a_failure_or_crash_at_any_step_leaves_the_old_or_the_new_pair_never_a_m
             SECRET_FAULT.with(|f| f.set(None));
             let why = format!("{step}/{how:?}: {res:?}");
 
-            // 重開 daemon：只看磁碟上的東西。
             let fresh = crate::runners::app_ports_p2::load_config(cfg_path.clone()).await.unwrap().get().await.build.remote;
             let pair = (fresh.host.clone(), secret(&dir, &fresh).unwrap());
             if step == "cleanup" {
@@ -1356,7 +1327,6 @@ async fn a_failure_or_crash_at_any_step_leaves_the_old_or_the_new_pair_never_a_m
                 assert_eq!(files, vec![(PASSWORD_FILE.to_string(), 0o600)], "失敗要收乾淨，只剩舊檔：{why}");
             }
 
-            // 下一次成功的儲存把殘骸（沒人指到的暫存檔、舊檔）收掉。
             let store = crate::runners::app_ports_p2::load_config(cfg_path.clone()).await.unwrap();
             let r = commit_remote(&store, &dir, Some("newer-pw"), |r| r.host = "newer-host".into()).await.unwrap();
             assert_eq!(secret(&dir, &r).unwrap().as_deref(), Some("newer-pw"), "{why}");

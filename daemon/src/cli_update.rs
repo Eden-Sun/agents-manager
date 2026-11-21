@@ -325,7 +325,6 @@ impl Runner for Real {
             if host == crate::config::LOCAL_HOST {
                 local_sh(&script, INSTALL_TIMEOUT).await.map_err(classify_install_error)
             } else {
-                // 遠端逾時只砍得掉本機這條 ssh；那邊的安裝可能還在跑（鎖也還在它手上），所以錯誤要講清楚、請人去那台看。
                 fence.conn().ssh_exec_path_timeout(&script, INSTALL_TIMEOUT).await.map_err(|e| {
                     classify_install_error(format!("在 {host} 安裝失敗（逾時的話那台的安裝可能還在跑）：{}", tail(&format!("{e:#}"))))
                 })
@@ -581,10 +580,8 @@ pub async fn start(
     let Some(target) = target.and_then(|t| version_string(t.trim())) else {
         return Err(LcError::Bad("要帶 target_version（確認框寫的那一版）；重新整理頁面再按一次".into()));
     };
-    // 使用者核准的版本要跟 daemon 眼中那台「需安裝」的目標是同一版：舊分頁、別人剛裝好、帳本又出了新版都擋下來重看。
     let current_target = match kind {
         "claude" => crate::upstream_update::latest_target_for_host(app, kind, host).await,
-        // 只有成功確認沒有 pending notice 才退回快照；讀取失敗時拒絕，避免舊確認框改用另一個目標。
         _ => match pending_target(app, host).await {
             Ok(Some(t)) => Some(t),
             Ok(None) => crate::upstream_update::behind_target_for_host(app, kind, host).await,
@@ -621,7 +618,6 @@ pub async fn start(
         ));
     }
     let update_id = crate::db::ulid();
-    // 先寫進 DB 才開跑（#564）：每台最多一筆 `running`，重啟之後也還在，由 [`recover_at_startup`] 接手。
     let now = crate::db::now();
     let inserted = sqlx::query(
         "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at, host_target)
@@ -660,8 +656,6 @@ pub async fn start(
             json!({"host": host, "kind": running_kind, "update_id": id, "recovered": recovered, "message": message}),
         ));
     }
-    // herdr 一鍵更新在跑（server 要重啟、所有 pane 會消失）：同一台不能同時裝 CLI 再 scoped 重啟 bot。
-    // 先寫自己的列、再看那邊（herdr_upgrade 反過來：先佔位、再看這邊的列）；被擋就把剛寫的列拿掉，不然這台從此被自己的殘列卡住。
     if crate::herdr_upgrade::is_running(app, host) {
         let _ = sqlx::query("DELETE FROM cli_updates WHERE id = ?").bind(&update_id).execute(&app.db).await;
         return Err(LcError::conflict(
@@ -679,7 +673,6 @@ pub async fn start(
         use futures::FutureExt as _;
         let res = std::panic::AssertUnwindSafe(run_with_fence(&app2, runner.as_ref(), &host2, &id2, &target2, &kind2, Some(fence2))).catch_unwind().await;
         if res.is_err() {
-            // 中途 panic 也要等終態寫進 DB 後才告訴 UI；finish_row 會在目前行程內保留 retry debt。
             let failed = json!({"update_id": id2, "host": host2, "kind": kind2, "target_version": target2,
                 "ok": false, "reason": "internal_error", "error": "安裝流程中途異常結束，沒有重啟任何 bot；看 daemon.log"});
             if let Some(durable) = finish_row(&app2, &id2, &failed).await {
@@ -759,7 +752,6 @@ async fn run_with_kind_result(
         let finish_kind = finish_kind.clone();
         let finish_log_kind = finish_log_kind.clone();
         async move {
-        // 結果先落進 DB 才推事件、才放這台的名額（#564、#577）。
         let Some(v) = finish_row(app, update_id, &v).await else {
             return json!({"update_id": update_id, "host": host, "kind": finish_kind, "target_version": target,
                 "ok": false, "reason": "superseded", "error": "終態列已不存在或已被其他流程取代；沒有發布本地結果"});
@@ -801,8 +793,6 @@ async fn run_with_kind_result(
         }
     };
     let target_v = parse_version(target);
-    // Codex 的安裝器裝最新版，已到或超過目標就可直接套用。Claude 只會在低於目標時執行指定版本安裝；
-    // 快照落後而磁碟已超前目標時也當作已安裝，避免照舊快照把 CLI 降版。
     let already = if kind == "claude" {
         parse_version(&before)
             .zip(target_v.as_ref())
@@ -825,7 +815,6 @@ async fn run_with_kind_result(
         }
         match installed {
             Ok(out) => log_line(app, &format!("[{update_id}] 安裝輸出：\n{}", out.trim_end())),
-            // 那台已經有別的安裝在跑（上一顆 daemon 留下的、或別的實例開的）：這次**沒有**跑安裝指令（#564）。
             Err(InstallError::Locked(e)) => {
                 log_line(app, &format!("[{update_id}] {host} 已經有另一個安裝在跑，這次沒有安裝：\n{e}"));
                 return finish(done(false, json!({"reason": "already_running", "from": before,
@@ -856,7 +845,6 @@ async fn run_with_kind_result(
                 "error": format!("安裝指令跑完了，codex 還是 {after}（原本 {before}），沒有重啟任何 bot")})))
             .await;
         }
-        // Codex 裝最新版，至少要到核准版本；Claude 指定版本必須完全相同。失敗時一顆都不重啟。
         if if kind == "claude" {
             parse_version(&after) != target_v
         } else {
@@ -900,7 +888,6 @@ async fn run_with_kind_result(
         .await;
     }
     if kind == "claude" {
-        // Claude 的安裝與套用是兩次明確操作；改好持續通知後交給一般重啟 chip，不背景替使用者重啟。
         return finish(done(
             true,
             json!({
@@ -927,9 +914,6 @@ async fn run_with_kind_result(
     }
     let restart = runner.restart(app, Scope { kind: kind.clone(), host: host.to_string() }, &fence).await;
     let v = match restart {
-        // `restart_status` 照批次那邊講的（#566）：`started` 開了這台 codex 的一批；`already_covered` 正在跑的那一批
-        // 確實還排著這台每一顆該重啟的 codex；`deferred` 那一批沒涵蓋，排在它後面、它結束時自己接著開。
-        // 不能再把「剛好有一批在跑」（`already_running`）當成重啟已經交出去。
         Ok(plan) => {
             let status = plan["restart_status"].as_str().unwrap_or("started").to_string();
             if status == "superseded" {
@@ -954,7 +938,6 @@ async fn run_with_kind_result(
             done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
                 "restart": plan, "restart_status": status}))
         }
-        // 裝好了但批次開不起來：新版已經在磁碟上，通知也改成「重啟套用」了，照一般的一鍵重啟再按一次就好。
         Err(e) => done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
             "restart": null, "restart_status": "error", "restart_error": format!("{e:#}")})),
     };
@@ -1290,7 +1273,6 @@ async fn recover_with_registry(
             "error": format!("daemon 在安裝途中重啟，{host} 的 {kind} 現在是 {}，沒符合確認的 {target}；沒有重啟任何 bot，要裝就再按一次", after.as_deref().unwrap_or("（讀不到）"))})))
         .await;
     };
-    // 跑著的版本優先取通知寫的起點（`mark_installed` 自己會找）；這裡的 `from` 只是最後的退路。
     if !app.hosts.is_current(&fence).await || host_target_for_conn(fence.conn()) != host_target {
         return finish(superseded(format!("{host} 在改通知前重連或改設定；沒有發布接手成功"))).await;
     }
@@ -1468,7 +1450,6 @@ async fn mark_installed_change_is_already_durable(app: &impl crate::capabilities
         };
         return Ok(recorded >= installed);
     }
-    // The run no longer carries this CLI install handoff, so it cannot be skipped by this operation's restart.
     Ok(true)
 }
 
@@ -1548,9 +1529,6 @@ async fn mark_installed_with_fence(
                 .execute(app.db())
                 .await
         };
-        // Host replacement takes the same connection's write gate. Validate under its read side
-        // and keep that gate through the durable CAS, so repoint either wins first and refuses
-        // this write or waits until the notice transition has committed on its captured authority.
         let result = match fence {
             Some(fence) => match app.hosts().run_if_current(fence, write_notice).await {
                 Some(result) => result?,
@@ -2217,7 +2195,6 @@ mod tests {
         assert!(crate::testing::eventually!(fake.restarts().len() == 1), "run must reach the terminal path");
         fail_terminal_updates(&env.app).await;
         release.send(()).unwrap();
-        // 等它真的走到 finish_row，不賭固定 100ms：整樹平行跑負載高時還停在前一個 phase（#759，d753af7e）。
         assert!(
             crate::testing::eventually!(row_phase(&env.app, "u-finish-ok").await == "finishing"),
             "run must reach the owed terminal write"
@@ -2260,7 +2237,6 @@ mod tests {
         assert!(crate::testing::eventually!(fake.installs() == 1), "installer must start before injecting the failure");
         fail_terminal_updates(&env.app).await;
         release.send(()).unwrap();
-        // 等它真的走到 finish_row，不賭固定 100ms：整樹平行跑負載高時還停在前一個 phase（#759，d753af7e）。
         assert!(
             crate::testing::eventually!(row_phase(&env.app, "u-finish-failed").await == "finishing"),
             "run must reach the owed terminal write"
@@ -2520,7 +2496,6 @@ mod tests {
         let (bot, run) = codex_bot_with_notice(&env, "cx-b", &pending).await;
         sqlx::query("UPDATE bots SET project_id=? WHERE id=?").bind(&pid).bind(&bot).execute(&env.app.db).await.unwrap();
         seed_running(&env.app, "u-347", host, "0.157.0").await;
-        // 第二次讀版本讀到的是 B 已經比較新的 codex：沒有圍籬的話就會被當成「A 升上去了」。
         let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed on A"));
         let (release, gate) = tokio::sync::oneshot::channel();
         *fake.gate.lock().unwrap() = Some(gate);
@@ -2915,7 +2890,6 @@ mod tests {
         let id = first["update_id"].as_str().unwrap();
         let (st, res) = row_status(&env.app, id).await;
         assert_eq!((st.as_str(), res["ok"].clone(), res["to"].clone()), ("done", json!(true), json!("0.157.0")), "結果寫進那一列：{res}");
-        // 第一次裝好會把通知改成「已安裝」；再開一次要有新的「需安裝」目標。
         sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(&pending).bind(&run).execute(&env.app.db).await.unwrap();
         start(&env.app, &ui, "local", Some("codex"), Some("0.157.0"), Fake::new(&[], Ok("ok"))).await.expect("放掉之後可以再開");
     }
@@ -3058,7 +3032,6 @@ mod tests {
         let listed = running_list(&env.app).await;
         assert!(listed.iter().any(|r| r["update_id"] == orphan.as_str() && r["recovered"] == true), "state 要看得到接手中的那筆：{listed:?}");
 
-        // 那台的安裝鎖還被上一個安裝拿著兩輪，第三輪放掉；那時磁碟上已經是新版。
         let rec = Fake::new(&["codex-cli 0.157.0"], Ok("should not run"));
         *rec.busy.lock().unwrap() = vec![true, true];
         let mut rx = env.app.subscribe();
@@ -3075,7 +3048,6 @@ mod tests {
         assert_eq!(done_events(&mut rx).len(), 1);
         assert!(running_list(&env.app).await.is_empty(), "收尾後放掉這台");
 
-        // 之後刻意再裝一次（新的目標）照常開。
         let next = crate::codex_update::pending_text(Some("0.157.0"), "0.158.0");
         sqlx::query("UPDATE runs SET update_notice=? WHERE id=?").bind(&next).bind(&run).execute(&env.app.db).await.unwrap();
         let again = Fake::new(&["codex-cli 0.157.0", "codex-cli 0.158.0"], Ok("ok"));
@@ -3291,7 +3263,6 @@ mod tests {
             ..Arc::try_unwrap(Fake::new(&["codex-cli 0.157.0"], Ok("already installed"))).ok().unwrap()
         });
 
-        // Make the startup SELECT fail while keeping the row intact, then restore the table without restarting the app.
         sqlx::query("ALTER TABLE cli_updates RENAME TO cli_updates_unavailable")
             .execute(&env.app.db)
             .await
@@ -3469,7 +3440,6 @@ mod tests {
             .await
             .expect("the first worker must reach its controlled probe");
 
-        // This is the exact result a sweep can hold after SELECT returns and before it dispatches its rows.
         let stale_row = unfinished_updates(&env.app)
             .await
             .unwrap()
@@ -3580,7 +3550,6 @@ mod tests {
 
     /// `echo $! > file` creates the file before writing the PID, so wait for parseable content, not just existence.
     async fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {
-        // 30 秒上限（issue #952）：原本 2 秒在整樹平行跑、負載高時會先到期。
         for _ in 0..3000 {
             if let Some(pid) = std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok()) {
                 return Some(pid);
@@ -3880,7 +3849,7 @@ mod tests {
         drop(input);
         let installer_pid = wait_for_pid_file(&installer_pid_file).await.expect("fake installer started");
 
-        control.start_kill().unwrap(); // Unix `start_kill` uses SIGKILL; do not run the wrapper's EXIT trap.
+        control.start_kill().unwrap();
         control.wait().await.unwrap();
         assert_eq!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "the fake installer outlives the SSH control shell");
 
@@ -4081,7 +4050,6 @@ mod tests {
         assert!(std::fs::symlink_metadata(&lock).is_err(), "跑完放掉鎖");
         assert!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap());
 
-        // 主人被 SIGKILL（trap 沒跑到）留下的鎖：pid 已經不在，當過期拿走。
         std::os::unix::fs::symlink("99999999", &lock).unwrap();
         local_sh(&locked_script(&lock, &format!("touch '{}'", marker.display())), Duration::from_secs(5)).await.expect("過期的鎖要拿得走");
         assert!(marker.exists());
@@ -4148,7 +4116,6 @@ mod tests {
         let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
         let (cx, _) = codex_bot_with_notice(&env, "cx", &pending).await;
         seed_running(&app, "u-566", "local", "0.157.0").await;
-        // 這台不認得的身份：重啟在 start 那一步被擋，不真的開 pane。
         sqlx::query("UPDATE bots SET identity='nope' WHERE id IN (?, ?)").bind(&cl.id).bind(&cx).execute(&app.db).await.unwrap();
         let seen = Arc::new(Mutex::new(Vec::<crate::state::WsEvent>::new()));
         let (mut rx, out) = (app.subscribe(), seen.clone());

@@ -55,7 +55,6 @@ pub async fn receive(
     Json(body): Json<HookBody>,
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    // 分不出「沒這顆 bot」與「token 不對」（#304）：先驗 token，410 只給 token 正確者。
     let unauthorized = || (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
     let bot = match db::bot(&app.db, &body.bot_id).await {
         Ok(Some(b)) => b,
@@ -64,15 +63,10 @@ pub async fn receive(
     if token.is_empty() || !app.ct_eq(token, &bot.hook_token) {
         return unauthorized();
     }
-    // A3: a deleted bot's surviving agent must not be able to create turns / messages.
     if bot.deleted_at.is_some() {
         return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
     }
     let provider = if body.provider.is_empty() { provider } else { body.provider.clone() }.to_ascii_lowercase();
-    // provider 要跟這顆 bot 的 kind 一致：claude bot 的 pane 裡跑 `codex exec -c notify=[… --bot $AM_BOT_ID …]`，
-    // token／run id 都是從 pane 環境繼承來的、全對，codex 的 thread-id 就被當成這顆 claude bot 的 session
-    // 記成 native_session_id 還標 verified（2026-09-22 AM-issuers-XH：DB 記了一個不存在的 UUIDv7，
-    // restart --resume native 兩次都起不來）。
     if !hookrecv::provider_matches_kind(&provider, &bot.kind) {
         tracing::warn!(bot = %bot.name, kind = %bot.kind, %provider, "hook from another provider; ignored");
         return (StatusCode::CONFLICT, Json(json!({"error": "provider_mismatch", "bot_kind": bot.kind, "provider": provider})));
@@ -80,7 +74,6 @@ pub async fn receive(
     let mut b = body;
     b.provider = provider;
 
-    // 單槽、最新的贏的訊號：不進佇列，掉一格只是晚一次重繪（`hook_inbox` 模組說明）。
     if matches!(hookrecv::classify(&b.provider, &b.payload), hookrecv::HookKind::StatusLine) {
         spawn_statusline(&app, b);
         return (StatusCode::OK, Json(json!({})));
@@ -88,7 +81,6 @@ pub async fn receive(
 
     match crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Http).await {
         Ok(accepted) => {
-            // commit 之後才叫醒 worker：醒來一定看得到那一列。
             app.hook_inbox_wake.notify_one();
             (StatusCode::OK, Json(json!({"stored": accepted.is_new()})))
         }
@@ -125,7 +117,6 @@ fn spawn_statusline(app: &Arc<App>, b: HookBody) {
     STATUSLINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let app = app.clone();
     tokio::spawn(async move {
-        // 先排隊等鎖、拿到鎖才把槽裡「當下最新」的那則取走：等鎖期間到的都已經取代過了。
         let lock = app.bot_lock(&bot_id).await;
         let _g = lock.lock().await;
         let Some(b) = status_slots().lock().unwrap_or_else(|e| e.into_inner()).remove(&bot_id) else { return };
@@ -134,7 +125,6 @@ fn spawn_statusline(app: &Arc<App>, b: HookBody) {
         }
     });
 }
-
 
 /// SPEC §11.4.4.
 pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
@@ -180,7 +170,6 @@ async fn finish_drain(app: &Arc<App>, host: &str, bot_id: &str, n: usize) -> Res
         let mut g = hookrecv::drain_gates().lock().unwrap();
         hookrecv::gate_take_again(g.entry(bot_id.to_string()).or_default())
     };
-    // An empty drain may mean the hook is still writing its line (§11.4.4).
     let delay = if again {
         Some(hookrecv::DRAIN_WINDOW)
     } else if n == 0 {
@@ -349,8 +338,6 @@ pub async fn replay_host(app: &Arc<App>, host: &str) {
 
 #[cfg(not(test))]
 const REPLAY_RETRIES: u32 = 40;
-// 測試的間隔是 50ms，40 次只撐 2 秒：runner 負載高時，測試執行緒從 `replay_host` 到把表改回
-// 可讀之間就可能超過，背景重試先放棄，spool 永遠收不進來（#255 的另一個偶發來源）。
 #[cfg(test)]
 const REPLAY_RETRIES: u32 = 400;
 #[cfg(not(test))]
@@ -418,7 +405,6 @@ mod local_spool_tests {
         assert_eq!(n, 1);
         assert!(!dir.join("hook-spool.jsonl").exists());
         assert!(!dir.join("hook-spool.jsonl.replaying").exists());
-        // 沒有 spool 的 bot 不重放、也不碰鎖。
         assert_eq!(replay_local_spools(&app).await, 0);
     }
 
@@ -452,7 +438,6 @@ mod local_spool_tests {
             std::fs::write(dir.join("hook-spool.jsonl"), format!("{}\n", spool_line(&bot.id, p))).unwrap();
         }
 
-        // 遠端：一台 host 上一顆 bot C（掃描腳本回 C 的 id，claim 腳本回 C 的一行）。
         let host = format!("spool-stall-{}", db::ulid());
         let conn = app
             .hosts
@@ -488,7 +473,6 @@ mod local_spool_tests {
         assert!(tt::eventually!(ingested(&app, &c.id).await == 1), "A 握著鎖時，遠端主機上 C 的 spool 仍要收進來");
         assert_eq!(ingested(&app, &a.id).await, 0, "A 還卡在它的鎖上");
 
-        // 前提：A 的鎖整段都還握著。放鎖後，下一輪把 A 的 spool 收進來。
         assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
         drop(held);
         tokio::time::timeout(std::time::Duration::from_secs(30), scan).await.expect("這一輪不能卡在 A 的鎖上").unwrap();
@@ -508,7 +492,6 @@ mod local_spool_tests {
         std::fs::create_dir_all(&b_dir).unwrap();
         std::fs::write(b_dir.join("hook-spool.jsonl"), format!("{}\n", spool_line(&b.id, "pb1"))).unwrap();
 
-        // 遠端：同一台主機上 C（會握鎖）與 D（沒有鎖）各一份 spool。掃描腳本回兩顆的 id，claim 腳本回腳本裡出現的那一顆的一行。
         let host = format!("spool-remote-stall-{}", db::ulid());
         let conn = app
             .hosts
@@ -545,13 +528,11 @@ mod local_spool_tests {
 
         let lock = app.bot_lock(&c.id).await;
         let held = lock.lock().await;
-        // 第一輪：C 握著鎖。這一輪要自己回來（不能卡在 C 的鎖上），D 收得進來，C 的 spool 留著。
         tokio::time::timeout(std::time::Duration::from_secs(30), scan_once(&app)).await.expect("一輪掃描不能卡在遠端 C 的鎖上");
         assert_eq!(ingested(&app, &b.id).await, 1, "本機 B 的 spool 收進來");
         assert_eq!(ingested(&app, &d.id).await, 1, "同一台主機上沒有握鎖的 D 照樣收進來");
         assert_eq!(ingested(&app, &c.id).await, 0, "C 還握著鎖，它的 spool 留給下一輪");
 
-        // 第二輪（C 仍握著鎖）：B 在上一輪之後又有新的 spool，這一輪要收進來。
         use std::io::Write as _;
         std::fs::OpenOptions::new()
             .create(true)
@@ -564,7 +545,6 @@ mod local_spool_tests {
         assert_eq!(ingested(&app, &b.id).await, 2, "C 握鎖期間，B 的新 spool 在下一輪照樣收進來");
         assert_eq!(ingested(&app, &c.id).await, 0, "C 還握著鎖");
 
-        // 放鎖後：下一輪把 C 的 spool 收進來。
         drop(held);
         tokio::time::timeout(std::time::Duration::from_secs(30), scan_once(&app)).await.expect("放鎖後的一輪掃描要回來");
         assert_eq!(ingested(&app, &c.id).await, 1, "放鎖後下一輪 C 的 spool 收進來");

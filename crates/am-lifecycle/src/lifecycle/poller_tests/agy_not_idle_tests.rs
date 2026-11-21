@@ -96,7 +96,6 @@ async fn statusline_task_count_and_agent_state_hold_the_turn_then_release_when_i
     let app = f.env.app.clone();
     let a = a_turn(&app, &f.bot_id, Some(&f.run_id), "in_flight").await;
 
-    // 1. statusLine 回報背景工作還在跑（agent_state=idle 但 task_count=1）：即使沒收過 Stop、畫面也乾淨，備援不能提早收
     let bg_state = json!({
         "hookEventName": "state",
         "conversation_id": "c-1",
@@ -110,7 +109,6 @@ async fn statusline_task_count_and_agent_state_hold_the_turn_then_release_when_i
     assert!(!try_fallback(&app, &f.run_id, Some(&a)).await.unwrap());
     assert_eq!(turn_status(&app, &a).await, "in_flight");
 
-    // 2. 先收過 fullyIdle:false Stop，接著背景工作結束、statusLine 回報 agent_state=idle 且 task_count=0 → 解除證據，備援能正常收（不會永遠卡在輸出中）
     stop(&f, false).await;
     let idle_state = json!({
         "hookEventName": "state",

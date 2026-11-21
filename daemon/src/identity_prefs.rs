@@ -24,7 +24,6 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     )
     .execute(&mut *tx)
     .await?;
-    // kind × host 啟用開關（使用者 2026-11-14：grok 不訂閱）。停用＝不挑、不派、不啟動、不探測。
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS kind_prefs (
           host TEXT NOT NULL,
@@ -93,7 +92,6 @@ pub async fn put_identity_disabled(
     if name.trim().is_empty() {
         return Err(LcError::Bad("identity is empty".into()));
     }
-    // 留白＝沒給（API.md `host?`）：存成空字串的停用列挑身份時永遠查不到（#1528）。
     let host = b
         .host
         .as_deref()
@@ -124,7 +122,6 @@ pub async fn get_identity_prefs(State(app): State<Arc<App>>) -> Result<Json<Valu
         json!({"disabled": rows.iter().map(|(h, k, i)| json!({"host": h, "kind": k, "identity": i})).collect::<Vec<_>>()}),
     ))
 }
-
 
 /// `kind` 在 `host` 上是否被停用（沒有列＝啟用）。讀失敗當作啟用，由呼叫端自己決定要不要擋。
 pub async fn kind_disabled(pool: &SqlitePool, host: &str, kind: &str) -> bool {
@@ -321,7 +318,6 @@ mod tests {
     async fn put_kind_disabled_responds_without_waiting_for_refresh() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        // 持有 tick_mutex 鎖：若 put_kind_disabled 是同步等待 refresh_now，將會卡住或死鎖。
         let guard = crate::runners::upstream_update::tick_mutex().lock().await;
         let res = put_kind_disabled(
             State(app.clone()),

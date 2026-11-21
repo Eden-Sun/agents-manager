@@ -23,7 +23,6 @@ async fn stopped_project_member_names_resolve_and_duplicates_are_ambiguous() {
     assert_eq!(result["to_bot_id"], first.id);
     assert!(result["to_run_id"].is_null());
     let second = crate::testing::claude_bot(&env.app, &env.project_id, "api-two").await;
-    // Exercise ambiguity even if a legacy database contains duplicate display names.
     sqlx::query("DROP INDEX bots_name_project_live").execute(&env.app.db).await.unwrap();
     sqlx::query("UPDATE bots SET name='api' WHERE id=?").bind(&second.id).execute(&env.app.db).await.unwrap();
     let LcError::Conflict(body) = resolve().await.unwrap_err() else { panic!("expected ambiguity") };
@@ -131,7 +130,6 @@ async fn replay_notified_request_after_new_conversation_does_not_deliver_again()
     sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,created_at,completed_at) VALUES(?,?,'web','completed','ok',?,?)").bind(&turn).bind(&conv).bind(db::now()).bind(db::now()).execute(&env.app.db).await.unwrap();
     let request = db::ulid();
     sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,to_turn_id,state,created_at) VALUES(?,?,?,'stable','please answer','[]',?,'notified',?)").bind(&request).bind(&a.id).bind(&b.id).bind(&turn).bind(db::now()).execute(&env.app.db).await.unwrap();
-    // Replace the target conversation, reproducing the boundary where turn-level keys differ.
     let archived = db::ulid();
     sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES(?,?,?,'claude','archived',?)").bind(&archived).bind(&env.project_id).bind("archived-owner").bind(db::now()).execute(&env.app.db).await.unwrap();
     sqlx::query("UPDATE conversations SET bot_id=? WHERE id=?").bind(&archived).bind(&conv).execute(&env.app.db).await.unwrap();
@@ -237,7 +235,6 @@ async fn retrying_a_cluster_request_after_it_moved_returns_the_original() {
     let first: Value = serde_json::from_slice(&axum::body::to_bytes(first.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(first["delivery"], "pending", "{first}");
     let request = first["request_id"].as_str().unwrap().to_string();
-    // b 先閒下來，群集把請求改派給它。
     sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
     assert_eq!(crate::expert_cluster::claim_target(&env.app, &request, &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
     sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();

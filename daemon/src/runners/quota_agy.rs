@@ -47,7 +47,6 @@ async fn pane_probe(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence,
     }
 }
 
-
 /// agy 明說沒憑證之後，登入偵測（[`login_watch_once`]）暫時不要又因為 Keychain 裡有項目而把旗標翻回已登入、再開一次 pane。
 pub(crate) const AUTH_DENIED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
@@ -80,7 +79,6 @@ pub(crate) fn note_auth_denied(key: String, fence: &crate::hosts::HostFence) {
     auth_denied().lock().unwrap().insert(key, AuthDeniedEntry { until: std::time::Instant::now() + AUTH_DENIED_COOLDOWN, authority: fence.authority_key() });
 }
 
-
 /// 把這一輪的結果記下來：成功清掉失敗、未登入翻旗標、其他失敗留下原因；有變就推 `host_changed`。
 /// 整段寫入在 `run_if_current(fence)` 裡（#1023）：探測途中換了主機或重連，這份結果就不寫任何一格
 /// （冷卻、探測錯誤、登入旗標都一樣），推播放到圍籬外面（`emit_host_changed` 自己也走圍籬）。
@@ -94,7 +92,6 @@ pub(crate) async fn record_probe_result(app: &Arc<App>, host: &str, fence: &crat
                 Ok(()) => {
                     clear_auth_denied(&key);
                     changed |= set_probe_error(host, None);
-                    // 探測讀得到額度＝這台已登入（登入後第一次探測成功就把「未登入」翻回來）。
                     changed |= set_logged_in_quiet(app, host, fence, true).await;
                 }
                 Err(ProbeFail::AuthRequired) => {
@@ -164,13 +161,11 @@ pub async fn refresh_agy_identities(app: &Arc<App>, host: &str) {
         }
         let shares = crate::quota::identity_shares_default("agy", &idn.env);
         if shares {
-            // 沒有自己的 HOME（內建的 `ag0`）＝預設帳號：那一格由 `refresh_agy` 問，這裡不重問、也不因它的登入狀態清掉。
             continue;
         }
         let base = crate::quota::quota_base_default_aware("agy", Some(&idn.name), shares);
         let full = crate::quota::quota_key(host, &base);
         if logins.get(&idn.name).and_then(|i| i.logged_in) == Some(false) {
-            // 已登出（憑證被刪）：那一格的舊讀數不能再顯示。
             crate::quota::forget(app, &full).await;
             continue;
         }
@@ -225,7 +220,6 @@ pub(crate) fn may_reuse_tools_after(outcome: &Result<crate::tools::HostTools, an
 
 async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<bool, RefreshFail> {
     let cached = app.tools.lock().await.contains_key(host);
-    // 每分鐘一次的輪詢，這行只留 debug；真的要跑偵測才用 info。
     tracing::debug!(host, cached, "agy quota refresh started");
     if !cached {
         tracing::info!(host, "agy quota refresh: no cached tools for this host; running detection");
@@ -258,7 +252,6 @@ async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::Ho
     let buckets = match parsed {
         Ok(b) => b,
         Err(fail) => {
-            // 主機換掉了：這個結果不屬於現在這台，別記。
             let superseded = matches!(&fail, ProbeFail::Other { reason: "superseded", .. });
             if !superseded {
                 record_probe_result(app, host, fence, &Err(fail.clone())).await;
@@ -271,13 +264,11 @@ async fn refresh_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::Ho
         }
     };
     for (key, q) in buckets {
-        // 寫入被擋＝途中換代，同樣不屬於現在這台。
         crate::quota::set_fenced(app, host, key, q, fence).await.map_err(|error| RefreshFail { error, superseded: true })?;
     }
     record_probe_result(app, host, fence, &Ok(())).await;
     Ok(true)
 }
-
 
 pub(crate) const REMOTE_LOGOUT_SCRIPT: &str = "f=\"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"; r=0; \
 if [ -e \"$f\" ] || [ -L \"$f\" ]; then rm -f \"$f\" && r=1 || { echo AM_FAILED; exit 0; }; fi; \
@@ -344,15 +335,12 @@ async fn agy_state(app: &impl crate::tools::ToolsTable, host: &str) -> Option<(b
 /// 那一格立刻變成沒有讀數。回「檔案原本在不在」（不在不算錯）。不跑 agy、不動別的檔、不停正在跑的 agy bot（它們下次重啟才會停在登入畫面）。
 /// 拿探測的鎖：正在跑的探測不能在清掉之後又把讀數寫回來。
 pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
-    // 請求當下的權威：排隊等探測鎖期間 H 若換了主機或重連，這份就作廢（#865）。
     let requested = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
     let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
     let fence = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
     if !fence.same_authority(&requested) {
         return Err(LogoutError::Superseded);
     }
-    // 刪憑證 → 清額度 → 翻未登入，整段拿 authority_gate 的 read 端，跟 repoint／reconnect 線性化。
-    // closure 裡不能呼叫 `emit_host_changed`／`set_logged_in`（它們內部也走 `run_if_current`，寫者排隊時再取 read 會死結），推播放到外面。
     let done = app
         .hosts
         .run_if_current(&fence, async {
@@ -382,7 +370,6 @@ pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
             let key = crate::quota::quota_key(host, "agy");
             let had = app.quotas.lock().await.contains_key(&key);
             crate::quota::forget(app, &key).await;
-            // 額度那格要立刻變成「未登入」並出現登入鈕，不等下一輪偵測。
             let changed = set_logged_in_quiet(app, host, &fence, false).await;
             Ok::<_, LogoutError>((removed, had, changed))
         })
@@ -399,7 +386,6 @@ pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
     tracing::info!(host, removed, "agy logged out: credentials removed and quota snapshots cleared");
     Ok(removed)
 }
-
 
 /// 探測失敗的冷卻。綁著失敗當下的主機世代（同 `update_watch::DiskVersionEntry`）：
 /// 同名改指到別台或重連之後，舊世代的冷卻不能壓住新主機，舊世代的 watcher 也不能清掉新主機的冷卻（#873）。
@@ -457,7 +443,6 @@ pub(crate) fn starts_backoff(fail: &RefreshFail) -> bool {
 
 /// `None` ＝這一輪跳過（上次失敗還在冷卻）。`GET /api/quota?refresh=1` 不走這裡，一律真的探測。
 pub async fn refresh_agy_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
-    // 已知未登入：`agy -p /usage` 會停在登入畫面等到逾時，不探測；登入後由 [`spawn_agy_login_watcher`] 發現憑證檔再探。
     if matches!(agy_state(app, host).await, Some((true, Some(false)))) {
         return Ok(None);
     }
@@ -476,7 +461,6 @@ async fn refresh_agy_gated(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
     let (fence, result) = refresh_agy_fenced(app, host).await;
     match result {
         Ok(v) => {
-            // 探測通了：這個世代留著的過期冷卻紀錄一併清掉。
             if let Some(fence) = fence.as_ref() {
                 clear_backoff(app, host, fence).await;
             }
@@ -523,12 +507,10 @@ pub const LOGIN_WATCH: Duration = Duration::from_secs(20);
 /// 有 `HOME` 覆寫的 agy 身份（`[[identities]] kind = "agy"`）各自的登入狀態不在這裡判，由身份的登入 watcher（剛登入）
 /// 與 [`spawn_agy_identity_poller`]（每 10 分鐘）重驗；所以這一格「已登入」與身份列可以不同，網頁那一格標成「預設帳號」。
 pub async fn login_watch_once(app: &Arc<App>, host: &str) {
-    // 沒裝、或這輪偵測沒問出登入與否（`None`）：什麼都不猜。
     let Some((true, Some(logged_in))) = agy_state(app, host).await else { return };
     let Some(fence) = app.hosts.fence(host).await else { return };
     let key = crate::quota::quota_key(host, "agy");
     let probe = if !logged_in {
-        // agy 剛明說沒憑證：Keychain 裡有項目（可能是過期的 token）不算登好了，冷卻期內不探測、不開 pane。
         if auth_denied_active(&key, &fence) || token_present(&fence).await != Some(true) {
             return;
         }
@@ -566,7 +548,6 @@ pub fn spawn_agy_identity_poller(app: Arc<App>) {
     crate::background_loop::spawn_periodic(&app, "agy identity poller", AGY_IDENTITY_RECHECK, AGY_IDENTITY_RECHECK, |app| async move {
         for host in crate::quota::pollable_hosts(&app).await {
             let identities = crate::tools::identities_for_host(&app, &host).await;
-            // 內建的 `ag0`（沒有自己的 HOME）就是預設帳號，沒有另一份登入可驗。
             let names = agy_identity_names(identities.iter().filter(|i| !crate::quota::identity_shares_default(&i.kind, &i.env)).map(|i| (i.name.as_str(), i.kind.as_str())));
             for name in names {
                 let _ = crate::tools::recheck_identity_login(&app, &host, &name).await;

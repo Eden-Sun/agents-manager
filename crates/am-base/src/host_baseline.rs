@@ -120,7 +120,6 @@ fn sh_words(items: impl IntoIterator<Item = String>) -> String {
 /// 用宣告檔填 [`BASELINE_SH_TEMPLATE`] 的佔位字。
 pub fn render_baseline_sh(m: &manifest::Manifest) -> String {
     let names = |v: &[manifest::Item]| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
-    // 工具清單另有一份放在 `$SHELL -lic '…'` 的單引號裡：先 quote 成內層 shell 的字，再把 `'` 寫成 `'\''` 嵌進外層單引號。
     let tools_inner = sh_words(names(&m.tools)).replace('\'', "'\\''");
     BASELINE_SH_TEMPLATE
         .replace("__AM_TOOLS_INNER__", &tools_inner)
@@ -261,7 +260,6 @@ fi
 printf 'AM_BL end\n'
 "#;
 
-
 /// 探測輸出裡的 `AM_BL os <uname -s>`。
 pub fn os_of(out: &str) -> Option<String> {
     out.lines().find_map(|l| l.trim_end().strip_prefix("AM_BL os ")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -345,11 +343,9 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
     if !out.lines().any(|l| l.trim_end() == "AM_BL end") {
         return None;
     }
-    // 宣告檔壞掉：不知道基準是什麼，就是未知（不是一致）。
     let m = manifest::shipped().ok()?;
     let mac = os_of(out).as_deref() == Some("Darwin");
     let mut issues = Vec::new();
-    // 探測印出來有絕對路徑的工具＝已安裝（`only_if_tool` 用；整份輸出先掃一遍，不靠行的順序）。
     let installed: std::collections::HashSet<&str> = out
         .lines()
         .filter_map(|l| {
@@ -357,7 +353,6 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
             (f.len() >= 4 && f[0] == "AM_BL" && f[1] == "tool" && !f[3].is_empty()).then(|| f[2])
         })
         .collect();
-    // 目前這個 claude 身份的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
     let mut claude_settings = true;
     let mut codex_config = true;
     for line in out.lines() {
@@ -381,7 +376,6 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     claude_settings = present;
                 }
                 let item = m.claude_files.iter().find(|i| i.name == f[3]);
-                // `only_if_tool`：那個工具沒裝就不算缺（例如沒裝 rtk 就不檢查 RTK.md）。
                 let skipped = item.and_then(|i| i.only_if_tool.as_deref()).is_some_and(|t| !installed.contains(t));
                 if !present && !skipped {
                     issues.push(BaselineIssue {
@@ -391,7 +385,6 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 }
             }
             "claude-key" if f.len() >= 5 => {
-                // `x`：jq 讀不懂整份檔。那不是「沒有這個鍵」，只報一條（四個鍵的 id 同一個，下面去重只留一條）。
                 if claude_settings && f.get(4).copied() == Some("x") {
                     issues.push(issue(
                         format!("claude.{}.settings.json:json", f[2]),
@@ -416,7 +409,6 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                 }
             }
             "claude-plugin" if f.len() >= 5 => {
-                // Mac 專用：Linux（或不知道是什麼系統）一律不算缺；settings.json 本身不在也不再追問。
                 if mac && claude_settings && m.mac_only_plugins.iter().any(|p| p == f[3]) && !present(f.get(4)) {
                     issues.push(issue(
                         format!("claude.{}.plugin:{}", f[2], f[3]),
@@ -461,13 +453,10 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
             _ => {}
         }
     }
-    // CLAUDE_CONFIG_DIR 指到 ~/.claude 或 ~/.claude-ccN 時，同一個目錄會走到兩次：同一個 id 只報一次。
     let mut seen = std::collections::HashSet::new();
     issues.retain(|i| seen.insert(i.id.clone()));
     Some(issues)
 }
-
-
 
 /// 每台主機的基線報告。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait HostBaselineTable: Send + Sync {

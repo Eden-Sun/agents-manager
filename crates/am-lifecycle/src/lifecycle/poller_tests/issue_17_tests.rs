@@ -292,7 +292,6 @@ async fn a_prompt_with_no_lossless_proof_is_typed_once_and_unverified() {
 #[tokio::test]
 async fn a_late_redraw_on_an_unverified_run_is_still_submitted_not_left_in_the_box() {
     let f = fixture("grok", "").await;
-    // 第一次讀的時候框還是空的：字「晚一幀」才出現。
     live(&f, crate::testing::LivePane { boxed: true, swallow_text: true, ..wide() });
     let app = f.env.app.clone();
     db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
@@ -300,7 +299,6 @@ async fn a_late_redraw_on_an_unverified_run_is_still_submitted_not_left_in_the_b
     let client = client_for_run(&app, &run).await.unwrap();
     let (calls, panes) = (f.env.herdr.calls.clone(), f.env.herdr.live.clone());
     let redraw = tokio::spawn(async move {
-        // 貼上之後的第一次讀畫面過去了，才把字畫進框裡。
         loop {
             let m: Vec<String> = calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
             if let Some(pos) = m.iter().position(|x| x == "pane.send_text") {
@@ -403,7 +401,6 @@ async fn a_codex_multi_line_prompt_is_proven_by_its_rollout() {
         .await
         .unwrap();
     sqlx::query("UPDATE runs SET native_session_id = 'sess-codex' WHERE id = ?").bind(&f.run_id).execute(&app.db).await.unwrap();
-    // codex 的 composer／回音 marker 是 `› `；mock pane 畫的是 `❯`，所以這裡只看 rollout 證據本身。
     let (run, bot) = run_and_bot(&f).await;
     let client = client_for_run(&app, &run).await.unwrap();
     let pane_cols = client.pane_size("pane-17").await.ok().flatten().map(|(w, _)| w);
@@ -582,7 +579,6 @@ async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
     assert_eq!(p["run_id"], run.id.as_str());
     let action = p["action"].as_str().unwrap_or_default();
     assert!(action.contains("pane") && action.contains("橫幅") && action.contains("重送"), "{p}");
-    // 巡檢收、叫醒。
     crate::supervisor::roles::classify(&app.db).await.unwrap();
     let routed: (String, i64) = sqlx::query_as(
         "SELECT role, wake FROM supervisor_inbox WHERE kind='ops_alert' AND event_key LIKE 'ops_alert:daemon:codex_security_banner:%'",
@@ -592,14 +588,12 @@ async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
     .unwrap();
     assert_eq!(routed, ("patrol".to_string(), 1));
 
-    // 橫幅被人關掉：照常派送，`1` 開頭的整句原封不動貼進去。
     f.env.herdr.set_screen("pane-17", "› Reply with PONG\n\n• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n");
     let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
     assert!(!matches!(out, Delivered::NotAttempted { .. }), "{out:?}");
     let sent = f.env.herdr.calls_to("pane.send_text");
     assert_eq!(sent.first().map(|c| c["text"].clone()), Some(json!("1. 先看 issue 782")), "{sent:?}");
 
-    // 關掉之後又出現：再通知一次。
     f.env.herdr.set_screen("pane-17", screen);
     let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
     assert_eq!(out, not("codex_security_banner", true));
@@ -667,8 +661,6 @@ async fn an_agent_with_a_session_binding_still_goes_through_agent_prompt() {
 /// `agent.prompt` 走完之後 DB 記的是「沒有證據、但可以重送」，而且沒有用掉重送額度。
 #[tokio::test]
 async fn the_agent_prompt_route_is_recorded_unverified_but_still_resendable() {
-    // 路由本身由 `an_agent_with_a_session_binding_still_goes_through_agent_prompt` 蓋；
-    // mock 不實作 agent.prompt，這裡只驗那條路的結果怎麼記。
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();
     crate::lifecycle::prompt::mark_delivery(&app, &f.turn_id, Delivered::Handed.record().unwrap(), &db::now()).await.unwrap();
@@ -1065,7 +1057,6 @@ async fn a_stall_round_that_cannot_read_what_was_sent_does_not_fail_the_turn() {
     let app = f.env.app.clone();
     app.stall_timers.lock().await.insert(f.run_id.clone(), 31);
     sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable").execute(&app.db).await.unwrap();
-    // 讀完之後 DB 就恢復：接下來判失敗是寫得進去的。
     let a = app.clone();
     crate::lifecycle::race_point::arm("stall_after_nudge", &f.turn_id, move || async move {
         sqlx::query("ALTER TABLE messages_unreadable RENAME TO messages").execute(&a.db).await.unwrap();
@@ -1135,7 +1126,6 @@ async fn a_resend_blocked_twice_says_what_blocked_it() {
         .unwrap();
     assert!(msg.contains("試著自動重送時被擋下") && msg.contains(why), "{msg}");
 
-    // 計時器被換掉（新的回合、取消）就停手，不動任何東西。
     assert_eq!(resend_with_retry(&app, &f.run_id, &f.bot_id, &f.turn_id, &sent, 8, Duration::from_millis(1)).await, None);
 }
 
@@ -1251,7 +1241,6 @@ async fn a_banner_the_fallback_closes_a_remote_turn_on_is_put_to_jev_once() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].0.as_str(), rows[0].1), (f.bot_id.as_str(), Some(0.93)));
 
-    // 備援收完之後，畫面掃描照樣會跑一次：橫幅已經寫過、回合也不在飛，不能再問第二次。
     capture_codex_usage_notices(&app, &f.bot_id, &f.run_id).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(limit_hit_rows(&app).await.len(), 1, "同一則橫幅只問一次");
@@ -1504,7 +1493,6 @@ async fn issue_1666_an_unedited_draft_is_still_pressed_again_however_it_was_wrap
         ("send to ann a", vec!["send to ann a"]),
     ] {
         let f = fixture("claude", "").await;
-        // 多行草稿只認 transcript 證據（沒有 transcript 會停在 `transcript_not_ready`）；Enter 被重畫吃掉，transcript 沒有新的一則。
         with_transcript(&f, crate::testing::LivePane { enter_redraws: Some(rows.iter().map(|r| r.to_string()).collect()), ..wide() }).await;
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
@@ -1819,7 +1807,6 @@ async fn issue_1654_startup_skips_durable_rows_that_no_longer_match() {
     use super::super::delivery::{LogFormat, Proof};
 
     let now = "2026-10-12T12:00:00.000Z";
-    // (情境, 打字後套用的 SQL（{run}／{turn} 代入），開機時間，預期接回幾筆)
     let cases: [(&str, &str, &str, usize); 6] = [
         ("對照：沒有變動，仍接回", "", "2026-10-12T12:01:00.000Z", 1),
         ("pane 不符", "UPDATE runs SET pane_id='pane-99' WHERE id='{run}'", "2026-10-12T12:01:00.000Z", 0),
@@ -1882,7 +1869,6 @@ async fn issue_1654_owed_unknown_write_restores_its_baseline_from_durable_storag
     let path = with_transcript(&f, quiet()).await;
     let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
     let text = "Reply with PONG please";
-    // 列的 TTL 以注入的時間判斷，不靠牆鐘：寫入與接回都用同一個固定時間。
     let now = "2026-10-12T12:00:00.000Z";
     let pending = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, now.into());
     late_proof::persist_pending_at(&app.db, &f.run_id, &pending, now).await.unwrap();
@@ -1903,7 +1889,6 @@ async fn issue_1654_one_failed_cleanup_does_not_stop_the_startup_restore() {
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();
     let path = with_transcript(&f, quiet()).await;
-    // 好的那筆（EchoRow 不看 session）較舊；壞的那筆（transcript，session 已換）較新，所以先被處理。
     let (good_run, good_turn) = seed_in_flight_run(&f).await;
     let good = late_proof::Pending::new("claude", "pane-17", &Proof::EchoRow, 0, 0, "good", "2026-10-12T12:00:00.000Z".into());
     late_proof::persist_pending_at(&app.db, &good_run, &good, "2026-10-12T12:00:00.000Z").await.unwrap();
@@ -1912,7 +1897,6 @@ async fn issue_1654_one_failed_cleanup_does_not_stop_the_startup_restore() {
     late_proof::persist_pending_at(&app.db, &f.run_id, &bad, "2026-10-12T12:00:05.000Z").await.unwrap();
     sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id IN (?, ?)").bind(&f.turn_id).bind(&good_turn).execute(&app.db).await.unwrap();
     sqlx::query("UPDATE runs SET native_session_id='sess-2' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
-    // 只讓壞的那筆 DELETE 失敗。
     sqlx::query(&format!(
         "CREATE TRIGGER issue_1654_fail_cleanup BEFORE DELETE ON late_proof_pending WHEN OLD.turn_id = '{}' BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END",
         f.turn_id

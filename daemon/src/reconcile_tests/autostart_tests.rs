@@ -124,7 +124,6 @@ async fn an_autostart_bot_whose_host_is_unreadable_is_skipped_and_retried_alone(
     let env = tt::env().await;
     let app = &env.app;
     let good = autostart_bot(&env, &env.project_id, "good").await;
-    // 主機欄讀不出字串（型別錯，跟 I/O 錯誤一樣是 `Err`）：只有這個專案的 bot 讀不到主機。
     let broken = db::ulid();
     let repo = env.dir.join("broken");
     tt::git::init_repo(&repo);
@@ -142,7 +141,6 @@ async fn an_autostart_bot_whose_host_is_unreadable_is_skipped_and_retried_alone(
     assert!(running(app, &good).await, "讀得到的照起");
     assert!(!running(app, &later).await && !running(app, &stopped).await, "讀不到主機：不當成本機起");
 
-    // 這之間使用者自己起過 `stopped` 又停掉它。
     sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at,ended_at) VALUES (?,?,'stopped','idle',?,?)")
         .bind(db::ulid())
         .bind(&stopped)

@@ -13,7 +13,6 @@ pub(crate) async fn herdr_session(app: &Arc<App>, run: &db::Run) -> Option<Strin
     if let Some(name) = run.agent_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         candidates.push(name);
     }
-    // herdr 在 `agent start` 逾時後會把名字拿掉，pane 與 claude 還在：改用 pane id 查（#878）。
     candidates.push(pane);
     for target in candidates {
         let Ok(Some(agent)) = client.agent_get(target).await else { continue };

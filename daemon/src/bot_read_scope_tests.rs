@@ -58,7 +58,6 @@ fn body(response: &str) -> &str {
 
 fn assert_role_gate(response: &str, path: &str) {
     assert!(
-        // AGM 角色閘（role_required），或更嚴的只限網頁（user_only，例如 claude-update review）都算擋下。
         response.starts_with("HTTP/1.1 403")
             && (body(response).contains("\"reason\":\"role_required\"")
                 || body(response).contains("\"reason\":\"user_only\"")),

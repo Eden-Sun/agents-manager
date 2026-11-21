@@ -107,8 +107,6 @@ pub fn drift(want: &[SchemaObject], have: &[SchemaObject]) -> Vec<String> {
                 .filter(|c| !h.columns.iter().any(|x| x.eq_ignore_ascii_case(c)))
                 .map(|c| format!("{}.{c}", w.name))
                 .collect();
-            // 欄位在，但型別／NOT NULL／預設值／主鍵不同（#307）：以前只比欄位名，這種漂移（例如舊 DB 的欄位是 TEXT、
-            // 程式以為 INTEGER DEFAULT 0）會一路放行，讀出來的值型別錯或預設值不同。
             for wc in &w.col_defs {
                 let Some(hc) = h.col_defs.iter().find(|x| x.0.eq_ignore_ascii_case(&wc.0)) else { continue };
                 let (wt, ht) = (wc.1.to_ascii_uppercase(), hc.1.to_ascii_uppercase());
@@ -130,10 +128,6 @@ pub fn drift(want: &[SchemaObject], have: &[SchemaObject]) -> Vec<String> {
                     w.name
                 ));
             }
-            // 約束（issue #470）：`pragma_table_info` 看不到 `CHECK`／表層級的 `UNIQUE`／`FOREIGN KEY`，
-            // 而表以前從來不比 DDL 原文（只有下面的 `else if` 分支比，表走不到那裡）。於是放寬一個 CHECK
-            // 之後：全新 DB 正常、測試全綠（測試都是新 DB），既有 DB 安靜地留著舊約束，只有正式機在寫
-            // 新值時炸 `CHECK constraint failed`。
             let (want_c, have_c) = (constraint_defs(&w.sql), constraint_defs(&h.sql));
             if want_c != have_c {
                 let only_in = |a: &[String], b: &[String]| {
@@ -225,10 +219,6 @@ pub fn constraint_defs(sql: &str) -> Vec<String> {
     let mut defs: Vec<&str> = Vec::new();
     let mut depth: i32 = 0;
     let mut start: usize = 0;
-    // 字串字面值裡的括號不算括號（i264 審 #470 提的）。今天的 SCHEMA 沒有這種字面值，但切錯的後果
-    // 不對稱：子句對不上 → `drift` 報問題 → `check_drift` 的 `ensure!` → **連全新 DB 都開不起來**，
-    // 而且訊息會說「表 X 的約束跟程式不同」，把人往資料庫的方向帶。跳引號的規則同 `normalize_sql`：
-    // 連著兩個引號是跳脫，不是結束。
     let mut in_quote: Option<char> = None;
     let mut it = body.char_indices().peekable();
     while let Some((i, c)) = it.next() {
@@ -295,7 +285,6 @@ pub fn normalize_sql(sql: &str) -> String {
         space = false;
         out.push(c);
         if c == '\'' || c == '"' {
-            // 引號裡原樣照抄；連著兩個引號是跳脫，不是結束。
             while let Some(q) = chars.next() {
                 out.push(q);
                 if q == c {

@@ -207,8 +207,6 @@ async fn require_writer(app: &Arc<App>, principal: &RequestPrincipal, project_id
     if !matches!(principal, RequestPrincipal::Bot(_)) || bot.parent_bot_id.is_some() {
         return Err(denied());
     }
-    // 母子模式（parent_child）沒有 manager：派工的是頂層 bot（parent），做完由它決定要不要前移，所以同專案頂層 bot 都可寫。
-    // expert 專案只認 manager（同 `api::expert_manager_over`）、代班中的副管理者與 AGM 角色。
     let expert = live_project(app, project_id).await?.mode == "expert";
     if !expert && bot.managed_by != "child" {
         return Ok(Some(bot));

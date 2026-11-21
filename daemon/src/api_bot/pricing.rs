@@ -8,7 +8,6 @@ pub(super) struct DirectGlobal;
 fn forbidden(value: &Value, allow_1h: bool, allow_search: bool, allow_fetch: bool) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
-            // cache_control 只接受 5 分鐘 ephemeral；這顆 bot 選了 1 小時才另放行 `ttl:"1h"`（其餘 TTL 仍拒絕）。
             (key == "cache_control" && value != &serde_json::json!({"type": "ephemeral"})
                     && !(allow_1h && value == &serde_json::json!({"type": "ephemeral", "ttl": "1h"})))
                 || matches!(key.as_str(), "service_tier" | "inference_geo" | "container")
@@ -36,7 +35,6 @@ struct Rates { input: i64, write_5m: i64, write_1h: i64, read: i64, output: i64,
 fn rates(model: &str) -> Result<Rates, QuoteError> {
     match model {
         "claude-opus-5-5" => Ok(Rates { input: 40, write_5m: 50, write_1h: 80, read: 2, output: 200, version: "claude-opus-5-5-global-2026-11-14" }),
-        // https://platform.claude.com/docs/en/models/fable-5-2/overview — checked 2026-11-13.
         "claude-fable-5-2" => Ok(Rates { input: 80, write_5m: 100, write_1h: 160, read: 2, output: 400, version: "claude-fable-5-2-global-2026-11-13" }),
         _ => Err(QuoteError::InvalidRequest),
     }
@@ -155,7 +153,6 @@ fn reserve_microusd(
     ttl_1h: bool,
     web_search: bool,
 ) -> Result<i64, QuoteError> {
-    // 沒命中時整段輸入按快取寫入價算；這顆 bot 選了 1 小時就按 1 小時寫入價（2×）。
     let write = if ttl_1h { rates.write_1h } else { rates.write_5m };
     let factor = speed_factor(speed)?;
     let input_tenths = if let Some(prefix) = previous_prefix {
@@ -242,9 +239,6 @@ impl QuoteProvider for DirectGlobal {
         let input = usage.get("input_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let output = usage.get("output_tokens").and_then(Value::as_u64).ok_or(QuoteError::UntrustedUsage)?;
         let speed = usage.get("speed").and_then(Value::as_str).ok_or(QuoteError::UntrustedUsage)?;
-        // 有 iterations 時以 iterations 為準（見下方「iterations 計價」）：頂層的快取欄位與 `cache_creation` 細項
-        // 在壓縮那一輪會跟頂層數字對不上（實測：頂層 cache_creation_input_tokens=4332，細項 ephemeral_5m=130581＝壓縮那一輪的寫入），
-        // 所以不拿它們驗證，也不拿來計價。
         let iter_items: Option<&Vec<Value>> = match usage.get("iterations") {
             Some(Value::Array(a)) if !a.is_empty() => Some(a),
             _ => None,
@@ -256,7 +250,6 @@ impl QuoteProvider for DirectGlobal {
         };
         let cache_creation = count("cache_creation_input_tokens")?;
         let cache_read = count("cache_read_input_tokens")?;
-        // `cache_creation` 細項（若有）必須只含兩個 TTL 欄位且總和等於 cache_creation_input_tokens；沒有細項就全部當 5 分鐘寫入。
         let (write_5m, write_1h) = match usage.get("cache_creation") {
             _ if iter_items.is_some() => (0, 0),
             None | Some(Value::Null) => (cache_creation, 0),
@@ -297,9 +290,6 @@ impl QuoteProvider for DirectGlobal {
             && !(request.speed() == "standard" && speed != "standard");
         let actual_speed = match speed { "standard" => "standard", "fast" => "fast", _ => return Err(QuoteError::UntrustedUsage) };
         let tenths = if let Some(items) = iter_items {
-            // iterations 計價：每個 iteration 各自驗證、各自依類型計價後加總（官方：加總 iterations 才是實際計費；
-            // 頂層 usage 不含壓縮那一輪）。`message` 是正常請求；`compaction` 是伺服器端壓縮的摘要輪，單價與一般請求相同
-            // （input／快取讀寫／output），a2ce1e3f5 起如此計。快取寫入沒有細項時依這顆 bot 的 TTL 選擇計價。
             if !metadata_ok { return Err(QuoteError::UntrustedUsage); }
             let bound = input_token_bound(request)?;
             let mut acc = 0_i64;
@@ -314,7 +304,6 @@ impl QuoteProvider for DirectGlobal {
                 let (i_read, i_write) = (field("cache_read_input_tokens", false)?, field("cache_creation_input_tokens", false)?);
                 let total = i_in.checked_add(i_read).and_then(|n| n.checked_add(i_write)).ok_or(QuoteError::UntrustedUsage)?;
                 if total > bound || (kind == "message" && i_out > u64::from(request.options().max_tokens)) { return Err(QuoteError::UntrustedUsage); }
-                // 細項（若有）必須只含兩個 TTL 欄位且總和等於該 iteration 的 cache_creation_input_tokens。
                 let (w5, w1) = match it.get("cache_creation") {
                     None | Some(Value::Null) => if request.options().cache_ttl_1h { (0, i_write) } else { (i_write, 0) },
                     Some(Value::Object(m)) if m.keys().all(|k| matches!(k.as_str(), "ephemeral_1h_input_tokens" | "ephemeral_5m_input_tokens")) => {
@@ -351,7 +340,6 @@ impl QuoteProvider for DirectGlobal {
         let estimated_microusd = to_micro(tenths)
             .checked_add(search_fee_microusd)
             .ok_or(QuoteError::UntrustedUsage)?;
-        // 實際費用超過預留（例如回合中途快取過期、整段按寫入價）仍是真實花費：照實記帳，不當成不可信用量。
         Ok(UsageQuote { estimated_microusd, actual_speed: Some(actual_speed) })
     }
 }
@@ -605,7 +593,6 @@ mod tests {
     fn approved_quotes_are_integer_upper_bounds_and_reject_untrusted_usage() {
         let standard = request(false, json!("fixture"));
         let fast = request(true, json!("fixture"));
-        // 預留依實際 request 估：輸入 = body 位元組數 + 固定餘裕，全部按快取寫入價；輸出 = max_tokens。
         let bound = input_token_bound(&standard).unwrap() as i64;
         assert!(bound < 10_000, "小 request 的輸入上界只有幾千 token");
         let expected = (bound * 50 + 1024 * 200 + 9) / 10;
@@ -654,16 +641,12 @@ mod tests {
             if !detail.is_null() { u["cache_creation"] = detail; }
             response(u)
         };
-        // 100×$4 + 1000×$5（5 分鐘寫入）+ 2000×$0.2（讀取，Opus 5.5 是 0.05×）+ 10×$20 = 400+5000+400+200 = 6000 µUSD
         assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, Value::Null)).unwrap().estimated_microusd, 6000);
         let detailed = json!({"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":1000});
         assert_eq!(DirectGlobal.settle(&standard, &with(1000, 2000, detailed)).unwrap().estimated_microusd, 6000);
-        // 1 小時寫入 2×：500×$8 = 4000
         let hour = json!({"ephemeral_1h_input_tokens":500,"ephemeral_5m_input_tokens":500});
         assert_eq!(DirectGlobal.settle(&standard, &with(1000, 0, hour)).unwrap().estimated_microusd, 400 + 2500 + 4000 + 200);
-        // 細項總和與總數不符 → 不信任
         assert!(DirectGlobal.settle(&standard, &with(1000, 0, json!({"ephemeral_1h_input_tokens":1,"ephemeral_5m_input_tokens":1}))).is_err());
-        // fast 實際單價 2×
         let mut f = with(0, 2000, Value::Null);
         f.usage["speed"] = json!("fast");
         assert_eq!(DirectGlobal.settle(&fast, &f).unwrap().estimated_microusd, (100 * 40 + 2000 * 2 + 10 * 200) * 2 / 10);
@@ -703,7 +686,6 @@ mod tests {
             assert_eq!(q.reserved_microusd, expected);
             let mut resp = response(json!({"input_tokens":100,"output_tokens":10,"speed":if fast {"fast"} else {"standard"},"cache_creation_input_tokens":1000,"cache_read_input_tokens":2000,"cache_creation":{"ephemeral_1h_input_tokens":500,"ephemeral_5m_input_tokens":500}}));
             resp.model = crate::config::API_BOT_FABLE_MODEL.into();
-            // 100*$8 + 500*$10 + 500*$16 + 2000*$0.20 + 10*$40 = 14600 µUSD.
             assert_eq!(DirectGlobal.settle(&req, &resp).unwrap().estimated_microusd, 14600 * factor);
             resp.model = crate::config::API_BOT_MODEL.into();
             assert!(DirectGlobal.settle(&req, &resp).is_err(), "never price a mismatched model");
@@ -718,7 +700,6 @@ mod tests {
         let quote = DirectGlobal.reserve(&req).unwrap();
         assert_eq!(quote.reserved_microusd, expected_legacy);
 
-        // Previous response without valid usage (no input_tokens) also falls back to legacy formula
         let mut invalid_prev_req = request(false, json!("fixture"));
         invalid_prev_req.set_previous_response(Some(response(json!({"invalid": true}))));
         let quote2 = DirectGlobal.reserve(&invalid_prev_req).unwrap();
@@ -738,12 +719,12 @@ mod tests {
         req.set_previous_response(Some(prev));
 
         let bound = input_token_bound(&req).unwrap() as i64;
-        let prefix = 3500_i64; // 2000 + 1000 + 500
+        let prefix = 3500_i64;
         assert!(bound > prefix);
         let prefix_tokens = prefix;
         let tail_tokens = bound - prefix;
-        let prefix_cost = prefix_tokens * 2; // claude-opus-5-5 read rate = 2（$0.20/M）
-        let tail_cost = tail_tokens * 50;   // claude-opus-5-5 write_5m rate = 50
+        let prefix_cost = prefix_tokens * 2;
+        let tail_cost = tail_tokens * 50;
         let input_base = prefix_cost + tail_cost;
         let input_with_margin = (input_base * 120 + 99) / 100;
         let expected_reserve = (input_with_margin + 1024 * 200 + 9) / 10;
@@ -751,7 +732,6 @@ mod tests {
         let quote = DirectGlobal.reserve(&req).unwrap();
         assert_eq!(quote.reserved_microusd, expected_reserve);
 
-        // Actual usage for this turn is well below reserve:
         let actual = response(json!({
             "input_tokens": 100,
             "cache_read_input_tokens": 3500,
@@ -767,7 +747,6 @@ mod tests {
 
     #[test]
     fn long_session_reserve_is_much_lower_than_legacy_formula() {
-        // In a long session, large conversation prefix was cached in previous turn
         let long_messages = vec![
             Message { role: "user".into(), content: json!("x".repeat(60_000)) },
             Message { role: "assistant".into(), content: json!("reply") },
@@ -779,7 +758,6 @@ mod tests {
         let bound = input_token_bound(&req).unwrap() as i64;
         assert!(bound > 60_000);
 
-        // Previous response usage recorded 60,000 prefix tokens
         let prev = response(json!({
             "input_tokens": 1000,
             "cache_read_input_tokens": 59_000,
@@ -792,11 +770,8 @@ mod tests {
         let legacy_reserve = (bound * 50 + 1024 * 200 + 9) / 10;
         let new_reserve = DirectGlobal.reserve(&req).unwrap().reserved_microusd;
 
-        // Legacy formula priced all 60k+ tokens at write_5m (50); new formula prices 60k at read (4).
-        // 60k * 4 = 240k vs 60k * 50 = 3000k. Even with 20% margin, new reserve is less than half the old.
         assert!(new_reserve < legacy_reserve / 2, "new_reserve ({new_reserve}) should be much lower than legacy ({legacy_reserve})");
 
-        // And normal actual usage settles well under the new reserve
         let actual = response(json!({
             "input_tokens": 500,
             "cache_read_input_tokens": 60_000,
@@ -816,7 +791,6 @@ mod tests {
         let bound = input_token_bound(&req).unwrap() as i64;
         let expected_legacy = (bound * 50 + 1024 * 200 + 9) / 10;
 
-        // 1. Response containing a compaction block and iterations in usage
         let mut compact_resp = response(json!({
             "input_tokens": 100,
             "output_tokens": 50,
@@ -845,12 +819,9 @@ mod tests {
             json!({"type": "text", "text": "Continuing after compaction"}),
         ];
 
-        // Settle accepts the compaction usage shape
         let settled = DirectGlobal.settle(&req, &compact_resp).unwrap();
-        // 頂層 100×40+50×200，壓縮 iteration 4000×40(input)+1000×4(read)+500×50(write)+300×200(output)，單位 0.1 µUSD。
         assert_eq!(settled.estimated_microusd, (14_000 + 160_000 + 2_000 + 25_000 + 60_000 + 9) / 10);
 
-        // 2. Next turn's reserve: previous response had compaction, so prefix no longer applies
         req.set_previous_response(Some(compact_resp));
         let quote_after_compact = DirectGlobal.reserve(&req).unwrap();
         assert_eq!(
@@ -880,14 +851,11 @@ mod tests {
         let req = RequestEnvelope::new(
             opt(fable, false, 32000, 150_000, false),
             json!("s"),
-            // 大 request：位元組上界要涵蓋 130k token 的壓縮輸入。
             vec![Message { role: "user".into(), content: json!("x".repeat(400_000)) }],
         ).unwrap();
         let mut resp = response(real_compaction_usage());
         resp.model = fable.into();
         let q = DirectGlobal.settle(&req, &resp).expect("accepted");
-        // Fable：input 80、5m 寫入 100、讀取 2、output 400（0.1µUSD/token）。
-        // 壓縮：38×80 + 130581×100 + 8192×400；message：2×80 + 4332×100 + 20653×2 + 533×400。
         let tenths = 38 * 80 + 130_581 * 100 + 8192 * 400 + 2 * 80 + 4332 * 100 + 20_653 * 2 + 533 * 400;
         assert_eq!(q.estimated_microusd, (tenths + 9) / 10);
         assert!((1_600_000..1_800_000).contains(&q.estimated_microusd), "約 $1.7，不是預留上限 $6.53：{}", q.estimated_microusd);
@@ -914,12 +882,10 @@ mod tests {
         use crate::api_bot::sse::StreamProgress;
         let model = crate::config::API_BOT_MODEL;
         let p = StreamProgress { input_tokens: 1000, cache_read_tokens: 2000, cache_creation_tokens: 500, output_tokens: 10, generated_chars: 3000, ..Default::default() };
-        // output 取 max(10, 3000/3=1000)=1000：1000×40 + 2000×2 + 500×50 + 1000×200 = 269000 tenths。
         assert_eq!(running_cost_microusd(model, false, false, &p), Some(26_900));
         assert_eq!(running_cost_microusd(model, true, false, &p), Some(53_800));
         let fast = StreamProgress { speed: Some("fast".into()), ..p.clone() };
         assert_eq!(running_cost_microusd(model, false, false, &fast), Some(53_800));
-        // 回報的 output_tokens 較大時用回報值。
         let big = StreamProgress { output_tokens: 5000, ..p };
         assert_eq!(running_cost_microusd(model, false, false, &big), Some((1000 * 40 + 2000 * 2 + 500 * 50 + 5000 * 200 + 9) / 10));
         assert_eq!(running_cost_microusd("unknown-model", false, false, &StreamProgress::default()), None);
@@ -928,10 +894,7 @@ mod tests {
     #[test]
     fn oversized_transcript_over_1m_bytes_with_compaction_is_pruned_and_quoted() {
         let fable = crate::config::API_BOT_FABLE_MODEL;
-        // 模擬故障 bot 01M7AKSKXMB1A6RRQZFJFPMVKK：歷史訊息超過 1.5M bytes，
-        // 中間觸發過 compaction，其後有新的對話。
         let mut messages = Vec::new();
-        // 前面累積超過 1.5MB 的舊歷史
         for i in 0..15 {
             messages.push(Message {
                 role: "user".into(),
@@ -948,7 +911,6 @@ mod tests {
         let total_old_bytes: usize = messages.iter().map(|m| serde_json::to_vec(&m.content).unwrap().len()).sum();
         assert!(total_old_bytes > 1_500_000, "舊歷史總 bytes 必須大於 1.5MB：{total_old_bytes}");
 
-        // 伺服器端 compaction 區塊
         messages.push(Message {
             role: "assistant".into(),
             content: json!([
@@ -959,7 +921,6 @@ mod tests {
             ]),
         });
 
-        // 壓縮後的新對話
         messages.push(Message {
             role: "user".into(),
             content: json!("What should we do next?"),
@@ -967,8 +928,6 @@ mod tests {
 
         let opts = opt(fable, false, 32000, 150_000, false);
 
-        // 以前：RequestEnvelope 序列化整個未修剪 messages（> 1.5MB），input_token_bound 直接失敗拒絕估價。
-        // 現在：修剪最新 compaction 區塊之前的內容，body 遠小於 1MB，估價成功。
         let req = RequestEnvelope::new(opts, json!("system"), messages).expect("envelope accepted");
         let bound = input_token_bound(&req).expect("input token bound calculated");
         assert!(bound < 50_000, "修剪後的 input token bound 應遠小於 1M tokens：{bound}");
@@ -980,7 +939,6 @@ mod tests {
     #[test]
     fn opus_cache_read_is_twenty_cents_per_million_and_the_version_moved() {
         let req = request(false, json!("fixture"));
-        // 1000 讀取 × $0.20/M = 200 µUSD（舊價 $0.40 會是 400）；另 100 input×$4 + 10 output×$20。
         let usage = json!({"input_tokens":100,"output_tokens":10,"speed":"standard","cache_creation_input_tokens":0,"cache_read_input_tokens":1000,"service_tier":"standard","inference_geo":"global"});
         assert_eq!(DirectGlobal.settle(&req, &response(usage)).unwrap().estimated_microusd, 400 + 200 + 200);
         assert_eq!(DirectGlobal.reserve(&req).unwrap().pricing_version, "claude-opus-5-5-global-2026-11-14");
@@ -993,17 +951,13 @@ mod tests {
             RequestEnvelope::new(options, json!("fixture"), vec![Message { role: "user".into(), content: json!("fixture") }]).unwrap()
         };
         let (five, hour) = (mk(false), mk(true));
-        // 請求體：1 小時才帶 ttl。
         assert!(five.body().to_string().contains(r#""cache_control":{"type":"ephemeral"}"#) && !five.body().to_string().contains(r#""ttl""#));
         assert!(hour.body().to_string().contains(r#""cache_control":{"ttl":"1h","type":"ephemeral"}"#));
-        // 兩種都放行；1 小時預留用 1 小時寫入價（$8 對 $5），輸出部分相同。
         let (q5, q1) = (DirectGlobal.reserve(&five).unwrap(), DirectGlobal.reserve(&hour).unwrap());
-        // 1 小時的 body 多了 `"ttl":"1h"` 幾個位元組，輸入上界各算各的。
         let (b5, b1) = (input_token_bound(&five).unwrap() as i64, input_token_bound(&hour).unwrap() as i64);
         assert!(b1 > b5);
         assert_eq!(q5.reserved_microusd, (b5 * 50 + 1024 * 200 + 9) / 10);
         assert_eq!(q1.reserved_microusd, (b1 * 80 + 1024 * 200 + 9) / 10);
-        // 5 分鐘 bot 的 body 不准出現 1h（沿用既有規則）；1 小時 bot 也不准別的 TTL。
         let sneaky_1h = RequestEnvelope::new(
             opt(crate::config::API_BOT_MODEL, false, 1024, 0, false),
             json!({"nested":[{"cache_control":{"type":"ephemeral","ttl":"1h"}}]}), vec![Message { role: "user".into(), content: json!("x") }]).unwrap();
@@ -1106,7 +1060,6 @@ mod tests {
         let messages = vec![Message { role: "user".into(), content: json!("search something") }];
         let unauth_req = RequestEnvelope::new(opts.clone(), json!("sys"), messages.clone()).unwrap();
 
-        // 1. web_search 未開：若 usage 帶 web_search_requests: 1 則報 UntrustedUsage
         let resp_search_1 = response(json!({
             "input_tokens": 10, "output_tokens": 10, "speed": "standard",
             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
@@ -1117,7 +1070,6 @@ mod tests {
         let problem = classify_usage_problem(&unauth_req, &resp_search_1).unwrap();
         assert!(problem.contains("未啟用 web_search"));
 
-        // 2. web_fetch 未開：若 usage 帶 web_fetch_requests: 1 則報 UntrustedUsage
         let resp_fetch_1 = response(json!({
             "input_tokens": 10, "output_tokens": 10, "speed": "standard",
             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
@@ -1128,7 +1080,6 @@ mod tests {
         let problem_fetch = classify_usage_problem(&unauth_req, &resp_fetch_1).unwrap();
         assert!(problem_fetch.contains("未啟用 web_fetch"));
 
-        // 3. 兩者皆開：正確計入 web search 費用（每次 10,000 µUSD），web fetch 不加收
         opts.web_search = true;
         opts.web_fetch = true;
         let auth_req = RequestEnvelope::new(opts, json!("sys"), messages).unwrap();
@@ -1139,9 +1090,6 @@ mod tests {
             "service_tier": "standard", "inference_geo": "global"
         }));
         let quote = DirectGlobal.settle(&auth_req, &resp_auth).expect("settle ok");
-        // Opus: 100 * $4 + 20 * $20 = 400 + 400 = 800 µUSD token 費用
-        // 3 次 web_search = 3 * 10,000 = 30,000 µUSD
-        // 總共 30,800 µUSD
         assert_eq!(quote.estimated_microusd, 30_800);
         assert!(classify_usage_problem(&auth_req, &resp_auth).is_none());
     }
@@ -1159,7 +1107,6 @@ mod tests {
             web_fetch: false,
             ..Default::default()
         };
-        // 模擬 3MB 圖片附件（base64 約 400 萬字元）
         let img_b64 = "A".repeat(4_000_000);
         let messages = vec![Message {
             role: "user".into(),
@@ -1170,11 +1117,9 @@ mod tests {
         }];
         let req = RequestEnvelope::new(opts.clone(), json!("sys"), messages).expect("envelope ok");
         let bound = input_token_bound(&req).expect("bound calculated");
-        // 若以位元組直算會爆 400 萬（> 1M token 被拒）；調整後應在 8000 + margin 約 16,000 左右
         assert!(bound < 50_000, "圖片 token bound 應遠小於 1M context：{bound}");
         assert!(bound >= 8_000 + INPUT_MARGIN_TOKENS);
 
-        // 模擬 4MB PDF 附件（base64 約 530 萬字元）
         let pdf_b64 = "B".repeat(5_300_000);
         let pdf_messages = vec![Message {
             role: "user".into(),

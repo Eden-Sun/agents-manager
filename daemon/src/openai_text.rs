@@ -55,7 +55,6 @@ fn class_error(class: ErrorClass) -> ClientError {
         ErrorClass::Auth => ClientError::Http { status: 401, usage: None },
         ErrorClass::Permission => ClientError::Http { status: 403, usage: None },
         ErrorClass::RateLimited { retry_after_secs } => ClientError::RateLimited { retry_after: retry_after_secs.map(|s| s.to_string()), usage: None },
-        // 額度用完不是等一下就好：不回 RateLimited。
         ErrorClass::InsufficientQuota => ClientError::Http { status: 429, usage: None },
         ErrorClass::ModelRejected { .. } | ErrorClass::InvalidRequest { .. } => ClientError::Http { status: 400, usage: None },
         ErrorClass::Unknown => ClientError::Http { status: 502, usage: None },
@@ -72,12 +71,10 @@ async fn complete(req: &MessagesRequest) -> Result<ClientOutcome, ClientError> {
     if url.scheme() != "https" || url.host_str() != Some(OFFICIAL_HOST) || url.port_or_known_default() != Some(443) {
         return Err(refused());
     }
-    // 測試只連得到字面上的 loopback。
     #[cfg(test)]
     if url.scheme() != "http" || !url.host_str().is_some_and(|h| h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())) {
         return Err(refused());
     }
-    // 結構化輸出（JSON schema）這條路徑沒有接：寧可拒絕，不送一個會被忽略的格式要求。
     if req.format.is_some() {
         return Err(ClientError::Http { status: 400, usage: None });
     }
@@ -90,7 +87,6 @@ async fn complete(req: &MessagesRequest) -> Result<ClientOutcome, ClientError> {
         max_output_tokens: u64::from(req.max_tokens),
     };
     let body = request.body().map_err(|_| ClientError::Http { status: 400, usage: None })?;
-    // 不跟隨任何 redirect（會把 Authorization 帶去別處）。
     let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_millis(req.timeout_ms.max(1)));
     #[cfg(test)]
     let builder = builder.no_proxy();
@@ -146,7 +142,6 @@ async fn complete(req: &MessagesRequest) -> Result<ClientOutcome, ClientError> {
         Err(CodecError::MissingUsage) => return Ok(unusable(req, "missing_usage")),
         Err(_) => return Ok(unusable(req, "protocol_error")),
     };
-    // 費用算得出來才算成功：要有用量、標準層級、沒有 12 小時快取寫入（我們沒要求，照預設期限算會少算）。
     let Ok(usage) = output.usage else { return Ok(unusable(req, "missing_usage")) };
     if usage.cache_write_12h_tokens > 0 || pricing::settle(&req.model, &usage, output.service_tier.as_deref()).is_err() {
         return Ok(unusable(req, "unpriced_usage"));

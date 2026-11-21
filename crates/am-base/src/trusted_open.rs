@@ -36,7 +36,6 @@ fn entry_cstr(name: &OsStr) -> io::Result<CString> {
 
 pub fn openat_raw(dirfd: i32, name: &OsStr, flags: i32) -> io::Result<File> {
     let c = cstr(name)?;
-    // `O_CLOEXEC`：這個 fd 不該被 bot 自己的子行程繼承到。
     let fd = unsafe { libc::openat(dirfd, c.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -320,8 +319,6 @@ pub fn open_entry_in_with<F>(dir: &File, name: &OsStr, open: F) -> io::Result<Fi
 where
     F: FnOnce(&File, &OsStr, i32) -> io::Result<File>,
 {
-    // 先檢查名字目前指向的一般檔案，避免對 FIFO 做一般的 blocking open。之後名字仍可能被換掉，
-    // 所以 open 本身也必須帶 O_NONBLOCK，並在同一個已開啟的 fd 上再 fstat 一次。
     let name_c = entry_cstr(name)?;
     let mut before: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::fstatat(dir.as_raw_fd(), name_c.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) };
@@ -337,13 +334,10 @@ where
     if !opened.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
     }
-    // 硬連結擋不住 `O_NOFOLLOW`（它就是一般檔案）：這些目錄裡的檔案是「搬進來」的，連結數 > 1＝同一個 inode 在別處也有名字
-    // （例如 `ln ui-token outbox/notes.txt`，名字黑名單看不出來），不給開。
     if opened.nlink() > 1 {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "file has more than one hard link"));
     }
 
-    // 一般檔案不需要非阻塞模式，且呼叫端可能會把這個 fd 交給一般的 Read 實作。
     let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
     if status < 0 {
         return Err(io::Error::last_os_error());
@@ -416,9 +410,8 @@ where
     let raw = reopened.as_raw_fd();
     let dp = unsafe { libc::fdopendir(raw) };
     if dp.is_null() {
-        return Err(io::Error::last_os_error()); // `reopened` 掉出作用域時正常關掉這個 fd，不會外洩。
+        return Err(io::Error::last_os_error());
     }
-    // fdopendir 成功之後這個 fd 的關閉交給 closedir；`reopened` 不用再自己關一次。
     std::mem::forget(reopened);
     struct DirGuard(*mut libc::DIR);
     impl Drop for DirGuard {
@@ -429,11 +422,9 @@ where
     let _guard = DirGuard(dp);
 
     loop {
-        // 這個 DIR* 只有這個函式自己用（剛從 fdopendir 拿到，沒有分享給別的執行緒），單純的
-        // `readdir`（不是 `readdir_r`）沒有資料競爭的疑慮。
         let entry = unsafe { libc::readdir(dp) };
         if entry.is_null() {
-            return Ok(true); // 到底了；讀不出更多東西一律當作到底，跟 `std::fs::read_dir` 出錯時 `.flatten()` 跳過一樣寧可少列不要出錯。
+            return Ok(true);
         }
         let name_bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name_bytes == b"." || name_bytes == b".." {
@@ -442,11 +433,9 @@ where
         let name = OsString::from_vec(name_bytes.to_vec());
         let Ok(name_c) = entry_cstr(&name) else { continue };
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // AT_SYMLINK_NOFOLLOW：查符號連結本身，不跟著它走——符號連結不列是既有規則，這裡沿用，
-        // 不會因為連結指到一個大檔案就把假的大小/mtime 交出去。
         let rc = unsafe { libc::fstatat(dir.as_raw_fd(), name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
         if rc != 0 {
-            continue; // 讀到名字之後、fstat 之前又被刪掉：跳過，不是錯誤。
+            continue;
         }
         let kind = st.st_mode & libc::S_IFMT;
         let is_file = kind == libc::S_IFREG;

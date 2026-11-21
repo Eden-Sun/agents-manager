@@ -72,15 +72,10 @@ async fn spend_counts_only_openai_after_the_anchor_and_puts_unpriced_unknowns_in
     let bot = crate::testing::claude_bot(&e.app, &e.project_id, "oa-balance").await.id;
     anchor(&e, 20.0, Some(ANCHOR_AT)).await.unwrap();
 
-    // 錨點之前：不算。
     attempt(&e, &bot, "openai", "recorded", Some(9_000_000), 9_000_000, "2026-11-02T00:00:00Z").await;
-    // 錨點之後的 openai recorded：確定花費 1.5。
     attempt(&e, &bot, "openai", "recorded", Some(1_500_000), 1_500_000, "2026-11-12T01:00:00Z").await;
-    // 結果不明、沒估價：金額是預留上限，只進 uncertain。
     attempt(&e, &bot, "openai", "unknown", None, 2_000_000, "2026-11-12T02:00:00Z").await;
-    // Claude 的花費：不算。
     attempt(&e, &bot, "anthropic", "recorded", Some(5_000_000), 5_000_000, "2026-11-12T03:00:00Z").await;
-    // spend.jsonl：openai 的行算、anthropic 的行不算、錨點之前的不算。
     spend_file(&e, &[
         ("2026-11-09T12:00:00Z", "openai", 8_000_000),
         ("2026-11-12T04:00:00Z", "openai", 500_000),
@@ -90,7 +85,6 @@ async fn spend_counts_only_openai_after_the_anchor_and_puts_unpriced_unknowns_in
     let v = get_openai_api_balance(&e.app).await.unwrap();
     assert_eq!(v["configured"], json!(true), "{v}");
     assert_eq!(v["anchor"]["usd"], json!(20.0));
-    // 已確定：1.5（API 帳）＋0.5（spend.jsonl）＝2.0。
     assert!((v["spent_usd"].as_f64().unwrap() - 2.0).abs() < 1e-9, "{v}");
     assert!((v["remaining_usd"].as_f64().unwrap() - 18.0).abs() < 1e-9, "{v}");
     assert!((v["uncertain_usd"].as_f64().unwrap() - 2.0).abs() < 1e-9, "{v}");
@@ -126,7 +120,6 @@ async fn put_rejects_negative_nan_and_bad_timestamps_and_writes_valid_ones_to_co
     assert_eq!((ok["ok"].clone(), ok["anchor"]["usd"].clone(), ok["anchor"]["at"].clone()), (json!(true), json!(12.5), json!(ANCHOR_AT)));
     let cfg = e.app.cfg.get().await;
     assert_eq!((cfg.openai_api.balance_anchor_usd, cfg.openai_api.balance_anchor_at.clone()), (Some(12.5), Some(ANCHOR_AT.to_string())));
-    // 不帶 at 就用現在時間。
     let now = anchor(&e, 3.0, None).await.unwrap();
     assert!(now["anchor"]["at"].as_str().is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok()), "{now}");
 }

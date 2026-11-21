@@ -30,8 +30,6 @@
             ("text/html", "application/octet-stream"),
             ("application/xhtml+xml", "application/octet-stream"),
             ("", "application/octet-stream"),
-            // svg 留在白名單而且 inline：瀏覽器對 SVG 不嗅探，改成 octet-stream 會讓現有縮圖變破圖。
-            // 安全性由回應的 nosniff ＋ `Content-Security-Policy: sandbox` 擔（見 `get_attachment`）。
             ("image/svg+xml", "image/svg+xml"),
         ] {
             assert_eq!(served_mime(given), want, "{given}");
@@ -101,7 +99,6 @@
         std::fs::remove_file(&file).unwrap();
         std::os::unix::fs::symlink(&secret, &file).unwrap();
         assert!(read(app, "att-sym").await.is_err(), "被換成符號連結：不給");
-        // 附件目錄本身被換成指到別處的連結也一樣。
         std::fs::remove_file(&file).unwrap();
         let elsewhere = project.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
@@ -122,19 +119,16 @@
         let project = PathBuf::from(project);
         let elsewhere = crate::testing::track(std::env::temp_dir().join(format!("am-attach-write-{}", crate::db::ulid())));
         std::fs::create_dir_all(&elsewhere).unwrap();
-        // `.agents-manager` 本身是連結。
         std::fs::create_dir_all(&project).unwrap();
         std::os::unix::fs::symlink(&elsewhere, project.join(".agents-manager")).unwrap();
         assert!(save(&env.app, &bot.id, "x.service", "text/plain", b"[Service]").await.is_err(), "連結目錄：不寫");
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "界線外什麼都不能出現");
         std::fs::remove_file(project.join(".agents-manager")).unwrap();
-        // 只有 `attachments` 是連結。
         std::fs::create_dir_all(project.join(".agents-manager")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, project.join(SUBDIR)).unwrap();
         assert!(save(&env.app, &bot.id, "x.service", "text/plain", b"[Service]").await.is_err(), "連結的 attachments：不寫");
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
         std::fs::remove_file(project.join(SUBDIR)).unwrap();
-        // 正常的還是通。
         let a = save(&env.app, &bot.id, "ok.txt", "text/plain", b"fine").await.unwrap();
         assert_eq!(read(&env.app, &a.id).await.unwrap().1, b"fine");
     }
@@ -189,7 +183,6 @@
     #[test]
     fn a_non_image_keeps_its_own_name_and_extension() {
         assert_eq!(ext_for("report.PDF", "application/pdf"), "pdf");
-        // 沒有副檔名時才看 mime。
         assert_eq!(ext_for("report", "application/pdf"), "pdf");
         assert_eq!(ext_for("blob", "application/octet-stream"), "bin");
         assert_eq!(safe_stem("../../etc/passwd"), "passwd");
@@ -290,7 +283,6 @@
         };
         let bound_msg = message("with a bound attachment".into()).await;
         bind(&env.app, &bound_msg, &[made["old-bound"].clone()]).await.unwrap();
-        // 舊版兩步綁定：訊息的 attachments_json 點名了它，attachments.message_id 卻沒設到。
         let named_msg = message("legacy".into()).await;
         sqlx::query("UPDATE messages SET attachments_json = ? WHERE id = ?")
             .bind(serde_json::to_string(&[made["old-named"].clone()]).unwrap())
@@ -470,7 +462,6 @@
 
         assert!(bind(&env.app, &msg_id, &[a.clone(), missing]).await.is_err());
 
-        // a 排在前面，它的 UPDATE 先成功、遇到第二筆才失敗——先成功的那筆也要被撤銷。
         let mid: Option<String> =
             sqlx::query_scalar("SELECT message_id FROM attachments WHERE id = ?").bind(&a.id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(mid, None, "已經成功的那筆 UPDATE 也要跟著整批回滾");

@@ -25,7 +25,6 @@
     #[test]
     fn same_or_older_on_disk_is_not_an_update() {
         assert!(version_notice("2.1.267", "2.1.267").is_none());
-        // 磁碟比較舊（降版、或探到別的 PATH）不是「有更新」，不要叫使用者重啟。
         assert!(version_notice("2.1.266", "2.1.267").is_none());
     }
 
@@ -48,8 +47,6 @@
         assert!(running_version(Some(r#"{"model_name":"Opus"}"#)).is_none());
         assert!(running_version(None).is_none());
     }
-
-    // ── codex（issue #388）：整條 sweep 走過去，畫面用 MockHerdr 餵，`codex --version` 用預先種好的磁碟版本快取，不起真行程 ──
 
     const CODEX_MENU: &str = "\
 >_ OpenAI Codex (v0.154.0)\n\n✨ Update available! 0.154.0 -> 0.155.1\n\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n";
@@ -89,7 +86,7 @@
         let e = crate::testing::env().await;
         let host = "update-watch-597";
         let conn_a = e.app.hosts.insert_remote_for_test(remote_host_cfg(host, "target-a")).await;
-        conn_a.connected.store(true, std::sync::atomic::Ordering::SeqCst); // 有 pane 在巡的主機是連著的；連不上的不讀磁碟版本
+        conn_a.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         let remote_herdr = crate::testing::MockHerdr::start(conn_a.client.socket_path().to_path_buf());
         let bot = crate::testing::claude_bot(&e.app, &e.project_id, "watch").await;
         let run = crate::testing::fake_run(&e.app, &bot.id).await;
@@ -345,13 +342,11 @@
             .execute(&e.app.db)
             .await
             .unwrap();
-        // 磁碟版本讀不到（`claude --version` 逾時）：快取裡是 None，不是 2.1.281。
         let fence = e.app.hosts.fence("local").await.expect("test host exists");
         e.app.disk_versions.lock().await.insert(
             "claude@local".to_string(),
             DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: None },
         );
-        // 別台主機落後，快照的 target 因此是 2.1.284；這台 local 自己其實已經在目標版。
         crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
@@ -366,7 +361,6 @@
         sweep(&e.app).await;
         assert_eq!(notice_of(&e.app, &run).await, None, "跑著的已是目標版，不該出現需安裝");
 
-        // 反例：跑著的版本真的落後時，仍要提示需安裝。
         sqlx::query("UPDATE runs SET status_json=? WHERE id=?")
             .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
             .bind(&run)
@@ -396,18 +390,15 @@
             .execute(&e.app.db)
             .await
             .unwrap();
-        // 磁碟版本讀不到：快取裡是 None，不是 2.1.284。
         let fence = e.app.hosts.fence("local").await.expect("test host exists");
         e.app.disk_versions.lock().await.insert(
             "claude@local".to_string(),
             DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: None },
         );
 
-        // 沒有上游快照：原本會把通知清成 NULL。
         sweep(&e.app).await;
         assert_eq!(notice_of(&e.app, &run).await.as_deref(), Some(waiting.as_str()), "磁碟讀不到時不清掉重啟套用");
 
-        // 別台落後：原本會把重啟套用改成需安裝。
         crate::upstream_update::set_snapshot_for_test(&e.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
@@ -445,10 +436,8 @@
         ))
         .await;
 
-        // 掃描開頭讀到的舊列：notice 還是 NULL，所以這輪會算出「需安裝」。
         let stale = db::run(&e.app.db, &run).await.unwrap().unwrap();
         assert_eq!(stale.update_notice, None);
-        // 掃描期間 cli_update 已裝好並把 notice 改成「已安裝，重啟套用」。
         let installed = crate::upstream_update::claude_installed_text("2.1.284", "2.1.281");
         sqlx::query("UPDATE runs SET update_notice=? WHERE id=?")
             .bind(&installed)
@@ -583,7 +572,6 @@
         let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
         assert_eq!(b.effort.as_deref(), Some("low"), "child 的設定是從 argv 抄來的，跟著 TUI 走（/api/state 的 effort）");
 
-        // 讀不到框底（選單蓋住、畫面清掉）：沿用最後已知值，不清空。
         e.herdr.set_screen(&pane, "  Select effort\n  1. low\n  2. high\n");
         sweep(&e.app).await;
         let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
@@ -637,7 +625,6 @@
         let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("gpt-6-luna"), Some("max")));
 
-        // 網頁改了 child 設定還沒套用：狀態列沒變，不能把設定蓋回去。
         sqlx::query("UPDATE bots SET effort = 'low' WHERE id = ?").bind(&bot).execute(&e.app.db).await.unwrap();
         sweep(&e.app).await;
         let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();

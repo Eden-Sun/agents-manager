@@ -101,7 +101,6 @@ pub async fn busy_before_restart(app: &impl crate::capabilities::Db, bot: &db::B
     };
     let busy = match run.agent_status.as_str() {
         "working" => Some("working"),
-        // 在等人：不催，也不再看有沒有回合沒收（那一回合就是卡在等人）。
         "blocked" => None,
         _ => match db::in_flight_turn(app.db(), &run.id).await {
             Ok(t) => t.map(|_| "turn_in_flight"),
@@ -125,7 +124,6 @@ pub async fn prior_run_ended_busy(app: &impl crate::capabilities::Db, bot: &db::
     if !wants_nudge(&bot.kind, opts.resume_native, Some("working")) {
         return None;
     }
-    // 最後寫進去的那一列＝最後一個 run：`rowid` 單調，`started_at`（精度不一）與 ulid（同毫秒不單調）都不是（#430）。
     let last: Option<(String, String, String, Option<String>)> =
         match sqlx::query_as("SELECT state, agent_status, started_at, turn_error FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
             .bind(&bot.id)
@@ -192,7 +190,6 @@ pub async fn arm(app: &impl ResumeNudgeContext, bot: &db::Bot, run_id: &str, bus
     }
     armed().lock().unwrap_or_else(|e| e.into_inner()).insert(bot.id.clone(), Armed { run_id: run_id.to_string(), idle_since: None });
     tracing::info!(bot = %bot.name, run = run_id, busy, "resumed a claude that was busy before the restart; a nudge follows if it resumes verified, sits idle and the transcript ends on a killed tool");
-    // 接回可能已經驗過、畫面也已經閒著，之後不一定還有狀態事件：自己先看一次（等這把鎖放掉）。
     schedule(app, &bot.id, Duration::ZERO);
 }
 
@@ -440,7 +437,6 @@ mod tests {
         let meta = json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": "<local-command-caveat>"}}).to_string();
         let thinking = json!({"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "…"}]}}).to_string();
         let interrupted = json!({"type": "user", "message": {"content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}).to_string();
-        // 2.1.281 接回時替沒有結果的呼叫補的那一筆（字串取自 2.1.281 執行檔）。
         let unknown = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1",
             "content": "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]"}]}})
         .to_string();

@@ -196,7 +196,6 @@ fn grok_source_lines_are_not_limit_hits() {
     ];
     let hits: Vec<&str> = lines.iter().copied().filter(|l| grok_limit_hit_line(l).is_some()).collect();
     assert!(hits.is_empty(), "{hits:#?}");
-    // 真畫面的形狀照舊認：框線、行首就是那句。
     assert!(grok_limit_hit_line("  ┃  You hit your weekly limit.").is_some());
     assert!(grok_limit_hit_line("  ┃  You've hit your weekly limit.").is_some());
     assert!(grok_limit_hit_line("  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted").is_some());
@@ -210,7 +209,6 @@ fn output_that_quotes_the_limit_screen_is_not_a_limit() {
     let ticket = format!("❯ 貼一下票上的原文\n{TICKET_SCREEN}\n⏺ 好了。\n❯\n");
     let diff = "❯ git diff\n+  ┃  You hit your weekly limit.\n+  ┃  Turn failed: Request failed (402): Grok Build usage balance exhausted\n⏺ 看完了\n❯\n";
     let test_out = "❯ cargo test\nthread 'x' panicked at src/a.rs:1:1: expected no hit: [\"You hit your weekly limit.\"]\n⏺ 紅了\n❯\n";
-    // 只有句子、沒有選項：不是那張選單（後面接別的行、或後面只剩說明列都一樣；只有一個選項也不夠）。
     let bare = "❯ echo\n┃  You hit your weekly limit.\n⏺ 我把這句印出來看看\n";
     let title_only = "┃  You hit your weekly limit.\n┃\n┃  ↑/↓ navigate · y copy   Enter:submit\n";
     let one_option = "┃  You hit your weekly limit.\n┃  3 (○) Try Again         Resubmit the last prompt once you have usage again\n┃  ↑/↓ navigate · y copy\n";
@@ -234,7 +232,6 @@ fn the_real_menu_is_read_under_quoted_scrollback() {
     let filler: String = (0..24).map(|i| format!("⏺ 之後又做了第 {i} 件事\n")).collect();
     let screen = format!("❯ rg limit\n┃  You hit your daily limit.\n┃  Turn failed: Request failed (402): Grok Build usage balance exhausted\n{filler}{TICKET_SCREEN}");
     assert_eq!(grok_limit_notice_lines(&screen), vec![WEEKLY.to_string()]);
-    // 真的 pB7 畫面：402 那句在選單上面十幾行，屬於同一個框，要跟著記。
     let pb7 = grok_limit_notice_lines(PB7_SCREEN);
     assert_eq!(pb7.len(), 2, "{pb7:?}");
 }
@@ -273,7 +270,6 @@ fn the_other_limit_variants_the_ticket_names_are_read_too() {
         assert_eq!(lines, vec![title.to_string()], "{title}");
         assert_eq!(grok_limit_window(&lines[0]), window, "{title}");
     }
-    // 只認畫面上那一句標題：回覆裡談到、或標題後面接了字母的不算。
     assert!(grok_limit_hit_line("Then you hit your daily limit and stopped").is_none());
     assert!(grok_limit_hit_line("You hit your daily limits, apparently").is_none());
     assert!(grok_limit_hit_line("You hit your limit").is_none(), "沒有說是哪個窗");
@@ -284,7 +280,6 @@ fn the_window_a_grok_line_names() {
     assert_eq!(grok_limit_window("┃  You hit your weekly limit."), (Some("seven_day"), 168));
     assert_eq!(grok_limit_window("You hit your session limit."), (Some("five_hour"), 5));
     assert_eq!(grok_limit_window(BALANCE), (None, 5));
-    // 有窗的那句排前面：一次讀畫面只有第一句算新的。
     let lines = grok_limit_notice_lines(PB7_SCREEN);
     assert_eq!(lines.first().map(String::as_str), Some(WEEKLY), "{lines:?}");
     assert!(lines.iter().any(|l| l.contains("usage balance exhausted")));

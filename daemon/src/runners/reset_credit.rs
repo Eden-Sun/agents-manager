@@ -92,7 +92,6 @@ pub async fn redeem(app: &Arc<App>, host: &str, identity: Option<&str>, credit_i
         .and_then(|q| q.reset_credits)
         .filter(|rc| rc.available > 0)
         .ok_or(RedeemError::NoCredit)?;
-    // 清單是空的（舊讀數沒有 `credits`）就不指定 id，交給 app-server 挑下一張。
     let credit = if rc.credits.is_empty() {
         None
     } else {
@@ -112,7 +111,6 @@ pub async fn redeem(app: &Arc<App>, host: &str, identity: Option<&str>, credit_i
         .map_err(RedeemError::Rpc)?;
     let outcome = parse_outcome(&r).map_err(RedeemError::Rpc)?;
 
-    // 先刷新額度再通知：bot 醒來看到的就是新的讀數。刷新失敗不影響兌換結果（下一輪輪詢會補）。
     if let Err(e) = crate::runners::quota::refresh_codex(app, host).await {
         tracing::warn!(host, error = %e, "reset credit used; quota refresh failed");
     }
@@ -286,7 +284,6 @@ mod tests {
         assert_eq!(snap["kinds"]["codex"]["held_bots"], json!(["codex-held"]), "{snap}");
         assert!(snap["kinds"]["claude"].get("held_bots").is_none());
 
-        // 放行（清掉 DB 的憑據）之後就不再算停工。
         sqlx::query("UPDATE turns SET quota_hold = NULL WHERE id = ?").bind(format!("turn-{bot_id}")).execute(&app.db).await.unwrap();
         assert!(!held_codex_bots(&app).await.iter().any(|b| b.id == bot_id));
     }

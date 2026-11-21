@@ -108,7 +108,7 @@ pub fn find(jsonl: &str, target: &str, skip: usize) -> Option<Leaf> {
     while let Some(id) = cur {
         steps += 1;
         if steps > nodes.len() + 1 {
-            return None; // 環：transcript 壞了
+            return None;
         }
         let (parent, text) = nodes.get(&id)?;
         if let Some(text) = text.as_deref().filter(|t| same_first_line(t, target)) {
@@ -154,8 +154,6 @@ pub fn need(tail: &str, leaf: &Leaf) -> Need {
         Need::Append
     }
 }
-
-// ───────────── 記下／補上 ─────────────
 
 /// 倒回成功之後、還握著 bot 鎖時呼叫：找出倒回點記進 `rewind_anchors`（同一段 session 只留最新的一筆）。
 /// `text`／`skip`：真的按了 Restore 的那一則與它在選單上跳過幾則。失敗只記 log，不影響倒回本身。

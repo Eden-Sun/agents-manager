@@ -48,11 +48,8 @@ pub async fn flush_queued_locked<C: QueueContext>(app: &C, bot_id: &str) -> anyh
     let failures_before = read_failure_count(bot_id);
     let res = flush_queued_inner(app, bot_id).await;
     if res.is_err() && read_failure_count(bot_id) == failures_before {
-        // #1361：任何一步讀寫不到，這一則還在佇列（或已記成欠著），但閒著的 bot 沒有 `working -> idle` 邊會再叫醒 flush——
-        // 留一個短 timer。`arm_queue_retry` 自己去重，已經掛了更早的就不會疊。
         schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
     }
-    // 這一輪沒有再排讀取重試：讀得到了，連續失敗的次數歸零（#1431）。
     if read_failure_count(bot_id) == failures_before {
         forget_read_failures(bot_id);
     }
@@ -65,7 +62,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Some(_) => {},
         None => anyhow::bail!("queued bot is unavailable"),
     }
-    // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
     match app.bot_handed_off_to(bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
@@ -82,22 +78,15 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Ok(conv) => conv,
         Err(error) => {
             tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
-            // #1361：讀不到對話也留一個短 timer：閒著的 bot 沒有邊會再叫醒它，這一則不能躺到保險絲。
             schedule_read_failure_retry(app, bot_id, WITHDRAWAL_RECHECK);
             return Ok(());
         }
     };
     let Some(turn) = db::queued_turn(app.db(), &conv).await? else { return Ok(()) };
-    // 已軟刪的 bot（run 還留著的晚到 child、退役中的 child）不再收字：直送的 prompt 在 #338 就擋了，排隊的不能比較寬鬆。
-    // 撤掉而不是留著——bot 回不來，留著只會一直佔住唯一的排隊名額。撤不掉就留在佇列，下一次叫醒再撤。
     if db::bot(app.db(), bot_id).await?.is_some_and(|b| b.deleted_at.is_some()) {
         revoke_queued_turn(app, &turn.id, "bot 已被刪除，排著的 prompt 不再送出").await?;
         return Ok(());
     }
-    // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
-    // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
-    // 讀不到交辦的狀態不等於還要、撤不掉也不等於撤完了（#159）：都留在佇列（不認領、不花重試、一個字都不送），
-    // 短 timer 再判斷一次。
     match assignment_withdrawal(app, &turn.id).await {
         Ok(None) => {}
         Ok(Some(why)) => {
@@ -113,24 +102,16 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Err(e.context("讀不到交辦是否已撤回：排著的 prompt 留在佇列"));
         }
     }
-    // Read errors fail closed through the normal queue retry path. A disabled schedule must
-    // release the single queued slot instead of merely failing its claim forever.
     if withdraw_invalid_schedule(app, &turn.id).await? {
         return Ok(());
     }
-    // Put back with a backoff: other wake-ups must not spend its retries early. Its timer brings it back.
     if let Some(at) = turn.next_flush_at.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) {
         let left = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
         if left > chrono::Duration::zero() {
-            // 這次叫醒比退避早（例如中斷寬限的 timer 比 `next_flush_at` 先燒）：不動這一筆，但要留下一個
-            // 到期才燒的 timer。燒掉的那個已經把自己從表上拿掉了，不補的話這顆 bot 一個 timer 都沒有，
-            // 閒著也不會再有 `working -> idle` 邊，排隊的派工要等 30 分鐘保險絲才被撤掉（review3 L1）。
-            // `arm_queue_retry` 本來就會去重，所以重複叫醒不會疊 timer。
             schedule_flush_retry(app, bot_id, left.to_std().unwrap_or_default());
             return Ok(());
         }
     }
-    // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
     let Some(mut run) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
     if run.state == "running" && matches!(run.agent_status.as_str(), "blocked" | "unknown")
         && super::claude_resume_menu::accept_if_shown(app, &run).await.unwrap_or(false)
@@ -138,14 +119,9 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         let Some(current) = db::active_run(app.db(), bot_id).await? else { return Ok(()) };
         run = current;
     }
-    // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
-    // Enter and stalls (2026-09-07 11:21). The `working -> idle` edge re-schedules this flush.
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
         return Ok(());
     }
-    // Web turns accepted with `queue_if_busy` stay queued until herdr explicitly reports idle.
-    // Older AGM and #122 turns retain their existing eligibility rules; in particular, this new
-    // admission must not treat `unknown` as proof that the busy agent has finished its turn.
     let awaits_idle: i64 = sqlx::query_scalar("SELECT awaits_idle FROM turns WHERE id = ?")
         .bind(&turn.id)
         .fetch_one(app.db())
@@ -157,12 +133,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         return Ok(());
     }
     let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(()) };
-    // 維護窗口握著：排隊的這一筆**留在佇列**，不要送進一個正要被重啟的 session（issue #86）。
-    // 不算重試、不動 `flush_retries`——擋住它的不是 bot 的狀態，是我們自己開的窗口，不該花掉它的額度。
-    // 掛一個到窗口到期為止的 timer：窗口提早 release 時 `drain_queue` 會叫醒 flush，沒有人來收的話
-    // 這個 timer 就是底線（租約到期即自動失效，不會鎖死）。
-    // 讀不到窗口狀態也一樣留在佇列（issue #127）：觀測不到租約不等於沒有租約，這一筆不 claim、不花重試，
-    // 過幾秒再判斷一次；DB 一恢復就照常往下走，不會永久卡住。
     match app.window_held().await {
         Ok(None) => {}
         Ok(Some(w)) => {
@@ -178,15 +148,12 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Ok(());
         }
     }
-    // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92）：留在佇列，不算重試，掛 timer 到期再來。
-    // `SessionStart` 一到，`hookrecv` 那邊會叫醒這裡；到期沒來就由閘門自己走刻意的退路（`resume_gate`）。
     if let super::resume_gate::Gate::Waiting { expected, left } = app.resume_gate(&bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, session = %expected, wait_s = left.as_secs(),
                        "resume 還沒驗證：排隊的 prompt 等 claude 回報 session 再送");
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
     }
-    // 續行提示只送進驗證過的接回（#430，`resume_nudge`）：接回失敗、驗證不了就撤掉，不送進一段全新的對話。
     match super::resume_nudge::withdraw_unless_resumed(app, &turn, &run).await {
         Ok(false) => {}
         Ok(true) => return Ok(()),
@@ -195,8 +162,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Err(e.context("續行提示該撤卻撤不掉：留在佇列，稍後再撤"));
         }
     }
-    // 目標身份還沒有額度（issue #108，`quota_hold`）：送進去只會再撞一次、派工白白燒掉。留在佇列、不花重試，
-    // 掛 timer 到撞限到期（最多五分鐘再看一次）；換身份重啟（#106）會叫醒這裡。撞限記在這一列上，重啟後照樣擋。
     if let Some(hit) = super::quota_hold::blocking_hit(app, &bot, &turn.id).await {
         let wait = super::quota_hold::recheck_in(hit.until.as_deref(), chrono::Utc::now());
         super::quota_hold::note_held(bot_id);
@@ -205,11 +170,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         schedule_flush_retry(app, bot_id, wait);
         return Ok(());
     }
-    // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
-    // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
-    // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
-    // 寬限只替使用者擋**別人**的派工；排著的這一則就是使用者自己在網頁送的（沒有轉寄來源）時不擋——那正是他接管後要打的字
-    // （2026-10-02 prorosal：Esc 後送的一句卡滿 60 秒才送）。
     if !queued_from_the_user(app, &turn).await {
         if let Some(left) = app.interrupt_grace_left(&bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, wait_s = left.as_secs(), "使用者剛 interrupt：排隊的派工等寬限結束再送");
@@ -219,8 +179,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     }
     let text = turn.prompt_text.clone().unwrap_or_default();
     if text.trim().is_empty() {
-        // Nothing deliverable: drop it rather than leave the queue permanently blocked. 還沒認領：收不成就留在佇列、
-        // 掛 timer 稍後再收，不當成丟掉了（#158）。
         if let Err(e) = super::turn_controller::set_status(app.db(), &turn.id, "queued", "failed", "prompt 是空的，送不出去").await {
             schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS));
             return Err(e.context("空的 prompt 收不成 failed：留在佇列，稍後再收"));
@@ -243,14 +201,10 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
             return Err(e.context("relay authorization unavailable; prompt remains queued"));
         }
     }
-    // 讀完 run、還沒認領的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("flush_before_claim", bot_id).await;
     }
-    // Claim it first. If the CAS loses, another flush got there and this one has nothing to do.
-    // 認領只認領到此刻還在跑的 run（issue #125）：讀完 run 之後它被收掉的話，這一筆留在佇列給下一個 run。
-    // 掛的交辦也要此刻還要（#159）：上面讀完到這裡之間才被取消的，不被領走；下一輪照它的狀態撤。
     match super::turn_controller::claim_queued(&mut *app.db().acquire().await?, &turn.id, &run.id).await? {
         super::turn_controller::Outcome::Applied => {}
         other => {
@@ -263,11 +217,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     }
     app.turn_changed(&turn.id).await;
 
-    // 認領之後再看一次維護窗口（issue #1677）。上面那次是認領前讀的；排隊訊息在 working 的 bot 上不算送達臨界區，
-    // 所以 flush 讀完 run（idle）之後 bot 轉 working、窗口恰好在這一瞬被拿走是可能的。認領已經 commit 的話
-    // （in_flight＋pending），acquire 的條件式 UPDATE 會被它擋下來；acquire 先 commit 的話，這裡一定讀得到租約。
-    // 兩邊加起來才是「窗口拿到之後不會有任何一個字進 pane」。讀不到也當作握著（fail closed，#127）。
-    // 放回佇列時不花送達重試（#1683）：擋住它的是窗口，不是送不進去；掛到租約到期，讀不到就短退避。
     let held = app.window_held().await;
     if !matches!(held, Ok(None)) {
         let until = match &held {
@@ -280,9 +229,6 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
     }
 
     let wait_key = rollout_wait_key(&run);
-    // Refused by a screen check → back on the queue **with a timed retry**: a bot left idle on a
-    // menu it cannot close produces no `working -> idle` edge, so waiting for one parked the prompt
-    // until somebody happened to use the bot (review 2 L2).
     if let Err(e) = app.pane_ready_for_prompt(&bot, &run, &conv).await {
         let why = match &e {
             LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()).unwrap_or("conflict").to_string(),
@@ -291,39 +237,25 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         return put_back_or_owe(app, bot_id, &conv, &turn.id, &format!("pane not ready for a prompt: {why}"), &wait_key).await;
     }
 
-    // From the claim to the RPC, giving up must requeue: `arm_stall` / `arm_progress` /
-    // `try_fallback` all require `delivery == "ok"`, so an abandoned turn would 409 every
-    // later prompt until the run ended, invisibly (background task).
     let client = match client_for_run(app, &run).await {
         Ok(c) => c,
         Err(e) => return put_back_or_owe(app, bot_id, &conv, &turn.id, &format!("no herdr client: {e:?}"), &wait_key).await,
     };
-    // A queued prompt waits a few put-backs for a codex rollout that is on its way, then goes out
-    // with what is available. Counted only for that reason and only for this run and session.
     let waited_for_log = turn.rollout_wait_key.as_deref() == Some(wait_key.as_str()) && turn.rollout_waits >= CODEX_LOG_WAIT_RETRIES;
     let res = app.deliver_queued_prompt(&client, &run, &bot, &text, waited_for_log).await;
-    // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
     let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
-        // 打字＋無損證據。`Handed`（agent.prompt）沒有證據，API 也照證據說「unverified」，
-        // 但它照舊可以自動重送（AGM 2026-09-16：證據與重送分開）。
         Ok(d @ (Delivered::Submitted | Delivered::Handed)) => {
             rec = d.record().expect("delivered outcome records");
             if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }
         }
-        // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
-        // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
         Ok(d @ Delivered::Unverified) => {
             rec = d.record().expect("delivered outcome records");
             "unverified"
         }
-        // Nothing was typed. A temporary reason goes back on the queue with a timed retry — a busy
-        // box produces no `working -> idle` edge to wake the flush (sol review round seven #2).
         Ok(Delivered::NotAttempted { reason, retry: true }) => {
             return put_back_or_owe(app, bot_id, &conv, &turn.id, reason, &wait_key).await;
         }
-        // A prompt that can never be sent as asked on this run: fail it visibly, in one transaction
-        // with its explanation, instead of retrying forever. 收不成就記成欠著（#158），不回普通的成功。
         Ok(Delivered::NotAttempted { reason, retry: false }) => {
             let hint = format!("沒有送出（{reason}）：這一則在這個 bot 上沒有辦法照原樣送出，所以一個字都沒打。");
             return app.close_owed(bot_id, &turn.id, "failed", &hint)
@@ -338,24 +270,19 @@ async fn flush_queued_inner<C: QueueContext>(app: &C, bot_id: &str) -> anyhow::R
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                // 收成 failed 寫不進去就記成欠著、之後補（#149），不留一筆永久 in_flight＋pending。
                 return app.close_owed(bot_id, &turn.id, "failed", &format!("delivery failed: {e}"))
                     .await
                     .map(drop)
                     .map_err(|e| e.context("herdr 拒收了排隊的 prompt，回合卻收不成 failed（記成欠著）"));
             }
-            // Not requeued: the agent may have taken it, so a retry could deliver twice.
-            // `delivery='unknown'` is the designed user-visible parking state (§6.3).
             tracing::warn!(bot = %bot_id, error = %e, "queued prompt delivery unknown");
             "unknown"
         }
     };
-    // 寫回（寫成才推 `turn_updated`）；寫不進去就記成欠著、之後補（#149），不回普通的成功。watchdog 照樣掛（字真的送出去了）。
     let written = app.delivered_owed(bot_id, &turn.id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
         app.arm_stall_and_progress(&run.id, bot_id, &turn.id).await;
     }
-    // 框已空、證據還沒長出來而記成 `unknown` 的：背景繼續看，看到就升成 ok（#1479）。
     if delivery == "unknown" && written.is_ok() {
         app.watch_late_proof(&run.id, bot_id, &turn.id);
     }
@@ -461,22 +388,18 @@ async fn defer_queued_turn(
     reason: &str,
     wait_key: &str,
 ) -> anyhow::Result<Deferred> {
-    // 認領之後、放回之前的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("defer_before_return", turn_id).await;
     }
-    // 先讀重試次數再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，這一筆放不回佇列、只能記成欠著（#831）。
     let mut tx = db::begin_write(app.db()).await?;
     let (retries, queue_class): (i64, String) =
         sqlx::query_as("SELECT flush_retries, queue_class FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("defer_after_retries_read", turn_id).await;
-    // daemon 自己排的通知擋在佇列頭，後面的使用者訊息就排不到：它的上限短得多（#562）。
     let notice = queue_class == super::prompt::QueueClass::DaemonNotice.as_str();
     if retries >= if notice { super::daemon_notice::RETRY_LIMIT } else { QUEUE_RETRY_LIMIT } {
         let out = super::turn_controller::fail_on(&mut tx, turn_id, super::turn_controller::DeliveryOnFail::Failed, "退避次數用完").await?;
-        // 沒收到的（別的路徑先收掉了）不補「試了 N 次」的說明：那不是它結束的原因。
         if out != super::turn_controller::Outcome::Applied {
             return Ok(Deferred::Settled(out));
         }
@@ -496,7 +419,6 @@ async fn defer_queued_turn(
         return Ok(Deferred::Settled(out));
     }
     if reason == "codex_log_not_ready" {
-        // Only this reason spends the rollout wait, and a different run or session starts over.
         sqlx::query(
             "UPDATE turns SET rollout_waits = CASE WHEN rollout_wait_key = ? THEN rollout_waits + 1 ELSE 1 END,
                               rollout_wait_key = ?
@@ -557,14 +479,12 @@ pub async fn assignment_withdrawal(app: &(impl crate::capabilities::Db + Supervi
         "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
         "failed" => ("已判定失敗", a.review_reason.as_deref()),
         "blocked" => ("已停在 blocked", a.error.as_deref()),
-        // 額度回來後 controller 會用下一個 `#r<n>` 另開一則重送；這一則送出去就是做兩次。
         "quota_blocked" => ("在等額度回來，屆時會用新的一則重送", None),
         _ => return Ok(None),
     };
     let why = detail.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("（{r}）")).unwrap_or_default();
     Ok(Some(format!("排隊中的這則沒有送出：交辦 {} {what}{why}，一併撤銷，不會再送。", a.id)))
 }
-
 
 /// 撤銷一筆還在排隊的 turn：標成 failed、寫明理由、釋放這個對話的 queued 名額，**不送**。
 /// 只動 `queued`——已經 in_flight 或送出的撤不回來，不假裝撤回。`Ok(true)`＝這次真的撤掉了。
@@ -576,7 +496,6 @@ pub async fn revoke_queued_turn<C: QueueContext>(app: &C, turn_id: &str, why: &s
     Ok(true)
 }
 
-// #1862 S0：值型別搬到 am-base（`lc_error.rs`）供 am-supervisor 的 ports 簽名共用；舊路徑 `queue::Revoked`／`lifecycle::Revoked` 照舊可用。
 pub use crate::lc_error::Revoked;
 
 /// [`revoke_queued_turn`] 的交易內版本：要跟別的寫入綁在一起時用（例如保險絲「撤成功才標 blocked」）。
@@ -613,13 +532,10 @@ pub async fn revoke_orphaned_queued_turns<C: QueueContext>(app: &C, bot_id: &str
     if !matches!(db::active_run(app.db(), bot_id).await, Ok(None)) {
         return Vec::new();
     }
-    // 重啟的 stop 與 start 之間（issue #106）：沒有 active run 是暫時的，排著的派工留給新的 run 送。
-    // 重啟沒能把 bot 開回來時，`restart_bot_with` 結束重啟之後會自己再呼叫這支。
     if super::restart_hold::in_progress(bot_id) {
         tracing::info!(bot = %bot_id, why, "重啟中：排著的 prompt 留給新的 run，不當孤兒撤掉");
         return Vec::new();
     }
-    // bot 沒在跑時使用者送的（issue #122，`start_send`）不撤：留在佇列等重新啟動或取消，只記下原因。
     app.note_run_gone(bot_id, why).await;
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 0",
@@ -692,7 +608,6 @@ where
             }
         }
         let g = QUEUE_RETRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // The timer being replaced stays asleep; its generation no longer matches, so it does nothing.
         map.insert(bot_id.to_string(), (g, deadline));
         g
     };
@@ -716,8 +631,6 @@ where
 
 /// Queued prompts waiting out a backoff, one entry per bot (its soonest), with the time left.
 pub async fn pending_queue_retries(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<(String, std::time::Duration)>> {
-    // `next_flush_at IS NULL` 的也要收：AGM 派工排進來的 queued turn 沒有退避時間，靠回合結束的事件送出；
-    // daemon 重啟時那個事件早就過去了，不補一次就變成永遠不會送的孤兒（AGM 2026-09-16）。
     let rows: Vec<(String, String)> = sqlx::query_as(
         concat!("SELECT c.bot_id, COALESCE(t.next_flush_at, '1970-01-01T00:00:00Z')
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
@@ -819,7 +732,6 @@ pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
         let app = (*app).clone();
         let bot_id = bot_id.to_string();
         tokio::spawn(Box::pin(async move {
-            // Let the caller finish its current event / status write before taking the same lock.
             tokio::task::yield_now().await;
             let lock = crate::capabilities::BotLocks::bot_lock(&app, &bot_id).await;
             let _g = lock.lock_owned().await;
@@ -829,7 +741,6 @@ pub fn schedule_flush_queued<C: QueueContext>(app: &C, bot_id: &str) {
         }));
     }
 }
-
 
 pub use crate::lc_error::RunExit;
 
@@ -864,7 +775,6 @@ pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reas
     if !super::run_state::LIVE.contains(&run.state.as_str()) {
         return (RunExit::AlreadyEnded, None);
     }
-    // #708：專案移交出去了，run 的結束歸接手的 daemon 記；這裡一樣都不寫（讀不到就不動）。
     match app.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
@@ -876,14 +786,10 @@ pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reas
             return (RunExit::NotRecorded, None);
         }
     }
-    // 讀完狀態、還沒寫 exited 的那一瞬（測試在這裡插進使用者 stop 的收尾寫入）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("mark_run_exited_after_read", run_id).await;
     }
-    // CAS 在 UPDATE 自己身上（#131）：這支不拿 bot 鎖，上面讀完之後使用者的 stop 可能剛寫下 `stopped`，
-    // 無條件寫 `exited` 會把「使用者要它停」蓋掉。沒寫到就是別的路徑先收掉了，後續由那條路負責。
-    // 兩步合起來等於 `LIVE → exited`：先 [starting, running]，輸了才 [stopping]（第一步 Applied 就不做第二步；第一步寫不進去也不做）。
     let moved = match super::run_state::transition(app.db(), run_id, &["starting", "running"], "exited", None).await {
         Ok(super::run_state::Moved::Lost) => super::run_state::transition(app.db(), run_id, &["stopping"], "exited", None).await.map(|m| (m, true)),
         other => other.map(|m| (m, false)),
@@ -902,14 +808,9 @@ pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reas
         }
     };
     let proof = ExitProof { from_stopping, at: db::now() };
-    // 只有 CAS 真的寫下 exited 的這一條路記原因（每個 run 只會成功一次，後到的在上面就回 AlreadyEnded）。#554：
-    // child 退役紀錄靠它分辨 pane 是 herdr 報關掉的還是對帳才發現不見。
-    // 記不下來只是少一個證據：退役紀錄讀到 NULL 就當成沒親眼看到，偏向「不算刻意」。
     if let Err(e) = sqlx::query("UPDATE runs SET exit_reason = ? WHERE id = ?").bind(reason).bind(run_id).execute(app.db()).await {
         tracing::warn!(run = run_id, reason, error = %e, "run exited but its exit reason could not be recorded");
     }
-    // pane 已經沒了，這不是我們能不做的事：回合收不成就記成欠著、之後補（#156），不當成已經收掉。
-    // 撤佇列與拆 watcher 是 run 結束的事，跟回合收不收得成無關，照做。
     let turn_owed = match fail_in_flight_or_owe(app, run_id, &format!("run ended: {reason}")).await {
         Ok(()) => false,
         Err(e) => {
@@ -919,8 +820,6 @@ pub async fn mark_run_exited_proved<C: QueueContext>(app: &C, run_id: &str, reas
     };
     revoke_orphaned_queued_turns(app, &run.bot_id, &format!("run 已結束（{reason}）")).await;
     if let Some(p) = run.pane_id.as_deref() {
-        // watcher 的 key 是 (host, session, pane)。讀不到主機就不拆（#198）：以前退回 `local`，本機剛好同名 session、同 pane id
-        // 的那顆 bot 的 watcher 被拆掉，它的狀態事件從此收不到。留下一個死 pane 的 watcher 無害。
         match db::bot_host(app.db(), &run.bot_id).await {
             Ok(host) => {
                 if let Some(session) = crate::capabilities::HerdrRoutes::session_for_run(app, &run).await {
@@ -971,7 +870,6 @@ mod run_exit_race_tests {
 
         let (app2, run2) = (app.clone(), run.clone());
         super::super::race_point::arm("mark_run_exited_after_read", &run, move || async move {
-            // `stop_bot_locked` 的最後一步。
             sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
         mark_run_exited(&app, &run, "pane exited").await;
@@ -1002,12 +900,10 @@ mod run_exit_race_tests {
         assert_eq!((exit, proof.map(|p| p.from_stopping)), (RunExit::Recorded, Some(true)));
         assert_eq!(run_state(&app, &stopping).await, "exited");
 
-        // 已經結束的：兩步都沒有可轉的。
         let (exit, proof) = mark_run_exited_proved(&app, &stopping, "pane exited").await;
         assert_eq!((exit, proof), (RunExit::AlreadyEnded, None));
         assert_eq!(mark_run_exited(&app, &stopping, "pane exited").await, RunExit::AlreadyEnded);
 
-        // 讀了之後、CAS 之前別的路徑（使用者 stop 的收尾）先寫了 stopped：兩步都輸。
         let raced = tt::fake_run(&app, &bot.id).await;
         let (app2, raced2) = (app.clone(), raced.clone());
         super::super::race_point::arm("mark_run_exited_after_read", &raced, move || async move {
@@ -1016,7 +912,6 @@ mod run_exit_race_tests {
         assert_eq!(mark_run_exited_proved(&app, &raced, "pane exited").await, (RunExit::AlreadyEnded, None));
         assert_eq!(run_state(&app, &raced).await, "stopped");
 
-        // 讀到 running、CAS 前被 stop 改成 stopping：第二步接手，證據是 from_stopping。
         let flipped = tt::fake_run(&app, &bot.id).await;
         let (app3, flipped2) = (app.clone(), flipped.clone());
         super::super::race_point::arm("mark_run_exited_after_read", &flipped, move || async move {
@@ -1129,7 +1024,6 @@ mod run_exit_race_tests {
         assert!(!rs::watched(&app, &watcher).await);
 
         rs::accept_turn_close(&app).await;
-        // 定時重試那一輪（沒有 hook、沒有 prompt）。
         super::super::interruption::settle_locked(&app, &bot.id, super::super::interruption::Evidence::Nothing).await.unwrap();
         assert_eq!(rs::turn_status(&app, &in_flight).await, "failed", "欠著的收尾補上了");
         assert_eq!(rs::system_notes(&app, &in_flight).await, 1);
@@ -1195,7 +1089,6 @@ mod flush_queue_tests {
         apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex", codex_limit_hit(notice, db::now())).await;
         let first = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
 
-        // 中間 app-server 清橫幅是另一條規則；這裡只測重掃。
         apply_codex_limit_hit_quota(&app, LOCAL_HOST, "codex", codex_limit_hit(notice, db::now())).await;
         let again = app.quotas.lock().await.get("codex").unwrap().limit_hit.clone().unwrap();
         assert_eq!(first.at, again.at, "同一張橫幅不會把時間戳往前推");
@@ -1269,7 +1162,6 @@ mod flush_queue_tests {
     async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
-        // 排隊的 run 住在 `pane-1` 上：真 herdr 上 run 的 pane 一定存在，替身要認得它（#1452）。
         env.herdr.know_pane("pane-1");
         let bot_id = db::ulid();
         sqlx::query(
@@ -1366,19 +1258,12 @@ mod flush_queue_tests {
         let s = std::time::Duration::from_secs;
         let grace = s(60);
         let now = at("2026-09-16T12:00:00Z");
-        // 沒有接管：不用等。
         assert_eq!(left(None, false, s(0), now, grace), None);
-        // 20 秒前按 Esc、之後一直閒著：還要 40 秒。
         assert_eq!(left(Some(at("2026-09-16T11:59:40Z")), false, s(20), now, grace), Some(s(40)));
-        // 按 Esc 之後使用者自己送了一則（規格 3）：不再擋，那一回合結束後照一般規則送。
         assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), true, s(10), now, grace), None);
-        // 兩分鐘前按 Esc，但十秒前才又閒下來（中間 working 過，規格 4）：從閒下來算，還要 50 秒。
         assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), false, s(10), now, grace), Some(s(50)));
-        // idle 計時比中斷還早（Esc 在閒著的時候按）：從中斷算。
         assert_eq!(left(Some(at("2026-09-16T11:59:40Z")), false, s(600), now, grace), Some(s(40)));
-        // 連續閒置滿寬限：送。
         assert_eq!(left(Some(at("2026-09-16T11:58:00Z")), false, s(120), now, grace), None);
-        // 接管最久 30 分鐘，之後回到一般排隊（不讓一次 Esc 永遠壓著）。
         assert_eq!(left(Some(at("2026-09-16T11:29:00Z")), false, s(1), now, grace), None);
     }
 
@@ -1397,8 +1282,6 @@ mod flush_queue_tests {
         assert_eq!((t.flush_retries, t.next_flush_at.clone()), (0, None), "寬限內連試都不試");
         assert!(queue_retry_timer_armed(&f.bot_id), "閒著的 bot 沒有邊會叫醒它，要掛 timer");
 
-        // 寬限過了：標記往回撥到 2 分鐘前，flush 就照常往下走（這裡沒有 herdr，會被放回佇列並算一次重試）。
-        // （規格 4：看連續 idle，所以 idle 計時也要撥回兩分鐘前。）
         super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(120));
         super::super::stuck_turns::observe_at(&f.run_id, "working", ago(121));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(120));
@@ -1431,7 +1314,6 @@ mod flush_queue_tests {
         assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text"), "一個字都沒打");
         assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，窗口關掉之後有人會回來送");
 
-        // 窗口過期（沒有人 release）就自動恢復：閘門看 `held_at`，不會鎖死。
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
@@ -1462,7 +1344,6 @@ mod flush_queue_tests {
         assert!(!f.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒送");
         assert!(queue_retry_timer_armed(&f.bot_id), "掛了 timer，下一輪重新判斷；不然這筆會一直躺著");
 
-        // 讀取恢復、窗口過期（沒有人 release）：照常往下送，不會永久卡住。
         crate::supervisor::maintenance::fault::restore_lease_reads(app.db()).await;
         let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='restart'").bind(&past).execute(app.db()).await.unwrap();
@@ -1479,7 +1360,6 @@ mod flush_queue_tests {
     async fn an_early_wake_up_leaves_a_timer_for_when_the_backoff_is_actually_up() {
         let f = queued("test").await;
         let app = f.env.app.clone();
-        // 這一筆已經被放回來過，下一次嘗試在 5 秒後。
         let next = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE turns SET next_flush_at = ?, flush_retries = 1 WHERE id = ?")
             .bind(&next)
@@ -1487,7 +1367,6 @@ mod flush_queue_tests {
             .execute(app.db())
             .await
             .unwrap();
-        // 寬限的 timer 剛剛燒掉並把自己從表上收走：現在這顆 bot 一個 timer 都沒有。
         forget_queue_retry_timer(&f.bot_id);
 
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -1548,7 +1427,6 @@ mod flush_queue_tests {
             .unwrap();
         assert!(why.contains(&a) && why.contains("已取消") && why.contains("改主意了"), "{why}");
 
-        // 名額釋放：同一個對話馬上排得進下一筆。
         sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','下一則',?)")
             .bind(db::ulid())
             .bind(&f.conv)
@@ -1633,7 +1511,6 @@ mod flush_queue_tests {
             assert_eq!(turn(&app, &f.turn_id).await.status, "failed", "{status}");
             assert!(f.env.herdr.pane("pane-1").map_or(true, |p| p.transcript.is_empty()), "{status}：一個字都沒打");
         }
-        // 對照：交辦還在（delivered）的照常送。
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
@@ -1682,9 +1559,8 @@ mod flush_queue_tests {
         sqlx::query("ALTER TABLE runs RENAME TO runs_unreadable").execute(app.db()).await.unwrap();
         let mut secs = Vec::new();
         for _ in 0..8 {
-            forget_queue_retry_timer(&f.bot_id); // 上一顆 timer 燒掉了
+            forget_queue_retry_timer(&f.bot_id);
             assert!(flush_queued_locked(&app, &f.bot_id).await.is_err());
-            // 剩餘時間量的是到期點減現在，讀取時已過的真實時間不超過 1 秒：向上取整就是排程的整秒數。
             secs.push(queue_retry_timer_left(&f.bot_id).expect("讀不到就要掛 timer").as_secs_f64().ceil() as u64);
         }
         assert_eq!(secs, vec![10, 20, 40, 80, 160, 300, 300, 300], "連續失敗：每次加倍，上限 5 分鐘");
@@ -1825,7 +1701,6 @@ mod flush_queue_tests {
         assert!(revoke_all_orphaned_queued_turns(&app).await.is_empty());
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
 
-        // 模擬舊版本：run 已經結束，但當時沒有撤銷。
         sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?").bind(db::now()).bind(&f.run_id).execute(app.db()).await.unwrap();
         assert_eq!(revoke_all_orphaned_queued_turns(&app).await, vec![f.turn_id.clone()]);
         assert_eq!(turn(&app, &f.turn_id).await.status, "failed");
@@ -1878,13 +1753,11 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET prompt_text = 'AGM 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         super::super::interrupt_grace::note_user_interrupt_at(&f.bot_id, chrono::Utc::now() - chrono::Duration::seconds(300));
 
-        // 中斷是五分鐘前，但 bot 十秒前才又閒下來（中間 working 過）：從閒下來那刻算，不送。
         super::super::stuck_turns::observe_at(&f.run_id, "working", ago(11));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(10));
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
 
-        // 連續閒了超過 60 秒：送。
         super::super::stuck_turns::observe_at(&f.run_id, "working", ago(62));
         super::super::stuck_turns::observe_at(&f.run_id, "idle", ago(61));
         sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
@@ -1966,7 +1839,6 @@ mod flush_queue_tests {
         assert_eq!(out.delivery, "queued");
         assert_eq!(typed(&f, "新的派工"), 0);
         assert!(queue_retry_timer_armed(&f.bot_id));
-        // AGM 自己排進去的那筆不是「使用者新輸入」：下一次 flush 照樣等寬限。
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(typed(&f, "新的派工"), 0);
     }
@@ -2028,7 +1900,6 @@ mod flush_queue_tests {
 
     /// 這一則的使用者訊息（`role = 'user'`），`relay_from` 空＝使用者自己從網頁送的。
     async fn user_message_of(app: &Arc<App>, f: &Fixture, relay_from: Option<&str>) {
-        // This fixture writes the turn directly, so it must persist the same trusted lane as the writer.
         sqlx::query("UPDATE turns SET queue_class=? WHERE id=?")
             .bind(if relay_from.is_some() { "relay" } else { "user" })
             .bind(&f.turn_id)
@@ -2100,11 +1971,9 @@ mod flush_queue_tests {
         let writes = |f: &Fixture| f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "pane.send_keys").count();
         assert_eq!(writes(&f), 0);
 
-        // 使用者把草稿清掉了；在退避時間到之前的喚醒不會搶先送。
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
-        // 退避時間到了（重試 timer 觸發）。
         sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
@@ -2197,7 +2066,6 @@ mod flush_queue_tests {
             let fired = fired.clone();
             move || fired.lock().unwrap().push(secs)
         };
-        // 中斷寬限掛的 60 秒 timer，接著排隊的派工被放回來，只要等 15 秒。
         assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(60), mark(&fired, 60)));
         assert!(arm_queue_retry(&bot, std::time::Duration::from_secs(15), mark(&fired, 15)), "更早的換掉舊的");
         assert_eq!(queue_retry_timer_left(&bot), Some(std::time::Duration::from_secs(15)), "掛著的是新的那個");
@@ -2209,7 +2077,6 @@ mod flush_queue_tests {
         assert_eq!(fired.lock().unwrap().as_slice(), &[15], "換上去的那個照自己的時間燒");
         assert!(!queue_retry_timer_armed(&bot), "燒完就把自己收掉");
 
-        // 被換掉的那個還睡著：醒來發現 generation 不是自己的，什麼都不做。
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         for _ in 0..4 {
             tokio::task::yield_now().await;
@@ -2235,7 +2102,6 @@ mod flush_queue_tests {
             assert_eq!(t.status, "queued", "put back #{n}");
             assert_eq!(t.flush_retries, n);
             assert!(t.next_flush_at.is_some());
-            // 另一次喚醒在 next_flush_at 之前：不動它、不花額度。
             flush_queued_locked(&app, &f.bot_id).await.unwrap();
             assert_eq!(turn(&app, &f.turn_id).await.flush_retries, n, "early wake-ups do not spend retries");
             sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
@@ -2314,7 +2180,6 @@ mod flush_queue_tests {
         );
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
-        // 「重啟」：舊行程的 timer 全沒了；框也清空了。
         forget_queue_retry_timer(&f.bot_id);
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
         let due_in = |d: chrono::Duration| (chrono::Utc::now() + d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -2342,7 +2207,6 @@ mod flush_queue_tests {
         assert!(left > std::time::Duration::from_secs(55 * 60), "armed for next_flush_at, not sooner: {left:?}");
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "not before it is due");
 
-        // 到期了：到期時間改成現在、再重建一次——較早的取代還在睡的那一個（它醒來時世代對不上，什麼都不做）。
         sqlx::query("UPDATE turns SET next_flush_at = ? WHERE id = ?")
             .bind(due_in(chrono::Duration::zero()))
             .bind(&f.turn_id)
@@ -2351,7 +2215,6 @@ mod flush_queue_tests {
             .unwrap();
         assert_eq!(rearm_queue_retries_with(&app, fire).await.unwrap(), 1, "the due one replaces the later timer");
 
-        // The typed delivery itself takes about two seconds.
         let _ = crate::testing::eventually!({
             let t = turn(&app, &f.turn_id).await;
             t.delivery != "pending" && t.status != "queued"
@@ -2528,7 +2391,6 @@ mod flush_queue_tests {
         db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         sqlx::query("UPDATE turns SET prompt_text = 'Reply with PONG please' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        // 讀畫面失敗（兩種讀法都失敗）。
         f.env.herdr.live.lock().unwrap().remove("pane-1");
         f.env.herdr.set_screen("pane-1", "__READ_ERROR__");
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -2597,7 +2459,6 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.flush_retries, t.rollout_waits), (3, 0), "busy put-backs are not rollout waits");
 
-        // 框清空了；codex 回報了 session，但 rollout 還沒寫。
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), codex: true, ..Default::default() });
         sqlx::query("UPDATE runs SET native_session_id = 'sess-busy' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         for n in 1..=CODEX_LOG_WAIT_RETRIES {
@@ -2627,14 +2488,12 @@ mod flush_queue_tests {
         assert_eq!(t.rollout_waits, 2);
         assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-a", f.run_id).as_str()));
 
-        // 新 session：前一個 session 等過的兩次不算數。
         sqlx::query("UPDATE runs SET native_session_id = 'sess-b' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.rollout_waits), ("queued", 1), "counted again from one");
         assert_eq!(t.rollout_wait_key.as_deref(), Some(format!("{}:sess-b", f.run_id).as_str()));
         clear_backoff(&f).await;
-        // 已經等滿三次也不能讓換了 session 的 turn 直接送：key 不同就不算等過。
         sqlx::query("UPDATE turns SET rollout_waits = 9 WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         sqlx::query("UPDATE runs SET native_session_id = 'sess-c' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
@@ -2675,7 +2534,6 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert!(queue_retry_timer_armed(&f.bot_id), "the first process armed it");
 
-        // 程序結束：記憶體裡的 timer 沒了。新的 App 開在同一個資料庫上。
         forget_queue_retry_timer(&f.bot_id);
         drop(app);
         let fresh = crate::testing::restart_app(&f.env).await;
@@ -2709,19 +2567,16 @@ mod flush_queue_tests {
             Some(f.turn_id.clone()),
             "the durable queue still holds it, so a later transition retries the delivery",
         );
-        // review 2 L2：放回去要自己掛 timer——閒著的 bot 不會再有 working→idle 邊來叫醒它。
         assert_eq!(t.flush_retries, 1, "算進重試次數，有上限");
         assert!(t.next_flush_at.is_some(), "有下一次嘗試的時間");
         assert!(queue_retry_timer_armed(&f.bot_id), "timer 已經掛上");
 
-        // Still retryable: requeueing didn't poison the relay-lane index or the CAS.
         f.env.herdr.set_agent("agent", "pane-1", true);
         sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?")
             .bind(&f.run_id)
             .execute(app.db())
             .await
             .unwrap();
-        // 退避時間到之前的其他喚醒不搶先；timer 到點（清掉 next_flush_at）才送。
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "still inside its backoff");
         sqlx::query("UPDATE turns SET next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
@@ -2742,7 +2597,6 @@ mod flush_queue_tests {
         sqlx::query("UPDATE turns SET prompt_text = '給舊 run 的派工' WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
         let (app2, run2) = (app.clone(), f.run_id.clone());
         super::super::race_point::arm("flush_before_claim", &f.bot_id, move || async move {
-            // `mark_run_exited` 的第一句寫入。
             sqlx::query("UPDATE runs SET state='exited', ended_at=? WHERE id=?").bind(db::now()).bind(&run2).execute(app2.db()).await.unwrap();
         });
 
@@ -2811,7 +2665,6 @@ mod flush_queue_tests {
                     .unwrap();
                 assert!(taken.is_some(), "認領前的窗口查詢是空的，這時才拿到租約");
                 if unreadable {
-                    // 租約還沒放、到期時間讀不懂：窗口狀態讀不到（#127），認領後的第二次查詢照樣 fail closed。
                     sqlx::query("UPDATE supervisor_leases SET expires_at = 'not-a-time' WHERE resource = 'restart'")
                         .execute(app2.db())
                         .await
@@ -2831,7 +2684,6 @@ mod flush_queue_tests {
             assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "掛了 timer 等租約到期或短退避");
             assert!(db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(), "不留 in_flight＋pending");
 
-            // 窗口放掉、退避到了：照常送出，只送一次。回合已結束，bot 閒下來（working 的 bot 不認領）。
             crate::supervisor::maintenance::release_restart_on_startup(&app).await;
             sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
             forget_queue_retry_timer(&f.bot_id);
@@ -2858,7 +2710,6 @@ mod flush_queue_tests {
             .await
             .unwrap();
         forget_queue_retry_timer(&f.bot_id);
-        // 放回佇列會寫 `next_flush_at`；這個觸發器讓那一句寫不進去。
         sqlx::query("CREATE TRIGGER lost_window_release BEFORE UPDATE OF next_flush_at ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
             .execute(app.db())
             .await
@@ -2910,7 +2761,6 @@ mod flush_queue_tests {
         db::set_pane_typed(app.db(), &f.run_id).await.unwrap();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
         sqlx::query("UPDATE turns SET prompt_text = '換版後才送', next_flush_at = NULL WHERE id = ?").bind(&f.turn_id).execute(app.db()).await.unwrap();
-        // 回合進行中：已送達的那一則 in_flight，bot working。
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES ('busy', ?, ?, 'web', 'in_flight', 'ok', ?)")
             .bind(&f.conv).bind(&f.run_id).bind(db::now()).execute(app.db()).await.unwrap();
@@ -2922,7 +2772,6 @@ mod flush_queue_tests {
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(turn(&app, &f.turn_id).await.status, "queued");
 
-        // 換版期間：回合結束（hook 重播的結果），bot 閒下來。舊行程的 timer 隨行程消失。
         sqlx::query("UPDATE turns SET status='completed' WHERE id='busy'").execute(app.db()).await.unwrap();
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(app.db()).await.unwrap();
         forget_queue_retry_timer(&f.bot_id);
@@ -2995,7 +2844,6 @@ mod flush_queue_tests {
     #[tokio::test]
     async fn a_failure_after_the_rpc_is_parked_as_unknown_not_requeued() {
         let f = queued("test").await;
-        // The agent.prompt path needs an agent herdr has a session bound to.
         f.env.herdr.set_agent("agent", "pane-1", true);
         let app = f.env.app.clone();
 
@@ -3109,7 +2957,6 @@ mod flush_queue_tests {
             assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "{why}：掛了下一次的 timer");
             assert!(db::in_flight_turn(app.db(), &f.run_id).await.unwrap().is_none(), "{why}：不再擋住下一則");
 
-            // 擋住它的東西沒了、退避到了：照常送出，只送一次。
             f.env.herdr.set_screen("pane-1", "");
             f.env.herdr.set_agent("agent", "pane-1", true);
             sqlx::query("UPDATE runs SET herdr_session = 'test' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();

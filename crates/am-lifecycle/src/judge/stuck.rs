@@ -56,8 +56,6 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
     let cfg = app.cfg().get().await.judge;
     let Some(bot) = crate::db::bot(app.db(), &c.bot_id).await? else { return Ok(None) };
     let label = crate::db::project(app.db(), &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
-    // 便宜的早退：開關與專案名單在讀畫面之前就看得出來。真正的名額是等到要問之前才占
-    // （`reserve_slot`），否則占了卻因為「輸入列空著」「同畫面問過」而沒問，名額就白燒了。
     if let Some(skip @ (super::Skip::Disabled | super::Skip::ProjectNotListed)) = super::gate(&cfg, &bot.project_id, &label, 0) {
         return Err(anyhow!("{skip:?}"));
     }
@@ -66,16 +64,13 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
         return Ok(None);
     }
     let Some(client) = app.herdr_for_run(&run).await else { return Ok(None) };
-    // 樣式讀：輸入框裡只有 claude 的「建議下一句」（dim）時是空輸入列，不是框在擋（`plain_without_hints`）。
     let text = app.read_pane_plain_text(&client, &c.pane_id, &bot.kind).await?;
     let lines: Vec<&str> = text.lines().collect();
-    // 輸入列空著＝沒有框在擋；那是別的問題（例如 flush 沒被叫醒），不是這裡要看的。
     if crate::tui_prompts::composer_is_idle(&lines) {
         return Ok(None);
     }
     let tail = super::tail(&text);
     let digest = fingerprint(&tail);
-    // 同一個 run、同一個畫面只問一次。
     let seen: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE run_id = ? AND regex_verdict = 'stuck_queued' AND matched_line = ?")
         .bind(&c.run_id)
         .bind(&digest)
@@ -84,7 +79,6 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
     if seen > 0 {
         return Ok(None);
     }
-    // 跟 `observe` 走**同一支**占位（i339 review #481）：只有一邊占位的話，另一邊照樣衝得過保險絲。
     let slot = super::reserve_slot(app, &cfg, &bot.project_id, &label, &c.bot_id, &c.run_id, &bot.kind, &digest, false, "stuck_queued").await?;
     let body = request_body(&cfg.model, &bot.kind, c.waited_secs, &tail);
     let started = Instant::now();
@@ -124,7 +118,6 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
 
 /// 畫面尾段的短指紋（去重用；不存全文）。
 fn fingerprint(tail: &str) -> String {
-    // FNV-1a 64：跟 `bin/agm` 備份檔名同一種做法，不引新 crate。
     let mut h: u64 = 0xcbf29ce484222325;
     for b in tail.bytes() {
         h ^= u64::from(b);
@@ -277,7 +270,6 @@ mod tests {
         let action = p["action"].as_str().unwrap();
         assert!(action.starts_with("🤖 Jev 建議") && action.contains("93%") && action.contains("只是建議，不會自動動作"), "{action}");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "只通知，不按鍵");
-        // 同一個畫面再掃一次：不再問、不再推。
         assert_eq!(inspect(&app, &s).await.unwrap(), None);
         assert_eq!(seen.lock().unwrap().len(), 1);
         assert_eq!(inbox_kinds(&app).await.len(), 1);
@@ -358,11 +350,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // SQL 那一層撈得比每輪上限多，輪轉才有東西可以輪。
         let all = candidates(&app, STUCK_AFTER_SECS).await.unwrap();
         assert!(all.len() > MAX_PER_ROUND, "撈到的要比每輪上限多，否則輪不動：{}", all.len());
 
-        // 第一輪挑的數量有上限；第二輪（冷卻還在）要換一批，不能又是同一批。
         let pick = |app: Arc<App>| async move {
             let now = std::time::Instant::now();
             let mut seen = app.judge_stuck_seen.lock().await;
@@ -397,7 +387,6 @@ mod tests {
         }
         assert!(!SWEEPING.load(Ordering::SeqCst), "正常結束要放掉");
 
-        // panic 的那一輪：guard 在 unwind 時被 drop，下一輪照樣搶得到。
         let hit = std::panic::catch_unwind(|| {
             let _g = SweepGuard::take().expect("panic 那一輪也拿得到");
             panic!("boom");

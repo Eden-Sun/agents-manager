@@ -95,16 +95,13 @@ pub async fn escalation_for(app: &(impl crate::capabilities::Db + crate::supervi
         Some(id) => store::approval(app.db(), id)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
-            // 只有「還能用來開窗口」的核准才有資格計時：已消耗、被撤、過期的都不算。
             .filter(|a| a.status == "approved" && RESOURCES.contains(&a.purpose.as_str()))
             .filter(|a| !a.effective_expiry().as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le())),
         None => store::oldest_live_window_approval(app.db(), &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
     };
     let Some(a) = found else { return Ok(None) };
-    // 同一個申請者換 commit 接續的等待（`wait_since`）也算：main 一動核准就換一筆，計時不能跟著歸零。
     let Some(since) = a.waiting_since() else { return Ok(None) };
     let waited = waited_secs(since, &now);
-    // 使用者在 header 按了「現在換版」：只放寬這次部署的自動核准（`deploy_wait`，使用者 2026-10-04）。
     let by_user = app.deploy_user_escalated_for(&a);
     let escalated = by_user || waited >= escalate_after_secs() || behind_escalates(behind_code_commits(app).await);
     Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated }))
@@ -117,8 +114,6 @@ pub fn behind_escalates(code_commits: u64) -> bool {
 }
 
 async fn behind_code_commits(app: &impl crate::supervisor::ports::HostProbes) -> u64 {
-    // 單元測試不看測試 checkout 落後 origin/main 多少（那跟受測行為無關、而且會讓結果隨 repo 狀態飄）；規則本身由
-    // `behind_escalates` 的純函式測試釘住。
     if cfg!(any(test, feature = "test-hooks")) {
         return 0;
     }
@@ -294,8 +289,6 @@ pub async fn window_held(app: &impl crate::capabilities::Db) -> Result<Option<Wi
             Err(e) => return Err(unreadable(resource, e)),
         };
         let Some(l) = lease else { continue };
-        // 沒放掉、卻沒有一個讀得懂的到期時間：不知道它什麼時候結束，不能當它不存在。
-        // （`acquire_lease` 一定會寫到期時間，所以這只會是壞資料；daemon 重啟時會被收掉。）
         if l.released_at.is_none() && l.expires_at.as_deref().is_none_or(|t| chrono::DateTime::parse_from_rfc3339(t).is_err()) {
             return Err(unreadable(resource, format!("lease is not released but its expires_at is unreadable: {:?}", l.expires_at)));
         }
@@ -356,11 +349,6 @@ pub async fn release(
     fence: i64,
     proof: store::LeaseProof<'_>,
 ) -> anyhow::Result<bool> {
-    // 憑證對不對在任何寫入之前決定：`release_lease` 只認 owner＋fence，而那兩個是公開欄位
-    // （`lease status` 就看得到），光憑它們等於誰都能把別人正在換 binary 的窗口收掉。
-    // Keep the exact row whose token was proved and whose approval this call may consume. Looking
-    // it up again after marking it released can race a new acquire and consume the next holder's
-    // approval instead.
     let Some(held) = store::lease(app.db(), resource).await? else { return Ok(false) };
     if !proof.allows(held.lease_token.as_deref()) {
         anyhow::bail!("lease_token_mismatch");
@@ -375,17 +363,12 @@ pub async fn release(
     };
     #[cfg(any(test, feature = "test-hooks"))]
     if released {
-        // key 用這張租約的 token（沒有 token 的舊列才退回 resource）：測試之間共用 `"rebuild"` 時，別條測試的 release 會吃掉動作（issue #949）。
         crate::race_point::hit("lease_release_after_mark", held.lease_token.as_deref().unwrap_or(resource)).await;
     }
     if released {
         if let Some(ap) = held.approval_id.as_deref() {
             if let Ok(Some(a)) = store::approval(app.db(), ap).await {
                 if a.status == "approved" {
-                    // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
-                    // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
-                    // 理由分得出「持有人自己交還」與「強制收掉」（daemon 開機收殘留、AGM `--force`）：
-                    // 自動部署只接續前者的等待（`swap_window`，SPEC §18.10）。
                     let why = if proof.is_forced() { FORCE_RELEASED_REASON } else { RELEASED_REASON };
                     let _ = store::decide_approval_from(app.db(), ap, "approved", "consumed", owner, Some(why), None).await;
                 }
@@ -455,17 +438,12 @@ pub async fn safety_as(
     let mut working = Vec::new();
     let mut blocked = Vec::new();
     let mut in_flight = Vec::new();
-    // 送達臨界區（SPEC §18.10）：縮小封鎖面之後就只剩這個、還握著的租約與讀不到畫面會擋。
     let mut delivering = Vec::new();
-    // A read that fails is not a bot that is idle. Before this, `let Ok(Some(run)) = … else
-    // continue` swallowed the error and the bot silently counted as free — a failing database
-    // would have read as "the coast is clear", which is the one answer this must never invent.
     let mut unreadable = Vec::new();
     for b in &bots {
         if exclude.contains(&b.id) {
             continue;
         }
-        // 在看 run 之前先問：沒有 active run 的 bot 也可能有一筆排隊中的 prompt。
         match delivery_critical(app.db(), &b.id).await {
             Ok(Some(turn_id)) => delivering.push(json!({"bot_id": b.id, "name": b.name, "turn_id": turn_id})),
             Ok(None) => {}
@@ -483,8 +461,6 @@ pub async fn safety_as(
             }
         };
         let Some(run) = run else { continue };
-        // AGM's own turn is protected by the same rule as everyone's: you do not restart the
-        // daemon out from under the session the user is talking to.
         if run.agent_status == "working" {
             working.push(json!({"bot_id": b.id, "name": b.name, "is_supervisor": Some(&b.id) == sup.bot_id.as_ref()}));
         } else if run.agent_status == "blocked" {
@@ -501,41 +477,25 @@ pub async fn safety_as(
     }
     let open = store::open_assignments(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let held = held_leases(app.db(), owner).await?;
-    // 擋人的只有別人的：同一個 owner 先拿 rebuild 再拿 restart 是標準換版流程，不是搶窗口。
     let held_by_others = held.iter().filter(|l| l.get("own") != Some(&Value::Bool(true))).count();
     let esc = escalation_for(app, approval_id).await?;
-    // Not knowing about even one bot is enough to refuse: the window's whole promise is that
-    // nothing is running, and we cannot promise that about a bot we could not look at.
     let strict = working.is_empty() && in_flight.is_empty() && unreadable.is_empty();
-    // 縮小封鎖面：思考中不再擋，送達臨界區、還握著的租約與讀不到畫面照擋（SPEC §18.10）。
     let escalated = esc.as_ref().is_some_and(|e| e.escalated);
-    // 放寬只會放寬：全靜止成立的窗口，等滿門檻之後也一定成立（review 2 總管 4）。以前是二選一，
-    // 等超過 30 分鐘反而多擋兩樣全靜止不看的東西——放回佇列、正在閒置的 queued 與別人的租約
-    // （租約的互斥由 acquire 本身把關，全靜止本來就不看）。
     let relaxed = escalated && delivering.is_empty() && unreadable.is_empty() && held_by_others == 0;
     let safe = strict || relaxed;
     Ok(json!({
         "safe": safe,
-        // 這一刻是不是已經放寬了，以及最早那筆沒用掉的核准等了多久（沒有這種核准時是 null）。
         "escalated": escalated,
         "waited_secs": esc.as_ref().map(|e| e.waited_secs),
         "escalation_approval_id": esc.as_ref().map(|e| e.approval_id.clone()),
         "escalate_after_secs": escalate_after_secs(),
-        // 放寬之後仍然會擋的兩項，列出來才看得懂為什麼還是 false。租約全部列出、各自帶 owner；
-        // `own: true` 的是發問者自己握的，不算擋。
         "delivering": delivering,
         "held_leases": held,
-        // 以誰的身份問的（沒給就是 null＝每一把租約都算擋）。回聲出來，呼叫端才分得出是不是舊 daemon 忽略了它。
         "owner": owner,
         "working": working,
         "in_flight": in_flight,
-        // Bots whose state could not be read this pass. Never empty *and* `safe` at once.
         "unreadable": unreadable,
-        // Reported, not blocking: a pane waiting on a person is a normal state, and a restart
-        // leaves it alone.
         "blocked_waiting_for_user": blocked,
-        // Queued work is not a reason to refuse either — it is exactly what the pause holds
-        // back — but the caller should see how much is waiting on the other side of the window.
         "queued_assignments": open.iter().filter(|a| a.status == "queued").count(),
         "checked_at": crate::db::now(),
     }))
@@ -610,8 +570,6 @@ pub async fn acquire_with_request(
     if commit.is_some_and(|c| !valid_commit(c)) {
         return Err(LcError::Bad("commit must be 7-64 hex characters (a git sha)".into()));
     }
-    // A restart interrupts every session on the box. "Take the window anyway" is not a thing
-    // you get to ask for: the idle check *is* the window for this resource.
     if EXCLUSIVE.contains(&resource) && !require_idle {
         return Err(LcError::Bad(format!(
             "the `{resource}` window cannot skip the idle check; wait for a safe window instead"
@@ -631,7 +589,6 @@ pub async fn acquire_with_request(
                    "target_commit": approval.target_commit, "requested_commit": commit}),
         ));
     }
-    // 核准是給申請的那個人的：別人拿著它 acquire，連升級計時都一起借走（review2 sup #5）。
     if approval.requester != owner {
         return Err(LcError::conflict(
             "the approval was granted to someone else",
@@ -639,11 +596,7 @@ pub async fn acquire_with_request(
                    "hint": "acquire 的 --owner 要跟申請時的 --requester 一樣；要自己開窗口就自己申請一筆"}),
         ));
     }
-    // 一次核准一個窗口：這張已經開過一個、那個窗口過期沒 release（執行端掛了）時，**同一張**不能再開一次。
-    // 接手過期租約時只消耗「別張」核准（store::acquire_lease），同一張會被放過去（review2 sup #6）。
     if let Some(l) = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        // 窗口已經 release 掉、核准卻還是 `approved`＝release 那一步的「消耗」沒寫成（DB 出錯，或兩步之間 daemon 死了）：
-        // 一樣算用掉了，不然同一張核准能再開第二個窗口。
         let used = l.released_at.is_some() || !l.held_at(&crate::db::now());
         if used && l.approval_id.as_deref() == Some(approval.id.as_str()) {
             let _ = store::decide_approval_from(app.db(), &approval.id, "approved", "consumed", "daemon", Some("lease expired"), None).await;
@@ -654,7 +607,6 @@ pub async fn acquire_with_request(
             ));
         }
     }
-    // 重送：同一個 request_id 開的、還握著的那一張，原樣拿回（見 [`acquire_with_request`]）。
     if let Some(rid) = request_id {
         if let Some(l) = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
             let detail: Value = serde_json::from_str(&l.detail_json).unwrap_or(Value::Null);
@@ -671,8 +623,6 @@ pub async fn acquire_with_request(
         }
     }
 
-    // 排除對象綁**這筆核准的申請者**（上面已驗過 `requester == owner`）：申請人自己那顆 bot。
-    // 別顆 bot 一律不能被排除掉——那等於拿一張自己的核准，把別人正在打字的 pane 也算成閒置。
     let self_bot = match store::approval_principal(app.db(), &approval.id).await.map_err(super::up)? {
         Some(store::ApprovalPrincipal::Bot { bot_id }) => Some(bot_id),
         _ => None,
@@ -687,13 +637,8 @@ pub async fn acquire_with_request(
             ));
         }
     }
-    // 放寬與否只看**這一筆**核准等了多久：別人放著沒用的核准不能替它開門。
-    // 以 acquire 的 owner 問：自己手上的 rebuild 不擋自己的 restart。
     let safety = safety_as(app, exclude, Some(&approval.id), Some(owner)).await?;
     if require_idle && safety.get("safe") != Some(&Value::Bool(true)) {
-        // 講得出「還要等多久」：只說 not_idle 的話，呼叫端會以為沒有出路（2026-09-19 實測，
-        // 有人因此連試 `--allow-busy`、最後想繞過租約）。升級機制就是這種情況的出口，
-        // 所以把等待秒數、門檻與預估升級時間直接放進錯誤裡。
         let waited = safety.get("waited_secs").and_then(Value::as_i64);
         let threshold = safety.get("escalate_after_secs").and_then(Value::as_i64);
         let eta = match (waited, threshold) {
@@ -716,16 +661,8 @@ pub async fn acquire_with_request(
         ));
     }
 
-    // The lease may not outlive the permission it rests on. Otherwise "approved until 14:00"
-    // quietly becomes "holding the box until 14:45", which is a different promise than the one
-    // anybody agreed to.
     let expires_at = lease_deadline(&iso_in(ttl), approval.effective_expiry().as_deref());
-    // 會中斷 pane 的窗口，連**寫下去的那一刻**都要沒有人在送達臨界區：safety 是上面讀的，
-    // 讀完到寫入之間還是有可能有一則 prompt 把 turn commit 進來（issue #86 的 TOCTOU）。
     let quiet_delivery = EXCLUSIVE.contains(&resource);
-    // 申請者自己這一回合不算「有人在送達臨界區」：它就是來換版的那個人，而它的回合要等 acquire
-    // 回來才會結束。不放過它的話，任何 bot 在自己的回合裡都拿不到 restart 窗口，只剩「把腳本丟
-    // 背景再結束回合」一條路——那正是規則 6a 禁止的（2026-09-18 AM-m3 連試 30 次都 raced=true）。
     let exclude_self = quiet_delivery.then(|| exclude_from_quiet(exclude, self_bot.as_deref())).flatten();
     let taken = store::acquire_lease(
         app.db(),
@@ -744,8 +681,6 @@ pub async fn acquire_with_request(
 
     let Some(lease) = taken else {
         let held = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-        // 分得出是哪一種輸法：窗口被別人搶走，還是「就在這一瞬有 prompt 進了送達臨界區」。
-        // 後者說成 `lease_held` 的話，呼叫端會去找一個根本不存在的持有者。
         if held.as_ref().is_none_or(|l| !l.held_at(&crate::db::now())) {
             let now = crate::db::now();
             let racing = store::delivery_critical_anywhere(app.db()).await.unwrap_or(true);
@@ -767,7 +702,6 @@ pub async fn acquire_with_request(
     let lease_token = lease.lease_token.clone();
     tracing::info!(resource, owner, fence = lease.fence, escalated, waited, "maintenance lease acquired");
     if escalated {
-        // 換版紀錄要看得出這次不是等到全靜止才換的（SPEC §18.10）。整份 safety 也寫在租約 meta 裡。
         tracing::warn!(
             resource,
             owner,
@@ -776,7 +710,6 @@ pub async fn acquire_with_request(
         );
     }
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
-    // token 只在這裡出現一次：`to_json()`（`lease status`、`/api/supervisor`、事件）永遠不含它。
     Ok(json!({"lease": lease.to_json(), "lease_token": lease_token, "approval": approval.to_json(), "safety": safety}))
 }
 
@@ -791,9 +724,6 @@ pub fn valid_commit(c: &str) -> bool {
 /// that permission lapses, and it cannot be granted past it either.
 pub fn lease_deadline(requested: &str, approval_expires_at: Option<&str>) -> String {
     match approval_expires_at {
-        // Compare instants, not strings: the approval's `expires_at` may be a second-precision value
-        // written by an older build, or any RFC3339 the AGM sent through the API (`+08:00`), while
-        // `requested` is `iso_in`'s millisecond form (issue #101).
         Some(exp) if crate::db::cmp_ts(exp, requested).is_lt() => exp.to_string(),
         _ => requested.to_string(),
     }

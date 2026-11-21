@@ -44,7 +44,6 @@ fn parses_chinese_page() {
 
 #[test]
 fn chinese_iso_dates_and_swapped_columns() {
-    // 欄位順序反了（發放日在前）也取較晚的當到期日。
     let t = "信用額度餘額\n$0.00\n$5.00 優惠額度可用\n$5.00 共 $10.00\n2026-10-14   2026-11-15\n";
     let d = ok(parse_console_billing(t));
     assert_eq!(d.promotions[0].expires_on.as_deref(), Some("2026-11-15"));
@@ -68,7 +67,6 @@ fn no_promotions_is_zero() {
 #[test]
 fn english_month_dates() {
     assert_eq!(find_dates("Nov 15, 2026  October 14 2026"), vec![NaiveDate::from_ymd_opt(2026, 11, 15).unwrap(), NaiveDate::from_ymd_opt(2026, 10, 14).unwrap()]);
-    // 第一段 > 12 當 DD/MM。
     assert_eq!(find_dates("25/12/2026"), vec![NaiveDate::from_ymd_opt(2026, 12, 25).unwrap()]);
     assert!(find_dates("$96.99 of $100.00").is_empty());
 }
@@ -83,7 +81,6 @@ fn logged_out_pages() {
 fn unrecognised_page_is_parse_failed() {
     assert_eq!(parse_console_billing("Something completely different\n$5.00\n"), ParseOutcome::ParseFailed);
     assert_eq!(parse_console_billing(""), ParseOutcome::ParseFailed);
-    // 有標籤但後面沒有金額。
     assert_eq!(parse_console_billing("Credit balance\nloading...\n"), ParseOutcome::ParseFailed);
 }
 
@@ -104,8 +101,6 @@ fn console_json_shapes() {
     assert_eq!(v["status"], "logged_out");
     assert!(v.get("total_usd").is_none());
 }
-
-// ── 流程：假 runner ──
 
 struct FakeRunner {
     calls: StdMutex<Vec<Vec<String>>>,
@@ -258,7 +253,6 @@ async fn bad_saved_state_keeps_original_file() {
     assert_eq!(snap.status, Status::Ok, "寫回失敗不影響讀到的餘額");
     assert!(std::fs::read_to_string(&p).unwrap().contains("old"));
     assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
-    // save 指令本身失敗也一樣。
     r.saved = None;
     let snap = fetch_once(&r, &p).await;
     assert_eq!(snap.status, Status::Ok);
@@ -295,13 +289,11 @@ fn exe_chain_dirs_follows_two_hop_symlink_chain() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(pkg.join("real"), "").unwrap();
-    // 第一跳用相對路徑、第二跳用絕對路徑，兩種都要涵蓋。
     symlink("../lib/pkg/bin/real", node_bin.join("agent-browser")).unwrap();
     symlink(node_bin.join("agent-browser"), local.join("agent-browser")).unwrap();
     let dirs = exe_chain_dirs(&local.join("agent-browser"));
     assert_eq!(dirs, vec![local.clone(), node_bin.clone(), node_bin.join("../lib/pkg/bin")]);
     assert!(dirs.contains(&node_bin), "中間層（node 所在）必須在 PATH 內");
-    // 非 symlink、相對單檔名都不炸。
     assert_eq!(exe_chain_dirs(&pkg.join("real")), vec![pkg.clone()]);
     assert!(exe_chain_dirs(Path::new("agent-browser")).is_empty());
 }

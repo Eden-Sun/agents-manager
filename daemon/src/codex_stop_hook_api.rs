@@ -151,7 +151,6 @@ pub(crate) async fn post_trust(
             "fleet operator trusts the Codex Stop hook on behalf of the user"
         );
     }
-    // 同一台主機、同一個 CODEX_HOME 的寫入序列化：兩次按鈕不會互相覆蓋 config.toml／hooks.json。
     let lock = codex_hook::home_lock(&t.host, &t.codex_home);
     let _guard = lock.lock().await;
     let instance = app.instance();
@@ -165,7 +164,6 @@ pub(crate) async fn post_trust(
             Err(_) => Err(anyhow::anyhow!("timed out")),
         }
     };
-    // Not installed / unreadable config etc. are the caller's state to fix, not a server fault.
     wrote.map_err(|e| LcError::Conflict(json!({"error": "stop_hook_not_trustable", "detail": format!("{e:#}")})))?;
     let status = probe(&app, &t).await.map(status_str).unwrap_or("unavailable");
     Ok(Json(Entry { host: t.host, identity: t.identity, codex_home: t.codex_home, status: status.into() }))
@@ -184,7 +182,6 @@ mod tests {
         std::fs::create_dir_all(&codex_home).unwrap();
         let t = resolve(&app, "local", None).await.unwrap();
         assert_eq!(t.codex_home, codex_home.to_string_lossy());
-        // 安裝本身不註冊 handler：沒有信任之前，hooks.json 裡不會出現我們的項目（#1989）。
         assert!(!codex_hook::install_local(&codex_home, &app.data_dir, app.instance().as_deref()).unwrap());
         let before = "# keep me\n[projects.\"/x\"]\ntrust_level = \"trusted\"\n";
         std::fs::write(codex_home.join("config.toml"), before).unwrap();

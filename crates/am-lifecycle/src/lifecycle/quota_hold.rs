@@ -107,8 +107,6 @@ pub async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &
     }
     match app.try_limit_hit_for_bot(bot).await {
         Ok(Some(hit)) => {
-            // 這一輪靠記憶體擋著，憑據卻沒落地：圍籬還沒做完，很快再寫一次（`arm_queue_retry` 留較早的那個 timer）。
-            // 寫成之前 daemon 重啟的話，只剩撞限當下蓋上的那一份（`stamp_queued`）。
             if let Err(e) = remember(app, turn_id, bot, &hit).await {
                 tracing::warn!(turn = %turn_id, error = %e, "could not persist the quota hold of a queued prompt; retrying soon");
                 app.schedule_flush_retry(&bot.id, PERSIST_RETRY);
@@ -118,15 +116,12 @@ pub async fn blocking_hit(app: &impl QuotaHoldContext, bot: &db::Bot, turn_id: &
         Ok(None) => {}
         Err(e) => return Some(unverified(bot, &e)),
     }
-    // 查完撞限、再讀一次主機之前（測試在這裡讓前一次讀不到的 DB 恢復）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("quota_hold_after_lookup", &bot.id).await;
     let host = match db::bot_host(app.db(), &bot.id).await {
         Ok(h) => h,
         Err(e) => return Some(unverified(bot, &e)),
     };
-    // 這台主機回填過了、而且這顆 bot 的憑據在回填時讀得懂（或本來就沒有）：記憶體就是唯一判準。
-    // 回填時解不開的那幾顆是例外——它們的撞限沒有被種回記憶體，「記憶體說不擋」對它們不是證據（issue #522）。
     if !backfilled(app, &host) || unresolved(app, &bot.id) {
         match held_on_turn(app, bot, turn_id).await {
             Ok(Some(hit)) => return Some(hit),
@@ -158,8 +153,6 @@ async fn still_holds(app: &impl QuotaHoldContext, bot: &db::Bot, held: &Held) ->
     if held.identity != app.billing_identity(bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
         return Ok(false);
     }
-    // 寫下之後這個主機名改指到另一台（#347）：那是另一台機器上的帳號，撞限不跟過去。主機不在設定裡不算「換了」——
-    // 讀不到不放行，跟上面讀不到身份一樣。單純重連不改設定，照樣算數。
     if let Some(then) = held.target.as_deref() {
         let host = db::bot_host(app.db(), &bot.id).await?;
         if host_target(app, &host).await.is_some_and(|now| now != then) {
@@ -306,11 +299,6 @@ async fn backfill(app: &impl QuotaHoldContext, host: &str) -> anyhow::Result<Vec
         if db::bot_host(app.db(), &bot.id).await? != host {
             continue;
         }
-        // 解不開的憑據（不是讀不到，是內容壞了）重來也一樣：跳過它，不讓它擋住整台主機的回填。
-        // 但**這顆 bot 不算回填過**（issue #522）：撞限沒被種回記憶體，之後 `blocking_hit` 若照「回填完了、
-        // 只看記憶體」走，就會讀到一個空的記憶體、把唯一的證據 `forget` 掉，然後把那一則送進還沒額度的身份——
-        // 正是這個模組要擋的事。記下來，讓它繼續走 `held_on_turn`（那裡對解不開是回錯、呼叫端照擋，方向一致）。
-        // 也不叫醒它的 flush：叫醒只是提早去踩那條路。
         let held = match serde_json::from_str::<Held>(&raw) {
             Ok(h) => h,
             Err(e) => {
@@ -323,7 +311,6 @@ async fn backfill(app: &impl QuotaHoldContext, host: &str) -> anyhow::Result<Vec
         if held.boot == app.boot_id() || !still_holds(app, &bot, &held).await? {
             continue;
         }
-        // 種回撞到的那個帳號（憑據上記的身份；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
         let base = app.quota_base_for_host(host, &bot.kind, held.identity.as_deref()).await;
         if app.restore_limit_hit(host, &base, held.hit()).await {
             tracing::info!(host, bot = %bot.id, until = ?held.until, "重啟回填：排著的 prompt 記下的撞限補回記憶體");
@@ -338,7 +325,7 @@ pub fn recheck_in(until: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Du
     let Some(until) = until.and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok()) else { return RECHECK_MAX };
     match (until.with_timezone(&chrono::Utc) - now).to_std() {
         Ok(left) => left.clamp(Duration::from_secs(1), RECHECK_MAX),
-        Err(_) => Duration::from_secs(1), // 已經過了：馬上再看
+        Err(_) => Duration::from_secs(1),
     }
 }
 
@@ -624,7 +611,6 @@ mod tests {
             assert_eq!(left.is_some(), want, "{why}：放行就清掉憑據");
         }
 
-        // 寫下之後同一把 key 有一回合真的答完（`clear_limit_hit` 記下的時刻）：額度回來的直接證據。
         sqlx::query("UPDATE turns SET status='queued', run_id=NULL, flush_retries=0, next_flush_at=NULL WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
         sqlx::query("UPDATE bots SET model=NULL WHERE id=?").bind(&q.bot.id).execute(app.db()).await.unwrap();
         put_hold(&app, &q.turn, &old_hold(Some("cc-a"), Some(later(2)), None)).await;
@@ -711,7 +697,6 @@ mod tests {
                 let turn = db::ulid();
                 sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
                     .bind(&turn).bind(&conv).bind(db::now()).execute(app.db()).await.unwrap();
-                // 走正式的寫入路徑（撞限當下蓋上），再當成上一輪開機寫的。
                 stamp_queued(&app, &bot.id, Some("cc-a"), &hit(Some(&later(2)))).await.unwrap();
                 let (_, held) = state(&app, &turn).await;
                 put_hold(&app, &turn, &Held { boot: "previous-boot".into(), ..held.expect("蓋上了") }).await;
@@ -721,22 +706,18 @@ mod tests {
             }
         };
         let (same_bot, same_turn) = queue(same, "qh-same").await;
-        // moved 上兩顆：一顆看回填之前的 flush（放行會清掉它的憑據），一顆看回填。
         let (flushed_bot, flushed_turn) = queue(moved, "qh-moved-flush").await;
         let (moved_bot, moved_turn) = queue(moved, "qh-moved").await;
         assert_eq!(state(&app, &same_turn).await.1.and_then(|h| h.target).as_deref(), Some("target-a:22/agents-manager"), "記下當時指到的機器");
 
-        // 重啟之後：same 只是重連（設定沒變），moved 改指到另一台。
         same_conn.bump_generation_for_test();
         app.hosts.replace_remote_for_test(&app, cfg(moved, "target-b")).await;
 
-        // 回填之前的 flush 直接看憑據。
         assert!(blocking_hit(&app, &same_bot, &same_turn).await.is_some(), "重連：同一台的撞限照擋");
         assert!(blocking_hit(&app, &flushed_bot, &flushed_turn).await.is_none(), "改指到另一台：舊機器的撞限不擋");
         assert!(state(&app, &flushed_turn).await.1.is_none(), "放行就清掉那一列的憑據");
         assert!(state(&app, &moved_turn).await.1.is_some(), "另一顆的憑據還在，下面的回填才有東西可判");
 
-        // 回填：same 種回，moved 另一則的憑據不種。
         backfill_once(&app, same).await;
         backfill_once(&app, moved).await;
         assert!(crate::runners::quota::limit_hit_for_bot(&app, &same_bot).await.is_some(), "重連：種回來");
@@ -769,21 +750,15 @@ mod tests {
         assert!(!q.env.herdr.methods().iter().any(|m| m == "pane.send_text" || m == "agent.prompt"), "一個字都沒打");
         rename(&app, "projects_unreadable", "projects").await;
 
-        // 回填之前、那一列讀不到。
         rename(&app, "turns", "turns_unreadable").await;
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "讀不到那一列的憑據：照擋");
         rename(&app, "turns_unreadable", "turns").await;
         assert!(state(&app, &q.turn).await.1.is_some(), "憑據沒被當成放行清掉");
 
-        // 憑據壞了（解不開）：回填之前照擋，**回填之後也照擋**（issue #522）。這裡以前斷言的是
-        // 「回填跳過它之後只看記憶體」——而那正是放行：解不開的憑據沒被種回記憶體，空的記憶體不是
-        // 「沒撞限」的證據，照那條走會把唯一的證據 `forget` 掉、再把那一則送進還沒額度的身份。
-        // 跟上面一格（那一列讀不到 → 照擋）也自相矛盾：同樣是「證明不了」，不該一個擋一個放。
         sqlx::query("UPDATE turns SET quota_hold='not json' WHERE id=?").bind(&q.turn).execute(app.db()).await.unwrap();
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之前照擋");
         backfill_once(&app, LOCAL_HOST).await;
         assert!(blocking_hit(&app, &q.bot, &q.turn).await.is_some(), "解不開：回填之後照樣擋（#522）");
-        // 這裡不能用 `state`（它會把憑據 parse 回 `Held`，而這一格正是故意壞的）：直接看那一欄還在不在。
         let raw: Option<String> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(&q.turn).fetch_one(app.db()).await.unwrap();
         assert_eq!(raw.as_deref(), Some("not json"), "唯一的證據不准被 forget 掉");
         forget_queue_retry_timer(&q.bot.id);

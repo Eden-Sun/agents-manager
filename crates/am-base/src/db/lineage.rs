@@ -408,7 +408,6 @@ async fn advance_in_tx(
             .bind(session_id)
             .fetch_optional(&mut *tx)
             .await?;
-    // 先退役舊的再升新的：部分唯一索引不容許同一條線同時有兩顆檢查點。
     if let Some(prev) = &previous {
         sqlx::query("UPDATE lineage_sessions SET state = 'retired', updated_at = ? WHERE id = ?").bind(now).bind(&prev.id).execute(&mut *tx).await?;
     }
@@ -448,8 +447,6 @@ async fn advance_in_tx(
         Some(prev) => by_session(tx, project_id, &prev.session_id).await?,
         None => None,
     };
-    // 檢查點移走後，舊檢查點上仍 open 的 claim（resume 或 fork）永遠無法再前移；
-    // 同一交易內一併標成 abandoned，避免永久掛著 open。
     sqlx::query(
         "UPDATE lineage_claims SET state = 'abandoned', updated_at = ? \
          WHERE project_id = ? AND line = ? AND state = 'open' AND base_session_id <> ?",
@@ -498,8 +495,6 @@ pub async fn claim(
         .fetch_optional(&mut *tx)
         .await?;
         if let Some(existing) = busy {
-            // 檢查點已經被別的寫入者（fork 前移、或沒帶 claim 的 advance）移走：這筆 resume 認領再也前移不了，
-            // 留著只會讓這條線永遠 busy。當場改 abandoned 再接受新的認領；還在同一顆檢查點上的才算真的佔用。
             if existing.base_session_id == cp.session_id {
                 return Err(LineageError::LineBusy(Box::new(existing)));
             }
@@ -688,15 +683,12 @@ mod tests {
         let pool = pool().await;
         advance(&pool, "p1", "web", "s1", Fields::default()).await.unwrap();
         create(&pool, "p1", "web", "s2", Fields::default()).await.unwrap();
-        // 繞過 advance 直接把第二顆改成 checkpoint：部分唯一索引擋下。
         let err = sqlx::query("UPDATE lineage_sessions SET state='checkpoint' WHERE session_id='s2'").execute(&pool).await.unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
         let err = sqlx::query("INSERT INTO lineage_sessions(id,project_id,line,session_id,state,created_at,updated_at)VALUES('x','p1','web','s3','checkpoint','t','t')").execute(&pool).await.unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
-        // 別條線、別的專案各自有自己的檢查點。
         advance(&pool, "p1", "quota", "s4", Fields::default()).await.unwrap();
         advance(&pool, "p2", "web", "s1", Fields::default()).await.unwrap();
-        // retired／active 不限數量。
         create(&pool, "p1", "web", "s5", Fields::default()).await.unwrap();
         retire(&pool, "p1", "s5").await.unwrap();
         retire(&pool, "p1", "s2").await.unwrap();
@@ -711,7 +703,6 @@ mod tests {
                 .bind(crate::db::ulid()).bind(role).bind(state).execute(&pool).await;
             assert!(r.unwrap_err().to_string().contains("CHECK"), "{role}/{state}");
         }
-        // 血統只給 codex：其他 kind 在 DB 就擋（直接 INSERT、UPDATE、經 create／advance 都一樣）。
         for kind in ["claude", "grok", "agy", "claude-api", ""] {
             let r = sqlx::query("INSERT INTO lineage_sessions(id,project_id,line,kind,session_id,created_at,updated_at)VALUES(?,'p1','web',?,'k','t','t')").bind(crate::db::ulid()).bind(kind).execute(&pool).await;
             assert!(r.unwrap_err().to_string().contains("CHECK"), "kind {kind:?}");
@@ -735,23 +726,18 @@ mod tests {
         assert_eq!((first.session.state.as_str(), first.session.role.as_str(), first.session.kind.as_str()), ("checkpoint", "worker", "codex"));
         assert!(first.retired.is_none() && first.session.parent_session_id.is_none());
 
-        // 進行中的 child 做完 → 前移：舊的退役、新的沿用登記時的 parent，只更新有給的欄位。
         create(&pool, "p1", "web", "s2", Fields { parent_session_id: Some("s1".into()), summary: Some("wip".into()), ..Default::default() }).await.unwrap();
         let second = advance(&pool, "p1", "web", "s2", Fields { head_sha: Some("bbbbbbb".into()), ..Default::default() }).await.unwrap();
         assert_eq!(second.retired.as_ref().map(|r| (r.session_id.as_str(), r.state.as_str())), Some(("s1", "retired")));
         assert_eq!((second.session.state.as_str(), second.session.head_sha.as_deref(), second.session.summary.as_deref(), second.session.parent_session_id.as_deref()), ("checkpoint", Some("bbbbbbb"), Some("wip"), Some("s1")));
 
-        // 沒登記過、也沒給 parent：記前一顆檢查點。
         let third = advance(&pool, "p1", "web", "s3", Fields::default()).await.unwrap();
         assert_eq!(third.session.parent_session_id.as_deref(), Some("s2"));
-        // 給了 parent 就照給的。
         let fourth = advance(&pool, "p1", "web", "s4", Fields { parent_session_id: Some("s1".into()), ..Default::default() }).await.unwrap();
         assert_eq!(fourth.session.parent_session_id.as_deref(), Some("s1"));
 
-        // 冪等：同一顆再前移一次，不退役任何東西。
         let again = advance(&pool, "p1", "web", "s4", Fields::default()).await.unwrap();
         assert!(again.retired.is_none());
-        // 退回舊檢查點：已退役的可以再前移。
         let back = advance(&pool, "p1", "web", "s2", Fields::default()).await.unwrap();
         assert_eq!(back.retired.as_ref().map(|r| r.session_id.as_str()), Some("s4"));
         assert_eq!(states(&pool, "p1", "web").await, vec![pair("s1", "retired"), pair("s2", "checkpoint"), pair("s3", "retired"), pair("s4", "retired")]);
@@ -774,7 +760,6 @@ mod tests {
         let pool = pool().await;
         create(&pool, "p1", "web", "s1", Fields { role: Some("thinker".into()), context_tokens: Some(1200), ..Default::default() }).await.unwrap();
         assert!(matches!(create(&pool, "p1", "quota", "s1", Fields::default()).await, Err(LineageError::Exists(_))));
-        // 別的專案的同名 session 是另一列；p2 退役不到 p1 的。
         create(&pool, "p2", "web", "s1", Fields::default()).await.unwrap();
         assert!(matches!(retire(&pool, "p2", "nope").await, Err(LineageError::NotFound)));
         let r = retire(&pool, "p2", "s1").await.unwrap();
@@ -802,7 +787,6 @@ mod tests {
         assert_eq!((c1.claim.holder_bot_id.as_deref(), c1.claim.backup_session_id.as_deref(), c1.claim.base_head_sha.as_deref()), (Some("bot-1"), Some("b1"), Some("aaaaaaa")));
         assert_eq!(c1.checkpoint.session_id, "s1");
 
-        // 第二筆 open resume 認領被拒，且 DB 部分唯一索引也擋。
         let busy = claim(&pool, "p1", "web", "resume", Some("bot-2"), Some("b2"), None).await.unwrap_err();
         assert!(matches!(busy, LineageError::LineBusy(ref existing) if existing.id == c1.claim.id), "{busy:?}");
         let sql_err = sqlx::query(
@@ -813,7 +797,6 @@ mod tests {
         .unwrap_err();
         assert!(sql_err.to_string().contains("UNIQUE"), "{sql_err}");
 
-        // fork 認領可多筆並存，不受 open resume 影響；別條線、別的專案各自獨立。
         let f1 = claim(&pool, "p1", "web", "fork", None, None, Some("w1")).await.unwrap();
         let f2 = claim(&pool, "p1", "web", "fork", Some("bot-2"), None, Some("w2")).await.unwrap();
         assert_ne!(f1.claim.id, f2.claim.id);
@@ -822,7 +805,6 @@ mod tests {
         advance(&pool, "p2", "web", "s1", Fields::default()).await.unwrap();
         claim(&pool, "p2", "web", "resume", None, None, None).await.unwrap();
 
-        // abandon 後可再認領 resume，且檢查點不動。
         let ab = abandon(&pool, "p1", &c1.claim.id).await.unwrap();
         assert_eq!(ab.state, "abandoned");
         assert_eq!(checkpoint(&pool, "p1", "web").await.unwrap().unwrap().session_id, "s1");
@@ -838,34 +820,28 @@ mod tests {
         let c_f1 = claim(&pool, "p1", "web", "fork", None, None, Some("w1")).await.unwrap();
         let c_f2 = claim(&pool, "p1", "web", "fork", None, None, Some("w2")).await.unwrap();
 
-        // 跨線、跨專案拒絕。
         assert!(matches!(advance_with_claim(&pool, "p1", "quota", &c_res.claim.id, None, Fields::default()).await, Err(LineageError::ClaimLineMismatch { .. })));
         assert!(matches!(advance_with_claim(&pool, "p2", "web", &c_res.claim.id, None, Fields::default()).await, Err(LineageError::ClaimNotFound)));
         assert!(matches!(abandon(&pool, "p2", &c_res.claim.id).await, Err(LineageError::ClaimNotFound)));
 
-        // resume 模式前移 base session 本身（冪等更新），claim 變 advanced。
         let adv_res = advance_with_claim(&pool, "p1", "web", &c_res.claim.id, None, Fields { head_sha: Some("bbbbbbb".into()), summary: Some("resumed".into()), ..Default::default() }).await.unwrap();
         assert_eq!((adv_res.session.session_id.as_str(), adv_res.session.head_sha.as_deref()), ("s1", Some("bbbbbbb")));
         assert!(adv_res.retired.is_none());
         assert_eq!(adv_res.claim.as_ref().unwrap().state, "advanced");
 
-        // claim 關閉後不能再前移也不能 abandon。
         assert!(matches!(advance_with_claim(&pool, "p1", "web", &c_res.claim.id, None, Fields::default()).await, Err(LineageError::ClaimClosed(_))));
         assert!(matches!(abandon(&pool, "p1", &c_res.claim.id).await, Err(LineageError::ClaimClosed(_))));
 
-        // fork 模式前移 work_session_id：s1 退役、w1 成新檢查點。
         let adv_f1 = advance_with_claim(&pool, "p1", "web", &c_f1.claim.id, None, Fields { head_sha: Some("ccccccc".into()), ..Default::default() }).await.unwrap();
         assert_eq!(adv_f1.session.session_id, "w1");
         assert_eq!(adv_f1.retired.as_ref().map(|r| r.session_id.as_str()), Some("s1"));
         assert_eq!(adv_f1.claim.as_ref().unwrap().state, "advanced");
 
-        // 過期的 fork claim（base=s1，但檢查點已經移到 w1）：前移時已自動標為 abandoned，再前移被拒（ClaimClosed）且什麼都沒改。
         let stale = advance_with_claim(&pool, "p1", "web", &c_f2.claim.id, None, Fields::default()).await.unwrap_err();
         assert!(matches!(stale, LineageError::ClaimClosed(ref c) if c.state == "abandoned"), "{stale:?}");
         assert_eq!(checkpoint(&pool, "p1", "web").await.unwrap().unwrap().session_id, "w1");
         assert!(by_session(&mut *pool.acquire().await.unwrap(), "p1", "w2").await.unwrap().is_none());
 
-        // abandon 後不能再前移；重複 abandon 冪等。
         let ab = abandon(&pool, "p1", &c_f2.claim.id).await.unwrap();
         assert_eq!(ab.state, "abandoned");
         assert_eq!(abandon(&pool, "p1", &c_f2.claim.id).await.unwrap().state, "abandoned");
@@ -884,7 +860,6 @@ mod tests {
         let updated = set_claim_work_session(&pool, "p1", &c_fork.claim.id, "w-new").await.unwrap();
         assert_eq!(updated.work_session_id.as_deref(), Some("w-new"));
 
-        // line 為空字串時由 claim.line 推得。
         let adv = advance_with_claim(&pool, "p1", "", &c_fork.claim.id, None, Fields { head_sha: Some("1234567".into()), ..Default::default() }).await.unwrap();
         assert_eq!(adv.session.session_id, "w-new");
         assert_eq!(adv.session.line, "web");

@@ -11,7 +11,6 @@
             "ssh://git@github.com/Eden-Sun/powertech-hub",
             "ssh://git@github.com/Eden-Sun/powertech-hub.git\n",
             "git://github.com/Eden-Sun/powertech-hub.git",
-            // A port after the host is not the scp-style `:owner/repo` separator.
             "ssh://git@github.com:22/Eden-Sun/powertech-hub.git",
             "https://github.com:443/Eden-Sun/powertech-hub",
         ] {

@@ -6,9 +6,7 @@ use std::time::Duration;
 fn hook_user_dedups_against_the_scraped_echo() {
     let echo = vec!["Reply with exactly MERGED-OK".to_string()];
     assert!(!hook_user_is_new(&echo, "Reply with exactly MERGED-OK"));
-    // The pane wrapped the echo across two columns; the hook sends one line.
     assert!(!hook_user_is_new(&vec!["Reply with\n  exactly MERGED-OK".into()], "Reply with exactly MERGED-OK"));
-    // The pane clipped the echo at the column width.
     assert!(!hook_user_is_new(&vec!["Reply with exactly MER".into()], "Reply with exactly MERGED-OK"));
 }
 
@@ -21,7 +19,6 @@ fn hook_prompt_identity_keeps_word_boundaries_and_rejects_weak_overlap() {
     assert!(hook_user_is_new(&[separated.into()], joined));
     assert!(hook_user_is_new(&[joined.into()], separated));
 
-    // A short common prefix is not enough evidence to assign a hook to a prompt.
     assert!(answers_another_prompt(Some("echo a much longer instruction"), Some("echo a")));
     assert!(hook_user_is_new(&["echo a much longer instruction".into()], "echo a"));
 }
@@ -36,7 +33,6 @@ fn hook_prompt_identity_accepts_wrapping_and_repeated_whitespace() {
         &["Reply with\n  exactly   MERGED-OK".into()],
         "Reply with exactly MERGED-OK"
     ));
-    // The existing clipped echo remains attributable when enough prompt text survived.
     assert!(!answers_another_prompt(
         Some("Reply with exactly MERGED-OK"),
         Some("Reply with exactly MER")
@@ -66,7 +62,6 @@ fn the_transcript_user_text_drops_the_cli_pasted_content_wrapper() {
 fn hook_user_is_stored_when_it_is_not_the_echo() {
     assert!(hook_user_is_new(&[], "Reply with exactly MERGED-OK"));
     assert!(hook_user_is_new(&vec!["echo 1".into()], "echo 2"));
-    // Nothing to store.
     assert!(!hook_user_is_new(&[], "   "));
 }
 
@@ -175,7 +170,6 @@ async fn a_late_hook_with_evidence_replaces_the_fallback_reply_in_place() {
     assert_eq!(n, 1, "不會變成兩則");
     assert_eq!(turn().await.status, "completed");
 
-    // 已經是 hook 寫的（回合也不再是 completed_fallback）：再來一份不動。
     fill_or_drop_late_hook(&app, &turn().await, "又一份", &Some("s1".into()), &Some("n1".into()), true, None).await.unwrap();
     let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
     assert_eq!(content, "第一段\n\n最後一段");
@@ -232,7 +226,6 @@ async fn a_late_hook_never_overwrites_the_dedup_key_of_a_turn_already_closed() {
     let app = env.app.clone();
     let (_conv, turn_id) = late_hook_fixture(&env, "late-keys", "completed_fallback").await;
     let stale = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
-    // 快照之後，另一則 hook 把它收成 completed、蓋上自己的鑰匙。
     sqlx::query("UPDATE turns SET status='completed', native_session_id='s0', native_turn_id='n0' WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
 
     fill_or_drop_late_hook(&app, &stale, "晚到的另一則", &Some("s1".into()), &Some("n1".into()), true, None).await.unwrap();
@@ -271,27 +264,23 @@ async fn a_late_hook_records_its_inbox_event_id_wherever_it_records_its_native_i
         async move { sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
     };
 
-    // 補空回覆（回合沒有任何 assistant 訊息）。
     let (_conv, fill) = late_hook_fixture(&env, "late-event-fill", "completed_fallback").await;
     fill_or_drop_late_hook(&app, &turn_of(fill.clone()).await, "遲到的回覆", &Some("s1".into()), &Some("n1".into()), true, Some("ev-fill")).await.unwrap();
     assert_eq!(native_ids(&app, &fill).await, (Some("s1".into()), Some("n1".into())));
     assert_eq!(source_event_of(&app, &fill).await.as_deref(), Some("ev-fill"), "補空回覆那條也記事件 id");
 
-    // 蓋掉備援回覆（有證據、回覆全是備援抓的）。
     let (conv, replace) = late_hook_fixture(&env, "late-event-replace", "completed_fallback").await;
     lifecycle::insert_message(&app, &conv, Some(&replace), "assistant", "備援抓的回覆", "terminal_fallback", true, None).await.unwrap();
     fill_or_drop_late_hook(&app, &turn_of(replace.clone()).await, "hook 原文", &Some("s2".into()), &Some("n2".into()), true, Some("ev-replace")).await.unwrap();
     assert_eq!(native_ids(&app, &replace).await, (Some("s2".into()), Some("n2".into())));
     assert_eq!(source_event_of(&app, &replace).await.as_deref(), Some("ev-replace"), "蓋掉備援回覆那條也記事件 id");
 
-    // 有證據，但回覆已經是 hook 寫的：丟掉這一份，鑰匙照記。
     let (conv, kept) = late_hook_fixture(&env, "late-event-kept", "completed_fallback").await;
     lifecycle::insert_message(&app, &conv, Some(&kept), "assistant", "hook 先到的回覆", "hook", false, None).await.unwrap();
     fill_or_drop_late_hook(&app, &turn_of(kept.clone()).await, "又一份", &Some("s3".into()), &Some("n3".into()), true, Some("ev-kept")).await.unwrap();
     assert_eq!(native_ids(&app, &kept).await, (Some("s3".into()), Some("n3".into())));
     assert_eq!(source_event_of(&app, &kept).await.as_deref(), Some("ev-kept"), "已有 hook 回覆而丟掉的那條也記事件 id");
 
-    // 沒有證據（可能屬於別的回合）而丟掉：什麼鑰匙都不留。
     let (conv, foreign) = late_hook_fixture(&env, "late-event-foreign", "completed_fallback").await;
     lifecycle::insert_message(&app, &conv, Some(&foreign), "assistant", "備援抓的回覆", "terminal_fallback", true, None).await.unwrap();
     fill_or_drop_late_hook(&app, &turn_of(foreign.clone()).await, "別回合的回覆", &Some("s4".into()), &Some("n4".into()), false, Some("ev-foreign")).await.unwrap();
@@ -354,7 +343,6 @@ async fn a_late_hook_fills_a_fallback_turn_that_has_no_reply() {
             .unwrap();
     assert_eq!(replies, vec!["側欄那組徽章已收齊，cdcf165 已推".to_string()]);
 
-    // 已有回覆的照舊丟，防一回合兩則。
     let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
         .bind(&turn_id)
         .fetch_one(&app.db)
@@ -568,7 +556,6 @@ async fn a_clipped_scraped_prompt_is_upgraded_to_the_hooks_full_text() {
     assert_eq!(rows[0].0, full);
     assert_eq!(rows[0].1, "hook");
 
-    // 不是前綴的就別動：那是另一句話。
     let none = upgrade_clipped_user_message(&mut app.db.acquire().await.unwrap(), &turn_id, "完全不同的一句").await.unwrap();
     assert!(none.is_none(), "不是前綴就不補");
     let after: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user'")
@@ -800,7 +787,6 @@ async fn an_inbox_row_replayed_after_the_external_turn_committed_opens_no_second
     assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
     let row = crate::hook_inbox::pending(&app.db, &db::now(), 10).await.unwrap().remove(0);
 
-    // 第一輪：回合與訊息已 commit，但 worker 還沒標 processed_at 就「重啟」了。
     process_for(&app, &body, Some(&row.id)).await.unwrap();
     assert_eq!(turn_count(&app, &conv).await, 1);
     assert_eq!(hook_message_count(&app, &conv).await, 1);
@@ -809,7 +795,6 @@ async fn an_inbox_row_replayed_after_the_external_turn_committed_opens_no_second
     let unprocessed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&row.id).fetch_one(&app.db).await.unwrap();
     assert!(unprocessed.is_none(), "還沒標處理完：模擬重啟在 commit 與 mark_done 之間");
 
-    // 重啟後 worker 把這列再處理一次。
     let mut events = app.subscribe();
     assert_eq!(crate::runners::hook_inbox::drain_once(&app).await.unwrap(), 1);
 
@@ -817,7 +802,6 @@ async fn an_inbox_row_replayed_after_the_external_turn_committed_opens_no_second
     assert_eq!(hook_message_count(&app, &conv).await, 1, "沒有第二則訊息");
     let done: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&row.id).fetch_one(&app.db).await.unwrap();
     assert!(done.is_some(), "重播後這列標成處理完");
-    // commit 後才發的通知補發了一次（前端靠訊息 id 去重）。
     let mut kinds = Vec::new();
     while let Ok(ev) = events.try_recv() {
         kinds.push(ev.kind);
@@ -903,7 +887,6 @@ async fn a_remote_stop_that_carries_the_users_text_replaces_the_fallback_reply()
             "hook_event_name": "Stop",
             "session_id": sid,
             "prompt_id": db::ulid(),
-            // mac_builder 的路徑：agm-host 讀不到。
             "transcript_path": "/Users/me/.claude/projects/x/s.jsonl",
             "last_assistant_message": "已經交給 memleak 排查，先看這幾點",
         });
@@ -916,20 +899,16 @@ async fn a_remote_stop_that_carries_the_users_text_replaces_the_fallback_reply()
         sqlx::query_as::<_, (String, String)>("SELECT content, source FROM messages WHERE id=?").bind(&fb).fetch_one(&app.db).await.unwrap()
     };
 
-    // 沒帶證據（舊版 hook.sh、沒有 python3）：照舊不蓋。
     process(&app, &stop("s1", None)).await.unwrap();
     assert_eq!(reply().await.1, "terminal_fallback", "沒有證據不蓋");
     assert_eq!(turn_row(&app, &turn_id).await.status, "completed_fallback");
 
-    // 每個事件各自對上同一筆備援回合：清掉前一則記下的 native id（它是「這一回合已有 hook 來過」的去重鑰匙）。
     let forget_native = || async { sqlx::query("UPDATE turns SET native_session_id=NULL, native_turn_id=NULL WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap() };
     forget_native().await;
-    // 帶的是別句：答案不是這一回合的，不蓋。
     process(&app, &stop("s2", Some("完全不同的另一句話"))).await.unwrap();
     assert_eq!(reply().await.1, "terminal_fallback", "別句不蓋");
 
     forget_native().await;
-    // 帶的就是這一回合的 prompt：蓋成 hook 原文。
     process(&app, &stop("s3", Some("現在部 demo"))).await.unwrap();
     assert_eq!(reply().await, ("已經交給 memleak 排查，先看這幾點".to_string(), "hook".to_string()));
     assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
@@ -1040,7 +1019,6 @@ async fn a_fifo_hook_transcript_does_not_block_stop_processing() {
     let mut task = tokio::spawn(async move { process(&app_for_task, &body).await });
     let quickly_finished = tokio::time::timeout(Duration::from_secs(3), &mut task).await;
     if quickly_finished.is_err() {
-        // Release a buggy blocking open before asserting, so the red test never leaks a thread.
         let fifo = path.clone();
         std::thread::spawn(move || drop(std::fs::OpenOptions::new().write(true).open(fifo).unwrap())).join().unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(3), &mut task).await;
@@ -1131,7 +1109,6 @@ async fn a_run_started_before_a_repoint_cannot_touch_the_repointed_host() {
     .unwrap();
     let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
 
-    // 起在 A 上的 run：啟動當下記下 A 的目標指紋（start 會這樣寫，這裡直接種）。
     let gen_a = app.hosts.fence(&host).await.unwrap().target_epoch().unwrap();
     let run = db::ulid();
     sqlx::query(
@@ -1160,7 +1137,6 @@ async fn a_run_started_before_a_repoint_cannot_touch_the_repointed_host() {
     .unwrap();
     assert_eq!(db::run_host_generation(&app.db, &run).await.unwrap(), Some(gen_a));
 
-    // 同名主機改指到 B：世代換了。
     app.hosts
         .replace_remote_with_client_for_test(&app, host_cfg("target-b"), crate::herdr::HerdrClient::new(env.dir.join("b.sock")))
         .await;
@@ -1250,7 +1226,6 @@ async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
     .unwrap();
     let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
 
-    // run 啟動時記下的是目標指紋（start 會這樣寫）。
     let epoch = app.hosts.fence(&host).await.unwrap().target_epoch().unwrap();
     let run = db::ulid();
     sqlx::query(
@@ -1266,7 +1241,6 @@ async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
     .await
     .unwrap();
 
-    // 1. 只改 remote_path：連線換了一條（世代變了），機器沒變。
     app.hosts
         .replace_remote_with_client_for_test(&app, host_cfg("/opt/bin"), crate::herdr::HerdrClient::new(env.dir.join("b.sock")))
         .await;
@@ -1275,7 +1249,6 @@ async fn a_same_machine_reconfigure_or_reconnect_keeps_the_run_hooks() {
     process(&app, &stop_hook(&bot_id, "s-mac_builder", "p-1", "第一則的回覆")).await.unwrap();
     assert_hook_completed(&app.db, &first, "第一則的回覆").await;
 
-    // 2. 重連：同一條設定，世代再加一。
     app.hosts.bump_generation_for_test(&host).await;
     let second = db::ulid();
     insert_in_flight_turn(&app.db, &second, &conv, &run, "第二句").await;
@@ -1302,7 +1275,6 @@ async fn a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn() {
     .unwrap();
     let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
 
-    // 上一代：跑在 `s-old` 上，使用者 interrupt 之後收掉（回合標 failed），run 結束。
     let old_run = db::ulid();
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
@@ -1329,9 +1301,6 @@ async fn a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn() {
     .await
     .unwrap();
 
-    // 這一代：重啟起來的新 run，已經開了新回合，還在跑。世代圍籬（`lifecycle::fence`）認的是
-    // **寫入順序**（rowid），不是這裡的 ULID 字典序（issue #98：兩者不保證一致，這行以前斷言
-    // `new_run > old_run` 會在同一毫秒巧合下偶爾紅——跟這支測試實際要驗的東西無關，拿掉）。
     let new_run = db::ulid();
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at)
@@ -1357,7 +1326,6 @@ async fn a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn() {
     .unwrap();
 
     let mut events = app.subscribe();
-    // 舊 session 的 Stop 現在才抵達。
     process(
         &app,
         &HookBody {
@@ -1385,13 +1353,11 @@ async fn a_late_stop_from_the_previous_run_cannot_touch_the_new_runs_turn() {
         sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&new_run).fetch_one(&app.db).await.unwrap();
     assert_eq!(run_session, None, "新 run 的 session 不能被舊事件寫進去");
 
-    // 丟掉一則事件要看得見，不是只活在函式裡。
     let ev = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap().unwrap();
     assert_eq!(ev.kind, "hook_fenced");
     assert_eq!(ev.data["prior_run_id"], serde_json::json!(old_run));
     assert_eq!(ev.data["session_id"], "s-old");
 
-    // 重播同一則：還是什麼都不改（idempotent）。
     process(
         &app,
         &HookBody {
@@ -1417,7 +1383,6 @@ async fn a_late_hook_from_this_same_run_still_fills_its_fallback_turn() {
     let env = tt::env().await;
     let app = env.app.clone();
     let (bot_id, _conv, turn_id) = fallback_closed_turn(&app, &env.project_id, "跑一次測試").await;
-    // 這個 run 已經回報過自己的 session：hook 帶同一個，就是這一代自己的。
     sqlx::query("UPDATE runs SET native_session_id='s-live' WHERE bot_id=?")
         .bind(&bot_id)
         .execute(&app.db)
@@ -1447,7 +1412,6 @@ async fn a_late_hook_from_the_process_before_a_resume_cannot_touch_the_resumed_r
     let app = env.app.clone();
     let bot = tt::claude_bot(&app, &env.project_id, "resumed").await;
     let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-    // 身份 A 的那一代：session `s-same`，撞額度之後被換身份重啟收掉。
     let old_run = db::ulid();
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at, ended_at)
@@ -1460,8 +1424,6 @@ async fn a_late_hook_from_the_process_before_a_resume_cannot_touch_the_resumed_r
     .execute(&app.db)
     .await
     .unwrap();
-    // 身份 B 的這一代：`--resume s-same` 起來、SessionStart 已經對上（`native_session_id` 同一個），
-    // 並且已經送出一則新的回合。
     let new_run = db::ulid();
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, native_session_id, started_at)
@@ -1518,7 +1480,6 @@ async fn a_late_hook_from_the_process_before_a_resume_cannot_touch_the_resumed_r
         .unwrap();
     assert_eq!(replies, 0, "舊行程的回覆不能貼進來，也不能變成一筆外部回合");
 
-    // 對照：同一個 session、這一代自己的行程送的——照常收（證明擋下前兩則的是 run id，不是別的條件）。
     let own = json!({"hook_event_name": "StopFailure", "session_id": "s-same", "prompt_id": "p-b",
                      "reason": "You've hit your usage limit · resets 5pm"});
     process(&app, &from(&new_run, own)).await.unwrap();
@@ -1620,13 +1581,11 @@ async fn a_late_hook_reply_reaches_the_assignment_it_answers() {
     store::get_or_init(&app.db).await.unwrap();
     let a = store::insert_assignment(&app.db, None, &bot_id, "crid-late", "跑一次測試", &[], None, true).await.unwrap();
     store::mark_delivered(&app.db, &a.id, &turn_id, "ok").await.unwrap();
-    // controller 在備援收掉回合時的結算：沒有回覆、證據不完整。
     store::settle_and_notify(&app.db, &a.id, "completed_fallback", false, None, None, "k-fallback", "assignment_completed", &json!({}))
         .await
         .unwrap();
 
     process(&app, &codex_done(&bot_id, "跑一次測試")).await.unwrap();
-    // 補寫會推 turn_updated（completed）；controller 的事件迴圈收到後呼叫這一支。
     controller::late_reply_for_turn(&app, &turn_id, "completed").await;
 
     let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
@@ -1645,7 +1604,6 @@ async fn a_late_hook_reply_reaches_the_assignment_it_answers() {
     assert_eq!(events[0].0, "assignment_completed");
     assert_eq!((p["result"].as_str(), p["late_reply"].as_bool(), p["needs_review"].as_bool()), (Some("hook reply"), Some(true), Some(true)));
 
-    // 同一個事件再來一次（重播、reconcile）：不再推第二則。
     controller::late_reply_for_turn(&app, &turn_id, "completed").await;
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE assignment_id=?").bind(&a.id).fetch_one(&app.db).await.unwrap();
     assert_eq!(n, 2, "結算那則＋結果到了那則");
@@ -1660,7 +1618,6 @@ async fn delivered_turn(app: &Arc<App>, project_id: &str) -> (String, String, St
     )
     .bind(&bot_id)
     .bind(project_id)
-    // ULID 的前段是時間戳：同一毫秒建的兩顆 bot 前六碼一樣，撞 `bots.project_id, bots.name`。取尾段。
     .bind(format!("hook-{}", &bot_id[bot_id.len() - 8..]))
     .bind(db::now())
     .execute(&app.db)
@@ -1746,7 +1703,6 @@ async fn a_user_interrupt_is_never_recorded_as_a_provider_failure() {
     let env = tt::env().await;
     let app = env.app.clone();
 
-    // (a) payload 自己說是中斷。
     let (bot_a, _c, turn_a) = delivered_turn(&app, &env.project_id).await;
     process(
         &app,
@@ -1762,7 +1718,6 @@ async fn a_user_interrupt_is_never_recorded_as_a_provider_failure() {
     assert_eq!(t.status, "in_flight", "使用者中斷不由這條路收尾");
     assert!(system_notes(&app, &turn_a).await.is_empty(), "也不寫「失敗」的說明");
 
-    // (b) payload 說不出原因，但 daemon 記得使用者剛按停的就是這一筆（`fail_in_flight` 還沒收掉它）。
     let (bot_b, _c, turn_b) = delivered_turn(&app, &env.project_id).await;
     let run_b = turn_row(&app, &turn_b).await.run_id.unwrap();
     lifecycle::expect_interrupt_echo(
@@ -1789,7 +1744,6 @@ async fn a_late_or_replayed_stop_failure_does_not_close_a_turn_twice() {
     let env = tt::env().await;
     let app = env.app.clone();
     let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
-    // Stop 先到，回合已經答完。
     sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
         .bind(db::now())
         .bind(&turn_id)
@@ -1807,7 +1761,6 @@ async fn a_late_or_replayed_stop_failure_does_not_close_a_turn_twice() {
     assert_eq!(t.status, "completed", "已經收好的不再被改成 failed");
     assert!(system_notes(&app, &turn_id).await.is_empty(), "也不補一則失敗說明");
 
-    // 同一則重播（spool 重送）：照樣什麼都不動。
     process(&app, &ev).await.unwrap();
     assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
     assert!(system_notes(&app, &turn_id).await.is_empty());
@@ -1830,7 +1783,6 @@ async fn another_bots_hook_cannot_pre_claim_my_session_and_turn_ids() {
     process(&app, &stop(&victim, "我才是被問的那顆")).await.unwrap();
     assert_eq!(turn_row(&app, &victim_turn).await.status, "completed", "別顆 bot 先用過同一組 id，不能讓我的完成事件被當成重複");
 
-    // 失敗事件同一道理。
     let (attacker2, _, _) = delivered_turn(&app, &env.project_id).await;
     let (victim2, _, victim2_turn) = delivered_turn(&app, &env.project_id).await;
     let fail = |bot: &str| stop_failure(bot, json!({"hook_event_name": "StopFailure", "session_id": "s-f", "prompt_id": "p-f", "reason": "API Error: 500"}));
@@ -1846,7 +1798,6 @@ async fn an_external_turn_survives_native_ids_another_bot_already_used() {
     let app = env.app.clone();
     let (attacker, _, attacker_turn) = delivered_turn(&app, &env.project_id).await;
     let (victim, victim_conv, victim_turn) = delivered_turn(&app, &env.project_id).await;
-    // 受害者那顆沒有 in-flight 的回合（使用者在終端手打的）。
     sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&victim_turn).execute(&app.db).await.unwrap();
     let stop = |bot: &str| stop_failure(bot, json!({"hook_event_name": "Stop", "session_id": "s-ext", "prompt_id": "p-ext", "last_assistant_message": "終端那句的回答"}));
     process(&app, &stop(&attacker)).await.unwrap();
@@ -1888,7 +1839,6 @@ async fn statusline_hooks_queued_behind_a_busy_bot_lock_are_coalesced() {
     let spawned = statusline_tasks_spawned() - spawned_before;
     assert!(spawned <= 2, "50 則 StatusLine 排在忙碌的 bot 鎖後面，背景 task 只該有 1～2 個，不是 {spawned}");
     drop(held);
-    // 放鎖之後最後一則（最新的）贏。
     assert!(
         crate::testing::eventually!(db::run(&app.db, &run_id).await.unwrap().unwrap().runtime_model.as_deref() == Some("claude-model-49")),
         "最新的那一則要生效"
@@ -1917,9 +1867,7 @@ async fn payloads_of_the_wrong_shape_are_handled_without_panicking() {
         let ev = stop_failure(&bot_id, payload.clone());
         process(&app, &ev).await.unwrap_or_else(|e| panic!("{payload}: {e:#}"));
     }
-    // 這一串怪事件沒有誤收掉那顆還在跑的回合。
     assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight");
-    // Stop 的欄位型別全錯：照樣只是「這一回合結束了」，不 panic、也沒有把垃圾當成回覆。
     let weird_stop = stop_failure(
         &bot_id,
         json!({"hook_event_name": "Stop", "session_id": 7, "prompt_id": ["x"], "last_assistant_message": {"not": "text"}}),
@@ -2104,7 +2052,6 @@ async fn a_quota_stop_failure_whose_host_cannot_be_read_fails_and_holds_the_queu
     let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
     let owed_at = crate::runners::quota::limit_hit_for_bot(&app, &bot).await.expect("派送前照欠著的那一筆擋").at;
     assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "回合不收、不推回合結束");
-    // 回合被別的路收掉（卡住的回合被看門狗收了）：沒有在飛的回合擋著，排著的照欠著的那一筆擋。
     let run: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
     sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?").bind(db::now()).bind(&turn_id).execute(&app.db).await.unwrap();
     sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
@@ -2114,7 +2061,6 @@ async fn a_quota_stop_failure_whose_host_cannot_be_read_fails_and_holds_the_queu
     assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進用盡的身份");
     sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
-    // 收件匣重試：讀得到了。
     process(&app, &ev).await.expect("重試");
     assert_eq!(limit_hits().await, vec!["remote1/claude".to_string()], "記在遠端那一格");
     assert_eq!(app.quotas.lock().await["remote1/claude"].limit_hit.as_ref().map(|h| h.at.clone()), Some(owed_at), "撞限時刻是當初那一刻，不是重試的時刻");
@@ -2178,7 +2124,6 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     let app = env.app.clone();
     const LIMIT: &str = "You've hit your session limit · resets 5pm";
 
-    // (a) Esc 已經把回合收掉（`fail_in_flight`），晚到的撞額度對不上被中斷的那一則：沒有 in-flight 回合可掛。
     let (bot_a, conv_a, turn_a) = delivered_turn(&app, &env.project_id).await;
     let run_a = turn_row(&app, &turn_a).await.run_id.unwrap();
     lifecycle::expect_interrupt_echo(
@@ -2194,7 +2139,6 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "沒有回合可掛，撞限照樣記下");
     let after = turn_row(&app, &turn_a).await;
     assert_eq!((after.status, after.completed_at), (closed.status, closed.completed_at), "已經收掉的回合不改");
-    // 下一件派工：排在佇列的那一則不會被送進 A。
     let queued = db::ulid();
     sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run_a).execute(&app.db).await.unwrap();
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','下一件派工',?)")
@@ -2210,7 +2154,6 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     assert_eq!((q.status.as_str(), q.flush_retries, q.run_id.as_deref()), ("queued", 0, None), "派工沒有送進沒額度的 A");
     lifecycle::forget_queue_retry_timer(&bot_a);
 
-    // (b) 就是被中斷那一則的回聲（同一個 prompt id）：回合照舊一個欄位都不動，撞限一樣記。
     let (bot_b, _c, turn_b) = delivered_turn(&app, &env.project_id).await;
     let run_b = turn_row(&app, &turn_b).await.run_id.unwrap();
     lifecycle::expect_interrupt_echo(
@@ -2224,7 +2167,6 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     let bot = db::bot(&app.db, &bot_b).await.unwrap().unwrap();
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "回聲裡的撞額度也是真的");
 
-    // (c) 沒有 run：說不準是哪個身份送的（停機後可能換過身份），不記。
     let (bot_c, _c, turn_c) = delivered_turn(&app, &env.project_id).await;
     let run_c = turn_row(&app, &turn_c).await.run_id.unwrap();
     sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run_c).execute(&app.db).await.unwrap();
@@ -2235,7 +2177,6 @@ async fn a_quota_stop_failure_after_an_esc_still_records_the_limit() {
     let bot = db::bot(&app.db, &bot_c).await.unwrap().unwrap();
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "沒有 run 的不記到現在的身份上");
 
-    // (d) 已經收過的同一則重播：不再記一次（不把撞限時刻往後推）。
     let (bot_d, _c, turn_d) = delivered_turn(&app, &env.project_id).await;
     let ev = stop_failure(&bot_d, json!({"hook_event_name": "StopFailure", "session_id": "sd", "prompt_id": "p-d", "reason": LIMIT}));
     process(&app, &ev).await.unwrap();
@@ -2253,7 +2194,6 @@ fn the_failure_classifier_keeps_rate_limit_auth_and_interrupts_apart() {
     use FailureReason::*;
     assert_eq!(classify_failure(Some("API Error: 429 rate_limit_error")), RateLimit);
     assert_eq!(classify_failure(Some("You've hit your usage limit")), RateLimit);
-    // claude 真正的撞額度橫幅沒有 rate／usage 字樣（issue #108）：以前被分成「API 錯誤」。
     assert_eq!(classify_failure(Some("You've hit your session limit · resets 5pm")), RateLimit);
     assert_eq!(classify_failure(Some("API Error: You've hit your weekly limit")), RateLimit);
     assert_eq!(classify_failure(Some("overloaded_error")), RateLimit);
@@ -2283,7 +2223,6 @@ fn a_generic_word_that_merely_contains_esc_is_not_a_user_interrupt() {
         RateLimit,
         "「description」含 esc，不該蓋掉後面真正的 rate limit 分類"
     );
-    // 真的是 Esc 觸發的中斷（獨立一個字，前後被非英數字元包住）照樣要抓到。
     assert_eq!(classify_failure(Some("Cancelled (Esc)")), Interrupted);
     assert_eq!(classify_failure(Some("esc")), Interrupted);
 }
@@ -2378,7 +2317,6 @@ async fn subagent_events_update_the_runs_snapshot_without_touching_any_turn() {
     assert_eq!(snap["event"], json!("stop"), "後到的 stop 蓋掉 start，只留最新的快照");
     assert_eq!(snap["transcript_path"], json!("/tmp/a1.jsonl"));
 
-    // 完全脫鉤：這顆 run 底下的 turn 沒有被碰過。
     let t = turn_row(&app, &turn_id).await;
     assert_eq!(t.status, "in_flight", "subagent 事件不該動到任何 turn");
 }
@@ -2387,7 +2325,6 @@ async fn subagent_events_update_the_runs_snapshot_without_touching_any_turn() {
 /// 支援解析子 agent 壓縮事件所帶的 `agent_id` 與 `agent_type`，無欄位時相容主 session。
 #[test]
 fn pre_compact_classifies_as_a_pure_compacting_marker() {
-    // 主 session 壓縮：無 agent_id / agent_type
     assert!(matches!(
         classify("claude", &json!({"hook_event_name": "PreCompact", "trigger": "auto"})),
         HookKind::CompactStarting { agent_id: None, agent_type: None }
@@ -2401,7 +2338,6 @@ fn pre_compact_classifies_as_a_pure_compacting_marker() {
         HookKind::Identity { session_id: Some(ref s), agent_id: None, agent_type: None, .. } if s == "s-main"
     ));
 
-    // 子 agent 壓縮：帶有 agent_id 與 agent_type（issue #2107）
     let sub_pre = json!({
         "hook_event_name": "PreCompact",
         "agent_id": "subagent-xyz",
@@ -2456,7 +2392,6 @@ async fn pre_compact_marks_the_run_until_the_compaction_session_or_the_turn_ends
     let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
     let marked = |now| am_base::compacting::json_at(&run_id, now) != Value::Null;
 
-    // 子 agent 壓縮開始不標記母 bot
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "agent_id": "sub-1", "agent_type": "general-purpose"}))).await.unwrap();
     assert!(!marked(chrono::Utc::now()), "子 agent 的 PreCompact 不標記母 bot 為壓縮中");
 
@@ -2464,17 +2399,14 @@ async fn pre_compact_marks_the_run_until_the_compaction_session_or_the_turn_ends
     assert!(marked(chrono::Utc::now()), "主 session 的 PreCompact 標成壓縮中");
     assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight", "PreCompact 不收、不開 turn");
 
-    // 子 agent 壓縮後的 SessionStart 不影響母 bot 的 session 與 compact 狀態
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-sub", "agent_id": "sub-1", "agent_type": "general-purpose"}))).await.unwrap();
     assert!(marked(chrono::Utc::now()), "子 agent 的 SessionStart 不收母 bot 標記");
     let native_sid: Option<String> = sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id = ?").bind(&run_id).fetch_one(&app.db).await.unwrap();
     assert_ne!(native_sid.as_deref(), Some("s-sub"), "子 agent 的 SessionStart 不得覆蓋母 bot 的 native_session_id");
 
-    // PostCompact 收掉標記
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PostCompact"}))).await.unwrap();
     assert!(!marked(chrono::Utc::now()), "主 session 的 PostCompact 收掉標記");
 
-    // 再次標記並用 SessionStart 收掉
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "PreCompact", "trigger": "auto"}))).await.unwrap();
     assert!(marked(chrono::Utc::now()));
     process(&app, &stop_failure(&bot_id, json!({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s-cmp"}))).await.unwrap();
@@ -2603,12 +2535,10 @@ async fn nr_claim_remote_spool_survives_parent_sleep_and_restart() {
     sqlx::query("UPDATE bots SET name='renamed' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
     let _reused = tt::claude_bot(&env.app, &env.project_id, "original").await;
     assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p7"), Some(&bot.id));
-    // The real shim also puts the captured run ID in the outer hook envelope.
     let mut delayed = stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p-replayed", "parent_run_id":old_run}));
     delayed.run_id = Some(old_run.clone());
     process(&env.app, &delayed).await.unwrap();
     assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p-replayed"), Some(&bot.id));
-    // Old spool writers may omit the audit run ID entirely.
     process(&env.app, &stop_failure(&bot.id, json!({"hook_event_name":"AmSpawnClaim", "pane_id":"w1:p8"}))).await.unwrap();
     assert_eq!(crate::spawn_hints::claims_for_host(&env.app,"local").await.unwrap().get("w1:p8"), Some(&bot.id));
 }
@@ -3026,7 +2956,6 @@ async fn a_compact_session_start_notes_the_compaction_and_closes_the_empty_turn(
             .unwrap();
     assert_eq!(msgs, vec![("system".into(), "Claude 閒置壓縮：286K tokens → 摘要 11K tokens".into(), Some(turn_id.clone()))]);
 
-    // 遠端：transcript 讀不到，用 hook.sh 帶來的 `agm_compact`（兩分鐘內已有說明就不寫，先把舊的推到更早）。
     sqlx::query("UPDATE messages SET created_at='2026-01-01T00:00:00.000Z' WHERE conversation_id=?").bind(&conv).execute(&app.db).await.unwrap();
     process(&app, &start(json!({"transcript_path": "/Users/me/.claude/projects/x/s.jsonl", "agm_compact": {"trigger": "manual", "idle": false, "pre_tokens": 900}})))
         .await
@@ -3066,7 +2995,6 @@ async fn a_typed_compact_command_turn_is_closed_and_noted_as_manual() {
     let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
     assert_eq!(notes, vec!["手動 /compact。".to_string()]);
 
-    // 使用者回合中間的自動壓縮（user 訊息不是 /compact）：回合不動。
     let busy = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
         .bind(&busy)
@@ -3168,20 +3096,18 @@ async fn a_finished_ask_user_question_lands_in_the_conversation_exactly_once() {
     };
     let path = own_projects_file(&app, &bot_id, &env.dir, "asks.jsonl").await;
     let lines = [
-        // 這一回合開始之前就答完的（fork／resume 帶來的舊提問）：不記。
         ask("old"),
         result("old", -3600, json!({"questions": qs, "answers": {"拋單怎麼處理？": "舊的"}})),
         ask("t1"),
         result("t1", 1, json!({"questions": qs, "answers": {"拋單怎麼處理？": "拿掉拋單", "go API 放哪？": "自訂：gateway"}})),
         ask("t2"),
-        // 取消（Cancel／Esc）：content 是固定那句。
         json!({"type": "user", "timestamp": at(2), "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "The user did not answer the questions."}]}, "toolUseResult": {"questions": qs}}),
     ];
     std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
 
     let stop = claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}));
     process(&app, &stop).await.unwrap();
-    process(&app, &stop).await.unwrap(); // 重送
+    process(&app, &stop).await.unwrap();
     let rows: Vec<String> = sqlx::query_scalar(ask_messages_sql()).fetch_all(&app.db).await.unwrap();
     assert_eq!(rows.len(), 2, "t1 與 t2 各一則，舊的不補：{rows:?}");
     let first: Value = serde_json::from_str(&rows[0]).unwrap();
@@ -3191,13 +3117,11 @@ async fn a_finished_ask_user_question_lands_in_the_conversation_exactly_once() {
     let second: Value = serde_json::from_str(&rows[1]).unwrap();
     assert_eq!(second["answered"], json!(false), "取消＝沒有回答");
     assert!(second["items"].as_array().unwrap().iter().all(|i| i["answer"].is_null()));
-    // 掛在這一回合、是系統訊息，不是使用者打的字，也沒有新開任何回合。
     let (role, source, turn): (String, String, Option<String>) =
         sqlx::query_as("SELECT role, source, turn_id FROM messages WHERE id LIKE 'ask:%' ORDER BY created_at LIMIT 1").fetch_one(&app.db).await.unwrap();
     assert_eq!((role.as_str(), source.as_str(), turn.as_deref()), ("system", "system", Some(turn_id.as_str())));
     assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id = ?").bind(&_conv).fetch_one(&app.db).await.unwrap(), 1);
 
-    // 同一個 tool_use_id 的 PostToolUse 晚到：一樣只有一列。
     let post = stop_failure(&bot_id, json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion", "tool_use_id": "t1",
         "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {"拋單怎麼處理？": "拿掉拋單"}}}));
     process(&app, &post).await.unwrap();
@@ -3688,11 +3612,9 @@ async fn only_a_late_hook_that_binds_a_native_turn_id_verifies_a_fallback_turn()
     let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
     assert_eq!(verified().await, 0, "備援收尾、沒有 hook 證據");
 
-    // 同一回合的晚到 hook，但沒有 native turn id：沒有證據可以綁。
     fill_or_drop_late_hook(&app, &turn, "", &Some("s1".into()), &None, true, None).await.unwrap();
     assert_eq!(verified().await, 0, "只有 session id 不是這一回合的證據");
 
-    // 同一回合的晚到 hook 帶著 native turn id：綁上了就是證據。
     fill_or_drop_late_hook(&app, &turn, "", &Some("s1".into()), &Some("n1".into()), true, None).await.unwrap();
     assert_eq!(verified().await, 1, "hook 綁上 native turn id 後視為已送達");
 }
@@ -3835,8 +3757,6 @@ async fn a_late_stop_hook_does_not_resurrect_a_turn_that_interrupt_already_faile
     .await
     .unwrap();
 
-    // `interrupt_bot` 本身要碰 herdr pane；直接呼叫它跟 `mark_run_exited` 共用的那支收尾函式，
-    // 單獨驗證 DB 這一段的不變量（herdr 那半邊 `interrupt_bot`/`abort_turns` 自己的測試已經蓋到）。
     lifecycle::fail_in_flight(&app, &run_id, "interrupted by user").await.unwrap();
     let before = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
     assert_eq!(before.status, "failed");
@@ -3963,10 +3883,8 @@ async fn stop_hook_finds_the_open_external_turn() {
     let found = db::in_flight_turn(&pool, &run).await.unwrap().expect("step 4 must claim the external turn");
     assert_eq!(found.id, "t");
     assert_eq!(found.origin, "external");
-    // `delivery` must be `ok` or the §4.3 terminal fallback refuses to close the turn.
     assert_eq!(found.delivery, "ok");
 
-    // Afterwards nothing is in flight, so a retried hook dedups.
     sqlx::query("UPDATE turns SET status='completed', completed_at=?, native_turn_id='u' WHERE id=? AND status='in_flight'")
         .bind(&now)
         .bind("t")

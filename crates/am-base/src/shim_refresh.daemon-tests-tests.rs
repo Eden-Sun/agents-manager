@@ -109,7 +109,6 @@
                 let m = std::fs::metadata(&p).unwrap();
                 assert_eq!((m.mtime(), m.mtime_nsec(), m.ino()), before[i], "{name}：只 chmod，不重寫內容（mtime／inode 不動）");
             }
-            // 修完之後再跑就是真的 no-op（冪等）。
             assert!(refresh_all(&data).changed.is_empty());
             let _ = std::fs::remove_dir_all(&data);
         }
@@ -203,7 +202,7 @@
         let unlock = || std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         lock();
-        crate::runners::shim_refresh::refresh_at_startup(app).await; // 不 panic：開機照走
+        crate::runners::shim_refresh::refresh_at_startup(app).await;
         unlock();
         assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), "#!/bin/sh\n# 舊\n", "換不動時舊檔原封不動");
 
@@ -220,13 +219,11 @@
         assert!(one[0].1.contains("\"shim\":\"cargo\""), "{}", one[0].1);
         assert!(one[0].1.contains("01STUCK/bin/cargo"), "payload 要帶得出是哪個檔：{}", one[0].1);
 
-        // 同一個版本再失敗一次不是新的一則（event_key 帶內容雜湊）。
         lock();
         crate::runners::shim_refresh::refresh_at_startup(app).await;
         unlock();
         assert_eq!(rows(app.db.clone()).await.len(), 1);
 
-        // 修好之後照樣換得動。
         crate::runners::shim_refresh::refresh_at_startup(app).await;
         assert_eq!(std::fs::read_to_string(bin.join("cargo")).unwrap(), crate::cargo_shim::SHIM_SH);
     }
@@ -247,8 +244,6 @@
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    // ───────────── 遠端（issue #124）：腳本直接在本機的假「遠端」目錄上跑，不需要真的 ssh ─────────────
-
     /// 用 `sh -s` 跑 [`remote_sync_script`]（跟 `HostConn::ssh_exec` 送腳本的方式一樣：走 stdin）。
     #[cfg(unix)]
     fn run_script(script: &str, path: Option<&str>) -> String {
@@ -260,7 +255,6 @@
             cmd.env("PATH", p);
         }
         let mut child = cmd.spawn().unwrap();
-        // 收不完（腳本被截斷）時 shell 可能先結束，寫入端會 EPIPE——那正是要模擬的情況，不算錯。
         let _ = child.stdin.take().unwrap().write_all(script.as_bytes());
         String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
     }
@@ -301,17 +295,16 @@
         use std::io::Read as _;
         let d = tmp();
         let (b1, b2, b3, b4) = (d.join("b1"), d.join("b2"), d.join("b3"), d.join("b4"));
-        write_shim(&b1.join("bin/herdr"), "#!/bin/sh\n# 舊版 herdr\n", 0o755); // 舊內容
-        write_shim(&b1.join("bin/cargo"), crate::cargo_shim::SHIM_SH, 0o644); // 內容對、權限掉了
-        write_shim(&b2.join("bin/herdr"), crate::herdr_shim::SHIM_SH, 0o755); // 健康的現行版
+        write_shim(&b1.join("bin/herdr"), "#!/bin/sh\n# 舊版 herdr\n", 0o755);
+        write_shim(&b1.join("bin/cargo"), crate::cargo_shim::SHIM_SH, 0o644);
+        write_shim(&b2.join("bin/herdr"), crate::herdr_shim::SHIM_SH, 0o755);
         touch_old(&b2.join("bin/herdr"));
-        // b2 沒有 cargo shim（從沒裝過）、b3 只有 bot 目錄沒有 bin、b4 根本不存在。
         std::fs::create_dir_all(&b3).unwrap();
         write_shim(&b1.join("bin/.herdr.tmp-999"), "殘留的半截暫存檔", 0o644);
         touch_old(&b1.join("bin/.herdr.tmp-999"));
         let mtime = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
         let b2_mtime = mtime(&b2.join("bin/herdr"));
-        let mut running_old = std::fs::File::open(b1.join("bin/herdr")).unwrap(); // 「正在執行」的舊 shim
+        let mut running_old = std::fs::File::open(b1.join("bin/herdr")).unwrap();
 
         let out = run_sync(&[&b1, &b2, &b3, &b4], &["herdr", "cargo"], false);
         let r = parse_remote_sync(&out).unwrap();
@@ -332,7 +325,6 @@
         let leftovers: Vec<String> = std::fs::read_dir(b1.join("bin")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with('.')).collect();
         assert!(leftovers.is_empty(), "殘留的暫存檔要掃掉：{leftovers:?}");
 
-        // 冪等：再跑一次什麼都沒換。
         let again = parse_remote_sync(&run_sync(&[&b1, &b2, &b3, &b4], &["herdr", "cargo"], false)).unwrap();
         assert_eq!(again, RemoteSync::default());
         assert_eq!(mtime(&b2.join("bin/herdr")), b2_mtime);
@@ -435,7 +427,6 @@ case " $* " in *" -mmin +10 "*) rm -f "$1";; esac
         let d = tmp();
         let bot = d.join("bot");
         write_shim(&bot.join("bin/herdr"), "#!/bin/sh\n# 舊版\n", 0o755);
-        // 一支會寫出 10 個位元組就死掉的 `cp`，蓋在 PATH 最前面。
         let fake = d.join("fakebin");
         std::fs::create_dir_all(&fake).unwrap();
         write_shim(&fake.join("cp"), "#!/bin/sh\nhead -c 10 \"$1\" > \"$2\"\nexit 1\n", 0o755);

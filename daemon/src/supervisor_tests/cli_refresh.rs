@@ -22,7 +22,6 @@ mod tests {
     fn a_reader_only_ever_sees_a_whole_0755_executable() {
         let dir = tmpdir();
         let bin = dir.join("agm");
-        // 夠大才看得出截斷：小檔案有機會在一次 write 裡寫完，測不到那個窗口。
         let old: String = "# old\n".repeat(20_000);
         let new: String = "# new\n".repeat(20_000);
         install_executable(&bin, old.as_bytes()).unwrap();
@@ -35,8 +34,6 @@ mod tests {
             std::thread::spawn(move || {
                 let mut reads = 0u64;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    // 權限跟內容一起看：檔案只要出現在最終路徑，就該已經是 0755。
-                    // 對路徑 chmod 的寫法在「建檔」與「補 +x」之間會有一瞬是 umask 的 0644。
                     if let Ok(md) = std::fs::metadata(&bin) {
                         let mode = md.permissions().mode() & 0o777;
                         if mode != 0o755 {
@@ -45,7 +42,6 @@ mod tests {
                     }
                     if let Ok(got) = std::fs::read_to_string(&bin) {
                         reads += 1;
-                        // 只記「不是舊也不是新」的那種，記字數就夠指認是不是半截。
                         if got != *"" && got.as_str() != old.as_str() && got.as_str() != new.as_str() {
                             seen.lock().unwrap().push(format!("{} 位元組", got.len()));
                         }
@@ -56,7 +52,6 @@ mod tests {
         };
         for i in 0..60 {
             let body = if i % 2 == 0 { &new } else { &old };
-            // 每隔幾輪先刪掉：這樣才會走到「從無到有建檔」那條，權限窗口只在那裡出現。
             if i % 10 == 0 {
                 let _ = std::fs::remove_file(&bin);
             }
@@ -83,13 +78,11 @@ mod tests {
         let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "建出來就該是 0755，實際 {mode:o}");
 
-        // 覆寫既有檔也要維持 0755：先把它改成 0644，再裝一次。
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
         install_executable(&bin, b"#!/usr/bin/env python3\nprint(1)\n").unwrap();
         let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "覆寫之後也要是 0755，實際 {mode:o}");
 
-        // 暫存檔不留下。
         let strays: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".tmp-")).collect();
@@ -174,7 +167,6 @@ mod tests {
         refresh_cli(&d, "NEW").unwrap();
         let bak = d.join("bin").join(format!("agm.bak-{}", short_hash(b"OLD")));
         let stamp = std::fs::metadata(&bak).unwrap().modified().unwrap();
-        // 有人手動裝回舊版，下一次開機又換掉：備份不重複、也不被覆寫。
         std::fs::write(d.join("bin/agm"), "OLD").unwrap();
         refresh_cli(&d, "NEWER").unwrap();
         assert_eq!(baks(&d), vec![format!("agm.bak-{}", short_hash(b"OLD"))]);
@@ -213,17 +205,15 @@ mod tests {
         assert_eq!(st["roles"][0]["state"], "stale", "{st}");
         assert_eq!(st["roles"][0]["installed_hash"], short_hash(b"OLD"));
 
-        refresh_with(app, "NEW").await; // POST 走的就是這一支
+        refresh_with(app, "NEW").await;
         let st = status(app, "NEW").await;
         assert_eq!(st["roles"][0]["state"], "ok", "{st}");
         assert_eq!(std::fs::read_to_string(patrol.join("bin/agm")).unwrap(), "NEW");
         assert_eq!(std::fs::read_to_string(patrol.join("persona.md")).unwrap(), "persona", "只動 bin/agm");
 
-        // GET 報的是這顆 binary 真的內嵌的那份（ops-sync 要拿它跟 repo 比）。
         let Json(v) = get_cli(State(app.clone())).await;
         assert_eq!(v["embedded_hash"], short_hash(crate::supervisor::setup::AGM_CLI.as_bytes()));
 
-        // 沒有 bin/ 的角色目錄：not_set_up，不代建。
         let bare = tmpdir();
         roles::set_env(&app.db, Role::Responder, "responder-bot", &e.project_id, &bare.to_string_lossy()).await.unwrap();
         let st = status(app, "NEW").await;
@@ -240,7 +230,6 @@ mod tests {
         let responder = with_bin("OLD");
         store::get_or_init(&app.db).await.unwrap();
         store::set_env(&app.db, "patrol-bot", &e.project_id, &patrol.to_string_lossy()).await.unwrap();
-        // 協調者沒設定：它的目錄就算在也不動。
         refresh_with(app, "NEW").await;
         assert_eq!(std::fs::read_to_string(patrol.join("bin/agm")).unwrap(), "NEW");
         assert_eq!(std::fs::read_to_string(responder.join("bin/agm")).unwrap(), "OLD");
@@ -249,7 +238,7 @@ mod tests {
         let before = roles::get(&app.db, Role::Responder).await.unwrap();
         let bin = responder.join("bin");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o555)).unwrap();
-        refresh_with(app, "NEW").await; // 不 panic、不回錯：開機照走
+        refresh_with(app, "NEW").await;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(std::fs::read_to_string(bin.join("agm")).unwrap(), "OLD");
         assert_eq!(std::fs::read_to_string(responder.join("persona.md")).unwrap(), "persona");
@@ -270,7 +259,6 @@ mod tests {
         let e = crate::testing::env().await;
         let app = &e.app;
         let patrol = with_bin("OLD");
-        // 協調者的 bin/agm 是目錄：讀檔會失敗（不靠 chmod，root 也擋得住）。
         let responder = with_bin("OLD");
         std::fs::remove_file(responder.join("bin/agm")).unwrap();
         std::fs::create_dir_all(responder.join("bin/agm")).unwrap();
@@ -287,7 +275,6 @@ mod tests {
         assert_eq!(c["outcome"], "failed", "{r:?}");
         assert!(c["error"].as_str().is_some_and(|s| !s.is_empty()), "{r:?}");
 
-        // 再跑一次：巡檢已經是新版 → unchanged；協調者還是壞的 → 仍 failed。
         let r = refresh_with(app, "NEW").await;
         let by = |role: &str| r.iter().find(|x| x["role"] == role).unwrap().clone();
         assert_eq!(by("patrol")["outcome"], "unchanged", "{r:?}");

@@ -15,8 +15,6 @@ pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate
     for (who, error) in &out.failed {
         let (bot_id, shim) = who.split_once('/').unwrap_or((who.as_str(), ""));
         let wanted = shims().iter().find(|(n, _)| *n == shim).map(|(_, c)| *c).unwrap_or_default();
-        // event_key 帶內容雜湊：同一個版本換不動只會有一則（`push_inbox` 是 INSERT OR IGNORE），
-        // 下一顆 binary 帶了新 shim 又失敗才是新的一則。
         let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor_inbox::short_hash(wanted.as_bytes()));
         let expert: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND p.mode='expert' AND b.deleted_at IS NULL AND p.deleted_at IS NULL)").bind(bot_id).fetch_one(app.db()).await.unwrap_or(false);
         if expert { let _ = crate::supervisor_inbox::push_inbox(app.db(), &format!("expert-shim-stale:{who}"), "ops_alert", None, Some(bot_id), None, &json!({"bot_id":bot_id,"message":"bot shim 更新失敗，專家模式派工權限可能過期"})).await; }
@@ -39,7 +37,6 @@ pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate
         .await;
     }
 }
-
 
 /// 連上（或重連）一台遠端 host 之後：盤點這台上還受管理的 bot（`live_bots_on_host`），把它們**已經存在**的
 /// `herdr`／`cargo` shim 換成這顆 binary 帶的版本，不必重啟任何 pane。回傳換了什麼。
@@ -94,7 +91,6 @@ pub(crate) fn spawn_remote_refresh(app: Arc<impl crate::capabilities::Db + crate
             }
             match app.hosts().get(&host).await {
                 Some(c) if c.is_connected() => {}
-                // 掉線了：這一輪不算數，也不開票——連上時會再叫一次。
                 _ => return,
             }
             match refresh_remote_host(&app, &host).await {
@@ -110,8 +106,6 @@ pub(crate) fn spawn_remote_refresh(app: Arc<impl crate::capabilities::Db + crate
                     if r.failed.is_empty() {
                         clear_stale(&app, &host).await;
                     } else {
-                        // 腳本跑完了但某幾支 cp／mv 失敗（磁碟滿、權限、被改成目錄）：重試同一輪也是一樣的結果，
-                        // 開票交給人處理，別把 ssh 再打三次。
                         tracing::warn!(host = %host, shims = ?r.failed, "could not refresh some remote shims (old files untouched)");
                         note_stale(&app, &host, format!("這幾支換不動（舊檔原封不動）：{:?}", r.failed)).await;
                     }
@@ -125,8 +119,6 @@ pub(crate) fn spawn_remote_refresh(app: Arc<impl crate::capabilities::Db + crate
                 }
             }
         }
-        // 走到這裡＝每一次都失敗。以前最後一行寫的也是 "will retry"，但迴圈已經結束——
-        // 那是唯一留下的紀錄，看的人會以為還有下一次（issue #534）。
         tracing::warn!(
             host = %host,
             attempts = REMOTE_RETRY_WAITS.len(),

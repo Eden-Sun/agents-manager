@@ -70,7 +70,6 @@ pub async fn cleanup_host(app: &Arc<impl crate::capabilities::Db + crate::capabi
         }
     }
 
-    // quota 表：`<host>/<kind>:<name>`（或本機的 `<kind>:<name>`），name 是別的 kind 的身份 → 殘留。
     let mut removed = Vec::new();
     {
         let mut quotas = app.quotas().lock().await;
@@ -107,7 +106,6 @@ mod tests {
     #[test]
     fn a_child_inherits_the_parents_identity_only_when_the_kind_matches() {
         assert_eq!(child_identity(Some("cc1"), "claude", "claude").as_deref(), Some("cc1"));
-        // 2026-09-14：codex 子 agent 從 claude 母 bot 抄到 cc1，quota 就長出 `codex:cc1`。
         assert_eq!(child_identity(Some("cc1"), "claude", "codex"), None);
         assert_eq!(child_identity(Some("cc0"), "claude", "grok"), None);
         assert_eq!(child_identity(None, "claude", "claude"), None);

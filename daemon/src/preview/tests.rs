@@ -126,8 +126,6 @@ fn set(v: &[u16]) -> HashSet<u16> {
     v.iter().copied().collect()
 }
 
-// ── 純函式 ──
-
 fn dirs(cwd: &str, files: &[&str], subs: &[(&str, &[&str])]) -> Result<Vec<PathBuf>, Vec<String>> {
     let files: HashSet<PathBuf> = files.iter().map(PathBuf::from).collect();
     let subs: HashMap<PathBuf, Vec<PathBuf>> =
@@ -142,7 +140,6 @@ fn detect_lists_root_then_web_then_the_rest_by_depth_and_path() {
         &["/p/vite.config.ts", "/p/web/vite.config.mts", "/p/apps/b/vite.config.js", "/p/apps/a/vite.config.mjs", "/p/packages/x/vite.config.ts"],
         &[("/p", &["/p/packages", "/p/web", "/p/apps"]), ("/p/apps", &["/p/apps/b", "/p/apps/a", "/p/apps/none"]), ("/p/packages", &["/p/packages/x"])],
     );
-    // 根目錄自己有設定就不再往裡面找（它底下的是它的一部分）。
     assert_eq!(got.unwrap(), vec![PathBuf::from("/p")]);
     let got = dirs(
         "/p",
@@ -156,7 +153,6 @@ fn detect_lists_root_then_web_then_the_rest_by_depth_and_path() {
 
 #[test]
 fn detect_finds_a_vite_three_levels_down_but_not_four() {
-    // wits-ops：專案是 wt，vite 在 wt/webui/apps/web。
     let got = dirs(
         "/wt",
         &["/wt/webui/apps/web/vite.config.ts"],
@@ -201,7 +197,6 @@ fn detect_caps_candidates_and_directories_visited() {
     let got = dirs("/p", &files, &[("/p", &kids)]).unwrap();
     assert_eq!(got.len(), MAX_CANDIDATES);
     assert_eq!(got[0], PathBuf::from("/p/app00"), "排序後取前面的");
-    // 走過的目錄數有上限：一個超寬的目錄不會掃到天荒地老。
     let wide: Vec<String> = (0..SEARCH_MAX_DIRS + 500).map(|i| format!("/p/d{i:05}")).collect();
     let wide_refs: Vec<&str> = wide.iter().map(String::as_str).collect();
     let last = format!("{}/vite.config.ts", wide.last().unwrap());
@@ -252,7 +247,6 @@ fn a_listener_counts_by_command_or_by_living_under_a_project() {
     assert_eq!(classify_listener("node server.js", "/home/wt", &roots), Some("unknown"));
     assert_eq!(classify_listener("node server.js", "/home/wt-other/x", &roots), None, "前綴相同不算底下");
     assert_eq!(classify_listener("node server.js", "/elsewhere", &roots), None);
-    // 7788、ssh、資料庫不列，即使 cwd 在專案底下。
     for c in ["/x/target/release/agents-managerd serve", "ssh -N host", "/usr/local/bin/postgres -D data", "herdr server"] {
         assert_eq!(classify_listener(c, "/home/wt/agents-manager", &roots), None, "{c}");
     }
@@ -280,7 +274,6 @@ fn join_servers_filters_and_labels_listeners() {
     let got = join_servers(&ports, &cwds, &cmds, &["/home/wt".to_string()], 999);
     let brief: Vec<(u16, &str)> = got.iter().map(|p| (p.port, p.kind.as_str())).collect();
     assert_eq!(brief, vec![(3200, "next"), (5173, "vite"), (5174, "vite")]);
-    // 自己的 pid 不列。
     assert!(join_servers(&ports, &cwds, &cmds, &["/home/wt".to_string()], 1).iter().all(|p| p.port != 3200));
 }
 
@@ -290,7 +283,6 @@ fn package_json_dev_script_and_the_command_that_follows() {
     assert_eq!(parse_dev_script(r#"{"scripts":{"build":"x"}}"#), None);
     assert_eq!(parse_dev_script(r#"{"scripts":{"dev":"  "}}"#), None);
     assert_eq!(parse_dev_script("not json"), None);
-    // #434：`allow_lan` 關著時認得出的框架要接上 loopback 旗標；開著就照專案自己的意思。
     assert_eq!(run_command(Some("next dev"), "next", false, 5180), "bun run dev -- -H 127.0.0.1");
     assert_eq!(run_command(Some("vite"), "vite", false, 5180), "bun run dev -- --host 127.0.0.1");
     assert_eq!(run_command(Some("node server.js"), "unknown", false, 5180), "bun run dev", "認不出框架就別猜旗標");
@@ -320,7 +312,6 @@ fn pick_port_starts_at_5180_and_skips_taken_and_listening() {
     assert_eq!(pick_port(&set(&[5180]), &set(&[5181])), Some(5182));
     let all: HashSet<u16> = (PORT_START..PORT_START + PORT_SPAN).collect();
     assert_eq!(pick_port(&all, &set(&[])), None);
-    // 5173 是人手開的，永遠不在窗口內。
     assert!(pick_port(&set(&[]), &set(&[])).unwrap() > 5173);
 }
 
@@ -351,7 +342,6 @@ fn transitions() {
     assert_eq!(next_status(Starting, false, o(None, false), 3), Next::Stay);
     assert!(matches!(next_status(Starting, false, o(Some(true), false), 60), Next::To(Failed, Some(_))));
     assert!(matches!(next_status(Starting, false, o(Some(false), false), 1), Next::To(Failed, Some(_))));
-    // port 已經起來的那一拍，pane 讀不到不該壓過它。
     assert_eq!(next_status(Starting, false, o(Some(false), true), 1), Next::To(Running, None));
     assert_eq!(next_status(Running, false, o(Some(true), true), 999), Next::Stay);
     assert_eq!(next_status(Running, false, o(Some(false), true), 1), Next::To(Off, None));
@@ -359,12 +349,9 @@ fn transitions() {
     assert_eq!(next_status(Running, false, o(None, true), 1), Next::Stay);
     assert_eq!(next_status(Off, false, o(Some(true), true), 1), Next::Stay);
     assert_eq!(next_status(Failed, false, o(Some(true), true), 1), Next::Stay);
-    // 接上的：port 不見就是斷開（off），不是失敗；它沒有 pane，pane 那一欄不參與。
     assert_eq!(next_status(Running, true, o(None, false), 1), Next::To(Off, None));
     assert_eq!(next_status(Running, true, o(None, true), 1), Next::Stay);
 }
-
-// ── DB＋假 env ──
 
 struct Rig {
     e: testing::Env,
@@ -486,14 +473,12 @@ async fn every_preview_body_says_whether_the_dev_server_is_reachable_from_elsewh
     let r = rig().await;
     assert!(!r.e.app.allow_lan(), "測試的 App 預設 allow_lan 關著");
     let bot = running_bot(&r, "alfa").await;
-    // 面板進來的第一次 GET 就是 off，那一份也要有。
     assert_eq!(get(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
     assert_eq!(start(&r.e.app, &bot, StartReq::default()).await.unwrap()["lan"], json!(false));
     r.fake.listen(5180);
     let running = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(status(&running), "running");
     assert_eq!(running["lan"], json!(false));
-    // DELETE 不走 `decorated`，自己補的那一份也要有。
     assert_eq!(stop(&r.e.app, &bot).await.unwrap()["lan"], json!(false));
 
     r.e.app.set_allow_lan_for_test(true);
@@ -523,7 +508,6 @@ async fn a_start_that_never_listens_fails_with_the_pane_tail() {
     assert_eq!(status(&body), "failed");
     let err = body["error"].as_str().unwrap();
     assert!(err.contains("port 5180 is in use"), "{err}");
-    // failed 不再佔 port：下一次啟動拿回 5180。
     assert_eq!(start(&r.e.app, &bot, StartReq::default()).await.unwrap()["port"], 5180);
 }
 
@@ -560,7 +544,6 @@ async fn stopping_a_failed_preview_does_not_close_a_pane_reused_by_another_activ
         .unwrap();
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
 
-    // Herdr restarted and gave the old preview pane ID to another bot's live agent pane.
     sqlx::query("UPDATE runs SET pane_id = ? WHERE bot_id = ?")
         .bind(&reused_pane)
         .bind(&other)
@@ -648,7 +631,6 @@ async fn stop_closes_the_pane_and_frees_the_port() {
     assert_eq!(status(&get(&r.e.app, &a).await.unwrap()), "off");
     assert!(state_map(&r.e.app.db).await.unwrap().is_empty());
     assert_eq!(start(&r.e.app, &b, StartReq::default()).await.unwrap()["port"], 5180, "5180 放出來了");
-    // 沒開過的 bot 停也是 off，不動任何 pane。
     let c = running_bot(&r, "charlie").await;
     assert_eq!(stop(&r.e.app, &c).await.unwrap(), json!({"status": "off", "lan": false}));
     assert_eq!(r.fake.closed.lock().unwrap().len(), 1);
@@ -762,7 +744,6 @@ async fn startup_reconcile_matches_rows_against_panes_and_ports() {
     r.fake.listen(5181);
     assert_eq!(status(&get(&r.e.app, &a).await.unwrap()), "running");
     assert_eq!(status(&get(&r.e.app, &b).await.unwrap()), "running");
-    // 「重啟」：同一個 DB、同一個假 env，記憶體歸零；期間 a 的 pane 被關、b 的 vite 死了、c 還在 starting 就 listen。
     let app2 = testing::restart_app(&r.e).await;
     *app2.preview_env.lock().unwrap() = Some(r.fake.clone());
     r.fake.kill_pane(&pa);
@@ -790,12 +771,10 @@ async fn an_unreadable_active_run_never_closes_a_healthy_preview() {
     r.fake.listen(5180);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
     break_runs(&r).await;
-    // GET／開機對帳都會走 refresh_locked：讀不到 run 是「不知道」，不是「bot 停了」。
     get(&r.e.app, &bot).await.unwrap();
     reconcile_all(&r.e.app).await;
     assert!(r.fake.closed.lock().unwrap().is_empty(), "健康的 vite pane 被關了");
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "running");
-    // 讀得回來之後照常運作。
     fix_runs(&r).await;
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
     assert!(r.fake.closed.lock().unwrap().is_empty());
@@ -808,7 +787,6 @@ async fn stopping_with_an_unreadable_run_keeps_the_row_until_the_owner_session_i
     let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
     break_runs(&r).await;
     stop_for_bot(&r.e.app, &bot).await;
-    // 不知道該用哪個 session 關：不關、也不寫 off（否則 pane 與 port 變成沒人管的孤兒）。
     assert!(r.fake.closed.lock().unwrap().is_empty());
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
     fix_runs(&r).await;
@@ -823,17 +801,14 @@ async fn cleanup_never_goes_through_another_session_when_the_owner_session_is_un
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
     let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
-    // 有 run，但拿不到它那個 session 的 client：不可退回管理 session 去關。
     r.fake.unresolvable.store(true, SeqCst);
     stop_for_bot(&r.e.app, &bot).await;
     assert!(r.fake.closed.lock().unwrap().is_empty());
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
-    // bot 已經沒有 run 的那一條：同樣要靠 bot 自己的 session，拿不到就不動。
     sqlx::query("UPDATE runs SET state = 'exited' WHERE bot_id = ?").bind(&bot).execute(&r.e.app.db).await.unwrap();
     get(&r.e.app, &bot).await.unwrap();
     assert!(r.fake.closed.lock().unwrap().is_empty());
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
-    // session 回來：在那個 session 關掉 pane，這時才記 off。
     r.fake.unresolvable.store(false, SeqCst);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
     assert_eq!(r.fake.closed.lock().unwrap().clone(), vec![pane]);
@@ -847,7 +822,6 @@ async fn a_close_that_fails_or_is_unconfirmed_does_not_record_off() {
     let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
     r.fake.close_fails.store(true, SeqCst);
     stop_for_bot(&r.e.app, &bot).await;
-    // pane 與 port 還在：不能寫成 off 讓 vite 變成沒人管的孤兒。
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "starting");
     r.fake.close_fails.store(false, SeqCst);
     stop_for_bot(&r.e.app, &bot).await;
@@ -863,7 +837,6 @@ async fn the_starting_watcher_survives_a_herdr_session_that_is_briefly_unavailab
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     r.fake.unresolvable.store(true, SeqCst);
     spawn_watcher(r.e.app.clone(), bot.clone());
-    // 好幾拍都拿不到 client：watcher 不能因此結束。
     tokio::time::sleep(Duration::from_millis(400)).await;
     r.fake.unresolvable.store(false, SeqCst);
     r.fake.listen(5180);
@@ -878,11 +851,9 @@ async fn the_starting_watcher_survives_an_unreadable_preview_row() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
-    // 用 testing 的注入（先刷新同一條連線的 schema 快取再 ALTER）：裸 ALTER 會隨機抽到沒看過上一次改動的連線而 `no such table`。
     testing::make_table_unreadable(&r.e.app, "bot_previews").await;
     let before = watcher_ticks(&bot);
     assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
-    // 等它在讀不到的期間**真的輪過幾次**（事件），不是睡一段固定時間就當作有輪過。
     assert!(testing::eventually!(watcher_ticks(&bot) >= before + 3), "watcher 沒有在讀不到的期間輪過");
     assert!(is_watched(&bot), "讀不到那一列（暫時性）時 watcher 就結束了");
     testing::make_table_readable(&r.e.app, "bot_previews").await;
@@ -909,8 +880,6 @@ async fn the_watcher_promotes_a_starting_preview_without_anyone_asking() {
     panic!("the watcher never noticed the port");
 }
 
-// ── #260：running 之後也有人看 ──
-
 #[tokio::test]
 async fn a_spawned_preview_whose_server_dies_after_running_fails_without_anyone_asking() {
     let r = rig().await;
@@ -919,7 +888,6 @@ async fn a_spawned_preview_whose_server_dies_after_running_fails_without_anyone_
     r.fake.listen(5180);
     assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
     assert!(testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"));
-    // 用 watcher 實際完成的輪次同步：running 之後再輪兩次，不能以固定 sleep 猜排程已執行。
     let running_tick = watcher_ticks(&bot);
     assert!(
         testing::eventually!(watcher_ticks(&bot) >= running_tick + 2),
@@ -936,7 +904,6 @@ async fn a_spawned_preview_whose_server_dies_after_running_fails_without_anyone_
     assert_eq!(r.e.app.current_seq(), seq, "DB 狀態可以先於 WS 事件可見");
     drop(ring_hold);
     assert!(testing::eventually!(r.e.app.current_seq() > seq), "preview_changed 有發出去");
-    // failed 是終點：監看結束，之後重試（POST）才會再掛一個。
     assert!(testing::eventually!(!is_watched(&bot)));
 }
 
@@ -954,7 +921,6 @@ async fn an_attached_preview_goes_off_by_itself_when_the_external_server_exits()
         testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "off"),
         "接上的 vite 結束了，沒人 GET 就沒人發現"
     );
-    // 別人的 server：只斷開，沒有動任何 pane。
     assert!(r.fake.closed.lock().unwrap().is_empty());
 }
 
@@ -964,11 +930,9 @@ async fn there_is_only_one_monitor_per_bot_and_a_finished_one_makes_room() {
     let bot = running_bot(&r, "alfa").await;
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
-    // 重複的 GET／POST／開機對帳都會呼叫：不會再多一個。
     assert!(!spawn_watcher(r.e.app.clone(), bot.clone()));
     reconcile_all(&r.e.app).await;
     assert!(!spawn_watcher(r.e.app.clone(), bot.clone()));
-    // 收掉預覽之後監看結束並註銷；下一顆預覽能重新掛。
     stop_for_bot(&r.e.app, &bot).await;
     assert!(testing::eventually!(!is_watched(&bot)));
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
@@ -982,7 +946,6 @@ async fn startup_reconcile_also_monitors_a_preview_that_was_already_running() {
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     r.fake.listen(5180);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
-    // 「重啟」：記憶體歸零，DB 裡那一列是 running；重啟後掛回監看，之後掛掉照樣發現。
     let app2 = testing::restart_app(&r.e).await;
     *app2.preview_env.lock().unwrap() = Some(r.fake.clone());
     reconcile_all(&app2).await;
@@ -990,8 +953,6 @@ async fn startup_reconcile_also_monitors_a_preview_that_was_already_running() {
     r.fake.unlisten(5180);
     assert!(testing::eventually!(row(&app2.db, &bot).await.unwrap().unwrap().status == "failed"));
 }
-
-// ── #253 v2：接上既有的 vite ──
 
 fn web_dir(r: &Rig) -> String {
     r.e.repo.join("web").to_string_lossy().into_owned()
@@ -1028,7 +989,6 @@ async fn another_checkout_is_listed_not_attached_and_a_spawn_follows() {
     assert_eq!(body["source"], "spawned");
     assert_eq!(r.fake.spawns().len(), 1);
     assert_eq!(body["port"], 5180);
-    // 起好之後停掉，回 off 的畫面要列出別份 checkout 讓使用者選。
     stop(&r.e.app, &bot).await.unwrap();
     let off = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(
@@ -1046,7 +1006,6 @@ async fn disconnecting_an_attached_preview_never_touches_the_others_server() {
     assert_eq!(stop(&r.e.app, &bot).await.unwrap(), json!({"status": "off", "lan": false}));
     assert!(r.fake.closed.lock().unwrap().is_empty(), "沒有關任何 pane");
     assert!(r.fake.vites.lock().unwrap().iter().any(|v| v.pid == 4242), "vite 還活著");
-    // bot 被停也一樣：只斷開。
     start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     stop_for_bot(&r.e.app, &bot).await;
     assert!(r.fake.closed.lock().unwrap().is_empty());
@@ -1092,18 +1051,15 @@ async fn an_attached_preview_goes_off_when_that_server_exits_even_without_a_runn
 #[tokio::test]
 async fn attach_mode_needs_a_port_that_really_is_a_vite() {
     let r = rig().await;
-    r.fake.listen(9000); // 有人在 listen，但不是 vite
+    r.fake.listen(9000);
     r.fake.vite(7, 3001, "/somewhere/hermes/apps/web");
     let bot = running_bot(&r, "alfa").await;
     let LcError::Bad(_) = start(&r.e.app, &bot, req("attach", None, None)).await.unwrap_err() else { panic!() };
     let LcError::Conflict(v) = start(&r.e.app, &bot, req("attach", Some(9000), None)).await.unwrap_err() else { panic!() };
     assert_eq!(v["reason"], "not_vite");
-    // 使用者明確選了別份 checkout 的：接。
     let body = start(&r.e.app, &bot, req("attach", Some(3001), None)).await.unwrap();
     assert_eq!((body["source"].as_str(), body["dir"].as_str()), (Some("attached"), Some("/somewhere/hermes/apps/web")));
 }
-
-// ── #258：接上的預覽綁的是那顆行程，不只是 port ──
 
 #[tokio::test]
 async fn an_attached_preview_does_not_silently_follow_an_unrelated_process_that_reused_the_port() {
@@ -1112,13 +1068,11 @@ async fn an_attached_preview_does_not_silently_follow_an_unrelated_process_that_
     r.fake.vite(100, 5180, &web_dir(&r));
     start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
-    // 原本那顆結束、別的行程佔了同一個 port（別份 checkout 的 vite／不相干的本機服務）。
     r.fake.vite_exits(5180);
     r.fake.server(200, 5180, "/other/web", "vite");
     let seq = r.e.app.current_seq();
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
     assert!(r.e.app.current_seq() > seq, "身份變了要推 preview_changed");
-    // 不相干的服務（掃不到是 dev server）也一樣。
     r.fake.vite_exits(5180);
     r.fake.vite(300, 5180, &web_dir(&r));
     start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
@@ -1134,12 +1088,10 @@ async fn an_attached_preview_follows_the_same_app_restarting_with_a_new_pid() {
     let bot = running_bot(&r, "alfa").await;
     r.fake.vite(100, 5180, &web_dir(&r));
     start(&r.e.app, &bot, req("attach", Some(5180), None)).await.unwrap();
-    // 同一個目錄的 vite 重啟（pid 換了、port 沒變）：仍是那個 app，沿用並記下新 pid。
     r.fake.vite_exits(5180);
     r.fake.vite(101, 5180, &web_dir(&r));
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
     assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().pid, Some(101));
-    // 掃描失敗（問不到）不當成換人；掃得到而且 port 上沒有 dev server 才是換人了。
     r.fake.scan_fails.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
     r.fake.scan_fails.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1152,19 +1104,16 @@ async fn a_stale_attach_selection_fails_instead_of_attaching_whatever_took_the_p
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;
     r.fake.vite(100, 5180, &web_dir(&r));
-    // GET 看到 pid 100；POST 之前它結束、別份 checkout 的 vite 佔了 5180。
     r.fake.vite_exits(5180);
     r.fake.server(200, 5180, "/other/web", "vite");
     let stale = StartReq { pid: Some(100), ..req("attach", Some(5180), Some(&web_dir(&r))) };
     let LcError::Conflict(v) = start(&r.e.app, &bot, stale).await.unwrap_err() else { panic!("要 409") };
     assert_eq!(v["reason"], "stale_selection");
     assert!(row(&r.e.app.db, &bot).await.unwrap().is_none(), "不可留下接到別人的那一列");
-    // 只帶 dir 也對得上才接；pid／dir 都對就接。
     let dir_only = req("attach", Some(5180), Some(&web_dir(&r)));
     assert!(matches!(start(&r.e.app, &bot, dir_only).await.unwrap_err(), LcError::Conflict(_)));
     let good = StartReq { pid: Some(200), ..req("attach", Some(5180), Some("/other/web")) };
     assert_eq!(start(&r.e.app, &bot, good).await.unwrap()["pid"], 200);
-    // 同一個目錄、只是換了一顆行程：只帶 pid 也要擋（那是另一顆 server 了）。
     r.fake.vite_exits(5180);
     r.fake.vite(101, 5180, "/other/web");
     let pid_only = StartReq { pid: Some(200), ..req("attach", Some(5180), None) };
@@ -1183,7 +1132,6 @@ async fn spawn_mode_and_dir_choice_override_auto_and_replace_a_live_preview() {
     assert_eq!(first["source"], "attached");
     assert_eq!(first["candidates"].as_array().unwrap().len(), 2);
     let site = r.e.repo.join("apps/site").to_string_lossy().into_owned();
-    // 換成自己起、而且挑另一個目錄：舊的（接上的）只斷開。
     let second = start(&r.e.app, &bot, req("spawn", None, Some(&site))).await.unwrap();
     assert_eq!(second["source"], "spawned");
     assert_eq!(second["dir"], site.as_str());
@@ -1238,10 +1186,8 @@ async fn opening_a_pre_v2_database_adds_the_source_and_pid_columns() {
     let pool = crate::app_ports_p1::open(&path).await.unwrap();
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('bot_previews')").fetch_all(&pool).await.unwrap();
     assert!(cols.contains(&"source".to_string()) && cols.contains(&"pid".to_string()), "{cols:?}");
-    // issue #474：pre-v2 的表沒有 `REFERENCES bots(id)`，而外鍵用 ALTER 加不回去——migrate 會重建表補上。
     let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
     assert_eq!(fks, 1, "重建之後要有 bots(id) 那個外鍵");
-    // 重跑一次是 no-op（已經有 FK 就不再重建），而且不能把資料洗掉。
     pool.close().await;
     let pool = crate::app_ports_p1::open(&path).await.unwrap();
     let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
@@ -1296,14 +1242,14 @@ async fn others_lists_every_local_vite_with_its_relation() {
     let mine = web_dir(&r);
     r.fake.repo(&r.e.repo.to_string_lossy(), "/git/am/.git", Some("git@h:me/am.git"));
     r.fake.repo(&mine, "/git/am/.git", Some("git@h:me/am.git"));
-    r.fake.vite(9, 5299, &mine); // 這顆 bot 自己的目錄
-    r.fake.vite(1, 5173, "/x/am-main/web"); // 同 repo 的另一個 worktree
+    r.fake.vite(9, 5299, &mine);
+    r.fake.vite(1, 5173, "/x/am-main/web");
     r.fake.repo("/x/am-main/web", "/git/am/.git", Some("git@h:me/am.git"));
-    r.fake.vite(2, 5174, "/x/am-clone/web"); // 另一份 clone，origin 一樣
+    r.fake.vite(2, 5174, "/x/am-clone/web");
     r.fake.repo("/x/am-clone/web", "/git/clone/.git", Some("git@h:me/am.git"));
-    r.fake.vite(3, 3001, "/x/hermes/apps/web"); // 別的 repo
+    r.fake.vite(3, 3001, "/x/hermes/apps/web");
     r.fake.repo("/x/hermes/apps/web", "/git/sample-agents/.git", Some("git@h:me/hermes.git"));
-    r.fake.vite(4, 3002, "/x/not-git/web"); // 判不出來
+    r.fake.vite(4, 3002, "/x/not-git/web");
     let bot = running_bot(&r, "alfa").await;
     let off = get(&r.e.app, &bot).await.unwrap();
     let got: Vec<(u64, &str, &str)> = off["others"]
@@ -1322,14 +1268,13 @@ async fn others_lists_every_local_vite_with_its_relation() {
             (3002, "other", "web"),
         ]
     );
-    // 5174 的 common dir 不同但 origin 相同，仍是 same_repo（repo 名取它自己的 clone 目錄）。
 }
 
 #[tokio::test]
 async fn every_vite_is_other_when_the_bots_own_repo_cannot_be_read() {
     let r = rig().await;
     r.fake.vite(1, 5173, "/x/am-main/web");
-    r.fake.repo("/x/am-main/web", "/git/am/.git", None); // bot 自己的目錄沒登記＝讀不到
+    r.fake.repo("/x/am-main/web", "/git/am/.git", None);
     let bot = running_bot(&r, "alfa").await;
     let off = get(&r.e.app, &bot).await.unwrap();
     assert_eq!(off["others"][0]["relation"], "other");
@@ -1343,7 +1288,6 @@ async fn attach_accepts_a_vite_of_another_project_and_records_its_dir() {
     let body = start(&r.e.app, &bot, req("attach", Some(3001), None)).await.unwrap();
     assert_eq!((body["source"].as_str(), body["dir"].as_str(), body["port"].as_u64()), (Some("attached"), Some("/x/hermes/apps/web"), Some(3001)));
     assert_eq!(body["pid"], 7);
-    // auto 不會自己去接別的專案的（先斷開，再用 auto 起）。
     stop(&r.e.app, &bot).await.unwrap();
     let auto = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(auto["source"], "spawned");
@@ -1410,26 +1354,20 @@ async fn a_dev_script_directory_is_spawned_with_bun_run_dev_and_the_port_is_obse
     let bot = running_bot(&r, "alfa").await;
     let body = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
     assert_eq!(status(&body), "starting");
-    // #434：allow_lan 關著，next 認得出來就接上 `-H 127.0.0.1`。
     assert_eq!(body["command"], "bun run dev -- -H 127.0.0.1");
     assert_eq!(body["kind"], "next");
     assert_eq!(body["port"], Value::Null, "不硬塞 port");
     assert_eq!(r.fake.spawns()[0].2, "bun run dev -- -H 127.0.0.1");
     assert_eq!(r.fake.spawns()[0].1, r.e.repo.to_string_lossy());
-    // 還沒 listen：留在 starting。
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "starting");
-    // server 自己挑了 3200：從 pane 的行程樹觀察到，記進去。
     let pane = body["pane_id"].as_str().unwrap().to_string();
     r.fake.pane_listens(&pane, 3200);
     let seen = get(&r.e.app, &bot).await.unwrap();
     assert_eq!((status(&seen), seen["port"].as_u64()), ("running", Some(3200)));
     assert_eq!(state_map(&r.e.app.db).await.unwrap()[&bot], json!({"status": "running", "port": 3200, "source": "spawned"}));
-    // 之後照一般的 port 檢查：server 掛了就 failed。
     r.fake.unlisten(3200);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
 }
-
-// ── #434：allow_lan 關著時，我們起的 dev server 不准綁到 loopback 以外 ──
 
 /// dev script 自己綁了 `0.0.0.0`（`lsof` 寫成 `*`）：旗標管不到（專案在設定檔裡蓋回去）時，
 /// 起來那一拍要判成 failed，而且**把 pane 關掉**——留著等於那顆 server 繼續對外聽。
@@ -1462,12 +1400,10 @@ async fn a_dev_server_that_rebinds_to_a_public_address_later_is_caught_too() {
     let bot = running_bot(&r, "alfa").await;
     let pane = start(&r.e.app, &bot, StartReq::default()).await.unwrap()["pane_id"].as_str().unwrap().to_string();
 
-    // 第一拍乖乖綁 loopback：running，pane 留著。
     r.fake.pane_listens_on(&pane, "127.0.0.1", 3200);
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "running");
     assert!(r.fake.closed.lock().unwrap().is_empty());
 
-    // 之後才多綁一個對外位址（同一個 port）：下一次重驗就要抓到。
     r.fake.pane_listens_on(&pane, "*", 3200);
     let seen = get(&r.e.app, &bot).await.unwrap();
 
@@ -1551,7 +1487,6 @@ async fn even_the_daemons_own_vite_command_is_verified_against_the_real_address(
     let port = body["port"].as_u64().unwrap() as u16;
     assert!(body["command"].as_str().unwrap().contains("--host 127.0.0.1"), "前提：旗標有帶");
 
-    // 旗標帶了，實際卻綁在對外介面。
     r.fake.pane_listens_on(&pane, "0.0.0.0", port);
 
     let seen = get(&r.e.app, &bot).await.unwrap();

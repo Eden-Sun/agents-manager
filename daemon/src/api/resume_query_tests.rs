@@ -3,7 +3,6 @@ use super::*;
 #[test]
 fn only_native_is_a_resume_mode_and_it_is_strict() {
     let q = |v: Option<&str>| StartQuery { resume: v.map(str::to_string), session: None };
-    // 2026-10-02 起預設接回（接不回才開新的），`fresh` 才是開新對話。
     let default = resume_opts(&q(None)).unwrap();
     assert!(default.resume_native && !default.resume_required, "預設：能接就接，接不回照樣啟動");
     assert_eq!(resume_opts(&q(Some(""))).unwrap(), default);

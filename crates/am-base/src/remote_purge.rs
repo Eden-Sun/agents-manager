@@ -63,7 +63,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // 補還原失敗的退避（#1427）：每 (主機, bot) 一列，連續失敗次數與下次可試的時間。
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS remote_restore_backoff (
            host TEXT NOT NULL,
@@ -77,7 +76,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // trigger 要在表建好之後裝；`sync_trigger` 內容不同就換掉，舊庫也會拿到（#1320）。
     let mut conn = pool.acquire().await?;
     crate::db::sync_trigger(&mut conn, "remote_bot_dir_purge_owed_on_host_move", OWE_ON_HOST_MOVE).await?;
     crate::db::sync_trigger(&mut conn, "remote_bot_dir_purge_owed_on_project_delete", OWE_ON_PROJECT_DELETE).await?;

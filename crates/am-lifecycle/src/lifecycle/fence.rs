@@ -96,10 +96,6 @@ pub fn decide(now: &Generation, ev: &EventIdentity, prior: Option<&PriorRun>) ->
     fn trimmed(s: Option<&str>) -> Option<&str> {
         s.map(str::trim).filter(|v| !v.is_empty())
     }
-    // 事件自己指名 run 時最直接：不是這一代就是別代，不必再看 session。
-    // 這是 `--resume` 唯一分得開的證據（issue #92）：接回同一段對話時新舊行程回報**同一個** session id，
-    // 換身份前那個行程遲到的 `StopFailure`（撞額度）只看 session 會被認成這一代的，收掉新行程的回合。
-    // 收編來的 run 例外：它的行程帶的是起它的那個 run 的 id，對不上是正常的，交給下面的 session 規則。
     if let Some(rid) = trimmed(ev.run_id) {
         if rid == now.run_id {
             return Ownership::Current;
@@ -115,12 +111,7 @@ pub fn decide(now: &Generation, ev: &EventIdentity, prior: Option<&PriorRun>) ->
         return Ownership::Current;
     }
     match prior {
-        // `prior` 只有在呼叫端（`classify`）已經用 rowid（寫入順序）驗過「這確實是更早寫進去的
-        // run」才會是 `Some`——這裡不再用 ULID 字典序複查一次（issue #98：同一毫秒內的隨機段不保證
-        // 單調，字典序複查反而會把 rowid 已經證出來的答案推翻）。
         Some(p) => Ownership::Stale { prior_run_id: p.run_id.to_string(), why: "這個 session 屬於這顆 bot 更早一代的 run" },
-        // session 對不上、又不屬於任何舊 run：同一個 CLI 換了 session（claude `/clear`）就是這樣。
-        // 這時候放行才對——殺掉的話 `/clear` 之後的回合再也不會完成。
         None => Ownership::Unproven("這個 session 不屬於任何更早的 run"),
     }
 }
@@ -133,15 +124,11 @@ pub async fn classify(pool: &sqlx::SqlitePool, bot_id: &str, run: &db::Run, ev: 
         resume_session_id: run.resume_session_id.as_deref(),
         adopted: run.adopted != 0,
     };
-    // 先用純規則問一次：能當場判定的（指名 run、session 就是這一代的、根本沒帶 session）不必查 DB。
     let quick = decide(&now, &ev, None);
     if !matches!(quick, Ownership::Unproven("這個 session 不屬於任何更早的 run")) {
         return quick;
     }
     let sid = ev.session_id.map(str::trim).unwrap_or_default();
-    // `rowid`（寫入順序）決定「更早」，不是 `id`（ULID）：兩個 run 若落在同一毫秒，ULID 的隨機段
-    // 不保證單調，字典序會偶爾把先寫進去的那個排到後面（issue #98）。子查詢先問現在這代自己的
-    // rowid，再只挑 rowid 比它小的——「比自己早」由 SQL 保證，不必回 Rust 再複查一次。
     let prior: Option<String> = match sqlx::query_scalar(
         "SELECT id FROM runs WHERE bot_id = ? AND native_session_id = ?
            AND rowid < (SELECT rowid FROM runs WHERE id = ?)
@@ -155,7 +142,6 @@ pub async fn classify(pool: &sqlx::SqlitePool, bot_id: &str, run: &db::Run, ev: 
     {
         Ok(v) => v,
         Err(e) => {
-            // 讀不到不等於是舊的：查詢壞掉時放行（既有行為），但要留痕。
             tracing::warn!(bot = %bot_id, error = ?e, "世代圍籬查不到舊 run；這一則照既有規則處理");
             return Ownership::Unproven("查不到舊 run");
         }
@@ -175,7 +161,6 @@ mod tests {
         let now = gen("01RUN-B", Some("s-new"));
         assert_eq!(decide(&now, &EventIdentity { run_id: None, session_id: Some("s-new") }, None), Ownership::Current);
         assert_eq!(decide(&now, &EventIdentity { run_id: Some("01RUN-B"), session_id: None }, None), Ownership::Current);
-        // `resume_native` 起的 run：第一則 hook 把 session 收進 `native_session_id` 之前的窗口。
         let resuming = Generation { run_id: "01RUN-B", session_id: None, resume_session_id: Some("s-old"), adopted: false };
         assert_eq!(decide(&resuming, &EventIdentity { run_id: None, session_id: Some("s-old") }, None), Ownership::Current);
     }
@@ -187,7 +172,6 @@ mod tests {
         let out = decide(&now, &ev, Some(&PriorRun { run_id: "01RUN-A" }));
         assert!(matches!(&out, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-A"), "{out:?}");
         assert!(!out.may_mutate());
-        // 指名別的 run 也一樣。
         let named = decide(&now, &EventIdentity { run_id: Some("01RUN-A"), session_id: None }, None);
         assert!(!named.may_mutate(), "{named:?}");
     }
@@ -199,7 +183,6 @@ mod tests {
         let old_process = decide(&resumed, &EventIdentity { run_id: Some("01RUN-A"), session_id: Some("s-same") }, None);
         assert!(matches!(&old_process, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-A"), "{old_process:?}");
         assert_eq!(decide(&resumed, &EventIdentity { run_id: Some("01RUN-B"), session_id: Some("s-same") }, None), Ownership::Current);
-        // 沒帶 run id（舊行程、舊版 hook.sh）：只剩 session 可看，照舊當成這一代的。
         assert_eq!(decide(&resumed, &EventIdentity { run_id: None, session_id: Some("s-same") }, None), Ownership::Current);
     }
     /// 收編來的 run：它的行程是在別的 run 底下起的，帶的 run id 本來就對不上——不能因此把它自己的
@@ -209,7 +192,6 @@ mod tests {
         let adopted = Generation { run_id: "01RUN-ADOPTED", session_id: Some("s-live"), resume_session_id: None, adopted: true };
         let own = decide(&adopted, &EventIdentity { run_id: Some("01RUN-STARTED"), session_id: Some("s-live") }, None);
         assert_eq!(own, Ownership::Current, "session 是這一代的：照常處理");
-        // session 能證明是舊的時候照樣擋。
         let old = decide(&adopted, &EventIdentity { run_id: Some("01RUN-STARTED"), session_id: Some("s-old") }, Some(&PriorRun { run_id: "01RUN-OLD" }));
         assert!(!old.may_mutate(), "{old:?}");
     }
@@ -218,14 +200,11 @@ mod tests {
     #[test]
     fn an_unprovable_event_is_let_through_not_guessed_at() {
         let now = gen("01RUN-B", Some("s-first"));
-        // `/clear` 之後的新 session：不屬於任何舊 run。
         let cleared = decide(&now, &EventIdentity { run_id: None, session_id: Some("s-after-clear") }, None);
         assert!(cleared.may_mutate(), "{cleared:?}");
         assert!(matches!(cleared, Ownership::Unproven(_)));
-        // 完全沒帶 session 的事件（codex 的某些 payload、手寫的）。
         let bare = decide(&now, &EventIdentity::default(), None);
         assert!(bare.may_mutate(), "{bare:?}");
-        // run 還沒回報過 session：也證不出來。
         let fresh = decide(&gen("01RUN-B", None), &EventIdentity { run_id: None, session_id: Some("s-x") }, None);
         assert!(fresh.may_mutate(), "{fresh:?}");
     }
@@ -234,7 +213,6 @@ mod tests {
     #[test]
     fn decide_trusts_prior_completely_it_is_the_callers_job_to_verify_it() {
         let now = gen("01RUN-B", Some("s-first"));
-        // 即使這個 run_id 字典序排在「現在這代」後面，`decide` 也不會自作主張推翻呼叫端的判斷。
         let out = decide(&now, &EventIdentity { run_id: None, session_id: Some("s-y") }, Some(&PriorRun { run_id: "01RUN-Z" }));
         assert!(matches!(&out, Ownership::Stale { prior_run_id, .. } if prior_run_id == "01RUN-Z"), "{out:?}");
     }

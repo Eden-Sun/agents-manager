@@ -78,7 +78,6 @@ async fn fixture(pending: bool) -> Fixture {
     )
     .await
     .unwrap();
-    // A synthetic leftover reservation with a settled context: recovery must preserve its hold.
     sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at)VALUES(?,?,?,?,?,1,0,'hash','fast','reserved',123,'fixture',?)")
         .bind(crate::db::ulid()).bind(&identity.session_id).bind(&bot).bind(&run).bind(&turn).bind(&now).execute(&env.app.db).await.unwrap();
     if pending {
@@ -479,7 +478,6 @@ async fn page_bounds_keyset_and_read_errors_are_not_silently_empty() {
             Err(Error::Bounds)
         ));
     }
-    // Copy only synthetic private rows, with the same timestamp to exercise tie-breaking.
     for turn in ["page-b", "page-c"] {
         sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,created_at)SELECT ?,conversation_id,run_id,'web','completed',created_at FROM turns WHERE id=?").bind(turn).bind(&f.identity.turn_id).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,created_at)SELECT session_id,bot_id,run_id,?,generation,revision,outcome,final_text,created_at FROM api_bot_join_receipts WHERE turn_id=?").bind(turn).bind(&f.identity.turn_id).execute(&app.db).await.unwrap();
@@ -643,9 +641,8 @@ mod startup_abandonment_tests;
 #[tokio::test]
 async fn failed_owner_settles_api_pending_but_never_tool_pending_or_a_live_owner() {
     use super::runtime::{startup_checkpoint_on, StartupCheckpoint};
-    let f = fixture(false).await; // owner turn completed、receipt applied，revision 已推進。
+    let f = fixture(false).await;
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=?").bind(&f.identity.session_id).fetch_one(&f.env.app.db).await.unwrap();
-    // 測試直接改 status 來湊情境，繞過合法轉移的 trigger（只動這個測試的 DB）。
     sqlx::query("DROP TRIGGER turns_status_transition").execute(&f.env.app.db).await.unwrap();
     let set = |status: &'static str, api_pending: bool, tool: Option<&'static str>| {
         let db = f.env.app.db.clone();
@@ -660,20 +657,16 @@ async fn failed_owner_settles_api_pending_but_never_tool_pending_or_a_live_owner
         let mut conn = f.env.app.db.acquire().await.unwrap();
         startup_checkpoint_on(&mut conn, &f.identity, revision).await.ok().unwrap()
     };
-    // failed + api_pending（沒 tool_pending）→ Safe（startup gate 放行、restore 也成立）。
     set("failed", true, None).await;
     assert!(matches!(check().await, StartupCheckpoint::Safe), "failed owner + api_pending");
-    // failed + tool_pending → 永遠 Unresolved（工具可能已有副作用）。
     set("failed", false, Some("toolu_1")).await;
     assert!(matches!(check().await, StartupCheckpoint::Unresolved), "failed owner + tool_pending");
     set("failed", true, Some("toolu_1")).await;
     assert!(matches!(check().await, StartupCheckpoint::Unresolved), "failed owner + api_pending + tool_pending");
-    // owner 還在 in_flight（或 completed）時 api_pending 不放寬。
     set("in_flight", true, None).await;
     assert!(matches!(check().await, StartupCheckpoint::Unresolved), "in_flight owner + api_pending");
     set("completed", true, None).await;
     assert!(matches!(check().await, StartupCheckpoint::Unresolved), "completed owner + api_pending");
-    // 乾淨的 checkpoint 照舊 Safe。
     set("completed", false, None).await;
     assert!(matches!(check().await, StartupCheckpoint::Safe));
 }

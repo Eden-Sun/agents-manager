@@ -146,7 +146,6 @@ fn mark_last_block(content: &Value, ttl_1h: bool) -> Value {
         Value::Array(blocks) => {
             let mut blocks = blocks.clone();
             if let Some(Value::Object(last)) = blocks.last_mut() {
-                // thinking 區塊不能帶 cache_control。
                 if !matches!(last.get("type").and_then(Value::as_str), Some("thinking" | "redacted_thinking")) {
                     last.insert("cache_control".into(), ephemeral(ttl_1h));
                 }
@@ -257,14 +256,10 @@ pub fn request(options: &Options, system: &Value, messages: &[Message]) -> Value
         "system": system, "messages": messages,
         "tools": tools, "tool_choice": {"type": "auto"}
     });
-    // Opus 5.5／Fable 5.2 的 thinking 區塊綁定產生它的那段對話（system＋前文）。system 每回合重組
-    // （agent md 從設定檔、遠端主機重讀），只要一個位元組不同，下一回合整段歷史就被 API 以 400 拒絕、bot 從此卡死。
-    // drop_block：前綴對不上的 thinking 區塊由 API 丟掉、對話照常進行（需 `THINKING_BINDING_BETA` header）。
     body["thinking"] = json!({"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}});
     if options.fast {
         body["speed"] = json!("fast");
     }
-    // 串流：長回合才看得到進度；回應由 sse.rs 組回與非串流相同的 Response。
     body["stream"] = Value::Bool(true);
     let mut edits = Vec::new();
     if options.compact_at_input_tokens > 0 || is_compact_request(&messages) {
@@ -397,7 +392,6 @@ mod tests {
         assert!(opts.validate().is_err());
         opts.compact_at_input_tokens = 0;
 
-        // clear_tool_uses validation
         opts.clear_tool_uses_at_input_tokens = 20_000;
         assert!(opts.validate().is_ok());
         opts.clear_tool_uses_at_input_tokens = 19_999;
@@ -437,7 +431,6 @@ mod tests {
         let body_none = request(&opts, &system, &messages);
         assert!(body_none.get("context_management").is_none());
 
-        // Compaction only
         opts.compact_at_input_tokens = 150_000;
         let body_compact = request(&opts, &system, &messages);
         let cm = body_compact.get("context_management").expect("context_management should be present");
@@ -448,7 +441,6 @@ mod tests {
         assert_eq!(edits[0]["trigger"]["value"], 150_000);
         assert_eq!(edits[0]["instructions"], COMPACT_INSTRUCTIONS);
 
-        // Clear tool uses only
         opts.compact_at_input_tokens = 0;
         opts.clear_tool_uses_at_input_tokens = 100_000;
         let body_clear = request(&opts, &system, &messages);
@@ -460,7 +452,6 @@ mod tests {
         assert_eq!(edits[0]["keep"]["value"], 3);
         assert_eq!(edits[0]["clear_at_least"]["value"], 5000);
 
-        // Co-existence of both compaction and clear_tool_uses
         opts.compact_at_input_tokens = 150_000;
         let body_both = request(&opts, &system, &messages);
         let cm = body_both.get("context_management").expect("context_management present");
@@ -469,7 +460,6 @@ mod tests {
         assert_eq!(edits[0]["type"], "compact_20260112");
         assert_eq!(edits[1]["type"], "clear_tool_uses_20250919");
 
-        // /compact user prompt forces compaction trigger value 1 even when threshold is 0
         opts.compact_at_input_tokens = 0;
         opts.clear_tool_uses_at_input_tokens = 0;
         let compact_msgs = vec![Message { role: "user".into(), content: json!("/compact") }];
@@ -530,10 +520,6 @@ mod tests {
         let body = request(&opts, &system, &messages);
         let sent_msgs = body["messages"].as_array().unwrap();
 
-        // Compaction 之前的訊息全丟棄；只保留最新 compaction 區塊（含）之後的內容。
-        // 原本 5 則訊息，修剪後只剩 2 則：
-        // 第 0 則：Turn 2 assistant message 修剪掉 compaction 前的 thinking，保留 compaction 及其後 blocks
-        // 第 1 則：Turn 3 user message
         assert_eq!(sent_msgs.len(), 2);
         let turn2_blocks = sent_msgs[0]["content"].as_array().unwrap();
         assert_eq!(turn2_blocks.len(), 3);

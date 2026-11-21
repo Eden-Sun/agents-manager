@@ -205,8 +205,6 @@ pub fn instructions(folder: &Path) -> String {
             push(&format!("資料夾的指示：{}", parts.join("/")), &t, truncated, &mut out);
         }
     }
-    // `memory/` 是 bot 自己寫的地方；`.claude/memory/`（claude auto-memory 的格式，既有資料夾可能已經有）唯讀照樣載入——
-    // claude 不准受限 bot 寫 `.claude/` 底下（明確 allow 也一樣，2.1.288 實測），所以新記憶不能放那裡。
     for mem in [&["memory"][..], &[".claude", "memory"]] {
         let label = mem.join("/");
         let mem: Vec<&OsStr> = mem.iter().map(OsStr::new).collect();
@@ -218,7 +216,6 @@ pub fn instructions(folder: &Path) -> String {
                 .map(|e| e.name.to_string_lossy().into_owned())
                 .filter(|n| n.ends_with(".md") && !n.starts_with('.'))
                 .collect();
-            // 索引在前，其餘照名字。
             names.sort_by_key(|n| (n != "MEMORY.md", n.clone()));
             for n in names.into_iter().take(64) {
                 let Ok(f) = crate::trusted_open::open_entry_in(&dir, OsStr::new(&n)) else { continue };
@@ -331,7 +328,6 @@ mod tests {
         assert_eq!(remote_root(None, "/home/mac_builder"), "/home/mac_builder/shared-bots");
         assert_eq!(remote_root(Some("~/kefu"), "/home/mac_builder"), "/home/mac_builder/kefu");
         assert_eq!(remote_root(Some("  ~/kefu/  "), "/home/mac_builder/"), "/home/mac_builder/kefu/");
-        // 這台的絕對路徑不能拿去遠端用：改回遠端的 ~/shared-bots。
         assert_eq!(remote_root(Some("/Users/me/shared-bots"), "/home/mac_builder"), "/home/mac_builder/shared-bots");
         assert_eq!(remote_root(Some(""), "/"), "/shared-bots");
     }
@@ -356,7 +352,6 @@ mod tests {
         let made = create_new(&root, "support", &home, &data).unwrap();
         assert!(made.is_dir());
         assert!(matches!(create_new(&root, "support", &home, &data), Err(LcError::Conflict(_))), "同名 409，不悄悄共用");
-        // 符號連結指到資料目錄：照真正的位置擋。
         std::os::unix::fs::symlink(&data, home.join("sneaky")).unwrap();
         assert!(check_existing(&home.join("sneaky").to_string_lossy(), &home, &data).is_err());
         assert!(check_existing("relative/path", &home, &data).is_err());
@@ -419,29 +414,23 @@ mod tests {
         let (home_s, root_s) = (home.to_string_lossy().into_owned(), root.to_string_lossy().into_owned());
         let owned = |ws: &Path| daemon_owned_workspace(&data, Some(&root_s), &home_s, &ws.to_string_lossy());
 
-        // daemon 替它建的新資料夾：直接在 folders_root 底下一層。
         let made = create_new(&root, "support", &home, &data).unwrap();
         assert_eq!(owned(&made), Some(made.clone()));
-        // 使用者的既有資料夾、folders_root 下更深一層、folders_root 本身：都不是 daemon 的。
         assert_eq!(owned(&base.join("project/site")), None);
         std::fs::create_dir_all(made.join("sub")).unwrap();
         assert_eq!(owned(&made.join("sub")), None);
         assert_eq!(owned(&root), None);
-        // 預設根目錄（沒設 folders_root）＝ `<home>/shared-bots`。
         let default_made = create_new(&home.join("shared-bots"), "kefu", &home, &data).unwrap();
         assert!(daemon_owned_workspace(&data, None, &home_s, &default_made.to_string_lossy()).is_some());
         assert_eq!(daemon_owned_workspace(&data, None, &home_s, &made.to_string_lossy()), None, "不在預設根目錄底下");
-        // 舊格式：資料目錄底下的 shared-bots/<id>/workspace。
         let legacy = data.join("shared-bots/b1/workspace");
         std::fs::create_dir_all(&legacy).unwrap();
         assert_eq!(owned(&legacy), Some(legacy.clone()));
         assert_eq!(owned(&data.join("shared-bots/b1/other")), None);
         assert_eq!(owned(&data.join("shared-bots/b1/x/workspace")), None);
         assert_eq!(owned(&data.join("shared-bots/b1/../b1/workspace")), None);
-        // 符號連結：folders_root 底下那層若是指到使用者資料夾的連結，不能當成 daemon 建的。
         std::os::unix::fs::symlink(base.join("project/site"), root.join("link")).unwrap();
         assert_eq!(owned(&root.join("link")), None);
-        // 相對路徑與危險位置照舊擋。
         assert_eq!(daemon_owned_workspace(&data, Some(&root_s), &home_s, "relative/support"), None);
         assert_eq!(daemon_owned_workspace(&data, Some("/etc"), &home_s, "/etc/foo"), None);
     }

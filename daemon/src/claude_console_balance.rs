@@ -65,8 +65,6 @@ pub enum ParseOutcome {
     ParseFailed,
 }
 
-// ───────────────────────── 純解析 ─────────────────────────
-
 /// `$1,234.56` → 1234.56；整段字串必須剛好是一個金額。
 fn parse_money(s: &str) -> Option<f64> {
     let t = s.trim().strip_prefix("US").unwrap_or(s.trim());
@@ -156,7 +154,6 @@ fn ymd(y: i32, m: u32, d: u32) -> Option<NaiveDate> {
 /// `YYYY年M月D日`、`Nov 15, 2026`。
 fn find_dates(line: &str) -> Vec<NaiveDate> {
     let mut out = Vec::new();
-    // 1) 數字加分隔符：以非「數字 / - . 年 月 日」切開的片段。
     for tok in line.split(|c: char| !(c.is_ascii_digit() || matches!(c, '/' | '-' | '.' | '年' | '月' | '日'))) {
         if tok.is_empty() {
             continue;
@@ -165,7 +162,6 @@ fn find_dates(line: &str) -> Vec<NaiveDate> {
             out.push(d);
         }
     }
-    // 2) 英文月份：Mon D, YYYY（或 Month D YYYY）。
     let words: Vec<&str> = line.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
     for w in words.windows(3) {
         let m = w[0].trim_end_matches('.').to_lowercase();
@@ -198,7 +194,6 @@ fn parse_numeric_date(tok: &str) -> Option<NaiveDate> {
     }
     if parts[2].len() == 4 {
         let y = n[2] as i32;
-        // 英文介面是 MM/DD/YYYY；第一段不可能是月份才當 DD/MM。
         return if n[0] > 12 { ymd(y, n[1], n[0]) } else { ymd(y, n[0], n[1]) };
     }
     None
@@ -208,13 +203,11 @@ fn parse_numeric_date(tok: &str) -> Option<NaiveDate> {
 pub fn parse_console_billing(text: &str) -> ParseOutcome {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
 
-    // purchased：標籤行之後 8 行內第一個「整行就是金額」的行。
     let mut purchased: Option<f64> = None;
     for (i, l) in lines.iter().enumerate() {
         if !is_balance_label(l) {
             continue;
         }
-        // 標籤跟金額同一行（例如「Credit balance $5.00」）也算。
         let same = money_tokens(l);
         if same.len() == 1 && !is_promo_line(l) {
             purchased = Some(same[0]);
@@ -229,7 +222,6 @@ pub fn parse_console_billing(text: &str) -> ParseOutcome {
         return if is_logged_out(text) { ParseOutcome::LoggedOut } else { ParseOutcome::ParseFailed };
     };
 
-    // promotions：「$剩 of $總」行，後面幾行（到下一筆之前）的日期。
     let mut promotions: Vec<Promotion> = Vec::new();
     let mut idx = 0;
     while idx < lines.len() {
@@ -258,13 +250,11 @@ pub fn parse_console_billing(text: &str) -> ParseOutcome {
             }
             j += 1;
         }
-        // 欄位順序是「到期日、發放日」；介面語言不同時保險起見取較晚的當到期日。
         let expires_on = dates.iter().max().map(|d| format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()));
         promotions.push(Promotion { remaining_usd, total_usd, expires_on });
         idx = j.max(idx + 1);
     }
 
-    // promotional 可用額度：優先用「$X promotional credit available」那一行；沒有就加總各筆剩餘。
     let promotional_usd = lines
         .iter()
         .filter(|l| is_promo_line(l))
@@ -276,8 +266,6 @@ pub fn parse_console_billing(text: &str) -> ParseOutcome {
 
     ParseOutcome::Ok(ConsoleBalanceData { purchased_usd, promotional_usd, promotions })
 }
-
-// ───────────────────────── 快照與 JSON ─────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -327,8 +315,6 @@ pub fn console_json(snapshot: Option<&ConsoleSnapshot>, configured: bool) -> Val
     v
 }
 
-// ───────────────────────── 抓取 ─────────────────────────
-
 /// 跑一條 agent-browser 指令；回 stdout。可替換成假的做測試。
 pub trait BrowserRunner: Send + Sync {
     fn run(&self, args: Vec<String>, timeout: Duration) -> impl Future<Output = Result<String, String>> + Send;
@@ -340,7 +326,6 @@ pub struct RealRunner {
 
 impl RealRunner {
     pub fn new() -> Self {
-        // daemon 的 PATH 不一定有 ~/.local/bin。
         let home = std::env::var("HOME").unwrap_or_default();
         let local = Path::new(&home).join(".local/bin/agent-browser");
         Self { exe: if local.exists() { local } else { PathBuf::from("agent-browser") } }
@@ -398,7 +383,6 @@ impl BrowserRunner for RealRunner {
             cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
             let out = tokio::time::timeout(timeout, cmd.output()).await.map_err(|_| "agent-browser timed out".to_string())?.map_err(|e| format!("agent-browser spawn failed: {e}"))?;
             if !out.status.success() {
-                // stderr 只留第一行短訊息，不帶其他輸出。
                 let err = String::from_utf8_lossy(&out.stderr);
                 let first = err.lines().next().unwrap_or("").chars().take(160).collect::<String>();
                 return Err(format!("agent-browser exited {}: {first}", out.status.code().unwrap_or(-1)));
@@ -419,7 +403,6 @@ fn remaining(deadline: Instant) -> Duration {
 /// 讀一次 Billing 頁。**一定** `close`，成功才把更新過的 cookie 寫回 `state_path`。
 pub async fn fetch_once<R: BrowserRunner>(r: &R, state_path: &Path) -> ConsoleSnapshot {
     let deadline = Instant::now() + TOTAL_BUDGET;
-    // 前一輪若殘留 session（daemon 被砍），先收掉，不然 --state 不會重新載入。
     let _ = r.run(args(&["--session", SESSION, "close"]), CLOSE_BUDGET).await;
     tokio::time::sleep(POST_CLOSE_WAIT.min(remaining(deadline))).await;
     let result = fetch_inner(r, state_path, deadline).await;
@@ -453,7 +436,6 @@ async fn fetch_inner<R: BrowserRunner>(r: &R, state_path: &Path, deadline: Insta
         if Instant::now() >= deadline {
             return Err("timed out waiting for billing page".into());
         }
-        // 頁面是 SPA，open 回來時餘額不一定已經畫好。
         tokio::time::sleep(POLL_EVERY.min(remaining(deadline))).await;
         let text = r.run(args(&["--session", SESSION, "get", "text", "body"]), remaining(deadline)).await?;
         outcome = parse_console_billing(&text);
@@ -463,7 +445,6 @@ async fn fetch_inner<R: BrowserRunner>(r: &R, state_path: &Path, deadline: Insta
     }
     if matches!(outcome, ParseOutcome::Ok(_)) {
         if let Err(e) = save_state_back(r, state_path, deadline).await {
-            // 寫回失敗不影響這次讀到的餘額。
             tracing::warn!("claude console balance: state write-back skipped: {e}");
         }
     }
@@ -509,8 +490,6 @@ fn validate_state_file(p: &Path) -> Result<(), String> {
         _ => Err("saved state has no cookies".into()),
     }
 }
-
-// ───────────────────────── daemon 整合 ─────────────────────────
 
 /// 設定現在要不要跑、登入態檔在哪；不跑回 `None`（含檔案不存在）。
 pub async fn active_state_path(app: &Arc<App>) -> Option<(PathBuf, Duration)> {

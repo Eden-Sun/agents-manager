@@ -59,7 +59,6 @@ fn codex_outcome_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
     let lines: Vec<&str> = log.lines().collect();
 
-    // 尋找最後一次出現 sent 其中一句的 user prompt 行
     let start = lines.iter().rposition(|l| is_turn_prompt_candidate(l, sent, &since))?;
 
     match turn_boundary::for_prompt(&lines, start, sent, &since) {
@@ -67,12 +66,10 @@ fn codex_outcome_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option
         turn_boundary::Proof::Legacy => {}
     }
 
-    // 從該 prompt 往後尋找 task_complete，期間不能有新的 user input
     let mut reply = None;
     let mut tc_offset = None;
     for (idx, line) in lines[start + 1..].iter().enumerate() {
         if crate::lifecycle::delivery::codex_user_text(line).is_some() {
-            // 本 turn 之後又有別的 user input，代表已經不是同一個回合
             return None;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
@@ -83,7 +80,6 @@ fn codex_outcome_for_turn(log: &str, sent: &[String], since_iso: &str) -> Option
             continue;
         }
 
-        // 檢查 task_complete 的時間戳
         if let Some(ts_str) = v.get("timestamp").and_then(Value::as_str) {
             if let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts_str) {
                 if at < since {
@@ -149,7 +145,6 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
     let since = chrono::DateTime::parse_from_rfc3339(since_iso).ok()?;
     let lines: Vec<&str> = log.lines().collect();
 
-    // 尋找最後一筆 task_complete
     let pos = lines.iter().rposition(|l| is_task_complete_candidate(l, &since))?;
 
     match turn_boundary::for_latest(&lines, pos, &since) {
@@ -157,7 +152,6 @@ pub fn codex_latest_reply_since(log: &str, since_iso: &str) -> Option<String> {
         turn_boundary::Proof::Legacy => {}
     }
 
-    // 檢查在該 task_complete 之後是否又有了新的 user message
     for line in &lines[pos + 1..] {
         if crate::lifecycle::delivery::codex_user_text(line).is_some() {
             return None;
@@ -224,7 +218,6 @@ pub async fn codex_rollout_reply_for_hookless(
 mod tests {
     #[test]
     fn native_task_complete_error_requires_matching_native_boundaries() {
-        // Shape: Codex 0.165 TurnCompleteEvent; message: upstream retry_after.rs.
         let start = serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:00Z","payload":{"type":"task_started","turn_id":"native-a"}});
         let prompt = serde_json::json!({"type":"response_item","timestamp":"2026-10-25T01:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test prompt"}]}});
         let complete = serde_json::json!({"type":"event_msg","timestamp":"2026-10-25T01:00:02Z","payload":{"type":"task_complete","turn_id":"native-a","last_agent_message":null,"error":{"message":"Access to this deployment ended.","codex_error_info":"model_not_found"}}});
@@ -288,12 +281,10 @@ mod tests {
             task_complete("2026-10-25T01:00:05Z", "turn 1 reply"),
             user_msg("2026-10-25T01:05:00Z", "turn 2 prompt")
         );
-        // 本 turn 是 "turn 2 prompt"，開始於 01:05:00Z，但尚未有 task_complete
         assert_eq!(
             codex_reply_for_turn(&log, &["turn 2 prompt".into()], "2026-10-25T01:04:50Z"),
             None
         );
-        // 若問的是 turn 1，但在 turn 1 之後已有新的 user prompt（turn 2），也不得回傳
         assert_eq!(
             codex_reply_for_turn(&log, &["turn 1 prompt".into()], "2026-10-25T00:59:50Z"),
             None
@@ -308,12 +299,10 @@ mod tests {
             user_msg("2026-10-25T01:00:00Z", "any updates"),
             task_complete("2026-10-25T01:00:05Z", "old update reply")
         );
-        // 本回合在 01:05:00Z 送出 "any updates"，但目前 rollout 裡只有 01:00:00Z 的紀錄
         assert_eq!(
             codex_reply_for_turn(&log, &["any updates".into()], "2026-10-25T01:05:00Z"),
             None
         );
-        // since 解析失敗一律回 None
         assert_eq!(
             codex_reply_for_turn(&log, &["any updates".into()], "invalid-time"),
             None
@@ -371,9 +360,7 @@ mod tests {
             task_complete("2026-10-25T01:00:05Z", "reply 1"),
             user_msg("2026-10-25T01:05:00Z", "q2")
         );
-        // since 晚於 task_complete -> 忽略
         assert_eq!(codex_latest_reply_since(&log, "2026-10-25T01:01:00Z"), None);
-        // task_complete 之後有新 user prompt -> 忽略
         assert_eq!(codex_latest_reply_since(&log, "2026-10-25T00:55:00Z"), None);
     }
 }

@@ -60,8 +60,6 @@ pub async fn start(app: &Arc<App>, kind: &str, to: &str, from: Option<&str>, sec
         if !versions.contains(&section.version) { versions.push(section.version.clone()); }
     }
     versions.sort_by_key(|v| crate::changelog::parse_version(v));
-    // Capture retry intent before queueing: concurrent first requests must not turn into
-    // an implicit retry if the request ahead of them fails while they wait for AUTO_LOCK.
     let mut jobs = Vec::new();
     let mut duplicate = true;
     for version in &versions {

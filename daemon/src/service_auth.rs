@@ -109,23 +109,18 @@ mod tests {
         assert!(allows(DAEMON_SWAP, "POST", "/api/services/daemon-swap/probe/01M123"));
         assert!(allows(DAEMON_SWAP, "GET", "/api/supervisor/health"));
         assert!(allows(DAEMON_SWAP, "POST", "/api/services/daemon-swap/restart-window"));
-        // 窗口只能經 restart-window 自己開（同一個核准＋安全檢查），generic acquire 要核准單、不在 scope。
         assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/restart/acquire"));
         assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/rebuild/acquire"));
-        // One service's route is not the other's.
         assert!(!allows(DAEMON_SWAP, "POST", "/api/services/herdr-upgrade/resume/01M123"));
         assert!(!allows(HERDR_UPGRADE, "POST", "/api/services/daemon-swap/probe/01M123"));
-        // No generic bot control, no extra path segments, no other lease resource.
         assert!(!allows(HERDR_UPGRADE, "POST", "/api/bots/01M123/start"));
         assert!(!allows(DAEMON_SWAP, "POST", "/api/bots/01M123/prompt"));
         assert!(!allows(HERDR_UPGRADE, "POST", "/api/services/herdr-upgrade/resume/01M123/stop"));
         assert!(!allows(HERDR_UPGRADE, "POST", "/api/services/herdr-upgrade/resume/"));
         assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/deploy/acquire"));
         assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/approvals/a1/decide"));
-        // `/api/state` carries bot env/args: neither service reads it.
         assert!(!allows(DAEMON_SWAP, "GET", "/api/state"));
         assert!(!allows(HERDR_UPGRADE, "GET", "/api/state"));
-        // Unknown service ids get nothing.
         assert!(!allows("user", "GET", "/api/supervisor/health"));
     }
 }

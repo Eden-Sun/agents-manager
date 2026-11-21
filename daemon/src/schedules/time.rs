@@ -242,7 +242,6 @@ pub fn slot_at(spec: &Spec, tz_name: &str, when: DateTime<Utc>) -> Result<Option
             }
             continue;
         }
-        // 往前退 1 毫秒再找「嚴格晚於」的下一次：剛好落在 `when` 的時段就會是 `when` 本身。
         let before = when - Duration::milliseconds(1);
         if daily_like(tz, start, days.clone(), before)? == Some(when) {
             return Ok(Some((slot.label.clone(), when)));
@@ -252,7 +251,6 @@ pub fn slot_at(spec: &Spec, tz_name: &str, when: DateTime<Utc>) -> Result<Option
 }
 
 fn earliest_slot(tz: Tz, slots: &[Slot], days: Option<Vec<Weekday>>, after: DateTime<Utc>, pick: Picker<'_>) -> Result<Option<(DateTime<Utc>, String)>> {
-    // 先比出最早的候選（固定時段 lo==hi；隨機區間是還沒抽的 [lo, hi]），只對勝出的那個抽籤。
     let mut best: Option<(DateTime<Utc>, DateTime<Utc>, String)> = None;
     for slot in slots {
         let start = parse_time(&slot.time)?;
@@ -275,7 +273,6 @@ fn earliest_slot(tz: Tz, slots: &[Slot], days: Option<Vec<Weekday>>, after: Date
 /// 隨機區間：從 `after` 的本地日期起，第一個「還有可抽秒數」的區間，回傳可抽範圍 `[lo, hi]`（整秒，`lo` 嚴格晚於 `after`）。
 fn window_like(tz: Tz, start: NaiveTime, end: NaiveTime, days: Option<Vec<Weekday>>, after: DateTime<Utc>) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
     let first: NaiveDate = after.with_timezone(&tz).date_naive();
-    // 嚴格晚於 `after` 的第一個整秒。
     let floor = DateTime::from_timestamp(after.timestamp() + 1, 0).context("時間超出範圍")?;
     for offset in 0..400 {
         let date = first + Duration::days(offset);
@@ -301,7 +298,6 @@ fn next_plain(spec: &Spec, tz: Tz, after: DateTime<Utc>) -> Result<Option<DateTi
         }
         Spec::Interval { every_secs, anchor } => {
             check_interval(*every_secs)?;
-            // 先比較時刻再算秒數：anchor 前不到一秒時 num_seconds() 會截成 0，不能當成「已過 anchor」。
             if after < *anchor {
                 return Ok(Some(*anchor));
             }
@@ -327,7 +323,6 @@ fn daily_like(tz: Tz, time: NaiveTime, days: Option<Vec<Weekday>>, after: DateTi
                 continue;
             }
         }
-        // 本地不存在的時間就跳過這一天；這樣 DST 跳過當天不會補跑，也不會重送到隔天同一時刻。
         let Some(when) = resolve(tz, date.and_time(time)) else { continue };
         if when > after {
             return Ok(Some(when));
@@ -358,7 +353,6 @@ mod tests {
 
     #[test]
     fn once_in_dst_gap_is_rejected() {
-        // 美東 2026-03-08 凌晨 2:00 → 3:00 跳過。
         let spec = Spec::Once { at: "2026-03-08T02:30".into() };
         let err = validate_and_first(&spec, "America/New_York", utc(2026, 1, 1, 0, 0)).unwrap_err();
         assert!(err.to_string().contains("不存在"), "{err}");
@@ -366,7 +360,6 @@ mod tests {
 
     #[test]
     fn once_in_dst_overlap_takes_earlier() {
-        // 美東 2026-11-01 凌晨 1:30 重複；取較早（EDT, UTC-4）。
         let spec = Spec::Once { at: "2026-11-01T01:30".into() };
         let got = validate_and_first(&spec, "America/New_York", utc(2026, 10, 1, 0, 0)).unwrap();
         assert_eq!(got, Some(utc(2026, 11, 1, 5, 30)));
@@ -375,7 +368,6 @@ mod tests {
     #[test]
     fn interval_is_anchored_not_drifting() {
         let spec = Spec::Interval { every_secs: 3600, anchor: utc(2026, 10, 13, 0, 0) };
-        // 任務慢跑完也不影響下一次：永遠是 anchor 的整數倍。
         assert_eq!(next_after(&spec, "UTC", utc(2026, 10, 13, 0, 0)).unwrap(), Some(utc(2026, 10, 13, 1, 0)));
         assert_eq!(next_after(&spec, "UTC", utc(2026, 10, 13, 1, 20)).unwrap(), Some(utc(2026, 10, 13, 2, 0)));
     }
@@ -386,7 +378,6 @@ mod tests {
         let spec = Spec::Interval { every_secs: 3600, anchor };
         let just_before = anchor - Duration::milliseconds(500);
         assert_eq!(next_after(&spec, "UTC", just_before).unwrap(), Some(anchor));
-        // 晚 500ms 時下一次是 anchor+1h，不能被截斷成跳過 anchor 或重跑 anchor。
         let just_after = anchor + Duration::milliseconds(500);
         assert_eq!(next_after(&spec, "UTC", just_after).unwrap(), Some(utc(2026, 10, 13, 1, 0)));
     }
@@ -401,7 +392,6 @@ mod tests {
 
     #[test]
     fn interval_overflowing_date_range_is_an_error_not_a_panic() {
-        // 逼近 chrono 可表示上限：下一次時間超出範圍，應回錯誤。
         let spec = Spec::Interval { every_secs: MAX_INTERVAL_SECS, anchor: DateTime::<Utc>::MAX_UTC - Duration::days(1) };
         assert!(next_after(&spec, "UTC", DateTime::<Utc>::MAX_UTC - Duration::hours(1)).is_err());
     }
@@ -414,29 +404,23 @@ mod tests {
 
     #[test]
     fn daily_respects_local_wall_clock_across_dst() {
-        // 美東每天 09:00：夏令（UTC-4）→ 13:00Z，冬令（UTC-5）→ 14:00Z。
         let spec = Spec::Daily { time: "09:00".into(), slots: vec![] };
         assert_eq!(next_after(&spec, "America/New_York", utc(2026, 3, 7, 14, 0)).unwrap(), Some(utc(2026, 3, 8, 13, 0)));
         assert_eq!(next_after(&spec, "America/New_York", utc(2026, 3, 9, 13, 0)).unwrap(), Some(utc(2026, 3, 10, 13, 0)));
-        // 冬令 → 夏令之後仍是本地 09:00（EDT, UTC-4）。
         assert_eq!(next_after(&spec, "America/New_York", utc(2026, 3, 14, 13, 0)).unwrap(), Some(utc(2026, 3, 15, 13, 0)));
     }
 
     #[test]
     fn daily_skips_nonexistent_local_time_and_does_not_double_run_overlap() {
-        // 美東每天 02:30：2026-03-08 不存在 → 跳過當天。
         let spec = Spec::Daily { time: "02:30".into(), slots: vec![] };
         assert_eq!(next_after(&spec, "America/New_York", utc(2026, 3, 8, 6, 0)).unwrap(), Some(utc(2026, 3, 9, 6, 30)));
-        // 每天 01:30：2026-11-01 重複，只跑較早那次（EDT, 05:30Z），不再於 06:30Z 補跑。
         let spec = Spec::Daily { time: "01:30".into(), slots: vec![] };
         assert_eq!(next_after(&spec, "America/New_York", utc(2026, 11, 1, 5, 30)).unwrap(), Some(utc(2026, 11, 2, 6, 30)));
     }
 
     #[test]
     fn weekly_picks_next_selected_weekday() {
-        // 2026-10-13 是週二。選週一(0)、週五(4)，09:00 台北。
         let spec = Spec::Weekly { time: "09:00".into(), weekdays: vec![0, 4], slots: vec![] };
-        // 台北 09:00 = UTC 01:00；週二之後下一個是週五 10-16。
         assert_eq!(next_after(&spec, "Asia/Taipei", utc(2026, 10, 13, 2, 0)).unwrap(), Some(utc(2026, 10, 16, 1, 0)));
     }
 
@@ -457,11 +441,8 @@ mod tests {
 
     #[test]
     fn multi_slot_daily_picks_earliest_and_labels_it() {
-        // 台北每天 08:30「上班」、18:05「下班」。
         let spec = Spec::Daily { time: "08:30".into(), slots: vec![slot("08:30", "上班"), slot("18:05", "下班")] };
-        // 台北 08:30 = UTC 00:30；10:00 台北之後的下一次是 18:05 台北 = UTC 10:05。
         assert_eq!(next_slot_after(&spec, "Asia/Taipei", utc(2026, 11, 9, 2, 0)).unwrap(), Some((utc(2026, 11, 9, 10, 5), "下班".into())));
-        // 18:05 之後才是隔天 08:30。
         assert_eq!(next_after(&spec, "Asia/Taipei", utc(2026, 11, 9, 10, 5)).unwrap(), Some(utc(2026, 11, 10, 0, 30)));
         assert_eq!(slot_label_at(&spec, "Asia/Taipei", utc(2026, 11, 9, 0, 30)).unwrap(), Some("上班".into()));
         assert_eq!(slot_label_at(&spec, "Asia/Taipei", utc(2026, 11, 9, 0, 31)).unwrap(), None);
@@ -470,7 +451,6 @@ mod tests {
     #[test]
     fn multi_slot_weekly_applies_weekdays_to_every_slot() {
         let spec = Spec::Weekly { time: "08:30".into(), weekdays: vec![0], slots: vec![slot("08:30", "上班"), slot("18:05", "下班")] };
-        // 2026-11-09 是週一；週一 18:05 台北（10:05Z）之後，下一個是週一 08:30 的下一週（11-16）。
         assert_eq!(next_slot_after(&spec, "Asia/Taipei", utc(2026, 11, 9, 10, 5)).unwrap(), Some((utc(2026, 11, 16, 0, 30), "上班".into())));
         assert_eq!(slot_label_at(&spec, "Asia/Taipei", utc(2026, 11, 9, 10, 5)).unwrap(), Some("下班".into()));
     }
@@ -565,12 +545,10 @@ mod tests {
     #[test]
     fn range_redraws_on_the_next_day_after_the_window_closes() {
         let spec = range_spec("08:55", "09:00");
-        // 窗口結束後（含剛好結束那一秒）：下一次落在隔天的區間。
         for after in [utc(2026, 11, 9, 1, 0), utc(2026, 11, 9, 5, 0)] {
             let (when, _) = next_slot_after_with(&spec, "Asia/Taipei", after, &mut |lo, _| lo).unwrap().unwrap();
             assert_eq!(when, utc(2026, 11, 10, 0, 55));
         }
-        // 兩天各抽各的：固定 picker 回不同值，結果跟著變，不會沿用前一天。
         let a = next_slot_after_with(&spec, "Asia/Taipei", utc(2026, 11, 9, 5, 0), &mut |lo, _| lo + 10).unwrap().unwrap().0;
         let b = next_slot_after_with(&spec, "Asia/Taipei", utc(2026, 11, 10, 5, 0), &mut |lo, _| lo + 20).unwrap().unwrap().0;
         assert_eq!((a, b), (utc(2026, 11, 10, 0, 55) + Duration::seconds(10), utc(2026, 11, 11, 0, 55) + Duration::seconds(20)));
@@ -593,7 +571,6 @@ mod tests {
         assert_eq!(code(&range_spec("09:00", "08:00")), Some("slot_range_not_after_start"));
         assert_eq!(code(&range_spec("09:00", "21:00:01")), Some("slot_range_too_long"));
         assert_eq!(code(&range_spec("09:00", "xx")), Some("slot_until_invalid"));
-        // 剛好 12 小時可以；不跨午夜（結束只能是當天時間）。
         assert!(validate_and_first(&range_spec("09:00", "21:00"), "UTC", utc(2026, 1, 1, 0, 0)).is_ok());
         assert!(validate_and_first(&range_spec("00:00", "23:59:59"), "UTC", utc(2026, 1, 1, 0, 0)).is_err());
     }
@@ -608,7 +585,6 @@ mod tests {
 
     #[test]
     fn range_mixes_with_fixed_slots_and_weekly_days() {
-        // 週一（2026-11-09）：固定 08:30（台北），隨機 18:00–18:10。
         let spec = Spec::Weekly { time: "08:30".into(), weekdays: vec![0], slots: vec![slot("08:30", "上班"), range("18:00", "18:10")] };
         let (when, label) = next_slot_after_with(&spec, "Asia/Taipei", utc(2026, 11, 9, 2, 0), &mut |lo, _| lo).unwrap().unwrap();
         assert_eq!((when, label.as_str()), (utc(2026, 11, 9, 10, 0), ""));

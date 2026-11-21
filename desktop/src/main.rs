@@ -62,8 +62,6 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             let handle = app.handle().clone();
-            // Everything below can block (login shell probe, daemon boot), so it runs off the
-            // main thread and the splash window paints immediately.
             std::thread::spawn(move || boot(handle, addr));
             Ok(())
         })
@@ -80,10 +78,6 @@ fn main() {
 }
 
 fn boot(handle: tauri::AppHandle, addr: SocketAddr) {
-    // A daemon already running in a terminal wins: attach to it, skip the preflight (it
-    // evidently found what it needed), and leave it alone on quit. The check has to identify
-    // the daemon, not just find a listener — otherwise any process holding the port would
-    // have the window navigated to it.
     let running = match identify(addr) {
         Port::Daemon => true,
         Port::Free => false,
@@ -126,8 +120,6 @@ fn boot(handle: tauri::AppHandle, addr: SocketAddr) {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    // ATS is happier with the `localhost` exception domain than a bare IP, and the daemon
-    // accepts either as a `Host` (docs/API.md §0).
     show(&handle, &format!("http://localhost:{}/", addr.port()));
 }
 
@@ -148,7 +140,6 @@ fn show(handle: &tauri::AppHandle, url: &str) {
 /// so no second page has to be bundled.
 fn fail(handle: &tauri::AppHandle, addr: SocketAddr) {
     eprintln!("agents-managerd did not come up on {addr}");
-    // `{:?}` on the String gives a quoted, escaped JS literal.
     report(handle, format!("{{kind:\"failed\",addr:{:?}}}", addr.to_string()));
 }
 
@@ -181,7 +172,6 @@ fn stop_daemon(child: CommandChild) {
         if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
             let deadline = Instant::now() + TERM_GRACE;
             while Instant::now() < deadline {
-                // ESRCH once the shell plugin's reader thread has reaped it.
                 if unsafe { libc::kill(pid, 0) } != 0 {
                     return;
                 }
@@ -196,8 +186,6 @@ fn spawn_daemon(
     handle: &tauri::AppHandle,
     env: HashMap<String, String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // The quit handler can only stop what it can see, so bracket the spawn with the flag:
-    // a quit arriving mid-`spawn()` would otherwise find `DAEMON` still empty.
     if EXITING.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -207,8 +195,6 @@ fn spawn_daemon(
         return Ok(());
     }
     *DAEMON.lock().unwrap() = Some(child);
-    // The daemon's tracing output is the only diagnostic a packaged build has; forward it to
-    // our stderr so running the bundle's binary from a terminal shows it (docs/PACKAGING.md §3).
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -265,8 +251,6 @@ fn identify(addr: SocketAddr) -> Port {
     let io = Duration::from_millis(1500);
     let _ = s.set_read_timeout(Some(io));
     let _ = s.set_write_timeout(Some(io));
-    // `/api/session` is rejected unless `Host` is loopback; when the daemon listens on a real
-    // interface it answers 403 instead, which still only agents-managerd does at this path.
     let host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
         format!("127.0.0.1:{}", addr.port())
     } else {
@@ -351,6 +335,5 @@ fn shell_path() -> Option<String> {
             return None;
         }
     };
-    // An interactive rc may print its own banner first; the PATH is the last line.
     text.lines().last().map(str::trim).filter(|p| p.contains('/')).map(str::to_string)
 }

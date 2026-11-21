@@ -131,7 +131,6 @@ pub async fn before_idle_close(app: &impl StuckTurnContext, run: &db::Run, turn:
             forget_unreadable(&turn.id);
             Ok(Recovery::Proceed)
         }
-        // 框讀不到（`›` 不在下緣的判讀範圍內）：跟讀不到畫面一樣等幾輪；之後照原本收尾，但不再沉默——告警一次（#1984）。
         crate::composer_parse::BoxState::Unready => {
             diagnose_box_once(&turn.id, &bot.kind, &screen, &sent[0], state);
             if unreadable_again(&turn.id) {
@@ -243,7 +242,6 @@ async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str
                 if !still_the_same(app, run, turn).await? {
                     return anyhow::Ok(false);
                 }
-                // 讀不到＝無從確認字還是這一則；鍵還沒送，當成沒按（額度照退）。
                 let Ok(screen) = super::delivery::read_composer(&client, &pane).await else {
                     return anyhow::Ok(false);
                 };
@@ -267,7 +265,6 @@ async fn press_enter_once(app: &impl StuckTurnContext, run: &db::Run, kind: &str
             db::refund_resend(app.db(), &turn.id).await?;
             Ok(Recovery::Wait)
         }
-        // 送鍵的 RPC 出錯：不知道按了沒有，額度不退（寧可不再按第二次）。
         Err(e) => {
             tracing::warn!(turn = %turn.id, error = %e, "pressing Enter for a prompt left in the composer failed; not pressing it again");
             Ok(Recovery::Wait)

@@ -51,7 +51,6 @@ async fn prompt_body_inner(
     cache_ttl_secs: i64,
     attachments: &[String],
 ) -> Result<PromptOut, E> {
-    // 只認 300（5 分鐘）／3600（1 小時）；其他值當預設，不讓不合法的 TTL 進到請求。
     let cache_ttl_secs = if cache_ttl_secs == 3600 { 3600 } else { 300 };
     use crate::lifecycle::send_now::ports::MaintenancePort;
     if !app.api_startup_gate.ready() || app.shutdown.is_cancelled() || text.trim().is_empty() || crid.trim().is_empty() { return Err(E::Unconfirmed); }
@@ -60,7 +59,7 @@ async fn prompt_body_inner(
             .await
             .map_err(|_| E::Refused("unknown attachment"))?;
         let mut total_size: i64 = 0;
-        const MAX_ATTACHMENT_BYTES: i64 = 5 * 1024 * 1024; // 5 MiB
+        const MAX_ATTACHMENT_BYTES: i64 = 5 * 1024 * 1024;
         for item in &items {
             let mime = item.mime.as_str();
             let is_supported = matches!(mime, "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf");
@@ -123,8 +122,6 @@ async fn prompt_body_inner(
     let run: Option<String> = sqlx::query_scalar(concat!("SELECT r.id FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.state='running'"))
         .bind(bot).fetch_optional(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     let run = run.ok_or(E::Unconfirmed)?;
-    // 換模型後舊對話接續的前置檢查（使用者 2026-11-14）：建立回合之前就證明。接不了就明確拒絕、不寫 pending 回合，
-    // 不要等到 identity 那一步才回無說明的 502。同一個 run 不用證明（沒有換 run）。
     let session_owner: Option<Option<String>> = sqlx::query_scalar("SELECT owner_run_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL")
         .bind(bot).fetch_optional(&mut *tx).await.map_err(|_| E::Unconfirmed)?;
     if let Some(Some(old)) = session_owner {

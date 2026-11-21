@@ -77,7 +77,6 @@ mod tests {
     #[tokio::test]
     async fn a_box_that_lost_the_head_is_cleared_and_never_submitted() {
         let f = fixture().await;
-        // 每一段都掉前 100 B：拆小段也擋不住，只剩框裡的檢查（這一段短，框不高，看得到缺頭；使用者那次也是只剩 4 列）。
         f.env.herdr.live_pane(
             &f.pane,
             tt::LivePane { width: Some(120), transcript_file: Some(f.transcript.clone()), send_text_drops_head_over: Some(100), ..Default::default() },

@@ -18,7 +18,6 @@
 
 /// 一段 SQL 布林式；`from`／`to`／`auth` 是 SQL 運算式（欄位名，可重複引用）。`from` 為 NULL（不是 bot 派工）時成立。
 pub fn relay_allowed_sql(from: &str, to: &str, auth: &str) -> String {
-    // `auth` 是逗號分隔的依據清單；某一項是否列在裡面：instr(',' || auth || ',', ',<項>,') > 0。
     let has = |item: &str| format!("instr(',' || {auth} || ',', ',' || {item} || ',') > 0");
     let has_specialist = has("'specialist:' || p.id");
     let has_deputy = has("'deputy:' || p.id");

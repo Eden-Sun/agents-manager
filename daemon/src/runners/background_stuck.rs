@@ -26,7 +26,6 @@ pub fn spawn(app: Arc<App>) {
 }
 
 async fn notify_due(app: &Arc<App>) {
-    // 鎖只在這一行持有，不跨 await。
     let due = crate::background_jobs::take_newly_stuck_now(&mut app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()));
     for (run_id, since, n) in due {
         let bot_id = match db::run(&app.db, &run_id).await {

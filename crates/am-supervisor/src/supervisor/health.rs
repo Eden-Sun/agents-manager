@@ -25,7 +25,6 @@ where
         }
         s.refreshing = true;
     }
-    // 呼叫端被取消（HTTP 連線斷了）也要把 refreshing 放掉，不然之後永遠回舊值。
     struct Reset<'a>(&'a std::sync::Mutex<ProbeSlot>);
     impl Drop for Reset<'_> {
         fn drop(&mut self) {
@@ -35,7 +34,6 @@ where
     let _reset = Reset(slot);
     let fresh = tokio::time::timeout(limit, probe()).await.ok();
     let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
-    // 逾時：沿用上一份，但一樣蓋時間戳，`ttl` 內不再重探。
     if let Some(v) = fresh {
         s.value = v;
     }
@@ -105,7 +103,6 @@ pub async fn release_triage_health(
         match map.get_mut(&data_dir) {
             Some(slot) => {
                 if slot.fingerprint != current_fp {
-                    // 設定變更：強制 invalidation，代數推進
                     slot.fingerprint = current_fp.clone();
                     slot.epoch = slot.epoch.wrapping_add(1);
                     slot.at = None;
@@ -113,10 +110,8 @@ pub async fn release_triage_health(
                     slot.refreshing = true;
                     slot.epoch
                 } else if slot.at.is_some_and(|at| at.elapsed() < ttl) || slot.refreshing {
-                    // 快取命中或已有探測進行中（非阻塞回傳上一份）
                     return slot.value.clone();
                 } else {
-                    // 快取過期且無人探測中
                     slot.refreshing = true;
                     slot.epoch
                 }
@@ -217,7 +212,6 @@ pub async fn responder_state(app: &(impl crate::capabilities::Db + crate::superv
 pub async fn role_state(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable), role: crate::supervisor::roles::Role) -> RoleState {
     let row = match crate::supervisor::roles::record(app.db(), role).await {
         Ok(row) => row,
-        // 讀不到不是「它好了」，也不是「它壞了」。
         Err(e) => {
             tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到角色狀態");
             return RoleState::Unknown;
@@ -229,21 +223,14 @@ pub async fn role_state(app: &(impl crate::capabilities::Db + crate::supervisor:
         "waiting_quota" => return RoleState::Unavailable(REASON_WAITING_QUOTA),
         _ => {}
     }
-    // 登記過、但那顆 bot 已經被軟刪：`db::active_run` 只看 `runs`，不看 bot 還在不在，
-    // 所以「bot 已軟刪、run 那一列還掛著 running」的窗口會被讀成還活著（#421 指出）。
-    // 那正是這支函式要擋的那種錯：閘門說「它可以裁示」，而它根本不存在，核准就靜靜躺著。
     match crate::db::bot(app.db(), &bot_id).await {
         Ok(Some(bot)) if bot.deleted_at.is_none() => {}
-        // 登記過卻找不到（或已軟刪）＝沒有東西在跑。沿用 `no_run`，不新增原因字串：
-        // 那幾個字是對外契約（#421 已經接線、SPEC 與 persona 都列舉了）。
         Ok(_) => return RoleState::Unavailable(REASON_NO_RUN),
         Err(e) => {
             tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到那顆 bot");
             return RoleState::Unknown;
         }
     }
-    // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
-    // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
     match crate::db::active_run(app.db(), &bot_id).await {
         Ok(Some(_)) => {}
         Ok(None) => return RoleState::Unavailable(REASON_NO_RUN),
@@ -252,14 +239,6 @@ pub async fn role_state(app: &(impl crate::capabilities::Db + crate::supervisor:
             return RoleState::Unknown;
         }
     }
-    // #427：health 的 30 秒 tick 看畫面看到的（`role_faults::refresh`；巡檢也看），加上 notify
-    // 連續沒完成。**排在 `active_run` 之後**：記憶體那張表會過期——bot 一停掉或重啟，上一輪的
-    // `needs_login` 還留著，排在前面會讓一顆已經停掉的協調者回 `needs_login` 而事實是 `no_run`。
-    // 兩個都是不可用，所以改派的決定不會錯，但那個字串會被原樣寫進 inbox payload 與 incident detail，
-    // 之後查事故的人會被它帶偏（i266 2026-09-24）。
-    //
-    // 空表（daemon 剛起來、第一拍還沒跑）與讀不到畫面都是 `None`：退回上面只看 DB 的結論，
-    // **不會**憑空變成 `Unavailable`（#421 的不變量）。這裡仍然不打 herdr，只讀記憶體。
     if let Some(reason) = crate::supervisor::role_faults::reason(app, role).await {
         return RoleState::Unavailable(reason);
     }
@@ -284,7 +263,6 @@ impl RoleState {
 
 pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::hosts::HostsAccess + crate::supervisor::ports::HostProbes + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::LocalAccountView + crate::supervisor::role_faults::RoleFaultTable + crate::supervisor::ports::DaemonConnection)) -> Result<Value, LcError> {
     let bots = crate::db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    // 一次讀完所有 active run，不逐顆 bot 再查一次（#1322）：跟 `active_run` 同一組狀態，同一顆 bot 只會有一筆。
     let active = crate::db::active_runs_by_bot(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut running = 0usize;
     let mut busy = 0usize;
@@ -307,7 +285,6 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
     } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.daemon_connected() {
         "degraded"
     } else { "healthy" };
-    // 協調者自己一格，跟巡檢分開：協調者等額度或倒了，不是「AGM 不能用」——使用者入口還在。
     let responder = supervisor.get("responder").cloned().unwrap_or(Value::Null);
     let responder_status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
     let responder_severity = responder_severity(&responder);
@@ -315,12 +292,6 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
     let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
     let system = crate::supervisor::incidents::system_health(app).await;
     let system_severity = system.get("status").and_then(Value::as_str).unwrap_or("unknown");
-    // The compat projection. `status` used to mean "is AGM all right", and a caller that only
-    // reads this field must not be told everything is fine while a host is down — so it is now
-    // the worse of the two halves, and the halves are published next to it. See docs/SPEC.md §18.
-    // 協調者也算進頂層：它是 bot 申請、核准請求與所有 mission 事件的**唯一**收件人，
-    // 它卡住時使用者入口顯示 healthy、沒有任何人被叫醒，申請可以躺好幾天（review 2026-09-16）。
-    // 「兩個問題兩個答案」的分格照舊留著，頂層只是不再漏掉這一半。
     let core = crate::supervisor::incidents::worst(manager_severity, system_severity);
     let severity = crate::supervisor::incidents::worst(&core, responder_severity);
     let api_bots_stuck_rows = am_base::db::api_bot::stuck_claude_api_bots_in_db(
@@ -339,8 +310,6 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
     Ok(json!({
         "status": severity,
         "checked_at": crate::db::now(),
-        // Two questions, two answers: whether the manager can work, and whether the system
-        // around it is intact. Folding them into one number is what let `healthy` mean neither.
         "manager_health": {
             "status": manager_severity,
             "supervisor_status": supervisor_status,
@@ -350,7 +319,6 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
         "responder_health": {
             "status": responder_severity,
             "responder_status": responder_status,
-            // #454：`responder_status` 在 `notify_stalled` 時還是 `idle`，原因只有這一欄帶得出來。
             "unavailable_reason": responder.get("unavailable_reason"),
             "inbox_open": responder.get("inbox_open"),
             "wake_pending": responder.get("wake_pending"),
@@ -359,24 +327,15 @@ pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabili
         "daemon": {"connected": app.daemon_connected()},
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
-        // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
-        // 不進 `status`、不自動殺：可能是正常的長工作，要人或 AGM 去看。
         "background_stuck": background_stuck,
         "api_bots_stuck": api_bots_stuck,
         "quota": app.quota_snapshot_json().await,
-        // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
-        // 只是以前要看得翻六張表；issue #75 驗收第 5 條。
         "due_actions": app.due_actions_snapshot().await,
-        // Two numbers, not one sum: an assignment still running and a notification nobody
-        // acked are different kinds of "owed", and adding them hid a 464-event backlog.
         "pending_assignments": crate::supervisor::store::open_assignment_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "awaiting_review": crate::supervisor::store::awaiting_review_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "inbox_open": crate::supervisor::store::open_inbox_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
-        // issue #204：`[release_triage] publish = true` 時 gh 沒登入要在這裡看得到（publish = false 為 null）。
         "release_triage": release_triage_health(app).await,
-        // issue #473：controller tick 每一段與全域鎖的耗時（最近一小時的 p50／p95／max）。
-        // 只是量測，沒有嚴重度、不進 `status`——要先有數字才談得上改結構。
         "timing": crate::supervisor::timing::snapshot(),
     }))
 }
@@ -400,19 +359,10 @@ fn background_stuck_entry(app: &impl crate::supervisor::ports::LocalAccountView,
 pub fn responder_severity(responder: &Value) -> &'static str {
     let status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
     let waiting = responder.get("wake_pending").and_then(Value::as_i64).unwrap_or(0) > 0;
-    // #454：#427 的兩個訊號只有 `unavailable_reason` 帶得出來（`status` 在 `notify_stalled` 時還是
-    // `idle`／`busy`——DB 那一欄從來不寫這個值）。不讀它的話，核准已經在改派、incident 已經開了，
-    // 這一格還是 healthy。
     let reason = responder.get("unavailable_reason").and_then(Value::as_str);
     match (status, reason) {
-        // 停在登入要人動手（從別的終端 `security unlock-keychain` 或跑 `/login`），期間所有核准與
-        // bot 申請都沒有人裁示，而且**不會自己好**。incident 開的就是 critical（`incidents.rs`），
-        // 兩個面板講同一件事就該同一個嚴重度（#454）。撞限不一樣：那是等得到的，維持 degraded。
         (_, Some(r)) if r == REASON_NEEDS_LOGIN => "critical",
         ("needs_login", _) => "critical",
-        // `no_run` 不是新消息——`status` 已經是 stopped／missing／not_configured，而下面那兩條規則
-        // 分得更細：**停著、又沒有人在等，本來就不算故障**（review 2026-09-16 c3 M1）。
-        // 這裡一律 degraded 會把那個判斷蓋掉，讓剛 setup 完還沒 start 的協調者被當成壞的。
         (_, Some(r)) if r == REASON_NO_RUN => match () {
             _ if responder.pointer("/desired_running").and_then(Value::as_bool) == Some(true) => "degraded",
             _ if waiting => "degraded",
@@ -805,11 +755,9 @@ mod probe_cache_tests {
         let va1 = release_triage_health(&app_a).await;
         assert_eq!(va1, json!({"app": "A"}));
 
-        // B 不得讀 A 的快取結論
         let vb1 = release_triage_health(&app_b).await;
         assert_eq!(vb1, json!({"app": "B"}), "App B 不得讀取 App A 的快取結果");
 
-        // 交錯呼叫，各自仍應命中快取
         let va2 = release_triage_health(&app_a).await;
         assert_eq!(va2, json!({"app": "A"}));
         let vb2 = release_triage_health(&app_b).await;
@@ -825,13 +773,11 @@ mod probe_cache_tests {
         let v1 = release_triage_health(&app).await;
         assert_eq!(v1, json!({"repo": "owner/repo-v1"}));
 
-        // 更新設定
         app.store.update(|c| {
             c.release_triage.repo = Some("owner/repo-v2".to_string());
             Ok(())
         }).await.unwrap();
 
-        // 應強制 invalidation，不得沿用舊快取
         let v2 = release_triage_health(&app).await;
         assert_eq!(v2, json!({"repo": "owner/repo-v2"}), "設定變更後應立即失效並重新探測");
     }
@@ -844,7 +790,6 @@ mod probe_cache_tests {
         let (_d, app) = create_mock_app("app_inflight", "owner/repo-v1", move |_cfg| {
             let s = *state_clone.lock().unwrap();
             if s == "v1" {
-                // 慢探測
                 std::thread::sleep(Duration::from_millis(200));
                 Some(json!({"version": "v1"}))
             } else {
@@ -860,21 +805,17 @@ mod probe_cache_tests {
 
         tokio::time::sleep(Duration::from_millis(30)).await;
 
-        // 此時 hot reload 設定
         *state.lock().unwrap() = "v2";
         app_ref.store.update(|c| {
             c.release_triage.repo = Some("owner/repo-v2".to_string());
             Ok(())
         }).await.unwrap();
 
-        // 呼叫新設定的 health
         let v2 = release_triage_health(&*app_ref).await;
         assert_eq!(v2, json!({"version": "v2"}));
 
-        // 等待舊的慢探測完成
         let _ = h1.await;
 
-        // 檢查快取：完成的 v1 probe 不得覆寫 v2
         let cached = release_triage_health(&*app_ref).await;
         assert_eq!(cached, json!({"version": "v2"}), "舊的 inflight probe 不得覆寫新設定的快取");
     }

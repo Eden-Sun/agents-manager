@@ -95,7 +95,6 @@ async fn stored_replies(app: &Arc<App>, turn: &str) -> Vec<String> {
 #[tokio::test]
 async fn a_long_multi_section_reply_is_stored_whole_when_the_cursor_sits_mid_reply() {
     let screen = screen_with(&long_reply());
-    // 游標＝讀到「## 修法」之前為止的畫面（回覆寫到一半時記下的）。
     let cursor = tail_hash(&screen[..screen.find("## 修法").unwrap()]);
     let (env, run, turn) = claude_fallback(&screen, "做個調查", Some(cursor)).await;
     let app = env.app.clone();
@@ -169,7 +168,6 @@ async fn codex_fallback_uses_rollout_reply_when_available() {
     let sess_id = "01a18888-0000-7000-8000-000000000001";
     sqlx::query("UPDATE runs SET native_session_id=? WHERE id=?").bind(sess_id).bind(&run).execute(&app.db).await.unwrap();
 
-    // 建立假 rollout 檔案
     let home = app.data_dir.join("codex_home");
     let sess_dir = home.join("sessions/2026/10/25");
     std::fs::create_dir_all(&sess_dir).unwrap();
@@ -205,7 +203,7 @@ async fn codex_fallback_uses_rollout_reply_when_available() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].0, "測試全過");
     assert_eq!(msgs[0].1, "transcript");
-    assert_eq!(msgs[0].2, 0); // incomplete = false
+    assert_eq!(msgs[0].2, 0);
 }
 
 /// #1988: 只有上一 turn 的 task_complete、本 turn 尚未完成時不得誤用上一 turn 的回覆，應退回終端快照
@@ -223,7 +221,6 @@ async fn codex_fallback_rejects_previous_turn_reply_when_current_turn_incomplete
     let sess_dir = home.join("sessions/2026/10/25");
     std::fs::create_dir_all(&sess_dir).unwrap();
     let rollout_file = sess_dir.join(format!("rollout-2026-10-25T01-00-00-{sess_id}.jsonl"));
-    // 只有上一回合的 task_complete，接著是本回合 user prompt，但本回合沒有 task_complete
     let log = format!(
         "{}\n{}\n{}",
         serde_json::json!({
@@ -258,9 +255,8 @@ async fn codex_fallback_rejects_previous_turn_reply_when_current_turn_incomplete
         .await
         .unwrap();
     assert_eq!(msgs.len(), 1);
-    // 不得誤拿上一回合回覆，退回終端快照
     assert_eq!(msgs[0].1, "terminal_fallback");
-    assert_eq!(msgs[0].2, 1); // incomplete = true
+    assert_eq!(msgs[0].2, 1);
 }
 
 /// #1988: rollout 缺失時退回終端快照
@@ -297,7 +293,6 @@ async fn terminal_fallback_ignores_duplicate_reply_already_stored_by_hook() {
     let run = tt::fake_run(&app, &bot.id).await;
     let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
 
-    // Turn 1: 已經由 hook 完成並收下完整回覆
     let turn1 = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "completed").await;
     let hook_reply = "The fake task is completed on `branch-fake` with 42 passing tests.\n\n- Detailed findings: all green";
     sqlx::query(
@@ -312,7 +307,6 @@ async fn terminal_fallback_ignores_duplicate_reply_already_stored_by_hook() {
     .await
     .unwrap();
 
-    // Turn 2: daemon 通知或交錯的 prompt，目前處於 in_flight
     let turn2 = crate::lifecycle::run_state::a_turn(&app, &bot.id, Some(&run), "in_flight").await;
     sqlx::query("UPDATE turns SET origin='web', prompt_text='[daemon fake notice] some results ready', created_at='2026-10-25T01:00:05Z' WHERE id=?")
         .bind(&turn2)
@@ -320,13 +314,11 @@ async fn terminal_fallback_ignores_duplicate_reply_already_stored_by_hook() {
         .await
         .unwrap();
 
-    // 終端畫面上殘留著上一回合的回覆（markdown 標記掉落）
     let screen = "⏺ The fake task is completed on branch-fake with 42 passing tests.\n\nDetailed findings: all green\n";
     env.herdr.set_screen(&format!("pane-{}", bot.id), screen);
 
     assert!(try_fallback(&app, &run, Some(&turn2)).await.unwrap());
 
-    // 驗證 Turn 2 的狀態是 completed_fallback，但 messages 表裡沒有為 Turn 2 存入重複的 assistant 訊息
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn2).fetch_one(&app.db).await.unwrap();
     assert_eq!(status, "completed_fallback");
 
@@ -337,7 +329,6 @@ async fn terminal_fallback_ignores_duplicate_reply_already_stored_by_hook() {
         .unwrap();
     assert!(turn2_msgs.is_empty(), "Turn 2 must not store duplicate scraped assistant reply when hook already received it");
 
-    // 全對話中依然只有 Turn 1 那唯一一筆完整回覆
     let all_replies: Vec<(String, String, i64)> = sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE conversation_id=? AND role='assistant'")
         .bind(&conv)
         .fetch_all(&app.db)

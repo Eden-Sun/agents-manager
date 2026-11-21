@@ -309,7 +309,6 @@ impl MockState {
         self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
     fn pane_json(&self, pane_id: &str, tab: &MockTab, cwd: Option<&Value>) -> Value {
-        // Named or not (like herdr after clearing a name), the occupant is the pane's agent.
         let occupant = self
             .agents
             .lock()
@@ -326,7 +325,6 @@ impl MockState {
             "cwd": cwd.cloned().or_else(|| pane_cwd.map(Value::String)).unwrap_or(Value::Null),
             "foreground_cwd": fg_cwd.map(Value::String).unwrap_or(Value::Null),
         });
-        // 真 herdr 0.9.3：空的 shell pane 沒有 `agent` 這個 key，`agent_status` 是 "unknown"（不是 null）。
         match occupant {
             Some(a) => {
                 v["agent"] = a.get("agent").cloned().unwrap_or(Value::Null);
@@ -400,8 +398,6 @@ impl MockHerdr {
             cwds: Default::default(),
             foreground_cwds: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
-            // 每顆 MockHerdr 各佔一段 id 空間：以前每顆都從 1 起算，每條測試拿到同一組 `ws-N:pM`，
-            // 以 pane id 當 key 的 `race_point` 就在不同測試之間互相吃動作（issue #949）。
             seq: Arc::new(std::sync::atomic::AtomicU64::new(MOCK_SEQ_BASE.fetch_add(1_000_000, std::sync::atomic::Ordering::SeqCst))),
         };
         let (workspaces, tabs, calls, agents) =
@@ -561,7 +557,6 @@ impl MockHerdr {
                             }
                         }
                         "pane.close" => {
-                            // NB: no tab reaping — see the type comment.
                             let pid = wid_of("pane_id");
                             let mut tabs = st.tabs.lock().unwrap();
                             for t in tabs.iter_mut() {
@@ -571,7 +566,6 @@ impl MockHerdr {
                         }
                         "pane.get" => {
                             let pid = wid_of("pane_id");
-                            // agent 一定住在某顆 pane 上：`set_agent` 種的 pane 就算不在任何 tab 上，也要查得到（#1451）。
                             let occupant_tab = st.agents.lock().unwrap().iter().find(|a| !is_stale(a) && a.get("pane_id").and_then(Value::as_str) == Some(pid.as_str())).map(|a| MockTab {
                                 tab_id: a.get("tab_id").and_then(Value::as_str).unwrap_or("tab-1").to_string(),
                                 workspace_id: a.get("workspace_id").and_then(Value::as_str).unwrap_or("ws-1").to_string(),
@@ -581,7 +575,6 @@ impl MockHerdr {
                             match st.find_pane(&pid).or(occupant_tab) {
                                 Some(t) => json!({"id": id, "result": {"type": "pane_info",
                                     "pane": st.pane_json(&pid, &t, None)}}),
-                                // 只用 `live_pane` 種、沒掛在 tab 上的 pane：照樣回得出畫面列數（#403）。
                                 None if st.live.lock().unwrap().get(&pid).is_some_and(|p| p.rows.is_some()) => {
                                     let t = MockTab { tab_id: "w0:t0".into(), workspace_id: "w0".into(), label: String::new(), panes: vec![] };
                                     json!({"id": id, "result": {"type": "pane_info", "pane": st.pane_json(&pid, &t, None)}})
@@ -600,7 +593,6 @@ impl MockHerdr {
                             match st.find_pane(&pid) {
                                 None => json!({"id": id, "error": {"code": "pane_not_found", "message": pid}}),
                                 Some(prev) => {
-                                    // Old tab is left standing, empty or not.
                                     st.tabs.lock().unwrap().iter_mut().for_each(|t| t.panes.retain(|p| *p != pid));
                                     let n = st.next();
                                     let tab = MockTab {
@@ -645,7 +637,6 @@ impl MockHerdr {
                                 {"workspaces": wss, "panes": panes,
                                  "tabs": tabs.iter().map(MockState::tab_json).collect::<Vec<_>>()}}})
                         }
-                        // Same enum as real herdr: an unknown source is a request error, not a read.
                         "pane.read" if !matches!(params.get("source").and_then(Value::as_str),
                             None | Some("visible" | "recent" | "recent_unwrapped" | "detection")) =>
                         {
@@ -678,8 +669,6 @@ impl MockHerdr {
                                 let revision = revisions.get(&pid).or_else(|| revisions.get("*")).copied().unwrap_or(1);
                                 (text, revision, false)
                             });
-                            // A screen set to this marker answers like a broken pane: the caller
-                            // must treat a read failure as an error, never as an empty screen.
                             if text == "__READ_ERROR__" {
                                 json!({"id": id, "error": {"code": "pane_unavailable", "message": "pane read failed"}})
                             } else {
@@ -706,15 +695,12 @@ impl MockHerdr {
                                     "cwd": "/tmp/p", "pid": os_pid}]}}}),
                             }
                         }
-                        // Typing into a pane: recorded in `calls`. A live pane reacts like a TUI;
-                        // any other pane just answers ok and keeps whatever screen the test set.
                         "pane.layout" => {
                             let pid = wid_of("pane_id");
                             let width = st.live.lock().unwrap().get(&pid).and_then(|p| p.width);
                             match width {
                                 Some(w) => json!({"id": id, "result": {"layout": {"panes": [
                                     {"pane_id": pid, "rect": {"x": 0, "y": 0, "width": w, "height": 40}}]}}}),
-                                // 沒帶 pane_id：真 herdr 回使用者正在看的那個分頁，這裡不含任何你要的 pane。
                                 None if pid.is_empty() => json!({"id": id, "result": {"layout": {"panes": []}}}),
                                 None => json!({"id": id, "error": {"code": "unsupported", "message": "no layout"}}),
                             }
@@ -738,7 +724,6 @@ impl MockHerdr {
                                     _ => text,
                                 };
                                 if !p.swallow_text {
-                                    // 游標一直停在框的最後一列尾巴：下一段的第一行接在後面（貼上被拆成好幾段時）。
                                     for (n, line) in text.split('\n').enumerate() {
                                         match p.composer.last_mut() {
                                             Some(last) if n == 0 => last.push_str(line),
@@ -780,14 +765,11 @@ impl MockHerdr {
                                         }
                                         continue;
                                     }
-                                    // claude 2.1.275 的 send-now 和弦（issue #103）：`ctrl+x ctrl+s` 跟 Enter
-                                    // 一樣把框裡的字送出去，差別在真的 CLI 那邊會順便打斷當下那一回合。
                                     let send_now = k == "ctrl+s" && prev == "ctrl+x";
                                     match k.as_str() {
                                         "enter" if !p.swallow_enter => submit_composer(p),
                                         _ if send_now && !p.swallow_enter => submit_composer(p),
                                         "ctrl+c" => p.composer.clear(),
-                                        // claude：空框裡的灰字建議，Tab 把它收進框裡（真正的字，不再是灰字）。
                                         "tab" if !p.swallow_tab && p.composer.is_empty() => {
                                             if let Some(s) = p.suggestion.take() {
                                                 p.composer = vec![s];
@@ -889,7 +871,6 @@ impl MockHerdr {
                             json!({"id": id, "result": {"agents": agents}})
                         }
                         "agent.get" => {
-                            // Like herdr: a live agent name or its pane id.
                             let target = wid_of("target");
                             let found = st
                                 .agents
@@ -912,7 +893,6 @@ impl MockHerdr {
                             bytes.push(b'\n');
                             let _ = w.write_all(&bytes).await;
                             let _ = w.flush().await;
-                            // 連線留著、不吐事件：訂閱建好的樣子。
                             std::future::pending::<()>().await;
                             return;
                         }
@@ -1131,7 +1111,6 @@ pub async fn trusted_transcript(app: &crate::state::App, bot_id: &str, root: &st
 }
 
 pub fn fake_home() -> std::path::PathBuf {
-    // 跟 `test_home` 換掉的 `$HOME` 同一個：兩條路（`home::dir()` 與讀 `$HOME` 的 `dirs::home_dir()`）都要落在同一處。
     crate::test_home::dir().to_path_buf()
 }
 
@@ -1196,7 +1175,6 @@ pub fn remove_at_exit(path: &std::path::Path) {
     }
     LIST.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
     HOOK.call_once(|| {
-        // SAFETY: `sweep` 是沒有參數的 `extern "C"` 函式，整個行程生命週期內都有效。
         unsafe { libc::atexit(sweep) };
     });
 }
@@ -1222,8 +1200,6 @@ pub async fn env() -> Env {
     git::init_repo(&repo);
     let pool = crate::app_ports_p1::open(&data.join("db.sqlite3")).await.unwrap();
     let cfg = crate::runners::app_ports_p2::load_config(data.join("config.toml")).await.unwrap();
-    // 出貨預設是關的（#749 審查）；測試 build 的 hook 本來就是空的，要用的測試換上 stub，所以這裡先把旗標打開，
-    // 「預設關」由 config 與 delivery 各自的測試把設定還原成預設再驗。
     cfg.update(|c| {
         c.codex_history.enabled = true;
         Ok(())

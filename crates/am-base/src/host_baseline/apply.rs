@@ -137,7 +137,6 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
     let mut p = Prepared::default();
     for a in chosen {
         let manual = |reason| Outcome { id: a.id.clone(), result: MANUAL, reason: Some(reason) };
-        // 憑證永遠手動（計畫本來就列 manual，這裡再擋一次）。
         if a.id.starts_with("gitconfig") || a.target.starts_with("git/") {
             p.manual.push(manual(super::plan::SECRET));
             continue;
@@ -147,7 +146,6 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
             continue;
         };
         if a.target == "codex/config.toml" {
-            // codex 的 model／effort／service_tier：計畫裡不該有；有也整個略過，連 manual 都不列。
             if key.split('.').any(super::manifest::codex_forbidden) {
                 continue;
             }
@@ -165,7 +163,6 @@ pub fn prepare(plan: &Plan, ids: Option<&[String]>) -> Result<Prepared, String> 
             continue;
         }
         if let Some(ident) = a.target.strip_prefix("claude:").and_then(|r| r.strip_suffix("/settings.json")) {
-            // 只認 `~/.claude`（default）與 `~/.claude-cc<N>`：自訂的 `$CLAUDE_CONFIG_DIR`／alias 指到哪裡，主機上不一定找得回同一個目錄。
             let digits = ident.strip_prefix("cc").filter(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|c| c.is_ascii_digit()));
             let token = match (ident, digits) {
                 ("default", _) => "claude-default/settings.json".to_string(),
@@ -961,7 +958,6 @@ mod tests {
         let mut p = hooks_plan();
         p.actions.push(FixAction { id: "codex.hooks.json".into(), action: plan::MANUAL, severity: "warn", target: "codex/hooks.json".into(), key: None, value: None, reason: Some(plan::NO_TEMPLATE) });
         p.actions.push(FixAction { id: "tool.rtk".into(), action: plan::MANUAL, severity: "critical", target: "tool/rtk".into(), key: None, value: None, reason: Some(plan::NO_INSTALLER) });
-        // 繞過計畫產生器手造的：model 類鍵、gitconfig、自訂身份、巢狀值。
         p.actions.push(act("codex.config.toml:model", "codex/config.toml", "model", serde_json::json!("gpt-x")));
         p.actions.push(act("codex.config.toml:profiles.x.model", "codex/config.toml", "profiles.x.model", serde_json::json!("gpt-x")));
         p.actions.push(act("codex.config.toml:features.reasoning_effort", "codex/config.toml", "features.reasoning_effort", serde_json::json!("high")));
@@ -1021,14 +1017,12 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(home.h.join(".codex")).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(leftovers.len(), 1, "no temp file left behind: {leftovers:?}");
 
-        // 第二次：鍵已在 → present，檔一個 byte 都不變，不建新備份。
         let before = home.read(".codex/config.toml");
         let run = home.apply(&id_n(1), &hooks_plan());
         assert_eq!((run.outcomes[0].result, run.backup_written), (PRESENT, false));
         assert_eq!(home.read(".codex/config.toml"), before);
         assert_eq!(home.backups(), vec![ID1.to_string()]);
 
-        // 已存在但值不同（各種寫法）：一律不改。
         for existing in [
             "[features]\nhooks = false\n",
             "[features] # c\n  hooks=false # x\n",
@@ -1042,7 +1036,6 @@ mod tests {
             assert_eq!(home.read(".codex/config.toml"), existing.as_bytes(), "{existing}");
             assert!(home.backups().is_empty(), "nothing written, nothing backed up: {existing}");
         }
-        // 沒有 [features]：以點號鍵補在根層（第一個表頭前），仍是合法 TOML。
         for (existing, want) in [
             ("model = \"m\"\n[profiles.a]\nx = 1\n", "model = \"m\"\nfeatures.hooks = true\n[profiles.a]\nx = 1\n"),
             ("a = 1", "a = 1\nfeatures.hooks = true\n"),
@@ -1057,7 +1050,6 @@ mod tests {
             let v: toml::Value = toml::from_str(&now).unwrap_or_else(|e| panic!("{e}: {now}"));
             assert_eq!(v["features"]["hooks"].as_bool(), Some(true));
         }
-        // 檔不在：不建。
         let home = Home::new();
         let run = home.apply(ID1, &hooks_plan());
         assert_eq!((run.outcomes[0].result, run.outcomes[0].reason), (SKIPPED, Some("file_missing")));
@@ -1082,7 +1074,6 @@ mod tests {
         assert_eq!(run.outcomes[0].reason, Some("symlink"));
         assert_eq!(std::fs::read(&outside).unwrap(), b"a = 1\n");
 
-        // 備份根目錄是 symlink：備份失敗 → 整趟停、檔不動。
         let home = Home::new();
         home.write(".codex/config.toml", "a = 1\n");
         std::fs::create_dir_all(home.h.join("bk")).unwrap();
@@ -1161,7 +1152,6 @@ mod tests {
             let id = if name == "other id" { id_n(3) } else { ID1.to_string() };
             std::fs::write(b.join("manifest"), format!("{header}id {id}\n{good}{second}")).unwrap();
             tweak(&b, &home.h);
-            // 逃出去的目標名真的指得到的目錄也先建好：擋下來的必須是名單，不是「目錄不在」。
             std::fs::create_dir_all(home._s.0.join(".ssh")).unwrap();
             let want = if name.contains("symlink") { "symlink" } else { "manifest_invalid" };
             let run = home.restore(ID1);
@@ -1210,7 +1200,6 @@ mod tests {
         let p = prepare(&plan, None).unwrap();
         let script = render_apply_sh(ID1, "r", &p.writes).unwrap();
 
-        // 沒有 jq 的 PATH：只放腳本用得到的工具。
         let home = Home::new();
         home.write(".claude-cc1/settings.json", body);
         let bin = home.h.join("bin");

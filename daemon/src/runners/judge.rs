@@ -17,8 +17,6 @@ use crate::judge::{key_status, stage_key, Sample};
 use crate::lc_error::LcError;
 use crate::state::App;
 
-// ───────────── Shadow Limit Hit ─────────────
-
 /// 鎖外去問：問答本身丟背景，呼叫端（畫面處理）不等它。
 pub async fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
     if !app.cfg.get().await.judge.enabled {
@@ -31,8 +29,6 @@ pub async fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
         }
     }));
 }
-
-// ───────────── Shadow Settled ─────────────
 
 /// 結案寫進 `result` 之後呼叫。**先看開關再丟背景**（#480）：HTTP 不在 tick 裡等。
 pub async fn shadow_settled(
@@ -64,8 +60,6 @@ pub async fn shadow_settled(
     }));
 }
 
-// ───────────── Stuck Sweep ─────────────
-
 /// 一次只准一個 sweep 在跑。
 pub(crate) static SWEEPING: AtomicBool = AtomicBool::new(false);
 
@@ -74,8 +68,6 @@ pub(crate) const SEEN_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// 控制迴圈每拍呼叫。**丟背景跑**（issue #480）。
 pub fn sweep(app: &Arc<App>) {
-    // 測試裡 controller 每拍都會經過這裡；`SWEEPING` 是行程全域旗標，會跟直接拿 `SweepGuard` 的測試互撞（issue #947）。
-    // 同 `idle_sleep::sweep`／`primary_keep_warm`：測試不跑背景 sweep，要驗的測試自己呼叫 `sweep_once`。
     if cfg!(test) || app.shutdown.is_cancelled() {
         return;
     }
@@ -150,8 +142,6 @@ pub async fn sweep_once(app: &Arc<App>) {
     }
 }
 
-// ───────────── HTTP Endpoints ─────────────
-
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/judge/shadow", get(get_shadow))
@@ -201,8 +191,6 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
         "suggested_by": crate::judge::SUGGESTED_BY, "source_label": crate::judge::SOURCE_LABEL, "suggestion_only": true,
     })))
 }
-
-// ───────────── Claim Collision Check（#1330）─────────────
 
 /// 題目與分支名的上限（字數）。
 const MAX_CLAIM_TEXT_CHARS: usize = 500;

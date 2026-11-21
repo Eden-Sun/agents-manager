@@ -68,8 +68,6 @@ pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crat
     if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
         return Ok(None);
     }
-    // Recheck after the candidate scan and again under the per-bot lock: handoff means this daemon
-    // must not restart the bot or write a bot_lost decision for the receiving daemon.
     if app.db().bot_handed_off_to(&bot.id).await?.is_some() {
         return Ok(None);
     }
@@ -81,7 +79,6 @@ pub(crate) async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crat
             .bind(&bot.id)
             .fetch_optional(app.db())
             .await?;
-    // 使用者關 pane 或其他路徑收掉的 run，都不是 herdr 掉的遺失。
     let lost = last
         .as_ref()
         .is_some_and(|(id, state, why)| id == &l.run_id && state == "exited" && why.as_deref().is_some_and(|w| LOST_REASONS.contains(&w)));
@@ -202,7 +199,6 @@ mod tests {
         let app = env.app.clone();
         let run2 = run.clone();
         crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
-            // pane-exited 事件那條路（events.rs）：在對帳讀完 run、還沒寫 exited 的那一瞬先收掉它。
             crate::lifecycle::mark_run_exited(&app, &run2, "pane exited").await;
         });
 
@@ -239,10 +235,7 @@ mod tests {
 
         let app = env.app.clone();
         let reconcile = tokio::spawn(async move { crate::reconcile::reconcile_host(&app, config::LOCAL_HOST).await });
-        // 補開停在閘門上（不管它是這一輪對帳還是延後補跑的那一輪起的）。
         reached.notified().await;
-        // 閘門不會自己放開：對帳要是在等補開，就永遠回不來。這個上限只是「回歸時別卡死整個測試行程」的保險，
-        // 正常路徑上對帳此刻只剩收尾，不靠它判斷快慢。
         tokio::time::timeout(std::time::Duration::from_secs(120), reconcile).await.expect("對帳不能等補開").unwrap().unwrap();
         assert_eq!(runner::pending_count(&env.app), 1, "對帳回來的時候補開還沒做完");
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "補開卡在閘門：沒有新 run");
@@ -371,7 +364,6 @@ mod tests {
         let bot = autostart_bot(&env, "flappy-restart").await;
         crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
         autostart_done(&env.app);
-        // Restore the durable history a fresh daemon would see after a restart; its process-local map starts empty.
         for attempt in 0..super::MAX_RESTARTS {
             crate::supervisor_inbox::push_inbox(
                 &env.app.db,
@@ -418,7 +410,6 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0]["outcome"], "restarted");
         assert_eq!(events[0]["reason"], "pane_gone");
-        // 已經接回來了：再掃一次不會再開。
         runner::sweep_lost_by_pane_gone(&env.app).await;
         runner::quiesce(&env.app).await;
         assert_eq!(runs(&env.app, &bot.id).await.len(), 2);
@@ -471,7 +462,6 @@ mod tests {
     async fn revive_parked_on_a_held_lock(env: &tt::Env, bot: &db::Bot) -> tokio::sync::OwnedMutexGuard<()> {
         let lost_run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
         crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
-        // 別的操作（hook、queue flush、spool 重放、對帳收尾…）握著這顆 bot 的鎖。
         let held = env.app.bot_lock(&bot.id).await.lock_owned().await;
         let reached = Arc::new(tokio::sync::Notify::new());
         let hook_reached = reached.clone();
@@ -522,7 +512,6 @@ mod tests {
 
         env.app.shutdown.cancel();
         env.app.background_tasks.close();
-        // 鎖還握在測試手上：補開要是還在鎖上等，wait() 就永遠不回來。上限只是回歸時別卡死整個測試行程。
         tokio::time::timeout(std::time::Duration::from_secs(120), env.app.background_tasks.wait())
             .await
             .expect("關機開始後補開不能在 bot 鎖上等，否則優雅關機的 wait() 會卡住（#1429）");
@@ -545,7 +534,6 @@ mod tests {
         for b in [&closed, &stopped, &plain, &child] {
             crate::lifecycle::start_bot(&env.app, &b.id).await.unwrap();
         }
-        // child 不能從這裡啟動：先起來，再改成 child。
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&child.id).execute(&env.app.db).await.unwrap();
         autostart_done(&env.app);
         for (b, why) in [(&closed, "pane exited"), (&plain, "pane gone"), (&child, "pane gone")] {
@@ -582,7 +570,6 @@ mod tests {
         assert_eq!(events[0]["outcome"], "failed");
         assert_eq!(runs(&env.app, &bot.id).await.len(), 1);
 
-        // 身份修好了，下一輪掃描也不再碰這顆已經決定過的 lost run。
         sqlx::query("UPDATE bots SET identity = NULL WHERE id = ?").bind(&bot.id).execute(&env.app.db).await.unwrap();
         runner::sweep_lost_by_pane_gone(&env.app).await;
         runner::quiesce(&env.app).await;
@@ -617,7 +604,6 @@ mod tests {
         runner::quiesce(&env.app).await;
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "第一輪：額度用完，不再開");
 
-        // 舊的補開紀錄滑出窗口。
         sqlx::query("UPDATE supervisor_inbox SET created_at = '2020-01-01T00:00:00.000Z' WHERE event_key LIKE ?")
             .bind(format!("bot_lost:{}:prior-%", bot.id))
             .execute(&env.app.db)

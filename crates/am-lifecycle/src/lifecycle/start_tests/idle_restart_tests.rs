@@ -54,7 +54,6 @@ async fn a_restart_that_cannot_start_again_is_not_recorded_as_a_user_stop() {
     assert_eq!(state, "exited", "重啟沒開回來，不是使用者停的");
     assert!(db::active_run(app.db(), &bot_id).await.unwrap().is_none());
 
-    // 對照：使用者自己 stop 的 run 留在 `stopped`。
     let (other, other_run) = bot_with_run(&env, "user", "idle").await;
     stop_bot(&app, &other).await.unwrap();
     let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&other_run).fetch_one(app.db()).await.unwrap();
@@ -102,7 +101,6 @@ async fn a_bot_that_got_busy_before_the_lock_is_not_restarted() {
         assert_eq!(reason(restart_bot_with(&app, &bot_id, opts).await.unwrap_err()), ("not_idle".into(), want.into()));
         assert_eq!(db::active_run(app.db(), &bot_id).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())));
     }
-    // 閒著但還有一回合沒收掉，也不動。
     let (bot_id, run_id) = bot_with_run(&env, "user", "idle").await;
     let conv = db::conversation_id(app.db(), &bot_id).await.unwrap();
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
@@ -115,7 +113,6 @@ async fn a_bot_that_got_busy_before_the_lock_is_not_restarted() {
         .unwrap();
     let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
     assert_eq!(reason(restart_bot_with(&app, &bot_id, opts).await.unwrap_err()).1, "turn_in_flight");
-    // 子 agent 的原地重啟也一樣。
     let (kid, _) = bot_with_run(&env, "child", "working").await;
     assert_eq!(reason(restart_child_in_pane_with(&app, &kid, true).await.unwrap_err()).1, "working");
     let methods = env.herdr.methods();

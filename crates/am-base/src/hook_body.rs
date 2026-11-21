@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// `Serialize` 是給 `hook_inbox` 用的：整個 body 要原封不動存進收件匣再讀回來走 §6.7。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookBody {
     pub bot_id: String,

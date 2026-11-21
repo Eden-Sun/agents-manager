@@ -145,11 +145,9 @@ pub async fn put_http(State(app): State<Arc<App>>, Path(key): Path<String>, Json
     }
     let (draft, changed) = put(&app.db, &key, &b.text).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(draft) = draft else {
-        // 非空寫入回 None＝目標已刪（見 [`put`]）：不能復活草稿。
         if !b.text.is_empty() {
             return Err(LcError::NotFoundValue(json!({"error": "draft_target_gone", "key": key})));
         }
-        // 從沒寫過、也沒東西可刪：rev 0。
         return Ok(Json(json!({"key": key, "rev": 0, "updated_at": null})));
     };
     if changed {
@@ -282,7 +280,6 @@ mod tests {
         assert!(get_http(State(app.clone())).await.unwrap().0["drafts"].as_array().unwrap().is_empty());
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("again", "c1")).await.unwrap().0;
         assert_eq!(r["rev"], 3, "a recreated draft must not restart at rev 1");
-        // 刪一份不存在的：rev 0、不留墓碑。
         let r = put_http(State(app.clone()), Path("bot:nope".into()), put_in("", "c1")).await.unwrap().0;
         assert_eq!(r["rev"], 0);
         assert!(get(&app.db, "bot:nope").await.unwrap().is_none());
@@ -351,11 +348,9 @@ mod tests {
         assert_eq!(ev.data["rev"], 1);
         assert_eq!(ev.data["client_id"], "tab-1");
         assert!(ev.data["updated_at"].as_str().is_some());
-        // 同樣的內容再送：不加 rev、不推。
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "tab-2")).await.unwrap().0;
         assert_eq!(r["rev"], 1);
         assert!(rx.try_recv().is_err());
-        // 刪除也推，text 空。
         let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "tab-2")).await.unwrap();
         let ev = rx.try_recv().unwrap();
         assert_eq!((ev.data["text"].as_str(), ev.data["rev"].as_i64(), ev.data["client_id"].as_str()), (Some(""), Some(2), Some("tab-2")));
@@ -385,7 +380,7 @@ mod tests {
         let _ = put_http(State(app.clone()), Path("group:p1".into()), put_in("g", "c")).await.unwrap();
         let _ = put_http(State(app.clone()), Path("bot:keep".into()), put_in("k", "c")).await.unwrap();
         let _ = put_http(State(app.clone()), Path("bot:b2".into()), put_in("x", "c")).await.unwrap();
-        let _ = put_http(State(app.clone()), Path("bot:b2".into()), put_in("", "c")).await.unwrap(); // 已經是墓碑
+        let _ = put_http(State(app.clone()), Path("bot:b2".into()), put_in("", "c")).await.unwrap();
         let mut rx = app.subscribe();
         clear_keys(&app, &["bot:b1".into(), "group:p1".into(), "bot:b2".into(), "bot:never".into()]).await;
         let left = list(&app.db).await.unwrap();
@@ -398,7 +393,6 @@ mod tests {
             seen.push((ev.data["key"].as_str().unwrap().to_string(), ev.data["rev"].as_i64().unwrap()));
         }
         assert_eq!(seen, [("bot:b1".to_string(), 2), ("group:p1".to_string(), 2)], "only drafts that had text announce");
-        // 復原後 key 再出現：rev 接著加，不從 1 重來。
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("back", "c")).await.unwrap().0;
         assert_eq!(r["rev"], 3);
     }
@@ -417,7 +411,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "a rejected write announces nothing");
         let tomb = get(&app.db, "bot:b1").await.unwrap().unwrap();
         assert_eq!((tomb.text.as_str(), tomb.rev), ("", 2), "墓碑與 rev 不動");
-        // 清除本身照舊冪等：再清一次不寫、不推。
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "c")).await.unwrap().0;
         assert_eq!(r["rev"], 2);
     }

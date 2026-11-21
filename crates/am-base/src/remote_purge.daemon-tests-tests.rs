@@ -32,7 +32,6 @@
                 anyhow::bail!("ssh: connect to host: Connection refused");
             }
             c.lock().unwrap().push(script.to_string());
-            // `sweep` 現在也會清回收區（#431）：那支腳本要回它自己的確認字，不然每個測試都在跑 gc 的失敗路徑。
             Ok(if script.contains("AM_TRASH_GC") { "AM_TRASH_GC 0\n".into() } else { "AM_TRASHED\n".into() })
         });
     }
@@ -155,7 +154,6 @@
         let r = remote("purgehost-restore").await;
         let app = r.env.app.clone();
         let id = r.deleted_bot("alfa").await;
-        // child：還原只清 `deleted_at`，不必動 config.toml。
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&id).execute(&app.db).await.unwrap();
 
         let (a2, i2) = (app.clone(), id.clone());
@@ -164,7 +162,6 @@
         });
 
         assert_eq!(sweep(&app, &r.host).await, (0, 0), "還原掉的那顆既沒清也不算欠著");
-        // `removed` 會把還原自己那次 ssh 也算進去（同樣提到 bots-trash 與這顆的 id），所以直接認搬進回收區的那支腳本。
         let moved_in = r.calls.lock().unwrap().iter().filter(|s| s.contains("AM_TRASHED") && s.contains(&id)).count();
         assert_eq!(moved_in, 0, "沒有任何一次「搬進回收區」下在這顆身上");
         assert!(crate::db::bot(&app.db, &id).await.unwrap().unwrap().deleted_at.is_none(), "它是活的");
@@ -234,7 +231,6 @@ async fn a_permanently_failing_head_of_line_does_not_starve_the_rest() {
         ids.push(r.deleted_bot(&format!("bot{i:03}")).await);
     }
     let app = r.env.app.clone();
-    // 第一輪排得到的那 100 顆（按 id 排序的前 100）＝永遠失敗的；剩下那顆＝第 101 顆。
     let first_batch: std::collections::HashSet<String> = crate::remote_purge::pending(&app.db, &r.host, true).await.unwrap().into_iter().collect();
     assert_eq!(first_batch.len(), 100, "前提：一輪最多 100 顆");
     let lone = ids.iter().find(|id| !first_batch.contains(*id)).unwrap().clone();
@@ -261,7 +257,6 @@ async fn an_owed_bot_stays_owed_to_its_old_host_after_its_project_moves() {
     let _ = second_remote_project(&r, new_host).await;
     let app = r.env.app.clone();
     let id = r.deleted_bot("alfa").await;
-    // 刪除的時候專案還在舊主機；之後搬到新主機，舊主機離線、從來沒 purge 過。
     sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(new_host).bind(&r.env.project_id).execute(&app.db).await.unwrap();
     let row = r.row(&id).await.expect("搬家時舊主機的義務要寫進 DB");
     assert!(row.0.is_none() && row.1 == 0, "欠著、還沒試過");
@@ -280,7 +275,6 @@ async fn moving_a_project_back_and_forth_neither_duplicates_nor_resets_the_debt(
     let other = "zz-purgehost-move-d";
     let _ = second_remote_project(&r, other).await;
     let app = r.env.app.clone();
-    // done：在舊主機清掉（有已清記號）；owed：還欠著。
     let done = r.deleted_bot("done").await;
     assert_eq!(sweep(&app, &r.host).await, (1, 0));
     let owed = r.deleted_bot("owed").await;
@@ -306,7 +300,6 @@ async fn moving_a_project_back_and_forth_neither_duplicates_nor_resets_the_debt(
     let done_rows = rows(done).await;
     assert_eq!(done_rows.len(), 1);
     assert!(done_rows[0].1.is_some() && done_rows[0].0 == r.host, "已清掉的記號不被搬家改回欠著");
-    // 新主機成功清掉它，不能沖掉舊主機的債。
     crate::remote_purge::record(&app, &owed, other, true, None).await;
     assert!(r.row(&owed).await.unwrap().0.is_none(), "新主機的成功不算舊主機的債");
 }
@@ -372,7 +365,6 @@ async fn a_handed_off_project_does_not_occupy_the_sweep_slots() {
         .execute(&app.db)
         .await
         .unwrap();
-    // 移交專案的 101 顆已刪 bot 排在字典序前面；正常專案只有一顆 z1。
     for i in 0..101 {
         insert_deleted_bot(&app, &handed, &format!("a{i:03}")).await;
     }

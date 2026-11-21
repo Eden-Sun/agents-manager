@@ -15,8 +15,6 @@ use super::*;
 use crate::config::HostCfg;
 use crate::db;
 use tt::App;
-// #1862 遷移 B：不需要 daemon `App`，用 am-share 自己的窄環境（同名同形的 env／claude_bot／scratch_dir）。
-// （要 daemon prompt／turns 路徑的「壞 SVG 提醒」在 daemon/src/share_tests/remote_svg.rs。）
 use crate::share::test_env as tt;
 
 fn client() -> reqwest::Client {
@@ -93,8 +91,6 @@ fn jpeg(w: u32, h: u32) -> Vec<u8> {
     out
 }
 
-// ───────────────────────── 上傳 ─────────────────────────
-
 #[tokio::test]
 async fn an_upload_lands_in_the_remote_inbox() {
     let e = tt::env().await;
@@ -167,8 +163,6 @@ async fn the_per_minute_upload_limit_is_the_same_as_local() {
     assert_eq!(r.upload("one-too-many.txt", b"x".to_vec()).await.status(), 429);
 }
 
-// ───────────────────────── 主機斷線 ─────────────────────────
-
 /// 主機斷線：上傳、列表、下載、附件檢查都是一般 503（不洩漏主機名），不是 404 也不是空清單。
 #[tokio::test]
 async fn a_disconnected_host_is_a_plain_503_everywhere() {
@@ -198,8 +192,6 @@ async fn an_attachment_that_is_not_in_the_remote_inbox_is_a_400() {
     assert_eq!(send.status(), 400);
     assert_eq!(send.json::<Value>().await.unwrap()["reason"], "unknown_attachment");
 }
-
-// ───────────────────────── 列表 ─────────────────────────
 
 #[tokio::test]
 async fn listing_an_outbox_that_does_not_exist_yet_is_empty_not_an_error() {
@@ -231,7 +223,6 @@ async fn files_older_than_an_hour_are_listed_and_never_deleted() {
     let r = setup(&e, "ls-old").await;
     let old = r.outbox.join("old-report.txt");
     std::fs::write(&old, b"still here").unwrap();
-    // BSD touch（macOS）沒有 `-d '2 hours ago'`（#1964）：直接設 mtime，兩邊一樣。
     let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
     std::fs::OpenOptions::new().write(true).open(&old).unwrap().set_modified(two_hours_ago).unwrap();
     for _ in 0..2 {
@@ -259,13 +250,10 @@ async fn the_remote_listing_hides_what_the_local_one_hides() {
     assert_eq!(names, vec!["ok.txt"], "{v}");
 }
 
-// ───────────────────────── 下載 ─────────────────────────
-
 #[tokio::test]
 async fn a_remote_download_streams_the_whole_file_with_a_content_length() {
     let e = tt::env().await;
     let r = setup(&e, "dl-big").await;
-    // 64 MiB 稀疏檔：大小剛好在上限，內容全是 0（不是黑名單開頭）。
     let big = r.outbox.join("big.bin");
     std::fs::File::create(&big).unwrap().set_len(crate::outbox::MAX_BYTES).unwrap();
     let resp = client().get(r.url("files/big.bin")).send().await.unwrap();
@@ -332,7 +320,6 @@ async fn a_truncated_remote_file_aborts_the_connection() {
         }
         Ok(out)
     });
-    // 連線在 body 中途被中斷：client 要嘛在收到標頭之前就看到錯誤（小檔常見），要嘛 body 讀到一半出錯——不會收到補零的完整檔案。
     match client().get(r.url("files/a.bin")).send().await {
         Err(_) => {}
         Ok(resp) => {
@@ -367,7 +354,6 @@ async fn a_client_that_hangs_up_gives_the_download_slots_back() {
     assert!(slot.available_permits() < 4, "下載進行中占著主機名額");
     drop(resp);
     assert!(wait_until(|| slot.available_permits() == 4).await, "斷線後主機名額回收");
-    // 下載名額（每分享 2）也回收：連開兩個再開第三個，不是 429。
     am_base::hosts::set_ssh_stream_chunk_delay(&r.host, 1024 * 1024, Duration::from_millis(0));
     for _ in 0..4 {
         assert_eq!(client().get(r.url("files/slow.bin")).send().await.unwrap().bytes().await.unwrap().len(), 1024 * 1024);
@@ -404,8 +390,6 @@ async fn an_exhausted_download_slot_pool_is_a_429_for_downloads() {
     assert_eq!(client().get(r.url("files/a.txt")).send().await.unwrap().status(), 200);
 }
 
-// ───────────────────────── SVG 嵌照片 ─────────────────────────
-
 #[tokio::test]
 async fn a_remote_svg_gets_its_inbox_photos_embedded() {
     let e = tt::env().await;
@@ -422,7 +406,6 @@ async fn a_remote_svg_gets_its_inbox_photos_embedded() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("data:image/jpeg;base64,"), "照片嵌進去了：{body}");
     assert!(body.contains(r#"data-am-embed="not_found""#), "抓不到的那張標 not_found（同本機）：{body}");
-    // 原檔不改。
     assert!(std::fs::read_to_string(r.outbox.join("poster.svg")).unwrap().contains(r#"href="inbox/p.jpg""#));
 }
 
@@ -448,7 +431,6 @@ async fn the_remote_photo_fetch_has_a_total_cap() {
     let r = setup(&e, "svg-total").await;
     let site = r.site(&e.app).await;
     for name in ["a.bin", "b.bin", "c.bin"] {
-        // 25 MiB 稀疏檔（不是圖，但大小要算進合計）。
         std::fs::File::create(r.inbox().join(name)).unwrap().set_len(25 * 1024 * 1024).unwrap();
     }
     let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="inbox/a.bin"/><image href="inbox/b.bin"/><image href="inbox/c.bin"/></svg>"#.to_vec();
@@ -475,7 +457,6 @@ fn the_photo_cache_does_not_mix_two_hosts() {
     let b = on("host-b", jpeg(100, 200));
     assert_ne!(a, b, "同一條路徑、同樣的身份，兩台主機各自的照片");
     assert!(a.contains("data:image/jpeg;base64,") && b.contains("data:image/jpeg;base64,"));
-    // 同一台再來一次走快取（身份一樣就不重解，即使這次給的位元組是壞的）。
     let again = on("host-a", b"not an image at all".to_vec());
     assert_eq!(again, a);
 }
@@ -500,8 +481,6 @@ fn a_prefetched_source_embeds_the_same_as_the_local_folder() {
     assert_eq!(super::compose::referenced_rels(svg), rels.to_vec(), "先找出引用的路徑，遠端才知道要抓哪些");
 }
 
-// ───────────────────────── 壞 SVG 提醒 ─────────────────────────
-
 /// 遠端 outbox 的壞 SVG：分享頁讀清單時查到，提醒 bot 一次；同一版本不重送。
 /// 讀不到（主機斷線）不提醒、也不記成「查過了」：下次還會再查。
 #[tokio::test]
@@ -514,8 +493,6 @@ async fn an_unreadable_remote_svg_is_not_checked_and_not_remembered() {
     r.conn.connected.store(true, Ordering::SeqCst);
     assert!(super::svg_check::check_file(&e.app, &r.bot.id, "card.svg").await.is_some(), "連回來之後照樣查得到");
 }
-
-// ───────────────────────── 主機改指（#1026） ─────────────────────────
 
 fn host_cfg_for(r: &Remote) -> HostCfg {
     HostCfg { name: r.host.clone(), ssh: "fake-ssh".into(), herdr_session: "test-session".into(), ..Default::default() }

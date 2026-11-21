@@ -49,7 +49,6 @@ fn emitted_kinds(src: &str) -> Vec<String> {
         while let Some(rel) = src[from..].find(call) {
             let at = from + rel;
             from = at + call.len();
-            // 前一個字元是識別字的一部分（`fn emit_event(` 的 `emit_event`、`remit(`…）就不算呼叫。
             if src[..at].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                 continue;
             }

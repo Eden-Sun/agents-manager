@@ -23,7 +23,6 @@ pub(crate) async fn set_pinned_with_context(
     bot_id: &str,
     pin: bool,
 ) -> Result<u64, sqlx::Error> {
-    // 只在第一次釘（位置還是 0）時排到最後；`max` 含已取消釘選的，所以新釘的一定在所有舊位置之後。
     let sql = if pin {
         "UPDATE bots SET is_primary = 1,
            primary_position = CASE WHEN primary_position = 0
@@ -85,7 +84,6 @@ pub(crate) async fn write_with_context(
             .execute(&mut *tx)
             .await
             .map_err(up)?;
-        // validate 與這個交易之間仍可能有人刪 bot；0 列不能當成功，否則前面的順序會半套 commit。
         if changed.rows_affected() != 1 {
             return Err(LcError::Bad(format!("order: 未知的 bot `{id}`")));
         }
@@ -120,7 +118,6 @@ mod tests {
         assert_eq!(pos(&e.app.db, &b).await, (1, 1));
         assert_eq!(pos(&e.app.db, &c).await, (1, 2));
         assert_eq!(pos(&e.app.db, &a).await, (1, 3));
-        // 重複釘（冪等）不動位置。
         set_pinned(&e.app.db, &b, true).await.unwrap();
         assert_eq!(pos(&e.app.db, &b).await, (1, 1));
     }
@@ -132,7 +129,6 @@ mod tests {
         set_pinned(&e.app.db, &b, true).await.unwrap();
         set_pinned(&e.app.db, &a, false).await.unwrap();
         assert_eq!(pos(&e.app.db, &a).await, (0, 1), "取消釘選不清位置");
-        // 別顆新釘的排在所有舊位置之後（含已取消的）。
         let c = testing::claude_bot(&e.app, &e.project_id, "d").await.id;
         set_pinned(&e.app.db, &c, true).await.unwrap();
         assert_eq!(pos(&e.app.db, &c).await, (1, 3));
@@ -158,7 +154,6 @@ mod tests {
         for id in [&a, &b, &c] {
             set_pinned(&e.app.db, id, true).await.unwrap();
         }
-        // 拖成 c, a；b 沒點名。
         write(&e.app.db, &[c.clone(), a.clone()]).await.unwrap();
         assert_eq!(pos(&e.app.db, &c).await.1, 1);
         assert_eq!(pos(&e.app.db, &a).await.1, 2);

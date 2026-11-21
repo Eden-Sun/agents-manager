@@ -182,7 +182,6 @@ impl StreamAssembler {
                 self.require_started()?;
                 self.stopped = true;
             }
-            // 未知事件型別要容忍（官方版本政策）。
             _ => {}
         }
         Ok(())
@@ -237,7 +236,6 @@ impl StreamAssembler {
                 self.progress.other_bytes += p.len();
             }
             "compaction_delta" => {
-                // 官方串流頁沒有描述；on-demand 頁說整個區塊一次到齊，threshold 頁說單一 delta。兩種都吃。
                 match delta.get("content") {
                     Some(Value::String(s)) => {
                         let cur = block.get("content").and_then(Value::as_str).unwrap_or("").to_string();
@@ -255,7 +253,6 @@ impl StreamAssembler {
                     _ => block["citations"] = json!([c]),
                 }
             }
-            // 未知 delta 型別：忽略，內容以 content_block_stop／最終區塊為準。
             _ => {}
         }
         Ok(())
@@ -345,7 +342,6 @@ mod tests {
         assert_eq!(r.model, "claude-opus-5-5");
         assert_eq!(r.stop_reason, "end_turn");
         assert_eq!(r.content, vec![json!({"type":"text","text":"Hello 世界"})]);
-        // message_delta 的累計 output_tokens 覆蓋 message_start；speed 等沿用。
         assert_eq!(r.usage, json!({"input_tokens":25,"output_tokens":15,"speed":"standard","service_tier":"standard"}));
     }
 
@@ -466,18 +462,13 @@ mod tests {
 
     #[test]
     fn truncated_or_malformed_streams_are_invalid() {
-        // 沒有 message_stop
         let body = sse(&[start(), mdelta("end_turn", 1)]);
         assert_eq!(assemble(&[&body]).unwrap_err(), StreamError::Invalid);
-        // 沒有 message_start
         let body = sse(&[("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}))]);
         assert_eq!(assemble(&[&body]).unwrap_err(), StreamError::Invalid);
-        // 壞掉的 JSON
         assert_eq!(assemble(&[b"data: {not json}\n\n"]).unwrap_err(), StreamError::Invalid);
-        // index 跳號
         let body = sse(&[start(), ("content_block_start", json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}))]);
         assert_eq!(assemble(&[&body]).unwrap_err(), StreamError::Invalid);
-        // tool 參數 JSON 壞掉
         let body = sse(&[
             start(),
             ("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"bash","input":{}}})),
@@ -485,7 +476,6 @@ mod tests {
             ("content_block_stop", json!({"type":"content_block_stop","index":0})),
         ]);
         assert_eq!(assemble(&[&body]).unwrap_err(), StreamError::Invalid);
-        // message_stop 之後還有事件
         let body = sse(&[start(), mdelta("end_turn", 1), stop(), ("ping", json!({"type":"ping"}))]);
         assert_eq!(assemble(&[&body]).unwrap_err(), StreamError::Invalid);
     }

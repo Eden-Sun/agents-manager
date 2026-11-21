@@ -132,17 +132,13 @@ mod tests {
         }
         let basis = crate::relay_policy::relay_prompt_basis(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.unwrap();
         assert_eq!(basis.as_deref(), Some(format!("specialist:{}", fx.env.project_id).as_str()));
-        // 專家對專家：開關不涵蓋，訊息寫 specialist、不提開關。
         let msg = denied(relay_prompt_allowed(app, &fx.spec.id, &fx.spec2.id, Admission::NewRequest).await);
         assert!(msg.starts_with("specialist 只接受 manager 派工") && !msg.contains("開關"), "{msg}");
-        // 跨專案：開關不讓專家出專案。
         assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.outsider.id, Admission::NewRequest).await.is_err());
-        // child 執行者不算（只有頂層 executor）。
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&fx.manager.id).bind(&fx.exec2.id).execute(&app.db).await.unwrap();
         assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec2.id, Admission::NewRequest).await.is_err());
         sqlx::query("UPDATE bots SET parent_bot_id=NULL WHERE id=?").bind(&fx.exec2.id).execute(&app.db).await.unwrap();
 
-        // 關掉：擋下，提示開關與管理者；/api/state 帶開關；config 寫 false。
         switch(&fx, false).await;
         assert!(!stored(&fx).await);
         let msg = denied(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await);
@@ -155,7 +151,6 @@ mod tests {
         assert!(proj.get("executor_grants").is_none());
         let cfg = app.cfg.get().await;
         assert!(!cfg.projects.iter().find(|p| p.id.as_deref() == Some(fx.env.project_id.as_str())).unwrap().specialist_dispatch);
-        // 再打開：恢復。
         switch(&fx, true).await;
         assert!(relay_prompt_allowed(app, &fx.spec.id, &fx.exec.id, Admission::NewRequest).await.is_ok());
     }
@@ -195,7 +190,6 @@ mod tests {
         let turn = db::ulid();
         sqlx::query("INSERT INTO turns(id,conversation_id,origin,status,delivery,client_request_id,queue_class,created_at) VALUES(?,?,'web',?,'pending',?,?,?)")
             .bind(&turn).bind(&conv).bind(status).bind(crid).bind(class).bind(db::now()).execute(&app.db).await.unwrap();
-        // 跟正式派工一樣記下核權當下的依據（`relay_prompt_basis`）；被擋的組合沒有依據。
         let auth = if class == "relay" { crate::relay_policy::relay_prompt_basis(app, &from.id, &to.id, Admission::Deliver).await.ok().flatten() } else { None };
         sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,relay_from,relay_auth,created_at) VALUES(?,?,?,'user','do it','web',?,?,?)")
             .bind(db::ulid()).bind(&conv).bind(&turn).bind(&from.id).bind(auth).bind(db::now()).execute(&app.db).await.unwrap();
@@ -222,13 +216,11 @@ mod tests {
         let note: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&queued).fetch_one(&app.db).await.unwrap();
         assert!(note.contains("只接受 manager 派工"), "{note}");
 
-        // 其他失效來源（專家被降級）不經 PATCH：flush 認領前的重驗擋下。
         switch(&fx, true).await;
         let later = queued_turn_from(&fx, &fx.spec, &fx.exec2, "plain-q2", "queued").await;
         set_role(&fx.env, &fx.spec, "advisor", None).await;
         assert!(crate::runners::relay_requests::queue_denial(app, &later).await.unwrap().is_some(), "降級：送達前擋下");
         assert_eq!(turn_status(&fx, &later).await, "failed", "queue_denial 當場撤回");
-        // manager 的排隊派工照舊不受影響（開關關著也一樣）。
         switch(&fx, false).await;
         let from_mgr = queued_turn_from(&fx, &fx.manager, &fx.exec, "mgr-q", "queued").await;
         assert_eq!(crate::runners::relay_requests::queue_denial(app, &from_mgr).await.unwrap(), None);
@@ -389,12 +381,10 @@ mod tests {
             }
             assert_eq!(turn_status(&fx, &queued).await, "failed");
         }
-        // 開著時同一條路照常建 in_flight turn（條件只擋失效）。
         switch(&fx, true).await;
         let r = dispatch_now(&fx, "now-ok").await;
         assert!(!basis_changed(&r), "{r:?}");
         assert_eq!(turns(&fx, "now-ok").await, 1);
-        // manager 派工不受影響（關著也能送）。
         switch(&fx, false).await;
         let q = queued_turn_from(&fx, &fx.manager, &fx.exec2, "mgr-claim", "queued").await;
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=?").bind(&fx.exec2.id).fetch_one(&app.db).await.unwrap();
@@ -551,7 +541,6 @@ mod tests {
         let fx = fixture().await;
         let app = &fx.env.app;
         sqlx::query("UPDATE projects SET deputy_bot_id=? WHERE id=?").bind(&fx.spec.id).bind(&fx.env.project_id).execute(&app.db).await.unwrap();
-        // config 也指定副管理者（否則之後的 PATCH 投影會把 DB 的 deputy 洗掉）。
         let (pid, sid) = (fx.env.project_id.clone(), fx.spec.id.clone());
         crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
             let p = cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())).unwrap();
@@ -591,11 +580,9 @@ mod tests {
             let body = serde_json::from_value(json!({"text": "do it", "client_request_id": crid, "relay_auth": format!("specialist:{pid},deputy:{pid}")})).unwrap();
             crate::api::prompt_bot(State(app.clone()), Path(fx.exec.id.clone()), headers, Extension(RequestPrincipal::Bot(fx.spec.id.clone())), Json(body))
         };
-        // 關著：夾帶的依據不會讓核權放行。
         switch(&fx, false).await;
         let r = send("smuggle-1").await;
         assert!(matches!(&r, Err(LcError::Forbidden(_))), "{:?}", r.as_ref().err());
-        // 開著：存下來的依據是 daemon 判定的（只有 specialist，沒有夾帶的 deputy）。
         switch(&fx, true).await;
         sqlx::query("UPDATE bots SET inject_hooks=0 WHERE id=?").bind(&fx.exec.id).execute(&app.db).await.unwrap();
         let _ = send("smuggle-2").await;

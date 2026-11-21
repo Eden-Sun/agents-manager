@@ -34,8 +34,6 @@ async fn sweep_inner(app: &Arc<App>, host: &str, due_only: bool) -> (usize, usiz
     crate::runners::app_ports_p11::race_point::hit("remote_sweep_after_pending", host).await;
     let (mut purged, mut kept) = (0, 0);
     for id in ids {
-        // 拿不到鎖就這一輪跳過、欠著，下一輪再來（#1301）：這顆正被別的路握著（還原、刪除、啟動），不能在這裡無限等，
-        // 否則同一輪掃到的別台主機、以及這台後面的 bot 都跟著停住。
         let Ok(_guard) = app.bot_lock(&id).await.try_lock_owned() else {
             tracing::debug!(host, bot = %id, "bot lock is busy; leaving its remote directory for the next sweep");
             kept += 1;
@@ -97,7 +95,6 @@ async fn sweep_inner(app: &Arc<App>, host: &str, due_only: bool) -> (usize, usiz
 
 /// 主機連上（含重連）那一刻背景掃一次。
 pub fn spawn_sweep(app: Arc<App>, host: String) {
-    // 一次性：掛在 `background_tasks` 下（#924），關機的 `wait()` 等得到它。
     if app.shutdown.is_cancelled() {
         return;
     }

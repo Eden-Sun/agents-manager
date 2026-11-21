@@ -105,9 +105,6 @@ pub struct ChangelogReply {
 }
 
 pub fn parse_version(s: &str) -> Option<Vec<u64>> {
-    // `[0.9.0] - 2026-09-07`（herdr 的 CHANGELOG 用 Keep a Changelog 的 `## [x.y.z] - date` 標題，
-    // 不是 Claude Code 那種裸 `## x.y.z`）：先取第一個空白分隔的 token 再拆掉包住版本號的中括號，
-    // 日期本來就在下一個 token，split_whitespace 早就丟掉了。
     let tok = s.split_whitespace().next()?;
     let tok = tok.trim_start_matches('[').trim_end_matches(']').trim_start_matches('v');
     let parts: Vec<u64> = tok.split('.').map(|p| p.parse::<u64>().ok()).collect::<Option<Vec<_>>>()?;
@@ -130,8 +127,6 @@ pub fn parse_changelog(md: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     let mut cur: Option<(String, Vec<&str>)> = None;
     for line in md.lines() {
-        // agy 的 1.1.4 標題前面真的多一個空白（` ## 1.1.4`）：縮排的 `## ` 只有後面是版本號才算標題，
-        // 否則（例如 body 裡縮排的 `## foo`）照舊當內文，不截斷段落。
         let heading = line.strip_prefix("## ").or_else(|| line.trim_start().strip_prefix("## ").filter(|r| version_string(r.trim()).is_some()));
         if let Some(rest) = heading {
             if let Some((v, body)) = cur.take() {
@@ -211,13 +206,11 @@ pub async fn installed_version(app: &impl crate::hosts::HostsAccess, host: &str,
         crate::hosts::sh_local_stdout(&script, VERSION_TIMEOUT, &format!("`{kind} --version`")).await?
     } else {
         let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-        // 睡著／斷線的主機：巡邏串行讀每台，不能每台都等滿 ssh 逾時（30 秒）才說讀不到。
         if !conn.is_connected() {
             return Err(anyhow!("host `{host}` 未連線，讀不到磁碟上的 `{kind}` 版本"));
         }
         conn.ssh_exec_path(&script).await?
     };
-    // 只認腳本自己印的 `AM_VER=` 那一行：遠端 shell 的 banner、motd 夾在前面（或只剩 banner）時，第一行不是 CLI 的版本。
     let line = out.lines().find_map(|l| l.split_once("AM_VER=").map(|(_, v)| v.trim())).unwrap_or("");
     cli_version_string(line).ok_or_else(|| anyhow!("`{kind} --version` 回了「{}」，看不出版本", out.trim()))
 }
@@ -229,7 +222,6 @@ pub fn feed_url(kind: &str) -> Option<(&'static str, bool)> {
         "codex" => Some((CODEX_RELEASES_API, true)),
         "herdr" => Some((HERDR_CHANGELOG_URL, false)),
         "agy" => Some((AGY_CHANGELOG_URL, false)),
-        // grok 的網址要帶版本：這裡回的是 stable 指標，實際的 changelog 網址由 [`grok_feed_url`] 組。
         "grok" => Some((crate::upstream_update::GROK_STABLE_URL, false)),
         _ => None,
     }
@@ -276,7 +268,6 @@ pub fn codex_releases_to_md(json: &str) -> Result<String> {
         let tag = r.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
         let tag = tag.trim_start_matches("rust-");
         let Some(ver) = version_string(tag) else { continue };
-        // 保險：再擋一次帶 `-alpha` 之類後綴的 tag。
         if tag.trim_start_matches('v').contains('-') {
             continue;
         }
@@ -394,7 +385,6 @@ async fn get_pinned_with_delays(
     if resp.content_length().is_some_and(|n| n > max as u64) {
         return Err(anyhow!("抓 {what} 失敗：內容超過 {max} 位元組"));
     }
-    // 沒有 Content-Length 的 chunked 回應也要擋：邊讀邊算，超過就停（不是整份讀完才檢查）。
     let mut raw: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| anyhow!("讀 {what} 失敗：{e}"))? {
         if raw.len() + chunk.len() > max {
@@ -540,7 +530,6 @@ pub fn releases_url(kind: &str) -> Option<&'static str> {
         "agy" => Some(AGY_RELEASES_API),
         "claude" => Some("https://api.github.com/repos/anthropics/claude-code/releases?per_page=30"),
         "herdr" => Some("https://api.github.com/repos/herdrdev/herdr/releases?per_page=30"),
-        // codex already uses Releases; grok publishes version files on its CDN.
         _ => None,
     }
 }
@@ -571,7 +560,6 @@ pub async fn target_sections(kind: &str, primary: Result<String>, src: &FeedSour
     if let Some(official_url) = releases_url(kind) {
         let url = if kind == "agy" { src.agy_releases.as_str() } else { official_url };
         let mut pinned = src.clone();
-        // Only the production constants extend the allowlist; never upstream response data.
         if kind != "agy" { pinned.allowed.push(official_url.to_string()); }
         return release_sections(&pinned, url, to).await
             .map_err(|error| anyhow!("CHANGELOG 缺少 {to} 或抓取／解析失敗；備援也失敗：{error:#}"));
@@ -616,7 +604,6 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
         }
     };
     if kind == "grok" {
-        // 抓到的是 stable 那一版的檔：它的版本就是 feed 裡最大的那一段。
         if let Some(newest) = all.iter().filter_map(|s| parse_version(&s.version).map(|v| (v, s.version.as_str()))).max() {
             reply.source_url = source_url_for(kind, newest.1);
         }
@@ -630,8 +617,6 @@ pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts:
     reply.sections = picked;
     reply
 }
-
-
 
 /// changelog 快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ChangelogState: Send + Sync {

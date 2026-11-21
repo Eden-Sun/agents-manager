@@ -261,8 +261,6 @@ pub async fn run_with_codec(
         let output = codec.accept(state, response).map_err(|_| Error::InvalidResponse)?;
         let calls = output.calls;
         state.api_pending = false;
-        // There may be tools not yet started: keep a pending marker until ALL results are
-        // durably committed. Crash recovery must not send an incomplete assistant tool batch.
         state.tool_pending = calls.first().map(|c| c.id.clone());
         checkpoint(journal, state).await?;
         if output.compacted {
@@ -270,7 +268,6 @@ pub async fn run_with_codec(
             checkpoint(journal, state).await?;
         }
         if wrapping_up && !calls.is_empty() {
-            // 收尾請求還是要工具：不執行，結清後結束（對話維持合法）。
             let mut results: Vec<ToolResult> = Vec::new();
             settle_interrupted_batch(codec, state, &mut results, false, None, &calls, "time limit reached");
             checkpoint(journal, state).await?;
@@ -281,7 +278,6 @@ pub async fn run_with_codec(
                 return Ok(Halt::TimeLimit);
             }
             if output.resumable_pause && call_idx < max_calls && !wrapping_up {
-                // 伺服器端工具暫停：自動重送延續，直到正常結束或預算用完。
                 continue;
             }
             return Ok(match output.stop {
@@ -294,7 +290,6 @@ pub async fn run_with_codec(
         let mut results: Vec<ToolResult> = Vec::new();
         let mut out_of_time = false;
         for (idx, call) in calls.iter().enumerate() {
-            // 軟期限：不開始新工具，這一批剩下的結清，下一輪送收尾請求。
             if !user_interrupted() && wrap_up() && !cancel.is_cancelled() {
                 let pushed = !results.is_empty();
                 settle_interrupted_batch(codec, state, &mut results, pushed, None, &calls[idx..], "time limit reached");
@@ -302,7 +297,6 @@ pub async fn run_with_codec(
                 break;
             }
             if cancel.is_cancelled() {
-                // 前一個工具已經回來並記下結果（tool_pending 只是批次還沒收尾）；使用者中斷就把剩下的結清。
                 if user_interrupted() {
                     let pushed = !results.is_empty();
                     settle_interrupted_batch(codec, state, &mut results, pushed, None, &calls[idx..], "interrupted by user");
@@ -331,8 +325,6 @@ pub async fn run_with_codec(
             };
             results.push(ToolResult { call_id: call.id.clone(), output: content, is_error });
             state.completed_tool_ids.insert(call.id.clone());
-            // Keep partial results in the transcript too, so a durable checkpoint cannot lose
-            // the output of a side effect. Only the final batch is submitted to the model.
             codec.put_tool_results(state, &results, None, results.len() > 1);
             checkpoint(journal, state).await?;
         }
@@ -353,7 +345,6 @@ pub async fn run_with_codec(
 
 pub(super) async fn checkpoint(journal: &impl Journal, state: &mut State) -> Result<(), Error> {
     if let Err(failure) = journal.save(state).await {
-        // Also poison the in-memory state: callers cannot reuse an uncommitted transcript.
         state.api_pending = true;
         return Err(Error::Journal(failure));
     }

@@ -8,7 +8,6 @@ const MODEL: &str = "_agm_context_model";
 const INVALIDATED: &str = "_agm_context_invalidated";
 
 fn has_usage(context: &Value) -> bool {
-    // Startup redraws contain all-zero counters; rounded 0% with real input is a measurement.
     context.get("used_percentage").and_then(Value::as_f64).is_some_and(|n| n > 0.0)
         || context.get("total_input_tokens").and_then(Value::as_u64).is_some_and(|n| n > 0)
         || context.get("current_usage").and_then(Value::as_object)
@@ -26,7 +25,6 @@ fn session_matches(status: &Value, session: &str) -> bool {
             }
         }
     }
-    // Legacy rows without payload identity are not evidence of this session.
     found
 }
 
@@ -34,8 +32,6 @@ fn model_matches(source: &str, target: &str) -> bool {
     if source == target {
         return true;
     }
-    // Only a bare alias and a full id in its family are interchangeable. Keep window suffixes
-    // and distinct full model versions strict; same-window model changes are conservative too.
     let alias = |m: &str| ["opus", "sonnet", "haiku", "fable"].contains(&m);
     !source.contains('[') && !target.contains('[')
         && (alias(source) || alias(target))
@@ -60,7 +56,6 @@ fn snapshot(previous: &Value, session: &str, model: &str) -> Option<Value> {
             measured[key] = value.clone();
         }
     }
-    // Preserve actual latest-request tokens rather than cumulative process totals.
     let usage = context.get("current_usage").and_then(Value::as_object).map(|u| {
         ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
             .iter().filter_map(|key| u.get(*key).and_then(Value::as_u64)).sum::<u64>()
@@ -78,8 +73,6 @@ fn boundary(session: &str) -> Value {
 }
 
 pub(super) async fn restore(pool: &SqlitePool, bot: &str, run: &str, session: &str, model: Option<&str>) -> Result<(), sqlx::Error> {
-    // Bound the lookup and memory regardless of session age. Missing/older history is unknown.
-    // No index/schema change or remote transcript access is needed for this display fallback.
     let previous: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT status_json, runtime_model FROM runs
          WHERE bot_id = ? AND id != ? AND (native_session_id = ? OR resume_session_id = ?)
@@ -93,15 +86,12 @@ pub(super) async fn restore(pool: &SqlitePool, bot: &str, run: &str, session: &s
             continue;
         }
         if previous.get(INVALIDATED).and_then(Value::as_str) == Some(session) {
-            // Carry the barrier into this run too: stopping before any StatusLine cannot
-            // make the next resume jump back over this compaction/session/window boundary.
             restored = Some(boundary(session));
             break;
         }
         if !previous.get("context_window").is_some_and(has_usage) {
             continue;
         }
-        // A measured model change ends the search too; older compatible rows are stale.
         if let Some((source, _)) = source_model(&previous, runtime_model.as_deref()).zip(model)
             .filter(|(source, target)| model_matches(source, target)
                 && runtime_model.as_deref().is_none_or(|launch| model_matches(launch, target)))
@@ -127,8 +117,6 @@ pub(crate) fn is_restored(status: Option<&str>) -> bool {
 pub(crate) fn retain_until_usage(incoming: &mut Value, previous: Option<&str>) {
     let Some(previous) = previous.and_then(|v| serde_json::from_str::<Value>(v).ok()) else { return };
     let Some(session) = incoming.get("session_id").and_then(Value::as_str).map(str::to_owned) else {
-        // An unidentified redraw cannot validate a measurement, but must not erase a barrier
-        // and let a future resume fall back across an earlier compaction.
         if let Some(session) = previous.get(INVALIDATED).or_else(|| previous.get(MARKER)).and_then(Value::as_str) {
             incoming[INVALIDATED] = json!(session);
         }
@@ -173,8 +161,6 @@ pub(crate) async fn invalidate(pool: &SqlitePool, run: &str, session: &str) -> R
 }
 
 pub(crate) async fn on_identity(pool: &SqlitePool, run: &crate::db::Run, session: Option<&str>, compact: bool) -> Result<(), sqlx::Error> {
-    // Compact may omit the payload id; the current run still identifies the session whose
-    // measurement is no longer valid. Never let an incomplete compact hook revive history.
     let session = if compact {
         session.or(run.native_session_id.as_deref()).or(run.resume_session_id.as_deref())
     } else {
@@ -346,7 +332,6 @@ mod database_tests {
         row(e.app.db(), "empty", &bot.id, "same", Some(context("same", 0)), "2026-09-02").await;
         row(e.app.db(), "other-session", &bot.id, "other", Some(context("other", 77)), "2026-09-03").await;
         row(e.app.db(), "other-bot", &other.id, "same", Some(context("same", 99)), "2026-09-04").await;
-        // Row session agrees but payload identity does not; this must never become 77% for "same".
         row(e.app.db(), "wrong-payload", &bot.id, "same", Some(context("other", 77)), "2026-09-05").await;
         row(e.app.db(), "new", &bot.id, "same", None, "2026-09-06").await;
         restore(e.app.db(), &bot.id, "new", "same", Some("opus")).await.unwrap();
@@ -358,7 +343,6 @@ mod database_tests {
         }
         restore(e.app.db(), &bot.id, "new", "missing", Some("opus")).await.unwrap();
         assert!(status(e.app.db(), "new").await.is_none());
-        // No matching payload identity, even when the row claims the target.
         row(e.app.db(), "legacy", &bot.id, "legacy", Some(json!({"model": {"id": "opus"},
             "context_window": {"used_percentage": 77}})), "2026-09-07").await;
         restore(e.app.db(), &bot.id, "new", "legacy", Some("opus")).await.unwrap();
@@ -375,7 +359,6 @@ mod database_tests {
         assert_eq!(status(e.app.db(), "b").await.unwrap()["context_window"]["used_percentage"], 42);
         let b = db::run(e.app.db(), "b").await.unwrap().unwrap();
         on_identity(e.app.db(), &b, None, true).await.unwrap();
-        // All fixture runs are stopped: the history boundary, not active-run state, protects C/D.
         row(e.app.db(), "c", &bot.id, "same", None, "2026-09-03").await;
         restore(e.app.db(), &bot.id, "c", "same", Some("opus")).await.unwrap();
         let c = status(e.app.db(), "c").await.unwrap();
@@ -387,7 +370,6 @@ mod database_tests {
         row(e.app.db(), "d", &bot.id, "same", None, "2026-09-04").await;
         restore(e.app.db(), &bot.id, "d", "same", Some("opus")).await.unwrap();
         assert!(status(e.app.db(), "d").await.unwrap().get("context_window").is_none());
-        // A genuine post-compact reading lifts the barrier and becomes the new source.
         sqlx::query("UPDATE runs SET status_json=? WHERE id='c'").bind(context("same", 7).to_string()).execute(e.app.db()).await.unwrap();
         sqlx::query("UPDATE runs SET status_json=NULL WHERE id='d'").execute(e.app.db()).await.unwrap();
         restore(e.app.db(), &bot.id, "d", "same", Some("opus")).await.unwrap();

@@ -185,7 +185,6 @@ async fn enqueue_binds_turn_and_message_in_one_step_and_marks_the_occurrence_que
 async fn materialize_twice_from_a_stale_snapshot_creates_one_occurrence() {
     let (e, bot) = setup().await;
     let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
-    // 讓它已經到期。
     let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     sqlx::query("UPDATE schedules SET next_due = ? WHERE id = ?").bind(&past).bind(&s.id).execute(&e.app.db).await.unwrap();
     s.next_due = Some(past);
@@ -358,7 +357,6 @@ async fn unknown_outcome_pauses_the_schedule_in_the_same_step() {
     assert_eq!(o.status, "unknown");
     let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM schedules WHERE id = ?").bind(&s.id).fetch_one(&e.app.db).await.unwrap();
     assert_eq!(enabled, 0, "同一步暫停，下次到期不會自動重跑");
-    // 之後再 settle 不會重複通知（notified 去重）。
     assert!(store::settle_queued(&e.app.db, &db::now()).await.unwrap().is_empty());
 }
 
@@ -383,13 +381,11 @@ async fn manual_key_merged_into_open_occurrence_replays_the_same_occurrence_afte
     let (e, bot) = setup().await;
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
     let k1 = run_with(&e.app, &s.id, "k1").await;
-    // K2 在 K1 的 occurrence 還沒結束時送來：併進去，但 key 也要記下來。
     let k2 = run_with(&e.app, &s.id, "k2").await;
     assert_eq!(k1, k2, "未結束的同一筆：合併");
     assert_eq!(turns_for(&e.app, &bot.id).await, 1);
     finish_turn(&e.app, &k1).await;
     assert_eq!(store::get_occurrence(&e.app.db, &k1).await.unwrap().unwrap().status, "failed");
-    // 回應遺失後的重送（K2）：回同一筆，不多排 turn、不多開 occurrence。
     assert_eq!(run_with(&e.app, &s.id, "k2").await, k1, "K2 重放回原來那一筆");
     assert_eq!(run_with(&e.app, &s.id, "k1").await, k1, "K1 重放也回原來那一筆");
     assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
@@ -402,7 +398,6 @@ async fn manual_key_absorbed_by_a_scheduled_occurrence_with_no_key_replays_that_
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
     let scheduled = pending(&e.app, &s).await;
     assert!(runner::enqueue(&e.app, &scheduled).await.unwrap());
-    // 排程來的 occurrence（client_request_id 是 NULL）還沒結束時，手動 key 併進去。
     assert_eq!(run_with(&e.app, &s.id, "m1").await, scheduled);
     assert_eq!(turns_for(&e.app, &bot.id).await, 1);
     finish_turn(&e.app, &scheduled).await;
@@ -426,7 +421,6 @@ async fn clear_after_round_trips_through_create_get_and_patch() {
     let sid = created["id"].as_str().unwrap().to_string();
     let got = api::get_one(State(e.app.clone()), Path(sid.clone())).await.unwrap().0;
     assert_eq!(got["clear_after"], true, "GET 回 true");
-    // 只帶 enabled 的部分更新不碰 clear_after。
     let stopped = api::patch(State(e.app.clone()), Path(sid.clone()), Json(api::PatchIn { enabled: Some(false), ..patch_in() })).await.unwrap().0;
     assert_eq!(stopped["clear_after"], true, "沒帶就保留原值");
     let edited = api::patch(State(e.app.clone()), Path(sid.clone()), Json(api::PatchIn { clear_after: Some(false), ..patch_in() })).await.unwrap().0;
@@ -518,7 +512,6 @@ async fn clear_waits_when_the_bot_has_another_queued_turn_or_schedule() {
     let (e, bot) = setup().await;
     let run1 = lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
-    // 使用者另外排的回合還在佇列裡：不清（不覆蓋、不撤回別人的）。
     let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, awaits_idle) VALUES (?,?,'web','queued','pending',?,1)")
         .bind(db::ulid())
@@ -529,8 +522,6 @@ async fn clear_waits_when_the_bot_has_another_queued_turn_or_schedule() {
         .unwrap();
     assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None);
     assert_eq!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, run1, "沒有重啟");
-    // 另一筆排程的 occurrence 還沒結束：也不清。
-    // 使用者那筆撤掉（queued→failed 是合法轉移）；之後只剩排程的未結束 occurrence 擋著。
     sqlx::query("UPDATE turns SET status = 'failed', delivery = 'failed' WHERE conversation_id = ? AND status = 'queued'").bind(&conv).execute(&e.app.db).await.unwrap();
     let _other = pending(&e.app, &s).await;
     assert_eq!(runner::clear_bot_after(&e.app, &bot.id).await.unwrap(), None);
@@ -725,7 +716,6 @@ async fn dry_run_has_distinct_source_key_and_never_merges_with_a_formal_run() {
     assert!(occ.prompt.starts_with("試跑："));
     assert!(occ.prompt.ends_with(&s.prompt));
     assert_eq!(run(true).await.unwrap().0["occurrence"]["id"], dry_id);
-    // An already accepted formal key always replays its own occurrence, not the dry run.
     assert_eq!(run(false).await.unwrap().0["occurrence"]["id"], formal);
     let new_formal = api::run_now(State(e.app.clone()), Path(s.id.clone()), Json(RunIn { client_request_id: Some("another".into()), dry_run: false })).await;
     assert!(new_formal.is_err(), "formal run must not merge with the open dry run");
@@ -771,10 +761,9 @@ async fn dry_run_never_retries_and_never_sends_failure_notices() {
 async fn random_window_materializes_once_and_stores_the_next_draw_on_the_following_day() {
     let (e, bot) = setup().await;
     let now = chrono::Utc::now();
-    // 用 UTC 時區、窗口＝「現在往前 1 分鐘到往後 1 分鐘」，next_due 設成已到期的一秒（窗口內）。
     let (lo, hi) = (now - chrono::Duration::minutes(1), now + chrono::Duration::minutes(1));
     if lo.date_naive() != hi.date_naive() {
-        return; // 跨午夜的瞬間，窗口不成立；下次再跑就好
+        return;
     }
     let (start, end) = (lo.format("%H:%M:%S").to_string(), hi.format("%H:%M:%S").to_string());
     let mut s = schedule(&e.app, &e.project_id, &bot.id).await;
@@ -786,7 +775,6 @@ async fn random_window_materializes_once_and_stores_the_next_draw_on_the_followi
     assert_eq!(count(&e.app, "SELECT COUNT(*) FROM schedule_occurrences WHERE schedule_id = ?", &s.id).await, 1);
     let next = store::get_schedule(&e.app.db, &s.id).await.unwrap().unwrap().next_due.unwrap();
     let next = chrono::DateTime::parse_from_rfc3339(&next).unwrap();
-    // 下一次一定在窗口結束之後（隔天的窗口），不是同一天再抽。
     assert!(next.with_timezone(&chrono::Utc) > now + chrono::Duration::hours(12), "{next}");
 }
 
@@ -806,13 +794,10 @@ async fn random_window_create_rejects_bad_ranges_with_a_code_and_stores_the_draw
     let due = chrono::DateTime::parse_from_rfc3339(v["next_due"].as_str().unwrap()).unwrap().with_timezone(&chrono::Utc);
     let secs = chrono::Timelike::num_seconds_from_midnight(&due.time());
     assert!((9 * 3600..=9 * 3600 + 300).contains(&secs), "{due}");
-    // 同一筆再讀：next_due 不變（存下後不重抽）。
     let id = v["id"].as_str().unwrap().to_string();
     let Json(again) = api::get_one(State(e.app.clone()), Path(id)).await.unwrap();
     assert_eq!(again["next_due"], v["next_due"]);
 }
-
-// ── 基準快照與「每次從基準快照開始」 ──────────────────────────────────────────
 
 mod from_base {
     use super::*;
@@ -896,7 +881,6 @@ mod from_base {
                 assert!(matches!(err, LcError::Forbidden(_)), "{f} by {who}: {err:?}");
             }
         }
-        // 同專案 expert 管理者可以；專案不是 expert 就不行。
         sqlx::query("UPDATE bots SET role = 'manager' WHERE id = ?").bind(&peer.id).execute(&e.app.db).await.unwrap();
         assert!(call(&e, "lock", &target.id, RequestPrincipal::Bot(peer.id.clone())).await.is_err(), "非 expert 專案的 manager 不行");
         sqlx::query("UPDATE projects SET mode = 'expert' WHERE id = ?").bind(&e.project_id).execute(&e.app.db).await.unwrap();
@@ -1036,8 +1020,6 @@ mod from_base {
     }
 }
 
-// ── 排程專屬 bot ─────────────────────────────────────────────────────────────
-
 mod dedicated_bot {
     use super::*;
 
@@ -1047,13 +1029,11 @@ mod dedicated_bot {
         let plain = testing::claude_bot(&e.app, &e.project_id, "plain").await;
         let err = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(daily(&plain.id, "x"))).await.err().expect("一般 bot 不能新綁");
         assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "schedule_bot_not_dedicated"), "{err:?}");
-        // 舊排程綁一般 bot：照常落帳、綁 turn；詳情帶 bot_dedicated=false 供 UI 提示。
         let s = schedule(&e.app, &e.project_id, &plain.id).await;
         let occ = pending(&e.app, &s).await;
         assert!(runner::enqueue(&e.app, &occ).await.unwrap(), "既有綁定照常執行");
         let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
         assert_eq!(v["bot_dedicated"], false);
-        // 轉成專屬（role = scheduler）後提示消失。
         sqlx::query("UPDATE bots SET role = 'scheduler' WHERE id = ?").bind(&plain.id).execute(&e.app.db).await.unwrap();
         let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
         assert_eq!(v["bot_dedicated"], true);
@@ -1095,9 +1075,7 @@ async fn a_create_without_retry_fields_defaults_to_two_retries_one_minute_and_no
     })).unwrap();
     let Json(v) = api::create(State(e.app.clone()), Path(e.project_id.clone()), Json(body)).await.unwrap();
     assert_eq!((v["retry_count"].as_i64(), v["retry_interval_mins"].as_i64()), (Some(2), Some(1)));
-    // 沒帶截止＝不設截止：存欄位允許的最大值（7 天），一分鐘間隔的 2 次重試永遠碰不到它。
     assert_eq!(v["retry_deadline_mins"], 10080);
-    // 時段不帶標籤也收（標籤欄位保留相容，舊資料照讀）。
     assert_eq!(v["spec"]["slots"].as_array().unwrap().len(), 2);
 }
 
@@ -1105,7 +1083,6 @@ async fn a_create_without_retry_fields_defaults_to_two_retries_one_minute_and_no
 async fn an_old_schedule_keeps_its_stored_values_and_its_old_deadline_still_applies() {
     let (e, bot) = setup().await;
     let s = schedule(&e.app, &e.project_id, &bot.id).await;
-    // 舊排程（建立於舊預設 0／3／15）：讀回原值，不被新預設改寫。
     let Json(v) = api::get_one(State(e.app.clone()), Path(s.id.clone())).await.unwrap();
     assert_eq!((v["retry_count"].as_i64(), v["retry_interval_mins"].as_i64(), v["retry_deadline_mins"].as_i64()), (Some(0), Some(3), Some(15)));
 }
@@ -1131,7 +1108,6 @@ async fn schedule_codes_increase_never_recycle_and_resolve_in_the_api() {
     let second = api::create(State(e.app.clone()), Path(pid.clone()), Json(b)).await.unwrap().0;
     assert_eq!(first["code"], "S1");
     assert_eq!(second["code"], "S2");
-    // 用代號查得到同一筆（含最近執行），小寫也行。
     let got = api::get_one(State(e.app.clone()), Path("S2".into())).await.unwrap().0;
     assert_eq!(got["id"], second["id"]);
     assert!(got["recent"].is_array());
@@ -1139,16 +1115,13 @@ async fn schedule_codes_increase_never_recycle_and_resolve_in_the_api() {
     assert_eq!(got["id"], first["id"]);
     let hist = api::history(State(e.app.clone()), Path("S1".into()), Query(api::HistoryQuery { limit: None, offset: None })).await;
     assert!(hist.is_ok(), "history 也吃代號");
-    // 刪掉最大號：下一個不回收。
     api::delete(State(e.app.clone()), Path("S2".into())).await.unwrap();
     assert!(matches!(api::get_one(State(e.app.clone()), Path("S2".into())).await, Err(LcError::NotFound(_))));
     let mut c = daily(&bot.id, "三");
     c.client_request_id = "crid-c".into();
     let third = api::create(State(e.app.clone()), Path(pid.clone()), Json(c)).await.unwrap().0;
     assert_eq!(third["code"], "S3", "刪除不回收代號");
-    // 沒有的代號 → 404。
     assert!(matches!(api::get_one(State(e.app.clone()), Path("S99".into())).await, Err(LcError::NotFound(_))));
-    // 通知用的 Transition 帶代號。
     let s = store::get_schedule(&e.app.db, third["id"].as_str().unwrap()).await.unwrap().unwrap();
     assert_eq!(s.code(), "S3");
 }
@@ -1178,16 +1151,13 @@ async fn duration_sums_attempts_and_reports_running_since() {
     sqlx::query("UPDATE schedules SET retry_count=1 WHERE id=?").bind(&s.id).execute(&e.app.db).await.unwrap();
     let occ_id = pending(&e.app, &s).await;
     let view = |id: String| { let app = e.app.clone(); async move { let o = store::get_occurrence(&app.db, &id).await.unwrap().unwrap(); store::occurrence_view(&app.db, &o).await.unwrap() } };
-    // 還沒開始：沒有花費時間。
     let v = view(occ_id.clone()).await;
     assert!(v["duration_ms"].is_null() && v["running_since"].is_null() && v["started_at"].is_null());
-    // 送出（綁 turn）才算開始。
     assert!(runner::enqueue(&e.app, &occ_id).await.unwrap());
     let v = view(occ_id.clone()).await;
     assert!(v["started_at"].is_string());
     assert!(v["running_since"].is_string(), "進行中：由畫面加上已進行時間");
     assert_eq!(v["duration_ms"], 0);
-    // 第一次 attempt 在 T0 開始、60 秒後失敗 → 排重試。
     let t0 = "2026-11-09T01:00:00.000Z";
     sqlx::query("UPDATE schedule_occurrences SET first_started_at=?, attempt_started_at=? WHERE id=?").bind(t0).bind(t0).bind(&occ_id).execute(&e.app.db).await.unwrap();
     let turn1: String = sqlx::query_scalar("SELECT turn_id FROM schedule_occurrences WHERE id=?").bind(&occ_id).fetch_one(&e.app.db).await.unwrap();
@@ -1198,7 +1168,6 @@ async fn duration_sums_attempts_and_reports_running_since() {
     assert_eq!(v["duration_ms"], 60_000, "重試等待不算");
     assert!(v["running_since"].is_null(), "等待重試中不在執行");
     assert_eq!(v["started_at"], t0, "first_started_at 不被重試覆蓋");
-    // 第二次 attempt 開始後 30 秒完成 → 總共 90 秒、各 attempt 另列。
     sqlx::query("UPDATE schedule_occurrences SET next_retry_at=? WHERE id=?").bind(db::now()).bind(&occ_id).execute(&e.app.db).await.unwrap();
     assert!(runner::enqueue(&e.app, &occ_id).await.unwrap());
     let t1 = "2026-11-09T01:10:00.000Z";
@@ -1218,48 +1187,34 @@ async fn duration_sums_attempts_and_reports_running_since() {
 
 #[test]
 fn is_bot_unavailable_overdue_checks_5_mins_and_slot_range() {
-    // 1. 固定時間排程（無隨機區間）：等 5 分鐘
     let fixed_spec = r#"{"mode":"daily","time":"09:00","slots":[]}"#;
     let sched_at = "2026-11-10T09:00:00Z";
-    // 4 分鐘後：未逾時
     assert!(!runner::is_bot_unavailable_overdue(sched_at, fixed_spec, "UTC", "2026-11-10T09:04:59Z"));
-    // 5 分鐘後：逾時
     assert!(runner::is_bot_unavailable_overdue(sched_at, fixed_spec, "UTC", "2026-11-10T09:05:00Z"));
 
-    // 2. 隨機區間排程（08:00–09:00，抽到 08:10）：區間在 09:00 結束
     let range_spec = r#"{"mode":"daily","time":"08:00","slots":[{"time":"08:00","label":"早班","until":"09:00"}]}"#;
     let drawn_at = "2026-11-10T08:10:00Z";
-    // 08:15（滿 5 分鐘但區間未過）：未逾時
     assert!(!runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T08:15:00Z"));
-    // 08:59（區間未過）：未逾時
     assert!(!runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T08:59:59Z"));
-    // 09:00（過區間且已超過 5 分鐘）：逾時
     assert!(runner::is_bot_unavailable_overdue(drawn_at, range_spec, "UTC", "2026-11-10T09:00:00Z"));
 
-    // 3. 隨機區間排程（08:58–09:00，抽到 08:59）：區間 09:00 結束，但 5 分鐘要等到 09:04
     let range_short = r#"{"mode":"daily","time":"08:58","slots":[{"time":"08:58","label":"短區間","until":"09:00"}]}"#;
     let drawn_short = "2026-11-10T08:59:00Z";
-    // 09:01（區間過了，但未滿 5 分鐘）：未逾時
     assert!(!runner::is_bot_unavailable_overdue(drawn_short, range_short, "UTC", "2026-11-10T09:01:00Z"));
-    // 09:04（滿 5 分鐘且過區間）：逾時
     assert!(runner::is_bot_unavailable_overdue(drawn_short, range_short, "UTC", "2026-11-10T09:04:00Z"));
 }
 
 #[tokio::test]
 async fn bot_unavailable_reason_diagnostics() {
     let (e, bot) = setup().await;
-    // 正常狀態（但不是執行專案下的 bot）
     assert_eq!(runner::bot_unavailable_reason(&e.app.db, &bot.id, "non-existent-proj").await, "bot 已換專案");
 
-    // 不存在的 bot
     assert_eq!(runner::bot_unavailable_reason(&e.app.db, "fake-bot-id", &e.project_id).await, "bot 不存在");
 
-    // 已刪除的 bot
     let deleted_bot = testing::claude_bot(&e.app, &e.project_id, "del-bot").await;
     sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&deleted_bot.id).execute(&e.app.db).await.unwrap();
     assert_eq!(runner::bot_unavailable_reason(&e.app.db, &deleted_bot.id, &e.project_id).await, "bot 已刪除");
 
-    // 子代理
     let child_bot = testing::claude_bot(&e.app, &e.project_id, "child-bot").await;
     sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&bot.id).bind(&child_bot.id).execute(&e.app.db).await.unwrap();
     assert_eq!(runner::bot_unavailable_reason(&e.app.db, &child_bot.id, &e.project_id).await, "bot 為子代理");
@@ -1283,10 +1238,8 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
         Box::pin(async { crate::webpush::SendOutcome::Sent })
     })));
 
-    // 把 bot 標記為已刪除，使 eligible_bot_tx 回傳 None
     sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
 
-    // 1. 未逾時的 occurrence（scheduled_for 是 10 分鐘後）：enqueue 回傳 false，不推播
     let s_future = schedule(&app, &e.project_id, &bot.id).await;
     sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_future.id).execute(&app.db).await.unwrap();
     let future_occ_id = db::ulid();
@@ -1316,7 +1269,6 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
     assert!(!runner::enqueue(&app, &future_occ_id).await.unwrap());
     assert!(rx.try_recv().is_err(), "未逾時不推播");
 
-    // 2. 逾時的 occurrence（scheduled_for 是 10 分鐘前）：推播一次
     let s_overdue = schedule(&app, &e.project_id, &bot.id).await;
     sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_overdue.id).execute(&app.db).await.unwrap();
     let s_overdue = store::get_schedule(&app.db, &s_overdue.id).await.unwrap().unwrap();
@@ -1350,11 +1302,9 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
     assert_eq!(got["body"], "綁定的 bot 不可用（bot 已刪除）");
     assert_eq!(got["tag"], format!("schedule:{overdue_occ_id}"));
 
-    // 同一筆 occurrence 再次 enqueue（模擬下一輪 tick）：去重，不重複推播
     assert!(!runner::enqueue(&app, &overdue_occ_id).await.unwrap());
     assert!(rx.try_recv().is_err(), "同 occurrence 不重複推播");
 
-    // 3. 測試 notify == 'none' 的排程：即使逾時也不推播
     let s_none = schedule(&app, &e.project_id, &bot.id).await;
     sqlx::query("UPDATE schedules SET notify = 'none' WHERE id = ?").bind(&s_none.id).execute(&app.db).await.unwrap();
     let none_occ_id = db::ulid();
@@ -1384,7 +1334,6 @@ async fn bot_unavailable_triggers_push_after_overdue_and_dedups() {
     assert!(!runner::enqueue(&app, &none_occ_id).await.unwrap());
     assert!(rx.try_recv().is_err(), "notify 為 none 時不推播");
 
-    // 4. 測試 dry_run source：即使逾時也不推播
     let s_dry = schedule(&app, &e.project_id, &bot.id).await;
     sqlx::query("UPDATE schedules SET notify = 'all' WHERE id = ?").bind(&s_dry.id).execute(&app.db).await.unwrap();
     let dry_occ_id = db::ulid();

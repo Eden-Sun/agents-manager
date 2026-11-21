@@ -15,7 +15,6 @@
         all.sort();
         all.dedup();
         assert_eq!(all.len(), n, "跨執行緒也不能重複");
-        // 對照：沒有這層的話，同一毫秒內會有降序（這個 crate 的隨機段不遞增）。
         let plain: Vec<String> = (0..5000).map(|_| ulid::Ulid::new().to_string()).collect();
         assert!(plain.windows(2).any(|w| w[0][..10] == w[1][..10] && w[0] > w[1]), "前提：Ulid::new() 在同一毫秒內會降序");
     }
@@ -32,7 +31,6 @@
             assert!(s.ends_with('Z'), "一律 UTC 的 Z，不可以是 +08:00 這種：{s}");
             assert_eq!(&s[10..11], "T", "{s}");
             assert_eq!(&s[19..20], ".", "到毫秒：{s}");
-            // 真的是這個時間，不是長得像而已。
             chrono::DateTime::parse_from_rfc3339(s).unwrap_or_else(|e| panic!("{s} 解不開：{e}"));
         }
     }
@@ -61,20 +59,14 @@
         for f in files {
             let at = f.strip_prefix(&root).unwrap().display().to_string();
             if at == "db.rs" {
-                continue; // 格式就是在這裡定義的
+                continue;
             }
-            // 從主檔搬出去、用 `#[cfg(test)] #[path = …] mod …;` 掛回的測試檔（`<名>_tests.rs`、`<名>_tests/…`）整檔都是測試。
             if f.strip_prefix(&root).unwrap().components().any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with("_tests") || s.ends_with("_tests.rs"))) {
                 continue;
             }
             let src = std::fs::read_to_string(&f).unwrap();
-            // 測試區塊以後不管：測試要造舊格式的列才測得到混存。
             let prod = src.split("#[cfg(test)]").next().unwrap_or("");
             for (i, line) in prod.lines().enumerate() {
-                // 只擋真的會出事的兩種：
-                //  - `Secs`：寬度跟毫秒不一樣，同一秒內字串比就會判錯（本 issue 的病灶）。
-                //  - 裸的 `to_rfc3339()`：產出 `+00:00` 而不是 `Z`，字典序跟時間序會差到**幾小時**。
-                // 直接寫 `Millis` 的雖然該改用 `db::` 的三支，但寬度是對的、不會判錯，先不擋。
                 let bad = line.contains("SecondsFormat::Secs")
                     || (line.contains("to_rfc3339()") && !line.contains("to_rfc3339_opts"));
                 if bad {
@@ -100,7 +92,6 @@
             assert!(prev < cur, "{prev} 應該排在 {cur} 前面");
             prev = cur;
         }
-        // 跨年、跨月也要成立（補零）。
         assert!(iso_at(base) < iso_at(base + chrono::Duration::days(200)));
     }
 
@@ -248,7 +239,6 @@
         assert_eq!(version, SCHEMA_VERSION);
         crate::runners::am_base_tests::check_drift(&current).await.expect("the widened table must match schema_guard");
         current.close().await;
-        // Idempotent: a second open does not touch it.
         let again = open(&path).await.expect("reopen");
         let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'bots'").fetch_one(&again).await.unwrap();
         assert_eq!(sql.matches("'agy'").count(), 1);
@@ -279,8 +269,6 @@
             .await
             .unwrap();
 
-        // This is the exact official v29 definition. It has host already, but its pane_id-only
-        // primary key means a valid v29 DB cannot yet hold the same pane id on two hosts.
         sqlx::query("DROP TABLE spawn_hints").execute(&old).await.unwrap();
         sqlx::query(
             "CREATE TABLE spawn_hints (pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id), created_at TEXT NOT NULL)",
@@ -303,8 +291,6 @@
                 .await
                 .unwrap();
         }
-        // Official v29 has no explicit spawn_hints index or trigger. Synthetic objects prove the
-        // rebuild restores any objects that a future or operator-managed v29 database may have.
         sqlx::query("CREATE INDEX spawn_hints_test_host_created ON spawn_hints(host, created_at)")
             .execute(&old)
             .await
@@ -317,8 +303,6 @@
         .unwrap();
         sqlx::query("PRAGMA user_version = 29").execute(&old).await.unwrap();
 
-        // Fail in the middle of the transactional rebuild, immediately after DROP. Reopening a
-        // raw pool must still show the complete committed v29 table and all its data/objects.
         let err = apply_migrations_failing_after_spawn_hints_drop(&old).await.expect_err("injected failure should abort migration");
         assert!(err.to_string().contains("injected failure after dropping old spawn_hints table"), "{err}");
         old.close().await;
@@ -413,7 +397,6 @@
             ]
         );
 
-        // Same pane ids on different hosts now coexist after migrating the official v29 fixture.
         for (host, bot_id) in [("local", "b2"), ("remote-a", "b")] {
             sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES ('same:pane', ?, ?, ?)")
                 .bind(host)
@@ -508,15 +491,12 @@
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-drift-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
-        // 舊資料庫：`bots` 少了一堆後來才加的欄位，而且 CREATE TABLE IF NOT EXISTS 不會補。
         {
             let old = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect(&format!("sqlite://{}?mode=rwc", path.display()))
                 .await
                 .unwrap();
-            // 少的是 `env_json`：它在 SCHEMA 裡、不在 ALTER 名單裡，也沒有索引用到它——
-            // 正好是「加欄位忘了補 ALTER」會留下的形狀。索引要用的欄位照給，才測得到這個檢查本身。
             sqlx::query(
                 "CREATE TABLE bots (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
                    kind TEXT NOT NULL, model TEXT, effort TEXT, fast INTEGER NOT NULL DEFAULT 0, persona TEXT,
@@ -620,7 +600,6 @@
             .execute(&pool)
             .await
             .unwrap();
-            // 做成上一版的形狀：這一欄還不存在。
             sqlx::query("ALTER TABLE attachments DROP COLUMN state").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "attachments", "state").await.unwrap());
             pool.close().await;
@@ -645,7 +624,6 @@
             sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO runs (id,bot_id,state,started_at) VALUES ('r','b','running',?)").bind(now()).execute(&pool).await.unwrap();
-            // 做成上一版的形狀：欄位跟 trigger 都還不存在。
             sqlx::query("DROP TRIGGER IF EXISTS runs_agent_status_since").execute(&pool).await.unwrap();
             sqlx::query("ALTER TABLE runs DROP COLUMN agent_status_since").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "runs", "agent_status_since").await.unwrap());
@@ -673,7 +651,6 @@
             let conv = conversation_id(&pool, "b").await.unwrap();
             sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,delivery,created_at) VALUES ('t',?,'web','completed','ok',?)")
                 .bind(&conv).bind(now()).execute(&pool).await.unwrap();
-            // 做成上一版的形狀：這一欄還不存在。
             sqlx::query("ALTER TABLE turns DROP COLUMN delivered_at").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "turns", "delivered_at").await.unwrap());
             pool.close().await;
@@ -698,7 +675,6 @@
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
         let conv = conversation_id(&pool, "b").await.unwrap();
-        // (id, status, native_turn_id, source_event_id)
         for (id, status, native, event) in [
             ("hooked", "completed", Some("n1"), Some("e1")),
             ("fallback", "completed_fallback", None, None),
@@ -744,7 +720,6 @@
             let pool = open(&path).await.unwrap();
             sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)").bind(now()).execute(&pool).await.unwrap();
-            // 做成上一版的形狀：這一欄還不存在。
             sqlx::query("ALTER TABLE bots DROP COLUMN instruction_files").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "bots", "instruction_files").await.unwrap());
             pool.close().await;
@@ -769,7 +744,6 @@
             sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,identity,created_at) VALUES ('b','p','b','claude','t','cc1',?)").bind(now()).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO runs (id,bot_id,state,started_at) VALUES ('r','b','running',?)").bind(now()).execute(&pool).await.unwrap();
-            // 做成上一版的形狀：這一欄還不存在。
             sqlx::query("ALTER TABLE runs DROP COLUMN runtime_identity").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "runs", "runtime_identity").await.unwrap());
             pool.close().await;
@@ -798,7 +772,6 @@
                 .execute(&pool)
                 .await
                 .unwrap();
-            // 做成 v67 的形狀：這一欄還不存在、版本號停在 67。
             sqlx::query("ALTER TABLE runs DROP COLUMN codex_instant_interrupt").execute(&pool).await.unwrap();
             sqlx::query("PRAGMA user_version = 67").execute(&pool).await.unwrap();
             assert!(!has_column(&pool, "runs", "codex_instant_interrupt").await.unwrap());
@@ -875,10 +848,6 @@
     async fn v19_rebuilds_a_pre_v2_bot_previews_to_restore_its_foreign_key() {
         let dir = tmp_dir();
         let file = dir.join("pre-v2.sqlite3");
-        // 先讓 migrate 建出完整的 schema，再把 `bot_previews` 換成 pre-v2 的形狀（沒有 FK）。
-        // 手寫整份 `projects`／`bots` 會漏掉後來加的欄位（`projects.host` 之類），那些欄位上還有索引，
-        // 下一次開 DB 就會炸在 `CREATE UNIQUE INDEX … ON projects(host, path)`——那是測試自己寫壞，
-        // 不是 migrate 的問題。這樣做也更接近正式那顆：跑過歷代 migrate、只有那個外鍵一直缺。
         {
             let pool = open(&file).await.unwrap();
             for stmt in [
@@ -889,11 +858,8 @@
                    status TEXT NOT NULL, error TEXT, started_at TEXT, updated_at TEXT NOT NULL)",
                 "INSERT INTO bot_previews (bot_id,host,pane_id,port,dir,status,error,started_at,updated_at)
                    VALUES ('b1','local','w1:p1',5173,'/tmp/x','running',NULL,'2026-01-01T00:00:00.000Z','2026-01-02T00:00:00.000Z')",
-                // 孤兒：指不到任何 bot，補外鍵時要被丟掉。
                 "INSERT INTO bot_previews (bot_id,host,pane_id,port,dir,status,error,started_at,updated_at)
                    VALUES ('gone','local','w1:p9',5174,'/tmp/y','off',NULL,NULL,'2026-01-02T00:00:00.000Z')",
-                // 這張表自己的索引與 trigger：`DROP TABLE` 會一起帶走，重建完要照原樣回來（i406 在 #474
-                // 提的前瞻陷阱）。今天的 `bot_previews` 一個都沒有，所以這裡自己造兩個來釘住行為。
                 "CREATE INDEX bot_previews_by_host ON bot_previews(host)",
                 "CREATE TRIGGER bot_previews_touch AFTER UPDATE ON bot_previews
                    BEGIN UPDATE bot_previews SET updated_at = updated_at WHERE bot_id = NEW.bot_id; END",
@@ -907,7 +873,6 @@
         let pool = open(&file).await.expect("pre-v2 形狀的 bot_previews 要開得起來並且自己補好");
         let fks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_list('bot_previews')").fetch_one(&pool).await.unwrap();
         assert_eq!(fks, 1, "重建之後要有 bots(id) 那個外鍵");
-        // 指得到 bot 的那一列要原封不動，連 ALTER 後來補的欄位都要有預設值。
         let row: (String, String, Option<i64>, String, String, String) = sqlx::query_as(
             "SELECT bot_id, host, port, status, updated_at, source FROM bot_previews",
         )
@@ -920,7 +885,6 @@
         assert_eq!(row.3, "running");
         assert_eq!(row.4, "2026-01-02T00:00:00.000Z");
         assert_eq!(row.5, "spawned", "ALTER 補的欄位照樣拿到預設值");
-        // 索引與 trigger 要原樣回來：`DROP TABLE` 帶走它們，`RENAME` 不會還回來。
         let extras: Vec<(String, String)> = sqlx::query_as(
             "SELECT type, name FROM sqlite_master
               WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name",
@@ -933,7 +897,6 @@
             vec![("index".to_string(), "bot_previews_by_host".to_string()), ("trigger".to_string(), "bot_previews_touch".to_string())],
             "重建前有的索引與 trigger 要一個不少"
         );
-        // 重跑是 no-op：已經有 FK 就不再重建（否則每次開機都洗一次表）。
         pool.close().await;
         let pool = open(&file).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_previews").fetch_one(&pool).await.unwrap();
@@ -968,7 +931,6 @@
             ("c3".into(), Some("gpt-6-luna".into())),
         ]);
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
-        // 蓋的是這顆 binary 的版本（之後再升版也一樣），不是寫死 15。
         assert_eq!(version, SCHEMA_VERSION);
         migrate(&pool).await.unwrap();
         let again: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
@@ -983,7 +945,6 @@
     async fn a_failed_submodule_migrate_leaves_the_version_unstamped() {
         let dir = tmp_dir();
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(&format!("sqlite://{}?mode=rwc", dir.join("db.sqlite3").display())).await.unwrap();
-        // hook_inbox::migrate 要建 index hook_events_dedupe；名字先被一張表占走，它會失敗，而主交易那時已經 commit。
         sqlx::query("CREATE TABLE hook_events_dedupe (x INTEGER)").execute(&pool).await.unwrap();
         assert!(migrate(&pool).await.is_err());
         let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
@@ -1007,10 +968,6 @@
             .connect(&format!("sqlite://{}?mode=rwc", path.display()))
             .await
             .unwrap();
-        // 故障注入：`runs_pane` 這個名字先被一張普通表占走。索引與表共用同一個命名空間，
-        // SCHEMA 跑到 `CREATE INDEX IF NOT EXISTS runs_pane ON runs(pane_id)` 會因為名字已經
-        // 是一張表而報錯——這一步落在 `projects`／`bots`／`runs` 都已經在這次呼叫裡新建、
-        // `runs_one_active` 也建完之後，剛好測得到「前面明明成功的東西」有沒有跟著回滾。
         sqlx::query("CREATE TABLE runs_pane (x INTEGER)").execute(&pool).await.unwrap();
 
         let err = migrate(&pool).await.expect_err("撞到命名衝突要失敗，不能靜靜吞掉");
@@ -1027,7 +984,6 @@
         let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         assert_eq!(v, 0, "schema 沒套用成功，版本戳記要跟著回滾，不能宣稱已經是這個版本");
 
-        // 修好衝突，重跑：可重入，這次要乾淨地跑完，並且通過完整性檢查。
         sqlx::query("DROP TABLE runs_pane").execute(&pool).await.unwrap();
         migrate(&pool).await.expect("修好之後重跑要成功");
         let integrity: String = sqlx::query_scalar("PRAGMA integrity_check").fetch_one(&pool).await.unwrap();
@@ -1035,7 +991,6 @@
         let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         assert_eq!(v, SCHEMA_VERSION, "這次真的套用成功了，版本戳記要跟著更新");
 
-        // 再跑一次：可重入，結果要一樣（不會因為東西都已經在了就出錯，也不會重複建東西）。
         let cols_before = columns(&pool, "bots").await;
         migrate(&pool).await.expect("再跑一次也要成功（可重入）");
         assert_eq!(columns(&pool, "bots").await, cols_before);
@@ -1056,14 +1011,12 @@
             .await
             .unwrap();
         migrate(&pool).await.unwrap();
-        // 假裝這個檔案被一顆懂得更多欄位的未來版 binary 動過。
         let future = SCHEMA_VERSION + 1;
         sqlx::query(&format!("PRAGMA user_version = {future}")).execute(&pool).await.unwrap();
 
         let err = migrate(&pool).await.expect_err("DB 比這顆 binary 認得的新，要拒絕啟動");
         assert!(err.to_string().contains(&future.to_string()) && err.to_string().contains(&SCHEMA_VERSION.to_string()), "錯誤要講清楚兩個版本號：{err}");
 
-        // 拒絕啟動不能順便把版本號改回來，也不能動任何 schema。
         let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         assert_eq!(v, future);
 
@@ -1122,7 +1075,6 @@
         let after: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         assert_eq!(after, SCHEMA_VERSION);
 
-        // 可重入：同一版再跑一次不報錯、版本號不變。
         migrate(&pool).await.expect("同一版重跑不該失敗");
         let again: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
         assert_eq!(again, SCHEMA_VERSION);
@@ -1187,8 +1139,6 @@
         sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','pm','claude','tok',?)")
             .bind(&at).execute(&pool).await.unwrap();
 
-        // 同一個 started_at，而且 id 的字典序跟寫入順序**相反**：
-        // 先寫 `r-zzz`（舊的那次 run），後寫 `r-aaa`（真正最後那次）。
         let same = "2026-09-07T05:00:00.123Z";
         for (id, native) in [("r-zzz", "native-earlier"), ("r-aaa", "native-latest")] {
             sqlx::query(
@@ -1199,13 +1149,10 @@
             .execute(&pool).await.unwrap();
         }
 
-        // 修好的寫法（`, rowid DESC`）：拿到後寫的那一個。
         let got = last_native_session(&pool, "b1").await.unwrap().map(|(sid, _)| sid);
         assert_eq!(got.as_deref(), Some("native-latest"), "同毫秒時要接回後寫進去的那一個 run");
         assert_eq!(last_native_session_id(&pool, "b1").await.unwrap().as_deref(), Some("native-latest"));
 
-        // 舊寫法為什麼不行，在同一份資料上直接證明：`id DESC` 會挑到先寫的那一筆
-        // （`r-zzz` > `r-aaa`），也就是**另一段對話**。沒有第二鍵的版本更糟——連決定性都沒有。
         let by_id: Option<String> = sqlx::query_scalar(
             "SELECT native_session_id FROM runs WHERE bot_id='b1' AND native_session_id IS NOT NULL
               ORDER BY started_at DESC, id DESC LIMIT 1",
@@ -1272,7 +1219,6 @@
                 .bind(id).bind(format!("/tmp/{id}")).bind(id).bind(host).bind(now())
                 .execute(&pool).await.unwrap();
         }
-        // (bot, project, identity, run state)
         let bots = [
             ("b1", "pm", "cc1", "running"),
             ("b2", "pm", "cc2", "stopped"),
@@ -1309,28 +1255,23 @@
         let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         apply_migrations(&pool).await.unwrap();
         for (name, sql, want) in [
-            // turn_error::last_turn、app_ports_p4 的 Completed 事件補 turn id
             (
                 "last_turn_of_run",
                 "SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 "SEARCH turns USING INDEX turns_run_time (run_id=?)",
             ),
-            // hookrecv 補 `completed_fallback`、grok_transcript::unbound_turns
             (
                 "fallback_of_run",
                 "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL AND completed_at > ? \
                  ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 "SEARCH turns USING INDEX turns_run_time (run_id=?)",
             ),
-            // supervisor responder／controller：同一個 run 有沒有更晚開始的回合
             (
                 "newer_turn_in_run",
                 "SELECT 1 FROM turns n WHERE n.run_id = ? AND n.id <> ? AND n.created_at > ? AND n.status <> 'queued'",
                 "SEARCH n USING INDEX turns_run_time (run_id=? AND created_at>?)",
             ),
-            // resume_nudge：這個 run 跑過幾回合
             ("count_of_run", "SELECT COUNT(*) FROM turns WHERE run_id = ?", "SEARCH turns USING COVERING INDEX turns_run_time (run_id=?)"),
-            // db::in_flight_turn
             (
                 "in_flight_of_run",
                 "SELECT * FROM turns WHERE run_id = ? AND status = 'in_flight'",
@@ -1399,7 +1340,6 @@
     /// 試跑（v86）之前的排程表：去掉 `schedule_dry_run_requests`，`source` 的 CHECK 還原成沒有 'dry_run'。
     async fn drop_dry_run_schema(conn: &mut sqlx::SqliteConnection) {
         sqlx::query("DROP TABLE schedule_dry_run_requests").execute(&mut *conn).await.unwrap();
-        // kind 啟用開關（v93）是之後才加的表，舊版 fixture 不該有它。
         sqlx::query("DROP TABLE IF EXISTS kind_prefs").execute(&mut *conn).await.unwrap();
         let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='schedule_occurrences'").fetch_one(&mut *conn).await.unwrap();
         let old = sql.replace("CHECK (source IN ('scheduled','manual','dry_run'))", "CHECK (source IN ('scheduled','manual'))");
@@ -1435,13 +1375,11 @@
         sqlx::query("DROP TABLE IF EXISTS bot_update_restart").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_claims").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS lineage_sessions").execute(&mut *tx).await.unwrap();
-        // 承諾帳本（v100）是之後才加的表，舊版 fixture 不該有它（events 先於 items，因為 FK）。
         sqlx::query("DROP TABLE IF EXISTS ledger_events").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS ledger_items").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_join_receipts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_attempts").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE api_bot_sessions").execute(&mut *tx).await.unwrap();
-        // 排程結果（P2，v86）：舊版沒有這些表與欄位，夾具要還原成舊 schema 才對得上 pin。
         sqlx::query("DROP TRIGGER schedule_retry_deadline").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP INDEX schedule_occ_turn").execute(&mut *tx).await.unwrap();
         sqlx::query("DROP TABLE schedule_attempts").execute(&mut *tx).await.unwrap();
@@ -1510,7 +1448,6 @@
         for (table, id) in [("bots", "old-b"), ("runs", "old-r"), ("turns", "old-t")] {
             assert_eq!(sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table} WHERE id=?")).bind(id).fetch_one(&pool).await.unwrap(), 1);
         }
-        // #748 的欄位：68 的舊列記的是 1，升版不改寫；67 沒有這欄，升上來是 NULL（＝沒記）。
         let codex: Option<i64> = sqlx::query_scalar("SELECT codex_instant_interrupt FROM runs WHERE id='old-r'").fetch_one(&pool).await.unwrap();
         assert_eq!(codex, if version == 68 { Some(1) } else { None }, "舊列的 codex_instant_interrupt 升版後保留");
         sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('api-fixture','old-p','api','claude-api','fixture',?)").bind(now()).execute(&pool).await.unwrap();
@@ -1602,7 +1539,6 @@
         sqlx::query("DROP TABLE IF EXISTS lineage_sessions").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS ledger_events").execute(&pool).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS ledger_items").execute(&pool).await.unwrap();
-        // openai-api 切片 C：provider 欄／tier 欄／不可變 trigger／索引（v69 的 api_bot_attempts 還沒有這些）。
         for sql in ["DROP TRIGGER api_bot_attempts_provider_immutable", "DROP INDEX api_bot_attempts_provider_created", "ALTER TABLE api_bot_attempts DROP COLUMN provider", "ALTER TABLE api_bot_attempts DROP COLUMN service_tier"] {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
@@ -1614,7 +1550,6 @@
             sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(&pool).await.unwrap();
         }
         drop_dry_run_schema(&mut *pool.acquire().await.unwrap()).await;
-        // openai-api D2b-2：v69 的 `bots.kind` CHECK 還沒有 `openai-api`（就地放寬是之後的事）。
         {
             let mut conn = pool.acquire().await.unwrap();
             let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='bots'").fetch_one(&mut *conn).await.unwrap();
@@ -1638,7 +1573,6 @@
             .bind(&now).bind(&now).bind(iso_in(86400)).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at)VALUES('ra','rs','rb','rr','rt',1,0,'hash','fast','unknown',123,'fixture',?)")
             .bind(&now).execute(&pool).await.unwrap();
-        // Snapshot committed pages through SQLite, including pages still in WAL.
         sqlx::query("VACUUM INTO ?").bind(backup.to_str().unwrap()).execute(&pool).await.unwrap();
         pool.close().await;
         struct Cleanup(std::path::PathBuf);
@@ -1649,14 +1583,12 @@
         let upgraded=open(&path).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&upgraded).await.unwrap(),SCHEMA_VERSION);
         assert_eq!(schema_guard::fingerprint(&schema_guard::read_objects(&upgraded).await.unwrap()),pinned(SCHEMA_VERSION));
-        // openai-api D2b-2：升級後 `bots.kind` 收 `openai-api`；舊的列不變，不認得的 kind 照樣被擋。
         sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('ob','rp','openai','openai-api','fake',?)").bind(&now).execute(&upgraded).await.unwrap();
         assert!(sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at)VALUES('xb','rp','nope','gemini-api','fake',?)").bind(&now).execute(&upgraded).await.is_err());
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT kind FROM bots WHERE id='rb'").fetch_one(&upgraded).await.unwrap(),"claude-api");
         sqlx::query("DELETE FROM bots WHERE id='ob'").execute(&upgraded).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM sqlite_master WHERE name IN('api_bot_join_receipts','api_bot_join_receipts_pending')").fetch_one(&upgraded).await.unwrap(),2);
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM api_bot_join_receipts").fetch_one(&upgraded).await.unwrap(),0);
-        // Additive migration is idempotent, with existing private checkpoint/accounting intact.
         migrate(&upgraded).await.unwrap();migrate(&upgraded).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT checkpoint_json FROM api_bot_sessions WHERE id='rs'").fetch_one(&upgraded).await.unwrap(),"{}");
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT reserved_microusd FROM api_bot_attempts WHERE id='ra'").fetch_one(&upgraded).await.unwrap(),123);
@@ -1664,14 +1596,11 @@
             .bind(&now).execute(&upgraded).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,String>("PRAGMA integrity_check").fetch_one(&upgraded).await.unwrap(),"ok");
         assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&upgraded).await.unwrap().is_empty());
-        // Keep a second WAL connection alive to make restore ordering deterministic.
         let restore_blocker=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&restore_blocker).await.unwrap(),SCHEMA_VERSION);
         upgraded.close().await;
-        // A v69 reader's version fence must reject the upgraded image; never lower user_version.
         let raw=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&raw).await.unwrap()>69);
-        // Exercise the real binary fence on a synthetic future version, not only a comparison.
         sqlx::query(&format!("PRAGMA user_version={}",SCHEMA_VERSION+1)).execute(&raw).await.unwrap();
         restore_blocker.close().await;
         raw.close().await;
@@ -1679,7 +1608,6 @@
         let fenced=SqlitePoolOptions::new().max_connections(1).connect_with(SqliteConnectOptions::new().filename(&path)).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,String>("SELECT final_text FROM api_bot_join_receipts").fetch_one(&fenced).await.unwrap(),"PRIVATE_RECEIPT_SENTINEL");
         assert_eq!(sqlx::query_scalar::<_,i64>("PRAGMA user_version").fetch_one(&fenced).await.unwrap(),SCHEMA_VERSION+1);
-        // Restoring the main file is safe only after the WAL users have stopped.
         let checkpoint:(i64,i64,i64)=sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)").fetch_one(&fenced).await.unwrap();
         assert_eq!(checkpoint,(0,0,0),"restore requires a complete WAL checkpoint");
         fenced.close().await;
@@ -1699,7 +1627,6 @@
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT reserved_microusd FROM api_bot_attempts WHERE id='ra'").fetch_one(&restored).await.unwrap(),123);
         assert!(sqlx::query("PRAGMA foreign_key_check").fetch_all(&restored).await.unwrap().is_empty());
         restored.close().await;
-        // Observe the actual pool contract, not asynchronous SQLite sidecar unlink timing.
         static FAILED_POOL:std::sync::Mutex<Option<SqlitePool>>=std::sync::Mutex::new(None);
         fn failing_migration(pool:&SqlitePool)->am_base::db::MigrationFuture<'_> {
             *FAILED_POOL.lock().unwrap()=Some(pool.clone());
@@ -1724,7 +1651,6 @@
         (status,String::from_utf8(bytes.to_vec()).unwrap())
     }
     #[tokio::test]
-    // a68ae215e 起 claude-api 可以建立（使用者 2026-11-01 核准）；這裡改驗：CLI 專用欄位被拒時沒有任何副作用，KINDS 仍不含它。
     async fn nr1944_real_create_api_refuses_cli_fields_with_no_side_effects() {
         let e=crate::testing::env().await;let cfg=std::fs::read(e.dir.join("data/config.toml")).unwrap();let before=e.herdr.methods();
         let (status,body)=nr1944_http(crate::api::router(e.app.clone()),"POST",&format!("/api/projects/{}/bots",e.project_id),serde_json::json!({"name":"api-with-args","kind":"claude-api","args":["--x"]}).to_string()).await;

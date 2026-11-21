@@ -220,7 +220,6 @@ enum TokenLookupError {
 }
 
 async fn resolve_token(pool: &sqlx::SqlitePool, slots: &Arc<Semaphore>, token: &str) -> Result<Option<String>, TokenLookupError> {
-    // Reject malformed shapes without consuming a scarce slot or asking SQLite.
     if !store::token_shape_ok(token) {
         return Ok(None);
     }
@@ -303,7 +302,6 @@ impl Drop for ListTurn {
     fn drop(&mut self) {
         drop(self.guard.take());
         let mut m = list_locks().lock().unwrap_or_else(|e| e.into_inner());
-        // map 裡一份、本回合一份；多出來的就是還有人在排隊，留給他們。
         if Arc::strong_count(&self.lock) <= 2 && m.get(&self.bot_id).is_some_and(|l| Arc::ptr_eq(l, &self.lock)) {
             m.remove(&self.bot_id);
         }
@@ -356,7 +354,6 @@ fn router_with_state<H: PortalEnv>(st: Portal<H>) -> Router {
         .route("/s/{token}/api/info", get(info::<H>))
         .route("/s/{token}/api/messages", get(list_messages::<H>).post(send_message::<H>).layer(DefaultBodyLimit::max(64 * 1024)))
         .route("/s/{token}/api/events", get(events::<H>))
-        // multipart 的邊界與標頭另外留 64 KiB；檔案本身照樣 ≤ MAX_UPLOAD（解開之後再量）。
         .route(
             "/s/{token}/api/upload",
             post(upload::<H>)
@@ -426,10 +423,8 @@ async fn security_headers<H: PortalEnv>(State(st): State<Portal<H>>, uri: Uri, r
         next.run(req).await
     };
     let asset_ok = uri.path().starts_with("/assets/") && res.status() == StatusCode::OK;
-    // 信任分享勾了「允許 iframe 嵌入」（SPEC §20.1a）：只有 token 底下的 200 回應放寬；其餘（404、403、資產）照舊 DENY。
     let embed = res.status() == StatusCode::OK && embed_for_path(&st, uri.path()).await;
     let h = res.headers_mut();
-    // 這個入口沒有任何 CORS：就算哪條路由不小心加了，也在這裡拿掉。
     h.remove(header::ACCESS_CONTROL_ALLOW_ORIGIN);
     h.remove(header::ACCESS_CONTROL_ALLOW_CREDENTIALS);
     let cache = if asset_ok { "public, max-age=31536000, immutable" } else { "no-store" };
@@ -441,7 +436,6 @@ async fn security_headers<H: PortalEnv>(State(st): State<Portal<H>>, uri: Uri, r
     } else {
         h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     }
-    // 唯一的例外是 inline 圖片自己設的 sandbox CSP（比頁面的更嚴），其餘一律覆蓋成頁面的。
     if h.get(header::CONTENT_SECURITY_POLICY).is_none_or(|v| v != INLINE_IMAGE_CSP) {
         let csp = if embed { HeaderValue::from_str(&CSP.replace(CSP_FRAME_DENY, CSP_FRAME_EMBED)).ok() } else { Some(HeaderValue::from_static(CSP)) };
         if let Some(v) = csp {
@@ -566,12 +560,9 @@ async fn upload_admission<H: PortalEnv>(State(st): State<Portal<H>>, Path(token)
     };
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_upload_after_bot_for", &bot_id).await;
-    // 單一分享的進行中＋排隊上限：先於全站名額檢查，一個連結不能把全站的名額與排隊位子佔滿。permit 跟 `_permit` 一樣活到回應結束。
     let Some(_share_permit) = st.share_uploads.try_acquire(&bot_id) else {
         return too_many(5, "upload_per_share");
     };
-    // 全域上傳名額滿了就排隊等（分享頁一次選好幾張照片時會同時送來）。等的時候還沒讀 body，不算一次上傳嘗試，
-    // 否則別的分享占滿名額時，重試會把這顆 bot 的每分鐘額度扣光。排隊的人太多、或等太久才 429。
     let _permit = match st.uploads.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -739,7 +730,6 @@ async fn list_messages<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): P
         },
         None => None,
     };
-    // 分享頁只有 end user 與 bot 的對話（使用者 2026-10-04）：規則見 [`VISIBLE_SQL`]，SSE 用同一段。
     /// id、role、content、attachments_json、relay_from、created_at。
     type Row = (String, String, String, Option<String>, Option<String>, String);
     let sql = format!(
@@ -819,12 +809,10 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         return bad("unknown_attachment", "附件不存在（請重新上傳）");
     }
 
-    // 限流檢查（#1032）：先扣額度再做任何昂貴檢查，429 時不量預算、不跑 SSH、不握 bot 互斥鎖。
     if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
         return too_many(wait, "message");
     }
 
-    // 沙箱總預算（#853、#1032）：在 bot 鎖外檢查，避免遠端 SSH du 量測長時間霸佔 bot 互斥鎖。
     match st.app.share_storage_full(&bot_id).await {
         Ok(false) => {}
         Ok(true) => {
@@ -834,11 +822,9 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
             )
                 .into_response();
         }
-        // 遠端專案量不到又沒有新鮮值：不當作沒滿（fail closed，remote-share-design §6），一般 503（不洩漏主機名）。
         Err(crate::share::budget::Unavailable) => return unavailable(),
     }
 
-    // 遠端專案（#955、#1032）：一趟 ssh 查完所有附件，在 bot 鎖外執行，不阻塞同 bot 的 Stop hook。
     let remote = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Ok(r) => r,
         Err(()) => return unavailable(),
@@ -860,7 +846,6 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         }
     }
 
-    // 在真正送出副作用前拿 bot 互斥鎖重驗 token（#816、#1032），序列化輪替／撤銷與送訊。
     let authority = match authority_lock(&st, &token, &bot_id).await {
         Ok(g) => g,
         Err(r) => return r,
@@ -870,13 +855,11 @@ async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Pa
         composed.push_str(&format!("\n\n{ATTACH_MARK}\n"));
         composed.push_str(&b.attachments.iter().map(|a| format!("- inbox/{a}")).collect::<Vec<_>>().join("\n"));
     }
-    // 跟主 UI 的冪等鍵分開一個命名空間。
     let crid = format!("share:{crid}");
     drop(authority);
     match H::send_share_message(&st.app, &bot_id, &composed, &crid, &token).await {
         SendOutcome::Accepted { message_id, delivery } => Json(json!({"accepted": true, "message_id": message_id, "delivery": delivery})).into_response(),
         SendOutcome::NotFound => not_found(),
-        // 細節（pane、run、herdr）不給外面看：只說現在收不下，等一下再試。
         SendOutcome::Conflict(v) => {
             tracing::info!(bot = %bot_id, detail = %v, "share message not accepted");
             (StatusCode::CONFLICT, Json(json!({"error": "not_accepted", "message": "上一則還在等回覆，等它回完再送"}))).into_response()
@@ -915,8 +898,6 @@ async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Str
     if let Some(wait) = st.limits.take(&bot_id, "stream", 30, Duration::from_secs(60)) {
         return too_many(wait, "stream");
     }
-    // Response body 可能直到 client poll 才執行；不可把 handler 的 authority guard 帶過 handoff。
-    // Stream.next 會在送出第一個 status 前重新驗 token，並只在組事件時持鎖。
     drop(authority);
     let s = Stream {
         app: st.app.clone(),
@@ -957,7 +938,6 @@ impl<H: PortalEnv> Stream<H> {
     /// 下一個要送的事件；`None`＝收掉這條連線（token 失效、bus 關了）。
     async fn next(&mut self) -> Option<Event> {
         if self.pending.take().is_some() {
-            // Response handoff 前已放掉 handler 的鎖；在首個 status poll 時重新驗 token。
             let _guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
                 Ok(g) => g,
                 Err(_) => return None,
@@ -965,7 +945,6 @@ impl<H: PortalEnv> Stream<H> {
             let first = json!({"status": status_of(&self.app, &self.bot_id).await});
             return Some(Event::default().event("status").data(first.to_string()));
         }
-        // 期限放在迴圈外：別顆 bot 的事件每來一則就轉一圈，放在裡面等於每次重新倒數、永遠不到期（#1162）。
         let recheck = tokio::time::sleep(STREAM_RECHECK);
         tokio::pin!(recheck);
         loop {
@@ -980,7 +959,6 @@ impl<H: PortalEnv> Stream<H> {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // 只重驗，不把鎖留到下一次 poll（#1200）。
                         if authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await.is_err() {
                             return None;
                         }
@@ -1008,7 +986,6 @@ impl<H: PortalEnv> Stream<H> {
         if ev.data.get("bot_id").and_then(Value::as_str) != Some(self.bot_id.as_str()) {
             return None;
         }
-        // 鎖只包重驗＋組事件（回傳前放掉）：事件交給 HTTP 層之後不握 bot 鎖，client 不讀也不會卡住這顆 bot（#1200）。
         let _guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
             Ok(g) => g,
             Err(_) => {
@@ -1023,7 +1000,6 @@ impl<H: PortalEnv> Stream<H> {
                 let s = |k: &str| m.get(k).and_then(Value::as_str);
                 let shown = match role {
                     "user" => shown_to_share(role, s("relay_from"), s("rewound_at")),
-                    // bot 的回覆要看觸發它的那一則（[`VISIBLE_SQL`]）。讀不到就不推（fail closed），重抓時照列表的規則補回來。
                     "assistant" => match s("id") {
                         Some(id) => sqlx::query_scalar::<_, bool>(&format!("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.id = ? AND {VISIBLE_SQL})"))
                             .bind(id)
@@ -1040,7 +1016,6 @@ impl<H: PortalEnv> Stream<H> {
                 let out = public_message(s("id")?, role, s("content").unwrap_or(""), s("attachments_json"), s("relay_from"), s("created_at").unwrap_or(""));
                 Some(Event::default().event("message").data(out.to_string()))
             }
-            // 擁有者在 AG Man 倒回對話：分享頁手上那幾則要消失，請它整頁重抓（重抓的清單已排除倒回的）。
             "messages_rewound" => Some(Event::default().event("resync").data("{}")),
             "bot_status" => Some(Event::default().event("status").data(json!({"status": status_of(&self.app, &self.bot_id).await}).to_string())),
             _ => None,
@@ -1128,7 +1103,6 @@ async fn upload<H: PortalEnv>(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    // 分享頁送 `FormData` 的 `file` 欄位；腳本也可以直接送原始位元組＋`?name=`。
     let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let (raw_name, data): (Option<String>, Bytes) = if content_type.to_ascii_lowercase().starts_with("multipart/") {
         match multipart::file_part(content_type, &body) {
@@ -1164,11 +1138,9 @@ async fn upload<H: PortalEnv>(
     crate::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
     let len = data.len();
-    // 遠端專案（#955）：在 bot 鎖內經 ssh 寫進遠端 inbox（同一趟檢查配額、`set -C` 建檔、驗長度與身份）。解析不出來＝503。
     match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => return unavailable(),
         Ok(Some(site)) => {
-            // 測試用：解析完、寫入之前（#1026）。這中間若改指到另一台，寫入要被圍籬擋下，不能寫進舊主機。
             #[cfg(any(test, feature = "test-hooks"))]
             crate::race_point::hit("share_upload_after_site_resolve", &bot_id).await;
             return match site.inbox_write(&stored, &data, INBOX_MAX_BYTES, INBOX_MAX_FILES).await {
@@ -1211,7 +1183,6 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
         Ok(id) => id,
         Err(r) => return r,
     };
-    // 排完隊才驗 token（#1163）：排隊期間連結被撤銷的，輪到時照樣 404，不能照樣列出檔名。`_listing` 活到函式結束。
     let _listing = match list_turn(&bot_id).await {
         Ok(turn) => turn,
         Err(r) => return r,
@@ -1220,13 +1191,10 @@ async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<Stri
         Ok(g) => g,
         Err(r) => return r,
     };
-    // token 驗完就放掉 per-bot 互斥鎖（#906）：後面的 outbox 掃描是慢 I/O，不能讓 hook／送訊息（同一把鎖）排在它後面。
     drop(authority);
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_io_after_authority_released", &bot_id).await;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // 遠端專案（#955）：經 ssh 列遠端 outbox——**不刪任何檔**（分享用 bot 走保留政策，不是 1 小時）；outbox 還沒建＝空清單，
-    // 不可信／連不上／框不完整＝503（不把不完整的結果當空清單）。
     match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => return unavailable(),
         Ok(Some(site)) => {
@@ -1276,7 +1244,6 @@ fn files_response<H: PortalEnv>(app: &Arc<H>, bot_id: &str, listed: &[Value]) ->
             json!({"name": f["name"], "size": f["size"], "modified_at": modified_at, "version": f["version"]})
         })
         .collect();
-    // 清單上的 .svg 有新版就在背景查一次是不是合法 XML，壞了自動提醒 bot（`svg_check`，SPEC §20）。
     crate::share::svg_check::spawn_check(app, bot_id, &out);
     Json(json!({"files": out})).into_response()
 }
@@ -1320,15 +1287,12 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
         Ok(v) => v,
         Err(r) => return r,
     };
-    // token 驗完就放掉 per-bot 互斥鎖（#906）：讀檔與 SVG 嵌圖（spawn_blocking 合成）很慢，不能讓同一把鎖上的 hook／送訊息排在後面。
     drop(authority);
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("share_io_after_authority_released", &bot_id).await;
-    // 只認 outbox 第一層的檔名；子目錄、`..`、隱藏檔一律不給。
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') || name.chars().any(char::is_control) {
         return not_found();
     }
-    // 下載名額（不排隊）：每個分享 [`DOWNLOADS_PER_SHARE`]、全站 [`DOWNLOAD_SLOTS`]；permit 跟著 body 活到送完（慢速 client 也占著）。
     let Some(share_permit) = st.share_downloads.try_acquire(&bot_id) else {
         return too_many(5, "download");
     };
@@ -1336,7 +1300,6 @@ async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Pa
         return too_many(5, "download");
     };
     let svg = inline_image(&name) == Some("image/svg+xml");
-    // 遠端專案（#955）：經 ssh 串流（名額＝下載名額＋主機名額，拿不到主機名額也是 429）；本機走原本的 fd-bound 串流。
     let fetched = match crate::share::remote_io::remote_site(&*st.app, &bot_id).await {
         Err(()) => Err(crate::outbox::ShareFileError::Unavailable),
         Ok(Some(site)) => {
@@ -1391,7 +1354,6 @@ async fn embed_photos<H: PortalEnv>(app: &Arc<H>, bot_id: &str, res: Response) -
         return Response::from_parts(parts, axum::body::Body::from(bytes));
     }
     let Some(folder) = folder_of(app, bot_id).await else { return Response::from_parts(parts, axum::body::Body::from(bytes)) };
-    // 全站 compose 名額（跨分享連結）：等不到就 503，不在沒有預算時解碼（#842）。
     let Ok(Ok(permit)) = tokio::time::timeout(crate::share::compose::COMPOSE_WAIT, crate::share::compose::slots().acquire_owned()).await else {
         return unavailable();
     };

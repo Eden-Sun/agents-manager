@@ -45,7 +45,6 @@ fn db_errors_are_classified_so_only_real_write_failures_are_db_write_failed() {
     let mut diag = SaveDiag::default();
     assert_eq!(db_failure(&mut diag, &anyhow::Error::new(db_api::StaleRevision)), JournalFailure::StaleRevision);
     assert_eq!(db_failure(&mut diag, &anyhow::Error::new(db_api::StaleFence("stale API bot owner"))), JournalFailure::FenceMismatch);
-    // 外層包了 context 仍能認出來。
     let wrapped = anyhow::Error::new(db_api::StaleRevision).context("checkpoint cas");
     assert_eq!(db_failure(&mut diag, &wrapped), JournalFailure::StaleRevision);
     assert_eq!(db_failure(&mut diag, &anyhow::anyhow!("disk I/O error")), JournalFailure::DbWriteFailed);

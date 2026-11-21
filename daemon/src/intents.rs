@@ -91,7 +91,6 @@ pub async fn insert(pool: &SqlitePool, kind: &str, subject_id: &str, host: &str,
         Ok(_) => Ok(Inserted::New(get(pool, &id).await?.expect("just inserted"))),
         Err(e) if e.as_database_error().is_some_and(|d| d.is_unique_violation()) => match open_for(pool, kind, subject_id).await? {
             Some(existing) => Ok(Inserted::AlreadyOpen(existing)),
-            // 唯一衝突卻讀不到那一列（剛好被收掉）：當成寫入失敗，讓呼叫端重試，不當成「已經有一件」。
             None => Err(anyhow::anyhow!("intent insert conflicted but the open row vanished; retry")),
         },
         Err(e) => Err(e.into()),
@@ -140,9 +139,6 @@ pub async fn prepare_restart(
     ttl_secs: i64,
     boot: &str,
 ) -> Result<String> {
-    // 先讀後寫：deferred 交易讀完再升級寫鎖時 SQLite 不跑 busy handler，讀完之後別的 writer（對帳每一輪都在寫 runs）
-    // 剛 commit 或正拿著寫鎖，就直接回 `database is locked`／517 BUSY_SNAPSHOT，整個重啟被拒（#814，同 #723）。
-    // BEGIN 就拿寫鎖，撞到只會等 busy_timeout。
     let mut tx = crate::db::begin_write(pool).await?;
     let existing: Option<Intent> = sqlx::query_as(
         "SELECT * FROM intents WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
@@ -150,7 +146,6 @@ pub async fn prepare_restart(
     .bind(subject_id)
     .fetch_optional(&mut *tx)
     .await?;
-    // 讀完舊 intent、還沒寫的那一瞬（測試在這裡讓另一個 writer 插進來）。
     #[cfg(test)]
     restart_intent_after_read(subject_id).await;
     let now = crate::db::now();
@@ -405,7 +400,6 @@ mod tests {
         assert!(matches!(insert(&p, "delete_bot", "bot-1", "local", &json!({}), 900).await.unwrap(), Inserted::New(_)), "另一種動作不衝突");
         assert!(matches!(insert(&p, "restart", "bot-2", "local", &json!({}), 900).await.unwrap(), Inserted::New(_)), "另一個目標不衝突");
         assert_eq!(a.payload()["resume"], true);
-        // 結束之後同一個目標可以再開一件。
         assert!(complete(&p, &a.id).await.unwrap());
         assert!(matches!(insert(&p, "restart", "bot-1", "local", &json!({}), 900).await.unwrap(), Inserted::New(_)));
         p.close().await;
@@ -467,12 +461,10 @@ mod tests {
         let Inserted::New(i) = insert(&p, "delete_bot", "bot-1", "local", &json!({}), -3600).await.unwrap() else { panic!() };
         assert!(claim(&p, &i.id, "boot-dead").await.unwrap(), "上一顆 daemon 自己認領過");
 
-        // 開機對帳的第一步：這顆 boot 還沒碰過它，一件都不收。
         assert!(expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap().is_empty());
         assert_eq!(get(&p, &i.id).await.unwrap().unwrap().status, "running", "還開著，recovery 撈得到");
         assert!(open(&p).await.unwrap().iter().any(|x| x.id == i.id));
 
-        // recovery 認領（＝真的補了一次）之後才輪到 TTL。
         assert!(claim(&p, &i.id, "boot-new").await.unwrap());
         let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
         assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![i.id.as_str()]);
@@ -499,23 +491,19 @@ mod tests {
             i
         };
 
-        // 主機清單還沒建起來（空的）：一件都不判死，寧可晚一輪。
         assert!(expire_overdue(&p, &crate::db::now(), "boot-new", &[]).await.unwrap().is_empty());
 
-        // `rusty-box` 已經不在 config 裡：沒有人會再來補它，現在就收掉並通知。
         let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
         assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![host_gone.id.as_str()]);
         assert!(get(&p, &host_gone.id).await.unwrap().unwrap().last_error.unwrap().contains("no longer configured"));
         assert_eq!(get(&p, &still_configured.id).await.unwrap().unwrap().status, "running", "主機還在＝等 recovery，不收");
 
-        // 主機還在、卻放了超過絕對期限：最後的收斂，不看 owner 也不看誰會來補。
         let long_ago = (chrono::Utc::now() - chrono::Duration::seconds(HARD_TTL_SECS + 60)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE intents SET created_at = ? WHERE id = ?").bind(&long_ago).bind(&still_configured.id).execute(&p).await.unwrap();
         let expired = expire_overdue(&p, &crate::db::now(), "boot-new", &["local".into()]).await.unwrap();
         assert_eq!(expired.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![still_configured.id.as_str()]);
         assert_eq!(get(&p, &still_configured.id).await.unwrap().unwrap().status, "failed");
 
-        // 兩件都有人被通知（放棄不會沒人知道）。
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed'").fetch_one(&p).await.unwrap();
         assert_eq!(n, 2);
         p.close().await;
@@ -534,7 +522,6 @@ mod tests {
         let other_wrote = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
         let (url, seen) = (format!("sqlite://{}", dir.join("t.sqlite").display()), other_wrote.clone());
         crate::race_point::arm("restart_intent_after_read", &subject, move || async move {
-            // 另一條連線、不等鎖：拿得到寫鎖就當場 commit（deferred 時正是這樣），拿不到＝被重啟的交易擋著。
             let mut other = SqliteConnectOptions::from_str(&url).unwrap().busy_timeout(std::time::Duration::ZERO).connect().await.unwrap();
             let wrote = insert_pending_on(&mut other, "restart", "another-bot", "local", &json!({}), 900).await.is_ok();
             *seen.lock().unwrap() = Some(wrote);

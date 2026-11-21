@@ -46,7 +46,6 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
             tracing::warn!(occurrence = %occ.id, error = ?e, "schedule enqueue failed; ledger keeps it pending");
         }
     }
-    // 重啟後：已綁定、還在等啟動（awaits_start）且沒有 run 的 bot，依既有 kick 的門檻補叫一次。
     let waiting: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT o.bot_id FROM schedule_occurrences o JOIN turns t ON t.id = o.turn_id
           WHERE o.status = 'queued' AND t.status = 'queued' AND t.awaits_start = 1",
@@ -54,7 +53,6 @@ pub async fn tick(app: &Arc<App>) -> Result<()> {
     .fetch_all(&pool)
     .await?;
     for (bot_id,) in waiting {
-        // 維護窗口（或讀不到）時不喚醒：先過同一道窗口閘，才 kick。
         if !matches!(app.window_held().await, Ok(None)) {
             continue;
         }
@@ -130,7 +128,6 @@ pub(crate) async fn clear_bot_after(app: &Arc<App>, bot_id: &str) -> Result<Opti
         return Ok(None);
     }
     let opts = lifecycle::StartOpts { require_idle: true, ..Default::default() };
-    // 重啟的 future 很大：裝箱，不放進這個 async fn 的 poll 框（AGENTS.md 的 1 MiB 堆疊守門）。
     let run = Box::pin(lifecycle::restart_bot_with(app, bot_id, opts)).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     tracing::info!(bot = %bot_id, run = %run, "schedule cleared the bot conversation after done");
     Ok(Some(run))
@@ -146,7 +143,6 @@ async fn notify_transition(app: &Arc<App>, t: &Transition) {
             json!({"project_id": t.project_id, "schedule_id": t.schedule_id, "schedule_code": t.schedule_code, "schedule_name": t.schedule_name, "occurrence_id": t.occurrence_id, "status": t.status, "outcome": t.outcome, "attempt_no": t.attempt_no, "error": t.error}),
         )
         .await;
-        // 網頁推播（手機鎖屏也收得到）：背景送、失敗只記 warn，不影響排程。
         crate::webpush::spawn_schedule_push(app, t);
     }
 }
@@ -160,19 +156,13 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
     let Some(due) = s.next_due.clone() else { return Ok(()) };
     let spec: Spec = serde_json::from_str(&s.spec_json).context("spec_json")?;
     let now_dt = DateTime::parse_from_rfc3339(now)?.with_timezone(&Utc);
-    // `next_due` is stored to milliseconds while an interval anchor can retain
-    // nanoseconds. At the exact stored due millisecond, `next_after(now)` can
-    // still return the occurrence just materialized; move past the consumed
-    // due before calculating its successor.
     let due_dt = DateTime::parse_from_rfc3339(&due)?.with_timezone(&Utc);
     let after_due = due_dt.checked_add_signed(Duration::milliseconds(1)).unwrap_or(due_dt);
-    // 隨機區間：這次已在區間內抽過了，下一次要從區間結束之後找，同一天不會再抽第二次。
     let slot = time::slot_at(&spec, &s.tz, due_dt)?;
     let window_end = slot.as_ref().and_then(|(_, end)| end.checked_add_signed(Duration::milliseconds(1)));
     let next = time::next_after(&spec, &s.tz, now_dt.max(after_due).max(window_end.unwrap_or(after_due)))?.map(fmt);
     let slot_label = slot.map(|(l, _)| l).filter(|l| !l.is_empty());
     let mut tx = db::begin_write(pool).await?;
-    // 交易內重讀：到期判斷與寫入之間可能被停用、編輯或刪除。
     let Some(cur) = store::get_schedule_tx(&mut tx, &s.id).await? else { return Ok(()) };
     if cur.enabled != 1 || cur.deleted_at.is_some() || cur.next_due.as_deref() != Some(due.as_str()) || cur.generation != s.generation {
         return Ok(());
@@ -212,7 +202,6 @@ pub(crate) async fn materialize(pool: &sqlx::SqlitePool, s: &Schedule, now: &str
 /// 把一筆 pending occurrence 綁成 queued turn。忙碌時照常排進既有佇列（不 steer、不 interrupt）。
 /// 回傳 `true` 代表已綁定；`false` 代表這次不送（等待中、已取消、Bot 不合格等，原因記在 waiting_reason 或 status）。
 pub async fn enqueue(app: &Arc<App>, occurrence_id: &str) -> Result<bool> {
-    // 「每次從基準快照開始」：先 fork 重啟再綁 turn，放背景做（重啟要等幾秒）；回 false＝這次呼叫沒綁，結果看帳本。
     if let Some(head) = store::get_occurrence(&app.db, occurrence_id).await? {
         let due = head.next_retry_at.as_deref().is_none_or(|t| t <= db::now().as_str());
         if head.status == "pending" && due && store::get_schedule(&app.db, &head.schedule_id).await?.is_some_and(|s| s.from_base == 1 && s.enabled == 1 && s.deleted_at.is_none() && s.generation == head.generation) {
@@ -234,11 +223,8 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
     let lock = app.bot_lock(&head.bot_id).await;
     let _guard = lock.lock().await;
     let now = db::now();
-    // 會話與 run 在 bot 鎖內讀（鎖住期間不會變），交易開之前讀，避免交易佔住唯一連線時再向池子要連線。
     let conv = db::conversation_id(&pool, &head.bot_id).await?;
     let run = db::active_run(&pool, &head.bot_id).await?;
-    // 維護窗口閘：在 bot 鎖內、DB 交易之前檢查（不在交易裡讀窗口，免得交易中又拿 DB 連線）。
-    // 窗口開著或讀不到 → 不造 turn、不 kick；ledger 保留 pending，tick 下一輪再試。
     match app.window_held().await {
         Ok(None) => {}
         Ok(Some(_)) => {
@@ -261,7 +247,6 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
     let sched = store::get_schedule_tx(&mut tx, &occ.schedule_id).await?;
     let sched_ok = sched.as_ref().is_some_and(|s| s.enabled == 1 && s.deleted_at.is_none() && s.generation == occ.generation);
     if !sched_ok {
-        // 排程已停用、刪除或換過設定（generation 不同）：這筆不再送，記成取消而不是永遠 pending。
         store::finish_open_tx(&mut tx, occurrence_id, "cancelled", "排程已停用、刪除或已修改", &now).await?;
         tx.commit().await?;
         return Ok(false);
@@ -284,7 +269,6 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
         }
         if occ.next_retry_at.as_deref().is_some_and(|t| db::cmp_ts(t, &now).is_gt()) { return Ok(false); }
     }
-    // Bot 資格：同一個專案（排程建立時的專案）、未刪、一般 Bot。換到別的專案＝不合格。
     let Some(kind) = eligible_bot_tx(&mut tx, &occ.bot_id, Some(&sched.project_id)).await? else {
         let changed = sqlx::query("UPDATE schedule_occurrences SET waiting_reason = 'bot_unavailable', updated_at = ? WHERE id = ? AND status = 'pending' AND waiting_reason IS NOT 'bot_unavailable'")
             .bind(&now).bind(occurrence_id).execute(&mut *tx).await?.rows_affected() > 0;
@@ -308,7 +292,6 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
 
         return Ok(false);
     };
-    // 送出時才展開變數（時間用這次觸發的時刻、排程時區）；occ.prompt 留原樣。
     let when = DateTime::parse_from_rfc3339(&occ.scheduled_for)?.with_timezone(&Utc);
     let prompt = super::template::expand(&occ.prompt, &super::template::Ctx::new(sched.tz.parse().unwrap_or(chrono_tz::UTC), when, &sched.name, occ.slot_label.as_deref().unwrap_or("")));
     let text = crate::lifecycle::pane_text::for_pane(&kind, &prompt);
@@ -318,19 +301,16 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
         notify_terminal(app, &sched, occurrence_id, "failed", Some("prompt 是空的"), occ.attempt_no, occ.source == "dry_run").await;
         return Ok(false);
     }
-    // 停止中：不收、不踢；等它停完再由 tick 重試。
     if run.as_ref().is_some_and(|r| r.state == "stopping") {
         tx.commit().await?;
         set_wait(app, &sched, occurrence_id, "stopping", &now).await;
         return Ok(false);
     }
-    // 既有的 queue 上限是每個會話 1 筆 queued：已有人排著就等，不覆蓋、不另開。
     if queued_ahead > 0 {
         tx.commit().await?;
         set_wait(app, &sched, occurrence_id, "bot_busy", &now).await;
         return Ok(false);
     }
-    // 沒有 run 或還在起：awaits_start=1，讓既有的啟動路徑認領；有 run 且在跑：只等 idle。
     let starting_or_none = run.as_ref().is_none_or(|r| r.state == "starting");
     let awaits_start: i64 = if starting_or_none { 1 } else { 0 };
     let turn_id = db::ulid();
@@ -364,11 +344,9 @@ pub(super) async fn enqueue_now(app: &Arc<App>, occurrence_id: &str) -> Result<b
     tx.commit().await?;
     drop(_guard);
     tracing::info!(occurrence = occurrence_id, turn = %turn_id, bot = %occ.bot_id, "schedule occurrence queued");
-    // 讓 Bot 對話立刻看見這則排程的 user 訊息與它排隊的 turn（既有的發布路徑）。
     crate::lifecycle::prompt::publish_prompt_message(&**app, &occ.bot_id, &msg_id).await;
     crate::lifecycle::emit_turn(app, &turn_id).await;
     changed(app, &sched.project_id, &sched.id).await;
-    // 叫既有的 kick／flush：沒有 run 走啟動路徑（kick），有 run 走佇列 flush。
     if run.is_none() {
         crate::lifecycle::start_send::kick(app, &occ.bot_id);
     }

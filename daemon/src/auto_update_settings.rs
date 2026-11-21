@@ -78,7 +78,6 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
 
-        // 預設全關
         let Json(initial) = get(State(app.clone())).await.unwrap();
         assert_eq!(
             initial,
@@ -90,7 +89,6 @@ mod tests {
             }
         );
 
-        // 部分開啟：codex = true
         let Json(updated) = put(
             State(app.clone()),
             Extension(RequestPrincipal::User),
@@ -111,7 +109,6 @@ mod tests {
             }
         );
 
-        // 再開 agy，關閉 codex
         let Json(updated2) = put(
             State(app.clone()),
             Extension(RequestPrincipal::User),
@@ -133,7 +130,6 @@ mod tests {
             }
         );
 
-        // bot 呼叫 PUT 應被 403 Forbidden
         let bot_err = put(
             State(app.clone()),
             Extension(RequestPrincipal::Bot("test-bot".into())),

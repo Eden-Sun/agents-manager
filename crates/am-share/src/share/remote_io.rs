@@ -48,12 +48,10 @@ const CHUNK: usize = 64 * 1024;
 struct StreamState {
     head: Option<Bytes>,
     body: SshStream,
-    // 每一塊讀取都要在這個權威仍是當前時才做（#1026）：repoint 之後舊主機的位元組不再送給 client。
     fence: HostFence,
     remaining: u64,
     idle: Duration,
     failed: bool,
-    // 名額跟著串流活到 body 送完或 client 斷線（RAII）；ssh 行程也一樣（`SshStream` drop 時殺掉）。
     _permit: OwnedSemaphorePermit,
     _download_permit: Option<OwnedSemaphorePermit>,
 }
@@ -140,12 +138,9 @@ async fn collect(file: RemoteFile, idle: Duration) -> Result<Vec<u8>, ()> {
             _ => return Err(()),
         }
     }
-    // 讀完才發現主機已經換掉：這份全文是舊主機的，不嵌、不回（#1026）。
     if !fence.is_current_now() {
         return Err(());
     }
-    // 讀完就放掉主機名額：接下來的 stat／抓照片各自再拿（整段仍受每分享 2、全站 8 的下載名額限制），
-    // 不然 4 個同時嵌圖的下載各占一格、再等第五格，全部互等。
     drop(permit);
     drop(download_permit);
     Ok(out)

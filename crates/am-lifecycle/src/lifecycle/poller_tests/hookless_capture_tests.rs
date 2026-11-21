@@ -59,7 +59,6 @@ async fn child(status: &str, screen: &str, hooks: i64, adopted: i64) -> Child {
 
 async fn messages(app: &Arc<App>, conv: &str) -> Vec<(String, String, String)> {
     sqlx::query_as::<_, (String, String, String)>(
-        // Same order as `GET /api/bots/{id}/messages`.
         "SELECT role, content, source FROM messages WHERE conversation_id = ? ORDER BY id",
     )
     .bind(conv)
@@ -131,7 +130,6 @@ async fn an_unreadable_last_reply_is_not_taken_as_no_reply() {
     let c = child("idle", EXCHANGE, 0, 1).await;
     let app = c.env.app.clone();
     assert!(capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
-    // herdr 對同一份回答報了第二次 `working -> idle`，游標又不在（重讀同一個畫面）：只有去重擋得住。
     sqlx::query("UPDATE runs SET last_read_tail_hash=NULL WHERE id=?").bind(&c.run_id).execute(&app.db).await.unwrap();
 
     sqlx::query("ALTER TABLE messages RENAME TO messages_unreadable").execute(&app.db).await.unwrap();
@@ -174,7 +172,6 @@ async fn a_run_with_hooks_is_left_to_its_hooks() {
     assert!(!capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     assert!(messages(&app, &c.conv).await.is_empty());
 
-    // Same for a run the daemon started itself, hooks or not.
     let own = child("idle", EXCHANGE, 0, 0).await;
     let app = own.env.app.clone();
     assert!(!capture_hookless_turn_locked(&app, &own.run_id, false).await.unwrap());

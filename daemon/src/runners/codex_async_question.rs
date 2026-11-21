@@ -24,11 +24,8 @@ pub async fn snapshot(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Op
     }
     let pane = run.pane_id.as_deref().filter(|p| !p.trim().is_empty())?;
     let client = app.herdr_for_run(run).await?;
-    // 200 行：收合時要在對話紀錄裡找題目原文，分辨哪幾題還排著。
     let mut read = client.pane_read(pane, "visible", 200).await.ok()?;
     let Some(mut screen) = async_screen(&read.text) else { return Some(None) };
-    // session 以 herdr 當下綁在這顆 pane 上的為準（/new、resume 後 DB 的 native_session_id 可能還是舊的）；
-    // herdr 沒回報才退回 DB，那時每一題的原文都必須在畫面上看得到，否則可能讀到舊 session 的題目，降級。
     let live = live_session(&client, pane).await;
     let session = live.clone().or_else(|| run.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string));
     let mut pending = match session {
@@ -36,7 +33,6 @@ pub async fn snapshot(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Op
         None => Vec::new(),
     };
     if db::bot_host(&app.db, &bot.id).await.ok()? != crate::config::LOCAL_HOST {
-        // SSH can take time: resolve against the screen after the read, never an old queue count.
         read = client.pane_read(pane, "visible", 200).await.ok()?;
         let Some(now) = async_screen(&read.text) else { return Some(None) };
         screen = now;
@@ -104,7 +100,6 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 
 pub(super) async fn observe_now(app: &Arc<App>, bot: &db::Bot, run: &db::Run) {
     let Some(seen) = snapshot(app, bot, run).await else { return };
-    // SSH may have yielded while the run resumed or ended; do not restore an obsolete reason.
     let Ok(Some(current)) = db::run(&app.db, &run.id).await else { return };
     if current.agent_status != "blocked" || current.state != run.state || current.pane_id != run.pane_id || current.started_at != run.started_at {
         return;
@@ -148,7 +143,6 @@ mod tests {
         assert!(r["text"].as_str().unwrap().contains("1 題非同步提問"), "{r}");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty() && env.herdr.calls_to("pane.send_text").is_empty());
 
-        // 畫面上不再有提問（作答了、跳過了）：原因清掉。
         env.herdr.set_screen("pane-async-q", "› Ask Codex to do anything\n");
         observe(&env.app, &run).await;
         assert_eq!(reason(&env, &bot.id).await, json!(null));

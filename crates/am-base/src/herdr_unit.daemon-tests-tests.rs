@@ -83,7 +83,6 @@
 
     /// 等背景 spawn 的假 herdr 寫完（它由 reap thread 收，不在這條執行緒上）。
     fn read_eventually(p: &Path) -> String {
-        // 30 秒上限（issue #952）：原本 2 秒在高負載下會先到期。
         for _ in 0..1500 {
             if let Ok(s) = std::fs::read_to_string(p) {
                 if !s.is_empty() {
@@ -114,7 +113,6 @@
         assert_eq!(busy_retry(|| start_server("agents-manager", &dir.0.join("logs"), Some(&u), &herdr)).unwrap(), "spawn");
         assert!(sys_log.exists(), "有 unit 就要先試");
         assert_eq!(read_eventually(&herdr_log), "--session agents-manager server\n");
-        // 沒有 unit（macOS、名字不能當實例名）直接 spawn。
         std::fs::remove_file(&herdr_log).unwrap();
         assert_eq!(busy_retry(|| start_server("x", &dir.0.join("logs"), None, &herdr)).unwrap(), "spawn");
         assert_eq!(read_eventually(&herdr_log), "--session x server\n");

@@ -123,7 +123,6 @@
         let env = Env::new();
         let args = ["-f", "--", "next start -p 3917", "a b", "$HOME", "`x`", "zz-no-such", "it's"];
         let (code, out, err) = env.run("sh", "pkill", &args);
-        // 政策：pkill 一律擋，參數再怎麼特殊都一樣；不能有任何輸出（沒有真的 pkill 被呼叫）。
         assert_eq!(code, DENIED_EXIT, "{err}");
         assert!(out.is_empty(), "{out}");
     }
@@ -163,10 +162,8 @@
     #[test]
     fn boot_refresh_writes_the_kill_shims_into_bots_that_already_have_a_bin_dir() {
         let d = tmp();
-        // 已經啟動過的 bot（bin/ 裡有 herdr）：開機掃描補上 pkill／killall，正在跑的 pane 下一次呼叫就生效。
         let started = d.join("bots/01STARTED/bin");
         write_exec(&started.join("herdr"), "#!/bin/sh\n# 舊\n");
-        // 從沒啟動過的 bot（沒有 bin/）：不生出新檔案。
         std::fs::create_dir_all(d.join("bots/01NEVER")).unwrap();
         let out = refresh_all(&d);
         assert!(out.failed.is_empty(), "{:?}", out.failed);
@@ -175,7 +172,6 @@
         }
         assert!(!d.join("bots/01NEVER/bin").exists());
         assert!(out.changed.contains(&"01STARTED/pkill".to_string()) && out.changed.contains(&"01STARTED/killall".to_string()), "{:?}", out.changed);
-        // 冪等。
         assert!(refresh_all(&d).changed.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }

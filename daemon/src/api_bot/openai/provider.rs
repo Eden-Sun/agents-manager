@@ -121,7 +121,6 @@ fn tool_calls(response: &Response) -> Result<Vec<ToolCall>, &'static str> {
             _ => return Err("unsupported output item"),
         }
     }
-    // 未完成的回應（被 max_output_tokens 截斷等）永遠不執行工具。
     if response.stop_reason != STOP_COMPLETED && !calls.is_empty() {
         return Err("tool call in a response that did not complete");
     }
@@ -137,7 +136,6 @@ impl Codec for OpenAiCodec {
         if calls.len() > MAX_TOOL_CALLS_PER_RESPONSE || calls.iter().any(|c| state.completed_tool_ids.contains(&c.id)) {
             return Err(InvalidResponse);
         }
-        // 重播用的 item 先全部驗過，transcript 才動（失敗時 state 不變）。
         let mut entries = Vec::with_capacity(response.content.len());
         for item in &response.content {
             ReplayItem::new(item.clone()).map_err(|_| InvalidResponse)?;
@@ -210,7 +208,6 @@ impl Codec for OpenAiCodec {
             return 0;
         }
         let added: Vec<Value> = unpaired.iter().map(|id| json!({"call_id": id, "output": note, "is_error": true})).collect();
-        // 這一批已經有部分結果（最後一筆就是 tool_results）就接在後面；否則開一筆新的。
         match state.messages.last_mut().filter(|m| m.role == ROLE_TOOL_RESULTS).and_then(|m| m.content.get_mut("results")).and_then(Value::as_array_mut) {
             Some(results) => results.extend(added),
             None => state.messages.push(Message { role: ROLE_TOOL_RESULTS.into(), content: json!({ "results": added }) }),
@@ -223,7 +220,7 @@ impl Codec for OpenAiCodec {
         let mut text = String::new();
         for item in &response.content {
             if item.get("type").and_then(Value::as_str) != Some("message") {
-                continue; // reasoning（含 encrypted_content）與 function_call 不是給使用者看的
+                continue;
             }
             for part in item.get("content").and_then(Value::as_array).into_iter().flatten() {
                 match part.get("type").and_then(Value::as_str) {
@@ -319,7 +316,6 @@ impl QuoteProvider for OpenAiQuote {
     fn reserve(&self, request: &dyn QuotedRequest) -> Result<ReservationQuote, QuoteError> {
         let request = OpenAiRequest::of(request)?;
         let table = pricing::price_table(&request.model).ok_or(QuoteError::Unapproved)?;
-        // 上界報價：輸入上界全部以最高的輸入單價計（含 12 小時快取寫入）、輸出用滿 max_output_tokens，超過長文門檻用長文價。
         let reserved = match pricing::quote_upper_bound(&request.model, request.input_token_bound(), request.max_output_tokens) {
             Ok(bound) => i64::try_from(bound).map_err(|_| QuoteError::InvalidRequest)?,
             Err(pricing::PriceError::UnknownModel) => return Err(QuoteError::Unapproved),
@@ -338,7 +334,6 @@ impl QuoteProvider for OpenAiQuote {
         if usage.input_tokens > request.input_token_bound() || usage.output_tokens > request.max_output_tokens {
             return Err(QuoteError::UntrustedUsage);
         }
-        // 回報的 service tier 不是標準層級就沒有核准的價（UnsupportedTier）：一樣是費用未知，不照標準價算。
         let tier = response.usage.get("service_tier").and_then(Value::as_str);
         let cost = pricing::settle(&request.model, &usage, tier).ok().and_then(|c| i64::try_from(c).ok()).ok_or(QuoteError::UntrustedUsage)?;
         Ok(UsageQuote { estimated_microusd: cost, actual_speed: Some(SERVICE_TIER) })
@@ -487,10 +482,8 @@ impl Provider for OpenAiProvider {
 
     fn encode(&self, effort: &str, system: &Value, transcript: &[Message], _previous: Option<&Response>) -> Result<Arc<dyn QuotedRequest>, QuoteError> {
         let request = self.request_for(effort, system, transcript)?;
-        // 配對錯、重複 call_id、不支援的 effort 都在這裡（HTTP 之前）拒絕。
         let wire = request.body().map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(&wire));
-        // 位元組上界只用來預留，超過 context window 不在這裡拒絕（上游會拒絕，且不計費）。
         let input_bound = pricing::input_token_bound(&self.model, wire.len()).map_err(|_| QuoteError::InvalidRequest)?;
         Ok(Arc::new(OpenAiRequest { wire, hash, model: self.model.clone(), max_output_tokens: self.max_output_tokens, input_bound }))
     }
@@ -615,12 +608,10 @@ async fn post_inner(
     if url.scheme() != "https" || url.host_str() != Some(OFFICIAL_HOST) || url.port_or_known_default() != Some(443) {
         return Err(Error::InvalidRequest);
     }
-    // 測試只連得到字面上的 loopback；DNS 名稱與真的 API endpoint 一律拒絕。
     #[cfg(test)]
     if url.scheme() != "http" || !url.host_str().is_some_and(|h| h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())) {
         return Err(Error::InvalidRequest);
     }
-    // 不跟隨任何 redirect（跨站 redirect 會把 Authorization 帶去別處）。
     let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(transport.timeout);
     #[cfg(test)]
     let builder = builder.no_proxy();
@@ -665,8 +656,6 @@ async fn post_inner(
             }
             let updates = assembler.feed(&chunk).map_err(codec_error)?;
             if let Some(report) = progress {
-                // 與 Claude（http.rs）同一個節奏：每個 chunk 都看一眼，距上次報告滿 PROGRESS_INTERVAL 才報；
-                // 文字、思考（reasoning 項目開始）、函式呼叫參數都算進度，尾端文字與 Claude 一樣只留 TAIL_CHARS。
                 for update in updates {
                     match update {
                         Update::TextDelta(delta) => {
@@ -697,15 +686,12 @@ async fn post_inner(
                 };
                 (output, format!("incomplete:{reason}"))
             }
-            // HTTP 200 之後才失敗：模型可能已經產生並計費，不是確定沒處理的拒絕。
             Outcome::Failed { code, message, .. } => {
                 let message = Some(crate::judge::mask(&message).chars().take(500).collect::<String>()).filter(|m| !m.is_empty());
                 return Err(Error::StreamAborted { kind: Some(code).filter(|c| !c.is_empty()), message });
             }
             Outcome::Truncated => return Err(Error::TransportUnknown),
         };
-        // 上游實際回報的模型：是我們要求的（或它的快照名）就記成要求的那個 id，原名留在 usage 的 `upstream_model`；
-        // 回報了別的模型就原樣帶出去，後面的內容檢查（`invalid_content_reason`）與結算會拒絕它。沒回報＝當作要求的那個。
         let upstream_model = output.model.clone();
         let model = match &upstream_model {
             Some(upstream) if !model_matches(&request.model, upstream) => upstream.clone(),
@@ -720,7 +706,6 @@ async fn post_inner(
             model,
             content: output.replay.iter().map(|item| item.to_checkpoint_value().clone()).collect(),
             stop_reason,
-            // 只有未完成的回應可能沒有用量（completed 缺 usage 已經在組裝時拒絕）：存 `null`，結算回 UntrustedUsage，不當成 0。
             usage,
         })
     };

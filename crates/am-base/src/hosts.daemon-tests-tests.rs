@@ -79,7 +79,6 @@
         );
         let mut events = env.app.subscribe();
 
-        // Replacement wins before publish; A's connected/error must not be paired with B's tools.
         publish_tx.send(()).unwrap();
         stale_emit.await.unwrap();
         assert!(
@@ -210,7 +209,6 @@
         assert_eq!(remote_path_prefix(""), "");
         assert_eq!(remote_path_prefix("  "), "");
         assert_eq!(remote_path_prefix("/opt/x/bin"), "export PATH='/opt/x/bin':\"$PATH\"\n");
-        // A space no longer splits the export; a `;` or `$(…)` is data, not a command.
         let p = remote_path_prefix("/Users/me/my tools/bin;$(touch /tmp/pwned)");
         assert_eq!(p, "export PATH='/Users/me/my tools/bin;$(touch /tmp/pwned)':\"$PATH\"\n");
     }
@@ -235,7 +233,6 @@
             remote_path_prefix("/opt/homebrew/bin:$HOME/.local/bin"),
             "export PATH='/opt/homebrew/bin':\"$HOME\"'/.local/bin':\"$PATH\"\n"
         );
-        // `$HOME` 只在項目開頭展開；其他 `$` 仍是資料。
         assert_eq!(remote_path_prefix("/x/$HOME/bin"), "export PATH='/x/$HOME/bin':\"$PATH\"\n");
         assert_eq!(remote_path_prefix("$HOMEX/bin"), "export PATH='$HOMEX/bin':\"$PATH\"\n");
         let p = remote_path_prefix("$HOME/a;$(touch /tmp/pwned)");
@@ -280,7 +277,6 @@
             .await
             .expect("寫入卡住時 timeout 必須生效，不能整個呼叫掛住");
         assert!(matches!(r, Ok(None)), "要回逾時：{r:?}");
-        // 對端 `sleep 30`：真的卡住會等滿 30 秒；上限只要低於它就分得出來，不必貼著名義時間（慢 runner 才不會翻紅）。
         assert!(started.elapsed() < Duration::from_secs(25));
     }
 
@@ -351,19 +347,16 @@
         assert!(String::from_utf8_lossy(&run.stdout).contains("Authentication required"), "{:?}", String::from_utf8_lossy(&run.stdout));
         assert!(String::from_utf8_lossy(&run.stderr).contains("warn"));
         assert!(t0.elapsed() < Duration::from_secs(25));
-        // 沒逾時的照舊：有退出狀態、完整輸出。
         let ok = sh_local_capture("printf out; printf err >&2; exit 3", Duration::from_secs(10)).await.unwrap();
         assert!(!ok.timed_out);
         assert_eq!(ok.status.and_then(|s| s.code()), Some(3));
         assert_eq!((String::from_utf8_lossy(&ok.stdout).as_ref(), String::from_utf8_lossy(&ok.stderr).as_ref()), ("out", "err"));
-        // `sh_local` 的契約不變：逾時回 `None`。
         assert!(sh_local("sleep 30", Duration::from_millis(200)).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn sh_local_timeout_kills_the_child() {
         let marker = format!("am-sh-local-{}", crate::db::ulid());
-        // `sh -c` may fork rather than exec the last command; the group kill has to reach it.
         let script = format!("sleep 30 # {marker}\nsleep 30 # {marker}");
         let t0 = std::time::Instant::now();
         let r = sh_local(&script, Duration::from_millis(300)).await.unwrap();
@@ -407,7 +400,6 @@
         let (mut master, mut slave) = (-1, -1);
         let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-        // master 留到子行程結束才關，不然 slave 會先掛斷。
         let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master) };
         let slave = unsafe { std::os::fd::OwnedFd::from_raw_fd(slave) };
         let full = module_path!().split_once("::").map_or(module_path!(), |(_, rest)| rest);
@@ -574,7 +566,6 @@
         let port = listener.local_addr().unwrap().port();
         let mut host_cfg = cfg();
         host_cfg.name = "reconnect-stale-error-test".into();
-        // Never accept: ssh stays in handshake past the first 250 ms poll, exposing a leaked stale error.
         host_cfg.ssh = "127.0.0.1".into();
         host_cfg.ssh_port = port;
         host_cfg.ssh_opts = vec!["-o".into(), "ConnectTimeout=2".into()];
@@ -595,22 +586,17 @@
         }
     }
 
-    // ---- #887：ssh 控制目錄與遠端腳本不再用 /tmp 底下可預測的路徑 ----
-
     #[test]
     fn ensure_private_dir_creates_0700_and_rejects_loose_or_symlinked_dirs() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let base = crate::testing::scratch_dir("am-test");
         let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
 
-        // 不存在 → 建立，0700。
         let fresh = base.join("fresh");
         ensure_private_dir(&fresh).unwrap();
         assert_eq!(mode(&fresh), 0o700);
-        // 已存在 0700 → 照樣 Ok（重複呼叫）。
         ensure_private_dir(&fresh).unwrap();
 
-        // 已存在但權限太鬆 → Err，而且不去 chmod 它。
         let loose = base.join("loose");
         std::fs::create_dir(&loose).unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -618,12 +604,10 @@
         assert!(err.contains("不安全的 ssh 控制目錄"), "{err}");
         assert_eq!(mode(&loose), 0o777, "別人預先佔的目錄不動它");
 
-        // 符號連結（就算指向一個 0700 目錄）→ Err。
         let link = base.join("link");
         symlink(&fresh, &link).unwrap();
         assert!(ensure_private_dir(&link).is_err());
 
-        // 不是目錄 → Err。
         let file = base.join("file");
         std::fs::write(&file, b"x").unwrap();
         assert!(ensure_private_dir(&file).is_err());
@@ -643,8 +627,6 @@
         let parsed = std::process::Command::new("/bin/sh").arg("-n").arg("-c").arg(&script).output().unwrap();
         assert!(parsed.status.success(), "sh -n: {}", String::from_utf8_lossy(&parsed.stderr));
     }
-
-    // ---- #888：post-connect 卡住不能讓 supervisor 發現不了斷線 ----
 
     struct TestHooks {
         hosts: HostManager,
@@ -698,7 +680,6 @@
         let mut host_cfg = cfg();
         host_cfg.name = "post-connect-hang-test".into();
         let conn = hooks.hosts.insert_remote_with_client_for_test(host_cfg, HerdrClient::new(dir.join("remote.sock"))).await;
-        // 一個活著的假 ssh master：`run_connected` 只看它還在不在。
         let master = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().unwrap();
         conn.set_master_for_test(master).await;
         set_ping_interval_for_test(Some(Duration::from_millis(100)));
@@ -718,7 +699,6 @@
         .await
         .expect("連上之後要標成連線中，而且 post-connect 已經開始（卡住）");
 
-        // herdr 不回 ping：post-connect 還卡著，也要在幾個 ping 間隔內發現、標成斷線。
         for _ in 0..4 {
             herdr.fail_next("ping", crate::testing::Fault::Refuse);
         }
@@ -792,7 +772,6 @@
         let ok = parse_dir_listing(&run(&dir_list_script(Some("~/project"), true)), true);
         assert!(ok.is_ok(), "dir_list ~/project should succeed: {:?}", ok.err());
     }
-
 
     /// B7（#1145）：ssh 上限要比腳本自己等的時間長，「起不來」的診斷才送得回來；腳本的迴圈也用同一個常數。
     #[test]

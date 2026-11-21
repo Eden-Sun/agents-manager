@@ -25,7 +25,6 @@ fn a_real_turn_whose_reply_is_a_title_object_is_not_a_title_turn() {
         "last-assistant-message": "{\"title\":\"結論\"}"
     });
     assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }), "{:?}", classify("codex", &real));
-    // 沒有 input-messages（取不到）時，回覆長相仍是唯一線索：照舊當標題回合。
     let no_input = serde_json::json!({
         "type": "agent-turn-complete", "thread-id": "t", "turn-id": "w",
         "last-assistant-message": "{\"title\":\"x\"}"

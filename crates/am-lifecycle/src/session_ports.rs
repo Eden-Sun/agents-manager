@@ -152,7 +152,6 @@ mod tests {
         "cargo_shim::install_remote(",
         "kill_shim::install_local(",
         "kill_shim::install_remote(",
-        // 事件、bot 鎖走 am-ports 合約的 adapter。
         "emit_turn(",
         "emit_message_added(",
         "app.emit(",

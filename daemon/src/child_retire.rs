@@ -19,7 +19,6 @@ use serde_json::json;
 use std::future::Future;
 use std::panic::Location;
 
-
 pub(crate) use crate::events::ports::{RetireMode as Mode, RetireOutcome as Outcome};
 
 /// 寫入 child 退役 intent 的 composition 邊界；實作留在 daemon，因為 `intents` 屬於上層。
@@ -69,15 +68,12 @@ where
         if bot.deleted_at.is_some() {
             return Ok(Outcome::AlreadyGone);
         }
-        // #708：移交出去的專案，child 在不在歸接手的 daemon 判斷；這裡不退役。
         if mode == Mode::Implicit {
             if let Some(to) = app.db().bot_handed_off_to(&bot.id).await? {
                 tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: the project was handed off");
                 return Ok(Outcome::HandedOff);
             }
         }
-        // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
-        // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
         if mode == Mode::Implicit && !matches!(app.is_share_bot(&bot.id).await, Ok(false)) {
             tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
             return Ok(Outcome::ShareBot);
@@ -92,8 +88,6 @@ where
         let record = record_payload(app, &bot, why, mode, &at.to_string()).await?;
         #[cfg(test)]
         crate::race_point::hit("child_retire_before_transaction", bot_id).await;
-        // `deleted_at` 與紀錄同生共死（#554）：同一筆交易先寫紀錄再退役，寫不進紀錄就不退役，
-        // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
         let mut tx = db::begin_write(app.db()).await?;
         if mode == Mode::Implicit {
             match tx.bot_handed_off_to_on(&bot.id).await {
@@ -131,13 +125,11 @@ where
             .await?
             .rows_affected();
         if n == 0 {
-            // 可能另一條路已先退役；撤掉這筆本來就不該留下的重複紀錄。
             tx.rollback().await?;
             return Ok(Outcome::AlreadyGone);
         }
         tx.commit().await?;
         tracing::info!(bot = %bot.name, bot_id = %bot.id, why, cause = %record["cause"], caller = %at, http = %crate::config_audit::http_caller(), ?mode, "child retired");
-        // 輸入框草稿跟著 bot 走（同 delete_bot，#1064）：清成墓碑並通知其他瀏覽器。盡力而為，失敗只記 log。
         crate::drafts::clear_keys(app, &[format!("bot:{}", bot.id)]).await;
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
         Ok(Outcome::Retired)
@@ -189,9 +181,7 @@ const OBSERVED_CLOSE: &[&str] = &["pane exited", "workspace closed"];
 pub(crate) fn cause(why: &str, exit_reason: Option<&str>, pane: Pane) -> &'static str {
     match why {
         "promoted" | "promote_recovered" => "promoted",
-        // Reconcile saw the live parent and the unclaimed successor it launched in this pass.
         "parent_replaced_child" => "parent_replaced_child",
-        // herdr 計畫中重啟之後沒回來的：是 herdr 重啟造成的，不是有人收掉的。
         "herdr_maintenance_closed" => "herdr_restarted",
         _ => match pane {
             Pane::Gone if exit_reason.is_some_and(|r| OBSERVED_CLOSE.contains(&r)) => "pane_closed",
@@ -203,7 +193,6 @@ pub(crate) fn cause(why: &str, exit_reason: Option<&str>, pane: Pane) -> &'stati
 
 /// 退役紀錄的 payload：原因、呼叫端、哪一顆 daemon（`boot_id`）、最後一個 run 怎麼結束、herdr 對 pane 的回答，與據此算出的 [`cause`]。
 async fn record_payload(app: &(impl crate::capabilities::BootId + crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot: &db::Bot, why: &str, mode: Mode, call_site: &str) -> anyhow::Result<serde_json::Value> {
-    // ULID 同毫秒會翻（#100），世代序用 rowid。
     let run: Option<db::Run> =
         sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&bot.id).fetch_optional(app.db()).await?;
     let exit_reason: Option<String> = match &run {
@@ -254,7 +243,6 @@ async fn agm_guard(app: &(impl crate::capabilities::Db + SupervisorRepo), bot: &
         return Outcome::Retired;
     }
     let role = owned.role(bot);
-    // 最後一個 run 的樣子給巡檢當線索。ULID 同毫秒會翻（#100），世代序用 rowid。讀不到就不寫這一段。
     let last: Option<(String, String, Option<String>)> =
         sqlx::query_as("SELECT state, agent_status, pane_id FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
             .bind(&bot.id)
@@ -271,7 +259,6 @@ async fn agm_guard(app: &(impl crate::capabilities::Db + SupervisorRepo), bot: &
         "last_run": last.as_ref().map(|(state, status, pane)| json!({"state": state, "agent_status": status, "pane_id": pane})),
         "action": format!("daemon 沒有刪它：這顆是 AGM 的（{role}），隱式退役要人決定。確定不要了就 `agm bot delete {} --confirm-supervisor`；還要用就查它的 pane 為什麼不見了", bot.id),
     });
-    // 同一顆、一小時最多一則（跟 `supervisor_owned::alert` 同一個慣例）：擋下來本身已經做完了。
     let key = notice_key(app, &bot.id, chrono::Utc::now()).await;
     match app.push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
         Ok(_) => tracing::warn!(bot = %bot.name, role, why, "refused to retire an AGM child; patrol notified"),
@@ -300,7 +287,6 @@ const NOTICE_WINDOW_SECS: i64 = 3600;
 /// 讀不到就開新的一把：這只是去重，寧可讓巡檢多看到一則，也不要讓通知整筆消失。
 async fn notice_key(app: &impl crate::capabilities::Db, bot_id: &str, now: chrono::DateTime<chrono::Utc>) -> String {
     let since = db::iso_at(now - chrono::Duration::seconds(NOTICE_WINDOW_SECS));
-    // `supervisor_inbox.created_at` 只由 `db::now()` 寫（同一種毫秒格式），所以字串比較就是照時刻比。
     let found: Result<Option<String>, _> = sqlx::query_scalar(
         "SELECT event_key FROM supervisor_inbox
           WHERE supervisor_id=? AND kind='child_retire_refused' AND bot_id=? AND created_at >= ?
@@ -543,10 +529,8 @@ mod tests {
         assert_eq!(cause(why, Some("pane exited"), Pane::Gone), "pane_closed");
         assert_eq!(cause(why, Some("workspace closed"), Pane::Gone), "pane_closed");
         assert_eq!(cause("reconcile_agent_gone", Some("pane exited"), Pane::Gone), "pane_closed", "CAS 輸給事件那條路：原因是事件寫的");
-        // 事件說關了，但 herdr 現在說 pane 還在（id 被重用、連錯 server）：不信。
         assert_eq!(cause(why, Some("pane exited"), Pane::Present), "agent_missing");
         assert_eq!(cause(why, Some("pane exited"), Pane::Unknown), "unconfirmed");
-        // 只知道「現在不在」：空的 herdr 也會這樣回答。
         assert_eq!(cause(why, Some("pane gone"), Pane::Gone), "unconfirmed");
         assert_eq!(cause("reconcile_agent_gone", Some("agent not found during reconcile"), Pane::Gone), "unconfirmed");
         assert_eq!(cause(why, None, Pane::Gone), "unconfirmed", "升級前結束的 run 沒有原因");

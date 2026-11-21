@@ -33,7 +33,6 @@
         let mut odd = fixture();
         odd["background_tasks"] = json!("nope");
         assert_eq!(parse(&odd), None, "形狀不對當沒說（退回畫面）");
-        // 欄位缺的元素照收：type 不明就叫 unknown，仍然算一個在跑的工作。
         let mut sparse = fixture();
         sparse["background_tasks"] = json!([{"id": "x"}, 7]);
         assert_eq!(parse(&sparse).unwrap().tasks.len(), 1, "非物件的元素略過");
@@ -102,21 +101,16 @@
         let (env, run) = setup().await;
         let app = env.app.clone();
         on_stop(&app, &run, &fixture()).await;
-        // 畫面（還沒更新）說 0：剛報的 hook 帳不被推翻。
         assert_eq!(reconcile(&app, &run.id, 0), 2);
-        // 過了寬限、畫面仍然完全沒有背景：背景在沒有新 Stop 的情況下結束了，丟掉 hook 帳。
         app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
         assert_eq!(reconcile(&app, &run.id, 0), 0);
         assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "丟掉就沒有清單了");
-        // 沒有 hook 帳＝畫面的數字。
         assert_eq!(reconcile(&app, &run.id, 3), 3);
 
-        // 過了寬限，畫面有一個 shell：以現場數字取代舊 hook 的兩個 shell。
         on_stop(&app, &run, &fixture()).await;
         app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
         assert_eq!(reconcile(&app, &run.id, 1), 1);
         assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "stale shell-only details are dropped");
-        // hook 說 0：寬限內畫面說 1 也是 0；過了寬限就退場、只看畫面。
         let mut empty = fixture();
         empty["background_tasks"] = json!([]);
         on_stop(&app, &run, &empty).await;

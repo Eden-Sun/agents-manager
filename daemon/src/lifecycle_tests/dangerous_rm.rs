@@ -40,7 +40,6 @@ mod tests {
         assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "herdr 判 idle 時補標");
         assert!(is_open(&run_id));
 
-        // 巡邏再看到同一個框（倒數在跳、畫面在變）：不再寫。
         let later = DANGEROUS_RM.replace("in 1:52", "in 0:31");
         observe_screen(&app, &run_of(&app, &run_id).await, &later).await;
         assert_eq!(system_messages(&app, &bot.id).await.len(), 1, "同一個框只講一次");
@@ -221,7 +220,6 @@ mod tests {
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
         assert!(is_open(&run_id));
 
-        // 還在跑：不動。
         let active = vec![run_of(&app, &run_id).await];
         forget_ended(&app, &[]).await;
         assert!(is_open(&run_id), "DB 說還在進行中（只是這一輪名單沒帶到）：留著");
@@ -253,7 +251,6 @@ mod tests {
         assert_eq!(msgs.len(), 2, "{msgs:?}");
         assert!(msgs[1].contains("other-dir"), "第二則要寫第二個指令：{}", msgs[1]);
 
-        // 同一個框再被看到：不重複。框關掉：補標的 blocked 還回去（沿用第一個框補的標記）。
         observe_screen(&app, &run_of(&app, &run_id).await, &second).await;
         assert_eq!(system_messages(&app, &bot.id).await.len(), 2);
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;

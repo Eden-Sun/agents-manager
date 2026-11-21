@@ -17,7 +17,6 @@ pub fn review_open(screen: &str) -> bool {
         if line != "Hooks need review" {
             return false;
         }
-        // 標題後面的一小段：選項 1、2、3 依序出現，接著是操作列（`enter confirm · esc skip`）。
         let window = &lines[heading + 1..lines.len().min(heading + 12)];
         let at = |pred: &dyn Fn(&str) -> bool| window.iter().position(|l| pred(l));
         let (Some(one), Some(two), Some(three)) = (
@@ -28,8 +27,6 @@ pub fn review_open(screen: &str) -> bool {
             return false;
         };
         let footer = at(&|l| l.contains("enter confirm") && l.contains("esc skip"));
-        // 審核框開著時，操作列就是畫面最後一行（框底下不會有 composer 或狀態列）。對話裡印出同一段文字
-        // （例如 agent 自己 cat 了這個 fixture）時底下還有輸入框，不算開著，才不會把正常畫面一直當成審核框擋住。
         let nothing_below = |f: usize| lines[heading + 1 + f + 1..].iter().all(|l| l.is_empty());
         one < two && two < three && footer.is_some_and(|f| f > three && f - three <= 4 && nothing_below(f))
     })

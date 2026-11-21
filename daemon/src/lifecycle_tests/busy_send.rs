@@ -4,7 +4,6 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::busy_send::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::capabilities::Db;
     use crate::lifecycle::{prompt, *};

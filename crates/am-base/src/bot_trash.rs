@@ -9,7 +9,6 @@
 //! 清理跑兩處：開機的清掃（`purge_deleted_bot_dirs`）與 [`spawn_gc`] 每天一次。只靠開機那一次不夠——
 //! daemon 常駐好幾天很常見，回收區會一路長（review d77434c0 #2）。
 
-
 use std::ffi::{OsStr, OsString};
 use std::collections::HashSet;
 use std::fs::File;
@@ -145,7 +144,6 @@ fn latest_name_in(root_dir: &File, bot_id: &str, kind: Option<&str>) -> Option<O
         .filter_map(|e| {
             if !e.is_dir && !e.is_symlink { return None; }
             let name = e.name.to_str()?;
-            // `<id>.attachments.<ms>` 在 kind=None 時 strip 出來是 `attachments.<ms>`，parse 失敗＝不是 bot 目錄。
             let ms: u128 = name.strip_prefix(&prefix)?.parse().ok()?;
             Some((ms, e.name))
         })
@@ -290,8 +288,6 @@ pub fn remove(root_dir: &File, name: &OsStr) -> bool {
     if let Err(err) = crate::trusted_open::remove_tree_in(root_dir, &staged) {
         tracing::warn!(dir = %name.to_string_lossy(), error = %err, "could not remove a bots-trash entry that was set aside");
     }
-    // rename 成功就代表這一份已經不在回收區裡（還原也撈不到了）：即使 remove_dir_all 沒清乾淨，
-    // 剩下的殘骸由下一輪的 [`sweep_leftovers`] 收，對呼叫端來說這一份確實清掉了。
     true
 }
 
@@ -302,7 +298,6 @@ pub fn take_aside(root_dir: &File, name: &OsStr) -> Option<OsString> {
     let staged = OsString::from(format!("{name_str}.{}.{DELETING_SUFFIX}", now_ms()));
     match crate::trusted_open::rename_in(root_dir, name, &staged) {
         Ok(()) => Some(staged),
-        // `NotFound`＝別人先拿走了，本來就不該由這裡清，不是錯。
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(dir = %name.to_string_lossy(), error = %err, "could not set a bots-trash entry aside for removal");
@@ -355,13 +350,11 @@ pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64, known: &Hash
             live.push((ms, name, size));
         }
     }
-    // 有一份量不到（`du`/讀目錄失敗）就不知道總量：這一輪只做過期，不憑不完整的數字淘汰（#1309）。
     if live.iter().any(|(_, _, size)| size.is_none()) {
         tracing::warn!("some bots-trash entries could not be measured; no size-based eviction this round");
         return (expired, 0);
     }
     let mut total: u64 = live.iter().filter_map(|(_, _, size)| *size).sum();
-    // 最舊的先走；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的，留著才有意義）。
     for (_, name, size) in live.iter().take(live.len().saturating_sub(1)) {
         if total <= max_bytes {
             break;
@@ -379,7 +372,6 @@ pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64, known: &Hash
 
 /// 定時清掉的一輪（`spawn_gc` 與開機清掃走的都是這一條）。
 pub async fn gc_once(data_dir: &Path, keep: Duration, max_bytes: u64, known: &HashSet<String>) -> (usize, usize) {
-    // 走目錄、刪目錄都是同步 IO，上萬檔或慢磁碟時會佔住 async worker、連計時器與 HTTP 都跟著停（#1308）：放到 blocking 執行緒上做。
     let (data_dir, known) = (data_dir.to_path_buf(), known.clone());
     tokio::task::spawn_blocking(move || gc_with_cap(&data_dir, keep, max_bytes, &known))
         .await

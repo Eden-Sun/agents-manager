@@ -35,8 +35,6 @@ impl DueAction {
             "kind": self.kind,
             "entity_id": self.entity_id,
             "due_at": self.due_at,
-            // 到期了還在這裡＝掃描還沒輪到它（正常）或它一直失敗（看 attempts／last_error）。
-            // 比時刻，不比字串：舊資料的秒格式（`…:00Z`）與現在的毫秒格式混存（issue #101）。
             "overdue": self.due_at.as_deref().is_some_and(|d| crate::db::cmp_ts(d, now).is_le()),
             "attempts": self.attempts,
             "last_error": self.last_error,
@@ -72,8 +70,6 @@ struct Source {
 /// | 持久 intent | `intents.expires_at`（開著的；過期還開著是正常的，見下） | `restart_intents::recover_host`（開機／主機重連對帳後） |
 /// | 遠端已刪 bot 目錄的清理 | `remote_bot_dir_purges`（欠著的從 DB 推導） | `remote_purge`：主機連上時掃一次＋每 5 分鐘 |
 const SOURCES: &[Source] = &[
-    // 排隊中的 prompt：`next_flush_at IS NULL` 的也算——那是 AGM 派工排進來、等回合結束事件送的，
-    // 一樣是「還沒發生的事」，而且它正是重啟後最容易被忘記的一種（5fe77d5 那條路）。
     Source {
         kind: "queue_retry",
         from: "turns t",
@@ -83,8 +79,6 @@ const SOURCES: &[Source] = &[
         error: "NULL",
         filter: "t.status = 'queued'",
     },
-    // 交辦重送與等額度分成兩種 kind：「送不出去在退避」跟「額度沒了在等」對看的人是兩件事，
-    // 混成一個數字就看不出該去修哪個。「未結案」用 `OPEN_STATES`，不自己抄一份清單。
     Source {
         kind: "assignment_retry",
         from: "supervisor_assignments",
@@ -121,7 +115,6 @@ const SOURCES: &[Source] = &[
         error: "NULL",
         filter: "watchdog_next_at IS NOT NULL",
     },
-    // 遠端已刪 bot 的目錄還沒清掉（#349）：欠著的清理從 DB 推導，這裡只列已經失敗過、記了原因的那些。
     Source {
         kind: "remote_bot_dir_purge",
         from: "remote_bot_dir_purges",
@@ -131,9 +124,6 @@ const SOURCES: &[Source] = &[
         error: "last_error",
         filter: "purged_at IS NULL",
     },
-    // 持久 intent（#355）：還沒補完的多步驟動作；到期＝`expires_at`（放置太久就放棄並通知），開機由 `restart_intents::recover_host` 接回。
-    // #508 之後「過了 `expires_at` 還開著」是正常狀態：期限只算 daemon 在線的時間，上一顆 boot 留下的要先讓 recovery 真的補一次才輪到收掉。
-    // 所以這一列是**唯一**看得到「還欠著一件刪除／重啟／promote」的地方（`agm health` 的 `due_actions`），久久不消失的那些要當真。
     Source {
         kind: "intent",
         from: "intents",
@@ -228,7 +218,6 @@ pub async fn counts(pool: &SqlitePool) -> Result<std::collections::BTreeMap<&'st
 pub async fn soonest(pool: &SqlitePool) -> Result<Option<DueAction>> {
     let mut best: Option<DueAction> = None;
     for s in SOURCES {
-        // 同一種來源裡新舊格式也會混存：`ORDER BY` 要照時刻排（issue #101）。
         let row: Option<DueAction> = sqlx::query_as(&format!(
             "{} AND {due} IS NOT NULL ORDER BY {due_ts} LIMIT 1",
             s.select(),
@@ -286,7 +275,6 @@ pub async fn pending(pool: &SqlitePool) -> Result<Vec<DueAction>> {
             .await?,
         );
     }
-    // 沒有排定時間的排最後：它們在等事件，不在等時鐘。
     out.sort_by(|a, b| match (&a.due_at, &b.due_at) {
         (Some(x), Some(y)) => crate::db::cmp_ts(x, y),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -314,16 +302,13 @@ pub async fn snapshot(app: &impl crate::capabilities::Db) -> Value {
     let failing = total(|c| c.failing);
     json!({
         "pending": total(|c| c.pending),
-        // 到期了還在名單上：掃描還沒輪到（正常），或它一直失敗。兩者都看 `failing` 與 `items`。
         "overdue": total(|c| c.overdue),
         "failing": failing,
-        // 這三個數字都是 SQL 聚合算的，不吃 `items` 的上限。
         "by_kind": by_kind
             .iter()
             .map(|(k, c)| (k.to_string(), json!({"pending": c.pending, "overdue": c.overdue, "failing": c.failing})))
             .collect::<serde_json::Map<_, _>>(),
         "soonest": soon.as_ref().map(|r| r.json(&now)),
-        // 一直做不成的樣本（試最多次的在前）。`items.len() < failing` 就是還有更多沒列出來。
         "items": items.iter().map(|r| r.json(&now)).collect::<Vec<_>>(),
         "items_truncated": failing > items.len() as i64,
     })
@@ -450,10 +435,8 @@ mod tests {
         assert_eq!(s["overdue"], n);
         assert_eq!(s["failing"], n);
         assert_eq!(s["by_kind"]["hook_event"]["pending"], n);
-        // 樣本仍然有上限，但會講明還有更多。
         assert_eq!(s["items"].as_array().unwrap().len(), SAMPLE as usize);
         assert_eq!(s["items_truncated"], true, "列不完要說");
-        // 列清單那支照舊有上限（它是拿來看的，不是拿來數的）。
         assert_eq!(pending(&app.db).await.unwrap().len(), PER_KIND as usize);
     }
 

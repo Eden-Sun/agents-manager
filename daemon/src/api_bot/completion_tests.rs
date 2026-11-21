@@ -363,7 +363,6 @@ async fn applied_receipt_proof_requires_exact_visible_message_and_live_owner() {
 async fn ambiguous_read_error_keeps_durable_pending_and_reserved_cost() {
     let f = fixture(true).await;
     let item = durable_item(&f).await;
-    // A read failure must not authorize another write or infer zero charge.
     sqlx::query("ALTER TABLE api_bot_join_receipts RENAME TO unavailable_receipts")
         .execute(&f.env.app.db)
         .await
@@ -438,7 +437,6 @@ async fn pending_receipt_with_preexisting_assistant_cannot_insert_a_second_messa
 #[tokio::test]
 async fn post_failure_notice_shows_http_error_details_or_falls_back_to_status() {
     let f = fixture(false).await;
-    // 1. Detailed 400 error
     let reason = completion::format_http_failure_reason(
         400,
         Some("invalid_request_error"),
@@ -456,7 +454,6 @@ async fn post_failure_notice_shows_http_error_details_or_falls_back_to_status() 
     assert!(msg.contains("prompt is too long"));
     assert!(msg.contains("req_123xyz"));
 
-    // 2. Status only error (non-JSON fallback)
     let f2 = fixture(false).await;
     let reason2 = completion::format_http_failure_reason(502, None, None, None);
     completion::post_failure_notice(&f2.env.app, &f2.key, &reason2).await;
@@ -472,8 +469,6 @@ async fn post_failure_notice_shows_http_error_details_or_falls_back_to_status() 
 async fn api_bot_turn_survives_idle_reconcile_and_writes_reply() {
     let f = fixture(true).await;
 
-    // 1. 測試 agent_status='working' 時（4115c9dd7 回合開始時寫 working）：
-    // 即使超過 5 分鐘門檻、沒有 hook 活動，stuck_turns sweep 絕不可誤收
     let long_ago = crate::db::iso_in(-600);
     sqlx::query("UPDATE turns SET created_at=?, delivered_at=? WHERE id=?")
         .bind(&long_ago)
@@ -498,8 +493,6 @@ async fn api_bot_turn_survives_idle_reconcile_and_writes_reply() {
     .await;
     assert!(swept_working.is_empty(), "working 狀態的 claude-api turn 絕不可被 sweep 收尾");
 
-    // 2. 測試 agent_status='idle' 時（舊狀態或回合間隙）：
-    // 即使已閒置超過 5 分鐘，stuck_turns sweep 也同樣絕不可誤收
     sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?")
         .bind(&f.key.run_id)
         .execute(&f.env.app.db)
@@ -523,7 +516,6 @@ async fn api_bot_turn_survives_idle_reconcile_and_writes_reply() {
         .unwrap();
     assert_eq!(status_before, "in_flight", "turn 必須依然保持 in_flight");
 
-    // 3. 長回合最終正常完成並提交回覆
     let item = durable_item(&f).await;
     let outcome = completion::store_durable_after_join(&f.env.app, &f.key, &f.identity, &item.payload)
         .await

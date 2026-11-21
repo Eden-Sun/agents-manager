@@ -217,7 +217,6 @@ pub enum Lookup {
 }
 
 pub async fn lookup(app: &impl crate::capabilities::Db, run_id: &str, tool_use_id: &str) -> Result<Lookup> {
-    // 不在 SQL 裡 `json_extract`：同一個 run 的 `limit_hit` 列 `matched_line` 是純文字，SQLite 不保證 AND 的求值順序。
     let rows: Vec<(String, String, Option<String>, Option<String>)> =
         sqlx::query_as("SELECT id, matched_line, error, model FROM judge_shadow WHERE regex_verdict = ? AND run_id = ? ORDER BY at DESC, id DESC")
             .bind(VERDICT)
@@ -368,13 +367,11 @@ async fn ask_context(
     if questions.is_empty() {
         return Ok(false);
     }
-    // 帳本在 task 開頭再看一次：兩次輪詢之間，前一個 task 可能剛好寫完並放掉 [`Flight`]。
     if lookup(app, run_id, tool_use_id).await? != Lookup::Never {
         return Ok(false);
     }
     let Ok(key) = super::read_key(&cfg.key_file) else { return Ok(false) };
     let Some((turn_id, prompt)) = context else { return Ok(false) };
-    // 投 Jev 之前的幾道閘是同一段：段內只隔著 DB 寫入，共用一次新鮮讀取；投 Jev 之後另開一段（見下）。
     let mut fresh = Fresh::default();
     if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? { return Ok(false); }
     let prompt = prompt_tail(&prompt);
@@ -397,7 +394,6 @@ async fn ask_context(
     .await
     {
         Ok(id) => id,
-        // 名額、開關在占位的鎖裡又判一次；不是錯誤。
         Err(e) if ["Fuse", "Disabled", "ProjectNotListed"].iter().any(|s| e.to_string() == *s) => return Ok(false),
         Err(e) => return Err(e),
     };
@@ -412,7 +408,6 @@ async fn ask_context(
         Err(e) => Err(e),
     };
     let ms = started.elapsed().as_millis() as i64;
-    // 投 Jev 的等待中提問可能已經被答掉：這一段的檢查一定重讀，不沿用投 Jev 之前那次。
     let mut fresh = Fresh::default();
     if !still_current(app, &cfg, bot_id, run_id, tool_use_id, &turn_id, &mut fresh).await? {
         sqlx::query("UPDATE judge_shadow SET error='stale', ms=? WHERE id=?").bind(ms).bind(&slot).execute(app.db()).await?;
@@ -492,7 +487,6 @@ async fn still_current(
     if bot.deleted_at.is_some() || run.id != run_id || silent_gate(app, cfg, &bot).await { return Ok(false); }
     if current_prompt(app, bot_id, run_id).await?.as_ref().map(|c| c.0.as_str()) != Some(turn_id) { return Ok(false); }
     if !fresh.pending(app, &bot, &run, tool).await { return Ok(false); }
-    // Transcript I/O can yield; check the DB boundary once more afterwards.
     let active = crate::db::active_run(app.db(), bot_id).await?;
     let Some(bot) = crate::db::bot(app.db(), bot_id).await? else { return Ok(false) };
     Ok(bot.deleted_at.is_none() && active.is_some_and(|r| r.id == run_id)
@@ -542,7 +536,6 @@ mod pure_tests {
         ]));
         let got = askable(&input);
         assert_eq!(got.iter().map(|q| (q.index, q.question.as_str(), q.options.len())).collect::<Vec<_>>(), [(1, "單選", 3)]);
-        // MAX_QUESTIONS 之後的位置不看：第 5 題不問。
         let five = ask_input(json!([
             {"question": "多選", "multiSelect": true, "options": opts(2)}, {"question": "多選", "multiSelect": true, "options": opts(2)},
             {"question": "多選", "multiSelect": true, "options": opts(2)}, {"question": "多選", "multiSelect": true, "options": opts(2)},
@@ -900,7 +893,6 @@ mod tests {
         assert_eq!(stored["questions"][0]["suggested"], 0);
         assert!(!rows[0].0.contains("內網") && !rows[0].0.contains("連線方式"), "帳本不存題目與選項原文");
 
-        // 只提示：不按鍵、不送字、不新增任何回合。
         assert!(rig.env.herdr.calls_to("pane.send_keys").is_empty() && rig.env.herdr.calls_to("pane.send_text").is_empty());
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&rig.env.app.db).await.unwrap();
         assert_eq!(turns, 1, "沒有替使用者送出任何東西");
@@ -932,7 +924,6 @@ mod tests {
         let rows = ledger(&rig.env.app).await;
         assert_eq!(rows.len(), 1);
         assert!(rows[0].1.as_deref().is_some_and(|e| e.contains("503")), "{:?}", rows[0]);
-        // 再讀、再 ask 都不重問。
         let _ = get(&rig).await;
         assert!(!ask(&rig.env.app, &rig.bot.id, &rig.run_id, "toolu_1", &input).await.unwrap());
         assert_eq!(rig.seen.lock().unwrap().len(), 1);
@@ -966,7 +957,6 @@ mod tests {
             c.judge.max_per_hour = 1;
             Ok(())
         }).await.unwrap();
-        // 別的場景已經占滿這一小時的名額。
         sqlx::query("INSERT INTO judge_shadow (id, at, bot_id, run_id, kind, matched_line, composer_idle, regex_verdict, error) VALUES (?,?,?,?,?,?,0,'limit_hit','boom')")
             .bind(db::ulid())
             .bind(db::now())

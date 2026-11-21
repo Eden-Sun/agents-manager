@@ -29,7 +29,6 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
         return null();
     }
     let host = db::bot_host(&app.db, &id).await.map_err(up)?;
-    // `fresh`：這次的檔尾是現讀的。現讀的檔尾已經證明提問還在，`hint_for` 的有效性檢查就不再讀一次；快取的檔尾不算證據。
     let (log, fresh) = if host == crate::config::LOCAL_HOST {
         let Some(path) = run.transcript_path.clone().filter(|p| !p.trim().is_empty()) else { return null() };
         if !crate::app_ports_p5::local_transcript_allowed(&app, &bot, &path).await {
@@ -377,7 +376,6 @@ mod codex_async_tests {
         let run = db::active_run(&app.db, &remote.bot).await.unwrap().unwrap();
         sqlx::query("UPDATE runs SET runtime_identity='old-account', launch_rev=? WHERE id=?")
             .bind(crate::launch_rev::of(&bot)).bind(&run.id).execute(&app.db).await.unwrap();
-        // No warm cache: the first read happens after the setting is changed.
         sqlx::query("UPDATE bots SET identity='new-account' WHERE id=?").bind(&remote.bot).execute(&app.db).await.unwrap();
         assert_eq!(remote.get().await["questions"][0]["question"], "Old account question?");
         assert_eq!(remote.reads(), 1);
@@ -536,7 +534,6 @@ mod remote_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let host = format!("mac-builder-pq-{}", db::ulid());
-        // 遠端的 herdr 接到同一顆 mock：#1503 起遠端讀取要先問 live session（herdr），所以 host 的 client 得真的能問。
         let conn = app
             .hosts
             .insert_remote_with_client_for_test(
@@ -558,7 +555,6 @@ mod remote_tests {
         sqlx::query("UPDATE bots SET env_json=? WHERE id=?").bind(json!({"CLAUDE_CONFIG_DIR": ROOT}).to_string()).bind(&bot.id).execute(&app.db).await.unwrap();
         let run_id = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET native_session_id=?, transcript_path=?, herdr_session='am-test' WHERE id=?").bind(SID).bind(recorded_path).bind(&run_id).execute(&app.db).await.unwrap();
-        // 這顆 run 的 pane 上，herdr 報的 live Claude session（`herdr_session` 以它為準；沒有就是 None）。
         if let Some(live) = live {
             env.herdr.set_unnamed_agent(&format!("pane-{}", bot.id), Some(live));
         }
@@ -725,7 +721,6 @@ mod remote_tests {
     /// 這顆 bot 的 run 有一則 turn。回傳的目錄由測試自己刪。
     async fn enable_jev(rig: &Rig, on_request: impl Fn() + Clone + Send + Sync + 'static) -> std::path::PathBuf {
         let app = rig.env.app.clone();
-        // 假 Jev：第一個選項 0.9、其餘 0.05。
         let route = axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
             let on_request = on_request.clone();
             async move {
@@ -827,7 +822,6 @@ mod remote_tests {
 
         let mut rx = app.subscribe();
         assert_eq!(get(&rig).await["questions"][0]["question"], "連線方式？");
-        // 背景任務在投 Jev 之後的檢查寫下 stale 才算跑完；等它，不靠 sleep。
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while stale_rows(&app).await == 0 {
                 tokio::task::yield_now().await;

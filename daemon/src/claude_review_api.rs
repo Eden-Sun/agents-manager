@@ -33,8 +33,6 @@ const MAX_LINE_CHARS: usize = 600;
 const MAX_TRIAGE_LINES: usize = 40;
 const MAX_DIFF_CHARS: usize = 12_000;
 
-// ───────────── 帳本 ─────────────
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
@@ -132,8 +130,6 @@ pub fn live_state(rec: &Record, now: chrono::DateTime<chrono::Utc>) -> Option<&'
 
 /// 同一時間只讓一個 POST 判斷「這一版有沒有人在跑」並占位，不然連按兩下會送兩次。
 static GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-// ───────────── prompt ─────────────
 
 pub struct Inputs<'a> {
     pub kind: &'a str,
@@ -255,8 +251,6 @@ pub async fn triage_digest(app: &App, kind: &str, version: &str) -> Option<Strin
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-// ───────────── 驗證與渲染 ─────────────
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelOut {
@@ -307,8 +301,6 @@ pub fn validate_and_render(text: &str, kind: &str, model: &str, with_diff: bool,
     }
     Ok(r)
 }
-
-// ───────────── 流程 ─────────────
 
 /// 兩層開關與 key 都在才值得先占位（其餘情況直接走 bot，行為跟以前一模一樣）。
 pub async fn ready(app: &App) -> bool {
@@ -379,7 +371,6 @@ pub async fn start(app: &Arc<App>, job: Job, auto: bool) -> std::io::Result<Star
     let cfg = app.cfg.get().await;
     let fp = fingerprint(&job, &cfg);
     let path = app.data_dir.join(LEDGER_DIR).join(format!("fp-{fp}.json"));
-    // 舊帳本（未有指紋）相容。新帳本以完整指紋判斷，範圍不同可各自占位。
     if let Some(rec) = load(&app.data_dir, &job.kind, &job.to) {
         if rec.fingerprint.is_empty() && live_state(&rec, chrono::Utc::now()).is_some() {
             return Ok(Started::Existing);
@@ -609,7 +600,6 @@ mod tests {
         assert_eq!(live_state(&rec, now), Some("done"));
         rec.status = "failed".into();
         assert_eq!(live_state(&rec, now), None);
-        // 路徑不收怪字元。
         assert!(ledger_path(&dir, "claude", "../x").file_name().unwrap().to_string_lossy().starts_with("claude-.._x"));
     }
 }

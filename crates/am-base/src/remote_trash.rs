@@ -24,7 +24,6 @@ fn trash_dir_for(home: &str, remote_root: &str) -> String {
 
 /// Check every component below the trusted home and pin later GC/restore paths to the opened directory.
 fn trash_root_guard(home: &str, fallback: &str, create: bool) -> String {
-    // `create`：寫入前（move_in）回收區的各段還不存在就建出來；每一段都先確認不是 symlink，才建或才進（#1299）。
     let mk = if create { "  [ -e \"$current\" ] || mkdir \"$current\" || trash_untrusted\n" } else { "" };
     format!(
         r#"H={home}
@@ -60,8 +59,6 @@ pub async fn move_in(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str
     let trash = trash_dir_for(&home, remote_root);
     let name = format!("{bot_id}.{}", now_ms());
     let dest = format!("{trash}/{name}");
-    // 搬進去之前先驗回收區的每一段：不是 symlink、實際落在家目錄底下（#1299）。驗不過就不動 `$D`，回報失敗。
-    // 目錄還沒有就在驗過的路徑上建出來（`create`）。`D` 不存在就不驗、不建，免得為了「沒東西要搬」建出空的回收區。
     let guard = trash_root_guard(&home, "printf 'AM_UNTRUSTED\\n'", true);
     let script = format!(
         "set -e\nD={d}\nif [ ! -e \"$D\" ]; then\n  printf 'AM_NOTHING\\n'\n  exit 0\nfi\nT={t}\n{guard}NAME={name}\nif [ -e \"$NAME\" ] || [ -L \"$NAME\" ]; then printf 'AM_UNTRUSTED\\n'; exit 0; fi\nmv \"$D\" \"$NAME\"\nprintf 'AM_TRASHED\\n'\n",
@@ -137,9 +134,6 @@ pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u
     let home = conn.home().await?;
     let trash_dir = trash_dir_for(&home, remote_root);
     let guard = trash_root_guard(&home, "printf 'AM_TRASH_GC 0 0\\n'", false);
-    // 「我們放的」才看：`<bot_id>.<毫秒>`（或 `<bot_id>.attachments.<毫秒>`、`<bot_id>.share_workspace.<毫秒>`），
-    // `<bot_id>` 必須在 `KNOWN` 裡（DB 認得的 bot，#1313）。`backups.1`、`X.1` 這種別人放的，不管尾碼多小、多舊都不動、也不算進總量。
-    // `am_owned` 印出毫秒、不是我們的就回非 0；抽成函式是因為 `case` 的樣式帶 `)`，寫在 $(...) 裡會被 shell 當成命令替換的結尾（macOS /bin/sh 實測語法錯誤）。
     let known_sh = sh_quote(&known.join(" "));
     let script = format!(
         "T={t}\n{guard}C={cutoff}\nMAXK={max_kb}\nKNOWN={known_sh}\nn=0\nev=0\nunk=0\n\
@@ -205,7 +199,6 @@ pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u
             Some((it.next()?.parse::<usize>().ok()?, it.next()?.parse::<usize>().ok()?, it.next().and_then(|u| u.parse::<usize>().ok()).unwrap_or(0)))
         })
         .ok_or_else(|| anyhow::anyhow!("remote bots-trash gc did not confirm: {}", out.trim()))?;
-    // `du` 讀不到的那一份大小不知道：這一輪不用總量淘汰，等能量到再說（#1300）。
     if unknown > 0 {
         tracing::warn!(unknown, "remote bots-trash entries could not be measured; no size-based eviction this round");
     }

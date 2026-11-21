@@ -43,7 +43,7 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
         .fetch_optional(&app.db)
         .await?;
     if same.is_none() {
-        return Ok(CloseOutcome::NotThisWindow(vec![])); // 別人先關了，或已換成新的一扇
+        return Ok(CloseOutcome::NotThisWindow(vec![]));
     }
     let retired = retire_unreturned_children(app, &w.opened_at).await?;
     let mut tx = app.db.begin().await?;
@@ -54,7 +54,7 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
         .rows_affected();
     if gone == 0 {
         tx.rollback().await?;
-        return Ok(CloseOutcome::NotThisWindow(retired)); // 別人先關了；退役的結果照回
+        return Ok(CloseOutcome::NotThisWindow(retired));
     }
     crate::supervisor_inbox::add_note_tx(
         &mut tx,
@@ -80,7 +80,6 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
     .fetch_all(&app.db)
     .await?;
     let mut names = Vec::new();
-    // 一顆退役失敗不擋後面的：記下第一個錯、跑完整輪再回錯（窗口保留、下次重試；已退役的不會再被選到）。
     let mut first_err: Option<anyhow::Error> = None;
     for (id, name, host) in kids {
         match crate::child_reconcile_safety::retirement_block(&app.db, &id).await {
@@ -95,7 +94,6 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
                 continue;
             }
         }
-        // 走退役的唯一入口（#413）：記呼叫端；AGM 的 child 不在這裡被隱式退役，擋下來、推一則給巡檢。
         use crate::child_retire::{retire, Mode, Outcome};
         match retire(app, &id, "herdr_maintenance_closed", Mode::Implicit).await {
             Ok(Outcome::Retired) => {
@@ -122,7 +120,6 @@ fn arm_expiry(app: &Arc<App>, until: &str) {
     let app = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(wait).await;
-        // 讀不到或收尾失敗（窗口還在）就退避重試，直到 `active` 成功。
         for attempt in 0.. {
             match active(&app).await {
                 Ok(_) => return,
@@ -186,8 +183,6 @@ pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<
 pub async fn open_as(app: &Arc<App>, minutes: i64, actor: &str, reason: &str) -> Result<Option<Window>> {
     let opened_at = crate::db::now();
     let until = (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    // 窗口與開窗的稽核寫在同一個交易（同 `close_as`，#890）：note 寫不進去就整個回滾，
-    // 不留下「窗口開著、沒有稽核、也沒排到期」的狀態（issue #1140）。
     let mut tx = app.db.begin().await?;
     let inserted = sqlx::query("INSERT OR IGNORE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,?,?)")
         .bind(&opened_at)
@@ -227,12 +222,10 @@ pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<J
     crate::race_point::hit("herdr_end_after_read", &w.opened_at).await;
     match close(&app, &w, "herdr_maintenance_end", role, b.reason.as_deref()).await.map_err(up)? {
         CloseOutcome::Closed(retired) => {
-            // 照實回：關完之後若又有人開了一扇，`active` 說的是現在的狀態。
             let now = row(&app.db).await.map_err(up)?;
             Ok(Json(json!({"active": now.is_some(), "closed": true, "retired_children": retired})))
         }
         CloseOutcome::NotThisWindow(retired) => match row(&app.db).await.map_err(up)? {
-            // 讀窗口與關窗之間被另一扇取代：不關新的那扇，也不能回 `active:false`（新窗口還開著）。
             Some(current) => Err(LcError::conflict(
                 "herdr_maintenance_superseded",
                 json!({"window": current, "retired_children": retired,

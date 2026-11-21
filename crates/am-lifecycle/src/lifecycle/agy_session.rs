@@ -175,7 +175,6 @@ pub async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAcces
 
 /// 讀到紀錄之後順手補網頁的 `status_json`（模型與 context token 數）。已經收過 statusLine 時以 statusLine 為準，不覆蓋；沒變也不寫。
 pub async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::Cfg), bot: &db::Bot, run: &db::Run, text: &str) {
-    // 快取倒數用：最後一筆 assistant 回覆的時間（不論 status_json 有沒有變都記）。
     if let Some(at) = crate::agy_support::last_assistant_at(text) {
         crate::cache_clock::on_agy_transcript(&run.id, &at);
     }

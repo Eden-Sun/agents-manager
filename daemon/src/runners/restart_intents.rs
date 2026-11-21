@@ -38,10 +38,6 @@ pub enum Outcome {
 /// 主機（本機開機，或遠端連上並對帳成功）之後：先收過期的，再把這台主機上還開著的 `restart` intent 各補一次（**內嵌**——
 /// 呼叫端接著要做 autostart 判斷，必須先解決）；補不成的丟背景以 `recovery_retry_delay` 重試到用完次數。
 pub async fn recover_host(app: &Arc<App>, host: &str) {
-    // 期限只算這顆 daemon 在線的時間（#508）：上一顆 boot 留下的先讓下面的 recovery 真的補一次，
-    // 不能在任何嘗試之前就被 TTL 收掉——daemon 死著的那段時間正是 intent 存在的理由。
-    // 主機清單給的是「還有沒有人會來補」：不在 config 裡的那台，它的 intent 現在就收掉並通知，
-    // 不然永遠等不到認領（見 `intents::expire_overdue` 的第 2、3 條）。
     let known_hosts = app.hosts.names().await;
     match intents::expire_overdue(&app.db, &db::now(), &app.boot_id, &known_hosts).await {
         Ok(expired) => {
@@ -57,8 +53,6 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
     let open = match intents::open(&app.db).await {
         Ok(v) => v,
         Err(e) => {
-            // 讀不到不等於沒有：intent id 還沒讀出來，沒有 per-intent retry worker 可以接手，
-            // 所以 discovery 本身必須一直欠著；只有拿到 id 後才由 drive_once 的 MAX_ATTEMPTS 收斂。
             tracing::warn!(error = %e, host, "cannot list open intents yet; will retry");
             let (app, host) = (app.clone(), host.to_string());
             tokio::spawn(async move {
@@ -84,7 +78,6 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
 }
 
 async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
-    // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
     lifecycle::restart_hold::retain_open(app, &open.iter().map(|i| i.id.clone()).collect());
     for i in open.into_iter().filter(|i| i.kind == "restart" && i.host == host) {
         match drive_once(app, &i.id).await {
@@ -110,8 +103,6 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
                 lifecycle::restart_hold::release_intent(app, id);
                 return;
             }
-            // 另一條真的在補（`driving()` 裡有它）：等它做完。但不能永遠等——連續太多輪都還在「補」的話，
-            // 放掉開機 hold 並大聲報錯，不讓 hold 與 queued 派工永遠卡著（#904）。
             Outcome::InProgress => {
                 in_progress += 1;
                 if in_progress > intents::MAX_ATTEMPTS {
@@ -158,7 +149,6 @@ impl Drop for Driving {
 /// 認領一次並補一輪。同 boot 的另一條 recovery 正在補＝ `InProgress`；已收尾／不存在＝ `Finished`。
 /// 同一顆 daemon 讀到自己留下的 `running` intent、而且沒有別條在補，視為上一輪留下的半套，不經 `claim` 直接續做。
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
-    // 登記放在 claim 之前：認領成功到開始補之間沒有空窗，別條看到 running 時一定查得到這件在補。
     let Some(_driving) = Driving::enter(id) else { return Outcome::InProgress };
     let intent = match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => match intents::get(&app.db, id).await {
@@ -193,7 +183,6 @@ async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
         }
         Ok(false) => Outcome::Retry(why),
         Err(e) => {
-            // 記不下失敗：intent 會停在 `running`。再試一次只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到。
             match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
                 Ok(_) => Outcome::Retry(format!("{why}（記失敗時出錯：{e:#}，已補記為 pending）")),
                 Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；補記也失敗：{e2:#}）")),
@@ -233,14 +222,11 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let bot_id = intent.subject_id.as_str();
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    // 拿到鎖之後再確認一次：這段等鎖的時間裡活著的 handler 可能已經把它收尾了（遠端重連時 recovery 與正在服務的重啟會碰到）——
-    // 已經不是我們認領的那件就什麼都不做，不能在使用者已經拿到錯誤之後又替他補做。
     let intent = match intents::get(&app.db, &intent.id).await.map_err(|e| format!("db: {e:#}"))? {
         Some(cur) if cur.status == "running" && cur.owner_boot.as_deref() == Some(app.boot_id.as_str()) => cur,
         _ => return Ok(()),
     };
     let payload = intent.payload();
-    // 解不開就是這次補不成（`Err`，走有次數上限的重試與通知），不能換成預設值去停、去起（#1297）。
     let (opts, from_run, credential_rotation) = decode_payload(&payload).map_err(|why| format!("intent 內容解不開：{why}"))?;
     let from_run = from_run.as_deref();
     let s = |e: anyhow::Error| format!("db: {e:#}");
@@ -251,14 +237,10 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         return Ok(());
     }
     match db::active_run(&app.db, bot_id).await.map_err(s)? {
-        // 已經有新的 run（不是 intent 記的那顆）：bot 回來了。
         Some(run) if Some(run.id.as_str()) != from_run => {
             intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
-        // A credential rotation commits while the pane is still running with its old token. That
-        // state means the restart has not started yet, but unlike an ordinary restart intent it
-        // must keep going: the old proof is already invalid and boot recovery must replace the pane.
         Some(run) if credential_rotation && Some(run.id.as_str()) == from_run && run.state != "stopping" => {
             match lifecycle::resume_credential_rotation_locked(app, bot_id, opts, &run.id).await {
                 Ok(_) => {}
@@ -268,21 +250,16 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
             intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
-        // The old pane is already gone. Rotation only needs to replace a pane still using the
-        // revoked token; restarting here would undo a user stop and create a fresh run.
         None if credential_rotation => {
             intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
-        // 舊 run 還好好的、`stopping` 從沒記過：承諾點之前就死了，世界沒變。
         Some(run) if run.state != "stopping" => {
             intents::abandon(&app.db, &intent.id, "the stop never began").await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
         _ => {}
     }
-    // 沒有 active run、但 intent 記的那顆之後又有人起過 run（使用者自己起了又停、或它起來後掛了）：重啟的目的早已不成立，
-    // 現在的 `stopped` 是使用者要的——重試不能再把它拉起來（跟憑證輪替那條 #688 同一個原則）。
     if let Some(from) = from_run {
         let later: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND id != ? AND rowid > (SELECT rowid FROM runs WHERE id = ?)",
@@ -300,7 +277,6 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     }
     match lifecycle::resume_restart_locked(app, bot_id, opts, from_run).await {
         Ok(_) => {}
-        // 新 agent 起來了、只是 `running` 還沒記下：bot 回來了。
         Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => {}
         Err(e) => return Err(format!("{e:?}")),
     }
@@ -405,7 +381,6 @@ mod tests {
         assert_eq!(run_state(&app2, &run1).await, "exited", "不是使用者要它停");
         assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
 
-        // 冪等：再補一次（或兩個一起補）不會多起。
         recover_host(&app2, LOCAL_HOST).await;
         tokio::join!(recover_host(&app2, LOCAL_HOST), recover_host(&app2, LOCAL_HOST));
         assert_eq!(runs_of(&app2, &bot.id).await, 2, "舊的＋補起來的那一顆，沒有第三個");
@@ -433,7 +408,6 @@ mod tests {
         let app2 = tt::restart_app(&e).await;
         lifecycle::restart_hold::adopt_open_intents(&app2).await;
         assert!(lifecycle::restart_hold::in_progress(&bot.id), "開機接回 hold");
-        // recovery 之前：對帳收尾／回合結束事件／定時 sweeper 的撤孤兒路徑。
         assert!(lifecycle::revoke_orphaned_queued_turns(&app2, &bot.id, "它的 run 已經結束").await.is_empty());
         assert!(lifecycle::revoke_all_orphaned_queued_turns(&app2).await.is_empty());
         let st = |t: String| {
@@ -476,7 +450,6 @@ mod tests {
         lifecycle::restart_hold::adopt_open_intents(&app2).await;
         assert!(lifecycle::restart_hold::in_progress(&bot.id));
 
-        // Hold the bot lock so the first recovery has claimed the intent but cannot finish.
         let lock = app2.bot_lock(&bot.id).await;
         let guard = lock.lock().await;
         let first_app = app2.clone();
@@ -484,7 +457,6 @@ mod tests {
         let intent_id = match inserted {
             crate::intents::Inserted::New(i) | crate::intents::Inserted::AlreadyOpen(i) => i.id,
         };
-        // 上限 30 秒：等的是一整串 sqlx 查詢，整樹平行時 2 秒會假紅（#1154）。
         let claimed = tt::eventually!(
             sqlx::query_scalar::<_, String>("SELECT status FROM intents WHERE id=?").bind(&intent_id).fetch_one(&app2.db).await.unwrap() == "running"
         );
@@ -517,12 +489,10 @@ mod tests {
         lifecycle::restart_hold::adopt_open_intents(&app2).await;
         assert!(lifecycle::restart_hold::in_progress(&bot.id));
 
-        // 另一個完全獨立的 App（自己的 DB、沒有任何開著的 intent）跑一輪 recovery。
         let other = tt::env().await;
         recover_host(&other.app, LOCAL_HOST).await;
         assert!(lifecycle::restart_hold::in_progress(&bot.id), "別人的 recovery 不能放掉我們的 hold");
 
-        // 自己的 recovery 收尾之後才放。
         recover_host(&app2, LOCAL_HOST).await;
         assert!(!lifecycle::restart_hold::in_progress(&bot.id));
     }
@@ -566,12 +536,10 @@ mod tests {
         let e = tt::env().await;
         let (bot, _run1) = running_bot(&e, "doomed").await;
         die_at(&e, &bot.id, "restart_after_stop").await;
-        // 之後 start 一定失敗：身份不存在。
         sqlx::query("UPDATE bots SET identity = 'no-such-identity' WHERE id = ?").bind(&bot.id).execute(&e.app.db).await.unwrap();
 
         let app2 = tt::restart_app(&e).await;
         recover_host(&app2, LOCAL_HOST).await;
-        // 上限 30 秒（#1154）：重試之間有退避，整樹平行時 5 秒不夠。
         assert!(
             tt::eventually!(intent_status(&app2, &bot.id).await == vec!["failed"]),
             "用完次數就放棄，不無限重試：{:?}",
@@ -601,7 +569,6 @@ mod tests {
         assert!(lifecycle::restart_hold::in_progress(&bot.id));
         let intent_id: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id = ?").bind(&bot.id).fetch_one(&app2.db).await.unwrap();
 
-        // 記不下失敗：把 running → pending 的寫入全擋掉。
         sqlx::query(
             "CREATE TRIGGER refuse_pending BEFORE UPDATE OF status ON intents WHEN OLD.status='running' AND NEW.status='pending'
              BEGIN SELECT RAISE(ABORT,'injected'); END",
@@ -616,7 +583,6 @@ mod tests {
         let second = drive_once(&app2, &intent_id).await;
         assert!(matches!(second, Outcome::Retry(_)), "沒有別條在補：不能再被當成 InProgress：{second:?}");
 
-        // 環境恢復：拆掉 trigger、身份改回 → 下一輪續做到收尾。
         sqlx::query("DROP TRIGGER refuse_pending").execute(&app2.db).await.unwrap();
         sqlx::query("UPDATE bots SET identity = NULL WHERE id = ?").bind(&bot.id).execute(&app2.db).await.unwrap();
         let third = drive_once(&app2, &intent_id).await;
@@ -758,7 +724,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The user brings it back and stops it; then requests a restart while it is down.
         let app = tt::restart_app(&e).await;
         let user_run = lifecycle::start_bot(&app, &bot.id).await.unwrap();
         lifecycle::stop_bot(&app, &bot.id).await.unwrap();
@@ -844,15 +809,9 @@ mod tests {
         tt::make_table_unreadable(&app2, "intents").await;
         recover_host(&app2, LOCAL_HOST).await;
 
-        // In tests, discovery uses the same 20 ms delay as other recovery loops. Keep the table
-        // unreadable past the old five-attempt window (100 ms), then restore it with this daemon
-        // still running and without another reconcile or herdr event.
         tokio::time::sleep(crate::runners::app_ports_p11::recovery_retry_delay(intents::MAX_ATTEMPTS as usize) * 7).await;
         tt::make_table_readable(&app2, "intents").await;
 
-        // The deadline is only the failure bound (success returns as soon as the intent is done). It
-        // must not be tight: the recovered restart is a full stop + start, which under a loaded
-        // whole-tree run took longer than the old 3 s while the intent was still `running` (not stuck).
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 if intent_status(&app2, &bot.id).await == vec!["done"] {

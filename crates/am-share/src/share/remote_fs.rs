@@ -95,8 +95,6 @@ pub struct RemoteFile {
     pub download_permit: Option<OwnedSemaphorePermit>,
 }
 
-// ───────────────────── 主機 Semaphore 名額管理 ─────────────────────
-
 static HOST_SLOTS: std::sync::Mutex<Option<HashMap<String, Arc<Semaphore>>>> = std::sync::Mutex::new(None);
 static HOST_DOWNLOAD_SLOTS_MAP: std::sync::Mutex<Option<HashMap<String, Arc<Semaphore>>>> = std::sync::Mutex::new(None);
 
@@ -124,8 +122,6 @@ pub async fn acquire_slot(host: &str, timeout: Duration) -> Result<OwnedSemaphor
     }
 }
 
-// ───────────────────── RFS1 協定 Frame 解析 ─────────────────────
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RfsFrame {
     pub tag: String,
@@ -136,7 +132,6 @@ pub struct RfsFrame {
 /// 遇到格式錯誤、長度不對、或未在 `allowed_tags`（以及 `ERR`）宣告的標籤，立即 fail-closed 回 Err。
 pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFrame>, RfsError> {
     let mut cursor = input;
-    // 檢查開頭版本標籤
     let header_prefix = format!("{RFS_VERSION_TAG}\n");
     if cursor.starts_with(header_prefix.as_bytes()) {
         cursor = &cursor[header_prefix.len()..];
@@ -148,7 +143,6 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
 
     let mut frames = Vec::new();
     loop {
-        // 檢查是否以 AM_RFS_DONE 結束
         if cursor.starts_with(RFS_DONE_TAG.as_bytes()) {
             let rest = &cursor[RFS_DONE_TAG.len()..];
             if rest.is_empty() || rest == b"\n" || rest == b"\r\n" {
@@ -157,11 +151,9 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
         }
 
         if cursor.is_empty() {
-            // 沒有 AM_RFS_DONE 結尾即結束 → 不完整作廢
             return Err(RfsError::Unavailable);
         }
 
-        // 讀取行頭 TAG len\n
         let line_end = cursor.iter().position(|&b| b == b'\n').ok_or(RfsError::Unavailable)?;
         let line_bytes = &cursor[..line_end];
         let line_str = std::str::from_utf8(line_bytes).map_err(|_| RfsError::Unavailable)?.trim_end_matches('\r');
@@ -183,7 +175,6 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
 
         let len: usize = len_str.parse().map_err(|_| RfsError::Unavailable)?;
 
-        // 驗證標籤是否允許（ERR 一律允許）
         if tag != "ERR" && !allowed_tags.contains(&tag) {
             return Err(RfsError::Untrusted);
         }
@@ -194,7 +185,6 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
         let data = cursor[..len].to_vec();
         cursor = &cursor[len..];
 
-        // 必須緊跟一個換行（\n 或 \r\n）
         if cursor.starts_with(b"\n") {
             cursor = &cursor[1..];
         } else if cursor.starts_with(b"\r\n") {
@@ -210,15 +200,11 @@ pub fn parse_rfs_frames(input: &[u8], allowed_tags: &[&str]) -> Result<Vec<RfsFr
     }
 }
 
-// ───────────────────── 純函式：腳本產生器與解析器 ─────────────────────
-
 /// 遠端分享腳本用的 lsof（macOS 的位置）。
 pub const SHARE_LSOF: &str = "/usr/sbin/lsof";
 
 pub fn script_common_header() -> String {
     let dir_helpers = am_base::outbox_remote::directory_identity_helpers();
-    // macOS 的 lsof 在 /usr/sbin（/usr/bin 沒有）：寫錯的話 BSD 那條身份檢查每個檔都失敗，分享頁的檔案清單永遠是空的
-    // （2026-11-04 mac_builder 實測）。Linux 走 /proc，不用 lsof；`file_identity_helpers` 自己再退回 /usr/bin/lsof。
     let file_helpers = am_base::outbox_remote::file_identity_helpers(SHARE_LSOF);
     format!(
         r#"umask 077
@@ -406,7 +392,6 @@ async fn exec_bytes(conn: &FencedConn, host: &str, script: &str, timeout: Durati
     })?;
     let mut out = Vec::new();
     match tokio::time::timeout(timeout, stream.take(cap.saturating_add(1)).read_to_end(&mut out)).await {
-        // 讀完才發現主機已經換掉：這份結果是舊主機的，不發布（#1026）。
         Ok(Ok(_)) if out.len() as u64 <= cap && conn.fence().is_current_now() => Ok(out),
         _ => Err(RfsError::Unavailable),
     }
@@ -480,7 +465,6 @@ pub fn parse_instructions(out: &[u8]) -> Result<String, RfsError> {
         if f.tag != "FILE" {
             continue;
         }
-        // `head -c` 可切在 UTF-8 字元中間：略過不完整尾字元，但保留內部壞位元組的 lossy 處理。
         let data = match std::str::from_utf8(&f.data) {
             Err(error) if error.error_len().is_none() => &f.data[..error.valid_up_to()],
             _ => &f.data[..],
@@ -812,7 +796,6 @@ printf 'AM_RFS_DONE\n'
     )
 }
 
-
 pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> {
     let frames = parse_rfs_frames(out, &["ENTRY"])?;
     for f in &frames {
@@ -825,15 +808,12 @@ pub fn parse_outbox_list(out: &[u8], _now: u64) -> Result<Vec<Value>, RfsError> 
         if f.tag != "ENTRY" {
             continue;
         }
-        // 檔名不是 UTF-8 只跳過那一筆，不讓整張清單 503（#983）。
         let Ok(line) = String::from_utf8(f.data) else { continue };
         let mut parts = line.splitn(3, '\t');
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        // 欄位：大小 mtime ctime [inode 其餘…]；舊腳本只有前三欄，之後的缺了就當沒有版本（空字串）。
         let tokens: Vec<&str> = meta.split_whitespace().collect();
         let (Some(Ok(size)), Some(Ok(modified))) = (tokens.first().map(|t| t.parse::<u64>()), tokens.get(1).map(|t| t.parse::<u64>())) else { continue };
         let changed = tokens.get(2).and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
-        // 不透明版本：inode＋大小＋奈秒 mtime／ctime（BSD 的 %Fm 可能含空白，所以其餘欄位整個併起來）。
         let version = tokens.get(3).map_or_else(String::new, |ino| {
             let mut v = format!("{ino}-{size}");
             for t in &tokens[4..] {
@@ -1093,7 +1073,6 @@ fn parse_mtime_ns(s: &str) -> Option<i128> {
     if let Ok(v) = s.parse::<i128>() {
         return Some(v);
     }
-    // GNU stat %.9Y 或 BSD stat %Fm 是小數秒 "1712345678.123456789"
     if let Some((sec_str, frac_str)) = s.split_once('.') {
         let sec: i128 = sec_str.parse().ok()?;
         let frac_trimmed = if frac_str.len() > 9 { &frac_str[..9] } else { frac_str };
@@ -1290,7 +1269,6 @@ pub fn parse_photo_fetch(
                 results[idx] = Ok(body_bytes.to_vec());
             }
         } else {
-            // `changed`：讀的途中檔案被改（長度對不上）。不是永久的 not_found，不能負快取（#1434）。
             results[idx] = match it.next().unwrap_or("not_found") {
                 "source_too_large" => Err("source_too_large"),
                 "changed" => Err("read_failed"),
@@ -1491,8 +1469,6 @@ pub fn parse_prune_outbox(out: &[u8]) -> Result<u64, RfsError> {
     Err(RfsError::Unavailable)
 }
 
-// ───────────────────── RemoteSite 實作 ─────────────────────
-
 /// 建受限分享 bot 前、以及每次啟動前的遠端檢查（R-S2 §4.1）。順序就是檢查的順序。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreflightError {
@@ -1563,7 +1539,6 @@ pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result
             tracing::warn!(host = %conn.name(), error = %e, "preflight: claude --version ssh failed");
             PreflightError::Unreachable
         })?;
-    // 只認恰好一行的輸出：banner、motd 夾在前面時，第一個像版本的字串（例如 `22.04`）不一定是 claude 的版本，寧可讀不到，並說清楚為什麼。
     let (found, why) = match ver.trim_end_matches('\n').lines().collect::<Vec<_>>().as_slice() {
         [] => (String::new(), "輸出是空的"),
         [one] if one.trim() == "NOCLAUDE" => (String::new(), "遠端找不到 claude"),
@@ -1580,7 +1555,6 @@ pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result
         tracing::warn!(host = %conn.name(), error = %e, "preflight: managed settings check ssh failed");
         PreflightError::Unreachable
     })?;
-    // 只認 `AM_MS=FOUND`／`AM_MS=NONE` 兩種明確的答案：空的、被截斷、夾著別的字都不能當成「沒有」。
     match managed.lines().find_map(|l| l.split_once("AM_MS=").map(|(_, v)| v.trim())) {
         Some("NONE") => Ok(()),
         Some("FOUND") => Err(PreflightError::ManagedSettings),
@@ -1592,7 +1566,6 @@ pub async fn preflight_restricted(conn: &FencedConn, min_claude: &str) -> Result
 }
 
 impl RemoteSite {
-    // 建立／啟動（R-S2 用）
     pub async fn resolve_folder(conn: &FencedConn, path: &str) -> Result<ResolvedFolder, RfsError> {
         if !conn.is_connected() {
             return Err(RfsError::Unavailable);
@@ -1710,7 +1683,6 @@ impl RemoteSite {
         }
     }
 
-    // 入口（R-S3 用）
     pub async fn inbox_write(
         &self,
         stored_name: &str,
@@ -1772,15 +1744,12 @@ impl RemoteSite {
             return Err(ShareFileError::NotFound);
         }
 
-        // 下載名額不排隊：先拿專屬下載名額（最多 HOST_DOWNLOAD_SLOTS = 3），再拿主機共享名額（最多 HOST_SHARE_SLOTS = 4）。
-        // 任何一個拿不到直接回 Busy（HTTP 429）。下載最多佔 3 格，恆保留 HOST_STREAM_RESERVE = 1 格給其他操作（#988）。
         let download_permit = host_download_slot(&self.host).try_acquire_owned().map_err(|_| ShareFileError::Busy)?;
         let permit = host_slot(&self.host).try_acquire_owned().map_err(|_| ShareFileError::Busy)?;
 
         let script = outbox_stream_script(&self.outbox, name, max);
         let mut stream = self.conn.ssh_stream(&script, &[]).await.map_err(|_| ShareFileError::Unavailable)?;
 
-        // 讀取標頭首行（超時 30 秒）
         async fn read_line(stream: &mut SshStream) -> Vec<u8> {
             let mut line_buf = Vec::new();
             let mut b = [0u8; 1];
@@ -1797,7 +1766,6 @@ impl RemoteSite {
             if line_buf.starts_with(RFS_VERSION_TAG.as_bytes()) {
                 line_buf = read_line(&mut stream).await;
             }
-            // 錯誤框是 `ERR <長度>\n<原因>\n`：原因在下一行（NOTFOUND／TOOLARGE／UNTRUSTED），要讀進來才分得出 404／413／503。
             if line_buf.starts_with(b"ERR") {
                 let reason = read_line(&mut stream).await;
                 line_buf.extend_from_slice(&reason);
@@ -1833,7 +1801,6 @@ impl RemoteSite {
             return Err(ShareFileError::TooLarge);
         }
 
-        // 讀取前 64 bytes 檢查內容是否被保留
         let head_to_read = len.min(64) as usize;
         let mut head = vec![0u8; head_to_read];
         tokio::time::timeout(TIMEOUT_STREAM_HEAD, stream.read_exact(&mut head))
@@ -1845,7 +1812,6 @@ impl RemoteSite {
             return Err(ShareFileError::NotFound);
         }
 
-        // 標頭讀完、交給下載之前再確認一次；之後每一塊讀取在 `remote_io` 裡還會各自檢查（#1026）。
         if !self.conn.fence().is_current_now() {
             return Err(ShareFileError::Unavailable);
         }
@@ -1899,13 +1865,11 @@ impl RemoteSite {
         }
         let _permit = acquire_slot(&self.host, TIMEOUT_MAINTAIN).await?;
         let script = photo_fetch_script(&self.workspace, rels, each_max, total_max);
-        // 照片是二進位，走原始位元組（見 `exec_bytes`）。讀取上限＝合計上限＋每筆框頭的餘裕；遠端超過就當不可信（#987）。
         let cap = total_max.saturating_add(64 * 1024 * rels.len() as u64).saturating_add(4096);
         let out = exec_bytes(&self.conn, &self.host, &script, TIMEOUT_MAINTAIN, cap, "photo_fetch").await?;
         parse_photo_fetch(&out, rels, each_max, total_max)
     }
 
-    // 預算與保留（R-S4 用）
     pub async fn measure(&self) -> Result<budget::Measured, RfsError> {
         self.measure_with("").await
     }
@@ -1946,8 +1910,6 @@ impl RemoteSite {
         parse_prune_outbox(out.as_bytes())
     }
 }
-
-// ───────────────────── 測試替身支援 ─────────────────────
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod test_support {
@@ -2066,8 +2028,6 @@ pub mod test_support {
             let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("spawn /bin/sh: {e}"))?;
             if let Some(mut sin) = child.stdin.take() {
                 use std::io::Write;
-                // 腳本可能在讀 stdin 之前就印好結果結束（配額滿、目標不可信）：寫入端拿到 EPIPE 是預期的，
-                // 結果照樣看 stdout——跟正式的 `run_with_stdin` 一樣（#1280）。
                 match sin.write_all(stdin) {
                     Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
                     r => r.map_err(|e| anyhow::anyhow!("write stdin: {e}"))?,

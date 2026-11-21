@@ -51,7 +51,6 @@ pub struct Leader {
 impl Leader {
     pub fn finish(mut self, run_id: &str) {
         self.finished = true;
-        // 做完就把格子收掉：之後來的是新的一次。已經在等的請求手上有 receiver，照樣拿得到這個結果。
         if let Ok(mut g) = slots().lock() {
             if g.1.get(&self.bot_id).is_some_and(|s| s.token == self.token) {
                 g.1.remove(&self.bot_id);
@@ -95,7 +94,6 @@ pub async fn admit(bot_id: &str, key: &str) -> Admission {
                 }
             }
         };
-        // 等領頭的做完：成功就跟它同一個結果；它失敗了，回到迴圈自己當領頭（等於使用者的重試）。
         loop {
             match rx.borrow().clone() {
                 Outcome::Ok(run_id) => return Admission::Joined(run_id),
@@ -147,7 +145,7 @@ mod tests {
         let Admission::Lead(l1) = admit(&a, "plain").await else { panic!() };
         assert!(matches!(admit(&a, "fresh").await, Admission::Lead(_)), "種類不同＝另一件事");
         assert!(matches!(admit(&other, "plain").await, Admission::Lead(_)), "別顆 bot 互不相干");
-        l1.finish("run-1"); // 被換掉的格子：收尾不能動新領頭者的（這裡只是確認不會 panic、不會留下髒狀態）
+        l1.finish("run-1");
     }
 
     #[tokio::test]
@@ -157,7 +155,7 @@ mod tests {
         let b2 = b.clone();
         let waiter = tokio::spawn(async move { admit(&b2, "k").await });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        drop(lead); // 沒做成（回錯誤或請求被取消）
+        drop(lead);
         assert!(matches!(waiter.await.unwrap(), Admission::Lead(_)), "領頭的失敗：等著的自己重試，不假裝成功");
     }
 }

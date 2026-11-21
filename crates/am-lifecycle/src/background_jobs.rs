@@ -68,7 +68,6 @@ fn record_at(m: &mut HashMap<String, Entry>, run_id: &str, n: u32, now: i64) -> 
     let prev = m.get(run_id).copied();
     let since = if n == 0 { None } else { prev.and_then(|e| e.since).or(Some(now)) };
     let stuck = stuck_at(since, now);
-    // 同一段（since 沒變）沿用已通知；新的一段或歸零就重置。
     let notified = prev.is_some_and(|e| e.since == since && e.notified);
     m.insert(run_id.to_string(), Entry { n, since, stuck, notified });
     prev.map(|e| (e.n, e.stuck)) != Some((n, stuck))
@@ -218,7 +217,6 @@ pub fn service_shells(ps: &str, listening: &HashSet<i32>, pane_shell: i32) -> u3
         }
         out
     };
-    // 從 pane 的 shell 往下走；碰到工具 shell 就結算它、不再往下（它底下的 shell 是它自己的事）。
     let (mut n, mut stack) = (0, vec![pane_shell]);
     while let Some(pid) = stack.pop() {
         for &c in children.get(&pid).into_iter().flatten() {
@@ -248,11 +246,9 @@ pub async fn services(app: &(impl crate::capabilities::Db + crate::hosts::HostsA
     let t = Duration::from_secs(10);
     let (ps, listen) = if conn.is_local() {
         let Ok(o) = crate::local_sh::output(PS_ARGS).await else { return 0 };
-        // Linux 讀 /proc、macOS 走 lsof（`linux_proc`）；None＝讀不到。
         let Some(l) = crate::linux_proc::listen_fpn(None, t).await else { return 0 };
         (String::from_utf8_lossy(&o.stdout).into_owned(), l)
     } else {
-        // 遠端一趟 ssh 拿兩份。沒有 lsof 的遠端 Linux 只會讀到空的 listen 清單＝不扣。
         let script = format!("{PS_ARGS}; echo '{LISTEN_MARK}'; lsof -nP -iTCP -sTCP:LISTEN -Fp 2>/dev/null; true");
         let Ok(out) = conn.ssh_exec_path_timeout(&script, t).await else { return 0 };
         let Some((ps, l)) = out.split_once(LISTEN_MARK) else { return 0 };
@@ -283,29 +279,21 @@ pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSna
             o.get("terminal_id").and_then(Value::as_str),
         );
         o.insert("identity_recovery_reason".into(), reason.into());
-        // 沒觀察過是 `null`，不是 0（#767）。
         o.insert("background_jobs".into(), known(app, id).into());
-        // #774：這一段背景從什麼時候開始、跑了多久、是不是可能卡住；沒有背景工作（或沒看過）是 null／false。
         let d = duration(app, id);
         let since = d.and_then(|(t, _, _)| chrono::DateTime::from_timestamp_millis(t));
         o.insert("background_since".into(), since.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).into());
         o.insert("background_secs".into(), d.map(|(_, s, _)| s).into());
         o.insert("background_stuck".into(), d.is_some_and(|(_, _, s)| s).into());
-        // claude 的 Stop hook 報的明細（`background_hook.rs`）；沒報過（舊版 claude、剛重啟）都是 null，數字來自畫面。
         let (tasks, crons) = crate::background_hook::details(app, id);
         o.insert("background_source".into(), if tasks.is_null() { Value::Null } else { "hook".into() });
         o.insert("background_tasks".into(), tasks);
         o.insert("session_crons".into(), crons);
-        // 為什麼停在 blocked（結構化原因，`blocked_reason.rs`）：只在 run 現在真的是 blocked 才帶，其他一律 null；
-        // 舊的前端忽略這個欄位。
         let blocked = o.get("agent_status").and_then(Value::as_str) == Some("blocked");
         o.insert("blocked_reason".into(), if blocked { crate::blocked_reason::json(id) } else { Value::Null });
-        // claude 輸入框裡那句灰字「建議下一句」（`prompt_suggestion.rs`）：只在 idle 帶，其他一律 null。
         let status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
         o.insert("prompt_suggestion".into(), crate::prompt_suggestion::json(id, status.as_deref()));
-        // 壓縮中（claude `PreCompact` hook 或畫面的 spinner，`compacting.rs`，#1770）：超過 10 分鐘或已收掉就 null。
         o.insert("compacting_since".into(), am_base::compacting::json_at(id, chrono::Utc::now()));
-        // #1674：`turn_error` 的種類（`turn_error::kind_of`），網頁靠它畫「模型滿載」，不比對文字；沒有錯誤是 null。
         let kind = o.get("turn_error").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(crate::turn_error::kind_of);
         o.insert("turn_error_kind".into(), kind.into());
     }
@@ -333,7 +321,6 @@ mod tests {
         let live = fixture("claude-2.1.281-background-shell.txt");
         assert_eq!(parse("claude", &live), 1);
         assert_eq!(parse("claude", &live.replace("· 1 shell ·", "· 3 shells ·")), 3);
-        // 背景跑完：模式列那段消失，收尾行 `· 1 shell still running` 還留在畫面上——不算。
         let done = live.replace("bypass permissions on · 1 shell · ← for agents", "bypass permissions on (shift+tab to cycle) · ← for agents");
         assert!(done.contains("1 shell still running"), "前提：收尾行還在");
         assert_eq!(parse("claude", &done), 0);
@@ -342,7 +329,6 @@ mod tests {
 
     #[test]
     fn a_background_shell_serving_a_port_is_a_service_not_a_job() {
-        // mac_builder 真機的形狀（pid 改小）：pane zsh → claude → 兩個背景 shell，一個底下的 node listen 3200、一個在跑 check。
         let ps = "\
   10     1 -zsh
   11    10 claude --dangerously-skip-permissions
@@ -407,7 +393,6 @@ mod tests {
         let v = run_json(&app, &run, Some(&run_id));
         assert_eq!((v["background_since"].clone(), v["background_secs"].clone(), v["background_stuck"].clone()), (Value::Null, Value::Null, false.into()), "沒看過");
 
-        // 半小時前開始的背景：帶得出持續秒數，還不算卡住。
         record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 1, now_ms() - 1_800_000);
         let v = run_json(&app, &run, Some(&run_id));
         let secs = v["background_secs"].as_i64().unwrap();
@@ -417,7 +402,6 @@ mod tests {
         let health = crate::supervisor::health::snapshot(&app).await.unwrap();
         assert_eq!(health["background_stuck"], serde_json::json!([]), "沒到門檻不列");
 
-        // 四小時前開始：可能卡住，巡檢健康摘要列出來（但不改 status）。
         app.background_jobs.lock().unwrap().clear();
         record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 2, now_ms() - 4 * 3_600_000);
         let v = run_json(&app, &run, Some(&run_id));
@@ -429,7 +413,6 @@ mod tests {
         assert_eq!(stuck[0]["background_jobs"], 2);
         assert!(stuck[0]["secs"].as_i64().unwrap() >= 4 * 3600);
 
-        // 歸零：開始時間清掉、不再列。
         record(&mut app.background_jobs.lock().unwrap(), &run_id, 0);
         let v = run_json(&app, &run, Some(&run_id));
         assert_eq!((v["background_since"].clone(), v["background_stuck"].clone()), (Value::Null, false.into()));
@@ -580,7 +563,6 @@ mod claude_2_1_329_footer_background_tests {
 
     #[test]
     fn parses_combined_footer_background_counts() {
-        // claude 2.1.329: footer background count supports combined tasks, monitors, etc.
         assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 background task · ← for agents"), Some(1));
         assert_eq!(claude_shells("⏵⏵ bypass permissions on · 2 background tasks · ← for agents"), Some(2));
         assert_eq!(claude_shells("⏵⏵ bypass permissions on · 1 monitor · ← for agents"), Some(1));

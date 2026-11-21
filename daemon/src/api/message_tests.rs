@@ -99,7 +99,6 @@ async fn cluster_dispatch_messages_carry_cluster_and_assignee_but_plain_relay_do
     for (req, cluster) in [("rq-cluster", Some("haiku")), ("rq-plain", None)] {
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,?,'x','[]','answered',?,?)")
             .bind(req).bind("ct-mgr").bind("ct-member").bind(req).bind(db::now()).bind(cluster).execute(&app.db).await.unwrap();
-        // 成員那邊收到的 relay 訊息、管理者那邊的結果通知。
         for (conv, turn, crid, from) in [(&kc, format!("t-member-{req}"), format!("relay-request:{req}"), "ct-mgr"), (&mc, format!("t-notice-{req}"), format!("relay-result:{req}:r0"), "ct-member")] {
             sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, client_request_id, created_at) VALUES (?,?,'external','completed',?,?)")
                 .bind(&turn).bind(conv).bind(crid).bind(db::now()).execute(&app.db).await.unwrap();
@@ -248,7 +247,6 @@ async fn a_before_cursor_that_is_gone_or_foreign_is_a_404_with_a_reason() {
     sqlx::query("DELETE FROM messages WHERE id='m-gone'").execute(&app.db).await.unwrap();
 
     let page = |before: &str| Query(HashMap::from([("before".to_string(), before.to_string())]));
-    // 自己的訊息照舊。
     let Json(ok) = get_messages(State(app.clone()), Path(mine.clone()), page("m-mine-2")).await.unwrap();
     assert_eq!(ok["messages"].as_array().unwrap().len(), 1);
     assert_eq!(not_found_reason(get_messages(State(app.clone()), Path(mine.clone()), page("m-gone")).await).await.as_deref(), Some("before_message_gone"));
@@ -333,7 +331,6 @@ async fn turn_id_and_role_filter_the_page() {
     a_turn(&app.db, &conv, "t-group").await;
     a_message(&app.db, &conv, "m-old", "t-old", "user", None).await;
     a_message(&app.db, &conv, "m-group", "t-group", "user", Some("grp-1")).await;
-    // prompt 後面跟著一長串 assistant：以前靠翻頁找就會被擠出去。
     for i in 0..250 {
         a_message(&app.db, &conv, &format!("m-a{i:03}"), "t-group", "assistant", None).await;
     }
@@ -346,12 +343,10 @@ async fn turn_id_and_role_filter_the_page() {
     assert!(messages[0].get("group_id").is_none(), "legacy group metadata is not exposed");
     assert_eq!(body["has_more"], false);
 
-    // turn 只過濾 turn，不順便挑 role。
     let q = HashMap::from([("turn_id".to_string(), "t-group".to_string()), ("limit".to_string(), "500".to_string())]);
     let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(251));
 
-    // 別的回合、別顆 bot 的同名 turn 都查不到（查詢限定在這個 conversation）。
     let q = HashMap::from([("turn_id".to_string(), "t-nope".to_string())]);
     let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(0));
@@ -367,12 +362,10 @@ async fn turn_id_and_role_filter_the_page() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["id"], "m-other");
 
-    // 沒帶過濾＝現狀（整段、依插入順序）。
     let q = HashMap::from([("limit".to_string(), "500".to_string())]);
     let Json(body) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(252));
 
-    // role 打錯要說，不能默默當作沒過濾。
     let q = HashMap::from([("role".to_string(), "assistant ".to_string())]);
     assert!(matches!(
         get_messages(State(app), Path(bot_id), Query(q)).await,
@@ -448,16 +441,13 @@ async fn every_page_carries_the_turns_of_its_own_messages() {
     assert_eq!(turn_ids(&third), ["t-1"], "最舊那頁也查得到回合");
     assert_eq!(third["turns"][0]["delivery"], "failed", "失敗 prompt 的送達警示不會因為翻頁消失");
 
-    // 帶 turn_id= 只回那一個回合（加上還沒結束的，這裡沒有）。
     let q = HashMap::from([("turn_id".to_string(), "t-1".to_string())]);
     let Json(filtered) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
     assert_eq!(turn_ids(&filtered), ["t-1"]);
-    // 沒有訊息的頁（查不到的 turn）：不帶任何已結束的回合，也不出錯。
     let q = HashMap::from([("turn_id".to_string(), "t-nope".to_string())]);
     let Json(none) = get_messages(State(app.clone()), Path(bot_id.clone()), Query(q)).await.unwrap();
     assert!(turn_ids(&none).is_empty());
 
-    // 還在 queued／in_flight 的回合不管在哪一頁都要帶（判斷還在不在跑）。
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES ('t-live',?,'web','in_flight','ok',?)")
         .bind(&conv)
         .bind(db::now())
@@ -543,7 +533,6 @@ async fn get_messages_prunes_duplicate_incomplete_fallback_message() {
     let hook_content = "Fake balance report is ready in `1a2b3c4d` with full details.\n\n- item: done";
     let fallback_content = "Fake balance report is ready in 1a2b3c4d with full details.\n\nitem: done";
 
-    // 1. Hook 收下的完整訊息
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, source, incomplete, created_at) VALUES ('m-hook', ?, 'assistant', ?, 'hook', 0, '2026-10-25T01:00:00Z')",
     )
@@ -553,7 +542,6 @@ async fn get_messages_prunes_duplicate_incomplete_fallback_message() {
     .await
     .unwrap();
 
-    // 2. 備援刮下的重複且 incomplete 的訊息
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, source, incomplete, created_at) VALUES ('m-fallback', ?, 'assistant', ?, 'terminal_fallback', 1, '2026-10-25T01:00:05Z')",
     )
@@ -566,7 +554,6 @@ async fn get_messages_prunes_duplicate_incomplete_fallback_message() {
     let Json(body) = get_messages(State(app), Path(bot_id.into()), Query(HashMap::new())).await.unwrap();
     let msgs = body["messages"].as_array().unwrap();
 
-    // 驗證只回傳了 1 則 assistant 訊息，且是完整的那則 'm-hook'，殘缺的 'm-fallback' 被過濾剔除
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["id"], "m-hook");
     assert_eq!(msgs[0]["incomplete"], 0);

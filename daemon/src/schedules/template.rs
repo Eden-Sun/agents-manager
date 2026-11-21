@@ -80,7 +80,6 @@ mod tests {
     use chrono::TimeZone;
 
     fn ctx(slot: &str) -> Ctx {
-        // 2026-11-09 00:30Z = 台北 2026-11-09（週一）08:30。
         let when = Utc.with_ymd_and_hms(2026, 11, 9, 0, 30, 0).unwrap();
         Ctx::new(chrono_tz::Asia::Taipei, when, "打卡", slot)
     }

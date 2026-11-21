@@ -141,7 +141,6 @@ async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
     let gate = std::sync::Arc::new(Gate { state: Default::default(), cv: std::sync::Condvar::new() });
     let _finish = Finish(gate.clone());
     {
-        // 失敗時的安全網：只看牆鐘、不靠 runtime（卡住時 runtime 的計時器也會停）。測試正常結束時它就退出。
         let gate = gate.clone();
         std::thread::spawn(move || {
             let st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,7 +189,6 @@ async fn a_hung_host_probe_does_not_delay_a_healthy_host() {
                     Err(_) => return false,
                 }
             }
-            // 健康那台更新的當下，卡住的那台還沒放行。
             !gate.state.lock().unwrap_or_else(|e| e.into_inner()).open
         } => seen,
         res = &mut round => {

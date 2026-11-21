@@ -81,9 +81,6 @@ impl Thresholds {
             host_disconnected_secs: cfg.host_disconnected_secs as i64,
             bot_stopped_secs: cfg.bot_stopped_secs as i64,
             assignment_stalled_secs: cfg.assignment_stalled_secs as i64,
-            // `.max(1)` 跟 `controller::notify` 同一句（issue #504 附帶）：那裡夾了、這裡沒夾，
-            // `notify_max_attempts = 0` 就會讓 `notify_attempts >= 0` 對**每一則** pending 巡檢事件
-            // 成立，一則事件一張 critical incident，而通知本身其實還在正常送（送出的那一路用的是 1）。
             notify_max_attempts: cfg.notify_max_attempts.max(1),
             approval_stalled_secs: super::failover::STALLED_AFTER_SECS,
         }
@@ -149,8 +146,6 @@ impl Detector {
         for obs in observations {
             let key = obs.key();
             let first = *self.since.entry(key.clone()).or_insert(SeenAt { wall_seconds: now, monotonic: monotonic_now });
-            // Wall time keeps deterministic callers and old tests compatible, while the monotonic
-            // clock prevents an NTP/manual rollback from restarting a live in-memory threshold.
             let wall_held = now.saturating_sub(first.wall_seconds).max(0);
             let monotonic_held = monotonic_now
                 .checked_duration_since(first.monotonic)
@@ -162,31 +157,23 @@ impl Detector {
                 "host_disconnected" => thresholds.host_disconnected_secs,
                 "bot_stopped" => thresholds.bot_stopped_secs,
                 ROLE_UNAVAILABLE_KIND => ROLE_UNAVAILABLE_HOLD_SECS,
-                // The stalled, undelivered and exhausted probes carry their own age test; a
-                // second wait here would just double the threshold.
                 _ => 0,
             };
             if held >= needed || open.contains(&key) {
                 plan.open.push(obs.clone());
             }
         }
-        // A threshold-qualified incident whose transaction failed is still owed. It can be
-        // replayed after the fault disappears; `sweep` acknowledges it only after a durable open.
         let mut planned: std::collections::HashSet<(String, String)> = plan.open.iter().map(Observation::key).collect();
         for (key, obs) in &self.pending_opens {
             if planned.insert(key.clone()) {
                 plan.open.push(obs.clone());
             }
         }
-        // Anything open that nobody observed this pass has cleared — unless the probe that
-        // would have seen it never ran, in which case we know nothing and say nothing.
         for key in open {
             if !seen.contains(key) && !blind.contains(&key.0.as_str()) {
                 plan.resolve.push(key.clone());
             }
         }
-        // A blind probe's timer is left alone too, so a fault that was already accumulating
-        // does not have to start its threshold over because of one failed query.
         self.since.retain(|k, _| seen.contains(k) || blind.contains(&k.0.as_str()));
         plan
     }
@@ -247,7 +234,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
     let mut probed = Probed::default();
     let out = &mut probed.seen;
 
-    // A host the daemon cannot reach takes every bot on it with it, and nothing else notices.
     for host in app.hosts().list().await {
         if !host.is_connected() {
             out.push(Observation {
@@ -259,8 +245,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // "Expected running" is the user's own `autostart`, not a guess: a bot somebody stopped on
-    // purpose is not a fault, and treating it as one is how a health page becomes noise.
     match crate::db::live_bots(app.db()).await {
         Ok(bots) => {
             for bot in bots {
@@ -269,13 +253,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                 }
                 match crate::db::active_run(app.db(), &bot.id).await {
                     Ok(None) => {
-                        // autostart is a launch preference, not a perpetual desired-state flag.
-                        // stop_bot records `stopped` and leaves autostart unchanged, so an
-                        // intentional stop must not become an outage after the debounce.
-                        //
-                        // 第二鍵用 `rowid`（寫入順序），不是 `id`（issue #100，同 fence.rs／a4605b2 的根因）：
-                        // 一顆 bot 快速重啟時兩個 run 可能擠進同一毫秒，ULID 的亂數段不保證遞增，字典序
-                        // 挑到的若不是真的最後一個 run，使用者主動停的（`stopped`）會被誤判成 outage。
                         let last = sqlx::query_scalar::<_, String>(
                             "SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
                         ).bind(&bot.id).fetch_optional(app.db()).await;
@@ -291,7 +268,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                         }
                     },
                     Ok(Some(_)) => {}
-                    // Could not tell whether this bot is running. Not knowing is not "it is fine".
                     Err(e) => {
                         tracing::warn!(bot = %bot.id, error = ?e, "bot_stopped probe failed");
                         probed.failed.push("bot_stopped");
@@ -305,9 +281,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // Work that has not moved in hours. `updated_at` moves on every retry and every delivery,
-    // so this only fires on something genuinely stuck — including an `awaiting_review` row
-    // nobody has accepted, which is the case the review found in production.
     let cutoff = stalled_cutoff(chrono::Utc::now(), thresholds.assignment_stalled_secs).unwrap_or_else(|| NEVER_STALLED_CUTOFF.to_string());
     match store::assignments_idle_since(app.db(), &cutoff).await {
         Err(e) => {
@@ -332,10 +305,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // Work that has never been handed over at all — the stopped-bot case. The idle probe above
-    // is blind to it: every retry moves `updated_at`, so an assignment bouncing off a stopped
-    // bot every five minutes looks busy forever. The detail carries the retry count and the
-    // last refusal, which is what makes it actionable instead of just red.
     match store::assignments_undelivered_since(app.db(), &cutoff).await {
         Err(e) => {
             tracing::warn!(error = ?e, "assignment_undelivered probe failed");
@@ -361,19 +330,12 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // A notification nobody could deliver after every retry. Critical: this is the path the
-    // manager learns anything through, and a silent one is worse than a loud failure.
-    //
-    // 一個巡檢一筆，不是一則事件一筆（issue #504 審核）：巡檢停在登入失效時整個佇列會一起用盡額度，
-    // 逐則開等於把一則送不出去的通知變成 N 張 critical incident，而每一張又各推一則 inbox 事件給協調者。
-    // 隔壁 `responder_undeliverable` 為了同一個理由早就是聚合的；兩邊現在形狀一致（`events` 是真正的總數）。
     match store::exhausted_inbox(app.db(), thresholds.notify_max_attempts).await {
         Err(e) => {
             tracing::warn!(error = ?e, "notify_exhausted probe failed");
             probed.failed.push("notify_exhausted");
         }
         Ok(stuck) if stuck.total > 0 => {
-            // 樣本一定非空（`total > 0` 而上限是 20）；`max_by_key` 仍照 Option 處理，不 expect。
             let worst = stuck.events.iter().max_by_key(|e| e.notify_attempts);
             let oldest = stuck.events.first();
             out.push(Observation {
@@ -397,13 +359,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         Ok(_) => {}
     }
 
-    // 協調者（issue #420）：它是 bot 申請、核准、群組任務唯一的收件者，倒了就是整條協調線靜默停擺。
-    // 兩件事分開開：角色 bot 自己不能用（下面那個迴圈），以及——不管原因——
-    // 它的事件已經送了 RESPONDER_UNDELIVERED_ATTEMPTS 次還在 pending。incident_opened 走巡檢（`roles::route`）。
-    // #427 第 2 項：**巡檢也要看**，而且每一拍都看。以前只有協調者、而且只在 `notify` 送不出去時才看，
-    // 所以巡檢停在登入失效沒有人知道（它是 incident 與 ops_alert 的收件人），協調者佇列空著時也一樣。
-    // 判定在 `role_faults::refresh`（同一拍、`sweep` 之前跑），這裡只把結論變成 incident。
-    // `resource` 從 bot_id 換成角色名：兩顆各自一筆，而且換 bot 不會留下關不掉的孤兒。
     for role in super::role_faults::WATCHED {
         let row = match super::roles::record(app.db(), role).await {
             Err(e) => {
@@ -413,28 +368,22 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
             }
             Ok(row) => row,
         };
-        // 沒建立的角色整個不留紀錄（連 blind 都不算）：算了會讓這個 kind 每一拍都是「探針沒跑」，
-        // 另一顆角色已經開著的 incident 就再也關不掉。
         if row.bot_id.is_none() {
             continue;
         }
         let fault = super::role_faults::snapshot(app, role).await.unwrap_or_default();
-        // 兩個獨立訊號：DB 那一欄是 `responder::notify` 送不出去時看畫面寫的（#420），
-        // 記憶體那份是每拍看畫面＋notify 連續沒完成（#427）。哪一個先看到都算。
         let reason = if row.status == "needs_login" {
             Some(super::role_faults::REASON_NEEDS_LOGIN)
         } else {
             fault.reason
         };
         let Some(reason) = reason else {
-            // 這一拍連畫面都讀不到＝不知道。不開也不解（跟上面每個探針同一個原則）。
             if fault.probe_failed {
                 probed.failed.push(ROLE_UNAVAILABLE_KIND);
             }
             continue;
         };
         let stuck_at_login = reason == super::role_faults::REASON_NEEDS_LOGIN;
-        // 停在登入要人動手，而且期間所有核准都沒有人裁示——比 degraded 嚴重。
         let severity = if stuck_at_login { "critical" } else { "degraded" };
         let action = if stuck_at_login {
             "在那顆 bot 的 pane 跑 /login（Keychain 鎖著時先在另一個終端 security unlock-keychain）；恢復後排著的核准會在下一輪 notify 被裁示"
@@ -463,7 +412,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
             probed.failed.push("responder_undeliverable");
         }
         Ok(stuck) if !stuck.is_empty() => {
-            // 一個協調者一筆 incident，不是一則事件一筆：它倒下時佇列裡常有十幾則，逐則開就是通知風暴。
             let worst = stuck.iter().max_by_key(|e| e.notify_attempts).expect("non-empty");
             out.push(Observation {
                 kind: "responder_undeliverable".into(),
@@ -482,10 +430,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         Ok(_) => {}
     }
 
-    // issue #421：核准開著超過 30 分鐘還沒有**任何人**裁示。改派（`failover`）只換得動角色；
-    // 兩個角色都沒登入時換到誰手上都一樣，這時要喊的是人，而不是只留一行 log——2026-09-23 那天
-    // 部署停了 9 小時，全程沒有任何東西告訴使用者「有一筆核准在等你」。
-    // critical：這是一道閘門，卡住的是別人的部署，不是 AGM 自己的工作。
     match super::failover::stalled_approvals(app.db(), thresholds.approval_stalled_secs).await {
         Ok(stalled) => {
             for (id, waiting_secs, requester) in stalled {
@@ -505,17 +449,12 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // #472：分類器自己壞掉。這不是某個資源故障，是 daemon 的一段路不通——
-    // 而它不通的後果是「新進 inbox 事件分不到角色，對兩個通知者同時隱形」，
-    // 沒有任何其他探針會發現（那些事件根本沒被選中，所以連 `notify_exhausted` 都不會觸發）。
-    // 計數在 `App`（記憶體、重啟重算，同 SPEC §18.9 的原則），tick 每拍更新。
     {
         let failures = app.classify_failure_count().load(std::sync::atomic::Ordering::Relaxed);
         if failures >= thresholds.classify_failures {
             out.push(Observation {
                 kind: CLASSIFY_FAILING_KIND.into(),
                 resource: "inbox".into(),
-                // critical：期間所有新事件都送不出去，而使用者入口看起來是好的。
                 severity: "critical".into(),
                 detail: json!({
                     "consecutive_failures": failures,
@@ -526,9 +465,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // #500 複看：遠端 spool 停收。這一條跟分類器那條的理由一樣——**沒有別的探針會發現**：
-    // 事件還在遠端的 `.claim` 裡，本機的 `hook_events` 從頭到尾沒看過它們，
-    // 而「hook 不再進來」跟「這顆 bot 很閒」在 daemon 這邊長得一模一樣。
     {
         let stuck = app.spool_fold_stuck().lock().await;
         for (resource, (rounds, bytes)) in stuck.iter() {
@@ -538,7 +474,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
             out.push(Observation {
                 kind: SPOOL_FOLD_STUCK_KIND.into(),
                 resource: resource.clone(),
-                // 資料沒丟（`.claim` 還在，空間一回來就整份補上），但期間這顆 bot 的回合全部看不到。
                 severity: "critical".into(),
                 detail: json!({
                     "rounds": rounds,
@@ -550,16 +485,12 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
         }
     }
 
-    // #534：遠端 shim 補版放棄了。這一條跟上面兩條的理由一樣——**沒有別的探針會發現**：
-    // 那台上的 bot 都還在跑、hook 照進來，只是它們手上的 cargo／herdr 是舊版，
-    // 表現出來的是「工作沒被轉到外部編譯主機」「cargo 卡住」這種看起來像慢、不像壞的症狀。
     {
         let stale = app.remote_shim_stale().lock().await;
         for (host, why) in stale.iter() {
             out.push(Observation {
                 kind: REMOTE_SHIM_STALE_KIND.into(),
                 resource: host.clone(),
-                // 不是資料問題、也沒有人被擋住，但這台的每一次建置都可能踩到舊 shim 的 bug。
                 severity: "degraded".into(),
                 detail: json!({
                     "why": why,
@@ -617,12 +548,7 @@ pub const ROLE_UNAVAILABLE_HOLD_SECS: i64 = 60;
 fn notifiable(kind: &str, resource: &str, responder_configured: bool) -> bool {
     match kind {
         "notify_exhausted" => responder_configured,
-        // #459：壞掉的是巡檢自己時，唯一收得到的是協調者（`roles::route` 會把它送過去）。
-        // 沒有協調者就沒有第二條路：留在 UI 與 `system_health` 上，不要推進一個已知收不到的佇列。
         ROLE_UNAVAILABLE_KIND => resource != super::roles::Role::Patrol.as_str() || responder_configured,
-        // #472：壞掉的**就是分類本身**。推一則 inbox 事件進去，那一則同樣會停在
-        // `role IS NULL`、同樣沒有人收得到——等於用壞掉的那條路去通報那條路壞了
-        // （跟 `notify_exhausted` 不推給巡檢是同一個理由）。留在 UI 與 `system_health` 上。
         CLASSIFY_FAILING_KIND => false,
         _ => true,
     }
@@ -640,7 +566,6 @@ pub async fn sweep(app: &(impl crate::capabilities::DataDir + crate::capabilitie
     let cfg = app.cfg().get().await;
     let thresholds = Thresholds::from_cfg(&cfg.supervisor);
     let probed = observe(app, &thresholds).await;
-    // Cannot read what is already open: do nothing at all rather than guess in either direction.
     let Ok(open) = store::open_incidents(app.db()).await else {
         tracing::warn!("incident sweep skipped: could not read the open incidents");
         return;
@@ -650,8 +575,6 @@ pub async fn sweep(app: &(impl crate::capabilities::DataDir + crate::capabilitie
         tracing::warn!(blind = ?probed.failed, "some incident probes could not run; their incidents are left as they are");
     }
     note_blind(app, &probed.failed);
-    // 讀不到＝不知道：當成「沒有協調者」會讓 notify_exhausted 的事件被吞掉（incident 已開、通知不再補），
-    // 所以整輪不做，跟上面讀不到 open incidents 同一個原則（#250）。
     let responder_configured = match super::roles::responder_configured(app.db()).await {
         Ok(v) => v,
         Err(e) => {
@@ -669,7 +592,6 @@ pub async fn sweep(app: &(impl crate::capabilities::DataDir + crate::capabilitie
 
     for obs in plan.open {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
-        // incident 與通知同一個交易（#319）：寫不進去就不開，下一輪 detector 重來。
         let (incident, opened) = match store::open_incident_notifying(
             app.db(),
             &obs.kind,
@@ -704,9 +626,6 @@ pub async fn sweep(app: &(impl crate::capabilities::DataDir + crate::capabilitie
 
 /// The system half of the health summary: severity, and the incidents behind it.
 pub async fn system_health(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> Value {
-    // `unwrap_or_default()` here used to turn a failed query into an empty list, and an empty
-    // list into `healthy` — the summary claimed the system was fine on the strength of a read
-    // that never happened.
     let open = match store::open_incidents(app.db()).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -720,7 +639,6 @@ pub async fn system_health(app: &(impl crate::capabilities::DataDir + crate::cap
         }
     };
     let severity = open.iter().fold("healthy".to_string(), |acc, i| worst(&acc, &i.severity));
-    // 有探針上一輪沒跑起來：那一類故障看不到，不能說 healthy（真的故障照舊比 unknown 嚴重）。
     let blind = blind_now(app);
     let severity = if blind.is_empty() { severity } else { worst(&severity, "unknown") };
     json!({
@@ -766,7 +684,6 @@ mod tests {
         assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "第一拍只是看到，還不開");
         assert!(d.plan(&seen, &[], &[], &t, 1000 + ROLE_UNAVAILABLE_HOLD_SECS - 1).open.is_empty(), "差一秒也還不開");
         assert_eq!(d.plan(&seen, &[], &[], &t, 1000 + ROLE_UNAVAILABLE_HOLD_SECS).open.len(), 1, "過了門檻才開");
-        // 恢復：這一拍沒看到就關掉，不用等任何人來按。
         let open = vec![(ROLE_UNAVAILABLE_KIND.to_string(), "responder".to_string())];
         assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
     }
@@ -816,7 +733,6 @@ mod tests {
         assert!(notifiable(ROLE_UNAVAILABLE_KIND, "responder", false), "協調者壞了：巡檢收得到，跟有沒有協調者無關");
         assert!(notifiable(ROLE_UNAVAILABLE_KIND, "patrol", true), "巡檢壞了、協調者在：送協調者");
         assert!(!notifiable(ROLE_UNAVAILABLE_KIND, "patrol", false), "巡檢壞了、又沒有協調者：不推進已知收不到的佇列");
-        // 既有規則不受影響。
         assert!(!notifiable("notify_exhausted", "responder", false));
         assert!(notifiable("host_disconnected", "some-host", false));
     }
@@ -831,7 +747,6 @@ mod tests {
         let at = 1000 + ROLE_UNAVAILABLE_HOLD_SECS;
         d.plan(&seen, &[], &[], &t, 1000);
         assert_eq!(d.plan(&seen, &[], &[], &t, at).open.len(), 2);
-        // 只剩協調者還在壞：巡檢那一筆關掉，協調者那一筆留著。
         let open: Vec<(String, String)> = seen.iter().map(Observation::key).collect();
         let plan = d.plan(&seen[..1], &open, &[], &t, at + 30);
         assert_eq!(plan.resolve, vec![(ROLE_UNAVAILABLE_KIND.to_string(), "patrol".to_string())]);
@@ -864,22 +779,17 @@ mod tests {
     #[cfg(all(test, not(feature = "daemon-test-harness")))]
     #[test]
     fn a_failing_classifier_opens_an_incident_that_never_goes_through_the_inbox() {
-        // 門檻以下不開：撐得過一次暫時性的 DB 錯誤。
         assert!(CLASSIFY_FAILURE_LIMIT >= 2, "至少要撐過一拍，否則一次抖動就開票");
 
         let mut d = Detector::default();
         let t = thresholds();
         let seen = [obs(CLASSIFY_FAILING_KIND, "inbox")];
-        // 這一類沒有時間門檻（次數已經是門檻），所以看到就開。
         assert_eq!(d.plan(&seen, &[], &[], &t, 1000).open.len(), 1);
 
-        // 不論有沒有協調者都不入 inbox。
         assert!(!notifiable(CLASSIFY_FAILING_KIND, "inbox", true));
         assert!(!notifiable(CLASSIFY_FAILING_KIND, "inbox", false));
-        // 對照：一般的種類照舊會推。
         assert!(notifiable("host_disconnected", "mac2", true));
 
-        // 恢復就自動關。
         let open = vec![(CLASSIFY_FAILING_KIND.to_string(), "inbox".to_string())];
         assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
     }
@@ -895,8 +805,6 @@ mod tests {
         assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "first sighting is not yet an incident");
         assert!(d.plan(&seen, &[], &[], &t, 1119).open.is_empty(), "one second short of the threshold");
         assert_eq!(d.plan(&seen, &[], &[], &t, 1120).open.len(), 1, "past the threshold it opens");
-        // Already open: every later pass just refreshes it, and `sweep` only notifies on the
-        // transition, so a five-hour outage stays one notification.
         assert_eq!(d.plan(&seen, &[("host_disconnected".into(), "mac2".into())], &[], &t, 9999).open.len(), 1);
     }
 
@@ -909,8 +817,6 @@ mod tests {
         let plan = d.plan(&[], &open, &[], &t, 5000);
         assert_eq!(plan.resolve, open);
         assert!(plan.open.is_empty());
-        // And the clock starts over, so a fault that comes back has to hold the threshold again
-        // rather than re-opening on its first tick.
         let seen = [obs("host_disconnected", "mac2")];
         assert!(d.plan(&seen, &[], &[], &t, 6000).open.is_empty());
     }
@@ -950,14 +856,12 @@ mod tests {
             ("host_disconnected".to_string(), "mac2".to_string()),
             ("assignment_stalled".to_string(), "a1".to_string()),
         ];
-        // The stalled probe failed this pass; the host probe ran and saw nothing.
         let plan = d.plan(&[], &open, &["assignment_stalled"], &t, 5000);
         assert_eq!(
             plan.resolve,
             vec![("host_disconnected".to_string(), "mac2".to_string())],
             "only the probe that actually looked may close its incident"
         );
-        // And once it can run again and still sees nothing, it resolves normally.
         let plan = d.plan(&[], &open, &[], &t, 5030);
         assert_eq!(plan.resolve.len(), 2);
     }
@@ -971,11 +875,9 @@ mod tests {
         let t = thresholds();
         let seen = [obs("host_disconnected", "mac2")];
         assert!(d.plan(&seen, &[], &[], &t, 1000).open.is_empty(), "clock starts");
-        // The probe fails for a while: no observation, but the fault is not known to be gone.
         for at in [1030, 1060, 1090] {
             assert!(d.plan(&[], &[], &["host_disconnected"], &t, at).open.is_empty());
         }
-        // Back up, still down: the original sighting still counts, so it opens on time.
         assert_eq!(d.plan(&seen, &[], &[], &t, 1120).open.len(), 1, "threshold measured from the first sighting");
     }
 
@@ -984,7 +886,6 @@ mod tests {
     #[test]
     fn the_broken_notification_channel_is_not_used_to_report_itself() {
         assert!(!notifiable("notify_exhausted", "responder", false), "this one would retry, exhaust, and open another incident");
-        // With a responder there is a second channel whose queue never exhausts: tell it.
         assert!(notifiable("notify_exhausted", "responder", true));
         for kind in ["host_disconnected", "bot_stopped", "assignment_stalled", "assignment_undelivered", super::super::failover::STALLED_KIND] {
             assert!(notifiable(kind, "whatever", false), "{kind} is safe to wake the manager about");

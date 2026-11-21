@@ -91,7 +91,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // 表可能是上一版建的：欄位 additive 補上（migrate 可重入）。
     for (col, ddl) in [
         ("owned_by", "ALTER TABLE panes ADD COLUMN owned_by TEXT NOT NULL DEFAULT 'none'"),
         ("unowned_notified_at", "ALTER TABLE panes ADD COLUMN unowned_notified_at TEXT"),
@@ -132,7 +131,6 @@ pub fn classify(foreground: Option<&str>, ports: &[u16]) -> &'static str {
 pub fn facts_from(shell: &crate::herdr::PaneShell, dump: &str, pane_id: &str) -> Option<crate::memproc::PaneFacts> {
     let pid = i32::try_from(shell.shell_pid?).ok()?;
     let mut f = crate::memproc::pane_facts_for_shell(dump, pane_id, pid)?;
-    // 閒著的 shell，herdr 會把 shell 自己列成前景；其他任何一個（含 pid 不明的）都不是「只有 shell」。
     if let Some(p) = shell.foreground_processes.iter().flatten().find(|p| p.pid != Some(i64::from(pid))) {
         f.shell_only = false;
         if f.foreground.is_none() {
@@ -257,10 +255,8 @@ async fn scan_snapshot_on(app: &(impl crate::capabilities::Cfg + crate::capabili
         (Some(sock), Some(ws)) => crate::probe_ws::is_ours(sock, ws),
         _ => false,
     };
-    // #708：移交出去的專案的 pane（它的 workspace／tab／活著的 run 的 pane）不歸這顆 daemon：不記、不 GC、不通知。
     let session = app.session_for_host(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     let handed_off = crate::handoff::footprint(app.db(), host, &session, &session).await?;
-    // #709：共用 session 的主機只收自己的 pane；別顆 daemon 的不記，也就不 GC、不通知、不當 scratch、不改名。
     let owned = app.pane_host_ownership(host).await?;
     let panes: Vec<Value> = snapshot
         .get("panes")
@@ -277,15 +273,10 @@ async fn scan_snapshot_on(app: &(impl crate::capabilities::Cfg + crate::capabili
 
 /// `snapshot_panes` 是 `session.snapshot` 的 `panes` 陣列（已經含 `agent`），所以不用再打一次 RPC。
 async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str, snapshot_panes: &[Value]) -> Result<ScanOutcome> {
-    // 對帳那一輪與定期那一輪不交錯寫同一張表（兩邊的 DELETE 會互相把對方剛記的列刪掉）。
     static SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = SCAN.lock().await;
-    // 這一輪判「不見了」的基準時間，越早捕捉越接近 `snapshot_panes` 真正拍下的那一刻：`note_purpose`
-    // 沒有 `SCAN` 鎖保護，一顆剛開的 pane 可能在這份 snapshot 拍下之後、下面的清理跑之前才被回報進來——
-    // 它比 `scanned_at` 新，不能被當成「這份 snapshot 說它不在了」而清掉（`record_scan` 的 cleanup DELETE）。
     let scanned_at = crate::db::now();
     let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
-    // 環境快照：pane 行程樹的 `AM_BOT_ID` 就是歸屬（§6.5e）。讀不到就這一輪不更新歸屬，不要猜。
     let dump = match crate::memproc::dump(app, host).await {
         Ok(out) => Some(out),
         Err(e) => {
@@ -298,14 +289,12 @@ async fn scan_host(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         let seen = match read_facts(client.as_ref(), dump.as_deref(), pane_id).await {
-            // port 讀不到跟事實讀不到一樣：這一輪不改寫這顆。
             Some(facts) => listen_ports(host, &facts.listen_pids).await.map(|ports| Observed { facts, ports }),
             None => None,
         };
         observed.insert(pane_id.to_string(), seen);
     }
     let (scan, gone) = record_scan_gone(app, host, snapshot_panes, &observed, &scanned_at).await?;
-    // 關掉的 pane 的指令草稿跟著清（issue #896）：手動在 herdr 關掉、或 herdr 重啟後不見的 pane 不會經過任何關閉 API。
     for pane_id in &gone {
         crate::drafts::clear_shell(app, host, pane_id).await;
     }
@@ -328,7 +317,6 @@ const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 pub async fn rescan(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + PaneRuntime), host: &str) -> Result<ScanOutcome> {
     let client = app.pane_shell_client(host).await?;
     let snapshot = client.snapshot().await?;
-    // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
     if !snapshot.get("panes").is_some_and(Value::is_array) {
         anyhow::bail!("session.snapshot on host `{host}` has no `panes`; skipping the pane scan");
     }
@@ -379,14 +367,12 @@ pub(crate) async fn record_scan_gone(
 ) -> Result<(ScanOutcome, Vec<String>)> {
     let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     if non_agent.is_empty() {
-        // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了），但別清掉比這份 snapshot 還新的列。
         let prev_scratch: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND scratch=1").bind(host).fetch_all(app.db()).await?;
         let gone: Vec<String> = sqlx::query_scalar("DELETE FROM panes WHERE host=? AND last_seen < ? RETURNING pane_id").bind(host).bind(scanned_at).fetch_all(app.db()).await?;
         track_reserved_scratch(host, &prev_scratch, &[], snapshot_panes);
         return Ok((ScanOutcome { panes: 0, complete: true, rename_scratch: None }, gone));
     }
     let now = crate::db::now();
-    // canonical path 比對用（§6.5e 的 cwd 回退）。
     let project_paths: Vec<(String, String)> = crate::db::live_projects(app.db())
         .await?
         .into_iter()
@@ -408,7 +394,6 @@ pub(crate) async fn record_scan_gone(
         .bind(pane_id)
         .fetch_optional(app.db())
         .await?;
-        // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
         let (last_output_at, first_seen) = match &prev {
             Some((old_rev, out_at, first, _, _, _)) => {
                 let moved = revision.is_some() && *old_rev != revision;
@@ -419,8 +404,6 @@ pub(crate) async fn record_scan_gone(
         let cwd = p.get("foreground_cwd").or_else(|| p.get("cwd")).and_then(Value::as_str).unwrap_or("");
 
         let Some(Observed { facts: f, ports }) = observed.get(pane_id).and_then(Option::as_ref) else {
-            // 讀不到事實：**不猜**。既有列只更新位置與輸出時間，kind／歸屬／前景／port 沿用上一輪；
-            // 新列先當 service（不自動關、關要確認），歸屬只能靠 cwd（review 2026-09-16 core 3）。
             complete = false;
             if prev.is_some() {
                 sqlx::query(
@@ -466,23 +449,12 @@ pub(crate) async fn record_scan_gone(
         let (prev_bound, prev_owner) = prev.as_ref().map(|p| (p.3.clone(), p.4.clone())).unwrap_or_default();
         let env_bot = f.bot_ids.first().cloned();
         let owner = env_bot.clone();
-        // 歸屬順序（§6.5e，使用者 2026-09-16 第 3 條裁示）：
-        //   1. `AM_PROJECT_ID`——開 pane 當下就綁好的專案。**bot 被刪也不失效**，否則孤兒 pane 會掉成
-        //      「非專案」，再撞上「只准一顆」的規則被當成多餘的那一顆。
-        //   2. `AM_BOT_ID`——只補 owner 與顯示；它的專案只在第 1 條沒有時才拿來用。
-        //   3. 兩個 env 都沒有才用 cwd 比對。
-        //   4. 都對不到才是沒歸屬（scratch 的候選）。
-        // 綁定（1、2）以讀得到的環境為準；這一輪讀不到這顆 pane 的環境（macOS 讀不到閒著的 `-zsh`）就沿用上一輪記下的，
-        // 不然專案一刪、綁定跟著蒸發，孤兒就掉成「沒歸屬」去搶 scratch（review 2026-09-16 core 2）。
         let env_project = if f.env_seen { f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned() } else { None };
         let bot_project = if f.env_seen && env_project.is_none() {
             match &env_bot {
                 Some(b) => match crate::db::bot(app.db(), b).await {
                     Ok(bot) => bot.map(|bot| bot.project_id),
                     Err(e) => {
-                        // An unreadable authority lookup is not evidence that this pane is unbound.
-                        // Keep existing classification untouched; a first-seen pane gets a safe placeholder
-                        // that cannot enter scratch/GC/unowned handling before the next scan retries.
                         complete = false;
                         tracing::warn!(host, pane_id, bot_id = %b, error = ?e, "pane bot project lookup failed; deferring classification");
                         if prev.is_some() {
@@ -531,13 +503,10 @@ pub(crate) async fn record_scan_gone(
         };
         let bound = if f.env_seen { env_project.or(bot_project) } else { prev_bound };
         let kind = classify(f.foreground.as_deref(), ports);
-        // 人 adopt 指定過 owner、而且那顆 bot 還活著：孤兒判定跟著它；環境與 cwd 都對不到專案時，專案也跟著它（#1354）。
-        // adopt 過＝這一列一定已經存在，所以讀不到時只更新位置與輸出時間，分類留給下一輪（同上面讀不到事實那支）。
         let adopted_live: Option<(String, String)> = match prev.as_ref().filter(|p| p.5 == 1).and_then(|p| p.4.clone()) {
             None => None,
             Some(b) => match crate::db::bot(app.db(), &b).await {
                 Ok(Some(bot)) if bot.deleted_at.is_none() => Some((b, bot.project_id)),
-                // adopt 的那顆也被刪了：照環境的判定。
                 Ok(_) => None,
                 Err(e) => {
                     complete = false;
@@ -561,7 +530,6 @@ pub(crate) async fn record_scan_gone(
                 }
             },
         };
-        // 擁有它的 bot 被刪（或根本不在這顆 DB）也是孤兒。DB 讀不到就不下結論。
         let owner_bot = match &adopted_live {
             Some((b, _)) => Some(b.clone()),
             None if f.env_seen => env_bot.clone(),
@@ -572,12 +540,9 @@ pub(crate) async fn record_scan_gone(
             None => false,
         };
         let live = |id: &str| project_paths.iter().any(|(pid, _)| pid == id);
-        // `live()` 只認這台主機的專案（`project_paths` 已照 host 濾過），adopt 給別台的 bot 不會把 pane 掛到別台的專案底下。
         let adopted_project = adopted_live.as_ref().map(|(_, p)| p.as_str()).filter(|p| live(p));
         let (project, owned_by, orphaned) = match &bound {
             Some(id) if live(id) => (Some(id.clone()), "bot", bot_gone),
-            // 綁過的專案被刪了：沒歸屬，但它是孤兒（通知 `pane_orphaned`、照 GC），不是 scratch 的候選。
-            // 人 adopt 指定的 bot 還活著時，專案跟著它、不是孤兒。
             Some(_) => match adopted_project {
                 Some(p) => (Some(p.to_string()), "bot", false),
                 None => (None, "none", true),
@@ -635,17 +600,13 @@ pub(crate) async fn record_scan_gone(
         .execute(app.db())
         .await?;
     }
-    // 不見了的 pane：herdr 說它不在了，就從表裡拿掉（下次再出現會重新記 first_seen）；
-    // 但比這份 snapshot 還新的列（見函式頂端的說明）不算「不見了」，留給下一輪重新判斷。
     let keep = seen.iter().map(|s| format!("'{}'", s.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-    // 先記下上一輪選中的 scratch：它若變成 agent pane（scratch 裡起了 claude）這張表就不收它，下面的 DELETE 會連 `scratch` 旗標一起刪掉。
     let prev_scratch: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND scratch=1").bind(host).fetch_all(app.db()).await?;
     let gone: Vec<String> = sqlx::query_scalar(&format!("DELETE FROM panes WHERE host=? AND pane_id NOT IN ({keep}) AND last_seen < ? RETURNING pane_id"))
         .bind(host)
         .bind(scanned_at)
         .fetch_all(app.db())
         .await?;
-    // scratch 只在完整的一輪重選：不完整時 kind／歸屬是上一輪的，拿來選會讓它來回跳。
     let mut rename_scratch = None;
     let reserved = track_reserved_scratch(host, &prev_scratch, &seen, snapshot_panes);
     if complete {
@@ -655,7 +616,6 @@ pub(crate) async fn record_scan_gone(
             .fetch_all(app.db())
             .await?;
         let pick = pick_scratch(&cands, reserved.as_deref());
-        // 保留中（原本那顆 scratch 還在、只是這一輪不是候選）：不動 `scratch` 欄，也不扶正別人。
         if pick.is_some() || reserved.is_none() {
             sqlx::query("UPDATE panes SET scratch = CASE WHEN pane_id = ? THEN 1 ELSE 0 END WHERE host=?")
                 .bind(pick.map(|c| c.pane_id.as_str()).unwrap_or(""))
@@ -666,7 +626,6 @@ pub(crate) async fn record_scan_gone(
         if pick.is_some() {
             clear_reserved_scratch(host);
         }
-        // 名字只是顯示：選好哪一顆之後才把 herdr 上的 pane 名字改成 `scratch_name`，從不拿名字找人。
         rename_scratch = pick.filter(|c| !name.is_empty() && c.label.as_deref() != Some(name.as_str())).map(|c| c.pane_id.clone());
     }
     Ok((ScanOutcome { panes: seen.len(), complete, rename_scratch }, gone))
@@ -747,7 +706,6 @@ pub async fn announce_if_changed(app: &(impl crate::capabilities::Db + crate::ca
     .await
     {
         Ok(r) => r,
-        // 讀不到不下結論：不發、也不動基準，下一次再比。
         Err(_) => return,
     };
     use std::hash::{Hash, Hasher};
@@ -772,7 +730,6 @@ pub async fn note_purpose(app: &(impl crate::capabilities::Db + crate::capabilit
         return Ok(());
     }
     let now = crate::db::now();
-    // 用途任何 bot 都能更新（別顆 bot 的 pane 也一樣，沿用既有行為）；歸屬欄位只在 `may_claim_owner` 說可以時才補。
     let claim = may_claim_owner(app.db(), host, pane_id, &bot.id).await?;
     sqlx::query(
         "INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, bound_project_id, purpose, last_output_at, first_seen, last_seen)
@@ -878,20 +835,15 @@ pub(crate) fn gc_skip(
     if kind != "shell" {
         return Some("not_a_shell");
     }
-    // 那顆固定的 scratch 永不自動關；其餘沒歸屬的才受 GC（使用者「只准一顆」的裁示）。
     if scratch {
         return Some("scratch");
     }
-    // 使用者手開的（cwd 對得到專案）預設不關，除非 adopt 時簽過名。
     if owned_by == Some("user") && gc_optin == 0 {
         return Some("user_pane");
     }
     if seconds_since(last_output_at) < idle_limit {
         return Some("recent_output");
     }
-    // 輸出訊號從沒動過＝**量不到**，不是「閒置 6 小時」（2026-09-16 實測 herdr 0.8.2：一直在輸出的 claude pane，
-    // `pane.get` 的 revision 10 秒內都不變、`pane.read` 的是 0）。沒有這條，GC 實際上是「第一次看到超過 6 小時、
-    // 此刻剛好停在提示字元」就關——使用者剛在裡面打過指令的 pane 也算。讀不到就不關（同 §6.5e 三條守門）。
     if last_output_at == first_seen {
         return Some("output_unmeasured");
     }
@@ -914,7 +866,6 @@ async fn close_if_still_idle(
     tab_id: Option<&str>,
     log_lines: u32,
 ) -> Result<bool> {
-    // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
     close_if_still_idle_with_dump(app, host, pane_id, workspace_id, tab_id, log_lines, &dump).await
 }
@@ -928,7 +879,6 @@ async fn close_if_still_idle_with_dump(
     log_lines: u32,
     dump: &str,
 ) -> Result<bool> {
-    // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let client = app.pane_shell_client(host).await?;
     let Some(f) = read_facts(Some(&client), Some(dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
@@ -937,11 +887,9 @@ async fn close_if_still_idle_with_dump(
     if !f.shell_only {
         return Ok(false);
     }
-    // port 讀不到也不關。
     if listen_ports(host, &f.listen_pids).await.is_none_or(|ports| !ports.is_empty()) {
         return Ok(false);
     }
-    // 2. 關之前把畫面最後幾行記進 log：自動關不可逆，出事要說得出關掉的是什麼。
     let tail = client
         .pane_read(pane_id, "recent_unwrapped", log_lines)
         .await
@@ -1014,7 +962,6 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     let ports = parse_ports(r.get::<Option<String>, _>("listen_ports").as_deref());
     let host: String = r.get("host");
     let kind: String = r.get("kind");
-    // 跟 `shell::typing_decision` 同一條：遠端不算 port，退回表上的 kind（service 就唯讀）。
     let read_only = !ports.is_empty() || (host != crate::config::LOCAL_HOST && kind == "service");
     json!({
         "pane_id": r.get::<String, _>("pane_id"),
@@ -1027,7 +974,6 @@ pub fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
         "project_id": r.get::<Option<String>, _>("project_id"),
         "purpose": r.get::<Option<String>, _>("purpose"),
         "foreground": r.get::<Option<String>, _>("foreground"),
-        // 打字權限（`shell::typing_decision`）：本機看 port，遠端退回 kind。前端直接用這一欄決定鎖不鎖輸入框。
         "read_only": read_only,
         "listen_ports": ports,
         "last_output_at": r.get::<String, _>("last_output_at"),
@@ -1170,7 +1116,6 @@ mod tests {
         let six_h = 21600;
         assert_eq!(gc_skip("shell", false, Some("bot"), 0, old, old, six_h), Some("output_unmeasured"), "從沒動過：量不到，不關");
         assert_eq!(gc_skip("shell", false, Some("bot"), 0, later, old, six_h), None, "動過而且閒置夠久才是候選");
-        // 其他規則照舊。
         assert_eq!(gc_skip("service", false, Some("bot"), 0, later, old, six_h), Some("not_a_shell"));
         assert_eq!(gc_skip("shell", true, Some("none"), 0, later, old, six_h), Some("scratch"));
         assert_eq!(gc_skip("shell", false, Some("user"), 0, later, old, six_h), Some("user_pane"));
@@ -1187,7 +1132,7 @@ mod tests {
         let app = env.app.clone();
         let host = "panes-evt-host";
         let bot = crate::testing::claude_bot(&app, &env.project_id, "pane-owner").await;
-        announce_if_changed(&app, host).await; // 基準：這台現在是空的
+        announce_if_changed(&app, host).await;
         let mut events = app.subscribe();
 
         note_purpose(&app, host, "w1:pE", &bot, "dev-server").await.unwrap();
@@ -1199,7 +1144,6 @@ mod tests {
         }
         assert_eq!(seen, 1, "新的 pane 列出現");
 
-        // 同樣的內容再報一次：表沒變，不再發。
         note_purpose(&app, host, "w1:pE", &bot, "dev-server").await.unwrap();
         announce_if_changed(&app, host).await;
         assert!(events.try_recv().is_err(), "表沒變就不發");
@@ -1296,7 +1240,6 @@ mod tests {
         assert_eq!((kind.as_str(), rev), ("service", Some(7)), "讀不到事實的新列先當 service");
         assert_eq!(out_at, first, "第一次看到就以 first_seen 當基準");
 
-        // revision 沒變：last_output_at 不動。
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         scan_host(&app, "local", &panes).await.unwrap();
         let same: String = sqlx::query_scalar("SELECT last_output_at FROM panes WHERE pane_id='w1:pB'")
@@ -1305,7 +1248,6 @@ mod tests {
             .unwrap();
         assert_eq!(same, out_at, "沒動就不算有輸出");
 
-        // revision 變了：last_output_at 往前推。
         let moved = vec![pane("w1:pA", Some("claude"), 3), pane("w1:pB", None, 8)];
         scan_host(&app, "local", &moved).await.unwrap();
         let newer: String = sqlx::query_scalar("SELECT last_output_at FROM panes WHERE pane_id='w1:pB'")
@@ -1314,13 +1256,6 @@ mod tests {
             .unwrap();
         assert!(newer > out_at, "{newer} > {out_at}");
 
-        // pane 不見了就從表裡拿掉。
-        // #437：清理只收 `last_seen < scanned_at` 的列（比 snapshot 新的留給下一輪），所以「w1:pB 比這份
-        // snapshot 舊」是這一步的前提。以前靠上一輪與這一輪背對背呼叫、**牆鐘一定往前走**來成立。DB 是
-        // 每條測試自己的（`app()`），沒有別處插列；兩輪依序 await、中間沒有別的寫入者，所以 pB 會留下來
-        // （left 1 / right 0）的路只剩牆鐘在兩次 `db::now()` 之間沒往前走（NTP／VM 對時回撥）——回撥本身
-        // 沒量到，但把 `record_scan` 的 `now` 撥快一秒就能照原樣重現。前提改由測試自己擺好：把它的
-        // `last_seen` 撥回一分鐘前——正式環境上一輪本來就是 60 秒前（`RESCAN_INTERVAL`）。
         sqlx::query("UPDATE panes SET last_seen=? WHERE host='local' AND pane_id='w1:pB'")
             .bind(crate::db::iso_in(-60))
             .execute(&app.db)
@@ -1388,7 +1323,6 @@ mod tests {
         let before = row(&app, "w1:pDev").await;
         assert_eq!((before.0.as_str(), before.1.as_str(), before.2.as_deref()), ("service", "bot", Some("p1")));
 
-        // 這一輪讀不到：什麼都不改寫。
         let moved = json!({"pane_id": "w1:pDev", "workspace_id": "w2", "tab_id": "t9", "cwd": "/elsewhere", "revision": 2});
         let fresh = json!({"pane_id": "w1:pNew", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1});
         let unknown = HashMap::from([("w1:pDev".to_string(), None)]);
@@ -1429,7 +1363,6 @@ mod tests {
             ("w1:pNew".to_string(), observed(Some("next dev"), Some("b1"), None, &[3010])),
         ]);
 
-        // Make bot authority unreadable while leaving project discovery and pane writes available.
         sqlx::query("ALTER TABLE bots RENAME TO bots_unavailable").execute(&app.db).await.unwrap();
         let errored = record_scan(&app, "local", &snapshot, &facts, &crate::db::now()).await;
         sqlx::query("ALTER TABLE bots_unavailable RENAME TO bots").execute(&app.db).await.unwrap();
@@ -1494,23 +1427,18 @@ mod tests {
         let pick = |c: &[ScratchCandidate], reserved: Option<&str>| pick_scratch(c, reserved).map(|c| c.pane_id.clone());
         assert_eq!(pick(&[tail.clone(), zsh.clone()], None).as_deref(), Some("w1:pZsh"), "service 不能搶 scratch");
 
-        // 別人把自己的 shell 取名叫 scratch：名字不算數，照樣是最早的那顆 shell。
         let early = cand("w1:pEarly", "shell", "none", "2026-09-15T00:00:00Z");
         let squatter = ScratchCandidate { label: Some("scratch".into()), ..zsh.clone() };
         assert_eq!(pick(&[early.clone(), squatter], None).as_deref(), Some("w1:pEarly"), "撞名不能搶走 scratch");
 
-        // 選中之後就黏住：裡面暫時跑 htop 變成 service 也還是它；使用者把它改了名也還是它。
         let busy = ScratchCandidate { kind: "service".into(), scratch: true, label: Some("my-shell".into()), ..zsh.clone() };
         assert_eq!(pick(&[early.clone(), busy], None).as_deref(), Some("w1:pZsh"), "改名後仍認得");
 
-        // 孤兒（綁過的專案被刪）與有歸屬的都不是候選。
         let orphan = ScratchCandidate { orphaned: true, ..early.clone() };
         let owned = cand("w1:pUser", "shell", "user", "2026-09-14T00:00:00Z");
         assert_eq!(pick(&[orphan, owned, zsh.clone()], None).as_deref(), Some("w1:pZsh"));
 
-        // 原本那顆 scratch 還活著、只是這一輪不是候選（裡面正在跑 claude）：這一輪不扶正別人。
         assert_eq!(pick(&[early.clone(), zsh.clone()], Some("w1:pGone")), None);
-        // 它回來了（claude 結束，列是新的、first_seen 比別人晚）：還是它，不是最早的那顆。
         let back = ScratchCandidate { first_seen: "2026-09-17T00:00:00Z".into(), ..zsh.clone() };
         assert_eq!(pick(&[early, back], Some("w1:pZsh")).as_deref(), Some("w1:pZsh"));
     }
@@ -1528,13 +1456,11 @@ mod tests {
         };
         let idle = |id: &str| (id.to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }));
         let facts = HashMap::from([idle("w1:pA"), idle("w1:pOther")]);
-        // 第一輪：pS 比較早 → 選中它。
         let first = record_scan(&app, host, &[named("w1:pA", "scratch"), named("w1:pOther", "scratch")], &facts, &crate::db::now()).await.unwrap();
         assert_eq!(first.rename_scratch, None, "名字剛好已經是 scratch：不用改");
         let flagged: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND scratch=1").bind(host).fetch_all(&app.db).await.unwrap();
         assert_eq!(flagged, vec!["w1:pA".to_string()], "撞名的 pOther 不影響選擇");
 
-        // 第二輪：pS 裡跑起 claude（agent pane，而且被使用者改了名）；pOther 仍叫 scratch。不能把 pOther 扶正。
         let mut agent = pane("w1:pA", Some("claude"), 2);
         agent["label"] = json!("renamed");
         let facts2 = HashMap::from([idle("w1:pOther")]);
@@ -1544,12 +1470,10 @@ mod tests {
         let flagged: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND scratch=1").bind(host).fetch_all(&app.db).await.unwrap();
         assert!(flagged.is_empty(), "pS 還活著：不扶正別人，pOther 不是 scratch：{flagged:?}");
 
-        // 第三輪：claude 結束，pS 回來（改過名）：還是它，不用重新選；名字顯示再改回 scratch。
         let facts3 = HashMap::from([idle("w1:pA"), idle("w1:pOther")]);
         let third = record_scan(&app, host, &[named("w1:pA", "renamed"), named("w1:pOther", "scratch")], &facts3, &crate::db::now()).await.unwrap();
         assert_eq!(third.rename_scratch.as_deref(), Some("w1:pA"), "pS 回來仍是 scratch，名字只是顯示、改回 scratch");
 
-        // 保留的 pane 不見了（關掉）：不再保留，下一顆 shell 才能成為 scratch。
         let facts4 = HashMap::from([idle("w1:pOther")]);
         let fourth = record_scan(&app, host, &[pane("w1:pA", Some("claude"), 3), named("w1:pOther", "scratch")], &facts4, &crate::db::now()).await.unwrap();
         assert_eq!(fourth.rename_scratch, None);
@@ -1572,7 +1496,6 @@ mod tests {
 
         sqlx::query("UPDATE projects SET deleted_at=? WHERE id='p1'").bind(crate::db::now()).execute(&app.db).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        // 這一輪讀得到事實，但讀不到 build shell 的環境（閒著的 -zsh）；使用者這時才開了雜事 pane。
         let mine = json!({"pane_id": "w1:pMine", "workspace_id": "w1", "tab_id": "t2", "cwd": "/Users/me", "revision": 1});
         let idle = |id: &str| (id.to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }));
         let facts = HashMap::from([idle("w1:pBuild"), idle("w1:pMine")]);
@@ -1651,7 +1574,6 @@ mod tests {
         let no_env = HashMap::from([("w1:pU".to_string(), observed(None, None, None, &[]))]);
         record_scan(&app, "local", &[pane], &no_env, &crate::db::now()).await.unwrap();
 
-        // Simulate elapsed time without sleeping: after the grace period, an adopted pane still is not unowned.
         let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE panes SET first_seen=? WHERE host='local' AND pane_id='w1:pU'")
             .bind(aged)
@@ -1686,7 +1608,6 @@ mod tests {
         assert_eq!(project_for_cwd("/Users/me/project/other", &projects), Some("p-outer"), "取得到的最長那個");
         assert_eq!(project_for_cwd("/tmp", &projects), None, "對不到就是沒歸屬");
         assert_eq!(project_for_cwd("", &projects), None);
-        // 前綴不是路徑邊界：`/Users/me/projectX` 不算在 `/Users/me/project` 底下。
         assert_eq!(project_for_cwd("/Users/me/projectX", &projects), None);
     }
 
@@ -1716,7 +1637,6 @@ mod tests {
         assert_eq!(facts.project_ids, vec!["p1".to_string()]);
         assert_eq!(facts.bot_ids, vec!["b1".to_string()]);
 
-        // bot 被刪：綁定照舊在（不然這顆會掉成「非專案」，再撞上「只准一顆」）。
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id='b1'").bind(&now).execute(&app.db).await.unwrap();
         assert_eq!(facts.project_ids, vec!["p1".to_string()], "env 的綁定與 bot 是否存在無關");
         std::fs::remove_dir_all(&app.data_dir).ok();
@@ -1749,10 +1669,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(notified, vec!["w1:pExtra".to_string()]);
-        // 再跑一次不會重複通知。
         assert_eq!(notify_unowned_and_orphans(&app, "local").await.unwrap(), 0);
 
-        // GC：scratch 不在候選裡，多出來的那顆才是（herdr 不在，close 會失敗，這裡只驗選誰）。
         let closed = gc_host(&app, "local").await.unwrap();
         assert_eq!(closed, 0, "沒有 herdr 可關，但不能因此誤刪資料");
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
@@ -1785,7 +1703,6 @@ mod tests {
             .await
             .unwrap();
         }
-        // 候選判斷與實際關閉分開：這裡沒有 herdr，所以看的是「有沒有走到關閉那一步」。
         assert_eq!(gc_host(&app, "local").await.unwrap(), 0);
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 3);
@@ -1810,19 +1727,16 @@ mod tests {
         let b1 = crate::db::bot(&app.db, "b1").await.unwrap().unwrap();
         let b2 = crate::db::bot(&app.db, "b2").await.unwrap().unwrap();
 
-        // 還沒掃到就先記：建一列。
         note_purpose(&app, "local", "w1:pS", &b1, "dev-server").await.unwrap();
         let (owner, purpose): (Option<String>, Option<String>) =
             sqlx::query_as("SELECT owner_bot_id, purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
         assert_eq!((owner.as_deref(), purpose.as_deref()), (Some("b1"), Some("dev-server")));
 
-        // 別的 bot 事後回報：用途可以更新，owner 不會被改寫（歸屬是掃描推斷的）。
         note_purpose(&app, "local", "w1:pS", &b2, "logs").await.unwrap();
         let (owner, purpose): (Option<String>, Option<String>) =
             sqlx::query_as("SELECT owner_bot_id, purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
         assert_eq!((owner.as_deref(), purpose.as_deref()), (Some("b1"), Some("logs")));
 
-        // 空字串不會把用途洗掉。
         note_purpose(&app, "local", "w1:pS", &b1, "").await.unwrap();
         let purpose: Option<String> =
             sqlx::query_scalar("SELECT purpose FROM panes WHERE pane_id='w1:pS'").fetch_one(&app.db).await.unwrap();
@@ -1904,17 +1818,14 @@ mod tests {
         let pane = json!({"pane_id": "w1:pS", "workspace_id": "w1", "tab_id": "t1", "cwd": "/Users/me", "revision": 1});
 
         note_purpose(&app, "local", "w1:pS", &b2, "build").await.unwrap();
-        // 環境讀不到：回報的綁定讓它仍算 p1 的 bot pane，不掉成沒歸屬。
         let idle = HashMap::from([("w1:pS".to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }))]);
         record_scan(&app, "local", &[pane.clone()], &idle, &crate::db::now()).await.unwrap();
         assert_eq!(owner(app.clone()).await, (Some("b2".into()), "bot".into(), Some("p1".into())));
 
-        // 環境讀到的是 b1：蓋過回報。
         let env = HashMap::from([("w1:pS".to_string(), observed(None, Some("b1"), Some("p1"), &[]))]);
         record_scan(&app, "local", &[pane.clone()], &env, &crate::db::now()).await.unwrap();
         assert_eq!(owner(app.clone()).await.0.as_deref(), Some("b1"));
 
-        // 人 adopt 指定 b2：之後掃描不再改它。
         let _ = adopt(State(app.clone()), Path("w1:pS".into()), Query(HashMap::new()), Some(Json(AdoptIn { owner_bot_id: Some("b2".into()), purpose: None, allow_gc: false })))
             .await
             .unwrap();
@@ -1956,7 +1867,6 @@ mod tests {
         record_scan(&app, "local", &[pane.clone()], &none, &crate::db::now()).await.unwrap();
         assert_eq!(adopted_state(&app).await, (Some("b1".into()), "bot".into(), Some("p1".into()), 0), "下一輪掃描不能撤銷 adopt");
 
-        // 讀不到環境的那種掃描（macOS 閒著的 -zsh）也一樣。
         let idle = HashMap::from([("w1:pU".to_string(), Some(Observed { facts: crate::memproc::PaneFacts { pids: vec![1], shell_only: true, ..Default::default() }, ports: vec![] }))]);
         record_scan(&app, "local", &[pane], &idle, &crate::db::now()).await.unwrap();
         assert_eq!(adopted_state(&app).await, (Some("b1".into()), "bot".into(), Some("p1".into()), 0));
@@ -2009,12 +1919,9 @@ mod tests {
         project_and_bot(&app).await;
         let bot = crate::db::bot(&app.db, "b1").await.unwrap().unwrap();
 
-        // 這次 snapshot 拍下的時間點：明確早於下面 note_purpose 的寫入，不靠毫秒級的巧合湊出順序。
         let scanned_at = crate::db::iso_in(-1);
-        // 這次 snapshot 是在 w1:pFresh 出生前拍的：它自然不在裡面。
         let old = json!({"pane_id": "w1:pOld", "workspace_id": "w1", "tab_id": "t1", "cwd": "/tmp", "revision": 1});
 
-        // shim 在這次 record_scan 收尾之前把剛開的 pane 報了進來。
         note_purpose(&app, "local", "w1:pFresh", &bot, "剛開的 build pane").await.unwrap();
 
         let facts = HashMap::from([("w1:pOld".to_string(), observed(None, None, None, &[]))]);
@@ -2050,7 +1957,6 @@ mod tests {
         crate::drafts::put(&app.db, &crate::drafts::shell_key("local", "w1:p8"), "ls").await.unwrap();
         let mut rx = app.subscribe();
 
-        // snapshot 還有 p8、沒有 p9：只有 p9 的草稿被清。
         scan_host(&app, "local", &[pane("w1:p8", None, 1)]).await.unwrap();
         let keys: Vec<String> = crate::drafts::list(&app.db).await.unwrap().into_iter().map(|d| d.key).collect();
         assert_eq!(keys, ["shell:local/w1:p8"], "不見的那顆草稿清掉，還在的留著");
@@ -2062,7 +1968,6 @@ mod tests {
         }
         assert_eq!(cleared, [("shell:local/w1:p9".to_string(), String::new())]);
 
-        // 這台一顆非 agent pane 都沒有的收尾分支也一樣。
         sqlx::query("UPDATE panes SET last_seen=? WHERE pane_id='w1:p8'").bind(crate::db::iso_in(-60)).execute(&app.db).await.unwrap();
         scan_host(&app, "local", &[]).await.unwrap();
         assert!(crate::drafts::list(&app.db).await.unwrap().is_empty());
@@ -2113,7 +2018,6 @@ mod tests {
         let (_, pane) = app.herdr.workspace_create("/tmp", "w", json!({})).await.unwrap();
         cached(app, &pane, "shell").await;
 
-        // 記成 shell，但這一刻讀不到它在跑什麼：當成 service，要人確認。
         match close(State(app.clone()), Path(pane.pane_id.clone()), Query(HashMap::new())).await {
             Err(LcError::Conflict(body)) => {
                 assert_eq!(body["reason"], "service_pane");
@@ -2122,14 +2026,12 @@ mod tests {
             other => panic!("讀不到就要確認：{other:?}"),
         }
 
-        // herdr 說裡面現在有 agent（shell 裡被 `herdr agent start --pane` 起了子 agent）：帶 confirm 也不給關。
         env.herdr.set_agent("kid", &pane.pane_id, false);
         match close(State(app.clone()), Path(pane.pane_id.clone()), with_confirm()).await {
             Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "agent_pane"),
             other => panic!("agent 的 pane 不歸這支關：{other:?}"),
         }
 
-        // 有 active run 也一樣（不用問 herdr）。
         let (_, busy) = app.herdr.workspace_create("/tmp", "b", json!({})).await.unwrap();
         cached(app, &busy, "shell").await;
         let bot = crate::testing::claude_bot(app, &env.project_id, "b").await;
@@ -2142,14 +2044,12 @@ mod tests {
             .unwrap();
         assert!(matches!(close(State(app.clone()), Path(busy.pane_id.clone()), with_confirm()).await, Err(LcError::Forbidden(_))));
 
-        // herdr 說 pane 已經不在：刪掉快取的列，回 404。
         let gone = crate::herdr::PaneInfo { pane_id: "ws-9:p9".into(), ..pane.clone() };
         cached(app, &gone, "shell").await;
         assert!(matches!(close(State(app.clone()), Path(gone.pane_id.clone()), with_confirm()).await, Err(LcError::NotFound(_))));
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id='ws-9:p9'").fetch_one(&app.db).await.unwrap();
         assert_eq!(left, 0);
 
-        // 確認過就關。
         let (_, plain) = app.herdr.workspace_create("/tmp", "p", json!({})).await.unwrap();
         cached(app, &plain, "shell").await;
         let out = close(State(app.clone()), Path(plain.pane_id.clone()), with_confirm()).await.expect("確認過就關");
@@ -2217,7 +2117,6 @@ mod tests {
         let pane_in = |id: &str, ws: &str| json!({"pane_id": id, "workspace_id": ws, "tab_id": format!("{ws}:t1"), "cwd": "/home/u", "agent": null, "revision": 1});
         let probe = crate::probe_ws::ProbeWorkspace::register(app.herdr.socket_path(), "wQ1795");
         let snapshot = json!({
-            // 探測被改名成普通名字；使用者的 workspace 取了探測的名字。
             "workspaces": [{"workspace_id": "w1", "label": "am-quota-claude-mine"}, {"workspace_id": "wQ1795", "label": "renamed"}],
             "panes": [pane_in("w1:pB", "w1"), pane_in("wQ1795:p1", "wQ1795")],
         });
@@ -2302,17 +2201,14 @@ mod tests {
         assert_eq!(sudo.foreground.as_deref(), Some("sudo make -C litware-ops dev"));
         assert_eq!(classify(sudo.foreground.as_deref(), &[]), "service");
 
-        // 閒著的 shell：herdr 把 shell 自己列成前景，那不算。
         let idle = facts_from(&herdr_shell(Some(70323), &[(Some(70323), "zsh")]), dump, "w168:p6J").unwrap();
         assert!(idle.shell_only, "{idle:?}");
         assert_eq!(idle.pids, vec![70323]);
 
-        // herdr 看到的前景樹還沒出現（剛啟動、或 dump 早一步取的）：也不算只有 shell。
         let racing = facts_from(&herdr_shell(Some(70323), &[(Some(99999), "vim notes.md")]), dump, "w168:p6J").unwrap();
         assert!(!racing.shell_only);
         assert_eq!(racing.foreground.as_deref(), Some("vim notes.md"));
 
-        // 判不出來：herdr 沒報 shell pid、或 pid 不在樹裡。
         assert_eq!(facts_from(&herdr_shell(None, &[]), dump, "w168:p6J"), None);
         assert_eq!(facts_from(&herdr_shell(Some(424242), &[]), dump, "w168:p6J"), None);
     }

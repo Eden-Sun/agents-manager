@@ -21,8 +21,6 @@ use std::time::Duration;
 const HOST_IO_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_SENTINEL: &str = "__AGM_CC_ALIAS_PROBE_OK__";
 
-// Deletions on one host serialize through the full reference-check/edit/probe/rollback/cache
-// sequence. This deliberately is not a global identity-writer admission gate.
 static HOST_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
 
 fn host_lock(host: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -61,15 +59,12 @@ impl IdentityRef {
 }
 
 async fn first_reference(app: &App, host: &str, identity: &str) -> anyhow::Result<Option<IdentityRef>> {
-    // A configured Bot reference blocks even when it is idle: it may be started later. A bare
-    // Bot (identity=None) does not explicitly use cc0 merely because both use the default login.
     for bot in db::live_bots_on_host(&app.db, host).await? {
         if explicitly_references(&bot.kind, bot.identity.as_deref(), identity) {
             return Ok(Some(IdentityRef::bot(bot.id)));
         }
     }
 
-    // Runtime identity catches a live pane whose effective identity differs from its Bot config.
     let runtime_run: Option<String> = sqlx::query_scalar(
         "SELECT r.id FROM runs r
          JOIN bots b ON b.id=r.bot_id
@@ -86,9 +81,6 @@ async fn first_reference(app: &App, host: &str, identity: &str) -> anyhow::Resul
         return Ok(Some(IdentityRef::runtime(run_id)));
     }
 
-    // The patrol identity is stored on `supervisors`; both supervisor tables associate it with a
-    // host through project_id (or, for older rows without it, their linked Bot's project).
-    // Unconfigured rows without either association are not a host reference.
     let supervisor: Option<String> = sqlx::query_scalar(
         "SELECT s.id FROM supervisors s
          LEFT JOIN projects sp ON sp.id=s.project_id AND sp.deleted_at IS NULL
@@ -218,8 +210,6 @@ struct WorkerRequest<'a> {
     expected_home: &'a str,
 }
 
-// Sent over stdin to both the local Python process and HostConn::ssh_exec_stdin. It reads only
-// candidate startup files, never prints their contents to logs/responses, and retains every backup.
 const HOST_WORKER: &str = r#"
 import hashlib,json,os,re,secrets,stat,subprocess,sys,tempfile
 
@@ -940,7 +930,6 @@ async fn delete_on_host(app: &Arc<App>, fence: &hosts::HostFence, host: &str, na
     let active = probe(fence, &home, &snapshot.shell, name, host).await?;
     let candidate = source_candidate(&snapshot, name, &active, host)?;
     let expected = digest(&candidate.original);
-    // Keep the intended backup location even if transport loses the prepare response.
     let token = digest(&ulid::Ulid::new().to_string());
     let intended_backup = format!("{home}/.config/agents-manager/shell-alias-backups/{}-{}.bak", candidate.profile, &token[..32]);
     let prepared = match run_worker(fence, &home, &WorkerRequest {
@@ -949,7 +938,6 @@ async fn delete_on_host(app: &Arc<App>, fence: &hosts::HostFence, host: &str, na
     }).await {
         Ok(reply) => reply,
         Err(_) => {
-            // Reconcile by reading this exact backup, never retry a file write blindly.
             match run_worker(fence, &home, &WorkerRequest {
                 action: "verify_backup", profile: Some(candidate.profile), expected_sha256: Some(&expected),
                 candidate: Some(&candidate.replacement), backup_path: Some(&intended_backup), candidate_sha256: None, expected_home: &home,
@@ -971,8 +959,6 @@ async fn delete_on_host(app: &Arc<App>, fence: &hosts::HostFence, host: &str, na
     }).await {
         Ok(reply) => reply,
         Err(_) => {
-            // The transport may have lost the reply after the helper renamed the file. Restore
-            // only if its current bytes still match this candidate; include the confirmed backup.
             let restored = conditional_restore(fence, &home, candidate.profile, &backup_path, &candidate_sha).await;
             let (reason, message) = if restored {
                 ("alias_commit_outcome_unknown", "The commit result was not received; conditional restore completed from the retained backup.")
@@ -1048,8 +1034,6 @@ async fn delete_on_host(app: &Arc<App>, fence: &hosts::HostFence, host: &str, na
         Ok(None) => {}
     }
 
-    // Take a new host observation ticket after the file replacement. This prevents a slower
-    // pre-delete alias poll from publishing its stale snapshot over the deletion result.
     let publish_fence = app.hosts.fence(host).await.ok_or_else(|| {
         conflict(host, name, "host_superseded", "The alias was removed but the host cache could not be refreshed.", Some(&backup_path), None, None)
     })?;
@@ -1095,8 +1079,6 @@ pub(super) async fn delete_shell_identity(
     }
     let lock = host_lock(&host);
     let _host_guard = lock.lock().await;
-    // Lock order: host lock → identity exclusive. Held through post-check and cache update so
-    // bot create/assign paths (`identity_fence::admit`) cannot interleave (#2002).
     let _identity_guard = crate::identity_fence::exclusive(&host, "claude", &identity).await;
     let fence = app.hosts.fence(&host).await.ok_or_else(|| LcError::NotFoundValue(json!({
         "error":"not_found","reason":"host_not_found","host":host,"kind":"claude","identity":identity
@@ -1441,8 +1423,6 @@ mod tests {
             fs::set_permissions(home.0.join(part), fs::Permissions::from_mode(0o700)).unwrap();
         }
         let xattr = |path: &std::path::Path, remove: bool| {
-            // macOS 的 python3 沒有 os.setxattr／removexattr（#1964：夜間 macos-latest AttributeError），改用系統的 /usr/bin/xattr；
-            // Linux 維持原本的 python 寫法（user.* 命名空間），兩邊設的都是同一種「多出來的 xattr」。
             let status = if cfg!(target_os = "macos") {
                 let mut c = Command::new("/usr/bin/xattr");
                 if remove { c.args(["-d", "com.agm.test"]) } else { c.args(["-w", "com.agm.test", "temp-test"]) }.arg(path).status()
@@ -1650,8 +1630,6 @@ mod tests {
         let rc = format!("# keep bytes\nexport PATH=\"$PATH:$HOME/tools\" # keep PATH comment\nexport PS1='\\u@\\h:\\w\\$ '\nalias ll='ls -alF' # keep alias comment\nalias gst=\"git status\" # keep double quote alias\nalias cc0='{body}'\n");
         home.write("bash_profile", &original);
         home.write("bashrc", &rc);
-        // The live-shell probe has no source-file metadata. A fake result mirrors the effective
-        // alias line from this temp-only fixture; the helper still runs real bash -n on its temp file.
         let active = rc.lines().find(|line| line.starts_with("alias cc0=")).unwrap().to_string() + "\n";
         assert_eq!(parse_probe(&active, "cc0", "local").unwrap().as_deref(), Some(body));
         let snapshot = run_fake_worker(&home, "/bin/bash", request(&home, "snapshot", json!({}))).snapshot("local", "cc0").unwrap();

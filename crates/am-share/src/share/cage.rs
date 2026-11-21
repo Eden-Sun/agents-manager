@@ -109,13 +109,11 @@ pub async fn prepare(app: &(impl ShareStorage + SiteEnv), bot: &db::Bot, host: &
         .await
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
     let Some(ws) = ws else {
-        // 信任分享（trusted）不進籠子，照一般 bot 起；但 outbox 一樣不給 gc 清、上傳的 inbox 一樣要在。
         if let Ok(Some(dir)) = crate::share::store::workspace(ShareStorage::db_pool(app), &bot.id).await {
             if host == LOCAL_HOST {
                 let _ = crate::share::folder::ensure_inbox(Path::new(&dir));
                 crate::outbox::mark_share_keep(ShareStorage::data_dir(app), &bot.id);
             } else if let Ok(site) = remote_site(app, &bot.id).await {
-                // 遠端的 inbox 與保留標記盡力而為（本機也是這樣）：失敗只記 warning，不擋啟動。
                 if let Err(e) = site.ensure_inbox().await {
                     tracing::warn!(bot = %bot.id, host, error = %e, "remote trusted share folder inbox not ensured");
                 }
@@ -128,13 +126,10 @@ pub async fn prepare(app: &(impl ShareStorage + SiteEnv), bot: &db::Bot, host: &
     };
     check_profile(&bot.kind, host, true)?;
     if host == LOCAL_HOST {
-        // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
         crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
-        // outbox 不給 AGM 的 gc 清（使用者 2026-10-04）：每次啟動補一次標記，bot 自己刪掉也回得來。
         crate::outbox::mark_share_keep(ShareStorage::data_dir(app), &bot.id);
         return Ok(Some(ws));
     }
-    // 遠端：每次啟動都重跑 preflight（claude 可能被換版、managed settings 可能被加），不過就不起來。
     let site = remote_site(app, &bot.id).await?;
     preflight_restricted(&site.conn).await?;
     site.ensure_inbox().await.map_err(|e| match e {
@@ -176,7 +171,6 @@ const BLANK: &[&str] = &[
 pub fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>, home: &str) {
     let Some(map) = env.as_object_mut() else { return };
     map.retain(|k, _| KEEP_AM.contains(&k.as_str()) || KEEP_CLAUDE.contains(&k.as_str()));
-    // 身份的值重算一次：bot env 可能蓋過同名的鍵，那是使用者自訂，不算數。
     for (k, v) in identity_env {
         if k.starts_with("AM_") || k == "PATH" {
             continue;
@@ -298,7 +292,6 @@ pub async fn install_prompt<T: CageEnv + SiteEnv>(app: &std::sync::Arc<T>, bot: 
     if host != LOCAL_HOST {
         let site = remote_site(app.as_ref(), &bot.id).await.map_err(|e| anyhow::anyhow!("遠端分享 bot 的位置：{}", lc_message(&e)))?;
         let folder_md = site.instructions().await.map_err(|e| anyhow::anyhow!("讀不到遠端資料夾的指示：{e}"))?;
-        // 寫進遠端時結尾換行會被 shell 吃掉、sha 對不上，所以先去掉。
         let text = system_prompt(workspace, outbox, bot.persona.as_deref(), &folder_md);
         let dir = format!("{}/bots/{}", site.root, bot.id);
         RemoteSite::write_private_files(&site.conn, &dir, &[(PROMPT_FILE, text.trim_end_matches('\n').as_bytes())])
@@ -336,7 +329,6 @@ pub fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str
                 "- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（保留 {} 天；總量太大時從最舊的清掉）。\n",
                 crate::outbox::SHARE_KEEP_DAYS
             ));
-            // share/compose.rs：入口送出 SVG 時把相對路徑的 <image> 嵌成 data URI。
             p.push_str(
                 "- 要把對方的照片放進你做的圖（SVG）：用相對於工作目錄的路徑引用，例如 `<image href=\"inbox/檔名.jpeg\" x=\"40\" y=\"40\" width=\"400\" height=\"300\" preserveAspectRatio=\"xMidYMid slice\"/>`，\
                  對方的頁面會自動把照片合成進去（只認工作目錄裡的 JPEG／PNG／WebP／GIF；網址、絕對路徑、`..` 都不會載入）。\
@@ -374,7 +366,6 @@ pub fn check_create(kind: &str, host: &str, host_known: bool, args: &[String], e
     Ok(())
 }
 
-
 /// 受限 bot 沒指定模型時用的：`/api/models?kind=claude` 當下列出的最新 Opus。清單有完整 id（`claude-opus-X-Y`）就挑版本最大的，
 /// 只有別名就用 `opus`（claude 自己把它解析成當版最新的 Opus，2.1.288 實測是 claude-opus-5-5）。清單抓不到也退回 `opus`：
 /// 不寫死版本號，也不落回帳號預設（線上那顆就是這樣跑成舊版的）。
@@ -398,7 +389,6 @@ pub fn latest_opus_in(models: &Value) -> Option<String> {
             continue;
         }
         let Some(rest) = id.strip_prefix("claude-opus-") else { continue };
-        // `claude-opus-5-5`、`claude-opus-4-1-20250805`：日期（8 位數）不算版本。
         let ver: Vec<u32> = rest.split('-').take_while(|p| p.len() < 8).map_while(|p| p.parse().ok()).collect();
         if ver.is_empty() {
             continue;

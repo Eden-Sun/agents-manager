@@ -163,9 +163,6 @@ impl crate::api_bot::runner::Tools for RemoteTools {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// 以下是純函式（不碰 ssh），單元測試直接測。
-
 /// 專案目錄：去掉結尾 `/`；必須是絕對路徑或 `~`／`~/…`（遠端 home 由 shell 展開）。
 fn normalize_root(root: &str) -> Result<String, String> {
     let r = root.trim();
@@ -301,7 +298,6 @@ fn parse_read_reply(out: &str) -> Result<ReadReply, String> {
     if let Some(size) = head.strip_prefix("AM_FILE ") {
         let size: usize = size.trim().parse().map_err(|_| "remote read returned a bad size")?;
         if rest.len() != size || rest.contains('\u{fffd}') {
-            // 長度對不上＝讀到一半被改或有非 UTF-8 位元組（lossy 解碼後會變長）。
             return Err("file read failed or not UTF-8".into());
         }
         return Ok(ReadReply::File(rest.to_string()));
@@ -422,7 +418,6 @@ mod tests {
         for bad in ["../x", "src/../../x", "/workspace/../etc/passwd", "/Users/u/proj/../other/x", "/etc/passwd", "/Users/u/proj2/x", "/Users/u", "~/other", "", "a\0b"] {
             assert!(resolve_path(ROOT, bad).is_err(), "{bad:?} must be rejected");
         }
-        // 專案目錄自己在 home 底下的 `~` 寫法
         assert_eq!(resolve_path("~/proj", "~/proj/a").unwrap(), "a");
         assert!(resolve_path("~/proj", "~/proj2/a").is_err());
     }
@@ -451,10 +446,8 @@ mod tests {
         let m = "__AM_API_EXIT_X__";
         assert_eq!(parse_bash_reply(&format!("hello\n\n{m}0\n"), m, 100).unwrap(), ("hello\n".into(), 0));
         assert_eq!(parse_bash_reply(&format!("\n{m}7\n"), m, 100).unwrap(), ("".into(), 7));
-        // 腳本補的那個換行要被吃掉，輸出本身的換行保留
         assert_eq!(parse_bash_reply(&format!("a\nb\n\n{m}1\n"), m, 100).unwrap(), ("a\nb\n".into(), 1));
         assert_eq!(parse_bash_reply(&format!("a\n{m}1\n"), m, 100).unwrap(), ("a".into(), 1));
-        // 使用者輸出裡出現 marker 字樣：只認最後一個
         assert_eq!(parse_bash_reply(&format!("{m}9\nx\n{m}0\n"), m, 100).unwrap().1, 0);
         assert!(parse_bash_reply("no marker", m, 100).is_err());
         assert!(parse_bash_reply(&format!("x\n{m}abc\n"), m, 100).is_err());
@@ -493,13 +486,10 @@ mod tests {
         assert!(out.contains("my proj") && out.contains("err"), "{out}");
         assert!(proj.join("made").exists());
         assert_eq!(go("echo before; exit 3", 4096), ("before\n".into(), 3));
-        // 讀 stdin 的指令不能吃掉後面的腳本
         assert_eq!(go("cat; echo after", 4096), ("after\n".into(), 0));
-        // 輸出太大：被截斷，但 exit code 還在
         let (out, code) = go("yes x | head -c 100000; exit 5", 50);
         assert_eq!(code, 5);
         assert!(out.contains("[output truncated at 50 bytes]"), "{out}");
-        // 專案目錄不存在：97
         let missing = parse_bash_reply(&run_script(&bash_script("/no/such/dir-am", "echo hi", m, 100)), m, 100).unwrap();
         assert_eq!(missing.1, 97);
         assert!(!missing.0.contains("hi"));
@@ -521,11 +511,9 @@ mod tests {
         assert!(read("bin").is_err());
         let ReadReply::Dir(names) = read("").unwrap() else { panic!() };
         assert_eq!(render_dir(names).unwrap(), "bin\nf.txt\nsub");
-        // create：不覆蓋既有檔、父目錄要存在
         let write = |script: String, data: &str| {
             let mut child = Command::new("/bin/sh").arg("-c").arg(&script).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
             use std::io::Write;
-            // 拒絕的腳本（檔已存在、父目錄不在）不讀 stdin 就先退出，寫入可能撞 EPIPE：那是預期的，結果看 stdout。
             let _ = child.stdin.take().unwrap().write_all(data.as_bytes());
             parse_write_reply(&String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout))
         };
@@ -534,7 +522,6 @@ mod tests {
         assert!(write(create_script(root, "f.txt"), "clobber").is_err());
         assert_eq!(std::fs::read_to_string(proj.join("f.txt")).unwrap(), "one\ntwo\n");
         assert!(write(create_script(root, "no/dir/x"), "x").is_err());
-        // 寫回：只收既有檔
         assert!(write(replace_script(root, "f.txt"), "three\n").is_ok());
         assert_eq!(std::fs::read_to_string(proj.join("f.txt")).unwrap(), "three\n");
         assert!(write(replace_script(root, "ghost"), "x").is_err());

@@ -14,7 +14,6 @@ async fn concurrent_uploads_are_capped_and_the_slot_is_freed_when_one_goes_away(
             bot.id
         )
     };
-    // 占滿名額：每條連線送出標頭與一小段 body，之後不再送（慢速上傳）。
     let mut held = Vec::new();
     for _ in 0..super::UPLOAD_CONCURRENCY {
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -30,7 +29,6 @@ async fn concurrent_uploads_are_capped_and_the_slot_is_freed_when_one_goes_away(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut out)).await;
         String::from_utf8_lossy(&out).into_owned()
     };
-    // 名額是在請求進來時才占的：等到伺服器都處理過那幾條。
     let mut refused = String::new();
     for _ in 0..100 {
         refused = try_upload().await;
@@ -41,7 +39,6 @@ async fn concurrent_uploads_are_capped_and_the_slot_is_freed_when_one_goes_away(
     }
     assert!(refused.starts_with("HTTP/1.1 429"), "名額滿了要 429：{refused}");
     assert!(refused.to_ascii_lowercase().contains("retry-after"), "{refused}");
-    // 一條慢速連線斷掉，名額就回來。
     drop(held.pop());
     let mut ok = String::new();
     for _ in 0..100 {

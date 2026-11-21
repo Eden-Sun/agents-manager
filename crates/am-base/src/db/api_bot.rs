@@ -44,7 +44,6 @@ impl Checkpoint {
             )),
             "unsupported checkpoint field"
         );
-        // 版本標籤（v2）：`{"v":2,"provider":"<id>"}` 兩個一起出現；都沒有＝舊格式（一律當 Claude 讀）。
         let tagged = match (object.get("v"), object.get("provider")) {
             (None, None) => true,
             (Some(v), Some(Value::String(p))) => {
@@ -382,7 +381,6 @@ pub async fn reserve_scoped(
             .bind(scope.provider)
             .fetch_one(&mut *tx)
             .await?;
-    // max_per_hour <= 0＝不限（使用者發起的回合、或設定為 0）。
     if max_per_hour > 0 && count >= max_per_hour {
         return Err(anyhow::Error::new(ReserveRefused::HourlyLimit));
     }
@@ -402,7 +400,6 @@ pub async fn reserve_scoped(
 /// 接 8 個以上的 key 字元就算。寧可多擋：帳務資料裡本來就不該有任何字串形的 key。
 fn looks_like_api_key(text: &str) -> bool {
     text.match_indices("sk-").any(|(i, _)| {
-        // `risk-assessment-notes` 這種單字中間的 `sk-` 不算：前面必須是字串開頭或非英數字元。
         let boundary = text[..i].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
         boundary && text[i + 3..].chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).count() >= 8
     })
@@ -668,8 +665,6 @@ pub async fn rebind(
         "stale handover fence"
     );
     let mut checkpoint = Checkpoint::new(&serde_json::from_str(&row.checkpoint_json)?)?;
-    // 舊 owner turn 已是 failed 且 receipt 已 applied：沒存下回應的模型呼叫（api_pending）視為結算，交接時一併清掉旗標，
-    // 之後的 reserve／adapter cursor 都從「沒有未結算」開始。attempt 列照舊維持 `unknown`＋預留額。
     let owner_failed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN api_bot_join_receipts j ON j.turn_id=t.id AND j.session_id=? AND j.bot_id=? AND j.run_id=t.run_id AND j.state='applied' AND j.outcome='failed' WHERE t.id=? AND t.run_id=? AND t.status='failed')")
         .bind(old.session).bind(old.bot).bind(old.turn).bind(old.run).fetch_one(&mut *tx).await?;
     ensure!(
@@ -854,7 +849,6 @@ pub async fn stuck_claude_api_bots_in_db(
 
     let mut stuck = Vec::new();
     for (bot_id, name) in bots {
-        // 1. Reserved timeout
         let has_stalled_reserved: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved' AND created_at < ?)"
         ).bind(&bot_id).bind(reserved_cutoff).fetch_one(pool).await.unwrap_or(false);
@@ -863,7 +857,6 @@ pub async fn stuck_claude_api_bots_in_db(
             continue;
         }
 
-        // 2. Checkpoint pending
         let session: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT checkpoint_json, owner_turn_id FROM api_bot_sessions WHERE bot_id=? AND retired_at IS NULL ORDER BY updated_at DESC LIMIT 1"
         ).bind(&bot_id).fetch_optional(pool).await.unwrap_or(None);
@@ -886,7 +879,6 @@ pub async fn stuck_claude_api_bots_in_db(
                         continue;
                     }
 
-                    // 3. Stale unknown attempt while checkpoint is api_pending
                     let has_stale_unknown: bool = sqlx::query_scalar(
                         "SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='unknown' AND COALESCE(finished_at, created_at) < ?)"
                     ).bind(&bot_id).bind(stale_unknown_cutoff).fetch_one(pool).await.unwrap_or(false);
@@ -1005,7 +997,6 @@ mod tests {
             "opaque-original"
         );
         assert!(Checkpoint::new(&json!({"key_file":"should-not-persist"})).is_err());
-        // 版本標籤：v 與 provider 要一起出現、v 只收 2、provider 是短的小寫識別字；沒有標籤的舊格式照收。
         let base = json!({"messages":[],"responses":[],"api_pending":false,"tool_pending":null,"completed_tool_ids":[]});
         let with = |extra: Value| {
             let mut v = base.clone();
@@ -1514,8 +1505,6 @@ mod tests {
         assert_eq!(rows_after.len(), 0);
     }
 
-    // ───────────── openai-api 切片 C：provider 隔離帳本 ─────────────
-
     fn fence_b() -> Fence<'static> {
         Fence { session: "sb", bot: "b", run: "rb", turn: "tb1", generation: 1, revision: 0 }
     }
@@ -1536,11 +1525,9 @@ mod tests {
         let pool = pool().await;
         let f = fence();
         create(&pool, &f, &checkpoint(false)).await.unwrap();
-        // 舊呼叫路徑（`reserve`）＝anthropic，沒有 tier。
         reserve(&pool, &f, &attempt_of("old-path", 100), &checkpoint(true), 1000, 0).await.unwrap();
         let row: (String, Option<String>) = sqlx::query_as("SELECT provider, service_tier FROM api_bot_attempts WHERE id='old-path'").fetch_one(&pool).await.unwrap();
         assert_eq!(row, ("anthropic".into(), None));
-        // OpenAI 路徑寫 openai ＋ tier。
         let f1 = Fence { revision: 1, ..f.clone() };
         let rec = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(1) };
         let rev = record(&pool, &f1, "old-path", &rec, &checkpoint(false)).await.unwrap();
@@ -1548,7 +1535,6 @@ mod tests {
         reserve_scoped(&pool, &f2, &Attempt { ordinal: 1, ..attempt_of("oa", 100) }, &checkpoint(true), 1000, 0, &openai_scope(None)).await.unwrap();
         let row: (String, Option<String>) = sqlx::query_as("SELECT provider, service_tier FROM api_bot_attempts WHERE id='oa'").fetch_one(&pool).await.unwrap();
         assert_eq!(row, ("openai".into(), Some("standard".into())));
-        // 不可變、只收已知 provider。
         assert!(sqlx::query("UPDATE api_bot_attempts SET provider='openai' WHERE id='old-path'").execute(&pool).await.is_err());
         assert!(sqlx::query("UPDATE api_bot_attempts SET provider='anthropic' WHERE id='oa'").execute(&pool).await.is_err());
         assert!(sqlx::query("UPDATE api_bot_attempts SET provider='mystery' WHERE id='oa'").execute(&pool).await.is_err());
@@ -1563,7 +1549,6 @@ mod tests {
         let f = fence();
         let old_checkpoint = checkpoint(false);
         create(&pool, &f, &old_checkpoint).await.unwrap();
-        // 退回舊 schema（拿掉這一片加的東西）。
         for sql in [
             "DROP TRIGGER api_bot_attempts_provider_immutable",
             "DROP INDEX api_bot_attempts_provider_created",
@@ -1573,7 +1558,6 @@ mod tests {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
         let now = super::super::now();
-        // recorded 42、reserved 90（已脫離 bot）、unknown（沒估價→用預留 340）、failed（不算）、另一顆 bot 的 recorded 7。
         for (id, bot, state, reserved, estimated, ord) in [
             ("rec", Some("a"), "recorded", 300_i64, Some(42_i64), 0_i64),
             ("det", None, "reserved", 90, None, 1),
@@ -1588,7 +1572,6 @@ mod tests {
             sqlx::query("INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,?,?,?,1,?,'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard',?,?,?,'fixture-v1',?)")
                 .bind(id).bind(session).bind(bot).bind(run).bind(turn).bind(ord).bind(state).bind(reserved).bind(estimated).bind(&now).execute(&pool).await.unwrap();
         }
-        // 舊的（沒有 provider 條件）整張表加總＝升級前 Claude 的總花費。
         let before: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(CASE WHEN state='recorded' THEN COALESCE(estimated_microusd,0) WHEN state='reserved' THEN reserved_microusd
                                       WHEN state='unknown' THEN COALESCE(estimated_microusd,reserved_microusd) ELSE 0 END),0)
@@ -1607,7 +1590,6 @@ mod tests {
         assert_eq!(spent(&pool, PROVIDER_OPENAI).await, 0);
         let checkpoints_after: Vec<(String, String)> = sqlx::query_as("SELECT id, checkpoint_json FROM api_bot_sessions ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(checkpoints_after, checkpoints_before, "舊 checkpoint 一個位元組都沒動");
-        // 升級後的 trigger 仍然生效。
         assert!(sqlx::query("UPDATE api_bot_attempts SET provider='openai' WHERE id='rec'").execute(&pool).await.is_err());
     }
 
@@ -1616,22 +1598,18 @@ mod tests {
         let pool = pool().await;
         let fa = fence();
         create(&pool, &fa, &checkpoint(false)).await.unwrap();
-        // Claude 已經花了 900。
         reserve(&pool, &fa, &attempt_of("claude-1", 900), &checkpoint(true), 100_000, 1).await.unwrap();
         let cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
-        // OpenAI 的額度是自己的：Claude 的 900 不算，每小時 1 筆的限制也只數 openai（Claude 那筆不佔）。
         let fb = fence_b();
         create(&pool, &fb, &checkpoint(false)).await.unwrap();
         reserve_scoped(&pool, &fb, &attempt_of("openai-1", 600), &checkpoint(true), 100_000, 1, &openai_scope(Some(cap))).await.unwrap();
         assert_eq!(spent(&pool, PROVIDER_ANTHROPIC).await, 900);
         assert_eq!(spent(&pool, PROVIDER_OPENAI).await, 600, "OpenAI 的預留不算進 Claude 的總花費");
-        // OpenAI 這一家再要 500 會超過它自己的 1000，被擋、不留列。
         let rec = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(600) };
         let rev = record(&pool, &Fence { revision: 1, ..fb.clone() }, "openai-1", &rec, &checkpoint(false)).await.unwrap();
         let err = reserve_scoped(&pool, &Fence { revision: rev, ..fb.clone() }, &Attempt { ordinal: 1, ..attempt_of("openai-2", 500) }, &checkpoint(true), 100_000, 0, &openai_scope(Some(cap))).await.unwrap_err();
         assert_eq!(err.downcast_ref::<TotalCapRefused>(), Some(&TotalCapRefused { cap_microusd: 1_000, spent_microusd: 600 }));
         assert_eq!(count(&pool).await, 2);
-        // Claude 的額度同樣不受 OpenAI 的 600 影響：它自己的 900 + 100 = 1000 剛好還能預留。
         let rec_a = Receipt { state: "recorded", actual_speed: None, usage: None, estimated_microusd: Some(900) };
         let rev_a = record(&pool, &Fence { revision: 1, ..fa.clone() }, "claude-1", &rec_a, &checkpoint(false)).await.unwrap();
         let claude_cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
@@ -1657,7 +1635,6 @@ mod tests {
             let (fa, fb) = (fence(), fence_b());
             create(&pool, &fa, &checkpoint(false)).await.unwrap();
             create(&pool, &fb, &checkpoint(false)).await.unwrap();
-            // 上限 1000，各要 600：只能有一筆。
             let cap = TotalCap { since: EPOCH, cap_microusd: 1_000 };
             let (cp_a, cp_b) = (checkpoint(true), checkpoint(true));
             let (at_a, at_b) = (attempt_of("race-a", 600), attempt_of("race-b", 600));
@@ -1680,10 +1657,8 @@ mod tests {
         let pool = pool().await;
         let f = fence();
         create(&pool, &f, &checkpoint(false)).await.unwrap();
-        // 每回合上限 500 < 預留 600：HTTP 前就擋（TurnBudget），不留列。
         let e = reserve_scoped(&pool, &f, &attempt_of("big", 600), &checkpoint(true), 500, 0, &openai_scope(None)).await.unwrap_err();
         assert!(matches!(e.downcast_ref::<ReserveRefused>(), Some(ReserveRefused::TurnBudget)));
-        // 總上限 100 < 預留 600：同樣擋。
         let e = reserve_scoped(&pool, &f, &attempt_of("big", 600), &checkpoint(true), 5_000, 0, &openai_scope(Some(TotalCap { since: EPOCH, cap_microusd: 100 }))).await.unwrap_err();
         assert!(e.downcast_ref::<TotalCapRefused>().is_some());
         assert_eq!(count(&pool).await, 0);

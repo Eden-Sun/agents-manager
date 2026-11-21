@@ -295,7 +295,6 @@ impl Manifest {
         }
         let mut mac_only_plugins = Vec::new();
         for p in raw.claude.plugins {
-            // 目前只有 Darwin 專用一種；Linux 專用之類要先在探測／evaluate 裡支援。
             if p.os != "darwin" {
                 return Err(format!("claude.plugins: os must be `darwin`, got `{}`", p.os));
             }
@@ -313,7 +312,6 @@ impl Manifest {
                 return Err(format!("codex.keys: `{}` is a model/effort/service_tier setting — the baseline never touches those", k.key));
             }
             let check = match k.check.as_str() {
-                // 原本就是整檔 grep `^\s*<key>\s*=`：只收單段鍵，點號鍵用 `true`。
                 "present" if segs.len() == 1 => CodexCheck::Present,
                 "true" if segs.len() == 2 => CodexCheck::True,
                 c => return Err(format!("codex.keys: `{}` with check `{c}` (present needs a plain key, true needs `table.key`)", k.key)),
@@ -323,7 +321,6 @@ impl Manifest {
             }
             if let Some(v) = k.value {
                 let v = value(v, "codex.keys")?;
-                // `true` 檢查的鍵只能補成 true，補別的值下一次偵測照樣算缺。
                 if check == CodexCheck::True && v != serde_json::Value::Bool(true) {
                     return Err(format!("codex.keys: `{}` is checked for `true`, so its value must be true", k.key));
                 }
@@ -336,7 +333,6 @@ impl Manifest {
         }
         let grok_files = files(raw.grok.files, "grok.files")?;
         let herdr_files = files(raw.herdr.files, "herdr.files")?;
-        // 探測靠 jq 查 settings.json 的鍵，鍵的檢查又以 settings.json 在不在為前提；codex 的鍵同理。
         if !claude_keys.is_empty() {
             if !tools.iter().any(|t| t.name == "jq") {
                 return Err("claude.keys needs `jq` in tools (the probe reads settings.json with it)".into());
@@ -566,8 +562,6 @@ mod tests {
         assert!(made.is_empty(), "the script ran a declared value as code: {made:?}");
     }
 
-    // ───────── 腳本等價：搬家前的腳本（凍結在這裡）與宣告檔產生的腳本，同一個假 HOME 跑出來逐 byte 相同 ─────────
-
     /// 搬家前 `host_baseline.rs` 的 `BASELINE_SH`，一字不改。
     #[rustfmt::skip]
     const OLD_BASELINE_SH: &str = r#"
@@ -756,12 +750,10 @@ printf 'AM_BL end\n'
         let mut seen = std::collections::BTreeSet::new();
         let mut runs = 0;
         for (i, (settings, codex)) in SETTINGS_VARIANTS.iter().zip(CODEX_VARIANTS.iter().cycle()).chain(
-            // codex 的每一種都要跑到（上面 zip 只走到 settings 的長度）
             CODEX_VARIANTS.iter().map(|c| (&SETTINGS_VARIANTS[0], c)).collect::<Vec<_>>(),
         ).enumerate() {
             let scratch = crate::hosts::remote_script_support::Scratch::new();
             let h = scratch.0.join("home");
-            // 多個身份：default、cc2（settings 在不同變體）、alias 指到 glob 外的目錄、CLAUDE_CONFIG_DIR 指到別處。
             write(&h.join(".claude/settings.json"), settings);
             write(&h.join(".claude/statusline-command.sh"), "");
             if i % 2 == 0 {
@@ -797,16 +789,12 @@ printf 'AM_BL end\n'
             }
         }
         assert!(runs >= 40, "{runs}");
-        // 三個改寫（通用 jq、bl_toml_true、bl_toml_has）每種結果都要真的跑到，不然「相同」可能只是都沒走到。
         let mut want = vec![
             "codex-key approval_policy 1",
             "codex-key approval_policy 0",
             "codex-key features.hooks 1",
             "codex-key features.hooks 0",
         ];
-        // 「沒有 jq」那個分支（印 `?`）要在探測 jq 的 login shell 真的找不到 jq 的環境才走得到：macOS 的 login shell 會用 path_helper／
-        // Homebrew 把 PATH 補回來，限縮過的 PATH 擋不住它，那個分支在那種環境不可能出現（#1964：夜間 macos-latest）。
-        // 先用跟腳本相同的探測確認；找得到 jq 就不期待 `?`，新舊腳本逐 byte 相同的斷言（上面）照舊對每個變體成立。
         let probe_scratch = crate::hosts::remote_script_support::Scratch::new();
         let nojq_login_finds_jq = std::process::Command::new("/bin/sh")
             .arg("-c")

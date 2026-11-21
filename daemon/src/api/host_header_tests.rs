@@ -22,7 +22,6 @@ fn loopback_hosts_and_hostless_clients_still_pass() {
     for host in ["127.0.0.1:7788", "127.0.0.1", "localhost:5173", "localhost", "[::1]:7788", "[::1]", "LOCALHOST:7788"] {
         assert!(origin_is_local(&h(&[("host", host)]), 7788, false), "{host}");
     }
-    // 沒有 Host 的不是瀏覽器（HTTP/1.0、內部呼叫）：照舊放行。
     assert!(origin_is_local(&h(&[]), 7788, false));
     assert!(origin_is_local(&h(&[("origin", "http://localhost:5173"), ("host", "127.0.0.1:7788")]), 7788, false));
 }
@@ -44,7 +43,6 @@ fn host_shapes_are_matched_exactly_not_by_prefix_or_suffix() {
     ] {
         assert!(!origin_is_local(&h(&[("host", bad)]), 7788, false), "{bad:?}");
     }
-    // Origin 也是整段比對：帶路徑、帳密、別的 scheme、`null` 都不收。
     for bad in ["http://localhost@evil.example", "http://localhost.evil.example", "http://localhost/x", "ftp://localhost", "null", "file://", "http://127.0.0.1:7788.evil.example"] {
         assert!(!origin_is_local(&h(&[("host", "127.0.0.1:7788"), ("origin", bad)]), 7788, false), "origin {bad:?}");
     }

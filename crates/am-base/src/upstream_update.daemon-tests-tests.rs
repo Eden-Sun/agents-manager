@@ -19,8 +19,6 @@
         assert_eq!(claude_pending_from(&with_source).as_deref(), Some("2.1.281"));
     }
 
-    // ── 純函式 ──
-
     /// 使用者 2026-09-28 那一刻：npm 2.1.283、磁碟 2.1.281。
     #[test]
     fn npm_newer_than_disk_is_an_update() {
@@ -47,7 +45,6 @@
     fn same_or_older_upstream_is_not_an_update() {
         let same = build_status("claude", &ok("2.1.283"), &[disk("local", "2.1.283 (Claude Code)")], None);
         assert!(!same.has_update && !should_notify(&same, None));
-        // 磁碟比 npm 新（npm 還沒同步、或裝了別的通道）：不叫人去裝。
         let older = build_status("claude", &ok("2.1.281"), &[disk("local", "2.1.283 (Claude Code)")], None);
         assert!(!older.has_update && !should_notify(&older, None));
     }
@@ -165,8 +162,6 @@
         assert!(error_text(&err).contains("GitHub releases"), "{}", error_text(&err));
     }
 
-    // ── 整輪：假的上游與磁碟 ──
-
     struct Fake {
         upstream: StdMutex<HashMap<String, Result<String, String>>>,
         disk: StdMutex<HashMap<String, String>>,
@@ -175,7 +170,6 @@
 
     impl Fake {
         fn new(claude: Result<&str, &str>, codex: Result<&str, &str>, claude_disk: &str, codex_disk: &str) -> Self {
-            // herdr 預設跟上游同版（沒有更新），要測 herdr 的用 set_upstream／set_disk 改。
             let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3")), ("grok", Ok("1.0.46")), ("agy", Ok("1.4.5"))]
                 .into_iter()
                 .map(|(k, r)| (k.to_string(), r.map(str::to_string).map_err(str::to_string)))
@@ -230,18 +224,14 @@
         assert_eq!(c["notify"], "update");
         assert!(c["text"].as_str().unwrap().contains("2.1.283"));
         assert_eq!(c["notified_version"], "2.1.283");
-        // codex 同版：推快照但不通知、沒有要顯示的字。
         assert!(of(&evs, "codex").unwrap()["notify"].is_null());
         assert!(of(&evs, "codex").unwrap()["text"].is_null());
 
-        // 同一版第二輪：什麼都不推（快照沒變、已通知過）。
         assert!(tick(&e.app, &w, &src, &last, &[]).await.is_empty(), "同一版不重複通知");
-        // daemon 重啟（新的 Watch）也不重報：去重記在檔案。
         let w2 = Watch::default();
         let evs = tick(&e.app, &w2, &src, &last, &[]).await;
         assert!(evs.iter().all(|e| e["notify"].is_null()), "重啟後同一版不重報：{evs:?}");
 
-        // claude 自己下載好了：快照改成沒有更新，推一次（web 收掉），不通知。
         src.set_disk("claude", "2.1.283 (Claude Code)");
         let evs = tick(&e.app, &w2, &src, &last, &[]).await;
         let c = of(&evs, "claude").unwrap();
@@ -250,13 +240,10 @@
         assert_eq!(w2.snapshot().await.len(), 5);
     }
 
-    // ── grok（issue #761）：正式版是 x.ai 放在 storage.googleapis.com 的 `cli/stable` 純文字，磁碟版本是 `grok --version` ──
-
     #[test]
     fn grok_latest_reads_the_stable_pointer_and_refuses_anything_else() {
         assert_eq!(grok_latest("1.0.47\n").unwrap(), "1.0.47");
         assert_eq!(grok_latest("  v1.0.47  ").unwrap(), "1.0.47");
-        // 預發布、HTML 錯誤頁、空內容都不能被當成版本（也不能默默變成「沒有新版」）。
         for bad in ["", "1.0.47-alpha.2", "<!doctype html><title>404</title>", "latest", "1.0.47+build5"] {
             assert!(grok_latest(bad).is_err(), "{bad:?}");
         }
@@ -297,8 +284,6 @@
         assert!(g["notify"].is_null(), "裝好了只收掉提示，不再通知");
     }
 
-    // ── agy（issue #1908）：官方 manifest 的版本；升級走 `POST /api/hosts/{name}/agy/install`，這裡只比對與通知 ──
-
     #[test]
     fn an_agy_host_behind_the_manifest_is_an_update_and_an_equal_one_is_latest() {
         let s = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("mac_builder", "1.4.2")], None);
@@ -309,7 +294,6 @@
         assert!(t.contains("更新檢查") && !t.contains("agy update") && !t.contains("agy install"), "只指向設定頁的更新，不叫人跑官方指令：{t}");
         let latest = build_status("agy", &ok("1.4.5"), &[disk("local", "1.4.5"), disk("mac_builder", "1.4.5")], None);
         assert!(!latest.has_update && !should_notify(&latest, None), "2026-10-23 兩台都在 1.4.5：已是最新");
-        // 磁碟比 manifest 新（別的平台還沒發）：不叫人降版。
         let newer = build_status("agy", &ok("1.4.4"), &[disk("local", "1.4.5")], None);
         assert!(!newer.has_update);
         let err = build_status("agy", &Err("官方 manifest 回 503".into()), &[disk("local", "1.4.2")], None);
@@ -360,7 +344,6 @@
         let c = of(&evs, "codex").unwrap();
         assert_eq!(c["notify"], "update");
         assert!(c["text"].as_str().unwrap().contains("需先安裝"));
-        // 上游又出了下一版：TTL 內用快取，不會馬上看到——清掉快取模擬過期。
         src.set_upstream("codex", Ok("0.158.0"));
         w.upstream.lock().await.clear();
         let evs = tick(&e.app, &w, &src, &last, &[]).await;
@@ -411,7 +394,6 @@
         assert_eq!(c["notify"], "error");
         assert!(c["text"].as_str().unwrap().contains("dns error"));
         assert!(c["latest_version"].is_null() && c["has_update"] == false);
-        // 下一輪的嘗試時間一定不同（毫秒精度）：時間戳變了不算快照變了。
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(of(&tick(&e.app, &w, &src, &last, &[]).await, "claude").is_none(), "持續抓不到不重複推");
         src.set_upstream("claude", Ok("2.1.283"));
@@ -445,7 +427,6 @@
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Ok("0.158.0"), "2.1.281", "codex-cli 0.157.0");
 
-        // claude 開自動更新，codex 沒開
         let auto_kinds = vec!["claude".to_string()];
         let evs = tick(&e.app, &w, &src, &last, &auto_kinds).await;
 

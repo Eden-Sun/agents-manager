@@ -59,7 +59,6 @@ pub struct SchedulerKick {
 
 impl SchedulerKick {
     pub fn for_this_host() -> Self {
-        // SAFETY: getuid 沒有前置條件，也不會失敗。
         let uid = unsafe { libc::getuid() };
         if cfg!(target_os = "linux") {
             Self::systemd(uid, std::env::var_os("XDG_RUNTIME_DIR").is_some())
@@ -91,7 +90,6 @@ impl SchedulerKick {
 impl KickLauncher for SchedulerKick {
     fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            // kill_on_drop：逾時把 future 丟掉時子行程一起被結束，不留下沒人等的 systemctl／launchctl。
             let mut cmd = tokio::process::Command::new(&self.program);
             cmd.args(&self.args).envs(self.env.iter().map(|(k, v)| (k, v))).kill_on_drop(true);
             let out = match tokio::time::timeout(self.timeout, cmd.output()).await {
@@ -352,13 +350,11 @@ pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Em
             .await
             .ok_or_else(|| LcError::conflict("unknown_commit", json!({"sha": s, "message": format!("{s} 不是這個 repo 的 commit")})))?,
     };
-    // 只部署 main 上的東西：`origin/main` 的祖先（或本身）。分支上的 commit 沒經過 CI 與 review。
     let on_main = git(&ctx.repo, &["merge-base", "--is-ancestor", &target, &head]).await.map_err(LcError::Upstream)?;
     if !on_main.status.success() {
         return Err(LcError::conflict("target_not_on_main", json!({"sha": target, "origin_main": head,
             "message": "要部署的 commit 不在 origin/main 上"})));
     }
-    // 舊分頁可能在 daemon 更新後才按下確認。線上版本必須是 target 的祖先或同一顆，才不會降版。
     let live_is_ancestor = git(&ctx.repo, &["merge-base", "--is-ancestor", &live_full, &target]).await.map_err(LcError::Upstream)?;
     match live_is_ancestor.status.code() {
         Some(0) => {}
@@ -516,7 +512,6 @@ mod tests {
         assert_eq!(v["target_sha"], f.head);
         let subjects: Vec<&str> = v["commits"].as_array().unwrap().iter().map(|c| c["subject"].as_str().unwrap()).collect();
         assert_eq!(subjects, ["docs two", "fix the daemon", "docs one"]);
-        // docs-only 的落後不算要部署（kick 同一條規則）。
         let v = behind(&f.ctx.repo, &f.code).await.unwrap();
         assert_eq!(v["behind"], 1);
         assert_eq!(v["code_changed"], false);
@@ -536,7 +531,6 @@ mod tests {
         let req: Value = serde_json::from_str(&std::fs::read_to_string(f.ctx.agm_dir.join(REQUEST_FILE)).unwrap()).unwrap();
         assert_eq!(req["sha"], f.code);
 
-        // 第二下：請求還沒被 kick 吃掉＝有部署在跑，409，不再 kick。
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "deploy_in_progress" && v["running"]["kind"] == "requested"), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 1);
@@ -584,7 +578,6 @@ mod tests {
     #[tokio::test]
     async fn start_refuses_a_target_older_than_the_live_binary() {
         let mut f = fixture().await;
-        // An old page confirms `code` after a newer code commit is already live.
         let newer = commit(&f.ctx.repo, "daemon/src/b.rs", "newer live");
         run(&f.ctx.repo, &["update-ref", "refs/remotes/origin/main", &newer]);
         f.ctx.live_sha = newer[..8].to_string();
@@ -605,7 +598,6 @@ mod tests {
     impl KickLauncher for SlowKick {
         fn kick<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
-                // 等到 ticker 看見 10 次為止（最多一萬圈）。只讓出執行緒、不靠計時器：ticker 若被擋住，這段什麼都看不到＝紅。
                 let before = self.ticks.load(Ordering::SeqCst);
                 for _ in 0..10_000 {
                     if self.ticks.load(Ordering::SeqCst) - before >= 10 {
@@ -658,7 +650,6 @@ mod tests {
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Unavailable(v) if v["reason"] == "kick_start_failed"), "{e:?}");
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists(), "留著的話之後每一下都 409");
-        // 收回之後可以再按。
         assert!(in_progress(&f.env.app, &f.ctx.agm_dir).await.unwrap().is_none());
     }
 
@@ -708,8 +699,6 @@ mod tests {
         let dir = tmp();
         let (k, log) = fake_systemctl(&dir.0, 0, "");
         k.kick().await.unwrap();
-        // --no-block：oneshot 的 start 預設會等 kick 整輪跑完，UI 那一下會卡住好幾分鐘。
-        // 沒有 XDG_RUNTIME_DIR 時要補 /run/user/<uid>，否則 systemctl --user 連不到 user bus。
         assert_eq!(
             std::fs::read_to_string(&log).unwrap(),
             "--user start --no-block com.agm.daemon-update.service\nXDG_RUNTIME_DIR=/run/user/4242\n"
@@ -722,7 +711,6 @@ mod tests {
         let (mut k, log) = fake_systemctl(&dir.0, 5, "Unit com.agm.daemon-update.service not found.");
         k.env = SchedulerKick::systemd(4242, true).env;
         assert_eq!(k.kick().await.unwrap_err(), "Unit com.agm.daemon-update.service not found.");
-        // 已經有值就不蓋：假 systemctl 看到的是繼承下來的原值（本機沒設就是空的，遠端編譯主機上有）。
         let inherited = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
         assert!(std::fs::read_to_string(&log).unwrap().ends_with(&format!("XDG_RUNTIME_DIR={inherited}\n")));
         let (k, _) = fake_systemctl(&dir.0, 5, "");
@@ -732,7 +720,6 @@ mod tests {
 
     #[test]
     fn each_host_kicks_its_own_scheduler() {
-        // 只看組出來的指令，不真的執行 launchctl（destructive-canary 的規則）。
         let mac = SchedulerKick::launchd(501);
         assert_eq!((mac.program.as_str(), mac.args.as_slice()), ("launchctl", ["kickstart".to_string(), "gui/501/com.agm.daemon-update".into()].as_slice()));
         assert!(mac.env.is_empty());
@@ -742,10 +729,8 @@ mod tests {
 
     #[test]
     fn only_unmarked_ui_token_callers_can_press_the_button() {
-        // #556 裁示：目前持有共用 UI token 就視為使用者，接受 LAN／本機行程風險。
         assert!(refuse_bot_caller(&HeaderMap::new()).is_ok());
 
-        // 只帶半套、帶錯 token 或完整宣告 bot 身份，都不能降級成使用者。
         let cases: &[&[(&str, &[u8])]] = &[
             &[("X-AM-Bot-Id", b"b1")],
             &[("X-AM-Bot-Token", b"not-the-token")],

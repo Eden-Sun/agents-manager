@@ -47,7 +47,6 @@ pub fn parse(screen: &str) -> Switch {
             after_slash = matches!(cmd, "/model" | "/effort");
             continue;
         }
-        // macOS 的字頭是 `⏺`，Linux 是 `●`（2.1.287 真畫面）。
         if line.starts_with(['⏺', '●']) {
             after_slash = false;
             continue;
@@ -69,8 +68,6 @@ pub fn parse(screen: &str) -> Switch {
                 s.effort = Some(level.to_ascii_lowercase());
             }
         } else if matches!(rest.trim_end(), "Effort level set to auto" | "Effort level set to auto (this session only)") {
-            // `/effort auto|unset`：回到模型預設。只認這兩句整句；`CLAUDE_CODE_EFFORT_LEVEL` 蓋住的變體
-            // （`Effort set to auto for this session, but …`）實際強度由環境決定，不猜、維持原值。
             s.effort = Some(CLI_DEFAULT_EFFORT.into());
         }
     }
@@ -137,7 +134,6 @@ pub async fn adopt_statusline_model(app: &(impl crate::capabilities::BotStatusEm
             return;
         }
     }
-    // CAS：只在這個 run 還活著、值真的不一樣時寫；同時有別的寫入者（`/model`、live apply）時以資料庫現況為準。
     let wrote = sqlx::query(
         "UPDATE runs SET runtime_model = ? WHERE id = ? AND state IN ('starting','running') AND COALESCE(runtime_model, '') <> ?",
     )
@@ -162,7 +158,6 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
     if seen == Switch::default() {
         return;
     }
-    // 鎖外那份畫面可能是網頁套用前的確認行。先拿 bot 鎖再重讀，寫進去的才是套用之後的畫面。
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     let Some(client) = app.herdr_for_run(run).await else { return };
@@ -184,27 +179,18 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
             Some(_) => {}
         }
     }
-    // 基準要等寫進去才前進（見下面）：寫失敗時留著舊的，下一輪同一份畫面還會再試（#1735）。
     let baseline = seen.clone();
     let Ok(Some(run)) = db::run(app.db(), &run.id).await else { return };
-    // run 的落差（跟 runtime 比）與 bot 設定的落差（跟 bots.* 比）分開算（#743）：bot 的 UPDATE 失敗時 runtime 已經對了，
-    // 下一輪只剩 bot 落後，仍要補寫，不能因為 runtime 已收斂就當作完成。
-    // 只跟 run 自己記的比，不退回 `bots.*`：child 的模型跟設定一樣、強度不一樣時，以前只寫了 runtime_effort，
-    // runtime_model 留空——網頁認定 runtime 已知、模型卻是空的，畫成「CLI 預設 ⟳」（2026-10-02 使用者：cf-優化 的 nv-opus／nv-fable）。
     let cur_model = run.runtime_model.clone();
     let cur_effort = run.runtime_effort.clone();
     let model = seen.model.clone().filter(|m| cur_model.as_deref() != Some(m.as_str()));
     let effort = seen.effort.clone().filter(|e| cur_effort.as_deref() != Some(e.as_str()));
     let bot_model = seen.model.filter(|m| child && bot.model.as_deref() != Some(m.as_str()));
-    // `default` 不是設定值：具體值 → 明確 default 才把 child 設定清成 NULL（同 codex_live::effort_follow）；
-    // 未知／已是 default／非 child 一律不動。
     let clear_bot_effort = child
         && seen.effort.as_deref() == Some(CLI_DEFAULT_EFFORT)
         && cur_effort.as_deref().is_some_and(|p| p != CLI_DEFAULT_EFFORT);
     let bot_effort = seen.effort.filter(|e| child && e != CLI_DEFAULT_EFFORT && bot.effort.as_deref() != Some(e.as_str()));
     let mut changed = false;
-    // Clear 要排在 runtime 之前：runtime 先收斂成 default，這一步失敗後下輪就看不出「上一輪是具體值」，設定永遠清不掉。
-    // 失敗就整輪不寫 runtime、基準不前進（child_runtime 的契約，#743）；成功但 runtime 寫失敗，下輪的 Clear 是 no-op。
     if clear_bot_effort {
         if let Err(e) = crate::child_runtime::follow_with(app, &bot.id, None, crate::child_runtime::EffortFollow::Clear).await {
             tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not clear the child's effort after /effort auto, retrying next sweep");
@@ -239,7 +225,6 @@ pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabili
         match wrote {
             Ok(_) => {
                 changed = true;
-                // `bot_status` 不帶設定，網頁收到 `bot_changed` 才重抓 bots（不然 runtime 跟設定一樣了還畫著 ⟳）。
                 app.emit("bot_changed", serde_json::json!({"bot_id": bot.id})).await;
             }
             Err(e) => tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not follow the claude runtime switch in bots.model/effort, retrying next sweep"),

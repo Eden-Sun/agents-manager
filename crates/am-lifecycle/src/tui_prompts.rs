@@ -98,8 +98,6 @@ pub fn composer_is_idle(lines: &[&str]) -> bool {
 
 /// claude 輸入框外框的上下線：整行只有 `─`／`━`（可帶 `╭╮╰╯` 角），至少 10 格。
 fn is_composer_rule(line: &str) -> bool {
-    // 輸入框自己的線從第 0 欄開始；輸入框裡的多行文字，續行一律縮排兩格（真畫面 `claude-2.1.281-multiline-draft.ansi`），
-    // 所以文字裡引用的 `────` 不會被當成輸入框的線。
     if line.starts_with(char::is_whitespace) {
         return false;
     }
@@ -217,8 +215,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 /// 開著的問卷在畫面上佔哪幾行：`(問句那一行, 最後一列選項那一行)`，都是 `screen.lines()` 的索引（含頭尾）。
 /// 沒有開著的問卷就是 `None`。[`is_feedback_survey`] 只問有沒有；要把問卷從回覆裡切掉的人要知道位置。
 pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
-    // 原文與壓平後的版本一起留著：兩個 tail 要對齊同一批行——`composer_is_idle` 要看原文
-    // （`❯` 會被 `flatten` 留著，但框線得先去掉），問句與選項看壓平後的。
     let kept: Vec<(usize, &str, String)> = screen
         .lines()
         .enumerate()
@@ -226,9 +222,6 @@ pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
         .filter(|(_, _, f)| !f.is_empty())
         .collect();
     let from = kept.len().saturating_sub(SURVEY_TAIL_LINES);
-    // **不能**套其他偵測的「輸入列空著就不是框」（[`composer_is_idle`]）：2.1.281 的真問卷底下就是一個空的
-    // 輸入列（`claude-2.1.281-feedback-survey.txt`），那道守衛會把真的問卷全部擋掉。分辨引文改看
-    // 問卷正下方是什麼（[`sits_on_empty_composer`]）。
     let raw_tail: Vec<&str> = kept[from..].iter().map(|(_, l, _)| *l).collect();
     let tail: Vec<String> = kept[from..].iter().map(|(_, _, f)| f.clone()).collect();
     let tail = &tail[..];
@@ -242,7 +235,6 @@ pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
             let option_end = tail.len().min(end + SURVEY_OPTION_GAP);
             let mut found = [false; 4];
             let mut last_row = None;
-            // 只採計「看起來就是選項列」的行：散文裡把選項寫進句子中間不算（`is_option_row`）。
             for i in (start..option_end).filter(|&i| is_option_row(&tail[i])) {
                 for (slot, present) in survey_options(&tail[i]).into_iter().enumerate() {
                     found[slot] |= present;
@@ -251,7 +243,6 @@ pub fn feedback_survey_span(screen: &str) -> Option<(usize, usize)> {
             }
             if found.into_iter().filter(|present| *present).count() >= 3 {
                 if let Some(last) = last_row.filter(|&i| sits_on_empty_composer(&raw_tail[i + 1..])) {
-                    // 視窗可能從問句上面幾行就開始：要切的是問句實際開始的那一行（能容下整句問句的最晚起點）。
                     let question_row = (start..end).rev().find(|&j| tail[j..end].join(" ").contains(question)).unwrap_or(start);
                     return Some((kept[from + question_row].0, kept[from + last].0));
                 }
@@ -280,10 +271,6 @@ mod survey_composer_shape_tests {
 /// Claude Code 開場登入選單（`CLAUDE_CONFIG_DIR` 未登入）。herdr 看起來是活的，prompt 卻只打在
 /// 選單上、回合永遠掛著，所以生命週期控制送前先看，中了回 409 `needs_login`。
 pub fn is_login_menu(screen: &str) -> bool {
-    // 標題允許窄 pane 折行（`Select login` / ` method:`），但選項一定要自己成行——句子裡提到
-    // 「select login method」的正文不算（[`norm_line`]）。只看最底 [`MENU_TAIL_LINES`] 行、而且輸入列不能空著：
-    // bot 在回報裡逐行引用這個選單（2026-09-22 triage bot 貼了 2.1.280 的 onboarding 原文），正文在上面、
-    // 底下是空的輸入列，那不是選單（同 [`is_switch_model_dialog`] 2026-09-18 的教訓）。
     let Some(tail_raw) = menu_tail(screen) else { return false };
     let lines: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     flatten(&tail_raw.join("\n")).contains("select login method")
@@ -364,7 +351,7 @@ pub fn screen_has_answerable_prompt(screen: &str) -> bool {
 
 fn screen_has_answerable_prompt_inner(screen: &str) -> bool {
     if screen.trim().is_empty() {
-        return true; // 讀不到內容不等於沒有提示。
+        return true;
     }
     if awaits_menu_choice(screen)
         || permission_prompt(screen).is_some()
@@ -386,7 +373,6 @@ fn screen_has_answerable_prompt_inner(screen: &str) -> bool {
     }
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &raw[raw.len().saturating_sub(ANSWERABLE_TAIL_LINES)..];
-    // 帶游標的編號選項（`❯ 1. Yes`、`› 1. Try new model`）一定是選單，輸入列空著也一樣（問卷的游標選項不在輸入列上）。
     if tail.iter().any(|l| menu_row(l).is_some_and(|(_, cursor)| cursor)) {
         return true;
     }
@@ -394,7 +380,6 @@ fn screen_has_answerable_prompt_inner(screen: &str) -> bool {
         return false;
     }
     tail.iter().any(|l| menu_row(l).is_some() || has_prompt_cue(&norm_line(l)))
-        // codex 的非同步提問在輸入列上方排著 `? N question · shift+← to answer`。
         || tail.iter().any(|l| { let n = norm_line(l); n.contains("to answer") && n.contains("shift+") })
 }
 
@@ -426,7 +411,7 @@ fn is_switch_model_dialog_inner(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail_raw = &raw[raw.len().saturating_sub(DIALOG_TAIL_LINES)..];
     if composer_is_idle(tail_raw) {
-        return false; // 輸入列還空著，不可能有框擋著它（見 [`composer_is_idle`]）。
+        return false;
     }
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     let titled = tail.iter().any(|l| l.starts_with("switch model?") || l.starts_with("change effort level?"));
@@ -555,7 +540,6 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
         return None;
     }
     let last = tail.iter().rposition(|l| menu_row(l).is_some())?;
-    // 模式列是固定 chrome（#788），不佔「選單底下還有幾行」的額度。
     let below: Vec<&&str> = tail[last + 1..].iter().filter(|l| !crate::claude_mode::is_mode_row(l)).collect();
     if below.len() > MENU_BELOW_LINES || below.iter().any(|l| is_agent_output_line(l) && !l.trim_start().starts_with('✻')) {
         return None;
@@ -563,7 +547,6 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
     let (mut want, mut cursors, mut first, mut gap) = (menu_row(tail[last])?.0, 0, last, 0);
     for i in (0..=last).rev() {
         let Some((n, cursor)) = menu_row(tail[i]) else {
-            // 選項之間的說明、折行；撞到對話輸出或夾太多行＝走出選單了。
             gap += 1;
             if is_agent_output_line(tail[i]) || gap > MENU_BELOW_LINES {
                 break;
@@ -592,7 +575,6 @@ pub fn awaits_menu_choice(screen: &str) -> bool {
 }
 
 fn awaits_menu_choice_inner(screen: &str) -> bool {
-    // daemon 接回原 session 的額度警告不是交給使用者的 blocked choice。
     if cold_resume_choice(screen).is_some() {
         return false;
     }
@@ -666,14 +648,11 @@ fn held_message_prompt_start_inner(screen: &str) -> Option<usize> {
     if composer_is_idle(&lines) {
         return None;
     }
-    // The permission body is untrusted text. Prefer the outer title immediately below its solid rule, not a repeated
-    // title inside the `╌`-delimited message body. Its real frame is the first matching title after transcript output.
     let after_output = tail.iter().rposition(|(_, l)| is_agent_output_line(l)).map_or(0, |i| i + 1);
     let Some(title) = (after_output..tail.len()).find(|&i| norm_line(tail[i].1) == "held message from another session" && i > 0 && is_solid_rule(tail[i - 1].1)) else {
         return None;
     };
     let after = &lines[title + 1..];
-    // 選項列：游標（可有可無）＋選項字，跟 `norm_line` 不同的是游標要留著數。
     let option = |l: &str, label: &str| -> Option<bool> {
         let body = l.trim();
         let (cursor, body) = match body.chars().next() {
@@ -748,9 +727,6 @@ fn permission_prompt_inner(screen: &str) -> Option<String> {
     let menu_from = frame.len().saturating_sub(CHOICE_MENU_TAIL_LINES);
     let (menu_first, _) = open_choice_menu(&frame[menu_from..])?;
     let menu_start = menu_from + menu_first;
-    // 真正的 frame 從最新工具輸出列之後的第一條實線算起（多框時最舊在上）。標題與目前選項之間若還有
-    // 另一份連號、恰好一個游標的選單，那條實線是上一份選單的，不能借它的標題；改看下一條實線。
-    // 命令預覽裡恰好一行 `1. …` 不夠證明是另一份選單。
     let after_output = frame[..menu_start].iter().rposition(|l| is_agent_output_line(l)).map_or(0, |i| i + 1);
     let rule = (after_output..menu_start).find(|&i| {
         if !is_solid_rule(frame[i]) || i + 1 >= menu_start {
@@ -766,7 +742,6 @@ fn permission_prompt_inner(screen: &str) -> Option<String> {
         !has_previous_menu
     })?;
     let title_line = frame.get(rule + 1)?;
-    // `Read file                  1 of 3`：標題與計數之間隔著一大段空白，只取前半。
     let title = title_line.trim().split("  ").next().unwrap_or("").trim();
     let low = title.to_lowercase();
     let tool = if low.starts_with("bash") {
@@ -812,7 +787,6 @@ fn tool_use_name(body: &[&str]) -> String {
 /// 七個主題選項。跟登入選單同一類：交給人處理（409 `needs_login`），不自動按——按了下一頁就是登入選單，
 /// 一樣要人。真畫面在 `lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt`（2026-09-22）。
 pub fn is_onboarding_theme(screen: &str) -> bool {
-    // 同 [`is_login_menu`]：只看最底幾行、輸入列不能空著（2026-09-22 triage bot 在回報裡引了整頁原文，每次送交辦都被判 needs_login）。
     let Some(tail_raw) = menu_tail(screen) else { return false };
     let lines: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     flatten(&tail_raw.join("\n")).contains("choose the text style that looks best with your terminal")
@@ -823,19 +797,11 @@ pub fn is_onboarding_theme(screen: &str) -> bool {
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
 /// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
 pub fn is_grok_trust_dialog(screen: &str) -> bool {
-    // 同 [`is_switch_model_dialog`]：標題與兩個帶鍵位的選項各自成行，句子裡提到不算；只看最底
-    // [`DIALOG_TAIL_LINES`] 行；而且要求輸入列不是空的（[`composer_is_idle`]）——grok 回覆裡
-    // 就算把這三段字逐行照抄（連「各自成行」這個形狀都模仿了），畫面上其實沒有真的框，
-    // 稍後照樣會印出一行空的輸入列，用這個結構性事實分辨，不必再猜引文的排版像不像框
-    // （2026-09-18，issue #114：`is_switch_model_dialog` 已經修過同一種誤判，這裡補齊）。
     let lines: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail_raw = &lines[lines.len().saturating_sub(DIALOG_TAIL_LINES)..];
     if composer_is_idle(tail_raw) {
         return false;
     }
-    // Grok marks its own transcript/tool output with these prefixes. They are stripped by
-    // `norm_line`, so reject them on the raw rows before an answer that quotes the complete
-    // dialog (including the y/n keys and build row) can look like the live trust screen.
     if tail_raw.iter().any(|line| {
         let line = line.trim_start();
         ["⏺", "●", "⎿"].iter().any(|marker| line.starts_with(marker))
@@ -946,7 +912,7 @@ fn dangerous_rm_prompt_inner(screen: &str) -> Option<DangerousRm> {
     let start = raw.len().saturating_sub(RM_DIALOG_TAIL_LINES);
     let tail_raw = &raw[start..];
     if composer_is_idle(tail_raw) {
-        return None; // 輸入列空著＝沒有框在擋，回覆裡引了原文而已（見 [`composer_is_idle`]）。
+        return None;
     }
     let norm: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     let question = norm.iter().rposition(|l| l.starts_with("do you want to proceed"))?;
@@ -955,7 +921,6 @@ fn dangerous_rm_prompt_inner(screen: &str) -> Option<DangerousRm> {
         return None;
     }
     let warn = norm[..question].iter().rposition(|l| l.starts_with("dangerous rm operation"))?;
-    // 警語折行：接到倒數那句（`⚠ Claude Code will automatically deny …`）或問句為止。
     let mut warning = strip_box(tail_raw[warn]);
     for (i, l) in norm.iter().enumerate().take(question).skip(warn + 1) {
         if l.starts_with("⚠") || l.contains("will automatically deny") {
@@ -965,10 +930,6 @@ fn dangerous_rm_prompt_inner(screen: &str) -> Option<DangerousRm> {
         warning.push_str(&strip_box(tail_raw[i]));
     }
     let target = warning.split_once(": ").map(|(_, t)| t.trim().to_string()).unwrap_or_default();
-    // 指令在框上方的 `Bash command` 區塊：標題下、警語前，`│` 開頭的那幾行。指令只佔一列時 claude 不畫 `│`
-    // （2026-09-24 真畫面），那就是標題下第一列；再下一列是說明，不算。
-    // 2.1.286 起指令改用兩條 `╌` 虛線夾住、說明移到虛線上方（#746，`claude-2.1.286-dangerous-rm-*.txt`）：
-    // 有虛線就只取兩條虛線之間，不然單列指令會把說明當成指令。
     let abs_warn = start + warn;
     let from = abs_warn.saturating_sub(RM_COMMAND_LOOKBACK);
     let above = &raw[from..abs_warn];
@@ -986,13 +947,11 @@ fn dangerous_rm_prompt_inner(screen: &str) -> Option<DangerousRm> {
         gutter_or_first(block)
     });
     if command.is_none() {
-        // 標題已經捲出畫面（長指令＋矮 pane）：只剩收尾那條虛線，它上面到畫面頂（或再上一條虛線）都是指令的後半段。
         let rules: Vec<usize> = above.iter().enumerate().filter(|(_, l)| is_dash_rule(l)).map(|(i, _)| i).collect();
         if let Some(&close) = rules.last() {
             let open = rules.len().checked_sub(2).map(|i| rules[i] + 1);
             command_truncated = open.is_none();
             let block = &above[open.unwrap_or(0)..close];
-            // 標題都看不到了，沒有 `│` 的列可能是說明或別的東西，只收 `│` 開頭的列。
             let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_gutter(l)).collect();
             if !gutter.is_empty() {
                 command = Some(gutter.join("\n"));
@@ -1075,7 +1034,6 @@ fn survey_composer_is_idle(screen: &str) -> bool {
 
 async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRead>) -> Option<PaneRead> {
     let read = target.client.pane_read(&target.pane, "visible", 80).await.ok()?;
-    // 不看 `read.revision`：herdr 0.9.5 的 `pane.read` 恆回 0（#1909、#1910）。授權靠文字相同加 fence。
     if read.pane_id != target.pane || read.source != "visible" || read.truncated {
         return None;
     }
@@ -1139,7 +1097,6 @@ fn warn_survey_give_up(run: &db::Run, reason: &'static str) {
 pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyFingerprints), run: &db::Run) -> bool {
     let Some(target) = current_survey_target(app, run).await else { return false };
     let Some(read) = read_actionable_survey(&target, None).await else {
-        // 問卷不在畫面上（或這輪讀不到）：忘掉這個 run 的指紋，之後再跳出的問卷才會重新處理。
         app.survey_fingerprints().lock().await.remove(&run.id);
         return false;
     };
@@ -1157,19 +1114,11 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     };
     if already_seen {
         if PRESS_KEYS_ON_SURVEY && attempt_complete {
-            // 上一輪已送過 0（以及需要時的 Enter），同一份問卷仍完整可見，表示 TUI 沒吃到按鍵。
-            // 保留指紋避免每輪重送，只透過 GiveUps 警告一次。
             warn_survey_give_up(run, SURVEY_KEY_NOT_TAKEN);
         }
         return false;
     }
     if !PRESS_KEYS_ON_SURVEY {
-        // 畫面內容不進 log（那是對話內容）；要補 fixture 的人用 pane id 自己抓一份原文。
-        //
-        // **每個 run 只吵一次**：指紋去重對按鍵版夠用（按下去畫面就變了），但不按鍵時問卷會一直
-        // 留在畫面上，每次重繪 revision 就變一次，每 10 秒一輪的巡邏會把同一件事一直寫進 log
-        // （i267 審 #485）。第一次 warn，之後降成 debug；真正該吵的人由 `child_alerts` 負責，
-        // 那邊本來就有自己的指紋去重。
         if first_for_this_run {
             tracing::warn!(
                 run = %run.id,
@@ -1185,9 +1134,6 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::race_point::hit("survey_before_first_key", &run.id).await;
-    // The classification read only authorizes this exact pane content, under the same
-    // run/session authority (herdr's revision is always 0, so it is no evidence). There is no
-    // conditional send_keys CAS in Herdr yet.
     let was_current = survey_target_is_current(app, &target).await;
     let final_read = if was_current { read_actionable_survey(&target, Some(&read)).await } else { None };
     let still_current = final_read.is_some() && survey_target_is_current(app, &target).await;
@@ -1205,7 +1151,6 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     crate::race_point::hit("survey_after_zero", &run.id).await;
     tokio::time::sleep(SETTLE).await;
     let mut attempted_fingerprint = fingerprint;
-    // The post-0 read is a new authorization basis for versions that also need Enter.
     if survey_target_is_current(app, &target).await {
         if let Some(second_stage) = read_actionable_survey(&target, None).await {
             let second_fingerprint = survey_fingerprint(&second_stage.text);
@@ -1236,7 +1181,6 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     }
     true
 }
-
 
 /// 測試共用的真畫面／抄錄畫面（`lifecycle::prompt` 的整合測試也用）。
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -1451,10 +1395,8 @@ mod tests {
     fn a_not_logged_in_reply_is_recognised_only_as_the_latest_error_line() {
         let stuck = super::screens::NOT_LOGGED_IN;
         assert!(super::is_not_logged_in_reply(stuck));
-        // 正文提到這句（沒有 `⎿`）：不算。
         let quoted = "⏺ 協調者畫面是「Not logged in · Please run /login」，我已經請使用者處理。\n\n❯ \n  AGM | Opus 5 | 5h:80%\n";
         assert!(!super::is_not_logged_in_reply(quoted));
-        // 很久以前出過、之後答過很多話（已經捲出底部）：不算。
         let recovered = format!("{stuck}{}", "⏺ 已處理一則申請。\n".repeat(30));
         assert!(!super::is_not_logged_in_reply(&recovered));
     }
@@ -1654,7 +1596,6 @@ Grok Build 1.0.46\n\
 
         assert!(dismiss_if_survey(&env.app, &run).await);
         assert_eq!(press_keys(&env), [serde_json::json!(["0"]), serde_json::json!(["enter"])]);
-        // 畫面沒變（這個替身不會收掉問卷）：同一畫面不重複按，下一輪應記一次失敗 WARN。
         assert!(!dismiss_if_survey(&env.app, &run).await);
         assert_eq!(press_keys(&env).len(), 2, "the same frame is pressed once");
         assert!(
@@ -1704,7 +1645,6 @@ Grok Build 1.0.46\n\
         assert!(dismiss_if_survey(&env.app, &run).await);
         assert_eq!(press_keys(&env), [serde_json::json!(["0"])]);
 
-        // 問卷收掉後掃一輪，再跳出一張一模一樣的問卷：要重新處理，不能被第一張的去重記錄擋住。
         assert!(!dismiss_if_survey(&env.app, &run).await);
         set_live_screen(&env, &pane, screens::FEEDBACK_SURVEY);
         assert!(dismiss_if_survey(&env.app, &run).await);
@@ -1825,8 +1765,6 @@ Grok Build 1.0.46\n\
     #[test]
     fn a_reply_that_quotes_the_survey_is_not_the_survey() {
         assert!(!is_feedback_survey(screens::FEEDBACK_SURVEY_QUOTED), "底下隔著回合結束那一行＝引文");
-        // 沒有空輸入列（還在跑）時靠選項列那一條：問句與四個選項**都**出現，但全寫在句子中間。
-        // （這一行必須同時含 `how is claude doing`，否則問句那一關就先擋掉，測不到 `is_option_row`。）
         let prose = " ⏺ The popup asked How is Claude doing this session? with 1: Bad 2: Fine 3: Good 0: Dismiss and I chose 0.\n ⎿  done\n   ✽ Working…\n";
         assert!(!is_feedback_survey(prose), "選項夾在句子裡不是選項列");
     }
@@ -1869,7 +1807,6 @@ Grok Build 1.0.46\n\
     fn other_dialogs_are_left_alone() {
         assert!(!is_feedback_survey(PERMISSION));
         assert!(!is_feedback_survey(""));
-        // 只提到 dismiss 的畫面不算——那個字到處都是。
         assert!(!is_feedback_survey("Press 0 to dismiss this notice"));
     }
 
@@ -1882,7 +1819,6 @@ Grok Build 1.0.46\n\
     #[test]
     fn change_effort_confirmation_is_recognised() {
         assert!(is_switch_model_dialog(CHANGE_EFFORT));
-        // 同樣不能被正文裡的引文帶偏。
         let quoted = format!("{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Opus 5 | 5h:96%\n", CHANGE_EFFORT, "⏺ Bash(cargo test)\n  ⎿  ok\n".repeat(8));
         assert!(!is_switch_model_dialog(&quoted));
     }
@@ -1910,12 +1846,10 @@ Grok Build 1.0.46\n\
         assert!(!composer_is_idle(&lines));
         assert!(awaits_menu_choice(picker), "{picker}");
         assert!(screen_has_answerable_prompt(picker));
-        // 說明框（ⓘ This content can’t be shown）印在選單之上：整段畫面一起仍是開著的選單。
         let notice = include_str!("lifecycle/fixtures/codex-upstream-safety-block-notice.txt");
         let full = format!("{notice}\n• Finding an explanation and safer ways to continue…\n\n{picker}");
         assert!(awaits_menu_choice(&full), "{full}");
         assert!(screen_has_answerable_prompt(&full));
-        // 引文在上、底下回到空輸入列＝不是選單。
         let quoted = format!("⏺ 畫面：\n{picker}\n────────\n›\n");
         assert!(!awaits_menu_choice(&quoted));
     }
@@ -1947,7 +1881,6 @@ Grok Build 1.0.46\n\
     #[test]
     fn a_report_quoting_the_dialog_is_not_a_dialog() {
         assert!(!is_switch_model_dialog(QUOTED_REPORT));
-        // 這份原始碼本身也引了那幾段字。
         assert!(!is_switch_model_dialog(include_str!("tui_prompts.rs")));
     }
 
@@ -1996,7 +1929,6 @@ Grok Build 1.0.46\n\
     #[test]
     fn switch_model_confirmation_is_recognised() {
         assert!(is_switch_model_dialog(SWITCH_MODEL));
-        // 同一段字出現在正文裡（例如 agent 正在讀這份原始碼），底下還有輸入列與 statusLine——不算。
         let quoted = format!(
             "{}\n{}\n─────\n❯\n─────\n  tony. | agents-manager | Fable 5.1 31% | 5h:96%\n  ⏵⏵ bypass permissions on\n",
             SWITCH_MODEL,
@@ -2026,13 +1958,10 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     #[test]
     fn update_notice_is_read_off_the_status_line() {
         assert_eq!(update_notice(UPDATE).as_deref(), Some(UPDATE_NOTICE));
-        // 窄 pane 折行。
         assert_eq!(update_notice("│ ✔ Update      │\n│ installed ·   │\n│ Restart to    │\n│ update        │\n").as_deref(), Some(UPDATE_NOTICE));
-        // 只中一半不算——例如 agent 正在讀這份原始碼。
         assert!(update_notice("✔ Update installed").is_none());
         assert!(update_notice("restart to update the docs").is_none());
         assert!(update_notice(SURVEY).is_none());
-        // 正文裡引到這兩句不算——寫這個功能的 agent 的畫面上就是這樣（2026-09-08 實測）。
         let quoted = format!(
             "  tooltip 寫原句 `Update installed · Restart to update` 與…\n{}\n{}\n❯\n{}\n  tony. | agents-manager | Fable 5.1 31% | 5h:96%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
             "⏺ Bash(git commit -m \"…\")\n  ⎿  cff77fc docs(goals): plan…\n".repeat(4),
@@ -2048,7 +1977,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     #[test]
     fn the_auto_mode_offer_is_recognised_and_quotes_are_not() {
         assert!(is_auto_mode_offer(AUTO_MODE));
-        // 正文引了兩個選項、但輸入列空著＝沒有框。
         let quoted = format!("⏺ 2.1.278 的框長這樣：\n  Yes, set auto mode as my default permission mode\n  No, keep bypass permissions\n{}", IDLE_CLAUDE);
         assert!(!is_auto_mode_offer(&quoted));
         assert!(!is_auto_mode_offer(SWITCH_MODEL) && !is_auto_mode_offer(PERMISSION));
@@ -2082,7 +2010,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let quoted = format!("{}\n{below}", REPORT_QUOTING_ONBOARDING.split("0 tokens").next().unwrap());
         assert!(!is_onboarding_theme(&quoted), "底下還有對話輸出＝引文，不是開著的選單");
         assert!(!is_login_menu(&quoted));
-        // 選單底下只有它自己的預覽／提示時才算——真畫面就是這樣。
         assert!(is_onboarding_theme(ONBOARDING_THEME));
     }
 
@@ -2093,7 +2020,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(!is_login_menu(REPORT_QUOTING_ONBOARDING));
         let quoted_login = format!("⏺ 登入選單長這樣：\n  Select login method:\n  ❯ 1. Claude account with subscription · Pro, Max\n    2. Anthropic Console account · API usage billing\n{}", IDLE_CLAUDE);
         assert!(!is_login_menu(&quoted_login));
-        // 引文在正文上方、底下正在跑（沒有空輸入列）：選單不在最底幾行，也不算。
         let far_above = format!("{}\n{}", REPORT_QUOTING_ONBOARDING.split("0 tokens").next().unwrap(), "  ⏺ Bash(cargo test)\n  ⎿  running…\n".repeat(12));
         assert!(!is_onboarding_theme(&far_above));
     }
@@ -2120,7 +2046,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert_eq!(var.target, r#""$D"/* in `rm -f "$D"/*`"#);
         assert_eq!(var.command.as_deref(), Some("D=$(cat /tmp/.origin_dir); P=northwinds-com-tw\nshred -u \"$D\"/origin.key 2>/dev/null || rm -f \"$D\"/*; rmdir \"$D\" 2>/dev/null"));
 
-        // 單列指令沒有 `│`：以前只收 `│` 開頭的列，通知裡指令是空的。說明那一列不能算進去。
         let one = dangerous_rm_prompt(DANGEROUS_RM_ONE_ROW).expect("單列指令的真畫面");
         assert_eq!(one.target, "command substitution output");
         assert_eq!(one.command.as_deref(), Some(r#"rm -rf "$(echo tmpdir2)""#));
@@ -2151,11 +2076,9 @@ pub fn is_feedback_survey(screen: &str) -> bool {
     #[test]
     fn a_dialog_quoted_into_the_composer_is_not_a_dialog() {
         for (name, fixture) in [("2.1.281", DANGEROUS_RM), ("2.1.289 倒數", include_str!("lifecycle/fixtures/claude-2.1.289-dangerous-rm-countdown-30rows.txt"))] {
-            // 舊格式：原文逐行直接放進輸入框（沒有前綴）。
             let old = parent_screen_with_typed(fixture);
             assert_no_dialog_recognised(&old, &format!("{name} 無前綴引文在輸入框內"));
             assert!(!screen_has_answerable_prompt(&old), "{name}: 輸入框裡的字沒有東西可回答");
-            // 現行格式：child_alerts 的整則通知（每行有 `· ` 前綴）。
             let notice = crate::child_alerts::message_for("otafable", fixture);
             assert_no_dialog_recognised(&parent_screen_with_typed(&notice), &format!("{name} 通知在輸入框內"));
             assert!(!screen_has_answerable_prompt(&parent_screen_with_typed(&notice)), "{name}: 通知在輸入框內沒有東西可回答");
@@ -2235,9 +2158,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let cmd = cut.command.as_deref().expect("標題捲出畫面時仍要拿到指令後半段");
         assert!(cmd.ends_with("\nEOF\nrm -f \"$S\"/{gauth.url,gauth.log,glogin.mjs}"), "{cmd}");
         assert!(!cmd.contains("will automatically deny") && !cmd.contains("Dangerous rm"), "{cmd}");
-        // 這張的標題與上緣虛線還在畫面裡（30 列剛好夠），所以沒有被截。
         assert!(!cut.command_truncated);
-        // 再把畫面頂端削掉 6 列（標題、說明、虛線與頭幾列指令）：標題看不到，仍讀得到剩下的指令，並標記被截。
         let mut seen = 0;
         let top_cut: String = DANGEROUS_RM_2289_COUNTDOWN_30ROWS
             .lines()
@@ -2329,12 +2250,9 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         for (name, screen) in [("dangerous rm", DANGEROUS_RM), ("session paused", SESSION_PAUSED), ("auto mode", AUTO_MODE), ("idle", IDLE_CLAUDE), ("empty", "")] {
             assert_eq!(permission_prompt(screen), None, "{name}：不是一般權限框");
         }
-        // 回覆裡逐行引用權限框原文、底下是空的輸入列：不是真的框。
         let quoted = format!("⏺ 剛才停在：\n  Bash command\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
         assert_eq!(permission_prompt(&quoted), None);
 
-        // The latest permission menu can be partially scrolled so its title is gone. Do not
-        // borrow the tool name from an earlier quoted menu still visible in scrollback.
         let earlier = PERMISSION_2287_BASH.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
         let write_lines: Vec<&str> = PERMISSION_2287_WRITE.lines().collect();
         let first_choice = write_lines.iter().position(|line| line.trim_start().starts_with("❯ 1.")).expect("Write fixture choice");
@@ -2367,14 +2285,11 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         }
         assert!(is_held_message_prompt(HELD_MESSAGE_2287));
         assert!(!is_held_message_prompt(PERMISSION_2287_BASH_WITH_HELD_QUEUED), "排在 Bash 框後面的 held message 還沒開");
-        // 排隊時畫面上的是最舊的那一框。
         assert!(PERMISSION_2287_BASH_QUEUE_FIRST.contains("\n touch q1.txt\n") && PERMISSION_2287_BASH_QUEUE_SECOND.contains("\n touch q2.txt\n"));
-        // 回覆裡逐行引用 held message 框、底下是空的輸入列：不是真的框。
         let quoted = format!(
             "● 剛才停在：\n────────────────\n Held message from another session\n ❯ Deny — drop it and tell the sender it was declined\n   Deliver this message to Claude\n{IDLE_CLAUDE}"
         );
         assert!(!is_held_message_prompt(&quoted) && permission_prompt(&quoted).is_none() && !awaits_menu_choice(&quoted));
-        // 沒有游標（選完了、框在收）、或選項底下還在跑對話輸出：都不算開著。
         let no_cursor = HELD_MESSAGE_2287.replace(" ❯ Deny", "   Deny");
         assert!(!is_held_message_prompt(&no_cursor));
         let below = format!("{HELD_MESSAGE_2287}\n● 繼續做事\n");
@@ -2467,7 +2382,6 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(is_session_paused_menu(&with_status));
         let wrapped = SESSION_PAUSED.replace("for the fixture.\n", "for the fixture.\n  second line\n  third line\n");
         assert!(is_session_paused_menu(&wrapped));
-        // 別的框不是 Session paused，但同樣是等人選的選單。
         assert!(!is_session_paused_menu(PERMISSION) && awaits_menu_choice(PERMISSION));
         assert!(!is_session_paused_menu(DANGEROUS_RM) && awaits_menu_choice(DANGEROUS_RM));
     }
@@ -2479,15 +2393,12 @@ pub fn is_feedback_survey(screen: &str) -> bool {
             "⏺ 剛剛停在這個選單：\n  Session paused\n  Details: `[x]`\n  ❯ 1. Switch to Opus 4.8\n    2. Edit prompt and retry\n✻ Cooked for 3s\n{IDLE_CLAUDE}"
         );
         assert!(!is_session_paused_menu(&quoted) && !awaits_menu_choice(&quoted), "引文，底下是空的輸入列");
-        // 還在跑、引文底下有工具輸出：不是選單。
         let running = SESSION_PAUSED.replace("✻ Waiting", "⏺ Bash(ls)\n  ⎿  ok\n✻ Waiting");
         assert!(!is_session_paused_menu(&running) && !awaits_menu_choice(&running));
-        // 游標：零個（捲出去或不是選單）、兩個（引文）都不算。
         let no_cursor = SESSION_PAUSED.replace("❯ 1.", "  1.");
         assert!(!is_session_paused_menu(&no_cursor) && !awaits_menu_choice(&no_cursor));
         let two = SESSION_PAUSED.replace("    2. Edit", "  ❯ 2. Edit");
         assert!(!awaits_menu_choice(&two));
-        // 標題被對話隔開：那是上一段的字，選單不是它的。
         let apart = SESSION_PAUSED.replace("  This request", "⏺ something else\n  This request");
         assert!(!is_session_paused_menu(&apart));
         let list = format!("⏺ 兩個做法：\n  1. 改 daemon\n  2. 改 web\n{IDLE_CLAUDE}");
@@ -2583,7 +2494,6 @@ mod answerable_prompt_tests {
         use am_base::capture::Capture;
         use am_base::composer_parse::{box_state, BoxState};
 
-        // 1. Empty prompt hint。2.1.326 的空框提示原文未知，非 dim 的文字一律當成有字；拿到實機 ANSI 擷取再補。
         const EMPTY_PROMPT_HINT: &str = "\
 ⏺ Request failed: 500 Internal Server Error
   ⎿  Error: server overloaded, try again later
@@ -2599,7 +2509,6 @@ mod answerable_prompt_tests {
         assert!(!am_base::capture::claude::PARSER.still_busy(EMPTY_PROMPT_HINT), "帶提示的輸入列不是 busy");
         assert!(!am_base::capture::claude::PARSER.awaits_input(EMPTY_PROMPT_HINT), "無 ANSI 的提示文字不算等待輸入");
 
-        // 2. Queued prompt (classified as busy)
         const QUEUED_PROMPT: &str = "\
 ⏺ Searching codebase...
   ⎿  Found 12 files
@@ -2616,7 +2525,6 @@ mod answerable_prompt_tests {
         assert!(am_base::capture::claude::PARSER.still_busy(QUEUED_PROMPT), "排隊中的任務畫面分類為 busy");
         assert!(!has(QUEUED_PROMPT), "Queued 提示不是 answerable confirmation prompt");
 
-        // 3. Trust prompt listing settings files and ⚠ (classified as awaiting confirmation)
         const TRUST_PROMPT: &str = "\
 Do you trust the contents of this project?
 /home/ubuntu/project
@@ -2632,7 +2540,6 @@ Enter to select · Esc to cancel
 ";
         assert!(has(TRUST_PROMPT), "信任提示（含設定檔清單與 ⚠）分類為 awaiting confirmation");
 
-        // 4. Two-choice plan approval card (classified as awaiting confirmation)
         const PLAN_CARD: &str = "\
 ─────────────────────────────────────────────────────────────
 Approve subagent plan?
@@ -2647,7 +2554,6 @@ Use arrow keys to navigate · Enter to select
         assert_eq!(super::permission_prompt(PLAN_CARD).as_deref(), Some("Plan"), "plan card 權限分類為 Plan");
         assert!(super::is_plan_approval_dialog(PLAN_CARD));
 
-        // 5. Dialogs with ✘/⚠/✔ prefix symbols
         let switch_model_symbols = format!("⚠ Switch {}\n❯ 1. Yes, switch to Opus 4.8\n  2. No, go back\n", "model?");
         assert!(has(&switch_model_symbols), "帶 ⚠ 前綴的 switch model 分類為 awaiting confirmation");
         assert!(super::is_switch_model_dialog(&switch_model_symbols));

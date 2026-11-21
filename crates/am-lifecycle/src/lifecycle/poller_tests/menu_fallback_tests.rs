@@ -20,7 +20,6 @@ async fn a_turn_paused_at_a_numbered_menu_is_not_closed_and_the_menu_is_not_stor
     let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
     assert_eq!(stored, 0, "選單那幾行不是回覆");
 
-    // 使用者選完、claude 答完回到輸入列：照常收，存的是回覆本身。
     env.herdr.set_screen(&pane, "❯ 派工\n\n⏺ 做完了。\n\n✻ Cooked for 3s\n────────\n❯ \n────────\n");
     assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
     let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn).fetch_one(&app.db).await.unwrap();

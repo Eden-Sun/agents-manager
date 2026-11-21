@@ -96,7 +96,6 @@ pub fn of(run_id: &str) -> Option<Reason> {
     if crate::session_paused::is_forced(run_id) {
         return Some(Reason { code: "session_paused", text: "claude Session paused 選單等待選擇".into() });
     }
-    // 一般權限確認（`permission_prompt`）：text 帶工具名。
     if let Some(tool) = permission().lock().unwrap_or_else(|e| e.into_inner()).get(run_id) {
         return Some(Reason { code: "permission_prompt", text: format!("等待權限確認：{tool}") });
     }

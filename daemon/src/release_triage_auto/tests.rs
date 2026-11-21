@@ -91,7 +91,6 @@ async fn an_api_verdict_is_validated_and_booked_then_the_user_entrance_gets_the_
     assert!(text.contains("hook 事件改名"), "尚未開的提案也要讓使用者看到：{text}");
     assert!(text.contains("upgrade-arg：") && !text.contains("upgrade-arg：本次無"), "{text}");
     assert!((3..=5).contains(&text.lines().count()), "三到五行：{text}");
-    // 路由：給巡檢（使用者入口），叫醒，不經協調者。
     let route = crate::supervisor::roles::route(&ev[0].kind, &payload, None);
     assert_eq!((route.role, route.wake), (crate::supervisor::roles::Role::Patrol, true));
 }
@@ -107,7 +106,6 @@ async fn the_same_version_is_never_triaged_twice() {
     assert_eq!(again["results"][0]["outcome"], "skipped", "{again}");
     assert_eq!(model.calls(), 1, "第二次不能再花一次 API");
     assert_eq!(notices(&app).await.len(), 1);
-    // `check` 只回 pending：離開 pending 的版本 kick 不會再派 bot。
     assert!(ledger::rows_with_status(&app.db, "claude", Status::Pending).await.unwrap().is_empty());
 }
 
@@ -156,7 +154,6 @@ async fn validation_feedback_repairs_an_empty_issue_title_without_a_bot() {
 async fn a_version_with_nothing_to_judge_is_already_empty_in_the_ledger_and_never_costs_a_call() {
     let env = crate::testing::env().await;
     let app = env.app.clone();
-    // 全部被規則丟掉的一版：只有 dropped 條目。
     let md = "## 9.9.9\n\n- [VSCode] Fixed something\n- Windows: fixed winget\n";
     let sections = source_sections("claude", md);
     let entries = build_entries("claude", &sections[0]).unwrap();
@@ -173,7 +170,6 @@ async fn a_version_with_nothing_to_judge_is_already_empty_in_the_ledger_and_neve
 async fn a_duplicate_of_the_ledger_knows_is_accepted_and_the_prompt_lists_recent_issue_titles() {
     let env = crate::testing::env().await;
     let app = env.app.clone();
-    // 先有一張別版開過的 issue：#123。
     let old = seed(&app, "2.1.278").await;
     let prop = StoredProposal { entry_ids: vec![judged(&old)[0].id.clone()], triage: "guard".into(), title: "舊的提防".into(), goal: "g".into(), suggestion: "s".into(), acceptance: "a".into(), duplicate_of: None };
     sqlx::query("UPDATE release_triage SET status = 'published', verdicts_json = ?, issue_numbers_json = ? WHERE kind = 'claude' AND version = '2.1.278'")
@@ -204,13 +200,11 @@ fn external_text_is_fenced_with_a_fence_longer_than_anything_inside_and_labelled
 
 #[test]
 fn the_prompt_rules_stay_in_step_with_the_bot_task_file() {
-    // 執行期讀，不 include_str!：那會讓 scripts/ops 變成 binary 的建置輸入（`persona::BUILD_INPUTS` 的測試會擋）。
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ops/release-triage-task.md");
     let task = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("讀不了 {}：{e}", path.display()));
     for v in ["guard", "adopt", "upgrade-arg", "none"] {
         assert!(task.contains(&format!("`{v}`")) && SYSTEM.contains(&format!("- {v}：")), "{v}");
     }
-    // 模組對照表：任務檔每一個模組檔名，prompt 都要有。
     for line in task.lines().filter(|l| l.starts_with("| ") && l.contains(".rs")) {
         for m in line.split('`').skip(1).step_by(2) {
             assert!(SYSTEM.contains(m), "prompt 少了模組 {m}（任務檔：{line}）");
@@ -282,7 +276,6 @@ async fn an_explicit_retry_repairs_a_failed_api_version_and_success_is_reused() 
     assert!(row.assigned_bot_id.is_none());
     assert!(row.verdicts.unwrap()["analysis"]["error"].is_null());
 }
-
 
 #[tokio::test]
 async fn api_mode_keeps_analysing_later_versions_after_one_version_fails() {
@@ -374,9 +367,6 @@ async fn concurrent_first_requests_do_not_retry_each_others_failure() {
     seed(&app, "2.1.277").await;
     let model = Fake::new(vec![Ok("{}".into()), Ok("{}".into()), Ok("{}".into())]);
     let versions = ["2.1.277".into()];
-    // 兩個請求都要在「第一次分析失敗」之前讀完帳本（重試意圖在讀帳本時就定了）。
-    // 先持有分析鎖，讓任何人都還拿不到鎖、也就不會有失敗可讀；放開鎖前留一段時間給兩邊讀帳本。
-    // 沒有這段保護時，B 偶爾在 A 整輪跑完後才讀帳本，看到 failed 就合法地重試，模型多被呼叫一次。
     let gate = AUTO_LOCK.lock().await;
     let (a, b, ()) = tokio::join!(
         run_auto(&app, &model, "claude", &versions, None),

@@ -38,7 +38,6 @@
         assert_eq!(m("see https://example.com/home/feed"), "see https://example.com/home/feed", "網址的 /home/ 不是家目錄");
         assert_eq!(m("token 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"), format!("token {REDACTED}"));
         assert_eq!(m("a\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----\nz"), format!("a\n{REDACTED}\nz"));
-        // 撞限橫幅與一般程式碼原樣通過——遮掉了 Jev 就沒東西可判。
         let banner = "■ You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), or try again at 3:22 AM.";
         assert_eq!(m(banner), banner);
         let code = r#"    low.contains("you hit your weekly limit") || low.contains("you've hit your weekly limit")"#;
@@ -57,57 +56,43 @@
         let out = mask(&line);
         assert!(!out.contains("eyJzdWIiOiIxIn0"), "JSON 形式的 Bearer 後面那條也要遮掉：{out}");
         assert!(!out.contains(jwt), "{out}");
-        // 認證方式本身留著：遮掉版面等於把 Jev 要判的東西一起拿走。
         assert!(out.contains("Bearer"), "{out}");
 
-        // 沒有 Bearer、單獨出現的 JWT 也要遮（log、curl 的 -H 拆行、程式碼字面值都會這樣）。
         assert_eq!(mask(&format!("token={jwt}")), format!("token={REDACTED}"));
         assert_eq!(mask(jwt), REDACTED);
         assert_eq!(mask(&format!("  header: {jwt} ok")), format!("  header: {REDACTED} ok"));
 
-        // 空白分隔的那一版（既有行為）不能退步。
         assert_eq!(mask(&format!("Authorization: Bearer {jwt}")), format!("Authorization: Bearer {REDACTED}"));
 
-        // 名字認得出來、值直接接在後面時也遮：`"Authorization":` 去掉包裹標點才對得上。
         let out = mask(r#"{"authorization": "abcdefghijklmnopqrstuvwxyz0123456789"}"#);
         assert!(!out.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{out}");
         assert!(mask(r#"cookie: "sess_abcdefghijklmnopqrstuvwxyz01234567""#).contains(REDACTED));
-        // `Token <值>`（GitHub 那種寫法）：方式留著、值遮掉。
         assert_eq!(mask("Authorization: Token ghp_abcdefghijklmnopqrstuvwxyz0123"), format!("Authorization: Token {REDACTED}"));
     }
 
     /// issue #451 的跟進審核（i407）：四個反向缺口。字串全是捏造的。
     #[test]
     fn bare_schemes_query_strings_userinfo_and_jwe_are_masked_too() {
-        // 1) 裸寫的 Basic／Token／Digest：以前只有 `BEARER` 點得起 `secret_next`，
-        //    所以 `Authorization: Basic X` 有遮（靠前面那個字接力），單獨一行的 `Basic X` 沒遮。
         assert_eq!(mask("Basic dXNlcjpwYXNzd29yZA=="), format!("Basic {REDACTED}"));
         assert_eq!(mask("Token ghp_abcdefghijklmnopqrstuvwxyz0123"), format!("Token {REDACTED}"));
         assert_eq!(mask("Digest username=admin"), format!("Digest {REDACTED}"));
 
-        // 2) query string：整串 URL 是同一個片段，第一個冒號是 scheme 的，名字比對不到；
-        //    `/`／`?`／`.` 又讓 looks_random 回 false。只換值、其餘原樣。
         assert_eq!(
             mask("https://h.example.invalid/api?token=abcdef123456&page=2"),
             format!("https://h.example.invalid/api?token={REDACTED}&page=2")
         );
         assert_eq!(mask("curl 'https://x.invalid/v1?api_key=k-abc123&q=1'"), format!("curl 'https://x.invalid/v1?api_key={REDACTED}&q=1'"));
         assert_eq!(mask("https://x.invalid/p?key=abc&sig=def"), format!("https://x.invalid/p?key={REDACTED}&sig={REDACTED}"));
-        // 沒有憑據參數的 URL 一個字都不要動。
         let plain = "https://x.invalid/p?page=2&sort=name";
         assert_eq!(mask(plain), plain);
 
-        // 3) `user:pass@`：以前要網域含 `.` 才遮。
         assert_eq!(mask("http://u:p@localhost:8080/path"), REDACTED);
         assert_eq!(mask("mail someone@example.com now"), format!("mail {REDACTED} now"));
 
-        // 4) JWE compact 是五段。
         let jwe = "eyJhbGciOiJSU0EtT0FFUCJ9.abcdefgh.ijklmnop.qrstuvwxyz012345.tag12345";
         assert_eq!(mask(jwe), REDACTED);
-        // `{ "alg"…`（大括號後有空白）的 header 是 `eyA` 開頭。
         assert_eq!(mask("eyAiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiIxIn0.sig12345"), REDACTED);
 
-        // 收尾標點留著：以前整個片段被換掉，JSON 的 `"}` 會不見。
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijklmnopqrstuvwxyz012345";
         let out = mask(&format!(r#"{{"Authorization": "Bearer {jwt}"}}"#));
         assert!(out.ends_with(r#""}"#), "版面要留著：{out}");
@@ -330,7 +315,6 @@
         put("fresh", "limit_hit", hours_ago(1), "You've hit your usage limit").await;
         put("stale", "limit_hit", hours_ago(CLEAR_WINDOW_HOURS + 1), "You've hit your usage limit").await;
         put("stuck", "stuck_queued", hours_ago(1), "x").await;
-        // 週限：撞了之後可能好幾天才有下一次成功回合，用 5 小時窗那個下界會把它整批漏掉（#453 跟進審核）。
         put("weekly", "limit_hit", hours_ago(24 * 3), "You hit your weekly limit.").await;
         put("weekly_old", "limit_hit", hours_ago(WEEKLY_CLEAR_WINDOW_HOURS + 1), "You hit your weekly limit.").await;
 
@@ -378,7 +362,6 @@
         write_key(p, "  k-test-0002\n").unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(read_key(p).unwrap(), "k-test-0002");
-        // 覆寫舊的；壞輸入不動既有的檔。
         write_key(p, "k-test-0003").unwrap();
         assert!(write_key(p, "two words").is_err() && write_key(p, " ").is_err());
         assert_eq!(read_key(p).unwrap(), "k-test-0003");
@@ -407,7 +390,6 @@
         assert!(!crate::runners::judge::get_settings(State(app.clone())).await.0.to_string().contains("k-test-0004"));
         assert!(!std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("k-test-0004"), "key 不進 config.toml");
 
-        // 空 token＝不動現有的 key；只關開關。
         let off = put(Some(false), None, Some("  ")).await.unwrap().0;
         assert_eq!((off["enabled"].clone(), off["key_present"].clone()), (json!(false), json!(true)));
         assert_eq!(read_key(dir.join("key").to_str().unwrap()).unwrap(), "k-test-0004");
@@ -421,9 +403,7 @@
         let key = dir.join("key");
         let keys = key.to_str().unwrap();
         assert_eq!(read_key(keys).unwrap(), "k-test-0001");
-        // config.toml 被外面換成壞檔：ConfigStore::update 會在重讀時失敗
         std::fs::write(dir.join("config.toml"), "this is = = not toml").unwrap();
-        // mtime 一定要跟 store 記的不同，否則不會重讀（時間解析度粗時會假綠／偶發紅）
         let f = std::fs::OpenOptions::new().write(true).open(dir.join("config.toml")).unwrap();
         f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
         let body = crate::runners::judge::SettingsBody { enabled: Some(true), projects: Some(vec!["p".into()]), token: Some("k-test-0009".into()) };

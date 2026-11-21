@@ -104,8 +104,6 @@ pub trait Ops: Send + Sync {
     fn notify_parent<'a>(&'a self, app: &'a Arc<App>, parent_bot_id: &'a str, text: &'a str, request_id: &'a str) -> BoxFuture<'a, Result<(), String>>;
 }
 
-// ---------------------------------------------------------------- 進行中（記憶體）
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Progress {
     pub update_id: String,
@@ -184,8 +182,6 @@ fn release_slot(app: &impl crate::capabilities::DataDir, update_id: &str) {
     }
 }
 
-// ---------------------------------------------------------------- 影響範圍
-
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Resumable {
     pub bot_id: String,
@@ -251,7 +247,6 @@ pub async fn affected(app: &impl crate::capabilities::Db, host: &str) -> anyhow:
         .await?
         .flatten()
         .filter(|s| !s.is_empty());
-    // 總管最後接回：它負責修其他顆（同 bulk_restart）。
     let pairs = out.resume.iter().map(|r| (r.bot_id.clone(), r.name.clone())).collect();
     out.resume = crate::bulk_restart::supervisor_last(pairs, supervisor.as_deref())
         .into_iter()
@@ -259,8 +254,6 @@ pub async fn affected(app: &impl crate::capabilities::Db, host: &str) -> anyhow:
         .collect();
     Ok(out)
 }
-
-// ---------------------------------------------------------------- API
 
 #[derive(Deserialize, Default)]
 pub struct HerdrUpdateIn {
@@ -335,8 +328,6 @@ pub async fn start(
         }
         g.insert(app.data_dir.clone(), progress);
     }
-    // 先佔自己的位、再看對方（cli_update 反過來：先寫列、再看這邊）：兩邊同時開的最壞結果是互相退讓，不會兩個都跑。
-    // herdr server 一重啟，CLI 安裝後 scoped 重啟正在開的 pane 全部消失。
     match sqlx::query_as::<_, (String, String)>("SELECT id, kind FROM cli_updates WHERE host = ? AND status = 'running'")
         .bind(host)
         .fetch_optional(&app.db)
@@ -372,8 +363,6 @@ pub async fn start(
         "children_lost": plan.children,
     }))
 }
-
-// ---------------------------------------------------------------- 背景流程
 
 struct Ctx {
     update_id: String,
@@ -447,7 +436,6 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
     if out.reason.is_some() && out.failed_phase.is_none() {
         out.failed_phase = running_list(app).first().map(|p| p.phase.clone());
     }
-    // staging 只在 steps 裡用：成功時已經複製進安裝位置，失敗時下次會重新下載、重新驗。不清的話每一版永久留一顆（#1048）。
     if let Err(e) = ops.cleanup(app, &ctx.target).await {
         log_line(app, ctx, "cleanup", &e);
     }
@@ -460,7 +448,6 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
     if ok || out.reason == Some("resume_failed") {
         crate::upstream_update::note_installed(app, "herdr", &ctx.host, &ctx.target).await;
     }
-    // 版本快取（hosts[].herdr）不等下一輪 60 秒巡邏。測試不跑：它會去執行本機真的 `herdr --version`。
     if !cfg!(test) {
         crate::runners::herdr_version::refresh(app, &ctx.host).await;
     }
@@ -479,13 +466,11 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
 
 async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outcome {
     let mut out = Outcome::default();
-    // 1. 下載到 staging、驗版本；現行 binary 不動。
     phase(app, ctx, "downloading", "下載到 staging").await;
     let install = match ops.install_path(&ctx.session).await {
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
     };
-    // 同機常有兩份 herdr（launchd 跑的與 login shell／shim 解析到的是不同檔）：兩份都看、都換，不然 server／CLI 會留下版本不一致。
     let cli = match ops.cli_path(&install).await {
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
@@ -519,7 +504,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         }
     }
 
-    // 2–3. 等閒置 → 開維護窗口 → 窗口裡再看一次（開窗口之前剛好有人送出一則就回去等）。
     phase(app, ctx, "waiting_idle", "等頂層 bot 都閒置").await;
     let deadline = Instant::now() + timing.idle_max;
     let (window, plan) = loop {
@@ -527,7 +511,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
             Ok(a) if a.busy.is_empty() => {
                 match crate::runners::herdr_maintenance::open_as(app, crate::herdr_maintenance::MAX_MINUTES, "herdr_update", &format!("herdr 一鍵更新 → {}", ctx.target)).await {
                     Ok(Some(w)) => {
-                        // 先關閘門再複查（issue #893）：複查之後到重啟之間不會再有新派送打進來；複查前剛送進去的，複查看得到。
                         set_phase(app, &ctx.update_id, "stopping");
                         match affected(app, &ctx.host).await {
                             Ok(a) if a.busy.is_empty() => break (w, a),
@@ -558,8 +541,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     let names: Vec<&str> = plan.resume.iter().map(|r| r.name.as_str()).collect();
     phase(app, ctx, "stopping", &format!("窗口 {} 開了；要接回 {:?}，子 agent 會沒了 {}", window.opened_at, names, plan.children.len())).await;
 
-    // 4. 換 binary → 重啟。
-    // 主機側先備份，再複製到同目錄、原子 rename；傳輸與檔案操作都經 Ops。已經是目標版的那份不動。
     let mut swapped: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut swap_error = None;
     for bin in binaries.iter().filter(|b| b.needs_swap(&ctx.target)) {
@@ -567,14 +548,12 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         match ops.swap(&staging, &bin.path, &from).await {
             Ok(backup) => swapped.push((bin.path.clone(), backup)),
             Err(e) if ops.swap_outcome_uncertain() => {
-                // SSH may lose its acknowledgement after rename. Treat the install as changed and restore the known backup.
                 let name = bin.path.file_name().and_then(|n| n.to_str()).unwrap_or("herdr");
                 swapped.push((bin.path.clone(), bin.path.with_file_name(format!("{name}.bak-{from}"))));
                 swap_error = Some(e);
                 break;
             }
             Err(e) => {
-                // 前面已經換掉的換回去（server 還沒動過，不必重啟）。
                 let undo = restore_all(ops, &swapped).await;
                 let _ = crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
                 let tail = match undo {
@@ -596,7 +575,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
             Err(e) => Err(e),
         }
     };
-    // 5. 失敗就換回 `.bak` 再重啟一次；bot 照樣接回（舊版也比沒有 bot 好）。
     if let Err(e) = restarted {
         out.reason = Some(if swap_error.is_some() { "swap_failed" } else { "restart_failed" });
         let backups = swapped.iter().map(|(_, b)| b.display().to_string()).collect::<Vec<_>>().join("、");
@@ -623,7 +601,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         });
     }
 
-    // 6. 接回頂層 bot；子 agent 通知母 bot。
     phase(app, ctx, "resuming", &format!("接回 {} 顆", plan.resume.len())).await;
     for r in &plan.resume {
         let resumed = if out.reason == Some("rollback_failed") {
@@ -659,7 +636,6 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         }
     }
 
-    // 7. 關窗口（沒接回的子 agent 由它照原規則退休）。
     match crate::runners::herdr_maintenance::close_as(app, &window, "herdr_update", Some("herdr 一鍵更新結束")).await {
         Ok(retired) => log_line(app, ctx, "resuming", &format!("維護窗口關了；退休的子 agent：{retired:?}")),
         Err(e) => log_line(app, ctx, "resuming", &format!("關維護窗口失敗（{e:#}），會在截止時間自己結束")),
@@ -683,7 +659,6 @@ async fn wait_server(app: &impl crate::hosts::HostsAccess, host: &str, expected:
     let deadline = Instant::now() + timing.restart_max;
     loop {
         let last = match ping_version(app, host).await {
-            // 版本對了還要 daemon 認得它的 protocol：不認得的話之後每個 RPC 都會壞，bot 一顆也接不回，不如現在換回舊版。
             Ok((v, protocol)) if parse_version(&v) == parse_version(expected) && crate::herdr::protocol_supported(protocol) => return Ok(v),
             Ok((v, protocol)) if parse_version(&v) == parse_version(expected) => {
                 format!("server 是 {v}，但 protocol {protocol} 不是這顆 daemon 認得的（{:?}）", crate::herdr::SUPPORTED_PROTOCOLS)
@@ -780,15 +755,11 @@ pub fn parent_notice(target: &str, ok: bool, kids: &[LostChild]) -> String {
     s
 }
 
-// ---------------------------------------------------------------- 真的實作
-
 #[path = "herdr_upgrade/real.rs"]
 mod real;
 use real::Real;
 
 fn manual_upgrade_command() -> &'static str {
-    // Homebrew 的 formula 常被 `brew pin` 住（pinned 時 `brew upgrade` 直接拒絕）：先 unpin、升完照原樣 pin 回去。
-    // Homebrew 與 `~/.local/bin` 是兩份獨立的檔：兩份都在就兩份都升。
     "if command -v brew >/dev/null 2>&1 && brew list --versions herdr >/dev/null 2>&1; then if brew list --pinned 2>/dev/null | grep -qx herdr; then brew unpin herdr; brew upgrade herdr; brew pin herdr; else brew upgrade herdr; fi; if [ -f \"$HOME/.local/bin/herdr\" ] && [ ! -L \"$HOME/.local/bin/herdr\" ]; then curl -fsSL https://herdr.dev/install.sh | sh; fi; else curl -fsSL https://herdr.dev/install.sh | sh; fi"
 }
 
@@ -855,8 +826,6 @@ fn ensure_launchd_program(output: &str, install: &Path) -> Result<(), String> {
 
 async fn command_output(mut cmd: tokio::process::Command, timeout: Duration) -> Result<String, String> {
     cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
-    // 驗的常常是 daemon 自己剛複製／換進去的 binary：同一個行程裡別的任務在寫入 fd 還開著時 fork，exec 會回 `ETXTBSY`（#189），
-    // 這不是 binary 壞了，重試就好；其他錯誤照舊。
     let out = tokio::time::timeout(timeout, crate::exec_retry::output_async(&mut cmd))
         .await
         .map_err(|_| format!("超過 {timeout:?}"))?
@@ -1063,7 +1032,6 @@ mod tests {
                 } else {
                     cli_version_string(&self.installed()).unwrap()
                 };
-                // 只有「新版」那一次會帶新的 protocol；換回舊版就是正常的 22。
                 let protocol = if v == "0.9.3" { self.new_protocol.load(Ordering::SeqCst) as u32 } else { 22 };
                 *self.pong.lock().unwrap() = (v, protocol);
                 Ok(())

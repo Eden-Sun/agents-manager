@@ -1106,7 +1106,6 @@ pub struct ClaudeApiUseCfg {
     pub provider: String,
 }
 
-
 /// 一個用途的預設值（不含開關）。
 pub struct ClaudeApiUseDef {
     pub id: &'static str,
@@ -1337,7 +1336,6 @@ impl ConfigFile {
             if let (Some(g), Some(gd)) = (self.claude_api.groups.get(def.group), CLAUDE_API_GROUPS.iter().find(|g| g.id == def.group)) {
                 let state = group_overlay(gd, g);
                 if state.provider == API_PROVIDER_OPENAI && !claude_api_use_allows_openai(id) {
-                    // 組改用 OpenAI，但這個用途留在 Claude：開關與上限照組，模型／effort 用 Claude 的（`[changelog_translate]` 寫的或組預設）。
                     let written = if id == "changelog_translate" { Some(&self.changelog_translate) } else { None };
                     let claude = |v: Option<&String>, d: &str, ok: &dyn Fn(&str) -> bool| v.map(|s| s.trim()).filter(|s| ok(s)).unwrap_or(d).to_string();
                     return Some(ClaudeApiUseState {
@@ -1411,7 +1409,6 @@ impl ConfigFile {
 
 fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseState {
     let pick = |v: &str, d: &str| if v.trim().is_empty() { d.to_string() } else { v.trim().to_string() };
-    // 只有允許的組會真的走 OpenAI；其他組寫了 `openai` 由 [`claude_api_group_problem`] 擋下（這裡不讓它生效）。
     if claude_api_group_allows_openai(gd.id) && api_provider_of(&g.provider) == Some(API_PROVIDER_OPENAI) {
         return ClaudeApiUseState {
             enabled: g.enabled.unwrap_or(gd.default_on),
@@ -1419,7 +1416,6 @@ fn group_overlay(gd: &ClaudeApiGroupDef, g: &ClaudeApiUseCfg) -> ClaudeApiUseSta
             effort: pick(&g.effort, OPENAI_USE_DEFAULT_EFFORT),
             max_per_hour: g.max_per_hour.unwrap_or(gd.max_per_hour),
             auto: gd.auto_default.map(|d| g.auto.unwrap_or(d)),
-            // 沒寫＝不換模型（重試同模型、effort 提高一級）；Claude 的預設重試模型不適用。
             retry_model: g.retry_model.as_deref().map(str::trim).unwrap_or("").to_string(),
             provider: API_PROVIDER_OPENAI,
         };
@@ -1820,7 +1816,6 @@ mod build_cfg_tests {
         assert_eq!(jobs("[build]\ncargo_jobs = 3\n"), 3);
         assert_eq!(jobs("[build]\ncargo_jobs = 100000\n"), MAX_BUILD_CARGO_JOBS);
 
-        // 夾過的值序列化出去再讀回來要穩定（不會每次開機都判成「外部改動」）。
         let once = toml::from_str::<ConfigFile>("[build]\ncargo_jobs = 0\n").unwrap();
         let twice = toml::from_str::<ConfigFile>(&toml::to_string_pretty(&once).unwrap()).unwrap();
         assert_eq!(once.build, twice.build);
@@ -1839,7 +1834,6 @@ mod build_cfg_tests {
 
         let bump = |text: &str| {
             std::fs::write(&path, text).unwrap();
-            // 不靠檔案系統的 mtime 解析度：每次都往後推一秒。
             let at = std::time::SystemTime::now() + std::time::Duration::from_secs(bump_secs());
             std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(at).unwrap();
         };
@@ -1854,12 +1848,10 @@ mod build_cfg_tests {
         assert_eq!(store.get().await.build.max_concurrent, 4, "記憶體裡的 [build] 一起換");
         assert_eq!(store.get().await.server.herdr_session, "one", "其他段不熱載入（要連著投影一起處理）");
 
-        // 打錯字／離譜的值：保留原本的，不退回預設。
         bump("[build]\nlease_ttl_secs = 0\n");
         assert_eq!(store.build_fresh().await.max_concurrent, 4);
         bump("[build\nmax_concurrent = 9\n");
         assert_eq!(store.build_fresh().await.max_concurrent, 4);
-        // 改回來就跟上。
         bump("[build]\nmax_concurrent = 1\n");
         assert_eq!(store.build_fresh().await.max_concurrent, 1);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1971,11 +1963,8 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
         "claude" => &["low", "medium", "high", "xhigh", "max"],
         "grok" => &["low", "medium", "high", "xhigh"],
         "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-        // agy：effort 已經包在模型 slug 裡（`gemini-3.8-flash-high`／`-low`…），`--effort` 旗標留到第二階段。
         "agy" => &[],
-        // claude-api：直接打 Messages API，`output_config.effort` 只收這五級（api_bot/protocol.rs `Options::validate`）。
         API_BOT_KIND => &["low", "medium", "high", "xhigh", "max"],
-        // openai-api：Responses API 的 `reasoning.effort`，照模型的清單（gpt-6-luna）。
         OPENAI_API_KIND => OPENAI_USE_EFFORTS,
         _ => &[],
     }
@@ -2210,7 +2199,6 @@ pub fn expand_home(value: &str, home: &str) -> String {
         value.to_string()
     };
     out = out.replace("${HOME}", home);
-    // Not inside a longer identifier ($HOMEBREW…).
     let mut res = String::with_capacity(out.len());
     let bytes: Vec<char> = out.chars().collect();
     let mut i = 0;
@@ -2238,7 +2226,6 @@ pub fn expand_home(value: &str, home: &str) -> String {
 /// `herdr_session` 會被拼進遠端的 session 路徑、launchd label 與 plist，限制在 herdr session 名字該有的字元。
 /// 呼叫端先 trim。
 pub fn host_target_problem(ssh: &str, session: &str) -> Option<String> {
-    // `user@-oProxyCommand=…`：`@` 後面以 `-` 開頭的主機名，較舊的 ssh 一樣會當成選項。
     let host_part = ssh.rsplit_once('@').map_or(ssh, |(_, h)| h);
     if ssh.is_empty() || ssh.starts_with('-') || host_part.starts_with('-') || ssh.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Some("ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters".into());
@@ -2296,12 +2283,9 @@ pub fn ssh_opts_problem(opts: &[String]) -> Option<String> {
 }
 
 fn ssh_option_problem(kv: &str) -> Option<String> {
-    // 允許 `Key=Value`；ssh 也接受 `Key Value`，一律先當成同一個東西檢查（Key 就是第一個 `=` 或空白前）。
-    // 非半形空白的空白（全形空白、NBSP…）ssh 不認作分隔，放行只會得到 Bad configuration option，這裡直接拒絕。
     if kv.chars().any(|c| c.is_control() || (c.is_whitespace() && c != ' ')) {
         return Some("an -o value contains a control character, newline or non-ASCII whitespace".into());
     }
-    // 分隔字元可能是多位元組（全形空白 3 bytes）：用 char_indices 取位元組位置，再跳過整個字元。
     let (key, value) = match kv.char_indices().find(|(_, c)| *c == '=' || c.is_whitespace()) {
         Some((i, c)) => (&kv[..i], kv[i + c.len_utf8()..].trim()),
         None => (kv, ""),
@@ -2320,7 +2304,6 @@ pub fn valid_host_name(name: &str) -> bool {
 }
 
 pub fn canonical_path(p: &str) -> Result<String> {
-    // bare `~` 也是家目錄（#1105）：不展開的話會被當成 daemon 工作目錄底下的相對路徑
     let expanded = if p == "~" {
         dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?
     } else if let Some(rest) = p.strip_prefix("~/") {
@@ -2349,7 +2332,6 @@ pub trait ConfigChangeHooks: Send + Sync {
     fn audit_write(&self, at: &'static std::panic::Location<'static>, path: &Path, old: &ConfigFile, new: &ConfigFile);
 }
 
-// 測試用：這條執行緒上 `ConfigStore::get` 被呼叫幾次（`/state` 不准逐台主機 clone 整份設定，見 `api::state_query_count_tests`，#1663）。
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
     pub static GET_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2466,11 +2448,8 @@ impl ConfigStore {
             g.mtime = mtime;
             return;
         }
-        // Cache even malformed content so it warns once, while a later corrected file with the
-        // same mtime still has a different fingerprint and gets another parse attempt.
         g.hot_fingerprint = Some(fingerprint);
         g.mtime = mtime;
-        // 空檔是合法 TOML（全部預設），卻是寫到一半或截斷後的形狀。當成解析失敗，留下記憶體裡的區段。
         if text.trim().is_empty() {
             tracing::warn!(path = %self.path.display(), "config.toml changed on disk but is blank; keeping the in-memory [build]/[agents]");
             return;
@@ -2559,11 +2538,8 @@ impl ConfigStore {
         G: FnOnce(&ConfigFile) -> Result<()>,
     {
         let mut g = self.inner.lock().await;
-        // 讀進來的磁碟內容（寫之前拿來比對、也是合併的底稿）；檔案不存在時是 `None`。
         let mut base: Option<String> = None;
         if self.path.exists() {
-            // Always merge from the current file: filesystems can preserve/coarsen mtimes, so
-            // comparing metadata alone can miss a completed external atomic replacement.
             let on_disk = std::fs::read_to_string(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
             base = Some(on_disk.clone());
@@ -2579,7 +2555,6 @@ impl ConfigStore {
             let (cfg, hot_fingerprint) = parse_file_text(&self.path, &on_disk)
                 .context("config.toml changed on disk and could not be re-read")?;
             let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
-            // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
             if cfg != g.cfg {
                 self.hooks.audit_external_change(at, &self.path, &g.cfg, &cfg);
             } else if mtime != g.mtime {
@@ -2592,20 +2567,11 @@ impl ConfigStore {
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
-        // issue #73：**落盤之前**先問「改完之後這份 config 投影出去會不會被擋」。以前是先寫檔再投影，
-        // 一筆會被擋下的修改等於把 TOML 改壞了才回錯誤——現場已經變了，daemon 下次啟動才爆。
-        // 這裡失敗就直接 `?` 出去：`next` 被丟掉，`g.cfg` 沒動，檔案一個字都沒寫。
-        //
-        // 不論這次改了什麼都驗整份；mutation 可以修復舊值，但不能讓其他不合法設定跟著落盤。
-        // 失敗是 `ConfigInvalid`：原因留在最前面（呼叫端與測試都在看它），型別讓 API 分得出這不是上游壞掉。
         if validate {
             self.hooks.validate_projection(&next)?;
         }
-        // 純驗證過了才問需要 DB 的那一類（同一條理由：驗不過就不寫，guard 也不例外）。
         guard(&next)?;
-        // 沒變就不寫（issue #38）；有變的話 `write_atomic` 就地改、保留註解與未知鍵。
         if next != g.cfg {
-            // 寫之前確認磁碟還是我們讀到的那一份：closure 與驗證都跑過了，這中間有手改就不寫、回錯誤請呼叫端重試（#1612）。
             if std::fs::read_to_string(&self.path).ok() != base {
                 return Err(anyhow::Error::new(ConfigChangedOnDisk));
             }
@@ -2636,11 +2602,8 @@ fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
 fn is_retired_key(path: &str) -> bool {
     let parts: Vec<&str> = path.split('.').collect();
     matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
-        // 專家模式逐對執行者授權（2026-11-06 改成總開關 `specialist_dispatch`）。
         || matches!(parts.as_slice(), ["projects", i, "executor_grants", ..] if i.parse::<usize>().is_ok())
-        // 專家模式執行者池（2026-11-06 退役）。
         || matches!(parts.as_slice(), ["projects", i, "executor_pool", ..] if i.parse::<usize>().is_ok())
-        // 執行者池條目指標（2026-11-06 隨執行者池退役）。
         || matches!(parts.as_slice(), ["projects", i, "bots", j, "pool_entry"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
 }
 
@@ -2706,7 +2669,6 @@ pub(crate) fn write_atomic_over(path: &Path, base: Option<&str>, cfg: &ConfigFil
 }
 
 fn resolve_write_target(path: &Path) -> Result<PathBuf> {
-    // 檔案還不存在（`read_file` 第一次寫預設設定）時 canonicalize 會失敗：那就照原路徑建。
     match std::fs::canonicalize(path) {
         Ok(target) => Ok(target),
         Err(_) if unresolvable_symlink(path) => {
@@ -2734,15 +2696,12 @@ fn write_resolved(target: &Path, base: Option<&str>, cfg: &ConfigFile) -> Result
         }
         let mut f = opts.open(&tmp)?;
         f.write_all(text.as_bytes())?;
-        // rename 會把暫存檔的權限當成新檔的權限：原檔被 chmod 過（0600、0640…）就沿用，不能被悄悄放寬或收窄
-        // （跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩）。
         if let Ok(md) = std::fs::metadata(target) {
             let _ = f.set_permissions(md.permissions());
         }
         f.sync_all()?;
         drop(f);
         std::fs::rename(&tmp, target)?;
-        // 目錄項目的更動也要落盤；有些檔案系統不支援對目錄 fsync，那就算了（檔案本身已經 sync 過）。
         if let Some(dir) = target.parent() {
             if let Ok(d) = std::fs::File::open(dir) {
                 let _ = d.sync_all();
@@ -2872,7 +2831,6 @@ fn merge_array_of_tables(old: &mut toml_edit::ArrayOfTables, new: &toml_edit::Ar
             Some(i) => {
                 used[i] = true;
                 let mut t = old.get(i).expect("matched index").clone();
-                // 未知鍵的路徑用**舊檔**的索引（`parse_config` 就是這樣報的）。
                 merge_table(&mut t, n, &format!("{path}.{i}"), unknown);
                 merged.push(t);
             }
@@ -2947,7 +2905,6 @@ mod v40_tests {
         assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
         assert!(normalize_effort("codex", Some("turbo")).is_err());
-        // `ultracode` is a TUI-only slider position, not a CLI value.
         assert_eq!(normalize_effort("claude", Some("High")).unwrap(), Some("high".into()));
         assert_eq!(normalize_effort("claude", Some("max")).unwrap(), Some("max".into()));
         assert!(normalize_effort("claude", Some("none")).is_err());
@@ -3084,7 +3041,6 @@ auto_start = true   # typo for autostart
         assert!(!dirty);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE, "comments and typos survive a no-op update");
 
-        // 真的有改：只動被改的那個值，使用者手寫的註解與（打錯字的）未知鍵原樣留著。
         store
             .update(|cfg| {
                 cfg.projects[0].bots[0].autostart = true;
@@ -3251,7 +3207,6 @@ mod issue507_tests {
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "連結被換成一般檔了");
         assert!(std::fs::read_to_string(&target).unwrap().contains("after"), "dotfiles 那份沒被更新");
-        // 暫存檔跟著目標走，而且兩邊都不准留下殘骸。
         for dir in [&home, &dotfiles] {
             let left: Vec<String> = std::fs::read_dir(dir)
                 .unwrap()
@@ -3260,7 +3215,6 @@ mod issue507_tests {
                 .collect();
             assert!(left.is_empty(), "{}: 留下暫存檔 {left:?}", dir.display());
         }
-        // 重新載入讀得到新值（連結還通）。
         assert_eq!(ConfigStore::load(link).await.unwrap().get().await.server.herdr_session, "after");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3377,7 +3331,6 @@ mod supervisor_cfg_tests {
         }
         assert_eq!(parse("[supervisor]\nresponder_max_backoff_secs = 600\n").responder_max_backoff_secs, 600);
 
-        // 夾過的值序列化出去再讀回來要穩定（不會每次開機都判成「外部改動」）。
         let once = parse("[supervisor]\nnotify_max_attempts = 0\nresponder_max_backoff_secs = 0\n");
         let twice = toml::from_str::<ConfigFile>(&toml::to_string_pretty(&ConfigFile {
             supervisor: once.clone(),
@@ -3454,22 +3407,18 @@ mod supervisor_cfg_tests {
         assert!(!none.openai_api.enabled);
         assert!(!toml::to_string_pretty(&none).unwrap().contains("openai_api"), "沒寫這段，設定檔的長相不變");
         assert_ne!(none.openai_api.key_file, none.claude_api.key_file, "openai 用自己的 key 檔");
-        // 關著：不驗證、不回限制。
         assert_eq!(none.openai_api.api_bot.validated(none.openai_api.enabled), Ok(None));
         let on: ConfigFile = toml::from_str("[openai_api]\nenabled=true\nkey_file='/k/openai'\n[openai_api.api_bot]\nmax_turn_cost_microusd=250000\ntotal_cap_usd=5.0\ntotal_cap_since='2026-11-18T00:00:00Z'\n").unwrap();
         assert!(on.openai_api.enabled);
         assert_eq!(on.openai_api.api_bot.total_cap_usd, Some(5.0));
         let v = on.openai_api.api_bot.validated(true).unwrap().expect("開了就有限制");
         assert_eq!(v.max_turn_cost_microusd, 250_000);
-        // 單回合上限可選：沒設＝不設上限（i64::MAX），照常啟動；設了 0 仍是無效值。
         assert_eq!(openai_api::OpenAiApiBotCfg::default().validated(true).unwrap().expect("開了就有限制").max_turn_cost_microusd, i64::MAX);
         let zero = openai_api::OpenAiApiBotCfg { max_turn_cost_microusd: Some(0), ..openai_api::OpenAiApiBotCfg::default() };
         assert!(zero.validated(true).is_err(), "0 不是不限");
-        // 其他共用的邊界照舊。
         let mut bad = on.openai_api.api_bot.clone();
         bad.max_api_calls_per_turn = 999;
         assert!(bad.validated(true).is_err());
-        // Claude 專屬的 compaction／clear_tool_uses／auto-lower-effort 不接受（沒有對應欄位，寫了也不生效、不 roundtrip）。
         let with_claude_only: ConfigFile = toml::from_str("[openai_api.api_bot]\ncompact_at_input_tokens=1\nauto_lower_effort_turn_cost_microusd=5\n").unwrap();
         assert!(!toml::to_string_pretty(&with_claude_only).unwrap().contains("compact_at_input_tokens"));
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
@@ -3485,11 +3434,9 @@ mod supervisor_cfg_tests {
         assert_eq!((d.enabled, d.model.as_str(), d.effort.as_str(), d.max_per_hour), (false, "claude-opus-5-5", "low", 30));
         assert_eq!(none.claude_use_state("changelog_translate").unwrap().model, "claude-haiku-5-5");
         assert_eq!(none.claude_api.use_state("nope"), None);
-        // 訊息翻譯是使用者親手按的：沒寫設定時預設開（仍受總開關管）；明寫 enabled=false 就關。
         assert!(none.claude_api.use_state("message_translate").unwrap().enabled);
         let off: ConfigFile = toml::from_str("[claude_api.uses.message_translate]\nenabled = false\n").unwrap();
         assert!(!off.claude_api.use_state("message_translate").unwrap().enabled);
-        // 自動翻譯英文訊息（使用者 2026-11-06）：訊息翻譯預設自動開，可明寫關掉；沒有自動開關的用途是 None；寫了會原樣存回。
         assert_eq!(none.claude_api.use_state("message_translate").unwrap().auto, Some(true));
         assert_eq!(none.claude_api.use_state("changelog_review").unwrap().auto, None);
         assert_eq!(none.claude_use_state("changelog_translate").unwrap().auto, None);
@@ -3505,7 +3452,6 @@ mod supervisor_cfg_tests {
         let h: ConfigFile = toml::from_str("[claude_api.uses.changelog_review]\nenabled = true\nmodel = \"claude-haiku-5-5\"\nmax_per_hour = 5\n").unwrap();
         let hs = h.claude_api.use_state("changelog_review").unwrap();
         assert_eq!((hs.model.as_str(), hs.effort.as_str(), hs.max_per_hour), ("claude-haiku-5-5", "low", 5));
-        // 舊設定檔：翻譯仍讀 [changelog_translate]；key 檔沿用被改過的那個。
         let legacy: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nkey_file = \"/k/old\"\n").unwrap();
         assert!(legacy.claude_use_state("changelog_translate").unwrap().enabled);
         assert_eq!(legacy.changelog_translate_key_file(), "/k/old");
@@ -3517,7 +3463,6 @@ mod supervisor_cfg_tests {
 
     #[test]
     fn claude_api_groups_resolve_use_to_group_and_project_legacy_config() {
-        // 預設：分析組 Opus 5.5／low；翻譯組 Haiku 5.5／low；同組的用途拿到同一份。
         let none = ConfigFile::default();
         let a = none.claude_group_state("changelog_analysis").unwrap();
         assert_eq!((a.model.as_str(), a.effort.as_str(), a.enabled), ("claude-opus-5-5", "low", false));
@@ -3526,22 +3471,18 @@ mod supervisor_cfg_tests {
         assert_eq!((t.model.as_str(), t.effort.as_str(), t.enabled, t.auto), ("claude-haiku-5-5", "low", true, Some(true)));
         assert!(none.claude_group_state("nope").is_none());
         assert!(CLAUDE_API_MODELS.contains(&"claude-opus-5-5"));
-        // 每個用途都屬於某組，組的成員表與用途表一致。
         for d in CLAUDE_API_USES {
             assert!(CLAUDE_API_GROUPS.iter().any(|g| g.id == d.group && g.members.contains(&d.id)), "{}", d.id);
         }
-        // 舊設定檔（只有 uses.*）：開機投影成組的值，沒寫組設定前每個用途照舊各讀各的。
         let old: ConfigFile = toml::from_str("[claude_api.uses.release_triage]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\neffort = \"high\"\nmax_per_hour = 7\n").unwrap();
         let g = old.claude_group_state("changelog_analysis").unwrap();
         assert_eq!((g.enabled, g.model.as_str(), g.effort.as_str(), g.max_per_hour), (true, "claude-sonnet-5-5", "high", 7));
         assert_eq!(old.claude_use_state("release_triage").unwrap().model, "claude-sonnet-5-5");
         assert_eq!(old.claude_use_state("changelog_review").unwrap().model, "claude-opus-5-5", "沒寫的成員用新預設");
-        // 舊的 [changelog_translate] 開著、訊息翻譯被關：翻譯組仍算開著（不讓更新框翻譯失效）。
         let legacy: ConfigFile = toml::from_str("[changelog_translate]\nenabled = true\nmodel = \"claude-sonnet-5-5\"\n[claude_api.uses.message_translate]\nenabled = false\n").unwrap();
         let lg = legacy.claude_group_state("translate").unwrap();
         assert!(lg.enabled);
         assert_eq!(lg.model, "claude-sonnet-5-5");
-        // 寫了組設定：整組以它為準，兩個用途一起變。
         let grouped: ConfigFile = toml::from_str("[claude_api.groups.translate]\nenabled = false\nmodel = \"claude-sonnet-5-5\"\n[claude_api.uses.message_translate]\nenabled = true\n").unwrap();
         for u in ["message_translate", "changelog_translate"] {
             let s = grouped.claude_use_state(u).unwrap();
@@ -3553,7 +3494,6 @@ mod supervisor_cfg_tests {
 
     #[test]
     fn legacy_changelog_timeout_survives_a_save_of_other_fields() {
-        // #1942：舊的 [changelog_translate] timeout_ms 已廢棄、不生效，但存檔時不能被悄悄刪掉。
         let old = "# mine\n[changelog_translate]\nenabled = true\ntimeout_ms = 8000\n";
         let (mut cfg, _) = parse_config(old).unwrap();
         assert_eq!(cfg.changelog_translate.timeout_ms, Some(8000));
@@ -3688,7 +3628,6 @@ model = "gpt-6"
         assert!(store.updates_fresh().await.is_auto("codex"));
         assert!(!store.updates_fresh().await.is_auto("grok"));
 
-        // 手改檔案熱重讀
         std::fs::write(&path, "[updates]\nauto = [\"grok\"]\n").unwrap();
         assert_eq!(store.updates_fresh().await.auto, vec!["grok"]);
         assert!(store.updates_fresh().await.is_auto("grok"));
@@ -3757,7 +3696,6 @@ model = "gpt-6"
         let t = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(t).unwrap();
         assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"));
-        // 半寫／打錯字：保留記憶體裡的值。
         std::fs::write(&path, "[agents\ninstructions_file = ").unwrap();
         let t2 = t + std::time::Duration::from_secs(5);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(t2).unwrap();
@@ -3859,7 +3797,6 @@ model = "gpt-6"
         AFTER_DISK_READ.with(|hook| *hook.borrow_mut() = None);
 
         result.unwrap();
-        // 這次更新沒有改任何東西（不寫檔），磁碟上的空檔也不能被換成舊內容（#1612 的寫入路徑另有測試）。
         assert!(std::fs::read_to_string(&path).unwrap().trim().is_empty(), "空檔不能被蓋掉");
         assert_eq!(observed_projects.get(), 1, "套用的對象應是剛讀到的那一份");
         assert_eq!(store.get().await.projects.len(), 1, "空檔不可把記憶體設定換成預設值");
@@ -3891,7 +3828,6 @@ mod ssh_opts_tests {
             assert!(ssh_opts_problem(&["-o".into(), format!("User{sep}root")]).is_some(), "sep={sep:?}");
             assert!(ssh_opts_problem(&[format!("-oConnectTimeout{sep}5")]).is_some(), "sep={sep:?}");
         }
-        // 不回歸：半形分隔與白名單照舊。
         assert_eq!(ssh_opts_problem(&["-o".into(), "ConnectTimeout=5".into()]), None);
         assert_eq!(ssh_opts_problem(&["-oUser root".into()]), None);
         assert_eq!(ssh_opts_problem(&["-o".into(), "User root".into()]), None);
@@ -3906,11 +3842,9 @@ mod canonical_path_tests {
 
     #[test]
     fn canonical_path_expands_a_bare_tilde_to_the_home_directory() {
-        // 只讀家目錄，不寫任何東西進真實 HOME。
         let home = std::fs::canonicalize(dirs::home_dir().unwrap()).unwrap();
         assert_eq!(canonical_path("~").unwrap(), home.to_string_lossy());
         assert_eq!(canonical_path("~/").unwrap(), home.to_string_lossy());
-        // `~foo` 不是家目錄底下的東西，照舊當相對路徑（不存在就是 Err）。
         assert!(canonical_path("~no-such-user-dir-xyz").is_err());
     }
 }
@@ -4105,7 +4039,6 @@ mod retry_cross_provider_tests {
         assert_eq!(claude_api_group_problem("translate", &group("claude-sonnet-5-5")), None);
         assert_eq!(claude_api_group_problem("translate", &group("")), None, "空字串＝不升級");
         assert!(claude_api_group_problem("changelog_analysis", &group("gpt-6-luna")).is_some(), "其他組不能重試到 OpenAI");
-        // 翻譯組的 OpenAI 只用 luna：astra／sol（bot 的核准模型）不能當翻譯的模型或重試模型。
         assert!(claude_api_group_problem("translate", &group("gpt-6.2-astra")).is_some(), "翻譯不用 astra（貴）");
         assert!(claude_api_group_problem("translate", &group("gpt-6.2-sol")).is_some(), "翻譯不用 sol");
         assert_eq!(api_provider_of_model("gpt-6.2-astra"), API_PROVIDER_OPENAI, "帳本與計價認得 astra 是 OpenAI");

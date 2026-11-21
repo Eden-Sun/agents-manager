@@ -93,7 +93,6 @@ async fn upload_takes_any_file_not_just_images() {
         status(upload_attachment(State(e.app.clone()), Path(bot_id.clone()), query, headers, Bytes::from_static(b"boom\n")).await).await,
         StatusCode::OK
     );
-    // 完全沒有 Content-Type 的上傳（有些瀏覽器貼上就是這樣）也不能被擋。
     let query = Query(HashMap::from([("name".to_string(), "notes.md".to_string())]));
     assert_eq!(
         status(upload_attachment(State(e.app.clone()), Path(bot_id), query, HeaderMap::new(), Bytes::from_static(b"# hi")).await).await,

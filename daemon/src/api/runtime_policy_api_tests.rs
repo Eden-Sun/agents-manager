@@ -21,7 +21,6 @@ async fn bot_override_is_user_only_validated_and_projected() {
     let err = patch(RequestPrincipal::Bot("someone".into()), json!({"runtime_override": {"keep_warm": true}})).await.err().unwrap();
     assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
 
-    // 超出模型視窗（claude 一律 1M）的覆寫要被擋，連同一起送的模型也不寫。
     let err = patch(RequestPrincipal::User, json!({"model": "claude-x", "runtime_override": {"context_tokens": 1000001}})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "context_out_of_range"), "{err:?}");
     assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().model, model_before, "驗證失敗什麼都不寫");
@@ -33,7 +32,6 @@ async fn bot_override_is_user_only_validated_and_projected() {
     let in_cfg = env.app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|x| x.id.as_deref() == Some(bot.as_str())).and_then(|x| x.runtime_override.clone());
     assert_eq!(in_cfg.as_ref().and_then(|v| v.get("context_tokens")), Some(&json!(512000)), "真相在 config.toml");
 
-    // 清掉＝跟角色。
     patch(RequestPrincipal::User, json!({"runtime_override": null})).await.map_err(|e| format!("{e:?}")).unwrap();
     assert!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().runtime_override_json.is_none());
 }

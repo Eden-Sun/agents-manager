@@ -152,7 +152,6 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         fail(app, &sched, &occ, "base_snapshot_missing", "這顆 bot 沒有基準快照（可能已被清除），不在舊 context 執行", false).await?;
         return Ok(false);
     };
-    // 本機 bot 且記得 rollout 位置：檔案不在了就明講，不要讓 codex 在啟動時才失敗。遠端 bot 在它自己的主機 fork，由 codex 啟動結果判斷。
     let host = db::bot_host(pool, &bot.id).await?;
     if host == crate::config::LOCAL_HOST {
         if let Some(path) = snap.transcript_path.as_deref() {
@@ -162,7 +161,6 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
             }
         }
     }
-    // 等 bot 閒置：有排隊或進行中的回合就先等（同既有的 bot_busy）。
     let conv = db::conversation_id(pool, &bot.id).await?;
     let busy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND status IN ('queued','in_flight')").bind(&conv).fetch_one(pool).await?;
     if busy > 0 {
@@ -170,10 +168,8 @@ pub(super) async fn dispatch(app: &Arc<App>, occurrence_id: &str) -> Result<bool
         return Ok(false);
     }
     let opts = StartOpts { fork_session: Some(snap.session_id.clone()), fork_source_bot: Some(bot.id.clone()), ..Default::default() };
-    // 重啟開始的時間：重啟真的成功才記成這次 attempt 的開始（等閒置、被擋的不算）。
     let began = db::now();
     let started = if db::active_run(pool, &bot.id).await?.is_some() {
-        // 鎖內再確認一次閒置（`require_idle`）；不閒置回 409 not_idle，等下一輪。
         Box::pin(lifecycle::restart_bot_with(app, &bot.id, StartOpts { require_idle: true, ..opts })).await
     } else {
         Box::pin(lifecycle::start_bot_with(app, &bot.id, opts)).await

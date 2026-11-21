@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 mod tests {
     use super::*;
 
-    // 測試本地輔助（#1862 S3b）：與 am-supervisor crate-only 版同一份本體。
     fn stats(key: &str) -> Value {
         snapshot()["stats"][key].clone()
     }
@@ -29,13 +28,10 @@ mod tests {
         let (logs, _guard) = crate::config_audit::capture::start();
         const SLOW_LINE: &str = "supervisor tick segment was slow";
 
-        // 真的跑一次 `seg`：確認它有量、而且快的那一段不寫 log。
         seg(&e.app, "quick", async {}).await;
         assert!(!logged(&logs.text(), SLOW_LINE), "正常的一段不該寫那一行：{:?}", logs.text());
         assert_eq!(stats("tick:quick")["count"], json!(1), "沒寫 log 不代表沒量");
 
-        // 門檻本身用明確的耗時驗（`seg` 量的是 `std::time::Instant`，`tokio::time::pause` 停不了它，
-        // 真的睡 2 秒又太慢）：剛好差 1 毫秒不寫，到門檻才寫。
         note_segment(&e.app, "just-under", SLOW_SEGMENT - Duration::from_millis(1)).await;
         assert!(!logged(&logs.text(), SLOW_LINE), "差一毫秒也不寫：{:?}", logs.text());
 

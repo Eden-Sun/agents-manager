@@ -47,7 +47,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // 比 #801 早建的帳本沒有上面兩欄：補上（`CREATE TABLE IF NOT EXISTS` 不會動既有的表）。
     let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('release_triage')").fetch_all(pool).await?;
     if !cols.iter().any(|c| c == "assigned_bot_id") {
         sqlx::query("ALTER TABLE release_triage ADD COLUMN assigned_bot_id TEXT").execute(pool).await?;
@@ -87,9 +86,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         .await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS release_triage_migrations (name TEXT PRIMARY KEY)").execute(pool).await?;
 
-    // Parse the old issue refs only once when introducing the compact, indexed quota summary.
-    // Entry and verdict payloads are intentionally untouched, and one malformed historical row
-    // must not prevent an unrelated release from being published.
     let mut tx = pool.begin().await?;
     let backfill = sqlx::query("INSERT OR IGNORE INTO release_triage_migrations (name) VALUES ('issue-create-summary-v1')")
         .execute(&mut *tx)

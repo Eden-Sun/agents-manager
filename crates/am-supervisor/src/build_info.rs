@@ -121,7 +121,6 @@ fn write_last_deploy(path: &Path, body: &[u8]) -> std::io::Result<()> {
 
 /// `{sha, sha_full, dirty, at}`：現在跑的是哪一版，以及它是什麼時候上線的。
 pub fn last_deploy() -> serde_json::Value {
-    // `sha_full`／`dirty`：daemon-swap 換完之後用 API 再複核一次（binary 驗過了，起來的卻不是它）。
     serde_json::json!({"sha": BUILD_SHA, "sha_full": BUILD_SHA_FULL, "dirty": BUILD_DIRTY, "at": DEPLOYED_AT.get().cloned().unwrap_or_else(started_at)})
 }
 
@@ -134,7 +133,6 @@ mod tests {
     /// `include_str!` 相對於這個檔案，在 am-supervisor 本身與 daemon（`#[path]` 引入）兩邊都解得到同一支 build.rs。
     #[test]
     fn the_build_script_reruns_when_any_workspace_crate_changes() {
-        // 清單在 build.rs（`WORKSPACE_WATCH`），迴圈與 `if release` 在兩支 build script 共用的 build_common.rs。
         let script = format!("{}{}", include_str!("../build.rs"), include_str!("../build_common.rs"));
         for p in ["../../daemon/src", "../../crates", "../../Cargo.toml", "../../Cargo.lock"] {
             assert!(script.contains(p), "build.rs must keep `{p}` in its rerun-if-changed list");
@@ -192,17 +190,13 @@ mod tests {
 
         let first = deployed_at(&dir, "abc1234", "2026-09-16T10:00:00Z");
         assert_eq!(first, "2026-09-16T10:00:00Z", "第一次跑：現在就是上線時間");
-        // 同一顆 binary 重啟兩次：時間不動。
         assert_eq!(deployed_at(&dir, "abc1234", "2026-09-16T10:20:00Z"), first);
         assert_eq!(deployed_at(&dir, "abc1234", "2026-09-16T18:00:00Z"), first);
-        // 換了 binary：這一刻才是新的上線時間，而且寫回去。
         assert_eq!(deployed_at(&dir, "def5678", "2026-09-17T09:00:00Z"), "2026-09-17T09:00:00Z");
         assert_eq!(deployed_at(&dir, "def5678", "2026-09-17T09:30:00Z"), "2026-09-17T09:00:00Z");
 
-        // 壞掉的檔案不能讓 daemon 起不來，也不該回一個空時間。
         std::fs::write(dir.join(FILE), "not json").unwrap();
         assert_eq!(deployed_at(&dir, "def5678", "2026-09-17T10:00:00Z"), "2026-09-17T10:00:00Z");
-        // 沒有 git 的建置分不出版本：用這個 process 的時間，不寫檔。
         let before = std::fs::read_to_string(dir.join(FILE)).unwrap();
         assert_eq!(deployed_at(&dir, "unknown", "2026-09-17T11:00:00Z"), "2026-09-17T11:00:00Z");
         assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), before);
@@ -228,4 +222,3 @@ mod tests {
     }
 }
 
-// Keep one daemon-only wiring smoke while pure cases run in their owning crate targets.

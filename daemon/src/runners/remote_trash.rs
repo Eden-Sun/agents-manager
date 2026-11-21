@@ -26,7 +26,6 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
             return;
         }
     };
-    // 清理記號（`remote_purge`）只有還原真的成功才忘掉（#1307）：沒成功就留著，之後的補還原與掃描還認得它。
     let Some(conn) = app.hosts.get(&host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir not restored from bots-trash");
         return;
@@ -79,7 +78,6 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
     crate::runners::app_ports_p11::race_point::hit("remote_restore_after_list", host).await;
     let mut out = Unrestored::default();
     for id in ids.iter().filter(|id| backed.contains(*id)) {
-        // 補還原的退避（#1427）：上次失敗還沒到下次可試的時間、或已經放棄自動重試，這一輪不 ssh；備份算「還沒還原」（不過期、不計量）。
         match crate::remote_purge::restore_backoff(&app.db, host, id).await {
             Ok(Some((attempts, due))) if !due || attempts >= crate::remote_purge::RESTORE_GIVE_UP_AFTER => {
                 out.failed.insert(id.clone());
@@ -92,8 +90,6 @@ async fn restore_pending(app: &Arc<App>, host: &str, conn: &crate::hosts::HostCo
                 continue;
             }
         }
-        // 拿不到鎖就這一輪跳過（別的路握著，不算還原失敗，下一輪再來）；它的備份這一輪也不能清（#1413）。
-        // 拿到才在鎖裡重讀 `deleted_at`，鎖握到 `restore` 與 `forget` 做完（同 `remote_purge::sweep`，#511／#1301）。
         let Ok(_guard) = app.bot_lock(id).await.try_lock_owned() else {
             out.busy.insert(id.clone());
             continue;
@@ -188,7 +184,6 @@ async fn give_up_alert(app: &Arc<App>, host: &str, id: &str, attempts: i64) {
 /// 活著、沒有任何回收區備份的 bot，它的「已清掉」記號沒有用了：忘掉（#1406）。一句 SQL 做完，子查詢只挑
 /// 這台主機上**還活著、沒移交**（§6.5h）的 bot，所以名單讀完之後才被刪的那顆不會被忘掉記號。寫不進去只記 log。
 async fn forget_marks_without_backup(app: &Arc<App>, host: &str, backed: &HashSet<String>) {
-    // 只清記在這台的記號（#1416）：別台的記號（專案搬走前記的）不屬於這台的清理。
     let mut sql = "DELETE FROM remote_bot_dir_purges WHERE host = ? AND bot_id IN (SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id \
                    WHERE p.host = ? AND p.handed_off_to IS NULL AND b.deleted_at IS NULL)"
         .to_string();

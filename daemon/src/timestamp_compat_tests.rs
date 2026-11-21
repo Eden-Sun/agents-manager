@@ -47,17 +47,12 @@ async fn a_second_precision_notify_deadline_is_due_by_the_instant_not_the_string
     let p = &e.app.db;
     store::get_or_init(p).await.unwrap();
     let rows = [
-        // 舊格式、同一秒內、已經過了（10:00:00.000 <= 10:00:00.500）→ 該出來。**字串比較在這裡判錯。**
         ("sec-same-second-past", "2026-09-18T10:00:00Z", true),
-        // 毫秒格式、同一秒內、已經過了 → 該出來。
         ("ms-same-second-past", "2026-09-18T10:00:00.400Z", true),
-        // 毫秒格式、同一秒內、還沒到 → 不該出來。
         ("ms-same-second-future", "2026-09-18T10:00:00.600Z", false),
-        // 舊格式、下一秒 → 不該出來。
         ("sec-next-second", "2026-09-18T10:00:01Z", false),
         ("sec-far-past", "2026-09-18T09:59:59Z", true),
         ("sec-far-future", "2026-09-18T10:10:00Z", false),
-        // 任何合法 RFC3339 都要判對（`+08:00` 的 18:00:00 就是 10:00:00Z）。
         ("offset-past", "2026-09-18T18:00:00+08:00", true),
         ("offset-future", "2026-09-18T18:00:01+08:00", false),
     ];
@@ -75,7 +70,6 @@ async fn a_second_precision_notify_deadline_is_due_by_the_instant_not_the_string
     want.sort();
     assert_eq!(got, want, "新舊格式混存，要照時刻判");
 
-    // 單角色時代那支（留給既有測試的守衛）也一樣。
     let mut got: Vec<String> = store::due_inbox(p, now, 5).await.unwrap().into_iter().map(|e| e.event_key).collect();
     got.sort();
     assert_eq!(got, want, "due_inbox 也要照時刻判");
@@ -90,19 +84,16 @@ async fn a_second_precision_approval_expiry_is_judged_by_the_instant() {
     let p = &e.app.db;
     let now = "2026-09-18T10:00:00.500Z";
 
-    // 已在 10:00:00.000 過期（舊格式），現在 10:00:00.500 → 過期。
     let id = approved(p, "bot-a", "restart", "2026-09-18T10:00:00Z").await;
     let a = st::approval(p, &id).await.unwrap().unwrap();
     assert_eq!(a.refusal(now, "restart", None), Some("approval_expired"), "同一秒內、舊格式：早就過期了");
     assert!(st::oldest_live_window_approval(p, now).await.unwrap().is_none(), "過期的不算還活著的核准");
 
-    // 下一秒才過期（舊格式）→ 還有效。
     sqlx::query("UPDATE supervisor_approvals SET expires_at='2026-09-18T10:00:01Z' WHERE id=?").bind(&id).execute(p).await.unwrap();
     let a = st::approval(p, &id).await.unwrap().unwrap();
     assert_eq!(a.refusal(now, "restart", None), None, "還沒到期");
     assert_eq!(st::oldest_live_window_approval(p, now).await.unwrap().map(|x| x.id), Some(id.clone()));
 
-    // 毫秒格式、同一秒內：0.400 已過、0.600 沒到。
     sqlx::query("UPDATE supervisor_approvals SET expires_at='2026-09-18T10:00:00.400Z' WHERE id=?").bind(&id).execute(p).await.unwrap();
     assert_eq!(st::approval(p, &id).await.unwrap().unwrap().refusal(now, "restart", None), Some("approval_expired"));
     sqlx::query("UPDATE supervisor_approvals SET expires_at='2026-09-18T10:00:00.600Z' WHERE id=?").bind(&id).execute(p).await.unwrap();
@@ -118,7 +109,6 @@ async fn a_second_precision_lease_is_held_only_until_its_instant() {
     let now = "2026-09-18T10:00:00.500Z";
     st::acquire_lease(p, "restart", "runner", None, None, "2026-09-18T10:00:00Z", false, None, &json!({})).await.unwrap();
     assert!(!st::lease(p, "restart").await.unwrap().unwrap().held_at(now), "10:00:00.000 已過，不算握著");
-    // 沒 release 的租約過期了，另一個人可以接手：改成下一秒才過期的，要仍算握著。
     sqlx::query("UPDATE supervisor_leases SET expires_at='2026-09-18T10:00:01Z' WHERE resource='restart'").execute(p).await.unwrap();
     assert!(st::lease(p, "restart").await.unwrap().unwrap().held_at(now), "10:00:01 才過期，還握著");
 }
@@ -136,9 +126,7 @@ async fn a_lease_that_expired_earlier_in_this_second_is_taken_over_and_cannot_re
         .unwrap()
         .expect("第一個人拿到");
 
-    // 舊格式、這一秒的整點 → 已經過了 60ms 以上。續約要失敗（過期的租約不能續）。
     assert!(!st::renew_lease(p, "restart", "runner-1", first.fence, &db::iso_in(600)).await.unwrap(), "過期的租約不能續");
-    // 過期沒 release → 下一個人可以接手。
     let later = db::iso_in(600);
     let second = st::acquire_lease(p, "restart", "runner-2", None, None, &later, false, None, &json!({})).await.unwrap();
     assert!(second.is_some(), "同一秒內過期的舊格式租約要能被接手");
@@ -180,7 +168,6 @@ async fn the_escalation_clock_starts_at_the_earlier_instant_whatever_the_spellin
     let e = tt::env().await;
     let p = &e.app.db;
     let id = approved(p, "bot-a", "rebuild", &db::iso_in(600)).await;
-    // 接續來的等待起點（秒格式）10:00:00.000 早於自己被核准的 10:00:00.500。
     sqlx::query("UPDATE supervisor_approvals SET decided_at='2026-09-18T10:00:00.500Z', wait_since='2026-09-18T10:00:00Z' WHERE id=?")
         .bind(&id)
         .execute(p)
@@ -269,7 +256,6 @@ mod due_actions {
         for i in 0..da::PER_KIND {
             assignment(p, &format!("ms-{i:03}"), "2026-09-18T10:00:05.500Z").await;
         }
-        // 舊格式、同一秒內更早（05.000 < 05.500）；字串排序把它排在最後一筆，剛好被 LIMIT 擠掉。
         assignment(p, "legacy-earliest", "2026-09-18T10:00:05Z").await;
         let rows = da::pending(p).await.unwrap();
         assert_eq!(rows.len() as i64, da::PER_KIND, "每一類最多這麼多筆");
@@ -305,14 +291,12 @@ async fn ts_sql_turns_every_spelling_into_the_canonical_string() {
         ("2026-09-18T10:00:00.594+00:00", "2026-09-18T10:00:00.594Z"),
         ("2026-09-18T18:00:00+08:00", "2026-09-18T10:00:00.000Z"),
         ("2026-09-18T05:00:00-05:00", "2026-09-18T10:00:00.000Z"),
-        // 跨日、跨年也要換對。
         ("2027-01-01T05:00:00+08:00", "2026-12-31T21:00:00.000Z"),
     ] {
         let got: String = sqlx::query_scalar(&sql).bind(raw).fetch_one(&p).await.unwrap();
         assert_eq!(got, want, "{raw}");
         assert_eq!(db::parse_ts(raw).map(db::iso_at).as_deref(), Some(want), "Rust 端 {raw}");
     }
-    // 解不開的原樣退回（不憑空編時間），NULL 還是 NULL。
     let got: String = sqlx::query_scalar(&sql).bind("not-a-time").fetch_one(&p).await.unwrap();
     assert_eq!(got, "not-a-time");
     let got: Option<String> = sqlx::query_scalar(&sql).bind(None::<String>).fetch_one(&p).await.unwrap();
@@ -324,7 +308,6 @@ async fn ts_sql_turns_every_spelling_into_the_canonical_string() {
 #[tokio::test]
 async fn ordering_a_mixed_bag_by_instant_matches_real_time_and_the_raw_strings_do_not() {
     let base = chrono::DateTime::parse_from_rfc3339("2026-09-18T10:00:00Z").unwrap().with_timezone(&chrono::Utc);
-    // 每 250ms 一個，前後各半秒；整秒的寫成秒格式，一半改用 `+08:00`，其餘毫秒。
     let mut items: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
     for k in -8..=8i64 {
         let t = base + chrono::Duration::milliseconds(250 * k);
@@ -338,7 +321,6 @@ async fn ordering_a_mixed_bag_by_instant_matches_real_time_and_the_raw_strings_d
         };
         items.push((t, spelled));
     }
-    // 決定性的洗牌。
     let mut shuffled = items.clone();
     shuffled.sort_by_key(|(t, _)| (t.timestamp_millis() * 7919) % 1009);
 
@@ -367,12 +349,9 @@ fn same_instant_ignores_how_the_time_is_spelled() {
     assert!(!db::same_instant(Some("2026-09-18T10:00:00Z"), Some("2026-09-18T10:00:00.001Z")));
     assert!(db::same_instant(None, None));
     assert!(!db::same_instant(Some("2026-09-18T10:00:00Z"), None));
-    // 解不開的退回字串相等。
     assert!(db::same_instant(Some("x"), Some("x")));
     assert!(!db::same_instant(Some("x"), Some("y")));
 }
-
-// ---------------------------------------------------------------- 守衛：不准有人再繞過去
 
 fn production_sources() -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -393,13 +372,10 @@ fn production_sources() -> Vec<(String, String)> {
         .into_iter()
         .filter_map(|f| {
             let at = f.strip_prefix(&root).unwrap().display().to_string();
-            // #1862：從 crates/ 搬進 daemon 的整份測試目錄（share_tests／supervisor_tests）不是 production，原本放在 crates/ 底下本來就不在掃描範圍。
             if at == "timestamp_compat_tests.rs" || at.ends_with("_tests.rs") || at.starts_with("share_tests/") || at.starts_with("supervisor_tests/") || at.starts_with("lifecycle_tests/") {
-                return None; // 整份都是測試
+                return None;
             }
             let src = std::fs::read_to_string(&f).unwrap();
-            // 生產區：第一個「`#[cfg(test)]` 接著 `mod`」之前。單獨一個 `#[cfg(test)] fn`（例如只給測試用的
-            // 輔助函式）不算測試區的開頭，後面的正式程式碼仍要掃。
             let lines: Vec<&str> = src.lines().collect();
             let mut end = lines.len();
             for (i, l) in lines.iter().enumerate() {
@@ -452,7 +428,6 @@ fn str_ordering(line: &str) -> bool {
         if starts_with_ordering_op(&line[i + ".as_str()".len()..]) {
             return true;
         }
-        // 往回退到這個運算元的開頭，看它前面是不是比較運算子。
         let head = &line[..i];
         let start = head.rfind(|c: char| !(is_ident(c) || c == '.' || c == '&' || c == '*' || c == '(' || c == ')')).map_or(0, |k| k + 1);
         ends_with_ordering_op(&head[..start])
@@ -480,12 +455,11 @@ fn time_named_operands_ordered(line: &str) -> bool {
     let word = |s: &str| -> String { s.chars().take_while(|c| is_ident(*c)).collect() };
     ["<=", ">=", "<", ">"].iter().any(|op| {
         line.match_indices(op).any(|(i, _)| {
-            // `<=` 也含 `<`：只在運算子開頭那一格判。
             if (*op == "<" || *op == ">") && line[i + 1..].starts_with('=') {
                 return false;
             }
             if line[..i].ends_with('-') || line[..i].ends_with('=') || line[i + op.len()..].starts_with('>') {
-                return false; // `->`、`=>`、`<>`
+                return false;
             }
             let left: String = line[..i].trim_end().chars().rev().take_while(|c| is_ident(*c)).collect::<Vec<_>>().into_iter().rev().collect();
             let right = word(line[i + op.len()..].trim_start());
@@ -539,7 +513,6 @@ const NON_MILLISECOND_WRITERS: &[(&str, &str)] = &[(
 /// `herdr_maintenance`、`bot_reads`）字串比較本來就對，列在 `CANONICAL_ONLY`，各有理由。
 #[test]
 fn deadline_comparisons_never_compare_raw_timestamp_strings() {
-    // (檔案, 為什麼字串比較在這裡是對的)
     const CANONICAL_ONLY: &[(&str, &str)] = &[
         ("build_scheduler.rs", "build_slots 的 since／last_seen／expires_at 只由本檔用 Utc::now() 的毫秒格式寫，從來沒有秒格式"),
         ("hook_inbox.rs", "hook_events.next_attempt_at 只由 mark_failed 用 Utc 的毫秒格式寫"),
@@ -559,7 +532,7 @@ fn deadline_comparisons_never_compare_raw_timestamp_strings() {
     let mut hits: Vec<String> = Vec::new();
     for (file, prod) in production_sources() {
         if file == "db.rs" {
-            continue; // 格式與正規化就定義在這裡
+            continue;
         }
         let canonical_only = CANONICAL_ONLY.iter().any(|(f, _)| *f == file);
         for (i, line) in prod.lines().enumerate() {
@@ -589,7 +562,6 @@ fn deadline_comparisons_never_compare_raw_timestamp_strings() {
          SQL 端把欄位包成 `db::ts_sql(\"col\")`；Rust 端用 `db::cmp_ts`／`db::same_instant`（issue #101）：\n{}",
         unexpected.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
     );
-    // 已知未修的清單不准留著過期的項目：修掉了就要從這裡拿掉。
     for (needle, why) in KNOWN_UNFIXED {
         assert!(hits.iter().any(|h| h.contains(needle)), "stale allowlist：{needle}（{why}）已經不再命中，請從 KNOWN_UNFIXED 移除");
     }
@@ -617,7 +589,6 @@ fn the_source_guard_recognises_the_shapes_it_is_meant_to_catch() {
     assert!(closure_param_ordering(".filter(|w| *w < decided)"));
     assert!(!closure_param_ordering(".map(|t| t + 1)"));
     assert!(!closure_param_ordering(".map(|a, b| a.cmp(b))"));
-    // upsert 守衛與寫入格式（#101／#702 的長期守衛）。
     assert!(compares_excluded_time("WHERE excluded.updated_at >= quota_cache.updated_at"));
     assert!(compares_excluded_time("AND excluded.read_at > bot_reads.read_at"));
     assert!(!compares_excluded_time("SET updated_at=excluded.updated_at"), "賦值不是比較");
@@ -639,7 +610,6 @@ async fn an_approval_that_expired_earlier_this_second_does_not_start_the_escalat
     let id = approved(p, "bot-a", "restart", &mid_second().await).await;
     let got = crate::supervisor::maintenance::escalation_for(&e.app, Some(&id)).await.unwrap();
     assert!(got.is_none(), "已過期的核准不算還能用來開窗口");
-    // 下一秒才過期的照舊有效。
     let live = approved(p, "bot-b", "restart", &db::iso_in(600)).await;
     assert!(crate::supervisor::maintenance::escalation_for(&e.app, Some(&live)).await.unwrap().is_some());
 }
@@ -649,11 +619,8 @@ async fn an_approval_that_expired_earlier_this_second_does_not_start_the_escalat
 #[test]
 fn the_lease_deadline_is_the_earlier_instant_whatever_the_spelling() {
     use crate::supervisor::maintenance::lease_deadline;
-    // 舊格式、同一秒內更早（10:00:00.000 < 10:00:00.500）→ 用核准的。
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T10:00:00Z")), "2026-09-18T10:00:00Z");
-    // 帶位移：18:00:00+08:00 就是 10:00:00Z，早於 10:00:01 → 用核准的（字串比較差 8 小時）。
     assert_eq!(lease_deadline("2026-09-18T10:00:01.000Z", Some("2026-09-18T18:00:00+08:00")), "2026-09-18T18:00:00+08:00");
-    // 核准比較晚 → 用要求的。
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T10:00:01Z")), "2026-09-18T10:00:00.500Z");
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T18:00:01+08:00")), "2026-09-18T10:00:00.500Z");
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", None), "2026-09-18T10:00:00.500Z");
@@ -682,13 +649,10 @@ async fn a_quota_cache_row_written_in_seconds_does_not_block_a_newer_millisecond
         sqlx::query_as::<_, (String, String)>("SELECT quota_json, updated_at FROM quota_cache WHERE key = 'local|claude'").fetch_one(p).await.unwrap()
     };
     sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES ('local|claude', '{}', '2026-10-01T10:00:00Z')").execute(p).await.unwrap();
-    // 同一秒內、毫秒、較新（10:00:00.500 > 10:00:00.000）→ 要寫進去。字串比較在這裡判錯（`.` < `Z`）。
     crate::quota::persist_cache_for_test(&e.app, "local|claude", &reading("2026-10-01T10:00:00.500Z")).await;
     assert_eq!(stored().await.1, "2026-10-01T10:00:00.500Z", "舊的秒格式列擋住了較新的讀數");
-    // 較舊的（毫秒、更早）照舊不准蓋掉較新的。
     crate::quota::persist_cache_for_test(&e.app, "local|claude", &reading("2026-10-01T10:00:00.200Z")).await;
     assert_eq!(stored().await.1, "2026-10-01T10:00:00.500Z", "較舊的讀數不能蓋掉較新的");
-    // 帶位移的寫法也照時刻：18:00:01+08:00 就是 10:00:01Z，比 10:00:00.500Z 新。
     crate::quota::persist_cache_for_test(&e.app, "local|claude", &reading("2026-10-01T18:00:01+08:00")).await;
     assert_eq!(stored().await.1, "2026-10-01T18:00:01+08:00");
 }

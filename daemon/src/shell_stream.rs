@@ -294,7 +294,6 @@ fn observe_is_cooling(app: &Arc<App>, host: &str) -> bool {
     let addr = Arc::as_ptr(app) as usize;
     let now = Instant::now();
     let mut map = observe_cooldowns().lock().unwrap();
-    // 順手清掉已經掉了的 App 與過期的登記，讓它們的配置能釋放。
     map.retain(|_, (w, until)| w.strong_count() > 0 && now < *until);
     map.get(&(addr, host.to_string())).is_some_and(|(w, _)| std::ptr::eq(w.as_ptr(), Arc::as_ptr(app)))
 }
@@ -442,7 +441,6 @@ async fn snapshot(app: &Arc<App>, k: &Key, wake: &Arc<Notify>, host: &str, pane_
             _ = wake.notified() => true,
         };
         if woke {
-            // 給 herdr 一拍把字畫進去；之後的節奏從最快重新算。
             cadence.reset();
             tokio::time::sleep(FAST).await;
         }
@@ -512,7 +510,6 @@ async fn serve(app: Arc<App>, host: String, pane_id: String, mut socket: WebSock
                         let _ = send_json(&mut socket, &error_message(code), timeout).await;
                         break;
                     }
-                    // 慢的 client 漏了幾幀：回放是完整狀態（以完整幀起頭），整段重送即可。
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let mut s = 0u64;
                         if !send_frames(&mut socket, &replay(&k), &mut s, timeout).await {
@@ -531,7 +528,6 @@ async fn serve(app: Arc<App>, host: String, pane_id: String, mut socket: WebSock
                         let old = std::mem::replace(&mut k, key(&app, &host, &pane_id, c, r));
                         (cols, rows) = (c, r);
                         let joined = attach(&app, &k, &host, &pane_id);
-                        // 先換掉 rx（舊的接收端在這裡丟掉），舊的串流才看得到沒人了。
                         rx = joined.rx;
                         wake_key(&old);
                         sent = 0;
@@ -546,7 +542,6 @@ async fn serve(app: Arc<App>, host: String, pane_id: String, mut socket: WebSock
         }
     }
     drop(rx);
-    // 讓迴圈看見觀看者少了（沒人了就自己停）。
     wake_key(&k);
 }
 
@@ -571,7 +566,6 @@ pub async fn stream(
     if !ct_eq(q.get("token").map(|s| s.as_str()).unwrap_or(""), &app.ui_token) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
-    // 參數錯誤走錯誤幀（連線照開），跟其他推送的錯誤路徑一致。
     let param_error = match (q.get("source").map(String::as_str).unwrap_or("visible"), q.get("format").map(String::as_str).unwrap_or("ansi")) {
         ("visible", "ansi") => None,
         (_, "ansi") => Some("bad_source"),
@@ -654,8 +648,6 @@ mod tests {
     fn fake_observe(tag: &str, body: &str) -> String {
         let dir = crate::test_dirs::scratch_dir(&format!("shell-observe-{tag}"));
         let path = dir.join("observe.sh");
-        // 並行的別條測試在別的執行緒 fork 時會短暫繼承寫入 fd，這時 exec 回 ETXTBSY → observe 起不來 →
-        // 退回快照幀，第一幀就不是 raw（整批測試偶發紅的真正原因）。write_exec 寫完先 exec 探測到成功才回來。
         crate::testing::write_exec(&path, format!("#!/bin/sh\n{body}\n"));
         path.display().to_string()
     }
@@ -760,7 +752,6 @@ mod tests {
         env.herdr.set_screen(&pane.pane_id, "$ ");
         let (_k, mut rx, _wake) = watch(app, "local", &pane.pane_id, 80, 24);
         assert!(next_frame(&mut rx, Duration::from_secs(2)).await.is_some());
-        // 讓節奏慢下來（連續沒變，會退到 1s）。
         tokio::time::sleep(Duration::from_millis(1600)).await;
         env.herdr.set_screen(&pane.pane_id, "$ ls");
         wake(app, "local", &pane.pane_id);
@@ -898,7 +889,6 @@ exec sleep 30"#,
         let env = crate::testing::env().await;
         let app = &env.app;
         let k = key(app, "local", "w-replay", 80, 24);
-        // 直接用內部的發布路徑塞兩幀：一張完整、一張差異（不啟動子行程）。
         hub().lock().unwrap().insert(k.clone(), Entry::new());
         publish(&k, Body::Raw { full: true, cols: 80, rows: 24, bytes: b"A".to_vec() });
         publish(&k, Body::Raw { full: false, cols: 80, rows: 24, bytes: b"B".to_vec() });
@@ -948,7 +938,6 @@ exec sleep 30"#,
             let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
             let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
             c.write_all(req.as_bytes()).await.unwrap();
-            // 握手回應只有一次：讀到空行為止，確認是 101。
             let mut head = Vec::new();
             loop {
                 let mut b = [0u8; 1];
@@ -961,7 +950,6 @@ exec sleep 30"#,
             assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"), "要升級成 WebSocket：{}", String::from_utf8_lossy(&head));
             c
         }
-        // client→server 的文字幀必須遮罩（RFC 6455）；這裡只送短訊息。
         async fn send_text(c: &mut tokio::net::TcpStream, text: &str) {
             let payload = text.as_bytes();
             assert!(payload.len() < 126);
@@ -971,7 +959,6 @@ exec sleep 30"#,
             f.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
             c.write_all(&f).await.unwrap();
         }
-        // 讀一個伺服器→client 的文字幀（不遮罩）。每一幀都設上限：卡住要失敗，不能掛著。
         async fn read_frame(c: &mut tokio::net::TcpStream) -> Value {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut h = [0u8; 2];
@@ -1002,7 +989,6 @@ exec sleep 30"#,
         assert_eq!(first["full"], true);
         assert_eq!(first["data"], "aGVsbG8=");
 
-        // 文字版不是這條串流的格式：連線照開，給一張錯誤幀。
         let mut bad = open(addr, &format!("/api/hosts/local/shells/{}/stream?format=text&token=test-token", pane.pane_id)).await;
         assert_eq!(read_frame(&mut bad).await, error_message("bad_format"));
     }

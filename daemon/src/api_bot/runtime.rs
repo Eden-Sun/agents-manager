@@ -193,8 +193,6 @@ impl ApiBotRuntime {
 
         #[cfg(all(test, feature = "daemon-test-harness"))]
         crate::lifecycle::race_point::hit("api_run_stop_before_admission", &key.run_id).await;
-        // A pre-CAS spawn may have passed run validation but not installed its registry ticket yet.
-        // Draining the same gate used by spawn makes that ticket visible before an empty-slot proof.
         let _bot_admission = self.bot_gate(&key.bot_id).await;
         let _admission = self.admission_gate(key).await;
 
@@ -263,8 +261,6 @@ impl ApiBotRuntime {
         })
     }
 
-    // Lock order: lifecycle bot lock (when held) → API bot gate → run admission → controls.
-    // The only read-only gate user is the bounded fresh-target descriptor; it takes no later locks.
     async fn bot_gate(&self, bot_id: &str) -> OwnedMutexGuard<()> {
         let gate = {
             let mut gates = self.inner.bot_admission.lock().await;
@@ -295,12 +291,10 @@ impl ApiBotRuntime {
             .filter(|b| crate::config::is_api_kind(&b.kind) && b.deleted_at.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: bot missing, deleted or not claude-api"); E::Unconfirmed })?;
         let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|error| { tracing::warn!(bot = bot_id, ?error, "api native start not confirmed: project lookup failed"); E::Unconfirmed })?
             .filter(|p| p.deleted_at.is_none() && p.handed_off_to.is_none()).ok_or_else(|| { tracing::warn!(bot = bot_id, "api native start not confirmed: project missing, deleted or handed off"); E::Unconfirmed })?;
-        // 遠端專案不隔離、不需要 bwrap，但主機要連得上；沒連線就明確拒絕（不建 run）。
         let remote = project.host != crate::config::LOCAL_HOST;
         if remote && !app.hosts.get(&project.host).await.is_some_and(|c| c.is_connected()) { return Err(E::Refused("api_bot_host_offline")); }
         let cfg = app.cfg.get().await;
         let openai = bot.kind == crate::config::OPENAI_API_KIND;
-        // 設定與金鑰跟著 kind 的供應商：openai-api 只看 `[openai_api]`，不讀 Claude 的設定。
         let limits = if openai {
             if super::openai::provider::configured(&cfg).is_err() { return Err(E::Refused("openai_not_configured")); }
             cfg.openai_api.api_bot.validated(cfg.openai_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("openai_not_configured"))?
@@ -311,8 +305,6 @@ impl ApiBotRuntime {
             cfg.claude_api.api_bot.validated(cfg.claude_api.enabled).map_err(|_| E::Refused("api_bot_config_invalid"))?.ok_or(E::Refused("api_bot_disabled"))?
         };
         if self.dependencies_snapshot().is_none() {
-            // 單次預留現在依實際 request 估；啟動時還沒有 request，用「3 萬 token 輸入（按快取寫入價）＋ max_output_tokens」當最低門檻。
-            // 這個門檻是 Claude 的價；openai-api 不套（它的預留在送出前依實際請求的上界報價，買不起就在那裡擋）。
             let factor = if bot.fast != 0 { 2_i64 } else { 1 };
             let reserve = (32_768_i64 * 5 + i64::from(limits.max_output_tokens) * 20) * factor;
             if !openai && limits.max_turn_cost_microusd < reserve { return Err(E::Refused("api_bot_turn_cost_cap_too_low")); }
@@ -511,7 +503,6 @@ impl ApiBotRuntime {
         }
 
         let (bot, project, run, prompt) = validated_turn(app, key).await?;
-        // 這一回合送出時選的快取保留（300／3600，預設 300）：整回合所有請求用同一個，費用預留與報價跟著它。
         let turn_cache_ttl: i64 = sqlx::query_scalar("SELECT cache_ttl_secs FROM turns WHERE id=?").bind(&key.turn_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?.unwrap_or(300);
         if let Some((_, _, proof)) = &prior {
             let same_conversation: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns old JOIN turns next ON next.conversation_id=old.conversation_id WHERE old.id=? AND old.run_id=? AND next.id=? AND next.run_id=? AND next.status='in_flight' AND (next.delivery='ok' OR (? AND next.delivery='pending')))")
@@ -555,12 +546,10 @@ impl ApiBotRuntime {
             clear_tool_uses_at_input_tokens: limits.clear_tool_uses_at_input_tokens,
             clear_tool_uses_keep: limits.clear_tool_uses_keep,
             clear_tool_uses_clear_at_least: limits.clear_tool_uses_clear_at_least,
-            // 每顆 bot 可選快取保留（300／3600，預設 5 分鐘）；跟 fast 一樣，每回合開始讀一次、下一回合起生效。
             cache_ttl_1h: turn_cache_ttl == 3600,
             web_search,
             web_fetch,
         };
-        // 這個 session 的供應商：跟著 bot 的 kind，建立時固定（接續時 adapter 會核對 checkpoint 的標籤）。
         let adapter_provider = || {
             if openai {
                 super::adapter::AdapterProvider {
@@ -577,8 +566,6 @@ impl ApiBotRuntime {
                 super::adapter::AdapterProvider::anthropic(options.clone(), dependencies.quote.clone())
             }
         };
-        // provider 建不起來（模型／強度不在清單、沒有價表…）：還沒有任何東西交給 worker，是確定的失敗。
-        // pending 的回合（使用者剛送出、已提交）不能懸在 in_flight：立刻收成 failed，寫穩定 reason，原訊息保留可重送。
         if native_pending {
             let probe = adapter_provider();
             if let Err(e) = super::provider::for_id(probe.id, probe.options.clone(), probe.quote.clone()) {
@@ -599,17 +586,14 @@ impl ApiBotRuntime {
             Some(&agent_md.text),
         );
         let system = serde_json::Value::String(fresh_system_text.clone());
-        // 每小時請求數只是「非使用者發起的回合」（relay 派工、排程、daemon 通知）的保險絲；使用者本人的回合（queue_class='user'）完全不受限（使用者 2026-11-15）。
         let queue_class: Option<String> = sqlx::query_scalar("SELECT queue_class FROM turns WHERE id=?").bind(&key.turn_id).fetch_optional(&app.db).await.map_err(|_| ApiBotError::Upstream)?;
         let hourly_fuse = hourly_fuse_for(queue_class.as_deref(), limits.max_requests_per_hour);
         let adapter_limits = super::adapter::AdapterLimits {
             max_checkpoint_bytes: limits.max_checkpoint_bytes,
             max_turn_microusd: limits.max_turn_cost_microusd,
             max_requests_per_hour: hourly_fuse,
-            // 總上限各家各的（openai 的在預留的同一個寫交易裡檢查，只算 openai 的 attempt）。
             total_cap_usd: if openai { cfg.openai_api.api_bot.total_cap_usd } else { cfg.claude_api.api_bot.total_cap_usd },
             total_cap_since: if openai { cfg.openai_api.api_bot.total_cap_since.clone() } else { cfg.claude_api.api_bot.total_cap_since.clone() },
-            // openai-api 不做自動降 effort（也沒有壓縮）。
             auto_lower_effort_turn_cost_microusd: if openai { None } else { limits.auto_lower_effort_turn_cost_microusd },
         };
         let (identity, expected_cursor, resume_old_admission) = self.identity_for_turn(app, &full).await?;
@@ -696,14 +680,11 @@ impl ApiBotRuntime {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        // openai-api v1 不支援附件：`POST /prompt` 已經先擋（`attachments_unsupported_for_kind`）；走到這裡代表繞過了那道檢查，
-        // 一樣不送——不靜默丟掉附件。
         if openai && !attachments.is_empty() {
             tracing::warn!(bot = %key.bot_id, turn = %key.turn_id, "openai-api turn carries attachments; refused (attachments_unsupported_for_kind)");
             return Err(ApiBotError::Upstream);
         }
         let user_content = if openai {
-            // OpenAI 的 transcript 一筆 user 訊息就是純文字；指示更新直接接在前面。
             serde_json::Value::String(if needs_instruction_update { format!("[Instructions updated by AG Man]\n\n{fresh_system_text}\n\n{prompt}") } else { prompt })
         } else if !attachments.is_empty() || needs_instruction_update {
             let mut content_blocks = Vec::new();
@@ -804,15 +785,12 @@ impl ApiBotRuntime {
                 crate::lifecycle::race_point::hit("api_run_runner_before_entry", &runner_run_id)
                     .await;
                 let responses_before = state.responses.len();
-                // 使用者強制中斷（不是 run 停止）時，runner 會把進行中的工具批次結清，下一回合才送得出去。
                 let interrupted = {
                     let (inner, key) = (fail_inner.clone(), fail_key.clone());
                     move || inner.user_interrupts.lock().expect("interrupt mutex poisoned").contains(&key)
                 };
                 let started = tokio::time::Instant::now();
                 let soft_at = started + soft_limit;
-                // 回合開始、軟期限到、回合結束都留 log：以前整個回合（可能跑好幾分鐘、十幾次呼叫）在 log 裡完全看不到，
-                // 使用者說「沒反應」時查不到它到底有沒有在跑（2026-11-15 pt-hub）。
                 tracing::info!(
                     bot = %fail_key.bot_id, run = %fail_key.run_id, turn = %fail_key.turn_id,
                     max_calls, turn_timeout_secs, soft_limit_secs = soft_limit.as_secs(), hard_limit_secs = hard_limit.as_secs(),
@@ -926,8 +904,6 @@ impl ApiBotRuntime {
         (run_ticket, cancel)
         };
 
-        // claude-api 沒有 pane／hook，`runs.agent_status` 要由回合狀態推：回合開始＝working（跟 CLI bot 同一個欄位、同一個事件，
-        // 前端的膠囊燈號、側欄、手機晶片不用分支）；結束時在 `own_ticket_inner` 回 idle。
         super::completion::set_run_agent_status(&app.shared(), &key.bot_id, &key.run_id, "working").await;
         let shutdown = app.shutdown.clone();
         let session_commit = SessionCommit {
@@ -1089,8 +1065,6 @@ impl ApiBotRuntime {
                 .bind(&key.bot_id).fetch_optional(pool).await.map_err(|_| ApiBotError::Unconfirmed)?.flatten();
             let Some(old) = old else { return Err(ApiBotError::Unconfirmed); };
             if old == key.run_id { return Err(ApiBotError::Unconfirmed); }
-            // Caller holds bot gate then new-run admission. Old-run admission comes next;
-            // completion retries take only their own run gate and never acquire the bot gate.
             let old_key = ApiRunKey { bot_id: key.bot_id.clone(), run_id: old.clone() };
             let old_admission = self.admission_gate(&old_key).await;
             let busy = {
@@ -1205,7 +1179,6 @@ impl ApiBotRuntime {
             Err(JoinError::IdentityMismatch) => return Err(ApiBotError::IdentityMismatch),
         };
         self.inner.user_interrupts.lock().expect("interrupt mutex poisoned").remove(&full);
-        // join 只證明 runner 停了；回合的終態（failed＋系統訊息）由 completion owner 隨後寫入，等它落地才算中斷完成。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=? AND run_id=?")
@@ -1382,8 +1355,6 @@ async fn own_ticket_inner(
     if state == JoinState::TimedOut {
         tracing::warn!("API bot task join exceeded shutdown deadline; outcome remains unconfirmed");
     }
-    // This receipt certifies only the real task join. A storage transaction must never delay or
-    // rewrite it; stop waits on this watch before doing its own recovery transaction.
     result_tx.send_replace(state);
 
     let joined = match state {
@@ -1404,8 +1375,6 @@ async fn own_ticket_inner(
             if let Some((committed, payload, published)) = settled {
                 let revision = committed.session_revision;
                 super::completion::emit_after_commit(&owner.app, &owner.key, committed).await;
-                // 回合結束（完成、失敗、取消都一樣）：run 的 agent_status 回 idle，主力膠囊的「進行中」燈號才會熄、已回答的未讀才亮。
-                // 排在訊息與回合事件之後（前端先拿到回覆再看到 idle）。
                 super::completion::set_run_agent_status(&owner.app, &owner.key.bot_id, &owner.key.run_id, "idle").await;
                 if let Some(note) = compaction_note {
                     super::completion::post_compaction_notice(&owner.app, &owner.key, &note).await;
@@ -1420,8 +1389,6 @@ async fn own_ticket_inner(
                 } else if let Some(secs) = time_limited {
                     super::completion::post_time_limit_notice(&owner.app, &owner.key, secs).await;
                 }
-                // 乾淨地結束（完成，或失敗但 checkpoint 已由 receipt 結清）才算 same-run 可接續；失敗後的下一則由 checkpoint 決定能不能繼續
-                // （有 unknown 的送出會在 rebind 時以 pending_unknown 明確失敗），不再卡在 in_flight/pending。
                 let clean = (joined == Completion::Completed && payload.outcome() == super::receipt::JoinOutcome::Completed)
                     || (joined == Completion::Failed && payload.outcome() == super::receipt::JoinOutcome::Failed);
                 if clean && published {
@@ -1431,15 +1398,12 @@ async fn own_ticket_inner(
                     return Some(super::same_run::Finalized { identity: owner.identity, revision, payload });
                 }
             } else {
-                // 沒結算成功（儲存失敗、被擋）：回合還是結束了，燈號不能卡在 working。關機中途不算結束（回合仍是 in_flight、pending），不動。
                 if !shutdown.is_cancelled() {
                     super::completion::set_run_agent_status(&owner.app, &owner.key.bot_id, &owner.key.run_id, "idle").await;
                 }
             }
         }
         (None, Some(_)) => {
-            // The only remaining caller is the isolated post-join cursor test path; production
-            // always supplies a CompletionOwner and the transaction's exact revision.
             if let Some(commit) = session_commit {
                 #[cfg(test)]
                 if let Some(notify) = &commit.before_revision {
@@ -1536,7 +1500,6 @@ async fn fail_pending_turn(app: &crate::state::App, key: &ApiTurnKey, err: &supe
     let changed = sqlx::query("UPDATE turns SET status='failed', delivery='failed', start_error=?, completed_at=? WHERE id=? AND run_id=? AND status='in_flight' AND delivery='pending' AND EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE r.id=turns.run_id AND r.id=? AND r.bot_id=? AND r.state='running' AND b.deleted_at IS NULL)")
         .bind(&code).bind(&now).bind(&key.turn_id).bind(&key.run_id).bind(&key.run_id).bind(&key.bot_id)
         .execute(&app.db).await.map(|r| r.rows_affected()).unwrap_or(0);
-    // 細節（模型、強度）只進 log：全是我們自己的設定值，沒有使用者文字或 key。
     tracing::warn!(reason = %code, detail = ?err, bot_id = %key.bot_id, run_id = %key.run_id, turn_id = %key.turn_id, changed, "API turn failed before handoff");
     if changed == 1 {
         crate::lifecycle::emit_turn(&app.shared(), &key.turn_id).await;
@@ -1564,7 +1527,6 @@ async fn completion_retry_wait(shutdown: &CancellationToken, delay: Duration) ->
     tokio::select! { biased; _ = shutdown.cancelled() => false, _ = tokio::time::sleep(delay) => true }
 }
 
-// Keep the multi-await recovery frame out of own_ticket's debug spawn/call stack.
 fn settle_joined_completion<'a>(
     owner: &'a CompletionOwner,
     joined: Completion,
@@ -1596,7 +1558,7 @@ async fn settle_joined_completion_body(
         warn_completion_storage(&owner.key);
         return None;
     };
-    drop(final_text); // The recovery loop retains only the one bounded visible payload.
+    drop(final_text);
     let mut failures = 0usize;
     let mut needs_proof = false;
     let mut last_reason = None;
@@ -1632,7 +1594,6 @@ async fn settle_joined_completion_body(
                 }
             }
         }
-        // An unconfirmed commit switches to read-only proof polling. Never retry a write blindly.
         let result = if needs_proof {
             Err(super::completion::StoreError::Ambiguous)
         } else {
@@ -1693,7 +1654,6 @@ async fn settle_joined_completion_body(
                     }
                     _ => {
                         needs_proof = true;
-                        // This only retires an old completion owner; it never creates join proof.
                         if retire_stale_completion(owner).await {
                             log_completion_recovery(
                                 &owner.key,
@@ -1726,7 +1686,7 @@ async fn settle_joined_completion_body(
             }
             return Some((committed, payload, published));
         }
-        drop(admission); // All retry waits below are outside admission/bot/session locks.
+        drop(admission);
         failures = failures.saturating_add(1);
         let reason = if needs_proof {
             CompletionRecoveryReason::AwaitingProof
@@ -1772,7 +1732,7 @@ async fn retire_stale_completion(owner: &CompletionOwner) -> bool {
         .await,
         Ok(false)
     ) {
-        return false; // Read errors never mean the owner ended.
+        return false;
     }
     if let Ok(Some(stored)) = super::receipt::load(&owner.app.db, &owner.identity).await {
         if matches!(stored.state, super::receipt::State::Pending)
@@ -1895,8 +1855,6 @@ impl super::runner::Tools for TimedSharedTools {
         cancel: &'a CancellationToken,
     ) -> futures::future::BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            // 這個工具是哪一次請求叫的：**執行前**就定下來（此刻最新的 recorded attempt 就是剛收到的那份回應）。
-            // 以前是背景寫入時才找「最新的」，工具跑得快時會記到下一次請求那一列。查不到就不記（只影響時間線的耗時）。
             let attempt_id: Option<String> = sqlx::query_scalar(
                 "SELECT id FROM api_bot_attempts WHERE bot_id = ? AND turn_id = ? AND state = 'recorded' ORDER BY ordinal DESC, created_at DESC LIMIT 1",
             )
@@ -1911,12 +1869,9 @@ impl super::runner::Tools for TimedSharedTools {
             let duration_ms = start.elapsed().as_millis() as u64;
             let is_error = res.is_err();
 
-            // 異步記錄工具耗時與錯誤至該 attempt 的 usage_json["tools"]
             let pool = self.pool.clone();
             let tool_name = call.name.clone();
 
-            // 一個 UPDATE 完成「讀出 tools → 接上一筆 → 寫回」：同一次回應的兩個工具各自收尾時不會互相蓋掉
-            // （以前是先 SELECT 再整份寫回，後寫的會把先寫的那一筆弄丟）。
             tokio::spawn(async move {
                 let Some(attempt_id) = attempt_id else { return };
                 let entry = serde_json::json!({"name": tool_name, "duration_ms": duration_ms, "is_error": is_error}).to_string();
@@ -2009,7 +1964,6 @@ async fn production_dependencies(app: &crate::state::App, bot: &crate::db::Bot, 
         let conn = app.hosts.get(&project.host).await.ok_or(ApiBotError::Upstream)?;
         Arc::new(super::tools::RemoteTools::new(conn, root, tool_limits).map_err(|_| ApiBotError::Upstream)?)
     };
-    // endpoint、金鑰、報價跟著 kind 的供應商：openai-api 用官方 Responses endpoint、`[openai_api]` 自己的 key、OpenAI 的價表。
     if bot.kind == crate::config::OPENAI_API_KIND {
         let key_source = Arc::new(OpenAiConfigKeySource(Arc::downgrade(&app.shared())));
         return Ok(ApiBotDependencies { endpoint: super::openai::provider::OFFICIAL_ENDPOINT.into(), key_source, quote: Arc::new(super::openai::provider::OpenAiQuote), tools, shutdown_join_timeout: None });
@@ -2089,8 +2043,6 @@ fn map_runner_result(
         Err(super::runner::Error::Cancelled) => TurnOutcome::Cancelled,
         Err(super::runner::Error::Model(H::Cancelled)) if cancel.is_cancelled() => TurnOutcome::Cancelled,
         Err(super::runner::Error::Budget) => TurnOutcome::Failed("api_bot_max_calls_reached".into()),
-        // 預留被拒絕時儲存失敗會冒成 Journal；有明確原因（額度、key、報價）就用它，沒有才用儲存失敗的具名原因
-        // （只有真正的寫入失敗才是 `journal`，見 `JournalFailure::reason`）。
         Err(super::runner::Error::Journal(failure)) => TurnOutcome::Failed(refusal.unwrap_or_else(|| failure.reason().into())),
         Err(super::runner::Error::PendingUnknown) => TurnOutcome::Failed("pending_unknown".into()),
         Err(super::runner::Error::InvalidResponse) => TurnOutcome::Failed("invalid_response".into()),
@@ -2161,8 +2113,6 @@ async fn stored_revision(
     .flatten()
 }
 
-
-// Startup-only capabilities: private metadata, never a new join or wire result.
 #[cfg(all(test, feature = "daemon-test-harness"))]
 fn delivery_lost_acks() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static FAULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
@@ -2346,7 +2296,6 @@ impl ApiBotRuntime {
             completion::Probe::Stale(_) => return Ok(StartupRestore::Fenced),
             _ => return Ok(StartupRestore::Unresolved),
         };
-        // Revalidate the read-only proof under a short write-intent lock; do not nest pool transactions.
         let mut tx = crate::db::begin_write(&app.db)
             .await
             .map_err(|_| StartupError::Storage)?;
@@ -2556,7 +2505,6 @@ pub(super) async fn startup_checkpoint_on(
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
         let checkpoint = Checkpoint::new(&value).ok()?;
         let state: super::runner::State = serde_json::from_value(checkpoint.value()).ok()?;
-        // recovery：不認得的 provider 標籤一律當成未解決，不替它結算。
         if !super::provider::is_known(state.provider_id()) {
             return None;
         }
@@ -2575,8 +2523,6 @@ pub(super) fn startup_context_settled(state: &super::runner::State, owner_failed
     if !am_base::db::api_bot::pending_settled_after_failed_owner(state.api_pending, state.tool_pending.is_some(), owner_failed) {
         return false;
     }
-    // OpenAI 的 transcript 由它的 codec 判斷：對話線上沒有還沒結果的工具呼叫，而且回應裡宣告過的每個呼叫都已完成。
-    // （下面是 Claude 形狀的判斷，維持原樣。）
     if state.provider_id() == super::openai::provider::ID {
         use super::provider::Codec as _;
         let codec = super::openai::provider::OpenAiCodec;
@@ -2619,10 +2565,6 @@ pub(super) fn startup_context_settled(state: &super::runner::State, owner_failed
             }
         }
     }
-    // `responses` 是這個 session 累積的**全部**回覆，`messages` 卻會被 API 壓縮（compaction）縮短：長 session 裡舊回覆的 tool_use
-    // 早就不在 `messages` 了，也就沒有對應的 tool_result 在裡面。所以回覆裡宣告的工具只要求「已完成」（`completed_tool_ids` 有它），
-    // 不要求 tool_result 還留在 `messages`；對話線上看得到的（`messages` 內）才要求宣告／回傳成對。
-    // 2026-11-15 pt-hub：144 筆回覆、170 個工具、messages 只剩 22 組 tool_result，舊規則把它判成未結清，重啟時整個 API 被隔離。
     let mut declared_in_responses = std::collections::HashSet::new();
     for response in &state.responses {
         let Ok(calls) = response.tools() else {

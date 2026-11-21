@@ -31,10 +31,8 @@
         assert_eq!(v["statusLine"], json!({"type": "command", "command": cmd, "stack_with_default": true}));
         assert_eq!(v["colorScheme"], "dark");
         assert_eq!(statusline_merge(&out, cmd).unwrap(), None, "idempotent");
-        // 資料目錄換了：我們的舊指令對齊成新的。
         let moved = statusline_merge(&out, "/new/agy-hook.sh state").unwrap().expect("ours, stale path");
         assert!(moved.contains("/new/agy-hook.sh"), "{moved}");
-        // 使用者自己的 statusLine 不碰。
         let mine = r#"{"statusLine":{"type":"command","command":"/home/me/bar.sh"}}"#;
         assert_eq!(statusline_merge(mine, cmd).unwrap(), None);
     }
@@ -49,7 +47,6 @@
         let ours = &v["agents-manager"];
         assert_eq!(ours["enabled"], true);
         for event in HOOK_EVENTS {
-            // 扁平：陣列元素直接是 handler，不是 `{matcher, hooks:[…]}`——形狀錯了 agy 會整個丟掉這個檔。
             let h = &ours[event][0];
             assert_eq!(h["type"], "command", "{event}");
             assert_eq!(h["timeout"], 5);
@@ -74,7 +71,6 @@
         assert_eq!(g["hooks"][0]["timeout"], 5);
         assert!(g.get("command").is_none(), "不是扁平 handler");
         assert_eq!(hooks_merge_guarded(&out, "agents-manager", "/d/agy-hook.sh").unwrap(), None, "idempotent");
-        // 舊的（沒有 PreToolUse）安裝會被補上；遠端版的結果不含 PreToolUse。
         let old = hooks_merge("{}", "agents-manager", "/d/agy-hook.sh").unwrap().unwrap();
         assert!(!old.contains("PreToolUse"));
         assert!(hooks_merge_guarded(&old, "agents-manager", "/d/agy-hook.sh").unwrap().expect("upgraded").contains("PreToolUse"));
@@ -151,14 +147,11 @@
         assert_eq!(turns.len(), 2);
         assert_eq!((turns[0].step_index, turns[0].prompt.as_str(), turns[0].reply.as_deref(), turns[0].closed), (0, "first", Some("the answer"), true));
         assert_eq!((turns[1].step_index, turns[1].reply.as_deref(), turns[1].closed), (4, Some("thinking out loud"), false), "最後是工具步驟＝還在跑");
-        // 最後一則就是回覆：結束了。
         let done = [user_step(0, "q"), step(1, "PLANNER_RESPONSE", "OK")].join("\n");
         assert!(parse_turns(&done)[0].closed);
-        // 沒有回覆的一問（被下一問打斷）也算結束；最後一問沒回覆還沒結束。
         let interrupted = [user_step(0, "a"), user_step(1, "b")].join("\n");
         let t = parse_turns(&interrupted);
         assert_eq!((t[0].closed, t[0].reply.clone(), t[1].closed), (true, None, false));
-        // 還在產生的回覆（status 不是 DONE）、壞行、第一行被截斷都不致命。
         let partial = format!("{{\"half\n{}\n{}", user_step(0, "q"), json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"RUNNING","content":"half an ans"}));
         let p = parse_turns(&partial);
         assert_eq!((p.len(), p[0].reply.clone(), p[0].closed), (1, None, false));
@@ -175,14 +168,12 @@
         .join("\n");
         assert_eq!(last_input_tokens(&text), Some(20000));
         assert_eq!(last_input_tokens(&user_step(0, "q")), None);
-        // 有快取：context＝input_tokens（未命中）＋cache_read_tokens（命中）；只看最後一筆回覆
         let cached = [
             json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","input_tokens":3000,"cache_read_tokens":100000}).to_string(),
             json!({"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"b","input_tokens":3415,"cache_read_tokens":140185}).to_string(),
         ]
         .join("\n");
         assert_eq!(last_input_tokens(&cached), Some(143_600));
-        // cache_read_tokens 缺就當 0；input_tokens 缺、只有快取也算
         let no_cache_field = json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","input_tokens":5000}).to_string();
         assert_eq!(last_input_tokens(&no_cache_field), Some(5000));
         let only_cache = json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","cache_read_tokens":7000}).to_string();
@@ -201,20 +192,14 @@
             let v: Value = serde_json::from_str(&status_json(None, Some(tokens), window).unwrap()).unwrap();
             v["context_window"].clone()
         };
-        // 預設 1M（1,048,576）：20000 / 1048576 ≈ 1.9%
         assert_eq!(pct(20_000, 1_048_576)["used_percentage"], 1.9);
-        // 400K 視窗：20000 / 400000 = 5.0%
         assert_eq!(pct(20_000, 400_000)["used_percentage"], 5.0);
-        // 設定成 1M：同樣 20000 → 2.0%，視窗大小照實寫
         let one_m = pct(20_000, 1_000_000);
         assert_eq!(one_m["context_window_size"], 1_000_000);
         assert_eq!(one_m["used_percentage"], 2.0);
-        // 一位小數四捨五入：1 / 3 → 33.3
         assert_eq!(pct(1, 3)["used_percentage"], 33.3);
-        // 超過視窗（agy 有時會把總量算過頭）上限 100，不超過 100
         assert_eq!(pct(500_000, 400_000)["used_percentage"], 100.0);
         assert_eq!(pct(400_000, 400_000)["used_percentage"], 100.0);
-        // 0 token：0%，不是 null
         assert_eq!(pct(0, 400_000)["used_percentage"], 0.0);
     }
 
@@ -304,7 +289,6 @@
         assert_eq!(v["model"]["display_name"], "Gemini 4 Argon (Medium)");
         assert_eq!(v["model"]["effort"], "medium");
         assert_eq!(v["effort"]["level"], "medium");
-        // statusLine 的 context_window_size (1,048,576) 優先於 fallback_window (400,000)
         assert_eq!(v["context_window"]["context_window_size"], 1_048_576);
         assert_eq!(v["context_window"]["total_input_tokens"], 143_600);
         assert_eq!(v["context_window"]["total_output_tokens"], 4_200);
@@ -317,7 +301,6 @@
         assert_eq!(v["task_count"], 2);
         assert_eq!(v["pending_input_count"], 1);
         assert_eq!(v["quota"]["gemini"]["remaining_fraction"], 0.82);
-        // 絕不寫入 statusLine 的摘要版 transcript_path
         assert!(v.get("transcript_path").is_none() && v.get("transcriptPath").is_none());
     }
 }

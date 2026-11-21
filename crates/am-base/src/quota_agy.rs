@@ -126,7 +126,6 @@ fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>>
         for bucket in buckets {
             let bucket_name = text_field(bucket, &["id", "name", "label", "title", "model"]).unwrap_or_default();
             let argon = is_argon(group_name, bucket_name);
-            // Argon 只有週窗；Gemini 只認精確的 gemini-weekly／gemini-5h（Claude/GPT 組的桶 id 是 3p-*，不會撞上），其餘略過。
             let slot: Option<&str> = match (argon, bucket_name.to_ascii_lowercase().as_str()) {
                 (true, _) => (window_is_weekly(bucket)).then_some("argon"),
                 (false, "gemini-weekly" | "gemini-5h") => Some("gemini"),
@@ -300,7 +299,6 @@ pub fn read_usage(host: &str, rc: Option<i32>, text: &str) -> Result<Vec<(&'stat
 /// stderr 也看（agy 的警告與登入提示不一定在 stdout）；正常結束時額度仍只從 stdout 讀。
 pub fn read_local_run(host: &str, timed_out: bool, stdout: &str, stderr: &str, timeout_secs: u64) -> Result<Vec<(&'static str, Quota)>, ProbeFail> {
     if timed_out {
-        // 逾時前已經印出完整的額度 JSON（agy 印完卻沒結束）：讀得到就照常用，跟正常結束的讀法一樣（#1725）。
         if let Ok(found) = read_usage(host, None, stdout) {
             return Ok(found);
         }

@@ -178,8 +178,6 @@ pub fn owe_delivery(bot_id: &str, new_turn: &str, delivery: Option<DeliveryRecor
 }
 
 async fn owe<C: InterruptionContext>(app: &C, bot_id: &str, mut p: Pending) -> anyhow::Result<()> {
-    // 這一筆已經欠著插隊送出的收尾（#164）：帳上跟它綁在一起的新那一則要跟著這一次一起收。帳是一筆回合一條，
-    // 不帶過來的話，收成了就連它一起 `forget`、收不成就被這一條 `record` 蓋掉——它從此是 run_id 為空的 in_flight。
     if p.new_turn.is_none() {
         p.new_turn = pending(bot_id).into_iter().find(|x| x.turn_id == p.turn_id).and_then(|x| x.new_turn);
     }
@@ -287,7 +285,6 @@ async fn settle_one<C: InterruptionContext>(app: &C, bot_id: &str, p: &Pending, 
     let now: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT status, run_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_optional(app.db()).await?;
     let old_in_flight = matches!(&now, Some((status, run)) if status == "in_flight" && run.as_deref() == Some(p.run_id.as_str()));
-    // 插隊送出那一則還沒掛上 run：舊的那一筆就算已經被別的路收掉，它也還要有個結果。
     let new_unbound = match &p.new_turn {
         Some(n) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE id=? AND status='in_flight' AND run_id IS NULL")
             .bind(&n.id)
@@ -296,7 +293,6 @@ async fn settle_one<C: InterruptionContext>(app: &C, bot_id: &str, p: &Pending, 
             > 0,
         None => false,
     };
-    // 那一筆已經被別的路收掉（或不是這一代的了）：這筆帳作廢。
     if !old_in_flight && !new_unbound {
         tracing::info!(bot = bot_id, turn = %p.turn_id, ?now, "打斷的帳作廢：那一筆已經不在飛了");
         forget(bot_id, &p.turn_id);
@@ -411,14 +407,11 @@ async fn close<C: InterruptionContext>(app: &C, bot_id: &str, p: &Pending) -> an
         super::messages::emit_message_added(app, bot_id, m).await;
     }
     if let Some(n) = &p.new_turn {
-        // 掛不上 run、收成 failed 的那一則也要寫（#163）：送出鍵生效過，字送出去了——送達與回合成敗是兩件事（§4.4a）。
         if let Some((rec, at)) = &n.delivery {
-            // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
             let _ = super::owed_delivery::delivered_at(app, bot_id, &n.id, *rec, at).await;
         }
         app.turn_changed(&n.id).await;
     }
-    // 推回合結束：排著的派工由它叫醒（`fail_in_flight` 一樣靠這個）。
     app.turn_changed(&p.turn_id).await;
     Ok(())
 }
@@ -532,7 +525,6 @@ pub async fn adopt_unbound_send_nows(app: &impl InterruptionContext, boot: &str)
         }
         let lock = app.bot_lock(&bot).await;
         let _g = lock.lock_owned().await;
-        // 送出鍵其實生效了（#229）：照平常的收尾做，不收成 unknown——不然 claude 替它送的 Stop 會認領被插隊的那一筆。
         match adopt_landed_send_now(app, &bot, &turn).await {
             Ok(true) => {
                 tracing::warn!(turn = %turn, bot = %bot, "a send-now had landed before the daemon stopped; finished closing the turn it interrupted");
@@ -611,7 +603,6 @@ pub fn schedule_retry<C: InterruptionContext>(app: &C, bot_id: &str) {
     tokio::spawn(Box::pin(async move {
         for secs in RETRY_DELAYS_SECS {
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            // 欠著的補寫；待證的 Esc 再看一次 log（#223：它等不到回聲）。
             if !pending(&bot_id).iter().any(|p| p.stage == Stage::Owed || p.esc_at.is_some()) {
                 return;
             }
@@ -796,8 +787,6 @@ mod tests {
         interrupt_bot(&app, &b.bot.id).await.expect_err("寫不進去");
         heal_turn_writes(&app).await;
 
-        // 回聲的字面看起來像撞額度也一樣：這一回合是被 Esc 停掉的，不是撞額度失敗收尾。（帳號撞限記不記由 #150
-        // 決定——那是帳號的事實，跟回合怎麼收無關，這裡不管。）
         let quota = "You've hit your session limit · resets 3pm (Asia/Taipei)";
         crate::hookrecv::process(&app, &echo(&b.bot.id, Some(quota))).await.unwrap();
 
@@ -839,7 +828,6 @@ mod tests {
         settle(&app, &b.bot.id).await.expect("定時重試補上了");
         assert_eq!(status_of(&app, &b.turn).await, "failed");
 
-        // 下一回合開始了。
         let conv = db::conversation_id(app.db(), &b.bot.id).await.unwrap();
         let next = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
@@ -1013,8 +1001,6 @@ mod tests {
         });
 
         let result = interrupt_bot(&app, &b.bot.id).await;
-        // A fail-closed implementation returns before this point; consume the hook here to restore
-        // the test DB. The old fail-open implementation consumes it inside interrupt_bot instead.
         crate::lifecycle::race_point::hit("interrupt_after_arrival", &b.bot.id).await;
         let err = result.expect_err("unreadable arrival state must produce a retryable error before Esc");
         let LcError::Unavailable(body) = err else { panic!("the arrival snapshot needs an explicit 503: {err:?}") };
@@ -1090,7 +1076,6 @@ mod tests {
         assert_eq!(system_notes(&app, &b.turn).await, vec![INTERRUPT_NOTE.to_string()]);
         assert!(pending(&b.bot.id).is_empty());
 
-        // 另一種結局：Esc 其實沒進去，回合自己答完了。
         let c = busy("esc-unknown-finished").await;
         let app = c.env.app.clone();
         c.env.herdr.fail_next("agent.send_keys", tt::Fault::DropBefore);
@@ -1143,7 +1128,6 @@ mod tests {
     async fn an_unanswered_esc_is_proven_by_the_interruption_the_transcript_recorded() {
         let b = busy("esc-unknown-logged").await;
         let app = b.env.app.clone();
-        // claude 在 Esc 進去之後才寫下標記。
         transcript(&b, &[prompt_line("跑一下測試", &at(0)), esc_marker(&at(300))]).await;
         b.env.herdr.fail_next("agent.send_keys", tt::Fault::DropAfter);
 
@@ -1369,12 +1353,10 @@ mod tests {
         .execute(app.db())
         .await
         .unwrap();
-        // send-now 生效時 claude 寫的：中斷標記（帶新那一則的 promptId，#178）緊接著新那一則。
         let path = transcript(&b, &[prompt_line("跑一下測試", &at(-5_000)), esc_marker(&at(-10)), prompt_line("先看這句", &at(-9))]).await;
 
         let fresh = tt::restart_app(&b.env).await;
         crate::reconcile::rearm_progress(&fresh).await;
-        // transcript 證明送出鍵生效了：照平常的收尾——舊的收掉、新的掛上 run、送達有證據。
         let (status, run, delivery, verified): (String, Option<String>, String, i64) =
             sqlx::query_as("SELECT status, run_id, delivery, delivery_verified FROM turns WHERE id=?").bind(&orphan).fetch_one(app.db()).await.unwrap();
         assert_eq!((status.as_str(), run.as_deref(), delivery.as_str(), verified), ("in_flight", Some(b.run.as_str()), "ok", 1));

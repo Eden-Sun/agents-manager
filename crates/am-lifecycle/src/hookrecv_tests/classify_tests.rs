@@ -141,7 +141,6 @@ fn codex_classify_stop_and_legacy_turn_complete() {
         other => panic!("expected TurnComplete, got {other:?}"),
     }
 
-    // stop_hook_active = true 必須 Ignore
     let active_payload = json!({
         "hook_event_name": "Stop",
         "session_id": "sess-codex-123",
@@ -150,14 +149,12 @@ fn codex_classify_stop_and_legacy_turn_complete() {
     });
     assert!(matches!(classify("codex", &active_payload), HookKind::Ignore(_)));
 
-    // 未知 event 不猜
     let unk_payload = json!({
         "hook_event_name": "UnknownFutureEvent",
         "session_id": "sess-codex-123"
     });
     assert!(matches!(classify("codex", &unk_payload), HookKind::Ignore(_)));
 
-    // 舊 agent-turn-complete 仍相容
     let legacy_payload = json!({
         "type": "agent-turn-complete",
         "thread-id": "sess-codex-123",
@@ -176,7 +173,6 @@ fn codex_classify_stop_and_legacy_turn_complete() {
         other => panic!("expected TurnComplete, got {other:?}"),
     }
 
-    // A normal JSON reply must not be guessed to be a hidden title turn.
     let title_payload = json!({
         "hook_event_name": "Stop",
         "session_id": "sess-codex-123",

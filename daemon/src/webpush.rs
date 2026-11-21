@@ -78,8 +78,6 @@ fn user_only(principal: &RequestPrincipal) -> Result<(), LcError> {
     Ok(())
 }
 
-// ---------- 檔案（0600、原子寫入） ----------
-
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -134,8 +132,6 @@ pub(crate) fn save_subs(dir: &Path, subs: &[Subscription]) -> std::io::Result<()
     write_private(&subs_path(dir), serde_json::to_string(subs)?.as_bytes())
 }
 
-// ---------- RFC 8291 加密＋RFC 8292 VAPID ----------
-
 /// aes128gcm 單一 record 加密。`ua_public`＝訂閱的 p256dh（65 bytes）、`auth`＝16 bytes。
 pub(crate) fn encrypt(ua_public: &[u8], auth: &[u8], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
     let ua_pk = PublicKey::from_sec1_bytes(ua_public).map_err(|e| anyhow::anyhow!("bad p256dh: {e}"))?;
@@ -154,7 +150,7 @@ pub(crate) fn encrypt(ua_public: &[u8], auth: &[u8], plaintext: &[u8]) -> anyhow
     hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek).map_err(|e| anyhow::anyhow!("hkdf: {e}"))?;
     hk.expand(b"Content-Encoding: nonce\0", &mut nonce).map_err(|e| anyhow::anyhow!("hkdf: {e}"))?;
     let mut data = plaintext.to_vec();
-    data.push(0x02); // 最後一個 record 的分隔符
+    data.push(0x02);
     let ct = Aes128Gcm::new_from_slice(&cek)
         .map_err(|e| anyhow::anyhow!("aes key: {e}"))?
         .encrypt(Nonce::from_slice(&nonce), data.as_slice())
@@ -181,8 +177,6 @@ fn vapid_header(sk: &SigningKey, endpoint: &str, subject: &str, now_secs: u64) -
     let sig: Signature = sk.sign(signing_input.as_bytes());
     Ok(format!("vapid t={signing_input}.{}, k={}", B64.encode(sig.to_bytes()), public_key_b64(sk)))
 }
-
-// ---------- 送出 ----------
 
 /// 結果：`Gone`＝訂閱失效（404／410），要刪；`Failed`＝暫時性失敗，保留。
 #[derive(Debug, PartialEq)]
@@ -300,8 +294,6 @@ pub async fn broadcast_detail(dir: &Path, subject: Option<&str>, payload: &Value
     (sent, gone.len(), failed, reasons)
 }
 
-// ---------- 排程終態通知 ----------
-
 /// 排程終態通知的內容：`S3 DON上班 ✅ 08:58 完成（47 秒）`。時間用排程的時區。
 pub(crate) fn schedule_payload(code: &str, name: &str, outcome: &str, status: &str, finished: chrono::DateTime<chrono::Utc>, tz: &str, duration_ms: Option<i64>, project_id: &str, schedule_id: &str, occurrence_id: &str) -> Value {
     let label = match (status, outcome) {
@@ -360,8 +352,6 @@ pub(crate) fn spawn_schedule_push(app: &Arc<App>, t: &crate::schedules::store::T
     });
 }
 
-// ---------- 主力 bot 推播（回合做完／需要回應） ----------
-
 /// 同 bot 同類通知的最短間隔：30 秒內多次合併（只送第一則）。
 const MAIN_THROTTLE: Duration = Duration::from_secs(30);
 /// blocked 要等畫面判斷（假 blocked 會被改回）才送。
@@ -400,8 +390,6 @@ struct SentPush {
 
 static SENT: std::sync::Mutex<Option<std::collections::HashMap<(String, MainKind), SentPush>>> = std::sync::Mutex::new(None);
 static SENT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-// ---------- 被登出（Auth）與撞額度上限（Quota）推播 ----------
 
 const AUTH_THROTTLE: Duration = Duration::from_secs(3600);
 const QUOTA_THROTTLE: Duration = Duration::from_secs(3600);
@@ -570,11 +558,9 @@ fn main_payload(bot_id: &str, bot_name: &str, kind: MainKind, line: &str) -> Val
 }
 
 async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind: MainKind, key: &str, read: ReadTarget, line: impl std::future::Future<Output = String>) {
-    // 先去重／節流／presence，再等譯文或摘要：等的時候不會重複推，也不會因為等而漏推。
     if !n.admit(&bot.id, kind, key, user_is_watching(&bot.id)) {
         return;
     }
-    // 已讀就不推：先等一段（期間在任一端讀了就取消），譯文／摘要等完後再判斷一次。
     tokio::time::sleep(Duration::from_millis(READ_DELAY_MS.load(Ordering::Relaxed))).await;
     if is_read(app, &bot.id, &read).await {
         return;
@@ -588,7 +574,6 @@ async fn send_main(app: &Arc<App>, n: &MainNotifier, bot: &crate::db::Bot, kind:
     SENT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert((bot.id.clone(), kind), SentPush { seq, tag, read: read.clone() });
     let subject = app.cfg.get().await.server.push_subject.clone();
     let _ = tokio::time::timeout(Duration::from_secs(60), broadcast(&app.data_dir, subject.as_deref(), &payload)).await;
-    // 送的途中已經在某端讀了：補發關閉（不然它會留在別的裝置上）。
     if is_read(app, &bot.id, &read).await {
         close_sent(app, &bot.id, kind, seq).await;
     }
@@ -660,7 +645,6 @@ fn line_wait() -> Duration {
 /// `id`：譯文快取的鍵（回覆用訊息 id，與網頁共用快取）。
 async fn push_line(app: &Arc<App>, id: &str, text: &str) -> String {
     use crate::message_translate as mt;
-    // 譯文快取鍵是原文（含前後空白），跟網頁、預先翻用同一份內容，不能先 trim 掉。
     let raw = text;
     let text = text.trim();
     if text.is_empty() {
@@ -739,12 +723,10 @@ async fn on_turn_done(app: &Arc<App>, n: &MainNotifier, bot_id: &str, turn_id: &
         return;
     }
     if failed {
-        // 回合失敗不論誰觸發都推。
         let read = ReadTarget::Message(newest_in_turn(app, turn_id).await);
         send_main(app, n, &bot, MainKind::Done, turn_id, read, async { "回合失敗".to_string() }).await;
         return;
     }
-    // 系統觸發的回合（daemon 通知、hook 喚醒、背景任務自續）不推：使用者沒有在等它，每則都推太吵（2026-11-10）。
     if !user_triggered(app, turn_id).await {
         return;
     }
@@ -851,7 +833,6 @@ pub fn spawn_main_notifier(app: Arc<App>) {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                // 回合完成要等譯文／摘要（最久數十秒）：另開工作做，不卡住事件流。去重在 send_main 一開始就記帳。
                 Ok(ev) if ev.kind == "turn_updated" => {
                     let (app, n) = (app.clone(), n.clone());
                     tokio::spawn(async move { handle_event(&app, &n, &ev).await });
@@ -863,8 +844,6 @@ pub fn spawn_main_notifier(app: Arc<App>) {
         }
     });
 }
-
-// ---------- 系統異常推播（遠端主機斷線、bot 補開失敗） ----------
 
 const INCIDENT_THROTTLE: Duration = Duration::from_secs(30);
 
@@ -971,7 +950,6 @@ pub(crate) async fn handle_incident(
             }
         }
         "bot_stopped" => {
-            // 子 agent 不推
             if let Ok(Some(bot)) = crate::db::bot(&app.db, resource).await {
                 if bot.managed_by == "child" || bot.parent_bot_id.is_some() {
                     return false;
@@ -1038,10 +1016,6 @@ pub fn spawn_incident_notifier(app: Arc<App>) {
     });
 }
 
-
-
-// ---------- 更新與重置券推播 ----------
-
 /// 不是 bot 的通用通知：標題固定 AG Man 以外的短標題＋內文。
 fn plain_payload(title: &str, body: &str, tag: &str, url: &str) -> Value {
     json!({"title": title, "body": body, "tag": tag, "url": url})
@@ -1065,20 +1039,17 @@ fn kind_label(kind: &str) -> String {
 /// 更新類事件 → 通知內容（沒有要通知就 ）。key 用來同版本只推一次。
 pub(crate) fn update_notice(kind: &str, data: &Value) -> Option<(String, Value)> {
     match kind {
-        // 上游偵測到新版： 本來就是「每個新版本一次」。
         "upstream_update" if data["notify"] == "update" => {
             let k = data["kind"].as_str()?;
             let v = data["latest_version"].as_str()?;
             Some((format!("upstream:{k}:{v}"), plain_payload("有新版", &format!("{} 有新版 {v}", kind_label(k)), &format!("update:{k}"), "/")))
         }
-        // 自動更新失敗通知
         "upstream_update" if data["notify"] == "error" && data["auto_update"] == true => {
             let k = data["kind"].as_str()?;
             let h = data["host"].as_str().unwrap_or("local");
             let text = data["text"].as_str().unwrap_or("自動更新失敗");
             Some((format!("auto_update_error:{h}:{k}"), plain_payload("自動更新失敗", text, &format!("auto_update_error:{h}:{k}"), "/")))
         }
-        // 網頁上「已安裝」的結果：成功才通知。
         "cli_update_done" if data["ok"] == true => {
             let k = data["kind"].as_str()?;
             let v = data["target_version"].as_str()?;
@@ -1240,7 +1211,6 @@ pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono
     let mut seen = load_reset_seen(&app.data_dir);
     let ts = now.timestamp();
     seen.retain(|_, at| ts - *at < 7 * 86400);
-    // 使用者按了「不再提醒」的帳號：不推、也不記入 seen（暫停結束後同一次耗盡還會再推）。
     let snoozed = crate::reset_offer_snooze::load(&app.data_dir, now);
     let fresh: Vec<ResetOffer> = reset_offers(snap, now).into_iter().filter(|o| !snoozed.contains_key(&o.key) && !seen.contains_key(&o.id)).collect();
     if fresh.is_empty() {
@@ -1260,8 +1230,6 @@ pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono
 pub fn spawn_extra_notifiers(app: Arc<App>) {
     let observed = app.clone();
     crate::supervisor_inbox::set_inbox_observer(Box::new(move |_key, kind, payload| spawn_system_alert(&observed, kind, payload)));
-    // AG Man 自己換版不再推播（2026-11-21）：開著的手機分頁會自己偵測到新前端，跳「請重新開啟」橫幅。
-    // 仍記下這次的 build，之後才判斷得出換版（`build_changed`）。
     let _ = build_changed(&app.data_dir, crate::build_info::BUILD_SHA);
     crate::background_loop::spawn_periodic(&app, "new model scan", crate::runners::new_models::SCAN_EVERY, crate::runners::new_models::SCAN_FIRST, |app| async move {
         crate::runners::new_models::run(&app).await;
@@ -1281,7 +1249,6 @@ pub(crate) async fn query_affected_bots(
     bucket: Option<&str>,
 ) -> Vec<(String, String)> {
     let id_str = identity.unwrap_or("").trim();
-    // 各 kind 預設帳號的名字：claude `cc0`、codex `co0`、agy `ag0`（舊資料記成 `agy`）。
     let is_default = id_str.is_empty() || matches!(id_str, "cc0" | "co0" | "ag0" | "agy");
     let rows: Vec<(String, String, Option<String>)> = if is_default {
         sqlx::query_as::<_, (String, String, Option<String>)>(
@@ -1357,7 +1324,6 @@ pub(crate) fn format_auth_payload(
     bot_ids: &[String],
     bot_names: &[String],
 ) -> Value {
-    // agy 預設帳號叫 `ag0`（舊資料 `agy`、或沒有身份）。
     let identity = match identity.trim() {
         "" | "agy" if kind == "agy" => crate::tools::AGY_DEFAULT_IDENTITY,
         other => other,
@@ -1429,7 +1395,6 @@ pub(crate) fn format_quota_payload(
 ) -> Value {
     let id_str = identity.map(str::trim).unwrap_or("");
     let base_label = if kind == "agy" && matches!(id_str, "" | "agy") {
-        // agy 預設帳號（裸 `agy` key）叫 `ag0`。
         crate::tools::AGY_DEFAULT_IDENTITY.to_string()
     } else if !id_str.is_empty() {
         id_str.to_string()
@@ -1553,8 +1518,6 @@ pub(crate) fn spawn_quota_push(
     });
 }
 
-// ---------- 系統警報推播（ops_alert 白名單） ----------
-
 /// 會打斷人的系統事件（`ops_alert` 的 `reason`，或獨立的 kind）。其他 ops_alert 只給巡檢，不推。
 const SYSTEM_ALERT_REASONS: [&str; 7] = [
     "swap_rolled_back",
@@ -1614,8 +1577,6 @@ pub(crate) fn spawn_system_alert(app: &Arc<App>, kind: &str, payload: &Value) {
     tokio::spawn(async move { send_plain(&app, notice).await });
 }
 
-// ---------- API ----------
-
 pub(crate) async fn get_vapid_key(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     user_only(&p)?;
     let _g = FILE_LOCK.lock().await;
@@ -1626,7 +1587,6 @@ pub(crate) async fn get_vapid_key(State(app): State<Arc<App>>, Extension(p): Ext
 pub(crate) async fn list(State(app): State<Arc<App>>, Extension(p): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
     user_only(&p)?;
     let _g = FILE_LOCK.lock().await;
-    // 不回 keys：只給 endpoint（網頁用來判斷「這個瀏覽器是否已訂閱」）與建立時間。
     let subs: Vec<Value> = load_subs(&app.data_dir).into_iter().map(|s| json!({"endpoint": s.endpoint, "created_at": s.created_at})).collect();
     Ok(Json(json!({"subscriptions": subs})))
 }
@@ -1668,7 +1628,7 @@ pub(crate) async fn subscribe(State(app): State<Arc<App>>, Extension(p): Extensi
     let sub = Subscription { endpoint: input.endpoint.clone(), p256dh: input.keys.p256dh.trim_end_matches('=').into(), auth: input.keys.auth.trim_end_matches('=').into(), created_at: crate::db::now(), origin };
     let existed = subs.iter().any(|s| s.endpoint == sub.endpoint);
     if let Some(slot) = subs.iter_mut().find(|s| s.endpoint == sub.endpoint) {
-        *slot = sub; // 同 endpoint 去重：更新 keys
+        *slot = sub;
     } else {
         if subs.len() >= MAX_SUBSCRIPTIONS {
             return Err(bad("too_many_subscriptions"));
@@ -1777,8 +1737,6 @@ pub(crate) async fn post_presence(Extension(p): Extension<RequestPrincipal>, Jso
     Ok(Json(json!({"ok": true})))
 }
 
-// ---------- 排程等不到 bot 通知 ----------
-
 static SCHED_WAIT_NOTIFIED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
     std::sync::Mutex::new(None);
 
@@ -1846,7 +1804,6 @@ pub(crate) fn spawn_schedule_bot_unavailable_push(
     });
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1906,7 +1863,6 @@ pub(crate) mod tests {
         use p256::ecdsa::signature::Verifier as _;
         let sig = Signature::from_slice(&B64.decode(parts[2]).unwrap()).unwrap();
         sk.verifying_key().verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).unwrap();
-        // 私鑰檔 0600，重讀得到同一把。
         assert_eq!(std::fs::metadata(vapid_path(&dir)).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(public_key_b64(&load_or_create_key(&dir).unwrap()), k);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2179,17 +2135,14 @@ pub(crate) mod tests {
         handle_event(&app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
         handle_event(&app, &n, &turn_ev(&bot_id, "t2", "completed")).await;
         assert!(rx.try_recv().is_err(), "同回合與 30 秒內都不再推");
-        // 非主力不推。
         let plain = crate::testing::claude_bot(&app, &env.project_id, "一般").await;
         handle_event(&app, &n, &turn_ev(&plain.id, "t3", "completed")).await;
         assert!(rx.try_recv().is_err(), "非主力不推");
-        // 開關關掉不推。
         let n2 = Arc::new(MainNotifier::default());
         write_private(&settings_path(&app.data_dir), br#"{"main_bots":false}"#).unwrap();
         handle_event(&app, &n2, &turn_ev(&bot_id, "t4", "completed")).await;
         assert!(rx.try_recv().is_err(), "開關關了不推");
         write_private(&settings_path(&app.data_dir), br#"{"main_bots":true}"#).unwrap();
-        // presence：正在看就不推。
         record_presence("c", Presence { bot_id: Some(bot_id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
         handle_event(&app, &n2, &turn_ev(&bot_id, "t5", "completed")).await;
         assert!(rx.try_recv().is_err(), "正在看不推");
@@ -2212,11 +2165,9 @@ pub(crate) mod tests {
             handle_event(&app, &n, &turn_ev(&bot_id, t, "completed")).await;
         }
         assert!(rx.try_recv().is_err(), "daemon 通知、別的 bot 轉來的、hook／背景自續回合都不推");
-        // 這些不吃掉使用者回合的節流名額。
         add_turn(&env, &bot_id, "human", "好了", "user", None).await;
         handle_event(&app, &n, &turn_ev(&bot_id, "human", "completed")).await;
         assert_eq!(rx.try_recv().expect("使用者訊息觸發的回合照推")["body"], "好了");
-        // 失敗：不論誰觸發都推（另一個 key／同類節流以失敗回合 id 計）。
         let n2 = Arc::new(MainNotifier::default());
         handle_event(&app, &n2, &turn_ev(&bot_id, "hook", "failed")).await;
         assert_eq!(rx.try_recv().expect("回合失敗照推")["body"], "回合失敗");
@@ -2240,7 +2191,6 @@ pub(crate) mod tests {
         let (env, bot_id, n, mut rx) = primary_env().await;
         let app = env.app.clone();
         let conv = crate::db::conversation_id(&app.db, &bot_id).await.unwrap();
-        // 網頁送的 /compact：user 訊息是 /compact，完成與失敗都不推。
         for (t, cmd) in [("c1", "/compact"), ("c2", "/clear"), ("c3", "/compact 保留計畫")] {
             add_reply(&env, &bot_id, t, "ok").await;
             sqlx::query("UPDATE messages SET content=? WHERE id=?").bind(cmd).bind(format!("u-{t}")).execute(&app.db).await.unwrap();
@@ -2250,14 +2200,12 @@ pub(crate) mod tests {
         }
         handle_event(&app, &Arc::new(MainNotifier::default()), &turn_ev(&bot_id, "c1", "failed")).await;
         assert!(rx.try_recv().is_err(), "使用者的 /compact、/clear 不推（含失敗）");
-        // 自動壓縮收掉的空回合：只有壓縮說明、沒有 user 訊息；就算被標失敗也不推。
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ?").bind(&bot_id).fetch_one(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('auto',?,?,'external','failed','ok',?)").bind(&conv).bind(&run).bind(crate::db::now()).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO messages(id,conversation_id,turn_id,role,content,source,created_at) VALUES('n-auto',?,'auto','system',?,'system',?)")
             .bind(&conv).bind(am_base::cache_clock::COMPACT_NOTE_PREFIXES[1]).bind(crate::db::now()).execute(&app.db).await.unwrap();
         handle_event(&app, &Arc::new(MainNotifier::default()), &turn_ev(&bot_id, "auto", "failed")).await;
         assert!(rx.try_recv().is_err(), "自動壓縮不推");
-        // 真正的工作回合照舊通知：一般 prompt、技能指令。
         add_reply(&env, &bot_id, "w1", "做完了").await;
         handle_event(&app, &n, &turn_ev(&bot_id, "w1", "completed")).await;
         assert_eq!(rx.try_recv().expect("一般工作回合照推")["body"], "做完了");
@@ -2287,8 +2235,6 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err(), "同一段 blocked 只推一次");
         set_test_sender(None);
     }
-
-    // ---- 推播內文：譯文／摘要 ----
 
     struct PFake {
         tr_calls: AtomicUsize,
@@ -2370,7 +2316,6 @@ pub(crate) mod tests {
         assert_eq!(got["body"], "已部署完成，測試全數通過");
         assert!(rx.try_recv().is_err(), "等譯文時重複事件不會重複推");
         assert_eq!((f.tr_calls.load(Ordering::SeqCst), f.sum_calls.load(Ordering::SeqCst)), (1, 0), "短句不摘要");
-        // 譯文快取與網頁共用：同一則再翻是命中。
         let again = crate::message_translate::translate(&env.app, "m-t1", EN_SHORT).await.unwrap();
         assert_eq!(again["cached"], true);
         set_test_sender(None);
@@ -2396,18 +2341,15 @@ pub(crate) mod tests {
         let _g = SENDER_TESTS.lock().await;
         clear_presence();
         let (env, bot_id, n, mut rx, f) = push_env(true, false, 0).await;
-        // 多行。
         let long_zh = "第一行說明目前的進度，已經完成部署\n第二行是更多細節：測試全部通過\n第三行列出檔案路徑 /tmp/a/b/c";
         add_reply(&env, &bot_id, "t1", long_zh).await;
         handle_event(&env.app, &n, &turn_ev(&bot_id, "t1", "completed")).await;
         assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY);
-        // 單行但超過 40 字。
         let single_long = "這是一句很長很長的中文訊息，超過四十個字的上限，所以不能直接當推播內文送出去，要改用固定的長訊息提示";
         let n2 = Arc::new(MainNotifier::default());
         add_reply(&env, &bot_id, "t2", single_long).await;
         handle_event(&env.app, &n2, &turn_ev(&bot_id, "t2", "completed")).await;
         assert_eq!(rx.try_recv().expect("要推")["body"], LONG_BODY);
-        // auto 關：英文長句不翻，也不摘要。
         let n3 = Arc::new(MainNotifier::default());
         add_reply(&env, &bot_id, "t3", EN_LONG).await;
         handle_event(&env.app, &n3, &turn_ev(&bot_id, "t3", "completed")).await;
@@ -2467,7 +2409,6 @@ pub(crate) mod tests {
         let n = Arc::new(MainNotifier::default());
         *n.settle.lock().unwrap() = Some(Duration::ZERO);
 
-        // 1. 一般頂層 bot（非主力）
         let bot = crate::testing::claude_bot(&app, &env.project_id, "頂層一般").await;
         let run_id = crate::testing::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
@@ -2477,7 +2418,6 @@ pub(crate) mod tests {
         assert_eq!(got["title"], "頂層一般");
         assert!(got["body"].as_str().unwrap().starts_with("需要你回應"), "{got}");
 
-        // 2. 子 agent 不推
         let child = crate::testing::claude_bot(&app, &env.project_id, "子代理").await;
         sqlx::query("UPDATE bots SET managed_by = 'child', parent_bot_id = ? WHERE id = ?").bind(&bot.id).bind(&child.id).execute(&app.db).await.unwrap();
         let child_run = crate::testing::fake_run(&app, &child.id).await;
@@ -2486,7 +2426,6 @@ pub(crate) mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(rx.try_recv().is_err(), "子 agent blocked 絕不推播");
 
-        // 3. 排程專屬 bot 不推
         let sched = crate::testing::claude_bot(&app, &env.project_id, "排程專屬").await;
         sqlx::query("UPDATE bots SET role = 'scheduler' WHERE id = ?").bind(&sched.id).execute(&app.db).await.unwrap();
         let sched_run = crate::testing::fake_run(&app, &sched.id).await;
@@ -2495,7 +2434,6 @@ pub(crate) mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(rx.try_recv().is_err(), "排程專屬 bot blocked 絕不推播");
 
-        // 4. other_bots 開關關掉不推
         let n2 = Arc::new(MainNotifier::default());
         *n2.settle.lock().unwrap() = Some(Duration::ZERO);
         write_private(&settings_path(&app.data_dir), br#"{"other_bots":false}"#).unwrap();
@@ -2507,7 +2445,6 @@ pub(crate) mod tests {
         assert!(rx.try_recv().is_err(), "other_bots 關閉時不推");
         write_private(&settings_path(&app.data_dir), br#"{"other_bots":true}"#).unwrap();
 
-        // 5. presence 抑制
         record_presence("c", Presence { bot_id: Some(bot2.id.clone()), visible: true, idle_secs: 1, received: std::time::Instant::now() });
         let n3 = Arc::new(MainNotifier::default());
         *n3.settle.lock().unwrap() = Some(Duration::ZERO);
@@ -2541,22 +2478,18 @@ pub(crate) mod tests {
             Box::pin(async { SendOutcome::Sent })
         })));
 
-        // 第一次呼叫：正常推播
         spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ1");
         let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("應收到推播").unwrap();
         assert_eq!(got["title"], "S5 每日報告");
         assert_eq!(got["body"], "綁定的 bot 不可用（bot 已刪除）");
 
-        // 同 occurrence_id 第二次呼叫：去重，不重複推播
         spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ1");
         assert!(rx.try_recv().is_err(), "同 occurrence 不重複推播");
 
-        // 另一個 occurrence_id 但開關關閉：不推播
         write_private(&settings_path(&app.data_dir), br#"{"schedules":false}"#).unwrap();
         spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ2");
         assert!(rx.try_recv().is_err(), "開關關閉不推播");
 
-        // 開關開啟：新 occurrence 推播
         write_private(&settings_path(&app.data_dir), br#"{"schedules":true}"#).unwrap();
         spawn_schedule_bot_unavailable_push(&app, "S5", "每日報告", "bot 已刪除", "p1", "sch1", "occ3");
         let got3 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("開關開啟應收到推播").unwrap();
@@ -2566,7 +2499,6 @@ pub(crate) mod tests {
         set_test_sender(None);
         clear_sched_wait_notified();
     }
-
 
     #[tokio::test]
     async fn host_and_bot_incident_push_dedup_and_recovery() {
@@ -2582,7 +2514,6 @@ pub(crate) mod tests {
         })));
         let notifier = Arc::new(IncidentNotifier::default());
 
-        // 1. host_disconnected open
         let host_inc = json!({
             "id": "inc_host_h1",
             "kind": "host_disconnected",
@@ -2596,7 +2527,6 @@ pub(crate) mod tests {
         assert_eq!(got["body"], "h1 已斷線");
         assert_eq!(got["url"], "/hosts");
 
-        // 重複 incident 或 30 秒節流窗口內不重複推
         assert!(!handle_incident(&app, &notifier, &host_inc).await);
         let host_inc_new_id = json!({
             "id": "inc_host_h1_2",
@@ -2608,7 +2538,6 @@ pub(crate) mod tests {
         assert!(!handle_incident(&app, &notifier, &host_inc_new_id).await);
         assert!(rx.try_recv().is_err(), "節流期間不應送出");
 
-        // 2. host_disconnected resolved 補推「已恢復」
         let host_resolved = json!({
             "id": "inc_host_h1",
             "kind": "host_disconnected",
@@ -2621,11 +2550,9 @@ pub(crate) mod tests {
         assert_eq!(got["title"], "主機 h1");
         assert_eq!(got["body"], "h1 已恢復");
 
-        // 再次 resolved 不重複推（同 incident 只推一次）
         assert!(!handle_incident(&app, &notifier, &host_resolved).await);
         assert!(rx.try_recv().is_err(), "已恢復只推一次");
 
-        // 未曾 open 過的 incident 直接 resolved 不推
         let ghost_resolved = json!({
             "id": "inc_ghost",
             "kind": "host_disconnected",
@@ -2636,7 +2563,6 @@ pub(crate) mod tests {
         assert!(!handle_incident(&app, &notifier, &ghost_resolved).await);
         assert!(rx.try_recv().is_err(), "未 open 不推 resolved");
 
-        // 3. bot_stopped open
         let bot = crate::testing::claude_bot(&app, &env.project_id, "工作bot").await;
         let bot_inc = json!({
             "id": "inc_bot_b1",
@@ -2651,7 +2577,6 @@ pub(crate) mod tests {
         assert_eq!(got["body"], format!("{} 已停止（自動補開失敗）", bot.name));
         assert_eq!(got["url"], format!("/bots/{}", bot.id));
 
-        // 4. bot_stopped resolved
         let bot_resolved = json!({
             "id": "inc_bot_b1",
             "kind": "bot_stopped",
@@ -2664,7 +2589,6 @@ pub(crate) mod tests {
         assert_eq!(got["title"], bot.name);
         assert_eq!(got["body"], format!("{} 已恢復", bot.name));
 
-        // 5. 子 agent 的 bot_stopped 不推
         let child_bot = crate::testing::claude_bot(&app, &env.project_id, "子代理").await;
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&child_bot.id).execute(&app.db).await.unwrap();
         let child_inc = json!({
@@ -2677,7 +2601,6 @@ pub(crate) mod tests {
         assert!(!handle_incident(&app, &notifier, &child_inc).await);
         assert!(rx.try_recv().is_err(), "子 agent 不推");
 
-        // 6. 開關關閉不推
         let notifier2 = Arc::new(IncidentNotifier::default());
         write_private(&settings_path(&app.data_dir), br#"{"hosts":false}"#).unwrap();
         assert!(!handle_incident(&app, &notifier2, &host_inc).await);
@@ -2685,7 +2608,6 @@ pub(crate) mod tests {
 
         set_test_sender(None);
     }
-
 
     #[tokio::test]
     async fn settings_roundtrip_user_only() {
@@ -2713,10 +2635,8 @@ pub(crate) mod tests {
         assert_eq!(p["title"], "換版失敗，已回滾");
         assert_eq!(p["tag"], "ops:swap_rolled_back");
         assert_eq!(p["url"], "/");
-        // 白名單外的 ops_alert（例如腳本停住、CI 盯哨）只給巡檢，不推。
         assert!(system_alert_notice("ops_alert", &json!({"reason": "check_failing", "detail": "x"})).is_none());
         assert!(system_alert_notice("ops_alert", &json!({"detail": "no reason"})).is_none());
-        // 獨立 kind：巡檢放棄自動重試。
         let gave_up = system_alert_notice("watchdog_gave_up", &json!({"attempts": 3, "why": "CLI 起來就死"})).unwrap();
         assert!(gave_up["body"].as_str().unwrap().contains("3 次"));
         assert!(system_alert_notice("turn_updated", &json!({})).is_none());
@@ -2795,28 +2715,23 @@ pub(crate) mod tests {
 
     #[test]
     fn format_auth_payload_formatting() {
-        // 1 bot, local host
         let p1 = format_auth_payload("local", "codex", "co0", &["b1".into()], &["sn-wkr".into()]);
         assert_eq!(p1["title"], "codex co0 被登出");
         assert_eq!(p1["body"], "sn-wkr 受影響，需重新登入");
         assert_eq!(p1["url"], "/bots/b1");
         assert_eq!(p1["tag"], "auth:local:codex:co0");
 
-        // 2 bots
         let p2 = format_auth_payload("local", "claude", "cc1", &["b1".into(), "b2".into()], &["sn-wkr".into(), "hk-wkr".into()]);
         assert_eq!(p2["title"], "claude cc1 被登出");
         assert_eq!(p2["body"], "sn-wkr、hk-wkr 共 2 顆 bot 受影響，需重新登入");
 
-        // 3 bots (aggregated)
         let p3 = format_auth_payload("local", "codex", "co0", &["b1".into(), "b2".into(), "b3".into()], &["sn-wkr".into(), "hk-wkr".into(), "am-repo".into()]);
         assert_eq!(p3["title"], "codex co0 被登出");
         assert_eq!(p3["body"], "sn-wkr、hk-wkr… 共 3 顆 bot 受影響，需重新登入");
 
-        // remote host
         let pr = format_auth_payload("ubuntu", "claude", "cc1", &["b1".into()], &["sn-wkr".into()]);
         assert_eq!(pr["title"], "claude cc1（ubuntu）被登出");
 
-        // agy (empty identity)
         let pa = format_auth_payload("local", "agy", "", &["b1".into()], &["agy-wkr".into()]);
         assert_eq!(pa["title"], "agy ag0 被登出", "agy 的預設帳號叫 ag0");
     }
@@ -2824,7 +2739,6 @@ pub(crate) mod tests {
     #[test]
     fn format_quota_payload_formatting() {
         let ids4_of = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("x{i}")).collect() };
-        // cc1, 7 bots, future reset
         let bots: Vec<String> = (1..=7).map(|i| format!("wkr-{i}")).collect();
         let ids: Vec<String> = (1..=7).map(|i| format!("b{i}")).collect();
         let until = "2026-11-12T11:00:00Z";
@@ -2835,21 +2749,18 @@ pub(crate) mod tests {
         assert_eq!(p["url"], "/bots/b1");
         assert_eq!(p["tag"], "quota:local/claude:cc1");
 
-        // agy 預設帳號（裸 `agy` key、或舊資料 `agy`）叫 ag0；ag1 照舊。
         let pa = format_quota_payload("local", "agy", None, None, None, &ids4_of(1), &ids4_of(1), "agy");
         assert_eq!(pa["title"], "ag0 額度用完");
         assert_eq!(format_quota_payload("m4p", "agy", Some("ag1"), None, None, &ids4_of(1), &ids4_of(1), "m4p/agy:ag1")["title"], "ag1（m4p）額度用完");
         assert_eq!(format_auth_payload("local", "agy", "", &ids4_of(1), &ids4_of(1))["title"], "agy ag0 被登出");
         assert_eq!(format_auth_payload("local", "agy", "ag1", &ids4_of(1), &ids4_of(1))["title"], "agy ag1 被登出");
 
-        // codex 5h bucket, 4 bots
         let bots4: Vec<String> = (1..=4).map(|i| format!("b-{i}")).collect();
         let ids4: Vec<String> = (1..=4).map(|i| format!("id-{i}")).collect();
         let p4 = format_quota_payload("local", "codex", None, Some("five_hour"), None, &ids4, &bots4, "codex");
         assert_eq!(p4["title"], "codex 5h 額度用完");
         assert_eq!(p4["body"], "b-1、b-2… 共 4 顆停擺");
 
-        // remote host
         let premote = format_quota_payload("ubuntu", "claude", Some("cc2"), Some("seven_day"), None, &ids4, &bots4, "ubuntu/claude:cc2");
         assert_eq!(premote["title"], "cc2 7d（ubuntu）額度用完");
     }
@@ -2857,14 +2768,12 @@ pub(crate) mod tests {
     #[test]
     fn notifier_admit_and_dedup() {
         let n = AuthQuotaNotifier::default();
-        // auth dedup
         assert!(n.admit_auth("local", "claude", "cc1"));
         assert!(!n.admit_auth("local", "claude", "cc1"), "短期內不可重複推");
         assert!(n.admit_auth("local", "claude", "cc2"), "不同身份可推");
         n.clear_auth("local", "claude", "cc1");
         assert!(n.admit_auth("local", "claude", "cc1"), "clear 後可重推");
 
-        // quota dedup
         let u1 = "2026-11-12T11:00:00Z";
         let u2 = "2026-11-12T16:00:00Z";
         assert!(n.admit_quota("claude:cc1", Some("five_hour"), Some(u1)));
@@ -2881,12 +2790,10 @@ pub(crate) mod tests {
         let user = || Extension(RequestPrincipal::User);
         let bot = || Extension(RequestPrincipal::Bot("b1".into()));
 
-        // 預設全開
         let res = get_settings(State(app.clone()), user()).await.unwrap().0;
         assert_eq!(res["auth"], true);
         assert_eq!(res["quota"], true);
 
-        // 修改 auth 開關
         let updated = put_settings(State(app.clone()), user(), Json(SettingsInput {
             auth: Some(false),
             ..Default::default()
@@ -2896,7 +2803,6 @@ pub(crate) mod tests {
         assert_eq!(auth_enabled(&app.data_dir), false);
         assert_eq!(quota_enabled(&app.data_dir), true);
 
-        // bot principal 403 Forbidden
         assert!(matches!(get_settings(State(app.clone()), bot()).await, Err(LcError::Forbidden(_))));
         assert!(matches!(put_settings(State(app), bot(), Json(SettingsInput { auth: Some(true), ..Default::default() })).await, Err(LcError::Forbidden(_))));
     }
@@ -2909,7 +2815,6 @@ pub(crate) mod tests {
         let app = env.app.clone();
         save_subs(&app.data_dir, &[fresh_sub("https://push.example/auth").0]).unwrap();
 
-        // 建立 3 顆 claude cc1 的 bot
         let b1 = crate::testing::claude_bot(&app, &env.project_id, "b1-worker").await;
         let b2 = crate::testing::claude_bot(&app, &env.project_id, "b2-worker").await;
         let b3 = crate::testing::claude_bot(&app, &env.project_id, "b3-worker").await;
@@ -2923,24 +2828,20 @@ pub(crate) mod tests {
             Box::pin(async { SendOutcome::Sent })
         })));
 
-        // 觸發推播
         spawn_auth_push(&app, "local", "claude", "cc1");
         let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("應收到 auth 推播").unwrap();
         assert_eq!(got["title"], "claude cc1 被登出");
         assert!(got["body"].as_str().unwrap().contains("共 3 顆 bot 受影響，需重新登入"), "{got}");
 
-        // 同一身份再次觸發：去重，不發第二則
         spawn_auth_push(&app, "local", "claude", "cc1");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(rx.try_recv().is_err(), "同身份去重不重複推");
 
-        // clear 後再次觸發：可送出
         clear_auth_push("local", "claude", "cc1");
         spawn_auth_push(&app, "local", "claude", "cc1");
         let got2 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("clear 後應再次收到推播").unwrap();
         assert_eq!(got2["title"], "claude cc1 被登出");
 
-        // 開關關閉時不推
         write_private(&settings_path(&app.data_dir), br#"{"auth":false}"#).unwrap();
         clear_auth_push("local", "claude", "cc1");
         spawn_auth_push(&app, "local", "claude", "cc1");
@@ -2987,12 +2888,10 @@ pub(crate) mod tests {
         crate::reset_offer_snooze::set(&app.data_dir, key, now + chrono::Duration::hours(1), now).unwrap();
         assert_eq!(scan_reset_credits(&app, &snap, now).await, 0, "暫停中不推");
         assert!(rx.try_recv().is_err());
-        // 暫停中的 scan 不記 seen：暫停結束後同一次耗盡、還有券，要再推一次。
         assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::minutes(59)).await, 0);
         assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(2)).await, 1, "暫停過期後同一事件再推");
         assert!(rx.try_recv().is_ok());
         assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(2)).await, 0, "推過就不重推");
-        // 推過之後才按不再提醒：暫停時清掉已記的 seen，過期後同一次耗盡還會再推。
         crate::reset_offer_snooze::set(&app.data_dir, key, now + chrono::Duration::hours(4), now + chrono::Duration::hours(2)).unwrap();
         assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::hours(3)).await, 0, "暫停中");
         assert_eq!(scan_reset_credits(&app, &snap, now + chrono::Duration::minutes(270)).await, 1, "過期後再推");
@@ -3007,7 +2906,6 @@ pub(crate) mod tests {
         let app = env.app.clone();
         save_subs(&app.data_dir, &[fresh_sub("https://push.example/quota").0]).unwrap();
 
-        // 建立 4 顆 codex co0 的 bot
         for i in 1..=4 {
             let b = crate::testing::claude_bot(&app, &env.project_id, &format!("codex-{i}")).await;
             sqlx::query("UPDATE bots SET kind = 'codex', identity = 'co0' WHERE id = ?").bind(&b.id).execute(&app.db).await.unwrap();
@@ -3026,18 +2924,15 @@ pub(crate) mod tests {
         assert!(got["body"].as_str().unwrap().contains("共 4 顆停擺"), "{got}");
         assert!(got["body"].as_str().unwrap().contains("重置"), "{got}");
 
-        // 同窗去重
         spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some(until1));
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(rx.try_recv().is_err(), "同窗不重複推");
 
-        // 新窗可推
         let until2 = "2026-11-12T16:00:00Z";
         spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some(until2));
         let got2 = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("新窗應收到推播").unwrap();
         assert_eq!(got2["title"], "co0 5h 額度用完");
 
-        // 開關關閉不推
         write_private(&settings_path(&app.data_dir), br#"{"quota":false}"#).unwrap();
         spawn_quota_push(&app, "local", "codex:co0", Some("five_hour"), Some("2026-11-12T21:00:00Z"));
         tokio::time::sleep(Duration::from_millis(100)).await;

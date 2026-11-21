@@ -69,13 +69,9 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
     if bot.kind != "claude" {
         return Err(conflict("unsupported_kind", "只有 claude 能倒回：codex／grok 沒有對應的 /rewind。"));
     }
-    // 使用者自己 default session 的 pane 只觀察、不代打（SPEC §6.5.1）。
     crate::default_session::refuse_default_session(&bot)?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
 
-    // 持 bot 鎖到打完字：`prompt` 拿同一把，期間不會有新的 prompt 打進這個 pane。
-    // already_rewound 與 skip 都在鎖裡重讀。鎖外算過的話，第二次請求會在第一次標記之前
-    // 就決定要倒，進鎖後照樣再按一次 Restore（#656）。
     #[cfg(test)]
     crate::race_point::hit("rewind_before_lock", bot_id).await;
     let lock = app.bot_lock(bot_id).await;
@@ -95,13 +91,11 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
     if msg.rewound_at.is_some() {
         return Err(conflict("already_rewound", "這一則已經倒回掉了。"));
     }
-    // 送出的字：排隊的網頁 prompt 記在 turn 上（跟畫面上的原文可能不一樣）。回合中補充的那句不是 turn 的 prompt，用它自己的原文。
     let prompt_text: Option<String> = match msg.turn_id.as_deref().filter(|_| msg.sent_via.as_deref() != Some("supplement")) {
         Some(t) => sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?").bind(t).fetch_optional(&app.db).await.map_err(up)?.flatten(),
         None => None,
     };
     let target = prompt_text.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| msg.content.clone());
-    // 同一行開頭的較新訊息（沒被倒掉的）要在選單上跳過幾則。排隊中被撤掉、從沒打進 pane 的不算（#1122）：選單上沒有它。
     let later: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT content, turn_id FROM messages WHERE conversation_id = ? AND role = 'user' AND rewound_at IS NULL
            AND rowid > (SELECT rowid FROM messages WHERE id = ?) ORDER BY rowid",
@@ -136,7 +130,6 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
             Arc::new(HerdrPane { client, pane_id })
         }
     };
-    // 直接對 pane 打過字：之後的 prompt 改走打字路線（`slash::mark_pane_typed` 的理由）。記不下來就不打。
     crate::app_ports_r2a8::mark_pane_typed(app, &run.id).await.map_err(up)?;
     if let Some(expect) = clear.as_deref() {
         clear_composer(pane.as_ref(), expect).await?;
@@ -145,10 +138,6 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         Some(t) => turn_dropped(app, t).await.map_err(up)?,
         None => false,
     };
-    // 真的按了 Restore 的那一則（被丟掉的那種會改倒到下一則，或根本不按）：下一次 resume 要接到它之前（`anchor`）。
-    // A dropped message may be missing from the CLI menu while still shifting
-    // `skip`. Include all stored user messages, even rewound/interrupted ones,
-    // before allowing confirmation text with hidden attachment paths.
     let history: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT m.content, t.prompt_text FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
          WHERE m.conversation_id = ? AND m.role = 'user'",
@@ -181,7 +170,6 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
     let _ = crate::app_ports_r2a8::insert_message(app, &conv, None, "system", &note, "system", false, None).await;
     app.emit("messages_rewound", json!({"bot_id": bot_id, "message_id": msg.id, "rewound_at": now})).await;
     tracing::info!(bot = %bot.name, hidden, pane_cleared = done.pane_cleared, "rewound the conversation");
-    // 還握著鎖：下一則還沒打進去，transcript 的長度就是「倒回當時」。
     if let Some((text, skip)) = &restored {
         anchor::record(app, &bot, &run, text, *skip).await;
     }
@@ -230,7 +218,6 @@ async fn next_in_context(app: &impl crate::capabilities::Db, conv: &str, message
                 continue;
             }
         }
-        // 跳過的只算「真的打進過 pane」的同開頭訊息（#1122）。
         let mut skip = 0;
         for (c, t) in &later[i + 1..] {
             if !same_first_line(c, content) {

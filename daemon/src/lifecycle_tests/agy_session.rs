@@ -113,13 +113,11 @@ mod tests {
         assert_eq!(replies(&c).await, [("PONG".to_string(), "transcript".to_string())]);
         let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id = ?").bind(&c.turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!((t.status.as_str(), t.native_session_id.as_deref(), t.native_turn_id.as_deref()), ("completed", Some(sid.as_str()), Some("p0")));
-        // 模型與 context 的 token 數（視窗大小不知道，不填百分比）。
         let r = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
         let st: serde_json::Value = serde_json::from_str(r.status_json.as_deref().expect("status_json")).unwrap();
         assert_eq!(st["model"]["id"], "gemini-3.8-flash-medium");
         assert_eq!(st["context_window"]["total_input_tokens"], 11824);
         assert_eq!(r.transcript_path.as_deref(), c.file.to_str());
-        // 同一份再讀一次：不重複。
         assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
         assert_eq!(replies(&c).await.len(), 1);
     }
@@ -131,7 +129,6 @@ mod tests {
         let got = sync_locked(&c.env.app, &c.run_id).await.unwrap();
         assert_eq!(got, Synced::Read { imported: 0, pending: Some("say PONG".into()) });
         assert!(replies(&c).await.is_empty(), "旁白不是最終回覆");
-        // 做完之後（最後一則是回覆）才收。
         let done = format!("{text}\n{}", step(3, "PLANNER_RESPONSE", "PONG", None));
         std::fs::write(&c.file, done).unwrap();
         assert_eq!(sync_locked(&c.env.app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
@@ -177,13 +174,10 @@ mod tests {
             crate::hosts::set_ssh_fake(&host, move |script| {
                 seen.lock().unwrap().push(script.to_string());
                 Ok(if script.contains("ps -Awwo") {
-                    // 行程表只要環境段：pane 裡的 agy 行程。
                     format!("---AM-ENV---\n  901 agy HERDR_PANE_ID={pane}\n")
                 } else if script.contains("lsof") {
-                    // 開著的兩段對話，外加一個不是對話的檔。
                     format!("p901\nn{REMOTE_HOME}/.zshrc\nn{REMOTE_HOME}/.gemini/antigravity-cli/conversations/{other}.db\nn{REMOTE_HOME}/.gemini/antigravity-cli/conversations/{sid}.db\n")
                 } else if script.contains("date -r") {
-                    // 只有 `sid` 有紀錄檔。
                     format!("{sid} 1700000000\n")
                 } else if script.contains("tail -c") {
                     text.clone()

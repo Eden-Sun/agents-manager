@@ -95,7 +95,6 @@ fn conflict_gave_up(since: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
     let limit = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
     match chrono::DateTime::parse_from_rfc3339(since) {
         Ok(t) => (now - t.with_timezone(&chrono::Utc)).num_minutes() >= limit,
-        // 讀不懂時間就不要放棄：寧可繼續重試，也不要因為一個壞欄位把工作收起來。
         Err(_) => false,
     }
 }
@@ -139,7 +138,6 @@ pub fn iso_in(secs: i64) -> String {
 pub fn past(iso: &str) -> bool {
     match chrono::DateTime::parse_from_rfc3339(iso) {
         Ok(t) => t <= chrono::Utc::now(),
-        // An unparseable timestamp must not wedge a retry forever.
         Err(_) => true,
     }
 }
@@ -153,7 +151,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
     if a.status != "queued" {
         return;
     }
-    // Re-check the target: between queueing and now it could have been deleted.
     let target = match crate::db::bot(app.db(), &a.target_bot_id).await {
         Ok(Some(b)) if b.deleted_at.is_none() => b,
         Ok(_) => {
@@ -165,8 +162,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
             return;
         }
     };
-    // 這顆 bot 在排隊期間變成了 AGM 的角色（setup 挑中了它）：直接 prompt 會繞過角色佇列，
-    // 把交接打進對方的 pane。停下來交給 AGM 用 `assign` 的角色路徑重下一次（SPEC §18.15）。
     match super::roles::role_of_bot(app.db(), &a.target_bot_id).await {
         Ok(Some(_)) => {
             dispatch_failed(app, &a, "target bot is now an AGM role; hand it over through the role queue instead").await;
@@ -180,11 +175,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
             return;
         }
     }
-    // 帳號正被 CLI 擋著（`You've hit your usage limit …`）：送出去只會換來一句系統錯誤，
-    // 而 `queued` 的重試會在 backoff 用完之後把它變成 dispatch_failed——工作就這樣無聲斷掉。
-    // 停在 `quota_blocked` 等額度回來，時間到了 controller 自己重送。
-    // 查不到（讀不到這顆 bot 在哪台主機，#197）不當成沒撞限——那樣會送進一個已經用盡的遠端身份：跟讀不到任務、讀不到窗口
-    // 同一個做法，`hold` 幾秒再看，不花重試。
     match app.try_limit_hit_for_bot(&target).await {
         Ok(Some(hit)) => {
             park_quota(app, &a, &hit, "dispatch").await;
@@ -198,15 +188,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
             return;
         }
     }
-    // A restart window is being held: the point of the window is that nothing new starts inside
-    // it. The assignment stays queued (nothing is lost or refused) until the window closes.
-    // 同一個閘門（`maintenance::window_held`）也擋使用者的 prompt 與排隊 prompt 的 flush，
-    // 三條入口一份定義，不再是「交辦有擋、打字進 pane 的兩條沒擋」（issue #86）。
-    // 交辦這條選**排隊**不是拒絕：它是有自己重試與驗收的持久工作項，窗口關掉就照常送出去，
-    // 不會遺失也不會重送（`dispatch_crid` 冪等）。
-    // 讀不到窗口狀態也不派（issue #127）：觀測不到租約不等於沒有租約。這不是一次失敗的送達，用 `hold`
-    // （不花 attempts）排幾秒後再看；原因不寫成 `pause_note`，免得窗口收掉時被當成「窗口的 hold」一起放行——
-    // 這一筆等的是「讀得到」，不是「窗口收掉」。
     match super::maintenance::window_held(app).await {
         Ok(None) => {}
         Ok(Some(w)) => {
@@ -223,15 +204,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
         }
     }
 
-    // The assignment is stamped as coming from the manager, not from the user: `relay_from` is
-    // set as the message is written, so there is no window in which the UI could render it as
-    // the user's own words (it used to be patched in afterwards).
-    //
-    // Fail closed. A DB hiccup here used to collapse to `None`, and `None` does not mean
-    // "source unknown" — it means "the user typed this", which is a claim we would be making
-    // about a person from a failed read. Retrying a few seconds later costs nothing; a prompt
-    // wearing the user's face cannot be taken back.
-    // 驗收角色是協調者、而協調者存在時，派工訊息標成協調者送的：bot 回話才會找對人。
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("dispatch_before_responder_attribution", &a.id).await;
     let responder = match a.review_role.as_deref() {
@@ -259,23 +231,13 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
         tracing::warn!(assignment = %a.id, "holding the assignment: the supervisor has no bot to attribute it to");
         return;
     };
-    // 對方回合中就排隊，不要每五分鐘賭一次它剛好在兩個回合之間（AGM 2026-09-16 裁示）。
-    // 只有這條派工路徑排隊；使用者與 web 的 `/prompt` 維持 409。
     match app.prompt_relayed_queueable(&a.target_bot_id, &a.text, &a.dispatch_crid(), Some(&from), crate::lifecycle::QueueClass::Relay).await {
         Ok(out) => {
-            // `failed` from the CLI itself is terminal; `unknown` means we do not know whether
-            // it landed, and is reconciled against the turn rather than re-sent.
             if out.delivery == "failed" {
                 dispatch_failed(app, &a, "delivery failed").await;
                 return;
             }
-            // `queued` 也記成 delivered（turn 已經存在、id 已經綁定）：回合結束時 queue flush 會送出，
-            // 之後的完成事件照舊對得上這筆交辦。等太久沒送出由 `block_stale_queues` 收尾。
-            // 寫失敗不能吞掉：下一個 tick 會用同一個 crid 重派，冪等回同一個 turn 再記一次。
             match store::mark_delivered(app.db(), &a.id, &out.turn_id, &out.delivery).await {
-                // 派送途中這筆被裁示掉了（取消／擋下）：**不要**把它寫回在途（issue #71）。
-                // 話已經送進 pane 收不回來了，但狀態要照裁示走，不然 AGM 看到的是一筆早就結案的
-                // 工作又活了過來；回合結束時 `settle` 的 CAS 也只認在途那三個，會一起放它過去。
                 Ok(false) => {
                     tracing::warn!(assignment = %a.id, turn = %out.turn_id,
                                    "交辦在派送途中已被裁示，不記成送達；送出去的那則訊息留在對話裡");
@@ -287,7 +249,6 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
             if out.delivery == "queued" {
                 tracing::info!(assignment = %a.id, bot = %a.target_bot_id, turn = %out.turn_id,
                                "對方回合中：交辦排進佇列，等它回合結束再送");
-                // 排隊是正常路徑，不是需要決策的事件：只記錄，不叫醒 AGM（2026-09-16 裁示）。
                 let key = format!("assignment_queued:{}:{}", a.id, out.turn_id);
                 let payload = json!({
                     "bot_id": a.target_bot_id, "turn_id": out.turn_id, "needs_review": false,
@@ -297,25 +258,18 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
             }
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "delivered"})).await;
         }
-        // A busy bot, an in-flight turn, a bot that is not running: all temporary, all keep
-        // the assignment queued with the same id.
         Err(LcError::Conflict(v)) => {
             let why = conflict_reason(&v);
-            // 這一輪也算進去：`busy_rounds` 記的是「排不進去幾輪」，`attempts` 不再被它加（issue #528）。
             let rounds = a.busy_rounds + 1;
             let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
             match a.conflict_since.as_deref() {
                 Some(since) if conflict_gave_up(since, chrono::Utc::now()) => {
                     undeliverable(app, &a, since, &why, &format!("從 {since} 起超過 {mins} 分鐘一直送不進去")).await
                 }
-                // 次數的保險絲（issue #528）：時間那條靠 `conflict_since`，而 `hold`／`quota_blocked`
-                // ／送達都會把它清掉（那是對的，合法的等待不算「送不進去」），所以一顆長期回合中的 bot
-                // 配上每隔一陣子就開一次的維護窗口，可以讓時間那條永遠燒不完。次數只加不減，收得掉。
                 _ if rounds >= CONFLICT_MAX_ROUNDS => {
                     let since = a.conflict_since.clone().unwrap_or_else(|| a.created_at.clone());
                     undeliverable(app, &a, &since, &why, &format!("連續 {rounds} 輪都排不進去（上限 {CONFLICT_MAX_ROUNDS} 輪）")).await
                 }
-                // 第一次撞（或上一輪被 hold／quota_blocked／送達打斷過）：`defer_conflict` 從現在開始計時。
                 _ => {
                     let wait = conflict_backoff_secs(a.busy_rounds);
                     let _ = store::defer_conflict(app.db(), &a.id, &iso_in(wait), &why).await;
@@ -325,22 +279,15 @@ pub async fn dispatch(app: &(impl crate::capabilities::Db + crate::capabilities:
         Err(LcError::NotFound(what)) => {
             dispatch_failed(app, &a, &format!("not found: {what}")).await;
         }
-        // A malformed assignment will be just as malformed next time: stop retrying it now,
-        // loudly, rather than holding work the user believes is running.
         Err(LcError::Bad(m)) => dispatch_failed(app, &a, &m).await,
         Err(LcError::BadValue(v)) => dispatch_failed(app, &a, &v.to_string()).await,
-        // 422: this prompt can never be delivered as asked; retrying the same text changes nothing.
         Err(LcError::Unprocessable(v)) => dispatch_failed(app, &a, &v.to_string()).await,
-        // 送出去了（或 herdr 已經拒收），只是結果還沒寫進 DB（#149）：不記成送達（DB 還沒說），也不花重試、不判
-        // dispatch_failed（工作可能已經在跑）。過一下用同一個 crid 再問，冪等那條路回寫好的結果。
         Err(LcError::Uncommitted(v)) => {
             let why = format!("{}: delivery={}", v["error"].as_str().unwrap_or("uncommitted"), v["delivery"].as_str().unwrap_or("?"));
             let _ = store::hold(app.db(), &a.id, &iso_in(UNCOMMITTED_RECHECK_SECS), &why).await;
             tracing::warn!(assignment = %a.id, turn = ?v["turn_id"].as_str(), %why, "交辦送出去了，結果還沒寫進 DB：等一下用同一個 crid 再問");
         }
         Err(e) => {
-            // Upstream / bad-request: retry a bounded number of times, then give up loudly
-            // rather than silently holding work the user thinks is running.
             let why = format!("{e:?}");
             if !upstream_retries_left(a.attempts) {
                 dispatch_failed(app, &a, &why).await;
@@ -366,8 +313,6 @@ fn conflict_reason(v: &serde_json::Value) -> String {
         .and_then(|s| s.as_str())
         .or_else(|| v.get("error").and_then(|s| s.as_str()))
         .unwrap_or("conflict");
-    // Several conflicts carry an operator-facing hint (`needs_login` explains which identity);
-    // it is the difference between "blocked" and "blocked, and here is what to do".
     match v.get("message").and_then(|s| s.as_str()).filter(|m| !m.trim().is_empty()) {
         Some(m) => format!("{reason}: {m}"),
         None => reason.to_string(),
@@ -391,18 +336,14 @@ pub fn conflict_reason_for_test(v: &serde_json::Value) -> String {
 /// 不判 `dispatch_failed`：工作沒失敗，是進不去那顆 bot（它一直在回合中），該由 AGM 決定怎麼辦。
 async fn undeliverable(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), a: &store::Assignment, since: &str, why: &str, fuse: &str) {
     let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
-    // 照實寫：哪一條保險絲燒掉的、最後一次 409 說了什麼（不是一律「對方在回合中」），
-    // 以及排不進去幾輪（`busy_rounds`）與累計派送嘗試幾次（`attempts`）——兩個數字不是同一件事。
     let note = format!("{fuse}（最後一次：{why}；連續排不進去 {} 輪、累計派送嘗試 {} 次）", a.busy_rounds + 1, a.attempts);
     let payload = json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id, "attempts": a.attempts,
                 "busy_rounds": a.busy_rounds + 1, "max_busy_rounds": CONFLICT_MAX_ROUNDS,
                 "waited_mins": mins, "conflict_since": since, "reason": why, "status": "blocked",
-                // 不能叫人用同一個 request id 再 `assign`：那是冪等查詢，只會拿回這筆 blocked（review2 deliv M1）。
                 "hint": UNDELIVERABLE_HINT});
-    // blocked 與通知同一個交易（#283）：寫不進去就不標，下一輪重來。
     match store::mark_undeliverable(app.db(), &a.id, &note, &event_key("assignment_undeliverable", a), &payload).await {
         Ok(true) => {}
-        Ok(false) => return, // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
+        Ok(false) => return,
         Err(e) => {
             tracing::warn!(assignment = %a.id, error = ?e, "could not record an undeliverable assignment; will look again next tick");
             return;
@@ -487,7 +428,6 @@ async fn settle(
         Ok(s) => {
             if s.moved {
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "awaiting_review"})).await;
-                // #558：證據旗標在結案之後另起 task 問，不改這次回傳、也不改交辦狀態。
                 app.judge_shadow_settled(&a.id, &a.target_bot_id, a.turn_id.as_deref(), turn_status, result).await;
             }
             s.moved
@@ -520,17 +460,13 @@ fn settle_event(a: &store::Assignment, turn_status: &str, evidence_complete: boo
     let payload = json!({
         "bot_id": a.target_bot_id,
         "turn_status": turn_status,
-        // `completed_fallback` means the reply was scraped off the terminal, not reported by a
-        // hook. The manager is told, because "it finished" and "we saw all of it" differ.
         "evidence_complete": evidence_complete,
         "result": result,
         "error": error,
-        // Said out loud in the payload so a digest cannot read as an acceptance.
         "needs_review": true,
     });
     (kind, payload)
 }
-
 
 /// `QuotaAction`／`TurnEnd` 兩個值型別。`$vis` 讓同一份定義在 `test`／`test-hooks` 建置下是 `pub`（daemon 的 `supervisor_tests` 要保留
 /// `assert_eq!`／結構字面值），正式 build 維持私有；兩種可見性共用一份定義，不會只改一份而漂移（#1862 S4）。
@@ -636,7 +572,6 @@ fn quota_action(retries: i64, until: Option<&str>) -> QuotaAction {
         return QuotaAction::GiveUp;
     }
     match until.map(str::trim).filter(|s| !s.is_empty()) {
-        // 已經過去的時間不是時間：那代表這份讀數比重置還舊，照沒說時間處理。
         Some(t) if !past(t) => QuotaAction::WaitUntil(t.to_string()),
         _ => QuotaAction::WaitBlind,
     }
@@ -660,7 +595,6 @@ async fn park_quota(app: &(impl crate::capabilities::Db + crate::capabilities::E
         settle(app, a, "quota_exhausted", true, None, Some(&why)).await;
         return;
     }
-    // 橫幅只是其中一個說法：app-server 的 5h 重置時間常常比它新（見 `resume_at_from`）。
     let quota_reset = match crate::db::bot(app.db(), &a.target_bot_id).await {
         Ok(Some(bot)) => app.next_reset_for_bot(&bot).await,
         _ => None,
@@ -673,7 +607,6 @@ async fn park_quota(app: &(impl crate::capabilities::Db + crate::capabilities::E
         "retries": a.quota_retries,
         "message": hit.message,
         "where": where_seen,
-        // 這不是要人來決定的事：時間到了 controller 自己重送。
         "needs_review": false,
     });
     let key = format!("quota_blocked:{}:{}", a.id, a.quota_retries);
@@ -742,7 +675,6 @@ pub async fn backfill_quota_limits(app: &(impl crate::capabilities::Db + crate::
         if bot_host != host {
             continue;
         }
-        // park 時撞到的是 pane 裡實際的帳號（run 起來時的身份，issue #238）；讀不到 run 同讀不到主機，這一件跳過、稍後重跑。
         let identity = match app.billing_identity(&bot).await {
             Ok(i) => i,
             Err(e) => {
@@ -752,7 +684,6 @@ pub async fn backfill_quota_limits(app: &(impl crate::capabilities::Db + crate::
         };
         let base = app.quota_base_for_host(host, &bot.kind, identity.as_deref()).await;
         let why = format!("重啟前記下的等待：{} 還在等額度", a.id);
-        // 桶名只有 claude 橫幅講得出來；park 時把橫幅寫進了 `error`，從那裡找回來（找不到就 None，照舊用讀數推）。
         let bucket = if bot.kind == "claude" { a.error.as_deref().and_then(crate::turn_error::banner_bucket) } else { None };
         if app.seed_limit_hit(host, &base, resume_at, &why, bucket).await {
             seeded += 1;
@@ -785,7 +716,6 @@ pub async fn resume_quota_blocked(app: &(impl crate::capabilities::Db + crate::c
     let Ok(rows) = store::quota_blocked_all(app.db()).await else { return };
     for a in rows {
         let Ok(Some(bot)) = crate::db::bot(app.db(), &a.target_bot_id).await else { continue };
-        // 讀不到這顆 bot 在哪台主機（#197）不等於「沒人說還在擋」：原地不動、不算次數，下一個 tick 再看。
         let still_hit = match app.try_limit_hit_for_bot(&bot).await {
             Ok(hit) => hit,
             Err(e) => {
@@ -795,11 +725,7 @@ pub async fn resume_quota_blocked(app: &(impl crate::capabilities::Db + crate::c
         };
         let due = a.resume_at.as_deref().map(past).unwrap_or(true);
         match (&still_hit, due) {
-            // 還在擋、時間也還沒到：什麼都不做。
             (Some(_), false) => continue,
-            // 到了預計時間仍被擋：算一次（「重送 N 次仍被擋」的 N），時間照 park 的規則重算——取橫幅與帳號讀數
-            // 最早的、超過 6 小時改 15 分鐘後再問。以前直接抄 `hit.until` 又不算次數：帶日期的橫幅能把交辦壓好幾天，
-            // 沒寫時間的撞限則每 30 分鐘順延一次、永遠到不了 `quota_exhausted`（review 2026-09-16 M1、sup #2）。
             (Some(hit), true) => {
                 if a.quota_retries + 1 < MAX_QUOTA_RETRIES {
                     let quota_reset = app.next_reset_for_bot(&bot).await;
@@ -807,16 +733,7 @@ pub async fn resume_quota_blocked(app: &(impl crate::capabilities::Db + crate::c
                     let _ = store::extend_quota_blocked(app.db(), &a.id, &next).await;
                     continue;
                 }
-                // 次數用完：走重送那條路。`dispatch` 會再查到撞限，交給 `park_quota` 收成 `quota_exhausted`
-                // （`quota_blocked` 不能直接 settle）。
             }
-            // 記憶體裡沒有撞限紀錄，但我們自己記的時間還沒到：**不重送**。
-            // daemon 一重啟 `app.quotas` 就是空的（純記憶體），「查不到 limit_hit」不等於額度回來了；
-            // 持久化的 `resume_at` 才是那段等待唯一的記錄（review 2026-09-16）。
-            // 例外：最後一次確認還在擋（park 或順延，都會寫 `updated_at`）之後，同一個帳號有一回合真的答完——
-            // 用了重置券、買了 credits，不必再等到原本的 `resume_at`（review 2026-09-16 M1）。
-            // 另一個例外：park 時記下的橫幅是模型專屬的桶（Fable），而這顆 bot 現在跑的不是那個模型——那段等待
-            // 從來不是它的（review3 c3 H2 修掉之前停進來的、或之後 `/model` 換掉了）。
             (None, false) => {
                 let parked_at = chrono::DateTime::parse_from_rfc3339(&a.updated_at).map(|t| t.with_timezone(&chrono::Utc));
                 if !parked_on_another_models_bucket(app, &a, &bot).await {
@@ -826,17 +743,11 @@ pub async fn resume_quota_blocked(app: &(impl crate::capabilities::Db + crate::c
                     }
                 }
             }
-            // 時間到了、也沒人說還在擋：回到 queued 並馬上試一次。
             (None, true) => {}
         }
-        // 重送會開新的一則（下一個 `#r<n>`），而且下面會清掉 `turn_id`：舊的那則若還排著，清掉之後就
-        // 再也對不回交辦——留著會佔 queued 名額、之後照送變成做兩次。現行路徑走不到（停進 quota_blocked
-        // 時回合都已結束或還沒有 turn），但 `park_quota_blocked` 接受 delivered，先擋住。
         if let Some(old) = a.turn_id.as_deref() {
             let text = format!("排隊中的這則沒有送出：交辦 {} 撞到額度上限，額度回來後用新的一則重送，舊的這則撤回，不會再送。", a.id);
             if let Err(e) = app.revoke_queued_turn(old, &text).await {
-                // 撤不掉不等於撤完了（#159 同一類）：照樣重送會清掉 `turn_id`，舊的那則對不回交辦、之後照送就是做兩次。
-                // 這一拍不重送，下一個 tick 再撤。
                 tracing::error!(assignment = %a.id, turn = old, error = %e, "could not revoke the old queued turn before a quota resend; not resending yet");
                 continue;
             }
@@ -851,8 +762,6 @@ pub async fn resume_quota_blocked(app: &(impl crate::capabilities::Db + crate::c
                     tracing::info!(assignment = %a.id, bot = %a.target_bot_id, "額度回來了，重送 assignment");
                 }
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "queued"})).await;
-                // 跟 `drain_queue` 一樣在 supervisor 鎖裡派：`dispatch` 看「任務關了沒」到送出之間，取消任務（拿同一把鎖）
-                // 才插不進來（issue #171）。
                 let _g = super::lock().await;
                 dispatch(app, &a.id).await;
             }
@@ -885,7 +794,6 @@ pub async fn late_reply_for_turn(app: &(impl crate::capabilities::Db + crate::ca
     if !matches!(status, "completed" | "completed_fallback") {
         return;
     }
-    // 讀不到不等於沒掛交辦（#200）：這一次寫不回去，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
     match store::assignment_by_turn(app.db(), turn_id).await {
         Ok(Some(a)) => late_reply(app, &a, turn_id).await,
         Ok(None) => {}
@@ -894,11 +802,9 @@ pub async fn late_reply_for_turn(app: &(impl crate::capabilities::Db + crate::ca
 }
 
 async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::JudgeOps), a: &store::Assignment, turn_id: &str) {
-    // `quota_blocked` 會自己重送，不是「結算過、回覆沒到」的那種（撞限收場歸 park_quota 管）。
     if a.is_executing() || a.status == "quota_blocked" || a.turn_status.as_deref() != Some("completed_fallback") {
         return;
     }
-    // 讀不到就這一次不寫（#200）：不寫就沒有收不回來的東西，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
     let read = async {
         let now_status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(app.db()).await?;
         if now_status.as_deref() != Some("completed") {
@@ -914,11 +820,9 @@ async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::E
         }
     };
     let Some(reply) = reply.filter(|r| !r.trim().is_empty()) else { return };
-    // 區塊裡的 JSON 會把 `reply` 搬走；證據旗標要的是同一段文字。
     let report = reply.clone();
     let res = async {
         let now = crate::db::now();
-        // 先讀交辦再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，遲到的回覆這一輪寫不回去（#831）。
         let mut tx = crate::db::begin_write(app.db()).await?;
         let (had_result, status, expects_review): (Option<String>, String, i64) =
             sqlx::query_as("SELECT result, status, expects_review FROM supervisor_assignments WHERE id=?")
@@ -940,7 +844,6 @@ async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::E
             > 0;
         let mut pushed = false;
         if moved && had_result.as_deref().is_none_or(|r| r.trim().is_empty()) {
-            // 已經自動結案的通知只記錄；其他（等驗收、或驗收者已經依「沒有回覆」做了決定）都要叫醒驗收者。
             let noticed = expects_review == 0 && status == "completed";
             let kind = if noticed { "assignment_noticed" } else { "assignment_completed" };
             let payload = json!({
@@ -982,7 +885,6 @@ async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::E
         Ok((true, pushed)) => {
             tracing::info!(assignment = %a.id, turn = %turn_id, pushed, "late hook reply written back to its assignment");
             app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
-            // 先前以「沒有回覆」結掉的，真正的回報現在才進 result。同一則交辦只問一次。
             app.judge_shadow_settled(&a.id, &a.target_bot_id, Some(turn_id), "completed", Some(report.as_str())).await;
         }
         Ok((false, _)) => {}
@@ -1004,7 +906,6 @@ pub async fn late_reply_for_test(app: &(impl crate::capabilities::Db + crate::ca
 /// 拿殘缺的證據結案（當成沒有回覆、沒有撞限）收不回來——AGM 讀到空的 `result` 會 followup 或改派，做完的工作再做一次。
 /// 這一次記一行，每一輪對帳（`reconcile`，從 DB 重新掃開著的交辦）再試。
 pub async fn on_turn_done(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + QuotaOps + JudgeOps), turn_id: &str, status: &str) {
-    // 只有真的終態才結案。`queued`／`in_flight` 是「還在路上」，結案會把排隊寫成失敗。
     if !matches!(status, "completed" | "completed_fallback" | "failed") {
         return;
     }
@@ -1018,18 +919,11 @@ async fn settle_finished_turn(app: &(impl crate::capabilities::Db + crate::capab
     if !a.is_executing() {
         return Ok(());
     }
-    // 回合結束時 run 上記的錯誤原因（撞限、API 錯誤…）抄進交辦：`turn_status` 只說成敗，
-    // 換手與驗收要看的是為什麼。
     let turn_error = turn_error_of(app.db(), turn_id).await?;
     if let Some(err) = turn_error.as_deref() {
         store::set_turn_error(app.db(), &a.id, err).await?;
     }
     let reply = last_reply(app.db(), turn_id).await?;
-    // 回合「結束」了，但 CLI 其實是回了一句「你的用量上限到了」——那不是工作的結果。
-    // 這種回合跟正常的 completed 分開處理：assignment 進 `quota_blocked` 等重送，
-    // 那句系統訊息記在 `error`（不是 `result`），免得 AGM 把它讀成 bot 的回覆。
-    // 只有**這一回合**被撞限打斷才算：帳號上有撞限、這顆卻正常答完（同身份別的 bot 撞的），照常結案（review3 c1 H1）。
-    // 所以撞限只在這一回合看起來被打斷時才查；查不到（讀不到主機，#197）不當成沒撞限。
     let end = TurnEnd { status, reply: reply.as_deref(), turn_error: turn_error.as_deref() };
     if end.cut_by_limit() {
         if let Some(bot) = crate::db::bot(app.db(), &a.target_bot_id).await? {
@@ -1067,7 +961,6 @@ pub async fn turn_error_of_for_test(db: &SqlitePool, turn_id: &str) -> anyhow::R
     turn_error_of(db, turn_id).await
 }
 
-
 /// 這段文字就是 CLI 的撞限橫幅（claude 的 `You've hit/reached your … limit`、codex 的 `hit your usage limit`）。
 /// 只看短短一兩行的：回覆裡**談到**撞限的長文不是橫幅。
 fn is_limit_banner(text: &str) -> bool {
@@ -1090,8 +983,6 @@ pub async fn reconcile(app: &(impl crate::capabilities::Db + crate::capabilities
             continue;
         };
         let Some(turn) = turn else {
-            // The turn is gone (a purge, a rebuilt bot). We cannot say what became of the
-            // work, so it goes to review rather than being called failed and forgotten.
             Box::pin(settle(app, &a, "turn_missing", false, None, Some("turn no longer exists"))).await;
             continue;
         };
@@ -1140,7 +1031,6 @@ async fn sweep_missing_events(db: &SqlitePool) {
             "result": a.result,
             "error": a.error,
             "needs_review": true,
-            // Said out loud: this one was recovered by the sweep, not reported live.
             "recovered": true,
         });
         if let Ok(Some(_)) = store::push_inbox(
@@ -1188,14 +1078,6 @@ pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::ca
         if waited < limit {
             continue;
         }
-        // 被 flush 的額度閘門刻意留在佇列（issue #108，`lifecycle::quota_hold`）：撞限在上限內會到期、或 flush
-        // 剛放掉擋、下一次重看就會送——這時候撤掉等於把馬上要送的派工丟掉。看不到盡頭的才照舊撤，理由寫額度。
-        // 判準跟 flush 是同一支（`blocking_hit`）：重啟之後、這台主機回填之前記憶體是空的，那一列自己帶的上一輪憑據
-        // 才是證據——只看記憶體的話，控制迴圈第一拍（比回填早）就把等額度的派工撤掉（issue #168）。
-        // **讀不到 bot 不等於它沒在等額度**（issue #525）：以前 `Err` 跟 `Ok(None)` 一起收斂成 `None`，
-        // 而 `None` 會退回只看記憶體的 `recently_held`——重啟後那張表是空的，所以「剛重啟那一拍剛好讀不到 DB」
-        // 就把一則只是在等額度的派工撤掉，理由還寫成「對方一直沒有回合結束的空檔」。讀不到就跳過這一拍：
-        // 保險絲本來就週期性跑，晚一拍沒有代價；當成擋著則會讓真的沒有 bot 的那種永遠撤不掉。
         let hit = match crate::db::bot(app.db(), &a.target_bot_id).await {
             Ok(Some(bot)) => app.blocking_quota_hit(&bot, &turn_id).await,
             Ok(None) => None,
@@ -1218,19 +1100,13 @@ pub async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::ca
             None => format!("排進佇列等了 {} 分鐘，對方一直沒有回合結束的空檔，沒有送出", waited / 60),
         };
         let text = format!("排隊中的這則沒有送出：交辦 {} {why}，已停在 blocked，一併撤回，不會再送。", a.id);
-        // 先撤 turn、撤成功才標 blocked，同一個交易（AGM 2026-09-16，review 2 H1）：
-        // - 只標 blocked 不撤：之後照送、結果沒地方收（blocked 不在執行中），AGM 以為沒送出又重派。
-        // - 先標再撤：flush 剛好在兩步之間領走 turn 時，會把已經送出的交辦標成「沒有送出」。
-        //   撤不到＝已經被 flush 領走，交辦維持 delivered，照一般回合結束流程走。
         let payload = json!({"assignment_id": a.id, "bot_id": a.target_bot_id, "turn_id": turn_id, "revoked_turn_id": turn_id,
             "waited_s": waited, "reason": why, "status": "blocked", "needs_review": true,
             "hint": "排著的那則已撤回，不會再送。等那顆 bot 空下來再派一次（followup），或改派給別人。"});
         let key = format!("queue_blocked:{}:{}", a.id, turn_id);
-        // 撤 turn、標 blocked、通知 AGM 同一個交易（#283）：通知寫不進去整組回滾，下一輪重來。
         match revoke_and_block(app.db(), &a.id, &turn_id, &why, &text, Some((&key, &payload))).await {
             Ok(Some(revoked)) => {
                 tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久：撤回排著的 prompt，交辦停在 blocked");
-                // 先 commit 再推：turn 事件到 `on_turn_done` 時交辦已經是 blocked，不會被當成回合失敗結案。
                 app.announce_revoked(&turn_id, revoked).await;
                 app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": "blocked"})).await;
             }
@@ -1253,7 +1129,7 @@ async fn revoke_and_block(
     let mut tx = db.begin().await?;
     let Some(revoked) = crate::lifecycle::revoke_queued_turn_tx(&mut tx, turn_id, text).await? else { return Ok(None) };
     if !store::block_stale_queue_tx(&mut tx, assignment_id, why).await? {
-        return Ok(None); // 交易回滾：turn 也不撤。
+        return Ok(None);
     }
     if let Some((key, payload)) = notify {
         let bot: String = sqlx::query_scalar("SELECT target_bot_id FROM supervisor_assignments WHERE id=?").bind(assignment_id).fetch_one(&mut *tx).await?;
@@ -1279,9 +1155,6 @@ pub async fn revoke_and_block_for_test(
 
 /// Offer every due queued assignment again.
 pub async fn drain_queue(app: &(impl crate::capabilities::Db + crate::capabilities::Cfg + crate::capabilities::Emit + QuotaOps + TurnOps + JudgeOps)) {
-    // A hold whose window is no longer held (released by any path, or expired) is not a reason
-    // to wait: lift it before looking at deadlines.
-    // 只在**確定**沒有窗口時才解除；讀不到不等於窗口收了。
     if matches!(super::maintenance::dispatch_paused(app).await, Ok(None)) {
         super::maintenance::window_closed(app.db(), "no restart window is held").await;
     }
@@ -1307,8 +1180,6 @@ fn digest(events: &[store::InboxEvent]) -> String {
     );
     for e in events {
         let p: serde_json::Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
-        // 交辦回報以外的事件（協調者的交接、協調者倒掉、incident…）欄位不叫 `result`：
-        // 依種類寫出內容，不能印成「沒有留下回覆」（review 2026-09-16 c3 M2）。
         if !super::digest_text::is_assignment_report(e) {
             let quiet = if e.wake == Some(0) { "（只記錄，不需回覆）" } else { "" };
             s.push_str(&format!("\n- event_id={} kind={}{quiet}{}", e.id, e.kind, super::digest_text::detail(e, &p)));
@@ -1370,8 +1241,6 @@ fn notify_due(last: Option<&str>, interval: u64, now: chrono::DateTime<chrono::U
     let Some(last) = last else { return true };
     let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else { return true };
     let elapsed = now.signed_duration_since(last.with_timezone(&chrono::Utc)).num_seconds();
-    // A clock that jumped backwards leaves the stamp in the future; that must not mute the
-    // manager until the clock catches up.
     elapsed < 0 || elapsed >= interval as i64
 }
 
@@ -1393,9 +1262,6 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
     let cfg = app.cfg().get().await;
     let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
     let now = crate::db::now();
-    // 「建立過」而不是「現在活著」：協調者停了或被刪，它的事件仍歸它（SPEC §18.15）。
-    // 讀不到＝不知道，不是「單角色」：unwrap_or(false) 會讓巡檢撿走協調者的事件、mark_delivered 還把
-    // claimed_by 改成 patrol，永久改寫歸屬。這輪不送，事件留 pending（#250）。
     let responder_configured = match super::roles::responder_configured(app.db()).await {
         Ok(v) => v,
         Err(e) => {
@@ -1407,53 +1273,33 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
     else {
         return;
     };
-    // 只有要叫醒人的事件才開一次喚醒；恢復、純記錄的那些等下一次有事時一起帶上。
     if !pending.iter().any(|e| e.wake != Some(0)) {
         return;
     }
-    // The throttle sits here on purpose: health detection, the watchdog and the model
-    // controller keep their own cadence, and every event is already in the inbox. All that is
-    // paced is how often the manager is interrupted — one digest per window, carrying
-    // everything the window collected.
     let interval = cfg.supervisor.notify_interval_secs;
     if !notify_due(sup.last_notify_at.as_deref(), interval, chrono::Utc::now()) {
         tracing::debug!(interval, pending = pending.len(), "supervisor notify throttled; events stay pending");
         return;
     }
-    // 讀不到 liveness 時不送（不知道它有沒有空），事件留 pending 下一輪再送。
     if !matches!(super::manager_liveness(app.db(), &manager).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = pending.iter().map(|e| e.id.clone()).collect();
-    // One prompt for the whole batch, with an id derived from the batch: a retry after a
-    // crash mid-send reuses it instead of prompting twice. Attempts past the first get their
-    // own suffix so a *known-failed* send is not forever answered out of the dedupe cache —
-    // `lifecycle::prompt` would hand back the dead turn instead of sending anything.
     let attempt = pending.iter().map(|e| e.notify_attempts).max().unwrap_or(0);
     let batch: Vec<(&str, i64)> = pending.iter().map(|e| (e.id.as_str(), e.notify_attempts)).collect();
     let crid = super::inbox_notify_crid("agm-inbox-", &batch);
-    // The digest is the daemon talking, not the user. Without the sentinel it lands in AGM's
-    // conversation as a blue bubble indistinguishable from an instruction somebody typed.
-    // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓 AGM 收到兩份。
     match lifecycle::owed_as_unknown(
         app.prompt_relayed(&manager, &digest(&pending), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await,
     ) {
-        // A prompt call that returns Ok is not a prompt that arrived. `failed` is the CLI
-        // telling us it did not land; treating that as delivered is exactly how a result went
-        // missing with the row saying it had been handed over.
         Ok(out) if out.delivery == "failed" => {
             let wait = notify_backoff(attempt).as_secs() as i64;
             let _ = store::defer_notify(app.db(), &ids, &iso_in(wait), "delivery failed").await;
             tracing::warn!(attempt, "supervisor notify reported a failed delivery; events stay pending");
         }
         Ok(out) => {
-            // `unknown` is recorded as unknown. The events are marked delivered against this
-            // turn so the recovery pass reconciles *that turn* rather than sending a second
-            // copy of the same digest.
             let n = super::roles::mark_delivered(app.db(), &ids, super::roles::Role::Patrol, &out.turn_id, &out.delivery)
                 .await
                 .unwrap_or(0);
-            // Only a wake that actually went out opens the next window.
             let _ = store::set_last_notify(app.db(), &crate::db::now()).await;
             let _ = super::roles::record_wake(app.db(), super::roles::Role::Patrol, n, &super::roles::wake_reason(&pending)).await;
         }
@@ -1528,12 +1374,10 @@ pub async fn recover_unacked(app: &(impl crate::capabilities::Cfg + crate::capab
     let cfg = app.cfg().get().await;
     let deadline = cfg.supervisor.notify_ack_deadline_secs as i64;
     let Ok(delivered) = store::delivered_inbox(app.db()).await else { return };
-    // 角色 → (這一輪沒跑完的回合 id, 這一輪有沒有回合真的跑完)。見下面 #427 那一段。
     let mut notify_rounds: std::collections::HashMap<String, (std::collections::BTreeSet<String>, bool)> =
         std::collections::HashMap::new();
     for e in delivered {
         let Some(turn_id) = e.notify_turn_id.clone() else { continue };
-        // 讀不到不等於「回合不見了」：下面 `None` 會把事件放回佇列重送，DB 暫時出錯不能走那條路。
         let turn = match sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
             .bind(&turn_id)
             .fetch_optional(app.db())
@@ -1546,12 +1390,8 @@ pub async fn recover_unacked(app: &(impl crate::capabilities::Cfg + crate::capab
             }
         };
         let why = match turn.as_ref().map(|t| t.status.as_str()) {
-            // The wake-up itself never completed (`lifecycle` fails a turn on an aborted or
-            // interrupted send): the manager cannot have read it.
             Some("failed") => Some("notify turn did not complete"),
-            // The turn we were told carried it does not exist any more.
             None => Some("notify turn is gone"),
-            // Still running: leave it alone, the manager is reading it right now.
             Some("in_flight") | Some("queued") => None,
             Some(_) => {
                 let age = e
@@ -1564,32 +1404,17 @@ pub async fn recover_unacked(app: &(impl crate::capabilities::Cfg + crate::capab
                 (age >= deadline).then_some("delivered but never acknowledged")
             }
         };
-        // #427 第 3 項：「送出去了、但回合沒跑完」連續 NOTIFY_STALL_LIMIT 個**不同的**回合就算那個角色
-        // 不可用。以前唯一的出口是補送到第 60～80 次才 gave_up，中間沒有任何人知道它收不到 digest。
-        // 這裡只收集，整輪掃完才一次算給那個角色——逐筆算的話，同一角色一輪裡有好幾筆事件時，
-        // 「一筆壞、一筆好」的結果會取決於迭代順序（i407 review 2026-09-24）。
-        //
-        // 算給誰看 `claimed_by`，不是 `role`（issue #505）：`notify_turn_id` 是 `roles::mark_delivered`
-        // 跟 `claimed_by` **同一句 SQL** 寫下的，所以「這個回合是誰的」只有 `claimed_by` 答得準；
-        // `role` 只是路由表寫的「本來該歸誰」。兩者不一樣的列（`role='responder'` 而
-        // `claimed_by='patrol'`，也就是單角色時期巡檢收走的那些）照 `role` 算，等於把**巡檢**送不出去
-        // 的回合記到協調者頭上：三輪就把一顆健康的協調者判成 `notify_stalled`，#421 的閘門於是把核准
-        // 從它手上搬給壞掉的巡檢，而巡檢自己的故障反而沒有人算。下面 `give_up_on` 早就是這樣取 owner 的。
         if let Some(role) = super::roles::owner(e.claimed_by.as_deref(), e.role.as_deref()) {
             let round = notify_rounds.entry(role).or_default();
             match turn.as_ref().map(|t| t.status.as_str()) {
                 Some("failed") => {
                     round.0.insert(turn_id.clone());
                 }
-                // 跑完了就是通的——有沒有被 ack 是另一回事（那是 `why` 在管的）。
                 Some(s) if s != "in_flight" && s != "queued" => round.1 = true,
-                // 還在跑、或回合整個不見了：都不算證據。
                 _ => {}
             }
         }
         let Some(why) = why else { continue };
-        // 補送不是無限的（使用者 2026-09-17 裁示）：送了五次沒人 ack、或開著超過六小時又已經補送過，
-        // 就停手並喊人。以前這裡沒有上限，協調者漏 ack 一則就每 30 分鐘被叫醒一次，而沒有任何人知道。
         let age = age_secs(&e.created_at);
         if !keep_recovering(e.notify_attempts, age) {
             give_up_on(app, &e, why, age).await;
@@ -1599,9 +1424,6 @@ pub async fn recover_unacked(app: &(impl crate::capabilities::Cfg + crate::capab
             tracing::warn!(event = %e.id, attempts = e.notify_attempts, why, "re-queueing an unanswered notification");
         }
     }
-    // #684：照協調者 persona 在回合中 ack 之後，成功回合的事件已是 handled，不在上面的重送清單裡。
-    // 仍把「最後一個失敗回合之後」已完成的 handled notify turn 當成通路恢復證據；較舊的成功回合
-    // 不會清掉後來累積的失敗。
     for role in super::role_faults::WATCHED {
         let key = role.as_str().to_string();
         if notify_rounds.get(&key).is_some_and(|round| round.1) {
@@ -1667,7 +1489,6 @@ async fn give_up_on(app: &(impl crate::capabilities::Db + crate::capabilities::E
             e.id
         ),
     });
-    // 放棄補送與喊另一個角色同一個交易（#310）：寫不進去事件就留在 delivered，下一輪再判。
     match store::give_up_inbox_and_notify(app.db(), &e.id, why, &format!("inbox_gave_up:{}", e.id), e.assignment_id.as_deref(), e.bot_id.as_deref(), &notice).await {
         Ok(true) => {}
         Ok(false) => return,
@@ -1687,7 +1508,6 @@ pub async fn apply_quota_policy(app: &(impl crate::capabilities::Db + crate::cap
     let sup = store::get_or_init(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(bot_id) = sup.bot_id.clone() else { return Ok(false) };
     let quota = manager_quota(app, &sup.identity).await;
-    // 讀不到 liveness 是 Err，不是 "stopped"：這一輪不做任何額度決策，DB 恢復後下一輪自然重來（#249）。
     let liveness = super::manager_liveness(app.db(), &bot_id).await?;
     match policy::decide(&sup, quota.as_ref(), liveness, chrono::Utc::now()) {
         policy::Decision::Keep => Ok(false),
@@ -1741,7 +1561,6 @@ pub async fn manager_quota_for_test(app: &impl crate::supervisor::ports::QuotaOp
 /// the plan is explicit that an unknown quota must not be treated as a full one.
 pub async fn quota_reset_at(app: &impl crate::supervisor::ports::QuotaOps, identity: &str) -> Option<String> {
     let quota = manager_quota(app, identity).await?;
-    // 比時刻不比字串（同 policy.rs:102-103）：帶時區偏移的 resets_at 字串比大小會挑錯。
     [&quota.five_hour, &quota.seven_day, &quota.fable]
         .into_iter()
         .flatten()

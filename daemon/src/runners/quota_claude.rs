@@ -43,7 +43,6 @@ pub(crate) async fn refresh_claude_account(
     if !app.hosts.is_current(fence).await {
         anyhow::bail!("host `{host}` was superseded before the Claude probe started");
     }
-    // A sane cwd keeps the session's project files out of `/`.
     let cwd = if host == LOCAL_HOST {
         std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or_else(|| home.to_string())
     } else {
@@ -58,7 +57,6 @@ pub(crate) async fn refresh_claude_account(
             return Err(anyhow!("claude probe on {host} did not finish within {PROBE_TIMEOUT:?}; screen:\n{}", last.trim()))
         }
     };
-    // 探測幾十秒，期間同名主機可能已換成另一台（#347）：整個結果作廢，不回登入狀態也不寫額度。
     if !app.hosts.is_current(fence).await {
         return Err(anyhow!("host `{host}` was reconnected/reconfigured during the claude probe; stale result discarded"));
     }
@@ -81,17 +79,13 @@ pub(crate) async fn refresh_claude_account(
 pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    // `~` expands against the *probed* host's home, not the daemon's.
     let home = crate::hosts::home_for_fence(&fence).await.map_err(|e| {
         tracing::warn!(host, error = %e, "skipping Claude quota probe because the host HOME is unreadable");
         e
     })?;
-    // `ccN` are per host (SPEC §16): cc1 on mac_builder is a different account than here.
     let identities = crate::tools::identities_for_host(app, host).await;
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
-    // DB-backed so a daemon restart doesn't lose the proof.
     let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
-    // 停用的身份不上額度條（使用者 2026-09-16），所以也不必再花探測去問它。
     let off = crate::db::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
     let unnamed_running = unnamed_claude_running(app.as_ref(), host).await;
     let statusline_keys: std::collections::BTreeSet<String> =
@@ -112,8 +106,6 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             anyhow::bail!("host `{host}` was superseded during the Claude quota refresh");
         }
         let full = crate::quota::quota_key(host, &t.key);
-        // `/usage` answered within USAGE_REFRESH = skip (many `ccN` per host, SPEC §16, would queue
-        // probes), unless we've never had a login answer for it — that rides on the probe.
         let login_known = t.names.iter().all(|n| logins.get(n).is_some_and(|i| i.logged_in.is_some()));
         if t.login_only && login_known {
             continue;
@@ -144,10 +136,8 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
                 } else if o.quota.is_some() {
                     any = true;
                     unpark(&full);
-                    // 這把 key 的 `/usage` 剛答過：接下來十分鐘不用再開 pane（有 bot 講話時狀態列補 5h/7d）。
                     mark_usage_seen(&full);
                 } else {
-                    // No plan lines: park it using the login answer we just got.
                     let logged_out = o.logged_in == Some(false);
                     park(&full, logged_out);
                     let retry = failure_backoff(ProbeEvidence { cli_says_logged_out: logged_out, ..t.evidence });

@@ -8,13 +8,8 @@ mod tests {
     use crate::testing as tt;
     use crate::testing::LivePane;
     use crate::tui_prompts::{cold_resume_choice, ResumeChoice};
-    // 真實 2.1.304 PTY 畫面，2026-10-20 重新擷取；獨立 binary 副本、拋棄式 cwd/session、safe-mode。
-    // Max 5x / Opus 4.6[1m]；只修改自己的 transcript timestamp（2h）與 usage/iterations（1M）。
-    // 沒有自然等待 2h，也沒有真的發送 1M tokens。畫面由 @xterm/headless 80x24 從 script(1) raw stream 還原。
     const ACTUAL: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.304-cold-resume.txt");
-    // 尚未實機重現：依 2.1.304 binary 的固定字串與無編號選項合成；帳號 idle 功能旗標未開。
     const SYNTHETIC: &str = include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.304-cold-resume-unsent-synthetic.txt");
-    // 同一份合成畫面，只把游標放回 Resume（真 2.1.304 的預設位置）。自動確認只在游標已在 Resume 時才按。
     fn synthetic_on_resume() -> String {
         let moved = SYNTHETIC.replace(
             "    Resume\n  ❯ Start a new conversation",
@@ -25,7 +20,6 @@ mod tests {
         moved
     }
     fn zero_revision(env: &tt::Env, run: &db::Run) {
-        // 真 herdr 0.9.5 的 `pane.read` 恆回 revision 0（#1909）。
         env.herdr
             .live
             .lock()
@@ -117,7 +111,6 @@ mod tests {
         let (env, _, run, _) = fixture(None).await;
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
-        // 決定性的 race barrier：第一幀已讀到空框，才把下一幀換成真實警告。
         let changed = pane.clone();
         crate::lifecycle::race_point::arm(
             "cold_resume_start_empty_frame",
@@ -390,7 +383,6 @@ mod tests {
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
         crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
-            // herdr 的 revision 不可信（實測恆為 0）：只有 revision 變、文字沒變，不算畫面改變。
             live.lock().unwrap().get_mut(&pane).unwrap().revision += 2;
         });
         let out = crate::lifecycle::prompt::prompt_with(&env.app, &bot.id, "retry safely", "cold-resume-race", &[])
@@ -413,7 +405,6 @@ mod tests {
         let live = env.herdr.live.clone();
         let pane = run.pane_id.clone().unwrap();
         crate::lifecycle::race_point::arm("cold_resume_before_key", &run.id, move || async move {
-            // 選項剛重畫成別的內容；不能依舊的一幀按鍵，也不能回「answer the prompt first」。
             live.lock().unwrap().get_mut(&pane).unwrap().cold_resume_menu =
                 Some(ACTUAL.replace("about 10%", "about 11%"));
         });
@@ -438,7 +429,6 @@ mod tests {
     }
     #[tokio::test]
     async fn cold_resume_accepts_when_herdr_reports_revision_zero() {
-        // #1909：真 herdr 的 pane.read 恆回 revision 0，舊守門因此一個鍵都沒按、巡檢卡了 35 分鐘。
         let (env, _, run, _) = fixture(Some(ACTUAL)).await;
         zero_revision(&env, &run);
         let pane = run.pane_id.clone().unwrap();
@@ -473,7 +463,6 @@ mod tests {
     }
     #[tokio::test]
     async fn cold_resume_cursor_not_on_resume_never_sends_a_key_or_moves_the_cursor() {
-        // 游標停在 Start a new conversation（合成畫面），以及完全沒有游標的畫面：一律不按、不移焦。
         let unfocused = ACTUAL.replace("  ❯ 1. Resume", "    1. Resume");
         assert_ne!(unfocused, ACTUAL);
         for (name, menu) in [("on_new", SYNTHETIC.to_string()), ("unfocused", unfocused)] {

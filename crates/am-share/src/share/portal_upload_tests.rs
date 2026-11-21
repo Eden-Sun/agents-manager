@@ -7,7 +7,6 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
-// #1862 遷移 B：不需要 daemon `App`，用 am-share 自己的窄環境（同名同形的 env／claude_bot／scratch_dir）。
 use crate::share::test_env as tt;
 
 /// 等名額被占滿／放回的上限。只是失敗時的保險（成功時幾毫秒就到）；被等的是真的 TCP＋DB，
@@ -104,7 +103,6 @@ async fn partial_upload(addr: SocketAddr, uri: &str) -> tokio::net::TcpStream {
 
 async fn response_status(stream: &mut tokio::net::TcpStream) -> u16 {
     let mut line = Vec::new();
-    // 第三個上傳要先排隊 300ms，高負載下更久：上限只是放棄的期限，不是成功的條件（#950）。
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let mut byte = [0_u8; 1];
@@ -407,7 +405,6 @@ fn issue_826_office_uploads_require_bounded_ooxml_zip_structure_and_return_offic
         );
     }
 
-    // 第一個 stored member 的宣告大小延伸到其餘 local record，central entries 因而重疊。
     let mut overlapping = zip_stored(&[
         ("[Content_Types].xml", b"<Types/>"),
         ("_rels/.rels", b"<Relationships/>"),
@@ -493,7 +490,6 @@ async fn queued_uploads_wait_for_the_two_slots_instead_of_failing() {
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(queued.iter().all(|h| !h.is_finished()), "名額滿了要排隊，不能先回 429");
 
-    // 慢的兩個把 body 送完：名額空出來，排隊的依序進去。
     for s in [&mut first, &mut second] {
         s.write_all(&vec![b'a'; 1_048_576]).await.unwrap();
     }
@@ -531,7 +527,6 @@ async fn one_share_cannot_take_every_upload_queue_slot() {
     .await
     .expect("two slow bodies should hold both upload permits");
 
-    // A 再排滿它自己的名額（進行中 2 ＋ 排隊 UPLOAD_INFLIGHT_PER_SHARE - 2）。
     let queued: Vec<_> = (0..UPLOAD_INFLIGHT_PER_SHARE - 2)
         .map(|i| {
             let (client, uri) = (client.clone(), format!("/s/{token_a}/api/upload?name=a-{i}.txt"));
@@ -546,7 +541,6 @@ async fn one_share_cannot_take_every_upload_queue_slot() {
     .await
     .expect("A's extra uploads should be waiting in the queue");
 
-    // 第 5 個起 A 立刻 429 upload_per_share，而且沒有再佔排隊位子。
     let r = client
         .post(format!("http://{addr}/s/{token_a}/api/upload?name=over.txt"))
         .header("content-type", "application/octet-stream")
@@ -559,7 +553,6 @@ async fn one_share_cannot_take_every_upload_queue_slot() {
     assert_eq!(body["what"], "upload_per_share");
     assert!(state.upload_queue.available_permits() >= UPLOAD_QUEUE_MAX - (UPLOAD_INFLIGHT_PER_SHARE - 2));
 
-    // B 不受 A 影響：能進排隊，A 放開名額後 B 成功。
     let b_upload = {
         let (client, uri) = (client.clone(), format!("/s/{token_b}/api/upload?name=b.txt"));
         tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", b"b".to_vec()).await })
@@ -592,12 +585,10 @@ async fn per_share_upload_permits_are_released_on_timeout() {
     .await
     .expect("two slow bodies should hold both upload permits");
 
-    // 排隊逾時（50ms）→ 429。
     assert_eq!(
         call(&client, addr, &format!("/s/{token}/api/upload?name=late.txt"), "application/octet-stream", b"late".to_vec()).await,
         StatusCode::TOO_MANY_REQUESTS
     );
-    // 慢的兩個斷線之後，計數要回到 0：連續 UPLOAD_INFLIGHT_PER_SHARE 個上傳都不會吃到 upload_per_share。
     drop((first, second));
     tokio::time::timeout(PERMIT_WAIT, async {
         while state.uploads.available_permits() != 2 {

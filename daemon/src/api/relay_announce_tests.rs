@@ -37,7 +37,6 @@ async fn announce(app: &Arc<App>, to: &str, text: &str) -> (StatusCode, Value) {
     let mut headers = HeaderMap::new();
     headers.insert("X-AM-Bot-Token", "tok-w1".parse().unwrap());
     let run_id = format!("relay-run-{to}");
-    // A concrete transport/run fixture, independent of the bot's display name.
     let _ = sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at,pane_id) SELECT ?,id,'running','idle',?,id FROM bots WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE bot_id=? AND state='running')")
         .bind(&run_id).bind(db::now()).bind(to).bind(to).execute(&app.db).await;
     let target_run = db::active_run(&app.db, to).await.ok().flatten().map(|r| r.id).unwrap_or(run_id);
@@ -124,12 +123,10 @@ async fn a_request_for_agm_that_cannot_be_queued_is_not_sent_to_the_pane() {
     let app = flow_tests::app().await;
     flow_tests::configure_responder(&app).await;
 
-    // 一般 bot：不是 AGM，照舊 announce、回 200 `{}`（shim 接著直送）。
     let (code, v) = announce(&app, "w2", "幫我看一下 relay-143-plain").await;
     assert_eq!((code, v), (StatusCode::OK, json!({"to_pane_id":"w2"})));
     assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "relay-run-w2", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
 
-    // 目標是 AGM，但協調佇列寫不進去。
     sqlx::query("CREATE TRIGGER test_inbox_down BEFORE INSERT ON supervisor_inbox BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
         .execute(&app.db)
         .await
@@ -139,14 +136,12 @@ async fn a_request_for_agm_that_cannot_be_queued_is_not_sent_to_the_pane() {
     assert_eq!(v["routing_unavailable"], true, "{v}");
     assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "relay-run-patrol", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
 
-    // DB 恢復後重試：只有一筆 durable 申請。
     sqlx::query("DROP TRIGGER test_inbox_down").execute(&app.db).await.unwrap();
     let (code, v) = announce(&app, "patrol", "請核准重建 relay-143-queue").await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(v["routed"], "responder", "{v}");
     assert_eq!(bot_requests(&app).await, 1);
 
-    // 連「目標是不是 AGM」都查不出來（角色表讀不到）：一樣不能當成「不是」。
     sqlx::query("DROP TABLE supervisor_roles").execute(&app.db).await.unwrap();
     let (code, v) = announce(&app, "resp", "請核准重啟 relay-143-lookup").await;
     assert!(code.is_server_error(), "{code} {v}");
@@ -199,7 +194,6 @@ async fn an_announce_to_a_handed_off_agent_opens_no_turn_and_touches_no_pane() {
     let run = crate::testing::fake_run(&app, &recipient.id).await;
     let text = "移交後的直送 relay-1460";
 
-    // 移交前收件方認得到（同一組資料，所以下面的 None 只能是移交造成的）。
     assert!(crate::lifecycle::relay_watch::resolve(&app, "w1", &run).await.unwrap().is_some(), "移交前：收件方在這顆 daemon 底下");
     sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
 

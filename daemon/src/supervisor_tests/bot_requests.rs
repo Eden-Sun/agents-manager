@@ -44,7 +44,6 @@ mod flow_tests {
         assert_eq!(payload["from_bot_id"], "patrol");
         assert_eq!(payload["via"], "assignment");
 
-        // 協調者被那一批叫醒；它在同一個回合裡明講 `--ack` 回巡檢一句「收到，我接手」→ 只記錄。
         turn_for(&app, "resp", "run-r", "c-r", "t-r").await;
         roles::mark_delivered(&app.db, &[ev[0].id.clone()], Role::Responder, "t-r", "ok").await.unwrap();
         let back = crate::supervisor::assign(
@@ -58,7 +57,6 @@ mod flow_tests {
         let patrol_due = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
         assert!(patrol_due.iter().all(|e| e.wake == Some(0)));
 
-        // 同一個回合裡另一句「要使用者裁示」沒有標記：那是新的事，叫醒巡檢（review 2026-09-16 H1 的第二條路）。
         let ask = crate::supervisor::assign(
             &app, "patrol", "builder 要刪使用者的 worktree，需要使用者裁示", "handover-1-ask", None, &[], None, false, None, Some(Role::Responder),
             ReplyMark::default(),
@@ -69,14 +67,12 @@ mod flow_tests {
         let patrol_due = roles::due_for(&app.db, Role::Patrol, true, "2999-01-01T00:00:00Z", 5).await.unwrap();
         assert_eq!(patrol_due.iter().filter(|e| e.wake == Some(1)).count(), 1);
 
-        // 對一般 bot 的交辦帶 ack 是呼叫端搞錯了，不要默默吞掉。
         let err = crate::supervisor::assign(
             &app, "w1", "去做", "ack-to-worker", None, &[], None, false, None, Some(Role::Responder), ReplyMark { ack: true, reply_to: None },
         )
         .await;
         assert!(matches!(err, Err(LcError::Bad(_))), "{err:?}");
 
-        // 對自己交辦仍然是錯的。
         let err = crate::supervisor::assign(
             &app, "resp", "自言自語", "self-1", None, &[], None, false, None, Some(Role::Responder), ReplyMark::default(),
         )
@@ -139,7 +135,6 @@ mod flow_tests {
         assert_eq!(key_p.as_deref(), Some("t-p"));
         assert_eq!(text_p, "幫我看一下登入流程");
 
-        // 認不出呼叫者就不猜：記成交辦文字本身，不替某個人編一句話。
         let anon = crate::supervisor::assign(
             &app, "w1", "腳本派的例行工作", "src-anon", None, &[], None, true, None, None, ReplyMark::default(),
         )
@@ -149,7 +144,6 @@ mod flow_tests {
         assert_eq!(key_a, None);
         assert_eq!(text_a, "腳本派的例行工作");
 
-        // 明講別人的回合也不行。
         let err = crate::supervisor::assign(
             &app, "w1", "借別人的授權", "src-borrow", Some("t-p"), &[], None, true, None, Some(Role::Responder), ReplyMark::default(),
         )
@@ -177,13 +171,11 @@ mod flow_tests {
         assert_eq!(status["status"], "missing");
         assert_eq!(status["configured"], true);
         assert_eq!(status["bot_present"], false);
-        // 再跑一次不會重複報。
         crate::supervisor::responder::notify(&app).await;
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='responder_bot_missing'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 1);
     }
 
-    // 測試本地輔助（#1862 S3b）：與 am-supervisor crate-only 版同一份本體，這裡是 daemon `App` 版。
     async fn turn_for(app: &Arc<App>, bot: &str, run: &str, conv: &str, turn: &str) {
         let now = crate::db::now();
         sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES (?,?,'running','working',?)")

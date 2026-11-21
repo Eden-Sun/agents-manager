@@ -133,7 +133,6 @@ async fn accept_locked(
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
-    // #708：移交出去的專案不收 prompt、不排隊、也不替它啟動（同 `prompt_inner`）。放在冪等檢查之前：讀不到是 502、不寫任何列。
     super::send_now::ports::HandoffSendRepo::refuse_handed_off(app, bot_id).await?;
     let bot = db::bot(app.db(), bot_id)
         .await
@@ -142,7 +141,6 @@ async fn accept_locked(
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
     let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?;
-    // 冪等：同一個請求再來一次回同一筆。還在等、也沒人在替它啟動的話再踢一次——重送同一個請求就是重試。
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
@@ -155,23 +153,19 @@ async fn accept_locked(
         let mark = if waiting { Starting::begin(bot_id) } else { None };
         return Ok(Accepted::Queued(super::prompt::answer_for_turn(app, &t).await?, mark));
     }
-    // 只有「沒有 run」或「正在起」才收下：在跑的照一般的路；`stopping` 是有人正在停它，收下的會被停止撤回，照一般的路 409。
     let starting_up = run.as_ref().is_none_or(|r| r.state == "starting");
     if !starting_up || (run.is_none() && bot.managed_by == "child") {
         return Ok(Accepted::Normal);
     }
-    // 維護窗口開著的時候不收、也不替它啟動（issue #86）：一個字都沒寫，同一個請求之後原樣重送是乾淨的。
     if let Some(refusal) = super::prompt::maintenance_refusal(app, Admission::Gated).await {
         return Err(refusal);
     }
     let files = app.resolve_attachments(bot_id, attachment_ids).await.map_err(|e| LcError::Bad(e.to_string()))?;
-    // 同 `prompt_inner`：起來後打進 pane 的是清過的字（#205），泡泡留原文。
     let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
     if super::pane_text::nothing_left(text, &deliver) {
         return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
     }
     let (turn_id, msg_id) = (db::ulid(), db::ulid());
-    // 沒有 run 才要替它起（`starting` 那顆已經有人在起）。已經有人在替它起（重複的請求）就不再疊一次。
     let mark = if run.is_none() { Starting::begin(bot_id) } else { None };
     let mut tx = app.db().begin().await.map_err(up)?;
     let queued = sqlx::query(
@@ -203,7 +197,6 @@ async fn accept_locked(
     .execute(&mut *tx)
     .await
     .map_err(up)?;
-    // 附件跟訊息同一個交易：要嘛整則（含附件）都收下，要嘛什麼都沒有，不會有一則指著沒綁上的附件在排隊。
     tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
     tx.commit().await.map_err(up)?;
     super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
@@ -267,8 +260,6 @@ pub async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
 
 /// 成功 → 叫醒 flush（起來、閒下來就送）；失敗 → 留在佇列，`start_error` 寫原因。`mark` 在啟動做完時放掉。
 async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
-    // The kick may outlive a withdrawal/stop. Recheck at actual start admission under the
-    // same lock as cancellation, then use the locked wake/start surfaces below.
     let bot_guard = crate::lifecycle::s6_ports::StartServices::lock_bot_for_start(app, bot_id).await;
     if !matches!(db::bot(app.db(), bot_id).await, Ok(Some(bot)) if !crate::config::is_api_kind(&bot.kind)) { return; }
     let waiting = sqlx::query_scalar::<_, bool>(&format!(
@@ -292,17 +283,13 @@ async fn start_with(app: &impl LcHost, bot_id: &str, mark: Starting) {
         Ok(true) => Started::Yes,
         Ok(false) => match start_stopped(app, bot_id).await {
             Ok(_) => Started::Yes,
-            // 別人（使用者按了啟動、AGM）剛好先起了：一樣是「起來了」。
             Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => Started::Yes,
-            // agent 起來了、只差 `running` 沒記下（#152）：不是沒能啟動。
             Err(LcError::Uncommitted(v)) => match v.get("run_id").and_then(|r| r.as_str()) {
                 Some(run_id) => Started::NotRecorded(run_id.to_string()),
                 None => Started::Yes,
             },
             Err(e) => Started::Failed(failure_text(&e)),
         },
-        // 叫醒（`--resume`）的錯誤是字串，分不出是哪一種：這顆已經有一個 `starting` 的 run 留著，就是 agent 起來了、
-        // 狀態沒記下（真的起不來時 start 會把 run 收成 `exited`）。
         Err(e) => match db::active_run(app.db(), bot_id).await {
             Ok(Some(r)) if r.state == "starting" => Started::NotRecorded(r.id),
             _ => Started::Failed(format!("{e:#}")),
@@ -532,7 +519,6 @@ pub async fn withdraw_turn(app: &impl LcHost, turn_id: &str) -> LcResult<Withdra
     .fetch_one(app.db())
     .await
     .map_err(up)?;
-    // 還在排的 daemon 自動通知也可以撤（#562）：它擋在佇列頭時，使用者要能讓自己的訊息先走。
     let why = if awaits_start == 1 {
         "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"
     } else if awaits_idle == 1 && origin == "web" {

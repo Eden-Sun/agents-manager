@@ -22,13 +22,9 @@ pub fn pending_ask_entry(log: &str) -> Option<(String, Value)> {
     let mut pending: Option<(String, Value)> = None;
     for line in log.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
-        // Sidechain tool calls are internal branches and must not replace or
-        // answer the question visible in the main conversation.
         if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        // claude 2.1.300 起每次 API 請求另記 `api-request-blob`，也帶 `message.content`（請求裡送出的訊息副本），
-        // 不是對話本身；只認對話的那兩種，副本不能重新問一次或答掉一題（issue #1771）。
         if entry.get("type").and_then(Value::as_str).is_some_and(|t| t != "assistant" && t != "user") {
             continue;
         }
@@ -39,7 +35,6 @@ pub fn pending_ask_entry(log: &str) -> Option<(String, Value)> {
                     let id = block.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                     pending = Some((id, block.get("input").cloned().unwrap_or(Value::Null)));
                 }
-                // 答了（或被取消，取消一樣會回一個 tool_result）：這一題不再等人。
                 Some("tool_result") => {
                     let answered = block.get("tool_use_id").and_then(Value::as_str);
                     if pending.as_ref().is_some_and(|(id, _)| Some(id.as_str()) == answered) {
@@ -141,7 +136,6 @@ mod tests {
         let blob = |m: serde_json::Value| json!({"type": "api-request-blob", "hash": "h", "sessionId": "s", "message": m}).to_string();
         let copy_answer = blob(serde_json::from_str::<serde_json::Value>(&answer("t1")).unwrap()["message"].clone());
         let copy_ask = blob(serde_json::from_str::<serde_json::Value>(&ask("t9", "副本")).unwrap()["message"].clone());
-        // 一回合十幾次請求（各帶新的 shape 與 blob）都塞在題目之後。
         let mut lines = vec![ask("t1", "還在等")];
         for _ in 0..4 {
             lines.extend(API_REQUEST_LOG.lines().map(str::to_string));

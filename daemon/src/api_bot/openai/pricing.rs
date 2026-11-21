@@ -117,7 +117,6 @@ impl Usage {
         let in_details = u.get("input_tokens_details").cloned().unwrap_or(Value::Null);
         let out_details = u.get("output_tokens_details").cloned().unwrap_or(Value::Null);
         let cache_write_tokens = field(&in_details, "cache_write_tokens")?;
-        // 寫入期限分項（有給才核對）：兩種期限相加必須等於 cache_write_tokens；不認得的期限沒有價可算。
         let cache_write_12h_tokens = match in_details.get("cache_write_tokens_details") {
             None | Some(Value::Null) => 0,
             Some(Value::Object(by_ttl)) => {
@@ -171,7 +170,7 @@ pub(crate) fn cost_microusd(table: &PriceTable, usage: &Usage) -> Option<u64> {
         + part(usage.cached_tokens, table.cache_read)
         + part(write_default, table.cache_write)
         + part(usage.cache_write_12h_tokens, table.cache_write_12h);
-    let output = part(usage.output_tokens, table.output); // reasoning_tokens 已含在 output_tokens
+    let output = part(usage.output_tokens, table.output);
     round_up(input, output, usage.input_tokens > table.long_context_over)
 }
 

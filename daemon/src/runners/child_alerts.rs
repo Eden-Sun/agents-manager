@@ -33,7 +33,6 @@ pub async fn sweep(app: &Arc<App>) -> usize {
         started += 1;
         let working = crate::child_alerts::Working::start(&run.bot_id);
         if cfg!(test) {
-            // 測試裡就地跑完一輪、不重試：看得到結果，也不留背景工作。
             crate::child_alerts::keep_telling(app, &run, &[]).await;
             drop(working);
             continue;

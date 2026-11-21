@@ -19,10 +19,8 @@ mod tests {
         let bot = tt::claude_bot(&app, &e.project_id, "title-bot").await;
         let run = tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
-        // 使用者把 herdr agent 改名：DB 裡的 agent_name 跟 herdr 現在報的名字對不上。
         sqlx::query("UPDATE runs SET agent_name = 'renamed-away' WHERE id = ?").bind(&run).execute(&app.db).await.unwrap();
 
-        // 別台 host 的 run：同 pane id、同 session、agent_name 恰好是 herdr 現在報的名字。
         let remote_project = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', 'mac2', ?)")
             .bind(&remote_project)

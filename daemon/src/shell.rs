@@ -126,14 +126,12 @@ pub async fn open(app: &(impl crate::api::shell::HostShellOpenLocks + crate::api
         let mut locks = app.host_shell_open_locks().lock().await;
         locks.entry(host.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
-    // Keep this host's quota exclusive through creation and registration. Other hosts can still open shells.
     let _opening = host_lock.lock().await;
     let live = app.host_shells().lock().await.iter().filter(|s| s.host == host).count();
     if live >= MAX_PER_HOST {
         return Err(LcError::conflict("too_many_shells", json!({"host": host, "max": MAX_PER_HOST})));
     }
     #[cfg(test)]
-    // key 帶上 registry 的位址：每個測試的 App 各一份，別條測試（login_assist 的 `shell::open`）不會吃掉這條的動作（issue #949）。
     crate::lifecycle::race_point::hit("host_shell_after_quota_check", &format!("{host}@{:p}", app.host_shells())).await;
     let cwd = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => c.to_string(),
@@ -146,7 +144,6 @@ pub async fn open(app: &(impl crate::api::shell::HostShellOpenLocks + crate::api
         workspace_id: pane.workspace_id.clone(),
         tab_id: pane.tab_id.clone(),
         pane_id: pane.pane_id.clone(),
-        // What herdr actually opened: a missing path lands somewhere else.
         cwd: pane.cwd.clone().unwrap_or(cwd),
         created_at: db::now(),
     };
@@ -162,17 +159,14 @@ pub async fn list(app: &(impl crate::api::shell::HostShells + crate::capabilitie
     let mut alive = Vec::with_capacity(mine.len());
     let mut dead = Vec::new();
     for s in mine {
-        // An unreachable herdr is not evidence the pane died; let the next poll decide.
         match client.pane_get(&s.pane_id).await {
             Ok(None) => dead.push(s.pane_id.clone()),
-            // id 被重用：現在這個 id 是別的 tab 的 pane，登記的那顆已經不在（#1353）。
             Ok(Some(p)) if !same_pane(&s, &p) => dead.push(s.pane_id.clone()),
             _ => alive.push(s),
         }
     }
     if !dead.is_empty() {
         app.host_shells().lock().await.retain(|s| s.host != host || !dead.contains(&s.pane_id));
-        // 手動在 herdr 關掉的 shell pane：它的指令草稿跟著清（issue #896）。
         for pane_id in &dead {
             crate::drafts::clear_shell(app, host, pane_id).await;
         }
@@ -226,17 +220,12 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
     if expect.is_some_and(|(ws, tab)| (!ws.is_empty() && pane.workspace_id != ws) || (!tab.is_empty() && pane.tab_id != tab)) {
         return Some(LiveVerdict::Gone);
     }
-    // herdr 認出 agent 不等於這顆 pane 歸 bot：使用者自己在 shell 裡跑 agy／claude（登入選單、貼授權碼）也會被認出來，
-    // 那時鎖輸入就沒人打得進去（2026-10-04）。只有 bot 的 pane 才擋；查不到歸屬就當成 bot 的（讀不到不放行）。
     if pane.agent.as_deref().is_some_and(|a| !a.is_empty()) && pane_is_bot_managed(app, host, pane_id).await.unwrap_or(true) {
         return Some(LiveVerdict::Agent);
     }
     if host != crate::config::LOCAL_HOST {
         return Some(LiveVerdict::Typeable);
     }
-    // Pane identity and agent ownership must be fresh because ids are reused. A cached Typeable
-    // would also allow keys for a few seconds after a server starts listening, so only cache the
-    // fail-closed ReadOnly result.
     if let Some((at, LiveVerdict::ReadOnly)) = app.pane_live.lock().await.get(&key).copied() {
         if at.elapsed() < LIVE_TTL {
             return Some(LiveVerdict::ReadOnly);
@@ -316,8 +305,6 @@ fn agent_pane_error() -> LcError {
 async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -> LcResult<HostShell> {
     let mine = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned();
     if let Some(s) = mine {
-        // 記憶體白名單認到了也不能直接放行：pane id 關掉後會被重用，記的 session 也可能已經不是現在的；
-        // 打字前還要即時問 herdr（裡面現在有 agent、在 listen、或根本是另一顆 pane）。
         if app.session_for_host(host).await.as_deref() != Some(s.herdr_session.as_str()) {
             return Err(LcError::NotFound("shell".into()));
         }
@@ -339,7 +326,6 @@ async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -
         return Err(LcError::NotFound("shell".into()));
     };
     let ports = crate::panes::parse_ports(ports.as_deref());
-    // 表裡不該有的 kind 一律不給；port 在這裡不擋——本機打字前會即時重對，表上的可能是好幾分鐘前的。
     if !allowed(&kind, false, access) {
         return Err(read_only_error(&ports));
     }
@@ -415,7 +401,6 @@ pub(crate) async fn snapshot(app: &Arc<App>, host: &str, pane_id: &str, source: 
         client.pane_read(pane_id, source, lines).await
     }
     .map_err(up)?;
-    // Best effort, as in `get_terminal`: a snapshot is still worth returning without geometry.
     let (columns, rows) = match client.pane_size(pane_id).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
@@ -483,7 +468,6 @@ pub async fn echo_after_send(app: &Arc<App>, host: &str, pane_id: &str, want: bo
 
 async fn echo_terminal(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Value> {
     let (cwd, read) = read_quick(app, host, pane_id, ECHO_LINES).await?;
-    // 幾何只是附帶資訊：取不到就 null，不影響快照本身。
     let (columns, rows) = match client_for(app, host).await {
         Ok((client, _)) => match client.pane_size(pane_id).await {
             Ok(Some((w, h))) => (Some(w), Some(h)),
@@ -568,14 +552,11 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
         return close_tracked_shell(app, host, pane_id, confirmed).await;
     };
     match client.pane_get(pane_id).await.map_err(up)? {
-        // 登記的那顆已經不在、這個 id 被 herdr 重用給別人：不關，登記也不再是我們的（#1353）。
-        // 現在這顆若是 `panes` 表認得的 shell，照那條的守門決定。
         Some(p) if !same_pane(&shell, &p) => {
             app.host_shells.lock().await.retain(|s| s.host != host || s.pane_id != pane_id);
             crate::login_assist::forget(app, host, pane_id);
             return close_tracked_shell(app, host, pane_id, confirmed).await;
         }
-        // 同一顆、但現在裡面跑著 bot 的 agent：照打字那條，不關（登記留著）。
         Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) && pane_is_bot_managed(app, host, pane_id).await.unwrap_or(true) => {
             return Err(agent_pane_error());
         }
@@ -645,8 +626,6 @@ mod tests {
                 *result_slot.lock().await = Some(result);
                 done.notify_one();
             });
-            // The broken implementation lets the second open pass its count and finish here.
-            // With per-host serialization it waits on the lock held by this first open.
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), second_done.notified()).await;
         });
 
@@ -691,9 +670,7 @@ mod tests {
 
         assert!(found("local", "w1:p2"));
         assert!(found("mac_builder", "w3:p1"));
-        // The same pane_id on the wrong host must not match…
         assert!(!found("mac_builder", "w1:p2"));
-        // …and neither must a pane the daemon never opened, which is every bot pane.
         assert!(!found("local", "w1:p1"));
     }
 
@@ -730,9 +707,7 @@ mod tests {
         tracked(&app, "w1:pS", "shell").await;
         let got = registered(&app, "local", "w1:pS", Access::View).await.expect("看得到");
         assert_eq!((got.cwd.as_str(), got.workspace_id.as_str()), ("/tmp/proj", "w1"));
-        // 沒被 trace 的 pane 仍然是陌生人。
         assert!(matches!(registered(&app, "local", "w1:pX", Access::View).await, Err(LcError::NotFound(_))));
-        // 主機不對也不算（pane id 只在單一主機內唯一）。
         assert!(matches!(registered(&app, "mac_builder", "w1:pS", Access::View).await, Err(LcError::NotFound(_))));
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
@@ -837,19 +812,16 @@ mod tests {
         };
         *app.host_shells.lock().await = panes.iter().map(reg).collect();
 
-        // 使用者自己的 shell：沒有 run、沒有 hint → 打得進去，字與鍵都真的送到 herdr。
         let mine = &panes[0];
         send_text(app, "local", &mine.pane_id, "4/0AX-code", true).await.expect("user-run agent in own shell is typeable");
         send_keys(app, "local", &mine.pane_id, &["down".to_string(), "enter".to_string()]).await.expect("keys too");
         assert!(!env.herdr.calls_to("pane.send_text").is_empty());
 
-        // bot 的 pane（有 active run）：照舊擋。
         let bots = &panes[1];
         give_pane_to_a_bot(app, &bots.pane_id).await;
         let r = send_text(app, "local", &bots.pane_id, "nope", false).await;
         assert!(matches!(r, Err(LcError::Forbidden(ref b)) if b["error"] == "agent_pane"), "run on pane: {r:?}");
 
-        // bot 剛起出來、還沒被收編成 run 的 pane（spawn hint）：也擋。
         let hinted = &panes[2];
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('hb','pb','hb','claude','t2',?)").bind(crate::db::now()).execute(&app.db).await.unwrap();
         crate::spawn_hints::record(app, "hb", &hinted.pane_id).await.unwrap();
@@ -884,8 +856,6 @@ mod tests {
             }
         };
 
-        // 跑著 vim 的 pane：shell 底下一個不 listen 的行程。表上還記著舊的 port——即時的為準，可以打字。
-        // 行程樹與 listen port 是決定性的假貨：真的 `ps`／`lsof` 在 CI runner 上會慢到逾時（見 `probe_smoke_*`）。
         *app.pane_probe.lock().unwrap() = Arc::new(
             crate::pane_probe::Fixed::tree(&[
                 (41001, 1, "-zsh"),
@@ -901,7 +871,6 @@ mod tests {
         let typed = registered(app, "local", &vim.pane_id, Access::Type).await;
         assert!(typed.is_ok(), "{:?}", typed.map(|s| s.pane_id));
 
-        // 真的在 listen 的：唯讀。
         let (_, dev) = app.herdr.workspace_create("/tmp", "dev", json!({})).await.unwrap();
         env.herdr.set_shell_pid(&dev.pane_id, 41003);
         track(dev.pane_id.clone(), dev.workspace_id.clone(), dev.tab_id.clone(), None).await;
@@ -910,11 +879,9 @@ mod tests {
             other => panic!("在 listen 的不能打字：{:?}", other.map(|s| s.pane_id)),
         }
 
-        // pane 已經不在：404。
         track("ws-9:pGone".into(), "ws-9".into(), "ws-9:t1".into(), None).await;
         assert!(matches!(registered(app, "local", "ws-9:pGone", Access::Type).await, Err(LcError::NotFound(_))));
 
-        // 裡面現在有 bot 的 agent：403。
         env.herdr.set_agent("kid", &vim.pane_id, false);
         give_pane_to_a_bot(app, &vim.pane_id).await;
         app.pane_live.lock().await.clear();
@@ -959,29 +926,23 @@ mod tests {
         env.herdr.set_shell_pid(&p.pane_id, 41101);
         *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
 
-        // 正常：同一顆、同一個 session、什麼都沒變。
         set(reg(&p.tab_id, &session)).await;
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "ok");
 
-        // pane id 被重用：同一個 id 現在在另一個 tab（不是我們開的那顆）。
         set(reg("some-other-tab", &session)).await;
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "404", "id 重用要當成不是同一顆");
 
-        // 記的是別的 herdr session：這個 session 裡的同號 pane 是陌生人。
         set(reg(&p.tab_id, "some-old-session")).await;
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "404", "session 不同");
 
-        // 打字前 pane 裡被 bot 起了 agent。
         set(reg(&p.tab_id, &session)).await;
         env.herdr.set_agent("kid", &p.pane_id, false);
         give_pane_to_a_bot(app, &p.pane_id).await;
         app.pane_live.lock().await.clear();
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "agent_pane");
 
-        // 看畫面不需要複查（跟 `panes` 表那條一樣）。
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::View).await), "ok");
 
-        // pane 已經不在：404。
         set(HostShell { pane_id: "ws-404:pGone".into(), ..reg(&p.tab_id, &session) }).await;
         assert_eq!(code(registered(app, "local", "ws-404:pGone", Access::Type).await), "404");
     }
@@ -1083,7 +1044,6 @@ mod tests {
             assert!(matches!(result, Err(LcError::Forbidden(ref b)) if b["error"] == "read_only_pane"), "{dev} 仍唯讀：{result:?}");
         }
 
-        // agent 旁邊另外有真正的 dev server（同一顆 pane）：dev server 的 port 照算。
         app.pane_live.lock().await.clear();
         *app.pane_probe.lock().unwrap() =
             Arc::new(crate::pane_probe::Fixed::tree(&[(43101, 1, "-zsh"), (43102, 43101, "agy"), (43103, 43101, "node vite")]).listening(43102, 39039).listening(43103, 5173));
@@ -1163,7 +1123,6 @@ mod tests {
         let body = conflict_body(close_confirmed(&env.app, "local", &p.pane_id, false).await);
         assert_eq!((body["reason"].as_str(), body["unverified"].as_bool()), (Some("service_pane"), Some(true)));
         assert!(env.app.herdr.pane_get(&p.pane_id).await.unwrap().is_some(), "還沒關");
-        // 內部呼叫的 `close`（沒有 confirm 可帶）同樣不繞過。
         assert!(matches!(close(&env.app, "local", &p.pane_id).await, Err(LcError::Conflict(_))));
     }
 
@@ -1241,10 +1200,8 @@ mod tests {
             cwd: "/tmp".into(),
             created_at: crate::db::now(),
         };
-        // 對照組：登記的 tab 就是現在這顆 pane 的 tab，照舊列出來。
         *app.host_shells.lock().await = vec![reg(&p.tab_id)];
         assert_eq!(list(app, "local").await.unwrap().len(), 1, "同一顆 pane 要照列");
-        // id 被重用：現在這個 id 在別的 tab，登記的那顆其實已經不在。
         *app.host_shells.lock().await = vec![reg("some-other-tab")];
         assert!(list(app, "local").await.unwrap().is_empty(), "別人的 pane 不能列成我們的 shell");
         assert!(app.host_shells.lock().await.is_empty(), "死掉的登記要清掉，不然一直佔 MAX_PER_HOST");
@@ -1268,7 +1225,6 @@ mod tests {
         }];
         env.herdr.set_screen(&pane.pane_id, "private output from the new pane");
 
-        // Herdr reused the id in another tab after the registered shell went away.
         {
             let mut tabs = env.herdr.tabs.lock().unwrap();
             let tab = tabs.iter_mut().find(|t| t.panes.contains(&pane.pane_id)).expect("mock pane tab");

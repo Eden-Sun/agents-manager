@@ -4,7 +4,6 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::delivery::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use std::time::Duration;
@@ -79,7 +78,6 @@ Accessing workspace:\n/home/user/project\n\n\
         };
         use std::io::{BufRead, Write};
         let mut stream = std::os::unix::net::UnixStream::connect(&sock).expect("AM_TEST_REAL_HERDR=1 但連不上 HERDR_SOCKET_PATH");
-        // 沒有讀寫逾時的話 herdr 卡住時這條測試永遠不回來（#1147）。
         let limit = Some(std::time::Duration::from_secs(10));
         stream.set_read_timeout(limit).unwrap();
         stream.set_write_timeout(limit).unwrap();
@@ -138,7 +136,6 @@ Accessing workspace:\n/home/user/project\n\n\
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         let code = "修這段：\n\nfn main() {\n    println!(\"hi\");  \n}";
-        // 舊的同一句已經在基準點之前：不算。
         std::fs::write(&path, format!("{}\n", user_entry(json!(code)))).unwrap();
         let offset = transcript_len(&path).unwrap();
         assert_eq!(transcript_hits_since(&path, offset, code).unwrap(), 0);
@@ -156,9 +153,7 @@ Accessing workspace:\n/home/user/project\n\n\
         assert_eq!(transcript_hits_since(&path, offset, code).unwrap(), 1);
         assert_eq!(transcript_hits_since(&path, offset, &code.replace("  \n", "\n")).unwrap(), 0, "行尾兩空白是內容");
         assert_eq!(transcript_hits_since(&path, offset, &long).unwrap(), 1, "2k 行");
-        // 基準點落在一個多位元組字元中間：第一段解析失敗被略過，後面的完整行照常。
         assert!(transcript_hits_since(&path, offset + 1, code).unwrap() <= 1);
-        // 檔案被換掉變短：不是基準點那一份，回錯。
         std::fs::write(&path, "").unwrap();
         assert!(transcript_hits_since(&path, offset, code).is_err());
         assert!(transcript_hits_since(&dir.join("missing.jsonl"), 0, code).is_err());
@@ -177,7 +172,6 @@ Accessing workspace:\n/home/user/project\n\n\
         let echo = user_entry(json!("<command-name>/compact</command-name>\n<command-args></command-args>"));
         std::fs::write(&path, [summary.clone(), echo.clone(), user_entry(json!("送出的那句")), summary.clone()].join("\n") + "\n").unwrap();
         assert_eq!(transcript_hits_since(&path, 0, "送出的那句").unwrap(), 1);
-        // 摘要與回音本身也不會被當成「我們送的字」數進去（就算送出的字剛好一樣）。
         let same_text = json!({"type": "user", "isCompactSummary": true, "message": {"role": "user", "content": "送出的那句"}}).to_string();
         std::fs::write(&path, [same_text, user_entry(json!("送出的那句"))].join("\n") + "\n").unwrap();
         assert_eq!(transcript_hits_since(&path, 0, "送出的那句").unwrap(), 1);
@@ -233,11 +227,9 @@ Accessing workspace:\n/home/user/project\n\n\
 mod api_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::delivery::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use std::time::Duration;
-    // Through `prompt()` itself: what reaches the database when nothing could be sent.
     use crate::lifecycle::delivery::*;
     use crate::testing as tt;
     async fn idle_bot(env: &tt::Env, kind: &str) -> (String, String, String) {
@@ -375,7 +367,6 @@ mod api_tests {
 
         let env = tt::env().await;
         let app = env.app.clone();
-        // grok 沒有要等的證據，所以會真的走到讀畫面那一步。
         let (bot_id, conv2, _run) = idle_bot(&env, "grok").await;
         env.herdr.set_screen("pane-api", "__READ_ERROR__");
         match prompt(&app, &bot_id, "Reply with PONG please", "crid-unreadable").await {
@@ -411,7 +402,6 @@ mod api_tests {
             .await
             .unwrap();
         env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        // is_file() 仍然成立，所以規劃會選 transcript；真正讀內容時才失敗。
         std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o000)).unwrap();
         let res = prompt(&app, &bot_id, "第一行\n第二行", "crid-locked").await;
         std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -439,10 +429,8 @@ mod api_tests {
             .unwrap();
         assert_eq!((delivery.as_str(), verified), ("ok", 0), "不是 unknown，而是帶標記的已送出");
         assert_eq!(env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
-        // 同一個 request id 再問一次，答案一樣是 unverified。
         assert_eq!(prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await.unwrap().delivery, "unverified");
     }
-    // ───── #749：codex app-server 的結構化歷史 ─────
 
     /// 一顆 codex bot：session `sess-api` 的 rollout 存在但永遠不長（mock pane 不寫 codex rollout＝「rollout 還沒 flush」）。
     async fn codex_with_idle_rollout(env: &tt::Env) -> (String, String, crate::codex_history::Binding) {
@@ -470,7 +458,6 @@ mod api_tests {
         stub.push_user(&b, "t0", "u0", "old prompt");
         stub.push_final(&b, "t0", "a0", "old reply");
         let prompt_text = "第一行\n第二行\n\n  indented { \"json\": true }";
-        // 第 1 次 open 是送出前的基準，第 2 次起是送出後的確認；那時歷史裡才有我們這則。
         stub.arrive_on_open(2, &b, "t1", "u1", prompt_text);
         app.codex_history.set(Some(Arc::new(stub.clone())));
         let before = crate::codex_history::counts();
@@ -493,7 +480,6 @@ mod api_tests {
         let with_error = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-err").await.unwrap();
         let with_error = (delivery_of(&app, &with_error.turn_id).await, env.herdr.calls_to("pane.send_text").len());
 
-        // 對照組：模組關掉（hook 空）。
         let env2 = tt::env().await;
         let (bot2, conv2, _) = codex_with_idle_rollout(&env2).await;
         let baseline = prompt(&env2.app, &bot2, "第一行\n第二行", "crid-hist-off").await.unwrap();
@@ -511,7 +497,6 @@ mod api_tests {
         let app = env.app.clone();
         let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
         let stub = crate::codex_history::StubSource::new();
-        // 同一句 prompt 以前就送過（舊歷史）；投影在送出前停住，所以基準拿不到。
         stub.push_user(&b, "t0", "u0", "第一行\n第二行");
         stub.stall(true);
         app.codex_history.set(Some(Arc::new(stub.clone())));
@@ -542,7 +527,6 @@ mod api_tests {
         stub.push_user(&b, "t0", "u0", "old");
         let other = crate::codex_history::Binding { thread_id: "sess-other".into(), ..b.clone() };
         stub.arrive_on_open(2, &other, "t1", "u1", "第一行\n第二行");
-        // 別的 home、別的 host 也一樣。
         let other_home = crate::codex_history::Binding { codex_home: Some(std::path::PathBuf::from("/elsewhere")), ..b.clone() };
         stub.arrive_on_open(2, &other_home, "t1", "u2", "第一行\n第二行");
         let other_host = crate::codex_history::Binding { host: "mac_builder".into(), ..b.clone() };

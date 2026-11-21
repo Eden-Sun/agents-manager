@@ -46,7 +46,6 @@ impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
 impl MaintenancePort for App {
     const UNREADABLE_RETRY_SECS: i64 = crate::supervisor::maintenance::UNREADABLE_RETRY_SECS;
     async fn window_held(&self) -> std::result::Result<Option<SendWindowHeld>, SendWindowUnreadable> {
-        // herdr 一鍵更新走到「要砍 server」的階段：同一道入場閘門，原因是 `herdr_updating`（issue #893）。
         if let Some(p) = crate::herdr_upgrade::gate(self) {
             return Ok(Some(SendWindowHeld {
                 resource: crate::lifecycle::send_now::ports::HERDR_UPDATE_RESOURCE,

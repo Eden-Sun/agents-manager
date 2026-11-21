@@ -45,7 +45,6 @@ pub(crate) async fn adopt(
         }
         _ => return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"}))),
     }
-    // 專家一定要有 track（與 PATCH／PUT role 同一條規則）。
     let specialist = role.as_deref() == Some("specialist");
     if specialist && track.is_none() {
         return Err(LcError::BadValue(json!({"error": "track_required"})));

@@ -124,7 +124,6 @@ mod tests {
     fn a_box_that_is_not_full_and_lost_its_head_is_truncated() {
         let (screen, sent) = real!("rows55-lost-head");
         assert!(truncated("claude", screen, sent, Some(55)));
-        // 同一個 8 行框，畫面其實有 55 列（上限 22）：框沒滿還看不到開頭＝真的缺頭。
         let (screen, sent) = real!("rows26-box8-46lines");
         assert!(truncated("claude", screen, sent, Some(55)));
     }

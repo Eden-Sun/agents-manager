@@ -423,24 +423,20 @@ mod tests {
     #[test]
     fn ops_alert_payload_matches_the_old_hand_written_shapes() {
         use serde_json::json;
-        // share_storage_full / remote_restore_gave_up / codex_reset_credit_expiring 這類只有五個固定欄位。
         assert_eq!(
             ops_alert_payload("share_storage_full", "b1", json!({}), "d", "a"),
             json!({"source": "daemon", "reason": "share_storage_full", "subject": "b1", "detail": "d", "action": "a"})
         );
-        // agents_gone_burst：額外欄位在 subject 與 detail 之間。
         assert_eq!(
             ops_alert_payload("agents_gone_burst", "h", json!({"host": "h", "count": 2, "bots": ["x"], "bot_names": ["n"], "window_secs": 60, "first_gone_at": "f", "last_gone_at": "l"}), "d", "a"),
             json!({"source": "daemon", "reason": "agents_gone_burst", "subject": "h", "host": "h", "count": 2, "bots": ["x"], "bot_names": ["n"],
                    "window_secs": 60, "first_gone_at": "f", "last_gone_at": "l", "detail": "d", "action": "a"})
         );
-        // herdr_unexpected_restart
         assert_eq!(
             ops_alert_payload("herdr_unexpected_restart", "local herdr", json!({"recovery_id": "r", "resumed_count": 1, "failed_count": 0, "children_lost_count": 0, "limited": false, "skipped": 0}), "d", "a"),
             json!({"source": "daemon", "reason": "herdr_unexpected_restart", "subject": "local herdr", "recovery_id": "r", "resumed_count": 1,
                    "failed_count": 0, "children_lost_count": 0, "limited": false, "skipped": 0, "detail": "d", "action": "a"})
         );
-        // 序列化後的字串也一樣（payload_json 存的是這串；serde_json 的 Map 依 key 排序，不受插入順序影響）。
         let built = ops_alert_payload("r", "s", json!({"x": 1}), "d", "a").to_string();
         let old = json!({"source": "daemon", "reason": "r", "subject": "s", "x": 1, "detail": "d", "action": "a"}).to_string();
         assert_eq!(built, old);

@@ -1,5 +1,3 @@
-// Blanket Arc forwarding for base-owned state traits; kept beside the traits
-// so the daemon composition crate does not violate Rust orphan rules.
 use std::sync::Arc;
 
 impl<T: crate::quota::QuotaTables + ?Sized> crate::quota::QuotaTables for Arc<T> {

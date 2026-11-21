@@ -189,8 +189,6 @@
         std::fs::write(base.join("root/a.txt"), b"hi").unwrap();
         let dir = open_bound_dir(&base, &[OsStr::new("root")], None).unwrap();
 
-        // 檢查通過之後、真正列舉之前：原本的目錄改名挪到旁邊（內容原封不動），`root` 這個名字
-        // 讓給一個指到界線外的符號連結。
         std::fs::rename(base.join("root"), base.join("root-moved-aside")).unwrap();
         std::fs::create_dir_all(base.join("elsewhere")).unwrap();
         std::fs::write(base.join("elsewhere/secret.txt"), b"nope").unwrap();
@@ -299,8 +297,6 @@
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        // 子行程是整顆測試 binary 再起一次：高負載下光是啟動（載入、過濾幾千條測試）就可能好幾秒。
-        // 要分辨的是「永遠卡在 open(FIFO)」，所以給得很寬；正常情況照樣幾十毫秒就回來（#1152）。
         const CHILD_DEADLINE: Duration = Duration::from_secs(60);
         let deadline = Instant::now() + CHILD_DEADLINE;
         let status = loop {

@@ -92,15 +92,12 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                     crate::session_paused::forget_ended(&app, &runs).await;
                     crate::dangerous_rm::forget_ended(&app, &runs).await;
                     for run in runs {
-                        // 之前判成誤報而改掉的 blocked：herdr 沒再報、畫面卻出現提示就改回去（不按鍵）。
                         if run.agent_status != "blocked" {
                             let _ = crate::lifecycle::poller::reblock_if_prompt(&app, &run).await;
                         }
-                        // 回合收了、herdr 也 idle，DB 卻還是 working 的卡死狀態：校正並 log。
                         if run.agent_status == "working" {
                             let _ = crate::lifecycle::poller::settle_stale_working(&app, &run).await;
                         }
-                        // #1876：啟動的一幀空框之後才跳警告、或事件漏掉的備援；跟送達共用 bot 鎖。
                         if matches!(run.agent_status.as_str(), "blocked" | "idle" | "unknown") {
                             let lock = app.bot_lock(&run.bot_id).await;
                             if let Ok(_guard) = lock.try_lock() {
@@ -113,20 +110,15 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                         }
                         if run.agent_status == "blocked" || run.agent_status == "idle" || crate::dangerous_rm::is_open(&run.id) {
                             dismiss_if_survey(&app, &run).await;
-                            // 防誤刪框：herdr 判成 idle 時的安全網，也負責框關掉之後的收尾（不按任何鍵）。
                             crate::runners::dangerous_rm::observe(&app, &run).await;
                         }
-                        // Session paused 選單：herdr 判 idle 時補標 blocked、選單關掉時還原（不按任何鍵）。
                         if run.agent_status == "idle" || crate::session_paused::is_forced(&run.id) {
                             crate::runners::session_paused::observe(&app, &run).await;
                         }
-                        // Codex 在 starting／working 狀態也可能停在啟動遷移框；只查畫面，不替使用者選。
                         crate::runners::codex_model_migration::observe(&app, &run).await;
-                        // claude 停在一般權限確認選單：事件那一刻漏掉、或選單換了一種工具，這裡每輪重讀一次（只看、不按鍵）。
                         if run.agent_status == "blocked" {
                             crate::blocked_reason::observe(&app, &run).await;
                             crate::runners::codex_async_question::observe(&app, &run).await;
-                            // herdr 判 blocked、畫面上卻沒有任何可回答的提示（誤報）：改掉狀態；事件那一刻沒趕上或誤報是後來才發生的由這裡補。
                             let _ = crate::lifecycle::poller::settle_false_blocked(&app, &run).await;
                         }
                     }

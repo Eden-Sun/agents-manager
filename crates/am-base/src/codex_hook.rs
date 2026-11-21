@@ -218,7 +218,6 @@ pub fn merge_hooks_json(existing: &str, canonical_command: &str) -> Result<Hooks
 /// sha256 of the key-sorted compact JSON of the normalized identity (verified against `hooks/list` `currentHash`, #1989).
 pub fn stop_hook_trust_hash(command: &str) -> String {
     use sha2::{Digest, Sha256};
-    // serde_json::Value objects are BTreeMap-ordered, so serialization is key-sorted.
     let identity = serde_json::json!({
         "event_name": "stop",
         "hooks": [{"async": false, "command": command, "timeout": 5, "type": "command"}],
@@ -557,7 +556,6 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], dispatcher);
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5);
 
-        // Second time should be idempotent and return merged_json: None
         let outcome2 = merge_hooks_json(&merged, &dispatcher).unwrap();
         assert_eq!(outcome2.group_index, 0);
         assert!(outcome2.merged_json.is_none());
@@ -596,7 +594,7 @@ mod tests {
 
         let dispatcher = sh_quote("/opt/agm/codex-hook.sh");
         let outcome = merge_hooks_json(&existing, &dispatcher).unwrap();
-        assert_eq!(outcome.group_index, 1); // Appended after existing Stop[0]
+        assert_eq!(outcome.group_index, 1);
         let merged = outcome.merged_json.unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(v["description"], "User custom config");
@@ -623,7 +621,7 @@ mod tests {
                             {
                                 "type": "command",
                                 "command": cmd,
-                                "timeout": 10 // Not canonical 5
+                                "timeout": 10
                             }
                         ]
                     }
@@ -642,7 +640,7 @@ mod tests {
                                 "type": "command",
                                 "command": cmd,
                                 "timeout": 5,
-                                "async": true // extra field!
+                                "async": true
                             }
                         ]
                     }
@@ -667,7 +665,6 @@ mod tests {
         assert!(script.contains("[ -n \"$AM_DAEMON_EXE\" ] && [ -n \"$AM_PORT\" ] || exit 0"));
         assert!(script.contains("[ \"${AM_INSTANCE:-}\" = 'inst-slug' ] || exit 0"));
         assert!(script.contains("exec \"$AM_DAEMON_EXE\" hook codex --bot \"$AM_BOT_ID\" --port \"$AM_PORT\" --data-dir '/var/run/agents manager'"));
-        // Ensure no PAYLOAD= or head secondary cap or no-op cat
         assert!(!script.contains("PAYLOAD"));
         assert!(!script.contains("head -c"));
         assert!(!script.contains("cat >/dev/null"));
@@ -695,7 +692,6 @@ mod tests {
         let disp = dir.join("codex-hook.sh");
         let fake_exe = dir.join("fake-daemon.sh");
 
-        // Write fake daemon exe that dumps its argv and stdin
         std::fs::write(
             &fake_exe,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$1.argv\"\ncat > \"$1.stdin\"\n",
@@ -710,7 +706,6 @@ mod tests {
         let script = local_dispatch_sh(&dir, Some("main-inst"));
         write_local_dispatcher(&disp, &script).unwrap();
 
-        // Case 1: Missing AM_BOT_ID -> exit 0 without executing fake daemon
         let out = Command::new("/bin/sh")
             .current_dir(&dir)
             .arg(&disp)
@@ -722,7 +717,6 @@ mod tests {
         assert!(out.stdout.is_empty());
         assert!(!dir.join("hook.argv").exists());
 
-        // Case 2: AM_CHILD_OF is set -> exit 0 without executing
         let out = Command::new("/bin/sh")
             .current_dir(&dir)
             .arg(&disp)
@@ -735,7 +729,6 @@ mod tests {
         assert!(out.status.success());
         assert!(!dir.join("hook.argv").exists());
 
-        // Case 3: Instance mismatch -> exit 0 without executing
         let out = Command::new("/bin/sh")
             .current_dir(&dir)
             .arg(&disp)
@@ -748,8 +741,7 @@ mod tests {
         assert!(out.status.success());
         assert!(!dir.join("hook.argv").exists());
 
-        // Case 4: Matches guards -> execs fake daemon with full stdin and argv
-        let large_payload = "X".repeat(200 * 1024); // 200 KiB stdin (>128 KiB limit)
+        let large_payload = "X".repeat(200 * 1024);
         let mut child = Command::new("/bin/sh")
             .current_dir(&dir)
             .arg(&disp)
@@ -843,7 +835,7 @@ mod tests {
         let dir = crate::test_dirs::scratch_dir("am-codex-stop-order");
         let home = dir.join("codex");
         let data = dir.join("data");
-        std::fs::create_dir_all(home.join("hooks.json")).unwrap(); // hooks.json cannot be written: the handler write must fail
+        std::fs::create_dir_all(home.join("hooks.json")).unwrap();
         assert!(install_and_trust_local(&home, &data, None).is_err());
         let command = sh_quote(&data.join(CODEX_HOOK_SH).to_string_lossy());
         let hooks = home.join("hooks.json");

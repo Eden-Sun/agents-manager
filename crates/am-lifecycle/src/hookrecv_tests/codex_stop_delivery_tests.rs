@@ -89,10 +89,8 @@ async fn codex_process_single_completion_order_legacy_then_stop() {
         run_id: Some(f.run_id.clone()),
     };
 
-    // 舊 notify 先 process
     process(&f.env.app, &legacy_notify).await.unwrap();
 
-    // 驗證原 turn completed、native IDs 留存、無額外 external turn
     let (status, nat_sess, nat_turn): (String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT status, native_session_id, native_turn_id FROM turns WHERE id = ?",
     )
@@ -111,7 +109,6 @@ async fn codex_process_single_completion_order_legacy_then_stop() {
         .unwrap();
     assert_eq!(total_turns, 1, "不准產生額外 external turn");
 
-    // 驗證 messages 中剛好只有單一 assistant message，內容為先到者
     let msgs: Vec<(String, String)> = sqlx::query_as(
         "SELECT role, content FROM messages WHERE turn_id = ? AND role = 'assistant'",
     )
@@ -122,7 +119,6 @@ async fn codex_process_single_completion_order_legacy_then_stop() {
     assert_eq!(msgs.len(), 1, "剛好單一 assistant message");
     assert_eq!(msgs[0].1, "Legacy assistant reply");
 
-    // 新 Stop 到達：真 process 執行
     process(&f.env.app, &new_stop).await.unwrap();
 
     let (status2, total_turns2): (String, i64) = (
@@ -179,7 +175,6 @@ async fn codex_process_single_completion_order_stop_then_legacy() {
         run_id: Some(f.run_id.clone()),
     };
 
-    // 新 Stop 先 process
     process(&f.env.app, &new_stop).await.unwrap();
 
     let (status, nat_sess, nat_turn): (String, Option<String>, Option<String>) = sqlx::query_as(
@@ -210,7 +205,6 @@ async fn codex_process_single_completion_order_stop_then_legacy() {
     assert_eq!(msgs.len(), 1, "剛好單一 assistant message");
     assert_eq!(msgs[0].1, r#"{"title":"A normal JSON reply"}"#);
 
-    // 舊 notify 後 process
     process(&f.env.app, &legacy_notify).await.unwrap();
 
     let (status2, total_turns2): (String, i64) = (

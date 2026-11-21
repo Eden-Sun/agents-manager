@@ -9,7 +9,6 @@
         let screen = "❯ 進度？\n⏺ 目前狀況：\n  build done · 3 tasks left\n  下一步跑測試\n";
         let reply = ClaudeCapture.extract_reply(screen).unwrap();
         assert!(reply.contains("3 tasks left"), "回覆中間那行不能被剝掉：{reply}");
-        // 真的狀態列照舊是雜訊。
         assert!(is_noise("gpt-5.6-sol high · ~/p · Context 3% used · 5h 82% left · weekly 97% left"));
         assert!(is_noise("· 5h 82% left · weekly 97% left"));
     }
@@ -53,8 +52,6 @@
         assert!(!is_mode_row("⏸ 暫停：等使用者決定 · mode on 的說明"));
         assert!(!is_noise("⏸ 暫停部署"));
         assert!(!is_noise("⏸ The manual mode on label is confusing here."));
-        // 第一段要「以 mode on 結尾」（可再接 shift+tab），不是中間出現這幾個字。
-        // `contains` 會把回覆「⏸ plan mode on the left…」整行當 chrome 剝掉。
         assert!(!is_mode_row("⏸ plan mode on the left is still default"));
         assert!(!is_noise("⏸ plan mode on the left is still default"));
         let quoted_status = "⏸ Quoted status: plan mode on";
@@ -86,7 +83,6 @@
             "⏸ manual mode on · ← for agents",
             "⏸ manual mode on · ? for shortcuts",
             "⏸ manual mode on",
-            // child_alerts 原本就認的：沒有箭頭的 bypass 列、窄 pane 折下來的提示、大小寫。
             "bypass permissions on · ← for agents",
             "permissions on (shift+tab to cycle)",
             "(Shift+Tab to cycle) · ← for agents",
@@ -104,7 +100,6 @@
         ] {
             assert!(!is_mode_row(reply), "{reply}");
         }
-        // 2.1.288 default 模式真畫面：最底那一行就是模式列。
         let fixture = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
         let last = fixture.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
         assert!(is_mode_row(last), "{last:?}");
@@ -115,7 +110,6 @@
     fn a_hint_row_under_a_login_error_is_not_the_activity() {
         let screen = "❯ go\n  ⎿  Not logged in · Please run /login\n   · Run in another terminal: security unlock-keychain\n";
         assert_eq!(ClaudeCapture.activity(screen), None);
-        // 真的 `·` 活動列（有 `…`）照舊回報。
         let working = "❯ go\n · Philosophising… (33m 33s · ↓ 94.9k tokens)\n";
         assert_eq!(ClaudeCapture.activity(working).as_deref(), Some("Philosophising… (33m 33s · ↓ 94.9k tokens)"));
     }
@@ -128,7 +122,6 @@
         let screen = "❯ 寫註解\n⏺ 這樣：\n  /**\n   * Returns the count of items\n   */\n  fn count() {}\n";
         let reply = ClaudeCapture.extract_reply(screen).unwrap();
         assert!(reply.contains("* Returns the count of items"), "程式碼區塊的註解行不能被剝：{reply}");
-        // 真的 spinner 行照舊是雜訊。
         assert!(is_noise("* Cooking… (3s · ↓ 1.0k tokens)"));
         assert!(is_noise("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
         assert!(is_noise("✻ Crunched for 9s · done 11:35 PM"));

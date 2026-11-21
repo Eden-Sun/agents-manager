@@ -371,7 +371,6 @@ pub async fn commit_item(pool: &SqlitePool, project_id: &str, actor: &str, sourc
     check_status(&status)?;
     check_owner(pool, project_id, input.owner_bot_id.as_deref()).await?;
     let mut tx = db::begin_write(pool).await?;
-    // 追加項從 1 起跳：`ordinal = 0` 留給 `ingest_user_message` 的原始收件項。
     let ordinal: i64 = match source_message_id {
         Some(m) => {
             let owned: Option<i64> = sqlx::query_scalar(
@@ -459,7 +458,6 @@ async fn resolve_id(tx: &mut Transaction<'_, Sqlite>, project_id: &str, raw: &st
 /// 樂觀鎖異動：`expected_version` 與目前不符就回 [`LedgerError::VersionConflict`]，什麼都不寫。
 /// `item_ref` 可以是 ULID，也可以是 `L<code_no>`；`Merge` 的目標同樣接受兩種寫法，寫進 `merged_into_id` 的一律是解析後的 ULID。
 pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str, expected_version: i64, actor: &str, op: LedgerPatchOp) -> Result<LedgerItem, LedgerError> {
-    // 承辦人只能是專案管理入口（管理者或副管理者）：帳本是管理者對使用者的承諾，派給執行者是另一回事（2026-11-21 裁示）。
     let new_owner = match &op {
         LedgerPatchOp::Claim { owner_bot_id } => Some(owner_bot_id.as_str()),
         LedgerPatchOp::Handback { to } => to.as_deref(),
@@ -684,7 +682,6 @@ pub async fn query_actionable_for_actor(pool: &SqlitePool, project_id: &str, bot
     rows.truncate(limit);
     Ok((rows, counts))
 }
-
 
 /// 副管理者代班改派（`relay_deputy::redirect`）：綁在這則 relay 請求上的未結事項改給副管理者（`version + 1`）。
 /// 還沒有任何綁定事項時，以 `relay_request_id` 冪等建一筆（標題取 `prompt_text`，直接由副手承辦）。
@@ -1037,9 +1034,7 @@ mod tests {
         .unwrap();
         assert_eq!((done.status.as_str(), done.close_reason.as_deref()), ("done", Some("已確認")));
         let actions: Vec<(String,)> = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at, rowid").bind(&first.id).fetch_all(&pool).await.unwrap();
-        // 從 untriaged 直接結案：算一次 triage（離開待分流），不另記 status。
         assert_eq!(actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["ingest", "triage"]);
-        // 之後從已分流的狀態再改，才記 status。
         let reopened = patch_item_cas(&pool, "p1", &first.id, done.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
         let last: (String,) = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(&first.id).fetch_one(&pool).await.unwrap();
         assert_eq!((last.0.as_str(), reopened.status.as_str()), ("status", "following"));
@@ -1146,7 +1141,6 @@ mod tests {
         assert_eq!(first.iter().map(|r| r.stage).collect::<Vec<_>>(), vec!["untriaged"]);
         assert!(mark_reminded(&pool, &first[0]).await.unwrap());
         assert!(due_reminders(&pool, now).await.unwrap().is_empty(), "同 (item, stage, version) 不再提醒");
-        // 版本變了（有人動過）就可以再提醒一次。
         sqlx::query("UPDATE ledger_items SET version = version + 1 WHERE id=?").bind(&item.id).execute(&pool).await.unwrap();
         assert_eq!(due_reminders(&pool, now).await.unwrap().len(), 1);
     }

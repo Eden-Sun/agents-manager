@@ -63,7 +63,6 @@
         assert_eq!(v["trustedWorkspaces"], json!(["/w/a"]));
         assert_eq!(v["colorScheme"], "light");
         assert_eq!(v["statusLine"]["command"], "/x", "statusLine 是另一條路的事，信任寫入不碰");
-        // 壞掉的檔不覆寫。
         std::fs::write(&store, "{ nope").unwrap();
         assert!(mark_trusted("agy", &store, &["/w/b".into()]).is_err());
         assert_eq!(std::fs::read_to_string(&store).unwrap(), "{ nope");
@@ -304,11 +303,9 @@ trust_level = "trusted"
 
         assert!(mark_trusted("claude", &store, &["/workspace".into()]).unwrap());
 
-        // The symlink must NOT have been replaced by a regular file!
         let meta = std::fs::symlink_metadata(&store).unwrap();
         assert!(meta.file_type().is_symlink(), "symlink was overwritten with a regular file");
 
-        // The target file must contain the trusted entry
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert_eq!(v["projects"]["/workspace"][CLAUDE_KEY], json!(true));
 

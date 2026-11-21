@@ -20,7 +20,6 @@ fn path(dir: &Path) -> std::path::PathBuf {
 /// 讀出仍有效的暫停（過期或讀不懂的順手清掉，有清才寫回）。
 pub(crate) fn load(dir: &Path, now: DateTime<Utc>) -> BTreeMap<String, String> {
     let all: BTreeMap<String, String> = std::fs::read_to_string(path(dir)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    // 比時刻不比字串（db::cmp_ts）：舊資料的秒格式與毫秒格式混存也照樣對。
     let now_s = db::iso_at(now);
     let live: BTreeMap<String, String> = all.iter().filter(|(_, until)| db::cmp_ts(until, &now_s).is_gt()).map(|(k, v)| (k.clone(), v.clone())).collect();
     if live.len() != all.len() {
@@ -37,7 +36,6 @@ pub(crate) fn snoozed_until(dir: &Path, key: &str, now: DateTime<Utc>) -> Option
 /// 設定暫停（覆寫舊的）。同時把這個 key 已記下的耗盡事件拿掉，讓暫停結束後同一次耗盡可以再推。
 pub(crate) fn set(dir: &Path, key: &str, until: DateTime<Utc>, now: DateTime<Utc>) -> std::io::Result<String> {
     let mut live = load(dir, now);
-    // 時間戳一律走 db::iso_at（固定寬度、Z 結尾，跟全站同格式，issue #101）。
     let until_s = db::iso_at(until);
     live.insert(key.to_string(), until_s.clone());
     crate::webpush::write_private(&path(dir), serde_json::to_string(&live).unwrap_or_default().as_bytes())?;

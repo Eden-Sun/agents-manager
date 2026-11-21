@@ -38,7 +38,6 @@ async fn an_explicit_session_overrides_the_recorded_one() {
     let plan = super::native_resume_plan(&e.app, &bot, crate::config::LOCAL_HOST, false, Some("246fcf93-real")).await.unwrap().unwrap();
     assert_eq!(plan.0, "246fcf93-real");
     assert!(plan.1.iter().any(|a| a == "246fcf93-real") && plan.1.iter().any(|a| a == "--resume"), "{:?}", plan.1);
-    // DB 記了另一段（錯的）也不影響。
     sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, started_at, ended_at, native_session_id)
                  VALUES (?,?,'exited','idle','ws-1','p-old',?,?, '01a0b8c6-wrong')")
         .bind(db::ulid()).bind(&bot.id).bind(db::now()).bind(db::now()).execute(e.app.db()).await.unwrap();
@@ -175,7 +174,6 @@ async fn resume_after_measured_session_change_without_a_statusline_never_borrows
         "model": {"id": "opus"}, "context_window": {"used_percentage": 77,
             "total_input_tokens": 770000, "context_window_size": 1000000}})).await;
     assert_eq!(active_context(&e, &bot.id).await["context_window"]["used_percentage"], 77);
-    // /clear moves the same run to B, with no B StatusLine before it sleeps.
     context_hook(&e, &bot.id, serde_json::json!({"hook_event_name": "SessionStart", "session_id": "context-B"})).await;
     assert!(active_context(&e, &bot.id).await.get("context_window").is_none());
     stop_bot(&e.app, &bot.id).await.unwrap();
@@ -287,7 +285,6 @@ async fn codex_start_uses_an_inline_tui_and_its_own_app_server() {
     );
     stop_bot(&e.app, &bot.id).await.unwrap();
 
-    // resume：子命令排最前面，guard 參數一樣要帶。
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
          VALUES (?,?,'stopped','idle','codex-previous','2026-09-07T00:00:00Z','2026-09-07T00:01:00Z')",
@@ -519,7 +516,6 @@ async fn a_claude_persona_that_cannot_be_staged_fails_closed() {
     let mut own = codex.clone();
     own.args_json = r#"["--profile","mine"]"#.into();
     assert!(matches!(stage(own).await, super::StagedPersona::KeptInline(_)));
-    // 沒指定自己的 profile 時，CODEX_HOME 在這個測試行程的假家目錄底下，不是真的 ~/.codex。
     let home = super::codex_home_dir(&e.app, &project, &no_env).await.unwrap();
     assert!(home.ends_with("/.codex") && home.starts_with(crate::home::dir().unwrap().to_str().unwrap()), "{home}");
 }
@@ -582,7 +578,6 @@ async fn an_unreadable_agent_md_keeps_the_cli_docs_on_and_raises_an_alert() {
     let notes = system_notes(&e, &bot.id).await;
     assert!(notes.iter().any(|n| n.contains("讀不到") && n.contains("不關 CLI 自己的指示檔")), "{notes:?}");
     assert_eq!(agent_md_alerts(&e, &bot.id).await, 1, "AGM inbox 有一則 agent_md_unreadable");
-    // 同一小時同一個問題再開一次：不重複推。
     stop_bot(&e.app, &bot.id).await.unwrap();
     start_bot(&e.app, &bot.id).await.unwrap();
     assert_eq!(agent_md_alerts(&e, &bot.id).await, 1, "同一小時同一個問題只推一則");
@@ -703,7 +698,6 @@ async fn codex_resume_and_fork_pin_permissions_to_auto_approve() {
     .await
     .unwrap();
     let sandbox = ["-c", "sandbox_mode=\"workspace-write\""];
-    // First resume with Full Access, then turn auto_approve off and resume that same saved session again.
     for auto_approve in [1, 0] {
         sqlx::query("UPDATE bots SET auto_approve=? WHERE id=?").bind(auto_approve).bind(&bot.id).execute(e.app.db()).await.unwrap();
         let resume = StartOpts { resume_native: true, ..Default::default() };
@@ -731,7 +725,6 @@ fn permission_args_follow_auto_approve() {
     assert_eq!(permission_args("codex", false), vec!["-c", "sandbox_mode=\"workspace-write\""]);
     assert_eq!(permission_args("claude", true), vec!["--dangerously-skip-permissions"]);
     assert_eq!(permission_args("grok", true), vec!["--always-approve"]);
-    // claude 的非 auto 權限由 settings 的 permissions.defaultMode 釘（#722）；grok 沒有 resume 恢復權限的問題。
     assert!(permission_args("claude", false).is_empty());
     assert!(permission_args("grok", false).is_empty());
     assert!(permission_args("gemini", true).is_empty());
@@ -744,8 +737,6 @@ fn permission_args_follow_auto_approve() {
 async fn a_silent_fallback_to_a_new_conversation_leaves_a_visible_note() {
     let e = env().await;
     let pm = claude_bot(&e.app, &e.project_id, "pm").await;
-    // 有過一段 run 但沒記到 session：native_resume_plan 判定 no_session_id，退回開新對話要留說明。
-    // （#1001：全新 bot 第一次啟動沒有原本的對話，不留這則說明；那個情況見 a_brand_new_bot_first_start_does_not_warn_context_lost。）
     sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at, ended_at) VALUES (?,?,'stopped','idle',?,?)")
         .bind(db::ulid())
         .bind(&pm.id)
@@ -850,7 +841,6 @@ async fn a_required_resume_refuses_instead_of_starting_fresh() {
     let sid: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(e.app.db()).await.unwrap();
     assert_eq!(sid.as_deref(), Some("sid-pm"));
 
-    // restart：停之前就判斷（看現在這個 run 的 session），接不回就連停都不停。
     sqlx::query("UPDATE runs SET native_session_id='sid-live' WHERE id=?").bind(&run_id).execute(e.app.db()).await.unwrap();
     restart_bot_with(&e.app, &pm.id, strict.clone()).await.unwrap();
     assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-live"]));
@@ -1223,7 +1213,6 @@ mod cross_identity_transcript_tests {
         let old_dir = e.dir.join("cc-old");
         let transcript = write_jsonl(&old_dir, "-Users-me-project-x", "sid-same");
 
-        // 新身份：自己的目錄下 `projects` 是指到舊身份那份 `projects` 的 symlink（同一份東西）。
         let new_dir = e.dir.join("cc-symlinked");
         std::fs::create_dir_all(&new_dir).unwrap();
         std::os::unix::fs::symlink(old_dir.join("projects"), new_dir.join("projects")).unwrap();
@@ -1247,7 +1236,6 @@ mod cross_identity_transcript_tests {
         assert_eq!(sid, "sid-same");
         assert!(args.windows(2).any(|w| w == ["--resume", "sid-same"]));
 
-        // 沒有另外複製出一份：透過 symlink 看到的還是原本那個 inode。
         let via_new = new_dir.join("projects").join("-Users-me-project-x").join("sid-same.jsonl");
         assert_eq!(std::fs::metadata(&via_new).unwrap().ino(), std::fs::metadata(&transcript).unwrap().ino());
         assert_eq!(std::fs::read_dir(old_dir.join("projects").join("-Users-me-project-x")).unwrap().count(), 1, "沒有多出檔案");
@@ -1317,8 +1305,6 @@ mod cross_identity_transcript_tests {
         assert_eq!(failure.session_id.as_deref(), Some("sid-gone"), "失敗通知需要綁定本次實際接回的 session");
     }
 
-    // ---- 對抗式審查（資料安全）：以下測的都是「換身份複製 transcript」的失敗與邊界 ----
-
     use std::os::unix::fs::PermissionsExt;
 
     /// 把一段 run 記在 DB 裡，回新身份（`cc9`）的 config dir。
@@ -1383,12 +1369,10 @@ mod cross_identity_transcript_tests {
         std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
         std::fs::write(&secret, "TOKEN").unwrap();
 
-        // 1. 形狀不對（不是 projects/<key>/<sid>.jsonl）。
         let new_dir = seed(&e, &bot, "claude", "sid-shape", &secret).await;
         assert_eq!(plan_of(&e, &bot).await, Err("transcript_missing"));
         assert!(files_under(&new_dir).is_empty(), "憑證被複製了：{:?}", files_under(&new_dir));
 
-        // 2. 形狀對，但檔案是指到別處的符號連結。
         let linked = e.dir.join("old-link/projects/-k/sid-link.jsonl");
         std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&secret, &linked).unwrap();
@@ -1765,7 +1749,6 @@ mod remote_cross_identity_transcript_tests {
             assert!(handle.contains(Code::Missing(11)), "{}", handle.summary());
             assert!(matches!(stdout_kind(&instrumented.stdout), StdoutKind::Missing));
 
-            // The same-root case needs a regular transcript, not the prior rejection fixture.
             std::fs::remove_file(old.join("k/sid.jsonl")).unwrap();
             std::fs::write(old.join("k/sid.jsonl"), b"fixture").unwrap();
             let link = base.join("same");
@@ -1872,7 +1855,7 @@ mod remote_cross_identity_transcript_tests {
         std::fs::write(old.join("cwd-key").join("sid.jsonl"), "hello").unwrap();
         std::fs::create_dir_all(old.join("cwd-key").join("sid")).unwrap();
         std::fs::write(old.join("cwd-key").join("sid").join("extra.txt"), "companion").unwrap();
-        let new = base.join("new-projects"); // 還不存在，要靠 mkdir -p 建出來
+        let new = base.join("new-projects");
 
         let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", Some("sid"));
         let out = run_script_locally(&script);
@@ -1882,8 +1865,6 @@ mod remote_cross_identity_transcript_tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
-
-    // ---- 對抗式審查（資料安全）：遠端 script 的暫存檔／權限／覆蓋規則要跟本機版一致 ----
 
     fn mode(p: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
@@ -1992,13 +1973,10 @@ esac
         std::fs::write(old.join("k/sid.jsonl"), "{\"a\":1}\n").unwrap();
         let new = base.join("new-projects");
         let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
-        // macOS 本身的 /usr/bin/stat 就是 BSD：假 stat 要把 `-c` 轉給 GNU stat，在 macOS 上沒有 GNU stat 可轉（#1964：夜間
-        // macos-latest 兩條 STAT_SOURCE），而且真的 BSD stat 與 devfs 的 `/dev/fd/N` 正是這條測試要守的，所以直接跑真的；其他平台照舊用假的。
         let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
         let (out, diag) = run_with_diagnostics(&script, if cfg!(target_os = "macos") { None } else { Some(&path) });
         assert!(out.contains("AM_STAGED"), "BSD stat staging output; {}", diag.summary());
         assert!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap() == "{\"a\":1}\n", "BSD fixture content changed");
-        // 同一個 projects（console-rpa 的情形：身份沒換）回 AM_SAME。
         let same = remote_stage_script(&old.to_string_lossy(), &old.to_string_lossy(), "k", "sid.jsonl", None);
         let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
         let (out, diag) = run_with_diagnostics(&same, Some(&path));
@@ -2023,7 +2001,6 @@ esac
         }
         let names: Vec<_> = std::fs::read_dir(real.join("k")).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names.len(), 1, "不該留下暫存檔或備份：{names:?}");
-        // 共用目錄裡那個檔本身是 symlink 時照舊不認。
         let secret = base.join("secret");
         std::fs::write(&secret, "TOKEN").unwrap();
         std::os::unix::fs::symlink(&secret, real.join("k/evil.jsonl")).unwrap();
@@ -2099,7 +2076,6 @@ esac
         let (out, diag) = run_with_diagnostics(&script, None);
         assert!(out.contains("AM_MISSING"), "hard-linked source rejection; {}", diag.summary());
         assert!(diag.contains(diagnostics::Code::Missing(13)), "{}", diag.summary());
-        // GNU stat 能直接讀 `/dev/fd/N` 的連結數（NlinkSame）；macOS 走 python fstat 那條（NlinkPre）——兩邊都是拒絕，只是記在不同的點（#1964）。
         let rejected_at = if cfg!(target_os = "macos") { diagnostics::Code::NlinkPre } else { diagnostics::Code::NlinkSame };
         assert!(diag.contains(rejected_at), "{}", diag.summary());
         assert!(!new.exists(), "hard-linked credential was copied as a transcript");
@@ -2133,7 +2109,7 @@ esac
     #[test]
     fn a_missing_source_file_reports_missing_and_creates_nothing() {
         let base = tmp();
-        let old = base.join("old-projects"); // 連目錄都沒建，模擬來源徹底不存在
+        let old = base.join("old-projects");
         let new = base.join("new-projects");
 
         let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
@@ -2155,7 +2131,7 @@ esac
         std::fs::write(old.join("cwd-key").join("sid.jsonl"), "hello").unwrap();
         let blocker = base.join("blocker");
         std::fs::write(&blocker, "this is a file, not a directory").unwrap();
-        let new = blocker.join("projects"); // 上一層是檔案，底下建不出任何東西
+        let new = blocker.join("projects");
 
         let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "cwd-key", "sid.jsonl", None);
         let out = run_script_locally(&script);
@@ -2273,7 +2249,7 @@ esac
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener); // 沒有人在聽這個 port 了：接下來連過去是 connection refused，快速失敗。
+        drop(listener);
 
         let host_cfg = crate::config::HostCfg { name: "unreachable-box".into(), ssh: "127.0.0.1".into(), ssh_port: port, ssh_opts: vec!["-o".into(), "ConnectTimeout=2".into()], herdr_session: "agents-manager".into(), ..Default::default() };
         e.app.hosts.apply_config(&e.app, &[host_cfg]).await;

@@ -199,7 +199,6 @@ pub async fn refresh_codex_with_ports<R, E>(
     let session_id = session.to_owned();
     match db::bot_host(database.pool(), &run.bot_id).await.as_deref() {
         Ok(host) if host == crate::config::LOCAL_HOST => {}
-        // 遠端 codex：rollout 在那台主機，經 host 通道增量讀；讀數有變才投影。
         Ok(_) => {
             let (changed, total_to_sync) = refresh_remote_inner(&run.id, &session_id, |offset, cap| rollout.remote_rollout_read(&run.id, &run.bot_id, &session_id, offset, cap)).await;
             if let Some((total, ctx)) = total_to_sync {
@@ -216,7 +215,6 @@ pub async fn refresh_codex_with_ports<R, E>(
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(run.id.clone()).or_default();
         if e.session_id != session_id {
-            // 換了 session（/new、resume）：位移與路徑都作廢，舊讀數不留。
             *e = Entry { session_id: session_id.clone(), ..Default::default() };
         }
         (e.path.clone(), e.offset)
@@ -233,8 +231,6 @@ pub async fn refresh_codex_with_ports<R, E>(
     let Ok(Ok((text, new_offset, latest_pair))) = tokio::task::spawn_blocking(move || {
         let (text, new_offset) = read_new(&p2, offset)?;
         let mut latest = last_token_count_with_total(&text);
-        // 還沒有任何讀數（daemon 剛重啟、第一次看到這個 run），檔尾又剛好全是工具輸出：往前多找一段，
-        // 不然冷掉之後永遠不知道冷前用了多少 context（使用者 2026-10-14）。
         if latest.is_none() && !known {
             latest = last_token_count_with_total_before(&p2, new_offset);
         }
@@ -294,7 +290,6 @@ where
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(run_id.to_owned()).or_default();
         if e.session_id != session {
-            // 換了 session：位移與舊讀數都作廢，同本機。
             *e = Entry { session_id: session.to_owned(), ..Default::default() };
         }
         if e.remote_at.is_some_and(|at| at.elapsed() < REMOTE_EVERY) {
@@ -389,7 +384,6 @@ fn ttl_secs_of(v: Option<&Value>) -> Option<i64> {
         Value::Number(n) => n.as_i64().filter(|n| *n > 0),
         Value::String(s) => {
             let s = s.trim();
-            // 單位取最後一個字元：切位元組會切在非 ASCII 字元中間。乘法用 checked，溢位就當作不知道。
             let unit = s.chars().last()?;
             let n: i64 = s[..s.len() - unit.len_utf8()].trim().parse().ok()?;
             let mul = match unit {
@@ -411,7 +405,6 @@ pub fn from_statusline(status_json: &str) -> Value {
     let ctx = v.get("context_window");
     let pct = ctx.and_then(|c| c.get("used_percentage")).and_then(Value::as_f64);
     let size = ctx.and_then(|c| c.get("context_window_size")).and_then(Value::as_i64);
-    // 這次請求讀進去的整段 context：current_usage 三項加總；沒有就用百分比乘視窗大小。
     let usage_sum = ctx.and_then(|c| c.get("current_usage")).filter(|u| u.is_object()).map(|u| {
         ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
             .iter()
@@ -574,18 +567,15 @@ mod lineage_sync_tests {
 
         let db_ctx = DbContext::new(pool.clone());
 
-        // 1. 找不到 rollout：不寫入
         refresh_codex_with_ports(&db_ctx, &FakeRollout { path: None }, &NullEvents, &run).await;
         let before = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
         assert_eq!((before[0].input_tokens, before[0].cached_input_tokens, before[0].output_tokens), (0, 0, 0));
 
-        // 2. 讀到假 rollout：扣掉父 session (100k, 80k, 2k) 後寫入 (30k, 25k, 400)
         refresh_codex_with_ports(&db_ctx, &FakeRollout { path: Some(rollout_path) }, &NullEvents, &run).await;
         let after = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
         assert_eq!((after[0].input_tokens, after[0].cached_input_tokens, after[0].output_tokens), (30_000, 25_000, 400));
         assert_eq!(after[0].context_tokens, Some(30_000));
 
-        // 3. 冪等：再跑一次不累加
         refresh_codex_with_ports(&db_ctx, &FakeRollout { path: None }, &NullEvents, &run).await;
         let again = db::lineage::list(&pool, "p1", Some("web"), Some("active")).await.unwrap();
         assert_eq!((again[0].input_tokens, again[0].cached_input_tokens, again[0].output_tokens), (30_000, 25_000, 400));

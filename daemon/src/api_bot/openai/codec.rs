@@ -16,8 +16,6 @@ use std::collections::{BTreeMap, HashSet};
 
 pub(crate) const RESPONSES_PATH: &str = "/v1/responses";
 
-// ───────────────────────────── effort ─────────────────────────────
-
 pub(crate) const DEFAULT_EFFORT: &str = "medium";
 
 /// 這個 API 模型允許的 effort 清單：轉交 am-config（唯一來源）；不認得的模型回 `None`（呼叫端在 HTTP 前拒絕）。
@@ -31,8 +29,6 @@ pub(crate) fn resolve_effort(model: &str, requested: Option<&str>) -> Result<&'s
     let want = requested.unwrap_or(DEFAULT_EFFORT);
     list.iter().copied().find(|e| *e == want).ok_or_else(|| CodecError::UnsupportedEffort { model: model.to_string(), effort: want.to_string() })
 }
-
-// ───────────────────────────── 錯誤型別 ─────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CodecError {
@@ -51,8 +47,6 @@ pub(crate) enum CodecError {
     Protocol(String),
     Sse(SseError),
 }
-
-// ───────────────────────────── 請求 ─────────────────────────────
 
 /// 上一輪原樣的 output item（message／reasoning／function_call），用來重播。內容（特別是 `encrypted_content`）不進 Debug。
 #[derive(Clone, PartialEq, Eq)]
@@ -138,7 +132,6 @@ impl Request {
         body.insert("max_output_tokens".into(), json!(self.max_output_tokens));
         body.insert("stream".into(), json!(true));
         body.insert("store".into(), json!(false));
-        // store:false 時要續傳 reasoning，必須要求回傳加密內容。
         body.insert("include".into(), json!(["reasoning.encrypted_content"]));
         if !tools.is_empty() {
             body.insert("tools".into(), Value::Array(tools));
@@ -173,8 +166,6 @@ impl Request {
         }
     }
 }
-
-// ───────────────────────────── 輸出型別 ─────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ToolCall {
@@ -239,8 +230,6 @@ pub(crate) enum Update {
     Activity(usize),
 }
 
-// ───────────────────────────── 組裝 ─────────────────────────────
-
 #[derive(Default)]
 struct ItemState {
     item: Value,
@@ -277,7 +266,7 @@ impl ResponseAssembler {
                 continue;
             }
             if self.terminal.is_some() {
-                continue; // 終態之後的事件不採用（連解析都不做：尾端的雜訊不能推翻已核對的結果）
+                continue;
             }
             let data: Value = serde_json::from_str(&ev.data).map_err(|e| CodecError::Protocol(format!("event is not JSON: {e}")))?;
             let kind = data.get("type").and_then(Value::as_str).map(str::to_string).or(ev.event.clone()).unwrap_or_default();
@@ -353,14 +342,12 @@ impl ResponseAssembler {
                     Some(other) => IncompleteReason::Other(other.to_string()),
                     None => IncompleteReason::Other("unknown".into()),
                 };
-                // 半截的工具呼叫：串流裡有 function_call 但參數沒收完整，或最終 output 裡有 function_call。
                 let streamed_partial = self
                     .items
                     .values()
                     .any(|s| s.item.get("type").and_then(Value::as_str) == Some("function_call") && s.args_done.is_none() && !Self::item_is_done(&s.item));
                 let (mut output, final_has_call) = self.build_incomplete_output(resp)?;
                 let partial_tool_call = streamed_partial || final_has_call;
-                // 未完成的回應永遠不執行工具（即使其中有看起來完整的呼叫：它們屬於被截斷的回合）。
                 output.tool_calls.clear();
                 output.stop = StopKind::EndTurn;
                 self.terminal = Some(Outcome::Incomplete { reason, partial_tool_call, output });
@@ -372,7 +359,6 @@ impl ResponseAssembler {
             "error" => {
                 self.terminal = Some(Self::failed(data));
             }
-            // reasoning summary、content_part、rate_limits、in_progress、queued…：不影響組裝。
             _ => {}
         }
         Ok(())
@@ -413,7 +399,6 @@ impl ResponseAssembler {
                     replay.push(ReplayItem::new(item.clone())?);
                 }
                 Some("reasoning") => replay.push(ReplayItem::new(item.clone())?),
-                // 半截的 function_call 不進 replay：沒有配對的輸出，重播會讓下一次請求變成不合法。
                 Some("function_call") => has_call = true,
                 _ => {}
             }
@@ -461,7 +446,6 @@ impl ResponseAssembler {
                     if !seen_calls.insert(call_id.to_string()) {
                         return Err(CodecError::DuplicateCallId(call_id.to_string()));
                     }
-                    // completed 的 response 裡還沒完成的呼叫＝參數可能是半截的：整個回應不採用。
                     if item.get("status").and_then(Value::as_str).is_some_and(|s| s != "completed") {
                         return Err(CodecError::BadToolArguments(call_id.to_string()));
                     }
@@ -520,8 +504,6 @@ impl ResponseAssembler {
         Ok(())
     }
 }
-
-// ───────────────────────────── 錯誤分類 ─────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ErrorClass {
@@ -582,7 +564,6 @@ pub(crate) fn classify_http(status: u16, body: &str, retry_after: Option<&str>) 
             other => other,
         },
         s if (500..600).contains(&s) => ErrorClass::Unknown,
-        // 408／409／425 等「送沒送到不確定」的歸 unknown；其餘明確的 4xx 是請求問題。
         408 | 409 | 425 => ErrorClass::Unknown,
         _ => match classify_error(code, kind) {
             ErrorClass::Unknown => ErrorClass::InvalidRequest { code: code.to_string() },

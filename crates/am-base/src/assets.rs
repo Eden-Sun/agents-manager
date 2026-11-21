@@ -20,8 +20,6 @@ struct WebAssets;
 #[cfg(feature = "embed-ui")]
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    // `//api/x`、`//ws` 不會進 /api 的 router，但也不能拿 200 的 index.html：
-    // 呼叫端（與權限矩陣）會把 2xx 當成路由存在。跟 /api 打錯路徑一樣回 JSON 404。
     if is_api_like(path) {
         return crate::lc_error::LcError::NotFound("route".into()).into_response();
     }
@@ -32,7 +30,6 @@ pub async fn serve(uri: Uri) -> Response {
             ([(header::CONTENT_TYPE, mime.as_ref())], f.data.into_owned()).into_response()
         }
         None => match WebAssets::get("index.html") {
-            // SPA fallback
             Some(f) => ([(header::CONTENT_TYPE, "text/html")], f.data.into_owned()).into_response(),
             None => (
                 StatusCode::NOT_FOUND,

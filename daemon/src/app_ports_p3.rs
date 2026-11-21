@@ -56,14 +56,9 @@ impl HostHooks for App {
             crate::runners::events::spawn_global_for_host(app.clone(), host.clone()).await;
             crate::runners::hookrecv::replay_host(&app, &host).await;
             crate::tools::spawn_detect(app.clone(), host.clone());
-            // 刪除 handler 的一次性 ssh purge 若在送出前 daemon 就死了，這台的已刪 bot 目錄靠連上時再掃一次收掉（#349）。
             crate::runners::remote_purge::spawn_sweep(app.clone(), host.clone());
-            // daemon 升級後，長跑的遠端 bot 手上還是舊 shim：連上（重連也一樣）就補版，背景做、不擋連線（issue #124）。
             crate::runners::shim_refresh::spawn_remote_refresh(app.clone(), host.clone());
-            // 同一個道理的權限：#494 的收緊在「啟動 bot」那一趟，換版前就在跑的遠端 bot 要等重啟才收得到（issue #501）。
             crate::remote_perms::spawn_tighten(app.clone(), host.clone());
-            // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
-            // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
             app.wait_until_startup_ready().await;
             crate::runners::reconcile::autostart_after_reconcile(&app, &host, reconciled).await;
         }
@@ -103,18 +98,14 @@ async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + cr
     };
     for key in removed {
         crate::quota::forget(app, &key).await;
-        // 前端的額度條認 `quota_updated`：不告訴它，那台機器（或換連線前的那條）的數字會掛到下一次輪詢（形狀同 `identity_kind::cleanup_host`）。
         app.emit("quota_updated", json!({"kind": key, "host": name, "quota": null})).await;
     }
-    // claude／grok 的探測退避與 `/usage` 讀到時刻只在記憶體、以主機名為鍵：換了連線不能繼承舊機器的（#892）。
     crate::quota_claude::forget_host(name);
     crate::quota_grok::forget_host(name);
     app.models_cache().lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells().lock().await.retain(|s| s.host != name);
     crate::login_assist::forget_host(app, name);
-    // 登入失效的記號是這台機器的觀測：同名改指後舊機器的「需要重新登入」不能掛到新機器上（#1142）。
     crate::login_prompt::forget_host(app, name);
-    // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
     if let Ok(projects) = crate::db::live_projects(app.db()).await {
         let mut github = app.github().lock().await;
         for project in projects.into_iter().filter(|project| project.host == name) {
@@ -170,7 +161,6 @@ pub async fn pane_preview(
     lines: u32,
 ) -> crate::lifecycle::LcResult<Value> {
     use crate::lifecycle::LcError;
-    // Another local herdr session's socket: same user's socket, no wider than `herdr` in their shell.
     let client = match socket.filter(|s| !s.is_empty()) {
         Some(path) if host == crate::config::LOCAL_HOST => {
             if !std::path::Path::new(path).exists() {
@@ -199,7 +189,6 @@ pub async fn pane_preview(
         "columns": columns, "rows": rows,
     }))
 }
-
 
 impl crate::host_baseline::BaselineEnv for App {
     fn baseline_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::host_baseline::BaselineReport>> {
@@ -253,11 +242,8 @@ impl crate::tools::ToolsEnv for App {
         let host = host.to_string();
         async move {
             let (app, host) = (&app, host.as_str());
-    // 身份表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
     crate::identity_kind::cleanup_host(app, host).await;
-    // 身份表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
     crate::runners::supervisor::runtime::backfill_quota_limits_once(app, host).await;
-    // 排著的 prompt 自己記下的撞限（issue #108）：同一個時機、同一個理由。
     crate::lifecycle::quota_hold::backfill_once(app, host).await;
         }
     }
@@ -295,20 +281,13 @@ pub async fn install_via_bot(
     crate::lifecycle::prompt(app, &bot.id, &text, &crid).await
 }
 
-
 impl crate::trust::TrustEnv for App {
     fn identity_env(app: &Arc<Self>, host: &str, name: &str) -> impl Future<Output = Option<std::collections::BTreeMap<String, String>>> + Send {
         let app = app.clone();
         let (host, name) = (host.to_string(), name.to_string());
-        // `identity_for_host`, not `cfg.identities`: shell-discovered `ccN` (SPEC §16) aren't in config.toml.
         async move { crate::tools::identity_for_host(&app, &host, &name).await.map(|i| i.env) }
     }
 }
-
-// ───────── am-ports：HostRuntime／HerdrPort ─────────
-//
-// `SessionId` 在這裡＝herdr session 名稱（`App::session_for_host`／`herdr_for_session` 那個）。`HostFence`（host id＋世代）只描述
-// 「哪一條連線」，所以每個動作一開始都先驗世代（`HostManager::conn_at_generation`）：舊世代一律 `Conflict`，不會送到換過的連線。
 
 use am_core::{BotId, HostFence as PortFence, HostId, PaneReadSource, PortError, RunId, SessionId};
 

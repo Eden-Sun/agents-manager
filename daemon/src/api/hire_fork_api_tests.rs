@@ -27,7 +27,6 @@ async fn a_scheduler_bot_is_not_a_peer_a_cluster_member_or_a_dispatch_target() {
     let create = |body: Value| create_bot(State(env.app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(body).unwrap()));
     let err = create(json!({"name": "bad-role", "kind": "claude", "role": "manager"})).await.err().unwrap();
     assert!(matches!(err, LcError::Bad(_)), "{err:?}");
-    // 專家專案沒帶 role＝執行者；也可指定顧問。
     let res = create(json!({"name": "no-role", "kind": "claude"})).await.unwrap();
     let nr = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
     assert_eq!(db::bot(&env.app.db, &nr).await.unwrap().unwrap().role.as_deref(), Some("executor"));
@@ -37,11 +36,9 @@ async fn a_scheduler_bot_is_not_a_peer_a_cluster_member_or_a_dispatch_target() {
     let res = create(json!({"name": "sched-a", "kind": "claude", "role": "scheduler"})).await.unwrap();
     let sched = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
     assert_eq!(db::bot(&env.app.db, &sched).await.unwrap().unwrap().role.as_deref(), Some("scheduler"));
-    // 管理者也能增聘專屬 bot（走既有 hire 權限）。
     let res = hire(&env, &manager, json!({"name": "sched-b", "kind": "claude", "role": "scheduler"})).await.unwrap();
     let hired = serde_json::from_slice::<Value>(&axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap()["bot_id"].as_str().unwrap().to_string();
     assert_eq!(db::bot(&env.app.db, &hired).await.unwrap().unwrap().role.as_deref(), Some("scheduler"));
-    // 也有一般的執行者作對照。
     let worker = add_bot(&env, &env.project_id, "claude", false).await;
     patch_bot(State(env.app.clone()), Path(worker.clone()), Extension(RequestPrincipal::User), Json(serde_json::from_value(json!({"role": "executor"})).unwrap())).await.map_err(|e| format!("{e:?}")).unwrap();
 
@@ -88,16 +85,12 @@ async fn fork_source_is_checked_and_refused_with_a_reason() {
     let claude_src = add_bot(&env, &env.project_id, "claude", true).await;
     let codex_src = add_bot(&env, &env.project_id, "codex", true).await;
     let codex_nosess = add_bot(&env, &env.project_id, "codex", false).await;
-    // 來源不是 codex。
     let err = hire(&env, &manager, json!({"name": "fk1", "kind": "codex", "fork_from": claude_src})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_not_codex"), "{err:?}");
-    // 新成員不是 codex。
     let err = hire(&env, &manager, json!({"name": "fk2", "kind": "claude", "fork_from": codex_src})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_target_not_codex"), "{err:?}");
-    // 來源沒有 session。
     let err = hire(&env, &manager, json!({"name": "fk3", "kind": "codex", "fork_from": codex_nosess})).await.err().unwrap();
     assert!(matches!(err, LcError::Conflict(ref v) if v["reason"] == "fork_source_no_session"), "{err:?}");
-    // 來源不存在。
     let err = hire(&env, &manager, json!({"name": "fk4", "kind": "codex", "fork_from": "nope"})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "fork_source_not_found"), "{err:?}");
 }
@@ -118,7 +111,6 @@ async fn fork_source_from_another_project_is_refused() {
 
 #[tokio::test]
 async fn fork_source_on_another_host_is_refused() {
-    // 來源 bot 的主機由它的專案決定（`bot_host` 就是專案的 host），所以這裡直接用「專案的 host 跟來源不同」驗證檢查本身。
     let env = crate::testing::env().await;
     let _manager = expert_project(&env).await;
     let source = add_bot(&env, &env.project_id, "codex", true).await;
@@ -154,7 +146,6 @@ async fn a_fork_hire_inherits_model_effort_and_identity_it_was_not_given() {
         f.identities.push(crate::config::IdentityCfg { name: "co0".into(), kind: "codex".into(), host: None, env: Default::default(), args: vec![] });
         Ok(())
     }).await.unwrap();
-    // 來源要經由 create_bot 建（設定寫進 config.toml）：直接改 DB 會被之後的投影蓋回去。
     let res = create_bot(
         State(env.app.clone()),
         Path(env.project_id.clone()),

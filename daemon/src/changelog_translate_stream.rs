@@ -35,7 +35,7 @@ pub fn model_output_tokens(model: &str) -> u32 {
             suffix == "-latest" || suffix.strip_prefix('-').is_some_and(|date| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()))
         });
         known.then_some(*tokens)
-    }).unwrap_or(64_000) // Conservative large allowance for unknown/custom IDs.
+    }).unwrap_or(64_000)
 }
 
 #[derive(Default)]
@@ -61,7 +61,6 @@ impl Events {
                     let m = &event["message"];
                     self.model = m["model"].as_str().map(str::to_owned);
                     self.usage = super::super::claude_api::parse_usage(m);
-                    // The initial output count is provisional (usually zero), not final spend.
                     if let Some(usage) = &mut self.usage { usage.output_tokens = None; }
                 }
                 Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
@@ -81,7 +80,7 @@ impl Events {
                 }
                 Some("message_stop") => self.done = true,
                 Some("error") => return Err(self.failed()),
-                _ => {} // pings, thinking/signature deltas and future metadata are not text.
+                _ => {}
             }
         }
         Ok(())
@@ -163,7 +162,6 @@ pub(super) async fn endless_ping_server() -> (String, std::sync::Arc<tokio::sync
         while socket.write_all(b"data: {\"type\":\"ping\"}\n\n").await.is_ok() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // A replacement/overlapping request would already be queued on this listener.
         assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
     });
     (endpoint, entered, server)
@@ -238,7 +236,6 @@ mod tests {
             json!({"type":"message_start","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":123,"output_tokens":0,"cache_read_input_tokens":4}}}),
             json!({"type":"message_delta","delta":{},"usage":{"output_tokens":77}}),
         );
-        // Idle timeout fires first in the first case; the total deadline fires first in the second.
         for (idle_ms, total) in [(150u64, Duration::from_secs(5)), (5_000, Duration::from_millis(200))] {
             let (endpoint, server) = stalled_stream_server(partial.clone()).await;
             let req = TranslateRequest { endpoint, key:"mock".into(), model:"claude-sonnet-5-5".into(), effort:"low".into(),

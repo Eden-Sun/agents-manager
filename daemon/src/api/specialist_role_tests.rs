@@ -35,27 +35,22 @@ async fn specialist_needs_a_track_and_only_the_user_sets_it() {
     let (manager, member) = expert_project(&env).await;
     let patch = |caller: RequestPrincipal, v: Value| patch_bot(State(env.app.clone()), Path(member.clone()), Extension(caller), Json(serde_json::from_value::<PatchBot>(v).unwrap()));
 
-    // 專家缺 track → 400 track_required（不寫任何東西）
     let err = patch(RequestPrincipal::User, json!({"role": "specialist"})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["error"] == "track_required"), "{err:?}");
     assert_eq!(db::bot(&env.app.db, &member).await.unwrap().unwrap().role, None);
 
-    // 管理者不能改 track：user_only
     let err = patch(RequestPrincipal::Bot(manager.clone()), json!({"track": "infra"})).await.err().unwrap();
     assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
 
-    // 使用者同時設角色與 track：寫進 DB，也投影回 config.toml
     patch(RequestPrincipal::User, json!({"role": "specialist", "track": "infra"})).await.map_err(|e| format!("{e:?}")).unwrap();
     let b = db::bot(&env.app.db, &member).await.unwrap().unwrap();
     assert_eq!((b.role.as_deref(), b.track.as_deref()), (Some("specialist"), Some("infra")));
     let cfg_track = env.app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|x| x.id.as_deref() == Some(member.as_str())).and_then(|x| x.track.clone());
     assert_eq!(cfg_track.as_deref(), Some("infra"), "track 的真相在 config.toml");
 
-    // 清掉 track 之後又缺 track
     let err = patch(RequestPrincipal::User, json!({"track": null})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["error"] == "track_required"), "{err:?}");
 
-    // /api/state：bot 帶 track、runtime_override（未設＝null），project 帶 role_policy
     patch(RequestPrincipal::User, json!({"track": "infra"})).await.map_err(|e| format!("{e:?}")).unwrap();
     let state = state_json(&env.app.clone()).await.unwrap();
     let project = state["projects"].as_array().unwrap().iter().find(|p| p["id"] == env.project_id.as_str()).unwrap();
@@ -72,7 +67,6 @@ async fn manager_appoints_a_specialist_only_with_a_track() {
 
     let err = call(Some("specialist"), None).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["error"] == "track_required"), "{err:?}");
-    // 其他角色不能順手帶 track
     let err = call(Some("executor"), Some("infra")).await.err().unwrap();
     assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "user_only"), "{err:?}");
 
@@ -110,7 +104,6 @@ async fn role_policy_is_user_only_and_lands_in_config_and_db() {
 
     let err = patch(RequestPrincipal::User, json!({"role_policy": "nope"})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "invalid_role_policy"), "{err:?}");
-    // key 只收 manager／executor／advisor／specialist；值一定是 object
     let err = patch(RequestPrincipal::User, json!({"role_policy": {"owner": {"max_turns": 1}}})).await.err().unwrap();
     assert!(matches!(err, LcError::BadValue(ref v) if v["reason"] == "invalid_role_policy" && v["role"] == "owner"), "{err:?}");
     let err = patch(RequestPrincipal::User, json!({"role_policy": {"specialist": 3}})).await.err().unwrap();

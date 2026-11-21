@@ -107,7 +107,6 @@ impl ProbeWorkspace {
         let key = (socket.to_path_buf(), workspace_id.to_string());
         let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        // 順手把過了寬限的帶走：探測每 30 秒一個，workspace id 不重複，不清就只增不減。
         r.retain(|_, ends| ends.is_none_or(|t| t > now));
         r.insert(key.clone(), None);
         drop(r);
@@ -151,7 +150,6 @@ mod tests {
         drop(guard);
         assert!(is_probe(a, "w1"), "剛結束：agent 退出的事件還會晚幾秒到");
         assert!(!is_probe_at(a, "w1", Instant::now() + GRACE + Duration::from_secs(1)), "過了寬限就不算");
-        // 下一次登記順手把過期的清掉（這裡用寬限內外都夠的做法：直接看 map 大小不會無限長）。
         let _next = ProbeWorkspace::register(a, "w3");
     }
 

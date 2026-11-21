@@ -79,10 +79,8 @@ impl RequestEnvelope {
         if messages.is_empty() {
             return Err(QuoteError::InvalidRequest);
         }
-        // 唯一一次編碼：之後報價、hash、送出都用這份，不再呼叫 `protocol::request`。
         let body = protocol::request(&options, &system, &messages);
         let wire = serde_json::to_vec(&body).map_err(|_| QuoteError::InvalidRequest)?;
-        // Recursively sort object keys, independent of serde_json feature unification.
         let canonical = canonicalize(&body);
         let bytes = serde_json::to_vec(&canonical).map_err(|_| QuoteError::InvalidRequest)?;
         let hash = format!("{:x}", Sha256::digest(bytes));

@@ -10,7 +10,6 @@
     /// 每個測試各自一個 host 名：`RESERVED_SCRATCH`、`ANNOUNCED`、`SSH_FAKES`、`ssh_delay` 這些行程級的狀態都以 host 名為 key，
     /// 同一個測試程序裡的測試共用 `"sh1"` 就會互相看到對方留下的 scratch／fake（#1958 偶發紅）。
     fn unique_host() -> String {
-        // host 名必須符合 `[a-z][a-z0-9_-]{0,31}`，ULID 是大寫，取尾端 16 個隨機字元轉小寫。
         format!("sh1-{}", crate::db::ulid()[10..].to_lowercase())
     }
 
@@ -161,7 +160,6 @@
         crate::panes::scan_snapshot(&app, &host, &snapshot).await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes ORDER BY pane_id").fetch_all(&app.db).await.unwrap();
         assert_eq!(ids, ["wM:p1"]);
-        // The pane must outlive the new notification grace period before this test checks it is reported.
         let aged = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE panes SET first_seen=? WHERE host=? AND pane_id='wM:p1'")
             .bind(aged)

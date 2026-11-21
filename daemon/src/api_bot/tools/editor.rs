@@ -37,7 +37,6 @@ impl Editor {
     }
     fn open(&self, path: &str, create: bool, write: bool) -> Result<File, String> {
         let given = Path::new(path);
-        // Both the actual host worktree and the stable Bash mount name are accepted.
         let relative = if given.is_absolute() {
             given
                 .strip_prefix(&self.root)
@@ -129,7 +128,6 @@ impl Editor {
         if !matches!(command, "view" | "create" | "str_replace" | "insert") {
             return Err("unsupported editor command".into());
         }
-        // Validate new content BEFORE O_CREAT: invalid/oversize input must not leave an empty file.
         let created = if command == "create" {
             let content = field("file_text")?;
             if content.len() > MAX_FILE {
@@ -240,8 +238,6 @@ impl Editor {
 }
 
 fn list_directory(file: &File) -> Result<String, String> {
-    // Open a fresh directory description: dup() would share the readdir offset with
-    // root/other views and could make the second view empty or race a concurrent view.
     let fd = unsafe {
         libc::openat(
             file.as_raw_fd(),

@@ -15,7 +15,6 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
     let (app, run) = (app.clone(), run.clone());
     tokio::spawn(async move {
         tokio::time::sleep(SETTLE).await;
-        // 事件帶來的 Run 是更新前的複本：重讀一次，狀態才是現在的。
         if let Ok(Some(run)) = db::run(&app.db, &run.id).await {
             observe(&app, &run).await;
         }
@@ -53,7 +52,7 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
 async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&'static str>) {
     if open {
         if run.agent_status == "blocked" {
-            return; // herdr 自己判的（或已經補過）：不動。
+            return;
         }
         let prev = run.agent_status.clone();
         let marked = db::compare_and_set_running_run_agent_status(&app.db, run, &prev, "blocked").await.unwrap_or(false);
@@ -66,7 +65,6 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
     }
     let Some((prev, epoch)) = get_forced(&run.id) else { return };
     tracing::info!(run = %run.id, bot = %run.bot_id, "Session paused 選單關掉了");
-    // 在還原 idle 與叫醒 queued flush 之前取回選單所屬的 turn；沒有 in-flight 就不排會影響未來回合的 timer。
     let paused_turn = if prev == "idle" {
         match db::in_flight_turn(&app.db, &run.id).await {
             Ok(turn) => turn,
@@ -78,14 +76,12 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
     } else {
         None
     };
-    // 只還我們自己標的那個 blocked：這段期間 herdr 已經報了別的狀態就是它的，不蓋。
     let restored = db::compare_and_set_running_run_agent_status(&app.db, run, "blocked", &prev).await;
     match restored {
         Ok(true) => {
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
             app.schedule_flush_queued(&run.bot_id);
-            // 選單關掉、還原成 idle（不是 herdr 的 idle 邊）：選了「Edit prompt and retry」的話，CLI 這時把上一則放回輸入框。
             if prev == "idle" {
                 crate::runners::composer_draft_watch::on_idle(app, run);
             }
@@ -93,9 +89,7 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
                 close_paused_turn_later(app, &run.id, &turn.id);
             }
         }
-        // 已經不是 blocked（herdr／別的路徑改過）或 run 不在了：被取代，補標記沒有要還的東西了。
         Ok(false) => retire(&run.id, epoch),
-        // 寫不進去：補標記留著，下一輪巡邏（`is_forced`）重試；DB 仍是 blocked，不發狀態、不叫 flush。
         Err(e) => tracing::warn!(run = %run.id, bot = %run.bot_id, error = %e, "Session paused 還原寫入失敗，下一輪巡邏重試"),
     }
 }
@@ -232,7 +226,6 @@ mod tests {
         let status = || async {
             sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap()
         };
-        // 被等的 closer 自己先睡 `AFTER_CLOSE`（1 秒）：固定 2 秒的輪詢在高負載下會先到期（issue #952），改 30 秒上限。
         assert!(crate::testing::eventually!(status().await != "in_flight"), "選單關掉、run 仍 idle：那筆沒有回覆的 in-flight 要馬上收");
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按：{m}");

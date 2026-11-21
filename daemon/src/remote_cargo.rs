@@ -51,17 +51,12 @@ const BLAZE_ARGS_UNSUPPORTED_MESSAGE: &str = "remote Blaze supports only safe ca
 /// 所以在交握階段看到 255 就是「我們根本沒進去」（issue #428）。
 const SSH_FAILED: i32 = 255;
 
-// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
 #[cfg(test)]
 thread_local! {
     static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
-    // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的排隊等待秒數；一樣是執行緒本地，要在呼叫 `run_offload` 的那條執行緒上設。
     static TEST_QUEUE_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-    // 測試用：覆寫正式路徑（[`Admission::from_cfg`]）的 shared 等待秒數（[`shared_wait_secs`]）；同上，要在呼叫 `run_offload` 的那條執行緒上設。
     static TEST_SHARED_WAIT_SECS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-    // 測試用：守門腳本讀的負載檔（[`loadavg_path`]）；沒設就是 `/proc/loadavg`。
     static TEST_LOADAVG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    // 測試用：本機執行器（`host = "local"`）的 `$HOME`——假 cargo 放在它的 `.cargo/bin`。
     static TEST_LOCAL_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -218,7 +213,6 @@ fn stage_password(data_dir: &Path, password: &str) -> anyhow::Result<String> {
         drop(f);
         std::fs::rename(&tmp, &path)?;
         fault_point("renamed")?;
-        // 目錄也 fsync，斷電後新檔名才一定在（有些檔案系統不支援對目錄 fsync：盡力而為）。
         if let Ok(d) = std::fs::File::open(data_dir) {
             let _ = d.sync_all();
         }
@@ -269,7 +263,6 @@ async fn commit_remote(
     password: Option<&str>,
     apply: impl FnOnce(&mut BuildRemoteCfg),
 ) -> anyhow::Result<BuildRemoteCfg> {
-    // 兩次儲存交錯的話，先提交的那次清舊檔時，會把另一次剛寫好、還沒提交的新密碼檔當成「沒人指到」刪掉。
     let _one_at_a_time = commit_lock().lock().await;
     let staged = match password {
         None => None,
@@ -295,7 +288,6 @@ async fn commit_remote(
             return Err(e);
         }
     };
-    // 已經提交了：清舊檔失敗不算這次失敗（剩下的是沒人指到的 0600 舊檔，下次儲存再清）。
     if let Err(e) = remove_unused_passwords(data_dir, &remote) {
         if crashed(&e) {
             return Err(e);
@@ -319,7 +311,6 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
         "max_shared_dirs": cfg.max_shared_dirs,
         "max_concurrent": cfg.max_concurrent,
         "password_set": password_is_set(data_dir, cfg),
-        // 之後的建置主機（#1956）：唯讀，只在 config.toml 的 `[[build.remote.hosts]]` 改。
         "hosts": cfg.targets().iter().skip(usize::from(!cfg.host.trim().is_empty())).map(|h| json!({
             "target": h.target_label(),
             "host": h.host,
@@ -362,7 +353,6 @@ pub async fn put_settings(
     let host = input.host.trim().to_string();
     let user = input.user.trim().to_string();
     let remote_root = input.remote_root.trim().to_string();
-    // `host = "local"`＝本機執行器（#1956），不用 user。
     if input.enabled && (host.is_empty() || (user.is_empty() && host != crate::config::LOCAL_BUILD_HOST)) {
         return Err(LcError::Bad("remote Cargo 啟用時 host 與 user 都必填（本機執行器 host = \"local\" 不用 user）".into()));
     }
@@ -380,7 +370,6 @@ pub async fn put_settings(
     if input.timeout_secs.is_some_and(|t| t > MAX_TIMEOUT_SECS) {
         return Err(LcError::Bad(format!("timeout_secs 最多 {MAX_TIMEOUT_SECS} 秒（0＝不設上限）")));
     }
-    // 密碼不進 config.toml；設定與密碼一起提交（見 `commit_remote`），失敗時兩邊都還是舊的。
     let remote = commit_remote(&app.cfg, &app.data_dir, input.password.as_deref(), |r| {
         r.enabled = input.enabled;
         r.host = host.clone();
@@ -396,7 +385,6 @@ pub async fn put_settings(
     })
     .await
     .map_err(|e| {
-        // 寫之前磁碟被手改：這次沒寫、可重送（409），其餘照舊當上游錯誤（#1647）。
         if e.downcast_ref::<crate::config::ConfigChangedOnDisk>().is_some() {
             crate::api::cfg_err(e)
         } else {
@@ -541,7 +529,6 @@ fn ssh_cmd(remote: &BuildRemoteCfg, password: Option<&str>, mode: Option<&PwMode
                 cmd.env("AM_SSH_PASSWORD", pw)
                     .env("SSH_ASKPASS", helper)
                     .env("SSH_ASKPASS_REQUIRE", "force")
-                    // 只問一次：密碼錯的話要當場失敗，不要卡在互動提示上。
                     .arg("-o")
                     .arg("NumberOfPasswordPrompts=1");
             }
@@ -620,7 +607,6 @@ fn output_with_timeout(mut cmd: Command, limit: std::time::Duration) -> anyhow::
     match rx.recv_timeout(limit) {
         Ok(out) => Ok(out?),
         Err(_) => {
-            // 執行緒握著 Child；只能用 pid 砍（它還沒被收掉，pid 不會被回收重用）。
             unsafe { libc::kill(pid, libc::SIGKILL) };
             anyhow::bail!("ssh 超過 {} 秒沒有結束，已中止", limit.as_secs())
         }
@@ -676,7 +662,6 @@ fn probe(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result<Value> {
         "cargo_version": version,
         "cargo_missing": cargo.is_none(),
         "clippy_version": clippy,
-        // 有 cargo 卻沒有 clippy：`cargo clippy` 轉過去才會失敗，UI 要當場講、給安裝按鈕（安裝會補上）。
         "clippy_missing": cargo.is_some() && clippy.is_none(),
     }))
 }
@@ -709,8 +694,6 @@ fn install_toolchain(remote: &BuildRemoteCfg, data_dir: &Path) -> anyhow::Result
         anyhow::bail!("rustup install failed (exit {:?}): {}", out.status.code(), if stderr.is_empty() { stdout } else { stderr });
     }
     let already = stdout.contains("ALREADY=");
-    // rustup 只裝 rust，不裝 linker。沒有 `cc` 的話 cargo test 會在連結那一步才爆，訊息很難懂
-    // （2026-09-18 實測這台就是這樣），所以當場講出來。
     let cc_missing = stdout.lines().any(|l| l.trim() == "CC_MISSING=1");
     let clippy_missing = stdout.lines().any(|l| l.trim() == "CLIPPY_MISSING=1");
     let version = stdout
@@ -761,8 +744,6 @@ pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Resul
                 return Ok(false);
             }
 
-            // Keep Cargo's global options ahead of its subcommand. `--color` consumes a value,
-            // so that value must not be mistaken for the subcommand.
             let mut i = 0;
             while let Some(arg) = args.get(i).map(String::as_str) {
                 match arg {
@@ -798,8 +779,6 @@ pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Resul
                     continue;
                 }
 
-                // Never use a different toolchain, cache, target, profile, or offline view of
-                // the source tree for an explicit Blaze verification.
                 if arg.starts_with('+')
                     || matches!(
                         arg,
@@ -828,8 +807,6 @@ pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Resul
                     return Ok(false);
                 }
 
-                // Unknown options fail closed. The value-taking options below are the common
-                // package/feature/target selectors; target redirection was rejected above.
                 if arg.starts_with('-') {
                     match arg {
                         "-p" | "--package" | "--exclude" | "--features" | "--bin" | "--example" | "--test"
@@ -862,8 +839,6 @@ pub fn eligible_with_engine(args: &[String], engine: RemoteCargoEngine) -> Resul
 }
 
 fn eligible_cargo(args: &[String]) -> bool {
-    // Cache invalidation must inspect the exact target/build directory used by Cargo.
-    // Command-line overrides may redirect the managed cache location; --config may set either.
     if args.iter().take_while(|a| a.as_str() != "--").any(|a| {
         a == "--target-dir" || a.starts_with("--target-dir=")
             || a == "--config" || a.starts_with("--config=")
@@ -879,8 +854,6 @@ fn eligible_cargo(args: &[String]) -> bool {
             }
             _ if a.starts_with("--color=") => continue,
             "c" | "check" | "t" | "test" => return true,
-            // `clippy --fix` 會改原始碼：改到的是 rsync 過去的遠端那份、不會同步回來，呼叫端以為修好了、本機一個字都沒變（issue #104）。
-            // 只轉唯讀的驗證；`--` 後面是給 clippy-driver 的 lint 參數，不算。
             "clippy" => return !it.take_while(|a| *a != "--").any(|a| a == "--fix"),
             _ => return false,
         }
@@ -949,34 +922,12 @@ pub fn login_shell_arg(script: &str) -> String {
 }
 
 pub fn sh_quote(s: &str) -> String {
-    // 空字串要寫成 `''`：回空字串的話 `cargo test -- ''` 送到遠端會少一個引數。
     if !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_./:=@+".contains(&c)) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
-
-// ── 遠端工作目錄（issue #141）──────────────────────────────────────────────────────────────
-//
-// 版面：`<remote_root>/<repo common dir 路徑的 fnv1a64>/`
-//   - `shared/`＋`shared.lock`：同一個 repo 的 worktree 共用原始碼＋`target/`，跨呼叫保留（增量編譯）。
-//   - `shared-<N>/`＋`.lock`（#1956）：同一個池的其他份，池的大小＝這台的名額數。守門拿第一份沒人持鎖的；
-//     第一次用到某一份時從池裡另一份複製出來（守門的 `seed`），之後各自增量。好幾個 worktree 同時編，各拿一份熱的，不再串成一列。
-//   - `job-<pid>-<ms>/`＋`.lock`：池裡每一份都被佔著、等了 [`SHARED_WAIT_SECS`] 還沒有任何一份空出來時的退路，冷編譯，結束就刪。
-//   - 純數字的 `<pid>/`：#141 之前的版本留下的，沒有鎖，只能靠「沒行程在用＋放很久」回收。
-// 另有 `<remote_root>/.slots/<n>`：遠端名額（issue #104）。守門拿到目錄之後再搶一個 `flock`，拿著直到結束——同一個 remote_root
-// 不分 worktree 同時最多 `max_concurrent` 個遠端編譯，其餘排隊。鎖跟著守門 shell 的 fd 走，守門怎麼死都會放。
-//
-// 每次呼叫先開一條「守門」ssh（[`guard_script`]）：它在遠端拿 flock、把目錄交給這次呼叫，然後讀 stdin
-// 等到 EOF 才清理。helper 正常結束、失敗、被 Ctrl-C／SIGTERM／kill -9，本機這端的 pipe 都會關掉，遠端就
-// 看到 EOF——**清理不靠本機活著做完**（2026-09-19 實測：本機 ssh 被 kill -9，遠端 shell 照樣讀到 EOF 跑完）。
-// 沒有 pty 的 ssh 斷線後遠端 cargo 不會收到訊號、會繼續跑（同日實測），所以 run 的那條 ssh 先把自己的
-// process group 寫下來（`<dir>.pgid-<token>`），守門清理時整組收掉再刪目錄。
-//
-// 租約身份（issue #148）是本機每次呼叫新產生的 [`LeaseToken`]（128 位元隨機），不是遠端 shell 的 `$$`：
-// PID 會被回收重用，「值一樣」不等於「同一次租約」。守門只把 `$$` 拿來做行程簿記（自己的 process group、
-// `/proc/$$/fd`），`.owner`、`.pgid-<token>` 與交給 run 的 token 全都用這個。
 
 /// 沒有鎖、也沒有行程的 cwd 在裡面，放這麼久就當孤兒刪（守門被 kill 在遠端那頭、舊版留下的 `<pid>/`）。
 const ORPHAN_IDLE_SECS: u64 = 10 * 60;
@@ -1588,7 +1539,6 @@ pub fn select_gc(hs: &Handshake, policy: &GcPolicy) -> Vec<String> {
         .map(|d| d.path.clone())
         .collect();
     if policy.max_shared > 0 {
-        // 盤點不含這次自己的目錄，所以自己的那份另外算。
         let own = hs.dir.rsplit_once('/').is_some_and(|(_, leaf)| is_shared_leaf(leaf));
         let total = hs.dirs.iter().filter(is_shared).count() + usize::from(own);
         let gone = hs.dirs.iter().filter(is_shared).filter(|d| picked.contains(&d.path)).count();
@@ -1657,16 +1607,11 @@ impl Lease {
     /// 名額全滿或 shared 被佔著時，守門要排隊，可能很久才交出目錄（issue #104）：交握放到另一條執行緒讀，
     /// 這裡每 20ms 看一次 `ctl`，收到終止訊號就砍掉本機這條 ssh（排隊中的守門靠心跳發現斷線，自己結束、放鎖）。
     fn start(mut cmd: Command, token: LeaseToken, ctl: &Deadline) -> anyhow::Result<Self> {
-        // stderr 原樣轉出去（守門與 ssh 自己講的話照舊看得到），順手留最後一行：連不進去時，
-        // 那一行就是 ssh 的原話（`Permission denied …`／`Connection refused`），要放進我們的說明裡（issue #428）。
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // 叫不起 ssh（這台沒裝、PATH 裡沒有）也是「遠端什麼都還沒跑」：當連不上處理，退回本機（issue #428）。
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::Error::new(Unreachable { why: format!("叫不起 {}：{e}", ssh_program()) }))?;
         let said = Arc::new(Mutex::new(String::new()));
-        // 這條在 stderr 讀完（管線 EOF）時才會斷；失敗路徑靠它等那一行真的進到 `said` 再讀（issue #467）。
-        // 不送內容、只當完成訊號：成功路徑沒有人收，送內容會讓長時間的編譯把 channel 撐大。
         let (relay_done, relay_rx) = std::sync::mpsc::channel::<()>();
         match child.stderr.take() {
             Some(err) => {
@@ -1681,7 +1626,6 @@ impl Lease {
                     drop(relay_done);
                 });
             }
-            // 沒有 stderr 可讀就當場斷訊號，否則失敗路徑會白等滿上限。
             None => drop(relay_done),
         }
         let stdin = child.stdin.take();
@@ -1713,21 +1657,13 @@ impl Lease {
                 return Err(e);
             }
             Err(e) => {
-                // 沒交目錄就結束了：75＝排隊超過上限（原因守門已經印在 stderr），
-                // 255＝ssh 自己沒進去（連不上／認證被拒／host key 不合，issue #428），其他是守門出事。
                 match lease.finish().and_then(|st| st.code()) {
                     Some(EXIT_QUEUE_FULL) => return Err(anyhow::Error::new(QueueFull {
-                        host: String::new(), // 由 open_lease 或 caller 補充
+                        host: String::new(),
                         shared_wait_secs: obs.shared_wait_secs,
                         slot_wait_secs: obs.slot_wait_secs,
                     })),
                     Some(SSH_FAILED) => {
-                        // 等轉發那條讀完再看（issue #467）：`finish()` 只保證 ssh 這個行程收掉了，**不保證**
-                        // 轉發執行緒已經把最後一行寫進 `said`。macOS 上剛好都來得及，Linux 上量到的是空字串，
-                        // 於是 `reason` 變成「什麼都沒說」而畫面上明明印著 `Permission denied`（#467 的紅）。
-                        // 行程已經收掉＝管線一定會 EOF，所以這裡等的是「馬上就會發生的事」；仍然給上限，
-                        // 不讓它變成 helper 卡住的新路（等不到就用手上有的，頂多少一句原話）。
-                        // 只送完成訊號（`Err(Disconnected)`＝讀完了），所以這裡等的是「斷線」而不是「收到值」。
                         let _ = relay_rx.recv_timeout(std::time::Duration::from_secs(5));
                         let said = said.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         let said = said.trim();
@@ -1806,9 +1742,6 @@ fn run_script_with_engine(
     let build_config = sh_quote(&format!("build.build-dir={cache_path:?}"));
     match engine {
         RemoteCargoEngine::Cargo => {
-            // Keep Cargo's cache under the inspected target without exporting cache overrides into
-            // tests/build scripts that spawn another Cargo for an unrelated temporary project.
-            // This is intentionally byte-for-byte the legacy Cargo script.
             Ok(format!(
                 "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
                  && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
@@ -1826,9 +1759,6 @@ fn run_script_with_engine(
             if !eligible_with_engine(args, RemoteCargoEngine::Blaze).unwrap_or(false) {
                 anyhow::bail!("{BLAZE_ARGS_UNSUPPORTED_MESSAGE}");
             }
-            // Resolve tools only on the executor. The script stays inside the existing host
-            // lease, verifies the installed capability marker, and invokes the Cargo subcommand
-            // so it cannot start an unleased bare cargo-blaze process.
             Ok(format!(
                 "d={dir}; g=$(ps -o pgid= -p $$ | tr -d ' ') && printf '%s\\n' \"$g\" > \"$d.pgid-{tok}\" \
                  && [ \"$(cat \"$d.owner\" 2>/dev/null)\" = {tok} ] \
@@ -1872,7 +1802,6 @@ fn run_script_with_engine(
 static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 extern "C" fn on_signal(sig: libc::c_int) {
-    // 第二次訊號＝不想再等了：直接結束。遠端那頭照樣清得掉——守門靠連線中斷（stdin EOF）偵測，不靠我們活著做完。
     if SIGNALLED.swap(sig, std::sync::atomic::Ordering::SeqCst) != 0 {
         unsafe { libc::_exit(128 + sig) };
     }
@@ -1927,7 +1856,6 @@ impl Deadline {
     /// `limit_secs == 0`＝不設上限。時間從 [`Deadline::arm`] 起算，在那之前只看訊號。
     fn new(limit_secs: u64) -> Self {
         Deadline {
-            // 手改 config 的 u64::MAX 不能讓 `arm()` 的 Instant 加法溢位 panic（#329）；API 端本來就擋在 MAX_TIMEOUT_SECS。
             limit: (limit_secs > 0).then(|| std::time::Duration::from_secs(limit_secs.min(MAX_TIMEOUT_SECS))),
             at: std::cell::Cell::new(None),
             abort: Default::default(),
@@ -1980,8 +1908,6 @@ fn run_status_tee_stderr(mut cmd: Command, what: &str, deadline: &Deadline) -> a
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
     let err = child.stderr.take().expect("stderr piped");
-    // 讀 stderr 的執行緒把已讀到的收在共用字串裡：子行程結束後孫行程（ssh 背景 master、ProxyCommand）可能還握著 pipe，
-    // 不能無限等 EOF，等一小段就拿手上已有的。
     let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let sink = seen.clone();
@@ -1995,7 +1921,6 @@ fn run_status_tee_stderr(mut cmd: Command, what: &str, deadline: &Deadline) -> a
         let _ = done_tx.send(());
     });
     let status = wait_child(child, what, deadline);
-    // 被砍時 rsync 的 ssh 孫行程可能還握著 pipe；不等它，免得卡住收尾。
     let seen = if status.is_ok() {
         let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
         seen.lock().unwrap().clone()
@@ -2033,9 +1958,6 @@ fn limit_text(secs: u64) -> String {
 /// 完全不在 cargo 專案裡就是 cwd 本身。只同步 cwd（#177）的話，`cd daemon && cargo check` 到了遠端沒有根的
 /// `Cargo.lock`、`[profile.*]`、`.cargo/config.toml`——本機用鎖定的依賴，遠端重新解析、驗的不是同一份東西。
 fn source_root(cwd: &Path) -> (PathBuf, String) {
-    // A workspace member can be reached through a symlink. Walk the real path so we still find
-    // the workspace manifest above it; syncing the symlink itself would make --delete treat one
-    // member as the whole shared source tree.
     let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut package: Option<&Path> = None;
     let mut root: Option<&Path> = None;
@@ -2234,8 +2156,6 @@ fn rsync_exclusions(root: &Path) -> anyhow::Result<Vec<String>> {
             exclusions.push(path.to_string());
         }
     }
-    // 根 `.claude/` 的 worktree 與其 target 合計十幾 GB，不能整個掃描、送上遠端；巢狀 `.claude` 是原始碼，照送。
-    // 前端產物可能是 release build 或專案自行 include 的輸入，照常同步。
     exclusions.extend(IMPLICIT_RSYNC_EXCLUDES.iter().map(|s| s.to_string()));
     Ok(exclusions)
 }
@@ -2329,7 +2249,6 @@ fn scan_source_manifest(root: &Path, exclusions: &[String]) -> anyhow::Result<So
     }
 
     let mut entries = BTreeMap::new();
-    // build scripts may inspect permissions of the workspace root as well as its children.
     entries.insert(b".".to_vec(), SourceEntry {
         kind: b'D',
         mode: std::fs::metadata(root)?.permissions().mode() & 0o7777,
@@ -2542,8 +2461,6 @@ fn source_invalidation_report(
     let embed_ui_anchor = verified_web_dist_embed_anchor(root);
     let mut non_web_regular_file_removals = 0;
 
-    // A directory symlink can feed include_* inputs in another package. A link outside the tree
-    // is also unknowable from this manifest. If either exists, any source change gets full touch.
     for (bytes, entry) in &current.entries {
         if entry.kind != b'L' {
             continue;
@@ -2577,13 +2494,6 @@ fn source_invalidation_report(
                 report.touch_paths.insert(anchor.clone());
                 continue;
             }
-            // Compiler dep-info may list only existing files discovered by a proc macro, so a new
-            // asset (any extension) can change an expansion without a tracked directory: those still
-            // fall back. Two additions are narrowed. A new Rust source under a package's src/, tests/,
-            // benches/ or examples/ is a module or target file, not a scanned asset: touch it and the
-            // package's crate roots, so only that package recompiles (this also surfaces a new
-            // `foo.rs` colliding with `foo/mod.rs`). A new directory adds nothing by itself; any file
-            // inside it is classified on its own entry.
             match now.kind {
                 b'F' => match safe_source_path(bytes).and_then(|path| added_rust_source_roots(current, &path).map(|roots| (path, roots))) {
                     Some((path, roots)) => {
@@ -2814,8 +2724,6 @@ fn touch_remote_files(
     paths: &[PathBuf],
     deadline: &Deadline,
 ) -> anyhow::Result<()> {
-    // The root .claude tree is absent from rsync and manifests; do not touch stale leftovers even
-    // if a path is passed directly.
     let paths: Vec<_> = paths
         .iter()
         .filter(|path| !is_implicit_source_exclusion(path))
@@ -2876,8 +2784,6 @@ fn read_remote_manifest(
     deadline: &Deadline,
 ) -> anyhow::Result<Option<SourceManifest>> {
     let path = remote_manifest_path(dir);
-    // Validate before rsync, including unchanged hot runs: neither the lease nor Cargo's
-    // cache may redirect writes through symlinks. Reuse this mandatory SSH round trip.
     let mut script = format!(
         "set -eu\nlease_dir={}\n[ ! -L \"$lease_dir\" ] || exit 2\n[ -e \"$lease_dir\" ] || exit 44\n[ -d \"$lease_dir\" ] || exit 2\nroot=$(cd -P -- \"$lease_dir\" && pwd) || exit 2\n[ \"$root\" = \"$lease_dir\" ] || exit 2\ncd -- \"$root\"\n",
         sh_quote(dir),
@@ -2988,7 +2894,6 @@ const SYNC_ATTEMPTS: u32 = 3;
 const SYNC_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn rsync_destination(remote: &BuildRemoteCfg, dir: &str) -> String {
-    // 本機執行器：直接寫本機路徑（守門交回來的是絕對路徑）。
     if remote.is_local() {
         return format!("{}/", dir.trim_end_matches('/'));
     }
@@ -3017,8 +2922,6 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     );
     let source = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
     let dest = rsync_destination(remote, dir);
-    // The successful manifest is the baseline across every retry. A partial rsync may already
-    // have applied chmod or type changes before returning 23/24; those differences must survive.
     let previous = read_remote_manifest(remote, data_dir, dir, deadline)?;
     let command = |exclusions: &[String]| {
         let mut cmd = match &mode {
@@ -3039,7 +2942,6 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
                 }
             }
         }
-        // 本機複製不壓縮（`-z` 只會白燒 CPU）。
         cmd.args([if local { "-a" } else { "-az" }, "--delete"])
             .args(RSYNC_CACHE_FLAGS)
             .arg("--quiet");
@@ -3052,8 +2954,6 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
         cmd.arg(&source).arg(&dest);
         cmd
     };
-    // 共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉；rsync 列完清單後舊檔消失就回 23/24。
-    // 重送一次就是新的一致狀態（`--delete` 也會清掉遠端的舊 hash 檔），所以短暫重試，不把呼叫端的 cargo 判死。
     for attempt in 1..=SYNC_ATTEMPTS {
         let exclusions = rsync_exclusions(&root)?;
         let before = scan_source_manifest(&root, &exclusions)?;
@@ -3094,14 +2994,10 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
                 touch_remote_files(remote, data_dir, dir, &paths, deadline)?;
             }
             SourceInvalidation::Workspace => {
-                // Full touch is the conservative path for structural changes and inputs whose
-                // dependency scope cannot be proven from the manifest.
                 touch_remote_workspace(remote, data_dir, dir, deadline)?;
             }
         }
 
-        // A source edit after rsync or while mtime updates ran must not be recorded as successfully
-        // synchronized. Keep the prior manifest so the next attempt will invalidate all differences.
         let verified_exclusions = rsync_exclusions(&root)?;
         let verified = scan_source_manifest(&root, &verified_exclusions)?;
         if after != verified {
@@ -3149,7 +3045,6 @@ fn run_remote(
     let script = run_script_with_engine(&lease.hs.dir, sub, &lease.token, remote.cargo_jobs, threads, engine, args)?;
     let mut cmd = host_shell(remote, data_dir, &script)?;
     let status = if remote.is_local() {
-        // 本機執行器的 cargo 自成 process group（不在前景）：接著終端的 stdin，測試一讀就被 SIGTTIN 停住；ssh 時遠端 stdin 本來就是 pipe。
         cmd.stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
         wait_child(cmd.spawn().map_err(|e| anyhow::anyhow!("remote cargo: {e}"))?, "remote cargo", deadline)?
     } else {
@@ -3300,7 +3195,6 @@ pub fn run_cli_with_engine(
     );
     install_signal_handlers();
     let call_id = crate::db::ulid();
-    // 整體上限是整組共用的（`hosts` 裡的主機不能各自設 timeout_secs）。
     run_offload_on_with_id_and_engine(&hosts, data_dir, cwd, args, &Deadline::new(hosts[0].timeout_secs).watching_signals(), &call_id, engine)
 }
 
@@ -3381,7 +3275,6 @@ fn run_offload_on_with_id_and_engine(
     }
     let mut used = 0;
     let result = (|| -> anyhow::Result<i32> {
-        // 從這裡起不管怎麼離開（`?`、panic、被殺、超過上限、收到訊號），守門都會收到 EOF 把目錄還回去、遠端還在跑的 cargo 整組收掉。
         let (root, sub) = source_root(cwd);
         let (i, mut lease) = acquire(hosts, data_dir, &root, ctl)?;
         used = i;
@@ -3404,7 +3297,6 @@ fn run_offload_on_with_id_and_engine(
             shared_wait_secs: lease.obs.shared_wait_secs,
             slot_wait_secs: lease.obs.slot_wait_secs,
         });
-        // 整體上限從拿到名額與目錄才開始算（issue #104）。
         ctl.arm();
         lease.collect(&select_gc(&lease.hs, &GcPolicy::from_cfg(remote)));
         sync_source(remote, data_dir, &root, &lease.hs.dir, ctl)?;
@@ -3413,8 +3305,6 @@ fn run_offload_on_with_id_and_engine(
         Ok(code)
     })();
     let remote = &hosts[used];
-    // `lease` 已經在上面那個閉包結束時放掉：守門的清理（收 process group、還目錄與鎖）做完才走到這裡。
-    // 收到終止訊號：Ctrl-C 會同時打到本機的 rsync／ssh，它們的結束碼不代表這次的結果——一律照訊號回 128+sig。
     if let Some(Stopped::Interrupted(sig)) = ctl.stop() {
         eprintln!("agents-manager: 收到訊號 {sig}，已中止遠端編譯（遠端那一整組行程已收掉、目錄與鎖已還回）");
         return 128 + sig;
@@ -3424,12 +3314,7 @@ fn run_offload_on_with_id_and_engine(
             note_health(remote, data_dir, true, None);
             code
         }
-        // 連不上／認證被拒（issue #428）：遠端什麼都還沒跑，所以跟 125 那條一樣退回本機——但要講清楚原因，
-        // 不然整批 child 會靜靜擠回本機那兩個名額，而沒有人知道外部編譯根本沒生效（同 issue #138 的教訓）。
-        // 原因與健康檔在 [`acquire`] 裡逐台記過了。
         Err(e) if e.downcast_ref::<Unreachable>().is_some() => EXIT_RUN_LOCALLY,
-        // 守門尚未交目錄、遠端還沒開工：改排本機名額（issue #1853）。
-        // 守門有回話＝連得上，只是滿了（健康檔在 [`acquire`] 記在排的那台名下）。
         Err(e) => {
             if let Some(qf) = e.downcast_ref::<QueueFull>() {
                 let ev = am_base::remote_event::RemoteCargoEvent {

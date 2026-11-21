@@ -29,7 +29,6 @@ pub fn parse_footer(screen: &str) -> Option<CodexFooter> {
     for raw in &lines[lines.len().saturating_sub(FOOTER_TAIL_LINES)..] {
         let row = without_warning(raw.trim());
         if is_model_row(row) {
-            // 最後一個相符的才是現在那列。
             out = Some(CodexFooter { line: row.to_string(), context_used_pct: context_pct(row) });
         }
     }
@@ -81,10 +80,8 @@ fn pct_after(line: &str, label: &str) -> Option<f64> {
         if !w.eq_ignore_ascii_case(label) {
             continue;
         }
-        // 截點可能在任何字元；`%` 之後被截才讀得到。
         let raw = *words.peek()?;
         let n: String = raw.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-        // 數字後面緊跟 `%` 才是完整讀數：`weekly 4…` 是 48% 被截在數字中間，不是剩 4%。
         if !raw[n.len()..].starts_with('%') {
             continue;
         }
@@ -120,7 +117,6 @@ mod tests {
             None
         );
 
-        // 不回歸
         let q = parse_status_quota("gpt-6-astra high · /tmp · Context 28% used · 5h 90% left · weekly 48% …").unwrap();
         assert_eq!((q.five_hour_left, q.weekly_left), (Some(90.0), Some(48.0)));
 

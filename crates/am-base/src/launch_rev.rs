@@ -74,7 +74,6 @@ pub async fn stamp_live_revision(pool: &SqlitePool, run_id: &str) -> Result<bool
     if exists == 0 {
         return Err(sqlx::Error::RowNotFound);
     }
-    // Another retry may have atomically consumed the marker first.
     Ok(false)
 }
 

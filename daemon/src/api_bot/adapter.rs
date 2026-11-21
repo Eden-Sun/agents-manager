@@ -82,7 +82,6 @@ impl Secret {
 }
 impl Drop for Secret {
     fn drop(&mut self) {
-        // Volatile overwrites keep this best-effort clearing from being optimized away.
         for byte in unsafe { self.0.as_bytes_mut() } { unsafe { std::ptr::write_volatile(byte, 0) }; }
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
@@ -270,7 +269,6 @@ impl ApiBotAdapter {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        // 新 session：固定 provider，checkpoint 從第一份就帶版本標籤（v2）。
         let provider = super::provider::for_id(provider_id, options, quote_provider.clone()).map_err(|_| http::Error::InvalidRequest)?;
         let initial_state = State {
             system: Some(system_str),
@@ -292,7 +290,6 @@ impl ApiBotAdapter {
             identity,
             system,
             limits,
-            // session 的標籤就是它的供應商（之後每一份 checkpoint 都照這個寫）。
             session_tag: Some(provider.id().to_string()),
             provider,
             quote_provider,
@@ -371,9 +368,6 @@ impl ApiBotAdapter {
             revision: old_revision,
         };
 
-        // Thinking signatures belong to their originating model. Reject before changing durable owner/revision.
-        // The prior turn is already terminal; load() requires a live turn and cannot be used here.
-        // Rebind below revalidates this exact revision before changing ownership.
         let expiry = am_base::db::ts_sql("expires_at");
         let previous: Option<String> = sqlx::query_scalar(&format!("SELECT checkpoint_json FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND revision=? AND retired_at IS NULL AND {expiry}>? AND length(CAST(checkpoint_json AS BLOB))<=?"))
             .bind(old_fence.session_id.as_str()).bind(old_fence.bot_id.as_str())
@@ -383,7 +377,6 @@ impl ApiBotAdapter {
             .fetch_optional(&pool).await.map_err(|_| http::Error::InvalidRequest)?;
         let previous: State = serde_json::from_str(&previous.ok_or(http::Error::InvalidRequest)?)
             .map_err(|_| http::Error::InvalidRequest)?;
-        // session 的 provider 在建立時就固定：依 checkpoint 的標籤取回同一個（沒有標籤＝Claude）；不認得就拒絕，不改任何 durable 狀態。
         if previous.provider_id() != provider_id {
             return Err(http::Error::InvalidRequest);
         }
@@ -492,8 +485,6 @@ impl Model for ApiBotAdapter {
                 if reconstructed.hash() != active.envelope.hash() {
                     return Err(http::Error::InvalidRequest);
                 }
-                // Invalid input does not spend the matching reservation's permit.
-                // Consume atomically only after identity validation, still before any HTTP.
                 let key = active.key.take().ok_or(http::Error::InvalidRequest)?;
                 active.permit_available = false;
 
@@ -506,7 +497,6 @@ impl Model for ApiBotAdapter {
                 )
             };
 
-            // 送出的是 reserve 時報價、算 hash 的那一份已編碼請求（`active.envelope`），不重新組 body。
             let transport = || super::provider::Transport {
                 endpoint: &self.http_cfg.endpoint,
                 key: key.as_str(),
@@ -528,9 +518,6 @@ impl Model for ApiBotAdapter {
             let mut cursor = self.cursor.lock().await;
             match res {
                 Ok(resp) => {
-                    // HTTP 已成功收到完整回應：帳是確定的。內容不合法（工具解析失敗、一批超過 32 個、
-                    // 工具 id 重複、模型不符）或用量不合規則時，也要把這次 attempt 結成 `recorded`、收掉 api_pending，
-                    // 之後的 prompt 才送得出去；transcript 維持送出前的 durable 狀態（不留半截 assistant tool batch）。
                     let content_problem = self.provider.invalid_content_reason(&resp, &cursor.last_durable_state);
                     let quote_res = self.quote_provider.settle(envelope.as_ref(), &resp);
                     let valid_quote = match &quote_res {
@@ -583,7 +570,6 @@ impl Model for ApiBotAdapter {
                             content_blocks: &resp.content,
                         };
                         let _ = am_base::db::api_bot::record_rejected_response(&self.pool, &record).await;
-                        // 有可信用量就照實算；用量本身不可信時費用不明，按預留額（上限）計，usage 不存。
                         let (receipt_speed, receipt_usage, estimated) = match &valid_quote {
                             Some(uq) => (uq.actual_speed, Some(&resp.usage), uq.estimated_microusd),
                             None => (
@@ -642,10 +628,6 @@ impl Model for ApiBotAdapter {
                         generation: self.identity.generation,
                         revision: cursor.revision,
                     };
-                    // 明確被 API 拒絕（4xx、429、529）＝這次請求沒有被處理、不計費：結果是已知的，
-                    // 照 `record` 的規則要把 pending 標記收掉（receipt `failed`、費用 0）。否則 checkpoint 永遠停在
-                    // api_pending，這顆 bot 之後的每一則都被當成「上一次還沒結算」拒收，重啟時還會讓整個 API 啟動閘隔離。
-                    // 逾時、連線中斷、回應讀壞才是真的不知道有沒有處理，維持 `unknown`。
                     let rejected = self.provider.definitive_rejection(&err);
                     let mut next_state = cursor.last_durable_state.clone();
                     next_state.api_pending = !rejected;
@@ -783,8 +765,6 @@ impl ApiBotAdapter {
 
             match (before_pending, after_pending) {
                 (true, true) => {
-                    // While HTTP is active/pending, disallow arbitrary mutation of messages/responses.
-                    // Only allow exactly matching the last durable state (idempotent checkpoint), without granting permits.
                     let durable_val =
                         self.checkpoint_value(&cursor.last_durable_state).map_err(|_| JournalFailure::CheckpointSerialize)?;
                     if val != durable_val {
@@ -844,14 +824,12 @@ impl ApiBotAdapter {
                         return Err(JournalFailure::InvalidQuote);
                     }
 
-                    // 帳本範圍跟著 session 的供應商：每筆 attempt 記它的 `provider`，每小時請求數與總上限都只算同一家的。
                     let ledger_provider = self.provider.id();
                     let claude = ledger_provider == db_api::PROVIDER_ANTHROPIC;
                     let total_cap = match (self.limits.total_cap_usd, &self.limits.total_cap_since) {
                         (Some(cap_usd), Some(since)) if cap_usd >= 0.0 && !since.is_empty() => Some((cap_usd, since.as_str())),
                         _ => None,
                     };
-                    // Claude：照舊在預留前先查（只算 anthropic 的 attempt；別家的花費不佔 Claude 的額）。
                     if let (true, Some((cap_usd, since))) = (claude, total_cap) {
                         {
                             let spent_microusd: i64 = sqlx::query_scalar(
@@ -868,7 +846,6 @@ impl ApiBotAdapter {
                             .bind(since)
                             .fetch_one(&self.pool)
                             .await
-                            // 讀不到已花金額就當成超過上限（fail-closed），不冒險送出請求。
                             .unwrap_or(i64::MAX);
 
                             let cap_microusd = (cap_usd * 1_000_000.0).round() as i64;
@@ -893,7 +870,6 @@ impl ApiBotAdapter {
                         pricing_version: &quote.pricing_version,
                     };
 
-                    // 其他供應商：總上限在預留的同一個寫交易裡檢查（兩筆並發只有一筆拿得到最後的額度）。
                     let scope = if claude {
                         db_api::ProviderScope::ANTHROPIC
                     } else {
@@ -953,13 +929,11 @@ impl ApiBotAdapter {
                         let active = cursor.active_attempt.as_ref().ok_or(JournalFailure::ResponseTransitionMismatch)?;
                         let settled = cursor.settled_response.as_ref().ok_or(JournalFailure::ResponseTransitionMismatch)?;
 
-                        // Verify legal increment from last durable state to state with assistant response
                         let durable = &cursor.last_durable_state;
                         if state.responses.len() != durable.responses.len() + 1 {
                             return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
-                        // Response has no PartialEq; compare prefix via JSON values
                         let durable_resp_val =
                             serde_json::to_value(&durable.responses).map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         let state_prefix_resp_val =
@@ -977,8 +951,6 @@ impl ApiBotAdapter {
                             return Err(JournalFailure::ResponseTransitionMismatch);
                         }
 
-                        // transcript 只能多出「這份回應照 session 的 codec 收進去」的那一段（Claude：一則 assistant 訊息；
-                        // OpenAI：回應的每個 output item 各一筆）。由 codec 從上一份 durable 狀態算出預期值再整份比對。
                         let mut expected = durable.clone();
                         let accepted = self.provider.codec().accept(&mut expected, settled.response.clone()).map_err(|_| JournalFailure::ResponseTransitionMismatch)?;
                         if state.messages != expected.messages {

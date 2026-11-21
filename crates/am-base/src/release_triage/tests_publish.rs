@@ -63,7 +63,6 @@ fn validation_rejects_the_whole_submission_with_every_problem_listed() {
     let es = entries277();
     let first = judged(&es)[0].id.clone();
     let second = judged(&es)[1].id.clone();
-    // 缺 verdict、未知 entry、重複 verdict。
     let mut s = sub(&es, Verdict::None, vec![]);
     let dup = s.verdicts[0].clone();
     s.verdicts.remove(1);
@@ -71,12 +70,10 @@ fn validation_rejects_the_whole_submission_with_every_problem_listed() {
     s.verdicts.push(EntryVerdict { entry_id: "nope000000".into(), verdict: Verdict::None, reason: String::new(), module: String::new() });
     let errs = verdict::validate(&s, &es).unwrap_err().join("\n");
     assert!(errs.contains(&second) && errs.contains("沒有 verdict") && errs.contains("nope000000") && errs.contains("多個 verdict"), "{errs}");
-    // dropped 的 entry 不能有 verdict。
     let dropped = es.iter().find(|e| e.bucket == Bucket::Dropped).unwrap().id.clone();
     let mut s2 = sub(&es, Verdict::None, vec![]);
     s2.verdicts.push(EntryVerdict { entry_id: dropped, verdict: Verdict::None, reason: String::new(), module: String::new() });
     assert!(verdict::validate(&s2, &es).is_err());
-    // 提案：引用 upgrade-arg／none 的 entry、同一 entry 進兩張、標記偽造、verdict 不一致、空欄位。
     let mut s3 = sub(&es, Verdict::UpgradeArg, vec![proposal(&[&first])]);
     assert!(verdict::validate(&s3, &es).unwrap_err().join("").contains("不是 guard／adopt"));
     s3.verdicts.iter_mut().for_each(|v| v.verdict = Verdict::Adopt);
@@ -157,8 +154,6 @@ fn a_title_that_already_carries_the_version_prefix_is_not_doubled() {
     assert_eq!(t("claude 2.1.277"), "claude 2.1.277: claude 2.1.277（提防）", "只有前綴沒有句子：不吃掉，讓人看得出模型沒寫");
     assert_eq!(t("claude 2.1.278: 另一版的標題"), "claude 2.1.277: claude 2.1.278: 另一版的標題（提防）", "別版的前綴不剝");
 }
-
-// ───────────────────────── 假 gh ─────────────────────────
 
 struct FakeGh {
     dir: std::path::PathBuf,
@@ -312,7 +307,6 @@ async fn seed_created_refs(p: &SqlitePool, version: &str, count: usize) {
             comment: false,
         })
         .collect();
-    // Keep the indexed daily-quota summary in sync just like a real publish write.
     assert!(ledger::save_publish(p, "claude", version, &refs, Status::Judged, None).await.unwrap());
 }
 
@@ -341,7 +335,6 @@ async fn running_twice_opens_exactly_one_issue_with_labels_and_marker() {
     let first = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
     assert!(matches!(first, Outcome::Published { created: 1, .. }), "{first:?}");
     assert_eq!(row(&p).await.status, Status::Published);
-    // 第二次：狀態已是 published → 不該再進 publish（呼叫端只重試 judged）；直接呼叫也不會多開。
     assert!(issue::publish_version(&p, &cfg, "claude", "2.1.277").await.is_err());
     assert_eq!(gh.count("issue create"), 1);
     let args = std::fs::read_to_string(gh.dir.join("last_create.txt")).unwrap();
@@ -391,7 +384,6 @@ async fn a_retry_finds_the_issue_through_the_label_listing_when_search_has_not_i
         json!([{"number": 77, "url": "https://github.com/o/r/issues/77", "title": "別的標題", "body": format!("x\n<!-- release-triage: {mk} -->\n")}]).to_string(),
     )
     .unwrap();
-    // list.json 不存在＝`--search` 回 []（索引還沒跟上）。
     let o = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await.unwrap();
     assert!(matches!(o, Outcome::Published { created: 0, existing: 1, .. }), "{o:?}");
     assert_eq!(gh.count("issue create"), 0, "遠端已經有了就不能再開：{:?}", gh.calls());
@@ -465,7 +457,6 @@ async fn gh_failure_leaves_the_row_judged_and_the_retry_only_reruns_publish() {
     assert!(matches!(o, Outcome::Published { created: 2, .. }), "{o:?}");
     let r = row(&p).await;
     assert_eq!((r.status, r.publish_error, r.issues.len()), (Status::Published, None, 2));
-    // auth 失敗同樣停在 judged。
     let p2 = pool().await;
     seed(&p2, &[("guard", &[0], None)]).await;
     gh.flag("fail_auth", true);
@@ -475,7 +466,6 @@ async fn gh_failure_leaves_the_row_judged_and_the_retry_only_reruns_publish() {
 
 #[tokio::test]
 async fn all_proposals_publish_guard_first_without_quantity_caps() {
-    // 五張 adopt＋一張 guard（排最後）：guard 優先，六張全部發布。
     let p = pool().await;
     let gh = FakeGh::new("cap");
     seed(&p, &[("adopt", &[0], None), ("adopt", &[1], None), ("adopt", &[2], None), ("adopt", &[3], None), ("adopt", &[4], None), ("guard", &[5], None)]).await;
@@ -488,7 +478,6 @@ async fn all_proposals_publish_guard_first_without_quantity_caps() {
     assert!(r.publish_error.is_none());
     assert_eq!(r.status, Status::Published);
 
-    // 別的版本已開 8 張，舊的延後錯誤仍會在下一輪自動清除。
     let p = pool().await;
     let gh = FakeGh::new("day");
     seed(&p, &[("guard", &[0], None)]).await;
@@ -601,7 +590,6 @@ async fn a_lost_create_beyond_the_label_list_limit_is_recovered_without_blocking
     .await
     .unwrap();
 
-    // The immediate label listing is capped at 200 and has been displaced by newer labelled issues.
     let displaced: Vec<serde_json::Value> = (0..200)
         .map(|n| {
             json!({
@@ -613,8 +601,6 @@ async fn a_lost_create_beyond_the_label_list_limit_is_recovered_without_blocking
         })
         .collect();
     std::fs::write(gh.dir.join("labelled.json"), serde_json::to_vec(&displaced).unwrap()).unwrap();
-    // The marker search can find the old page entry. Searches for the later version's different marker
-    // still return no matching body, so this only supplies cross-version recovery evidence.
     std::fs::write(
         gh.dir.join("list.json"),
         serde_json::to_vec(&json!([{
@@ -781,7 +767,6 @@ async fn a_comment_whose_ledger_write_failed_is_found_before_retrying_the_side_e
     let gh = FakeGh::new("comment-crash-window");
     gh.known_issue(102);
     seed(&p, &[("guard", &[0], Some(102))]).await;
-    // Put the operation marker on a later API page to make sure the full comment history is searched.
     std::fs::write(
         gh.dir.join("comment-markers-102.log"),
         "release-triage: old@0#one -->\nrelease-triage: old@0#two -->\n",
@@ -850,7 +835,6 @@ async fn health_probe_reports_gh_auth_failure_and_stays_silent_when_publish_is_o
     assert_eq!((&ok["gh_auth_ok"], &ok["repo_ok"], &ok["can_write"]), (&json!(true), &json!(true), &json!(true)));
     assert_eq!(ok["viewer_permission"], "ADMIN");
     assert_eq!(ok["labels_missing"], json!([]), "標籤齊");
-    // auth 綠但 repo 看不到／權限只有 READ／標籤少一個——三種都會讓 `gh issue create` 失敗，健檢要分得出來。
     std::fs::write(gh.dir.join("repo.json"), r#"{"nameWithOwner":"o/r","viewerPermission":"READ","hasIssuesEnabled":false}"#).unwrap();
     std::fs::write(gh.dir.join("labels.json"), r#"[{"name":"release-triage"},{"name":"upstream:claude"}]"#).unwrap();
     let ro = issue::health_probe(&gh.cfg(true)).await.unwrap();
@@ -866,8 +850,6 @@ async fn health_probe_reports_gh_auth_failure_and_stays_silent_when_publish_is_o
     assert!(bad["gh_auth_error"].as_str().unwrap().contains("not logged in"));
     assert_eq!(bad["repo_ok"], false, "auth 沒過就停在那一步，不再問 repo");
 }
-
-// ───────────────────────── 乾跑（打開 publish 之前） ─────────────────────────
 
 fn actions(v: &serde_json::Value) -> Vec<String> {
     v["versions"][0]["proposals"].as_array().unwrap().iter().map(|p| p["action"].as_str().unwrap().to_string()).collect()
@@ -885,14 +867,12 @@ async fn a_dry_run_plans_the_issues_without_creating_any_or_touching_the_ledger(
     assert_eq!(out["publish_enabled"], false, "publish 還是關著");
     assert_eq!((&out["would_create"], &out["would_comment"], &out["existing"]), (&json!(2), &json!(0), &json!(0)));
     assert_eq!(actions(&out), ["create", "create"]);
-    // guard 優先：排序跟真的 publish 同一套。
     assert_eq!(out["versions"][0]["proposals"][0]["triage"], "guard");
     let first = &out["versions"][0]["proposals"][0];
     assert_eq!(first["title"], "claude 2.1.277: 提案1（提防）");
     assert!(first["body"].as_str().unwrap().contains(&format!("> {}", judged(&es)[0].text)), "內文先看得到引用");
     assert!(first["body"].as_str().unwrap().contains(&format!("release-triage: claude@2.1.277#{} -->", judged(&es)[0].id)));
     assert_eq!(first["labels"], json!(["release-triage", "upstream:claude", "triage:guard"]));
-    // gh 只被讀過：auth／repo／label／issue list，沒有 create 也沒有 comment。
     assert_eq!((gh.count("issue create"), gh.count("issue comment")), (0, 0), "{:?}", gh.calls());
     assert!(gh.count("issue list") >= 2, "每個提案都真的問過遠端去重：{:?}", gh.calls());
     let after = row(&p).await;
@@ -949,7 +929,6 @@ async fn a_dry_run_and_the_real_publish_agree_even_when_two_proposals_share_an_e
     let es = entries277();
     ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
     let j = judged(&es);
-    // 兩個提案共用 j[0]：第二個還多帶一條 j[1]，所以不是同一組 entry_ids。
     let stored = vec![
         StoredProposal {
             entry_ids: vec![j[0].id.clone()],
@@ -1014,11 +993,9 @@ async fn a_dry_run_and_the_real_publish_have_no_daily_cap_across_versions() {
     }
     let cfg = gh.cfg(true);
     let dry = issue::preflight(&p, &cfg, None, None).await.unwrap();
-    // 3 版 × 4 ＝ 12 張，全部可發布。
     assert_eq!(dry["versions"].as_array().unwrap().len(), 3, "三版都要在乾跑裡");
     assert_eq!(dry["would_create"], json!(12), "乾跑應預告 12 張：{dry}");
 
-    // 真跑：照 ledger::list 的順序逐版開（同 post_publish）。
     let mut created_total = 0usize;
     for r in ledger::list(&p, None, None).await.unwrap().iter().filter(|r| r.status == Status::Judged) {
         match issue::publish_version(&p, &cfg, &r.kind, &r.version).await.unwrap() {
@@ -1044,8 +1021,6 @@ async fn a_dry_run_skips_github_for_proposals_already_in_the_ledger() {
     assert_eq!(actions(&out), ["already_logged"]);
     assert_eq!(gh.count("issue list"), 0, "帳本有了就不問遠端：{:?}", gh.calls());
 }
-
-// ───────────────────────── 審查補的（publish 路徑） ─────────────────────────
 
 /// 乾跑要預覽「真跑會送出去的那一段字」：`duplicate_of` 真跑是留言（`render_comment`），乾跑卻渲染成整張 issue 的內文，
 /// 打開 publish 前看到的跟實際貼上去的不同。

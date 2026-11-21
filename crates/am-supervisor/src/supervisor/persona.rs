@@ -61,8 +61,6 @@ pub const BUILD_INPUTS: [&str; 8] = [
 pub fn build_inputs_json() -> Value {
     json!({
         "paths": BUILD_INPUTS,
-        // Said out loud so a caller does not have to guess which of these are the surprising
-        // ones: a change here means the *binary* is stale, not that anything must restart now.
         "embedded": [
             {"path": "docs/goals/agm-supervisor-persona.md", "symbol": "supervisor::setup::PERSONA_DOC"},
             {"path": "docs/goals/agm-responder-persona.md", "symbol": "supervisor::responder::PERSONA_DOC"},
@@ -112,8 +110,6 @@ pub fn loaded_state(run_started_at: Option<&str>, persona_updated_at: Option<&st
         chrono::DateTime::parse_from_rfc3339(started),
         chrono::DateTime::parse_from_rfc3339(updated),
     ) else {
-        // An unreadable timestamp is not evidence of anything. Say so rather than guessing in
-        // the flattering direction.
         return Loaded::NotRunning;
     };
     if started < updated {
@@ -131,8 +127,6 @@ mod tests {
     fn the_hash_is_stable_and_distinguishes_texts() {
         assert_eq!(hash("你是 AGM"), hash("你是 AGM"));
         assert_ne!(hash("你是 AGM"), hash("你是 AGM。"));
-        // Pinned: the point of the hash is that it means the same thing in the next build, so a
-        // stored value stays comparable after an upgrade.
         assert_eq!(hash(""), "fnv1a64:cbf29ce484222325");
         assert_eq!(hash("a"), "fnv1a64:af63dc4c8601ec8c");
     }
@@ -200,7 +194,6 @@ mod tests {
                 for line in text.lines() {
                     let Some(rest) = line.split_once("include_str!(\"") else { continue };
                     let Some((rel, _)) = rest.1.split_once('"') else { continue };
-                    // Resolve against the file's own directory, then back to the repo root.
                     let abs = p.parent().expect("file has a parent").join(rel);
                     let Ok(abs) = abs.canonicalize() else { continue };
                     let Ok(rel_to_repo) = abs.strip_prefix(repo) else { continue };

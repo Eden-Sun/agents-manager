@@ -23,7 +23,6 @@
         let err = start_when_shell_ready(&e.app.herdr, "amquotatest2", &pane.pane_id).await.unwrap_err();
         assert!(pane_busy(&err), "有上限：一直 busy 就照實回錯，{err:#}");
         assert_eq!(e.herdr.calls_to("agent.start").len() - before, SHELL_READY_ATTEMPTS as usize, "有上限：忙碌回應到原本上限就照實回錯");
-        // 別種錯誤不重試。
         e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("invalid_agent_argument"));
         let before = e.herdr.calls_to("agent.start").len();
         assert!(start_when_shell_ready(&e.app.herdr, "amquotatest3", &pane.pane_id).await.is_err());
@@ -167,10 +166,8 @@
 
     #[test]
     fn a_reset_already_past_belongs_to_next_year() {
-        // Asked in late December about a reset rendered as "January 3".
         let r = parse_reset(" January 3, 09:00", at("2026-12-28T10:00:00+08:00")).unwrap();
         assert!(r.starts_with("2027-01-03"), "{r}");
-        // Same date, asked in January: this year.
         let r = parse_reset(" January 3, 09:00", at("2026-01-02T10:00:00+08:00")).unwrap();
         assert!(r.starts_with("2026-01-03"), "{r}");
     }
@@ -245,7 +242,6 @@
     #[test]
     fn a_screen_without_a_bar_row_is_not_a_quota() {
         assert!(parse_grok_usage("Context usage  Usage limit\n  Loading…", Local::now()).is_none());
-        // The context-usage tab has a percentage but no limit header.
         assert!(parse_grok_usage("  Context: ████░░  62%", Local::now()).is_none());
     }
 

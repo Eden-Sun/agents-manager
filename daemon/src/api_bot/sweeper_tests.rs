@@ -55,7 +55,6 @@ async fn sweeper_clears_api_pending_and_synthesizes_tool_result_when_owner_turn_
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(&now)
     .execute(&env.app.db).await.unwrap();
 
-    // Verify it is detected as stuck before sweeping:
     let stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(
         stuck,
@@ -65,16 +64,13 @@ async fn sweeper_clears_api_pending_and_synthesizes_tool_result_when_owner_turn_
         })
     );
 
-    // Run sweeper:
     let report = sweep_once(&env.app).await.unwrap();
     assert_eq!(report.abandoned_checkpoints, 1);
 
-    // Verify attempt became unknown:
     let att_state: String = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE id='att-1'")
         .fetch_one(&env.app.db).await.unwrap();
     assert_eq!(att_state, "unknown");
 
-    // Verify session checkpoint was settled:
     let (chk_raw, rev): (String, i64) = sqlx::query_as(
         "SELECT checkpoint_json, revision FROM api_bot_sessions WHERE id=?"
     )
@@ -95,7 +91,6 @@ async fn sweeper_clears_api_pending_and_synthesizes_tool_result_when_owner_turn_
     assert_eq!(content[0]["content"], "not executed: turn ended");
     assert_eq!(content[0]["is_error"], true);
 
-    // Verify it is no longer stuck:
     let after_stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(after_stuck, None);
 }
@@ -135,7 +130,6 @@ async fn sweeper_settles_reserved_attempt_exceeding_hard_deadline() {
     .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
     .execute(&env.app.db).await.unwrap();
 
-    // Insert reserved attempt created 2500 seconds ago (hard deadline is 1800 + 120 = 1920s)
     let stale_created = crate::db::iso_in(-2500);
     sqlx::query(
         "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) \
@@ -144,7 +138,6 @@ async fn sweeper_settles_reserved_attempt_exceeding_hard_deadline() {
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(&stale_created)
     .execute(&env.app.db).await.unwrap();
 
-    // Verify stuck detector finds it:
     let stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(
         stuck,
@@ -154,18 +147,15 @@ async fn sweeper_settles_reserved_attempt_exceeding_hard_deadline() {
         })
     );
 
-    // Run sweeper:
     let report = sweep_once(&env.app).await.unwrap();
     assert_eq!(report.reserved_timeouts, 1);
 
-    // Verify attempt settled to unknown:
     let (state, finished): (String, Option<String>) = sqlx::query_as(
         "SELECT state, finished_at FROM api_bot_attempts WHERE id='att-reserved-timeout'"
     ).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(state, "unknown");
     assert!(finished.is_some());
 
-    // Verify session checkpoint api_pending was cleared:
     let chk_raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?")
         .bind(session_id).fetch_one(&env.app.db).await.unwrap();
     let val: serde_json::Value = serde_json::from_str(&chk_raw).unwrap();
@@ -207,7 +197,6 @@ async fn sweeper_clears_api_pending_for_stale_unknown_attempt() {
     .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
     .execute(&env.app.db).await.unwrap();
 
-    // Insert unknown attempt finished 400s ago (> 300s = 5min)
     let stale_finished = crate::db::iso_in(-400);
     sqlx::query(
         "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at,finished_at) \
@@ -216,7 +205,6 @@ async fn sweeper_clears_api_pending_for_stale_unknown_attempt() {
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(&stale_finished).bind(&stale_finished)
     .execute(&env.app.db).await.unwrap();
 
-    // Verify stuck detector finds it:
     let stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(
         stuck,
@@ -226,26 +214,21 @@ async fn sweeper_clears_api_pending_for_stale_unknown_attempt() {
         })
     );
 
-    // Run sweeper:
     let report = sweep_once(&env.app).await.unwrap();
     assert_eq!(report.stale_unknowns, 1);
 
-    // Verify attempt remains unknown:
     let att_state: String = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE id='att-stale-unk'")
         .fetch_one(&env.app.db).await.unwrap();
     assert_eq!(att_state, "unknown");
 
-    // Verify session checkpoint api_pending was cleared:
     let chk_raw: String = sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE id=?")
         .bind(session_id).fetch_one(&env.app.db).await.unwrap();
     let val: serde_json::Value = serde_json::from_str(&chk_raw).unwrap();
     assert_eq!(val["api_pending"], false);
 
-    // Verify it is no longer stuck:
     let after_stuck = detect_stuck(&env.app, bot_id).await;
     assert_eq!(after_stuck, None);
 }
-
 
 /// 2026-11-15 事故重現：舊回合留下的 unknown attempt（ordinal 55）＋新回合進行中（owner turn in_flight、runtime 有回合、
 /// 有還在進行的 reserved attempt、checkpoint 剛被寫過）。sweeper 絕不能動這個 session 的 checkpoint，否則回合的 journal 存檔會失敗。
@@ -350,7 +333,6 @@ async fn api_turn_state_drives_the_same_run_agent_status_field_cli_bots_use() {
         async move { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE id=?").bind(run).fetch_one(&db).await.unwrap() }
     };
     let mut rx = env.app.subscribe();
-    // 回傳這顆 bot 收到的 bot_status 事件裡 run.agent_status 的序列。
     let drain = |rx: &mut tokio::sync::broadcast::Receiver<am_base::ws_event::WsEvent>| {
         let mut seen = Vec::new();
         while let Ok(ev) = rx.try_recv() {
@@ -400,7 +382,6 @@ async fn sweep_needs_only_one_available_pool_connection() {
     .bind(session_id).bind(bot_id).bind(run_id).bind(turn_id).bind(chk.to_string())
     .bind(&now).bind(crate::db::iso_in(-400)).bind(crate::db::iso_in(3600))
     .execute(&env.app.db).await.unwrap();
-    // 過了硬期限的 reserved：走超時結算路徑（交易內判斷 session_busy）。
     sqlx::query(
         "INSERT INTO api_bot_attempts(id,session_id,bot_id,run_id,turn_id,generation,ordinal,request_hash,requested_speed,state,reserved_microusd,pricing_version,created_at) \
          VALUES('att-1c-reserved',?,?,?,?,1,0,'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','standard','reserved',300,'v1',?)",
@@ -463,7 +444,6 @@ async fn sweeper_settles_every_unreturned_function_call_of_a_stuck_openai_sessio
     assert!(super::runtime::startup_context_settled(&state, true), "結清後可以在重啟時接續");
     assert_eq!(detect_stuck(&env.app, bot_id).await, None);
 
-    // 結清前的同一份 checkpoint 過不了接續檢查（對照）。
     let unsettled: super::runner::State = serde_json::from_value(checkpoint).unwrap();
     assert!(!super::runtime::startup_context_settled(&unsettled, true));
 }

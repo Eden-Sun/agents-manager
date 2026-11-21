@@ -163,7 +163,6 @@ async fn try_open_turn(app: &impl RelayWatchContext, run: &db::Run, from_bot: &s
     if run.state != "running" {
         return Ok(None);
     }
-    // 沒有 hook 的 grok 由它的對話檔記回合（§12.5）：slash 指令不是對話；收件方忙著時這句先記下，等對話檔出現它再收進自己的回合。
     let transcript = run.adopted != 0 && db::bot(app.db(), &run.bot_id).await?.is_some_and(|b| matches!(b.kind.as_str(), "grok" | "agy") && b.inject_hooks == 0);
     if transcript && super::grok_transcript::is_slash_command(text) {
         return Ok(None);
@@ -212,7 +211,6 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
         return Step::Done;
     }
     if let Some(t) = &w.turn_id {
-        // 收掉了（hook 或終端備援）＝送達、答完了。
         match db::in_flight_turn(app.db(), &w.run_id).await {
             Ok(Some(cur)) if &cur.id == t => {}
             Ok(_) => return Step::Done,
@@ -222,11 +220,9 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
             }
         }
     }
-    // agent 開始做事＝字被收下了，補 Enter 只會打到別的東西。
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Step::Done;
     }
-    // pane 或 agent 已經不在：不對死掉的 pane 重試；把 run 收掉，回合失敗（不是「沒送達」，是收件方沒了）。
     if super::dead_panes::pane_gone(app, &run).await {
         app.mark_run_exited(&w.run_id, "pane gone").await;
         return Step::Done;
@@ -257,8 +253,6 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
     }
     let since = *w.held_since.get_or_insert(now);
     if let (Some(before), Some((_, _, current))) = (&w.snapshot_at_nudge, read.as_ref()) {
-        // An unchanged pane.get/read revision is not evidence that Enter failed. With no
-        // composer change, conservatively stop retries; eventual completion still wins.
         if super::composer_draft::same_snapshot(&bot.kind, before, current) {
             tracing::warn!(run = %w.run_id, "relayed composer unchanged after Enter; not retrying");
             w.nudges = MAX_NUDGES;
@@ -277,7 +271,6 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
         w.held_since = None;
         return Step::Waiting;
     }
-    // The run/turn may have been replaced or started working during the read RPCs.
     let current = match db::active_run(app.db(), &w.bot_id).await {
         Ok(Some(current)) => current,
         Ok(None) => return Step::Done,
@@ -309,7 +302,6 @@ pub async fn step(app: &impl RelayWatchContext, w: &mut Watch, now: Instant) -> 
 
 async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
     let Some(turn_id) = w.turn_id.as_deref() else { return Step::Done };
-    // 重啟前就開的回合：不知道字有沒有被收下，只收工（#1202）。
     if !w.may_fail {
         return Step::Done;
     }
@@ -320,8 +312,6 @@ async fn give_up(app: &impl RelayWatchContext, w: &Watch) -> Step {
         if out != turn_controller::Outcome::Applied {
             return Ok(None);
         }
-        // The turn already owns its conversation. Reuse this transaction rather than
-        // acquiring a second pooled connection while holding SQLite's write lock.
         let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?")
             .bind(turn_id).fetch_one(&mut *tx).await?;
         let m = insert_message_tx(&mut tx, &conv, Some(turn_id), "system", why, "system", false, None).await?;
@@ -351,7 +341,6 @@ pub async fn on_resolved_announce(app: &impl RelayWatchContext, from_bot: &str, 
     if run.bot_id == from_bot {
         return;
     }
-    // 收件方的 pane 早就不在了（側欄還畫成活的）：收掉 run，不開回合、不盯（字打進去也沒人會送）。
     if super::dead_panes::pane_gone(app, &run).await {
         app.sweep_dead_panes().await;
         return;
@@ -424,12 +413,10 @@ async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) ->
     Ok(rows
         .into_iter()
         .map(|(turn_id, run_id, bot_id, text, created_at)| {
-            // 回合已經開了多久：讀不懂的時間當成很舊（不判失敗）；時鐘往回跳（未來的時間）當成剛開。
             let age = match chrono::DateTime::parse_from_rfc3339(&created_at) {
                 Ok(t) => (now_wall - t.with_timezone(&chrono::Utc)).to_std().unwrap_or_default(),
                 Err(_) => GIVE_UP_AFTER,
             };
-            // 期限從開回合那一刻接著算，不從重啟重新算（#1202）。
             let may_fail = age < GIVE_UP_AFTER;
             Watch {
                 run_id,
@@ -475,7 +462,6 @@ mod tests {
         let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
         let run_id = tt::fake_run(&env.app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
-        // herdr 認得這個 pane（沒登記的 pane 在 MockHerdr 是 `pane_not_found`＝已經死了）。
         env.herdr.tabs.lock().unwrap().push(tt::MockTab { tab_id: format!("tab-{}", bot.id), workspace_id: "ws-1".into(), label: "t".into(), panes: vec![pane.clone()] });
         F { env, bot_id: bot.id, run_id, pane }
     }
@@ -550,7 +536,6 @@ mod tests {
         }
         assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:04:00.000Z").await.unwrap().as_deref(), Some("turn-running"), "排隊中的回合還沒開始跑");
 
-        // 遠端報備晚到：turn-running 已經收尾；turn-queued 在 10:05:01 才真的送達開跑。
         sqlx::query("UPDATE turns SET status = 'completed', completed_at = '2026-10-09T10:05:00.000Z' WHERE id = 'turn-running'").execute(app.db()).await.unwrap();
         sqlx::query("UPDATE turns SET status = 'in_flight', delivered_at = '2026-10-09T10:05:01.000Z' WHERE id = 'turn-queued'").execute(app.db()).await.unwrap();
         assert_eq!(sender_turn_at(&app, &sender.id, "2026-10-09T10:04:00.000Z").await.unwrap().as_deref(), Some("turn-running"), "報備當下還是 turn-running");
@@ -588,7 +573,6 @@ mod tests {
 
         app.shutdown.cancel();
         app.background_tasks.close();
-        // 沒看 shutdown 的 watcher 會活到 GIVE_UP_AFTER（90 秒）；30 秒分得出來，又不會在高負載下把正在收尾的 watcher 判成沒收。
         assert!(GIVE_UP_AFTER > Duration::from_secs(30), "上限要比 watcher 自己放棄的時間短，才分得出『有看 shutdown』");
         tokio::time::timeout(Duration::from_secs(30), app.background_tasks.wait())
             .await
@@ -624,7 +608,6 @@ mod tests {
         let run = db::run(app.db(), &f.run_id).await.unwrap().unwrap();
         let tid = open_turn(&app, &run, &sender.id, None, TEXT).await.expect("開了回合");
         sqlx::query("UPDATE turns SET created_at = ? WHERE id = ?").bind(db::iso_in(-600)).bind(&tid).execute(app.db()).await.unwrap();
-        // agent 閒著、輸入列是空的：字早就送出去了。
         f.env.herdr.live_pane(&f.pane, tt::LivePane { no_spinner: true, width: Some(120), ..Default::default() });
 
         let mut w = restore_open_watches(&app, "local").await.unwrap().pop().expect("還是接回來（字若還在輸入列要補 Enter）");

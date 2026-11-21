@@ -48,7 +48,6 @@ async fn extractor_rejections_are_json_like_every_other_error() {
     assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     assert!(out.contains("\"error\":\"bad_request\""), "{out}");
 
-    // 對照：handler 自己回的 JSON 錯誤原樣通過，不被重包成巢狀字串。
     let out = send(e.app.clone(), "POST /api/projects", &[auth, json_ct], r#"{"path":"relative/dir"}"#).await;
     assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     assert!(out.contains("\"message\":\"project path must be absolute (or start with ~/)\""), "{out}");

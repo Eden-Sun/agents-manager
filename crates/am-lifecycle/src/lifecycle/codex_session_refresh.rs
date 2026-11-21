@@ -245,7 +245,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn stale_fence_or_expired_observation_never_binds() {
         for case in ["fence", "expired"] {
@@ -261,7 +260,6 @@ mod tests {
             assert!(db::run(&env.app.db, &run_id).await.unwrap().unwrap().native_session_id.is_none(), "{case}");
         }
     }
-
 
     async fn native_of(env: &tt::Env, run: &str) -> Option<String> {
         sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(run).fetch_one(&env.app.db).await.unwrap()
@@ -294,7 +292,6 @@ mod tests {
         sqlx::query("UPDATE runs SET terminal_id='some-other-terminal' WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
         let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
         assert!(super::refresh_idle(&env.app, &r).await.is_none());
-        // 證據補齊後馬上再試：還在節流窗內，不打 herdr。
         sqlx::query("UPDATE runs SET terminal_id=? WHERE id=?").bind(TERMINAL).bind(&run).execute(&env.app.db).await.unwrap();
         let r = db::run(&env.app.db, &run).await.unwrap().unwrap();
         assert!(super::refresh_idle(&env.app, &r).await.is_none());

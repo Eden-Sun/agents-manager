@@ -123,7 +123,6 @@ pub async fn get_for(app: &impl crate::outbox::OutboxEnv, id: String, q: std::co
     let not_found = || LcError::NotFound("image".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?;
     let place = app.bot_place(&id).await.map_err(|e| match e {
-        // bot 不在與專案不在，對外講法不同（原本的行為）：前者 bot，後者 image；DB 出錯照「不在」處理。
         crate::outbox::BotLookup::BotMissing | crate::outbox::BotLookup::BotUnavailable => LcError::NotFound("bot".into()),
         crate::outbox::BotLookup::ProjectMissing | crate::outbox::BotLookup::ProjectUnavailable => not_found(),
     })?;

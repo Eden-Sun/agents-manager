@@ -88,7 +88,6 @@ pub async fn fork_bot(
     let requested = req.name.as_deref().map(str::trim).unwrap_or("").to_string();
     let _serial = FORK_LOCK.lock().await;
 
-    // 先看這個請求是不是已經做過（或做到一半）：DB 讀不到就是錯誤，不能當成新請求再建一顆。
     if let Some(op) = fork_ops::get(&app.db, &request_id).await.map_err(up)? {
         if op.source_bot_id != id || op.requested_name != requested {
             return Err(LcError::conflict(
@@ -96,7 +95,6 @@ pub async fn fork_bot(
                 json!({"client_request_id": request_id, "message": "這個 client_request_id 已經用在另一個 fork 請求（來源或名字不同）。要再 fork 一次請換一個 id。"}),
             ));
         }
-        // #1422：移交之後的重送也不能把它做完（那會寫 config 建出一顆啟動不了的 bot）；操作留著，收回之後重送照樣接著做。
         crate::handoff::refuse(&app.db, &op.source_bot_id).await?;
         return finish_detached(&app, op, _serial).await;
     }
@@ -105,7 +103,6 @@ pub async fn fork_bot(
     if source.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
-    // 只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來。
     if source.managed_by == "child" {
         return Err(LcError::conflict(
             "fork_child",
@@ -113,7 +110,6 @@ pub async fn fork_bot(
         ));
     }
     lifecycle::refuse_default_session(&source)?;
-    // #708／#1360：移交出去的專案不在這顆 daemon 上建 bot、也不啟動；建之前就拒絕，不留下一顆啟動不了的 bot。
     crate::handoff::refuse(&app.db, &source.id).await?;
     let Some((session_id, transcript)) = source_session(&app, &source.id).await? else {
         return Err(LcError::conflict(
@@ -125,7 +121,6 @@ pub async fn fork_bot(
         return Err(LcError::conflict(why, json!({"kind": source.kind})));
     }
     let project = db::project(&app.db, &source.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
-    // 本機才看得到對話檔；不在了 CLI 會說找不到對話然後退出，不如先講清楚。
     if project.host == LOCAL_HOST {
         if let Some(t) = transcript.as_deref().filter(|t| !t.trim().is_empty()) {
             if !std::path::Path::new(t).exists() {
@@ -134,8 +129,6 @@ pub async fn fork_bot(
         }
     }
 
-    // #1265：claude 的 fork 靠來源那段對話的檔才接得回：沒記到檔的位置就沒有證據，建 bot 之前就拒絕，不留下一顆啟動不了的 bot。
-    // 判斷與 start 搬檔用同一條查詢（同一顆來源 bot、同一個 session）。
     if source.kind == "claude" && source_transcript_path(&app, &source.id, &session_id).await?.is_none() {
         return Err(LcError::conflict(
             "no_source_transcript",
@@ -147,7 +140,6 @@ pub async fn fork_bot(
     if !valid_bot_name(&wanted) {
         return Err(LcError::Bad(format!("bot name: {BOT_NAME_RE}")));
     }
-    // 先把「要建誰、從哪個 session 分」記下來再動 config：之後任何一步中斷，重送都拿同一個目標 id 接著做。
     let op = ForkOp {
         client_request_id: request_id,
         source_bot_id: source.id.clone(),
@@ -179,8 +171,6 @@ async fn finish_detached(app: &Arc<App>, op: ForkOp, serial: tokio::sync::MutexG
 async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     let source = db::bot(&app.db, &op.source_bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let new_id = op.target_bot_id.clone();
-    // Hold the target lock before projecting it into the sidebar; a fresh `/start` must not beat
-    // the fork launch and make an unrelated session look like a successful fork.
     let target_lock = app.bot_lock(&new_id).await;
     let _target_guard = target_lock.lock().await;
 
@@ -194,7 +184,6 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
                 .iter_mut()
                 .find(|p| p.id.as_deref() == Some(source.project_id.as_str()))
                 .ok_or_else(|| anyhow::anyhow!("not-in-config"))?;
-            // 上次已經寫進 config（寫完、記狀態之前死掉）：沿用那一顆，不再插第二顆。
             if let Some(existing) = p.bots.iter().find(|b| b.id.as_deref() == Some(new_id.as_str())) {
                 *used_name.lock().unwrap() = existing.name.clone();
                 return Ok(());
@@ -209,9 +198,6 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
             let taken = |n: &str| db_names.iter().any(|x| x == n) || p.bots.iter().any(|x| x.name == n);
             let name = if taken(&wanted) { crate::runners::app_ports_p11::next_free_name(&wanted, &taken) } else { wanted.clone() };
             *used_name.lock().unwrap() = name.clone();
-            // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
-            // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。
-            // 插在來源正下方（陣列位置＝側欄順序）：分出來的那顆要看得出是誰分的，不是掉到專案最底下（使用者 2026-09-15）。
             p.bots.insert(at + 1, BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None, id: Some(new_id.clone()), name, autostart: false, herdr_session: None, create_request_id: None, create_fingerprint: None, ..src });
             Ok(())
         })
@@ -228,13 +214,11 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
         #[cfg(test)]
         lifecycle::race_point::hit("fork_after_bot_changed", &new_id).await;
 
-        // 分叉之前的訊息不會複製過來（CLI 裡有，AG Man 的對話紀錄在來源那顆）。
         if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
             let note = format!(
                 "從 {} fork 出來：接續它到目前為止的完整對話脈絡（{} session `{}`），之後各走各的。分叉前的訊息請到 {} 看。",
                 source.name, source.kind, op.session_id, source.name
             );
-            // 中斷後重送會再走到這裡：說明已經寫過就不再寫一則。
             let seen: Option<i64> = sqlx::query_scalar("SELECT 1 FROM messages WHERE conversation_id = ? AND role = 'system' AND content = ? LIMIT 1")
                 .bind(&conv)
                 .bind(&note)
@@ -250,7 +234,6 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     }
 
     if op.state == "created" {
-        // 來源身份是 ForkOp 持久化的 `source_bot_id`：重送時搬的還是同一顆來源 bot 的對話（#1168）。
         let opts = StartOpts { fork_session: Some(op.session_id.clone()), fork_source_bot: Some(op.source_bot_id.clone()), ..Default::default() };
         let (run_id, start_error) = start_fork_target_locked(app, &new_id, opts).await?;
         if let Some(error) = start_error.as_deref() {
@@ -262,7 +245,6 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
         op.run_id = run_id;
         op.start_error = start_error;
     } else {
-        // 已經有結果的重送：目標被刪掉了就明說，不假裝還在。
         match db::bot(&app.db, &new_id).await.map_err(up)? {
             Some(b) if b.deleted_at.is_none() => {}
             _ => return Err(LcError::conflict("fork_target_deleted", json!({"bot_id": new_id, "client_request_id": op.client_request_id}))),
@@ -297,13 +279,9 @@ async fn start_fork_target_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts)
             if lifecycle::run_alive(app, &run, &bot).await {
                 return Ok((Some(run.id), None));
             }
-            // `restart_start` runs with this lock held and reconciles an active run whose pane is gone.
         } else if run.native_session_id.is_some() {
-            // A session id proves the forked CLI reached its hooks before exiting; never fork it again.
             return Ok((Some(run.id), None));
         } else {
-            // The daemon may have stopped between a failed launch and persisting `fork_ops.failed`.
-            // Avoid a second provider fork when the outcome is unknown; the UI receives this error.
             return Ok((
                 None,
                 Some(format!(
@@ -399,7 +377,6 @@ mod tests {
             .await
             .unwrap();
         }
-        // 對話檔放在真的位置 `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<id>.jsonl`：fork 搬檔失敗就不啟動（#1168），不能用不合形狀的路徑。
         let transcript = e.dir.join(format!("claude-config/projects/-t/{id}.jsonl"));
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, "{}\n").unwrap();
@@ -478,7 +455,6 @@ mod tests {
         assert!(!f.autostart, "fork 不抄 autostart");
         assert!(s.autostart, "來源不動");
 
-        // 新 bot 的對話裡有一則說明從哪裡分出來的系統訊息。
         let conv = db::conversation_id(&e.app.db, &new_id).await.unwrap();
         let text: String = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id = ? AND role = 'system'")
             .bind(&conv)
@@ -626,7 +602,7 @@ mod tests {
             fork_bot(State(app), Path(s), Some(Json(ForkReq { name: None, client_request_id: Some("req-drop".into()) }))).await.map(|_| ())
         });
         reached.notified().await;
-        h.abort(); // 瀏覽器斷線：handler future 被 drop（脫離出去的工作不受影響）
+        h.abort();
         let _ = h.await;
         release.notify_one();
         crate::api::wait_work_done_for_test(&target).await;
@@ -655,7 +631,6 @@ mod tests {
         assert_eq!(first, again, "重送拿到原本的結果");
         assert_eq!(fork_bot_count(&e).await, 2, "只有來源與一顆 fork");
         assert_eq!(fork_starts(&e), 1, "provider 只被分岔一次");
-        // 明確的第二次 fork：換一個 id 才會有。
         let second = fork_with(&e, &src, None, Some("req-2")).await.unwrap();
         assert_ne!(second["bot_id"], first["bot_id"]);
         assert_eq!(second["name"], "alfa-fork-1");
@@ -766,8 +741,6 @@ mod tests {
         let manual_app = e.app.clone();
         let manual_id = target.clone();
         let manual_task = tokio::spawn(async move { lifecycle::start_bot(&manual_app, &manual_id).await });
-        // With the target lock held before projection, the manual start stays outside lifecycle
-        // until the fork has launched; without it, this hook proves the blank start won the race.
         let _manual_reached_agent_start = tokio::time::timeout(std::time::Duration::from_millis(500), manual_start_rx).await.is_ok();
 
         let _ = release_tx.send(());
@@ -834,7 +807,6 @@ mod tests {
         let src = source_bot(&e, "claude", "alfa", "user").await;
         let first = fork_with(&e, &src, None, Some("req-crash")).await.unwrap();
         let (target, run) = (first["bot_id"].as_str().unwrap().to_string(), first["run_id"].as_str().unwrap().to_string());
-        // 把紀錄倒回「啟動完、還沒記結果」。
         fork_ops::set_state(&e.app.db, "req-crash", "created", "alfa-fork", None, None).await.unwrap();
         let again = fork_with(&e, &src, None, Some("req-crash")).await.unwrap();
         assert_eq!((again["bot_id"].as_str().unwrap(), again["run_id"].as_str().unwrap()), (target.as_str(), run.as_str()));
@@ -852,7 +824,6 @@ mod tests {
         }
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fork_ops").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(n, 0, "被拒的請求不留紀錄");
-        // 合格的照常（前後空白 trim 掉）。
         let out = fork_with(&e, &src, None, Some(" req-ok.1 ")).await.unwrap();
         assert_eq!(out["name"], "alfa-fork");
     }

@@ -4,7 +4,6 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::resume_nudge::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::capabilities::Db;
     use crate::lifecycle::s6_ports::ResumeNudgeContext;
@@ -342,7 +341,6 @@ mod tests {
             .unwrap();
             let account = use_account(&e, &bot.id, &format!("cc-new-{want}")).await;
             let run = crate::lifecycle::start_bot_with(&e.app, &bot.id, strict()).await.unwrap();
-            // 換身份：啟動時把舊帳號那份複製進新帳號；之後 CLI 接著寫的是新帳號那份。
             write_transcript(&account, &bot.id, &account_body);
             settle(&e, &bot.id, &run, Some("verified")).await;
             assert_eq!(wait_out(&e, &bot.id).await, want, "{case}");

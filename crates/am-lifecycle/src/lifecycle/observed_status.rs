@@ -45,8 +45,6 @@ struct Owned {
     authority: crate::hosts::HostAuthorityKey,
 }
 
-// Ownership receipts only, not another status machine. A successor poller can inherit its
-// predecessor's receipt; aborting the old task must not lose the eventual CAS restoration.
 fn owned() -> &'static Mutex<HashMap<String, Owned>> {
     static OWNED: OnceLock<Mutex<HashMap<String, Owned>>> = OnceLock::new();
     OWNED.get_or_init(Default::default)
@@ -93,8 +91,6 @@ pub(super) async fn observe(
     kind: &str,
     text: &str,
 ) -> anyhow::Result<()> {
-    // Scope #2003 to Claude. The parser's live footer check also excludes a quoted old spinner
-    // in the reply/composer; is_screen_busy alone can find activity-shaped text elsewhere.
     if kind != "claude"
         || menu(text)
         || !super::is_screen_busy(text)
@@ -138,8 +134,6 @@ pub(super) async fn observe(
             .bind(&stamp.run.terminal_id).bind(&stamp.host).bind(stamp.generation).bind(&client.fence.conn().name).bind(turn)
             .execute(&mut *tx).await?.rows_affected() == 1;
         let since: Option<String> = if changed {
-            // Read the trigger's timestamp in the same transaction. A failed read rolls the
-            // status update back rather than leaving a working value without an owner.
             sqlx::query_scalar("SELECT agent_status_since FROM runs WHERE id=?")
                 .bind(&fresh.id).fetch_one(&mut *tx).await?
         } else { None };
@@ -175,7 +169,6 @@ pub(super) async fn finish(app: &impl LcHost, run: &str, turn: &str) -> anyhow::
         forget(run, &prior);
         return Ok(true);
     }
-    // A new in-flight turn owns the pane now; it can inherit the receipt on its first busy frame.
     if db::in_flight_turn(app.db(), run).await?.is_some() {
         return Ok(true);
     }
@@ -192,7 +185,6 @@ pub(super) async fn finish(app: &impl LcHost, run: &str, turn: &str) -> anyhow::
     let screen = client.pane_read(pane, "recent_unwrapped", 160).await?;
     if menu(&screen.text)
         || crate::capture::claude::PARSER.still_busy(&screen.text)
-        // 輸入框裡可以有使用者還沒送出的草稿（2026-10-30 hub-8p5dpe）：只要求框在、沒有 spinner。
         || !(super::pane_awaits_input("claude", &screen.text) || crate::capture::claude::composer_visible(&screen.text))
     {
         return Ok(false);
@@ -214,7 +206,6 @@ pub(super) async fn finish(app: &impl LcHost, run: &str, turn: &str) -> anyhow::
             .bind(&prior.stamp.host).bind(prior.stamp.generation).bind(&client.fence.conn().name).bind(turn).execute(app.db()).await?;
         Ok(result.rows_affected() == 1)
     })).await.transpose()?.unwrap_or(false);
-    // A newer turn may already have inherited the receipt: never erase that owner's entry.
     if changed {
         let mut map = owned().lock().unwrap_or_else(|e| e.into_inner());
         if map
@@ -291,8 +282,6 @@ pub(super) async fn settle_stale_working(app: &impl LcHost, run: &db::Run) -> an
     Ok(changed)
 }
 
-// A distinct key in the existing receipt table keeps a late working poller from retiring
-// an independently observed menu receipt. The suffix of `turn` is the consecutive-clear count.
 fn menu_key(run: &str) -> String { format!("menu:{run}") }
 
 pub(super) fn menu_owned(run: &str) -> bool { receipt(&menu_key(run)).is_some() }
@@ -366,7 +355,6 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
     };
     let plain = crate::composer_parse::strip_ansi(&read.text);
     if other_menu_owner(&plain) {
-        // An existing dialog owner now controls this pane. Never restore its status later.
         if let Some(owner) = receipt(&key) { forget(&key, &owner); }
         return Ok(true);
     }
@@ -451,16 +439,6 @@ async fn observe_menu_inner(app: &impl LcHost, run: &db::Run) -> anyhow::Result<
     Ok(true)
 }
 
-// ───────────── 誤報的 blocked（2026-11-05）：畫面上沒有任何可以回答的提示 ─────────────
-//
-// herdr 的 `agent_status=blocked` 是它自己的畫面規則猜的，會誤報，而且誤報之後常常一直停在 blocked、不再報別的狀態。
-// 網頁看到 blocked 就彈「需要回應」、側欄與晶片也畫紅色要回答——畫面上卻沒有任何選項（robins-hub `lead`：只是一段正在跑的
-// `Bash(…)` 與它的 JSON 輸出），對使用者沒有意義。這裡讀畫面：連續兩次、相隔至少 [`FALSE_BLOCK_MIN_SPAN`] 都沒有可回答的提示
-// （[`crate::tui_prompts::screen_has_answerable_prompt`]），就把 DB 的狀態改成畫面實際的樣子（working／idle／unknown）。
-// 只看 claude；一個鍵都不按；讀不到畫面、畫面有任何提示字樣、或其他 episode（防誤刪、權限框、Session paused…）擁有這個 blocked 都不動。
-// 改過之後留收據（`fblocked:<run>`）：herdr 之後報任何狀態都以 herdr 為準（`agent_status_since` 變了收據就作廢）；herdr 沒再報、
-// 畫面卻出現提示時，[`reblock_if_prompt`] 以同一個 CAS 改回 blocked。
-
 /// 畫面「沒有提示」的判斷要連續成立至少這麼久、至少兩次讀取：畫面剛換、框還沒畫出來的一瞬間不算。
 const FALSE_BLOCK_MIN_SPAN: Duration = Duration::from_millis(1000);
 
@@ -507,7 +485,6 @@ pub(super) async fn settle_false_blocked(app: &impl LcHost, run: &db::Run) -> an
         forget_clear(&run.id);
         return Ok(false);
     }
-    // 別的 episode 擁有這個 blocked（防誤刪框、權限框、Session paused、codex 對話框、#2017 補標的選單）：不動。
     if menu_owned(&run.id) || crate::blocked_reason::of(&run.id).is_some() {
         forget_clear(&run.id);
         return Ok(false);
@@ -798,7 +775,6 @@ mod tests {
         observe_menu(&f.env.app, &run).await.unwrap();
         observe_menu(&f.env.app, &run).await.unwrap();
         assert_eq!(status(&f).await, "unknown", "the queued turn must not invalidate the menu owner");
-        // The daemon-test harness records queue wakeups rather than spawning them.
         crate::lifecycle::queue::take_scheduled_flush_count(&f.run.bot_id);
         let ev = crate::herdr::Event {
             event: "pane_agent_status_changed".into(),
@@ -1225,8 +1201,6 @@ mod tests {
         assert_eq!(status(&f).await, "idle");
     }
 
-    // ───────────── 誤報的 blocked：畫面沒有可回答的提示 ─────────────
-
     const TOOL_RUNNING: &str = include_str!("answerable_fixtures/claude-false-blocked-tool-running.txt");
     const BASH_PERMISSION: &str = include_str!("fixtures/claude-2.1.287-bash-permission.txt");
 
@@ -1252,7 +1226,6 @@ mod tests {
         set_status(&f, "blocked").await;
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
         assert!(settle_twice(&f).await);
-        // 畫面是正在跑的工具呼叫（有 spinner）→ working，不是 blocked。
         assert_eq!(status(&f).await, "working");
         assert!(false_blocked_owned(&f.run.id));
     }
@@ -1266,7 +1239,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
         assert_eq!(status(&f).await, "blocked");
-        // 讀不到畫面也不動。
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), "__READ_ERROR__");
         settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap();
         assert_eq!(status(&f).await, "blocked");
@@ -1282,7 +1254,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
-        // 計數被提示打斷、重新開始：這一次又只是第一次。
         assert!(!settle_false_blocked(&f.env.app, &fresh(&f).await).await.unwrap());
         assert_eq!(status(&f).await, "blocked");
     }
@@ -1294,7 +1265,6 @@ mod tests {
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
         assert!(settle_twice(&f).await);
         assert_eq!(status(&f).await, "working");
-        // 沒有提示：不動。
         assert!(!reblock_if_prompt(&f.env.app, &fresh(&f).await).await.unwrap());
         assert_eq!(status(&f).await, "working");
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
@@ -1309,7 +1279,6 @@ mod tests {
         set_status(&f, "blocked").await;
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), TOOL_RUNNING);
         assert!(settle_twice(&f).await);
-        // herdr 之後報了 idle（agent_status_since 動了）：收據作廢，畫面上有提示也不改回 blocked。
         set_status(&f, "idle").await;
         f.env.herdr.set_screen(f.run.pane_id.as_deref().unwrap(), BASH_PERMISSION);
         assert!(!reblock_if_prompt(&f.env.app, &fresh(&f).await).await.unwrap());

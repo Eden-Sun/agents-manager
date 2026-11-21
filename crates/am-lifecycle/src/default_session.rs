@@ -34,7 +34,6 @@ pub trait DefaultSessionProjection: Send + Sync {
 /// This function intentionally does not create/close workspaces or panes. A default-session
 /// agent is adopted as an already-running Run and its pane remains user-owned.
 pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Isolation + crate::default_session::DefaultSyncLock + DefaultSessionProjection + crate::events::ports::HostSidePort + crate::events::ports::IngressCommands + crate::events::ports::TurnCommands + crate::herdr::LocalHerdr)) -> Result<()> {
-    // 使用者的 default session 屬於正式那顆 daemon；隔離實例收編它等於兩顆搶同一批 pane。
     if app.isolated() {
         return Ok(());
     }
@@ -55,7 +54,6 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
         .await?
         .into_iter()
         .filter(|p| p.host == LOCAL_HOST)
-        // #708：移交出去的專案不從 default session 匯入 agent。
         .filter(|p| p.handed_off_to.is_none())
         .collect();
     let mut seen_bots = HashSet::new();
@@ -77,7 +75,6 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
         let Some(cwd) = agent_cwd(&agent) else { continue };
         let Some(project) = projects.iter().find(|p| same_workdir(cwd, &p.path)) else { continue };
 
-        // A different/missing native session in an already occupied pane is unknown.
         let occupied: Option<(String, Option<String>)> = sqlx::query_as(
             "SELECT r.bot_id, r.native_session_id FROM runs r JOIN bots b ON b.id=r.bot_id
              WHERE b.project_id=? AND b.deleted_at IS NULL AND r.herdr_session=? AND r.pane_id=?
@@ -98,8 +95,6 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
         let active = db::active_run(app.db(), &bot_id).await?;
 
         if let Some(run) = active {
-            // An imported bot can only have a default-session run. Keep an unexpected active
-            // run in another session untouched rather than moving it under this agent.
             if run.herdr_session.as_deref().map(|s| s != SESSION).unwrap_or(false) {
                 continue;
             }
@@ -164,10 +159,6 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
         app.emit_bot_status(&bot.id).await;
     }
 
-    // A vanished default-session agent ends its Run, but its external pane is deliberately not
-    // closed. The next sync can still observe a newly detected agent in that pane.
-    // `agent.list` 空陣列不是失敗：herdr 重啟中清單還沒填好時，list 空、get 還找得到。
-    // 沒再問就標 exited，等於把還在跑的 default-session bot 收掉（之後可能再 import 成另一顆）。
     for bot in db::live_bots(app.db()).await?.into_iter().filter(|b| b.herdr_session.as_deref() == Some(SESSION)) {
         if seen_bots.contains(&bot.id) {
             continue;
@@ -183,7 +174,7 @@ pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
                         true
                     }
                 },
-                None => true, // Missing stable IDs cannot prove the run disappeared.
+                None => true,
             };
             if still_there {
                 continue;
@@ -253,8 +244,6 @@ async fn ensure_imported_bot(
     agent_name: &str,
     kind: &str,
 ) -> Result<(db::Bot, bool)> {
-    // Native session proves continuity across panes; otherwise use only an active pane
-    // in the observed default session. A nickname never imports another bot's history.
     let native = crate::lifecycle::dead_panes::herdr_session_id(agent);
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT b.id FROM bots b JOIN runs r ON r.bot_id=b.id
@@ -291,8 +280,6 @@ async fn ensure_imported_bot(
             persona: None,
             args: vec![],
             autostart: false,
-            // The agent already owns its process/config; do not rewrite its hooks when a
-            // default-session pane is merely adopted.
             inject_hooks: false,
             auto_approve: false,
             identity: None,

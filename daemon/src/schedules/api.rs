@@ -129,14 +129,12 @@ fn schedule_json(s: &Schedule) -> Value {
 async fn with_open(pool: &sqlx::SqlitePool, s: &Schedule) -> Result<Value, LcError> {
     let mut v = schedule_json(s);
     v["bot_available"] = json!(runner::eligible_bot(pool, &s.bot_id, &s.project_id).await.map_err(db_err)?);
-    // 綁的不是排程專屬 bot（舊排程）：UI 提示「轉成專屬」或「改綁到新專屬 bot」。
     let role: Option<Option<String>> = sqlx::query_scalar("SELECT role FROM bots WHERE id = ?").bind(&s.bot_id).fetch_optional(pool).await.map_err(db_err)?;
     v["bot_dedicated"] = json!(role.flatten().as_deref() == Some("scheduler"));
     v["open"] = match store::open_occurrence(pool, &s.id).await.map_err(db_err)? {
         Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
         None => Value::Null,
     };
-    // 上次執行（已結束的最近一筆，含總花費時間 `duration_ms`）：列表在「上次」旁顯示。
     v["last"] = match store::last_finished(pool, &s.id).await.map_err(db_err)? {
         Some(o) => store::occurrence_view(pool, &o).await.map_err(db_err)?,
         None => Value::Null,
@@ -232,7 +230,6 @@ pub async fn rebind(State(app): State<Arc<App>>, Path(project_id): Path<String>,
         bot_ids.insert(s.bot_id.clone());
         heads.push(s);
     }
-    // 與刪除和單筆編輯共用 bot 鎖，依 id 固定順序取得，避免交叉改綁死鎖。
     let mut locks = Vec::new();
     for id in &bot_ids { locks.push(app.bot_lock(id).await); }
     let mut guards = Vec::new();
@@ -370,7 +367,6 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     let prompt = b.prompt.clone().unwrap_or_else(|| cur.prompt.clone());
     let tz = b.tz.clone().unwrap_or_else(|| cur.tz.clone());
     let notify = b.notify.clone().unwrap_or_else(|| cur.notify.clone());
-    // 只影響之後的 done；不算內容變動（不撤回已排的、不升 generation）。
     let clear_after = i64::from(b.clear_after.unwrap_or(cur.clear_after == 1));
     let from_base = i64::from(b.from_base.unwrap_or(cur.from_base == 1));
     let retry_count = b.retry_count.unwrap_or(cur.retry_count);
@@ -410,7 +406,6 @@ pub async fn patch(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b):
     }
     let spec: Spec = serde_json::from_str(&spec_json).map_err(db_err)?;
     let next_due = if enabled {
-        // 內容、時間變了，或從停用重新啟用：從現在重算；否則保留原本的下一次。
         if content_changed || cur.enabled == 0 {
             time::validate_and_first(&spec, &tz, now_t).map_err(time_err)?.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         } else {
@@ -505,7 +500,6 @@ pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b
     let now = db::now();
     let mut tx = db::begin_write(&pool).await.map_err(db_err)?;
     let s = store::get_schedule_tx(&mut tx, &id).await.map_err(db_err)?.filter(|s| s.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("schedule".into()))?;
-    // 同一個 key 的重送：mapping 是權威，回原來那一筆（不論它現在是哪個狀態，也不論排程後來是否停用）。
     if let Some(c) = crid.as_deref() {
         if let Some(prev) = store::find_request_kind_tx(&mut tx, &id, c, b.dry_run).await.map_err(db_err)? {
             tx.commit().await.map_err(db_err)?;
@@ -515,7 +509,6 @@ pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b
     if s.enabled != 1 {
         return Err(LcError::Conflict(json!({"error": "schedule_disabled", "message": "排程已停用，先啟用再手動執行"})));
     }
-    // 新的 key：併進未結束的 occurrence（不論它是排程來的、還是手動來的），或新開一筆；不論哪一種都記下 key → 那一筆。
     let occ_id = match store::open_occurrence_tx(&mut tx, &id).await.map_err(db_err)? {
         Some(open) if !b.dry_run && open.source != "dry_run" => open.id,
         Some(_) => return Err(LcError::Conflict(json!({"error":"schedule_open", "message":"已有未結束的執行，試跑與正式執行不能合併；請先等它結束"}))),
@@ -525,7 +518,6 @@ pub async fn run_now(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b
         store::bind_request_kind_tx(&mut tx, &id, c, &occ_id, &now, b.dry_run).await.map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
-    // 只對還是 pending 的叫 enqueue；它會自己重查有效性與鎖。
     let _ = runner::enqueue(&app, &occ_id).await.map_err(db_err)?;
     let occ = store::get_occurrence(&pool, &occ_id).await.map_err(db_err)?;
     announce(&app, &s.project_id, &id).await;
@@ -559,7 +551,6 @@ async fn insert_manual(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, s: &Schedul
         generation: s.generation,
         bot_id: s.bot_id.clone(),
         prompt: if dry_run { format!("{}\n\n{}", DRY_RUN_PREFIX, s.prompt) } else { s.prompt.clone() },
-        // 手動／試跑：時間用按下當下；時段標籤用下一個排定時段（沒有就空白）。
         slot_label: serde_json::from_str::<Spec>(&s.spec_json)
             .ok()
             .and_then(|sp| time::next_slot_after(&sp, &s.tz, DateTime::parse_from_rfc3339(now).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now())).ok().flatten())

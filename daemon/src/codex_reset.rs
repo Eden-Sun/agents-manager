@@ -138,7 +138,6 @@ fn update(old: &State, forecast: &Value, feed: &Value, now: DateTime<Utc>) -> Re
         _ => false,
     };
     if upcoming {
-        // Age/probability fields may change every poll without a new announcement.
         let identity = match signal {
             Value::Object(v) => serde_json::json!({
                 "id":v.get("id"), "url":v.get("url"), "at":v.get("at"),
@@ -174,7 +173,6 @@ fn update(old: &State, forecast: &Value, feed: &Value, now: DateTime<Utc>) -> Re
             seen.push(n.id.clone());
         }
     }
-    // Keep chronological insertion order; the upstream feed is bounded, as is our restart ledger.
     if seen.len() > 1000 {
         seen.drain(..seen.len() - 1000);
     }

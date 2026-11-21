@@ -248,7 +248,6 @@
         let env = crate::testing::env().await;
         let first = crate::testing::claude_bot(&env.app, &env.project_id, "first").await;
         let second = crate::testing::claude_bot(&env.app, &env.project_id, "second").await;
-        // These rows describe two host sessions, independently of either parent's run state.
         for (bot, session) in [(&first, "session-a"), (&second, "test")] {
             sqlx::query("INSERT INTO spawn_claims (pane_id,host,bot_id,created_at,herdr_session) VALUES ('w1:p2','local',?,'2000-01-01T00:00:00.000Z',?)")
                 .bind(&bot.id).bind(session).execute(&env.app.db).await.unwrap();
@@ -344,7 +343,6 @@
         for host in ["local", "mac_builder"] {
             let env = crate::testing::env().await;
             let bot = crate::testing::claude_bot(&env.app, &env.project_id, "parent").await;
-            // A different bot's active run supplies the host session even while the parent sleeps.
             let witness = crate::testing::claude_bot(&env.app, &env.project_id, "witness").await;
             sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
             let run = crate::testing::fake_run(&env.app, &witness.id).await;

@@ -147,7 +147,6 @@ async fn nr1791_unmapped_start_exits_only_when_herdr_confirms_no_agents() {
     assert_eq!(run_of(app, &bot).await.unwrap().state, "exited", "confirmed empty herdr cannot keep a starting zombie");
 }
 
-// #1791: names are snapshots; only the pane/native session establishes identity.
 #[tokio::test]
 async fn nr1791_renamed_run_ignores_reused_names_and_project_labels() {
     let env = tt::env().await;
@@ -326,8 +325,6 @@ async fn assert_adoption_waits_for_delete_lock_and_rechecks(project_deleted: boo
     }))
     .unwrap();
 
-    // delete_bot holds this lock across its snapshot, soft delete, and cleanup. Adoption must
-    // queue behind it and then reject the stale parent/project snapshot after deletion.
     let guard = app.bot_lock(&parent.id).await.lock_owned().await;
     let (app2, client2, parent2, agent2) = (app.clone(), client.clone(), parent.clone(), agent.clone());
     let mut adoption = tokio::spawn(async move {
@@ -353,7 +350,6 @@ async fn assert_adoption_waits_for_delete_lock_and_rechecks(project_deleted: boo
             .unwrap();
     }
     drop(guard);
-    // 放鎖之後 adopt_child 還要拿 parent 的鎖、重讀 DB；忙的機器上 2 秒不夠。只是放棄的上限，結束得早就早回。
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), adoption).await.unwrap().unwrap();
     assert!(result.is_err(), "stale reconciliation state must not resurrect a deleted owner: {result:?}");
     let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id=?")
@@ -403,7 +399,6 @@ async fn a_prompt_caught_mid_delivery_by_a_restart_is_marked_unknown() {
     assert_eq!(t.auto_resend, 0, "鍵可能按過了：舊版本留下的可重送預設也關掉（#149）");
     assert!(t.delivered_at.is_some(), "送出最晚就是重啟那一刻：不退回 created_at（#149）");
 
-    // 已經證出來送到的那種不要動它。
     sqlx::query("UPDATE turns SET delivery='ok' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
     super::rearm_progress(app).await;
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
@@ -461,7 +456,6 @@ async fn the_delivery_time_is_recorded_once() {
 fn only_a_freshly_sent_turn_gets_its_watchdog_back() {
     let now = chrono::Utc::now();
     let iso = |d: chrono::Duration| (now - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    // 固定的「現在」：iso 與判斷用同一個時刻，邊界不受 runner 快慢影響。
     let fresh = |d: chrono::Duration| super::fresh_enough_at(&iso(d), now);
     assert!(fresh(chrono::Duration::seconds(5)));
     assert!(fresh(chrono::Duration::seconds(119)));
@@ -472,8 +466,6 @@ fn only_a_freshly_sent_turn_gets_its_watchdog_back() {
     assert!(!super::fresh_enough_at("not-a-time", now), "讀不懂時間就不要補");
     assert!(super::fresh_enough(&iso(chrono::Duration::seconds(5))), "帶牆鐘的版本只驗大方向");
 }
-
-// ---- #75 重開：開機恢復讀不到不算做完 ----
 
 fn ago(d: chrono::Duration) -> String {
     (chrono::Utc::now() - d).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -509,7 +501,6 @@ async fn a_turn(app: &Arc<App>, table: &str, bot: &str, run: Option<&str>, statu
     .bind(delivery)
     .bind(created_at)
     .bind(delivered_at)
-    // 排著的那一則：一小時後才到期，timer 掛上之後會一直掛著，看得到。
     .bind((status == "queued").then(|| ago(chrono::Duration::hours(-1))))
     .execute(&app.db)
     .await
@@ -543,7 +534,6 @@ async fn a_startup_recovery_that_cannot_read_turns_catches_up_once_the_db_does()
     let env = tt::env().await;
     let app = &env.app;
     let long_ago = ago(chrono::Duration::minutes(30));
-    // 重啟前就在的五件。
     let flying = a_bot(&env, "flying").await;
     let r_flying = a_run(app, &flying, "running", &long_ago, None).await;
     a_turn(app, "turns", &flying, Some(&r_flying), "in_flight", "ok", &long_ago, Some(&db::now())).await;
@@ -565,7 +555,6 @@ async fn a_startup_recovery_that_cannot_read_turns_catches_up_once_the_db_does()
     assert!(!crate::lifecycle::queue_retry_timer_armed(&waiting));
     assert_eq!(turn_state(app, "turns_unreadable", &t_orphan).await.1, "pending");
 
-    // 重啟之後才有的：這個行程自己送到一半的插隊送出、剛結束的 run 上還沒收的回合（收尾在這個行程的記憶體帳上）。
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let live_send_now = a_bot(&env, "live-send-now").await;
     let t_live_send_now = a_turn(app, "turns_unreadable", &live_send_now, None, "in_flight", "pending", &db::now(), None).await;
@@ -621,7 +610,6 @@ async fn the_startup_recovery_retries_only_what_it_still_owes() {
     let armed = stall_gen(app, &r_flying).await;
     assert!(armed.is_some() && polled(app, &r_flying).await, "讀得到的那一個當場接回");
     assert!(!polled(app, &r_orphan).await, "收不成 unknown 就先不掛：欠著");
-    // 重試期間：這個行程送到 `idle`，送達證不出來（`unknown`，照設計不掛 poller）。
     a_turn(app, "turns", &idle, Some(&r_idle), "in_flight", "unknown", &db::now(), Some(&db::now())).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(!polled(app, &r_idle).await, "開機時就沒欠的 run，之後的回合是這個行程自己的");
@@ -654,7 +642,6 @@ async fn the_startup_recovery_leaves_what_this_process_already_owns_alone() {
     super::rearm_progress(app).await;
     assert!(!polled(app, &r_flying).await, "run 清單讀不到：這一次什麼都沒接回");
 
-    // 重試期間：這個行程送出了 `taken` 的回合、自己掛上 poller 與 watchdog；另一顆 bot 重啟之後才開始跑。
     crate::lifecycle::arm_progress(app, &r_taken, &taken, &t_taken).await;
     crate::lifecycle::arm_stall(app, &r_taken, &taken, &t_taken).await;
     let own = stall_gen(app, &r_taken).await;
@@ -804,7 +791,6 @@ async fn colliding_child_names_are_stored_under_their_agent_name_and_never_abort
         assert_eq!(runs, 1, "{}: one adopted run", k.name);
     }
 
-    // A second pass never re-parents or duplicates an occupied child pane.
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(kids(alfa.clone()).await.len(), 2);
     assert_eq!(kids(bravo.clone()).await.len(), 1);
@@ -858,7 +844,6 @@ async fn an_isolated_instance_refuses_to_adopt_an_existing_pane() {
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert!(run_of(&app, &bot).await.is_none(), "隔離實例不該把正式 daemon 的 pane 收編成自己的 run");
 
-    // 正式實例照收（同一組輸入，只差這個旗標）。
     app.set_instance(None);
     register_ended_identity(&env, &bot, &pane).await;
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
@@ -877,7 +862,6 @@ async fn a_production_instance_still_adopts_through_reconcile_and_the_default_se
     let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
     let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
 
-    // reconcile：自己開的 bot pane。
     let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "alfa", json!({})).await.unwrap();
     let bot = a_bot(&env, "alfa").await;
     let agent = crate::config::agent_name("proj", &bot);
@@ -889,7 +873,6 @@ async fn a_production_instance_still_adopts_through_reconcile_and_the_default_se
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(run_of(&app, &bot).await.expect("reconcile 照收").adopted, 1);
 
-    // default session：使用者自己在專案目錄裡開的 agent。收編會寫回 config.toml，所以專案要在裡面。
     let repo = env.repo.to_string_lossy().to_string();
     let (pid, path, alfa) = (env.project_id.clone(), repo.clone(), bot.clone());
     app.cfg
@@ -926,7 +909,6 @@ async fn a_production_instance_still_adopts_through_reconcile_and_the_default_se
 async fn wait_for_call(env: &tt::Env, method: &str) {
     for _ in 0..200 {
         if env.herdr.methods().iter().any(|m| m == method) {
-            // One beat more so it is actually parked on the lock, not still between calls.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             return;
         }
@@ -965,13 +947,11 @@ async fn an_agent_that_left_while_reconcile_waited_for_the_lock_is_not_adopted()
         "name": agent, "agent": "claude", "agent_status": "idle",
         "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})];
 
-    // `stop_bot` is holding the bot's lock…
     let guard = app.bot_lock(&bot).await.lock_owned().await;
     let app2 = app.clone();
     let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
     wait_for_call(&env, "agent.list").await;
 
-    // …and finishes the stop while the reconcile waits: agent gone, pane closed, run ended.
     env.herdr.agents.lock().unwrap().clear();
     client.pane_close(&pane.pane_id).await.unwrap();
     sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
@@ -983,7 +963,6 @@ async fn an_agent_that_left_while_reconcile_waited_for_the_lock_is_not_adopted()
     drop(guard);
     rec.await.unwrap().unwrap();
 
-    // What `start_bot` finds next is the only thing that matters: nothing in its way.
     assert!(
         db::active_run(&app.db, &bot).await.unwrap().is_none(),
         "reconcile adopted the agent that had just been stopped, so the restart will refuse with `active run already exists`"
@@ -1023,8 +1002,6 @@ async fn a_stale_agent_list_does_not_roll_a_runs_status_back() {
     let rec = tokio::spawn(async move { super::reconcile_host(&app2, crate::config::LOCAL_HOST).await });
     wait_for_call(&env, "agent.list").await;
 
-    // The agent starts working while the reconcile is parked on the lock; the event
-    // handler records that in the DB.
     env.herdr.agents.lock().unwrap()[0]["agent_status"] = json!("working");
     sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=?")
         .bind(&bot)
@@ -1164,12 +1141,10 @@ async fn a_fresh_run_survives_when_herdr_cannot_confirm_its_agent(herdr_still_li
     .execute(&app.db)
     .await
     .unwrap();
-    // The new occupant's name cleared; in one variant the old entry lingers.
     let nameless = json!({
         "name": null, "agent": "claude", "agent_status": "idle",
         "workspace_id": ws.workspace_id, "tab_id": new.tab_id, "pane_id": new.pane_id, "cwd": "/tmp/p"});
     *env.herdr.agents.lock().unwrap() = vec![nameless];
-    // herdr 以名字查 agent 仍回舊的、已關掉的 pane（cb12b83d：重啟後名字還沒換過來）。
     if herdr_still_lists_the_old_pane {
         env.herdr.set_stale_agent(&agent, &old.pane_id);
     }
@@ -1288,7 +1263,6 @@ async fn a_reused_pane_id_belonging_to_a_newer_pane_is_not_closed_as_an_orphan()
     let app = env.app.clone();
     let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
     let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
-    // 兩顆都是「活著、沒有 agent」的 pane，而且都掛在某個已結束的 run 的 pane id 上。
     let orphan = client.tab_create(&ws.workspace_id, "/tmp/p", "orphan", json!({})).await.unwrap();
     let reused = client.tab_create(&ws.workspace_id, "/tmp/p", "reused", json!({})).await.unwrap();
     let ended_at = db::iso_in(-600);
@@ -1309,7 +1283,6 @@ async fn a_reused_pane_id_belonging_to_a_newer_pane_is_not_closed_as_an_orphan()
         .await
         .unwrap();
     }
-    // 只有「重用 id」那顆在 `panes` 裡，而且是那個 run 結束**之後**才第一次被看到的。
     let seen = db::iso_in(-60);
     sqlx::query(
         "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, last_output_at, first_seen, last_seen, owned_by)
@@ -1351,11 +1324,9 @@ async fn a_child_whose_pane_closed_before_the_reconcile_is_retired() {
     let kid_agent = format!("{}-kid", crate::config::agent_name("proj", &parent));
     let (kid, run) = a_child(&env, &parent, "kid", &kid_agent, &ws.workspace_id, &pane.tab_id, &pane.pane_id).await;
 
-    // `pane_closed` first…
     client.pane_close(&pane.pane_id).await.unwrap();
     env.herdr.agents.lock().unwrap().clear();
     crate::lifecycle::mark_run_exited(&app, &run, "pane exited").await;
-    // …then the reconcile.
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
 
     let b = db::bot(&app.db, &kid).await.unwrap().unwrap();
@@ -1529,11 +1500,9 @@ async fn children_are_kept_while_herdr_maintenance_is_open() {
     };
     open_until("2999-01-01T00:00:00.000Z").execute(&app.db).await.unwrap();
 
-    // 路徑 1：run 還開著，agent 不見了。
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "k1", json!({})).await.unwrap();
     let a1 = format!("{}-k1", crate::config::agent_name("proj", &parent));
     let (k1, r1) = a_child(&env, &parent, "k1", &a1, &ws.workspace_id, &p1.tab_id, &p1.pane_id).await;
-    // 路徑 2：pane_closed 先把 run 結束了。
     let p2 = client.tab_create(&ws.workspace_id, "/tmp/p", "k2", json!({})).await.unwrap();
     let a2 = format!("{}-k2", crate::config::agent_name("proj", &parent));
     let (k2, r2) = a_child(&env, &parent, "k2", &a2, &ws.workspace_id, &p2.tab_id, &p2.pane_id).await;
@@ -1549,7 +1518,6 @@ async fn children_are_kept_while_herdr_maintenance_is_open() {
         assert!(!["starting", "running", "stopping"].contains(&state.as_str()), "the run still ends: {state}");
     }
 
-    // 窗口過期：下一輪對帳就照原規則退休（過期當下由 herdr_maintenance 收尾）。
     open_until("2020-01-01T00:00:00.000Z").execute(&app.db).await.unwrap();
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     for kid in [&k1, &k2] {
@@ -1586,7 +1554,6 @@ async fn an_unreadable_maintenance_state_never_retires_a_child() {
         .execute(&app.db)
         .await
         .unwrap();
-    // 路徑 1：run 還開著，agent 不見了。路徑 2：pane_closed 先把 run 結束了。
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "k1", json!({})).await.unwrap();
     let a1 = format!("{}-k1", crate::config::agent_name("proj", &parent));
     let (k1, r1) = a_child(&env, &parent, "k1", &a1, &ws.workspace_id, &p1.tab_id, &p1.pane_id).await;
@@ -1606,21 +1573,18 @@ async fn an_unreadable_maintenance_state_never_retires_a_child() {
     let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&r1).fetch_one(&app.db).await.unwrap();
     assert_eq!(state, "exited", "run 照樣結束，留著的是子 bot");
 
-    // DB 恢復，窗口還開著：照樣留。
     maintenance_readable(&app, true).await;
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     for kid in [&k1, &k2] {
         assert!(!retired(&app, kid).await, "還在維護：留著");
     }
 
-    // 兩顆都沒有 active run 了，再讀不到一次：一樣不退休。
     maintenance_readable(&app, false).await;
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     for kid in [&k1, &k2] {
         assert!(!retired(&app, kid).await, "沒有 active run 也不因為讀不到而退休");
     }
 
-    // 窗口確定結束、pane 也沒回來：延後的那一輪自己補跑，照原規則退休（這之後沒有任何人叫 reconcile）。
     sqlx::query("DELETE FROM herdr_maintenance_unreadable").execute(&app.db).await.unwrap();
     maintenance_readable(&app, true).await;
     let _ = crate::testing::eventually!(retired(&app, &k1).await && retired(&app, &k2).await);
@@ -1664,7 +1628,6 @@ async fn an_agm_child_is_not_retired_when_its_agent_is_gone() {
         a_child(&env, &agm, "k-agm", &format!("{}-k", crate::config::agent_name("proj", &agm)), &ws.workspace_id, &pa.tab_id, &pa.pane_id).await;
     let (user_kid, _) =
         a_child(&env, &user, "k-user", &format!("{}-k", crate::config::agent_name("proj", &user)), &ws.workspace_id, &pu.tab_id, &pu.pane_id).await;
-    // run 留著開著，只讓 herdr 不再列這兩個 agent。
     env.herdr.agents.lock().unwrap().clear();
     client.pane_close(&pa.pane_id).await.unwrap();
     client.pane_close(&pu.pane_id).await.unwrap();
@@ -1682,8 +1645,6 @@ async fn an_agm_child_is_not_retired_when_its_agent_is_gone() {
     assert_eq!(refusals[0].0.as_deref(), Some(agm_kid.as_str()));
     assert!(refusals[0].1.contains("reconcile_agent_gone"), "帶原因：{}", refusals[0].1);
     assert!(refusals[0].1.contains("AGM 開出去的子 agent"), "帶角色：{}", refusals[0].1);
-    // 同一顆、同一輪不會越推越多：第二次沿用上一則那把鑰匙（#536；以前是牆上時鐘的小時格，兩次對帳
-    // 跨過整點就變兩則，這條斷言因此會間歇性紅）。
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert!(!retired(&app, &agm_kid).await);
     assert_eq!(retire_refusals(&app).await.len(), 1, "一小時只推一次，跨整點也一樣");
@@ -1748,7 +1709,6 @@ async fn a_child_whose_run_exit_was_not_recorded_is_not_retired() {
     assert_eq!(state, "running", "前提：結束沒寫進去");
     assert!(!retired(&app, &kid).await, "run 還活著就不退休");
 
-    // 寫得進去之後，延後的那一輪自己把它收掉並退休。
     sqlx::query("DROP TRIGGER exit_unwritable").execute(&app.db).await.unwrap();
     let _ = crate::testing::eventually!(retired(&app, &kid).await);
     assert!(retired(&app, &kid).await, "結束寫進去之後照原規則退休");
@@ -1809,7 +1769,6 @@ async fn a_spawned_child_is_adopted_with_the_model_its_argv_names() {
         json!({"name": kid_agent, "agent": "claude", "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"}),
     ];
-    // The parent's `haiku` must be ignored: a user bot's model is configuration.
     env.herdr.set_argv(&root.pane_id, &["claude", "--dangerously-skip-permissions", "--model", "haiku"]);
     env.herdr.set_argv(&kid_pane.pane_id, &["claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]);
 
@@ -1829,7 +1788,6 @@ async fn a_spawned_child_is_adopted_with_the_model_its_argv_names() {
     let p = db::bot(&app.db, &parent).await.unwrap().unwrap();
     assert_eq!(p.model, None, "a user bot's model is configuration, never scraped from its process");
 
-    // `/model` leaves argv untouched, so argv must not win a rematch.
     sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
@@ -1874,7 +1832,6 @@ async fn an_agy_child_run_records_the_model_its_argv_names_as_its_runtime_model(
     assert_eq!((kid.kind.as_str(), kid.model.as_deref()), ("agy", Some("gemini-3.8-flash-medium")));
     let run = run_of(&app, &kid.id).await.unwrap();
     assert_eq!(run.runtime_model.as_deref(), Some("gemini-3.8-flash-medium"), "run 也記 argv 的模型");
-    // 之後別的來源寫過的不蓋。
     sqlx::query("UPDATE runs SET runtime_model = 'gemini-3.1-pro-high' WHERE id = ?").bind(&run.id).execute(&app.db).await.unwrap();
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(run_of(&app, &kid.id).await.unwrap().runtime_model.as_deref(), Some("gemini-3.1-pro-high"));
@@ -2114,7 +2071,6 @@ async fn a_late_herdr_kind_repairs_an_existing_child_and_its_identity() {
         .unwrap();
     assert_eq!(first.kind, "claude", "前提：第一輪沒有 kind／argv，只能暫時退回 parent");
     assert_eq!(first.identity.as_deref(), Some("cc1"));
-    // As if the first pass had read a Claude account off the pane: a kind change must drop it.
     sqlx::query("UPDATE runs SET runtime_identity = 'cc1' WHERE bot_id = ?").bind(&first.id).execute(&app.db).await.unwrap();
 
     let argv = codex_argv();
@@ -2239,7 +2195,6 @@ async fn a_spawned_childs_identity_is_the_account_its_own_pane_runs_on() {
     let env = tt::env().await;
     let app = env.app.clone();
     let home = dirs::home_dir().unwrap().to_string_lossy().to_string();
-    // Two accounts, spelled the two ways an identity may spell one.
     app.cfg
         .update(|c| {
             c.identities =
@@ -2291,7 +2246,6 @@ async fn a_spawned_childs_identity_is_the_account_its_own_pane_runs_on() {
     env.herdr.set_pid(&head.pane_id, 4924);
     env.herdr.set_pid(&lost.pane_id, 4925);
     env.herdr.set_pid(&same.pane_id, 4926);
-    // The parent's pane says `cc2` too, and must never be read: user config.
     let fake = Arc::new(FakeProcEnv {
         envs: std::collections::BTreeMap::from([
             (1, claude_env(&format!("{home}/.claude-cc2"))),
@@ -2326,11 +2280,8 @@ async fn a_spawned_childs_identity_is_the_account_its_own_pane_runs_on() {
     assert_eq!(head_bot.identity.as_deref(), Some("cc2"), "read off its own pane's CLAUDE_CONFIG_DIR");
     assert_eq!(head_bot.model.as_deref(), Some("claude-opus-5-5"), "the same process_info still fills the model through the shared mapping");
 
-    // An unclaimed directory is no answer: the inherited value stays.
     assert_eq!(kid("lost").await.identity.as_deref(), Some("cc1"));
 
-    // The run records what was actually read off the pane — also when it equals the inherited
-    // value — and stays NULL (UI: 未知) when nothing was: the inherited `cc1` is only a guess.
     let run_identity = |name: &'static str| {
         let app = app.clone();
         let kid = kid(name);
@@ -2344,7 +2295,6 @@ async fn a_spawned_childs_identity_is_the_account_its_own_pane_runs_on() {
     let p = db::bot(&app.db, &parent).await.unwrap().unwrap();
     assert_eq!(p.identity.as_deref(), Some("cc1"), "a user bot's account is configuration, never scraped");
 
-    // Once per child, never the parent: a per-pass `ps` is an ssh storm on remote hosts.
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(*fake.asked.lock().unwrap(), vec![4924, 4925, 4926]);
     assert_eq!(kid("head").await.identity.as_deref(), Some("cc2"));
@@ -2385,7 +2335,6 @@ async fn an_explicitly_claimed_stranger_is_adopted_as_its_child() {
     assert_eq!(r.adopted, 1);
     assert_eq!(r.pane_id.as_deref(), Some(kid_pane.pane_id.as_str()));
 
-    // Idempotent: a second pass reuses the bot rather than making a twin.
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ? AND deleted_at IS NULL")
         .bind(&parent)
@@ -2547,7 +2496,6 @@ async fn a_native_subagent_hook_on_the_parent_does_not_disturb_pane_based_adopti
     .await
     .unwrap();
 
-    // 父 bot 自己觸發一個 in-process Task 工具子代理：純可見性，不建立任何 pane。
     crate::hookrecv::process(
         &app,
         &crate::hookrecv::HookBody {
@@ -2597,7 +2545,6 @@ async fn a_native_subagent_hook_on_the_parent_does_not_disturb_pane_based_adopti
         .expect("the grandchild was adopted exactly like without the hook");
     assert_eq!(grand.parent_bot_id.as_deref(), Some(kid.id.as_str()), "血緣認領完全不看 subagent_json");
 
-    // hookless：child／grandchild 自己一路都沒收過任何 hook，`subagent_json` 仍是 NULL。
     for id in [&kid.id, &grand.id] {
         let s: Option<String> = sqlx::query_scalar("SELECT subagent_json FROM runs WHERE bot_id = ?").bind(id).fetch_one(&app.db).await.unwrap();
         assert_eq!(s, None, "child 沒有 hook，不該憑空冒出快照");
@@ -2619,7 +2566,6 @@ async fn spawn_hints_keep_a_new_tab_full_of_children_from_chaining_or_duplicatin
     let parent_agent = crate::config::agent_name("proj", &parent);
     insert_idle_parent_run(&app, &parent, &ws.workspace_id, &root, &parent_agent).await;
 
-    // 一個全新的 tab（不是父自己的），裡面連續開三顆——今晚實戰的形狀。
     let p1 = client.tab_create(&ws.workspace_id, "/tmp/p", "kids", json!({})).await.unwrap();
     let p2 = client.pane_split(&p1.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
     let p3 = client.pane_split(&p2.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
@@ -2631,8 +2577,6 @@ async fn spawn_hints_keep_a_new_tab_full_of_children_from_chaining_or_duplicatin
     };
     let (name1, name2, name3) = (format!("{parent_agent}-k1"), format!("{parent_agent}-k2"), format!("{parent_agent}-k3"));
 
-    // 三次分開的 reconcile pass，模擬三次 `agent start` 之間真的會有的時間差——正是今晚串成鏈的時序。
-    // 父 agent 自己全程還活著（它自己的 pane 一路都在清單裡）。
     crate::spawn_hints::record(&app, &parent, &p1.pane_id).await.unwrap();
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
@@ -2652,7 +2596,6 @@ async fn spawn_hints_keep_a_new_tab_full_of_children_from_chaining_or_duplicatin
         assert_eq!(c.parent_bot_id.as_deref(), Some(parent.as_str()), "{} 要掛在真正的父 bot 底下，不是前一顆子代理", c.name);
     }
 
-    // 用過的 hint 已經被消耗掉；再跑一次（這次沒有新 hint）靠既有的血緣配對，不該長出任何東西。
     assert!(crate::spawn_hints::for_host(&app, crate::config::LOCAL_HOST).await.unwrap().is_empty(), "hint 用完就該被消耗掉");
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id IS NOT NULL").fetch_one(&app.db).await.unwrap();
@@ -2679,12 +2622,10 @@ async fn a_spawn_hint_that_arrives_after_the_pass_still_gets_the_child_adopted()
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&format!("{parent_agent}-draft"), &kid_pane)];
     bind_listed_instances(&env).await;
 
-    // 子 agent 出現的那一輪：還沒有線索，不認領。
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
     assert_eq!(n, 0, "沒有線索的那輪不該認領");
 
-    // 父 bot 的 PostToolUse 晚到；之後沒有任何人再叫 reconcile。
     crate::hookrecv::process(
         &app,
         &crate::hookrecv::HookBody {
@@ -2741,7 +2682,6 @@ async fn nr1892_terminal_migration_is_idempotent_and_keeps_legacy_identity_unkno
     assert_eq!(db::run(&env.app.db,&run_id).await.unwrap().unwrap().terminal_id.as_deref(), Some("saved-terminal"));
 }
 
-// Fake herdr replies deliberately omit agent_session, as they can at initial adoption.
 fn nr1892_agent(pane: &crate::herdr::PaneInfo, name: &str, terminal: &str) -> Value {
     json!({"name":name, "agent":"claude", "agent_status":"idle", "pane_id":pane.pane_id,
         "workspace_id":pane.workspace_id, "tab_id":pane.tab_id, "terminal_id":terminal})
@@ -2778,10 +2718,8 @@ async fn macos_local_nr1892_terminal_restores_child_watch_and_completion_after_r
         let run = db::active_run(&env.app.db, &kid).await.unwrap().unwrap();
         assert_eq!(run.terminal_id.as_deref(), Some("child-terminal"));
         assert_eq!(run.native_session_id, None);
-        // Let the original adoption seed read an empty screen before the new daemon exists.
         assert!(tt::eventually!(env.herdr.calls.lock().unwrap().iter().any(|(method, args)|
             method == "pane.read" && args["pane_id"] == pane.pane_id && args["source"] == "recent_unwrapped" && args["lines"] == 200)));
-        // The capture holds the bot lock through the read/store; wait until it has finished.
         drop(env.app.bot_lock(&kid).await.lock_owned().await);
         crate::events::unwatch_pane_on_session(&env.app, &host, "test", &pane.pane_id).await;
         let subscriptions_before = env.herdr.calls_to("events.subscribe").iter()
@@ -2798,8 +2736,6 @@ async fn macos_local_nr1892_terminal_restores_child_watch_and_completion_after_r
         let conv = db::conversation_id(&restarted.db, &kid).await.unwrap();
         let turn_id = tokio::time::timeout(std::time::Duration::from_secs(12), async {
             loop {
-                // Capture inserts the completed turn before its messages; status alone
-                // is not yet a completion that notify_turn can deliver.
                 if let Some(id) = sqlx::query_scalar::<_, String>(
                     "SELECT t.id FROM turns t WHERE t.conversation_id=? AND t.status='completed_fallback'
                            AND t.completed_at IS NOT NULL
@@ -2808,7 +2744,6 @@ async fn macos_local_nr1892_terminal_restores_child_watch_and_completion_after_r
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }).await.expect("restarted reconcile must capture the child's completed reply");
-        // Wait for the same capture's cursor/emit work to finish, not an arbitrary delay.
         let capture_lock = restarted.bot_lock(&kid).await;
         let _capture_guard = capture_lock.lock().await;
         let captured_reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
@@ -2816,23 +2751,18 @@ async fn macos_local_nr1892_terminal_restores_child_watch_and_completion_after_r
         assert!(captured_reply.contains("庫存檢查完成，測試通過。"));
         assert_eq!(db::run(&restarted.db, &run.id).await.unwrap().unwrap().agent_status, "idle");
         drop(_capture_guard);
-        // Parent is mid-turn: the production path must durably queue the restored child's notice.
         let parent_run = db::active_run(&restarted.db, &parent_id).await.unwrap().unwrap();
         let parent_conv = db::conversation_id(&restarted.db, &parent_id).await.unwrap();
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(db::ulid()).bind(&parent_conv).bind(&parent_run.id).bind(db::now()).execute(&restarted.db).await.unwrap();
-        // Terminal-fallback completions wait out a short settle window (child_done FALLBACK_SETTLE_SECS)
-        // before they are reported; age the capture past it instead of sleeping.
         sqlx::query("UPDATE turns SET completed_at=? WHERE id=?")
             .bind((chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
             .bind(&turn_id).execute(&restarted.db).await.unwrap();
-        // Immediate notification is disabled under cfg(test); invoke its production handler.
         crate::runners::child_done::notify_turn(&restarted, &turn_id).await.unwrap();
         let crid = format!("child-done:{kid}:{turn_id}");
         let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.client_request_id=?")
             .bind(&parent_id).bind(&crid).fetch_one(&restarted.db).await.unwrap();
         assert_eq!(notices, 1, "{host}: the parent must get a durable completion notice");
-        // The CLI identity can arrive later; terminal evidence permits recording it.
         env.herdr.agents.lock().unwrap()[1]["agent_session"] = json!({"kind":"id","value":"late-native"});
         super::reconcile_host(&restarted, &host).await.unwrap();
         assert_eq!(db::run(&restarted.db, &run.id).await.unwrap().unwrap().native_session_id.as_deref(), Some("late-native"));
@@ -2865,7 +2795,7 @@ async fn nr1892_terminal_matching_keeps_native_conflicts_and_legacy_nulls_closed
         (None, Some("native"), Some("term"), Some("term"), true),
         (Some("a"), Some("b"), Some("term"), Some("term"), false),
         (Some("a"), Some("a"), Some("old"), Some("new"), true),
-        (Some("a"), None, None, None, true), // existing grok fallback remains unchanged
+        (Some("a"), None, None, None, true),
     ] {
         run.native_session_id = native.map(str::to_owned);
         run.terminal_id = terminal.map(str::to_owned);
@@ -2875,7 +2805,6 @@ async fn nr1892_terminal_matching_keeps_native_conflicts_and_legacy_nulls_closed
         assert_eq!(super::matches_run(&run,&agent,true), expected, "{native:?}/{seen_native:?}/{terminal:?}/{seen_terminal:?}");
         if native.is_none() { agent.pane_id = "another-pane".into(); assert!(!super::matches_run(&run,&agent,true)); }
     }
-    // Legacy NULL cannot be backfilled from the current occupant, even with a parent claim.
     crate::spawn_hints::claim(&env.app,&parent,&pane.pane_id).await.unwrap();
     *env.herdr.agents.lock().unwrap() = vec![nr1892_agent(&pane,"old","new-terminal")];
     super::reconcile_host(&env.app,"local").await.unwrap();
@@ -2883,7 +2812,6 @@ async fn nr1892_terminal_matching_keeps_native_conflicts_and_legacy_nulls_closed
     assert_eq!(kept.id,id);
     assert_eq!(kept.terminal_id,None);
     assert!(env.app.pane_watchers.lock().await.is_empty());
-    // Matching terminal IDs on the wrong host/session must not attach a child either.
     sqlx::query("DELETE FROM spawn_claims WHERE pane_id=?").bind(&pane.pane_id).execute(&env.app.db).await.unwrap();
     sqlx::query("UPDATE runs SET terminal_id='new-terminal' WHERE id=?").bind(&id).execute(&env.app.db).await.unwrap();
     let other = format!("nr1892-other-{}", db::ulid());
@@ -2931,7 +2859,6 @@ async fn a_child_without_a_herdr_session_is_kept_by_its_pane_after_a_restart() {
         .await
         .unwrap();
     }
-    // herdr 對 grok 不回 agent_session。
     let agent_json = |name: &str, kind: &str, pane: &crate::herdr::PaneInfo| {
         json!({"name": name, "agent": kind, "agent_status": "idle",
                "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"})
@@ -2972,7 +2899,6 @@ async fn a_shim_spawn_claim_that_arrives_after_the_pass_still_gets_the_child_ado
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.unwrap();
     assert_eq!(n, 0, "沒有登記的那輪不該認領");
 
-    // shim 的 claim 晚到；之後沒有任何人再叫 reconcile。
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
     let (status, _) = crate::runners::credential_spawn::claim(
@@ -3022,12 +2948,10 @@ async fn an_unreadable_spawn_hint_defers_adoption_instead_of_guessing_by_tab() {
         sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id IS NOT NULL ORDER BY name").fetch_all(&app.db).await.unwrap()
     };
 
-    // k1 那一輪讀得到：照 hint 掛在父底下。
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(children(app.clone()).await.len(), 1);
 
-    // k2、k3 出現的那兩輪 hint 讀不到：k1 已經是那個 tab 的候選 parent，退回推斷就會串鏈。
     sqlx::query("ALTER TABLE spawn_hints RENAME TO spawn_hints_unreadable").execute(&app.db).await.unwrap();
     env.herdr.agents.lock().unwrap().push(agent_json(&name2, &p2));
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
@@ -3036,7 +2960,6 @@ async fn an_unreadable_spawn_hint_defers_adoption_instead_of_guessing_by_tab() {
     let kids = children(app.clone()).await;
     assert_eq!(kids.len(), 1, "hint 讀不到的那幾輪一顆都不認領，不猜：{kids:?}");
 
-    // DB 恢復：延後的那一輪自己補跑，照 hint 認領，沒有鏈、沒有重複。
     sqlx::query("ALTER TABLE spawn_hints_unreadable RENAME TO spawn_hints").execute(&app.db).await.unwrap();
     let mut kids;
     let _ = crate::testing::eventually!({
@@ -3116,7 +3039,6 @@ async fn without_spawn_hints_a_new_tab_full_of_children_stays_unknown() {
     };
     let (name1, name2, name3) = (format!("{parent_agent}-k1"), format!("{parent_agent}-k2"), format!("{parent_agent}-k3"));
 
-    // 父 agent 自己全程還活著（它自己的 pane 一路都在清單裡）。
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&parent_agent, &root), agent_json(&name1, &p1)];
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     env.herdr.agents.lock().unwrap().push(agent_json(&name2, &p2));
@@ -3205,7 +3127,6 @@ async fn an_unnamed_hinted_agent_without_a_usable_argv_name_gets_a_name_from_its
     let app = env.app.clone();
     let (_client, parent, parent_agent, root, split) = parent_with_split_pane(&env).await;
     crate::spawn_hints::record(&app, &parent, &split.pane_id).await.unwrap();
-    // 別顆 bot 的名字（前綴對不上）、`--name` 後面沒東西都不能用。
     env.herdr.set_argv(&split.pane_id, &["claude", "--name", "someone-else-fix"]);
     *env.herdr.agents.lock().unwrap() = vec![named_agent_json(&parent_agent, &root), unnamed_agent_json(&split)];
 
@@ -3337,7 +3258,6 @@ async fn an_unnamed_agent_in_a_panes_with_an_active_run_is_not_adopted_as_a_chil
     super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
 
     assert!(all_children(&app).await.is_empty(), "有人的 run 住在這顆 pane：不能再收成子 agent");
-    // 原本的流程把名字放回去（用的是那顆 bot 自己的名字，不是 `<parent>-…`）。
     let renames = env.herdr.calls_to("agent.rename");
     assert_eq!(renames.len(), 1, "{renames:?}");
     assert_eq!(renames[0]["name"], json!(sibling_agent));
@@ -3357,10 +3277,8 @@ fn argv_name_reads_long_short_and_equals_forms() {
 #[test]
 fn unnamed_child_suffix_prefers_a_legal_argv_suffix_and_falls_back_to_the_pane_id() {
     use super::unnamed_child_suffix as s;
-    // pane id 轉成 herdr 名字的字元集：小寫、非英數換成 `-`。
     assert_eq!(s("w9FY:p6A", "hub-kytpg9").as_deref(), Some("w9fy-p6a"));
     assert_eq!(super::unnamed_child_suffix_from("w9FY:p6A", "hub-kytpg9", Some("hub-kytpg9-om-fix")).as_deref(), Some("om-fix"));
-    // 前綴對不上、字尾含不合法字元、整個放不進 32 字：改用 pane id。
     for argv_name in ["other-om-fix", "hub-kytpg9-Om Fix", "hub-kytpg9-", "hub-kytpg9-aaaaaaaaaaaaaaaaaaaaaaaa"] {
         assert_eq!(
             super::unnamed_child_suffix_from("w9FY:p6A", "hub-kytpg9", Some(argv_name)).as_deref(),
@@ -3368,9 +3286,7 @@ fn unnamed_child_suffix_prefers_a_legal_argv_suffix_and_falls_back_to_the_pane_i
             "{argv_name}"
         );
     }
-    // pane id 太長（放不進 32 字）：留右邊、去掉開頭的 `-`。
     assert_eq!(s("ws-100000001:p100000003", "hub-kytpg9").as_deref(), Some("100000001-p100000003"));
-    // 母名已經把 32 字用完、一個字都放不下的時候：不改名。
     assert_eq!(s("w9FY:p6A", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), None);
 }
 
@@ -3412,7 +3328,6 @@ async fn a_claimed_child_keeps_its_parent_against_the_name_prefix_and_a_later_re
     };
     let kid_name = format!("{a_agent}-kid");
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&a_agent, &root), agent_json(&b_agent, &tab_b), agent_json(&kid_name, &kids)];
-    // B 開的：即使名字前綴說是 A，仍只接受 claim 的 bot ID。
     crate::spawn_hints::claim(&app, &b, &kids.pane_id).await.unwrap();
 
     bind_listed_instances(&env).await;
@@ -3430,7 +3345,6 @@ async fn a_claimed_child_keeps_its_parent_against_the_name_prefix_and_a_later_re
     let claims = crate::spawn_hints::claims_for_host(&app, crate::config::LOCAL_HOST).await.unwrap();
     assert_eq!(claims.get(&kids.pane_id), Some(&b), "認領之後 claim 還在");
 
-    // 之後被改名成別的前綴（還是 A 的）：同一顆 child、同一個 parent，run 記新名字。
     let renamed = format!("{a_agent}-renamed");
     *env.herdr.agents.lock().unwrap() = vec![agent_json(&a_agent, &root), agent_json(&b_agent, &tab_b), agent_json(&renamed, &kids)];
     bind_listed_instances(&env).await;
@@ -3499,7 +3413,6 @@ async fn a_run_whose_agent_is_gone_still_exits() {
         .await
         .unwrap();
     }
-    // herdr lists only one of the two.
     *env.herdr.agents.lock().unwrap() = vec![json!({
         "name": live_agent, "agent": "claude", "agent_status": "idle",
         "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id,

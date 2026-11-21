@@ -22,7 +22,6 @@ const WARM_COMPACT_WINDOW_SECS: i64 = 15 * 60;
 /// 收件匣重播或兩個來源各報一次：這段時間內已有壓縮說明就不再寫。
 const DEDUPE_SECS: i64 = 120;
 
-// 開頭由 `cache_clock::COMPACT_NOTE_PREFIXES` 統一定義（cache 倒數／保溫靠它認出「最後一次壓縮」）。
 const IDLE_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[0];
 const AUTO_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[1];
 const MANUAL_NOTE: &str = am_base::cache_clock::COMPACT_NOTE_PREFIXES[2];
@@ -107,7 +106,6 @@ fn is_note(content: &str) -> bool {
 /// 不是 agent 的回覆，不存成終端擷取泡泡。
 pub fn is_screen_notice(text: &str) -> bool {
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    // `/compact` 做完 claude 會列出摘要裡帶回來的檔案（`Referenced file …`、`Read … (N lines)`，#1762）。
     let restored = |l: &str| {
         l.starts_with("Referenced file ") || (l.starts_with("Read ") && l.ends_with(" lines)")) || l.starts_with("Loaded ")
     };
@@ -196,10 +194,6 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
             .await?;
     let write_note = !warm && !recent.iter().any(|c| is_note(c));
 
-    // 這次壓縮自己的回合：(a) pane 轉 working 開出來的 external 空回合（沒有 prompt、沒有任何訊息）；
-    // (b) 使用者打的 `/compact`（終端直接打的 UserPromptSubmit 或網頁送的，#1762）——只有 `/compact` 這則 user 訊息、
-    // 還沒有回覆。兩種都不會有 Stop，這裡收掉；終端備援就不會再把畫面上的壓縮提示存成回覆。
-    // 其他有 prompt 的回合（自動壓縮發生在使用者回合中間）照常等 Stop。
     let own_turn = match db::in_flight_turn(app.db(), &run.id).await? {
         Some(t) => {
             let (users, others): (i64, i64) = sqlx::query_as(
@@ -223,7 +217,6 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
         None => None,
     };
     let manual_command = own_turn.as_ref().is_some_and(|(_, command)| *command);
-    // 遠端沒帶 `agm_compact`（hook.sh 還是舊版）時，至少知道是手動 `/compact`。
     if manual_command && info.is_none() {
         info = Some(CompactInfo { trigger: Some("manual".into()), ..Default::default() });
     }
@@ -252,7 +245,6 @@ pub async fn record<H: HookHost>(app: &H, bot: &db::Bot, run: &db::Run, payload:
         app.emit_turn(&turn).await;
         app.schedule_flush_queued(&bot.id);
     }
-    // 壓縮之後 cache 倒數要停（`run.cache_compacted`）：馬上推一次狀態，不等下一次狀態變動。
     app.emit_bot_status(&bot.id).await;
     Ok(())
 }

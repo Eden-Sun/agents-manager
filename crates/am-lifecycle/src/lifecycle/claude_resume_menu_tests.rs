@@ -1,10 +1,6 @@
 use super::*;
 use crate::tui_prompts::{cold_resume_choice, ResumeChoice};
-// 真實 2.1.304 PTY 畫面，2026-10-20 重新擷取；獨立 binary 副本、拋棄式 cwd/session、safe-mode。
-// Max 5x / Opus 4.6[1m]；只修改自己的 transcript timestamp（2h）與 usage/iterations（1M）。
-// 沒有自然等待 2h，也沒有真的發送 1M tokens。畫面由 @xterm/headless 80x24 從 script(1) raw stream 還原。
 const ACTUAL: &str = include_str!("fixtures/claude-2.1.304-cold-resume.txt");
-// 尚未實機重現：依 2.1.304 binary 的固定字串與無編號選項合成；帳號 idle 功能旗標未開。
 const SYNTHETIC: &str = include_str!("fixtures/claude-2.1.304-cold-resume-unsent-synthetic.txt");
 #[test]
 fn cold_resume_actual_is_not_ready_an_error_a_reply_or_a_human_question() {

@@ -27,7 +27,6 @@ fn clean(line: &str) -> String {
     let s: String = line
         .chars()
         .map(|c| match c {
-            // Keep bar glyphs for the fallback pct parser; drop frame / chrome.
             '│' | '┌' | '┐' | '└' | '┘' | '─' | '├' | '┤' | '┬' | '┴' | '┼' | '▎' | '▔' | '↓' => ' ',
             c => c,
         })
@@ -125,10 +124,6 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
     let dt = match (month, day) {
         (Some(month), Some(day)) => {
             let naive = |y: i32| NaiveDate::from_ymd_opt(y, month, day).and_then(|d| d.and_hms_opt(h, m, 0));
-            // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
-            // 先略過肯定早於門檻的候選，再解析本地時間；因此過去年份的 DST gap 不會中止搜尋。
-            // 日期本身不存在（2/29 遇到平年）就跳過那一年；仍在門檻內的候選若落在 DST gap 就放棄，
-            // 不換成別年的同一天。
             let nearest = || -> Option<DateTime<chrono_tz::Tz>> {
                 let cutoff = now - chrono::Duration::days(1);
                 for year in [now.year() - 1, now.year(), now.year() + 1] {
@@ -146,8 +141,6 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
             nearest()?
         }
         _ => {
-            // Time-only: today, or tomorrow if that time already passed (both in `tz`, not host local).
-            // 明天是「日曆上的明天、同一個牆上時刻」，不能 `+ 24 小時`：跨 DST 的那一天會差一小時（#1743）。
             let today = now.date_naive().and_hms_opt(h, m, 0)?;
             let tomorrow = || -> Option<_> {
                 let tomorrow = now.date_naive().succ_opt()?.and_hms_opt(h, m, 0)?;
@@ -159,7 +152,6 @@ pub fn parse_claude_reset(line: &str, now: DateTime<Local>) -> Option<String> {
                 chrono::LocalResult::Ambiguous(first, second) => {
                     [first, second].into_iter().filter(|dt| dt > &now).min().or_else(tomorrow)?
                 }
-                // Preserve the existing behavior for a wall time that does not exist during a spring DST jump.
                 chrono::LocalResult::None => return None,
             }
         }
@@ -201,7 +193,6 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
             i += 1;
             continue;
         };
-        // 純文字（`claude -p "/usage"`）：百分比與重置時間都在同一行。
         if let Some(used_pct) = parse_used_pct(&lines[i]) {
             let resets_at = resets_tail(&lines[i]).and_then(|t| parse_claude_reset(t, now));
             let w = Window { observed_at: None, used_pct, resets_at };
@@ -213,7 +204,6 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
             i += 1;
             continue;
         }
-        // 舊的 TUI 對話框：標題、長條、`Resets` 各一行。
         let mut pct = None;
         let mut resets = None;
         let mut j = i + 1;
@@ -373,18 +363,9 @@ pub fn probe_command(bin: &str, env: &BTreeMap<String, String>, with_usage: bool
     for (k, v) in env.iter().filter(|(k, _)| crate::tools::valid_env_name(k)) {
         pfx.push_str(&format!("{k}={} ", crate::hosts::sh_quote(v)));
     }
-    // claude 2.1.274 起認得這個變數：`0` 讓第一個 non-interactive turn 不等 MCP server 連線。
-    // 這支只問登入狀態跟 `/usage`，從不用到工具，MCP 起得慢或掛掉不該拖慢額度探測、甚至把探測
-    // 拖到 timeout（issue #80）。只在這支 throwaway probe 命令裡加；一般 managed bot 的啟動指令
-    // 是完全分開的路徑（`lifecycle/start.rs`），不會被這裡影響到，工具可用性維持原樣。放在
-    // identity 自己的 env 之後：就算某個身份自己也設了同名變數，probe 要的 `0` 一律蓋過去。
-    // 舊版 CLI（2.1.274 之前）不認得這個變數，當成一般環境變數忽略，行為跟現在一樣，安全。
     pfx.push_str("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0 ");
     let b = crate::hosts::sh_quote(bin);
     let auth = crate::tools::CLAUDE_LOGIN_ARGS.join(" ");
-    // `/usage` 先要結構化版本（claude 2.1.273 起：`usage_report` 帶 kind／percent／ISO resets_at／scope）。
-    // `grep -m1` 沒抓到（舊 CLI 不認 `--output-format`、或還沒有這個欄位）才跑純文字版給 [`parse_claude_usage`]。
-    // 只要登入答案的 target（[`Target::login_only`]）不跑 `/usage`：那一格的額度由裸 target 負責，多跑一次是純成本。
     let usage = if with_usage {
         format!(
             "{pfx}{b} -p '/usage' --output-format stream-json --verbose </dev/null 2>/dev/null | grep -m1 usage_report \
@@ -422,8 +403,6 @@ pub fn parse_claude_usage_report(segment: &str, account: Option<&str>) -> Option
             Some("weekly_all") => seven = win(row),
             Some("weekly_scoped") => {
                 let model = row.pointer("/scope/model/display_name").and_then(Value::as_str).unwrap_or_default();
-                // 2.1.273 實機是 `Fable`；帶版號的 `Fable 5.1` 也要認，不然 `fable` 窗永遠是 None，
-                // 撞限的保底時間與 `mission::pick` 的桶判斷都會退回猜測（review 2026-09-16「沒把握」一節）。
                 if model.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("fable")) {
                     fable = win(row);
                 }
@@ -574,7 +553,6 @@ pub async fn run_marked_pane<T>(
     };
     let pane_id = pane.pane_id.clone();
 
-    // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.
     tokio::time::sleep(Duration::from_millis(700)).await;
     let mut sends = 1u32;
     let mut sent_at = tokio::time::Instant::now();
@@ -792,7 +770,6 @@ pub fn skip_disabled_default(
 /// 這台主機上有沒有不帶身份、正在跑的 claude bot（它們用的就是預設帳號）。
 pub async fn unnamed_claude_running(app: &impl crate::capabilities::Db, host: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
-        // run 實際的身份（issue #238）：記了就用它，沒記才用 bot 設定的。
         "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE r.state IN ('starting','running','stopping') AND p.host = ? AND b.deleted_at IS NULL
             AND b.kind = 'claude'
@@ -802,7 +779,6 @@ pub async fn unnamed_claude_running(app: &impl crate::capabilities::Db, host: &s
     .fetch_one(app.db())
     .await
     .map(|n| n > 0)
-    // 讀不到就當有：寧可多探一次，也不要把正在用的預設帳號弄瞎。
     .unwrap_or(true)
 }
 
@@ -830,9 +806,6 @@ pub fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -
         for (k, v) in &id.env {
             env.insert(k.clone(), expand_home(v, i.home));
         }
-        // 「這個身份就是預設帳號嗎」只能有一份規則：`env.is_empty()` 會把只帶
-        // `ANTHROPIC_BASE_URL`（沒有 CLAUDE_CONFIG_DIR）的身份算成獨立帳號，跟 statusline 那邊
-        // 的落點不一致，同一個帳號的數字會分裂在兩格（review 2026-09-16）。
         let shares_default = crate::quota::identity_shares_default("claude", &id.env);
         if shares_default && id.env.is_empty() {
             bare_names.push(id.name.clone());

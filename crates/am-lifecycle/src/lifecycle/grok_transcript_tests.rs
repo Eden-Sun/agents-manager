@@ -24,7 +24,6 @@ fn a_fresh_history_is_two_exchanges_without_the_context_entries() {
     assert!(ex[0].prompt.starts_with("你是 agents-manager-mkng2n-g5（repo Eden-Sun/agents-manager"), "{}", ex[0].prompt);
     assert!(!ex[0].prompt.contains("<user_query>"), "外層標籤拿掉");
     assert!(ex[0].closed);
-    // 帶 tool_calls 的那幾則是中途的旁白，回覆是最後一則沒有 tool_calls 的。
     assert!(ex[0].reply.as_deref().unwrap().starts_with("已接手 `fix/xreview-grok` 的未提交改動並完成收尾。"), "{:?}", ex[0].reply);
     assert_eq!(ex[1].prompt_index, Some(1));
     assert!(ex[1].prompt.starts_with("繼續剛才的接手工作"));
@@ -49,7 +48,6 @@ fn a_compacted_history_keeps_the_replayed_prompt_and_the_pending_one() {
 #[test]
 fn the_session_is_picked_by_the_pane_process_then_by_a_unique_cwd() {
     let s = |sid: &str, pid: i64, cwd: &str| ActiveSession { session_id: sid.into(), pid, cwd: cwd.into() };
-    // 2026-10-03 真機：同一個 cwd 同時開著四顆 grok。
     let active = parse_active(
         r#"[{"session_id":"01a10136-175e-7480-a7a0-64b5b49c5e54","pid":1875628,"cwd":"/home/u/agents-manager","opened_at":"2026-10-03T10:01:25.135106874Z"},
             {"session_id":"01a10187-dcbd-7702-8927-d12eab9fd583","pid":513147,"cwd":"/home/u/agents-manager","opened_at":"2026-10-03T11:30:44.042502623Z"},
@@ -227,7 +225,6 @@ async fn a_hookless_grok_child_records_its_exchanges_from_chat_history() {
         .unwrap();
     assert_eq!(keys, vec![("completed".into(), "p0".into()), ("completed".into(), "p1".into())]);
 
-    // herdr 同一輪報好幾次 idle、daemon 重啟再認領：不重記。
     assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     assert!(!super::super::poller::capture_hookless_turn_locked(&app, &c.run_id, true).await.unwrap());
     assert_eq!(messages(&app, &c.conv).await.len(), 4);
@@ -266,7 +263,6 @@ async fn several_grok_sessions_in_one_cwd_each_pane_reads_its_own() {
     let _ = proc.wait();
     let got = synced.unwrap();
     if got != (Synced::Read { imported: 2, pending: None }) {
-        // `Unavailable` 有五個回傳點（run／bot 不在、不是 transcript run、session 或對話檔找不到），這裡把 run／bot 狀態印出來分辨。
         let run = db::run(&app.db, &c.run_id).await.unwrap().map(|r| (r.state, r.adopted, r.native_session_id));
         let bot = db::bot(&app.db, &c.bot.id).await.unwrap().map(|b| (b.kind, b.inject_hooks));
         panic!("sync_locked = {got:?}; run(state, adopted, native_session_id) = {run:?}; bot(kind, inject_hooks) = {bot:?}");
@@ -288,7 +284,6 @@ async fn a_relayed_prompt_is_the_user_message_and_its_reply_lands_on_the_same_tu
     assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, "/effort high").await.is_none(), "slash 指令不開回合");
     assert!(messages(&app, &c.conv).await.is_empty(), "slash 指令的回音不是對話");
     let tid = super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[0].prompt).await.expect("交辦開回合");
-    // 收件方忙的時候送來的下一句：先記下來，等它自己的回合。
     assert!(super::super::relay_watch::open_turn(&app, &run, &parent.id, None, &want[1].prompt).await.is_none());
 
     assert!(super::super::poller::try_fallback(&app, &c.run_id, Some(&tid)).await.unwrap(), "對話檔收掉這一回合");
@@ -507,7 +502,6 @@ async fn an_unrelated_writer_between_the_reply_read_and_the_import_does_not_fail
     .execute(&app.db)
     .await
     .unwrap();
-    // hook 記下的回音是截斷的（不是畫面刮的，不用換原文）：對得上這一問，第一句就是讀回覆。
     let clipped: String = want[0].prompt.chars().take(30).collect::<String>() + " …";
     insert_message(&app, &c.conv, Some(&tid), "user", &clipped, "hook", false, None).await.unwrap();
     insert_message(&app, &c.conv, Some(&tid), "assistant", "我先讀 AG Man 指示，並在既有\nworktree 看…", "terminal_fallback", true, Some("snap")).await.unwrap();

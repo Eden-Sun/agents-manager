@@ -164,8 +164,6 @@ impl PortalEnv for App {
     }
 }
 
-// ───────── 路由用的 axum handler（舊名由原模組 re-export） ─────────
-
 /// `GET /api/bots/{id}/outbox`
 pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> Result<Response, LcError> {
     crate::outbox::list_for(&app, id).await
@@ -203,7 +201,6 @@ mod tests {
         let place = e.app.bot_place(&bot.id).await.unwrap();
         assert_eq!(place.host, crate::config::LOCAL_HOST);
         assert_eq!(e.app.bot_place("no-such-bot").await.unwrap_err(), BotLookup::BotMissing);
-        // 外鍵不讓 bot 指到不存在的專案：這一條連線暫時關掉外鍵檢查，造出「bot 在、專案不在」。
         let mut conn = e.app.db.acquire().await.unwrap();
         sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await.unwrap();
         sqlx::query("UPDATE bots SET project_id = 'ghost-project' WHERE id = ?").bind(&bot.id).execute(&mut *conn).await.unwrap();

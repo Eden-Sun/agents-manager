@@ -55,7 +55,6 @@ mod tests {
             "只有兩個壞回合，掃幾輪都還是兩個"
         );
 
-        // 第三個**不同的**回合才到門檻。
         note_notify_round(&app, "responder", turns(&["C"]), false).await;
         assert_eq!(snapshot(&app, RESPONDER).await.unwrap().failed_turns.len(), NOTIFY_STALL_LIMIT);
     }
@@ -70,10 +69,8 @@ mod tests {
         note_notify_round(&app, "responder", turns(&["C"]), true).await;
         assert!(snapshot(&app, RESPONDER).await.unwrap().failed_turns.is_empty(), "這一輪有回合跑完＝通的");
 
-        // 不是角色的事件（一般 bot）不要在表裡長出永遠不會被 refresh 清掉的項目。
         note_notify_round(&app, "some-bot", turns(&["t9"]), false).await;
         assert!(app.role_faults.lock().await.get("some-bot").is_none());
-        // 什麼都沒看到的一輪不要無中生有一個項目。
         note_notify_round(&app, "patrol", turns(&[]), false).await;
         assert!(snapshot(&app, Role::Patrol).await.is_none());
     }
@@ -144,8 +141,6 @@ mod tests {
         assert_eq!(reason(&app, RESPONDER).await, Some(REASON_NOTIFY_STALLED));
         assert!(snapshot(&app, RESPONDER).await.unwrap().since.is_some(), "要記下第一次看到的時間");
 
-        // 回合跑完就歸零，下一拍自己恢復——不用任何人來按。**畫面照樣讀不到**：notify 那一半的證據
-        // 在集合裡，不該因為看不到畫面就把已經解除的結論繼續留著。
         note_notify_round(&app, "responder", turns(&[]), true).await;
         refresh(&app).await;
         assert!(snapshot(&app, RESPONDER).await.unwrap().probe_failed, "畫面仍然讀不到");
@@ -195,7 +190,6 @@ mod tests {
         assert!(snapshot(&app, RESPONDER).await.is_some());
         assert!(snapshot(&app, Role::Patrol).await.is_none(), "巡檢還沒建立：不留紀錄");
 
-        // 角色被拆掉（bot 刪了、登記清空）之後，上一輪留下的項目也要跟著消失。
         sqlx::query("UPDATE supervisor_roles SET bot_id=NULL").execute(&app.db).await.unwrap();
         refresh(&app).await;
         assert!(snapshot(&app, RESPONDER).await.is_none(), "不再建立就不留陳舊的結論");

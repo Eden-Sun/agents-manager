@@ -338,13 +338,10 @@ max_turn_cost_microusd = 500000
     fn validated_disabled_returns_ok_none() {
         let mut cfg = ApiBotCfg { max_turn_cost_microusd: Some(100), ..Default::default() };
 
-        // global off, api_bot off -> Ok(None)
         assert_eq!(cfg.validated(false), Ok(None));
 
-        // global on, api_bot off -> Ok(None)
         assert_eq!(cfg.validated(true), Ok(None));
 
-        // global off, api_bot on -> Ok(None)
         cfg.enabled = true;
         assert_eq!(cfg.validated(false), Ok(None));
     }
@@ -353,15 +350,12 @@ max_turn_cost_microusd = 500000
     fn validated_budget_validation() {
         let mut cfg = ApiBotCfg { enabled: true, ..Default::default() };
 
-        // None budget is rejected when enabled
         cfg.max_turn_cost_microusd = None;
         assert!(cfg.validated(true).is_err());
 
-        // 0 budget is rejected
         cfg.max_turn_cost_microusd = Some(0);
         assert!(cfg.validated(true).is_err());
 
-        // Valid cost 1..=i64::MAX
         cfg.max_turn_cost_microusd = Some(1);
         let limits = cfg.validated(true).unwrap().unwrap();
         assert_eq!(limits.max_turn_cost_microusd, 1);
@@ -370,7 +364,6 @@ max_turn_cost_microusd = 500000
         let limits = cfg.validated(true).unwrap().unwrap();
         assert_eq!(limits.max_turn_cost_microusd, i64::MAX);
 
-        // Overflow i64::MAX is rejected
         cfg.max_turn_cost_microusd = Some(i64::MAX as u64 + 1);
         assert!(cfg.validated(true).is_err());
 
@@ -382,7 +375,6 @@ max_turn_cost_microusd = 500000
     fn validated_limits_mapping_and_boundaries() {
         let mut cfg = ApiBotCfg { enabled: true, max_turn_cost_microusd: Some(1000), ..Default::default() };
 
-        // Default valid check
         let limits = cfg.validated(true).unwrap().unwrap();
         assert_eq!(limits.max_api_calls_per_turn, 20);
         assert_eq!(limits.max_requests_per_hour, 0);
@@ -393,7 +385,6 @@ max_turn_cost_microusd = 500000
         assert_eq!(limits.max_tool_output_bytes, 65536);
         assert_eq!(limits.max_turn_cost_microusd, 1000);
 
-        // max_api_calls_per_turn boundaries (1..=64)
         cfg.max_api_calls_per_turn = 0;
         assert!(cfg.validated(true).is_err());
         cfg.max_api_calls_per_turn = 1;
@@ -404,7 +395,6 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_api_calls_per_turn = 20;
 
-        // max_requests_per_hour boundaries (0＝不限, 1..=10000)
         cfg.max_requests_per_hour = 0;
         assert!(cfg.validated(true).is_ok());
         cfg.max_requests_per_hour = 1;
@@ -415,11 +405,10 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_requests_per_hour = 60;
 
-        // turn_timeout_secs boundaries (1..=3600)
         cfg.turn_timeout_secs = 0;
         assert!(cfg.validated(true).is_err());
         cfg.turn_timeout_secs = 1;
-        cfg.command_timeout_secs = 1; // command_timeout_secs must be <= turn_timeout_secs
+        cfg.command_timeout_secs = 1;
         assert!(cfg.validated(true).is_ok());
         cfg.turn_timeout_secs = 3600;
         cfg.command_timeout_secs = 300;
@@ -429,7 +418,6 @@ max_turn_cost_microusd = 500000
         cfg.turn_timeout_secs = 300;
         cfg.command_timeout_secs = 60;
 
-        // command_timeout_secs boundaries (1..=300 and <= turn_timeout_secs)
         cfg.command_timeout_secs = 0;
         assert!(cfg.validated(true).is_err());
         cfg.command_timeout_secs = 1;
@@ -439,12 +427,11 @@ max_turn_cost_microusd = 500000
         cfg.command_timeout_secs = 301;
         assert!(cfg.validated(true).is_err());
         cfg.command_timeout_secs = 300;
-        cfg.turn_timeout_secs = 100; // command_timeout_secs > turn_timeout_secs
+        cfg.turn_timeout_secs = 100;
         assert!(cfg.validated(true).is_err());
         cfg.turn_timeout_secs = 300;
         cfg.command_timeout_secs = 60;
 
-        // max_output_tokens boundaries (1..=64000)
         cfg.max_output_tokens = 0;
         assert!(cfg.validated(true).is_err());
         cfg.max_output_tokens = 1;
@@ -455,7 +442,6 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_output_tokens = 8192;
 
-        // max_checkpoint_bytes boundaries (1..=8388608)
         cfg.max_checkpoint_bytes = 0;
         assert!(cfg.validated(true).is_err());
         cfg.max_checkpoint_bytes = 1;
@@ -466,7 +452,6 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_checkpoint_bytes = 8_388_608;
 
-        // max_tool_output_bytes boundaries (1..=1048576)
         cfg.max_tool_output_bytes = 0;
         assert!(cfg.validated(true).is_err());
         cfg.max_tool_output_bytes = 1;
@@ -477,7 +462,6 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.max_tool_output_bytes = 65536;
 
-        // compact_at_input_tokens boundaries (0 or 50000..=900000)
         cfg.compact_at_input_tokens = 0;
         assert!(cfg.validated(true).is_ok());
         cfg.compact_at_input_tokens = 49_999;
@@ -490,7 +474,6 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.compact_at_input_tokens = 150_000;
 
-        // clear_tool_uses_at_input_tokens boundaries (0 or 20000..=900000)
         cfg.clear_tool_uses_at_input_tokens = 0;
         assert!(cfg.validated(true).is_ok());
         cfg.clear_tool_uses_at_input_tokens = 19_999;
@@ -503,21 +486,18 @@ max_turn_cost_microusd = 500000
         assert!(cfg.validated(true).is_err());
         cfg.clear_tool_uses_at_input_tokens = 100_000;
 
-        // clear_tool_uses_keep (1..=50)
         cfg.clear_tool_uses_keep = 0;
         assert!(cfg.validated(true).is_err());
         cfg.clear_tool_uses_keep = 51;
         assert!(cfg.validated(true).is_err());
         cfg.clear_tool_uses_keep = 3;
 
-        // clear_tool_uses_clear_at_least (1000..=100000)
         cfg.clear_tool_uses_clear_at_least = 999;
         assert!(cfg.validated(true).is_err());
         cfg.clear_tool_uses_clear_at_least = 100_001;
         assert!(cfg.validated(true).is_err());
         cfg.clear_tool_uses_clear_at_least = 5000;
 
-        // auto_lower_effort_turn_cost_microusd (0=None, 1..=i64::MAX)
         cfg.auto_lower_effort_turn_cost_microusd = Some(0);
         assert_eq!(cfg.validated(true).unwrap().unwrap().auto_lower_effort_turn_cost_microusd, None);
         cfg.auto_lower_effort_turn_cost_microusd = Some(500_000);

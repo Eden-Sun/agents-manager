@@ -33,8 +33,6 @@ fn identity_entry(i: &IdentityCfg, home: &str) -> Option<String> {
         }
         kvs.push(format!("{key}={value}"));
     }
-    // agy 的預設帳號（內建 `ag0`，沒有自己的 HOME）：明寫真家目錄。shim 對「沒有帳號目錄」的身份會 `unset` 那個變數，
-    // 對 claude／codex 是回到預設目錄，對 agy 卻是 `unset HOME`；而且母 bot 若是 ag1（HOME＝影子家目錄），子 pane 要換回真的家。
     if i.kind == "agy" && kvs.is_empty() && !home.is_empty() && token_ok(home, &BAD_VALUE) {
         kvs.push(format!("HOME={home}"));
     }

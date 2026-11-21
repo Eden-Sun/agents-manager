@@ -36,11 +36,9 @@ fn without_list(screen: &str) -> String {
 #[test]
 fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
     for (cmd, raw) in [("/rewind", REWIND), ("/model", MODEL), ("/effort", EFFORT), ("/compact", COMPACT)] {
-        // `plain-5h`：舊格式 `5h:` 狀態列，也要過同一組判讀（`5h left` 之外的另一種額度段）。
         let old_status = plain(raw).replace("5h left 96%", "5h:96%");
         for (form, screen) in [("ansi", raw.to_string()), ("plain", plain(raw)), ("plain-5h", old_status)] {
             let ctx = format!("{cmd} {form}");
-            // fixture 形狀：選中列縮排兩格、帶說明欄，在輸入框上方；輸入框是第 0 欄 `❯`＋NBSP＋指令。
             let rows: Vec<String> = screen.lines().map(strip_ansi).collect();
             let sel = rows.iter().position(|r| r.starts_with(&format!("  ❯ {cmd} "))).unwrap_or_else(|| panic!("{ctx}: 沒有選中列"));
             let boxed = rows.iter().rposition(|r| r.trim_end() == format!("❯\u{a0}{cmd}")).unwrap_or_else(|| panic!("{ctx}: 沒有輸入框"));
@@ -52,7 +50,6 @@ fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
             let lines: Vec<&str> = screen.lines().collect();
             let base_lines: Vec<&str> = base.lines().collect();
 
-            // 輸入框位置與內容。
             assert_eq!(box_state("claude", &screen), box_state("claude", &base), "{ctx}: box_state");
             assert_eq!(box_state("claude", &screen), BoxState::NonEmpty, "{ctx}: 框裡有指令");
             assert_eq!(composer_text("claude", &screen), composer_text("claude", &base), "{ctx}: composer_text");
@@ -63,22 +60,18 @@ fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
             assert_eq!(composer_holds_prompt("claude", &screen, cmd), composer_holds_prompt("claude", &base, cmd), "{ctx}: composer_holds_prompt");
             assert_eq!(prompt_suggestion("claude", &screen), None, "{ctx}: 清單不是建議下一句");
 
-            // 回音索引與送達判讀：回音是使用者上一則，不是清單選中列。
             assert_eq!(after_last_prompt_echo("claude", &lines), after_last_prompt_echo("claude", &base_lines), "{ctx}: 回音索引");
             assert_eq!(last_prompt_echo_text("claude", &screen), last_prompt_echo_text("claude", &base), "{ctx}: 回音文字");
             if form == "plain" {
-                // 樣式讀的回音列前面有 ESC 碼，本來就讀不到（跟清單無關）；純文字讀要拿到使用者那句。
                 assert_eq!(last_prompt_echo_text("claude", &screen).as_deref(), Some(ECHO), "{ctx}: 回音文字");
             }
             assert_eq!(echo_row_hits("claude", &screen, ECHO), echo_row_hits("claude", &base, ECHO), "{ctx}: echo_row_hits");
             assert_eq!(echo_row_hits("claude", &screen, cmd), 0, "{ctx}: 選中列不算 `{cmd}` 的回音");
             assert_eq!(extract_reply("claude", &screen), extract_reply("claude", &base), "{ctx}: extract_reply");
-            // 樣式（ansi）讀不出回覆本來就是 None（跟清單無關，同一張基準畫面也一樣）；純文字讀要拿到 PONG。
             if form != "ansi" {
                 assert_eq!(extract_reply("claude", &screen).as_deref(), Some("PONG"), "{ctx}: 清單不進回覆");
             }
 
-            // rewind／換模型的畫面判讀。
             assert_eq!(crate::claude_live::parse(&screen), crate::claude_live::parse(&base), "{ctx}: claude_live::parse");
             assert!(crate::rewind::parse_menu(&screen).is_none(), "{ctx}: 不是 rewind 選單");
             assert!(!crate::rewind::in_rewind_ui(&screen), "{ctx}: 不在 rewind 畫面");
@@ -86,7 +79,6 @@ fn claude_290_suggestion_list_reads_like_the_same_screen_without_it() {
         }
     }
 }
-
 
 /// 只有整塊貼著框、帶選中列的清單才切：回覆最後一段縮排的 `/路徑` 不算清單，照樣是回覆。
 #[test]

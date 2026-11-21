@@ -106,7 +106,6 @@ impl SseParser {
                 self.event = Some(value.to_string());
                 self.saw_field = true;
             }
-            // id／retry／未知欄位：Responses 不用，忽略（不算事件內容）。
             _ => {}
         }
         Ok(())

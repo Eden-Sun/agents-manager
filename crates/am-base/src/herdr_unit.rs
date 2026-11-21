@@ -28,7 +28,6 @@ impl UnitStart {
         if !cfg!(target_os = "linux") {
             return None;
         }
-        // SAFETY: getuid 沒有前置條件，也不會失敗。
         let uid = unsafe { libc::getuid() };
         Self::systemd(uid, std::env::var_os("XDG_RUNTIME_DIR").is_some(), session)
     }
@@ -85,8 +84,6 @@ pub fn start_server(session: &str, log_dir: &std::path::Path, unit: Option<&Unit
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errlog));
-    // Detach: the herdr server outlives the daemon and is not part of its terminal's
-    // foreground process group.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     crate::local_sh::reap_in_background(cmd.spawn()?);

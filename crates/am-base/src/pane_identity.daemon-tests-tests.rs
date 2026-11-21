@@ -56,7 +56,6 @@
         let var = "CLAUDE_CONFIG_DIR";
         assert_eq!(identity_named(&ids, "claude", var, "/Users/me", "/Users/me/.claude-cc2/"), Some("cc2".into()));
         assert_eq!(identity_named(&ids, "claude", var, "/Users/me", "/Users/me/.claude-ccompany"), Some("cc1".into()));
-        // Unclaimed dir / wrong kind: no answer, caller keeps the inherited value.
         assert_eq!(identity_named(&ids, "claude", var, "/Users/me", "/Users/me/.claude-other"), None);
         assert_eq!(identity_named(&ids, "codex", "CODEX_HOME", "/Users/me", "/Users/me/.claude-cc2"), None);
     }
@@ -72,7 +71,6 @@
         assert_eq!(child_identity(&ids, "claude", var, h, None), Some("cc0".into()));
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/me/.claude-ccompany")), Some("cc1".into()));
         assert_eq!(child_identity(&ids, "claude", var, h, Some("/Users/me/.claude-other")), None);
-        // 沒有空 env 身份（只剩 cc1）時，預設目錄／沒覆寫＝預設帳號（空字串），不是「不認得」。
         assert_eq!(child_identity(&ids[1..], "claude", var, h, None), Some(String::new()));
     }
 

@@ -86,8 +86,6 @@ pub async fn fail(pool: &SqlitePool, turn_id: &str, delivery: DeliveryOnFail, wh
 
 /// [`fail`] 的交易內版本：要跟系統訊息綁在同一個交易裡時用。
 pub async fn fail_on(conn: &mut sqlx::SqliteConnection, turn_id: &str, delivery: DeliveryOnFail, why: &str) -> Result<Outcome> {
-    // `completed_at` 用 COALESCE：收尾時間只記第一次。這一條路的起點永遠是 `in_flight`（還沒收尾、
-    // 欄位是 NULL），所以行為跟直接蓋一樣；但規則跟 `set_status` 一致，之後不會有人各寫各的。
     let sql = format!(
         "UPDATE turns SET status='failed', delivery={}, completed_at=COALESCE(completed_at, ?) WHERE id=? AND status='in_flight'",
         delivery.sql()
@@ -307,10 +305,8 @@ pub async fn fail_with_native_evidence(
 /// 送達結果寫回時照證據打開。
 pub async fn claim_queued(conn: &mut sqlx::SqliteConnection, turn_id: &str, run_id: &str) -> Result<Outcome> {
     edge("queued", "in_flight", "認領排隊")?;
-    // 掛的交辦此刻已經不要了也不認領（#159）：flush 讀完交辦到這一句之間才被取消的，同一句擋下。
     let withdrawn = super::queue::WITHDRAWN_ASSIGNMENT.map(|s| format!("'{s}'")).join(",");
     let schedule_allowed = super::queue::scheduled_turn_allowed_sql("turns.id");
-    // 專家派工的依據在認領的同一句核對（關閉開關等先提交就認領不到，留在佇列由 flush 重驗撤回），見 `relay_grant`。
     let grants_ok = super::relay_grant::queued_turn_grants_ok_sql("turns.id");
     let done = sqlx::query(&format!(
         "UPDATE turns SET status='in_flight', run_id=?, auto_resend=0, claimed_from_queue=1
@@ -434,13 +430,10 @@ mod tests {
                 assert!(!is_legal(s, active), "{s} 不可以回到 {active}");
             }
         }
-        // 真正的死路（`completed`／`failed`）一條出邊都沒有；`completed_fallback` 只有往 `completed` 那一條。
         assert!(outgoing("completed").is_empty() && outgoing("failed").is_empty(), "終局不該有出邊");
         assert_eq!(outgoing("completed_fallback"), vec!["completed"]);
-        // `completed_fallback` 是唯一一個還能往前走的終局狀態——遲到的 hook 把回覆補上。
         assert!(is_legal("completed_fallback", "completed"));
         assert!(!is_legal("completed", "completed_fallback"));
-        // 這條是 #76 現況表漏掉的真實邊：漏了它去建 trigger，每一次放回佇列都會爆。
         assert!(is_legal("in_flight", "queued"), "defer_queued_turn 要放得回去");
         assert!(!is_legal("queued", "completed"), "沒送出去的不可能直接完成");
     }
@@ -463,12 +456,10 @@ mod tests {
             .await
             .unwrap();
 
-        // 合法：認領過的放回佇列，以及收尾。
         sqlx::query("UPDATE turns SET status='queued' WHERE id='t1'").execute(&app.db).await.expect("in_flight -> queued 是合法的");
         sqlx::query("UPDATE turns SET status='in_flight' WHERE id='t1'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='completed' WHERE id='t1'").execute(&app.db).await.unwrap();
 
-        // 非法：終局回到進行中。任何路徑都不行——擋在 DB，繞不過去。
         for bad in ["in_flight", "queued"] {
             let err = sqlx::query("UPDATE turns SET status=? WHERE id='t1'")
                 .bind(bad)
@@ -479,7 +470,6 @@ mod tests {
         }
         let still: String = sqlx::query_scalar("SELECT status FROM turns WHERE id='t1'").fetch_one(&app.db).await.unwrap();
         assert_eq!(still, "completed", "被擋下來的那一句一個欄位都沒改");
-        // 冪等重寫照樣放行。
         sqlx::query("UPDATE turns SET status='completed' WHERE id='t1'").execute(&app.db).await.unwrap();
     }
 
@@ -519,7 +509,6 @@ mod tests {
         let admitted = crate::lifecycle::fence::Admitted::for_test(&run);
         let ev = |s, t| NativeEvidence { session_id: Some(s), turn_id: Some(t) };
 
-        // 收尾：unknown 的送達升成 ok，native id 跟 status 同一句寫進去。
         let t = turn_in(app, &conv, Some(&run), "in_flight", "unknown").await;
         let mut c = app.db.acquire().await.unwrap();
         assert_eq!(complete_with_native_evidence(&mut c, &t, &admitted, ev("s1", "p1")).await.unwrap(), Outcome::Applied);
@@ -528,7 +517,6 @@ mod tests {
         assert_eq!((r.native_session_id.as_deref(), r.native_turn_id.as_deref()), (Some("s1"), Some("p1")));
         let first_done = r.completed_at.clone();
         assert!(first_done.is_some());
-        // 重複的 hook：不再收一次，native id 與收尾時間都不被蓋掉；StopFailure 後到也一樣。
         assert_eq!(
             complete_with_native_evidence(&mut c, &t, &admitted, ev("s1", "p2")).await.unwrap(),
             Outcome::Raced { now: "completed".into() }
@@ -537,7 +525,6 @@ mod tests {
         let r = row(app, &t).await;
         assert_eq!((r.native_turn_id.as_deref(), r.completed_at), (Some("p1"), first_done));
 
-        // 舊世代：回合掛在別的 run 上。放行的是這一代，收不到它。
         let other_run = crate::testing::fake_run(app, &crate::testing::claude_bot(app, &e.project_id, "shape-other").await.id).await;
         let stale = turn_in(app, &conv, Some(&other_run), "in_flight", "ok").await;
         assert!(matches!(complete_with_native_evidence(&mut c, &stale, &admitted, ev("s9", "p9")).await.unwrap(), Outcome::Fenced(_)));
@@ -545,7 +532,6 @@ mod tests {
         let r = row(app, &stale).await;
         assert_eq!((r.status.as_str(), r.native_turn_id), ("in_flight", None), "一個欄位都沒改");
 
-        // StopFailure：收成 failed，`delivery` 不動（字送出去了，失敗的是回合）。
         sqlx::query("UPDATE turns SET status='failed', completed_at=? WHERE id=?").bind(crate::db::now()).bind(&stale).execute(&app.db).await.unwrap();
         let f = turn_in(app, &conv, Some(&run), "in_flight", "ok").await;
         assert_eq!(fail_with_native_evidence(&mut c, &f, &admitted, ev("s1", "p4")).await.unwrap(), Outcome::Applied);
@@ -563,21 +549,18 @@ mod tests {
         sqlx::query("UPDATE runs SET state='running' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         let mut c = app.db.acquire().await.unwrap();
 
-        // 認領先到：撤銷撤不回來。
         let q = turn_in(app, &conv, None, "queued", "pending").await;
         assert_eq!(claim_queued(&mut c, &q, &run).await.unwrap(), Outcome::Applied);
         assert_eq!(retract_queued(&mut c, &q).await.unwrap(), Outcome::Raced { now: "in_flight".into() });
         let r = row(app, &q).await;
         assert_eq!((r.status.as_str(), r.delivery.as_str(), r.run_id.as_deref()), ("in_flight", "pending", Some(run.as_str())));
 
-        // 放回佇列：拔掉 run、記一次重試、排下一次；已經不在飛的放不回去。
         assert_eq!(return_to_queue(&mut c, &q, "2099-01-01T00:00:00.000Z").await.unwrap(), Outcome::Applied);
         let r = row(app, &q).await;
         assert_eq!((r.status.as_str(), r.run_id.as_deref(), r.flush_retries), ("queued", None, 1));
         assert_eq!(return_to_queue(&mut c, &q, "2099-01-01T00:00:00.000Z").await.unwrap(), Outcome::Raced { now: "queued".into() });
         assert_eq!(row(app, &q).await.flush_retries, 1, "沒放回去就不多記一次");
 
-        // 撤銷先到：認領不到，也不會把它拉回進行中。
         assert_eq!(retract_queued(&mut c, &q).await.unwrap(), Outcome::Applied);
         let r = row(app, &q).await;
         assert_eq!((r.status.as_str(), r.delivery.as_str(), r.next_flush_at), ("failed", "failed", None));
@@ -585,7 +568,6 @@ mod tests {
         assert_eq!(claim_queued(&mut c, &q, &run).await.unwrap(), Outcome::Raced { now: "failed".into() });
         assert_eq!(retract_queued(&mut c, &q).await.unwrap(), Outcome::Raced { now: "failed".into() }, "重複撤銷冪等");
 
-        // 認領到已經不在跑的 run：留在佇列。
         let q2 = turn_in(app, &conv, None, "queued", "pending").await;
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         assert!(matches!(claim_queued(&mut c, &q2, &run).await.unwrap(), Outcome::Fenced(_)));
@@ -617,13 +599,11 @@ mod tests {
         assert_eq!(t.0, "failed");
         assert!(t.1.is_some(), "收尾要記時間");
 
-        // 同一步再來一次：不是錯誤，但說得出它現在是什麼（重複收尾冪等）。
         assert_eq!(
             set_status(&app.db, "s1", "in_flight", "failed", "測試").await.unwrap(),
             Outcome::Raced { now: "failed".into() },
         );
         assert_eq!(set_status(&app.db, "nope", "in_flight", "failed", "測試").await.unwrap(), Outcome::Missing);
-        // 非法邊連 SQL 都不必送。
         let err = set_status(&app.db, "s1", "failed", "in_flight", "測試").await.unwrap_err();
         assert!(format!("{err}").contains("illegal turn status transition"), "{err}");
     }

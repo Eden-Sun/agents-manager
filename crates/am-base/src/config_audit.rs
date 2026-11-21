@@ -204,7 +204,6 @@ pub mod capture {
 
     /// 回傳一個只在 `guard` 活著的期間生效的 subscriber（`set_default` 綁在目前執行緒；測試要用 current_thread runtime）。
     pub fn start() -> (Buf, tracing::subscriber::DefaultGuard) {
-        // 一定要在 `set_default` 之前：註冊自己那一刻表裡就已經有兩個，`has_just_one` 才會是 false。
         KEEP_REGISTRY_PLURAL.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let buf = Buf::default();
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).with_max_level(tracing::Level::DEBUG).finish();
@@ -260,7 +259,6 @@ mod tests {
         assert!(line.contains(" bot=-"), "沒驗過就不能有身份：{line}");
         assert!(!line.contains("caller=agm"), "舊的 caller= 會被讀成驗過的：{line}");
 
-        // 驗過的 bot 在 `bot=`；同一個請求就算自稱別人，自稱那一格也只是自稱。
         let line = describe_request(&req(&[("x-am-caller", "agm")]), Some("01M3(build)"), None);
         assert!(line.contains("bot=01M3(build)") && line.contains("caller_self_reported=agm"), "{line}");
     }

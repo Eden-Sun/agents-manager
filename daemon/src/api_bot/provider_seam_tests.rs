@@ -81,14 +81,12 @@ fn response(content: Vec<Value>, reason: &str) -> Response {
 fn a_legacy_checkpoint_loads_and_encodes_to_the_golden_claude_request() {
     let state: State = serde_json::from_value(legacy_checkpoint()).unwrap();
     let env = envelope(&state);
-    // body：serde_json 預設的物件鍵序（preserve_order 未開時是字母序），逐字固定。
     let body = serde_json::to_string(&env.body()).unwrap();
     assert_eq!(body, GOLDEN_BODY, "Claude request body 必須與抽接點之前位元組相同");
     assert_eq!(env.wire(), GOLDEN_BODY.as_bytes(), "實際送上線的位元組就是報價／算 hash 的那一份");
     assert_eq!(env.encoded().hash(), GOLDEN_HASH);
     assert_eq!(env.beta_header(), super::protocol::THINKING_BINDING_BETA);
     assert_eq!(env.hash(), GOLDEN_HASH, "request hash");
-    // 報價與結算（價格）
     let quote = DirectGlobal.reserve(&env).unwrap();
     assert_eq!((quote.reserved_microusd, quote.pricing_version.as_str()), GOLDEN_RESERVE);
     let settled = DirectGlobal.settle(&env, &state.responses[0]).unwrap();
@@ -98,7 +96,6 @@ fn a_legacy_checkpoint_loads_and_encodes_to_the_golden_claude_request() {
 #[tokio::test]
 async fn running_from_the_legacy_checkpoint_produces_the_golden_tool_transcript() {
     let mut state: State = serde_json::from_value(legacy_checkpoint()).unwrap();
-    // 接著再來一輪：兩個工具（一成功一失敗），最後回文字。
     let model = Script(Mutex::new(vec![
         response(
             vec![
@@ -113,7 +110,6 @@ async fn running_from_the_legacy_checkpoint_produces_the_golden_tool_transcript(
     assert_eq!(halt, Halt::EndTurn);
     let messages = serde_json::to_string(&state.messages).unwrap();
     assert_eq!(messages, GOLDEN_MESSAGES, "工具結果 transcript 必須與抽接點之前位元組相同");
-    // 最後一份送出去的 body（第三次請求的內容）也固定。
     let last = envelope(&State { messages: state.messages[..state.messages.len() - 1].to_vec(), ..state.clone() });
     assert_eq!(last.hash(), GOLDEN_LAST_HASH);
 }
@@ -187,7 +183,6 @@ async fn a_wrap_up_request_from_a_legacy_checkpoint_matches_the_golden_request_a
     assert_eq!(halt, Halt::TimeLimit);
     let sent = model.1.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "收尾只送一次請求");
-    // 收尾請求：1 小時快取、fast、開 web_search 的選項組合，system 是陣列形狀。
     let opts = Options { max_tokens: 2048, effort: "medium".into(), fast: true, cache_ttl_1h: true, web_search: true, ..Options::default() };
     let system = json!([{"type": "text", "text": "You are AG Man's API bot."}]);
     let env = RequestEnvelope::new(opts, system, sent[0].clone()).unwrap();
@@ -200,7 +195,6 @@ async fn a_wrap_up_request_from_a_legacy_checkpoint_matches_the_golden_request_a
     let settled = DirectGlobal.settle(&env, state.responses.last().unwrap()).unwrap();
     assert_eq!((settled.estimated_microusd, settled.actual_speed), GOLDEN_WRAP_SETTLE);
     assert_eq!(serde_json::to_string(&state.messages).unwrap(), GOLDEN_WRAP_MESSAGES, "收尾後的 transcript");
-    // checkpoint 本身（State 的序列化）也固定：舊格式讀進來再存，欄位與順序不變。
     let mut saved = serde_json::to_value(&state).unwrap();
     saved["completed_tool_ids"].as_array_mut().unwrap().sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     assert_eq!(serde_json::to_string(&saved).unwrap(), GOLDEN_WRAP_CHECKPOINT);

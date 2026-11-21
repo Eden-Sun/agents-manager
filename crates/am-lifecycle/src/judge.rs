@@ -68,11 +68,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    // 舊庫沒有這一欄。全新庫的 CREATE 已經有，這裡是 no-op。
     if !crate::db::has_column(pool, "judge_shadow", "jev_same_work").await? {
         sqlx::query("ALTER TABLE judge_shadow ADD COLUMN jev_same_work REAL").execute(pool).await?;
     }
-    // 既有 DB 的 CREATE TABLE IF NOT EXISTS 不會補欄。
     for (col, ty) in [("assignment_id", "TEXT"), ("claims_verified", "REAL"), ("asks_parent_action", "REAL")] {
         if !crate::db::has_column(pool, "judge_shadow", col).await? {
             sqlx::query(&format!("ALTER TABLE judge_shadow ADD COLUMN {col} {ty}")).execute(pool).await?;
@@ -321,7 +319,6 @@ fn weekly_limit_line(matched_line: &str) -> bool {
 ///   會把這筆舊的追認成「剛剛清掉」，把「從未被清掉」這個事實改寫掉。
 pub async fn note_cleared(pool: &SqlitePool, bot_id: &str) {
     let now = chrono::Utc::now();
-    // 先撈最寬的窗，再逐筆按「撞的是哪個窗」決定算不算數：下界寫在 Rust，不必把橫幅的字串搬進 SQL。
     let widest = crate::db::iso_at(now - chrono::Duration::hours(WEEKLY_CLEAR_WINDOW_HOURS));
     let rows: Vec<(String, String, String)> = match sqlx::query_as(
         "SELECT id, at, matched_line FROM judge_shadow
@@ -457,30 +454,20 @@ pub fn mask(text: &str) -> String {
 
 fn mask_line(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    // 前一個字是 `Bearer`，或是以 `=`／`:` 結尾的憑據名（`password: hunter2`）→ 這個字整個遮掉。
     let mut secret_next = false;
-    // 保留原本的空白：畫面的排版本身就是 Jev 判斷的依據。
     for piece in split_keep_ws(line) {
         if piece.chars().all(char::is_whitespace) {
             out.push_str(piece);
             continue;
         }
-        // 判斷要看**去掉包裹標點**之後的字（issue #451）：JSON 寫成 `"Bearer`、`{"Authorization":`，
-        // 用原字比 `== "BEARER"` 永遠不成立，於是後面那條 JWT 原樣送出去。
         let upper = bare(piece).to_ascii_uppercase();
-        // `Authorization: Bearer <token>`：`Authorization:` 讓 `secret_next` 成立，但要遮的是 token，
-        // 不是 `Bearer` 這個字——認證方式留著，版面才看得出這行是什麼（Jev 判的就是版面）。
         let scheme = matches!(upper.as_str(), "BEARER" | "BASIC" | "DIGEST" | "TOKEN");
-        // 遮掉整個片段會把 JSON 的收尾一起吃掉（`"Bearer <jwt>"}` → 右邊的 `"}` 不見了）。
-        // 立場跟「認證方式留著」一樣：版面是 Jev 判斷的依據，只換掉字本身（issue #451 的跟進審核）。
         let masked = if secret_next && !scheme {
             let (lead, trail) = wrapping(piece);
             format!("{lead}{REDACTED}{trail}")
         } else {
             mask_word(piece)
         };
-        // `Bearer`／`Basic`／`Digest`／`Token` 自己就點得起來：以前只有 `BEARER` 那一條，所以
-        // `Authorization: Basic <b64>` 有遮（靠前面的 `Authorization:` 接力），裸寫的 `Basic <b64>` 沒遮。
         secret_next = scheme || (upper.ends_with(['=', ':']) && SECRET_NAMES.iter().any(|n| upper.contains(n)));
         out.push_str(&masked);
     }
@@ -520,7 +507,6 @@ fn bare(word: &str) -> &str {
 fn wrapping(word: &str) -> (&str, &str) {
     let lead = word.len() - word.trim_start_matches(WRAPPERS).len();
     let trail = word.len() - word.trim_end_matches(WRAPPERS).len();
-    // 整個片段都是標點時不要重疊切。
     if lead + trail >= word.len() {
         return (word, "");
     }
@@ -535,22 +521,16 @@ fn mask_word(word: &str) -> String {
     if KEY_PREFIXES.iter().any(|p| bare.starts_with(p)) && bare.len() >= 12 {
         return REDACTED.to_string();
     }
-    // NAME=value／NAME: value 連在一起的那種；分開寫的靠下面的高熵規則。
     if let Some(i) = bare.find(['=', ':']) {
         let (name, value) = (bare[..i].to_ascii_uppercase(), &bare[i + 1..]);
         if !value.is_empty() && SECRET_NAMES.iter().any(|n| name.contains(n)) {
             return format!("{}{}{REDACTED}", &bare[..i], &bare[i..=i]);
         }
     }
-    // URL 的 query string：整串是同一個片段，上面那條只看**第一個** `=`／`:`，而 URL 的第一個冒號永遠是
-    // scheme 的（`https:`），所以 `?token=…` 一路漏到底（issue #451 的跟進審核）。逐段看、只換值。
     if let Some(masked) = mask_query(bare) {
-        // `bare` 已經去掉包裹標點，接回去才不會把 `curl '…'` 的引號吃掉。
         let (lead, trail) = wrapping(word);
         return format!("{lead}{masked}{trail}");
     }
-    // `user:pass@host` 的憑據：以前要網域含 `.` 才遮，於是 `http://u:p@localhost:8080/x` 漏掉。
-    // 有 `@`、而且 `@` 左邊有冒號（＝帶密碼的 userinfo）就遮，網域長什麼樣不管。
     let userinfo = bare.rsplit_once('@').is_some_and(|(left, _)| left.contains(':') && !left.is_empty());
     if bare.contains('@') && !bare.starts_with('@') && (userinfo || bare.rsplit('@').next().is_some_and(|d| d.contains('.'))) {
         return REDACTED.to_string();
@@ -618,8 +598,6 @@ fn query_secret(name: &str) -> bool {
 fn looks_jwt(s: &str) -> bool {
     let b64url = |p: &str| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     let parts: Vec<&str> = s.split('.').collect();
-    // 3 段＝JWS（簽章型），5 段＝JWE compact（header.key.iv.ciphertext.tag，中間幾段可能是空的）。
-    // header 的開頭：`{"` → `eyJ`，`{ "`（大括號後有空白）→ `eyA`。
     matches!(parts.len(), 3 | 5)
         && (parts[0].starts_with("eyJ") || parts[0].starts_with("eyA"))
         && parts[0].len() >= 12

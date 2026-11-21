@@ -26,7 +26,6 @@ async fn a_start_whose_running_state_cannot_be_recorded_is_not_reported_as_start
     rs::refuse_run_state(&app, "running").await;
 
     let err = start_bot(&app, &bot.id).await.expect_err("DB 沒記下 running，不能回啟動成功");
-    // 先看錯誤是哪一種：沒走到 agent.start 就失敗（例如這台沒裝 claude）的話，訊息直接寫在這裡。
     let LcError::Uncommitted(body) = &err else { panic!("要 503 start_state_uncommitted，拿到 {err:?}") };
     let run = db::active_run(app.db(), &bot.id).await.unwrap().expect("agent 在跑，run 不能被收成 exited");
     assert_eq!((body["error"].as_str(), body["run_id"].as_str()), (Some("start_state_uncommitted"), Some(run.id.as_str())));

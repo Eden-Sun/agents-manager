@@ -43,7 +43,6 @@ pub async fn bind_codex_session_if_missing(app: &impl LcHost, run: &db::Run) -> 
     codex_session_refresh::refresh_idle(app, run).await
 }
 
-
 /// Unchanged polls at an empty composer before we complete the Turn ourselves (~14s; a slow hook still wins).
 pub const IDLE_POLLS: u32 = 20;
 
@@ -76,7 +75,6 @@ async fn flush_progress(app: &(impl crate::capabilities::Emit + crate::lifecycle
         return;
     }
     emitted.insert(run_id.to_string(), std::time::Instant::now());
-    // The map outlives its poller (a new turn must not get a fresh budget); drop stale entries.
     emitted.retain(|_, t| t.elapsed() < PROGRESS_STALE);
     drop(emitted);
     app.emit("turn_progress", frame).await;
@@ -145,8 +143,6 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             return;
         }
     }
-    // A new turn is starting: whatever cut the *previous* one short is history (§4.3a). 清不掉就在 poller 裡
-    // 再清：留著的話，這一回合斷在同一句錯誤上會被「同一則只記一次」吞掉（#193）。
     let mut error_cleared = crate::turn_error::clear(app, run_id, bot_id).await.is_ok();
     let mut pollers = app.progress_pollers().lock().await;
     if let Some(h) = pollers.remove(run_id) {
@@ -160,10 +156,8 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
     let h = tokio::spawn(Box::pin(async move {
         let started = std::time::Instant::now();
         let interval = progress_interval(&run_id);
-        // 連續讀不到幾次（#193）：讀到就歸零。
         let mut failures = 0u32;
         let mut bot: Option<db::Bot> = None;
-        // What we sent, to strip the pane's echo off every frame.
         let mut sent: Option<Vec<String>> = None;
         let mut last = (String::new(), String::new(), String::new());
         let mut quiet = 0u32;
@@ -176,13 +170,10 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             }
             #[cfg(all(test, feature = "daemon-test-harness"))]
             super::race_point::hit("progress_poll", &run_id).await;
-            // 讀不到（DB 一時 busy／I/O error）不是「回合收掉了」：延後重讀，不放掉這一回合（#193）。
             let run = match still_ours(&app2, &run_id, &bot_id, &turn_id, &mut bot, &mut sent).await {
                 Ok(Some(run)) => run,
                 Ok(None) => match observed_status::finish(&app2, &run_id, &turn_id).await {
                     Ok(true) => break,
-                    // Stop may beat the idle redraw. Keep the existing poller/backoff until
-                    // its own receipt can be restored, or a successor turn takes the pane.
                     Ok(false) => { failures = 0; continue; }
                     Err(e) => {
                         failures = poll_unreadable(&turn_id, failures, &e);
@@ -195,7 +186,6 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
                 }
             };
             failures = 0;
-            // `still_ours` 讀到了才回 `Some`：兩個都已經有了。
             let (Some(bot), Some(sent)) = (bot.as_ref(), sent.as_deref()) else { continue };
             if !error_cleared {
                 error_cleared = crate::turn_error::clear(&app2, &run_id, &bot_id).await.is_ok();
@@ -213,10 +203,8 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
             }
             let live = live_reply(&bot.kind, &read.text).unwrap_or_default();
             let live = sent.iter().fold(live, |acc, p| strip_echoed_prompt(&acc, p));
-            // `clean_screen` drops the spinner row, so a thinking / tool phase needs its own `activity` field.
             let activity = live_activity(&bot.kind, &read.text).unwrap_or_default();
             let alert = live_alert(&bot.kind, &read.text).unwrap_or_default();
-            // 壓縮中的畫面備援（`compacting.rs`，#1770）：spinner 還在就標記，畫面沒了只收掉自己標的（hook 來的等 hook 收）。
             if am_base::compacting::observe_screen(&run_id, am_base::compacting::screen_shows(&read.text), chrono::Utc::now()) {
                 crate::capabilities::BotStatusEmit::emit_bot_status(&app2, &bot_id).await;
             }
@@ -230,20 +218,14 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
                 continue;
             }
             flush_progress(&app2, &run_id, &mut pending, false).await;
-            // §4.3's fallback is armed by herdr's `working -> idle`; when that sticks (2026-09-06: grok
-            // idle at an empty composer, herdr still `working`) nothing closes the turn. So trust the
-            // pane too: empty composer + no change = wants input. `blocked` excluded (a modal isn't an end).
             let agent_status = match db::run(app2.db(), &run_id).await {
                 Ok(Some(r)) => r.agent_status,
                 Ok(None) => break,
-                // 不知道是不是 `blocked`（對話框）：這一輪不算閒著，也不歸零（#193）。以前當成空字串，照樣累計。
                 Err(e) => {
                     failures = poll_unreadable(&turn_id, failures, &e);
                     continue;
                 }
             };
-            // grok 撞週限停在 `blocked`（#222）：沒有 working->idle 那條邊，備援與掃描都不會跑；daemon 重啟時已經停在那裡的
-            // 也不會再有 blocked 邊。這裡是安全網，每個 blocked 只掃一次。
             if agent_status == "blocked" && bot.kind == "grok" && !grok_scanned && !grok_limit_notice_lines(&read.text).is_empty() {
                 grok_scanned = true;
                 let lock = app2.bot_lock(&bot_id).await;
@@ -261,12 +243,9 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
                 continue;
             }
             quiet += 1;
-            // 這回合畫面上出現過任何東西嗎（回覆、spinner、警示都算）。
             let said_something = !(last.0.is_empty() && last.1.is_empty() && last.2.is_empty());
             if quiet >= idle_threshold(said_something, &agent_status) {
                 tracing::info!(turn = %turn_id, "pane idle at an empty prompt; completing via fallback");
-                // Under the bot lock, like the Stop hook: outside it the two interleaved into two
-                // assistant messages for one turn (review 2026-09-12 #5).
                 let done = {
                     let lock = app2.bot_lock(&bot_id).await;
                     let _g = lock.lock().await;
@@ -274,8 +253,6 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
                 };
                 match done {
                     Ok(true) => break,
-                    // Nothing claimed (spinner, tool, or hook won). Keep watching: this is the net for a
-                    // status that never flips (grok 2026-09-06); the `still` check ends it once closed.
                     Ok(false) => quiet = 0,
                     Err(e) => {
                         tracing::debug!(turn = %turn_id, error = ?e, "idle-prompt fallback failed; keeping the poller");
@@ -293,7 +270,6 @@ pub async fn arm_progress(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id
     pollers.insert(key, h);
 }
 
-
 /// The user typed straight into the pane: open the `external` turn on the `-> working` edge so it
 /// gets the same live bubble / progress as a web prompt. `delivery='ok'` so the §4.3 fallback
 /// (which ignores other values) can still close it if the Stop hook never comes.
@@ -304,8 +280,6 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     }
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
-    // Re-read under the lock: `prompt()` may have opened a turn, and the watcher is armed before
-    // the run is `running`, so a boot-time `-> working` blip is not the user typing.
     let Ok(Some(run)) = db::run(app.db(), &run.id).await else { return };
     if run.state != "running" {
         return;
@@ -332,14 +306,10 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     .execute(app.db())
     .await
     {
-        // Losing the `turns_one_in_flight` race means someone else opened it — fine.
         tracing::debug!(run = %run.id, error = %e, "external turn not opened");
         return;
     }
     tracing::info!(run = %run.id, turn = %tid, "external turn opened from pane activity");
-    // No echo on screen: open the turn anyway rather than invent a user message.
-    // claude 自己起頭的回合（背景 shell 的 task notification）畫面上沒有新的回音，最後一個是上一則使用者 prompt，
-    // 已經記在上一回合底下——不是這一回合的 user 訊息（issue #224，`transcript_origin`）。
     let by_the_cli = match db::bot(app.db(), &run.bot_id).await {
         Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
         _ => false,
@@ -348,8 +318,6 @@ pub async fn begin_external_turn(app: &impl LcHost, run: &db::Run) {
     if by_the_cli {
         tracing::info!(turn = %tid, "external turn started by the CLI itself (task notification); no user message");
     }
-    // 判不出是不是 CLI 自己起頭的（遠端 bot 的 transcript 在那台，這裡讀不到）時，畫面上最後一則回音可能就是上一則
-    // 已經回答過的 prompt（2026-10-01 wits-ops-web：「去我的ego 開新身份」又出現一次）。跟它一樣就不存。
     let echo = match echo {
         Some(text) => match app.db().acquire().await {
             Ok(mut conn) => match crate::hookrecv::repeats_answered_prompt(&mut conn, &conv, &tid, &text).await {
@@ -495,12 +463,10 @@ pub fn is_clipped_echo(line: &str, rest: &[&str]) -> bool {
 pub fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
     let want: Vec<&str> = prompt.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if want.len() < 2 {
-        // A one-line prompt can still be shredded across rows in a narrow pane.
         return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
-    // The `❯ <first line>` marker row is already gone, so resume at the prompt's second line.
     let mut w = 1;
     while i < lines.len() && w < want.len() {
         let l = lines[i].trim();
@@ -509,7 +475,6 @@ pub fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
             continue;
         }
         if l != want[w] {
-            // The TUI may have clipped the whole remaining echo onto this row.
             if is_clipped_echo(l, &want[w..]) {
                 i += 1;
                 w = want.len();
@@ -519,7 +484,6 @@ pub fn strip_echoed_prompt(text: &str, prompt: &str) -> String {
         i += 1;
         w += 1;
     }
-    // Only strip on a full match; eating half a real reply is worse than an echo.
     if w < want.len() {
         return strip_echoed_prompt_squashed(text, prompt).unwrap_or_else(|| text.to_string());
     }
@@ -537,7 +501,6 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
     if ps.len() < SQUASH_MIN || ts.is_empty() {
         return None;
     }
-    // Longest prompt tail the candidate opens with (the head went with the `❯ ` row).
     let mut matched = 0;
     for k in 0..ps.len() {
         let suf = &ps[k..];
@@ -550,7 +513,6 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
                 break;
             }
         } else if suf[..ts.len()] == *ts {
-            // The candidate ran out inside the echo: all of it is echo.
             return Some(String::new());
         }
     }
@@ -578,7 +540,6 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
 async fn pane_columns(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> Option<u32> {
     let pane = run.pane_id.clone()?;
     let client = client_for_run(app, run).await.ok()?;
-    // 用 pane_id 問（#1454）：`pane.layout` 不認 workspace_id，回的是使用者正在看的那個分頁。
     client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w)
 }
 
@@ -606,7 +567,6 @@ pub fn live_activity(kind: &str, text: &str) -> Option<String> {
         return agy_activity(&lines[start..]).map(|s| cap_activity(&s));
     }
     let grok = kind == "grok";
-    // Fast path only; the glyph set grows between releases, `is_activity_shape` catches the rest.
     let glyphs: &[char] = if grok { &['◆'] } else { &['✻', '✽', '✶', '✳', '✢', '·'] };
     let mut found: Option<String> = None;
     for line in &lines[start..] {
@@ -621,7 +581,6 @@ pub fn live_activity(kind: &str, text: &str) -> Option<String> {
         let rest = if glyphs.contains(&first) {
             s[first.len_utf8()..].trim()
         } else if is_activity_shape(s) {
-            // Unknown glyph (or none at all): drop a leading symbol if there is one.
             if first.is_alphanumeric() { s } else { s[first.len_utf8()..].trim() }
         } else {
             continue;
@@ -629,7 +588,6 @@ pub fn live_activity(kind: &str, text: &str) -> Option<String> {
         if rest.is_empty() {
             continue;
         }
-        // The last activity row on screen is the current one.
         found = Some(rest.to_string());
     }
     found.map(|s| cap_activity(&s))
@@ -699,7 +657,6 @@ fn has_word(s: &str, word: &str) -> bool {
 
 pub fn live_alert(kind: &str, text: &str) -> Option<String> {
     const RETRY_TOKENS: [&str; 6] = ["retry", "retrying", "attempt", "reconnect", "重試", "retries"];
-    // Codex hard limit may wrap across narrow-pane rows: multi-line scanner.
     if kind == "codex" {
         if let Some(hit) = codex_usage_notice_lines(text)
             .into_iter()
@@ -724,11 +681,9 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
         } else {
             line.trim()
         };
-        // `⎿` 是工具輸出的縮排（sed、cat 印出來的程式碼或 log），不是 CLI 自己說的話（#1686）。要在剝前導記號之前認。
         if s.starts_with('⎿') {
             continue;
         }
-        // Drop a leading spinner / bullet glyph so `✻ API error …` matches too.
         let s = match s.chars().next() {
             Some(c) if !c.is_alphanumeric() => s[c.len_utf8()..].trim(),
             _ => s,
@@ -737,28 +692,21 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
             continue;
         }
         let low = s.to_ascii_lowercase();
-        // 要是獨立的字：`def test_otp_rejected_on_retry_still_propagates_stage_error():` 這種程式名稱（底線連在一起）
-        // 同時含 retry 與 error，以前被當成重試橫幅掛在回覆下面（2026-10-03 console-rpa 用 heredoc 寫測試檔）。
         let says_error = has_word(&low, "error") || low.contains("錯誤") || has_word(&low, "overloaded");
         if !says_error {
             continue;
         }
-        // Data, not a banner (2026-09-08): JSON or `|` rows from e.g. a sqlite dump.
         if s.contains('{') || s.contains('}') || s.matches('|').count() >= 2 {
             continue;
         }
-        // 只認 CLI 自己印的橫幅：固定前綴（claude `API error`、codex `stream error`）。光有 error＋retry 字眼不夠，
-        // `Err(e) => tracing::warn!(…, "…; retrying")` 這種程式碼行（#1686，2026-10-13 A-leader 的黃色橫幅）就是這樣被認成橫幅的。
         let banner = low.starts_with("api error") || low.starts_with("stream error");
         if !banner {
             continue;
         }
         let retrying = RETRY_TOKENS.iter().any(|t| if t.is_ascii() { has_word(&low, t) } else { low.contains(t) });
-        // 談論 API error 處理的散文沒有重試字眼，也沒有 claude 的 `API Error:` 冒號。
         if !retrying && !low.starts_with("api error:") {
             continue;
         }
-        // The newest banner is the one still true.
         found = Some(s.to_string());
     }
     let s = found?;
@@ -769,7 +717,6 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
     cut.push('…');
     Some(cut)
 }
-
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/nbsp_composer_tests.rs"]
@@ -977,7 +924,6 @@ pub fn prompt_never_reached_screen(kind: &str, screen: &str, sent: &[String]) ->
             return false;
         }
     }
-    // Nothing long enough to look for: cannot prove absence, so never resend.
     any_needle
 }
 
@@ -1021,7 +967,6 @@ const RESEND_RETRY_SECS: u64 = 3;
 /// Re-deliver a prompt that never reached the pane, at most [`MAX_PROMPT_RESENDS`] times per turn.
 /// Same guards as [`nudge_unsent_prompt`]; every reason to do nothing is `Skipped`.
 async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent: &[String]) -> Resend {
-    // DB 讀不到是 `Unreadable`，不是 `Skipped`（#193）：`Skipped` 之後 watchdog 就判失敗了。
     let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return Resend::Skipped,
@@ -1030,8 +975,6 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Resend::Skipped;
     }
-    // 重送看 `auto_resend`，不看有沒有證據（AGM 2026-09-16）：打過字但證不明的那條路重送會重複派工，
-    // 所以它是 0；`agent.prompt` 一樣沒有證據，但它沒送進去才會走到這裡，重送是安全的。
     match db::in_flight_turn(app.db(), run_id).await {
         Ok(Some(t)) if t.id == turn_id && t.delivery == "ok" && t.auto_resend != 0 => {}
         Ok(_) => return Resend::Skipped,
@@ -1048,17 +991,12 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
     if !prompt_never_reached_screen(&bot.kind, &read.text, sent) {
         return Resend::Skipped;
     }
-    // `sent[0]` is the delivered form (`turns.prompt_text`: mentions stripped, attachment paths
-    // included), exactly what was sent before.
     let Some(text) = sent.first() else { return Resend::Skipped };
-    // The claim is the lock and it lives in the DB: a queue flush and this watchdog cannot both
-    // resend, and a daemon restart does not hand the same turn a fresh budget (sol review #3).
     match db::claim_resend(app.db(), turn_id, MAX_PROMPT_RESENDS).await {
         Ok(true) => {}
         Ok(false) => return Resend::Skipped,
         Err(e) => return resend_unreadable(turn_id, &e),
     }
-    // The first delivery just failed silently; re-deliver the way that is verified on screen.
     let res = deliver_prompt(app, &client, &run, &bot, text, true, true).await;
     match res {
         Ok(Delivered::Submitted | Delivered::Handed) => {
@@ -1071,8 +1009,6 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
             Resend::Sent
         }
         Ok(Delivered::NotAttempted { reason, retry }) => {
-            // 一個字都沒寫進去（`NotAttempted` 的契約），所以這次不該算進唯一一次重送額度：
-            // 擋下它的原因（框裡剛好有字）通常兩秒後就消失了——呼叫端（`arm_stall`）會再試一次。
             if let Err(e) = db::refund_resend(app.db(), turn_id).await {
                 resend_unreadable(turn_id, &e);
                 return Resend::RefundOwed;
@@ -1084,7 +1020,6 @@ async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent
             tracing::warn!(run_id, turn = %turn_id, reason = why, "re-delivery could not be proven either");
             unproven(app, run_id, &bot.id, turn_id, why).await
         }
-        // `execute_delivery` 在打第一個字之前的失敗都是 `NotAttempted`，走到 `Err` 就是鍵可能已經送出去了。
         Err(e) => {
             tracing::warn!(run_id, turn = %turn_id, error = %e, "re-delivering a lost prompt failed after typing started");
             unproven(app, run_id, &bot.id, turn_id, "resend_error").await
@@ -1200,7 +1135,6 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
     let turn_id = turn_id.to_string();
     tokio::spawn(Box::pin(async move {
         let mut st = Stall::default();
-    // Every prompt gets the early look: a single line pasted into a busy TUI loses its Enter too.
         tokio::time::sleep(Duration::from_secs(NUDGE_EARLY_SECS)).await;
         {
             let lock = app2.bot_lock(&bot_id).await;
@@ -1208,7 +1142,6 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
             if app2.stall_timers().lock().await.get(&run_id) != Some(&generation) {
                 return;
             }
-            // 早看的這一眼讀不到就算了：期限那一輪會再看，那一輪讀不到才擋著不判失敗。
             match nudge_if_unsent(&app2, &run_id, &turn_id, &mut st.sent).await {
                 Ok(n) => st.nudged = n,
                 Err(e) => tracing::debug!(turn = %turn_id, error = %e, "early nudge could not read the turn; the deadline looks again"),
@@ -1275,7 +1208,6 @@ async fn stall_round(
         }
     }
     let mut unsure = false;
-    // Deadline: if the text is still there, press Enter and grant a grace period first.
     {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
@@ -1296,18 +1228,12 @@ async fn stall_round(
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("stall_after_nudge", turn_id).await;
-    // Not in the box either: the prompt never reached the TUI. Deliver it again once instead of
-    // failing the turn with a system message the user has to act on.
     let mut resent_now = false;
     if !st.nudged && !st.resent && !unsure {
-        // 沒在框裡、畫面上也看不到：不一定是「沒送到」。Claude 長思考時畫面是 `✽ Orchestrating… (13s · ↓ 537 tokens)` 加一個空的 `❯`，
-        // herdr 偵測又把它當 idle（沒有 `working` 事件），這時重送等於把同一則 prompt 再打一次（issue #956）。
-        // 這一輪 hook 已經有動靜、或畫面上有進行中的 spinner／計時＝agent 收到了，不重送、也不判失敗。
         if agent_is_active(app, run_id, bot_id, turn_id).await {
             tracing::info!(turn = %turn_id, bot = %bot_id, "stall watchdog: the agent is already working on the prompt (hook activity or a live spinner); not resending");
             return StallRound::Done;
         }
-        // 期限那一次 nudge 讀到了才走到這裡：`sent` 已經有了。
         let sent = st.sent.clone().unwrap_or_default();
         let Some((last, blocked)) =
             resend_with_retry(app, run_id, bot_id, turn_id, &sent, generation, Duration::from_secs(RESEND_RETRY_SECS)).await
@@ -1330,7 +1256,6 @@ async fn stall_round(
     if st.nudged || resent_now {
         tokio::time::sleep(grace).await;
     }
-    // A resend can land in a busy box just like the first try did.
     if resent_now {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
@@ -1388,20 +1313,14 @@ async fn fail_stalled_turn(
     if turn.id != turn_id || turn.delivery != "ok" {
         return Ok(());
     }
-    // issue #956: 判 STALL 前先看 agent 有沒有在動——hook 有動靜（PostToolUse…）或畫面上有進行中的 spinner／計時，
-    // 就是收到了在處理（長思考、編排），不是「沒反應」。herdr 對 Claude 2.1.x 的 Orchestrating 畫面報 idle，所以光看 `agent_status` 會誤判。
     if has_hook_activity(app.db(), bot_id, &turn.created_at, turn_id).await {
         tracing::info!(turn = %turn_id, bot = %bot_id, "prompt stall watchdog saw hook activity for this turn; not failing it");
         return Ok(());
     }
-    // Codex: 判失敗前先看 rollout 是否已完成回覆（例如 task_complete）。
-    // 若已有回覆，走 try_fallback 補收，不寫 stall 誤報。
     let bot_for_check = db::bot(app.db(), bot_id).await?;
     let sent = turn_echo_texts(app, turn_id).await.unwrap_or_default();
     let is_quiet = turn.prompt_text.as_deref().map_or(false, is_no_reply_notice)
         || sent.iter().any(|s| is_no_reply_notice(s));
-    // Codex: 判失敗前先看 rollout 是否已完成回覆（例如 task_complete）。
-    // 若已有回覆，走 try_fallback 補收，不寫 stall 誤報。
     if bot_for_check.as_ref().is_some_and(|b| b.kind == "codex") {
         let since_iso = super::codex_rollout::turn_since(&turn.created_at, turn.delivered_at.as_deref());
         let rollout_done = if let Some(bot) = bot_for_check.as_ref() {
@@ -1416,7 +1335,6 @@ async fn fail_stalled_turn(
             }
         }
     }
-    // Quote the screen, never assert a cause (the host may well be logged in).
     let mut snapshot: Option<String> = None;
     let mut hints: Vec<String> = Vec::new();
     if let Ok(client) = client_for_run(app, &run).await {
@@ -1448,7 +1366,6 @@ async fn fail_stalled_turn(
     if resent {
         reason.push_str(&format!("\n（第一次送出後畫面上完全沒有這則訊息，已自動重送 {MAX_PROMPT_RESENDS} 次，仍沒有反應。）"));
     } else if let Some(why) = resend_blocked {
-        // 以前這種情況的訊息完全不提試過重送：看起來像 agent 沒反應，其實是重送被擋下（review2 deliv #4）。
         reason.push_str(&format!("\n（畫面上完全沒有這則訊息；試著自動重送時被擋下（{why}），一個字都沒打，所以沒有送出。清掉擋住的東西後請重送。）"));
     }
     let mut tx = app.db().begin().await?;
@@ -1507,7 +1424,6 @@ pub fn is_no_reply_notice(prompt: &str) -> bool {
 /// Neutral wording: symptom + quoted screen + keychain caveat; never claim "not logged in".
 pub fn stall_reason(hints: &[String], nudged: bool, secs: u64) -> String {
     let head = format!("agent 在 {secs} 秒內沒有對訊息作出反應。");
-    // `nudged`: tell the user we already pressed Enter for text left in the box.
     let head = if nudged {
         format!("{head}訊息還留在輸入框沒送出（TUI 忙碌時會把多行文字當成貼上，吞掉最後的 Enter），已嘗試補送一次 Enter，等 {NUDGE_GRACE_SECS} 秒仍沒有反應。")
     } else {
@@ -1556,7 +1472,6 @@ pub async fn abandon_turn(app: &impl LcHost, turn_id: &str) -> LcResult<()> {
     Ok(())
 }
 
-
 /// working -> idle 之後等 Stop hook 先到；沒等到才從終端收。
 const FALLBACK_DELAY: Duration = Duration::from_secs(5);
 
@@ -1575,7 +1490,6 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
             return;
         }
     }
-    // 讀不到就不排：排了也不知道要收哪一回合，收錯比不收糟（這一回合有 poller 的閒置備援與 stuck watchdog 兜著）。
     let armed_for = match db::in_flight_turn(app.db(), run_id).await {
         Ok(turn) => turn.map(|t| t.id),
         Err(e) => {
@@ -1598,7 +1512,6 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
             return;
         }
         match try_fallback(&app2, &run_id, armed_for.as_deref()).await {
-            // No turn, but for a hookless run the pane is the only record of the answer.
             Ok(false) => {
                 if let Err(e) = capture_hookless_turn_locked(&app2, &run_id, false).await {
                     tracing::warn!(error = ?e, "hookless terminal capture failed");
@@ -1607,11 +1520,9 @@ async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay
             Ok(true) => {}
             Err(e) => tracing::warn!(error = ?e, "terminal fallback failed"),
         }
-        // A Codex usage hint may render after notify already completed the turn: capture regardless.
         if let Err(e) = capture_codex_usage_notices(&app2, &bot_id, &run_id).await {
             tracing::debug!(error = ?e, "codex notice capture failed");
         }
-        // §4.3a: also classify ended vs cut off by the API, even when the Stop hook already completed it.
         match crate::turn_error::capture(&app2, &bot_id, &run_id).await {
             Ok(true) => super::api_error_nudge::arm(&app2, &bot_id, &run_id).await,
             Ok(false) => {}
@@ -1632,8 +1543,6 @@ async fn codex_compaction_pending(app: &impl LcHost, bot: &db::Bot, run: &db::Ru
     }
     let Some(session) = run.native_session_id.clone().filter(|s| !s.is_empty()) else { return false };
     let Some(home) = super::s6_ports::StuckTurnServices::codex_home(app, bot).await else { return false };
-    // created_at is the enqueue time for queued turns, not this input's
-    // delivery boundary. Missing delivery metadata is not positive evidence.
     let Some(since) = turn.delivered_at.clone() else { return false };
     tokio::task::spawn_blocking(move || {
         let path = super::delivery::codex_session_log(&home, &session)?;
@@ -1662,13 +1571,10 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         return Ok(false);
     }
     let run = codex_session_refresh::refresh(app, &run, &bot, &turn.id).await.unwrap_or(run);
-    // §12.5：沒有 hook 的 grok 先問它自己的對話檔，畫面只是備援。
     if let Some(done) = super::grok_transcript::settle_in_flight(app, &bot, &run, &turn).await {
         return Ok(done);
     }
 
-    // Read the pane before claiming: a failure after claiming left `completed_fallback` with no
-    // message, no `turn_updated`, no queue flush. Failing here keeps it in flight for the next edge.
     let pane_id = run.pane_id.clone().unwrap_or_default();
     let client = app
         .herdr_for_run(&run)
@@ -1676,19 +1582,14 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
 
-    // A spinner still turning means mid-thought whatever herdr says: claiming stored chrome as the
-    // answer (2026-09-07 11:17). Left in flight, the next edge or the idle poller re-arms this.
     if pane_still_busy(&read.text) {
         tracing::debug!(run_id, "pane still shows a spinner; not completing the turn from it");
         return Ok(false);
     }
-    // agy（#2146）：Stop 帶 `fullyIdle:false`、或畫面結構上還有前景／背景工作時，herdr 報 idle 也不收（2026-11-17 agi1 誤收）。
     if bot.kind == "agy" && super::agy_busy::should_hold(&run.id, &turn.id, &read.text) {
         tracing::debug!(run_id, "agy is not fully idle; not completing the turn from the pane");
         return Ok(false);
     }
-    // 停在等人選的編號選單（權限框、Session paused…）：回合沒結束，選單那幾行也不是回覆（2026-09-25 cf-ox-fork-fork
-    // 把 `2. Edit prompt and retry with …` 存成了回覆）。留在飛，等使用者選完由 hook／下一次 edge 收。
     if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
         tracing::debug!(run_id, "pane is waiting at a numbered menu; not completing the turn from it");
         return Ok(false);
@@ -1702,9 +1603,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
 
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
 
-    // Codex hard limit: system notice + failed turn, not a fake reply. Banner may sit above the cursor,
-    // but a replayed old one must not count (`limit_banner::fallback_hit`, 2026-09-15).
-    // grok（#222）走同一條：撞週限的畫面不是回覆，收成失敗、記撞限。
     let codex_hit = if matches!(bot.kind.as_str(), "codex" | "grok") {
         let grok = bot.kind == "grok";
         let limits = |t: &str| -> Vec<String> {
@@ -1719,16 +1617,12 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None
     };
 
-    // The recorded input is the only evidence for a Codex compact turn. In
-    // particular, an empty external turn or compact-looking prose is not proof.
     let compact_turn = if bot.kind == "codex" && codex_hit.is_none() {
         let command = |s: &str| {
             let s = s.trim();
             s == "/compact" || s.starts_with("/compact ")
         };
         match turn.prompt_text.as_deref().filter(|s| !s.trim().is_empty()) {
-            // prompt_text is the actual sent input; user bubbles can retain
-            // routing mentions that were removed before delivery.
             Some(input) => command(input),
             None => {
                 let inputs = db::turn_user_messages(app.db(), &turn.id).await?;
@@ -1739,8 +1633,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         false
     };
 
-    // Auto-compaction can leave an idle-looking screen before the resumed
-    // answer. Only independent rollout evidence permits stripping its cell.
     let compact_tail = if bot.kind == "codex" && !compact_turn && codex_hit.is_none() {
         match codex_compaction_tail(&fresh) {
             Some(tail) if codex_compaction_pending(app, &bot, &run, &turn).await => Some(tail),
@@ -1771,7 +1663,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None => (None, None, None),
     };
 
-    // Derive the reply before SQLite's write lock (`pane_columns` RPC, `turn_echo_texts` other conn).
     let reply = if codex_hit.is_some() || codex_rollout_error.is_some() || compact_turn {
         None
     } else if let Some(r) = codex_rollout_reply.clone() {
@@ -1784,7 +1675,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         match screen_reply(&bot.kind, screen, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
-                // Shredded = too narrow to read; name the pane and width so it's actionable.
                 let how_wide = match pane_columns(app, &run).await {
                     Some(w) => format!("目前 {w} 欄，"),
                     None => String::new(),
@@ -1800,15 +1690,9 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
     };
 
     if compact_tail.is_some() && reply.is_none() && codex_rollout_error.is_none() {
-        // No cursor advance: every later idle poll must keep waiting until an
-        // answer or hook arrives. The existing stuck-turn timeout remains active.
         return Ok(false);
     }
 
-    // 沒有人送 prompt 的 external 回合（herdr 的 working→idle 抖一下就會開一個）：畫面上還是上一段回覆，游標又對不上
-    // （尾端含 codex 狀態列的額度數字，一變就找不到）時，整個畫面被當成新內容，同一段回覆存第二次（am-lead 2026-09-25 10:36／11:27）。
-    // 若上一則回覆已由 hook 收下、或畫面上根本沒有當前 prompt 的 echo，刮出來的又是同一段回覆（含 markdown 掉落），
-    // 同樣是終端殘留的上一段回覆，不存第二次。
     let reply = match reply {
         Some(r) => {
             if let Some(prev) = last_assistant_message(app, &turn.conversation_id).await? {
@@ -1853,11 +1737,9 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None
     };
 
-    // CAS claim + reply in one transaction, so a completed turn never lacks its reply.
     let is_codex_rollout_reply = codex_rollout_reply.is_some();
     let is_codex_rollout_done = is_codex_rollout_reply || codex_rollout_empty.is_some();
     let mut tx = app.db().begin().await?;
-    // 撞限直接 `in_flight -> failed`：先落在 `completed_fallback` 再改 failed 不是合法邊，trigger 會把整個交易擋掉（#109）。
     let res = if codex_hit.is_some() || codex_rollout_error.is_some() {
         super::turn_controller::fail_on(&mut tx, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "§4.3 備援看到撞限橫幅").await?
     } else if compact_turn {
@@ -1914,8 +1796,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
         tx.commit().await?;
         emit_message_added(app, &bot.id, message).await;
-        // 第二意見（#240）：備援先下手時，之後 `capture_codex_usage_notices` 看到的是「已寫過、回合也不在飛」而跳過，
-        // 這一次命中就不會進帳本（#1467）。只記錄、鎖外問（spawn），回合與額度照下面的收。
         app.shadow_limit_hit(crate::judge::Sample {
             bot_id: bot.id.clone(),
             run_id: run_id.to_string(),
@@ -1925,8 +1805,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
             screen: read.text.clone(),
         })
         .await;
-        // 記在這顆 bot 的主機與身份那一格。讀不到主機不退回 `local`；記不進去就欠著，派送前與 flush 照欠著的那一筆擋、
-        // 之後每次查詢先補寫（#198）。回合已經收掉了，照樣回 `true`。
         if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &hit).await {
             tracing::warn!(turn = %turn.id, error = %e, "codex limit hit owed; it holds this bot until it is recorded");
         }
@@ -1940,7 +1818,6 @@ pub(super) async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn:
         None
     };
     let Some(reply) = reply else {
-        // Only our own prompt: the turn is closed (composer unlocks); storing the echo would put words in the agent's mouth.
         tracing::info!(turn = %turn.id, "terminal fallback saw only our own prompt; storing no reply");
         remember_pane_cursor_tx(&mut tx, run_id, &read).await?;
         tx.commit().await?;
@@ -2091,15 +1968,12 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
     if !is_hookless(&bot, &run) || run.state != "running" {
         return Ok(false);
     }
-    // Like §4.3: a modal waiting for an answer is not an ended turn.
     if run.agent_status == "blocked" {
         return Ok(false);
     }
-    // An in-flight turn belongs to `try_fallback`; capturing too would store it twice.
     if db::in_flight_turn(app.db(), run_id).await?.is_some() {
         return Ok(false);
     }
-    // §12.5：grok 的對話檔讀得到就不刮畫面。
     if matches!(bot.kind.as_str(), "grok" | "agy" | "claude") {
         match super::grok_transcript::sync_locked(app, run_id).await {
             Ok(super::grok_transcript::Synced::Read { imported, .. }) => return Ok(imported > 0),
@@ -2117,20 +1991,15 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
         .await
         .ok_or_else(|| anyhow::anyhow!("no Herdr session is available for run `{}`", run.id))?;
     let read = client.pane_read(&pane_id, "recent_unwrapped", 200).await?;
-    // 同 `try_fallback`：停在編號選單上不是回合結束，選單不是回覆。
     if crate::tui_prompts::awaits_menu_choice(&read.text) || crate::tui_prompts::cold_resume_choice(&read.text).is_some() {
         return Ok(false);
     }
     let fresh = slice_after_cursor(&read.text, run.last_read_tail_hash.as_deref());
-    // The pane echo is the only record of what was typed.
     let echo = last_prompt_echo_text(&bot.kind, &fresh);
-    // Without a cursor, only the echo marks where the last turn began; with neither, just
-    // remember the cursor — storing older turns as one message is worse than nothing.
     if run.last_read_tail_hash.is_none() && echo.is_none() {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
-    // 尋找此回合開始的時間下限（以此對話最新一筆 message 的時間或 run 的 started_at 為準）
     let since_iso = sqlx::query_scalar::<_, String>(
         "SELECT created_at FROM messages WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1"
     )
@@ -2155,13 +2024,10 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
             (_, None) => String::new(),
         }
     };
-    // Unlike `try_fallback`, no turn waits to be closed, so no 「（終端沒有可辨識的回覆）」 bubble.
-    // grok 的啟動選單不是回覆（§12.5）。
     if reply.trim().is_empty() || is_shredded(&reply) || (bot.kind == "grok" && super::grok_transcript::is_startup_screen(&reply)) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
-    // herdr reports `working -> idle` more than once per answer: an identical reply is the same reply.
     if last_assistant_content(app, &conv).await?.as_deref().is_some_and(|prev| is_same_or_nearly_same_reply(prev, &reply)) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
@@ -2200,7 +2066,6 @@ pub(super) async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str
     .await?;
     if let Some(text) = echo.as_deref() {
         insert_message(app, &conv, Some(&tid), "user", text, "terminal_fallback", false, None).await?;
-        // ULIDs only order by millisecond; wait so the reply doesn't sort above its prompt.
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     insert_message(app, &conv, Some(&tid), "assistant", &reply, message_source, message_incomplete, Some(&read.text)).await?;
@@ -2233,7 +2098,6 @@ pub fn spawn_adopted_capture(app: &impl LcHost, run_id: &str, bot_id: &str) {
             begin_external_turn(&app, &run).await;
             return;
         }
-        // `blocked` / `unknown` are refused inside the capture: neither is a finished turn.
         if let Err(e) = capture_hookless_turn(&app, &run_id, &bot_id, true).await {
             tracing::debug!(run = %run_id, error = ?e, "adopted pane capture failed");
         }
@@ -2247,7 +2111,6 @@ const IDLE_TRANSCRIPT_SYNC_DELAY: Duration = Duration::from_secs(2);
 /// herdr 一直回 unknown），完成就只能靠對話檔補（issue #1798）。只同步、不刮畫面；已經記過的問不重記。
 /// 呼叫端拿著 bot 鎖；回傳有沒有新記下回合。
 pub(super) async fn sync_idle_transcript_locked(app: &impl LcHost, run_id: &str) -> anyhow::Result<bool> {
-    // 在飛的回合歸 `try_fallback`（它自己會問對話檔）。
     if db::in_flight_turn(app.db(), run_id).await?.is_some() {
         return Ok(false);
     }
@@ -2310,7 +2173,6 @@ mod menu_fallback_tests;
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/progress_rate_tests.rs"]
 mod progress_rate_tests;
-
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "poller_tests/lost_prompt_tests.rs"]

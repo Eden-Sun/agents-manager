@@ -52,7 +52,7 @@ fn main() {
             match rt.block_on(async move {
                 let target = match (to, feed_file.is_some()) {
                     (Some(to), _) => Some(to),
-                    (None, true) => None, // Explicit offline fixture mode only.
+                    (None, true) => None,
                     (None, false) => Some(agents_managerd::runners::upstream_update::fetch_latest(&kind).await?),
                 };
                 release_triage::run_check(release_triage::CheckArgs { kind, since, target, installed, db, feed_file }).await
@@ -62,7 +62,6 @@ fn main() {
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    // 結構化錯誤放 stdout（kick 讀 stdout），exit 1 照舊：不是「沒有新版」。
                     println!("{}", serde_json::json!({"error": format!("{e:#}")}));
                     eprintln!("release-triage-check: {e:#}");
                     std::process::exit(1);

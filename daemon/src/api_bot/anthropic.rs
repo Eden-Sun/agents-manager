@@ -89,7 +89,6 @@ impl Codec for AnthropicCodec {
             calls,
             stop,
             compacted: has_block(&response, "compaction"),
-            // 伺服器端工具（web_search、web_fetch 等）執行滿 server-side iterations 時以 `pause_turn` 暫停。
             resumable_pause: response.stop_reason == "pause_turn" && has_block(&response, "server_tool_use"),
         };
         state.messages.push(Message { role: "assistant".into(), content: json!(response.content) });
@@ -168,9 +167,6 @@ impl Codec for AnthropicCodec {
 }
 
 pub(crate) fn checkpoint_matches_model(state: &State, model: &str) -> bool {
-    // 兩邊都必須是支援的 claude-api 模型（如 claude-opus-5-5、claude-fable-5-2）。
-    // 請求已帶 thinking.block_binding.prefix_mismatch_behavior = "drop_block"，
-    // 支援模型之間的 checkpoint 可安全接續。
     if !am_config::api_bot_model_supported(model) {
         return false;
     }

@@ -129,7 +129,6 @@ async fn hook_inbox_worker_survives_a_panic_in_one_tick() {
     PANIC_NEXT_TICK.store(true, Ordering::SeqCst);
     crate::runners::hook_inbox::spawn_worker(app.clone());
     assert!(tt::eventually!(!PANIC_NEXT_TICK.load(Ordering::SeqCst)), "第一輪 tick 要 panic（旗標被取走）");
-    // panic 的那一輪不計；重啟後的輪次要出現，而且醒著的 worker 仍然回應喚醒（再多一輪）。
     assert!(tt::eventually!(TICKS.load(Ordering::SeqCst) >= 1), "panic 之後迴圈要重啟");
     let seen = TICKS.load(Ordering::SeqCst);
     app.hook_inbox_wake.notify_one();

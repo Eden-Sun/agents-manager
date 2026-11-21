@@ -24,7 +24,6 @@ pub async fn publish_prompt_message(app: &(impl crate::capabilities::Db + crate:
     }
 }
 
-
 /// 記下一則送達：`delivery`（CHECK 只認四種）＋ `delivery_verified`（有沒有證據）＋ `auto_resend`
 /// （能不能自動重送）。後兩者是兩件事，見 [`crate::lifecycle::delivery::DeliveryRecord`]。`at` 是送出的那一刻。
 /// 寫不進去回 `Err`，不吞（#149）：送出之後的呼叫端走 [`super::owed_delivery`]，記成欠著、不回普通的成功。
@@ -35,7 +34,6 @@ pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capab
     super::race_point::hit("mark_delivery_before_claim", turn_id).await;
 
     let mut tx = app.db().begin().await?;
-    // 只有將 delivered_at 從 NULL 原子改寫成功的呼叫者建立 restamp debt；回合內保存的時間是重試唯一依據。
     let first_delivery = sqlx::query("UPDATE turns SET delivered_at=?, restamp_pending=1 WHERE id=? AND delivered_at IS NULL")
     .bind(at)
     .bind(turn_id)
@@ -43,11 +41,6 @@ pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capab
     .await?
     .rows_affected()
         > 0;
-    // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
-    // 它仍然不會把同一則再打一次。
-    // 這筆 UPDATE 對每份 evidence 都執行，包括沒有取得 first-delivery claim 的呼叫者。
-    // hook 已經收掉這個回合（`completed` 且綁了 native turn id）就已經有事後證據（issue #1471）：欠著的送達結果
-    // 晚一步補寫時，`delivery_verified` 不能被寫回 0。
     sqlx::query(
         "UPDATE turns SET delivery=?,
                 delivery_verified=CASE WHEN status='completed' AND native_turn_id IS NOT NULL THEN 1 ELSE ? END,
@@ -81,9 +74,6 @@ pub async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capab
 /// writes stay in one transaction, so any SQLite failure leaves `restamp_pending` set. The event
 /// carries the loaded row directly; there is no fallible post-commit lookup that can lose it.
 async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), turn_id: &str) -> anyhow::Result<()> {
-    // `BEGIN IMMEDIATE`：這個交易先讀後寫，一般（deferred）交易讀完才升級成寫入時，別的寫入者正拿著鎖，SQLite 會直接回
-    // `database is locked`（code 5／517），完全不等 busy_timeout——daemon 剛起來撞上前一顆還沒收乾淨的寫入就是這樣（正式環境
-    // 一天 10 次）。一開始就要寫入鎖，才會等。
     let mut tx = db::begin_write(app.db()).await?;
     let target: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT t.created_at, t.delivered_at, b.kind FROM turns t LEFT JOIN conversations c ON c.id=t.conversation_id LEFT JOIN bots b ON b.id=c.bot_id WHERE t.id=? AND t.restamp_pending=1",
@@ -132,7 +122,6 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
         return Ok(());
     }
 
-    // `fetch_one` preserves lookup failures (including a missing conversation) as retryable debt.
     let bot_id: String = sqlx::query_scalar(
         "SELECT c.bot_id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=?",
     )
@@ -149,7 +138,6 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
                 .await?;
         }
     }
-    // Re-load in the same transaction, so the emitted message reflects the committed timestamp.
     let messages: Vec<db::Message> = sqlx::query_as(
         "SELECT *, rowid AS seq FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
     )
@@ -162,8 +150,6 @@ async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capa
     for message in messages {
         crate::capabilities::Emit::emit(app, "message_added", json!({"bot_id": bot_id, "message": message})).await;
     }
-    // Keep the marker through emission. A crash before this write replays the same id and first
-    // timestamp on recovery; clients upsert by message id.
     sqlx::query("UPDATE turns SET restamp_pending=0 WHERE id=? AND delivered_at=? AND restamp_pending=1")
         .bind(turn_id)
         .bind(first_at)
@@ -285,10 +271,6 @@ retraction_type!(pub(super),);
 pub(super) async fn retract_unsent_turn(app: &impl LcHost, bot_id: &str, turn_id: &str, msg_id: &str) -> Result<Retraction, Unretracted> {
     let res = async {
         let mut tx = app.db().begin().await?;
-        // 訊息要先刪（`messages.turn_id` 指著 turns，反過來會踩到外鍵），turn 那句才是把關的：
-        // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
-        // 附件的 message_id 指著這則訊息、沒有 ON DELETE。先解開再刪，不然帶圖的撤回會外鍵失敗，
-        // 可重試的 409 變成 502，回合被收成假的 failed、crid 也燒掉（#646）。
         tx.unbind_attachment_message(msg_id, turn_id).await?;
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
         let gone = sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
@@ -311,17 +293,12 @@ pub(super) async fn retract_unsent_turn(app: &impl LcHost, bot_id: &str, turn_id
         }
         Err(e) => {
             tracing::error!(turn = turn_id, error = %e, "could not retract an unsent turn; failing it instead");
-            // 收成 failed 也寫不進去就記成欠著、之後補（#158）：不留一筆沒人收的 in_flight＋pending。
             let owed = super::owed_delivery::closed(app, bot_id, turn_id, "failed", UNRETRACTED_NOTE).await.err();
             Err(Unretracted { cause: e, owed })
         }
     };
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, turn_id).await;
     if out.as_ref().map(|r| *r == Retraction::Withdrawn).unwrap_or(false) {
-        // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
-        // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
-        // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
-        // 沒刪成的兩條路沒有幽靈列要收，`emit_turn` 就夠了。
         crate::capabilities::Emit::emit(app, "resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
     }
     out
@@ -330,7 +307,6 @@ pub(super) async fn retract_unsent_turn(app: &impl LcHost, bot_id: &str, turn_id
 /// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
 /// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
 pub(super) async fn answer_for_turn(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), t: &db::Turn) -> LcResult<PromptOut> {
-    // 第一則才是這一回合的 prompt；之後的可能是回合中補充的（`sent_via = 'supplement'`）。
     let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
         .bind(&t.id)
         .fetch_optional(app.db())
@@ -349,9 +325,6 @@ pub(super) async fn answer_for_turn(app: &(impl crate::capabilities::Db + crate:
             .ok_or_else(|| LcError::Upstream("the prompt conversation is gone".into()))?;
         emit_prompt_message(app, &bot_id, &message_id).await.map_err(up)?;
     }
-    // The same request asked again reports the same outcome, including "unverified".
-    // 還在排隊的那筆照第一次的回答說 `queued`：它的 `delivery` 欄位是 `pending`，原樣回的話
-    // 重派的交辦會被記成 delivered/pending，從此不歸排隊保險絲管（review2 deliv L1）。
     let delivery = if t.status == "queued" {
         "queued".to_string()
     } else if t.delivery == "ok" && t.delivery_verified == 0 {
@@ -419,7 +392,6 @@ pub async fn prompt_with(
     prompt_with_attachments_and_relay(app, bot_id, text, client_request_id, attachment_ids, None).await
 }
 
-// #1862 S0：`QueueClass` 搬到 am-base（`lc_error.rs`），舊路徑 `prompt::QueueClass`／`lifecycle::QueueClass` 照舊可用。
 pub use crate::lc_error::QueueClass;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -489,7 +461,6 @@ pub async fn prompt_from_api(
     attachment_ids: &[String],
     relay: RelaySrc<'_>,
     send_now: bool,
-    // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
     clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
     prompt_inner(app, bot_id, text, client_request_id, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None, None).await
@@ -684,7 +655,6 @@ pub(super) fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'s
         "codex" if super::codex_hook_review::review_open(screen) => Some(super::codex_hook_review::REASON),
         "codex" if crate::codex_live::permission_approval_open(screen) => Some("dialog_open"),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
-        // #782：帳號安全提醒橫幅開著時 agent.prompt 打進去的開頭數字一樣會被當成選項吃掉。
         "codex" if super::codex_banner::blocks_typing(screen) => Some(super::codex_banner::REASON),
         _ => None,
     }
@@ -698,8 +668,6 @@ pub async fn final_agent_prompt_guard(
     bot: &db::Bot,
     target: &str,
 ) -> Result<(), &'static str> {
-    // Read authority before any final run/pane inspection; these reads and the eventual RPC use the
-    // client captured from this exact HostConn, never a fresh lookup by host name.
     if !app.hosts().is_current(&client.fence).await {
         return Err("host_changed");
     }
@@ -753,8 +721,6 @@ pub async fn final_agent_prompt_guard(
     if let Some(reason) = agent_prompt_dialog_reason(&bot.kind, &read.text) {
         return Err(reason);
     }
-    // `agent.prompt` bypasses the pane typing preflight. Recheck the Codex composer here so a
-    // restored draft or a queued follow-up cannot be combined with a newly delivered prompt.
     if bot.kind == "codex" && (run.resume_session_id.is_some() || run.resume_outcome.is_some()) {
         if let Err(super::delivery::Delivered::NotAttempted { reason, .. }) =
             super::delivery::composer_ready(app, run, "codex", &read.text).await
@@ -771,8 +737,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
         Some(pane) => Some(pane),
         None => None,
     };
-    // A missing pane is handled by the delivery planner. Once a pane id exists, a missing client or
-    // failed read is uncertainty: do not treat it as an empty screen and let prompt delivery pass.
     let client = match pane {
         Some(_) => Some(client_for_run(app, run).await.map_err(|_| pane_guard_retry(run, "pane_unreadable"))?),
         None => None,
@@ -788,7 +752,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
             screen = read_guard_screen(client, pane, run, "composer_unreadable").await?;
         }
     }
-    // An unlogged claude opens on "Select login method" and looks idle; a prompt would type into the menu.
     if bot.kind == "claude" && crate::tui_prompts::stuck_at_login(&screen) {
         let identity = bot.identity.clone().unwrap_or_default();
         let hint = if identity.is_empty() {
@@ -801,7 +764,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
     }
     if bot.kind == "claude" {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
-            // 2.1.281 的防誤刪框只由使用者核准。不按任何鍵、不打字進去，通知後回 409。
             if let Some(rm) = crate::tui_prompts::dangerous_rm_prompt(&screen) {
                 app.dangerous_rm_notify_once(run, &rm).await;
                 return Err(LcError::conflict(
@@ -810,7 +772,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                            "message": "claude 停在防誤刪確認框（Dangerous rm），要使用者本人到終端回答；框關掉之後再送。"}),
                 ));
             }
-            // 2.1.278 首次啟動的 Auto mode 框：只替它選原本 bypass 模式的第二項。
             if crate::tui_prompts::is_auto_mode_offer(&screen) {
                 #[cfg(all(test, feature = "daemon-test-harness"))]
                 super::race_point::hit("claude_auto_mode_before_answer", &bot.id).await;
@@ -855,8 +816,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
             return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": "claude 正在等待選單選擇，請到終端處理後再送。"})));
         }
     }
-    // agy 的登入框、色彩頁、條款頁、信任框、權限框（或 statusLine 回報 `tool_confirmation_pending`）herdr 可能判 idle：
-    // 認到就不送、也不按任何鍵（條款頁一個 Enter 就切換同意與否）。
     if bot.kind == "agy" {
         let dialog = crate::agy_screen::blocking_dialog(&screen).or_else(|| {
             super::agy_busy::tool_confirmation_pending(&run.id).then_some(crate::agy_screen::AgyDialog::Permission)
@@ -867,7 +826,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
             return Err(LcError::conflict(dialog.reason(), json!({"run_id": run.id, "message": hint})));
         }
     }
-    // grok's folder-trust dialog is not recognized by herdr, so trust the bot's actual host/cwd before answering `y`.
     if bot.kind == "grok" && crate::tui_prompts::is_grok_trust_dialog(&screen) {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
             #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -916,11 +874,8 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
             }
         }
     }
-    // codex migration/rate-limit questions belong to the user. Ordinary pickers may be Escaped,
-    // but any unreadable step in `close_picker` is returned as a refusal.
     if bot.kind == "codex" {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
-            // hook 審核框：不按任何鍵（Esc 是略過、2 是全部信任），也不讓下面的關選單流程碰它。
             if super::codex_hook_review::review_open(&screen) {
                 app.observe_codex_screen(run, &screen).await;
                 return Err(LcError::conflict(
@@ -940,8 +895,6 @@ pub async fn pane_ready_for_prompt(app: &impl LcHost, bot: &db::Bot, run: &db::R
                 let hint = "codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單。";
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
             }
-            // 啟動時的更新選單：不替使用者選更新、不把 prompt 打進去（Enter 會選到預設的 Update now）。
-            // 補標 blocked 並在對話裡講一次原因（`observe_screen` 每個選單只講一次）；這裡的 409 不另寫訊息，排隊的 prompt 重試也不洗版。
             if crate::codex_update::update_menu_open(&screen) {
                 app.observe_codex_screen(run, &screen).await;
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": crate::codex_update::MENU_HINT})));
@@ -1016,21 +969,13 @@ async fn prompt_inner(
     text: &str,
     client_request_id: &str,
     attachment_ids: &[String],
-    // `from: None` = 使用者自己在畫面上打的。
     relay: RelaySrc<'_>,
-    // 對方回合中時排隊而不是 409。只有 AGM 派工會給 true。
     queue_if_busy: bool,
-    // User /prompt 的 `queue_if_busy:true`：只在 run 正在跑但 turn／agent 忙時排入 awaits_idle。
     queue_awaits_idle: bool,
-    // 維護窗口的入場閘門要不要管這一則（issue #86）。
     admission: Admission,
-    // 插隊送出（issue #103）：對方回合中時打斷它，而不是 409。只有使用者按「立刻送出」會給 true。
     want_send_now: bool,
-    // 先清掉框裡的這段草稿（使用者在網頁上按「清掉再送我這則」）。
     clear_draft: Option<&str>,
-    // 分享 capability 必須在 bot 鎖裡重驗，避免撤銷前通過的請求之後才送達。
     share_token: Option<&str>,
-    // 主力保溫（#872）：計畫當時的 active run。鎖內 active run 已換掉、不再 idle 或有排隊回合就不送（`superseded_run`）。
     expected_run: Option<&str>,
 ) -> LcResult<PromptOut> {
     let bot_kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
@@ -1062,22 +1007,13 @@ async fn prompt_inner(
         }
         app.touch_share(bot_id).await;
     }
-    // #708：移交出去的專案不收 prompt（也不排隊）：送到了也是另一顆 daemon 的回合。
     super::send_now::ports::HandoffSendRepo::refuse_handed_off(app, bot_id).await?;
-    // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」
-    // 的那個「下次要用」就是這裡。**在鎖裡**做（issue #123）：巡邏收機器也在同一把鎖裡判斷＋寫標記＋停機，
-    // 叫醒放在鎖外的話，會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被收掉，接著只會看到 409 沒有 active run。
-    // 不是睡著的 bot 只多一次索引查詢，路徑照舊。
     if let Err(e) = app.idle_sleep_wake_locked(bot_id, "有新的訊息要送進來").await {
         tracing::warn!(bot = %bot_id, error = %e, "could not wake a sleeping bot for a prompt");
     }
-    // 上一次打斷欠著的收尾先補（#147）：不然那筆已經被 Esc 停掉、只是狀態沒寫成的回合，會把這一則擋成
-    // 「a turn is already in flight」直到 watchdog。
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
-    // 送達結果欠著的也先補（#149）：同一個 request id 的重試因此拿到寫好的結果，herdr 拒收、還沒收成 failed 的那一筆
-    // 也不會把這一則擋成「a turn is already in flight」。
     if let Err(e) = super::owed_delivery::settle_locked(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去");
     }
@@ -1154,27 +1090,21 @@ async fn prompt_gate_body(
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
-    // 已軟刪的 bot 不收 prompt（#338）：pane 可能還活著（停機中、停機失敗保留 run），打進去是打進使用者已經刪掉的東西。
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    // 專案刪除時的 child 清理可能因 DB 暫時故障而重試：那段期間 child row 可能仍是 live，但
-    // 專案已定案刪除。檢查放在 per-bot 鎖內，避免驗過之後剛好被 delete_project 軟刪仍送進舊 pane。
     db::project(app.db(), &bot.project_id)
         .await
         .map_err(up)?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
-    // Resolve first so an unknown id is a plain 400, not an undelivered turn.
     let files = app.resolve_attachments(bot_id, attachment_ids)
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
-    // 打進 pane 的字先清成 CLI 會原樣收下的樣子（#205，`pane_text`）：`prompt_text` 存清過的字，泡泡（`text`）留原文。
     let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
     if super::pane_text::nothing_left(text, &deliver) {
         return Err(LcError::Bad("the prompt is empty once invisible characters and terminal escapes are removed".into()));
     }
 
-    // 2. idempotency
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
@@ -1185,22 +1115,15 @@ async fn prompt_gate_body(
         check_same_text(app, &t, text).await?;
         return answer_for_turn(app, &t).await.map(Gated::Done);
     }
-    // 新的（非保溫）回合＝真的活動：「不用保溫」到此為止。
     app.note_keep_warm_prompt(bot_id, client_request_id).await;
 
     if queue_awaits_idle {
-        // A queued turn can remain pending briefly after its predecessor ends; do not let a direct
-        // prompt overtake that occupied user slot during the queue worker's wake-up window.
         super::busy_send::refuse_if_slot_taken(app, &conv, relay.queue_class).await?;
     }
-    // 維護窗口的入場閘門（issue #86）：`restart` 租約握著的時候，daemon 這一側不再開新回合。
-    // 擋在規劃與 turn 之前，所以連一列都不會建，同一個 `client_request_id` 之後原樣重送是乾淨的。
-    // 冪等那一段在上面：已經送出去的那一筆照舊回它自己的結果，不會因為窗口開著就改口。
     if let Some(refusal) = maintenance_refusal(app, admission).await {
         return Err(refusal);
     }
 
-    // 1. preconditions
     let mut run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict("bot has no active run", json!({}))
     })?;
@@ -1234,9 +1157,6 @@ async fn prompt_gate_body(
     if run.agent_status == "blocked" {
         return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
     }
-    // issue #103：插隊送出。先問這顆 run 認不認得 send-now 鍵，**再**決定要不要打斷——不合資格時
-    // 一個鍵都不按，照原本的路回 409，只是把原因一起講出來。
-    // issue #748：codex 另有一條 steer（`[codex] instant_interrupt` 旗標＋跑著的版本 >= 0.159.0），旗標預設關。
     let codex_on = want_send_now && bot.kind == "codex" && app.cfg().get().await.codex.instant_interrupt;
     let gate = want_send_now.then(|| {
         let codex_running = app.codex_running_version(&run.id);
@@ -1248,7 +1168,6 @@ async fn prompt_gate_body(
         None => (None, None),
     };
     let send_now_ok = want_send_now && refused.is_none();
-    // 打斷哪一筆。**現在不收**：計畫失敗（框裡有字、證據讀不到）時一個鍵都還沒按，不該先把人家的回合收掉。
     let interrupted = match db::in_flight_turn(app.db(), &run.id).await.map_err(up)? {
         Some(t) if send_now_ok => Some(t),
         Some(t) => {
@@ -1264,18 +1183,13 @@ async fn prompt_gate_body(
         }
         None => None,
     };
-    // 真的要按那顆鍵，只有在**有東西可以打斷**的時候。閒著的 bot 照一般 Enter 送出：按 send-now
-    // 什麼回合都沒打斷，卻把這條路多綁一個版本前提上去。
     let send_now_active = send_now_ok && interrupted.is_some();
-    // 回給呼叫端的那個字：真的插了隊、當下本來就閒著、或沒插隊的原因。
     let send_now = match (want_send_now, refused, interrupted.is_some()) {
         (false, _, _) => None,
         (true, Some(r), _) => Some(r.code()),
         (true, None, true) => Some("interrupted"),
         (true, None, false) => Some("idle"),
     };
-    // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92，`resume_gate`）：一個字都不打。
-    // AGM 派工排進佇列（驗證完或到期由 flush 送）；其他送入跟「對方回合中」一樣回可重試的 409。
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
         if queue_awaits_idle {
             let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, relay, &files).await?;
@@ -1292,9 +1206,6 @@ async fn prompt_gate_body(
             json!({"run_id": run.id, "session_id": expected, "retry_after_s": left.as_secs().max(1)}),
         ));
     }
-    // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
-    // 使用者自己在網頁送的（User /prompt：`queue_awaits_idle`，沒有轉寄來源）不擋：那就是他接管後要打的那一句，
-    // 擋下來等 60 秒是反了（2026-10-02 prorosal：Esc 後 7 秒送的「用cc1 sonnets」卡到寬限結束才送）。
     let users_own = queue_awaits_idle && relay.from.is_none();
     if queue_if_busy && !users_own {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
@@ -1319,23 +1230,13 @@ async fn prompt_gate_body(
     {
         return Err(LcError::conflict("a previous turn has unknown delivery; abandon it first", json!({"turn_id": t.id})));
     }
-    // Resolve the client before committing: must stay a retryable 502, not a stuck `pending` turn.
     let client = client_for_run(app, &run).await?;
     if let Some(expect) = clear_draft {
         super::composer_draft::clear(app, &client, &run, &bot, expect, interrupted.is_some()).await?;
     }
-    // codex steer（#748）：字照一般方式打進忙碌的 pane，併進**同一個**進行中的回合——不收舊回合、不建新回合。
-    // 閒著（沒有進行中的回合）時不走這裡，照一般送出（`send_now: "idle"`）。
     if let (Some(send_now::Mode::CodexSteer), Some(turn)) = (send_now_mode, interrupted.as_ref()) {
         return super::codex_steer::steer(app, &client, &run, &bot, turn, text, &deliver, client_request_id).await.map(Gated::Done);
     }
-    // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
-    // (box busy, no way to prove it) must never become an in-flight turn nobody can release
-    // (sol review round seven #2). A 409 keeps a supervisor assignment queued with backoff.
-    // A direct prompt never waits inside the request: a missing codex rollout answers 409 and the
-    // caller (or AGM's backoff) asks again.
-    // 插隊送出一定要走打字那條路（`force_pane`）：herdr 的 `agent.prompt` 沒有鍵可以按，
-    // 按不到 send-now 就只是把字排進 CLI 自己的佇列，等於沒插隊。
     let plan = match plan_delivery(app, &client, &run, &bot, &deliver, send_now_active, false).await.map_err(up)? {
         Ok(plan) if send_now_active => plan.submitting_with(Submit::SendNow),
         Ok(plan) => plan,
@@ -1370,18 +1271,8 @@ async fn prompt_commit_and_deliver_body(
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_turn_commit", bot_id).await;
 
-    // 插隊送出：被打斷的那一筆**現在不收**，要等送出鍵確定生效（#120，`send_now::deliver`）。新的那一則照樣先寫進 DB
-    // （維護窗口的閘門、冪等都靠它），但 `run_id` 先留空：舊的那一筆還佔著 run 的 in-flight 名額
-    // （`turns_one_in_flight`），送出鍵生效時跟收掉舊的同一個交易掛上去。連續兩次插隊送出也因此不會有兩個 in_flight：
-    // 兩次都在同一顆 per-bot 鎖裡排隊，第二次打斷的是第一次掛上去的那一則。
-
-    // 3. turn + user message committed BEFORE the RPC, so an early hook can match.
-    // `prompt_text` 存**實際送出**的字（附件路徑展開後），跟排隊那條同一欄：
-    // stall 重送、畫面比對、hook 對 prompt 都讀它，不讀泡泡原文（review3 c3 M4）。
-    // `auto_resend=0` 在打字之前寫死：送出之後結果寫不回來（#149），這一筆也不會變成可以自動重送；寫回時照證據打開。
     let turn_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up)?;
-    // 專家派工的依據跟建 turn 同一句核對（`relay_grant`）：核權之後才提交的關閉開關／降級，這裡寫不進去。
     let inserted = sqlx::query(&format!(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          SELECT ?, ?, ?, 'web', 'in_flight', 'pending', ?, ?, ?, 0
@@ -1425,7 +1316,6 @@ async fn prompt_commit_and_deliver_body(
         ));
     }
     let msg_id = db::ulid();
-    // 真的要打斷一個進行中的回合才標「插隊」；閒著時按插隊就是一般送出。
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, relay_auth, sent_via, created_at) VALUES (?,?,?,'user',?,'web',?,?,?,?,?)",
     )
@@ -1445,8 +1335,6 @@ async fn prompt_commit_and_deliver_body(
     if let Err(e) = app.bind_attachments(&msg_id, &files).await {
         publish_prompt_message(app, bot_id, &msg_id).await;
         super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
-        // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
-        // DB 還是 in_flight＋pending 時不回普通的 `failed`。
         let note = format!("delivery failed: attachment binding failed: {e}");
         return match super::owed_delivery::closed(app, bot_id, &turn_id, "failed", &note).await {
             Ok(true) => Ok(PromptOut { turn_id, message_id: msg_id, delivery: "failed".into(), send_now }),
@@ -1457,27 +1345,19 @@ async fn prompt_commit_and_deliver_body(
     publish_prompt_message(app, bot_id, &msg_id).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
 
-    // 窄窗：閘門讀完之後、這一筆 commit 之前，窗口才被拿走。一個字都還沒打，所以撤回這一筆再回 409。
-    // 另一邊（`store::acquire_lease`）的條件式寫入保證它看不到已經 commit 的 turn，兩句都是單句寫入、
-    // 由 SQLite 排序，所以先 commit 的那個贏：這裡贏 → acquire 拿不到；acquire 贏 → 這裡撤回。
-    // 兩邊加起來才是「acquire 回 Ok 之後不會有任何一個字進 pane」（issue #86）。
     if let Some(refusal) = maintenance_refusal(app, admission).await {
         match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
             Ok(Retraction::Withdrawn) => return Err(refusal),
-            // 這筆已經被別的路徑收掉了：照它現在的樣子回，跟同一個 request id 重送一致（review3 L4）。
             Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
             Err(u) => return Err(u.answer(&run.id, &turn_id, &msg_id, "a maintenance window opened and the turn could not be withdrawn")),
         }
     }
 
-    // 這一則確定留下來（沒有被撤回）才入帳；撤回的訊息不會留下指向它的承諾項。
     super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
 
-    // 打第一個字之前的那一瞬：人在終端裡打字、CLI 跳出新框，都不受 bot 鎖管（#120 測試插在這裡）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_typing", bot_id).await;
 
-    // 4. deliver
     let res = match interrupted.as_ref() {
         None => execute_delivery(app, &client, &run, &bot, &deliver, plan).await,
         Some(old) => match super::send_now::deliver(app, &client, &run, &bot, &deliver, plan, old, &turn_id).await {
@@ -1485,7 +1365,6 @@ async fn prompt_commit_and_deliver_body(
             super::send_now::Outcome::NotAttempted(not) => Ok(not),
             super::send_now::Outcome::NotSent(why) => return send_now_fell_through(app, bot_id, &run.id, &turn_id, &msg_id, why, false).await,
             super::send_now::Outcome::Unknown(why) => return send_now_fell_through(app, bot_id, &run.id, &turn_id, &msg_id, why, true).await,
-            // 送出鍵生效了、狀態沒寫成：503，跟 interrupt／start／stop 的 `*_state_uncommitted` 同一種（#147）。
             super::send_now::Outcome::Uncommitted(e) => {
                 return Err(LcError::Uncommitted(json!({
                     "error": "send_now_state_uncommitted", "run_id": run.id, "turn_id": turn_id, "interrupted_turn_id": old.id,
@@ -1495,38 +1374,23 @@ async fn prompt_commit_and_deliver_body(
             }
         },
     };
-    // `delivery` 是回給呼叫端／UI 的字；`rec` 是要寫進 DB 的兩個欄位（證據、能不能重送）。
     let mut rec = DeliveryRecord { stored: "unknown", verified: false, auto_resend: true };
     let delivery = match res {
-        // 打字＋無損證據。`Handed`（agent.prompt）沒有證據，API 也照證據說「unverified」，
-        // 但它照舊可以自動重送（AGM 2026-09-16：證據與重送分開）。
         Ok(d @ (Delivered::Submitted | Delivered::Handed)) => {
             rec = d.record().expect("delivered outcome records");
             if matches!(d, Delivered::Submitted) { "ok" } else { "unverified" }
         }
-        // Typed and submitted on a run with no lossless evidence (grok, remote, codex before its
-        // session is known): delivered as far as anyone can tell, marked for a human, never re-sent.
         Ok(d @ Delivered::Unverified) => {
             rec = d.record().expect("delivered outcome records");
             "unverified"
         }
-        // The box filled between the plan and the first keystroke: nothing was sent. Take the turn
-        // back out so the same request id can be sent again, and answer 409 like the plan would.
         Ok(not @ Delivered::NotAttempted { .. }) => {
             match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
-                // 撤掉了：同一個 request id 原樣重送會重來一次，照計畫階段的答案回 409／422。
                 Ok(Retraction::Withdrawn) => return Err(super::composer_draft::with_draft(&client, &run, &bot, not_attempted_error(&run.id, not)).await),
-                // 窄窗裡別的路徑（`mark_run_exited` → `fail_in_flight`）已經把這筆收掉並插了說明：
-                // 一個字都沒刪，照 turn 現況回。回可重試的 409 只會叫呼叫端用同一個 request id 重送，
-                // 而重送從冪等分支拿到的就是這一筆收掉的回合——兩次答案不一致，交辦還被記成送達失敗
-                // （review3 L4）。
                 Ok(Retraction::AlreadySettled) => return answer_for_turn_id(app, &turn_id).await,
-                // If the turn cannot be taken back, the same request id would only ever find a failed
-                // turn: answer 5xx (final for this id), not a retryable 409.
                 Err(u) => return Err(u.answer(&run.id, &turn_id, &msg_id, "prompt was not sent and its turn could not be withdrawn")),
             }
         }
-        // Keys were sent and the result cannot be proven: that is what `unknown` means (§6.3).
         Ok(Delivered::Unproven(why)) => {
             tracing::warn!(bot = %bot_id, reason = why, "prompt delivery could not be proven");
             "unknown"
@@ -1534,7 +1398,6 @@ async fn prompt_commit_and_deliver_body(
         Err(e) => {
             let blocked = e.downcast_ref::<HerdrError>().map(|h| h.code == "agent_blocked").unwrap_or(false);
             if blocked {
-                // 收成 failed 寫不進去就記成欠著（#149）：DB 還是 in_flight＋pending 時不回普通的 `failed`。
                 if let Err(err) = super::owed_delivery::closed(app, bot_id, &turn_id, "failed", &format!("delivery failed: {e}")).await {
                     return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, "failed", Some(&err)));
                 }
@@ -1544,7 +1407,6 @@ async fn prompt_commit_and_deliver_body(
             "unknown"
         }
     };
-    // 寫回（寫成才推 `turn_updated`）；寫不進去就記成欠著、回 503（#149）。watchdog 照樣掛——字真的送出去了，它們每一步都重讀 DB。
     let written = super::owed_delivery::delivered(app, bot_id, &turn_id, rec).await;
     if delivery == "ok" || delivery == "unverified" {
         arm_stall(app, &run.id, bot_id, &turn_id).await;
@@ -1553,13 +1415,11 @@ async fn prompt_commit_and_deliver_body(
     if let Err(e) = written {
         return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e)));
     }
-    // 框已空、證據還沒長出來而記成 `unknown` 的：背景繼續看，看到就升成 ok（#1479）。其他原因的 unknown 沒有記著東西，什麼都不做。
     if delivery == "unknown" {
         super::late_proof::arm(app, &run.id, bot_id, &turn_id);
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now })
 }
-
 
 /// 插隊送出沒有打斷任何東西（#120）：送出鍵沒生效（`unknown = false`）或不知道生效了沒有（`true`）。
 /// 正在跑的那一回合原封不動；新的那一則收成 failed（不佔 run 的 in-flight 名額），送達記成 `failed`／`unknown`，
@@ -1589,7 +1449,6 @@ async fn send_now_fell_through(
             delivery: delivery.into(),
             send_now: Some(if unknown { "unknown" } else { "not_sent" }),
         }),
-        // 別的路徑先收掉了：照它現在的樣子回。
         Ok(false) => answer_for_turn_id(app, turn_id).await,
         Err(e) => Err(super::owed_delivery::uncommitted(Some(run_id), turn_id, msg_id, delivery, Some(&e))),
     }
@@ -1607,7 +1466,6 @@ mod prompt_tests {
     }
 }
 
-
 /// 同一個 client_request_id 換了內容不能回第一則的結果（#337）：呼叫端會以為新的那則送達了，其實一個字都沒打。
 /// 只有內容完全一樣的重送才是冪等；讀不到原本的內容也不敢說「一樣」，回錯讓呼叫端重試。
 pub async fn check_same_text(app: &impl crate::capabilities::Db, turn: &db::Turn, text: &str) -> LcResult<()> {
@@ -1624,7 +1482,6 @@ pub async fn check_same_text(app: &impl crate::capabilities::Db, turn: &db::Turn
         _ => Ok(()),
     }
 }
-
 
 /// #1461／#1465 守門：`prompt_inner` 拆段之後，段與段之間傳的 `Ready` 要維持小型值（只放資料列與 client，不放中間 future）。
 /// 真正的棧餘裕由 daemon 的 `*_fits_in_a_one_mib_stack` 守：握手那一拍（`prompt_control_plane`）就在 `the_plain_bot_gate_path_…` 裡。

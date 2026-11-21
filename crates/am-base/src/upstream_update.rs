@@ -455,7 +455,6 @@ pub async fn tick(
             let v = status.latest_version.clone().unwrap_or_default();
             last.insert(kind.to_string(), v);
             if let Err(e) = save_last(last_file, &last) {
-                // 記不下來下一輪會再推一次；寧可重複也不要漏。
                 tracing::warn!(kind, error = %e, "upstream_update: 寫不進 last_notified");
             }
             if is_auto {
@@ -472,7 +471,6 @@ pub async fn tick(
         if let Some(e) = &status.error {
             tracing::warn!(kind, error = %e, "upstream_update: 查不到上游最新版");
         }
-        // `checked_at` 不算變化：抓不到時每輪都是新的嘗試時間，算進去就會每 10 分鐘重推一次同樣的錯誤。
         let changed = prev.as_ref().map(|p| UpstreamStatus { checked_at: status.checked_at.clone(), ..p.clone() }).as_ref() != Some(&status);
         watch.snapshot.lock().await.insert(kind.to_string(), status.clone());
         if !changed && notify.is_none() {
@@ -488,8 +486,6 @@ pub async fn tick(
     }
     emitted
 }
-
-
 
 /// 上游更新的觀察狀態。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait UpstreamWatch: Send + Sync {

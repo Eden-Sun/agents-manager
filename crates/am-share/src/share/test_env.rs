@@ -111,7 +111,6 @@ pub async fn env() -> Env {
     let app = TestShareEnv {
         db: pool,
         cfg,
-        // 本機 herdr 指向不存在的 socket：分享測試不碰本機 herdr，真的碰到會連線失敗。
         hosts: HostManager::new(am_base::herdr::HerdrClient::new(data.join("no-herdr.sock"))),
         data_dir: data,
         events,

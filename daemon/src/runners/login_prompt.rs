@@ -47,7 +47,6 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
     let host = fence.conn().name.clone();
     let Some(identity) = turn_identity(app, bot).await else { return };
     let identity = identity.as_str();
-    // 以放行時捕獲的權威為準，並把檢查與標記放在 host 換代的 gate 內。
     let Some((known, changed)) = fence
         .run_current(async {
             let known = app.tools.lock().await.get(&host).is_some_and(|h| h.identities.contains_key(identity));
@@ -68,7 +67,6 @@ pub async fn on_auth_failure(app: &Arc<App>, bot: &db::Bot, admitted: Option<&cr
     }
     let (app, host, identity, fence) = (app.clone(), host, identity.to_string(), fence.clone());
     tokio::spawn(async move {
-        // 本機問得出「未登入」會更新快取並推快照（`record_identity_login_fenced`）；遠端 claude 問不出來就維持上面的記號。
         let _ = crate::tools::recheck_identity_login_fenced(&app, &host, &identity, &fence).await;
     });
 }
@@ -79,7 +77,6 @@ pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot, admitted: Option<&crate::
         return;
     }
     let Some(fence) = admitted else { return };
-    // 先看有沒有帳：絕大多數回合都沒有，不必每次都查 DB（只有整張空的才早退，有帳就去查這個回合的身份）。
     if app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
         return;
     }

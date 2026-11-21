@@ -68,7 +68,6 @@
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(b"#!/bin/sh\necho ok\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // 寫入 fd 還開著：直接 exec 會是 ETXTBSY（前提）。
         assert!(is_text_busy(&std::process::Command::new(&path).output().unwrap_err()), "前提：寫入 fd 開著時 exec 回 ETXTBSY");
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(60));

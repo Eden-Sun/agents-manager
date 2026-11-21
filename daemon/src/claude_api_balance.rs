@@ -152,7 +152,6 @@ pub fn compute_balance_spent(
 ) -> Result<BalanceCalculation> {
     let t_next_day = start_of_next_day(anchor_at_dt);
 
-    // 1. (a) T 當天花費：只取 local attempts 中 created_at >= T 且 created_at < T_next_day
     let mut spent_t_day_usd = 0.0;
     let mut uncertain_usd = 0.0;
     for att in local_attempts {
@@ -163,11 +162,9 @@ pub fn compute_balance_spent(
         }
     }
 
-    // 2. (b) T 隔天起之 cost_report 完整日
     let mut spent_report_usd = 0.0;
     let mut report_through: Option<DateTime<Utc>> = None;
 
-    // 將 buckets 依 starting_at 排序
     let mut sorted_buckets = report_buckets.to_vec();
     sorted_buckets.sort_by(|a, b| a.starting_at.cmp(&b.starting_at));
 
@@ -175,7 +172,6 @@ pub fn compute_balance_spent(
         let b_start = parse_rfc3339(&bucket.starting_at)?;
         let b_end = parse_rfc3339(&bucket.ending_at)?;
 
-        // 只取 >= T 隔天的 bucket，且必須是完整日（結束時間 <= 今天 00:00:00 UTC）
         if b_start >= t_next_day && b_end <= start_of_day(now) {
             let mut bucket_usd = 0.0;
             for res in &bucket.results {
@@ -188,16 +184,12 @@ pub fn compute_balance_spent(
         }
     }
 
-    // 3. (c) report 還沒涵蓋的日子（通常是 report_through 起至現在）
-    // 如果 report_through 有值，則 local_since = report_through
-    // 若 report_through 無值，則 local_since = t_next_day
     let local_since = report_through.unwrap_or(t_next_day);
 
     let mut spent_recent_local_usd = 0.0;
     for att in local_attempts {
         if let Ok(ts) = parse_rfc3339(&att.created_at) {
             if ts >= local_since {
-                // 官方報表涵蓋到的日子之後才用本機帳；其間不確定的 attempt（已被官方數字取代的日子）不再列。
                 if att.uncertain { uncertain_usd += microusd_to_usd(att.microusd); } else { spent_recent_local_usd += microusd_to_usd(att.microusd); }
             }
         }
@@ -446,7 +438,6 @@ pub async fn query_local_attempts_since(app: &Arc<App>, since_rfc3339: &str) -> 
     .await?;
 
     let mut out: Vec<AttemptSpent> = rows.into_iter().map(|(created_at, microusd, uncertain)| AttemptSpent { created_at, microusd, uncertain }).collect();
-    // 同一把 key 的其他用途（翻譯、changelog、分診）記在 spend.jsonl，不在 api_bot_attempts。
     if let Ok(since) = parse_rfc3339(since_rfc3339) {
         out.extend(crate::claude_api::read_spend_since(&app.data_dir, since).into_iter().map(|(created_at, microusd)| AttemptSpent { created_at, microusd, uncertain: false }));
     }
@@ -467,7 +458,6 @@ pub async fn get_claude_api_balance(
     let now = Utc::now();
     let as_of = am_base::db::iso_at(now);
 
-    // 檢查是否有設定錨點與 key
     let (anchor_usd, anchor_at_str) = match (anchor_usd, anchor_at_str) {
         (Some(usd), Some(at)) => (usd, at),
         _ => {
@@ -491,7 +481,6 @@ pub async fn get_claude_api_balance(
         }
     };
 
-    // 讀取 admin key
     let admin_key = match am_base::key_file::read_key(&admin_key_path) {
         Ok(k) => Some(k),
         Err(e) => {
@@ -500,7 +489,6 @@ pub async fn get_claude_api_balance(
         }
     };
 
-    // 抓取本機帳（從 T 的 00:00:00 UTC 開始）
     let t_day_start = am_base::db::iso_at(start_of_day(anchor_dt));
     let local_attempts = match query_local_attempts_since(&app, &t_day_start).await {
         Ok(atts) => atts,
@@ -509,8 +497,6 @@ pub async fn get_claude_api_balance(
         }
     };
 
-    // 官方數字：先用小時粒度的 analytics/cost（今天也有，只差 data_refreshed_at 之後的空窗）；
-    // 這個端點不給（beta、組織不支援）才退回每日的 legacy cost_report（只到前一個 UTC 日）。
     let mut api_error: Option<String> = None;
     let mut source = "local";
     let mut analytics: Option<(Vec<CostReportBucket>, Option<DateTime<Utc>>)> = None;
@@ -545,7 +531,6 @@ pub async fn get_claude_api_balance(
         compute_balance_hourly(anchor_usd, anchor_dt, &buckets, refreshed, &local_attempts, now)
             .map_err(|e| LcError::Bad(format!("calculation error: {e}")))?
     } else {
-        // 錨點隔天 0 點還沒過完一整天時，cost_report 不會有任何可用的日子；這時去查會被回 400（ending 必須晚於 starting）。
         let report_buckets = if start_of_next_day(anchor_dt) >= start_of_day(now) {
             Vec::new()
         } else if let Some(ref key) = admin_key {
@@ -582,7 +567,6 @@ pub async fn get_claude_api_balance(
         },
         "spent_usd": calc.spent_usd,
         "remaining_usd": calc.remaining_usd,
-        // 這是估算：官方只給到前一個 UTC 日的帳（`report_through`），今天的靠本機帳；不確定的另列、餘額另給最壞下限。
         "estimate": true,
         "uncertain_usd": calc.uncertain_usd,
         "remaining_floor_usd": calc.remaining_floor_usd,
@@ -665,18 +649,11 @@ mod tests {
 
     #[test]
     fn test_compute_balance_spent_all_three_tiers() {
-        // T 錨點：2026-11-01T12:00:00Z，餘額 B = 100.0 USD
         let anchor_at = DateTime::parse_from_rfc3339("2026-11-01T12:00:00Z").unwrap().with_timezone(&Utc);
         let anchor_usd = 100.0;
 
-        // 當前時間：2026-11-04T15:00:00Z
         let now = DateTime::parse_from_rfc3339("2026-11-04T15:00:00Z").unwrap().with_timezone(&Utc);
 
-        // 本機 attempts：
-        // 1. T 之前：2026-11-01T10:00:00Z (不計入)
-        // 2. T 當天：2026-11-01T14:00:00Z (計入 tier a，100,000 µUSD = $0.10)
-        // 3. 2026-11-02T10:00:00Z (此日有 report，不應從 local 計入)
-        // 4. 2026-11-04T08:00:00Z (今天尚未有 report，計入 tier c，200,000 µUSD = $0.20)
         let local_attempts = vec![
             AttemptSpent { created_at: "2026-11-01T10:00:00Z".into(), microusd: 500_000, uncertain: false },
             AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000, uncertain: false },
@@ -684,9 +661,6 @@ mod tests {
             AttemptSpent { created_at: "2026-11-04T08:00:00Z".into(), microusd: 200_000, uncertain: false },
         ];
 
-        // cost_report：
-        // 涵蓋 2026-11-02 (23.5018 cents = $0.235018)
-        // 涵蓋 2026-11-03 (100.0000 cents = $1.000000)
         let report_buckets = vec![
             CostReportBucket {
                 starting_at: "2026-11-02T00:00:00Z".into(),
@@ -702,14 +676,10 @@ mod tests {
 
         let res = compute_balance_spent(anchor_usd, anchor_at, &report_buckets, &local_attempts, now).unwrap();
 
-        // (a) T 當天：$0.10
         assert!((res.breakdown.t_day_local_usd - 0.10).abs() < 1e-6);
-        // (b) report：$0.235018 + $1.00 = $1.235018
         assert!((res.breakdown.report_usd - 1.235018).abs() < 1e-6);
-        // (c) 未涵蓋日 (2026-11-04)：$0.20
         assert!((res.breakdown.recent_local_usd - 0.20).abs() < 1e-6);
 
-        // 總花費：0.10 + 1.235018 + 0.20 = 1.535018
         let expected_spent = 0.10 + 1.235018 + 0.20;
         assert!((res.spent_usd - expected_spent).abs() < 1e-6);
         assert!((res.remaining_usd - (100.0 - expected_spent)).abs() < 1e-6);
@@ -720,14 +690,13 @@ mod tests {
 
     #[test]
     fn test_compute_balance_fallback_no_report() {
-        // 沒有 report 資料時，T 隔天起全部走本機帳
         let anchor_at = DateTime::parse_from_rfc3339("2026-11-01T12:00:00Z").unwrap().with_timezone(&Utc);
         let anchor_usd = 50.0;
         let now = DateTime::parse_from_rfc3339("2026-11-02T15:00:00Z").unwrap().with_timezone(&Utc);
 
         let local_attempts = vec![
-            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000, uncertain: false }, // $0.10
-            AttemptSpent { created_at: "2026-11-02T05:00:00Z".into(), microusd: 400_000, uncertain: false }, // $0.40
+            AttemptSpent { created_at: "2026-11-01T14:00:00Z".into(), microusd: 100_000, uncertain: false },
+            AttemptSpent { created_at: "2026-11-02T05:00:00Z".into(), microusd: 400_000, uncertain: false },
         ];
 
         let res = compute_balance_spent(anchor_usd, anchor_at, &[], &local_attempts, now).unwrap();
@@ -754,10 +723,8 @@ mod tests {
         };
         let buckets = vec![bucket("2026-11-14", "2026-11-15", "1592.78")];
         let atts = vec![
-            // 11/14 的不確定 attempt：官方 11/14 的帳已涵蓋（15.93），不再另計。
             AttemptSpent { created_at: "2026-11-14T10:00:00Z".into(), microusd: 5_278_119, uncertain: true },
             AttemptSpent { created_at: "2026-11-14T11:00:00Z".into(), microusd: 15_000_000, uncertain: false },
-            // 今天（官方還沒有）：確定 $35.90、不確定三筆 $6.53。
             AttemptSpent { created_at: "2026-11-15T01:00:00Z".into(), microusd: 35_898_529, uncertain: false },
             AttemptSpent { created_at: "2026-11-15T02:00:00Z".into(), microusd: 6_530_000, uncertain: true },
             AttemptSpent { created_at: "2026-11-15T03:00:00Z".into(), microusd: 6_530_000, uncertain: true },
@@ -787,18 +754,18 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-11-15T11:20:00Z").unwrap().with_timezone(&Utc);
         let refreshed = DateTime::parse_from_rfc3339("2026-11-15T10:39:59Z").unwrap().with_timezone(&Utc);
         let buckets = vec![
-            bucket("2026-11-15T05:00:00Z", "2026-11-15T06:00:00Z", &["52.26"]),   // 錨點那一小時：不用官方
-            bucket("2026-11-15T07:00:00Z", "2026-11-15T08:00:00Z", &["125.02"]),  // $1.2502
-            bucket("2026-11-15T08:00:00Z", "2026-11-15T09:00:00Z", &["300.00", "329.80"]), // 同一小時兩列（有 group）＝$6.298
+            bucket("2026-11-15T05:00:00Z", "2026-11-15T06:00:00Z", &["52.26"]),
+            bucket("2026-11-15T07:00:00Z", "2026-11-15T08:00:00Z", &["125.02"]),
+            bucket("2026-11-15T08:00:00Z", "2026-11-15T09:00:00Z", &["300.00", "329.80"]),
         ];
         let at = |h: &str, microusd: i64, uncertain: bool| AttemptSpent { created_at: format!("2026-11-15T{h}Z"), microusd, uncertain };
         let local = vec![
-            at("05:30:00", 999_999_999, false),  // 錨點之前：不算
-            at("05:55:00", 400_000, false),      // 錨點那一小時：本機 $0.40
-            at("07:10:00", 50_000_000, false),   // 官方段內：被官方取代
-            at("08:30:00", 9_000_000, true),     // 官方段內的不確定：被官方取代，不列
-            at("10:50:00", 6_880_000, false),    // 官方資料（10:00）之後：本機 $6.88
-            at("11:00:00", 6_530_000, true),     // 空窗內的不確定：列出
+            at("05:30:00", 999_999_999, false),
+            at("05:55:00", 400_000, false),
+            at("07:10:00", 50_000_000, false),
+            at("08:30:00", 9_000_000, true),
+            at("10:50:00", 6_880_000, false),
+            at("11:00:00", 6_530_000, true),
         ];
         let r = compute_balance_hourly(98.14, anchor, &buckets, Some(refreshed), &local, now).unwrap();
         assert!((r.breakdown.t_day_local_usd - 0.40).abs() < 1e-9, "錨點那一小時用本機");
@@ -843,7 +810,6 @@ mod tests {
         let anchor = DateTime::parse_from_rfc3339("2026-11-02T05:52:10Z").unwrap().with_timezone(&Utc);
         let now = DateTime::parse_from_rfc3339("2026-11-15T12:16:00Z").unwrap().with_timezone(&Utc);
         let refreshed = DateTime::parse_from_rfc3339("2026-11-15T11:36:21Z").unwrap().with_timezone(&Utc);
-        // 11/02 06:00 起每小時 $1 到 11/15 09:00（空桶不列的小時：10:00 沒有列）；分兩批餵進來模擬分頁。
         let mut buckets = Vec::new();
         let mut t = DateTime::parse_from_rfc3339("2026-11-02T06:00:00Z").unwrap().with_timezone(&Utc);
         let last = DateTime::parse_from_rfc3339("2026-11-15T09:00:00Z").unwrap().with_timezone(&Utc);
@@ -856,7 +822,7 @@ mod tests {
         }
         let local = vec![
             AttemptSpent { created_at: "2026-11-02T05:55:00Z".into(), microusd: 100_000, uncertain: false },
-            AttemptSpent { created_at: "2026-11-15T09:30:00Z".into(), microusd: 6_880_000, uncertain: false }, // 官方（到 11:00）涵蓋的小時：不重複算
+            AttemptSpent { created_at: "2026-11-15T09:30:00Z".into(), microusd: 6_880_000, uncertain: false },
             AttemptSpent { created_at: "2026-11-15T11:10:00Z".into(), microusd: 19_740_000, uncertain: false },
             AttemptSpent { created_at: "2026-11-15T12:05:00Z".into(), microusd: 9_150_000, uncertain: false },
         ];

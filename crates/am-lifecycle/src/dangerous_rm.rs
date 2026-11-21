@@ -75,7 +75,6 @@ pub async fn notify_once(app: &(impl crate::capabilities::Db + crate::events::po
         let mut m = open().lock().unwrap();
         match m.get(&run.id) {
             Some(ep) if ep.warning == rm.warning && ep.command == rm.command => return false,
-            // 另一個框接在上一個後面（上一個框沒被巡邏看到關掉）：補標的 blocked 還是我們的，沿用。
             prev => {
                 let forced_from = prev.and_then(|ep| ep.forced_from.clone());
                 m.insert(run.id.clone(), Episode { warning: rm.warning.clone(), command: rm.command.clone(), forced_from, closing: false });
@@ -123,7 +122,6 @@ pub async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + cra
                 }
                 return;
             }
-            // herdr 沒把它判成 blocked：補標，燈號與「需要回應」才會亮，一般送出也照 blocked 擋。
             let prev = run.agent_status.clone();
             let marked = db::compare_and_set_running_run_agent_status(app.db(), run, &prev, "blocked").await.unwrap_or(false);
             if marked {

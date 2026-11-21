@@ -122,16 +122,13 @@ mod tests {
 
     #[test]
     fn bot_override_uses_the_kind_window_and_ttl() {
-        // claude 一律 1M、codex 400k：codex 512k 超出。
         assert_eq!(reason(validate_bot("codex", "gpt-6-luna", &json!({"context_tokens": 512000})).unwrap_err()).0, "context_out_of_range");
         assert!(validate_bot("claude", "claude-x", &json!({"context_tokens": 1000000})).is_ok());
         assert!(validate_bot("claude", "haiku", &json!({"context_tokens": 512000})).is_ok());
         assert!(validate_bot("claude", "opus", &json!({"context_tokens": 512000})).is_ok());
-        // claude 超過 200k 必須有模型。
         assert!(validate_bot("claude", "", &json!({"context_tokens": 300000})).is_err());
         assert_eq!(reason(validate_bot("agy", "", &json!({"context_tokens": 300000})).unwrap_err()).0, "context_unsupported");
         assert!(validate_bot("codex", "gpt-6", &json!({"context_tokens": 400000})).is_ok());
-        // 保溫分鐘 < claude TTL（60 分）；codex 沒有 TTL 限制。
         assert!(validate_bot("claude", "opus", &json!({"keep_warm_after_min": 59})).is_ok());
         assert_eq!(reason(validate_bot("claude", "opus", &json!({"keep_warm_after_min": 60})).unwrap_err()).1, "keep_warm_after_min");
     }

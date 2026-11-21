@@ -62,8 +62,6 @@ fn frame(tag: &str, payload: &str) -> String {
     format!("AM_RFS1\n{tag} {}\n{payload}\nAM_RFS_DONE\n", payload.len())
 }
 
-// ───────────────────────── measure ─────────────────────────
-
 #[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn measure_counts_workspace_and_outbox_but_not_the_keep_mark_or_symlink_targets() {
@@ -73,7 +71,6 @@ async fn measure_counts_workspace_and_outbox_but_not_the_keep_mark_or_symlink_ta
     fs::write(ws.join("a.bin"), vec![1u8; 8192]).unwrap();
     fs::create_dir_all(ws.join("sub")).unwrap();
     fs::write(ws.join("sub/b.bin"), vec![2u8; 4096]).unwrap();
-    // 指到工作目錄外的大檔與目錄：既不跟、也不算。
     let outside = test_dirs::scratch_dir("rs4-outside");
     fs::write(outside.join("huge.bin"), vec![3u8; 2 * 1024 * 1024]).unwrap();
     unix_fs::symlink(outside.join("huge.bin"), ws.join("link-file")).unwrap();
@@ -121,8 +118,6 @@ fn the_measure_output_is_parsed_strictly() {
     assert_eq!(parse_measure(frame("EVIL", "1 2 3 0").as_bytes()).unwrap_err(), RfsError::Untrusted, "沒宣告的 TAG 作廢");
 }
 
-// ───────────────────────── prune_outbox ─────────────────────────
-
 #[cfg(not(feature = "daemon-test-harness"))]
 #[tokio::test]
 async fn a_file_is_pruned_only_when_both_mtime_and_ctime_are_past_the_keep_days() {
@@ -138,11 +133,9 @@ async fn a_file_is_pruned_only_when_both_mtime_and_ctime_are_past_the_keep_days(
     fs::write(ob.join(".am-share-keep"), b"keep").unwrap();
     set_mtime(&ob.join(".am-share-keep"), now - 30 * DAY);
 
-    // 現在：mtime 是舊的，但 ctime 是剛剛（改 mtime 本身就更新 ctime）→ 兩個都要過，所以什麼都不刪。
     assert_eq!(prune_at(&site, 14, u64::MAX, 100, None).await.unwrap(), 0);
     assert!(ob.join("old-mtime.txt").exists() && ob.join("fresh.txt").exists());
 
-    // 15 天後：ctime 與 mtime 都超過 14 天的刪；mtime 在未來的不刪；標記檔不刪不算。
     let later = epoch(now) + 15 * 86_400;
     assert_eq!(prune_at(&site, 14, u64::MAX, 100, Some(later)).await.unwrap(), 2);
     assert!(!ob.join("old-mtime.txt").exists() && !ob.join("fresh.txt").exists());
@@ -157,13 +150,12 @@ async fn an_overfull_outbox_is_trimmed_from_the_oldest_by_count_and_by_bytes() {
     let site = site(&scratch, "rs4-prune-cap-host");
     let ob = Path::new(&site.outbox);
     let now = SystemTime::now();
-    fs::write(ob.join(".am-share-keep"), vec![0u8; 5000]).unwrap(); // 標記檔不算進上限
+    fs::write(ob.join(".am-share-keep"), vec![0u8; 5000]).unwrap();
     for i in 1..=5u64 {
         let p = ob.join(format!("f{i}.bin"));
         fs::write(&p, vec![i as u8; 100]).unwrap();
-        set_mtime(&p, now - Duration::from_secs((6 - i) * 3600)); // f5 最新
+        set_mtime(&p, now - Duration::from_secs((6 - i) * 3600));
     }
-    // 數量上限 2：留 f5、f4，刪 f1～f3。
     assert_eq!(prune_at(&site, 14, u64::MAX, 2, None).await.unwrap(), 3);
     let left = |dir: &Path| {
         let mut v: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
@@ -172,7 +164,6 @@ async fn an_overfull_outbox_is_trimmed_from_the_oldest_by_count_and_by_bytes() {
     };
     assert_eq!(left(ob), [".am-share-keep", "f4.bin", "f5.bin"]);
 
-    // 位元組上限 150：新的排前面累計，f5（100）進得去，f4 一加就 200 > 150，它和更舊的都刪。
     assert_eq!(prune_at(&site, 14, 150, 100, None).await.unwrap(), 1);
     assert_eq!(left(ob), [".am-share-keep", "f5.bin"]);
 }
@@ -188,7 +179,6 @@ async fn pruning_deletes_newline_names_recurses_but_never_removes_directories_or
     fs::write(ob.join("keep.txt"), b"x").unwrap();
     fs::create_dir_all(ob.join("sub")).unwrap();
     fs::write(ob.join("sub/deep.txt"), b"x").unwrap();
-    // 符號連結：不是一般檔，不刪、不算，連結指到的檔更不能動。
     let outside = test_dirs::scratch_dir("rs4-prune-outside");
     fs::write(outside.join("precious.txt"), b"x").unwrap();
     unix_fs::symlink(outside.join("precious.txt"), ob.join("link.txt")).unwrap();
@@ -239,15 +229,12 @@ async fn the_keep_mark_script_replaces_a_symlinked_mark_instead_of_writing_throu
     assert!(!mark.exists());
 }
 
-// ───────────────────────── 需要整個 App 的：is_full／sweep／keep 標記 ─────────────────────────
-
 #[cfg(not(feature = "daemon-test-harness"))]
 mod with_app {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::share::budget::{self, Measured, Unavailable};
-    // #1862 遷移 B：這組只需要 DB／主機登記／SiteEnv，不需要 daemon `App`：用 am-share 自己的窄環境（同名同形的 env／claude_bot）。
     use crate::share::test_env as tt;
 
     /// 把測試 app 的專案搬到一台假遠端主機（`local_sh_fake`：本機 sh 扮演它，家目錄＝scratch）。
@@ -293,18 +280,14 @@ mod with_app {
         let conn = remote_host(&e, "rs4-closed-app", &scratch).await;
         let (id, _, _) = share_bot(&e, &scratch, "far-closed", "restricted").await;
 
-        // 有新鮮的量測值：主機斷了也照用。
         budget::set_cached_for_test(&e.app, &id, Measured::default()).await;
         conn.connected.store(false, Ordering::SeqCst);
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "新鮮值照用");
-        // 沒有值又量不到：不當作沒滿。
         budget::clear_cached_for_test(&id);
         assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable), "主機斷線＋沒有量測值 → Unavailable（分享頁 503）");
-        // 連上了、但腳本框不完整（被截斷）：同樣量不到。
         conn.connected.store(true, Ordering::SeqCst);
         am_base::hosts::set_ssh_fake("rs4-closed-app", |_| Ok("AM_RFS1\nMEASURE 7\n1 2 3 0\n".into()));
         assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable), "框不完整 → Unavailable");
-        // ssh 本身失敗。
         am_base::hosts::set_ssh_fake("rs4-closed-app", |_| Err(anyhow::anyhow!("ssh: connection reset")));
         assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable));
         assert!(budget::cached(&id).is_none(), "量不到不記值");
@@ -317,13 +300,11 @@ mod with_app {
         let _conn = remote_host(&e, "rs4-unreadable-app", &scratch).await;
         let (id, ws, _) = share_bot(&e, &scratch, "far-unreadable", "restricted").await;
 
-        // 1. Normal readable file: is_full is Ok(false), and result is cached.
         fs::write(ws.join("inbox/up.bin"), vec![0u8; 8192]).unwrap();
         budget::clear_cached_for_test(&id);
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "正常可讀且未滿");
         assert!(budget::cached(&id).is_some(), "量測成功有快取");
 
-        // 2. Unreadable subtree: fails closed with Err(Unavailable), no cache published.
         budget::clear_cached_for_test(&id);
         let priv_dir = ws.join("secret_dir");
         fs::create_dir_all(&priv_dir).unwrap();
@@ -336,7 +317,6 @@ mod with_app {
         assert_eq!(res, Err(Unavailable), "不可讀子目錄必須 fail closed 回傳 Unavailable (503)");
         assert!(budget::cached(&id).is_none(), "量測失敗絕不發布低用量快取");
 
-        // Restore permissions
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
         fs::set_permissions(&priv_dir, perms).unwrap();
     }
@@ -368,7 +348,6 @@ mod with_app {
         let newly = budget::sweep(&e.app).await;
         assert_eq!(newly.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [restricted.as_str()], "只有受限的那顆被量、而且剛變滿");
         assert!(newly[0].1.full());
-        // 受限：先 prune 再 measure；信任分享：只 prune（不算預算）。順序不保證在兩顆之間，但每顆各自 prune 在 measure 之前。
         let seen = calls.lock().unwrap().clone();
         assert_eq!(seen.iter().filter(|c| **c == "prune").count(), 2, "受限與信任分享各做一次保留政策：{seen:?}");
         assert_eq!(seen.iter().filter(|c| **c == "measure").count(), 1, "信任分享不量：{seen:?}");
@@ -376,10 +355,8 @@ mod with_app {
         assert!(seen[..last_measure].contains(&"prune"), "量之前先做過保留政策：{seen:?}");
         assert!(budget::cached(&trusted).is_none());
 
-        // 第二輪：已經是滿的，不再宣告。
         assert!(budget::sweep(&e.app).await.is_empty(), "同一次變滿只通知一次");
 
-        // 主機斷線：整台跳過（不打 ssh、不通知、不清快取）。
         conn.connected.store(false, Ordering::SeqCst);
         let before = calls.lock().unwrap().len();
         assert!(budget::sweep(&e.app).await.is_empty());
@@ -403,7 +380,6 @@ mod with_app {
         crate::share::keep_share_outboxes(&e.app).await;
         assert!(mark.is_file(), "開機補標記：遠端 outbox 放 .am-share-keep");
 
-        // bot 已標成刪除之後收尾，仍找得到它在哪台主機並拿掉標記。
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
         crate::share::revoke_bot_share(&e.app, &id).await.unwrap();
         assert!(!mark.exists(), "revoke 拿掉遠端標記");
@@ -427,7 +403,6 @@ mod with_app {
         assert_eq!(budget::cached(&id).map(|(m, _)| m), last, "失敗不記值，也不拿 0 覆蓋");
         sqlx::query("ALTER TABLE shared_bots_away RENAME TO shared_bots").execute(&e.app.db).await.unwrap();
 
-        // DB 恢復後遠端量得到，照常放行或擋下。
         am_base::hosts::set_ssh_fake("budget-db-host", |_| Ok(frame("MEASURE", "1 0 1 0")));
         budget::clear_cached_for_test(&id);
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false));
@@ -444,17 +419,14 @@ mod with_app {
         budget::clear_cached_for_test(&id);
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(false), "A 量到 8 MiB，記下來");
 
-        // 指到 B，B 的連線還沒通：不得沿用 A 的新鮮值，要 503。
         let b = remote_host(&e, "budget-repoint-b", &scratch).await;
         b.connected.store(false, Ordering::SeqCst);
         assert_eq!(budget::is_full(&e.app, &id).await, Err(Unavailable), "B 不可用：不沿用 A 的 false");
 
-        // B 連上了：量 B 的數字（已滿）。
         b.connected.store(true, Ordering::SeqCst);
         am_base::hosts::set_ssh_fake("budget-repoint-b", |_| Ok(frame("MEASURE", &format!("{} 0 1 0", budget::SANDBOX_MAX_BYTES))));
         assert_eq!(budget::is_full(&e.app, &id).await, Ok(true), "只有 B 的量測才算數");
 
-        // 工作目錄換了（bot id 不變）：舊目錄的量測值不再用。
         let moved = scratch.join("shared-bots/budget-repoint-moved");
         fs::create_dir_all(&moved).unwrap();
         sqlx::query("UPDATE shared_bots SET workspace = ? WHERE bot_id = ?").bind(moved.to_string_lossy().to_string()).bind(&id).execute(&e.app.db).await.unwrap();
@@ -471,12 +443,10 @@ mod with_app {
         let (id, _, _) = share_bot(&e, &scratch, "far-revoke", "restricted").await;
         assert!(crate::share::store::enable(&e.app.db, &id).await.unwrap().is_some(), "先開分享：bot_shares 有一列");
 
-        // 假 ssh 延遲 5 秒；下面的等待上限要小於它，`!task.is_finished()` 才成立（#1279）。
         am_base::hosts::set_ssh_delay("x5-revoke-app", std::time::Duration::from_secs(5));
         let app = e.app.clone();
         let target = id.clone();
         let task = tokio::spawn(async move { crate::share::revoke_bot_share(&app, &target).await });
-        // token 作廢是 spawn 出去的 DB 寫入，高負載下不會在固定時間內完成：等它不見（有上限），不靠固定 sleep。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
         let left = loop {
             let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_shares WHERE bot_id = ?").bind(&id).fetch_one(&e.app.db).await.unwrap();
@@ -630,7 +600,6 @@ mod with_app {
         crate::share::keep_share_outboxes(&e.app).await;
         assert!(mark.is_file(), "前置：現役時標記在");
 
-        // 刪除：bot 標成刪除，欠一列「拿掉」。
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
         crate::share::store::queue_keep(&e.app.db, "i1266-removal-app", &id).await.unwrap();
 
@@ -641,14 +610,12 @@ mod with_app {
         };
         tokio::time::timeout(Duration::from_secs(10), entered).await.expect("拿掉的 ssh 沒有進到卡點").unwrap();
 
-        // restore：bot 回來，放上標記。
         sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&e.app.db).await.unwrap();
         let restore = {
             let app = e.app.clone();
             let id = id.clone();
             tokio::spawn(async move { crate::share::keep_new_remote_share(&app, &id).await })
         };
-        // 給 restore 去搶的時間（有鎖的版本會在這裡等，不會搶先）。
         tokio::time::sleep(Duration::from_millis(200)).await;
         release.send(()).unwrap();
         drain.await.unwrap();
@@ -666,7 +633,6 @@ mod with_app {
         remote_host(&e, "i1266-add-app", &scratch).await;
         let (id, _, outbox) = share_bot(&e, &scratch, "far-i1266-add", "restricted").await;
         let mark = outbox.join(".am-share-keep");
-        // 現役 bot 欠一列「放上」，標記還沒放上去。
         crate::share::store::queue_keep(&e.app.db, "i1266-add-app", &id).await.unwrap();
         assert!(!mark.exists());
 
@@ -677,7 +643,6 @@ mod with_app {
         };
         tokio::time::timeout(Duration::from_secs(10), entered).await.expect("放上的 ssh 沒有進到卡點").unwrap();
 
-        // 刪除：bot 標成刪除、拿掉標記。
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&id).execute(&e.app.db).await.unwrap();
         let revoke = {
             let app = e.app.clone();

@@ -31,7 +31,6 @@ use crate::db;
 /// 使用者自己在 pane 裡回答掉也來得及。
 pub const SETTLE: Duration = Duration::from_secs(8);
 
-
 /// 訊息裡最多帶這麼多字的畫面尾段——父 agent 要的是「它在問什麼」，不是整個終端。
 const MAX_QUESTION_CHARS: usize = 500;
 
@@ -107,13 +106,10 @@ async fn last_inbound_is_our_alert(app: &impl crate::capabilities::Db, bot_id: &
 /// statusLine 與權限模式列（`⏵⏵ bypass permissions`、`⏸ manual mode on`…）這類固定行丟掉——那些每回合都在變，會讓指紋一直不同。
 pub fn question_from_screen(screen: &str) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    // 2.1.287 的 held message 框（#775）每行都很長，上面對話裡還有一大段 `● Held peer message …`：從框的標題起算，
-    // 訊息內文才不會被字數上限截掉。
     let from = crate::tui_prompts::held_message_prompt_start(screen).unwrap_or(0);
     for raw in screen.lines().skip(from) {
         let line: String = raw
             .chars()
-            // `╌`：2.1.286 起權限框夾住指令的虛線（#746），整行都是它，丟掉才不會佔掉尾段的行數。
             .map(|c| if "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔╌".contains(c) { ' ' } else { c })
             .collect();
         let line = line.trim().to_string();
@@ -133,11 +129,7 @@ pub fn question_from_screen(screen: &str) -> Option<String> {
 /// 每回合都在變、對父 agent 沒有意義的固定行。
 fn is_chrome(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    // 權限模式列跟備援回覆共用 [`crate::claude_mode::is_mode_row`]（#788）。
-    // 不要再用「句中出現 bypass／shift+tab」：回覆提到 mode on 不是模式列。
     crate::claude_mode::is_mode_row(line)
-        // 使用者的 statusLine（`名字 | 專案 | 模型 31% | 5h:96%`）：每回合都在變，帶進來會讓
-        // 同一個問題每次算出不同指紋，變成連珠炮。
         || (l.contains('|') && l.contains('%'))
         || l.starts_with('❯') && l.len() <= 2
         || l.chars().all(|c| c == '>' || c == '❯' || c.is_whitespace())
@@ -213,7 +205,6 @@ pub fn quote_lines(text: &str) -> String {
 pub fn message_for(child_name: &str, question: &str) -> String {
     let fence = fence_for(question);
     let quoted = quote_lines(question);
-    // claude 2.1.281 的防誤刪框只有人能核准（`dangerous_rm`）：parent 不能替它按 Yes，只能轉告使用者。
     let rm_note = if question.contains("Dangerous rm operation") {
         "\n**這是 claude 的防誤刪確認（Dangerous rm）：只有使用者本人能核准，不要替它按 Yes 或送 1。** daemon 已經在它的對話裡通知使用者；約 2 分鐘沒人回答 claude 會自動拒絕、那個 rm 不執行。\n"
     } else {
@@ -282,7 +273,6 @@ pub const RETRY: [Duration; 6] = [
     Duration::from_secs(1800),
 ];
 
-
 /// 8 秒之後的那一段：告訴 parent；這一刻收不下就照 `retry` 的間隔再試。每一次都從頭判斷（child 還卡著嗎、parent
 /// 還在嗎、畫面上是什麼問題），child 被回答、parent 走了就自己停；同一次 blocked 的冪等鍵不變，重試不會變成兩則。
 pub async fn keep_telling(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::events::ports::TurnCommands), run: &db::Run, retry: &[Duration]) {
@@ -329,7 +319,6 @@ pub async fn parent_to_tell(app: &impl crate::capabilities::Db, bot_id: &str) ->
     if db::active_run(app.db(), &parent_id).await?.is_none() {
         return Ok(None);
     }
-    // 只往上送一層：這顆 child 自己就是因為讀了一則 child 通知才停下來的話，不要再往上轉。
     if last_inbound_is_our_alert(app, &child.id).await {
         return Ok(None);
     }
@@ -352,10 +341,8 @@ async fn tell_parent(app: &(impl crate::capabilities::Db + crate::capabilities::
         if may_speak(prev, fp, now, THROTTLE) {
             seen.insert(child.id.clone(), (fp, now));
         } else if prev.map(|(seen_fp, _)| seen_fp) != Some(fp) {
-            // 換了問題但還在節流窗內。
             return Ok(Told::Settled);
         }
-        // 同一個問題：講過了沒有、要不要再講，看 parent 那邊這一則實際怎麼了（#567）。
     }
     let base = crid_base(&child.id, &question);
     let Some(attempt) = next_attempt(last_sent(app, &parent_id, &base).await?, chrono::Utc::now()) else {
@@ -368,7 +355,6 @@ async fn tell_parent(app: &(impl crate::capabilities::Db + crate::capabilities::
             Ok(Told::Settled)
         }
         Err(e) => {
-            // 送不出去就把指紋收回來，由 [`keep_telling`] 稍後再試：child 還卡著就不會有下一次狀態事件（issue #169）。
             spoken().lock().unwrap().remove(&child.id);
             Ok(Told::NotYet(format!("{e:?}")))
         }
@@ -525,7 +511,6 @@ mod retain_tests {
             spoken().lock().unwrap().insert(bot.id.clone(), (7, std::time::Instant::now()));
         }
         let mut live = crate::update_watch::live_bot_ids(&env.app).await.unwrap();
-        // 這兩張表是行程級的、平行的測試共用：把別的測試手上的項目一起放進名單，只讓這個測試的 `stale` 被清。
         live.extend(spoken().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
         live.extend(episodes().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
         retain_bots(&live);
@@ -541,7 +526,6 @@ mod retain_tests {
             spoken().lock().unwrap().insert(id.to_string(), (1, std::time::Instant::now()));
             let _ = episode_for(id);
         }
-        // 行程級的表平行測試共用：別的測試手上的項目一起放進名單，只讓 `alert-gone` 被清。
         let mut live: Vec<String> = spoken().lock().unwrap().keys().chain(episodes().lock().unwrap().keys()).filter(|k| *k != "alert-gone").cloned().collect();
         live.push("alert-kept".to_string());
         retain_bots(&live);

@@ -20,9 +20,6 @@ fn valid_history_sql(states: &str, include_owner: bool) -> String {
     } else {
         "(j.turn_id!=s.owner_turn_id AND j.revision<s.revision)"
     };
-    // session 目前的 owner 已結清：有對上的 applied receipt；或 owner turn 已是終態、沒有任何未 applied 的 receipt
-    // （例如回合被其他機制收尾、完成被 fence 掉而沒留 receipt，之後 sweeper 清掉 pending checkpoint）。
-    // 否則一個沒 receipt 的 owner 會讓這個 session 所有歷史 receipt 都判 unresolved，隔離全部 API bot。
     let owner_settled = "EXISTS(SELECT 1 FROM api_bot_join_receipts latest WHERE latest.session_id=s.id AND latest.bot_id=b.id AND latest.run_id=s.owner_run_id AND latest.turn_id=s.owner_turn_id AND latest.generation=s.generation AND latest.revision=s.revision AND latest.state='applied') OR (EXISTS(SELECT 1 FROM turns ot WHERE ot.id=s.owner_turn_id AND ot.status IN ('completed','completed_fallback','failed')) AND NOT EXISTS(SELECT 1 FROM api_bot_join_receipts p WHERE p.session_id=s.id AND p.turn_id=s.owner_turn_id AND p.state!='applied'))";
     format!("SELECT EXISTS(SELECT 1 FROM api_bot_sessions s JOIN bots b ON b.id=s.bot_id JOIN runs r ON r.id=? AND r.bot_id=b.id JOIN turns t ON t.id=? AND t.run_id=r.id JOIN conversations c ON c.id=t.conversation_id AND c.bot_id=b.id JOIN api_bot_join_receipts j ON j.session_id=s.id AND j.bot_id=b.id AND j.run_id=r.id AND j.turn_id=t.id WHERE ({owner_settled}) AND s.id=? AND b.id=? AND b.kind IN {api_kinds} AND r.state IN {states} AND j.state='applied' AND j.generation=? AND j.revision=? AND j.generation<=s.generation AND {owner} AND t.delivery='ok' AND ((j.outcome='completed' AND t.status='completed' AND j.final_text IS NOT NULL AND (SELECT count(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant')=1 AND EXISTS(SELECT 1 FROM messages m WHERE m.turn_id=t.id AND m.conversation_id=c.id AND m.role='assistant' AND m.source='transcript' AND m.incomplete=0 AND m.rewound_at IS NULL AND m.content=j.final_text)) OR (j.outcome IN ('failed','cancelled') AND t.status='failed' AND j.final_text IS NULL AND (SELECT count(*) FROM messages m WHERE m.turn_id=t.id AND m.role='assistant')=0)))", api_kinds = crate::config::API_KINDS_SQL)
 }
@@ -38,8 +35,6 @@ async fn classify_body(pool: &sqlx::SqlitePool, item: &Pending) -> Result<Startu
     let run_state: Option<String> = sqlx::query_scalar(concat!("SELECT r.state FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND r.id=?"))
         .bind(&item.identity.bot_id).bind(&item.identity.run_id).fetch_optional(&mut *tx).await.map_err(|_| Error::Storage)?;
     let result = match run_state.as_deref() {
-        // 同一個還活著的 run 裡已被後來 turn 取代的舊 receipt 是歷史，不是「目前的 owner」：
-        // 一律當 Live 會讓任何跑過兩則以上的 run 在重啟時被隔離（api_startup_unresolved）。
         Some(state @ ("running" | "starting" | "stopping")) => {
             let exact = receipt::matches_on(&mut tx, item, State::Applied).await.map_err(|_| Error::Storage)?;
             if exact && history_valid(&mut *tx, item, &format!("('{state}')"), state != "running").await? { StartupHistoricalApplied::Skip } else { StartupHistoricalApplied::Live }
@@ -131,7 +126,6 @@ mod tests {
         let bot=crate::db::ulid(); let run=crate::db::ulid(); let conv=crate::db::ulid(); let session=crate::db::ulid();
         let (a,b,c)=(crate::db::ulid(),crate::db::ulid(),crate::db::ulid());
         let now=crate::db::now();
-        // 長 session：`responses` 累積了 3 筆各帶一個工具，但 API 壓縮之後 `messages` 只剩最近一組 tool_use／tool_result。
         let resp = |n: u32| serde_json::json!({"id": format!("msg_{n}"), "model": crate::config::API_BOT_MODEL, "content": [{"type":"tool_use","id": format!("t{n}"),"name":"bash","input":{}}], "stop_reason":"tool_use", "usage": {"input_tokens":1,"output_tokens":1}});
         let checkpoint = serde_json::json!({
             "messages": [
@@ -190,7 +184,6 @@ mod tests {
         let mut tx = crate::db::begin_write(&app.db).await.unwrap();
         assert!(super::super::native_resume::prove_on(&mut tx, &bot, &run, super::super::native_resume::ProofMode::StartBeforeRun).await.is_ok(), "沒有 receipt 的終態 owner 也要能 resume");
         tx.rollback().await.unwrap();
-        // owner 還有未 applied 的 receipt 時仍要擋（不放寬真正未結清的情況）。
         sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at) VALUES(?,?,?,?,2,9,'completed','late','pending',?)").bind(&session).bind(&bot).bind(&run).bind(&b).bind(&now).execute(&app.db).await.unwrap();
         let mut tx = crate::db::begin_write(&app.db).await.unwrap();
         assert!(super::super::native_resume::prove_on(&mut tx, &bot, &run, super::super::native_resume::ProofMode::StartBeforeRun).await.is_err());

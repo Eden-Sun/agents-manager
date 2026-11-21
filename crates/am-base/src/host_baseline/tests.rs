@@ -41,7 +41,6 @@ fn a_host_that_matches_the_baseline_has_no_issues() {
 
 #[test]
 fn a_probe_cut_short_is_unknown_not_everything_missing() {
-    // ssh 逾時、被截斷：沒有 `AM_BL end`。一次逾時不能在每台主機上喊一排缺漏。
     let cut = GOOD.replace("AM_BL end\n", "");
     assert_eq!(evaluate(&cut), None);
     assert_eq!(evaluate(""), None);
@@ -49,7 +48,6 @@ fn a_probe_cut_short_is_unknown_not_everything_missing() {
 
 #[test]
 fn a_missing_tool_is_named_and_only_herdr_is_critical() {
-    // rtk 沒裝時 RTK.md 也不查（only_if_tool），所以只剩 tool.rtk 一條。
     let out = GOOD.replace("AM_BL tool rtk /u/rtk", "AM_BL tool rtk ");
     assert_eq!(ids(&out), vec!["tool.rtk"]);
     assert_eq!(sev(&out, "tool.rtk"), WARN);
@@ -137,7 +135,6 @@ fn a_missing_settings_file_does_not_also_list_every_key_in_it() {
 
 #[test]
 fn a_settings_file_jq_cannot_read_is_one_critical_issue_not_missing_keys() {
-    // jq 讀不懂整份檔（退出碼 5）不是「沒有那個鍵」，不能逐鍵報缺（#1370 只處理了沒有 jq 的那一半）。
     let out = GOOD
         .replace("claude-key default statusLine 1", "claude-key default statusLine x")
         .replace("claude-key default hooks 1", "claude-key default hooks x")
@@ -161,7 +158,6 @@ fn codex_gaps_and_a_token_in_gitconfig_are_warnings() {
     for id in ids(&out) {
         assert_eq!(sev(&out, &id), WARN, "{id}");
     }
-    // 只報有，不能把 token 本身帶進訊息。
     assert!(!format!("{:?}", evaluate(&out)).contains("ghp_"));
 }
 
@@ -212,7 +208,6 @@ fn run_probe(home: &std::path::Path, path: &str) -> String {
 }
 
 fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::OsStr)]) -> String {
-    // `am_abs` 是 PROBE_SH 的函式；BASELINE_SH 不依賴它（自己一次問完六個工具），這裡仍給一個替身，確保沒偷用。
     let script = format!("am_abs() {{ echo am_abs-called >&2; return 1; }}\n{}", baseline_sh());
     let out = Command::new("/bin/sh")
         .arg("-c")
@@ -251,13 +246,9 @@ fn the_real_script_marks_settings_keys_unknown_when_jq_is_unavailable() {
         std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), bin.join(tool)).unwrap();
     }
 
-    // 假的 login shell：BASELINE_SH 用 `$SHELL -lic` 查工具，而 macOS 的登入 shell 會跑 /etc/profile 的 path_helper 把 /usr/bin
-    // 加回 PATH——系統內建的 /usr/bin/jq 一定找得到，真主機上「jq 缺席」這條分支在 macOS 根本走不到（#1964 K 組、#719）。
-    // 這條測試只驗「腳本在 jq 缺席時的輸出」這段邏輯，不代表正式環境的 PATH：吃掉 `-lic`、改用不讀任何 profile 的 `/bin/sh -c`。
     let shell = fake_login_shell(&bin);
     let out = run_probe_env(h, bin.to_str().unwrap(), &[("SHELL", shell.as_os_str())]);
     if !out.contains("AM_BL tool jq \n") {
-        // probe 用 `${SHELL} -lic` 查 jq：登入 shell 會重讀 profile，PATH 限縮不等於找不到。只在失敗時印出同一條查詢的結果。
         let login = Command::new("/bin/sh")
             .arg("-lic")
             .arg("command -v jq")
@@ -282,7 +273,6 @@ fn the_real_script_reports_a_settings_file_that_is_not_json_once() {
     let home = FakeHome::new();
     let h = home.path();
     fs::create_dir_all(h.join(".claude")).unwrap();
-    // 寫到一半（少一個 `}`）：jq 退出碼 5，四個鍵都看不出來。
     fs::write(h.join(".claude/settings.json"), r#"{ "statusLine": {}, "hooks": {},"#).unwrap();
 
     let out = run_probe(h, "/usr/bin:/bin");
@@ -310,7 +300,6 @@ fn the_real_script_reads_a_fake_home_and_writes_nothing() {
     let out = run_probe(h, "/usr/bin:/bin");
     let ids = ids(&out);
 
-    // 外層 PATH 故意沒有 rtk，但登入 shell 會重讀使用者的 profile。有絕對路徑就是找到了，空的才是缺。
     let rtk = out.lines().find(|l| l.starts_with("AM_BL tool rtk ")).expect("rtk tool line");
     let rtk_path = &rtk["AM_BL tool rtk ".len()..];
     if rtk_path.is_empty() {
@@ -334,7 +323,6 @@ fn the_real_script_reads_a_fake_home_and_writes_nothing() {
 
 #[test]
 fn an_alias_outside_the_claude_cc_glob_is_still_checked() {
-    // 票面：每個 claude 身份看它自己的 CLAUDE_CONFIG_DIR，不只有 ~/.claude 與 ~/.claude-cc<數字>。
     let home = FakeHome::new();
     let h = home.path();
     fs::create_dir_all(h.join(".claude-work")).unwrap();
@@ -411,7 +399,6 @@ fn a_host_with_no_claude_dir_at_all_reports_no_claude_identity() {
 
 #[test]
 fn the_same_claude_dir_reached_twice_is_reported_once() {
-    // daemon 自己的環境若有 CLAUDE_CONFIG_DIR 指到 ~/.claude-ccN（或 ~/.claude），迴圈會走到同一個目錄兩次。
     let home = FakeHome::new();
     let h = home.path();
     fs::create_dir_all(h.join(".claude-cc2")).unwrap();
@@ -439,7 +426,6 @@ AM_BL codex-file config.toml 1",
 
 #[test]
 fn a_hostile_directory_name_cannot_forge_probe_lines() {
-    // `~/.claude-cc<數字>*` 的 glob 什麼名字都收：空白會讓欄位錯位、換行可以偽造 `AM_BL end` 或假的缺項。
     let home = FakeHome::new();
     let h = home.path();
     fs::create_dir_all(h.join(".claude-cc1 x")).unwrap();
@@ -448,7 +434,6 @@ fn a_hostile_directory_name_cannot_forge_probe_lines() {
     let out = run_probe(h, "/usr/bin:/bin");
     assert_eq!(out.lines().filter(|l| *l == "AM_BL end").count(), 1, "forged end marker: {out}");
     assert!(out.lines().all(|l| l.starts_with("AM_BL ")), "a line escaped the AM_BL framing: {out}");
-    // 真的 rtk 可以是絕對路徑（登入 shell 的 Homebrew）。偽造是多一行，或路徑不是絕對路徑。
     let rtk: Vec<_> = out.lines().filter(|l| l.starts_with("AM_BL tool rtk")).collect();
     assert_eq!(rtk.len(), 1, "forged tool line: {out}");
     let rtk_path = &rtk[0]["AM_BL tool rtk ".len()..];
@@ -460,8 +445,6 @@ fn a_hostile_directory_name_cannot_forge_probe_lines() {
 
 #[test]
 fn the_tools_are_looked_up_with_one_login_shell_not_six() {
-    // 每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒）；PROBE_SH 自己已經開了好幾次，
-    // 再加六次會把整趟探測推過 30 秒上限，連原本的 tools 偵測都跟著失敗。
     let home = FakeHome::new();
     let h = home.path();
     let counter = h.join("shell-calls");
@@ -481,7 +464,6 @@ fn a_token_used_as_the_url_user_is_also_flagged_without_echoing_it() {
     let out = run_probe(h, "/usr/bin:/bin");
     assert!(ids(&out).contains(&"gitconfig.token".to_string()), "{out}");
     assert!(!out.contains("abc123SECRET"), "{out}");
-    // 一般的 user@host（SSH 風格、沒有密碼）不算。
     fs::write(h.join(".gitconfig"), "[url \"https://git@github.com/\"]\n  insteadOf = https://github.com/\n").unwrap();
     assert!(!ids(&run_probe(h, "/usr/bin:/bin")).contains(&"gitconfig.token".to_string()));
 }
@@ -511,8 +493,6 @@ fn snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>, u32, i64, i64)> {
     acc
 }
 
-// ───────── 第二版（#719-b）：darwin-only、inbox 通知 ─────────
-
 const MAC_PLUGINS_MISSING: &str = "AM_BL claude-plugin default imessage 0
 AM_BL claude-plugin default discord 0
 ";
@@ -539,7 +519,6 @@ fn mac_only_items_are_listed_on_a_mac() {
 
 #[test]
 fn an_unknown_os_never_counts_mac_only_items() {
-    // 舊探測沒帶 `AM_BL os`：不知道是哪個系統就不能說缺 Mac 專用項。
     let out = GOOD.replace("AM_BL claude-key default permissions 1\n", &format!("AM_BL claude-key default permissions 1\n{MAC_PLUGINS_MISSING}"));
     assert_eq!(os_of(&out), None);
     assert_eq!(evaluate(&out), Some(vec![]));
@@ -609,7 +588,7 @@ async fn notify_pushes_one_inbox_event_per_distinct_difference() {
     let app = &env.app;
     let first = report(Some(vec![bi("tool.rtk", CRITICAL)]));
     notify(app, "ubuntu", &first).await;
-    notify(app, "ubuntu", &first).await; // 重連、定期重量：同一份差異不再推
+    notify(app, "ubuntu", &first).await;
     assert_eq!(inbox_keys(app).await.len(), 1);
 
     notify(app, "ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL), bi("tool.zsh", CRITICAL)]))).await;
@@ -650,8 +629,6 @@ fn mac_only_plugins_match_the_script() {
     assert!(baseline_sh().contains(&format!("for pl in {quoted}; do")));
 }
 
-// ───────── 過期標記：偵測失敗或太久沒量，不能讓舊結果看起來像現在的 ─────────
-
 fn at(hours_ago: i64) -> String {
     (chrono::Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -662,7 +639,6 @@ fn fresh(issues: Option<Vec<BaselineIssue>>, checked_at: String) -> BaselineRepo
 
 #[test]
 fn a_report_is_stale_after_a_failed_probe_or_after_more_than_one_recheck_cycle() {
-    // 對齊到毫秒：時間戳一律走 db::iso_at（毫秒寬度），邊界才不會被截斷成「早一點點」。
     let now = chrono::Utc::now();
     let now = now - chrono::Duration::nanoseconds(i64::from(now.timestamp_subsec_nanos() % 1_000_000));
     assert!(!fresh(Some(vec![]), at(0)).snapshot(now).stale, "剛量完不算過期");
@@ -677,7 +653,6 @@ fn a_report_is_stale_after_a_failed_probe_or_after_more_than_one_recheck_cycle()
     let snap = failed.snapshot(now);
     assert!(snap.stale, "最後一次偵測失敗");
     assert_eq!(snap.issues.as_ref().map(Vec::len), Some(1), "舊結果照樣留著給人看，只是標過期");
-    // 時間讀不懂：不賭它新。
     assert!(fresh(Some(vec![]), "garbage".into()).snapshot(now).stale);
 }
 

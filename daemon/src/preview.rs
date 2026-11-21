@@ -144,7 +144,6 @@ pub struct RealEnv {
 impl PreviewEnv for RealEnv {
     fn spawn<'a>(&'a self, target_pane: &'a str, cwd: &'a str, cmd: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(async move {
-            // 往下切：只吃高度，不像左右切會把 agent 的 TUI 擠到 ~31 欄以下而亂排。
             let pane = self.client.pane_split(target_pane, "down", cwd, json!({})).await?;
             let typed = async {
                 self.client.pane_send_text(&pane.pane_id, cmd).await?;
@@ -173,7 +172,6 @@ impl PreviewEnv for RealEnv {
                 Ok(None) => true,
                 Ok(Some(p)) => {
                     crate::app_ports_p13::close_pane_and_tab(&self.client, Some(&p.workspace_id), Some(&p.tab_id), pane_id).await;
-                    // 關指令的結果被吞掉了：再問一次，確定不在才算關掉。
                     matches!(self.client.pane_get(pane_id).await, Ok(None))
                 }
             }
@@ -277,8 +275,6 @@ async fn env_for_bot(app: &Arc<App>, bot_id: &str) -> Option<Arc<dyn PreviewEnv>
     Some(Arc::new(RealEnv { client, app: app.clone() }))
 }
 
-// ───────────────────────────── 純函式 ─────────────────────────────
-
 /// 往下找幾層（`<cwd>` 是第 0 層）。
 pub const SEARCH_DEPTH: usize = 3;
 /// 最多走過幾個目錄、最多列幾個候選：專案目錄底下可能是整個 monorepo 或一堆 worktree，不能無限掃。
@@ -315,7 +311,6 @@ pub fn detect_dirs(
                 found.push((depth, dir));
                 continue;
             }
-            // 有 `dev` script 的也是候選，但不擋住往下找：monorepo 根目錄常有一個 `turbo run dev`，真正的 app 在裡面。
             if has_dev_script(&dir) {
                 found.push((depth, dir.clone()));
             }
@@ -566,14 +561,11 @@ pub fn next_status(cur: Status, attached: bool, obs: Observed, elapsed_secs: i64
         }
         Status::Starting => Next::Stay,
         Status::Running if gone => Next::To(Status::Off, None),
-        // 接上的是別人的 server：它結束了就是斷開，不算我們的失敗。
         Status::Running if attached && !obs.listening => Next::To(Status::Off, None),
         Status::Running if !obs.listening => Next::To(Status::Failed, Some("vite 已經停了（port 不再 listen）")),
         Status::Running => Next::Stay,
     }
 }
-
-// ───────────────────────────── DB ─────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Row {
@@ -675,8 +667,6 @@ async fn emit_changed(app: &impl crate::capabilities::Emit, r: &Row) {
     app.emit("preview_changed", json!({"bot_id": r.bot_id, "status": r.status, "port": r.port, "source": r.source})).await;
 }
 
-// ───────────────────────────── 入口 ─────────────────────────────
-
 /// 預覽操作的全域鎖：見模組說明。
 fn gate() -> &'static tokio::sync::Mutex<()> {
     static G: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -711,7 +701,6 @@ async fn base_dir(app: &impl crate::capabilities::Db, bot: &db::Bot) -> LcResult
 
 async fn candidates_of(app: &impl crate::capabilities::Db, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
     let cwd = base_dir(app, bot).await?;
-    // 不跟 symlink：免得繞圈。
     let subdirs = |d: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(d)
             .map(|it| it.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect())
@@ -737,7 +726,6 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         Ok(Some(run)) => env_for(app, &run).await.unwrap_or_else(|_| fallback_env(app)),
         _ => fallback_env(app),
     };
-    // 各候選會跑的那一行；退回 `bunx vite` 的要先知道會挑到哪個 port。
     let devs: Vec<Option<String>> = cands.iter().map(|c| read_dev_script(c)).collect();
     let mut port = PORT_START;
     if devs.iter().any(Option::is_none) {
@@ -748,16 +736,13 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         .iter()
         .zip(&devs)
         .map(|(c, d)| {
-            // 顯示的那一行要跟真的會跑的一致（含 #434 接上去的 loopback 旗標）。
             let kind = d.as_deref().and_then(dev_kind).unwrap_or(if d.is_some() { "unknown" } else { "vite" });
             json!({"dir": c.to_string_lossy(), "command": run_command(d.as_deref(), kind, app.allow_lan(), port)})
         })
         .collect();
     if !live {
         let base = base_dir(app, bot).await?;
-        // 掃不到就當沒有：這只是「順便列出來」，不是決定。
         let scan = env.scan_servers(&local_project_roots(app).await).await.unwrap_or_default();
-        // 這顆 bot 屬於哪個 repo、什麼算「同一個目錄」都看它自己的工作目錄（專案路徑），跟找沒找到設定檔無關。
         let mine = env.repo_key(&base).await;
         let mut same_dirs = cands.clone();
         same_dirs.push(PathBuf::from(&base));
@@ -770,8 +755,6 @@ async fn decorated(app: &Arc<App>, bot: &db::Bot, mut body: Value, live: bool) -
         others.sort_by_key(|(r, _, p)| (*r, p.port));
     }
     if let Some(o) = body.as_object_mut() {
-        // #527：`allow_lan` 關著時我們起的 dev server 釘在 loopback（#434／#452），從手機或別台機器
-        // 開的前端連不到它；前端要據此把 iframe 換成說明，不要只給一片空白。
         o.insert("lan".into(), json!(app.allow_lan()));
         o.insert("candidates".into(), json!(cands.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>()));
         if !live {
@@ -793,7 +776,6 @@ pub async fn get(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     let _g = gate().lock().await;
     let r = refresh_locked(app, bot_id).await;
     let live = r.as_ref().is_some_and(|r| r.status().is_live());
-    // 舊 daemon 留下的、或監看掛掉的列：GET 補上（已經有就不會多一個）。
     #[cfg(not(test))]
     if live {
         spawn_watcher(app.clone(), bot_id.to_string());
@@ -828,7 +810,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     crate::app_ports_p13::refuse_default_session(&bot)?;
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
     if host != crate::config::LOCAL_HOST {
-        // iframe 連的是瀏覽器所在那台的 port；遠端主機上的 vite 連不到。
         return Err(LcError::conflict("remote_host", json!({"bot_id": bot_id, "host": host})));
     }
     let mode = match req.mode.as_deref().unwrap_or("auto") {
@@ -842,7 +823,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     }
     let explicit = mode != Mode::Auto || req.port.is_some() || req.dir.is_some();
     let _g = gate().lock().await;
-    // 已經在跑（或在起）而且對得上帳：原樣回；明確指定了別的（換目錄、換接哪顆）才先斷開再來。
     if let Some(r) = refresh_locked(app, bot_id).await {
         let status = r.status();
         if status.is_live() {
@@ -854,13 +834,10 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
             match disconnect_locked(app, r).await {
                 Some(stopped) if !stopped.status().is_live() => {}
                 _ => {
-                    // 明確切換不能把舊 pane 關掉時，不能繼續起第二顆，否則會留下孤兒 server。
                     return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
                 }
             }
         } else if status == Status::Failed {
-            // A failed server can leave its service pane alive at a shell prompt. Close it
-            // before retrying, otherwise replacing the row below leaves an orphan pane.
             match disconnect_locked(app, r).await {
                 Some(stopped) if !stopped.status().is_live() => {}
                 _ => {
@@ -876,7 +853,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         Some(run) => env_for(app, run).await?,
         None => fallback_env(app),
     };
-    // 掃不到只影響「自動接」，不擋 spawn；明確要求 attach 時掃不到就是失敗。
     let roots = local_project_roots(app).await;
     let scan = env.scan_servers(&roots).await;
 
@@ -885,7 +861,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
             let port = req.port.unwrap_or_default();
             let hit = scan.as_deref().unwrap_or_default().iter().find(|p| p.port == port).cloned();
             let hit = hit.ok_or_else(|| LcError::conflict("not_vite", json!({"bot_id": bot_id, "port": port})))?;
-            // 使用者挑的是清單上「那一顆」：GET 到 POST 之間 port 被別的行程接手時，失敗，不默默接到別人。
             if req.pid.is_some_and(|pid| pid != hit.pid) || req.dir.as_deref().is_some_and(|d| norm(d) != norm(&hit.cwd)) {
                 return Err(LcError::conflict(
                     "stale_selection",
@@ -900,7 +875,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
                 Some(d) => vec![all.iter().find(|c| norm(&c.to_string_lossy()) == norm(d)).cloned().ok_or_else(|| {
                     LcError::Bad(format!("dir `{d}` 不是這顆 bot 的 dev server 候選目錄"))
                 })?],
-                // 候選目錄之外，bot 自己的工作目錄也算「同一個目錄」（那顆 server 可能沒有 vite 設定，例如 next）。
                 None => all.into_iter().chain([PathBuf::from(base_dir(app, &bot).await?)]).collect(),
             };
             classify(scan.as_deref().unwrap_or_default(), &pool).0
@@ -945,7 +919,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     let Some(run) = run.filter(|r| r.state == "running" && r.pane_id.is_some()) else {
         return Err(LcError::conflict("bot_not_running", json!({"bot_id": bot_id})));
     };
-    // 有 dev script 就用它，不硬塞 port（起來之後觀察實際 listen 的 port）；沒有才退回 `bunx vite` 並由 daemon 挑 port。
     let dev = read_dev_script(Path::new(&dir));
     let port = if dev.is_some() {
         None
@@ -957,8 +930,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
                 .ok_or_else(|| LcError::conflict("no_free_port", json!({"from": PORT_START, "span": PORT_SPAN})))?,
         )
     };
-    // kind 先算：`run_command` 要靠它決定接哪個 loopback 旗標（#434）。沒有 dev script 時我們自己組的
-    // 那一行一定是 vite。
     let kind = dev.as_deref().and_then(dev_kind).unwrap_or(if dev.is_some() { "unknown" } else { "vite" });
     let cmd = run_command(dev.as_deref(), kind, app.allow_lan(), port.unwrap_or(PORT_START));
     let pane = run.pane_id.clone().unwrap_or_default();
@@ -980,12 +951,10 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
         command: Some(cmd),
     };
     if let Err(e) = put(&app.db, &r).await {
-        // 記不下來就不留孤兒 pane。
         env.close_pane(&pane_id).await;
         return Err(up(e));
     }
     emit_changed(app, &r).await;
-    // 測試自己決定什麼時候看（不然背景那一拍會跟測試的手動轉移搶）；watcher 另有測試。
     #[cfg(not(test))]
     spawn_watcher(app.clone(), bot_id.to_string());
     decorated(app, &bot, r.body(), true).await
@@ -995,7 +964,6 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
 async fn disconnect_locked(app: &Arc<App>, r: Row) -> Option<Row> {
     crate::preview_bind::forget(&r.bot_id);
     if !close_row_pane(app, &r).await {
-        // 不知道那顆 pane 屬於哪個 session（讀 run 失敗）：不關、也不標 off，留著下次再看。
         tracing::warn!(bot = %r.bot_id, "preview: cannot tell which herdr session owns the pane; leaving the preview as is");
         return Some(r);
     }
@@ -1019,7 +987,6 @@ pub async fn stop(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
     if !stop_for_bot(app, bot_id).await {
         return Err(LcError::conflict("preview_stop_failed", json!({"bot_id": bot_id})));
     }
-    // 這條不走 `decorated`，`lan` 自己補（#527）：前端拿回應直接蓋掉手上那一份。
     let mut body = off_body();
     if let Some(o) = body.as_object_mut() {
         o.insert("lan".into(), json!(app.allow_lan()));
@@ -1050,14 +1017,10 @@ async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
     if bot_is_handed_off(app, &r.bot_id).await {
         return false;
     }
-    // 接上的那顆是別人開的 server：只斷開，絕不動它。
     if r.attached() {
         return true;
     }
     let Some(pane) = r.pane_id.as_deref() else { return true };
-    // Herdr can reuse a pane ID after restart. A failed preview is not refreshed, so its old ID
-    // may now identify a different pane; never close one claimed by a live run or first seen
-    // after this preview row was last updated.
     let reused: bool = match sqlx::query_scalar(
         "SELECT EXISTS(
            SELECT 1 FROM runs r2
@@ -1137,8 +1100,6 @@ pub async fn reconcile_all(app: &Arc<App>) {
     }
 }
 
-// ───────────────────────────── 對帳 ─────────────────────────────
-
 /// 一次觀察＋轉移＋寫回＋通知；回最新的列（沒有這列回 `None`）。要在 [`gate`] 裡呼叫。
 async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
     let r = match row(&app.db, bot_id).await {
@@ -1152,7 +1113,6 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         return Some(r);
     }
     let attached = r.attached();
-    // 讀不到 run（`Err`）不是「沒有 run」：那是不知道，什麼都不動、下次再看（關 pane 是破壞性的）。
     let run = match db::active_run(&app.db, bot_id).await {
         Ok(run) => run,
         Err(e) if !attached => {
@@ -1161,7 +1121,6 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         }
         Err(_) => None,
     };
-    // bot 自己掛了或被停了：預覽跟著收，不留一顆沒人管的 vite。接上的只看它自己的 port，不看 bot。
     if run.is_none() && !attached {
         return disconnect_locked(app, r).await;
     }
@@ -1169,7 +1128,6 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         (Some(run), false) => match env_for(app, run).await {
             Ok(env) => env,
             Err(e) => {
-                // 暫時拿不到 herdr：不知道，列原樣留著、下次再看（不是「沒有這列」，watcher 不可因此結束）。
                 tracing::warn!(bot = bot_id, error = ?e, "preview: no herdr session for the run; leaving the preview as is");
                 return Some(r);
             }
@@ -1177,23 +1135,18 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         _ => fallback_env(app),
     };
     let mut port = r.port;
-    // 接上的 server 換了行程（同 port 被別的行程接手）：見 [`attached_identity`]。
     let mut rebind: Option<i64> = None;
-    // 這一拍量到的 `(位址, port)`；`None`＝這一拍沒問（或問不到），#434 的檢查就不下結論。
     let mut listeners: Option<Vec<(String, u16)>> = None;
     let (pane_alive, listening) = match (&r.pane_id, r.port) {
         (Some(p), Some(port)) => (env.pane_alive(p).await, env.port_listening(port as u16).await),
-        // dev script 起的 server 自己挑 port：看這顆 pane 的行程樹實際 listen 到哪個（多個取最小的）。
         (Some(p), None) if !attached => {
             let alive = env.pane_alive(p).await;
             let socks = env.pane_listeners(p).await;
-            // pane_listeners 的 None 是「問不到」，不能當成空集合讓 starting 超時失敗；pane_alive 已知關閉仍照常失敗。
             if socks.is_none() && alive != Some(false) {
                 return Some(r);
             }
             let socks = socks.unwrap_or_default();
             port = socks.iter().map(|(_, p)| i64::from(*p)).min();
-            // 同一拍拿到的位址留著給下面的 bind 檢查用（#434），不再多問一次 lsof。
             listeners = Some(socks);
             (alive, port.is_some())
         }
@@ -1212,14 +1165,6 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         _ => (Some(false), false),
     };
     let mut next = next_status(r.status(), attached, Observed { pane_alive, listening }, elapsed_secs(r.started_at.as_deref()));
-    // #434：`allow_lan` 關著時，**我們起的** server 不准綁到 loopback 以外；量不到就不下結論，
-    // 跟這個模組其他地方同一條原則。接上的那顆是別人的 server，不在管轄範圍：使用者明確挑了它，
-    // 而且關掉它也不是我們的事。
-    //
-    // #452：原本只在轉成 `running` 的那一拍量一次——起來時綁 loopback、之後才改綁對外的 server
-    // （設定檔改了自己重啟、dev script 內部重啟）從此不會再被看一眼，`allow_lan` 關著也一路 `running`。
-    // 改成 `running` 期間也驗，但**不是每一拍**：量位址要多跑一趟 `lsof`，而 `running` 的輪詢本來
-    // 只是一次 TCP connect。轉進來那一拍一定驗，之後每 `RECHECK_EVERY_MS` 輪到一次。
     let becoming_running = matches!(next, Next::To(Status::Running, _));
     let still_running = matches!(next, Next::Stay) && r.status() == Status::Running;
     let mut forced_error: Option<String> = None;
@@ -1270,9 +1215,6 @@ async fn refresh_locked(app: &Arc<App>, bot_id: &str) -> Option<Row> {
         }
         _ => None,
     };
-    // 一般的 failed 把 pane 留著給人看錯誤（重試時才收，見 #253）；綁到對外介面這一種不行——那顆 server
-    // 還活著、還在對外聽，留著等於沒擋。關不掉也照樣記 failed（不能繼續說它 running），pane 留給重試再收。
-    // 不在 `running` 了就把 #452 的重驗名額忘掉（`disconnect_locked` 那條路自己也會忘）。
     if to != Status::Running {
         crate::preview_bind::forget(bot_id);
     }
@@ -1345,7 +1287,6 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
                 }
             }
         }
-        // 只在 panic 之類沒走到下面明確註銷的情況兜底；正常結束在 gate 裡註銷後解除，免得誤刪之後才登記的新監看。
         let mut guard = Unwatch(Some(bot_id.clone()));
         let mut wait = POLL;
         loop {
@@ -1358,17 +1299,13 @@ fn spawn_watcher(app: Arc<App>, bot_id: String) -> bool {
             }
             #[cfg(test)]
             tick(&bot_id);
-            // 只讀**一次**決定要不要結束：以前是 refresh 讀不到之後再讀一次確認，兩次之間 DB 恢復了就把暫時性的錯誤誤判成
-            // 「這列沒了」、監看無聲結束（整套平行跑時偶發，`the_starting_watcher_survives_an_unreadable_preview_row`）。
             let next = match row(&app.db, &bot_id).await {
-                // 讀不到這一列（暫時性）不是「這列沒了」：只有確定沒有這一列、或它已經不是在監看的狀態才結束。
                 Err(_) => Some(Status::Starting),
                 Ok(None) => None,
                 Ok(Some(r)) if !r.status().is_live() => None,
                 Ok(Some(seen)) => match refresh_locked(&app, &bot_id).await {
                     Some(r) if r.status().is_live() => Some(r.status()),
                     Some(_) => None,
-                    // 剛看到它是活的：refresh 讀不到或寫不進去（暫時性），下一輪再看；這列不會消失。
                     None => Some(seen.status()),
                 },
             };

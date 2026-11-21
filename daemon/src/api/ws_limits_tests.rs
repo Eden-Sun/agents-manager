@@ -70,7 +70,6 @@ async fn the_number_of_concurrent_connections_is_capped() {
     let mut out = vec![0u8; 256];
     let n = c.read(&mut out).await.unwrap();
     assert!(String::from_utf8_lossy(&out[..n]).starts_with("HTTP/1.1 503"), "第 4 條要被拒：{}", String::from_utf8_lossy(&out[..n]));
-    // 一條斷線，名額就回來。
     drop(held.pop());
     let mut ok = String::new();
     for _ in 0..100 {
@@ -93,7 +92,6 @@ async fn a_client_that_never_reads_is_dropped_after_the_send_timeout() {
     let (_stuck, head) = connect(addr).await;
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     let big = "x".repeat(1024 * 1024);
-    // 把 kernel 的送出／接收緩衝塞滿：之後的 send 才會真的卡住。
     for _ in 0..96 {
         env.app.emit("message_added", json!({"text": big})).await;
         tokio::task::yield_now().await;

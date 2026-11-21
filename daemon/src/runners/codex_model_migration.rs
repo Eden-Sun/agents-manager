@@ -37,8 +37,6 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
             if db::compare_and_set_running_run_agent_status(&app.db, run, "blocked", "blocked").await.unwrap_or(false) {
                 let changed = notify_once(app, run, dialog).await;
                 if changed {
-                    // herdr 不會把 hook 審核框判成 blocked（現場五顆都是 idle）：run 已經是 blocked 而記憶體裡沒有 episode，
-                    // 就是 daemon 重啟前補標的。記回「原本是 idle」，框關掉才還原得回去，不會一直掛著 blocked。
                     if dialog == Dialog::HookReview {
                         if let Some(episode) = open().lock().unwrap().get_mut(&run.id) {
                             episode.forced_from.get_or_insert_with(|| "idle".to_string());
@@ -47,7 +45,6 @@ pub async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
                     app.emit_bot_status(&run.bot_id).await;
                 }
             }
-            // 框換成另一種時 blocked_reason 跟著變，網頁要重讀一次。
             return;
         }
 
@@ -135,7 +132,6 @@ async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::
         let mut episodes = open().lock().unwrap();
         match episodes.get_mut(&run.id) {
             Some(e) if e.closing || e.dialog == dialog => return false,
-            // 換了一種框：原因跟著換、提示再講一次。
             Some(e) => e.dialog = dialog,
             None => {
                 episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false, dialog });
@@ -145,8 +141,6 @@ async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::
     tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
     match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conversation) => {
-            // episode 只在記憶體：daemon 重啟（部署）後同一個框會再被看到一次。聊天室最後一則已經是這句提示就不重貼
-            // （director 2026-11-18 兩小時內因部署被貼了 8 次）；中間有別的訊息才再講。
             let last: Result<Option<(String, String)>, _> =
                 sqlx::query_as("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
                     .bind(&conversation)

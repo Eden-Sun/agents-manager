@@ -92,11 +92,9 @@
         let mid = seed(&data, "b2", now - 2_000, 4_000);
         let new = seed(&data, "b3", now - 1_000, 4_000);
 
-        // 沒超量就一個都不動（keep 很長，沒有東西過期）。
         assert_eq!(gc_with_cap(&data, Duration::from_secs(3600), 100_000), (0, 0));
         assert!(old.exists() && mid.exists() && new.exists());
 
-        // 上限只容得下一份：最舊的兩份走，最新那份留著。
         assert_eq!(gc_with_cap(&data, Duration::from_secs(3600), 5_000), (0, 2));
         assert!(!old.exists() && !mid.exists(), "最舊的先清");
         assert!(new.exists(), "最新那一份永遠留著");
@@ -108,7 +106,7 @@
     fn expiry_runs_before_the_size_cap() {
         let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-both-{}", crate::db::ulid())));
         let now = now_ms();
-        seed(&data, "b1", now - 10_000, 4_000); // 過期
+        seed(&data, "b1", now - 10_000, 4_000);
         let mid = seed(&data, "b2", now - 2_000, 4_000);
         let new = seed(&data, "b3", now - 1_000, 4_000);
 
@@ -165,7 +163,6 @@
         assert!(!bots.exists() && !att.exists(), "兩個都搬走了");
         assert_eq!(entries(&data).len(), 2, "兩份都要被 GC 看得到（過期與總量上限一視同仁）");
 
-        // 還原 bot 目錄時不能撈到 attachments 那份。
         restore(&data, "B1", &bots).unwrap();
         assert_eq!(std::fs::read_to_string(bots.join("config")).unwrap(), "bot");
         restore_kind(&data, "B1", Some(ATTACHMENTS), &att).unwrap();
@@ -199,7 +196,6 @@
         let entry = seed(&data, "B1", now - 1_000, 32);
         assert_eq!(latest(&data, "B1", None).as_ref(), Some(&entry), "前提：還原撈得到它");
 
-        // 清理的第一步（改名）做完、remove_dir_all 還沒跑：裡面的檔一個都還在。
         let root_dir = open_root(&data).unwrap();
         let staged = root(&data).join(take_aside(&root_dir, entry.file_name().unwrap()).expect("gc 拿到了這一份"));
         assert!(staged.join("blob").exists(), "還沒刪任何東西");
@@ -268,36 +264,30 @@
         std::fs::create_dir_all(ws.join("sub")).unwrap();
         std::fs::write(ws.join("sub/doc.txt"), vec![b'b'; 200]).unwrap();
 
-        // 搬進 trash
         let moved = move_in_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("moved to trash");
         assert!(!ws.exists(), "original workspace is no longer live");
         assert!(moved.join("inbox/test.txt").exists());
         assert!(moved.join("sub/doc.txt").exists());
 
-        // 計算大小
         let trash_entries = entries(&data);
         assert_eq!(trash_entries.len(), 1);
         assert_eq!(trash_entries[0].2, 300, "counts share workspace bytes");
 
-        // 還原
         let restored = restore_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("restored");
         assert_eq!(restored, moved);
         assert!(ws.join("inbox/test.txt").exists());
         assert!(ws.join("sub/doc.txt").exists());
         assert_eq!(entries(&data).len(), 0);
 
-        // 再次刪除 + GC 淘汰
         let moved2 = move_in_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("moved again");
         assert!(!ws.exists());
         assert_eq!(entries(&data).len(), 1);
 
-        // GC with zero keep
         let (expired, _) = gc_with_cap(&data, Duration::ZERO, u64::MAX);
         assert_eq!(expired, 1);
         assert!(!moved2.exists());
         assert_eq!(entries(&data).len(), 0);
 
-        // 過期後 restore 回傳 None
         assert_eq!(restore_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap(), None);
         std::fs::remove_dir_all(&base).unwrap();
     }

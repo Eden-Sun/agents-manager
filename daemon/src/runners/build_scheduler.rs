@@ -72,7 +72,6 @@ pub async fn post_acquire(
                 "test_threads": cfg.test_threads(),
                 "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?
             });
-            // 熱池在這台機器上：本機原生 cargo 要拿同一組名額（見 `BuildRemoteCfg::same_machine_slot_pool`）。沒有就不給這兩個欄位。
             if let Some(home) = std::env::var_os("HOME") {
                 if let Some((dir, max)) = cfg.remote.same_machine_slot_pool(cfg.max_concurrent(), std::path::Path::new(&home)) {
                     out["local_slot_dir"] = json!(dir.display().to_string());
@@ -136,8 +135,6 @@ pub async fn post_release(
             })),
         );
     }
-    // 空 token＝取消等待（#913）：沒有 token 可以證明這個 holder 是你的，所以要驗身份，而且只能取消自己的號碼牌。
-    // 帶 token 的放名額維持原樣（token 本身就是憑證，shim 的 `trap … EXIT` 不用帶標頭）。
     let bot_id = if body.token.is_empty() {
         match authenticate(app.as_ref(), &headers, body.bot_id.as_deref()).await {
             Ok(id) => id,

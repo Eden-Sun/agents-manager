@@ -13,7 +13,6 @@
 //! （一次核准一個窗口），下一輪只能開新的。這張新的**接續**被交還那張的等待（[`given_back_wait`]），計時不歸零——
 //! 2026-10-04 08:41～09:22 每輪都在瞬間閒置時拿到租約、3a 又看到人在忙而交還，`escalates_at` 每輪往後推 5 分鐘，忙碌的機群永遠等不到放寬。
 
-
 use crate::lifecycle::LcError;
 use crate::supervisor::store;
 
@@ -39,7 +38,6 @@ pub async fn approval_for(app: &impl crate::capabilities::Db, owner: &str, commi
     if let Some(a) = live.as_ref().filter(|a| a.target_commit.as_deref() == Some(commit)) {
         return Ok(a.id.clone());
     }
-    // 活的那張會由 `supersedes` 接續；沒有活的才看上一輪是不是拿到窗口又沒換成就交還了。
     let carried = match &live {
         Some(_) => None,
         None => given_back_wait(app, owner, actor, &now).await?,
@@ -147,7 +145,6 @@ mod tests {
         let b = approval_for(app, "ops", "aaaaaaa1", actor).await.unwrap();
         assert_eq!(since(b.clone()).await, Some(old.clone()), "持有人交還：接續");
 
-        // 交還之後 main 又動了：換 commit 一樣接續。
         consume(b, RELEASED_REASON, 60).await;
         let c = approval_for(app, "ops", "bbbbbbb2", actor).await.unwrap();
         assert_eq!(since(c.clone()).await, Some(old.clone()), "換 commit 也接續");
@@ -175,12 +172,10 @@ mod tests {
         assert_ne!(mine, theirs.id);
         assert_eq!(store::approval(&app.db, &theirs.id).await.unwrap().unwrap().status, "approved", "AGM 核的那張原封不動");
 
-        // 同 commit 也不借用別人核的那張（它的 commit 剛好一樣也一樣：那是 AGM 的授權，不是自動部署的）。
         let same = approval_for(app, "ops", "aaaaaaa1", actor).await.unwrap();
         assert_ne!(same, theirs.id);
         assert_eq!(store::approval(&app.db, &theirs.id).await.unwrap().unwrap().status, "approved");
 
-        // 自己開的照舊：同 commit 沿用、換 commit 取代並接續計時。
         assert_eq!(approval_for(app, "ops", "aaaaaaa1", actor).await.unwrap(), same);
         let next = approval_for(app, "ops", "ccccccc3", actor).await.unwrap();
         assert_ne!(next, same);

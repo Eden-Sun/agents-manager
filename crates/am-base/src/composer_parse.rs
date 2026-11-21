@@ -410,7 +410,6 @@ pub fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxState {
     let lines: Vec<&str> = screen.lines().collect();
     let particles = kind == "codex" && screen.contains("\u{1b}[");
     let Some(c) = locate_composer(kind, &lines, particles, tail) else { return BoxState::Unready };
-    // codex：找到的 `›` 必須是當前 composer（歷史的 `›` 後面接著助理輸出，不能拿來判斷框空不空）。
     if kind == "codex" && codex_composer_row(&lines) != Some(c.idx) {
         return BoxState::Unready;
     }
@@ -573,7 +572,6 @@ pub fn strip_grok_decor(line: &str) -> String {
                 && clock.len() <= 5
                 && clock.chars().filter(|c| *c == ':').count() == 1
                 && clock.chars().all(|c| c.is_ascii_digit() || c == ':');
-            // Two or more spaces before the clock = right-aligned column, not prose.
             if ok && head.ends_with(' ') {
                 s = head.trim_end().to_string();
             }
@@ -587,7 +585,6 @@ pub fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" | "grok" => Some("❯ "),
         "codex" => Some("› "),
-        // agy：使用者那句回音是 `> 原文`（1.2.16 真機）；輸入列是單獨一個 `>`。
         "agy" => Some("> "),
         _ => None,
     }
@@ -602,7 +599,6 @@ pub fn pane_awaits_input(kind: &str, text: &str) -> bool {
     }
     let Some(marker) = prompt_echo_prefix(kind).and_then(|p| p.trim_end().chars().next()) else { return false };
     text.lines().rev().take(12).any(|l| {
-        // 空白用 `is_whitespace`：claude 2.1.285 的空框是 `❯` 接 U+00A0（2026-10-01 cf-ox-2），只認空格與 tab 會當成框裡有字。
         let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━".contains(*c));
         chars.next() == Some(marker) && chars.next().is_none()
     })
@@ -674,7 +670,6 @@ fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool, tail: Opt
         let content = t[marker.len()..].trim();
         !content.is_empty() && !(kind == "agy" && is_agy_placeholder(content))
     })?;
-    // codex：找到的 `›` 必須就是當前 composer（歷史訊息的 `›` 後面接著助理輸出，不算）；草稿到底邊為止。
     let codex_end = if kind == "codex" {
         if codex_composer_row(&lines) != Some(from + idx) {
             return None;
@@ -763,7 +758,6 @@ mod composer_draft_shape_tests {
         for row in &rows[1..] { screen.push_str(&format!("  {row}\n")); }
         screen.push_str("\ngpt-6.1-sol context 13%\n");
         assert_eq!(composer_text_whole_within("codex", &screen, 72), Some(rows.join("\n")));
-        // 窗口由結構決定（`›` 到底部 footer），不再被 24 列截斷：就算傳小的 tail 也讀得到整段。
         assert_eq!(composer_text_whole_within("codex", &screen, 24), Some(rows.join("\n")));
         assert_eq!(composer_text_whole_within("codex", &screen.replace('›', " "), 72), None);
     }
@@ -882,7 +876,6 @@ mod agy_placeholder_tests {
         assert_eq!(box_state("agy", &real("", "Gemini 3.8 Flash · high")), BoxState::Empty);
         assert_eq!(box_state("agy", &real(" hello world", "Gemini 3.8 Flash · high")), BoxState::NonEmpty, "打的字是預設前景色");
         assert_eq!(box_state("agy", &real_herdr(" hello world")), BoxState::NonEmpty);
-        // 使用者真的打了字、又在非預設模式：灰的佔位字不見了，剩下打的字。
         assert_eq!(box_state("agy", &real(" x", "\u{1b}[32maccept-edits\u{1b}[39m · Gemini 3.8 Flash · high")), BoxState::NonEmpty);
     }
 

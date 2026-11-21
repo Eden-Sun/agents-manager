@@ -128,7 +128,6 @@ pub async fn accept(
     if client_request_id.trim().is_empty() {
         return Err(LcError::Bad("client_request_id must not be empty".into()));
     }
-    // 跟 `submit` 一樣：欠著的收尾先補，不然那筆已經停掉、只是沒寫成的回合會把這一次擋成「回合在飛」。
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
@@ -140,7 +139,6 @@ pub async fn accept(
         return Err(LcError::conflict("suggestion_unsupported", json!({"kind": bot.kind, "sent": false})));
     }
     let conv = db::conversation_id(app.db(), bot_id).await.map_err(up)?;
-    // 同一個 client_request_id 重送：回原本那一筆（網頁逾時重試不會多送一次）。
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
@@ -150,7 +148,6 @@ pub async fn accept(
     {
         return answer_for_turn(app, &t).await;
     }
-    // ---- 按 Tab 之前：全是看、一個鍵都不按 ----
     let run = app.submit_gates(bot_id, &bot, &conv).await?;
     if expect_run_id.is_some_and(|id| id != run.id) {
         return Err(LcError::conflict("run mismatch", json!({"run_id": run.id, "sent": false})));
@@ -169,12 +166,9 @@ pub async fn accept(
         .await
         .map_err(|_| composer_draft::unreadable(&run))?
         .text;
-    // 這裡比去掉空白：Tab 只把建議句收進框裡、還送不出去，逐字的比對在 Tab 之後（`same_sentence`，按 Enter 之前）。
-    // 網頁的建議句是壓平過的字串，沒有列的資訊；窄 pane 寬度一變，折行位置就跟著變，這裡逐字比會誤擋。
     match suggestion_on(&screen) {
         Some(now) if squash(&now) == squash(expect) => {}
         Some(now) => {
-            // 畫面上的建議換了：記下新的、讓網頁換字，這次不送。
             if crate::prompt_suggestion::set(&run.id, Some(now.clone())) {
                 app.emit_bot_status(bot_id).await;
             }
@@ -184,7 +178,6 @@ pub async fn accept(
             if crate::prompt_suggestion::forget(&run.id) {
                 app.emit_bot_status(bot_id).await;
             }
-            // 框裡若是使用者打的字，一併給草稿與動作，網頁才有東西讓人處理。
             let draft = (box_state("claude", &screen) == BoxState::NonEmpty).then(|| composer_text_whole("claude", &screen)).flatten();
             let mut err = composer_draft::refusal("suggestion_gone", &run, true, "claude", draft.as_deref());
             if let LcError::Conflict(o) = &mut err {
@@ -196,12 +189,10 @@ pub async fn accept(
     #[cfg(test)]
     super::race_point::hit("suggestion_before_tab", bot_id).await;
 
-    // ---- Tab：把灰字收進輸入框 ----
     if let Err(e) = client.pane_send_keys(&pane, &["tab"]).await {
         tracing::warn!(bot = %bot_id, error = %e, "herdr refused the Tab key; nothing was accepted");
         return Err(LcError::Upstream(format!("herdr refused the Tab key: {e}")));
     }
-    // 之後每一種收法都要把頁面上的建議忘掉：Tab 不管成不成，那句灰字都不在原位了。
     if crate::prompt_suggestion::forget(&run.id) {
         app.emit_bot_status(bot_id).await;
     }
@@ -214,7 +205,6 @@ pub async fn accept(
         };
         match state {
             BoxState::Unready => return Err(refused("composer_unreadable", &run, true, json!({"detail": "Tab 已經按了，輸入框讀不出來；沒有再按任何鍵"}))),
-            // 框還是空的（或灰字還在）：TUI 可能還沒重畫，再等一次；兩次都空就是 Tab 沒生效。
             BoxState::Empty if attempt == 0 => continue,
             BoxState::Empty => return Err(refused("tab_not_accepted", &run, true, json!({"detail": "按了 Tab，輸入框沒有收下那一句；沒有再按任何鍵"}))),
             BoxState::NonEmpty => {
@@ -224,7 +214,6 @@ pub async fn accept(
         }
     }
     let Some(draft) = taken.filter(|d| same_sentence(d, expect)) else {
-        // 框裡是別的字（使用者剛在終端打字、或 Tab 做了別的事）：不認得、不碰，照草稿流程讓人處理。
         let now = composer_draft::read_draft(&client, &pane, "claude").await.ok().and_then(|(_, d, _)| d);
         let mut err = composer_draft::refusal("draft_changed", &run, true, "claude", now.as_deref());
         if let LcError::Conflict(o) = &mut err {
@@ -233,17 +222,13 @@ pub async fn accept(
         return Err(err);
     };
 
-
-    // ---- Enter：框裡就是那一句，走「送出框裡那段」的既有流程 ----
     let token = composer_draft::draft_token(&run.id, &pane, &draft);
     match app.submit_locked(bot_id, &token, client_request_id).await {
         Ok(out) => Ok(out),
         Err(composer_draft::SubmitDraftError::EnterMayHaveBeenSent(e)) => {
-            // Enter 已送或可能已送：絕不清理輸入框，避免打斷已送出的回合。
             Err(e)
         }
         Err(composer_draft::SubmitDraftError::NoKeySent(err)) => {
-            // Enter 確定尚未送出：若輸入框仍是原建議且無回合擁有它，清框還原。
             let turn_owned = db::in_flight_turn(app.db(), &run.id).await.unwrap_or(None).is_some()
                 || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND client_request_id = ?")
                     .bind(&conv)

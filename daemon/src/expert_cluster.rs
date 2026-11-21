@@ -187,7 +187,6 @@ pub fn group(members: &[Member]) -> Vec<Cluster> {
         let base = short_model(&k.0, v[0].model.as_deref());
         (base, Cluster { name: String::new(), kind: k.0, model: v[0].model.clone(), effort: v[0].effort.clone(), identity: v[0].identity.clone(), members: v })
     }).collect();
-    // 同短名的群集依序加 -<effort>、-<identity>，仍撞名最後補序號。
     let mut names: Vec<String> = groups.iter().map(|(b, _)| b.clone()).collect();
     let collides = |names: &[String], i: usize| names.iter().enumerate().any(|(j, n)| j != i && *n == names[i]);
     for step in 0..2 {
@@ -200,8 +199,6 @@ pub fn group(members: &[Member]) -> Vec<Cluster> {
             }
         }
     }
-    // 序號：同名的第一群保留原名，其餘補 -2、-3…；產生的名字也可能撞到別群的自然名稱（#2071），
-    // 所以先把所有現有名稱占住，每個候選都要確認沒被用過才採用。
     let snapshot = names.clone();
     let mut used: std::collections::BTreeSet<String> = snapshot.iter().cloned().collect();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -241,7 +238,6 @@ impl Scope {
 pub async fn sender_scope(app: &Arc<App>, sender: &db::Bot) -> anyhow::Result<Option<Scope>> {
     if sender.deleted_at.is_some() { return Ok(None) }
     if sender.role.as_deref() == Some("manager") && sender.parent_bot_id.is_none() { return Ok(Some(Scope::All)) }
-    // 代班權限只屬於頂層 advisor／specialist（副管理者的合格角色）；降級後即使設定還沒清掉也不算。
     let deputy_role = matches!(sender.role.as_deref(), Some("advisor" | "specialist")) && sender.parent_bot_id.is_none();
     if deputy_role && crate::runners::relay_deputy::acting(app, &sender.id).await { return Ok(Some(Scope::All)) }
     if sender.role.as_deref() != Some("specialist") || sender.parent_bot_id.is_some() { return Ok(None) }
@@ -283,7 +279,6 @@ pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Resu
     let mut members: Vec<Member> = bots.iter()
         .filter(|b| b.project_id == project_id && b.role.as_deref() == Some("executor") && b.parent_bot_id.is_none() && b.deleted_at.is_none() && !crate::config::is_api_kind(&b.kind))
         .map(|b| member_of(b, runs.get(&b.id))).collect();
-    // 側欄 menu 順序：config.toml 裡這個 project 的 bots 陣列索引（拖曳排序寫的就是它）。
     let cfg = app.cfg.get().await;
     let menu: std::collections::HashMap<String, usize> = cfg.projects.iter()
         .find(|p| p.id.as_deref() == Some(project_id))
@@ -300,8 +295,6 @@ pub async fn project_executors(app: &Arc<App>, project_id: &str) -> anyhow::Resu
         member.quota_blocked = quota.is_some_and(|q| {
             q.exhausted(crate::quota::Bucket::FiveHour, now) || q.exhausted(crate::quota::Bucket::SevenDay, now)
         });
-        // 畫面還是 idle、但剛被派了工作（turn 已建立、排隊或進行中，agent 還沒開始動）的成員不算閒置：
-        // 連續派好幾份到同一群集時，不然都會挑到同一顆，後面的排在它後面，閒著的成員接不到（排隊的 turn 也不會再被改派）。
         if member.idle {
             let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status IN ('queued','in_flight'))")
                 .bind(&member.id).fetch_one(&app.db).await?;
@@ -392,8 +385,6 @@ pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, c
         project_executors(app, &from.project_id).await?.into_iter()
             .filter(|m| tier_of(&m.kind, m.model.as_deref()) == target.tier).collect::<Vec<_>>()
     } else {
-        // Older pending requests lack an immutable identity. Never infer it from a bot
-        // that may already have changed model or identity; fail closed for retry.
         let key = request.as_ref().and_then(|(_, _, k)| k.as_deref())
             .and_then(|raw| serde_json::from_str::<ClusterKey>(raw).ok());
         let Some(key) = key.filter(|k| k.project_id == from.project_id) else {
@@ -401,8 +392,6 @@ pub async fn claim_target(app: &Arc<App>, request_id: &str, project_bot: &str, c
         };
         project_executors(app, &key.project_id).await?.into_iter().filter(|m| key.matches(m)).collect::<Vec<_>>()
     };
-    // 每次重選都用發起者「當下」的權限（不論角色）：管理者／代班中的副管理者不限；專家只在開關開著時、限本專案頂層執行者。
-    // 發起者不存在、已刪、降級或代班結束（`sender_scope` 回 None）就終止請求——不預設 All，也不會先自動啟動成員。
     let scope = match &sender { Some(s) => sender_scope(app, s).await?, None => None };
     let Some(scope) = scope else { return Ok(gone(format!("cluster {cluster}: sender may no longer dispatch to clusters")).await?) };
     members.retain(|m| scope.allows(&m.id));
@@ -464,7 +453,6 @@ mod tests {
 
     #[test]
     fn generated_number_suffix_never_collides_with_natural_name() {
-        // #2071：前兩群都叫 haiku-low-cc1，補序號的 -2 會撞到第三群原本就叫 haiku-low-cc1-2。
         let cs = group(&[m("a", "claude-haiku-4-5", "low", "cc1"), m("b", "claude-haiku-4-5", "low", "cc1"),
             m("c", "claude-haiku-5-5", "low", "cc1"), m("d", "claude-haiku-5-5", "low", "cc1"),
             m("e", "claude-haiku-5-5", "low", "cc1-2"), m("f", "claude-haiku-5-5", "low", "cc1-2")]);
@@ -472,7 +460,6 @@ mod tests {
         let uniq: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(uniq.len(), cs.len(), "群集名必須唯一：{names:?}");
         assert_eq!(names, ["haiku-low-cc1", "haiku-low-cc1-2", "haiku-low-cc1-3"]);
-        // 自然名稱 haiku-low-cc1-2 仍屬於 identity=cc1-2 那群；每群都能用名稱找到自己。
         assert_eq!(cs.iter().find(|c| c.name == "haiku-low-cc1-2").unwrap().identity.as_deref(), Some("cc1-2"));
         for c in &cs { assert!(std::ptr::eq(cs.iter().find(|x| x.name == c.name).unwrap(), c)); }
     }
@@ -555,8 +542,6 @@ mod tests {
         let manager = expert_member(&env, "mgr-menu", "manager", "idle").await;
         let a = expert_member(&env, "menu-a", "executor", "idle").await;
         let b = expert_member(&env, "menu-b", "executor", "idle").await;
-        // b 在 menu 上面（bots 陣列 [b, a]），但 b 的 context 高、cache 冷；a 的 context 低、cache 熱。
-        // 不看 menu 時 a 會贏，所以 b 勝出就是 menu 位置生效。
         sqlx::query("UPDATE runs SET status_json=?, agent_status_since=? WHERE bot_id=?")
             .bind(r#"{"context_window":{"used_percentage":70}}"#).bind("2026-11-02T01:00:00Z").bind(&b.id).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE runs SET status_json=?, agent_status_since=? WHERE bot_id=?")
@@ -744,7 +729,6 @@ mod tests {
         let b = expert_member(&env, "w2", "executor", "working").await;
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq',?,?,'k','p','[]','pending',?,'haiku')")
             .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
-        // 全忙：沒人接手，請求原地等。
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), None);
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
@@ -793,7 +777,6 @@ mod tests {
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), None, "原群集全忙：繼續等，不能被 high 群集接走");
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&b.id).execute(&env.app.db).await.unwrap();
         assert_eq!(claim_target(&env.app, "rq", &a.id, "haiku").await.unwrap(), Some(b.id.clone()));
-        // 原群集縮到一顆時仍保留身份；剩餘成員閒置後可以接手。
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq2',?,?,'k2','p','[]','pending',?,'haiku')")
             .bind(&manager.id).bind(&a.id).bind(db::now()).execute(&env.app.db).await.unwrap();
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&b.id).execute(&env.app.db).await.unwrap();
@@ -818,16 +801,13 @@ mod tests {
         }
         let cs = project_clusters(&env.app, &env.project_id).await.unwrap();
         assert_eq!((cs.len(), cs[0].members.len()), (1, 2));
-        // 背景啟動任務會自己寫 runs 列；等它收尾再放我們的假 run，否則兩邊搶 `runs.bot_id` UNIQUE（偶發 2067）。
         let started = start_one_and_wait(&env.app, &env.project_id, "haiku").await;
         assert!(started.is_some());
-        // 已有啟動中的成員：不重複啟動。
         let first = started.unwrap();
         sqlx::query("DELETE FROM runs WHERE bot_id=?").bind(&first).execute(&env.app.db).await.unwrap();
         let run = crate::testing::fake_run(&env.app, &first).await;
         sqlx::query("UPDATE runs SET state='starting' WHERE id=?").bind(run).execute(&env.app.db).await.unwrap();
         assert_eq!(start_one_if_needed(&env.app, &env.project_id, "haiku").await, None);
-        // 起來並閒置後，請求送達它。
         sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE bot_id=?").bind(&first).execute(&env.app.db).await.unwrap();
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES('rq',?,?,'k','p','[]','pending',?,'haiku')")
             .bind(&manager.id).bind(ids.iter().find(|i| **i != first).unwrap()).bind(db::now()).execute(&env.app.db).await.unwrap();
@@ -869,25 +849,21 @@ mod specialist_cluster_tests {
     async fn a_specialist_resolves_a_cluster_while_the_switch_is_on() {
         let f = fx().await;
         let app = &f.env.app;
-        // 開著：專家跟管理者一樣拿到閒著的成員。
         status(&f, &f.e2, "idle").await;
         let spec = crate::api::resolve_cluster_target(app, &f.spec, "haiku").await.unwrap().0;
         assert_eq!((spec["to_bot_id"].as_str(), spec["cluster_idle"].as_bool()), (Some(f.e2.as_str()), Some(true)), "{spec}");
         let mgr = crate::api::resolve_cluster_target(app, &f.mgr, "haiku").await.unwrap().0;
         assert_eq!(mgr["to_bot_id"], f.e2.as_str(), "{mgr}");
-        // child 化的成員不算（專家只派頂層執行者）。
         assert_eq!(sender_scope(app, &db::bot(&app.db, &f.spec).await.unwrap().unwrap()).await.unwrap(), Some(Scope::Specialist([f.e1.clone(), f.e2.clone()].into_iter().collect())));
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&f.mgr).bind(&f.e2).execute(&app.db).await.unwrap();
         assert!(!sender_scope(app, &db::bot(&app.db, &f.spec).await.unwrap().unwrap()).await.unwrap().unwrap().allows(&f.e2));
         sqlx::query("UPDATE bots SET parent_bot_id=NULL WHERE id=?").bind(&f.e2).execute(&app.db).await.unwrap();
-        // 關掉：專家不能對群集派工；管理者照舊。
         switch(&f, false).await;
         match crate::api::resolve_cluster_target(app, &f.spec, "haiku").await {
             Err(crate::lifecycle::LcError::Forbidden(v)) => assert_eq!(v["reason"], "cluster_manager_only"),
             other => panic!("{other:?}"),
         }
         assert!(crate::api::resolve_cluster_target(app, &f.mgr, "haiku").await.is_ok());
-        // 執行者本身不能對群集派工。
         assert!(matches!(crate::api::resolve_cluster_target(app, &f.e1, "haiku").await, Err(crate::lifecycle::LcError::Forbidden(_))));
     }
 
@@ -898,12 +874,9 @@ mod specialist_cluster_tests {
         let rid = db::ulid();
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'gc-key','p','[]','pending',?,'haiku')")
             .bind(&rid).bind(&f.spec).bind(&f.e1).bind(db::now()).execute(&app.db).await.unwrap();
-        // 全忙：繼續等（專家不替自己啟動成員）。
         assert_eq!(claim_target(app, &rid, &f.e1, "haiku").await.unwrap(), None);
-        // e2 閒下來：開著時改派給它。
         status(&f, &f.e2, "idle").await;
         assert_eq!(claim_target(app, &rid, &f.e1, "haiku").await.unwrap(), Some(f.e2.clone()));
-        // 另一筆，關掉後：請求標 failed，不改派。
         let rid2 = db::ulid();
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,cluster) VALUES(?,?,?,'gc-key2','p','[]','pending',?,'haiku')")
             .bind(&rid2).bind(&f.spec).bind(&f.e1).bind(db::now()).execute(&app.db).await.unwrap();
@@ -950,7 +923,6 @@ mod sender_rescope_tests {
         let e2 = member(&env, "rs-e2", "executor", None, Some("working")).await;
         let e3 = member(&env, "rs-e3", "executor", None, None).await;
         sqlx::query("UPDATE projects SET deputy_bot_id=?, deputy_after_sec=60 WHERE id=?").bind(&deputy).bind(&env.project_id).execute(&app.db).await.unwrap();
-        // 代班中：有一則從管理者改派給 D、還沒做完的請求。
         sqlx::query("INSERT INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,redirected_from,redirected_at) VALUES('rs-redir',?,?,'rs-redir','q','[]','delivered',?,?,?)")
             .bind(&spec).bind(&deputy).bind(db::now()).bind(&mgr).bind(db::now()).execute(&app.db).await.unwrap();
         assert!(crate::runners::relay_deputy::acting(&app, &deputy).await);
@@ -1040,7 +1012,6 @@ mod sender_rescope_tests {
     #[tokio::test]
     async fn a_sender_that_lost_its_authority_neither_moves_nor_starts_members() {
         for (sender, c) in [(Sender::Specialist, Change::Demote), (Sender::Specialist, Change::Delete), (Sender::Specialist, Change::SwitchOff), (Sender::Deputy, Change::EndActing), (Sender::Deputy, Change::Demote)] {
-            // 不改派：另一顆成員閒下來（舊行為會以 Scope::All 改派給它）。
             let f = fx().await;
             let from = match sender { Sender::Specialist => f.spec.clone(), Sender::Deputy => f.deputy.clone(), Sender::Manager => f.mgr.clone() };
             let (rid, to) = dispatch(&f, &from).await;
@@ -1052,7 +1023,6 @@ mod sender_rescope_tests {
             assert_eq!((state.as_str(), now_to.as_str()), ("failed", to.as_str()), "{sender:?}/{c:?}: {error:?}");
             assert!(error.unwrap_or_default().contains("may no longer dispatch"), "{sender:?}/{c:?}");
 
-            // 不啟動：全忙、e3 停著（舊行為會先自動啟動 e3）。
             let f = fx().await;
             let from = match sender { Sender::Specialist => f.spec.clone(), Sender::Deputy => f.deputy.clone(), Sender::Manager => f.mgr.clone() };
             let (rid, to) = dispatch(&f, &from).await;
@@ -1074,7 +1044,6 @@ mod sender_rescope_tests {
             change(&f, &from, Change::None).await;
             assert_eq!(claim_target(&f.env.app, &rid, &to, "haiku").await.unwrap(), None);
             assert_eq!(row(&f, &rid).await.0, "pending", "{sender:?}");
-            // 專家的派工範圍內（本專案頂層執行者）的停著成員，與管理者一樣會被自動啟動。
             assert!(crate::testing::eventually!(e3_runs(&f).await > 0), "{sender:?}: 有權限的發起者照舊自動啟動停著的成員");
         }
     }

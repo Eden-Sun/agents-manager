@@ -46,7 +46,6 @@ async fn settings_json(app: &Arc<App>, cfg: &ConfigFile) -> Value {
 }
 
 pub(crate) async fn get_settings(State(app): State<Arc<App>>) -> Json<Value> {
-    // `claude_fresh` 先做熱重載：手改 config.toml 後這裡看到的是最新的。
     let cfg = app.cfg.claude_fresh().await;
     Json(settings_json(&app, &cfg).await)
 }
@@ -111,7 +110,6 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<P
                 o.key_file = path.trim().to_string();
             }
             match total_cap_usd {
-                // 設上限：沒另外指定起算時間就從現在起算（同 Claude 的總上限）。
                 Some(Some(cap)) => {
                     o.api_bot.total_cap_usd = Some(cap);
                     if total_cap_since.is_none() {

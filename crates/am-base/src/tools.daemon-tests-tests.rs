@@ -30,7 +30,6 @@
         assert_eq!(list.iter().filter(|i| i.name == "ag0").count(), 1);
         assert_eq!(list.iter().find(|i| i.name == "ag1").and_then(|i| i.env.get("HOME")).map(String::as_str), Some("$HOME/.agy-ag1"));
         assert!(identity_for_host(app, crate::config::LOCAL_HOST, "ag9").await.is_none(), "不認得的名字仍然不認得");
-        // 子 pane 的 HOME 是真家目錄 → ag0；是 ag1 的影子家目錄 → ag1。
         assert_eq!(crate::pane_identity::child_identity(&list, "agy", "HOME", "/home/me", Some("/home/me")).as_deref(), Some("ag0"));
         assert_eq!(crate::pane_identity::child_identity(&list, "agy", "HOME", "/home/me", Some("/home/me/.agy-ag1")).as_deref(), Some("ag1"));
         assert!(is_builtin_default_identity("agy", "ag0") && is_builtin_default_identity("agy", "agy"));
@@ -60,7 +59,7 @@
         app.cfg
             .update(|c| {
                 c.identities = vec![
-                    cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", "/home/me/.claude-cc1"), // 現行形狀
+                    cfg("cc1", "claude", None, "CLAUDE_CONFIG_DIR", "/home/me/.claude-cc1"),
                     cfg("cx2", "codex", None, "CODEX_HOME", "$HOME/.codex-cx2"),
                 ];
                 Ok(())
@@ -69,15 +68,12 @@
             .unwrap();
         let dir_of = |i: Option<crate::config::IdentityCfg>, var: &str| i.and_then(|i| i.env.get(var).cloned());
 
-        // 本機：照舊拿得到，env 也照舊。
         let local = identity_for_host(app, crate::config::LOCAL_HOST, "cc1").await;
         assert_eq!(dir_of(local, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
-        // 遠端還沒偵測：codex 身份馬上能用（那台不可能有同名 shell 身份）；`ccN` 要等那台的 alias 讀過。
         assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cx2").await, "CODEX_HOME").as_deref(), Some("$HOME/.codex-cx2"), "codex 身份只能寫在 config 裡，遠端要用得到");
         assert!(identity_for_host(app, "mac_builder", "cc1").await.is_none(), "還不知道 mac_builder 有沒有自己的 cc1");
 
-        // mac_builder 偵測到自己的 cc1：那台的說了算，不被本機那筆遮蔽。
         let shell = |dir: Option<&str>| crate::tools::HostTools {
             tools: Default::default(),
             identities: Default::default(),
@@ -86,11 +82,9 @@
         };
         app.tools.lock().await.insert("mac_builder".into(), shell(Some("$HOME/.claude-ccompany")));
         assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("$HOME/.claude-ccompany"));
-        // mac_builder 偵測完、沒有自己的 cc1：沒寫 host 的那筆就適用。
         app.tools.lock().await.insert("mac_builder".into(), shell(None));
         assert_eq!(dir_of(identity_for_host(app, "mac_builder", "cc1").await, "CLAUDE_CONFIG_DIR").as_deref(), Some("/home/me/.claude-cc1"));
 
-        // 明寫 host 的最優先，而且只給那一台；`host = "local"` 就是只要本機。
         app.cfg
             .update(|c| {
                 c.identities.push(cfg("cc1", "claude", Some("mac_builder"), "CLAUDE_CONFIG_DIR", "/home/mac_builder/.claude-ccompany"));
@@ -122,16 +116,13 @@
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-onboard-{}", ulid::Ulid::new())));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join(".claude.json");
-        // No account: leave it alone (the TUI has to log in anyway).
         std::fs::write(&f, r#"{"theme":"dark"}"#).unwrap();
         assert!(!super::ensure_claude_onboarded(&dir));
-        // Account but no flag: set it.
         std::fs::write(&f, r#"{"oauthAccount":{"emailAddress":"x@y"},"theme":"dark"}"#).unwrap();
         assert!(super::ensure_claude_onboarded(&dir));
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
         assert_eq!(v["hasCompletedOnboarding"], true);
         assert_eq!(v["oauthAccount"]["emailAddress"], "x@y");
-        // Already set: no rewrite.
         assert!(!super::ensure_claude_onboarded(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -149,7 +140,6 @@
         assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600, "帳號檔不能被放寬");
         let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec![".claude.json".to_string()], "沒有留下暫存檔");
-        // 沒有檔：不建。
         let empty = crate::testing::track(std::env::temp_dir().join(format!("am-onboard-none-{}", ulid::Ulid::new())));
         std::fs::create_dir_all(&empty).unwrap();
         assert!(!super::ensure_claude_onboarded(&empty));
@@ -175,7 +165,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(ids[0].env.is_empty(), "cc0 is the default account: no config dir");
         assert_eq!(ids[1].env["CLAUDE_CONFIG_DIR"], "$HOME/.claude-cc1");
         assert_eq!(ids[2].env["CLAUDE_CONFIG_DIR"], "$HOME/.claude-cc2");
-        // The alias's own flags are never taken (the daemon owns those).
         assert!(ids.iter().all(|i| i.args.is_empty() && i.kind == "claude"));
 
         let remote = "AM_ALIAS cc1='CLAUDE_CONFIG_DIR=$HOME/.claude-ccompany claude --dangerously-skip-permissions'";
@@ -184,11 +173,9 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 
     #[test]
     fn ignores_aliases_that_are_not_ours() {
-        // bash prints a leading `alias `; zsh does not. Both are read.
         let ids = parse_shell_identities("AM_ALIAS alias cc3=\"CLAUDE_CONFIG_DIR=~/.c3 claude\"");
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].env["CLAUDE_CONFIG_DIR"], "~/.c3");
-        // Not claude, out of range, or the config dir set after the binary → skipped.
         for line in [
             "AM_ALIAS cc1='CLAUDE_CONFIG_DIR=$HOME/.x codex'",
             "AM_ALIAS cc7='CLAUDE_CONFIG_DIR=$HOME/.x claude'",
@@ -197,14 +184,11 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             "AM_ALIAS cc2='env CLAUDE_CONFIG_DIR=$HOME/.x claude'",
         ] {
             let got = parse_shell_identities(line);
-            // Never an empty-env identity that would run on the default account.
             assert!(got.is_empty(), "should not have made an identity from `{line}`: {got:?}");
         }
-        // No config dir at all *is* the default account, and still counts.
         let ids = parse_shell_identities("AM_ALIAS cc0='claude --dangerously-skip-permissions'");
         assert_eq!(ids.len(), 1);
         assert!(ids[0].env.is_empty());
-        // A later definition of the same name wins, the way the shell resolves it.
         let ids = parse_shell_identities(
             "AM_ALIAS cc1='CLAUDE_CONFIG_DIR=/a claude'\nAM_ALIAS cc1='CLAUDE_CONFIG_DIR=/b claude'",
         );
@@ -234,7 +218,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(m["codex"].logged_in, Some(true));
         assert!(!m["grok"].installed);
         assert!(m["grok"].path.is_none());
-        // not installed + "no auth file" → unknown, not false
         assert_eq!(m["grok"].logged_in, None);
     }
 
@@ -254,7 +237,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(login_probe_args("claude", LOCAL_HOST), Some(CLAUDE_LOGIN_ARGS));
         assert_eq!(login_probe_args("claude", "mac_builder"), None);
         assert_eq!(login_probe_args("codex", "mac_builder"), Some(&["login", "status"][..]));
-        // 腳本要用帶進來的 args，不是 kind 的預設（claude 的預設是 None，會整段被略過）。
         let mut it = probe("cc1", "claude", &[("CLAUDE_CONFIG_DIR", "/Users/me/.claude-ccompany")]);
         it.args = Some(CLAUDE_LOGIN_ARGS.to_vec());
         let sh = identity_probe_sh(&[it]);
@@ -303,12 +285,10 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         ]);
         assert!(sh.contains("AM_IDENT_BEGIN %s\\n' 'gk0'"));
         assert!(sh.contains("AM_IDENT_END %s\\n' 'cx1'"));
-        // gk0 has no env of its own, so its subshell must not carry cx1's.
         let gk0 = sh.split("AM_IDENT_BEGIN %s\\n' 'gk0'").nth(1).unwrap().split("AM_IDENT_END").next().unwrap();
         assert!(!gk0.contains("CODEX_HOME"));
         assert!(gk0.contains(" '/opt/homebrew/bin/grok' 'models'"));
         assert!(sh.contains("CODEX_HOME='/Users/me/.codex-alt'; export CODEX_HOME;"));
-        // stdin closed: none of these CLIs may wait for a TTY.
         assert!(sh.contains("</dev/null"));
     }
 
@@ -353,14 +333,12 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 
     #[test]
     fn unreadable_answers_stay_unknown_not_logged_out() {
-        // Empty (the CLI died), garbage, and a truncated block are all "could not tell".
         let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nAM_IDENT_OUT zsh: command not found\nAM_IDENT_RC b 0\nAM_IDENT_END b\nAM_IDENT_BEGIN c\nAM_IDENT_OUT {\"loggedIn\":true}\n";
         let m = parse_identity_probe(out, &kinds(&[("a", "claude"), ("b", "claude"), ("c", "claude")]));
         assert_eq!(m["a"].logged_in, None);
         assert_eq!(m["a"].reason.as_deref(), Some("auth status probe 沒有完成"));
         assert_eq!(m["b"].logged_in, None);
         assert_eq!(m["b"].reason.as_deref(), Some("auth status 輸出無法解析"));
-        // `c` never closed, so it is not reported at all (the caller keeps its unknown row).
         assert!(!m.contains_key("c"));
     }
 
@@ -375,7 +353,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     /// claude 例外（見 [`claude_is_not_asked_over_ssh`]）；其餘每種 CLI 都要有一條 ssh 問法。
     #[test]
     fn every_other_kind_has_a_login_question() {
-        // agy 沒有 `login`／`status` 子命令（`agy models` 要登入才答、登入框會卡住 ssh）：已登入與否之後從 statusLine 的 `email` 讀（第二階段）。
         for k in crate::config::KINDS.iter().filter(|k| !matches!(**k, "claude" | "agy")) {
             assert!(login_status_args(k).is_some(), "{k} has no login status command");
         }
@@ -551,7 +528,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         }
         assert_eq!(login_answer_to_cache(false, "claude", false), None, "遠端 claude 讀不到 Keychain");
         assert_eq!(login_answer_to_cache(false, "claude", true), Some(true));
-        // 本機一律照實寫（包含 claude 的未登入）。
         assert_eq!(login_answer_to_cache(true, "claude", false), Some(false));
         assert_eq!(login_answer_to_cache(true, "codex", false), Some(false));
     }
@@ -590,7 +566,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert_eq!(identity_logout_command("codex", &BTreeMap::new()).as_deref(), Some("codex logout"));
         assert_eq!(identity_logout_command("grok", &BTreeMap::new()).as_deref(), Some("grok logout"));
         assert!(identity_logout_command("other", &BTreeMap::new()).is_none());
-        // 兩邊的前綴是同一段程式算出來的，不會有一邊漏掉。
         assert_eq!(
             identity_login_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0,
             identity_logout_command("claude", &env).unwrap().rsplit_once(' ').unwrap().0
@@ -738,7 +713,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             created_at: crate::db::now(),
         });
 
-        // 第一輪（~1 秒）看得到 CLI、第二輪看到它結束：沒有圍籬的 watcher 這時就會收尾。
         tokio::time::sleep(Duration::from_millis(1500)).await;
         herdr_b.set_argv("w1:p1", &["zsh"]);
         tokio::time::sleep(Duration::from_millis(2000)).await;
@@ -933,7 +907,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         std::fs::write(real.join(".gitconfig"), "x").unwrap();
         std::fs::write(real.join(".gemini/mine"), "real login").unwrap();
         let dir = real.join(".agy-b");
-        // 目錄改名後留下的舊名相容連結（`~/.agy-` → `.agy-b`）：不能連進影子家目錄，那是自己繞回自己。
         std::os::unix::fs::symlink(".agy-b", real.join(".agy-")).unwrap();
         let sh = agy_shadow_home_sh(dir.to_str().unwrap(), real.to_str().unwrap());
         for _ in 0..2 {
@@ -948,11 +921,9 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(dir.join(".gitconfig").is_symlink() && dir.join(".ssh").is_symlink(), "git／ssh 設定照常可用");
         assert!(!dir.join(".agy-b").exists(), "不把自己連進自己");
         assert!(!dir.join(".agy-").exists() && !dir.join(".agy-").is_symlink(), "指回自己的舊名連結也不連進來");
-        // macOS：Library 不能整包連回去，否則身份讀得到真家目錄的 login Keychain（預設帳號的 token）。
         std::fs::create_dir_all(real.join("Library/Keychains")).unwrap();
         std::fs::create_dir_all(real.join("Library/Preferences")).unwrap();
         std::fs::write(real.join("Library/Keychains/login.keychain-db"), "secret").unwrap();
-        // 舊版留下的整包連結要換成真目錄（只移連結，不碰目標）。
         std::os::unix::fs::symlink(real.join("Library"), dir.join("Library")).unwrap();
         for _ in 0..2 {
             let ok = std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap();
@@ -962,7 +933,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(dir.join("Library/Preferences").is_symlink(), "Library 其餘照樣連回去");
         assert!(!dir.join("Library/Keychains").exists(), "login Keychain 不可見");
         assert!(real.join("Library/Keychains/login.keychain-db").exists(), "真的 Keychain 不被動到");
-        // 首次精靈旗標：真家目錄已完成 → 影子補上（複製，不帶憑證）；影子已完成的不覆蓋；真家目錄沒完成就不補。
         let cache = real.join(".gemini/antigravity-cli/cache");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(real.join(".gemini/antigravity-cli/antigravity-oauth-token"), "REAL-TOKEN").unwrap();
@@ -983,11 +953,9 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(!shadow_flag.is_symlink(), "複製不連結");
         assert!(!dir.join(".gemini/antigravity-cli/antigravity-oauth-token").exists(), "不帶 OAuth token");
         assert!(!dir.join(".config/antigravity/credential-user-scope").exists(), "不帶憑證範圍檔");
-        // 影子已經完成：不覆蓋（agy 之後改寫的內容留著）。
         std::fs::write(&shadow_flag, r#"{"onboardingComplete": true, "mine": 1}"#).unwrap();
         assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
         assert!(std::fs::read_to_string(&shadow_flag).unwrap().contains("mine"));
-        // 狀態 hook 連回真家目錄、settings.json（statusLine＋信任）複製成種子；影子已有內容的不覆蓋。
         std::fs::create_dir_all(real.join(".gemini/config/hooks")).unwrap();
         std::fs::write(real.join(".gemini/config/hooks.json"), r#"{"agents-manager":{}}"#).unwrap();
         std::fs::write(real.join(".gemini/antigravity-cli/settings.json"), r#"{"statusLine":{"command":"x state"},"trustedWorkspaces":["/w"]}"#).unwrap();
@@ -1003,7 +971,6 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         std::fs::write(&seeded, "{}\n").unwrap();
         assert!(std::process::Command::new("sh").arg("-c").arg(&sh).status().unwrap().success());
         assert!(std::fs::read_to_string(&seeded).unwrap().contains("statusLine"), "只有空物件視為沒有");
-        // 家目錄就是真家目錄：什麼都不做。
         let same = agy_shadow_home_sh(real.to_str().unwrap(), real.to_str().unwrap());
         assert!(std::process::Command::new("sh").arg("-c").arg(&same).status().unwrap().success());
         let _ = std::fs::remove_dir_all(&root);
@@ -1034,13 +1001,11 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(st.is_file() && !st.is_symlink(), "settings.json 是複製，不是連結");
         assert!(std::fs::read_to_string(&st).unwrap().contains("x state"), "帶著 statusLine");
         assert!(dir.join(".gemini/config/hooks.json").is_symlink() && dir.join(".gemini/config/hooks").is_symlink(), "狀態 hook 一定接上");
-        // 之後 agy 改過的檔案不被蓋掉；重跑不壞東西。
         std::fs::write(&st, "mine").unwrap();
         std::fs::write(&ob, r#"{"onboardingComplete":true}"#).unwrap();
         run();
         assert_eq!(std::fs::read_to_string(&st).unwrap(), "mine");
         assert_eq!(std::fs::read_to_string(&ob).unwrap(), r#"{"onboardingComplete":true}"#);
-        // 真家目錄沒有 hooks／settings（還沒裝）：不報錯、也不亂連。
         let bare = root.join("bare");
         std::fs::create_dir_all(&bare).unwrap();
         let dir2 = bare.join(".agy-b");

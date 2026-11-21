@@ -110,7 +110,6 @@ fn path(app: &impl crate::capabilities::DataDir) -> PathBuf {
 fn save(app: &impl crate::capabilities::DataDir, w: Option<&Wait>) {
     let p = path(app);
     let res = match w {
-        // 暫存檔 + fsync + rename：寫到一半當機，正式檔也不會是半份（issue #869）。
         Some(w) => serde_json::to_vec(w).map_err(std::io::Error::other).and_then(|b| crate::lifecycle::setup::write_private(&p, &b)).map(|()| sync_dir(&p)),
         None => match std::fs::remove_file(&p) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -228,7 +227,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
     let mut emit_ws = false;
     let ws_wait = {
         let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // 換版中又來試＝上一次拿到窗口卻沒換成（窗口逾時交還），還是同一次部署。
         let continuing = g.as_ref().is_some_and(|w| {
             w.owner == owner && matches!(w.phase, Phase::Waiting | Phase::Swapping) && secs_between(&w.last_attempt_at, &now) < STALE_SECS
         });
@@ -283,7 +281,6 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                     w.auto_escalated = true;
                 }
                 if entering_swap && w.notified_at.is_some() {
-                    // 拿到窗口：同一個 sha 最多每 30 分鐘一則（issue #856）。
                     w.swap_announced_at.retain(|_, at| secs_between(at, &now) < SWAP_CYCLE_THROTTLE_SECS);
                     let throttle_ok = w.swap_announced_at.get(commit).is_none_or(|t| secs_between(t, &now) >= SWAP_CYCLE_THROTTLE_SECS);
                     if throttle_ok {
@@ -297,11 +294,9 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
             Err(e) => {
                 if w.phase == Phase::Swapping {
                     w.phase = Phase::Waiting;
-                    // 3a ABORT 交還：回到 waiting，不推 inbox（循環同一 sha 最多 30 分鐘一則，issue #856），但發 WS
                     emit_ws = true;
                 }
                 if let Some((blockers, eta, escalated)) = blockers_of(e) {
-                    // 名單一樣、只是順序不同不算換人。
                     let key = |b: &[Blocker]| {
                         let mut k: Vec<String> = b.iter().map(|x| format!("{}|{:?}|{}", x.why, x.bot_id, x.name)).collect();
                         k.sort();
@@ -318,13 +313,11 @@ pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilit
                         w.auto_escalated = true;
                         transition = Some(Announce::AutoEscalated);
                     } else if blockers_changed {
-                        // 擋住名單變動不單獨推 inbox（issue #856）；只發 WS 讓 web header 更新
                         emit_ws = true;
                     }
                 }
             }
         }
-        // 還沒通知就拿到窗口的：不必讓使用者知道。
         if let Some(a) = evaluate(w, transition, &now) {
             out.push((a, w.clone()));
         }
@@ -350,7 +343,6 @@ async fn tick_at(
     app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState),
     now: &str,
 ) {
-    // 先補送排隊中的通知（首次通知在最前），避免後續狀態轉換改掉它的 rev、內容或 wake。
     flush(app).await;
     let mut out = None;
     {
@@ -375,7 +367,6 @@ async fn tick_at(
                 }
             }
             Phase::Done | Phase::Abandoned => {
-                // 還有沒送進 inbox 的通知就不能清（issue #1507）：清掉＝那一則永遠送不出去。
                 let settled = w.pending_first.is_none() && w.pending_events.is_empty();
                 if settled && w.ended_at.as_deref().is_none_or(|t| secs_between(t, now) >= KEEP_ENDED_SECS) {
                     *g = None;
@@ -383,7 +374,6 @@ async fn tick_at(
                 }
             }
             Phase::Swapping => {
-                // 換版中：daemon 馬上就會被換掉；換不成（窗口逾時交還）時 kick 下一輪會再試，回到 Waiting 那條路。
                 if secs_between(&w.last_attempt_at, now) >= STALE_SECS {
                     w.phase = Phase::Abandoned;
                     w.ended_at = Some(now.to_string());
@@ -495,11 +485,9 @@ pub fn view(app: &impl crate::deploy_wait::DeployWaitState) -> Value {
 async fn announce(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), a: Announce, w: &Wait, now: &str) {
     let v = view_of(w, now);
     let first = a == Announce::First;
-    // 只記錄類的 deploy_waiting 不設 wake（issue #856）；首次通知也只在「自己不會好」時才叫醒（issue #1478）。
     let wake = first && !clears_itself(w);
     tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, now));
     app.emit("deploy_wait", json!({"wait": v.clone(), "first": first})).await;
-    // 首次通知的內容在 `evaluate` 排進 `pending_first`；之後的狀態轉換先排進佇列（落盤）再送，送不進就留著，tick 每拍重送（issue #1507）。
     if !first {
         enqueue(app, PendingEvent {
             key: notice_key(&w.id, w.rev),

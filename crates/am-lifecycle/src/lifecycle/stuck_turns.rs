@@ -130,11 +130,8 @@ pub fn spawn_stuck_turn_sweeper(app: impl StuckTurnContext) {
             super::dead_panes::sweep(&app).await;
             sweep(&app, None).await;
             forget_ended_runs(&app).await;
-            // run 早就結束卻還排著的 queued（含這個版本上線前留下來的）：沒有人會送，收掉。
             revoke_all_orphaned_queued_turns(&app).await;
-            // 停在提問的子 agent 的通知不只靠那一條 blocked 邊（#192）。
             app.sweep_child_alerts().await;
-            // 完成通知也用持久 turn 記錄補上漏掉的事件或 daemon 中斷。
             app.sweep_child_done().await;
         }
     });
@@ -174,7 +171,6 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
     };
     let mut closed = Vec::new();
     for (turn_id, run_id, bot_id, status) in rows {
-        // 每輪拿 DB 的現況再對一次：事件漏掉時，至少不會把 working 當成還在 idle。
         observe_at(&run_id, &status, now);
         if !idle_for(&run_id, now).is_some_and(|d| d >= threshold) {
             continue;
@@ -184,7 +180,6 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
             tracing::warn!(bot = %bot_id, turn = %turn_id, "stuck turn sweep: bot lock is busy; skipping this bot until the next round");
             continue;
         };
-        // 等鎖的時候狀態可能變了：鎖內重讀，run 不是 idle、turn 已經不是那一筆就不動。
         let Ok(Some(run)) = db::run(app.db(), &run_id).await else { continue };
         observe_at(&run_id, &run.agent_status, now);
         if run.state != "running" || run.agent_status != "idle" {
@@ -195,13 +190,10 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
         if turn.id != turn_id {
             continue;
         }
-        // 遠端 pane 的狀態可能一直報 idle，hook 卻還在進來（長跑的 Bash、spool 晚到；cf-優化-fork1 2026-10-14 12:37 被誤收，
-        // 一分鐘後 Stop 才到，#1763）：門檻內還有 hook 活動就是在做，從現在重新計時。
         if hook_active_within(app, &bot_id, threshold).await {
             observe_at(&run_id, "working", now);
             continue;
         }
-        // agy（#2146）：Stop 帶 `fullyIdle:false`、或畫面上還有前景／背景工作，herdr 報 idle 也不是做完。不重設計時（證據解除或畫面不忙就照收）。
         if db::bot(app.db(), &bot_id).await.ok().flatten().is_some_and(|b| b.kind == "agy") {
             let screen = super::unsent_draft::read_screen(app, &run).await.unwrap_or_default();
             if super::agy_busy::should_hold(&run_id, &turn.id, &screen) {
@@ -209,7 +201,6 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
                 continue;
             }
         }
-        // run 閒置夠久還不算：這筆也要送出夠久（見 [`stuck_for`]）。
         let stuck = stuck_for(idle, turn_age(&turn, wall_at(now)));
         if stuck < threshold {
             continue;
@@ -217,7 +208,6 @@ async fn sweep_with(app: &impl StuckTurnContext, host: Option<&str>, now: Instan
         match close_stuck(app, &run, &turn, CloseWhy::Idle(stuck)).await {
             Ok(true) => {
                 closed.push(turn.id.clone());
-                // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
                 if let Err(e) = super::flush_queued_locked(app, &bot_id).await {
                     tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush after closing a stuck turn failed");
                 }
@@ -298,7 +288,6 @@ async fn close_stuck(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Turn
     if turn.delivery == "pending" {
         return fail_never_sent(app, run, turn).await;
     }
-    // 送達證不出來的：先看字是不是還留在框裡（#1897），補按 Enter／收成 failed／照原本的收尾。
     if matches!(why, CloseWhy::Idle(_)) {
         match super::unsent_draft::before_idle_close(app, run, turn).await? {
             super::unsent_draft::Recovery::Proceed => {}
@@ -351,8 +340,6 @@ async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Tur
         return Ok(false);
     }
     let reply = proven_reply(app, &bot, run, turn).await?;
-    // An idle screen is not evidence that an unconfirmed submission ran. Preserve
-    // unknown delivery so an operator can inspect the composer without resending.
     if turn.delivery == "unknown" && turn.delivery_verified == 0 {
         return fail_unconfirmed(app, run, turn).await;
     }
@@ -369,18 +356,14 @@ async fn close_locked(app: &impl StuckTurnContext, run: &db::Run, turn: &db::Tur
     let quiet = reply.is_none() && matches!(why, CloseWhy::Idle(_)) && compaction_only(app, &bot.id, turn).await?;
 
     let mut tx = app.db().begin().await?;
-    // 這裡的終點是**算出來的**（有證得出來的回覆就 `completed`，否則 `completed_fallback`），
-    // 所以要走 controller：它會先擋掉不合法的終點，而不是讓一個綁錯的字串直接寫進 DB（issue #68）。
     let claimed =
         super::turn_controller::set_status_on(&mut tx, &turn.id, "in_flight", status, "reconcile 收掉閒置太久的回合").await?;
     if claimed != super::turn_controller::Outcome::Applied {
         return Ok(false);
     }
     let message = match reply.as_deref() {
-        // 回覆已經有一份（例如 hook 寫了訊息卻沒收掉 turn）：不再寫第二份。
         Some(_) if already_answered => None,
         Some(text) => Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
-        // CLI 自己壓縮對話開出來的空回合：照常收，不寫「沒有偵測到結束」（#1758）。
         None if quiet => None,
         None => {
             let why = match why {
@@ -420,7 +403,6 @@ async fn compaction_only(app: &impl StuckTurnContext, bot_id: &str, turn: &db::T
     .bind(&turn.created_at)
     .fetch_one(app.db())
     .await
-    // 收件匣表不在（舊 DB）或查不到：照舊寫說明，寧可多一則也不吞掉真的卡住。
     .unwrap_or(false);
     Ok(compacted)
 }
@@ -455,7 +437,6 @@ async fn logged_reply(app: &impl StuckTurnContext, bot: &db::Bot, run: &db::Run,
             claude_reply_after(&log, sent)
         }
         "codex" => {
-            // #749：先問 codex 自己的 thread 歷史（正確綁定 thread／turn 的最終回覆）；沒有證據才讀 rollout。
             if let Some(reply) = app.codex_exact_reply(bot, run, sent).await {
                 return Some(reply);
             }
@@ -486,7 +467,6 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
 /// 回它的文字。之間又出現別的 user prompt（下一個回合）、或只有 tool_use（還在做）、或被中斷沒有 end_turn，都是 `None`。
 pub fn claude_reply_after(log: &str, sent: &[String]) -> Option<String> {
     let lines: Vec<&str> = log.lines().collect();
-    // herdr `agent.prompt` 送的會被 CLI 包成 `<pasted_content>`（#218）。
     let start = lines
         .iter()
         .rposition(|l| transcript_user_text(l).is_some_and(|t| sent.iter().any(|s| super::pasted_content::is_sent(&t, s))))?;
@@ -581,7 +561,6 @@ mod tests {
     /// 巡邏每輪把不再 active 的 run 帶走（呼叫端傳的是 DB 裡還活著的 run id）。
     #[test]
     fn an_ended_runs_idle_timer_is_dropped() {
-        // 用自己的表：全域那張被別的測試同時在用，清它會讓它們剛記的計時憑空消失（整樹偶發紅的來源）。
         let mut timers: HashMap<String, Instant> = HashMap::new();
         timers.insert("idle-timer-gone".into(), Instant::now());
         timers.insert("idle-timer-kept".into(), Instant::now());
@@ -595,7 +574,6 @@ mod tests {
     async fn a_bot_whose_lock_is_held_does_not_stall_the_sweep_for_other_bots() {
         let f = stuck("被握著鎖的那顆").await;
         let app = f.env.app.clone();
-        // 同一個 app 裡的第二顆：一樣卡住（照 `the_sweep_leaves_a_handed_off_projects_turn_alone` 的寫法手動建）。
         let other = tt::claude_bot(&app, &f.env.project_id, "other-stuck").await;
         let other_run = tt::fake_run(&app, &other.id).await;
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&other_run).execute(app.db()).await.unwrap();
@@ -638,7 +616,6 @@ mod tests {
             locked_bots.push(bot_id);
         }
 
-        // Insert the eligible unlocked candidate after all of the blocked predecessors.
         let (target_bot, target_run, target_turn) = stale_candidate(&app, &env.project_id, "unlocked-stuck-late").await;
         observe_at(&target_run, "idle", t0);
 
@@ -716,16 +693,12 @@ mod tests {
         .join("\n");
         assert_eq!(claude_reply_after(&done, &sent).as_deref(), Some("部署完成：pid 42894"), "最後那句，不是中途的旁白");
 
-        // 被中斷（AskUserQuestion 按掉）：只有 tool_use，沒有 end_turn。
         let interrupted = [claude_user("部署 6b84fa5"), claude_assistant("tool_use", json!([{"type": "tool_use", "name": "AskUserQuestion"}]))].join("\n");
         assert_eq!(claude_reply_after(&interrupted, &sent), None);
-        // 舊回合的 end_turn 不能冒充這一回合的。
         let only_old = [claude_user("舊的問題"), claude_assistant("end_turn", json!([{"type": "text", "text": "舊的回答"}])), claude_user("部署 6b84fa5")].join("\n");
         assert_eq!(claude_reply_after(&only_old, &sent), None);
-        // 我們的 prompt 之後已經是下一個人的 prompt：那個 end_turn 是別人的。
         let next = [claude_user("部署 6b84fa5"), claude_user("另一件事"), claude_assistant("end_turn", json!([{"type": "text", "text": "另一件事的回答"}]))].join("\n");
         assert_eq!(claude_reply_after(&next, &sent), None);
-        // transcript 裡根本沒有這個 prompt。
         assert_eq!(claude_reply_after(&done, &["沒送過".to_string()]), None);
     }
 
@@ -917,7 +890,6 @@ mod tests {
         let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
         assert_eq!(row.status, "awaiting_review", "交辦照一般回合結束流程，不留在 delivered");
 
-        // 已經收掉的不會再收一次。
         assert!(sweep_at(&app, None, t0 + 20 * MIN, 5 * MIN).await.is_empty());
     }
 
@@ -1020,7 +992,6 @@ mod tests {
         assert!(!msgs.iter().any(|m| m.0 == "assistant"), "沒有 assistant 訊息：{msgs:?}");
         assert!(msgs.iter().any(|m| m.0 == "system" && m.2.contains("送出前就卡住")), "{msgs:?}");
 
-        // 交辦照回合的實際終態走：是 failed，不是 completed_fallback（那會讓 AGM 以為工作做完了）。
         crate::supervisor::controller::reconcile(&app).await;
         let row = crate::supervisor::store::assignment(app.db(), &a).await.unwrap().unwrap();
         assert_eq!(row.turn_status.as_deref(), Some("failed"), "{:?}", row.turn_status);
@@ -1035,7 +1006,6 @@ mod tests {
         let app = f.env.app.clone();
         let t0 = Instant::now();
         observe_at(&f.run_id, "idle", t0);
-        // 這筆在「掃描那一刻」前 9 秒才送達；bot 本身已經閒置 15 分鐘。
         let sent = (chrono::Utc::now() + chrono::Duration::minutes(15) - chrono::Duration::seconds(9))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         sqlx::query("UPDATE turns SET created_at = ?, delivered_at = ? WHERE id = ?")
@@ -1048,7 +1018,6 @@ mod tests {
 
         assert!(sweep_at(&app, None, t0 + 15 * MIN, 5 * MIN).await.is_empty(), "剛送出 9 秒，不是卡住");
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
-        // 送出之後真的過了門檻（6 分鐘）才收，理由寫的是這筆送出後的時間，不是 run 閒置的 21 分鐘。
         assert_eq!(sweep_at(&app, None, t0 + 21 * MIN, 5 * MIN).await, vec![f.turn_id.clone()]);
         let why = messages(&app, &f.turn_id).await.into_iter().find(|m| m.0 == "system").expect("理由寫進對話");
         assert!(why.2.contains("閒置 6 分鐘"), "{why:?}");
@@ -1143,12 +1112,10 @@ mod tests {
             assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
         }
 
-        // 回到 idle：計時從這一刻重新算，不接著之前那 30 分鐘。
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&f.run_id).execute(app.db()).await.unwrap();
         let back = t0 + 30 * MIN;
         observe_at(&f.run_id, "idle", back);
         assert!(sweep_at(&app, None, back + 4 * MIN, 5 * MIN).await.is_empty(), "重算後才四分鐘");
-        // 中途又閃一下 working（事件進來），再回 idle。
         observe_at(&f.run_id, "working", back + 4 * MIN);
         observe_at(&f.run_id, "idle", back + 4 * MIN + Duration::from_secs(10));
         assert!(sweep_at(&app, None, back + 6 * MIN, 5 * MIN).await.is_empty(), "閃過 working，從 4 分 10 秒重算");
@@ -1204,7 +1171,6 @@ mod tests {
         observe_at(&f.run_id, "idle", t0);
         let lock = app.bot_lock(&f.bot_id).await;
         let _held = lock.lock().await;
-        // 上限只是「多久算永遠」：鎖握到測試結束，真的去排就不會回來。給得寬，高負載下查 DB 慢也不會誤判。
         let done = tokio::time::timeout(Duration::from_secs(30), sweep_at(&app, None, t0 + MIN, 5 * MIN)).await;
         assert_eq!(done.ok(), Some(vec![]), "沒到門檻就直接略過，不等鎖");
         assert!(lock.try_lock().is_err(), "前提：鎖整段都還握著，sweep 不是因為拿到鎖才回來的");
@@ -1303,14 +1269,12 @@ mod tests {
         .await
         .unwrap();
 
-        // 1. 測試 agent_status='working' 狀態下（4115c9dd7 回合開始），即使超時且無 hook 活動，sweep 也絕不收尾
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run_id).execute(app.db()).await.unwrap();
         let t0 = Instant::now();
         let closed_working = sweep_at(&app, None, t0 + 10 * MIN, 5 * MIN).await;
         assert!(closed_working.is_empty(), "working 狀態的 claude-api bot 絕不應被 stuck_turn sweep 收尾");
         assert_eq!(turn(&app, &turn_id).await.status, "in_flight");
 
-        // 2. 測試 agent_status='idle' 狀態下（舊狀態或結束後殘留），即使閒置超過 5 分鐘，sweep 也絕不收尾
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(app.db()).await.unwrap();
         observe_at(&run_id, "idle", t0);
 

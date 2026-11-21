@@ -12,7 +12,6 @@ pub fn summary(server: Option<(&str, u32)>, cli: Option<&str>) -> Value {
     json!({
         "server_version": server_version,
         "protocol": protocol,
-        // protocol 不在實測過的清單（herdr.rs `SUPPORTED_PROTOCOLS`）：daemon 的 RPC 形狀沒驗過。
         "protocol_supported": protocol.map(crate::herdr::protocol_supported),
         "cli_version": cli_version,
         "mismatch": mismatch,

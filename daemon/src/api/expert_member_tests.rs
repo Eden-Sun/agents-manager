@@ -102,7 +102,6 @@ async fn patch_project_sets_validates_and_clears_the_deputy() {
     assert_eq!(col().await.unwrap(), (Some(advisor.clone()), Some(180)), "預設 180 秒");
     patch(RequestPrincipal::User, json!({"deputy": {"bot_id": advisor, "after_sec": 60}})).await.unwrap();
     assert_eq!(col().await.unwrap().1, Some(60));
-    // 副管理者不能增聘（hire 只認管理者）。
     let hire = hire_member(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::Bot(advisor.clone())),
         Json(HireMember { name: "worker-x".into(), kind: Some("claude".into()), model: None, effort: None, identity: None, role: None, track: None, fork_from: None })).await;
     assert!(matches!(hire, Err(LcError::Forbidden(ref v)) if v["reason"] == "manager_role_scope"), "{hire:?}");
@@ -131,7 +130,6 @@ async fn expert_manager_hires_with_user_selected_settings_and_ignores_retired_po
     let bot = db::bot(&env.app.db, &id).await.unwrap().unwrap();
     assert_eq!((bot.role.as_deref(), bot.kind.as_str(), bot.model.as_deref(), bot.effort.as_deref()), (Some("executor"), "codex", Some("gpt-6.1-sol"), Some("high")));
 
-    // The retired project key is accepted as an unknown field and has no effect.
     let ignored: PatchProject = serde_json::from_value(json!({"executor_pool": "not a pool"})).unwrap();
     patch_project(State(env.app.clone()), Path(env.project_id.clone()), Extension(RequestPrincipal::User), Json(ignored)).await.unwrap();
     let state = state_json(&env.app.clone()).await.unwrap();

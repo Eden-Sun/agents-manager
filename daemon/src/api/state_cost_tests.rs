@@ -16,7 +16,6 @@ async fn state_snapshot_and_ws_fanout_stay_cheap_on_a_production_sized_db() {
     let dir = std::path::PathBuf::from(dir);
     let app = app_over(&dir).await.expect("open the db copy");
     let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE deleted_at IS NULL").fetch_one(&app.db).await.unwrap();
-    // 暖機一次，再量 30 次。
     let _ = state_json(&app).await.unwrap();
     let mut build = Vec::new();
     let mut ser = Vec::new();
@@ -32,7 +31,6 @@ async fn state_snapshot_and_ws_fanout_stay_cheap_on_a_production_sized_db() {
     }
     build.sort();
     ser.sort();
-    // 哪一段貴：逐段量（同一份 DB、暖機後各 20 次取中位數）。
     async fn med<F: std::future::Future>(label: &str, mut f: impl FnMut() -> F) {
         let mut v = Vec::new();
         for _ in 0..20 {
@@ -58,7 +56,6 @@ async fn state_snapshot_and_ws_fanout_stay_cheap_on_a_production_sized_db() {
     med("cfg identities", || async { app.cfg.get().await.identities }).await;
     eprintln!("STATE bots={bots} size={size}B build p50={:?} max={:?} | serialize p50={:?} max={:?}", build[15], build[29], ser[15], ser[29]);
 
-    // WebSocket 扇出：每個事件進環一份、`bus.send` 一份，每條連線 recv 時再 clone、再各自序列化一次。
     let payload = |n: usize| json!({"bot_id": "01M1", "turn_id": "01M2", "text": "x".repeat(n), "items": (0..20).map(|i| json!({"i": i, "k": "v"})).collect::<Vec<_>>()});
     for (label, n) in [("small(0.5KB)", 500usize), ("big(50KB)", 50_000)] {
         for clients in [0usize, 5] {
@@ -90,7 +87,6 @@ async fn state_snapshot_and_ws_fanout_stay_cheap_on_a_production_sized_db() {
             }
         }
     }
-    // 20 ms 是目標；這個機器常常負載 40+，量測用的上限放寬到 50 ms，只擋「又變成逐顆查」這種數量級的退步。
     assert!(build[15] < std::time::Duration::from_millis(50), "state_json p50 {:?}", build[15]);
     assert!(size < 1_000_000, "state size {size}");
 }

@@ -17,7 +17,6 @@
         let host = sh.host.clone();
         let tag = crate::shared_host::probe_tag(&app, &host).await.unwrap();
         assert_eq!(super::probe_label(&app, &host, Some("cc1")).await, format!("am-quota-claude-cc1@{tag}"));
-        // 兩顆是我們開的（登記過、沒確認關掉）；其餘（別顆 daemon 的、同名卻不是我們開的、使用者的）沒登記。
         let mut ours = Vec::new();
         for l in [format!("am-quota-claude@{tag}"), format!("am-quota-claude-cc1@{tag}")] {
             let (ws, _) = sh.client.workspace_create("/tmp", &l, json!({})).await.unwrap();

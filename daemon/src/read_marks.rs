@@ -22,7 +22,6 @@ use crate::state::App;
 /// 檢查、建表、補標記與修正舊標記在同一個交易裡：以前建表成功但 seed 失敗時，下次啟動看到表已存在就永遠不補，
 /// 升級前的訊息全部變未讀。
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    // 先看表在不在再建：deferred 的話讀完之後別的 writer 一 commit，CREATE 就 517，daemon 起不來（#831）。
     let mut tx = crate::db::begin_write(pool).await?;
     let existed: Option<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_reads'")
         .fetch_optional(&mut *tx)
@@ -43,10 +42,8 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     } else {
-        // 修正正規化之前寫進去的標記（帶時區位移、不同精度或未來時間），否則字串比較會一直算錯。
         let rows: Vec<(String, String)> = sqlx::query_as("SELECT bot_id, read_at FROM bot_reads").fetch_all(&mut *tx).await?;
         for (bot_id, at) in rows {
-            // 不是 RFC 3339 的值保留原樣：API 從不寫入這種值，猜成 now 會把未讀默默清光，猜成最早又會全部冒成未讀。
             let Some(fixed) = normalize_at(&at, &now) else {
                 tracing::warn!(bot_id, read_at = at, "bot_reads.read_at is not RFC 3339; left unchanged");
                 continue;
@@ -274,9 +271,7 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
     let (m, advanced) = mark(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let unread = unread_count_for(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let out = json!({"bot_id": id, "read_mark": json_value(&m), "unread": unread});
-    // 任一端讀了：已送出的訊息推播若已讀就在各裝置關掉（不看 advanced：重複的讀取也算「有人在看」）。
     crate::webpush::on_bot_read(&app, &id);
-    // 標記沒前進（重複送、或較舊的標記被擋下）：其他分頁什麼都沒變，不廣播（#899）。
     if advanced {
         app.emit("bot_read", out.clone()).await;
     }
@@ -333,7 +328,6 @@ mod tests {
                 .bind(tid).bind(at).bind(at).execute(pool).await.unwrap();
             sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c',?,'user','q','web',?)")
                 .bind(format!("u-{tid}")).bind(tid).bind(at).execute(pool).await.unwrap();
-            // 同一回合兩則 assistant：算一個回合。
             for k in 0..2 {
                 sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c',?,'assistant','a','hook',?)")
                     .bind(format!("a{k}-{tid}")).bind(tid).bind(at).execute(pool).await.unwrap();
@@ -345,8 +339,6 @@ mod tests {
     #[tokio::test]
     async fn the_unread_queries_seek_messages_by_conversation_and_time_instead_of_scanning_them() {
         let (pool, _dir) = pool().await;
-        // 每顆 bot 的未讀只看 assistant 訊息，而且只要 turn_id／id／created_at：用只含 assistant 列的 covering 索引，
-        // 不必為了讀 `role` 去撈每一列（量測：1.7 萬則訊息的正式 DB 複本上 11 ms → 1 ms，結果逐位元相同）。
         for (name, sql, index) in [
             ("unread", UNREAD_SQL, "COVERING INDEX messages_assistant_unread"),
             ("unread_one", UNREAD_ONE_SQL, "COVERING INDEX messages_assistant_unread"),
@@ -386,7 +378,6 @@ mod tests {
         let (pool, dir) = pool().await;
         seed(&pool).await;
         sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
-        // t4：純 relay（daemon 通知）；t5：relay 回合裡使用者補話。
         for (tid, at) in [("t4", "2026-09-15T04:00:00.000Z"), ("t5", "2026-09-15T05:00:00.000Z")] {
             sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES (?,'c','web','completed',?,?)")
                 .bind(tid).bind(at).bind(at).execute(&pool).await.unwrap();
@@ -398,15 +389,12 @@ mod tests {
         sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('s-t5','c','t5','user','補話','web','2026-09-15T05:00:00.000Z')")
             .execute(&pool).await.unwrap();
 
-        // 非專家專案（預設 parent_child）：relay 回合照算，共 5。
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&5));
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 5);
 
         sqlx::query("UPDATE projects SET mode='expert' WHERE id='p'").execute(&pool).await.unwrap();
-        // 專家專案：t1～t3 使用者回合 + t5（有補話）＝4；t4 純 relay 不算。
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&4));
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 4);
-        // 管理者回覆 daemon 通知是在向使用者回報：照算。
         sqlx::query("UPDATE bots SET role='manager' WHERE id='b'").execute(&pool).await.unwrap();
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&5));
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), 5);
@@ -467,7 +455,6 @@ mod tests {
             .bind(&later).execute(&pool).await.unwrap();
         assert_eq!(unread(&pool).await, Some(1), "未來標記不能永久蓋掉之後的訊息");
 
-        // 修正前已經寫進 DB 的未來值／時區位移標記，啟動 migrate 時修掉。
         sqlx::query("UPDATE bot_reads SET read_at='2099-01-01T00:00:00+08:00'").execute(&pool).await.unwrap();
         migrate(&pool).await.unwrap();
         let at: String = sqlx::query_scalar("SELECT read_at FROM bot_reads WHERE bot_id='b'").fetch_one(&pool).await.unwrap();
@@ -490,7 +477,6 @@ mod tests {
         let (pool, dir) = pool().await;
         seed(&pool).await;
         sqlx::query("DROP TABLE bot_reads").execute(&pool).await.unwrap();
-        // 故障注入：seed 讀的 bots 暫時不存在，建表那步已成功後才失敗。
         sqlx::query("ALTER TABLE bots RENAME TO bots_moved").execute(&pool).await.unwrap();
         assert!(migrate(&pool).await.is_err());
         let table: Option<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_reads'")
@@ -503,8 +489,6 @@ mod tests {
         assert_eq!(unread(&pool).await, None, "下次啟動重新建表並補標記，舊訊息算已讀");
         std::fs::remove_dir_all(dir).ok();
     }
-
-    // ───────── bot 已讀標記端點的審查（#756 之後） ─────────
 
     async fn app_with_bot() -> (crate::testing::Env, String) {
         let e = crate::testing::env().await;
@@ -525,7 +509,6 @@ mod tests {
         }
         let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_reads").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(stored, 0, "被拒的請求什麼都不存");
-        // 真實訊息 id 與空字串（只推時間）照收。
         let conv = crate::db::conversation_id(&e.app.db, &bot).await.unwrap();
         let valid_id = crate::db::ulid();
         let at = crate::db::now();
@@ -633,8 +616,6 @@ mod tests {
         assert_eq!(unread, 0, "a later inserted message is a later read mark even when its id sorts first");
     }
 
-    // ---- #899：標記沒前進就不廣播；POST 只算那一顆 bot 的未讀 ----
-
     fn rfc(ago_min: i64) -> String {
         (chrono::Utc::now() - chrono::Duration::minutes(ago_min)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     }
@@ -704,7 +685,6 @@ mod tests {
         }
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), before);
         assert_eq!(unread_counts(&pool).await.unwrap().get("b").copied().unwrap_or(0), before);
-        // 使用者在那一回合補了話（supplement）：網頁不收合，這回合照算未讀。
         sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('u-cd','c','cd','user','順便看一下','web','2026-09-15T06:00:00.000Z')")
             .execute(&pool).await.unwrap();
         assert_eq!(unread_count_for(&pool, "b").await.unwrap(), before + 1);
@@ -721,7 +701,6 @@ mod tests {
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t',?)").bind(now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2',?)").bind(now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-b2',  'c2',NULL,'assistant','a','hook','2026-09-15T05:00:00.000Z')").execute(&pool).await.unwrap();
-        // 保溫回合的回覆不算未讀（兩個版本都要排除）。
         sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,client_request_id,created_at,completed_at) VALUES ('kw','c','web','completed','keep-warm:x','2026-09-15T04:00:00.000Z','2026-09-15T04:00:00.000Z')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-kw','c','kw','assistant','a','hook','2026-09-15T04:00:00.000Z')").execute(&pool).await.unwrap();
 

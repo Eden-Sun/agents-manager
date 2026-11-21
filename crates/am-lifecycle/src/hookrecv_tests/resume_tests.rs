@@ -41,7 +41,6 @@ async fn a_hook_from_another_provider_cannot_claim_this_bots_session() {
     let (native, outcome): (Option<String>, Option<String>) =
         sqlx::query_as("SELECT native_session_id, resume_outcome FROM runs WHERE id=?").bind(&run.id).fetch_one(&e.app.db).await.unwrap();
     assert_eq!((native, outcome), (None, None));
-    // 同一顆的 claude hook 照常。
     assert!(provider_matches_kind("claude", "claude") && provider_matches_kind("Claude", "claude") && provider_matches_kind("codex", ""));
     assert!(!provider_matches_kind("codex", "claude") && !provider_matches_kind("grok", "codex"));
 }

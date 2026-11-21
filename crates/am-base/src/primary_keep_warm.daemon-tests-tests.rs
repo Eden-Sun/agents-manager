@@ -60,12 +60,10 @@
         assert_eq!(at(Some(30.0)), Step::Wait, "剛好 30% 不壓（要超過）");
         assert_eq!(at(Some(12.5)), Step::Wait, "≤ 30% 不壓縮");
         assert_eq!(at(None), Step::Wait, "拿不到 context 保守不壓縮");
-        // 不壓縮之後也不保溫：110 分以後一律等，直到真的活動重新計時。
         for min in [110, 115, 120, 200] {
             assert_eq!(decide(m(min), m(min - 58), ttl, true, false, Some(10.0), 30.0), Step::Wait, "{min} 分");
             assert_eq!(decide(m(min), m(min - 58), ttl, false, false, Some(10.0), 30.0), Step::Wait, "沒保溫過也不補保溫：{min} 分");
         }
-        // 58 分的保溫不看 context。
         assert_eq!(decide(m(58), m(58), ttl, false, false, Some(5.0), 30.0), Step::KeepWarm);
         assert_eq!(decide(m(58), m(58), ttl, false, false, None, 30.0), Step::KeepWarm);
     }
@@ -100,7 +98,6 @@
         assert!(!eligible("codex", true, "running", "idle", false, false), "codex 的 cache 不會涼掉，不保溫");
         assert!(!eligible("grok", true, "running", "idle", false, false));
         assert!(!eligible("agy", true, "running", "idle", false, false));
-        // agy 有 12 分 TTL（網頁倒數用），但不保溫、不熱壓：ttl 有值不代表被納入（使用者 2026-11-20）。
         assert!(cache_clock::ttl_secs("agy").is_some(), "agy 有倒數");
         assert_eq!(warm_compact_min_context_pct("agy"), None, "agy 沒有熱壓門檻");
         assert!(!eligible("claude", false, "running", "idle", false, false), "不是主力");
@@ -123,7 +120,6 @@
         assert!(window_open(run));
         assert!(!cache_clock::on_statusline(run, Some(a), Some(b), "2026-10-04T11:00:00.000Z"), "保溫造成的指紋變化不算活動");
         assert_eq!(cache_clock::statusline_at(run), None);
-        // 太早（不到 WINDOW_MIN）不會被巡邏關掉；寬限過了才關。
         settle_window(run, true);
         assert!(window_open(run));
         age_window_opened_for_test(run, WINDOW_MIN);
@@ -138,7 +134,6 @@
         age_window_closed_for_test(run, WINDOW_GRACE + WINDOW_ECHO);
         assert!(!echo_open(run));
         assert!(cache_clock::on_statusline(run, Some(b), Some(c), "2026-10-04T12:00:00.000Z"), "視窗與回音期都過了，真的活動照算");
-        // 視窗有最長期限，到期同樣即時接回音期。
         open_window(run);
         age_window_opened_for_test(run, WINDOW_MAX);
         assert!(!window_open(run) && echo_open(run));
@@ -156,14 +151,12 @@
         let second = Duration::from_secs(1);
         open_window(run);
         age_window_opened_for_test(run, WINDOW_MIN);
-        settle_window(run, true); // 巡邏看到收尾：只記 closed
-        // 寬限到期前一秒：視窗還開、沒有回音期；到期那一刻：視窗關、回音期立刻接上（中間沒有空窗，也沒有再呼叫 settle_window）。
+        settle_window(run, true);
         age_window_closed_for_test(run, WINDOW_GRACE - second);
         assert!(window_open(run) && !echo_open(run));
         age_window_closed_for_test(run, WINDOW_GRACE);
         assert!(!window_open(run) && echo_open(run), "寬限一到回音期接上");
         assert!(!cache_clock::on_statusline(run, Some(a), Some(b), "2026-10-04T11:00:20.000Z"), "空窗期的指紋變化不算活動");
-        // 收尾 5 分鐘後（Instant 真的推進）仍在回音期；15 分鐘（加寬限）後結束。
         age_window_closed_for_test(run, WINDOW_GRACE + Duration::from_secs(5 * 60));
         assert!(!window_open(run) && echo_open(run));
         assert!(!cache_clock::on_statusline(run, Some(a), Some(b), "2026-10-04T11:05:00.000Z"));
@@ -176,15 +169,12 @@
         settle_window(run, true);
         assert!(!window_open(run) && !echo_open(run), "過期的記錄由巡邏丟掉");
 
-        // 沒有巡邏介入：最長期限到期同樣即時接上。
         open_window(run);
         age_window_opened_for_test(run, WINDOW_MAX);
         assert!(!window_open(run) && echo_open(run));
         assert!(!cache_clock::on_statusline(run, Some(c), Some(a), "2026-10-04T13:00:00.000Z"));
-        // 回音期內再開新一輪保溫：回音期作廢、視窗接手。
         open_window(run);
         assert!(!echo_open(run) && window_open(run));
-        // 保溫沒送出去（撤回視窗）不留回音期。
         drop_window(run);
         assert!(!echo_open(run) && !window_open(run));
     }
@@ -197,7 +187,6 @@
         open_window(run);
         cache_clock::annotate(&mut json, "claude", Some(&t));
         assert_eq!(json["last_api_at"], "2026-10-04T10:00:00.000Z", "保溫回合在跑：年齡照真實的算");
-        // 真的有使用者回合在飛（last_turn 是 in_flight）就是熱的。
         let live = cache_clock::LastTurn { status: "in_flight".into(), completed_at: None, kept_warm_at: None, ..Default::default() };
         let mut json = serde_json::json!({"id": run, "agent_status": "working"});
         cache_clock::annotate(&mut json, "claude", Some(&live));
@@ -212,7 +201,7 @@
         let (bot, run) = primary(&env, "rearm-a", "working").await;
         turn(&env, &bot, "kw-in-flight", Some("keep-warm:x"), "in_flight", &db::now(), None).await;
         sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-in-flight'").bind(&run.id).execute(&env.app.db).await.unwrap();
-        drop_window(&run.id); // 重啟後記憶體是空的
+        drop_window(&run.id);
         assert!(!window_open(&run.id));
         assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 1, "在飛的保溫要重開視窗");
         assert!(window_open(&run.id));
@@ -246,13 +235,12 @@
         let (bot, run) = primary(&env, "rearm-echo", "idle").await;
         turn(&env, &bot, "kw-echo", Some("keep-warm:z"), "completed", &at(8, now), Some(&at(5, now))).await;
         sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-echo'").bind(&run.id).execute(&env.app.db).await.unwrap();
-        drop_window(&run.id); // 重啟後記憶體是空的
+        drop_window(&run.id);
         assert!(!echo_open(&run.id));
         assert_eq!(rearm_windows(&env.app.db).await.unwrap(), 0, "視窗已過，只補回音期");
         assert!(echo_open(&run.id) && !window_open(&run.id));
         assert!(!cache_clock::on_statusline(&run.id, Some(a), Some(b), &db::now()), "重啟後保溫回音一樣不算活動");
 
-        // 熱壓之後 11 分鐘重啟：既有熱壓抑制只有 10 分，保護要接得上（收據時間是送出時間，壓縮還可能在跑）。
         let (cbot, crun) = primary(&env, "rearm-echo-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &cbot.id, "anchor-1", &crun.id, 111).await.unwrap());
         settle_warm_compact(&env.app.db, &cbot.id, "anchor-1").await.unwrap();
@@ -268,8 +256,6 @@
         assert!(window_open(&crun.id) && !echo_open(&crun.id), "熱壓後 11 分鐘重啟：壓縮可能還在跑，視窗仍開著");
         assert!(!cache_clock::on_statusline(&crun.id, Some(a), Some(b), &db::now()));
 
-        // 送出與完成相隔數分鐘：壓縮 4 分鐘、送出後第 16 分重啟——收據時間是送出時間，完成時間不知道，
-        // 保守算「送出＋視窗上限＋回音期」，第 16 分仍在保護內（只用收據時間＋寬限＋回音期會漏掉）。
         let (sbot, srun) = primary(&env, "rearm-echo-slow-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &sbot.id, "anchor-3", &srun.id, 111).await.unwrap());
         settle_warm_compact(&env.app.db, &sbot.id, "anchor-3").await.unwrap();
@@ -284,14 +270,12 @@
         rearm_windows(&env.app.db).await.unwrap();
         assert!(echo_open(&srun.id) && !window_open(&srun.id), "第 16 分：視窗上限（15 分）已過，進回音期");
         assert!(!cache_clock::on_statusline(&srun.id, Some(a), Some(b), &db::now()));
-        // 壓縮還沒過 15 分上限（送出後 6 分）：視窗仍開著，working／指紋都不算活動。
         let (wbot, wrun) = primary(&env, "rearm-window-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &wbot.id, "anchor-4", &wrun.id, 111).await.unwrap());
         sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(6, now)).bind(&wbot.id).execute(&env.app.db).await.unwrap();
         drop_window(&wrun.id);
         rearm_windows(&env.app.db).await.unwrap();
         assert!(window_open(&wrun.id) && !echo_open(&wrun.id));
-        // 超過視窗上限＋回音期（送出後 31 分）：不補。
         let (xbot, xrun) = primary(&env, "rearm-echo-too-old-compact", "idle").await;
         assert!(claim_warm_compact(&env.app.db, &xbot.id, "anchor-5", &xrun.id, 111).await.unwrap());
         sqlx::query("UPDATE primary_cache_actions SET claimed_at = ? WHERE bot_id = ?").bind(at(31, now)).bind(&xbot.id).execute(&env.app.db).await.unwrap();
@@ -302,7 +286,6 @@
             drop_window(id);
         }
 
-        // 收尾超過寬限＋回音期：不補，真的活動不能被吞。
         let (obot, orun) = primary(&env, "rearm-echo-old", "idle").await;
         turn(&env, &obot, "kw-echo-old", Some("keep-warm:w"), "completed", &at(40, now), Some(&at(30, now))).await;
         sqlx::query("UPDATE turns SET run_id = ? WHERE id = 'kw-echo-old'").bind(&orun.id).execute(&env.app.db).await.unwrap();
@@ -331,7 +314,6 @@
         open_window(&run.id);
         age_window_opened_for_test(&run.id, WINDOW_MIN);
         settle_window(&run.id, true);
-        // 收尾後 5 分鐘（Instant 也真的推進，不靠巡邏再 settle）：背景 API 呼叫讓指紋變化。
         age_window_closed_for_test(&run.id, WINDOW_GRACE + Duration::from_secs(5 * 60));
         assert!(!window_open(&run.id) && echo_open(&run.id));
         let a = r#"{"cost":{"total_api_duration_ms":100},"context_window":{"total_output_tokens":5}}"#;
@@ -343,7 +325,6 @@
             let after = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
             assert_eq!((after.step, after.anchor.as_str()), (Step::Wait, at(59, now).as_str()), "{min} 分：錨點不前移、不再保溫");
         }
-        // 真的活動（使用者回合）照樣更新錨點。
         let fresh = now + chrono::Duration::minutes(20);
         turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
         let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(58)).await.unwrap().unwrap();
@@ -365,10 +346,8 @@
             open_window(&run.id);
             age_window_opened_for_test(&run.id, WINDOW_MIN);
             settle_window(&run.id, true);
-            // 保溫收尾後 4 分鐘：視窗已關、回音期正在跑（Instant 真的推進）。
             age_window_closed_for_test(&run.id, WINDOW_GRACE + Duration::from_secs(4 * 60));
             assert!(!window_open(&run.id) && echo_open(&run.id), "{origin}：在回音期內");
-            // 回音期內（保溫收尾後 4 分鐘）使用者的真回合；statusLine 照樣在動，但錨點看的是回合。
             let real_at = now + chrono::Duration::minutes(4);
             turn(&env, &bot, "t-user", None, "completed", &db::iso_at(real_at), Some(&db::iso_at(real_at))).await;
             sqlx::query("UPDATE turns SET origin = ? WHERE id = 't-user'").bind(origin).execute(&env.app.db).await.unwrap();
@@ -440,16 +419,13 @@
         let now = chrono::Utc::now();
         let (bot, run) = primary(&env, "kw-plan", "idle").await;
 
-        // 沒有任何活動紀錄：不編時間。
         assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap(), None);
 
-        // 59 分鐘前的真回合 → cache 還熱，該保溫。
         turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
         let p = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
         assert_eq!((p.step, p.anchor.as_str()), (Step::KeepWarm, at(59, now).as_str()));
         assert_eq!(keep_warm_crid(&p.anchor), format!("keep-warm:{}", at(59, now)));
 
-        // 保溫回合剛跑完：年齡仍從真回合算（不被重置），而且不再續。
         let kept_at = db::iso_at(now);
         turn(&env, &bot, "t-keep", Some(&keep_warm_crid(&p.anchor)), "completed", &kept_at, Some(&kept_at)).await;
         let after = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
@@ -458,7 +434,6 @@
         assert_eq!(last.completed_at.as_deref(), Some(at(59, now).as_str()));
         assert_eq!(last.kept_warm_at.as_deref(), Some(kept_at.as_str()), "顏色用的「保溫時間」來自保溫回合");
 
-        // 同一錨點到 110 分鐘：context 用量 > 30% 才壓縮（拿不到、≤ 30% 都不壓）；記號一寫就不再壓縮。
         let later = now + chrono::Duration::minutes(52);
         let p = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
         assert_eq!((p.step, p.age_secs / 60), (Step::Wait, 111), "run 還沒有 context 用量：保守不壓縮");
@@ -479,7 +454,6 @@
         crate::lifecycle::insert_message(&env.app, &conv, None, "system", &note, "system", false, None).await.unwrap();
         let p = plan(&env.app, &bot, &run, later + chrono::Duration::seconds(5)).await.unwrap().unwrap();
         assert_eq!(p.step, Step::Wait, "壓縮記號比錨點晚，同一錨點不再壓縮");
-        // 熱壓後視為涼掉：不再保溫、也不再壓縮（錨點沒變、年齡繼續往上），而且熱壓不算讓 cache 變熱、熱壓前的保溫也不算。
         for min in [10, 30, 60, 300] {
             let t = later + chrono::Duration::minutes(min);
             assert_eq!(plan(&env.app, &bot, &run, t).await.unwrap().map(|p| p.step), Some(Step::Wait), "熱壓後 {min} 分");
@@ -491,7 +465,6 @@
         assert!(json["cache_kept_warm_at"].is_null());
         assert_eq!(json["last_api_at"], at(59, now), "真實年齡照舊；web 以 max(last_api_at, cache_kept_warm_at) 起算＝已超過 TTL＝涼");
 
-        // 真的新活動（使用者回合）→ 錨點更新、計數重來：58 分後重新保溫，新的保溫時間又算讓 cache 變熱。
         let fresh = later + chrono::Duration::minutes(20);
         turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
         assert_eq!(plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(1)).await.unwrap(), None);
@@ -553,10 +526,8 @@
         assert!(idle(plan(&env.app, &bot, &run, now).await.unwrap()), "跳過這一輪：不保溫");
         let later = now + chrono::Duration::minutes(55);
         assert!(idle(plan(&env.app, &bot, &run, later).await.unwrap()), "cache 已過期、context 不明：也不壓縮");
-        // 沒有活動：巡邏不會把它清掉。
         settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some());
-        // 保溫自己的回合（視窗開著）不算活動。
         open_window(&run.id);
         let fresh = now + chrono::Duration::minutes(1);
         turn(&env, &bot, "t-kw-self", Some(&keep_warm_crid("x")), "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
@@ -564,7 +535,6 @@
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some());
         drop_window(&run.id);
 
-        // 真的活動：使用者回合在按下之後完成 → 巡邏恢復。
         turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
         settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_none(), "活動後自動恢復");
@@ -594,7 +564,6 @@
         assert_eq!(decide_frozen(55 * 60, 3600, false, Some(20.0), 30.0), Step::Wait, "context 不夠大：讓它涼");
         assert_eq!(decide_frozen(4 * 60, 5 * 60, false, Some(90.0), 30.0), Step::Wait, "TTL 太短不壓");
 
-        // 壓完：壓縮的回音（收據之後 10 分鐘內的錨點）不是使用者回來，「不用保溫」留著。
         let anchor = plan(&env.app, &bot, &run, at_min(-5)).await.unwrap().unwrap().anchor;
         assert!(claim_warm_compact(&env.app.db, &bot.id, &anchor, &run.id, 55).await.unwrap());
         settle_warm_compact(&env.app.db, &bot.id, &anchor).await.unwrap();
@@ -628,7 +597,6 @@
         drop_window(&run.id);
         let reopened = crate::app_ports_p1::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
         assert!(skip_since(&reopened, &bot.id).await.unwrap().is_some(), "重開 DB 後還在");
-        // 冰凍：不保溫，錨點 59 分（已過 58 分保溫視窗、cache 還沒到 60 分的壓縮窗）→ 這一輪只回 Wait，沒有任何動作。
         assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap().map(|p| p.step), Some(Step::Wait), "重啟後仍然不保溫");
         let last = cache_clock::last_turn_for_bot(&reopened, &bot.id).await.unwrap().unwrap();
         assert!(last.keep_warm_skip, "run JSON 的 keep_warm_skip 也從 DB 來");
@@ -667,11 +635,9 @@
         sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id='t-kw'").bind(at(0, now)).execute(&env.app.db).await.unwrap();
         let last = cache_clock::last_turn_for_bot(&env.app.db.clone(), &bot.id).await.unwrap().unwrap();
         assert_eq!(last.keep_warm_replied_at.as_deref(), Some(at(0, now).as_str()));
-        // 帶進 run JSON。
         let mut json = serde_json::json!({"id": "r-kw-replied", "agent_status": "idle"});
         cache_clock::annotate(&mut json, "claude", Some(&last));
         assert_eq!(json["keep_warm_replied_at"], at(0, now));
-        // 使用者送出新的 prompt → 清成 null。
         let fresh = db::iso_at(now + chrono::Duration::seconds(30));
         turn(&env, &bot, "t-user2", None, "in_flight", &fresh, None).await;
         let last = cache_clock::last_turn_for_bot(&env.app.db, &bot.id).await.unwrap().unwrap();
@@ -688,7 +654,6 @@
         let now = chrono::Utc::now();
         let (bot, run) = primary(&env, "kw-legacy", "idle").await;
         turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
-        // 舊前綴的保溫已經送過 → 同錨點不再保溫，kept_warm_at 與保溫回覆也照算。
         turn(&env, &bot, "t-old", Some("keepalive:old-anchor"), "completed", &at(1, now), Some(&at(0, now))).await;
         let after = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
         assert_eq!(after.step, Step::Wait, "舊前綴的保溫回合也算「這個錨點之後保溫過了」");
@@ -696,7 +661,6 @@
         assert_eq!((last.completed_at.as_deref(), last.kept_warm_at.as_deref()), (Some(at(59, now).as_str()), Some(at(0, now).as_str())));
         assert_eq!(last.keep_warm_replied_at.as_deref(), Some(at(0, now).as_str()));
 
-        // 訊息標記與未讀：新舊前綴的訊息都標 keep_warm、都不算未讀；一般回合的 assistant 才算。
         turn(&env, &bot, "t-new", Some("keep-warm:new-anchor"), "completed", &at(2, now), Some(&at(2, now))).await;
         turn(&env, &bot, "t-chat", None, "completed", &at(3, now), Some(&at(3, now))).await;
         let mut ids = vec![];
@@ -709,14 +673,11 @@
         }
         let unread = crate::read_marks::unread_counts(&env.app.db).await.unwrap();
         assert_eq!(unread.get(&bot.id), Some(&1), "只有一般回合的回覆算未讀");
-        // 新增的 migrate 會把舊列補上標記。
         sqlx::query("UPDATE messages SET keep_warm = 0").execute(&env.app.db).await.unwrap();
         let reopened = crate::app_ports_p1::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE keep_warm = 1").fetch_one(&reopened).await.unwrap();
         assert_eq!(n, 4, "舊資料回填");
     }
-
-    // ---- #872／#864：act 帶計畫的 run id、熱壓以 durable 收據去重 ----
 
     use am_core::{BotId, NoticeRequest, PortError, RunId, TurnError, TurnId};
     use std::collections::VecDeque;
@@ -967,7 +928,6 @@
         let now = chrono::Utc::now();
         let (bot, run) = warm_compact_due(&env, "kw-seed-exist", now).await;
         let anchor = at(115, now);
-        // 種下收據：done, note_written=0
         sqlx::query(
             "INSERT INTO primary_cache_actions (bot_id, anchor, kind, run_id, status, age_min, claimed_at, done_at, note_written)
              VALUES (?, ?, 'warm_compact', ?, 'done', 110, ?, ?, 0)",
@@ -980,7 +940,6 @@
         .execute(&env.app.db)
         .await
         .unwrap();
-        // 種下已寫入的 system message
         let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
         let note_content = warm_compact_note(110);
         let msg_id = db::ulid();
@@ -1014,13 +973,11 @@
         let turns = FakeTurns::default();
         let notes = FakeNotes::default();
 
-        // 第一次 sweep：compact 成功，寫入 note 成功
         sweep(&env, &turns, &notes, now).await;
         assert_eq!(turns.compacts.lock().unwrap().len(), 1);
         assert_eq!(notes.notes.lock().unwrap().len(), 1);
         assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 1)));
 
-        // 人為模擬收據 UPDATE 失敗：將 note_written 重設為 0
         sqlx::query("UPDATE primary_cache_actions SET note_written = 0 WHERE bot_id = ?")
             .bind(&bot.id)
             .execute(&env.app.db)
@@ -1028,7 +985,6 @@
             .unwrap();
         assert_eq!(receipt(&env, &bot.id).await, Some(("done".to_string(), 0)));
 
-        // 下一次 sweep：recovery 應 reconcile，不重複寫入 note，並將 note_written 設回 1
         drop_window(&run.id);
         sweep(&env, &turns, &notes, now).await;
         assert_eq!(notes.notes.lock().unwrap().len(), 1, "仍只有一則 note");
@@ -1063,7 +1019,6 @@
         let now = chrono::Utc::now();
         let (bot, run) = warm_compact_due(&env, "kw-concurrent-sweep", now).await;
         let anchor = at(115, now);
-        // 種下收據：done, note_written=0
         sqlx::query(
             "INSERT INTO primary_cache_actions (bot_id, anchor, kind, run_id, status, age_min, claimed_at, done_at, note_written)
              VALUES (?, ?, 'warm_compact', ?, 'done', 110, ?, ?, 0)",

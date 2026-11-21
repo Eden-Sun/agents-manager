@@ -109,8 +109,6 @@
         make_parent_busy(&f, "parent-waiting-result").await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 0);
-        // Even if a different child_done batch advanced the watermark, this open request
-        // must keep the idle-stop gate closed until its result notice is delivered.
         let idle_at = db::now();
         sqlx::query("UPDATE child_done_state SET active=0,idle_at=?,notified_at=?,covered_rowid=(SELECT rowid FROM turns WHERE id=?) WHERE child_id=?")
             .bind(&idle_at).bind(&idle_at).bind(&f.child_turn).bind(&f.child_id).execute(&f.env.app.db).await.unwrap();
@@ -349,7 +347,6 @@
         let f = fixture("terminal_fallback", "completed_fallback").await;
         make_parent_busy(&f, "parent-working-noreply").await;
         sqlx::query("DELETE FROM messages WHERE turn_id = ?").bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
-        // No reply is needed to establish that the settled child is idle.
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(notice_count(&f).await, 1);
         sqlx::query("UPDATE turns SET completed_at = ? WHERE id = ?").bind(db::iso_in(-300)).bind(&f.child_turn).execute(&f.env.app.db).await.unwrap();
@@ -415,7 +412,6 @@
         let p2 = crate::testing::claude_bot(&app, &f.env.project_id, "parent-2").await;
         let p2_run = crate::testing::fake_run(&app, &p2.id).await;
         let p2_conversation = db::conversation_id(&app.db, &p2.id).await.unwrap();
-        // 兩位 parent 都在忙：通知走佇列（同其他測試），不去碰真的 herdr 送出。
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind("p2-busy-sweep")
             .bind(&p2_conversation)
@@ -471,7 +467,6 @@
     #[tokio::test]
     async fn the_sweep_does_not_backfill_old_completed_turns() {
         let f = fixture("hook", "completed").await;
-        // parent 在線時完成的（它的 run 早在 child 完成之前就開著）：即時事件一定觸發過，兩小時前的不補（#871 仍維持一小時）。
         sqlx::query("UPDATE runs SET started_at=? WHERE id=?")
             .bind(db::iso_in(-3 * 60 * 60))
             .bind(&f.parent_run)
@@ -584,7 +579,6 @@
     #[tokio::test]
     async fn a_turn_completed_while_the_parent_was_offline_is_delivered_when_it_returns() {
         let f = fixture("hook", "completed").await;
-        // parent 的 run 從 6 小時前開到 3 小時前；child 在 2 小時前完成（parent 離線中）。
         parent_run_window(&f, 6, 3, 2).await;
         let older = add_completed_turn(&f, "更早的一件事做完了，細節如下。").await;
         sqlx::query("UPDATE turns SET created_at=?, completed_at=? WHERE id=?")
@@ -597,7 +591,6 @@
         sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 0, "parent 沒有在線 run：沒有人收");
         parent_returns(&f).await;
-        // Both offline turns are included in one notice.
         assert_eq!(sweep(&f.env.app).await, 1);
         assert_eq!(notice_count(&f).await, 1);
         assert_eq!(all_child_notice_count(&f).await, 1);
@@ -613,7 +606,6 @@
         parent_returns(&f).await;
         sweep(&f.env.app).await;
         assert_eq!(notice_count(&f).await, 0);
-        // 6 天前完成（同樣離線期間）就補。
         parent_run_window(&f, 24 * 9, 24 * 7, 24 * 6).await;
         assert_eq!(sweep(&f.env.app).await, 1);
         assert_eq!(notice_count(&f).await, 1);
@@ -691,13 +683,11 @@
         let prefix = "a".repeat(500);
         let diff1 = format!("{prefix}suffix_one");
         let diff2 = format!("{prefix}suffix_two");
-        // 兩者在前 500 字完全相同，但在截斷上限截斷後 normalized 都一樣，所以視為重複
         let t1 = truncate(&diff1, NEAR_DUPLICATE_MAX_CHARS);
         let t2 = truncate(&diff2, NEAR_DUPLICATE_MAX_CHARS);
         assert_eq!(t1, t2);
         assert!(nearly_same_reply(&t1, &t2));
 
-        // 若前 500 字實質不同（差異超過 20%），則不重複
         let head1 = format!("alpha {}", "x".repeat(100));
         let head2 = format!("omega {}", "y".repeat(100));
         let t_head1 = truncate(&head1, NEAR_DUPLICATE_MAX_CHARS);
@@ -724,8 +714,6 @@
         assert!(legacy.ends_with("不需要回覆這則通知。"), "{legacy}");
         assert_eq!(quoted_reply(&legacy), Some(reply));
     }
-
-    // ---- #874：字沒打進去的通知補送 ----
 
     fn base_crid(f: &Fixture) -> String {
         format!("{CRID_PREFIX}{}:{}", f.child_id, f.child_turn)
@@ -772,7 +760,6 @@
         let f = fixture("hook", "completed").await;
         make_parent_busy(&f, "parent-working-retry-dup").await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
-        // 冷卻剛過（2 分鐘多一點），第 0 次的內文還在 5 分鐘的近似重複窗口裡。
         fail_undelivered(&f, &base_crid(&f), 130).await;
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(crid_count(&f, &format!("{}:r1", base_crid(&f))).await, 1);
@@ -839,8 +826,6 @@
         notify_turn(&f.env.app, &f.child_turn).await.unwrap();
         assert_eq!(all_child_notice_count(&f).await, 1, "撤回＝使用者說不要，不重送");
     }
-
-    // ---- #1984：codex parent 的通知短上限、composer_unreadable 記成一次失敗 attempt ----
 
     /// parent 是 codex 用 500 字，其他 kind 維持 1,600 字；去重上限 500 不變。
     #[test]
@@ -980,7 +965,6 @@
         let text: String = sqlx::query_scalar("SELECT m.content FROM messages m JOIN turns t ON t.id=m.turn_id WHERE t.conversation_id=? AND t.client_request_id=? AND m.role='user'")
             .bind(&f.parent_conversation).bind(base_crid(&f)).fetch_one(&f.env.app.db).await.unwrap();
         assert!(text.contains("背景工作仍在跑"));
-        // Model the queue's confirmed delivery independently of completion of the parent turn.
         sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id='parent-background-reconcile'").bind(db::now()).execute(&f.env.app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='in_flight',delivery='ok',run_id=? WHERE conversation_id=? AND client_request_id=?")
             .bind(&f.parent_run).bind(&f.parent_conversation).bind(base_crid(&f)).execute(&f.env.app.db).await.unwrap();

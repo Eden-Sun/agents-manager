@@ -66,7 +66,6 @@ async fn api_usage_sums_attempts_and_is_user_only() {
         sqlx::query("INSERT INTO api_bot_attempts(id,bot_id,turn_id,generation,ordinal,request_hash,requested_speed,state,usage_json,reserved_microusd,estimated_microusd,pricing_version,created_at) VALUES(?,?,?,1,?,'h','standard',?,?,?,?,'v',?)")
             .bind(crate::db::ulid()).bind(&bot2).bind(turn).bind(n).bind(state).bind(usage).bind(reserved).bind(est).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     }
-    // t2（進行中）是 fast 回合：turns[].speed 要如實回報這一回合送出請求用的速度。
     sqlx::query("UPDATE api_bot_attempts SET requested_speed='fast' WHERE turn_id='t2'").execute(&env.app.db).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let addr = listener.local_addr().unwrap();
     let shutdown = CancellationToken::new(); let stop = shutdown.clone();

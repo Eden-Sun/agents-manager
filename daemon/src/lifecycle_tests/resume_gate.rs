@@ -3,7 +3,6 @@
 
 mod tests {
     use crate::lifecycle_tests::prelude::*;
-    // parent-uses
     use crate::lifecycle::*;
 
     use crate::lifecycle::resume_gate::*;
@@ -209,7 +208,6 @@ mod tests {
         let held = turn(&app, &queued).await;
         assert_eq!((held.status.as_str(), held.flush_retries), ("queued", 0), "遠端 run 一樣要等驗證");
 
-        // 「遠端」那台：真的 hook.sh，pane env 帶這個 run 的 AM_RUN_ID，沒有 herdr（只寫 spool）。
         let home = e.dir.join("far-home");
         std::fs::create_dir_all(&home).unwrap();
         let script = home.join("hook.sh");
@@ -293,7 +291,7 @@ mod tests {
     async fn a_pane_waiting_on_a_human_does_not_burn_the_verify_window() {
         let t0 = "2026-09-23T16:00:00.000Z";
         let (_e, bot, run) = bot_and_run("claude", 1, Some("s-1"), t0).await;
-        let long_after = at("2026-09-23T16:10:00Z"); // 窗口（120 秒）早就過了
+        let long_after = at("2026-09-23T16:10:00Z");
         assert_eq!(decide(&bot, &run, long_after), Gate::Expired { expected: "s-1".into() }, "沒卡住、狀態也沒變過：照原本的期限");
 
         let mut blocked = run.clone();
@@ -304,7 +302,6 @@ mod tests {
             "還在等人按信任提示：不可能有回報，不算到期"
         );
 
-        // 人按下去了：`blocked → idle`，trigger 蓋上 `agent_status_since`（issue #93）。
         let mut unblocked = run.clone();
         unblocked.agent_status_since = Some("2026-09-23T16:09:50.000Z".into());
         assert_eq!(
@@ -328,7 +325,6 @@ mod tests {
         let (e, bot, run) = bot_and_run("claude", 1, Some("s-trust"), &long_ago).await;
         let app = e.app.clone();
         let queued = queue_one(&app, &bot.id, "換身份之後排著的派工").await;
-        // 十分鐘都卡在信任提示，然後人按下去：`blocked → idle` 讓 trigger 蓋上 `agent_status_since`。
         for st in ["blocked", "idle"] {
             sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?").bind(st).bind(&run.id).execute(&app.db).await.unwrap();
         }
@@ -352,7 +348,6 @@ mod tests {
         assert_eq!(notes, 0, "也不能留那則說錯話的提醒");
         assert!(queue_retry_timer_armed(&bot.id), "掛 timer 等那一行回來");
 
-        // 下一輪 spool 掃描把 `SessionStart` 撈回來。
         session_start(&app, &bot.id, &run.id, "s-trust").await;
         let outcome: Option<String> = sqlx::query_scalar("SELECT resume_outcome FROM runs WHERE id=?").bind(&run.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(outcome.as_deref(), Some("verified"), "接回的就是原本那段");
@@ -373,7 +368,7 @@ mod tests {
         let app = tt::restart_app(&e).await;
         assert!(rearm_queue_retries(&app).await.unwrap() >= 1, "開機接回排著的 prompt");
         assert!(queue_retry_timer_armed(&bot.id));
-        forget_queue_retry_timer(&bot.id); // 那個 timer 燒起來做的就是下面這一步
+        forget_queue_retry_timer(&bot.id);
         flush_queued_locked(&app, &bot.id).await.unwrap();
         let t = turn(&app, &queued).await;
         assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 0), "重啟不等於驗證過了");

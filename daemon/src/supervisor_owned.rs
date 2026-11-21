@@ -16,7 +16,6 @@ use serde_json::json;
 use sqlx::SqlitePool;
 pub async fn load(pool: &SqlitePool) -> Result<crate::projection::Owned> {
     let mut o = crate::projection::Owned::default();
-    // `supervisors` 那一列就是巡檢本人；`supervisor_roles.role` 是 'patrol' | 'responder'。
     let sup: Vec<(Option<String>, Option<String>)> = sqlx::query_as("SELECT bot_id, project_id FROM supervisors").fetch_all(pool).await?;
     let roles: Vec<(Option<String>, Option<String>, String)> =
         sqlx::query_as("SELECT bot_id, project_id, role FROM supervisor_roles").fetch_all(pool).await?;
@@ -266,7 +265,6 @@ mod tests {
         let alerts = ops_alerts(&app).await;
         assert!(alerts.len() == 1 && alerts[0].contains(&e.project_id) && alerts[0].contains("10.0.0.9"), "{alerts:?}");
 
-        // 明講了就刪得掉：閘門擋的是「沒說清楚」，不是「永遠不准」。
         let q = Query(DeleteQuery { confirm: Some(super::CONFIRM.into()) });
         crate::config_audit::HTTP_CALLER
             .scope(CALLER.into(), delete_project_http(State(app.clone()), Path(e.project_id.clone()), q))

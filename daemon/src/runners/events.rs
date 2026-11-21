@@ -72,7 +72,6 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     app.set_default_connected(true).await;
                 }
                 tracing::info!(host = %host, session = %session, "global herdr event subscription established");
-                // herdr live-handoff 後訂閱重建：server 版本／protocol 可能換了，重問一次（#254）。
                 if is_local_main || host != LOCAL_HOST {
                     let (app2, host2) = (app.clone(), host.clone());
                     tokio::spawn(async move { app2.refresh_herdr_version(&host2).await });
@@ -91,13 +90,11 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     }
                     reconnect_pending = false;
                 }
-                // Reconcile after every (re)connect.
                 if is_local_default {
                     if let Err(e) = app.sync_default_session().await {
                         tracing::debug!(host = %host, session = %session, error = ?e, "default session sync failed");
                     }
                 } else {
-                    // 遠端 supervisor 連上那一輪對帳失敗、這裡才成功（連線沒斷）：欠著的一生一次 autostart 在這補（#259）。本機由開機那一輪負責。
                     reconcile_and_autostart(&app, &host, host != LOCAL_HOST).await;
                 }
                 let connected_at = Instant::now();
@@ -118,7 +115,6 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
             Err(e) => {
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
-                    // 馬上讓 UI 知道，不然燈號會一直綠到下次連上為止。
                     app.emit_daemon_status().await;
                 }
                 if is_local_default {
@@ -127,7 +123,6 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                 tracing::debug!(host = %host, session = %session, error = %e, "herdr subscribe failed");
             }
         }
-        // 遠端的重連歸 HostConn supervisor 管：這裡停手，等它在 master 回來後重開我們。
         if host != LOCAL_HOST && !app.host_connected(&host).await {
             tracing::info!(host = %host, "host disconnected; global subscription yields to the supervisor");
             return;
@@ -158,8 +153,6 @@ pub async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate
                     tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
                 }
             } else if app.session_for_host(host).await.as_deref() == Some(session) && detection_wants_reconcile(app, host, session, &ev.data).await {
-                // 多半是 bot 剛開的子 pane（見 `reconcile`），不排一次對帳就要等到下次重啟才看得到。
-                // 另開 task 並晚一拍，讓還在啟動的 agent 先報出名字與 kind。
                 let app = app.clone();
                 let host = host.to_string();
                 tokio::spawn(Box::pin(async move {
@@ -207,13 +200,10 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
     if !converged {
         tracing::warn!(host, pane_id, "a closed pane's run could not be recorded as exited; watcher kept, retrying");
         retry_pane_close(app, host, session, pane_id, attempt);
-        // 已收成功的 child 仍要排對帳（重試時它不再是 active，不會再算到）。
     }
     if converged {
         unwatch_pane_on_session(app, host, session, pane_id).await;
     }
-    // #60：子 agent 退役由對帳判定（pane 被搬走也會報舊 id 關閉），但關 pane 不保證會發
-    // `pane.agent_detected`，所以這裡自己排一次，同樣晚一拍等 herdr 穩定。
     if ended_a_child {
         let app = app.clone();
         let host = host.to_string();
@@ -256,7 +246,6 @@ async fn close_workspace_try(app: &Arc<App>, host: &str, session: &str, ws: &str
         }
     }
     if app.session_for_host(host).await.as_deref() == Some(session) {
-        // #708：移交出去的專案的映射不動。
         match sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ? AND handed_off_to IS NULL").bind(ws).bind(host).execute(&app.db).await {
             Ok(_) => app.emit("project_changed", json!({})).await,
             Err(e) => {
@@ -321,8 +310,6 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     let handle = tokio::spawn(Box::pin(async move {
         let mut backoff = HERDR_SUBSCRIBE_INITIAL_BACKOFF;
         let mut resubscribing = false;
-        // 只有「證明 run 已經結束」那一種離開才算收掉這個 pane；拿不到 client（遠端斷線、session 對不上）離開時 run 還活著，
-        // 等著重放的狀態事件與 pane 的鎖都還要用（`forget_watcher`）。
         let mut run_ended = false;
         loop {
             let Some(client) = app2.herdr_for_session(&hst, &sess).await else { break };
@@ -340,18 +327,13 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                         handle_status(&app2, &hst, &sess, &ev).await;
                     }
                     connected_for = Some(connected_at.elapsed());
-                    // 每次 daemon／herdr 重啟或遠端斷線，每個 pane 各掉一次（一天 237 行 WARN）；底下會自己重訂並補讀狀態，真有問題
-                    // 由「host connect failed」「herdr event stream closed」那些行說，這行只是逐 pane 的旁證。
                     tracing::info!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
                 }
                 Err(e) => {
-                    // 這段時間的狀態邊也漏了：之後訂閱成功要補讀，不只是「斷線後重接」才補。
                     resubscribing = true;
                     tracing::debug!(host = %hst, session = %sess, pane_id = %pid, error = %e, "pane status subscribe failed");
                 }
             }
-            // Stop retrying only once the run is *provably* no longer active (#244): a read error or an
-            // unknown session is not proof, so keep the watcher and retry after the backoff.
             match app2.session_for_host(&hst).await {
                 None => tracing::warn!(host = %hst, pane_id = %pid, "watcher cannot tell the host's session; keeping it"),
                 Some(fallback) => match crate::db::active_runs_for_pane(&app2.db, &hst, &pid, &sess, &fallback).await {
@@ -456,7 +438,6 @@ pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
         };
         #[cfg(test)]
         crate::race_point::hit("status_repair_after_lookup", pane_id).await;
-        // 登記的 run 已經不是 pane 上的 run：那筆跟著舊 run 結束就丟掉。登記時就沒有 run、現在也沒有：沒東西可修。
         let stale = match &repair.run_id {
             Some(id) => runs.first().map(|r| r.id.as_str()) != Some(id.as_str()),
             None => runs.is_empty(),
@@ -465,7 +446,6 @@ pub async fn repair_pending_statuses(app: &Arc<App>) -> usize {
             clear_status_repair_if(app, key, repair.gen);
             continue;
         }
-        // 移交出去的專案：這顆 daemon 不碰它的 pane，連讀都不讀（SPEC §6.5h）；登記一起丟掉（#1409）。讀不到就留到下一輪。
         let Some(run) = runs.first() else { continue };
         match app.db.bot_handed_off_to(&run.bot_id).await {
             Ok(None) => {}
@@ -493,7 +473,6 @@ fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
     let (app, host, session, ev) = (app.clone(), host.to_string(), session.to_string(), ev.clone());
     tokio::spawn(Box::pin(async move {
         tokio::time::sleep(wait).await;
-        // 這個 pane 之後又來過事件：那一則比這一則新，這一則不再算數。
         if status_seq().lock().unwrap().get(&key) != Some(&seq) {
             return;
         }
@@ -512,7 +491,6 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         .data
         .get("agent_status")
         .and_then(|v| v.as_str())
-        // `runs.agent_status` 的 CHECK 只認這四種：herdr 之後新增的值原樣寫進去整句 UPDATE 會失敗。
         .map(|s| match s {
             "done" => "idle",
             "idle" | "working" | "blocked" | "unknown" => s,
@@ -522,12 +500,9 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         .to_string();
     tracing::info!(host, session, pane_id, status = %reported_status, "pane.agent_status_changed");
     let key: PaneKey = (host.to_string(), session.to_string(), pane_id.to_string());
-    // 重放的那一則不是新事件：沿用原來的序號，不能把自己登記成「最新」。
     let seq = match replay_seq {
         Some(seq) => seq,
         None => {
-            // 全域遞增，不是每個 pane 從 1 開始數：`forget_pane_status_state` 清掉項目之後，同一個 pane 的
-            // 新事件才不會拿到某個還在等的重放手上那個號碼（拿到就會把舊狀態當成「還是最新的」寫回去）。
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed) + 1;
             status_seq().lock().unwrap().insert(key.clone(), n);
@@ -541,21 +516,16 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     }
 
     let fallback = app.session_for_host(host).await.unwrap_or_default();
-    // 讀不到不等於這個 pane 沒有 run（#192）：以前讀取錯誤被當成空集合、整則事件丟掉。對 working／idle 之後的對帳還補得回來，
-    // 但 `blocked` 那條邊的副作用（告訴父 agent 它的 child 在等）只有這一次——child 停在同一個問題上不會再有第二個狀態事件。
-    // 稍後重放這一則（這個 pane 之後沒有更新的事件才算數）；重放也讀不到，還有 `child_alerts::sweep` 的定時安全網。
     let runs = match crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await {
         Ok(runs) => runs,
         Err(e) => {
             tracing::warn!(host, pane_id, status = %reported_status, error = ?e, "could not look up the run for a pane status event; replaying it shortly");
-            // run 還不知道也要登記：重放用完之後沒有任何新事件，修復迴圈是唯一的補救（#1293）。
             mark_status_repair(app, &key, None);
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
         }
     };
     let Some(run) = runs.into_iter().next() else {
-        // pane 上沒有 run：沒有東西可修，登記一起丟掉（#1409）。
         clear_status_repair(app, &key);
         return;
     };
@@ -567,11 +537,9 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     } else {
         reported_status
     };
-    // #708：移交出去的專案，狀態、外部回合、備援、通知 parent 都歸接手的 daemon。讀不到就照「讀不到 run」重放。
     match app.db.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(_)) => {
-            // 移交出去的專案不欠這顆 daemon 任何狀態：之前登記的修復一起丟掉（#708、#1409）。
             clear_status_repair(app, &key);
             return;
         }
@@ -582,12 +550,9 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             return;
         }
     }
-    // Herdr owns the run status from its first report after a synthetic Dangerous rm marker.
     crate::dangerous_rm::on_herdr_status(&run.id);
     let prev = run.agent_status.clone();
-    // 卡住的 turn 要「持續」idle 才收：每個狀態事件都記，閃一下 working 就重算。
     app.observe_agent_status(&run.id, &status);
-    // 閒置回收收機前會對這一份（issue #144）：DB 寫不進去時，DB 的 idle 不能被當成閒著的證據。
     app.observe_idle_status(&run.id, &status);
     if prev != status {
         if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?")
@@ -596,8 +561,6 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             .execute(&app.db)
             .await
         {
-            // 寫不進去就跟讀不到 run 一樣重放：DB 停在舊狀態時，邊的副作用（排隊訊息的 flush 閘門讀的是 DB）會卡住。
-            // 這一輪不做任何邊的副作用；重放成功那一次 `prev` 仍是 DB 的舊值，副作用在那一次完整做一遍。
             tracing::warn!(run = %run.id, status = %status, error = ?e, "could not persist the agent status; replaying it shortly");
             mark_status_repair(app, &key, Some(&run.id));
             drop(write_guard);
@@ -605,39 +568,28 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             return;
         }
     }
-    // 寫進去了（或本來就一致）：這個 pane 不再欠 DB 一個狀態（#1184）。
     clear_status_repair(app, &key);
     drop(write_guard);
     app.emit_bot_status(&run.bot_id).await;
 
-    // The agent reacted to the prompt: the stall watchdog is no longer needed.
     if status == "working" || status == "blocked" {
         app.cancel_stall(&run.id).await;
     }
-    // 續行提示的 10 秒從「驗證過且 idle」起算；變成 working／blocked 就取消（#424）。
     if matches!(status.as_str(), "idle" | "working" | "blocked") {
         app.poke_resume_nudge(&run.bot_id);
     }
 
-    // 停下來等人回答時先看是不是 claude 的滿意度問卷——是就自己按 0（§3.1）。其他 blocked 不動。
     if prev != "blocked" && status == "blocked" {
         let (app2, run2) = (app.clone(), run.clone());
         tokio::spawn(async move {
             app2.dismiss_survey_if_shown(&run2).await;
         });
-        // grok 撞週限的畫面（#222）：herdr 把它判成 `blocked`、沒有 working->idle 那條邊，畫面掃描不會自己跑。
-        // 不是 grok 的 bot、或畫面上沒有那兩句，掃描什麼都不做；一個鍵都不按（選項 1、2 是付費）。
         if crate::db::bot(&app.db, &run.bot_id).await.ok().flatten().is_some_and(|b| b.kind == "grok") {
             app.schedule_codex_notice_capture(&run.bot_id, &run.id);
         }
-        // 子 agent 停在提問時，它的父 agent 不會自己知道（`child_alerts`）：UI 的徽章是給人看的，
-        // 父 agent 是一顆 CLI 行程，沒有人打字進去就什麼都收不到。
         crate::runners::child_alerts::on_child_blocked(app, &run);
-        // claude 2.1.281 的防誤刪框：通知使用者（帶目標），一個鍵都不按。
         crate::runners::dangerous_rm::on_blocked(app, &run);
-        // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
         app.codex_migration_on_blocked(&run);
-        // claude 一般權限確認選單：等畫面畫完讀一次，結構化原因（`blocked_reason`）寫「等待權限確認：<工具>」。只看、不按鍵。
         {
             let (app2, run2) = (app.clone(), run.clone());
             tokio::spawn(async move {
@@ -645,10 +597,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
                 if let Ok(Some(fresh)) = crate::db::run(&app2.db, &run2.id).await {
                     if fresh.agent_status == "blocked" {
                         crate::blocked_reason::observe(&app2, &fresh).await;
-                        // codex 的非同步提問（#1879）：題目從 rollout 讀，寫進 blocked_reason。
                         crate::runners::codex_async_question::observe(&app2, &fresh).await;
-                        // herdr 的 blocked 常常誤報（畫面上沒有任何可回答的提示）：讀兩次畫面確認，沒有就改掉狀態，
-                        // 網頁才不會彈「需要回應」、側欄也不紅（讀畫面、不按鍵；10 秒巡邏同一件事是備援）。
                         if crate::lifecycle::poller::settle_false_blocked(&app2, &fresh).await.unwrap_or(false) {
                             return;
                         }
@@ -663,27 +612,20 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
             });
         }
     }
-    // 不再 blocked：權限框的原因跟著清（選單關了、回合繼續）。
     if prev == "blocked" && status != "blocked" {
         crate::blocked_reason::forget(&run.id);
     }
-    // claude 2.1.281 的 Session paused 選單 herdr 判成 idle：看一眼畫面，是就補標 blocked（不按鍵）。
     if prev != "idle" && status == "idle" {
         app.session_paused_on_idle(&run);
     }
-    // 不再 blocked：同一個問題下次再出現時才要再講一次。
     if prev == "blocked" && status != "blocked" {
         crate::child_alerts::forget(&run.bot_id);
     }
 
-    // 沒有 in-flight turn 卻開始 working＝有人在 pane 裡打字：現在就開 external turn，UI 才串得到；
-    // 等 Stop hook 的話整段回合對話都是空的。
     if prev != "working" && status == "working" && matches!(crate::db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
         app.begin_external_turn(&run).await;
     }
 
-    // §11.4.3：遠端 run 的內容留在那台的 spool，先 drain 再 arm 備援，終端快照才只在 hook 真的沒來時贏。
-    // 有預算上限（下一個事件排在它後面），逾時就讓備援接手，CAS 保證不雙寫。
     if host != LOCAL_HOST && ((prev == "working" && status == "idle") || (prev != "blocked" && status == "blocked")) {
         let drain = app.drain_remote_coalesced(host, &run.bot_id);
         match tokio::time::timeout(DRAIN_BUDGET, drain).await {
@@ -693,19 +635,14 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         }
     }
 
-    // 建議下一句只在 idle 有意義：回合開始（或停在對話框）就忘掉；回到 idle 的前幾秒補讀（claude 另外算出來的，Stop 當下還沒畫）。
     if status != "idle" {
         crate::prompt_suggestion::forget(&run.id);
-        // 卡在輸入框的草稿：不再 idle＝不是「卡住的草稿」了（只推 `composer_draft present:false`，不讀畫面）。
         crate::runners::composer_draft_watch::on_not_idle(&app, &run);
     } else if prev != "idle" {
         app.prompt_suggestion_on_idle(&run);
-        // idle 邊讀一次輸入框，有草稿就推 `composer_draft`（網頁收到才 GET，不輪詢）。
         crate::runners::composer_draft_watch::on_idle(&app, &run);
     }
 
-    // §4.3: working -> idle arms the terminal fallback.
-    // blocked -> idle 時若有 in-flight turn（例如 codex 中途被彈出視窗短暫 blocked），也 arm_fallback 收回合。
     let inflight = if prev == "working" && status == "idle" {
         true
     } else if prev == "blocked" && status == "idle" {
@@ -715,26 +652,19 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     };
     if inflight {
         app.arm_fallback(&run.id, &run.bot_id).await;
-        // A prompt queued while the agent was still working waits for exactly this edge.
         app.schedule_flush_queued(&run.bot_id);
-        // 忙的時候改的 codex fast 等的就是這條邊（#393）。
         app.schedule_deferred_live(&run.bot_id);
         crate::update_restart::schedule(app, &run.bot_id);
     } else if prev != "idle" && status == "idle" {
-        // 剛起來（`unknown`）或對話框剛關掉（`blocked`）就閒下來：排著的也該送了——bot 沒在跑時收下的那一則
-        // （issue #122）正是等這一刻，不然要等退避的 timer（最少 15 秒）。flush 自己的閘門照舊把關。
         app.schedule_flush_queued(&run.bot_id);
         app.schedule_deferred_live(&run.bot_id);
         crate::update_restart::schedule(app, &run.bot_id);
     }
 
-    // 沒有 hook 的被接管 pane（對話檔是唯一的完成證據）：沒收到 working 邊就沒有回合在飛，idle 時補讀對話檔（issue #1798）。
     if prev != "idle" && status == "idle" && run.adopted != 0 {
         crate::lifecycle::poller::spawn_idle_transcript_sync(app, &run.id, &run.bot_id);
     }
 }
-
-// ---------------------------------------------------------------- agent titles
 
 const TITLE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
 
@@ -749,7 +679,6 @@ pub fn spawn_title_poller(app: Arc<App>) {
             let Some(client) = app.herdr_for_session(&conn.name, &session).await else { continue };
             poll_titles(&app, &conn.name, &session, &session, &client).await;
         }
-        // default session 不在 HostManager 裡，但可能有被採用的 agent，標題也要跟。
         if app.herdr_session.as_str() != "default" && app.default_connected.load(Ordering::SeqCst) {
             let fallback = app.herdr_session.clone();
             let client = app.default_herdr.clone();
@@ -786,7 +715,6 @@ mod tests {
         assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await, "之後對帳成功");
         assert!(crate::testing::eventually!(active().await), "欠著的 autostart 在這補上");
 
-        // 再一次訂閱重建的對帳不能再起一次（一生一次；使用者停掉的就是靠這個不被重開）。
         assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
@@ -855,7 +783,6 @@ mod tests {
         assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 的鎖要清掉");
         assert!(!app.pane_watchers.lock().await.contains_key(&key));
 
-        // 同一個 pane 之後裝了新的 watcher（世代不同）：舊的 watcher 退出不能動它的狀態。
         status_seq().lock().unwrap().insert(key.clone(), 9);
         watcher_gens().lock().unwrap().insert(key.clone(), 8);
         forget_watcher(&app, key.clone(), 7, true).await;
@@ -874,7 +801,7 @@ mod tests {
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "unreach").await;
         let _run = tt::fake_run(&app, &bot.id).await;
-        let session = "unreachable-session"; // 本機沒有這個 session 的 client：`herdr_for_session` 回 None
+        let session = "unreachable-session";
         let pane = format!("pane-{}", bot.id);
         let key: PaneKey = (LOCAL_HOST.to_string(), session.to_string(), pane.clone());
         status_seq().lock().unwrap().insert(key.clone(), 41);
@@ -902,7 +829,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "wsbot").await;
-        let run = tt::fake_run(&app, &bot.id).await; // workspace ws-1
+        let run = tt::fake_run(&app, &bot.id).await;
         let other = tt::claude_bot(&app, &e.project_id, "other").await;
         let other_run = tt::fake_run(&app, &other.id).await;
         sqlx::query("UPDATE runs SET workspace_id='ws-2' WHERE id=?").bind(&other_run).execute(&app.db).await.unwrap();
@@ -910,8 +837,6 @@ mod tests {
 
         tt::make_table_unreadable(&app, "bots").await;
         handle_global(&app, LOCAL_HOST, "test", &ws_event("ws-1")).await;
-        // 前提（這一刻沒收到）要在 bots **還讀不到的時候**看（runs 本身讀得到）：一旦讀得到，背景重試隨時會收斂，
-        // 高負載下測試這邊晚一步再看就會看到已經收好的結果。
         assert_eq!(run_state(&app, &run).await, "running", "前提：這一刻沒收到");
         tt::make_table_readable(&app, "bots").await;
 
@@ -937,7 +862,7 @@ mod tests {
         assert_eq!(stored().await, "working", "別的、已經不在的 pane 不動這個 run");
 
         e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
-        e.herdr.set_agent("agent", &pane, false); // herdr 現在說 idle
+        e.herdr.set_agent("agent", &pane, false);
         resync_pane_status(&app, &app.herdr, LOCAL_HOST, "test", &pane).await;
         assert_eq!(stored().await, "idle", "漏掉的 working → idle 要補回來");
     }
@@ -954,7 +879,7 @@ mod tests {
         let pane = format!("pane-{}", bot.id);
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
-        e.herdr.set_agent("agent", &pane, false); // herdr 現在說 idle：working → idle 發生在訂閱建起來之前
+        e.herdr.set_agent("agent", &pane, false);
         e.herdr.fail_next("events.subscribe", tt::Fault::Refuse);
 
         watch_pane_on_session(&app, LOCAL_HOST, "test", &pane).await;
@@ -985,7 +910,7 @@ mod tests {
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "stale-replay").await;
-        tt::fake_run(&app, &bot.id).await; // agent_status = idle
+        tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
         let ev = |status: &str| crate::herdr::Event {
             event: "pane_agent_status_changed".into(),
@@ -993,9 +918,6 @@ mod tests {
         };
         let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap() };
         let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
-        // 舊的 blocked 事件登記的號碼（讀不到 run、排了重放）。編號是全域遞增的（#521），所以這裡只能
-        // 斷言「較新的事件把它換掉了」。舊號碼用 0：計數器從 1 起算，永遠不會發出 0（單獨跑這個測試時，
-        // 第一則事件就是 1，拿 1 當舊號碼會撞號、重放被當成最新的）。
         status_seq().lock().unwrap().insert(key.clone(), 0);
 
         let held = pane_status_lock(&key).lock_owned().await;
@@ -1156,7 +1078,6 @@ mod tests {
         };
         *e.herdr.agents.lock().unwrap() = vec![agent(Some(&parent_agent), &root), agent(None, &split)];
 
-        // herdr 的偵測事件不帶名字：只有 agent 種類、pane、workspace。
         let data = serde_json::json!({"agent": "claude", "pane_id": split.pane_id, "workspace_id": split.workspace_id});
         assert!(detection_wants_reconcile(&app, LOCAL_HOST, "test", &data).await, "無名 agent 的偵測事件照樣對帳");
         handle_global(&app, LOCAL_HOST, "test", &crate::herdr::Event { event: "pane_agent_detected".into(), data }).await;
@@ -1197,7 +1118,6 @@ mod tests {
         let _ = crate::testing::eventually!(run_state(&app, &run).await == "exited" && !watching(&app, &pane).await);
         assert_eq!(run_state(&app, &run).await, "exited", "重試補上，不靠第二個事件");
         assert!(!watching(&app, &pane).await, "收斂之後才拆 watcher");
-        // 重複的關閉事件是安全的。
         handle_global(&app, LOCAL_HOST, "test", &close_event(&pane)).await;
         assert_eq!(run_state(&app, &run).await, "exited");
     }
@@ -1261,7 +1181,7 @@ mod tests {
             let run = tt::fake_run(&app, &bot.id).await;
             let pane = format!("pane-{}", bot.id);
             e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
-            e.herdr.set_agent(name, &pane, false); // herdr 現在說 idle
+            e.herdr.set_agent(name, &pane, false);
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
             cases.push((run, pane));
         }
@@ -1269,7 +1189,6 @@ mod tests {
         for (_, pane) in &cases {
             handle_status(&app, LOCAL_HOST, "test", &status_event(pane, "idle")).await;
         }
-        // 重放用完（測試裡約 2 秒）還寫不進去；寬一點等，免得重放還在跑就被 DB 恢復搶先寫好。
         tokio::time::sleep(Duration::from_secs(5)).await;
         for (run, _) in &cases {
             assert_eq!(status_in_db(&app, run).await, "working", "寫不進去時 DB 停在舊狀態");
@@ -1298,15 +1217,13 @@ mod tests {
         let run = tt::fake_run(&app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
         e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
-        e.herdr.set_unnamed_agent(&pane, None); // herdr 現在說 working
+        e.herdr.set_unnamed_agent(&pane, None);
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         break_status_writes(&app).await;
         handle_status(&app, LOCAL_HOST, "test", &status_event(&pane, "idle")).await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert!(pending_repair(&app, &pane), "寫不進去的 pane 還欠著 DB 一個狀態");
 
-        // herdr 現在說 working、DB 也是 working：修復重讀到的是 working，跟 DB 一致，不寫、清掉登記；
-        // 登記的那則舊 idle 不會被重放進來。
         repair_pending_statuses(&app).await;
         assert!(!pending_repair(&app, &pane), "修復讀到的是 herdr 當下的值，跟 DB 一致就不用寫");
         sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
@@ -1356,18 +1273,16 @@ mod tests {
         let r1 = tt::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
         break_status_writes(&app).await;
-        // R1 的寫入失敗、重放用完：登記 R1（直接以用完的重放次數進入，不等背景重放）。
         handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "idle"), status_replay_delays().len(), None).await;
         assert_eq!(repaired_run(&app, &key), Some(r1.clone()));
 
-        // R1 結束、R2 在同一顆 pane 上開始，R2 的寫入也失敗。
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
         let r2 = tt::fake_run(&app, &bot.id).await;
         handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "working"), status_replay_delays().len(), None).await;
         assert_eq!(repaired_run(&app, &key), Some(r2.clone()), "登記要跟著 pane 換到 R2");
 
         sqlx::query("DROP TRIGGER status_write_fails").execute(&app.db).await.unwrap();
-        e.herdr.set_unnamed_agent(&pane, None); // herdr 現在說 working（fake 的列表是 append，這裡只放這一筆）
+        e.herdr.set_unnamed_agent(&pane, None);
         repair_pending_statuses(&app).await;
         assert!(!pending_repair(&app, &pane), "DB 恢復後修復一輪補完");
         assert_eq!(status_in_db(&app, &r2).await, "working", "R2 的狀態要被修回來，不是被丟掉");
@@ -1389,10 +1304,8 @@ mod tests {
         handle_status_try(&app, LOCAL_HOST, "test", &status_event(&pane, "idle"), status_replay_delays().len(), None).await;
         assert_eq!(repaired_run(&app, &key), Some(r1.clone()));
 
-        // 修復一開始拿到的是 R1 的登記；DB 這時已經是 R2 在跑（R1 結束）。
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&r1).execute(&app.db).await.unwrap();
         let r2 = tt::fake_run(&app, &bot.id).await;
-        // 在它讀完 DB、準備清登記的那一刻，R2 的寫入失敗、登記了 R2。
         let (hook_app, hook_key, r2c) = (app.clone(), key.clone(), r2.clone());
         crate::race_point::arm("status_repair_after_lookup", &pane, move || async move {
             mark_status_repair(&hook_app, &hook_key, Some(&r2c));
@@ -1413,11 +1326,10 @@ mod tests {
             let run = tt::fake_run(&app, &bot.id).await;
             let pane = format!("pane-{}", bot.id);
             e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
-            e.herdr.set_agent(name, &pane, false); // herdr 現在說 idle
+            e.herdr.set_agent(name, &pane, false);
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
             cases.push((run, pane));
         }
-        // 查 run 的那一步失敗；直接以用完的重放次數進入（不等背景重放），所以之後不會有任何重放還在跑。
         tt::make_table_unreadable(&app, "runs").await;
         for (_, pane) in &cases {
             handle_status_try(&app, LOCAL_HOST, "test", &status_event(pane, "idle"), status_replay_delays().len(), None).await;
@@ -1425,7 +1337,6 @@ mod tests {
         }
         tt::make_table_readable(&app, "runs").await;
 
-        // DB 恢復，沒有新事件：修復一輪重讀 herdr，補上 DB 的狀態。
         repair_pending_statuses(&app).await;
         for ((run, pane), _) in cases.iter().zip(0..) {
             assert!(!pending_repair(&app, pane), "DB 恢復後修復一輪補完");

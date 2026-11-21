@@ -53,8 +53,6 @@ fn append_pane_ids(output: &str, pane_ids: &mut Vec<String>, seen: &mut HashSet<
         }
     }
 
-    // If shell output surrounds the JSON stream, still accept valid JSON Lines after/between it.
-    // This also recovers responses after one unrelated line without treating that line as a hint.
     for line in output.lines() {
         if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
             if let Some(pane_id) = pane_id_from_herdr_json(&value) {

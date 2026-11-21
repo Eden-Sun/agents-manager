@@ -54,7 +54,6 @@ async fn bot_credentials_cannot_read_or_upload_user_facing_files() {
     let bot_statuses: Vec<&str> = bot_responses.iter().map(|r| status(r)).collect();
     assert_eq!(bot_statuses, ["403"; 5], "bot principal crossed the user-facing file API boundary: {bot_statuses:?}");
 
-    // These same operations remain available to the UI token.
     let user_headers = [("X-AM-Token", e.app.ui_token.as_str()), ("Content-Type", "text/plain")];
     let user_responses = [
         request(e.app.clone(), "POST", &format!("/api/bots/{}/attachments?name=allowed.txt", owner.id), &user_headers, b"allowed",).await,

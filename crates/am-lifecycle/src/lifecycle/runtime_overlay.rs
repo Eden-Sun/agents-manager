@@ -23,7 +23,6 @@ pub fn resolve(bot: &db::Bot, role_policy: &BTreeMap<String, serde_json::Value>)
     let ov: Option<RuntimeSettings> = bot.runtime_override_json.as_deref().and_then(|s| serde_json::from_str(s).ok());
     let role: Option<RuntimeSettings> = bot.role.as_deref().and_then(|r| role_policy.get(r)).and_then(|v| serde_json::from_value(v.clone()).ok());
     let eff = effective(ov.as_ref(), role.as_ref());
-    // context 只來自 bot 覆寫或角色 policy，需在啟動時補上對應參數。
     let from_override = ov.as_ref().and_then(|o| o.context_tokens).is_some();
     let from_role = role.as_ref().and_then(|r| r.context_tokens).is_some();
     (eff, from_override || from_role)
@@ -119,14 +118,11 @@ mod tests {
     #[test]
     fn bot_override_then_role_policy_then_default() {
         let pol = policy("executor", r#"{"context_tokens": 200000}"#);
-        // 0. 預設：什麼都沒有，不補參數。
         let b = bot("claude", Some("opus"), None, None);
         assert_eq!(resolve(&b, &pol), (Effective::default(), false));
-        // 1. 角色 policy：補參數（但 executor 角色的 bot 沒有 role 時不套用）。
         let b = bot("claude", Some("opus"), Some("executor"), None);
         let (eff, apply) = resolve(&b, &pol);
         assert_eq!((eff.context_tokens, apply), (Some(200_000), true));
-        // 2. bot 覆寫最大：蓋過角色 policy。
         let b = bot("claude", Some("opus"), Some("executor"), Some(r#"{"context_tokens": 512000}"#));
         assert_eq!(resolve(&b, &pol), (Effective { context_tokens: Some(512_000), ..Default::default() }, true));
     }
@@ -138,10 +134,8 @@ mod tests {
         let o = build_overlay(&b, &eff, true);
         assert_eq!(o.env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW").map(String::as_str), Some("512000"));
         assert_eq!(o.model.as_deref(), Some("opus[1m]"), "超過 200k 改用 [1m] 變體");
-        // 夾到模型視窗：codex 只有 400k。
         let c = bot("codex", Some("gpt-6-luna"), Some("manager"), None);
         assert!(build_overlay(&c, &eff, true).args.contains(&"model_auto_compact_token_limit=400000".to_string()));
-        // 沒有模型又超過 200k：不補（記 log）。
         assert_eq!(build_overlay(&bot("claude", None, Some("manager"), None), &eff, true), Overlay { eff: eff.clone(), ..Default::default() });
     }
 
@@ -153,7 +147,6 @@ mod tests {
         assert!(o.env.is_empty() && o.model.as_deref() == Some("gpt-6"), "模型沿用 bot 自己的");
         let agy = build_overlay(&bot("agy", None, Some("executor"), None), &eff, true);
         assert_eq!(agy, Overlay { eff: eff.clone(), ..Default::default() }, "agy 不支援 context");
-        // apply=false：什麼都不補。
         assert_eq!(build_overlay(&bot("codex", None, None, None), &eff, false), Overlay { eff: eff.clone(), ..Default::default() });
     }
 }

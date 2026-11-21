@@ -62,7 +62,6 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
         .bind(MAX_CHECKPOINT_BYTES as i64).bind(bot).bind(crate::db::now()).bind(old_run).bind(new_run).bind(new_run).bind(new_run).bind(new_run)
         .fetch_optional(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
     let Some((session, turn, generation, revision, 1, Some(raw), owner_status, owner_unreceipted)) = row else {
-        // 診斷具體失敗原因，避免回傳無說明的 502：
         let diag_sql = format!(
             "SELECT ({expiry} <= ?), (length(CAST(s.checkpoint_json AS BLOB)) > ?) \
              FROM api_bot_sessions s WHERE s.bot_id = ? AND s.owner_run_id = ? AND s.retired_at IS NULL"
@@ -91,13 +90,11 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| ResumeProofError::Unconfirmed)?;
     let checkpoint = Checkpoint::new(&value).map_err(|_| ResumeProofError::Unconfirmed)?;
     let state: super::runner::State = serde_json::from_value(checkpoint.value()).map_err(|_| ResumeProofError::Unconfirmed)?;
-    // session 的 provider 在建立時固定：checkpoint 標的 provider 不認得就不接（沒有標籤＝Claude）。
     if !super::provider::is_known(state.provider_id()) {
         return Err(ResumeProofError::Unconfirmed);
     }
     let (kind, model): (String, Option<String>) = sqlx::query_as("SELECT kind, model FROM bots WHERE id=?")
         .bind(bot).fetch_one(&mut *conn).await.map_err(|_| ResumeProofError::Unconfirmed)?;
-    // session 的供應商必須就是這顆 bot 的 kind 的那一家（不拿 Claude 的 checkpoint 配 OpenAI 的 key 接著送，反之亦然）。
     if am_config::api_provider(&kind) != Some(state.provider_id()) {
         return Err(ResumeProofError::Unconfirmed);
     }
@@ -111,7 +108,6 @@ async fn prove_on_inner(conn: &mut sqlx::SqliteConnection, bot: &str, old_run: &
         let from = state.responses.last().map(|r| r.model.clone()).unwrap_or_default();
         return Err(ResumeProofError::ModelChanged { from, to: target_model.to_string() });
     }
-    // owner 沒有 receipt（回合被其他機制收尾、完成被 fence 掉）時，結果沒寫進對話，跟失敗的 owner 一樣處理。
     if !startup_context_settled(&state, owner_status == "failed" || owner_unreceipted) {
         return Err(ResumeProofError::ContextUnsettled);
     }

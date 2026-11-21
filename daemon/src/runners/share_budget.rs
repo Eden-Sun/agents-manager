@@ -39,7 +39,6 @@ fn mib(bytes: u64) -> u64 {
 const FULL_NOTE_PREFIX: &str = "分享空間滿了：";
 
 async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
-    // 量到一半停下（樹太深或檔案太多）時，數字只是下限：不能說「已達上限」，要講清楚是量不完、擋下來是保守的做法（#1028）。
     let why = if m.truncated {
         "工作目錄或 outbox 的目錄太深或檔案太多，量不完（數字只是下限，所以先擋下）。".to_string()
     } else {
@@ -62,7 +61,7 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
             .bind(crate::db::iso_in(-24 * 3600))
             .fetch_one(&app.db)
             .await
-            .unwrap_or(false); // 查不到就照貼：寧可多一則，不要漏講
+            .unwrap_or(false);
             if !told {
                 if let Err(e) = crate::lifecycle::insert_message(app.as_ref(), &conv, None, "system", &text, "system", false, None).await {
                     tracing::warn!(bot = %bot_id, error = %e, "could not tell the owner the share sandbox is full");
@@ -71,7 +70,6 @@ async fn notify_owner(app: &Arc<App>, bot_id: &str, m: budget::Measured) {
         }
         Err(e) => tracing::warn!(bot = %bot_id, error = %e, "could not find the share bot's conversation"),
     }
-    // 同一顆一天最多推一則 ops_alert（key 帶日期）。
     let day = chrono::Utc::now().format("%Y-%m-%d");
     let key = format!("ops_alert:daemon:share_storage_full:{bot_id}:{day}");
     let payload = crate::supervisor_inbox::ops_alert_payload(

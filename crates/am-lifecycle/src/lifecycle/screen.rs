@@ -46,18 +46,12 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
     let notices = if grok { grok_limit_notice_lines(&screen) } else { codex_usage_notice_lines(&screen) };
     let is_limit_line = |n: &str| if grok { grok_limit_hit_line(n).is_some() } else { codex_limit_hit_line(n).is_some() };
     let limit_banners: Vec<String> = notices.iter().filter(|n| is_limit_line(n)).cloned().collect();
-    // 同一畫面裡比最後一張橫幅更新的狀態列還有餘裕 → 畫面上的撞限橫幅都是舊的（見 `limit_banner`）。
     let headroom_below = super::limit_banner::status_line_says_headroom(&screen);
     let mut marked = Ok(());
     for notice in notices {
         let is_limit = is_limit_line(&notice);
-        // 撞限要看的「有沒有回合在飛」在寫通知訊息**之前**讀（#198）：訊息寫了之後這一則就不再是新的（`fresh`），
-        // 讀在後面的話讀錯就回錯，沒有在飛回合時下一次被當成看過的舊橫幅跳過，撞限永遠不記。
         let in_flight = if is_limit { db::in_flight_turn(app.db(), &run.id).await? } else { None };
         if is_limit {
-            // fork／resume 重播的舊橫幅、或同一畫面更新的狀態列說還有額度：不寫系統訊息、不標額度、
-            // 不解開回合（2026-09-14 AGM：fork 重播讓交辦被 quota_blocked）。`sighting` 每次讀取都要問，
-            // 它同時更新「上一次看到幾次」。
             let seen = super::limit_banner::sighting(&run.id, &screen, &notice, &limit_banners);
             let replayed = super::limit_banner::is_history(seen, in_flight.is_some());
             if replayed || headroom_below {
@@ -65,8 +59,6 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
                 continue;
             }
         }
-        // 去重只看這個 run 開始之後：比對整段對話時，兩天前一樣的上限橫幅讓這次被跳過，
-        // 額度沒標、回合沒解開（2026-09-12 使用者）。
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM messages
              WHERE conversation_id=? AND role='system' AND source='system' AND content=? AND created_at >= ?)",
@@ -78,21 +70,15 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
         .await?;
         let fresh = exists == 0;
         if fresh {
-            // No pane snapshot: the idle splash is a boxed TUI, not a failed cut of a reply.
             app.insert_system_notice(&conversation_id, &notice).await?;
             tracing::info!(bot = %bot.name, kind = %bot.kind, notice = %notice, "CLI account notice captured");
         }
         #[cfg(all(test, feature = "daemon-test-harness"))]
         super::race_point::hit("codex_notice_after_insert", bot_id).await;
         if is_limit {
-            // 有回合在飛＝橫幅就是那句的答案，照樣處理；否則只認這個 run 內第一次看到的，
-            // 舊橫幅才不會反覆把額度打回 100%。
             if !fresh && in_flight.is_none() {
                 continue;
             }
-            // 記在這顆 bot 的主機與身份那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身份
-            // 反而沒擋），記不進去就欠著，派送前與 flush 照欠著的那一筆擋（#198）。
-            // 第二意見只記錄（#240）：鎖外去問，回合與額度照下面的收。
             app.shadow_limit_hit(crate::judge::Sample {
                     bot_id: bot.id.clone(),
                     run_id: run.id.clone(),
@@ -104,7 +90,6 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
             if let Err(e) = app.mark_codex_limit_hit(&bot, &notice).await {
                 marked = Err(e);
             }
-            // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = in_flight {
                 app.fail_in_flight_turn(&turn.id, "撞限橫幅").await?;
             }
@@ -112,7 +97,6 @@ pub async fn capture_codex_usage_notices(app: &(impl crate::capabilities::Db + S
     }
     marked
 }
-
 
 pub async fn conversation_message_count(app: &impl crate::capabilities::Db, conversation_id: &str) -> anyhow::Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
@@ -273,11 +257,9 @@ pub fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     if kind == "agy" {
         return agy_after_echo(lines);
     }
-    // claude 的回音是第 0 欄的 `❯ `；回覆與貼上內文裡縮排引用的不算（issue #762，認法在 `capture::claude`）。
     if kind == "claude" {
         return crate::capture::claude::prompt_echo_row(lines).map(|i| i + 1).unwrap_or(0);
     }
-    // codex inline banner 的選項列 `› 1. …` 不是回音（#779）。
     let banner = if kind == "codex" { codex_inline_banner(lines) } else { None };
     lines
         .iter()
@@ -347,7 +329,6 @@ fn agy_after_echo(lines: &[&str]) -> usize {
     }) {
         return i + 1;
     }
-    // 沒有回音：banner（`▄▀▀▄ Antigravity CLI …` 到它底下的 logo 尾巴）之後。
     match (0..top).find(|&i| is_agy_chrome(lines[i].trim()) && lines[i].contains("Antigravity CLI")) {
         Some(b) => (b + 1..top).find(|&i| !lines[i].trim().is_empty() && !is_agy_chrome(lines[i].trim())).unwrap_or(top),
         None => 0,
@@ -386,7 +367,6 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
         return None;
     }
     let raw = lines[idx - 1];
-    // grok right-aligns a clock and a scrollbar glyph onto the prompt row (see `clean_screen`).
     let stripped;
     let line = if kind == "grok" {
         stripped = strip_grok_decor(raw);
@@ -398,10 +378,7 @@ pub fn last_prompt_echo_text(kind: &str, text: &str) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    // 折行的續行也是同一句話（2026-09-12 使用者回報）：只讀 `❯` 那行的話訊息被截斷，
-    // 剩下半句被 `extract_reply` 當成 agent 的回覆。
     let mut out = vec![body.to_string()];
-    // 只有排到行尾的回音才可能有續行；否則 grok 回覆、codex `thinking…` 這類縮排行會被誤收成使用者的話。
     if echo_row_is_full(raw) {
         for l in lines.iter().skip(idx) {
             match echo_continuation(kind, l) {
@@ -423,18 +400,15 @@ fn echo_row_is_full(raw: &str) -> bool {
 /// 上一行回音的續行？續行＝有縮排且不是別的東西（`⎿`、`⏺`、`●`、`✻`、框線要先排除）。
 /// 寧可少收（留一句回音）也不多收（吃掉 agent 的回覆）。
 fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
-    // 續行一定有縮排；沒縮排的是下一塊內容。
     let rest = line.strip_prefix("  ")?;
     let t = rest.trim();
     if t.is_empty() || is_noise(line) {
         return None;
     }
-    // 這些開頭代表另一塊東西開始了。
     const MARKERS: [&str; 10] = ["⎿", "⏺", "●", "✻", "✳", "│", "└", "├", "╭", "╰"];
     if MARKERS.iter().any(|m| t.starts_with(m)) {
         return None;
     }
-    // 下一個回音行（使用者連送兩句）也不是續行。
     if let Some(echo) = prompt_echo_prefix(kind) {
         if t.starts_with(echo) {
             return None;
@@ -452,7 +426,6 @@ pub fn is_noise(s: &str) -> bool {
 /// `gpt-… · <cwd>`，舊規則要 `Context`／`left` 才認，完成時間行就不在回覆尾巴（#207 真畫面）。
 fn is_codex_status_row(s: &str) -> bool {
     let s = s.trim();
-    // The warning counter is either its own footer row or right-aligned beside shortcuts.
     let warning = |row: &str| {
         let Some(rest) = row.strip_prefix("⚠ ") else { return false };
         let Some((count, tail)) = rest.split_once(' ') else { return false };
@@ -488,7 +461,6 @@ fn is_codex_status_row(s: &str) -> bool {
     }
     let Some((head, rest)) = s.split_once('·') else { return false };
     let model = head.split_whitespace().next().unwrap_or("");
-    // 模型名以英數字開頭：markdown 項目符號 `-` 也含 `-`，不能當成 `- 項目 · ~/路徑` 那種狀態列。
     if !model.contains('-') || !model.starts_with(|c: char| c.is_ascii_alphanumeric()) {
         return false;
     }
@@ -531,7 +503,6 @@ const CODEX_BANNER_HINTS: [&str; 3] = [
 pub fn codex_inline_banner(lines: &[&str]) -> Option<std::ops::Range<usize>> {
     let blank = |i: usize| lines[i].trim().is_empty();
     let composer = lines.iter().rposition(|l| l.starts_with('›'))?;
-    // 輸入列上面：空白列，再上去是提示（可能折行）。
     let mut i = composer;
     while i > 0 && blank(i - 1) {
         i -= 1;
@@ -545,9 +516,7 @@ pub fn codex_inline_banner(lines: &[&str]) -> Option<std::ops::Range<usize>> {
     }
     let hint = lines[i..hint_end].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
     let hint = hint.split_whitespace().collect::<Vec<_>>().join(" ");
-    // 最後一種是沒有動作選項的純資訊 banner。
     let with_actions = CODEX_BANNER_HINTS.iter().position(|h| *h == hint)? != 2;
-    // 提示上面一列空白，然後是動作選項（`› 1. …`、`  2. …`，從 1 連號）。
     if i == 0 || !blank(i - 1) {
         return None;
     }
@@ -573,7 +542,6 @@ pub fn codex_inline_banner(lines: &[&str]) -> Option<std::ops::Range<usize>> {
             i -= 1;
         }
     }
-    // 標題與說明：縮排兩格、連續、最多 8 列，上面是空白列（或畫面頂端）。
     let header_end = i;
     while i > 0 && !blank(i - 1) && lines[i - 1].starts_with("  ") {
         i -= 1;
@@ -604,7 +572,6 @@ pub fn is_codex_completion_line(s: &str) -> bool {
     let s = s.trim();
     let rest = match s.strip_prefix("Worked for ") {
         Some(r) => {
-            // Newer Codex uses a bullet before a bare clock (issue #1878).
             if let Some((elapsed, clock)) = r.split_once(" • ") {
                 return is_codex_duration(elapsed) && is_codex_done_time(clock);
             }
@@ -671,8 +638,6 @@ fn drop_codex_completion_tail(out: &mut Vec<String>) {
 /// grok 1.0.13 TUI chrome (appendix F): `◆` rows, "Worked for" footer, telemetry banner, shortcut
 /// footer, `<cwd>   15K / 500K` header, `[stable]`.
 fn is_grok_noise(s: &str) -> bool {
-    // 1.0.70 welcome chrome: keep the branch glyph and cwd shape as evidence;
-    // plain "main ..." or prose mentioning ctrl+u is still assistant content.
     let branch_cwd = s
         .strip_prefix('\u{e0a0}')
         .and_then(|rest| rest.trim_start().split_once(char::is_whitespace))
@@ -698,7 +663,6 @@ fn is_grok_noise(s: &str) -> bool {
     if s.contains("Ctrl+.:shortcuts") || s.contains("Shift+Tab:mode") || s.contains("Esc:cancel") {
         return true;
     }
-    // "<cwd>                       15K / 500K"
     if let Some((_, tail)) = s.rsplit_once("  ") {
         let t = tail.trim();
         if t.ends_with('K') && t.contains(" / ") && t.chars().all(|c| c.is_ascii_digit() || c == 'K' || c == ' ' || c == '/' || c == '.') {
@@ -860,7 +824,6 @@ pub fn codex_limit_hit_line(line: &str) -> Option<String> {
     if !hit {
         return None;
     }
-    // Stable ERROR: prefix so the chat styles it as a hard failure.
     if s.to_ascii_lowercase().starts_with("error:") {
         Some(s.to_string())
     } else {
@@ -885,7 +848,6 @@ fn join_wrapped_limit_hit(lines: &[&str], i: usize) -> (Option<String>, usize) {
         if t.is_empty() || t.starts_with('›') || t.starts_with('❯') || t.starts_with('╭') || t.starts_with('╰') {
             break;
         }
-        // Model-picker chrome under the input box — stop.
         if t.to_ascii_lowercase().starts_with("gpt-") || t.contains("max fas") {
             break;
         }
@@ -907,11 +869,9 @@ pub fn codex_usage_notice_lines(text: &str) -> Vec<String> {
     while i < lines.len() {
         let line = lines[i];
         if let Some(notice) = codex_limit_hit_line(line) {
-            // When wrapped, `try again at …` (the only reset time) is on the next row; the single row
-            // stored `…, visit` with no reset (2026-09-10, codex-astra). Prefer the join only if it adds that.
             let (joined, next) = join_wrapped_limit_hit(&lines, i);
             if !banner_is_last_cell(&lines, next.max(i + 1)) {
-                i = next.max(i + 1); // 引用的輸出（#237）：後面還有 codex 自己的回覆。
+                i = next.max(i + 1);
                 continue;
             }
             if !has_try_again(&notice) {
@@ -955,8 +915,8 @@ fn banner_is_last_cell(lines: &[&str], from: usize) -> bool {
     let low = next.to_ascii_lowercase();
     next.starts_with(['›', '❯', '╭', '╰', '│', '─'])
         || low.starts_with("gpt-")
-        || low.contains("max fas") // 窄 pane 截斷的模型頁尾
-        || next.contains(" · ") // 頁尾、`1 background terminal running · /ps to view · /stop to close`
+        || low.contains("max fas")
+        || next.contains(" · ")
 }
 
 fn has_try_again(notice: &str) -> bool {
@@ -1009,7 +969,6 @@ fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::Dat
         }
         let digits: String = tok.chars().take_while(|c| c.is_ascii_digit()).collect();
         if digits.is_empty() {
-            // The last token is `pm.`: an exact match loses the meridiem (reset 12 h early).
             match tok.trim_matches(|c: char| !c.is_ascii_alphanumeric()) {
                 "pm" => pm = true,
                 "am" => pm = false,
@@ -1052,7 +1011,6 @@ fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::Dat
     if !pm && hour == 12 {
         hour = 0;
     }
-    // A reset is always ahead: a passed clock time means tomorrow, a passed month/day next year.
     let today = now.date_naive();
     let (date, roll) = match (month, day) {
         (Some(m), Some(d)) => (NaiveDate::from_ymd_opt(year.unwrap_or_else(|| today.year()), m, d)?, year.is_none()),
@@ -1062,10 +1020,8 @@ fn parse_codex_try_again_at<Tz: chrono::TimeZone>(notice: &str, now: chrono::Dat
     let bare_clock = month.is_none() || day.is_none();
     if roll && naive <= now.naive_local() {
         if bare_clock {
-            // 裸鐘點只會是「今天」（見上面的說明）：已經過去就是舊橫幅，晚點再問，不滾到明天。
             naive = now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS);
         } else {
-            // 帶月日、沒有年份：剛過去幾分鐘＝舊橫幅，晚點再問；過很久才是去年的同一天，滾到明年。
             let behind = now.naive_local().signed_duration_since(naive);
             naive = if behind <= chrono::Duration::minutes(STALE_BANNER_GRACE_MINS) {
                 now.naive_local() + chrono::Duration::minutes(STALE_BANNER_RETRY_MINS)
@@ -1177,13 +1133,10 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let grok = kind == "grok";
     let agy = kind == "agy";
     let agy_end = if agy { agy_composer_top(&lines) } else { lines.len() };
-    // agy：`▸ Thought for …` 底下那一段思考內文不是回答，到空行為止。
     let mut in_thought = false;
-    // grok's telemetry banner wraps at pane width: skip "Help improve Grok" … "Privacy Policy." as a block.
     let mut in_banner = false;
     for (i, line) in lines.iter().enumerate().skip(start) {
         if agy {
-            // 輸入區（上面那條分隔線）就是輸出的盡頭。
             if i >= agy_end {
                 break;
             }
@@ -1198,16 +1151,13 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
                 }
                 continue;
             }
-            // 工具列 `● Bash(ls) (ctrl+o to expand)`、banner、shell 行都不是回答。
             if is_agy_chrome(t) || is_agy_tool_row(t) {
                 continue;
             }
         }
-        // codex 的 inline banner（#779）是輸入框的一部分，不是回覆。
         if banner_at == Some(i) {
             break;
         }
-        // Codex draws every tool call with the assistant's own `•` marker; the cell is not the answer.
         if tool_rows.get(i).copied().unwrap_or(false) {
             continue;
         }
@@ -1229,8 +1179,6 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
                 continue;
             }
         }
-        // Prompt box means the transcript ended. Codex's composer is unboxed `› …`（佔位字不是空的 `›`）。
-        // claude 的輸入框／回音都是第 0 欄的 `❯`；縮排的 `  ❯ cmd` 是回覆或貼上內文裡引的，不是輸入框，不能在這裡收尾（issue #762）。
         let at_prompt = if kind == "claude" {
             line.starts_with('❯')
         } else {
@@ -1239,12 +1187,9 @@ pub fn clean_screen(kind: &str, text: &str) -> Option<String> {
         if at_prompt || (kind == "claude" && (s == "›" || s.starts_with("› "))) {
             break;
         }
-        // `is_activity_shape` catches spinner glyphs `is_noise` doesn't know.
         if is_noise(s) || is_activity_shape(s) || (grok && is_grok_noise(s)) {
             continue;
         }
-        // Codex 0.156 keeps the streamed body when a turn fails or is interrupted, then draws a
-        // terminal status row after it. Do not save that UI row as part of the assistant reply.
         if kind == "codex" && codex_non_reply_row(s) {
             break;
         }
@@ -1302,9 +1247,7 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
         _ => return None,
     };
     let lines: Vec<&str> = text.lines().collect();
-    // A2: only this turn's output — else the previous turn's `⏺` line is returned as the answer.
     let after_echo = reply_start(kind, &lines);
-    // codex 的 inline banner（#779）：標題、說明、選項都不是回覆，回覆最多到它上面為止。
     let lines = &lines[..codex_inline_banner(&lines).map_or(lines.len(), |b| b.start)];
     let tool_rows = codex_tool_cell_mask(kind, lines);
     let is_tool_row = |i: usize| tool_rows.get(i).copied().unwrap_or(false);
@@ -1315,10 +1258,6 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
             && !codex_non_reply_row(s)
             && !is_tool_row(i)
     };
-    // Codex uses `• ` both for assistant rows and for bullets in the answer. Start at the first
-    // assistant row after the last tool cell, so bullets in its body cannot move the start forward.
-    // If an interrupted turn has no assistant row after its final tool, retain the latest earlier
-    // assistant row as the partial answer.
     let last_tool_end = (after_echo..lines.len())
         .rfind(|&i| is_tool_row(i))
         .map(|i| i + 1)
@@ -1332,26 +1271,20 @@ pub fn extract_reply(kind: &str, text: &str) -> Option<String> {
     };
     let mut out: Vec<String> = Vec::new();
     for (i, line) in lines.iter().enumerate().skip(start) {
-        // The answer ends where the next tool cell begins; its `└` output is not part of the reply.
         if i > start && is_tool_row(i) {
             break;
         }
         let t = line.trim_end();
         let s = t.trim_start();
-        // The composer is an unboxed `›` row. Box-drawing characters and horizontal rules can be
-        // part of Codex's Mermaid diagrams, so they are not transcript boundaries.
         if s.starts_with('›') || s.starts_with('❯') {
             break;
         }
         if kind == "codex" && codex_non_reply_row(s) {
             break;
         }
-        // Skip the spinner / status line and its neighbours (`Tip:`, `✗ Auto-update failed`).
         if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || (is_noise(s) && !is_diagram_line(s)) {
             continue;
         }
-        // Only the first marker is Codex chrome. Later `• ` rows belong to the answer body, such
-        // as a list, and must survive verbatim.
         let cleaned = if i == start { s.strip_prefix(marker).unwrap_or(t) } else { t }.to_string();
         out.push(cleaned);
     }
@@ -1548,7 +1481,6 @@ mod extract_tests {
             codex_usage_notice_lines(CODEX_STARTUP),
             vec!["You have 1 usage limit reset available. Run /usage to use one."],
         );
-        // Older Codex builds used a square marker and pluralised the noun.
         assert_eq!(
             codex_usage_notice_line(" ■ You have 2 usage limit resets available. Run /usage to use one."),
             Some("You have 2 usage limit resets available. Run /usage to use one.".into()),
@@ -1659,7 +1591,6 @@ gpt-5.6-luna max fast · ~/project/sample-agents/projects/pt · Context 0% used 
             extract_reply("codex", screen).as_deref(),
             Some("專案結構如下：\n  └── src/\n      └── main.rs"),
         );
-        // 真的工具列照舊遮掉：回覆是它後面那一則。
         let with_tool = "› 跑\n\n• Ran ls\n  └ a.txt\n\n• 只有一個檔案。\n";
         assert_eq!(extract_reply("codex", with_tool).as_deref(), Some("只有一個檔案。"));
     }
@@ -1756,7 +1687,6 @@ gpt-5.6-luna max fast · ~/project/sample-agents/projects/pt · Context 0% used 
         );
     }
 
-
     /// 2026-09-25 w168:pGD（codex 0.155.1）的真畫面：三則回覆中間夾了十幾個 `• Ran …` 工具 cell。
     /// codex 把工具呼叫畫成跟回覆同一個 `•` 標記，備援又取「畫面上最後一個 `•`」，所以網頁上那顆 codex
     /// 的回覆變成 `Ran rtk proxy cargo test …` 加它 `└` 的 rsync 錯誤，三則真回覆一則都沒進對話。
@@ -1767,7 +1697,6 @@ gpt-5.6-luna max fast · ~/project/sample-agents/projects/pt · Context 0% used 
         let reply = extract_reply("codex", REAL).expect("畫面上有回覆");
         assert_eq!(reply, "網頁已改成在 bot 設定與額度未登入提示中開獨立 CLI 登入，並保留原 bot pane；cc1 目前仍回報 loggedIn: false，因為 OAuth 授權碼尚未回填到登入 shell w168:pG9。程式驗證正在跑，授權完成後我會再核對 w16J:pF。", "最後一則回覆，不是它下面的工具 cell");
 
-        // 三則都抓得到，工具 cell 一行都不留。
         let whole = clean_screen("codex", REAL).expect("畫面上有回覆");
         assert_eq!(whole, "• 系統修正已改到兩個入口：Claude 身份登入改用 claude auth login，額度列偵測到未登入時會開獨立 CLI shell，不再把 /login 送進原 bot pane。現在驗證編譯與相關測試；cc1 的瀏覽器授權仍在等待完成。\n\n• cc1 的 Claude CLI 登入已在 Herdr shell w168:pG9 等待授權碼。請在剛開啟的瀏覽器完成授權，並將授權碼貼回該 shell；完成後告訴我，我會核對登入狀態及原 bot。\n\n• 網頁已改成在 bot 設定與額度未登入提示中開獨立 CLI 登入，並保留原 bot pane；cc1 目前仍回報 loggedIn: false，因為 OAuth 授權碼尚未回填到登入 shell w168:pG9。程式驗證正在跑，授權完成後我會再核對 w16J:pF。");
 
@@ -1846,12 +1775,10 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(n.contains("hit your usage limit"));
         assert!(n.contains("try again at 5:07 am"), "the reset half must survive: {n}");
         assert!(parse_codex_try_again(&lines[0]).is_some());
-        // A banner that already carries its own reset is not extended by whatever follows it.
         assert_eq!(codex_usage_notice_lines(CODEX_LIMIT_HIT).len(), 1);
     }
     #[test]
     fn codex_banner_reads_in_the_hosts_own_zone() {
-        // 遠端 UTC、橫幅 6:43 PM（遠端當地）＝ 18:43Z，不管 daemon 在哪個時區（#239）。
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-19T08:00:00Z").unwrap();
         let utc = chrono::FixedOffset::east_opt(0).unwrap();
         let got = parse_codex_try_again_at("try again at Sep 19th, 2026 6:43 PM", now.with_timezone(&utc));
@@ -1900,7 +1827,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(dt.date_naive(), now.date_naive(), "今天，不是明天：{got}");
     }
 
-
     /// 裸鐘點永遠是「今天的那個時刻」：今天稍晚就照字面（不設上限），已經過去就是舊橫幅、幾分鐘後再問。
     #[test]
     fn codex_try_again_without_a_date_is_always_today() {
@@ -1912,21 +1838,17 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
                 if h < 12 { "AM" } else { "PM" })
         };
         for h in 0..24u32 {
-            // 同一個 `now` 解析：各讀各的時鐘時跨過邊界會偶發紅燈（2026-09-13）。
             let candidate = now.date_naive().and_hms_opt(h, 7, 0).unwrap();
             let parsed = parse_codex_try_again_at(&at(h), now).unwrap_or_else(|| panic!("hour {h} did not parse"));
             let dt = chrono::DateTime::parse_from_rfc3339(&parsed).unwrap().with_timezone(&Local);
             if candidate > now.naive_local() {
-                // 今天稍晚：照字面，離現在多久都一樣（週窗、credits 可能是今天 23:40 才回來）。
                 assert_eq!((dt.hour(), dt.minute()), (h, 7), "{parsed}");
                 assert_eq!(dt.date_naive(), now.date_naive(), "今天，不是明天：{parsed}");
             } else {
-                // 已經過去＝畫面上留著的舊橫幅：幾分鐘後再問，不滾到明天。
                 let mins = dt.signed_duration_since(now).num_minutes();
                 assert!((4..=6).contains(&mins), "hour {h} 應該是幾分鐘後再問：{parsed}（{mins} 分）");
             }
         }
-        // A month/day with no year still lands on a real date.
         let r = parse_codex_try_again_at("try again at Aug 8th 1:47 PM.", now).unwrap();
         let dt = chrono::DateTime::parse_from_rfc3339(&r).unwrap().with_timezone(&Local);
         assert_eq!((dt.month(), dt.day()), (8, 8));
@@ -1998,19 +1920,16 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
             live_alert("claude", screen).as_deref(),
             Some("API error · Retrying in 0s · attempt 1/10")
         );
-        // codex words it differently; the shape is what matches.
         assert_eq!(
             live_alert("codex", "stream error: 503 upstream; retrying 2/5 in 1s").as_deref(),
             Some("stream error: 503 upstream; retrying 2/5 in 1s")
         );
-        // The newest banner wins.
         let two = "API error · Retrying in 0s · attempt 1/10\nAPI error · Retrying in 4s · attempt 2/10";
         assert!(live_alert("claude", two).unwrap().ends_with("attempt 2/10"));
     }
 
     #[test]
     fn live_alert_ignores_identifiers_that_contain_retry_and_error() {
-        // 2026-10-03 console-rpa：heredoc 寫測試檔，畫面上的函式名被掛成黃色重試警示。
         let screen = "⏺ Bash(cat > tests/test_ctbc.py <<'EOF'\n      def test_otp_rejected_on_retry_still_propagates_stage_error():\n      EOF)\n";
         assert_eq!(live_alert("claude", screen), None);
         let real = "✻ API error · Retrying in 3s · attempt 1/10\n";
@@ -2019,36 +1938,25 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn live_alert_ignores_the_agent_talking_about_errors() {
-        // Prose that merely mentions an error is not a banner: no retry token.
         assert!(live_alert("claude", "I fixed the error in the parser.").is_none());
-        // A retry token with no error is not one either.
         assert!(live_alert("claude", "Retrying the test suite now").is_none());
-        // Long prose that happens to contain both stays out.
         let prose = format!("The {} error means we should retry the request later on.", "x".repeat(300));
         assert!(live_alert("claude", &prose).is_none());
-        // Printed data saying error + attempt (sqlite row / JSON, 2026-09-08).
         let row = r#"62|note||{"action":"protocol_error","attempt":3,"bot":"t1-dev-2","error":"report.status 必須是 done 或 blocked"}|06:12"#;
         assert!(live_alert("claude", row).is_none());
         assert!(live_alert("claude", r#"{"error":"timeout","retry":true}"#).is_none());
-        // …but a real banner still gets through.
         assert!(live_alert("claude", "API error · Retrying in 2s · attempt 2/10").is_some());
-        // 回覆裡談到 API error 處理的散文（有 error、沒有重試字眼、沒有冒號）也不是橫幅。
         assert_eq!(live_alert("claude", "API error handling 已補上，之後再看"), None);
     }
 
     #[test]
     fn live_alert_ignores_code_and_tool_output_that_says_error_and_retrying() {
-        // 2026-10-13 A-leader：sed 印出 herdr_upgrade.rs 的一行，黃色錯誤橫幅的內容就是這一行（#1686）。
         let code = r#"Err(e) => tracing::warn!(error = ?e, "herdr update: cannot read bot states; retrying"),"#;
         let screen = format!("❯ 看一下 herdr_upgrade\n⏺ Bash(sed -n '1,80p' daemon/src/herdr_upgrade.rs)\n  ⎿  {code}\n✻ Thinking…\n");
         assert_eq!(live_alert("claude", &screen), None);
-        // 工具輸出的續行（沒有 ⎿）也一樣。
         assert_eq!(live_alert("claude", &format!("      {code}")), None);
-        // 工具輸出裡剛好有一行 `API error · Retrying`（例如 cat 一份 log）也不是 CLI 的橫幅。
         assert_eq!(live_alert("claude", "  ⎿  API error · Retrying in 3s · attempt 1/10"), None);
-        // codex 的程式碼片段同理：只認固定前綴，不看 error／retrying 字眼。
         assert_eq!(live_alert("codex", &format!("• {code}")), None);
-        // 真的橫幅（✻ 前綴、codex 的 stream error）照樣認。
         assert!(live_alert("claude", "✻ API error · Retrying in 3s · attempt 1/10").is_some());
         assert!(live_alert("codex", "stream error: 503 upstream; retrying 2/5 in 1s").is_some());
     }
@@ -2068,7 +1976,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     /// grok 1.0.13 `agent.read {source: visible}` (appendix F), columns narrowed.
     const GROK_SCREEN: &str = "\
   /private/tmp/scratch/grok-ws                                       15K / 500K
-
 
      ❯ Reply with exactly GROK-OK                                        2:09 AM
                                                                                 █
@@ -2096,21 +2003,15 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     #[test]
     fn the_real_empty_composers_of_every_provider_are_empty() {
         use crate::lifecycle::{box_state, BoxState};
-        // grok：`│ ❯   │` 裡的結構空白、`╰── Grok 4.6 (low) · always-approve ─╯` 框底。
         assert_eq!(box_state("grok", GROK_SCREEN), BoxState::Empty);
         assert_eq!(box_state("grok", GROK_SCREEN_NARROW), BoxState::Empty);
         assert_eq!(box_state("grok", GROK_AWAITING), BoxState::Empty, "窄到只剩 `╰─ Grok ─╯`");
-        // codex：沒有框。純文字快照看不出佔位字是不是有人打的 → 保守當非空（sol 第九輪 #2）。
         assert_eq!(box_state("codex", CODEX_IDLE_SPLASH), BoxState::NonEmpty, "純文字的 › Ask Codex to do anything");
         assert_eq!(box_state("codex", CODEX_STARTUP), BoxState::NonEmpty, "純文字的 › Write tests for @filename");
-        // 同一列用 ANSI 讀（2026-09-14 w168:p3E 實機）：佔位字被畫成 dim（SGR 2）→ 才是空框。
         let styled = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", CODEX_PLACEHOLDER_ANSI, 1);
         assert_eq!(box_state("codex", &styled), BoxState::Empty);
-        // claude 舊版：`│ ❯ │` 框。
         assert_eq!(box_state("claude", THINKING_ONLY), BoxState::Empty);
-        // claude 現行：兩條全寬框線中間的輸入列，裡面是使用者真的打的字 → 非空。
         assert_eq!(box_state("claude", CLAUDE_UNSENT_PROMPT), BoxState::NonEmpty);
-        // agy 1.5.9：純文字或 ANSI 讀取下，模式循環提示（如 Auto mode）與預設空輸入框都是空框。
         assert_eq!(box_state("agy", AGY_IDLE_SPLASH_AUTO), BoxState::Empty);
         assert_eq!(box_state("agy", AGY_IDLE_SPLASH_AUTO_ANSI), BoxState::Empty);
         assert_eq!(box_state("agy", AGY_IDLE_SPLASH_ACCEPT_EDITS), BoxState::Empty);
@@ -2186,7 +2087,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         let typed = "\u{1b}[0m\u{1b}[1m›\u{1b}[0m Ask Codex to do anything";
         let s = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", typed, 1);
         assert_eq!(box_state("codex", &s), BoxState::NonEmpty);
-        // 一半 dim、一半不是：也不算佔位字。
         let half = "›\u{1b}[0m \u{1b}[2mAsk Codex\u{1b}[22m to do anything";
         let s = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", half, 1);
         assert_eq!(box_state("codex", &s), BoxState::NonEmpty);
@@ -2202,7 +2102,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert_eq!(box_state("codex", &codex_typed), BoxState::NonEmpty, "佔位字多一個字就是使用者的字");
         let codex_space = CODEX_IDLE_SPLASH.replacen("› Ask Codex to do anything", "›  ", 1);
         assert_eq!(box_state("codex", &codex_space), BoxState::NonEmpty, "marker 後多打一格");
-        // agy：真的打字（包含多打字、加字在 placeholder 後面）就是非空，草稿能如實讀出。
         let agy_typed = AGY_IDLE_SPLASH_AUTO.replace(
             "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
             "> test draft from user",
@@ -2261,11 +2160,9 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     const GROK_ATTACHMENT_ECHO: &str = "\
    main ~/project/agents-manager                                          250K / 500K
 
-
      ❯ 是否能有更好的ui表示法                                                7:25 PM
 
        附加圖片（請讀取這個檔案來查看）： …
-
 
      ◆ user_prompt_submit  [hooks: 1]
 
@@ -2329,8 +2226,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(is_clipped_echo("附加圖片（請讀取這個檔案來查看）： …", &["附加圖片（請讀取這個檔案來查看）：", "/tmp/a.png"]));
     }
 
-    // composer check behind the stall watchdog's Enter nudge
-
     /// claude 2.1.263 compacting a 673k session (2026-09-07 11:21): Enter swallowed, text left in the box.
     const CLAUDE_UNSENT_PROMPT: &str = "\
 ❯ 直接做，且要確保claude裝有herdr 的skill
@@ -2353,7 +2248,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn an_unsent_prompt_is_seen_in_the_composer() {
-        // The box, not the transcript echo; `[Image #6]` in front doesn't hide it.
         assert_eq!(
             composer_text("claude", CLAUDE_UNSENT_PROMPT).unwrap(),
             "[Image #6]試著對claude max方案增加 fable用量的讀取\n附加圖片（請讀取這個檔案來查看）："
@@ -2385,7 +2279,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     #[test]
     fn other_text_in_the_composer_is_not_our_prompt() {
         assert!(!composer_holds_prompt("claude", CLAUDE_UNSENT_PROMPT, "完全不一樣的另一個問題"));
-        // grok's empty box (`│ ❯ │`) reads as empty through its border glyphs too.
         assert_eq!(composer_text("grok", GROK_SCREEN), None);
     }
 
@@ -2400,12 +2293,9 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
             "❯ [Pasted text #3 +6 lines]",
         );
         assert!(composer_holds_prompt("claude", &folded, sent));
-        // 行數不同：不是我們的貼上，不按 Enter。
         assert!(!composer_holds_prompt("claude", &folded, "第一行\n第二行"));
-        // 摺起來的貼上後面還有別的字：使用者在打字，不動它。
         let typing = folded.replace("+6 lines]", "+6 lines] 再補一句");
         assert!(!composer_holds_prompt("claude", &typing, sent));
-        // 只有 claude 會摺。
         assert!(!composer_holds_prompt("codex", &folded, sent));
     }
 
@@ -2421,7 +2311,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         );
         assert_eq!(composer_text("claude", &screen).as_deref(), Some(edited));
         assert!(!composer_holds_prompt("claude", &screen, sent));
-        // 同一則原文沒被改過的時候照樣認得（上面那個 fixture 的寫法）。
         let intact = CLAUDE_UNSENT_PROMPT.replace(
             "❯ [Image #6]試著對claude max方案增加 fable用量的讀取\n  附加圖片（請讀取這個檔案來查看）：",
             &format!("❯ {sent}"),
@@ -2458,13 +2347,10 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         let lines = grok_limit_notice_lines(GROK_LIMIT);
         assert!(lines.iter().any(|l| l.contains("usage balance exhausted")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("You hit your weekly limit")), "{lines:?}");
-        // 畫面上重畫很多次，每一句只記一筆。
         assert_eq!(lines.len(), lines.iter().collect::<std::collections::HashSet<_>>().len());
 
-        // 一般畫面、選項行本身都不算。
         assert!(grok_limit_notice_lines("⏺ 做完了\n  ❯ \n").is_empty());
         assert!(grok_limit_hit_line("  ┃  1 (○) Upgrade tier      Upgrade to a higher tier").is_none());
-        // 402 要跟 grok 一起出現才算，別的 CLI 的 402 不借用這條。
         assert!(grok_limit_hit_line("Request failed (402): something else").is_none());
         assert!(grok_limit_hit_line("┃  Turn failed: Request failed (402): Grok Build usage balance exhausted").is_some());
     }
@@ -2476,7 +2362,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn a_mid_tool_call_screen_is_not_an_answer() {
-        // The exact shape that closed a turn with the wrong content (2026-09-07).
         assert!(is_tool_progress("Running 1 shell command…\n\nTip: Run /install-slack-app to use it"));
         assert!(is_tool_progress("Running 4 shell commands…"));
         assert!(is_tool_progress("  Running 1 shell command…  \n  esc to interrupt  "));
@@ -2484,20 +2369,16 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn a_turning_spinner_means_the_turn_is_not_over() {
-        // The screen that closed a turn with chrome as its answer (2026-09-07 11:17).
         let screen = "⏺ 上一句回覆\n\n✢ Baking…\n  ⎿  Tip: Use /memory to view and manage Claude memory\n✗ Auto-update failed · Run claude doctor\n❯ ";
         assert!(pane_still_busy(screen));
         assert!(pane_still_busy("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
         assert!(pane_still_busy("⠦ Thinking… 52s"));
-        // Finished-spinner lines are not "busy".
         assert!(!pane_still_busy("✻ Crunched for 9s · done 11:35 PM\n❯ "));
         assert!(!pane_still_busy("✻ Baked for 25m 50s · done 11:01 AM"));
         assert!(!pane_still_busy("⏺ 做完了。\n❯ "));
-        // And none of that chrome survives into a stored reply.
         let screen = "❯ hi\n✢ Baking…\nTip: Use /memory\n✗ Auto-update failed · Run claude doctor\n⏺ 真正的回覆\n╭───╮\n│ ❯ │\n╰───╯";
         assert_eq!(extract_reply("claude", screen).unwrap(), "真正的回覆");
         assert_eq!(clean_screen("claude", screen).unwrap(), "⏺ 真正的回覆");
-        // Chrome alone is nothing at all — never a stored "reply".
         assert!(clean_screen("claude", "❯ hi\n✢ Baking…\nTip: Use /memory\n✗ Auto-update failed · Run claude doctor\n❯ ").is_none());
     }
 
@@ -2506,24 +2387,19 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     fn the_update_banner_above_the_composer_is_not_part_of_the_reply() {
         let screen = "❯ 看一下孫代\n⏺ parent_bot_id 正確指向 is102103。\n  要不要我開一張 UI issue。\n\n✻ Worked for 15s · done 12:49 · 1 shell still running\n                                   current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update\n──────\n❯\n──────\n  xavie | agents-manager | OP5 H 47% | 5h:94%\n";
         assert_eq!(extract_reply("claude", screen).unwrap(), "parent_bot_id 正確指向 is102103。\n  要不要我開一張 UI issue。");
-        // 還沒裝好時只有前半段；裝好後被擠到只剩後半段也一樣。
         for banner in ["current: 2.1.276 · latest: 2.1.277", "✔ Update installed · Restart to update"] {
             let s = screen.replace("current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update", banner);
             assert!(!extract_reply("claude", &s).unwrap().contains("2.1.27"), "{banner}");
             assert!(!extract_reply("claude", &s).unwrap().contains("Restart"), "{banner}");
         }
-        // 回覆裡**講到**這句話的照留。
         let talk = "❯ hi\n⏺ 狀態列會印 current: 2.1.276 · latest: 2.1.277 ✔ Update installed · Restart to update，要重啟才套用。\n╭───╮\n│ ❯ │\n╰───╯";
         assert!(extract_reply("claude", talk).unwrap().contains("要重啟才套用"));
     }
 
     #[test]
     fn a_real_reply_is_still_stored() {
-        // Finished tools (`Ran`, no ellipsis) come with the answer; do not throw that away.
         assert!(!is_tool_progress("Ran 4 shell commands\n\n已追加給同一個 agent 一起做。"));
-        // A reply that merely talks about running commands is a reply.
         assert!(!is_tool_progress("我會 Running 1 shell command… 之後再回報結果"));
-        // A lone Tip line is a different symptom and must not be swallowed here.
         assert!(!is_tool_progress("Tip: Run /ultrareview for a cloud-based review"));
         assert!(!is_tool_progress(""));
     }
@@ -2538,8 +2414,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
   tony. | pt | HAI4.5 | 5h:- | 7d:-
   ⏵⏵ bypass permissions on (shift+tab to cycle)
 ";
-
-
 
     /// 2026-09-06: lines 2..n of a multi-line prompt echo were stored as the agent's answer.
     const ECHOED_BACK: &str = "\
@@ -2559,7 +2433,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     #[test]
     fn an_unknown_spinner_glyph_never_reaches_a_message() {
-        // `✛` is in no glyph list, so only `is_activity_shape` keeps it out of `clean_screen`.
         assert_eq!(clean_screen("claude", "❯ go\n✛ Generating… (4s · thinking)\n"), None);
     }
 
@@ -2575,34 +2448,27 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         let sent = "不要依剩餘量重排 固定 cc0 cc1 codex grok";
         let shredded = "要\n依\n剩\n餘\n量\n重\n排\n固\n定\nc\nc\n0\nc\nc\n1\nc\no\nd\ne\nx\ng\nr\no\nk";
         assert_eq!(strip_echoed_prompt(shredded, sent), "");
-        // …and with a real answer after it, only the echo goes.
         let with_reply = format!("{shredded}\n好\n的");
         assert_eq!(strip_echoed_prompt(&with_reply, sent), "好\n的");
     }
 
     #[test]
     fn the_squashed_strip_does_not_eat_a_reply_that_merely_starts_alike() {
-        // Shares only three characters with the prompt: nowhere near SQUASH_MIN.
         assert_eq!(strip_echoed_prompt("不要這樣做，我改用別的方法。", SENT), "不要這樣做，我改用別的方法。");
-        // No prompt at all to match against.
         assert_eq!(strip_echoed_prompt("PONG", "hi"), "PONG");
     }
 
     #[test]
     fn shredded_output_is_recognised() {
         assert!(is_shredded("要\n依\n剩\n餘\n量\n重\n排\n固\n定"));
-        // A normal reply is not shredded, however many short lines it happens to have.
         assert!(!is_shredded("好的，我來處理。\n第一步：讀設定。\n第二步：改程式。"));
-        // Too few lines to judge.
         assert!(!is_shredded("要\n依\n剩"));
     }
 
     #[test]
     fn strip_echoed_prompt_leaves_a_partial_match_alone() {
-        // The pane wrapped line 2 away: dropping half a real reply is worse than a duplicate.
         let text = "1 沒事 bot 不會需要停止的動作\n好的，我來處理。";
         assert_eq!(strip_echoed_prompt(text, SENT), text);
-        // A single-line prompt has no tail to strip.
         assert_eq!(strip_echoed_prompt("PONG", "ping"), "PONG");
     }
 
@@ -2630,16 +2496,12 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     fn a_pane_too_narrow_to_read_is_recognised() {
         let shredded = "要\n依\n剩\n餘\n量\n重\n排\n固\n定\nc\nc\n0\nHelp impro\n";
         assert!(is_shredded(shredded));
-        // A normal reply must never be mistaken for one, however short its lines are.
         assert!(!is_shredded("好的，我來處理。\n改了三個檔案：\n- a.rs\n- b.rs\n- c.rs\n都跑過測試了。\n"));
-        // Too little to judge: a two-line answer is not evidence of a broken pane.
         assert!(!is_shredded("好\n的\n"));
 
-        // Verbatim `w8:pK` (2026-09-06): short-line count alone let it through; widest row = 4 chars gives it away.
         let real = "381K\n❯\n█\n█\n▼\nHel\nOff\nby\ndef\nau…\n";
         assert!(is_shredded(real));
 
-        // The width rule must not fire on a narrow *but legible* reply.
         assert!(!is_shredded("已修好。\n改了 db.rs。\n測試全過。\n沒有其他影響。\n重啟後生效。\n請確認。\n"));
     }
 
@@ -2648,7 +2510,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
         assert!(pane_awaits_input("grok", GROK_AWAITING));
         assert!(pane_awaits_input("claude", "⏺ done\n╭────╮\n│ ❯  │\n╰────╯\n"));
         assert!(pane_awaits_input("codex", "• done\n╭────╮\n│ ›  │\n╰────╯\n"));
-        // True while claude works too — why the caller pairs it with "nothing changed for N polls".
         assert!(pane_awaits_input("claude", THINKING_ONLY));
     }
 
@@ -2656,7 +2517,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     fn a_composer_with_text_in_it_is_not_awaiting_input() {
         assert!(!pane_awaits_input("grok", "╭────────╮\n│ ❯ hi   │\n╰─ Grok ─╯\n"));
         assert!(!pane_awaits_input("claude", "⏺ still writing the answer\n"));
-        // Only the tail is searched: an old empty prompt scrolled far up must not count.
         let mut s = String::from("╭──╮\n│ ❯ │\n╰──╯\n");
         for _ in 0..20 {
             s.push_str("output line\n");
@@ -2714,7 +2574,6 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
     fn live_activity_falls_back_to_agy_running_row() {
         let s = "> go\n● Running (cd x && cargo test -p a -- b::) (ctrl+o to expand)\n────\nGemini 4 Neon · medium · /tasks\n";
         assert_eq!(live_activity("agy", s).unwrap(), "Running cd x && cargo test -p a -- b::");
-        // 只有背景工作數、沒有活動列：不算活動
         assert_eq!(live_activity("agy", "> go\nGemini 4 Neon · medium · 2 task(s) · /tasks\n"), None);
     }
 
@@ -2791,13 +2650,10 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
     /// 2026-09-13（GROK／w168:pN）：15 秒還是空 `❯` 被當成等輸入，回覆 36 秒後才到。沒印過東西要多等。
     #[test]
     fn a_pane_that_never_rendered_anything_gets_a_longer_grace() {
-        // 只有「herdr 說閒著」+「印過東西然後停住」才走短的那條。
         assert_eq!(idle_threshold(true, "idle"), IDLE_POLLS);
         assert_eq!(idle_threshold(false, "idle"), IDLE_POLLS_SILENT);
-        // herdr 說還在跑：可能真的在做事（2026-09-13 GROK）。
         assert_eq!(idle_threshold(true, "working"), IDLE_POLLS_SILENT);
         assert_eq!(idle_threshold(false, "working"), IDLE_POLLS_SILENT);
-        // 讀不到狀態時不要比原本更急。
         assert_eq!(idle_threshold(true, ""), IDLE_POLLS);
         assert!(IDLE_POLLS_SILENT > IDLE_POLLS * 3, "要明顯長過那 14 秒，不然等於沒改");
     }
@@ -2809,7 +2665,6 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
         let got = last_prompt_echo_text("claude", screen).expect("有回音");
         assert!(got.starts_with("請直接呼叫 AskUserQuestion"), "第一行還在：{got}");
         assert!(got.contains("問完就停著等我回答。"), "折行的下半句要收進來：{got}");
-        // 工具結果那行不是使用者說的話。
         assert!(!got.contains("Fable limit"), "`⎿` 開頭的是 claude 的輸出：{got}");
     }
 
@@ -2823,18 +2678,13 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
 
     #[test]
     fn echo_continuation_stops_at_anything_that_is_not_the_same_sentence() {
-        // 沒縮排 = 下一塊內容
         assert_eq!(echo_continuation("claude", "⏺ 我看了一下"), None);
         assert_eq!(echo_continuation("claude", "done"), None);
-        // 縮排但是輸出標記／狀態列／框線
         for l in ["  ⎿  結果", "  ⏺ 回覆", "  ✻ Worked for 0s", "  │ box", "  ╭─────"] {
             assert_eq!(echo_continuation("claude", l), None, "{l} 不是續行");
         }
-        // 空行
         assert_eq!(echo_continuation("claude", "   "), None);
-        // 下一個回音（使用者連送兩句）
         assert_eq!(echo_continuation("claude", "  ❯ 第二句"), None);
-        // 真的續行
         assert_eq!(echo_continuation("claude", "  第二半句"), Some("第二半句"));
     }
 
@@ -2864,7 +2714,6 @@ Gemini 4 Neon · medium · 1 task(s) · /tasks
         assert_eq!(last_prompt_echo_text("unknown", "❯ hello\n"), None);
     }
 }
-
 
 /// #207：codex 0.155.1 真畫面（SPEC §4.3）。私有 prefix 的 0.155.1、拋棄式 `CODEX_HOME`、
 /// AG Man 不會認領的 pane。`idle`／`working` 是 live TUI；`working-summary` 是
@@ -2903,7 +2752,7 @@ mod codex_0155_screen_tests {
         "done 3:24 PM",
         "Worked for 2m 5s · done 3:24 PM",
         "done Sep 6 at 2:32 PM",
-        "done Aug 2 at 3:00 AM", // 真畫面
+        "done Aug 2 at 3:00 AM",
         "Worked for 1h 2m 3s · done Sep 6, 2000 at 2:32 PM",
         "Worked for 2m 5s",
         "Worked for 2m 5s · done 12:05 AM · Local tools: 2 calls (1.2s)",
@@ -3123,7 +2972,6 @@ mod codex_01593_banner_tests {
     }
 }
 
-
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_bullet_row_tests {
     use super::*;
@@ -3137,7 +2985,6 @@ mod codex_bullet_row_tests {
         let screen = "› 專案在哪？\n• 三個位置：\n  - agents-manager · ~/project/agents-manager 是根目錄\n  - web · 前端介面\n\n› \n\n  gpt-6.1-sol default · ~/project/agents-manager\n";
         let reply = extract_reply("codex", screen).expect("reply");
         assert!(reply.contains("- agents-manager · ~/project/agents-manager 是根目錄"), "{reply}");
-        // 真的狀態列照舊是雜訊。
         assert!(is_codex_status_row("  gpt-6.1-sol default · ~/project/agents-manager"));
     }
 }
@@ -3175,7 +3022,6 @@ mod codex_warning_footer_tests {
             assert_eq!(clean_screen("codex", &screen).as_deref(), Some("• 修復完成。"));
             assert_eq!(crate::lifecycle::poller::live_reply("codex", &screen).as_deref(), Some("修復完成。"));
             assert!(crate::lifecycle::poller::pane_awaits_input("codex", &screen));
-            // A clipped snapshot can retain the footer without its composer row.
             let clipped = screen.replace("\n› \n", "\n");
             assert_eq!(extract_reply("codex", &clipped).as_deref(), Some("修復完成。"));
             assert_eq!(crate::lifecycle::poller::live_reply("codex", &clipped).as_deref(), Some("修復完成。"));
@@ -3212,13 +3058,11 @@ mod issue_1664_screenshot_tests {
         assert_eq!(extract_reply("codex", snap), None);
         assert_eq!(crate::lifecycle::poller::live_reply("codex", snap), None);
 
-        // 帶警告記號之快捷鍵列亦能正常辨識為 chrome
         let snap_with_warning = "  Worked for 11s • 5:04 AM\n\n  ← for agents · ? for shortcuts  ⚠ 1 warning · f2 to view";
         assert_eq!(clean_screen("codex", snap_with_warning), None);
         assert_eq!(extract_reply("codex", snap_with_warning), None);
     }
 }
-
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod synthetic_codex_compaction_tests {
@@ -3227,8 +3071,6 @@ mod synthetic_codex_compaction_tests {
     #[test]
     fn synthetic_completed_cells_keep_the_last_answer_without_inferring_compaction() {
         let compact = "• Old answer\nWorked for 21s • 11:03 AM\n• Context compacted · 1m 14s\nWorked for 1m 14s • 11:57 AM\n› \n";
-        // With independent rollout evidence, stripping the compact cell leaves
-        // no answer. The generic extractor still preserves identical normal prose.
         let tail = codex_compaction_tail(compact).unwrap();
         assert_eq!(extract_reply("codex", tail).or_else(|| clean_screen("codex", tail)), None);
         let continued = compact.replace("› \n", "• New answer\nWorked for 3s • 11:58 AM\n› \n");
@@ -3427,7 +3269,6 @@ mod agy_1_5_12_scroll_indicator_tests {
         assert!(is_agy_scroll_indicator("\u{1b}[38;5;8m↓ 25 lines · 2 turns\u{1b}[0m"));
         assert!(is_agy_scroll_indicator("\u{1b}[2m↓ 1 line · 1 turn\u{1b}[22m"));
 
-        // Negative cases
         assert!(!is_agy_scroll_indicator(""));
         assert!(!is_agy_scroll_indicator("↓"));
         assert!(!is_agy_scroll_indicator("25 lines · 2 turns"));
@@ -3462,13 +3303,11 @@ mod agy_1_5_12_scroll_indicator_tests {
              ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
         );
 
-        // 1. Prompt echo text is cleanly extracted
         assert_eq!(
             last_prompt_echo_text("agy", &screen).as_deref(),
             Some("請幫我重構資料庫模組")
         );
 
-        // 2. Reply is cleanly extracted without leaking rules, scroll indicator, or prompt
         let reply = clean_screen("agy", &screen).expect("clean reply");
         assert!(reply.contains("已成功重構 db.rs 模組，所有測試皆已通過。"), "{reply}");
         assert!(!reply.contains("↓ 25 lines"), "{reply}");
@@ -3476,11 +3315,9 @@ mod agy_1_5_12_scroll_indicator_tests {
         assert!(!reply.contains("Antigravity CLI"), "{reply}");
         assert!(!reply.contains("? for shortcuts"), "{reply}");
 
-        // 3. Waiting state and empty prompt box are detected
         assert_eq!(box_state("agy", &screen), BoxState::Empty);
         assert!(pane_awaits_input("agy", &screen));
 
-        // 4. When user has typed into the prompt box, BoxState is NonEmpty and draft text is extracted
         let typed_screen = screen.replace("\n>\n", "\n> 新的問題\n");
         assert_eq!(box_state("agy", &typed_screen), BoxState::NonEmpty);
         assert_eq!(composer_text("agy", &typed_screen).as_deref(), Some("新的問題"));
@@ -3506,19 +3343,16 @@ mod agy_1_5_12_scroll_indicator_tests {
              ? for shortcuts                                                                 Gemini 3.8 Flash · high\n"
         );
 
-        // 1. Prompt echo text is cleanly extracted
         assert_eq!(
             last_prompt_echo_text("agy", &screen).as_deref(),
             Some("檢查修復")
         );
 
-        // 2. Reply is cleanly extracted without leaking rules or scroll indicator
         let reply = clean_screen("agy", &screen).expect("clean reply");
         assert!(reply.contains("所有測試已全數通過，無任何報錯。"), "{reply}");
         assert!(!reply.contains("↓ 12 lines"), "{reply}");
         assert!(!reply.contains(RULE), "{reply}");
 
-        // 3. Waiting state and empty prompt box (with placeholder) are detected
         assert_eq!(box_state("agy", &screen), BoxState::Empty);
         assert_eq!(composer_text("agy", &screen), None);
         assert!(pane_awaits_input("agy", &screen.replace("> \u{1b}[38;5;8mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)\u{1b}[0m", ">")));

@@ -16,7 +16,6 @@ mod limit_hit_quota_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         apply(&app).await;
-        // 改成已經過期，模擬「等到重置時間、重送一次，又撞到同一句」。
         {
             let mut q = app.quotas.lock().await;
             let hit = q.get_mut("codex").unwrap().limit_hit.as_mut().unwrap();
@@ -67,7 +66,6 @@ mod limit_hit_quota_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot, run) = codex_run(&env, None, &banner_screen()).await;
-        // 這個 run 已經讀過一次畫面（那時沒有橫幅），這張是新的。
         crate::lifecycle::limit_banner::sighting(&run, "", FAR_LIMIT, &[]);
         let a = app.clone();
         crate::lifecycle::race_point::arm("codex_notice_after_insert", &bot.id, move || async move {

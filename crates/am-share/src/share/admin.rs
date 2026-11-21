@@ -54,7 +54,6 @@ pub async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::D
         "shareable": true,
         "enabled": row.is_some(),
         "url": url,
-        // 加 `token` 欄之前開的分享只有 hash：連結照樣能用，但拿不回完整網址，重產一次就有。
         "needs_rotate": row.as_ref().is_some_and(|r| r.token.is_none()),
         "token_hint": row.as_ref().map(|r| r.token_hint.clone()),
         "created_at": row.as_ref().map(|r| r.created_at.clone()),
@@ -132,7 +131,6 @@ pub async fn reserve_remote_share_bot(
     folder: &ShareFolderIn,
     replay: bool,
 ) -> Result<(String, bool), LcError> {
-    // 整段建立都綁在同一個權威圍籬上：中途 repoint 之後，後面的步驟會拿不到權威（fail closed），不會寫到換過的主機（#1026）。
     let conn = FencedConn::new(app.hosts().fence(host).await.ok_or_else(|| cage::preflight_conflict(crate::share::remote_fs::PreflightError::Unreachable))?);
     if profile == store::PROFILE_RESTRICTED {
         cage::preflight_restricted(&conn).await?;
@@ -237,7 +235,6 @@ fn remote_folder_error(e: RfsError) -> LcError {
 pub async fn finish_restricted(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
     if created {
         if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(app.db()).await {
-            // 啟動時以 `shared_bots.workspace` 為準（`cage::prepare`），這裡寫不進去只影響側欄顯示的目錄。
             tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its folder");
         }
         crate::outbox::mark_share_keep(app.data_dir(), bot_id);

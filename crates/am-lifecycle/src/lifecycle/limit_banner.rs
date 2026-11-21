@@ -178,7 +178,6 @@ mod tests {
         assert_eq!(sighting(run, &again, banner, &banners), Sighting::New, "同一句又印一次＝真的又撞到");
         let scrolled = "› 繼續\n".to_string();
         assert_eq!(sighting(run, &scrolled, banner, &banners), Sighting::Old, "捲出畫面次數變少，不是新撞到");
-        // 折行把時間拆到下一行也認得是同一張。
         let wrapped = "■ You've hit your usage limit. Upgrade to Pro, or try again at Sep 19th, 2026\n6:43 PM.\n";
         assert_eq!(banner_count(wrapped, &banner_key(banner)), 1);
     }
@@ -188,10 +187,8 @@ mod tests {
     fn the_terminal_fallback_does_not_revive_a_replayed_banner() {
         let banner = FORK_REPLAY.lines().find(|l| l.contains("hit your usage limit")).unwrap().trim_start_matches("■ ").to_string();
         let hits = vec![banner.clone()];
-        // 同一畫面有比較新、還有餘裕的狀態列 → 不算（就算擷取從沒讀過這個 run）。
         assert_eq!(fallback_hit("run-fallback-headroom", FORK_REPLAY, hits.clone(), hits.clone()), None);
 
-        // 沒有狀態列可比時：擷取已經把它記成歷史 → 不算；同一句又印一次（次數加一）→ 算。
         let no_status = format!("■ {banner}\n\n› Ask Codex to do anything\n");
         let run = "run-fallback-seen";
         assert_eq!(sighting(run, &no_status, &banner, &hits), Sighting::FirstRead);
@@ -199,7 +196,6 @@ mod tests {
         let again = format!("{no_status}\n› 繼續\n\n■ {banner}\n");
         assert_eq!(fallback_hit(run, &again, hits.clone(), hits.clone()).as_deref(), Some(banner.as_str()), "又印了一次＝真的撞到");
 
-        // 擷取沒記過（例如 daemon 中途重啟）且沒有狀態列：照舊算數，不能漏掉真的撞限。
         assert_eq!(fallback_hit("run-fallback-unknown", &no_status, hits.clone(), hits).as_deref(), Some(banner.as_str()));
     }
 

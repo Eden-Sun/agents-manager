@@ -61,7 +61,6 @@
         run.abort();
         let _ = run.await;
         let _ = std::fs::remove_file(&pidfile);
-        // 還在跑才算活著；殘留的 zombie 已經不在執行了。
         let still_running = |pid: &str| {
             std::process::Command::new("ps")
                 .args(["-o", "stat=", "-p", pid])

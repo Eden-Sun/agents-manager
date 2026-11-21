@@ -45,7 +45,6 @@ pub fn parse_summary(status: &str, shortstat: &str) -> GitSummary {
         } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
             s.upstream = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            // `+3 -1`
             for tok in rest.split_whitespace() {
                 if let Some(n) = tok.strip_prefix('+') {
                     s.ahead = n.parse().unwrap_or(0);
@@ -59,7 +58,6 @@ pub fn parse_summary(status: &str, shortstat: &str) -> GitSummary {
             s.untracked += 1;
         }
     }
-    // ` 3 files changed, 12 insertions(+), 4 deletions(-)`
     for part in shortstat.split(',') {
         let part = part.trim();
         let n: i64 = part.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
@@ -78,12 +76,9 @@ pub async fn summary(app: &Arc<App>, id: &str) -> Result<GitSummary, LcError> {
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     if !st.ok() {
-        // Not a repository (or git missing): the chip simply does not show.
         return Ok(GitSummary::default());
     }
-    // 沒有任何已追蹤的改動（`1`／`2`／`u` 列）時 shortstat 一定是空的：遠端就省一趟 ssh（同 `parse_summary` 的計數）。
     let tracked_changes = st.stdout.lines().any(|l| l.starts_with("1 ") || l.starts_with("2 ") || l.starts_with("u "));
-    // `HEAD` fails on an unborn branch; an empty shortstat then just means zero.
     let stat = if !tracked_changes {
         String::new()
     } else {
@@ -306,7 +301,6 @@ mod tests {
         let seen = calls.clone();
         crate::hosts::set_ssh_fake(&host, move |script| {
             seen.lock().unwrap().push(script.to_string());
-            // `git()` 把每個參數各自單引號包起來（`'status' '--porcelain=v2'`），所以認參數本身。
             let body = if script.contains("'--porcelain=v2'") {
                 status
             } else if script.contains("'--shortstat'") {
@@ -314,7 +308,6 @@ mod tests {
             } else {
                 ""
             };
-            // 遠端輸出的格式同 `git_sh::wrap_remote_script`：內容後面跟 `__am_rc=<代碼>`（那個常數是 am-base 的私有值）。
             Ok(format!("{body}\n__am_rc=0\n"))
         });
         (env, project, calls)

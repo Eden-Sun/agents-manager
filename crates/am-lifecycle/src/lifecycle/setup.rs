@@ -521,10 +521,6 @@ am_herdr "$@" </dev/null >/dev/null 2>>"$DIR/hook.log" &
 exit 0
 "#;
 
-// grok (SPEC §12): 1.0.13 has no per-launch hook flag, so one global hooks file runs a static
-// dispatcher that reads `AM_BOT_ID` / `AM_HOOK_TOKEN` / `AM_PORT` from the pane env and exits 0
-// when unset — the user's own grok sessions are unaffected.
-
 pub const GROK_HOOKS_FILE: &str = "agents-manager.json";
 pub const GROK_DISPATCH_SH: &str = "grok-hook.sh";
 
@@ -592,7 +588,6 @@ fn install_local_grok_hook(app: &(impl crate::capabilities::DataDir + crate::cap
 async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option<&str>) -> anyhow::Result<()> {
     let home = conn.home().await?;
     let root = crate::hosts::remote_root_for(instance);
-    // 按實例分址：共用一個 dispatcher 的話，兩顆 daemon 會互相把它改寫成指向自己（sol 三輪）。
     let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
     let read = conn.ssh_exec(&remote_grok_read_script(&hooks_dir, &grok_hooks_file(instance))).await?;
@@ -600,8 +595,6 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     let merged = super::grok_hook::hooks_json_merged(existing.as_ref().map(|(text, _)| text.as_str()), &dispatcher);
     let expected = existing.as_ref().map(|(_, hash)| hash.as_str());
     let script = format!(
-        // `$G` 是使用者自己的 `~/.grok/hooks`：在 daemon 端合併、保留其他項目，再以同目錄原子替換；
-        // 遠端檔案在讀取後若被改過，hash fence 會拒絕覆蓋。
         "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\nWT=$(mktemp \"$W.tmp.XXXXXX\")\ncat > \"$WT\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$WT\"\nmv -f \"$WT\" \"$W\"\nG={g}\nmkdir -p \"$G\"\n[ ! -L \"$G\" ] && [ -d \"$G\" ] || {{ printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }}\nchmod 700 \"$G\"\ncd \"$G\"\nF={file}\n{guard}\nT=$(mktemp .agents-manager.XXXXXX)\ntrap 'rm -f \"$T\"' EXIT HUP INT TERM\ncat > \"$T\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$T\"\n{guard}\n{publish}\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
         wrap = remote_grok_dispatch_sh(&root, instance),
@@ -655,7 +648,6 @@ if [ ! -e "$F" ] && [ ! -L "$F" ]; then printf 'AM_GROK_MISSING\n'; exit 0; fi
     )
 }
 
-
 fn parse_remote_grok_file(out: &str) -> anyhow::Result<Option<(String, String)>> {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
@@ -700,7 +692,6 @@ pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<
         anyhow::bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
     let home = conn.home().await?;
-    // 隔離實例在遠端也要有自己的根（`instances/<slug>`），否則同 id 的 bot 會共用 spool。
     let dir = format!("{home}/{}/bots/{bot_id}", crate::hosts::remote_root_for(instance));
     Ok(RemoteHookPaths { hook_sh: format!("{dir}/hook.sh"), settings: format!("{dir}/claude-settings.json"), dir })
 }
@@ -708,13 +699,8 @@ pub async fn remote_bot_dir_for(conn: &HostConn, bot_id: &str, instance: Option<
 /// SPEC §11.4 — push `hook.sh` (+ `claude-settings.json`) to the remote before `agent.start`.
 /// 遠端 claude bot 的 settings：hook 指令指向遠端的 `hook.sh`。受限 bot 再由 `cage_settings` 蓋一次（見 `injected_args`）。
 fn remote_claude_settings(p: &RemoteHookPaths, bot: &db::Bot, time_zone: &str) -> Value {
-    // Token slot is `-` (review 2026-09-12 #8): `hook.sh` never reads it and the real key opens
-    // `/relay/announce` + `/hook/*`. Kept positional for older agents.
     let cmd = shell_join(&[p.hook_sh.clone(), "claude".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
-    // `hook.sh statusline` writes `hook-status.json` (§11.4.5), then execs the user's own statusLine.
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
-    // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
-    // 決定要不要開手機入口（見 `claude_settings`）。
     claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), bot.auto_approve != 0, time_zone)
 }
 
@@ -723,11 +709,8 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let settings = remote_claude_settings(&p, bot, time_zone);
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
-        // issue #494：目錄 0700、腳本 0700、設定 0600。`umask 077` 管新建的，`chmod` 管舊版留下的
-        // （這支每次啟動 bot 都會跑，所以升級上來的 0644 spool 也在這裡被收回去）。
         "set -e\numask 077\nD={dir}\nmkdir -p \"$D\"\nchmod 700 \"$D\"\nchmod go-rwx \"$D\"/* 2>/dev/null || true\ncat > \"$D/hook.sh\" <<'AM_HOOK_EOF'\n{hook}AM_HOOK_EOF\nchmod 700 \"$D/hook.sh\"\ncat > \"$D/claude-settings.json\" <<'AM_SETTINGS_EOF'\n{settings}\nAM_SETTINGS_EOF\nchmod 600 \"$D/claude-settings.json\"\nprintf 'AM_INSTALLED\\n'\n",
         dir = sh_quote(&p.dir),
-        // 腳本裡寫的根目錄與上面的安裝位置同一個：事件才會進這個實例自己的 spool。
         hook = remote_hook_sh(&crate::hosts::remote_root_for(instance)),
         settings = settings_text,
     );
@@ -799,9 +782,7 @@ pub fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
     match (kind, auto_approve) {
         ("claude", true) => vec!["--dangerously-skip-permissions".into()],
         ("codex", true) => vec!["--yolo".into()],
-        // = `--permission-mode bypassPermissions` (grok 1.0.13 `--help`).
         ("grok", true) => vec!["--always-approve".into()],
-        // agy 1.2.16 `--help`: "自動核准所有工具權限"。沒開就不帶：`toolPermission` 留 agy 自己的預設（`request-review`）。
         ("agy", true) => vec!["--dangerously-skip-permissions".into()],
         ("codex", false) => vec!["-c".into(), "sandbox_mode=\"workspace-write\"".into()],
         _ => Vec::new(),
@@ -813,8 +794,6 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
-    // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
-    // 信任分享（trusted）不算：照一般 bot 的權限參數。
     let restricted = app.caged_workspace(&bot.id).await?;
     let mut out = if restricted.is_some() { Vec::new() } else { permission_args(&bot.kind, bot.auto_approve != 0) };
     if bot.inject_hooks == 0 && restricted.is_none() {
@@ -826,7 +805,6 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
 
     let stop_hook_enabled = bot.kind == "codex" && app.cfg().get().await.codex.stop_hook;
 
-    // remote project: POSIX sh hook via that host's own herdr (§11.4)
     if project.host != LOCAL_HOST {
         let conn = app
             .hosts()
@@ -836,8 +814,6 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
         let time_zone = app.cfg().agents_fresh().await.time_zone().to_string();
         let paths = install_remote_hook(&conn, bot, app.instance().as_deref(), &time_zone).await?;
         if let Some(ws) = &restricted {
-            // 受限：settings 換成籠子那一版寫回遠端；寫完比對 sha256，不符就不啟動（R-S2 §4.2）。
-            // 寫入綁在同一代的主機權威上：中途改指就寫不進去（#1026）。
             let fence = app.hosts().fence(&project.host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
             let mut settings = remote_claude_settings(&paths, bot, &time_zone);
             app.cage_settings(&mut settings, ws, env);
@@ -845,20 +821,16 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
             app.write_remote_private_file(&fence, &paths.dir, "claude-settings.json", &bytes).await?;
         }
         let hook_args: Vec<String> = match bot.kind.as_str() {
-            // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
             "claude" => vec!["--settings".into(), paths.settings, "--verbose".into()],
-            // The notify argv is visible in `ps` for the whole run: placeholder token slot (#8, issue #43).
             "codex" => {
                 let parts = vec![paths.hook_sh, "codex".to_string(), bot.id.clone(), REMOTE_TOKEN_SLOT.to_string()];
                 let legacy = vec!["-c".into(), format!("notify={}", serde_json::to_string(&parts)?)];
-                // 啟動只唯讀判斷信任、不註冊未信任的 handler（#1989）；殘留與 stop_hook=false 的項目由 reconcile 移除（best effort）。
                 let root = crate::hosts::remote_root_for(app.instance().as_deref());
                 let paths = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, remote_codex_paths(env, &conn, &root)).await {
                     Ok(r) => r,
                     Err(_) => Err(anyhow::anyhow!("remote Codex home lookup timed out")),
                 };
                 if stop_hook_enabled {
-                    // Bounded: a slow or dead host must never delay the bot start; any failure keeps legacy notify.
                     let ready = match tokio::time::timeout(REMOTE_STOP_HOOK_BUDGET, async {
                         let (home, _) = paths.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
                         am_base::codex_hook::install_remote(&conn, home, &root, app.instance().as_deref()).await
@@ -879,13 +851,10 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                     legacy
                 }
             }
-            // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
             "grok" => {
                 install_remote_grok_hook(&conn, env, app.instance().as_deref()).await?;
                 vec![]
             }
-            // SPEC §12a.12：遠端的 `~/.gemini` 裝 dispatcher＋hooks.json＋statusLine，事件經上面那支 `hook.sh agy …` 進 spool。
-            // 跟本機一樣，裝不成不擋啟動：少的只是 hook 回報，畫面判讀還在。
             "agy" => {
                 if let Err(e) = crate::agy_remote::install_remote(&conn, app.instance().as_deref()).await {
                     tracing::warn!(bot = %bot.name, host = %project.host, error = %format!("{e:#}"), "could not install the remote agy hooks; the bot starts without them");
@@ -899,14 +868,11 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
     }
 
     let dir = app.bot_dir(&bot.id)?;
-    // spool 與 `claude-settings.json` 都在這底下：0700，不是 umask 決定的（issue #494）。
     crate::private_files::create_private_dir(&dir)?;
     let hook_args: Vec<String> = match bot.kind.as_str() {
         "claude" => {
             let cmd = shell_join(&hook_cmd_parts(app, bot, "claude"));
-            // Status line reports rate limits, then runs the user's own statusLine command.
             let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
-            // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
             let time_zone = app.cfg().agents_fresh().await.time_zone().to_string();
             let mut settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0, &time_zone);
@@ -955,14 +921,10 @@ pub async fn injected_args(app: &(impl crate::capabilities::Cfg + crate::capabil
                 legacy
             }
         }
-        // SPEC §12: the hook is global (dispatched through the pane env), not an argv flag.
         "grok" => {
             install_local_grok_hook(app, env)?;
             vec![]
         }
-        // agy：全域的 `~/.gemini/config/hooks.json`（具名項 `agents-manager`）＋ `settings.json` 的 statusLine，
-        // 指令都是同一支 dispatcher，pane env 沒有 `AM_BOT_ID` 就什麼都不做（使用者自己開的 agy 不受影響）。
-        // 裝不成（使用者的設定檔壞了、唯讀…）不擋啟動：少的只是 hook 回報，畫面判讀與 transcript 還在。
         "agy" => {
             if let Err(e) = super::agy_hook::install_local(app) {
                 tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not install the agy hooks; the bot starts without them");
@@ -1017,14 +979,12 @@ async fn reconcile_remote_stop_hook(conn: &HostConn, host: &str, codex_home: &st
 
 fn codex_notification_args(legacy: Vec<String>, trusted: anyhow::Result<bool>) -> Vec<String> {
     match trusted {
-        // Phase two (#1989): the user-trusted stdin Stop hook will run, so drop legacy notify (its argv JSON hits E2BIG).
         Ok(true) => vec!["-c".into(), "notify=[]".into()],
         Ok(false) => {
             tracing::warn!("Codex Stop hook is not trusted yet; retaining legacy notify");
             legacy
         }
         Err(_) => {
-            // User configuration errors must not expose their contents in logs.
             tracing::warn!("Codex Stop hook setup unavailable; retaining legacy notify");
             legacy
         }
@@ -1045,77 +1005,28 @@ fn with_kill_guard(settings: &mut Value, hook_cmd: &str) {
 /// rc off）。判準是這顆 bot 自己有沒有要求——argv 帶了 `--remote-control` 才是 true。
 fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_approve: bool, time_zone: &str) -> Value {
     json!({
-        // issue #722：claude 2.1.283 的 fullscreen 渲染。`tui` 沒設時，回合結束會跳「Try the new fullscreen renderer?」
-        // 選單（herdr 判 blocked、daemon 認不出，AGM 切到 agm-host 當天就卡在這裡），使用者在同一個設定目錄試過一次
-        // 還會把 `"tui": "fullscreen"` 寫進 `~/.claude/settings.json`。`tui_prompts`、畫面備援、回音剝除都照一般渲染寫，
-        // 所以 bot 一律釘 `default`：`--settings` 優先於使用者設定，而且只要 `tui` 有值，那個選單的條件就不成立。
         "tui": "default",
-        // issue #1756：claude 2.1.299 起，200K+ 的 session 閒置約 54 分會在 cache 過期前自己壓縮。保溫／熱壓與 cache
-        // 時鐘由 daemon 自己管（`cache_clock.rs`），CLI 再壓一次會重疊、讓 cache 剩幾分失真，壓縮當下送的話還可能被吞
-        // Enter。所以釘 `false`；2.1.290 以前不認得這個鍵就忽略（未知鍵不報 settings 錯誤）。
         "idleCompaction": false,
-        // 同一版的「Make auto mode your default permission mode?」（游標預設在 Yes）只在 user settings 有
-        // `permissions.defaultMode`、而 `--settings` 這類較高層沒有時才跳。照這顆 bot 自己的 auto_approve 寫，
-        // 不會因此放大權限（沒開 auto_approve 的就是 `default`，跟不寫一樣）。
         "permissions": {"defaultMode": if auto_approve { "bypassPermissions" } else { "default" }},
         "remoteControlAtStartup": wants_remote,
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "Stop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
-            // issue #1770：壓縮開始（手動 `/compact`、閒置壓縮、自動壓縮都送）。daemon 據此在網頁標「壓縮中…」；
-            // 壓縮做完是 `SessionStart`（source=compact）收掉。舊版 claude 不認得就忽略。
             "PreCompact": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
-            // 回合**失敗**收尾（API／auth／額度…）也是一級訊號，不是只有答完才算結束（issue #79）。
-            // 沒有它的話，失敗的回合要等 §4.3 備援或 stuck watchdog 才被發現，中間一直掛在 in_flight。
-            // 舊版 claude 不認得這個鍵就忽略它，不影響既有兩個 hook。
             "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
-            // issue #82：claude 原生的 in-process Task 工具子代理的第二路訊號（`agent_id`／
-            // `agent_type`／`agent_transcript_path`），純可見性，寫進 `runs.subagent_json`——**不是**
-            // §6.5a 血緣認領要的那種子 agent：這裡的「子代理」是同一個行程裡的 Task 工具呼叫，沒有自己
-            // 的 pane；AGM 的 child bot（`herdr pane split` 開出來的獨立 pane）本來就沒有 hook（§4.3），
-            // 這兩個鍵永遠不會替 child bot 觸發，也就不可能影響哪個 pane 歸誰。
             "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
-            // issue #94：這顆 bot 自己的 Bash 工具跑 `herdr pane split`／`agent start` 時，那條指令的
-            // stdout 就是 herdr 自己回的 JSON（`{"id":"cli:pane:split"/"cli:agent:start",
-            // "result":{...,"pane_id":...}}`），daemon 讀得到「這個 pane 是我剛剛開的」這個事實，
-            // 比 §6.5a 的同 tab／名字前綴推斷更早、更精確（`spawn_hints.rs`）。`matcher: "Bash"` 只在
-            // 跑 shell 指令時觸發，不是每個工具呼叫都送一次。
             "PostToolUse": [
                 {"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]},
-                // 2026-10-02：使用者答完 `AskUserQuestion` 的當下就把題目與答案記進對話（`ask_answers.rs`）。回合被中斷時
-                // 沒有 Stop，這是唯一當下就留得下來的一條路；一般情況由回合結束時讀 transcript 補。
                 {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}
             ]
         },
         "statusLine": {"type": "command", "command": statusline},
-        // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
         "outputStyle": "Concise",
-        // `--dangerously-skip-permissions` still asks 「Bypass Permissions mode … Yes, I accept」
-        // once per config dir; this is the record accepting it writes (2026-09-08).
         "skipDangerousModePermissionPrompt": true,
-        // 使用者 2026-09-15：每顆 bot 的 CLI 時間統一台北時間 24 小時制（claude 2.1.257 起的設定；本機、遠端都一樣）。
         "timeFormat": "24-hour",
         "timeZone": time_zone,
-        // issue #78：撞到用量上限時 claude 自己排一個「continuing automatically at HH:MM」，daemon 完全
-        // 不知道，而且那個自動續跑被取消時（畫面變 `Automatic continue cancelled`）沒有人接手，整顆卡死
-        // 到有人手動 `/rate-limit-options` 重新掛上。managed pane 的 Turn 該由誰接回去是 daemon 的
-        // resend／排隊機制（`stuck_turns.rs`、queue timer）決定，不該讓 CLI 自己另開一條線。
-        //
-        // 這不是 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`（那是完全不同的子系統：cloud/remote worker
-        // epoch 之間搬 session 用的環境變數，字串表裡緊跟著 `host_draining`／`container_recreated`／
-        // `checkpoint_restore`，跟本機 pane 的用量上限自動續跑無關，關了也不會影響這裡）。真正管這個
-        // 行為的是 settings.json 的 `autoContinueAtUsageLimit`（`/config` 裡的「Continue automatically
-        // at usage limit」，claude 2.1.234 起存在），關掉之後撞到上限會停下來、把「等」變成使用者自己選
-        // 的選項，不會自己續跑。
         "autoContinueAtUsageLimit": false,
-        // issue #102：claude 2.1.275 起會把「你 claude.ai 帳號上開啟的 skills／plugins」同步進用同一個帳號
-        // 登入的終端 session。managed pane 的工具集必須由 daemon 決定，理由跟上面那條同一條：
-        //   1. 同步進來的東西 daemon 不知情，同一顆 bot 在不同時間會跑出不同行為，出事無從重現；
-        //   2. skills 會吃 context，而 §4.4a 的 context／額度判斷都假設環境是 daemon 決定的；
-        //   3. 帳號是共用的（cc0／cc1／cc2…），一個人在 claude.ai 上開一個 skill 會同時改掉所有用那個帳號的 bot。
-        // 只寫進 daemon 注入的 `--settings` 檔，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
-        // 2.1.275 以前的 claude 不認得這兩個鍵，一律靜靜忽略。
         "syncClaudeAiSkills": false,
         "syncClaudeAiPlugins": false
     })
@@ -1186,13 +1097,8 @@ pub async fn pane_env_for_fence(
     }
     let mut env = serde_json::Map::new();
     env.insert("AM_BOT_ID".into(), json!(bot.id));
-    // Name the herdr shim prefixes children with (SPEC §6.5b); the persona quotes it too.
     env.insert("AM_AGENT_NAME".into(), json!(agent_name));
-    // 母 bot 的 kind／模型／強度：子 agent 沒指定 `--model` 時 shim 拿來補（SPEC §6.5b）。
     env.insert("AM_KIND".into(), json!(bot.kind));
-    // §6.5e：bot 開的 pane 要落在自己 project 的 workspace。shim 在 `tab create` 沒指定時先問 herdr 母 pane 現在的
-    // workspace，問不到才補這個值——它是 workspace 決定**之前**的舊映射，第一次啟動沒有、映射失效時是死的（review core 7）。
-    // `pane split` 以母 pane 為基準，本來就同 workspace。
     env.insert("AM_PROJECT_ID".into(), json!(bot.project_id));
     if let Ok(Some(p)) = crate::db::project(app.db(), &bot.project_id).await {
         if let Some(ws) = p.workspace_id.filter(|w| !w.trim().is_empty()) {
@@ -1206,14 +1112,8 @@ pub async fn pane_env_for_fence(
         env.insert("AM_EFFORT".into(), json!(e));
     }
     if let Some(dir) = shim_dir {
-    // Best effort only: the login shell's profile (`path_helper`, `brew shellenv`) pushes us back;
-    // `start_inner` re-prepends in the pane's shell, which is what actually wins.
-        // 別顆 bot 的 shim 目錄先清掉再接自己的（`shim_path`）：daemon 常常是從某顆 bot 的 pane
-        // 裡啟動的，它的 `PATH` 前面就掛著那顆 bot 的 shim，照抄進來就是 2026-09-18 的巢狀死鎖。
         let path = match std::env::var("PATH") {
             Ok(p) if host == LOCAL_HOST => crate::shim_path::prepend_own_shim_dir(&p, dir),
-            // 遠端：herdr 照字面設 env，所以 `remote_path`（CLI 裝在 `~/.local/bin` 之類）要在這裡展開接上。
-            // 漏掉的話 pane 裡 `claude: command not found`，preflight 卻會過（它走 `ssh_exec_path`）——#92 live-SSH 撞到的。
             _ => {
                 let rp = fence.conn().cfg.as_ref().map(|c| c.remote_path.clone()).unwrap_or_default();
                 let mut dirs = vec![dir.to_string()];
@@ -1225,32 +1125,22 @@ pub async fn pane_env_for_fence(
         env.insert("PATH".into(), json!(path));
     }
     env.insert("AM_RUN_ID".into(), json!(run_id));
-    // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
         env.insert("AM_PORT".into(), json!(app.port().to_string()));
-        // issue #104：cargo shim 只拿到 helper/config 的位置與是否啟用；SSH 密碼永遠不進 pane env。
         env.insert("AM_DAEMON_EXE".into(), json!(app.exe().to_string_lossy()));
         env.insert("AM_CONFIG_PATH".into(), json!(app.cfg().path.to_string_lossy()));
     }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
-    // agy 預設會在背景自我更新（200 MB 的執行檔、版本一個月跳十幾版）：版本由 AG Man 管，每個 agy pane 都關掉它，
-    // 包括使用者手動在 bot pane 裡再開的。放在自訂 env 合併之前——明講要開的人可以在 bot env 蓋掉。
     if bot.kind == "agy" {
         env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), json!("true"));
     }
-    // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion，Tab 收下、Enter 送出）。以前這裡用
-    // `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` 全關（2026-09-23 AM-2-M：純文字檢查把灰字當草稿、擋成 409 `composer_busy`）；
-    // 現在所有檢查都用樣式讀分得出灰字（`delivery::box_state`），而網頁要顯示它、一鍵送出（2026-10-03 使用者），
-    // 所以不再覆蓋：跟著 CLI 與帳號自己的設定走。不想要的人在 bot env 設 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`。
 
-    // Identities are per host (SPEC §16): `cc1` means that machine's config dir.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if let Some(id) = crate::tools::identity_for_host(app, host, idn).await {
             for (k, v) in &id.env {
                 env.insert(k.clone(), json!(crate::config::expand_home(v, &home)));
             }
-            // agy 身份＝換 `HOME`：影子家目錄先補齊（只補缺的連結），不然 git／ssh／PATH 在那個 HOME 底下找不到東西。
             if bot.kind == "agy" {
                 if let Err(e) = crate::tools::ensure_agy_shadow_home(fence, &id.env, &home).await {
                     tracing::warn!(host, identity = idn, error = %e, "agy shadow HOME could not be prepared");
@@ -1258,13 +1148,11 @@ pub async fn pane_env_for_fence(
             }
         }
     }
-    // issue #1775：這台看得到的身份清單，母 pane 的 herdr shim 查 `agent start --identity <名>` 用（只給母 pane，子 pane 不往下傳）。
     let identities = crate::tools::identities_for_host(app, host).await;
     env.insert("AM_IDENTITIES".into(), json!(crate::lifecycle::pane_identities::identities_env(&identities, &home)));
     for (k, v) in bot.env() {
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
-    // B 期：角色 policy／bot 覆寫的 context 啟動環境（池條目的已在 bot.env，這裡不重複）。
     for (k, v) in super::runtime_overlay::overlay_for(app.as_ref(), bot).await?.env {
         env.insert(k, json!(v));
     }
@@ -1280,8 +1168,6 @@ pub async fn pane_env_for_fence(
     reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir().to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
-    // §6.5f：給使用者的檔案放這裡（不是 scratchpad）。跟 AM_DATA_DIR 一樣在自訂 env 合併之後才由 daemon 蓋回去：
-    // 被改掉的話 bot 寫到別處，使用者在網頁上看不到。遠端主機給**那台上**的目錄，網頁走 ssh 列與下載（`outbox_remote`）。
     let outbox = if host == LOCAL_HOST {
         crate::outbox::ensure(app.data_dir(), &bot.id).map(|d| d.to_string_lossy().into_owned())
     } else {
@@ -1467,7 +1353,6 @@ const HERDR_SKILL_DESC: &str = "在 agents-manager（AG Man）裡控制 herdr �
 fn herdr_skill_doc(raw: &str) -> String {
     let rules = format!("## AG Man 規則（硬規則，優先於本文件其餘內容）\n\n{}\n\n受管 prompt 可用同專案成員顯示名稱（含停止的成員）；同名時改用 `bot:<id>`。daemon 錯誤會顯示回應內容，依錯誤原因處理；投遞結果不明時沿用提示的 request-id 對帳或重試。\n", child_agent_rules());
     let lines: Vec<&str> = raw.lines().collect();
-    // Front matter is `---` … `---`; without one, put ours in front and leave the rest alone.
     let end = if lines.first().map(|l| l.trim_end()) == Some("---") {
         lines.iter().skip(1).position(|l| l.trim_end() == "---").map(|i| i + 1)
     } else {
@@ -1490,8 +1375,6 @@ fn herdr_skill_doc(raw: &str) -> String {
         out.push('\n');
         if i == end {
             if !replaced {
-                // No description to replace: the front matter is not what we expected, so add
-                // ours to the body rather than editing a document we do not understand.
                 tracing::debug!("herdr --skill has no description line; leaving its front matter alone");
             }
             out.push('\n');
@@ -1517,7 +1400,6 @@ pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db:
     if bot.kind != "claude" {
         return;
     }
-    // Never write into the developer's own `~/.claude`; the rewrite is covered by `herdr_skill_doc` tests.
     if cfg!(test) {
         return;
     }
@@ -1531,7 +1413,6 @@ pub async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db:
         }
     };
     if let Err(e) = result {
-        // Never fatal: the skill is a convenience, and claude works without it.
         tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the herdr skill");
     }
 }
@@ -1564,7 +1445,6 @@ async fn install_herdr_skill_local(cfg_dir: Option<String>) -> anyhow::Result<()
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
-    // 同目錄暫存檔再 rename：同身份的 claude 可能正在讀這份檔，不能就地截斷重寫（#1121）。
     let tmp = dir.join(format!(".SKILL.md.{}.tmp", db::ulid()));
     std::fs::write(&tmp, &doc)?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
@@ -1576,7 +1456,6 @@ async fn install_herdr_skill_local(cfg_dir: Option<String>) -> anyhow::Result<()
 }
 
 async fn install_herdr_skill_remote(conn: &HostConn, cfg_dir: Option<String>) -> anyhow::Result<()> {
-    // herdr 常在 `remote_path` 裡（`~/.local/bin`）：非互動 ssh 的 PATH 沒有它，要走 `ssh_exec_path`。
     let raw = conn.ssh_exec_path("herdr --skill").await?;
     if !raw.contains("name:") {
         anyhow::bail!("`herdr --skill` on `{}` did not look like a skill file", conn.name);
@@ -1646,17 +1525,11 @@ pub fn persona_args_cli_docs(bot: &db::Bot, agent_name: &str, agent_md: Option<&
     let p = persona_text(bot, agent_name, agent_md);
     let p = p.as_str();
     match bot.kind.as_str() {
-        // `claude --help`: --append-system-prompt-file reads the text from a file.
         "claude" => match staged_persona {
             Some(path) => vec!["--append-system-prompt-file".into(), path.to_string()],
             None => vec!["--append-system-prompt".into(), p.to_string()],
         },
-        // `grok --help`: "Extra rules to append to the system prompt".
-        // The whole persona regularly exceeds Herdr's 900-byte shell-command budget. Keep the
-        // argv value short and let Grok read the exact, complete text staged beside this bot.
         "grok" => vec!["--rules".into(), staged_persona.map(grok_rules_reference).unwrap_or_else(|| p.to_string())],
-        // app-server / config schema key `developer_instructions`; the value is TOML.
-        // §6.5i：`project_doc_max_bytes=0` 讓 codex 不讀 AGENTS.md，指示只有這一份。
         "codex" => {
             let mut v = match staged_persona {
                 Some(profile) => vec!["-p".into(), profile.to_string()],
@@ -1678,7 +1551,6 @@ pub fn persona_args_cli_docs(bot: &db::Bot, agent_name: &str, agent_md: Option<&
 pub async fn effort_checked(app: &impl crate::lifecycle::start::ports::SessionProviderPort, bot: &db::Bot, host: &str) -> db::Bot {
     let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
-    // `efforts` does not depend on identity, so no identity is passed.
     let Ok(list) = app.models_list(host, &bot.kind, None, false).await else { return bot.clone() };
     let Some(entry) = list
         .get("models")
@@ -1704,14 +1576,10 @@ pub fn model_args(bot: &db::Bot) -> Vec<String> {
         match bot.kind.as_str() {
             "claude" => out.extend(["--model".to_string(), m.to_string()]),
             "codex" | "grok" => out.extend(["-m".to_string(), m.to_string()]),
-            // agy：slug 已含 effort 變體（`gemini-3.8-flash-high`）；解析失敗時互動模式只警告、退回預設。拿掉的模型已由上面的 `canonical_model` 換成 3.8 medium。
             "agy" => out.extend(["--model".to_string(), m.to_string()]),
             _ => {}
         }
     }
-    // grok: `--reasoning-effort low|medium|high|xhigh` (per model; grok-4.5 rejects xhigh)
-    // codex: `-c model_reasoning_effort="<x>"` (values from `model/list`)
-    // claude: `--effort low|medium|high|xhigh|max` (2.1+; an unknown value is only a warning)
     if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         match bot.kind.as_str() {
             "claude" => out.extend(["--effort".to_string(), e.to_lowercase()]),
@@ -1720,9 +1588,6 @@ pub fn model_args(bot: &db::Bot) -> Vec<String> {
             _ => {}
         }
     }
-    // codex Fast tier must be sent both ways (2026-09-09): omitted means `~/.codex/config.toml`
-    // decides, often `service_tier = "fast"`, so an unchecked bot ran fast. `service_tier=""` is
-    // codex's "no tier" (verified 0.153.4); `priority` is what the TUI shows as `fast`.
     if bot.kind == "codex" {
         let tier = if bot.fast != 0 { "priority" } else { "" };
         out.extend(["-c".to_string(), format!("service_tier=\"{tier}\"")]);
@@ -1826,7 +1691,6 @@ mod model_args_tests {
             a,
             vec!["-m", "gpt-6.1-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\""]
         );
-        // Fast off ≠ no opinion: without the flag `~/.codex/config.toml` decides.
         let a = model_args(&bot("codex", None, None, false));
         assert_eq!(a, vec!["-c", "service_tier=\"\""]);
     }
@@ -1840,7 +1704,6 @@ mod model_args_tests {
         assert_eq!(model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(effort.as_deref(), Some("xhigh"));
         assert!(args.iter().any(|a| a.contains("service_tier=\"priority\"")), "fast is a flag we can read back");
-        // CLI defaults read back as neither (not 「設定與實際不符」); an empty tier reads as not-fast.
         let bare = model_args(&bot("codex", None, None, false));
         assert_eq!(crate::models::model_effort_from_argv("codex", &bare), (None, None));
         assert!(!bare.iter().any(|a| a.contains("service_tier=\"priority\"")));
@@ -1870,7 +1733,6 @@ mod model_args_tests {
         assert_eq!(super::permission_args("agy", true), vec!["--dangerously-skip-permissions"]);
         assert!(super::permission_args("agy", false).is_empty(), "沒開 auto_approve 就不帶，agy 自己的 toolPermission 照預設");
         assert_eq!(model_args(&bot("agy", Some("gemini-3.8-flash-high"), None, true)), vec!["--model", "gemini-3.8-flash-high"]);
-        // 已存在的 bot 設了拿掉的模型：啟動時改用 3.8 medium，不讓 agy 因為不認得而起不來。
         for retired in ["gemini-3.1-pro-high", "gemini-3.7-flash-low", "claude-sonnet-4-6", "gpt-oss-120b-medium"] {
             assert_eq!(model_args(&bot("agy", Some(retired), None, true)), vec!["--model", "gemini-3.8-flash-medium"], "{retired}");
         }
@@ -1908,7 +1770,6 @@ mod model_args_tests {
         assert!(doc.contains("herdr agent list"), "reuse an idle child before opening a new one");
         assert!(doc.contains("$HERDR_PANE_ID"), "how to split its own pane");
         assert!(doc.contains("herdr organizes terminals."), "herdr's own body survives");
-        // The rules must come before herdr's text, not after it.
         assert!(doc.find("AG Man 規則").unwrap() < doc.find("herdr organizes").unwrap());
     }
 
@@ -1976,16 +1837,13 @@ mod model_args_tests {
             vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))],
             "沒設 [agents]：codex 照舊讀 AGENTS.md"
         );
-        // §6.5i：agent md 夾在 AG Man 規則與 bot 自己的 persona 中間。
         let args = persona_args(&b, "proj-abc123", Some("AGENT-MD"), None);
         assert_eq!(&args[2..], ["-c", "project_doc_max_bytes=0"], "§6.5i：設了 [agents] 就不讀 AGENTS.md");
         assert_eq!(args[1], format!("developer_instructions={}", toml_basic_string(&format!("{rule}\n\nAGENT-MD\n\nline1\nsay \"hi\" \\ done\n\n{note}"))));
-        // No user persona: the daemon's rule alone, never nothing.
         b.kind = "claude".into();
         b.persona = None;
         assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), format!("{rule}\n\n{note}")]);
         assert!(!rule.contains("proj-abc123"), "共用的規則本文不寫任何一顆的名字");
-        // 瀏覽器規則：只用 agent-browser、一個 bot 一個 session（用自己的名字）、結束就關。
         assert!(rule.contains("**一律用 agent-browser**"));
         assert!(rule.contains("**禁止**用 ego lite"));
         assert!(rule.contains("`--session $AM_AGENT_NAME`"));
@@ -2031,7 +1889,6 @@ mod model_args_tests {
             assert!(!fitted.iter().any(|a| a.contains("後略")), "{kind}: {fitted:?}");
             assert!(fitted.iter().all(|a| !a.contains("AG Man 規則") && !a.contains(&long)), "{kind}: the text itself stays out of argv");
         }
-        // 對照：沒有 staged 時整份放進 argv，確實會被砍——這正是頂層 bot 以前的樣子。
         let mut b = bot("claude", None, None, false);
         b.persona = Some(long.clone());
         let inline = crate::herdr::fit_command_line(super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), None));
@@ -2115,7 +1972,6 @@ mod model_args_tests {
         for want in ["`Agent`／`Task`", "`Workflow`", "`codex-rescue`", "codex 的子代理", "只准用 herdr pane 派工", "`--kind codex`"] {
             assert!(rule.contains(want), "要點名禁止內建子代理：{want}");
         }
-        // issue #1472：`herdr pane run <pane> "claude …"` 開的 agent 在 herdr 沒有名稱，AG Man 認領不到。
         assert!(rule.contains("`herdr agent start <名稱> --kind … --pane <新 pane>`"), "要說明唯一的開法");
         assert!(rule.contains("**禁止** `herdr pane run <pane> \"claude …\"`"), "要點名禁止 pane run 直接起 CLI");
         assert!(rule.contains("沒有名稱，AG Man 認領不到"), "要講原因");
@@ -2162,9 +2018,7 @@ mod model_args_tests {
         for want in ["gcloud auth login --no-browser", "--use-device-code", "firebase login --no-localhost", "GH_BROWSER=echo", "--no-launch-browser"] {
             assert!(rule.contains(want), "要點名旗標：{want}");
         }
-        // 使用者 2026-10-18：拿掉「禁止替使用者登入」，兩處都不能再注入。
         assert!(!rule.contains("替使用者登入"), "「禁止替使用者登入」已拿掉");
-        // 使用者 2026-10-15：使用者自己登入後可以把登入態交給 bot 的 session；舊的「禁止搬 cookie」不能再注入。
         assert!(!rule.contains("搬瀏覽器的 cookie"), "舊規則要拿掉");
         assert!(rule.contains("**登入態**（使用者 2026-10-15）") && rule.contains("交給你的 session 接著執行"));
         assert!(rule.contains("herdr pane split --pane \"$HERDR_PANE_ID\""), "互動式指令放 pane，不在 shell 工具裡卡住");
@@ -2185,7 +2039,6 @@ mod model_args_tests {
         for banned in [".pem", ".key", ".sqlite", ".db", "DB 複本"] {
             assert!(rule.contains(banned), "禁放清單要列出 {banned}");
         }
-        // 真的送到 bot 手上：三種 kind 的 persona 參數裡有，claude 的 skill 文件裡也有。
         let mut b = bot("claude", None, None, false);
         for kind in ["claude", "grok", "codex"] {
             b.kind = kind.into();
@@ -2220,7 +2073,6 @@ mod remote_hook_tests {
     //! SPEC §11.4.2 — runs `REMOTE_HOOK_SH` with `/bin/sh` against a fake `$HOME` and `herdr`.
     //! The shell parses top-level event hints; authoritative classification is `hookrecv::classify`.
     use std::io::Write as _;
-    // #1862 遷移 B：只需要 track／write_exec；daemon 版與 crate-only 版同名同行為（`am_base::test_dirs`）。
     #[cfg(feature = "daemon-test-harness")]
     use crate::testing as tt;
     #[cfg(not(feature = "daemon-test-harness"))]
@@ -2280,7 +2132,6 @@ mod remote_hook_tests {
             std::fs::create_dir_all(&dir).unwrap();
             write_exec(&dir.join("hook.sh"), &super::remote_hook_sh(root));
             if with_herdr {
-                // Records one invocation per line so `--seq` ordering stays observable.
                 write_exec(
                     &dir.join("herdr"),
                     "#!/bin/sh\n{ for a in \"$@\"; do printf '%s ' \"$a\"; done; printf '\\n'; } >> \"$AM_TEST_LOG\"\n",
@@ -2350,7 +2201,6 @@ mod remote_hook_tests {
             }
             cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut ch = cmd.spawn().unwrap();
-            // 子 agent 的 pane（AM_CHILD_OF）會在讀 stdin 之前就 exit 0：這時寫入端拿到 EPIPE 是預期的，不是測試失敗。
             match ch.stdin.take().unwrap().write_all(stdin) {
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
                 r => r.unwrap(),
@@ -2443,14 +2293,12 @@ mod remote_hook_tests {
         assert_eq!(p["last_assistant_message"], "回覆 ✓", "原本的欄位不動：{p}");
         assert_eq!(p["session_id"], "s-1");
 
-        // 讀不到 transcript：不帶，其餘照舊。
         let sb2 = Sandbox::new(false);
         sb2.run(&["claude", &sb2.bot, "-"], &stop("/Users/nobody/none.jsonl", "Stop"));
         let p = spooled(&sb2);
         assert!(p.get("agm_user_text").is_none(), "{p}");
         assert_eq!(p["session_id"], "s-1");
 
-        // 不是 Stop（SessionStart 之類）：不讀 transcript。
         let sb3 = Sandbox::new(false);
         sb3.run(&["claude", &sb3.bot, "-"], &stop(&transcript.to_string_lossy(), "SessionStart"));
         assert!(spooled(&sb3).get("agm_user_text").is_none());
@@ -2520,7 +2368,6 @@ mod remote_hook_tests {
             spooled(&sb)["agm_compact"],
             serde_json::json!({"trigger": "auto", "idle": true, "pre_tokens": 286047, "post_tokens": 11362})
         );
-        // 不是壓縮的 SessionStart：不帶。
         let sb = Sandbox::new(false);
         sb.run(&["claude", &sb.bot, "-"], &payload("resume"));
         assert!(spooled(&sb).get("agm_compact").is_none());
@@ -2568,7 +2415,6 @@ mod remote_hook_tests {
             assert!(asks[1]["items"].as_array().unwrap().iter().all(|i| i["answer"].is_null()), "取消＝沒有回答：{p}");
         }
 
-        // 不是回合結束的事件、讀不到 transcript：不帶。
         let sb = Sandbox::new(false);
         sb.run(&["claude", &sb.bot, "-"], &payload("SessionStart"));
         assert!(spooled(&sb).get("agm_asks").is_none());
@@ -2576,7 +2422,6 @@ mod remote_hook_tests {
         sb.run(&["claude", &sb.bot, "-"], &serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": "/Users/nobody/none.jsonl"}).to_string());
         assert!(spooled(&sb).get("agm_asks").is_none());
 
-        // 答案裡有孤立 surrogate：什麼都不帶，但 spool 行仍是合法 JSON、其餘欄位不動。
         let sb = Sandbox::new(false);
         let project_dir = sb.dir.join(".claude/projects/project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -2643,7 +2488,6 @@ mod remote_hook_tests {
         let wake = line(serde_json::json!({"type": "user", "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification>done</task-notification>"}}));
         let reply = line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}}));
 
-        // 使用者打的一句，中間有工具結果：起點是 human。
         let sb = Sandbox::new(false);
         let project_dir = sb.dir.join(".claude/projects/project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -2653,7 +2497,6 @@ mod remote_hook_tests {
         let p = spooled(&sb);
         assert_eq!((p["agm_user_text"].as_str(), p["agm_origin_kind"].as_str()), (Some("現在部 demo"), Some("human")), "{p}");
 
-        // 背景工作完成喚醒的一輪：起點是 task-notification（文字仍是最後一則使用者條目，daemon 看起點決定不存）。
         let sb = Sandbox::new(false);
         let project_dir = sb.dir.join(".claude/projects/project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -2663,7 +2506,6 @@ mod remote_hook_tests {
         let p = spooled(&sb);
         assert_eq!(p["agm_origin_kind"].as_str(), Some("task-notification"), "{p}");
 
-        // 舊版 CLI 沒有 origin：只帶文字，不帶起點（沒有證據）。
         let sb = Sandbox::new(false);
         let project_dir = sb.dir.join(".claude/projects/project");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -2871,7 +2713,6 @@ mod remote_hook_tests {
         assert!(c.contains("--state idle "), "{c}");
         assert!(c.contains("--agent-session-id s-1"), "{c}");
         assert!(c.contains("--agent-session-path /tmp/t.jsonl"), "{c}");
-        // `--message` costs a fork and never reaches the subscriber (§11.4.1).
         assert!(!c.contains("--message"), "{c}");
     }
 
@@ -2931,8 +2772,6 @@ mod remote_hook_tests {
         if let Ok(pid) = std::fs::read_to_string(&pid_path) {
             let _ = Command::new("/bin/kill").args(["-KILL", pid.trim()]).status();
         }
-        // 診斷（#1964：macOS 夜間在這裡被 8 秒上限 SIGKILL，原因未定）：herdr 有沒有被啟動（pid 檔）與 hook.log 一起帶出來，
-        // 分得出是「還沒走到背景 report」（前面某步慢，例如 python3 啟動）還是「report 擋住了 hook」。
         let diag = format!(
             "{status}; elapsed={:?}; herdr_started={}; hook.log={:?}; spool_d={:?}",
             started.elapsed(),
@@ -3014,18 +2853,15 @@ mod remote_hook_tests {
     #[test]
     fn remote_event_hints_ignore_nested_fields_and_tolerate_missing_metadata() {
         let sb = Sandbox::new(true);
-        // Before top-level JSON parsing, the nested event name incorrectly triggered an idle report.
         sb.run(
             &["claude", &sb.bot, "tok"],
             r#"{"metadata":{"hook_event_name":"Stop","session_id":"nested"},"hook_event_name":"PostToolUse"}"#,
         );
         assert!(sb.calls().is_empty(), "nested data must not impersonate the event: {:?}", sb.calls());
 
-        // Malformed JSON whose prefix looks like Stop must be spooled safely without a false report.
         sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"Stop""#);
         assert!(sb.calls().is_empty(), "incomplete JSON is not a Stop event: {:?}", sb.calls());
 
-        // Provider JSON may contain legal leading whitespace; it must stay an object for classification.
         sb.run(
             &["claude", &sb.bot, "tok"],
             " \n {\"hook_event_name\":\"SessionStart\",\"session_id\":\"s-start\"} \n",
@@ -3034,7 +2870,6 @@ mod remote_hook_tests {
         assert_eq!(calls.len(), 1, "leading whitespace must not turn an object into raw text: {calls:?}");
         assert!(calls[0].contains("pane report-agent-session p1 ") && calls[0].contains("--agent-session-id s-start"), "{calls:?}");
 
-        // A valid Stop without optional session fields still reports idle and remains spoolable.
         sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"Stop"}"#);
         let calls = sb.wait_calls(2);
         assert_eq!(calls.len(), 2, "missing optional fields must not break event handling: {calls:?}");
@@ -3170,8 +3005,6 @@ mod remote_hook_tests {
     #[test]
     fn the_generated_hook_keeps_the_spool_private() {
         let sb = Sandbox::new(false);
-        // 明確用寬鬆的 umask 跑：這條測的就是「不靠那台機器的 umask」，runner 剛好是 077 時
-        // 走 `Sandbox::run`（繼承呼叫者的 umask）會變成同義反覆。
         let script = format!(
             "umask 022; exec {} claude {} -",
             crate::hosts::sh_quote(&sb.dir.join("hook.sh").to_string_lossy()),
@@ -3376,7 +3209,6 @@ mod claude_settings_tests {
         let v = claude_settings("hook", "sl", false, true, "Asia/Taipei");
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
-        // 2026-10-02：使用者答完提問當下就記進對話（`ask_answers.rs`）；只多這一個工具，其餘工具照舊不送。
         let matchers: Vec<&str> = v["hooks"]["PostToolUse"].as_array().unwrap().iter().filter_map(|h| h["matcher"].as_str()).collect();
         assert_eq!(matchers, ["Bash", "AskUserQuestion"]);
         assert_eq!(v["hooks"]["PostToolUse"][1]["hooks"][0]["command"], "hook");
@@ -3449,8 +3281,6 @@ mod herdr_skill_timeout_tests {
         assert!(err.contains("boom"), "{err}");
     }
 }
-
-
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod codex_stop_args_tests {

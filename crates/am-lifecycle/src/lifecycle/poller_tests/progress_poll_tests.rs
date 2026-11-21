@@ -147,7 +147,6 @@ async fn a_prompt_less_external_turn_does_not_store_the_previous_reply_again() {
     let open = |origin: &'static str| {
         let (app, conv, run) = (app.clone(), conv.clone(), f.run_id.clone());
         async move {
-            // 游標對不上＝整個畫面都算新的。
             sqlx::query("UPDATE runs SET last_read_tail_hash='nope' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
             let tid = db::ulid();
             sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,?,'in_flight','ok',?)")
@@ -196,8 +195,6 @@ async fn a_transient_in_flight_read_error_does_not_end_the_poller() {
 async fn the_poller_stops_once_the_turn_is_really_closed() {
     let f = in_flight(BUSY, "Reply with PONG").await;
     let app = f.env.app.clone();
-    // A healthy Herdr working report has no synthetic receipt to restore. The stale-cache
-    // case (Stop before the idle redraw) is covered by observed_status's real-poller test.
     sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
         .bind(&f.run_id).execute(&app.db).await.unwrap();
     fast(&f.run_id);
@@ -234,7 +231,6 @@ async fn a_bot_that_cannot_be_read_when_the_poller_starts_is_read_again() {
     fast(&f.run_id);
     unreadable(&app, "bots", true).await;
     let b = app.clone();
-    // 第一輪 bot 還讀不到，第二輪之前恢復。
     let rx = this_poll_then_next(&f.run_id, || async {}, move || async move { unreadable(&b, "bots", false).await });
     arm_progress(&app, &f.run_id, &f.bot_id, &f.turn_id).await;
     still_polled_after(rx).await;
@@ -273,7 +269,6 @@ async fn a_fallback_that_cannot_read_what_was_sent_closes_nothing() {
     let f = in_flight(PONG, "Reply with PONG").await;
     let app = f.env.app.clone();
     unreadable(&app, "messages", true).await;
-    // 讀完「送了什麼」之後 DB 就恢復：接著寫得進去的話，錯的回覆就真的存下來了。
     let a = app.clone();
     race_point::arm("fallback_after_echo", &f.turn_id, move || async move { readable_again(&a, "messages").await });
 

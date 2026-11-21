@@ -73,7 +73,6 @@ fn clean_for_claude(text: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\u{1b}' => skip_escape(&mut chars),
-            // C1 的 CSI／OSC（單一字元版的 `ESC[`／`ESC]`）。
             '\u{9b}' => skip_csi(&mut chars),
             '\u{9d}' => skip_string(&mut chars),
             '\r' if chars.peek() == Some(&'\n') => {}
@@ -88,9 +87,7 @@ fn clean_for_claude(text: &str) -> String {
 fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     match chars.next() {
         Some('[') => skip_csi(chars),
-        // OSC、DCS、SOS、PM、APC：一直到 ST（`ESC \`、U+009C）或 BEL。
         Some(']' | 'P' | 'X' | '^' | '_') => skip_string(chars),
-        // 兩個字元的跳脫（`ESC 7`、`ESC c`…）：那一個字元也不是給人看的。
         _ => {}
     }
 }

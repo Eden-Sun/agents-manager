@@ -121,8 +121,6 @@ fn hooks_merge_with(existing: &str, name: &str, dispatcher: &str, kill_guard: bo
     render(root).map(Some)
 }
 
-// ───────────────────────── transcript_full.jsonl ─────────────────────────
-
 /// `<USER_REQUEST>\n…\n</USER_REQUEST>` 裡的使用者原文（後面附的 `<ADDITIONAL_METADATA>` 等不要）。沒有標籤＝`None`。
 pub fn user_request(content: &str) -> Option<String> {
     let start = content.find("<USER_REQUEST>")? + "<USER_REQUEST>".len();
@@ -211,7 +209,6 @@ pub fn parse_turns(jsonl: &str) -> Vec<Turn> {
             continue;
         }
         let Some(c) = cur.as_mut() else { continue };
-        // 還在產生的步驟（`status` 不是 DONE）不是最終回覆。
         let finished = v.get("status").and_then(Value::as_str).is_none_or(|s| s.eq_ignore_ascii_case("DONE"));
         match assistant_text(line).filter(|_| finished) {
             Some(text) => {
@@ -260,7 +257,6 @@ pub fn status_json(model: Option<&str>, context_tokens: Option<i64>, context_win
         v["model"] = json!({"id": m, "display_name": m});
     }
     if let Some(n) = context_tokens {
-        // 鍵名照 claude statusLine（網頁 `normalizeStatus` 讀 `total_input_tokens`、`context_window_size`、`used_percentage`）。
         let size = context_window_tokens.max(1);
         v["context_window"] = json!({
             "total_input_tokens": n,
@@ -332,7 +328,6 @@ pub fn status_json_from_statusline(
     let mut out = serde_json::Map::new();
     out.insert("_agm_statusline".into(), json!(true));
 
-    // 1. model & effort
     let raw_model = obj.get("model").and_then(Value::as_object);
     let slug = model_slug_from_statusline(payload)
         .or_else(|| raw_model.and_then(|m| m.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
@@ -369,7 +364,6 @@ pub fn status_json_from_statusline(
         out.insert("effort".into(), json!({"level": eff}));
     }
 
-    // 2. context_window（statusLine 的值優先於 transcript 估算與 [agy] context_window_tokens）
     if let Some(cw) = obj.get("context_window").or_else(|| obj.get("contextWindow")).and_then(Value::as_object) {
         let size = cw
             .get("context_window_size")
@@ -409,7 +403,6 @@ pub fn status_json_from_statusline(
             .or_else(|| cw.get("totalInputTokens"))
             .and_then(Value::as_i64)
             .filter(|&n| n >= 0);
-        // 整段 context 大小：current_usage（本輪 input + cache_read + cache_creation）優先，否則用 total_input_tokens。
         let context_tokens = usage_tokens.or(total_in);
         let pct_from_payload = cw
             .get("used_percentage")
@@ -452,7 +445,6 @@ pub fn status_json_from_statusline(
         out.insert("context_window".into(), prev_cw.clone());
     }
 
-    // 3. agent_state / tool_confirmation_pending / task_count / pending_input_count
     if let Some(state) = obj
         .get("agent_state")
         .or_else(|| obj.get("agentState"))
@@ -481,7 +473,6 @@ pub fn status_json_from_statusline(
         .unwrap_or(0) as u32;
     out.insert("pending_input_count".into(), json!(pending_in));
 
-    // 4. quota：先只記不取代 /usage 探測
     if let Some(q) = obj.get("quota").filter(|q| !q.is_null()) {
         out.insert("quota".into(), q.clone());
     } else if let Some(prev_q) = prev.get("quota").filter(|q| !q.is_null()) {

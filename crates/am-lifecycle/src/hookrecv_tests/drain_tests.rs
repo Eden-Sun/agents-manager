@@ -56,7 +56,6 @@ fn the_status_slot_becomes_a_claude_statusline_hook() {
     assert_eq!(b.bot_id, "bot1");
     assert!(matches!(classify(&b.provider, &b.payload), HookKind::StatusLine));
     assert!(status_body("bot1", "not json").is_none());
-    // A JSON scalar is not a payload we can stamp.
     assert!(status_body("bot1", "3").is_none());
 }
 
@@ -70,7 +69,6 @@ fn a_second_trigger_inside_the_window_is_merged() {
     assert!(!gate_admit(&mut g, t0 + Duration::from_millis(900)));
     assert!(gate_take_again(&mut g));
     assert!(!gate_take_again(&mut g), "the flag is consumed once");
-    // Past the window the next trigger opens its own ssh again.
     assert!(gate_admit(&mut g, t0 + DRAIN_WINDOW + Duration::from_millis(1)));
     assert!(!g.again);
 }
@@ -79,7 +77,6 @@ fn a_second_trigger_inside_the_window_is_merged() {
 fn the_claim_script_takes_the_spool_and_the_status_slot() {
     let s = claim_script("botX", crate::startup::REMOTE_ROOT).unwrap();
     assert!(s.contains("bots/\"'botX'"));
-    // 遠端根目錄跟著實例走：兩顆 daemon 管同一台遠端時 spool 不能共用。
     assert!(s.contains("\"$HOME/.config/agents-manager/bots/\""), "正式實例路徑不變：{s}");
     let iso = crate::startup::remote_root_for(Some("a1b2"));
     assert!(claim_script("botX", &iso).unwrap().contains("\"$HOME/.config/agents-manager/instances/a1b2/bots/\""));
@@ -87,7 +84,6 @@ fn the_claim_script_takes_the_spool_and_the_status_slot() {
     assert!(scan_script(&iso).contains("\"$HOME/.config/agents-manager/instances/a1b2/bots\"/*/"));
     assert_eq!(crate::startup::remote_root_for(None), crate::startup::REMOTE_ROOT);
     assert_eq!(crate::startup::remote_root_for(Some("a1b2")), ".config/agents-manager/instances/a1b2");
-    // #493：摘下來走 rename，不是 `cat` 完再刪 spool。
     assert!(s.contains("mv \"$f\" \"$f.claim\""), "要先 rename 再讀：{s}");
     assert!(!s.contains("rm -f \"$f\";"), "claim 階段不准刪 live spool：{s}");
     assert!(s.contains("hook-status.json"));
@@ -101,7 +97,6 @@ fn the_claim_script_never_deletes_the_spool_it_just_read() {
     let s = claim_script("botX", crate::startup::REMOTE_ROOT).unwrap();
     assert!(s.contains("cat \"$f.replaying\""), "要讀出來：{s}");
     assert!(!s.contains("rm -f \"$f.replaying\""), "claim 階段不可以刪 .replaying：{s}");
-    // 單槽的 status 是例外（最新的贏，不是佇列），照舊讀完就刪。
     assert!(s.contains("rm -f \"$s\""), "status 仍是讀完就刪：{s}");
 
     let ack = ack_script("botX", crate::startup::REMOTE_ROOT).unwrap();

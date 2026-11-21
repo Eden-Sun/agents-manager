@@ -43,7 +43,6 @@ async fn a_bot_with_its_own_directory_does_not_run_in_a_fresh_workspace_root_ope
     assert!(tabs[0].panes.contains(run.pane_id.as_ref().unwrap()));
     assert!(env.herdr.methods().contains(&"pane.close".into()));
 
-    // 沒有自己目錄的 bot：新 workspace 的 root 就是它的 pane，不多開 tab。
     let env2 = tt::env().await;
     let plain = a_bot(&env2, "plain").await;
     start_bot(&env2.app, &plain).await.unwrap();
@@ -112,8 +111,6 @@ async fn running_on(app: &Arc<App>, bot_id: &str, ws: &str, pane: &str, tab: Opt
 #[tokio::test]
 async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
     let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid())));
-    // 工作目錄是經過符號連結進去的（macOS 的 `/tmp` 就是）；自己造一個，不靠這台機器的 tmp 剛好是不是連結
-    // ——Linux 的 `/tmp` 不是，原本的 `!starts_with("/tmp/")` 在那邊必紅（#139，遠端編譯主機）。
     let repo = dir.join("real/repo");
     std::fs::create_dir_all(&repo).unwrap();
     std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
@@ -128,7 +125,6 @@ async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
     assert_eq!(v["numStartups"], 7, "the CLI's own state survives the merge");
     let key = crate::trust::canonical(&cwd);
     assert_eq!(v["projects"][&key]["hasTrustDialogAccepted"], true);
-    // Resolved path: the CLI compares its `getcwd()`, which never contains the symlink.
     assert!(!key.contains("/link/"), "the recorded path is canonical, got {key}");
     assert_eq!(key, std::fs::canonicalize(&repo).unwrap().to_string_lossy(), "resolved to the real directory");
 
@@ -154,7 +150,6 @@ async fn a_starting_bot_gets_a_tab_of_its_own() {
         assert_eq!(env.herdr.tab(t).unwrap().panes.len(), 1, "each tab holds exactly the one bot's pane");
     }
 
-    // Same cwd/env contract as `pane.split`, nickname on the tab bar, never steals focus.
     let p = env.herdr.first_call("tab.create").expect("tab.create was called");
     assert_eq!(p["workspace_id"], json!(ws.workspace_id));
     assert_eq!(p["cwd"], json!("/tmp/p"));
@@ -205,13 +200,11 @@ async fn stopping_a_bot_in_a_shared_tab_leaves_the_tab_alone() {
     let app = env.app.clone();
     let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
     let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
-    // The old world: two bots split into the workspace's single tab.
     let neighbour = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
     let mine = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
     assert_eq!(mine.tab_id, neighbour.tab_id);
 
     let bot = a_bot(&env, "alfa").await;
-    // Reconcile fills `tab_id` for old runs too, so "has a tab id" can't decide closing.
     running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, Some(&mine.tab_id)).await;
 
     assert!(stop_bot(&app, &bot).await.unwrap());
@@ -232,7 +225,6 @@ async fn moving_a_running_bot_gives_it_a_tab_without_changing_its_pane() {
     let mine = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
 
     let bot = a_bot(&env, "alfa").await;
-    // NULL tab_id: a run from before the column existed.
     let run = running_on(&app, &bot, &ws.workspace_id, &mine.pane_id, None).await;
 
     move_pane_to_own_tab(&app, &bot).await.unwrap();
@@ -245,7 +237,6 @@ async fn moving_a_running_bot_gives_it_a_tab_without_changing_its_pane() {
     assert_eq!(env.herdr.tab(&tab).unwrap().panes, vec![mine.pane_id.clone()], "it has the tab to itself");
     assert_eq!(env.herdr.first_call("pane.move").unwrap()["destination"]["label"], json!("alfa"));
     assert_eq!(env.herdr.first_call("pane.move").unwrap()["focus"], json!(false));
-    // The tab it left still holds the neighbour, so it is not closed.
     assert!(env.herdr.tab(&neighbour.tab_id).unwrap().panes.contains(&neighbour.pane_id));
 }
 
@@ -259,16 +250,13 @@ async fn the_tidy_up_closes_an_empty_tab_and_only_an_empty_one() {
     let alone = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "alfa", &json!({}), None).await.unwrap();
     let busy = acquire_run_pane(&client, &ws.workspace_id, "/tmp/p", "bravo", &json!({}), None).await.unwrap();
 
-    // Occupied: left alone.
     close_tab_if_empty(&client, &ws.workspace_id, &busy.tab_id).await;
     assert!(env.herdr.tab(&busy.tab_id).is_some());
 
-    // Emptied: closed.
     client.pane_close(&alone.pane_id).await.unwrap();
     close_tab_if_empty(&client, &ws.workspace_id, &alone.tab_id).await;
     assert!(env.herdr.tab(&alone.tab_id).is_none());
 
-    // Already gone: not an error, and nothing else is touched.
     close_tab_if_empty(&client, &ws.workspace_id, &alone.tab_id).await;
     assert!(env.herdr.tab(&busy.tab_id).is_some());
 }

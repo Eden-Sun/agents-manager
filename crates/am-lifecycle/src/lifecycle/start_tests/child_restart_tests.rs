@@ -50,7 +50,6 @@ async fn a_child_that_will_not_exit_gets_its_run_back() {
     .execute(app.db())
     .await
     .unwrap();
-    // Explicitly model an agent ignoring ctrl+c, independently of its display name.
     *env.herdr.agents.lock().unwrap() = vec![json!({
         "name": null, "agent": "claude", "agent_status": "idle", "ignore_ctrl_c": true,
         "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
@@ -63,7 +62,6 @@ async fn a_child_that_will_not_exit_gets_its_run_back() {
     assert_eq!(run.state, "running", "the agent is still in its pane, so the run is still live");
     assert!(run.ended_at.is_none());
     assert_eq!(db::active_run(app.db(), &kid).await.unwrap().map(|r| r.id), Some(run_id));
-    // Nothing touched the pane.
     assert!(env.herdr.tab(&kid_pane.tab_id).unwrap().panes.contains(&kid_pane.pane_id));
     assert!(!env.herdr.methods().iter().any(|m| m == "pane.close"));
 }
@@ -103,7 +101,6 @@ async fn a_queued_dispatch_survives_a_sweep_in_the_middle_of_a_child_restart() {
     .execute(app.db())
     .await
     .unwrap();
-    // 有名字的 agent：mock 收到 ctrl+c 就讓它離開，`agent.start` 再把它放回來。
     *env.herdr.agents.lock().unwrap() = vec![json!({
         "name": "proj-alfa-ui", "agent": "claude", "agent_status": "idle",
         "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,

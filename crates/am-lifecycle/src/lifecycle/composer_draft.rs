@@ -130,7 +130,6 @@ pub async fn snapshot(client: &HerdrClient, run: &db::Run, bot: &db::Bot) -> LcR
         (BoxState::NonEmpty, Some(d)) => ("draft", full_fields(&bot.kind, run, d)),
         (BoxState::Unready, _) => ("unready", draft_fields(&bot.kind, run, None)),
         (BoxState::Empty, _) => ("empty", draft_fields(&bot.kind, run, None)),
-        // 框判成有字、卻解不出內容：不給動作（沒有可綁的 token）。
         (BoxState::NonEmpty, None) => ("unready", draft_fields(&bot.kind, run, None)),
     };
     let mut body = json!({"bot_id": bot.id, "run_id": run.id, "state": label, "busy": run.agent_status == "working"});
@@ -150,11 +149,9 @@ pub(super) fn pane_of(run: &db::Run) -> Option<String> {
 /// 框的狀態＋框裡的字（跟送 prompt 前的檢查同一種讀法：帶樣式，TUI 自己畫的提示不算字）。
 pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, crate::herdr::PaneRead)> {
     let read = super::delivery::read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
-    // `truncated` 只代表上面還有更舊的歷史（長時間跑的 pane 都是），不代表框沒讀完整；見 `stop::clear_restored_prompt`。
     if read.pane_id != pane || read.source != SCAN_SOURCE {
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
     }
-    // 對話框的游標列不是草稿：一律當成「不是輸入框」，沒有字、沒有 token、沒有動作。
     let state = if blocking_dialog(kind, &read.text).is_some() { BoxState::Unready } else { box_state(kind, &read.text) };
     let text = (state == BoxState::NonEmpty).then(|| composer_text_whole(kind, &read.text)).flatten();
     Ok((state, text, read))
@@ -204,7 +201,6 @@ fn composer_frame(kind: &str, text: &str) -> Option<ComposerFrame> {
         let bottom = (marker + 1..lines.len()).find(|&i| rule(&plain[i]))?;
         (top, bottom, plain[top].clone(), plain[bottom].clone())
     } else {
-        // codex 草稿可以有空白行：框的底邊是第一個非空、又不縮排的列（footer），不是第一個空白列。
         let bottom = if kind == "codex" {
             (marker + 1..lines.len()).find(|&i| !plain[i].trim().is_empty() && !plain[i].starts_with("  ")).unwrap_or(lines.len())
         } else {
@@ -316,9 +312,6 @@ pub async fn clear(
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_clear_key", &bot.id).await;
-    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
-    // reread immediately before Ctrl+C, and fail closed on any composer change. A change after this
-    // last read but before Herdr applies the key remains a narrow, non-atomic window.
     let (fresh_state, fresh, fresh_snapshot) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     if fresh_state == BoxState::Unready {
         return Err(not_a_composer(&bot.kind, run, &fresh_snapshot));
@@ -390,7 +383,6 @@ async fn draft_proof(app: &impl LcHost, client: &HerdrClient, run: &db::Run, bot
     };
     match choose_proof(&inputs, draft) {
         Ok(p @ Proof::Transcript { .. }) => Ok(p),
-        // 一列回音要逐字等於送出的字，畫面讀來的草稿做不到；框清空就是送出去了，照沒有證據記。
         Ok(Proof::EchoRow | Proof::Unverified) => Ok(Proof::Unverified),
         Err(not) => Err(not_attempted_error(&run.id, not)),
     }
@@ -446,7 +438,6 @@ async fn confirm(
                 let got = new_user_entries(*format, path, offset)?;
                 if !got.is_empty() {
                     tracing::info!(run = %run.id, bot = %bot.name, "submitted the draft in the composer; the session log shows it");
-                    // 只有一則就是它；多則（別人也送了）挑內容對得上的那一則，挑不出就用畫面讀來的字，proof 照清（#1578）。
                     let exact = match got.as_slice() {
                         [one] => Some(one.clone()),
                         many => own_entry(many, draft).or_else(|| Some(draft.to_string())),
@@ -557,8 +548,6 @@ async fn retry_exact_text(app: &impl LcHost, turn: &db::Turn) -> anyhow::Result<
         _ => anyhow::bail!("composer proof format does not match its bot kind"),
     };
     let entries = new_user_entries(format, &path, checkpoint.offset)?;
-    // 還沒有新訊息：log 可能還沒寫到，留給下一次重試。一則就是它；多則挑內容跟這回合的草稿對得上的，
-    // 挑不出就用這回合存下來的草稿字（#1578：不永久要求剛好一則）。
     let draft = turn.prompt_text.clone().unwrap_or_default();
     let text = match entries.as_slice() {
         [] => anyhow::bail!("composer proof has no new user message yet"),
@@ -717,8 +706,6 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_turn_tx", bot_id).await;
 
-    // 回合＋使用者訊息在按鍵之前寫進 DB（跟一般 prompt 一樣，早到的 hook 才對得上）。`auto_resend=0`：框裡那段不是我們打的，
-    // 不會有「再打一次」這回事。
     let turn_id = db::ulid();
     let msg_id = db::ulid();
     let mut tx = app.db().begin().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
@@ -750,7 +737,6 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
     tx.commit().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
     emit_turn(app, &turn_id).await;
 
-    // 打字前的那幾道閘門（維護窗口在 commit 之間被拿走、記不下「這個 pane 要打字」）：一個鍵都還沒按，撤回再回錯。
     let before_key = if let Some(refusal) = maintenance_refusal(app, Admission::Gated).await {
         Some(refusal)
     } else {
@@ -766,9 +752,6 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
 
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("draft_before_enter", bot_id).await;
-    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized snapshot,
-    // reread immediately before Enter, and fail closed on any composer change. A change after this
-    // last read but before Herdr applies the key remains a narrow, non-atomic window.
     let (final_state, fresh, final_snapshot) = match read_draft(&client, &pane, &bot.kind).await {
         Ok(snapshot) => snapshot,
         Err(_) => return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await,
@@ -796,7 +779,6 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
             confirm(app, &client, &run, &bot, &pane, &proof, offset, &draft).await
         }
         Err(e) => {
-            // herdr 沒收下 Enter：框裡還是那一段＝沒送出去，撤回這一筆。看不出來才記成 unknown。
             let still = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
             if still.as_deref() == Some(draft.as_str()) {
                 return match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
@@ -828,7 +810,6 @@ pub async fn submit_locked(app: &impl LcHost, bot_id: &str, expect_token: &str, 
             ("unknown", DeliveryRecord { stored: "unknown", verified: false, auto_resend: false }, correction_error)
         }
     };
-    // 內容定稿（可能換成了 session log 的原文）才推訊息：`message_added` 以 id 去重，推了就改不回來。
     if correction_error.is_none() {
         super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
     }

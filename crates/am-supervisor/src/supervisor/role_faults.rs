@@ -60,8 +60,6 @@ pub struct RoleFault {
 /// disagree by one tick」）。
 pub async fn refresh(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps + crate::supervisor::role_faults::RoleFaultTable)) {
     for role in WATCHED {
-        // 沒建立的角色整個不留紀錄：留著會讓 `incidents::observe` 每一拍都把這個 kind 算成
-        // 「探針沒跑」，另一顆角色已經開著的 incident 就再也關不掉（blind 會擋住 resolve）。
         if !is_configured(app.db(), role).await {
             app.role_faults().lock().await.remove(role.as_str());
             continue;
@@ -70,10 +68,6 @@ pub async fn refresh(app: &(impl crate::capabilities::Db + crate::capabilities::
         let mut faults = app.role_faults().lock().await;
         let entry = faults.entry(role.as_str().to_string()).or_default();
         entry.probe_failed = probe.is_none();
-        // 兩個訊號各自算，不要混在同一個 match 裡：**只有畫面那一半**在讀不到時要維持上一拍的結論
-        // （不憑空宣告故障、也不宣告恢復）；notify 那一半的證據就在手上的集合裡，每一拍都要重算。
-        // 混在一起的話，notify 恢復（集合被清空）那一拍剛好讀不到畫面，就會把已經解除的
-        // `notify_stalled` 當成「上一拍的結論」繼續留著，然後每一拍都讀不到、每一拍都繼續留著。
         let screen_says_logged_out = match probe {
             Some(v) => v,
             None => entry.reason == Some(REASON_NEEDS_LOGIN),
@@ -81,7 +75,6 @@ pub async fn refresh(app: &(impl crate::capabilities::Db + crate::capabilities::
         let reason = if screen_says_logged_out {
             Some(REASON_NEEDS_LOGIN)
         } else if entry.failed_turns.len() >= NOTIFY_STALL_LIMIT {
-            // 畫面是好的（或看不到），但 notify 一直沒完成也算不可用（#427 第 3 項）。
             Some(REASON_NOTIFY_STALLED)
         } else {
             None
@@ -121,7 +114,6 @@ pub async fn note_notify_round(
     failed: std::collections::BTreeSet<String>,
     any_completed: bool,
 ) {
-    // 只認這兩個角色：別的字串進來就不要在表裡長出永遠不會被 `refresh` 清掉的項目。
     if !WATCHED.iter().any(|r| r.as_str() == role) {
         return;
     }
@@ -166,14 +158,12 @@ async fn is_configured(db: &SqlitePool, role: Role) -> bool {
 /// StatusLine hook 送進來的 `rate_limits`（`/api/quota` 同一個來源），登入不了就不會有新的讀數。
 async fn probe_role(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps), role: Role) -> Option<bool> {
     let bot_id = crate::supervisor::roles::bot_for(app.db(), role).await.ok()??;
-    // claude 以外的 CLI 沒有這個畫面，不要拿別人的版面去猜——但那不是「讀不到」，是「不是這個問題」。
     let bot = crate::db::bot(app.db(), &bot_id).await.ok().flatten()?;
     if bot.kind != "claude" {
         return Some(false);
     }
     let run = crate::db::active_run(app.db(), &bot_id).await.ok()?;
     let Some(run) = run else {
-        // `role_state` 已明確回報 no_run；已成功查到沒有 run，不是探針讀取失敗。
         return Some(false);
     };
     let pane = run.pane_id.clone()?;

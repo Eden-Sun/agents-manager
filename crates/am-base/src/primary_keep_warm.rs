@@ -162,7 +162,6 @@ pub async fn rearm_windows(pool: &SqlitePool) -> anyhow::Result<usize> {
     for run_id in &runs {
         open_window(run_id);
     }
-    // 視窗已收（或熱壓還在跑）、還在回音期：重啟後第一個 statusLine 指紋變化一樣不算活動。
     let replied: Vec<(String, String)> = sqlx::query_as(&format!(
         "SELECT t.run_id, MAX(t.completed_at) FROM turns t JOIN runs r ON r.id = t.run_id
           WHERE r.state IN ('starting','running') AND {}
@@ -248,7 +247,6 @@ pub fn context_used_pct(kind: &str, run_id: &str, status_json: Option<&str>) -> 
     match kind {
         "claude" => {
             let status: serde_json::Value = serde_json::from_str(status_json?).ok()?;
-            // Resume history is a display fallback, never evidence for automatic/frozen compaction.
             if status.get("_agm_resumed_context").is_some() || status.get("_agm_context_invalidated").is_some() {
                 return None;
             }
@@ -405,7 +403,6 @@ pub async fn settle_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: 
     }
     let Ok((Some(anchor), _)) = anchor_of(db, bot, run, now).await else { return };
     let Some(anchor_t) = db::parse_ts(&anchor) else { return };
-    // 冰凍壓縮自己造成的活動不是使用者回來了：壓完照樣不保溫（壓縮的回音另見 `is_warm_compact_echo`）。
     if is_warm_compact_echo(anchor_t, last_warm_compact_at(db.pool(), &bot.id).await.ok().flatten()) {
         return;
     }
@@ -611,7 +608,6 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     let queued = db::queued_turn_for_bot(db.pool(), &bot.id).await?.is_some();
     let eff = effective_runtime(db, bot).await?;
     let tuning = eff.keep_warm_tuning(KEEP_WARM_AFTER_SECS, WARM_COMPACT_AFTER_SECS, warm_compact_min_context_pct(&bot.kind));
-    // 對象：主力，或 effective keep_warm==true；effective keep_warm==false 可關掉主力的保溫。
     let target = tuning.enabled.unwrap_or(bot.is_primary != 0);
     if !eligible(&bot.kind, target, &run.state, &run.agent_status, in_flight, queued) {
         return Ok(None);
@@ -619,11 +615,9 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     let (anchor, last_turn) = anchor_of(db, bot, run, now).await?;
     let Some(anchor) = anchor else { return Ok(None) };
     let Some(anchor_t) = db::parse_ts(&anchor) else { return Ok(None) };
-    // 壓縮過後 cache 已作廢、context 也變小：保溫沒有意義，直到真的有新回合。
     if cache_clock::compacted_since(Some(&anchor), last_turn.as_ref()) {
         return Ok(Some(Plan { step: Step::Wait, age_secs: (now - anchor_t).num_seconds(), anchor }));
     }
-    // 「不用保溫」（冰凍）：按下之後沒有真的活動（錨點不晚於按下的時間）就不保溫；context 夠大時只在 cache 到期前壓一次（[`decide_frozen`]）。
     let frozen = skip_since(db.pool(), &bot.id).await?.is_some_and(|since| anchor_t <= since);
     let age_secs = (now - anchor_t).num_seconds();
     let first_look_secs = if frozen {
@@ -634,7 +628,6 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     if age_secs < first_look_secs {
         return Ok(None);
     }
-    // 只有 claude 保溫與熱壓（agy 有 TTL 但不保溫；見 `eligible`）。
     if bot.kind != "claude" {
         return Ok(None);
     }
@@ -656,7 +649,6 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
     )
     .await?
     .is_some_and(|t| t > anchor_t);
-    // 舊資料只有 note、新資料以收據為準：兩者都算，取較晚的。
     let last_note = latest(
         db,
         &format!(
@@ -717,7 +709,6 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
     match plan.step {
         Step::Wait => {}
         Step::KeepWarm => {
-            // 先開視窗再送：送出後 statusLine 馬上會動，不能把這次當成活動。送不出去就撤回。
             open_window(&run.id);
             match turns.send_prompt(PromptRequest {
                 bot_id: bot.id.clone(),
@@ -735,7 +726,6 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
         }
         Step::WarmCompact => {
             let age_min = plan.age_secs / 60;
-            // 先 claim 再送（#864）：收據在 DB，note 寫失敗或 daemon 在兩者之間掛掉都不會對同一錨點重壓。
             match claim_warm_compact(db.pool(), &bot.id, &plan.anchor, &run.id, age_min).await {
                 Ok(true) => {}
                 Ok(false) => return,
@@ -744,7 +734,6 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     return;
                 }
             }
-            // 同保溫：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_warm_compact_echo`）。
             open_window(&run.id);
             match turns.compact_bot(bot.id.clone(), Some(run.id.clone())).await {
                 Ok(()) => {
@@ -754,7 +743,6 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     }
                     write_warm_compact_note(db, messages, bot, &plan.anchor, age_min).await;
                 }
-                // 鎖內前置檢查擋下、一個鍵都沒打（含 #872 的 `superseded_run`）：撤回 claim，下一輪依新狀態重判。
                 Err(e @ (TurnError::Busy(_) | TurnError::BotNotFound(_) | TurnError::InvalidRequest(_) | TurnError::QuotaBlocked(_))) => {
                     drop_window(&run.id);
                     if let Err(re) = release_warm_compact(db.pool(), &bot.id, &plan.anchor).await {
@@ -762,7 +750,6 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(db: &DbContext<SqlitePool>,
                     }
                     tracing::info!(bot = %bot.name, error = ?e, "primary cache compaction not sent this round; will retry");
                 }
-                // 可能已送出 `/compact`（例如 send_slash_line 中途失敗）：保留 claim，不重壓這個錨點。
                 Err(e) => {
                     drop_window(&run.id);
                     tracing::warn!(bot = %bot.name, error = ?e, "primary cache compaction: result unknown; not retrying this anchor");

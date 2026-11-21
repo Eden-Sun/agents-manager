@@ -60,7 +60,6 @@ mod tests {
     fn the_security_banner_blocks_typing_in_plain_and_styled_reads() {
         assert!(blocks_typing(BANNER));
         assert!(blocks_typing(BANNER_ANSI));
-        // 動畫粒子落在橫幅周圍的空白列上：抹掉之後照樣認得。
         let sparkled = BANNER_ANSI.replacen("\n\n\u{1b}[1m\u{1b}[36m", "\n\u{1b}[38;2;90;90;200m⠂\u{1b}[0m\n\u{1b}[1m\u{1b}[36m", 1);
         assert_ne!(sparkled, BANNER_ANSI, "要真的放進一顆粒子");
         assert!(blocks_typing(&sparkled));
@@ -69,10 +68,8 @@ mod tests {
     #[test]
     fn a_screen_without_a_choice_banner_is_not_blocked() {
         assert!(!blocks_typing("› Reply with PONG\n\n• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n"));
-        // 只有資訊、沒有選項：打字就是繼續，數字不會被吃。
         let info = "• PONG\n\n\n  Heads up\n  Something changed on your account.\n\n  esc to dismiss · type to continue\n\n› Ask Codex to do anything\n";
         assert!(!blocks_typing(info));
-        // 回覆裡照抄了橫幅的字（結構不完整）不是橫幅。
         let quoted = "› 貼一下提醒的原文\n\n• 原文如下：\n  Keep using Daybreak mode\n  Press a number to choose · esc to dismiss · type to continue\n\n› Ask Codex to do anything\n";
         assert!(!blocks_typing(quoted));
     }

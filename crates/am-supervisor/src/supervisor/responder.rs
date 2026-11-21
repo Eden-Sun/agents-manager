@@ -118,7 +118,6 @@ pub fn runtime_json(port: u16, self_id: &str, manager_id: Option<&str>, data_dir
         "role": Role::Responder.as_str(),
         "self_bot_id": self_id,
         "responder_bot_id": self_id,
-        // 使用者入口（巡檢）。CLI 的 `state` 用它標出誰是總管。
         "manager_bot_id": manager_id,
         "data_dir": data_dir,
         "supervisor_id": store::SUPERVISOR_ID,
@@ -128,7 +127,6 @@ pub fn runtime_json(port: u16, self_id: &str, manager_id: Option<&str>, data_dir
 fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, manager_id: Option<&str>, persona: &str) -> std::io::Result<super::setup::Deployed> {
     let dir = dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    // 一律原子寫（temp + rename）：bin/agm 與 runtime.json 隨時會被 exec／讀，原地截斷會讓讀者看到半截（#919／#520 同一條）。
     super::setup::write_file(&dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()).as_bytes())?;
     super::setup::write_file(&dir.join("persona.md"), persona.as_bytes())?;
     let runtime = serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, manager_id, &app.data_dir().to_string_lossy()))?;
@@ -161,8 +159,6 @@ pub async fn ensure_env(
     let model = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.model);
     let model = crate::models::canonical_model("claude", model).to_string();
     let effort = effort.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.effort).to_string();
-    // 這三個值會直接變成 CLI 的 argv。不驗的話，一句 `--dangerously-skip-permissions` 或一段空白
-    // 就能從 setup 的欄位混進命令列；模型名單會隨 CLI 改版變動，所以驗的是**形狀**不是白名單。
     if !valid_model(&model) {
         return Err(LcError::Bad(format!(
             "model must look like a CLI alias ([a-z0-9][a-z0-9._-]{{0,39}}), got {model:?}"
@@ -171,7 +167,6 @@ pub async fn ensure_env(
     let effort = crate::config::normalize_effort("claude", Some(&effort))
         .map_err(LcError::Bad)?
         .ok_or_else(|| LcError::Bad("effort must not be empty".into()))?;
-    // #2002: admit before validating; held through the config write and `set_runtime` (local I/O only).
     let _identity_admit = am_base::identity_fence::admit(crate::config::LOCAL_HOST, "claude", Some(&identity)).await;
     if app.identity_for_host(crate::config::LOCAL_HOST, &identity).await.is_none() {
         return Err(LcError::conflict(
@@ -183,7 +178,6 @@ pub async fn ensure_env(
     std::fs::create_dir_all(&d).map_err(|e| LcError::Bad(format!("{}: {e}", d.display())))?;
     let path = crate::config::canonical_path(&d.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
     let persona = effective_persona(app.db()).await?;
-    // 舊安裝的協調者自成一個專案；先搬進巡檢的專案，下面就是在同一個專案裡更新同一顆 bot。
     let adopted = match row.bot_id.as_deref() {
         Some(b) => adopt_into_manager_project(app, b).await?,
         None => None,
@@ -198,7 +192,6 @@ pub async fn ensure_env(
     let fresh_bot = crate::db::ulid();
     let (m2, e2, i2, p2, persona2) = (model.clone(), effort.clone(), identity.clone(), path.clone(), persona.clone());
     let (project_id, bot_id) = app.update_and_project(move |cfg| {
-        // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
         ensure_role_bot(
             cfg,
             RoleBotPick {
@@ -215,7 +208,6 @@ pub async fn ensure_env(
                 persona: &persona2,
             },
             |bot| {
-                // 使用者入口只有巡檢一個：協調者不帶任何額外 args。
                 bot.args = vec![];
             },
         )
@@ -231,10 +223,8 @@ pub async fn ensure_env(
             up(e)
         }
     })?;
-    // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
     set_cwd(app.db(), &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
-    // 巡檢的 runtime.json 也要知道協調者是誰：它目錄裡的 ops 腳本派工給協調者（巡檢不能對自己下交辦）。
     if let Some(m) = manager_id.as_deref() {
         if let Err(e) = super::setup::write_runtime_json(app, m, Some(&bot_id)) {
             tracing::warn!(error = %e, "could not record the responder in the patrol runtime.json");
@@ -267,7 +257,6 @@ pub async fn merge_into_manager_project(app: &(impl crate::capabilities::Cfg + c
 }
 
 async fn adopt_into_manager_project(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + ConfigProjection), bot_id: &str) -> Result<Option<String>, LcError> {
-    // 巡檢還沒設定就沒有可以搬進去的專案：什麼都不動。
     let Some(manager_project) = store::get_or_init(app.db()).await.map_err(up)?.project_id else {
         return Ok(None);
     };
@@ -287,8 +276,6 @@ async fn adopt_into_manager_project(app: &(impl crate::capabilities::Cfg + crate
         let at = cfg.projects[from].bots.iter().position(|b| b.id.as_deref() == Some(bid.as_str())).expect("found above");
         let bot = cfg.projects[from].bots.remove(at);
         cfg.projects[to].bots.push(bot);
-        // 舊專案只是「協調者的目錄」那層殼，空了就拿掉，不然側欄會留一個空專案。
-        // 只拿掉路徑對得上的那一個：別人的專案就算空了也不是這裡能刪的。
         if cfg.projects[from].bots.is_empty() && cfg.projects[from].path == c2 {
             cfg.projects.remove(from);
         }
@@ -297,7 +284,6 @@ async fn adopt_into_manager_project(app: &(impl crate::capabilities::Cfg + crate
     .await;
     let moved = match moved {
         Ok(m) => m,
-        // 協調者不在 config.toml（被手改過），或巡檢的專案不見了：交給 setup 重建，不在這裡猜。
         Err(e) if e.to_string() == "missing" => return Ok(None),
         Err(e) => return Err(up(e)),
     };
@@ -337,7 +323,6 @@ pub async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabil
 /// 憑據，寫不進去就整個失敗、什麼都不動，不留下「跑著但沒人要它跑」（issue #84）。start 本身失敗時
 /// 意圖留著，交給看門狗的有界重試（999480e）。
 pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + ControllerRuntime)) -> Result<(), LcError> {
-    // 沒設定好就回 not_configured，不要先留下一個沒有 bot 可以對應的「要它跑」。
     if roles::responder_bot(app.db()).await.map_err(up)?.is_none() {
         return Err(LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})));
     }
@@ -358,7 +343,6 @@ pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         None => {
             app.start_bot(&bot.id).await?;
         }
-        // 上一個 run 還在收尾：這時起不了新的（`runs_one_active`），當成「已經在跑」往下走只會回一個假的成功。
         Some(run) if run.state == "stopping" => {
             return Err(LcError::conflict(
                 "run_stopping",
@@ -368,13 +352,11 @@ pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         Some(_) => {}
     }
     if let Err(e) =
-        // 同 `super::start_manager`：控制面的握手不受維護窗口的閘門管（issue #86）。
         app.prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)).await
     {
         tracing::warn!(error = ?e, "AGM responder bootstrap prompt was not delivered");
     }
     let _ = roles::set_status_detail(app.db(), Role::Responder, detail).await;
-    // 協調者的喚醒掛在巡檢的 controller 迴圈上；巡檢還沒起來也要有一條迴圈在跑。
     let sup = store::get_or_init(app.db()).await.map_err(up)?;
     if sup.bot_id.is_some() {
         app.spawn_supervisor_controller(sup.generation);
@@ -388,8 +370,6 @@ pub async fn stop(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
-    // 先寫「不要它跑」，看門狗才不會在兩步之間把它拉回來；寫不進去就不要停——停了也會被拉回來，
-    // 而使用者拿到的是 200（issue #84）。
     roles::set_desired_running(app.db(), Role::Responder, false)
         .await
         .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was stopped): {e}")))?;
@@ -398,15 +378,12 @@ pub async fn stop(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
     Ok(())
 }
 
-// ---------------------------------------------------------------- watchdog
-
 /// 這一列翻譯成看門狗看得懂的那幾個欄位。拿鎖前的第一次判斷與拿鎖後的重判共用同一支，
 /// 兩次才不會用不同的規則（issue #523）。
 fn watched(row: &roles::RoleRow, quota_unknown_retry: bool) -> watchdog::Watched<'_> {
     watchdog::Watched {
         configured: true,
         wanted: row.desired_running != 0,
-        // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態，而且排定的重試時間已經到了。
         waiting_quota: row.status == "waiting_quota" && !quota_unknown_retry,
         attempts: row.watchdog_attempts,
         next_at: row.watchdog_next_at.as_deref(),
@@ -417,23 +394,13 @@ pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabili
     let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
     let Ok(bot) = roles::responder_bot(app.db()).await else { return };
     let Some(bot) = bot else {
-        // 登記過卻找不到那顆 bot（被刪掉）：看門狗沒有東西可以拉起來，交給巡檢。事件照樣留在
-        // 協調者的佇列（SPEC §18.15）——只有等超過 5 分鐘的核准會被 `failover` 改派（issue #421）。
         if row.bot_id.is_some() {
             report_missing(app.db(), row.bot_id.as_deref().unwrap_or("")).await;
         }
         return;
     };
-    // 讀不到 liveness ＝ 不知道，不是「已停止」：這個 tick 不動看門狗狀態（#249）。
     let Ok(liveness) = super::manager_liveness(app.db(), &bot.id).await else { return };
-    // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
-    // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身份
-    // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身份被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
-    // `notify` 因為它沒在跑不送、`answered_since` 要它答完一個回合——三個條件互相等，永遠卡住（review3 c3 M3）。
-    // 有可信證據說被擋（撞限或見底讀數）時照舊不啟動。
     let retry_due = row.notify_next_at.as_deref().is_none_or(watchdog::past);
-    // 這個判斷要花一次額度查詢，所以算一次就記著：下面拿鎖之後重判時直接沿用（額度狀態不會因為
-    // 有人按 stop 而改變，而在全域鎖裡再查一次額度只會把 controller 整拍拖住，#473）。
     let quota_unknown_retry = retry_due && quota_state(app, &bot).await == QuotaState::Unknown;
     let is_past = |at: &str| watchdog::scheduled_past(app, "responder", at);
     match watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, is_past) {
@@ -460,11 +427,6 @@ pub async fn watchdog_tick(app: &(impl crate::capabilities::Db + crate::capabili
         }
         watchdog::Plan::Start => {
             let _g = super::lock().await;
-            // 拿到鎖才重讀意圖與 liveness（issue #523）：上面那個 `row` 是**等鎖之前**讀的，而
-            // `POST /api/supervisor/responder/stop` 拿的是同一把鎖，它會先把 `desired_running=0`
-            // 寫進去再停掉 pane。照舊的 `row` 啟動等於把使用者剛按下的 stop 蓋掉，而且收不回來：
-            // bot 跑著、意圖是 0，下一拍 `plan_for` 因為 `wanted=false` 回 `Idle`，看門狗從此不管它。
-            // 巡檢那半（`watchdog::start`）一直是這樣防的，這裡以前沒跟上。
             #[cfg(any(test, feature = "test-hooks"))]
             crate::race_point::hit("responder_watchdog_start", &bot.id).await;
             let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
@@ -514,8 +476,6 @@ async fn report_missing(db: &SqlitePool, bot_id: &str) {
     .await;
     let pushed = store::push_inbox(
         db,
-        // event_key 帶一個時間格：`push_inbox` 是 INSERT OR IGNORE，固定鍵的話這則一輩子只推一次，
-        // 巡檢 ack 掉之後協調者不見了就再也沒有人會被提醒（review 2026-09-16）。
         &format!("responder_bot_missing:{bot_id}:{}", crate::db::now().get(..13).unwrap_or_default()),
         "responder_bot_missing",
         None,
@@ -541,8 +501,6 @@ pub async fn report_gave_up_for_test(app: &(impl crate::capabilities::Db + crate
     report_gave_up(app, why).await
 }
 
-// ---------------------------------------------------------------- notify
-
 /// 短窗批次：最舊的待喚醒事件已經等滿 `batch_secs`，距離上一次喚醒也滿 `batch_secs`。
 /// 一陣連發的申請（同一顆 bot 補一句、三顆 bot 同時回報）因此是一次喚醒。
 pub fn batch_due(oldest_wake: &str, last_wake: Option<&str>, batch_secs: u64, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -553,7 +511,6 @@ pub fn batch_due(oldest_wake: &str, last_wake: Option<&str>, batch_secs: u64, no
     };
     let b = batch_secs as i64;
     let oldest = age(oldest_wake);
-    // 時鐘往回跳（age < 0）不能讓事件永遠卡住。
     let ripe = oldest < 0 || oldest >= b;
     let spaced = last_wake.map(|t| {
         let a = age(t);
@@ -589,10 +546,7 @@ pub enum QuotaState {
 /// **裸 `claude`** 那一把——所以固定拼 `claude:<identity>` 的協調者永遠讀不到自己的額度，也就永遠
 /// 不知道自己撞限了。反過來，有自己 env 的身份（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
 async fn quota_key_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> Option<String> {
-    // pane 裡實際的帳號（run 起來時的身份，issue #238）；讀不到 run 當 Unknown。
     let identity = app.billing_identity(bot).await.ok().flatten()?;
-    // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
-    // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
     let host = strict_bot_host(app.db(), &bot.id).await?;
     let base = app.quota_base_for_host(&host, &bot.kind, Some(&identity)).await;
     Some(crate::quota::quota_key(&host, &base))
@@ -627,8 +581,6 @@ pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::Quo
     let now = chrono::Utc::now();
     let q = app.quotas().lock().await;
     let Some(quota) = q.get(&key) else { return QuotaState::Unknown };
-    // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。撞的是模型專屬的桶（Fable）而協調者
-    // 跑的是別的模型，就不是它的撞限——跟 `limit_hit_for_bot` 同一條規則（review3 c3 H2）。
     if let Some(hit) = quota
         .limit_hit
         .clone()
@@ -641,7 +593,6 @@ pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::Quo
             .min_by(|a, b| crate::db::cmp_ts(a, b));
         return QuotaState::Blocked(hit.until.clone().or(soonest));
     }
-    // 判斷本體是共用的 `Quota::exhausted`（issue #464／#475：以前三處各寫一份，而窗長到期只在開機跑）。
     let critical: Vec<&crate::quota::Window> = [crate::quota::Bucket::FiveHour, crate::quota::Bucket::SevenDay]
         .into_iter()
         .filter(|b| quota.exhausted(*b, now))
@@ -650,12 +601,6 @@ pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::Quo
     if !critical.is_empty() {
         return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min_by(|a, b| crate::db::cmp_ts(a, b)));
     }
-    // 「可以用」要有證據：共用視窗都有讀數、都沒見底，也沒撞限；Codex 權威讀數可確認 5h 不存在。
-    // 空的或不完整的讀數（探測只回了一半、剛起來還沒拿到）不能拿來宣稱恢復——少的那一格
-    // 可能正是見底的那一格。
-    // issue #475：「有讀數」要是**說得出話**的讀數——一筆比窗長還舊、又沒有重置時間的，
-    // 不能拿來宣稱恢復（那正是「少的那一格可能就是見底的那一格」的情形）。
-    // 讀數本身也要新鮮：開機從快取回填的、或執行中探測壞掉而太久沒人更新的，不是「現在可以用」的證據（見底的照舊擋，寧可多擋）。
     let flagged = app.quota_stale().lock().await.contains(&key);
     if crate::quota::reading_is_stale(quota, flagged, now) {
         return QuotaState::Unknown;
@@ -710,13 +655,11 @@ async fn answered_since(db: &SqlitePool, bot_id: &str, since: Option<&str>) -> b
     if !matches!(status.as_str(), "completed" | "completed_fallback") || noted != 0 {
         return false;
     }
-    // `turn_error` 只有在還屬於這一回合時才算它的。
     if newer == 0 && turn_error.is_some_and(|e| !e.trim().is_empty()) {
         return false;
     }
     match chrono::DateTime::parse_from_rfc3339(&completed_at) {
         Ok(t) => (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() >= CAPTURE_SETTLE_SECS,
-        // 時間讀不懂：不要憑它宣告恢復。
         Err(_) => false,
     }
 }
@@ -803,23 +746,16 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
     let (batch, cap) = (cfg.supervisor.responder_batch_secs, cfg.supervisor.responder_max_backoff_secs);
     let now = chrono::Utc::now();
     let now_iso = crate::db::now();
-    // 額度狀態**每個 tick 都算一次**，跟「現在有沒有待辦」無關：只在有事要送時才重算的話，
-    // 佇列清空後 `waiting_quota` 會永遠掛著——看門狗把它當成「不是故障」，協調者就再也不會被拉起來。
     let waiting = row.status == "waiting_quota";
-    // 送出去之前要等到的時間（額度或退避），隨下面的判斷更新。
     let mut next_at = row.notify_next_at.clone();
     match quota_state(app, &bot).await {
         QuotaState::Blocked(reset) => {
-            // 已經在等、時間還沒到、讀數也沒變 → **什麼都不寫**。每個 tick 重算 `iso_in(cap)` 會
-            // 讓重試時間永遠往後飄（而且每 10 秒寫一次 DB、推一次 SSE），看起來像在等一個永遠不到的點。
             let due_now = row.notify_next_at.as_deref().is_none_or(watchdog::past);
             let reset_changed = !crate::db::same_instant(row.quota_reset_at.as_deref(), reset.as_deref());
             if waiting && !due_now && !reset_changed {
                 return;
             }
             let next = quota_retry_at(reset.as_deref(), watchdog::iso_in(cap));
-            // issue #421：這句以前寫「不會改由巡檢處理」。核准現在會改派（開超過 5 分鐘就換巡檢裁示），
-            // 其餘種類才是真的留著等——UI 讀的就是這段字，寫錯會讓人以為核准還在協調者手上。
             let detail = format!(
                 "{} 的額度見底；{next} 再試。bot 申請留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
                 bot.identity.as_deref().unwrap_or("(身份不明)")
@@ -835,8 +771,6 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
             next_at = None;
             app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
         }
-        // 讀不到：不宣稱恢復、也不新增等待。唯一能解除的是協調者**答完**了一個沒出錯的回合
-        // （`answered_since`）；已排定的重試時間到了照常試一次，但送出去不等於恢復。
         QuotaState::Unknown if waiting => {
             if answered_since(app.db(), &bot.id, row.waiting_since.as_deref()).await {
                 let _ = roles::set_status(app.db(), Role::Responder, "", Some("額度已恢復（協調者完成了一個回合）"), None).await;
@@ -847,13 +781,10 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
         }
         QuotaState::Unknown | QuotaState::Available => {}
     }
-    // 停在登入（#420）：答完一個沒出錯的回合、或畫面上已經看不到登入問題，才算恢復。送還是照退避繼續試——
-    // 人從別的終端 unlock-keychain 之後畫面不會變，擋住不送就永遠等不到那個「答完」。
     if row.status == "needs_login" && login_recovered(app, &bot, row.waiting_since.as_deref()).await {
         let _ = roles::set_status(app.db(), Role::Responder, "", Some("登入已恢復"), None).await;
         app.emit("supervisor_changed", json!({"responder": "login_resumed"})).await;
     }
-    // 還沒到下一次可以試的時間（上一次送不出去的退避，或讀不到額度時仍在等的那個點）。
     if next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
         return;
     }
@@ -874,7 +805,6 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
         let next = crate::db::iso_in(wait);
         let _ = store::defer_notify(app.db(), &ids, &next, &why).await;
     };
-    // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓協調者收到兩份。
     match lifecycle::owed_as_unknown(app.prompt_relayed(&bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
         Ok(out) if out.delivery == "failed" => {
             defer("delivery failed".into()).await;
@@ -885,9 +815,6 @@ pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::
                 .await
                 .unwrap_or(0);
             let _ = roles::record_wake(app.db(), Role::Responder, n, &roles::wake_reason(&due)).await;
-            // **送達不是恢復**：`ok`／`unknown` 只代表字進了 pane 或佇列，CLI 可能下一刻才報撞限。
-            // 還在等額度時不動狀態，只把下一次重試推到有界的間隔之後（不然每個批次窗都再送一次）；
-            // 解除要等可信讀數或協調者真的答完一個回合。
             if waiting {
                 let _ = roles::set_notify_next(app.db(), Role::Responder, Some(&watchdog::iso_in(cap))).await;
             }
@@ -941,26 +868,15 @@ pub async fn note_login_problem_for_test(app: &(impl crate::capabilities::Db + c
 pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> Result<Value, LcError> {
     let row = roles::get(app.db(), Role::Responder).await.map_err(up)?;
     let bot = roles::responder_bot(app.db()).await.map_err(up)?;
-    // 「登記過」與「那顆 bot 還在」分開講：登記過但 bot 被刪掉是 `missing`，不是 `not_configured`——
-    // 後者會讓人以為事件回到巡檢了，而它們還在協調者的佇列裡。
     let status = match (&bot, row.bot_id.is_some()) {
         (None, false) => "not_configured".to_string(),
         (None, true) => "missing".to_string(),
         (Some(_), _) if !row.status.is_empty() => row.status.clone(),
         (Some(b), _) => super::manager_liveness(app.db(), &b.id).await?.to_string(),
     };
-    // #454：#427 判出來的不可用只存在記憶體（`App.role_faults`），而這支面板只讀 DB 的 `row.status`，
-    // 於是「核准正在被默默改派、incident 已經開了，面板卻說 idle」——正是 #420 要消滅的症狀，
-    // 只是換成 #427 新加的訊號路徑又出現一次。`notify_stalled` 更是從來不會被寫進 DB，永遠看不到。
-    //
-    // **只改對外這一層**：`supervisor_roles.status` 一個字都不動。那一欄是 `notify` 與看門狗的憑據
-    // （`parked_on_quota`），把 `unavailable` 寫進去會讓撞限的協調者被看門狗一直重啟。
     let unavailable_reason = crate::supervisor::health::responder_state(app).await.reason();
     let status = match unavailable_reason {
-        // 停在登入是要人動手的那一種，單獨給一個值（既有 UI 與 `responder_severity` 都認這個字）。
         Some(r) if r == crate::supervisor::health::REASON_NEEDS_LOGIN => "needs_login".to_string(),
-        // 撞限照舊叫 waiting_quota；`no_run` 的既有值（stopped／missing／not_configured）比
-        // 一個籠統的 `unavailable` 好懂，也不要蓋掉。
         Some(r) if r == crate::supervisor::health::REASON_WAITING_QUOTA => status,
         Some(r) if r == crate::supervisor::health::REASON_NO_RUN => status,
         Some(_) => "unavailable".to_string(),
@@ -982,7 +898,6 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
     .fetch_one(app.db())
     .await
     .map_err(up)?;
-    // 還沒送出、會叫醒它的事件。協調者沒在跑時這個數字就是「有人在等、而沒有人會被叫醒」（health.rs）。
     let wake_pending: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM supervisor_inbox WHERE {owner}='responder' AND state='pending' AND COALESCE(wake, 1)=1",
         owner = roles::OWNER
@@ -996,14 +911,10 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
         "bot_id": row.bot_id.clone(),
         "project_id": bot.as_ref().map(|b| b.project_id.clone()),
         "identity": row.identity,
-        // 設定值。實際在跑的是 `runtime`：`/model` 換過、或 bot 被人改過設定時，這兩個會不一樣，
-        // 而「協調者現在跑在什麼上面」要看後者，不是 setup 當下的快照。
         "model": row.model,
         "effort": row.effort,
         "runtime": runtime,
         "status": status,
-        // 機器讀的原因（穩定字串，同 `health::REASON_*`、同 #421 寫進 inbox payload 的那個）：
-        // `needs_login` / `waiting_quota` / `notify_stalled` / `no_run`，`null` = 這一拍看起來是好的。
         "unavailable_reason": unavailable_reason,
         "status_detail": row.status_detail,
         "quota_reset_at": row.quota_reset_at,

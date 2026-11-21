@@ -38,7 +38,6 @@ async fn slot_holder(app: &(impl crate::capabilities::Db + SupervisorSendRepo), 
         return json!({"kind": "daemon"});
     }
     if let Some(from) = relay_from {
-        // 沒帶 bot token 的 `relay_from` 只是自稱（`relay_unverified`）：不當事實講成 AGM、也不替呼叫端把任意 id 解析成名字。
         if relay_unverified.unwrap_or(1) != 0 {
             return json!({"kind": "bot"});
         }
@@ -86,8 +85,6 @@ pub(super) async fn queue_awaiting_idle(
     relay: prompt::RelaySrc<'_>,
     files: &[Attachment],
 ) -> LcResult<prompt::PromptOut> {
-    // 先讀槽再寫：bot 鎖只排得住這顆 bot 自己，擋不住別的 writer（對帳、收件匣）在讀與寫之間 commit；deferred 交易
-    // 這時升級寫鎖直接 517，空著的槽也把使用者的 prompt 拒掉（#821）。
     let mut tx = db::begin_write(app.db()).await.map_err(up)?;
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 AND queue_class=? ORDER BY created_at, id LIMIT 1",
@@ -120,7 +117,6 @@ pub(super) async fn queue_awaiting_idle(
     .execute(&mut *tx)
     .await;
     if let Err(error) = inserted {
-        // 唯一索引（每個對話最多一筆 queued）擋下來＝槽被 AGM 派工、別的 bot、啟動等待佔著：說是誰，不要只回一句英文。
         if error.as_database_error().is_some_and(|d| d.is_unique_violation()) {
             drop(tx);
             let occupant: Option<String> = sqlx::query_scalar(

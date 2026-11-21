@@ -81,8 +81,6 @@ async fn store_debt(pool: &SqlitePool, debt: &RuntimeDebt) -> Result<(), sqlx::E
 }
 
 async fn commit_debt(pool: &SqlitePool, run_id: &str) -> Result<Option<RuntimeDebt>, sqlx::Error> {
-    // 先讀後寫：deferred 交易升級寫鎖時 SQLite 不跑 busy handler，背景重試與另一個 writer 同時動就直接
-    // `database is locked`／BUSY_SNAPSHOT（#723）。BEGIN 就拿寫鎖，撞到只會等 busy_timeout。
     let mut tx = crate::db::begin_write(pool).await?;
     let debt = sqlx::query_as::<_, RuntimeDebt>("SELECT * FROM live_apply_debts WHERE run_id = ?")
         .bind(run_id)
@@ -165,7 +163,6 @@ fn schedule_retry<A: LiveApplyDebtContext + Clone>(app: &A, run_id: &str) {
             tokio::time::sleep(delay).await;
             match retry_once(&app, &run_id).await {
                 Ok(_) => break,
-                // 原本那個 run 列不在了：絕不轉寫到別的 run，停手（SPEC §4.4a 第 5 點）。
                 Err(sqlx::Error::RowNotFound) => {
                     tracing::warn!(run_id, "live-apply bookkeeping target run is gone; giving up");
                     break;

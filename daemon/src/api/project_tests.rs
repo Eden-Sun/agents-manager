@@ -4,7 +4,6 @@ use super::*;
 async fn patch_renames_the_project_and_rejects_a_blank_label() {
     let e = crate::testing::env().await;
     let (app, pid) = (e.app.clone(), e.project_id.clone());
-    // `testing::env` only seeds the db row; the rename edits config.toml.
     app.cfg
         .update(|cfg| {
             cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
@@ -50,7 +49,6 @@ async fn patch_renames_the_project_and_rejects_a_blank_label() {
 async fn the_shared_session_flag_is_listed_live_and_kept_when_a_host_update_omits_it() {
     let e = crate::testing::env().await;
     let app = e.app.clone();
-    // 每個測試各自的 host 名（見 shared_host 的 unique_host）：行程級狀態以 host 名為 key，不能寫死 "sh1"。
     let host = crate::runners::am_base_tests::shared_host::tests::shared_host(&e, true).await.host;
     let flag = |app: Arc<App>| {
         let host = host.clone();
@@ -177,7 +175,6 @@ async fn a_non_delete_mutation_the_bulk_guard_would_reject_leaves_the_file_and_t
     let (app, pid) = (e.app.clone(), e.project_id.clone());
     let repo = e.repo.to_string_lossy().to_string();
 
-    // 種 4 顆 bot 並投影進 DB：DB 的活列＝上一次投影的結果。
     app.cfg
         .update(|cfg| {
             cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
@@ -216,8 +213,6 @@ async fn a_non_delete_mutation_the_bulk_guard_would_reject_leaves_the_file_and_t
     crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
     assert_eq!(db::live_bots(&app.db).await.unwrap().len(), 4);
 
-    // 外面把 config.toml 換掉：只剩 1 顆 bot。`ConfigStore::update` 會先重讀最新版，這裡先強迫
-    // 重讀一次（不改任何東西，跟 projection.rs 的 `a_config_swapped_under_a_running_daemon_is_refused` 同一招）。
     let reduced = format!(
         "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = '{pid}'\npath = '{repo}'\nlabel = 'proj'\nhost = 'local'\n\n[[projects.bots]]\nid = 'b1'\nname = 'b1'\nkind = 'claude'\n"
     );

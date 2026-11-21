@@ -129,7 +129,6 @@ async fn expert_manager_patches_model_effort_fast_and_name_of_top_level_members_
     assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", manager.id)).await, "cannot change itself");
     assert!(!manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", other_manager.id)).await, "another manager");
     assert!(!manager_may_start(&env.app, &peer.id, "PATCH", &format!("/api/bots/{}", manager.id)).await, "non-manager");
-    // 顧問與專家也是成員：管理者能調模型／強度（wits lead 的實際需求：專家「OO共享助理」）。
     let advisor = crate::testing::claude_bot(&env.app, &env.project_id, "pat-advisor").await;
     sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor.id).execute(&env.app.db).await.unwrap();
     let specialist = crate::testing::claude_bot(&env.app, &env.project_id, "pat-specialist").await;
@@ -269,33 +268,26 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
         .await
         .unwrap();
 
-    // 1. Manager GETs member's messages -> 200 OK
     let resp = http_get(env.app.clone(), &format!("/api/bots/{}/messages", executor.id), &bot_headers(&manager)).await;
     assert!(resp.starts_with("HTTP/1.1 200"), "manager reading executor messages: {resp}");
 
-    // 1b. Manager GETs claude-api member's messages -> 200 OK
     let resp_api = http_get(env.app.clone(), &format!("/api/bots/{}/messages", api_member.id), &bot_headers(&manager)).await;
     assert!(resp_api.starts_with("HTTP/1.1 200"), "manager reading claude-api member messages: {resp_api}");
 
-    // 2. Manager of another project GETs member's messages -> 403 Forbidden with bot_resource_scope
     let resp_other = http_get(env.app.clone(), &format!("/api/bots/{}/messages", executor.id), &bot_headers(&other_manager)).await;
     assert!(resp_other.starts_with("HTTP/1.1 403"), "other project manager must get 403: {resp_other}");
     assert!(resp_other.contains("bot_resource_scope"), "must fail at bot_resource_scope: {resp_other}");
 
-    // 3. Non-manager member reading another member -> 403 Forbidden with bot_resource_scope
     let resp_peer = http_get(env.app.clone(), &format!("/api/bots/{}/messages", api_member.id), &bot_headers(&executor)).await;
     assert!(resp_peer.starts_with("HTTP/1.1 403"), "peer member must get 403: {resp_peer}");
     assert!(resp_peer.contains("bot_resource_scope"), "must fail at bot_resource_scope: {resp_peer}");
 
-    // 4. Manager POSTing to a write route on a member (other than allowed ones) -> still 403
     let resp_write = http_post(env.app.clone(), &format!("/api/bots/{}/fork", executor.id), &bot_headers(&manager), "{}").await;
     assert!(resp_write.starts_with("HTTP/1.1 403"), "manager POST to write route must get 403: {resp_write}");
 
     let err = authorize_bot_path(&env.app, &manager.id, "POST", &format!("/api/bots/{}/fork", executor.id)).await.unwrap_err();
     assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "bot_resource_scope"), "authorize_bot_path must deny write with bot_resource_scope: {err:?}");
 
-    // 5. Turns and attachments owned by a member (including claude-api member)
-    // 5a. Executor turn & attachment
     let exec_conv = db::conversation_id(&env.app.db, &executor.id).await.unwrap();
     let exec_turn_id = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES (?, ?, 'web', 'completed', ?)")
@@ -308,7 +300,6 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
 
     let exec_attachment = crate::attach::save(&env.app, &executor.id, "exec.txt", "text/plain", b"exec attachment data").await.unwrap();
 
-    // 5b. Claude-api member turn & attachment
     let api_conv = db::conversation_id(&env.app.db, &api_member.id).await.unwrap();
     let api_turn_id = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES (?, ?, 'web', 'completed', ?)")
@@ -321,11 +312,9 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
 
     let api_attachment = crate::attach::save(&env.app, &api_member.id, "api.txt", "text/plain", b"api attachment data").await.unwrap();
 
-    // Manager GET on turn -> Ok(())
     assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/turns/{exec_turn_id}")).await.is_ok());
     assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/turns/{api_turn_id}")).await.is_ok());
 
-    // Other manager or peer GET on turn -> 403 Forbidden
     assert!(matches!(
         authorize_bot_path(&env.app, &other_manager.id, "GET", &format!("/api/turns/{exec_turn_id}")).await,
         Err(LcError::Forbidden(_))
@@ -335,11 +324,9 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
         Err(LcError::Forbidden(_))
     ));
 
-    // Manager GET on attachment -> Ok(())
     assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/attachments/{}", exec_attachment.id)).await.is_ok());
     assert!(authorize_bot_path(&env.app, &manager.id, "GET", &format!("/api/attachments/{}", api_attachment.id)).await.is_ok());
 
-    // Other manager or peer GET on attachment -> 403 Forbidden
     assert!(matches!(
         authorize_bot_path(&env.app, &other_manager.id, "GET", &format!("/api/attachments/{}", exec_attachment.id)).await,
         Err(LcError::Forbidden(_))
@@ -349,13 +336,11 @@ async fn expert_manager_may_read_its_project_members_including_claude_api_bots()
         Err(LcError::Forbidden(_))
     ));
 
-    // get_attachment handler invocation -> 200 OK
     let res_exec = get_attachment(State(env.app.clone()), Path(exec_attachment.id.clone())).await.unwrap();
     assert_eq!(res_exec.status(), StatusCode::OK);
     let res_api = get_attachment(State(env.app.clone()), Path(api_attachment.id.clone())).await.unwrap();
     assert_eq!(res_api.status(), StatusCode::OK);
 
-    // Note: GET /api/attachments/{id} over HTTP dies at bot_user_only because it is UserOnly in bot_route_policy
     let resp_att_http = http_get(env.app.clone(), &format!("/api/attachments/{}", exec_attachment.id), &bot_headers(&manager)).await;
     assert!(resp_att_http.starts_with("HTTP/1.1 403"), "UserOnly routes die at bot_user_only before authorize_bot_path: {resp_att_http}");
     assert!(resp_att_http.contains("user_only"), "UserOnly reason: {resp_att_http}");
@@ -383,7 +368,6 @@ async fn expert_manager_deletes_paused_executor_in_its_project_only() {
     sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
 
     let (m_id, pe_id, pa_id, other_pid, other_pe_id) = (manager.id.clone(), paused_executor.id.clone(), paused_advisor.id.clone(), other_project.clone(), other_paused_exec.id.clone());
-    // 把專案與 bot 寫進 config，以便完整測試 delete_bot
     env.app.cfg.update(move |cfg| {
         cfg.projects.push(crate::config::ProjectCfg {
             mode: "expert".into(),
@@ -418,7 +402,6 @@ async fn expert_manager_deletes_paused_executor_in_its_project_only() {
         Ok(())
     }).await.unwrap();
 
-    // 1. manager 刪自己專案停派執行者 -> 成功（manager_may_start 放行，HTTP DELETE 成功）
     assert!(manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_executor.id)).await, "manager may delete paused executor");
     assert!(authorize_bot_path(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_executor.id)).await.is_ok());
 
@@ -427,12 +410,10 @@ async fn expert_manager_deletes_paused_executor_in_its_project_only() {
     let deleted_at: Option<String> = sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id=?").bind(&paused_executor.id).fetch_one(&env.app.db).await.unwrap();
     assert!(deleted_at.is_some(), "paused executor is soft-deleted");
 
-    // 2. manager 刪別專案停派執行者 -> 403
     assert!(!manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", other_paused_exec.id)).await, "cannot delete paused executor in other project");
     let resp_del_other = http_delete(env.app.clone(), &format!("/api/bots/{}", other_paused_exec.id), &bot_headers(&manager)).await;
     assert!(resp_del_other.starts_with("HTTP/1.1 403"), "delete other project paused executor must return 403: {resp_del_other}");
 
-    // 3. manager start 停派執行者 -> 仍 403
     let paused_exec2 = distinct_bot(&env, &env.project_id, "p-paused-exec2").await;
     sqlx::query("UPDATE bots SET role='executor', manager_use=0 WHERE id=?").bind(&paused_exec2.id).execute(&env.app.db).await.unwrap();
 
@@ -443,12 +424,10 @@ async fn expert_manager_deletes_paused_executor_in_its_project_only() {
     assert!(resp_start.starts_with("HTTP/1.1 403"), "start paused executor must return 403: {resp_start}");
     assert!(resp_start.contains("user_only"), "reason must be user_only: {resp_start}");
 
-    // 4. manager 刪停派顧問 -> 403
     assert!(!manager_may_start(&env.app, &manager.id, "DELETE", &format!("/api/bots/{}", paused_advisor.id)).await, "manager cannot delete paused advisor");
     let resp_del_adv = http_delete(env.app.clone(), &format!("/api/bots/{}", paused_advisor.id), &bot_headers(&manager)).await;
     assert!(resp_del_adv.starts_with("HTTP/1.1 403"), "delete paused advisor must return 403: {resp_del_adv}");
     assert!(resp_del_adv.contains("user_only"), "reason must be user_only: {resp_del_adv}");
 
-    // 5. PATCH 停派執行者（改名）放行
     assert!(manager_may_start(&env.app, &manager.id, "PATCH", &format!("/api/bots/{}", paused_exec2.id)).await, "manager may patch paused executor");
 }

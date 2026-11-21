@@ -74,7 +74,6 @@
         assert_eq!(of("opus").await, "medium", "文件：頂層 effortLevel 對 Opus 5.5 不算數");
         assert_eq!(of("claude-opus-5").await, "low", "Opus 5 照舊吃頂層那個");
 
-        // #1679：檔案只有舊版那一列（claude-opus-5）→ 目前版本沒有列，用內建預設，不拿舊版頂替。
         crate::hosts::set_ssh_fake(&host, |_| Ok(r#"{"modelSettings":{"claude-opus-5":{"effortLevel":"xhigh"}}}"#.into()));
         assert_eq!(of("opus").await, "medium");
         assert_eq!(of("claude-opus-5").await, "xhigh", "完整 id 照完全相等的那一列");
@@ -165,7 +164,6 @@
         match r {
             Ok(Ok(s)) => assert_eq!(s, "", "FIFO 當成缺檔，立刻回空字串"),
             _ => {
-                // 還是卡住：寫端開一下把 `cat` 放掉，免得留下行程。
                 let f = fifo.clone();
                 std::thread::spawn(move || drop(std::fs::OpenOptions::new().write(true).open(f)));
                 panic!("讀 FIFO 卡住（超過 20 秒）：{r:?}");
@@ -239,7 +237,6 @@
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(model_effort_from_argv("claude", &argv(&["claude", "--dangerously-skip-permissions"])), (None, None));
         assert_eq!(model_effort_from_argv("grok", &argv(&["grok", "--reasoning-effort", "max"])), (None, None));
-        // A flag whose value is missing must not swallow the next flag.
         assert_eq!(
             model_effort_from_argv("claude", &argv(&["claude", "--model", "--effort", "high"])),
             (None, Some("high".into()))
@@ -250,7 +247,6 @@
     fn grok_falls_back_to_its_terminal_title() {
         assert_eq!(grok_title_model_effort("Grok 4.6 (xhigh)"), (Some("grok-4.6".into()), Some("xhigh".into())));
         assert_eq!(grok_title_model_effort("Grok 4.6"), (Some("grok-4.6".into()), None));
-        // A title the agent has renamed to its task says nothing about the model.
         assert_eq!(grok_title_model_effort("遠端主機 gh 登入 API 與 UI - grok"), (None, None));
         assert_eq!(grok_title_model_effort("Grok Code Fast"), (None, None));
     }
@@ -437,12 +433,10 @@ gemini-4-argon\n";
         assert_eq!(field(&models, "fable", "account_default_effort"), json!("high"));
         assert_eq!(field(&models, "haiku", "default_effort"), json!("medium"));
         assert_eq!(field(&models, "haiku", "account_default_effort"), json!("high"), "帳號全域 high 跟 haiku 內建不同：另標");
-        // 文件：頂層 effortLevel 對 Opus 5.5 不算數——沒有 opus-5-5 那一列時，全域 high 不會變成它的帳號值。
         let only_global = parse_claude_effort_settings(r#"{"effortLevel":"high"}"#);
         let m = claude_static_models(only_global.0.as_deref(), &only_global.1, None);
         assert_eq!(field(&m, "opus", "account_default_effort"), Value::Null);
 
-        // mac_builder：沒有頂層 `effortLevel`，只有 fable 的列。
         let (global2, per_model2) =
             parse_claude_effort_settings(r#"{"modelSettings":{"claude-fable-5-1":{"effortLevel":"low"}}}"#);
         assert_eq!(global2, None);
@@ -451,7 +445,6 @@ gemini-4-argon\n";
         assert_eq!(field(&models2, "fable", "account_default_effort"), json!("low"));
         assert_eq!(field(&models2, "opus", "account_default_effort"), Value::Null);
 
-        // 讀不到／不是 JSON：沒有帳號值，廠推薦照舊。
         let (g3, m3) = parse_claude_effort_settings("");
         assert_eq!(g3, None);
         assert!(m3.is_empty());
@@ -547,7 +540,6 @@ gemini-4-argon\n";
         assert_eq!(marks(Some("opus[1m]")), ["opus"]);
         assert_eq!(marks(Some("claude-opus-5-5")), ["opus"]);
         assert_eq!(marks(Some("claude-fable-5-1")), ["fable"]);
-        // 沒設、或對不到任何系列：一顆都不標，不猜 opus。
         assert!(marks(None).is_empty());
         assert!(marks(Some("gpt-6-luna")).is_empty());
     }
@@ -559,7 +551,6 @@ gemini-4-argon\n";
         assert_eq!(claude_alias_of("claude-haiku-5-5"), Some("haiku"));
         assert_eq!(claude_alias_of("claude-sonnet-5"), Some("sonnet"));
         assert_eq!(claude_alias_of("claude-opus"), Some("opus"));
-        // 子字串不算：名字裡有家族名但不是那個家族的，對不到。
         assert_eq!(claude_alias_of("my-sonnet-experiment"), None);
         assert_eq!(claude_alias_of(""), None);
     }
@@ -581,20 +572,16 @@ gemini-4-argon\n";
                 json!({"id": "gpt-6-luna", "is_default": false, "default_effort": "low"}),
             ]
         };
-        // 模型與強度都有設：luna 成為預設，強度覆寫在 luna 上，sol 不動。
         let m = codex_apply_identity_config(models(), "model = \"gpt-6-luna\"\nmodel_reasoning_effort = \"high\"\n");
         assert_eq!(m[0]["is_default"], json!(false));
         assert_eq!(m[1]["is_default"], json!(true));
         assert_eq!(m[1]["default_effort"], json!("high"));
         assert_eq!(m[0]["default_effort"], json!("low"));
-        // 只有強度：覆寫 app-server 回的預設模型。
         let m = codex_apply_identity_config(models(), "model_reasoning_effort = 'medium'\n");
         assert_eq!(m[0]["default_effort"], json!("medium"));
         assert_eq!(m[1]["default_effort"], json!("low"));
-        // 設的模型不在清單裡：一顆都不標，不猜。
         let m = codex_apply_identity_config(models(), "model = \"gpt-9\"\n");
         assert!(m.iter().all(|v| v["is_default"] == json!(false)));
-        // 沒設、讀不懂、或只在 [profiles] 裡：照 app-server 原樣。
         assert_eq!(codex_apply_identity_config(models(), ""), models());
         assert_eq!(codex_apply_identity_config(models(), "not toml = = ="), models());
         assert_eq!(codex_apply_identity_config(models(), "[profiles.x]\nmodel = \"gpt-6-luna\"\n"), models());
@@ -605,7 +592,6 @@ gemini-4-argon\n";
     fn identity_home_reaches_the_cli_env_and_its_files() {
         assert_eq!(home_env_prefix("CODEX_HOME", "/home/u/.codex-cx2"), "CODEX_HOME='/home/u/.codex-cx2'; export CODEX_HOME; ");
         assert_eq!(home_file_expr(Some("/home/u/.grok-g2"), ".grok", "config.toml"), "'/home/u/.grok-g2'/config.toml");
-        // 沒有身份：照 CLI 預設讀 `$HOME/<預設目錄>`。
         assert_eq!(home_file_expr(None, ".grok", "models_cache.json"), "\"$HOME/.grok/models_cache.json\"");
     }
 
@@ -667,7 +653,6 @@ gemini-4-argon\n";
 
     #[test]
     fn grok_config_effort_ignores_other_tables_and_junk() {
-        // A same-named key under an unrelated table is not the global default.
         let cfg = "[models.\"grok-4.5\"]\ndefault_reasoning_effort = \"low\"\n";
         assert_eq!(grok_default_effort_from_config(cfg), None);
         assert_eq!(grok_default_effort_from_config("default_reasoning_effort = \"\"\n"), None);

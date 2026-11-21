@@ -59,7 +59,6 @@ mod tests {
     fn a_bots_shim_dir_is_recognised_wherever_the_data_dir_is() {
         assert!(is_bot_shim_dir("/Users/me/.config/agents-manager/bots/01M2RYE4BQ/bin"));
         assert!(is_bot_shim_dir("/tmp/am-data/bots/01ABC/bin/"));
-        // 不是 shim 目錄的一律留著。
         assert!(!is_bot_shim_dir("/opt/homebrew/bin"));
         assert!(!is_bot_shim_dir("/Users/me/.cargo/bin"));
         assert!(!is_bot_shim_dir("/x/bots/bin"));
@@ -74,9 +73,7 @@ mod tests {
         let path = "/d/bots/SELF/bin:/usr/bin:/d/bots/OTHER/bin:/bin:/d/bots/SELF/bin:/d/bots/THIRD/bin";
         assert_eq!(prepend_own_shim_dir(path, own), "/d/bots/SELF/bin:/usr/bin:/bin");
 
-        // 本來就沒有 shim 的 PATH 只是被接上自己那一份。
         assert_eq!(prepend_own_shim_dir("/usr/bin:/bin", own), "/d/bots/SELF/bin:/usr/bin:/bin");
-        // 整條都是別人的 shim：清完只剩自己。
         assert_eq!(prepend_own_shim_dir("/d/bots/A/bin:/d/bots/B/bin", own), own);
         assert_eq!(prepend_own_shim_dir("", own), own);
     }

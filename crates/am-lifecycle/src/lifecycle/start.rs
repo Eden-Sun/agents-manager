@@ -60,8 +60,6 @@ fn codex_pane_guard_args(kind: &str) -> Vec<String> {
     }
 }
 
-
-// #1862 S0：`StartOpts` 搬到 am-base（`lc_error.rs`），舊路徑 `start::StartOpts`／`lifecycle::StartOpts` 照舊可用。
 pub use crate::lc_error::StartOpts;
 
 /// 這顆 bot 現在為什麼不能被重啟；`None` ＝ 閒置。呼叫端持 bot 鎖。理由的代碼與 `bulk_restart::Skip` 一致。
@@ -152,7 +150,6 @@ pub async fn start_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String
 
 pub async fn start_bot_with(app: &impl StartContext, bot_id: &str, opts: StartOpts) -> LcResult<String> {
     let kind = db::bot(app.db(), bot_id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?.ok_or_else(|| LcError::NotFound("bot".into()))?.kind;
-    // kind 在這台主機被停用（使用者 2026-11-14）：不啟動；已經在跑的不殺，這裡只擋新的啟動。
     let host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
         .bind(bot_id)
         .fetch_optional(app.db())
@@ -218,7 +215,6 @@ async fn start_bot_locked_with_host_fence_body(
         return Err(LcError::NotFound("bot".into()));
     }
     if crate::config::is_api_kind(&bot.kind) { return Err(LcError::Upstream("api_native_start_unconfirmed".into())); }
-    // A child only exists as the pane its parent opened; starting here would open an unrelated pane.
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
             "a spawned child is started by its parent agent, not from here",
@@ -230,11 +226,9 @@ async fn start_bot_locked_with_host_fence_body(
     if let Some(existing) = db::active_run(app.db(), bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
-    // 要求接回原對話：在任何副作用（run 列、pane、shim）之前就判斷，接不回就整個不啟動。
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, false, opts.resume_session.as_deref()).await? {
-            // #1761：還沒記到自己 session 的 fork 會改從來源再分一次，不算接不回。
             if why.reason != "no_session_id" || unsettled_fork(app, bot_id).await.is_none() {
                 return Err(cannot_resume(bot_id, why.reason));
             }
@@ -261,10 +255,6 @@ async fn start_bot_locked_with_host_fence_body(
             return Err(host_superseded(bot_id, &project.host));
         }
     }
-    // An unknown identity would silently run as the host's default login (mac_builder: `cc1` bot answered
-    // as cc0). Refuse; a confirmed-logged-out explicit identity fails closed the same way instead of
-    // falling back to the host's default account (GH #83: it used to just warn and start anyway,
-    // which quietly billed usage to the wrong account).
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if app.identity_for_host(&project.host, idn).await.is_none() {
             return Err(LcError::conflict(
@@ -274,7 +264,6 @@ async fn start_bot_locked_with_host_fence_body(
             ));
         }
         let mut not_logged_in = app.cached_identity_logged_out(&project.host, idn).await;
-        // The cache can be ~30 min stale after a login; ask the CLI before saying not logged in.
         if not_logged_in {
             if let Some(fresh) = app.recheck_identity_login(&project.host, idn).await {
                 not_logged_in = !fresh;
@@ -306,11 +295,9 @@ async fn start_bot_locked_with_host_fence_body(
                 }),
             ));
         }
-        // Logged in headlessly but never onboarded: the TUI would open on the login menu.
         if bot.kind == "claude" && project.host == crate::config::LOCAL_HOST {
             if let Some(i) = app.identity_for_host(&project.host, idn).await {
                 let home = dirs::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                // 拿不到家目錄就不猜路徑（#1125）。
                 if !home.is_empty() {
                     let dir = claude_account_file_dir(&i.env, &home);
                     if crate::tools::ensure_claude_onboarded(std::path::Path::new(&dir)) {
@@ -321,14 +308,9 @@ async fn start_bot_locked_with_host_fence_body(
         }
     }
 
-    // 上一個 run 被外力收掉時還在忙：接回之後補一句續行提示（claude 2.1.281，`resume_nudge`）。要在新 run 寫進去之前讀。
     let nudge = super::resume_nudge::prior_run_ended_busy(app, &bot, &opts).await;
-    // 1. INSERT Run before touching herdr (SPEC §6.2.1).
-    // 身份跟著 run 走（issue #238）：pane 用這一刻的身份起來，之後 PATCH 改身份要重啟才生效，額度要記在這個身份上。
     let run_id = db::ulid();
     let started_identity = bot.identity.as_deref().map(str::trim).unwrap_or("").to_string();
-    // 遠端 run 記下啟動當下所在主機的目標指紋（#1035，#1773）：之後 `?confirm=repoint` 把名字指到別台，舊 run 的 hook 就認得出是上一代。
-    // 存的是 ssh 目標的指紋、不是連線世代：改 remote_path、重連、daemon 重啟都不換這個數字。本機不記。
     let host_generation = if project.host == crate::config::LOCAL_HOST {
         None
     } else {
@@ -342,7 +324,6 @@ async fn start_bot_locked_with_host_fence_body(
     .bind(&session)
     .bind(&started_identity)
     .bind(format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or("")))
-    // 這個 run 載入的啟動設定版本（#353）：之後 config 改了、版本對不上＝需要重啟，不靠 PATCH 回應裡那個會遺失的布林。
     .bind(crate::launch_rev::of(&bot))
     .bind(db::now())
     .bind(&project.host)
@@ -367,15 +348,11 @@ async fn start_bot_locked_with_host_fence_body(
             }
             Ok(run_id)
         }
-        // agent 已經在跑，只差 `running` 沒記下（#145）：收成 exited 會留下一顆沒有 run 的活 agent，
-        // 交給 `start_inner` 排好的重試照證據收斂。
         Err(e @ LcError::Uncommitted(_)) => {
             app.bot_status_changed(bot_id).await;
             Err(e)
         }
         Err(e) => {
-            // CAS：`start_inner` 途中不拿鎖的 pane-exit 事件已經收掉它的話，不覆寫。寫不進去時 pane 已經收掉了，
-            // DB 卻還是 `starting`——不留一顆永遠擋住下一次 start 的 run，排對帳重試（#145 驗收 3）。
             if let Err(db_err) = super::run_state::transition(app.db(), &run_id, &["starting"], "exited", None).await {
                 tracing::warn!(bot = %bot.name, run = %run_id, error = %db_err, "failed start could not be recorded as exited");
                 super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
@@ -398,7 +375,6 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
     match kind {
         "claude" | "grok" => Ok(vec!["--resume".into(), session_id.into()]),
         "codex" => Ok(vec!["resume".into(), session_id.into()]),
-        // id 來自 DB／hook，形狀不對就不拼進 argv（不是舊 id 的接續，是沒有可用的 id）。
         "agy" if super::agy_session::valid_session_id(session_id.trim()) => Ok(vec![format!("--conversation={}", session_id.trim())]),
         "agy" => Err("no_session_id"),
         _ => Err("unsupported_kind"),
@@ -443,11 +419,7 @@ pub async fn native_resume_plan(
     override_session: Option<&str>,
 ) -> LcResult<Result<(String, Vec<String>), NativeResumeFailure>> {
     let last = if let Some(sid) = override_session {
-        // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身份時要複製），沒有就讓 CLI 自己找。
         let transcript: Option<String> = sqlx::query_scalar(
-            // 第二鍵用 `rowid`（寫入順序），不是 `id`：`started_at` 只到毫秒（`db::now`），
-            // 同一顆 bot 快速重啟時兩個 run 會擠進同一毫秒，而 ULID 的亂數段在同一毫秒內不保證遞增
-            // （issue #100／a4605b2，同 `supervisor/incidents.rs` 挑「最後一個 run」的寫法）。
             "SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL
               ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
@@ -459,8 +431,6 @@ pub async fn native_resume_plan(
         Some((sid.to_string(), transcript))
     } else if include_active {
         sqlx::query_as::<_, (String, Option<String>)>(
-            // 同上：挑錯的後果不是少接回一次，是 `--resume` 進**另一段對話**，
-            // 之後這顆 bot 的訊息都落在那段裡（issue #461）。重啟正是最會擠同一毫秒的路徑。
             "SELECT native_session_id, transcript_path FROM runs
               WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
@@ -475,15 +445,9 @@ pub async fn native_resume_plan(
     if session_id.trim().is_empty() {
         return Ok(Err(NativeResumeFailure::without_session("no_session_id")));
     }
-    // 倒回過、之後沒有新回合：先把倒回點補進 transcript（換身份的話在複製之前），`--resume` 才不會接回舊分支（SPEC §6.13）。
-    // 重啟前的檢查（`include_active`）那時 CLI 還開著，它結束時會蓋掉，不在那裡補。
     if !include_active && bot.kind == "claude" {
         crate::rewind::anchor::ensure(app, &session_id).await;
     }
-    // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
-    // right after a "successful" restart (2026-09-11 restart-idle repro). Also stages the file
-    // into the current identity's config dir when it moved — local and remote both (issue #95:
-    // remote used to skip this entirely and just hope `--resume` found the file on its own).
     if let Some(transcript) = transcript.filter(|t| !t.trim().is_empty()) {
         if let Err(why) = stage_cross_identity_transcript(app, bot, host, &transcript).await {
             return Ok(Err(NativeResumeFailure::for_session(why, &session_id)));
@@ -524,8 +488,6 @@ pub async fn identity_config_dir_for_fence(
 /// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
 /// 換身份後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
 async fn stage_cross_identity_transcript(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
-    // 只有 claude 的 session 檔住在 `<CLAUDE_CONFIG_DIR>/projects/` 底下。codex／grok 的對話檔不歸這個目錄管：
-    // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身份>/projects/<日>/`（資料安全審查）。
     if bot.kind != "claude" {
         return Ok(());
     }
@@ -553,7 +515,6 @@ async fn stage_cross_identity_transcript_local(app: &(impl crate::hosts::HostsAc
         }
     };
     let new_projects = std::path::Path::new(&new_dir).join("projects");
-    // transcript 可能有幾百 MB：複製放到 blocking pool，不占 tokio worker。
     let (src, cwd_dir, old_projects, fname, bot_name) =
         (src.to_path_buf(), cwd_dir.to_path_buf(), old_projects.to_path_buf(), fname.to_os_string(), bot.name.clone());
     tokio::task::spawn_blocking(move || stage_cross_identity_transcript_local_fs(&bot_name, &src, &cwd_dir, &old_projects, &fname, &new_projects))
@@ -577,14 +538,12 @@ fn stage_cross_identity_transcript_local_fs(
     if same {
         return Ok(());
     }
-    // 要複製了：來源是 DB 記的字串，形狀不對（不是 projects/<key>/<sid>.jsonl）或是符號連結，一律不複製。
     if !super::transcript_stage::is_claude_transcript(src) {
         tracing::warn!(bot = %bot_name, from = %src.display(), "identity switch：來源不是 projects/<cwd>/<id>.jsonl 的一般檔，不複製，改開新對話");
         return Err("transcript_missing");
     }
     let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
     let dest_dir = new_projects.join(cwd_key);
-    // 暫存檔＋rename、不蓋比來源長的目標、檔 0600／目錄 0700：規則在 `transcript_stage`。
     let staged = match super::transcript_stage::stage_file(src, &dest_dir, fname) {
         Ok(staged) => staged,
         Err(e) => {
@@ -601,7 +560,6 @@ fn stage_cross_identity_transcript_local_fs(
         }
         _ => {}
     }
-    // 檔名同名的附屬目錄（有些 CLI 版本會在 jsonl 旁邊放一份）一起搬，搬不動不影響主對話。
     if let Some(stem) = src.file_stem() {
         let companion_src = cwd_dir.join(stem);
         if companion_src.is_dir() {
@@ -618,7 +576,6 @@ fn stage_cross_identity_transcript_local_fs(
 /// 執行一段 shell script，不是本機↔遠端搬檔。主機沒連線／ssh 指令本身失敗都回 `transcript_missing`
 /// ——連不上就假裝已經搬過去，比直接開新對話更糟（會讓 `--resume` 帶著錯的期待送出去）。
 async fn stage_cross_identity_transcript_remote(app: &(impl crate::hosts::HostsAccess + IdentityAccess), bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
-    // 形狀不對（不是 projects/<key>/<id>.jsonl）就不碰 ssh：路徑是 DB 記的字串，不能拿來叫遠端複製任意檔案。
     if !super::transcript_stage::has_claude_transcript_shape(transcript) {
         tracing::warn!(bot = %bot.name, host, transcript, "identity switch：遠端來源不是 projects/<cwd>/<id>.jsonl，不複製，改開新對話");
         return Err("transcript_missing");
@@ -1135,14 +1092,13 @@ pub fn tab_label(bot: &db::Bot) -> String {
 pub async fn close_tab_if_empty(client: &crate::herdr::HerdrClient, workspace_id: &str, tab_id: &str) {
     let tabs = match client.tab_list(workspace_id).await {
         Ok(t) => t,
-        // Never guess: closing a tab we cannot see could take the user's pane with it.
         Err(e) => {
             tracing::debug!(workspace_id, tab_id, error = %e, "tab.list failed; leaving the tab alone");
             return;
         }
     };
     match tabs.iter().find(|t| t.tab_id == tab_id) {
-        None => {} // herdr already reaped it
+        None => {}
         Some(t) if t.pane_count == 0 => {
             if let Err(e) = client.tab_close(tab_id).await {
                 tracing::debug!(tab_id, error = %e, "tab.close failed");
@@ -1433,13 +1389,11 @@ async fn start_inner_body(
     if !connected {
         return Err(LcError::Upstream(format!("host `{host}` is not connected")));
     }
-    // 1b. preflight: a missing CLI would sit in `launch_pending` for the full 60 s silently.
     if let Err(reason) = ensure_kind_installed(app, &host, &bot.kind).await {
         let conv = db::conversation_id(app.db(), &bot.id).await.map_err(up)?;
         let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
         return Err(LcError::Bad(reason));
     }
-    // 1c. claude 身分目錄的 herdr hook 是 session 來源的必要條件：缺就補裝，補不上明講（不擋啟動，也不默默啟動成沒有 session 的 agent）。
     if let Some(warning) = app.claude_hook_preflight(bot, &host).await {
         tracing::warn!(bot = %bot.name, host = %host, "{warning}");
         if let Ok(conv) = db::conversation_id(app.db(), &bot.id).await {
@@ -1447,7 +1401,6 @@ async fn start_inner_body(
         }
     }
     let agent = crate::config::agent_name(&project.label, &bot.id);
-    // 分享用的受限 bot（SPEC「分享 bot」）：沒有 shim（不能開子 agent）、env 收窄、不讀 agent md／CLAUDE.md、argv 換成籠子那一套。
     let restricted = app.prepare_restricted_bot(bot, &host).await?;
     let shim_dir = if restricted.is_some() { None } else { install_shim(app, bot, project).await };
     let env = app.pane_env(bot, &host, run_id, &agent, shim_dir.as_deref(), fence).await.map_err(up)?;
@@ -1459,7 +1412,6 @@ async fn start_inner_body(
         }
         None => env,
     };
-    // §6.5i：agent md 讀一次，母 bot 的 persona 與子 agent 的檔用同一份。
     let mut agent_md = if restricted.is_some() { Default::default() } else { super::agent_md::load(app, project).await };
     let child_base_text = agent_md.text.clone();
     if restricted.is_none() && project.mode == "expert" {
@@ -1499,21 +1451,14 @@ async fn start_inner_body(
     let mut env = env;
     record_daemon_url_injected(app.db(), run_id, &env).await?;
     if agent_md.cli_docs_disabled() {
-        // 這個專案有 agent md（而且每一份都讀到）：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
-        // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。
         if let Some(map) = env.as_object_mut() {
             map.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), serde_json::json!("1"));
         }
     } else if agent_md.configured {
-        // 有一份指示檔讀不到（#769 方案 A）：不關 CLI 自己的指示檔，讓 bot 至少讀得到 repo 的 CLAUDE.md／AGENTS.md。
-        // claude 靠「不設」上面那個變數；子 agent 的 codex 由 shim 看這個旗標決定要不要補 `project_doc_max_bytes=0`。
         if let Some(map) = env.as_object_mut() {
             map.insert("AM_KEEP_CLI_DOCS".into(), serde_json::json!("1"));
         }
     }
-    // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
-    // below the PTY shell limit. Stage the full startup persona in a file and pass its short path.
-    // Grok also needs the child-rules file when no custom [agents] document is configured.
     let child_md = super::setup::child_instructions(&child_base_text);
     let child_instructions_path = if agent_md.configured || !agent_md.text.is_empty() || bot.kind == "grok" {
         super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await
@@ -1526,7 +1471,6 @@ async fn start_inner_body(
             map.insert("AM_INSTRUCTIONS_FILE".into(), serde_json::json!(path));
         }
     }
-    // Identity args are read once: `stage_persona` needs them to see a codex `-p`, and the argv below appends them.
     let identity_args_v = if restricted.is_some() { Vec::new() } else { identity_args(app, bot, &project.host).await };
     let fork_note = if restricted.is_some() { None } else { fork_identity_note(app.db(), &bot.id).await.map_err(up)? };
     let staged_persona = if restricted.is_some() {
@@ -1554,22 +1498,18 @@ async fn start_inner_body(
             let _ = insert_message(app, &conv, None, "system", note, "system", false, None).await;
         }
     }
-    // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     if restricted.is_none() {
         install_herdr_skill(app, bot, project, &env, &agent).await;
     }
 
-    // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
     if let Some(ws) = &restricted {
-        // 受限 bot 不吃 bot／身份自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
         let prompt = app.install_restricted_prompt(bot, &host, ws, &env).await.map_err(up)?;
         args.extend(app.restricted_launch_args(&env, std::path::Path::new(&prompt)));
         args.extend(model_args(&launch_model_bot(app, bot, &project.host).await));
     } else {
         args.extend(persona_args_cli_docs(bot, &agent, (agent_md.configured || !agent_md.text.is_empty()).then_some(agent_md.text.as_str()), staged_persona.reference(), agent_md.cli_docs_disabled()));
-        // B 期：角色 policy／bot 覆寫生效時，啟動模型與 context 參數以它為準（沒有覆寫就是 bot 自己的，完全不變）。
         let overlay = super::runtime_overlay::overlay_for(app, bot).await.map_err(up)?;
         let mut model_bot = launch_model_bot(app, bot, &project.host).await;
         if overlay.model.is_some() {
@@ -1588,9 +1528,6 @@ async fn start_inner_body(
             tracing::warn!(bot = %bot.name, error = %e, "could not record the runtime policy revision for this run");
         }
     }
-    // issue #748：`[codex] instant_interrupt` 開著才替 codex 打開它那一側的 instant_interrupt；進了 argv 才記 1，
-    // 記錄跟 argv 出自同一個判斷（send_now 的閘門靠它分辨「這個 run 起的時候有沒有帶」）。寫不進去只記 log：
-    // 欄位留 NULL，閘門會回 restart_needed（不賭），不擋啟動。
     if bot.kind == "codex" {
         let ii = codex_instant_interrupt_args(app.cfg().get().await.codex.instant_interrupt, restricted.is_some());
         if let Err(e) = sqlx::query("UPDATE runs SET codex_instant_interrupt = ? WHERE id = ?").bind(i64::from(!ii.is_empty())).bind(run_id).execute(app.db()).await {
@@ -1599,10 +1536,7 @@ async fn start_inner_body(
         args.extend(ii);
     }
 
-    // Reopen only: resolve the previous native session after preflight. The requested id is
-    // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
     let mut opts = opts;
-    // C 期（`agm hire --fork-from`）：新 member 第一次啟動（還沒有自己的 session）才從來源 codex bot 分岔；之後重啟走它自己的 session。
     if opts.fork_session.is_none() {
         if let Some((sid, source)) = pending_fork(app, bot).await.map_err(up)? {
             opts.fork_session = Some(sid);
@@ -1613,7 +1547,6 @@ async fn start_inner_body(
         match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
             Err(failure) if failure.reason == "no_session_id" && opts.fork_session.is_none() && unsettled_fork(app, &bot.id).await.is_some() => {
-                // #1761：還沒記到自己 session 的 fork（剛 fork 就換身份重啟、遠端 hook 晚到）：再從來源分一次，不開空白新對話。
                 let (from, source) = unsettled_fork(app, &bot.id).await.unwrap_or_default();
                 tracing::info!(bot = %bot.name, from = %from, "fork has no session of its own yet; forking again from its source");
                 opts.fork_session = Some(from);
@@ -1621,13 +1554,9 @@ async fn start_inner_body(
                 None
             }
             Err(failure) => {
-                // 預檢過了、這裡才接不回（遠端搬檔那趟 ssh 失敗、檔案在這幾秒不見…）：`resume_required` 的約定是不啟動，
-                // 不是悄悄開新對話。這裡還沒開 pane，直接回 409（#1123）。
                 if opts.resume_required {
                     return Err(cannot_resume(&bot.id, failure.reason));
                 }
-                // 預設退回開新對話。
-                // #1001：全新 bot 第一次啟動沒有「原本的對話」可以接，不是接丟了，不寫警告。
                 if failure.reason == "no_session_id" && is_first_contact(app, bot, run_id).await? {
                     tracing::info!(bot = %bot.name, "first start of a new bot; no earlier conversation to resume");
                 } else {
@@ -1639,15 +1568,10 @@ async fn start_inner_body(
     } else {
         None
     };
-    // fork：換一個新 session 接著同一段脈絡。不寫 `resume_session_id`——那是「應該回到同一個 id」的檢查，
-    // fork 本來就會拿到新 id。
     if let Some(from) = opts.fork_session.as_deref() {
         let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
         if bot.kind == "claude" {
             crate::rewind::anchor::ensure(app, from).await;
-            // 來源那段對話的檔可能還在別的身份底下（來源 bot 改了身份還沒重啟就被 fork）：照接回的做法先複製到這顆 bot 的
-            // 身份（#1124）。只看來源 bot 自己的 run（#1168）：`native_session_id` 是 provider 的 id，別顆 bot 的同 sid 不算。
-            // 搬不成就不啟動：以前只記 warn 照樣啟動，claude 接不到對話會直接退出，等於假裝 fork 成功。
             let source = opts.fork_source_bot.as_deref().ok_or_else(|| LcError::Bad("cannot fork: 沒有來源 bot".into()))?;
             let transcript: Option<String> = sqlx::query_scalar(
                 "SELECT transcript_path FROM runs WHERE bot_id = ? AND native_session_id = ? AND transcript_path IS NOT NULL AND transcript_path != ''
@@ -1658,12 +1582,10 @@ async fn start_inner_body(
             .fetch_optional(app.db())
             .await
             .map_err(up)?;
-            // #1265：沒有記到對話檔的位置（NULL／空字串）就沒有證據證明對話在新身份底下找得到，不能當成「沒有東西要搬」照樣啟動。
             let Some(t) = transcript.filter(|t| !t.trim().is_empty()) else {
                 return Err(LcError::conflict("no_source_transcript", json!({"session_id": from, "message": "來源對話的檔案位置沒有記下來，無法確認新身份底下找得到這段對話，不啟動。"})));
             };
             if let Err(why) = stage_cross_identity_transcript(app, bot, &host, &t).await {
-                // `cause` 不能叫 `reason`：conflict() 會用 extra 覆蓋 reason，外層代碼就丟了（#1265）。
                 return Err(LcError::conflict("fork_transcript_unavailable", json!({"session_id": from, "cause": why})));
             }
         }
@@ -1696,14 +1618,9 @@ async fn start_inner_body(
     args.extend(codex_pane_guard_args(&bot.kind));
 
     let cwd = restricted.as_deref().unwrap_or_else(|| bot_cwd(bot, project));
-    // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
-    // the first message. Record trust first (local, only when not yet trusted).
-    // 遠端也要（#407）：換身份＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。
     for w in app.pretrust_for_start(bot, &project.host, cwd).await {
         tracing::warn!(bot = %bot.name, cwd, warning = %w, "could not pre-trust the working directory");
     }
-    // claude 2.1.326 起 `--add-dir` 的目錄也有自己的信任框（「Adding a new directory… This session hasn't worked here
-    // before」，游標在 *No, exit*），分享用 bot 的 outbox 就卡在這裡（2026-11-16）。同一份信任紀錄，照工作目錄一樣先寫。
     if bot.kind == "claude" {
         for dir in add_dir_args(&args) {
             for w in app.pretrust_for_start(bot, &project.host, dir).await {
@@ -1712,11 +1629,7 @@ async fn start_inner_body(
         }
     }
 
-    // 2. workspace
-    // `(root pane, 它開在哪個目錄)`：bot 有自己的 cwd 時不能沿用開在專案目錄的 root（見 `acquire_run_pane`）。
     let mut fresh_root: Option<(crate::herdr::PaneInfo, &str)> = None;
-    // `projects.workspace_id` is the configured session's; an imported bot in `default` must not
-    // overwrite it (the next reconcile would clear it).
     let workspace_id = match (session != "default", project.workspace_id.as_deref()) {
         (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
         _ => {
@@ -1734,13 +1647,11 @@ async fn start_inner_body(
         }
     };
 
-    // 3. pane
     let root = acquire_run_pane(&client, &workspace_id, cwd, &tab_label(bot), &env, fresh_root).await.map_err(up)?;
     let pane_id = root.pane_id;
     let tab_id = root.tab_id;
     let mut pane_guard = StartPaneGuard::new(&client, &workspace_id, &tab_id, &pane_id);
 
-    // 4. persist mapping. Until `agent.start` succeeds, every error must close the pane and tab.
     pane_guard
         .protect(
             sqlx::query("UPDATE runs SET workspace_id = ?, pane_id = ?, tab_id = ? WHERE id = ?")
@@ -1754,7 +1665,6 @@ async fn start_inner_body(
         )
         .await?;
 
-    // 5. agent.start under `<project>-<bot>`
     pane_guard
         .protect(
             sqlx::query("UPDATE runs SET agent_name = ? WHERE id = ?")
@@ -1765,8 +1675,6 @@ async fn start_inner_body(
                 .map_err(up),
         )
         .await?;
-    // SPEC §4.4a: stamp model/effort read back off the argv, not `bots` — `effort_checked` and
-    // `bot.args` can differ, and `bots` changes under a live run.
     let (rt_model, rt_effort) = crate::models::model_effort_from_argv(&bot.kind, &args);
     let rt_fast = i64::from(args.iter().any(|a| a.contains("service_tier=\"priority\"")));
     pane_guard
@@ -1781,19 +1689,10 @@ async fn start_inner_body(
                 .map_err(up),
         )
         .await?;
-    // #742：全新對話起的 claude run 畫面上不會有舊的 `/model`、`/effort` 確認，第一輪巡邏前使用者真的切了也要採用。
-    // 接回、分支（argv 帶 `--resume`／`--continue`）會把舊對話印回來，那種維持「第一次看到只當基準」。
     if bot.kind == "claude" && !args.iter().any(|a| matches!(a.as_str(), "--resume" | "-r" | "--continue" | "-c")) {
         app.claude_live_start_fresh(run_id);
     }
-    // A fresh pane answers `agent_pane_busy: … is not an available shell` until its shell settles
-    // (2026-09-06: one of six back-to-back starts lost, 300 ms in); hence the retry.
-    // SPEC §6.5b: the login shell's profile rebuilds PATH after the pane env (macOS 2026-09-07:
-    // `path_helper` + `brew shellenv`), so the shim prepend is typed into the shell before
-    // `agent.start`; the pty buffers it if the shell isn't up yet.
     if let Some(dir) = shim_dir.as_deref() {
-        // 先把繼承來的 shim 目錄清掉再接自己的：子 agent 的 pane 是 `pane split` 出來的，父 pane 的
-        // shim 原封不動跟著進來（`shim_path`，2026-09-18 的巢狀死鎖）。
         let line = crate::shim_path::pane_export_line(&sh_quote(dir));
         if let Err(e) = client.pane_send_text(&pane_id, &line).await {
             tracing::warn!(bot = %bot.name, pane = %pane_id, error = %e, "could not prepend the herdr shim to the pane PATH");
@@ -1848,16 +1747,13 @@ async fn start_inner_body(
     }
     pane_guard.disarm();
 
-    // 6. per-run status subscription
     app.watch_pane_on_session(&host, session, &pane_id).await;
 
-    // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
     let (status, ready_session) = match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
         Ok(info) => (info.agent_status.normalized(), super::dead_panes::herdr_session_id(&info)),
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
-            // Do NOT close the pane on timeout (SPEC §6.2.7).
             match client.agent_get(&pane_id).await {
                 Ok(Some(info)) => (info.agent_status.normalized(), super::dead_panes::herdr_session_id(&info)),
                 _ => {
@@ -1878,16 +1774,12 @@ async fn start_inner_body(
     }
     let status = super::claude_resume_menu::after_start(app, &bot.kind, run_id, status, fence.or(ready_fence.as_ref())).await;
     crate::codex_live::spawn_boot_version_read(app.db(), &client, fence.or(ready_fence.as_ref()), &bot.kind, &bot.id, run_id, &pane_id);
-    // agent 起來了、`running` 還沒記下的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("start_before_running", &bot.id).await;
     }
-    // `running` 是 prompt 准入、UI、restart／reconcile 認的權威（#145）：跨過 `agent.start` 之後寫不進去，
-    // 就不能回一般的成功，也不殺掉活著的 agent——回 503、排重試，讓對帳照 herdr 的證據收成 running。
     match super::run_state::transition(app.db(), run_id, &["starting"], "running", Some(status.as_str())).await {
         Ok(super::run_state::Moved::Applied) => {}
-        // 不拿 bot 鎖的 pane-exit／workspace-closed 事件已經把它收成終態（pane 沒了）：不拉回 running。
         Ok(super::run_state::Moved::Lost) => {
             tracing::warn!(bot = %bot.name, run = run_id, "the run ended while it was starting; not bringing it back");
             return Err(LcError::Upstream(format!("run {run_id} ended while it was starting (its pane went away)")));
@@ -1903,12 +1795,9 @@ async fn start_inner_body(
             ));
         }
     }
-    // Codex account notices are TUI history rows, not in `notify`'s last message: snapshot the pane later.
     if bot.kind == "codex" {
         schedule_codex_notice_capture(app, &bot.id, run_id);
     }
-    // 不補 `/effort`：grok 1.0.46 會把該 slash 寫進 config.toml 的 default_reasoning_effort。
-    // 這一輪的等級只靠上面 argv 的 `--reasoning-effort`。
     let _ = app.apply_grok_startup_effort(&bot, run_id, &pane_id, &client).await;
     app.bot_status_changed(&bot.id).await;
     Ok(())
@@ -1925,7 +1814,6 @@ async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::ki
     let found: Option<String> = if let Some(run) = app.kind_probe().get() {
         run(host, kind, &probe)
     } else if host == LOCAL_HOST {
-        // could not probe → do not block the start
         crate::hosts::sh_local_stdout(&probe, Duration::from_secs(10), "kind preflight").await.ok().map(|o| o.trim().to_string())
     } else {
         match app.hosts().get(host).await {
@@ -1941,7 +1829,6 @@ async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::ki
     };
     crate::kind_probe::verdict(host, kind, found)
 }
-
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 pub async fn restart_bot(app: &impl StartContext, bot_id: &str) -> LcResult<String> {
@@ -1986,15 +1873,12 @@ async fn restart_bot_with_authority_body(
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
-    // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if crate::config::is_api_kind(&bot.kind) { return Err(LcError::conflict("api_bot_restart_unsupported", json!({"bot_id": bot_id}))); }
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     refuse_default_session(&bot)?;
-    // 子 agent 的 pane 是父 agent 開的，daemon 重建不了它的環境：這條 stop + start 會把 pane 關掉再開一個不一樣的（#188）。
-    // 走哪條路由呼叫端先分類，分錯或誤呼不能靠約定——鎖裡讀到 child 就拒絕，什麼都還沒停。
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
             "child_restarts_in_pane",
@@ -2006,11 +1890,9 @@ async fn restart_bot_with_authority_body(
             return Err(not_idle(bot_id, &why));
         }
     }
-    // 停之前就確定接得回，免得 ctrl+c 掉之後才發現只能開新對話。
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, true, opts.resume_session.as_deref()).await? {
-            // #1761：還沒記到自己 session 的 fork 會改從來源再分一次，不算接不回。
             if why.reason != "no_session_id" || unsettled_fork(app, bot_id).await.is_none() {
                 return Err(cannot_resume(bot_id, why.reason));
             }
@@ -2018,8 +1900,6 @@ async fn restart_bot_with_authority_body(
     }
     let stopping = db::active_run(app.db(), bot_id).await.map_err(up)?.map(|r| r.id);
     let nudge = super::resume_nudge::busy_before_restart(app, &bot, &opts).await;
-    // 持久 intent（#355 P2）：在第一個不可逆步驟（記 `stopping`）**之前**先 commit，daemon 在 stop 與 start 之間死掉的話，
-    // 開機由 `restart_intents::recover_host` 往前補完。寫不進去＝什麼都還沒動，不能開始（fail closed）。
     let host = db::bot_host(app.db(), bot_id).await.map_err(up)?;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
@@ -2032,7 +1912,6 @@ async fn restart_bot_with_authority_body(
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping, fence).await;
     settle_restart_intent(app, &intent_id, &res).await;
-    // 不在這裡佔佇列。接回驗證且閒置滿 10 秒、尾巴仍是被砍的工具，才由 `resume_nudge` 送一次（#424）。
     if let (Ok(run_id), Some(busy)) = (&res, nudge) {
         super::resume_nudge::arm(app, &bot, run_id, busy).await;
     }
@@ -2058,7 +1937,6 @@ const RESTART_INTENT_TTL_SECS: i64 = 15 * 60;
 async fn settle_restart_intent(app: &(impl crate::capabilities::Db + crate::lifecycle::start::ports::RestartIntentRepo), intent_id: &str, res: &LcResult<String>) {
     let out = match res {
         Ok(_) => app.complete_intent(intent_id).await,
-        // 新 agent 起來了、只是 `running` 還沒記下（#145）：bot 回來了。
         Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => app.complete_intent(intent_id).await,
         Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(|r| r.as_str()), Some("not_idle" | "no_longer_idle")) => {
             app.abandon_intent(intent_id, "refused before anything was stopped").await
@@ -2088,7 +1966,6 @@ async fn restart_stop_and_start_body(
     stopping: Option<String>,
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<String> {
-    // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
     let restarting = super::restart_hold::begin(bot_id);
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
@@ -2101,7 +1978,6 @@ async fn restart_stop_and_start_body(
     };
     match stopped {
         Ok(_) => {}
-        // 鎖裡看過閒置之後、記 `stopping` 之前它開始忙了（#346）：什麼都沒動，照 `busy` 對回 `not_idle`。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("no_longer_idle") => {
             let why = busy_reason_locked(app, bot_id, opts.refuse_background_jobs).await.ok().flatten().unwrap_or_else(|| "working".to_string());
             return Err(not_idle(bot_id, &why));
@@ -2116,13 +1992,10 @@ async fn restart_stop_and_start_body(
     let started = restart_start(app, bot_id, opts, fence).await;
     drop(restarting);
     match started {
-        // 排著的交給新的 run：`--resume` 起的 claude 由 `resume_gate` 等驗證，其他照常送。
         Ok(run_id) => {
             schedule_flush_queued(app, bot_id);
             Ok(run_id)
         }
-        // 新 agent 起來了，只是 `running` 還沒記下（#145）：bot 回來了，不是沒開回來。對帳重試收成 running 時不叫 flush，
-        // 它起來時的 idle 邊又早在 `starting` 就過了：等它收斂再叫（#165，同 start_send 的 #152）。
         Err(LcError::Uncommitted(v)) => {
             if let Some(run_id) = v.get("run_id").and_then(|r| r.as_str()) {
                 app.flush_once_running(bot_id, run_id);
@@ -2134,10 +2007,8 @@ async fn restart_stop_and_start_body(
                 Some(run_id) => left_down_by_restart(app, bot_id, run_id).await.err().map(|db_err| (run_id, db_err)),
                 None => None,
             };
-            // 沒開回來：這下排著的才真的沒有人會送。
             revoke_orphaned_queued_turns(app, bot_id, "重啟之後沒能把 bot 開回來").await;
             match unlabelled {
-                // 舊 run 還記著 `stopped`（「使用者要它停」）：不能只回 start 的錯，那等於默認它是故意停的（#146 重開 B）。
                 Some((run_id, db_err)) => {
                     let mut err = LcError::uncommitted(
                         "restart_state_uncommitted",
@@ -2249,13 +2120,10 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
     let agent = run.agent_name.clone().unwrap_or_else(|| bot.name.clone());
 
-    // A concurrent reconcile can observe the gap after the old agent exits but before agent.start
-    // replies. Guard that hand-off; agent_name_taken below upgrades the temporary guard permanently.
     crate::child_reconcile_safety::record_retirement_grace(app.db(), bot_id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record child restart grace: {e:#}")))?;
 
-    // 鎖裡看過閒置、還沒記 `stopping` 的那一瞬（測試在這裡讓使用者剛好開始打字）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("child_restart_before_stopping", bot_id).await;
     if require_idle {
@@ -2266,8 +2134,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
             ));
         }
     }
-    // 舊 run 跟 stop 走同一套（#146 留言）：先記「正在停」，記不下來就一步都不做；被 pane-exit 事件先收掉就不重開。
-    // `require_idle`（一鍵重啟）時這一步同時是「還是閒著才准停」的許可（#346，同 `stop_for_restart_if_idle_locked`）。
     let moved = if require_idle {
         super::stop::admit_idle_stop(app.db(), &run.id, bot_id, true).await.map_err(up)?
     } else {
@@ -2286,7 +2152,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         }
     }
     app.emit_bot_status(bot_id).await;
-    // 在飛的那一筆先收，收不成就不送 ctrl+c、不重開（#156，跟 stop 同一套）。
     if let Err(e) = fail_in_flight(app, &run.id, "restarted to apply the CLI update").await {
         return Err(super::turn_unwritable(app, bot_id, &run.id, "重啟", e).await);
     }
@@ -2298,7 +2163,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     let mut empty = false;
     for _ in 0..20 {
         match client.pane_get(&pane_id).await {
-            // pane 沒了：子 agent 結束，run 收掉，不在別處重開。
             Ok(None) => {
                 mark_run_exited(app, &run.id, "子 agent 的 pane 在重啟過程中被關掉").await;
                 app.emit_bot_status(bot_id).await;
@@ -2313,25 +2177,17 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
     }
     if !empty {
-        // agent 還在：run 轉回 running。留在 `stopping` 會讓 prompt 409、start 拒絕、reconcile
-        // 也不救——永遠黃燈（2026-09-12 review #1）。寫不進去就排重試。
         back_to_running(app, &run.id).await;
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream("子 agent 十秒內沒有退出，沒有動它的 pane".into()));
     }
-    // 舊 run 停了、新 run 還沒寫進去：這一段沒有 active run，但子 agent 馬上就在同一個 pane 裡回來，
-    // 排著的派工不是孤兒（#129，跟 #106 同一件事）。寫入新 run 之後就放掉：之後的失敗照舊撤。
     let restarting = super::restart_hold::begin(bot_id);
-    // 舊 run 的 `stopped` 寫進去之前不寫新 run、不 `agent.start`（#146 留言）：不靠 active-run 唯一索引碰巧擋住。
     match super::run_state::transition(app.db(), &run.id, &["stopping"], "stopped", None).await {
         Ok(super::run_state::Moved::Applied) => {}
-        // pane-exit 事件先把它收掉了（pane 沒了）：同上面 pane 不見的處理，不在別處重開。
         Ok(super::run_state::Moved::Lost) => {
             app.emit_bot_status(bot_id).await;
             return Err(LcError::Bad("這個子 agent 的 pane 已經被關掉了".into()));
         }
-        // agent 已經退出 pane，舊 run 卻還是 `stopping`：不重啟。憑證隨 return 放掉（#129：沒開回來照舊撤），
-        // 對帳照證據把舊 run 收成 exited 之後，排著的派工才當孤兒撤。
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "the child left its pane but its old run could not be recorded as stopped; not restarting");
             super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::Reconcile { stuck: "stopping".into() });
@@ -2344,14 +2200,12 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
             ));
         }
     }
-    // 測試在這裡插進不拿 bot 鎖的 sweeper。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("child_restart_between_runs", bot_id).await;
     }
 
     let mut args = super::setup::permission_args(&bot.kind, bot.auto_approve != 0);
-    // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
     let overlay = super::runtime_overlay::overlay_for(app, &bot).await.map_err(up)?;
     let mut model_bot = launch_model_bot(app, &bot, &host).await;
     if overlay.model.is_some() {
@@ -2363,8 +2217,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     let resume = match db::last_native_session(app.db(), bot_id).await.map_err(up)? {
         Some((sid, _)) => match resume_args_by_kind(&bot.kind, &sid) {
             Ok(a) => Some((sid, a)),
-            // 有記到上一段卻接不回：聊天室要看得見脈絡斷了（以前只有 tracing）。
-            // 失敗的 session id 一併記下（#852）：之後接回同一段時才撤得掉這則說明。
             Err(why) => {
                 context_lost(app, &bot, why, Some(sid.as_str()).filter(|s| !s.trim().is_empty())).await?;
                 None
@@ -2424,8 +2276,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
                 tokio::time::sleep(Duration::from_millis(300 + 200 * u64::from(attempt))).await;
             }
             Err(e) if agent_name_taken(&e) => {
-                // 舊 agent 還掛在原 pane（Done、名字沒釋放）：agent 其實還在，新 run 當成收編、記 running；
-                // 不能留成「沒有 active run」——那樣 reconcile 會把子 agent 退役軟刪（2026-09-22 rollout：pvd／rh）。
                 crate::child_reconcile_safety::hold_after_name_taken(app.db(), bot_id, &agent)
                     .await
                     .map_err(|write| LcError::Upstream(format!("herdr returned agent_name_taken, and the child retirement reason could not be recorded: {write:#}")))?;
@@ -2449,7 +2299,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         app.emit_bot_status(bot_id).await;
         return Err(LcError::Upstream(format!("pane {pane_id} never became an available shell")));
     }
-    // 同 #145：agent 起來了，`running` 寫不進去就不回成功；pane-exit 事件先收掉的不拉回來。
     match super::run_state::transition(app.db(), &run_id, &["starting"], "running", None).await {
         Ok(super::run_state::Moved::Applied) => {}
         Ok(super::run_state::Moved::Lost) => {
@@ -2459,7 +2308,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "the child is back but its run could not be recorded as running");
             super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
-            // 排著的派工留給它（#129），但收成 running 的對帳不叫 flush：等它收斂再叫（#165）。
             app.flush_once_running(bot_id, &run_id);
             app.emit_bot_status(bot_id).await;
             return Err(LcError::uncommitted(
@@ -2478,8 +2326,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
     match client.agent_wait_ready(&bot.kind, &pane_id, &until, 60_000).await {
-        // 新 run 以 `unknown` 起頭、`running` 時沒帶狀態；閒著的 codex（herdr 0.9.2+）不會再有狀態事件，
-        // 不把 ready 的結果記下來就一直停在 `unknown`。只補還是 `unknown` 的，不蓋掉期間來的事件。
         Ok(info) => {
             let ready = super::claude_resume_menu::after_start(app, &bot.kind, &run_id, info.agent_status.normalized(), Some(&client.fence)).await;
             crate::codex_live::spawn_boot_version_read(app.db(), &client, Some(&client.fence), &bot.kind, bot_id, &run_id, &pane_id);
@@ -2496,7 +2342,6 @@ pub async fn restart_child_in_pane_with(app: &impl StartContext, bot_id: &str, r
         }
         Err(e) => tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手"),
     }
-    // 沒有 hook 的 run，畫面是唯一來源（同收編）。
     app.spawn_adopted_capture(&run_id, bot_id);
     app.emit_bot_status(bot_id).await;
     app.emit("bot_changed", json!({"bot_id": bot_id})).await;

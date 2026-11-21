@@ -45,7 +45,6 @@ async fn macos_local_child_spawn_environment_authenticates_as_child_through_rout
     };
     let before = child_command(&format!("bot:{}", parent.id)).output().await.unwrap();
     assert!(!before.status.success() && String::from_utf8_lossy(&before.stderr).contains("child_not_registered"));
-    // A different declared name in the same pane must never acquire a credential.
     let mismatched = db::ulid();
     sqlx::query("INSERT INTO child_credentials(spawn_id,token_hash,parent_bot_id,child_name,host,herdr_session,pane_id,state,created_at,expires_at) VALUES(?,?,?,'wrong-name','local','test',?,'pending',?,?)")
         .bind(&mismatched).bind(crate::child_credentials::hash_token("other-secret"))

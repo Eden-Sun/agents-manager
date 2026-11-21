@@ -49,7 +49,6 @@ async fn an_unreadable_handoff_lookup_fails_the_hook_and_recovery_still_ignores_
     assert!(format!("{err:#}").contains("handed off"), "錯誤要說清楚是移交查詢失敗：{err:#}");
     assert_eq!(footprint(&e, &run).await, before, "查詢失敗時不准有任何 hook 副作用");
 
-    // 查詢恢復：移交的專案照樣丟掉，而且不留下任何東西。
     hand_off(&e, Some("agm-host")).await;
     process_for(&e.app, &stop_body(&bot.id, "p1"), None).await.unwrap();
     assert_eq!(footprint(&e, &run).await, before, "恢復後移交的專案仍然不處理");

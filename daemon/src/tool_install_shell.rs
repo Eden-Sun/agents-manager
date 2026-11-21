@@ -249,7 +249,6 @@ mod tests {
         assert!(!installer_busy(&none));
         assert!(!installer_busy(&PaneShell::default()));
         assert!(installer_busy(&busy));
-        // 沒有 shell_pid 時，installer 自己的 `bash` 不能被當成 shell 以外的程序漏看：curl 在就算忙。
         let unknown = PaneShell { shell_pid: None, foreground_processes: Some(vec![proc(11, &["npm", "i"])]) };
         let unknown_idle = PaneShell { shell_pid: None, foreground_processes: Some(vec![proc(10, &["-bash"])]) };
         assert!(installer_busy(&unknown));
@@ -330,7 +329,6 @@ mod tests {
         assert_eq!(event.data["installed"], false);
         assert_eq!(event.data["pane_kept"], true);
     }
-
 
     #[tokio::test]
     async fn watcher_reconnect_emits_superseded_and_releases_slot() {

@@ -36,13 +36,11 @@ mod tests {
         assert_eq!(r["code"], "codex_update_menu");
         assert!(r["text"].as_str().unwrap().contains("更新"), "{r}");
 
-        // WS：bot_status 事件帶同一份。
         let mut rx = env.app.subscribe();
         env.app.emit_bot_status(&bot_id).await;
         let frame = std::iter::from_fn(|| rx.try_recv().ok()).find(|f| f.kind == "bot_status").expect("bot_status");
         assert_eq!(frame.data["run"]["blocked_reason"]["code"], "codex_update_menu");
 
-        // 換成別種畫面，原因跟著換（同一個 run 的 episode 不重講，但原因要對）。
         let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
         crate::runners::codex_model_migration::observe_screen(&env.app, &run, "› Ask Codex to do anything\n").await;
         assert_eq!(run_blocked_reason(&env, &bot_id).await, json!(null), "關掉就清掉");
@@ -65,17 +63,14 @@ mod tests {
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "不替使用者按任何鍵");
         assert!(env.herdr.calls_to("pane.send_text").is_empty());
 
-        // 換成另一個工具的框：原因跟著換。
         env.herdr.set_screen("pane-perm", include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.287-fetch-permission.txt"));
         crate::blocked_reason::observe(&env.app, &run).await;
         assert_eq!(run_blocked_reason(&env, &bot.id).await["text"], "等待權限確認：Fetch");
 
-        // 選單關掉：清掉。
         env.herdr.set_screen("pane-perm", "────────────\n❯\n────────────\n");
         crate::blocked_reason::observe(&env.app, &run).await;
         assert_eq!(run_blocked_reason(&env, &bot.id).await, json!(null));
 
-        // 讀不到畫面（pane 不存在）：不動、不報錯、不亂清也不亂設。
         crate::blocked_reason::forget(&run_id);
         sqlx::query("UPDATE runs SET pane_id=NULL WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
         let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
@@ -97,7 +92,6 @@ mod tests {
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
         assert_eq!(run_blocked_reason(&env, &bot.id).await, json!(null), "不是 blocked 就不帶");
 
-        // codex bot：同一張畫面不歸這裡（codex 有自己的對話框偵測），不設原因。
         let (cbot, crun) = codex_run(&env, "perm-codex").await;
         sqlx::query("UPDATE runs SET pane_id='pane-perm3', agent_status='blocked' WHERE id=?").bind(&crun).execute(&env.app.db).await.unwrap();
         env.herdr.set_screen("pane-perm3", include_str!("../../../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.287-write-permission.txt"));
@@ -117,7 +111,6 @@ mod tests {
             let run = crate::db::run(&env.app.db, &run_id).await.unwrap().unwrap();
             crate::runners::codex_model_migration::observe_screen(&env.app, &run, screen).await;
             assert_eq!(run_blocked_reason(&env, &bot_id).await["code"], code);
-            // herdr 自己報了新的狀態（working）：記憶體裡的 episode 還沒收，但 run 已經不是 blocked——不能還掛著原因。
             sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&env.app.db).await.unwrap();
             assert_eq!(run_blocked_reason(&env, &bot_id).await, json!(null), "{code}：status 不是 blocked 就不帶原因");
         }

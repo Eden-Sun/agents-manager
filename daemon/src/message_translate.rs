@@ -236,7 +236,6 @@ fn load(path: &Path) -> Option<CacheEntry> {
 /// 讀負面標記；沒有或不是標記回 None。
 fn load_rejection(path: &Path) -> Option<(String, Option<String>)> {
     let e: CacheEntry = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    // `low_fidelity` 是舊版 Jev 門檻下的標記；現在低分也照顯示（`low_confidence`），舊標記不再擋，會自動重翻。
     let reason = e.rejected.filter(|r| r.as_str() != "low_fidelity" && e.translation.trim().is_empty())?;
     Some((reason, e.rejected_translation))
 }
@@ -308,7 +307,6 @@ fn save(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // 複盤記錄跟著快取檔走：呼叫端沒帶就沿用檔案裡既有的（重新翻譯、負面標記覆寫都不會丟掉）。
     let mut out = entry.clone();
     if out.retros.is_empty() {
         out.retros = load_entry(path).map(|e| e.retros).unwrap_or_default();
@@ -329,7 +327,6 @@ fn usage_json(u: &claude_api::Usage) -> Value {
 fn error_of(e: ClaudeError) -> LcError {
     match e {
         ClaudeError::Disabled | ClaudeError::NoKey(_) => LcError::conflict("claude_api_not_configured", json!({"message": e.to_string()})),
-        // 翻譯設成走 OpenAI 但沒開或沒有 key：具名回報，不改走 Claude。
         ClaudeError::OpenAiNotConfigured(_) => LcError::conflict("openai_not_configured", json!({"message": "OpenAI 未啟用或未設定金鑰", "detail": e.to_string()})),
         other => LcError::Upstream(format!("translate_failed: {other}")),
     }
@@ -706,7 +703,6 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     let state = app.cfg.claude_fresh().await.claude_use_state(USE_CASE);
     let configured = state.as_ref().map(|s| s.effort.clone()).unwrap_or_default();
     let provider = state.as_ref().map_or(crate::config::API_PROVIDER_ANTHROPIC, |s| s.provider);
-    // 升級模型（[claude_api.groups.translate] retry_model；空字串＝不升級）。手動重試（force）首次就用它。
     let retry_model = state.as_ref().map(|s| s.retry_model.trim().to_string()).unwrap_or_default();
     let first_model = (force && !retry_model.is_empty()).then_some(retry_model.as_str());
     let mut attempts = vec![match first_model {
@@ -715,13 +711,10 @@ async fn translate_upstream(app: &App, id: &str, content: &str, path: &Path, for
     }];
     if needs_retry(&attempts[0], min_prob) {
         let prev = attempts[0].reason;
-        // 本地檢查回 untranslated／japanese_output／markdown_structure：重試改用升級模型，effort 照設定、不額外提高。
-        // 已經用升級模型的（force 首次）就不再換，照舊只提高 effort。
         let upgrade = !retry_model.is_empty() && matches!(prev, Some("untranslated" | "partially_untranslated" | "japanese_output" | "markdown_structure")) && attempts[0].model != retry_model;
         let next = if upgrade {
             attempt_upgraded(app, id, content, None, prev, &retry_model).await?
         } else {
-            // 只重試一次，effort 往上提一階（同樣的請求再打一次，模型通常還是給同樣的結果）。
             attempt(app, id, content, Some(next_effort_for(provider, &configured)), prev, None).await?
         };
         attempts.push(next);
@@ -825,10 +818,6 @@ pub struct TranslateQuery {
     /// 重新翻譯：略過正面快取，首次用升級模型，成功覆寫快取、失敗保留舊譯文。
     retranslate: Option<bool>,
 }
-
-// ── 推播內文用的小工具 ──────────────────────────────────────────────────────────
-//
-// 推播內文不再由模型摘要（使用者 2026-11-19：摘要模型會把自己的指示吐進推播內文），長訊息改用固定句（webpush.rs）。
 
 /// 判斷文字是否含有日文假名（平假名 U+3040–U+309F 或片假名 U+30A0–U+30FF）。
 pub(crate) fn has_japanese_kana(text: &str) -> bool {
@@ -1151,7 +1140,6 @@ pub(crate) fn partially_untranslated(source: &str, reply: &str) -> bool {
     fn norm(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
-    // 英文字數：去掉行內 code，只數含英文字母的單字（網址不算）。
     fn english_words(line: &str) -> usize {
         line.split('`')
             .enumerate()
@@ -1182,8 +1170,6 @@ pub(crate) fn partially_untranslated(source: &str, reply: &str) -> bool {
     }
     false
 }
-
-// ── Markdown 表格分隔列決定性修補與結構檢查 ───────────────────────────────────
 
 #[derive(Clone, Copy)]
 struct Fence { ch: char, len: usize }
@@ -1264,7 +1250,6 @@ fn parse_delimiter_row(line: &str) -> Option<DelimiterRow<'_>> {
     let (body, has_cr) = match line.strip_suffix('\r') { Some(b) => (b, true), None => (line, false) };
     let indent_len = body.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
     let trimmed = body[indent_len..].trim_end();
-    // 必須含 `|`，避免把 `---`（水平線／setext 標題底線）誤認成表格分隔列。
     if trimmed.is_empty() || !trimmed.contains('|') { return None; }
     let cells = split_table_cells(trimmed)?;
     if !cells.iter().all(|c| is_delimiter_cell(c)) { return None; }
@@ -1413,11 +1398,6 @@ pub(crate) fn is_mostly_english(text: &str) -> bool {
     }
     latin >= 20 && cjk * 10 <= latin
 }
-
-// ── 待答問卷（codex／claude 的「需要回應」決策題）：一份問卷一次呼叫 ──────────────────────────
-//
-// 題目、標題、選項 label 與 description 結構化成 JSON 進、JSON 出，id 由 daemon 產生（`q{n}`、`q{n}-o{m}`）並逐一核對，
-// 對不上就不採用、不寫快取。用途、開關、帳本、快取目錄都跟對話訊息翻譯共用；快取鍵是 `pq-` 前綴＋整份內容的雜湊。
 
 const PQ_CACHE_PREFIX: &str = "pq-";
 const PQ_PROMPT_VERSION: &str = "1";
@@ -1589,7 +1569,6 @@ fn flight_slot(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
 
 fn flight_forget(path: &Path, slot: Arc<tokio::sync::Mutex<()>>) {
     let mut g = FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    // 表裡一份、我手上一份；多的就是還有人在排隊。
     if Arc::strong_count(&slot) <= 2 {
         if let Some(m) = g.as_mut() {
             if m.get(path).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
@@ -1608,7 +1587,6 @@ pub(crate) async fn translate_questions(app: &App, qs: &[PqIn]) -> Result<Value,
     }
     let slot = flight_slot(&path);
     let guard = slot.lock().await;
-    // 等鎖期間別人可能已經寫好快取：拿到控制權後重查，命中就不打 API。
     if let Some(hit) = load_pq(&path) {
         drop(guard);
         flight_forget(&path, slot);
@@ -1671,9 +1649,7 @@ mod cost_tests {
     #[test]
     fn cost_uses_list_prices_and_unknown_models_have_none() {
         let u = claude_api::Usage { input_tokens: Some(1_000_000), output_tokens: Some(1_000_000), cache_creation_input_tokens: Some(1_000_000), cache_read_input_tokens: Some(1_000_000) };
-        // Haiku 5.5：0.10 + 0.50 + 0.125 + 0.01
         assert!((cost_usd("claude-haiku-5-5", &u).unwrap() - 0.735).abs() < 1e-9);
-        // Sonnet 5.5：2 + 10 + 2.5 + 0.1（快取讀取 $0.10/MTok＝輸入價 0.05×，a7d53148e）
         assert!((cost_usd("claude-sonnet-5-5", &u).unwrap() - 14.6).abs() < 1e-9);
         assert_eq!(cost_usd("gpt-x", &u), None);
     }
@@ -1752,22 +1728,18 @@ mod tests {
 
     #[test]
     fn mixed_message_is_not_untranslated() {
-        // 英文為主、夾一段中文引用：英文翻掉、引用原樣保留 → 不判 untranslated
         let source = "Please review the deployment plan for the API service before Friday, the team needs it.\n這是引用：OK。";
         let translated = "請在週五前檢視 API 服務的部署計畫，團隊需要它。\n這是引用：OK。";
         assert_eq!(local_reason(source, translated), None, "英文已翻、中文引用保留的混合訊息不應判為 untranslated");
-        // 英文原樣沒翻（只有中文引用保留）→ 仍要判 untranslated
         let untranslated = "Please review the deployment plan for the API service before Friday, the team needs it.\n這是引用：OK。";
         assert_eq!(local_reason(source, untranslated), Some("untranslated"), "英文沒翻的混合訊息仍要擋下");
     }
 
     #[test]
     fn mixed_message_with_code_versions_and_zh_quote_is_not_untranslated() {
-        // 英文段含行內程式碼與版本號、夾繁體中文段：英文翻掉、其餘原樣保留 → 不判 untranslated
         let source = "Please upgrade the `agm` CLI to v0.155.1 before the release review, then rerun the checks.\n原文引用：請先確認。";
         let translated = "請在發版審查前把 `agm` CLI 升級到 v0.155.1，然後重跑檢查。\n原文引用：請先確認。";
         assert_eq!(local_reason(source, translated), None);
-        // 來源中文字數超過拉丁字母十分之一時不算「主要英文」，本來就不做 untranslated 檢查（既有門檻，此次未改）。
     }
 
     #[test]
@@ -1878,11 +1850,9 @@ mod tests {
         assert_eq!(load_rejection(&path).and_then(|(_, t)| t).as_deref(), Some(content), "標記帶著被擋的譯文，給網頁「仍然顯示譯文」");
         assert!(matches!(&err, LcError::Unprocessable(v) if v["translation"] == content), "422 本體也帶被擋的譯文");
         assert!(load(&path).is_none(), "標記不是譯文");
-        // 第二次同一則：直接回標記，不打 API。
         let err2 = translate(&app, "m_fail", content).await.unwrap_err();
         assert!(matches!(&err2, LcError::Unprocessable(v) if v["reason"] == "untranslated"));
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "命中負面標記不調用 API");
-        // 手動重試（force）才會再打。
         let _ = translate_with(&app, "m_fail", content, true).await;
         assert_eq!(f.calls.load(Ordering::SeqCst), 3, "force 略過標記");
     }
@@ -1899,7 +1869,6 @@ mod tests {
 
     #[test]
     fn partially_untranslated_ignores_code_and_short_lines() {
-        // 程式碼區塊與行內 code 不算英文段；不到 8 個英文字的句子也不算。
         let source = "中文說明在這裡。\n\n```\nthis is a long english code line that stays as is in the block\n```\n\nRun `cargo test --workspace` now.\n\nOK done";
         let reply = "中文說明在這裡。\n\n```\nthis is a long english code line that stays as is in the block\n```\n\n現在執行 `cargo test --workspace`。\n\nOK done";
         assert_eq!(local_reason(source, reply), None);
@@ -1912,13 +1881,11 @@ mod tests {
         let path = cache_path(&app.data_dir, &cache_key("m_redo", content));
         save(&path, &CacheEntry { translation: "舊譯文".into(), model: "old".into(), prompt_version: PROMPT_VERSION.into(), ..Default::default() }).unwrap();
 
-        // 剛寫好（60 秒內）：連按只沿用，不打 API。
         let f = fake_seq(&app, vec!["不該被用到".into()]);
         let same = translate_redo(&app, "m_redo", content).await.unwrap();
         assert_eq!(same["translation"], json!("舊譯文"));
         assert_eq!(f.calls.load(Ordering::SeqCst), 0, "60 秒內重按不打 API");
 
-        // 快取過了 60 秒：重翻失敗（兩次都原樣回傳）回 422，舊譯文保留。
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
         let f = fake_seq(&app, vec![content.to_string(), content.to_string()]);
@@ -1927,7 +1894,6 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 2, "首次＋一次重試");
         assert_eq!(load(&path).map(|e| e.translation).as_deref(), Some("舊譯文"), "失敗保留舊譯文，不寫負面標記覆蓋");
 
-        // 重翻成功：覆寫同一份快取。
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
         let f = fake_seq(&app, vec!["新的 GitHub 504 來源說明，不是 AG Man 自己的伺服器。".into()]);
         let ok = translate_redo(&app, "m_redo", content).await.unwrap();
@@ -2005,7 +1971,6 @@ mod tests {
     #[tokio::test]
     async fn rejected_first_reply_retries_once_at_next_effort() {
         let (app, _dir) = app(true).await;
-        // 這兩個測的是「不升級、同模型提一階」的路徑；升級模型另有測試（retry_model_tests）。
         app.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), ..Default::default() }); Ok(()) }).await.unwrap();
         let content = "The system has encountered an unexpected condition.";
         let f = fake_seq(&app, vec!["システムで予期しない状態が発生しました。".into(), "系統遇到了非預期的狀況。".into()]);
@@ -2023,7 +1988,6 @@ mod tests {
     #[tokio::test]
     async fn retry_at_top_effort_stays_max() {
         let (app, _dir) = app(true).await;
-        // 這兩個測的是「不升級、同模型提一階」的路徑；升級模型另有測試（retry_model_tests）。
         app.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), effort: "max".into(), ..Default::default() }); Ok(()) }).await.unwrap();
         app.cfg
             .update(|c| {
@@ -2213,7 +2177,6 @@ mod tests {
     #[tokio::test]
     async fn jev_unavailable_accepts_translation() {
         let (app, _dir) = app(true).await;
-        // Jev 預設是 disabled (app.cfg.get().judge.enabled == false)
         assert!(!app.cfg.get().await.judge.enabled);
 
         let content = "The operation completed successfully.";
@@ -2271,7 +2234,6 @@ mod tests {
         let f = dir.join("claude-api/spend.jsonl");
         assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(std::fs::metadata(f.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
-        // 快取命中不重複記
         translate(&app, "m1", "hello world").await.unwrap();
         assert_eq!(crate::claude_api::read_spend_since(&dir, since).len(), 1);
     }
@@ -2300,7 +2262,6 @@ mod tests {
         ));
         let b = translate(&app, "m-simp", simp).await.unwrap();
         assert_eq!((b["cached"].clone(), b["translation"].clone()), (json!(true), a["translation"].clone()), "同一份快取");
-        // 繁體與日文照舊：不是簡體，也不是英文，這支端點仍會照舊送 LLM（前端只對英文與簡體出按鈕）。
         let trad = translate(&app, "m-trad", "這個問題我們需要修復一下，修復之後請再執行測試。").await.unwrap();
         assert_eq!(trad["model"], json!("claude-haiku-5-5"));
         assert_eq!(f.calls.load(Ordering::SeqCst), 1);
@@ -2432,10 +2393,8 @@ mod tests {
         assert_eq!(f.calls.load(Ordering::SeqCst), 1, "同一份問卷同時只打一次上游");
         assert_eq!(a["questions"], b["questions"], "兩份回應一致");
         assert_eq!(usize::from(a["cached"] == json!(true)) + usize::from(b["cached"] == json!(true)), 1, "後到的那份拿到快取");
-        // 只看這份問卷的鍵：FLIGHT 是行程共用的，別的測試（預先翻）可能同時在飛。
         let key = pq_cache_path(&app.data_dir, &pq_payload(&qs));
         assert!(FLIGHT.lock().unwrap().as_ref().is_none_or(|m| !m.contains_key(&key)), "沒人等了，鎖表要收乾淨");
-        // 不同問卷照常各自打一次。
         let mut other = pq_body();
         other.questions[0].question.push('?');
         gate.add_permits(1);
@@ -2633,7 +2592,6 @@ mod retry_model_tests {
         let msg = crate::db::ulid();
         sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'hook',?)")
             .bind(&msg).bind(&conv).bind(&content).bind(crate::db::now()).execute(&e.app.db).await.unwrap();
-        // 把「已被擋」的負面標記寫好（用真的寫入函式，不打 API）。
         let path = cache_path(&e.app.data_dir, &cache_key(&msg, &content));
         let _ = mark_rejected(&path, "untranslated", &content, &content, vec!["claude-haiku-5-5".into(), "claude-sonnet-5-5".into()], 2);
 
@@ -2951,12 +2909,10 @@ mod retry_model_tests {
         assert!(req.system.unwrap().contains("Preserve the exact Markdown structure"));
         assert!(req.prompt.contains("完整保留 Markdown 結構"));
 
-        // 分隔列少一欄 → 補成同欄數、不動儲存格文字
         let fixed = repair_markdown_tables("| 欄一 | 欄二 | 欄三 |\n|---|---|\n| 甲 | 乙 | 丙 |");
         assert_eq!(fixed, "| 欄一 | 欄二 | 欄三 |\n|---|---|---|\n| 甲 | 乙 | 丙 |");
         assert_eq!(extract_markdown_structure(&fixed).tables, vec![TableShape { cols: 3, rows: 1 }]);
 
-        // 含對齊冒號：補欄與截斷皆保留既有對齊冒號
         assert_eq!(
             repair_markdown_tables("| 項目 | 對齊 | 數字 | 備註 |\n| :--- | :---: | ---: |\n| A | B | 1 | ok |"),
             "| 項目 | 對齊 | 數字 | 備註 |\n| :--- | :---: | ---: |---|\n| A | B | 1 | ok |"
@@ -2966,7 +2922,6 @@ mod retry_model_tests {
             "| 項目 | 數字 |\n| :--- | ---: |\n| A | 1 |"
         );
 
-        // ``` / ~~~ 程式碼區塊內的 |---| 不動
         let fenced = "說明\n\n```markdown\n| A | B | C |\n|---|---|\n| 1 | 2 | 3 |\n```\n\n~~~md\n| X | Y | Z |\n|---|---|\n| 4 | 5 | 6 |\n~~~\n\n| 真一 | 真二 | 真三 |\n|---|---|\n| 7 | 8 | 9 |";
         let expected = fenced.replacen("| 真一 | 真二 | 真三 |\n|---|---|", "| 真一 | 真二 | 真三 |\n|---|---|---|", 1);
         assert_eq!(repair_markdown_tables(fenced), expected);
@@ -3030,7 +2985,6 @@ You picked B in the previous dialog, but I haven't renamed anything yet. Role na
         assert_eq!(*f1.models.lock().unwrap(), vec!["claude-haiku-5-5".to_string(), "claude-sonnet-5-5".to_string()]);
         assert_eq!(out["translation"], json!(good1));
 
-        // retry_model 為空時提高 effort；兩次都壞（3 欄變 2 欄）走現有 rejected 流程
         let src2 = "## Plan\n\n| Step | Owner | Result |\n|---|---|---|\n| 1 | Alice | Done |";
         let (a2, _d2) = app(true).await;
         a2.cfg.update(|c| { c.claude_api.groups.insert("translate".into(), crate::config::ClaudeApiUseCfg { retry_model: Some(String::new()), ..Default::default() }); Ok(()) }).await.unwrap();
@@ -3195,7 +3149,6 @@ mod openai_translate_tests {
         assert_eq!((out["translation"].clone(), out["model"].clone(), out["cached"].clone()), (json!(GOOD), json!("gpt-6-luna"), json!(false)));
         assert_eq!(claude.0.load(Ordering::SeqCst), 0, "Claude is never called for an OpenAI translation");
 
-        // 請求：無狀態、沒有工具、instructions＝system、input＝一則 user 訊息、effort 照設定（OpenAI 的預設 low）。
         let seen = server.seen.lock().unwrap();
         assert_eq!(seen.bodies.len(), 1);
         let body = &seen.bodies[0];
@@ -3210,7 +3163,6 @@ mod openai_translate_tests {
         assert_eq!(seen.auth, [format!("Bearer {OPENAI_KEY}")]);
         drop(seen);
 
-        // 金額＝OpenAI 價表的結算：普通輸入 900、快取讀 200、快取寫 100、輸出 80。
         let settled = crate::api_bot::openai::pricing::settle(
             "gpt-6-luna",
             &crate::api_bot::openai::pricing::Usage { input_tokens: 1200, cached_tokens: 200, cache_write_tokens: 100, cache_write_12h_tokens: 0, output_tokens: 80, reasoning_tokens: 0 },
@@ -3221,18 +3173,15 @@ mod openai_translate_tests {
         assert_eq!(out["cost_usd"], json!(settled as f64 / 1e6));
         assert_eq!(out["usage"], json!({"input_tokens": 900, "output_tokens": 80, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 200}));
 
-        // 帳本與花費明細都標 provider=openai；花費明細的金額就是結算值。
         let ledger = app.claude_api.ledger.snapshot(10);
         assert_eq!((ledger["rows"][0]["provider"].clone(), ledger["rows"][0]["model"].clone(), ledger["rows"][0]["ok"].clone()), (json!("openai"), json!("gpt-6-luna"), json!(true)));
         let spend = spend_lines(&dir);
         assert_eq!(spend.len(), 1);
         assert_eq!((spend[0]["provider"].clone(), spend[0]["model"].clone(), spend[0]["microusd"].clone(), spend[0]["use_case"].clone()), (json!("openai"), json!("gpt-6-luna"), json!(settled), json!(USE_CASE)));
-        // OpenAI 的花費不算進 Claude 帳戶餘額的扣減。
         let since = chrono::Utc::now() - chrono::Duration::hours(1);
         assert!(crate::claude_api::read_spend_since(&dir, since).is_empty());
         assert_eq!(crate::claude_api::read_provider_spend_since(&dir, since, "openai").len(), 1);
 
-        // key 不出現在回應、帳本、花費明細。
         for text in [out.to_string(), ledger.to_string(), serde_json::to_string(&spend).unwrap()] {
             assert!(!text.contains(OPENAI_KEY) && !text.contains("SENTINEL"), "{text}");
         }
@@ -3425,7 +3374,6 @@ mod openai_translate_tests {
         }
         assert!(app.cfg.claude_fresh().await.claude_api.groups.get("translate").is_none_or(|g| g.provider.is_empty()), "a refused PUT changes nothing");
 
-        // 合法的切換：模型／effort／重試模型換成 OpenAI 的預設；更新框翻譯留在 Claude（不把 OpenAI 的模型寫進它的設定）。
         let axum::Json(view) = put(json!({"groups": {"translate": {"provider": "openai"}}})).await.unwrap();
         let group = view["groups"].as_array().unwrap().iter().find(|g| g["id"] == "translate").unwrap().clone();
         assert_eq!((group["provider"].clone(), group["model"].clone(), group["effort"].clone(), group["retry_model"].clone(), group["openai_allowed"].clone()), (json!("openai"), json!("gpt-6-luna"), json!("low"), json!(""), json!(true)));
@@ -3437,13 +3385,11 @@ mod openai_translate_tests {
         assert_eq!((changelog.provider, changelog.model.as_str()), ("anthropic", "claude-haiku-5-5"));
         assert!(cfg.changelog_translate.model.starts_with("claude-"));
 
-        // 切回 Claude：回到 Claude 的預設，設定檔不留 provider 欄位。
         let axum::Json(view) = put(json!({"groups": {"translate": {"provider": "anthropic"}}})).await.unwrap();
         let group = view["groups"].as_array().unwrap().iter().find(|g| g["id"] == "translate").unwrap().clone();
         assert_eq!((group["provider"].clone(), group["model"].clone(), group["retry_model"].clone()), (json!("anthropic"), json!("claude-haiku-5-5"), json!("claude-sonnet-5-5")));
         assert!(app.cfg.claude_fresh().await.claude_api.groups["translate"].provider.is_empty());
 
-        // 手改設定檔：別的組寫了 openai，那個用途的呼叫回 bad_config，不送。
         app.cfg.update(|c| { c.claude_api.groups.insert("schedule_outcome".into(), crate::config::ClaudeApiUseCfg { enabled: Some(true), provider: "openai".into(), ..Default::default() }); Ok(()) }).await.unwrap();
         use_openai(&app, &key_file, true).await;
         let cfg = app.cfg.claude_fresh().await;

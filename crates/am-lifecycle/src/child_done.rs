@@ -58,7 +58,6 @@ const LEGACY_INTRO: &str =
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 fn quoted_reply(notice: &str) -> Option<&str> {
-    // 舊結尾（#1778 之前寫出的通知）：DB 裡還留著，去重要認得得出來。
     const LEGACY_END: &str = "不需要回覆這則通知。";
     let framed = [NOTICE_INTRO, LEGACY_INTRO]
         .into_iter()

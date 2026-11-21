@@ -31,7 +31,6 @@ use serde_json::json;
 use crate::lc_error::LcError;
 use crate::trusted_open;
 
-
 /// 分享／outbox 幾乎所有動作只需要的兩樣：資料目錄與 DB 連線（`App` 在 `app_ports_p10` 實作）。
 pub trait ShareStorage: Send + Sync + 'static {
     fn data_dir(&self) -> &Path;
@@ -135,7 +134,6 @@ fn walk_usage(dir: &std::fs::File, depth: usize, usage: &mut TreeUsage, seen: &m
             return false;
         }
         if entry.is_file {
-            // 標記檔 `.am-share-keep` 是 daemon 放的，不算使用者的量（跟 `outbox-gc.sh` 一致）。
             if depth == 0 && entry.name == SHARE_KEEP_MARK {
                 return true;
             }
@@ -255,13 +253,11 @@ pub fn withheld_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
-    // `x.sqlite3`、`x.sqlite3-wal`、`x.sqlite3.bak-20260916`、`bak1644.db-shm`。
     if name.contains(".sqlite") || name.ends_with(".db") || name.contains(".db-") || name.contains(".db.") {
         return true;
     }
     const KEYS: [&str; 12] =
         [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx", ".env", ".token", ".keychain", ".keychain-db"];
-    // 名單以外、但就是憑證的常見檔名：codex OAuth、gcloud ADC、gh 的 hosts.yml、這個 daemon 自己的 ui-token（review core 11 洞 2）。
     const CREDENTIAL_FILES: [&str; 5] = ["auth.json", "credentials.json", "application_default_credentials.json", "hosts.yml", "ui-token"];
     KEYS.iter().any(|ext| name.ends_with(ext))
         || CREDENTIAL_FILES.contains(&name)
@@ -334,7 +330,6 @@ fn open_share_outbox_entry(base: &Path, bot_id: &str, requested: &str, owner_uid
         p
     });
     let (name, rel) = safe_outbox_path(&root, requested).ok_or(ShareFileError::NotFound)?;
-    // 分享入口只給 outbox 最上層（見 [`scan_checked`]）：子資料夾裡的檔就算路徑合法也不放行。
     if rel.len() != 1 {
         return Err(ShareFileError::NotFound);
     }
@@ -436,7 +431,6 @@ fn walk_scan(
             return true;
         }
         if e.is_file {
-            // 檔案版本（分享入口用）：同秒同大小重寫秒數與大小都一樣（#843），所以另外帶 inode／奈秒 mtime／ctime，不透明字串。
             let mut version = String::new();
             let is_withheld = match trusted_open::open_entry_in(dir, &e.name) {
                 Ok(mut file) => {
@@ -578,8 +572,6 @@ async fn outbox_of(app: &impl OutboxEnv, bot_id: &str) -> Result<PathBuf, LcErro
 
 /// `GET /api/bots/{id}/outbox` — 這顆 bot 交給使用者的檔案（新的排前面），各自還剩多久被清掉。
 pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: String) -> Result<Response, LcError> {
-    // 遠端主機的 bot：outbox 在那台機器上，走 ssh 列（`outbox_remote`）。
-    // 連不上那台不是錯誤：回空清單並講原因（下載才回 409）。
     match crate::outbox_remote::target(app, &id).await {
         Ok(Some(t)) => return crate::outbox_remote::list(t, now_secs()).await,
         Ok(None) => {}
@@ -590,15 +582,11 @@ pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     }
     let dir = match outbox_of(app, &id).await {
         Ok(d) => d,
-        // 遠端不是錯誤，是常態：回空清單並說明原因，前端不用畫成紅字。
         Err(LcError::Conflict(detail)) => {
             return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": detail.get("reason")}))).into_response())
         }
         Err(e) => return Err(e),
     };
-    // 可信檢查（拿到目錄 fd）跟真正列舉擺進同一個 blocking closure、共用同一個 fd：中間沒有
-    // `.await`，也沒有「查完路徑 → 之後再用路徑重新 open 去列」這一步，這顆 bot 自己把目錄整個換成
-    // 符號連結也換不掉已經拿在手上的 fd（issue #96）。
     let data_dir = app.data_dir().to_path_buf();
     let scan_dir = dir.clone();
     let now = now_secs();
@@ -616,8 +604,6 @@ pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
             return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
         }
     };
-    // 分享用 bot（SPEC §20）的 outbox 走分享保留政策（14 天、500 MiB／1000 檔）：`ttl_secs:null`、每個檔不帶 1 小時到期，
-    // 另回 `share_usage {bytes, files, cap, keep_days}`。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
     if matches!(crate::db::is_share_bot(app.db_pool(), &id).await, Ok(true)) {
         without_expiry(&mut files);
         let (data_dir, usage_dir) = (app.data_dir().to_path_buf(), dir.clone());
@@ -651,7 +637,7 @@ pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
     if let Some(t) = crate::outbox_remote::target(app, &id).await? {
         return crate::outbox_remote::file(t, &requested, inline_req).await;
     }
-    outbox_of(app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
+    outbox_of(app, &id).await?;
     let data_dir = app.data_dir().to_path_buf();
     let bot_id = id.clone();
     let opened = tokio::task::spawn_blocking(move || {

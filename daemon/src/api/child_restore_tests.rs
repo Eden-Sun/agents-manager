@@ -26,7 +26,6 @@ async fn a_soft_deleted_child_is_restored_without_a_run() {
     let b = db::bot(&e.app.db, &kid.id).await.unwrap().unwrap();
     assert!(b.deleted_at.is_none() && b.managed_by == "child" && b.parent_bot_id.is_some());
     assert!(db::active_run(&e.app.db, &kid.id).await.unwrap().is_none(), "restore 不開 run");
-    // Herdr has not reopened the child yet; a reconcile in this window must preserve its row/history.
     *e.herdr.agents.lock().unwrap() = Vec::new();
     crate::reconcile::reconcile_host(&e.app, crate::config::LOCAL_HOST).await.unwrap();
     assert!(db::bot(&e.app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none(), "restore grace keeps the original child row");
@@ -56,7 +55,6 @@ async fn restore_refuses_a_live_child_and_a_taken_name() {
     let kid = live_child(&e, "dup").await;
     assert!(conflict_reason(restore_bot(State(e.app.clone()), Path(kid.id.clone())).await.unwrap_err()).contains("not deleted"));
     soft_delete(&e.app, &kid.id).await;
-    // 同名的另一顆活 child（例如父 bot 已經用 herdr 重開了一顆）。
     sqlx::query("INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
                      SELECT ?, project_id, name, kind, '[]', 0, 0, 'tok2', 'child', parent_bot_id, ? FROM bots WHERE id=?")
         .bind(db::ulid()).bind(db::now()).bind(&kid.id).execute(&e.app.db).await.unwrap();

@@ -18,7 +18,6 @@ async fn codex_turn(screen: &str, prompt: &str) -> (tt::Env, String, String) {
     (env, run, turn)
 }
 
-// Synthetic fixture based on issue #1878's DB suffix, not a captured pane.
 const SYNTHETIC_COMPACT: &str = "• 上一則已由 hook 落過的回覆。\n\n  Worked for 21s • 11:03 AM\n\n• Context compacted · 1m 14s\n\n  Worked for 1m 14s • 11:57 AM\n\n› \n";
 
 #[tokio::test]
@@ -38,8 +37,6 @@ async fn synthetic_codex_manual_and_external_compact_store_only_a_system_note() 
         ).bind(&turn).fetch_all(&app.db).await.unwrap();
         assert_eq!(messages, vec![("system".into(), "Codex 已壓縮 · 1m 14s".into(), "system".into(), 0)]);
 
-        // A repeated external edge with a mismatched cursor must not replay the
-        // old hook reply or duplicate the compaction note.
         let again = crate::lifecycle::run_state::a_turn(&app, &bot, Some(&run), "in_flight").await;
         sqlx::query("UPDATE turns SET origin='external',prompt_text='/compact' WHERE id=?").bind(&again).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET last_read_tail_hash='stale' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
@@ -122,7 +119,6 @@ async fn synthetic_codex_auto_compact_without_an_answer_waits_then_records_one_r
     }
     let screen = SYNTHETIC_COMPACT.replace("› \n", "• 修好了。\nWorked for 8s • 11:58 AM\n› \n");
     env.herdr.set_screen(&format!("pane-{bot}"), &screen);
-    // The pane may show the answer before rollout appends the assistant item.
     assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
     assert!(!try_fallback(&app, &run, Some(&turn)).await.unwrap());
     assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "completed_fallback");
@@ -138,8 +134,6 @@ async fn synthetic_queued_codex_turn_does_not_adopt_compaction_before_delivery()
         let (env, run, turn) = codex_turn(screen, "Reply with the requested text").await;
         let app = env.app.clone();
         let bot: String = sqlx::query_scalar("SELECT bot_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
-        // Queued at 11:00; the preceding turn compacts at 11:10; this input
-        // is delivered only at 11:20. There is no later assistant in rollout.
         sqlx::query("UPDATE turns SET created_at='2026-10-20T11:00:00Z',delivered_at=? WHERE id=?")
             .bind(delivered_at).bind(&turn).execute(&app.db).await.unwrap();
         let home = env.dir.join("synthetic-queued-codex-home");

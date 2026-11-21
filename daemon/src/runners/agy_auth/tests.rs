@@ -151,7 +151,6 @@ async fn an_unadmitted_agy_hook_does_not_change_login_state() {
     let _globals = agy_globals().await;
     let env = tt::env().await;
     seed_agy(&env.app).await;
-    // 有 bot 但沒有 run：沒有放行證明。
     let bot = tt::claude_bot(&env.app, &env.project_id, "agy-auth-e").await;
     sqlx::query("UPDATE bots SET kind='agy' WHERE id=?").bind(&bot.id).execute(&env.app.db).await.unwrap();
     let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
@@ -199,7 +198,6 @@ async fn a_replaced_generations_success_does_not_clear_the_new_cooldown() {
     crate::runners::quota_agy::record_probe_result(&env.app, HOST, &old, &Ok(())).await;
     assert!(auth_denied_active(&key, &new), "舊世代的成功不清新世代的冷卻");
 
-    // 新世代自己的結果照常生效：AuthRequired 翻未登入、記冷卻。
     crate::runners::quota_agy::record_probe_result(&env.app, HOST, &new, &Err(ProbeFail::AuthRequired)).await;
     assert_eq!(logged_in(&env.app).await, Some(false));
     assert!(auth_denied_active(&key, &new));

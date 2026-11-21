@@ -14,18 +14,10 @@ use crate::lifecycle::{self, LcError};
 use serde_json::Value;
 use std::future::Future;
 
-// ============================================================================
-// Reconcile Ports
-// ============================================================================
-
 /// Backoff retry delay for recovery / intents loops.
 pub fn recovery_retry_delay(attempt: usize) -> Duration {
     crate::reconcile::recovery_retry_delay(attempt)
 }
-
-// ============================================================================
-// Share Ports
-// ============================================================================
 
 /// Revokes sharing for a single bot.
 pub async fn revoke_bot_share(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
@@ -36,10 +28,6 @@ pub async fn revoke_bot_share(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::
 pub async fn revoke_project_shares(app: &Arc<App>, project_id: &str) -> Result<(), sqlx::Error> {
     crate::share::revoke_project_shares(app, project_id).await
 }
-
-// ============================================================================
-// Lifecycle Ports
-// ============================================================================
 
 /// Closes a pane and confirms herdr removed it before callers discard its local records.
 pub async fn close_and_confirm(
@@ -65,10 +53,6 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
 pub fn in_default_session(run: &crate::db::Run) -> bool {
     lifecycle::in_default_session(run)
 }
-
-// ============================================================================
-// API Ports
-// ============================================================================
 
 /// Acquires bot locks in deterministic sorted order.
 pub async fn lock_bots_in_order(
@@ -111,10 +95,6 @@ pub async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::Result<V
     crate::api::descendant_children(app, root).await
 }
 
-// ============================================================================
-// Supervisor Ports
-// ============================================================================
-
 pub const RELEASED_REASON: &str = crate::supervisor::maintenance::RELEASED_REASON;
 pub const FORCE_RELEASED_REASON: &str = crate::supervisor::maintenance::FORCE_RELEASED_REASON;
 
@@ -152,10 +132,6 @@ impl crate::intents::IntentFailureInbox for sqlx::SqlitePool {
         }
     }
 }
-
-// ============================================================================
-// Test Support / Race Points
-// ============================================================================
 
 #[cfg(test)]
 pub mod race_point {

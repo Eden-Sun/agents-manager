@@ -123,7 +123,6 @@ async fn deleting_a_hostless_identity_is_refused_while_a_remote_bot_relies_on_it
     }
     assert_eq!(app.cfg.get().await.identities.len(), 1, "什麼都沒刪");
 
-    // mac_builder 有自己的 work：刪沒寫 host 的那筆不影響那台的 bot。
     std::fs::write(&app.cfg.path, text("\n[[identities]]\nname = 'work'\nkind = 'codex'\nhost = 'mac_builder'\n")).unwrap();
     app.cfg.update(|_| Ok(())).await.unwrap();
     crate::projection::project_config(&app.cfg, &app.db).await.unwrap();
@@ -221,8 +220,6 @@ async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
     assert!(tools["local"].identities.contains_key("work"), "本機自己的 work 沒被刪，快取列不能一起消失");
 }
 
-// ── #2002：身份刪除與引用寫入互斥（identity_fence） ──
-
 async fn seed_shell_cc1(app: &Arc<App>) {
     let ht = crate::tools::HostTools {
         tools: Default::default(),
@@ -269,7 +266,6 @@ async fn create_bot_waits_for_an_in_flight_identity_delete_then_reports_it_missi
     let task = tokio::spawn(async move { create_bot(State(a2), Path(pid), new_claude_bot("late", Some("cc1"))).await.map(|r| r.status()) });
     settle().await;
     assert!(!task.is_finished(), "刪除還沒完成：create 要等");
-    // 模擬刪除完成：快取移除 alias，再放鎖。
     app.tools.lock().await.get_mut(LOCAL_HOST).unwrap().shell_identities.clear();
     drop(guard);
     let res = task.await.unwrap();

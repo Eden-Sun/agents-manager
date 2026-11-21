@@ -69,7 +69,6 @@ async fn a_trusted_share_bot_needs_an_explicit_confirm_and_only_an_existing_fold
     let bots = st["projects"].as_array().unwrap().iter().flat_map(|p| p["bots"].as_array().unwrap().iter()).collect::<Vec<_>>();
     assert_eq!(bots.iter().find(|b| b["id"] == json!(id)).unwrap()["share_profile"], "trusted");
 
-    // 分享開得起來，跟受限的一樣。
     set_base(&e.app).await;
     let r: Value = c.post(format!("{base}/api/bots/{id}/share")).header("X-AM-Token", "test-token").json(&json!({"enabled": true})).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["enabled"], true, "{r}");
@@ -89,7 +88,6 @@ async fn a_trusted_share_bot_starts_as_an_ordinary_bot_without_the_cage() {
     assert_eq!(pane["cwd"], json!(dir.to_string_lossy()), "cwd 是選的資料夾");
     assert!(dir.join("inbox").is_dir(), "上傳的 inbox 一樣在");
     assert!(crate::outbox::dir_for(&e.app.data_dir, &b.id).unwrap().join(crate::outbox::SHARE_KEEP_MARK).exists(), "outbox 不給 gc 清");
-    // 受限 bot 的「hook token 只准打自己的 hook」不套在信任分享上；AGM 不能刪、不能停則一樣。
     assert!(!refuses_bot_principal(&e.app.db, &b.id).await);
     assert_eq!(guards_from_bot_principal(&e.app.db, "DELETE", &format!("/api/bots/{}", b.id)).await, Some(b.id.clone()));
     assert_eq!(guards_from_bot_principal(&e.app.db, "POST", &format!("/api/bots/{}/stop", b.id)).await, Some(b.id.clone()));
@@ -136,7 +134,6 @@ async fn a_trusted_share_bot_is_kept_out_of_idle_sleep_and_outbox_expiry() {
     tt::fake_run(&e.app, &b.id).await;
     let c = crate::supervisor_tests::idle_sleep::candidates(&e.app).await.unwrap().into_iter().find(|c| c.bot_id == b.id).expect("在名單裡");
     assert!(c.is_share_bot, "閒置再久也不收");
-    // outbox 列表：不過期（`ttl_secs:null`、`kept`）。
     let out = crate::outbox::dir_for(&e.app.data_dir, &b.id).unwrap();
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("card.png"), b"\x89PNG\r\n").unwrap();
@@ -161,7 +158,6 @@ async fn the_bots_reply_to_an_owner_turn_stays_off_the_share_page_unless_flagged
     let flagged = add_turn_message(&e.app, &b.id, Some("t3"), "user", "後台：跟他說今天會晚點回", None).await;
     store::mark_reply_visible(&e.app.db, &flagged).await.unwrap();
     add_turn_message(&e.app, &b.id, Some("t3"), "assistant", "今天會晚一點回覆你", None).await;
-    // 沒有 turn 的回覆：看它前面最近一則 user（擁有者的）→ 不給。
     add_message(&e.app, &b.id, "user", "後台：再確認一次", None).await;
     add_message(&e.app, &b.id, "assistant", "確認了", None).await;
     let base = serve(portal::router(e.app.clone())).await;
@@ -277,7 +273,6 @@ async fn post_share_rolls_back_token_if_second_write_fails() {
     let base = serve(crate::api::router(e.app.clone())).await;
     let c = client();
 
-    // 注入故障：當 UPDATE allow_embed 時觸發 SQLite ABORT
     sqlx::query(
         "CREATE TRIGGER fail_allow_embed_update BEFORE UPDATE OF allow_embed ON bot_shares
          BEGIN
@@ -314,7 +309,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
     let c = client();
     let mut rx = e.app.subscribe();
 
-    // 第一次開啟，allow_embed: false
     let res = c
         .post(format!("{base}/api/bots/{}/share", t.id))
         .header("X-AM-Token", "test-token")
@@ -326,10 +320,8 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
     let initial_share = store::share(&e.app.db, &t.id).await.unwrap().expect("share exists");
     assert!(!initial_share.allow_embed);
 
-    // 清空 rx 裡的初始事件
     while rx.try_recv().is_ok() {}
 
-    // 切換 allow_embed: true（既有分享）
     let res = c
         .post(format!("{base}/api/bots/{}/share", t.id))
         .header("X-AM-Token", "test-token")
@@ -339,7 +331,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
         .unwrap();
     assert_eq!(res.status(), 200);
 
-    // 必須收到 bot_share_changed 事件
     let mut found = false;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
     while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -352,7 +343,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
     }
     assert!(found, "既有分享切換 allow_embed=true 必須發出 bot_share_changed 事件");
 
-    // T2 重新讀取必須看到 allow_embed: true
     let g: Value = c
         .get(format!("{base}/api/bots/{}/share", t.id))
         .header("X-AM-Token", "test-token")
@@ -364,7 +354,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
         .unwrap();
     assert_eq!(g["allow_embed"], true);
 
-    // 重送相同設定（idempotency）：不換 token，不發重複事件
     while rx.try_recv().is_ok() {}
     let res = c
         .post(format!("{base}/api/bots/{}/share", t.id))
@@ -377,7 +366,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
     let current_share = store::share(&e.app.db, &t.id).await.unwrap().expect("share exists");
     assert_eq!(current_share.token, initial_share.token, "重送相同設定不能 rotate token");
 
-    // 不應收到 bot_share_changed
     let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
     let mut redundant = false;
     while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
@@ -388,7 +376,6 @@ async fn post_share_existing_share_allow_embed_toggle_emits_event_and_is_idempot
     }
     assert!(!redundant, "相同設定不應發出重複的 bot_share_changed 事件");
 
-    // 再切換回 false
     while rx.try_recv().is_ok() {}
     let res = c
         .post(format!("{base}/api/bots/{}/share", t.id))
@@ -451,7 +438,6 @@ async fn enabling_a_share_survives_a_foreign_writer_between_the_read_and_the_wri
     let e = tt::env().await;
     let (t, _) = trusted_bot(&e.app, &e.project_id, "enable-under-writers").await;
 
-    // 第一次開分享（走 INSERT）。
     let seen = tt::arm_app_foreign_writer(&e.app, "share_enable_after_read", &t.id);
     let out = store::set_share_enabled(&e.app.db, &t.id, Some(true))
         .await
@@ -460,7 +446,6 @@ async fn enabling_a_share_survives_a_foreign_writer_between_the_read_and_the_wri
     assert_eq!(*seen.lock().unwrap(), Some(false), "交易從 BEGIN 就拿著寫鎖，外來 writer 被擋在外面");
     assert!(store::share(&e.app.db, &t.id).await.unwrap().is_some_and(|r| r.allow_embed));
 
-    // 既有分享切換 allow_embed（走 UPDATE）。
     let seen = tt::arm_app_foreign_writer(&e.app, "share_enable_after_read", &t.id);
     let out = store::set_share_enabled(&e.app.db, &t.id, Some(false))
         .await

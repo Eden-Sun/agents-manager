@@ -79,13 +79,10 @@
             assert!(matches!(r, Acquired::Granted { .. } | Acquired::Waiting { .. }), "第 {i} 列：{r:?}");
         }
         assert_eq!(acquire(&app, "flood:extra", Some("BOTA"), "x", "local").await.unwrap(), Acquired::TooManyForBot);
-        // 已經有的列重送不受影響（waiting 的重 poll、held 的重問）。
         assert!(!matches!(acquire(&app, "flood:1", Some("BOTA"), "x", "local").await.unwrap(), Acquired::TooManyForBot));
-        // 別顆 bot 照樣排得進去。
         assert!(matches!(acquire(&app, "b:1", Some("BOTB"), "x", "local").await.unwrap(), Acquired::Waiting { .. }));
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows as usize, MAX_ROWS_PER_BOT + 1, "表不會被撐大");
-        // 手動（UI token，沒有 bot 身份）不受這個上限管：那是人在操作。
         assert!(matches!(acquire(&app, "manual:1", None, "x", "local").await.unwrap(), Acquired::Waiting { .. }));
     }
 
@@ -244,7 +241,6 @@
         set_max_concurrent(&app, 1).await;
 
         acquire(&app, "dead", None, "test", "local").await.unwrap();
-        // 模擬 TTL 已過（不用真的等），直接把 expires_at 撥回過去。
         sqlx::query("UPDATE build_slots SET expires_at = '2020-01-01T00:00:00.000Z' WHERE holder = 'dead'").execute(&app.db).await.unwrap();
 
         let Acquired::Granted { .. } = acquire(&app, "new-holder", None, "test", "local").await.unwrap() else {
@@ -356,8 +352,6 @@
         let app = env.app.clone();
         let Acquired::Granted { token, .. } = acquire(&app, "victim", Some("BOTA"), "test", "local").await.unwrap() else { panic!() };
 
-        // Release is intentionally idempotent and reports success for an unknown token. Check the
-        // stored lease itself so an unauthenticated caller cannot free somebody else's capacity.
         let (code, body) = post_release(
             State(app.clone()),
             HeaderMap::new(),
@@ -377,11 +371,9 @@
         set_max_concurrent(&app, 1).await;
         let Acquired::Granted { token, .. } = acquire(&app, "A:1", None, "test", "local").await.unwrap() else { panic!() };
         let Acquired::Waiting { .. } = acquire(&app, "B:2", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
-        // C 排在 B 後面；A 放掉名額後，B 的號碼牌（沒有 poll、也沒被取消）還在最前面，C 要讓它。
         let Acquired::Waiting { .. } = acquire(&app, "C:3", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
         release(&app, "A:1", &token).await.unwrap();
         assert!(matches!(acquire(&app, "C:3", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }), "B 的號碼牌還在前面，C 不能插隊");
-        // B 放棄：不改 last_seen（沒有等 60 秒），空 token 直接退號碼牌。
         release_as(&app, "B:2", "", None).await.unwrap();
         assert!(matches!(acquire(&app, "C:3", None, "test", "local").await.unwrap(), Acquired::Granted { .. }), "B 退號碼牌後 C 立刻拿到");
     }
@@ -446,7 +438,6 @@
         let Acquired::Waiting { .. } = acquire(&app, "live-waiter", None, "test", "local").await.unwrap() else { panic!("滿了應該要等") };
 
         sqlx::query("UPDATE build_slots SET expires_at = '2020-01-01T00:00:00.000Z' WHERE holder = 'holder'").execute(&app.db).await.unwrap();
-        // dead-waiter 早就不再 poll 了；live-waiter 這一刻還在 poll（last_seen 不動，維持剛剛 acquire 留下的現在時刻）。
         sqlx::query("UPDATE build_slots SET last_seen = '2020-01-01T00:00:00.000Z' WHERE holder = 'dead-waiter'").execute(&app.db).await.unwrap();
 
         let (held, waiting) = sweep(&app).await;
@@ -465,7 +456,6 @@
         set_max_concurrent(&app, 1).await;
 
         let Acquired::Granted { token: first_token, .. } = acquire(&app, "first", None, "t", "local").await.unwrap() else { panic!() };
-        // 進場順序：a, b, c（每個之間睡一下，確保 since 的毫秒級排序穩定）。
         let Acquired::Waiting { .. } = acquire(&app, "a", None, "t", "local").await.unwrap() else { panic!() };
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let Acquired::Waiting { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!() };
@@ -474,7 +464,6 @@
 
         release(&app, "first", &first_token).await.unwrap();
 
-        // 發問順序刻意倒過來：c 先問、b 再問、a 最後問——沒有一個排在 a 前面拿得到。
         let Acquired::Waiting { .. } = acquire(&app, "c", None, "t", "local").await.unwrap() else { panic!("c 排最後，不該搶到") };
         let Acquired::Waiting { .. } = acquire(&app, "b", None, "t", "local").await.unwrap() else { panic!("b 前面還有 a，不該搶到") };
         let Acquired::Granted { token: a_token, .. } = acquire(&app, "a", None, "t", "local").await.unwrap() else { panic!("a 排最早，該輪到它") };
@@ -496,14 +485,12 @@
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let Acquired::Waiting { .. } = acquire(&app, "alive-second", None, "t", "local").await.unwrap() else { panic!() };
 
-        // dead-front 排最前面，但早就不再 poll 了。
         sqlx::query("UPDATE build_slots SET last_seen = '2020-01-01T00:00:00.000Z' WHERE holder = 'dead-front'").execute(&app.db).await.unwrap();
         release(&app, "first", &token).await.unwrap();
 
         let Acquired::Granted { .. } = acquire(&app, "alive-second", None, "t", "local").await.unwrap() else {
             panic!("死掉的號碼牌不該永遠擋住後面活著的人")
         };
-        // dead-front 的列也該一併被清掉，不是留著佔 GET /build-slots 的版面。
         let s = status(&app).await.unwrap();
         let holders: Vec<String> = s["slots"].as_array().unwrap().iter().map(|v| v["holder"].as_str().unwrap().to_string()).collect();
         assert!(!holders.contains(&"dead-front".to_string()), "{holders:?}");
@@ -616,8 +603,6 @@
             .unwrap();
         assert_eq!(out.0["granted"], true);
 
-        // Old shims that send body bot_id plus the hook token (no X-AM-Bot-Id) still authenticate during
-        // pane migration. Both slots are taken by now, so this one queues — the point is it is not refused.
         let h = auth_headers(Some("tok-123"), None, None);
         let out = post_acquire(
             State(app.clone()),
@@ -687,7 +672,6 @@
         .into_response();
         assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN);
 
-        // The owner still gets the same secret; the attacker did not replace the row.
         let owner_again = post_acquire(
             State(app.clone()),
             auth_headers(Some("owner-token"), None, Some(&owner_id)),
@@ -697,7 +681,6 @@
         .unwrap();
         assert_eq!(owner_again.0["token"].as_str(), Some(owner_token.as_str()));
 
-        // The same check protects queued rows: a bot cannot replace another bot's saved queue entry.
         release(&app, "shared-holder", &owner_token).await.unwrap();
         let blocker = acquire(&app, "blocker", None, "test", "local").await.unwrap();
         let Acquired::Waiting { .. } = acquire(&app, "queued-holder", Some(&owner_id), "owner", "local").await.unwrap() else {

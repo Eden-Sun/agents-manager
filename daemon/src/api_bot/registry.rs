@@ -138,11 +138,8 @@ impl ApiBotRegistry {
         let (outcome_tx, outcome_rx) = watch::channel(None);
 
         let cancel_child = cancel_token.clone();
-        // Box::pin prevents debug stack frame overflow (AGENTS.md #1465)
         let runner_handle = tokio::spawn(Box::pin(async move { task_fn(cancel_child).await }));
 
-        // Dedicated supervisor task ensures the runner JoinHandle is never lost/detached,
-        // even if callers or tickets drop their futures.
         let registry_weak = Arc::downgrade(self);
         let run_id_clone = key.run_id.clone();
         let turn_id_clone = key.turn_id.clone();
@@ -160,8 +157,6 @@ impl ApiBotRegistry {
                 }
             };
 
-            // Order invariant: Atomically remove slot under lock BEFORE broadcasting outcome.
-            // Guarantees that any awaiter waking up from the watch channel immediately observes `is_active == false`.
             if let Some(reg) = registry_weak.upgrade() {
                 let mut guard = reg.slots.lock().expect("registry mutex not poisoned");
                 if let Some(slot) = guard.get(&run_id_clone) {
@@ -171,7 +166,6 @@ impl ApiBotRegistry {
                 }
             }
 
-            // Broadcast the terminal outcome to all current and future watchers
             let _ = outcome_tx.send(Some(typed_outcome));
         }));
 
@@ -208,7 +202,6 @@ impl ApiBotRegistry {
             (slot.cancel_token.clone(), slot.outcome_rx.clone())
         };
 
-        // Fire cancellation token without holding registry lock
         token.cancel();
 
         wait_outcome(&mut rx).await
@@ -264,7 +257,6 @@ mod tests {
     use tokio::sync::{oneshot, Notify};
     use tokio::time::timeout;
 
-    // Helper to poll once without sleeping or busy spinning
     fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -291,7 +283,6 @@ mod tests {
 
         assert!(registry.is_active("r1"));
 
-        // Duplicate registration on same run rejected atomically
         let key_dup = RunTurnKey {
             run_id: "r1".into(),
             turn_id: "t2".into(),
@@ -303,15 +294,12 @@ mod tests {
             other => panic!("expected AlreadyRunning, got {:?}", other.map(|_| ())),
         }
 
-        // Release task and wait for completion
         notify.notify_one();
 
         let res = registry.cancel_and_join("r1").await;
         assert_eq!(res.unwrap(), TurnOutcome::Completed);
-        // Guaranteed false immediately on return due to removal before broadcast
         assert!(!registry.is_active("r1"));
 
-        // Once completed and removed, subsequent join returns conservative NotFound
         let after_res = registry.cancel_and_join("r1").await;
         assert_eq!(after_res, Err(RegistryError::NotFound));
     }
@@ -407,11 +395,9 @@ mod tests {
         let mut fut1 = Box::pin(reg1.cancel_and_join("r_conc"));
         let mut fut2 = Box::pin(reg2.cancel_and_join("r_conc"));
 
-        // Verify both futures have been polled to Pending and subscribed
         assert!(poll_once(fut1.as_mut()).is_pending());
         assert!(poll_once(fut2.as_mut()).is_pending());
 
-        // Now release task
         notify.notify_one();
 
         let res1 = fut1.await;
@@ -439,21 +425,16 @@ mod tests {
             })
             .unwrap();
 
-        // Start first waiter and verify it polls to Pending, then drop it
         {
             let mut fut1 = Box::pin(registry.cancel_and_join("r_two_waiters"));
             assert!(poll_once(fut1.as_mut()).is_pending());
-            // Drops fut1
         }
 
-        // Slot must still be active and protected
         assert!(registry.is_active("r_two_waiters"));
 
-        // Second waiter starts and polls to Pending
         let mut fut2 = Box::pin(registry.cancel_and_join("r_two_waiters"));
         assert!(poll_once(fut2.as_mut()).is_pending());
 
-        // Release the runner task
         let _ = tx_done.send(());
 
         let res2 = fut2.await;
@@ -488,11 +469,9 @@ mod tests {
             let _token = registry
                 .spawn_tracked(key.clone(), move |cancel| async move {
                     if i % 2 == 0 {
-                        // Cancel-first branch
                         cancel.cancelled().await;
                         Ok(TurnOutcome::Cancelled)
                     } else {
-                        // Complete-first branch
                         let _ = rx_start_signal.await;
                         witness.fetch_add(1, Ordering::SeqCst);
                         Ok(TurnOutcome::Completed)
@@ -507,7 +486,6 @@ mod tests {
                 let mut fut = Box::pin(registry.cancel_and_join(&key.run_id));
                 assert!(poll_once(fut.as_mut()).is_pending());
 
-                // Signal completion to runner
                 let _ = tx_start_signal.send(());
 
                 let outcome = fut.await.unwrap();
@@ -517,7 +495,6 @@ mod tests {
             assert!(!registry.is_active(&key.run_id));
         }
 
-        // Exactly 16 iterations performed task completion
         assert_eq!(complete_witness.load(Ordering::SeqCst), 16);
     }
 
@@ -540,26 +517,20 @@ mod tests {
 
             assert!(registry.is_active("r_late"));
 
-            // Poll legacy join to Pending before releasing runner
             let mut legacy_fut = Box::pin(registry.cancel_and_join("r_late"));
             assert!(poll_once(legacy_fut.as_mut()).is_pending());
 
-            // Release runner task
             let _ = tx_done.send(());
 
-            // Await legacy join to completion
             let outcome_reg = legacy_fut.await.unwrap();
             assert_eq!(outcome_reg, TurnOutcome::Completed);
 
-            // Verify slot is definitely removed
             assert!(!registry.is_active("r_late"));
             assert_eq!(
                 registry.cancel_and_join("r_late").await,
                 Err(RegistryError::NotFound)
             );
 
-            // Even though slot is completely removed and registry cancel_and_join gives NotFound,
-            // the owned ticket still yields the genuine JoinHandle TurnOutcome!
             let outcome_ticket = ticket.join().await.unwrap();
             assert_eq!(outcome_ticket, TurnOutcome::Completed);
         })
@@ -584,19 +555,15 @@ mod tests {
                 })
                 .unwrap();
 
-            // Get an independent observer for turn 1 before finishing
             let mut obs1 = registry.subscribe_observer("r_turns").expect("slot exists");
 
-            // Finish turn 1 runner
             let _ = tx1_done.send(());
             let res1 = wait_outcome(&mut obs1).await.unwrap();
             assert_eq!(res1, TurnOutcome::Completed);
 
-            // Verify slot is removed (slot count 0)
             assert_eq!(registry.slot_count(), 0);
             assert!(!registry.is_active("r_turns"));
 
-            // Now start turn 2 on same run, holding gate so it stays running
             let key2 = RunTurnKey {
                 run_id: "r_turns".into(),
                 turn_id: "t2".into(),
@@ -620,18 +587,14 @@ mod tests {
             let _ = rx2_started.await;
             assert!(registry.is_active("r_turns"));
 
-            // Old ticket 1 executes cancel_and_join
-            // Because turn 1 already finished, it consumes ticket1 and returns turn 1 outcome
             ticket1.cancellation_token().cancel();
             let old_outcome = ticket1.join().await.unwrap();
             assert_eq!(old_outcome, TurnOutcome::Completed);
 
-            // Verify turn 2 token was NOT cancelled and slot remains active
             let t2_cancel = cancel_token_clone.lock().unwrap().as_ref().unwrap().clone();
             assert!(!t2_cancel.is_cancelled());
             assert!(registry.is_active("r_turns"));
 
-            // Now release turn 2 and join cleanly
             let _ = tx2_done.send(());
             let outcome2 = ticket2.join().await.unwrap();
             assert_eq!(outcome2, TurnOutcome::Completed);
@@ -690,25 +653,19 @@ mod tests {
                 })
                 .unwrap();
 
-            // Wait until task starts
             let _ = rx_started.await;
 
-            // Subscribe an observer receiver to monitor supervisor outcome without calling cancel_and_join
             let mut obs_rx = registry
                 .subscribe_observer("r_drop_t")
                 .expect("slot exists");
 
-            // Dropping ticket must NOT cancel runner
             drop(ticket);
 
-            // Slot must still be active and cancel token not cancelled
             assert!(registry.is_active("r_drop_t"));
             let _ = tx_checked_not_cancelled.send(());
 
-            // Release runner task (do NOT call cancel_and_join, which would signal cancel)
             let _ = tx_done.send(());
 
-            // Await genuine completion via observer
             let outcome = wait_outcome(&mut obs_rx).await.unwrap();
             assert_eq!(outcome, TurnOutcome::Completed);
             assert!(!registry.is_active("r_drop_t"));
@@ -735,16 +692,13 @@ mod tests {
                 })
                 .unwrap();
 
-            // Start a cancel_and_join waiter from registry, poll it, then drop it
             {
                 let mut fut = Box::pin(registry.cancel_and_join("r_wait_drop"));
                 assert!(poll_once(fut.as_mut()).is_pending());
             }
 
-            // Runner is released
             let _ = tx_done.send(());
 
-            // Ticket can still join cleanly and witness the genuine completion
             let res = ticket.join().await.unwrap();
             assert_eq!(res, TurnOutcome::Completed);
             assert!(!registry.is_active("r_wait_drop"));
@@ -798,7 +752,6 @@ mod tests {
                     })
                     .unwrap();
 
-                // Duplicate spawn with another turn_id on same run MUST be rejected
                 let dup_key = RunTurnKey {
                     run_id: format!("run_cycle_{}", i),
                     turn_id: format!("turn_dup_{}", i),
@@ -812,27 +765,21 @@ mod tests {
                     Ok(_) => panic!("expected AlreadyRunning, got Ok"),
                 }
 
-                // Set up test observer before dropping ticket
                 let mut obs = registry
                     .subscribe_observer(&key.run_id)
                     .expect("slot exists");
 
-                // Drop ticket (must not cancel or abort runner or supervisor)
                 drop(ticket);
 
-                // Release task and wait for supervisor result via observer
                 let _ = tx_release.send(());
                 let outcome = wait_outcome(&mut obs).await.unwrap();
                 assert_eq!(outcome, TurnOutcome::Completed);
 
-                // Drop observer
                 drop(obs);
 
-                // Stable barrier: slot count must be 0 after join and supervisor cleanup
                 assert_eq!(registry.slot_count(), 0);
             }
 
-            // Verify after 64 cycles slots map has not grown
             assert_eq!(registry.slot_count(), 0);
         })
         .await
@@ -856,31 +803,24 @@ mod tests {
                 })
                 .unwrap();
 
-            // Subscribe observer to monitor when sender is dropped/closed
             let mut obs = registry
                 .subscribe_observer(&key.run_id)
                 .expect("slot exists");
 
-            // Release task and join via ticket
             let _ = tx_release.send(());
             let outcome = ticket.join().await.unwrap();
             assert_eq!(outcome, TurnOutcome::Completed);
 
-            // Slot is dropped from registry
             assert_eq!(registry.slot_count(), 0);
 
-            // Observer receives terminal outcome
             let res = wait_outcome(&mut obs).await.unwrap();
             assert_eq!(res, TurnOutcome::Completed);
 
-            // Explicitly mark terminal update as seen so next changed() observes sender closure
             obs.borrow_and_update();
 
-            // Verify supervisor dropped sender and channel is closed
             assert!(obs.changed().await.is_err());
             drop(obs);
 
-            // Now test dropping ticket before task completion:
             let key2 = RunTurnKey {
                 run_id: "r_watch_recycle2".into(),
                 turn_id: "t_watch_recycle2".into(),
@@ -897,27 +837,20 @@ mod tests {
                 .subscribe_observer(&key2.run_id)
                 .expect("slot exists");
 
-            // Drop ticket
             drop(ticket2);
 
-            // Release runner task
             let _ = tx_release2.send(());
 
-            // Observer receives terminal outcome
             let res2 = wait_outcome(&mut obs2).await.unwrap();
             assert_eq!(res2, TurnOutcome::Completed);
 
-            // Slot is removed
             assert_eq!(registry.slot_count(), 0);
 
-            // Explicitly mark terminal update as seen so next changed() observes sender closure
             obs2.borrow_and_update();
 
-            // Sender was dropped by supervisor, so changed() returns Err
             assert!(obs2.changed().await.is_err());
             drop(obs2);
 
-            // Both observers and slots dropped, resources fully reclaimed
             assert_eq!(registry.slot_count(), 0);
         })
         .await

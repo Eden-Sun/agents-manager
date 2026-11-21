@@ -4,13 +4,10 @@
 mod tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::unsent_draft::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::lifecycle::s6_ports::StuckTurnContext;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Mutex, OnceLock};
-    // #1897：送達證不出來、字還留在框裡的回合，idle 收尾之前先補按一次 Enter；沒用才收成 failed＋ops_alert。
-    // 全部走真的 `stuck_turns::sweep_at` 與 mock herdr 的 codex pane（`pane.read` 畫出框、`Enter` 會把框裡的字送進對話）。
 
     use crate::lifecycle::unsent_draft::*;
     use crate::lifecycle::stuck_turns::{observe_at, sweep_at};
@@ -100,7 +97,6 @@ mod tests {
         assert!(sweep(&f, t0, 6).await.is_empty());
         assert_eq!(enters(&f), 1);
 
-        // 補按之後閒置重新計時：下一輪看到 idle 才起算，再過門檻才輪到它。
         assert!(sweep(&f, t0, 7).await.is_empty(), "閒置剛重新起算，不收");
         assert_eq!(sweep(&f, t0, 13).await, vec![f.turn_id.clone()]);
         let t = turn(&f).await;
@@ -155,7 +151,6 @@ mod tests {
         let key = format!("undelivered_draft_suspect:{}", f.turn_id);
         assert_eq!(alerts(&f).await, vec![key.clone()]);
 
-        // 同一筆再走一次判斷（例如收尾失敗下一輪重來）：alert 不重複。
         let run = db::run(f.env.app.db(), &f.run_id).await.unwrap().unwrap();
         let mut t = turn(&f).await;
         t.status = "in_flight".into();
@@ -274,7 +269,6 @@ mod tests {
     /// 告警只有 bot、pane、輪數、時間，不含畫面文字。
     #[tokio::test]
     async fn an_unreadable_composer_waits_for_its_rounds_then_alerts_once() {
-        // 框的 `›` 離底部超過 400 列（codex 草稿的讀取上限）：讀不到，不是一段長草稿。
         let filler: Vec<String> = (1..=450).map(|i| format!("filler {i}")).collect();
         let refs: Vec<&str> = filler.iter().map(String::as_str).collect();
         let f = fixture(&refs, false).await;
@@ -298,7 +292,6 @@ mod tests {
         assert!(payload.contains(&f.pane), "告警帶 pane");
         assert!(!payload.contains("filler"), "告警不含畫面內容");
 
-        // 同一個回合再遇到讀不到：不重複告警。
         for _ in 0..UNREADABLE_ROUNDS {
             let _ = before_idle_close(&app, &run, &t).await.unwrap();
         }

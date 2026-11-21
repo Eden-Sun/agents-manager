@@ -118,11 +118,8 @@ pub struct OpGuard {
 
 impl Drop for OpGuard {
     fn drop(&mut self) {
-        // 1) 在放鎖的那一刻量：hold 要含到真的放掉為止。
         let held = self.held_since.elapsed();
-        // 2) 先把全域鎖放掉。
         drop(self.inner.take());
-        // 3) 記帳（會拿 timing 的 mutex）已經在鎖外面了。
         timing::note_lock_hold(self.at, held);
     }
 }
@@ -151,14 +148,9 @@ const BOOTSTRAP_PROMPT: &str = r#"這是 AGM 啟動握手，不是新的工作�
 /// 啟動本身失敗時意圖照樣留著：交給看門狗的有界重試，健康那格也會因為「要它跑卻停著」變成 degraded
 /// （999480e 對協調者的決定，這裡跟它一致）。
 pub async fn start_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + TurnOps + QuotaOps + JudgeOps + CandidateSwitch + ControllerRuntime + Clone + 'static)) -> Result<(), LcError> {
-    // Choose the configured fallback before launching the CLI, so a low Fable bucket starts
-    // directly on Opus instead of briefly opening the wrong session.
-    // 大 future 包成 Box（#1461，理由見 runners::supervisor::api::post_start）。
     if let Err(e) = Box::pin(controller::apply_quota_policy(app)).await {
         tracing::warn!(error = ?e, "quota policy during start failed");
     }
-    // `manager_bot` 建好那一列（`get_or_init`）之後才寫得進去，而且沒設定好就該回 not_configured，
-    // 不是留下一個沒有 bot 的「要它跑」。
     if manager_bot(app.db()).await?.is_none() {
         return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
     }
@@ -199,7 +191,6 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
         None => {
             Box::pin(app.start_bot(&bot.id)).await?;
         }
-        // 上一個 run 還在收尾：這時起不了新的（`runs_one_active`），當成「已經在跑」往下走只會回一個假的成功。
         Some(run) if run.state == "stopping" => {
             return Err(LcError::conflict(
                 "run_stopping",
@@ -208,13 +199,6 @@ pub async fn start_manager(app: &(impl crate::capabilities::Db + crate::capabili
         }
         Some(_) => {}
     }
-    // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
-    // idempotent handshake so the user can immediately see how to use AGM; the stable request
-    // id prevents a restart from creating another greeting turn.
-    // The handshake is the daemon's, not the user's: marked as such so AGM's own conversation
-    // keeps showing which lines a person actually typed.
-    // 控制面自己的送入：維護窗口不擋它，否則「把 AGM 重新起來」這件事會被自己開的窗口鎖在門外
-    // （issue #86）。
     if let Err(e) = Box::pin(app
         .prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)))
         .await
@@ -272,13 +256,10 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
     let status = if !configured {
         "not_configured".to_string()
     } else if !sup.status.is_empty() {
-        // A sticky `waiting_quota` / `failed` outranks the run: the process may well be up
-        // and simply unable to answer.
         sup.status.clone()
     } else {
         manager_liveness(app.db(), bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
     };
-    // 同 handoff：未結案的不能因為掉出最新 50 筆就從這個畫面消失（issue #515）。
     let assignments = store::list_assignments_with_open(app.db(), 50).await.map_err(up)?;
     Ok(json!({
         "configured": configured,
@@ -295,12 +276,9 @@ pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor
         "quota_reset_at": sup.quota_reset_at,
         "pending_count": store::pending_count(app.db()).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
-        // 雙角色（SPEC §18.15）。上面那些欄位一直是巡檢的，舊的呼叫端照讀不受影響。
         "role": roles::Role::Patrol.as_str(),
         "stats": roles::get(app.db(), roles::Role::Patrol).await.map_err(up)?.stats_json(),
         "responder": responder::status_json(app).await?,
-        // 上次成功上線：現在跑的這顆 binary 的 commit 與它起來的時間。前端用它排掉上線以前的
-        // 舊申請，AGM 用它判斷「origin/main 動了」跟「已經上線了」是不是同一件事。
         "last_deploy": crate::build_info::last_deploy(),
     }))
 }
@@ -322,11 +300,8 @@ pub async fn assign(
     ownership: &[String],
     follow_up_of: Option<&str>,
     expects_review: bool,
-    // 回報給哪個 AGM 角色驗收；`None` = 協調者（roles.rs 的預設）。
     review_role: Option<roles::Role>,
-    // 呼叫端自己是哪個角色（bot token 驗過的）。`None` = UI／腳本。
     actor: Option<roles::Role>,
-    // 角色之間的交接明講是回覆（`--ack`／`--reply-to`）；只對交接有意義。
     reply: bot_requests::ReplyMark<'_>,
 ) -> Result<Value, LcError> {
     if client_request_id.trim().is_empty() {
@@ -335,8 +310,6 @@ pub async fn assign(
     if text.trim().is_empty() {
         return Err(LcError::Bad("text must not be empty".into()));
     }
-    // 派送時超過這個長度的 prompt 一定送不出去（`prompt_too_long_to_prove`，不會重試）：入口就擋，不要收下一件註定失敗的工作
-    // 讓呼叫端拿到 200（#335）。跟 bot prompt API 同一個上限、同樣回 422。
     let chars = text.chars().count();
     if chars > crate::lifecycle::MAX_PROVABLE_CHARS {
         return Err(LcError::Unprocessable(json!({
@@ -345,7 +318,6 @@ pub async fn assign(
     }
     let _g = lock().await;
 
-    // A retry of the same request is the same assignment, never a second one.
     if let Some(a) = store::assignment_by_crid(app.db(), client_request_id).await.map_err(up)? {
         if a.target_bot_id != target_bot_id {
             return Err(LcError::conflict(
@@ -353,15 +325,12 @@ pub async fn assign(
                 json!({"assignment_id": a.id, "target_bot_id": a.target_bot_id}),
             ));
         }
-        // Same id, different words: the model would read a 200 here as "my new instruction
-        // went out", and it did not. Only a byte-identical retry is idempotent.
         if a.text != text {
             return Err(LcError::conflict(
                 "client_request_id already used with different text",
                 json!({"assignment_id": a.id, "reason": "text_mismatch"}),
             ));
         }
-        // 同 id、同 text、同 bot 但會改變行為的欄位不同（#334）：回原筆 200 等於把新的意圖吞掉（本來要交辦卻是通知）。
         let mut have_own = a.ownership();
         let mut want_own = ownership.to_vec();
         have_own.sort();
@@ -371,7 +340,6 @@ pub async fn assign(
         } else if have_own != want_own {
             Some("ownership")
         } else if a.review_role.as_deref().unwrap_or("responder") != review_role.map_or("responder", roles::Role::as_str) {
-            // 沒寫＝協調者（跟 to_json 的預設同一個），明講 responder 的重送不算不同。
             Some("review_role")
         } else {
             None
@@ -389,8 +357,6 @@ pub async fn assign(
     let manager_id = sup.bot_id.clone().ok_or_else(|| {
         LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"}))
     })?;
-    // 目標是另一個 AGM 角色：這不是交辦，是**交接**。走跟 bot 申請同一條佇列（批次、節流、
-    // 「回覆不再叫醒對方」的規則只有一份），不直接打進對方的 pane（SPEC §18.15）。
     if let Some(target_role) = roles::role_of_bot(app.db(), target_bot_id).await.map_err(up)? {
         if actor == Some(target_role) || target_bot_id == manager_id && actor.is_none() && target_role == roles::Role::Patrol {
             return Err(LcError::Bad("the supervisor cannot assign work to itself".into()));
@@ -419,7 +385,6 @@ pub async fn assign(
         out["expects_review"] = json!(expects_review);
         return Ok(out);
     }
-    // 「這是回覆」只有交接走的佇列看得懂；對一般 bot 下的交辦帶它，呼叫端會以為對方不會被打擾。
     if reply.is_set() {
         return Err(LcError::Bad("ack / reply_to only apply to a handover between AGM roles".into()));
     }
@@ -429,19 +394,13 @@ pub async fn assign(
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
 
-    // The user's own words behind this assignment, with a stable id to dedupe on. A text hash
-    // would not be one — two identical asks are two asks.
     let (source, source_key, request_text) = source_of(app.db(), &manager_id, source_turn_id, text, actor).await?;
     let request_id = store::upsert_request(app.db(), source, source_key.as_deref(), &request_text)
         .await
         .map_err(up)?;
 
-    // Who else is already holding these files. Reported, never enforced: the daemon cannot
-    // know that two modules are really independent, so this goes to AGM to arbitrate rather
-    // than refusing work on a string match (SPEC §18.4).
     let conflicts = ownership_conflicts(app.db(), ownership, None).await?;
 
-    // 驗收角色與交辦一同寫入。
     let a = store::insert_assignment_linked(
         app.db(),
         Some(&request_id),
@@ -458,9 +417,7 @@ pub async fn assign(
     if let Some(parent) = follow_up_of {
         store::link_followup(app.db(), parent, &a.id).await.map_err(up)?;
     }
-    // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
-    // #557：路徑比對之後才問撞題。只 spawn，不等 Jev（#480）。答案不併進 ownership_conflicts，也不改這筆交辦。
     app.judge_schedule_assignment(&a.id).await;
     let a = store::assignment(app.db(), &a.id).await.map_err(up)?.unwrap_or(a);
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
@@ -517,7 +474,6 @@ fn overlaps(a: &str, b: &str) -> bool {
 /// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
 /// and not be deleted.
 pub async fn check_assignable(db: &SqlitePool, target_bot_id: &str) -> Result<(), LcError> {
-    // 角色 bot 不是工人：要跟另一個角色說話走 `assign` 的交接路徑（佇列），不是 followup。
     if roles::role_of_bot(db, target_bot_id).await.map_err(up)?.is_some() {
         return Err(LcError::Bad("an AGM role cannot be the target of an assignment; hand over through the role queue".into()));
     }
@@ -544,16 +500,12 @@ async fn source_of(
     text: &str,
     actor: Option<roles::Role>,
 ) -> Result<(&'static str, Option<String>, String), LcError> {
-    // 來源綁**呼叫者自己**（bot token 驗過的角色）。兩個角色同時在回合中時，若照固定順序先撿巡檢
-    // 的回合，協調者派的工就會被記成「使用者對巡檢說的另一句話」——授權與稽核從此對不上人。
     let actor_bot = match actor {
         Some(r) => roles::bot_for(db, r).await.map_err(up)?,
         None => None,
     };
     let conv_of = |id: String| async move { crate::db::conversation_id(db, &id).await.map_err(up) };
     let turn_id = match source_turn_id.map(str::trim).filter(|s| !s.is_empty()) {
-        // 明講了是哪個回合：那是呼叫端拿得出來的證據。驗過的角色只能指自己的回合；沒驗過的
-        // 呼叫端（UI、腳本）仍只能指兩個角色其中之一的回合。
         Some(t) => {
             let mut convs = Vec::new();
             match actor_bot.clone() {
@@ -580,8 +532,6 @@ async fn source_of(
             }
             Some(t.to_string())
         }
-        // 沒講：只認呼叫者自己現在跑的那一回合。認不出呼叫者就**不猜**別人的回合——
-        // 記成 `assignment_text_fallback`（交辦文字就是交辦文字），不要替某個人編一句話。
         None => match actor_bot {
             Some(id) => match crate::db::active_run(db, &id).await.map_err(up)? {
                 Some(r) => crate::db::in_flight_turn(db, &r.id).await.map_err(up)?.map(|t| t.id),
@@ -602,8 +552,6 @@ async fn source_of(
     .map_err(up)?;
     match user_text.filter(|s| !s.trim().is_empty()) {
         Some(t) => Ok(("manager_turn", Some(turn_id), t)),
-        // The turn is real, so it is still the right dedupe key; we just do not have the
-        // user's wording, and the record says so.
         None => Ok(("assignment_text_fallback", Some(turn_id), text.to_string())),
     }
 }
@@ -625,12 +573,10 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
             connected.insert(h.clone());
         }
     }
-    // §6.11：這一輪被收起來省 RAM 的是哪幾顆。總管看得到才不會把「睡著」當成「掛了」。
     let asleep = idle_sleep::all_asleep(app).await;
     let mut out = Vec::new();
     for b in &bots {
         let run = crate::db::active_run(app.db(), &b.id).await.map_err(up)?;
-        // Work already waiting on this bot: a bot with a queue is available, but not free.
         let queued: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM turns WHERE conversation_id=(SELECT id FROM conversations WHERE bot_id=?)
                AND status='queued'",
@@ -655,21 +601,14 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
             "cwd": b.cwd,
             "host": hosts.get(&b.project_id).cloned(),
             "host_connected": hosts.get(&b.project_id).map(|h| connected.contains(h)),
-            // 側欄上那顆燈號，跟 `GET /api/state` 同一個函式算的。以前這裡沒有它，`bin/agm`
-            // 只好自己從 `host_connected` + `run` 推——而 `lamp` 吃的是 `bot_connected`
-            // （bot → host → **herdr session**），同一台主機上 session 掉了的那顆會分岔（issue #514）。
             "lamp": app.bot_lamp(&b.id, run.as_ref()).await,
             "queued_turns": queued,
-            // 停著但可以叫醒：派工照送就好，`lifecycle::prompt` 會先把它 `--resume` 回來。
             "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
             "run": run.as_ref().map(|r| json!({
                 "id": r.id,
                 "state": r.state,
-                // The lamp the sidebar shows: idle / working / blocked / unknown.
                 "agent_status": r.agent_status,
                 "agent_title": r.agent_title,
-                // Whether the original conversation can be resumed at all, and on what the
-                // CLI is *actually* running — which is not always what the bot is configured with.
                 "native_session_id": r.native_session_id,
                 "adopted": r.adopted,
                 "terminal_id": r.terminal_id,
@@ -688,8 +627,6 @@ pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabi
             "id": p.id, "label": p.label, "path": p.path, "host": p.host,
         })).collect::<Vec<_>>(),
         "bots": out,
-        // Everything still owed, `awaiting_review` included: the point of the acceptance state
-        // is that a finished turn stays in front of the manager until it decides.
         "open_assignments": store::unsettled_assignments(app.db()).await.map_err(up)?
             .iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
         "pending_inbox": store::pending_inbox(app.db()).await.map_err(up)?

@@ -65,7 +65,6 @@ pub fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev:
         target_rev: target_rev.to_string(),
         single_field,
     });
-    // A later PATCH supersedes the desired config but must preserve the original loaded baseline.
     e.target_rev = target_rev.to_string();
     for f in fields {
         let f: &'static str = match *f {
@@ -171,8 +170,6 @@ pub async fn apply_deferred_once(
     match &outcome {
         super::LiveApplyOutcome::Applied { .. } => finish_apply(bot_id),
         super::LiveApplyOutcome::Failed(why) if is_busy_reason(why) => {
-            // 剛閒下來又被新回合搶走：再排一次。
-            // 同一組欄位放回去（`take` 已清空）；套用期間若又排進新的，`requeue` 保留新的目標版本與較早的 baseline。
             requeue(bot_id, queued);
         }
         super::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
@@ -186,8 +183,6 @@ pub async fn apply_deferred_once(
     }
     app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
     if !matches!(&outcome, super::LiveApplyOutcome::Failed(why) if is_busy_reason(why)) && is_deferred(bot_id) {
-        // A PATCH can queue a follow-up while this item is in flight. If this apply settled, do
-        // not require another agent-status edge to make progress while the bot remains idle.
         schedule_deferred_live(app, bot_id);
     }
     Some(outcome)
@@ -278,7 +273,7 @@ mod tests {
         );
         assert!(defer_live(id, &["model"], "base", "t3", true), "same-field updates still defer");
 
-        requeue(id, queued); // old apply found the bot busy and restored the item
+        requeue(id, queued);
         let got = take(id).unwrap();
         assert_eq!(got.fields, vec!["model"]);
         assert_eq!(got.baseline_rev, "base");
@@ -292,9 +287,9 @@ mod tests {
         let _serial = pending_test_lock();
         let id = "test-deferred-requeue";
         assert!(defer_live(id, &["fast"], "b1", "t1", false));
-        let queued = take_for_apply(id).unwrap(); // 套用開始
-        assert!(defer_live(id, &["effort"], "b2", "t2", false)); // 套用期間又 PATCH
-        requeue(id, queued); // 忙 → 放回
+        let queued = take_for_apply(id).unwrap();
+        assert!(defer_live(id, &["effort"], "b2", "t2", false));
+        requeue(id, queued);
         let got = take(id).unwrap();
         assert_eq!(got.target_rev, "t2");
         assert_eq!(got.baseline_rev, "b1");

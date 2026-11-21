@@ -28,10 +28,8 @@
         assert!(is_sent(&u[0], &u[0]), "原樣也算");
         assert!(!is_sent(&u[0], "請只回覆 OK 兩個字母"), "只是其中一段不算");
         assert!(!is_sent(&u[0], "請只回覆 OK 兩個字母，不要多說其他話"), "別則");
-        // 沒被 CLI 改寫過的照舊逐字：頭尾空白也是內容。
         assert!(is_sent(&u[1], "請只回覆 OK 兩個字母不要多說其他話"));
         assert!(!is_sent(&u[1], "請只回覆 OK 兩個字母不要多說其他話 "));
-        // 包起來的：CLI 包之前 trim 過。
         assert!(is_sent(&u[2], "請只回覆 OK 兩個字母，不要多說其他話\n"));
     }
 
@@ -54,6 +52,5 @@
         ] {
             assert!(matches!(original(&bad), Cow::Borrowed(_)), "{bad:?}");
         }
-        // 非 ASCII 緊接在 `id="` 後面也不會切在字元中間。
         assert!(matches!(original("<pasted_content id=\"中文字\">"), Cow::Borrowed(_)));
     }

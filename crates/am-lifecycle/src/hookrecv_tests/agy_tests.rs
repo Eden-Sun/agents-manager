@@ -23,8 +23,6 @@ fn a_normal_stop_is_a_turn_with_the_reply_the_hook_process_read_and_no_dedup_key
         }
         other => panic!("expected TurnComplete, got {other:?}"),
     }
-    // issue #1950: 實機 stdin 原文 fixture（agy 1.4.7 Stop hook）：
-    // 兩者皆有時 lastUserMessage 優先；缺席或空白時退回 lastUserInput；型別錯（非字串）時忽略
     let stop_raw_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e","conversationId":"29ce4fac-aba5-4325-a11c-b5d664ff7a5e","error":"","executionNum":0,"fullyIdle":true,"lastUserInput":"test_stop_input","modelName":"gemini-3.8-flash-low","terminationReason":"NO_TOOL_CALL","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/29ce4fac-aba5-4325-a11c-b5d664ff7a5e/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
     let mut from_stop_fixture: Value = serde_json::from_str(stop_raw_fixture).unwrap();
     from_stop_fixture["hookEventName"] = json!("Stop");
@@ -54,7 +52,6 @@ fn a_normal_stop_is_a_turn_with_the_reply_the_hook_process_read_and_no_dedup_key
         HookKind::TurnComplete { user, .. } => assert_eq!(user, None, "只有 lastUserInput 但型別錯時忽略"),
         other => panic!("expected TurnComplete, got {other:?}"),
     }
-    // terminationReason 的值域不可假設：不認得的值照樣是正常結束。
     assert!(matches!(classify("agy", &stop(json!({"terminationReason": "model_stop"}))), HookKind::TurnComplete { .. }));
     assert!(matches!(classify("agy", &stop(json!({"terminationReason": "SOMETHING_NEW"}))), HookKind::TurnComplete { .. }));
 }
@@ -90,7 +87,6 @@ fn session_start_and_the_first_pre_invocation_both_give_the_identity_and_state_i
         }
     }
     assert!(matches!(classify("agy", &json!({"hookEventName": "state", "conversation_id": "c-9"})), HookKind::StatusLine));
-    // 沒有事件名（手動跑、舊 dispatcher）：不猜。
     assert!(matches!(classify("agy", &json!({"conversationId": "c-9"})), HookKind::Ignore(_)));
     assert!(matches!(classify("agy", &json!({"hookEventName": "PostInvocation"})), HookKind::Ignore(_)));
 }
@@ -156,7 +152,6 @@ async fn a_stop_completes_the_in_flight_turn_with_the_transcript_reply() {
     let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
     assert_eq!(t.status, "completed");
     assert_eq!(replies(&app, &turn_id).await, [("assistant".to_string(), "OK".to_string())]);
-    // 同一則重送（spool 重播）：回合已收，不會長出第二個回覆。
     process(&app, &body(&bot_id, stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"})))).await.unwrap();
     assert_eq!(replies(&app, &turn_id).await.len(), 1);
 }
@@ -198,8 +193,6 @@ async fn a_resumed_agy_conversation_is_verified_or_reported_as_a_mismatch() {
 
 #[tokio::test]
 async fn an_error_stop_closes_the_turn_as_failed_with_the_agy_error_in_the_note() {
-    // "API key not valid" 被歸為授權失敗，會走 `agy_auth::on_turn_auth_failure`：寫行程全域的 agy 登入冷卻（key 是本機）。
-    // 跟 `quota_agy` 的登入／登出測試共用同一把鎖，不然冷卻會在別條測試中途冒出來（login watcher 測試因此偶發紅）。
     let _agy_globals = crate::quota_agy::token_test_lock().await;
     let env = tt::env().await;
     let app = env.app.clone();
@@ -225,7 +218,6 @@ async fn the_first_pre_invocation_records_the_conversation_and_a_transcript_unde
     let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
     assert_eq!(r.native_session_id.as_deref(), Some(conv.as_str()));
     assert_eq!(r.transcript_path.as_deref(), Some(tp.to_str().unwrap()));
-    // statusLine 也補對話 id（沒有對話之前什麼都不記）。
     let (bot2, run2, _t2) = agy_turn(&app, &env.project_id).await;
     process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": "", "transcript_path": "/placeholder/transcript_full.jsonl"}))).await.unwrap();
     let r2 = db::run(&app.db, &run2).await.unwrap().unwrap();
@@ -270,7 +262,6 @@ async fn statusline_official_payload_takes_precedence_over_transcript_fallback_a
     sqlx::query("UPDATE bots SET model = 'gemini-3.8-flash-medium' WHERE id = ?").bind(&bot_id).execute(&app.db).await.unwrap();
     sqlx::query("UPDATE runs SET runtime_model = 'gemini-3.8-flash-medium', agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
 
-    // 1. statusLine 送來官方欄位（1M 視窗、cache_read_input_tokens、model=gemini-4-argon+high、tool_confirmation_pending=true、task_count=2、quota）
     let state_payload = json!({
         "hookEventName": "state",
         "conversation_id": "conv-sl-1",
@@ -323,14 +314,12 @@ async fn statusline_official_payload_takes_precedence_over_transcript_fallback_a
     assert_eq!(st["quota"]["gemini"]["remaining_fraction"], 0.75);
     assert!(!app.quotas.lock().await.contains_key("agy"), "quota 只記在 status_json，不取代 /usage 探測");
 
-    // 2. 隨後 Stop hook 帶舊的 transcript lastInputTokens (11824) 來：已有 statusLine，不能被 transcript 估算與 400K 設定覆蓋
     process(&app, &body(&bot_id, stop(json!({"conversationId": "conv-sl-1", "lastAssistantMessage": "DONE", "lastUserMessage": "say OK", "lastInputTokens": 11824})))).await.unwrap();
     let r_after_stop = db::run(&app.db, &run_id).await.unwrap().unwrap();
     let st_after: Value = serde_json::from_str(r_after_stop.status_json.as_deref().unwrap()).unwrap();
     assert_eq!(st_after["context_window"]["context_window_size"], 1_048_576, "Stop hook 不覆蓋 statusLine 的視窗");
     assert_eq!(st_after["context_window"]["total_input_tokens"], 150_000, "Stop hook 不覆蓋 statusLine 的 token 數");
 
-    // 3. 使用者核准工具後 statusLine 回報 tool_confirmation_pending:false、agent_state:idle、task_count:0 → 自動解除 blocked
     let mut cleared_payload = state_payload.clone();
     cleared_payload["tool_confirmation_pending"] = json!(false);
     cleared_payload["agent_state"] = json!("idle");
@@ -341,7 +330,6 @@ async fn statusline_official_payload_takes_precedence_over_transcript_fallback_a
     assert_eq!(r_cleared.agent_status, "idle", "待確認解除後還原成補標前的 idle");
     assert!(crate::blocked_reason::of(&run_id).is_none());
 
-    // 4. 遠端（m4p）路徑：statusLine 由遠端 agy-hook.sh state → hook.sh 寫入 hook-spool.d → drain_remote_locked → hook_inbox worker 處理
     let host = "m4p";
     let conn = app
         .hosts

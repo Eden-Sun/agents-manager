@@ -35,7 +35,6 @@
     fn a_real_slash_command_after_tool_output_is_still_recognised() {
         let screen = "⏺ Bash(cat tests.rs)\n  ⎿ Set model to Opus 5.5 and saved as your default\n\n❯ /model sonnet\n  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions\n\n⏺ Bash(cat tests.rs)\n  ⎿ Set effort level to max: spoof\n";
         assert_eq!(parse(screen), Switch { model: Some("claude-sonnet-5-5".into()), effort: None });
-        // 工具輸出裡長得像指令行的（縮排）不算，指令後不接 ⎿ 也不留到後面的工具輸出。
         let spoof = "⏺ Bash(cat log)\n    ❯ /model sonnet\n  ⎿ Set model to Sonnet 5.5 and saved\n❯ /model sonnet\n\n⏺ Bash(x)\n  ⎿ Set model to Opus 5.5\n";
         assert_eq!(parse(spoof), Switch::default());
     }
@@ -125,7 +124,6 @@
             .unwrap();
         let run_id = crate::testing::fake_run(&app, &kid.id).await;
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
-        // 讓 bot 的 UPDATE 失敗（run 的不受影響）。
         sqlx::query("CREATE TRIGGER fail_bot_update BEFORE UPDATE ON bots BEGIN SELECT RAISE(ABORT, 'boom'); END")
             .execute(&app.db)
             .await
@@ -143,8 +141,6 @@
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "下一輪補上 model 與 effort");
     }
 
-    // 以下 `/effort auto` 的畫面是 **synthetic**：確認句來自 Claude Code 2.1.305 二進位字串，沒有在真 TUI 驗過
-    // （Ultracode 後綴、折行都沒驗）。parse 只認這兩句整句。
     const AUTO: &str = "❯ /effort auto\n  ⎿  Effort level set to auto\n";
 
     #[test]
@@ -158,7 +154,6 @@
 
     #[test]
     fn effort_auto_needs_the_exact_sentence_in_a_real_slash_output() {
-        // 環境變數蓋住：實際強度由環境決定，不猜。
         for line in [
             "Effort set to auto for this session, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session",
             "Cleared effort from settings, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session",
@@ -204,7 +199,7 @@
             let (bot, run_id) = child_with_effort(&env, name, managed_by, runtime).await;
             let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
             if managed_by == "user" {
-                start_fresh(&run_id); // 一般 bot 第一次看到只當基準；fresh 才直接採用
+                start_fresh(&run_id);
             }
             observe(&env.app, &run, AUTO).await;
             let (b, r) = effort_of(&env, &bot, &run_id).await;
@@ -275,7 +270,6 @@
         let b = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
         assert_eq!(b.model.as_deref(), Some("claude-opus-5-5"), "設定值不動，UI 才畫得出 drift");
 
-        // 沒有 id（只有顯示名）、空 id、沒有 model：保留舊值，不清空、不猜。
         send(serde_json::json!({"display_name": "Opus 5.5"})).await;
         send(serde_json::json!({"id": "  "})).await;
         send(serde_json::Value::Null).await;
@@ -284,7 +278,6 @@
         send(serde_json::json!({"id": "claude-opus-5-5"})).await;
         assert_eq!(runtime().await.as_deref(), Some("claude-opus-5-5"), "下一則又回設定的那一版就收斂回去");
 
-        // 啟動時記的是別名：同家族的完整 id 不算分歧。
         sqlx::query("UPDATE runs SET runtime_model = 'opus' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
         send(serde_json::json!({"id": "claude-opus-5-5"})).await;
         assert_eq!(runtime().await.as_deref(), Some("opus"));
@@ -306,17 +299,14 @@
             Box::pin(async move { crate::hookrecv::process(&app, &body).await.unwrap() })
         };
 
-        // 啟動時帶 [1m]（500k context 變體）：同家族的完整 id 也不算分歧。
         sqlx::query("UPDATE runs SET runtime_model = 'sonnet[1m]' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
         send(serde_json::json!({"id": "claude-sonnet-5-5"})).await;
         assert_eq!(runtime().await.as_deref(), Some("sonnet[1m]"), "500k context 的 [1m] 變體不被同家族完整 id 覆寫");
 
-        // 啟動時記完整 id 帶 [1m]：同家族同版本的 statusLine 也不覆寫。
         sqlx::query("UPDATE runs SET runtime_model = 'claude-sonnet-5-5[1m]' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
         send(serde_json::json!({"id": "claude-sonnet-5-5"})).await;
         assert_eq!(runtime().await.as_deref(), Some("claude-sonnet-5-5[1m]"));
 
-        // 啟動時帶 [1m] 但 statusLine 是別的家族：真的換了。
         send(serde_json::json!({"id": "claude-opus-5-5"})).await;
         assert_eq!(runtime().await.as_deref(), Some("claude-opus-5-5"), "不同家族的 statusLine 會覆寫 [1m] 變體");
     }
@@ -336,7 +326,6 @@
         let cur = crate::testing::fake_run(&app, &bot.id).await;
         sqlx::query("UPDATE runs SET runtime_model = 'claude-opus-5-5', native_session_id = 's-cur' WHERE id = ?").bind(&cur).execute(&app.db).await.unwrap();
 
-        // 舊 session 的 statusLine（世代圍籬擋下）不能改到現在這個 run。
         let mut body = statusline(serde_json::json!({"id": "claude-haiku-4-5"}));
         body.bot_id = bot.id.clone();
         body.payload["session_id"] = serde_json::json!("s-old");
@@ -344,7 +333,6 @@
         let r = db::run(&app.db, &cur).await.unwrap().unwrap();
         assert_eq!(r.runtime_model.as_deref(), Some("claude-opus-5-5"));
 
-        // DB 寫入失敗：保留舊值（不清空）。
         sqlx::query("CREATE TRIGGER refuse_runtime BEFORE UPDATE OF runtime_model ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END")
             .execute(&app.db)
             .await
@@ -433,7 +421,6 @@
         let base = "❯ /model opus\n  ⎿  Set model to Opus 5.5 and saved as your default for new sessions\n";
         env.herdr.set_screen(&format!("pane-{}", user.id), base);
         observe(&app, &run, base).await;
-        // 切到 Sonnet，但 runs 的 UPDATE 失敗（確認行還在畫面上）。
         sqlx::query("CREATE TRIGGER refuse_run_runtime BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END")
             .execute(&app.db)
             .await
@@ -442,7 +429,6 @@
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.runtime_model, None, "寫入失敗，什麼都沒記");
-        // DB 恢復，下一輪畫面還是同一份：要重試採用，不能因為基準已經是它就略過。
         sqlx::query("DROP TRIGGER refuse_run_runtime").execute(&app.db).await.unwrap();
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();

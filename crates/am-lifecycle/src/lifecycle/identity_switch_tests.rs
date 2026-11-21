@@ -85,7 +85,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     sqlx::query("UPDATE bots SET identity='cc-a' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
 
-    // ---- 1. 身份 A：起來、回報 session、一回合在飛時撞額度
     let run_a = start_bot(&app, &bot.id).await.unwrap();
     assert_eq!(last_env(&e)["CLAUDE_CONFIG_DIR"], json!(dir_a.to_string_lossy()));
     let transcript_a = dir_a.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
@@ -119,7 +118,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     };
     assert_eq!(status(quota_turn.clone()).await, "failed", "撞額度的回合收成失敗，不是掛著等重送");
 
-    // ---- 2. 換身份 B、要求接回原對話
     sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
@@ -135,7 +133,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
         sqlx::query_as("SELECT resume_session_id, resume_outcome FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
     assert_eq!((resume_sid.as_deref(), outcome), (Some(S), None), "要接的 session 記下來了，還沒有結論");
 
-    // B 的 pane 是活的、能打字（沒有閘門的話，下面的 flush 就會真的送出去）。
     let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
     e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
     db::set_pane_typed(&app.db, &run_b).await.unwrap();
@@ -152,7 +149,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
         }
     };
 
-    // ---- 3. 身份 A 那個行程遲到的 SessionStart（spool 重播）：同一個 S，但不是新行程的回報，不算驗證
     crate::hookrecv::process(
         &app,
         &hook(&bot.id, &run_a, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "startup",
@@ -162,7 +158,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     .unwrap();
     assert_eq!(outcome_now().await, (Some(S.to_string()), None), "舊行程的回報不能冒充新行程接回了");
 
-    // ---- 4. 驗證前：派工排隊、使用者 409、flush 不動（一個字都沒進 B 的 pane）
     let dispatch = prompt_relayed_queueable(&app, &bot.id, "換身份之後的派工", "agm-after-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
@@ -175,7 +170,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     assert_eq!((t.status.as_str(), t.flush_retries, t.run_id.as_deref()), ("queued", 0, None), "驗證前不 claim、不花重試");
     assert_eq!(in_pane("換身份之後的派工"), 0);
 
-    // B 的行程回報：同一個 session → 接回了
     crate::hookrecv::process(
         &app,
         &hook(&bot.id, &run_b, json!({"hook_event_name": "SessionStart", "session_id": S, "source": "resume",
@@ -199,13 +193,11 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
     assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())), "驗證過了才送，送進 B 這一代");
     assert_eq!(in_pane("換身份之後的派工"), 1);
 
-    // ---- 5. B 的第一回合在飛時，A 那個行程的撞額度與半截回覆才到（遠端 spool 晚到）：同一個 S，全部擋下
     crate::hookrecv::process(&app, &hook(&bot.id, &run_a, limit)).await.unwrap();
     let late_reply = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-a",
                             "last_assistant_message": "身份 A 那一回合的半截回覆"});
     crate::hookrecv::process(&app, &hook(&bot.id, &run_a, late_reply)).await.unwrap();
     assert_eq!(status(dispatch.turn_id.clone()).await, "in_flight", "A 遲到的撞額度／回覆不准收掉 B 的回合");
-    // B 自己答完：照常收尾。
     let done = json!({"hook_event_name": "Stop", "session_id": S, "prompt_id": "p-b",
                       "last_assistant_message": "B 接著原本的脈絡做完了"});
     crate::hookrecv::process(&app, &hook(&bot.id, &run_b, done)).await.unwrap();
@@ -217,7 +209,6 @@ async fn quota_on_identity_a_then_switching_to_b_resumes_the_exact_same_session(
         .unwrap();
     assert_eq!(replies, vec!["B 接著原本的脈絡做完了".to_string()], "A 的半截回覆沒有混進來");
 
-    // ---- 6. 撞額度那一句沒有被重送；DB 裡也只有那一筆
     assert_eq!(in_pane("撞額度的那一句"), 0, "換身份、接回、放行都不可以把撞額度那一句再打一次");
     assert!(typed(&e).iter().all(|s| !s.contains("撞額度的那一句")), "{:?}", typed(&e));
     let copies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE prompt_text LIKE '%撞額度的那一句%'")
@@ -275,13 +266,11 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
     .execute(&app.db)
     .await
     .unwrap();
-    // A 還在回合中：AGM 的派工排在後面。
     let dispatch = prompt_relayed_queueable(&app, &bot.id, "撞額度之前就排好的派工", "agm-before-switch", Some(crate::agent_relay::DAEMON_SENDER), QueueClass::Relay)
         .await
         .unwrap();
     assert_eq!(dispatch.delivery, "queued");
 
-    // ---- 換身份重啟（回合中）：撞額度那一回合被收掉，派工留下來
     sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
@@ -295,12 +284,10 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
         .unwrap();
     assert_eq!(revoked, 0, "沒有「一併撤銷」的說明");
 
-    // ---- 新 run 接回、驗證完才送
     let transcript_b = dir_b.join("projects").join(CWD_KEY).join(format!("{S}.jsonl"));
     let pane_b: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_b).fetch_one(&app.db).await.unwrap();
     e.herdr.live_pane(&pane_b, tt::LivePane { width: Some(120), transcript_file: Some(transcript_b.clone()), ..Default::default() });
     db::set_pane_typed(&app.db, &run_b).await.unwrap();
-    // 真的送進 B 的 pane 幾次（mock 的 pane 只在字被送出時記一筆）。
     let sent = || e.herdr.pane(&pane_b).map_or(0, |p| p.transcript.iter().filter(|l| l.contains("撞額度之前就排好的派工")).count());
     forget_queue_retry_timer(&bot.id);
     flush_queued_locked(&app, &bot.id).await.unwrap();
@@ -321,7 +308,6 @@ async fn a_dispatch_queued_before_the_switch_survives_the_restart_and_goes_out_e
     assert_eq!((t.status.as_str(), t.delivery.as_str(), t.run_id.as_deref()), ("in_flight", "ok", Some(run_b.as_str())));
     assert_eq!(sent(), 1);
 
-    // 多叫醒幾次、A 遲到的撞額度也到了、B 答完——都不會再送一次。
     flush_queued_locked(&app, &bot.id).await.unwrap();
     let late = json!({"hook_event_name": "StopFailure", "session_id": S, "prompt_id": "p-a",
                       "reason": "You've hit your usage limit · resets 5pm"});
@@ -361,7 +347,6 @@ async fn dispatch_queued_behind_a_turn(e: &tt::Env, name: &str) -> (db::Bot, Str
     )
     .await
     .unwrap();
-    // A 的 pane 是活的、能打字：沒有額度閘門的話，下面的 flush 會真的把派工送進 A。
     let pane_a: String = sqlx::query_scalar("SELECT pane_id FROM runs WHERE id=?").bind(&run_a).fetch_one(&app.db).await.unwrap();
     e.herdr.live_pane(&pane_a, tt::LivePane { width: Some(120), transcript_file: Some(transcript_a.clone()), ..Default::default() });
     db::set_pane_typed(&app.db, &run_a).await.unwrap();
@@ -396,12 +381,10 @@ async fn quota_hit_with_a_dispatch_queued(e: &tt::Env, name: &str) -> (db::Bot, 
     let app = e.app.clone();
     let (bot, run_a, pane_a, dispatch) = dispatch_queued_behind_a_turn(e, name).await;
 
-    // StopFailure 先到：回合收成失敗，而且 A 的撞限在推回合結束**之前**就記下來了。
     crate::hookrecv::process(&app, &a_limit(&bot.id, &run_a)).await.unwrap();
     let bot = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_some(), "StopFailure 就記下撞限，不等讀畫面");
 
-    // 回合結束叫醒的 flush（測試裡 `schedule_flush_queued` 是 no-op，直接叫）：派工留在佇列，沒有送進 A。
     forget_queue_retry_timer(&bot.id);
     flush_queued_locked(&app, &bot.id).await.unwrap();
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&dispatch).fetch_one(&app.db).await.unwrap();
@@ -458,11 +441,9 @@ async fn a_dispatch_held_for_quota_goes_out_once_when_identity_a_gets_its_quota_
     let app = e.app.clone();
     let (bot, run_a, pane_a, dispatch) = quota_hit_with_a_dispatch_queued(&e, "quota-back").await;
 
-    // 還在擋的時候多叫醒幾次也不會送。
     flush_queued_locked(&app, &bot.id).await.unwrap();
     assert_eq!(sent_to(&e, &pane_a), 0);
 
-    // A 的新讀數：5 小時窗是撞限之後才開的（剛重置、用了 3%）——撞限作廢（`quota::recalibrate_limit_hit`）。
     let base = crate::quota::quota_base_for_host(&app, LOCAL_HOST, "claude", Some("cc-a")).await;
     let reopened = crate::quota::Quota {
         five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 3.0, resets_at: Some(db::iso_at(chrono::Utc::now() + chrono::Duration::hours(5) + chrono::Duration::seconds(5))) }),
@@ -522,7 +503,6 @@ async fn a_quota_hold_survives_a_daemon_restart_then_goes_to_identity_b_exactly_
     let app = restarted(&e, &bot.id).await;
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：新行程的記憶體是空的");
 
-    // 開機的 `rearm_queue_retries` 立刻叫醒 flush（測試裡 `schedule_flush_queued` 是 no-op，直接叫）——這時身份偵測還沒完成。
     flush_queued_locked(&app, &bot.id).await.unwrap();
     assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "重啟後仍擋：不 claim、不花重試");
     assert_eq!(sent_to(&e, &pane_a), 0, "沒有送進還沒額度的 A");
@@ -535,7 +515,6 @@ async fn a_quota_hold_survives_a_daemon_restart_then_goes_to_identity_b_exactly_
     assert_eq!(held(&turn_row(&app, &dispatch).await), ("queued", 0, None), "回填之後照樣擋");
     assert_eq!(sent_to(&e, &pane_a), 0);
 
-    // 換到 B：接回驗證完就送。
     sqlx::query("UPDATE bots SET identity='cc-b' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let strict = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     let run_b = restart_bot_with(&app, &bot.id, strict).await.unwrap();
@@ -649,7 +628,6 @@ async fn a_queued_prompt_whose_quota_hold_is_unreadable_is_not_released_after_a_
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：新行程的記憶體是空的");
     sqlx::query("UPDATE turns SET quota_hold='{' WHERE id=?").bind(&dispatch).execute(&app.db).await.unwrap();
 
-    // 回填跑完：那一列解不開，撞限沒被種回記憶體。
     identities_detected(&app).await;
     assert!(crate::runners::quota::limit_hit_for_bot(&app, &bot).await.is_none(), "前提：解不開的憑據種不回去");
 

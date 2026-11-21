@@ -83,7 +83,6 @@ async fn a_wait_under_three_minutes_says_nothing_and_one_over_says_it_once() {
     assert_eq!(view(app), Value::Null, "/api/state 也還沒有");
     let first = current(app).unwrap().id;
 
-    // 同一張核准等到 4 分鐘（把起點撥早），下一次試窗口就通知。
     sqlx::query("UPDATE supervisor_approvals SET decided_at = ? WHERE id = ?").bind(crate::db::iso_in(-240)).bind(&id).execute(&app.db).await.unwrap();
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     let rows = inbox(app).await;
@@ -94,19 +93,16 @@ async fn a_wait_under_three_minutes_says_nothing_and_one_over_says_it_once() {
     assert_eq!(view(app)["blockers"][0]["name"], "alpha");
     assert_eq!(rows[0].1["wake"], false, "只有 working 擋著、放寬已排定：自己會好，只記錄不叫醒（issue #1478）");
 
-    // 一樣的人擋著、再試十次：不洗版。tick 也不重送。
     for _ in 0..10 {
         observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
         tick(app).await;
     }
     assert_eq!(inbox(app).await.len(), 1, "同一次部署只通知一次");
 
-    // 換人擋：不單獨推 inbox（issue #856），但 web header / /api/state 看得到即時名單。
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b2", "bravo")]))).await;
     assert_eq!(inbox(app).await.len(), 1, "換人擋不推 inbox");
     assert_eq!(view(app)["blockers"][0]["name"], "bravo", "即時名單在 web header 對得上");
 
-    // main 動了：換 commit、換核准，仍是同一次部署；拿到窗口為狀態轉換。
     let next = crate::swap_window::approval_for(app, OWNER, "1234567abcdef", &actor()).await.unwrap();
     observe(app, OWNER, &next, "1234567abcdef", Ok(false)).await;
     let rows = inbox(app).await;
@@ -164,7 +160,6 @@ fn delivering(name: &str, escalates_at: Option<&str>) -> LcError {
 /// issue #1478：首次通知只在「自己不會好」時叫醒巡檢。
 #[tokio::test]
 async fn the_first_notice_wakes_agm_only_when_waiting_will_not_clear_itself() {
-    // 擋住的只有 working、放寬已排定 → 不叫醒（上面那條測試的情境）；inbox 照記、WS 照發。
     let e = tt::env().await;
     let app = &e.app;
     let id = approval_waiting(app, SHA, 240).await;
@@ -174,14 +169,12 @@ async fn the_first_notice_wakes_agm_only_when_waiting_will_not_clear_itself() {
     assert_eq!(rows[0].1["wake"], false);
     assert!(view(app)["blockers"][0]["name"] == "alpha", "web header 照常看得到");
 
-    // 送達臨界區擋著：放寬不放行 → 叫醒。
     let e = tt::env().await;
     let app = &e.app;
     let id = approval_waiting(app, SHA, 240).await;
     observe(app, OWNER, &id, SHA, Err(&delivering("dora", Some("2026-10-04T12:30:00.000Z")))).await;
     assert_eq!(inbox(app).await[0].1["wake"], true, "送達中擋著要人看");
 
-    // working 擋著、但沒有排定放寬（不知道何時會好）→ 叫醒。
     let e = tt::env().await;
     let app = &e.app;
     let id = approval_waiting(app, SHA, 240).await;
@@ -193,7 +186,6 @@ async fn the_first_notice_wakes_agm_only_when_waiting_will_not_clear_itself() {
     observe(app, OWNER, &id, SHA, Err(&no_eta)).await;
     assert_eq!(inbox(app).await[0].1["wake"], true, "沒有排定放寬時仍叫醒");
 
-    // 擋住名單是 working ＋ 別人的租約：租約放寬不掉 → 叫醒。
     let e = tt::env().await;
     let app = &e.app;
     let id = approval_waiting(app, SHA, 240).await;
@@ -224,20 +216,16 @@ async fn now_please_relaxes_only_this_deployment() {
     assert_eq!(v["user_escalated"], true);
     assert_eq!(esc(id.clone()).await, Some(true), "按了「現在換版」：這次部署的核准放寬");
 
-    // 別人的核准（AGM 親手核的、別的 owner）不跟著放寬。
     let theirs = crate::supervisor::store::create_approval(&app.db, "ops", "restart", "AGM 核的", Some("aaaaaaa1"), Some(&crate::db::iso_in(3600)), None).await.unwrap().approval;
     crate::supervisor::store::decide_approval_from(&app.db, &theirs.id, "pending", "approved", "AGM", None, None).await.unwrap();
     assert_eq!(esc(theirs.id.clone()).await, Some(false), "別人的核准不受影響");
 
-    // 拿到窗口、還在換（Swapping）：daemon-swap 換 binary 前用同一張核准複查（§3a），放寬不能在這裡消失（issue #840）。
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     assert_eq!(current(app).unwrap().phase, Phase::Swapping);
     assert_eq!(esc(id.clone()).await, Some(true), "拿到窗口後複查：放寬還在");
-    // 窗口交還、下一輪又沒拿到：還是同一次部署，放寬照舊。
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     assert_eq!(esc(id.clone()).await, Some(true), "同一次部署重試：放寬還在");
 
-    // 這次部署換好了：下一次部署從頭算。
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     app.deploy_wait.lock().unwrap().as_mut().unwrap().phase = Phase::Done;
     assert_eq!(esc(id.clone()).await, Some(false), "這次部署結束，放寬跟著結束");
@@ -271,14 +259,12 @@ async fn the_new_daemon_reports_whether_the_swap_landed() {
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     let wid = current(app).unwrap().id;
-    // 換版＝重啟：新 daemon 只看得到檔案。
     *app.deploy_wait.lock().unwrap() = None;
     startup_as(app, &SHA[..7]).await;
     let w = current(app).unwrap();
     assert_eq!((w.id.as_str(), w.phase), (wid.as_str(), Phase::Done));
     assert_eq!(inbox(app).await.last().unwrap().1["deploy_wait"]["phase"], "done");
 
-    // 回滾：跑的不是要上的那顆。
     let mut s = w.clone();
     s.phase = Phase::Swapping;
     save(app, Some(&s));
@@ -331,7 +317,7 @@ async fn a_corrupt_state_file_is_kept_aside_and_logged_not_silently_dropped() {
 async fn an_unreadable_state_file_is_not_overwritten() {
     let e = tt::env().await;
     let app = &e.app;
-    std::fs::create_dir(path(app)).unwrap(); // 讀會 EISDIR
+    std::fs::create_dir(path(app)).unwrap();
     startup_as(app, "abc").await;
     assert!(path(app).is_dir(), "讀不了的不動它");
     assert!(current(app).is_none());
@@ -359,7 +345,6 @@ async fn the_recheck_after_taking_the_window_keeps_the_users_go_ahead() {
     let e = tt::env().await;
     let app = &e.app;
     let now = crate::db::now();
-    // 一顆正在思考的 bot（working、turn 已送達）：全靜止模式會擋。
     sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('busy',?,'busy','claude','tok-busy',?)")
         .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
     sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('busy','busy','running','working',?)")
@@ -372,12 +357,10 @@ async fn the_recheck_after_taking_the_window_keeps_the_users_go_ahead() {
     let recheck = |app: Arc<App>, id: String| async move {
         crate::supervisor::maintenance::safety_as(&app, &[], Some(&id), Some(OWNER)).await.unwrap()
     };
-    // 沒放寬：working 照樣擋，窗口拿不到。
     let refused = crate::supervisor::maintenance::acquire(app, "restart", OWNER, &id, Some(SHA), 900, true, &[]).await.unwrap_err();
     observe(app, OWNER, &id, SHA, Err(&refused)).await;
     assert_eq!(recheck(app.clone(), id.clone()).await["safe"], false, "沒放寬時 working 照擋");
 
-    // 使用者按「現在換版」→ 拿到窗口（phase 變 Swapping）→ 複查：還是安全的。
     escalate(app, &current(app).unwrap().id).await.unwrap();
     crate::supervisor::maintenance::acquire(app, "restart", OWNER, &id, Some(SHA), 900, true, &[]).await.unwrap();
     observe(app, OWNER, &id, SHA, Ok(false)).await;
@@ -386,7 +369,6 @@ async fn the_recheck_after_taking_the_window_keeps_the_users_go_ahead() {
     assert_eq!((s["safe"].as_bool(), s["escalated"].as_bool()), (Some(true), Some(true)), "複查不能推翻 acquire 給的放寬：{s}");
     assert_eq!(s["working"][0]["bot_id"], "busy", "working 還在，只是不擋");
 
-    // 送達臨界區照擋：daemon 正在往 pane 打字。
     sqlx::query("UPDATE turns SET delivery='pending' WHERE id='busy'").execute(&app.db).await.unwrap();
     let s = recheck(app.clone(), id.clone()).await;
     assert_eq!(s["safe"], false, "放寬了，送達臨界區仍然要擋：{s}");
@@ -403,7 +385,6 @@ async fn abort_cycle_is_throttled_to_at_most_once_per_thirty_minutes() {
     assert_eq!(inbox(app).await.len(), 1, "初次通知已等 4 分鐘");
     let wid = current(app).unwrap().id;
 
-    // 第一次拿到窗口：推 inbox (swapping)，wake: false
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     let rows = inbox(app).await;
     assert_eq!(rows.len(), 2);
@@ -411,21 +392,17 @@ async fn abort_cycle_is_throttled_to_at_most_once_per_thirty_minutes() {
     assert_eq!(rows[1].1["deploy_wait"]["phase"], "swapping");
     assert_eq!(rows[1].1["wake"], false);
 
-    // 3a ABORT 交還：observe 回報 Err，回到 waiting，不推 inbox
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     assert_eq!(current(app).unwrap().phase, Phase::Waiting);
     assert_eq!(inbox(app).await.len(), 2, "3a ABORT 交還不推 inbox");
 
-    // 30 分鐘內重試又拿到窗口：循環節流，不推 inbox
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     assert_eq!(current(app).unwrap().phase, Phase::Swapping);
     assert_eq!(inbox(app).await.len(), 2, "30 分鐘內再次拿到窗口被節流，不推 inbox");
 
-    // 又交還：不推 inbox
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     assert_eq!(inbox(app).await.len(), 2);
 
-    // 30 分鐘過去了（把這顆 sha 的時間撥早）：再次拿到窗口就可以推
     app.deploy_wait.lock().unwrap().as_mut().unwrap().swap_announced_at.insert(SHA.into(), crate::db::iso_in(-1801));
     observe(app, OWNER, &id, SHA, Ok(false)).await;
     let rows = inbox(app).await;
@@ -434,7 +411,6 @@ async fn abort_cycle_is_throttled_to_at_most_once_per_thirty_minutes() {
     assert_eq!(rows[2].1["deploy_wait"]["phase"], "swapping");
     assert_eq!(rows[2].1["wake"], false);
 
-    // 換到另一顆 sha 可立即記錄；再回到剛通知過的 sha，仍受它自己的 30 分鐘節流。
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     let other_sha = "1234567abcdef";
     observe(app, OWNER, &id, other_sha, Ok(false)).await;
@@ -453,14 +429,12 @@ async fn auto_escalation_notifies_once_without_wake() {
     observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
     assert_eq!(inbox(app).await.len(), 1, "初次通知已發出");
 
-    // 模擬已過門檻（escalated: true, escalates_at: null）
     let escalated_err = LcError::conflict(
         "something is still running; wait for a safe window",
         json!({"reason": "not_idle", "escalates_at": null,
                "safety": {"working": [{"bot_id": "b1", "name": "alpha", "is_supervisor": false}],
                           "escalated": true, "delivering": [], "unreadable": [], "held_leases": []}}),
     );
-    // §3a race 回覆沒有 safety 快照，不能把 ETA 消失誤判成自動放寬。
     let raced_err = LcError::conflict(
         "a prompt entered the delivery critical section while this window was being taken",
         json!({"reason": "not_idle", "raced": true}),
@@ -480,13 +454,11 @@ async fn auto_escalation_notifies_once_without_wake() {
     let summary = rows[1].1["text"].as_str().unwrap();
     assert!(summary.contains("已自動放寬"), "{summary}");
 
-    // 再試多次不重複推
     for _ in 0..5 {
         observe(app, OWNER, &id, SHA, Err(&escalated_err)).await;
     }
     assert_eq!(inbox(app).await.len(), 2, "自動放寬生效不重複推");
 
-    // 如果第一次觀察到放寬時已經拿到窗口，成功回應的 safety 也要記進狀態。
     observe(app, OWNER, &id, SHA, Ok(true)).await;
     let rows = inbox(app).await;
     assert_eq!(rows.len(), 3, "拿到窗口是下一個狀態轉換");
@@ -506,14 +478,12 @@ async fn user_dispatch_actions_push_records_without_wake() {
     assert_eq!(inbox(app).await.len(), 1);
 
     let wid = current(app).unwrap().id;
-    // 使用者按「現在換版」
     escalate(app, &wid).await.unwrap();
     let rows = inbox(app).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].1["deploy_wait"]["user_escalated"], true);
     assert_eq!(rows[1].1["wake"], false, "使用者操作不叫醒巡檢");
 
-    // 使用者按「先等」
     act(app, &wid, |w| w.dismissed = true).await.unwrap();
     let rows = inbox(app).await;
     assert_eq!(rows.len(), 3);
@@ -570,7 +540,6 @@ async fn pending_first_survives_reload_and_keeps_its_payload_even_after_state_ch
         assert!(current(app).unwrap().pending_first.is_none());
         assert!(load(app).unwrap().pending_first.is_none(), "成功才將清除狀態落盤");
 
-        // insert 成功、清 pending 前重啟：同 key 已存在仍算送達，不產生第二筆。
         save(app, Some(&w));
         *app.deploy_wait.lock().unwrap() = load(app);
         super::tick_at(app, "2026-10-04T12:03:15.000Z").await;
@@ -620,10 +589,8 @@ fn pending_keys(app: &Arc<App>) -> Vec<String> {
 /// 不回滾已成功的操作、不因為等待記錄過期或中間重啟就消失，補上之後恰好一筆、重複 tick 不再多插。
 #[tokio::test]
 async fn a_failed_later_notice_is_queued_and_resent_with_its_own_rev_and_payload() {
-    // 等待記錄已經過期（結束後超過 10 分鐘）：有待送的就不能清掉。
     let much_later = "2099-01-01T00:00:00.000Z";
 
-    // 使用者按「現在換版」，inbox 寫入失敗。
     {
         let e = tt::env().await;
         let app = &e.app;
@@ -653,7 +620,6 @@ async fn a_failed_later_notice_is_queued_and_resent_with_its_own_rev_and_payload
         assert_eq!(inbox(app).await.len(), 2, "重複 tick 不會多插一筆");
     }
 
-    // 換版完成（新 daemon 開機時寫的 Done），inbox 寫入失敗，之後還重啟了一次。
     {
         let e = tt::env().await;
         let app = &e.app;
@@ -683,7 +649,6 @@ async fn a_failed_later_notice_is_queued_and_resent_with_its_own_rev_and_payload
         assert!(current(app).is_none(), "送達後、過期的結束記錄照常清掉");
     }
 
-    // 沒有人再試而放棄，inbox 寫入失敗。
     {
         let e = tt::env().await;
         let app = &e.app;

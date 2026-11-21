@@ -459,8 +459,6 @@ impl<A: crate::capabilities::Emit + crate::capabilities::BotStatusEmit> EventSin
                 ));
             }
             self.app.emit(&event.kind, payload).await;
-            // App::emit owns the sequence assignment; callers of this P4 adapter do not use the
-            // return value, but expose the current sequence for the port's typed result.
             Ok(self.app.current_seq())
         }
     }

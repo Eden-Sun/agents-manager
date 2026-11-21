@@ -105,7 +105,6 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
         remote_path: h.remote_path.clone(),
         shared_session: h.shared_session,
     };
-    // 先把主機寫進 config（不必等它真的連上：這條測的是閘門，不是連線）。
     e.app.cfg
         .update(move |f| {
             f.hosts.push(HostCfg { name: "zz92".into(), ssh: "old-box".into(), herdr_session: "agents-manager".into(), ..Default::default() });
@@ -113,7 +112,6 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
         })
         .await
         .unwrap();
-    // 這台上放一個活著的專案。
     crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
         cfg.projects.push(crate::config::ProjectCfg { mode: "parent_child".into(), role_policy: Default::default(), deputy: None, specialist_dispatch: true,
             handed_off_to: None,
@@ -128,7 +126,6 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
     .await
     .unwrap();
 
-    // 1. 改 ssh（換機器）→ 409，而且什麼都沒寫進去。
     let mut repoint = mk(&host);
     repoint.ssh = "new-box".into();
     let err = create_host(State(e.app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(repoint))
@@ -141,7 +138,6 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
     let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
     assert_eq!(after.ssh, "old-box", "被擋下來就不能改到 config：{body}");
 
-    // 2. 只改不會換機器的欄位（remote_path）→ 放行。
     let mut cosmetic = mk(&host);
     cosmetic.remote_path = Some("/opt/bin".into());
     create_host(State(e.app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(cosmetic))
@@ -150,7 +146,6 @@ async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_
     let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
     assert_eq!((after.ssh.as_str(), after.remote_path.as_str()), ("old-box", "/opt/bin"));
 
-    // 3. 明確確認就放行（沿用 ?confirm= 的先例）。
     let mut forced = mk(&host);
     forced.ssh = "new-box".into();
     create_host(State(e.app.clone()), Query(DeleteQuery { confirm: Some("repoint".into()) }), Extension(RequestPrincipal::User), Json(forced))
@@ -293,8 +288,6 @@ async fn xreview_delete_host_rechecks_projects_while_removing_the_host_config() 
         })
         .await
         .unwrap();
-    // Model a project commit after the early DB snapshot. Host removal shares project
-    // creation's config lock, so this staged config entry must be detected before removal.
 
     let err = delete_host(State(app.clone()), Path(host.into()), Extension(RequestPrincipal::User))
         .await

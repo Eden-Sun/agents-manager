@@ -14,7 +14,6 @@ pub struct FullMessagesRequest<'a> {
     pub timeout: Duration,
     pub max_response_bytes: usize,
 }
-// No Debug: endpoint/key/system/messages may contain credentials or private instructions.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidRequest,
@@ -141,7 +140,6 @@ async fn send(
     {
         return Err(Error::InvalidRequest);
     }
-    // Tests can ONLY reach literal loopback. DNS names and real API endpoints are refused.
     #[cfg(test)]
     if url.scheme() != "http"
         || !url.host_str().is_some_and(|h| {
@@ -154,12 +152,10 @@ async fn send(
     let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(req.timeout);
-    // Even a developer's HTTP_PROXY must not send fixture traffic outside loopback.
     #[cfg(test)]
     let builder = builder.no_proxy();
     let client = builder.build().map_err(|_| Error::InvalidRequest)?;
     let operation = async {
-        // `.json(value)` 等於 Content-Type: application/json ＋ serde_json::to_vec(value)；這裡送的就是事先編好的那一份。
         let mut response = client
             .post(url)
             .header("x-api-key", req.key)
@@ -260,7 +256,6 @@ async fn send(
                 }
             }
             let parsed = assembler.finish().map_err(stream_error)?;
-            // 模型與工具內容的驗證交給 adapter：這裡拒絕會丟掉已收到的 usage，attempt 只能留成 unknown。
             return Ok(parsed);
         }
         let mut bytes = Vec::new();

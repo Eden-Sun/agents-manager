@@ -23,7 +23,6 @@
     fn a_local_probe_that_printed_the_login_wall_and_hung_is_auth_required() {
         assert_eq!(read_local_run("local", true, "Authentication required\nPlease visit the URL to log in\n", "", 40).unwrap_err(), ProbeFail::AuthRequired);
         assert_eq!(read_local_run("local", true, "", "Authentication required", 40).unwrap_err(), ProbeFail::AuthRequired, "stderr 也看");
-        // 逾時而且什麼辨識得出的都沒有：只是逾時，不改登入旗標。
         match read_local_run("local", true, "starting…", "", 40).unwrap_err() {
             ProbeFail::Other { reason, message } => {
                 assert_eq!(reason, "timeout");
@@ -49,7 +48,6 @@
     fn a_finished_local_probe_reads_usage_from_stdout_and_only_stderr_can_add_the_login_wall() {
         assert!(read_local_run("local", false, &real(), "", 40).is_ok());
         assert_eq!(read_local_run("local", false, "", "Authentication required", 40).unwrap_err(), ProbeFail::AuthRequired);
-        // 讀得到額度就不看 stderr 的警告。
         assert!(read_local_run("local", false, &real(), "Authentication required (refreshing)", 40).is_ok());
         match read_local_run("local", false, "", "dial tcp: connection refused", 40).unwrap_err() {
             ProbeFail::Other { reason, .. } => assert_eq!(reason, "unreadable"),
@@ -157,7 +155,6 @@
         let g = got[0].1.seven_day.as_ref().unwrap();
         assert_eq!((g.used_pct, g.resets_at.as_deref()), (0.0, None), "超過 100% 夾進範圍、沒有重置時間就是 None");
         assert_eq!(got.len(), 1, "Claude/GPT weekly row is ignored");
-        // 只有一桶也算（另一桶之後再說）。
         let one = json!({"response": "Gemini Models\tWeekly Limit Remaining\t50%\t2026-10-11T00:00:00Z"}).to_string();
         assert_eq!(parse_usage(&one).unwrap().len(), 1);
     }
@@ -208,7 +205,6 @@
                 s = state.display()
             ),
         );
-        // macOS 的 /usr/bin 有真的 `security`（會去問真的 Keychain）：沒有 security 的情境 PATH 只放一個空目錄，sh 內建的 `[`、`command` 夠用。
         let empty = dir.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
         let run = |script: &str, with_security: bool| {
@@ -223,7 +219,6 @@
         assert_eq!(run(REMOTE_LOGOUT_SCRIPT, true), "AM_REMOVED");
         assert!(!state.exists(), "Keychain 項目被刪");
         assert_eq!(run(REMOTE_LOGOUT_SCRIPT, true), "AM_ABSENT");
-        // 檔案與 Keychain 都在：兩個都清。
         let tok = home.join(TOKEN_FILE);
         std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
         std::fs::write(&tok, "t").unwrap();
@@ -260,14 +255,12 @@
         for (key, q) in parse_usage(&real()).unwrap() {
             crate::quota::set(&app, LOCAL_HOST, key, q).await;
         }
-        // 兩個窗口都落在唯一的 Gemini key 上。
         let again = parse_usage(&real()).unwrap().remove(0);
         crate::quota::set(&app, LOCAL_HOST, again.0, again.1).await;
         let q = app.quotas.lock().await.clone();
         assert!(q.contains_key("agy"), "{:?}", q.keys().collect::<Vec<_>>());
         assert!(!q.contains_key("agy:claude-gpt"), "不建立舊的 Claude/GPT key");
         let before = q["agy"].seven_day.clone();
-        // 探測壞掉（沒有 agy 輸出）：解析回 None，呼叫端不寫任何東西。
         assert!(parse_usage("garbage").is_none());
         assert_eq!(app.quotas.lock().await["agy"].seven_day, before);
         let snap = crate::quota::snapshot(&app).await;
@@ -318,7 +311,6 @@
         let p = pane_probe_command_with_env(Some("/a/agy"), &env);
         assert!(p.contains("HOME='/home/u/.agy-ag1' '/a/agy' -p /usage"), "{p}");
         assert_eq!(pane_probe_command(Some("/a/agy")), pane_probe_command_with_env(Some("/a/agy"), &Default::default()));
-        // 名字不合法的 env 略過，不讓它變成 shell 指令。
         let bad = std::collections::BTreeMap::from([("A;rm".to_string(), "x".to_string())]);
         assert_eq!(env_assignments(&bad), "");
     }

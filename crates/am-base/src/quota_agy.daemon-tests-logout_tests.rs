@@ -47,7 +47,6 @@
         }
         assert_eq!(cleared, ["agy".to_string()].into(), "推一則 quota:null");
 
-        // 檔案原本不在：false，不算錯。
         assert!(!logout(&app, LOCAL_HOST).await.unwrap());
         std::fs::remove_file(&other).unwrap();
     }
@@ -58,7 +57,6 @@
         let e = tt::env().await;
         let app = e.app.clone();
         assert!(matches!(logout(&app, "no-such-host").await, Err(LogoutError::UnknownHost)));
-        // 遠端那台的 agy 額度不受本機登出影響。
         let host = format!("agy-lo-{}", crate::db::ulid().to_ascii_lowercase());
         app.hosts.insert_remote_for_test(crate::config::HostCfg { name: host.clone(), ssh: "unused".into(), herdr_session: "agents-manager".into(), ..Default::default() }).await;
         seed(&app, &host).await;
@@ -81,7 +79,6 @@
             s2.lock().unwrap().push(script.to_string());
             Ok(r2.lock().unwrap().remove(0))
         });
-        // 沒連線：不送 ssh，回錯。
         conn.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         seed(&app, &host).await;
         assert!(matches!(logout(&app, &host).await, Err(LogoutError::Failed(m)) if m.contains("not connected")));
@@ -126,7 +123,6 @@
             async move { logout(&app, &host).await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        // 排隊期間 H 改指到 B。
         let b = app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
         b.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         drop(guard);
@@ -135,7 +131,6 @@
         assert!(scripts.lock().unwrap().is_empty(), "A、B 都沒收到任何 script");
         assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")), "額度快照還在");
 
-        // 重試（現在的權威是 B）會成功，剛好送一段 script。
         assert!(logout(&app, &host).await.unwrap());
         assert_eq!(scripts.lock().unwrap().len(), 1);
     }
@@ -149,7 +144,6 @@
         let conn = app.hosts.insert_remote_for_test(remote_cfg(&host)).await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         crate::hosts::set_ssh_fake(&host, |_| Ok("AM_REMOVED\n".to_string()));
-        // ssh 那一段非同步地卡住：logout 在 closure 裡等它。
         crate::hosts::set_ssh_delay(&host, Duration::from_millis(400));
         seed(&app, &host).await;
 

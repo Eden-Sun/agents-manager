@@ -94,7 +94,6 @@ fn the_dispatcher_always_answers_empty_json_for_hooks_nothing_for_the_status_lin
     assert!(calls.contains("hook agy --bot bot1 --port 7791 --data-dir /data dir --event Stop"), "{calls}");
     assert!(calls.contains("--event state"), "{calls}");
 
-    // 不是 AG Man 的 pane（沒有 bot env）：什麼都不做，使用者自己開的 agy 不受影響。
     std::fs::remove_file(&log).unwrap();
     let (out, code) = run_dispatcher(&script, &["PreInvocation"], &[("AM_TEST_LOG", log.to_str().unwrap())]);
     assert_eq!((out.as_str(), code), ("{}\n", 0));
@@ -113,15 +112,12 @@ fn a_pre_tool_use_denial_reaches_agy_but_nothing_else_does() {
     let (out, code) = run_dispatcher(&script, &["PreToolUse"], &env);
     assert_eq!((out.trim(), code), (deny, 0));
     assert!(std::fs::read_to_string(&log).unwrap().contains("--event PreToolUse"));
-    // 同一支 stub 在別的事件印的東西不能漏給 agy。
     let (out, code) = run_dispatcher(&script, &["Stop"], &env);
     assert_eq!((out.as_str(), code), ("{}\n", 0));
-    // hook 沒印決策（放行）、或掛掉：空、exit 0。
     let quiet = stub.with_file_name("quiet");
     tt::write_exec(&quiet, "#!/bin/sh\nexit 7\n");
     let (out, code) = run_dispatcher(&dispatch_sh(quiet.to_str().unwrap(), "/d", None), &["PreToolUse"], &env);
     assert_eq!((out.as_str(), code), ("", 0), "放行是空 stdout，不是 `{{}}`（1.4.7 把 `{{}}` 判成拒絕）");
-    // 不是 AG Man 的 pane：不呼叫、空。
     std::fs::remove_file(&log).unwrap();
     let (out, code) = run_dispatcher(&script, &["PreToolUse"], &[("AM_TEST_LOG", log.to_str().unwrap())]);
     assert_eq!((out.as_str(), code), ("", 0), "沒有 AM_BOT_ID：拋棄式目錄裡的 agy 不能被擋");
@@ -135,20 +131,16 @@ fn a_pre_tool_use_allow_prints_nothing_on_every_early_exit() {
     let log = stub.with_file_name("calls.log");
     let env = [("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t"), ("AM_TEST_LOG", log.to_str().unwrap())];
 
-    // 正常路徑：daemon 不擋 → 空。
     let (out, code) = run_dispatcher(&dispatch_sh(stub.to_str().unwrap(), "/d", None), &["PreToolUse"], &env);
     assert_eq!((out.as_str(), code), ("", 0));
-    // 沒有 AM_BOT_ID／AM_HOOK_TOKEN（使用者自己的 agy、拋棄式 HOME）→ 空，且不呼叫 daemon。
     std::fs::remove_file(&log).unwrap();
     let (out, code) = run_dispatcher(&dispatch_sh(stub.to_str().unwrap(), "/d", None), &["PreToolUse"], &[]);
     assert_eq!((out.as_str(), code), ("", 0));
     assert!(!log.exists(), "沒有 bot env：不呼叫 daemon");
-    // AM_INSTANCE 不符（別顆 daemon 的 pane）→ 空，且不呼叫 daemon。
     let inst = dispatch_sh(stub.to_str().unwrap(), "/d", Some("alpha"));
     let (out, code) = run_dispatcher(&inst, &["PreToolUse"], &[("AM_INSTANCE", "beta"), ("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t"), ("AM_TEST_LOG", log.to_str().unwrap())]);
     assert_eq!((out.as_str(), code), ("", 0));
     assert!(!log.exists(), "AM_INSTANCE 不符：不呼叫 daemon");
-    // 同樣是 AM_INSTANCE 不符，但事件是 Stop → 仍是 `{}`（只有 PreToolUse 改成空）。
     let (out, _) = run_dispatcher(&inst, &["Stop"], &[("AM_INSTANCE", "beta"), ("AM_BOT_ID", "b"), ("AM_HOOK_TOKEN", "t")]);
     assert_eq!(out, "{}\n");
 }
@@ -181,8 +173,6 @@ mod delivery_and_screen {
 
     #[test]
     fn the_first_prompt_has_no_transcript_to_prove_it_but_later_ones_do() {
-        // 對話是第一則 prompt 才建立：還沒有 session／transcript。單行放得下的靠送出後那列 `> 原文` 回音；多行或太長的照打照送、
-        // 記成未驗證，不擋也不重送。
         assert_eq!(choose_proof(&inputs(None, None, true), "say OK").unwrap(), Proof::EchoRow);
         assert_eq!(choose_proof(&inputs(None, None, true), "line one\nline two").unwrap(), Proof::Unverified);
         let dir = tt::scratch_dir("am-agy-proof");
@@ -190,7 +180,6 @@ mod delivery_and_screen {
         std::fs::write(&t, format!("{USER}\n")).unwrap();
         let p = choose_proof(&inputs(Some("c-1"), Some(t.to_str().unwrap()), true), "say OK").unwrap();
         assert_eq!(p, Proof::Transcript { format: LogFormat::Agy, path: t.clone(), session_id: "c-1".into() });
-        // 檔案不在（路徑是占位）／遠端：沒有無損證據。
         assert_eq!(choose_proof(&inputs(Some("c-1"), Some("/nope/transcript_full.jsonl"), true), "x\ny").unwrap(), Proof::Unverified);
         assert_eq!(choose_proof(&inputs(Some("c-1"), Some(t.to_str().unwrap()), false), "x\ny").unwrap(), Proof::Unverified);
     }
@@ -222,7 +211,6 @@ mod delivery_and_screen {
         assert_eq!(box_state("agy", &screen("> ")), BoxState::Empty, "尾端空白是 padding");
         assert_eq!(box_state("agy", &screen("> half a thought")), BoxState::NonEmpty);
         assert_eq!(box_state("agy", "no composer here\n"), BoxState::Unready);
-        // 純文字讀不放寬佔位字（分不出是提示還是真的打了）：寧可 NonEmpty。
         assert_eq!(box_state("agy", &screen("> Ask anything")), BoxState::NonEmpty);
     }
 
@@ -266,12 +254,10 @@ mod delivery_and_screen {
         let typed = AGY_159_STARTUP.replace("Auto mode: edits & safe commands auto-approved (shift+tab to cycle)", "my draft text");
         assert_eq!(box_state("agy", &typed), BoxState::NonEmpty);
 
-        // 下框線尚未畫出（例如輸出只到輸入列）：未穩定回傳 Unready
         let lines: Vec<&str> = AGY_159_STARTUP.lines().collect();
-        let incomplete = lines[..9].join("\n"); // 到輸入列，不含下框線
+        let incomplete = lines[..9].join("\n");
         assert_eq!(box_state("agy", &incomplete), BoxState::Unready);
 
-        // 上框線尚未畫出：未成框回傳 Unready
         let no_top = {
             let mut removed = false;
             lines
@@ -365,7 +351,6 @@ async fn heal_on_an_up_to_date_install_changes_no_file_and_keeps_the_users_entri
     let e = tt::env().await;
     let home = tt::scratch_dir("am-agy-heal-same");
     install_at(&e.app, &home).unwrap();
-    // 使用者自己的具名項（例如 herdr 的）要原樣保留。
     let hooks = cfg::hooks_path(&home);
     let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
     root["herdr"] = json!({"enabled": true, "PreInvocation": [{"type": "command", "command": "bash herdr.sh", "timeout": 10}]});

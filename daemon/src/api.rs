@@ -36,22 +36,16 @@ pub(crate) async fn detach<T: Send + 'static>(
     #[cfg_attr(not(test), allow(unused_variables))] key: &str,
     work: impl std::future::Future<Output = Result<T, LcError>> + Send + 'static,
 ) -> Result<T, LcError> {
-    // 呼叫端是 task-local（config 寫入的稽核 `http=` 欄位讀它）：脫離之後要帶過去，不然工作裡寫的稽核都會變成 `-`。
     let caller = crate::config_audit::http_caller();
     #[cfg(test)]
     let done_key = key.to_string();
-    // 先把呼叫端給的 future 裝箱（#1465）：下面兩層包裝（完成訊號、task-local scope）與 spawn 就只帶一個指標，
-    // 不再各留一份幾十 KB 的副本——debug 建置下這個函式的 poll 框原本有 150 KiB 上下。
     let work = Box::pin(work);
-    // 完成訊號在脫離的 task 裡發（handler 已經被 drop 時也要發）；只在測試編進去。
     let work = async move {
         let out = work.await;
         #[cfg(test)]
         work_done_for_test(&done_key).notify_one();
         out
     };
-    // Box::pin（#1465）：debug 建置下 spawn 會把 future 一層一層以值傳下去，脫離的工作（restart／promote／fork／刪除）
-    // 的 future 動輒數十 KB，不裝箱就是 1 MiB 上下的堆疊。
     let task = tokio::spawn(Box::pin(crate::config_audit::HTTP_CALLER.scope(caller, work)));
     #[cfg(test)]
     work_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), task.abort_handle());
@@ -103,7 +97,6 @@ pub(crate) fn kill_delete_work_for_test(key: &str) -> bool {
 /// 「你的設定有問題、改一下再送」跟「ssh 斷了、等一下重試」。`config_written: false` 是關鍵的一半：
 /// 跟 `projection_refused` 的 `config_written: true` 相反，這次什麼都沒寫，直接重送修正後的請求就好。
 pub(crate) fn cfg_err(e: anyhow::Error) -> LcError {
-    // 寫之前磁碟被手改：這次沒寫，原樣重送即可（#1647）。
     if e.downcast_ref::<crate::config::ConfigChangedOnDisk>().is_some() {
         return LcError::conflict(
             "config.toml changed on disk; nothing was written",
@@ -112,7 +105,6 @@ pub(crate) fn cfg_err(e: anyhow::Error) -> LcError {
         );
     }
     match e.downcast_ref::<crate::projection::ConfigInvalid>() {
-        // `to_string()` 而不是 `c.0`：Display 才帶著「（config.toml 未變更）」，那句是給人看的 recovery path。
         Some(c) => LcError::BadValue(
             json!({"error": "config_invalid", "message": c.to_string(), "config_written": false}),
         ),
@@ -195,10 +187,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
         .route("/intents", get(list_intents))
-        // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
         .route("/drafts", get(crate::drafts::get_http))
         .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
-        // 專案排程（User-only，見 `schedules/api.rs`）。
         .route("/projects/{id}/schedules", get(crate::schedules::api::list_for_project).post(crate::schedules::api::create))
         .route("/projects/{id}/schedules/rebind", post(crate::schedules::api::rebind))
         .route("/schedules/{id}", get(crate::schedules::api::get_one).patch(crate::schedules::api::patch).delete(crate::schedules::api::delete))
@@ -206,7 +196,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/schedules/{id}/history", get(crate::schedules::api::history))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_route))
         .route("/projects/{id}/bots", post(create_bot))
-        // §6.5e：非 agent 的 shell／服務 pane。
         .route("/projects/{id}/panes", get(crate::runners::panes::list_for_project))
         .route("/panes/{id}/adopt", post(crate::runners::panes::adopt))
         .route("/panes/{id}/close", post(crate::runners::panes::close))
@@ -230,7 +219,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/base-snapshot", get(crate::schedules::base::get_snapshot).put(crate::schedules::base::lock).delete(crate::schedules::base::clear))
         .route("/bots/{id}/member", post(crate::expert_member::adopt))
         .route("/projects/{id}/members", post(hire_member))
-        // SPEC §6.9；放在 `{id}` 那組前面，否則 `restart-idle` 會被當成 bot id。
         .route("/bots/restart-idle", post(restart_idle_bots))
         .route("/bots/{id}/api_fresh_target", get(api_fresh_target))
         .route("/bots/{id}/api-session/retire", post(crate::api_bot_retire_route::retire_api_session))
@@ -253,7 +241,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/relay-requests", get(list_relay_requests))
         .route("/relay/resolve", get(resolve_relay_target))
         .route("/pane-authorize", post(crate::pane_authority::authorize))
-        // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
         .route("/bots/{id}/share", get(crate::runners::share_admin::get_share).post(crate::runners::share_admin::post_share))
         .route("/bots/{id}/share/rotate", post(crate::runners::share_admin::post_rotate))
         .route(
@@ -272,7 +259,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/composer-draft", get(get_composer_draft))
         .route("/bots/{id}/pending-question", get(crate::runners::pending_question::get_pending_question))
         .route("/bots/{id}/local-image", get(crate::app_ports_p10::get))
-        // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
         .route("/bots/{id}/outbox", get(crate::app_ports_p10::list))
         .route("/bots/{id}/outbox/file", get(crate::app_ports_p10::file))
         .route("/bots/{id}/scratchpad", get(crate::outbox::scratchpad_gone))
@@ -290,9 +276,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/baseline/backups", get(baseline_backups))
         .route("/hosts/{name}/baseline/apply", post(baseline_apply))
         .route("/hosts/{name}/baseline/restore", post(baseline_restore))
-        // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
-        // header 一鍵升級 herdr：下載驗版本 → 等閒置 → 維護窗口裡重啟 server → bot 接回（SPEC §6.9b）。只給 UI。
         .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
@@ -325,10 +309,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/quota/probe", post(probe_quota))
         .route("/quota/reset-credit/use", post(use_reset_credit))
         .route("/quota/reset-credit/snooze", axum::routing::put(put_reset_credit_snooze).delete(delete_reset_credit_snooze))
-        // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
-        // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::runners::build_scheduler::get_status))
-        // issue #104：開發者專用外部 Cargo worker 設定。密碼只進 data-dir 的 0600 secret file。
         .route(
             "/build/remote",
             get(crate::remote_cargo::get_settings).put(crate::remote_cargo::put_settings),
@@ -340,18 +321,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mem/processes/kill", post(kill_mem_process))
         .route("/mem/processes/pane", get(get_mem_pane))
         .route("/search/messages", get(search_messages).layer(agm_gate!(app)))
-        // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
         .route("/supervisor", get(crate::runners::supervisor::api::get_supervisor).layer(agm_gate!(app)))
         .route("/supervisor/health", get(crate::runners::supervisor::api::get_health).layer(agm_gate!(app)))
-        // AGM 的管理面：被證明身份的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
         .route("/supervisor/setup", post(crate::runners::supervisor::api::post_setup).layer(agm_gate!(app)))
         .route("/supervisor/start", post(crate::runners::supervisor::api::post_start).layer(agm_gate!(app)))
         .route("/supervisor/stop", post(crate::runners::supervisor::api::post_stop).layer(agm_gate!(app)))
         .route("/supervisor/fallback", post(crate::runners::supervisor::api::post_fallback).layer(agm_gate!(app)))
         .route(
             "/supervisor/assignments",
-            // POST 不掛整條 gate：一般 bot 可以對 AGM 角色 bot 送 `notice`（release／herdr 更新任務的 `agm assign --notice --bot <巡檢>`），
-            // 其餘由 handler 自己判斷（`supervisor::api::post_assignment`）。
             get(crate::runners::supervisor::api::get_assignments).layer(agm_gate!(app)).post(crate::runners::supervisor::api::post_assignment),
         )
         .route(
@@ -359,27 +336,22 @@ pub fn router(app: Arc<App>) -> Router {
             get(crate::runners::supervisor::api::get_handoff).layer(agm_gate!(app)).merge(axum::routing::put(crate::runners::supervisor::api::put_handoff).layer(agm_gate!(app))),
         )
         .route("/supervisor/assignments/{id}", get(crate::runners::supervisor::api::get_assignment).layer(agm_gate!(app)))
-        // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
         .route("/supervisor/assignments/{id}/review", post(crate::runners::supervisor::api::post_review).layer(agm_gate!(app)))
-        // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
         .route(
             "/claude-update/review",
             get(crate::claude_review::get_review).post(crate::claude_review::post_review),
         )
         .route("/supervisor/incidents", get(crate::runners::supervisor::api::get_incidents).layer(agm_gate!(app)))
-        // 人設：持久版本是權威，內嵌版只在首次安裝當種子（SPEC §18.11）。
         .route(
             "/supervisor/persona",
             get(crate::runners::supervisor::api::get_persona).layer(agm_gate!(app)).put(crate::runners::supervisor::api::put_persona),
         )
         .route("/supervisor/persona/adopt-embedded", post(crate::runners::supervisor::api::post_persona_adopt))
         .route("/supervisor/build-inputs", get(crate::runners::supervisor::api::get_build_inputs).layer(agm_gate!(app)))
-        // 左上角「立即部署」：落後多少、有沒有在跑；按下去交給既有的 daemon-update-kick（SPEC §18.2）。
         .route("/deploy/status", get(crate::deploy_now::get_status))
         .route("/deploy/now", post(crate::deploy_now::post_now))
         .route("/deploy/wait/escalate", post(crate::deploy_wait::post_escalate))
         .route("/deploy/wait/dismiss", post(crate::deploy_wait::post_dismiss))
-        // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",
             get(crate::runners::supervisor::api::get_approvals).layer(agm_gate!(app)).post(crate::runners::supervisor::api::post_approval),
@@ -396,13 +368,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/inbox", get(crate::runners::supervisor::api::get_inbox).layer(agm_gate!(app)))
         .route("/supervisor/inbox/{id}/ack", post(crate::runners::supervisor::api::post_inbox_ack))
         .route("/supervisor/state", get(crate::runners::supervisor::api::get_sanitized_state).layer(agm_gate!(app)))
-        // 已安裝的 bin/agm vs 這顆 binary 內嵌的那份（SPEC §18.2a）：GET 比對、POST 就地換版，
-        // 不必等下一次開機（issue #532）。
         .route(
             "/supervisor/cli",
             get(crate::runners::supervisor::cli::get_cli).layer(agm_gate!(app)).merge(post(crate::runners::supervisor::cli::post_cli_refresh).layer(agm_gate!(app))),
         )
-        // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
         .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::runners::supervisor::responder_api::routes(app.clone()))
@@ -427,36 +396,27 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(axum::middleware::from_fn(json_rejections))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
         .route("/session", get(get_session))
-        // #2036：不需登入（bot 也可），但要真的碰一次 DB 池；死結時外部才偵測得到「活著但不能用」。
         .route("/healthz", get(healthz))
-        // 沒這條路由的 /api/* 要回 JSON 404，不能掉到外層的 SPA fallback（200 的 index.html）。
         .fallback(api_route_not_found);
 
     Router::new()
         .nest("/api", api)
         .route("/ws", get(ws_handler))
-        // 主機 shell 的畫面推送：WebSocket 瀏覽器帶不了 X-AM-Token，所以跟 `/ws` 一樣掛在 `/api` 認證層外、用 query token（shell_stream.rs）。
         .route("/api/hosts/{name}/shells/{pane_id}/stream", get(crate::shell_stream::stream))
         .route("/hook/{provider}", post(crate::runners::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
-        // Credential-bearing pane creation is fenced against concurrent credential rotation.
         .route("/relay/spawn/begin", post(crate::runners::credential_spawn::begin))
         .route("/relay/spawn/finish", post(crate::runners::credential_spawn::finish))
         .route("/relay/spawn/abort", post(crate::runners::credential_spawn::abort))
-        // issue #1790：開完子 agent 後登記「這顆 pane 是我開的」，歸屬以它為準。
         .route("/relay/spawn/claim", post(crate::runners::credential_spawn::claim))
-        // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
-        // 母 bot 的 `herdr agent list` 附上子 agent 的 cache 還熱多久（kids_cache）。
         .route("/relay/kids", post(relay_kids))
-        // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
         .route("/build-slots/acquire", post(crate::runners::build_scheduler::post_acquire))
         .route("/build-slots/renew", post(crate::runners::build_scheduler::post_renew))
         .route("/build-slots/release", post(crate::runners::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
         .with_state(app.clone())
         .layer(axum::middleware::from_fn_with_state(app.clone(), startup_readiness))
-        // 最外層：/api 與 /ws 以外（靜態檔、hook、relay、build-slots）以前不看 Host。
         .layer(axum::middleware::from_fn_with_state(app, reject_rebound_host))
 }
 
@@ -515,7 +475,6 @@ async fn relay_pane(
     if crate::share::refuses_bot_principal(&app.db, &bot.id).await {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
     }
-    // 讀不到 host 就 503 讓 shim 重試：退回 local 會把遠端 pane id 寫進本機 namespace（#243）。
     let Ok(host) = db::bot_host(&app.db, &bot.id).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "bot host unreadable; retry"})));
     };
@@ -581,7 +540,6 @@ async fn relay_target_run(app: &Arc<App>, sender: &str, target: &str) -> anyhow:
 async fn relay_announce(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    // 表單而非 JSON：POSIX sh shim 用 `--data-urlencode` 對任意內容都安全。
     axum::extract::Form(mut body): axum::extract::Form<RelayAnnounce>,
 ) -> (StatusCode, Json<Value>) {
     let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -595,7 +553,6 @@ async fn relay_announce(
     if crate::share::refuses_bot_principal(&app.db, &body.bot_id).await {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
     }
-    // A frozen pane or explicit bot selector supplies stable recipient evidence; never resolve display names.
     if body.to_bot_id.as_deref().is_none_or(str::is_empty) && (body.to_agent.starts_with("bot:") || body.to_agent.contains(":p")) {
         match relay_target_run(&app, &body.bot_id, &body.to_agent).await {
             Ok(run) => {
@@ -606,7 +563,6 @@ async fn relay_announce(
             Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"relay_watch_unavailable", "retryable":true, "detail":format!("{e:#}")}))),
         }
     }
-    // Resolve the actual live run and enforce current authorization for every managed relay.
     let resolved = match relay_target_run(&app, &body.bot_id, &body.to_agent).await {
         Ok(v) => v,
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"relay_watch_unavailable","watch_unavailable":true,"retryable":true}))),
@@ -626,16 +582,12 @@ async fn relay_announce(
     }
     body.to_bot_id = Some(target.bot_id.clone());
     body.to_run_id = Some(target.id.clone());
-    // 舊 shim 只有顯示名稱：缺 ID 的報備保持未知，不攔進角色佇列、不標寄件來源。
     let Some(to_bot_id) = body.to_bot_id.as_deref().filter(|id| !id.is_empty()) else {
         return (StatusCode::OK, Json(json!({})));
     };
     let Some(delivery_id) = body.delivery_id.as_deref().filter(|id| !id.is_empty()) else {
         return (StatusCode::OK, Json(json!({})));
     };
-    // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
-    // 路由狀態**不知道**不等於「不是 AGM」（issue #143）：查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，
-    // 都回 503 `routing_unavailable`，shim 看到就明確失敗、不直送——直送會繞過 durable inbox、去重與 wake／ack 語意。
     let unavailable = |why: String| {
         tracing::warn!(to = %body.to_agent, error = %why, "could not route a bot request for AGM; refusing instead of falling back to the pane");
         (
@@ -652,7 +604,6 @@ async fn relay_announce(
             };
             match crate::supervisor::bot_requests::intercept(&app, &target, &body.bot_id, &body.text, None, &[], true, "herdr_shim", mark).await {
                 Ok(Some(v)) => return (StatusCode::OK, Json(v)),
-                // 協調者還沒建立（舊部署）或角色對自己：本來就不攔，照舊直送。
                 Ok(None) => {}
                 Err(e) => return unavailable(format!("{e:?}")),
             }
@@ -660,14 +611,11 @@ async fn relay_announce(
         Ok(None) => {}
         Err(e) => return unavailable(format!("{e:?}")),
     }
-    // #610：shim 收到 2xx 後會直接把 prompt 送進 pane。先確認 watcher admission 的 DB lookup
-    // 成功；讀取錯誤不是「非 managed target」，必須回 retryable error，不能讓唯一的 watchdog 消失。
     let relay_run = if body.text.trim().is_empty() {
         None
     } else {
         match crate::lifecycle::relay_watch::resolve(&app, &body.bot_id, body.to_run_id.as_deref().unwrap_or_default()).await {
             Ok(run) => {
-                // #1460：沒有目標（含移交出去的）就只看一眼是不是移交，留 log；正常路徑不多一次查詢。
                 if run.is_none() {
                     crate::lifecycle::relay_watch::note_handoff_direct(&app, &body.bot_id, body.to_run_id.as_deref().unwrap_or_default()).await;
                 }
@@ -693,7 +641,6 @@ async fn relay_announce(
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "relay_recipient_mismatch"})));
         }
     }
-    // 報備記的是寄件者所在的主機（收件 run 只能在同一台主機認領）；讀不到就跟收件目標讀不到一樣，要 shim 重試。
     let host = match db::bot_host(&app.db, &body.bot_id).await {
         Ok(host) => host,
         Err(e) => {
@@ -710,7 +657,6 @@ async fn relay_announce(
             );
         }
     };
-    // 寄件 bot 送這句當下正在跑的回合（#927，child_done 用它認「這一回合已經自己回報過」）。找不到不擋送出，只是少一個綁定。
     let from_turn = match crate::lifecycle::relay_watch::sender_turn_at(&app, &body.bot_id, &db::now()).await {
         Ok(turn) => turn,
         Err(e) => {
@@ -725,7 +671,6 @@ async fn relay_announce(
     if !crate::agent_relay::announce_delivery(&host, &body.bot_id, &run.id, delivery_id, &body.text, from_turn.as_deref()) {
         return (StatusCode::OK, Json(json!({"to_pane_id": pane_id})));
     }
-    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；先登記受關機屏障管理的 watcher，再回 2xx。
     crate::lifecycle::relay_watch::on_resolved_announce(&app, &body.bot_id, from_turn.as_deref(), &body.text, relay_run).await;
     (StatusCode::OK, Json(json!({"to_pane_id": pane_id})))
 }
@@ -805,7 +750,6 @@ fn extra_allowed_hosts() -> &'static [String] {
 /// 任何 Origin 都放行的舊行為讓別的網頁（或 rebind 過來的網域）在 LAN 模式下拿得到 UI token。
 pub(crate) fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     let name_ok = |authority: &str| if allow_lan { lan_host_ok(authority, extra_allowed_hosts()) } else { is_loopback_host(authority) };
-    // DNS rebinding：同源 GET 沒有 Origin，所以 Host 也要過關（沒有 Host 的不是瀏覽器）。
     if let Some(host) = headers.get("host") {
         let Ok(host) = host.to_str() else { return false };
         if !name_ok(host) {
@@ -824,7 +768,6 @@ pub(crate) fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) 
 /// `<id>(<name>)`；其餘一律 `None`（只有 UI token 的網頁、腳本，或 token 對不上的冒名）。
 /// 讀不到 bot 也是 `None`：DB 一時忙不能把自稱升級成驗過的。
 pub(crate) async fn verified_caller_bot(app: &Arc<App>, headers: &HeaderMap) -> Option<String> {
-    // 空的／非 UTF-8 的 token 算「沒驗過」，跟 `relay_auth` 同一條線（#339／44348e62）；前後空白一樣先去掉。
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty());
     let (id, token) = (header("X-AM-Bot-Id")?, header("X-AM-Bot-Token")?);
     let bot = db::bot(&app.db, id).await.ok().flatten()?;
@@ -857,7 +800,6 @@ enum BotRoutePolicy {
 }
 
 const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
-    // 基準快照：User，加上同專案 expert 管理者（見 `manager_base_snapshot`）；其他 Bot（含自己）不行。
     ("GET", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
     ("PUT", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
     ("DELETE", "/api/bots/{id}/base-snapshot", BotRoutePolicy::UserOnly),
@@ -973,7 +915,6 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
-    // #989：網頁專用的寫入——撤回／放棄回合。一般 Bot 在自己的專案裡也不能打。
     ("POST", "/api/turns/{id}/withdraw", BotRoutePolicy::UserOnly),
     ("POST", "/api/turns/{id}/abandon", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/projects", BotRoutePolicy::UserOrAgm),
@@ -1089,8 +1030,6 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         if !is_read && !allowed_prompt && !(*req.method() == axum::http::Method::POST && path == "/api/pane-authorize") { return (StatusCode::FORBIDDEN, Json(json!({"error":"child_scope_denied"}))).into_response(); }
         RequestPrincipal::Child { child_id: child.child_id, parent_bot_id: child.parent_id }
     } else if has_bot || has_service {
-        // A presented identity is decisive: partial, invalid, or mixed credentials never fall
-        // through to the shared user token.
         if has_bot == has_service || has_ui {
             return unauthorized();
         }
@@ -1116,7 +1055,6 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
                 Ok(_) => return unauthorized(),
                 Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
             };
-            // 分享用的受限 bot：它的 token 只能打自己的 hook，`/api` 一條都不給（SPEC「分享 bot」）。
             if crate::share::refuses_bot_principal(&app.db, &bot.id).await {
                 return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"}))).into_response();
             }
@@ -1144,17 +1082,11 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
                 }
             }
         } else { false };
-        // 專家模式的 manager 可以啟動／重啟它管的 bot（角色改了要重啟才套用；使用者 2026-10-31）。
-        // 管理者刪成員不能帶 `?confirm=`（那是給 AGM／使用者確認刪 AGM 的 bot 用的），免得繞過 supervisor_owned 守衛。
-        // 判斷要跟 handler 用同一個解碼器（`Query<DeleteQuery>`）：原始字串比對會被 `%63onfirm` 這類編碼繞過（review L2 #1）。
-        // 解碼失敗就當成有帶（fail closed）。
         let confirm_query = method == "DELETE" && axum::extract::Query::<DeleteQuery>::try_from_uri(uri).map_or(true, |q| q.0.confirm.is_some());
         let manager_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role && !confirm_query && manager_may_start(&app, bot_id, method, path).await;
-        // 派工者撤回自己派出、還沒送的那一則：路由仍是 UserOnly，只對這個情境放行（見 withdraw_turn_route）。
         let sender_withdraw = method == "POST" && decoded_bot_path_segments(path).is_some_and(|p| p.len() == 4 && p[0] == "api" && p[1] == "turns" && p[3] == "withdraw")
             && lifecycle::sender_may_withdraw(&app, &decoded_bot_path_segments(path).unwrap()[2], bot_id).await.unwrap_or(false);
         let manager_base = policy == Some(BotRoutePolicy::UserOnly) && matches!(&principal, RequestPrincipal::Bot(_)) && manager_base_snapshot(&app, bot_id, path).await;
-        // fleet operator（`[agents] fleet_operators`）：跨專案的生命週期操作；只在其他放行都不成立時才查（要讀一次設定檔）。
         let fleet_lifecycle = policy == Some(BotRoutePolicy::UserOrAgm)
             && !is_agm_role
             && !manager_lifecycle
@@ -1172,8 +1104,6 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
             return e.into_response();
         }
-        // 分享用 bot（SPEC §20）不給 AGM 刪、停（含刪它所在的專案）：只有使用者自己能。
-        // 守衛要看解碼後的路徑（#992）：範圍檢查與 handler 拿到的都是解碼後的 id，`%30…` 這種編碼不能讓守衛查不到。
         let Some(decoded) = decoded_bot_path_segments(path) else { return bot_scope_denied(bot_id).into_response() };
         let decoded_path = format!("/{}", decoded.join("/"));
         if let Some(target) = crate::share::guards_from_bot_principal(&app.db, method, &decoded_path).await {
@@ -1181,11 +1111,9 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         }
     }
     req.extensions_mut().insert(principal.clone());
-    // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。
     if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS) {
         return next.run(req).await;
     }
-    // 只有 hook token 對得上才算「驗過的 bot」；`X-AM-Caller` 一律只當自稱記（review d77434c0 #3）。
     let verified = match &principal {
         RequestPrincipal::Child { child_id, .. } => Some(child_id.clone()),
         RequestPrincipal::Bot(_) => verified_caller_bot(&app, &headers).await,
@@ -1290,12 +1218,9 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
 
     let target = match (parts.get(1).copied(), parts.get(2).copied()) {
         (Some("bots"), Some(id)) if !matches!(id, "deleted" | "restart-idle") => {
-            // Sending a prompt is the intentional cross-bot route. `prompt_bot` verifies the
-            // sender's Bot proof and relay metadata before it can write to the recipient.
             if method == "POST" && parts.get(3) == Some(&"prompt") {
                 return Ok(());
             }
-            // 專家管理者不能刪自己（樹狀存取規則會讓 bot 碰到自己，這裡先擋）；AGM 角色照舊能自刪。
             if method == "DELETE" && parts.len() == 3 && id == caller
                 && crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none()
             {
@@ -1308,7 +1233,6 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if matches!(method, "GET" | "HEAD") && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
-                // 專家模式的管理者可以替同專案的頂層 bot 設執行者／顧問角色（使用者 2026-10-31）；handler 再驗一次並只收 role。
                 if method == "PUT" && parts.len() == 4 && parts[3] == "role" && expert_manager_over(app, caller, &target_bot).await? {
                     return Ok(());
                 }
@@ -1321,7 +1245,6 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                 if crate::runners::relay_deputy::may_restart(app, caller, method, &parts, &target_bot).await {
                     return Ok(());
                 }
-                // 巡檢（patrol）可以重啟／啟動任何頂層 bot（使用者 2026-10-31）；child 與其他操作仍限自己的樹。
                 if method == "POST"
                     && parts.len() == 4
                     && matches!(parts[3], "restart" | "start")
@@ -1368,7 +1291,6 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
                         }
                     }
                 }
-                // 派工者撤回自己派出、還在佇列的那一則（見 withdraw_turn_route）。
                 if method == "POST" && parts.len() == 4 && parts[3] == "withdraw" && lifecycle::sender_may_withdraw(app, id, caller).await? {
                     return Ok(());
                 }
@@ -1437,8 +1359,6 @@ async fn get_session(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    // This route bootstraps the shared UI token, so it intentionally has no UI-token auth layer.
-    // Bot and Service credentials must not turn that exception into a way to obtain the UI token.
     if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
         .iter()
         .any(|name| headers.contains_key(*name))
@@ -1515,22 +1435,16 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
             "ssh_opts": c.cfg.as_ref().map(|x| x.ssh_opts.clone()).unwrap_or_default(),
             "herdr_session": c.cfg.as_ref().map(|x| x.herdr_session.clone()).unwrap_or_else(|| app.herdr_session.clone()),
             "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
-            // #709：讀當下的設定（改了不重連，連線上的快照會是舊的）。
             "shared_session": crate::shared_host::flagged_in(cfg, &c.name),
             "connected": connected,
             "error": c.error_string().await,
-            // 遠端斷線起點；連著／本機為 null（UI 的離線警示條算「離線多久」）。
             "disconnected_since": c.disconnected_since(),
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| crate::quota_agy::tools_json(&c.name, &x.tools)),
-            // Login state *on this host*, `[[identities]]` + this host's `ccN` aliases (SPEC §16).
             "identities": t.map(|x| crate::login_prompt::identities_json(app, &c.name, &x.identities)),
-            // Env unexpanded, as written.
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
-            // 工作環境一致性（只讀檢查，#719）：`{issues: null|[{id,severity,message}], checked_at}`；沒量過＝null。
             "baseline": baselines.get(&c.name).map(|b| json!(b.view(chrono::Utc::now()))),
-            // herdr 版本（server／protocol 來自 ping，只在連著時報；CLI 來自探測），SPEC §11.6。
             "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
     }
@@ -1538,40 +1452,32 @@ async fn hosts_list(app: &Arc<App>, cfg: &crate::config::ConfigFile) -> Vec<Valu
 }
 
 pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
-    // 整份設定一次請求只取一份（#1663）：hosts 逐台讀會是 N 次整份 clone。
     let cfg = app.cfg.get().await;
     let connected = app.connected.load(Ordering::SeqCst);
     let projects = db::live_projects(&app.db).await.map_err(any_err)?;
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     let unread = crate::read_marks::unread_counts(&app.db).await.map_err(any_err)?;
     let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
-    // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
     let share_profiles = crate::share::store::profiles(&app.db).await.map_err(any_err)?;
     let sharing = crate::share::store::shared_ids(&app.db).await.map_err(any_err)?;
-    // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
-    // 快取倒數（`cache_clock`）：每顆 bot 最近一筆送出去的回合，一次讀完。
     let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.map_err(any_err)?;
-    // 被排程綁著的 bot（沒有未刪除的排程＝不在內）：側欄把沒設角色的 bot 歸到「排程 bot」區用。
     let scheduled_bots: std::collections::HashSet<String> = sqlx::query_scalar("SELECT DISTINCT bot_id FROM schedules WHERE deleted_at IS NULL").fetch_all(&app.db).await.map_err(any_err)?.into_iter().collect();
-    // 建立時帶的冪等鍵（只在 config.toml，不在 DB）：前端用它把「建立中」佔位列對到真 bot，不靠名字（#1796）。
     let create_request_ids: std::collections::HashMap<&str, &str> = cfg
         .projects
         .iter()
         .flat_map(|p| p.bots.iter())
         .filter_map(|c| Some((c.id.as_deref()?, c.create_request_id.as_deref()?)))
         .collect();
-    // 撞限（#1899）：整份快照一次批次算完（查詢次數不隨 bot 數增加），逐顆只取值。
     let limit_hits: HashMap<String, crate::quota::LimitHit> = bots
         .iter()
         .zip(crate::runners::quota::limit_hits_for_bots(app, &bots).await)
         .filter_map(|(b, hit)| hit.map(|hit| (b.id.clone(), hit)))
         .collect();
     let stale_hosts = app.remote_shim_stale.lock().await.clone();
-    // B 期：每顆 bot 在 run 啟動時記下的生效政策指紋（NULL＝沒記，不誤報待套用）。
     let policy_revs: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
         "SELECT bot_id, policy_rev FROM runs WHERE state IN ('starting','running','stopping') AND policy_rev IS NOT NULL",
     )
@@ -1584,7 +1490,6 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     for p in projects {
         let mut bl = Vec::new();
         let role_policy = p.role_policy();
-        // 專家模式群集（同設定的執行者）：用這份快照算，不另外查 DB。
         let cluster_names = if p.mode == "expert" { crate::expert_cluster::names_by_bot(&crate::expert_cluster::clusters_of(&bots, &runs, &p.id)) } else { Default::default() };
         for b in bots.iter().filter(|b| b.project_id == p.id) {
             let run = runs.remove(&b.id);
@@ -1596,21 +1501,15 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 let path = app.data_dir.join("bots").join(&b.id).join("bin/herdr");
                 (run.is_some() || path.exists()) && std::fs::read_to_string(path).ok().as_deref() != Some(crate::herdr_shim::SHIM_SH)
             } else { stale_hosts.contains_key(&p.host) };
-            // host 就是這個專案的 host（`db::bot_host` 的 JOIN 同一個欄位），不必再讀 bot／bot_host 兩次。
             let bot_connected = app.bot_connected_on(b, &p.host).await;
             let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
             crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             crate::send_now_capability::annotate(&mut run_v, &b.kind, run.as_ref(), cfg.codex.instant_interrupt);
             let limit_hit = crate::state::limit_hit_value(b, limit_hits.get(&b.id));
-            // 「角色 policy 改了、還沒重啟」：只有這個才影響狀態列的 context 分母（`context_tokens`）。`role_pending` 另外含 shim 過期、
-            // daemon_url 還沒注入——每次部署 herdr shim 一換、所有 bot 的 `role_pending` 都亮，不能拿來決定要不要套 context 門檻
-            // （2026-11-15 lead／L2 的分母因此回到 1M）。
             let policy_pending = policy_drift || run.as_ref().is_some_and(|r| role_policy_drifted(r.runtime_role_policy.as_deref(), &p.id, &p.host, &p.mode, b.role.as_deref()));
             let mut bot_v = json!({
                 "id": b.id,
                 "project_id": b.project_id,
-                // Legacy child nicknames may contain a redundant generated project-agent prefix.
-                // Keep the stored value intact, but project the concise name through shared state.
                 "name": if b.managed_by == "child" { crate::config::short_child_name(&p.label, &b.name) } else { b.name.clone() },
                 "kind": b.kind,
                 "role": b.role,
@@ -1631,41 +1530,26 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "managed_by": b.managed_by,
                 "parent_bot_id": b.parent_bot_id,
                 "create_request_id": create_request_ids.get(b.id.as_str()),
-                // 使用者釘的主要 bot（純顯示）。
                 "primary": b.is_primary == 1,
-                // 頂層主力撞限中才有值（#1899，唯讀；判斷在 daemon）。child 與沒撞限一律 null。
                 "limit_hit": limit_hit,
-                // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
                 "primary_position": b.primary_position,
-                // 專家模式保護額度開關 A：可被管理者使用（預設 true）
                 "manager_use": b.manager_use == 1,
-                // 專家模式專長軌道（role=specialist 時必填）；執行期覆蓋（B 期用，NULL＝跟角色）。
                 "track": b.track,
                 "runtime_override": b.runtime_override_json.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()),
-                // 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353）：從資料算，PATCH 回應掉了也看得到。
                 "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)) && !crate::lifecycle::is_deferred(&b.id),
                 "live_apply_deferred": crate::lifecycle::is_deferred(&b.id),
                 "cwd": b.cwd,
-                // 分享用 bot（SPEC §20）：`restricted`／`trusted`；一般 bot＝null。
                 "share_profile": share_profiles.get(&b.id),
-                // 分享連結開著（`bot_shares` 有一列）；變了發 `bot_share_changed`。
                 "share_enabled": sharing.contains(&b.id),
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
-                // #714：`run.background_jobs`＝回合結束後畫面上還標著的背景工作數（記憶體裡的，不在 DB）。
-                // `run.last_api_at`／`run.cache_ttl_secs`：快取倒數（`cache_clock`）。
                 "run": run_v,
-                // §6.11：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
-                // 用 `--resume` 叫醒。`null` = 不是這種停。
-                // 預覽模式（§6.12）：`{status, port}`；沒開（或 off）是 `null`。
                 "preview": previews.get(&b.id),
                 "asleep": asleep.get(&b.id).map(|(at, mins)| json!({"since": at, "idle_minutes": mins})),
                 "queued_turn": queued_turn,
                 "lamp": lamp(bot_connected, run.as_ref()),
-                // 跨裝置共用的未讀回合數與已讀標記（read_marks.rs）。
                 "unread": unread.get(&b.id).copied().unwrap_or(0),
                 "read_mark": read_marks.get(&b.id).map(crate::read_marks::json_value),
             });
-            // 專家模式群集名（同專案同設定執行者 ≥2 顆）；不在群集內＝null（json! 巨集已到遞迴上限，所以在外面補）。
             bot_v["policy_pending"] = json!(policy_pending);
             bot_v["cluster"] = json!(cluster_names.get(&b.id));
             bot_v["scheduled"] = json!(scheduled_bots.contains(&b.id));
@@ -1684,13 +1568,10 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     }
     Ok(json!({
         "daemon_seq": app.current_seq(),
-        // 現在有沒有一批一鍵重啟在跑（issue #492）：進度只走 WS，`bots_restart_done` 收不到時前端要有地方對帳。
         "restart_batch": crate::runners::bulk_restart::running_batch(&app.data_dir),
-        // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
         "cli_updates": crate::cli_update::running_list(app).await,
         "codex_reset": app.codex_resets.lock().await.snapshot.clone(),
         "herdr_updates": crate::herdr_upgrade::running_list(app),
-        // 等換版窗口超過 3 分鐘、已通知使用者的那一次部署（SPEC §18.10）；WS `deploy_wait` 收不到時的對帳來源。
         "deploy_wait": crate::deploy_wait::view(app),
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
@@ -1705,10 +1586,8 @@ async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<
     match principal {
         RequestPrincipal::User => {
             let mut state = state_json(&app).await?;
-            // #719 階段 3a：`[host_baseline.sync]` 對不上主機的鍵，只給使用者看（bot 的視圖從 `state_json` 出，不帶這欄）。
             let cfg = app.cfg.get().await;
             state["host_baseline_orphan_sync_keys"] = json!(cfg.host_baseline_orphan_sync_keys());
-            // #719 階段 3b：每台主機實際生效的模式（只會是 "off"／"ask"，`auto` 當 "ask"），網頁據此決定畫不畫「補齊」鈕。同樣只給使用者。
             let sync: serde_json::Map<String, Value> = std::iter::once(crate::config::LOCAL_HOST)
                 .chain(cfg.hosts.iter().map(|h| h.name.as_str()))
                 .map(|name| {
@@ -1879,7 +1758,6 @@ fn local_dir_entries(path: &std::path::Path, hidden: bool) -> std::io::Result<(V
 }
 
 async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
-    // SPEC §11.5。DirPicker 專用：pane 裡的 bot（拿得到自己的 token）不能借 daemon 的身份去列本機、更不能經 daemon 的 ssh 列別台主機。
     if principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
@@ -1895,7 +1773,6 @@ async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let raw = expand_dir_path(q.path.as_deref(), &home)?;
     let path = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
-    // 錯誤訊息講使用者自己打的那串，不替人把符號連結解開、講出真正指到哪。
     if !path.is_dir() {
         return Err(LcError::Bad(format!("{raw} is not a directory")));
     }
@@ -1996,13 +1873,11 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
         crate::bot_input::check_is_dir(&canonical)?;
         canonical
     } else {
-        // SPEC §11.6.
         let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
         crate::hosts::remote_canonical_dir(&conn, b.path.trim())
             .await
             .map_err(|e| LcError::Bad(format!("{e:#}")))?
     };
-    // 驗的與存的都是 trim 過的（同 patch_project）：頭尾空白不進 config.toml，長度上限也對實際存的字串生效。
     let label = b.label.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| {
         std::path::Path::new(&path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.clone())
     });
@@ -2159,7 +2034,6 @@ pub(crate) async fn patch_project(
         Some(Value::String(h)) if !h.trim().is_empty() => Some(Some(h.trim().to_string())),
         Some(_) => return Err(LcError::Bad("handed_off_to must be a non-empty host name or null".into())),
     };
-    // role_policy：key 只收 manager／executor／advisor／specialist，值一律是 JSON object；其他一律 400 `invalid_role_policy`。
     let parsed_role_policy: Option<BTreeMap<String, Value>> = match &b.role_policy {
         None => None,
         Some(Value::Object(map)) => {
@@ -2220,13 +2094,11 @@ pub(crate) async fn patch_project(
     })
     .await;
     projection.map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) })?;
-    // 專家派工的依據可能失效（關掉開關、離開 expert）：當場收回排隊中、還沒認領的專家派工（重驗後才收，依據仍成立的不動）。
     if b.specialist_dispatch == Some(false) || b.mode.is_some() {
         crate::specialist_dispatch::withdraw_disabled(&app, &id).await;
     }
     if let Some(h) = &handed_off_to {
         tracing::warn!(project_id = %id, handed_off_to = ?h, http = %crate::config_audit::http_caller(), "project handoff changed");
-        // 收回：下一輪對帳照常接手，不等下一個 herdr 事件。
         if h.is_none() {
             if let Ok(Some(p)) = db::project(&app.db, &id).await {
                 let app = app.clone();
@@ -2336,12 +2208,7 @@ async fn refuse_handed_off_project(pool: &sqlx::SqlitePool, id: &str) -> Result<
 }
 
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // Handoff ownership takes precedence over deletion: the receiving daemon owns these bots and panes.
     refuse_handed_off_project(&app.db, &id).await?;
-    // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
-    // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
-    // 跟 `delete_bot` 同一個做法：拿鎖的途中又有 child 被認領進來的話，它沒被鎖住也不在快照裡——放掉重來（不能在持鎖時
-    // 再補拿，那會亂了順序）。定案之後還有最後一道（下面的 `late`）。
     let mut attempt = 0;
     let (in_project, ids, guards) = loop {
         let in_project: Vec<db::Bot> =
@@ -2366,9 +2233,6 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": bot_id})));
         }
     }
-    // 專案 host 在**定案之前**讀好（#246）：定案之後才重讀、讀不到就退回 local，會去砍本機同 id 的目錄、
-    // 遠端那份留著沒人回收。讀不到就 502、什麼都還沒動，可以原樣再按一次。
-    // 已刪的專案再刪一次＝404，不能走到 `begin`：那會沿用並 abandon 背景還在補的 intent（#1058）。
     let project = db::project(&app.db, &id)
         .await
         .map_err(any_err)?
@@ -2378,9 +2242,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         return Err(LcError::conflict("handed_off", json!({"project_id": id, "handed_off_to": host})));
     }
     let host = project.host;
-    // 授權範圍在臨界區裡從**當下的** TOML 算；TOML 裡多出沒鎖住的 bot 就拒絕。
     let held: std::collections::HashSet<String> = ids.iter().cloned().collect();
-    // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 bot 快照）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
     let snapshot: Vec<Value> = in_project.iter().map(|b| json!({"id": b.id, "managed_by": b.managed_by})).collect();
     let requested_by = crate::config_audit::http_caller();
     tracing::warn!(project_id = %id, http = %requested_by, "project delete requested");
@@ -2408,20 +2270,10 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
-    // 輸入框草稿跟著專案走：群組草稿與每顆 bot 的草稿都清掉，其他瀏覽器也會收到清除事件。
     let draft_keys: Vec<String> = std::iter::once(format!("group:{id}")).chain(ids.iter().map(|b| format!("bot:{b}"))).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
-    // config 投影只軟刪「不在 TOML 裡的 user bot」，child 本來就不進 TOML，所以會留下一批
-    // `deleted_at IS NULL`、project 卻已經軟刪的列：UI 看不到、reconcile 也掃不到（`live_bots_on_host`
-    // 要求專案還活著），它們的 pane 與 hook 目錄從此沒人回收（review 2026-09-16）。
-    // 鎖還在手上，順手比照 delete_bot 收掉。
-    // 專案已經在 config 裡定案刪除，之後不能再「一顆失敗就整段中止」：後面的 child 會永遠留在 `deleted_at IS NULL`，
-    // 使用者再按一次只會拿到 not_in_config（#284）。每顆各自試，寫不進去的背景重試到成功才 purge，最後仍回錯讓人知道。
     let mut failed: Vec<db::Bot> = Vec::new();
     let mut kept_dirs: Vec<Value> = Vec::new();
-    // 定案之後再列一次：快照與定案之間才被認領進專案的 child（不在 `in_project`、沒被鎖住）一起軟刪。專案已經是已刪，
-    // reconcile 之後不會再掃它們，留成 `deleted_at IS NULL` 就永遠沒人收。它們沒經過「都已停止」的檢查，所以有 active run 的
-    // 只軟刪、不動目錄（列進 `kept_dirs`）。user bot 在 TOML 裡，`held` 已擋下沒鎖住的。
     let late: Vec<db::Bot> = match db::live_bots(&app.db).await {
         Ok(all) => all.into_iter().filter(|b| b.project_id == id && b.managed_by != "user" && !held.contains(&b.id)).collect(),
         Err(e) => {
@@ -2438,8 +2290,6 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
     let late_with_run: std::collections::HashSet<String> =
         kept_dirs.iter().filter_map(|k| k["bot_id"].as_str().map(str::to_string)).collect();
     for bot in in_project.iter().chain(late.iter()).filter(|b| b.managed_by != "user") {
-        // 這個 UPDATE 以前用 `let _ =` 忽略結果：DB 寫不進去也照樣往下 purge，變成
-        // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。purge 只能發生在 DB 已經確定寫成 deleted 之後。
         if let Err(e) = soft_delete_child(&app, &bot.id).await {
             tracing::error!(bot = %bot.name, error = ?e, "project deleted but its child could not be soft-deleted; retrying in the background");
             failed.push(bot.clone());
@@ -2452,11 +2302,8 @@ async fn finish_project_delete(app: Arc<App>, id: String, host: String, held: st
     }
     let retry_failed = !failed.is_empty() || share_retry;
     if retry_failed {
-        // 各路徑自己的記憶體重試 task 換成 intent 的重試（#355）：intent 留著，背景用 recovery 補完（含清目錄），daemon 死掉開機也接得回。
         crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some project cleanup could not be completed".into());
     }
-    // user bot 由 config 投影軟刪，但 bots/<id>/ 沒人清：本機要等下次開機、遠端永遠不掃（#313）。已確認皆無 active run、鎖在手。
-    // 只清「確定軟刪」的；讀不到就留著。清不掉（ssh 失敗等）不算成功，列進 kept_dirs。
     for bot in in_project.iter().filter(|b| b.managed_by == "user") {
         match db::bot(&app.db, &bot.id).await {
             Ok(Some(b)) if b.deleted_at.is_some() => {
@@ -2545,12 +2392,10 @@ async fn check_identity(app: &Arc<App>, host: &str, identity: &Option<String>, k
 fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
     let bad = |reason: &str| LcError::BadValue(json!({"error": "bad_request", "reason": reason}));
     if let Some(m) = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        // 各家只收自己核准的模型（claude-api 不收 gpt-*，openai-api 不收 claude-*）。
         if !crate::config::api_bot_model_supported_for(&b.kind, m) {
             return Err(bad("api_bot_model_unsupported"));
         }
     }
-    // openai-api：effort 依模型（astra／sol 不收 none），沒給模型就看預設模型。
     if b.kind == crate::config::OPENAI_API_KIND {
         if let Some(e) = b.effort.as_deref().map(|e| e.trim().to_ascii_lowercase()).filter(|e| !e.is_empty()) {
             let model = b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::OPENAI_API_BOT_MODEL);
@@ -2559,7 +2404,6 @@ fn check_api_bot_create(b: &NewBot) -> Result<(), LcError> {
             }
         }
     }
-    // openai-api 沒有 fast（Claude 的計價選項）。
     if b.kind == crate::config::OPENAI_API_KIND && b.fast {
         return Err(bad("api_bot_cli_fields_unsupported"));
     }
@@ -2602,8 +2446,6 @@ async fn create_bot(
     if !crate::config::valid_bot_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::bot_kinds_list())));
     }
-    // 專家模式專案的 bot 一定要有角色：沒帶就是執行者；可選執行者／顧問／排程專用（管理者、專家要另外指派）。
-    // 非專家專案維持舊規則：只收 `scheduler`。分享用 bot 不是專家成員，不補預設。
     let expert_project = db::project(&app.db, &pid).await.map_err(any_err)?.is_some_and(|p| p.mode == "expert");
     let scheduler_role = match b.role.as_deref().map(str::trim) {
         None | Some("") => (expert_project && b.share_profile.as_deref().map(str::trim).is_none_or(str::is_empty)).then(|| "executor".to_string()),
@@ -2614,14 +2456,12 @@ async fn create_bot(
     let api_bot = crate::config::is_api_kind(&b.kind);
     if api_bot {
         check_api_bot_create(&b)?;
-        // openai-api：`[openai_api]` 沒開或 key 檔不能用就不讓建（具名錯誤，網頁照著提示去設定）。
         if b.kind == crate::config::OPENAI_API_KIND {
             if let Err(reason) = crate::api_bot::openai::provider::configured(&app.cfg.get().await) {
                 return Err(LcError::conflict("openai_not_configured", json!({"message": "OpenAI 未啟用或未設定金鑰", "detail": reason})));
             }
         }
     }
-    // model／env／args 最後是 CLI 的 argv 與 pane 的環境變數，形狀不對在這裡就擋（`bot_input`）。
     if let Some(m) = &b.model {
         crate::bot_input::check_model(m)?;
     }
@@ -2629,7 +2469,6 @@ async fn create_bot(
         crate::bot_input::check_env(env)?;
     }
     crate::bot_input::check_args(&b.args)?;
-    // `cc1` is a different account on each host.
     let host = db::project(&app.db, &pid)
         .await
         .map_err(any_err)?
@@ -2639,7 +2478,6 @@ async fn create_bot(
         return Err(LcError::conflict("kind_disabled", json!({"reason": "kind_disabled", "host": host, "kind": b.kind})));
     }
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
-    // 分享用 bot：專案在本機，或設定裡有這台主機（不認得＝409 `unsupported_host`）。
     let host_known = host == crate::config::LOCAL_HOST || app.hosts.get(&host).await.is_some();
     let share_profile = match b.share_profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
@@ -2666,13 +2504,11 @@ async fn create_bot(
     if b.confirm_trusted && share_profile != Some(crate::share::store::PROFILE_TRUSTED) {
         return Err(LcError::Bad("confirm_trusted is only for share_profile `trusted`".into()));
     }
-    // 受限＝關進籠子（`share::cage`）；信任分享是一般 bot 的權限，只有分享入口與「分享 bot」的保護跟受限一樣。
     let restricted = share_profile == Some(crate::share::store::PROFILE_RESTRICTED);
     let share_bot = share_profile.is_some();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = if api_bot { (Some(b.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::config::api_bot_defaults(&b.kind).map_or(crate::config::API_BOT_MODEL, |d| d.0)).to_string()), None) } else { remap_model(&b.kind, b.model.as_deref()) };
-    // 受限 bot 沒指定模型：用 `/api/models` 當下列出的最新 Opus（使用者 2026-10-03：不寫死，CLI 的帳號預設會跑到舊版）。
     let model = match (restricted, model) {
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
         (_, m) => m,
@@ -2704,12 +2540,10 @@ async fn create_bot(
         if c.len() > 128 || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.:".contains(ch)) {
             return Err(LcError::Bad("client_request_id must be 1..=128 chars of [A-Za-z0-9-_.:]".into()));
         }
-        // 這個前綴是 daemon 在 setup 角色 bot 時自己留的記號：使用者給了就等於偽造「這顆是 setup 建的」。
         if c.starts_with(crate::supervisor::bot_requests::ROLE_SETUP_MARK_PREFIX) {
             return Err(LcError::Bad(format!("client_request_id must not start with `{}` (reserved)", crate::supervisor::bot_requests::ROLE_SETUP_MARK_PREFIX)));
         }
     }
-    // 請求指紋＝會影響這顆 bot 的欄位；`name_auto` 時名字只是提示（重送時瀏覽器的清單已同步，算出來的名字本來就會變）。
     let create_fingerprint = create_request_id.as_ref().map(|_| {
         json!([
             pid,
@@ -2735,13 +2569,9 @@ async fn create_bot(
     });
     let replayed: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
     let reused: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-    // child（reconcile 認領的）不在 config.toml，但 DB 的 `(project_id, name)` 唯一約束算它們。
-    // 只看 config 會先寫進檔、投影再爆，之後這個專案每次新增／修改都 502（#654）。
     let db_names = live_bot_names(&app.db, &pid).await.map_err(any_err)?;
-    // 受限 bot：config 寫進去之前先記下來，投影出來的那一列從第一次啟動起就在籠子裡（沒有當一般 bot 起來的空窗）。
     let workspace = match &share_folder {
         Some(folder) => {
-            // 同一個請求鍵的重送：新資料夾已經是上一次建的，照用不回 409（真正的判斷在下面 config 鎖裡）。
             let replay = match &create_request_id {
                 Some(c) => app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|x| x.create_request_id.as_deref() == Some(c.as_str())),
                 None => false,
@@ -2753,8 +2583,6 @@ async fn create_bot(
         }
         None => None,
     };
-    // #2002：身份刪除與引用寫入互斥。admit 取在遠端 I/O（reserve_share_bot_on）之後、驗證之前，持有到 config 提交完；
-    // 取到後重驗（刪除剛完成＝快取已無此身份 → 404 identity）。
     let identity_admit = crate::identity_fence::admit(&host, &b.kind, identity.as_deref()).await;
     if identity_admit.is_some() {
         if let Err(e) = check_identity(&app, &host, &identity, &b.kind).await {
@@ -2772,7 +2600,6 @@ async fn create_bot(
             .iter_mut()
             .find(|p| p.id.as_deref() == Some(pid.as_str()))
             .ok_or_else(|| anyhow::anyhow!("no-project"))?;
-        // 同一個請求鍵：在 config 鎖裡查（跟寫入同一個原子步驟），重送不會並發建出兩顆。
         if let Some(c) = &create_request_id {
             if let Some(prev) = p.bots.iter().find(|x| x.create_request_id.as_deref() == Some(c.as_str())) {
                 if prev.create_fingerprint == create_fingerprint {
@@ -2803,7 +2630,6 @@ async fn create_bot(
             persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
             args: b.args.clone(),
             autostart: b.autostart,
-            // 分享入口靠 hook 收 bot 的回覆：分享用 bot（兩種）一律注入。
             inject_hooks: b.inject_hooks.unwrap_or(true) || share_bot,
             auto_approve: b.auto_approve.unwrap_or(true) && !restricted,
             identity: identity.clone(),
@@ -2820,7 +2646,6 @@ async fn create_bot(
     if let Some((ws, created_folder)) = &workspace {
         let created = res.is_ok() && replayed.lock().unwrap().is_none();
         crate::share::admin::finish_share_bot_on(&app, &host, &id, ws, *created_folder, created).await;
-        // 遠端的保留標記（本機的 `finish_restricted` 已經放了）。
         if created && host != crate::config::LOCAL_HOST {
             crate::share::keep_new_remote_share(&app, &id).await;
         }
@@ -2841,7 +2666,6 @@ async fn create_bot(
         Err(e) => return Err(projection_err(e)),
     }
     if let Some((bot_id, name)) = replayed.into_inner().unwrap() {
-        // 重送：拿回原本那顆，什麼都沒新建、不推事件。
         let mut body = json!({"bot_id": bot_id, "name": name, "replayed": true});
         if let Some(value) = &remapped { body["remapped"] = value.clone(); }
         return Ok((StatusCode::OK, Json(body)).into_response());
@@ -2924,16 +2748,12 @@ async fn set_order(State(app): State<Arc<App>>, Json(b): Json<SetOrder>) -> Resu
     if b.projects.is_none() && b.bots.is_none() && b.primary.is_none() {
         return Err(LcError::Bad("order: projects、bots 或 primary 至少要有一個".into()));
     }
-    // 兩個 store 不可能同一個交易：`primary` 只存 DB、projects／bots 寫 config.toml；混送要嘛半套生效、要嘛回滾也可能失敗。
-    // 一律 400、什麼都不寫，分成兩次送（#350）。
     if b.primary.is_some() && (b.projects.is_some() || b.bots.is_some()) {
         return Err(LcError::Bad("order: primary（只存 DB）不能跟 projects／bots（寫 config.toml）同一個請求送，請分成兩次".into()));
     }
-    // 先驗再動：點名了不存在的 bot，config 那邊的順序也不寫。
     if let Some(ids) = &b.primary {
         crate::primary_order::validate(&app.db, ids).await?;
     }
-    // 只有主力順序（`primary`）的請求不碰 config.toml：它只存 DB。
     if b.projects.is_some() || b.bots.is_some() {
         crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
             if let Some(want) = &b.projects {
@@ -3135,7 +2955,6 @@ async fn fleet_operator_over(app: &Arc<App>, caller: &str, method: &str, parts: 
     if !is_fleet_operator(app, caller).await? {
         return Ok(false);
     }
-    // 讀不到就當成分享用 bot（fail closed）。
     if !matches!(db::is_share_bot(&app.db, &target.id).await, Ok(false)) {
         return Ok(false);
     }
@@ -3211,9 +3030,7 @@ fn manager_lifecycle_op(method: &str, parts: &[impl AsRef<str>], target: &db::Bo
     match (method, parts.len(), sub) {
         ("POST", 4, Some("start" | "restart")) => target.manager_use != 0,
         ("POST", 4, Some("stop")) => matches!(target.role.as_deref(), Some("executor" | "specialist")),
-        // 刪除：只限自己專案的頂層執行者／專家（child 跟著母 bot 走，不另外刪）。
         ("DELETE", 3, None) => target.parent_bot_id.is_none() && matches!(target.role.as_deref(), Some("executor" | "specialist")),
-        // 改模型／強度／快速／名稱：頂層、非管理者的成員；欄位範圍在 patch_bot 再驗（只收這四個）。
         ("PATCH", 3, None) => target.parent_bot_id.is_none() && target.role.as_deref() != Some("manager"),
         _ => false,
     }
@@ -3290,14 +3107,11 @@ async fn hire_member(
     if role == "specialist" && track.is_none() {
         return Err(LcError::BadValue(json!({"error": "track_required"})));
     }
-    // fork：先驗來源（同專案、同主機、codex、有 session），新 member 也得是 codex。
     let planned_kind = b.kind.as_deref().unwrap_or_default();
     if let Some(source) = b.fork_from.as_deref() {
         validate_fork_source(&app, &project, source, planned_kind).await?;
     }
     let kind = b.kind.clone().ok_or_else(|| LcError::Bad("kind is required".into()))?;
-    // fork：沒給的 model／effort／identity 從來源 bot 繼承（2026-11-08：tr3 沒帶 --effort，落在獨立群集）。
-    // 逐欄判斷：呼叫端有給的一律照給，只補空的。
     let source = match b.fork_from.as_deref() {
         Some(src) => db::bot(&app.db, src).await.map_err(any_err)?,
         None => None,
@@ -3317,7 +3131,6 @@ async fn hire_member(
     let Some(id) = created["bot_id"].as_str().map(str::to_string) else { return Ok(Response::from_parts(parts, axum::body::Body::from(bytes))) };
     let patch: PatchBot = serde_json::from_value(json!({"role": role, "track": track})).map_err(any_err)?;
     patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
-    // fork 來源只寫進 config，不進 DB。
     if b.fork_from.is_some() {
         let bot_id = id.clone();
         let fork_from = b.fork_from.clone();
@@ -3359,7 +3172,6 @@ async fn put_bot_role(
             if !expert_manager_over(&app, caller, &target).await? || !matches!(role.as_deref(), None | Some("executor" | "advisor" | "specialist")) {
                 return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "manager_role_scope"})));
             }
-            // 管理者只能在設成專家時一併帶 track；其他角色不能順手改 track。
             if role.as_deref() != Some("specialist") && b.track.is_some() {
                 return Err(bot_user_only());
             }
@@ -3375,8 +3187,6 @@ async fn put_bot_role(
     }
     let patch: PatchBot = serde_json::from_value(body).map_err(any_err)?;
     let response = patch_bot(State(app.clone()), Path(id.clone()), Extension(RequestPrincipal::User), Json(patch)).await?;
-    // A child cannot be restarted in place (its parent respawns it and that makes a new record), so its
-    // role applies to the running child immediately; the parent tells the child what the role means.
     if let Some(bot) = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.managed_by == "child") {
         if let (Some(run), Some(project)) = (db::active_run(&app.db, &id).await.map_err(any_err)?, db::project(&app.db, &bot.project_id).await.map_err(any_err)?) {
             let policy = format!("{}:{}:{}:{}", project.id, project.host, project.mode, bot.role.as_deref().unwrap_or(""));
@@ -3397,9 +3207,7 @@ async fn patch_bot(
     if (b.identity.is_some() || b.env.is_some() || b.role.is_some() || b.manager_use.is_some() || b.track.is_some() || b.runtime_override.is_some()) && principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
-    // 專家管理者（非 AGM 角色的 Bot，含代班的副管理者）只能改 model／effort／fast／name（使用者 2026-11-08）。
     if let RequestPrincipal::Bot(caller) = &principal {
-        // 目標不在自己的 bot 樹裡（＝靠管理者或 fleet operator 的放行進來的）也一樣只收這四個，就算 caller 另有 AGM 角色。
         if (b.persona.is_some() || b.args.is_some() || b.autostart.is_some() || b.inject_hooks.is_some() || b.auto_approve.is_some() || b.is_primary.is_some())
             && (crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_none() || !bot_descends_from_or_is(&app, caller, &id).await?)
         {
@@ -3407,7 +3215,6 @@ async fn patch_bot(
         }
     }
     if let Some(Some(role)) = &b.role { if !matches!(role.as_str(), "manager" | "executor" | "advisor" | "specialist" | "scheduler") { return Err(LcError::Bad("invalid role".into())); } }
-    // 專家（specialist）一定要有 track：合併改動後的結果（角色＋track）必須有 track，否則 400。
     if b.role.is_some() || b.track.is_some() {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         let next_role = match &b.role {
@@ -3472,8 +3279,6 @@ async fn patch_bot(
         || b.track.is_some()
         || b.runtime_override.is_some();
     let mut pre_patch_rev = None;
-    // 改設定之前：active run 還沒記啟動版本就用「改之前」的補記，改完才看得出過期（#353）。
-    // 這是設定提交的 admission prerequisite；任何讀取或補記不確定都不可以繼續寫 TOML／DB。
     if restart_relevant {
         if let Some(r) = &active {
             let before = match db::bot(&app.db, &id).await {
@@ -3515,7 +3320,6 @@ async fn patch_bot(
         None => None,
         Some(e) => Some(crate::config::normalize_effort(&kind, e.as_deref()).map_err(LcError::Bad)?),
     };
-    // openai-api：改模型或強度時，生效中的（模型，強度）組合必須在該模型的清單裡（astra／sol 不收 none）。
     if b.model.is_some() || effort.is_some() {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         if current.kind == crate::config::OPENAI_API_KIND {
@@ -3535,7 +3339,6 @@ async fn patch_bot(
             }
         }
     }
-    // 執行期覆寫：看得到 kind／model（PATCH 帶的 model 優先，否則用現在存的），用同一套 context 視窗與 TTL 規則驗證，存正規化後的物件。
     if let Some(Some(ro)) = &b.runtime_override {
         let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
         let model = match &b.model {
@@ -3546,7 +3349,6 @@ async fn patch_bot(
         let normalized = crate::role_policy::validate_bot(&kind, &model, ro)?;
         b.runtime_override = Some(Some(normalized));
     }
-    // #2002：admit 在驗證之前取、持有到 config／DB 提交完（見 `identity_fence`）。
     let mut identity_admit = None;
     if let Some(Some(name)) = &b.identity {
         if !name.trim().is_empty() {
@@ -3557,16 +3359,12 @@ async fn patch_bot(
             crate::lifecycle::race_point::hit("patch_bot_after_identity_admit", &id).await;
         }
     }
-    // `primary` 只存 DB、其他欄位寫 config.toml：兩個 store 不可能同一個交易，混送半套生效的風險比多送一次請求大得多（#350）。
-    // config 裡的 bot（managed_by=user）混送一律 400、什麼都不寫；child bot 全在 DB，不受這條限制。
     if b.is_primary.is_some() && (restart_relevant || b.name.is_some() || b.autostart.is_some()) {
         let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
         if managed_by == "user" {
             return Err(LcError::Bad("primary（只存 DB）不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個請求送，請分成兩次 PATCH".into()));
         }
     }
-    // child bot 不在 config.toml，cfg.update 只會 404（2026-09-09 使用者：child 身分改不了）→ 直接改 DB。
-    // child 的 primary 與其他欄位都在 bots 表，交給同一條 UPDATE，避免失敗時留下半套狀態。
     let managed_by = db::bot(&app.db, &id).await.map_err(any_err)?.map(|x| x.managed_by).unwrap_or_default();
     if managed_by != "user" && b.role.as_ref().and_then(|r| r.as_deref()) == Some("manager") { return Err(LcError::Bad("child cannot be manager".into())); }
     if managed_by == "user" {
@@ -3647,16 +3445,13 @@ async fn patch_bot(
     drop(identity_admit);
     app.emit("bot_changed", json!({"bot_id": id})).await;
     if b.name.is_some() {
-        // 遠端主機要經 ssh，不讓改名的回應等它。
         let (app, id) = (app.clone(), id.clone());
         tokio::spawn(async move { relabel_tab(&app, &id).await });
     }
-    // 只動可用 slash 指令當場套用的欄位就不用重啟；grok `/model <id> <effort>` 可順帶 effort。
     let extras = |skip: &[&str]| {
         let hit = |name: &str, present: bool| present && !skip.contains(&name);
         hit("model", b.model.is_some())
             || hit("effort", b.effort.is_some())
-            // `fast` 也要吃 `skip`（SPEC §4.4a），否則只改 fast 永遠回 needs_restart（2026-09-09 實測）。
             || hit("fast", b.fast.is_some())
             || b.persona.is_some()
             || b.args.is_some()
@@ -3665,7 +3460,6 @@ async fn patch_bot(
             || b.auto_approve.is_some()
             || b.inject_hooks.is_some()
     };
-    // codex 可一次收 model / effort / fast 任意組合（SPEC §4.4a）；claude / grok 的 slash 指令一次一個值。
     let live_fields: Vec<&str> = match kind.as_str() {
         "codex" if !extras(&["model", "effort", "fast"]) => ["model", "effort", "fast"]
             .into_iter()
@@ -3681,9 +3475,7 @@ async fn patch_bot(
         "claude" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
         _ => Vec::new(),
     };
-    // 失敗要說得出哪一步（2026-09-13 使用者：codex 改 effort 靜默落回重啟）。只在真的試過時才出現。
     let mut live_revisions = None;
-    // 回合中改 codex 的 model／effort 時，live 套用會按 Esc 停下回合、套用後送 continue 接著跑（#1681）：這次有沒有按。
     let mut live_interrupted = false;
     let live = if needs_restart && !live_fields.is_empty() {
         let target_rev = match db::bot(&app.db, &id).await {
@@ -3720,15 +3512,12 @@ async fn patch_bot(
     } else {
         None
     };
-    // codex 的 fast（也含 model／effort）忙的時候不重啟：記下來，下一次 idle 再套（#393，lifecycle/deferred_live.rs）。
-    // claude／grok 也一樣（#712），但它們一次只能排一個欄位（`defer_live` 的 single_field）。
     let busy = matches!(&live, Some(lifecycle::LiveApplyOutcome::Failed(why)) if lifecycle::is_busy_reason(why));
     let deferred = busy
         && live_revisions.as_ref().is_some_and(|(baseline_rev, target_rev)| {
             lifecycle::defer_live(&id, &live_fields, baseline_rev, target_rev, kind != "codex")
         });
     if deferred {
-        // 上面那則 bot_changed 送出時還沒排上：前端要再拉一次 state 才看得到 `live_apply_deferred`。
         app.emit("bot_changed", json!({"bot_id": id})).await;
     }
     let needs_restart = match &live {
@@ -3743,8 +3532,6 @@ async fn patch_bot(
             lifecycle::LiveApplyOutcome::BookkeepingPending { .. }
             | lifecycle::LiveApplyOutcome::Failed(_),
         ) => !deferred,
-        // 沒走當場套用（persona／args 等）：跟 `/state` 同一個判斷（launch_rev），值沒變或改回載入的值就不必重啟。
-        // 讀不到就保守說要重啟。
         None if needs_restart => match (db::bot(&app.db, &id).await, db::active_run(&app.db, &id).await) {
             (Ok(Some(bot)), Ok(Some(run))) => crate::launch_rev::is_stale(&bot, &run),
             _ => true,
@@ -3794,7 +3581,6 @@ async fn preview_get(State(app): State<Arc<App>>, Path(id): Path<String>) -> Res
     Ok(Json(crate::preview::get(&app, &id).await?).into_response())
 }
 async fn preview_start(State(app): State<Arc<App>>, Path(id): Path<String>, body: Bytes) -> Result<Response, LcError> {
-    // body 可有可無（沒帶＝auto）；帶了就要是合法的 JSON。
     let req: crate::preview::StartReq = if body.iter().all(u8::is_ascii_whitespace) {
         Default::default()
     } else {
@@ -3807,17 +3593,11 @@ async fn preview_stop(State(app): State<Arc<App>>, Path(id): Path<String>) -> Re
 }
 
 pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 整個刪除都拿著這顆 bot 與它所有 child 的 per-bot 鎖：start 要同一把，等它拿到時 bot 已經刪了
-    // （NotFound），不會在「定案」和「停機」之間插進來重開一個 run。
-    // 鎖要跟 delete_project 一樣**依 id 排序一次拿齊**：先拿 parent、之後再逐顆拿 child 的話，child id
-    // 排在 parent 前面時會跟 delete_project 互等成死鎖（ULID 不保證 parent 比較小；sol 五輪）。
-    // 2026-09-08: spawned children go with it, else they're sidebar orphans. Deepest first.
     let mut attempt = 0;
     let (children, _guards) = loop {
         let before: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?;
         let ids = std::iter::once(id.clone()).chain(before.iter().map(|c| c.id.clone())).collect();
         let (_, guards) = lock_bots_in_order(&app, ids).await;
-        // 拿鎖的途中又認領了新的 child：它沒被鎖住，放掉重來（不能在持鎖時再補拿，那就又亂了順序）。
         let now: Vec<db::Bot> = descendant_children(&app, &id).await.map_err(any_err)?;
         if now.iter().map(|c| &c.id).eq(before.iter().map(|c| &c.id)) {
             break (now, guards);
@@ -3835,16 +3615,10 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
         return Err(LcError::NotFound("bot".into()));
     }
     let host = db::bot_host(&app.db, &id).await.map_err(any_err)?;
-    // 定案之前先確定讀得到每一顆的 run 狀態：讀不到就 502、什麼都不動，可以原樣再按一次。定案之後才發現讀不到，
-    // 已經是「軟刪了、run 不知道還在不在」，只能保住目錄（#210）。
     for b in std::iter::once(&bot).chain(children.iter()) {
         db::active_run(&app.db, &b.id).await.map_err(any_err)?;
     }
-    // 先定案、再停機（sol 四輪）：會 409 的只有這一步，這時什麼都還沒停；定案之後沒有會失敗回頭的步驟，
-    // 所以不會留下「已停、未刪」。（child 由母 agent 開，daemon 本來就重開不了它，事後回滾做不到。）
-    // 持久 intent（#355 P3）：定案**之前**先 commit（payload＝當時的 child 快照，深的先）；定案之後 daemon 死掉，開機由 `delete_intents::recover_host` 補完。
     let snapshot: Vec<Value> = children.iter().map(|c| json!({"id": c.id, "managed_by": c.managed_by})).collect();
-    // 誰按的刪除：留在 log 與 intent（DB）裡，事後查得到（issue #406：13:28Z 那兩筆就是查不到）。
     let requested_by = crate::config_audit::http_caller();
     tracing::warn!(bot = %bot.name, bot_id = %id, http = %requested_by, "bot delete requested");
     detach(&id, finish_bot_delete(app, id.clone(), bot, host, children, snapshot, requested_by, _guards)).await
@@ -3869,7 +3643,6 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
     crate::api_bot::schedule_retention_after_delete(&app);
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
-    // 輸入框草稿跟著 bot 走（含一併刪掉的 child）。
     let draft_keys: Vec<String> = std::iter::once(&id).chain(children.iter().map(|c| &c.id)).map(|b| format!("bot:{b}")).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
     let mut child_retry = false;
@@ -3877,14 +3650,10 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
         tracing::error!(bot = %bot.name, error = %e, "bot deleted but its share capability could not be revoked; retrying in the background");
         child_retry = true;
     }
-    // 目錄只在「確定沒有 active run」時才 purge（#210）；不確定的留著，列在回應的 `kept_dirs`，下次開機的
-    // `purge_deleted_bot_dirs` 在 run 確定結束之後再收。
     let mut removed_children = Vec::new();
     let mut kept_dirs: Vec<Value> = Vec::new();
     for child in children {
         let settled = stop_for_delete_locked(&app, &child.id).await;
-        // 定案之後不能因為某顆 child 的軟刪寫不進去就 early return（#296）：後面的 child 與母 bot 都還沒停，母 bot 已軟刪、
-        // 沒人會再處理它的 run。失敗就記成保留目錄、背景重試，其餘照做。
         let settled = match soft_delete_child(&app, &child.id).await {
             Ok(()) => settled,
             Err(e) => {
@@ -3903,9 +3672,7 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
         app.emit("bot_changed", json!({"bot_id": child.id})).await;
         removed_children.push(child.id);
     }
-    // 已經拿著全部的鎖：一律用 locked 版（stop_bot 會再拿同一把而卡死）。
     match stop_for_delete_locked(&app, &id).await {
-        // Soft delete; the conversation and its messages stay.
         Ok(()) => {
             lifecycle::purge_bot_dir(&app, &id, &host).await;
         }
@@ -3915,13 +3682,11 @@ async fn finish_bot_delete(app: Arc<App>, id: String, bot: db::Bot, host: String
     if bot.managed_by == "child" {
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     }
-    // intent：有 child 軟刪或 share capability 清理沒寫成就留著、背景補完；否則收成 done。
     if child_retry {
         crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some bot cleanup could not be completed".into());
     } else {
         crate::delete_intents::complete(&app, &intent).await;
     }
-    // 排程不跟著刪：告訴呼叫端哪些排程需要改綁，並通知已開著的列表重讀資格。
     let affected_schedules: Result<Vec<(String, String)>, _> = sqlx::query_as(
         "SELECT id, name FROM schedules WHERE bot_id = ? AND deleted_at IS NULL ORDER BY id",
     ).bind(&id).fetch_all(&app.db).await;
@@ -3973,7 +3738,6 @@ pub(crate) async fn stop_for_delete_locked(app: &Arc<App>, bot_id: &str) -> Resu
     let mut forced = false;
     if let Err(e) = lifecycle::stop_bot_locked(app, bot_id).await {
         tracing::warn!(bot = %bot_id, error = ?e, "could not stop the bot while deleting it; ending its run");
-        // 讀不到就收不掉：往下由最後那一次讀取判定（讀不到＝不確定，目錄留著）。
         if let Ok(Some(run)) = db::active_run(&app.db, bot_id).await {
             lifecycle::mark_run_exited(app, &run.id, "the bot was deleted while its host was unreachable").await;
             forced = true;
@@ -4034,8 +3798,6 @@ where
 }
 
 pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：child 同時拿 parent 鎖，避免 parent delete 的 child 快照漏掉
-    // 正在還原的 child。依 id 排序一次拿齊，跟 delete_bot／delete_project 的多 bot 鎖順序一致。
     let mut attempt = 0;
     let (bot, _guards) = loop {
         let before = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -4057,9 +3819,7 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
     }
     crate::handoff::refuse(&app.db, &id).await?;
-    // A restored restricted bot keeps its profile, but a public capability from before deletion never returns.
     crate::share::revoke_bot_share(&app, &id).await.map_err(any_err)?;
-    // 放棄的 intent 只在還原真的成功時才寫（下面各分支、驗證都過之後）：被 409 擋下的還原不能先動它（交易範圍）。
     let taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL AND id <> ?",
     )
@@ -4076,7 +3836,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         ));
     }
     if bot.managed_by != "user" {
-        // child 的專案或母 bot 已經刪了：還原只會得到一顆誰都看不到的活 bot（#298）。
         let project_live = db::project(&app.db, &bot.project_id).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none());
         let parent_live = match &bot.parent_bot_id {
             Some(pid) => db::bot(&app.db, pid).await.map_err(any_err)?.is_some_and(|p| p.deleted_at.is_none()),
@@ -4087,8 +3846,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         }
         #[cfg(test)]
         crate::lifecycle::race_point::hit("restore_child_after_liveness_check", &id).await;
-        // A child restored by AGM is reopened by its parent in the existing pane; allow ten minutes
-        // for that asynchronous hand-off before reconcile applies the normal retirement rule.
         let mut tx = app.db.begin().await.map_err(any_err)?;
         crate::child_reconcile_safety::record_retirement_grace_on(&mut tx, &id).await.map_err(any_err)?;
         let changed = sqlx::query(
@@ -4105,11 +3862,9 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             tx.rollback().await.map_err(any_err)?;
             return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
         }
-        // 還原成功才放棄刪除前排著的 restart，跟復活在同一個交易裡。
         abandon_pending_restart(&mut *tx, &id).await.map_err(any_err)?;
         tx.commit().await.map_err(any_err)?;
     } else {
-        // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身份起。
         let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let env = serde_json::from_str(&bot.env_json).map_err(|e| LcError::conflict("bot env_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
         let entry = crate::config::BotCfg { role: None, manager_use: true, track: None, runtime_override: None, fork_from: None,
@@ -4143,7 +3898,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         })
         .await
         .map_err(|e| {
-            // 專案已刪＝呼叫端的前提不成立（還原不回去、重試也一樣）：409，不是 502 upstream。
             if e.to_string() == "project-gone" {
                 LcError::conflict("the project of this bot is deleted", json!({"bot_id": id, "project_id": bot.project_id}))
             } else {
@@ -4152,7 +3906,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         })?;
         abandon_pending_restart(&app.db, &id).await.map_err(any_err)?;
     }
-    // 刪除時搬進回收區的目錄搬回來（issue #406）。本機才有；搬不回來不擋還原（下次啟動會重建需要的檔）。
     if let Ok(dir) = app.bot_dir(&id) {
         match crate::bot_trash::restore(&app.data_dir, &id, &dir) {
             Ok(Some(from)) => tracing::info!(bot = %id, from = %from.display(), "restored bot config dir from bots-trash"),
@@ -4160,7 +3913,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot config dir from bots-trash"),
         }
     }
-    // 附件副本也是刪除時一起收進回收區的（#465）：不搬回來的話還原後對話還在、縮圖全破。
     {
         let att = crate::bot_trash::attachments_dir(&app.data_dir, &id);
         match crate::bot_trash::restore_kind(&app.data_dir, &id, Some(crate::bot_trash::ATTACHMENTS), &att) {
@@ -4169,8 +3921,6 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot attachments from bots-trash"),
         }
     }
-    // 受限分享用 bot 的工作目錄（issue #828）：刪除時也是收進回收區的。
-    // 還原時搬回；若已過期或被淘汰則重建乾淨的工作目錄與 inbox，舊檔案不再重現。
     if let Ok(Some(ws)) = crate::share::store::restricted_workspace(&app.db, &id).await {
         if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
             match crate::bot_trash::restore_kind(&app.data_dir, &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
@@ -4211,8 +3961,6 @@ struct NewHost {
     shared_session: Option<bool>,
 }
 
-// A host config write and its HostManager update are one mutation. Serialize create/update and
-// delete so a concurrent same-name request cannot remove or install a stale connection afterward.
 static HOST_CONFIG_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 這次更新會不會改變「這個名字指到哪台機器或 SSH 身份」。`ssh_opts` 可以改 `User`、`IdentityFile` 等登入身份，
@@ -4231,7 +3979,6 @@ async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Pro
 /// their live bot rows and active runs block host removal/repointing.
 async fn host_bots_requiring_attention(app: &Arc<App>, host: &str) -> Result<Vec<String>, LcError> {
     let require_remote_purge = !crate::shared_host::is_shared(app, host).await;
-    // 欠著目錄的 bot 歸屬看記號（#1320）：專案搬走之後，舊主機的債仍擋舊主機的刪除／換指，不能只看 `projects.host`。
     Ok(sqlx::query_scalar(
         "SELECT b.id FROM bots b
            JOIN projects p ON p.id = b.project_id
@@ -4275,15 +4022,12 @@ async fn create_host(
         return Err(LcError::Bad(why));
     }
     let host_mutation = HOST_CONFIG_MUTATION.lock().await;
-    // 更新既有主機時，沒帶的選填欄位一律沿用舊值（共用 session 是安全開關 #709；remote_path 被清掉會讓遠端 PATH 找不到 herdr，#1752）。
-    // 新主機才用預設值。
     let prev = app.cfg.get().await.hosts.into_iter().find(|h| h.name == b.name);
     let cfg = HostCfg { daemon_url: prev.as_ref().and_then(|p| p.daemon_url.clone()),
         name: b.name.clone(),
         ssh: b.ssh.trim().to_string(),
         ssh_port: b.ssh_port.or(prev.as_ref().map(|p| p.ssh_port)).unwrap_or(22),
         ssh_opts: b.ssh_opts.or_else(|| prev.as_ref().map(|p| p.ssh_opts.clone())).unwrap_or_default(),
-        // trim 跟 `ssh` 同一條規矩：存進 config 的字就是之後直接交給 herdr 的字。
         herdr_session: b
             .herdr_session
             .map(|s| s.trim().to_string())
@@ -4293,11 +4037,6 @@ async fn create_host(
         remote_path: b.remote_path.or_else(|| prev.as_ref().map(|p| p.remote_path.clone())).unwrap_or_default(),
         shared_session: b.shared_session.or(prev.as_ref().map(|p| p.shared_session)).unwrap_or(false),
     };
-    // 這支同時是新增與**更新**（docs/API.md）。更新到「指去另一台機器」時要跟 `delete_host` 一樣先確認
-    // 主機上沒有活著的專案（issue #544）：`apply_config` 會把連線整個換掉，但 `runs` 一列都不動——
-    // 那些 run 還帶著**舊那台**開出來的 pane id，接下來 daemon 會拿它們去問新那台。輕則 pane 不存在、
-    // run 被判成不見了收掉；重則新機器上剛好有同樣的 pane id（herdr 的 id 是每個實例自己編的），
-    // prompt 與按鍵就送進一顆完全不相干的 pane。刪掉只是「連線沒了」，改掉是「連線還在、但接到別台」。
     let existing = app.cfg.get().await.hosts.into_iter().find(|h| h.name == cfg.name);
     let is_repoint = existing.as_ref().is_some_and(|old| repoints_host(old, &cfg));
     let repoint_bots = if is_repoint {
@@ -4327,8 +4066,6 @@ async fn create_host(
     let update = app
         .cfg
         .update(move |f| {
-            // Project registration/deletion also commits through this config lock. Recheck there
-            // so a project that lands after the async DB snapshot cannot slip past confirmation.
             if !confirm_repoint
                 && f.hosts.iter().find(|h| h.name == c2.name).is_some_and(|old| repoints_host(old, &c2))
                 && f.projects.iter().any(|p| p.host == c2.name)
@@ -4367,7 +4104,6 @@ async fn create_host(
                 }),
             ));
         }
-        // 設定不合法是請求的問題（400 config_invalid），不是上游壞掉（#1568）。
         return Err(cfg_err(e));
     }
     let hosts = app.cfg.get().await.hosts;
@@ -4403,9 +4139,6 @@ async fn delete_host(
             return Err(LcError::conflict("host still used by projects", json!({"project_id": p.id})));
         }
     }
-    // Project deletion may leave a soft-deleted bot's remote directory (including its herdr/cargo shims)
-    // waiting for `remote_purge`, or a late child may still have an active run. Removing the host row
-    // would discard the only route needed to stop that run and finish cleaning its directory.
     let pending_bots = host_bots_requiring_attention(&app, &name).await?;
     if !pending_bots.is_empty() {
         return Err(LcError::conflict(
@@ -4422,8 +4155,6 @@ async fn delete_host(
     let remove = app
         .cfg
         .update(move |f| {
-            // Project registration shares this config lock. Recheck while holding it so a project
-            // committed after the DB snapshot cannot be left pointing at a host we just removed.
             if f.projects.iter().any(|p| p.host == n2) {
                 anyhow::bail!("host_still_used_by_projects");
             }
@@ -4768,13 +4499,11 @@ async fn logout_kind_default(
     }).await;
     let shell = opened
         .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before logout started")))??;
-    // 預設帳號沒有身份名可重驗：watcher 只負責收 pane；登出完成後這裡重新偵測整台主機。
     crate::tools::spawn_identity_login_watch(app.clone(), name.clone(), shell.pane_id.clone(), String::new(), kind.clone(), true, fence);
     let pane = shell.pane_id.clone();
     let host = name.clone();
     let app_for_detect = app.clone();
     tokio::spawn(async move {
-        // CLI 結束（pane 被 watcher 收掉）之後才重偵測；最多等 3 分鐘。
         for _ in 0..180 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let gone = match app_for_detect.hosts.get(&host).await {
@@ -4801,7 +4530,6 @@ async fn install_agy(
     crate::runners::upstream_update::clear_attempt(&attempts_file, &name, "agy");
     match crate::agy_install::install(&app, &name).await {
         Ok(done) => {
-            // 升好了：上游更新快照立刻跟上，header／設定頁不用等下一輪 10 分鐘巡邏才收起「可更新」。
             crate::upstream_update::note_installed(app.as_ref(), "agy", &name, &done.to).await;
             Ok(Json(serde_json::to_value(done).unwrap_or(Value::Null)))
         }
@@ -4817,8 +4545,6 @@ async fn install_agy(
 }
 
 async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
-    // 沒寫 host 的身份在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
-    // 開 pane 之前記下主機權威，watcher 只對這一條連線收尾（#347）。
     let Some(fence) = app.hosts.fence(&name).await else {
         return Err(LcError::NotFound("host".into()));
     };
@@ -4839,7 +4565,6 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         .map(|(k, v)| (k.clone(), crate::config::expand_home(v, &home)))
         .collect::<BTreeMap<_, _>>();
     if idn.kind == "agy" {
-        // 登入／登出都在那個身份的 HOME 底下跑：先補齊影子家目錄。
         if let Err(e) = crate::tools::ensure_agy_shadow_home(&fence, &idn.env, &home).await {
             tracing::warn!(host = %name, identity = %identity, error = %e, "agy shadow HOME could not be prepared");
         }
@@ -4851,7 +4576,6 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         crate::tools::identity_login_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
-    // claude（貼 code）與 codex（裝置碼）的登入 pane 都登記，網頁才拿得到網址與碼。
     let login_reservation = if !logout && matches!(idn.kind.as_str(), "claude" | "codex") {
         crate::runners::login_assist::prune_dead(&app, &name, &identity).await;
         Some(crate::runners::login_assist::reserve(&app, &name, &identity)?)
@@ -5110,7 +4834,6 @@ fn openai_api_bot_models() -> Value {
         "display_name": match *model { "gpt-6.2-astra" => "GPT-6.2 Astra", "gpt-6.2-sol" => "GPT-6.2 Sol", _ => "GPT-6 Luna" },
         "description": "", "is_default": *model == crate::config::OPENAI_API_BOT_MODEL,
         "default_effort": crate::config::OPENAI_API_BOT_DEFAULT_EFFORT,
-        // effort 依模型：astra／sol 不收 none（官方模型頁）。
         "efforts": if *model == "gpt-6-luna" { crate::config::OPENAI_USE_EFFORTS } else { crate::config::OPENAI_NO_NONE_EFFORTS },
         "service_tiers": [],
     })).collect();
@@ -5123,7 +4846,6 @@ async fn get_models(
     Query(q): Query<ModelsQuery>,
 ) -> Result<Json<Value>, LcError> {
     if q.kind == crate::config::API_BOT_KIND {
-        // 沒有 CLI 可問：清單是寫死的一筆（harness 只會送這個模型），不看 host／身份、也不走快取。
         return Ok(Json(api_bot_models()));
     }
     if q.kind == crate::config::OPENAI_API_KIND {
@@ -5136,14 +4858,12 @@ async fn get_models(
     if app.hosts.get(&host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
-    // agy 內建的預設帳號（`ag0`，舊資料 `agy`）＝不指定身份：快取、背景刷新、回應都用同一格（`runners::models::list` 同一條）。
     let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty()).filter(|s| !crate::tools::is_builtin_default_identity(&q.kind, s));
     if let RequestPrincipal::Bot(bot_id) | RequestPrincipal::Child { child_id: bot_id, .. } = &principal {
         if matches!(&principal, RequestPrincipal::Child { .. }) || crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(any_err)?.is_none() {
             if let Some(cached) = crate::models::cached(&app, &host, &q.kind, identity).await {
                 return Ok(Json(cached));
             }
-            // #1890：未命中就由 daemon 在背景排一趟刷新（single-flight、每格每分鐘一次、失敗退避）；這次請求仍只回 503。
             let refresh = crate::runners::models_refresh::on_cache_miss(&app, &host, &q.kind, identity).await;
             return Err(LcError::Unavailable(json!({
                 "error": "model_cache_miss",
@@ -5214,7 +4934,6 @@ async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuer
     }
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let pattern = format!("%{}%", like_escape(needle));
-    // 已刪 bot 仍在結果裡（總管查證據要），但活的排前面：命中較多的已刪 bot 不能把活 bot 擠出 `limit`（#766）。
     let rows: Vec<(String, bool, i64, String)> = sqlx::query_as(
         r#"SELECT c.bot_id, b.deleted_at IS NOT NULL AS bot_deleted, COUNT(*) AS hits,
                   (SELECT m2.content FROM messages m2
@@ -5312,7 +5031,6 @@ async fn kill_mem_process(State(app): State<Arc<App>>, Json(body): Json<Value>) 
         Ok(Err(crate::memproc::KillDenied::NotInTree)) => Err(LcError::Bad(format!("pid {pid} 不在 {host} 的 herdr 樹裡"))),
         Ok(Err(crate::memproc::KillDenied::Herdr)) => Err(LcError::Bad("不能砍 herdr 本身".into())),
         Ok(Err(crate::memproc::KillDenied::Daemon)) => Err(LcError::Bad("不能砍 AG Man 自己（或它開的 ssh／helper）".into())),
-        // 什麼都沒送：那個 pid 在重新取樣與送訊號之間換了行程。重新整理清單再決定。
         Ok(Err(crate::memproc::KillDenied::PidChanged)) => Err(LcError::conflict(
             "pid_changed",
             json!({"pid": pid, "message": "這個 pid 已經不是剛才那一顆行程了，沒有送出任何訊號；重新整理清單再試"}),
@@ -5347,7 +5065,6 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
             }
             None => crate::quota::pollable_hosts(&app).await,
         };
-        // 各主機併發（`quota::for_each_host`，跟背景輪詢同一份），同一台的三個 kind 也併發；各自的 probe_lock 照舊。
         let app2 = app.clone();
         let job = tokio::spawn(async move {
             crate::quota::for_each_host(hosts, move |host| {
@@ -5375,7 +5092,6 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
     crate::reset_offer_snooze::annotate(&app.data_dir, &mut snap, chrono::Utc::now());
     let mut resp = Json(snap).into_response();
     if pending {
-        // body 是 quota key 的 map，不能塞旗標進去（前端會把它當成一格額度）：用 header 說「還有探測在背景跑」。
         resp.headers_mut().insert("x-am-quota-refresh", axum::http::HeaderValue::from_static("pending"));
     }
     Ok(resp)
@@ -5517,11 +5233,9 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
     if b.name == crate::tools::AGY_DEFAULT_IDENTITY {
-        // `ag0` 是內建的 agy 預設帳號名（每台都有、沒有 env）；再建一筆同名的會讓「ag0＝預設帳號」不成立。
         return Err(LcError::conflict("identity name is reserved", json!({"name": b.name, "message": "ag0 是內建的 agy 預設帳號，不能另建同名身份"})));
     }
     if b.kind == "agy" {
-        // agy 沒有設定目錄變數，身份＝換 `HOME`（影子家目錄）；沒帶、或指回真家目錄＝其實是預設帳號，擋掉免得兩個身份共用一份登入。
         let home = crate::tools::agy_identity_home(&b.env);
         if home.is_none() || matches!(home, Some("~" | "$HOME" | "${HOME}")) {
             return Err(LcError::Bad("agy identity needs HOME=<directory> in env (e.g. HOME=$HOME/.agy-b); agy has no config-dir variable, so an identity is a separate HOME".into()));
@@ -5539,7 +5253,6 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     }
     let cfg = IdentityCfg { name: b.name.clone(), kind: b.kind.clone(), host, env: b.env.clone(), args: b.args.clone() };
     let res = crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
-        // 鍵是 `(host, name)`：同一個名字可以在不同主機各有一份（同名不同帳號正是 §16.2 的前提）。
         if f.identities.iter().any(|i| i.name == cfg.name && i.host_or_local() == cfg.host_or_local()) {
             anyhow::bail!("duplicate");
         }
@@ -5556,7 +5269,6 @@ async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>
     }
     forget_identity_models(&app, &b.name).await;
     if b.kind == "agy" {
-        // 先把影子家目錄建好（只補缺的連結）：登入／探測／啟動 bot 都從這個目錄走。其他主機在第一次用到時補。
         let host_name = b.host.clone().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
         if let Some(fence) = app.hosts.fence(&host_name).await {
             if let Ok(home) = crate::hosts::home_for_fence(&fence).await {
@@ -5592,7 +5304,6 @@ fn hostless_identity_in_effect(
     crate::tools::merge_identities(config, host, Some(shell.unwrap_or_default()))
         .into_iter()
         .find(|(i, _)| i.name == name)
-        // shell 讀到的 `ccN` 也沒有 host：要看來源，不能只看 `is_hostless`。
         .is_some_and(|(i, source)| source == crate::tools::SOURCE_CONFIG && i.is_hostless())
 }
 
@@ -5603,14 +5314,11 @@ async fn delete_identity(
 ) -> Result<Response, LcError> {
     let host = q.host.as_deref().map(str::trim).filter(|h| !h.is_empty()).unwrap_or(crate::config::LOCAL_HOST).to_string();
     let cfg = app.cfg.get().await;
-    // 刪本機那一筆時，沒寫 host 的那份也一起刪（`host_or_local`）；它在遠端也適用（`tools::merge_identities` 第 4 條）。
     let removing_hostless = host == crate::config::LOCAL_HOST && cfg.identities.iter().any(|i| i.name == name && i.is_hostless());
     for b in db::live_bots(&app.db).await.map_err(any_err)? {
         if b.identity.as_deref() != Some(name.as_str()) {
             continue;
         }
-        // 同一台的 bot 還在用它。同名的 `cc1` 在別台通常是別的帳號——除非那台用的正是這筆沒寫 host 的。
-        // 讀不到某顆 bot 的 host 就不刪（#243）：當成 local 可能放行「遠端 bot 還在用」的 identity。
         let bot_host = db::bot_host(&app.db, &b.id).await.map_err(any_err)?;
         let shell = app.tools.lock().await.get(&bot_host).map(|t| t.shell_identities.clone());
         if bot_host == host
@@ -5621,7 +5329,6 @@ async fn delete_identity(
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_identity_after_check", &name).await;
-    // 被刪那一筆的 kind（刪除前的設定裡找；找不到＝本來就沒有這筆，額度 key 不必動）（#1350）。
     let removed_kind = cfg.identities.iter().find(|i| i.name == name && i.host_or_local() == host).map(|i| i.kind.clone());
     let (n2, h2) = (name.clone(), host.clone());
     crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
@@ -5631,16 +5338,12 @@ async fn delete_identity(
     .await
     .map_err(|e| {
         if is_unknown_identity(&e) {
-            // 查完之後、刪除之前有 bot 開始用它：config 鎖裡的驗證擋下來了（什麼都沒刪）。
             LcError::conflict("identity still used by bots", json!({"host": host, "detail": "a bot started using it while it was being deleted"}))
         } else {
             projection_err(e)
         }
     })?;
-    // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
-    // 只動受影響的那幾台的快取：被刪的那一台；刪的是沒寫 host 的那筆時，還靠它的每一台（自己沒有明寫同名的）。
     let cfg_after = app.cfg.get().await;
-    // 要忘掉的額度 key（#1350）：`<kind>:<name>`，只在這個身份真的不再生效的那幾台。鎖放掉之後才清（清它會推事件）。
     let mut forget: Vec<(String, String)> = Vec::new();
     let forget_key = |h: &str| removed_kind.as_ref().map(|kind| crate::quota::quota_key(h, &crate::quota::quota_base(kind, Some(&name))));
     {
@@ -5653,7 +5356,6 @@ async fn delete_identity(
             if !(*h == host || (removing_hostless && !has_own)) {
                 continue;
             }
-            // 同名的 shell alias（`ccN`）接手：那把 key 仍然有效，不清。
             if !ht.shell_identities.iter().any(|i| i.name == name) {
                 if let Some(key) = forget_key(h) {
                     forget.push((h.clone(), key));
@@ -5712,12 +5414,10 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
     )
     .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
     let (input, cache_read, cache_creation) = (t.8, t.9, t.10);
-    // 目前 context 大小（最近一次 recorded 請求最後一個 iteration 的 input＋cache_read＋cache_creation）與壓縮門檻（0＝關閉→null）。
     let last_usage: Option<Option<String>> = sqlx::query_scalar(
         "SELECT usage_json FROM api_bot_attempts WHERE bot_id=? AND state='recorded' ORDER BY created_at DESC, ordinal DESC LIMIT 1",
     )
     .bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
-    // 壓縮門檻是 Claude 的設定；openai-api 沒有壓縮（給 0 → null）。
     let compact_at = if bot.kind == crate::config::OPENAI_API_KIND { 0 } else { app.cfg.get().await.claude_api.api_bot.compact_at_input_tokens };
     let context = json!({
         "tokens": last_usage.flatten().and_then(|u| serde_json::from_str::<Value>(&u).ok()).map(|u| crate::api_bot_turn_cost::context_tokens(&u)),
@@ -5728,7 +5428,6 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
     let last_json = last.map(|(actual, requested, usage, at)| {
         let u: Value = usage.and_then(|u| serde_json::from_str(&u).ok()).unwrap_or(Value::Null);
         let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
-        // OpenAI 的 usage：快取欄位叫 cached_tokens／cache_write_tokens，而且 input_tokens 含它們；換成跟 Claude 同一種語意再回。
         let (read, write) = (g("cache_read_input_tokens").max(g("cached_tokens")), g("cache_creation_input_tokens").max(g("cache_write_tokens")));
         let plain_input = g("input_tokens") - g("cached_tokens") - g("cache_write_tokens");
         let effort = u.get("effort").and_then(Value::as_str);
@@ -5738,7 +5437,6 @@ async fn api_bot_usage(State(app): State<Arc<App>>, Path(id): Path<String>, Exte
                "effort": effort, "auto_lowered_effort": auto_lowered})
     });
     let stuck = crate::api_bot::sweeper::detect_stuck(&app, &id).await;
-    // 進行中的回合要讓使用者看到「第幾次／上限、跑多久／時限」：把這顆設定的每回合上限附在每個 turn 上（回合開始時讀一次，跟 runtime 同一組數字）。
     let (max_calls, turn_timeout_secs) = {
         let cfg = app.cfg.get().await;
         if bot.kind == crate::config::OPENAI_API_KIND {
@@ -5924,20 +5622,15 @@ pub(crate) async fn start_bot_http(State(app): State<Arc<App>>, Path(id): Path<S
 }
 
 async fn start_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
-    // 參數不合法要在任何副作用（包括叫醒睡著的 bot）之前就 400，與 restart_bot 同順序。
     let opts = resume_opts(&q)?;
     refuse_child_restart(&app, &id).await?;
-    // 脫離請求（#1356）：agent 起來要等 60 秒以上，client 斷線時啟動照樣做完，不會停在 starting。
     let body = detach(&id, {
         let (app, id) = (app.clone(), id.clone());
         async move {
-            // 被 AGM 因為閒置收起來的（§6.11）一律走續接：使用者按「啟動」要的是把剛剛那顆帶著對話的
-            // bot 叫回來，不是開一段新的空白對話。
             if crate::supervisor::idle_sleep::wake(&app, &id, "使用者按了啟動")
                 .await
                 .map_err(|e| LcError::Upstream(e.to_string()))?
             {
-                // 叫醒接不回時會退回開新對話（`idle_sleep::wake`）：照實際結果回，不寫死 `true`（issue #107）。
                 return match db::active_run(&app.db, &id).await.map_err(any_err)? {
                     Some(run) => started_json(&app, &run.id, &lifecycle::StartOpts { resume_native: true, ..Default::default() }).await,
                     None => Ok(json!({"run_id": null, "resumed": false})),
@@ -5979,8 +5672,6 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
     let opts = resume_opts(&q)?;
     refuse_child_restart(&app, &id).await?;
-    // 連點兩下／兩個鈕／兩個分頁：同一顆 bot 同樣的重啟**仍在進行中**，後來的不再重啟一次，等它做完、回同一個結果（`restart_coalesce`）。
-    // 做完之後再來的是新的一次（改了設定馬上重啟要套用新設定）。
     let lead = match crate::restart_coalesce::admit(&id, &format!("{opts:?}")).await {
         crate::restart_coalesce::Admission::Joined(run_id) => {
             let mut body = started_json(&app, &run_id, &opts).await?;
@@ -5989,9 +5680,6 @@ async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(
         }
         crate::restart_coalesce::Admission::Lead(lead) => lead,
     };
-    // 脫離請求（#1355）：stop 與 start 之間 client 斷線，重啟照樣做完，不會停在 stopped、intent 停在 pending。
-    // `lead` 也一起搬進去：leader 斷線時 `Joined` 的請求還是拿得到結果。
-    // 出錯就直接丟掉 `lead`（等著的請求會自己重試），不是假裝成功。
     let body = detach(&id, {
         let (app, id) = (app.clone(), id.clone());
         async move {
@@ -5999,7 +5687,6 @@ async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(
             lead.finish(&run_id);
             let body = started_json(&app, &run_id, &opts).await?;
             app.emit("bot_changed", json!({"bot_id": id})).await;
-            // 強制重啟＝更新已套用：清掉「閒下來自動重啟」的旗標（失敗時上面的 `?` 已經離開，旗標留著）。
             crate::update_restart::forced_restart_done(&app, &id).await;
             Ok(body)
         }
@@ -6024,8 +5711,6 @@ async fn rotate_bot_credential(
     }
     let lock = app.bot_lock(&id).await;
     let lock_guard = lock.lock().await;
-    // 一路讀（bot、子孫、pane、重啟 intent）最後才寫 token：deferred 的話讀完之後別的 writer 一 commit 就 517，輪替被拒（#831）。
-    // 交易裡只有 DB 與記憶體裡的 fence，不等 herdr。
     let mut tx = db::begin_write(&app.db).await.map_err(any_err)?;
     let bot = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE id=?")
         .bind(&id)
@@ -6041,9 +5726,6 @@ async fn rotate_bot_credential(
         ));
     }
     lifecycle::refuse_default_session(&bot)?;
-    // herdr creates panes outside SQLite and bot_lock. The shim's spawn permit shares this gate:
-    // once the fence is visible, new pane / child-agent creation fails closed; an operation already
-    // in herdr makes this rotation refuse before touching the proof.
     let rotation_fence = match crate::runners::credential_spawn::RotationFence::begin(&app, &id) {
         Ok(fence) => fence,
         Err(crate::credential_spawn::FenceError::AlreadyRotating) => {
@@ -6062,9 +5744,6 @@ async fn rotate_bot_credential(
         .await
         .map_err(any_err)?
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
-    // Child panes carry the environment of the bot that opened them. Refuse before changing the
-    // parent's proof while any live descendant still depends on it; follow the full parent chain
-    // because a grandchild can retain the same inherited AM_BOT_ID/token pair.
     let live_descendants: Vec<String> = sqlx::query_scalar(
         "WITH RECURSIVE descendants(id) AS (
              SELECT id FROM bots WHERE parent_bot_id = ?
@@ -6087,9 +5766,6 @@ async fn rotate_bot_credential(
             json!({"reason": "live_children_use_credential", "bot_id": id, "children": live_descendants}),
         ));
     }
-    // Bare panes opened with `herdr pane split` are not bots yet, so they do not appear in runs.
-    // The shim registers each successful pane creation in the existing pane inventory before
-    // releasing its permit; keep the old credential until those live siblings are gone too.
     let inherited_panes: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND owner_bot_id=? ORDER BY pane_id")
         .bind(&host)
         .bind(&id)
@@ -6300,7 +5976,6 @@ async fn service_daemon_swap_restart_window(
     }
     let ttl = b.ttl_secs.unwrap_or(900);
     let actor = format!("service({})", crate::service_auth::DAEMON_SWAP);
-    // 同一張核准一輪輪沿用，升級計時才接得下去（`swap_window`）。
     let id = crate::swap_window::approval_for(&app, owner, commit, &actor).await.map_err(any_err)?;
     match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
         Ok(v) => {
@@ -6309,7 +5984,6 @@ async fn service_daemon_swap_restart_window(
             Ok(Json(v))
         }
         Err(e) => {
-            // 等太久要告訴使用者、讓使用者調度（SPEC §18.10，使用者 2026-10-04）。
             crate::deploy_wait::observe(&app, owner, &id, commit, Err(&e)).await;
             if !crate::swap_window::keep_after(&e) && !crate::swap_window::held_by_approval(&e, &id) {
                 let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
@@ -6374,7 +6048,6 @@ async fn service_herdr_upgrade_resume(
 }
 
 async fn stop_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 脫離請求（#1357）：送完 ctrl+c 之後 client 斷線，停止照樣記成 stopped，不會卡在 stopping 或被收成 exited。
     let had = detach(&id, {
         let (app, id) = (app.clone(), id.clone());
         async move { lifecycle::stop_bot(&app, &id).await }
@@ -6503,7 +6176,6 @@ async fn parse_cache_ttl(app: &Arc<App>, bot_id: &str, raw: Option<&str>) -> Res
     let kind = db::bot(&app.db, bot_id).await.map_err(any_err)?.map(|b| b.kind);
     match kind.as_deref() {
         Some(k) if k == crate::config::API_BOT_KIND => Ok(Some(secs)),
-        // openai-api 是 API bot，但 v1 沒有 prompt cache 保留的選項：字面明說是「這個 kind 不支援」。
         Some(k) if k == am_config::OPENAI_API_KIND => {
             Err(LcError::BadValue(json!({"error":"bad_request","reason":"cache_ttl_unsupported_for_kind"})))
         }
@@ -6532,7 +6204,6 @@ async fn relay_name_candidates(app: &Arc<App>, sender: &str, target: &str) -> Re
         "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND p.host=? AND COALESCE(r.herdr_session,?)=? AND (r.pane_id=? OR r.agent_name=? OR b.name=?)"
     ).bind(&host).bind(&fallback).bind(session).bind(target).bind(target).bind(target)
         .fetch_all(&app.db).await.map_err(any_err)?;
-    // Display names are project-scoped and remain usable when the member is stopped.
     let members: Vec<RelayCandidate> = sqlx::query_as(
         "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM bots b JOIN projects p ON p.id=b.project_id LEFT JOIN runs r ON r.bot_id=b.id AND r.state='running' WHERE b.project_id=(SELECT project_id FROM bots WHERE id=?) AND b.name=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL"
     ).bind(sender).bind(target).fetch_all(&app.db).await.map_err(any_err)?;
@@ -6540,7 +6211,6 @@ async fn relay_name_candidates(app: &Arc<App>, sender: &str, target: &str) -> Re
         if !candidates.iter().any(|candidate| candidate.0 == member.0) { candidates.push(member); }
     }
     if candidates.is_empty() {
-        // 跨主機：只用 agent 名稱（帶 $AM_AGENT_NAME 前綴，全域應唯一）找；pane id 與 bot 名稱各主機自己的，不做跨主機比對。
         candidates = sqlx::query_as(
             "SELECT b.id,r.id,r.agent_name,r.pane_id,b.name FROM runs r JOIN bots b ON b.id=r.bot_id JOIN projects p ON p.id=b.project_id WHERE r.state='running' AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND r.agent_name=?"
         ).bind(target).fetch_all(&app.db).await.map_err(any_err)?;
@@ -6591,7 +6261,6 @@ async fn resolve_relay_target(
         }
     }
     if rows.is_empty() {
-        // 候選存在但全被政策擋掉：回 403 帶原因，不要吞成 404。
         return Err(match denied_reason {
             Some(body) => LcError::Forbidden(body),
             None => LcError::NotFoundValue(json!({"error":"not_found","what":"relay target","message":"找不到目標；剛啟動的 child 約數秒內會被認領，請稍後重試"})),
@@ -6621,7 +6290,6 @@ pub(crate) async fn resolve_cluster_target(app: &Arc<App>, sender: &str, name: &
     let chosen = match cluster.pick_best(None) {
         Some(m) => Some((m.id.clone(), true)),
         None => {
-            // 沒有閒置成員：先啟動一顆停著的（群集已有啟動中的就不再啟動），請求留 pending 等它閒下來。
             cluster.pick_to_start().map(|m| m.id.clone())
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked && (m.running || m.starting)).map(|m| m.id.clone()).next())
                 .or_else(|| cluster.members.iter().filter(|m| m.manager_use && !m.quota_blocked).map(|m| m.id.clone()).next())
@@ -6721,7 +6389,6 @@ async fn ensure_relay_member_ready(app: &Arc<App>, sender: &str, target: &str) -
     if to.parent_bot_id.is_some() || to.managed_by != "user" || !matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) {
         return Err(stopped("目標不是可派工的頂層成員"));
     }
-    // 自動啟動的權限與派工範圍相同：管理者（或代班副管理者）不限；專家只限它可直接派工的頂層執行者（開關關著就沒有範圍）。
     let scope = crate::expert_cluster::sender_scope(app, &from).await.map_err(any_err)?;
     if !scope.as_ref().is_some_and(|s| s.allows(target)) {
         return Err(stopped("不在你可自動啟動的範圍內（管理者／代班副管理者，或專家派工開關開著時的本專案頂層執行者）"));
@@ -6733,7 +6400,6 @@ async fn ensure_relay_member_ready(app: &Arc<App>, sender: &str, target: &str) -
     let mut task = tokio::spawn(Box::pin(async move {
         if db::active_run(&app2.db, &id).await.map_err(|e| e.to_string())?.is_none() {
             if let Err(e) = Box::pin(lifecycle::start_bot(&app2, &id)).await {
-                // Another request can win the start lock while we wait for it.
                 if !db::active_run(&app2.db, &id).await.map_err(|e| e.to_string())?.is_some_and(|r| r.state == "starting" || r.state == "running") {
                     return Err(format!("{:?}", e));
                 }
@@ -6766,7 +6432,6 @@ pub(crate) async fn prompt_bot(
 ) -> Result<Response, LcError> {
     let bot_record = db::bot(&app.db, &id).await.map_err(|_| LcError::Upstream("bot_kind_unconfirmed".into()))?;
     let kind = bot_record.as_ref().map(|b| b.kind.as_str());
-    // openai-api v1：沒有附件、沒有壓縮。送出前就明確拒絕（不靜默丟掉附件、不把 /compact 當成一般文字送給模型）。
     if kind == Some(crate::config::OPENAI_API_KIND) {
         if !b.attachments.is_empty() {
             return Err(LcError::BadValue(json!({"error": "bad_request", "reason": "attachments_unsupported_for_kind", "kind": crate::config::OPENAI_API_KIND, "message": "openai-api 不支援附件", "sent": false})));
@@ -6778,7 +6443,6 @@ pub(crate) async fn prompt_bot(
     }
     if kind.is_some_and(crate::config::is_api_kind) {
         let is_bot_dispatch = matches!(&principal, RequestPrincipal::Bot(_) | RequestPrincipal::Child { .. }) || b.relay_from.is_some();
-        // 可被請教（顧問，或母子模式 parent 對 parent）才收 bot 請求；判斷見 `relay_policy::api_bot_consultable`。
         let is_advisor = match bot_record.as_ref() {
             Some(to) if is_bot_dispatch => {
                 let sender = match &principal { RequestPrincipal::Bot(s) | RequestPrincipal::Child { child_id: s, .. } => Some(s.as_str()), _ => None };
@@ -6800,7 +6464,6 @@ pub(crate) async fn prompt_bot(
         if is_bot_dispatch && is_advisor && !b.expect_result {
             return Err(LcError::Bad("api_native_prompt_unsupported: advisor requires expect_result".into()));
         }
-        // 使用者從網頁送的附件（圖片／PDF）native 路徑收得下（native_prompt 會驗格式與大小）；bot 請教仍不帶附件。
         if b.send_now || b.clear_draft || b.submit_draft || b.share_reply_visible || (is_bot_dispatch && !b.attachments.is_empty()) || b.ack || b.reply_to.is_some() {
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
@@ -6808,12 +6471,9 @@ pub(crate) async fn prompt_bot(
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
     }
-    // 把回覆公開到分享頁只有使用者（UI token）能決定：Bot／Service 帶旗標一律 403，且不送出（issue #855）。
     if b.share_reply_visible && principal != RequestPrincipal::User {
         return Err(bot_user_only());
     }
-    // #990：`start_if_stopped` 會替對方開機、`send_now` 會打斷對方的回合，等同 start／interrupt（#804 的政策）：
-    // 只給 User 與登記的 AGM 角色。一般 Bot 帶這兩個旗標在任何副作用前就 403（跨 bot 的 prompt 不能繞過 start／interrupt）。
     if (b.start_if_stopped || b.send_now) && principal != RequestPrincipal::User {
         let is_role = match &principal {
             RequestPrincipal::Bot(caller) => crate::supervisor::roles::role_of_bot(&app.db, caller).await.map_err(any_err)?.is_some(),
@@ -6823,7 +6483,6 @@ pub(crate) async fn prompt_bot(
             return Err(bot_user_only());
         }
     }
-    // #923：冪等鍵進 turns 的唯一索引、再隨回應與日誌回出去，先驗長度與字元（同 fork 的做法）。
     let given_crid = match b.client_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         Some(c) => Some(crate::request_id::validate("client_request_id", c)?),
         None => None,
@@ -6832,9 +6491,6 @@ pub(crate) async fn prompt_bot(
     if crid.starts_with("relay-request:") || crid.starts_with("relay-result:") || crid.starts_with(crate::runners::relay_requests::WITHDRAWN_PREFIX) {
         return Err(LcError::Bad("client_request_id uses a reserved daemon prefix".into()));
     }
-    // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
-    // attributed to the id already authenticated by middleware. A User request claiming a bot
-    // without that bot's token is refused (#410 ended #339's unsigned compatibility branch).
     let relay_claim = b.relay_from.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let relay = match &principal {
         RequestPrincipal::Child { child_id, parent_bot_id } => {
@@ -6850,7 +6506,6 @@ pub(crate) async fn prompt_bot(
             crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?
         }
     };
-    // 這次派工只靠什麼放行（專家派工開關／代班）；建 turn 的那一句依它正向確認仍成立（`lifecycle::relay_grant`）。
     let mut relay_auth: Option<String> = None;
     if !b.expect_result {
         if let Some(r) = &relay { relay_auth = check_relay_basis(&app, &r.from, &id).await?; }
@@ -6865,8 +6520,6 @@ pub(crate) async fn prompt_bot(
         }
         let files = serde_json::to_string(&b.attachments).map_err(any_err)?;
         let cluster = b.cluster.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
-        // 冪等身分（#2069）：直接派工是（來源, 收件者, 鍵）；群集派工的 `to_bot_id` 會被 `claim_target` 改派給別的成員，
-        // 所以改用（來源, 群集, 鍵）認原請求，否則原呼叫端重送給原目標會再建一筆、重複派工。
         let existing: Option<(String, String, String, String, Option<String>)> = sqlx::query_as("SELECT id,prompt_text,attachments_json,state,to_turn_id FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND (to_bot_id=? OR redirected_from=? OR (cluster IS NOT NULL AND cluster=?)) ORDER BY to_bot_id<>? LIMIT 1")
             .bind(sender).bind(&crid).bind(&id).bind(&id).bind(&cluster).bind(&id).fetch_optional(&app.db).await.map_err(any_err)?;
         if let Some((request_id, text, stored_files, state, turn_id)) = existing {
@@ -6892,7 +6545,6 @@ pub(crate) async fn prompt_bot(
                 found.is_some()
             };
             if !target_ok { return Err(LcError::Bad("target is not a member of that cluster".into())); }
-            // 專家：目標必須是它可直接派工的成員（check_relay_policy 已核過，這裡明確擋群集越界）。
             if !scope.allows(&id) { return Err(LcError::Forbidden(json!({"error":"forbidden","reason":"cluster_not_dispatchable"}))); }
         }
         crate::attach::resolve(&app, &id, &b.attachments).await.map_err(|e| LcError::Bad(e.to_string()))?;
@@ -6902,7 +6554,6 @@ pub(crate) async fn prompt_bot(
         let request_id = db::ulid();
         let lock = crate::runners::child_done::parent_lock(&format!("relay-request:{request_id}"));
         let _guard = lock.lock().await;
-        // 群集請求：同（來源, 群集, 鍵）已有一筆（可能剛被改派走、唯一鍵擋不到）就不插，跟上面的查重同一個身分。
         let inserted = sqlx::query("INSERT OR IGNORE INTO relay_requests(id,from_bot_id,to_bot_id,client_request_id,prompt_text,attachments_json,state,created_at,track,cluster,cluster_key) SELECT ?,?,?,?,?,?,'pending',?,?,?,? WHERE ? IS NULL OR NOT EXISTS(SELECT 1 FROM relay_requests WHERE from_bot_id=? AND client_request_id=? AND cluster=?)")
             .bind(&request_id).bind(sender).bind(&id).bind(&crid).bind(&b.text).bind(&files).bind(db::now()).bind(&b.track).bind(&cluster).bind(&cluster_key)
             .bind(&cluster).bind(sender).bind(&crid).bind(&cluster).execute(&app.db).await.map_err(any_err)?.rows_affected() == 1;
@@ -6916,13 +6567,9 @@ pub(crate) async fn prompt_bot(
         if !inserted || request_state != "pending" || stored_turn.is_some() {
             return Ok((StatusCode::OK, Json(json!({"request_id":request_id,"turn_id":stored_turn,"message_id":null,"delivery":request_state,"state":request_state}))).into_response());
         }
-        // 群集派工且被挑中的成員已不閒（resolve 當時都忙，或之後被別的工作佔走）：留在 pending，
-        // 由 relay_requests 的 reconcile 在第一個閒下來的成員身上送出，不在忙的成員後面排隊。
         if cluster.is_some() && !crate::expert_cluster::member_idle(&app, &id).await {
             return Ok((StatusCode::ACCEPTED, Json(json!({"request_id":request_id,"turn_id":null,"message_id":null,"delivery":"pending","cluster":cluster}))).into_response());
         }
-        // Recheck the immutable named-cluster key before the immediate delivery path too.
-        // If selection moved, the normal pending reconciler delivers to the new member.
         if cluster_key.is_some() {
             let name = cluster.as_deref().expect("named key requires cluster");
             if crate::expert_cluster::claim_target(&app, &request_id, &id, name).await.map_err(any_err)?.as_deref() != Some(id.as_str()) {
@@ -6930,7 +6577,6 @@ pub(crate) async fn prompt_bot(
             }
         }
         let delivery_key = format!("relay-request:{request_id}");
-        // API 顧問（claude-api／openai-api）走同一條 native 路徑；派工前的上限依目標的供應商各算各的。
         let is_target_claude_api = kind.is_some_and(crate::config::is_api_kind);
         let out = if is_target_claude_api {
             use crate::lifecycle::api_bot_port::{ApiBotPort, ApiNativeStartError, ApiNativeStartMode};
@@ -7002,7 +6648,6 @@ pub(crate) async fn prompt_bot(
         response["request_id"] = json!(request_id);
         return Ok((StatusCode::OK, Json(response)).into_response());
     }
-    // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
     if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
         let queued = crate::supervisor::bot_requests::intercept(&app, &id, &r.from, &b.text, given_crid.as_deref(), &b.attachments, true, "api", mark);
@@ -7012,7 +6657,6 @@ pub(crate) async fn prompt_bot(
     }
     let cache_ttl_secs = parse_cache_ttl(&app, &id, b.cache_ttl.as_deref()).await?;
     let src = lifecycle::RelaySrc::trusted(relay.as_ref().map(|r| r.from.as_str())).with_auth(relay_auth.as_deref()).with_cache_ttl(cache_ttl_secs);
-    // 框裡的草稿只有使用者自己在畫面上處理：bot 轉送的 prompt 不能替人送出或清掉別人的字。
     if (b.clear_draft || b.submit_draft) && relay.is_some() {
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));
     }
@@ -7041,7 +6685,6 @@ pub(crate) async fn prompt_bot(
         lifecycle::prompt_from_api(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now, expect).await?
     };
     if b.share_reply_visible && matches!(crate::share::store::is_share_bot(&app.db, &id).await, Ok(true)) {
-        // 記不下來只是回覆不出現在分享頁（預設行為），訊息本身已經送出，不回錯。
         if let Err(e) = crate::share::store::mark_reply_visible(&app.db, &out.message_id).await {
             tracing::warn!(bot = %id, error = %e, "could not mark the share reply as visible");
         }
@@ -7086,9 +6729,7 @@ async fn upload_attachment(
         .and_then(|v| v.to_str().ok())
         .map(|m| m.split(';').next().unwrap_or(m).trim().to_string())
         .unwrap_or_default();
-    // 2026-09-14：任何檔案都收。mime 只決定 UI 畫縮圖還是檔案晶片，agent 讀到的一律是路徑。
     let mime = if mime.is_empty() { "application/octet-stream".to_string() } else { mime };
-    // `{:#}` so the ssh / filesystem cause reaches the UI.
     let a = crate::attach::save_bytes(&app, &id, name, &mime, body)
         .await
         .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
@@ -7113,10 +6754,6 @@ async fn get_attachment(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             (header::CONTENT_TYPE, served.to_string()),
             (header::CONTENT_DISPOSITION, disposition.to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-            // svg 是 inline 的（拿掉會讓現有縮圖變破圖），所以這一層要擋住「真的被導航到」的情況：
-            // sandbox 讓它拿不到這個 origin，腳本也不會跑。`<img>` 載入不是 document，這個標頭對它沒作用，
-            // 但那條路本來就不會執行腳本。**注意**：`URL.createObjectURL` 只保留 MIME、不帶標頭，
-            // 所以未來若要加「在新分頁開啟附件」，不能靠這個標頭，要用別的方式（#471）。
             (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'".to_string()),
             (header::CACHE_CONTROL, "private, max-age=31536000".to_string()),
         ],
@@ -7248,14 +6885,11 @@ async fn get_messages(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
-    // Unknown id would trip the FK in `conversation_id` → 502 (review 2026-09-12 #9); deleted bots stay readable (API.md §10.4).
     if db::bot(&app.db, &id).await.map_err(any_err)?.is_none() {
         return Err(LcError::NotFound("bot".into()));
     }
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
-    // 游標必須是這段對話裡還在的訊息：被刪掉的或別顆 bot 的一律 404＋reason，不拿全域 rowid 默默切出錯的一頁（#766）。
-    // `before=` 空字串等同沒帶（回第一頁），同 `turn_id`／`role` 與群組版；不是「游標指到一個不存在的 id」。
     let before_rowid = match q.get("before").map(String::as_str).filter(|b| !b.is_empty()) {
         Some(b) => {
             let at: Option<(i64, String)> = sqlx::query_as("SELECT rowid, conversation_id FROM messages WHERE id = ?")
@@ -7271,10 +6905,8 @@ async fn get_messages(
         }
         None => None,
     };
-    // 只在同一個 conversation 底下過濾，查不到的 turn 是空清單不是 404。
     let turn_filter = q.get("turn_id").map(|s| s.as_str()).filter(|s| !s.is_empty());
     let role_filter = match q.get("role").map(|s| s.as_str()).filter(|s| !s.is_empty()) {
-        // 靜默忽略會讓呼叫端以為過濾過了，拿整段當成某個 role 的全部。
         Some(r) if !["user", "assistant", "system"].contains(&r) => return Err(LcError::Bad(format!("bad role `{r}`"))),
         other => other,
     };
@@ -7304,9 +6936,6 @@ async fn get_messages(
     let mut msgs: Vec<db::Message> = rows.into_iter().take(limit as usize).collect();
     msgs.reverse();
     prune_duplicate_incomplete_fallback_messages(&mut msgs);
-    // `turns`：這一頁訊息所屬的回合（送達警示與撤回鈕要查得到，翻到更早的頁也一樣）∪ 這段對話還沒結束的回合
-    // （判斷還在不在跑）。以前是「最新 limit+1 筆」，翻頁或帶 `turn_id=` 時跟頁上的訊息對不上（#954）。
-    // 一頁最多 500 則訊息，`?` 佔位符低於 SQLite 的 999 個參數上限。第二排序鍵 `rowid`：同毫秒的回合順序要穩定。
     let mut page_turns: Vec<&str> = msgs.iter().filter_map(|m| m.turn_id.as_deref()).collect();
     page_turns.sort_unstable();
     page_turns.dedup();
@@ -7489,13 +7118,11 @@ async fn get_terminal(
         return Err(LcError::Bad("bad source".into()));
     }
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
-    // `format=ansi` 讀的是帶 SGR 色碼的原樣；預設（沒帶或 `text`）維持純文字、回應形狀不變。
     let ansi = match q.get("format").map(String::as_str) {
         None | Some("text") => false,
         Some("ansi") => true,
         Some(_) => return Err(LcError::Bad("bad format".into())),
     };
-    // herdr 的 `detection` 不管 format 都回純文字，標成 ansi 會騙人，所以直接拒絕。
     if ansi && source == "detection" {
         return Err(LcError::Bad("format=ansi 不支援 source=detection，請改用 visible／recent／recent_unwrapped".into()));
     }
@@ -7509,7 +7136,6 @@ async fn get_terminal(
         client.pane_read(&pane, &source, lines).await
     }
     .map_err(any_err)?;
-    // Below ~60 columns TUI text is unrecoverably fragmented (seen on `w8:pK` at 31); lets the UI explain it.
     let (columns, rows) = match client.pane_size(&pane).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
@@ -7547,9 +7173,6 @@ async fn ws_handler(
     if !origin_is_local(&headers, app.port, app.allow_lan()) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
-    // `/ws` is outside the `/api` auth middleware, but it is still a User-only endpoint.
-    // Do not silently ignore an explicit Bot/Service identity when the query also carries the
-    // shared UI token; that would let one request cross principal boundaries.
     if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Child-Spawn-Id", "X-AM-Child-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
         .iter()
         .any(|name| headers.contains_key(*name))
@@ -7560,7 +7183,6 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let since: Option<u64> = q.get("since").and_then(|s| s.parse().ok());
-    // 連線數上限：每條連線一個 task、一個訂閱與（慢 client 時）一份緩衝，不能無限開。
     let Some(slot) = WsSlot::take(&app) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many websocket connections").into_response();
     };
@@ -7601,15 +7223,6 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     let send_timeout = app.ws_send_timeout();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("ws_subscribed", &app.data_dir.display().to_string()).await;
-    // **先訂閱再讀環**是對的：反過來的話兩者之間的事件誰都收不到。代價是重複——那一段時間送出的耐久事件
-    // 兩邊都有（`emit` 把推進環與 `bus.send` 包在同一把 ring 鎖裡，而我們的 `backlog` 正在等那把鎖），
-    // 同一個 `seq` 會送兩次。客戶端沒有 seq 去重，而 `bots_restart_progress` 這類 handler 是純累加
-    // （`restartBatch.ts` 的 `done + 1`），重複等於「又發生了一次」：進度會超前甚至衝過總數（issue #521）。
-    //
-    // 所以這條連線自己記「backlog 送到哪」，之後低於它的即時幀跳過＝**同一個 seq 在一條連線上只送一次**。
-    // 從 0 起算、只被真的送出去的 backlog 幀推高，刻意**不拿 `since` 當起點**：daemon 重啟後 seq 從頭來，
-    // 客戶端帶著舊的大 `since` 重連會落到下面的 resync 分支（那時一幀 backlog 都沒送），拿 `since` 當起點
-    // 會把新 daemon 那些號碼很小的即時幀全部擋掉（issue #368 要補的正是那段）。
     let mut sent_through = 0u64;
     let backlog = match since {
         Some(s) => app.backlog(s).await,
@@ -7630,7 +7243,6 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
             }
         }
     }
-    // 沒事件也定期送一幀（issue #760）：不佔 seq、不進重播環，客戶端只拿它當「線還活著」的證據。
     let every = app.ws_ping_every();
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -7640,15 +7252,12 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                 if !ws_send(&mut socket, WsMessage::Text(json!({"type": "ping"}).to_string().into()), send_timeout).await { return; }
             }
             ev = rx.recv() => match ev {
-                // backlog 已經送過這一則（訂閱與讀環之間送出的，兩邊都有）：跳過，不是漏送（issue #521）。
                 Ok(e) if e.seq <= sent_through => {}
                 Ok(e) => {
                     sent_through = e.seq;
                     if !ws_send(&mut socket, WsMessage::Text(ws_frame_text(&app, &e).await.into()), send_timeout).await { return; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // 帶 seq，跟重連那條一樣（API.md §8：`{"type":"resync","seq":12}`）——少了它，
-                    // 客戶端在 lag 之後的 `lastSeq` 會停在漏掉的事件之前，下一次重連白跑一趟 backlog（issue #482）。
                     if !ws_send(&mut socket, WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()), send_timeout).await { return; }
                 }
                 Err(_) => return,

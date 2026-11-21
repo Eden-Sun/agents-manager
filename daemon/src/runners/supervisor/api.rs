@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use super::{controller, health_core, setup, store};
 
-
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
@@ -36,8 +35,6 @@ pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
     let _g = super::lock().await;
     let (_project_id, bot_id, deployed) = setup::ensure_env(app.as_ref()).await?;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    // Bringing the environment back up is a new generation: an old controller (from a config
-    // that pointed at a bot which no longer exists) must not keep sending notifications.
     if sup.generation == 0 {
         super::runtime::respawn(&app).await;
     }
@@ -52,7 +49,6 @@ pub async fn post_setup(State(app): State<Arc<App>>) -> Result<Json<Value>, LcEr
 /// `super::stop_requested`，不由每個呼叫端各自維護（issue #84）。
 pub async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let _g = super::lock().await;
-    // 大 future 包成 Box（#1461）：debug 建置下 future 會在呼叫端的 poll 框裡各留一份，巢狀一深就撐爆測試執行緒的 2 MiB 堆疊。
     Box::pin(super::start_requested(&app)).await?;
     Ok(Json(Box::pin(super::status_json(app.as_ref())).await?))
 }
@@ -117,13 +113,9 @@ pub async fn get_assignments(
         })
         .transpose()?;
     let limit = q.limit.unwrap_or(200).clamp(1, 500);
-    // 在 SQL 裡篩，不是回去之後才篩：未結案的那幾筆天生是最舊的，呼叫端過濾等於為了 6 筆
-    // 把一千多筆搬過去、一頁一頁翻（issue #543）。不認得的狀態回 400——回一份空清單的話，
-    // 打錯字跟「真的沒有這個狀態的交辦」長得一模一樣。
     let raw_status = q.status.as_deref().unwrap_or("");
     let status = store::StatusFilter::parse(raw_status)
         .ok_or_else(|| LcError::Bad(format!("status must be `open` or one of {:?}", super::assignment_state::ALL)))?;
-    // 多撈一筆才知道後面還有沒有；`has_more` 是「這不是全部」唯一可靠的訊號。
     let mut rows = store::list_assignments_page(
         &app.db,
         cursor.as_ref().map(|c| (c.0.as_str(), c.1.as_str())),
@@ -144,7 +136,6 @@ pub async fn get_assignments(
         "has_more": has_more,
         "next_cursor": next_cursor,
         "limit": limit,
-        // 回聲：舊 daemon 會忽略 `status`，呼叫端照這個欄位就知道自己那份過濾到底有沒有生效。
         "status": if raw_status.is_empty() { Value::Null } else { json!(raw_status.trim()) },
     })))
 }
@@ -211,17 +202,12 @@ pub async fn post_assignment(
     headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
-    // #923：長度與字元一起驗（`bounded` 只看長度，放得進空白與控制字元）。
     let client_request_id = crate::request_id::validate("client_request_id", &b.client_request_id)?;
     bounded_ownership(&b.ownership)?;
-    // 只有 `task`（預設）與 `notice`：`Notice`／`urgent` 這種打錯的值以前被當成要驗收的交辦，呼叫端以為自己送了通知。
     if !matches!(b.kind.as_deref(), None | Some("task") | Some("notice")) {
         return Err(LcError::Bad("kind must be task | notice".into()));
     }
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
-    // 一般 bot（被證明身份、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收）——
-    // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦
-    // 是 AGM 的事（它們會直接叫那顆 bot 做事）。
     if let Some(bot) = super::bot_requests::declared_plain_bot(&app, &headers).await? {
         let to_role = super::roles::role_of_bot(&app.db, &b.target_bot_id).await.map_err(up)?.is_some();
         if b.expects_review() || !to_role {
@@ -230,8 +216,6 @@ pub async fn post_assignment(
                 "一般 bot 只能對 AGM 角色 bot 送 notice（kind=notice）；派工與要驗收的交辦只給 AGM 角色或使用者",
             ));
         }
-        // 通過上面的檢查：就是這顆一般 bot 自己寫給 AGM 的 notice。寄件者必須是它自己；不能走 `super::assign`，
-        // 那邊 actor=None 被當成使用者，寄件者換成巡檢：交回巡檢一律 400、協調者看到的是巡檢寄的（#991）。
         if b.text.trim().is_empty() {
             return Err(LcError::Bad("text must not be empty".into()));
         }
@@ -240,7 +224,6 @@ pub async fn post_assignment(
             return Err(LcError::Unprocessable(json!({"error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false})));
         }
         let mark = super::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
-        // 跟 prompt／shim 的攔截同一條：協調者建立過就排進它的佇列，寄件者是這顆 bot；沒有協調者才排進目標角色。
         let mut out = match super::bot_requests::intercept(&app, &b.target_bot_id, &bot, &b.text, Some(client_request_id.as_str()), &[], true, "assignment", mark).await? {
             Some(v) => v,
             None => {
@@ -292,8 +275,6 @@ fn decision_actor(verified: Option<super::roles::Role>, claimed: Option<&str>) -
         return format!("{}:{}", store::SUPERVISOR_ID, r.as_str());
     }
     match claimed.map(str::trim).filter(|c| !c.is_empty()) {
-        // 保留呼叫端自稱的名字（`bin/agm … --actor`），但永遠包在 `user(…)` 裡：讀的人一眼看得出
-        // 這串字沒有被驗證過，而且它再怎麼填都變不成 `AGM` 開頭。
         Some(c) => format!("user({})", c.chars().take(64).collect::<String>()),
         None => "user".to_string(),
     }
@@ -343,7 +324,6 @@ pub async fn post_review(
     Json(b): Json<ReviewIn>,
 ) -> Result<Json<Value>, LcError> {
     let verified = super::bot_requests::actor_role(&app, &headers).await?;
-    // 輸入先驗再碰任何東西：被拒的裁示不留審計列、不動交辦。
     for (label, value, max) in [
         ("reason", b.reason.as_deref(), MAX_NOTE_CHARS),
         ("evidence", b.evidence.as_deref(), MAX_NOTE_CHARS),
@@ -353,12 +333,10 @@ pub async fn post_review(
     ] {
         bounded(label, value.unwrap_or_default(), max)?;
     }
-    // #923：續作的冪等鍵進 assignments 的唯一索引；空白＝沒給，交給下面 followup 分支的「needs a stable followup_request_id」去擋。
     if let Some(c) = b.followup_request_id.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
         crate::request_id::validate("followup_request_id", c)?;
     }
     bounded_ownership(&b.ownership)?;
-    // 續作文字跟交辦本文同一個上限（#335）：超過的一定送不出去，不收下一件註定失敗的續作。
     if let Some(chars) = b.followup_text.as_deref().map(|t| t.chars().count()).filter(|c| *c > crate::lifecycle::MAX_PROVABLE_CHARS) {
         return Err(LcError::Unprocessable(json!({
             "error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false,
@@ -370,8 +348,6 @@ pub async fn post_review(
     })?;
     let a = store::assignment(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("assignment".into()))?;
 
-    // Already decided this way: hand back what is on file. A retry after a lost response must
-    // not look like a second decision.
     if a.status == to_status && a.review_decision.as_deref() == Some(b.decision.as_str()) {
         if b.decision == "followup" {
             let f = match a.followup_assignment_id.as_deref() {
@@ -398,22 +374,12 @@ pub async fn post_review(
         out["idempotent"] = json!(true);
         return Ok(Json(out));
     }
-    // A decision is only meaningful on something that is still open. Re-deciding a closed
-    // assignment would rewrite history; the follow-up mechanism exists for that.
     if !a.is_open() {
         return Err(LcError::conflict(
             "assignment is already closed; create a follow-up assignment instead of re-deciding this one",
             json!({"assignment_id": a.id, "status": a.status, "reason": "already_closed"}),
         ));
     }
-    // The turn is still running: there is nothing to accept yet, and accepting it would be a
-    // claim about work we can still watch happening.
-    //
-    // `cancel` is the one decision that applies mid-flight, and it has a cost worth stating:
-    // the turn is *not* aborted, so whatever the bot says next will not be recorded against
-    // this assignment. `block` is refused here on purpose — it would take the row out of the
-    // executing set while its turn is still open, and the result would land nowhere. Wait for
-    // the turn to end (it will park on `awaiting_review`) and block it then.
     if a.is_executing() && b.decision != "cancel" {
         return Err(LcError::conflict(
             "assignment has not finished executing; only cancel applies while it is in flight",
@@ -421,15 +387,9 @@ pub async fn post_review(
         ));
     }
 
-    // 驗證過的角色以 token 為準，不信 body 裡自稱的名字（issue #414）。
     let actor = decision_actor(verified, b.actor.as_deref());
     let source = b.source.clone().unwrap_or_else(|| "api".to_string());
 
-    // Cancelling work that is (or may be) already running stops the *tracking*, not the bot.
-    // Spelled out here and returned to the caller, because the tempting reading of a cancelled
-    // row — "it never went out" — is wrong in two different ways: a `delivered` assignment is
-    // running right now, and an `unknown` one may or may not be. The daemon does not abort
-    // turns, and it must not let a status imply that it did.
     let still_running = if b.decision != "cancel" {
         None
     } else {
@@ -443,15 +403,6 @@ pub async fn post_review(
         }
     };
 
-    // A follow-up is a *new* assignment carrying the unfinished part forward, never an edit of
-    // the one already sent: rewriting delivered text is how a bot ends up working from words
-    // nobody sent it.
-    //
-    // Order is the whole point here. The decision, the continuation row and the audit entry are
-    // written in one guarded transaction *before* anything is dispatched, because a prompt that
-    // has gone out cannot be rolled back. Creating the work first and recording it afterwards
-    // (the shape this had until 2026-09-13) let two callers each send a continuation and then
-    // argue about which decision survived.
     let followup_spec = if b.decision == "followup" {
         let text = b
             .followup_text
@@ -466,16 +417,12 @@ pub async fn post_review(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| LcError::Bad("followup needs a stable followup_request_id".into()))?;
         let target = b.followup_bot_id.clone().unwrap_or_else(|| a.target_bot_id.clone());
-        // Validate the target before the transaction: a read, and a 400 for a bot that cannot
-        // take work is more useful than a rolled-back transaction.
         super::check_assignable(&app.db, &target).await?;
         Some((target, crid.to_string(), text.to_string()))
     } else {
         None
     };
 
-    // The caveat goes into the audit row too: whoever reads this decision later should see the
-    // same warning the caller got, not just the word `cancelled`.
     let evidence = match (b.evidence.as_deref(), still_running) {
         (Some(e), Some(note)) => Some(format!("{e}｜{note}")),
         (None, Some(note)) => Some(note.to_string()),
@@ -487,7 +434,6 @@ pub async fn post_review(
         client_request_id: crid,
         text,
         ownership: &ownership,
-        // The continuation answers the same user request as its parent.
         request_id: a.request_id.as_deref(),
     });
     let decided = store::review_with_followup(
@@ -511,8 +457,6 @@ pub async fn post_review(
     })?;
 
     let Some(decided) = decided else {
-        // The guard did not match: somebody decided it between our read and our write, and
-        // **nothing** was written — no continuation, no audit row.
         let now = store::assignment(&app.db, &id).await.map_err(up)?;
         return Err(LcError::conflict(
             "the assignment was decided by someone else first; nothing was written",
@@ -527,21 +471,15 @@ pub async fn post_review(
     };
     let updated = decided.updated;
 
-    // 交辦不要了：它排著還沒送出的 queued turn 一併撤銷、釋放名額（AGM 2026-09-16）。
-    // 已經 in_flight 或送出的撤不回來，不動——上面的 warning 已經講清楚。
-    // 讀不到交辦、或撤不掉（寫不進去）：這一刻撤不成，不假裝沒有要撤的（#200）。那一則不會因此送出——flush 送之前
-    // 再判斷一次，讀不到就不送、讀得到就撤（#159）；這裡叫醒 flush、回應裡講明撤銷待補（`revoke_pending_turn_id`）。
     let mut revoked_turn = None;
     let mut revoke_pending = None;
     if matches!(updated.status.as_str(), "cancelled" | "superseded" | "failed") {
         if let Some(tid) = updated.turn_id.as_deref() {
-            // 決定 commit 了、還沒撤的那一瞬（測試在這裡讓交辦讀不到）。
             #[cfg(test)]
             crate::lifecycle::race_point::hit("review_before_revoke", &updated.id).await;
             let withdrawal = app.assignment_withdrawal(tid).await;
             if let Err(e) = &withdrawal {
                 tracing::warn!(assignment = %updated.id, turn = tid, error = ?e, "讀不到交辦是否已撤回：排著的那一則這一刻撤不成，交給 flush");
-                // 還排著的才有得撤；已經送出去的不講待補。回合的狀態也讀不到時當成可能還排著。
                 let queued = sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id=?")
                     .bind(tid)
                     .fetch_optional(&app.db)
@@ -555,7 +493,6 @@ pub async fn post_review(
                 match app.revoke_queued_turn(tid, &why).await {
                     Ok(true) => {
                         revoked_turn = Some(tid.to_string());
-                        // 決定寫進稽核時還不知道撤不撤得回來；撤回了，「turn 還在跑」那句就不成立。
                         if still_running.is_some() {
                             let note = format!("排隊中的 turn {tid} 已撤回，沒有送出");
                             let amended = match b.evidence.as_deref() {
@@ -580,8 +517,6 @@ pub async fn post_review(
         }
     }
 
-    // Committed, so now it can go out. Dispatch is best effort exactly as in `assign`: a
-    // failure leaves the row `queued`, which is the recoverable state.
     if let Some(f) = decided.followup.as_ref() {
         controller::dispatch(&app, &f.id).await;
     }
@@ -604,12 +539,9 @@ pub async fn post_review(
         out["revoke_pending_turn_id"] = json!(t);
         out["revoke_pending"] = json!("排著的那一則這一刻撤不成（讀不到交辦或寫不進去）；它不會被送出——送出前會再判斷一次，讀得到就撤。");
     }
-    // 撤掉的是還沒送出的那則：「turn 還在跑」的警告不成立，不要跟 revoked_turn_id 一起回給呼叫端。
     let still_running = if revoked_turn.is_some() { None } else { still_running };
     if let Some(note) = still_running {
         out["warning"] = json!(note);
-        // The transport facts stay readable next to the warning: a cancelled `unknown` keeps
-        // its `delivery` and `turn_id` precisely so nobody has to guess afterwards.
         out["may_still_be_running"] = json!(true);
     }
     Ok(Json(out))
@@ -643,8 +575,6 @@ pub async fn get_incidents(
 
 pub async fn get_handoff(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    // 未結案的一律帶上，就算它已經掉出最新 200 筆——不然 `open_assignments` 會少報，
-    // 而冷啟動的總管就是照這個數字決定還有沒有事要接手（issue #515）。
     let assignments = store::list_assignments_with_open(&app.db, 200).await.map_err(up)?;
     let open = assignments.iter().filter(|a| a.is_open()).count();
     Ok(Json(json!({
@@ -672,12 +602,9 @@ pub async fn put_handoff(State(app): State<Arc<App>>, Json(b): Json<HandoffIn>) 
         return Err(LcError::Bad(format!("summary is too long (max {MAX_HANDOFF_BYTES} bytes); keep the handoff short and put detail in the repo")));
     }
     let version = store::set_summary(&app.db, &b.summary).await.map_err(up)?;
-    // The readable copy in the manager's own directory. The database stays authoritative;
-    // this is what the manager reads on a cold start before anything else is available.
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let mut copy_error = None;
     if let Some(cwd) = sup.cwd.as_deref() {
-        // 原子寫（#919）。寫不進去不能無聲吞掉：DB 已經更新（權威），所以事件照發，再回 Upstream 讓呼叫端重送同一份來補。
         if let Err(e) = setup::write_file(
             &std::path::Path::new(cwd).join("handoff.md"),
             format!("# AGM 管理摘要（v{version}）\n\n{}\n", b.summary).as_bytes(),
@@ -715,10 +642,7 @@ pub async fn get_inbox(
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("role must be patrol | responder".into()))?),
         None => None,
     };
-    // 分類在 controller tick 做；讀的人不必等下一個 tick 才看得到角色。
     let _ = super::roles::classify(&app.db).await;
-    // 角色條件在 SQL 裡（LIMIT 之前）：先取 limit 筆再過濾，最舊的一批全是另一個角色時，
-    // 自己的待辦會永遠翻不到。
     let events = super::roles::list_for(&app.db, role, all, limit).await.map_err(up)?;
     Ok(Json(json!({
         "events": events.iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
@@ -800,15 +724,12 @@ pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertI
     Ok(Json(json!({"queued": id.is_some(), "inbox_event_id": id, "event_key": key})))
 }
 
-// ------------------------------------------------------------------------ persona
-
 /// Which copy is which, and what the running session can honestly be said to have.
 pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let (text, _) = setup::effective_persona(&app.db).await?;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let embedded = setup::persona_body();
     let embedded_hash = super::persona::hash(&embedded);
-    // A row without a stored hash is judged by the text it actually holds.
     let stored_hash = sup.persona_hash.clone().unwrap_or_else(|| super::persona::hash(&text));
     let run_started = match sup.bot_id.as_deref() {
         Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
@@ -826,16 +747,11 @@ pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcE
             "text": text,
         },
         "embedded": {"hash": embedded_hash, "length": embedded.chars().count()},
-        // Never `verified`. The daemon passes the persona when it starts the CLI and cannot see
-        // what the session holds now, so the only claims here are "nothing is running",
-        // "the session predates this text" and "it was started with this text".
         "loaded": {
             "status": loaded.as_str(),
             "run_started_at": run_started,
             "evidence": "the daemon passes the persona at start; it cannot observe the live session",
         },
-        // The embedded text moved on. Reported, never applied on its own — that is
-        // `POST /api/supervisor/persona/adopt-embedded`.
         "upgrade_available": super::persona::upgrade_available(&stored_hash, sup.persona_seed_hash.as_deref(), &embedded_hash),
         "needs_restart": loaded.needs_restart(),
     })))
@@ -905,8 +821,6 @@ pub(super) async fn note_persona_change(db: &SqlitePool, actor: &str, old: Optio
         new_hash = super::persona::hash(new),
         "AGM persona rewritten"
     );
-    // 一個版本一則：同一版重送（修 projection）不該再叫醒巡檢一次。
-    // 巡檢與協調者的版號各自從 0 數，同一個鍵會被 `INSERT OR IGNORE` 靜靜吃掉另一邊的通知（#968）：協調者那條加前綴，巡檢沿用舊鍵。
     let key = if how == "responder_api" { format!("persona:responder:{version}:changed") } else { format!("persona:{version}:changed") };
     if let Err(e) = store::push_inbox(db, &key, "persona_changed", None, None, None, &summary).await {
         tracing::warn!(error = ?e, "persona 換了，但通知寫不進 inbox");
@@ -933,8 +847,6 @@ pub async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b
     }
     let changed = sup.persona_text.as_deref() != Some(text);
     let version = if changed { store::set_persona(&app.db, text, "api", None).await.map_err(up)? } else { sup.persona_version };
-    // 留痕擺在 `sync_persona` **之前**：DB 那一份才是權威，projection 寫不出去時文字已經生效了
-    // （`sync_persona` 的說明就是這個意思）。把留痕放在後面的話，部分失敗＝改了卻沒人知道。
     if changed {
         note_persona_change(&app.db, &actor, sup.persona_text.as_deref(), text, version, "api").await;
     }
@@ -975,8 +887,6 @@ pub async fn post_persona_adopt(
     note_persona_change(&app.db, &actor, previous.as_deref(), &embedded, version, "adopt_embedded").await;
     sync_persona(&app, &embedded, version).await?;
     drop(_g);
-    // `actor` 從驗過的身份來，不是 body 自稱的（issue #463）：以前這裡是
-    // `b.actor.as_deref().unwrap_or("AGM")`，任何呼叫端都能把這行 log 掛成 AGM。
     tracing::info!(version, actor, reason = b.reason.as_deref().unwrap_or(""), "AGM persona migrated to the embedded version");
     app.emit("supervisor_changed", json!({"persona_version": version})).await;
     Ok(Json(json!({"changed": true, "version": version, "hash": embedded_hash})))
@@ -1022,8 +932,6 @@ async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabilitie
 pub async fn get_build_inputs(State(_app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     Ok(Json(super::persona::build_inputs_json()))
 }
-
-// ------------------------------------------------------------- approvals & leases
 
 #[derive(Deserialize)]
 pub struct ApprovalIn {
@@ -1081,7 +989,6 @@ async fn requester_claim(app: &impl crate::capabilities::Db, headers: &HeaderMap
 
 /// Ask for a rebuild / restart window. Creates a `pending` record; AGM decides it.
 pub(crate) async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, axum::Extension(principal): axum::Extension<crate::api::RequestPrincipal>, Json(b): Json<ApprovalIn>) -> Result<Json<Value>, LcError> {
-    // #970：自由文字原樣進申請列、`approval_requested` inbox 與 `GET /approvals`，跟交辦一樣設上限（request_id 另由 #923 驗）。
     for (label, value, max) in [
         ("requester", Some(b.requester.as_str()), MAX_LABEL_CHARS),
         ("scope", Some(b.scope.as_str()), MAX_NOTE_CHARS),
@@ -1096,7 +1003,6 @@ pub(crate) async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMa
     if b.target_commit.as_deref().is_some_and(|c| !super::maintenance::valid_commit(c)) {
         return Err(LcError::Bad("target_commit must be 7-64 hex characters (a git sha)".into()));
     }
-    // #923：穩定的 request id 進唯一索引、再隨回應回出去，先驗長度與字元。
     let request_id = match b.request_id.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => Some(crate::request_id::validate("request_id", r)?),
         None => None,
@@ -1126,7 +1032,6 @@ pub(crate) async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMa
     ).await
     }
     .map_err(|e| match e.downcast::<store::ApprovalRequestMismatch>() {
-        // 同一個 request id 換了內容不是重送，是兩件事共用了一個 id：什麼都不動。
         Ok(m) => LcError::conflict(
             "approval_request_mismatch",
             json!({"reason": "approval_request_mismatch", "message": m.to_string(), "request_id": m.request_id,
@@ -1141,17 +1046,13 @@ pub(crate) async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMa
         },
     })?;
     let a = out.approval;
-    // 重送不再叫醒 AGM 一次，也不再推一次事件：它看到的還是同一筆。
     if out.created {
-        // AGM decides these itself (CLAUDE.md, 2026-09-12): the request is put in front of it as an
-        // inbox event rather than sent to the user to relay. 事件已在建立的同一個交易裡寫好（#320）。
         app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     }
     if let Some(old) = out.superseded.as_deref() {
         app.emit("supervisor_changed", json!({"approval_superseded": old, "by": a.id})).await;
     }
     let mut v = a.to_json();
-    // 呼叫端要分得出「這次新開的」與「回你原本那筆」，才不會把重送讀成沒送出去。
     v["created"] = json!(out.created);
     v["superseded"] = json!(out.superseded);
     Ok(Json(v))
@@ -1175,12 +1076,8 @@ pub async fn post_approval_decision(
     headers: HeaderMap,
     Json(b): Json<DecisionIn>,
 ) -> Result<Json<Value>, LcError> {
-    // #970：被拒的裁示不拿鎖、不寫列（reason 進 supervisor_approvals 與稽核列，actor 進稽核列）。
     bounded("reason", b.reason.as_deref().unwrap_or_default(), MAX_NOTE_CHARS)?;
     bounded("actor", b.actor.as_deref().unwrap_or_default(), MAX_LABEL_CHARS)?;
-    // 核准只給驗過的 AGM 角色（issue #447，2026-09-25 使用者裁示）：核准是換 binary／重啟窗口的授權來源，
-    // 而 UI token 本機任何行程都拿得到——不要求角色的話，一顆 bot 不帶身份就能核准自己要的窗口。
-    // deny／revoke 照舊不要求：那只會叫停，人在一般 shell 裡還得叫得停。
     let verified = if b.decision == "approve" {
         Some(super::bot_requests::require_role(&app, &headers).await?)
     } else {
@@ -1194,7 +1091,6 @@ pub async fn post_approval_decision(
         _ => return Err(LcError::Bad("decision must be approve | deny | revoke".into())),
     };
     let current = store::approval(&app.db, &id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("approval".into()))?;
-    // 只讀申請當下持久化的 principal；舊名字或舊 unverified 旗標都不足以回推身份。
     if status == "approved" {
         let principal = store::approval_principal(&app.db, &current.id).await.map_err(|e| {
             LcError::Unavailable(json!({"error":"unavailable", "reason":"requester_lookup_failed", "retryable":true, "sent":false,
@@ -1212,14 +1108,11 @@ pub async fn post_approval_decision(
                 "sent":false, "approval_id":current.id, "message":"缺少申請當下的獨立 principal 證據；請重新申請"}))),
         }
     }
-    // A decision that is already recorded is answered from the row: a retry is not a new
-    // decision, and re-approving something that was revoked has to be explicit.
     if current.status == status {
         let mut out = current.to_json();
         out["idempotent"] = json!(true);
         return Ok(Json(out));
     }
-    // 已過有效期的申請不能原樣核准：沒帶新的 expires_in_secs 的話，寫下去的是一張當場就不能用的核准。
     if status == "approved"
         && b.expires_in_secs.is_none()
         && current.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &crate::db::now()).is_le())
@@ -1234,23 +1127,15 @@ pub async fn post_approval_decision(
             }),
         ));
     }
-    // 範圍先驗完再算時間。算在鎖裡、但在任何 UPDATE 之前：不合法直接 400，鎖放掉，列不動（#655）。
     let expires = approval_expires(b.expires_in_secs)?;
     let actor = decision_actor(verified, b.actor.as_deref());
-    // **第一個裁示定案**：approve／deny 只從 `pending` 寫得進去，而且條件寫在 SQL 裡、不看先前
-    // 讀到的值。否則兩個角色同時決定時，後到的那個會把 `approved` 改成 `denied`——同一筆核准就
-    // 有了兩個「第一次裁示」。要翻案得明講 `revoke`，而且歷程留著（`supervisor_notes`）。
     let allowed_from: &[&str] = match status {
         "approved" | "denied" => &["pending"],
-        // 撤銷的是還有效的許可：已核准的收回，還沒決定的等於作廢。
         _ => &["approved", "pending"],
     };
     let mut decided = None;
     let mut from_status = "";
     for from in allowed_from {
-        // 決定與它的稽核紀錄在同一個 transaction 裡（`decide_approval_from`）：分兩步寫的話，
-        // note 失敗會留下「有決定、沒紀錄」，而重送同一個決定會撞上 idempotent 直接回成功，
-        // 那筆 audit 就永遠補不回來。
         if let Some(pair) = store::decide_approval_from(&app.db, &id, from, status, &actor, b.reason.as_deref(), expires.as_deref())
             .await
             .map_err(up)?
@@ -1296,7 +1181,6 @@ pub async fn get_approvals(State(app): State<Arc<App>>, Query(q): Query<Approval
         Some(id) => store::approval(&app.db, id).await.map_err(up)?.into_iter().collect(),
         None => store::approvals(&app.db, 100).await.map_err(up)?,
     };
-    // 決定歷程跟著回：核准列只有最後一個狀態，「誰核准的、後來被誰撤銷」要查得到。只查這幾筆的（#972）。
     let ids: Vec<String> = rows.iter().map(|a| a.id.clone()).collect();
     let mut history = store::approval_decisions_for(&app.db, &ids).await.map_err(up)?;
     let out: Vec<Value> = rows
@@ -1340,7 +1224,6 @@ pub async fn get_maintenance_safety(
     let approval = q.approval.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let owner = q.owner.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let mut snapshot = super::maintenance::safety_as(&app, &exclude, approval, owner).await?;
-    // Echo the applied IDs so callers can distinguish an older daemon ignoring the query.
     snapshot["excluded_bot_ids"] = json!(exclude);
     Ok(Json(snapshot))
 }
@@ -1380,9 +1263,6 @@ pub async fn post_lease_acquire(
     headers: HeaderMap,
     Json(b): Json<AcquireIn>,
 ) -> Result<Json<Value>, LcError> {
-    // Body 的 owner 與 approval requester 相等仍不夠：被證明身份的一般 bot 只能替自己開窗口，
-    // 否則任何 bot 都能借另一顆 bot 已獲核准的 approval 拿走 lease token。
-    // #923：冪等鍵進租約表的唯一索引，先驗長度與字元。
     let request_id = match b.request_id.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         Some(r) => Some(crate::request_id::validate("request_id", r)?),
         None => None,
@@ -1440,7 +1320,6 @@ fn lease_proof<'a>(b: &'a LeaseHolderIn, actor: Option<super::roles::Role>) -> R
         }
         return Ok(store::LeaseProof::Forced);
     }
-    // 沒帶不是當場拒絕：升級前建立的租約沒有 token 可以帶，那一種由 `allows()` 放行。
     Ok(match b.lease_token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) => store::LeaseProof::Token(t),
         None => store::LeaseProof::Absent,
@@ -1479,20 +1358,12 @@ pub async fn post_lease_renew(
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
-    // force 是「持有者已經不在了、收掉它的窗口」，不是「替別人延長」：renew 只認 token。
-    // 以前 AGM 角色帶 force 就能用公開的 owner／fence 延長別人的租約，而且不留 note（review2 sup #5）。
     if b.force {
         return Err(LcError::Bad("renew 不接受 force：延長租約要帶 acquire 當下的 lease_token；要接管請 release --force".into()));
     }
-    // A tokenless pre-migration lease is still accepted for compatibility, so owner/fence
-    // cannot be its only boundary for a Bot principal. Bind the public owner claim to the
-    // authenticated Bot before consulting or changing the lease.
     requester_claim(&app, &headers, &b.owner).await?;
     let _g = super::lock().await;
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
-    // Renewal re-checks the permission, it does not just extend the clock. An approval that was
-    // revoked (or has lapsed) while the holder was working must not be extendable by the holder
-    // — otherwise "revoked" only takes effect whenever the current lease happens to run out.
     let held = store::lease(&app.db, &resource).await.map_err(up)?;
     let approval = match held.as_ref().and_then(|l| l.approval_id.clone()) {
         Some(ap) => store::approval(&app.db, &ap).await.map_err(up)?,
@@ -1513,7 +1384,6 @@ pub async fn post_lease_renew(
             ));
         }
     }
-    // 憑證在任何寫入之前比對；`renew_lease` 只認 owner＋fence，那兩個是公開欄位。
     let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
     if !proof.allows(store::lease_token(&app.db, &resource).await.map_err(up)?.as_deref()) {
         return Err(lease_forbidden(&resource, &b.owner, b.lease_token.is_some()));
@@ -1537,14 +1407,10 @@ pub async fn post_lease_release(
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
-    // A valid token should not let one Bot operate another Bot's lease. AGM force-release
-    // remains governed by the role check below; ordinary non-force release is owner-bound.
     if !b.force {
         requester_claim(&app, &headers, &b.owner).await?;
     }
     let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
-    // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
-    // placed so held assignments go out on the next pass.
     let released = super::maintenance::release(&app, &resource, &b.owner, b.fence, proof).await.map_err(|e| {
         if e.to_string() == "lease_token_mismatch" {
             lease_forbidden(&resource, &b.owner, b.lease_token.is_some())
@@ -1592,8 +1458,6 @@ mod persona_sync_tests {
             .bind(&bid).bind(store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
         assert_eq!(setup::effective_persona(&app.db).await.unwrap().0, "existing custom persona");
         let initial = store::get_or_init(&app.db).await.unwrap().persona_version;
-        // persona.md cannot be created yet. A partial sync must be visible, while the new
-        // authoritative text remains durable and recoverable using the exact same request.
         let err = put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn {
             text: "new persona".into(), expected_version: Some(initial),
         })).await.unwrap_err();
@@ -1607,7 +1471,6 @@ mod persona_sync_tests {
         assert_eq!(repaired["stored"]["version"], stored.persona_version);
         assert_eq!(std::fs::read_to_string(setup::agm_dir(&app).join("persona.md")).unwrap(), "new persona");
         assert_eq!(crate::db::bot(&app.db, &bid).await.unwrap().unwrap().persona.as_deref(), Some("new persona"));
-        // An old request with DIFFERENT text still cannot overwrite the new revision.
         assert!(put_persona(State(app.clone()), HeaderMap::new(), Json(PersonaIn {
             text: "stale edit".into(), expected_version: Some(initial),
         })).await.is_err());
@@ -1620,7 +1483,6 @@ mod persona_sync_tests {
 mod approval_decision_tests {
     use super::*;
 
-    // Direct-handler tests explicitly model the principal normally supplied by the auth middleware.
     async fn post_approval(state: State<Arc<App>>, headers: HeaderMap, body: Json<ApprovalIn>) -> Result<Json<Value>, LcError> {
         let principal = match headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()) {
             Some(id) => crate::api::RequestPrincipal::Bot(id.into()),
@@ -1748,14 +1610,12 @@ mod approval_decision_tests {
             .unwrap();
         assert_eq!(decided, 0, "拒絕時不寫稽核");
 
-        // 同一筆帶新的有效期就核准，而且新的有效期比現在晚。
         let body: DecisionIn = serde_json::from_value(json!({"decision": "approve", "actor": "agm", "expires_in_secs": 600})).unwrap();
         let Json(out) = post_approval_decision(State(app.clone()), Path(id.clone()), patrol_headers(&app).await, Json(body)).await.unwrap();
         assert_eq!(out["status"], "approved");
         let exp = out["expires_at"].as_str().unwrap();
         assert!(crate::db::cmp_ts(exp, &crate::db::now()).is_gt(), "新的有效期在現在之後：{exp}");
 
-        // deny 不看有效期：過期的 pending 照樣可以拒絕。
         let other = verified_approval(&app.db, "fixer-b", "rebuild", "release", Some("def456"), None, None).await.unwrap().approval.id;
         sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?")
             .bind(crate::db::iso_in(-10))
@@ -1773,9 +1633,7 @@ mod approval_decision_tests {
     #[tokio::test]
     async fn rewriting_the_persona_is_refused_for_a_bot_that_is_not_a_role_and_always_leaves_a_trace() {
         let app = app().await;
-        let agm = agm_role_headers(&app).await; // 巡檢角色
-        // 這個精簡的測試 app 沒有 manager bot 的 config 列，`sync_persona` 必然回
-        // `persona_sync_incomplete`。那正好是要測的那一格：權威寫入已經生效，留痕不能被它吃掉。
+        let agm = agm_role_headers(&app).await;
         let put = |app: &Arc<App>, h: HeaderMap, text: &str| {
             let (app, text) = (app.clone(), text.to_string());
             async move {
@@ -1798,7 +1656,6 @@ mod approval_decision_tests {
             }
         };
 
-        // 1) 驗得過、但那顆不是角色 bot：403，一個字都不寫。
         let plain = crate::db::ulid();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','plain','claude','plain-tok',?)")
             .bind(&plain)
@@ -1815,7 +1672,6 @@ mod approval_decision_tests {
         assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none(), "被擋下就不該寫進去");
         assert!(inbox(&app).await.is_empty(), "被擋下就不該推通知");
 
-        // 2) 宣告了身份卻證明不了：403（`verified_bot_id` 丟的），也不寫。
         let mut forged = HeaderMap::new();
         forged.insert("X-AM-Bot-Id", plain.parse().unwrap());
         forged.insert("X-AM-Bot-Token", "nope".parse().unwrap());
@@ -1823,7 +1679,6 @@ mod approval_decision_tests {
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
         assert!(store::get_or_init(&app.db).await.unwrap().persona_text.is_none());
 
-        // 3) 沒宣告身份＝使用者／UI：照收（界線留在 #447），但要留痕，記成 user、歸巡檢。
         put(&app, HeaderMap::new(), "使用者從網頁改的").await.unwrap();
         let rows = inbox(&app).await;
         assert_eq!(rows.len(), 1, "每次真的改動都要推一則");
@@ -1836,7 +1691,6 @@ mod approval_decision_tests {
         crate::supervisor::roles::classify(&app.db).await.unwrap();
         assert_eq!(inbox(&app).await[0].1, "patrol", "persona_changed 歸巡檢");
 
-        // 4) 角色 bot：照收，記成 AGM:<role>。
         put(&app, agm, "協調者改的").await.unwrap();
         let rows = inbox(&app).await;
         assert_eq!(rows.len(), 2);
@@ -1845,7 +1699,6 @@ mod approval_decision_tests {
         assert_eq!(p["verified"], json!(true));
         assert_eq!(p["old_bytes"], json!("使用者從網頁改的".len()), "舊文字的長度要對");
 
-        // 5) 同一段文字再送一次（修 projection）：不是改動，不該再叫醒巡檢一次。
         put(&app, HeaderMap::new(), "協調者改的").await.unwrap();
         assert_eq!(inbox(&app).await.len(), 2, "重送同一段文字不該再推一則");
 
@@ -1870,7 +1723,6 @@ mod approval_decision_tests {
         let held = || async { store::lease(&app.db, "rebuild").await.unwrap().unwrap() };
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
 
-        // 什麼都不帶：403，租約一個字都不動。
         let err = post_lease_release(State(app.clone()), Path("rebuild".into()), HeaderMap::new(), Json(body(json!({"owner": "runner", "fence": lease.fence}))))
             .await
             .unwrap_err();
@@ -1878,7 +1730,6 @@ mod approval_decision_tests {
         assert_eq!(v["reason"], "lease_token_required");
         assert!(held().await.released_at.is_none(), "被擋下來就不該動到租約");
 
-        // 帶錯的：一樣 403。
         let err = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
@@ -1892,7 +1743,6 @@ mod approval_decision_tests {
         assert!(held().await.released_at.is_none());
         assert_eq!(store::approval(&app.db, &ap.id).await.unwrap().unwrap().status, "approved", "核准也不該被消耗");
 
-        // 帶對的：成功。
         let Json(out) = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
@@ -1916,10 +1766,8 @@ mod approval_decision_tests {
     #[tokio::test]
     async fn a_claimed_bot_identity_that_cannot_be_proven_is_refused_not_downgraded_to_the_user() {
         let app = app().await;
-        let good = agm_role_headers(&app).await; // 巡檢角色
+        let good = agm_role_headers(&app).await;
         let bot_id = good.get("X-AM-Bot-Id").unwrap().to_str().unwrap().to_string();
-        // 協調者要先建立起來，跨角色才成立：沒有協調者時，協調的事件本來就是巡檢在收
-        // （`roles::ack` 的 `Patrol if !responder_configured`），那一格不是這條測試要問的。
         let responder = crate::db::ulid();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','AGM-responder','claude','resp-tok',?)")
             .bind(&responder)
@@ -1930,7 +1778,6 @@ mod approval_decision_tests {
         crate::supervisor::roles::set_env(&app.db, crate::supervisor::roles::Role::Responder, &responder, "p-agm", "/tmp").await.unwrap();
         assert!(crate::supervisor::roles::responder_configured(&app.db).await.unwrap(), "前提：協調者已建立");
 
-        // 一筆歸協調者的事件。
         let ev = |app: &Arc<App>| {
             let app = app.clone();
             async move {
@@ -1953,14 +1800,12 @@ mod approval_decision_tests {
             }
         };
 
-        // 1) 帶對 token：還是只能結自己角色的，409（既有行為，別退化）。
         let e1 = ev(&app).await;
         let err = post_inbox_ack(State(app.clone()), Path(e1.clone()), good.clone()).await.unwrap_err();
         let LcError::Conflict(v) = &err else { panic!("expected 409, got {err:?}") };
         assert_eq!(v["reason"], "claimed_by_other_role");
         assert_eq!(state(&app, e1.clone()).await, "pending", "被擋下就不該動到事件");
 
-        // 2) 同一顆 bot、token 打錯：403，不是「當成使用者」。
         for bad in ["nope", ""] {
             let mut h = HeaderMap::new();
             h.insert("X-AM-Bot-Id", bot_id.parse().unwrap());
@@ -1972,7 +1817,6 @@ mod approval_decision_tests {
             assert_eq!(state(&app, e).await, "pending", "token={bad:?}：擋下來就不該結掉別人的事件");
         }
 
-        // 3) 完全不帶 token 但宣告了 bot id：一樣證明不了。
         let mut only_id = HeaderMap::new();
         only_id.insert("X-AM-Bot-Id", bot_id.parse().unwrap());
         let e3 = ev(&app).await;
@@ -1980,15 +1824,12 @@ mod approval_decision_tests {
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
         assert_eq!(state(&app, e3).await, "pending");
 
-        // 4) 什麼身份都沒宣告：以前是「使用者／UI，什麼都結得掉」，issue #432 之後也是 403
-        //    ——不宣告曾經比宣告了卻證明不了更有權限，那個反差正是要消掉的東西。
         let e4 = ev(&app).await;
         let err = post_inbox_ack(State(app.clone()), Path(e4.clone()), HeaderMap::new()).await.unwrap_err();
         let LcError::Forbidden(v) = &err else { panic!("沒宣告身份應該 403，卻是 {err:?}") };
         assert_eq!(v["reason"], "role_required");
         assert_eq!(state(&app, e4).await, "pending", "擋下來就不該動到事件");
 
-        // 5) 驗過、但那顆不是角色 bot：跟沒宣告一樣結不掉（`actor_role` 回 Ok(None)）。
         let plain = crate::db::ulid();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?,'p-agm','plain','claude','plain-tok',?)")
             .bind(&plain)
@@ -2018,20 +1859,17 @@ mod approval_decision_tests {
             async move { store::approval(&app.db, &id).await.unwrap().unwrap().decided_by.unwrap_or_default() }
         };
 
-        // 沒驗過卻自稱是協調者：記成 user(...)，絕不是 AGM 開頭。沒驗過的只能 deny／revoke（issue #447）。
         let a1 = pending(&app).await;
         let _ = decide(&app, &a1, "deny", "AGM:responder").await.unwrap();
         let who = decided_by(&app, a1).await;
         assert_eq!(who, "user(AGM:responder)");
         assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身份，卻拿到 {who:?}");
 
-        // 沒驗過、也沒自稱：user，而不是以前的 AGM。
         let a2 = pending(&app).await;
         let body: DecisionIn = serde_json::from_value(json!({"decision": "deny"})).unwrap();
         let _ = post_approval_decision(State(app.clone()), Path(a2.clone()), HeaderMap::new(), Json(body)).await.unwrap();
         assert_eq!(decided_by(&app, a2).await, "user");
 
-        // 驗過的角色：以 token 為準，body 自稱的名字不影響。
         let a3 = pending(&app).await;
         let h = agm_role_headers(&app).await;
         let body: DecisionIn = serde_json::from_value(json!({"decision": "approve", "actor": "AGM:responder"})).unwrap();
@@ -2064,27 +1902,22 @@ mod approval_decision_tests {
             async move { store::approval(&app.db, &id).await.unwrap().unwrap() }
         };
 
-        // 1) 沒宣告身份：照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），
-        //    `requester` 一個字都不動，但記成沒驗過。
         let Json(a1) = ask(&app, HeaderMap::new(), "daemon-update-kick", "r-1").await.unwrap();
         let a1 = row(&app, a1["id"].as_str().unwrap().to_string()).await;
         assert_eq!(a1.requester, "daemon-update-kick", "自稱的名字要原樣留著，lease 的 --owner 靠它對");
         assert_eq!(a1.requester_unverified, 1);
         assert_eq!(a1.to_json()["requester_unverified"], json!(true), "API 要看得出來沒驗過");
 
-        // 2) 驗過、而且申請人就是自己（這裡用經驗證的 bot id）：記成驗過。
         let h = agm_role_headers(&app).await;
         let Json(a2) = ask(&app, h.clone(), h["X-AM-Bot-Id"].to_str().unwrap(), "r-2").await.unwrap();
         let a2 = row(&app, a2["id"].as_str().unwrap().to_string()).await;
         assert_eq!((a2.requester.as_str(), a2.requester_unverified), (h["X-AM-Bot-Id"].to_str().unwrap(), 0));
 
-        // 3) 驗過、卻用別人的名義申請：403，不是默默改寫成自己。
         let err = ask(&app, h.clone(), "somebody-else", "r-3").await.unwrap_err();
         let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
         assert_eq!(v["reason"], "requester_not_the_caller");
         assert!(store::approval_by_request(&app.db, "r-3").await.unwrap().is_none(), "擋下來就不該留下半筆申請");
 
-        // 4) 宣告了身份卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者申請」。
         let mut bad = HeaderMap::new();
         bad.insert("X-AM-Bot-Id", h.get("X-AM-Bot-Id").unwrap().clone());
         bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
@@ -2123,24 +1956,19 @@ mod approval_decision_tests {
             async move { store::approval(&app.db, &id).await.unwrap().unwrap().status }
         };
 
-        // 自己申請、自己核准：擋下來，而且那筆還是 pending。
         let mine = ask(&app, h.clone(), h["X-AM-Bot-Id"].to_str().unwrap(), "s-1").await;
         let err = decide_as(&app, mine.clone(), h.clone(), "approve").await.unwrap_err();
         let LcError::Forbidden(v) = &err else { panic!("expected 403, got {err:?}") };
         assert_eq!(v["reason"], "self_approval_forbidden");
         assert_eq!(status(&app, mine.clone()).await, "pending", "擋下來就不該動到那筆");
 
-        // 同一個人把自己的申請收回（deny）照舊可以。
         let _ = decide_as(&app, mine.clone(), h.clone(), "deny").await.unwrap();
         assert_eq!(status(&app, mine).await, "denied");
 
-        // 別人送的申請照常裁示得了。
         let theirs = ask(&app, requester_headers(&app, "fixer").await, "fixer", "s-2").await;
         let _ = decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
         assert_eq!(status(&app, theirs).await, "approved");
 
-        // 申請時不帶身份、裁示時才帶自己的——守衛不能因此變成選配的（i406 的審核，2026-09-24 裁示）：
-        // 缺少申請當下的 principal 證據就保持未知，一樣不能核准。
         let side_door = ask(&app, HeaderMap::new(), h["X-AM-Bot-Id"].to_str().unwrap(), "s-3").await;
         let err = decide_as(&app, side_door.clone(), h, "approve").await.unwrap_err();
         assert!(matches!(&err, LcError::Unavailable(v) if v["reason"] == "requester_identity_unknown"), "got {err:?}");
@@ -2171,12 +1999,10 @@ mod approval_decision_tests {
             other => panic!("expected 403 role_required, got {other:?}"),
         };
 
-        // 1) 沒宣告身份（共用 UI token 的任何呼叫端）：核准 403，那筆還是 pending。
         let a1 = pending(&app).await;
         role_required(decide_as(&app, a1.clone(), HeaderMap::new(), "approve").await);
         assert_eq!(status(&app, a1.clone()).await, "pending", "擋下來就不該動到那筆");
 
-        // 2) 證明得了自己、卻不是角色 bot（一般修正 bot）：一樣 403，不因為驗過身份就能核准。
         let fixer = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p-fix','/tmp/p-fix','fix',?)")
             .bind(crate::db::now())
@@ -2195,18 +2021,15 @@ mod approval_decision_tests {
         role_required(decide_as(&app, a1.clone(), fix_h.clone(), "approve").await);
         assert_eq!(status(&app, a1.clone()).await, "pending");
 
-        // 3) 宣告了身份卻證明不了：照 #415 是 403 `bot_proof_mismatch`，不是退回「使用者核准」。
         let mut bad = fix_h.clone();
         bad.insert("X-AM-Bot-Token", "nope".parse().unwrap());
         let err = decide_as(&app, a1.clone(), bad, "approve").await.unwrap_err();
         assert!(matches!(&err, LcError::Forbidden(v) if v["reason"] == "bot_proof_mismatch"), "got {err:?}");
 
-        // 4) 驗過的角色照常核准。
         let role = patrol_headers(&app).await;
         let _ = decide_as(&app, a1.clone(), role, "approve").await.unwrap();
         assert_eq!(status(&app, a1.clone()).await, "approved");
 
-        // 5) 叫停不要求角色：沒標頭的 revoke、沒標頭的 deny、非角色 bot 的 deny 都照收。
         let _ = decide_as(&app, a1.clone(), HeaderMap::new(), "revoke").await.unwrap();
         assert_eq!(status(&app, a1).await, "revoked");
         let a2 = pending(&app).await;
@@ -2227,7 +2050,6 @@ mod approval_decision_tests {
         let h = agm_role_headers(&app).await;
         let a = verified_approval(&app.db, "unreadable-requester", "rebuild", "daemon", None, None, Some("u-1")).await.unwrap().approval;
         let id = a.id;
-        // 只破壞申請的 principal 證據；角色 caller 的憑證仍可正常驗證。
         sqlx::query("UPDATE supervisor_notes SET body=x'80' WHERE id=?")
             .bind(format!("approval-principal:{id}")).execute(&app.db).await.unwrap();
         let decision: DecisionIn = serde_json::from_value(json!({"decision": "approve"})).unwrap();
@@ -2294,7 +2116,6 @@ mod approval_decision_tests {
         let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, false, None, &json!({})).await.unwrap().unwrap();
         let body = |v: serde_json::Value| -> LeaseHolderIn { serde_json::from_value(v).unwrap() };
 
-        // 一般呼叫端（沒有角色）就算附了理由也不能接管：force 是授權問題，不只是稽核問題。
         let err = post_lease_release(
             State(app.clone()),
             Path("rebuild".into()),
@@ -2347,7 +2168,6 @@ mod approval_decision_tests {
         store::decide_approval(&app.db, &ap.id, "approved", "AGM", None, None).await.unwrap();
         let until = iso_in(900);
         let lease = store::acquire_lease(&app.db, "rebuild", "runner", Some(&ap.id), None, &until, false, None, &json!({})).await.unwrap().unwrap();
-        // 升級前的那一列：token 是 NULL。
         sqlx::query("UPDATE supervisor_leases SET lease_token=NULL WHERE resource='rebuild'").execute(&app.db).await.unwrap();
 
         let body: LeaseHolderIn = serde_json::from_value(json!({"owner": "runner", "fence": lease.fence})).unwrap();
@@ -2527,7 +2347,6 @@ mod approval_decision_tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='approval_requested'").fetch_one(&app.db).await.unwrap();
         assert_eq!(events, 1, "重送不再叫醒 AGM 一次");
 
-        // 同 id 換 commit：409，原本那筆不動。
         let err = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(Some("restart-ca7b22d"), "deadbee"))).await.unwrap_err();
         let LcError::Conflict(detail) = &err else { panic!("expected 409, got {err:?}") };
         assert_eq!(detail["reason"], "approval_request_mismatch");
@@ -2535,7 +2354,6 @@ mod approval_decision_tests {
         assert_eq!(detail["approval_id"], first["id"]);
         assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
 
-        // 另一顆 bot 撞上同一個自然 id：不能拿回別人的那一筆（review2 sup 沒把握 3）。
         let mut other = ask(Some("restart-ca7b22d"), "ca7b22d");
         other.requester = "someone-else".into();
         let err = post_approval(State(app.clone()), HeaderMap::new(), Json(other)).await.unwrap_err();
@@ -2543,7 +2361,6 @@ mod approval_decision_tests {
         assert_eq!((detail["reason"].as_str(), detail["field"].as_str()), (Some("approval_request_mismatch"), Some("requester")));
         assert_eq!(store::approvals(&app.db, 10).await.unwrap().len(), 1);
 
-        // 不帶 id 照舊：每次都是新的一筆。
         let Json(a) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(None, "ca7b22d"))).await.unwrap();
         let Json(b) = post_approval(State(app.clone()), HeaderMap::new(), Json(ask(None, "ca7b22d"))).await.unwrap();
         assert_ne!(a["id"], b["id"]);
@@ -2598,11 +2415,8 @@ mod approval_decision_tests {
             .map(|d| (d["from"].as_str().unwrap_or("").into(), d["to"].as_str().unwrap_or("").into()))
             .collect();
         assert_eq!(pairs, vec![("pending".to_string(), "approved".to_string()), ("approved".into(), "revoked".into())]);
-        // 核准只有驗過的角色做得了（issue #447），記成 token 驗出來的角色、不是 body 自稱的；
-        // revoke 走沒有 bot 標頭的呼叫端，自稱的 `AGM:patrol` 只會被記成未驗證的 `user(…)`（issue #414）。
         assert_eq!(decisions[0]["actor"], format!("{}:patrol", store::SUPERVISOR_ID), "誰核准的要查得到");
         assert_eq!(decisions[1]["actor"], "user(AGM:patrol)");
-        // 撤銷之後不能就地再核准：要開新的一筆申請。
         assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err());
     }
 
@@ -2612,13 +2426,11 @@ mod approval_decision_tests {
     async fn a_decision_whose_audit_cannot_be_written_is_not_written_either() {
         let app = app().await;
         let id = pending(&app).await;
-        // 只讓裁示的稽核 INSERT 失敗，保留申請時已寫入的 principal 證據。
         sqlx::query("CREATE TRIGGER reject_decision_audit BEFORE INSERT ON supervisor_notes WHEN NEW.kind='approval_decision' BEGIN SELECT RAISE(ABORT,'disk I/O error'); END")
             .execute(&app.db).await.unwrap();
         assert!(decide(&app, &id, "approve", "AGM:patrol").await.is_err(), "寫不了紀錄就不該有決定");
         assert_eq!(store::approval(&app.db, &id).await.unwrap().unwrap().status, "pending", "核准沒有被改掉");
 
-        // 寫入恢復之後，同一個決定照樣能做（沒有被 idempotent 擋住）。
         sqlx::query("DROP TRIGGER reject_decision_audit").execute(&app.db).await.unwrap();
         assert_eq!(decide(&app, &id, "approve", "AGM:patrol").await.unwrap().0["status"], "approved");
         let history = store::approval_decisions(&app.db).await.unwrap();
@@ -2692,7 +2504,6 @@ mod review_boundary_tests {
     #[tokio::test]
     async fn the_assignment_list_pages_so_the_oldest_open_work_is_still_reachable() {
         let app = app().await;
-        // 同一毫秒寫兩筆：沒有 id 當第二個排序鍵的話，翻頁會漏掉或重複其中一筆。
         for i in 0..5 {
             let a = store::insert_assignment(&app.db, None, "bot", &format!("crid-{i}"), "work", &[], None, true)
                 .await
@@ -2729,7 +2540,6 @@ mod review_boundary_tests {
         uniq.sort();
         uniq.dedup();
         assert_eq!((seen.len(), uniq.len()), (5, 5), "五筆各出現一次：{seen:?}");
-        // 第一頁就是舊行為：拿得到最新兩筆，而且明講後面還有。
         let first = get_assignments(State(app.clone()), Query(AssignmentsQuery::default())).await.unwrap().0;
         assert_eq!(first["assignments"].as_array().unwrap().len(), 5);
         assert_eq!(first["has_more"], json!(false));
@@ -2748,7 +2558,6 @@ mod review_boundary_tests {
     #[tokio::test]
     async fn the_list_filters_by_status_in_sql_and_the_sort_has_an_index() {
         let app = app().await;
-        // 一筆很舊的未結案，前面壓一整頁比它新的已結案：客戶端過濾要翻頁才看得到它。
         let open = store::insert_assignment(&app.db, None, "bot", "crid-open", "還在等", &[], None, true).await.unwrap();
         sqlx::query("UPDATE supervisor_assignments SET created_at='2026-09-01T00:00:00.000Z', status='blocked' WHERE id=?")
             .bind(&open.id)
@@ -2765,7 +2574,6 @@ mod review_boundary_tests {
                 .unwrap();
         }
 
-        // `status=open`：第一頁就是那一筆，不必翻。
         let page = get_assignments(
             State(app.clone()),
             Query(AssignmentsQuery { before: None, limit: Some(2), status: Some("open".into()) }),
@@ -2778,7 +2586,6 @@ mod review_boundary_tests {
         assert_eq!(page["has_more"], json!(false));
         assert_eq!(page["status"], json!("open"), "回聲要在：舊 daemon 忽略 status 時呼叫端才看得出來");
 
-        // 剛好一個狀態。
         let done = get_assignments(
             State(app.clone()),
             Query(AssignmentsQuery { before: None, limit: Some(10), status: Some("completed".into()) }),
@@ -2788,7 +2595,6 @@ mod review_boundary_tests {
         .0;
         assert_eq!(done["assignments"].as_array().unwrap().len(), 4);
 
-        // 打錯字回 400，不是靜靜地回一份空清單（那跟「真的沒有」分不開）。
         let err = get_assignments(
             State(app.clone()),
             Query(AssignmentsQuery { before: None, limit: None, status: Some("opne".into()) }),
@@ -2797,9 +2603,6 @@ mod review_boundary_tests {
         .expect_err("不認得的狀態");
         assert!(matches!(err, LcError::Bad(_)), "{err:?}");
 
-        // 排序真的走索引：少了它 planner 會掃完整張表再排序（離線兩萬筆 202ms → 13ms）。
-        // `EXPLAIN QUERY PLAN` 回四欄（id、parent、notused、detail），要的是第四欄；
-        // `query_scalar` 取的是第一欄，那是 INTEGER。
         let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
             "EXPLAIN QUERY PLAN SELECT * FROM supervisor_assignments WHERE supervisor_id=?
               ORDER BY created_at DESC, id DESC LIMIT 5",
@@ -2840,7 +2643,6 @@ mod review_boundary_tests {
         assert!(matches!(r, Err(LcError::Upstream(_))), "{r:?}");
         let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'").fetch_one(&app.db).await.unwrap();
         assert_eq!(stored, 1, "權威在 DB：照存");
-        // 目錄回來之後重送就補上，而且寫的是完整檔。
         std::fs::create_dir_all(&missing).unwrap();
         put_handoff(State(app.clone()), Json(HandoffIn { summary: "交接".into() })).await.expect("目錄在了就寫得進去");
         let copy = std::fs::read_to_string(missing.join("handoff.md")).unwrap();
@@ -2853,7 +2655,6 @@ mod review_boundary_tests {
     #[tokio::test]
     async fn the_handoff_counts_open_work_that_fell_off_the_recent_page() {
         let app = app().await;
-        // 一筆很舊、還沒結案；再塞一整頁比它新的已結案。
         let old = store::insert_assignment(&app.db, None, "bot", "crid-old", "還在等", &[], None, true).await.unwrap();
         sqlx::query("UPDATE supervisor_assignments SET created_at='2026-09-01T00:00:00.000Z', status='blocked' WHERE id=?")
             .bind(&old.id)
@@ -2869,13 +2670,11 @@ mod review_boundary_tests {
                 .await
                 .unwrap();
         }
-        // 只看最新 2 筆的話，那筆 blocked 在頁外。
         let page = store::list_assignments(&app.db, 2).await.unwrap();
         assert!(!page.iter().any(|a| a.id == old.id), "前提：它不在最新那一頁裡");
         let with_open = store::list_assignments_with_open(&app.db, 2).await.unwrap();
         assert!(with_open.iter().any(|a| a.id == old.id), "未結案的要補進來");
         assert_eq!(with_open.iter().filter(|a| a.is_open()).count(), 1);
-        // 新的在前，而且補進來的那筆不會插錯位置。
         let order: Vec<&str> = with_open.iter().map(|a| a.created_at.as_str()).collect();
         let mut sorted = order.clone();
         sorted.sort_by(|a, b| b.cmp(a));
@@ -2989,7 +2788,6 @@ mod review_boundary_tests {
         assert_eq!(store::list_assignments(&app.db, 20).await.unwrap().len(), 2);
         assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
 
-        // 沿用別筆交辦的 request id 當續作 id：409 followup_request_id_taken，不是 502（review 2026-09-16 c1 L2）。
         let now = crate::db::now();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('bot','p','bot','claude','t',?)")
@@ -3055,8 +2853,6 @@ mod review_boundary_tests {
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
-
-
 
     #[tokio::test]
     async fn safety_query_excludes_only_requested_bots_and_matches_acquire_probe() {
@@ -3186,7 +2982,6 @@ mod desired_running_tests {
     async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
         let app = flow_tests::app().await;
         store::set_desired_running(&app.db, true).await.unwrap();
-        // 停掉之後會推 `supervisor_changed {stopped:true}`：拿它當「副作用有沒有跑過」的探針。
         let mut events = app.subscribe();
         break_intent_writes(&app).await;
 

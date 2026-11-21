@@ -239,7 +239,6 @@ async fn last_activity(db: &SqlitePool, bot_id: &str, run: &db::Run) -> anyhow::
     .bind(&run.started_at)
     .fetch_one(db)
     .await?;
-    // `SELECT ?2` 保證有值；真的拿到 NULL 代表查詢的形狀不對，一樣是「不知道」。
     latest.ok_or_else(|| anyhow::anyhow!("the activity query returned no timestamp"))
 }
 
@@ -253,7 +252,6 @@ pub async fn last_activity_for_test(db: &SqlitePool, bot_id: &str, run: &db::Run
 fn minutes_since(iso: &str, now: chrono::DateTime<chrono::Utc>) -> i64 {
     match chrono::DateTime::parse_from_rfc3339(iso) {
         Ok(t) => (now - t.with_timezone(&chrono::Utc)).num_minutes(),
-        // 讀不懂的時間戳不能變成「閒置很久」的理由。
         Err(_) => 0,
     }
 }
@@ -336,7 +334,6 @@ async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports
     }
     let host = db::bot_host(app.db(), &bot.id).await?;
     let seen = last_activity(app.db(), &bot.id, run).await?;
-    // 讀不到所在專案就回 Err（issue #123）：漏認的顧問會被當成一般 worker 收掉。
     let is_expert_advisor = bot.role.as_deref() == Some("advisor")
         && db::project(app.db(), &bot.project_id).await?.is_some_and(|p| p.mode == "expert");
     Ok(Some(Cand {
@@ -345,7 +342,6 @@ async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports
         managed_by: bot.managed_by.clone(),
         is_supervisor: sup.contains(&bot.id),
         is_primary: bot.is_primary != 0,
-        // 讀不到就回 Err（issue #123）：漏認的分享用 bot 會被當成一般 worker 收掉。
         is_share_bot: app.is_share_bot(&bot.id).await?,
         is_expert_advisor,
         state: run.state.clone(),
@@ -354,7 +350,6 @@ async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports
         queued_turn: db::queued_turn_for_bot(app.db(), &bot.id).await?.is_some(),
         open_assignment: has_open_assignment(app.db(), &bot.id).await?,
         live_children: has_live_children(app.db(), &bot.id).await?,
-        // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
         background_shell: false,
         resumable: resumable(
             &bot.kind,
@@ -372,7 +367,6 @@ async fn candidates_with(app: &(impl crate::capabilities::Db + crate::supervisor
         match cand_for(app, &run, sup).await {
             Ok(Some(c)) => out.push(c),
             Ok(None) => {}
-            // 這顆的證據讀不到：不進名單（＝這一輪不收），別的 bot 照常巡。
             Err(e) => tracing::warn!(bot = %run.bot_id, error = %format!("{e:#}"), "idle sweep: could not read this bot's state; keeping it warm this round"),
         }
     }
@@ -542,8 +536,6 @@ pub mod test_ps {
     }
 }
 
-// ---------------------------------------------------------------- 睡著這件事本身
-
 /// 把這顆標成「AGM 收起來的」。**先寫再停**：中間死掉的話留下的是一列「它應該是睡著的」，
 /// 而 [`wake`] 對一顆其實還活著的 bot 只會把這列清掉，不會誤動它——反過來（停完才寫）
 /// 死在中間就變成一顆沒人知道要 `--resume` 叫醒的 bot。
@@ -679,7 +671,6 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
     let _g = lock.lock().await;
     let run = match db::active_run(app.db(), &c.bot_id).await {
         Ok(Some(run)) => run,
-        // 已經不在跑了（別人先停掉了它）：沒什麼好收的。
         Ok(None) => return,
         Err(e) => return unreadable(c, "active run", &e),
     };
@@ -688,10 +679,6 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
         Err(e) => return unreadable(c, "supervisor ids", &e),
     };
     let fresh = match cand_for(app, &run, &sup).await {
-        // 背景工作那一項剛才已經問過（貴），沿用；其餘都是鎖裡重讀的。
-        //
-        // 沿用是安全的：daemon 經手的新工作一定先建 turn／訊息（同一把鎖裡），鎖裡重讀的 in-flight、排隊、交辦、
-        // 最後動作時間就看得到；一個剛開始又結束的回合，也會把「最後動作」推到現在而不再閒置。
         Ok(Some(f)) => Cand { background_shell: c.background_shell, ..f },
         Ok(None) => return,
         Err(e) => return unreadable(c, "bot state", &e),
@@ -712,11 +699,8 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
-    // 測試專用的競態點：「已標記、還沒停」的那一瞬，另一條路（叫醒／prompt）剛好落在這裡。
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("idle_sleep.marked", &c.bot_id).await;
-    // 寫完標記到停機之間，事件流可能剛說它開始忙（handle_status 不拿鎖）：再問一次記憶體，再由停機那一步的許可
-    // （`stop_bot_locked_if_idle`，DB 裡同一句 UPDATE）做最後的排序（issue #144）。
     if observed_busy(&run) {
         tracing::info!(bot = %c.name, "idle sweep: the bot started working right before the stop; leaving it running");
         clear_asleep(app.db(), &c.bot_id).await;
@@ -736,17 +720,10 @@ async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabiliti
             .await;
             app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
         }
-        // agent 已經停了、pane 已經關了，只是 `stopped` 寫不進 DB（503 `stop_state_uncommitted`，run 停在 `stopping`、
-        // 背景重試會補記）：它**就是**睡著的，標記要留著——收回去的話補記之後它只是一顆「使用者停掉」的 bot，
-        // 下一則 prompt 不會用 `--resume` 叫醒它（issue #152）。
         Err(e @ LcError::Uncommitted(_)) => {
             tracing::warn!(bot = %c.name, error = ?e, "idle bot stopped but its run could not be recorded as stopped yet; keeping it marked asleep while the retry records it");
             app.emit("bot_changed", json!({"bot_id": c.bot_id, "asleep": true})).await;
         }
-        // 其餘的錯誤：只有**確定它還在跑**（許可沒過、agent 對 ctrl+c 沒反應被放回 `running`、在飛的那一筆收不成）才收回
-        // 標記。問不到 herdr 證實 agent 不在（`stop_not_confirmed`／`Unknown`：pane 已經關了）時 run 留在 `stopping` 交給
-        // 對帳——收成 `exited` 的話它就是睡著的，標記收回去就叫不醒原本的對話（issue #170）；對帳看到 agent 放回
-        // `running` 的話，`wake` 看到活著的 run 本來就會把標記清掉。讀不到 run 也不算「確定還在跑」。
         Err(e) => match db::active_run(app.db(), &c.bot_id).await {
             Ok(Some(r)) if r.state == "running" => {
                 tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
@@ -767,8 +744,6 @@ pub async fn sleep_one_for_test(app: &(impl crate::capabilities::BotLocks + crat
     sleep_one(app, c, threshold).await
 }
 
-// ---------------------------------------------------------------- 叫醒
-
 /// 被收起來的 bot 要用了：用 `--resume` 把同一段 session 接回來。
 ///
 /// `Ok(false)` = 這顆本來就不是睡著的（絕大多數呼叫都是這一種，所以這條路必須便宜）。
@@ -788,17 +763,12 @@ pub async fn wake(app: &(impl crate::capabilities::BotLocks + crate::capabilitie
 pub async fn wake_locked(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps), bot_id: &str, why: &str) -> anyhow::Result<bool> {
     let Some((_, mins)) = read_asleep(app.db(), bot_id).await? else { return Ok(false) };
     if let Some(run) = db::active_run(app.db(), bot_id).await? {
-        // 停在 `stopping`：巡邏停掉了它、`stopped` 還沒補記上（issue #152）。那是睡著的過程，不是「其實還活著」——
-        // 標記留著，補記之後照 `--resume` 叫醒；現在拿一次 start 去撞它也只會撞上那筆還沒收掉的 run。
         if run.state == "stopping" {
             return Ok(false);
         }
         clear_asleep(app.db(), bot_id).await;
         return Ok(false);
     }
-    // `resume_required`：接不回原本那段對話時**不要**默默開一段新的——「只留下 resume」是這個
-    // 功能的全部前提，悄悄換成空白對話等於把使用者的脈絡弄丟還不說（上游 2026-09-17 的
-    // `?resume=native` 用的是同一個旗標）。接不回就退回開新對話，但在那顆 bot 自己的對話裡講清楚。
     let resumed = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     match app.start_bot_locked_with(bot_id, resumed).await {
         Ok(run_id) => {
@@ -813,8 +783,6 @@ pub async fn wake_locked(app: &(impl crate::capabilities::Db + crate::capabiliti
             app.emit("bot_changed", json!({"bot_id": bot_id, "asleep": false})).await;
             Ok(true)
         }
-        // 409 `cannot_resume`：session 或 transcript 在這段睡眠裡不見了（使用者清掉、CLI 換身份）。
-        // 這顆還是要回得來，所以改開新對話，但把「原本那段接不回來」寫進對話裡，不裝作沒事。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("cannot_resume") => {
             let reason = v.get("resume_reason").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
             match app.start_bot_locked_with(bot_id, StartOpts::default()).await {
@@ -839,14 +807,11 @@ pub async fn wake_locked(app: &(impl crate::capabilities::Db + crate::capabiliti
             }
         }
         Err(e) => {
-            // 標記留著：這顆還是睡著的，下一次要用它時再試一次，也還看得出它是被收起來的。
             tracing::warn!(bot = %bot_id, why, error = ?e, "could not wake a sleeping bot");
             Err(anyhow::anyhow!("{e:?}"))
         }
     }
 }
-
-// ---------------------------------------------------------------- 巡邏
 
 /// 巡邏的互斥旗標與它的 guard。`$vis` 讓同一份定義在 `test`／`test-hooks` 建置下是 `pub`（daemon 的 `supervisor_tests` 要直接讀寫 `SWEEPING`、
 /// 呼叫 `SweepGuard::take()`），正式 build 維持私有；兩種可見性共用一份定義，不會只改一份而漂移（#1862 S3a）。
@@ -966,7 +931,6 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
     let sup = match supervisor_bot_ids(app.db()).await {
         Ok(s) => s,
         Err(e) => {
-            // 認不出誰是總管就不能收任何一顆：漏掉的那幾個會被當成一般 worker。
             tracing::warn!(error = %format!("{e:#}"), "idle sweep could not read who the supervisors are; skipping this round");
             return;
         }
@@ -982,8 +946,6 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
         if app.shutdown().is_cancelled() {
             return;
         }
-        // 收之前再確認一次：湊完清單到輪到這顆，中間隔了前面每一顆的停機時間（一顆最久十秒），
-        // 這段時間裡它可能已經被派了工作。
         let run = match db::active_run(app.db(), &c.bot_id).await {
             Ok(Some(run)) => run,
             Ok(None) => continue,
@@ -1000,13 +962,9 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
                 continue;
             }
         };
-        // 便宜的判斷全過了才去問 pane：一次 ps dump 不該為了每顆閒著的 bot 每分鐘跑一遍。
         if decide(&f, threshold).is_err() {
             continue;
         }
-        // 網頁顯示的「背景執行中」同一本帳（claude Stop hook 的 `background_tasks`，沒有就是畫面判斷）：
-        // subagent／monitor／workflow 不是 pane 底下的行程，行程樹看不到它們。帳上有就不收，也不必再為它跑一次 ps。
-        // 只往保守的方向用：帳上說「沒有」不能放寬行程樹（沒登記在 claude 的行程照樣會在收機器時被殺）。
         if let Some(n) = app.background_jobs_known(&run.id).filter(|n| *n > 0) {
             tracing::info!(bot = %run.bot_id, background_jobs = n, "idle sweep: the web shows background work for this bot; leaving it alone");
             continue;
@@ -1017,7 +975,6 @@ async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::
                 tracing::info!(bot = %run.bot_id, procs = ?procs, "idle sweep: pane still has background work; leaving it alone");
                 f.background_shell = true;
             }
-            // 問不到跟「有背景工作」是兩種暫緩，log 分開寫：前者是觀測失敗（下一輪重試），後者是真的在忙。
             BackgroundWork::Unknown(reason) => {
                 tracing::warn!(bot = %run.bot_id, reason, "idle sweep: could not tell whether the pane has background work; keeping the bot warm and retrying next round");
                 continue;

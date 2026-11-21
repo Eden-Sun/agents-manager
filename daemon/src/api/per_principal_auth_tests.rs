@@ -23,8 +23,6 @@ async fn raw(app: Arc<App>, request: String) -> String {
         axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
     });
     let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
-    // 超過 body 上限的請求：伺服器在讀完之前就回 413 並關線，寫入端可能撞 BrokenPipe／ECONNRESET。
-    // 回應其實已經在收到的位元組裡（實測：寫入失敗與讀取 RST 都照樣收得到 413），所以這裡不把連線錯誤當成測試失敗，照收到的內容回。
     let wrote = c.write_all(request.as_bytes()).await;
     let mut bytes = Vec::new();
     let read = c.read_to_end(&mut bytes).await;
@@ -255,8 +253,6 @@ async fn patrol_and_responder_keep_their_scoped_agm_cli_management_routes() {
         let created = raw(e.app.clone(), request("POST", &format!("/api/projects/{}/bots", e.project_id), &created_body)).await;
         assert!(created.starts_with("HTTP/1.1 200"), "{role} agm bot create remains available in its project: {created}");
 
-        // Use the role bot itself here: its invalid resume option reaches the handler, while
-        // the separate child target below exercises the existing child-stop permission.
         let started = raw(e.app.clone(), request("POST", &format!("/api/bots/{}/start?resume=invalid", bot.id), "{}")).await;
         assert!(started.starts_with("HTTP/1.1 400") && !started.contains("user_only"), "{role} agm bot start reaches the existing validation for its child: {started}");
         let stopped = raw(e.app.clone(), request("POST", &format!("/api/bots/{}/stop", target.id), "{}")).await;
@@ -269,7 +265,6 @@ async fn patrol_and_responder_keep_their_scoped_agm_cli_management_routes() {
         assert!(shell.starts_with("HTTP/1.1 403") && shell.contains("user_only"), "AGM role does not bypass the handler's explicit shell restriction: {shell}");
     }
 
-    // Changing the DB role mapping immediately removes the shared-fence exception.
     let replacement = distinct_bot(&e, "user-only-patrol-replacement").await;
     crate::supervisor::store::set_env(&e.app.db, &replacement.id, &e.project_id, "/tmp").await.unwrap();
     let body = json!({"name": "stale-patrol", "kind": "claude"}).to_string();
@@ -397,8 +392,6 @@ async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
     let draft_key_b = format!("bot:{}", bot_b.id);
     crate::drafts::put(&e.app.db, &draft_key_b, "B-private-draft").await.unwrap();
 
-    // Prove an actual disclosure before running the full route matrix. This stays first so
-    // an unguarded destructive handler cannot make later cases appear protected by 404.
     let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot_a.id, bot_a.hook_token);
     let leaked = raw(
         e.app.clone(),
@@ -425,8 +418,6 @@ async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
     .await;
     assert!(drafts_leak.starts_with("HTTP/1.1 403") || drafts_leak.starts_with("HTTP/1.1 404"), "Bot A read the shared drafts list: {drafts_leak}");
 
-    // This is also the review table: all handlers registered against an identifier that
-    // resolves to another bot/project are listed, including mixed-method route families.
     let paths = [
         ("GET", "/api/drafts"), ("PUT", "/api/drafts/bot%3A{bot}"),
         ("PATCH", "/api/projects/{project}"), ("DELETE", "/api/projects/{project}"),
@@ -501,8 +492,6 @@ async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
         .unwrap();
     assert_eq!(draft_after, "B-private-draft", "cross-bot draft writes must be rejected before mutation");
 
-    // The same resource remains visible to the User principal, and a parent may access a
-    // child resource that carries the parent's delegated authority.
     let as_user = raw(
         e.app.clone(),
         format!(
@@ -566,7 +555,6 @@ async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
     .await;
     assert!(role_assignment.starts_with("HTTP/1.1 200"), "AGM role may read supervisory assignments across bots: {role_assignment}");
 
-    // A different bot may intentionally prompt B; that route performs its own relay proof.
     let relay = raw(
         e.app.clone(),
         format!(
@@ -1045,8 +1033,6 @@ async fn a_plain_bot_model_cache_miss_does_not_spawn_the_cli() {
     assert!(response.contains("model_cache_miss"), "the response should explain that the daemon is refreshing: {response}");
     assert!(response.contains("\"refresh\"") && !response.contains("\"state\":\"none\""), "a miss must schedule a background refresh: {response}");
     assert!(e.app.models_cache.lock().await.is_empty(), "the request path must not populate the cache");
-    // The background refresh uses the stubbed tool path (a file that does not exist), so it fails at once
-    // instead of starting a real codex, and leaves nothing in the cache.
     let failed = crate::testing::eventually!(
         crate::runners::models_refresh::on_cache_miss(&e.app, LOCAL_HOST, "codex", None).await["state"] == "failed"
     );
@@ -1201,7 +1187,6 @@ async fn process_inventory_intents_and_build_slots_are_user_only() {
     let as_bot = [("X-AM-Bot-Id", worker.id.clone()), ("X-AM-Bot-Token", worker.hook_token.clone())];
     let as_user = [("X-AM-Token", e.app.ui_token.clone())];
     let status = |r: &str| r.split_whitespace().nth(1).unwrap_or("").to_string();
-    // 失敗訊息附回應：先把 token 換掉再截 300 字，不讓憑證進測試輸出。
     let redact = |r: &str| {
         r.replace(&e.app.ui_token, "<ui_token>").replace(&worker.hook_token, "<hook_token>").chars().take(300).collect::<String>()
     };
@@ -1272,26 +1257,22 @@ async fn the_hook_endpoint_rejects_bad_requests_cleanly_and_stores_a_good_one_on
     }
     assert_eq!(rows().await, 1, "只有那則型別怪但合法的 body 進了收件匣");
 
-    // 認證：沒有 token、錯的 token、不存在的 bot，一律 401 且分不出差別。
     for (what, token, bot_id) in [("沒有 token", None, bot.id.as_str()), ("錯 token", Some("wrong"), bot.id.as_str()), ("沒這顆 bot", Some("x"), "no-such-bot")] {
         let body = format!(r#"{{"bot_id":"{bot_id}","payload":{{}}}}"#);
         let r = raw(e.app.clone(), post("claude", token, body)).await;
         assert_eq!(status(&r), "401", "{what}: {r}");
     }
-    // 未知 provider（跟這顆 bot 的 kind 不符）。
     let r = raw(e.app.clone(), post("nonesuch", Some(&bot.hook_token), good(""))).await;
     let r2 = raw(e.app.clone(), post("claude", Some(&bot.hook_token), good("").replace(r#""provider":"claude""#, r#""provider":"codex""#))).await;
     assert_eq!(status(&r2), "409", "{r2}");
     assert!(status(&r) == "200" || status(&r) == "409", "URL 上的 provider 被 body 的蓋過：{r}");
 
-    // 太大：2 MiB 以上整個擋在 body 限制，不進 JSON 解析、不進收件匣。
     let before = rows().await;
     let huge = good(&format!(r#","tool_response":"{}""#, "x".repeat(3 * 1024 * 1024)));
     let r = raw(e.app.clone(), post("claude", Some(&bot.hook_token), huge)).await;
     assert_eq!(status(&r), "413", "{}", &r[..r.len().min(200)]);
     assert_eq!(rows().await, before);
 
-    // 好的一則：收下一列，同一則重送回 stored:false、不長第二列。
     let fresh = || good("").replace("\"t1\"", "\"t2\"");
     let before = rows().await;
     let one = raw(e.app.clone(), post("claude", Some(&bot.hook_token), fresh())).await;
@@ -1493,7 +1474,6 @@ async fn daemon_swap_opens_its_own_restart_window_without_an_approval_from_anyon
     let e = crate::testing::env().await;
     let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: Some(600) };
     let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
-    // 只有 daemon-swap 服務身份；使用者與 bot 都不行。
     for other in [RequestPrincipal::User, RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service(crate::service_auth::HERDR_UPGRADE.into())] {
         let r = service_daemon_swap_restart_window(State(e.app.clone()), Extension(other), Json(body())).await;
         assert!(matches!(r, Err(LcError::Forbidden(_))));
@@ -1503,7 +1483,6 @@ async fn daemon_swap_opens_its_own_restart_window_without_an_approval_from_anyon
     assert!(v["lease_token"].as_str().is_some_and(|t| !t.is_empty()));
     assert_eq!(v["approval"]["decided_by"], "service(daemon-swap)");
     assert_eq!(v["approval"]["purpose"], "restart");
-    // 窗口被握著時別人拿不到，而且不留下 approved 的殘單。
     let mut other = body();
     other.owner = "someone-else".into();
     let r = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(other)).await;
@@ -1591,7 +1570,6 @@ async fn daemon_swap_keeps_one_approval_across_rounds_so_a_busy_fleet_still_gets
     let a1 = a1.unwrap();
     assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "approved", "not_idle 不撤");
 
-    // 那張核准已經等了 31 分鐘（把核准時間往前推）；main 又動了，換 commit 也接得下去。
     let old = crate::db::iso_in(-31 * 60);
     sqlx::query("UPDATE supervisor_approvals SET decided_at=?, created_at=? WHERE id=?").bind(&old).bind(&old).bind(&a1).execute(&e.app.db).await.unwrap();
     let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c2c2c2c2"))).await.expect("等滿門檻之後 working 不再擋");
@@ -1623,7 +1601,6 @@ async fn a_window_given_back_by_the_swap_recheck_does_not_reset_the_escalation_c
         async move { crate::supervisor::maintenance::safety_as(&app, &[], Some(&id), Some(owner)).await.unwrap() }
     };
 
-    // 第一輪：瞬間閒置，拿到窗口；3a 複查時又有人在忙、還沒放寬 → 交還。
     let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.expect("閒置時拿得到");
     let a1 = v["approval"]["id"].as_str().unwrap().to_string();
     set("working").await;
@@ -1636,7 +1613,6 @@ async fn a_window_given_back_by_the_swap_recheck_does_not_reset_the_escalation_c
     assert_eq!(a1.status, "consumed", "一次核准一個窗口：交還照樣消耗");
     let since = a1.waiting_since().unwrap().to_string();
 
-    // 第二輪：同一個 commit 開新的一張，等待起點接續第一張；escalates_at 沒有往後推。
     let r = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await;
     let Err(LcError::Conflict(d)) = &r else { panic!("{r:?}") };
     let d = if d.get("detail").is_some() { &d["detail"] } else { d };
@@ -1648,7 +1624,6 @@ async fn a_window_given_back_by_the_swap_recheck_does_not_reset_the_escalation_c
     let want = chrono::DateTime::parse_from_rfc3339(&since).unwrap() + chrono::Duration::seconds(crate::supervisor::maintenance::escalate_after_secs());
     assert!((eta - want).num_seconds().abs() <= 2, "escalates_at {eta} 應該還是 {want}");
 
-    // 等滿門檻（把第一張的等待往前推 31 分鐘）：即使還有人 working，窗口給得出來，3a 複查也放行。
     let old = crate::db::iso_in(-31 * 60);
     sqlx::query("UPDATE supervisor_approvals SET wait_since=? WHERE id=?").bind(&old).bind(&a2).execute(&e.app.db).await.unwrap();
     let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.expect("等滿門檻後 working 不擋");
@@ -1690,10 +1665,8 @@ async fn daemon_swap_service_scope_accepts_only_its_fixed_probe_route() {
     let e = crate::testing::env().await;
     e.app.service_tokens.write().unwrap().insert(crate::service_auth::DAEMON_SWAP.into(), "swap-secret".into());
     let target = distinct_bot(&e, "swap-probe-target").await;
-    // An unknown bot is 404 from the handler: auth and scope let the request through.
     let response = service_post(e.app.clone(), "daemon-swap", "swap-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
     assert!(response.starts_with("HTTP/1.1 404"), "{response}");
-    // The same credential cannot use the generic prompt, bot control, or the other service's route.
     for path in [
         format!("/api/bots/{}/prompt", target.id),
         format!("/api/bots/{}/stop", target.id),
@@ -1703,7 +1676,6 @@ async fn daemon_swap_service_scope_accepts_only_its_fixed_probe_route() {
         let denied = service_post(e.app.clone(), "daemon-swap", "swap-secret", &path).await;
         assert!(denied.starts_with("HTTP/1.1 403"), "{path}: {denied}");
     }
-    // Another service's token under this id, or an unknown service id, is not a credential.
     e.app.service_tokens.write().unwrap().insert(crate::service_auth::HERDR_UPGRADE.into(), "herdr-secret".into());
     let swapped = service_post(e.app.clone(), "daemon-swap", "herdr-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
     assert!(swapped.starts_with("HTTP/1.1 401"), "{swapped}");
@@ -1834,12 +1806,10 @@ async fn plain_bot_gate_body() {
         let r = call(m, p, None).await;
         assert!(!denied(&r), "{m} {p}: 使用者不能被擋：{r}");
     }
-    // 角色 bot：過了這道閘（後面可能因為別的原因 4xx/5xx，但不是 role_required）。
     for (m, p) in endpoints {
         let r = call(m, p, Some(patrol_creds)).await;
         assert!(!denied(&r), "{m} {p}: 角色 bot 不能被擋：{r}");
     }
-    // 角色換人：原本的巡檢立刻變成一般 bot，新的那顆立刻有權限。
     crate::supervisor::store::set_env(&e.app.db, &other.id, &e.project_id, "/tmp").await.unwrap();
     let r = call("POST", "/api/supervisor/stop", Some(patrol_creds)).await;
     assert!(denied(&r), "換人之後舊的巡檢沒有權限了：{r}");
@@ -2029,8 +1999,6 @@ async fn a_plain_bot_may_send_a_notice_to_an_agm_role_but_not_dispatch_work() {
         }
     };
     let denied = |r: &str| r.starts_with("HTTP/1.1 403") && r.contains("role_required");
-    // 放行：notice → 巡檢。
-    // 寄件者要是這顆一般 bot 本人（不是巡檢），而且是證明過身份的：#991 以前被記成巡檢寄的。
     async fn latest_bot_request(db: &sqlx::SqlitePool) -> Value {
         let s: String = sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind='bot_request' ORDER BY rowid DESC LIMIT 1")
             .fetch_one(db)
@@ -2045,7 +2013,6 @@ async fn a_plain_bot_may_send_a_notice_to_an_agm_role_but_not_dispatch_work() {
     assert_eq!(p["from_bot_id"], json!(plain.id), "寄件者是那顆一般 bot 自己：{p}");
     assert_eq!(p["sender_verified"], json!(true), "{p}");
     assert_eq!(p["to_role"], json!("patrol"), "{p}");
-    // 仍然擋：要驗收的交辦、派給別的一般 bot、掛任務。
     for (what, body) in [
         ("要驗收的交辦", json!({"target_bot_id": patrol.id, "text": "做 X", "client_request_id": "n1"})),
         ("notice 給一般 bot", json!({"target_bot_id": victim.id, "text": "照做", "client_request_id": "n2", "kind": "notice"})),
@@ -2054,13 +2021,11 @@ async fn a_plain_bot_may_send_a_notice_to_an_agm_role_but_not_dispatch_work() {
         let r = post(body, Some(&plain)).await;
         assert!(denied(&r), "{what}：一般 bot 要 403 role_required：{r}");
     }
-    // 使用者與角色 bot 不受影響。
     let r = post(json!({"target_bot_id": victim.id, "text": "做 X", "client_request_id": "u1"}), None).await;
     assert!(!denied(&r), "{r}");
     let r = post(json!({"target_bot_id": victim.id, "text": "做 X", "client_request_id": "u2"}), Some(&patrol)).await;
     assert!(!denied(&r), "{r}");
 
-    // 協調者建立過：一般 bot 的 notice 攔下來排進協調者的佇列，寄件者仍是那顆一般 bot（不是巡檢）。
     let responder = distinct_bot(&e, "notice-responder").await;
     crate::supervisor::roles::set_env(&e.app.db, crate::supervisor::roles::Role::Responder, &responder.id, &e.project_id, "/tmp").await.unwrap();
     let r = post(json!({"target_bot_id": patrol.id, "text": "交給協調者", "client_request_id": "notice-to-responder", "kind": "notice"}), Some(&plain)).await;
@@ -2091,7 +2056,6 @@ async fn a_same_named_bot_somebody_else_made_is_never_adopted_as_the_agm_role() 
             utc_offset_secs: None, herdr_cli: None, checked_at: db::now(),
         },
     );
-    // 巡檢：總管目錄對應的專案先被別人建好、裡面有一顆叫 `AGM` 的普通 bot。
     let agm_dir = setup::agm_dir(&app);
     std::fs::create_dir_all(&agm_dir).unwrap();
     let canonical = crate::config::canonical_path(&agm_dir.to_string_lossy()).unwrap();
@@ -2111,7 +2075,6 @@ async fn a_same_named_bot_somebody_else_made_is_never_adopted_as_the_agm_role() 
     assert_eq!(store::get_or_init(&app.db).await.unwrap().bot_id, None, "角色沒有被綁到那顆 bot");
     assert_eq!(app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.id.as_deref() == Some(planted.as_str())).unwrap().persona.as_deref(), Some("我是普通 bot"), "它的設定一個字都沒被改");
 
-    // 協調者：同一個形狀。
     let resp_dir = responder::dir(&app);
     std::fs::create_dir_all(&resp_dir).unwrap();
     let resp_canonical = crate::config::canonical_path(&resp_dir.to_string_lossy()).unwrap();
@@ -2129,7 +2092,6 @@ async fn a_same_named_bot_somebody_else_made_is_never_adopted_as_the_agm_role() 
     assert!(format!("{err:?}").contains("name_taken"), "{err:?}");
     assert_eq!(roles::get(&app.db, roles::Role::Responder).await.unwrap().bot_id, None);
 
-    // 記號偽造不了：`client_request_id` 帶保留前綴 → 400。
     let r = create_bot(
         State(app.clone()),
         Path(e.project_id.clone()),
@@ -2276,10 +2238,8 @@ async fn no_header_trick_gets_an_unproven_relay_from_stored() {
     let h = |k: &str, v: &str| (k.to_string(), v.to_string());
     let status = |r: &str| r.lines().next().unwrap_or_default().to_string();
 
-    // UI token（User）自稱 bot、沒有任何 bot 憑證。
     let r = send("adv-ui-only", &victim.id, vec![h("X-AM-Token", &ui)]).await;
     assert!(status(&r).contains("403") && r.contains("relay_from_token_required"), "{r}");
-    // UI token 加上受害者的 token（混合憑證不得降級／升級）：401。
     for (name, headers) in [
         ("adv-ui-plus-token", vec![h("X-AM-Token", &ui), h("X-AM-Bot-Token", &victim.hook_token)]),
         ("adv-ui-plus-empty-token", vec![h("X-AM-Token", &ui), h("X-AM-Bot-Token", "")]),
@@ -2292,7 +2252,6 @@ async fn no_header_trick_gets_an_unproven_relay_from_stored() {
         let r = send(name, &victim.id, headers).await;
         assert!(status(&r).contains("401"), "{name}: {r}");
     }
-    // 自己的憑證、claim 別顆：不管大小寫的 header 名、前後空白、重複 header，都是 403 mismatch。
     let mut bodies = Vec::new();
     for (name, relay, headers) in [
         ("adv-plain", victim.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &sender.hook_token)]),
@@ -2312,9 +2271,7 @@ async fn no_header_trick_gets_an_unproven_relay_from_stored() {
             bodies.push(r.split("\r\n\r\n").nth(1).unwrap_or_default().to_string());
         }
     }
-    // 活的、已刪的、根本不存在的 claim，回的內容完全一樣（不能當 bot id 神諭）。
     assert!(bodies.windows(2).all(|w| w[0] == w[1]), "{bodies:?}");
-    // 自己轉給自己：400，同樣不寫。
     let r = send(
         "adv-self",
         &target.id,
@@ -2605,7 +2562,6 @@ async fn concurrent_replay_of_a_spawn_permit_registers_only_one_pane() {
     e.herdr.set_agent("replay-b", "w1:p-replay-b", false);
     e.herdr.live_pane("w1:p-replay-b", crate::testing::LivePane { rows: Some(40), ..Default::default() });
 
-    // Both requests pass the permit check before either finishes its async pane registration.
     let (a, b) = tokio::join!(
         spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, "w1:p-replay-a"),
         spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, "w1:p-replay-b"),
@@ -2788,8 +2744,6 @@ async fn the_spawn_gate_refuses_a_child_created_after_the_descendant_snapshot() 
     let bot_id = parent.id.clone();
     let token = old.clone();
     crate::lifecycle::race_point::arm("credential_rotation_after_descendant_query", &parent.id, move || async move {
-        // This is the shim's pre-herdr request. A 409 means it will not invoke herdr and no
-        // inherited-credential pane can appear between the descendant snapshot and UPDATE.
         let response = spawn_begin(app, &bot_id, &token).await;
         let _ = send.send(response);
     });
@@ -2831,8 +2785,6 @@ async fn a_running_child_can_spawn_after_its_parent_run_stops_and_session_change
         .unwrap();
     assert!(db::active_run(&e.app.db, &parent.id).await.unwrap().is_none(), "the parent run is stopped while the child pane remains live");
 
-    // The real-shim pane split above exercises this inherited proof end to end. Here the
-    // route-level calls also verify that a stopped parent run does not lose session fencing.
     let begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
     assert!(begin.starts_with("HTTP/1.1 200"), "a surviving child can reserve a pane on the captured host/session: {begin}");
     let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
@@ -2866,8 +2818,6 @@ async fn a_running_child_can_spawn_after_its_parent_run_stops_and_session_change
         .unwrap();
     assert_eq!(stale_registered, 0, "a pane from the retired session must not be registered");
 }
-
-// ── fleet operator（`[agents] fleet_operators`）：代表主控 daemon 的 bot 跨專案管理 bot 生命週期 ──────────────
 
 struct Fleet {
     e: crate::testing::Env,
@@ -3032,12 +2982,10 @@ async fn a_fleet_operator_cannot_delete_reconfigure_or_reach_beyond_the_lifecycl
 async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role() {
     let f = fleet_env().await;
     set_fleet_operators(&f.e, &[&f.operator.id]).await;
-    // 分享用 bot：一條都不放行。
     let shared = fleet_other_project_bot(&f.e, &f.other_project, "fleet-shared").await;
     crate::testing::fake_run(&f.e.app, &shared.id).await;
     sqlx::query("INSERT INTO shared_bots(bot_id,profile,workspace,created_at) VALUES (?,'trusted','/tmp/shared-ws',?)").bind(&shared.id).bind(db::now()).execute(&f.e.app.db).await.unwrap();
     fleet_register(&f.e, &f.other_project, &shared).await;
-    // 別人的 child：不是頂層。
     let child = fleet_other_project_bot(&f.e, &f.other_project, "fleet-target-child").await;
     sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.target.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
     crate::testing::fake_run(&f.e.app, &child.id).await;
@@ -3048,7 +2996,6 @@ async fn a_fleet_operator_cannot_touch_a_share_bot_a_child_or_stop_an_agm_role()
         }
         assert!(db::active_run(&f.e.app.db, &victim.id).await.unwrap().is_some());
     }
-    // AGM 巡檢：不能被 stop；其他生命週期操作照放行。
     let patrol = fleet_other_project_bot(&f.e, &f.other_project, "fleet-patrol").await;
     crate::testing::fake_run(&f.e.app, &patrol.id).await;
     crate::supervisor::store::get_or_init(&f.e.app.db).await.unwrap();
@@ -3069,7 +3016,6 @@ async fn only_the_listed_top_level_bot_id_is_a_fleet_operator() {
     sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&f.operator.id).bind(&child.id).execute(&f.e.app.db).await.unwrap();
     let child = db::bot(&f.e.app.db, &child.id).await.unwrap().unwrap();
     fleet_register(&f.e, &f.e.project_id.clone(), &plain).await;
-    // operator 與它的 child 都列進去：child 不是頂層，列了也沒用；名稱不算數。
     set_fleet_operators(&f.e, &[&f.operator.id, &child.id, &plain.name]).await;
     for who in [&plain, &child] {
         for (method, path, body) in fleet_ops(&f.target.id) {
@@ -3078,7 +3024,6 @@ async fn only_the_listed_top_level_bot_id_is_a_fleet_operator() {
         }
     }
     assert!(db::active_run(&f.e.app.db, &f.target.id).await.unwrap().is_some());
-    // 刪掉的 operator：token 本身就不再有效。
     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&f.operator.id).execute(&f.e.app.db).await.unwrap();
     let r = as_bot(&f.e, &f.operator, "POST", &format!("/api/bots/{}/stop", f.target.id), "{}").await;
     assert!(r.starts_with("HTTP/1.1 401"), "{r}");
@@ -3127,12 +3072,10 @@ async fn only_a_fleet_operator_may_read_and_trust_the_codex_stop_hook_for_the_us
     let trust = r#"{"host":"local","identity":null}"#;
     let user_only = |r: &str| forbidden(r) && r.contains("user_only");
 
-    // 清單是空的：operator 自己也照舊 403。
     assert!(user_only(&as_bot(&f.e, &f.operator, "GET", "/api/codex/stop-hook", "").await));
     assert!(user_only(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await));
     assert!(!codex_home.join("hooks.json").exists(), "nothing was installed");
 
-    // child 的 id 也列進去：不是頂層，不算。
     set_fleet_operators(&f.e, &[&f.operator.id, &child.id]).await;
     for who in [&plain, &child] {
         let r = as_bot(&f.e, who, "GET", "/api/codex/stop-hook", "").await;
@@ -3147,11 +3090,9 @@ async fn only_a_fleet_operator_may_read_and_trust_the_codex_stop_hook_for_the_us
     let r = as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await;
     assert!(r.starts_with("HTTP/1.1 200") && r.contains(r#""status":"trusted""#), "{r}");
     assert!(std::fs::read_to_string(codex_home.join("config.toml")).unwrap().contains("trusted_hash"));
-    // 其他 User-only 的設定路由不因此打開。
     assert!(user_only(&as_bot(&f.e, &f.operator, "PUT", "/api/settings/time-zone", r#"{"time_zone":"UTC"}"#).await));
     assert!(forbidden(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/other", trust).await) || as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/other", trust).await.starts_with("HTTP/1.1 404"));
 
-    // 從清單移除：立刻失效。
     set_fleet_operators(&f.e, &[]).await;
     assert!(user_only(&as_bot(&f.e, &f.operator, "POST", "/api/codex/stop-hook/trust", trust).await));
 }

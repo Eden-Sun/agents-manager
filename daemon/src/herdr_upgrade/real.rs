@@ -213,8 +213,6 @@ pub(super) fn service_script(session: &str, install: Option<&Path>) -> Result<St
             lookup = program_lookup(&label, &unit),
             install = sh_quote(&install.to_string_lossy())
         ),
-        // macOS：換了 binary 之後 `kickstart -k` 會因為 job 還綁著舊 binary 的簽章 spawn failed（OS_REASON_CODESIGNING），
-        // 要 bootout 再 bootstrap。bootout 是非同步的，bootstrap 失敗就等一下重試；最後仍失敗＝這一步失敗，呼叫端會換回舊版。
         None => format!(
             r#"
 case "$(uname -s)" in

@@ -4,7 +4,6 @@
 #[allow(unused_imports)]
 mod tests {
     use crate::supervisor::setup::*;
-    // 接縫別名：測試本文照舊寫 `runtime_json(..)`／`claude_md(..)`。
     use crate::supervisor::setup::{claude_md_for_test as claude_md, runtime_json_for_test as runtime_json};
     use crate::config::{BotCfg, ProjectCfg};
     use crate::lifecycle::LcError;
@@ -138,7 +137,6 @@ mod tests {
         assert!(args_in_cfg(app.clone(), bot_id.clone()).await.is_empty(), "新 setup 不再帶 --remote-control");
         assert_eq!(strip_remote_control_args(&app).await.unwrap(), 0, "沒有就不動");
 
-        // 舊安裝：args 裡有 Remote Control 一對與使用者自己加的旗標；run 是用那份設定起來的。
         let id = bot_id.clone();
         app.update_and_project(move |cfg| {
             for b in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
@@ -167,7 +165,6 @@ mod tests {
         assert!(stale(app.clone(), bot_id.clone()).await, "舊 run 還拿著舊的 argv：要標需重啟，而不是被自動重啟");
         assert_eq!(strip_remote_control_args(&app).await.unwrap(), 0, "冪等：第二次什麼都不做");
 
-        // 重跑 setup：不把它寫回去，使用者的旗標也不被蓋掉。
         let id = bot_id.clone();
         app.update_and_project(move |cfg| {
             for b in cfg.projects.iter_mut().flat_map(|p| p.bots.iter_mut()) {
@@ -200,7 +197,6 @@ mod tests {
                 utc_offset_secs: None, herdr_cli: None, checked_at: crate::db::now(),
             },
         );
-        // 部署檔案那一步失敗：`bin` 被一個檔案佔住。
         let bin = agm_dir(&app).join("bin");
         std::fs::create_dir_all(agm_dir(&app)).unwrap();
         std::fs::write(&bin, "not a directory").unwrap();

@@ -111,7 +111,6 @@ const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
 /// production daemon's SSH master control socket or forwarded herdr socket (issue #85) —
 /// otherwise one instance's explicit reconnect or shutdown kills the other's tunnel.
 pub fn short_dir(instance: Option<&str>) -> PathBuf {
-    // SAFETY: geteuid(2) has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
     match instance {
         Some(slug) => PathBuf::from(format!("/tmp/agents-manager-{uid}-{slug}")),
@@ -132,7 +131,6 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
     if meta.file_type().is_symlink() || !meta.is_dir() {
         bail!("不安全的 ssh 控制目錄 {}：不是一般目錄（可能是符號連結）", path.display());
     }
-    // SAFETY: geteuid(2) has no preconditions and cannot fail.
     let me = unsafe { libc::geteuid() };
     if meta.uid() != me {
         bail!("不安全的 ssh 控制目錄 {}：擁有者是 uid {}，不是目前的 uid {me}", path.display(), meta.uid());
@@ -199,7 +197,6 @@ pub(crate) mod remote_script_support {
     /// 用本機 `/bin/sh -c` 跑一段腳本，stdin 餵 `stdin`；回傳 exit 是否成功。
     pub(crate) fn run_sh(script: &str, stdin: &[u8]) -> bool {
         let mut child = Command::new("/bin/sh").arg("-c").arg(script).stdin(Stdio::piped()).spawn().unwrap();
-        // 腳本拒絕時會提早 exit、不讀 stdin，寫入會是 broken pipe：那是預期的，看 exit 狀態就好。
         let _ = child.stdin.take().unwrap().write_all(stdin);
         child.wait().unwrap().success()
     }
@@ -263,7 +260,6 @@ fn drain_into<R>(pipe: Option<R>, buf: Arc<std::sync::Mutex<Vec<u8>>>) -> tokio:
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    // Box::pin（#1465）：8 KiB 的讀取緩衝放在堆上，debug 建置下 spawn 不再把它一層一層複製。
     tokio::spawn(Box::pin(async move {
         use tokio::io::AsyncReadExt;
         let Some(mut pipe) = pipe else { return };
@@ -281,9 +277,6 @@ where
 pub async fn sh_local_capture(script: &str, timeout: Duration) -> Result<LocalRun> {
     let mut cmd = tokio::process::Command::new("/bin/sh");
     cmd.arg("-c").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    // 脫離控制終端（#1411）：只換 process group 不夠，子行程還在呼叫端的控制終端裡；背景 job 裡的 `-i` shell
-    // （`$SHELL -lic` 探測）會去搶前景、被 job control 停住。setsid 之後沒有控制終端，子行程與它的孫行程都碰不到 tty；
-    // 同時子行程是新 session 的 leader（pgid＝pid），逾時整個群組砍掉的做法照舊。
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -315,7 +308,6 @@ pub async fn sh_local_capture(script: &str, timeout: Duration) -> Result<LocalRu
                 let _ = tokio::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status().await;
             }
             let _ = child.kill().await;
-            // 群組被砍之後管線裡可能還有沒讀完的幾個位元組；給一小段時間排空，不等孫行程握著管線不放的情況。
             let _ = tokio::time::timeout(Duration::from_millis(300), async {
                 let _ = (&mut read_out).await;
                 let _ = (&mut read_err).await;
@@ -547,13 +539,11 @@ impl HostConn {
             "-o".into(),
             "ServerAliveCountMax=3".into(),
         ];
-        // Only override the port when it is not the default, so ssh_config aliases keep theirs.
         if cfg.ssh_port != 22 {
             v.push("-p".into());
             v.push(cfg.ssh_port.to_string());
         }
         v.extend(cfg.ssh_opts.iter().cloned());
-        // 在使用者的選項之後：ssh 取第一個拿到的值，預設值不能擋住使用者為慢線路明寫的。
         v.push("-o".into());
         v.push(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"));
         v
@@ -566,15 +556,12 @@ impl HostConn {
     }
 
     pub async fn ssh_exec_timeout(&self, script: &str, timeout: Duration) -> Result<String> {
-        // 假貨是同步的，永遠不會把控制權交回 executor，所以「主機收下 TCP 但不回話」這種**逾時**光靠假貨測不到
-        // （`tokio::time::timeout` 是合作式的）。這個延遲是真的 await point，讓呼叫端的上限測得出來（#407 review）。
         #[cfg(any(test, feature = "test-hooks"))]
         if let Some(d) = ssh_delay_for(&self.name) {
             tokio::time::sleep(d).await;
         }
         #[cfg(any(test, feature = "test-hooks"))]
         if let Some(f) = ssh_fake_for(&self.name) {
-            // 假貨是同步的：放到 blocking 執行緒上跑，卡住時探測 task 的逾時才收得掉，也不佔住 runtime 的 worker（#1439）。
             let script = script.to_string();
             return tokio::task::spawn_blocking(move || f(&script)).await.map_err(|e| anyhow::anyhow!("ssh fake did not finish: {e}"))?;
         }
@@ -588,7 +575,6 @@ impl HostConn {
     pub async fn ssh_put(&self, path: &str, data: &[u8]) -> Result<()> {
         let Some(cfg) = &self.cfg else { bail!("ssh_put called on the local host") };
         let script = ssh_put_script(path);
-        // ssh joins argv and hands it to the remote login shell: quote once more for that split.
         let remote = format!("/bin/sh -c {}", sh_quote(&script));
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg(&remote);
@@ -938,13 +924,10 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
             }
             if self.client.ping().await.is_ok() {
                 tracing::info!(host = %self.name, socket = %local_sock.display(), "ssh master up; herdr ping ok");
-                // RPC 改走同一條 ssh 主連線上的持久中繼（每個 RPC 一條 `ssh -L` 新連線要 ~110 ms，見 herdr_relay.rs）。
-                // 中繼起不來時 client 會自動退回上面那個 socket，所以這裡設上去不會讓遠端變得更不能用。
                 let mut opts = vec!["-S".to_string(), ctl.display().to_string()];
                 opts.extend(self.ssh_args());
                 let argv = crate::herdr_relay::ssh_argv(&opts, &cfg.ssh, remote_sock);
                 self.client.set_relay(Some(crate::herdr_relay::Relay::new(argv)));
-                // 畫面串流（herdr terminal session observe）也走同一條 ssh 主連線，在遠端跑同一支 CLI。
                 self.client.set_observe_remote(Some(crate::herdr::RemoteObserve {
                     ssh_opts: opts.clone(),
                     target: cfg.ssh.clone(),
@@ -1040,7 +1023,6 @@ pub async fn run_connected<H: HostHooks>(app: &Arc<H>, conn: &Arc<HostConn>, fen
     conn.connected.store(true, Ordering::SeqCst);
     *conn.error.lock().await = None;
     H::host_changed(app, fence).await;
-    // supervisor 被 abort（reconnect／換設定／移除）時這個 future 直接被丟掉：guard 一起收掉 post-connect task，不留孤兒。
     let post = AbortOnDrop(tokio::spawn(H::host_connected(app.clone(), conn.name.clone())));
 
     loop {
@@ -1086,7 +1068,7 @@ fn spawn_supervisor<H: HostHooks>(app: Arc<H>, conn: Arc<HostConn>, generation: 
         let mut backoff = BACKOFF_MIN;
         loop {
             if conn.generation.load(Ordering::SeqCst) != generation {
-                return; // superseded by a reconnect / config change
+                return;
             }
             let attempt = async {
                 let sock = conn.ensure_remote_session(H::is_shared_host(&app, &conn.name).await).await?;
@@ -1559,9 +1541,6 @@ impl HostManager {
         }
 
         for h in hosts {
-            // 第二層保險（issue #506）：`projection::validate` 已經擋掉 `name = "local"`，但這支
-            // 也被測試與 API 直接呼叫，而「把本機那顆 HostConn 換成 remote」是個沒有回頭路的形狀
-            // ——socket 指到沒人在聽的 `<instance>/local.sock`，`is_local()` 翻面之後全部走 ssh。
             if h.name == LOCAL_HOST {
                 tracing::warn!(host = %h.name, "[[hosts]] 不能叫 `local`（那是本機）；忽略這一列");
                 continue;
@@ -1622,7 +1601,6 @@ impl HostManager {
         }
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
-        // Stale `<gone>/claude` quota rows would read as local downstream — SPEC §14.
         H::host_removed(app, name).await;
         tracing::info!(host = %name, "host removed");
     }
@@ -1730,7 +1708,6 @@ pub fn target_epoch(cfg: &HostCfg) -> i64 {
 /// 一次最多列幾個子目錄（本機與遠端同一個數字）；超過就截斷並回 `truncated:true`。
 pub const DIR_LIST_LIMIT: usize = 2000;
 
-// 遠端目錄列舉要跑的 sh（純字串，可以拿到本機直接跑來驗）。
 /// 輸出靠 `AM_*` 開頭的行解析，所以：目前路徑或目錄名字含控制字元（換行、tab、CR…）的一律不列——否則一個叫
 /// `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」；憑證與金鑰目錄（`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.gemini`、daemon 與各 CLI 的設定目錄）
 /// 不給進；子目錄最多 [`DIR_LIST_LIMIT`] 個。
@@ -1738,7 +1715,6 @@ pub fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
         None => "\"$HOME\"".to_string(),
         Some("~") => "\"$HOME\"".to_string(),
-        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         Some(p) if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
         Some(p) => sh_quote(p),
     };
@@ -1831,7 +1807,6 @@ pub enum MakeDirOutcome {
 pub fn make_dir_script(parent: &str, name: &str) -> String {
     let target = match parent.trim() {
         "" | "~" => "\"$HOME\"".to_string(),
-        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         p if p.starts_with("~/") => format!("\"$HOME\"/{}", sh_quote(&p[2..])),
         p => sh_quote(p),
     };
@@ -1886,7 +1861,6 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
     let target = if path == "~" {
         "\"$HOME\"".to_string()
     } else if let Some(rest) = path.strip_prefix("~/") {
-        // Tail is user input: must be quoted; only `"$HOME"` stays outside.
         format!("\"$HOME\"/{}", sh_quote(rest))
     } else {
         sh_quote(path)
@@ -1894,7 +1868,6 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
     let out = conn
         .ssh_exec(&format!("cd -- {target} 2>/dev/null && pwd -P || printf 'AM_ERR\\n'"))
         .await?;
-    // 路徑含換行或控制字元時只取第一行會悄悄存成另一個目錄（建專案）：要求輸出恰好一行、沒有控制字元，否則拒絕。
     let mut lines = out.lines();
     let line = match (lines.next(), lines.next()) {
         (Some(one), None) if !one.chars().any(char::is_control) => one,

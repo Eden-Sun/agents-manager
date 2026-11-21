@@ -1,6 +1,5 @@
 //! Lifecycle and adjacent daemon domain modules extracted from agents-managerd.
 
-// Preserve the former crate-root paths for the stable lower-level modules.
 pub use am_base::*;
 pub use am_core;
 pub use am_ports;

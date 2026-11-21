@@ -190,8 +190,6 @@ pub fn echo_verdict(
     if stamped > pending.at + slack {
         return EchoVerdict::NotEcho("在 Esc 之後才擷取");
     }
-    // 此刻在飛的是 Esc 之後才開的回合。送端時間可能只有秒精度，視為 [stamped, stamped + 1s)：
-    // 這個區間只要碰到新回合開始時間，就不能證明它是 Esc 的回聲。
     if let Some((_, Some(began))) = in_flight {
         if began > pending.at && stamped + chrono::Duration::seconds(1) > began {
             return EchoVerdict::NotEcho("在新回合開始之後才擷取");
@@ -437,7 +435,6 @@ pub fn codex_interrupted_after(log: &str, sent: &[String]) -> bool {
 
 /// 這一筆（`sent`）在這顆 bot 的 session log 裡是不是已經被使用者按停了（#235，重啟時用）。讀不到＝不知道＝`false`。
 pub async fn log_interrupted_after(app: &impl LcHost, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
-    // #749：codex 先看 thread 歷史裡那個 turn 的狀態；只有明說 interrupted 才算數，其餘照舊讀 rollout。
     if bot.kind == "codex" && crate::lifecycle::s6_ports::InterruptGraceHostServices::codex_interrupted_after(app, bot, run, sent).await {
         return true;
     }
@@ -496,8 +493,6 @@ pub async fn hold_at(
         (Some(a), Some(b)) => a.max(b),
         (a, b) => a.or(b)?,
     };
-    // 中斷之後使用者有新輸入（網頁送的、在 pane 裡打字送出的，都會開一筆 turn）＝使用者已經拿回輸入框。
-    // AGM 自己排進去的 queued 不算。
     let newer: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM turns WHERE conversation_id = ? AND status <> 'queued' AND created_at > ?)",
     )
@@ -506,7 +501,6 @@ pub async fn hold_at(
     .fetch_one(app.db())
     .await
     .unwrap_or(false);
-    // 連續 idle 多久：跟 stuck_turns 同一份計時（還沒記過就從現在起算）。
     observe_at(&run.id, &run.agent_status, now);
     let idle = idle_for(&run.id, now).unwrap_or_default();
     let left = interrupt_grace_remaining(Some(interrupted_at), newer, idle, now_utc, grace);
@@ -593,7 +587,6 @@ mod tests {
         let at = "2026-09-16T12:01:00.000Z";
         let log = [user("跑測試"), interrupted(at)].join("\n");
         assert_eq!(claude_interrupted_at(&log).map(|t| t.to_rfc3339()), Some("2026-09-16T12:01:00+00:00".into()));
-        // 工具執行中被按掉的那種寫法（沒有 interruptedMessageId）。
         let tool = json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}).to_string();
         assert!(claude_interrupted_at(&[user("跑測試"), tool].join("\n")).is_some());
         assert_eq!(claude_interrupted_at(&[user("跑測試"), interrupted(at), user("我自己來")].join("\n")), None, "中斷後使用者又送了一則");
@@ -611,14 +604,12 @@ mod tests {
         let bot = crate::testing::claude_bot(&app, &env.project_id, "esc-then-work").await;
         let run = crate::testing::fake_run(&app, &bot.id).await;
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        // 十分鐘前閒著的時候按過一次 Esc（回聲一直沒來）；之後使用者自己送了一則，現在在跑。
         let at = Utc::now() - chrono::Duration::minutes(10);
         note_user_interrupt_at(&bot.id, at);
         expect_interrupt_echo(&bot.id, InterruptedTurn { run_id: run.clone(), turn_id: None, session_id: None, prompt_id: None, at });
         let turn = open_turn(&app, &conv, &run).await;
 
         let mut ev = stop_failure(&bot.id, "p-esc", Some(QUOTA), Utc::now());
-        // 沒有擷取時間的（手寫、舊版送端）一樣證不出是那次 Esc 的回聲。
         ev.received_at = None;
         crate::hookrecv::process(&app, &ev).await.unwrap();
 
@@ -645,26 +636,16 @@ mod tests {
         };
         let is_echo = |v: EchoVerdict| matches!(v, Echo(_));
 
-        // run：bot 換了 run，舊的那筆作廢。
         assert_eq!(echo_verdict(&pending(None, None), "run-2", &ev(None, None, Some(t0)), None), Superseded);
-        // session 對不上就不是，時間再近都一樣。
         assert!(!is_echo(echo_verdict(&pending(None, None), "run-1", &ev(Some("s-2"), None, Some(t0)), None)));
-        // prompt id 兩邊都有時一錘定音：同一則就是回聲，擷取得再晚都一樣（遠端 spool 放多久都不影響）；
-        // 不同則就不是，即使擷取時間落在 Esc 當下。
         assert!(is_echo(echo_verdict(&pending(Some("p-a"), None), "run-1", &ev(Some("s-1"), Some("p-a"), Some(t0 + s(600))), Some(("b", Some(t0 + s(20)))))));
         assert!(!is_echo(echo_verdict(&pending(Some("p-a"), None), "run-1", &ev(Some("s-1"), Some("p-b"), Some(t0)), None)));
-        // 此刻在飛的就是被中斷的那一筆：只可能在講它。
         assert!(is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-x"), None), Some(("a", Some(t0 - s(30)))))));
-        // 證不出來時看擷取時間：Esc 當下擷取的才是回聲（遠端只蓋到秒、往下捨去也算）。
         assert!(is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-a"), Some(t0 - s(1))), None)));
         assert!(is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-a"), Some(t0 + s(1))), Some(("b", Some(t0 + s(20)))))));
-        // 新回合 B 在 Esc 之後 40 秒撞額度——以前在 120 秒窗口內會被吞掉。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), Some(t0 + s(40))), Some(("b", Some(t0 + s(20)))))));
-        // B 是 Esc 之前就排好的派工（`created_at` 比 Esc 早）：沒有「新回合開始」可比，Esc 之後 40 秒才擷取的就不是回聲。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), Some(t0 + s(40))), Some(("b", Some(t0 - s(60)))))));
-        // 就算 B 快到在寬容的那幾秒內開始又失敗：擷取在 B 開始之後，就是 B 自己的事。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), Some(t0 + s(2))), Some(("b", Some(t0 + s(1)))))));
-        // 遠端 hook 的秒級 stamp 代表整秒區間；B 在該秒稍後開始時，不能把 B 的失敗當成回聲。
         let second = t0 - chrono::Duration::nanoseconds(t0.timestamp_subsec_nanos() as i64);
         let pending_subsecond = InterruptedTurn {
             run_id: "run-1".into(),
@@ -682,7 +663,6 @@ mod tests {
             ),
             NotEcho("在新回合開始之後才擷取"),
         );
-        // 沒有擷取時間：證不出來，不算。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), None), Some(("b", Some(t0 + s(1)))))));
     }
 
@@ -740,10 +720,8 @@ mod tests {
 
         interrupt_bot(&app, &bot.id).await.unwrap();
         assert_eq!(status_of(&app, &a).await, "failed", "A 由 Esc 收掉");
-        // A 的回聲：說不出原因，Esc 那一刻就蓋了時間。
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-a", None, t0)).await.unwrap();
 
-        // 馬上開 B；B 在 Esc 之後 40 秒撞額度（還在舊的 120 秒窗口內）。
         let b = open_turn(&app, &conv, &run).await;
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-b", Some(QUOTA), t0 + chrono::Duration::seconds(40))).await.unwrap();
 
@@ -770,7 +748,6 @@ mod tests {
         let t0 = pending.at;
         let b = open_turn_at(&app, &conv, &run, t0 + chrono::Duration::seconds(20)).await;
 
-        // Esc 當下擷取、45 秒後才被撈回來的回聲（處理時間不參與判斷）。
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-a", None, t0 + chrono::Duration::milliseconds(300))).await.unwrap();
         assert_eq!(status_of(&app, &b).await, "in_flight", "A 的回聲不收 B");
         assert_eq!(pending_echo(&bot.id), None, "回聲到了就結清");
@@ -816,7 +793,6 @@ mod tests {
         assert_eq!(pending_echo(&bot.id).unwrap().prompt_id.as_deref(), Some("p-a"), "subagent 的 sidechain 不算");
         let b = open_turn_at(&app, &conv, &run, t0 + chrono::Duration::seconds(20)).await;
 
-        // B 的失敗擷取時間落在 Esc 那幾秒內（時鐘歪了之類），但 prompt 不是被中斷的那一則。
         crate::hookrecv::process(&app, &stop_failure(&bot.id, "p-b", Some("API Error: 500"), t0 + chrono::Duration::seconds(1))).await.unwrap();
         assert_eq!(status_of(&app, &b).await, "failed", "prompt id 對不上就不是回聲");
         assert!(pending_echo(&bot.id).is_some(), "不是回聲的不結清：A 的回聲可能還在路上");

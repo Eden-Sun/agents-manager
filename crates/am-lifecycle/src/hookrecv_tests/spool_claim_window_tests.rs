@@ -30,7 +30,6 @@ async fn a_line_appended_between_claim_and_ack_survives() {
     std::fs::create_dir_all(&dir).unwrap();
     let spool = dir.join("hook-spool.jsonl");
     let staging = dir.join("hook-spool.jsonl.replaying");
-    // 上一輪 ack 沒成功留下的 `.replaying`：修正前只有這條合併路徑會走到「讀完再刪」。
     std::fs::write(&staging, line(&bot.id, "s0")).unwrap();
     std::fs::write(&spool, line(&bot.id, "s1")).unwrap();
 
@@ -78,12 +77,10 @@ fn fold_spool_appends_without_truncating() {
     assert_eq!(std::fs::read_to_string(&dst).unwrap(), "OLD1\nOLD2-half\nNEW1\nNEW2\n");
     assert!(!src.exists(), "併完才刪 src");
 
-    // dst 已經以換行結尾：不多補空行。
     std::fs::write(&src, "NEW3\n").unwrap();
     super::fold_spool(&src, &dst).unwrap();
     assert!(std::fs::read_to_string(&dst).unwrap().ends_with("NEW2\nNEW3\n"));
 
-    // dst 不存在：直接搬過去。
     let fresh = dir.join("fresh.replaying");
     std::fs::write(&src, "ONLY\n").unwrap();
     super::fold_spool(&src, &fresh).unwrap();
@@ -123,8 +120,6 @@ async fn read_spool_line_drops_an_oversized_line_and_keeps_reading() {
     assert_eq!(tail.bytes, b"tail", "最後一行沒有換行也要讀到");
     assert!(super::read_spool_line(&mut r).await.unwrap().is_none());
 }
-
-// ---- 遠端那一半：真的把產出的腳本跑起來（不連任何主機，`$HOME` 指到暫存目錄）
 
 struct Remote {
     home: std::path::PathBuf,
@@ -182,7 +177,6 @@ impl Drop for Remote {
 fn the_remote_claim_script_keeps_a_line_appended_inside_the_window() {
     let r = Remote::new();
     let root = crate::startup::REMOTE_ROOT;
-    // 上一輪 ack 沒成功留下的 `.replaying`：修正前只有這條路徑會 `cat` 完再刪 live spool。
     std::fs::write(r.spool.with_extension("jsonl.replaying"), "OLD\n").unwrap();
     std::fs::write(&r.spool, "A\n").unwrap();
     r.arm_append_inside_the_window("LATE\n");
@@ -230,7 +224,6 @@ fn a_claim_that_cannot_be_folded_reports_itself_as_stuck() {
     assert_eq!(d.stuck_bytes, Some(10), ".claim 的位元組數要帶回來：{out:?}");
     assert!(d.lines.is_empty(), "標記不可以被當成 spool 的一行：{:?}", d.lines);
 
-    // 併得進去的那一輪不准報卡住（不然每次 drain 都在喊狼來了）。
     std::fs::remove_dir(r.spool.with_extension("jsonl.replaying")).unwrap();
     let out = r.sh(&claim_script("botX", root).unwrap());
     assert_eq!(parse_drain_output(&out).stuck_bytes, None, "{out:?}");

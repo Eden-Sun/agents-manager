@@ -83,7 +83,7 @@ pub struct PaneInfo {
     pub tab_id: String,
     pub cwd: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // herdr 協定欄位，測試與日後除錯用
+    #[allow(dead_code)]
     pub foreground_cwd: Option<String>,
     pub agent: Option<String>,
     pub agent_status: Option<AgentStatus>,
@@ -128,10 +128,10 @@ pub struct AgentInfo {
     #[serde(default)]
     pub launch_pending: bool,
     #[serde(default)]
-    #[allow(dead_code)] // herdr 協定欄位
+    #[allow(dead_code)]
     pub state_change_seq: u64,
     #[serde(default)]
-    #[allow(dead_code)] // herdr 協定欄位
+    #[allow(dead_code)]
     pub revision: u64,
 }
 
@@ -327,21 +327,15 @@ pub fn fit_command_line(mut args: Vec<String>) -> Vec<String> {
     while total(&args) > MAX_COMMAND_BYTES {
         let Some((i, _)) = args.iter().enumerate().max_by_key(|(_, s)| s.len()) else { break };
         let over = total(&args) - MAX_COMMAND_BYTES;
-        // The marker's own bytes must come out of the budget, else a small overshoot loops
-        // forever (2026-09-06: 11 GB of WARN in six minutes).
         let keep = args[i].len().saturating_sub(over + TRIM_MARK.len());
         if keep < 40 {
-            break; // Nothing left worth trimming; let herdr answer for it rather than send junk.
+            break;
         }
-        // Char boundary, not byte: a cut through a multi-byte character panics.
         let cut = (0..=keep).rev().find(|n| args[i].is_char_boundary(*n)).unwrap_or(0);
         let trimmed = format!("{}{TRIM_MARK}", &args[i][..cut]);
-        // Belt and braces: never spin on a pass that does not shorten.
         if trimmed.len() >= args[i].len() {
             break;
         }
-        // error, not warn (#901): six top-level bots ran for months with a 348-char system prompt and nobody saw the warning.
-        // The flag in front of the value says what was cut (`--append-system-prompt`, `--rules`, `-c`…).
         let flag = i.checked_sub(1).and_then(|p| args.get(p)).filter(|f| f.len() <= 64).cloned().unwrap_or_default();
         tracing::error!(arg = i, flag = %flag, from = args[i].len(), to = trimmed.len(), "trimming an over-long agent argument; the agent will see a truncated value");
         args[i] = trimmed;
@@ -393,7 +387,6 @@ impl HerdrClient {
     pub fn session_socket(session: &str) -> PathBuf {
         let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         if session == "default" {
-            // The default session predates named sessions: socket is not under sessions/.
             base.join(".config/herdr/herdr.sock")
         } else {
             base.join(".config/herdr/sessions").join(session).join("herdr.sock")
@@ -432,7 +425,6 @@ impl HerdrClient {
     /// 送一行請求、拿一行回應。短呼叫且中繼閒著才走中繼；中繼說「還沒送出」才直連 socket（那條路一個請求一條連線）。
     async fn exchange_line(&self, line: &[u8], id: &str, method: &str, params: &Value, timeout: Duration) -> Result<String> {
         let relay = self.relay.lock().unwrap().clone();
-        // 只有短呼叫走中繼（白名單，見 herdr_relay::is_short_call）；長等的一律直連 socket，不占中繼。
         if let Some(relay) = relay.filter(|_| crate::herdr_relay::is_short_call(method, params)) {
             let text = String::from_utf8_lossy(line).into_owned();
             match relay.exchange(&text, id, timeout).await {
@@ -465,7 +457,6 @@ impl HerdrClient {
             Ok(v) => serde_json::from_value::<Pong>(v).map_err(anyhow::Error::from),
             Err(e) => Err(e),
         };
-        // 讀不到就清掉：舊的版本不能冒充現況（#254）。
         let pong = match parsed {
             Ok(p) => p,
             Err(e) => {
@@ -762,7 +753,6 @@ impl HerdrClient {
     pub async fn subscribe(&self, subscriptions: Vec<Value>) -> Result<mpsc::Receiver<Event>> {
         let id = self.next_id();
         let req = json!({"id": id.clone(), "method": "events.subscribe", "params": {"subscriptions": subscriptions}});
-        // **只包握手**：連線、送出、讀 ack。後面讀事件的那條是長連線，本來就該一直等，不能包。
         let handshake = async {
             let mut stream = UnixStream::connect(&self.socket).await.context("connect herdr socket for subscribe")?;
             let mut line = serde_json::to_vec(&req)?;
@@ -802,9 +792,6 @@ impl HerdrClient {
                                     break;
                                 }
                             }
-                            // herdr 0.9.2+：讀太慢、落後到 server 保留的歷史之外，會回一行 JSON-RPC error（`events_lost`）
-                            // 再關連線。這條串流從此缺事件，不能當沒看到繼續讀：收掉它，讓呼叫端照斷線處理
-                            // ——重訂閱，再用權威讀取對帳（全域訂閱跑 reconcile、pane 監看補讀當下狀態，見 `events.rs`）。
                             Err(e) => match serde_json::from_str::<RawResponse>(t).ok().and_then(|r| r.error) {
                                 Some(err) => {
                                     tracing::warn!(code = %err.code, message = %err.message, "herdr event stream returned an error; dropping it to resubscribe and reconcile");
@@ -863,7 +850,6 @@ pub fn split_paste(text: &str, max: usize) -> Vec<&str> {
     let mut start = 0;
     for line in text.split_inclusive('\n') {
         let end_of_line = start_of(text, line) + line.len();
-        // 這一行放進目前這段會超過：先把目前這段收掉。
         while end_of_line - start > max {
             let line_start = start_of(text, line);
             if line_start > start {
@@ -889,14 +875,6 @@ pub fn split_paste(text: &str, max: usize) -> Vec<&str> {
 fn start_of(text: &str, line: &str) -> usize {
     line.as_ptr() as usize - text.as_ptr() as usize
 }
-
-
-
-
-
-
-
-
 
 /// 本機 herdr 的 client、session 名與連線旗標。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait LocalHerdr: Send + Sync {

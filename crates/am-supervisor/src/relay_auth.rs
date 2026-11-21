@@ -30,7 +30,6 @@
 //! （repo 內與維運腳本改走 service principal、persona 慣例帶 token、daemon.log 連續 7 天零 warn）都成立。
 //! 歷史訊息的 `relay_unverified = 1` 仍保留，UI 照舊在來源旁寫「未驗證」。
 
-
 use axum::http::HeaderMap;
 use serde_json::json;
 
@@ -69,8 +68,6 @@ pub async fn authenticate(
             "message": "relay_from=daemon 只給 daemon 自己用，不能從 API 帶進來；bot 請帶自己的 bot id 與 X-AM-Bot-Token",
         })));
     }
-    // 自己轉述給自己：`relay_from` 的意思是「這句話不是收件者自己想的」，指向收件者本人就沒有來源可標，
-    // UI 會畫出「A → A」。沒有正當呼叫端這樣送（daemon 的 child 警示是 child → 母代，兩顆不同的 bot）。
     if claimed == target.trim() {
         return Err(LcError::BadValue(json!({
             "error": "bad_request",
@@ -94,26 +91,18 @@ enum Proof {
 /// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 的驗證（issue #409）。
 /// `claimed` 已 trim、非空、不是 `daemon`。
 async fn prove_bot(app: &(impl crate::capabilities::Db + RelayTokenVerify), headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
-    // A Bot principal (the `/api` middleware already proved `X-AM-Bot-Id` + its token) may only
-    // claim itself. Compared by id, not only by token, so the rule does not lean on tokens being
-    // unique (issue #556: relay_from never overrides the authenticated identity).
     if let Some(id) = headers.get("X-AM-Bot-Id") {
         if id.to_str().ok().map(str::trim) != Some(claimed) {
             return Err(mismatch());
         }
     }
-    // **header 在不在**才是分歧點，值長什麼樣都不算「沒帶」：空字串與非 UTF-8 以前都掉進相容期，
-    // 等於送一個壞掉的 header 就能冒名放行。
     let presented = headers.get("X-AM-Bot-Token").map(|v| v.to_str().unwrap_or_default().trim().to_string());
     let live = crate::db::bot(app.db(), claimed)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|b| b.deleted_at.is_none());
     match (presented, live) {
-        // 有帶而且對得上：本人。
         (Some(t), Some(b)) if !t.is_empty() && app.ct_eq(&t, &b.hook_token) => Ok(Proof::Verified(b.id)),
-        // 有帶但對不上（別顆的、空的、非 UTF-8），或指到不存在／已刪的 bot：同一個 403。
-        // 不按「bot 存不存在」分成 400／403——那會讓狀態碼變成探測 bot id 的神諭。
         (Some(_), _) => Err(mismatch()),
         (None, Some(_)) => Ok(Proof::Absent),
         (None, None) => Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),

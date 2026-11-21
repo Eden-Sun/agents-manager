@@ -47,7 +47,6 @@ pub(crate) async fn open(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
 
 #[cfg(test)]
 fn publish_test_template(path: &Path, template: &[u8]) -> std::io::Result<bool> {
-    // Publish only a complete temporary file, and let hard_link fail if another opener won.
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no file name")
@@ -120,7 +119,6 @@ async fn test_schema_template() -> anyhow::Result<Arc<[u8]>> {
         return Ok(template.clone());
     }
 
-    // Use the normal full migration and schema check before serializing the stamped schema.
     let options = SqliteConnectOptions::new()
         .in_memory(true)
         .create_if_missing(true)

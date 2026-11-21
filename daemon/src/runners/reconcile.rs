@@ -158,7 +158,6 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str, o
     if bot_host != host {
         return Ok(());
     }
-    // 這一輪看到的連線世代：start 失敗時用它分辨「主機中途斷了／被換掉」與「bot 本身起不來」。
     let Some(fence) = app.hosts.fence(host).await else {
         return Err(anyhow::anyhow!("host gone"));
     };
@@ -182,9 +181,6 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str, o
             if !app.hosts.is_current(&fence).await || !app.host_connected(host).await {
                 return Err(owed_after(app, &bot.id, since, own_runs, "host disconnected while starting bot".into()).await);
             }
-            // herdr／ssh 暫時不通、或暫時讀不到狀態：不是「這顆 bot 不該起」，記在 still 讓背景重試。
-            // Uncommitted（副作用已做、run 會自己收斂）與 Bad／NotFound／Conflict／Forbidden／Unprocessable
-            // （不該起、已在起）維持 Ok：再試也不會不一樣。
             if matches!(e, crate::lifecycle::LcError::Upstream(_) | crate::lifecycle::LcError::Unavailable(_)) {
                 return Err(owed_after(app, &bot.id, since, own_runs, format!("autostart could not start the bot yet: {e:?}")).await);
             }
@@ -350,7 +346,6 @@ mod tests {
             "claim 沒完成"
         );
 
-        // 背景重試：只看欠著的那顆，自己失敗的 run 不算別人動過它；herdr 好了就起來。
         assert!(autostart_pass(&env.app, LOCAL_HOST, &mut owed, &claim.since).await);
         assert!(db::active_run(&env.app.db, &failed).await.unwrap().is_some(), "重試之後起來了");
         claim.complete();

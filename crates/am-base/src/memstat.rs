@@ -91,7 +91,6 @@ pub fn parse_machine(out: &str) -> Option<MachineMem> {
             return Some(MachineMem { total_bytes: total * 1024, available_bytes: avail * 1024 });
         }
     }
-    // macOS: 第一行是 `sysctl -n hw.memsize` 的裸位元組數，後面是 `vm_stat`。
     let total = out.lines().map(str::trim).find_map(|l| l.parse::<u64>().ok())?;
     if total == 0 {
         return None;
@@ -429,9 +428,6 @@ pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
                     prev.total_bytes.abs_diff(snap.total_bytes) >= 1024 * 1024
                         || prev.hosts.len() != snap.hosts.len()
                         || projects_changed(&prev.projects, &snap.projects)
-                        // 剩餘 RAM 與瀏覽器分頁數跟 herdr 樹的用量無關，卻被綁在它身上：
-                        // 晚上沒有 bot 在跑時 herdr 樹幾乎不動，使用者開了四十個分頁、可用記憶體掉到
-                        // 800 MiB，一次事件都不會送——正好在最該示警的時候失效（review 2026-09-16）。
                         || host_signals_changed(&prev.hosts, &snap.hosts)
                 }
                 None => true,

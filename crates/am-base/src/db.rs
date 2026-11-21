@@ -612,196 +612,101 @@ CREATE INDEX IF NOT EXISTS idx_ledger_events_item
 /// `release_triage` 表），同樣記著 4 的 DB 長相不一，所以從 5 開始釘。
 pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (5, "519fd4f808b8ac5b"),
-    // issue #213：`bots.instruction_files`（claude bot 讀哪份專案指示檔）。
     (6, "f75ac921663299da"),
-    // issue #238：`runs.runtime_identity`（run 用哪個身份起來的，額度記在它上面）。
     (7, "7372788a43638544"),
-    // issue #240：`judge_shadow`（撞限第二意見的帳本，只記錄）。
     (8, "3b7f1d3c6f8712de"),
-    // issue #253：`bot_previews`（頂層 bot 的 vite 預覽）。
     (9, "be0411b44c5111ab"),
-    // issue #253 v2：`bot_previews.source`／`pid`（預覽可以接上既有的 vite）。
     (10, "d17c9db38b9c22e7"),
-    // issue #253 v4：`bot_previews.command`／`kind`（預覽擴大成本機 dev server）。
     (11, "b2704fdf9aeb332c"),
-    // issue #344：`bots.primary_position`（主力那列的固定順序）。
     (12, "dd16404b83c0823f"),
-    // issue #355：`intents`（持久 intent）、`bots.launch_rev`／`runs.launch_rev`（啟動版本雜湊）；同版含 4cbacecc（#349）的 `remote_bot_dir_purges`（那顆沒升版）。
     (13, "44c2487afdf01452"),
-    // issue #392：`quota_cache`（重啟後先顯示上一次的額度讀數）。
     (14, "0cb16547e439691a"),
-    // issue #400：data-only model rewrite, so the schema fingerprint stays the same; includes deleted rows.
     (15, "0cb16547e439691a"),
-    // issue #405：`messages.rewound_at`（對話倒回標掉的訊息，標記不刪）。
     (16, "cd536b2d4cda75e5"),
-    // issue #339：`messages.relay_unverified`（沒帶 bot token 自稱的 relay_from）。
     (17, "b9b1eb7d09e3cb5b"),
-    // issue #436：`supervisor_approvals.requester_unverified`（申請人是自稱的還是驗過的）。
     (18, "5df2ad9350704345"),
-    // issue #474：pre-v2 的 `bot_previews` 重建補回 `REFERENCES bots(id)`。全新 DB 本來就有那個外鍵，
-    // 所以指紋跟 v18 一樣（同 #400 那一版的情形）——升版是因為 migrate 真的動了既有資料庫。
     (19, "5df2ad9350704345"),
-    // issue #528：`supervisor_assignments.busy_rounds`（排不進去幾輪，跟 `attempts` 分開記）。
     (20, "bfb00c5a78aa5503"),
-    // issue #543：`supervisor_assignments_created`（分頁與未結案清單共用的排序索引）。
     (21, "80f6adcef290b9e3"),
-    // issue #554：`runs.exit_reason`（run 為什麼被收成 exited，child 退役紀錄分辨刻意／弄丟用）。
     (22, "23efc61b27d2a5a9"),
-    // issue #557：`judge_shadow.jev_same_work`（撞題 Noul，不塞進 jev_is_live_ui）。
     (23, "8118ff0f6b5b3027"),
-    // issue #558：`judge_shadow.assignment_id`／`claims_verified`／`asks_parent_action`（回報證據旗標）。
     (24, "190576f2d85181bd"),
-    // issue #564：`cli_updates`（codex 一鍵安裝的持久紀錄，daemon 重啟後接手；每台最多一筆 running）。
     (25, "62482003005235be"),
-    // issue #347：`cli_updates.host_target` pins recovery to the host authority where the update started.
     (26, "4631f4f3433fc553"),
-    // issue #611：`release_triage_publish_intents`（GitHub create/comment 副作用前的 durable marker）。
     (27, "ec6860a3b46abdd7"),
-    // 2026-09-28：`messages.sent_via`（插隊／補充送出的訊息，泡泡上標出來）。
     (28, "a713484136f43301"),
-    // issues #598/#603: persist runtime readback debt and launch-stamp retry proof.
     (29, "bfd0564e8c1a8d5e"),
-    // issue #635: spawn hints are unique by host and pane id, not by pane id globally.
     (30, "db1edd18d6bf4693"),
-    // issue #708：`projects.handed_off_to`（專案移交給另一台主機的 daemon）。
     (31, "4aa40b8a872df7d8"),
-    // issue #733：persist user prompts accepted while the agent is busy.
     (32, "4376ae24058f9753"),
-    // issue #738: durable retries for queued-prompt message restamping after delivery.
     (33, "ed264766628799b2"),
-    // 2026-10-01：`composer_drafts`（輸入框草稿存 daemon，各瀏覽器同步）。
     (34, "1fb4da468542c3bb"),
-    // issue #756：`project_group_reads`（專案群組已讀標記存 daemon，跨裝置共用）。
     (35, "fe4e118f866a5cfd"),
-    // perf：`messages_with_attachments`（清附件時問「有沒有訊息點名它」只看帶附件的訊息）。
     (36, "dea182f6831c676b"),
-    // perf：`messages_assistant_unread`（未讀數只看 assistant 訊息的 partial covering 索引）。主幹現況是 36；若與 716-b 的 schema 變更同時合流，
-    // 兩邊都會寫成 37 而衝突，以合流後主幹的最後一號 +1 重算指紋、併成同一版。
     (37, "5560444159e4c9a5"),
-    // 分享 bot：`shared_bots`（受限的分享用 bot 與它的工作目錄）、`bot_shares`（分享連結，只存 token 的 SHA-256）。
     (38, "f2d07b091615d3d7"),
-    // 分享 bot：`bot_shares.token`（token 原文，管理端隨時拿得回完整連結；NULL＝只有 hash 的舊列）。
     (39, "827c54df62168fe1"),
-    // claude 倒回：`rewind_anchors`（下一次 resume 之前補進 transcript 的倒回點）。
     (40, "715f4def20647528"),
-    // 信任分享：`shared_bots.profile` 收 'trusted'（重建表改 CHECK）、`share_reply_visible`（擁有者送的哪幾則回覆仍給分享頁看）。
     (41, "7891fefaecfdb8e0"),
-    // agy（Antigravity CLI）：`bots.kind` 的 CHECK 收 'agy'（既有庫就地放寬，不重建 bots——十七張表指著它）。
     (42, "e3b7ca73b8056a33"),
-    // 主力保溫：`keep_warm_skip`（不用保溫）、`messages.keep_warm` 與蓋它的 trigger。
     (43, "d554cdfaeba6efe4"),
-    // issue #852：`context_lost_notices`（原生對話接不回的警告紀錄，依 session id 精確撤銷）。
     (44, "0d15873cf9a77b83"),
-    // l8 審查發現 2：`turns.source_event_id`（收這筆回合的 hook 在收件匣的 id）＋唯一索引，重播同一則 hook 不再開第二個外部回合。
     (45, "e88ca2badecc5381"),
-    // issue #879：`runs.transcript_baseline_at`（沒有 hook 的 claude run 第一次讀對話檔的基準，既有歷史不生回合）。
     (46, "0d415c91ca473b5e"),
-    // issue #864：`primary_cache_actions`（主力熱壓的 durable 收據，note 只是投影）。
     (47, "d9e8f995cf7cd191"),
-    // issue #916：`codex_steers`（codex steer 的 client_request_id 落地，重啟後重送不再打第二次字）。
     (48, "0883f7828daa3cda"),
-    // issue #927：`messages.relay_turn_id`（別的 bot 的報備是寄件 bot 哪一回合送的，child_done 只認同一回合的回報）。
     (49, "62625b15ce32c1d2"),
-    // issue #801：`release_triage.assigned_bot_id`／`dispatch_gen`（交辦綁定收件 bot 與派工代數，verdict 只收它的）。
     (50, "22bdbf27a684cd91"),
-    // 信任分享：`bot_shares.allow_embed`（勾了「允許 iframe 嵌入」的信任分享，預設 0）。
     (51, "d22c0281cffb2f15"),
-    // issue #1035：`runs.host`／`runs.host_generation`（run 啟動時所在的遠端主機與它的世代；`?confirm=repoint` 換指之後，舊 run 的 hook 不認新主機）。
     (52, "2facd719ec482737"),
-    // issue #1038：`share_keep_pending`（遠端分享保留標記欠著的主機，ssh 失敗時記下、巡邏補做）。
     (53, "27e8089933d86980"),
-    // issue #1329：`release_triage_issue_creates`（24 小時配額只掃索引摘要，不解碼整份歷史帳本）。
     (54, "0761ab4fd4f7886e"),
-    // issue #1320：`projects.host`／`deleted_at` 的 trigger 把舊主機還欠著的已刪 bot 義務寫進 `remote_bot_dir_purges`。
     (55, "3337f703704eed22"),
-    // issue #1427：`remote_restore_backoff`（補還原失敗的退避：每 (主機, bot) 的連續失敗次數與下次可試的時間）。
     (56, "08b0bd7b0cd32821"),
-    // issue #1482：`turns.claimed_from_queue` separates a claimed queued prompt from a direct prompt while both are pending.
     (57, "97ff8e05ebd65f0c"),
-    // issue #1488：原文校正寫入失敗時保留 session-log proof，讓同請求重試能補正。
     (58, "f1fafc8c7e9ef622"),
-    // issues #1493/#1494: persist and bound pending late-delivery proof baselines.
     (59, "1d4bdc902d82f33b"),
-    // issue #1653：`turns_run_time`（以 run 找回合）與 `supervisor_inbox_sup_state`（收件匣依 state 篩），不再掃 messages／讀整張收件匣。
     (60, "174c28815b653271"),
-    // 專案排程（schedules／schedule_occurrences，2026-10-13）：ledger、冪等 key、通知去重、等待原因與 unknown 狀態。
     (61, "912947f9ac233189"),
-    // 手動執行 key 的 mapping（schedule_manual_requests，2026-10-13 補）：重試回同一筆 occurrence。
     (62, "cf53e353ad0b9965"),
-    // issue #1685：使用者、relay、daemon 通知各有自己的 queued 槽，使用者 flush 優先。
     (63, "56fa10c366935e77"),
-    // issue #1779：`schedules.clear_after`（排程跑完就讓 Bot 開新對話，不留記憶、不佔 context）。
     (64, "18d72ba10ff77a10"),
-    // issue #1790：`spawn_claims`（shim 登記「這個 pane 是 bot 開的」，子 agent 歸屬以它為準、改名不換 parent）。
     (65, "243128a550c2ec96"),
-    // issue #1793: scope spawn claims to the parent run and herdr session.
     (66, "47e922c6f2ab97d9"),
-    // #1892: persist the terminal instance used to reconnect adopted child runs.
     (67, "14ee6138116e5ba4"),
-    // issue #748: `runs.codex_instant_interrupt`（codex 啟動時帶了 instant_interrupt 參數沒有）。
     (68, "26359d939fbd1275"),
-    // #1944 B: private API bot checkpoints and attempt accounting, expanded bot kind CHECK.
     (69, "5c5a67ab8a3b16d2"),
-    // #1944 D1: private durable joined receipts (no production writer yet).
     (70, "b87dfcf444f07cd0"),
     (71, "d32e25a1e3418557"),
     (72, "1ea615a552a5e0ad"),
     (73, "7b90de666223749d"),
-    // Remove obsolete project group read marks.
     (74, "1b4fc0fe9e17728b"),
     (75, "dab5e06d25106ac2"),
-    // 專家模式 track（2026-10-31）：`relay_requests.track`。
     (76, "f00a57c2bd7cfbfa"),
-    // 專家模式執行者池退役（2026-11-06）：保留既有 `projects.executor_pool_json` 欄位，不再使用。
     (77, "02d3beb36275b2dc"),
-    // 專家模式專家（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`（A／B 合一版）。
     (78, "7191b39c27eab19f"),
-    // B 期角色 policy（2026-11）：`runs.policy_rev`（ALTER ADD）。
     (79, "a75a882aefa18996"),
-    // 專家模式副管理者（2026-11）：`projects.deputy_bot_id`／`deputy_after_sec`、`relay_requests.redirected_from`／`redirected_at`／`digest_at`（ALTER ADD）。
     (80, "f2044f7ae8a9f49a"),
-    // 專家模式群集派工（2026-11）：`relay_requests.cluster`（ALTER ADD）。
     (81, "791ac96276182d69"),
-    // 專家模式執行者授權（2026-11-06）：`projects.executor_grants_json`（ALTER ADD；SCHEMA 84 起不再使用）。
     (82, "c16167decdd32a1d"),
-    // 專家模式派工的授權依據（2026-11-06）：`messages.relay_auth`（ALTER ADD）。
     (83, "cd92a0ee3855fbc4"),
-    // 專家派工總開關（2026-11-06，取代逐對授權）：`projects.specialist_dispatch`（ALTER ADD，預設 1）。
-    // `projects.executor_grants_json` 不再使用，欄位留著不 DROP。
     (84, "1f27b51cf6de802a"),
-    // 側欄 pane 別名持久化（2026-11-07）：`pane_aliases`（CREATE TABLE）。
     (85, "e55cfce83db3cb81"),
-    // Bind named relay requests to their original cluster identity.
     (86, "5cb62ec809c30f7a"),
-    // 排程失敗重試與結果（P2，2026-11-08）：`schedules.retry_*`、`schedule_occurrences.outcome`／`attempt_no` 等（ALTER ADD）、`schedule_attempts`（CREATE TABLE）。
     (87, "1b910d09bc467d22"),
-    // 試跑（P1）：source 加 dry_run，occurrence 表重建。
     (88, "70e406f78e62381f"),
-    // 排程一天多時段（P3）：`schedule_occurrences.slot_label`（ALTER ADD）。
     (89, "e5a94923aaa5bbbf"),
-    // codex bot 基準快照（2026-11-09）：`bot_base_snapshots`（CREATE TABLE）、`schedules.from_base`（ALTER ADD）。
     (90, "af38ef82eaedb7b4"),
-    // 排程代號（2026-11-09）：`schedules.code_no`（ALTER ADD；既有排程依建立時間回填）。
     (91, "f6d42636bb336366"),
-    // 排程總花費時間（2026-11-09）：`schedule_occurrences.first_started_at`／`attempt_started_at`、`schedule_attempts.started_at`（ALTER ADD）。
     (92, "e31b0a1f55e8ed41"),
-    // kind 啟用開關（2026-11-14）：`kind_prefs`（CREATE TABLE IF NOT EXISTS，identity_prefs 的 migrate 裡建）。
     (93, "7f4b8aaaa990df4d"),
-    // claude-api 每回合快取保留（2026-11-14）：`turns.cache_ttl_secs`（ALTER ADD，預設 300）。
     (94, "7ee64d1c638b0801"),
-    // 被拒回應記錄（2026-11-15）：`api_bot_rejected_responses`（CREATE TABLE）。
     (95, "9823d73c31741f77"),
-    // 閒下來自動重啟套用更新（2026-11-18）：`bot_update_restart`（CREATE TABLE）。
     (96, "e0364d581dcb0388"),
-    // openai-api 切片 C（2026-11-18）：`api_bot_attempts.provider`／`service_tier`（ALTER ADD）、provider 不可變 trigger 與 (provider, created_at) 索引。
     (97, "e221e96c9fdae2a0"),
-    // openai-api D2b-2（2026-11-18）：`bots.kind` 的 CHECK 多收 `openai-api`（就地放寬 `sqlite_master.sql`，不搬資料）。
     (98, "8bda24e0822e32ff"),
-    // codex session 血統（issue #1943 子票 A，2026-11-20）：`lineage_sessions`（CREATE TABLE，`kind` 只收 codex）與「一條線一顆 checkpoint」部分唯一索引。
     (99, "8392961c08c2cf76"),
-    // 防遺忘承諾帳本 T1（2026-11-21）：`ledger_items`、`ledger_events` 與索引（CREATE TABLE）。
     (100, "d159d420a712b673"),
-    // codex session 血統認領（issue #1943 子票 B1，2026-11-21）：`lineage_claims`（CREATE TABLE）與 open resume 部分唯一索引。
     (101, "bdaf849a9896d73f"),
     // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：`lineage_sessions` input_tokens／cached_input_tokens／output_tokens。
     (102, "ff718b0b270a7fc9"),
@@ -857,14 +762,12 @@ pub async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, ddl: &s
 
 /// 開啟資料庫；feature 的 migration 清單由呼叫端給（順序即執行順序）。
 pub async fn open_with(path: &Path, features: FeatureMigrations) -> Result<SqlitePool> {
-    // 不經 `sqlite://` URL：路徑裡的 `?` 會被當成連線參數、`%XX` 會被 percent-decode 到別的檔（issue #1144）。
     let opts = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .busy_timeout(std::time::Duration::from_secs(10));
-    // Throw-away single-connection pool: no pooled connection keeps a pre-migration table layout.
     {
         let mpool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -886,11 +789,8 @@ pub async fn open_with(path: &Path, features: FeatureMigrations) -> Result<Sqlit
 async fn migrate_with(pool: &SqlitePool, features: FeatureMigrations) -> Result<()> {
     apply_migrations_with(pool, features).await?;
     schema_guard::check_drift_with(pool, features).await?;
-    // 版本戳記最後才蓋（#289）：子模組 migrate 或漂移核對失敗時 daemon 起不來，這時 DB 不能已經宣稱是新版，
-    // 否則回滾用的舊 binary 會被版本閘（#72）擋在門外。
     let stored: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(pool).await?;
     if stored < SCHEMA_VERSION {
-        // `user_version` 不接受 bind 參數，但這裡的值是編譯期常數，不是外部輸入。
         sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).execute(pool).await.context("stamp schema version")?;
     }
     Ok(())
@@ -920,8 +820,6 @@ async fn apply_migrations_with(pool: &SqlitePool, features: FeatureMigrations) -
 }
 
 async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: bool, features: FeatureMigrations) -> Result<()> {
-    // 先讀版本再套 schema：deferred 的話讀完之後別的 writer（換版時還沒收完的舊 daemon）一 commit，第一句 DDL 就 517，
-    // daemon 起不來（#831）。
     let mut tx = begin_write(pool).await?;
     let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
     #[cfg(any(test, feature = "test-hooks"))]
@@ -939,11 +837,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         }
         sqlx::query(s).execute(&mut *tx).await.with_context(|| format!("apply schema: {s}"))?;
     }
-    // issue #635: pane ids are allocated independently by each herdr host. v29 keyed this
-    // table globally by pane_id; rebuild transactionally so same-id hints on different hosts coexist.
     rebuild_schedule_occurrences_for_dry_run(&mut tx).await?;
     rebuild_spawn_hints_host_key(&mut tx, fail_after_spawn_hints_drop).await?;
-    // v66: scope pane IDs to host sessions; backfill legacy claims from unambiguous active host sessions.
     if !has_column(&mut *tx, "spawn_claims", "parent_run_id").await? {
         sqlx::query("CREATE TABLE spawn_claims_scoped (
             pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
@@ -959,135 +854,70 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         sqlx::query("DROP TABLE spawn_claims").execute(&mut *tx).await?;
         sqlx::query("ALTER TABLE spawn_claims_scoped RENAME TO spawn_claims").execute(&mut *tx).await?;
     }
-    // Additive columns for databases created before they existed.
     for (table, col, ddl) in [
-        // 2026-09-14: daemon 對這個 pane 直接打過字（當場套用 slash、codex 選單、/login）。之後這個
-        // run 的 prompt 一律改走「打字進 pane 再看畫面」，因為 herdr `agent.prompt` 在這種 pane 上
-        // 回 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33）。存在 DB：daemon 重啟後不能忘記，否則第一則
-        // 又走回已知會失效的那條路。
         ("runs", "pane_typed", "ALTER TABLE runs ADD COLUMN pane_typed INTEGER NOT NULL DEFAULT 0"),
-        // 這個 turn 已經被 watchdog 重送過幾次。存在 DB 才擋得住「重啟後又重送同一則」。
         ("turns", "resend_count", "ALTER TABLE turns ADD COLUMN resend_count INTEGER NOT NULL DEFAULT 0"),
-        // 0 = the prompt was typed and submitted on a run with no lossless evidence (grok, remote
-        // hosts, codex before its session is known). `delivery` stays 'ok' — its CHECK constraint
-        // predates this state and cannot be widened without rebuilding the table — and this column
-        // carries the "check it by hand" mark to the API, the UI and the supervisor.
         ("turns", "delivery_verified", "ALTER TABLE turns ADD COLUMN delivery_verified INTEGER NOT NULL DEFAULT 1"),
-        // A queued prompt that could not be typed yet (busy box, transcript not reported): how many
-        // times it has been put back, and not before when it is tried again. Persisted so the
-        // backoff and its limit survive a restart and cannot be reset by extra wake-ups.
         ("turns", "flush_retries", "ALTER TABLE turns ADD COLUMN flush_retries INTEGER NOT NULL DEFAULT 0"),
         ("turns", "next_flush_at", "ALTER TABLE turns ADD COLUMN next_flush_at TEXT"),
-        // Put-backs spent waiting for a codex rollout, counted only for that reason and only for
-        // the run and session in `rollout_wait_key` (`<run id>:<session id>`); a different key
-        // starts the count again (sol review round ten #2).
-        // 能不能自動重送，與「有沒有證據」分開（AGM 2026-09-16）。既有列給 1＝維持今天的行為：
-        // 舊的 unverified 列早就把 resend_count 頂到上限，照樣不會被重送。
         ("turns", "auto_resend", "ALTER TABLE turns ADD COLUMN auto_resend INTEGER NOT NULL DEFAULT 1"),
-        // The pending direct-prompt INSERT and a claimed queued prompt have the same delivery and resend fields;
-        // retain the queue transition source so interrupt arrival can tell them apart.
         ("turns", "claimed_from_queue", "ALTER TABLE turns ADD COLUMN claimed_from_queue INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_waits", "ALTER TABLE turns ADD COLUMN rollout_waits INTEGER NOT NULL DEFAULT 0"),
         ("turns", "rollout_wait_key", "ALTER TABLE turns ADD COLUMN rollout_wait_key TEXT"),
-        // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
-        // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
         ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
-        // issue #738: delivery is durable before the queued prompt's message timestamp and event are restamped.
         ("turns", "restamp_pending", "ALTER TABLE turns ADD COLUMN restamp_pending INTEGER NOT NULL DEFAULT 0"),
-        // 排著的這一則被 flush 的額度閘擋下時看到的撞限（issue #108，`lifecycle::quota_hold`，JSON）。
-        // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身份。
         ("turns", "quota_hold", "ALTER TABLE turns ADD COLUMN quota_hold TEXT"),
-        // 送出時 bot 沒在跑、daemon 先收下再替它啟動的那一則（issue #122，`lifecycle::start_send`）：
-        // 沒有 run 也不當孤兒撤，啟動失敗只記原因（`start_error`），等使用者重新啟動或取消。
         ("turns", "awaits_start", "ALTER TABLE turns ADD COLUMN awaits_start INTEGER NOT NULL DEFAULT 0"),
         ("turns", "start_error", "ALTER TABLE turns ADD COLUMN start_error TEXT"),
-        // issue #733: a user prompt accepted while the run is busy waits for the next idle edge.
         ("turns", "awaits_idle", "ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0"),
-        // issue #1488: retain the composer submission's transcript proof until exact message text is committed.
         ("turns", "composer_draft_proof", "ALTER TABLE turns ADD COLUMN composer_draft_proof TEXT"),
-        // #1685：寫入時依可信來源保存 queued turn 分類；舊列在下方用 message relay metadata 回填。
         ("turns", "queue_class", "ALTER TABLE turns ADD COLUMN queue_class TEXT NOT NULL DEFAULT 'user' CHECK (queue_class IN ('user','relay','daemon'))"),
-        // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
-        // 一律當 'ready'（issue #88）。
         (
             "attachments",
             "state",
             "ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'ready' CHECK (state IN ('staging','ready','failed'))",
         ),
-        // `agent_status` 最後一次真的改變的時間；見下面 `runs_agent_status_since` trigger 與 issue #93。
         ("runs", "agent_status_since", "ALTER TABLE runs ADD COLUMN agent_status_since TEXT"),
-        // claude 原生 SubagentStart／SubagentStop 的最後一筆快照，純輔助可見性（issue #82）。
         ("runs", "subagent_json", "ALTER TABLE runs ADD COLUMN subagent_json TEXT"),
-        // `resume_native` 的結論（issue #92）；見 SCHEMA 那一欄的說明與 `lifecycle::resume_gate`。
         ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
-        // 已棄用的 `bots.instruction_files`（issue #213，現在不讀寫）；留著 ALTER 讓更舊的 DB 開起來欄位齊全、`check_schema_drift` 不炸。
         ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
-        // run 用哪個身份起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身份算，跟加這一欄之前一樣。
         ("runs", "runtime_identity", "ALTER TABLE runs ADD COLUMN runtime_identity TEXT"),
-        // 預覽（issue #253 v2）：`spawned`（自己起的）／`attached`（接上既有的 vite）與被接上的 pid；舊列都是 spawned。
         ("bot_previews", "source", "ALTER TABLE bot_previews ADD COLUMN source TEXT NOT NULL DEFAULT 'spawned'"),
         ("bot_previews", "pid", "ALTER TABLE bot_previews ADD COLUMN pid INTEGER"),
-        // 預覽擴大成本機 dev server（issue #253 v4）：實際跑的那一行與 dev server 種類。
         ("bot_previews", "command", "ALTER TABLE bot_previews ADD COLUMN command TEXT"),
         ("bot_previews", "kind", "ALTER TABLE bot_previews ADD COLUMN kind TEXT"),
-        // 主力那列的固定順序（issue #344）；舊列 0＝沒排過，排在有排過的之後。
         ("bots", "primary_position", "ALTER TABLE bots ADD COLUMN primary_position INTEGER NOT NULL DEFAULT 0"),
-        // 對話倒回（issue #405）：被倒掉的訊息標記不刪；舊列 NULL＝沒被倒掉。
         ("messages", "rewound_at", "ALTER TABLE messages ADD COLUMN rewound_at TEXT"),
-        // 啟動相關設定的版本雜湊（#355 機制 B／#353）：`bots.launch_rev`＝目前設定的版本，`runs.launch_rev`＝這個 run 啟動時載入的版本；
-        // NULL＝沒記（舊資料，視為相同、不誤報「需重啟」）。P1 只加欄位、沒有人讀寫。
         ("bots", "launch_rev", "ALTER TABLE bots ADD COLUMN launch_rev TEXT"),
-        // openai-api 切片 C（2026-11-18）：每筆 attempt 的 provider（不可變，見 `api_bot_attempts_provider_immutable`）與計價用的 service tier。
-        // 既有列（含已脫離 bot 的歷史列）一律是 anthropic：DEFAULT 讓舊列自動回填，Claude 的總上限前後相等。
         ("api_bot_attempts", "provider", "ALTER TABLE api_bot_attempts ADD COLUMN provider TEXT NOT NULL DEFAULT 'anthropic' CHECK(provider IN ('anthropic','openai'))"),
         ("api_bot_attempts", "service_tier", "ALTER TABLE api_bot_attempts ADD COLUMN service_tier TEXT"),
         ("runs", "launch_rev", "ALTER TABLE runs ADD COLUMN launch_rev TEXT"),
-        // issue #339：`relay_from` 是呼叫端自稱、沒帶自己的 bot token 證明（相容期）＝1。舊列 0＝不是這條路寫的。
         ("messages", "relay_unverified", "ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0"),
-        // issue #927：`relay_turn_id`＝寄件 bot 送這句話當下正在跑的回合（child_done 用它認「這一回合已經自己回報過」）。舊列 NULL＝不知道。
         ("messages", "relay_turn_id", "ALTER TABLE messages ADD COLUMN relay_turn_id TEXT"),
-        // issue #554：run 為什麼被收成 exited；舊列 NULL＝不知道，退役紀錄當成「沒親眼看到 pane 被關」。
         ("runs", "exit_reason", "ALTER TABLE runs ADD COLUMN exit_reason TEXT"),
-        // 回合中送出的方式（使用者 2026-09-28）：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。
-        // 舊列 NULL＝一般送出。`source` 的 CHECK 放不進新值（要重建表），所以另開一欄。
         (
             "messages",
             "sent_via",
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
         ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
-        // #1892: capture at adoption; never infer identity for legacy NULL rows.
         ("runs", "terminal_id", "ALTER TABLE runs ADD COLUMN terminal_id TEXT"),
-        // issue #879：沒有 hook 的 claude run 第一次讀對話檔時建的基準（那一輪已結束的最後一問的時間）；之後只記比它晚的問。
-        // NULL＝還沒讀過（舊列、剛開的 run）。空字串＝讀過、檔裡當時沒有任何一問。
         ("runs", "transcript_baseline_at", "ALTER TABLE runs ADD COLUMN transcript_baseline_at TEXT"),
-        // issue #1035：run 啟動時所在的遠端主機與它的主機世代；NULL＝本機或舊列（不檢查）。
         ("runs", "host", "ALTER TABLE runs ADD COLUMN host TEXT"),
         ("runs", "host_generation", "ALTER TABLE runs ADD COLUMN host_generation INTEGER"),
-        // issue #748：啟動 codex 時有沒有帶 `-c features.instant_interrupt=true`（1／0）；NULL＝沒記（舊列、adopt 來的）。
         ("runs", "codex_instant_interrupt", "ALTER TABLE runs ADD COLUMN codex_instant_interrupt INTEGER"),
-        // 保溫回合（`client_request_id` 以 `keep-warm:`／舊的 `keepalive:` 開頭）留下的訊息＝1：網頁淡化、未讀不計。
-        // 新訊息由下面的 trigger 蓋，舊列由下面的回填補。
         ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
-        // #708：專案已移交給另一台主機的 daemon；NULL＝本機管。
         ("projects", "handed_off_to", "ALTER TABLE projects ADD COLUMN handed_off_to TEXT"),
         ("projects", "mode", "ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'parent_child'"),
         ("bots", "role", "ALTER TABLE bots ADD COLUMN role TEXT"),
         ("runs", "runtime_role_policy", "ALTER TABLE runs ADD COLUMN runtime_role_policy TEXT"),
         ("runs", "daemon_url_injected", "ALTER TABLE runs ADD COLUMN daemon_url_injected INTEGER NOT NULL DEFAULT 0"),
-        // B 期角色 policy（2026-11）：run 啟動時生效政策的指紋；之後 policy 變了 bot 標待套用。NULL＝沒記（舊 run），不誤報。
         ("runs", "policy_rev", "ALTER TABLE runs ADD COLUMN policy_rev TEXT"),
-        // 收這一筆回合的那則 hook 在收件匣的 `hook_events.id`（發現 2，l8 審查）：收件匣的「處理完」標記是 `process()` 返回後才另寫，
-        // 兩者之間 daemon 重啟，重播的同一則 hook 沒有 native turn id 可去重，會再開一個外部回合與訊息。回合與這把鑰匙同一個交易寫，
-        // 重播先查它（見 `hookrecv::process_for`）。NULL＝不是 hook 收件匣收的（網頁送出的、備援抓的、舊列）。
         ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
-        // issue #1779：跑完就清空對話（排程勾了 clear_after）。
         ("schedules", "clear_after", "ALTER TABLE schedules ADD COLUMN clear_after INTEGER NOT NULL DEFAULT 0 CHECK (clear_after IN (0,1))"),
         ("schedules", "retry_count", "ALTER TABLE schedules ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 5)"),
         ("schedules", "retry_interval_mins", "ALTER TABLE schedules ADD COLUMN retry_interval_mins INTEGER NOT NULL DEFAULT 3 CHECK (retry_interval_mins BETWEEN 1 AND 1440)"),
         ("schedules", "retry_deadline_mins", "ALTER TABLE schedules ADD COLUMN retry_deadline_mins INTEGER NOT NULL DEFAULT 15 CHECK (retry_deadline_mins BETWEEN 1 AND 10080)"),
-        // 排程一天多時段（P3）：這筆 occurrence 是哪個時段觸發的（標籤，給 `{{slot}}` 與最近執行列用）；NULL＝沒有時段。
-        // 排程「每次從基準快照開始」（bot_base_snapshots）。
         ("schedule_occurrences", "first_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN first_started_at TEXT"),
         ("schedule_occurrences", "attempt_started_at", "ALTER TABLE schedule_occurrences ADD COLUMN attempt_started_at TEXT"),
         ("schedule_attempts", "started_at", "ALTER TABLE schedule_attempts ADD COLUMN started_at TEXT"),
@@ -1099,32 +929,22 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("schedule_occurrences", "reply_message_id", "ALTER TABLE schedule_occurrences ADD COLUMN reply_message_id TEXT"),
         ("schedule_occurrences", "attempt_no", "ALTER TABLE schedule_occurrences ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1"),
         ("schedule_occurrences", "next_retry_at", "ALTER TABLE schedule_occurrences ADD COLUMN next_retry_at TEXT"),
-        // 專家模式 track（2026-10-31）：relay_requests 所屬的票號或模組。
         ("relay_requests", "track", "ALTER TABLE relay_requests ADD COLUMN track TEXT"),
-        // 專家模式保護額度開關 A：bot manager_use
         ("bots", "manager_use", "ALTER TABLE bots ADD COLUMN manager_use INTEGER NOT NULL DEFAULT 1"),
-        // 已退役的執行者池 JSON 欄位；保留相容既有資料庫 schema，不再消費。
         ("projects", "executor_pool_json", "ALTER TABLE projects ADD COLUMN executor_pool_json TEXT NOT NULL DEFAULT '{}'"),
-        // 專家模式專家（specialist）角色與政策（2026-10-31）：`bots.track`、`bots.runtime_override_json`、`projects.role_policy_json`。
         ("bots", "track", "ALTER TABLE bots ADD COLUMN track TEXT"),
         ("bots", "runtime_override_json", "ALTER TABLE bots ADD COLUMN runtime_override_json TEXT"),
-        // claude-api 每回合送出時選的快取保留秒數（300＝5 分鐘預設、3600＝1 小時）：記在 turn 上，該回合所有請求用同一個 TTL。
         ("turns", "cache_ttl_secs", "ALTER TABLE turns ADD COLUMN cache_ttl_secs INTEGER NOT NULL DEFAULT 300"),
         ("projects", "role_policy_json", "ALTER TABLE projects ADD COLUMN role_policy_json TEXT NOT NULL DEFAULT '{}'"),
-        // 專家模式副管理者：專案設定與改派紀錄（不進 CREATE TABLE，指紋欄序不動）。
         ("projects", "deputy_bot_id", "ALTER TABLE projects ADD COLUMN deputy_bot_id TEXT"),
         ("projects", "deputy_after_sec", "ALTER TABLE projects ADD COLUMN deputy_after_sec INTEGER"),
         ("relay_requests", "redirected_from", "ALTER TABLE relay_requests ADD COLUMN redirected_from TEXT"),
         ("relay_requests", "redirected_at", "ALTER TABLE relay_requests ADD COLUMN redirected_at TEXT"),
         ("relay_requests", "digest_at", "ALTER TABLE relay_requests ADD COLUMN digest_at TEXT"),
-        // 專家模式群集派工：請求是對哪個群集發的（NULL＝一般派工）；沒有閒置成員時 pending 等第一個閒下來的成員。
         ("relay_requests", "cluster", "ALTER TABLE relay_requests ADD COLUMN cluster TEXT"),
         ("relay_requests", "cluster_key", "ALTER TABLE relay_requests ADD COLUMN cluster_key TEXT"),
-        // 專家模式執行者授權：`ProjectCfg.executor_grants` 的投影（JSON 陣列）。
         ("projects", "executor_grants_json", "ALTER TABLE projects ADD COLUMN executor_grants_json TEXT NOT NULL DEFAULT '[]'"),
-        // 專家模式派工的依據（`specialist:<專案>`／`deputy:<專案>`，SCHEMA 84 前為 `grant:<專案>`；NULL＝不靠依據）：turn 變成可送出時依它正向確認。
         ("messages", "relay_auth", "ALTER TABLE messages ADD COLUMN relay_auth TEXT"),
-        // 專家派工總開關：`ProjectCfg.specialist_dispatch` 的投影（1＝專家可直接派工給本專案執行者）。
         ("projects", "specialist_dispatch", "ALTER TABLE projects ADD COLUMN specialist_dispatch INTEGER NOT NULL DEFAULT 1"),
         // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：lineage_sessions.input_tokens / cached_input_tokens / output_tokens
         ("lineage_sessions", "input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"),
@@ -1137,7 +957,6 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
-    // 排程代號回填：只動還沒號碼的列（code_no = 0），依建立時間（同刻依 id）排號，接在現有最大號之後。
     let unnumbered: Vec<String> = sqlx::query_scalar("SELECT id FROM schedules WHERE code_no = 0 ORDER BY created_at, id").fetch_all(&mut *tx).await.context("list unnumbered schedules")?;
     if !unnumbered.is_empty() {
         let mut next: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(code_no),0) FROM schedules").fetch_one(&mut *tx).await.context("max schedules.code_no")?;
@@ -1147,13 +966,9 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         }
     }
     if !had_queue_class {
-        // Drop the v60 single-slot index and the earlier prefix-derived v61 indexes once, before
-        // creating the writer-class indexes below. Do not rebuild them on every daemon startup.
         for name in ["turns_one_queued", "turns_one_queued_user", "turns_one_queued_daemon", "turns_one_queued_relay"] {
             sqlx::query(&format!("DROP INDEX IF EXISTS {name}")).execute(&mut *tx).await?;
         }
-        // 舊資料沒有可信 lane；只有 daemon sentinel 可確定為通知。
-        // 其餘 relay 即使帶通知前綴也保守歸 relay，不能把外部 bot 的冪等鍵當來源證明。
         sqlx::query(
             "UPDATE turns AS t
                 SET queue_class = CASE
@@ -1167,21 +982,16 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         .await
         .context("backfill queued turn classes")?;
     }
-    // The indexes follow the additive column migration so opening an existing database does not
-    // try to index a column before it exists. The classes remain disjoint and each lane has one slot.
     for (name, class) in [("turns_one_queued_user", "user"), ("turns_one_queued_relay", "relay"), ("turns_one_queued_daemon", "daemon")] {
         sqlx::query(&format!("CREATE UNIQUE INDEX IF NOT EXISTS {name} ON turns(conversation_id) WHERE status='queued' AND queue_class='{class}'"))
             .execute(&mut *tx)
             .await
             .with_context(|| format!("index turns queued {class} lane"))?;
     }
-    // 一則 hook 最多收成一個回合：唯一鍵讓重播（收件匣 at-least-once）命中既有結果，而不是再開一個。
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_source_event ON turns(source_event_id) WHERE source_event_id IS NOT NULL")
         .execute(&mut *tx)
         .await
         .context("index turns.source_event_id")?;
-    // Recover queued prompts delivered before #738 whose old timestamp proves the previous post-delivery
-    // update was lost. The predicate matches the original five-second restamp rule.
     sqlx::query(
         "UPDATE turns SET restamp_pending=1
           WHERE restamp_pending=0 AND delivered_at IS NOT NULL
@@ -1192,8 +1002,6 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     .execute(&mut *tx)
     .await
     .context("re-arm queued prompt restamps left behind before issue #738")?;
-    // Capture identity exactly once for any named-cluster request inserted by legacy producers.
-    // Existing pending rows are deliberately not backfilled: the target may already have changed.
     sync_trigger(&mut tx, "relay_named_cluster_key_on_insert", r#"CREATE TRIGGER relay_named_cluster_key_on_insert AFTER INSERT ON relay_requests
         WHEN NEW.cluster IS NOT NULL AND substr(NEW.cluster,1,5) <> 'auto:' AND NEW.cluster_key IS NULL
         BEGIN
@@ -1201,12 +1009,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
               'model', coalesce(model,''), 'effort', coalesce(effort,''), 'identity', coalesce(identity,'')) FROM bots WHERE id=NEW.to_bot_id)
           WHERE id=NEW.id;
         END"#).await.context("create named cluster key trigger")?;
-    // issue #474：pre-v2 建的 `bot_previews` 沒有 `REFERENCES bots(id)`——`CREATE TABLE IF NOT EXISTS`
-    // 對既有 DB 是 no-op，而外鍵用 `ALTER TABLE` 加不回去，所以那種資料庫到今天都還缺這個約束
-    // （`pragma_table_info` 看不到 FK，#470 之前漂移核對也不比表的約束，所以一直沒人發現）。
-    // 唯一補得回來的做法是重建表。
     rebuild_bot_previews_fk(&mut tx).await?;
-    // Retry admission is checked at the final queued→in_flight CAS, after legacy columns exist.
     sync_trigger(&mut tx, "schedule_retry_deadline", r#"CREATE TRIGGER IF NOT EXISTS schedule_retry_deadline BEFORE UPDATE OF status ON turns
 WHEN OLD.status = 'queued' AND NEW.status = 'in_flight' AND EXISTS (
   SELECT 1 FROM schedule_occurrences o JOIN schedules s ON s.id = o.schedule_id
@@ -1214,7 +1017,6 @@ WHEN OLD.status = 'queued' AND NEW.status = 'in_flight' AND EXISTS (
     AND (o.attempt_no > s.retry_count + 1 OR julianday('now') > julianday(o.scheduled_for) + s.retry_deadline_mins / 1440.0)
 )
 BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
-    // provider 一旦寫進 attempt 就不能改（帳本隔離的前提：Claude 的上限只算 anthropic、OpenAI 的只算 openai）。
     sync_trigger(
         &mut tx,
         "api_bot_attempts_provider_immutable",
@@ -1225,10 +1027,6 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     .await
     .context("create api_bot_attempts provider immutability trigger")?;
     sqlx::query("CREATE INDEX IF NOT EXISTS api_bot_attempts_provider_created ON api_bot_attempts(provider, created_at)").execute(&mut *tx).await.context("index api_bot_attempts provider")?;
-    // 建在這裡（column 一定已經存在之後），不是跟著上面的 SCHEMA 一起用 `;\n` 切開來送：這句 trigger
-    // body 自己就帶了分號，切開來就會斷成兩句送不出去。寫 `agent_status` 的地方有好幾處（events／
-    // reconcile／default session／bulk_restart／stuck_turns…），用 trigger 而不是在每一處補一行：
-    // 漏掉一處就會讓「起點」在那條路徑上悄悄跟丟（issue #93）。
     sync_trigger(
         &mut tx,
         "runs_agent_status_since",
@@ -1240,8 +1038,6 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     )
     .await
     .context("create runs_agent_status_since trigger")?;
-    // 保溫回合的訊息帶 `keep_warm = 1`。寫訊息的地方有好幾處（prompt、hook、transcript、terminal fallback…），
-    // 用 trigger 蓋而不是每一處補一行：漏一處，那條路徑的保溫回覆就會亮未讀。
     sync_trigger(
         &mut tx,
         "messages_keep_warm_mark",
@@ -1264,7 +1060,6 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     .execute(&mut *tx)
     .await
     .context("backfill messages.keep_warm")?;
-    // Data-only migration; exact comparisons preserve explicitly versioned model ids.
     sqlx::query(
         "UPDATE bots SET model = CASE model
              WHEN 'gpt-5.6-sol' THEN 'gpt-6-sol'
@@ -1278,9 +1073,6 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     .context("remap retired Codex models")?;
     sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE kind='claude' AND model='opus'")
         .execute(&mut *tx).await.context("remap retired Claude alias")?;
-    // issue #1471：hook 收掉的回合（`completed`、native turn id 與收件匣 event id 都在）是事後證據；舊 daemon 收尾時
-    // 沒把 `delivery_verified` 寫成 1，補送過一次的遠端回合因此一直掛著「未驗證送達」。資料回填、不動 schema；
-    // 可重入（只動還是 0 的）。備援收尾、沒綁 native turn id 的不碰——它們真的沒有 hook 證據。
     sqlx::query(
         "UPDATE turns SET delivery_verified = 1
           WHERE delivery_verified = 0 AND status = 'completed'
@@ -1289,9 +1081,6 @@ BEGIN SELECT RAISE(ABORT, 'schedule_retry_deadline'); END;"#).await?;
     .execute(&mut *tx)
     .await
     .context("backfill turns.delivery_verified for hook-completed turns")?;
-    // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `db::turn_guard::LEGAL_EDGES`（`lifecycle::turn_controller` re-export），
-    // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
-    // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
     turn_guard::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
     widen_bots_kind_check(&mut tx).await?;
     tx.commit().await?;
@@ -1333,14 +1122,12 @@ async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> 
     const OLD: &str = "CHECK (kind IN ('claude','codex','grok'))";
     const FOUR: &str = "CHECK (kind IN ('claude','codex','grok','agy'))";
     const FIVE: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api'))";
-    // openai-api D2b-2（2026-11-18）：再放寬一種。只放寬、不搬資料；**單向**——寫進 `openai-api` 的列之後，舊 binary 的 schema guard 不認這份 schema。
     const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy','claude-api','openai-api'))";
     let sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'").fetch_optional(&mut *conn).await?;
     let Some(sql) = sql else { return Ok(()) };
     if sql.contains(NEW) {
         return Ok(());
     }
-    // 沒有 kind 的 CHECK（更舊的庫、手工建的）＝沒有東西擋 agy，不必放寬。有 CHECK 卻長得不認得才不敢動。
     if !sql.contains("CHECK (kind IN") && !sql.contains("CHECK(kind IN") {
         return Ok(());
     }
@@ -1356,7 +1143,6 @@ async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> 
     let version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await?;
     sqlx::query("PRAGMA writable_schema = ON").execute(&mut *conn).await?;
     let updated = sqlx::query("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'bots'").bind(&widened).execute(&mut *conn).await;
-    // 不論成敗都要關回去；`schema_version` 的 PRAGMA 不收 bind 參數，值是剛讀出來的整數。
     let bumped = sqlx::query(&format!("PRAGMA schema_version = {}", version + 1)).execute(&mut *conn).await;
     sqlx::query("PRAGMA writable_schema = OFF").execute(&mut *conn).await?;
     updated.context("widen bots.kind CHECK")?;
@@ -1368,14 +1154,12 @@ async fn rebuild_schedule_occurrences_for_dry_run(conn: &mut sqlx::SqliteConnect
     let ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_occurrences'")
         .fetch_one(&mut *conn).await?;
     if ddl.contains("'dry_run'") { return Ok(()); }
-    // Preserve both the request mappings and any explicit indexes/triggers, transactionally.
     let extras: Vec<(String,)> = sqlx::query_as("SELECT sql FROM sqlite_master WHERE tbl_name IN ('schedule_occurrences','schedule_manual_requests','schedule_dry_run_requests') AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name")
         .fetch_all(&mut *conn).await?;
     let manual_ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_manual_requests'").fetch_one(&mut *conn).await?;
     let dry_ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='schedule_dry_run_requests'").fetch_one(&mut *conn).await?;
     let schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS schedule_occurrences (").nth(1).context("missing schedule schema")?
         .split("\n);").next().context("unterminated schedule schema")?;
-    // 不用 RENAME：SQLite 改名後會把表名加上引號，指紋就跟全新 DB 對不上；這裡先備份資料、刪表、用原名重建。
     let create = format!("CREATE TABLE schedule_occurrences ({}\n)", schema);
     for sql in ["CREATE TEMP TABLE schedule_manual_backup AS SELECT * FROM schedule_manual_requests",
                 "CREATE TEMP TABLE schedule_dry_backup AS SELECT * FROM schedule_dry_run_requests",
@@ -1387,7 +1171,6 @@ async fn rebuild_schedule_occurrences_for_dry_run(conn: &mut sqlx::SqliteConnect
         sqlx::query(sql).execute(&mut *conn).await?;
     }
     sqlx::query(&create).execute(&mut *conn).await?;
-    // 只搬舊表有的欄位（P2 的結果欄位在升級路徑上由下面的 ALTER 補；這裡不能 SELECT * 對不上數）。
     let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('schedule_occ_backup')").fetch_all(&mut *conn).await?;
     let cols = cols.into_iter().map(|(c,)| c).collect::<Vec<_>>().join(",");
     sqlx::query(&format!("INSERT INTO schedule_occurrences ({cols}) SELECT {cols} FROM schedule_occ_backup")).execute(&mut *conn).await?;
@@ -1552,9 +1335,6 @@ async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()
         defs.push(def);
         names.push(name.as_str());
     }
-    // `bot_id IS NULL` 也算孤兒，而且要明寫（i264 審 #474 提的）：`NULL NOT IN (…)` 是 NULL 不是 true，
-    // 只寫 `NOT IN` 的話那種列不會被算進來，但下面 `INSERT … WHERE bot_id IN (…)` 一樣會把它濾掉
-    // ——列被丟了、warn 卻少報一筆。（`bot_id TEXT PRIMARY KEY` 在 SQLite 是可以為 NULL 的。）
     let orphans: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM bot_previews WHERE bot_id IS NULL OR bot_id NOT IN (SELECT id FROM bots)")
         .fetch_one(&mut *conn)
@@ -1563,13 +1343,6 @@ async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()
     if orphans > 0 {
         tracing::warn!(orphans, "bot_previews 有指不到 bot 的列；補外鍵時一併丟掉（issue #474）");
     }
-    // 這張表自己的索引與 trigger：`DROP TABLE` 會一起帶走，而 `RENAME` 不會還回來（i406 在 #474 提的
-    // 前瞻陷阱）。今天 `bot_previews` 一個都沒有，所以現況不會掉東西——但下一個替它加索引的人不會
-    // 想到要回來改這裡，而掉了也不會有人立刻發現（少一個索引只是變慢，不會報錯）。所以先收起來、
-    // 重建完照原樣建回去。
-    //
-    // `sql IS NULL` 的不收：那是 PRIMARY KEY／UNIQUE 自動建的 autoindex，新表的約束會自己重建，
-    // 照抄反而會撞名。
     let extras: Vec<(String,)> = sqlx::query_as(
         "SELECT sql FROM sqlite_master
           WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL
@@ -1587,12 +1360,9 @@ async fn rebuild_bot_previews_fk(conn: &mut sqlx::SqliteConnection) -> Result<()
     ] {
         sqlx::query(&stmt).execute(&mut *conn).await.with_context(|| format!("rebuild bot_previews: {stmt}"))?;
     }
-    // 改完名才建：收起來的那幾句 DDL 指名的是 `bot_previews`，在 RENAME 之前建會落到舊名上。
     for (sql,) in &extras {
         sqlx::query(sql).execute(&mut *conn).await.with_context(|| format!("restore bot_previews object: {sql}"))?;
     }
-    // 對帳：數量對不上就整個 migrate 失敗、交易回滾（DB 一個字都沒動），不要留一張少了索引的表
-    // 讓人以後自己去發現。
     let after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master
           WHERE tbl_name='bot_previews' AND type IN ('index','trigger') AND sql IS NOT NULL",
@@ -1682,8 +1452,6 @@ pub fn now() -> String {
 /// 以前總管、看門狗、維護、API 各有一份一模一樣、卻寫到**秒**的 `iso_in`，於是
 /// `notify_next_at`（秒）跟 `db::now()`（毫秒）在 SQL 裡比大小會差不到一秒（issue #101）。
 pub fn iso_in(secs: i64) -> String {
-    // `+` panics when the instant leaves chrono's range (`expires_in_secs` 曾把 handler 打崩，#655)。
-    // 加不出來就停在現在：到期判斷會當成已經過期，不會變成幾萬年後的核准。
     let now = chrono::Utc::now();
     let Some(delta) = chrono::Duration::try_seconds(secs) else { return iso_at(now) };
     iso_at(now.checked_add_signed(delta).unwrap_or(now))
@@ -1959,7 +1727,7 @@ pub struct Turn {
     /// Times a queued prompt was put back because it could not be typed yet.
     #[sqlx(default)]
     #[serde(skip_serializing)]
-    #[cfg_attr(not(test), allow(dead_code))] // 只有測試讀；daemon 用 SQL 直接遞增與比較
+    #[cfg_attr(not(test), allow(dead_code))]
     pub flush_retries: i64,
     /// Not before this (RFC 3339) is that queued prompt tried again.
     #[sqlx(default)]
@@ -2092,7 +1860,6 @@ pub async fn project(pool: &SqlitePool, id: &str) -> Result<Option<Project>> {
     Ok(sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
-// 測試用：這條執行緒上做了幾次「一顆 bot 一次」的查詢（`GET /api/state` 不准逐顆查，見 `api::state_query_count_tests`）。
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local! {
     pub static PER_BOT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2218,9 +1985,6 @@ pub async fn latest_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result
 /// Transcript path included so a restart can tell a resumable session from one never written.
 pub async fn last_native_session(pool: &SqlitePool, bot_id: &str) -> Result<Option<(String, Option<String>)>> {
     Ok(sqlx::query_as::<_, (String, Option<String>)>(
-        // 第二鍵用 `rowid`（寫入順序），不是 `id`：`started_at` 只到毫秒，同一顆 bot 快速重啟時
-        // 兩個 run 會擠進同一毫秒，ULID 的亂數段那時不保證遞增（issue #100／a4605b2）。
-        // 這裡挑錯＝ `--resume` 接回另一段對話（issue #461）。
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND ended_at IS NOT NULL AND native_session_id IS NOT NULL
           ORDER BY started_at DESC, rowid DESC LIMIT 1",
@@ -2279,7 +2043,6 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
 /// A live run under an identity proves that account is logged in on `host`, whatever
 /// `claude auth status` said (`quota_claude`); survives a daemon restart.
 pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
-    // run 實際的身份（issue #238）：記了就用它，沒記才用 bot 設定的。
     let rows = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT ident FROM (
            SELECT CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE r.runtime_identity END AS ident

@@ -24,7 +24,6 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
         for at in BURST {
             tokio::time::sleep(Duration::from_millis(at - waited)).await;
             waited = at;
-            // 事件帶來的 Run 是更新前的複本：每次重讀，狀態才是現在的。
             let Ok(Some(run)) = db::run(db.pool(), &run_id).await else { return };
             match observe(&app, &run).await {
                 Some(true) => return,

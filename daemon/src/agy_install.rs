@@ -195,7 +195,6 @@ impl Env for Real {
     fn run<'a>(&'a self, fence: &'a HostFence, script: &'a str, timeout: Duration) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             if fence.conn().is_local() {
-                // 本機：整個 process group 一起收（逾時也不留 curl／tar）；stderr 併進 stdout 才看得到失敗原因。
                 let wrapped = format!("exec 2>&1\n{script}");
                 let out = crate::hosts::sh_local(&wrapped, timeout)
                     .await
@@ -204,7 +203,6 @@ impl Env for Real {
                 let text = String::from_utf8_lossy(&out.stdout).to_string();
                 if out.status.success() { Ok(text) } else { Err(format!("{}：{}", out.status, tail(&text))) }
             } else {
-                // 遠端逾時只砍得掉本機這條 ssh；那邊的安裝可能還在跑（鎖也還在它手上）。
                 fence.conn().ssh_exec_path_timeout(script, timeout).await.map_err(|e| tail(&format!("{e:#}")))
             }
         })
@@ -278,7 +276,6 @@ pub async fn install_with(app: &Arc<impl crate::hosts::HostsAccess + crate::tool
         return Err(gone("讀官方版本"));
     }
 
-    // 已經是官方最新版：不下載、不動檔案（偵測結果可能是舊快取，所以先用腳本問磁碟上現在的版本）。
     let from = cached_version(app, host).await;
     if let Some(v) = from.as_deref().filter(|v| has_version(v, &manifest.version)) {
         return Ok(Installed {
@@ -305,7 +302,6 @@ pub async fn install_with(app: &Arc<impl crate::hosts::HostsAccess + crate::tool
     }
     let (path, version) = installed_marker(&out).ok_or_else(|| failed("install_failed", format!("安裝腳本跑完了但沒有成功標記：{}", tail(&out))))?;
 
-    // 重新偵測：那台的 PATH 看得到才算裝好（`~/.local/bin` 不在 PATH 的話，bot 與額度探測都找不到 agy）。
     let detected = crate::tools::detect(app, host).await.map_err(|e| failed("verify_failed", format!("agy 已寫入 {path}，但重新偵測 {host} 失敗：{e:#}")))?;
     let seen = detected.tools.get("agy");
     if !seen.is_some_and(|t| t.installed && t.version.as_deref().is_some_and(|v| has_version(v, &manifest.version))) {

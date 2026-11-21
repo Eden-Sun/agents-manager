@@ -21,10 +21,8 @@ pub(crate) async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Opti
         }
         return Some(DiskVersionObservation { version, fence });
     }
-    // A cache row from a prior connection generation is not evidence for this host name anymore.
     cache.remove(&key);
     let v = crate::changelog::installed_version(app, host, kind).await.ok();
-    // The read may have crossed a reconnect or repoint. Discard it instead of publishing it under the new name.
     if !app.hosts.is_current(&fence).await {
         return None;
     }
@@ -43,7 +41,6 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     crate::tui_prompts::retain_survey_runs(app, active_runs).await;
     crate::codex_model_migration::retain_runs(active_runs);
     crate::blocked_reason::retain_runs(active_runs);
-    // 還要留著 per-bot 帳的 bot：讀不到就這一輪不清（把讀失敗當成「沒有 bot」會清光）。
     let live_bots: Vec<String> = match live_bot_ids(app.as_ref()).await {
         Ok(ids) => ids,
         Err(e) => {
@@ -107,9 +104,6 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         }
         if kind == "codex" {
             crate::runners::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
-            // herdr 開的 codex child 沒有 hook 回報 session（`native_session_id` 是空的）：用 herdr 綁在 agent 上的
-            // session 讀 rollout，不然它的快取晶片永遠沒有 context 用量，冷了也算不出重寫要多少（使用者 2026-10-14）。
-            // 只拿來讀檔，不寫回 runs（接回原對話的判斷不受影響）。
             let mut cache_run = run.clone();
             if cache_run.native_session_id.as_deref().is_none_or(|s| s.trim().is_empty()) {
                 if let Ok(Some(info)) = client.agent_get(&pane).await {
@@ -151,10 +145,7 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
                     })
                 })
                 .map(str::to_owned);
-            // 「裝著的版本」：磁碟讀得到用磁碟，讀不到才用跑著的；兩個都不知道就不判成落後（未知不等於落後，#974）。
             let installed = disk_version.or(running.as_deref());
-            // 磁碟版本讀不到＝不知道。這顆 run 已經掛著「重啟套用」就沿用：不拿跑著的舊版本改判成「需安裝」，
-            // 也不因為這一輪比不出來就清掉（#1204；#974 同一條規則）。
             let keep_restart_notice = disk_version.is_none()
                 && run
                     .update_notice
@@ -207,7 +198,6 @@ pub async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         if seen.is_some() {
             tracing::info!(run = %run.id, bot = %run.bot_id, kind = %kind, "有新版等著處理");
         }
-        // 以這輪開頭讀到的舊值做 CAS：掃描期間若 cli_update 等已經改過，0 列就保留較新的值，不用舊快照蓋回去（#976）。
         let update = async {
             sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice IS ?")
                 .bind(seen.as_deref())

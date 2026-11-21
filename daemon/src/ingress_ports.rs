@@ -38,7 +38,6 @@ mod tests {
     /// 每一行是否落在 `#[cfg(test)]` 項目裡（從屬性那行到項目的大括號收尾）。
     use am_base::source_mask::test_mask;
 
-    // 正向護欄禁止整個家族；反向檢查只要求 adapter 使用其中一個名稱（#1886）。
     const FEATURE_CALL_ALIASES: &[&[&str]] = &[
         &["lifecycle::mark_run_exited(", "lifecycle::mark_run_exited_proved("],
     ];
@@ -132,7 +131,6 @@ mod tests {
                     continue;
                 }
                 for pat in forbidden {
-                    // `<App as SupervisorRepo>::SUPERVISOR_ID` 是走介面的寫法，放行。
                     if line.contains(pat.as_str()) && !(pat == "SUPERVISOR_ID" && line.contains("SupervisorRepo")) {
                         out.push(format!("{file}:{}: {pat}  ← {}", n + 1, line.trim()));
                     }
@@ -160,7 +158,6 @@ mod tests {
 
     fn adapter_covers_call(adapters: &[&str], call: &str) -> bool {
         let has_call = |p: &str| {
-            // adapter 可能省略 crate 路徑，但仍要有模組名與呼叫的左括號。
             let short = p.rsplit("::").next().unwrap_or(p);
             let module = p.trim_end_matches('(').rsplit("::").nth(1).unwrap_or("");
             let probe = format!("{module}::{short}");
@@ -178,7 +175,6 @@ mod tests {
         let adapter = include_str!("app_ports_p8.rs");
         let lifecycle_adapter = include_str!("../../crates/am-lifecycle/src/ports_impl.rs");
         let mut pats = feature_calls();
-        // `supervisor::store::push_inbox(` 只留在禁止清單（防有人走回舊路徑）：0fe179937 之後 adapter 改走 `supervisor_inbox::push_inbox(`。
         pats.retain(|p| p != "SUPERVISOR_ID" && p != "lifecycle::start_send::resume_after_boot(" && p != "supervisor::store::push_inbox(");
         for p in pats.iter().map(String::as_str).chain(TO_RECONCILE.iter().copied()).chain(TO_INGRESS.iter().copied()) {
             assert!(adapter_covers_call(&[adapter, lifecycle_adapter], p), "P8 adapter 不再含 {p} 或同家族的呼叫");

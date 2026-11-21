@@ -93,7 +93,6 @@ async fn the_snapshot_carries_login_needed_only_for_marked_identities() {
     assert_eq!(n["via"], VIA_TURN);
     assert!(n["since"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(json_of(&env.app, "cc2").await.get("login_needed").is_none(), "別的身份不受影響");
-    // 別台主機同名的身份不共用。
     assert_eq!(get(&env.app, "mac_builder", "cc1"), None);
     assert!(clear(&env.app, HOST, "cc1"));
     assert!(!clear(&env.app, HOST, "cc1"));
@@ -134,7 +133,6 @@ async fn other_failures_unbound_bots_and_other_kinds_are_ignored() {
     process(&env.app, &auth_failure(&unbound, "p3")).await.unwrap();
     assert!(env.app.login_needed.lock().unwrap().is_empty(), "沒綁身份：沒有哪個身份可以提示");
 
-    // 身份不在這台主機的表裡（改名、刪了）：不記。
     let ghost = bound_bot(&env, "logout-ghost", "cc-gone").await;
     process(&env.app, &auth_failure(&ghost, "p4")).await.unwrap();
     assert!(env.app.login_needed.lock().unwrap().is_empty());
@@ -199,7 +197,6 @@ async fn a_stale_auth_failure_does_not_mark_the_repointed_host_identity() {
     let bot = bound_bot(&env, "stale-auth-failure", "cc1").await;
     let admitted = env.app.hosts.fence(HOST).await.unwrap();
 
-    // A reconfigure/repoint keeps the host name but retires the admitted authority.
     env.app.hosts.bump_generation_for_test(HOST).await;
     assert!(!env.app.hosts.is_current(&admitted).await);
 

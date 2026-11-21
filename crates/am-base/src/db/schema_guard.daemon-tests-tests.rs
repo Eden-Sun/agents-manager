@@ -26,7 +26,6 @@
             panic!("{e}\n\n現在的 schema（全新 DB）：\n{}", dump(objects));
         }
         assert_eq!(SCHEMA_VERSION, SCHEMA_HISTORY.last().unwrap().0);
-        // 標準答案涵蓋的不只 `db::SCHEMA`：交易 commit 之後才跑的子模組，與它們的索引、trigger 都要在裡面。
         for (kind, name) in [
             ("table", "supervisor_assignments"),
             ("trigger", "supervisor_assignments_status_transition"),
@@ -88,7 +87,6 @@
             pool.close().await;
         }
 
-        // 只改排版與註解：同一個索引照舊版的排版重建，指紋不變。
         let pool = fresh().await;
         sqlx::query("DROP INDEX projects_host_path_live").execute(&pool).await.unwrap();
         sqlx::query(
@@ -128,7 +126,6 @@
         let (dir, path) = tmp_db();
         {
             let pool = open(&path).await.unwrap();
-            // 做成「`build_scheduler::migrate` 的 CREATE TABLE 多了 purpose，卻沒有補 ALTER」的舊 DB 形狀。
             sqlx::query("ALTER TABLE build_slots DROP COLUMN purpose").execute(&pool).await.unwrap();
             pool.close().await;
         }
@@ -193,7 +190,6 @@
     /// `herdr_maintenance` 是獨立的表（沒有任何 FK 指向它），所以測試裡重建得起來。
     #[tokio::test]
     async fn a_tables_check_constraint_that_drifted_is_caught_on_an_existing_db() {
-        // 1) 舊 DB 的 CHECK 跟程式不一樣（程式是 `CHECK (id = 1)`）。
         let (dir, path) = tmp_db();
         {
             let pool = open(&path).await.unwrap();
@@ -209,12 +205,10 @@
         let err = open(&path).await.expect_err("CHECK 不同不該靜靜開起來").to_string();
         assert!(err.contains("schema drift"), "{err}");
         assert!(err.contains("herdr_maintenance"), "訊息要指名是哪張表：{err}");
-        // `normalize_sql` 會把空白收緊：`CHECK (id = 1)` → `CHECK(id=1)`。
         assert!(err.contains("CHECK(id=1)"), "訊息要指名少了哪個子句：{err}");
         assert!(err.contains("CHECK(id IN(1,2))"), "訊息要指名多了哪個子句：{err}");
         std::fs::remove_dir_all(&dir).unwrap();
 
-        // 2) 舊 DB 根本沒有那個 CHECK（＝程式後來才加上／放寬的那個方向）。
         let (dir, path) = tmp_db();
         {
             let pool = open(&path).await.unwrap();
@@ -229,7 +223,6 @@
         }
         let err = open(&path).await.expect_err("少一個 CHECK 也是漂移").to_string();
         assert!(err.contains("herdr_maintenance") && err.contains("CHECK(id=1)"), "{err}");
-        // 修法要講重建表，不要叫人去 ALTER（CHECK 改不了）。
         assert!(err.contains("重建表"), "訊息要講清楚修法：{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -239,44 +232,33 @@
     fn only_constraint_clauses_count_as_a_tables_definition() {
         let c = |sql: &str| constraint_defs(&normalize_sql(sql));
         assert_eq!(c("CREATE TABLE t (a TEXT, b INTEGER)"), Vec::<String>::new(), "沒有約束就沒有子句");
-        // `ALTER TABLE ADD COLUMN` 會把新欄位接在 SQLite 存的建表語句尾巴：不能因此誤報。
         assert_eq!(
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b INTEGER)"),
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b INTEGER, c TEXT)"),
             "多一個沒有約束的欄位不算漂移"
         );
-        // 順序不算：比的是集合。
         assert_eq!(
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x')), b TEXT CHECK (b > 0))"),
             c("CREATE TABLE t (b TEXT CHECK (b > 0), a TEXT CHECK (a IN ('x')))"),
             "換順序不算漂移"
         );
-        // 欄位層級的 FK 算（issue #474：pre-v2 的 `bot_previews` 少了它，migrate 現在補得回來）。
         assert_ne!(
             c("CREATE TABLE t (a TEXT PRIMARY KEY)"),
             c("CREATE TABLE t (a TEXT PRIMARY KEY REFERENCES u(id))"),
             "少一個外鍵是漂移"
         );
-        // 但光是 PRIMARY KEY 不算：那一項由 `col_defs` 的主鍵序管。
         assert_eq!(c("CREATE TABLE t (a TEXT PRIMARY KEY)"), Vec::<String>::new(), "PRIMARY KEY 自己不算子句");
-        // 真的改了約束就要看得出來。
         assert_ne!(
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x')))"),
             c("CREATE TABLE t (a TEXT CHECK (a IN ('x','y')))"),
             "放寬 CHECK 要算漂移"
         );
-        // CHECK 裡面的逗號不能把子句切斷（括號深度）。
         assert_eq!(c("CREATE TABLE t (a TEXT CHECK (a IN ('x','y')), b TEXT)").len(), 1);
-        // 字串字面值裡的**不成對**括號不能算進深度（i264 審 #470）：不跳引號的話，`')'` 那個右括號
-        // 會把深度歸零、當成整張表的結尾，第二欄的子句就此消失——而後果是連全新 DB 都開不起來。
         let quoted = c("CREATE TABLE t (a TEXT CHECK (a <> ')'), b TEXT CHECK (b <> '('))");
         assert_eq!(quoted.len(), 2, "字面值裡的括號不算深度：{quoted:?}");
-        // `normalize_sql` 會把空白收緊：`a <> ')'` → `a<>')'`。
         assert!(quoted.iter().any(|d| d.contains("a<>")) && quoted.iter().any(|d| d.contains("b<>")), "{quoted:?}");
-        // 連著兩個引號是跳脫、不是結束（同 `normalize_sql`）。
         let escaped = c("CREATE TABLE t (a TEXT CHECK (a <> 'it''s )'), b TEXT CHECK (b <> 'x'))");
         assert_eq!(escaped.len(), 2, "跳脫的引號不能提早結束字面值：{escaped:?}");
-        // 表層級的 FK 與 UNIQUE 也算。
         let table_level = c("CREATE TABLE t (a TEXT, b TEXT, UNIQUE(a, b), FOREIGN KEY(a) REFERENCES u(id))");
         assert_eq!(table_level.len(), 2, "{table_level:?}");
     }

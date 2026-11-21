@@ -34,7 +34,6 @@ pub struct AsyncQuestion {
 pub fn pending_async_questions(log: &str) -> Vec<AsyncQuestion> {
     let mut pending: Vec<AsyncQuestion> = Vec::new();
     for line in log.lines() {
-        // 檔尾幾 MB 幾乎都是工具輸出：先用子字串過濾，不對每一行做 JSON 解析。
         let ask = line.contains(ASK_TOOL);
         let reply = line.contains("send_user_message_question_reply");
         let ended = line.contains("task_complete") || line.contains("turn_aborted");
@@ -42,8 +41,6 @@ pub fn pending_async_questions(log: &str) -> Vec<AsyncQuestion> {
             continue;
         }
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
-        // codex 0.163.0 的回合收尾會 take_pending_drafts → clear_pending；只接受完整的外層事件，
-        // 工具輸出／引文裡同名的字不算。task_started／turn_context 不是清佇列的證據。
         if entry.get("type").and_then(Value::as_str) == Some("event_msg")
             && matches!(entry.get("payload").and_then(|p| p.get("type")).and_then(Value::as_str), Some("task_complete" | "turn_aborted"))
         {
@@ -103,7 +100,6 @@ fn answered_items(text: &str) -> Vec<(String, usize)> {
     items
         .iter()
         .filter_map(|item| {
-            // `questionItemId` 本身是一個 JSON 字串：`["request_user_input_async","<call_id>",<index>]`。
             let id = serde_json::from_str::<Value>(item.get("questionItemId")?.as_str()?).ok()?;
             let parts = id.as_array()?;
             (parts.first()?.as_str()? == ASK_TOOL).then_some(())?;
@@ -128,14 +124,12 @@ pub fn async_screen(text: &str) -> Option<AsyncScreen> {
     let from = lines.len().saturating_sub(SCAN);
     let lines = &lines[from..];
     for (i, line) in lines.iter().enumerate().rev() {
-        // 收合：`? 1 question · 7s`，下一個有字的行是 `shift+← to answer`。
         if let Some(count) = collapsed_count(line) {
             let next = lines[i + 1..].iter().find(|l| !l.is_empty());
             if next.is_some_and(|l| l.starts_with("shift+← to answer") || l.starts_with("⇧← to answer")) {
                 return Some(AsyncScreen { expanded: false, count });
             }
         }
-        // 展開：腳註 `enter submit   ^] skip   shift+→ main prompt`（多題另加 `shift+← next question`）。
         if line.starts_with("enter submit") && (line.contains("^] skip") || line.contains("⌃] skip")) {
             let count = lines[..i]
                 .iter()
@@ -269,9 +263,6 @@ mod tests {
         .to_string()
     }
 
-    // #1896：mac_builder codex 0.163.0 真實測試 rollout 的去敏片段（顏色／水果／城市）。
-    // 原行號 1、2、8、14、62、64、65、70、112、114、115、120、170–174、179；
-    // 只留相關事件，移除路徑／帳號等 metadata，turn/call id 改成別名，沒有捏造 resume 事件。
     const STALE_TURNS: &str = r#"{"timestamp":"2026-10-22T07:58:00.782Z","type":"session_meta","payload":{"cli_version":"0.163.0","source":"cli"}}
 {"timestamp":"2026-10-22T07:58:00.782Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
 {"timestamp":"2026-10-22T07:58:01.261Z","type":"turn_context","payload":{"turn_id":"turn-1"}}
@@ -306,12 +297,10 @@ mod tests {
 
     #[test]
     fn resumed_history_keeps_ended_questions_cleared_without_a_new_session_marker() {
-        // 真實的同檔續寫：只有第一次有 session_meta；恢復後先更新設定，再開始城市回合。
         let before_new_question = STALE_TURNS.lines().take(17).collect::<Vec<_>>().join("\n");
         assert_eq!(before_new_question.matches("session_meta").count(), 1);
         assert!(pending_async_questions(&before_new_question).is_empty());
         assert_eq!(pending_async_questions(STALE_TURNS)[0].call_id, "call-4");
-        // 原 rollout 第 241 行：城市回合也已結束時，城市題同樣失效。
         let finished = format!("{STALE_TURNS}{}", json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn-4"}}));
         assert!(pending_async_questions(&finished).is_empty());
     }
@@ -351,7 +340,6 @@ mod tests {
             let cut = &boundary[1..];
             let current = ask("new", json!([{"title": "New?"}]));
             assert_eq!(pending_async_questions(&format!("{cut}\n{current}")), vec![q("new", "New?")]);
-            // 中途有壞掉／截斷的事件時，不能只靠 type 的子字串把既有題目消掉而誤通過題數比對。
             let log = format!("{}\n{cut}\n{current}", ask("old", json!([{"title": "Old?"}])));
             let pending = pending_async_questions(&log);
             assert_eq!(pending.len(), 2);
@@ -435,7 +423,6 @@ mod tests {
         assert_eq!(pending_async_questions(&[ask("c1", json!([{"title": "Q?"}])), chat].join("\n")).len(), 1);
     }
 
-    // 以下畫面是 codex 0.163.0 的真畫面（2026-10-21 隔離 tmux session 抓的，路徑已拿掉）。
     const COLLAPSED: &str = "\
 • Which color?
   • red

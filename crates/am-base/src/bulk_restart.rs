@@ -105,13 +105,10 @@ pub fn is_candidate(c: &Cand) -> bool {
 /// 計畫時用一次，**輪到它真的要重啟前再用一次**（[`run_batch`]）。
 pub fn skip_reason(c: &Cand) -> Option<Skip> {
     if c.child {
-        // 不是「暫時不能動」：子 agent 一律不由 daemon 重啟（SPEC §6.5a，2026-09-22）。
         Some(Skip::Child)
     } else if c.needs_manual_install {
-        // 跟下面幾條「暫時不能動」不同，這條是「重啟了也沒用」，排最前面。
         Some(Skip::NeedsManualInstall)
     } else if c.default_session {
-        // SPEC §6.5.1：重啟會關掉使用者自己的 pane（2026-09-12 review #4）。
         Some(Skip::DefaultSession)
     } else if c.state != "running" {
         Some(Skip::NotRunning)
@@ -124,7 +121,6 @@ pub fn skip_reason(c: &Cand) -> Option<Skip> {
     } else if c.turn_in_flight {
         Some(Skip::TurnInFlight)
     } else {
-        // 排在最後：它是閒置、沒有回合，唯一還擋著的是背景工作。`None`（沒看過）不擋——沒有證據。
         c.background_jobs.filter(|n| *n > 0).map(Skip::BackgroundJobs)
     }
 }
@@ -142,7 +138,6 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
     }
     (go, skip)
 }
-
 
 /// 只重啟某台主機的某個 kind（`cli_update`：那台裝好 codex 新版之後，只重啟那台的 codex，不順手動到 claude 或別台）。
 #[derive(Debug, Clone, PartialEq, Eq)]

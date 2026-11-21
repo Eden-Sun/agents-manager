@@ -61,7 +61,6 @@ async fn bot_create_and_patch_refuse_flag_like_models_reserved_env_and_control_c
         let r = patch(&e, &id, body.clone()).await;
         assert!(matches!(r, Err(LcError::Bad(_))), "{body}: {r:?}");
     }
-    // 合法的照常：model 清空、env 設 CLAUDE_CONFIG_DIR。
     patch(&e, &id, json!({"model": "", "env": {"CLAUDE_CONFIG_DIR": "$HOME/.claude-x"}})).await.unwrap();
 }
 
@@ -86,7 +85,6 @@ async fn patch_repairs_a_semantically_invalid_external_config_and_keeps_final_va
     assert_eq!(in_memory.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(target.as_str())).unwrap().name, "fixed-name");
     assert_eq!(db::bot(&e.app.db, &target).await.unwrap().unwrap().name, "fixed-name", "TOML 與 DB 要同步");
 
-    // 另一筆仍非法時，修 target 不能把整份無效設定寫出去。
     let disk = replace_config_bot_name(&disk, "other", "bad@name");
     std::fs::write(&path, &disk).unwrap();
     let err = patch(&e, &target, json!({"name": "fixed-again"})).await.unwrap_err();
@@ -149,12 +147,10 @@ async fn project_create_stores_the_trimmed_label() {
     create_project(State(e.app.clone()), body(&dir_a, "  spaced  ")).await.unwrap();
     assert_eq!(e.app.cfg.get().await.projects.last().unwrap().label, "spaced");
 
-    // 空白 label 照舊退回目錄名。
     create_project(State(e.app.clone()), body(&dir_b, "   ")).await.unwrap();
     let dir_b_name = dir_b.file_name().unwrap().to_string_lossy().into_owned();
     assert_eq!(e.app.cfg.get().await.projects.last().unwrap().label, dir_b_name);
 
-    // 64 字加前後空白：驗的是 trim 後的 64 字，存的也是 64 字。
     let dir_c = crate::testing::track(std::env::temp_dir().join(format!("am-label-{}", db::ulid())));
     std::fs::create_dir_all(&dir_c).unwrap();
     create_project(State(e.app.clone()), body(&dir_c, &format!(" {} ", "長".repeat(64)))).await.unwrap();
@@ -365,13 +361,11 @@ async fn a_second_restart_of_the_same_bot_is_coalesced_not_run_again() {
     let coalesced = [&a, &b].iter().filter(|v| v["coalesced"] == json!(true)).count();
     assert_eq!(coalesced, 1, "被合併的那個說一聲：{a} {b}");
 
-    // 剛做完又來一個：那是另一次重啟，不是同一次（只合併「仍在進行中」的）——照做，換新的 run。
     let second = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(None)).await.unwrap()).await;
     assert_eq!(starts() - before, 2, "做完之後的重啟不合併：{second}");
     assert_ne!(second["run_id"], a["run_id"]);
     assert!(second.get("coalesced").is_none(), "{second}");
 
-    // 改設定後馬上（不到一秒）重啟：必須真的重啟，而且新 run 帶的是新設定（2026-10-02：被當成同一次就沒套到）。
     let needs_restart = |app: Arc<App>, id: String| async move {
         let st = state_json(&app).await.unwrap();
         st["projects"].as_array().unwrap().iter().flat_map(|p| p["bots"].as_array().unwrap().clone()).find(|b| b["id"] == json!(id)).unwrap()["needs_restart"].clone()
@@ -383,7 +377,6 @@ async fn a_second_restart_of_the_same_bot_is_coalesced_not_run_again() {
     assert_ne!(third["run_id"], second["run_id"]);
     assert_eq!(needs_restart(e.app.clone(), id.clone()).await, json!(false), "新 run 載入的是新設定");
 
-    // 不一樣的重啟（明確要開新對話）本來就不是同一件事：照做。
     let fresh = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(Some("fresh"))).await.unwrap()).await;
     assert_eq!(starts() - before, 4, "不同的重啟種類不合併：{fresh}");
     assert_ne!(fresh["run_id"], third["run_id"]);
@@ -426,7 +419,6 @@ async fn an_invalid_env_variable_name_is_refused_up_front_not_dropped_at_use_tim
     let id = add(&e, json!({"name": "eok", "kind": "claude"})).await.unwrap();
     let err = patch(&e, &id, json!({"env": {"BAD NAME": "1"}})).await.unwrap_err();
     assert!(reason(err).contains("`BAD NAME`"), "patch bot");
-    // 值留空（#1750）：身份被點名拒絕、什麼都沒存；bot 自己的 env 空值照舊可以。
     for empty in ["", "   "] {
         let err = create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": empty})))).await.unwrap_err();
         let m = reason(err);
@@ -434,7 +426,6 @@ async fn an_invalid_env_variable_name_is_refused_up_front_not_dropped_at_use_tim
     }
     assert!(e.app.cfg.get().await.identities.iter().all(|i| i.name != "cc9"), "空值被拒的身份什麼都沒存");
     assert!(patch(&e, &id, json!({"env": {"HTTP_PROXY": ""}})).await.is_ok(), "bot 的 env 空值不受影響");
-    // 合法的照收。
     assert!(create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": "$HOME/.claude-cc9", "_X1": "y"})))).await.is_ok());
     assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());
 }
@@ -483,8 +474,6 @@ async fn a_bot_token_cannot_switch_its_identity_or_cli_config_directory() {
     assert_eq!(after.env_json, before.env_json);
 }
 
-// ───────── 目錄瀏覽（DirPicker 背後的 `/fs/dirs`）的安全審查 ─────────
-
 fn dirs_user() -> Extension<RequestPrincipal> {
     Extension(RequestPrincipal::User)
 }
@@ -516,7 +505,6 @@ fn dirs_path_expands_only_tilde_and_tilde_slash() {
     assert_eq!(expand_dir_path(Some("~/a/b"), home).unwrap(), "/h/me/a/b");
     assert_eq!(expand_dir_path(Some("  ~/a/b "), home).unwrap(), "/h/me/a/b");
     assert_eq!(expand_dir_path(Some("/abs/x"), home).unwrap(), "/abs/x");
-    // 現況 `~2` 會得到 `/h/me2`、`~backup/x` 會得到 `/h/mebackup/x`：兩者都是家目錄的兄弟，不是使用者指的地方。
     for bad in ["~2", "~backup/x", "rel/dir", "./x", ".."] {
         assert!(matches!(expand_dir_path(Some(bad), home), Err(LcError::Bad(_))), "{bad} 要 400");
     }
@@ -552,7 +540,6 @@ async fn dirs_credential_and_daemon_directories_are_not_listed() {
     for ok in ["/", "/home", "/home/u", "/home/u/project", "/home/u/.config", "/home/u/.sshx", "/home/u/.claudeish", "/home/u/.geminix", "/srv", "/srv/am-data2"] {
         assert!(!fs_dir_denied(std::path::Path::new(ok), home, data), "{ok} 不該擋");
     }
-    // 真的走 handler：daemon 自己的資料目錄。
     let e = env().await;
     let err = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&e.app.data_dir)).await.unwrap_err();
     assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
@@ -627,8 +614,6 @@ fn dirs_a_directory_name_cannot_forge_the_remote_listing_protocol() {
     assert_eq!(names, [".hidden", "ok1"], "hidden=1 才多出隱藏的：{v}");
 }
 
-// ───────── 「新資料夾」`POST /fs/dirs`（issue #877） ─────────
-
 fn mkdir_in(parent: &std::path::Path, name: &str) -> Json<MkdirIn> {
     Json(MkdirIn { host: None, parent: Some(parent.to_string_lossy().into_owned()), name: name.into() })
 }
@@ -652,7 +637,6 @@ async fn mkdir_creates_a_folder_under_the_browsed_parent_and_returns_its_path() 
         assert_eq!(v["name"], json!(name.trim()), "名字去掉頭尾空白");
         assert_eq!(v["parent"], json!(tmp.to_string_lossy()));
     }
-    // 建好的資料夾本來就能被目錄瀏覽列出來、也能當 Project 路徑。
     let Json(listing) = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&tmp)).await.unwrap();
     assert!(listing["entries"].as_array().unwrap().iter().any(|x| x["name"] == json!("new-proj")));
 }
@@ -704,7 +688,6 @@ async fn mkdir_is_user_only_and_keeps_the_browse_denylist() {
     assert!(!tmp.join("x").exists());
     let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&e.app.data_dir, "x")).await.unwrap_err();
     assert!(matches!(err, LcError::Forbidden(_)), "daemon 資料目錄底下不能建：{err:?}");
-    // 新路徑本身落在不給進的地方（在家目錄底下建 `.ssh`）也擋：純判斷。
     let home = std::path::Path::new("/home/u");
     let data = std::path::Path::new("/srv/am-data");
     for target in ["/home/u/.ssh", "/home/u/.aws", "/home/u/.claude-cc9", "/home/u/.config/agents-manager"] {
@@ -721,7 +704,6 @@ async fn mkdir_needs_an_existing_directory_as_parent() {
         let err = make_dir(State(e.app.clone()), dirs_user(), mkdir_in(&parent, "n")).await.unwrap_err();
         assert!(matches!(err, LcError::Bad(_)), "{parent:?}: {err:?}");
     }
-    // 上層是符號連結：建在它指到的那一層（canonicalize 之後），不是建在連結本身。
     let real = scratch("parent-real");
     let link = tmp.join("lnk");
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -742,25 +724,21 @@ fn mkdir_remote_script_creates_reports_exists_and_refuses_credential_dirs() {
         crate::hosts::parse_make_dir(&String::from_utf8_lossy(&out.stdout))
     };
     let work = home.join("work");
-    // 絕對路徑、`~/`、`~` 三種上層寫法。
     assert_eq!(run(work.to_str().unwrap(), "a").unwrap(), crate::hosts::MakeDirOutcome::Created(work.join("a").to_string_lossy().into()));
     assert_eq!(run("~/work", "b").unwrap(), crate::hosts::MakeDirOutcome::Created(work.join("b").to_string_lossy().into()));
     assert_eq!(run("~", "c").unwrap(), crate::hosts::MakeDirOutcome::Created(home.join("c").to_string_lossy().into()));
     assert!(work.join("a").is_dir() && work.join("b").is_dir() && home.join("c").is_dir());
-    // 已存在：資料夾、檔案、符號連結。
     std::fs::write(work.join("file"), "keep").unwrap();
     std::os::unix::fs::symlink("/tmp", work.join("link")).unwrap();
     for name in ["a", "file", "link"] {
         assert_eq!(run("~/work", name).unwrap(), crate::hosts::MakeDirOutcome::Exists, "{name}");
     }
     assert_eq!(std::fs::read_to_string(work.join("file")).unwrap(), "keep");
-    // 名字裡的 shell 元字元不能被執行或拆開：整個當成一個名字。
     for name in ["$(touch pwned)", "a b", "x';touch pwned;'", "`touch pwned`", "*"] {
         let Ok(crate::hosts::MakeDirOutcome::Created(p)) = run("~/work", name) else { panic!("{name}") };
         assert_eq!(std::path::Path::new(&p).file_name().unwrap().to_string_lossy(), name);
     }
     assert!(!work.join("pwned").exists() && !home.join("pwned").exists(), "名字被當成命令跑了");
-    // 憑證目錄：在底下建、或建出憑證目錄本身都擋；上層不存在回錯。
     assert!(run("~/.ssh", "x").unwrap_err().to_string().contains("forbidden"));
     assert!(run("~/.ssh/inner", "x").unwrap_err().to_string().contains("forbidden"));
     assert!(run("~", ".aws").unwrap_err().to_string().contains("forbidden"), "建出 ~/.aws 本身也擋");
@@ -831,21 +809,17 @@ async fn a_config_change_under_a_running_bot_stays_visible_after_the_patch_respo
     };
     assert_eq!(needs(&e, id.clone()).await, json!(false));
 
-    // 「回應掉了」：呼叫端沒拿到 needs_restart，我們也不看它——只看資料。
     let _lost = patch(&e, &id, json!({"persona": "換一份人設 A"})).await.unwrap();
     assert_eq!(needs(&e, id.clone()).await, json!(true), "改了設定、run 還是舊版：從資料看得出要重啟");
 
-    // 重啟＝新 run 載入新版本，不再過期。
     lifecycle::restart_bot(&e.app, &id).await.unwrap();
     assert_eq!(needs(&e, id.clone()).await, json!(false));
 
-    // 只改可以當場套用的欄位（claude 的 model → /model）：套用成功就是已生效，不能被誤判成過期。
     let out = patch(&e, &id, json!({"model": "opus"})).await.unwrap();
     if out.get("live_apply").is_some_and(|l| l["applied"] == json!(true)) {
         assert_eq!(needs(&e, id.clone()).await, json!(false), "當場套用成功：run 的版本跟著更新");
     }
 
-    // 升版前的舊 run（沒記版本）：改設定那一刻補記「改之前」的版本，之後照樣看得出。
     sqlx::query("UPDATE runs SET launch_rev = NULL WHERE bot_id = ? AND state IN ('starting','running')").bind(&id).execute(&e.app.db).await.unwrap();
     assert_eq!(needs(&e, id.clone()).await, json!(false), "沒記版本＝不誤報");
     let _ = patch(&e, &id, json!({"persona": "換一份人設"})).await.unwrap();
@@ -1016,7 +990,6 @@ async fn a_deferred_live_apply_keeps_its_stamp_retry_after_launch_write_fails() 
     .await
     .unwrap();
 
-    // 回合中只切 fast 會直接送（#712）；輸入框裡有使用者的草稿就不碰，排到回合結束——這條測的是排隊那條路。
     e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
     let out = patch(&e, &id, json!({"fast": true}))
         .await
@@ -1210,7 +1183,7 @@ async fn a_busy_fast_change_waits_when_the_composer_holds_a_draft() {
     assert!(e.herdr.calls_to("pane.send_text").is_empty(), "一個字都不打");
     assert!(e.herdr.calls_to("pane.send_keys").is_empty(), "一個鍵都不按");
     assert!(lifecycle::is_deferred(&id));
-    lifecycle::apply_deferred_once(&e.app, &id).await; // 清掉全域排程，不留給別的測試
+    lifecycle::apply_deferred_once(&e.app, &id).await;
 }
 
 /// 稽核：閒著的 codex 輸入框裡有使用者的草稿時，`apply`（model／effort／fast 當場套用）不能把 `/model`、`/fast` 打在草稿後面——
@@ -1802,7 +1775,6 @@ async fn openai_api_bot_is_created_only_when_openai_is_configured_and_only_with_
     let body = json!({"name": "oa-adv", "kind": "openai-api"});
     let refused = add(&e, body.clone()).await;
     assert!(matches!(&refused, Err(LcError::Conflict(v)) if v["reason"] == "openai_not_configured" && v["message"] == "OpenAI 未啟用或未設定金鑰"), "{refused:?}");
-    // 開了但 key 檔不存在：一樣是 openai_not_configured。
     let missing = e.dir.join("no-openai-key").to_string_lossy().into_owned();
     e.app.cfg.update(move |c| { c.openai_api.enabled = true; c.openai_api.key_file = missing; Ok(()) }).await.unwrap();
     assert!(matches!(add(&e, body.clone()).await, Err(LcError::Conflict(ref v)) if v["reason"] == "openai_not_configured"));
@@ -1830,14 +1802,12 @@ async fn openai_api_bot_is_created_only_when_openai_is_configured_and_only_with_
         assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == reason), "{bad}: {r:?}");
     }
     assert!(add(&e, json!({"name": "oa-effort", "kind": "openai-api", "effort": "ultra"})).await.is_err(), "effort 照 luna 的清單");
-    // effort 依模型：astra（預設）不收 none；luna 收。
     let r = add(&e, json!({"name": "oa-none-astra", "kind": "openai-api", "effort": "none"})).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
     let r = add(&e, json!({"name": "oa-none-sol", "kind": "openai-api", "model": "gpt-6.2-sol", "effort": "none"})).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
     let none = add(&e, json!({"name": "oa-none", "kind": "openai-api", "model": "gpt-6-luna", "effort": "none"})).await.unwrap();
     assert_eq!(db::bot(&e.app.db, &none).await.unwrap().unwrap().effort.as_deref(), Some("none"));
-    // 改模型到 astra 時，生效中的 none 不能跟過去。
     let r = patch(&e, &none, json!({"model": "gpt-6.2-astra"})).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "api_bot_effort_unsupported_for_model"), "{r:?}");
     patch(&e, &none, json!({"model": "gpt-6.2-astra", "effort": "low"})).await.unwrap();

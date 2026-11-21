@@ -6,20 +6,16 @@
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
         let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
 
-        // 名字看起來無害、內容是私鑰：檔頭黑名單擋下，回 NotFound。
         std::fs::write(outbox.join("notes.txt"), b"-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n").unwrap();
         assert!(matches!(share_file_stream(&env.app, &bot.id, "notes.txt").await, Err(ShareFileError::NotFound)));
-        // 真的 .pem 副檔名也一樣不給。
         std::fs::write(outbox.join("key.pem"), b"-----BEGIN PRIVATE KEY-----\nabc\n").unwrap();
         assert!(matches!(share_file_stream(&env.app, &bot.id, "key.pem").await, Err(ShareFileError::NotFound)));
 
-        // MAX_BYTES + 1 的稀疏檔：fstat 就擋下，回 TooLarge。
         let f = std::fs::File::create(outbox.join("huge.bin")).unwrap();
         f.set_len(MAX_BYTES + 1).unwrap();
         drop(f);
         assert!(matches!(share_file_stream(&env.app, &bot.id, "huge.bin").await, Err(ShareFileError::TooLarge)));
 
-        // 一般檔：200、Content-Length 對、body 是完整內容。
         std::fs::write(outbox.join("ok.txt"), b"hello stream").unwrap();
         let res = share_file_stream(&env.app, &bot.id, "ok.txt").await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -170,7 +166,7 @@
         let base = scratch("landed");
         let f = std::fs::File::create(base.join("moved-in.pdf")).unwrap();
         let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
-        f.set_modified(two_hours_ago).unwrap(); // mtime 兩小時前；ctime 是現在
+        f.set_modified(two_hours_ago).unwrap();
         drop(f);
         let fd = trusted_open::open_bound_dir(&base, &[], None).unwrap();
         let now = now_secs();
@@ -185,7 +181,6 @@
     fn every_download_is_an_attachment_with_a_usable_filename() {
         assert_eq!(mime_of(Path::new("a.tsv")), "text/plain; charset=utf-8");
         assert_eq!(mime_of(Path::new("a.pdf")), "application/pdf");
-        // 白名單以外一律 octet-stream：bot 寫出來的 HTML 不在這個 origin 跑起來。
         assert_eq!(mime_of(Path::new("evil.html")), "application/octet-stream");
         assert_eq!(mime_of(Path::new("evil.svg")), "application/octet-stream");
         assert_eq!(mime_of(Path::new("noext")), "application/octet-stream");
@@ -222,7 +217,6 @@
         std::fs::write(outbox.join("test.html"), b"<script>alert(1)</script>").unwrap();
         std::fs::write(outbox.join("test.svg"), b"<svg><script>alert(1)</script></svg>").unwrap();
 
-        // 1. PDF 預覽：?inline=1 回 inline disposition、nosniff 與 CSP sandbox
         let q_pdf: std::collections::HashMap<_, _> = [("path".to_string(), "test.pdf".to_string()), ("inline".to_string(), "1".to_string())].into();
         let resp_pdf = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_pdf)).await.unwrap();
         assert_eq!(resp_pdf.status(), StatusCode::OK);
@@ -231,7 +225,6 @@
         assert_eq!(resp_pdf.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox; default-src 'none'");
         assert_eq!(resp_pdf.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
 
-        // 2. HTML 或 SVG：即使帶 ?inline=1 也絕不 inline，仍是 attachment 且沒有 CSP sandbox
         let q_html: std::collections::HashMap<_, _> = [("path".to_string(), "test.html".to_string()), ("inline".to_string(), "1".to_string())].into();
         let resp_html = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_html)).await.unwrap();
         assert_eq!(resp_html.status(), StatusCode::OK);
@@ -246,7 +239,6 @@
         assert!(resp_svg.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap().starts_with("attachment; filename="));
         assert!(resp_svg.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
 
-        // 3. 一般下載：未帶 inline 參數時 PDF 仍為 attachment
         let q_pdf_dl: std::collections::HashMap<_, _> = [("path".to_string(), "test.pdf".to_string())].into();
         let resp_pdf_dl = file(State(env.app.clone()), UrlPath(bot.id.clone()), Query(q_pdf_dl)).await.unwrap();
         assert_eq!(resp_pdf_dl.status(), StatusCode::OK);
@@ -263,17 +255,13 @@
             let mime = mime_of(path);
             let mime_lower = mime.to_ascii_lowercase();
 
-            // 必須不是 text/html
             assert_ne!(mime_lower, "text/html", "{} 不能是 text/html", ext);
             assert!(!mime_lower.starts_with("text/html"), "{} 不能以 text/html 開頭", ext);
 
-            // 必須不是 image/svg+xml
             assert_ne!(mime_lower, "image/svg+xml", "{} 不能是 image/svg+xml", ext);
 
-            // 不能是任何 *xml
             assert!(!mime_lower.contains("xml"), "{} 的 MIME ({}) 不得包含 xml", ext, mime);
 
-            // 不能是任何 *javascript
             assert!(!mime_lower.contains("javascript"), "{} 的 MIME ({}) 不得包含 javascript", ext, mime);
         }
     }
@@ -342,7 +330,6 @@
         }
         assert_eq!(scratchpad_gone().await.into_response().status(), StatusCode::NOT_FOUND);
 
-        // outbox 還沒建（或被清理收掉了）：空清單，不是錯誤。
         std::fs::remove_dir_all(&outbox).unwrap();
         let (status, bytes) = body(list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap()).await;
         assert_eq!(status, StatusCode::OK);
@@ -368,7 +355,6 @@
         assert_eq!((v["files"].clone(), v["reason"].clone()), (json!([]), json!("outbox_untrusted")));
         assert_eq!(get_file(&env.app, &bot.id, "session-notes.md").await.0, StatusCode::NOT_FOUND);
 
-        // 真的目錄照常；還沒建也不算不安全。
         std::fs::remove_file(&outbox).unwrap();
         assert!(matches!(open_trusted_dir(&env.app.data_dir, &outbox), Ok(None)), "還沒建");
         ensure(&env.app.data_dir, &bot.id).unwrap();
@@ -388,17 +374,14 @@
         std::fs::create_dir_all(&outbox_dir).unwrap();
         std::fs::write(outbox_dir.join("report.md"), b"# safe").unwrap();
 
-        // list() 的第一步：可信檢查，拿到已經打開的目錄 fd。
         let fd = open_trusted_dir(&data_dir, &outbox_dir).unwrap().expect("目錄存在，該給 fd");
 
-        // 檢查通過之後、真正列舉之前：整個目錄搬到旁邊（內容不動），原本的名字換成指到界線外的符號連結。
         std::fs::rename(&outbox_dir, data_dir.join("outbox").join("moved-aside")).unwrap();
         let elsewhere = base.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::write(elsewhere.join("secret.txt"), b"host secret").unwrap();
         std::os::unix::fs::symlink(&elsewhere, &outbox_dir).unwrap();
 
-        // list() 的第二步：拿著同一個 fd 去列，不重新解一次路徑。
         let listed: Vec<String> = scan(&fd, 0).into_iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(listed, vec!["report.md".to_string()], "列到的是拿到 fd 當下那個目錄，不是換過去的 elsewhere");
         std::fs::remove_dir_all(&base).unwrap();
@@ -468,26 +451,20 @@
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
         let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
 
-        // 建立 5 MiB 稀疏檔案，不佔硬碟空間
         let f = std::fs::File::create(outbox.join("sparse.bin")).unwrap();
         f.set_len(5 * 1024 * 1024).unwrap();
         drop(f);
 
-        // 指定上限 4 MiB：stat 即擋下，回傳 TooLarge
         let res = share_file_bytes_with_limit(&env.app, &bot.id, "sparse.bin", 4 * 1024 * 1024).await;
         assert!(matches!(res, Err(ShareFileError::TooLarge)));
 
-        // 建立 100 bytes 檔案
         std::fs::write(outbox.join("small.bin"), vec![b'a'; 100]).unwrap();
-        // 指定上限 50 bytes：回傳 TooLarge
         let res_small_too_large = share_file_bytes_with_limit(&env.app, &bot.id, "small.bin", 50).await;
         assert!(matches!(res_small_too_large, Err(ShareFileError::TooLarge)));
-        // 指定上限 200 bytes：回傳 Ok
         let res_small_ok = share_file_bytes_with_limit(&env.app, &bot.id, "small.bin", 200).await;
         assert!(res_small_ok.is_ok());
         assert_eq!(res_small_ok.unwrap().1.len(), 100);
 
-        // 既有的 symlink 安全防護：指到外面的符號連結不可繞過（違反可信邊界回 Unavailable）
         let secret = env.dir.join("secret.bin");
         std::fs::write(&secret, b"secret").unwrap();
         std::os::unix::fs::symlink(&secret, outbox.join("link_to_secret.bin")).unwrap();
@@ -509,29 +486,24 @@
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), b"outside secret").unwrap();
 
-        // 正常巢狀檔案
         std::fs::create_dir_all(root.join("sub/nested")).unwrap();
         std::fs::write(root.join("top.txt"), b"top").unwrap();
         std::fs::write(root.join("sub/report.pdf"), b"%PDF-1.4").unwrap();
         std::fs::write(root.join("sub/nested/data.csv"), b"a,b,c").unwrap();
 
-        // symlink 子目錄：指向外部目錄
         std::os::unix::fs::symlink(&outside, root.join("sym_dir")).unwrap();
 
-        // 子目錄裡的 withheld 檔（名字與內容）
         std::fs::write(root.join("sub/id_rsa"), b"key").unwrap();
         std::fs::write(root.join("sub/auth.json"), b"{}").unwrap();
         std::fs::write(root.join("sub/data.sqlite3"), b"SQLite format 3\0...").unwrap();
         std::fs::write(root.join("sub/disguised.bin"), b"SQLite format 3\0...").unwrap();
         std::fs::write(root.join("sub/.hidden"), b"hidden").unwrap();
 
-        // withheld 名稱的子目錄
         std::fs::create_dir_all(root.join(".hidden_dir")).unwrap();
         std::fs::write(root.join(".hidden_dir/file.txt"), b"hidden").unwrap();
         std::fs::create_dir_all(root.join("id_rsa")).unwrap();
         std::fs::write(root.join("id_rsa/file.txt"), b"withheld dir").unwrap();
 
-        // 深度超過 WALK_MAX_DEPTH (32) 的深層目錄
         let mut deep_path = root.clone();
         for i in 0..=WALK_MAX_DEPTH {
             deep_path = deep_path.join(format!("d{i}"));
@@ -543,43 +515,35 @@
         let listed = scan(&fd, 0);
         let names: Vec<String> = listed.iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
 
-        // 1. 巢狀檔會列出，且帶相對路徑
         assert!(names.contains(&"top.txt".to_string()), "最上層檔案有列出: {names:?}");
         assert!(names.contains(&"sub/report.pdf".to_string()), "第一層子目錄檔案有列出: {names:?}");
         assert!(names.contains(&"sub/nested/data.csv".to_string()), "第二層子目錄檔案有列出: {names:?}");
 
-        // 2. symlink 子目錄不跟
         assert!(!names.iter().any(|n| n.starts_with("sym_dir")), "symlink 子目錄不該列出: {names:?}");
         assert!(servable(&root, "sym_dir/secret.txt").is_none(), "symlink 子目錄裡的檔案不可下載");
 
-        // 3. .. 下載被拒
         assert!(servable(&root, "../outside/secret.txt").is_none());
         assert!(servable(&root, "sub/../../outside/secret.txt").is_none());
         assert!(servable(&root, "sub/..").is_none());
 
-        // 4. 深度上限：超過 WALK_MAX_DEPTH 的深層檔案不列出、不可下載
         assert!(!names.iter().any(|n| n.ends_with("too_deep.txt")), "超過深度上限不該列出: {names:?}");
         let deep_rel = deep_path.strip_prefix(&root).unwrap().join("too_deep.txt");
         assert!(servable(&root, deep_rel.to_str().unwrap()).is_none(), "超過深度上限不可下載");
 
-        // 5. withheld 檔在子目錄仍被擋
         for withheld in ["sub/id_rsa", "sub/auth.json", "sub/data.sqlite3", "sub/disguised.bin", "sub/.hidden", ".hidden_dir/file.txt", "id_rsa/file.txt"] {
             assert!(!names.contains(&withheld.to_string()), "{withheld} 不該列出: {names:?}");
             assert!(servable(&root, withheld).is_none(), "{withheld} 不可下載");
         }
 
-        // 下載正常巢狀檔案成功
         assert_eq!(servable(&root, "sub/report.pdf"), Some(b"%PDF-1.4".to_vec()));
         assert_eq!(servable(&root, "sub/nested/data.csv"), Some(b"a,b,c".to_vec()));
 
-        // 分享入口維持單層：只列最上層的檔，子資料夾整個不列
         let shared: Vec<String> = scan_checked(&fd, 0).unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect();
         assert!(shared.contains(&"top.txt".to_string()), "分享清單有最上層檔: {shared:?}");
         assert!(!shared.iter().any(|n| n.contains('/')), "分享清單不含子資料夾裡的檔: {shared:?}");
 
         std::fs::remove_dir_all(&base).unwrap();
     }
-
 
     /// 分享用 bot 的保留標記：outbox 那一段被換成符號連結，就不寫進連結另一頭、也不刪那頭的同名檔（不跟進去到界線外）。
     #[tokio::test]

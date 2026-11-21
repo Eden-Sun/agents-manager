@@ -48,7 +48,7 @@
         let env = crate::testing::env().await;
         let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
-        *conn.remote_home.lock().await = Some("/Users/x".into()); // 連過一次，home 有快取
+        *conn.remote_home.lock().await = Some("/Users/x".into());
         assert!(!conn.is_connected());
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "asleep").await;
@@ -92,7 +92,6 @@
             Ok("AM_OUTBOX_OK\n".into())
         });
 
-        // `target()` 已選好舊連線；監督器接著回報斷線，I/O handler 再收到這份 target。
         conn.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         let list = list(target_for_test(conn.clone(), "/remote/outbox/bot"), 0).await.unwrap();
         let body = axum::body::to_bytes(list.into_body(), usize::MAX).await.unwrap();
@@ -241,7 +240,6 @@
     fn a_fetched_file_is_decoded_byte_for_byte() {
         let bytes: Vec<u8> = (0u8..=255).collect();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        // GNU base64 每 76 字換行，macOS 不換：兩種都要解得回來。
         let wrapped: String = b64.as_bytes().chunks(76).map(|c| std::str::from_utf8(c).unwrap().to_string() + "\n").collect();
         for body in [b64.clone() + "\n", wrapped] {
             match parse_file(&format!("AM_OUTBOX_FILE\n{body}")) {
@@ -927,7 +925,6 @@ exit 1
         assert!(v.get("kept").is_none() && v["files"][0]["expires_at"].is_u64(), "一般遠端 bot 照舊：{v}");
         assert!(scripts.lock().unwrap().last().unwrap().contains("-exec rm -f"), "一般遠端 bot 照舊刪超過 1 小時的");
 
-        // 讀不到是不是分享 bot（表讀不出來）：寧可少刪，當成分享 bot。
         sqlx::query("ALTER TABLE shared_bots RENAME TO shared_bots_unreadable").execute(&env.app.db).await.unwrap();
         let v = listed(plain.id.clone()).await;
         assert_eq!(v["kept"], json!(true), "{v}");
@@ -959,13 +956,11 @@ exit 1
         assert!(!names.iter().any(|n| n.starts_with("sym_dir")), "symlink dir not listed: {names:?}");
         assert!(!names.contains(&"sub/id_rsa".to_string()), "withheld sub/id_rsa not listed: {names:?}");
 
-        // Download
         let out = run_download(&d, "sub/report.pdf", "");
         assert_eq!(served(&out), Some(b"%PDF-1.4".to_vec()));
         let out_csv = run_download(&d, "sub/nested/data.csv", "");
         assert_eq!(served(&out_csv), Some(b"1,2,3".to_vec()));
 
-        // Symlink dir download fails
         let out_sym = run_download(&d, "sym_dir/secret.txt", "");
         assert_eq!(out_sym.trim(), "AM_OUTBOX_MISSING");
 

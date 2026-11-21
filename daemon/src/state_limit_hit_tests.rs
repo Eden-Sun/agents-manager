@@ -85,7 +85,6 @@ async fn a_model_bucket_that_does_not_block_this_model_is_null() {
     let bot = crate::testing::claude_bot(&app, &env.project_id, "opus-bot").await;
     let run = crate::testing::fake_run(&app, &bot.id).await;
     sqlx::query("UPDATE runs SET runtime_model='opus' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
-    // 撞的是 Fable 週窗；這顆跑 opus，不被擋（`bucket_blocks_model`）。
     assert!(seed_limit_hit(&app, LOCAL_HOST, "claude", &future(), "You've hit your Fable limit", Some("fable".into())).await);
 
     assert_eq!(state_bot(&app, &bot.id).await["limit_hit"], Value::Null);
@@ -111,21 +110,17 @@ async fn an_unreadable_lookup_is_null_and_does_not_fail_the_projection() {
 async fn the_batch_gives_every_bot_what_the_single_bot_path_gives() {
     let env = crate::testing::env().await;
     let app = env.app.clone();
-    // 撞限中（claude 的共用 key）。
     crate::testing::claude_bot(&app, &env.project_id, "hit").await;
     assert!(seed_limit_hit(&app, LOCAL_HOST, "claude", &future(), "usage limit", None).await);
-    // 過期：撞限還在，until 已過。
     codex_bot(&app, &env.project_id, "expired").await;
     assert!(seed_limit_hit(&app, LOCAL_HOST, "codex", &future(), "usage limit", None).await);
     app.quotas.lock().await.get_mut("codex").unwrap().limit_hit.as_mut().unwrap().until =
         Some(crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(1)));
-    // bucket 不擋：自己的 key（claude:cc1）撞 Fable，這顆跑 opus。
     let opus = crate::testing::claude_bot(&app, &env.project_id, "opus").await;
     sqlx::query("UPDATE bots SET identity='cc1' WHERE id=?").bind(&opus.id).execute(&app.db).await.unwrap();
     let run = crate::testing::fake_run(&app, &opus.id).await;
     sqlx::query("UPDATE runs SET runtime_model='opus' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
     assert!(seed_limit_hit(&app, LOCAL_HOST, "claude:cc1", &future(), "Fable limit", Some("fable".into())).await);
-    // child：key 上有撞限，但 child 的投影一律 null（這裡比的是撞限判斷本身，所以單筆與批次都要有值）。
     let parent = crate::testing::claude_bot(&app, &env.project_id, "parent").await;
     let child = crate::testing::claude_bot(&app, &env.project_id, "child").await;
     sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?").bind(&parent.id).bind(&child.id).execute(&app.db).await.unwrap();

@@ -171,7 +171,6 @@ pub fn clear_schedule(app: &impl crate::supervisor::watchdog::WatchdogDeadlines,
 pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + 'static)) {
     let Ok(sup) = store::get_or_init(app.db()).await else { return };
     let Some(bot_id) = sup.bot_id.clone() else { return };
-    // 讀不到 liveness ＝ 不知道，不是「已停止」：不排程、不計次、不動任何 watchdog 狀態，下一個 tick 再看（#249）。
     let liveness = match super::manager_liveness(app.db(), &bot_id).await {
         Ok(v) => v,
         Err(e) => {
@@ -182,8 +181,6 @@ pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
     let is_past = |at: &str| scheduled_past(app, "patrol", at);
     match plan(&sup, liveness, is_past) {
         Plan::Idle => {
-            // Seen answering prompts again: the streak is over. `starting` is not enough — a
-            // CLI that opens and dies would otherwise reset the count on every attempt.
             if matches!(liveness, "idle" | "busy") && (sup.watchdog_attempts > 0 || sup.watchdog_next_at.is_some()) {
                 let _ = store::set_watchdog(app.db(), 0, None).await;
                 clear_schedule(app, "patrol");
@@ -198,10 +195,6 @@ pub async fn tick(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
             }
         }
         Plan::Wait { schedule: false } => {}
-        // The manager is down, wanted, and out of automatic retries. Before 2026-09-13 this
-        // branch did *nothing*: the give-up was re-derived silently on every tick and nobody
-        // was ever told. The worst case is the one that produced it — the fifth start returns
-        // Ok and the CLI dies a second later, so no error path runs at all.
         Plan::GaveUp => {
             let why = sup
                 .watchdog_last_error
@@ -246,8 +239,6 @@ pub(super) enum GaveUpWho {
 
 pub(super) async fn report_gave_up_as(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), who: GaveUpWho, why: &str) {
     use super::roles::{self, Role};
-    // The marker means "owed a notification", not "notified" (#251). The key comes from the persisted
-    // marker, never from a degraded read: no marker / unreadable row = retry next tick.
     let at = match who {
         GaveUpWho::Manager => {
             let _ = store::mark_watchdog_gave_up(app.db(), why).await;
@@ -276,7 +267,6 @@ pub(super) async fn report_gave_up_as(app: &(impl crate::capabilities::Db + crat
             serde_json::json!({"why": why, "gave_up_at": at, "action": "`bin/agm responder-start`；bot 申請留在 inbox，等超過 5 分鐘的核准會改派給巡檢裁示"}),
         ),
     };
-    // Err = not durable yet, retry next tick; Ok(None) = already delivered on an earlier tick.
     let Ok(Some(_)) = store::push_inbox(app.db(), &key, kind, None, None, None, &payload).await else { return };
     match who {
         GaveUpWho::Manager => {
@@ -298,7 +288,6 @@ pub(super) async fn report_gave_up_as(app: &(impl crate::capabilities::Db + crat
 
 async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::watchdog::WatchdogDeadlines + crate::supervisor::ports::TurnOps + crate::supervisor::ports::ControllerRuntime + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::JudgeOps + Clone + 'static), bot_id: &str, failures: i64) {
     let _g = super::lock().await;
-    // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
     let Ok(sup) = store::get_or_init(app.db()).await else { return };
     let Ok(liveness) = super::manager_liveness(app.db(), bot_id).await else { return };
     if plan(&sup, liveness, |at: &str| scheduled_past(app, "patrol", at)) != Plan::Start {
@@ -309,8 +298,6 @@ async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit +
     match super::start_manager(app, Some(&detail)).await {
         Ok(()) => {
             tracing::info!(attempt, "supervisor watchdog started the manager");
-            // Counted until it is seen idle/busy: a CLI that dies right after opening keeps
-            // climbing the backoff instead of restarting every 30 seconds.
             let wait = backoff_secs(attempt);
             let at = iso_in(wait);
             if store::set_watchdog(app.db(), attempt, Some(&at)).await.is_ok() {
@@ -323,7 +310,6 @@ async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit +
             if attempt >= MAX_ATTEMPTS {
                 let _ = store::set_watchdog(app.db(), attempt, None).await;
                 clear_schedule(app, "patrol");
-                // Same reporting as the "started but died" path: one durable event, once.
                 report_gave_up(app, &why).await;
             } else {
                 let wait = backoff_secs(attempt);

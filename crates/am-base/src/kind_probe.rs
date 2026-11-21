@@ -53,7 +53,6 @@ pub fn verdict(host: &str, kind: &str, found: Option<String>) -> Result<(), Stri
         Some(path) if path.is_empty() || !path.starts_with('/') => {
             let where_ = if host == crate::config::LOCAL_HOST { "本機".to_string() } else { format!("主機 {host}") };
             if kind == "agy" {
-                // agy 沒有套件管理器，也不能跑官方 install.sh：AG Man 自己從官方 manifest 裝（SPEC §12a.11）。講清楚去哪裡按，不要只說「請先安裝」。
                 return Err(format!(
                     "{where_}尚未安裝 agy。請在額度欄的 agy 格（或新增 bot 的 kind 選單）按「安裝 agy」，由 AG Man 從官方下載並驗 sha512 後裝到 ~/.local/bin/agy（不跑官方 install.sh）；裝好、登入後再啟動這顆 bot。"
                 ));
@@ -70,9 +69,6 @@ pub fn verdict(host: &str, kind: &str, found: Option<String>) -> Result<(), Stri
     }
 }
 
-// preflight 本身的測試：跟 start_bot 的其他測試不同，這裡**要**走過「找不找得到」。用自己的 runner——真的
-// `/bin/sh -c <probe>`，環境釘死在測試給的 `bin/`——所以答案只取決於 stub 在不在，跟跑測試的機器裝了什麼無關
-// （開發機、乾淨 Linux 都一樣）。
 /// kind 預檢的接線點。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait KindProbeState: Send + Sync {
     fn kind_probe(&self) -> &crate::kind_probe::KindProbeHook;

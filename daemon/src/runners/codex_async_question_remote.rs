@@ -91,8 +91,6 @@ pub async fn rollout_read(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &s
 }
 
 async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> Option<String> {
-    // Identity changes apply at restart. Reconstruct the launch identity before comparing the
-    // launch revision; there is no persisted launch env, so an unprovable env must degrade.
     let mut launched = bot.clone();
     launched.identity = run.started_identity().unwrap_or_else(|| bot.identity.clone());
     if run.launch_rev.as_deref() != Some(crate::launch_rev::of(&launched).as_str()) {
@@ -105,7 +103,6 @@ async fn home_setting(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) 
     if let Some(value) = bot.env().get("CODEX_HOME") {
         home = Some(value.clone());
     }
-    // The reader expands ~ and $HOME on the target. No extra SSH just to discover HOME.
     Some(home.unwrap_or_else(|| "~/.codex".into()))
 }
 
@@ -119,7 +116,6 @@ async fn current(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sessi
     }
     let Some(client) = app.herdr_for_run(run).await else { return false };
     let Some(pane) = run.pane_id.as_deref() else { return false };
-    // Preserve #1879's DB fallback when herdr has no session, but reject a changed live session.
     super::codex_async_question::live_session(&client, pane).await
         .or_else(|| now.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
         .as_deref() == Some(session)
@@ -148,7 +144,6 @@ pub async fn pending(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, s
         return None;
     }
     let fence = tokio::time::timeout_at(deadline, app.hosts.fence(host)).await.ok()??;
-    // Mutable bot settings must not bypass the per-run/session failure backoff.
     let key = format!("{}\0{}\0{:?}\0{}\0{session}", run.id, run.started_at, run.pane_id, fence.authority_scope());
     let slot = slot(&key)?;
     let value = read_through(slot, deadline, || async {
@@ -166,8 +161,6 @@ pub async fn pending(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, s
         }
         Some(value)
     }).await;
-    // Cached tails also need the current run/session/host observation. Include this in the
-    // original deadline so validating a cached value cannot extend the read budget.
     tokio::time::timeout_at(deadline, async {
         if app.hosts.is_current(&fence).await && current(app, bot, run, host, session).await {
             value
@@ -210,7 +203,6 @@ mod tests {
     fn macos_local_rollout_reader_bounds_the_tail_and_rejects_escape_paths() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-async-tail-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        // Run the exact embedded reader, including remote HOME expansion and canonical guards.
         let program = format!("{}\n{}", include_str!("codex_async_question_tail.py").split("if __name__").next().unwrap(), r#"
 import tempfile
 with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
@@ -258,8 +250,6 @@ with tempfile.TemporaryDirectory(dir=sys.argv[1]) as tmp:
         let slot: Slot = Default::default();
         let calls = AtomicUsize::new(0);
         let value = read_through(slot.clone(), tokio::time::Instant::now() + Duration::from_millis(80), || async {
-            // Front work consumes the budget before SSH starts. The transport deadline would
-            // be later than the outer deadline, reproducing the review's cancellation ordering.
             tokio::time::sleep(Duration::from_millis(50)).await;
             calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -361,13 +351,9 @@ mod delta_tests {
     #[test]
     fn the_delta_reads_whole_lines_from_the_offset_and_resumes_at_next() {
         let home = rollout(LINES.as_bytes());
-        // 0：整檔的整行；未結束的 "thr" 不讀、位移停在它前面。
         assert_eq!(read(&home, 0), Some(am_ports::RemoteRollout { text: "one\ntwo\n".into(), next: 8 }));
-        // 位移正好在行首：只讀之後的新增（這裡沒有）。
         assert_eq!(read(&home, 8), Some(am_ports::RemoteRollout { text: String::new(), next: 8 }));
-        // 位移落在行中：跳到下一個換行之後，不吃半行。
         assert_eq!(read(&home, 2), Some(am_ports::RemoteRollout { text: "two\n".into(), next: 8 }));
-        // 新增完整行之後，從上次位移讀到新的 next。
         std::fs::write(home.join("sessions/2026/10/24/rollout-x-abc.jsonl"), "one\ntwo\nthree\n").unwrap();
         assert_eq!(read(&home, 8), Some(am_ports::RemoteRollout { text: "three\n".into(), next: 14 }));
     }
@@ -375,13 +361,11 @@ mod delta_tests {
     #[test]
     fn a_shrunk_or_replaced_file_is_read_from_the_start() {
         let home = rollout(b"new-a\nnew-b\n");
-        // 位移超過檔案大小（rotate／截斷）：從頭讀，next 會比舊位移小。
         assert_eq!(read(&home, 500), Some(am_ports::RemoteRollout { text: "new-a\nnew-b\n".into(), next: 12 }));
     }
 
     #[test]
     fn a_delta_never_reads_more_than_the_cap_and_keeps_line_alignment() {
-        // 9 MiB 的整行：只取最後 8 MiB（上限），第一個（可能是半行的）片段丟掉。
         let line = format!("{}\n", "x".repeat(99));
         let body = line.repeat(9 * 1024 * 1024 / line.len());
         let home = rollout(body.as_bytes());
@@ -396,12 +380,10 @@ mod delta_tests {
     fn a_bad_offset_or_a_bad_channel_is_none_not_a_guess() {
         let home = rollout(LINES.as_bytes());
         let home_str = home.to_string_lossy().into_owned();
-        // 負數、非數字：python 不輸出；解析不到表頭＝None。
         for bad in ["-1", "1x", "+3", " 3"] {
             let script = format!("{} {}", script(&home_str, "abc"), sh_quote(bad));
             assert_eq!(parse_delta(&fake_ssh(&script)), None, "{bad}");
         }
-        // session 不在、路徑逃出 sessions：空輸出＝None（通道失敗，呼叫端保留上一次讀數）。
         assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "nope", 0, TAIL_BYTES))), None);
         assert_eq!(parse_delta(&fake_ssh(&delta_script(&home_str, "../abc", 0, TAIL_BYTES))), None);
         assert_eq!(parse_delta(""), None);
@@ -425,7 +407,6 @@ mod delta_tests {
 
     #[test]
     fn the_legacy_tail_without_offset_is_unchanged() {
-        // 不帶 offset：仍是原來的檔尾原文，沒有 AM_ROLLOUT 表頭（async 提問的行為不准變）。
         let home = rollout(LINES.as_bytes());
         let out = fake_ssh(&script(&home.to_string_lossy(), "abc"));
         assert_eq!(out, LINES);

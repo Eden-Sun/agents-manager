@@ -13,7 +13,6 @@ pub async fn pane_gone(app: &(impl crate::capabilities::Db + crate::capabilities
     let Ok(client) = client_for_run(app, run).await else { return false };
     match client.pane_get(pane).await {
         Ok(None) => true,
-        // 同一個 id 已經掛著別的 agent：舊 pane 不在了，不能再當成這顆 run。
         Ok(Some(_)) => pane_id_reused(&client, run).await,
         Err(_) => false,
     }
@@ -87,7 +86,6 @@ pub async fn sweep_proved(app: &(impl Db + DeadPanesServices + crate::lifecycle:
 }
 
 async fn sweep_each(app: &(impl Db + DeadPanesServices + crate::lifecycle::s6_ports::QueueContext + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess)) -> Vec<(String, RunExit, Option<ExitProof>)> {
-    // 讀不到維護狀態就不動：寧可晚收，不在 herdr 重啟中把整批活的 run 收掉。
     if app.maintenance_window_active().await {
         return Vec::new();
     }

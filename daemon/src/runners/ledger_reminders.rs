@@ -30,11 +30,9 @@ pub async fn sweep(app: &Arc<App>) {
         }
     }
     for (target, items) in by_target {
-        // 目標不在跑：不標記，下一輪再說。
         if !running(app, &target).await {
             continue;
         }
-        // 先 CAS 標記（版本還是當初看到的才寫）；只有標記成功的才會送。
         let mut marked = Vec::new();
         for r in items {
             if matches!(ledger::mark_reminded(&app.db, &r).await, Ok(true)) {
@@ -48,7 +46,6 @@ pub async fn sweep(app: &Arc<App>) {
         let crid = format!("{NOTICE_PREFIX}{:016x}", hash_of(&marked));
         match app.prompt_relayed_queueable(&target, &text, &crid, None, QueueClass::DaemonNotice).await {
             Ok(_) => tracing::info!(target = %target, items = marked.len(), "ledger reminder queued"),
-            // 管理者的佇列格被占著、或輸入框有草稿：還原標記，下一輪再提醒。
             Err(LcError::Conflict(_)) => unmark_all(app, &marked).await,
             Err(e) => {
                 tracing::warn!(target = %target, error = ?e, "ledger reminder could not be queued");
@@ -70,11 +67,9 @@ async fn target_for(app: &Arc<App>, r: &Reminder) -> Option<String> {
         return r.owner_bot_id.clone();
     }
     let top = ledger::top_manager(&app.db, &r.project_id).await.ok().flatten()?;
-    // 副手自己名下的到期事項逾期升級：一律給頂層管理者，絕不退回給副手本人（否則主忙時會被副手吃掉、主永遠收不到）。
     if r.owner_bot_id.is_some() {
         return Some(top);
     }
-    // 孤兒（無承辦人）：頂層忙、且代班副手真的在代班（acting）且在跑，才給代班副手；其他情況給頂層。
     if busy(app, &top).await {
         let deputy: Option<String> = sqlx::query_scalar("SELECT deputy_bot_id FROM projects WHERE id=? AND mode='expert' AND deleted_at IS NULL")
             .bind(&r.project_id)
@@ -151,7 +146,6 @@ mod tests {
         let m = crate::testing::claude_bot(&env.app, &env.project_id, "lg-mgr").await;
         sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&m.id).execute(&env.app.db).await.unwrap();
         let run = crate::testing::fake_run(&env.app, &m.id).await;
-        // 管理者手上有一個進行中的回合：提醒會排進佇列（沒有它，假 pane 的輸入框讀不到，送進去會 composer_unreadable）。
         let conv = crate::db::conversation_id(&env.app.db, &m.id).await.unwrap();
         sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('t-live',?,?,'web','in_flight','ok',?)")
             .bind(&conv).bind(&run).bind(db::now()).execute(&env.app.db).await.unwrap();
@@ -198,18 +192,14 @@ mod tests {
         sweep(app).await;
         assert_eq!(notices(app, &mgr).await.len(), 1, "同一版同一階段不重發");
 
-        // 版本變了，但上一則還在佇列裡沒處理：不疊第二則（無重複的未處理提醒）。
         sqlx::query("UPDATE ledger_items SET version = version + 1 WHERE id=?").bind(&item.id).execute(&app.db).await.unwrap();
         sweep(app).await;
         assert_eq!(notices(app, &mgr).await.len(), 1, "上一則還沒處理，不疊");
 
-        // 上一則處理完（回合結束）後，新版本才再提醒。
         let conv = db::conversation_id(&app.db, &mgr).await.unwrap();
-        // 佇列裡的提醒依序跑完（queued → in_flight → completed，狀態機不允許直接跳）。
         sqlx::query("UPDATE turns SET status='completed' WHERE id='t-live'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='in_flight' WHERE conversation_id=? AND status='queued'").bind(&conv).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET status='completed' WHERE conversation_id=? AND status='in_flight'").bind(&conv).execute(&app.db).await.unwrap();
-        // 管理者又忙起來（有進行中的回合）：新版本的提醒排進佇列。
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&mgr).fetch_one(&app.db).await.unwrap();
         sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,created_at) VALUES('t-live2',?,?,'web','in_flight','ok',?)")
             .bind(&conv).bind(&run).bind(db::now()).execute(&app.db).await.unwrap();
@@ -235,7 +225,6 @@ mod tests {
         assert_eq!(notices(app, &dep.id).await.len(), 1, "剛到期：只提醒承辦的副手");
         assert!(notices(app, &mgr).await.is_empty(), "還沒逾期 30 分鐘，不升級");
 
-        // 逾期 35 分鐘（版本推進，才算新的一次）。
         sqlx::query("UPDATE ledger_items SET due_at=?, version=version+1 WHERE id=?").bind(ago(35)).bind(&item.id).execute(&app.db).await.unwrap();
         sweep(app).await;
         assert_eq!(notices(app, &mgr).await.len(), 1, "逾期超過 30 分鐘升級給頂層管理者");

@@ -1,6 +1,5 @@
 //! Daemon base modules extracted from agents-managerd.
 
-// Keep the existing crate-root configuration path for moved modules.
 pub use am_config as config;
 pub use am_core;
 pub use am_ports;

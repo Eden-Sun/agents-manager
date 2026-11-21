@@ -46,25 +46,20 @@ async fn resumed_reports_the_recorded_outcome_not_the_marker_session_start_clear
     let app = e.app.clone();
     let opts = lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() };
 
-    // 帶了 --resume、還在等回報。
     let (bot, run) = resumed_run(&app, &e.project_id, "pending", Some("s-1")).await;
     assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(true), json!("s-1"), Value::Null));
-    // SessionStart 在回應組好之前就到了：暫存欄位清掉，但接回了就是接回了。
     session_start(&app, &bot, &run, "s-1").await;
     let marker: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
     assert_eq!(marker, None, "前提：暫存欄位真的被清掉了");
     assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(true), json!("s-1"), json!("verified")));
 
-    // CLI 開了新對話：不是接回。
     let (bot, run) = resumed_run(&app, &e.project_id, "mismatch", Some("s-2")).await;
     session_start(&app, &bot, &run, "s-brand-new").await;
     assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(false), Value::Null, json!("mismatch")));
 
-    // 這次根本沒帶 --resume（接不回、退回開新對話）。
     let (_bot, run) = resumed_run(&app, &e.project_id, "fresh", None).await;
     assert_eq!(summary(&started_json(&app, &run, &opts).await.unwrap()), (json!(false), Value::Null, Value::Null));
 
-    // 沒要求 resume：只回 run_id，跟以前一樣。
     assert_eq!(started_json(&app, &run, &lifecycle::StartOpts::default()).await.unwrap(), json!({"run_id": run}));
 }
 
@@ -74,7 +69,6 @@ async fn waking_a_sleeping_bot_that_could_not_resume_says_so() {
     let e = tt::env().await;
     let app = e.app.clone();
     let bot = tt::claude_bot(&app, &e.project_id, "sleeper").await;
-    // 睡著了，但沒有任何一段對話可以接（沒有 native session）。
     sqlx::query("INSERT INTO bot_sleeps (bot_id, native_session_id, idle_minutes, reason, slept_at) VALUES (?,NULL,90,'idle',?)")
         .bind(&bot.id)
         .bind(db::now())

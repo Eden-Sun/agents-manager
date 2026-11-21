@@ -25,7 +25,6 @@ fn a_real_tall_restored_draft_reads_as_a_draft() {
     let marker = lines.iter().rposition(|l| delivery::strip_ansi(l).starts_with('❯')).unwrap();
     assert!(lines.len() - marker > COMPOSER_TAIL, "fixture 的框頂要真的在預設範圍之外（不然測不到什麼）");
     assert_eq!(box_state("claude", TALL_DRAFT), BoxState::NonEmpty);
-    // `composer_text` 讀到第一個空白列為止（既有行為）：這裡要的是「讀得出草稿」，不是整段。
     let text = composer_text("claude", TALL_DRAFT).unwrap();
     assert!(text.starts_with("fix\n這是一段合成的多行貼上"), "{text}");
 }
@@ -162,7 +161,6 @@ async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
     let f = claude_with(vec!["aborted prompt A".into()]).await;
     let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
     bind_turn_prompt(&f, &turn, "aborted prompt A").await;
-    // 草稿在 settle 視窗內打進來：用固定的 race point 插入，不靠計時（測試裡 settle 只等 10 毫秒，#781）。
     let live = f.env.herdr.live.clone();
     super::super::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         let mut live = live.lock().unwrap();
@@ -240,8 +238,6 @@ async fn a_force_abort_does_not_clear_after_its_run_and_pane_are_replaced() {
     let bot_id = f.bot_id.clone();
     let old_run = f.run_id.clone();
     let live = f.env.herdr.live.clone();
-    // Land the replacement inside the settle window at a fixed point: a timed task loses to the
-    // 400 ms settle on a loaded host and lets the old binding authorize the key (#781).
     super::super::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
             .bind(old_run)
@@ -280,8 +276,6 @@ async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
         .unwrap();
     let app = f.env.app.clone();
     let run_id = f.run_id.clone();
-    // The session changes after the candidate read matched: only the re-check right before Ctrl+C
-    // can catch it. A timed task raced the settle sleep and lost under load (#781).
     super::super::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET native_session_id='session-B' WHERE id=?")
             .bind(run_id)

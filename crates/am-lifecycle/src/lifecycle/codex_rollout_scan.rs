@@ -118,7 +118,6 @@ impl NegativeCache {
     fn plan(&mut self, identity: &CacheIdentity, snapshot: FileSnapshot, now: Instant, limits: ScanLimits) -> CachePlan {
         self.expire(now, limits.cache_ttl);
 
-        // A new run supersedes every negative result retained for this bot.
         if self
             .0
             .iter()
@@ -127,8 +126,6 @@ impl NegativeCache {
             self.0.retain(|e| e.identity.bot_id != identity.bot_id);
         }
 
-        // Without a reliable file instance, neither a negative hit nor an incremental range
-        // can safely be reused. Unix records use dev/inode; other platforms fail closed here.
         let Some(instance) = snapshot.instance else {
             self.forget(identity);
             return CachePlan::ScanFrom {
@@ -176,7 +173,6 @@ impl NegativeCache {
                 }
             }
             Some(_) => {
-                // Truncation or a different file instance invalidates every proof/cursor.
                 self.forget(identity);
                 CachePlan::ScanFrom {
                     floor: 0,
@@ -279,8 +275,6 @@ impl FileSnapshot {
 
     #[cfg(not(unix))]
     fn from_metadata(metadata: &fs::Metadata) -> Self {
-        // No reliable cross-platform file-instance id is available in std on these targets.
-        // Disable negative reuse rather than treating path and length as identity.
         let modified = metadata.modified().ok().and_then(|time| {
             time.duration_since(STANDARD_UNIX_EPOCH).ok().map(|duration| FileTime {
                 seconds: duration.as_secs() as i64,
@@ -754,9 +748,6 @@ where
     let mut chunks = Vec::new();
     let mut line_reversed = Vec::new();
 
-    // For an incremental scan, floor is old_len minus a line-sized overlap. Any record
-    // completed by the append is therefore wholly inside the scanned range; the prefix
-    // before floor was already completely scanned at the previous file length.
     while cursor > floor {
         let remaining = limits.max_scan_bytes.saturating_sub(bytes_scanned);
         if remaining == 0 {
@@ -821,7 +812,6 @@ where
         cursor = start;
     }
 
-    // At byte zero, the first record may not have a preceding newline.
     if floor == 0 && !line_reversed.is_empty() {
         line_reversed.reverse();
         let line = String::from_utf8_lossy(&line_reversed);
@@ -1904,7 +1894,6 @@ mod tests {
             "not json".to_string(),
         ];
         for line in &rows {
-            // Original inline predicates from origin/main, retained as independent comparison.
             let old_prompt = (|| {
                 let is_match = crate::lifecycle::delivery::codex_user_text(line)
                     .is_some_and(|t| sent.iter().any(|s| s == &t));
@@ -1987,7 +1976,6 @@ mod tests {
         serde_json::json!({"type": "event_msg", "timestamp": at, "payload": payload}).to_string()
     }
 
-    // The returned JSONL record is exactly output_len bytes (the fixture uses ASCII output).
     fn noise_line(output_len: usize) -> String {
         let base = serde_json::json!({
             "type": "response_item", "payload": {"type": "function_call_output", "output": ""}

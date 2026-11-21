@@ -48,7 +48,6 @@ fn ids_are_stable_and_match_the_dedupe_markers_already_in_use() {
     let codex = codex_sections_fixture();
     let e0155 = entries("codex", &codex, "0.155.0");
     let e0155_1 = entries("codex", &codex, "0.155.1");
-    // #205–#207 的去重標記已經用了這些值：對不上就是正規化寫法變了。
     assert_eq!(find(&e277, "invisible Unicode formatting").id, "b61f2b664d");
     assert_eq!(find(&e277, "Added AGENTS.md support").id, "4257013a6a");
     assert_eq!(find(&e277, "terminal color codes").id, "c9928fd626");
@@ -91,7 +90,6 @@ fn claude_fixture_keeps_the_entries_that_matter() {
     let unicode = find(&e277, "invisible Unicode formatting");
     assert_eq!(unicode.bucket, Bucket::Kept);
     assert!(unicode.categories.contains(&"tui".to_string()), "prompt 輸入框語意：{:?}", unicode.categories);
-    // 軟 drop 的回歸測試：括號裡提到 Bedrock／Vertex／Foundry 不能讓整條被丟掉。
     let agents = find(&e277, "Added AGENTS.md support");
     assert_eq!(agents.bucket, Bucket::Kept);
     assert!(agents.categories.contains(&"instructions".to_string()));
@@ -122,7 +120,6 @@ fn codex_body_is_cut_at_changelog_heading_and_headings_do_not_truncate_sections(
     assert_eq!(find(&e0155, "Touch ID").bucket, Bucket::Dropped);
     assert_eq!(find(&e0155, "Python SDK").bucket, Bucket::Dropped);
     assert_eq!(entries("codex", &all, "0.155.1").len(), 1);
-    // `GET /api/changelog` 用的 parse_changelog 行為不變：body 遇到 `## New Features` 就結束。
     let md = changelog::codex_releases_to_md(CODEX_JSON).unwrap();
     assert!(changelog::parse_changelog(&md).iter().all(|s| !s.body.contains("Touch ID")));
 }
@@ -136,9 +133,7 @@ async fn first_run_records_the_installed_baseline_and_returns_nothing_pending() 
     assert!(r.pending.is_empty());
     let row = ledger::get(&p, "claude", "2.1.278").await.unwrap().unwrap();
     assert_eq!(row.status, ledger::Status::Empty);
-    // 帳本已有基準：同一份 feed 再跑，沒有新版。
     assert!(check_from_feed(&p, "claude", &all, None, None).await.unwrap().pending.is_empty());
-    // 沒有基準又讀不到磁碟版本 → 明確報錯，不猜。
     let fresh = pool().await;
     assert!(check_from_feed(&fresh, "claude", &all, None, None).await.is_err());
 }
@@ -149,16 +144,13 @@ async fn replay_2_1_275_to_278_gives_a_row_per_version_and_276_is_empty() {
     let all = claude_sections();
     let r = check_from_feed(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert_eq!((r.from.as_str(), r.to.as_str()), ("2.1.275", "2.1.278"));
-    // 三版各一列；276 全被丟掉 → empty，不在 pending。
     assert_eq!(ledger::list(&p, Some("claude"), None).await.unwrap().len(), 3);
     assert_eq!(ledger::get(&p, "claude", "2.1.276").await.unwrap().unwrap().status, ledger::Status::Empty);
-    // 契約：pending 舊版在前、新版在後（kick 截斷時 request-id 取該批最後一版，靠這個順序）。
     assert_eq!(r.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["2.1.277", "2.1.278"], "升冪；278 的 `/status` 那條進 kept");
     let v277 = &r.pending[0];
     assert!(v277.kept.iter().any(|k| k.id == "b61f2b664d" && !k.categories.is_empty()));
     assert!(v277.kept.iter().any(|k| k.id == "4257013a6a"));
     assert!(v277.dropped_count > 20 && v277.kept.len() + v277.unmatched.len() + v277.dropped_count == 87);
-    // 輸出契約：欄位名固定。
     let j = serde_json::to_value(&r).unwrap();
     assert!(j.get("kind").is_some() && j.get("from").is_some() && j.get("to").is_some());
     let pv = &j["pending"][0];
@@ -178,8 +170,6 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
     let all = claude_sections();
     let first = check_from_feed(&p, "claude", &all, None, Some("2.1.275")).await.unwrap();
     assert_eq!(first.pending.len(), 2);
-    // 還沒派工就重跑（沒有 `agm assign`／`release-triage dispatched` 介入）：
-    // 兩版還是 pending，理應照樣列出，不能因為 `from` 已經追上這一版就消失。
     let second = check_from_feed(&p, "claude", &all, None, None).await.unwrap();
     assert_eq!(second.from, "2.1.278", "from＝帳本已分診的最大版本");
     assert_eq!(
@@ -187,7 +177,6 @@ async fn rerun_before_dispatch_still_reports_the_same_pending_versions() {
         first.pending.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
         "沒派工、狀態沒變，兩次列出來的應該一樣"
     );
-    // 派出去之後才不再是 pending；重跑 --since 也不會重複派。
     let both = ["2.1.277".to_string(), "2.1.278".to_string()];
     assert_eq!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.unwrap(), 2);
     assert!(ledger::mark_dispatched(&p, "claude", &both, "bot-worker").await.is_err(), "CAS：已 dispatched 的不再接受重複派工");
@@ -213,7 +202,6 @@ async fn stale_dispatch_goes_back_to_pending_and_fails_after_three_attempts() {
     ledger::insert_version(&p, "claude", "2.1.277", &es).await.unwrap();
     for round in 1..=3 {
         ledger::mark_dispatched(&p, "claude", &["2.1.277".into()], "bot-worker").await.unwrap();
-        // 剛派出去：還沒過期，不動。
         assert!(ledger::requeue_stale(&p, "claude").await.unwrap().is_empty());
         let old = (chrono::Utc::now() - chrono::Duration::hours(7)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         sqlx::query("UPDATE release_triage SET dispatched_at = ? WHERE kind='claude' AND version='2.1.277'").bind(old).execute(&p).await.unwrap();
@@ -336,12 +324,10 @@ async fn pending_is_sorted_oldest_first_numerically() {
 
 #[test]
 fn cli_version_output_with_a_name_prefix_is_still_a_version() {
-    // AGM 2026-09-19 實測：`codex --version` 印 `codex-cli 0.154.0`，以前整個 check 掛掉、kick 每輪跳過 codex。
     for (line, want) in [
         ("codex-cli 0.154.0", Some("0.154.0")),
         ("2.1.278 (Claude Code)", Some("2.1.278")),
         ("herdr 0.8.2", Some("0.8.2")),
-        // 前面有帶點的非版本 token（檔名、網址）不能讓後面真的版本被略過。
         ("claude.real 2.1.278", Some("2.1.278")),
         ("herdr.exe 0.9.1 (build 2026.09.10)", Some("0.9.1")),
         ("codex-cli", None),
@@ -351,7 +337,6 @@ fn cli_version_output_with_a_name_prefix_is_still_a_version() {
     }
 }
 
-// Offline fixtures explicitly choose their largest version; production must supply an upstream target.
 async fn check_from_feed(pool: &SqlitePool, kind: &str, all: &[Section], installed: Option<&str>, since: Option<&str>) -> anyhow::Result<CheckReport> {
     let target = all.iter().filter_map(|s| crate::changelog::parse_version(&s.version).map(|v| (v, s.version.clone())))
         .max().map(|(_, v)| v).ok_or_else(|| anyhow::anyhow!("fixture has no version"))?;

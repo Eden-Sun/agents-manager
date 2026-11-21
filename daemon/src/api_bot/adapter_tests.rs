@@ -312,10 +312,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Safety Tests
-    // =========================================================================
-
     #[tokio::test]
     async fn test_single_fresh_reservation_arms_one_shot_permit_verified_by_http() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
@@ -356,12 +352,10 @@ mod tests {
             content: serde_json::json!("Permit message"),
         }];
 
-        // Complete without reserve fails; exactly 0 HTTP calls
         use runner::Model;
         assert!(adapter.complete(&messages, &cancel).await.is_err());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
 
-        // Reserve checkpoint
         let mut state = State::default();
         state.messages = messages.clone();
         state.api_pending = true;
@@ -369,12 +363,10 @@ mod tests {
         use runner::Journal;
         adapter.save(&state).await.expect("reserve checkpoint");
 
-        // First complete consumes permit and dispatches 1 HTTP call
         let resp1 = adapter.complete(&messages, &cancel).await;
         assert!(resp1.is_ok());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 1);
 
-        // Second complete fails immediately; wire calls remain 1
         let resp2 = adapter.complete(&messages, &cancel).await;
         assert!(resp2.is_err());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 1);
@@ -450,7 +442,6 @@ mod tests {
         use runner::Journal;
         adapter.save(&state).await.unwrap();
 
-        // 1. Attempt dispatch with mismatched message content -> zero wire calls
         let mismatched_messages = vec![Message {
             role: "user".into(),
             content: serde_json::json!("Altered content"),
@@ -462,7 +453,6 @@ mod tests {
             .is_err());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
 
-        // 2. Dispatch with original messages -> 1 wire call, body exactly matches expected
         let resp = adapter.complete(&messages, &cancel).await;
         assert!(resp.is_ok());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 1);
@@ -527,7 +517,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Force DB error by deleting turn before reserve
         sqlx::query("DELETE FROM turns WHERE id=?")
             .bind(&turn)
             .execute(&pool)
@@ -542,7 +531,6 @@ mod tests {
         state.api_pending = true;
 
         use runner::Journal;
-        // Reserve fails because turn owner check fails
         assert!(adapter.save(&state).await.is_err());
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
 
@@ -552,7 +540,6 @@ mod tests {
     #[tokio::test]
     async fn test_untrusted_and_malformed_usage_transport_routes() {
         let wire_calls = Arc::new(AtomicUsize::new(0));
-        // HTTP 200 with negative usage tokens
         let server = spawn_mock_server(
             wire_calls.clone(),
             serde_json::json!({
@@ -594,7 +581,6 @@ mod tests {
         let res = runner::run(&adapter, &adapter, &adapter, &mut state, &cancel, 2).await;
         assert!(res.is_err());
 
-        // 回應已成功收到：用量不可信時費用不明，按預留額（上限）記成 recorded，pending 收掉（不再卡成 unknown）。
         let row: (String, Option<i64>, i64) = sqlx::query_as(
             "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
         )
@@ -876,7 +862,7 @@ mod tests {
     async fn test_checkpoint_bytes_limit_enforced_fail_closed() {
         let (pool, bot, run, turn, session) = setup_test_db().await;
         let mut limits = test_limits();
-        limits.max_checkpoint_bytes = 200; // Artificially small limit
+        limits.max_checkpoint_bytes = 200;
 
         let adapter = ApiBotAdapter::new(
             pool.clone(),
@@ -913,7 +899,6 @@ mod tests {
         state.api_pending = true;
 
         use runner::Journal;
-        // Checkpoint serialization exceeds 200 bytes -> must fail closed
         assert!(adapter.save(&state).await.is_err());
     }
 
@@ -960,17 +945,14 @@ mod tests {
         state.api_pending = true;
 
         use runner::Journal;
-        // Reserve attempt
         adapter.save(&state).await.expect("reserve ok");
 
-        // Dispatch genuine wire complete
         use runner::Model;
         let _resp = adapter
             .complete(&state.messages, &cancel)
             .await
             .expect("complete ok");
 
-        // Now maliciously forge a different assistant response in state.responses
         let mut forged_state = state.clone();
         forged_state.api_pending = false;
         forged_state.responses.push(Response {
@@ -985,11 +967,9 @@ mod tests {
             content: serde_json::json!([{"type": "text", "text": "Maliciously injected text"}]),
         });
 
-        // Unconditional assertion: Attempting to record this forged response MUST fail!
         let record_res = adapter.save(&forged_state).await;
         assert!(record_res.is_err(), "forged response save must be rejected");
 
-        // While run is still running, attempt remains in reserved state with estimated_microusd = NULL
         let row_running: (String, Option<i64>, i64) = sqlx::query_as(
             "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
         )
@@ -1002,7 +982,6 @@ mod tests {
         assert_eq!(row_running.1, None);
         assert_eq!(row_running.2, 10_000);
 
-        // When lifecycle later transitions run to stopping and calls recover_unknown:
         sqlx::query("UPDATE runs SET state='stopping' WHERE id=?")
             .bind(&run)
             .execute(&pool)
@@ -1081,7 +1060,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Simulate tool pending checkpoint
         let mut state = State::default();
         state.messages = vec![Message {
             role: "user".into(),
@@ -1091,23 +1069,19 @@ mod tests {
         state.tool_pending = Some("call_1".into());
 
         use runner::Journal;
-        // Save tool pending checkpoint
         adapter.save(&state).await.expect("save tool pending");
         assert_eq!(adapter.current_revision().await, 1);
 
-        // Attempting to reserve while tool_pending is active MUST fail closed
         state.api_pending = true;
         assert!(adapter.save(&state).await.is_err());
         assert_eq!(adapter.current_revision().await, 1);
 
-        // Resolve tool pending
         state.api_pending = false;
         state.tool_pending = None;
         adapter.save(&state).await.expect("settle tool pending");
         let settled_rev = adapter.current_revision().await;
         assert_eq!(settled_rev, 2);
 
-        // Now setup second turn for rebind
         let now = am_base::db::now();
         sqlx::query("UPDATE turns SET status='completed' WHERE id=?")
             .bind(&turn1)
@@ -1127,10 +1101,9 @@ mod tests {
             bot_id: bot.clone(),
             run_id: run.clone(),
             turn_id: "t2".into(),
-            generation: 2, // generation advances to old + 1
+            generation: 2,
         };
 
-        // Supported models can cross-resume; unsupported models cannot.
         let previous: State = serde_json::from_value(serde_json::json!({
             "messages": [], "responses": [{"id":"prior","model":"claude-opus-5-5","content":[],"stop_reason":"end_turn","usage":{}}],
             "api_pending":false,"tool_pending":null,"completed_tool_ids":[]
@@ -1156,11 +1129,10 @@ mod tests {
         sqlx::query("UPDATE api_bot_sessions SET checkpoint_json=? WHERE id=?")
             .bind(serde_json::to_string(&state).unwrap()).bind(&old_identity.session_id).execute(&pool).await.unwrap();
 
-        // Rebind constructor for turn 2 succeeds cleanly
         let rebind_res = ApiBotAdapter::rebind(
             pool.clone(),
             &old_identity,
-            settled_rev, // dynamically retrieved settled revision (2)
+            settled_rev,
             new_identity,
             test_options(),
             serde_json::json!("System"),
@@ -1213,7 +1185,6 @@ mod tests {
             generation: 1,
         };
 
-        // Create adapter with initial frozen system
         let _adapter = ApiBotAdapter::new(
             pool.clone(),
             identity.clone(),
@@ -1237,7 +1208,6 @@ mod tests {
         .await
         .unwrap();
 
-        // 1. Rebind with a different system: effective system remains FrozenOriginalSystem
         let turn2 = "t2";
         sqlx::query("UPDATE turns SET status='completed' WHERE id=?")
             .bind(&turn1)
@@ -1284,8 +1254,6 @@ mod tests {
         );
         assert_eq!(rebound_state.system, Some("FrozenOriginalSystem".into()));
 
-        // 2. Old checkpoint without stored system: rebind falls back to composing once
-        // Strip system from checkpoint in DB
         let old_chk_val = serde_json::json!({
             "messages": [], "responses": [],
             "api_pending": false, "tool_pending": null, "completed_tool_ids": []
@@ -1345,10 +1313,6 @@ mod tests {
 
         server.shutdown().await;
     }
-
-    // =========================================================================
-    // 32-Round Interleaving Stress Test (Registry + Adapter + Stop Race)
-    // =========================================================================
 
     #[tokio::test]
     async fn test_adapter_registry_stop_race_32_rounds() {
@@ -1421,28 +1385,23 @@ mod tests {
                     )
                     .await;
 
-                    // Send the concrete runner::Result to coordinator BEFORE exiting
                     let _ = tx_result.send(outcome);
                     release_gate_child.notified().await;
                     Ok(TurnOutcome::Completed)
                 })
                 .unwrap();
 
-            // Wait for HTTP server to receive the request
             tokio::time::timeout(DEADLOCK_TIMEOUT, pause_notify.notified())
                 .await
                 .expect("server received HTTP call within timeout");
 
             if i % 2 == 0 {
-                // Stop wins branch:
-                // 1. CAS run to stopping while HTTP is suspended
                 sqlx::query("UPDATE runs SET state='stopping' WHERE id=?")
                     .bind(&run)
                     .execute(&pool)
                     .await
                     .unwrap();
 
-                // 2. Poll cancel_and_join to Pending to guarantee cancel token is fired
                 let cancel_token = ticket.cancellation_token();
                 let mut join_fut = Box::pin(async move {
                     cancel_token.cancel();
@@ -1450,10 +1409,8 @@ mod tests {
                 });
                 assert!(poll_once(join_fut.as_mut()).is_pending());
 
-                // 3. Unpause server so HTTP completes, but adapter discovers owner is stopping
                 unpause_notify.notify_one();
 
-                // 4. Await runner result proof: must match Cancelled or Journal error
                 let runner_res = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
                     .await
                     .expect("rx_result within timeout")
@@ -1470,7 +1427,6 @@ mod tests {
                     runner_res
                 );
 
-                // 5. Release task and await join completion
                 release_gate.notify_one();
                 let join_outcome = tokio::time::timeout(DEADLOCK_TIMEOUT, join_fut)
                     .await
@@ -1479,7 +1435,6 @@ mod tests {
                 assert_eq!(join_outcome, TurnOutcome::Completed);
                 assert!(!registry.is_active(&run));
 
-                // 6. Call recover_unknown and verify DB
                 am_base::db::api_bot::recover_unknown(&pool, &run)
                     .await
                     .unwrap();
@@ -1496,18 +1451,14 @@ mod tests {
                 assert_eq!(row.1, None);
                 assert_eq!(row.2, 10_000);
             } else {
-                // Record wins branch:
-                // 1. Unpause server immediately to let HTTP complete and record commit
                 unpause_notify.notify_one();
 
-                // 2. Await runner result proof: must be EndTurn and recorded in DB
                 let runner_res = tokio::time::timeout(DEADLOCK_TIMEOUT, rx_result)
                     .await
                     .expect("rx_result within timeout")
                     .expect("channel valid");
                 assert_eq!(runner_res, Ok(Halt::EndTurn));
 
-                // 3. Poll cancel_and_join to Pending to ensure subscription
                 let cancel_token = ticket.cancellation_token();
                 let mut join_fut = Box::pin(async move {
                     cancel_token.cancel();
@@ -1515,7 +1466,6 @@ mod tests {
                 });
                 assert!(poll_once(join_fut.as_mut()).is_pending());
 
-                // 4. Release task to allow it to exit cleanly
                 release_gate.notify_one();
 
                 let outcome = tokio::time::timeout(DEADLOCK_TIMEOUT, join_fut)
@@ -1525,7 +1475,6 @@ mod tests {
                 assert_eq!(outcome, TurnOutcome::Completed);
                 assert!(!registry.is_active(&run));
 
-                // 5. Verify attempt in DB is recorded with estimated microUSD
                 let row: (String, Option<i64>, i64) = sqlx::query_as(
                     "SELECT state, estimated_microusd, reserved_microusd FROM api_bot_attempts WHERE turn_id=?",
                 )
@@ -1540,7 +1489,6 @@ mod tests {
             }
         }
 
-        // All 32 rounds sent genuine wire HTTP requests
         assert_eq!(wire_calls.load(Ordering::SeqCst), total_iterations);
 
         server.shutdown().await;
@@ -1569,7 +1517,6 @@ mod tests {
             generation: 1,
         };
 
-        // 插入一筆已花費 0.95 美元 (950,000 微美元) 的 attempt
         sqlx::query(
             "INSERT INTO api_bot_attempts(id, session_id, bot_id, run_id, turn_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, created_at)
              VALUES(?, NULL, ?, ?, ?, 1, 0, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', 'standard', 'recorded', 950000, 950000, 'v1', '2026-11-02T01:00:00Z')",
@@ -1582,7 +1529,6 @@ mod tests {
         .await
         .unwrap();
 
-        // 報價 100,000 微美元（0.1 美元），累計 0.95 + 0.1 = 1.05 > 1.0 上限
         let quote = Arc::new(TestQuoteProvider {
             reserved_amount: 100_000,
             estimated_amount: 100_000,
@@ -1613,8 +1559,6 @@ mod tests {
         let refusal = adapter.take_refusal();
         assert_eq!(refusal.as_deref(), Some("api_total_cap_reached:cap=1:spent=0.95"));
     }
-
-    // ── checkpoint 版本標籤與 session 固定 provider（openai-api 切片 A 第 4 片）──────────────────────────────
 
     use crate::api_bot::http;
     use crate::api_bot::runner::Journal as _;
@@ -1693,7 +1637,6 @@ mod tests {
         assert_eq!((saved["v"].as_u64(), saved["provider"].as_str()), (Some(2), Some("anthropic")), "an untagged runner state is stamped with the session's tag");
         assert_eq!(saved["messages"][0]["content"], "hello");
 
-        // 帶著別的 provider 標籤的 state 不是這個 session 的 transcript：拒絕，什麼都不寫。
         let foreign = State { v: Some(2), provider: Some("openai".into()), ..user_turn("other") };
         assert!(adapter.save(&foreign).await.is_err());
         assert_eq!(stored_checkpoint(&pool, &session).await.2, saved);
@@ -1722,7 +1665,6 @@ mod tests {
         let (_, _, saved) = stored_checkpoint(&pool, &session).await;
         assert!(saved.get("v").is_none() && saved.get("provider").is_none(), "a legacy session stays in the legacy shape: {saved}");
         assert_eq!(saved["messages"].as_array().unwrap().len(), 3);
-        // 舊 session 不會被默默升級成別的 provider。
         let tagged = State { v: Some(2), provider: Some("anthropic".into()), ..state.clone() };
         assert!(rebound.save(&tagged).await.is_err());
     }
@@ -1743,8 +1685,6 @@ mod tests {
             assert_eq!(stored, foreign, "{tag}");
         }
     }
-
-    // ── 供應商由呼叫端指定（openai-api D2b-1）：帳本範圍與總上限跟著 session 的供應商 ──────────────────────────
 
     use crate::api_bot::adapter::AdapterProvider;
     use crate::api_bot::provider::{ProviderExtras, SessionOptions};
@@ -1781,7 +1721,6 @@ mod tests {
         adapter.save(&pending("hello")).await.expect("reserved under the openai cap");
         assert_eq!(attempts(&pool).await, [("openai".to_string(), Some("standard".to_string()), "reserved".to_string(), 10_000)]);
         assert_eq!(stored_checkpoint(&pool, &session).await.2["provider"], "openai");
-        // Claude 的總上限只算 anthropic 的 attempt：openai 花了多少都不影響。
         let mut conn = pool.acquire().await.unwrap();
         assert_eq!(am_base::db::api_bot::provider_spent_microusd(&mut conn, "anthropic", "2000-01-01T00:00:00.000Z").await.unwrap(), 0);
         assert_eq!(am_base::db::api_bot::provider_spent_microusd(&mut conn, "openai", "2000-01-01T00:00:00.000Z").await.unwrap(), 10_000);
@@ -1795,7 +1734,6 @@ mod tests {
         let identity = AdapterIdentity { session_id: session, bot_id: bot.clone(), run_id: run, turn_id: turn, generation: 1 };
         let openai = ApiBotAdapter::new_with(pool.clone(), identity, openai_spec(), serde_json::json!("sys"), capped(0.015), tag_http("http://127.0.0.1:9"), None).await.unwrap();
         openai.save(&pending("one")).await.expect("within the openai cap");
-        // 再開一顆 Claude bot（自己的 run／turn／session）。
         let now = am_base::db::now();
         sqlx::query("INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES('b-claude','p','claude-side','claude-api','fixture',?)").bind(&now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO runs(id,bot_id,state,started_at) VALUES('r-claude','b-claude','running',?)").bind(&now).execute(&pool).await.unwrap();
@@ -1829,7 +1767,6 @@ mod tests {
     async fn an_exhausted_openai_cap_refuses_the_reservation_with_a_named_reason() {
         let (pool, bot, run, turn, session) = setup_test_db().await;
         let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn, generation: 1 };
-        // 上限 $0.005，報價 $0.01：第一筆就超過。
         let adapter = ApiBotAdapter::new_with(pool.clone(), identity, openai_spec(), serde_json::json!("sys"), capped(0.005), tag_http("http://127.0.0.1:9"), None).await.unwrap();
         let (revision, _, before) = stored_checkpoint(&pool, &session).await;
         assert!(adapter.save(&pending("too expensive")).await.is_err());
@@ -1842,17 +1779,14 @@ mod tests {
     /// 接續時供應商必須與 session 的一致：Claude 的 session 用 openai 接、openai 的 session 用 Claude 接，都拒絕且不改 owner／revision。
     #[tokio::test]
     async fn rebinding_with_another_provider_than_the_sessions_is_refused_before_any_durable_change() {
-        // Claude 的 session（tag_session 開的）用 openai 接。
         let (pool, session, _adapter, identity, next) = tag_session().await;
         hand_over_turn(&pool, &identity, &next).await;
         let refused = ApiBotAdapter::rebind_with(pool.clone(), &identity, 0, next.clone(), openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await;
         assert!(refused.is_err());
         let (revision, owner_turn, _) = stored_checkpoint(&pool, &session).await;
         assert_eq!((revision, owner_turn.as_str()), (0, identity.turn_id.as_str()));
-        // 用對的供應商就接得上。
         assert!(tag_rebind(&pool, &identity, 0, &next).await.is_ok());
 
-        // openai 的 session 用 Claude 接。
         let (pool, bot, run, turn, session) = setup_test_db().await;
         let identity = AdapterIdentity { session_id: session.clone(), bot_id: bot, run_id: run, turn_id: turn, generation: 1 };
         ApiBotAdapter::new_with(pool.clone(), identity.clone(), openai_spec(), serde_json::json!("sys"), test_limits(), tag_http("http://127.0.0.1:9"), None).await.unwrap();
@@ -1865,8 +1799,6 @@ mod tests {
         assert_eq!(state.provider_id(), "openai");
         drop(rebound);
     }
-
-    // ---- Journal 失敗的具名原因與統一出口 log（2026-11-19）----
 
     fn one_message_state(text: &str, pending: bool) -> State {
         State {
@@ -1909,7 +1841,6 @@ mod tests {
         let (result, diag) = adapter.save_observed(&state).await;
         assert_eq!(result, Err(runner::JournalFailure::CheckpointTooLarge));
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0);
-        // 統一出口記的就是這一行（真實 save 路徑產生的診斷資料）：只含 reason、id、數字與 SQLite 代碼。
         let line = diag.log_line(runner::JournalFailure::CheckpointTooLarge);
         assert_eq!(line.matches("reason=checkpoint_too_large").count(), 1, "{line}");
         assert!(line.contains("limit=Some(64)") && line.contains("bot_id="), "{line}");
@@ -1919,17 +1850,14 @@ mod tests {
     #[tokio::test]
     async fn stale_revision_fence_and_real_write_failure_get_their_own_reasons() {
         use crate::api_bot::runner::Journal as _;
-        // 別的寫入先到了（revision 被推進）：stale_revision，不是「對話狀態無法寫入」。
         let (adapter, pool, session, _run, _) = journal_adapter(test_limits()).await;
         sqlx::query("UPDATE api_bot_sessions SET revision = revision + 1 WHERE id = ?").bind(&session).execute(&pool).await.unwrap();
         assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::StaleRevision));
 
-        // 回合的 run 已結束：圍籬對不上，fence_mismatch。
         let (adapter, pool, _session, run, _) = journal_adapter(test_limits()).await;
         sqlx::query("UPDATE runs SET state = 'stopped' WHERE id = ?").bind(&run).execute(&pool).await.unwrap();
         assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::FenceMismatch));
 
-        // 真正的寫入失敗（連線池已關閉）：db_write_failed，這才是唯一顯示「對話狀態無法寫入」的原因。
         let (adapter, pool, _session, _run, _) = journal_adapter(test_limits()).await;
         pool.close().await;
         assert_eq!(adapter.save(&one_message_state("a", false)).await, Err(runner::JournalFailure::DbWriteFailed));
@@ -1939,7 +1867,7 @@ mod tests {
     async fn turn_cap_too_small_refuses_before_http_with_the_named_reason() {
         use crate::api_bot::runner::Journal as _;
         let mut limits = test_limits();
-        limits.max_turn_microusd = 1; // 預留 10_000 超過單回合上限
+        limits.max_turn_microusd = 1;
         let (adapter, _pool, _session, _run, wire_calls) = journal_adapter(limits).await;
         assert_eq!(adapter.save(&one_message_state("hi", true)).await, Err(runner::JournalFailure::Refused));
         assert_eq!(wire_calls.load(Ordering::SeqCst), 0, "cap 不足：HTTP 之前就拒絕");

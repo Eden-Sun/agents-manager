@@ -64,14 +64,13 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
         for at in PROBES {
             tokio::time::sleep(Duration::from_millis(at - waited)).await;
             waited = at;
-            // 事件帶來的 Run 是更新前的複本：每次重讀，狀態才是現在的。
             let Ok(Some(run)) = db::run(&app.db, &run_id).await else { return };
             if run.state != "running" {
                 forget(&run_id);
                 return;
             }
             if run.agent_status != "idle" {
-                return; // 不再 idle：`on_not_idle` 負責收尾
+                return;
             }
             if delivery_in_progress(&app, &run.bot_id).await {
                 continue;
@@ -192,12 +191,10 @@ mod tests {
         on_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![true]);
 
-        // 使用者在終端清掉，下一個 idle 邊讀到空框。
         e.herdr.live_pane(&pane_id, pane(vec![]));
         on_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![false]);
 
-        // 再來一輪：先有草稿 → true，回合開始（working）→ false，不用讀畫面。
         e.herdr.live_pane(&pane_id, pane(vec!["又一段".into()]));
         on_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![true]);
@@ -205,7 +202,6 @@ mod tests {
         on_not_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![false]);
         assert_eq!(e.herdr.pane(&pane_id).unwrap().reads, reads_before, "回合開始只推事件，不讀 pane");
-        // 沒推過 true 的 run，回合開始什麼都不推。
         on_not_idle(&e.app, &run_of(&e.app, &run_id).await);
         assert!(drain(&mut rx, 200).await.is_empty());
     }
@@ -253,7 +249,6 @@ mod tests {
             on_idle(&e.app, &run_of(&e.app, &run_id).await);
             assert!(drain(&mut rx, 300).await.is_empty(), "{status}：送字中不推");
             assert_eq!(e.herdr.pane(&pane_id).unwrap().reads, 0, "{status}：送字中不讀 pane");
-            // 回合結束後再來一個 idle 邊：那段字還在框裡，這時才是卡住的草稿。
             sqlx::query("UPDATE turns SET status=? WHERE id=?").bind(if status == "queued" { "failed" } else { "completed" }).bind(&turn).execute(&e.app.db).await.unwrap();
             on_idle(&e.app, &run_of(&e.app, &run_id).await);
             assert_eq!(drain(&mut rx, 300).await.iter().map(|g| g.0).collect::<Vec<_>>(), vec![true], "{status}");
@@ -268,7 +263,6 @@ mod tests {
         let run_id = tt::fake_run(&e.app, &bot.id).await;
         let pane_id = format!("pane-{}", bot.id);
         e.herdr.live_pane(&pane_id, pane(vec![]));
-        // 一次探測花幾次 pane 讀取。
         let before = e.herdr.pane(&pane_id).unwrap().reads;
         assert_eq!(probe(&e.app, &run_of(&e.app, &run_id).await).await, Some(false));
         let per_probe = e.herdr.pane(&pane_id).unwrap().reads - before;

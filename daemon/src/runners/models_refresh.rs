@@ -342,7 +342,6 @@ mod tests {
             Ok(())
         })
         .await;
-        // 一趟結束後仍在限流內，狀態是 waiting（不是 none）。
         assert!(crate::testing::eventually!(ledger.status(&key()).await.state == RefreshState::Waiting));
         let c2 = calls.clone();
         let held = Ledger::schedule(&ledger, key(), move || async move {
@@ -403,7 +402,6 @@ mod tests {
         assert!(crate::testing::eventually!(ledger.status(&key()).await.state == RefreshState::Failed));
         let failed = ledger.status(&key()).await;
         assert!(failed.error.as_deref().is_some_and(|e| e.contains("timed out")), "{failed:?}");
-        // 名額已還：另一格立刻能跑完。
         let other = cache_key("local", "grok", None);
         Ledger::schedule(&ledger, other.clone(), || async { Ok(()) }).await;
         assert!(crate::testing::eventually!(ledger.status(&other).await.state == RefreshState::None));

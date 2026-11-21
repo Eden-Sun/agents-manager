@@ -2,7 +2,6 @@
 //! 草稿一律用中性假字；真畫面來自 2026-09-26 隔離 herdr session 的實抓（`fixtures/*-draft.ansi`／`*-cleared.ansi`）。
 
 use super::*;
-// ---- 真畫面：清框的鍵按下去之前／之後，daemon 讀得出什麼 ----
 
 const CLAUDE_DRAFT: &str = include_str!("fixtures/claude-2.1.281-draft.ansi");
 const CLAUDE_CLEARED: &str = include_str!("fixtures/claude-2.1.281-draft-cleared.ansi");
@@ -50,7 +49,6 @@ fn a_claude_draft_with_a_blank_row_reads_whole() {
     assert_ne!(screen, CLAUDE_MULTI, "fixture 換行的寫法變了，這個測試要跟著改");
     assert_eq!(composer_text("claude", &screen).as_deref(), Some("fixture line one"), "舊讀法：停在空白列");
     assert_eq!(composer_text_whole("claude", &screen).as_deref(), Some("fixture line one\n\nfixture line two\nfixture line three"));
-    // 沒有空白列的畫面兩種讀法一樣；codex／grok 維持原讀法。
     assert_eq!(composer_text_whole("claude", CLAUDE_MULTI).as_deref(), Some(THREE_LINES));
     for (kind, draft) in [("codex", CODEX_MULTI), ("grok", GROK_MULTI)] {
         assert_eq!(composer_text_whole(kind, draft), composer_text(kind, draft), "{kind}");
@@ -98,7 +96,6 @@ fn nr1913_snapshot_checks_content_and_metadata_even_with_zero_revision() {
         }
         assert!(!same_snapshot("claude", &before, &after), "{field}");
     }
-    // herdr 的 `truncated` 只說上面還有更舊的歷史；框一樣就是同一個框（w17:p21 2026-10-30）。
     let long = crate::herdr::PaneRead { truncated: true, ..before.clone() };
     assert!(same_snapshot("claude", &long, &long));
     assert!(same_snapshot("claude", &before, &long));

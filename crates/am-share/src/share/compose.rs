@@ -149,7 +149,6 @@ impl PhotoSource for PrefetchedSource {
             Some((_, Some(Ok(bytes)))) if bytes.len() as u64 <= max => Ok(bytes.clone()),
             Some((_, Some(Ok(_)))) => Err("source_too_large"),
             Some((_, Some(Err(why)))) => Err(why),
-            // 這一趟沒抓到（批次失敗、或回覆比要的少）：不是照片本身的事，不能當成永久的 not_found（#1434）。
             Some((_, None)) => Err("read_failed"),
             _ => Err("not_found"),
         }
@@ -169,7 +168,6 @@ impl PhotoSource for RecordingSource {
     fn stat(&self, parts: &[&str]) -> Result<PhotoMeta, &'static str> {
         let rel: Vec<String> = parts.iter().map(|p| (*p).to_string()).collect();
         let mut wanted = self.wanted.borrow_mut();
-        // 候選（原樣與 `%XX` 解碼後）合計最多 2×MAX_IMAGES 條，免得一份塞滿 `<image>` 的 SVG 讓遠端查太多。
         if wanted.len() < MAX_IMAGES * 2 && !wanted.contains(&rel) {
             wanted.push(rel);
         }
@@ -259,7 +257,6 @@ fn cache_put(k: Key, v: Embedded) {
     }
 }
 
-// 解碼次數（測試看快取有沒有生效）；`embed` 在呼叫端的執行緒上同步跑，平行的其他測試不會算進來。
 #[cfg(any(test, feature = "test-hooks"))]
 thread_local!(static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
@@ -298,7 +295,6 @@ pub fn embed_with(svg: &[u8], src: &dyn PhotoSource) -> Option<Vec<u8>> {
         };
         out.push_str(&rest[..lt]);
         let at = &rest[lt..];
-        // 註解、CDATA、宣告與處理指令原樣跳過，裡面的 `<image` 不算。
         let skip = [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>"), ("<!", ">")].into_iter().find(|(open, _)| at.starts_with(open));
         if let Some((open, close)) = skip {
             let end = at[open.len()..].find(close).map(|e| open.len() + e + close.len()).unwrap_or(at.len());
@@ -344,13 +340,11 @@ fn tag_end(at: &str) -> Option<usize> {
 fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, attempts: &mut usize, size_so_far: usize) -> Option<String> {
     let mut out = String::with_capacity(tag.len());
     let mut changed = false;
-    // 這個標籤已經處理過一個相對 href（嵌好或留了記號）；之後的相對 href 直接拿掉。
     let mut handled = false;
     let bytes = tag.as_bytes();
     let mut i = "<image".len();
     out.push_str(&tag[..i]);
     loop {
-        // 屬性之間的空白
         let ws_start = i;
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
@@ -378,7 +372,6 @@ fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, att
             j += 1;
         }
         let Some(&q) = bytes.get(j).filter(|b| matches!(b, b'"' | b'\'')) else {
-            // 沒加引號的屬性值不是合法 XML：剩下的原樣照抄。
             out.push_str(&tag[ws_start..]);
             break;
         };
@@ -398,8 +391,6 @@ fn rewrite_image_tag(tag: &str, src: &dyn PhotoSource, embedded: &mut usize, att
         if v.starts_with('#') || v.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("data:")) {
             out.push_str(&tag[ws_start..end]);
         } else if handled {
-            // 同一個標籤的第二個相對 href（常見：`href` 與 `xlink:href` 並寫）：前一個已經嵌好或留了記號，這個直接拿掉——
-            // 再處理一次會嵌兩份，或寫出第二個 `data-am-embed`（重複屬性＝整份 SVG 不合法）。
             changed = true;
         } else {
             handled = true;
@@ -530,7 +521,6 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
     if let Some(hit) = cache_get(&key) {
         return hit;
     }
-    // 只快取跟照片內容綁定的結果。讀取階段的失敗（遠端這一趟沒抓到、單次合計上限、檔案剛好在改）跟這張照片的身份無關：不快取，下次再試（#1393）。
     if meta.len > SOURCE_MAX {
         let result = Err("source_too_large");
         cache_put(key, result.clone());
@@ -538,7 +528,6 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
     }
     let bytes = match src.read(parts, SOURCE_MAX) {
         Ok(bytes) => bytes,
-        // 永久讀不到（遠端 stat 成功、讀檔被拒）：身份沒變就不會好，負快取，下一次不用再抓（#1434）。其他讀取階段的失敗照舊不快取。
         Err("not_found") => {
             let result = Err("not_found");
             cache_put(key, result.clone());
@@ -554,7 +543,6 @@ fn load(src: &dyn PhotoSource, parts: &[&str]) -> Embedded {
 /// 看檔頭判斷是不是收的圖；HEIC/HEIF 另外認出來，理由寫清楚。
 fn sniff(bytes: &[u8]) -> Result<ImageFormat, &'static str> {
     if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"avif") {
-        // HEIC 要 libheif（C 函式庫）才解得開，daemon 不帶；iPhone 從瀏覽器上傳時通常已經轉成 JPEG。
         return Err("heic_unsupported");
     }
     match image::guess_format(bytes) {
@@ -759,7 +747,6 @@ mod tests {
         assert_eq!(marks[3], (None, Some("not_found".into())));
         assert_eq!(marks[4], (Some("#sym".into()), None));
         assert_eq!(marks[5], (Some("data:image/png;base64,AAAA".into()), None));
-        // 沒有 <image>、或只有 #id／data: 的：原樣送。
         assert!(embed(svg("<rect/>").as_bytes(), &dir).is_none());
         assert!(embed(svg(r##"<image href="#a"/>"##).as_bytes(), &dir).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
@@ -768,7 +755,6 @@ mod tests {
     #[test]
     fn exif_orientation_is_applied() {
         let dir = scratch("exif");
-        // 200x100 的 JPEG，EXIF Orientation=6（順時針轉 90°）：嵌進去的要是 100x200。
         let raw = jpeg(200, 100);
         let exif: &[u8] = &[
             b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
@@ -795,7 +781,6 @@ mod tests {
         let b = embed(src.as_bytes(), &dir).unwrap();
         assert_eq!(a, b);
         assert_eq!(decodes_for_test() - before, 1, "第二次走快取");
-        // 換一張（大小不同）就重算。
         std::fs::remove_file(dir.join("inbox/p.jpg")).unwrap();
         std::fs::write(dir.join("inbox/p.jpg"), jpeg(600, 200)).unwrap();
         let c = embed(src.as_bytes(), &dir).unwrap();
@@ -861,7 +846,7 @@ mod tests {
        <image xlink:href="inbox/missing.jpg" href="inbox/missing.jpg" width="4" height="3"/>"#,
         );
         let out = embed(src.as_bytes(), &dir).expect("有要改的");
-        let imgs = images(&out); // 重複屬性的話這裡就 panic（「屬性要合法」）
+        let imgs = images(&out);
         assert_eq!(imgs.len(), 2);
         assert!(imgs[0].0.as_deref().unwrap().starts_with("data:image/jpeg;base64,"));
         assert_eq!(imgs[0].1, None);
@@ -937,7 +922,6 @@ mod tests {
         assert_eq!(images(&out), vec![(None, Some("not_found".to_string()))]);
         assert!(is_cached(&scope, &rels[0], &meta), "永久讀不到要負快取");
 
-        // 下一次：不該再去抓（給一個「沒抓」的來源；若還去讀，會是 read_failed 而不是 not_found）。
         let unfetched = PrefetchedSource::new("hostA#1", &ws, &rels, &[Some(meta)], vec![None]);
         let out = embed_with(s.as_bytes(), &unfetched).unwrap();
         assert_eq!(images(&out), vec![(None, Some("not_found".to_string()))], "第二次直接用負快取");

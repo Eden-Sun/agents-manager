@@ -4,7 +4,6 @@
 mod live_slash_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::slash::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::testing as tt;
@@ -27,7 +26,6 @@ mod live_slash_tests {
         }
         assert!(env.herdr.calls_to("pane.send_text").is_empty() && env.herdr.calls_to("pane.send_keys").is_empty(), "一個字、一個鍵都沒打");
 
-        // B 不再 idle：就算 expected 對得上也不送。
         sqlx::query("UPDATE runs SET agent_status = 'working' WHERE id = ?").bind(&run_b).execute(&env.app.db).await.unwrap();
         match crate::lifecycle::slash::compact(&env.app, &bot.id, Some(&run_b)).await.err().expect("not idle") {
             LcError::Conflict(v) => assert_eq!(v["reason"], "superseded_run", "{v}"),
@@ -51,7 +49,6 @@ mod live_slash_tests {
         let turn = crate::db::in_flight_turn(&app.db, &run).await.unwrap().unwrap();
         assert_eq!(turn.prompt_text.as_deref(), Some("/compact"));
         assert_eq!(turn.delivery, "ok");
-        // No compact-looking text is necessary: the sent input is the evidence.
         env.herdr.set_screen(&pane, "• An older answer still on screen\n› \n");
         assert!(crate::lifecycle::poller::test_seams::try_fallback(&app, &run, Some(&turn.id)).await.unwrap());
         let messages: Vec<(String,String)> = sqlx::query_as("SELECT role,content FROM messages WHERE turn_id=?")
@@ -359,7 +356,6 @@ mod live_slash_tests {
 mod send_text_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::slash::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::lifecycle::slash::*;
@@ -451,7 +447,6 @@ mod send_text_tests {
         }
         assert!(pushed, "推 message_added，網頁才看得到泡泡");
 
-        // 不帶 record（BlockedChoices 那些打字）照舊不留訊息。
         assert!(send_text_recorded(&env.app, &bot.id, "1", true, None, false).await.unwrap().is_none());
         assert_eq!(user_rows(&env.app, &bot.id).await.len(), 1);
     }

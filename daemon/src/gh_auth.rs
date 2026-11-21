@@ -132,8 +132,6 @@ impl LoginMode {
     }
 }
 
-// ---------------------------------------------------------------- redact / parse
-
 /// Wipe `ghp_` / `gho_` / `github_pat_` (etc.) payloads so they cannot leak into logs or 502 bodies.
 pub fn redact_secrets(s: &str) -> String {
     redact_counting(s, |_| {})
@@ -145,7 +143,7 @@ fn redact_counting(s: &str, mut on_copy: impl FnMut(usize)) -> String {
     const PREFIXES: [&str; 6] = ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
-    let mut copied = 0; // s[copied..i] 還沒輸出
+    let mut copied = 0;
     let mut i = 0;
     while i < s.len() {
         if let Some(p) = PREFIXES.iter().copied().find(|p| s[i..].starts_with(p)) {
@@ -243,7 +241,6 @@ pub fn parse_accounts(raw: &str) -> Option<Vec<GhAccount>> {
     let v: Value = serde_json::from_str(raw.trim()).ok()?;
     let hosts = v.get("hosts")?.as_object()?;
     let mut accounts = Vec::new();
-    // Prefer github.com; if the key is missing, take the first host.
     let list = match hosts.get("github.com").or_else(|| hosts.values().next()) {
         Some(v) => v.as_array()?.clone(),
         None => Vec::new(),
@@ -260,8 +257,6 @@ pub fn parse_accounts(raw: &str) -> Option<Vec<GhAccount>> {
     }
     Some(accounts)
 }
-
-// ---------------------------------------------------------------- run on host
 
 async fn run_script(app: &impl crate::hosts::HostsAccess, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
@@ -456,8 +451,6 @@ async fn login_auto(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
         return Err(LcError::Upstream("gh 未安裝（brew install gh）".into()));
     }
     if !st.status_known() {
-        // Unsupported status output or an inconclusive fallback is not proof of logout.
-        // A device flow is safe; copying the local token could silently replace a remote account.
         return login_device(app, host).await;
     }
     if st.logged_in() {
@@ -465,9 +458,6 @@ async fn login_auto(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
         return Ok(st.to_json(host, Some("auto"), None, None));
     }
     if let Some(u) = st.switchable().map(str::to_string) {
-        // `gh auth switch` fails when the active token is in a different store
-        // (macOS keyring "default") than the valid one (`hosts.yml`). Fall through
-        // to dropping the dead active account, then to copy.
         if switch_user(app, host, &u).await.is_ok() {
             let st = read_status(app, host).await?;
             if st.logged_in() {
@@ -842,7 +832,6 @@ async fn poll_device_with_exchange<F>(
                 drop(token);
                 match apply {
                     Ok(()) => {
-                        // Drop the session without aborting this task — we *are* the poller.
                         let mut g = app.gh_device().lock().await;
                         if g.get(&host).is_some_and(|s| s.device_code == device_code) {
                             g.remove(&host);

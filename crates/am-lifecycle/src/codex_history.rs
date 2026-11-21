@@ -140,8 +140,6 @@ impl Default for HistoryHook {
     }
 }
 
-// ───────────────────────── metrics ─────────────────────────
-
 /// 一則 codex prompt 最後靠哪一種證據判定（SPEC §4.4a）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evidence {
@@ -198,8 +196,6 @@ fn note_miss(what: &'static str, why: &str) {
     tracing::debug!(what, why, "codex structured history gave no evidence; falling back");
 }
 
-// ───────────────────────── 純解析 ─────────────────────────
-
 fn parse_item_entry(v: &Value) -> Option<Item> {
     let turn_id = v.get("turnId")?.as_str()?.to_string();
     let item = v.get("item")?;
@@ -250,8 +246,6 @@ pub fn is_user_text(item: &Item, text: &str) -> bool {
     }
 }
 
-// ───────────────────────── 增量讀取 ─────────────────────────
-
 /// 送出前記下的基準：thread 當時最新那筆 item 的 id（`None`＝thread 還是空的）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mark {
@@ -280,7 +274,6 @@ async fn items_since(conn: &mut dyn HistoryConn, after: Option<&str>) -> Result<
         match page.next_cursor {
             Some(c) => cursor = Some(c),
             None => {
-                // 整份歷史讀完了。基準是 `None`（空 thread）才合理；否則基準不見了。
                 if after.is_none() {
                     newer.reverse();
                     return Ok(newer);
@@ -359,7 +352,6 @@ pub async fn prompt_landed(host_env: &impl CodexHistoryHost, mark: &Mark, conn: 
             false
         }
         Err(e) => {
-            // 連線可能已經壞了，下次重開。
             *conn = None;
             note_miss("delivery", &e.to_string());
             false
@@ -372,7 +364,6 @@ pub async fn prompt_landed(host_env: &impl CodexHistoryHost, mark: &Mark, conn: 
 pub fn reply_after(newest_first: &[Item], sent: &[String]) -> Option<String> {
     let start = newest_first.iter().position(|i| sent.iter().any(|s| is_user_text(i, s)))?;
     let ours = &newest_first[start];
-    // `newest_first[..start]` 是我們那則之後的東西（新到舊）。
     for item in newest_first[..start].iter().rev() {
         match &item.kind {
             ItemKind::User(_) => return None,
@@ -467,8 +458,6 @@ pub async fn interrupted_after(host_env: &impl CodexHistoryHost, bot: &db::Bot, 
         }
     }
 }
-
-// ───────────────────────── 真的 app-server ─────────────────────────
 
 /// 短命的 `codex app-server`（stdio JSON-RPC）。只在本機。
 pub struct AppServerSource;
@@ -577,8 +566,6 @@ impl HistoryConn for AppServerConn {
         })
     }
 }
-
-// ───────────────────────── 測試用 stub ─────────────────────────
 
 /// 決定性的假 source：每個 [`Binding`] 一份歷史（新到舊），可以隨時改、可以讓它全部失敗。
 #[cfg(any(test, feature = "test-hooks"))]
@@ -780,7 +767,6 @@ mod tests {
         src.push_user(&b, "t1", "u1", "x");
         let mut c = conn(&src, &b);
         assert!(items_since(&mut c, Some("gone")).await.is_err());
-        // 翻頁預算：基準埋在很深的地方也算讀不到。
         for i in 0..(PAGE_LIMIT as usize * MAX_PAGES + 5) {
             src.push(&b, "t9", &format!("x{i}"), ItemKind::Other);
         }
@@ -795,7 +781,6 @@ mod tests {
         let fin = |t: &str| ItemKind::Assistant { text: t.into(), phase: Some("final_answer".into()) };
         let com = |t: &str| ItemKind::Assistant { text: t.into(), phase: Some("commentary".into()) };
         let sent = vec!["跑測試".to_string()];
-        // 新到舊
         let ok = vec![it("t2", "a", fin("測試全過")), it("t2", "c", com("先跑")), it("t2", "u", user("跑測試")), it("t1", "o", fin("舊的"))];
         assert_eq!(reply_after(&ok, &sent).as_deref(), Some("測試全過"));
         let running = vec![it("t2", "c", com("先跑")), it("t2", "u", user("跑測試"))];
@@ -874,7 +859,6 @@ mod tests {
                 .unwrap();
             let app = FakeHistoryEnv {
                 db: pool,
-                // daemon harness 的預設（空 source），不是 crate 的預設（真的 AppServerSource）。
                 codex_history: HistoryHook(RwLock::new(None)),
                 cfg: FakeCfg(std::sync::Mutex::new(CfgState { codex_history: CodexHistoryCfg { enabled: true } })),
             };
@@ -918,7 +902,6 @@ mod tests {
         let dir = crate::test_dirs::track(std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("codex");
-        // 讀一行回一行：initialize 前先噴一則 notification；items/list 回一筆並帶 CODEX_HOME 當 item id；turns/list 回 error。
         write_exec(
             &script,
             r#"while IFS= read -r line; do
@@ -937,7 +920,6 @@ done
         assert_eq!(page.data[0].item_id, "/tmp/agm-home-a", "CODEX_HOME 綁定帶進子行程");
         assert_eq!(c.turns_desc(None, 10).await.unwrap_err(), HistoryError::Rpc("nope".into()));
         drop(c);
-        // 不存在的執行檔＝Unavailable，不是 panic。
         assert!(matches!(AppServerConn::start("/nonexistent/codex", &b).await, Err(HistoryError::Unavailable(_))));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -977,14 +959,12 @@ done
         let (_, b) = eligible(&app, &bot, &run).await.unwrap();
         assert_eq!(b, Binding { host: LOCAL_HOST.into(), codex_home: Some(PathBuf::from("/srv/codex-a")), thread_id: "thread-1".into() });
 
-        // 「重啟」：記憶體裡的東西全丟掉，只剩 DB 裡的 thread id，照樣得到同一個 binding 與同一份歷史。
         stub.push_user(&b, "t1", "u1", "hello");
         let reloaded_run = db::run(&app.db, &run.id).await.unwrap().unwrap();
         let (_, again) = eligible(&app, &bot, &reloaded_run).await.unwrap();
         assert_eq!(again, b);
         assert!(mark(&app, &bot, &reloaded_run).await.is_some_and(|m| m.after.as_deref() == Some("u1")));
 
-        // 沒有 session / 不安全的 id / 不是 codex / 關掉：沒有 binding。
         let (bot2, no_session) = codex_bot_and_run(&env, None).await;
         assert!(eligible(&app, &bot2, &no_session).await.is_none());
         let (bot3, odd) = codex_bot_and_run(&env, Some("../../etc")).await;
@@ -1014,7 +994,6 @@ done
         app.codex_history.set(Some(Arc::new(stub.clone())));
         let (_, b) = eligible(&app, &bot, &run).await.unwrap();
         assert_eq!((b.host.as_str(), b.codex_home.as_ref(), b.thread_id.as_str()), ("mac_builder", None, "thread-1"));
-        // 同名 thread 在本機（另一個 CODEX_HOME）的歷史不會跑到遠端這份。
         let local = Binding { host: LOCAL_HOST.into(), codex_home: Some(PathBuf::from("/srv/codex-a")), thread_id: "thread-1".into() };
         stub.push_user(&local, "t1", "u-local", "same text");
         stub.push_user(&b, "t1", "u-remote", "other");
@@ -1040,7 +1019,6 @@ done
         stub.push_final(&b, "t1", "a1", "測試全過");
         assert_eq!(exact_reply(&app, &bot, &run, &sent).await.as_deref(), Some("測試全過"));
 
-        // 下一回合別人的回覆不會被當成我們的。
         stub.push_user(&b, "t2", "u2", "別的問題");
         stub.push_final(&b, "t2", "a2", "別人的答案");
         assert_eq!(exact_reply(&app, &bot, &run, &sent).await.as_deref(), Some("測試全過"), "我們那一回合的答案不變");

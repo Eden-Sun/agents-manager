@@ -63,7 +63,6 @@ pub(crate) async fn agy_home_of(app: &Arc<App>, bot: &db::Bot) -> Option<PathBuf
     transcript_read::agy_home_from(host_home.as_deref(), identity_home.as_deref(), bot_home.as_deref())
 }
 
-// 目前只有測試（`lifecycle::agy_tests`）直接問 root 清單。
 #[cfg(test)]
 pub(crate) async fn trusted_roots(app: &Arc<App>, bot: &db::Bot) -> Vec<PathBuf> {
     transcript_read::trusted_roots_for(&AppTranscriptRoots { app, bot }).await
@@ -118,7 +117,7 @@ mod tests {
         let dir = tmp("since");
         let big = dir.join("big.jsonl");
         let f = std::fs::File::create(&big).unwrap();
-        f.set_len(40 * 1024 * 1024).unwrap(); // 稀疏檔：幾乎不占磁碟
+        f.set_len(40 * 1024 * 1024).unwrap();
         let res = crate::lifecycle::log_hits_since(crate::lifecycle::LogFormat::Claude, &big, 0, "x");
         assert!(res.is_err(), "40 MB 的新內容要被擋下（上限 32 MB）：{res:?}");
         let small = dir.join("small.jsonl");

@@ -51,7 +51,6 @@ pub async fn reconcile_and_autostart(app: &impl crate::events::ports::ReconcileC
         }
         Err(e) => {
             tracing::error!(host, error = ?e, "reconcile failed");
-            // 事件驅動的對帳失敗不會有下一個觸發點：斷線那段漏掉的 pane.closed 等不到補，排一輪晚一點的補跑（它失敗會自己再排）。
             app.schedule_deferred_pass(host);
             false
         }
@@ -89,8 +88,6 @@ pub async fn forget_watcher(app: &impl crate::events::PaneWatchers, key: PaneKey
     if gens.get(&key) == Some(&generation) {
         gens.remove(&key);
         watchers.remove(&key);
-        // watcher 自己退出（run 結束）也要把這個 pane 的狀態序號與鎖帶走，不只在 `unwatch_pane_on_session`：
-        // 不然這兩張行程級表每個開過又收掉的 pane 留一格。拿不到 client 而退出的不帶（run 還活著，之後重連會再裝 watcher）。
         if run_ended {
             forget_pane_status_state(&key);
         }
@@ -152,8 +149,6 @@ pub fn forget_pane_status_state(key: &PaneKey) {
     status_seq().lock().unwrap().remove(key);
     pane_status_locks().lock().unwrap_or_else(|e| e.into_inner()).remove(key);
 }
-
-// ---------------------------------------------------------------- agent titles
 
 /// Titles that carry no information: the CLI's own name before it has been given a task.
 const PLACEHOLDER_TITLES: &[&str] = &["claude code", "claude", "codex", "grok", "grok cli", "terminal", "zsh", "bash"];

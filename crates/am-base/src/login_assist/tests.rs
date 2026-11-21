@@ -54,7 +54,6 @@ fn the_real_screens_give_the_url_and_the_prompt() {
 
 #[test]
 fn the_wrapped_screen_really_is_wrapped_mid_word() {
-    // 前提：折行版的網址分在好幾列、中間沒有空白，單看哪一列都不是完整網址。
     assert!(WRAPPED.lines().filter(|l| l.contains("oauth") || l.starts_with("callback") || l.starts_with("p_servers")).count() >= 3);
     assert!(!WRAPPED.lines().any(|l| l.contains(URL)));
 }
@@ -98,10 +97,8 @@ fn only_claude_login_urls_are_handed_to_the_page() {
     }
     assert!(is_login_url("https://platform.claude.com/oauth/authorize?a=b"));
     assert!(is_login_url("https://claude.ai/oauth/authorize?a=b"));
-    // 畫面上塞了別的網址：不交出去。
     let evil = UNWRAPPED.replace("https://claude.com/", "https://evil.example/");
     assert_eq!(parse_screen(&evil).url, None);
-    // 一列裡網址後面還有字：不往下一列接。
     let trailing = "visit: https://claude.com/oauth/authorize?a=b and then\nTAIL\nPaste code here if prompted >";
     assert_eq!(parse_screen(trailing).url.as_deref(), Some("https://claude.com/oauth/authorize?a=b"));
 }
@@ -116,8 +113,6 @@ fn only_oauth_code_characters_are_typed() {
     }
 }
 
-// ---- 走 daemon：fake herdr 的登入 pane ----
-
 struct Fx {
     env: tt::Env,
     pane: String,
@@ -129,7 +124,6 @@ async fn login_pane(screen: &str) -> Fx {
     let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
     reserve(&env.app, "local", "cc9").unwrap().register(&shell.pane_id, &shell.created_at, "claude");
     env.herdr.set_screen(&shell.pane_id, screen);
-    // 打字前 daemon 會即時問 herdr／行程樹這顆 pane 現在的樣子（`shell::live_verdict`）：給一棵沒有 listen port 的樹。
     env.herdr.set_shell_pid(&shell.pane_id, 41101);
     *env.app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
     env.herdr.argvs.lock().unwrap().insert(shell.pane_id.clone(), vec!["claude".into(), "auth".into(), "login".into()]);
@@ -162,7 +156,6 @@ async fn the_status_gives_the_url_the_identity_and_whether_a_code_is_wanted() {
     assert_eq!(v["kind"], "claude");
     assert_eq!(v["code_sent"], false);
     assert_eq!(v["failure"], Value::Null);
-    // 剛開、CLI 還沒印網址：什麼都沒有，但已經知道這是登入 pane。
     f.env.herdr.set_screen(&f.pane, "user@host:~$ claude auth login\n");
     let v = status(&f.env.app, "local", &f.pane).await.unwrap();
     assert_eq!((v["url"].clone(), v["awaiting_code"].clone()), (Value::Null, json!(false)));
@@ -178,12 +171,10 @@ async fn only_registered_login_panes_are_served() {
     assert!(matches!(submit_code(&env.app, "local", &plain.pane_id, "abc").await, Err(LcError::NotFound(_))));
     assert!(env.herdr.calls_to("pane.send_text").is_empty());
 
-    // 登記過，但帳上那顆 shell 的身份（created_at）對不上＝pane id 被別的 shell 重用。
     reserve(&env.app, "local", "cc9").unwrap().register(&plain.pane_id, "some-other-shell", "claude");
     assert!(matches!(status(&env.app, "local", &plain.pane_id).await, Err(LcError::NotFound(_))));
     assert!(!is_registered(&env.app, "local", &plain.pane_id), "對不上就順手清掉");
 
-    // 關 pane 就忘掉。
     let f = login_pane(UNWRAPPED).await;
     assert!(is_registered(&f.env.app, "local", &f.pane));
     crate::api::shell::close(&f.env.app, "local", &f.pane).await.unwrap();
@@ -251,7 +242,6 @@ async fn the_conflict_names_the_existing_login_pane_so_the_page_can_reopen_it() 
     assert_eq!(body["pane_id"], json!(shell.pane_id));
     assert_eq!((body["host"].as_str(), body["kind"].as_str()), (Some("local"), Some("claude")));
 
-    // 活著的 pane 不會被 prune_dead 清掉，仍然擋。
     prune_dead(&env.app, "local", "cc9").await;
     assert!(is_registered(&env.app, "local", &shell.pane_id));
     assert!(reserve(&env.app, "local", "cc9").is_err());
@@ -261,20 +251,17 @@ async fn the_conflict_names_the_existing_login_pane_so_the_page_can_reopen_it() 
 #[tokio::test]
 async fn a_dead_login_pane_does_not_block_a_new_login() {
     let env = tt::env().await;
-    // 登記了、但帳上沒有這顆 shell。
     reserve(&env.app, "local", "cc9").unwrap().register("w1:p1", "shell-gone", "claude");
     assert!(reserve(&env.app, "local", "cc9").is_err(), "reserve 本身不問 herdr，帳上有就擋");
     prune_dead(&env.app, "local", "cc9").await;
     assert!(!is_registered(&env.app, "local", "w1:p1"), "死 pane 順手忘掉");
     assert!(reserve(&env.app, "local", "cc9").is_ok());
 
-    // pane id 被別的 shell 重用（created_at 對不上）。
     let plain = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
     reserve(&env.app, "local", "cc8").unwrap().register(&plain.pane_id, "some-other-shell", "claude");
     prune_dead(&env.app, "local", "cc8").await;
     assert!(reserve(&env.app, "local", "cc8").is_ok());
 
-    // 別的身份、別的主機不受影響。
     reserve(&env.app, "local", "cc7").unwrap().register("w2:p2", "shell-gone", "claude");
     prune_dead(&env.app, "local", "cc6").await;
     assert!(is_registered(&env.app, "local", "w2:p2"));
@@ -311,7 +298,6 @@ async fn a_code_sent_once_cannot_be_submitted_again_while_the_prompt_is_still_vi
 #[tokio::test]
 async fn a_code_is_typed_only_while_the_prompt_is_the_last_line() {
     let f = login_pane(UNWRAPPED).await;
-    // CLI 收到 code 之後的反應：把畫面換成失敗那一張。
     let later = f.env.herdr.set_screen_later();
     let pane = f.pane.clone();
     tokio::spawn(async move {
@@ -398,7 +384,6 @@ async fn a_malformed_code_is_a_400_before_anything_is_read() {
 async fn a_finished_login_clears_the_login_prompt_but_a_failed_one_keeps_it() {
     for (screen_after, cleared) in [("user@host:~$ \n", true), (FAILED, false)] {
         let f = login_pane(UNWRAPPED).await;
-        // 這台主機的身份表要有 cc9，快照才帶得出記號。
         f.env.app.tools.lock().await.insert(
             "local".into(),
             crate::tools::HostTools {
@@ -451,17 +436,14 @@ fn codex_device_screen_gives_the_fixed_url_and_the_one_time_code() {
 
 #[test]
 fn a_device_code_is_only_taken_from_the_line_after_the_prompt() {
-    // 畫面還沒印出碼（只有網址）：不取。
     let before = "   https://auth.openai.com/codex/device\n2. Enter this one-time code (expires in 15 minutes)\n";
     assert_eq!(parse_device_screen(before).device_code, None);
-    // 提示後面的那一行不是碼（含空白、符號、太長）：不取，網址照給。
     for bad in ["   <b>AB7K-QX29</b>", "   AB7K QX29", "   AB7K_QX29", "   ABCDEFGHIJKLMNOPQRSTUVWXYZ"] {
         let text = format!("https://auth.openai.com/codex/device\nenter this one-time code\n{bad}\n");
         let s = parse_device_screen(&text);
         assert_eq!(s.device_code, None, "{bad:?}");
         assert!(s.url.is_some());
     }
-    // 網址只認 codex 的裝置頁，別的網址不交給網頁。
     assert_eq!(parse_device_screen("https://evil.example/codex/device\none-time code\nAB7K-QX29").url, None);
 }
 

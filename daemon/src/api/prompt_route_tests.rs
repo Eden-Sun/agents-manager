@@ -179,7 +179,6 @@ async fn a_queue_slot_conflicts_only_with_the_same_trusted_lane() {
     sqlx::query("INSERT INTO supervisors (id, bot_id, created_at, updated_at) VALUES ('sup-1', ?, ?, ?)").bind(&agm).bind(db::now()).bind(db::now()).execute(&e.app.db).await.unwrap();
     let other = typed_bot_named(&e, "claude", "other-bot", "pane-other").await;
 
-    // (佔著的人, lane, awaits_idle, awaits_start, crid, relay_from, 預期結果, holder.kind)
     let cases: Vec<(&str, &str, i64, i64, Option<String>, Option<String>, bool, &str)> = vec![
         ("agm", "relay", 0, 0, None, Some(agm.clone()), false, "agm"),
         ("bot", "relay", 0, 0, None, Some(other.clone()), false, "bot"),
@@ -229,7 +228,6 @@ async fn a_self_declared_relay_source_is_never_named_or_called_agm() {
     let held = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, awaits_idle, queue_class) VALUES (?, ?, 'web', 'queued', 'pending', 'held', ?, 0, 'relay')")
         .bind(&held).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
-    // 自稱是 AGM 的 bot（沒帶 token）。
     sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?, ?, ?, 'user', 'held', 'web', ?, 1, ?)")
         .bind(db::ulid()).bind(&conv).bind(&held).bind(&agm).bind(db::now()).execute(&e.app.db).await.unwrap();
 
@@ -312,7 +310,6 @@ async fn busy_prompt_admission_dispatch_and_withdrawal_share_the_durable_queue()
         .bind(&previous_id).bind(&conversation_id).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
     sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
 
-    // B can restore a still-queued prompt submitted by A before C dispatches it.
     let (status, withdrawn) = call_queue_if_busy(&e, &bot, "先放回輸入框", "queue-withdraw-first", &[]).await;
     assert_eq!(status, StatusCode::OK, "{withdrawn}");
     let withdrawn_id = withdrawn["turn_id"].as_str().unwrap().to_string();
@@ -323,7 +320,6 @@ async fn busy_prompt_admission_dispatch_and_withdrawal_share_the_durable_queue()
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&withdrawn_id).fetch_one(&e.app.db).await.unwrap();
     assert_eq!(status, "failed");
 
-    // A second prompt remains queued while its predecessor is active, then C dispatches it at idle.
     let (status, admitted) = call_queue_if_busy(&e, &bot, "等閒下來再送", "queue-dispatch-next", &[]).await;
     assert_eq!(status, StatusCode::OK, "{admitted}");
     let queued_id = admitted["turn_id"].as_str().unwrap();
@@ -508,11 +504,9 @@ async fn cache_ttl_is_validated_and_api_bot_only() {
     }
     let r = parse_cache_ttl(&e.app, &cli, Some("1h")).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_api_bot_only"), "{r:?}");
-    // openai-api 也是 API bot，但沒有 cache_ttl：字面說「這個 kind 不支援」，不是「只給 claude-api」。
     let oa = typed_bot_named(&e, "openai-api", "route-oa", "pane-oa").await;
     let r = parse_cache_ttl(&e.app, &oa, Some("1h")).await;
     assert!(matches!(r, Err(LcError::BadValue(ref v)) if v["reason"] == "cache_ttl_unsupported_for_kind"), "{r:?}");
     assert_eq!(parse_cache_ttl(&e.app, &oa, None).await.unwrap(), None);
-    // 不帶的時候其他 kind 照舊（舊客戶端相容）。
     assert_eq!(parse_cache_ttl(&e.app, &cli, None).await.unwrap(), None);
 }

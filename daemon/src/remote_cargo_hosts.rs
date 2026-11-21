@@ -271,7 +271,6 @@ mod tests {
         let r7 = hosts.iter().find(|host| host.target_label() == "r7@r7:22").expect("r7 要照設定順序保留");
         assert_eq!((r7.cargo_jobs, r7.test_threads, r7.max_concurrent), (12, 6, 1), "沒寫的沿用第一台");
         assert_eq!(r7.password_id.as_deref(), Some(""), "之後的主機只走金鑰／agent");
-        // 額外主機設錯（主機名不合法、沒寫 user 又沿用到本機執行器的空 user）：只略過那台。
         let bad_extra = "[build.remote]\nenabled = true\nhost = \"local\"\n\
                          [[build.remote.hosts]]\nhost = \"h;id\"\nuser = \"u\"\n[[build.remote.hosts]]\nhost = \"r9\"\n";
         if cfg!(target_os = "linux") {
@@ -287,7 +286,6 @@ mod tests {
         }
         let (ok, skipped) = usable_targets(BuildRemoteCfg { host: "r7".into(), user: String::new(), ..Default::default() }.targets());
         assert!(ok.is_empty() && skipped.len() == 1 && skipped[0].contains("r7"), "{skipped:?}");
-        // 全部都錯：退回本機並講是哪台。
         match decide("[build.remote]\nenabled = true\nhost = \"h;id\"\nuser = \"u\"\n") {
             Offload::Local(Some(why)) => assert!(why.contains("h;id"), "{why}"),
             _ => panic!("壞掉的那台要講"),
@@ -340,7 +338,6 @@ mod guard_backed_tests {
         let base = base();
         let (remote, cwd, data) = local_host(&base, "rc", "pwd > \"$HOME/ran\"; env > \"$HOME/env\"; exit 0\n");
         std::fs::write(cwd.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
-        // ssh／rsync-over-ssh 一律不准碰：換成會失敗的假程式，被叫到就紅。
         let bin = base.join("fakebin");
         std::fs::create_dir_all(&bin).unwrap();
         write_exec(&bin.join("ssh"), "echo 'ssh must not run' >&2; exit 255\n");
@@ -371,9 +368,6 @@ mod guard_backed_tests {
         assert_eq!(err.downcast_ref::<Busy>().map(|b| b.waiters), Some(0), "{err:#}");
         assert!(!base.join(format!("rc/{HASH}/job-2-2")).exists(), "試用不改走冷目錄");
 
-        // 一個正常守門在排隊：試用數得到它。
-        // 同步點是排隊中的心跳 `Q`（同 `hang_up_while_queued`）：`Q` 只在號碼牌已經 flock 之後才印，讀到它才算「進了佇列」。
-        // 讀到 `Q` 之前不准 probe，避免撞上 #1978 的號碼牌計數競態（試用的 `busy()` 會刪掉還沒鎖住的號碼牌）。
         let shared_wait = 30;
         let wtoken = LeaseToken::new();
         let mut waiter = guard_cmd(&base, HASH, "job-3-3", &wtoken, Admission { shared_wait_secs: shared_wait, ..one })
@@ -395,7 +389,6 @@ mod guard_backed_tests {
         let err = Lease::start(guard_cmd(&base, HASH, "job-4-4", &token, trial), token, &Deadline::new(0)).err().expect("busy");
         assert_eq!(err.downcast_ref::<Busy>().map(|b| b.waiters), Some(1), "{err:#}");
         holder.finish();
-        // 收尾：關 stdin 讓守門照協定放掉（同 `Lease::finish`），再等它結束；不 kill，免得跳過釋放鎖的路徑。
         drop(waiter.stdin.take());
         waiter.wait().unwrap();
         let _ = std::fs::remove_dir_all(base);
@@ -416,12 +409,10 @@ mod guard_backed_tests {
             assert!(st.success());
         };
 
-        // 1. 沒鎖的舊暫名檔（超過 60 秒）
         let stale_unlocked = qdir.join("stale.tmp.111");
         std::fs::write(&stale_unlocked, "").unwrap();
         set_mtime_2m_ago(&stale_unlocked);
 
-        // 2. 持鎖中的舊暫名檔（超過 60 秒）：背景行程 flock 持鎖
         let stale_locked = qdir.join("stale.tmp.222");
         std::fs::write(&stale_locked, "").unwrap();
         set_mtime_2m_ago(&stale_locked);
@@ -439,11 +430,9 @@ mod guard_backed_tests {
         assert!(locker_out.read_line(&mut locked_line).unwrap() > 0, "locker 未取得鎖就結束了");
         assert_eq!(locked_line.trim(), "LOCKED");
 
-        // 3. 剛建立的新暫名檔（< 60 秒，沒鎖）
         let fresh_tmp = qdir.join("fresh.tmp.333");
         std::fs::write(&fresh_tmp, "").unwrap();
 
-        // 佔住 target，讓 trial 守門走進 busy()
         let one = Admission { max: 1, pool: 0, ..QUICK };
         let mut holder = guard_with(&base, HASH, "job-1-1", one);
 
@@ -543,7 +532,6 @@ mod guard_backed_tests {
         let base = base();
         let (local, cwd, data) = local_host(&base, "rc", "echo must-not-run >&2; exit 99\n");
         let r7 = dead_r7(&base, &local);
-        // 別的 repo 佔著本機唯一的名額（池是空的，只有名額滿）。
         let mut holder = guard_with(&base, "00000000000000a1", "job-1-1", Admission { max: 1, ..QUICK });
         TEST_QUEUE_WAIT_SECS.with(|w| w.set(Some(1)));
         let rc = with_dead_ssh(&base, || run_offload_on(&[r7, local], &data, &cwd, &["check".to_string()], &Deadline::new(60)));
@@ -613,7 +601,6 @@ mod guard_backed_tests {
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].target_label(), remote.target_label());
         assert!(usable_targets(hosts.clone()).1.is_empty(), "沒有略過的主機＝沒有新的警告");
-        // 記下每次 ssh 跑的腳本。
         let bin = base.join("fakebin");
         std::fs::rename(bin.join("ssh"), bin.join("ssh-real")).unwrap();
         let log = base.join("ssh.log");

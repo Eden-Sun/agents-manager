@@ -63,7 +63,6 @@ impl Delivered {
             Delivered::Submitted => Some(DeliveryRecord { stored: "ok", verified: true, auto_resend: false }),
             Delivered::Handed => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: true }),
             Delivered::Unverified => Some(DeliveryRecord { stored: "ok", verified: false, auto_resend: false }),
-            // unknown 不會被重送（閘門要 delivery=ok），所以不動重送額度。
             Delivered::Unproven(_) => Some(DeliveryRecord { stored: "unknown", verified: false, auto_resend: true }),
             Delivered::NotAttempted { .. } => None,
         }
@@ -155,7 +154,6 @@ pub fn echo_markers(kind: &str) -> &'static [&'static str] {
         "claude" => &["❯ ", "> "],
         "grok" => &["❯ "],
         "codex" => &["› "],
-        // agy 送出之後，使用者那句回音是 `> 原文`（1.2.16 真機）：第一則 prompt 沒有 transcript 可證時，單行放得下的靠這一列。
         "agy" => &["> "],
         _ => &[],
     }
@@ -254,12 +252,6 @@ pub fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
     (0..end)
         .filter(|&i| {
             let row = lines[i];
-            // Grok right-aligns a clock and scrollbar glyph on its real prompt echoes. Ignore only
-            // that known chrome before the exact comparison; otherwise a successful first paste
-            // looks unproven and the retry path can submit it twice.
-            // 列尾的空白不算內容（issue #1479）：styled 讀取把 claude 回音那一列的灰底補滿整列寬，
-            // 剝掉 ANSI 之後 `❯ <text>` 後面接了一整排空白，逐字相等永遠不成立。`text` 本來就要求頭尾沒有空白
-            // （`provable_by_echo_row`），所以只放過列尾補白；marker 後多一個空白、少一個字照樣不算。
             let row = row.trim_end();
             let exact = if kind == "grok" {
                 let plain = crate::lifecycle::screen::strip_grok_decor(row);
@@ -303,7 +295,6 @@ pub fn codex_user_text(line: &str) -> Option<String> {
 
 pub fn transcript_user_text(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
-    // 原樣的文字（可能被 CLI 包成 `<pasted_content>`，`is_sent` 會處理）；compact 摘要、指令回音、sidechain 不算一問（#910）。
     super::claude_child_log::user_prompt_raw(&v)
 }
 
@@ -321,10 +312,8 @@ pub fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) ->
 }
 
 pub fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
-    // The file was replaced or truncated (shorter than the baseline) or grew by an absurd amount: unreadable, never zero.
     let buf = crate::transcript_read::read_since(path, offset, "transcript")?;
     let body = String::from_utf8_lossy(&buf);
-    // claude 可能把貼上的 prompt 包成 `<pasted_content>` 才寫進去（#218）；codex 不會。
     let ours = |t: &String| match format {
         LogFormat::Claude => super::pasted_content::is_sent(t, text),
         LogFormat::Codex => t == text,
@@ -432,7 +421,6 @@ pub fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Delivered> {
                 }
             }
         }
-        // agy 的對話是第一則 prompt 才建立：第一則沒有 transcript 可證（`Unverified`，照打照送），之後每一則都有。
         ("agy", true) => {
             if let (Some(session), Some(path)) = (session, path) {
                 if std::path::Path::new(path).is_file() {
@@ -446,9 +434,6 @@ pub fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Delivered> {
                     Some(log) => {
                         return Ok(Proof::Transcript { format: LogFormat::Codex, path: log.clone(), session_id: session.to_string() });
                     }
-                    // The session is known, so its rollout is coming: wait for the lossless proof
-                    // instead of typing unverified right away (sol review round nine #1). Only a
-                    // prompt that already waited falls through.
                     None if !i.waited_for_log => {
                         return Err(Delivered::NotAttempted { reason: "codex_log_not_ready", retry: true });
                     }
@@ -462,8 +447,6 @@ pub fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Delivered> {
     if marker_cols > 0 && provable_by_echo_row(text, marker_cols, i.pane_cols) {
         return Ok(Proof::EchoRow);
     }
-    // A local claude with hooks reports its transcript at SessionStart: worth a short wait, since a
-    // lossless proof is coming. Everything else has no lossless evidence to wait for.
     if i.kind == "claude" && i.host_is_local && i.hooks && (session.is_none() || path.is_none()) {
         return Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true });
     }
@@ -504,7 +487,6 @@ pub(super) async fn composer_ready(app: &impl LcHost, run: &db::Run, kind: &str,
     } else { screen };
     if kind == "codex" {
         if super::codex_hook_review::review_open(screen) {
-            // 標 blocked＋原因、聊天室提示一次（跟巡邏共用同一個 episode，不重複講）。
             app.observe_codex_hook_review(run, screen).await;
             return Err(Delivered::NotAttempted { reason: super::codex_hook_review::REASON, retry: true });
         }
@@ -575,7 +557,6 @@ pub async fn plan_delivery(
                 true
             }
         };
-    // 接回後第一個 Enter 仍可能打開額度警告。不能交給沒有送達證據的 agent.prompt 後立刻回 Handed。
     let resumed_claude = bot.kind == "claude" && (run.resume_session_id.is_some() || run.resume_outcome.is_some());
     if !(force_pane || marked || resumed_claude || !agent_prompt_usable(client, &target).await) {
         return Ok(Ok(Plan::AgentPrompt { target }));
@@ -583,7 +564,6 @@ pub async fn plan_delivery(
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string) else {
         return Ok(Err(Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
-    // 讀不到主機就不送（#198）：當成遠端會跳過本機 transcript／rollout 這種無損證據，改成盲打；一個字都還沒打，可重試。
     let host_is_local = match db::project(app.db(), &bot.project_id).await {
         Ok(p) => p.is_some_and(|p| p.host == LOCAL_HOST),
         Err(e) => {
@@ -625,8 +605,6 @@ pub async fn plan_delivery(
         Ok(p) => p,
         Err(not) => return Ok(Err(not)),
     };
-    // Nothing has been typed yet: a pane that cannot be read is "try again later", never a 502
-    // and never an unknown delivery (sol review round ten #1).
     let mut screen = match read_composer(client, &pane).await {
         Ok(s) => s,
         Err(e) => {
@@ -691,7 +669,6 @@ pub async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proo
     match db::run(app.db(), run_id).await {
         Ok(Some(r)) => {
             let same_id = r.native_session_id.as_deref() == Some(session_id.as_str());
-            // codex has no transcript_path column value; its log is named for the session id.
             let same_path = match format {
                 LogFormat::Claude | LogFormat::Agy => r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path()),
                 LogFormat::Codex => true,
@@ -759,18 +736,12 @@ pub async fn prepare_delivery(
         Plan::AgentPrompt { target } => return Ok(Ready::AgentPrompt { target }),
         Plan::Type { pane, proof, submit } => (pane, proof, submit),
     };
-    // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
-    // 寫不進去時一個字都還沒打：跟其他「打第一個字之前」的失敗一樣是可重試的 NotAttempted。以前回 `Err`，
-    // 直接送與排隊都被記成 `delivery='unknown'`，5 分鐘後被 stuck_turns 收成 completed_fallback——工作根本沒送出去
-    // （review3 c4 L5）。
     if let Err(e) = db::set_pane_typed(app.db(), &run.id).await {
         tracing::warn!(run = %run.id, error = %e, "could not record runs.pane_typed before typing; nothing was typed");
         return Err(Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true });
     }
 
-    // The box may have changed since the plan (someone typing in the terminal): look again. Still
-    // before the first keystroke, so a failed read is "not attempted".
     let before = match read_composer(client, &pane).await {
         Ok(s) => s,
         Err(e) => {
@@ -779,9 +750,6 @@ pub async fn prepare_delivery(
         }
     };
     composer_ready(app, run, &bot.kind, &before).await?;
-    // The baseline is still before the first keystroke: an evidence file that vanished, was swapped
-    // or became unreadable since the plan means "not attempted", never an unknown delivery
-    // (sol review round eleven). Only failures after `pane_send_text` may become `unknown`.
     let offset = match &proof {
         Proof::Transcript { path, .. } => match transcript_len(path) {
             Ok(n) => n,
@@ -799,7 +767,6 @@ pub async fn prepare_delivery(
             return Err(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
         }
     };
-    // 結構化歷史的基準（#749）：送出前 thread 最新那筆 item。取不到＝沒有這條證據，不影響送達。
     let structured = app.codex_history_mark(bot, run).await;
     Ok(Ready::Type { pane, proof, submit, offset, baseline, structured })
 }
@@ -872,9 +839,6 @@ pub async fn type_text(
             }
             #[cfg(all(test, feature = "daemon-test-harness"))]
             super::race_point::hit("agent_prompt_after_guard", &run.bot_id).await;
-            // The guard performs read-only RPCs which can yield. Recheck the same generation at the
-            // last point before submission; there is no client re-resolution between this check and
-            // invoking agent.prompt, so a replacement connection can never inherit this request.
             if !app.hosts().is_current(&client.fence).await {
                 return Ok(Typing::Done(Delivered::NotAttempted {
                     reason: "host_changed",
@@ -893,12 +857,8 @@ pub async fn type_text(
         }
         Ready::Type { pane, proof, submit, offset, baseline, structured } => (pane, proof, submit, offset, baseline, structured),
     };
-    // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
     let read = || read_composer(client, &pane);
 
-    // The turn may finish while Codex is restoring an unanswered question answer to its composer
-    // (#551 / Codex 0.157). Re-read at the last point before our first write so the two drafts can
-    // never be concatenated. This is still `NotAttempted`: no key has reached the pane.
     let before = match read().await {
         Ok(s) => s,
         Err(e) => {
@@ -922,9 +882,6 @@ pub async fn type_text(
     let mut box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
     let mut evidence_grew = evidence(&bot.kind, &proof, offset, &seen, text)? > baseline;
     if should_repaste(&proof, box_empty, evidence_grew) {
-        // 2026-11-17 m4p L2 事故：遠端 herdr 晚一幀重畫，第一次貼的字其實已在路上；700ms 後讀到空框就立刻重貼，
-        // 框裡變兩份字，重貼後又只等一個 settle 就判 `nothing_typed`（不按 Enter），下一則 409 `composer_busy`。
-        // 重貼前先多等一個 settle 再讀一次，重新判斷；仍然空框且證據沒長才重貼。
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
         box_empty = box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty;
@@ -935,28 +892,22 @@ pub async fn type_text(
         client.pane_send_text(&pane, text).await?;
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
-        // 同一事故：重貼後也可能晚一幀。判 `nothing_typed` 之前最多再多等一個 settle 讀一次。
         if box_state_within(&bot.kind, &seen, typed_tail(text)) == BoxState::Empty {
             tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
             seen = read().await?;
         }
     } else if proof == Proof::Unverified && box_empty {
-        // 沒有證據的那條路不重貼（見 `should_repaste`），但也不能一格空框就判「沒打進去」：遠端／grok 晚一幀
-        // 重畫時字其實已經在框裡，判 `nothing_typed` 會不按 Enter、把字留在框裡，下一則 prompt 因此 409
-        // `composer_busy`（review2 deliv 上一輪 #2 的副作用）。多等一個 settle 再看一次。
         tokio::time::sleep(pane_settle(Duration::from_millis(TYPE_SETTLE_MS))).await;
         seen = read().await?;
     }
     let state = box_state_within(&bot.kind, &seen, typed_tail(text));
     let truncated = match super::paste_check::lost_head(&bot.kind, &seen, text, typed_tail(text)) {
-        // 框滿不滿要看畫面有幾列（#403）；只在看不到開頭時才多問一次。
         Some(lost) if state == BoxState::NonEmpty => {
             lost.truncated(client.pane_viewport_rows(&pane).await.ok().flatten().map(|r| r as usize))
         }
         _ => false,
     };
     match state {
-        // #382：框沒滿卻缺了開頭。按 Enter 送出去的就是半段——清框、明講沒送出（框清乾淨了才算一個字都沒到 agent）。
         BoxState::NonEmpty if truncated => {
             tracing::warn!(run = %run.id, bot = %bot.name, "the composer lost the head of the paste; clearing it instead of sending half");
             client.pane_send_keys(&pane, &["ctrl+c"]).await?;
@@ -1038,7 +989,6 @@ fn bare(s: &str) -> String {
 
 /// 框裡（去掉空白後）還找得到本則原文，只是後面可能接了別的字。claude 送出前會清掉隱形字元，所以比的是清過的樣子。
 fn text_still_in_box(kind: &str, screen: &str, text: &str) -> bool {
-    // 摺起來的貼上看不到原文：同一個 helper 判斷（#1984），不然 late proof 會把還在框裡的字記成送出去的路上（Pending）。
     if super::poller::box_shows_our_folded_paste(kind, screen, text) {
         return true;
     }
@@ -1059,7 +1009,6 @@ pub async fn confirm_submitted(
     let Typed { pane, proof, submit, offset, baseline, structured } = t;
     let (offset, baseline) = (*offset, *baseline);
     let read = || read_composer(client, pane);
-    // 送出鍵剛按下去：上一則沒被認領的「之後再看」作廢，這一則的起點從這一刻算（`late_proof`，#1479）。
     super::late_proof::clear(&run.id);
     let submitted_at = db::now();
     let mut pressed_again = false;
@@ -1082,10 +1031,7 @@ pub async fn confirm_submitted(
             SessionMatch::Unavailable => continue,
         }
         let state = box_state_within(&bot.kind, &now, typed_tail(text));
-        // 證據不分框的狀態看：transcript 已經有本則就是送出去了。框裡還是同一則字也一樣，不能因此再補按 Enter（#1599）。
         let proof_evidence = evidence(&bot.kind, proof, offset, &now, text).ok();
-        // #749：rollout／回音還證不出來時，問 codex 自己的 thread 歷史。只有 positive evidence 會升級成 `Submitted`；
-        // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。composer 非空時也查，避免已送達的 A 讓補按送出新草稿 B。
         if !proof_evidence.is_some_and(|n| n > baseline) {
             if let Some(mark) = structured {
                 if app.codex_prompt_landed(mark, &mut history_conn, text).await {
@@ -1101,24 +1047,16 @@ pub async fn confirm_submitted(
             return Ok(Delivered::Submitted);
         }
         match state {
-            // No evidence to wait for: the box took the paste and emptied on Enter. That is all
-            // that can be said, and it is said as `Unverified`, not as a proven delivery.
             BoxState::Empty if *proof == Proof::Unverified => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "prompt typed and submitted; no lossless evidence on this run");
                 note_codex_delivery(&bot.kind, crate::codex_history::Evidence::Screen);
                 return Ok(Delivered::Unverified);
             }
-            // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
-            // 證據永遠對不上。不按，交給使用者看。送出前的清理（`pane_text::for_pane`）本來就不該讓這個畫面出現。
             BoxState::NonEmpty if super::pane_text::invisible_review_notice(&now) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "claude is asking to review a prompt it cleaned of invisible characters; not pressing Enter");
-                // 框裡是清過的同一則字，字還在框裡、沒送出：不記 Pending（#1600）。
                 return Ok(Delivered::Unproven("invisible_chars_review"));
             }
-            // 框裡不是本則（空了、換成別人的字、讀不準）：不按 Enter，也不提早 return，後面的證據查詢照跑，
-            // 最後一定記下 Pending 讓背景升級（#1577）。精確比對不能再擋在這裡：折行的同一則要能補按（#1571）。
             BoxState::NonEmpty if !composer_still_holds(&bot.kind, &now, text) => {
-                // 框裡有字、對不上這一則：不按。記一次框的形狀，之後看摺疊標籤的字數是不是跟我們送的對不上（#1984 D）。
                 super::unsent_draft::diagnose_box_once(&run.id, &bot.kind, &now, text, BoxState::NonEmpty);
             }
             BoxState::Unready => {}
@@ -1133,7 +1071,6 @@ pub async fn confirm_submitted(
     let last = read().await?;
     let state = box_state_within(&bot.kind, &last, typed_tail(text));
     if state == BoxState::Empty {
-        // 最後再問一次歷史：rollout 還沒 flush 時，這是唯一的 positive evidence（#749）。
         if let Some(mark) = structured {
             if app.codex_prompt_landed(mark, &mut history_conn, text).await {
                 tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
@@ -1148,8 +1085,6 @@ pub async fn confirm_submitted(
         BoxState::NonEmpty => "composer_changed_or_unreadable",
         BoxState::Empty => "not_proven_submitted",
     };
-    // 字還在框裡（原封不動，或後面接了別的字）就不記 Pending：它還沒送出去，框空了也不能當成送出（#1600）。
-    // 框空了、讀不準、或框裡已經找不到本則：證據可能還在路上，回 `Unproven` 前記下基準，呼叫端寫完 `unknown` 後背景繼續看（#1479、#1577）。
     let text_in_box = state == BoxState::NonEmpty && text_still_in_box(&bot.kind, &last, text);
     if !text_in_box {
         let pending = super::late_proof::Pending::new(&bot.kind, pane, proof, offset, baseline, text, submitted_at);
@@ -1256,7 +1191,6 @@ mod plain_warn_tests {
         assert!(warn_due(&mut seen, "w1:p1", t0));
         assert!(!warn_due(&mut seen, "w1:p1", t0 + std::time::Duration::from_secs(60)), "窗口內不再講");
         assert!(warn_due(&mut seen, "w1:p2", t0 + std::time::Duration::from_secs(60)));
-        // 窗口過了：舊 pane 的格子被帶走，不是永遠留著。
         assert!(warn_due(&mut seen, "w1:p3", t0 + std::time::Duration::from_secs(PLAIN_FOR_ANSI_WARN_SECS + 1)));
         assert!(!seen.contains_key("w1:p1"), "p1 過期被清：{seen:?}");
         assert!(seen.contains_key("w1:p2") && seen.contains_key("w1:p3"), "窗口內的留著：{seen:?}");
@@ -1280,12 +1214,9 @@ mod tests {
     #[test]
     fn a_history_prompt_or_a_truncated_or_menu_frame_never_gets_a_retry_press() {
         let text = LONG_TEXT.trim_end_matches('\n');
-        // 歷史 `›`：框裡不是本則。
         assert!(!super::may_press_retry_submit("codex", "› 舊問題\n• 舊回覆\n", "舊問題", false, false));
-        // 框被截斷：畫面只剩前幾列，比對不到完整草稿。
         let truncated: String = LONG_SCREEN.lines().take(12).collect::<Vec<_>>().join("\n");
         assert!(!super::may_press_retry_submit("codex", &truncated, text, false, false), "截斷不補按");
-        // 選單（hook 審核框）：不是輸入框。
         let review = include_str!("fixtures/codex-0.169.1-hooks-review.txt");
         assert!(!super::may_press_retry_submit("codex", review, text, false, false), "選單不補按");
     }
@@ -1349,8 +1280,6 @@ mod tests {
         let before_first_enter = screen(&[], &["A"]);
         assert_eq!(crate::composer_parse::composer_text_whole("claude", &before_first_enter).as_deref(), Some("A"));
 
-        // The first Enter has already reached the pane. A user then starts a new draft before
-        // confirmation reads the composer. The retry decision must leave that draft untouched.
         let after_first_enter = screen(&[], &["B"]);
         let mut enter_count = 1;
         if may_press_retry_submit("claude", &after_first_enter, "A", false, false) {
@@ -1491,7 +1420,6 @@ mod tests {
     #[test]
     fn codex_braille_particles_are_not_a_draft_on_a_styled_read() {
         assert_eq!(box_state("codex", CODEX_PARTICLES_EMPTY), BoxState::Empty, "只有 dim 佔位字與點字底紋");
-        // 2026-09-14 w168:p4R：點字蓋在 `›` 後面那一格上（`›⠁Ask Codex…`）。
         let glued = CODEX_PARTICLES_EMPTY.replacen(
             "\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[48;2;59;64;76m \u{1b}[0m",
             "\u{1b}[1m\u{1b}[48;2;59;64;76m›\u{1b}[0m\u{1b}[38;2;85;89;99m\u{1b}[48;2;59;64;76m⠁\u{1b}[0m",
@@ -1499,7 +1427,6 @@ mod tests {
         );
         assert_ne!(glued, CODEX_PARTICLES_EMPTY, "fixture 的 marker 形狀沒變");
         assert_eq!(box_state("codex", &glued), BoxState::Empty, "點字蓋掉 marker 後的空格");
-        // 真草稿：點字還蓋在字與字之間的空格上（`login⠁bug`），一般字元照樣算非空。
         assert_eq!(box_state("codex", CODEX_PARTICLES_DRAFT), BoxState::NonEmpty, "點字底紋＋真草稿");
     }
     /// 2026-09-23 真畫面（claude 2.1.28x，`/model claude-opus-5-5` 套用後閒置）：輸入列是 `❯ ` 加一串普通空格——
@@ -1508,27 +1435,21 @@ mod tests {
     fn a_claude_composer_padded_with_blank_cells_after_a_model_switch_is_empty() {
         const SCREEN: &str = include_str!("fixtures/claude-2.1.28x-composer-padding-after-model.ansi");
         assert_eq!(box_state("claude", SCREEN), BoxState::Empty);
-        // 同一個畫面把 padding 換成一個真的字：還是草稿。
         let typed = SCREEN.replacen("❯\u{a0}   ", "❯\u{a0}x  ", 1);
         assert_ne!(typed, SCREEN);
         assert_eq!(box_state("claude", &typed), BoxState::NonEmpty);
     }
     #[test]
     fn braille_is_only_ignored_when_it_is_a_coloured_codex_particle() {
-        // 純文字讀法不放寬：分不出點字是不是打的（sol 第九輪 #2）。
         let plain: String = CODEX_PARTICLES_EMPTY.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
         assert_eq!(box_state("codex", &plain), BoxState::NonEmpty, "plain read");
         let row = |marker_row: &str, below: &str| format!("\u{1b}[0m\n{marker_row}\n{below}\n\n  gpt-6-astra medium · ~/proj\n");
         let dim_ph = "\u{1b}[1m›\u{1b}[0m \u{1b}[2mAsk Codex to do anything\u{1b}[0m";
         let particle = "\u{1b}[38;2;139;141;148m⠐\u{1b}[0m";
-        // 使用者真的打了點字（沒有顏色、非 dim）：是草稿。
         assert_eq!(box_state("codex", &row(&format!("\u{1b}[1m›\u{1b}[0m ⠁⠂"), "")), BoxState::NonEmpty, "uncoloured braille typed");
-        // 點字底紋之間混進一個一般字元：草稿。
         assert_eq!(box_state("codex", &row(&format!("{dim_ph}   {particle}  x"), "")), BoxState::NonEmpty, "one ordinary char");
-        // 下一列只有縮排＋點字：空白列；下一列有真字：續行。
         assert_eq!(box_state("codex", &row(&format!("{dim_ph}  {particle}"), &format!("      {particle}   {particle}"))), BoxState::Empty);
         assert_eq!(box_state("codex", &row(&format!("{dim_ph}  {particle}"), &format!("  more {particle}"))), BoxState::NonEmpty, "second line typed");
-        // claude 不套這條：同樣的點字仍是內容。
         let claude = format!("─────\n❯ {particle}\n─────\n");
         assert_eq!(box_state("claude", &claude), BoxState::NonEmpty);
     }
@@ -1537,7 +1458,6 @@ mod tests {
     /// 使用者打了字送不出去，畫面上框裡只有一句灰色的「繼續寫完」）。
     #[test]
     fn a_grok_ghost_suggestion_is_a_hint_not_a_draft() {
-        // 真畫面的顏色：框線與提示 88,88,88／marker 200,200,200／底 20,20,20。
         let esc = "\u{1b}";
         let bg = format!("{esc}[48;2;20;20;20m");
         let row = |text_fg: &str| {
@@ -1548,7 +1468,6 @@ mod tests {
         let screen = format!("⏺ 先前的輸出\n{}\n╰──────────────╯\n", row("88;88;88"));
         assert_eq!(box_state("grok", &screen), BoxState::Empty, "灰色建議不是草稿");
 
-        // 同一個框、同樣位置，使用者真的打的字（亮色）就是草稿。
         let screen = format!("⏺ 先前的輸出\n{}\n╰──────────────╯\n", row("225;225;225"));
         assert_eq!(box_state("grok", &screen), BoxState::NonEmpty, "亮色是使用者打的字");
     }
@@ -1560,7 +1479,6 @@ mod tests {
         let typed = Cell { ch: '字', dim: false, fg: true, fg_rgb: Some((30, 30, 30)), bg_rgb: Some((250, 250, 250)) };
         assert!(is_hint_cell(&hint, Some(&marker)), "淺色主題的灰提示");
         assert!(!is_hint_cell(&typed, Some(&marker)), "淺色主題打的字");
-        // SGR 2 照舊算提示；沒有顏色資訊（純文字讀）一律不放寬。
         assert!(is_hint_cell(&Cell { ch: 'x', dim: true, fg: false, fg_rgb: None, bg_rgb: None }, None));
         assert!(!is_hint_cell(&Cell { ch: 'x', dim: false, fg: false, fg_rgb: None, bg_rgb: None }, Some(&marker)));
     }
@@ -1578,13 +1496,10 @@ mod tests {
     fn claude_280_prompt_suggestion_is_an_empty_box() {
         assert!(CLAUDE_280_SUGGESTION.contains("❯\u{a0}\u{1b}[0m\u{1b}[2mInitialize git\u{1b}[0m"), "fixture 形狀變了");
         assert_eq!(box_state("claude", CLAUDE_280_SUGGESTION), BoxState::Empty, "真畫面的建議句");
-        // AGM 從 AM-2-M 讀到的那一行，逐位元組。
         let agm = CLAUDE_280_SUGGESTION.replace("Initialize git", "推給agm強制部署");
         assert_eq!(box_state("claude", &agm), BoxState::Empty, "AM-2-M 那一句");
-        // 使用者真的打的字：同一個位置、沒有 dim。
         let typed = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
         assert_eq!(box_state("claude", &typed), BoxState::NonEmpty, "非 dim＝打的字");
-        // 混合：dim 的建議後面接一個正常字（使用者在建議句上開始打字的那一幀）。
         let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
         assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "同一行混了正常字");
         let mixed_front = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize", "x\u{1b}[2mInitialize");
@@ -1597,19 +1512,15 @@ mod tests {
         assert_eq!(prompt_suggestion("claude", CLAUDE_280_SUGGESTION).as_deref(), Some("Initialize git"));
         let cjk = CLAUDE_280_SUGGESTION.replace("Initialize git", "推給agm強制部署");
         assert_eq!(prompt_suggestion("claude", &cjk).as_deref(), Some("推給agm強制部署"));
-        // 純文字讀（沒有 ESC）：分不出，不猜。
         let plain: String = CLAUDE_280_SUGGESTION.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
         assert!(plain.contains("Initialize git"), "前提：純文字裡看得到那幾個字");
         assert_eq!(prompt_suggestion("claude", &plain), None);
-        // 使用者打的字（沒有 dim）、同一行混了實字、別的 kind。
         let typed = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
         assert_eq!(prompt_suggestion("claude", &typed), None, "打的字不是建議");
         let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
         assert_eq!(prompt_suggestion("claude", &mixed), None, "同一行混了正常字");
         assert_eq!(prompt_suggestion("codex", CLAUDE_280_SUGGESTION), None);
-        // 空框（沒有任何字）也不是建議。
         assert_eq!(prompt_suggestion("claude", &CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git\u{1b}[0m", "")), None);
-        // 長度上限：不拿一大段當成建議。
         let long = CLAUDE_280_SUGGESTION.replace("Initialize git", &"長".repeat(SUGGESTION_MAX_CHARS + 1));
         assert_eq!(prompt_suggestion("claude", &long), None);
     }
@@ -1626,7 +1537,6 @@ mod tests {
         assert_ne!(screen, CLAUDE_280_SUGGESTION, "fixture 換行的寫法變了，這個測試要跟著改");
         assert_eq!(prompt_suggestion("claude", &screen).as_deref(), Some("Run the full test suite again"));
         assert_eq!(prompt_suggestion("claude", &wrapped("跑一次完整", "測試再收尾")).as_deref(), Some("跑一次完整測試再收尾"));
-        // 續行裡有實字：整句是草稿，不是建議。
         let typed_tail = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git\u{1b}[0m\r\n", "\u{1b}[2mInitialize git\u{1b}[0m\r\n  typed\r\n");
         assert_eq!(prompt_suggestion("claude", &typed_tail), None);
     }
@@ -1644,7 +1554,6 @@ mod tests {
         assert_eq!(crate::lifecycle::poller::composer_text("claude", &typed).as_deref(), Some("Initialize git"));
         let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
         assert!(plain_without_hints("claude", &mixed).contains("Initialize gitx"), "混了正常字就整句保留");
-        // 純文字讀看不出 dim：不放寬。
         let bare = strip_ansi(CLAUDE_280_SUGGESTION);
         assert_eq!(plain_without_hints("claude", &bare), bare);
     }
@@ -1693,8 +1602,6 @@ mod tests {
     fn only_the_exact_empty_shape_is_an_empty_box() {
         let empty = screen(&["⏺ 先前的回覆"], &[]);
         assert_eq!(box_state("claude", &empty), BoxState::Empty);
-        // marker 後只有空白是終端留下的 padding，不是草稿（2026-09-23：`/model` 套用後 `❯ ` 後面跟著二十幾個空格，
-        // 閒置的 bot 全被回 composer_busy）。真的打了一個空白再送 prompt，最多是 prompt 前面多一個空白。
         for (row, why) in [("❯  ", "marker 後多一個空白"), ("❯   ", "只有空白")] {
             let s = empty.replacen("❯\n", &format!("{row}\n"), 1);
             assert_eq!(box_state("claude", &s), BoxState::Empty, "{why}");
@@ -1705,12 +1612,10 @@ mod tests {
         assert_eq!(box_state("claude", &blank_second), BoxState::NonEmpty, "空白第二行");
         let second_line = empty.replacen("❯\n", "❯\n  草稿\n", 1);
         assert_eq!(box_state("claude", &second_line), BoxState::NonEmpty, "第二行有字");
-        // 佔位字只有畫成 dim 才算空框；純文字的同一句可能是使用者打的。
         let plain = empty.replacen("❯\n", "❯ Try \"fix lint errors\"\n", 1);
         assert_eq!(box_state("claude", &plain), BoxState::NonEmpty, "純文字的佔位字");
         let dim = empty.replacen("❯\n", "❯ \u{1b}[2mTry \"fix lint errors\"\u{1b}[0m\n", 1);
         assert_eq!(box_state("claude", &dim), BoxState::Empty, "dim 的佔位字");
-        // Claude Code 的「建議下一句」：整句 dim，不管寫什麼都是空框；同一句沒 dim、或混進一個非 dim 字就是草稿。
         let suggestion = empty.replacen("❯\n", "❯\u{a0}\u{1b}[2m把 4b 和 4c 補做完\u{1b}[0m\r\n", 1);
         assert_eq!(box_state("claude", &suggestion), BoxState::Empty, "dim 的建議句");
         let typed_same = empty.replacen("❯\n", "❯\u{a0}把 4b 和 4c 補做完\n", 1);
@@ -1719,8 +1624,6 @@ mod tests {
         assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "混進非 dim 字");
         let dim_codex = "› \u{1b}[2mSomething codex suggests\u{1b}[0m\n\ngpt-6-astra low · ~/proj\n";
         assert_eq!(box_state("codex", dim_codex), BoxState::Empty, "codex 任何 dim 提示");
-        // 只有空白（dim 或不 dim）是終端留下的 padding，不是草稿（2026-09-23 之前這裡當 NonEmpty，
-        // 讓 /model 套用後的閒置 bot 全部 composer_busy）。
         let dim_spaces = empty.replacen("❯\n", "❯ \u{1b}[2m  \u{1b}[0m\n", 1);
         assert_eq!(box_state("claude", &dim_spaces), BoxState::Empty, "只有空白是 padding");
         let plain_spaces = empty.replacen("❯\n", "❯\u{a0}                      \n", 1);
@@ -1750,7 +1653,6 @@ mod tests {
         for (text, cols, want, why) in table {
             assert_eq!(provable_by_echo_row(text, 2, *cols), *want, "{why}");
         }
-        // 剛好放得下／差一欄的邊界。
         let fits = "x".repeat(80 - 2 - ROW_SAFETY_COLS);
         assert!(provable_by_echo_row(&fits, 2, Some(80)));
         assert!(!provable_by_echo_row(&format!("{fits}x"), 2, Some(80)));
@@ -1763,7 +1665,6 @@ mod tests {
         assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "⏺ 好"], &[]), "ab"), 1);
         assert_eq!(echo_row_hits("claude", &screen(&["> Reply with PONG"], &[]), "Reply with PONG"), 1, "`> ` 變體");
         assert_eq!(echo_row_hits("claude", &screen(&["❯  Reply with PONG"], &[]), "Reply with PONG"), 0, "多一個空白");
-        // 回覆若以兩格縮排的純文字開頭，會被當成續行 → 假陰性（Unproven），不會假陽性。
         assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "  plain reply text"], &[]), "ab"), 0);
     }
     /// issue #1479：claude 的回音列是灰底整列寬，styled 讀取把列尾補成空白。補白不算內容；內容本身仍要逐字相等。
@@ -1776,7 +1677,6 @@ mod tests {
         assert_eq!(echo_row_hits("claude", &row("Reply with PONG!"), "Reply with PONG"), 0, "多一個字");
         assert_eq!(echo_row_hits("claude", &row(" Reply with PONG"), "Reply with PONG"), 0, "marker 後多一個空白");
         assert_eq!(echo_row_hits("claude", &screen(&[&format!("❯ ab{pad}"), "  cd"], &[]), "ab"), 0, "補白的列底下接縮排文字還是續行");
-        // 帶 ANSI 的灰底整列：`evidence` 先剝掉 ANSI 再數。
         let styled = format!("\u{1b}[0m\u{1b}[48;2;55;55;55m❯ \u{1b}[38;2;255;255;255mReply with PONG{pad}\u{1b}[0m\n❯\n");
         assert_eq!(evidence("claude", &Proof::EchoRow, 0, &styled, "Reply with PONG").unwrap(), 1);
     }
@@ -1833,7 +1733,6 @@ mod tests {
         for (why, i, text, want) in table {
             assert_eq!(choose_proof(&i, text), want, "{why}");
         }
-        // hooks 關掉的 claude 永遠不會回報 transcript：不等，直接打並標 unverified。
         let no_hooks = ProofInputs { hooks: false, ..inputs("claude", true, None, None, None, w) };
         assert_eq!(choose_proof(&no_hooks, multi), Ok(Proof::Unverified));
         let huge = "x".repeat(MAX_PROVABLE_CHARS + 1);
@@ -1871,7 +1770,6 @@ mod tests {
         let newer = day.join("rollout-2026-09-14T09-00-00-sess-same.jsonl");
         std::fs::write(&newer, "").unwrap();
         std::fs::write(&older, "").unwrap();
-        // mtime 由測試自己設，不靠牆鐘：以秒為單位的檔案系統，兩次寫入會落在同一秒（#1148）。
         let set_mtime = |p: &std::path::Path, secs: u64| {
             std::fs::File::options()
                 .write(true)
@@ -1882,12 +1780,9 @@ mod tests {
         };
         set_mtime(&newer, 1_800_000_000);
         set_mtime(&older, 1_800_000_060);
-        // 檔名排序在前的 older 反而是最後寫的：以修改時間為準。
         assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&older).unwrap()));
-        // 反過來也成立：看的是 mtime，不是寫入順序或檔名。
         set_mtime(&newer, 1_800_000_120);
         assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&newer).unwrap()));
-        // mtime 一樣時的 tiebreak 是路徑較大的那個（現況行為，釘住）。
         set_mtime(&older, 1_800_000_120);
         assert_eq!(codex_session_log(&home, "sess-same"), Some(std::fs::canonicalize(&newer).unwrap()));
         std::fs::write(ancient.join("rollout-2026-01-02T00-00-00-sess-ancient.jsonl"), "").unwrap();
@@ -1927,7 +1822,6 @@ mod tests {
         let waited = ProofInputs { waited_for_log: true, ..inputs("codex", true, Some("s1"), None, None, Some(80)) };
         assert_eq!(choose_proof(&waited, "a\nb"), Ok(Proof::Unverified));
         assert_eq!(choose_proof(&waited, "go"), Ok(Proof::EchoRow));
-        // session 本身還不知道：沒有東西可等，照舊。
         let unknown = inputs("codex", true, None, None, None, Some(80));
         assert_eq!(choose_proof(&unknown, "a\nb"), Ok(Proof::Unverified));
     }
@@ -1986,13 +1880,9 @@ mod api_tests {
     #[test]
     fn evidence_and_auto_resend_are_recorded_separately() {
         let r = |d: Delivered| d.record().expect("a delivered outcome records something");
-        // 打字＋無損證據：有證據，而且證據就是「已經進了 session」，重送只會做兩次（review3 c3 M4）。
         assert_eq!(r(Delivered::Submitted), DeliveryRecord { stored: "ok", verified: true, auto_resend: false });
-        // agent.prompt：沒有證據（它回 ok 卻沒送進去過），但沒送到才會重送，所以重送安全。
         assert_eq!(r(Delivered::Handed), DeliveryRecord { stored: "ok", verified: false, auto_resend: true });
-        // 打過字、證不明：重送會重複派工，關掉。
         assert_eq!(r(Delivered::Unverified), DeliveryRecord { stored: "ok", verified: false, auto_resend: false });
-        // unknown 本來就過不了重送閘門（要 delivery=ok），所以不動重送額度。
         assert_eq!(r(Delivered::Unproven("x")), DeliveryRecord { stored: "unknown", verified: false, auto_resend: true });
         assert!(Delivered::NotAttempted { reason: "x", retry: true }.record().is_none());
     }

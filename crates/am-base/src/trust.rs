@@ -48,7 +48,6 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
         env.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| expand_home(s, home))
     };
     match kind {
-        // Unset → `~/.claude.json`, *not* `~/.claude/.claude.json` (unlike settings.json).
         "claude" => Some(match var("CLAUDE_CONFIG_DIR") {
             Some(dir) => PathBuf::from(dir).join(".claude.json"),
             None => PathBuf::from(home).join(".claude.json"),
@@ -61,8 +60,6 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
             let dir = var("GROK_HOME").unwrap_or_else(|| format!("{home}/.grok"));
             Some(PathBuf::from(dir).join("trusted_folders.toml"))
         }
-        // agy 的設定目錄只認 `$HOME`（沒有專用變數）；agy 身份是換 `HOME`（SPEC §16.8），信任要寫進那個身份的 HOME 底下，
-        // 不然新身份第一次進專案還是會跳信任框。沒有 HOME 就是預設帳號。
         "agy" => Some(crate::agy_support::settings_path(Path::new(&var("HOME").unwrap_or_else(|| home.to_string())))),
         _ => None,
     }
@@ -96,7 +93,6 @@ pub fn claude_merge(existing: &str, paths: &[String]) -> Result<Option<String>> 
     if !changed {
         return Ok(None);
     }
-    // Match Claude Code's own formatting so the file does not flip between writers.
     Ok(Some(format!("{}\n", serde_json::to_string_pretty(&root)?)))
 }
 
@@ -110,7 +106,6 @@ pub fn codex_merge(existing: &str, paths: &[String]) -> Result<Option<String>> {
 
     let projects = doc.entry("projects").or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
     let Some(projects) = projects.as_table_mut() else { bail!("`projects` in codex `config.toml` is not a table") };
-    // Renders the children as `[projects."/path"]` instead of emitting a bare `[projects]`.
     projects.set_implicit(true);
 
     let mut changed = false;
@@ -187,7 +182,6 @@ fn resolve_symlink(path: &Path) -> PathBuf {
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let target = resolve_symlink(path);
     let dir = target.parent().ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
-    // 新建的目錄是 0700，不沿用 umask（移植自 ec199db2a）；已存在的目錄不動。
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
@@ -256,8 +250,6 @@ pub fn update_file(store: &Path, merge: impl Fn(&str) -> Result<Option<String>>)
 /// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
 async fn config_env<T: TrustEnv>(app: &Arc<T>, bot: &db::Bot, host: &str, home: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
-    // `identity_for_host`, not `cfg.identities`: shell-discovered `ccN` (SPEC §16) aren't in
-    // config.toml, which once sent cc2's record to the wrong file (2026-09-08).
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
         if let Some(id_env) = T::identity_env(app, host, name).await {
             for (k, v) in &id_env {
@@ -279,7 +271,6 @@ pub async fn pretrust_bots<T: TrustEnv>(app: &Arc<T>, bots: &[db::Bot]) -> Vec<S
     };
     let home = home.to_string_lossy().into_owned();
 
-    // One write per file, not per bot: the CLIs write these files too, so minimise the race.
     let mut jobs: BTreeMap<PathBuf, (String, BTreeSet<String>)> = BTreeMap::new();
     for b in bots {
         let Some(cwd) = b.cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { continue };
@@ -434,7 +425,6 @@ async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &
     for _ in 0..REMOTE_RACE_ATTEMPTS {
         let out = conn.ssh_exec(&remote_read_script(&f, paths)).await?;
         let (real_paths, sum, existing) = parse_remote_read(&out, paths.len()).with_context(|| format!("reading {store}"))?;
-        // `pwd -P` 之後才去重：兩顆 bot 可能用不同的 symlink 指到同一個目錄。
         let real_paths: Vec<String> = real_paths.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
         let Some(next) = merged(kind, &existing, &real_paths)? else { return Ok(false) };
         let body = next.strip_suffix('\n').unwrap_or(&next);

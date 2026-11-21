@@ -16,7 +16,7 @@ use am_base::db::api_bot::Checkpoint;
 use serde_json::{json, Value};
 
 pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-pub(crate) const UNKNOWN_STALE_SECS: i64 = 300; // 5 minutes
+pub(crate) const UNKNOWN_STALE_SECS: i64 = 300;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SweepReport {
@@ -59,13 +59,10 @@ pub(crate) async fn sweep_once(app: &crate::state::App) -> anyhow::Result<SweepR
     }
     let mut report = SweepReport::default();
 
-    // 1. Abandoned checkpoints after owner turn failed / ended
     sweep_abandoned_pending_checkpoints(app, &mut report).await?;
 
-    // 2. Reserved attempts exceeding hard deadline
     sweep_reserved_attempts_exceeding_hard_deadline(app, &mut report).await?;
 
-    // 3. Stale unknown attempts older than N minutes
     sweep_stale_unknown_attempts(app, &mut report).await?;
 
     Ok(report)
@@ -93,7 +90,6 @@ async fn sweep_abandoned_pending_checkpoints(
             continue;
         }
 
-        // Check if owner turn is still actively running:
         let is_active = if let Some(turn_id) = &owner_turn_id {
             let turn_row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
                 "SELECT t.status, t.run_id, r.state FROM turns t LEFT JOIN runs r ON r.id = t.run_id WHERE t.id = ?",
@@ -118,10 +114,8 @@ async fn sweep_abandoned_pending_checkpoints(
             continue;
         }
 
-        // Owner turn is ended or failed, but checkpoint is still pending. Settle safely:
         let mut tx = crate::db::begin_write(&app.db).await?;
 
-        // 1. Close reserved attempts on this session:
         let attempts: Vec<(String, Option<String>)> = sqlx::query_as(
             "SELECT id, turn_id FROM api_bot_attempts WHERE session_id = ? AND state = 'reserved'",
         )
@@ -154,7 +148,6 @@ async fn sweep_abandoned_pending_checkpoints(
             tracing::warn!(attempt_id = %att_id, bot_id = %bot_id, state = new_state, "API bot sweeper closed reserved attempt on ended owner turn");
         }
 
-        // 2. Apply any pending join receipts:
         let receipts: Vec<(String, String)> = sqlx::query_as(
             "SELECT turn_id, state FROM api_bot_join_receipts WHERE session_id = ? AND state = 'pending'",
         )
@@ -181,11 +174,8 @@ async fn sweep_abandoned_pending_checkpoints(
             .await?;
         }
 
-        // 3. Clear api_pending and synthesize tool_result for tool_pending:
         let mut new_val = val.clone();
         new_val["api_pending"] = json!(false);
-        // OpenAI 的 transcript 形狀不同（output item 一筆一筆、結果是 tool_results 批次），而且每個 function_call 都要有結果：
-        // 交給它的 codec 把這一批裡所有還沒有結果的呼叫都結清。Claude 走下面原本的路徑（不變）。
         let openai = new_val.get("provider").and_then(Value::as_str) == Some(super::openai::provider::ID);
         if openai {
             let Ok(mut state) = serde_json::from_value::<super::runner::State>(new_val.clone()) else {
@@ -271,7 +261,6 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
     app: &crate::state::App,
     report: &mut SweepReport,
 ) -> anyhow::Result<()> {
-    // 設定在 begin_write 之前讀好（#2036）。
     let turn_timeout_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs;
     let hard_deadline_secs = turn_timeout_secs + 120;
     let cutoff = crate::db::iso_in(-(hard_deadline_secs as i64));
@@ -318,8 +307,6 @@ async fn sweep_reserved_attempts_exceeding_hard_deadline(
                 .await?;
 
                 if let Some((rev, generation, chk_raw, updated_at)) = session_row {
-                    // 過期的 reserved 只結清帳（上面已做）；session 現在有人在用（回合在跑、更新的 attempt）就不動 checkpoint。
-                    // 交易內判斷：所有查詢都走同一個交易（不再借第二條連線，#2036）。
                     let busy = session_busy(app, &mut *tx, turn_timeout_secs, s_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &updated_at).await?;
                     if let (false, Ok(mut val)) = (busy, serde_json::from_str::<Value>(&chk_raw)) {
                         if val["api_pending"] == true {
@@ -372,7 +359,6 @@ async fn sweep_stale_unknown_attempts(
     app: &crate::state::App,
     report: &mut SweepReport,
 ) -> anyhow::Result<()> {
-    // 在任何交易與借連線之前先讀設定（#2036：ConfigStore 的鎖不能在握交易時拿）。
     let turn_timeout_secs = app.cfg.get().await.claude_api.api_bot.turn_timeout_secs;
     let cutoff = crate::db::iso_in(-UNKNOWN_STALE_SECS);
     let stale_unknowns: Vec<(String, String, Option<String>, i64, i64, String, String, String)> = sqlx::query_as(
@@ -388,11 +374,6 @@ async fn sweep_stale_unknown_attempts(
     .await?;
 
     for (att_id, session_id, bot_id, revision, generation, checkpoint_json, session_updated_at, att_created_at) in stale_unknowns {
-        // 一筆舊的 unknown 只是帳務未知（保守計入花費），跟**目前**的 checkpoint 無關：只有整個 session 真的靜止才碰 checkpoint。
-        // 2026-11-15 事故：舊回合的 ordinal 55 unknown 讓 sweeper 在新回合的請求進行中把 api_pending 清掉，回合 journal 因此寫失敗。
-        // 判斷一律看**目前**狀態：這顆 bot 有沒有回合在跑、session 有沒有還在進行的 reserved、有沒有比這筆更新的 attempt、
-        // session 最近有沒有被寫過。任何一個成立就放著不動。
-        // 這裡不握交易：借一條連線只給判斷用，用完還回去，才能再 begin_write。
         let busy = {
             let mut conn = app.db.acquire().await?;
             session_busy(app, &mut conn, turn_timeout_secs, &session_id, bot_id.as_deref(), Some(&att_id), &att_created_at, &session_updated_at).await?
@@ -410,7 +391,6 @@ async fn sweep_stale_unknown_attempts(
         let next_rev = revision + 1;
         let now = crate::db::now();
         let encoded = serde_json::to_string(&chk.value())?;
-        // 與 runtime 同一道圍欄：revision＋generation 都要對得上，而且 session 還沒被別人寫過（updated_at 不變）；對不上就放棄。
         let changed = sqlx::query(
             "UPDATE api_bot_sessions SET checkpoint_json = ?, revision = ?, updated_at = ? \
              WHERE id = ? AND revision = ? AND generation = ? AND updated_at = ? AND retired_at IS NULL",
@@ -567,7 +547,6 @@ pub(crate) async fn detect_stuck(app: &crate::state::App, bot_id: &str) -> Optio
                 .fetch_one(&app.db)
                 .await
                 .unwrap_or(false);
-                // 回合在跑、或 session 最近才被寫過＝不是卡住（跟 sweeper 的 `session_busy` 同一條）：舊的 unknown 只是帳務未知。
                 let moving = app.api_bot_runtime.has_live_turn(bot_id) || crate::db::cmp_ts(&session_updated_at, &cutoff_5m).is_ge();
                 if has_stale_unknown && !moving {
                     return Some(StuckInfo {

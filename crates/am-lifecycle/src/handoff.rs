@@ -86,9 +86,6 @@ pub async fn footprint(pool: &SqlitePool, host: &str, session: &str, host_sessio
     let mut fp = Footprint::default();
     let projects = crate::db::live_projects(pool).await?;
     for p in projects.iter().filter(|p| p.host == host && p.handed_off_to.is_some()) {
-        // A bare projects.workspace_id has no session evidence. Only scoped live
-        // runs establish a pane/tab/workspace footprint; NULL run sessions use the
-        // documented configured-host-session fallback.
         type RunRow = (Option<String>, Option<String>, Option<String>, bool);
         let runs: Vec<RunRow> = sqlx::query_as(
             "SELECT r.pane_id, r.tab_id, r.workspace_id, r.state IN ('starting','running','stopping')
@@ -100,7 +97,6 @@ pub async fn footprint(pool: &SqlitePool, host: &str, session: &str, host_sessio
         .fetch_all(pool)
         .await?;
         for (pane, tab, ws, active) in runs {
-            // 結束的 run 的 pane id 會被 herdr 重用（#469），只有活著的才算它的。
             if active {
                 fp.panes.extend(pane.filter(|v| !v.is_empty()));
                 fp.tabs.extend(tab.filter(|v| !v.is_empty()));
@@ -454,7 +450,6 @@ mod tests {
         assert_eq!(reason(crate::lifecycle::stop_bot(&app, &bot.id).await.unwrap_err()), "handed_off");
         assert_eq!(reason(crate::lifecycle::restart_bot(&app, &bot.id).await.unwrap_err()), "handed_off");
         assert_eq!(run_state(&app, &run).await, "running");
-        // 沒有 run 的 stop 也擋：它會去收這顆的預覽 pane（不經過 `client_for_run`）。
         let idle = tt::claude_bot(&app, &env.project_id, "bravo").await;
         assert_eq!(reason(crate::lifecycle::stop_bot(&app, &idle.id).await.unwrap_err()), "handed_off");
     }
@@ -567,7 +562,6 @@ mod tests {
         let mut a = entry("mine", &ws.workspace_id, &root.tab_id, &root.pane_id);
         a["cwd"] = json!(env.repo.to_string_lossy());
         *env.herdr.agents.lock().unwrap() = vec![a];
-        // 匯入會寫回 config.toml，所以專案要在裡面。
         let (pid, path) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
         app.cfg
             .update(move |cfg| {

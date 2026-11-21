@@ -49,14 +49,12 @@ async fn codex_rpc_local(exe: &str, lines: &[String], id: u64, home: Option<&str
         .stderr(std::process::Stdio::null())
         .process_group(0)
         .kill_on_drop(true);
-    // 身份的 `CODEX_HOME`：model/list 的結果（含預設模型）跟著這個家目錄走。沒有身份就照 daemon 的環境。
     if let Some(dir) = home {
         cmd.env("CODEX_HOME", dir);
     }
     let mut child = cmd.spawn().with_context(|| format!("spawn {exe} app-server"))?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
-    // 任何一步失敗（含寫 stdin、讀 stdout）都要走到下面的 kill，不留 app-server。
     let result: Result<Value> = async {
         let mut stdin = stdin.ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = stdout.ok_or_else(|| anyhow!("no stdout"))?;
@@ -128,8 +126,6 @@ async fn agy_model_list(app: &Arc<App>, host: &str, identity: Option<&str>) -> R
         return Ok(("static", agy_static_models()));
     }
     let Some(conn) = app.hosts.get(host).await else { return Ok(("static", agy_static_models())) };
-    // 未登入時 `agy models` 以非 0 結束：包在 subshell 裡（指令尾巴有 `exit $rc`）再 `|| true`，ssh 那層不當成連線錯誤，
-    // 輸出照樣過濾成空的，往下試 pane。
     let script = format!("( {} ) 2>/dev/null || true\n", agy_models_script(&exe, home.as_deref()));
     if let Ok(out) = conn.ssh_exec_path_timeout(&script, AGY_MODELS_TIMEOUT).await {
         let models = agy_models_from_text(&out);
@@ -186,7 +182,6 @@ async fn agy_models_via_pane(app: &Arc<App>, host: &str, exe: &str, home: Option
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
         "codex" => {
-            // 身份的 CODEX_HOME：app-server 的 model/list 與這個身份 config.toml 的預設才會是它自己的。
             let home = identity_home_dir(app, host, identity, "codex", "CODEX_HOME").await?;
             let r = codex_rpc_in(app, host, home.as_deref(), "model/list", json!({"includeHidden": false})).await?;
             let m = codex_models_from_rpc(&r);
@@ -197,7 +192,6 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             ("codex-app-server", codex_apply_identity_config(m, &cfg_text))
         }
         "grok" => {
-            // 身份的 GROK_HOME：`grok models` 與兩個檔都讀這個家目錄（沒有身份＝`~/.grok`）。
             let home = identity_home_dir(app, host, identity, "grok", "GROK_HOME").await?;
             let env = home.as_deref().map(|dir| home_env_prefix("GROK_HOME", dir)).unwrap_or_default();
             let exe = crate::tools::cached_path(app, host, "grok").await.unwrap_or_else(|| "grok".into());
@@ -358,7 +352,6 @@ fn fallback_last_known(dir: &std::path::Path, host: &str, kind: &str, identity: 
 }
 
 pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value> {
-    // agy 內建的預設帳號（`ag0`，舊資料 `agy`）就是「不指定身份」：收斂成同一格快取與同一份 models-last。
     let identity = identity.filter(|name| !crate::tools::is_builtin_default_identity(kind, name));
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
     if !refresh {
@@ -370,7 +363,6 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
     }
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let fetched = fetch(app, host, kind, identity).await;
-    // claude 沒有清單 API（永遠是寫死的），不存；agy 查不到會退回 "static"，也不存、並優先用上次抓到的。
     let v = match fetched {
         Ok(v) if v["source"] != "static" => {
             save_last_known(&app.data_dir, host, kind, identity, &v);
@@ -390,7 +382,6 @@ pub async fn list(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>
     if !app.hosts.is_current(&fence).await {
         bail!("host `{host}` was reconnected/reconfigured while listing {kind} models; stale result discarded");
     }
-    // 過期的格子順手丟掉（同 `github::remember_issues`）：identity 是任意字串，不回收就只增不減（#1349）。
     cache.retain(|_, entry| entry.0.elapsed() < CACHE_TTL);
     cache.insert(key, (Instant::now(), v.clone()));
     Ok(v)
@@ -421,8 +412,6 @@ mod tests {
             sh_quote(&fake.to_string_lossy()),
             sh_quote(&pidfile.to_string_lossy())
         );
-        // 200ms 內要 fork/exec 兩層 shell 再寫一次檔；整樹平行忙的時候不一定來得及。沒寫到就用更長的時限重來，
-        // 寫到了才往下驗（正常機器第一輪就過）。時限照時限回來、卡住的 shell 被收掉，這兩件事每一輪都驗。
         let mut pid = None;
         for timeout_ms in [200u64, 1_000, 5_000, 20_000] {
             let _ = std::fs::remove_file(&pidfile);
@@ -431,7 +420,6 @@ mod tests {
             assert!(err.to_string().contains("timed out"), "{err}");
             assert!(started.elapsed() < Duration::from_millis(timeout_ms) + Duration::from_secs(10), "逾時要照時限回來");
             if let Ok(p) = std::fs::read_to_string(&pidfile) {
-                // 假 shell 寫檔與逾時砍它可能同時發生：只收完整的一行數字。
                 if p.ends_with('\n') && p.trim().parse::<u32>().is_ok() {
                     pid = Some(p.trim().to_string());
                     break;
@@ -439,7 +427,6 @@ mod tests {
             }
         }
         let pid = pid.expect("四輪（最長 20 秒）假 shell 都沒跑到寫 pid 檔");
-        // 被 SIGKILL 的行程要等排程器輪到才真的消失，2 秒在忙的機器上不夠。
         let dead = crate::testing::eventually!(!alive(&pid));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(dead, "逾時後卡住的 login shell（pid {pid}）要被收掉");
@@ -478,14 +465,12 @@ mod tests {
         assert_eq!(got["host"], json!("m4p"), "host 仍是查的這台");
         assert_eq!(got["stale"], json!(true));
         assert_eq!(got["models"][0]["id"], json!("gemini-4-argon-high"));
-        // 這台自己抓到過：優先用自己的，不借別台。
         let own = json!({"kind": "agy", "host": "m4p", "source": "agy-cli", "fetched_at": "2026-11-18T00:00:00Z", "models": one("gemini-3.8-flash-high")});
         save_last_known(&dir, "m4p", "agy", Some("ag1"), &own);
         let got = fallback_last_known(&dir, "m4p", "agy", Some("ag1")).unwrap();
         assert_eq!(got["host"], json!("m4p"));
         assert_eq!(got["source"], json!("agy-cli"), "自己的上次抓到優先");
         assert_eq!(got["models"][0]["id"], json!("gemini-3.8-flash-high"));
-        // 其他 kind 不借 agy 的清單。
         assert!(fallback_last_known(&dir, "m4p", "codex", None).is_none(), "非 agy 不借別台");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -565,12 +550,10 @@ gpt-oss-120b-medium         GPT-OSS 120B (Medium)\n\nAM_AGY_DONE=0\nm4p@mac ~ % 
         assert_eq!(got["models"][0]["id"], json!("gemini-4-neon-medium"));
         assert!(!legacy.exists() && last.join("local-agy-ag0.json").exists(), "舊檔改名成 ag0");
         assert_eq!(fallback_last_known(&dir, "local", "agy", Some("ag1")).unwrap()["models"][0]["id"], json!("gemini-3.8-flash-high"));
-        // 新檔已在：殘留的舊檔丟掉，不蓋過新的。
         std::fs::write(&legacy, body("stale").to_string()).unwrap();
         save_last_known(&dir, "local", "agy", Some("ag0"), &body("gemini-4-argon-low"));
         assert!(!legacy.exists());
         assert_eq!(fallback_last_known(&dir, "m4p", "agy", None).expect("別台借 ag0 的")["models"][0]["id"], json!("gemini-4-argon-low"));
-        // 其他 kind 的檔名不變。
         assert_eq!(last_known_path(&dir, "local", "codex", None), last.join(format!("local-codex-{}.json", safe_part(""))));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -606,7 +589,6 @@ gpt-oss-120b-medium         GPT-OSS 120B (Medium)\n\nAM_AGY_DONE=0\nm4p@mac ~ % 
     async fn failed_fetch_serves_last_known_or_errors() {
         let env = crate::testing::env().await;
         let app = &env.app;
-        // 未知 kind：fetch 必失敗。
         assert!(list(app, "local", "nope", None, true).await.is_err());
         let last = json!({"kind": "nope", "host": "local", "source": "x", "fetched_at": "t0", "models": [{"id": "m1"}]});
         save_last_known(&app.data_dir, "local", "nope", None, &last);

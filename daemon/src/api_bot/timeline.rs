@@ -39,7 +39,7 @@ pub struct TurnSummary {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimelineToolItem {
     #[serde(rename = "type")]
-    pub kind: String, // "tool"
+    pub kind: String,
     pub name: String,
     pub duration_ms: Option<u64>,
     pub is_error: bool,
@@ -48,10 +48,10 @@ pub struct TimelineToolItem {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimelineRequestItem {
     #[serde(rename = "type")]
-    pub kind: String, // "request"
+    pub kind: String,
     pub ordinal: i64,
     pub timestamp: String,
-    pub iteration_type: String, // "message" | "compaction"
+    pub iteration_type: String,
     pub input_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
@@ -65,7 +65,7 @@ pub struct TimelineRequestItem {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimelineTurnEndItem {
     #[serde(rename = "type")]
-    pub kind: String, // "turn_end"
+    pub kind: String,
     pub timestamp: Option<String>,
     pub status: String,
     pub halt_reason: String,
@@ -90,7 +90,6 @@ fn model_rates(model: &str) -> Rates {
             output: 400.0,
         },
         _ => Rates {
-            // claude-opus-5-5 or default
             input: 40.0,
             write_5m: 50.0,
             write_1h: 80.0,
@@ -106,16 +105,15 @@ pub async fn get_turn_timeline(
     bot_id: &str,
     turn_id: &str,
 ) -> Result<Option<Value>, sqlx::Error> {
-    // 1. 驗證 turn 是否存在且屬於該 bot
     type TurnRow = (
-        String,         // t.id
-        String,         // t.status
-        String,         // t.created_at
-        Option<String>, // t.completed_at
-        Option<String>, // t.start_error
-        String,         // b.model
-        bool,           // b.fast
-        i64,            // t.cache_ttl_secs
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        i64,
     );
     let turn_opt: Option<TurnRow> = sqlx::query_as(
         "SELECT t.id, t.status, t.created_at, t.completed_at, t.start_error, b.model, b.fast, t.cache_ttl_secs \
@@ -144,19 +142,18 @@ pub async fn get_turn_timeline(
         t_cache_ttl_secs,
     ) = turn;
 
-    // 2. 撈取該 turn 的所有 attempts
     type AttemptRow = (
-        String,         // id
-        Option<String>, // session_id
-        i64,            // ordinal
-        String,         // requested_speed
-        Option<String>, // actual_speed
-        String,         // state
-        Option<String>, // usage_json
-        i64,            // reserved_microusd
-        Option<i64>,    // estimated_microusd
-        String,         // created_at
-        Option<String>, // finished_at
+        String,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        i64,
+        Option<i64>,
+        String,
+        Option<String>,
     );
 
     let attempts: Vec<AttemptRow> = sqlx::query_as(
@@ -171,7 +168,6 @@ pub async fn get_turn_timeline(
     .fetch_all(db)
     .await?;
 
-    // 3. 嘗試讀取 session checkpoint_json 作為備援（提取 tools 與 stop_reason）
     let session_id_opt = attempts.first().and_then(|a| a.1.clone());
     let checkpoint_val: Option<Value> = if let Some(sid) = session_id_opt {
         let raw_ckpt: Option<String> = sqlx::query_scalar(
@@ -186,7 +182,6 @@ pub async fn get_turn_timeline(
         None
     };
 
-    // 4. 計算回合總耗時（ms）
     let turn_duration_ms: Option<u64> = match (&t_completed_at, &t_created_at) {
         (Some(completed), created) => {
             if let (Some(c), Some(s)) = (
@@ -237,21 +232,20 @@ fn build_timeline_and_summary(
     cache_ttl_secs: i64,
     turn_duration_ms: Option<u64>,
     attempts: &[(
-        String,         // id
-        Option<String>, // session_id
-        i64,            // ordinal
-        String,         // requested_speed
-        Option<String>, // actual_speed
-        String,         // state
-        Option<String>, // usage_json
-        i64,            // reserved_microusd
-        Option<i64>,    // estimated_microusd
-        String,         // created_at
-        Option<String>, // finished_at
+        String,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        i64,
+        Option<i64>,
+        String,
+        Option<String>,
     )],
     checkpoint: Option<&Value>,
 ) -> Value {
-    // OpenAI 的模型用它自己的價表拆分（單位換成這裡的「每千萬 token 的美元」）；usage 的欄位名與 input 的定義也不同，見下。
     let openai_table = crate::api_bot::openai::pricing::price_table(model);
     let rates = match openai_table {
         Some(t) => {
@@ -280,7 +274,6 @@ fn build_timeline_and_summary(
     let mut last_stop_reason: Option<String> = None;
     let mut fast_mode_used = false;
 
-    // 從 checkpoint 取得 responses 與 messages（備援用）
     let empty_vec = Vec::new();
     let responses = checkpoint
         .and_then(|c| c.get("responses"))
@@ -322,7 +315,6 @@ fn build_timeline_and_summary(
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
-        // 計算 request 耗時
         let req_duration_ms: Option<u64> = usage_obj
             .as_ref()
             .and_then(|u| u.get("duration_ms"))
@@ -345,7 +337,6 @@ fn build_timeline_and_summary(
                 _ => None,
             });
 
-        // 判定 stop_reason
         let resp_fallback = responses.get(*ordinal as usize);
         let resp_stop_reason = resp_fallback
             .and_then(|r| r.get("stop_reason"))
@@ -363,14 +354,12 @@ fn build_timeline_and_summary(
             last_stop_reason = Some(r.clone());
         }
 
-        // 解析 iterations 或頂層 tokens
         let iterations = usage_obj
             .as_ref()
             .and_then(|u| u.get("iterations"))
             .and_then(Value::as_array);
 
         if let Some(iters) = iterations.filter(|a| !a.is_empty()) {
-            // 有 iterations（通常代表包含 compaction 輪次）
             for it in iters {
                 let it_type = it
                     .get("type")
@@ -438,7 +427,6 @@ fn build_timeline_and_summary(
                 }));
             }
         } else {
-            // 標準 message 請求（無 iterations）
             let u_in = usage_obj
                 .as_ref()
                 .and_then(|u| u.get("input_tokens"))
@@ -459,8 +447,6 @@ fn build_timeline_and_summary(
                 .and_then(|u| u.get("cache_creation_input_tokens").or_else(|| u.get("cache_write_tokens")))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            // OpenAI 的 `input_tokens` **含**快取讀寫（Claude 的不含）：拆分時扣掉，才不會重複計；
-            // 輸入超過長文門檻時整個請求輸入與快取 ×2、輸出 ×1.5。
             let (u_in, in_factor, out_factor) = match openai_table {
                 Some(t) => {
                     let long = u_in > t.long_context_over;
@@ -469,7 +455,6 @@ fn build_timeline_and_summary(
                 None => (u_in, 1.0, 1.0),
             };
 
-            // server tool check
             let u_server_tool = usage_obj
                 .as_ref()
                 .and_then(|u| u.get("server_tool_use"))
@@ -497,7 +482,6 @@ fn build_timeline_and_summary(
 
             if u_server_tool {
                 server_tool_tokens += 1;
-                // server tool 額外標記
                 server_tool_cost_usd += 0.0;
             }
 
@@ -517,8 +501,6 @@ fn build_timeline_and_summary(
             }));
         }
 
-        // 解析此 request 呼叫並執行的工具列表
-        // 優先讀取 usage_json["tools"]，次選從 checkpoint 提取
         let recorded_tools = usage_obj
             .as_ref()
             .and_then(|u| u.get("tools"))
@@ -541,13 +523,11 @@ fn build_timeline_and_summary(
                 }));
             }
         } else if let Some(resp) = resp_fallback {
-            // 從 response content 抓 tool_use
             let content_blocks = resp
                 .get("content")
                 .and_then(Value::as_array)
                 .unwrap_or(&empty_vec);
             for b in content_blocks {
-                // OpenAI 的回應：output item `function_call`（id 是 `call_id`），結果在 `tool_results` 批次裡。
                 if b.get("type").and_then(Value::as_str) == Some("function_call") {
                     let call_id = b.get("call_id").and_then(Value::as_str).unwrap_or("");
                     let is_error = messages.iter().any(|m| {
@@ -572,7 +552,6 @@ fn build_timeline_and_summary(
                         .unwrap_or("unknown")
                         .to_string();
 
-                    // 在 messages 搜尋對應的 tool_result
                     let is_error = messages.iter().any(|m| {
                         m.get("content")
                             .and_then(Value::as_array)
@@ -599,13 +578,11 @@ fn build_timeline_and_summary(
             }
         }
 
-        // 若最後一個 attempt 且無後續工具
         if att_idx == attempts.len() - 1 && req_stop_reason.is_some() {
             last_stop_reason = req_stop_reason;
         }
     }
 
-    // 5. 判定回合結束原因
     let halt_reason = if let Some(err) = turn_start_error {
         err.to_string()
     } else if let Some(reason) = last_stop_reason {
@@ -623,8 +600,6 @@ fn build_timeline_and_summary(
         "halt_reason": halt_reason,
     }));
 
-    // 6. 計算各類別佔比與最大項
-    // 若 calculated items sum > 0 且 total_cost_usd == 0（例如只有 mock 數據），以 sum 為準
     let calculated_sum = input_cost_usd
         + cache_read_cost_usd
         + cache_write_cost_usd
@@ -679,7 +654,6 @@ fn build_timeline_and_summary(
         },
     };
 
-    // 找出最大項
     let categories: [(&str, &str, &BreakdownCategory); 6] = [
         ("cache_write", "快取寫入", &breakdown.cache_write),
         ("input", "一般輸入", &breakdown.input),
@@ -708,10 +682,8 @@ fn build_timeline_and_summary(
         }
     }
 
-    // 7. 產生可省建議 (suggestions)
     let mut suggestions: Vec<String> = Vec::new();
 
-    // 建議一：快取冷掉重寫
     if breakdown.cache_write.tokens > 0 && breakdown.cache_write.cost_usd > 0.0 {
         let speed_factor = if fast_mode_used { 2.0 } else { 1.0 };
         let hit_cost = (breakdown.cache_write.tokens as f64 * rates.read) * speed_factor
@@ -730,7 +702,6 @@ fn build_timeline_and_summary(
         }
     }
 
-    // 建議二：fast 模式費用提示
     if fast_mode_used && base_cost > 0.001 {
         let fast_savings = base_cost * 0.5;
         suggestions.push(format!(
@@ -739,7 +710,6 @@ fn build_timeline_and_summary(
         ));
     }
 
-    // 建議三：輸出（含思考）費用過高
     if largest.category == "output"
         && breakdown.output.cost_usd >= 0.005
         && breakdown.output.percentage >= 40.0
@@ -750,7 +720,6 @@ fn build_timeline_and_summary(
         ));
     }
 
-    // 建議四：對話壓縮
     if breakdown.compaction.cost_usd >= 0.001 {
         suggestions.push(format!(
             "對話累積過長觸發了伺服器端壓縮（花費 ${:.3}）。建議開新對話或精簡上下文，避免重複壓縮歷史。",
@@ -758,7 +727,6 @@ fn build_timeline_and_summary(
         ));
     }
 
-    // 建議五：請求次數過多
     if attempts.len() >= 4 {
         suggestions.push(format!(
             "本回合進行了 {} 次 API 請求與工具來回。若將多個工具操作合併或批次處理，可大幅減少 API 請求次數與重複上下文傳輸成本。",
@@ -854,7 +822,7 @@ mod tests {
             "recorded".to_string(),
             Some(serde_json::to_string(&usage).unwrap()),
             10_000,
-            Some(58_544), // $0.058544
+            Some(58_544),
             "2026-11-15T02:00:00.000Z".to_string(),
             Some("2026-11-15T02:00:01.500Z".to_string()),
         )];
@@ -883,7 +851,6 @@ mod tests {
         assert!(breakdown["cache_write"]["tokens"].as_u64().unwrap() > 0);
         assert!(breakdown["output"]["tokens"].as_u64().unwrap() > 0);
 
-        // timeline 應有 2 個 request（compaction + message）與 1 個 turn_end
         let timeline = res["timeline"].as_array().unwrap();
         assert_eq!(timeline.len(), 3);
         assert_eq!(timeline[0]["type"], "request");
@@ -898,7 +865,7 @@ mod tests {
         let usage = json!({
             "input_tokens": 100,
             "output_tokens": 100,
-            "cache_creation_input_tokens": 50_000, // 冷掉重寫 50k
+            "cache_creation_input_tokens": 50_000,
             "cache_read_input_tokens": 0,
             "duration_ms": 2000,
             "stop_reason": "end_turn"
@@ -913,7 +880,7 @@ mod tests {
             "recorded".to_string(),
             Some(serde_json::to_string(&usage).unwrap()),
             50_000,
-            Some(25_240), // ~$0.025
+            Some(25_240),
             "2026-11-15T03:00:00.000Z".to_string(),
             Some("2026-11-15T03:00:02.000Z".to_string()),
         )];
@@ -945,7 +912,6 @@ mod tests {
 
     #[test]
     fn test_tools_timeline_with_recorded_tools_and_fallback() {
-        // 情況 A：usage_json 內建 tools
         let usage_with_tools = json!({
             "input_tokens": 200,
             "output_tokens": 50,
@@ -989,7 +955,6 @@ mod tests {
         );
 
         let timeline = res["timeline"].as_array().unwrap();
-        // 1 request + 2 tools + 1 turn_end = 4
         assert_eq!(timeline.len(), 4);
         assert_eq!(timeline[0]["type"], "request");
         assert_eq!(timeline[1]["type"], "tool");
@@ -1005,7 +970,6 @@ mod tests {
 
     #[test]
     fn test_tools_timeline_fallback_from_checkpoint() {
-        // 情況 B：舊資料 usage_json 沒有 tools，從 checkpoint 提取
         let usage_plain = json!({
             "input_tokens": 150,
             "output_tokens": 40,
@@ -1064,10 +1028,10 @@ mod tests {
         );
 
         let timeline = res["timeline"].as_array().unwrap();
-        assert_eq!(timeline.len(), 3); // 1 request + 1 tool + 1 turn_end
+        assert_eq!(timeline.len(), 3);
         assert_eq!(timeline[1]["type"], "tool");
         assert_eq!(timeline[1]["name"], "search_code");
-        assert!(timeline[1]["duration_ms"].is_null()); // fallback 無精確 duration
+        assert!(timeline[1]["duration_ms"].is_null());
         assert_eq!(timeline[1]["is_error"], false);
     }
 }

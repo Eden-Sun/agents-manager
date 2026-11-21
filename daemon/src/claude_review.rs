@@ -81,7 +81,6 @@ pub fn task_text(task_md: &str, to: &str, from: Option<&str>, changelog: &str, s
     out.push_str("觸發：使用者在更新提示上按了「分析影響」（不是排程）。唯讀：不要 build、不要重啟、不要改設定。\n\n");
     let body = truncate(changelog.trim(), MAX_BODY_CHARS);
     if body.is_empty() {
-        // 抓不到就照樣派：協調者還能 diff 兩顆 binary（task 裡本來就寫了怎麼做）。
         out.push_str(&format!("這次抓不到 changelog 內容（離線或版本對不上），請直接讀 {source_url}，或照上面的步驟 diff 兩顆 binary。\n"));
         return out;
     }
@@ -200,13 +199,11 @@ fn task_head(app: &impl crate::capabilities::DataDir, kind: &str) -> Option<Stri
 /// 沒指定新版時要解析哪一版。claude 是磁碟上那一版（自動更新已經下載好）；codex 的新版**還沒安裝**，
 /// 磁碟上是舊的，所以先看分診帳本裡最新的正式版（跟 `codex_update::decide` 同一個來源），帳本空才退回磁碟。
 async fn default_to(app: &(impl crate::capabilities::Db + crate::changelog::ChangelogState + crate::hosts::HostsAccess + crate::upstream_update::UpstreamWatch), host: &str, kind: &str) -> Option<String> {
-    // herdr 同理：新版還沒裝，看上游快照裡這台落後時的目標版本。
     if kind == "herdr" {
         if let Some(v) = crate::upstream_update::behind_target_for_host(app, kind, host).await {
             return Some(v);
         }
     }
-    // agy／grok 同 codex：新版還沒裝，磁碟上是舊的，看分診帳本。
     if matches!(kind, "codex" | "agy" | "grok") {
         if let Ok(Some(v)) = crate::release_triage::ledger::max_version(app.db(), kind).await {
             return Some(v);
@@ -268,7 +265,6 @@ async fn redispatch_target(app: &impl crate::capabilities::Db, kind: &str, to: &
             return Ok((candidate, Some(tail.id)));
         }
     }
-    // 一千次重派？不會真的發生；有個終點比 panic 或死迴圈安全。
     Ok((format!("{base}-r{}", crate::db::now()), Some(tail.id)))
 }
 
@@ -313,7 +309,6 @@ pub struct ReviewState {
 /// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
 async fn latest_in_chain(app: &impl crate::capabilities::Db, a: app_ports_p13::Assignment) -> Result<app_ports_p13::Assignment, LcError> {
     let mut cur = a;
-    // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
     for _ in 0..50 {
         let Some(next_id) = cur.followup_assignment_id.clone() else {
             break;
@@ -408,7 +403,6 @@ pub async fn bot_review_state(app: &impl crate::capabilities::Db, kind: &str, to
             return Ok(state);
         }
     }
-    // 自己派的那筆優先；沒有就看 kick 派的（同一版，結論一樣算數）。
     let mut row: Option<(String, Option<String>, Option<String>, String)> = None;
     for crid in [ui_request_id(kind, to), request_id(kind, to)] {
         row = sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
@@ -519,7 +513,6 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     let host = b.host.clone().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let to_hint = match b.to.as_deref().and_then(crate::changelog::version_string) {
         Some(v) => Some(v),
-        // codex 的新版還沒裝、磁碟是舊的：沒給 `to` 就用帳本的最新版（見 [`default_to`]）。
         None if matches!(kind, "codex" | "agy" | "grok") => crate::release_triage::ledger::max_version(&app.db, kind).await.ok().flatten(),
         None if kind == "herdr" => crate::upstream_update::behind_target_for_host(&app, kind, &host).await,
         None => None,
@@ -532,12 +525,6 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         return triage::start(&app, kind, &to, reply.from_version.as_deref(), &reply.sections, binary_diff_for(app.as_ref(), kind, reply.from_version.as_deref(), &to), b.auto).await.map(Json);
     }
     let found = Found { from_version: reply.from_version.clone(), body: changelog_body(&reply.sections), source_url: reply.source_url.clone(), sections: reply.sections.len() };
-    // 這一版已經有能用的交辦（自己派的、kick 派的，或 assignment 的 supersede 鏈上最新那一筆還活著／已完成），
-    // 或 API 快速解析已經有結論／正在跑：**直接回它**，不要再送一次。冪等判斷跟 [`review_state`] 是同一套
-    // （issue #394：原本各查各的，assignment 完成了視窗卻還在說「還沒派」）。全部都是 superseded／failed
-    // （鏈走到死路）才重派——`post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆
-    // 按鈕的正文本來就差一句觸發來源，不短路的話會變成錯誤而不是「已經派過」（協調者 2026-09-19）。
-    // API 模式一經選定就不派 bot，deep 舊參數也遵守這個界線。
     let api_mode = kind == "herdr" && crate::claude_review_api::ready(&app).await;
 
     if b.auto && !api_mode {
@@ -658,9 +645,6 @@ async fn dispatch_to_bot(app: &Arc<App>, kind: &str, to: &str, found: &Found) ->
     };
     let (crid, follow_up_of) = redispatch_target(app, kind, to).await?;
     let text = task_text(&task_md, to, found.from_version.as_deref(), &found.body, &found.source_url, versions_dir(kind).as_deref());
-    // 直接走 `supervisor::assign`（不是 `post_assignment` 那層 HTTP handler）：重派時要把新的一筆接在
-    // 死路的鏈尾之後（`follow_up_of`），`AssignIn` 沒有這個欄位——那是給外部呼叫端用的，這個接續是
-    // daemon 自己內部判斷出來的，不該讓使用者也塞得進去。
     app_ports_p13::supervisor_assign(
         app,
         &target.id,
@@ -778,7 +762,6 @@ mod tests {
 
         assert!(existing_for(&app, "claude", "2.1.277").await.unwrap().is_none(), "還沒派過");
 
-        // kick 派的那一筆（正文是它自己的版本）。
         let kick_text = format!("{TASK}\n---\n本次：舊版 2.1.276 → 新版 2.1.277\n");
         app_ports_p13::supervisor_assign(
             &app, "resp1", &kick_text, &request_id("claude", "2.1.277"), None, &[], None, true, None, None,
@@ -788,14 +771,11 @@ mod tests {
         .expect("kick 派得出去");
         let a = existing_for(&app, "claude", "2.1.277").await.unwrap().expect("剛派的那一筆");
 
-        // 使用者按按鈕：同一版查得到，UI 顯示「已經派過」。
         let found = existing_for(&app, "claude", "2.1.277").await.unwrap().expect("kick 派過的那一筆");
         assert_eq!(found.id, a.id);
         assert_eq!(found.target_bot_id, "resp1");
-        // 別的版本不受影響。
         assert!(existing_for(&app, "claude", "2.1.278").await.unwrap().is_none());
 
-        // 直接用不同正文重送同一個 crid 會被擋成 409（所以上面那條短路是必要的）。
         let err = app_ports_p13::supervisor_assign(
             &app, "resp1", "完全不同的正文", &request_id("claude", "2.1.277"), None, &[], None, true, None, None,
             app_ports_p13::ReplyMark::default(),
@@ -831,7 +811,6 @@ mod tests {
 
         assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "none", "還沒派");
 
-        // 派出去了：收件匣有這筆，還沒有回合。
         let key = app_ports_p13::supervisor_event_key("AGM", Some(&ui_request_id("claude", "2.1.278")), "fp", 0);
         app_ports_p13::supervisor_push_inbox(&app.db, &key, "bot_request", None, Some("resp1"), None, &json!({"fingerprint": "fp"}))
             .await
@@ -842,7 +821,6 @@ mod tests {
         assert_eq!(pending.target_bot_name.as_deref(), Some("AGM-responder"));
         assert!(pending.result.is_none());
 
-        // 處理完：事件帶回合 id，對方在那個回合講的話就是結論。
         sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, created_at) VALUES ('t-1',?,'web','completed',?)")
             .bind(&conv).bind(&now).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisor_inbox SET notify_turn_id='t-1', state='handled' WHERE event_key=?")
@@ -855,11 +833,9 @@ mod tests {
         assert_eq!(done.result.as_deref(), Some("2.1.278 沒有值得 AG Man 跟進的改動。"), "結論原樣帶出去給框顯示");
         assert!(done.answered_at.is_some());
 
-        // 只有空白的回覆不算結論。
         sqlx::query("UPDATE messages SET content='   ' WHERE turn_id='t-1'").execute(&app.db).await.unwrap();
         assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "pending");
 
-        // kick 派的那筆（不帶 -ui）也讀得到：同一版的結論一樣算數。
         let kick_key = app_ports_p13::supervisor_event_key("AGM", Some(&request_id("claude", "2.1.279")), "fp2", 0);
         app_ports_p13::supervisor_push_inbox(&app.db, &kick_key, "bot_request", None, Some("resp1"), None, &json!({}))
             .await
@@ -887,7 +863,6 @@ mod tests {
             .unwrap()
             .expect("收件匣裡要有這一筆");
         assert_eq!(inbox_event_for(&app, "claude", "2.1.277").await.unwrap().as_deref(), Some(id.as_str()));
-        // 別的版本不受影響。
         assert!(inbox_event_for(&app, "claude", "2.1.278").await.unwrap().is_none());
     }
 
@@ -1209,15 +1184,11 @@ mod tests {
         .await
         .unwrap();
         let head = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
-        // 鏈尾是 failed（不是 completed）：整條路都死了，不是「還活著」也不是「有結論」。
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
 
         let state = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(state.state, "none", "全部都死了，等同沒派過，允許重按");
 
-        // 重派：換一個沒人用過的 crid，原本那個 `-ui` 已經被死掉的那筆佔住，沿用它只會被 `assign()`
-        // 的 crid 冪等擋住、悄悄回那筆死的（issue #394 的重按沒反應）；而且要接在死路的鏈尾之後，
-        // 不然下次 review_state 沿舊 crid 找還是只走到那條死路，看不到新派的這筆。
         let (crid, follow_up_of) = redispatch_target(&app, "claude", "2.1.280").await.unwrap();
         assert_ne!(crid, ui_request_id("claude", "2.1.280"));
         assert_eq!(crid, format!("{}-r2", ui_request_id("claude", "2.1.280")));
@@ -1269,7 +1240,6 @@ mod tests {
         let herdr_md = "# Changelog\n\n## [0.9.3] - 2026-09-29\n\n- codex idle\n\n## [0.9.2] - 2026-09-24\n\n- events_lost\n";
         let body = |from: &str| ReviewIn { auto: false, kind: Some("herdr".into()), host: None, from: Some(from.into()), to: Some("0.9.3".into()), deep: None };
 
-        // 1. kick 先派。
         let e = crate::testing::env().await;
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
@@ -1286,7 +1256,6 @@ mod tests {
         assert_eq!(v["review"]["state"], "pending", "{v}");
         assert_eq!(counts(&app).await, before, "kick 派過就不再派");
 
-        // 2. 按鈕先派：正文是 AGM_ASK＋版差，用 kick 的 id。
         let e = crate::testing::env().await;
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
@@ -1381,7 +1350,6 @@ mod tests {
             .bind(id).bind(&e.project_id).bind(id).bind(format!("tok-{id}")).bind(&now)
             .execute(&app.db).await.unwrap();
         }
-        // 只有巡檢：不能派給它自己，所以還是「沒有目標」。
         app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1'").execute(&app.db).await.unwrap();
         assert_eq!(
@@ -1391,19 +1359,14 @@ mod tests {
         );
         assert!(pick_target_from(&app, Some("patrol1".into())).await.is_none(), "巡檢不能收交辦");
 
-        // 指到協調者就用它。
         assert_eq!(pick_target_from(&app, Some("resp1".into())).await.map(|b| b.id), Some("resp1".to_string()));
 
-        // 指到不存在的 bot：往下找，找不到就 None。
         assert!(pick_target_from(&app, Some("nope".into())).await.is_none());
 
-        // 前後空白照舊會被修掉；空字串等於沒設；誰都沒設＝拒絕。
         assert_eq!(pick_target_from(&app, Some("  resp1 ".into())).await.map(|b| b.id), Some("resp1".to_string()));
         assert!(pick_target_from(&app, Some(String::new())).await.is_none());
         assert!(pick_target_from(&app, None).await.is_none(), "誰都沒設＝拒絕");
     }
-
-    // ───────────── API 快速解析（#1919） ─────────────
 
     use crate::claude_api::{ClientError, ClientOutcome, MessagesClient, MessagesRequest, Usage};
 

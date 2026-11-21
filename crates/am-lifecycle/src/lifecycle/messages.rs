@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-
-
 pub async fn insert_message(
     app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conversation_id: &str,
@@ -98,8 +96,6 @@ pub async fn insert_message_full(
     snapshot: Option<&str>,
     relay_from: Option<&str>,
 ) -> anyhow::Result<db::Message> {
-    // 先讀 owner 再寫訊息（#613 要它們同一個交易）：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，
-    // `let _ =` 的呼叫端連說明訊息都默默丟了（#822）。
     let mut tx = db::begin_write(app.db()).await?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
         .bind(conversation_id)
@@ -208,11 +204,9 @@ pub async fn emit_turn(app: &impl LcHost, turn_id: &str) {
     let bot_id = row.bot_id;
     let should_flush_queue = t.status != "in_flight" && t.status != "queued";
     if matches!(t.status.as_str(), "completed" | "completed_fallback") {
-        // Hook and terminal-fallback completion both publish here, after their reply is committed.
         crate::lifecycle::s6_ports::TurnEventHostServices::child_done_after_completed_turn(app, &t.id);
     }
     app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
-    // Every path that takes a turn out of `in_flight` funnels through here: one subscription suffices.
     crate::lifecycle::s6_ports::TurnEventHostServices::publish_lifecycle_turn(
         app,
         &bot_id,
@@ -220,14 +214,11 @@ pub async fn emit_turn(app: &impl LcHost, turn_id: &str) {
         &t.status,
         &t.delivery,
     );
-    // Schedule after publishing so the next prompt cannot race the completion event.
     if should_flush_queue {
-        // 快取倒數（`cache_clock`）：`run.last_api_at` 取自回合的 `completed_at`，agent 先 idle、回合後收時要再推一次。
         if t.completed_at.is_some() {
             app.emit_bot_status(&bot_id).await;
         }
         schedule_flush_queued(app, &bot_id);
-        // 回合收掉是「回合在飛」那種延後在等的邊：agent 早已 idle 時不會再有 idle 邊（#712）。
         super::schedule_deferred_live(app, &bot_id);
     }
 }
@@ -398,7 +389,6 @@ mod tests {
         sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await.unwrap();
         drop(conn);
 
-        // 等的是背景重試（DB 讀寫＋emit）：上限只是保險，平行負載下 2 秒會誤紅（#1274）。壞掉時 30 秒後照樣紅。
         let recovered = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Ok(event) = turn_events.recv().await {
@@ -453,7 +443,6 @@ mod tests {
             });
         };
         assert_eq!(rearm_queue_retries_with(&restarted, fire).await.unwrap(), 1);
-        // 等的是 spawn 出去的整趟 flush（拿鎖、DB、herdr RPC）：上限只是保險（#1274）。
         let (woken, flushed) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await
             .expect("a durable queued row is retried after restart")
             .expect("the retry callback reports the bot");

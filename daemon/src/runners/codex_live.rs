@@ -21,7 +21,6 @@ pub async fn sync_runtime(
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    // 鎖裡重查：等鎖的時候這個 run 可能已經被換掉。
     if !matches!(crate::db::active_run(&app.db, bot_id).await, Ok(Some(r)) if r.id == run_id) {
         return;
     }

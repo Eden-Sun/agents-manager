@@ -491,8 +491,6 @@ fn run_attempt(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         let client = app.changelog_translate.client();
-        // 帳本的分類要跟 finish 用同一套內容驗證（#1945），送出的版本清單從 reserve 時寫進的 job 讀。
-        // 讀不到 job 就不做內容驗證（只看 stop_reason／usage）：拿空清單去驗，會把正確的回覆誤記成錯誤。
         let included = match load(&job_path(&app.data_dir, &fp)) {
             Ok(job) => Some(job.included_versions),
             Err(e) => {
@@ -556,7 +554,6 @@ fn decide(
     };
     let own_busy_or_done = existing.as_ref().is_some_and(|j| matches!(last_state(j), "completed" | "reserved" | "in_flight"));
     if !own_busy_or_done {
-        // 同一段內容已由別的範圍翻完（覆蓋重用）、或正在翻（背景或別的 range）：直接用／等，不算預算、不送（#1948）。
         if let Some(v) = covered_view(data_dir, plan, fp).or_else(|| covering_busy_view(data_dir, plan, fp)) {
             return Action::View(v);
         }
@@ -960,7 +957,6 @@ fn verified_language(lang: &str) -> Option<&'static str> {
 }
 
 fn prompt_for(plan: &Plan) -> Option<String> {
-    // `plan.lang` 來自 `cfg.lang`（空字串已收成 zh-Hant）。沒通過允許表就不組 prompt。
     let target = verified_language(&plan.lang)?;
     let mut versions = String::new();
     let mut data = String::new();
@@ -1212,7 +1208,6 @@ fn load(path: &Path) -> Result<Job, LoadErr> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Cold completed results remain reusable after hot-ledger retention.
             if path.parent().and_then(Path::file_name).and_then(|s| s.to_str()) == Some(LEDGER_DIR) {
                 if let (Some(data_dir), Some(name)) = (path.parent().and_then(Path::parent), path.file_name()) {
                     let job = load(&archive_dir(data_dir).join(name))?;
@@ -1223,8 +1218,6 @@ fn load(path: &Path) -> Result<Job, LoadErr> {
             }
             return Err(LoadErr::Missing);
         },
-        // 帳本目錄被一個檔案擋住時，這筆 json 根本不存在，不是壞掉的舊檔。
-        // 交給 save 回 http/ledger，避免把寫不進去說成 bad_format。
         Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Err(LoadErr::Missing),
         Err(_) => return Err(LoadErr::Corrupt),
     };
@@ -1271,7 +1264,7 @@ fn ledger_jobs(dir: &Path) -> Vec<Job> {
 /// 5. witness 必須在保留名單內，且不可被排入同批刪除（避免 A/B 互蓋同時刪除）；刪除前持 gate 再次重讀 candidate 與 witness，驗證保護條件。
 const MAX_ELIGIBLE_COVERED_LEDGERS: usize = 100;
 const SCAN_BATCH_LIMIT: usize = 200;
-const DELETE_BATCH_LIMIT: usize = 40; // 5 * 40 <= 200 個 IO 操作
+const DELETE_BATCH_LIMIT: usize = 40;
 
 fn is_known_final_attempt_state(state: &str) -> bool {
     matches!(state, "completed" | "interrupted" | "failed")
@@ -1304,7 +1297,6 @@ fn attempt_ts_older_than(
         let Some(retry) = crate::db::parse_ts(retry_str) else {
             return false;
         };
-        // Both operands are parsed UTC instants, never raw ledger strings (#1982).
         if retry.cmp(&now) != std::cmp::Ordering::Less {
             return false;
         }
@@ -1373,7 +1365,6 @@ fn is_strictly_covered_by(candidate: &Job, witness: &Job) -> bool {
     if cand_set.is_empty() || !cand_set.is_subset(&wit_set) || cand_set.len() >= wit_set.len() {
         return false;
     }
-    // candidate 的每個 version 在 witness 的 sections 裡都有對應譯文，且 body.trim() 非空
     candidate.source.iter().all(|cs| {
         witness
             .sections
@@ -1398,7 +1389,7 @@ fn schedule_prune(app: &Arc<App>) {
 
 struct PrunePlan {
     expired: Vec<String>,
-    covered: Vec<(String, String)>, // (candidate_fp, witness_fp)
+    covered: Vec<(String, String)>,
 }
 
 fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePlan {
@@ -1422,13 +1413,11 @@ fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePla
     let expired_set: std::collections::HashSet<&str> =
         eligible_expired.iter().map(|s| s.as_str()).collect();
 
-    // witness 必須是 completed 且不在過期刪除清單內
     let valid_witness_pool: Vec<&Job> = completed_witness_pool
         .into_iter()
         .filter(|j| !expired_set.contains(j.fingerprint.as_str()))
         .collect();
 
-    // 尋找 witness：選取包含 candidate 且 source 集合最大的 witness（maximal coverer）
     let mut covered_pairs: Vec<(&Job, &Job)> = Vec::new();
     for cand in eligible_covered_candidates {
         let best_witness = valid_witness_pool
@@ -1442,7 +1431,6 @@ fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePla
 
     let mut covered_plan = Vec::new();
     if covered_pairs.len() > MAX_ELIGIBLE_COVERED_LEDGERS {
-        // 按每筆 job 最近一次完成時間，由舊到新淘汰。
         covered_pairs.sort_by_key(|(cand, _)| {
             cand.attempts
                 .iter()
@@ -1451,7 +1439,6 @@ fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePla
                 .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
         });
         let excess = covered_pairs.len() - MAX_ELIGIBLE_COVERED_LEDGERS;
-        // 挑選出 candidate，但必須確保被選中的 candidate 絕對不能在保留的 witness 清單中
         let mut chosen_candidates = Vec::new();
         let witness_set: std::collections::HashSet<String> = covered_pairs
             .iter()
@@ -1462,7 +1449,6 @@ fn plan_prune(snapshots: &[Job], now: chrono::DateTime<chrono::Utc>) -> PrunePla
             if chosen_candidates.len() >= excess {
                 break;
             }
-            // 不能刪除當前被其他候選當作見證者的 job（避免 A->B->C 刪掉 B）
             if witness_set.contains(cand.fingerprint.as_str()) {
                 continue;
             }
@@ -1548,13 +1534,12 @@ fn archive_pruned_job_with_saver<F>(
 where
     F: FnMut(&Path, &Job) -> std::io::Result<()>,
 {
-    // Disk metadata is untrusted. Reject before constructing any archive path.
     if !valid_fingerprint(&job.fingerprint) {
         tracing::warn!("invalid changelog translation fingerprint; preserving hot job");
         return Err(());
     }
     let a_path = archive_path(data_dir, &job.fingerprint);
-    *ops += 1; // 嘗試讀取既有 archive
+    *ops += 1;
     let mut base_job = match load_for_prune(&a_path) {
         Ok(existing) => existing,
         Err(LoadErr::Missing) => {
@@ -1596,7 +1581,7 @@ where
         })?;
         let suffix = hex_encode(&Sha256::digest(&payload_bytes));
         let c_path = conflict_archive_path(data_dir, &job.fingerprint, &suffix);
-        *ops += 1; // 嘗試讀取既有 conflict 檔
+        *ops += 1;
         let should_save = match std::fs::read(&c_path) {
             Ok(existing_bytes) => {
                 if existing_bytes != payload_bytes {
@@ -1613,7 +1598,7 @@ where
             }
         };
         if should_save {
-            *ops += 1; // 嘗試寫入 conflict 檔
+            *ops += 1;
             if let Err(e) = saver(&c_path, &conflict_job) {
                 tracing::warn!(path = %c_path.display(), ?e, "failed to save conflict changelog usage archive");
             }
@@ -1623,7 +1608,7 @@ where
 
     base_job.status = job.status.clone();
 
-    *ops += 1; // 嘗試儲存 archive
+    *ops += 1;
     saver(&a_path, &base_job).map_err(|e| {
         tracing::warn!(path = %a_path.display(), ?e, "failed to save changelog usage archive");
     })
@@ -1665,12 +1650,11 @@ async fn apply_prune_batch(
         } else if !is_expired_job(&job, now) {
             continue;
         }
-        // archive 讀取 + 儲存（透過 ops 實際計數已執行的 IO 步數）
         if archive_pruned_job(&app.data_dir, &job, &mut stats.operations).is_err() {
             continue;
         }
 
-        stats.operations += 1; // unlink
+        stats.operations += 1;
         match std::fs::remove_file(&path) {
             Ok(()) => stats.removed += 1,
             Err(error) => {
@@ -2255,7 +2239,6 @@ mod tests {
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_status(&env.app, "2.1.5", "completed").await;
         assert_eq!(fake.calls(), 1);
-        // 前端 range 是 (2.1.4, 2.1.5]：只有 2.1.5 一段，每一段原文都翻過，直接組出來。
         let narrow = get(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(narrow["status"], "completed");
         assert_eq!(narrow["reused"], true);
@@ -2299,7 +2282,6 @@ mod tests {
         enable(&env).await;
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_status(&env.app, "2.1.5", "completed").await;
-        // (2.1.4, 2.1.5] 與 (2.1.3, 2.1.4] 都是背景那一輪的子集，各版正文相同，一律不送。
         let b_to_c = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(b_to_c["status"], "completed");
         let a_to_b = post(&env.app, q_host("local", "2.1.3", "2.1.4")).await;
@@ -2324,7 +2306,6 @@ mod tests {
             .unwrap();
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_status(&env.app, "2.1.5", "completed").await;
-        // 用掉唯一一次之後，覆蓋的範圍照樣拿得到，不會被 hourly 擋。
         let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(covered["status"], "completed", "covered reuse is not budget-blocked");
         assert_eq!(fake.calls(), 1);
@@ -2342,7 +2323,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // 三個不同的新版（不同內容＝不同指紋），一小時內都要送得出去。
         for (i, (from, to, body)) in [("2.1.3", "2.1.5", "widgets"), ("2.1.5", "2.1.6", "more"), ("2.1.6", "2.1.7", "last")].into_iter().enumerate() {
             env.app.changelog.seed("claude", &format!("## {to}\n- {body} in {to}\n## {from}\n- old {from}\n")).await;
             let _ = post(&env.app, q_host("local", from, to)).await;
@@ -2367,7 +2347,6 @@ mod tests {
             .unwrap();
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_calls(&fake, 1).await;
-        // 背景還在翻 (2.1.3,2.1.5]；使用者開框要 (2.1.4,2.1.5]：不付第二次，回 in_flight 讓前端輪詢。
         let open = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(open["status"], "in_flight");
         assert_eq!(fake.calls(), 1, "a covered in-flight request must not spend again");
@@ -2385,18 +2364,15 @@ mod tests {
         let _release = Release(gate.clone());
         let (env, fake) = boot(vec![Step::Hang(gate.clone()), ok_step()]).await;
         env.app.changelog.seed("agy", "## 2.1.5\n- agy change\n## 2.1.4\n- old agy\n").await;
-        // 200ms 太貼：第一筆還在翻（gate 還沒放）時重送就又被擋、之後不再排，macOS 負載下穩定踩到（#1964）；1.5s 仍遠短於輪詢上限。
         *env.app.changelog_translate.retry_floor.lock().unwrap() = std::time::Duration::from_millis(1500);
         enable(&env).await;
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_calls(&fake, 1).await;
-        // max_in_flight=1：另一個 kind 被擋下，排一次延後重送。
         auto_kick(env.app.clone(), "agy".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         settle_background(&env.app).await;
         assert_eq!(fake.calls(), 1, "blocked while the first is in flight");
         gate.notify_one();
         until_status(&env.app, "2.1.5", "completed").await;
-        // 等延後重送（retry_floor 200ms）：上限只是放棄的耐心，不是斷言；macOS 的 runner 在整樹測試的負載下會慢過 2 秒（#1964）。
         for _ in 0..2000 {
             if fake.calls() >= 2 {
                 break;
@@ -2426,7 +2402,6 @@ mod tests {
         auto_kick(env.app.clone(), "claude".into(), Some("2.1.3".into()), "2.1.5".into()).await;
         until_status(&env.app, "2.1.5", "completed").await;
         assert_eq!(fake.calls(), 2);
-        // 自己那筆是 failed（退避中）：先找涵蓋，直接用，不再送。
         let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(covered["status"], "completed");
         assert_eq!(covered["reused"], true);
@@ -2434,7 +2409,6 @@ mod tests {
     }
 
     async fn settle_background(app: &Arc<App>) {
-        // 背景送出只是 spawn，沒有可等的句柄：讓它有機會跑完（或靜默放棄）。
         for _ in 0..20 {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -2554,7 +2528,6 @@ mod tests {
 
     #[tokio::test]
     async fn defaults_bound_failures_to_three_and_explicit_cap_still_applies() {
-        // 預設最多三次；退避到期不能繞過失敗窗口，滿一小時才可再送。
         let (env, fake) = boot(vec![
             Step::Fail(ClientError::Timeout { usage: None }),
             Step::Fail(ClientError::Timeout { usage: None }),
@@ -2578,7 +2551,6 @@ mod tests {
         until_status(&env.app, "2.1.5", "completed").await;
         assert_eq!(fake.calls(), 4, "a later window permits retry");
 
-        // 使用者自己設 max_attempts＝2：兩次送出後就擋在一小時窗口。
         let (env, fake) = boot(vec![
             Step::Fail(ClientError::Timeout { usage: None }),
             Step::Fail(ClientError::Timeout { usage: None }),
@@ -3049,7 +3021,6 @@ mod tests {
             .unwrap();
         let _ = post(&env.app, q_to("2.1.5")).await;
         let _ = until_status(&env.app, "2.1.5", "completed").await;
-        // 2.1.4 已被覆蓋重用（不耗預算），要測 hourly 就得是沒翻過的新版。
         env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n").await;
         let blocked = post(&env.app, q_host("local", "2.1.5", "2.1.6")).await;
         assert_eq!(blocked["status"], "failed");
@@ -3066,11 +3037,9 @@ mod tests {
         enable(&env).await;
         let _ = post(&env.app, q_to("2.1.5")).await;
         until_calls(&fake, 1).await;
-        // (2.1.4,2.1.5] 已被在飛的 (2.1.3,2.1.5] 涵蓋：回 in_flight（不是預算錯誤），不送、不記。
         let covered = post(&env.app, q_host("local", "2.1.4", "2.1.5")).await;
         assert_eq!(covered["status"], "in_flight");
         assert!(covered["error_kind"].is_null());
-        // 2.1.6 沒有任何在飛的帳本涵蓋：照舊被 in_flight 預算擋下。
         env.app.changelog.seed("claude", "## 2.1.6\n- Newer change\n## 2.1.5\n- Added widgets for the update window\n").await;
         let other = post(&env.app, q_host("local", "2.1.5", "2.1.6")).await;
         assert_eq!(other["error"], "in_flight");
@@ -3110,7 +3079,6 @@ mod tests {
         let fp = failed["fingerprint"].as_str().unwrap().to_string();
         patch_retry_past(&env.app, &fp);
 
-        // 剛送完：1 小時內不送，retry_after 就是最後一次結束起 1 小時。
         let blocked = post(&env.app, q_to("2.1.5")).await;
         assert_eq!(blocked["error_kind"], "budget");
         assert_eq!(blocked["error"], "attempts");
@@ -3120,7 +3088,6 @@ mod tests {
         assert!((3500..=3600).contains(&remaining_secs(&retry_at)));
         assert_eq!(fake.calls(), 1);
 
-        // GET 與 POST 一致：同一個 retry_after；連續查詢不往後延。
         let got = get(&env.app, q_to("2.1.5")).await;
         assert_eq!(got["error"], "attempts");
         assert_eq!(got["retry_after"], retry_at);
@@ -3128,7 +3095,6 @@ mod tests {
         assert_eq!(again["retry_after"], retry_at);
         assert_eq!(fake.calls(), 1);
 
-        // 過了 1800 秒、還沒滿 1 小時：仍不送，剩餘時間約 1800 秒，窗口終點不動。
         age_last_sent(&env.app, &fp, 1800);
         let mid = window_end(&env.app, &fp);
         assert!((1790..=1800).contains(&remaining_secs(&mid)));
@@ -3138,7 +3104,6 @@ mod tests {
         assert_eq!(mid_post["retry_after"], mid);
         assert_eq!(fake.calls(), 1);
 
-        // 過了 1 小時：允許再送一次；那次失敗後又要等下一個 1 小時。
         age_last_sent(&env.app, &fp, 3601);
         let _ = post(&env.app, q_to("2.1.5")).await;
         until_calls(&fake, 2).await;
@@ -3567,7 +3532,6 @@ mod tests {
         let seen = &fake.seen()[0];
         assert_eq!(seen.model, "claude-sonnet-5-5");
         assert_eq!(seen.effort, "low");
-        // 舊的 [changelog_translate] timeout_ms 不生效，跟 [claude_api] timeout_ms 走。
         assert_eq!(seen.timeout_ms, 4321);
         assert_eq!(seen.max_tokens, 128_000);
         assert_eq!(done["requested_model"], "claude-sonnet-5-5");
@@ -3791,7 +3755,6 @@ mod tests {
     mod retention_tests {
         use super::*;
 
-        // Fixture labels stay readable while persisted identifiers follow the production format.
         fn fixture_fp(label: &str) -> String {
             if valid_fingerprint(label) {
                 label.to_owned()
@@ -3961,7 +3924,6 @@ mod tests {
             let reused = post(&env.app, q_to("2.1.5")).await;
             assert_eq!(reused["status"], "completed");
             assert_eq!(fake.calls(), 1, "expired success must never be billed again");
-            // archive 保留譯文，attempt 與原熱 job 完全相等。
             let archived = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
             assert_eq!(archived.attempts.len(), expected_job.attempts.len());
             assert_eq!(
@@ -3989,7 +3951,6 @@ mod tests {
                 0o700
             );
 
-            // 驗證即使 instantiate 新的 ClaudeApi（記憶體帳本歸零），archive 仍可讀出完整歷史
             let fresh_claude_api = crate::claude_api::ClaudeApi::new();
             assert_eq!(fresh_claude_api.ledger.snapshot(20)["totals"]["calls"], 0);
             let persistent_archive = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
@@ -4115,7 +4076,6 @@ mod tests {
             put(&env.app, &old);
             let stale = items(plan_prune(&[old.clone()], chrono::Utc::now()));
             assert_eq!(stale.len(), 1);
-            // A writer enters between planning and applying the original plan.
             {
                 let _gate = env.app.changelog_translate.gate.lock().await;
                 let mut active = old;
@@ -4133,7 +4093,6 @@ mod tests {
             put(&env.app, &narrow);
             let wide = job("wide", OLD, &[("v1", "a"), ("v2", "b")]);
             put(&env.app, &wide);
-            // A completed witness changes before the deletion batch.
             {
                 let _gate = env.app.changelog_translate.gate.lock().await;
                 let mut busy = wide;
@@ -4163,7 +4122,6 @@ mod tests {
             assert_eq!(count, 200);
             assert_eq!(first.len(), 200);
             assert!(!done);
-            // This is the same gate awaited by GET/POST; the actual batch has returned it.
             let gate = env
                 .app
                 .changelog_translate
@@ -4230,7 +4188,6 @@ mod tests {
             assert!(!job_path(&env.app.data_dir, "narrow").exists());
             let after = covered_view(&env.app.data_dir, &plan, "requested").unwrap();
             assert_eq!(before, after);
-            // Permission failure in the actual unlink branch leaves the completed reply intact.
             put(&env.app, &narrow);
             use std::os::unix::fs::PermissionsExt;
             let dir = ledger_dir(&env.app.data_dir);
@@ -4276,18 +4233,16 @@ mod tests {
             let env = crate::testing::env().await;
             let fp = "archive-test";
             let mut j1 = job(fp, EXPIRED, VERSIONS);
-            j1.attempts[0].usage = None; // None usage 維持 None
+            j1.attempts[0].usage = None;
             put(&env.app, &j1);
 
-            // 1. 同次寫兩次：模擬 archive 已寫但熱 job 尚未 unlink，apply 重跑 attempt 不重複且真正 unlink 熱 job
             let mut ops = 0;
             assert!(archive_pruned_job(&env.app.data_dir, &j1, &mut ops).is_ok());
-            assert_eq!(ops, 2); // 1 load (NotFound) + 1 save
+            assert_eq!(ops, 2);
             let first_arc = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
             assert_eq!(first_arc.attempts.len(), 1);
             assert!(first_arc.attempts[0].usage.is_none());
 
-            // 模擬已寫好 archive，熱 job 仍存在，由正式 apply_prune_batch 重跑
             let batch = [(fixture_fp(fp), None)];
             let res_reapply = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
             assert_eq!(res_reapply.removed, 1);
@@ -4298,13 +4253,12 @@ mod tests {
             let second_arc = load_for_prune(&archive_path(&env.app.data_dir, fp)).unwrap();
             assert_eq!(second_arc.attempts.len(), 1, "attempt 不重複增加");
 
-            // 2. 同 fp 另輪產生新 attempt（只有新 attempt，未帶舊 attempt），archive union 仍保留 old
             let mut j2 = j1.clone();
             let mut next_att = j1.attempts[0].clone();
             next_att.id = crate::db::ulid();
             next_att.started_at = crate::db::iso_in(-EXPIRED);
             next_att.finished_at = Some(crate::db::iso_in(-EXPIRED));
-            j2.attempts = vec![next_att.clone()]; // 只有新 attempt
+            j2.attempts = vec![next_att.clone()];
             put(&env.app, &j2);
             let res_j2 = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
             assert_eq!(res_j2.removed, 1);
@@ -4317,7 +4271,6 @@ mod tests {
             assert_eq!(merged.attempts[0].id, j1.attempts[0].id);
             assert_eq!(merged.attempts[1].id, next_att.id);
 
-            // 3. 同 id 衝突（metadata 不一致）：寫 conflict 檔，舊 archive 與熱 job 皆保留
             let mut j_conflict = j1.clone();
             j_conflict.attempts[0].sent = !j_conflict.attempts[0].sent;
             put(&env.app, &j_conflict);
@@ -4330,12 +4283,10 @@ mod tests {
                 "同 id 衝突時熱 job 必須保留"
             );
 
-            // 舊 archive 位元組完全不變
             let after_conflict_arc_bytes =
                 std::fs::read(archive_path(&env.app.data_dir, fp)).unwrap();
             assert_eq!(old_arc_bytes, after_conflict_arc_bytes);
 
-            // 驗證 conflict 檔存在，且內容與新衝突 job 的 attempts JSON 相等
             let mut c_job = j_conflict.clone();
             c_job.summary.clear();
             c_job.sections.clear();
@@ -4350,7 +4301,6 @@ mod tests {
                 serde_json::to_value(&j_conflict.attempts).unwrap()
             );
 
-            // 再次重跑相同 conflict：不重複寫入，比對完全相同視為已保留
             let res_conflict_repeat = apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
             assert_eq!(res_conflict_repeat.removed, 0);
             assert_eq!(
@@ -4359,7 +4309,6 @@ mod tests {
                 "相同 conflict 不盲目覆寫"
             );
 
-            // 若 conflict 檔存在但內容不同（損壞或他者殘留）：不覆寫，warn 保留原檔與熱 job
             std::fs::write(&c_path, b"unrelated bytes").unwrap();
             let res_conflict_corrupt =
                 apply_prune_batch(&env.app, &batch, chrono::Utc::now()).await;
@@ -4374,7 +4323,6 @@ mod tests {
                 "熱 job 依舊完整保留"
             );
 
-            // 4. 有效 archive 加未知 field：fail-closed
             let a_file = archive_path(&env.app.data_dir, fp);
             let mut valid_val = serde_json::to_value(&merged).unwrap();
             valid_val
@@ -4396,7 +4344,6 @@ mod tests {
                 "未知欄位檔案位元組不動"
             );
 
-            // 5. archive save 失敗（透過注入 persist 失敗函數驗證）：fail-closed，熱 job 保留
             std::fs::write(&a_file, &old_arc_bytes).unwrap();
             let mut ops_err = 0;
             let mut save_called = false;
@@ -4412,7 +4359,7 @@ mod tests {
             assert!(save_called, "must reach the injected persistence failure");
             assert_eq!(std::fs::read(&a_file).unwrap(), old_arc_bytes);
             assert!(job_path(&env.app.data_dir, fp).exists());
-            assert_eq!(ops_err, 2); // 1 read + 1 failed save attempt
+            assert_eq!(ops_err, 2);
         }
     }
 }
@@ -4442,7 +4389,6 @@ mod live_probe {
             let sections = crate::changelog::pick_sections(&all, None, version);
             assert_eq!(sections.len(), 1);
             let mut limits = limits_of(&cfg, full.claude_api.timeout_ms);
-            // The probe must translate the ENTIRE official release, never a 6000-char prefix.
             limits.max_input_chars = u32::try_from(sections[0].body.chars().count()).unwrap();
             let plan = plan_input("agy", &limits, &sections);
             assert!(!plan.truncated_input && plan.omitted.is_empty());
@@ -4464,7 +4410,6 @@ mod live_probe {
                 "input_tokens":usage.input_tokens,"output_tokens":usage.output_tokens,"cache_write_tokens":usage.cache_creation_input_tokens,
                 "cache_read_tokens":usage.cache_read_input_tokens,"seconds":seconds,"cost_usd":crate::claude_api::cost_usd(model, usage),
                 "stop_reason":out.stop_reason,"coverage":"full"});
-            // Credentials never leave memory; payloads are isolated from the live daemon ledger.
             std::fs::write(result_dir.join(format!("{version}.json")), serde_json::to_vec(&json!({"measurement":row,"summary":summary,"sections":translated})).unwrap()).unwrap();
             println!("LIVE_TRANSLATION_MEASUREMENT {row}");
             rows.push(row);

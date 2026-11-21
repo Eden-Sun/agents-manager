@@ -10,7 +10,6 @@ use crate::lc_error::QueueClass;
 use serde_json::json;
 
 pub(crate) async fn ingest_user_prompt(app: &(impl Db + Emit + Cfg), relay: RelaySrc<'_>, bot_id: &str, message_id: &str, turn_id: &str, text: &str) {
-    // 預設不自動收件：每則都建項太吵，要追蹤的才加（`[ledger] auto_ingest`）。
     if !app.cfg().get().await.ledger.auto_ingest {
         return;
     }

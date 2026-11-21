@@ -65,8 +65,6 @@ fn context_percent(line: &str) -> bool {
 /// `<model> [<effort>] [fast] · <cwd> · <topic|Context …|quota>` — the only place codex states
 /// all three, so it is the read-back proving a live change landed (SPEC §4.4a).
 pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
-    // Last match in the viewport tail wins: the startup banner and a quoted line higher up share
-    // the shape. A narrow pane wraps the line; join a continuation line.
     let screen = crate::composer_parse::codex_main_conversation(screen);
     let screen = screen.as_ref();
     let lines: Vec<&str> = screen.lines().collect();
@@ -100,21 +98,16 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
         if !line.contains('·') {
             continue;
         }
-        // 未開始回合的冷啟動 footer 只有兩段（`<model> <default> · <cwd>`），還沒有 Context／額度／主題，
-        // 尚未有 active session，不當成 runtime（保留 argv 預設值，SPEC §4.3）。
         if line.matches('·').count() < 2 && !context_percent(&line) && !line.contains("% left") {
             continue;
         }
         let Some((head, _)) = line.split_once('·') else { continue };
         let mut parts = head.split_whitespace();
-        // 這一行的開頭沒有東西（`· Context …`）只是別的行：略過，不能整個函式回 None（下面才有真的狀態列）。
-        // 0.157 印顯示名（`GPT-6-Luna`）而不是 id（`gpt-6-luna`）：一律轉小寫，runtime 才跟設定比得起來（#712）。
         let Some(model) = parts.next().map(str::to_ascii_lowercase) else { continue };
         if !model.contains('-') || !model.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_') {
             continue;
         }
         let rest: Vec<&str> = parts.collect();
-        // head 裡在 model 之後只能是 fast、default 或已知的 codex effort（避免把普通文字行誤認成狀態列）。
         if !rest.iter().all(|w| {
             let lower = w.to_ascii_lowercase();
             lower == "fast"
@@ -128,7 +121,6 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
             .iter()
             .find(|w| crate::config::efforts_for_kind("codex").contains(&w.to_ascii_lowercase().as_str()))
             .map(|w| w.to_ascii_lowercase())
-            // 明確的 `default` 字樣＝CLI 預設（不是未知）。沒有這個字也沒有強度字，才是未知。
             .or_else(|| rest.iter().any(|w| w.eq_ignore_ascii_case("default")).then(|| CLI_DEFAULT_EFFORT.to_string()));
         out = Some(CodexRuntime { model, effort, fast });
     }
@@ -155,7 +147,6 @@ fn effort_follow<'a>(seen: Option<&'a str>, prev: Option<&str>) -> crate::child_
     }
 }
 
-// A failed/cancelled edge is still an attempt: replaying it could erase a newer UI intent.
 const FAST_FOLLOW_LIMIT: usize = 1024;
 /// 共用清理 task 的巡查間隔、每批 `IN (…)` 帶幾個 run id、表滿 WARN 的最短間隔（同一個 process）。
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
@@ -184,8 +175,6 @@ impl Default for FastFollowEdges {
 impl FastFollowEdges {
     fn observe_runtime(&mut self, run: &str, runtime: bool, matches_screen: bool) {
         if let Some(edge) = self.map.get_mut(run) {
-            // A live apply can advance runtime without this observer. A matching screen also
-            // establishes the current edge; an unchanged DB after a failed attempt does not.
             if matches_screen || edge.runtime != runtime {
                 edge.attempted = runtime;
                 edge.runtime = runtime;
@@ -199,8 +188,6 @@ impl FastFollowEdges {
             edge.attempted = fast;
             return Outcome { follow: true, ..Outcome::default() };
         }
-        // No eviction of active edges: at capacity preserve settings rather than replay them.
-        // The caller sweeps ended runs (without holding this lock) and tries once more.
         if self.map.len() >= self.limit { return Outcome { full: true, ..Outcome::default() }; }
         self.map.insert(run.to_string(), FastFollowEdge { attempted: fast, runtime, warned: false });
         Outcome { follow: true, start_sweeper: !std::mem::replace(&mut self.sweeper, true), full: false }
@@ -295,7 +282,6 @@ async fn attempt_fast_follow(pool: &sqlx::SqlitePool, run: &str, fast: bool, run
 async fn attempt_fast_follow_in(edges: SharedEdges, pool: &sqlx::SqlitePool, run: &str, fast: bool, runtime: bool) -> Option<FastFollowAttempt> {
     let mut outcome = lock_edges(edges).attempt(run, fast, runtime);
     if outcome.full {
-        // 表滿：先清掉已結束的 run 再試一次（鎖在 await 之前放掉）；仍然滿才放棄，WARN 節流。
         sweep_finished_fast_edges(edges, pool).await;
         let warn;
         {
@@ -318,7 +304,6 @@ async fn attempt_fast_follow_in(edges: SharedEdges, pool: &sqlx::SqlitePool, run
 pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_status_line(screen) else { return false };
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
-    // 狀態列沒講強度（沒有強度字、也沒有 default）＝未知：沿用上一輪已知的值，不清成 NULL；model／fast 照常校正。
     let effort = effective_effort(&seen, &run);
     if let Some(runtime) = run.runtime_fast {
         fast_follow_edges().lock().unwrap_or_else(|e| e.into_inner())
@@ -330,14 +315,12 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
     if same {
         return false;
     }
-    // Re-read the current user's settings on every attempt, including after daemon restart.
     let bot: db::Bot = match sqlx::query_as("SELECT * FROM bots WHERE id=?").bind(&run.bot_id).fetch_one(app.db()).await {
         Ok(bot) => bot,
         Err(_) => return false,
     };
     let fast_edge = bot.managed_by == "child" && run.runtime_fast.is_some_and(|prev| prev != i64::from(seen.fast));
     let mut attempt = if fast_edge { attempt_fast_follow(app.db(), run_id, seen.fast, run.runtime_fast.unwrap_or(0) != 0).await } else { None };
-    // 設定與 runtime 原子提交；失敗或取消一起 rollback，但嘗試記錄保留。
     let Ok(mut tx) = app.db().begin().await else { return false };
     let model = Some(seen.model.as_str()).filter(|_| run.runtime_model.as_deref() != Some(seen.model.as_str()));
     let effort_follow = effort_follow(seen.effort.as_deref(), run.runtime_effort.as_deref());
@@ -346,8 +329,6 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
         crate::child_runtime::EffortFollow::Set(value) => (Some(value), false),
         crate::child_runtime::EffortFollow::Clear => (None, true),
     };
-    // 被去重（或表滿）的 fast edge 只是不重播 fast；同一輪的 model／effort 照常跟隨（#1906）。
-    // `attempt` 只在 fast_edge 時才可能是 Some。
     let fast = attempt.is_some().then_some(i64::from(seen.fast));
     let changed = if bot.managed_by == "child" && (model.is_some() || effort_value.is_some() || clear || fast.is_some()) {
         match sqlx::query(
@@ -388,10 +369,8 @@ pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotSta
 
 /// 把畫面底部的模型列寫進 `runs.status_line`／`status_json`（網頁狀態列與 context 用量）。回傳 `true` = 有改動。
 pub async fn record_footer_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
-    // 讀不到模型列（壓縮中、選單開著）不清掉舊值。
     let Some(footer) = am_base::codex_status::parse_footer(screen) else { return false };
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
-    // 鍵名照 claude statusLine，網頁 `toStatusInfo` 讀 `context_window.used_percentage`。
     let json = footer.context_used_pct.map(|p| serde_json::json!({"context_window": {"used_percentage": p}}).to_string());
     if run.status_line.as_deref() == Some(footer.line.as_str()) && run.status_json == json {
         return false;
@@ -503,7 +482,6 @@ pub fn picker_number(screen: &str, needle: &str) -> Option<u32> {
         };
         let matches = match needle {
             "(current)" | "(default)" => marker == Some(needle),
-            // 0.162 的選單印顯示名（`GPT-6.1-Sol`），設定裡是 id（`gpt-6.1-sol`）：不分大小寫比（#1681 實測）。
             _ => plain_label.eq_ignore_ascii_case(needle),
         };
         if matches {
@@ -553,7 +531,6 @@ pub fn picker_open(screen: &str) -> bool {
     crate::tui_prompts::is_codex_model_migration_prompt(screen)
         || rate_limit_switch_prompt_open(screen)
         || safety_recourse_picker_open(screen)
-        // 啟動時的更新選單（預設選 Update now）：`/model`、`/fast` 打進去、Enter 就是替使用者按下「現在更新」。
         || crate::codex_update::update_menu_open(screen)
         || model_menu_open(screen)
 }
@@ -687,8 +664,6 @@ const PICKER_ESCAPES: u32 = 4;
 
 /// A failed send leaves the menu open, so back out before reporting failure.
 async fn press_number(client: &HerdrClient, pane_id: &str, n: u32, needle: &str) -> Result<bool, ()> {
-    // A picker can close or change while the caller is deciding which row to choose. Re-read and
-    // verify both the picker and the intended row immediately before typing the one-digit choice.
     let screen = read(client, pane_id).await?;
     if !picker_choice_matches(&screen, needle, n) {
         let _ = close_picker_checked(client, pane_id).await;
@@ -769,7 +744,6 @@ async fn apply_model_and_effort(
     if !press_number(client, pane_id, n, &needle).await? {
         return Ok(false);
     }
-    // Should be closed now; if not, the next prompt would be typed into it.
     close_picker_checked(client, pane_id).await
 }
 
@@ -825,9 +799,6 @@ pub async fn apply(
     running_version: Option<&str>,
     model_default_effort: Option<&str>,
 ) -> Result<CodexRuntime, &'static str> {
-    // The startup migration and rate-limit suggestion both require a user choice. Do not type into
-    // either screen or dismiss it with Escape while applying a setting.
-    // 「Hooks need review」審核框不能用 Esc 關（它的 Esc 是略過，而且要使用者本人決定信任）：先看到就停，不進選單流程。
     if let Ok(screen) = read(client, pane_id).await {
         if crate::lifecycle::codex_hook_review::review_open(&screen) {
             return Err(crate::lifecycle::codex_hook_review::REASON);
@@ -838,8 +809,6 @@ pub async fn apply(
         Ok(false) => return Err("picker_open"),
         Err(()) => return Err("pane_read_failed"),
     }
-    // 輸入框裡有使用者的草稿：`/model`、`/fast` 會接在後面，Enter 把整段當 prompt 送出（回合中那條 #712 早有這道檢查）。
-    // herdr 不給帶樣式的讀法時分不出灰色佔位字與草稿，不擋（維持原行為）。
     if let Ok(r) = crate::composer_parse::read_styled_snapshot(client, pane_id, "visible", 60).await {
         if r.format == "ansi" && crate::composer_parse::box_state("codex", &r.text) == crate::composer_parse::BoxState::NonEmpty {
             return Err("composer_not_empty");
@@ -849,8 +818,6 @@ pub async fn apply(
         match oneshot_model_command(bot, fields, model_default_effort) {
             Ok((line, want_effort)) => match apply_oneshot(client, pane_id, bot, fields, &line, want_effort.as_deref()).await {
                 Err(ONESHOT_NOT_SUPPORTED) => {
-                    // 送出後畫面完全沒變、狀態列也沒變：這個 codex 不認得該語法（版本讀錯）。退回選單**一次**——
-                    // 但先重看輸入框：不是空的就不能再打字，不然會接成 `/model … /model` 再按 Enter。
                     #[cfg(all(test, feature = "daemon-test-harness"))]
                     crate::race_point::hit("codex_oneshot_before_fallback", pane_id).await;
                     match composer_is_empty(client, pane_id).await {
@@ -868,7 +835,6 @@ pub async fn apply(
                 }
                 done => return done,
             },
-            // 沒設強度又查不到預設強度：不送，走選單的 `(default)` 那一列。
             Err(ONESHOT_NO_DEFAULT_EFFORT) => {}
             Err(why) => return Err(why),
         }
@@ -1050,7 +1016,6 @@ async fn apply_oneshot(
     let before = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
     let before_runtime = parse_status_line(&before);
     let before_responses = model_responses(&before);
-    // 送出前就已經是目標：回應再慢也不能當成「不認得」而重送（退回選單會接成 `/model … /model`）。
     let already_there = before_runtime.as_ref().is_some_and(|rt| verify(rt, bot, fields).is_ok() && want_effort.is_none_or(|e| rt.effort.as_deref() == Some(e)));
     if !text(client, pane_id, line).await {
         return Err(oneshot_fail(client, pane_id, bot, "oneshot_send_failed").await);
@@ -1062,7 +1027,6 @@ async fn apply_oneshot(
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::race_point::hit("codex_oneshot_after_enter", pane_id).await;
 
-    // 先等回應文字。
     let deadline = tokio::time::Instant::now() + oneshot_wait();
     loop {
         tokio::time::sleep(oneshot_poll()).await;
@@ -1083,8 +1047,6 @@ async fn apply_oneshot(
         if tokio::time::Instant::now() >= deadline {
             let Ok(screen) = screen else { return Err(oneshot_fail(client, pane_id, bot, "pane_read_failed").await) };
             return match parse_status_line(&screen) {
-                // 連送出的那一行都完全沒讓畫面多出任何東西、狀態列也沒動，而且送出前不是已經在目標上：才當作不認得。
-                // 其餘（畫面有新的字、狀態列動了但沒有回應行、本來就在目標上）都不能重送。
                 Some(now) if Some(&now) == before_runtime.as_ref() && !has_new_nonblank_line(&before, &screen) && !already_there => {
                     Err(ONESHOT_NOT_SUPPORTED)
                 }
@@ -1094,7 +1056,6 @@ async fn apply_oneshot(
         }
     }
 
-    // 再等狀態列回來並對上設定（max／ultra 的動畫會暫時蓋住它）。
     let deadline = tokio::time::Instant::now() + oneshot_wait();
     let mut last = ONESHOT_UNVERIFIED;
     loop {
@@ -1117,7 +1078,6 @@ async fn apply_oneshot(
 /// `/fast` until the status line says `want`: read the tier first, toggle only when wrong; an unknown tier is
 /// toggled once, read back, and toggled back if it landed the wrong way round (module docs).
 async fn reach_fast(client: &HerdrClient, pane_id: &str, want: bool, was_fast: Option<bool>) -> Result<(), &'static str> {
-    // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
     let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
     let now = parse_status_line(&screen).map(|r| r.fast).or(was_fast);
     match fast_plan(now, want) {
@@ -1224,8 +1184,6 @@ fn interrupt_settle_poll() -> Duration {
 /// `Err(`[`BUSY_NOT_READY`]`)`：沒按 Esc，或按了但畫面確認不了回到可輸入——**不盲打**，呼叫端照舊排到回合結束。
 /// `Err("pane_read_failed")`：開頭讀不到畫面，什麼都沒按。
 pub async fn interrupt_for_apply(client: &HerdrClient, pane_id: &str) -> Result<(), &'static str> {
-    // 一律讀帶樣式的那份、自己剝掉樣式再判斷「在跑／有選單」：herdr 沒有帶樣式的讀法時 `read_styled` 退回純文字，
-    // 輸入框就讀成 NonEmpty（佔位字當草稿），這裡照 [`busy_fast_blocked`] 的保守作法不碰。
     let styled = crate::composer_parse::read_styled(client, pane_id, "visible", 60)
         .await
         .map_err(|_| "pane_read_failed")?;
@@ -1315,10 +1273,8 @@ mod tests {
         assert!(super::picker_open(picker), "{picker}");
         let idle = "  Ask me\n\n› Ask Codex to do anything\n";
         assert!(!super::picker_open(idle));
-        // 窄 pane 把腳註折成兩行時仍開著。
         let wrapped = picker.replace("  enter select · esc back", "  enter select ·\n  esc back");
         assert!(super::picker_open(&wrapped), "{wrapped}");
-        // 只引說明字樣、沒有選項與腳註＝不是選單。
         assert!(!super::picker_open("Choosing a rewrite sends it in a new chat.\n› Ask Codex to do anything\n"));
     }
 
@@ -1533,8 +1489,6 @@ mod tests {
         );
     }
 
-    // ---- codex >= 0.164.0 一行 `/model`（2026-10-23 在 0.164.0 的一次性 CODEX_HOME 實測，回應文字照原樣）----
-
     #[test]
     fn only_a_seen_codex_at_or_above_0_164_0_takes_the_one_line_form() {
         for (v, ok) in [
@@ -1574,8 +1528,6 @@ mod tests {
         assert_eq!(cmd(&fast, &all, None).unwrap(), ("/model gpt-6-astra --reasoning=high --speed=priority".into(), Some("high".into())));
         let slow = codex_bot(&env, "oneshot-slow", Some("gpt-6-astra"), Some("xhigh"), 0).await;
         assert_eq!(cmd(&slow, &all, Some("low")).unwrap().0, "/model gpt-6-astra --reasoning=xhigh --speed=standard", "設了強度就不看預設");
-        // 沒設強度（空、`default`）＝這個模型的預設強度，明確帶上：0.164.0 實測同一個模型不帶 `--reasoning` 會把強度重設成預設，
-        // 而 `--reasoning=default` 會被拒，所以要從模型清單查出具體等級。
         for (i, effort) in [None, Some(""), Some("default")].into_iter().enumerate() {
             let bot = codex_bot(&env, &format!("oneshot-no-effort-{i}"), Some("gpt-6.1-sol"), effort, 0).await;
             assert_eq!(
@@ -1586,14 +1538,11 @@ mod tests {
             assert_eq!(cmd(&bot, &["effort"], None), Err(ONESHOT_NO_DEFAULT_EFFORT), "查不到預設強度＝不送，走選單：{effort:?}");
             assert_eq!(cmd(&bot, &["effort"], Some("turbo")), Err(ONESHOT_NO_DEFAULT_EFFORT), "清單裡的值不是已知等級也不送：{effort:?}");
         }
-        // 沒設模型＝選單的 `(current)`：不帶模型，維持現在的。
         let no_model = codex_bot(&env, "oneshot-no-model", None, Some("max"), 1).await;
         assert_eq!(cmd(&no_model, &["effort"], None).unwrap().0, "/model --reasoning=max --speed=priority");
-        // 只改 fast：不碰模型與強度（跟選單路徑只按 `/fast` 一樣），也就不需要預設強度。
         assert_eq!(cmd(&fast, &["fast"], None).unwrap(), ("/model --speed=priority".into(), None));
         let unset = codex_bot(&env, "oneshot-fast-only", Some("gpt-6.1-sol"), None, 0).await;
         assert_eq!(cmd(&unset, &["fast"], None).unwrap().0, "/model --speed=standard");
-        // 多出來的空白或旗標會變成別的參數：不送。
         let bad = codex_bot(&env, "oneshot-bad-model", Some("gpt-6-luna --speed=flex"), None, 0).await;
         assert_eq!(cmd(&bad, &["model"], Some("low")), Err("oneshot_bad_model"));
         let bad = codex_bot(&env, "oneshot-bad-effort", Some("gpt-6-luna"), Some("turbo"), 0).await;
@@ -1619,7 +1568,6 @@ mod tests {
         for model in ["gpt-6-astra", "gpt-7-test", "gpt-9"] {
             assert_eq!(model_default_effort(&env.app, &unset, Some(model)).await, None, "{model}：沒有、或不是已知等級");
         }
-        // 過期的快取（10 分鐘）不算。
         let old = std::time::Instant::now().checked_sub(crate::models::CACHE_TTL + std::time::Duration::from_secs(1)).unwrap();
         env.app.models_cache.lock().await.insert("local/codex/".into(), (old, list));
         assert_eq!(model_default_effort(&env.app, &bot, None).await, None);
@@ -1644,7 +1592,6 @@ mod tests {
         ] {
             assert_eq!(model_responses(&format!("  {line}\n\n› Ask Codex to do anything\n")), vec![(kind, line.to_string())], "{line}");
         }
-        // 舊版選單的結果（沒有 `for this session only`）、一般文字、引用的 `■` 行都不是這個回應。
         assert!(model_responses("• Model changed to gpt-6-astra high\n■ something else broke\n  > ■ Unexpected argument").is_empty());
         let before = model_responses(&format!("{CHANGED}\n"));
         assert_eq!(new_model_response(&before, &before), None, "畫面沒變＝沒有新的回應");
@@ -1735,7 +1682,6 @@ mod tests {
         }).await;
         assert_eq!(d.result, Ok(CodexRuntime { model: "gpt-6.1-sol".into(), effort: Some("low".into()), fast: false }));
         assert_eq!(d.typed, vec!["/model gpt-6.1-sol --reasoning=low --speed=standard"]);
-        // 畫面上強度不是我們帶的那個：不算套用成功。
         let still_high = format!("  {}\n{}", CHANGED.replace("astra high fast", "sol high"), idle_with_footer(same));
         let d = oneshot_apply(Run {
             name: "same-model-high", bot: (Some("gpt-6.1-sol"), None, 0), fields: &["effort"], version: V164, default_effort: Some("low"), before_footer: same, after: still_high, ..Default::default()
@@ -1770,7 +1716,6 @@ mod tests {
         let d = oneshot_apply(Run {
             name: "silent", bot: (Some("gpt-6-astra"), Some("high"), 0), fields: &["model"], version: V164, before_footer: BEFORE, after: idle_with_footer(BEFORE), ..Default::default()
         }).await;
-        // 退回的選單路徑在這個假畫面上開不出選單，所以失敗；重點是順序：先一行、再恰好一次裸 `/model`。
         assert_eq!(d.result, Err("picker_failed"));
         assert_eq!(d.typed, vec!["/model gpt-6-astra --reasoning=high --speed=standard".to_string(), "/model".to_string()]);
     }
@@ -1792,13 +1737,9 @@ mod tests {
     async fn every_failure_exit_after_sending_reports_a_composer_that_is_not_empty() {
         let hidden_footer = |composer: String| format!("  {CHANGED}\n{composer}\n  M A X\n");
         let screens: [(&str, String, &str); 4] = [
-            // 回應來了，但狀態列一直被蓋住（逾時）
             ("hidden", hidden_footer(with_footer(include_str!("lifecycle/fixtures/codex-0.155-draft.ansi"), "")), ONESHOT_RESIDUE),
-            // 回應來了，狀態列對不上設定
             ("mismatch", format!("  {CHANGED}\n{}", residue_with_footer("  GPT-6-Astra low · ~/project/agents-manager · Context 3% used · 5h 10% left")), ONESHOT_RESIDUE),
-            // 沒有回應文字、畫面多了字（輸入框留著送出的行）
             ("no-answer", residue_with_footer(BEFORE), ONESHOT_RESIDUE),
-            // 同樣三種情形、輸入框是空的：照原因回
             ("hidden-empty", hidden_footer(with_footer(EMPTY_BOX_ANSI, "")), ONESHOT_UNVERIFIED),
         ];
         for (name, after, want) in screens {
@@ -1838,7 +1779,6 @@ mod tests {
         }).await;
         assert_eq!(d.result, Err(ONESHOT_UNVERIFIED));
         assert_eq!(d.typed.len(), 1, "不退回選單");
-        // 對照：同樣的畫面，但送出前不在目標上，才會退回選單一次。
         let d = oneshot_apply(Run {
             name: "slow-control", bot: (Some("gpt-6-astra"), Some("high"), 1), fields: &["model", "effort", "fast"], version: V164, before_footer: BEFORE,
             after: idle_with_footer(BEFORE), ..Default::default()
@@ -1914,7 +1854,6 @@ mod tests {
             assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, i64::from(managed != "child"));
             assert_eq!(fast_of(&env, &run).await, Some(0));
 
-            // UI 再要求開 fast，尚未套用；即使這輪其他 runtime 欄位改變，也不能將 fast 蓋回關。
             sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
             let low = ASTRA_HIGH.replace("astra high", "astra low");
             assert!(correct_runtime_from_screen(&env.app, &run, &low).await);
@@ -1985,7 +1924,6 @@ mod tests {
         let env = crate::testing::env().await;
         let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
         sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
-        // runtime_fast 維持 0，畫面也沒有 fast：不是 edge。
         let switched = ASTRA_HIGH.replace("gpt-6-astra high", "gpt-6-luna low");
         assert!(correct_runtime_from_screen(&env.app, &run, &switched).await);
         let (model, fast) = bot_model_fast(&env, &bot).await;
@@ -2006,7 +1944,6 @@ mod tests {
         assert_eq!(bot_model_fast(&env, &bot).await, (Some("gpt-6-luna".to_string()), 1));
         assert_eq!(fast_of(&env, &run).await, Some(1));
 
-        // 原子性：同一輪 fast 寫入被擋時，model 也一起 rollback、runtime 不前進（下一輪還能重試）。
         let env = crate::testing::env().await;
         let (bot, run) = child_with_effort(&env, "child", Some("high"), Some("high")).await;
         sqlx::query("UPDATE bots SET fast=0 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
@@ -2039,14 +1976,12 @@ mod tests {
     /// 表非空就一定有清理 task：task 結束（表空、旗標清掉）與插入新 edge 兩種順序都要成立。
     #[test]
     fn a_new_edge_never_lands_in_the_gap_after_the_sweeper_decides_to_end() {
-        // 順序一：task 先結束，之後插入 → 新 edge 自己起新的 task。
         let mut edges = super::FastFollowEdges::default();
         assert!(edges.attempt("a", true, false).start_sweeper);
         edges.map.remove("a");
         assert!(edges.finish_sweeper_if_empty(), "表空了，task 結束");
         assert!(edges.attempt("b", true, false).start_sweeper, "旗標已清掉，新 edge 要起新的 task");
         assert!(edges.sweeper);
-        // 順序二：新 edge 先插進來，task 才檢查 → 表不空，task 不結束，也不重複起。
         let mut edges = super::FastFollowEdges::default();
         assert!(edges.attempt("a", true, false).start_sweeper);
         edges.map.remove("a");
@@ -2068,7 +2003,6 @@ mod tests {
                 let (edges, running, max_running) = (edges.clone(), running.clone(), max_running.clone());
                 std::thread::spawn(move || {
                     for i in 0..50 {
-                        // 計數與鎖內的狀態變化一起做（這個計數只是測試的記帳，不是被測的同步）。
                         let mut guard = edges.lock().unwrap();
                         if guard.attempt(&format!("r{round}-{i}"), true, false).start_sweeper {
                             max_running.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
@@ -2083,7 +2017,6 @@ mod tests {
                 std::thread::spawn(move || {
                     for _ in 0..200 {
                         let mut guard = edges.lock().unwrap();
-                        // 有清理 task 在跑（旗標為 true）才會醒來巡一輪；沒有就沒有人做這件事。
                         if guard.sweeper {
                             guard.map.clear();
                             if guard.finish_sweeper_if_empty() {
@@ -2162,7 +2095,6 @@ mod tests {
         let keys: std::collections::BTreeSet<String> = super::lock_edges(edges).map.keys().cloned().collect();
         assert_eq!(keys, [a.clone(), b.clone(), c.clone()].into_iter().collect());
 
-        // 三個都還在跑：清完還是滿，第四個被擋下，已有的 edge 一個都不能被擠掉。
         let d = active_run(&env, "d").await;
         assert!(super::attempt_fast_follow_in(edges, &env.app.db, &d, true, false).await.is_none());
         assert_eq!(super::lock_edges(edges).map.len(), 3);
@@ -2184,7 +2116,6 @@ mod tests {
             assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
             assert_eq!(fast_of(&env, &run).await, Some(0));
 
-            // UI live apply updates both rows, without passing through this screen observer.
             sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
             sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
             if matching_poll {
@@ -2228,13 +2159,11 @@ mod tests {
             assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "child UPDATE must roll back with runtime");
             assert_eq!(fast_of(&env, &run).await, Some(1));
             assert!(events.try_recv().is_err(), "no event before atomic commit");
-            // 模擬使用者隨後另存開啟 fast；同畫面重試只能補 runtime，不能重放設定寫入。
             sqlx::query("UPDATE bots SET fast=1 WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
             assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
             assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 1, "preserve the newer UI intent");
             assert_eq!(fast_of(&env, &run).await, Some(0));
             assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
-            // 新 edge 可以再跟隨：先開再關，不能被前次失敗的標記永久擋住。
             let on = ASTRA_HIGH.replace("astra high", "astra high fast");
             assert!(correct_runtime_from_screen(&env.app, &run, &on).await);
             assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_HIGH).await);
@@ -2284,7 +2213,6 @@ mod tests {
         assert!(correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
         assert_eq!(run_effort(&env, &run).await.as_deref(), Some("default"));
         assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"), "未知不等於已套用 default");
-        // 再讀一次同一畫面：已經收斂，不改動。
         assert!(!correct_runtime_from_screen(&env.app, &run, ASTRA_DEFAULT).await);
     }
 
@@ -2361,14 +2289,12 @@ mod tests {
         assert_eq!(row.runtime_fast, Some(1), "fast 照畫面校正");
         assert_eq!(row.runtime_effort.as_deref(), Some("high"), "未知的強度不清成 NULL");
         assert_eq!(bot_effort(&env, &bot).await.as_deref(), Some("high"), "未知的強度不跟隨到子 agent 設定");
-        // 收斂：再讀同一畫面不改動。
         assert!(!correct_runtime_from_screen(&env.app, &run, footer).await);
     }
 
     /// codex 子 agent l8 在 TUI 裡手動打 /fast 開了 fast，狀態列顯示主題段（無 Context）。
     #[test]
     fn status_line_with_session_topic_or_truncated_topic_parses_runtime() {
-        // codex 子 agent l8 的真實畫面
         let screen = "• Compacting context (7s • esc to interrupt)\n  └ Making room to continue.\n\n› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n  ? for shortcuts                                                                                                                                                                          ⚠ 2 warnings · f2 to view\n";
         let rt = parse_status_line(screen).expect("讀得到主題段的狀態列");
         assert_eq!(
@@ -2380,7 +2306,6 @@ mod tests {
             }
         );
 
-        // 截斷主題（…）
         let truncated = "› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · …\n";
         let rt_trunc = parse_status_line(truncated).expect("讀得到 … 截斷主題的狀態列");
         assert_eq!(
@@ -2392,7 +2317,6 @@ mod tests {
             }
         );
 
-        // 手動打 /fast 關閉 fast
         let fast_off = "› Ask Codex to do anything\n\n  GPT-6-Luna max · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
         let rt_off = parse_status_line(fast_off).expect("讀得到關閉 fast 的狀態列");
         assert_eq!(
@@ -2404,7 +2328,6 @@ mod tests {
             }
         );
 
-        // 手動打 /model 切換模型與推理強度
         let model_switched = "› Ask Codex to do anything\n\n  gpt-5.6-sol medium fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
         let rt_switch = parse_status_line(model_switched).expect("讀得到換模型後的狀態列");
         assert_eq!(
@@ -2416,7 +2339,6 @@ mod tests {
             }
         );
 
-        // 窄 pane 折行主題
         let wrapped_topic = "  GPT-6-Luna max fast · ~/project/agents-manager ·\n  修正主力 cache 冷 context 規則\n";
         let rt_wrapped = parse_status_line(wrapped_topic).expect("折行的主題段仍能解析");
         assert_eq!(
@@ -2435,7 +2357,6 @@ mod tests {
         let env = crate::testing::env().await;
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
         let run = crate::testing::fake_run(&env.app, &bot.id).await;
-        // 初始狀態如 adopted child：runtime 皆為 NULL
         sqlx::query("UPDATE runs SET runtime_model=NULL, runtime_effort=NULL, runtime_fast=NULL WHERE id=?")
             .bind(&run)
             .execute(&env.app.db)
@@ -2504,11 +2425,9 @@ mod tests {
     #[test]
     fn the_status_line_is_what_codex_is_really_on() {
         let rt = parse_status_line(STATUS).unwrap();
-        // The banner above says `gpt-5.6-luna max fast`; the live line below it wins.
         assert_eq!(rt, CodexRuntime { model: "gpt-5.6-sol".into(), effort: Some("high".into()), fast: true });
         let off = parse_status_line("  gpt-5.6-sol high · /tmp · Context 0% used · 5h 82% left\n").unwrap();
         assert!(!off.fast);
-        // A model on the CLI default effort prints no level at all.
         let bare = parse_status_line("  gpt-5.5 · /tmp · Context 3% used\n").unwrap();
         assert_eq!(bare.effort, None);
         assert!(parse_status_line("› Ask Codex to do anything\n").is_none());
@@ -2517,13 +2436,10 @@ mod tests {
     #[test]
     fn picker_rows_are_matched_by_text_not_by_position() {
         assert_eq!(picker_number(MODEL_MENU, "gpt-5.6-sol"), Some(2));
-        // No model of its own → stay on the row codex marks as current.
         assert_eq!(picker_number(MODEL_MENU, "(current)"), Some(4));
         assert_eq!(picker_number(EFFORT_MENU, "Extra high"), Some(4));
         assert_eq!(picker_number(EFFORT_MENU, "(default)"), Some(1));
         assert_eq!(picker_number(EFFORT_MENU, "More reasoning…"), Some(5));
-        // `Max` / `Ultra` only appear in row 5's *description*; matching that would press the
-        // submenu row as if it were the level itself.
         assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
         assert_eq!(picker_number(EFFORT_MENU, "Ultra"), None);
         assert_eq!(picker_number(MODEL_MENU, "gpt-4"), None);
@@ -2558,7 +2474,6 @@ mod tests {
   Press enter to confirm or esc to go back
 ";
         assert_eq!(picker_number(AMBIGUOUS, "gpt-5.5"), None, "ambiguous rows must not be selected");
-        // Same rule for effort labels: `High` must not pick `Extra high` or `Higher`.
         const LEVELS: &str = "\
   Select Reasoning Level for gpt-6-sol
 
@@ -2637,16 +2552,13 @@ mod tests {
     fn a_pane_showing_a_picker_is_not_ready_for_text() {
         assert!(picker_open(MODEL_MENU));
         assert!(picker_open(EFFORT_MENU));
-        // The footer alone is enough: a short pane can scroll the heading away.
         assert!(picker_open("  Press enter to confirm or esc to go back\n"));
         assert!(!picker_open(COMPOSER));
         assert!(!picker_open(STATUS));
         assert!(!picker_open(""));
-        // #1766：對話裡印出來的選單字樣（輸入框還在它下面）不是選單。
         let quoted = format!("• Ran herdr agent read child\n  └\n      Select Reasoning Level for GPT-6-Luna\n      Press enter to confirm or esc to go back\n{COMPOSER}");
         assert!(!picker_open(&quoted), "輸入框在選單字樣下面：只是對話內容");
         assert!(picker_open(&format!("{COMPOSER}\n{EFFORT_MENU}")), "選單真的開在最底下");
-        // #1766：對話紀錄瀏覽要 Esc 回輸入框；只認最後一行的底列，對話裡提到這幾個字不算。
         assert!(transcript_browser_open("• Ran herdr agent list\n\nBrowsing transcript · ↑↓/jk scroll · ←→/hl prompts · ^t details · ↵ rewind · esc back\n"));
         assert!(!transcript_browser_open("Browsing transcript · esc back 是 codex 的瀏覽模式\n› Ask Codex to do anything\n"));
         assert!(!transcript_browser_open(COMPOSER));
@@ -2700,7 +2612,6 @@ mod tests {
         assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("xhigh")), Some(4));
         assert_eq!(picker_number(EFFORT_MENU_0154, "More reasoning…"), Some(5));
         assert!(picker_number(EFFORT_MENU_0154, effort_menu_label("max")).is_none(), "max 藏在下一層");
-        // `(default)` 那一列不能被 `Extra high` 的描述文字搶走（描述在兩格空白之後）。
         assert_eq!(picker_number(EFFORT_MENU_0154, "(default)"), Some(1));
     }
 
@@ -2733,7 +2644,6 @@ mod tests {
         assert_eq!(q.five_hour_left, Some(90.0));
         assert_eq!(q.weekly_left, Some(48.0), "`left` 被截掉也要讀得到");
 
-        // 省略號黏在 `%` 後（2026-09-13 實機），曾讓 header 少了 7d。
         let tight = parse_status_quota(
             "  gpt-6-astra medium · ~/project/agents-manager · Context 9% used · 5h 36% left · weekly 24%…",
         )
@@ -2746,12 +2656,10 @@ mod tests {
             .unwrap();
         assert_eq!((full.five_hour_left, full.weekly_left), (Some(82.0), Some(73.0)));
 
-        // 只有 5h 的那種（週窗還沒開始算）。
         let one = parse_status_quota("gpt-6-astra high · /tmp · Context 44% used · 5h 10% left").unwrap();
         assert_eq!((one.five_hour_left, one.weekly_left), (Some(10.0), None));
 
         assert!(parse_status_quota("› Ask Codex to do anything\n1 background terminal running\n").is_none());
-        // 空讀數不能蓋掉 app-server 的。
         assert!(parse_status_quota("gpt-6-astra high · /tmp · Context 44% used").is_none());
     }
 
@@ -2826,13 +2734,11 @@ mod tests {
     fn the_footer_model_row_loses_its_right_aligned_warning_and_keeps_the_context_percent() {
         use am_base::codex_status::{parse_footer, CodexFooter};
         assert_eq!(parse_footer(&fixture_1671()), Some(CodexFooter { line: MODEL_ROW_1671.into(), context_used_pct: Some(17.0) }));
-        // 模型列在 shortcuts 行上面、只有主題段（沒有 Context）：照樣是那一列，沒有百分比。
         let topic = "• 完成\n\n› Ask Codex to do anything\n\n  GPT-6-Astra default · ~/project/agents-manager · 解決 issue #1664\n  ? for shortcuts      ⚠ 1 warning · f2 to view\n";
         assert_eq!(
             parse_footer(topic),
             Some(CodexFooter { line: "GPT-6-Astra default · ~/project/agents-manager · 解決 issue #1664".into(), context_used_pct: None })
         );
-        // 沒有 warning、帶 5h 段。
         let five = "› Ask Codex to do anything\n\n  GPT-6.1-Sol high · /tmp · Context 5% used · 5h 96% left · weekly 48% left\n";
         assert_eq!(parse_footer(five).unwrap().line, "GPT-6.1-Sol high · /tmp · Context 5% used · 5h 96% left · weekly 48% left");
     }

@@ -31,7 +31,6 @@ pub fn tick(app: &Arc<App>) {
         return;
     }
     let now = Instant::now();
-    // guard 要活到 spawn 進去的 task 裡，不能在這個區塊結束時就放掉。
     let guard = {
         let mut last = LAST_SWEEP.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
         if last.is_some_and(|l| now.checked_duration_since(l).is_some_and(|d| d < TICK_EVERY)) {
@@ -55,7 +54,6 @@ pub fn tick(app: &Arc<App>) {
 mod tests {
     use super::*;
 
-    // 全域旗標只有這一條測試碰，不會和其他測試搶。
     #[test]
     fn the_sweep_flag_is_released_when_the_sweep_panics() {
         let g = SweepGuard::take().expect("free");

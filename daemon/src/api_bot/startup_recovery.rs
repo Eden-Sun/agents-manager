@@ -68,7 +68,6 @@ pub(super) async fn recover_page_body(
             Err(StartupError::NotStartup) => return Err(Error::NotStartup),
             Err(StartupError::Storage) => return Err(Error::Storage),
         };
-        // Terminal Applied history is read-only evidence for skipping this artifact only.
         if !restore && matches!(stored.state, receipt::State::Applied) {
             match super::startup_history::classify(&app.db, &item).await? {
                 super::startup_history::StartupHistoricalApplied::Skip => continue,

@@ -175,7 +175,6 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
     if !app.cfg().get().await.judge.enabled {
         return Ok(());
     }
-    // child 只認呼叫端給的 bot ID（要在這個專案、還活著）；沒給或對不上就用呼叫端自己（它的卡同樣不比）。名字不拿來找 bot。
     let child: Option<(String, String, Option<String>)> = match ask.child_bot_id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => {
             sqlx::query_as("SELECT id, kind, parent_bot_id FROM bots WHERE project_id = ? AND id = ? AND deleted_at IS NULL")
@@ -191,17 +190,14 @@ pub async fn check_claim(app: &(impl crate::capabilities::Cfg + crate::capabilit
     if let Some(branch) = &ask.branch {
         summary = format!("{summary}\nbranch {branch}");
     }
-    // 候選 key 不放名字：有 claim ID 就用它，沒有（舊版 CLI）退回「呼叫端＋票號」。
     let key = match ask.claim_id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => format!("claim:{id}"),
         None => format!("claim:{}:{}", ask.caller, ask.issue.map_or_else(|| "-".to_string(), |n| n.to_string())),
     };
-    // 呼叫端、候選（child 或呼叫端）與它的父 bot：提示會掛在後兩者之一，呼叫端也要還在（#1626）。
     let mut live_bots = vec![ask.caller.clone(), bot_id.clone()];
     live_bots.extend(parent_bot_id.clone());
     let ownership = crate::supervisor_inbox::claim_ownership(app.db(), &live_bots).await?;
     let host_fence = app.claim_host_fence(&ask.caller).await;
-    // Hook admission 與這裡之間也可能已 repoint；不可把舊 run 配上新 host authority。
     if let (Some(fence), Some(run)) = (&host_fence, crate::db::active_run(app.db(), &ask.caller).await?) {
         if crate::db::run_host_generation(app.db(), &run.id).await?.is_some_and(|was| fence.target_epoch().is_some_and(|now| now != was)) {
             return Ok(());
@@ -235,7 +231,6 @@ pub async fn check_assignment(app: &(impl crate::capabilities::Cfg + crate::capa
     let Some(a) = crate::supervisor_inbox::assignment(app.db(), assignment_id).await? else {
         return Ok(());
     };
-    // 通知不是新的工作；已經不會開始的交辦（派送當場失敗、被取消／收掉）也不是（#568）。
     if a.expects_review == 0 || !STARTABLE.contains(&a.status.as_str()) {
         return Ok(());
     }
@@ -282,7 +277,6 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
     if !cfg.enabled {
         return Ok(());
     }
-    // 沒設定：靜默略過，不占保險絲、不寫帳本。
     let key = match super::read_key(&cfg.key_file) {
         Ok(k) => k,
         Err(_) => return Ok(()),
@@ -293,7 +287,6 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
     };
     let mine = cand.as_card();
     for pid in projects {
-        // #1421：移交出去的專案歸接手的 daemon 管，這裡不問、不占帳本、不推提示（同 `child_retire` 的移交檢查）。
         if crate::handoff::project_handed_off_to(app.db(), &pid).await?.is_some() {
             continue;
         }
@@ -308,7 +301,6 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
             if asked(app, &pair).await? {
                 continue;
             }
-            // #1626：caller 已經刪了或移交了，就不再問、也不占帳本。
             if !cand.live_bots.is_empty() && (!crate::supervisor_inbox::bots_live(app.db(), &cand.live_bots).await?
                 || crate::supervisor_inbox::claim_ownership(app.db(), &cand.live_bots).await? != cand.ownership
                 || cand.host_fence.as_ref().is_some_and(|f| !f.is_current_now())) {
@@ -348,8 +340,6 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 Ok(a) => (Some(a.value), a.model.clone(), a.input_tokens, None),
                 Err(e) => (None, None, None, Some(e.to_string())),
             };
-            // #1626：Jev 等待中不持 bot 鎖，答案回來時 caller（或候選、父 bot）可能已被刪或移交：這次結果丟掉，
-            // 帳本記下原因、不留答案，也不推提示（寫提示的那句 SQL 還會再檢查一次，兩者之間的刪除也擋得住）。
             if !cand.live_bots.is_empty() && (!crate::supervisor_inbox::bots_live(app.db(), &cand.live_bots).await?
                 || crate::supervisor_inbox::claim_ownership(app.db(), &cand.live_bots).await? != cand.ownership
                 || cand.host_fence.as_ref().is_some_and(|f| !f.is_current_now())) {
@@ -357,13 +347,10 @@ async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilit
                 return Ok(());
             }
             settle_same_work(app, &slot, p, model, ms, tokens, error).await?;
-            // 問的時候交辦被取消、收掉或裁示了：答案照記，但標成過時、不推提示，後面的對也不再問（#568）。
-            // 第一對之前 `check_assignment` 看過；之後每一對之前都剛經過這裡，中間沒有 HTTP。
             if let Some(status) = gone(app, cand).await? {
                 mark_stale(app, &slot, &status).await?;
                 return Ok(());
             }
-            // 失敗只留帳本。不把錯誤當成「撞了」去推 inbox。
             let Ok(a) = answer else { continue };
             if a.value >= SAME_WORK_THRESHOLD {
                 push_hint(app, cand, &other, a.value, &pair).await?;
@@ -437,7 +424,6 @@ async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Em
     let id = if cand.live_bots.is_empty() {
         crate::supervisor_inbox::push_inbox(app.db(), &event_key, "judge_same_work", cand.assignment_id.as_deref(), Some(&parent), None, &payload).await?
     } else {
-        // #1626：撞題提示只在 bot 還在時寫（檢查與寫入同一句 SQL）。
         let write = crate::supervisor_inbox::push_inbox_if_live(
             app.db(),
             &event_key,
@@ -608,7 +594,6 @@ fn text_card(key: String, source: &'static str, jev_kind: &'static str, raw: &st
 
 fn rank(cand: &Card, mut others: Vec<Card>) -> Vec<Card> {
     let mut issues = issue_numbers(&format!("{} {}", cand.title, cand.summary));
-    // 票號也可能只在 `issue_ref`（claim 的票號、交辦的第二行）：title／summary 抽不到時照樣算數（#1385）。
     if let Some(r) = &cand.issue_ref {
         push_num(&mut issues, r.trim_start_matches('#'));
     }
@@ -1123,7 +1108,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // 閒置頂層 bot 不在目前活躍候選範圍內。
         let top = tt::claude_bot(&app, &rig.env.project_id, "top").await;
         let top_run = tt::fake_run(&app, &top.id).await;
         sqlx::query("UPDATE runs SET state='stopped', agent_title=? WHERE id=?")
@@ -1135,7 +1119,6 @@ mod tests {
 
         let newbie = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
         sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&newbie.id).execute(&app.db).await.unwrap();
-        // 被派工的那顆自己在跑的標題與先前的交辦：同一顆接著做不是撞題，不拿來比。
         let own_run = tt::fake_run(&app, &newbie.id).await;
         sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("自己上一件 SELF-TITLE").bind(&own_run).execute(&app.db).await.unwrap();
         crate::supervisor::store::insert_assignment(&app.db, None, &newbie.id, "own-old", "SELF-ASSIGNMENT 還沒驗收", &[], None, true).await.unwrap();
@@ -1445,7 +1428,6 @@ mod tests {
         let other = tt::claude_bot(&app, &rig.env.project_id, "b").await;
         crate::supervisor::store::insert_assignment(&app.db, None, &other.id, "old", "做 A", &[], None, true).await.unwrap();
         let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot.id, "new", "做 A 的另一面", &[], None, true).await.unwrap();
-        // 逾時 60 秒、Jev 卡住：10 秒內回來就代表 schedule 沒有等 Jev（不拿牆鐘毫秒數當斷言，issue #948）。
         tokio::time::timeout(std::time::Duration::from_secs(10), schedule_assignment(&app, &a.id)).await.expect("schedule 不能等 Jev 回來");
         assert_eq!(status_of(&app, &a.id).await, "queued");
         assert!(shadow_rows(&app).await.is_empty() || shadow_rows(&app).await[0].2.as_deref() == Some("pending") || shadow_rows(&app).await[0].1.is_none());
@@ -1538,7 +1520,6 @@ mod tests {
         let id = out["id"].as_str().unwrap().to_string();
         let a = crate::supervisor::store::assignment(&app.db, &id).await.unwrap().unwrap();
         assert_eq!((a.status.as_str(), a.turn_status.as_deref()), ("awaiting_review", Some("dispatch_failed")), "前提：派送當場失敗");
-        // 背景那個 task 跟這一次直接呼叫都要跳過；直接呼叫讓結果是決定性的，不靠等。
         check_assignment(&app, &id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(rig.seen.lock().unwrap().is_empty(), "不會開始的交辦不問 Jev");
@@ -1691,7 +1672,6 @@ mod tests {
     async fn an_opened_issue_is_compared_the_same_way() {
         let rig = stand(Mode::Noul(0.81), true, true).await;
         let app = rig.env.app.clone();
-        // 票開在 `[release_triage] repo`；`project_ids` 明講的專案才是「同專案」。
         let pid = rig.env.project_id.clone();
         app.cfg.update(move |c| { c.release_triage.repo = Some("owner/proj".into()); c.release_triage.project_ids = vec![pid]; Ok(()) }).await.unwrap();
         let parent = tt::claude_bot(&app, &rig.env.project_id, "parent").await;
@@ -1713,7 +1693,6 @@ mod tests {
         assert!(blob.contains("fix/quota-g404") || blob.contains("issue #404") || blob.contains("#404"));
         assert!(!inbox(&app).await.is_empty());
         assert!(shadow_rows(&app).await.iter().any(|r| r.1 == Some(0.81)));
-        // 已經在 before 裡的票不再問。
         let n = sent.len();
         check_opened(&app, &after.issues, &after).await.unwrap();
         assert_eq!(rig.seen.lock().unwrap().len(), n);
@@ -1939,7 +1918,6 @@ mod tests {
         let bot: String = sqlx::query_scalar("SELECT bot_id FROM judge_shadow WHERE regex_verdict='same_work' LIMIT 1").fetch_one(&app.db).await.unwrap();
         assert_eq!(bot, newbie.id);
 
-        // 另一次認領：只帶名字 `newbie`（現在改叫別的，且另有一顆別人叫 `newbie`）。
         let impostor = tt::claude_bot(&app, &rig.env.project_id, "newbie").await;
         let impostor_run = tt::fake_run(&app, &impostor.id).await;
         sqlx::query("UPDATE runs SET agent_title=? WHERE id=?").bind("修卡住的畫面判斷 同名者 NAMESAKE-1330").bind(&impostor_run).execute(&app.db).await.unwrap();

@@ -230,7 +230,6 @@ async fn give_up_after_observation(
         .unwrap_or_else(|e| e.into_inner())
         .observe(&run.id, &run.bot_id, now);
     if should_alert {
-        // `supervisors.bot_id` is the authoritative Patrol identity; names are not role identifiers.
         let patrol_id = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM supervisors WHERE bot_id = ?)")
             .bind(&run.bot_id)
             .fetch_one(app.db())
@@ -324,7 +323,6 @@ async fn accept_on_body_inner(
                 && crate::composer_parse::box_state("claude", &read.text)
                     == crate::composer_parse::BoxState::Empty
             {
-                // herdr 曾把這個自動處理的框標成 blocked；真的回到空框才撤掉，不蓋掉 working 或別的問題。
                 sqlx::query("UPDATE runs SET agent_status='idle', agent_status_since=? WHERE id=? AND state='running' AND agent_status IN ('blocked','unknown')")
                     .bind(db::now()).bind(&run.id).execute(app.db()).await?;
             }
@@ -337,7 +335,6 @@ async fn accept_on_body_inner(
         if answered {
             return Err(give_up_after_observation(app, run, &bot, client, STILL_SHOWN, true, now, observed_menu_pending).await);
         }
-        // 游標不在 Resume 上（含沒有游標）一律不按、也不移焦：那一鍵可能選到「Start a new conversation」。
         if choice != ResumeChoice::Resume {
             return Err(give_up_after_observation(app, run, &bot, client, CURSOR_NOT_ON_RESUME, true, now, observed_menu_pending).await);
         }
@@ -357,7 +354,6 @@ async fn accept_on_body_inner(
         if !current(app, run, client).await? {
             return Err(give_up_after_observation(app, run, &bot, client, AUTHORITY_CHANGED, false, now, observed_menu_pending).await);
         }
-        // Herdr 沒有按 revision 的 conditional send；用最後一讀的文字＋同一連線世代縮小窗口。
         let sent = app.hosts()
             .run_if_current(&client.fence, client.pane_send_keys(pane, &["enter"]))
             .await;
@@ -405,7 +401,6 @@ async fn after_start_body(
     let Ok(Some(run)) = db::run(app.db(), run_id).await else {
         return reported;
     };
-    // SessionStart 可能先於警告畫面抵達，consume_resume_session 已清掉 marker；仍須檢查這次接回。
     if run.resume_session_id.is_none() && run.resume_outcome.is_none() {
         return reported;
     }
@@ -453,7 +448,6 @@ async fn after_start_body(
             }
         } else {
             stable = 0;
-            // 其他確認框仍交給原本的處理流程。
             if crate::tui_prompts::awaits_menu_choice(&read.text) {
                 return reported;
             }

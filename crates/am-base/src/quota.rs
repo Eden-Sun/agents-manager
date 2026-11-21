@@ -9,7 +9,6 @@
 //! use am_base::quota::persist_cache;
 //! ```
 
-// Without the dev-dependency feature, even the explicitly named test helper is not exported.
 #![cfg_attr(not(feature = "test-hooks"), doc = "```compile_fail,E0432\nuse am_base::quota::persist_cache_for_test;\n```")]
 
 use crate::config::LOCAL_HOST;
@@ -89,7 +88,6 @@ pub fn quota_base(kind: &str, identity: Option<&str>) -> String {
 pub fn identity_shares_default(kind: &str, env: &std::collections::BTreeMap<String, String>) -> bool {
     match crate::pane_identity::config_dir_var(kind) {
         Some(var) => !env.contains_key(var),
-        // 不認得的 kind 沒有「home 變數」可看，只好退回「env 整個是空的才算」。
         None => env.is_empty(),
     }
 }
@@ -109,10 +107,6 @@ pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_defau
 pub async fn quota_base_for_host(app: &impl HostIdentities, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
     let found = app.identity_for_host(host, idn).await;
-    // 身份有 kind（`identity_kind`）：別的 kind 的身份（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
-    // 帳號代號，一律寫裸 kind——codex 不該有任何 `codex:ccN`（2026-09-14 使用者指正）。
-    // 同 kind 才看 home 變數那條保險；查不到那個身份（主機的身份還沒偵測完）維持分開，免得把兩個
-    // claude 帳號的數字疊進同一格。
     let shares = match &found {
         Some(i) if i.kind != kind => true,
         Some(i) => identity_shares_default(kind, &i.env),
@@ -209,8 +203,6 @@ pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::
     runtime.or_else(|| bot.model.clone()).filter(|m| !m.trim().is_empty())
 }
 
-
-
 /// Unknown host prefixes fall back to `local`.
 pub fn host_of_key<'a>(key: &'a str, hosts: &[String]) -> (&'a str, &'a str) {
     match key.split_once('/') {
@@ -285,7 +277,6 @@ impl Bucket {
     pub fn len(self) -> chrono::Duration {
         match self {
             Bucket::FiveHour => FIVE_HOUR_LEN,
-            // Fable 跟 7d 同一個週期重置。
             Bucket::SevenDay | Bucket::Fable => SEVEN_DAY_LEN,
         }
     }
@@ -359,7 +350,6 @@ impl Window {
             return false;
         }
         match self.observed_at.as_deref().and_then(parse_utc) {
-            // 觀測比重置新 → 這筆讀數已經是重置後的狀態，不算跨過重置（#489）。
             Some(observed) => observed <= resets,
             None => true,
         }
@@ -489,17 +479,9 @@ impl Quota {
     /// `Quota::updated_at`。不能只看 `updated_at`：[`set`] 會沿用新讀數缺的窗，而 `updated_at`
     /// 蓋成現在，被沿用的那一桶年齡永遠是 0（i267 review，#475）。解不開就回 `false`（不知道年齡，不亂判）。
     fn reading_older_than_window(&self, b: Bucket, now: chrono::DateTime<chrono::Utc>) -> bool {
-        // `observed_at` 解不開時**退回 `updated_at`**：能用的時間戳優先於「不知道」。
-        // 兩個都解不開才算說不出年齡。
         let observed = self.window_of(b).and_then(|w| w.observed_at.as_deref()).and_then(parse_utc);
         match observed.or_else(|| parse_utc(&self.updated_at)) {
             Some(at) => now - at >= b.len(),
-            // **兩個時間戳都解不開＝當成已經過期**（i267 review，#518）：跟其他四處「解不開＝已過去」同向。
-            //
-            // 第一版回 `false`（＝「這筆讀數還很新」），方向剛好相反，於是 #475 那個「永久擋住一個身份」
-            // 原封不動回來：`resets_at` 被丟成 `None`（#489 那顆）收不掉、`reset_passed` 回 false、
-            // `exhausted` 永遠 true。這裡的嚴格方向是「寧可放掉，也不要永久擋住」——跟 #464／#475
-            // 整條線的取捨一致，而且 [`load_cache`] 已經先把這兩個欄位驗過，壞值不該從那條路進來。
             None => true,
         }
     }
@@ -547,7 +529,6 @@ pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::Quot
     let mut restored = Vec::new();
     let mut retired = Vec::new();
     for (key, raw, updated_at) in rows {
-        // agy 現在只提供 Gemini 額度。清除舊版保存的 Claude/GPT 子 key，避免重啟後又出現在快照。
         if is_retired_agy_quota_key(&key) {
             retired.push(key);
             continue;
@@ -559,16 +540,10 @@ pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::Quot
                 continue;
             }
         };
-        // Cache rows can outlive the reset. Keep the existing limit-hit expiry rule at boot too,
-        // so an old "用完了" marker never blocks work while the first fresh probe is pending.
         if limit_hit_expired(q.limit_hit.as_ref()) {
             q.limit_hit = None;
         }
         q.updated_at = if updated_at.trim().is_empty() { q.updated_at } else { updated_at };
-        // 快取列的 `resets_at` 也要驗一次（i264 review，#489）：`load_cache` 是裸的
-        // `serde_json::from_str`，而 `Window` 只 derive `Deserialize`，所以解不開的值**不是被丟掉，
-        // 是原樣載回記憶體**——接著 `reset_passed` 把它讀成「已經跨過重置」，那個身份一路看起來有額度，
-        // 直到下一次探測成功才好，而 `unix_to_rfc3339`／`already_past` 的兩個 warn 都不在這條路上。
         drop_unparseable_resets(&mut q, &key);
         q.host = key.split_once('/').map_or(LOCAL_HOST, |(host, _)| host).to_string();
         restored.push((key, q));
@@ -610,7 +585,6 @@ async fn persist_cache_locked(app: &impl crate::capabilities::Db, key: &str, q: 
             return;
         }
     };
-    // 兩邊都包 `ts_sql` 照時刻比：舊列可能是秒格式（`…:00Z`），同一秒內較新的毫秒讀數（`…:00.500Z`）不能被字串比較判成較舊（#101）。
     let sql = format!(
         "INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET quota_json=excluded.quota_json, updated_at=excluded.updated_at
@@ -666,12 +640,6 @@ pub fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
             if let Ok(n) = s.parse::<i64>() {
                 n
             } else {
-                // 已經是時間字串：**至少驗一次解得開**再放行（i204 review，#489）。原本是原樣回傳，
-                // 所以格式漂移時一串亂碼會直接變成 `resets_at`，而解不開的重置時間會被
-                // `Window::reset_passed` 讀成「已經跨過重置」——那個身份就永遠看起來有額度。
-                // 解不開就丟掉：`resets_at: None` 是「不知道」，由 `usable_window` 的窗長規則收尾（#475），
-                // 比一個會讓人誤判成「有額度」的壞值安全。
-                // 只驗、不改寫：格式正規化不是這張票的事，而且下游一律 `parse_utc`／`cmp_ts` 比時刻。
                 return match parse_utc(s) {
                     Some(_) => Some(s.clone()),
                     None => {
@@ -683,7 +651,6 @@ pub fn unix_to_rfc3339(v: Option<&Value>) -> Option<String> {
         }
         _ => return None,
     };
-    // 1e12 秒 ＝ 西元 33658 年；1e12 毫秒 ＝ 2001 年。超過就只可能是毫秒。
     let (secs, millis) = if raw.abs() >= MS_THRESHOLD { (raw.div_euclid(1000), raw.rem_euclid(1000) as u32) } else { (raw, 0) };
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, millis * 1_000_000)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
@@ -715,7 +682,6 @@ fn reset_credits(result: &Value) -> Option<ResetCredits> {
                 .collect()
         })
         .unwrap_or_default();
-    // 穩定排序：有到期日的由早到晚，沒有的排最後。
     credits.sort_by_key(|c| c.expires_at.as_deref().and_then(parse_utc).map_or(i64::MAX, |t| t.timestamp()));
     let first = credits.first();
     Some(ResetCredits {
@@ -748,8 +714,6 @@ pub fn quota_from_codex(result: &Value) -> Option<Quota> {
         five = window(p);
         seven = window(s);
     }
-    // 兩個窗都讀不出來（空的 rateLimits、malformed）不是完整帳號讀數：回 None，讓呼叫端當成探測失敗，
-    // 不去清掉有效的窗與撞限（#1506）。只有週窗的方案照常是完整讀數（#1496）。
     if five.is_none() && seven.is_none() {
         return None;
     }
@@ -780,7 +744,6 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
     };
     let five = window(rl.get("five_hour"));
     let seven = window(rl.get("seven_day"));
-    // 實測（2026-09-07）statusLine 沒有 fable 桶，這裡只是有就收。
     let fable = window(rl.get("fable")).or_else(|| window(rl.get("seven_day_fable")));
     if five.is_none() && seven.is_none() {
         return None;
@@ -845,8 +808,6 @@ pub async fn set_fenced(
 /// [`Window::reset_passed`] 讀成「已重置」而放行一個可能真的見底的身份。
 fn drop_unparseable_resets(q: &mut Quota, key: &str) {
     if parse_utc(&q.updated_at).is_none() {
-        // 不編一個時間出來（那等於謊報新鮮度）：只記下來。年齡判斷那一側對解不開的已經當成過期
-        // （`reading_older_than_window`），所以結果是「這筆讀數不算數」，不是被當成很新。
         tracing::warn!(key, updated_at = %q.updated_at, "快取列的 updated_at 解不開，這筆讀數的年齡無從判斷");
     }
     for (bucket, w) in [("five_hour", &mut q.five_hour), ("seven_day", &mut q.seven_day), ("fable", &mut q.fable)] {
@@ -857,8 +818,6 @@ fn drop_unparseable_resets(q: &mut Quota, key: &str) {
                 w.resets_at = None;
             }
         }
-        // `observed_at` 同樣要驗（i267 review，#518）：留著壞值會讓年齡判斷拿它當輸入。
-        // 設成 `None` 就退回 `updated_at`，那個也壞的話由上面那條 warn ＋ 年齡側的「解不開＝過期」收尾。
         if let Some(raw) = w.observed_at.as_deref() {
             if parse_utc(raw).is_none() {
                 tracing::warn!(key, bucket, observed_at = %raw, "快取裡的觀測時間解不開，載回來時丟掉");
@@ -881,7 +840,6 @@ fn drop_unparseable_resets(q: &mut Quota, key: &str) {
 fn already_past(resets_at: Option<&str>) -> bool {
     let now = chrono::Utc::now();
     match resets_at {
-        // 沒有重置時間：沒有東西可以沿用，也不必說它過去了。
         None => false,
         Some(raw) => match parse_utc(raw) {
             Some(at) => at <= now,
@@ -956,14 +914,11 @@ async fn set_inner(
                 return false;
             }
         }
-        // Any stale caller is a chance to evict the retired value, never write it again.
         forget(app, &key).await;
         return true;
     }
     sanitize_percentages(&mut q, &key);
     let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
-    // This write can also delete split keys; lock every touched key in sorted order so an old
-    // in-flight split-key write cannot recreate a row after that deletion.
     let mut write_keys = vec![key.clone()];
     write_keys.extend(stale.iter().cloned());
     write_keys.sort();
@@ -972,7 +927,6 @@ async fn set_inner(
     for write_key in write_keys {
         cache_writes.push(cache_write_lock(&write_key).await);
     }
-    // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
     let brings_its_own_hit = q.limit_hit.is_some();
     let fresh = q.clone();
     let mut quotas = app.quotas().lock().await;
@@ -994,8 +948,6 @@ async fn set_inner(
             tracing::info!(host, stale = %k, bare = %key, "dropped a split quota key that now resolves to the bare key");
         }
     }
-    // issue #475（i267 review）：**這一次真的帶進來的**窗蓋上觀測時間；下面沿用舊窗時原樣保留它。
-    // 沒有這一步，被沿用的那一桶會跟著 `updated_at` 一直「看起來很新」，窗長到期永遠不成立。
     for w in [&mut q.five_hour, &mut q.seven_day, &mut q.fable].into_iter().flatten() {
         if w.observed_at.is_none() {
             w.observed_at = Some(if q.updated_at.trim().is_empty() { crate::db::now() } else { q.updated_at.clone() });
@@ -1004,20 +956,16 @@ async fn set_inner(
     if let Some(w) = q.argon_weekly.as_deref_mut().filter(|w| w.observed_at.is_none()) {
         w.observed_at = Some(if q.updated_at.trim().is_empty() { crate::db::now() } else { q.updated_at.clone() });
     }
-    // A window the new reading lacks keeps the previous value: statusLine has no Fable and
-    // otherwise wipes the probe's F bar every few seconds.
     if q.fable.is_none() {
         if let Some(prev) = quotas.get(&key) {
             q.fable = prev.fable.clone();
         }
     }
-    // agy 的 Argon 週額度只在它自己的組裡：讀數缺它就沿用上一份（同 fable），不讓一次缺漏把它抹掉。
     if q.argon_weekly.is_none() {
         if let Some(prev) = quotas.get(&key) {
             q.argon_weekly = prev.argon_weekly.clone();
         }
     }
-    // 部分讀數沿用缺窗；codex app-server 是完整帳號讀數，缺窗表示方案沒有該窗。
     if q.source != "codex-app-server" && (q.five_hour.is_none() || q.seven_day.is_none()) {
         if let Some(prev) = quotas.get(&key) {
             if q.five_hour.is_none() {
@@ -1028,8 +976,6 @@ async fn set_inner(
             }
         }
     }
-    // 重置券只有 app-server 讀得到，別的來源不該抹掉；但 app-server 已確認換了方案（兩邊的 planType 都知道且不同）
-    // 時，舊方案的券不再屬於這個帳號，不沿用（#1508）。
     if q.reset_credits.is_none() {
         if let Some(prev) = quotas.get(&key) {
             let plan_changed = q.source == "codex-app-server" && q.plan.is_some() && prev.plan.is_some() && q.plan != prev.plan;
@@ -1038,7 +984,6 @@ async fn set_inner(
             }
         }
     }
-    // 撞上限只有 CLI 橫幅看得到（§12.4），不沿用會被 app-server 輪詢洗回滿格（2026-09-12 使用者）。
     if q.limit_hit.is_none() {
         if let Some(prev) = quotas.get(&key) {
             q.limit_hit = prev.limit_hit.clone().filter(|hit| {
@@ -1050,16 +995,12 @@ async fn set_inner(
         }
     }
     if !brings_its_own_hit {
-        // `fresh` 是這次帶進來的讀數，不看 stale 旗標（見 `grok_reading_clears_hit`）。
         q.limit_hit = q.limit_hit.take().and_then(|h| recalibrate_for_key(app, &key, h, &fresh, true));
     }
     if limit_hit_expired(q.limit_hit.as_ref()) {
         q.limit_hit = None;
         forget_grok_pct_clear(app, &key);
     }
-    // CLI 狀態列沒有重置時間，沿用上一份，否則量表的「N 小時後重置」會消失。
-    // **已經過去的不沿用**（issue #489）：對顯示沒有意義（畫面會寫「N 小時前重置」），而且它會被
-    // `reset_passed` 讀成「這個窗重置過了」，把一筆剛讀到、真的見底的狀態列讀數放行。
     if let Some(prev) = quotas.get(&key) {
         for (now, old) in [(&mut q.five_hour, &prev.five_hour), (&mut q.seven_day, &prev.seven_day), (&mut q.fable, &prev.fable)] {
             if let (Some(w), Some(p)) = (now.as_mut(), old.as_ref()) {
@@ -1088,8 +1029,6 @@ async fn set_inner(
         delete_cache(app, old).await;
     }
     persist_cache_locked(app, &key, &q).await;
-    // 寫進記憶體之後、寫快取列之前主機被換掉：換連線那一側已經清過這把 key，這裡剛寫的列會把舊機器的讀數留到下次開機。
-    // 讓快取列回到記憶體現在的樣子（被清掉就刪，新連線已寫了就用它的）。
     if let Some(f) = fence {
         if !app.hosts().is_current(f).await {
             let now = app.quotas().lock().await.get(&key).cloned();
@@ -1163,7 +1102,6 @@ fn guard_statusline_windows(
             continue;
         };
         if same_window(old_at, new_at) {
-            // 分不出誰新時才同窗取大；5h 證明這份比較新就照寫，帳號在窗內被重置（resets_at 不變）時才降得下來（#404）。
             if freshness != Some(std::cmp::Ordering::Greater) {
                 new.used_pct = new.used_pct.max(old.used_pct);
             }
@@ -1245,13 +1183,9 @@ pub fn recalibrate_limit_hit(hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
 /// [`recalibrate_limit_hit`] 的本體。`grok_pct` 為 `false` 時跳過 grok 看百分比那一條（其他規則照舊）；
 /// codex、claude 的讀數本來就走不到那一條，這個參數對它們沒有作用。
 fn recalibrate_limit_hit_at(mut hit: LimitHit, fresh: &Quota, now: chrono::DateTime<chrono::Utc>, grok_pct: bool) -> Option<LimitHit> {
-    // credits 用完（codex 橫幅沒寫重置時間＝`until: None`，沒有桶名）：窗的讀數證明不了 credits 回來了，權威讀數不解除（#1576）。
-    // 方案變了另由 `set` 的 plan_changed 分支處理。
     if hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, fresh) {
         return Some(hit);
     }
-    // 完整的 Codex 帳號讀數可證明撞限的桶已消失或不再見底。
-    // 舊探測、statusline 與其他供應商不具有這個權威性。
     if codex_reading_after_hit(&hit, fresh) {
         let full = match hit.bucket.as_deref() {
             None => [&fresh.five_hour, &fresh.seven_day].into_iter().flatten().any(Window::critical),
@@ -1263,7 +1197,6 @@ fn recalibrate_limit_hit_at(mut hit: LimitHit, fresh: &Quota, now: chrono::DateT
             return None;
         }
     }
-    // grok：窗開在撞限之前時下面那條永遠清不掉（#1900），權威讀數說那一桶不見底就解除。
     if grok_pct && grok_reading_clears_hit(&hit, fresh, now) {
         return None;
     }
@@ -1274,8 +1207,6 @@ fn recalibrate_limit_hit_at(mut hit: LimitHit, fresh: &Quota, now: chrono::DateT
         Some("five_hour") => (fresh.five_hour.as_ref(), chrono::Duration::hours(5)),
         Some("seven_day") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
         Some("fable") => (fresh.fable.as_ref(), chrono::Duration::days(7)),
-        // Opus／Sonnet 的週桶沒有自己的量表，但跟 7d 同一個週期重置（`/usage` 的 `weekly_scoped` 列與
-        // `weekly_all` 同一個 `resets_at`）：拿 7d 的窗來校正時間，不看它的百分比。
         Some("opus") | Some("sonnet") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
         _ => return Some(hit),
     };
@@ -1305,8 +1236,6 @@ fn both_windows_opened_after(hit: &LimitHit, fresh: &Quota) -> bool {
 /// 沒寫時間的一律**不**過期，只能靠 [`clear_limit_hit`]。
 pub fn limit_hit_expired(hit: Option<&LimitHit>) -> bool {
     let Some(until) = hit.and_then(|h| h.until.as_deref()) else { return false };
-    // 解不開的 `until` **不**算過期：這裡的「不過期」是**繼續擋**（嚴格的那一邊），
-    // 跟 `already_past` 的嚴格方向一致，不是 `reset_passed` 那種「放行」。
     match parse_utc(until) {
         Some(t) => chrono::Utc::now() >= t,
         None => false,
@@ -1514,7 +1443,6 @@ pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabil
     let mut quotas = app.quotas().lock().await;
     if let Some(hit) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()) {
         if !limit_hit_expired(Some(hit)) {
-            // 沒寫時間的撞限永不過期（`limit_hit_expired`），一定比任何時間都「晚」。
             let keep = match hit.until.as_deref().and_then(parse_utc) {
                 None => true,
                 Some(prev) => prev >= t,
@@ -1564,12 +1492,9 @@ pub async fn restore_limit_hit(app: &(impl crate::capabilities::DataDir + crate:
     let key = quota_key(host, base);
     let _cache_write = cache_write_lock(&key).await;
     let mut quotas = app.quotas().lock().await;
-    // credits 撞限不由讀數解除（見 recalibrate_limit_hit）：權威讀數在它之後、格子卻已經沒有撞限，代表它已被方案變更或成功回合清掉，不寫回（#1576）。
     if quotas.get(&key).is_some_and(|q| q.limit_hit.is_none() && hit.bucket.is_none() && hit.until.is_none() && codex_reading_after_hit(&hit, q)) {
         return false;
     }
-    // 表裡這筆可能是開機回填、還沒被真探測換掉的（stale 旗標還掛著）：那種讀數不准拿來看百分比。
-    // 上鎖順序同 `load_cache`：quotas → quota_stale。
     let grok_pct = !app.quota_stale().lock().await.contains(&key);
     let hit = match quotas.get(&key) {
         Some(q) => match recalibrate_for_key(app, &key, hit, q, grok_pct) {
@@ -1629,7 +1554,6 @@ pub async fn snapshot(app: &(impl crate::hosts::HostsAccess + crate::quota::Quot
         }
     }
     for (k, v) in q.iter() {
-        // Otherwise read as a local key downstream.
         let orphan = k.contains('/') && host_of_key(k, &hosts).0 == LOCAL_HOST;
         if !orphan {
             m.insert(k.clone(), quota_value(v, is_stale(k, v)));
@@ -1726,12 +1650,6 @@ pub fn pane_window_used(
         },
     }
 }
-
-
-
-
-
-
 
 /// 每個 quota key 的最新額度快照。（欄位在 top state，由 composition 層實作這個窄能力。）
 pub trait QuotaTables: Send + Sync {
@@ -1845,7 +1763,6 @@ mod cache_write_lock_tests {
         app.quotas.lock().await.insert(key.clone(), before_clear.clone());
         persist_cache_for_test(&app, &key, &before_clear).await;
 
-        // A 已複製舊快照、仍持有 key 的寫入鎖，尚未落地；B 不能先改記憶體並寫清除快照。
         let a_write = cache_write_lock(&key).await;
         let a_snapshot = app.quotas.lock().await[&key].clone();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2047,16 +1964,13 @@ mod clear_if_older_tests {
     #[tokio::test]
     async fn the_comparison_is_by_instant_not_by_text() {
         let app = app().await;
-        // 同一時刻、不同 offset 與小數位數：相等，不清。
         seed(&app, "grok:offset-equal", with_hit("2026-10-20T02:17:11.218+02:00")).await;
         assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:offset-equal", t("2026-10-20T00:17:11.218Z")).await, "+02:00 的同一時刻要當相等");
 
-        // 字串上 `08:00+09:00` 比 `00:00Z` 大，但實際是 23:00Z（較早）：要清。
         let earlier = seed(&app, "grok:offset-earlier", with_hit("2026-10-20T08:00:00+09:00")).await;
         assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:offset-earlier", t("2026-10-20T00:00:00Z")).await, "應按時刻比，不按字串");
         assert!(app.quotas.lock().await[&earlier].limit_hit.is_none());
 
-        // 小數位數：`.2185` 比 `.218` 晚 0.5 毫秒，不清。
         seed(&app, "grok:precision", with_hit("2026-10-20T00:17:11.2185Z")).await;
         assert!(!clear_limit_hit_if_older_than(&app, LOCAL_HOST, "grok:precision", t("2026-10-20T00:17:11.218Z")).await, "較晚的小數不能被當成更早");
     }
@@ -2070,7 +1984,6 @@ mod clear_if_older_tests {
         assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, base, late).await);
         assert_eq!(marked(&app, &key), Some(late));
 
-        // 新撞限在 `earlier` 之前就命中，`earlier` 這次成功比上一次早：清得掉，但 cleared_at 仍是 `late`。
         let earlier = t("2026-10-21T06:00:00Z");
         app.quotas.lock().await.insert(key.clone(), with_hit("2026-10-21T01:00:00Z"));
         assert!(clear_limit_hit_if_older_than(&app, LOCAL_HOST, base, earlier).await);
@@ -2085,7 +1998,6 @@ mod clear_if_older_tests {
         let key = seed(&app, base, with_hit("2026-10-20T00:17:11Z")).await;
         let success = t("2026-10-21T00:10:00Z");
 
-        // 寫入端先拿鎖，把撞限換成比 `success` 還新的一顆，然後才放鎖。
         let writer_lock = cache_write_lock(&key).await;
         let mut newer = with_hit("2026-10-21T00:20:00Z");
         newer.source = "race-writer".into();

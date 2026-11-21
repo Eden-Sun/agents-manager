@@ -73,7 +73,6 @@ impl Relay {
         }
         let proc = st.proc.as_mut().expect("spawned above");
         if let Err(e) = proc.stdin.write_all(line.as_bytes()).await.and(proc.stdin.flush().await) {
-            // 寫不進去：中繼已經死了，請求沒有到達遠端。
             Self::drop_proc(&mut st);
             if !st.proven {
                 st.disabled_until = Some(Instant::now() + RETRY_AFTER);
@@ -100,10 +99,8 @@ impl Relay {
                 Exchange::Sent(Ok(b))
             }
             Err(e) => {
-                // 回應對不上或讀不到：這條管線的狀態不可信，丟掉重來；請求已送出，所以不退回重送。
                 Self::drop_proc(&mut st);
                 if !st.proven {
-                    // 從來沒成功過：多半是遠端沒有 python3 之類，短暫停用，之後的呼叫直接走 socket。
                     st.disabled_until = Some(Instant::now() + RETRY_AFTER);
                     return Exchange::NotSent(e);
                 }
@@ -262,7 +259,6 @@ mod tests {
     /// 中繼從來沒成功過、回應就壞掉（不是我們要的 id）：算沒送出，可以退回 socket。
     #[tokio::test]
     async fn a_first_bad_answer_is_not_sent_so_the_caller_can_fall_back() {
-        // 回的不是 JSON（沒有 id）：中繼沒證明過能用，所以算沒送出。
         let relay = Relay::new(vec!["sh".into(), "-c".into(), "while read l; do echo not-json; done".into()]);
         assert!(matches!(relay.exchange(&req("c", "ping"), "c", Duration::from_secs(2)).await, Exchange::NotSent(_)));
     }
@@ -313,7 +309,6 @@ mod tests {
     async fn a_long_call_does_not_touch_the_relay() {
         let (sock, server) = fake_herdr("long");
         let client = crate::herdr::HerdrClient::new(&sock);
-        // 會卡住的中繼：一行回應都不給。若長呼叫走了它，這裡會等到逾時。
         client.set_relay(Some(Relay::new(vec!["sh".into(), "-c".into(), "cat > /dev/null".into()])));
         let v = tokio::time::timeout(Duration::from_secs(5), client.call("agent.wait", serde_json::json!({"timeout_ms": 1000})))
             .await
@@ -330,7 +325,6 @@ mod tests {
         let relay = Relay::new(vec!["sh".into(), "-c".into(), "cat > /dev/null".into()]);
         let client = crate::herdr::HerdrClient::new(&sock);
         client.set_relay(Some(relay.clone()));
-        // 另一個任務持有中繼（模擬一個正在等回應的請求）。
         let holder = relay.clone();
         let hold = tokio::spawn(async move {
             let _g = holder.state.lock().await;

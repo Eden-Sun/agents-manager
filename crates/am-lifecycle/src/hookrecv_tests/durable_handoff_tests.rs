@@ -33,7 +33,6 @@ async fn inbox_rows(e: &Env) -> i64 {
 async fn a_hook_that_cannot_be_persisted_is_not_answered_with_200() {
     let e = env().await;
     let bot = claude_bot(&e.app, &e.project_id, "hooky").await;
-    // 收件匣壞掉（磁碟滿、schema 沒跟上……都是同一種下場）。
     sqlx::query("DROP TABLE hook_events").execute(&e.app.db).await.unwrap();
 
     let (code, _) = receive(
@@ -99,7 +98,6 @@ async fn the_same_hook_sent_twice_does_not_become_two_events() {
     }
     assert_eq!(inbox_rows(&e).await, 1, "三次重送只有一列");
 
-    // 處理過一輪之後再重送，也不會多出一列（去重看的是事件身份，不是有沒有處理過）。
     crate::runners::hook_inbox::drain_once(&e.app).await.unwrap();
     let (code, _) =
         receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
@@ -138,7 +136,6 @@ async fn an_accepted_hook_survives_a_restart_before_it_is_processed() {
     let (code, _) =
         receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
     assert_eq!(code, StatusCode::OK);
-    // 沒有人處理它就「掛掉」了。
     assert_eq!(crate::hook_inbox::pending(&e.app.db, &db::now(), 10).await.unwrap().len(), 1);
 
     let restarted = restart_app(&e).await;
@@ -148,7 +145,6 @@ async fn an_accepted_hook_survives_a_restart_before_it_is_processed() {
         crate::hook_inbox::pending(&restarted.db, &db::now(), 10).await.unwrap().is_empty(),
         "處理完就不在待辦裡了"
     );
-    // 事件真的走到了 §6.7（session id 回填到 run 上）。
     let sid: Option<String> =
         sqlx::query_scalar("SELECT native_session_id FROM runs WHERE id=?").bind(&run).fetch_one(&restarted.db).await.unwrap();
     assert_eq!(sid.as_deref(), Some("sess-1"), "hook 真的被處理了，不是只被標成完成");

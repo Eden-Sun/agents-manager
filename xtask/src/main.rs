@@ -8,7 +8,6 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 fn repo_root() -> PathBuf {
-    // xtask lives at <repo>/xtask, CARGO_MANIFEST_DIR is <repo>/xtask.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("xtask has a parent dir")
@@ -145,8 +144,6 @@ fn terminate(pid: u32) -> bool {
     if !Command::new("kill").arg(pid.to_string()).status().is_ok_and(|s| s.success()) {
         return false;
     }
-    // Wait for it to actually exit — a following `cargo dev` binding the same port
-    // (e.g. the daemon's 7788) would otherwise race a socket the kernel hasn't freed yet.
     for _ in 0..50 {
         if process_info(pid).is_none() {
             break;
@@ -180,7 +177,6 @@ fn dev(root: &Path) {
             );
             std::process::exit(1);
         }
-        // 舊的 pid 檔（重開機後、行程自己掉了）：行程已經不在，或 pid 已被別的程式用掉。不是使用者要手動清的東西。
         println!("{} 是舊的（行程已不在，或 pid 已被別的程式用掉），清掉重來。", pids.display());
         fs::remove_file(&pids).ok();
     }
@@ -188,9 +184,6 @@ fn dev(root: &Path) {
     let logs = log_dir(root);
     fs::create_dir_all(&logs).expect("create log dir");
 
-    // Build first so `dev` doesn't return before the binary exists, and so we can
-    // spawn the real binary directly (spawning through `cargo run`/`bun run` would
-    // leave `cargo down` killing a wrapper process instead of the actual server).
     let build = Command::new("sh")
         .arg(root.join("scripts/project-cargo.sh"))
         .args(["build", "--bin", "agents-managerd"])
@@ -212,28 +205,20 @@ fn dev(root: &Path) {
         std::process::exit(1);
     }
 
-    // 兩個 log 檔先開好：這之前什麼行程都還沒起，開檔失敗不會留下東西。
     let daemon_log = fs::File::create(logs.join("daemon.log")).expect("create daemon.log");
     let web_log = fs::File::create(logs.join("web.log")).expect("create web.log");
 
     let daemon: Child = Command::new(root.join("target/debug/agents-managerd"))
         .arg("serve")
         .current_dir(root)
-        // Bind every interface and accept LAN peers/Origins — see main.rs/api.rs. A dev
-        // binary does this on its own now; kept explicit so `cargo dev` never depends on how
-        // the default is detected.
         .env("AM_DEV_LAN", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
         .stderr(Stdio::from(daemon_log))
-        // Its own process group *and* detached stdin: without this, Ctrl-C on `cargo dev`'s
-        // terminal, or the terminal/session closing, sends SIGINT/SIGHUP to the daemon along
-        // with it, even though `cargo dev` itself already exited.
         .process_group(0)
         .spawn()
         .expect("spawn agents-managerd");
     let mut tracked = vec![track(daemon.id(), Kind::Daemon)];
-    // daemon 一起來就先寫 pid 檔：之後 vite 起不來，`cargo down` 也找得到它（#1075）。
     if let Err(e) = write_pids(root, &tracked) {
         abort(root, &tracked, &format!("write {}: {e}", pid_file(root).display()));
     }
@@ -265,8 +250,6 @@ fn dev(root: &Path) {
 
     println!("\nlistening:");
     for (name, pid) in [("daemon", daemon.id()), ("web", web.id())] {
-        // The daemon does a herdr handshake before it binds, so poll instead of a fixed
-        // sleep — a flat delay long enough for that would just slow down the common case.
         let mut lines = Vec::new();
         for _ in 0..50 {
             let out = Command::new("lsof")
@@ -319,7 +302,6 @@ fn down(root: &Path) {
     for t in decode(&contents) {
         match process_info(t.pid) {
             None => eprintln!("pid {} was already gone", t.pid),
-            // pid 被別的程式用掉了（pid 檔是舊的）：不殺，那不是我們起的。
             Some(info) if !is_ours(&t, &info) => eprintln!(
                 "pid {} 現在是別的行程（{}），不是 cargo dev 起的 {}；跳過，不殺。pid 檔是舊的。",
                 t.pid,
@@ -338,7 +320,6 @@ fn down(root: &Path) {
 
     fs::remove_file(&path).ok();
 }
-
 
 #[cfg(test)]
 mod tests {

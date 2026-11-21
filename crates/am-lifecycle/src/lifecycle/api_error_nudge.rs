@@ -41,7 +41,7 @@ fn has_code(s: &str, code: &str) -> bool {
 pub fn is_transient(line: &str) -> bool {
     let l = line.to_lowercase();
     if crate::turn_error::kind_of(line) != "api_error" || crate::turn_error::is_quota_limit(line) {
-        return false; // 額度撞限、模型滿載
+        return false;
     }
     if l.contains("資安過濾") || l.contains("can’t be shown") || l.contains("can't be shown") {
         return false;
@@ -322,7 +322,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(crid, format!("{CRID_PREFIX}{turn}"));
-        // 同一個回合不再 arm。
         arm(&e.app, &bot.id, &run).await;
         assert!(!check(&e.app, &bot.id).await);
     }

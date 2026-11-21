@@ -180,8 +180,6 @@ fn latest_version(all: &[Section]) -> Option<String> {
     all.iter().filter_map(|s| changelog::parse_version(&s.version).map(|v| (v, s.version.clone()))).max().map(|(_, s)| s)
 }
 
-// ───────────────────────── check 的輸出契約（kick 腳本依賴，欄位名不要改） ─────────────────────────
-
 #[derive(Debug, Serialize, PartialEq)]
 pub struct KeptOut {
     pub id: String,
@@ -384,7 +382,6 @@ pub async fn run_check_with_source(a: CheckArgs, src: &changelog::FeedSource) ->
         Some(target) => {
             let target = changelog::version_string(target).ok_or_else(|| anyhow!("目標版本 `{target}` 看不出版本"))?;
             let all = if a.feed_file.is_some() {
-                // --feed-file is strictly offline, even when --to is explicit.
                 let all = source_sections(&a.kind, &primary?);
                 if changelog::pick_sections(&all, None, &target).is_empty() {
                     bail!("離線 feed 缺少目標版本 {target}");
@@ -406,7 +403,6 @@ pub async fn run_check_with_source(a: CheckArgs, src: &changelog::FeedSource) ->
         None => default_db_path()?,
     };
     let pool = open_ledger_db(&db).await?;
-    // 只有帳本是空的第一次才需要磁碟版本；避免每 30 分鐘白跑一次 login shell。
     let installed = match (&a.installed, ledger::max_version(&pool, &a.kind).await?, &a.since) {
         (Some(i), _, _) => Some(i.clone()),
         (None, None, None) => Some(local_installed_version(&a.kind).await?),

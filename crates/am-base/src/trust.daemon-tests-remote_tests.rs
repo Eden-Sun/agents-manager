@@ -146,7 +146,6 @@
     async fn a_hung_remote_gives_the_start_a_warning_within_the_budget() {
         const HOST: &str = "trustbox-hang";
         let (env, home) = remote_env(HOST).await;
-        // 收下連線卻不回話：每趟 ssh 都會慢慢等到 `SSH_EXEC_TIMEOUT`（30 秒）。
         crate::hosts::set_ssh_delay(HOST, std::time::Duration::from_secs(30));
         crate::hosts::set_ssh_fake(HOST, run_sh);
         let bot = bot_on(&env, "ra").await;
@@ -230,7 +229,6 @@
         let dir = home.join(".claude-ra");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".claude.json"), "{}").unwrap();
-        // `mv` 那一行換成 `exit 1`：cat 已經寫好暫存檔，接著就死了。
         crate::hosts::set_ssh_fake(HOST, |script| run_sh(&script.replace("mv -f \"$T\" \"$F\"", "exit 1")));
 
         let bot = bot_on(&env, "ra").await;
@@ -295,10 +293,8 @@
         let errs = pretrust_for_start(&env.app, &bot, HOST, CWD).await;
         assert!(errs.is_empty(), "{errs:?}");
 
-        // Symlink must still be a symlink!
         let meta = std::fs::symlink_metadata(&store).unwrap();
         assert!(meta.file_type().is_symlink(), "remote symlink was overwritten with a regular file");
 
-        // Target file must have been updated!
         assert_eq!(trusted(&target), json!(true));
     }

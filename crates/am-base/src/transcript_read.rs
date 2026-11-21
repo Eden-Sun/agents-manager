@@ -144,7 +144,6 @@ pub async fn trusted_roots_for(src: &impl TranscriptRoots) -> Vec<PathBuf> {
     match src.kind() {
         "claude" => roots.extend(src.claude_config_dir().await.map(|d| PathBuf::from(d).join("projects"))),
         "codex" => roots.extend(src.codex_home().await.map(|h| h.join("sessions"))),
-        // agy：身份＝換 HOME（影子家目錄），對話在 `<HOME>/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/`。
         "agy" => roots.extend(src.agy_home().await.map(|h| h.join(".gemini").join("antigravity-cli").join("brain"))),
         _ => {}
     }
@@ -163,7 +162,6 @@ pub async fn transcript_allowed_for(src: &impl TranscriptRoots, path: &str) -> b
                 && p.extension().and_then(|e| e.to_str()) == Some("jsonl")
         }
         Some(true) => path_within_roots(path, &trusted_roots_for(src).await),
-        // A host lookup failure gives no basis for deciding whether this daemon can read the path.
         None => false,
     }
 }

@@ -143,7 +143,6 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
         let no_user = no_scheme.rsplit_once('@').map(|(_, h)| h).unwrap_or(no_scheme);
         let host_path = no_user.strip_prefix("github.com")?;
         if had_scheme {
-            // With a scheme the colon is a **port**, never the scp-style separator.
             let after_port = match host_path.strip_prefix(':') {
                 Some(p) => p.trim_start_matches(|c: char| c.is_ascii_digit()),
                 None => host_path,
@@ -156,9 +155,6 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
     let mut parts = rest.trim_end_matches('/').split('/');
     let owner = parts.next()?.trim();
     let repo = parts.next()?.trim().trim_end_matches(".git").trim();
-    // 這兩段來自 repo 自己的 `.git/config`（不可信）：會拼進 `--repo`、API 路徑與給網頁的連結。照 GitHub 的規則收：
-    // owner 只有英數與單一 `-`（不以 `-` 開頭／結尾、不可連續），repo 只有英數與 `._-`。
-    // 空白、引號、`<>`、開頭 `-` 或額外 URL path 都不是合法的 GitHub repository。
     if parts.next().is_some() || !valid_owner(owner) || !valid_repo_name(repo) {
         return None;
     }
@@ -350,7 +346,7 @@ pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate:
     let script = format!(
         "{PATH_FIX}cd {} || exit 0\n\
          test -f .gitmodules || exit 0\n\
-         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | sed 's/^[^ ]* //' | while IFS= read -r p; do\n\
+         git config --file .gitmodules --get-regexp '^submodule\\..*\\.path$' 2>/dev/null | sed 's/^[^ ]*
            printf '%s|%s\\n' \"$p\" \"$(git -C \"$p\" remote get-url origin 2>/dev/null)\"\n\
          done",
         sh_quote(&p.path)
@@ -373,7 +369,6 @@ pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate:
 pub async fn cached(app: &impl crate::github::GithubCache, project_id: &str) -> Option<GithubInfo> {
     app.github().lock().await.get(project_id).cloned().flatten()
 }
-
 
 /// gh 失敗的原因分類（看 stderr）：限流、找不到（issue／repo）、沒登入、沒安裝要分開說，不然「找不到那張 issue」會被講成「gh 沒安裝」。
 /// 訊息只留前 [`ERROR_CHARS`] 字：gh 的錯誤有時整份 JSON／HTML 都在裡面。
@@ -533,10 +528,6 @@ pub async fn get_issue(app: &(impl crate::capabilities::Db + crate::github::Gith
     }
     Ok(json!({"project_id": p.id, "repo": gh.slug(), "repo_path": repo.trim().trim_matches('/'), "content_notice": CONTENT_NOTICE, "issue": issue}))
 }
-
-
-
-
 
 /// 每台主機偵測到的 GitHub 專案資訊。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait GithubCache: Send + Sync {

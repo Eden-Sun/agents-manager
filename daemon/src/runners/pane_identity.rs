@@ -96,7 +96,6 @@ pub async fn sync_child_identity(
     pane_id: &str,
     pid: Option<i64>,
 ) {
-    // Children only: for a user bot this is the user's setting, projected back to `config.toml`.
     if bot.managed_by != "child" {
         return;
     }
@@ -124,13 +123,11 @@ pub async fn sync_child_identity(
     }
     let reader = app.proc_env.reader();
     let Some(env) = reader.env_of(app, host, pid).await else {
-        // Not marked probed: a transient failure must not pin the child to the parent's account.
         tracing::debug!(host, bot = %bot.name, pid, "cannot read the child pane's environment");
         return;
     };
     let identities = crate::tools::identities_for_host(app, host).await;
     if !identities.iter().any(|i| i.kind == bot.kind) {
-        // Boot reconcile can beat tool detection (§16); an empty list must not become a final answer.
         tracing::debug!(host, bot = %bot.name, "no identities known for this kind yet; re-checking next pass");
         return;
     }
@@ -141,24 +138,17 @@ pub async fn sync_child_identity(
         return;
     };
     let dir = dir.unwrap_or("");
-    // Keep the authority read gate through both writes: a host repoint between this check and
-    // persistence must not let the retired machine overwrite the replacement's identity.
     let Some(persisted) = fence.run_current(async {
-        // #2002：runtime／child 身份引用寫入前先 admit，取到後重驗身份仍在（刪除剛完成就等下一輪偵測）。
         let _identity_admit = crate::identity_fence::admit(host, &bot.kind, Some(name.as_str())).await;
         if _identity_admit.is_some() && crate::tools::identity_for_host(app, host, &name).await.is_none() {
             return false;
         }
-        // The run remembers the account it was actually read off (`runs.runtime_identity`), even
-        // when it matches the inherited value: NULL there means "nobody knows", and the UI says so.
         if !stamp_run_identity(app.as_ref(), bot, pane_id, &name).await {
             return false;
         }
-        // 預設帳號（空字串）只記在 run 上：`bots.identity` 是使用者的設定，不因一次偵測清掉或改成空值。
         if name.is_empty() || bot.identity.as_deref() == Some(name.as_str()) {
             return true;
         }
-        // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
         if let Err(e) = sqlx::query("UPDATE bots SET identity = ? WHERE id = ? AND managed_by = 'child'")
             .bind(&name)
             .bind(&bot.id)

@@ -19,7 +19,6 @@ mod tests {
         assert!(should_reassign(300, "responder", Some("needs_login")), "滿 5 分鐘＋不可用 → 改派");
         assert!(should_reassign(9000, "responder", Some("waiting_quota")), "撞限也算不可用（票上第 1 點）");
         assert!(!should_reassign(299, "responder", Some("needs_login")), "還沒滿 5 分鐘不動");
-        // `None` 同時是「可用」與「不知道」：兩種都不該改派。
         assert!(!should_reassign(9000, "responder", None), "可用／讀不到都不動");
         assert!(!should_reassign(9000, "patrol", Some("needs_login")), "已經在巡檢手上的不再動");
     }
@@ -30,10 +29,8 @@ mod tests {
     #[tokio::test]
     async fn the_contract_reassignment_depends_on_is_the_one_role_state_publishes() {
         let app = app().await;
-        // 還沒建立協調者：沒有東西要改派。
         assert_eq!(responder_unavailable(&app).await, None, "沒建立協調者");
 
-        // 登記一顆 bot（還沒有 run）。
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(crate::db::now()).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('resp','p','AGM-responder','claude','tok',?)")
             .bind(crate::db::now())
@@ -43,7 +40,6 @@ mod tests {
         roles::set_env(&app.db, Role::Responder, "resp", "p", "/tmp").await.unwrap();
         assert_eq!(responder_unavailable(&app).await, Some("no_run"), "登記了卻沒有 run");
 
-        // 有 run：可用。
         sqlx::query(
             "INSERT INTO runs (id,bot_id,state,agent_status,workspace_id,pane_id,agent_name,herdr_session,pane_typed,started_at)
              VALUES ('r1','resp','running','idle','ws','pane-r','AGM-responder','test',1,?)",
@@ -54,21 +50,15 @@ mod tests {
         .unwrap();
         assert_eq!(responder_unavailable(&app).await, None, "有 run 就當可用");
 
-        // #420 標的兩種黏著狀態。
         for (status, want) in [("needs_login", "needs_login"), ("waiting_quota", "waiting_quota")] {
             roles::set_status(&app.db, Role::Responder, status, None, None).await.unwrap();
             assert_eq!(responder_unavailable(&app).await, Some(want), "status={status}");
         }
-        // 清掉就回到可用。
         roles::set_status(&app.db, Role::Responder, "", None, None).await.unwrap();
         assert_eq!(responder_unavailable(&app).await, None);
 
-        // bot 被軟刪：**run 還掛著 running 也算不可用**。我原本回報這是個缺口（role_state 判的是
-        // `row.bot_id` 的 active run，不是那顆 bot 還在不在），287c772a 收掉了——刪掉的協調者裁示不了
-        // 任何東西，閘門說「可以裁示」就等於核准永遠不會被改派。這一條釘住那個修法。
         sqlx::query("UPDATE bots SET deleted_at=? WHERE id='resp'").bind(crate::db::now()).execute(&app.db).await.unwrap();
         assert_eq!(responder_unavailable(&app).await, Some("no_run"), "軟刪但 run 還在 running");
-        // run 也收掉之後一樣（原本就會走到的那條）。
         sqlx::query("UPDATE runs SET state='stopped' WHERE id='r1'").execute(&app.db).await.unwrap();
         assert_eq!(responder_unavailable(&app).await, Some("no_run"), "登記過但沒有在跑的 run");
     }
@@ -116,7 +106,6 @@ mod tests {
         assert_eq!(p["reassigned_reason"], json!("needs_login"));
         assert!(p["reassigned_at"].as_str().is_some_and(|s| !s.is_empty()));
 
-        // 叫得醒：巡檢的待辦撈得到，而且 wake=1。
         let due = roles::due_for(&app.db, Role::Patrol, true, &crate::db::now(), 5).await.unwrap();
         assert_eq!(due.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec![old.as_str()]);
         assert_eq!(due[0].wake, Some(1));
@@ -136,7 +125,6 @@ mod tests {
         let exactly = approval_event(&app, "approval:a-300:requested", REASSIGN_AFTER_SECS).await;
         assert_eq!(reassign_stale_approvals(&app, Some("needs_login")).await, 1, "滿 300 秒就動");
         assert_eq!(owner_of(&app.db, &exactly).await.unwrap().as_deref(), Some("patrol"));
-        // 299 秒那則還在原地：這一輪只動滿門檻的那一則。
         assert_eq!(owner_of(&app.db, &just_under).await.unwrap().as_deref(), Some("responder"));
     }
 
@@ -149,13 +137,11 @@ mod tests {
         reassign_stale_approvals(&app, Some("needs_login")).await;
         assert_eq!(owner_of(&app.db, &id).await.unwrap().as_deref(), Some("patrol"));
 
-        // 協調者恢復（unavailable = None），而且分類又跑了好幾拍。
         for _ in 0..3 {
             assert_eq!(reassign_stale_approvals(&app, None).await, 0);
             roles::classify(&app.db).await.unwrap();
         }
         assert_eq!(owner_of(&app.db, &id).await.unwrap().as_deref(), Some("patrol"), "恢復之後不能搶回去");
-        // 路由表自己也要答巡檢（payload 帶著 to_role）。
         let p = payload(&app, &id).await;
         assert_eq!(roles::route("approval_requested", &p, None).role, Role::Patrol);
     }
@@ -240,7 +226,6 @@ mod tests {
         assert!(out[0].1 >= STALLED_AFTER_SECS);
         assert_eq!(out[0].2, "kick");
 
-        // 裁示掉就不再報（incidents 那條路會自動 resolve）。
         store::decide_approval(&app.db, &fresh, "approved", "AGM", None, None).await.unwrap();
         assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "裁示過的不算");
     }
@@ -257,7 +242,6 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        // 重申請：自動取代掉上面那筆，並把等待起點接過來。
         let second = store::create_approval(&app.db, "kick", "rebuild", "s", Some("c2"), None, None).await.unwrap().approval.id;
         let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
         assert_eq!(out.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>(), vec![second.as_str()], "只剩新那筆 pending");
@@ -288,7 +272,6 @@ mod tests {
         age_and_expire(&app, &id, 3600).await;
         let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
         assert_eq!(out.iter().map(|(i, _, _)| i.as_str()).collect::<Vec<_>>(), vec![id.as_str()], "還沒過期的照報");
-        // 秒格式的舊值（`…Z` 不帶毫秒）靠 cmp_ts 正規化，不能因為字串比較而誤判。
         let past_secs = chrono::Utc::now().checked_sub_signed(chrono::Duration::seconds(10)).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?").bind(past_secs).bind(&id).execute(&app.db).await.unwrap();
         assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "秒格式的過期值也要認得");
@@ -412,7 +395,6 @@ mod tests {
             .await
             .unwrap();
 
-        // 外部（例如自動取代或其他路徑）直接把核准狀態標為 superseded
         sqlx::query("UPDATE supervisor_approvals SET status='superseded' WHERE id=?")
             .bind(&apprv)
             .execute(&app.db)

@@ -75,11 +75,9 @@ pub fn parse_prompt(screen: &str) -> Option<Prompt> {
     for (i, line) in lines.iter().enumerate() {
         let low = lower(line);
         let Some(at) = low.find("update available") else { continue };
-        // 句子本身要像提示：`Update available!` 在行首（框線、emoji 之後）；對話裡「the Update available! banner」不算。
         if at > 2 {
             continue;
         }
-        // 窄 pane 會把 `a -> b` 折到下一行。
         let joined = format!("{} {}", &line[at..], lines.get(i + 1).map(String::as_str).unwrap_or(""));
         let Some((from, to)) = versions_after(&joined) else { continue };
         let next: Vec<String> = lines.iter().skip(i + 1).take(8).map(|l| lower(l)).collect();
@@ -98,7 +96,6 @@ pub fn parse_prompt(screen: &str) -> Option<Prompt> {
 /// 非互動方框（底下就是正常的輸入列）與對話裡引用選單原文（後面接著輸入列）都不算。
 pub fn update_menu_open(screen: &str) -> bool {
     const TAIL_LINES: usize = 16;
-    // Footer 與選項要取自同一個目前選單：若只在整個 viewport 搜尋，舊的引用選單加上新的啟動選單會拼成假陽性。
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let Some(footer_lines) = press_enter_footer_lines(&raw) else { return false };
 
@@ -127,8 +124,6 @@ pub fn update_menu_open(screen: &str) -> bool {
         return false;
     }
 
-    // 版本更新選單的末兩項足夠辨認一個頂端被捲走的畫面；如果只剩 1／2，則也要看到更新橫幅。
-    // 同時取最近的選項列，避免從早先的對話引文借用 1. Update now 或 2. Skip。
     if choices.len() < 2 {
         return false;
     }
@@ -216,8 +211,6 @@ pub fn decide(
     upstream: Option<&str>,
     existing: Option<&str>,
 ) -> Option<String> {
-    // 跑著的版本沒看過（啟動畫面早被推掉）時，「需安裝」通知寫的起點就是它：不然 header 一鍵裝好之後，
-    // 這顆的通知會一直停在「需安裝」、批次永遠不收（`cli_update`，2026-09-25）。
     let from_notice = existing.and_then(pending_from);
     let running = running.or(from_notice.as_deref());
     if let (Some(d), Some(r)) = (disk, running) {
@@ -225,23 +218,18 @@ pub fn decide(
             return Some(t);
         }
     }
-    // 磁碟讀不到＝不知道，不是「還沒裝」：既有通知已經說「已安裝，重啟套用」就沿用，
-    // 不拿跑著的舊版本改判成需安裝（#1203；#974 對 claude 的同一條規則）。
     if disk.is_none() {
         if let Some(e) = existing.filter(|e| e.starts_with(NOTICE_PREFIX) && e.contains("已安裝")) {
             return Some(e.to_string());
         }
     }
     let disk_v = disk.and_then(|d| cli_version_string(d).or_else(|| version_string(d)));
-    // 裝著的版本：磁碟優先（跑著的不會比磁碟新），讀不到才用跑著的。兩個都不知道就不拿帳本比。
     let have = disk_v.clone().or_else(|| running.and_then(version_string));
     let upstream_target = match (have.as_deref().and_then(parse_version), upstream.and_then(version_string)) {
         (Some(h), Some(u)) if parse_version(&u).is_some_and(|uv| uv > h) => Some(u),
         _ => None,
     };
     if let Some(p) = screen_prompt {
-        // 提示說的新版磁碟上已經有了（安裝過、這個 run 還舊）：也是「重啟就換」，不再說需安裝——
-        // 除非帳本知道還有更新的一版。
         if let Some(d) = disk_v.as_deref() {
             if let (Some(dv), Some(tv)) = (parse_version(d), parse_version(&p.to)) {
                 if dv >= tv {
@@ -255,7 +243,6 @@ pub fn decide(
         return Some(pending_text(p.from.as_deref(), &newest(&p.to, upstream_target.as_deref())));
     }
     if let Some(u) = upstream_target {
-        // 既有的「還沒裝」通知若寫的新版更新（帳本落後 codex 自己的檢查），沿用它的目標。
         let prev = existing.filter(|e| e.starts_with(NOTICE_PREFIX) && e.contains("需安裝")).and_then(versions_after);
         let to = newest(&u, prev.as_ref().map(|(_, t)| t.as_str()));
         let from = running.and_then(version_string).or_else(|| prev.and_then(|(f, _)| f)).or(disk_v);
@@ -387,7 +374,6 @@ mod tests {
     #[test]
     fn the_non_interactive_box_is_read_with_both_versions() {
         assert_eq!(parse_prompt(BOXED), Some(p("0.154.0", "0.155.1")));
-        // 方框畫在框線裡也一樣。
         let framed = "│ ✨ Update available! 0.154.0 -> 0.155.1 │\n│ Run sh -c 'curl x/install.sh | sh' to update. │\n";
         assert_eq!(parse_prompt(framed), Some(p("0.154.0", "0.155.1")));
     }
@@ -434,7 +420,6 @@ mod tests {
         let n = decide(None, Some("0.154.0"), Some("codex-cli 0.155.1"), None, None).unwrap();
         assert!(n.contains("0.155.1") && n.contains("0.154.0") && n.contains("已安裝") && n.contains("重啟套用"), "{n}");
         assert!(!n.contains("需安裝"), "已經裝好了，不能再叫人去裝：{n}");
-        // 磁碟相同或更舊、也沒有提示：沒有通知。
         assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.155.1"), None, None), None);
         assert_eq!(decide(None, Some("0.155.1"), Some("codex-cli 0.154.0"), None, None), None);
         assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), None, None), None, "不知道跑著的版本就不比");
@@ -451,7 +436,6 @@ mod tests {
     fn a_pending_notice_survives_the_prompt_leaving_the_screen() {
         let pending = pending_text(Some("0.154.0"), "0.155.1");
         assert_eq!(decide(None, Some("0.154.0"), Some("codex-cli 0.154.0"), None, Some(&pending)), Some(pending.clone()));
-        // 不是 codex 的通知（例如舊資料）不沿用。
         assert_eq!(decide(None, None, None, None, Some("Update installed · Restart to update")), None);
     }
 
@@ -461,12 +445,9 @@ mod tests {
     fn the_triage_ledger_alone_is_enough_to_know_there_is_a_newer_version() {
         let n = decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), None).expect("帳本比磁碟新＝有新版");
         assert_eq!(n, pending_text(Some("0.155.1"), "0.157.0"), "{n}");
-        // 帳本沒有比裝著的新：不造通知。
         assert_eq!(decide(None, None, Some("codex-cli 0.157.0"), Some("0.157.0"), None), None);
         assert_eq!(decide(None, None, Some("codex-cli 0.157.0"), Some("0.156.1"), None), None);
-        // 裝著的版本完全不知道：不拿帳本比（不能憑空說有新版）。
         assert_eq!(decide(None, None, None, Some("0.157.0"), None), None);
-        // 只知道跑著的版本也行。
         assert_eq!(decide(None, Some("0.155.1"), None, Some("0.157.0"), None), Some(pending_text(Some("0.155.1"), "0.157.0")));
     }
 
@@ -475,10 +456,8 @@ mod tests {
     fn the_newer_of_the_prompt_and_the_ledger_is_the_target() {
         let n = decide(Some(&p("0.155.1", "0.156.1")), Some("0.155.1"), Some("codex-cli 0.155.1"), Some("0.157.0"), None).unwrap();
         assert_eq!(n, pending_text(Some("0.155.1"), "0.157.0"));
-        // 帳本反而落後（kick 停了）：提示照舊。
         let n = decide(Some(&p("0.155.1", "0.156.1")), Some("0.155.1"), Some("codex-cli 0.155.1"), Some("0.155.1"), None).unwrap();
         assert_eq!(n, pending_text(Some("0.155.1"), "0.156.1"));
-        // 過期的提示（磁碟已經裝了它說的那版）但帳本還有更新的：仍是「需安裝」，不是「重啟套用」。
         let n = decide(Some(&p("0.155.1", "0.156.1")), None, Some("codex-cli 0.156.1"), Some("0.157.0"), None).unwrap();
         assert_eq!(n, pending_text(Some("0.156.1"), "0.157.0"));
     }
@@ -503,7 +482,6 @@ mod tests {
         assert_eq!(pending_from("Update installed · Restart to update"), None);
         let n = decide(None, None, Some("codex-cli 0.157.0"), Some("0.157.0"), Some(&pending)).unwrap();
         assert!(n.contains("已安裝") && !n.contains("需安裝") && n.contains("0.155.1"), "{n}");
-        // 磁碟還沒到：照舊是「需安裝」。
         assert_eq!(decide(None, None, Some("codex-cli 0.155.1"), Some("0.157.0"), Some(&pending)), Some(pending));
     }
 
@@ -513,7 +491,6 @@ mod tests {
         assert_eq!(remember_running(id, MENU, None).as_deref(), Some("0.154.0"));
         assert_eq!(remember_running(id, "long conversation\n", None).as_deref(), Some("0.154.0"));
         assert_eq!(remember_running("run-other", "nothing\n", None), None);
-        // 提示句的 from 也算。
         assert_eq!(remember_running("run-from", "x\n", Some(&p("0.150.0", "0.151.0"))).as_deref(), Some("0.150.0"));
     }
 
@@ -523,11 +500,8 @@ mod tests {
     fn an_unreadable_disk_does_not_turn_an_installed_notice_back_into_needs_install() {
         let installed = "codex 有新版 0.157.0（這個 run 跑的是 0.156.0），已安裝，重啟套用";
         assert_eq!(decide(None, Some("0.156.0"), None, Some("0.157.0"), Some(installed)).as_deref(), Some(installed));
-        // 畫面上還留著啟動時的提示也一樣。
         assert_eq!(decide(Some(&p("0.156.0", "0.157.0")), Some("0.156.0"), None, Some("0.157.0"), Some(installed)).as_deref(), Some(installed));
-        // 反例：沒有既有通知時，磁碟讀不到就拿跑著的比（照舊）。
         assert!(decide(None, Some("0.156.0"), None, Some("0.157.0"), None).unwrap().contains("需安裝"));
-        // 反例：磁碟讀得到而且真的是舊的（被降版）→ 照實改回需安裝。
         assert!(decide(None, Some("0.156.0"), Some("codex-cli 0.156.0"), Some("0.157.0"), Some(installed)).unwrap().contains("需安裝"));
     }
 }

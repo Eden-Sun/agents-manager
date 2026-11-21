@@ -62,7 +62,6 @@ pub(crate) async fn post(State(app): State<Arc<App>>, Extension(principal): Exte
     }
     db::update_restart::schedule(&app.db, &ids).await.map_err(internal)?;
     publish(&app).await;
-    // 排的時候它可能剛好已經閒下來：不等下一個 idle 邊，當場判一次（不忙才會真的重啟）。
     for id in ids {
         schedule(&app, &id);
     }
@@ -160,7 +159,6 @@ mod tests {
         let id = bot_with_update(&env, "idle-one", "idle", NOTICE).await;
         db::update_restart::schedule(&env.app.db, std::slice::from_ref(&id)).await.unwrap();
         let out = run_once(&env.app, &id).await.expect("scheduled bots are evaluated");
-        // 走的是一鍵重啟那條路（這個夾具的身份會讓 start 失敗，所以是「試過了、放棄」；真的成功則是 Restarted）。
         assert!(matches!(out, DueOutcome::Restarted | DueOutcome::Dropped("restart_failed")), "{out:?}");
         assert!(!db::update_restart::is_scheduled(&env.app.db, &id).await.unwrap(), "重啟（或放棄）之後旗標清掉");
     }
@@ -174,7 +172,6 @@ mod tests {
         assert_eq!(out, DueOutcome::NotYet("working"), "忙的不打斷");
         assert!(db::update_restart::is_scheduled(&env.app.db, &id).await.unwrap(), "旗標留著，等下一次閒置");
         assert_eq!(db::update_restart::list(&env.app.db).await.unwrap(), vec![id.clone()], "list 讀得到（旗標在 DB，daemon 重啟後同一份）");
-        // 之後它閒下來（idle 邊會再叫一次 run_once）：這次輪到了。
         sqlx::query("UPDATE runs SET agent_status='idle' WHERE bot_id=?").bind(&id).execute(&env.app.db).await.unwrap();
         let again = run_once(&env.app, &id).await.unwrap();
         assert!(matches!(again, DueOutcome::Restarted | DueOutcome::Dropped("restart_failed")), "{again:?}");

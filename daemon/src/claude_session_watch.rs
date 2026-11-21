@@ -284,7 +284,6 @@ impl Real<'_> {
 impl Probe for Real<'_> {
     fn config_dirs<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Vec<ConfigDir>> {
         Box::pin(async move {
-            // 身分清單以 daemon 偵測到的為準（shell alias／設定檔），再加預設；不掃 `~/.claude-*`。
             let mut names: Vec<String> = vec![String::new()];
             names.extend(crate::tools::identities_for_host_ref(self.0, host).await.into_iter().filter(|i| i.kind == "claude").map(|i| i.name));
             let mut out: Vec<ConfigDir> = Vec::new();
@@ -317,7 +316,6 @@ impl Probe for Real<'_> {
     fn install<'a>(&'a self, host: &'a str, dir: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             let d = crate::hosts::sh_quote(dir.trim_end_matches('/'));
-            // 只加不改：herdr 把 SessionStart 併進既有 settings.json；仍先備份一次（已有備份不覆蓋）。
             let inner = format!(
                 "d={d}; [ -d \"$d\" ] || {{ echo 'config 目錄不存在'; exit 3; }}\n\
                  [ ! -f \"$d/settings.json\" ] || [ -e \"$d/settings.json.am-bak-herdr\" ] || cp -p \"$d/settings.json\" \"$d/settings.json.am-bak-herdr\" || {{ echo '備份 settings.json 失敗，未安裝'; exit 4; }}\n\
@@ -328,7 +326,6 @@ impl Probe for Real<'_> {
             if out.lines().any(|l| l.trim() == "AM_NO_HERDR") {
                 return Err("這台找不到 herdr".to_string());
             }
-            // 成功與否以重讀 settings.json 為準（[`ensure_dir`]）；這裡只擋明確的失敗輸出。
             if out.contains("備份 settings.json 失敗") || out.contains("config 目錄不存在") {
                 return Err(out.trim().chars().take(300).collect());
             }
@@ -444,7 +441,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         sqlx::query("INSERT INTO projects(id,path,label,host,created_at) VALUES('p1','/x','x','mac_builder','t')").execute(&pool).await.unwrap();
-        // (bot, identity, inject_hooks, session, adopted)
         for (id, ident, inject, session, adopted) in [
             ("b-cc1", "cc1", 0, "", 1),
             ("b-cc0", "cc0", 0, "sess-1", 1),

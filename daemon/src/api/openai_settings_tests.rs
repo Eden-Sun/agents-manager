@@ -57,14 +57,12 @@ async fn get_and_put_never_contain_the_key_only_whether_it_is_usable() {
     assert_eq!((v["enabled"].as_bool(), v["key_present"].as_bool(), v["key_file"].as_str()), (Some(true), Some(true), Some(path.as_str())));
     let (_, raw) = http(&e, "GET", "/api/openai-api/settings", None, &user(&e)).await;
     assert!(!raw.contains(SENTINEL), "GET 不能回金鑰：{raw}");
-    // 權限對外開放：讀不到，原因是固定句型，也不含金鑰。
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     let (_, raw) = http(&e, "GET", "/api/openai-api/settings", None, &user(&e)).await;
     let v: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["key_present"], false);
     assert!(v["key_error"].as_str().is_some_and(|m| m.contains("chmod 600")), "{v}");
     assert!(!raw.contains(SENTINEL), "{raw}");
-    // 設定檔裡只有路徑，沒有金鑰。
     let on_disk = std::fs::read_to_string(e.app.data_dir.join("config.toml")).unwrap();
     assert!(on_disk.contains("[openai_api]") && !on_disk.contains(SENTINEL), "{on_disk}");
 }
@@ -94,20 +92,17 @@ async fn put_writes_the_cap_validates_it_and_a_hand_edit_hot_reloads() {
     assert!(chrono::DateTime::parse_from_rfc3339(&since).is_ok(), "{since}");
     let cfg = e.app.cfg.get().await;
     assert_eq!((cfg.openai_api.api_bot.total_cap_usd, cfg.openai_api.api_bot.total_cap_since.as_deref()), (Some(5.0), Some(since.as_str())));
-    // 不合法的輸入：400，而且什麼都沒改。
     for bad in [json!({"total_cap_usd": -1.0}), json!({"total_cap_since": "yesterday"}), json!({"key_file": "relative/key"}), json!({"key_file": ""}), json!({"key_file": "/tmp/a\nb"})] {
         let (status, body) = put(&e, bad.clone()).await;
         assert_eq!(status, 400, "{bad}: {body}");
     }
     assert_eq!(get(&e).await.1["api_bot"]["total_cap_usd"], 5.0);
-    // 手改 config.toml → 下一次 GET 就是新值（熱重載），不必重啟。
     let path = e.app.data_dir.join("config.toml");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("total_cap_usd = 5.0"), "{text}");
     std::fs::write(&path, text.replace("total_cap_usd = 5.0", "total_cap_usd = 7.5")).unwrap();
     assert_eq!(get(&e).await.1["api_bot"]["total_cap_usd"], 7.5, "熱重載");
     assert_eq!(e.app.cfg.claude_fresh().await.openai_api.api_bot.total_cap_usd, Some(7.5));
-    // null＝清除（起算時間一起清）。
     let (_, v) = put(&e, json!({"total_cap_usd": null})).await;
     assert_eq!((v["api_bot"]["total_cap_usd"].clone(), v["api_bot"]["total_cap_since"].clone()), (Value::Null, Value::Null));
 }

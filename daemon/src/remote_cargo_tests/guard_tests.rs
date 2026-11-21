@@ -80,7 +80,6 @@ fn fake_home(base: &Path) -> PathBuf {
 }
 
 fn spawn_run(base: &Path, home: &Path, dir: &str, token: &LeaseToken) -> Child {
-    // 遠端每條 ssh 都是自己的 session（sshd setsid）；這裡用獨立的 process group 模擬，收 pgid 才不會打到測試本身。
     Command::new("sh")
         .arg("-c")
         .arg(run_script(dir, "", token, 1, 0, &["test".into()]))
@@ -130,13 +129,13 @@ fn a_finished_call_removes_its_private_dir_and_keeps_the_shared_target() {
 fn an_interrupted_call_stops_the_remote_cargo_and_removes_its_dir() {
     let base = base();
     let home = fake_home(&base);
-    let mut holder = guard(&base, HASH, "job-1-1"); // 佔住 shared，讓下一個拿 job 目錄
+    let mut holder = guard(&base, HASH, "job-1-1");
     let mut lease = guard(&base, HASH, "job-2-2");
     let dir = lease.hs.dir.clone();
     let mut run = spawn_run(&base, &home, &dir, &lease.token);
     wait_until("fake cargo to start", || started(&dir));
 
-    drop(lease.stdin.take()); // 本機那端沒了
+    drop(lease.stdin.take());
     assert!(lease.finish().unwrap().success());
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
@@ -175,7 +174,6 @@ fn a_late_run_after_the_lease_ended_does_not_start_cargo() {
 fn the_remote_run_starts_in_the_same_subdirectory_as_the_local_call() {
     let base = base();
     let home = fake_home(&base);
-    // 這裡的假 cargo 把自己的 cwd 記下來就結束。
     let cargo = home.join(".cargo/bin/cargo");
     std::fs::write(&cargo, "#!/bin/sh\npwd > \"$AM_TEST_PWD\"\n").unwrap();
     let mut lease = guard(&base, HASH, "job-1-1");
@@ -202,7 +200,6 @@ fn the_remote_run_starts_in_the_same_subdirectory_as_the_local_call() {
 }
 
 fn wait_run(run: &mut Child) -> ExitStatus {
-    // 等待 run 結束；若 stale run 違規啟動 cargo 則不會主動退出，故需以牆鐘 deadline 防護避免無窮卡死
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if let Some(st) = run.try_wait().unwrap() {
@@ -236,7 +233,6 @@ fn a_stale_run_is_refused_after_the_next_lease_takes_over_the_same_dir() {
     assert_eq!(status.code(), Some(126), "{status:?}");
     assert!(!started(&dir), "舊 run 不能在下一代的目錄裡跑 cargo");
 
-    // 同一次租約的 run 照常跑。
     let mut run = spawn_run(&base, &home, &dir, &b.token);
     wait_until("the current lease's cargo to start", || started(&dir));
     assert!(b.finish().unwrap().success());
@@ -259,7 +255,6 @@ fn the_lease_identity_is_the_callers_token_and_cleanup_only_reaps_its_own_genera
 
     let mut b = guard(&base, HASH, "job-2-2");
     assert_eq!(std::fs::read_to_string(format!("{dir}.owner")).unwrap().trim(), b.token.as_str());
-    // 舊 run 被拒之前已經寫下的 sidecar（指向一個不屬於這一代的 process group）。
     let mut decoy = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
     std::fs::write(format!("{dir}.pgid-{}", stale.as_str()), format!("{}\n", decoy.id())).unwrap();
     let mut run = spawn_run(&base, &home, &dir, &b.token);
@@ -346,8 +341,6 @@ fn gc_removes_orphans_but_never_a_dir_in_use_or_outside_its_layout() {
     let _ = locker.wait();
     let _ = std::fs::remove_dir_all(base);
 }
-
-// ── 整體執行上限（issue #194）：用假的 ssh／rsync 把本機當成遠端，跑真的 `run_offload`＋真的守門腳本 ──
 
 /// 寫一支假腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
 pub(super) fn write_exec(path: &Path, body: &str) {
@@ -593,7 +586,6 @@ fn workspace_invalidation_ignores_removed_paths_and_prunes_target() {
     let target_file = Path::new(&dir).join("target/debug/sentinel");
     std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
     std::fs::write(&target_file, "keep target\n").unwrap();
-    // 固定在過去的時間：任何會動到 target 的同步都會把 mtime 改成現在，不必等檔案系統的秒數精度。
     set_mtime(&target_file, std::time::UNIX_EPOCH + Duration::from_secs(10));
     let target_mtime = std::fs::metadata(&target_file).unwrap().modified().unwrap();
 
@@ -785,7 +777,6 @@ fn source_manifest_only_narrows_safe_regular_file_changes() {
         "a new Rust module candidate with no owning package cannot be narrowed"
     );
 
-    // With an owning package, the new module candidate touches that crate's roots only.
     let in_crate = |extra: &[(&'static str, u8, &'static [u8], u32)]| {
         let mut entries = vec![
             ("crates/core", b'D', &b""[..], 0o755),
@@ -1699,8 +1690,6 @@ fn run_keeps_project_cache_overrides_inside_the_lease() {
     let outside_target = base.join("outside-target");
     let outside_target_alias = base.join("outside-target-alias");
     let outside_build = base.join("outside-build");
-    // Model variables inherited by the SSH shell; the helper must remove them before Cargo
-    // starts (some Cargo initialization happens before command-line config is applied).
     write_exec(&base.join("fakebin/ssh"), &format!(
         "for a; do last=$a; done\nHOME={} CARGO_TARGET_DIR={} CARGO_BUILD_TARGET_DIR={} CARGO_BUILD_BUILD_DIR={} exec setsid sh -c \"$last\"\n",
         sh_quote(&base.join("home").display().to_string()),
@@ -1749,8 +1738,6 @@ edition = "2021"
 [lib]
 proc-macro = true
 "#).unwrap();
-    // Like asset embedding macros, this tracks every existing input through include_bytes!,
-    // but a newly discovered input is absent from the previous compiler dep-info.
     std::fs::write(cwd.join("listing/src/lib.rs"), r#"extern crate proc_macro;
 #[proc_macro]
 pub fn count(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -1925,7 +1912,6 @@ fn main() {
             .expect("unrelated crate build counter should exist after the initial test")
     };
 
-    // Keep the existing web parent in the baseline; only web/dist is added below.
     std::fs::create_dir_all(cwd.join("web")).unwrap();
     sync();
     test();
@@ -2106,14 +2092,10 @@ fn main() {
     let runs = runs_file();
     assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().collect::<Vec<_>>(), ["false"]);
     let remote_tool = Path::new(&dir).join("tools/probe");
-    // source 與 remote 的 mtime 都固定在過去：沒有真的 touch 時 remote 就還是這個時間（斷言會紅），
-    // 有 touch 才會變成現在。不必等檔案系統的秒數精度，也不會因為 rsync 複製了「現在」的 source mtime 而假綠。
     set_mtime(&tool, std::time::UNIX_EPOCH + Duration::from_secs(10));
     set_mtime(&remote_tool, std::time::UNIX_EPOCH + Duration::from_secs(10));
     let before = std::fs::metadata(&remote_tool).unwrap().modified().unwrap();
     let source_mtime = std::fs::metadata(&tool).unwrap().modified().unwrap();
-    // Cargo compares rerun-if-changed inputs against build/<hash>/output, not just
-    // .fingerprint or .d. A clock rollback may leave only that baseline in the future.
     let build_output = runs.parent().unwrap().parent().unwrap().join("output");
     assert!(build_output.is_file());
     set_mtime(&build_output, std::time::SystemTime::now() + Duration::from_secs(3600));
@@ -2124,8 +2106,6 @@ fn main() {
     assert!(after > before, "metadata-only rsync changes need a newer remote mtime");
     run_cargo();
 
-    // Simulate rsync applying chmod before returning 23/24. The failed attempt must not
-    // replace the last successful manifest; the next successful call still touches the file.
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
     let baseline_manifest = with_fake_transport(&base, || {
         read_remote_manifest(&remote, &data, &dir, &Deadline::new(60))
@@ -2150,7 +2130,6 @@ fn main() {
         failed_mtime, after,
         "chmod applied by failed retries must not be treated as invalidated"
     );
-    // 恢復同步的 touch 要能看得出來：兩邊先固定在過去（同上，不靠 sleep 跨秒數精度）。
     set_mtime(&tool, std::time::UNIX_EPOCH + Duration::from_secs(20));
     set_mtime(&remote_tool, std::time::UNIX_EPOCH + Duration::from_secs(20));
     sync().expect("the next successful sync must invalidate the earlier failed chmod");
@@ -2191,7 +2170,6 @@ fn source_manifest_handles_newline_names_without_forging_touch_paths() {
     sync().expect("first source manifest should synchronize");
     let remote_source = Path::new(&dir).join(&name);
     let remote_forged_paths = [Path::new(&dir).join("line"), Path::new(&dir).join("victim")];
-    // 兩邊固定在過去（同 chmod 測試）：只有真的 touch 才會讓 remote 的 mtime 變新，不靠 sleep 跨秒數精度。
     set_mtime(&source, std::time::UNIX_EPOCH + Duration::from_secs(10));
     set_mtime(&remote_source, std::time::UNIX_EPOCH + Duration::from_secs(10));
     let before = std::fs::metadata(&remote_source)
@@ -2234,8 +2212,6 @@ struct TestToolchain {
 
 impl TestToolchain {
     fn current() -> Self {
-        // Cargo supplies its own executable path. Enumerating rustup installations can pick
-        // an unrelated old release (CI also has 1.57), even when stable built these tests.
         let cargo = PathBuf::from(
             std::env::var_os("CARGO")
                 .filter(|value| !value.is_empty())
@@ -2257,7 +2233,6 @@ impl TestToolchain {
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.cargo);
-        // rustdoc loads proc-macro metadata too; leaving it on PATH can mix compiler versions.
         command.env("RUSTC", &self.rustc).env("RUSTDOC", &self.rustdoc);
         command
     }
@@ -2438,9 +2413,7 @@ fn a_remote_build_over_the_limit_is_aborted_and_its_remote_processes_are_reaped(
     assert!(took < Duration::from_secs(60), "超過上限之後要很快收乾淨：{took:?}");
     let pids = started_cargo_pids(&base);
     assert_eq!(pids.len(), 1, "假 cargo 真的起來過：{pids:?}");
-    // 非當前行程之直系 child 無法接收 SIGCHLD/waitpid，觀察外部行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
     wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
-    // 守門收尾做完才回來：這次的 owner 撤掉了（＝目錄已還回去，晚到的 run 不會再跑）。
     let owners: Vec<_> = std::fs::read_dir(base.join("rc")).unwrap().flatten().flat_map(|h| std::fs::read_dir(h.path()).unwrap().flatten()).filter(|e| e.file_name().to_string_lossy().ends_with(".owner")).collect();
     assert!(owners.is_empty(), "目錄要還回去：{owners:?}");
     let _ = std::fs::remove_dir_all(base);
@@ -2453,9 +2426,6 @@ fn a_remote_build_over_the_limit_is_aborted_and_its_remote_processes_are_reaped(
 fn a_remote_that_refuses_the_login_falls_back_to_the_local_build_and_says_why() {
     let base = base();
     let (remote, cwd, data) = fake_remote(&base, 60, "exit 0\n");
-    // 真的 ssh 被拒時就是這樣：訊息進 stderr、退出碼 255，stdout 一個字都沒有。
-    // 多寫一行前置訊息：`reason` 要帶的是**最後**那一行（ssh 的結論），而且這一段等得到 stderr 讀完
-    // （issue #467：以前沒等，Linux 上量到空字串、`reason` 變成「什麼都沒說」）。
     write_exec(
         &base.join("fakebin/ssh"),
         "echo 'OpenSSH_9.0, LibreSSL 3.3.6' >&2\necho 'me@fake: Permission denied (publickey,password).' >&2\nexit 255\n",
@@ -2470,7 +2440,6 @@ fn a_remote_that_refuses_the_login_falls_back_to_the_local_build_and_says_why() 
     assert!(why.contains("Permission denied"), "要帶 ssh 自己說的那一句，不是只有「回 255」：{h:?}");
     assert!(!why.contains("LibreSSL"), "帶的是最後那一行（結論），不是開頭的版本行：{h:?}");
 
-    // 這一段就是印在 stderr 的東西：第一行要自己講完「連不上誰、改在本機跑」。
     let note = unreachable_note(&remote, &auth_desc(&remote, &data), why);
     let first = note.lines().next().unwrap();
     assert!(first.contains("me@fake:22") && first.contains("改在本機跑"), "第一行就要看得懂：{first}");
@@ -2640,15 +2609,13 @@ fn a_zero_limit_means_no_limit() {
     let _ = std::fs::remove_dir_all(base);
 }
 
-// ── 本機 helper 被砍時遠端也要停（issue #201）──
-
 /// 本機 helper 被 `kill -9`：kernel 收掉它所有的 fd，守門那條 ssh 的 stdin 關掉（**不是**我們自己做清理）——遠端還在跑的 cargo 整組要在
 /// 幾秒內消失，shared 的鎖也要放掉（不然同一棵 worktree 的下一次編譯會卡在等鎖，只能連到遠端手動清）。
 #[test]
 fn a_dead_helper_leaves_no_running_remote_process_and_releases_the_shared_lock() {
     let base = base();
     let home = fake_home(&base);
-    let mut lease = guard(&base, HASH, "job-1-1"); // 搶到 shared
+    let mut lease = guard(&base, HASH, "job-1-1");
     let dir = lease.hs.dir.clone();
     assert!(dir.ends_with("/shared"), "{dir}");
     let mut run = spawn_run(&base, &home, &dir, &lease.token);
@@ -2657,10 +2624,9 @@ fn a_dead_helper_leaves_no_running_remote_process_and_releases_the_shared_lock()
     let lock_free = || Command::new("flock").args(["-n", &lock, "true"]).status().map(|s| s.success()).unwrap_or(false);
     assert!(!lock_free(), "cargo 在跑：鎖被守門持有");
 
-    drop(lease.stdin.take()); // helper 死了：只剩連線中斷
+    drop(lease.stdin.take());
     let status = wait_run(&mut run);
     assert!(status.signal().is_some() || !status.success(), "遠端的 cargo 要被收掉：{status:?}");
-    // 守門結束時作業系統會自動釋放所有 flock，等 lease.child 結束即可確認鎖已放掉
     let _ = lease.child.wait();
     assert!(lock_free(), "守門結束後 shared 鎖必須已釋放");
     let _ = std::fs::remove_dir_all(base);
@@ -2675,7 +2641,7 @@ fn a_process_that_left_the_process_group_is_still_reaped_when_the_lease_ends() {
         &home.join(".cargo/bin/cargo"),
         "touch \"$PWD/../cargo-started-$$\"\nsetsid sleep 45 >/dev/null 2>&1 &\necho $! > \"$PWD/../escaped.pid\"\nexec sleep 45\n",
     );
-    let mut holder = guard(&base, HASH, "job-1-1"); // 佔住 shared，讓下一個拿 job 目錄
+    let mut holder = guard(&base, HASH, "job-1-1");
     let mut lease = guard(&base, HASH, "job-2-2");
     let dir = lease.hs.dir.clone();
     let mut run = spawn_run(&base, &home, &dir, &lease.token);
@@ -2686,7 +2652,6 @@ fn a_process_that_left_the_process_group_is_still_reaped_when_the_lease_ends() {
 
     drop(lease.stdin.take());
     assert!(lease.finish().unwrap().success());
-    // 非直系 child 無法接收 SIGCHLD，觀察 setsid 逃逸行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
     wait_until("the escaped helper to be reaped", || unsafe { libc::kill(pid, 0) } != 0);
     let _ = run.wait();
     holder.finish();
@@ -2715,12 +2680,9 @@ fn an_interrupted_helper_reaps_the_remote_group_before_it_exits() {
     assert!(t0.elapsed() < Duration::from_secs(60), "{:?}", t0.elapsed());
     let pids = started_cargo_pids(&base);
     assert_eq!(pids.len(), 1, "{pids:?}");
-    // 非直系 child 無法接收 SIGCHLD，觀察假 cargo 行程消亡只能靠 kill(pid, 0) 牆鐘輪詢
     wait_until("the remote cargo to be reaped", || unsafe { libc::kill(pids[0], 0) } != 0);
     let _ = std::fs::remove_dir_all(base);
 }
-
-// ── 遠端名額（issue #104）──
 
 /// 不同 worktree 共用同一組遠端名額：上限 2 時第三棵要排隊，前面有人還回名額它才拿到（拿到的就是空出來的那個）。
 #[test]
@@ -2733,7 +2695,6 @@ fn different_worktrees_share_one_remote_cap() {
     got.sort();
     assert_eq!(got, vec![Some((1, 2)), Some((2, 2))]);
 
-    // 同步點是排隊中的心跳 `Q`：`Q` 只在號碼牌已經 flock 之後才印，讀到它才算「進了佇列」
     let queue_wait = adm.queue_wait_secs;
     let c_token = LeaseToken::new();
     let mut waiter = guard_cmd(&base, "00000000000000c3", "job-3-3", &c_token, adm)
@@ -2820,11 +2781,8 @@ fn a_shared_wait_is_capped_under_test() {
 #[test]
 fn time_spent_queueing_does_not_count_toward_the_overall_limit() {
     let base = base();
-    // #1990：上限與排隊時間都要留裕度。負載高時「跑 1 秒」的 sleep 會被拉長，
-    // 上限若只比實際執行多一點點就會偶發 rc=124；這裡上限 8 秒、排隊 10 秒，只算後面那段。
     let (mut remote, cwd, data) = fake_remote(&base, 8, "sleep 1\nexit 0\n");
     remote.max_concurrent = 1;
-    // #1853：名額只等 8 秒後會 overflow；改等同 worktree 的 shared 鎖，仍驗證排隊不算執行逾時。
     let hash = cache_hash(&cwd);
     let mut holder = guard_with(&base, &hash, "job-1-1", Admission { max: 1, ..QUICK });
     let release = std::thread::spawn(move || {
@@ -2848,7 +2806,6 @@ fn a_busy_shared_target_is_waited_for_and_only_given_up_after_a_limit() {
     let adir = a.hs.dir.clone();
     assert!(adir.ends_with("/shared"), "{adir}");
 
-    // 一個正常守門在等 shared：同步點是排隊中的心跳 `Q`
     let shared_wait = 30;
     let adm_b = Admission { shared_wait_secs: shared_wait, ..QUICK };
     let b_token = LeaseToken::new();
@@ -2866,12 +2823,9 @@ fn a_busy_shared_target_is_waited_for_and_only_given_up_after_a_limit() {
     let b_hs = hs.expect("a 用完之後 waiter 要拿到 shared 目錄");
     assert_eq!(b_hs.dir, adir, "waiter 拿到同一個 shared，不是 job-2-2");
 
-    // 佔著不放：等 2 秒還沒空出來就改用 job 目錄。
     let t0 = Instant::now();
     let mut c = guard_with(&base, HASH, "job-3-3", Admission { shared_wait_secs: 2, ..QUICK });
     assert!(c.hs.dir.ends_with(&format!("/{HASH}/job-3-3")), "{:?}", c.hs);
-    // guard 腳本用 `date +%s`（整秒）算已等多久：上限 2 秒實際會在 1～2 秒之間放棄（負載高時更明顯），
-    // 要擋的是「馬上改用冷編譯」，所以門檻是至少等過 1 秒，不是剛好 2 秒。
     assert!(t0.elapsed() >= Duration::from_secs(1), "{:?}", t0.elapsed());
     assert_eq!(c.obs.outcome.as_deref(), Some("isolated"));
     assert!(c.obs.shared_wait_secs.is_some_and(|seconds| seconds >= 1));
@@ -2925,7 +2879,6 @@ fn hang_up_while_queued(base: &Path, hash: &str, adm: Admission) {
     }
     drop(child.stdin.take());
     let drain = std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
-    // 斷線後守門應在數秒內主動結束並放鎖；若發生 bug 未退出則以 10 秒牆鐘超時 kill 防止卡死
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() > deadline {
@@ -3015,7 +2968,6 @@ fn a_busy_shared_target_hands_the_next_call_a_seeded_copy_instead_of_a_cold_dir(
     assert!(bdir.join("target/own").is_file(), "池裡的每一份都留著給下一次（不是用完就刪的 job 目錄）");
     assert!(a.finish().unwrap().success());
 
-    // 都空著：照順序先拿第一份；第一份再被佔著時拿到的是已經在的第二份，不會重新複製蓋掉它。
     std::fs::write(adir.join("target/debug/deps/libp.rlib"), "new").unwrap();
     let mut c = guard_with(&base, HASH, "job-3-3", pool);
     assert_eq!(c.hs.dir, adir.display().to_string());
@@ -3038,7 +2990,6 @@ fn a_full_pool_hands_out_whichever_copy_frees_up_first() {
     assert!(b.hs.dir.ends_with("/shared-2"), "{:?}", b.hs);
     let bdir = b.hs.dir.clone();
 
-    // 兩份都在用：同步點是排隊中的心跳 `Q`
     let shared_wait = 30;
     let adm_c = Admission { shared_wait_secs: shared_wait, max: 3, pool: 2, ..QUICK };
     let c_token = LeaseToken::new();

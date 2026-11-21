@@ -14,7 +14,6 @@ fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
 fn a_rebound_hostname_is_refused_in_lan_mode_too() {
     for host in ["evil.example:7788", "evil.example", "127.0.0.1.evil.example:7788", "192.168.1.5.nip.io", "x.ts.net.evil.example", "local"] {
         let ok = origin_is_local(&h(&[("host", host)]), 7788, true);
-        // `local` 是單一標籤（允許）；其他都不行。
         assert_eq!(ok, host == "local", "{host}");
     }
     assert!(!origin_is_local(&h(&[("host", "192.168.1.5:7788"), ("origin", "http://evil.example")]), 7788, true), "別的網頁從瀏覽器打過來");
@@ -136,7 +135,6 @@ async fn a_service_principal_is_confined_to_its_listed_paths() {
         let allowed_listed = path.starts_with("/api/capabilities");
         assert!(allowed_listed || resp.starts_with("HTTP/1.1 403") || resp.starts_with("HTTP/1.1 404") || resp.starts_with("HTTP/1.1 405"), "{method} {path}: {}", resp.lines().next().unwrap_or(""));
     }
-    // 同時帶 UI token 與 service 身份：拒絕，不降級。
     let mixed = raw(app, "GET /api/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: svc-token\r\nX-AM-Token: test-token\r\nConnection: close\r\n\r\n").await;
     assert!(mixed.starts_with("HTTP/1.1 401"), "{mixed}");
 }

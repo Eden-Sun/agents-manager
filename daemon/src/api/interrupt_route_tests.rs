@@ -16,8 +16,6 @@ async fn an_unreadable_arrival_snapshot_is_a_retryable_503_without_esc() {
         crate::testing::make_table_readable(&restore_app, "runs").await;
     });
     let result = interrupt_bot(State(e.app.clone()), Path(bot.id.clone()), None).await;
-    // In the fixed path the handler returns before the race point; consume it here to restore
-    // the test DB. The previous fail-open path consumes it before sending Esc.
     crate::lifecycle::race_point::hit("interrupt_after_arrival", &restore_bot).await;
     let response = match result {
         Ok(response) => response,

@@ -632,7 +632,6 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api", Expect::NotFound, None),
         rule("PATCH", "/api", Expect::NotFound, None),
         rule("DELETE", "/api", Expect::NotFound, None),
-        // 有嵌前端是 200 的 index.html，沒嵌是 404。兩種都不是 Bot B 的資料。
         rule("GET", "/api/bots/{id}/share", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/share", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/share", Expect::Forbidden, None),
@@ -643,7 +642,6 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/share/rotate", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/share/rotate", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/share/rotate", Expect::Forbidden, None),
-        // 有嵌前端是 200 的 index.html，沒嵌是 404。兩種都不是 Bot B 的資料。
         rule("GET", "/", Expect::NotFound, None),
 
         rule("POST", "/api/supervisor/responder/persona", Expect::RoleRequired, None),
@@ -718,8 +716,6 @@ fn rules() -> Vec<Rule> {
 }
 
 fn router_paths_and_methods(debug: &str) -> Vec<(String, String)> {
-    // Node 的 paths 是 `"RouteId(N)": "/api/..."`. 方法不跟路徑綁在同一段字串，
-    // 所以樣板路徑來自 router Debug，方法用探測：405 代表這個方法沒註冊。
     let mut paths = Vec::new();
     let mut rest = debug;
     while let Some(i) = rest.find("\"/") {
@@ -793,7 +789,6 @@ fn observed(status: StatusCode, body: &str) -> Result<Expect, StatusCode> {
 
 fn matches_expect(expect: Expect, got: Expect) -> bool {
     match expect {
-        // 舊列只要求 403，reason 未分。
         Expect::Forbidden => matches!(got, Expect::Forbidden | Expect::UserOnly | Expect::RoleRequired),
         other => got == other,
     }
@@ -841,8 +836,6 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         (std::time::Instant::now(), json!({"kind":"codex", "host":"local", "models":[{"id":"cached-model"}]})),
     );
 
-    // A real verdict against a seeded ledger row, so the matrix proves the write endpoint is reachable.
-    // Bot A is not assigned this version, so the binding (#801) must refuse it.
     let sections = crate::release_triage::source_sections("claude", include_str!("../../crates/am-base/src/release_triage/fixtures/claude_2.1.276-278.md"));
     let section = sections.iter().find(|section| section.version == "2.1.277").unwrap();
     let entries = crate::release_triage::build_entries("claude", section).unwrap();
@@ -1017,7 +1010,6 @@ async fn a_bot_cannot_publish_a_share_reply_with_its_prompt() {
         .unwrap();
     assert_eq!(turns, 0, "a refused request leaves no side effect");
 
-    // 不帶旗標：維持 Bot→Bot prompt 的既有政策（B 沒在跑時可能是 404／409），只斷言不是 user_only。
     let plain = reqwest::Client::new()
         .post(&url)
         .header("content-type", "application/json")
@@ -1127,7 +1119,6 @@ async fn a_plain_bot_cannot_start_or_interrupt_another_bot_through_prompt() {
     assert_eq!(turns, 0, "a refused prompt must not open a turn on the target");
     assert!(crate::db::active_run(&env.app.db, &b).await.unwrap().is_none(), "a refused start must not start the target");
 
-    // 使用者（UI token）照舊能用這兩個旗標：不是 403。
     let user = client
         .post(&url)
         .header("content-type", "application/json")

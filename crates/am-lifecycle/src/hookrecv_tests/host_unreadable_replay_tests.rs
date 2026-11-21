@@ -63,7 +63,6 @@ async fn a_host_pass_that_cannot_enumerate_bots_retries_until_the_spool_is_drain
     let (bot, spool) = spooled(&env, "alfa").await;
     let claim = spool.with_extension("jsonl.claim");
     let staging = spool.with_extension("jsonl.replaying");
-    // 背景重試把 spool 摘成 `.claim` 之後、併進 `.replaying` 之前停住：這一瞬 spool 與 `.replaying` 都不在，只剩 `.claim`。
     let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<()>();
     let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
     crate::lifecycle::race_point::arm("spool_claimed", &bot.id, move || async move {
@@ -77,9 +76,6 @@ async fn a_host_pass_that_cannot_enumerate_bots_retries_until_the_spool_is_drain
     paused_rx.await.unwrap();
     assert!(claim.exists() && !spool.exists() && !staging.exists(), "停在認領與併入之間");
     go_tx.send(()).unwrap();
-    // 等的是背景重試這個任務結束，不是檔案消失的那一瞬（#255、#1662）：重試任務是 tracked 的，
-    // 關掉 tracker 後 `wait` 只在它收完（或放棄）時才回來；它先認領、後 commit、最後才刪 `.replaying`，
-    // 所以結束時三個檔都不在、列數就是已收的那批。逾時只防卡死，不是等待的條件。
     env.app.background_tasks.close();
     tokio::time::timeout(std::time::Duration::from_secs(60), env.app.background_tasks.wait())
         .await

@@ -74,7 +74,6 @@ mod delivery_tests {
     async fn the_queued_and_the_waiting_for_start_paths_store_the_clean_text_too() {
         let f = fixture(claude_strips).await;
         let app = f.env.app.clone();
-        // 對方回合中：佔住一個在飛的回合，AGM 的派工才會排進佇列。
         let run: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=?").bind(&f.bot_id).fetch_one(&app.db).await.unwrap();
         let conv = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")

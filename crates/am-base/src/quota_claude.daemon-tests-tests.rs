@@ -92,7 +92,6 @@
         async fn a_leftover_from_a_failed_close_is_swept_by_the_next_probe_by_id() {
             let (h, c, dir) = herdr();
             c.workspace_create("/tmp", "proj", json!({})).await.unwrap();
-            // 使用者自己的 workspace 取了探測的名字：不是我們開的，不能收。
             c.workspace_create("/tmp", "am-quota-claude", json!({})).await.unwrap();
             h.set_screen("*", &finished_screen());
             h.fail_next("workspace.close", Fault::Refuse);
@@ -100,7 +99,6 @@
             let mut left = open_labels(&h, 3).await;
             left.sort();
             assert_eq!(left, vec!["am-quota-claude", "am-quota-claude-zz92la", "proj"], "前提：這一輪的 close 被拒");
-            // 殘留被改名也還是它（認 ID 不認名字）。
             let leftover = h.workspaces.lock().unwrap().iter().find(|(_, l)| l.as_str() == LABEL).map(|(id, _)| id.clone()).unwrap();
             h.workspaces.lock().unwrap().insert(leftover, "renamed-by-user".into());
 
@@ -181,7 +179,6 @@ AM_USAGE_DONE=0
 ", line.replace('\n', " "));
         let q = parse_claude_usage_report(&screen, Some("cc1")).expect("structured report");
         assert_eq!(q.five_hour.as_ref().unwrap().used_pct, 30.0);
-        // 毫秒不再被截掉：以前 `Secs` 會把 `.594` 無條件捨去（總是往**早**的方向偏）。
         assert_eq!(q.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2026-09-15T23:50:00.594Z"));
         assert_eq!(q.seven_day.as_ref().unwrap().used_pct, 66.0);
         assert_eq!(q.fable.as_ref().unwrap().used_pct, 24.0, "weekly_scoped 的 Fable 列");
@@ -210,7 +207,6 @@ AM_USAGE_DONE=0
 ";
         assert!(parse_claude_usage_report(screen, None).is_none());
         assert!(parse_claude_usage(screen, at("2026-09-15T20:00:00+08:00"), None).is_some());
-        // 有那一行但壞掉（截斷）也不能當成有資料。
         assert!(parse_claude_usage_report("{\"usage_report\":{\"rate_limits\":{\"limi", None).is_none());
     }
 
@@ -246,11 +242,8 @@ AM_USAGE_DONE=0
     /// 週窗與方案名**只有** `/usage` 讀得到。重啟前看得到只是因為 `quota::set` 會沿用舊的 `fable`。
     #[test]
     fn a_chatty_account_still_gets_its_usage_probe() {
-        // 從沒問過 `/usage`（或已超過十分鐘）：狀態列再新也要開一次 pane，否則 Fable 那格永遠是空的。
         assert!(!skip_usage_probe(true, false));
-        // 問過而且還新：不用再開 pane。
         assert!(skip_usage_probe(true, true));
-        // 還不知道這個帳號登入了沒：登入答案跟 `/usage` 同一趟，值得一個 pane。
         assert!(!skip_usage_probe(false, true));
     }
 
@@ -270,7 +263,6 @@ AM_USAGE_DONE=0
         assert!(!usage_fresh(&key), "沒問過的 key 不能算新");
         mark_usage_seen(&key);
         assert!(usage_fresh(&key));
-        // 十分鐘是上限：往後推時間就該重新問一次。不從 `Instant::now()` 往回減——開機不到十分鐘時那會 panic。
         assert!(!usage_fresh_at(&key, std::time::Instant::now() + USAGE_REFRESH), "超過 USAGE_REFRESH 就要再問一次");
     }
 
@@ -417,7 +409,6 @@ AM_USAGE_DONE=0
         let cmd = probe_command("/bin/claude", &BTreeMap::new(), true);
         assert_eq!(cmd.matches("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0").count(), 3, "{cmd}");
 
-        // login-only target（不跑 /usage）：登入探測一樣不該被 MCP 拖住。
         let login_only = probe_command("/bin/claude", &BTreeMap::new(), false);
         assert_eq!(login_only.matches("CLAUDE_CODE_MCP_STARTUP_WAIT_MS=0").count(), 1, "{login_only}");
     }
@@ -476,7 +467,6 @@ AM_USAGE_DONE=0
     fn a_live_bot_run_beats_the_login_answer() {
         let e = ProbeEvidence { cli_says_logged_out: true, has_live_run: true, ..Default::default() };
         assert!(should_probe_identity(e));
-        // 有 run 在跑，沒登入的 30 分鐘縮成 5 分鐘——但不是完全不退避（M4）。
         let k = format!("test/claude:{}", ulid::Ulid::new());
         let t0 = std::time::Instant::now();
         park(&k, true);
@@ -802,13 +792,11 @@ AM_USAGE_DONE=0
         assert!(cooling_down(&theirs, false, false), "別台不動");
         assert!(usage_fresh(&theirs));
         assert!(cooling_down(&local, false, false), "本機不動");
-        // 主機名是別台的前綴也不誤清（`m4` 不能清 `mac_builder/…`）。
         let short = &host[..2];
         forget_host(short);
         park(&mine, true);
         forget_host(short);
         assert!(cooling_down(&mine, false, false), "前綴相同但不是同一台不能誤清");
-        // 本機：只清不帶 `/` 的 key。
         forget_host(LOCAL_HOST);
         assert!(!cooling_down(&local, false, false));
         assert!(cooling_down(&mine, false, false), "遠端不受本機 forget 影響");

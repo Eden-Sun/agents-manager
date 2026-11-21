@@ -75,9 +75,6 @@ pub fn parse_reset<Tz: TimeZone>(rest: &str, now: DateTime<Tz>) -> Option<String
     let naive = |y: i32| NaiveDate::from_ymd_opt(y, month, day).and_then(|d| d.and_hms_opt(h, m, 0));
     let dt = match year {
         Some(y) => build(y)?,
-        // 最近的一次：不早於一天前的最早那個。只看今年會在 1 月初把去年 12 月底剛過的重置推到明年。
-        // 先略過肯定早於門檻的候選，再解析本地時間；因此過去年份的 DST gap 不會中止搜尋。
-        // 仍在門檻內的候選若落在 DST gap 就放棄，不換成別年的同一天。
         None => {
             let nearest = || -> Option<DateTime<Tz>> {
                 let cutoff = now.clone() - chrono::Duration::days(1);

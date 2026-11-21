@@ -37,7 +37,6 @@ pub struct Gh {
 
 impl Gh {
     async fn run(&self, args: &[&str]) -> Result<String, String> {
-        // launchd 的 PATH 只有 /usr/bin:/bin；補上 Homebrew 與 ~/.local/bin（#66 留言點出的洞）。
         let home = std::env::var("HOME").unwrap_or_default();
         let path = format!("/opt/homebrew/bin:/usr/local/bin:{home}/.local/bin:{}", std::env::var("PATH").unwrap_or_default());
         let out = tokio::time::timeout(
@@ -49,8 +48,6 @@ impl Gh {
                 .env_remove("CLICOLOR_FORCE")
                 .env_remove("FORCE_COLOR")
                 .stdin(std::process::Stdio::null())
-                // 逾時＝丟掉這個 future。沒有這一行的話子行程不會被殺，`gh issue create` 會在背景
-                // 繼續把 issue 開出來，而呼叫端已經當它失敗、帳本裡沒有那張的紀錄（#456）。
                 .kill_on_drop(true)
                 .output(),
         )
@@ -494,10 +491,8 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     };
 
     let mut proposals = proposals_of(&row);
-    // guard 優先（stable sort：同類保持模型交來的順序）。
     proposals.sort_by_key(|p| p.triage != "guard");
 
-    // 有事可做才碰 gh：全部已在帳本就不必問 auth。
     if proposals.iter().all(|p| already(p, &issues)) {
         ledger::save_publish(pool, kind, version, &issues, Status::Published, None).await?;
         return Ok(Outcome::Published { created: 0, commented: 0, existing: 0, skipped: vec![] });
@@ -505,8 +500,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     if let Err(e) = gh.run(&["auth", "status"]).await {
         return record_err(&issues, e).await;
     }
-    // 遠端已有的 release-triage issue 抓一次就好（立即一致的列表，不是搜尋索引）。這一輪自己開出來的
-    // 不必進這份快取：每開一張立刻寫回帳本，下一個提案由 `already` 擋掉。
     let remote = match Remote::load(&gh).await {
         Ok(r) => r,
         Err(e) => return record_err(&issues, e).await,
@@ -514,8 +507,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     if let Err(e) = reconcile_confirmed_creates(pool, &gh, &remote).await {
         return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await;
     }
-    // Reconciliation may have recovered an issue from this version as well as older versions.
-    // Refresh before checking which proposals are already handled.
     issues = ledger::get(pool, kind, version).await?.map(|r| r.issues).unwrap_or(issues);
 
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
@@ -525,14 +516,12 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             continue;
         }
         let mk = marker(kind, version, &p.entry_ids);
-        // (a) 帳本查完了；(b) 遠端標記（`--state all`，已關的不復活）——乾跑走同一個函式。
         let found = match find_existing(&gh, &remote, &mk, &title(kind, version, p)).await {
             Ok(f) => f,
             Err(e) => return record_err(&issues, e).await,
         };
         let intent = ledger::publish_intent(pool, kind, version, &mk).await?;
         let recovered_create = found.is_some() && intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
-        // 乾跑與真跑共用遠端去重及留言目標判斷。
         let dup_known = p.duplicate_of.is_some_and(|d| remote.has_number(d) || known_numbers.contains(&d));
         let action = plan_action(p, found.as_ref(), dup_known);
         match action {
@@ -562,7 +551,6 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
                 commented += 1;
                 continue;
             }
-            // `already` 在迴圈開頭擋掉了；`RemoteUnknown` 只有乾跑會用（這裡查不到就已經 record_err 回去）。
             PlanAction::AlreadyLogged | PlanAction::RemoteUnknown => continue,
             PlanAction::Create => {}
         }
@@ -590,15 +578,12 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             created_at: ledger::now_ts(),
             comment: false,
         });
-        // 開一張就寫一次：之後任何一步掛掉，重跑也不會重開這張。
         ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
         created += 1;
     }
     ledger::save_publish(pool, kind, version, &issues, Status::Published, None).await?;
     Ok(Outcome::Published { created, commented, existing, skipped: vec![] })
 }
-
-// ───────────────────────── 乾跑（preflight） ─────────────────────────
 
 /// 一個提案在乾跑裡的結論。`create`／`comment` 是「真的跑 publish 會做的事」，其餘是不會做的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -639,12 +624,7 @@ impl PlanAction {
 pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&str>, version: Option<&str>) -> Result<serde_json::Value> {
     let gh = gh_for(cfg);
     let mut checks = readonly_checks(&gh).await;
-    // 門檻要跟 publish_version 一樣：它只跑 `gh auth status`（repo 沒設時提早回錯、不碰 gh），
-    // 不查 repo view。乾跑若額外要求 repo_ok，repo 有問題時乾跑全報 remote_unknown、真跑照樣開（#204 review）。
-    // repo 的問題仍然照實記在 `checks`，而且真的查不到時 find_existing 會回錯、落成 remote_unknown。
     let can_ask = checks["gh_auth_ok"] == serde_json::json!(true) && !gh.repo.trim().is_empty();
-    // 遠端已有的 release-triage issue 只抓一次（立即一致的列表，不是搜尋索引），而且**真的需要問**
-    // 才抓：全部提案都已經在帳本裡時一次 gh 都不叫（同 publish_version 的提早返回）。
     let mut remote: Option<Remote> = None;
     let mut remote_err: Option<String> = None;
     let known_numbers = ledger_issue_numbers(pool).await?;
@@ -653,8 +633,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
     for row in ledger::list(pool, kind, version).await?.into_iter().filter(|r| r.status == Status::Judged) {
         let mut proposals = proposals_of(&row);
         proposals.sort_by_key(|p| p.triage != "guard");
-        // **會長大的清單**（同 publish_version）：existing／comment／create 都要 push 進去，
-        // 否則同一版兩個提案的 entry_ids 有交集時，真跑跳過第二個、乾跑兩個都算 create（#204 review）。
         let mut issues = row.issues.clone();
         let mut plans = Vec::new();
         for p in &proposals {
@@ -704,7 +682,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     }
                 }
             };
-            // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
             if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
                 issues.push(IssueRef {
                     marker: mk.clone(),
@@ -723,7 +700,6 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             }
             plan["action"] = serde_json::json!(action.as_str());
             plan["writes"] = serde_json::json!(action.writes());
-            // 真跑對 `comment` 貼的是留言（不是整張 issue、沒有標題與標籤）：預覽的就是那一段字。
             if action == PlanAction::Comment {
                 plan["body"] = serde_json::json!(render_comment(&row.kind, &row.version, &row.entries, p));
                 if let Some(o) = plan.as_object_mut() {

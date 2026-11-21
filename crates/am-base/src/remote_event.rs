@@ -92,7 +92,6 @@ fn record_inner(data_dir: &Path, ev: &RemoteCargoEvent) -> std::io::Result<Recor
     }
     let _guard = LockGuard(lock_file);
 
-    // 取得鎖後，執行大小檢查與必要輪替
     let file_path = data_dir.join(EVENT_FILE);
     let cur_len = match std::fs::metadata(&file_path) {
         Ok(m) => m.len(),
@@ -183,12 +182,9 @@ mod tests {
         let lmeta = std::fs::metadata(&lock_path).unwrap();
         assert_eq!(lmeta.permissions().mode() & 0o777, 0o600);
 
-        // 模擬檔案寫滿觸發輪替
-        // 寫入 5 MiB 的資料
         let big = vec![b'a'; 5 * 1024 * 1024];
         std::fs::write(&file_path, big).unwrap();
 
-        // 再次寫入一筆
         let out2 = record(data_dir, &ev);
         assert_eq!(out2, RecordOutcome::Recorded);
 
@@ -197,7 +193,6 @@ mod tests {
         let rmeta = std::fs::metadata(&rot_path).unwrap();
         assert_eq!(rmeta.permissions().mode() & 0o777, 0o600);
 
-        // 新檔應該只有剛寫進去的那一行
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content.lines().count(), 1);
     }
@@ -231,7 +226,6 @@ mod tests {
             slot_wait_secs: None,
         };
 
-        // 在被鎖住的情境下寫入，必須立即返回 LockBusy
         let out = record(data_dir, &ev);
         assert_eq!(out, RecordOutcome::LockBusy);
 
@@ -299,8 +293,6 @@ mod tests {
         assert_eq!(preload.len() as u64, MAX_BYTES - 128);
         std::fs::write(&active, preload).unwrap();
         std::fs::set_permissions(&active, std::fs::Permissions::from_mode(0o600)).unwrap();
-        // Every actual event exceeds the remaining 128 bytes, so the first recorded
-        // event must rotate. All 400 attempts together cannot trigger a second rotation.
         assert!(serde_json::to_vec(&test_event("worker-0-0".into())).unwrap().len() > 128);
         let mut children = Vec::new();
         for worker in 0..4 {

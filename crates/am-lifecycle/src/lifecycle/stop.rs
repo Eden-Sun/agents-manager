@@ -110,7 +110,6 @@ async fn stop_locked_body(
     notified_idle_at: Option<&str>,
 ) -> LcResult<bool> {
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
     app.refuse_handed_off(bot_id).await?;
     if crate::config::is_api_kind(&bot.kind) {
         if for_restart {
@@ -249,7 +248,6 @@ async fn stop_locked_body(
         return Ok(true);
     }
     let Some(run) = db::active_run(app.db(), bot_id).await.map_err(up)? else {
-        // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
         match host_fence {
             Some(fence) => {
                 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -273,14 +271,11 @@ async fn stop_locked_body(
         None => client_for_run(app, &run).await?.client,
     };
     let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
-    // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("stop_before_stopping", bot_id).await;
     }
 
-    // 鎖內檢查之後、`running → stopping` 之前，畫面或新的 Stop hook 都可能多出背景工作。
-    // 先現場 refresh（新鮮 hook 帳仍優先），再看帳本；這一步必須在 CAS 之前。
     if only_if_idle && refuse_background_jobs {
         app.refresh_background_jobs(&run, &bot.kind).await;
         if let Some(n) = app.background_jobs_count(&run.id).filter(|n| *n > 0) {
@@ -291,10 +286,6 @@ async fn stop_locked_body(
         }
     }
 
-    // 先把「正在停」記下來，才有權動外面（#146）：記不下來就一步都不做——不收 in-flight、不送 ctrl+c、
-    // 不關 pane、不撤佇列。讀完 active run 之後被不拿鎖的 pane-exit 事件先收掉的話（CAS 輸了），收尾歸那條路。
-    // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
-    // 使用者的 stop 在同一個交易撤回等它起來才送的那幾則（[`begin_stop`]，#199）。閒置回收的許可本來就要求沒有排著的。
     let (moved, withdrawn) = if only_if_idle {
         (admit_idle_stop_with_notice(app.db(), &run.id, bot_id, for_restart, notified_idle_at).await.map_err(up)?, Vec::new())
     } else {
@@ -306,7 +297,6 @@ async fn stop_locked_body(
     }
     match moved {
         super::run_state::Moved::Applied => {}
-        // 閒置回收的許可沒過：它不再閒著（或已經被別的路停掉）。外面一步都沒動。
         super::run_state::Moved::Lost if only_if_idle => {
             app.notify_bot_status(bot_id).await;
             return Err(LcError::conflict("no_longer_idle", json!({"bot_id": bot_id, "run_id": run.id})));
@@ -318,9 +308,6 @@ async fn stop_locked_body(
         }
     }
     app.notify_bot_status(bot_id).await;
-    // Close the in-flight turn and send ctrl+c as one fenced external handoff. Config replacement
-    // uses the same per-host authority gate: it either wins first and this does nothing, or waits
-    // while the RPC runs on the captured A client. It cannot resolve H to B in the middle of stop.
     let stop_signal = async {
         if let Err(e) = app.fail_in_flight(&run.id, "run stopped by user").await {
             return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
@@ -345,8 +332,6 @@ async fn stop_locked_body(
         }
     }
 
-    // Preview shutdown resolves its session by host name too, so keep the same authority gate
-    // while it closes its pane; a repoint cannot turn this into cleanup on B.
     match host_fence {
         Some(fence) => {
             if !app.stop_preview(bot_id, Some(fence)).await {
@@ -357,7 +342,6 @@ async fn stop_locked_body(
             let _ = app.stop_preview(bot_id, None).await;
         }
     }
-    // 只認 herdr 明確說「不在」：RPC 失敗不是退出的證據。
     let mut gone = false;
     for _ in 0..20 {
         let agent = client.agent_get(&target).await;
@@ -365,7 +349,6 @@ async fn stop_locked_body(
             Some(p) => Some(client.pane_get(p).await),
             None => None,
         };
-        // A missing agent binding alone does not prove exit when the pane is unreadable.
         let confirmed_gone = match pane {
             Some(Ok(None)) => true,
             Some(Ok(Some(pane))) => pane.agent.is_none() && matches!(agent, Ok(None)),
@@ -377,8 +360,6 @@ async fn stop_locked_body(
         }
         tokio::time::sleep(pane_settle(Duration::from_millis(500))).await;
     }
-    // Close the Run's pane (and its tab if owned) so no bare shell lingers — except in the user's
-    // `default` session (SPEC §6.5.1): only ctrl+c; closing took their terminal (review 2026-09-12 #4).
     let outcome = if in_default_session(&run) {
         if gone {
             StopOutcome::Gone
@@ -404,8 +385,6 @@ async fn stop_locked_body(
         StopOutcome::Unknown
     };
     if matches!(outcome, StopOutcome::StillAlive | StopOutcome::Unknown) {
-        // agent 可能還活著：不能記成 `stopped`、不撤佇列（#146 驗收 3）。確定還在就放回 `running`；
-        // 問不到就留 `stopping`，讓對帳照證據收（看得到 agent 放回 running，看不到收成 exited）。
         if outcome == StopOutcome::StillAlive {
             back_to_running(app, &run.id).await;
         } else {
@@ -416,19 +395,13 @@ async fn stop_locked_body(
             "stop_not_confirmed: agent `{target}` did not exit ({outcome:?}); the run is not recorded as stopped"
         )));
     }
-    // pane 關了、`stopped` 還沒記下的那一瞬（herdr 的 pane_closed 事件會在這裡搶進來）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
     {
         super::race_point::hit("stop_before_stopped", bot_id).await;
     }
     match commit_stopped(app, &run.id, for_restart).await {
         Ok(StopCommit::Applied) => after_stop(app, bot_id, &run, &host).await,
-        // 被 pane-exit 事件收成 `exited`（已改標成 `stopped`）：一般的收尾那條路做過了，不做第二份（stop 才有的撤回
-        // 在記 `stopping` 時就跟著做了）。
         Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
-        // agent 已經停了，終態卻寫不進去（#146 驗收 2）：不回一般的成功，佇列與 watcher 等終態成立再動，排重試。
-        // 被 pane-exit 先收成 `exited`、改標回 `stopped` 寫不進去也是這一支（#146 重開 A）：留著 `exited` 就是在說
-        // 「它自己掛了」，autostart 的 bot 會被報 `bot_stopped`。重試（`FinishStop`）照樣補改標。
         Err(e) => {
             tracing::warn!(bot = %bot.name, run = %run.id, error = %e, "the agent is stopped but its run could not be recorded as stopped");
             let how = if for_restart {
@@ -579,7 +552,6 @@ async fn commit_stopped(app: &impl crate::capabilities::Db, run_id: &str, for_re
 
 /// 終態寫進去之後才做的收尾（跟 #135 同一條：先有 durable 的終態，才撤佇列、拆 watcher）。
 async fn after_stop(app: &impl StopContext, bot_id: &str, run: &db::Run, host: &str) {
-    // 停掉之後沒有人會送它排著的 queued：收掉，不留著佔名額、擋 restart safety（AGM 2026-09-16）。
     app.revoke_orphaned_queued_turns(bot_id, "bot 已被停止").await;
     if let Some(p) = run.pane_id.as_deref() {
         if let Some(session) = app.session_for_run(run).await {
@@ -616,7 +588,6 @@ pub async fn back_to_running(app: &impl StopContext, run_id: &str) {
 pub async fn finish_stop(app: &impl StopContext, run_id: &str) {
     let Ok(Some(run)) = db::run(app.db(), run_id).await else { return };
     let _g = app.lock_bot_for_stop(&run.bot_id).await;
-    // 收尾要拆那台主機上的 watcher：讀不到主機就這一輪什麼都不寫，下一輪重試（不退回 local——拆錯台，這台的 watcher 就留著）。
     let host = match db::bot_host(app.db(), &run.bot_id).await {
         Ok(h) => h,
         Err(e) => {
@@ -635,14 +606,12 @@ pub async fn finish_stop(app: &impl StopContext, run_id: &str) {
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
 pub async fn run_alive(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, bot: &db::Bot) -> bool {
     let target = db::run_target(run, bot);
-    // Without a pane ID, do not report the launch as live; recover the orphaned starting row.
     if target.is_empty() { return false; }
     let pane = target.as_str();
     let Ok(client) = client_for_run(app, run).await else { return true };
     if super::dead_panes::pane_id_reused(&client, run).await { return false; }
     match client.pane_get(pane).await {
         Ok(None) => return false,
-        // A live occupant is evidence of activity; mutable names are irrelevant.
         Ok(Some(p)) if p.agent.is_some() => return true,
         _ => {}
     }
@@ -660,8 +629,6 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
                 continue;
             }
             let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
-            // 只有「確定是軟刪」而且「確定沒有 active run」才有權刪：讀不到（DB 一時忙、I/O 錯）不等於沒有，留著、記一行，
-            // 下一次啟動再判斷（清理可重入）。刪掉還在跑的 bot 的目錄會拿走它的 hook／shim／spool，補不回來。
             let deleted: Option<Option<String>> = match sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
                 .bind(&id)
                 .fetch_optional(app.db())
@@ -676,7 +643,6 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
             if !matches!(deleted, Some(Some(_))) {
                 continue;
             }
-            // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
             if !matches!(app.bot_handed_off_to(&id).await, Ok(None)) {
                 continue;
             }
@@ -697,7 +663,6 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
     if removed > 0 {
         tracing::info!(removed, "moved bots/<id>/ directories left behind by deleted bots to bots-trash");
     }
-    // 清理已軟刪受限 bot 殘留的 share workspace（issue #828，崩潰重啟後收斂）。
     let restricted_deleted: Vec<(String, String)> = sqlx::query_as(
         "SELECT s.bot_id, s.workspace FROM shared_bots s
          JOIN bots b ON b.id = s.bot_id
@@ -727,7 +692,6 @@ pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + c
             }
         }
     }
-    // 過期的與超出總量上限的一起收（review d77434c0 #2）；常駐的 daemon 另外由 `bot_trash::spawn_gc` 每天再跑一次。
     let known = crate::bot_trash::known_bot_ids(app.db()).await;
     let (expired, evicted) = crate::bot_trash::gc_once(app.data_dir(), crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES, &known).await;
     if expired > 0 || evicted > 0 {
@@ -752,24 +716,16 @@ pub async fn purge_bot_dir(
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
         return false;
     }
-    // #708／#709：移交出去的專案，bot 目錄是接手那顆 daemon 在用的（遠端資料目錄可能就是這裡）：兩邊都不刪。讀不到也不刪。
     if !matches!(app.bot_handed_off_to(bot_id).await, Ok(None)) {
         tracing::info!(host, bot = %bot_id, "bot of a handed-off project (or unreadable); bot config dir left in place");
         return false;
     }
-    // 附件的 daemon 端副本（`attachments/<id>/`）不分本機／遠端都在這台（遠端 bot 也留一份做縮圖）。
-    // 以前刪 bot 完全沒人動它：沒有 TTL、沒有總量上限、也沒有任何程式碼路徑會再看它一眼（#465）。
-    // 一起搬進 `bots-trash`，就跟 `bots/<id>/` 受同一套 7 天＋總量上限，restore 也搬得回來。
-    // 搬不動只記 warning：這支的回傳值講的是「bot 設定目錄清掉了沒」，不改那個語意。
     let att = crate::bot_trash::attachments_dir(crate::capabilities::DataDir::data_dir(app), bot_id);
     match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::ATTACHMENTS), &att) {
         Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %att.display(), trash = %to.display(), "moved bot attachments to bots-trash"),
         Ok(None) => {}
         Err(e) => tracing::warn!(bot = %bot_id, dir = %att.display(), error = %e, "could not move bot attachments to bots-trash"),
     }
-    // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
-    // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
-    // 遠端專案的工作目錄是那台機器上的路徑：這台不認得、也不能動（R-S2 §6：遠端資料夾刪 bot 一律不動）。
     if host == LOCAL_HOST {
         if let Ok(Some(ws)) = app.restricted_workspace(bot_id).await {
             if let Some(ws_path) = app.validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws).await {
@@ -783,7 +739,6 @@ pub async fn purge_bot_dir(
     }
     if host == LOCAL_HOST {
         let Ok(dir) = app.bot_dir(bot_id) else { return false };
-        // 搬進回收區而不是刪（issue #406）：restore 時搬得回來。
         return match crate::bot_trash::move_in(crate::capabilities::DataDir::data_dir(app), bot_id, &dir) {
             Ok(Some(to)) => {
                 tracing::info!(dir = %dir.display(), trash = %to.display(), "moved bot config dir to bots-trash");
@@ -796,7 +751,6 @@ pub async fn purge_bot_dir(
             }
         };
     }
-    // #709：共用 session 的主機上，遠端資料目錄可能是另一顆 daemon 的：不搬，也不記成欠著。
     if app.is_shared_host(host).await {
         tracing::info!(host, bot = %bot_id, "shared-session host; remote bot dir left in place");
         return false;
@@ -806,7 +760,6 @@ pub async fn purge_bot_dir(
         RemoteCleanupPort::record_remote_purge(app, bot_id, host, false, Some("unknown host")).await;
         return false;
     };
-    // 遠端也搬進回收區而不是 `rm -rf`（issue #411）：restore 時 ssh 搬得回來。
     match RemoteCleanupPort::move_remote_bot_dir_to_trash(app, &conn, bot_id).await {
         Ok(to) => {
             tracing::info!(host, bot = %bot_id, trash = ?to, "moved remote bot config dir to bots-trash");
@@ -854,26 +807,18 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
 /// 回 503 `interrupt_state_uncommitted`（不是普通的成功），欠著的收尾之後補——同一筆的重試**不再按** Esc；
 /// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
 pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
-    // 沒指名哪一筆時，「這一次要打斷的」是**按下去那一刻**使用者看得到的那一筆（#1474）：在拿到 bot 鎖之前先記下來。
-    // 這一刻到拿到鎖之間，那一筆可能剛好結束、排著的 prompt 被 flush 接著送出——以前拿到鎖之後才讀「在飛的是誰」，
-    // Esc 就按在一則使用者根本沒看過是「在跑」的新回合上（送出後 117ms 被收成 `interrupted by user`，claude 把字放回框裡）。
     let seen = if expect_turn.is_none() { in_flight_at_arrival(app, bot_id).await? } else { None };
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("interrupt_after_arrival", bot_id).await;
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
-    // API bot（claude-api／openai-api）沒有 pane：直接取消這一筆的 API 請求（不停 run），不碰 herdr／Esc。
     if crate::config::is_api_kind(&bot.kind) {
         return interrupt_api_turn(app, bot_id, &run, expect_turn, seen.as_ref()).await;
     }
-    // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。
     let owed = super::interruption::owed_turn(bot_id);
     let settled = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await;
     let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?;
-    // 欠著的那一筆剛剛補上（或已經被別的路收掉）：這一次就是上一次中斷的重試，中斷已經完成——不再按 Esc。
-    // 沒指名哪一筆時，只有 run 上已經沒有別的在飛才算（#166）：欠著的帳不一定是 Esc 記的——插隊送出的帳一結清，
-    // 新的那一則就掛上 run、claude 正在做它，這一次的 Esc 是要打斷它。
     if let Some(t) = owed.as_deref() {
         let done = settled.is_ok() && in_flight.as_ref().map(|x| x.id.as_str()) != Some(t);
         if done && (expect_turn == Some(t) || (expect_turn.is_none() && in_flight.is_none())) {
@@ -888,10 +833,6 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
             ));
         }
     }
-    // 沒指名哪一筆：現在在飛的跟按下去那一刻看到的不是同一筆（它結束了、接著送出的是別的回合）就不按 Esc。
-    // 欠著收尾的那一次重試例外（上面已經處理過；#166：插隊送出的帳一結清，新的那一則就掛上 run，這一次的 Esc 正是要打斷它）。
-    // 例外：到達時沒有在飛的回合、之後才冒出來的是 CLI 自己開的外部回合（畫面上本來就在跑，daemon 只是晚一步開回合）——
-    // 使用者要停的正是它。
     if let (None, None, Some(seen), Some(now)) = (expect_turn, owed.as_deref(), seen.as_ref(), in_flight.as_ref()) {
         let live_pane_work = seen.is_none() && now.origin == "external";
         if seen.as_deref() != Some(now.id.as_str()) && !live_pane_work {
@@ -902,26 +843,19 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
             ));
         }
     }
-    // 這一筆的 Esc 已經生效、只是狀態還沒寫成：不再按（claude 閒著時連按兩次 Esc 會跳 rewind 選單）。
     if let Some(t) = in_flight.as_ref().filter(|t| super::interruption::owes(bot_id, &t.id)) {
         return Err(super::interruption::uncommitted(&run.id, &t.id, settled.as_ref().err()));
     }
     let client = client_for_run(app, &run).await?;
     let target = super::dead_panes::execution_target(&client, &run, &bot).await?;
-    // herdr 沒回時要拿它去 log 裡找這次 Esc 留下的中斷紀錄（#223）：取在按鍵**之前**。
     let esc_at = chrono::Utc::now();
     let sent = client.agent_send_keys(&target, &["esc".to_string()]).await;
     let fate = super::interruption::key_fate(&sent);
     if fate == super::interruption::KeyFate::NotApplied {
-        // herdr 沒收下：什麼都沒發生，回合照舊在飛。
         return Err(up(sent.err().map(|e| format!("{e:#}")).unwrap_or_default()));
     }
-    // 先記接管，再收 in-flight：收掉會 emit turn → 觸發 flush，順序反過來排隊的派工就搶進去了。
-    // 同時記下被中斷的是哪一回合：它的 `StopFailure` 回聲才認得出來，新回合的失敗不會被當成回聲（#117）。
     app.note_user_interrupt_of(&bot, &run, in_flight.as_ref()).await;
     if fate == super::interruption::KeyFate::Unknown {
-        // 不知道 Esc 進了沒有：不假定打斷。claude 2.1.276～2.1.278 按 Esc 不送任何 hook（#223），回聲等不到——
-        // 趁還握著鎖先看 log 裡有沒有這次的中斷紀錄（§4.3 備援等的是同一把鎖）；還看不到就留在 in_flight 等證據。
         if let Some(t) = in_flight.as_ref() {
             match super::interruption::unconfirmed(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE, esc_at).await {
                 Ok(false) => {}
@@ -944,7 +878,6 @@ pub async fn interrupt_turn(app: &impl StopContext, bot_id: &str, expect_turn: O
     }
     if let Some(t) = in_flight.as_ref() {
         if let Err(e) = super::interruption::interrupted(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE).await {
-            // Esc 確實進去了：框照樣要清。
             clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
             return Err(super::interruption::uncommitted(&run.id, &t.id, Some(&e)));
         }
@@ -1036,14 +969,10 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
         tracing::warn!(run = %run.id, "interrupt: could not read the pane to look for a restored prompt; nothing cleared");
         return;
     };
-    // `truncated` 不看：herdr 只要 pane 的歷史比要的列數長就回 true（截的是上面較舊的歷史），長時間跑的 bot 幾乎都是；
-    // 框完不完整由 composer parser 要求框頂、框底都在範圍內把關（w17:p21 2026-10-30：放回的字因此一直沒清）。
     if candidate.pane_id != pane || candidate.source != SCAN_SOURCE {
         return;
     }
     if !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
-        // 框是空的（claude 沒放回來，或還沒放回來），或框裡不是這一則的字：不按。留一筆 log 才分得出
-        // 「沒有草稿」與「有草稿卻對不上」（#1474：使用者之後得自己去終端按 Ctrl+C，daemon log 卻什麼都沒有）。
         tracing::info!(run = %run.id, state = ?box_state(&bot.kind, &candidate.text),
                        "interrupt: composer holds no exact copy of the interrupted prompt; not clearing");
         return;
@@ -1051,8 +980,6 @@ async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &Herd
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("abort_before_clear_key", &bot.id).await;
 
-    // Herdr has no conditional-key revision parameter. Re-read the complete composer and authority
-    // immediately before Ctrl+C; a change after this read remains a narrow non-atomic window.
     let Ok(fresh) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
     if fresh.pane_id != pane
         || !super::composer_draft::same_snapshot(&bot.kind, &candidate, &fresh)
@@ -1116,13 +1043,10 @@ pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value
     let _g = app.lock_bot_for_stop(bot_id).await;
     let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(app.db(), bot_id).await.map_err(up)?;
-    // 上一次打斷欠著的先補（#147）；補不上也照樣往下收——強制中止本來就是先保證 DB 解開。
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot.name, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
 
-    // 在飛的那一筆在按 esc **之前**讀（#208）：讀不到就一步都不做。以前放在 esc 之後、讀錯當成「沒有」——esc 已經送出去，
-    // 打斷的紀錄（`note_user_interrupt_of`、`interrupted`）卻沒記，那一回合的 StopFailure 回聲之後會被當成真的失敗。
     let in_flight = match run.as_ref() {
         Some(r) => db::in_flight_turn(app.db(), &r.id).await.map_err(up)?,
         None => None,
@@ -1153,12 +1077,8 @@ pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value
         if let Some(t) = &in_flight {
             aborted.push(t.id.clone());
         }
-        // 強制中止也是使用者要接手：排著的派工照樣不撤，只是先讓使用者拿回輸入框（§4.4a）。
         app.note_user_interrupt_of(&bot, r, in_flight.as_ref()).await;
-        // 收不掉就不是成功（#147）：以前 `fail_in_flight` 把錯吞掉，下面的迴圈又因為它在 `aborted` 裡而跳過它，
-        // 回 200 `aborted:[它]`、它卻還在飛。記成欠著，之後補。
         if let Some(t) = &in_flight {
-            // 下面要一起收的，算進這一則的筆數，不各寫一則（#581）。
             let more: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM turns t JOIN conversations c ON c.id = t.conversation_id
                  WHERE c.bot_id = ? AND t.id <> ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
@@ -1177,7 +1097,6 @@ pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value
             clear_restored_prompt(app, c, r, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
         }
     }
-    // Unknown-delivery turns live on the bot, not a run: a stopped run can leave one behind.
     let unknown = sqlx::query_as::<_, db::Turn>(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
          WHERE c.bot_id = ? AND (t.status = 'in_flight' OR t.delivery = 'unknown')",
@@ -1186,17 +1105,8 @@ pub async fn abort_turns(app: &impl StopContext, bot_id: &str) -> LcResult<Value
     .fetch_all(app.db())
     .await
     .map_err(up)?;
-    // 一次收好幾筆時只寫一則說明、帶筆數（#581：wits-pro 一次收 5 筆，對話裡連著 5 則一樣的話）。在飛的那一筆
-    // 已經由它那一則說了（筆數算在裡面），這裡不再寫。一顆 bot 只有一段對話（`conversations.bot_id` UNIQUE）。
     let turns: Vec<db::Turn> = unknown.into_iter().filter(|t| !(aborted.contains(&t.id) && t.delivery != "unknown")).collect();
     if !turns.is_empty() {
-        // 上面那句 SELECT 撈的是「in_flight **或** delivery='unknown'」，所以這裡拿到的不一定還在飛：
-        // §4.3 的備援關掉的回合（`completed_fallback`）不會動 `delivery`，所以它可以是已經收好、
-        // 但 `delivery` 還停在 `unknown` 的狀態。那種的**只清掉 `unknown` 這個停車位**（它是擋住下一則
-        // prompt 的東西，見 `prompt_inner` 的前置檢查），不改它的 status——回合已經收好了，
-        // 把它改寫成 failed 會讓使用者看到一筆「失敗」的回合，而它其實答完了。
-        // （`turn_controller` 的轉移表也沒有 `completed_fallback -> failed` 這條邊，issue #68。）
-        // 收掉與說明同一個交易（#208，同 `fail_in_flight`）：以前說明寫不進去被 `let _` 吞掉，回合收了、對話裡卻沒有一句話。
         let mut tx = app.db().begin().await.map_err(up)?;
         for t in &turns {
             if t.status == "in_flight" {
@@ -1248,7 +1158,6 @@ pub async fn move_pane_to_own_tab(app: &impl StopContext, bot_id: &str) -> LcRes
         .ok_or_else(|| LcError::NotFound("pane".into()))?;
     let client = client_for_run(app, &run).await?;
 
-    // `runs.tab_id` is NULL for old runs and stale if the user dragged the pane.
     let pane = client.pane_get(&pane_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("pane".into()))?;
     let workspace_id = pane.workspace_id.clone();
     let current_tab = pane.tab_id.clone();
@@ -1265,7 +1174,6 @@ pub async fn move_pane_to_own_tab(app: &impl StopContext, bot_id: &str) -> LcRes
         current_tab
     } else {
         let (new_tab, previous) = client.pane_move_to_new_tab(&pane_id, &tab_label(&bot)).await.map_err(up)?;
-        // The shared tidy-up is idempotent and the one place that decides a tab may go.
         if !previous.is_empty() && previous != new_tab {
             close_tab_if_empty(&client, &workspace_id, &previous).await;
         }
@@ -1321,15 +1229,11 @@ mod abort_tests {
             .bind(&rid).bind(&bid).bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)")
             .bind(&cid).bind(&bid).bind(&now).execute(app.db()).await.unwrap();
-        // Both an in-flight turn and an unknown-delivery one block the next prompt.
         let (t_flight, t_unknown) = (db::ulid(), db::ulid());
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
             .bind(&t_flight).bind(&cid).bind(&rid).bind(&now).execute(app.db()).await.unwrap();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','failed','unknown',?)")
             .bind(&t_unknown).bind(&cid).bind(&rid).bind(&now).execute(app.db()).await.unwrap();
-        // §4.3 的備援關掉的回合不會動 `delivery`：這種「已經收好、但 delivery 停在 unknown」的
-        // 一樣擋住下一則 prompt，也一樣要被解開——但它的 status 不可以被改寫成 failed
-        // （回合其實答完了，而且 `completed_fallback -> failed` 不是合法邊，issue #68）。
         let t_fallback = db::ulid();
         sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, completed_at, created_at) VALUES (?,?,?,'web','completed_fallback','unknown',?,?)")
             .bind(&t_fallback).bind(&cid).bind(&rid).bind(&now).bind(&now).execute(app.db()).await.unwrap();
@@ -1354,7 +1258,6 @@ mod abort_tests {
         assert_eq!(unknown, ("failed".into(), "failed".into()), "unknown delivery is resolved, not left to block");
         assert!(db::in_flight_turn(app.db(), &rid).await.unwrap().is_none(), "nothing left in flight");
 
-        // Idempotent: nothing to abort the second time round.
         let again = abort_turns(&app, &bid).await.unwrap();
         assert_eq!(again["aborted"].as_array().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1437,7 +1340,6 @@ mod default_session_tests {
         assert_eq!(db::active_run(app.db(), &bot_id).await.unwrap().map(|r| r.id), Some(run_id.clone()), "still running");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys"), "no ctrl+c was sent");
 
-        // With no run at all, `start` is what the sidebar button would call.
         sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
             .bind(db::now())
             .bind(&run_id)
@@ -1449,7 +1351,6 @@ mod default_session_tests {
         assert_eq!(creates, 1, "only the fixture's own workspace.create; the daemon made none in the user's session");
     }
 }
-
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 mod stop_commit_tests {
@@ -1815,9 +1716,6 @@ mod stop_commit_tests {
         app.set_instance(Some(b_instance.clone()));
         let b_socket = crate::hosts::short_dir(Some(&b_instance)).join(format!("{host}.sock"));
         std::fs::create_dir_all(b_socket.parent().unwrap()).unwrap();
-        // /tmp 底下的 socket 與 B 的整個 instance 目錄不在 Env 的暫存資料目錄裡，測試結束（含 panic）要自己清，
-        // 不然每跑一次就在 /tmp 多留一個 agents-manager-<uid>-restart-preview-<ulid>。A 的 socket 在共用的 production
-        // 目錄，只刪自己那一個檔名，不碰整個目錄。
         struct TmpSockets(Vec<std::path::PathBuf>);
         impl Drop for TmpSockets {
             fn drop(&mut self) {
@@ -1931,7 +1829,6 @@ mod stop_commit_tests {
         let bot = tt::claude_bot(&app, &env.project_id, "mine").await.id;
         sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot).execute(app.db()).await.unwrap();
         let run = db::ulid();
-        // 明確模擬不理 Ctrl+C 的 agent，不以名字或目標格式影響它是否退出。
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
              VALUES (?,?,'running','idle',?,?,?,?,'default',1,?)",
@@ -2295,7 +2192,6 @@ mod stop_commit_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (kid, run, _pane) = a_child(&env).await;
-        // 名字清掉與忽略 Ctrl+C 是兩件獨立的事。
         env.herdr.agents.lock().unwrap()[0]["name"] = serde_json::Value::Null;
         env.herdr.agents.lock().unwrap()[0]["ignore_ctrl_c"] = json!(true);
         rs::refuse_run_state(&app, "running").await;

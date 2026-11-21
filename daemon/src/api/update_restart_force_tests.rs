@@ -35,7 +35,6 @@ async fn a_forced_restart_clears_the_idle_restart_flag() {
 #[tokio::test]
 async fn a_forced_restart_that_fails_keeps_the_flag() {
     let e = crate::testing::env().await;
-    // 沒有 active run：restart 在 start 那一步被身份擋下（同 bulk_restart 夾具），失敗不清旗標。
     let bot = crate::testing::claude_bot(&e.app, &e.project_id, "broken").await;
     sqlx::query("UPDATE bots SET identity='nope' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
     let run = crate::testing::fake_run(&e.app, &bot.id).await;

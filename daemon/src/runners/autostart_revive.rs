@@ -20,14 +20,12 @@ fn pending_key(app: &Arc<App>) -> usize {
 
 /// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫：**丟到背景**，不讓對帳呼叫端等。
 pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
-    // 關機已經開始：不再替任何 bot 開 pane（#1372）；交給下一次開機的對帳。
     if lost.is_empty() || app.shutdown.is_cancelled() {
         return;
     }
     let key = pending_key(app);
     *pending().lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default() += 1;
     let (app, host) = (app.clone(), host.to_string());
-    // 掛在 background_tasks 下：優雅關機的 `wait()` 會等它做完，不會在啟動做到一半時行程結束（#1372）。
     let tracker = app.background_tasks.clone();
     crate::background_loop::spawn_named(&tracker, "autostart revive", async move {
         revive(&app, &host, lost).await;
@@ -65,7 +63,6 @@ pub(crate) async fn quiesce(app: &Arc<App>) {
         loop {
             let notified = revive_done().notified();
             tokio::pin!(notified);
-            // 先登記再看計數：看完計數到開始等之間補開收尾，也不會漏掉叫醒。
             notified.as_mut().enable();
             if pending_count(app) == 0 {
                 return;
@@ -143,7 +140,6 @@ pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
         }
     }
     for l in lost {
-        // 關機開始後不再開下一顆（#1372）：正在做的那一顆自己收尾。
         if app.shutdown.is_cancelled() {
             return;
         }
@@ -154,8 +150,6 @@ pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
 }
 
 async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> {
-    // Check once before the lock to keep the common no-op path cheap, then check again while holding
-    // the per-bot lock. A user start/stop in between must cancel this background recovery.
     if eligible_lost_bot(app.as_ref(), host, l).await?.is_none() {
         return Ok(());
     }
@@ -163,9 +157,6 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     crate::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
 
     let lock = app.bot_lock(&l.bot_id).await;
-    // 等鎖，但關機一開始就放棄等（#1429、#1470）：補開掛在 background_tasks 下，優雅關機的 `wait()` 會等它，不能在別人握著的鎖上
-    // 卡到關機逾時。平常（沒在關機）一定等到鎖再判斷：「對帳判定遺失」的 run 只會交進來這一次，這裡跳過就沒有任何掃描會再補開
-    // （定時掃描只撈 `pane gone`），bot 會無聲停著、也沒有 `bot_lost` 紀錄。`biased`：關機已經開始就不再拿鎖、不開新的 pane（#1372）。
     let guard = tokio::select! {
         biased;
         _ = app.shutdown.cancelled() => {
@@ -175,8 +166,6 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         guard = lock.clone().lock_owned() => guard,
     };
     let Some(bot) = eligible_lost_bot(app.as_ref(), host, l).await? else { return Ok(()) };
-    // 一次遺失只決定一次（restarted／failed／backoff 都算）：這顆 lost run 已經有 bot_lost 紀錄就不再碰（#1061）。
-    // 定時掃描每 30 秒會把同一顆 run 再交進來一次；inbox 以 (bot, run) 去重，重做的嘗試不會進退避額度。
     let key = format!("bot_lost:{}:{}", bot.id, l.run_id);
     let decided: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM supervisor_inbox WHERE kind = 'bot_lost' AND event_key = ?)")
         .bind(&key)
@@ -191,8 +180,6 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         ("backoff", None)
     } else {
         tracing::info!(host, bot = %bot.name, "autostart revive: the agent was lost (herdr restart or reconnect); starting it again");
-        // The detached start owns the bot lock through pane creation; cancelling this caller must
-        // not leave an unguarded start that can race a user stop.
         let (start_app, bot_id) = (app.clone(), bot.id.clone());
         match tokio::spawn(async move {
             let _guard = guard;

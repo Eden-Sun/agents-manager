@@ -20,7 +20,6 @@
     fn the_last_token_count_in_a_real_rollout_is_read() {
         let u = last_token_count(ROLLOUT).unwrap();
         assert_eq!(u, CodexUsage { at_ms: ms("2026-09-28T14:35:40.856Z"), input: 17667, cached: 13056, window: 258400 });
-        // `info:null`、其他事件、半行都不是讀數。
         assert!(last_token_count(r#"{"timestamp":"2026-09-28T14:35:13.100Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#).is_none());
         assert!(parse_token_count(r#"{"timestamp":"2026-09-28T14:35:32.249Z","type":"event_msg","payload":{"type":"token_cou"#).is_none());
         assert!(last_token_count("").is_none());
@@ -70,7 +69,6 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         assert_eq!(hot["context_used_tokens"], 17667);
         assert_eq!(hot["context_size"], 258400);
         assert_eq!(from_codex_usage(&u, Some(3600), u.at_ms + 61 * 60_000)["warm"], false);
-        // 沒有 TTL（codex 現況）：閒置再久都熱，不給到期時間。
         let never = from_codex_usage(&u, None, u.at_ms + 24 * 3600_000);
         assert_eq!(never["warm"], true);
         assert!(never["expires_at"].is_null() && never["ttl_secs"].is_null());
@@ -114,7 +112,6 @@ fn a_token_count_older_than_the_tail_is_still_found() {
 
     #[test]
     fn resumed_or_compacted_zero_redraw_is_unknown_not_zero_percent() {
-        // resume／壓縮後的空重繪：used=0、total=0，界線留在 status_json。網頁要看到 null＋未知旗標，不是 0%。
         let raw = r#"{"session_id":"s1","_agm_context_invalidated":"s1","context_window":{"used_percentage":0,"total_input_tokens":0,"context_window_size":1000000,"current_usage":{"input_tokens":0}},"prompt_cache":{"warm":true,"ttl":"1h"}}"#;
         let mut run = json!({"id": "r-lead", "status_json": raw});
         annotate(&mut run, "claude", 0);
@@ -126,7 +123,6 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         assert!(run["prompt_cache"]["context_used_pct"].is_null());
         assert!(run["prompt_cache"]["context_used_tokens"].is_null());
         assert_eq!(run["prompt_cache"]["warm"], true, "cache warmth is not affected by the context mask");
-        // 只遮罩網頁副本：傳進來的原文字串不被改寫（保溫判斷仍讀 DB 原文）。
         assert!(raw.contains("\"used_percentage\":0"));
     }
 
@@ -138,14 +134,12 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         annotate(&mut run, "claude", 0);
         assert_eq!(run["status_json"], real);
         assert_eq!(run["prompt_cache"]["context_used_pct"], 15.0);
-        // 四捨五入成 0% 但確實讀到 input token：也是真讀數。
         let rounded = r#"{"session_id":"s1","_agm_context_invalidated":"s1","context_window":{"used_percentage":0,"current_usage":{"input_tokens":300},"context_window_size":1000000}}"#;
         assert!(mask_invalidated_context(rounded).is_none());
     }
 
     #[test]
     fn a_zero_without_the_boundary_is_left_alone() {
-        // 沒有失效界線的 0 不在這裡判斷（不是 resume／壓縮的情況），原樣保留。
         let plain = r#"{"session_id":"s1","context_window":{"used_percentage":0,"total_input_tokens":0}}"#;
         assert!(mask_invalidated_context(plain).is_none());
         assert!(mask_invalidated_context("not json").is_none());
@@ -154,7 +148,6 @@ fn a_token_count_older_than_the_tail_is_still_found() {
 
     #[test]
     fn a_ttl_that_is_not_ascii_or_overflows_is_unknown_not_a_panic() {
-        // 單位若取最後一個位元組會切在字元中間（panic）；秒數乘上單位溢位（debug 直接 panic，release 繞成負數）。
         for ttl in ["5分", "分", "9000000000000000h"] {
             let v = from_statusline(&format!(r#"{{"prompt_cache":{{"ttl":"{ttl}"}}}}"#));
             assert_eq!(v["ttl_secs"], Value::Null, "{ttl}");
@@ -181,7 +174,6 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         assert_eq!(run["prompt_cache"]["source"], "rollout_estimate");
         assert_eq!(run["prompt_cache"]["warm"], true, "codex 閒置 3 小時仍熱");
         assert!(run["prompt_cache"]["expires_at"].is_null());
-        // 還沒讀到任何 token_count：null。
         let mut fresh = json!({"id": "r-codex-unseen"});
         annotate(&mut fresh, "codex", 0);
         assert!(fresh["prompt_cache"].is_null());
@@ -193,24 +185,19 @@ fn a_token_count_older_than_the_tail_is_still_found() {
         let dir = crate::testing::scratch_dir("am-pc");
         let path = dir.join("rollout-x.jsonl");
         let lines: Vec<&str> = ROLLOUT.lines().collect();
-        // 第一輪：前三行＋第四行只寫一半。
         let half = &lines[3][..40];
         std::fs::write(&path, format!("{}\n{}\n{}\n{half}", lines[0], lines[1], lines[2])).unwrap();
         let (t1, off1) = read_new(&path, 0).unwrap();
         assert_eq!(last_token_count(&t1).unwrap().input, 13547);
         assert_eq!(off1 as usize, lines[0].len() + lines[1].len() + lines[2].len() + 3);
-        // 沒新增：空字串、位移不動。
         assert_eq!(read_new(&path, off1).unwrap(), (String::new(), off1));
-        // 補完那一行：只讀到新增的整行，不重讀前面。
         std::fs::write(&path, format!("{}\n{}\n{}\n{}\n", lines[0], lines[1], lines[2], lines[3])).unwrap();
         let (t2, off2) = read_new(&path, off1).unwrap();
         assert_eq!(t2.lines().count(), 1);
         assert_eq!(last_token_count(&t2).unwrap().input, 17667);
         assert_eq!(off2, std::fs::metadata(&path).unwrap().len());
-        // 檔案縮小（換檔）：從頭來。
         std::fs::write(&path, format!("{}\n", lines[2])).unwrap();
         assert_eq!(last_token_count(&read_new(&path, off2).unwrap().0).unwrap().input, 13547);
-        // 新增很大：只取檔尾、第一個（可能是半行的）片段丟掉。
         let mut big = String::new();
         while (big.len() as u64) < TAIL_BYTES * 2 {
             big.push_str(lines[0]);
@@ -255,11 +242,10 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     let run = "r-remote-timer";
     store().lock().unwrap().remove(run);
     let lines: Vec<&str> = ROLLOUT.lines().collect();
-    let two = format!("{}\n", lines[2]); // input 13547
-    let three = format!("{}\n", lines[3]); // input 17667
+    let two = format!("{}\n", lines[2]);
+    let three = format!("{}\n", lines[3]);
     let calls = std::cell::RefCell::new(Vec::<Option<u64>>::new());
 
-    // 第一次：沒有位移，讀到第一筆讀數就變動。
     let first = refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk(&two, two.len() as u64))
@@ -268,7 +254,6 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     assert!(first);
     assert_eq!(remote_state_for_test(run), Some((two.len() as u64, Some(13547))));
 
-    // 間隔內再來：不打 host。
     assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk("", 0))
@@ -276,7 +261,6 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     .await);
     assert_eq!(calls.borrow().len(), 1, "節流間隔內不讀");
 
-    // 間隔過了、沒有新行：從上次位移讀，讀數不變。
     age_remote_for_test(run);
     let n = two.len() as u64;
     assert!(!refresh_remote(run, "s1", |off, _cap| {
@@ -287,7 +271,6 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     assert_eq!(calls.borrow()[1], Some(n), "只從上次位移起讀");
     assert_eq!(remote_state_for_test(run), Some((n, Some(13547))));
 
-    // 通道失敗：讀數與位移都不動，且退避到下一個間隔（不立刻再打）。
     age_remote_for_test(run);
     assert!(!refresh_remote(run, "s1", |off, _cap| {
         calls.borrow_mut().push(off);
@@ -302,7 +285,6 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     .await);
     assert_eq!(calls.borrow().len(), 3, "失敗後退避中不再讀");
 
-    // 有新行：讀數變成新的一筆，位移前進。
     age_remote_for_test(run);
     let total = n + three.len() as u64;
     assert!(refresh_remote(run, "s1", |off, _cap| {
@@ -312,7 +294,6 @@ async fn remote_codex_reads_on_a_timer_and_resumes_from_the_offset() {
     .await);
     assert_eq!(remote_state_for_test(run), Some((total, Some(17667))));
 
-    // 換 session：位移與讀數作廢，從頭（None）讀。
     assert!(!refresh_remote(run, "s2", |off, _cap| {
         calls.borrow_mut().push(off);
         std::future::ready(remote_chunk("", 0))
@@ -367,8 +348,8 @@ async fn the_first_remote_read_is_the_context_cap_and_a_missing_token_count_look
     let _serial = store_serial_async().await;
     store().lock().unwrap().remove(run);
     let lines: Vec<&str> = ROLLOUT.lines().collect();
-    let two = format!("{}\n", lines[2]); // input 13547
-    let filler = "x\n".to_string(); // 檔尾全是工具輸出
+    let two = format!("{}\n", lines[2]);
+    let filler = "x\n".to_string();
     let calls = std::cell::RefCell::new(Vec::<(Option<u64>, u64)>::new());
     let read = |off: Option<u64>, cap: u64| {
         calls.borrow_mut().push((off, cap));

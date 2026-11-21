@@ -293,7 +293,6 @@ mod tests {
         assert_eq!(notes, [HOOK_REVIEW_WAITING_HINT]);
         assert!(notes[0].contains("重新啟動這顆 bot 即可") && notes[0].contains("不會自動按鍵"), "{}", notes[0]);
 
-        // daemon 重啟：episode 不見了，run 在 DB 裡還是 blocked。
         open().lock().unwrap().remove(&run_id);
         observe_screen(&app, &run_of(&app, &run_id).await, review).await;
         assert!(is_open(&run_id), "重啟後重新接手這個框");

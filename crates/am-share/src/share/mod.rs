@@ -140,7 +140,6 @@ pub async fn drain_keep_pending<S: site::SiteEnv>(app: &S) {
         if !conn.is_connected() {
             continue;
         }
-        // 現役狀態要在鎖裡讀：拿到鎖之前讀的值，可能已經被一顆較新的直接寫入蓋過（#1266）。
         let _key = keep_lock(&row.host, &row.bot_id).await;
         let keep = match store::is_active_share(pool, &row.bot_id).await {
             Ok(keep) => keep,
@@ -198,7 +197,6 @@ pub async fn revoke_project_shares<S: crate::outbox::ShareStorage + site::SiteEn
         portal::kick(&bot_id);
     }
     store::revoke_project(pool, project_id).await?;
-    // 分享關著的分享用 bot 也有標記：專案底下每一顆都拿掉（遠端專案的拿掉遠端那份）。
     let restricted: Vec<String> =
         sqlx::query_scalar("SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ?").bind(project_id).fetch_all(pool).await?;
     for bot_id in restricted {

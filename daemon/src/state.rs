@@ -69,8 +69,6 @@ const TOKEN_METRIC_SUFFIXES: [&str; 7] = [
 
 fn is_credential_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    // 用量計數是遙測不是憑證：只放行已知計數鍵、明確的 token 類別後綴與計數鍵的細節欄位。
-    // 不能只憑 `_tokens` 判斷，因為 `service_tokens` 也可能是憑證集合。名字含 `secret` 的一律當憑證。
     let usage_counter = !key.contains("secret")
         && (TOKEN_METRIC_KEYS.contains(&key.as_str())
             || matches!(key.as_str(), "recache_tokens_if_cold" | "context_used_tokens")
@@ -554,7 +552,6 @@ impl App {
 
     pub async fn bot_connected(&self, bot_id: &str) -> bool {
         let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await else { return false };
-        // 讀不到 host＝不知道，不當成 local 去比對本機 herdr（#243）。
         let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else { return false };
         self.bot_connected_on(&bot, &host).await
     }
@@ -576,7 +573,6 @@ impl App {
     }
 
     pub async fn herdr_for_run(&self, run: &crate::db::Run) -> Option<HerdrClient> {
-        // #708：移交出去的專案沒有 client（survey、update_watch、child_alerts、閒置回收……都經過這裡）；讀不到也不給。
         if !matches!(crate::handoff::bot_handed_off_to(&self.db, &run.bot_id).await, Ok(None)) {
             return None;
         }
@@ -624,16 +620,9 @@ impl App {
 
     pub async fn emit(&self, kind: &str, mut data: Value) {
         scrub_credentials(&mut data);
-        // seq 在 ring 鎖**內**取，ring 順序＝seq 順序。在鎖外編號的話兩個並行 emit 可能先推 6 再推 5，
-        // 斷線後帶 `since=6` 重連的客戶端就永遠收不到 5（review 2026-09-12 f）。
         {
             let mut ring = self.ring.lock().await;
             let ev = WsEvent { seq: self.seq.fetch_add(1, Ordering::SeqCst) + 1, kind: kind.to_string(), data };
-            // 即時幀不佔重播額度（issue #482）：`turn_progress` 是每個 run 每秒 4 幀，跟耐久事件共用
-            // 這 200 個位子的話，環涵蓋的時間＝`200 / (4 × 在跑的 run 數)`——20 顆同時在跑只剩 2.5 秒，
-            // 而前端光是重連退避就 250ms～3 秒，於是**每次**重連都落在環外、退化成全量 resync。
-            // 照樣即時廣播（下面的 `bus.send`）；重連的客戶端不需要舊的 progress：下一幀 250ms 內就到，
-            // 真相另有 `turn_updated` 與訊息。seq 照發，`{seq,type,data}` 的形狀不變。
             if !is_ephemeral(kind) {
                 ring.push_back(ev.clone());
                 while ring.len() > WS_RING {
@@ -679,20 +668,10 @@ impl App {
         let oldest = ring.front().map(|e| e.seq);
         let newest = self.current_seq();
         if since > newest {
-            return None; // seq went backwards (daemon restarted)
+            return None;
         }
         match oldest {
             None => Some(vec![]),
-            // `o` 是**環裡最舊那一則的 seq**，不是「最舊的 seq」——即時幀不進環（[`is_ephemeral`]，issue #482），
-            // 所以環內的 seq 是稀疏的，中間被 progress 打洞，而這行算術是照「連續」寫的。
-            //
-            // 後果是它偏**保守**：`since` 是某一則耐久事件、環裡最舊的是**下一則**耐久事件（中間隔著 progress）時，
-            // 其實一則都沒漏，`since + 1 >= o` 卻不成立，照樣回 `None` 要求 resync。**這跟客戶端送什麼無關**——
-            // 送 `lastDurableSeq` 也一樣（i264 的複看，2026-09-24：兩則耐久事件只有「號碼相鄰」時條件才成立）。
-            // 方向是 fail-safe（只會多要求重抓，不會謊稱補得齊），所以維持現狀。
-            //
-            // 要真的精確：`pop_front` 時記下被擠掉的耐久事件裡最大的 seq（`evicted_max`），這裡改判
-            // `since >= evicted_max`，就跟「環裡最舊那一則的號碼」脫鉤。動這一行之前先看這段。
             Some(o) if since + 1 >= o => Some(ring.iter().filter(|e| e.seq > since).cloned().collect()),
             Some(_) => None,
         }
@@ -735,18 +714,15 @@ impl App {
         let run = match crate::db::active_run(&self.db, bot_id).await {
             Ok(run) => run,
             Err(error) => {
-                // 不確定就跳過整個 frame，讓前端保留目前的 run；後續 status emit 會重新讀取 DB。
                 tracing::warn!(bot_id, error = %error, "bot_status not emitted: active run unreadable");
                 return;
             }
         };
-        // 讀不到 host 就不發：發 `host:"local"` 會讓前端把遠端 bot 顯示成本機（#243）；DB 好了下一次事件會補。
         let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else {
             tracing::warn!(bot_id, "bot_status not emitted: bot host unreadable");
             return;
         };
         let mut run_v = crate::background_jobs::run_json(self, &run, run.as_ref().map(|r| r.id.as_str()));
-        // 讀不到最近回合就只靠記憶體帳推算（`cache_clock`）：這只是倒數的提示，不值得為它擋掉整個 frame。
         let last_turn = crate::cache_clock::last_turn_for_bot(&self.db, bot_id).await.ok().flatten();
         crate::cache_clock::annotate(&mut run_v, &bot.kind, last_turn.as_ref());
         crate::send_now_capability::annotate(&mut run_v, &bot.kind, run.as_ref(), self.cfg.get().await.codex.instant_interrupt);
@@ -835,7 +811,6 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
         .run_if_current(fence, async {
             let conn = fence.conn();
             let connected = if conn.is_local() { app.connected.load(Ordering::SeqCst) } else { conn.is_connected() };
-            // Carry detection from this still-current host authority, never a replacement connection's cache.
             let detected = app.tools.lock().await.get(&conn.name).cloned();
             let mut ev = serde_json::Map::new();
             ev.insert("name".into(), json!(conn.name));
@@ -843,14 +818,12 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             ev.insert("error".into(), json!(conn.error_string().await));
             ev.insert("disconnected_since".into(), json!(conn.disconnected_since()));
             ev.insert("herdr".into(), crate::herdr_version::for_host(conn, connected, detected.as_ref()));
-            // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
             if let Some(d) = detected {
                 ev.insert("tools".into(), crate::quota_agy::tools_json(&conn.name, &d.tools));
                 ev.insert("identities".into(), crate::login_prompt::identities_json(app, &conn.name, &d.identities));
                 ev.insert("shell_identities".into(), json!(d.shell_identities));
                 ev.insert("tools_checked_at".into(), json!(d.checked_at));
             }
-            // 同樣是「沒有就不帶」：沒量過不等於一致。
             if let Some(b) = app.host_baseline.lock().await.get(&conn.name) {
                 ev.insert("baseline".into(), json!(b.view(chrono::Utc::now())));
             }
@@ -881,7 +854,6 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
         anyhow::bail!("herdr default session is not running; refusing to start the user's session")
     }
     tracing::info!(session, socket = %sock.display(), "herdr socket not reachable; starting server");
-    // Linux 交給 systemd user unit，macOS／沒裝 unit 才直接 spawn（issue #677，`herdr_unit`）。
     let unit = crate::herdr_unit::UnitStart::for_this_host(session);
     let how = crate::herdr_unit::start_server(session, log_dir, unit.as_ref(), "herdr")?;
     for _ in 0..50 {
@@ -942,7 +914,6 @@ mod scrub_tests {
         assert_eq!(v, json!({"kinds": {"tokenbox/claude": {}}}));
         let v = scrubbed(json!({"identities": {"my-token-id": {"refresh_token": "r", "name": "n"}}, "shell_identities": {"secret": {}}}));
         assert_eq!(v, json!({"identities": {"my-token-id": {"name": "n"}}, "shell_identities": {"secret": {}}}));
-        // 名字 map 只豁免那一層：不在這四個鍵底下的物件照舊用 key 判斷。
         assert_eq!(scrubbed(json!({"other": {"secret-lab": 1}})), json!({"other": {}}));
     }
 
@@ -1003,22 +974,18 @@ mod ws_seq_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
 
-        // 斷線前最後收到的耐久事件。
         app.emit("message_added", json!({"bot_id": "b1"})).await;
         let last_seen = app.current_seq();
 
-        // 斷線那 3 秒：20 顆 run 各 4 幀/秒。
         for i in 0..20 * 4 * 3 {
             app.emit("turn_progress", json!({"run_id": format!("r{}", i % 20)})).await;
         }
-        // 斷線期間真正該補的那一則。
         app.emit("turn_updated", json!({"bot_id": "b1"})).await;
 
         let backlog = app.backlog(last_seen).await.expect("240 幀 progress 不該把重播窗口衝掉");
         let kinds: Vec<&str> = backlog.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(kinds, ["turn_updated"], "補的是耐久事件，progress 不重播（過期即無用）：{kinds:?}");
 
-        // progress 照樣即時廣播、也照樣佔 seq（`{seq,type,data}` 的形狀不變）。
         assert!(app.current_seq() > last_seen + 240, "seq 照發");
         let mut rx = app.subscribe();
         app.emit("turn_progress", json!({"run_id": "r0"})).await;

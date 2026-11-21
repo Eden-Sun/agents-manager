@@ -104,7 +104,6 @@ pub mod race_point {
     }
 }
 
-// Supervisor delegation helpers for claude_review
 pub const SUPERVISOR_ID: &str = crate::supervisor::store::SUPERVISOR_ID;
 pub const OPEN_STATES: [&str; 6] = crate::supervisor::store::OPEN_STATES;
 pub type Assignment = crate::supervisor::store::Assignment;

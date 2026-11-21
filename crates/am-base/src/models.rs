@@ -51,7 +51,6 @@ pub fn find_response(text: &str, id: u64) -> Option<Result<Value>> {
     None
 }
 
-
 pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
     result
         .get("data")
@@ -233,7 +232,6 @@ pub fn grok_models_from_text(text: &str) -> Vec<Value> {
                 "description": "",
                 "is_default": is_default,
                 "default_effort": Value::Null,
-                // Fallback when models_cache.json is missing; enriched per-model below.
                 "efforts": ["low", "medium", "high"],
                 "service_tiers": [],
             })
@@ -403,7 +401,6 @@ const LOCAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 pub async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, path_expr: &str) -> Result<String> {
     let script = optional_cat_script(path_expr);
     if host == LOCAL_HOST {
-        // 本機也要有上限：走 hosts::sh_local_stdout（逾時整個行程群組砍掉），不是 Command::output() 外面包 timeout（子行程會留下）。
         crate::hosts::sh_local_stdout(&script, LOCAL_READ_TIMEOUT, &format!("read {path_expr}")).await
     } else {
         let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
@@ -500,7 +497,6 @@ pub fn claude_alias_of(model: &str) -> Option<&'static str> {
 /// `default_model` 是帳號 settings.json 的頂層 `model`：`is_default` 只標它對到的那一顆；沒有就一顆都不標（不猜 opus）。
 /// `default_effort` 是廠商內建預設（每個帳號都一樣）；帳號自己記住的值放 `account_default_effort`，跟內建相同或沒有就是 `null`（#1679）。
 pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, String>, default_model: Option<&str>) -> Vec<Value> {
-    // claude 沒有 per-model effort 清單，每個 alias 都用 `--effort` 那五級。
     let efforts: Vec<Value> = crate::config::efforts_for_kind("claude").iter().map(|e| json!(e)).collect();
     let default_alias = default_model.and_then(claude_alias_of);
     ["opus", "sonnet", "haiku", "fable"]
@@ -550,7 +546,6 @@ pub fn agy_static_models() -> Vec<Value> {
 pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, Option<String>) {
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;
-    // codex also takes both via `-c key=value`.
     let assignment = |s: &str, key: &str| -> Option<String> {
         let (k, v) = s.split_once('=')?;
         (k.trim() == key).then(|| v.trim().trim_matches('"').trim_matches('\'').to_string())
@@ -570,7 +565,6 @@ pub fn model_effort_from_argv(kind: &str, argv: &[String]) -> (Option<String>, O
                 return Some(v);
             }
             let v = argv.get(*i + 1)?.clone();
-            // A missing value (`--model` last, or `--model --effort high`) is not a value.
             if v.starts_with('-') {
                 return None;
             }
@@ -649,7 +643,6 @@ pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) 
         return (None, None);
     };
     let mut it = rest.split_whitespace();
-    // `4.6` -> the `grok-4.6` id the model list and `-m` both use.
     let model = it
         .next()
         .map(|v| v.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.'))
@@ -688,8 +681,6 @@ pub fn grok_composer_fragment(screen: &str) -> Option<String> {
 pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
     grok_title_model_effort(&grok_composer_fragment(screen)?).1
 }
-
-
 
 /// 模型清單快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait ModelsCache: Send + Sync {

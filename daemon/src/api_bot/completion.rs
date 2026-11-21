@@ -108,7 +108,6 @@ async fn store_in_transaction(
     };
 
     let finished_at = crate::db::now();
-    // Zero rows are valid when no reservation remains; owner and turn CAS are independent.
     am_base::db::api_bot::close_reserved_unknown_on(
         tx,
         &key.bot_id,
@@ -280,8 +279,6 @@ pub(super) async fn consume_receipt(
             .map_err(|_| StoreError::Retryable)?;
         return Ok(Outcome::Fenced);
     }
-    // A prior assistant is a conflict even if another writer left the turn in flight.
-    // Check inside the write transaction so a retry cannot create a second assistant.
     if assistant_count(&mut tx, &key.turn_id).await? != 0 {
         tx.rollback().await.map_err(|_| StoreError::Ambiguous)?;
         return Err(StoreError::Ambiguous);
@@ -350,7 +347,6 @@ pub(super) async fn probe_after_join(
         .map_err(|_| StoreError::Retryable)?;
     let mut tx = app.db.begin().await.map_err(|_| StoreError::Retryable)?;
     let Some(stored) = stored else {
-        // A missing receipt alone is never proof. Check the exact live owner and zero assistants.
         let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM api_bot_sessions WHERE id=? AND bot_id=? AND owner_run_id=? AND owner_turn_id=? AND generation=? AND retired_at IS NULL")
             .bind(&identity.session_id).bind(&identity.bot_id).bind(&identity.run_id).bind(&identity.turn_id).bind(identity.generation)
             .fetch_optional(&mut *tx).await.map_err(|_| StoreError::Retryable)?;
@@ -675,7 +671,6 @@ mod compaction_note_tests {
 
     #[test]
     fn the_note_uses_the_whole_context_before_and_after_not_just_uncached_input() {
-        // 2026-11-15 09:43Z P.api 的真實 usage：壓縮前 36＋20653＋120964，壓縮後 2＋20653＋5522。
         let usage = json!({"input_tokens": 2, "iterations": [
             {"type": "compaction", "input_tokens": 36, "cache_read_input_tokens": 20653, "cache_creation_input_tokens": 120964},
             {"type": "message", "input_tokens": 2, "cache_read_input_tokens": 20653, "cache_creation_input_tokens": 5522}]});

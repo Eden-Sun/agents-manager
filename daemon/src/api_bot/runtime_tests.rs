@@ -14,7 +14,6 @@ const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn claude_api_kind_stays_out_of_the_bot_creation_allowlist() {
-    // create_bot rejects any kind not accepted by this guard before it reaches storage.
     assert!(!crate::config::valid_kind("claude-api"));
     assert!(crate::config::valid_bot_kind("claude-api"));
 }
@@ -89,7 +88,6 @@ async fn cap_exceeded_turn_posts_a_reason_notice_and_the_next_turn_still_runs() 
     let shutdown = CancellationToken::new(); let stop = shutdown.clone();
     let server = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap() });
     enable_fake_runtime(&env.app, format!("http://{addr}/v1/messages"), DEADLOCK_TIMEOUT).await;
-    // 測試報價：預留 100、結算 50。上限 120：第一次呼叫後累計 50，再預留 100 → 150 > 120。
     env.app.cfg.update(|c| { c.claude_api.api_bot.max_turn_cost_microusd = Some(120); Ok(()) }).await.unwrap();
     let bot = crate::db::ulid(); let run = crate::db::ulid(); let first = crate::db::ulid(); let second = crate::db::ulid(); let conv = crate::db::ulid();
     insert_bot_and_turn(&env.app, &bot, &run, &first, &conv, &env.project_id, "use a tool").await;
@@ -101,7 +99,6 @@ async fn cap_exceeded_turn_posts_a_reason_notice_and_the_next_turn_still_runs() 
         tokio::task::yield_now().await;
     } }).await.unwrap() } };
     assert_eq!(status(first.clone()).await, "failed");
-    // 系統訊息可見、帶 reason
     let notice = tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop {
         let m: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&first).fetch_optional(&env.app.db).await.unwrap();
         if let Some(m) = m { return m; }
@@ -109,7 +106,6 @@ async fn cap_exceeded_turn_posts_a_reason_notice_and_the_next_turn_still_runs() 
     } }).await.unwrap();
     assert!(notice.contains("api_bot_turn_cost_cap_exceeded"), "{notice}");
     assert_eq!(calls.load(Ordering::SeqCst), 1, "被擋下的預留不能送出第二次請求");
-    // 同一個 run 的下一則：不再卡 Busy，會跑完
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','again',?)").bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let two = ApiTurnKey { bot_id: bot, run_id: run, turn_id: second.clone() };
     tokio::time::timeout(DEADLOCK_TIMEOUT, async { loop { match env.app.api_turn_spawn(&two).await { Ok(()) => break, Err(ApiBotError::Busy) => tokio::task::yield_now().await, Err(e) => panic!("{e:?}") } } }).await.unwrap();
@@ -136,12 +132,9 @@ async fn native_start_refuses_with_a_specific_reason_before_any_side_effect() {
     assert_eq!(reason(go().await), "api_bot_turn_cost_cap_too_low");
     let missing = env.dir.join("no-such-key").to_string_lossy().into_owned();
     env.app.cfg.update(move |c| { c.claude_api.api_bot.max_turn_cost_microusd = Some(5_000_000); c.claude_api.key_file = missing; Ok(()) }).await.unwrap();
-    // 沒有 bwrap／userns 就是 sandbox；有的話下一關是讀不到 key。兩者都是明確拒絕，不是 unconfirmed。
     assert!(matches!(reason(go().await), "api_bot_sandbox_unavailable" | "api_bot_key_unavailable"));
     sqlx::query("UPDATE projects SET host='remote-x' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
-    // 遠端專案不再擋成「只限本機」：主機沒連線（或不認得）就明確拒絕，並且不留 run。
     assert_eq!(reason(go().await), "api_bot_host_offline");
-    // 連上線的遠端主機：不需要 bwrap，直接走到下一關（讀不到 key）。
     let conn = env.app.hosts.insert_remote_for_test(crate::config::HostCfg { daemon_url: None, shared_session: false, name: "remote-x".into(), ssh: "unused".into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "am-test".into(), remote_path: String::new() }).await;
     assert_eq!(reason(go().await), "api_bot_host_offline", "有登記但沒連線也是離線");
     conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -864,8 +857,6 @@ impl crate::capabilities::BotLocks for LockWaitProbe {
         let bot_id = bot_id.to_string();
         async move {
             let lock = app.bot_lock(&bot_id).await;
-            // The current-thread test task cannot observe this notification until
-            // settle_once polls `lock().await` and yields while stop still owns the lock.
             requested.notify_one();
             lock
         }
@@ -1402,7 +1393,6 @@ async fn retire_after_stop_prunes_stale_terminal_controls_of_earlier_runs() {
     sqlx::query("UPDATE api_bot_sessions SET id=? WHERE id='r2-session'").bind(&session).execute(&env.app.db).await.unwrap();
     let now = crate::db::now();
     sqlx::query("INSERT INTO api_bot_join_receipts(session_id,bot_id,run_id,turn_id,generation,revision,outcome,final_text,state,created_at,processed_at) VALUES(?,'r2-bot','r2-run','r2-turn',1,5000,'completed','fixture','applied',?,?)").bind(&session).bind(&now).bind(&now).execute(&env.app.db).await.unwrap();
-    // 較早一個已停止的 run 留下的 terminal control record：停止後清除對話不該被它擋成 api_retire_busy。
     let other = crate::db::ulid(); let other_run = crate::db::ulid(); let other_turn = crate::db::ulid(); let other_conv = crate::db::ulid();
     insert_bot_and_turn(&env.app, &other, &other_run, &other_turn, &other_conv, &env.project_id, "fixture").await;
     sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&other_turn).execute(&env.app.db).await.unwrap();
@@ -2506,8 +2496,6 @@ async fn fake_app_port_persists_first_turn_rebinds_and_prunes_terminal_control_r
         .await
         .unwrap();
         assert_eq!(terminal, ("stopped".into(), "completed".into()));
-        // 修剪不是背景 task：只在 spawn／live／admission 這些入口順手跑。所以這裡不能只「看」數量等它變少，
-        // 要自己走一次會修剪的入口（`api_run_live`）；owner 已退出且 DB 終態都已確定，一次就該收乾淨。
         let _ = env.app.api_run_live(&key).await;
         let controls = env.app.api_bot_runtime.control_count_for_test();
         assert!(controls <= 1, "terminal control records pruned (have {controls})");
@@ -2861,8 +2849,6 @@ async fn idle_stop_proof_drains_spawn_paused_after_owner_writes_before_registry(
             stop_at_admission_hook.notify_one();
         },
     );
-    // This hook returns inline; after it, the proof's next await is the shared gate.
-    // Spawn is still parked after owner writes, so Pending here is admission drain.
     let mut proof = Box::pin(env.app.api_run_stop_proof(&run_key));
     let proof_first_poll = std::future::poll_fn(|cx| {
         std::task::Poll::Ready(match proof.as_mut().poll(cx) {
@@ -3507,7 +3493,6 @@ async fn lifecycle_stop_waits_for_the_real_tool_join_before_settling() {
     let live_before_cleanup = env.app.api_run_live(&key).await;
     let stop_finished_before_cleanup = stop_task.is_finished();
 
-    // Restore the fixture owner, then cancel and release the actual runner before asserting.
     let restore_run = sqlx::query("UPDATE runs SET state='stopping' WHERE id=? AND bot_id=?")
         .bind(&run_id)
         .bind(&bot_id)
@@ -4372,8 +4357,6 @@ async fn ambiguous_store_with_exact_uncommitted_owner_retries_once() {
     .bind(&turn_id).fetch_all(&env.app.db).await.unwrap();
     assert_eq!(assistant.len(), 1, "retry commits one assistant message");
     assert_eq!(assistant[0].1, "joined final");
-    // Completed turns publish bot_status after turn_updated; assert all completion events by
-    // their exact owner key so this legitimate projection does not mask a duplicate pair.
     let mut message_events = Vec::new();
     let mut turn_events = Vec::new();
     let mut status_events = Vec::new();
@@ -4411,8 +4394,6 @@ async fn ambiguous_store_with_exact_uncommitted_owner_retries_once() {
     );
     assert_eq!(turn_events[0].data["turn"]["status"], "completed");
     assert!(message_events[0].seq < turn_events[0].seq);
-    // 這個 fixture 直接掛 own_ticket（不經 spawn），所以沒有回合開始的 working；結束時 idle 是 claude-api 的 run 狀態由回合推的那一則
-    // （見 `completion::set_run_agent_status`），排在回覆事件之後。
     assert_eq!(status_events.len(), 2, "the pre-existing status frame plus the idle at turn end");
     assert_eq!(status_events[1].data["run"]["agent_status"], "idle");
     assert!(turn_events[0].seq < status_events[1].seq);
@@ -4665,7 +4646,6 @@ async fn failed_cancelled_or_missing_final_text_use_failure_receipts() {
         );
     }
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BackoffProofFault {
@@ -5007,7 +4987,6 @@ async fn shutdown_interrupts_backoff_and_keeps_durable_pending_without_fake_comp
         .unwrap(),
         0
     );
-    // 關機不會假裝完成：回合還是 in_flight，所以也不會推 idle。
     assert!(events.try_recv().is_err());
     assert!(f
         .env
@@ -5221,14 +5200,11 @@ async fn claude_api_advisor_relay_end_to_end() {
     let advisor = crate::db::bot(&env.app.db, &advisor_id).await.unwrap().unwrap();
     sqlx::query("UPDATE bots SET role='manager' WHERE id=?").bind(&manager.id).execute(&env.app.db).await.unwrap();
 
-    // Start advisor natively
     let adv_run = crate::lifecycle::start_bot(&env.app, &advisor.id).await.unwrap();
-    // Start manager
     let mgr_run = crate::testing::fake_run(&env.app, &manager.id).await;
     sqlx::query("UPDATE runs SET state='running', runtime_role_policy=? WHERE id=?")
         .bind(format!("{}:local:expert:manager", env.project_id)).bind(&mgr_run).execute(&env.app.db).await.unwrap();
 
-    // Send expect_result relay prompt from manager to advisor
     let mut headers = axum::http::HeaderMap::new();
     headers.insert("X-AM-Bot-Id", manager.id.parse().unwrap());
     headers.insert("X-AM-Bot-Token", manager.hook_token.parse().unwrap());
@@ -5252,10 +5228,8 @@ async fn claude_api_advisor_relay_end_to_end() {
     let request_id = val["request_id"].as_str().unwrap().to_string();
     let target_turn_id = val["turn_id"].as_str().unwrap().to_string();
 
-    // Wait for native provider to be called and complete turn
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.expect("fake provider should be called");
 
-    // Wait for native turn to reach completed status in turns table
     let turn_completed = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
@@ -5268,22 +5242,18 @@ async fn claude_api_advisor_relay_end_to_end() {
     }).await;
     assert!(turn_completed.is_ok(), "turn did not reach completed in time");
 
-    // 發送者忙著：通知排進它的佇列（跟 relay_requests 既有測試同一個做法；假 run 沒有真 pane 可送）。
     sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&mgr_run).execute(&env.app.db).await.unwrap();
-    // Now run relay requests sweep so relay_requests transitions to answered and delivers notice
     crate::runners::relay_requests::sweep(&env.app).await;
 
     let (req_state, req_err): (String, Option<String>) = sqlx::query_as("SELECT state, error FROM relay_requests WHERE id=?")
         .bind(&request_id).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(req_state, "answered", "error={req_err:?}");
 
-    // Verify notification turn queued for manager bot contains "fixture answer"
     let mgr_conv = crate::db::conversation_id(&env.app.db, &manager.id).await.unwrap();
     let notice_content: String = sqlx::query_scalar("SELECT m.content FROM turns t JOIN messages m ON m.turn_id=t.id AND m.role='user' WHERE t.conversation_id=? AND t.queue_class='daemon'")
         .bind(&mgr_conv).fetch_one(&env.app.db).await.unwrap();
     assert!(notice_content.contains("fixture answer"), "notice content must contain fixture answer: {notice_content}");
 
-    // Now verify transition to notified once notice delivery is verified
     let notice_turn: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? AND queue_class='daemon'")
         .bind(&mgr_conv).fetch_one(&env.app.db).await.unwrap();
     sqlx::query("UPDATE turns SET status='in_flight', delivery='ok', delivery_verified=1, run_id=? WHERE id=?")
@@ -5397,7 +5367,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
     env.app.api_turn_spawn(&one).await.unwrap();
     wait_until_completed(&env.app, &one).await;
 
-    // 1. Verify turn 1 ended as COMPLETED (not failed)
     let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
         .bind(&first)
         .fetch_one(&env.app.db)
@@ -5405,7 +5374,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
         .unwrap();
     assert_eq!(status, "completed", "Cap reached turn must end as completed, not failed");
 
-    // 2. Verify assistant reply is the last assistant text
     let assistant_msg: String = sqlx::query_scalar(
         "SELECT content FROM messages WHERE turn_id=? AND role='assistant'",
     )
@@ -5418,7 +5386,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
         "Progress summary: scanned 50% of the codebase, remaining tasks: finish tests."
     );
 
-    // 3. Verify system note exists with exact expected text
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
@@ -5438,7 +5405,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
         "已達本回合 API 呼叫上限（3 次），回覆 continue 可接著做。"
     );
 
-    // 4. Verify no failure notice was posted
     let fail_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM messages WHERE turn_id=? AND content LIKE '%這一回合失敗%'",
     )
@@ -5448,7 +5414,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
     .unwrap();
     assert_eq!(fail_count, 0);
 
-    // 5. Verify join receipt is applied and completed
     let receipt_outcome: String =
         sqlx::query_scalar("SELECT outcome FROM api_bot_join_receipts WHERE turn_id=?")
             .bind(&first)
@@ -5457,7 +5422,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
             .unwrap();
     assert_eq!(receipt_outcome, "completed");
 
-    // 6. Resume: wait for turn 1 finalized proof to be set
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let cursor = env.app.api_bot_runtime.inner.sessions.lock().unwrap().get(&bot).cloned();
@@ -5467,7 +5431,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
         }
     }).await.unwrap();
 
-    // 7. Spawn second turn ("continue") in the same session
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','continue',?)")
         .bind(&second).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let two = ApiTurnKey {
@@ -5478,7 +5441,6 @@ async fn reaching_the_cap_ends_turn_as_completed_with_note_and_can_resume() {
     env.app.api_turn_spawn(&two).await.unwrap();
     wait_until_completed(&env.app, &two).await;
 
-    // 8. Verify second turn completed successfully
     let status2: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
         .bind(&second)
         .fetch_one(&env.app.db)
@@ -5661,10 +5623,8 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
         .unwrap();
     wait_turn_status(&env.app.db, &turn1, "completed").await;
 
-    // Now change agent_md
     std::fs::write(&instructions_file, "V2 UPDATED INSTRUCTIONS").unwrap();
 
-    // Turn 2
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 2 prompt',?)")
         .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let two = ApiTurnKey {
@@ -5678,7 +5638,6 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
         .unwrap();
     wait_turn_status(&env.app.db, &turn2, "completed").await;
 
-    // Turn 3 (still with V2)
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 3 prompt',?)")
         .bind(&turn3).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let three = ApiTurnKey {
@@ -5697,11 +5656,9 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
 
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 3);
-    // 1. System field remains identical across turns 1, 2, and 3
     assert_eq!(reqs[0]["system"], reqs[1]["system"]);
     assert_eq!(reqs[0]["system"], reqs[2]["system"]);
 
-    // 2. Turn 2 user message has update block prepended
     let msgs2 = reqs[1]["messages"].as_array().unwrap();
     let turn2_user = msgs2.iter().rfind(|m| m["role"] == "user").unwrap();
     let blocks2 = turn2_user["content"].as_array().unwrap();
@@ -5711,7 +5668,6 @@ async fn changed_agent_md_keeps_system_identical_and_adds_update_block_once() {
     assert!(update_block.contains("V2 UPDATED INSTRUCTIONS"));
     assert_eq!(blocks2[1]["text"], "turn 2 prompt");
 
-    // 3. Turn 3 user message does NOT have update block (added only once)
     let msgs3 = reqs[2]["messages"].as_array().unwrap();
     let turn3_user = msgs3.iter().rfind(|m| m["role"] == "user").unwrap();
     let blocks3 = turn3_user["content"].as_array().unwrap();
@@ -5816,7 +5772,6 @@ async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
         .unwrap();
     wait_turn_status(&env.app.db, &turn1, "completed").await;
 
-    // Remove "system" field from checkpoint_json in DB
     let old_chk_json: String =
         sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?")
             .bind(&bot)
@@ -5835,7 +5790,6 @@ async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
         .await
         .unwrap();
 
-    // Turn 2 loads the old checkpoint without "system"
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','turn 2 prompt',?)")
         .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let two = ApiTurnKey {
@@ -5856,7 +5810,6 @@ async fn old_checkpoint_without_stored_system_still_loads_and_stores_it() {
     assert_eq!(reqs.len(), 2);
     assert!(!reqs[1]["system"].as_array().unwrap().is_empty());
 
-    // Verify checkpoint now has "system" stored in DB
     let new_chk_json: String =
         sqlx::query_scalar("SELECT checkpoint_json FROM api_bot_sessions WHERE bot_id=?")
             .bind(&bot)
@@ -5936,7 +5889,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
     let (endpoint, shutdown, server) = compaction_test_server(requests.clone(), replies.clone(), hit.clone()).await;
     enable_fake_runtime(&env.app, endpoint, DEADLOCK_TIMEOUT).await;
 
-    // Config: compact_at_input_tokens = 150_000 by default; set turn cost cap to allow turns
     env.app
         .cfg
         .update(|c| {
@@ -5953,7 +5905,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
     let turn3 = crate::db::ulid();
     let conv = crate::db::ulid();
 
-    // Turn 1 response: contains thinking block, compaction block, text, and iterations in usage
     replies.lock().unwrap().push_back(json!({
         "id": "msg_turn1",
         "type": "message",
@@ -5979,7 +5930,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         }
     }));
 
-    // Start turn 1
     insert_bot_and_turn(&env.app, &bot, &run, &turn1, &conv, &env.project_id, "first prompt").await;
     let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
     env.app.api_turn_spawn(&key1).await.unwrap();
@@ -5998,9 +5948,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         }
     }).await.unwrap();
 
-    // Verify Request 1:
-    // 1. Beta header contains compact-2026-01-12
-    // 2. context_management present with trigger 150000
     {
         let reqs = requests.lock().unwrap();
         assert_eq!(reqs.len(), 1);
@@ -6013,7 +5960,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         assert_eq!(cm["edits"][0]["trigger"]["value"], 150_000);
     }
 
-    // 3. Verify system note written for Turn 1 with exact numbers
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
@@ -6026,7 +5972,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         .bind(&turn1).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(sys_note1, "對話已由 API 壓縮（約 180000 tokens → 200 tokens）");
 
-    // Turn 2 response: plain message
     replies.lock().unwrap().push_back(json!({
         "id": "msg_turn2",
         "type": "message",
@@ -6044,7 +5989,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         }
     }));
 
-    // Start turn 2
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','second prompt',?)")
         .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
@@ -6052,9 +5996,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
     wait_until_completed(&env.app, &key2).await;
 
-    // Verify Request 2:
-    // - compaction block is resent
-    // - thinking block before it is NOT resent
     {
         let reqs = requests.lock().unwrap();
         assert_eq!(reqs.len(), 2);
@@ -6065,7 +6006,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         assert!(turn1_assistant.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")), "compaction block must be resent");
     }
 
-    // Now test: 0 disables both beta header and context_management
     env.app
         .cfg
         .update(|c| {
@@ -6096,7 +6036,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         }
     }));
 
-    // Start turn 3
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','third prompt',?)")
         .bind(&turn3).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let key3 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn3.clone() };
@@ -6104,8 +6043,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
     wait_until_completed(&env.app, &key3).await;
 
-    // Verify Request 3:
-    // - 0 disables both: beta header does not have compact-2026-01-12, context_management is None
     {
         let reqs = requests.lock().unwrap();
         assert_eq!(reqs.len(), 3);
@@ -6115,7 +6052,6 @@ async fn api_bot_server_side_compaction_threshold_headers_resending_and_notes() 
         assert!(body3.get("context_management").is_none(), "0 must disable context_management in body");
     }
 
-    // Verify system note for Turn 3 without numbers: 「對話已由 API 壓縮」
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE turn_id=? AND role='system'")
@@ -6195,12 +6131,10 @@ async fn api_bot_streamed_turn_publishes_progress_and_stores_the_same_message() 
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
     wait_until_completed(&env.app, &key).await;
 
-    // 組出來的訊息與非串流回應相同：assistant 訊息內容就是兩段 delta 接起來。
     let reply: String = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
         .bind(&turn).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(reply, "streamed answer");
 
-    // 進度幀：同 turn、帶目前為止的文字與估價。
     let mut frames = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if ev.kind == "turn_progress" { frames.push(ev.data); }
@@ -6262,7 +6196,6 @@ async fn api_bot_next_turn_after_a_mid_stream_abort_resends_and_completes() {
     spawn_retrying_busy(&env.app, &key2).await;
     wait_until_completed(&env.app, &key2).await;
 
-    // 第二次請求帶著第一個（沒答完的）問題與新問題。
     let reqs = requests.lock().unwrap();
     assert_eq!(reqs.len(), 2);
     let sent: Vec<String> = reqs[1]["messages"].as_array().unwrap().iter().map(|m| m.to_string()).collect();
@@ -6365,7 +6298,7 @@ async fn api_bot_force_interrupt_ends_the_turn_keeps_the_run_and_the_next_prompt
     let key1 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn1.clone() };
     env.app.api_turn_spawn(&key1).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, hit.notified()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await; // 讓串流真的卡在 message_start 之後
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     let started = std::time::Instant::now();
     crate::lifecycle::interrupt_turn(&env.app, &bot, Some(&turn1)).await.expect("interrupt");
@@ -6375,7 +6308,6 @@ async fn api_bot_force_interrupt_ends_the_turn_keeps_the_run_and_the_next_prompt
     assert_eq!(status, "failed");
     let run_state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(run_state, "running", "只中斷回合，不停 run");
-    // 失敗通知在回合收成 failed 之後才寫（獨立的一筆），等它落地。
     let notice = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
             let found: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='system'").bind(&turn1).fetch_optional(&env.app.db).await.unwrap();
@@ -6387,13 +6319,11 @@ async fn api_bot_force_interrupt_ends_the_turn_keeps_the_run_and_the_next_prompt
     let attempt: String = sqlx::query_scalar("SELECT state FROM api_bot_attempts WHERE turn_id=?").bind(&turn1).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(attempt, "unknown", "串流被中斷：不知道已產生多少，保留預留額");
 
-    // 已經不在飛：409 turn_not_in_flight（帶指名與不指名兩種）。
     for expect in [Some(turn1.as_str()), None] {
         let err = crate::lifecycle::interrupt_turn(&env.app, &bot, expect).await.unwrap_err();
         assert!(format!("{err:?}").contains("turn_not_in_flight"), "{err:?}");
     }
 
-    // 緊接著的下一則 prompt：同一個 run 送出並完成。
     sqlx::query("INSERT INTO turns(id,conversation_id,run_id,origin,status,delivery,prompt_text,created_at) VALUES(?,?,?,'web','in_flight','ok','next question',?)")
         .bind(&turn2).bind(&conv).bind(&run).bind(crate::db::now()).execute(&env.app.db).await.unwrap();
     let key2 = ApiTurnKey { bot_id: bot.clone(), run_id: run.clone(), turn_id: turn2.clone() };
@@ -6498,7 +6428,6 @@ async fn recording_bodies_server(
         bodies.lock().unwrap().push(body);
         calls.fetch_add(1, Ordering::SeqCst);
         hit.notify_one();
-        // 真的 API 回的就是請求的模型；echo 回去，不然 adapter 會當成模型不符。
         let model = bodies.lock().unwrap().last().and_then(|b| b["model"].as_str().map(str::to_owned)).unwrap_or_default();
         Json(json!({
             "id":"fixture-message",
@@ -6649,7 +6578,6 @@ async fn native_model_switch_refusals_are_http_409_with_stable_reason() {
     assert!(status.contains(" 409 "), "start status: {status}");
     assert_eq!(body["reason"], "api_model_changed");
     assert_eq!(body["current_model"], "unsupported-model");
-    // 送 prompt 要在 run 還在跑時才會走到 continuity 檢查：先用 opus 重新啟動，再把模型換成不支援的。
     sqlx::query("UPDATE bots SET model=? WHERE id=?").bind(am_config::API_BOT_MODEL).bind(&bot).execute(&app.db).await.unwrap();
     crate::lifecycle::start_bot_with(&app, &bot, crate::lifecycle::StartOpts { resume_native: true, resume_required: true, ..Default::default() }).await.unwrap();
     sqlx::query("UPDATE bots SET model='unsupported-model' WHERE id=?").bind(&bot).execute(&app.db).await.unwrap();
@@ -6665,8 +6593,6 @@ async fn native_model_switch_refusals_are_http_409_with_stable_reason() {
     tokio::time::timeout(DEADLOCK_TIMEOUT, server).await.unwrap().unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, provider).await.unwrap().unwrap();
 }
-
-// ───────────── openai-api（D2b-2）：啟動的具名拒絕、整回合（兩個工具呼叫）、帳記在 openai ─────────────
 
 const OPENAI_TEST_KEY: &str = "sk-openai-test-only";
 
@@ -6775,7 +6701,6 @@ async fn openai_api_native_start_reads_only_openai_settings_and_names_its_refusa
     let reason = |r: Result<crate::lifecycle::api_bot_port::ApiNativeStartResult, E>| match r { Err(E::Refused(x)) => x, Err(E::Unconfirmed) => "UNCONFIRMED", Err(_) => "OTHER", Ok(_) => "OK" };
     let go = || env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: false });
     assert_eq!(reason(go().await), "openai_not_configured");
-    // Claude 那邊全開也沒用：openai-api 不讀 Claude 的設定與 key。
     env.app.cfg.update(|c| { c.claude_api.enabled = true; c.claude_api.api_bot.enabled = true; c.claude_api.api_bot.max_turn_cost_microusd = Some(5_000_000); Ok(()) }).await.unwrap();
     assert_eq!(reason(go().await), "openai_not_configured");
     let missing = env.dir.join("no-such-openai-key").to_string_lossy().into_owned();
@@ -6785,13 +6710,11 @@ async fn openai_api_native_start_reads_only_openai_settings_and_names_its_refusa
     crate::key_file::stage_key(&key.to_string_lossy(), OPENAI_TEST_KEY).unwrap().publish().unwrap();
     let key = key.to_string_lossy().into_owned();
     env.app.cfg.update(move |c| { c.openai_api.key_file = key; Ok(()) }).await.unwrap();
-    // 單回合上限留空＝不設上限：照常過啟動檢查（不再以 cap_missing 擋），也不是設定錯誤。
     assert_ne!(reason(go().await), "api_bot_turn_cost_cap_missing", "openai 沒設上限也能啟動");
     assert_ne!(reason(go().await), "api_bot_config_invalid");
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(0); Ok(()) }).await.unwrap();
     assert_eq!(reason(go().await), "api_bot_config_invalid", "0 是無效值，不是不限");
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = None; Ok(()) }).await.unwrap();
-    // 上限很低也不會被 Claude 的啟動預算常數擋（`api_bot_turn_cost_cap_too_low` 是 Claude 的價）。
     env.app.cfg.update(|c| { c.openai_api.api_bot.max_turn_cost_microusd = Some(1000); Ok(()) }).await.unwrap();
     assert_ne!(reason(go().await), "api_bot_turn_cost_cap_too_low");
     let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=? AND state NOT IN ('running','starting')").bind(&bot).fetch_one(&env.app.db).await.unwrap();
@@ -6817,7 +6740,6 @@ async fn openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls() {
             let found: Option<String> = sqlx::query_scalar("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.role='assistant' ORDER BY m.created_at DESC LIMIT 1")
                 .bind(&bot).fetch_optional(&env.app.db).await.unwrap();
             if let Some(text) = found { break text; }
-            // 回合失敗就不用等到逾時：把原因印出來。
             let failed: Option<(String, Option<String>)> = sqlx::query_as("SELECT t.status, t.start_error FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE c.bot_id=? AND t.status='failed'").bind(&bot).fetch_optional(&env.app.db).await.unwrap();
             if let Some(failed) = failed {
                 let notes: Vec<String> = sqlx::query_scalar("SELECT m.role || ': ' || m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=?").bind(&bot).fetch_all(&env.app.db).await.unwrap();
@@ -6847,7 +6769,6 @@ async fn openai_api_bot_starts_and_finishes_a_turn_with_two_tool_calls() {
     assert_eq!(input[4], json!({"type": "function_call_output", "call_id": "call_1", "output": "ran call_1"}));
     assert_eq!(input[5], json!({"type": "function_call_output", "call_id": "call_2", "output": "ran call_2"}));
 
-    // 帳：兩筆都記在 openai、標準層級、已結算；金額＝OpenAI 價表（900→90、40→20；1100→110、12→6 微美元）。
     let attempts: Vec<(String, Option<String>, String, Option<i64>)> = sqlx::query_as("SELECT provider, service_tier, state, estimated_microusd FROM api_bot_attempts WHERE bot_id=? ORDER BY ordinal").bind(&bot).fetch_all(&env.app.db).await.unwrap();
     assert_eq!(attempts, [
         ("openai".to_string(), Some("standard".to_string()), "recorded".to_string(), Some(110)),
@@ -6889,7 +6810,6 @@ async fn openai_api_turn_that_is_refused_with_the_key_echoed_leaks_it_into_no_ws
         axum::serve(listener, app).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
     });
 
-    // 用 sentinel 當 key：整個 `[openai_api]` 設定與 key 檔都從這個值來。
     let key_path = env.dir.join("openai-ws-sentinel-key");
     crate::key_file::stage_key(&key_path.to_string_lossy(), WS_SENTINEL).unwrap().publish().unwrap();
     let key_file = key_path.to_string_lossy().into_owned();
@@ -6935,14 +6855,12 @@ async fn openai_api_turn_that_is_refused_with_the_key_echoed_leaks_it_into_no_ws
     assert_eq!(status, "failed", "401 應該讓回合失敗");
     assert!(seen.load(Ordering::SeqCst) >= 1, "確實有打到假上游");
 
-    // 把這段期間所有 WS 事件序列化（kind＋data 的 Debug／JSON 兩種都收）。
     let mut events = String::new();
     while let Ok(ev) = ws.try_recv() {
         events.push_str(&format!("{} {} {:?}\n", ev.kind, ev.data, ev.data));
     }
     assert!(!events.is_empty(), "應該有 WS 事件可以檢查");
     assert!(!events.contains(WS_SENTINEL), "WS 事件洩漏 key：{events}");
-    // 上游錯誤原文現在會以使用者可見的失敗訊息呈現（25c22663a），但 key 必須已被遮蔽。
     assert!(!events.contains("Incorrect API key provided: sk-"), "上游錯誤裡的 key 沒有遮蔽：{events}");
 }
 
@@ -6994,14 +6912,10 @@ async fn openai_api_session_resumes_after_a_daemon_restart_with_its_history() {
     let attempts: Vec<(String, String)> = sqlx::query_as("SELECT provider, state FROM api_bot_attempts WHERE bot_id=? ORDER BY created_at, ordinal").bind(&bot).fetch_all(&app.db).await.unwrap();
     assert_eq!(attempts, vec![("openai".to_string(), "recorded".to_string()); 3]);
 
-    // 快取資訊：openai-api 沒有 Claude 的 5 分鐘／1 小時倒數。
     let cache = crate::api_bot_turn_cost::cache_info(&app.db, &bot).await.unwrap();
     assert!(cache["last_request_at"].is_string() && cache["ttl_secs"].is_null() && cache["expires_at"].is_null(), "{cache}");
-    // 回合時間線：工具從 OpenAI 的 function_call 看得到。
-    // （工具的耗時是回合外的背景寫入：等兩筆都落地。兩個工具同一次回應，各記各的、不互相蓋掉。）
     let timeline = tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
-            // 兩筆都記在叫它們的那一次請求（ordinal 0）上，不會落到下一次請求那一列。
             let recorded: Vec<Option<i64>> = sqlx::query_scalar("SELECT json_array_length(usage_json, '$.tools') FROM api_bot_attempts WHERE turn_id=? ORDER BY ordinal").bind(&key.turn_id).fetch_all(&app.db).await.unwrap();
             assert!(recorded.get(1).copied().flatten().is_none(), "{recorded:?}");
             if recorded.first().copied().flatten() == Some(2) { break super::super::timeline::get_turn_timeline(&app.db, &bot, &key.turn_id).await.unwrap().unwrap(); }
@@ -7010,7 +6924,6 @@ async fn openai_api_session_resumes_after_a_daemon_restart_with_its_history() {
     }).await.expect("both tool records land");
     let tools = timeline["timeline"].as_array().map(|items| items.iter().filter(|i| i["type"] == "tool").count()).unwrap_or(0);
     assert_eq!(tools, 2, "{timeline}");
-    // 花費拆分用 OpenAI 的價表（不是 Claude 的）：第一回合 2000 輸入 ×$0.10/M＋52 輸出 ×$0.50/M，合計就是帳上的 226 微美元。
     let breakdown = &timeline["summary"]["breakdown"];
     let usd = |v: &Value| (v.as_f64().unwrap() * 1e9).round() as i64;
     assert_eq!((usd(&breakdown["input"]["cost_usd"]), usd(&breakdown["output"]["cost_usd"]), usd(&timeline["summary"]["total_cost_usd"])), (200_000, 26_000, 226_000), "{timeline}");
@@ -7038,13 +6951,11 @@ async fn openai_api_advisor_relay_end_to_end_delivers_exactly_one_result_notice(
     let body: crate::api::PromptIn = serde_json::from_value(json!({"text": "Which commands should run?", "client_request_id": "oa-e2e-1", "expect_result": true})).unwrap();
     let res = crate::api::prompt_bot(axum::extract::State(env.app.clone()), axum::extract::Path(advisor.clone()), headers, axum::Extension(crate::api::RequestPrincipal::Bot(manager.id.clone())), axum::Json(body)).await.unwrap();
     let val: Value = serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 65536).await.unwrap()).unwrap();
-    // 顧問沒在跑：派工先把它啟動，請求留在 pending，由背景補送。
     assert_eq!(val["delivery"], "pending", "{val}");
     let request_id = val["request_id"].as_str().unwrap().to_string();
     let running: Option<String> = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? AND ended_at IS NULL").bind(&advisor).fetch_optional(&env.app.db).await.unwrap();
     assert_eq!(running.as_deref(), Some("running"), "派工自動啟動了 openai-api 顧問");
 
-    // 掃到請求有了回合、回合完成、請求 answered 為止。
     sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&mgr_run).execute(&env.app.db).await.unwrap();
     tokio::time::timeout(DEADLOCK_TIMEOUT, async {
         loop {
@@ -7073,7 +6984,6 @@ async fn openai_api_advisor_relay_end_to_end_delivers_exactly_one_result_notice(
     let attempts: Vec<String> = sqlx::query_scalar("SELECT provider FROM api_bot_attempts WHERE bot_id=?").bind(&advisor).fetch_all(&env.app.db).await.unwrap();
     assert_eq!(attempts, ["openai", "openai"]);
 
-    // 通知送達確認後請求進 notified，仍然只有那一則。
     sqlx::query("UPDATE turns SET status='in_flight', delivery='ok', delivery_verified=1, run_id=? WHERE id=?").bind(&mgr_run).bind(&notices[0].0).execute(&env.app.db).await.unwrap();
     crate::runners::relay_requests::sweep(&env.app).await;
     let state: String = sqlx::query_scalar("SELECT state FROM relay_requests WHERE id=?").bind(&request_id).fetch_one(&env.app.db).await.unwrap();
@@ -7113,12 +7023,10 @@ async fn an_already_running_api_bot_answers_active_run_for_plain_resume_only() {
         Err(e) => panic!("一般續接要回 ActiveRun，實際 {e:?}"),
         Ok(_) => panic!("已在跑的 bot 不該另開一個 run"),
     }
-    // 要求特定 resume：不合併，照舊報錯（不是 ActiveRun）。
     match env.app.api_native_start(&bot, ApiNativeStartMode::Resume { required: true }).await {
         Err(E::ActiveRun { .. }) => panic!("required resume 不能合併"),
         _ => {}
     }
-    // Fresh：不合併（照舊）。
     let fresh = ApiNativeStartMode::Fresh(ApiFreshTarget { session_id: "s-none".into(), generation: 1 });
     match env.app.api_native_start(&bot, fresh).await {
         Err(E::ActiveRun { .. }) => panic!("Fresh 不能合併"),

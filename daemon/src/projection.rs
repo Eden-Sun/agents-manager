@@ -123,7 +123,6 @@ pub fn delete_from_config<'a>(
 
 async fn delete_from_config_at(at: &'static Location<'static>, store: &ConfigStore, pool: &SqlitePool, target: DeleteTarget<'_>) -> Result<Deleting> {
     let _g = PROJECTION.lock().await;
-    // 臨界區內 DB 的 user bot／project 只有投影會改，所以這份快照在寫 config 之前都成立。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
@@ -218,7 +217,6 @@ fn removals(
 /// 只查**投影自己會擋**的事。需要 DB 才判得出來的安全閘（大量軟刪）不在這裡：那條路是刪除
 /// （`delete_from_config`），它本來就是先在記憶體算出 `next`、對著 DB 快照驗過才 `*cfg = next`。
 pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
-    // 包成具名型別，呼叫端才分得出「你的設定有問題」與「上游壞掉」（api.rs 的 `cfg_err`）。
     check(cfg).map_err(|e| anyhow::Error::new(ConfigInvalid(format!("{e:#}"))))
 }
 
@@ -236,12 +234,7 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         }
         if project.mode == "expert" && project.bots.iter().filter(|b| b.role.as_deref() == Some("manager")).count() != 1 { bail!("expert project requires exactly one manager"); }
     }
-    // #639：超大的 lease_ttl_secs 會在 acquire 時 `as i64` 變負數或讓 DateTime 加法 panic。
     crate::config::checked_build_lease_ttl(cfg.build.lease_ttl_secs).map_err(anyhow::Error::msg)?;
-    // `[[hosts]]` 以前完全沒驗（issue #506）：`create_host` 擋的四件事只擋得住 API，手改 TOML
-    // 這條全部放行。最要命的是 `name = "local"`——`hosts::apply_config` 會照著它把本機那顆
-    // `HostConn` 換成 `HostConn::remote`，socket 指到一個沒人在聽的 `<instance>/local.sock`、
-    // `is_local()` 翻成 false，本機的一切開始走 ssh，而 log 只留一行 `host configured`。
     let mut seen_hosts: HashSet<&str> = HashSet::new();
     for h in &cfg.hosts {
         if let Some(raw) = &h.daemon_url {
@@ -254,10 +247,6 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         if !valid_host_name(&h.name) {
             bail!("invalid host name `{}` (must match {})", h.name, crate::config::SLUG_NAME_RE);
         }
-        // 一律**先 trim 再驗空**（i92b review）。前後空白本身不擋開機——`project_inner` 會把它
-        // trim 掉寫回去（跟補 id／canonical path 同一條路），一個手滑的空白不該讓 daemon 起不來。
-        // `herdr_session` 也要驗：serde 的 `default` 只在**缺 key** 時生效，手寫 `herdr_session = ""`
-        // 照樣進得來，之後就是 `herdr --session ''` 接到一個空的 session 名。
         if h.ssh.trim().is_empty() {
             bail!("host `{}` has an empty ssh target", h.name);
         }
@@ -290,8 +279,6 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         crate::bot_input::check_env(&i.env).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
         crate::bot_input::check_args(&i.args).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
     }
-    // #1351：id 不能重複。兩列同 id 會在投影時靜默合成一顆（後面那列蓋掉前面那列）；bot id 是全域唯一的（DB 的主鍵）。
-    // 名字只在同一個專案裡不能重複（`bots_name_project_live` 唯一索引）。沒有 id 的列不算重複：投影會各補一個新的。
     let mut seen_projects: HashSet<&str> = HashSet::new();
     let mut seen_bots: HashSet<&str> = HashSet::new();
     for p in &cfg.projects {
@@ -303,7 +290,6 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
                 bail!("duplicate project id `{id}` (project `{}`); remove the copied `id` line so a new one is generated", p.label);
             }
         }
-        // #708：空字串不是「本機管」也不是任何一台主機；要收回就整個拿掉這個 key。
         if p.handed_off_to.as_deref().is_some_and(|h| h.trim().is_empty()) {
             bail!("project `{}` has an empty handed_off_to (remove the key to manage it here)", p.label);
         }
@@ -329,17 +315,9 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
             crate::bot_input::check_env(&b.env).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;
             crate::bot_input::check_args(&b.args).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;
             if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
-                // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
-                // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
-                // owns those, so an unknown name is only an error outside that set.
-                // 身份以 `(host, name)` 為鍵（`26a14c2`）：本機的 `work`（claude）與 mac_builder 的 `work`（codex）可以並存，
-                // 只看名字會拿到第一筆同名的、判成 kind 不符。規則跟 API 的 `tools::identity_for_host`
-                // 同一份（`merge_identities`）。這裡拿不到那台偵測到的 `ccN`，所以傳 `None`：沒寫 host 的
-                // `ccN` 在遠端先不給，落到「shell alias 本來就合法」那條。
                 let merged = crate::tools::merge_identities(&cfg.identities, &p.host, None);
                 match merged.iter().map(|(i, _)| i).find(|i| i.name == idn) {
                     None if crate::tools::SHELL_IDENTITY_NAMES.contains(&idn) => {}
-                    // 內建的 agy 預設帳號（`ag0`；舊資料記成 `agy`）不寫在 `[[identities]]`。
                     None if crate::tools::is_builtin_default_identity(&b.kind, idn) => {}
                     None => bail!("bot `{}` references unknown identity `{idn}`", b.name),
                     Some(i) if i.kind != b.kind => {
@@ -384,15 +362,11 @@ where
     F: FnOnce(&mut crate::config::ConfigFile) -> Result<T>,
 {
     let _g = PROJECTION.lock().await;
-    // 投影失敗要把這次寫進去的 TOML 退回。child 名字不在 config 裡，唯一約束會在寫檔之後才爆，
-    // 不退的話這個檔之後每一次投影都 502（#654）。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
     let owned = pool.load_owned().await?;
     let recent = recently_removed_bots(pool).await?;
-    // 在 ConfigStore 同一把鎖內重讀、取更新前快照並套用 mutation。不可用 no-op update 重讀：它會先驗證
-    // 舊設定，讓合法 mutation 無法修復外部手改後的語意錯誤（#1658）。最終 next 仍由 update_guarded_at 完整驗證。
     let (snapshot, out) = match store
         .update_guarded_at(
             at,
@@ -421,9 +395,6 @@ where
             return Err(e);
         }
     };
-    // 寫檔已經過了同一份閘門，這裡是投影（`delete_from_config` 也是同一個形狀：拿著 `_g` 直接叫
-    // `project_inner`，不重新拿鎖）。DB 沒被別人動過（還在臨界區內），所以 `project_inner` 自己那次
-    // `guard_removals` 一定過，純粹是既有流程（補 id、upsert、soft-delete）的重用。
     if let Err(e) = project_inner(at, store, pool, None, false).await {
         match restore_config(at, store, snapshot).await {
             Ok(()) => tracing::warn!(caller = %at, "投影失敗，config.toml 已退回這次寫入之前"),
@@ -449,8 +420,6 @@ async fn project_inner(
     allow: Option<&Deleting>,
     allow_bulk: bool,
 ) -> Result<()> {
-    // 1. fill in ids / canonicalize paths, write back only if something changed.
-    //    連帶在落盤前套用刪除閘門：補 id 的寫回也不能先於拒絕決定。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
@@ -461,10 +430,6 @@ async fn project_inner(
             at,
             |cfg| {
                 let mut dirty = false;
-                // host 的 ssh／herdr_session 跟著 id／canonical path 一起正規化寫回（i92b review）：
-                // `create_host` 會 `ssh.trim()`，手改 TOML 這條沒人 trim，`ssh " me@host "` 會原樣
-                // 帶到 ssh 指令上變成一個查不出原因的連不上。空的 `herdr_session` 補回預設，跟「整個
-                // key 省略」同一個結果。
                 for h in cfg.hosts.iter_mut() {
                     for (field, default) in
                         [(&mut h.ssh, None), (&mut h.herdr_session, Some(crate::config::DEFAULT_HERDR_SESSION))]
@@ -485,8 +450,6 @@ async fn project_inner(
                         p.id = Some(db::ulid());
                         dirty = true;
                     }
-                    // Only local paths can be canonicalized here; a remote path was already
-                    // canonicalized on its host when the project was created (SPEC §11.6).
                     if p.host == crate::config::LOCAL_HOST {
                         if let Ok(c) = canonical_path(&p.path) {
                             if c != p.path {
@@ -542,14 +505,11 @@ async fn project_inner(
     let live_bots: HashSet<String> =
         cfg.projects.iter().flat_map(|p| p.bots.iter()).filter_map(|b| b.id.clone()).collect();
 
-    // 任何寫入之前先擋：投錯 DB／被換掉的 config 長得就像「config 裡什麼都沒有」。
     if let Err(e) = guard_removals(pool, &live_projects, &live_bots, allow, allow_bulk).await {
         alert_on_refusal(pool, &e).await;
         return Err(e);
     }
 
-    // 投影的 DB 寫入併成一個交易（#1613）：中途失敗（撞名）時，前面已經寫進去的列跟著退回，才跟 config 的退回對得上。
-    // 要軟刪的清單在交易開始前取（讀取不改狀態；交易裡的 upsert 只會把仍在 config 裡的列弄活，不影響它）。
     let live_bots_before = db::live_bots(pool).await?;
     let live_projects_before = db::live_projects(pool).await?;
     let mut tx = db::begin_write(pool).await?;
@@ -567,7 +527,6 @@ async fn project_inner(
         .bind(&p.path)
         .bind(&p.label)
         .bind(&p.host)
-        // 陣列位置就是側欄順序（`POST /api/order` 會重排這個陣列）。
         .bind(p_at as i64)
         .bind(p.handed_off_to.as_deref().map(str::trim))
         .bind(&p.mode)
@@ -599,7 +558,6 @@ async fn project_inner(
             .bind(&b.kind)
             .bind(b.model.as_deref().filter(|s| !s.trim().is_empty()).map(|m| crate::models::canonical_model(&b.kind, m.trim())))
             .bind(&b.role)
-            // v4.0: effort is kind-dependent; a hand-edited value that the kind rejects is dropped.
             .bind(crate::config::normalize_effort(&b.kind, b.effort.as_deref()).unwrap_or(None))
             .bind(b.fast as i64)
             .bind(b.persona.as_deref().filter(|s| !s.trim().is_empty()))
@@ -618,7 +576,6 @@ async fn project_inner(
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-            // `db::conversation_id` 只收 pool；這裡在同一個交易裡建（同一條 ON CONFLICT 語意）。
             sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?) ON CONFLICT(bot_id) DO NOTHING")
                 .bind(db::ulid())
                 .bind(&bid)
@@ -628,10 +585,6 @@ async fn project_inner(
         }
     }
 
-    // 2. soft-delete rows no longer in the TOML.
-    //
-    // `child` bots (agents a bot spawned, adopted by the reconcile) never enter config.toml,
-    // so the "not in the TOML ⇒ deleted" rule must not touch them.
     for b in live_bots_before {
         if b.managed_by != "user" {
             continue;
@@ -707,7 +660,6 @@ async fn recently_removed_bots(pool: &SqlitePool) -> Result<usize> {
 async fn alert_on_refusal(pool: &SqlitePool, e: &anyhow::Error) {
     let Some(r) = e.downcast_ref::<ProjectionRefused>() else { return };
     let reason = if r.supervisor_children.is_empty() { "projection_removal_refused" } else { "supervisor_bot_removal_refused" };
-    // dedupe 的 subject＝這次要被拿掉的那幾顆（review d77434c0 #4）：換一批 bot 就是另一則，同一批連續投影才收斂。
     let subject = if r.supervisor_children.is_empty() { r.bots.join("+") } else { r.supervisor_children.join("+") };
     pool.ops_alert(reason, &subject, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller())).await;
 }
@@ -724,14 +676,12 @@ fn bulk_removal_check(
     recently_removed: usize,
 ) -> Result<(), ProjectionRefused> {
     let (gone_bots, gone_projects) = removals(db_bots, db_projects, live_projects, live_bots, None);
-    // AGM 的 bot（總管／角色本身、它們的 child、總管專案裡的工人）：隱式投影一律不刪（issue #406）。
     let supervisor_children: Vec<String> =
         db_bots.iter().filter(|b| !live_bots.contains(&b.id) && owned.owns(b)).map(|b| b.name.clone()).collect();
     if gone_bots.is_empty() && gone_projects.is_empty() {
         return Ok(());
     }
     let empty_config = live_projects.is_empty();
-    // 窗口內已經刪掉的也算：兩次投影各刪 1 顆＝這一次要刪第 2 顆。
     let bots_in_window = if gone_bots.is_empty() { 0 } else { gone_bots.len() + recently_removed };
     let bot_limit_exceeded = bots_in_window > MAX_REMOVED_BOTS;
     let bulk = too_many(bots_in_window, db_bots.len() + recently_removed, MAX_REMOVED_BOTS)
@@ -777,13 +727,10 @@ async fn guard_removals(
     allow: Option<&Deleting>,
     allow_bulk: bool,
 ) -> Result<()> {
-    // `child` bot 本來就不在 config.toml 裡，不算「少掉」。
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
 
-    // 刪除模式：授權名單以外只要還有一列會不見就拒絕，不看門檻、也不吃 env 放行
-    // （`delete_from_config` 在寫檔前已經擋過一次，這裡是投影當下的最後一道）。
     if let Some(allow) = allow {
         let (gone_bots, gone_projects) = removals(&db_bots, &db_projects, live_projects, live_bots, Some(allow));
         if gone_bots.is_empty() && gone_projects.is_empty() {
@@ -859,7 +806,6 @@ mod tests {
             sqlx::query_as("SELECT id, kind FROM bots ORDER BY rowid").fetch_all(&pool).await.unwrap();
         assert_eq!(before_bots.len(), 1, "投影過了，DB 有那顆 bot");
 
-        // 三種投影一定會擋的修改，每一種都不可以留下痕跡。
         let cases: Vec<(&str, Box<dyn Fn(&mut crate::config::ConfigFile)>)> = vec![
             (
                 "unknown identity",
@@ -894,7 +840,6 @@ mod tests {
             assert_eq!(store.get().await, before_cfg, "{what}: 記憶體裡那份也不能變");
         }
 
-        // DB 同樣沒被碰過，而且合法的修改照樣走得通（不是把整條路堵死）。
         let after_bots: Vec<(String, String)> =
             sqlx::query_as("SELECT id, kind FROM bots ORDER BY rowid").fetch_all(&pool).await.unwrap();
         assert_eq!(after_bots, before_bots, "DB 不該被動到");
@@ -914,11 +859,9 @@ mod tests {
         use crate::config::{ConfigFile, HostCfg};
         let host = |name: &str, ssh: &str| HostCfg { name: name.into(), ssh: ssh.into(), herdr_session: "agents-manager".into(), ..Default::default() };
         let with = |hosts: Vec<HostCfg>| ConfigFile { hosts, ..Default::default() };
-        // serde 的 `default` 只在缺 key 時生效：手寫一個空字串照樣進得來。
         let blank_session = |s: &str| HostCfg { daemon_url: None, herdr_session: s.into(), ..host("mac_builder", "me@10.0.0.2") };
 
         validate(&with(vec![host("mac_builder", "me@10.0.0.2")])).expect("一台正常的遠端要過");
-        // 前後空白交給 `project_inner` trim 掉寫回，不在這裡擋開機。
         validate(&with(vec![host("mac_builder", " me@10.0.0.2 ")])).expect("空白是正規化的事，不是拒絕的事");
 
         for (what, cfg, needle) in [
@@ -1121,7 +1064,6 @@ mod tests {
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_config(&store, &pool).await.expect("mac_builder 的 work 是 codex，跟 bot 一致");
 
-        // 在 mac_builder 上綁 claude：那台的 work 是 codex，照樣擋（不會去拿本機那份 claude 放行）。
         std::fs::write(&path, text("claude")).unwrap();
         let err = project_config(&store, &pool).await.unwrap_err().to_string();
         assert!(err.contains("is for codex"), "{err}");
@@ -1148,7 +1090,6 @@ mod tests {
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "拒絕投影時一列都不能動");
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
 
-        // 人確認過、帶 env 重啟也不能一次軟刪多顆 bot。
         let err = project_config_at_startup(&crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, true)
             .await
             .unwrap_err()
@@ -1181,15 +1122,12 @@ mod tests {
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
-        // 使用者清空 config，帶 env 重啟：空設定的舊式明確覆寫仍放行一顆 bot。
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
-        // 放行與否用參數傳進去，不改整個行程的環境變數（測試平行跑時 set_var 是資料競爭）。
         let started = project_config_at_startup(&store, &pool, true).await;
         started.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 0);
 
-        // DB 有一顆 bot 時，外部清空後 runtime 重投不能靠 process env 放行。
         std::fs::write(&path, config_text(&["b1"])).unwrap();
         project_config_at_startup(&crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, false).await.unwrap();
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
@@ -1217,14 +1155,12 @@ mod tests {
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
-        // daemon 還活著、store 還在手上，檔案被外面換成另一份（這裡是空的）。
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         store.update(|_| Ok(())).await.unwrap();
         let err = project_config(&store, &pool).await.unwrap_err().to_string();
         assert!(err.contains("拒絕投影"), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
 
-        // 刪除 API 找不到目標（TOML 被清空）就拒絕：不會因為有人按了一次刪除就全部放行。
         let err = delete_from_config(&store, &pool, DeleteTarget::Bot("b1")).await.unwrap_err();
         assert!(err.downcast_ref::<NotInConfig>().is_some(), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4, "一列都不能動");
@@ -1346,7 +1282,6 @@ mod tests {
         .unwrap();
         let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
 
-        // 使用者手改檔案（記憶體還不知道）：改 `[server] herdr_session`，也把 bot 名改成可解析但不合法。
         let edited = config_text(&["alfa"])
             .replacen("[server]\nlisten = '127.0.0.1:7788'\n", "[server]\nlisten = '127.0.0.1:7788'\nherdr_session = 'hand-edited'\n", 1)
             .replacen("name = 'alfa'", "name = 'bad@name'", 1);
@@ -1653,8 +1588,6 @@ mod tests {
         assert!(validate(&cfg).is_err(), "BotCfg args 也必須拒絕 NUL");
     }
 
-    // ---- issue #406 ----
-
     async fn ops_alerts(pool: &SqlitePool) -> Vec<String> {
         sqlx::query_scalar("SELECT payload_json FROM supervisor_inbox WHERE kind = 'ops_alert' ORDER BY created_at")
             .fetch_all(pool)
@@ -1699,7 +1632,6 @@ mod tests {
         assert!(db::bot(&pool, "b2").await.unwrap().unwrap().deleted_at.is_none(), "第 2 顆不能刪");
         assert!(ops_alerts(&pool).await.iter().any(|a| a.contains("projection_removal_refused")));
 
-        // 窗口過了（把第 1 顆的 deleted_at 往前推）就又能刪 1 顆。
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b1'").bind(db::iso_in(-(REMOVAL_WINDOW_SECS + 5))).execute(&pool).await.unwrap();
         project_config(&store, &pool).await.expect("窗口外");
         assert!(db::bot(&pool, "b2").await.unwrap().unwrap().deleted_at.is_some());

@@ -17,11 +17,9 @@ async fn read_handshake(s: &mut tokio::net::TcpStream) -> String {
 #[tokio::test]
 async fn an_event_emitted_between_subscribe_and_backlog_is_sent_once() {
     let env = crate::testing::env().await;
-    // 環裡先有一則，`since` 才有東西可以往後接。
     env.app.emit("bot_changed", json!({"mark": "before"})).await;
     let since = env.app.current_seq();
 
-    // 訂閱之後、讀環之前送出的那一則。key 用 data-dir，平行測試不會互相觸發。
     let app2 = env.app.clone();
     crate::lifecycle::race_point::arm("ws_subscribed", &env.app.data_dir.display().to_string(), move || async move {
         app2.emit("bot_changed", json!({"mark": "in_window"})).await;
@@ -41,12 +39,10 @@ async fn an_event_emitted_between_subscribe_and_backlog_is_sent_once() {
     let head = read_handshake(&mut client).await;
     assert!(head.starts_with("HTTP/1.1 101"), "要真的升級成 websocket：{head}");
 
-    // 第一幀＝backlog 裡的那一則（沒有它就是漏送，不是重複）。
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
     assert_eq!(first["data"]["mark"], "in_window", "窗口裡那一則要從 backlog 送出來：{first}");
     let first_seq = first["seq"].as_u64().unwrap();
 
-    // 哨兵在第一幀之後才送，所以它一定排在「重複的那一則」後面：下一幀是誰就見分曉。
     env.app.emit("bot_changed", json!({"mark": "sentinel"})).await;
     let second = tokio::time::timeout(std::time::Duration::from_secs(5), crate::testing::read_text_frame(&mut client)).await.unwrap();
     assert_eq!(second["data"]["mark"], "sentinel", "同一個 seq 被送第二次（backlog 一次、即時串流一次）：{second}");

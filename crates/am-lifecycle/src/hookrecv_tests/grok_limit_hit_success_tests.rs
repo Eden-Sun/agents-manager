@@ -190,7 +190,6 @@ async fn without_usable_times_or_a_delivered_in_flight_turn_nothing_clears() {
     assert!(!cleared_by(Some(300), |s| s.received_at = Some("not-a-time".into())).await);
     assert!(!cleared_by(Some(300), |s| s.received_at = Some(at(-3600))).await, "比現在晚的觸發時間不可信");
 
-    // 沒有 in-flight 回合（這一則已被收過、或根本沒有回合）／送達結果不明。
     for sql in ["UPDATE turns SET status = 'completed'", "UPDATE turns SET delivery = 'unknown'", "UPDATE turns SET origin = 'external'"] {
         let e = crate::testing::env().await;
         let (bot, _run) = grok_bot(&e, &e.project_id, Some(300)).await;
@@ -245,7 +244,6 @@ async fn a_late_stop_of_a_previous_runs_session_keeps_it() {
     .execute(&e.app.db)
     .await
     .unwrap();
-    // 現在這代 run 也有一個送出之後還在飛的回合：圍籬不放行時它不能被拿來當證據。
     let conv = db::conversation_id(&e.app.db, &bot).await.unwrap();
     sqlx::query("UPDATE turns SET status = 'completed' WHERE conversation_id = ?").bind(&conv).execute(&e.app.db).await.unwrap();
     sqlx::query(

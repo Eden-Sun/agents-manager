@@ -239,25 +239,20 @@ async fn http_loop_compaction_headers_context_management_and_thinking_strip() {
 
     let headers = f.seen_headers.lock().unwrap();
     assert_eq!(headers.len(), 2);
-    // 1. Beta header has both thinking-binding and compact
     let expected_beta = format!("{},{}", super::protocol::THINKING_BINDING_BETA, super::protocol::COMPACT_BETA);
     assert_eq!(headers[0]["anthropic-beta"], expected_beta);
     assert_eq!(headers[1]["anthropic-beta"], expected_beta);
 
     let seen = f.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
-    // 2. Request 1 carries context_management with 150000
     assert_eq!(seen[0]["context_management"]["edits"][0]["type"], "compact_20260112");
     assert_eq!(seen[0]["context_management"]["edits"][0]["trigger"]["value"], 150_000);
 
-    // 3. Request 2: response 1 contained compaction block.
-    // In request 2, older messages before compaction are pruned, and thinking before compaction is NOT resent!
     let req2_msgs = seen[1]["messages"].as_array().unwrap();
     let assistant_msg_blocks = req2_msgs[0]["content"].as_array().unwrap();
     assert!(!assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("thinking")));
     assert!(assistant_msg_blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")));
 
-    // 4. Session checkpoint in state.messages persists the compaction block
     assert!(state.messages.iter().any(|m| m.content.as_array().is_some_and(|blocks| blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("compaction")))));
 }
 #[tokio::test]
@@ -617,8 +612,6 @@ async fn macos_local_bash_rejects_unavailable_isolation_and_never_runs_host_shel
         name: "bash".into(),
         input: json!({"command":"touch should-not-exist"}),
     };
-    // On Linux with a real sandbox this may succeed, but the command still cannot run outside
-    // /workspace. On unsupported platforms it must refuse without creating anything.
     let result = tools.execute(&call, &CancellationToken::new()).await;
     if cfg!(target_os = "linux") && std::path::Path::new("/usr/bin/bwrap").is_file() {
         if result.is_ok() {
@@ -645,7 +638,6 @@ async fn http_malformed_reply_and_unresponsive_connection_are_explicit_failures(
     let server = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let (mut connection, _) = listener.accept().await.unwrap();
-        // Drain the request, never send a reply. Client timeout closes the connection.
         let mut buf = [0; 4096];
         while connection.read(&mut buf).await.unwrap_or(0) > 0 {}
     });
@@ -718,7 +710,6 @@ async fn fable_requests_use_the_selected_model_and_reject_a_different_response_m
     let req = http::FullMessagesRequest { endpoint: &f.endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(2), max_response_bytes: 64 * 1024 };
     let r = http::complete(&req, &CancellationToken::new()).await.unwrap();
     assert_eq!(r.model, crate::config::API_BOT_FABLE_MODEL);
-    // 模型不符改由 adapter 驗證（才能用已收到的 usage 結帳）；http 層照實回傳。
     let other = http::complete(&req, &CancellationToken::new()).await.unwrap();
     assert_ne!(other.model, crate::config::API_BOT_FABLE_MODEL);
     let seen = f.seen.lock().unwrap();
@@ -1015,7 +1006,6 @@ async fn sse_fixture(chunks: Vec<Vec<u8>>, delay: Duration) -> (String, Arc<Mute
 }
 
 fn sse_body(content: &[Value], reason: &str) -> Vec<u8> {
-    // 把一個完整訊息拆成 SSE 事件：每個文字區塊切成兩段 delta，tool_use 的 input 切成兩段 partial_json。
     let mut out = String::new();
     let mut ev = |name: &str, data: Value| out.push_str(&format!("event: {name}\ndata: {data}\n\n"));
     ev("message_start", json!({"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,
@@ -1060,7 +1050,6 @@ async fn streamed_response_equals_the_nonstreaming_response() {
     let req = |endpoint| http::FullMessagesRequest { endpoint, key: "fixture-not-a-real-key", options: &options, system: &system, messages: &messages, timeout: Duration::from_secs(5), max_response_bytes: 64 * 1024 };
     let expected = http::complete(&req(&plain.endpoint), &CancellationToken::new()).await.unwrap();
 
-    // 把整段 SSE 切成 7 位元組的小 chunk（含切在 UTF-8 字元中間）。
     let body = sse_body(&content, "tool_use");
     let chunks: Vec<Vec<u8>> = body.chunks(7).map(|c| c.to_vec()).collect();
     let (endpoint, seen, shutdown) = sse_fixture(chunks, Duration::from_millis(0)).await;
@@ -1075,7 +1064,6 @@ async fn streamed_response_equals_the_nonstreaming_response() {
 #[tokio::test]
 async fn mid_stream_error_event_is_stream_aborted_not_an_http_status() {
     let mut body = sse_body(&[json!({"type":"text","text":"partial"})], "end_turn");
-    // 把結尾的 message_delta／message_stop 換成 error 事件。
     let text = String::from_utf8(body.clone()).unwrap();
     let cut = text.find("event: message_delta").unwrap();
     body = text[..cut].as_bytes().to_vec();
@@ -1100,7 +1088,6 @@ async fn mid_stream_error_event_is_stream_aborted_not_an_http_status() {
 async fn truncated_stream_is_an_invalid_response_and_progress_is_throttled() {
     let full = sse_body(&[json!({"type":"text","text":"live progress text"})], "end_turn");
     let cut = String::from_utf8(full.clone()).unwrap().find("event: message_stop").unwrap();
-    // 兩個 chunk 之間隔 1.2 秒，第二個 chunk 到達後應該回報一次進度。
     let first = full[..cut / 2].to_vec();
     let rest = full[cut / 2..cut].to_vec();
     let (endpoint, _seen, shutdown) = sse_fixture(vec![first, rest], Duration::from_millis(1200)).await;

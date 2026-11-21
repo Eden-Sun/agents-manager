@@ -167,7 +167,6 @@
         assert!(!denied("# pkill -f claude\nls"));
         assert!(denied("if true; then pkill -f claude; fi"));
         assert!(denied("{ pkill -f claude; }"));
-        // 重導向不是 pattern：`2>&1`、`> /dev/null` 不會讓窄的指令變成「太短」。
         assert!(denied("pkill -f next-server 2>&1"));
         assert!(denied("pkill -f next-server >/dev/null 2>&1 &"));
         assert!(denied("pkill -f next-server > /dev/null"));
@@ -193,18 +192,15 @@
         let grok = r#"{"hookEventName":"pre_tool_use","toolName":"run_terminal_command","toolInput":{"command":"killall node"}}"#;
         assert!(deny_json("grok", "", grok).is_some());
 
-        // agy 的 payload 沒有事件名，事件名由 dispatcher 參數帶；shell 指令欄位叫 CommandLine。
         let agy = r#"{"conversationId":"c","toolCall":{"name":"run_command","args":{"CommandLine":"kill -9 -1"}}}"#;
         let v = deny_json("agy", "PreToolUse", agy).expect("擋");
         assert_eq!(v["decision"], "deny");
         assert!(v["reason"].as_str().unwrap().contains("-1"));
 
-        // issue #2094: agy 1.5.4 含 cwd 與 toolCall.id
         let agy_with_id = r#"{"conversationId":"c","cwd":"/repo","toolCall":{"id":"call-99","name":"run_command","args":{"CommandLine":"pkill -f claude"}}}"#;
         let v = deny_json("agy", "PreToolUse", agy_with_id).expect("擋");
         assert_eq!(v["decision"], "deny");
 
-        // issue #2111: stdin 帶有 UTF-8 BOM
         let agy_bom = "\u{feff}{\"conversationId\":\"c\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"pkill -f claude\"}}}";
         let v = deny_json("agy", "PreToolUse", agy_bom).expect("擋");
         assert_eq!(v["decision"], "deny");
@@ -224,7 +220,6 @@
         assert_eq!(v["decision"], "deny");
         assert!(v["reason"].as_str().unwrap().contains("lsof -ti :PORT"), "{out}");
 
-        // 其他 provider 照舊：hookSpecificOutput 形狀。
         let claude = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"killall node"}}"#;
         let Guard::Deny(out) = guard("claude", "PreToolUse", claude) else { panic!("要擋") };
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -237,20 +232,15 @@
         assert_eq!(guard("claude", "", "not json"), Guard::NotPreToolUse);
         assert_eq!(guard("agy", "PreToolUse", "not json"), Guard::Pass, "agy 的事件名在參數裡：讀不懂也是 PreToolUse，放行");
         assert_eq!(guard("claude", "", "[1,2]"), Guard::NotPreToolUse);
-        // 不是 PreToolUse（同樣的 payload 在 PostToolUse／Stop 是 daemon 的事件，不能被攔、也不能被吞）。
         let post = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"pkill -f claude"}}"#;
         assert_eq!(guard("claude", "", post), Guard::NotPreToolUse);
         let stop = r#"{"hook_event_name":"Stop","last_assistant_message":"PreToolUse hook says pkill -f claude"}"#;
         assert_eq!(guard("claude", "", stop), Guard::NotPreToolUse);
-        // 沒有 shell 指令的工具（Read／Edit）。
         let read = r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}"#;
         assert_eq!(guard("claude", "", read), Guard::Pass);
-        // 巨大、亂引號的指令也不 panic。
         let nasty = format!(r#"{{"hook_event_name":"PreToolUse","tool_input":{{"command":{}}}}}"#, serde_json::to_string(&format!("echo '{}\"$(`", "x".repeat(100_000))).unwrap());
         assert_eq!(guard("claude", "", &nasty), Guard::Pass);
     }
-
-    // ───────────── review 修正（#1884 rv2）─────────────
 
     fn notes(cmd: &str) -> Vec<String> {
         check_command_logged(cmd).1
@@ -259,22 +249,15 @@
     #[test]
     fn hostile_patterns_are_judged_fast_and_never_overflow() {
         let started = std::time::Instant::now();
-        // 災難性回溯的寫法：NFA 線性時間，照常判斷（沒命中就放行，不需要記 log）。
-        // pkill 一律擋，所以這裡只驗證判斷很快（不回溯），不管是擋還是放行。
         for cmd in ["pkill -f '(.*)*Z'", "pkill -f '(a*)*(b*)*(c*)*Z'", "pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)Z'"] {
             assert!(denied(cmd), "{cmd}");
         }
-        // 會命中的也照擋（不會因為「太複雜」而漏掉）。
         assert!(denied("pkill -f '(.*)*claude'"));
         assert!(denied("pkill -f '(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.)(.|.).*claude'"));
-        // 兩萬層括號：長度上限，直接放行並記 log（不 stack overflow）。
-        // pkill 一律擋，所以超長 pattern 不再需要判斷語法；這裡只驗證判斷不會 stack overflow、很快回來。
         let deep = format!("pkill -f '{}x{}'", "(".repeat(20_000), ")".repeat(20_000));
         assert!(denied(&deep));
         let deep_kill = format!("kill 4242 # '{}'", "(".repeat(20_000));
         assert!(!denied(&deep_kill));
-        // 長度在上限內、但巢狀超過 8 層：放行並記 log。
-        // pkill 一律擋：巢狀深度與 pattern 數不影響結論（判斷仍必須快、不 stack overflow）。
         for n in [9, 40] {
             let nested = format!("pkill -f '{}claude{}'", "(".repeat(n), ")".repeat(n));
             assert!(denied(&nested), "{n} 層");
@@ -286,24 +269,19 @@
 
     #[test]
     fn heredoc_bodies_comments_and_unterminated_quotes_are_not_commands() {
-        // 內文只是文字（引號終止字）：不是指令。
         assert!(!denied("cat <<'EOF'\npkill -f claude\nEOF"));
         assert!(!denied("cat > notes.md <<\"EOF\"\nrun pkill -f claude then\n$(pkill -f claude)\nEOF\necho done"));
         assert!(!denied("cat <<-EOF\n\tpkill -f claude\n\tEOF\nls"));
         assert!(!denied("cat << EOF\npkill -f claude\nEOF"));
-        // 註解：連 `$(…)` 都不執行。
         assert!(!denied("# $(pkill -f claude)\nls"));
         assert!(!denied("ls # `pkill -f claude`"));
-        // 未閉合引號／括號：shell 自己也語法錯誤，放行並記 log。
         for cmd in ["pkill -f claude 'unterminated", "pkill -f claude \"unterminated", "echo $(pkill -f claude", "echo `pkill -f claude"] {
             let (v, n) = check_command_logged(cmd);
             assert_eq!(v, Verdict::Allow, "{cmd}");
             assert!(n.iter().any(|x| x.contains("解析失敗")), "{cmd}: {n:?}");
         }
-        // 之前已經完整的行還是會跑，照擋。
         assert!(denied("pkill -f claude\necho 'unterminated"));
         assert!(!denied("echo ok\npkill -f claude 'unterminated"));
-        // 但會被執行的 heredoc 還是要看：未加引號內文的 `$(…)`、餵給 shell 的 script。
         assert!(denied("cat <<EOF\n$(pkill -f claude)\nEOF"));
         assert!(denied("cat <<EOF\nx `killall node` y\nEOF"));
         assert!(denied("bash <<'EOF'\npkill -f claude\nEOF"));
@@ -311,10 +289,8 @@
         assert!(denied("bash <<< 'pkill -f claude'"));
         assert!(!denied("bash -c 'echo hi' <<'EOF'\npkill -f claude\nEOF"), "-c 時 heredoc 是 stdin，不是 script");
         assert!(!denied("grep pkill <<< 'pkill -f claude'"));
-        // heredoc 結束後同一行之後的指令、之後的行照看。
         assert!(denied("cat <<'EOF' ; pkill -f claude\nbody\nEOF"));
         assert!(denied("cat <<'EOF'\nbody\nEOF\npkill -f claude"));
-        // 沒有終止行：內文讀到結尾（bash 也是）。
         assert!(!denied("cat <<'EOF'\npkill -f claude"));
     }
 
@@ -377,24 +353,19 @@
 
     #[test]
     fn unreadable_payloads_are_let_through_and_logged() {
-        // agy：事件名在參數裡，壞 JSON 也是 PreToolUse。
         let (g, l) = logged("agy", "PreToolUse", "not json");
         assert_eq!(g, Guard::Pass);
         assert!(l.len() == 1 && l[0].contains("JSON"), "{l:?}");
-        // 看得出是 PreToolUse、但被截斷的 JSON：交回事件流程，但留一行。
         let (g, l) = logged("claude", "", r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pk"#);
         assert_eq!(g, Guard::NotPreToolUse);
         assert!(l.len() == 1 && l[0].contains("PreToolUse"), "{l:?}");
-        // 其他事件的壞 payload 是 daemon 的事，不吵。
         let (g, l) = logged("claude", "", "not json");
         assert_eq!(g, Guard::NotPreToolUse);
         assert!(l.is_empty(), "{l:?}");
-        // 判不出來的指令：放行，原因進 log。
         let unterminated = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"pkill -f claude 'oops"}}"#;
         let (g, l) = logged("claude", "", unterminated);
         assert_eq!(g, Guard::Pass);
         assert!(l.iter().any(|x| x.contains("解析失敗")), "{l:?}");
-        // 乾淨的放行不寫 log。
         let ok = r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"kill 4242"}}"#;
         let (g, l) = logged("claude", "", ok);
         assert_eq!(g, Guard::Pass);
@@ -405,18 +376,15 @@
     #[test]
     fn env_dash_s_expansion_is_bounded() {
         let started = std::time::Instant::now();
-        // 一長串 `env -S env -S …`：每層都要複製剩餘參數，不能變成二次方；超限放行並記 log。
         let flat = format!("{}echo hello", "env -S ".repeat(6000));
         let (v, n) = check_command_logged(&flat);
         assert_eq!(v, Verdict::Allow);
         assert!(n.iter().any(|x| x.contains("env -S") && x.contains("上限")), "{n:?}");
-        // 同一串放進 `-S` 的值裡（一層引號、內容是長鏈）。
         let quoted = format!("env -S '{}echo hello'", "env -S ".repeat(6000));
         let (v, n) = check_command_logged(&quoted);
         assert_eq!(v, Verdict::Allow);
         assert!(n.iter().any(|x| x.contains("env -S")), "{n:?}");
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
-        // 正常深度（含多層）照擋。
         assert!(denied(r#"env -S "env -S 'pkill -f claude'""#));
     }
 
@@ -427,11 +395,9 @@
         assert!(!denied("sh -n <<< 'pkill -f claude'"));
         assert!(!denied("bash -n -c 'pkill -f claude'"));
         assert!(!denied("sudo bash -vn -c 'pkill -f claude'"));
-        // 不是 -n 的照擋；`-c` 的字串裡出現 n 不算。
         assert!(denied("bash -c 'pkill -f claude'"));
         assert!(denied("bash -lc 'pkill -f claude'"));
         assert!(denied("bash -x <<'EOF'\npkill -f claude\nEOF"));
-        // 後面的 `+n`／`+o noexec` 會再打開執行：照選項順序算最後的狀態。
         assert!(denied("bash -n +n -c 'pkill -f claude'"));
         assert!(denied("bash -n +n <<'EOF'\npkill -f claude\nEOF"));
         assert!(denied("bash -o noexec +o noexec -c 'pkill -f claude'"));
@@ -441,7 +407,6 @@
         assert!(!denied("bash -nc 'pkill -f claude'"));
         assert!(!denied("bash -n +x <<'EOF'\npkill -f claude\nEOF"));
         assert!(denied("bash -n -o noexec +o xtrace -c 'pkill -f claude'"), "noexec 以外的 -o／+o 值一律取消快速放行");
-        // 帶值的選項（`-O`／`+O`、`-o`／`+o`、`--rcfile`）要把值一起吃掉，不能在值那裡停下、留著前面的 `-n`。
         assert!(denied("bash -n -O extglob +n -c 'kill -9 -1'"));
         assert!(denied("bash -n -O extglob +n -c 'pkill -f claude'"));
         assert!(denied("bash -n +O extglob +n -c 'pkill -f claude'"));
@@ -455,7 +420,6 @@
         assert!(!denied("bash -n -O extglob -O globstar -c 'pkill -f claude'"));
         assert!(!denied("bash -nO extglob -c 'pkill -f claude'"));
         assert!(!denied("sh -n <<'EOF'\npkill -f claude\nEOF"));
-        // `-o`／`+o` 的值只有 noexec（及其等價寫法）才影響狀態；zsh 的 `-o exec` 會重新啟用執行，其他值一律取消快速放行。
         assert!(denied("zsh -n -o exec -c 'kill -9 -1'"));
         assert!(denied("zsh -n -o exec -c 'pkill -f claude'"));
         assert!(denied("zsh -n +o noexec -c 'pkill -f claude'"));
@@ -472,18 +436,14 @@
         assert!(!denied("zsh -o NO_EXEC -c 'pkill -f claude'"));
         assert!(!denied("zsh -o no_exec <<'EOF'\npkill -f claude\nEOF"));
         assert!(!denied("zsh -n -o noexec -O extglob -c 'pkill -f claude'"));
-        // 不認得的選項：判斷不了，不當 noexec 放行（照一般規則判斷）。
         assert!(denied("bash -n -Z -c 'pkill -f claude'"));
         assert!(denied("bash -n --frobnicate -c 'pkill -f claude'"));
         assert!(denied("bash -n -O extglob -Z -c 'pkill -f claude'"));
-        // 位置參數／script 檔不是 stdin 的 script；`-s` 才是。
         assert!(!denied("bash script.sh <<'EOF'\npkill -f claude\nEOF"));
         assert!(!denied("bash -O extglob script.sh <<'EOF'\npkill -f claude\nEOF"));
         assert!(denied("bash -s arg <<'EOF'\npkill -f claude\nEOF"));
         assert!(denied("bash -O extglob <<'EOF'\npkill -f claude\nEOF"));
-        // noexec 的 shell 只是不跑 script；外層 shell 展開的 heredoc 內文 `$(…)` 照樣會執行。
         assert!(denied("bash -n <<EOF\n$(pkill -f claude)\nEOF"));
-        // `-c` 之後的字是 `$0`／參數，不是選項。
         assert!(!denied("bash -n -c 'pkill -f claude' +n"));
         assert!(denied("bash -c 'echo no' ; bash <<'EOF'\npkill -f claude\nEOF"));
     }

@@ -63,23 +63,16 @@ fn is_decision(status: &str) -> bool {
 /// | `quota_blocked → queued` | `resume_quota_blocked`（額度回來，重送次數 +1） |
 /// | 任何未結案 → 裁示狀態 | `review_with_followup`（accept／fail／cancel／block／followup） |
 pub fn allowed(from: &str, to: &str) -> bool {
-    // 終局沒有出邊。這一行就是這張表存在的理由。
     if is_terminal(from) {
         return false;
     }
-    // 裁示可以從任何還沒結案的狀態下達。
     if is_decision(to) {
         return true;
     }
     match (from, to) {
-        // 派出去了。`queued` 是第一次；`delivered`／`unknown` 之間互相走，是重派同一個 crid
-        // 再記一次（冪等），所以自己到自己也是一條**真的**邊，不是靠「原地不動一律放行」放進來的。
         (f, "delivered" | "unknown") if IN_FLIGHT.contains(&f) => true,
-        // 回合結束。
         (f, "awaiting_review") if IN_FLIGHT.contains(&f) => true,
-        // 等額度。
         (f, "quota_blocked") if IN_FLIGHT.contains(&f) => true,
-        // 額度回來了，重新排隊。
         ("quota_blocked", "queued") => true,
         _ => false,
     }
@@ -199,7 +192,6 @@ pub fn guard_ddl() -> String {
 /// DB 裡那一份跟現在的轉移表不同就換掉（issue #186）：以前 `IF NOT EXISTS` 只建一次，表改了舊 DB 永遠停在舊規則。
 /// DROP 與重建在同一個交易裡，換到一半失敗不會留下沒有守衛的空窗。
 pub async fn install_guard(pool: &SqlitePool) -> Result<()> {
-    // `sync_trigger` 先讀現在那一份再換：deferred 的話讀完之後別的 writer 一 commit，DROP 就 517，daemon 起不來（#831）。
     let mut tx = crate::db::begin_write(pool).await?;
     crate::db::sync_trigger(&mut tx, "supervisor_assignments_status_transition", &guard_ddl()).await?;
     tx.commit().await?;
@@ -268,8 +260,6 @@ async fn row(p: &SqlitePool, crid: &str) -> String {
 mod tests {
     use super::*;
 
-
-
     /// issue #71 點名的兩條：結案的工作不可以被弄活過來。
     #[test]
     fn a_settled_assignment_never_goes_back_to_work() {
@@ -279,7 +269,6 @@ mod tests {
             for to in ["queued", "delivered", "unknown", "awaiting_review", "quota_blocked", "blocked"] {
                 assert!(!allowed(from, to), "{from} → {to} 不該放行");
             }
-            // 連換一個終局都不行：裁示只下一次。
             for to in TERMINAL {
                 if to != from {
                     assert!(!allowed(from, to), "{from} → {to} 不該放行");
@@ -304,7 +293,6 @@ mod tests {
             assert!(allowed(from, "quota_blocked"), "park: {from}");
         }
         assert!(allowed("quota_blocked", "queued"), "resume");
-        // 裁示從任何還沒結案的狀態都下得了。
         for from in ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked"] {
             for to in ["completed", "failed", "cancelled", "superseded", "blocked"] {
                 assert!(allowed(from, to), "裁示 {from} → {to}");
@@ -333,7 +321,6 @@ mod tests {
         for s in ["queued", "awaiting_review", "quota_blocked"] {
             assert!(!allowed(s, s), "{s} → {s} 不是任何一支函式在做的事");
         }
-        // `blocked → blocked` 走的是「裁示」那條，不是重寫。
         for s in TERMINAL {
             assert!(!allowed(s, s), "{s} 已經結案，連再寫一次都不該經過轉移");
         }
@@ -346,7 +333,6 @@ mod tests {
         assert_eq!(sources_for("unknown"), vec!["queued", "delivered", "unknown"]);
         assert_eq!(sources_for("awaiting_review"), vec!["queued", "delivered", "unknown"]);
         assert_eq!(sources_for("quota_blocked"), vec!["queued", "delivered", "unknown"]);
-        // 終局永遠不在來源裡——守衛因此自動擋掉「結案的又活過來」。
         for to in ["delivered", "unknown", "awaiting_review", "quota_blocked"] {
             for t in TERMINAL {
                 assert!(!sources_for(to).contains(&t), "{t} 不該能走到 {to}");
@@ -357,7 +343,6 @@ mod tests {
     #[test]
     fn terminal_is_exactly_the_four_decision_outcomes() {
         assert!(is_terminal("completed") && is_terminal("failed") && is_terminal("cancelled") && is_terminal("superseded"));
-        // `blocked` 是「還開著」的裁示，不是終局——它仍在 `OPEN_STATES` 裡。
         assert!(!is_terminal("blocked"));
         for s in crate::supervisor::store::OPEN_STATES {
             assert!(!is_terminal(s), "{s} 在 OPEN_STATES 裡，不可能是終局");
@@ -385,7 +370,6 @@ mod tests {
         p
     }
 
-
     /// `set_status`：非法邊當場回錯（連 SQL 都不必送），轉移沒發生時講得出「它現在是什麼」，
     /// 值不變的重寫（重播）照樣放行。跟 `turn_controller::set_status_reports_why_a_transition_did_not_happen`
     /// 同一個形狀。
@@ -398,18 +382,15 @@ mod tests {
         let now: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
         assert_eq!(now, "delivered");
 
-        // 別的路徑先動了手：不是錯誤，但講得出它現在是什麼。
         assert_eq!(
             set_status(&p, &id, AssignmentState::Queued, AssignmentState::Delivered, "測試").await.unwrap(),
             Outcome::Raced { now: "delivered".into() },
         );
         assert_eq!(set_status(&p, "nope", AssignmentState::Queued, AssignmentState::Delivered, "測試").await.unwrap(), Outcome::Missing);
 
-        // 非法邊連 SQL 都不必送。
         let err = set_status(&p, &id, AssignmentState::Completed, AssignmentState::Delivered, "測試").await.unwrap_err();
         assert!(format!("{err}").contains("illegal assignment status transition"), "{err}");
 
-        // 值不變的重寫（重播）一律放行，不查表。
         assert_eq!(set_status(&p, &id, AssignmentState::Delivered, AssignmentState::Delivered, "重播").await.unwrap(), Outcome::Applied);
     }
 
@@ -420,11 +401,9 @@ mod tests {
         let p = pool().await;
         let id = row(&p, "c1").await;
 
-        // 合法：派出去、結案。
         sqlx::query("UPDATE supervisor_assignments SET status='delivered' WHERE id=?").bind(&id).execute(&p).await.expect("queued -> delivered 合法");
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("delivered -> completed 合法");
 
-        // 非法：終局回到在途。任何路徑都不行——擋在 DB，繞不過 Rust 這一層。
         for bad in ["delivered", "queued", "awaiting_review"] {
             let err = sqlx::query("UPDATE supervisor_assignments SET status=? WHERE id=?")
                 .bind(bad)
@@ -437,11 +416,8 @@ mod tests {
         let still: String = sqlx::query_scalar("SELECT status FROM supervisor_assignments WHERE id=?").bind(&id).fetch_one(&p).await.unwrap();
         assert_eq!(still, "completed", "被擋下來的那一句一個欄位都沒改");
 
-        // 值不變的重寫（冪等收尾）照樣放行——trigger 只管真的改變值的那一句。
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?").bind(&id).execute(&p).await.expect("冪等重寫不該被擋");
     }
-
-
 
     /// 表跟 trigger 讀的是同一份 `allowed()`：合法的邊（同一份清單 `sources_for` 已經釘過）走 SQL
     /// 一樣通，不會因為多了一層 trigger 就變嚴。
@@ -461,8 +437,6 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{from} -> {to} 表上是合法的，trigger 不該擋：{e}"));
         }
     }
-
-    // #1862 D：下面兩條原本在 daemon harness 的 `mod tests`，只需要 DB 與 race point，搬進 crate-only 的 `mod tests`（測試名不變）。
 
     use super::*;
 
@@ -495,7 +469,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite3");
         let p = super::super::test_env::open(&path).await.unwrap();
-        // 舊版留下的守衛：轉移表還沒有 → quota_blocked 那幾條（現在合法的邊被擋），turns 那張還沒有 → in_flight。
         for (name, stale) in [
             (
                 "supervisor_assignments_status_transition",
@@ -510,7 +483,6 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'stale turn guard'); END",
             ),
         ] {
-            // 同一條連線、同一個交易：DROP 與 CREATE 不能落在連線池裡兩條不同的連線上。
             let mut tx = p.begin().await.unwrap();
             sqlx::query(&format!("DROP TRIGGER {name}")).execute(&mut *tx).await.unwrap();
             sqlx::query(stale).execute(&mut *tx).await.unwrap();
@@ -519,7 +491,6 @@ mod tests {
         p.close().await;
 
         let p = super::super::test_env::open(&path).await.unwrap();
-        // SQLite 存的是去掉 `IF NOT EXISTS` 的原文。
         let current = |ddl: String| ddl.replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
         for (name, want) in [
             ("supervisor_assignments_status_transition", current(guard_ddl())),
@@ -528,7 +499,6 @@ mod tests {
             let have: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").bind(name).fetch_optional(&p).await.unwrap();
             assert_eq!(have.as_deref(), Some(want.as_str()), "{name}：重開之後守衛要等於現在的轉移表");
         }
-        // 行為上也是現在這一份：表上合法的邊走得通，終局照樣回不去。
         let id = row(&p, "g1").await;
         sqlx::query("UPDATE supervisor_assignments SET status='quota_blocked' WHERE id=?").bind(&id).execute(&p).await.expect("queued -> quota_blocked 現在是合法的");
         sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE id=?").bind(&id).execute(&p).await.unwrap();

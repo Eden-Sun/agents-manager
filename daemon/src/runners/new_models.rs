@@ -286,10 +286,8 @@ mod tests {
         let mut seen = Seen::new();
         scan(&mut seen, &Fetched { codex: Some(set(&["a"])), claude: None }, true);
         let before = seen.clone();
-        // 抓取失敗：None 不動 seen，也不推。
         assert!(scan(&mut seen, &Fetched { codex: None, claude: None }, true).is_empty());
         assert_eq!(seen, before);
-        // 失敗之後恢復：仍以原本的 seen 比對，只推真正新的 id。
         let pushes = scan(&mut seen, &Fetched { codex: Some(set(&["a", "z"])), claude: None }, true);
         assert_eq!(pushes.len(), 1);
         assert_eq!(pushes[0]["body"], "Codex：z");
@@ -302,7 +300,6 @@ mod tests {
         let pushes = scan(&mut seen, &Fetched { codex: Some(set(&["a", "new1"])), claude: None }, false);
         assert!(pushes.is_empty(), "開關關掉不推");
         assert_eq!(seen["codex"], set(&["a", "new1"]), "但 seen 仍更新");
-        // 之後再打開：不會把 new1 當成新的補推。
         assert!(scan(&mut seen, &Fetched { codex: Some(set(&["a", "new1"])), claude: None }, true).is_empty());
     }
 
@@ -310,10 +307,8 @@ mod tests {
     fn ids_that_disappear_are_kept_so_they_do_not_repush_when_back() {
         let mut seen = Seen::new();
         scan(&mut seen, &Fetched { codex: Some(set(&["a", "b"])), claude: None }, true);
-        // 某台暫時抓不到，清單短一截：不移除，也不推。
         assert!(scan(&mut seen, &Fetched { codex: Some(set(&["a"])), claude: None }, true).is_empty());
         assert_eq!(seen["codex"], set(&["a", "b"]));
-        // 補回來：b 已見過，不推。
         assert!(scan(&mut seen, &Fetched { codex: Some(set(&["a", "b"])), claude: None }, true).is_empty());
     }
 

@@ -181,8 +181,6 @@ async fn the_start_if_stopped_path_refuses_an_unsigned_relay_too() {
 #[tokio::test]
 async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
     let f = fx().await;
-    // Keep the default changing spinner: background redraws must not revoke a draft action.
-    // Real herdr returns zero revision; authorization comes from the composer frame.
     f.e.herdr.live_pane("pane-relay", crate::testing::LivePane { zero_revision: true, width: Some(120), boxed: true, composer: vec!["假草稿".into()], ..Default::default() });
     let call = |clear: bool, submit: bool, expect: Option<&str>, relay: Option<String>| {
         let body = PromptIn {
@@ -202,7 +200,6 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
             share_reply_visible: false,
             track: None, cluster: None, cache_ttl: None,
         };
-        // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
         let mut headers = HeaderMap::new();
         if body.relay_from.is_some() {
             headers.insert("X-AM-Bot-Token", "tok-alfa".parse().unwrap());
@@ -221,8 +218,6 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
         assert!(matches!(err, LcError::Bad(_)), "{err:?}");
     }
     assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
-    // A matching draft token cannot authorize Enter when the composer draft changes,
-    // even though pane.read keeps returning revision 0. The provisional turn is withdrawn.
     let live = f.e.herdr.live.clone();
     crate::lifecycle::race_point::arm("draft_before_enter", &f.target, move || async move {
         live.lock().unwrap().get_mut("pane-relay").unwrap().composer = vec!["未確認的新草稿".into()];
@@ -238,7 +233,6 @@ async fn draft_actions_need_the_confirmed_draft_and_the_user_themself() {
     assert!(f.e.herdr.calls_to("pane.send_keys").is_empty());
     assert_eq!(counts(&f.e.app).await, (0, 0), "no stale draft turn or message survives");
     f.e.herdr.live.lock().unwrap().get_mut("pane-relay").unwrap().composer = vec!["假草稿".into()];
-    // 帶齊了就真的送出框裡那段（grok：沒有無損證據，unverified）。
     let resp = call(false, true, Some(&token), None).await.unwrap();
     let out: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
     assert_eq!(out["delivery"], "unverified", "{out}");
@@ -265,14 +259,11 @@ async fn requests_to_agm_follow_the_same_rule() {
     assert_eq!(verified, vec![true]);
 }
 
-// --------------------------------------------- review 7ed32d94：同一張 #339 的收尾
-
 /// 「有帶 `X-AM-Bot-Token` 但值是空的／非 UTF-8」以前掉進「沒帶」那一格，於是送一個壞掉的
 /// header 就能走相容期冒名放行。有帶就得對得上：一律 403，一個字都不寫。
 #[tokio::test]
 async fn a_present_but_unusable_token_is_a_mismatch_not_a_missing_one() {
     let f = fx().await;
-    // 空字串、只有空白、非 UTF-8（0xff 不是合法 UTF-8，但是合法的 header 位元組）。
     for (raw, label) in [(&b""[..], "empty"), (&b"   "[..], "blank"), (&b"\xff\xfe"[..], "not-utf8")] {
         let (status, body) = send_raw_token(&f.e.app, &f.target, &f.alfa, raw, label).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
@@ -301,7 +292,6 @@ async fn a_wrong_token_never_reveals_whether_the_bot_exists() {
     );
     assert_eq!(counts(&f.e.app).await, (0, 0));
 
-    // 沒帶 token、bot 不存在照舊是 400（那條路沒有 token 可以對，也沒有神諭可讀）。
     let (status, _) = send(&f.e.app, &f.target, "01MNOSUCHBOTIDATALL0000000", None, "absent-nosig").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
@@ -311,7 +301,6 @@ async fn a_wrong_token_never_reveals_whether_the_bot_exists() {
 #[tokio::test]
 async fn a_bot_cannot_relay_a_message_to_itself() {
     let f = fx().await;
-    // 連帶對自己那顆的正確 token 也不行：驗得出身份不代表這個來源標示講得通。
     sqlx::query("UPDATE bots SET hook_token='tok-target' WHERE id=?").bind(&f.target).execute(&f.e.app.db).await.unwrap();
     for (token, crid) in [(None, "self-none"), (Some("tok-target"), "self-signed")] {
         let (status, body) = send(&f.e.app, &f.target, &f.target, token, crid).await;
@@ -320,7 +309,6 @@ async fn a_bot_cannot_relay_a_message_to_itself() {
     }
     assert_eq!(counts(&f.e.app).await, (0, 0), "自己送給自己不留 turn、不留訊息");
 
-    // 送給**別顆** bot 照舊通：擋的是 from == to，不是「有 relay_from」。
     let (status, body) = send(&f.e.app, &f.target, &f.bravo, Some("tok-bravo"), "self-ok").await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }

@@ -57,7 +57,6 @@ async fn fast_argv_fills_only_unknown_runtime_and_never_refills_after_a_tui_swit
     sqlx::query("UPDATE runs SET runtime_fast=1 WHERE id=?").bind(&run).execute(&env.app.db).await.unwrap();
     assert!(crate::codex_live::correct_runtime_from_screen(&env.app, &run, CODEX_DEFAULT).await);
     assert_eq!(db::bot(&env.app.db, &bot).await.unwrap().unwrap().fast, 0);
-    // model 設為未知以強迫走到 argv UPDATE；SQL 也必須保護 fast。
     sqlx::query("UPDATE bots SET model=NULL WHERE id=?").bind(&bot).execute(&env.app.db).await.unwrap();
     sync_round(&env, &bot).await;
     sync_round(&env, &bot).await;
@@ -71,16 +70,13 @@ async fn sync_pane_model_does_not_refill_a_cleared_effort_after_the_screen_shows
     let env = testing::env().await;
     let (bot, run) = codex_child(&env, Some("high"), Some("high")).await;
 
-    // 第一輪：畫面切到明確 default → 子 agent 設定清成 NULL、run 記 `default`。
     assert!(crate::codex_live::correct_runtime_from_screen(&env.app, &run, CODEX_DEFAULT).await);
     assert_eq!(bot_effort(&env, &bot).await, None);
     assert_eq!(run_effort(&env, &run).await.as_deref(), Some("default"));
 
-    // 第二輪：對帳讀到 argv high，但 run 已有畫面記錄 → 不補。
     sync_round(&env, &bot).await;
     assert_eq!(bot_effort(&env, &bot).await, None, "argv 的舊 high 不能覆寫清掉的 default");
 
-    // 第三輪：畫面一樣、對帳又跑一次 → 仍然不動。
     assert!(!crate::codex_live::correct_runtime_from_screen(&env.app, &run, CODEX_DEFAULT).await);
     sync_round(&env, &bot).await;
     assert_eq!(bot_effort(&env, &bot).await, None);

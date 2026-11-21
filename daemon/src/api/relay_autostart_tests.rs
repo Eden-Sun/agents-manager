@@ -48,7 +48,6 @@ async fn stopped_member_is_not_started_for_a_specialist_when_dispatch_switch_is_
 #[tokio::test]
 async fn stopped_member_outside_specialist_scope_is_not_started() {
     let (env, specialist, _worker) = specialist_fixture(true).await;
-    // 頂層 advisor 不在專家可直接派工的範圍（只有執行者），即使開關開著也不能替它啟動。
     let advisor = crate::testing::claude_bot(&env.app, &env.project_id, "scope-advisor").await;
     sqlx::query("UPDATE bots SET role='advisor' WHERE id=?").bind(&advisor.id).execute(&env.app.db).await.unwrap();
     let err = ensure_relay_member_ready(&env.app, &specialist, &advisor.id).await.unwrap_err();
@@ -88,8 +87,6 @@ async fn stopped_member_is_started_and_relay_request_is_persisted() {
     assert!(status.is_success(), "{status}: {value}");
     let run = db::active_run(&env.app.db, &worker).await.unwrap().unwrap();
     assert_eq!(run.state, "running");
-    // The test herdr creates a pane but does not simulate a composer until explicitly attached.
-    // Reconcile the durable request once that composer becomes available.
     let pane = run.pane_id.as_deref().unwrap();
     env.herdr.live_pane(pane, crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
     crate::runners::relay_requests::sweep(&env.app).await;

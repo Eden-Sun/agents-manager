@@ -15,16 +15,12 @@ use std::sync::Arc;
 pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot, fence: &crate::hosts::HostFence) {
     let host = fence.conn().name.clone();
     let key = crate::quota::quota_key(&host, "agy");
-    // 整段在圍籬裡（#1023）：換代了就什麼都不寫，冷卻、旗標、探測錯誤與舊讀數一起不動。
     let Some((changed, had)) = app
         .hosts
         .run_if_current(&fence, async {
-            // 憑證檔還在（只是被撤銷）：登入偵測不能在冷卻期內又把旗標翻回已登入、再開一次約 200 MB 的探測。
             note_auth_denied(key.clone(), &fence);
             let mut changed = set_logged_in_quiet(app, &host, &fence, false).await;
-            // 不要讓網頁同時顯示「已登入，但額度暫時拿不到」。
             changed |= crate::quota_agy::set_probe_error(&host, None);
-            // 舊讀數不能繼續看起來很新。
             let had = app.quotas.lock().await.contains_key(&key);
             crate::quota::forget(app, &key).await;
             (changed, had)
@@ -37,7 +33,6 @@ pub async fn on_turn_auth_failure(app: &Arc<App>, bot: &db::Bot, fence: &crate::
     if had {
         app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
     }
-    // 不能放進 `run_if_current` 的 closure：`emit_host_changed` 自己也拿同一把圍籬的 gate。
     if changed {
         crate::state::emit_host_changed(app, &fence).await;
         crate::webpush::spawn_auth_push(app, &host, "agy", "");

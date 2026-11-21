@@ -102,7 +102,6 @@ pub fn parse_listeners(out: &str) -> Vec<(String, u16)> {
     for line in out.lines() {
         let Some(rest) = line.strip_prefix('n') else { continue };
         let rest = rest.trim();
-        // 位址與 port 之間是**最後**一個冒號：IPv6 的位址自己就有一堆冒號。
         let Some((addr, port)) = rest.rsplit_once(':') else { continue };
         let Ok(port) = port.trim().parse::<u16>() else { continue };
         let addr = addr.trim();
@@ -124,7 +123,6 @@ pub fn is_loopback(addr: &str) -> bool {
         return true;
     }
     let a = a.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(a);
-    // IPv6 的 scope id（`fe80::1%en0`）要先去掉才 parse 得動。
     let a = a.split('%').next().unwrap_or(a);
     a.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
@@ -154,7 +152,6 @@ mod tests {
         for addr in ["127.0.0.1", "127.1.2.3", "[::1]", "::1", "localhost"] {
             assert!(is_loopback(addr), "{addr} 是 loopback");
         }
-        // `*` 是 lsof 寫的 INADDR_ANY；認不得的字串也一律從嚴。
         for addr in ["*", "0.0.0.0", "[::]", "::", "192.168.1.9", "fe80::1%en0", "", "garbage"] {
             assert!(!is_loopback(addr), "{addr} 不能當成只有本機連得到");
         }
@@ -176,7 +173,6 @@ mod tests {
         assert_eq!(exposed_addr(&loopback), None);
         assert_eq!(exposed_addr(&[]), None, "沒在 listen 不算違規");
 
-        // 同時綁 loopback 與對外（vite `--host` 會這樣）：只要有一個對外就是對外。
         let mixed = vec![("127.0.0.1".to_string(), 5180u16), ("*".to_string(), 5180)];
         assert_eq!(exposed_addr(&mixed), Some("*"));
         assert_eq!(exposed_addr(&[("192.168.1.9".to_string(), 3000u16)]), Some("192.168.1.9"));
@@ -190,7 +186,6 @@ mod tests {
         assert!(!due_after(Some(&t(0)), &t(59_999), 60_000), "還沒到就不多跑 lsof");
         assert!(due_after(Some(&t(0)), &t(60_000), 60_000), "到了就驗");
         assert!(due_after(Some(&t(0)), &t(120_000), 60_000));
-        // 時鐘往回跳（NTP 校時）不該讓它從此不再檢查——但也不會比「沒驗過」更糟：下一次到期照樣驗。
         assert!(!due_after(Some(&t(60_000)), &t(0), 60_000));
         for bad in ["", "not-a-time", "2026-09-24"] {
             assert!(due_after(Some(bad), &t(0), 60_000), "讀不懂的 {bad:?} 當成沒驗過");
@@ -203,7 +198,6 @@ mod tests {
     #[test]
     fn a_slot_is_taken_once_per_interval_and_forgotten_with_the_preview() {
         let t = |ms: i64| chrono::DateTime::from_timestamp_millis(1_700_000_000_000 + ms).unwrap().to_rfc3339();
-        // bot id 各測試不同：這張表是行程共用的，撞名才會互相影響。
         let bot = format!("b-{}", crate::db::ulid());
 
         assert!(take_slot_after(&bot, &t(0), 60_000), "第一次一定給");

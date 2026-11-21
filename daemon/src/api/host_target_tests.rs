@@ -121,7 +121,6 @@ async fn create_host_refuses_ssh_port_zero_before_touching_config() {
     )
     .await
     .expect_err("ssh_port 0 must be refused");
-    // 設定不合法是請求的問題：400 `config_invalid`＋`config_written:false`（同 `cfg_err`），不是 502。
     assert!(matches!(&err, LcError::BadValue(v) if v["error"] == "config_invalid" && v["config_written"] == false), "{err:?}");
     assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
 }

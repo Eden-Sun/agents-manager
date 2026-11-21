@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use quick_xml::events::Event;
 use sha2::Digest as _;
 
-
 /// 單檔超過這麼大就不查（bot 畫的圖不會這麼大；查不完不如不查）。
 pub const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
 
@@ -73,7 +72,6 @@ fn bad_entity(s: &[u8], check_named_entities: bool) -> Option<usize> {
     while i < s.len() {
         if s[i] == b'&' {
             let rest = &s[i + 1..];
-            // 找不到 `;`：這個 `&` 就是壞的（不能當成「沒有壞實體」）。
             let Some(end) = rest.iter().position(|&b| b == b';') else { return Some(i) };
             let name = &rest[..end];
             let numeric = name.first() == Some(&b'#');
@@ -82,7 +80,7 @@ fn bad_entity(s: &[u8], check_named_entities: bool) -> Option<usize> {
             } else if check_named_entities {
                 matches!(name, b"lt" | b"gt" | b"amp" | b"quot" | b"apos")
             } else {
-                true // 有 DOCTYPE 時不解析自訂具名實體，但數值參照仍照 XML 1.0 驗證。
+                true
             };
             if !ok || end == 0 || (check_named_entities && end > 32) {
                 return Some(i);
@@ -176,7 +174,6 @@ pub fn check(text: &str) -> Result<(), SvgError> {
                     }
                 }
             }
-            // quick-xml 把文字裡的 `&名稱;` 切成獨立事件（`before` 指在 `&`）。
             Event::GeneralRef(ref g) => {
                 let name: &[u8] = g.as_ref();
                 let numeric = name.first() == Some(&b'#');
@@ -339,10 +336,8 @@ pub async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) 
     let read = match read_outbox_file(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
         Ok(r) => r,
         Err(crate::outbox::ShareFileError::TooLarge) => {
-            // 超過 4 MiB 直接略過不查；不叫 forget，同一版本不重複排查。
             return None;
         }
-        // 讀不到（剛被刪、暫時失敗）：下次讀清單再查。
         Err(_) => {
             forget(bot_id, name);
             return None;
@@ -367,7 +362,6 @@ pub async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) 
     match H::remind_bot(app, bot_id, &reminder(name, &e), &crid).await {
         Ok(_) => tracing::info!(bot = bot_id, file = name, line = e.line, col = e.col, error = %e.message, "share bot svg is broken; told the bot to fix it"),
         Err(err) => {
-            // 沒送成（例如分享使用者的訊息正排著）：下次讀清單再試。
             forget(bot_id, name);
             tracing::info!(bot = bot_id, file = name, error = ?err, "share bot svg is broken; could not tell the bot yet, will retry");
         }
@@ -385,7 +379,6 @@ pub fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_js
                 return None;
             }
             let size = f.get("size").and_then(|v| v.as_i64()).unwrap_or(-1);
-            // 沒有 `version`（舊資料）就退回 modified_at-size。
             let version = match f.get("version").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
                 Some(v) => v.to_string(),
                 None => format!("{}-{size}", f.get("modified_at").and_then(|v| v.as_str()).unwrap_or("")),
@@ -439,7 +432,6 @@ mod tests {
 
     #[test]
     fn invalid_utf8_bytes_are_caught_even_when_the_lossy_text_is_well_formed() {
-        // 0xFF 不是合法 UTF-8；lossy 轉成 `�` 後結構完全正確，所以要在 bytes 層擋下來（issue #866）。
         let prefix = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>";
         let mut data = prefix.as_bytes().to_vec();
         data.extend_from_slice(b"\xFF</text></svg>");
@@ -452,7 +444,7 @@ mod tests {
     #[test]
     fn invalid_utf8_with_utf8_encoding_declaration_is_still_caught() {
         let mut data = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg><text>".to_vec();
-        data.extend_from_slice(b"\xC3</text></svg>"); // 截斷的多位元組序列
+        data.extend_from_slice(b"\xC3</text></svg>");
         let e = check_bytes(&data).expect_err("宣告 UTF-8 也不能含非法位元組");
         assert_eq!(e.line, 2, "{e:?}");
     }
@@ -493,17 +485,14 @@ mod tests {
 
     #[test]
     fn a_bare_ampersand_in_an_attribute_value_is_caught() {
-        // #1160：`&` 之後整段都沒有 `;` 時，這個 `&` 本身就是壞的（以前 `?` 讓整個檢查回「沒有壞實體」）。
         let s = "<svg><a href=\"https://x.test/?a=1&b=2\"><text>t</text></a></svg>";
         let e = bad(s);
         assert!(e.message.contains("屬性值裡的 `&`"), "{e:?}");
         assert_eq!((e.line, e.col), (1, s.find('&').unwrap() + 1), "指在那個 `&`：{e:?}");
         assert!(bad("<svg><text font-family=\"A&B\">x</text></svg>").message.contains("屬性值裡的 `&`"));
         assert!(bad("<svg><text aria-label=\"R&D\">x</text></svg>").message.contains("屬性值裡的 `&`"));
-        // 合法的寫法照舊過。
         assert_eq!(check("<svg><a href=\"?a=1&amp;b=2\"/></svg>"), Ok(()));
         assert_eq!(check("<svg a=\"&#x4E2D;&lt;\"/>"), Ok(()));
-        // 有 DOCTYPE 的照舊不查實體。
         assert_eq!(check("<!DOCTYPE svg [<!ENTITY x \"y\">]><svg a=\"&x;\"/>"), Ok(()));
     }
 

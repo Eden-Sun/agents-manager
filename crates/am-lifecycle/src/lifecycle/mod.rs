@@ -259,12 +259,9 @@ pub async fn client_for_run(app: &(impl crate::capabilities::Db + crate::capabil
             run.id
         ))
     };
-    // #708：移交出去的專案一個 pane RPC 都不打（keys／text／interrupt／login／搬 tab……都經過這裡）。
     crate::handoff::refuse(app.db(), &run.bot_id).await?;
     let host = db::bot_host(app.db(), &run.bot_id).await.map_err(up)?;
     let fence = app.hosts().fence(&host).await.ok_or_else(no_client)?;
-    // Reuse #594's exact-fence resolver: it verifies the run still names this host before and after
-    // session selection and gets the client from the captured HostConn. Do not look it up again by name.
     let client = client_for_run_with_host_fence(app, run, &fence)
         .await
         .map_err(|error| match error {
@@ -310,9 +307,6 @@ async fn client_for_run_with_host_fence(
     let client = match app.herdr_for_host_fence(fence, &session).await {
         Some(client) => client,
         None => {
-            // A configured fence with an unusable run session is the old upstream failure, not
-            // evidence that this host generation was superseded. Recheck authority so a stale
-            // fence still wins when the client lookup raced a reconnect or repoint.
             if db::bot_host(app.db(), &run.bot_id).await.map_err(up)? == host
                 && app.hosts().is_current(fence).await
             {

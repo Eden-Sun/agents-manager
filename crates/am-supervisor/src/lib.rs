@@ -1,6 +1,5 @@
 //! Supervisor domain extracted from agents-managerd.
 
-// Keep the daemon's former crate-root import paths available while the upper crates are split.
 pub use am_base as base;
 pub use am_lifecycle::*;
 pub use am_core;

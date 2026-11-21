@@ -3,11 +3,7 @@
 
 mod tests {
     use crate::lifecycle_tests::prelude::*;
-    // parent-uses
     use crate::lifecycle::*;
-
-    // 一鍵送出建議下一句（Tab → 確認 → Enter）：fake herdr 的 claude 框會把灰字畫成 dim，Tab 把它收進框裡，Enter 送進 transcript。
-    // 文字一律用中性假字。
 
     use crate::lifecycle::suggestion::*;
     use crate::testing as tt;
@@ -58,7 +54,6 @@ mod tests {
         env.herdr.live_pane(
             "pane-s",
             tt::LivePane {
-                // This fixture is idle; a changing working spinner invalidates the pre-key snapshot.
                 no_spinner: true,
                 zero_revision: true,
                 suggestion: suggestion.map(Into::into),
@@ -160,13 +155,11 @@ mod tests {
     /// 一般送出的閘門在 Tab **之前**擋：回合在飛、run 對不上、不是 claude、對話框開著，都是一個鍵都不按。
     #[tokio::test]
     async fn the_gates_refuse_before_tab() {
-        // run 對不上（bot 重啟過）。
         let f = idle(Some(SUGGESTION)).await;
         let body = conflict(accept(&f.env.app, &f.bot_id, SUGGESTION, Some("some-other-run"), "c1").await);
         assert_eq!(body["reason"], "run mismatch", "{body}");
         assert!(f.keys().is_empty());
 
-        // 有回合在飛。
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES ('t-fly',?,?,'web','in_flight','ok',?)",
         )
@@ -180,14 +173,12 @@ mod tests {
         assert_eq!(body["reason"], "a turn is already in flight", "{body}");
         assert!(f.keys().is_empty() && f.pane().suggestion.as_deref() == Some(SUGGESTION), "灰字原封不動");
 
-        // 不是 claude。
         let g = idle(Some(SUGGESTION)).await;
         sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&g.bot_id).execute(&g.env.app.db).await.unwrap();
         let body = conflict(g.accept(SUGGESTION, "c3").await);
         assert_eq!(body["reason"], "suggestion_unsupported", "{body}");
         assert!(g.keys().is_empty());
 
-        // 空字串是 400，不是 409。
         assert!(matches!(g.accept("   ", "c4").await, Err(LcError::Bad(_))));
     }
     /// A stale UI can still carry an old suggestion after the run starts working. The daemon must
@@ -294,25 +285,19 @@ mod tests {
         });
 
         let res = f.accept(SUGGESTION, "c-fault").await;
-        // 3. API fails retryably
         assert!(res.as_ref().is_err_and(|e| e.is_retryable()), "expected retryable error, got: {res:?}");
 
-        // 1. Tab was sent
         assert!(f.keys().contains(&json!(["tab"])), "Tab 必須已送出");
 
-        // 2. Enter was never sent
         assert!(!f.keys().contains(&json!(["Enter"])), "Enter 絕不可送出");
 
-        // 4. exact accepted suggestion is cleared (Ctrl+C only after revalidation)
         assert!(f.keys().contains(&json!(["ctrl+c"])), "必須送出 ctrl+c 清框還原");
         assert!(f.pane().composer.is_empty(), "輸入框必須已清空");
 
-        // 5. no active/in-flight turn remains
         assert_eq!(f.count("turns").await, 0, "不可殘留任何 turn");
         assert_eq!(f.count("messages").await, 0, "不可殘留任何 message");
         assert!(db::in_flight_turn(&f.env.app.db, &f.run_id).await.unwrap().is_none());
 
-        // 6. next ordinary prompt is not blocked by a stale composer draft
         sqlx::query("DROP TRIGGER fault_turns").execute(&f.env.app.db).await.unwrap();
         let next = crate::lifecycle::prompt(&f.env.app, &f.bot_id, "下一則一般 prompt", "c-next").await;
         assert!(next.is_ok(), "下一則一般 prompt 必須順利送出，不被草稿阻擋: {next:?}");
@@ -322,7 +307,6 @@ mod tests {
     async fn post_enter_delivery_failure_never_clears_composer_or_interrupts_turn() {
         let f = idle(Some(SUGGESTION)).await;
         crate::prompt_suggestion::set(&f.run_id, Some(SUGGESTION.into()));
-        // 在 Enter 送達後的 delivery 寫回失敗
         sqlx::query("CREATE TRIGGER lost_delivery_write BEFORE UPDATE OF delivery ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
             .execute(&f.env.app.db)
             .await
@@ -331,11 +315,9 @@ mod tests {
         let res = f.accept(SUGGESTION, "c-post-enter").await;
         assert!(res.is_err(), "送達寫回失敗應回錯: {res:?}");
 
-        // Tab 與 Enter 均已送出
         assert_eq!(f.keys(), [json!(["tab"]), json!(["Enter"])], "只有 Tab 與 Enter，絕無 ctrl+c");
         assert!(!f.keys().contains(&json!(["ctrl+c"])), "post-enter 失敗絕不可送 ctrl+c");
 
-        // turn 已送出並留在 DB 中
         assert_eq!(f.count("turns").await, 1, "回合必須保留在 DB 中");
     }
 }

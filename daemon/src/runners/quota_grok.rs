@@ -13,7 +13,6 @@ use std::time::Duration;
 
 /// `Ok(false)` = grok is not installed there (quota stays null).
 pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
-    // kind 停用（使用者 2026-11-14：grok 不訂閱）：不探測。
     if crate::identity_prefs::kind_disabled(&app.db, host, "grok").await {
         return Ok(false);
     }
@@ -23,7 +22,6 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     if !app.hosts.is_current(&fence).await {
         bail!("host `{host}` changed while resolving HOME");
     }
-    // The start-up poller can beat detection; empty cache = unknown, not missing.
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
     }
@@ -38,12 +36,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     let probe = Probe::new(client.clone(), ws.workspace_id.clone());
     let pane_id = pane.pane_id.clone();
 
-    // A distinct name so reconcile and the bot list can never confuse it with a real bot.
     let name = format!("amquota{}", ulid::Ulid::new().to_string()[20..].to_ascii_lowercase());
-    // grok 1.0.41 起 herdr 常在啟動當下就把名字從 pane 上拿掉（`agent_name_not_found`：named agent … no longer owns
-    // the target terminal），之後用名字 `agent_wait` 回 `agent_not_running`——grok 其實好好開著，額度卻從 09-23 起
-    // 大多數輪都讀不到（2026-09-28 使用者：「grok children 跑了一陣子，usage 沒更新」）。探測只需要 pane：
-    // 名字掉了不算失敗，改看 pane 自己的 agent／狀態。
     if let Err(e) = start_when_shell_ready(&client, &name, &pane_id).await {
         if !name_lost(&e) {
             return Err(e);
@@ -51,7 +44,6 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
         tracing::debug!(host, pane = %pane_id, "grok probe: herdr dropped the agent name at start; waiting on the pane instead");
     }
     wait_for_grok_pane(&client, &pane_id, Duration::from_secs(60)).await?;
-    // The TUI accepts a slash command only once its input line is drawn.
     tokio::time::sleep(Duration::from_secs(3)).await;
     client.pane_send_text(&pane_id, "/usage").await?;
     tokio::time::sleep(Duration::from_millis(800)).await;

@@ -5,7 +5,6 @@ mod prompt_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::prompt::rearm_queued_prompt_restamps;
     use crate::lifecycle::prompt::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::lifecycle::send_now::ports::AttachConnPort;
@@ -156,9 +155,7 @@ mod prompt_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        // These exercise the agent.prompt path, which needs an agent herdr has a session bound to.
         env.herdr.set_agent("prompt-test", "pane-prompt-test", true);
-        // This pane belongs to the mock's test session, not an unavailable session.
         if session == "test" {
             sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?")
                 .bind(&run_id).execute(&app.db).await.unwrap();
@@ -423,7 +420,6 @@ mod prompt_tests {
     async fn an_agm_dispatch_queues_behind_an_in_flight_turn_but_a_user_prompt_still_gets_409() {
         let f = fixture("codex", "test").await;
         let app = f.env.app.clone();
-        // 先佔住一個回合。
         let busy = db::ulid();
         sqlx::query(
             "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
@@ -437,11 +433,9 @@ mod prompt_tests {
         .await
         .unwrap();
 
-        // 使用者：照舊 409，不排隊。
         let user = prompt(&app, &f.bot_id, "使用者自己打的", "user-1").await;
         assert!(matches!(user, Err(LcError::Conflict(_))), "使用者的 /prompt 仍是 409");
 
-        // AGM 派工：排一筆 queued，內容存在 prompt_text 等 flush。
         let out = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot"), QueueClass::Relay).await.unwrap();
         assert_eq!(out.delivery, "queued");
         let (status, run_id, text): (String, Option<String>, Option<String>) =
@@ -452,11 +446,9 @@ mod prompt_tests {
                 .unwrap();
         assert_eq!((status.as_str(), run_id, text.as_deref()), ("queued", None, Some("AGM 派的工作")));
 
-        // 同一筆交辦重試：回原本那一筆，不會疊第二筆。
         let again = prompt_relayed_queueable(&app, &f.bot_id, "AGM 派的工作", "agm-1", Some("agm-bot"), QueueClass::Relay).await.unwrap();
         assert_eq!(again.turn_id, out.turn_id);
         assert_eq!(again.delivery, "queued", "重問一筆還在排隊的，回答跟第一次一樣（不是 turn 欄位上的 pending）");
-        // 另一筆交辦想排第二筆：擋下來，照舊 409（每個對話只留一筆 queued）。
         let other = prompt_relayed_queueable(&app, &f.bot_id, "另一件事", "agm-2", Some("agm-bot"), QueueClass::Relay).await;
         assert!(matches!(other, Err(LcError::Conflict(_))), "每個對話只留一筆 queued");
         let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued'")
@@ -643,7 +635,6 @@ mod prompt_tests {
 
         let out = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-raced").await.expect("不是可重試的 409");
 
-        // 那一筆回合留著，使用者的訊息與「run ended」說明都在。
         let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id = ?").bind(&out.turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!(t.status, "failed", "收掉它的是 run 結束那條路，不是撤回");
         let msgs: Vec<(String, String)> = sqlx::query_as("SELECT role, content FROM messages WHERE turn_id = ? ORDER BY role")
@@ -659,7 +650,6 @@ mod prompt_tests {
         assert!(!out.message_id.is_empty(), "回的是那顆還在的泡泡");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
 
-        // 同一個 request id 重送：走冪等分支，答案必須跟剛剛那次一模一樣。
         let again = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-raced").await.unwrap();
         assert_eq!(
             (again.turn_id, again.message_id, again.delivery),
@@ -688,7 +678,6 @@ mod prompt_tests {
     /// 別的 bot／排程送進來的 prompt 要留 `relay_from`，UI 才分得出來源（2026-09-12 使用者）。
     #[tokio::test]
     async fn a_relayed_prompt_records_who_sent_it() {
-        // 一顆 bot 同時只有一個回合在飛：各用一個 fixture。
         let user = fixture("codex", "test").await;
         let user_app = user.env.app.clone();
         let mine = prompt_with(&user_app, &user.bot_id, "使用者自己打的", "prompt-user", &[]).await.unwrap();
@@ -751,8 +740,6 @@ mod prompt_tests {
         assert!(body["retry_after_secs"].as_i64().unwrap_or(0) > 0, "要講還要等多久：{body}");
         assert_eq!(turn_count(&app, &f.conv).await, 0, "連 turn 都沒建");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
-        // 擋在 turn 之前，不是建完再撤：撤回那條路會先廣播 `message_added` 再補一次 `resync`，
-        // 使用者看到的是一顆泡泡冒出來又消失。窗口開著時每一則 prompt 都這樣閃一下是不行的。
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), events.recv()).await.is_err(),
             "一則都不該廣播：沒有泡泡冒出來又消失",
@@ -805,7 +792,6 @@ mod prompt_tests {
     async fn a_window_that_opens_while_the_turn_commits_takes_the_turn_back_out() {
         let f = fixture("codex", "test").await;
         let app = f.env.app.clone();
-        // 這一刻還沒有人握著（`released_at` 有值）：閘門的第一次讀會放行。
         sqlx::query("INSERT INTO supervisor_leases (resource, owner, fence, released_at) VALUES ('restart','k8bw2f',7,?)")
             .bind(db::now())
             .execute(&app.db)
@@ -847,14 +833,12 @@ mod prompt_tests {
         assert_eq!(turn_count(&app, &f.conv).await, 0, "連 turn 都沒建");
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "agent.prompt").count(), 0, "一個字都沒送");
 
-        // 讀取恢復、窗口還握著：現在是「真的有窗口」的 409，跟上面「讀不到」分得開。
         crate::supervisor::maintenance::fault::restore_lease_reads(&app.db).await;
         let Err(LcError::Conflict(body)) = prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unreadable").await else {
             panic!("窗口還握著，要是 409")
         };
         assert_eq!(body["reason"], "maintenance_window", "{body}");
 
-        // 窗口收了：同一個 request id 原樣重送就送得進去。
         let l = crate::supervisor::store::lease(&app.db, "restart").await.unwrap().unwrap();
         assert!(crate::supervisor::store::release_lease(&app.db, "restart", "k8bw2f", l.fence).await.unwrap());
         prompt(&app, &f.bot_id, "Reply with PONG please", "prompt-unreadable").await.expect("恢復＋窗口收了：照常送");
@@ -871,7 +855,6 @@ mod prompt_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        // turn 一 commit，那一列就變成解不開的樣子（第一次讀已經過了）。
         sqlx::query(
             "CREATE TRIGGER the_lease_goes_bad_mid_commit AFTER INSERT ON turns
              BEGIN
@@ -1337,7 +1320,6 @@ mod prompt_tests {
         let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
         let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
 
-        // pane 的 client 已經照 run 拿到了，之後才讀不到主機——正是現場的窗口。
         let app2 = app.clone();
         crate::lifecycle::race_point::arm("grok_trust_before_host", &f.bot_id, move || async move {
             crate::testing::make_table_unreadable(&app2, "projects").await;
@@ -1351,7 +1333,6 @@ mod prompt_tests {
         assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "主機讀不到：不能按 y");
         assert!(!trust_file.exists(), "主機讀不到：不能把信任寫到 daemon 這台");
 
-        // 讀得回來：同一個 prompt 再試一次就照常信任並按 y（mock 畫面不會消失，所以仍是 409）。
         assert!(pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.is_err());
         let keys: Vec<serde_json::Value> = f.env.herdr.calls_to("pane.send_keys").iter().filter_map(|p| p.get("keys").cloned()).collect();
         assert_eq!(keys, vec![json!(["y"])]);
@@ -1704,7 +1685,6 @@ mod prompt_tests {
         assert!(herdr_a.calls_to("agent.prompt").is_empty());
         assert!(herdr_b.calls_to("agent.prompt").is_empty());
 
-        // Model reconcile publishing a fresh active run against the now-authoritative B connection.
         assert_eq!(mark_run_exited(&app, &f.run_id, "host repointed").await, RunExit::Recorded);
         let new_run = db::ulid();
         sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'pane-prompt-test', 'test', ?)")
@@ -1715,8 +1695,6 @@ mod prompt_tests {
             .await
             .unwrap();
         let retry = prompt(&app, &f.bot_id, "同名主機改指後不能沿用舊 client", "remote-host-repoint").await.unwrap();
-        // The test mock deliberately does not implement agent.prompt, so a received call is
-        // recorded as unknown. What matters here is that the explicit retry reaches only B.
         assert_eq!(retry.delivery, "unknown", "the retry reaches B after the new run exists");
         assert!(herdr_a.calls_to("agent.prompt").is_empty(), "the old physical host remains untouched");
         assert_eq!(herdr_b.calls_to("agent.prompt").len(), 1, "only the newly authoritative host gets the retry");
@@ -1759,14 +1737,11 @@ mod send_now_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::prompt::rearm_queued_prompt_restamps;
     use crate::lifecycle::prompt::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::lifecycle::send_now::ports::AttachConnPort;
     use crate::lc_error::PromptOut;
     use crate::lc_error::QueueClass;
-    // 插隊送出（issue #103）：daemon 這一側的記帳。端到端（pane 真的跑 2.1.275、CLI 真的收到）要等
-    // §6.9 批次升級之後才能驗，這裡釘的是「哪些 run 可以插隊」與「被打斷的回合怎麼收」。
     use crate::lifecycle::prompt::*;
     use crate::testing as tt;
     struct Fixture {
@@ -1794,7 +1769,6 @@ mod send_now_tests {
         let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
         let run_id = db::ulid();
         let transcript = if kind == "claude" {
-            // Claude transcript evidence is trusted only inside this bot's configured project root.
             let config_dir = env.dir.join("claude-config");
             sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
                 .bind(serde_json::json!({ "CLAUDE_CONFIG_DIR": config_dir.to_string_lossy() }).to_string())
@@ -2337,7 +2311,6 @@ mod send_now_tests {
         let (herdr_live, herdr_screens) = (f.env.herdr.live.clone(), f.env.herdr.screens.clone());
         let (from, to) = (transcript.clone(), hidden.clone());
         crate::lifecycle::race_point::arm("send_now_after_key", &f.bot_id, move || async move {
-            // 鍵送出去之後什麼都看不到了：pane 讀不到、transcript 也暫時讀不到。
             herdr_live.lock().unwrap().remove("pane-sn");
             herdr_screens.lock().unwrap().insert("pane-sn".into(), "__READ_ERROR__".into());
             std::fs::rename(&from, &to).unwrap();
@@ -2350,8 +2323,6 @@ mod send_now_tests {
         assert_eq!(status_of(&f, &out.turn_id).await, "failed", "新的那一則不佔 in_flight");
         assert_eq!(delivery_of(&f, &out.turn_id).await, "unknown");
 
-        // transcript 又讀得到了，而新那一則的 user entry 確實在裡面；它的 Stop 到了：先補「被插隊打斷」，
-        // 回覆才不會接到舊回合上。
         std::fs::rename(&hidden, &transcript).unwrap();
         let stop = crate::hookrecv::HookBody {
             bot_id: f.bot_id.clone(),
@@ -2404,7 +2375,6 @@ mod send_now_tests {
         assert!(transcript_of(&f).await.contains("先看這句"), "鍵確實生效了");
 
         sqlx::query("DROP TRIGGER lost_close").execute(&app.db).await.unwrap();
-        // 同一個 request id 重送：先補欠著的那一半，回的是那一則，不重打。
         let again = prompt_send_now(&app, &f.bot_id, "先看這句", "sn-owed", &[], None).await.unwrap();
         assert_eq!(status_of(&f, &running).await, "failed");
         assert_eq!(notes_on(&f, &running).await, vec![SEND_NOW_NOTE.to_string()]);
@@ -2457,7 +2427,6 @@ mod send_now_tests {
         let sent_by = Arc::new(std::sync::Mutex::new(String::new()));
         let (db, bot, seen) = (app.db.clone(), f.bot_id.clone(), sent_by.clone());
         crate::lifecycle::race_point::arm("send_now_owed", &f.bot_id, move || async move {
-            // 收舊回合那一半好了，寫送達結果的那一句（只有它寫 `delivery_verified`）換成寫不進去。
             sqlx::query("DROP TRIGGER lost_close").execute(&db).await.unwrap();
             sqlx::query("CREATE TRIGGER lost_delivery BEFORE UPDATE OF delivery_verified ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
                 .execute(&db)
@@ -2697,7 +2666,6 @@ mod restamp_tests {
     use crate::lifecycle_tests::prelude::*;
     use crate::lifecycle::prompt::rearm_queued_prompt_restamps;
     use crate::lifecycle::prompt::test_seams::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::state::App;
     use crate::lifecycle::send_now::ports::AttachConnPort;
@@ -2771,7 +2739,6 @@ mod restamp_tests {
         drop(conn);
         assert!(db::bot(&app.db, &missing.id).await.unwrap().is_none());
         assert!(restamp_queued_prompt(&app, &rows[1].0).await.is_ok());
-        // Restore CLI debt so the scan itself must process it.
         sqlx::query("UPDATE messages SET created_at='2026-09-30T13:28:31.333Z' WHERE id=?").bind(&rows[1].1).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET restamp_pending=1 WHERE id=?").bind(&rows[1].0).execute(&app.db).await.unwrap();
         assert!(restamp_queued_prompt(&app, &rows[2].0).await.is_err());
@@ -2811,12 +2778,10 @@ mod restamp_tests {
         let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "daemon 通知").await;
         mark_delivery(&app, &turn, ok, "2026-09-30T13:38:55.000Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, "2026-09-30T13:38:55.000Z");
-        // 之後補證據再記一次：delivered_at 不變，訊息也不再動。
         mark_delivery(&app, &turn, ok, "2026-09-30T13:50:00.000Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, "2026-09-30T13:38:55.000Z");
 
         sqlx::query("UPDATE turns SET status='failed' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
-        // 沒排隊（幾百毫秒內就送出）的不動。
         let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T14:00:00.000Z", "一般送出").await;
         mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.600Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, "2026-09-30T14:00:00.000Z");
@@ -2899,7 +2864,6 @@ mod restamp_tests {
         let ok = DeliveryRecord { stored: "ok", verified: true, auto_resend: false };
         mark_delivery(&app, &turn, ok, first_at).await.unwrap();
 
-        // Recreate an uncompleted durable debt, then make the bot lookup fail once.
         sqlx::query("UPDATE messages SET created_at=? WHERE id=?").bind(queued_at).bind(&msg).execute(&app.db).await.unwrap();
         sqlx::query("UPDATE turns SET restamp_pending=1 WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
         let mut events = app.subscribe();
@@ -2931,7 +2895,6 @@ mod restamp_tests {
         let turn2 = turn.clone();
         let app2 = app.clone();
         crate::lifecycle::race_point::arm("mark_delivery_before_claim", &turn, move || async move {
-            // 這筆在第一筆 claim 前進來，並先完成原子 claim。
             mark_delivery(
                 &app2,
                 &turn2,
@@ -2942,7 +2905,6 @@ mod restamp_tests {
             .unwrap();
         });
 
-        // 外層呼叫先抵達 claim 點後暫停；注入的 evidence 先 claim 13:38:55，外層稍後以另一份 evidence 寫入。
         mark_delivery(
             &app,
             &turn,

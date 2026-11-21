@@ -6,7 +6,6 @@ use crate::db;
 use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
 use crate::hosts::sh_quote;
-// 測試模組（`use super::*`）還在用整個 daemon 的型別、以及搬到 `runners/hookrecv.rs` 的組裝函式；測試檔之後再改成自己 import。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 use crate::state::App;
 #[cfg(all(test, feature = "daemon-test-harness"))]
@@ -88,8 +87,6 @@ async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::por
     Ok(())
 }
 
-// Accept the caller's transaction as well as a pool; hook writes must not borrow
-// another pool slot while holding SQLite's write lock.
 async fn relay_source<'e>(conn: impl sqlx::Executor<'e, Database = sqlx::Sqlite>, run: Option<&db::Run>, echo: &str) -> Option<crate::agent_relay::Relayed> {
     let run = run?;
     let host: Option<String> = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
@@ -220,7 +217,6 @@ fn failure_detail(p: &Value) -> Option<String> {
     for k in KEYS {
         match p.get(k) {
             Some(Value::String(s)) if !s.trim().is_empty() => return Some(s.trim().to_string()),
-            // `error: {type, message}` 之類的巢狀形狀。
             Some(Value::Object(o)) => {
                 for inner in ["message", "type", "code"] {
                     if let Some(s) = o.get(inner).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
@@ -239,16 +235,12 @@ fn failure_detail(p: &Value) -> Option<String> {
 pub fn classify_failure(detail: Option<&str>) -> FailureReason {
     let t = detail.unwrap_or("").to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
-    // `esc` 太短，直接 `contains` 會連「unescaped」「description」這種普通英文字都算中——那樣一來
-    // 真正的失敗（API／額度）會被這條擋在最前面的分支攔走，回合被當成使用者中斷、一個字都不動，
-    // #79／#108 想防的「卡在 in_flight、額度沒記下來」又繞了回來。只認被非英數字元包住的獨立字。
     let esc_word = t.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|w| w == "esc");
     if esc_word || has(&["interrupt", "cancel", "abort", "user_stop", "user stop"]) {
         FailureReason::Interrupted
     } else if crate::turn_error::is_quota_exhaustion(&t)
         || has(&["rate limit", "rate_limit", "ratelimit", "usage limit", "usage_limit", "quota", "429", "overloaded"])
     {
-        // 第一支是 claude 撞額度的橫幅（`You've hit your session limit` 之類，沒有 rate/usage 字樣，issue #108）。
         FailureReason::RateLimit
     } else if has(&["auth", "401", "403", "credential", "unauthorized", "forbidden", "login", "api key", "api_key"]) {
         FailureReason::Auth
@@ -326,7 +318,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
         }
         return HookKind::ClaimCollisionCheck { issue, title, child, child_bot_id, claim_id, branch };
     }
-    // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
     if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
         return match (s("to_bot_id"), s("to_run_id"), s("delivery_id"), s("text")) {
             (Some(to_bot_id), Some(to_run_id), Some(delivery_id), Some(text))
@@ -343,7 +334,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
     }
     match provider {
         "claude" => {
-            // 解不開的 payload（hook 子行程包成 `{"raw": …}`：超過 1 MiB 被截斷、stdin 逾時）沒有事件名：不猜成 SessionStart（#1007）。
             if p.get("hook_event_name").is_none() && p.get("prompt_id").is_none() && p.get("raw").is_some() {
                 return HookKind::Ignore("unparseable payload (raw)".into());
             }
@@ -368,8 +358,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     agent_id: s("agent_id"),
                     agent_type: s("agent_type"),
                 },
-                // 回合失敗收尾的原生訊號（issue #79）：以前只有 `Stop`，失敗的回合要等 §4.3 備援或
-                // stuck watchdog 才被發現，中間一直掛在 in_flight。
                 "StopFailure" => {
                     let detail = failure_detail(p);
                     HookKind::TurnFailed {
@@ -392,8 +380,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                         user: None,
                     }
                 }
-                // issue #82：純可見性，見 `HookKind::SubagentEvent` 的說明——這裡不建立、不動任何
-                // Turn，`agent_id`／`agent_type` 兩個事件都有，`agent_transcript_path` 只有 Stop 帶。
                 "SubagentStart" => HookKind::SubagentEvent {
                     event: "start",
                     agent_id: s("agent_id"),
@@ -406,8 +392,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     agent_type: s("agent_type"),
                     transcript_path: s("agent_transcript_path"),
                 },
-                // issue #94：`matcher: "Bash"` already scopes this to shell commands; the actual
-                // "was this herdr creating a pane" decision is `crate::spawn_hints::extract_pane_ids`.
                 "PostToolUse" if p.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") => {
                     match crate::ask_answers::from_post_tool_use(p) {
                         Some(rec) => HookKind::AskAnswered(rec),
@@ -447,10 +431,7 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
                     .filter(|s| !s.is_empty());
-                // Codex runs a hidden title-generation turn after each reply; not user-visible.
                 let assistant = s("last-assistant-message");
-                // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
-                // 取不到 input 時，回覆長相才是唯一線索。
                 let is_title_turn = match user.as_deref() {
                     Some(u) => u.contains("single-line task title"),
                     None => assistant
@@ -471,7 +452,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 };
             }
 
-            // Stop
             let stop_active = p
                 .get("stop_hook_active")
                 .or_else(|| p.get("stopHookActive"))
@@ -486,11 +466,8 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
             let transcript_path = s("transcript_path");
             let assistant = s("last_assistant_message").or_else(|| s("last-assistant-message"));
 
-            // Stop 管道不帶使用者原文：不能合成整段 input-messages 或猜測 prompt，嚴格給 None
             let user = None;
 
-            // Stop has no input-messages to prove a hidden title request. A normal
-            // reply may itself be {"title": ...}; do not discard it by guessing.
             HookKind::TurnComplete {
                 session_id,
                 turn_id,
@@ -499,7 +476,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 user,
             }
         }
-        // SPEC §12 / appendix F: camelCase keys, grok 1.0.13 also sends some snake_case copies.
         "grok" => {
             let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake));
             let ev = either("hookEventName", "hook_event_name").unwrap_or_default().to_lowercase();
@@ -511,7 +487,6 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                     agent_type: None,
                 },
                 "stop" => {
-                    // A second, observe-only Stop fires at session end (`reason: shutdown`).
                     let reason = s("reason").unwrap_or_else(|| "end_turn".into());
                     if reason != "end_turn" {
                         return HookKind::Ignore(format!("stop reason {reason}"));
@@ -535,40 +510,29 @@ pub fn classify(provider: &str, p: &Value) -> HookKind {
                 other => HookKind::Ignore(other.to_string()),
             }
         }
-        // agy（設計 A.6／§2 #6）：payload 沒有事件名，hook 子行程把 dispatcher 的參數放在 `hookEventName`（`hook_cmd::enrich_agy_payload`）；
-        // `Stop` 另帶 `lastAssistantMessage`／`lastUserMessage`（從 transcript 讀的）；agy 1.4.7 起 stdin 自帶 `lastUserInput`（issue #1950）。
-        // camelCase 是 hook、snake_case 是 statusLine。
         "agy" => {
             let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
             let conv = either("conversationId", "conversation_id");
             let path = either("transcriptPath", "transcript_path");
             match s("hookEventName").unwrap_or_default().to_ascii_lowercase().as_str() {
-                // 對話是第一則 prompt 才建立：`SessionStart` 沒文件、不一定來，第一個 `PreInvocation` 補身份。
                 "sessionstart" | "preinvocation" => HookKind::Identity { session_id: conv, transcript_path: path, agent_id: None, agent_type: None },
-                // statusLine：每次 agent 狀態改變一則，單槽、最新的贏（不進收件匣）。
                 "state" => HookKind::StatusLine,
                 "stop" => {
                     let reason = s("terminationReason").unwrap_or_default();
                     let error = s("error").map(|e| e.trim().to_string()).filter(|e| !e.is_empty());
-                    // 值域不可假設（官方 `model_stop`／`max_steps_exceeded`／`error`，實測 `ERROR`，第三方 `NO_TOOL_CALL`）：
-                    // 有錯誤文字、或原因是 error 才算失敗；其他一律當正常結束。
                     if error.is_some() || reason.eq_ignore_ascii_case("error") {
                         let detail = error.or_else(|| Some(reason.clone()).filter(|r| !r.is_empty()));
                         return HookKind::TurnFailed {
                             session_id: conv,
-                            // `executionNum` 是不是跨回合唯一沒有驗過：當去重鑰匙會把之後的回合吃掉，所以不給。
                             turn_id: None,
                             transcript_path: path,
                             reason: classify_failure(detail.as_deref()),
                             detail,
                         };
                     }
-                    // 背景工作還在跑（`fullyIdle:false`）＝回合還沒真的結束，等最後那一個 Stop。
                     if p.get("fullyIdle").and_then(Value::as_bool) == Some(false) {
                         return HookKind::Ignore(lifecycle::agy_busy::NOT_IDLE_REASON.into());
                     }
-                    // issue #1950: agy 1.4.7 hook stdin 新增 lastUserInput 當額外證據；
-                    // lastUserMessage 優先，缺席或空白才退回 lastUserInput
                     let user = either("lastUserMessage", "last_user_message")
                         .or_else(|| either("lastUserInput", "last_user_input"));
                     HookKind::TurnComplete { session_id: conv, turn_id: None, transcript_path: path, assistant: s("lastAssistantMessage"), user }
@@ -597,8 +561,6 @@ pub async fn process<H: HookHost>(app: &H, body: &HookBody) -> Result<()> {
 /// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
 /// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
 pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option<&str>) -> Result<()> {
-    // #1626：撞題檢查等 Jev（可能很慢），而它只寫撞題帳本與提示、不改這顆 bot 的回合狀態，所以不取 bot 鎖；
-    // 占著鎖的話同一顆 bot 之後的 Stop 與其他要這把鎖的操作都得排在後面。移交、世代、provider 等檢查照常走 process_locked。
     if is_claim_collision(body) {
         process_locked_for_with_outcome(app, body, event_id, &mut None).await?;
         return Ok(());
@@ -607,7 +569,6 @@ pub async fn process_for<H: HookHost>(app: &H, body: &HookBody, event_id: Option
     let _g = lock.lock().await;
     let mut accepted_turn_id = None;
     process_locked_for_with_outcome(app, body, event_id, &mut accepted_turn_id).await?;
-    // Only a Stop that the core actually applied can contribute its post-Stop records.
     if let Some(turn_id) = accepted_turn_id {
         let run_id = sqlx::query_scalar::<_, Option<String>>("SELECT run_id FROM turns WHERE id = ?")
             .bind(&turn_id)
@@ -743,7 +704,6 @@ async fn store_resent_prompt(app: &(impl crate::capabilities::Db + crate::events
         return Ok(());
     }
     let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
-    // 先數有沒有使用者訊息再寫：deferred 的話數完之後別的 writer 一 commit，INSERT 就 517，那一句補不上（#831）。
     let mut tx = db::begin_write(app.db()).await?;
     let added = store_resent_prompt_tx(&mut tx, conv, turn, run, &text).await?;
     tx.commit().await?;
@@ -760,7 +720,6 @@ fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
         .lines()
         .rev()
         .find_map(crate::lifecycle::transcript_user_text)
-        // CLI 把貼上的 prompt 包成 `<pasted_content>`（#218）：存進對話、比對的都是原文。
         .map(|t| crate::lifecycle::pasted_content::original(&t).into_owned())
 }
 
@@ -907,7 +866,6 @@ async fn fill_or_drop_late_hook(
     same_turn: bool,
     event_id: Option<&str>,
 ) -> Result<()> {
-    // 先數有沒有回覆再寫：deferred 的話數完之後別的 writer（對帳每一輪都在寫）一 commit 就 517，遲到的回覆補不上（#831）。
     let mut tx = db::begin_write(app.db()).await?;
     let has_reply: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
@@ -920,8 +878,6 @@ async fn fill_or_drop_late_hook(
         return replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id, event_id).await;
     }
     if body_text.trim().is_empty() || has_reply > 0 {
-        // 丟掉的 hook：只有「有證據是這一回合的」才記它的鑰匙。沒有證據的（`same_turn = false`）可能屬於別的回合，
-        // 記上去之後 `recent_fallback_turn`（只找 native id 為空的）就找不到這一回合，它真正的晚到 hook 沒地方收。
         if same_turn {
             stamp_late_hook_keys(&mut tx, &turn.id, session_id, native_turn_id, event_id).await?;
         }
@@ -929,15 +885,11 @@ async fn fill_or_drop_late_hook(
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
         return Ok(());
     }
-    // Keep the owner read in this transaction and ahead of durable message/status writes.
-    // On failure, the inbox delivery can be retried without leaving a misrouted event behind.
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
         .bind(&turn.conversation_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("conversation {} has no owner", turn.conversation_id))?;
-    // 這一筆是備援關掉的（`completed_fallback`），遲到的 hook 把回覆補上才升級成 `completed`。
-    // 以前這句沒有 guard（`WHERE id=?`）：中間若有別的路徑動過它，這裡會無聲蓋過去（issue #68）。
     if tx.set_status_on(&turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
         != lifecycle::turn_controller::Outcome::Applied
     {
@@ -971,7 +923,6 @@ async fn replace_fallback_reply(
             .fetch_all(&mut *tx)
             .await?;
     let Some((latest, _)) = rows.first().filter(|_| rows.iter().all(|(_, src)| src == "terminal_fallback")) else {
-        // 有證據是這一回合的 hook（呼叫端才會走到這裡），只是已經有 hook 寫的回覆：鑰匙照記。
         stamp_late_hook_keys(&mut tx, &turn.id, session_id, native_turn_id, event_id).await?;
         tx.commit().await?;
         tracing::info!(turn = %turn.id, "late hook dropped; the turn already has a hook reply");
@@ -999,7 +950,6 @@ async fn replace_fallback_reply(
     tx.commit().await?;
     tracing::info!(turn = %turn.id, msg = %latest, "late hook replaced the terminal-fallback reply with the transcript's");
     if let Some(bot_id) = bot_id {
-        // 同一個 id 再推一次：前端遇到內容不同的同 id 訊息會換掉（`store/lists.ts` 的 `upsertSorted`）。
         app.emit_message_added(&bot_id, message).await;
     }
     app.emit_turn(&turn.id).await;
@@ -1089,7 +1039,6 @@ async fn confirm_agy_pre_invocation_delivery<H: HookHost>(
         }
     }
 
-    // 唯一性守衛：候選唯一性先看同文 in_flight 集合；若有兩筆以上相同候選（不論是否已 verified），一筆都不補
     if matches.len() != 1 {
         return Ok(());
     }
@@ -1098,7 +1047,6 @@ async fn confirm_agy_pre_invocation_delivery<H: HookHost>(
         return Ok(());
     }
 
-    // CAS 條件防更新競態：比對 id、run_id、status、delivery、delivery_verified、delivered_at
     let affected = sqlx::query(
         "UPDATE turns SET delivery_verified = 1
           WHERE id = ? AND run_id = ? AND status = 'in_flight' AND delivery = 'ok'
@@ -1111,7 +1059,6 @@ async fn confirm_agy_pre_invocation_delivery<H: HookHost>(
     .await?
     .rows_affected();
 
-    // 只有 UPDATE 真正 0 -> 1 才 emit
     if affected > 0 {
         tracing::info!(turn = %target_id, run = %run.id, "agy PreInvocation lastUserInput matched prompt; delivery verified");
         app.emit_turn(target_id).await;
@@ -1129,12 +1076,8 @@ pub async fn consume_resume_session(
     reported_session_id: Option<&str>,
 ) -> Result<()> {
     let Some(expected) = run.resume_session_id.as_deref() else { return Ok(()) };
-    // No session id proves nothing (codex notify may lack `thread-id`); leave the marker for the next hook.
     let Some(reported) = reported_session_id else { return Ok(()) };
     let mismatch = reported != expected;
-    // 結論跟清掉標記寫在同一句：`resume_gate` 看 `resume_outcome` 放行（issue #92）。先前等到期寫了
-    // `unverified` 的，這時候才到的回報照樣改成真正的結論。回報的 session 也在同一句記下：不拿鎖的讀者
-    // （`api::started_json`，issue #107）看到 `verified` 時一定讀得到是哪一段。
     let consumed = sqlx::query(
         "UPDATE runs SET resume_session_id = NULL, resume_outcome = ?, native_session_id = COALESCE(native_session_id, ?)
           WHERE id = ? AND resume_session_id IS NOT NULL",
@@ -1144,7 +1087,6 @@ pub async fn consume_resume_session(
     .bind(&run.id)
     .execute(app.db())
     .await?;
-    // A second hook may hold a stale `Run` snapshot; only the one that cleared the marker records a mismatch.
     if consumed.rows_affected() == 0 {
         return Ok(());
     }
@@ -1157,22 +1099,15 @@ pub async fn consume_resume_session(
     if !mismatch {
         app.retire_context_lost(&bot.id, expected).await;
     }
-    // 閘門在等的就是這一則：排著的 prompt 現在可以送了（對不上的話，上面那則說明已經先進聊天室）。
     app.schedule_flush_queued(&bot.id);
-    // 續行提示從接回驗過、畫面閒置起算 10 秒；對不上的就地取消（#424）。
     app.poke_resume_nudge(&bot.id);
     Ok(())
 }
 
 /// 120 秒內被終端備援關掉、還沒收到過 native id 的最近一筆回合（遲到的 hook 可能是它的真回覆，§4.3）。
 async fn recent_fallback_turn(app: &impl crate::capabilities::Db, run_id: &str) -> Result<Option<db::Turn>> {
-    // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     Ok(sqlx::query_as::<_, db::Turn>(
-        // 第二鍵同 issue #461 的其餘三處：`created_at` 只到毫秒，並列時 SQLite 回哪一列是未定義的，
-        // 挑錯就把這次的回覆掛到另一回合底下。（同一個 run 通常一次只有一筆在飛，
-        // 要兩筆 `completed_fallback` 撞同一毫秒才會中，機率比接回 session 那三處低很多；
-        // 一起改是因為修法完全相同。）
         "SELECT * FROM turns WHERE run_id=? AND status='completed_fallback' AND native_turn_id IS NULL
          AND completed_at > ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
@@ -1233,7 +1168,6 @@ async fn fired_within(app: &impl crate::capabilities::Db, t: &db::Turn, received
     }
     let fired_at = fired.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let between: i64 = sqlx::query_scalar(
-        // 「`t` 之後」同毫秒的也算：`created_at` 只到毫秒，同一毫秒開的另一個回合（寫入順序在 `t` 後面）一樣是在 `t` 之後開的。
         "SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND id <> ?
             AND (created_at > ? OR (created_at = ? AND rowid > (SELECT rowid FROM turns WHERE id = ?)))
             AND created_at <= ?",
@@ -1357,13 +1291,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
     accepted_turn_id: &mut Option<String>,
 ) -> Result<()> {
     let Some(bot) = db::bot(app.db(), &body.bot_id).await? else { return Ok(()) };
-    // A3: also guards the spool-replay path, where nothing checked the token.
     if bot.deleted_at.is_some() {
         tracing::info!(bot = %bot.name, "hook for a deleted bot; ignored");
         return Ok(());
     }
-    // #708：移交出去的專案，hook 的事歸接手的 daemon；記一行就丟（spool 重播、spawn hint 也一樣）。
-    // #1259：讀不到＝不知道專案歸誰。不當成「我的」去處理，也不當成「移交了」去丟：下面會只做撞額度的記帳，然後回錯讓收件匣重試。
     let handoff_unknown = match app.db().bot_handed_off_to(&bot.id).await {
         Ok(None) => None,
         Ok(Some(to)) => {
@@ -1375,26 +1306,20 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             Some(e)
         }
     };
-    // spool 重播的那條路也要擋（`receive` 已經擋過一次，但舊 spool 裡可能還躺著別種 provider 的）。
     if !provider_matches_kind(&body.provider, &bot.kind) {
         tracing::warn!(bot = %bot.name, kind = %bot.kind, provider = %body.provider, "hook from another provider; ignored");
         return Ok(());
     }
-    // Provider matching is case-insensitive for compatibility; dispatch must use that same
-    // canonical spelling or an accepted `Claude` event is consumed as an unknown event.
     let provider = body.provider.to_ascii_lowercase();
     let conv = db::conversation_id(app.db(), &bot.id).await?;
     let run = db::active_run(app.db(), &bot.id).await?;
     let kind = classify(&provider, &body.payload);
-    // 被截斷或解不開的事件等於掉了一則：log 要說得出來，不然只看到一筆 `Identity`／`Ignore`（#1007）。只記旗標，不記 payload 內容。
     if body.truncated || matches!(&kind, HookKind::Ignore(why) if why.starts_with("unparseable payload")) {
         tracing::warn!(
             bot = %bot.name, provider = %body.provider, truncated = body.truncated,
             "hook payload was truncated or unparseable; the event itself is lost and the turn will close via the terminal fallback",
         );
     }
-    // #1760：送出當下沒有逐字證據的回合（遠端 claude 不送 UserPromptSubmit、補送過一次），送出之後 agent 跑了工具就是收到了；
-    // 以前要等 Stop 收尾（#1471）才補，回合進行中一直掛著「未驗證送達」。
     if provider == "claude" && body.payload.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse") {
         if let Some(r) = &run {
             confirm_delivery_by_tool_use(app, r, body.received_at.as_deref()).await?;
@@ -1406,13 +1331,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         tracing::info!(bot = %bot.name, provider = %body.provider, ?kind, "hook received");
     }
 
-    // #1259：移交查詢讀不出來時，這一則不做任何 hook 副作用（不認領、不收回合、不寫訊息、不送子通知、不清旗標）。
-    // 唯一的例外是撞額度的記帳（#108）：撞限是帳號的事實，記下來排著的派工才擋得住。記完回錯，收件匣退避重試。
     if let Some(e) = handoff_unknown {
         record_limit_hit_only(app, body, &bot, run.as_ref(), &kind).await?;
         return Err(e.context("could not tell whether the hook's project was handed off; retrying"));
     }
-    // 壓縮中的標記（`compacting.rs`，#1770、#2107）收掉的時機：主 session 的 PostCompact、壓縮做完的 SessionStart（source=compact）、回合收尾的 Stop／StopFailure。
     let compact_ends = match &kind {
         HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. } => true,
         HookKind::CompactEnding { agent_id, agent_type } => agent_id.is_none() && agent_type.is_none(),
@@ -1427,16 +1349,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    // 世代圍籬（issue #69）：這一則屬於哪一代。只在這裡問一次，`fence` 是唯一的規則所在地——
-    // 散在 hook／reconcile／fallback 各判一次，遲早會漂成三套。舊世代的事件只記錄，一個欄位都不改。
-    // 放行的證明（`admitted`）是 hook 改 Turn 的前提：`turn_controller` 那兩支沒有它就不能呼叫（issue #125）。
     let mut admitted = None;
-    // 放行的那一代主機世代（#1024）：agy 的授權失敗只改這一代，換代了就不改。
     let mut admitted_fence = None;
     if let Some(r) = &run {
-        // 主機換機（#1035）：這一run 啟動時所在的遠端主機名已經指到別台（`?confirm=repoint` 換了 ssh 目標）＝這一則是上一代主機的，
-        // 跟上面的 run 世代一樣：只記錄、不改任何欄位。比的是主機目標指紋（`target_epoch`），不是連線世代：
-        // 同一台機器改 remote_path、重連都不算換機器（#1773）。
         let run_host_generation = db::run_host_generation(app.db(), &r.id).await.ok().flatten();
         let host_moved = match run_host_generation {
             Some(was) => app.admitted_host_fence(&bot).await.is_some_and(|f| f.target_epoch().is_some_and(|now| now != was)),
@@ -1457,11 +1372,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
         let owner = app.db().classify_event_owner(&bot.id, r, ev).await;
-        // Spawn claims describe a bot/pane fact, not a turn in the parent's current run.
         if !owner.may_mutate() && !matches!(&kind, HookKind::SpawnClaim { .. }) {
             let (prior_run_id, why) = match &owner {
                 crate::lifecycle::fence::Ownership::Stale { prior_run_id, why } => (prior_run_id.as_str(), *why),
-                // `may_mutate()` 只有 `Stale` 會是 false；留著這一支是為了日後多一種歸屬時編譯器會提醒。
                 _ => ("", "unknown"),
             };
             tracing::warn!(
@@ -1469,7 +1382,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 session = hook_session_id(&body.payload), why,
                 "上一代的 hook：丟棄，不讓它改到這一代的狀態（issue #69）",
             );
-            // 看得見：丟掉一則事件不可以只活在這個函式裡。重跑同一則會走到同一個分支，仍然什麼都不改。
             app.emit(
                 "hook_fenced",
                 json!({"bot_id": bot.id, "provider": body.provider, "run_id": r.id,
@@ -1487,9 +1399,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    // claude ≥ 2.1.287 的 Stop 自己報背景工作（`background_tasks`）：以它為準，不用等畫面巡邏（`background_hook.rs`）。
-    // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
-    // #2146：agy 的完整閒置 Stop（`fullyIdle:true`）到了，之前記的「尚未閒置」證據解除。
     if provider == "agy" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = &run {
             lifecycle::agy_busy::clear(&r.id);
@@ -1501,8 +1410,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    // 登入失效的主動提示（#838，`login_prompt.rs`）：沒登入時回合只回 `Not logged in · Please run /login`（走 `Stop`，不是 `StopFailure`）
-    // ＝授權失敗；綁著身份的 bot 正常答完一回合＝那個身份是通的。
     if (provider == "claude" || provider == "codex") && admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
             if crate::login_prompt::is_auth_failure_line(&provider, a) {
@@ -1513,19 +1420,15 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
     if provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
             app.schedule_codex_notice_capture(&bot.id, &r.id);
         }
-        // 真的答完一回合＝帳號又能跑了，不必等橫幅寫的重置時間。
         if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
             app.clear_limit_hit_for_bot(&bot).await;
         }
     }
 
-    // 撞限的 Grok 回合不以 `end_turn` 收尾，所以一則通過世代圍籬的 end_turn Stop 代表這個帳號答得了話。但只有「撞限之後才送出」的那一回合才能當證據，
-    // 週限誤清會影響同身份的所有 bot：`grok_success_at` 取 daemon 記的 `turns.delivered_at` 當 `success_at`，不用 Stop 的時間（#1872）。
     if provider == "grok" && admitted.is_some() {
         if let (HookKind::TurnComplete { assistant: Some(a), .. }, Some(r)) = (&kind, run.as_ref()) {
             if let Some(success_at) = grok_success_at(app, &bot, r, a, body.received_at.as_deref()).await {
@@ -1534,17 +1437,13 @@ async fn process_locked_for_with_outcome<H: HookHost>(
         }
     }
 
-    // 上一次打斷欠著的收尾先補（#147）：鍵已經生效、DB 那一半沒寫成的那一筆，要在這一則被對到任何回合之前收掉。
-    // 寫不進去就讓這一則失敗、由收件匣重試，順序不亂。
     if matches!(kind, HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. }) {
         app.settle_interruption(&bot.id, lifecycle::InterruptEvidence::Nothing).await?;
-        // 送達結果欠著的同理（#149）：herdr 拒收、還沒收成 failed 的那一筆不能被這一則的回覆認領。
         app.settle_owed_deliveries(&bot.id).await?;
     }
 
     match kind {
         HookKind::Ignore(why) => {
-            // #2146：agy 的 `fullyIdle:false` Stop——記下「這個 run 的當前 in-flight turn 還沒完全閒置」，終端備援與閒置收尾看這份證據。
             if provider == "agy" && why == lifecycle::agy_busy::NOT_IDLE_REASON {
                 if let Some(r) = &run {
                     if let Some(t) = db::in_flight_turn(app.db(), &r.id).await? {
@@ -1555,32 +1454,16 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             tracing::debug!("hook ignored");
             Ok(())
         }
-        // issue #79：回合失敗是一級訊號。收掉那一筆 in-flight turn 並把原因寫進對話，
-        // 而不是讓它掛著等 §4.3 備援（兩分鐘）或 stuck watchdog（五分鐘）來猜。
         HookKind::TurnFailed { session_id, turn_id, transcript_path, reason, detail } => {
-            // 使用者自己中斷不是失敗。兩道都要：payload 說得出是中斷時照它說的；說不出來時看
-            // daemon 自己的紀錄——`interrupt_bot` 先記下**被中斷的是哪一回合**再收 in-flight turn，
-            // 對得上那一回合的 StopFailure 才是那一次 Esc 的回聲（AGM 交辦 2026-09-18）。只看「剛按過停」
-            // 的話，Esc 之後馬上開的新回合撞額度也會被吞掉（#117）。
             if reason == FailureReason::Interrupted {
-                // 回聲證明打斷的鍵生效了：還在等證據的那一筆在這裡收（#147）。
                 app.settle_interruption(&bot.id, lifecycle::InterruptEvidence::Echo).await?;
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
             }
-            // 登入失效：記下這個身份要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
-            // agy 沒有身份：改把那台主機的 `tools.agy.logged_in` 翻成未登入（`agy_auth.rs`，issue #870）。
             if reason == FailureReason::Auth && (provider == "claude" || provider == "agy") && admitted.is_some() {
                 app.login_on_auth_failure(&bot, admitted_fence.as_ref()).await;
             }
-            // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = seen_turn(app, &bot, session_id.as_deref(), turn_id.as_deref()).await?;
-            // 撞的是帳號額度（#108、#150）：先記撞限，**再**推回合結束——那個事件會叫醒 queue flush，排著的派工要看得到
-            // 這個身份沒額度。撞額度是帳號的事實，跟這一則還有沒有回合可收無關：Esc 收掉回合之後才到、對上中斷的回聲、
-            // 回合已被別的路收掉，都一樣要記，不然下一件派工會被送進沒額度的身份。只記這一代 run 送來的（`admitted`：
-            // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身份）；已經收過的同一則不再記，免得把撞限時刻往後推。
-            // 記不進去（讀不到主機、身份表還沒進來、憑據寫不進去）就讓這一則失敗、由收件匣重試（#108 重開）：回合先不收、
-            // 不推回合結束，排著的派工照欠著的那一筆擋（`turn_error::owed_limit_hit`），不能當作沒撞。
             if admitted.is_some() && seen.is_none() {
                 if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
                     match bot.kind.as_str() {
@@ -1618,7 +1501,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 .execute(app.db())
                 .await?;
             }
-            // 同一筆送兩次（重試、spool 重播）不再收第二次——跟 `TurnComplete` 同一把鎖。
             if let Some(existing) = seen {
                 tracing::info!(turn = %existing, "duplicate StopFailure ignored");
                 return Ok(());
@@ -1631,10 +1513,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 但沒有 in-flight turn：後到的訊號，不開新回合");
                 return Ok(());
             };
-            // CAS 在 `status='in_flight'` 上：後到的 Stop／§4.3 備援若已經把它收掉，這裡就什麼都不做，
-            // 不會變成第二次收尾（issue #79 驗收第二條）。`delivery` 不動——字是送出去了，失敗的是回合。
-            // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
-            // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let mut tx = app.db().begin().await?;
             let claimed = tx.fail_with_native_evidence(&t.id, admitted, native).await?;
@@ -1649,17 +1527,11 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             let message = tx.insert_message_tx(&conv, Some(&t.id), "system", &note, "hook", false, None).await?;
             tx.commit().await?;
             *accepted_turn_id = Some(t.id.clone());
-            // 撞限在上面（進這一支之前）就記好了：畫面那條路（`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
             app.emit_message_added(&bot.id, message).await;
             app.emit_turn(&t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
         }
-        // agy 的 statusLine（官方 `https://antigravity.google/docs/cli/statusline`）：
-        // 1. 補 conversation_id（對話一建立就有；**不記它的 `transcript_path`**——給的是摘要版 `transcript.jsonl`，完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來）；
-        // 2. 解析 `context_window`（含 `context_window_size`、`total_input_tokens`、`current_usage.cache_read_input_tokens`…）、`model.{id,effort}`、`agent_state`、`tool_confirmation_pending`、`task_count`、`pending_input_count`、`quota`（只記不取代 /usage 探測）寫進 `runs.status_json`，有 statusLine 時優先於 transcript 估算與 `[agy] context_window_tokens`；
-        // 3. `agent_state`＋`task_count` 連動 `agy_busy`（背景工作未結束時不提早收、結束回 idle 時解除）；`tool_confirmation_pending` 連動 blocked 判斷；
-        // 4. `model.{id,effort}` 校正 `runs.runtime_model`。
         HookKind::StatusLine if provider == "agy" => {
             let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
             if let Some(r) = &run {
@@ -1722,13 +1594,9 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             Ok(())
         }
         HookKind::StatusLine => {
-            // 讀不到主機就丟掉這一份，下一次重繪會再來（#108 重開）：退回 local 會把遠端的讀數寫進本機那一格，
-            // 還會拿它去校正、作廢本機身份真的撞限（`quota::set`）。
             let host = db::bot_host(app.db(), &bot.id).await?;
-            // 讀數是這個 run 的 pane 送來的：帳號是它起來時的身份（issue #238），不是剛改、還沒重啟生效的設定。
             let identity = crate::quota::identity_for_run(&bot, run.as_ref());
             let identity = identity.as_deref();
-            // Written only when changed — claude refreshes often and every write wakes every client.
             if let Some(r) = &run {
                 let text = body.payload.get("status_line").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
                 let mut rich = body.payload.clone();
@@ -1749,9 +1617,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 let rich = serde_json::to_string(&rich).ok();
                 let changed = text != r.status_line.as_deref() || rich != r.status_json;
                 if changed {
-                    // 快取倒數（`cache_clock`）：API 指紋真的動了才算一次 API 活動，閒置重繪不算。
-                    // A restored measurement is not an API baseline: startup redraws must not
-                    // make the old session's expired prompt cache look warm again (#1869).
                     if !lifecycle::resume_context::is_restored(r.status_json.as_deref())
                         && !lifecycle::resume_context::is_restored(rich.as_deref())
                     {
@@ -1765,16 +1630,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         .await;
                     app.emit_bot_status(&bot.id).await;
                 }
-                // #750：server fallback 後實際在跑的模型（statusLine 是權威），校正 runtime_model、不碰 bots.model。
                 if provider == "claude" {
                     app.adopt_statusline_model(r, &body.payload).await;
                 }
             }
-            // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
             if let Some(idn) = identity {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
-                    // 對 claude 共用預設帳號的身份（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉
-                    // `/usage` 探測的 Fable 週窗。規則跟 codex 同一支（`quota::quota_base_for_host`）。
                     let key = app.quota_base_for_host(&host, "claude", Some(idn)).await;
                     app.set_quota(&host, &key, q).await;
                 }
@@ -1790,8 +1651,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #1770、#2107：壓縮開始。只標記這顆 run「壓縮中」，不建立、不動任何 Turn；沒有活著的 run 就沒地方標。
-        // 子 agent 壓縮（agent_id／agent_type 有值）不標記母 bot 為壓縮中。
         HookKind::CompactStarting { agent_id, agent_type } => {
             if agent_id.is_some() || agent_type.is_some() {
                 return Ok(());
@@ -1803,7 +1662,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #2107：壓縮結束。收掉壓縮中標記；子 agent 壓縮不影響母 bot。
         HookKind::CompactEnding { agent_id, agent_type } => {
             if agent_id.is_some() || agent_type.is_some() {
                 return Ok(());
@@ -1815,10 +1673,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #82：純可見性快照，整筆覆蓋 `runs.subagent_json`，不建立、不動任何 Turn，不查重複
-        // （跟 `StatusLine` 一樣，最新的贏），也不碰 `bots`／`parent_bot_id`——那是 §6.5a 血緣認領的事，
-        // 這裡的 `agent_id` 是同一行程內 Task 工具呼叫的 id，不是哪個 pane 的身份。沒有活著的 run
-        // 就沒地方寫，直接丟（跟 `HookKind::Identity` 一樣）。
         HookKind::SubagentEvent { event, agent_id, agent_type, transcript_path } => {
             if let Some(r) = &run {
                 let snapshot = json!({
@@ -1836,9 +1690,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #94：這顆 bot 自己剛剛用 `herdr pane split`／`agent start` 開出 `pane_id`——記下來給
-        // `reconcile::adopt_child` 當比同 tab 更早、更精確的線索。純粹記錄一個事實，不查任何 bot／pane
-        // 現在的狀態，也不需要活著的 run（這是這顆 bot 自己的行程剛做的事，不是它的 Turn 的事）。
         HookKind::SpawnHint { pane_ids } => {
             for pane_id in pane_ids {
                 crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
@@ -1846,17 +1697,12 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             reconcile_after_spawn_hint(app, &bot.id).await;
             Ok(())
         }
-        // 2026-10-02 使用者：claude 問的題目與使用者的答案要留在對話裡（`ask_answers`）。
         HookKind::AskAnswered(rec) => {
             ask_answers::record_in_flight(app, &bot.id, &conv, vec![rec]).await?;
             Ok(())
         }
-        // 2026-09-30 使用者：console-rpa（mac_builder）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
-        // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
         HookKind::RelayAnnounce { to_bot_id, to_run_id, delivery_id, text } => {
-            // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
             let host = db::bot_host(app.db(), &bot.id).await?;
-            // 寄件 bot 送這句當下正在跑的回合：用 shim 寫進報備的 `received_at`（送出時間；spool 可能晚好幾秒才收到）。
             let sent_at = body.received_at.clone().unwrap_or_else(db::now);
             let from_turn = crate::lifecycle::relay_watch::sender_turn_at(app, &bot.id, &sent_at).await?;
             let Some(run) = db::run(app.db(), &to_run_id).await? else { return Ok(()) };
@@ -1872,9 +1718,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
             Ok(())
         }
-        // issue #1790：遠端 shim 開完子 agent 後的登記（本機走 `/relay/spawn/claim`）；只記「這顆 pane 是這顆 bot 開的」。
         HookKind::SpawnClaim { pane_id, parent_run_id } => {
-            // The parent may have slept or restarted while this event waited in the spool.
             crate::spawn_hints::claim_for_run(app, &bot.id, &parent_run_id, &pane_id).await?;
             reconcile_after_spawn_hint(app, &bot.id).await;
             Ok(())
@@ -1894,15 +1738,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path, agent_id, agent_type } => {
-            // issue #2107：子 agent 壓縮後的 post-compaction SessionStart 帶有 agent_id 與 agent_type，
-            // 這是子 agent 自己的 session，不覆蓋母 bot 的 native_session_id，也不收掉母 bot 的回合。
             if agent_id.is_some() || agent_type.is_some() {
                 return Ok(());
             }
             if let Some(r) = &run {
-                // Codex/Grok are checked on their first completed turn; don't consume the request early.
-                // agy 的對話是第一則 prompt 才建立，`SessionStart`／`PreInvocation` 帶的 conversationId 就是真正在用的那段：
-                // `--conversation=<不存在的 id>` 只警告、開新對話，靠這裡對不上才抓得到。
                 if provider == "claude" || provider == "agy" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
@@ -1921,13 +1760,11 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         body.payload.get("source").and_then(Value::as_str) == Some("compact")).await?;
                 }
                 app.emit_bot_status(&bot.id).await;
-                // #1759：壓縮做完的 SessionStart。說明寫不進去不擋身份更新。
                 if provider == "claude" && body.payload.get("source").and_then(Value::as_str) == Some("compact") {
                     if let Err(e) = crate::compaction::record(app, &bot, r, &body.payload, transcript_path.as_deref()).await {
                         tracing::warn!(bot = %bot.name, error = ?e, "could not record a claude compaction");
                     }
                 }
-                // #1969：agy 1.4.7 起 PreInvocation hook 帶 `lastUserInput`，在嚴格條件下補記送達證據
                 if provider == "agy" {
                     let is_local = matches!(db::bot_host(app.db(), &bot.id).await, Ok(h) if h == crate::config::LOCAL_HOST);
                     confirm_agy_pre_invocation_delivery(app, r, body, is_local, admitted.is_some()).await?;
@@ -1936,9 +1773,7 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             Ok(())
         }
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
-            // Stop 的 transcript_path 不只寫進 `runs`：下面還會直接讀它、把內容當成使用者訊息記進對話，所以一進來就驗。
             let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
-            // Remote paths are retained for SSH-side transcript transfer, never opened on this host.
             let transcript_read_path = if let Some(path) = transcript_path.as_deref() {
                 if app.local_transcript_allowed(&bot, path).await { Some(path.to_string()) } else { None }
             } else {
@@ -1949,8 +1784,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
             }
-            // agy 的 statusLine 沒來（舊版、沒有 statusLine 回報）時的備援：模型與 context 的 token 數（hook 子行程讀 transcript 帶來的）
-            // 記成網頁讀得懂的精簡 `status_json`。已經收過 statusLine 時以 statusLine 為準，不拿 transcript 估算與 `[agy] context_window_tokens` 覆蓋。
             if provider == "agy" {
                 if let Some(r) = &run {
                     if !crate::agy_support::has_statusline(r.status_json.as_deref()) {
@@ -1965,7 +1798,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     }
                 }
             }
-            // Codex has no SessionStart; grok's carries no transcript path.
             if let Some(r) = &run {
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(native_session_id, ?),
@@ -1978,7 +1810,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 .await?;
             }
 
-            // 3a. 收件匣重播：這一則已經收成回合了（commit 之後、標 processed_at 之前重啟）。不再開第二個，只補發通知。
             if let Some(event) = event_id {
                 if let Some(turn) = turn_of_event(app.db(), event).await? {
                     tracing::info!(turn = %turn, event, "inbox replay of an already-applied hook ignored; re-announcing");
@@ -1988,7 +1819,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
 
-            // 3. dedup on (native_session_id, native_turn_id)
             if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
                 let dup: Option<String> =
                     sqlx::query_scalar(
@@ -2018,13 +1848,10 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
 
-            // 4. the run's single in-flight Turn
             let target = match &run {
                 Some(r) => db::in_flight_turn(app.db(), &r.id).await?,
                 None => None,
             };
-            // `unknown`＝打字進去但沒有證據。這時 hook 若看得到**別句**使用者訊息，那是使用者在終端手打的另一句：
-            // 答案不能掛到原本那則，更不能順手把它標成「已送達」（第二輪 review 送達線 #3）。看不到使用者訊息時照舊認領。
             let (target, user) = match target {
                 Some(t) if t.delivery == "unknown" => {
                     let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
@@ -2036,9 +1863,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                         (Some(t), user)
                     }
                 }
-                // 備援關掉 T1、使用者接著送了 T2（已送達、in-flight），T1 的真回覆這時才到（#297）：
-                // hook 看得到的使用者訊息不是 T2 的、而是那筆備援回合的，答案屬於 T1，不能收掉 T2。
-                // 兩邊都對不上（或看不到使用者訊息）時照舊認領——沒有證據不改判。
                 Some(t) => {
                     if let Some(r) = &run {
                         if let Some(late) = recent_fallback_turn(app, &r.id).await? {
@@ -2063,8 +1887,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             };
             let body_text = assistant.clone().unwrap_or_default();
 
-            // An empty Codex notify can hide a typed native error. Keep the exact
-            // matching turn in flight so the existing rollout fallback can decide.
             if bot.kind == "codex" && body_text.is_empty() {
                 if let (Some(t), Some(r), Some(native)) = (&target, &run, turn_id.as_deref()) {
                     if t.native_turn_id.as_deref() == Some(native) && admitted.is_some() {
@@ -2079,10 +1901,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
             }
 
             if let (Some(t), Some(admitted)) = (target, &admitted) {
-                // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
-                // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
-                // Transcript reads can wait on filesystem I/O / the blocking pool. Resolve
-                // them before borrowing a connection or taking SQLite's write lock.
                 let resent_prompt = if t.origin == "external" && user.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_none() {
                     human_started_prompt(&body.payload, transcript_read_path.as_deref()).await
                 } else { None };
@@ -2095,31 +1913,23 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                     lifecycle::turn_controller::Outcome::Applied => {
                         stamp_source_event(&mut tx, &t.id, event_id).await?;
                     }
-                    // 不是圍籬放行那一代的回合：一個字都不掛上去。
                     lifecycle::turn_controller::Outcome::Fenced(why) => {
                         tracing::warn!(turn = %t.id, why, "hook 收尾：回合不屬於放行的那一代，不動");
                         return Ok(());
                     }
-                    // Lost the CAS to the §4.3 fallback: adding the hook's copy made two replies
-                    // (review 2026-09-12 #5). Stopped/failed turns still keep the reply.
                     lifecycle::turn_controller::Outcome::Raced { now } if now == "completed_fallback" => {
-                        // 這個交易沒寫到東西；先結束它，`fill_or_drop_late_hook` 自己開一個。
                         tx.commit().await?;
-                        // 這筆就是 hook 要收的 in-flight 回合，只是 CAS 輸給備援：同一回合。
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true, event_id).await?;
                         store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
                         *accepted_turn_id = Some(t.id.clone());
                         return Ok(());
                     }
-                    // This hook still writes its reply after losing to another terminal status;
-                    // make the inbox replay key atomic with that accepted reply as well.
                     lifecycle::turn_controller::Outcome::Raced { .. } => {
                         stamp_source_event(&mut tx, &t.id, event_id).await?;
                     }
                     _ => {}
                 }
                 let mut added = Vec::new();
-                // `begin_external_turn` already stored the scraped echo; add the hook's copy only if different.
                 if t.origin == "external" {
                     if let Some(u) = user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                         let have: Vec<String> =
@@ -2135,8 +1945,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                             crate::lifecycle::messages::mark_relay_turn(&mut tx, &msg.id, from.as_ref().and_then(|r| r.from_turn.as_deref())).await?;
                             added.push(msg);
                         } else {
-                            // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
-                            // 同一個 id 在 commit 後再推一次：前端遇到內容不同的同 id 訊息會換掉（#1006）。
                             added.extend(upgrade_clipped_user_message(&mut tx, &t.id, u).await?);
                         }
                     } else if let Some(text) = resent_prompt {
@@ -2155,23 +1963,16 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 return Ok(());
             }
 
-            // §4.3: a late hook must not overwrite a fallback-claimed turn.
             let mut user = user;
             if let Some(r) = &run {
                 let late = recent_fallback_turn(app, &r.id).await?;
                 if let Some(t) = late {
-                    // 跟上面 unknown 那條同一個判斷（review3 c1 L13）：hook 帶來的使用者訊息若是**別句**
-                    // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
-                    // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
                     let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
                     let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
                     if answers_none_of(prompt.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
                         user = user.or(seen);
                     } else {
-                        // 看得到使用者訊息而且對上＝同一回合。遠端 bot 讀不到 transcript（在那台）、看不到使用者訊息時，
-                        // 退而看 hook 在那台觸發的時間：落在這一回合開始之後、中間沒開過別的回合，也是同一回合（2026-10-02
-                        // wits-ops-web：備援抓到一份工具輸出當回覆，真回覆晚 25 秒到卻被丟）。都不成立只能補空的，不蓋已有的。
                         let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same, event_id).await?;
                         store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
@@ -2181,7 +1982,6 @@ async fn process_locked_for_with_outcome<H: HookHost>(
                 }
             }
 
-            // 5. external turn：回合（帶去重用的 native id）與它的訊息同一個交易（#115）。
             let tid = db::ulid();
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let mut tx = app.db().begin().await?;
@@ -2254,8 +2054,6 @@ async fn reannounce_turn(app: &(impl crate::capabilities::Db + crate::events::po
     app.emit_turn(turn_id).await;
 }
 
-// Remote drain: see SPEC §11.4.3–§11.4.5.
-
 const STATUS_MARKER: &str = "---AM-STATUS---";
 
 /// #500 複看：`am_fold` 跑完 `.claim` 還在＝這台的 spool 停收了，而且從外面看不出來——腳本 exit 0、
@@ -2290,7 +2088,6 @@ fn parse_drain_output(text: &str) -> Drained<'_> {
         }
         let l = line.trim();
         if let Some(n) = l.strip_prefix(FOLD_STUCK_MARKER) {
-            // 數字讀不出來不影響判斷「卡住了」——標記本身才是訊號。
             out.stuck_bytes = Some(n.trim().parse().unwrap_or(-1));
             continue;
         }
@@ -2330,7 +2127,6 @@ pub async fn drain_remote_locked<H: HookHost>(app: &H, host: &str, bot_id: &str)
         return Ok(0);
     }
     let root = crate::hosts::remote_root_for(app.instance().as_deref());
-    // 第一趟：claim（`mv` 成 `.replaying` 再 `cat`），**不刪**。遠端那份是唯一的副本。
     let text = conn.ssh_exec(&claim_script(bot_id, &root)?).await?;
     let drained = parse_drain_output(&text);
     let (lines, status) = (drained.lines, drained.status);
@@ -2343,16 +2139,12 @@ pub async fn drain_remote_locked<H: HookHost>(app: &H, host: &str, bot_id: &str)
                     tracing::warn!("remote spool line for a different bot; skipped");
                     continue;
                 }
-                // 收不下就整個放棄這一輪：`.replaying` 留在遠端，下一次 claim 會再讀到它。
-                // 重讀不會變成兩筆——`hook_inbox` 的 dedupe_key 擋掉（issue #70 的去重規則）。
                 crate::hook_inbox::accept(app.db(), &b, crate::hook_inbox::Source::Remote).await?;
                 n += 1;
             }
-            // A4: 解不開的行再 claim 幾次也一樣，留著只會擋住 ack；記一筆丟掉。
             Err(_) => tracing::warn!(record = %spool_line_log_context(line), "unparseable remote spool line; dropped"),
         }
     }
-    // 第二趟：本機已經 commit 了，才准刪遠端那份。ack 失敗＝`.replaying` 還在，下一輪重來。
     conn.ssh_exec(&ack_script(bot_id, &root)?).await?;
     if n > 0 {
         app.wake_hook_inbox();
@@ -2391,7 +2183,6 @@ async fn note_fold_stuck(app: &impl crate::hookrecv::SpoolFoldStuck, host: &str,
                 "remote spool is stuck: the claimed copy cannot be folded into .replaying, so nothing new is being taken"
             );
         }
-        // 併進去了：這一輪是好的，重新算。
         None => {
             g.remove(&key);
         }
@@ -2426,7 +2217,6 @@ fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
 fn claim_script(bot_id: &str, root: &str) -> Result<String> {
     let dir = bots_dir(bot_id, root)?;
     Ok(format!(
-        // `.replaying` 是這支腳本自己建的，裡面裝完整 payload：0600，不交給那台機器的 login umask（#501）。
         "umask 077\n\
          d={dir}\n\
          f=\"$d/hook-spool.jsonl\"\n\
@@ -2477,7 +2267,6 @@ fn ack_script(bot_id: &str, root: &str) -> Result<String> {
 
 fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
     let mut payload: Value = serde_json::from_str(raw).ok()?;
-    // hook.sh already stamps it; a hand-written or older file may not.
     if let Some(o) = payload.as_object_mut() {
         o.insert("hook_event_name".into(), json!("StatusLine"));
     } else {
@@ -2564,14 +2353,11 @@ fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(
     if !dst.exists() {
         return std::fs::rename(src, dst);
     }
-    // 追加寫入，不重寫 `dst`（#912）：以前 read(dst)→write(整份) 是先截斷再寫，崩在寫入途中就清空了這份唯一的副本。
-    // 先開 `src`、確認是一般檔：讀不到（壞檔、是目錄）就在碰 `dst` 之前回錯。
     let mut from = std::fs::File::open(src)?;
     if !from.metadata()?.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "spool source is not a regular file"));
     }
     let mut f = std::fs::OpenOptions::new().read(true).append(true).create(true).open(dst)?;
-    // 崩在一行寫到一半時尾巴沒有換行：直接接上去，會跟下一份的第一行黏成一行、兩則一起解不開。
     let len = f.metadata()?.len();
     if len > 0 {
         use std::os::unix::fs::FileExt as _;
@@ -2581,9 +2367,7 @@ fn fold_spool(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<(
             f.write_all(b"\n")?;
         }
     }
-    // #1068：串流複製，不把整份 `src` 讀進記憶體（spool 在 daemon 離線時可能長到 GiB）。
     std::io::copy(&mut from, &mut f)?;
-    // 寫完、sync 完才刪 `src`；中途崩掉的話兩份都在，重複與半行交給 `dedupe_key` 與 unparseable spool line 的既有保護。
     f.sync_all()?;
     std::fs::remove_file(src)
 }
@@ -2636,7 +2420,6 @@ async fn fold_spool_blocking(src: std::path::PathBuf, dst: std::path::PathBuf) -
 
 /// SPEC §4.4.6.
 pub async fn replay_spool<H: HookHost>(app: &H, bot_id: &str) -> Result<usize> {
-    // 讀不到 host 不等於本機（#243）：退回 local 會去讀本機 spool、遠端那份留著沒人排。回錯讓呼叫端重試。
     let host = db::bot_host(app.db(), bot_id).await?;
     if host != crate::config::LOCAL_HOST {
         return drain_remote(app, &host, bot_id).await;
@@ -2660,18 +2443,11 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
     let spool = dir.join("hook-spool.jsonl");
     let claim = dir.join("hook-spool.jsonl.claim");
     let staging = dir.join("hook-spool.jsonl.replaying");
-    // 上一輪崩在「收了一半」留下的 `.replaying`／`.claim` 就是唯一的副本：沒有新的 spool 也要處理它（#302）。
-    // 以前只看 spool 在不在，兩邊都沒新事件時它就一直躺在那裡，直到下一則 hook 失敗寫進 spool 才被併回來。
     if !spool.exists() && !claim.exists() && !staging.exists() {
         return Ok(0);
     }
-    // 上一輪摘下來、還沒併進 `.replaying` 就崩掉的。
     fold_spool_blocking(claim.clone(), staging.clone()).await?;
     if spool.exists() {
-        // #493：**先 rename 再讀**。以前是 `read(spool)` → 整份寫回 `.replaying` → `remove_file(spool)`，
-        // 中間那一大段（寫一份完整的 staging）裡 hook 附加進來的行，會在最後那個 remove 被連檔刪掉。
-        // rename 是原子的：之後 append 的行落在新的 inode 上，不在這一輪手上，也就刪不到。
-        // #1256：認領也拿 spool 目錄的鎖，跟 hook 行程的超量丟棄互斥（`am_base::hook_cmd::lock_spool_dir`）。
         let (s, c, d) = (spool.clone(), claim.clone(), dir.clone());
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let _lock = am_base::hook_cmd::lock_spool_dir(&d)?;
@@ -2685,7 +2461,6 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
     if !staging.exists() {
         return Ok(0);
     }
-    // #1068：逐行讀，不把整份 `.replaying` 讀進記憶體；超過上限的行整行丟掉（不可能是合法的 hook）。
     let mut reader = tokio::io::BufReader::new(tokio::fs::File::open(&staging).await?);
     let mut n = 0usize;
     while let Some(raw) = read_spool_line(&mut reader).await? {
@@ -2704,15 +2479,12 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
                     tracing::warn!("spool line for a different bot; skipped");
                     continue;
                 }
-                // 同遠端：收進收件匣、commit 成功才算數。失敗就整個放棄這一輪，`.replaying`
-                // 留在檔案系統上（上面那段會把它併回來），下一次重放再讀一次；dedupe 擋重複。
                 crate::hook_inbox::accept(app.db(), &b, crate::hook_inbox::Source::Spool).await?;
                 n += 1;
             }
             Err(_) => tracing::warn!(record = %spool_line_log_context(line), "unparseable spool line"),
         }
     }
-    // 只有在上面每一行都 commit 進 hook_events 之後，才刪掉這份唯一的副本。
     std::fs::remove_file(&staging).ok();
     if n > 0 {
         app.wake_hook_inbox();
@@ -2720,7 +2492,6 @@ async fn replay_spool_locked<H: HookHost>(app: &H, bot_id: &str) -> Result<usize
     }
     Ok(n)
 }
-
 
 #[cfg(all(test, feature = "daemon-test-harness"))]
 #[path = "hookrecv_tests/drain_tests.rs"]

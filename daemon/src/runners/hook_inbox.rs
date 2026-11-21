@@ -19,7 +19,6 @@ const BATCH: i64 = 64;
 /// 唯一的消費者。`receive` / drain 只負責 commit 之後叫醒它，不自己處理——單一消費者才不必為
 /// 「同一列被兩邊同時處理」另外加 claim 欄位。
 pub fn spawn_worker(app: Arc<App>) {
-    // panic 之後由 supervisor 退避重啟（#924）；睡覺時看 shutdown。
     crate::background_loop::spawn_restartable(&app, "hook inbox worker", {
         let app = app.clone();
         move || {
@@ -34,7 +33,6 @@ pub fn spawn_worker(app: Arc<App>) {
                 }
                 TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
-            // 先做一輪再等：daemon 重啟後把上一輪沒處理完的補回來，就是這一行。
             match drain_once(&app).await {
                 Ok(n) if n > 0 => tracing::info!(processed = n, "hook inbox drained"),
                 Ok(_) => {}
@@ -151,8 +149,6 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
     let mut tasks: JoinSet<Result<usize>> = JoinSet::new();
     let mut claims: JoinSet<Result<usize>> = JoinSet::new();
     loop {
-        // 出錯之後不再起新的 task：手上的收完就回傳第一個錯誤（同舊行為）。
-        // 撈列每輪都做：撞題 lane 的列不占 bot task 名額，bot 名額滿了也要看得到撞題列以外的列。
         if first_err.is_none() {
             match pending_excluding(&app.db, &db::now(), BATCH, &busy_bot_ids(), &claims_in_flight_ids()).await {
                 Ok(rows) => start_tasks(app, rows, &mut tasks, &mut claims),
@@ -192,7 +188,6 @@ fn start_tasks(app: &Arc<App>, rows: Vec<Pending>, tasks: &mut JoinSet<Result<us
             let _ = blocked_tx().send(rows[0].id.clone());
             break;
         }
-        // 別的 task（或別的 drain）正在處理這顆 bot：不搶，等它做完。
         let Some(claim) = BotClaim::try_new(&bot_id) else { continue };
         tasks.spawn(drain_bot(app.clone(), rows, claim));
     }
@@ -412,7 +407,6 @@ mod tests {
         .unwrap();
         assert_eq!(reservation, (None, Some("pending".into())), "先有可恢復的 reservation 才能進入 Jev");
 
-        // 丟棄中的 hook future 等同 swap 取消正在處理的工作；收件匣列尚未 ACK。
         drop(processing);
         assert_eq!(crate::judge::settle_interrupted(&app).await.unwrap(), 1);
         let interrupted: Option<String> = sqlx::query_scalar("SELECT error FROM judge_shadow WHERE regex_verdict='same_work'")
@@ -421,7 +415,6 @@ mod tests {
             .unwrap();
         assert_eq!(interrupted.as_deref(), Some("interrupted"));
 
-        // 讓被取消的假 Jev handler 收尾，再模擬新 daemon 的 inbox worker 重播。
         response_gate.add_permits(1);
         assert_eq!(drain_once(&app).await.unwrap(), 1);
         assert!(processed(&app, &caller.id).await, "重播完成後 ACK hook");
@@ -441,7 +434,6 @@ mod tests {
         let b = tt::claude_bot(&app, &env.project_id, "inbox-b").await;
         tt::fake_run(&app, &a.id).await;
         tt::fake_run(&app, &b.id).await;
-        // A 的列先進來（在 B 前面）：舊的單一消費者會先卡在它身上。
         for body in [stop(&a.id, "pa"), stop(&b.id, "pb")] {
             assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
         }
@@ -450,12 +442,10 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        // 上限 30 秒：被等的是一串 sqlx 查詢，整樹平行時 2 秒會假紅（#1154）。放寬不會變假綠：A 的鎖握到下面才放。
         assert!(tt::eventually!(processed(&app, &b.id).await), "A 握著鎖時 B 的 hook 仍要處理完（不是排在 A 後面）");
         assert!(!processed(&app, &a.id).await, "A 的還卡在它的鎖上");
         assert!(!drain.is_finished());
 
-        // 前提：A 的鎖整段都還握著（不是因為等久了 A 也好了）。
         assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
         drop(held);
         let n = tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 的也處理完").unwrap().unwrap();
@@ -480,14 +470,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!drain.is_finished(), "A 握著鎖，drain 還在等它");
 
-        // 這時才到的 B：照 receive 的順序寫進收件匣，再叫醒。
         assert!(crate::hook_inbox::accept(&app.db, &stop(&b.id, "pb"), crate::hook_inbox::Source::Http).await.unwrap().is_new());
         app.hook_inbox_wake.notify_one();
         assert!(tt::eventually!(processed(&app, &b.id).await), "A 還握著鎖時，後到的 B 仍要處理完");
         assert!(!processed(&app, &a.id).await, "A 還卡在它的鎖上");
         assert!(!drain.is_finished());
 
-        // 前提：A 的鎖整段都還握著（不是因為等久了 A 也好了）。
         assert!(lock.try_lock().is_err(), "前提：A 的鎖整段都還握著");
         drop(held);
         let n = tokio::time::timeout(Duration::from_secs(30), drain).await.expect("放鎖後 A 也處理完").unwrap().unwrap();
@@ -713,7 +701,6 @@ mod tests {
 
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
-        // 撞題 lane 同時最多 4 個在問 Jev：等其中四個到了，其餘的八顆 bot 都還卡著。
         for _ in 0..4 {
             next_arrival(&mut jev).await;
         }
@@ -770,7 +757,6 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let caller = tt::claude_bot(&app, &env.project_id, "deleted-claim-caller").await;
-        // child 由母 agent 開：刪除走 SQL 軟刪，不查 config.toml（user 管理的那種刪除要比對設定檔）。
         sqlx::query("UPDATE bots SET managed_by='child' WHERE id=?").bind(&caller.id).execute(&app.db).await.unwrap();
         running_peer(&app, &env.project_id, "deleted-claim-peer", "正在做同一件事").await;
         let mut jev = gated_jev(&app, &env.project_id).await;
@@ -782,7 +768,6 @@ mod tests {
         let drain_app = app.clone();
         let drain = tokio::spawn(async move { drain_once(&drain_app).await });
         next_arrival(&mut jev).await;
-        // Jev 還沒回時完成實際刪除，再放行答案。
         crate::api::delete_bot(axum::extract::State(app.clone()), axum::extract::Path(caller.id.clone())).await.unwrap();
 
         jev.gate.add_permits(1);

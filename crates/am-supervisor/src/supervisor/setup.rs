@@ -206,11 +206,7 @@ fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &
         "daemon_url": format!("http://127.0.0.1:{port}"),
         "manager_bot_id": bot_id,
         "responder_bot_id": responder_id,
-        // The CLI also accepts `bot_id`, which an earlier draft wrote. Both are emitted so a
-        // deployment cannot be broken by whichever half is upgraded first.
         "bot_id": bot_id,
-        // 雙角色（SPEC §18.15）：這個目錄是巡檢的。`bin/agm` 用它決定預設看哪個角色的 inbox、
-        // 回報時以誰的名義；真正的身份驗證靠 pane 環境裡的 bot token，不靠這個字串。
         "role": "patrol",
         "self_bot_id": bot_id,
         "data_dir": data_dir,
@@ -234,16 +230,12 @@ pub fn runtime_json_for_test(port: u16, bot_id: &str, responder_id: Option<&str>
 pub fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
     let dir = agm_dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    // 原子寫（#919）：`fs::write` 的 `O_TRUNC` 窗口會讓讀的人（`bin/agm` 每次執行都讀 runtime.json）看到空的或半截。
     write_file(&dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()).as_bytes())?;
     write_file(&dir.join("persona.md"), persona.as_bytes())?;
     write_runtime_json(app, bot_id, responder_id)?;
     if !dir.join("handoff.md").exists() {
         write_file(&dir.join("handoff.md"), "# AGM 管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n".as_bytes())?;
     }
-    // 原子寫（issue #520）：這支 CLI 一直有人在跑（所有 kick 每 5～30 分鐘 exec 一次），
-    // `fs::write` 的 `O_TRUNC` 窗口會讓它們讀到半截的 python。跟 `cli_refresh` 用同一個 helper，
-    // 免得同一個檔兩條路兩種寫法（這正是 #520 的形狀）。
     let bin = dir.join("bin").join("agm");
     super::cli_refresh::install_executable(&bin, AGM_CLI.as_bytes())?;
     Ok(Deployed { cwd: dir.to_string_lossy().to_string(), agm_cli: "deployed".into() })
@@ -318,9 +310,6 @@ pub(super) fn ensure_role_bot(
     let proj = &mut cfg.projects[pidx];
     let bidx = match pick.known_bot {
         Some(id) => proj.bots.iter().position(|b| b.id.as_deref() == Some(id)),
-        // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 bot 只可能是上一次設定寫進 config、
-        // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
-        // 只認 setup 自己留了記號的那一顆，不看名字：同名但沒記號的是別人建的，而這顆被使用者改了名之後重跑也要找得回來。
         None => proj.bots.iter().position(|b| b.create_request_id.as_deref() == Some(pick.mark)),
     };
     let bidx = match bidx {
@@ -372,9 +361,6 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
     std::fs::create_dir_all(&dir).map_err(|e| LcError::Bad(format!("{}: {e}", dir.display())))?;
     let path = crate::config::canonical_path(&dir.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
 
-    // The identity has to exist already: silently running the manager under whatever account
-    // happens to be default is exactly the kind of guess that produces a bot nobody can log in.
-    // #2002: admit before validating, held until the config write is committed (see `identity_fence`).
     let identity_admit = am_base::identity_fence::admit(crate::config::LOCAL_HOST, "claude", Some(&sup.identity)).await;
     if app.identity_for_host(crate::config::LOCAL_HOST, &sup.identity).await.is_none() {
         return Err(LcError::conflict(
@@ -383,20 +369,12 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
         ));
     }
 
-    // The persisted ids win over the name. The user may have renamed AGM in the sidebar, and
-    // an unrelated bot may since have been called `AGM` — matching on the name would either
-    // create a duplicate manager or quietly take over somebody else's bot.
     let known_project = sup.project_id.clone();
     let known_bot = sup.bot_id.clone();
     let fresh_project = crate::db::ulid();
     let fresh_bot = crate::db::ulid();
     let model = model_arg(&sup.active_model).to_string();
-    // Stored wins. An older binary running `setup` used to write its own compiled-in text back
-    // over the bot, which is how a persona that had just been updated could be silently rolled
-    // back; the embedded copy is now only ever a seed for an install that has none.
     let (persona, seeded) = effective_persona(app.db()).await?;
-    // The closure below moves its copy into the config update; `persona` itself is still needed
-    // afterwards to write the readable copy.
     let persona_for_cfg = persona.clone();
     if seeded {
         tracing::info!("seeded the AGM persona from the existing bot or embedded first-install default");
@@ -422,7 +400,6 @@ pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabiliti
                 persona: &persona_for_cfg,
             },
             |bot| {
-                // 手機 Remote Control 已廢（#1477）：舊安裝留下的 `--remote-control <name>` 在這裡拿掉，使用者自己加的其他 args 不動。
                 if let Some(args) = without_remote_control(&bot.args) {
                     bot.args = args;
                 }

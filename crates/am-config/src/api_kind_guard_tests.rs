@@ -13,22 +13,18 @@ fn is_api_kind_and_api_provider_know_both_api_kinds_and_nothing_else() {
     assert_eq!(api_provider(CLAUDE_API_KIND), Some("anthropic"));
     assert_eq!(api_provider(OPENAI_API_KIND), Some("openai"));
     assert_eq!(API_BOT_KINDS, &["claude-api", "openai-api"]);
-    // SQL 片段與常數同步，而且每個 kind 都在裡面。
     assert_eq!(API_KINDS_SQL, "('claude-api','openai-api')");
     assert_eq!(API_KINDS_SQL, crate::api_kinds_sql!());
     for k in API_BOT_KINDS {
         assert!(API_KINDS_SQL.contains(&format!("'{k}'")));
     }
-    // provider 與 attempt 帳本的 provider 值一致（切片 C 的 CHECK）。
     for k in API_BOT_KINDS {
         assert!(matches!(api_provider(k), Some("anthropic" | "openai")));
     }
-    // D2b-2 起兩種 API kind 都可以建立，但都不在 CLI 的 KINDS 裡（不探測安裝、不開 pane）。
     assert!(crate::valid_bot_kind("claude-api") && crate::valid_bot_kind("openai-api"));
     assert!(!crate::KINDS.contains(&"claude-api") && !crate::KINDS.contains(&"openai-api"));
     assert!(!crate::valid_kind("openai-api"));
     assert!(crate::bot_kinds_list().ends_with("claude-api, openai-api"));
-    // 模型與 effort 各家各的：openai-api 收 astra（預設）／sol／luna，effort 依模型（astra／sol 不收 none）。
     assert!(crate::api_bot_model_supported_for("openai-api", "gpt-6-luna") && !crate::api_bot_model_supported_for("openai-api", "claude-opus-5-5"));
     assert!(crate::api_bot_model_supported_for("claude-api", "claude-opus-5-5") && !crate::api_bot_model_supported_for("claude-api", "gpt-6-luna"));
     assert!(!crate::api_bot_model_supported_for("codex", "gpt-6-luna"));
@@ -95,7 +91,6 @@ fn test_regions(text: &str) -> Vec<(usize, usize)> {
         let line = text[line_start..line_end].trim_start();
         if line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test") {
             let mut i = line_end;
-            // 後續的屬性行一併跳過。
             loop {
                 let rest = text[i..].trim_start();
                 let skipped = text[i..].len() - rest.len();

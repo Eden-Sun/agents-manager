@@ -10,7 +10,7 @@ pub fn file_part<'a>(content_type: &str, body: &'a [u8]) -> Result<(String, &'a 
     loop {
         let rest = body.get(at..).ok_or("bad_multipart")?;
         if rest.starts_with(b"--") {
-            break; // 結尾的 `--boundary--`
+            break;
         }
         if !rest.starts_with(b"\r\n") {
             return Err("bad_multipart");
@@ -24,7 +24,7 @@ pub fn file_part<'a>(content_type: &str, body: &'a [u8]) -> Result<(String, &'a 
         if let Some((name, filename)) = disposition(headers) {
             if name == "file" {
                 if found.is_some() {
-                    return Err("bad_multipart"); // 一次只收一個檔
+                    return Err("bad_multipart");
                 }
                 found = Some((filename.ok_or("bad_multipart")?, content));
             }

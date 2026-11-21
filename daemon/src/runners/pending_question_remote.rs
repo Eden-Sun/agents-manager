@@ -34,7 +34,6 @@ impl TailCache {
     fn slot(&self, key: &str, now: Instant) -> Slot {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         if slots.len() >= MAX_RUNS && !slots.contains_key(key) {
-            // 沒人握著（只有 map 自己一個參照）、而且過期的才丟；正在讀的、剛讀完的留著。
             slots.retain(|_, s| Arc::strong_count(s) > 1 || s.try_lock().map(|g| g.as_ref().is_some_and(|(at, _)| now.duration_since(*at) < FRESH_FOR)).unwrap_or(true));
         }
         slots.entry(key.to_string()).or_default().clone()
@@ -70,8 +69,6 @@ pub(crate) fn cache_key_parts(run_id: &str, started_at: &str, pane: Option<&str>
     format!("{run_id}\0{started_at}\0{}\0{host}\0{host_id}\0{host_generation}\0{session}", pane.unwrap_or(""))
 }
 
-// A per-run clock lets composition tests keep the polling cache fixed while
-// independently changing the remote transcript. Production always uses Instant::now.
 fn cache_now(_run_id: &str) -> Instant {
     #[cfg(test)]
     if let Some(at) = test_clocks().lock().unwrap().get(_run_id).copied() {
@@ -146,7 +143,6 @@ pub async fn tail(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str) -> (
         fence.generation(),
         &session,
     );
-    // 讀完之後發現 session 或 run 已經換了：這次的檔尾不是這個 session 的，不能當證據，也不能讓呼叫端沿用。
     let moved = AtomicBool::new(false);
     let (value, fresh) = cache()
         .read_through(&key, || cache_now(&run.id), || async {
@@ -270,7 +266,6 @@ mod tests {
                     .await
             })
         };
-        // 第一個在 fetch 裡等 gate 時，第二個進來排在同一格的鎖後面。
         while reads.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }

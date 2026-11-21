@@ -11,14 +11,11 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, cl
     if n > 0 && kind == "claude" {
         n = n.saturating_sub(services(app, run, client, pane).await);
     }
-    // claude 的 Stop hook 自己報過背景工作（`background_hook.rs`）就以它為準；沒報過（舊版）才是畫面的數字。
     if kind == "claude" {
         n = crate::background_hook::reconcile(app, &run.id, n);
     }
     let changed = {
         let mut m = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
-        // 0 也記：「看過、乾淨」跟「沒看過」不同（#767）。從沒看過到第一次看過也算變了，要推，前端才把「未知」換掉。
-        // 數字沒變、但這一輪跨過「可能卡住」門檻（#774）也算變了。
         record(&mut m, &run.id, n)
     };
     if changed {

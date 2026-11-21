@@ -81,7 +81,7 @@ fn lsof_port_only(args: &[String]) -> bool {
                         return false;
                     }
                     ports += 1;
-                    break; // `-i` 的值吃掉這個旗標叢的其餘字元
+                    break;
                 }
                 _ => return false,
             }
@@ -159,9 +159,7 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
         n if is_shell(n) => {
             let o = shell_opts(args);
             let verdict = match o.command.and_then(|i| args.get(i)) {
-                // `bash -n`／`-o noexec`：只檢查語法、不執行，裡面寫什麼都不會跑。
                 Some(_) | None if o.noexec => Verdict::Allow,
-                // `bash -c '…'`、`bash -lc '…'`：第一個非選項字是一段 shell 指令。
                 Some(script) => check_depth(script, depth + 1, ctx),
                 None => Verdict::Allow,
             };
@@ -174,9 +172,7 @@ fn check_simple(simple: &Simple, depth: u32, ctx: &mut Ctx) -> Verdict {
     if let Verdict::Deny(r) = verdict {
         return Verdict::Deny(r);
     }
-    // heredoc／here-string：餵給 shell（沒有 -c、沒有 script 檔參數）的就是一份要跑的 script；其他指令的未加引號 heredoc 內文只有 `$(…)`、反引號會被執行。
     for doc in &simple.docs {
-        // 餵給 shell 當 script：沒有 `-c`、沒有 script 檔參數（或有 `-s`）、不是 noexec。
         let as_script = shell.as_ref().is_some_and(|o| !o.noexec && o.command.is_none() && (o.stdin_script || o.positional >= args.len()));
         let v = if as_script {
             check_depth(&doc.body, depth + 1, ctx)
@@ -222,7 +218,6 @@ const SHELL_LONG_FLAGS: &[&str] = &["posix", "noediting", "noprofile", "norc", "
 fn shell_opts(args: &[String]) -> ShellOpts {
     let mut o = ShellOpts { noexec: false, command: None, stdin_script: false, positional: args.len() };
     let (mut noexec, mut c, mut i) = (false, false, 0usize);
-    // `unsure`：看不懂的選項（字母、長選項），分不出哪個字是值；`cancel`：選項都看得懂，只是 `-o` 的值不是 noexec——只取消 noexec，位置照實。
     let (mut unsure, mut cancel) = (false, false);
     while let Some(a) = args.get(i) {
         if a == "--" {
@@ -251,8 +246,6 @@ fn shell_opts(args: &[String]) -> ShellOpts {
                 'c' => c = on,
                 's' => o.stdin_script = on,
                 'o' => {
-                    // 只有明確認得的 `noexec`（zsh 不分大小寫與底線：`NO_EXEC`、`no_exec`）才影響 noexec 狀態；
-                    // 其他值（含 zsh 的 `exec`／`+o exec`、不認得的）一律取消快速放行、走一般判斷。
                     match args.get(i + consumed).map(|v| v.to_ascii_lowercase().replace('_', "")) {
                         Some(v) if v == "noexec" => noexec = on,
                         _ => cancel = true,
@@ -260,7 +253,6 @@ fn shell_opts(args: &[String]) -> ShellOpts {
                     consumed += 1;
                 }
                 'O' => {
-                    // bash 的 `-O` 是 shopt 名（`extglob`…），不影響 noexec；但 `exec` 這個名字在別的 shell 可能是執行開關，保守起見也取消。
                     if args.get(i + consumed).is_some_and(|v| v.to_ascii_lowercase().replace('_', "") == "exec") {
                         cancel = true;
                     }
@@ -280,8 +272,6 @@ fn shell_opts(args: &[String]) -> ShellOpts {
         }
     }
     if unsure {
-        // 選項看不懂就看不準哪個字是值：指令字與 script 檔參數退回粗略的找法（含 `c` 的短選項叢的下一個字；第一個不以 `-`／`+` 開頭的字），
-        // 而且絕不當 noexec 放行。
         o.command = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c')).map(|p| p + 1).filter(|p| *p < args.len());
         o.positional = args.iter().position(|a| !a.starts_with(['-', '+'])).unwrap_or(args.len());
     }
@@ -335,7 +325,6 @@ fn unwrap_budgeted(words: &[String], expansions: &mut u32) -> Option<Vec<String>
             w = &w[1..];
             continue;
         }
-        // 各 wrapper 帶值的選項（其餘選項視為無值旗標）。
         let valued: &[&str] = match basename(head) {
             "sudo" | "doas" => &["-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"],
             "env" => &["-u", "-C", "--unset", "--chdir"],
@@ -355,7 +344,6 @@ fn unwrap_budgeted(words: &[String], expansions: &mut u32) -> Option<Vec<String>
                 break;
             }
             if name == "env" {
-                // `-S` 的值是一整串要再切開的指令：切開後接上剩下的參數，從頭再剝。
                 if let Some((val, used)) = env_split_string(&w[i..]) {
                     *expansions += 1;
                     if *expansions > MAX_ENV_S_EXPANSIONS {
@@ -375,7 +363,7 @@ fn unwrap_budgeted(words: &[String], expansions: &mut u32) -> Option<Vec<String>
             }
         }
         if name == "timeout" && i < w.len() {
-            i += 1; // 時限
+            i += 1;
         }
         if i >= w.len() {
             return Some(Vec::new());
@@ -383,8 +371,6 @@ fn unwrap_budgeted(words: &[String], expansions: &mut u32) -> Option<Vec<String>
         w = &w[i..];
     }
 }
-
-// ───────────────────────── 切指令 ─────────────────────────
 
 /// heredoc／here-string 的內文。`expands`＝heredoc 的終止字沒加引號（內文裡的 `$(…)`、反引號會被執行）。
 struct Doc {
@@ -675,7 +661,6 @@ fn parse_shell(cmd: &str) -> Script {
                     cur.push(c);
                     has = true;
                 }
-                // `2>&1`、`&>file`、`>&2` 的 `&` 是重導向的一部分，不是背景符號。
                 '&' if cur.ends_with(['>', '<']) || chars.get(i + 1) == Some(&'>') => {
                     cur.push(c);
                     has = true;
@@ -738,7 +723,6 @@ fn strip_redirects(words: Vec<String>) -> (Vec<String>, Vec<Doc>) {
         }
         let op = w.trim_start_matches(|c: char| c.is_ascii_digit());
         if op.starts_with(['>', '<']) || op.starts_with("&>") {
-            // 只有運算子、沒有目標（`> file`）：下一個字才是目標。
             if matches!(op, ">" | ">>" | "<" | "&>" | "&>>" | ">|") {
                 it.next();
             }
@@ -748,8 +732,6 @@ fn strip_redirects(words: Vec<String>) -> (Vec<String>, Vec<Doc>) {
     }
     (out, docs)
 }
-
-// ───────────────────────── kill ─────────────────────────
 
 fn is_signal_spec(a: &str) -> bool {
     let Some(rest) = a.strip_prefix('-') else { return false };
@@ -772,7 +754,7 @@ fn check_kill(args: &[String]) -> Verdict {
         } else if a == "--" {
             dashdash = true;
         } else if a == "-l" || a == "-L" || a == "-t" {
-            return Verdict::Allow; // 列出訊號名，不殺任何東西
+            return Verdict::Allow;
         } else if (a == "-s" || a == "-n") && targets.is_empty() {
             signal = true;
             sig0 = args.get(i + 1).is_some_and(|v| v == "0");
@@ -785,39 +767,29 @@ fn check_kill(args: &[String]) -> Verdict {
         }
         i += 1;
     }
-    // 訊號 0（`kill -0 "$pid"`）不送任何訊號，只探測行程在不在：目標是什麼都不會殺到誰，放行。
     if sig0 {
         return Verdict::Allow;
     }
-    // `kill -1`：只有 `-1` 一個參數（沒有目標），照清單一起擋；`kill -1 1234` 不是。
     if args.len() == 1 && args[0] == "-1" {
         return Verdict::Deny(format!("擋下廣域 kill：`kill -1` 是 pid -1（這個使用者的所有行程）的寫法。{HOW_TO}"));
     }
-    // 訊號之後的 `-1`／`0`：所有行程／自己的整個行程群組。`kill -1 1234`（對 1234 送 SIGHUP）不是。
     if let Some(t) = targets.iter().find(|t| **t == "-1" || **t == "0") {
         let what = if *t == "0" { "0（呼叫端整個行程群組，包含 agent 自己和上層的 shell）" } else { "-1（這個使用者的所有行程）" };
         return Verdict::Deny(format!("擋下廣域 kill：目標是 pid {what}。{HOW_TO}"));
     }
-    // 只放行數字 PID 與 `$!`（上一個背景行程的 PID）。其他（變數、`$(…)`、`%1`…）判不出是哪一個行程，一律擋。
     if let Some(t) = targets.iter().find(|t| !is_explicit_pid(t)) {
         return Verdict::Deny(format!("擋下 kill：目標 `{t}` 不是數字 PID。只准 `kill <數字PID>`（多個也行）或 `kill $!`；要殺的行程請在啟動時就把 PID 記下來（`cmd & echo $!`）。{HOW_TO}"));
     }
     Verdict::Allow
 }
 
-// ───────────────────────── pkill／killall ─────────────────────────
-
 fn check_pkill() -> Verdict {
-    // 政策（使用者 2026-11 裁示）：pkill 一律擋，不論選項與比對字串（窄的 `pkill -f 'scripts/check.sh changed'` 也會命中自己的 shell）。
     Verdict::Deny(PKILL_DENY.to_string())
 }
 
 fn check_killall() -> Verdict {
-    // 政策同 pkill：killall 一律擋。
     Verdict::Deny(KILLALL_DENY.to_string())
 }
-
-// ───────────────────────── hook 接線 ─────────────────────────
 
 /// 各 CLI 的 PreToolUse payload（claude／codex 的 `tool_input.command`、grok 的 camelCase 副本、agy 的 `CommandLine`…）裡的 shell 指令。
 /// 欄位名每家不同，所以在 tool 輸入物件裡找 `command`／`commandLine`／`cmd` 這幾個字串欄位（最多往下 4 層）。沒有就是 `None`（不是 shell 工具）。
@@ -876,7 +848,6 @@ pub fn guard(provider: &str, event: &str, stdin_text: &str) -> Guard {
 pub fn guard_logged(provider: &str, event: &str, stdin_text: &str, log: &mut dyn FnMut(&str)) -> Guard {
     let clean = stdin_text.trim_start_matches('\u{feff}');
     let Ok(payload) = serde_json::from_str::<Value>(clean) else {
-        // 事件名在參數裡（agy）或 payload 文字裡看得出是 PreToolUse 才記：其他事件的壞 payload 是 daemon 事件流程的事。
         if event_is_pre(event) {
             log("PreToolUse payload 不是合法 JSON，放行");
             return Guard::Pass;
@@ -899,7 +870,6 @@ pub fn guard_logged(provider: &str, event: &str, stdin_text: &str, log: &mut dyn
         log(n);
     }
     let Verdict::Deny(reason) = verdict else { return Guard::Pass };
-    // agy 1.4.7 只認 `decision`／`reason`；`hookSpecificOutput` 是未知欄位，protojson 會拒絕整個結果、理由也被蓋掉（SPEC agy）。
     if provider == "agy" {
         return Guard::Deny(json!({"decision": "deny", "reason": reason}).to_string());
     }

@@ -55,7 +55,6 @@
         assert!(ClaudeCapture.still_busy(&busy), "輸入框正上方的活動列應該算還在跑");
         let baking = "❯ Reply with PONG\n✢ Baking… (3s · esc to interrupt)\n──────\n❯\n";
         assert!(ClaudeCapture.still_busy(baking));
-        // codex 的中斷提示沒有經過時間，不是 claude 的活動列。
         assert!(!ClaudeCapture.still_busy("• Working (🤖 • esc to interrupt)"));
     }
 
@@ -120,7 +119,6 @@
             ClaudeCapture.extract_reply(&screen).as_deref(),
             Some("執行：\n  ❯ npm test\n  PASS\n結論：全綠。"),
         );
-        // activity 也從真回音起算：引用行之後才有的字不能讓前面的活動列消失。
         let busy = "❯ 跑\n✻ Cooking… (3s · ↓ 1 tokens)\n⏺ 結果：\n  ❯ ls\n";
         assert_eq!(ClaudeCapture.activity(busy).as_deref(), Some("Cooking… (3s · ↓ 1 tokens)"));
     }

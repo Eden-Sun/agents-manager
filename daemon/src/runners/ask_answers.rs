@@ -22,7 +22,6 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
     if bot.deleted_at.is_some() || bot.kind != "claude" {
         return Ok(());
     }
-    // Recheck the admission boundary after the core hook transaction and bind recording to its turn.
     if app.db.bot_handed_off_to(&bot.id).await?.is_some() {
         return Ok(());
     }

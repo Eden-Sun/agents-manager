@@ -14,7 +14,6 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     {
         use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        // `create` 對已經存在的目錄不動權限，所以升級上來的那些要另外收。
         let loose = std::fs::metadata(dir).map(|m| m.permissions().mode() & 0o077 != 0).unwrap_or(false);
         if loose {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;

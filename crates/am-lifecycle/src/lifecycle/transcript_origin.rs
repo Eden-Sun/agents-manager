@@ -76,13 +76,10 @@ mod tests {
     #[test]
     fn the_sample_says_who_started_the_turn() {
         assert_eq!(starter_origin_kind(SAMPLE).as_deref(), Some("task-notification"), "最後一回合是背景 shell 完成的通知");
-        // 使用者那一回合（前面幾筆）：起點是 human；中間的工具結果（`type: user`、沒有 origin）不算起點。
         let human_turn: Vec<&str> = SAMPLE.lines().take(6).collect();
         assert_eq!(starter_origin_kind(&human_turn.join("\n")).as_deref(), Some("human"));
-        // 通知那一回合之後又有工具結果：起點仍是通知。
         let tool_result = SAMPLE.lines().find(|l| l.contains("tool_result")).expect("樣本裡有一筆真的工具結果");
         assert_eq!(starter_origin_kind(&format!("{SAMPLE}{tool_result}\n")).as_deref(), Some("task-notification"));
-        // 舊版沒有 origin、壞行、空的：沒有證據。
         assert_eq!(starter_origin_kind("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\nnot json\n"), None);
         assert_eq!(starter_origin_kind(""), None);
     }
@@ -136,7 +133,6 @@ mod tests {
     /// 對照組：使用者直接在 pane 裡打字（transcript 最新的起點是 `human`）——回音照舊存成 user 訊息。
     #[tokio::test]
     async fn a_prompt_typed_in_the_pane_keeps_its_echo() {
-        // 通知那一回合之後，使用者在 pane 裡又打了一句：最新的起點換成 human。
         let typed = r#"{"type":"user","message":{"role":"user","content":"順便看一下 lint"},"origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","timestamp":"2026-09-19T10:05:00.000Z"}"#;
         let (env, run, bot_id) = with_transcript(&format!("{SAMPLE}{typed}\n")).await;
         env.herdr.set_screen(&format!("pane-{bot_id}"), SCREEN_TYPED_IN_THE_PANE);
@@ -177,7 +173,6 @@ mod tests {
         crate::lifecycle::begin_external_turn(&env.app, &run).await;
         assert_eq!(user_messages(&env, &bot_id).await.len(), 1, "畫面上的回音是上一則：不再存一次");
 
-        // 收掉這一輪，換成使用者在 pane 裡打了新的一句：照存。
         sqlx::query("UPDATE turns SET status='completed' WHERE origin='external'").execute(env.app.db()).await.unwrap();
         env.herdr.set_screen(&format!("pane-{bot_id}"), SCREEN_TYPED_IN_THE_PANE);
         crate::lifecycle::begin_external_turn(&env.app, &run).await;

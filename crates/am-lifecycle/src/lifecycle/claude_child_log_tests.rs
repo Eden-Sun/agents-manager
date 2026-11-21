@@ -101,7 +101,6 @@ fn a_compact_summary_row_is_not_a_prompt_and_does_not_steal_the_next_reply() {
     assert!(ex[0].closed);
     assert_eq!(crate::lifecycle::transcript_user_text(&compact_summary()), None);
     assert_eq!(is_human_prompt_row(&serde_json::from_str(&compact_summary()).unwrap()), None);
-    // 摘要之後使用者再打一句，照常成為新的一問。
     let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("A 做完了", Some("end_turn"), false), compact_summary(), user("uB", "做 B"), assistant("B 做完了", Some("end_turn"), false)]));
     assert_eq!(ex.iter().map(|e| (e.prompt.as_str(), e.reply.as_deref())).collect::<Vec<_>>(), vec![("做 A", Some("A 做完了")), ("做 B", Some("B 做完了"))]);
 }
@@ -114,7 +113,6 @@ fn a_skipped_user_row_closes_the_previous_exchange() {
     assert_eq!(ex.len(), 1, "{ex:#?}");
     assert_eq!(ex[0].reply.as_deref(), Some("A 做完了"), "B 的回覆不能蓋掉 A");
     assert!(ex[0].closed);
-    // 工具結果是同一回合中途的 user 行，不能截斷（旁白→工具→最終回覆）。
     let ex = parse_exchanges(&log(&[user("uA", "做 A"), assistant("先讀檔", Some("tool_use"), true), tool_result(), assistant("讀完了", Some("end_turn"), false)]));
     assert_eq!(ex[0].reply.as_deref(), Some("讀完了"));
 }
@@ -127,7 +125,6 @@ fn a_slash_command_echo_is_not_the_last_user_text() {
     let typed = user("u1", "真正的一問");
     assert_eq!(crate::lifecycle::transcript_user_text(&typed).as_deref(), Some("真正的一問"));
     assert_eq!(is_human_prompt_row(&serde_json::from_str(&typed).unwrap()).as_deref(), Some("真正的一問"));
-    // 送達驗證比對的是原樣文字（CLI 包過的 `<pasted_content>` 由 `is_sent` 還原），人打的行回原樣、人格式的中斷標記不算一問。
     let wrapped = user("u2", "\n\n<pasted_content id=\"c4ab\">\n長長的一段\n</pasted_content id=\"c4ab\">\n");
     assert!(crate::lifecycle::transcript_user_text(&wrapped).unwrap().contains("<pasted_content"));
     assert_eq!(is_human_prompt_row(&serde_json::from_str(&wrapped).unwrap()).as_deref(), Some("長長的一段"));
@@ -273,7 +270,6 @@ fn a_recorded_transcript_path_selects_its_exact_worktree_file() {
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
     std::fs::write(&a, "QUESTION-A").unwrap();
     std::fs::write(&b, "QUESTION-B").unwrap();
-    // Python reader argv: session id, byte limit, marker, optional recorded path, then roots.
     let script = format!(
         "python3 -I -c {} {} 64 {} {} {} 2>/dev/null; :",
         sh_quote(include_str!("claude_child_tail.py")),
@@ -334,8 +330,6 @@ fn read_tail_directory_swap_keeps_the_opened_directory_fd() {
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(root.join(format!("projects/-cwd/{SID}.jsonl")), "INSIDE").unwrap();
     std::fs::write(outside.join(format!("{SID}.jsonl")), "OUTSIDE").unwrap();
-    // Swap precisely after cwd was opened and before the file is opened.
-    // The production reader runs unchanged except for this syscall interposer.
     let hook = r#"
 real_open = os.open
 swapped = False
@@ -499,7 +493,6 @@ async fn a_hookless_claude_child_records_its_exchanges_from_its_transcript() {
     let status: Vec<String> = sqlx::query_scalar("SELECT status FROM turns WHERE conversation_id = ? ORDER BY created_at, rowid").bind(&c.conv).fetch_all(&app.db).await.unwrap();
     assert_eq!(status, vec!["completed", "completed"]);
 
-    // 同一輪報好幾次 idle、daemon 重啟再認領：不重記。
     assert!(!crate::lifecycle::poller::capture_hookless_turn_locked(&app, &c.run_id, false).await.unwrap());
     assert_eq!(messages(&app, &c.conv).await.len(), 4);
 }
@@ -582,11 +575,9 @@ async fn a_remote_claude_child_reads_its_transcript_over_ssh() {
             Ok(format!("{LOG_MARK}\n{transcript}\n{body}"))
         });
     }
-    // 子 agent 的 bot／run 掛在遠端專案上；herdr 在那台機器上。
     let c = claude_child_in(e, None, Some(&host)).await;
     herdr.tabs.lock().unwrap().push(tt::MockTab { tab_id: "tab-1".into(), workspace_id: "ws-1".into(), label: "t".into(), panes: vec![c.pane.clone()] });
     herdr.set_agent("hub-midplat", &c.pane, true);
-    // `set_agent` 綁的 session 是 sess-1；遠端 herdr 要回真正的 session id。
     herdr.agents.lock().unwrap().iter_mut().for_each(|a| {
         a["agent_session"]["value"] = json!(SID);
     });
@@ -625,7 +616,6 @@ async fn pending_tail_uses_live_herdr_session() {
     );
 
     let e = tt::env().await;
-    // socket 目錄用短的固定基底：macOS 的 `TMPDIR` 連同 ULID 會超過 `sun_path` 的 104 上限（bind 失敗）。
     let sock = tt::track(std::path::PathBuf::from("/tmp").join(format!("am-claude-live-pending-{}", db::ulid())));
     std::fs::create_dir_all(&sock).unwrap();
     let herdr = tt::MockHerdr::start(sock.join("herdr.sock"));
@@ -702,7 +692,6 @@ async fn the_first_read_only_takes_a_baseline_and_makes_no_turns() {
     assert!(messages(&app, &c.conv).await.is_empty());
     assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some("2026-10-07T11:00:00.000Z"));
 
-    // 再讀（輪詢、再一次重啟）：基準之前的還是不記。
     for _ in 0..2 {
         assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
     }
@@ -834,7 +823,6 @@ async fn the_transcript_effort_and_model_become_the_runtime() {
     assert_eq!(bot.effort.as_deref(), Some("medium"), "child 的設定跟上 runtime（#938）");
     assert_eq!(bot.model.as_deref(), Some("haiku"), "同家族別名沒有變，設定的模型不動");
 
-    // 之後 /effort 切到 high、/model 換成 sonnet：照最新一則走。
     write_log(&cfg, "sess-1", &(body + &log(&[assistant_with("high", "claude-sonnet-5-5")])));
     sync_locked(&app, &c.run_id).await.unwrap();
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
@@ -936,7 +924,6 @@ async fn an_idle_edge_with_no_turn_in_flight_records_the_exchange_that_finished_
     write_log(&cfg, "sess-1", &log(&[user_at("u1", prompt, "2026-10-17T08:04:02.714Z"), assistant("我先讀 brief。", Some("tool_use"), true)]));
     c.env.herdr.set_agent("hub-midplat", &c.pane, true);
 
-    // adopt 後的第一次讀：只建基準，這一問還在跑，不是回合。
     assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: Some(prompt.into()) });
     assert_eq!(baseline(&app, &c.run_id).await.as_deref(), Some(""));
     assert_eq!(turn_count(&app, &c.conv).await, 0);
@@ -953,7 +940,6 @@ async fn an_idle_edge_with_no_turn_in_flight_records_the_exchange_that_finished_
     let got: Vec<(String, String)> = messages(&app, &c.conv).await.into_iter().map(|(r, t, _)| (r, t)).collect();
     assert_eq!(got, vec![("user".to_string(), prompt.to_string()), ("assistant".to_string(), "已推上 origin main。".to_string())]);
 
-    // 同一個 idle 重報：不再記。
     assert!(!crate::lifecycle::poller::sync_idle_transcript_locked(&app, &c.run_id).await.unwrap());
     assert_eq!(turn_count(&app, &c.conv).await, 1);
     assert_eq!(messages(&app, &c.conv).await.len(), 2);

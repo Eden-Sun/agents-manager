@@ -46,7 +46,6 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             format!(" from={from}（{from_id}）{verified}{reply}\n  內容：{}\n", snippet(s("text").unwrap_or(""), 1500))
         }
         "approval_requested" => {
-            // 申請理由（沒附時印「（空）」）與未驗證身份一起印：裁示的人才看得到理由，也看得出是不是冒名。
             let unverified = if p.get("requester_unverified").and_then(Value::as_bool) == Some(true) { "（申請者未以 bot token 驗證）" } else { "" };
             format!(
                 " approval={} requester={}{unverified} purpose={} commit={}\n  範圍：{}\n  理由：{}\n",
@@ -75,8 +74,6 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             )
         }
         _ => {
-            // 故障類（`watchdog_gave_up`、`responder_*`、`bot_restart_failed`、`ops_alert`…）的欄位名不一，
-            // 挑人看得懂的那幾個照順序印；一個都沒有就整份 payload 節錄，不要印成「空」。
             let mut out = String::new();
             for (k, label) in [
                 ("text", "內容"),
@@ -94,8 +91,6 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
                     out.push_str(&format!("\n  {label}：{}", snippet(v, 600)));
                 }
             }
-            // mission 的「下一步」物件（放行後的下一步，`mission_answered`／`mission_resumed`）：沒有字串的 `action` 才補，
-            // `mission_next` 自己已經有 `action`，不重複印。
             if s("action").is_none() {
                 if let Some(n) = p.get("next").filter(|n| n.is_object()) {
                     let action = n.get("action").and_then(Value::as_str).unwrap_or("?");
@@ -107,10 +102,8 @@ pub fn detail(e: &InboxEvent, p: &Value) -> String {
             if out.is_empty() {
                 out = format!("\n  內容：{}", snippet(&p.to_string(), 600));
             }
-            // 掛在交辦上的事件（送不進去、等額度…）要說得出是哪一件：下一步就是對它下 `review`。
             let assignment = e.assignment_id.as_deref().map(|a| format!(" assignment={a}")).unwrap_or_default();
             let bot = e.bot_id.as_deref().map(|b| format!(" bot={b}")).unwrap_or_default();
-            // mission 事件要說得出是哪一筆任務：AGM 接著每一步（`mission pick／assign --mission <id>`）都要這個 id。
             let mission = s("mission_id").map(|m| format!(" mission={m}")).unwrap_or_default();
             format!("{assignment}{bot}{mission}{out}\n")
         }

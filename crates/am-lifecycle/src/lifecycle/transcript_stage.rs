@@ -137,8 +137,6 @@ fn stage_file_after_missing_check(
         backup.push(if preserve_old { format!(".replaced-{}-{}", chrono::Utc::now().timestamp_millis(), crate::db::ulid()) } else { crate::db::ulid() });
         if let Err(e) = crate::trusted_open::rename_in(&dir, fname, &backup) {
             let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
-            // Another stager may have moved the destination after our comparison. Re-read the
-            // winner's state and apply the same prefix/divergence rules to that version.
             if e.kind() == std::io::ErrorKind::NotFound {
                 return stage_file(src, dest_dir, fname);
             }
@@ -150,9 +148,6 @@ fn stage_file_after_missing_check(
     if let Err(e) = crate::trusted_open::rename_noreplace_in(&dir, &tmp_name, fname) {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
             let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
-            // `rename_noreplace` publishes the completed, fsynced file atomically. A competing stager won
-            // the same name between our lookup and publication; verify its contents before
-            // accepting it, and retain any divergent destination according to the normal rules.
             let retry = stage_file(src, dest_dir, fname);
             if retry.is_ok() {
                 if let Some(backup) = backup_name.as_deref().filter(|_| !preserve_old) {

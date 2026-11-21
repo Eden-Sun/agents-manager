@@ -23,7 +23,6 @@ fn is_api_error(body: &str) -> bool {
 }
 
 fn lower_is_api_error(lower: &str) -> bool {
-    // 只認 `API Error:` 與重試列；光看開頭會把回覆「API error handling 已補上」誤釘（2026-09-12 review h）。
     let banner = lower.starts_with("api error:")
         || (lower.starts_with("api error") && (lower.contains("retrying") || lower.contains("attempt ") || lower.contains("connection")));
     banner || is_quota_limit_lower(lower)
@@ -78,11 +77,7 @@ fn agy_banner_at(lines: &[&str], i: usize) -> Option<String> {
 
 fn is_quota_limit_lower(lower: &str) -> bool {
     let reached = lower.starts_with("you've reached your") && lower.contains("limit");
-    // agy TUI 的個人額度列：`⚠ Individual quota reached … Resets in 3h 12m`（前導 ⚠ 與折行見 [`agy_line`]）。
     let agy = agy_line(lower);
-    // 2.1.271 起速率上限也會寫成「You've hit your session／weekly／Opus limit」（CLI 的橫幅前綴清單同時有
-    // hit 與 reached）。只認速率桶：`hit your monthly spend limit`、`fast limit`、團隊預算不是 5h／7d 用完，
-    // 記成撞限會把量表釘成 100%（2026-09-15）。
     let hit = lower.starts_with("you've hit your") && limit_bucket(lower) != LimitBucket::Unknown;
     reached || hit || agy
 }
@@ -141,7 +136,6 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
     let hours = match limit_bucket(lower) {
         LimitBucket::Session => 5,
         LimitBucket::Weekly | LimitBucket::Fable | LimitBucket::Model(_) => 24 * 7,
-        // 認不出是哪一桶：用最短的那個，寧可早一點放行讓它再撞一次。
         LimitBucket::Unknown => 5,
     };
     let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
@@ -217,7 +211,6 @@ fn saturate_bucket(q: &mut QuotaSnapshot, lower: &str, at: &str) -> Option<Strin
         LimitBucket::Model(_) => q.seven_day.as_ref().filter(|w| !stale(w)).and_then(|w| w.resets_at.clone()),
         LimitBucket::Weekly => full(&mut q.seven_day).flatten(),
         LimitBucket::Session => full(&mut q.five_hour).flatten(),
-        // 5h 窗閒著（上一個窗的讀數）＝撞的不會是 5h，先看 7d。
         LimitBucket::Unknown if !current(&q.five_hour) && current(&q.seven_day) => full(&mut q.seven_day).flatten(),
         LimitBucket::Unknown => match full(&mut q.five_hour) {
             Some(until) => until,
@@ -231,13 +224,10 @@ fn is_chrome(s: &str) -> bool {
     s.is_empty()
         || s == "❯"
         || s == "›"
-        // codex 空輸入框的 placeholder：真畫面上錯誤橫幅底下一定有它，不認就永遠找不到橫幅（2026-10-17 w0:pDX）。
         || lifecycle::screen::is_codex_idle_prompt(s)
         || lifecycle::is_noise(s)
         || lifecycle::is_activity_shape(s)
-        // claude 自動更新提示釘在輸入框上方，不是 agent 說的話（2.1.266）。
         || s.contains("Update installed")
-        // claude 2.1.269 在額度拒絕下多印 `0 tokens`，沒認出來橫幅就永遠找不到（2026-09-12 使用者實測）。
         || is_token_count(s)
 }
 
@@ -278,7 +268,6 @@ pub fn kind_of(line: &str) -> &'static str {
 /// （#1675：子 agent 連上舊版共用 app-server，`gpt-6.1-sol` 被 400 拒絕，回合卻照常收成完成）。
 /// 只認行首的 `■` 加上帶 `error.message` 的 JSON；釘上的是狀態碼、錯誤種類與訊息。
 fn codex_json_error(line: &str) -> Option<String> {
-    // 跟滿載橫幅同一條規則：`■` 要在原始行的行首，縮排的續行是引文。
     if !line.starts_with('■') {
         return None;
     }
@@ -310,7 +299,6 @@ const CONTENT_BLOCKED: &str = "OpenAI 資安過濾擋掉了這次回覆，請改
 
 /// 跟滿載橫幅同一條規則：`ⓘ` 要在原始行的行首，縮排的續行與 `•` 回覆是引文。
 fn is_content_blocked(line: &str) -> bool {
-    // `ⓘ` 在 Unicode 算字母（Other_Alphabetic），`body_of` 不會剝它，要自己剝。
     let Some(rest) = line.strip_prefix('ⓘ') else { return false };
     let body = rest.trim().to_lowercase().replace('’', "'");
     body.starts_with("this content can't be shown")
@@ -358,7 +346,6 @@ pub fn api_error_line(screen: &str) -> Option<String> {
         if let Some(banner) = agy_banner_at(&lines, i) {
             return Some(banner);
         }
-        // 用帶記號的那串：`is_noise` 靠 `✻` 認出 spinner 收尾行。
         if !is_chrome(raw) {
             return None;
         }
@@ -376,18 +363,12 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(false) };
     let Some(screen) = app.read_run_pane_recent_unwrapped(&run, pane_id, 200).await? else { return Ok(false) };
     let Some(line) = api_error_line(&screen) else { return Ok(false) };
-    // 同一則錯誤只記一次；`arm_progress` 開下一回合時清掉。
     if run.turn_error.as_deref() == Some(line.as_str()) {
         return Ok(false);
     }
-    // 上面那個「只記一次」的標記（`turn_error`）、釘在那一回合上的訊息、收掉在飛的回合，**同一個交易**寫；要讀的全部先讀
-    // （#198 同類）。以前標記先寫、後面讀寫一失敗就回錯：下一次擷取被「只記一次」擋掉，訊息沒釘、回合不收（輸入框鎖著），
-    // 再也不重來。撞限要記在哪個身份也在這裡讀。
     let Some(bot) = db::bot(db.pool(), bot_id).await? else { return Ok(false) };
     let conversation_id = db::conversation_id(db.pool(), bot_id).await?;
     let turn = last_turn(&db, &run.id).await?;
-    // Codex 0.156 flushes an interrupted/failed stream into its terminal transcript. Keep that
-    // assistant content as a separate incomplete message beside the error notice.
     let partial = if bot.kind == "codex" {
         if let Some(t) = turn.as_ref() {
             match lifecycle::turn_echo_texts(app, &t.id).await {
@@ -404,8 +385,6 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
         None
     };
 
-    // 額度格標成被擋，量表與標題列才對得上。撞限是外面已經發生的事：記不進去時欠著（排著的派工照欠著的那一筆擋），
-    // 下面寫不寫得進去都一樣；錯誤留到最後回給呼叫端。
     let marked = if is_quota_limit(&line) {
         match bot.kind.as_str() {
             "claude" => mark_claude_limit_hit(app, &bot, &line).await,
@@ -440,7 +419,6 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
             );
         }
     }
-    // 釘在那一回合上，看得出是哪一則回覆斷的。
     messages.push(
         lifecycle::insert_message_tx(
             &mut tx,
@@ -454,7 +432,6 @@ pub async fn capture(app: &impl TurnErrorContext, bot_id: &str, expected_run_id:
         )
         .await?,
     );
-    // 不收掉 in_flight 的話輸入框會一直鎖著。
     let mut failed = None;
     if let Some(t) = turn.as_ref().filter(|t| t.status == "in_flight") {
         let res = crate::lifecycle::turn_controller::fail_on(
@@ -565,7 +542,6 @@ mod tests {
     fn other_api_error_variants_count_too() {
         let screen = "❯ hi\n⏺ API Error: 500 Internal Server Error\n\n✻ Worked for 3s · done 1:07 AM\n❯\n";
         assert_eq!(api_error_line(screen).as_deref(), Some("API Error: 500 Internal Server Error"));
-        // 重試橫幅停在最後一件事上，也是這回合斷了。
         let retry = "❯ hi\n✻ API error · Retrying in 0s · attempt 1/10\n❯\n";
         assert_eq!(api_error_line(retry).as_deref(), Some("API error · Retrying in 0s · attempt 1/10"));
     }
@@ -606,7 +582,6 @@ mod tests {
         assert_eq!(api_error_line(screen), None);
         assert!(!is_quota_limit(screen));
         assert!(!is_quota_exhaustion(screen));
-        // A real exhausted-bucket banner remains classifiable despite the new recommendation.
         assert!(is_quota_limit("You've hit your weekly limit. Switch to gpt-6-luna for lower credit usage."));
     }
 
@@ -682,7 +657,6 @@ mod tests {
   Learn more: https://help.openai.com/en/articles/20001326
   Apply for Daybreak: https://openai.com/form/enterprise-trusted-access-for-cyber/
 
-
 › Ask Codex to do anything
 
   GPT-6.1-Sol medium · ~/project/agents-manager · 優化 CICD 測試
@@ -692,7 +666,6 @@ mod tests {
         assert_eq!(kind_of(&line), "api_error");
         assert!(!is_quota_limit(&line));
         assert!(!is_quota_exhaustion(&line));
-        // 只剩橫幅那一行（說明被捲掉或沒印）也算。
         assert_eq!(api_error_line("› hi\nⓘ This content can't be shown\n\n›\n").as_deref(), Some(CONTENT_BLOCKED));
     }
 
@@ -719,7 +692,6 @@ mod tests {
     fn a_clean_turn_has_no_error() {
         let screen = "❯ echo 1\n⏺ PONG\n✻ Worked for 0s · done 1:07 AM\n──────\n❯\n";
         assert_eq!(api_error_line(screen), None);
-        // agent 自己在講 API 錯誤這件事，不是橫幅——它不在行首。
         let prose = "❯ hi\n⏺ 這個 API Error 要自己處理\n✻ done\n❯\n";
         assert_eq!(api_error_line(prose), None);
         assert_eq!(api_error_line(""), None);
@@ -732,7 +704,6 @@ mod tests {
         assert_eq!(api_error_line(prose), None);
         let english = "❯ fix\n⏺ API errors are now retried three times.\n✻ done\n❯\n";
         assert_eq!(api_error_line(english), None);
-        // 帶冒號的仍然是橫幅。
         let banner = "❯ fix\n⏺ API Error: Request timed out.\n✻ done\n❯\n";
         assert_eq!(api_error_line(banner).as_deref(), Some("API Error: Request timed out."));
     }
@@ -768,7 +739,6 @@ mod tests {
         assert!(is_quota_limit(AGY_JOINED));
         assert!(is_quota_exhaustion(AGY_JOINED));
         assert_eq!(kind_of(AGY_JOINED), "quota_limit");
-        // 13 分 11 秒，不能只剩分鐘（舊的切法會丟掉 `11s`）。
         assert_eq!(agy_reset_until(AGY_JOINED, "2026-10-24T10:00:00Z").as_deref(), Some("2026-10-24T10:13:11.000Z"));
     }
 
@@ -798,10 +768,8 @@ mod tests {
 
     #[test]
     fn an_agy_quota_line_that_is_not_a_hit_is_not_a_banner() {
-        // 助理回覆（`■` 開頭）引用橫幅：不是現在撞限。
         let quoted = format!("❯ 幫我查一下\n■ 你看到的是 Individual quota reached. Resets in 1h 30m\n─────\n❯\n");
         assert_eq!(api_error_line(&quoted), None);
-        // 沒有重置時間、或重置時間不成形：不是撞限橫幅。
         assert!(!is_quota_limit("Individual quota reached. Upgrade your plan."));
         let no_reset = "❯ x\nIndividual quota reached. Upgrade your plan.\n─────\n❯\n";
         assert_eq!(api_error_line(no_reset), None);
@@ -809,7 +777,6 @@ mod tests {
         assert_eq!(api_error_line(tail_only), None);
         let not_a_duration = "❯ x\n⚠ Individual quota reached. Resets in\nPlease wait a while.\n─────\n❯\n";
         assert_eq!(api_error_line(not_a_duration), None);
-        // 不是 agy 的句子，只是碰巧有 quota、resets in 幾個字。
         let prose = "The quota reached its limit; resets in spring.";
         assert!(!is_quota_limit(prose));
         assert!(!is_quota_exhaustion(prose));
@@ -843,10 +810,6 @@ pub async fn mark_agy_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line
 /// 本機 `codex` 那一格，本機帳號被當成用盡、派工停擺，真正用盡的遠端身份反而沒擋）、那台的身份表還沒偵測完、排著的
 /// prompt 蓋不上憑據，都回錯並記成欠著；補上之前 flush 與派送前照欠著的那一筆擋。
 pub async fn mark_codex_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, notice: &str) -> Result<()> {
-    // grok 撞週限時畫的是自己的字（`screen::grok_limit_hit_line`），走同一條畫面擷取（2026-09-19 w168:pB7：以前 grok 根本不走這條，
-    // bot 一直停在 blocked、額度還顯示有餘），但撞限記在 **grok** 那一格、帶額度窗與保底到期（#222）：橫幅裡沒有時間，
-    // 記成 `until: None` 就是永不過期、`/usage` 探測也校正不到，而且 `record` 對 codex 橫幅一律算 `codex` 的 key，
-    // 會把 codex 標成用盡。
     match bot.kind.as_str() {
         "codex" => {
             let until = codex_banner_until(app, bot, notice).await;
@@ -884,10 +847,7 @@ async fn codex_banner_until(app: &impl TurnErrorContext, bot: &db::Bot, notice: 
 }
 
 async fn mark_limit_hit(app: &impl TurnErrorContext, bot: &db::Bot, line: &str, banner: Banner) -> Result<()> {
-    // 撞的是 pane 裡實際的帳號＝run 起來時的身份（issue #238），不是剛改、還沒重啟生效的設定。讀不到 run 回錯（不猜）：
-    // `StopFailure` 由收件匣重試；這段時間閘門同樣讀不到 run，照擋。
     let identity = crate::quota::billing_identity(app, bot).await?;
-    // 同一筆撞限重來（收件匣重試 `StopFailure`、下一次讀到同一張橫幅）：撞的那一刻、橫幅上的時間都還是當初的，不往後推。
     let (banner, at) = match owed(app, &bot.id).filter(|m| m.identity == identity && m.line == line) {
         Some(m) => (m.banner, m.at),
         None => (banner, db::now()),
@@ -1011,8 +971,6 @@ async fn record_claude<A: TurnErrorQuotaAccess>(access: &A, host: &str, m: &Mark
     let key = access.resolve_key(host, "claude", m.identity.as_deref()).await?;
     let mut quota = access.snapshot(&key).await?.unwrap_or_else(|| new_quota_snapshot(host, "claude-limit-hit", m.identity.clone()));
     let lower = m.line.to_ascii_lowercase();
-    // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
-    // 給一個保底時間，撞限才有出口（review 2026-09-16）。
     let until = saturate_bucket(&mut quota, &lower, &m.at).or_else(|| fallback_until(&lower, &m.at));
     let hit = crate::quota::LimitHit { message: m.line.clone(), until, at: m.at.clone(), bucket: bucket_name(&lower) };
     quota.limit_hit = Some(daemon_limit_to_port(&hit));
@@ -1048,9 +1006,6 @@ async fn record_grok<A: TurnErrorQuotaAccess>(access: &A, host: &str, m: &Mark) 
     let key = access.resolve_key(host, "grok", m.identity.as_deref()).await?;
     let previous = access.snapshot(&key).await?;
     let hit = m.hit();
-    // 已經記著、還沒過期的撞限：同一句再看到不是新證據（撞的那一刻不往後推）；到期比較晚的也不被較短的蓋掉
-    // （同一張畫面兩句：402 credits 用完只有 5 小時的保底，`You hit your weekly limit.` 是 7 天，後到的不能把週限縮短）。
-    // 已經過期的不算：過期後真的又被擋一次。
     if let Some(h) = previous.as_ref().and_then(|q| q.limit_hit.as_ref()) {
         let previous_hit = port_limit_to_daemon(h);
         if !crate::quota::limit_hit_expired(Some(&previous_hit)) {
@@ -1215,7 +1170,6 @@ mod quota_limit_tests {
 
     #[test]
     fn the_token_count_trailer_does_not_hide_the_limit_banner() {
-        // 2026-09-12 實機（claude 2.1.269）：橫幅底下多一行 `0 tokens`。
         let screen = "❯ ping\n\nYou've reached your Fable limit. Run /usage-credits to continue or switch models with /model.\n\n0 tokens\n─────\n❯\n─────\n  tony. | agents-manager | Fable 5.1 | 5h:67% | F5:0%\n";
         assert_eq!(
             api_error_line(screen).as_deref(),
@@ -1262,7 +1216,6 @@ mod quota_limit_tests {
         }
         assert_eq!(fallback_until("session limit", "not-a-time"), None, "讀不懂時間就不要編一個出來");
 
-        // 有讀數時照舊用那一桶自己的 resets_at，保底不會蓋掉它。
         let mut q = QuotaSnapshot {
             five_hour: Some(PortWindow { observed_at: None, used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
             seven_day: None, fable: None, argon_weekly: None, reset_credits: None, limit_hit: None, plan: None,
@@ -1306,18 +1259,15 @@ mod quota_limit_tests {
             assert!(is_quota_limit(line), "{line}");
             assert_eq!(bucket_name(&lower).as_deref(), Some(bucket), "{line}");
             let mut q = quota();
-            // 重置時間借 7d 那格（`/usage` 的 weekly_scoped 與 weekly_all 同一個週期），但一格量表都不標。
             assert_eq!(saturate_bucket(&mut q, &lower, "2026-09-16T10:00:00Z").as_deref(), Some("7d-reset"), "{line}");
             let pct = |w: &Option<PortWindow>| w.as_ref().unwrap().used_pct;
             assert_eq!((pct(&q.five_hour), pct(&q.seven_day), pct(&q.fable)), (40.0, 60.0, 10.0), "{line}：量表不動");
-            // 那一桶連 7d 都還沒有讀數時照舊給保底（一週），不會留下 until=None。
             let mut empty = quota();
             empty.seven_day = None;
             let at = "2026-09-16T10:00:00Z";
             let until = saturate_bucket(&mut empty, &lower, at).or_else(|| fallback_until(&lower, at));
             assert_eq!(until.as_deref(), Some("2026-09-23T10:00:00.000Z"), "{line}");
         }
-        // 「weekly limit」仍然是整個身份的 7d。
         assert_eq!(bucket_name("you've hit your weekly limit").as_deref(), Some("seven_day"));
     }
 
@@ -1340,7 +1290,6 @@ mod quota_limit_tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let (mut bot, _) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
-        // The helper creates the normal database fixture; this unit exercises the agy route.
         bot.kind = "agy".into();
         let line = "Individual quota reached for Gemini Pro. Resets in 1h 30m";
         mark_agy_limit_hit(&app, &bot, line).await.unwrap();

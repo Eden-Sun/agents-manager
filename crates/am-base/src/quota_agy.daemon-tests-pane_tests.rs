@@ -29,7 +29,6 @@
             .await;
         conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         *conn.remote_home.lock().await = Some("/Users/me".into());
-        // 純 ssh 讀不到 Keychain：探測**不能**走 ssh（記下任何 ssh 呼叫）。
         let ssh_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let calls = ssh_calls.clone();
         crate::hosts::set_ssh_fake(&host, move |script| {
@@ -65,7 +64,6 @@
     }
 
     async fn open_workspaces(h: &MockHerdr) -> usize {
-        // 等到收乾淨為止（放棄上限 30 秒），不是固定 2 秒的短輪詢（#951）。
         let _ = crate::testing::eventually!(h.workspaces.lock().unwrap().is_empty());
         h.workspaces.lock().unwrap().len()
     }
@@ -119,7 +117,6 @@
         assert_eq!(open_workspaces(&r.herdr).await, 0, "卡在登入畫面的 pane 也關掉");
         assert_eq!(r.ssh_calls.lock().unwrap().len(), 0);
 
-        // 冷卻期內：Keychain 裡有項目也不翻回去、不再開 pane。
         let before = r.herdr.calls_to("workspace.create").len();
         login_watch_once(&app, &r.host).await;
         assert_eq!(agy_flag(&app, &r.host).await, Some(false));
@@ -145,7 +142,6 @@
         }
         assert!(pushed, "失敗原因要推 host_changed，網頁才換掉「背景查詢中」");
 
-        // 恢復：下一次讀得到，錯誤清掉並再推一次。
         r.herdr.set_screen("*", &screen(&usage_json(), 0));
         assert!(refresh_agy(&app, &r.host).await.unwrap());
         assert!(quota_error_of(&app.tools.lock().await[&r.host], &r.host).is_null());
@@ -188,7 +184,6 @@
 
     #[test]
     fn the_pane_output_parsers_read_the_last_complete_run_and_spot_the_login_wall() {
-        // 指令重打過：捲動緩衝區有兩輪，只認最後那輪完整的。
         let two = format!("{PANE_BEGIN}\nold\n{PANE_BEGIN}\n{{\"a\":1}}\n{PANE_DONE}0\n");
         assert_eq!(pane_done(&two), Some((0, "{\"a\":1}".to_string())));
         assert_eq!(pane_done(&format!("{PANE_BEGIN}\nstill running")), None, "沒有 DONE＝還沒結束");
@@ -199,7 +194,6 @@
         assert!(!auth_required("{\"status\":\"SUCCESS\"}"));
         assert_eq!(json_line("warning: x\n  {\"a\":1}  \ntrailer"), Some("{\"a\":1}"));
         assert_eq!(json_line("no json here"), None);
-        // 登入牆只看最後一次 BEGIN 之後：之前畫面上的字不算。
         assert!(!auth_required(after_begin(&format!("Authentication required\n{PANE_BEGIN}\nok\n"))));
     }
 

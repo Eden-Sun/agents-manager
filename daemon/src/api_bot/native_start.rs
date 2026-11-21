@@ -57,8 +57,6 @@ async fn create_run_inner(app: &crate::state::App, bot: &str, required: bool, cl
         refused(bot, "gate_not_ready_or_quarantined");
         return Err(E::Unconfirmed);
     }
-    // 同一顆 bot 已經在跑（`starting`／`running`）：一般續接（不要求特定 resume、不是 Fresh）不另開，回可辨識的 `ActiveRun`。
-    // 這裡在 bot 鎖內，跟其他啟動序列化；Fresh 與要求 resume 的請求照舊走下面的路徑。
     if !cleared && !required {
         let active: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state IN ('starting','running') LIMIT 1")
             .bind(bot)
@@ -144,7 +142,6 @@ async fn create_run_inner(app: &crate::state::App, bot: &str, required: bool, cl
             return Err(E::Unconfirmed);
         }
     };
-    // run 在 daemon 內跑（沒有 pane），所以 `runs.host` 一律 'local'；專案在哪台主機只影響工具（本機 bwrap／遠端 ssh）。
     let inserted = sqlx::query(concat!("INSERT INTO runs(id,bot_id,state,agent_status,started_at,host) SELECT ?,b.id,'starting','unknown',?,'local' FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.kind IN ", crate::config::api_kinds_sql!(), " AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL AND b.managed_by!='child' AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.bot_id=b.id AND r.state IN ('starting','running','stopping'))"))
         .bind(&id).bind(crate::db::now()).bind(bot).execute(&mut *tx).await.map_err(|e| {
             failed(bot, "insert_run")(e);

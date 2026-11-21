@@ -13,8 +13,6 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
         }
         after = runs.last().cloned();
         for (bot, run) in runs {
-            // The guard proves startup exclusivity for this bot/run; dummy session/turn are never
-            // used as DB evidence, and the absence of a live registry is not join proof.
             let identity = AdapterIdentity {
                 bot_id: bot.clone(),
                 run_id: run.clone(),
@@ -62,7 +60,6 @@ pub(super) async fn abandon_all(app: &Arc<crate::state::App>) -> Result<(), Erro
             tx.commit().await.map_err(|_| Error::Storage)?;
         }
     }
-    // A keyset page becoming empty does not prove that no earlier key appeared.
     let remains: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM runs r JOIN bots b ON b.id=r.bot_id WHERE b.kind IN ", crate::config::api_kinds_sql!(), " AND r.state IN ('starting','running','stopping'))"))
         .fetch_one(&app.db).await.map_err(|_| Error::Storage)?;
     if remains {

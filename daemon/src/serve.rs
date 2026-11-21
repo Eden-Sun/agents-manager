@@ -41,13 +41,10 @@ enum Tightened {
 /// 既有 ui-token 的權限比 0600 寬就修回來（備份還原、rsync、手動複製都會把它放寬）。
 #[cfg(unix)]
 fn tighten_ui_token(path: &std::path::Path) {
-    // 包一層具名 fn：直接傳泛型的 `std::fs::set_permissions` 會被實例化成某個固定 lifetime，
-    // 滿足不了 `for<'a> Fn(&'a Path, ..)`。
     fn chmod(p: &std::path::Path, perm: std::fs::Permissions) -> std::io::Result<()> {
         std::fs::set_permissions(p, perm)
     }
     let outcome = tighten_with(path, chmod);
-    // uid 一起記：過寬的 token 誰讀得到，看檔案是誰的最直接（i92b review）。
     let owner = file_owner(path);
     match outcome {
         Tightened::AlreadyPrivate | Tightened::Unknown => {}
@@ -98,8 +95,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         .with_target(false)
         .init();
 
-    // 資料目錄跟著設定檔走，而且**在建立或寫入任何檔案之前**先拿鎖：只換 --config 與 port 的
-    // 「隔離測試」曾經打到正式 DB，連 ConfigStore::load 都會先寫一份預設 config（startup.rs）。
     let startup::Instance { dir, cfg_path, store, pool, lock, slug } =
         startup::open_instance(config_path, startup::env_dir()?, startup::LOCK_WAIT).await?;
     let _dir_lock = lock;
@@ -120,7 +115,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
 
     let mut addr: std::net::SocketAddr = cfg.server.listen.parse().context("parse server.listen")?;
     let exe = std::env::current_exe()?;
-    // LAN/Tailscale access; binding alone would still 403 non-local peers, `App::allow_lan` relaxes that.
     let dev_lan = dev_lan_default(&exe);
     if dev_lan {
         addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
@@ -156,7 +150,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     let server = tokio::spawn(async move {
         axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .with_graceful_shutdown(async move {
-                // Install signal handlers after initialization; during boot the API returns 503.
                 let _ = wait_to_enable_shutdown.await;
                 let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
                 match term.as_mut() {
@@ -174,8 +167,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     tracing::info!(%addr, "HTTP listener bound; startup requests receive 503");
     crate::api_bot::startup_gate::barrier(&app).await;
     lifecycle::recover_live_apply_debts(&app).await;
-    // #392：先把上一次額度讀數放回記憶體，API 開始服務時就能畫出 stale 的量表；新的探測回來後由 quota::set 蓋掉。
-    // 上一輪在「占位」與「補答案」之間被收掉時留下的 pending 列，收成終態（issue #481／i339 review）。
     if let Err(e) = judge::settle_interrupted(&app).await {
         tracing::warn!(error = ?e, "judge shadow 的占位列收不掉");
     }
@@ -183,18 +174,14 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         tracing::warn!(error = ?e, "quota cache load failed; waiting for the first probe");
     }
 
-    // #378: 被打斷的重啟在 recovery 補完之前，對帳收尾舊 run 不能把它排著的派工當孤兒撤掉。
     lifecycle::restart_hold::adopt_open_intents(&app).await;
-    // 保溫視窗只在記憶體：重啟前送出、還在飛（或剛收尾）的保溫回合，回覆造成的 statusLine 變化不能被當成真的活動（#1285）。
     match crate::primary_keep_warm::rearm_windows(&app.db).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(n, "re-armed keep-warm windows after restart"),
         Err(e) => tracing::warn!(error = ?e, "could not re-arm keep-warm windows; a keep-warm reply may count as activity once"),
     }
 
-    // §11.3: each remote host's supervisor reconciles on connect.
     app.hosts.apply_config(&app, &host_cfg).await;
-    // #1773：舊版 run 記的是連線世代，重啟後對不上；還沒結束的遠端 run 改記這台目前設定的目標指紋（之後只有換機器才圍掉）。
     for h in host_cfg.iter().filter(|h| h.name != config::LOCAL_HOST) {
         match db::rebase_active_run_host_epoch(&app.db, &h.name, am_base::hosts::target_epoch(h)).await {
             Ok(0) => {}
@@ -203,7 +190,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         }
     }
 
-    // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
     let local_reconciled = match crate::runners::reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
         Ok(()) => true,
         Err(e) => {
@@ -211,9 +197,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
             false
         }
     };
-    // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
     crate::runners::reconcile::rearm_progress(&app).await;
-    // #1493: recover late-delivery proof baselines only after run reconciliation has restored current panes.
     match lifecycle::late_proof::recover_at_startup(&app).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(n, "re-armed late delivery proof watchers after restart"),
@@ -235,34 +219,24 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         }
     });
     lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
-    // #564：上一顆 daemon 沒收尾的 codex 安裝，等那台的安裝鎖放掉再收尾（不重跑安裝）。
     cli_update::recover_at_startup(&app).await;
-    // #61: directories of bots deleted before every deletion path purged them.
     lifecycle::purge_deleted_bot_dirs(&app).await;
-    // shim 只在 bot 啟動時寫，長跑的 bot 會抱著舊版好幾天（2026-09-18 的 shim 巢狀死鎖就是這樣
-    // 在修正上線後還在發生）。開機就地換成這顆 binary 帶的版本，不必重啟任何 pane。
     runners::shim_refresh::refresh_at_startup(&app).await;
-    // grok 的全域 hook 檔若指到別的資料目錄／已刪的腳本（測試或別顆 daemon 寫的），開機就修回來；沒有檔就不建。
     match lifecycle::grok_hook::heal_at_startup(&app, None) {
         Ok(true) => tracing::info!("repaired the grok hooks file at startup"),
         Ok(false) => {}
         Err(e) => tracing::warn!(error = ?e, "could not check the grok hooks file at startup"),
     }
-    // agy 的 dispatcher 與全域 hooks.json：裝過的機器開機就換成這顆 binary 的版本（換版後不必等 agy bot 重啟）；沒裝過不建。
     match lifecycle::agy_hook::heal_at_startup(&app) {
         Ok(true) => tracing::info!("repaired the agy hooks at startup"),
         Ok(false) => {}
         Err(e) => tracing::warn!(error = ?e, "could not check the agy hooks at startup"),
     }
-    // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
-    // 上傳了卻從沒送出的附件（`ready`、沒有訊息引用）依保留期清掉；開機一次、之後每 6 小時。
     attach::spawn_sweep(app.clone());
-    // 預覽（§6.12）：pane 還在不在、port 有沒有在 listen，對回 `bot_previews`。
     preview::reconcile_all(&app).await;
     crate::runners::events::spawn_global(app.clone()).await;
 
-    // The daemon never spawns the user's default session; watching it is best-effort.
     if app.herdr_session != default_session::SESSION {
         if let Err(e) = default_session::sync(&app).await {
             tracing::debug!(session = default_session::SESSION, error = ?e, "initial default session sync skipped");
@@ -283,18 +257,14 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     runners::hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
-    // 這顆 binary 是哪一版、什麼時候**上線**的（`GET /api/supervisor` 的 `last_deploy`）。
     build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
     host_baseline::spawn_poller(app.clone());
     crate::runners::herdr_version::spawn_poller(app.clone());
     crate::runners::remote_purge::spawn_poller(app.clone());
     crate::schedules::spawn_poller(app.clone());
-    // herdr 非計畫重啟後被定時掃描收成 `pane gone` 的 autostart bot 也要補開（#914）。
     crate::runners::autostart_revive::spawn_pane_gone_sweeper(app.clone());
-    // 連上那趟收權限失敗的主機（#501）：欠著的每 5 分鐘補跑一次，不然一台不重連的主機就一直是 0755（#501 複看）。
     remote_perms::spawn_poller(app.clone());
-    // #406：回收區不能只在開機收，常駐好幾天會一路長。
     bot_trash::spawn_gc(app.clone());
     crate::runners::quota::spawn_codex_poller(app.clone());
     crate::codex_reset::spawn(app.clone());
@@ -307,72 +277,52 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     runners::quota_agy::spawn_agy_login_watcher(app.clone());
     runners::quota_agy::spawn_agy_identity_poller(app.clone());
     runners::github::spawn_detect_all(app.clone());
-    // 協調者跟巡檢是同一顆總管的兩個角色：舊安裝把它放在自己的專案，開機時併回去（工作目錄仍然分開）。
     if let Err(e) = supervisor::responder::merge_into_manager_project(&app).await {
         tracing::warn!(error = ?e, "AGM 協調者併回巡檢的專案失敗，這一輪維持原樣");
     }
-    // 手機 Remote Control 已廢（#1477）：既有安裝的巡檢／協調者 args 裡留著的 `--remote-control <name>` 在這裡拿掉。
-    // 冪等；只改 config.toml，執行中的 session 照舊（launch_rev 變了＝標需重啟），不自動重啟 AGM。
     match supervisor::setup::strip_remote_control_args(&app).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(n, "removed --remote-control from supervisor bot args; restart them to apply"),
         Err(e) => tracing::warn!(error = ?e, "could not remove --remote-control from supervisor bot args"),
     }
-    // 換版後已安裝的 bin/agm 跟著換（只動 bin/agm；寫不進去記 warn＋inbox，不擋開機，SPEC §18.2a）。
     supervisor::cli_refresh::refresh_on_startup(&app).await;
     crate::runners::supervisor::runtime::respawn(&app).await;
     crate::runners::supervisor::health::spawn(app.clone());
     crate::webpush::spawn_incident_notifier(app.clone());
     crate::api_bot::spawn_retention_ticker(app.clone());
     crate::api_bot::spawn_sweeper(app.clone());
-    // Agent titles have no herdr event, so they are polled.
     crate::runners::events::spawn_title_poller(app.clone());
-    // 主力 bot 回合做完／需要回應 → 網頁推播。
     crate::webpush::spawn_main_notifier(app.clone());
-    // 自動翻譯開著：訊息一落地就在 daemon 端預先翻好（寫進同一份快取）。
     crate::message_pretranslate::spawn(app.clone());
     crate::webpush::spawn_extra_notifiers(app.clone());
-    // 狀態寫不進 DB、重放也用完的 pane，靠這裡定時重讀 herdr 補回來（#1184）。
     crate::runners::events::spawn_status_repair(app.clone());
     runners::tui_prompts::spawn_survey_watcher(app.clone());
     lifecycle::spawn_stuck_turn_sweeper(app.clone());
     crate::runners::update_watch::spawn_update_watcher(app.clone());
-    // issue #707：claude／codex 上游有新版、磁碟上還沒有（跟上面的「重啟套用」分開）。
     crate::runners::upstream_update::spawn(app.clone());
-    // issue #1772：herdr integration（claude／codex／antigravity-cli／grok 的 hook 腳本）落後 herdr 要求的版本時，設定頁「更新檢查」要看得到。
     crate::herdr_integration::spawn(app.clone());
     crate::claude_session_watch::spawn(app.clone());
-    // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     runners::hook_inbox::spawn_worker(app.clone());
     runners::hookrecv::spawn_spool_scanner(app.clone());
-    // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
-    // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
     crate::runners::build_scheduler::spawn_sweeper(app.clone());
 
-    // Restarting is how a restart window ends: nothing waits out the old lease (SPEC §18.10).
     supervisor::maintenance::release_restart_on_startup(&app).await;
-    // 上一顆 daemon 開的 herdr 維護窗口：沒到期就重新排截止，過期就當場收尾（§6.5.2）。
     crate::runners::herdr_maintenance::arm_on_startup(&app).await;
-    // 上一顆 daemon 等換版窗口等到一半（或就是這次換版）：讀回來，換好了／回滾了要告訴使用者（SPEC §18.10）。
     deploy_wait::startup(&app).await;
     deploy_wait::spawn_ticker(&app);
     app.set_startup_ready(true);
     {
-        // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑。
-        // API 先 ready，bot 啟動時寫入的 hooks／relay 才不會撞上 startup 503。
         let app2 = app.clone();
         tokio::spawn(async move { crate::runners::reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
     }
     tracing::info!(%addr, "listening");
-    // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
     share::portal::spawn_listener(&app, addr.port()).await;
     crate::runners::share_budget::spawn_ticker(&app);
     crate::runners::reset_credit_expiry::spawn_ticker(&app);
     crate::claude_console_balance::spawn_ticker(&app);
     let _ = enable_shutdown.send(());
     {
-        // 遠端保留標記一顆一趟 ssh，慢的主機要好幾分鐘：不擋 signal handler 與巡邏。關機時跟著取消（#1286）。
         let app2 = app.clone();
         crate::background_loop::spawn_named(&app.background_tasks, "share outbox keeper", async move {
             tokio::select! {
@@ -381,7 +331,6 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
             }
         });
     }
-    // 連線收完後才等受監督的迴圈，再關 SSH masters。
     let serve_result = match join_server_within_shutdown(server, app.shutdown.clone(), HTTP_SHUTDOWN_WAIT)
         .await
         .context("HTTP server task panicked")?
@@ -578,13 +527,11 @@ mod tests {
         assert!(!fresh.is_empty());
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "新建的就要是 0600");
 
-        // 備份還原／rsync 把它放寬：開機時修回來，token 不變。
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let again = load_or_create_ui_token(&dir).unwrap();
         assert_eq!(again, fresh, "既有 token 不可以被換掉");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "過寬的要被修回 0600");
 
-        // 空檔（寫到一半死掉）會重新產生，而且新檔照樣 0600，不沿用舊 inode 的權限。
         std::fs::write(&path, "   \n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
         let regenerated = load_or_create_ui_token(&dir).unwrap();
@@ -604,8 +551,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ui-token");
         std::fs::write(&path, "tok").unwrap();
-        // 具名 fn 而不是 closure：closure 推不出 `for<'a> Fn(&'a Path, ..)`，會撞
-        // 「implementation of `Fn` is not general enough」。
         fn boom(_: &Path, _: std::fs::Permissions) -> std::io::Result<()> {
             Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope"))
         }
@@ -614,11 +559,9 @@ mod tests {
         assert_eq!(tighten_with(&path, boom), Tightened::Failed(0o644), "改不動要說改不動");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok", "修權限不可以動到內容");
 
-        // 已經是 0600 就根本不叫 chmod（叫了就會炸在 boom 上）。
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(tighten_with(&path, boom), Tightened::AlreadyPrivate);
 
-        // 檔案不見了：不猜、不報錯。
         std::fs::remove_file(&path).unwrap();
         assert_eq!(tighten_with(&path, boom), Tightened::Unknown);
 

@@ -135,8 +135,6 @@ async fn post_verdicts(State(app): State<Arc<App>>, Extension(principal): Extens
 pub(crate) async fn accept_submission(app: &Arc<App>, sub: &Submission, version: &str, row: &Row, cas: Option<(&str, i64)>) -> Result<Value, LcError> {
     let (verdicts, proposals) = verdict::validate(sub, &row.entries)
         .map_err(|problems| LcError::BadValue(json!({"error": "invalid_verdicts", "problems": problems})))?;
-    // `duplicate_of` 會被 publish 直接拿去 `gh issue comment <n>`：只收帳本裡真的有的 release-triage issue，
-    // 模型填錯或幻覺出別的 issue／PR 編號時整份退回，不能把留言貼到不相干的地方。
     let dups: Vec<i64> = proposals.iter().filter_map(|p| p.duplicate_of).collect();
     if !dups.is_empty() {
         let known = issue::ledger_issue_numbers(&app.db).await.map_err(up)?;
@@ -152,7 +150,6 @@ pub(crate) async fn accept_submission(app: &Arc<App>, sub: &Submission, version:
     let next = if proposals.is_empty() { Status::Empty } else { Status::Judged };
     let stored = json!({"submitted_at": ledger::now_ts(), "verdicts": verdicts, "issues": proposals});
     if !ledger::save_verdicts(&app.db, &sub.kind, version, &stored, next, cas).await.map_err(up)? {
-        // 說明放 `message`：extra 的 `reason` 會蓋掉機器 key（#228，同 #219）。
         return Err(LcError::conflict("not_awaiting_verdict", json!({"message": "狀態在驗證期間變了"})));
     }
     let cfg = app.cfg.get().await.release_triage;
@@ -246,10 +243,6 @@ struct PublishIn {
 async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>) -> Result<Json<Value>, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let cfg = app.cfg.get().await.release_triage;
-    // 篩選條件跟 `post_dispatched`／`get_ledger` 對齊（#458）：`ledger::list` 是完全相等比對，
-    // 不驗、不正規化的話 `--kind codx`（打錯）或 `--version v0.156.0`（帶 v）都只會靜靜回
-    // 「沒事要做」，跟「這一版真的沒東西要開」在輸出上分不出來——而乾跑的數字正是打開
-    // `publish` 之前的依據。
     if let Some(kind) = b.kind.as_deref() {
         if !crate::release_triage::rules::supported(kind) {
             return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex｜agy｜grok）")));
@@ -447,7 +440,6 @@ mod tests {
 
         let judged: Vec<&crate::release_triage::Entry> = entries.iter().filter(|e| e.bucket != Bucket::Dropped).collect();
         let mk = |verdict| judged.iter().map(|e| EntryVerdict { entry_id: e.id.clone(), verdict, reason: "r".into(), module: "m".into() }).collect::<Vec<_>>();
-        // 缺一條 → 400，狀態不動。
         let mut partial = mk(Verdict::None);
         partial.pop();
         let bad = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: partial, issues: vec![] })).await;
@@ -469,7 +461,6 @@ mod tests {
         assert_eq!(ok.0["status"], "judged");
         assert_eq!(ok.0["publish_enabled"], false, "預設只寫帳本");
         assert!(ok.0["publish"].is_null());
-        // 已 judged：同一版不接第二份。
         let again = post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await;
         assert!(matches!(again, Err(LcError::Conflict(_))));
 
@@ -477,7 +468,6 @@ mod tests {
         assert_eq!(got.0["rows"][0]["status"], "judged");
         assert_eq!(got.0["rows"][0]["verdicts"]["issues"][0]["triage"], "guard");
         assert_eq!(got.0["rows"][0]["entries"].as_array().unwrap().len(), entries.len());
-        // publish 重試端點在 publish=false 時什麼都不做。
         let p = post_publish(State(app.clone()), None).await.unwrap();
         assert_eq!(p.0["results"][0]["result"]["outcome"], "disabled");
     }
@@ -512,14 +502,11 @@ mod tests {
         let pub_in = |kind: Option<&str>, version: Option<&str>, dry_run: bool| {
             Json(PublishIn { kind: kind.map(str::to_string), version: version.map(str::to_string), dry_run })
         };
-        // 帶 v 的版本要對到同一列（以前回 results: []）。
         let hit = post_publish(State(app.clone()), Some(pub_in(None, Some("v2.1.277"), false))).await.unwrap();
         assert_eq!(hit.0["results"].as_array().unwrap().len(), 1, "v2.1.277 要對到 2.1.277：{}", hit.0);
         assert_eq!(hit.0["results"][0]["version"], "2.1.277");
-        // 乾跑那條路同樣要正規化，否則打開 publish 前看到的 would_create 會是假的 0。
         let dry = post_publish(State(app.clone()), Some(pub_in(None, Some("v2.1.277"), true))).await.unwrap();
         assert_eq!(dry.0["versions"].as_array().unwrap().len(), 1, "{}", dry.0);
-        // 認不出的版本與不支援的 kind 都是 400，不再靜靜回空。
         for bad in [pub_in(None, Some("不是版本"), false), pub_in(Some("codx"), None, false), pub_in(Some("codx"), None, true)] {
             assert!(matches!(post_publish(State(app.clone()), Some(bad)).await, Err(LcError::Bad(_))));
         }
@@ -549,12 +536,10 @@ mod tests {
             duplicate_of: dup,
         };
         let submit = |dup| post_verdicts(State(app.clone()), Extension(RequestPrincipal::User), Json(Submission { dispatch_gen: None, kind: "claude".into(), version: "2.1.277".into(), verdicts: vs.clone(), issues: vec![proposal(dup)] }));
-        // 帳本裡沒有 #9999：退回，狀態不動。
         let err = submit(Some(9999)).await.expect_err("不認得的 issue 編號不能當 duplicate_of");
         let LcError::BadValue(body) = err else { panic!("要是 400：{err:?}") };
         assert!(body["problems"].to_string().contains("9999"), "{body}");
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
-        // 帳本裡別的版本開過的 #123 是合法的重複對象。
         let mut other = entries.clone();
         other.truncate(1);
         ledger::insert_version(&app.db, "claude", "2.1.276", &other).await.unwrap();
@@ -600,7 +585,6 @@ mod tests {
             .filter(|e| e.bucket != Bucket::Dropped)
             .map(|e| EntryVerdict { entry_id: e.id.clone(), verdict: Verdict::None, reason: "r".into(), module: "m".into() })
             .collect();
-        // 讀的時候還是 pending、寫的時候一列都沒更新到＝驗證期間狀態變了。
         sqlx::query("CREATE TRIGGER hold_release_triage BEFORE UPDATE ON release_triage BEGIN SELECT RAISE(IGNORE); END")
             .execute(&app.db)
             .await
@@ -640,7 +624,6 @@ mod tests {
         let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
         assert_eq!((row.assigned_bot_id.as_deref(), row.dispatch_gen), (Some(worker.id.as_str()), 1));
 
-        // 不相干的 bot：帶不帶代數都 403（順序是先看派給誰），列不動。
         for gen in [None, Some(1)] {
             let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(stranger.id.clone())), Json(submission(gen, "2.1.277", &entries)))
                 .await
@@ -649,20 +632,17 @@ mod tests {
         }
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
 
-        // 派給的 bot 自己不帶代數：403 要它帶。
         let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(worker.id.clone())), Json(submission(None, "2.1.277", &entries)))
             .await
             .expect_err("綁定的交辦要帶代數");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
 
-        // 代數對不上：409 stale_assignment，不是 403（派給的人沒錯，只是這份交辦過期了）。
         let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(child.id.clone())), Json(submission(Some(0), "2.1.277", &entries)))
             .await
             .expect_err("過期的代數不能交");
         let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
         assert_eq!(body["reason"].as_str(), Some("stale_assignment"), "{body}");
 
-        // 派給的 bot 的 child 用現在這一代交：收。
         let ok = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(child.id.clone())), Json(submission(Some(1), "2.1.277", &entries))).await.unwrap();
         assert_eq!(ok.0["status"], "empty");
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Empty);
@@ -680,20 +660,17 @@ mod tests {
         let next = crate::testing::claude_bot(&app, &env.project_id, "rt-second").await;
         let dispatch = |bot: &str| DispatchedIn { kind: "claude".into(), versions: vec!["2.1.277".into()], bot_id: bot.to_string() };
         let _ = post_dispatched(State(app.clone()), Json(dispatch(&worker.id))).await.unwrap();
-        // 超時退回 pending（真的 requeue 要等六小時，這裡直接改狀態）再派給另一顆。
         sqlx::query("UPDATE release_triage SET status = 'pending' WHERE kind = 'claude' AND version = '2.1.277'").execute(&app.db).await.unwrap();
         let _ = post_dispatched(State(app.clone()), Json(dispatch(&next.id))).await.unwrap();
         let row = ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap();
         assert_eq!((row.assigned_bot_id.as_deref(), row.dispatch_gen), (Some(next.id.as_str()), 2));
 
-        // 第一顆的 bot 已經不是收件方：403（不是 409，它從來沒有這一代的權利）。
         let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(worker.id.clone())), Json(submission(Some(1), "2.1.277", &entries)))
             .await
             .expect_err("舊的收件方不能交");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Dispatched);
 
-        // 同一顆 bot 再被派一次（代數 3）：第一次的代數 2 過期，要 409；用現在的代數就收。
         sqlx::query("UPDATE release_triage SET status = 'pending' WHERE kind = 'claude' AND version = '2.1.277'").execute(&app.db).await.unwrap();
         let _ = post_dispatched(State(app.clone()), Json(dispatch(&next.id))).await.unwrap();
         let err = post_verdicts(State(app.clone()), Extension(RequestPrincipal::Bot(next.id.clone())), Json(submission(Some(2), "2.1.277", &entries)))
@@ -749,11 +726,9 @@ mod tests {
 
         let got = get_ledger(State(app.clone()), Extension(as_role()), ledger_query()).await.unwrap();
         assert_eq!(got.0["rows"].as_array().unwrap().len(), 2, "角色 bot 看全域：{}", got.0);
-        // 沒派給它、還是 pending 的版：人工補交照收（不綁、不用代數）。
         let ok = post_verdicts(State(app.clone()), Extension(as_role()), Json(submission(None, "2.1.278", &entries_of("2.1.278")))).await.unwrap();
         assert_eq!(ok.0["status"], "empty");
 
-        // 撤掉角色（角色表的 bot 清掉）：同一顆 bot 現在是一般 Bot。
         sqlx::query("UPDATE supervisor_roles SET bot_id = NULL WHERE role = ?").bind(crate::supervisor::roles::Role::Responder.as_str()).execute(&app.db).await.unwrap();
         let got = get_ledger(State(app.clone()), Extension(as_role()), ledger_query()).await.unwrap();
         assert_eq!(got.0["rows"], json!([]), "撤掉角色後看不到派給別人的列");

@@ -69,16 +69,11 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
     let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
     let rows: Vec<String> = tail.iter().map(|l| norm(l)).collect();
     let has = |f: &dyn Fn(&str) -> bool| rows.iter().any(|r| f(r));
-    // 整行就是標題（對話框的標題自己一行，前面最多一個圖示）；回覆裡的引文前面是項目符號、引號或別的字，不算。
-    // 回傳標題所在的列，用來判斷輸入列是在框上面還是下面。
     let title = |t: &str| {
         rows.iter().position(|r| {
             r == t || r.strip_suffix(t).is_some_and(|pre| pre.chars().all(|c| !c.is_alphanumeric() && !"●⏺⎿•>*-\"'`".contains(c)))
         })
     };
-    // 1.5.9 的首次精靈（色彩預覽頁、Terms 頁）比 `TAIL_LINES` 高，標題被擠出視窗；頁尾操作列是結構性的指紋：
-    // 色彩頁 `[Next]`＋`↑/↓ Navigate · enter Confirm`、Terms 頁 `[Done]`＋`↑/↓ Navigate · enter Toggle`，都在畫面最底下幾列。
-    // 回覆的引文不會剛好在最底下又沒有輸入列。
     let footer = |text: &str, button: &dyn Fn(&str) -> bool| {
         let n = rows.len();
         let last = &rows[n.saturating_sub(5)..];
@@ -113,7 +108,6 @@ pub fn blocking_dialog(screen: &str) -> Option<AgyDialog> {
         .find_map(|t| title(t))?;
         (i, AgyDialog::Permission)
     };
-    // 輸入列在標題下面＝框已經關了（回覆抄了框的字，畫面上只剩輸入列）。標題上面的單獨 `>` 是回覆裡的引文，框照樣要認到。
     if tail[at + 1..].iter().any(|l| is_composer_row(l)) {
         return None;
     }
@@ -404,7 +398,6 @@ Antigravity CLI can make mistakes and is vulnerable to prompt injection and supp
     fn the_159_first_run_wizard_pages_are_blocked_not_idle() {
         assert_eq!(blocking_dialog(REAL_COLOR_WIZARD_159), Some(AgyDialog::ColorScheme));
         assert_eq!(blocking_dialog(REAL_TERMS_159), Some(AgyDialog::Terms));
-        // 輸入列出現（精靈已過）就不是對話框；回覆裡引文也不誤判。
         assert_eq!(blocking_dialog(&format!("{REAL_COLOR_WIZARD_159}\n>\n")), None);
         assert_eq!(blocking_dialog(REAL_IDLE), None);
         assert_eq!(blocking_dialog("● 步驟說明：按 [Next] 之後看到 ↑/↓ Navigate · enter Confirm\n\n>\n? for shortcuts\n"), None);

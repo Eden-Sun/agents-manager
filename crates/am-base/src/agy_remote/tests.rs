@@ -9,8 +9,6 @@ use std::process::{Command, Stdio};
 
 const ROOT: &str = crate::startup::REMOTE_ROOT;
 
-// ── dispatcher：真的用 /bin/sh 跑（假 HOME、假 hook.sh／真 hook.sh）─────────────────────────────────
-
 struct Sandbox {
     home: PathBuf,
     bot: String,
@@ -124,7 +122,6 @@ fn macos_local_a_stop_is_spooled_with_its_event_name_and_the_reply_read_from_the
     let p = &e["payload"];
     assert_eq!(p["hookEventName"], "Stop");
     assert_eq!(p["conversationId"], "c-1", "原本的欄位不動");
-    // 與本機 hook 子行程（`hook_cmd::enrich_agy_payload`）同一份語意：兩邊吃同一份 transcript，答案要一樣。
     let tail = transcript();
     let ex = cfg::last_exchange(&tail);
     assert_eq!(p["lastAssistantMessage"].as_str(), ex.assistant.as_deref());
@@ -145,7 +142,6 @@ fn macos_local_other_events_only_get_their_event_name_and_the_state_event_prints
     let (stdout, ok) = sb.run_in_pane("PreInvocation", r#"{"conversationId":"c-9","transcriptPath":"/nonexistent/t.jsonl"}"#, SYS_PATH);
     assert!(ok);
     assert_eq!(stdout, "{}\n");
-    // statusLine：stdout 會被當成狀態列文字，所以什麼都不印。
     let (stdout, ok) = sb.run_in_pane("state", r#"{"agent_state":"idle","conversation_id":"c-9","transcript_path":"/x/t.jsonl"}"#, SYS_PATH);
     assert!(ok);
     assert_eq!(stdout, "", "statusLine 不印東西");
@@ -161,27 +157,22 @@ fn macos_local_other_events_only_get_their_event_name_and_the_state_event_prints
 fn macos_local_outside_a_daemon_pane_or_without_a_hook_sh_it_does_nothing_and_still_answers_empty_json() {
     let sb = Sandbox::new();
     sb.fake_hook();
-    // 使用者自己開的 agy：沒有 AM_BOT_ID／AM_HOOK_TOKEN。
     let (stdout, ok) = sb.run("Stop", "{}", &[], SYS_PATH);
     assert!(ok);
     assert_eq!(stdout, "{}\n");
     assert!(!sb.home.join("argv").exists(), "沒有 pane env 就不轉給 hook.sh");
-    // 隔離實例的 pane 不歸正式實例的 dispatcher。
     let (stdout, ok) = sb.run("Stop", "{}", &[("AM_BOT_ID", "b-test"), ("AM_HOOK_TOKEN", "t"), ("AM_INSTANCE", "other")], SYS_PATH);
     assert!(ok && stdout == "{}\n");
     assert!(!sb.home.join("argv").exists());
-    // 這顆 bot 的 hook.sh 還沒裝：吞掉、不報錯。
     std::fs::remove_file(sb.bot_dir().join("hook.sh")).unwrap();
     let (stdout, ok) = sb.run_in_pane("Stop", "{}", SYS_PATH);
     assert!(ok && stdout == "{}\n");
-    // 隔離實例的 dispatcher 只收自己實例的 pane。
     let iso = dispatch_sh("x/instances/iso", Some("iso"));
     assert!(iso.contains("AM_INSTANCE") && iso.contains("'iso'") && iso.contains("$HOME/x/instances/iso/bots/$AM_BOT_ID/hook.sh"), "{iso}");
 }
 
 #[test]
 fn macos_local_without_python3_the_dispatcher_still_adds_the_event_name() {
-    // PATH 只放必要的系統指令，刻意沒有 python3。
     let bin = tt::scratch_dir("am-agy-nopy-bin");
     for cmd in ["head", "tr", "cat", "sh", "printf"] {
         for dir in ["/usr/bin", "/bin"] {
@@ -200,12 +191,10 @@ fn macos_local_without_python3_the_dispatcher_still_adds_the_event_name() {
     let got: Value = serde_json::from_str(&std::fs::read_to_string(sb.home.join("stdin")).unwrap()).expect("合法 JSON");
     assert_eq!((got["hookEventName"].as_str(), got["conversationId"].as_str()), (Some("SessionStart"), Some("c-1")));
     assert_eq!(std::fs::read_to_string(sb.home.join("argv")).unwrap().trim(), "agy b-test -", "參數＝provider、bot、token 佔位");
-    // 空物件。
     let (_, ok) = sb.run_in_pane("Stop", "{}", &path);
     assert!(ok);
     let got: Value = serde_json::from_str(&std::fs::read_to_string(sb.home.join("stdin")).unwrap()).unwrap();
     assert_eq!(got, json!({"hookEventName": "Stop"}));
-    // 事件名只留英文字母：不讓 hooks.json 的參數變成注入點。
     let (_, ok) = sb.run_in_pane("Stop\"; id #", "{}", &path);
     assert!(ok);
     let got: Value = serde_json::from_str(&std::fs::read_to_string(sb.home.join("stdin")).unwrap()).unwrap();
@@ -219,8 +208,6 @@ fn the_dispatcher_text_has_no_single_quote_inside_its_python_and_marks_itself_ou
     assert!(s.starts_with("#!/bin/sh\n") && s.contains("python3 -c '"), "{s}");
     assert!(cfg::DISPATCH_SH == "agy-hook.sh", "statusLine 認我們的指令靠檔名");
 }
-
-// ── 安裝（ssh 換成「就地用 /bin/sh 跑」，HOME 指到假家目錄）────────────────────────────────────────
 
 async fn remote_conn(env: &tt::Env, home: &Path) -> (std::sync::Arc<HostConn>, String) {
     let host = format!("agy-rem-{}", crate::db::ulid().to_ascii_lowercase());
@@ -281,7 +268,6 @@ async fn a_remote_install_writes_the_dispatcher_and_merges_only_our_keys_into_th
 #[tokio::test]
 async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_and_never_overwrites_unreadable_json() {
     let env = tt::env().await;
-    // 全新的家目錄：兩個檔、整個 ~/.gemini 都要建出來（0600）。
     let home = tt::scratch_dir("am-agy-remote-fresh");
     let (conn, _) = remote_conn(&env, &home).await;
     assert!(install_remote(&conn, None).await.unwrap());
@@ -289,7 +275,6 @@ async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_an
     assert_eq!(std::fs::metadata(&hooks).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(read_json(&hooks)["agents-manager"]["Stop"].is_array());
 
-    // 使用者自己設了 statusLine：不碰（hook 照裝）。
     let home = tt::scratch_dir("am-agy-remote-userstatus");
     let settings = home.join(".gemini/antigravity-cli/settings.json");
     std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
@@ -300,7 +285,6 @@ async fn a_remote_install_creates_missing_files_keeps_a_users_own_status_line_an
     assert_eq!(read_json(&settings), mine, "使用者的 statusLine 一個字不改");
     assert!(home.join(".gemini/config/hooks.json").is_file());
 
-    // 讀不懂的 hooks.json：回錯、檔案原樣（agy 自己也是這樣）。
     let home = tt::scratch_dir("am-agy-remote-badjson");
     let hooks = home.join(".gemini/config/hooks.json");
     std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
@@ -338,7 +322,6 @@ async fn a_remote_agy_bot_start_installs_the_hooks_and_no_longer_bails() {
     project.host = host;
     let args = crate::lifecycle::injected_args(&env.app, &bot, &project, &json!({})).await.expect("遠端 agy 不再被擋");
     assert_eq!(args, vec!["--dangerously-skip-permissions"], "agy 沒有 hook 旗標，只有權限旗標");
-    // hook.sh（事件的去處）與 dispatcher、兩個設定檔都在那台的家目錄。
     assert!(home.join(ROOT).join("bots").join(&bot.id).join("hook.sh").is_file());
     assert!(home.join(ROOT).join(cfg::DISPATCH_SH).is_file());
     assert!(read_json(&home.join(".gemini/config/hooks.json"))["agents-manager"]["Stop"].is_array());
@@ -370,10 +353,8 @@ fn starting_on_a_host_without_agy_points_at_the_install_prompt() {
     let msg = crate::kind_probe::verdict("mac_builder", "agy", Some(String::new())).unwrap_err();
     assert!(msg.contains("主機 mac_builder") && msg.contains("尚未安裝 agy") && msg.contains("安裝 agy") && msg.contains("sha512"), "{msg}");
     assert!(!msg.contains("remote_path"), "agy 不是靠 PATH 補丁解的");
-    // 其他 kind 的訊息不變；查不了＝放行。
     assert!(crate::kind_probe::verdict("mac_builder", "codex", Some(String::new())).unwrap_err().contains("請先在該主機安裝 codex"));
     assert!(crate::kind_probe::verdict("mac_builder", "agy", None).is_ok());
     assert!(crate::kind_probe::verdict("mac_builder", "agy", Some("/Users/me/.local/bin/agy".into())).is_ok());
-    // 本機。
     assert!(crate::kind_probe::verdict(crate::config::LOCAL_HOST, "agy", Some(String::new())).unwrap_err().starts_with("本機尚未安裝 agy"));
 }

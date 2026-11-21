@@ -40,7 +40,6 @@ pub async fn get_openai_api_balance(app: &Arc<App>) -> Result<Value, LcError> {
     let anchor_at_str = cfg.openai_api.balance_anchor_at.clone();
     let as_of = am_base::db::iso_at(Utc::now());
 
-    // 未啟用：網頁整格不畫，不查帳。
     if !enabled {
         return Ok(json!({ "enabled": false, "configured": false, "as_of": as_of }));
     }
@@ -114,7 +113,6 @@ pub async fn query_openai_attempts_since(app: &Arc<App>, since_rfc3339: &str) ->
         .map(|(created_at, microusd, uncertain)| AttemptSpent { created_at, microusd, uncertain })
         .collect();
 
-    // 同一份 spend.jsonl 裡 provider='openai' 的行（Claude 的餘額只算 anthropic，兩邊互不相扣）。
     if let Ok(since) = crate::claude_api_balance::parse_rfc3339(since_rfc3339) {
         out.extend(
             crate::claude_api::read_provider_spend_since(&app.data_dir, since, crate::config::API_PROVIDER_OPENAI)

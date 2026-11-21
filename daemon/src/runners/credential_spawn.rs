@@ -20,7 +20,6 @@ fn fail(status: StatusCode, reason: &str, message: &str) -> (StatusCode, Json<Va
 async fn authenticated_bot(app: &impl crate::capabilities::Db, bot_id: &str, token: &str) -> Result<crate::db::Bot, (StatusCode, Json<Value>)> {
     match crate::db::bot(app.db(), bot_id).await {
         Ok(Some(bot)) if bot.deleted_at.is_none() && !token.is_empty() && crate::agent_relay::ct_eq(token, &bot.hook_token) => {
-            // 分享用的受限 bot 不能開子 agent（SPEC「分享 bot」）。
             if crate::db::refuses_bot_principal(app.db(), &bot.id).await {
                 return Err(fail(StatusCode::FORBIDDEN, "restricted_bot", "a restricted share bot cannot spawn panes"));
             }
@@ -34,7 +33,6 @@ async fn authenticated_bot(app: &impl crate::capabilities::Db, bot_id: &str, tok
     }
 }
 
-// Child requests use their own verified identity, never the inherited parent token.
 async fn spawn_actor(app: &Arc<App>, headers: &axum::http::HeaderMap, claimed: &str) -> Result<(crate::db::Bot, bool), (StatusCode, Json<Value>)> {
     let child = headers.contains_key("X-AM-Child-Spawn-Id") || headers.contains_key("X-AM-Child-Token");
     if child {
@@ -249,8 +247,6 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     if reserve(&app, &body.bot_id, &permit_id, permit_ttl(&body.timeout_ms), authority.clone()).is_err() {
         return fail(StatusCode::CONFLICT, "credential_rotation_pending", "credential rotation is checking child panes; spawn refused");
     }
-    // Close the read-before-reserve window: a rotation may have committed between the first token
-    // read and reserve(), after which its fence is already down and only this second read notices.
     if let Err(response) = spawn_actor(&app, &headers, &body.bot_id).await {
         release(&app, &body.bot_id, &permit_id);
         return response;
@@ -292,8 +288,6 @@ pub async fn begin(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
             release(&app, &body.bot_id, &permit_id);
             return fail(StatusCode::BAD_REQUEST, "invalid_child_name", "child name contains invalid characters");
         }
-        // 預先信任：與 lifecycle 一樣，四種 CLI 的 child 啟動前把 pane 目錄寫進它的信任紀錄。
-        // 寫入失敗只 warn，不擋 spawn（與 lifecycle 的 best-effort 相同）。
         if matches!(body.kind.as_str(), "agy" | "claude" | "codex" | "grok") {
             let pane_info = match observed {
                 Ok(Ok((Some(ref pane), _))) => Some(pane),
@@ -347,8 +341,6 @@ pub async fn claim(State(app): State<Arc<App>>, headers: axum::http::HeaderMap, 
     }
     match crate::spawn_hints::claim_for_run(&app, &bot.id, &body.parent_run_id, pane_id).await {
         Ok(()) => {
-            // 登記常比 `pane.agent_detected` 觸發的那輪對帳晚（grok 起得慢，2026-10-19 #1867）；那輪沒登記就不認領，
-            // 之後沒有別的事件叫對帳，子 agent 要等到 pane 關掉才被看見。登記一記下就排一輪延後對帳（同 hook 的 SpawnClaim）。
             if let Ok(host) = crate::db::bot_host(&app.db, &bot.id).await {
                 crate::runners::reconcile::schedule_deferred_pass(&app, &host);
             }
@@ -700,7 +692,6 @@ mod tests {
             }
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         });
-        // 這台有一個 agy 身份 ag1（HOME 在影子家目錄）與一個 claude 身份 cc9（kind 不符，不能拿來當 agy 的）。
         let h = host.to_string();
         e.app
             .cfg
@@ -845,11 +836,6 @@ mod tests {
         }
     }
 
-    // ── 四種 CLI 的 child 預先信任（沿用 agy fixture；只用合成設定，不讀真憑證）──────────────────────────
-    //
-    // 信任紀錄檔（`trust::store_path`）：claude `CLAUDE_CONFIG_DIR/.claude.json`（未設＝`$HOME/.claude.json`）、
-    // codex `CODEX_HOME/config.toml`（未設＝`$HOME/.codex`）、grok `GROK_HOME/trusted_folders.toml`（未設＝`$HOME/.grok`）。
-
     fn kind_env_key(kind: &str) -> &'static str {
         match kind {
             "claude" => "CLAUDE_CONFIG_DIR",
@@ -982,7 +968,6 @@ mod tests {
                 let cwd = cwd_dir.to_string_lossy().into_owned();
                 let ident_dir = e.dir.join(format!("{kind}-{bad}-k1"));
                 let key = kind_env_key(kind);
-                // ag1 是 agy 的身份（kind 不符）；nope 根本不存在。兩者都有目錄，確認不能寫進去。
                 let kind_ident = crate::config::IdentityCfg { name: "k1".into(), kind: kind.into(), host: Some(crate::config::LOCAL_HOST.into()), env: [(key.to_string(), ident_dir.to_string_lossy().into_owned())].into(), args: vec![] };
                 let agy_ident = crate::config::IdentityCfg { name: "ag1".into(), kind: "agy".into(), host: Some(crate::config::LOCAL_HOST.into()), env: [("HOME".to_string(), ident_dir.to_string_lossy().into_owned())].into(), args: vec![] };
                 let (status, body) = local_kind_spawn(&e, kind, bad, &cwd, vec![kind_ident, agy_ident]).await;
@@ -1029,7 +1014,6 @@ mod tests {
         let cwd_dir = e.dir.join("claude-blocked-worktree");
         std::fs::create_dir_all(&cwd_dir).unwrap();
         let cwd = cwd_dir.to_string_lossy().into_owned();
-        // 身份的 CLAUDE_CONFIG_DIR 是一個既有的檔案：寫 `.claude.json` 時 mkdir／開檔必定失敗。
         let blocker = e.dir.join("claude-blocker-file");
         std::fs::write(&blocker, "not a dir").unwrap();
         let ident = crate::config::IdentityCfg { name: "k1".into(), kind: "claude".into(), host: Some(crate::config::LOCAL_HOST.into()), env: [("CLAUDE_CONFIG_DIR".to_string(), blocker.to_string_lossy().into_owned())].into(), args: vec![] };

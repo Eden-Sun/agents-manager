@@ -189,7 +189,6 @@ pub async fn settle_once(app: &impl RunStateServices, run_id: &str, how: &Settle
                 app.emit_bot_status(&run.bot_id).await;
             }
         }
-        // CAS 輸了（已經不是 `from`、或 bot 有了新的 active run）也算收斂：這一筆已經沒有要改的標籤。
         Settle::Relabel { from, to } => {
             let lock = app.bot_lock(&run.bot_id).await;
             let _g = lock.lock().await;

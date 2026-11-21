@@ -180,7 +180,6 @@ async fn measure_at<S: SiteEnv>(app: &S, bot_id: &str, place: Place, by_sweep: b
     if let Place::Local { workspace, .. } = &place {
         let (data_dir, id, ws) = (app.data_dir().to_path_buf(), bot_id.to_string(), PathBuf::from(workspace));
         let measured = tokio::task::spawn_blocking(move || measure_blocking(&data_dir, &ws, &id)).await;
-        // 量不到不記值：沒有新的數字就留著舊的（同位置），不拿 0 去覆蓋。
         return match measured {
             Ok(Ok(m)) => Ok(Some((m, record(bot_id, place, m, by_sweep)))),
             _ => {
@@ -240,10 +239,9 @@ pub async fn sweep<S: SiteEnv>(app: &S) -> Vec<(String, Measured)> {
         let local = host == crate::config::LOCAL_HOST;
         let restricted = profile == "restricted";
         if local && !restricted {
-            continue; // 本機的信任分享：保留政策由 outbox-gc.sh 做，這裡不量
+            continue;
         }
         if !local {
-            // 斷線的主機整台跳過：不通知、不清快取（量測值照留，`is_full` 自己會因為太舊而 fail closed）。
             let connected = match app.host_conn(&host).await {
                 Some(c) => c.is_connected(),
                 None => false,
@@ -290,7 +288,6 @@ mod tests {
         std::fs::write(ws.join("notes.md"), vec![0u8; 1000]).unwrap();
         std::fs::write(ws.join("inbox/up.bin"), vec![0u8; 2000]).unwrap();
         std::fs::write(ws.join("a/b/deep.txt"), vec![0u8; 300]).unwrap();
-        // 指到工作目錄外的大檔與目錄：既不跟、也不算。
         let outside = dir("outside");
         std::fs::write(outside.join("huge.bin"), vec![0u8; 50_000]).unwrap();
         symlink(outside.join("huge.bin"), ws.join("link-file")).unwrap();
@@ -329,7 +326,7 @@ mod tests {
         }
         std::fs::create_dir_all(&deep).unwrap();
         let big = std::fs::File::create(deep.join("big.bin")).unwrap();
-        big.set_len(1200 * 1024 * 1024).unwrap(); // 稀疏檔，不真的佔磁碟
+        big.set_len(1200 * 1024 * 1024).unwrap();
         let m = measure_blocking(&data, &ws, "BOT4").unwrap();
         assert!(m.truncated, "{m:?}");
         assert!(m.total() < SANDBOX_MAX_BYTES, "看不到第 33 層的大檔：下限 {m:?}");

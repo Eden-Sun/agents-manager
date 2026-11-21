@@ -87,7 +87,6 @@ pub fn parse_status(out: &str) -> Vec<Row> {
         }
         let rest = rest.trim();
         let path = rest.rsplit_once('(').and_then(|(_, p)| p.strip_suffix(')')).filter(|p| p.contains('/')).map(str::to_string);
-        // 版本在狀態字後面的第一組括號；路徑那組不含 `v<數字>`，所以先砍掉路徑再讀。
         let without_path = match &path {
             Some(p) => rest.strip_suffix(&format!("({p})")).unwrap_or(rest).trim_end(),
             None => rest,
@@ -263,7 +262,6 @@ pub async fn install(
     let state = watch.items(host).into_iter().find(|r| r.name == name).map(|r| r.state);
     match state {
         Some("outdated") => {}
-        // 只有 grok／antigravity-cli、而且那台那家已登入（跟自動安裝同一個判斷）才讓使用者手動裝；其餘照舊 409。
         Some("not_installed") => match AUTO_INSTALL.iter().find(|(n, _)| *n == name) {
             Some((_, tool)) if logged_in.contains(&(host.to_string(), tool.to_string())) => {}
             Some((_, tool)) => {
@@ -296,9 +294,7 @@ async fn run_install(watch: &Watch, ops: &dyn Ops, host: &str, name: &str) -> Re
     let outcome = ops.install(host, name).await;
     watch.installing.lock().unwrap().remove(host);
     let output = outcome.map_err(|e| LcError::Upstream(format!("在 {host} 更新 {name} integration 失敗：{}", tail(&e))))?;
-    // 裝完再讀一次：回給畫面的是實際狀態，不是「指令沒報錯」。
     watch.refresh_host(ops, host).await;
-    // 重讀失敗（`items` 還是裝之前的舊資料）時不拿舊的當結果：state／integration 是 null，原因放 `reread_error`。
     if let Some(e) = watch.read_error(host) {
         return Ok(json!({"host": host, "name": name, "state": null, "integration": null,
                          "reread_error": e, "output": tail(&output)}));
@@ -410,7 +406,6 @@ impl Ops for Real {
 
     fn install<'a>(&'a self, host: &'a str, name: &'a str) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            // `name` 呼叫端已驗過在 TRACKED，這裡再擋一次，不讓任何字串進到 shell。
             if !TRACKED.contains(&name) {
                 return Err(format!("不支援的 integration：{name}"));
             }
@@ -425,7 +420,6 @@ fn watch() -> &'static Watch {
 }
 
 pub fn spawn(app: Arc<App>) {
-    // 開機先等工具探測（第一輪延後 60 秒），同 upstream_update。
     crate::background_loop::spawn_periodic(&app, "herdr integration watcher", SWEEP, Duration::from_secs(60), |app| async move {
         let hosts: Vec<(String, bool)> =
             app.hosts.list().await.iter().map(|c| (c.name.clone(), c.is_local() || c.is_connected())).collect();
@@ -578,7 +572,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         assert_eq!(by("mac_builder")["items"].as_array().unwrap().len(), 0);
         assert_eq!(by("gone")["error"], "ssh 逾時", "讀取失敗是錯誤，不是「沒有 integration」");
 
-        // 第二輪：local 讀失敗，上一次的 items 還在、只多一個 error；gone 已不在主機清單就整筆丟掉。
         fake.status.lock().unwrap().clear();
         sweep(&watch, &fake, &[("local".into(), true), ("mac_builder".into(), false)]).await;
         let snap = watch.snapshot();
@@ -611,7 +604,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         assert_eq!(r["state"], "current", "回的是裝完重讀的實際狀態");
         assert_eq!(*fake.installs.lock().unwrap(), vec![("local".to_string(), "claude".to_string())]);
         assert!(watch.installing.lock().unwrap().is_empty(), "做完要放掉這台的佔位");
-        // 快照也跟著更新，codex 沒被動到。
         let items = watch.items("local");
         assert_eq!(items.iter().find(|r| r.name == "claude").unwrap().state, "current");
         assert_eq!(items.iter().find(|r| r.name == "codex").unwrap().state, "outdated");
@@ -621,10 +613,8 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
     async fn install_refuses_untracked_not_installed_current_and_never_seen_without_running_anything() {
         let watch = Watch::default();
         let fake = Fake::new("local", &format!("{SAMPLE}claude: current (v11) (/x/y.sh)\n"));
-        // 沒巡過：不知道狀態就不裝。
         assert!(matches!(install(&watch, &fake, "local", "codex", &who(&[])).await, Err(LcError::Conflict(v)) if v["reason"] == "state_unknown"));
         sweep(&watch, &fake, &[("local".into(), true)]).await;
-        // 不在名單：400，包含會被當成 shell 片段的字串。
         for bad in ["pi", "claude; rm -rf ~", "", "../x"] {
             assert!(matches!(install(&watch, &fake, "local", bad, &who(&[])).await, Err(LcError::Bad(_))), "{bad:?}");
         }
@@ -663,7 +653,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         let hosts = [("local".to_string(), true)];
         sweep(&watch, &fake, &hosts).await;
 
-        // grok 已登入、agy 沒登入；claude／codex（outdated）就算登入也不自動升。
         let out = auto_install(&watch, &fake, &hosts, &who(&[("local", "grok"), ("local", "claude"), ("local", "codex")])).await;
         assert_eq!(*fake.installs.lock().unwrap(), vec![("local".to_string(), "grok".to_string())]);
         assert_eq!(out.len(), 1);
@@ -671,7 +660,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         assert!(watch.installing.lock().unwrap().is_empty());
         assert_eq!(watch.items("local").iter().find(|r| r.name == "grok").unwrap().state, "current", "裝完立刻重讀");
 
-        // 設定頁快照帶出自動裝的結果；沒試過的列沒有這個欄位。
         let snap = watch.snapshot();
         let items = snap[0]["items"].as_array().unwrap();
         let by = |n: &str| items.iter().find(|i| i["name"] == n).unwrap();
@@ -685,11 +673,8 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         let fake = Fake::new("local", SAMPLE);
         let hosts = [("local".to_string(), true), ("mac_builder".to_string(), false)];
         sweep(&watch, &fake, &hosts).await;
-        // 沒登入（或探測問不到）。
         assert!(auto_install(&watch, &fake, &hosts, &who(&[])).await.is_empty());
-        // 主機沒連線：就算探測快取留著登入也不裝。
         assert!(auto_install(&watch, &fake, &hosts, &who(&[("mac_builder", "grok")])).await.is_empty());
-        // 這一輪讀狀態失敗（items 是上次的）：不拿舊資料決定。
         fake.status.lock().unwrap().clear();
         sweep(&watch, &fake, &[("local".to_string(), true)]).await;
         assert!(auto_install(&watch, &fake, &[("local".to_string(), true)], &who(&[("local", "grok")])).await.is_empty());
@@ -710,11 +695,9 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         assert_eq!(first.len(), 2, "grok 與 agy 各試一次");
         assert!(first.iter().all(|o| !o.ok && o.error.as_deref().is_some_and(|e| e.contains("permission denied"))), "{first:?}");
         assert!(watch.installing.lock().unwrap().is_empty(), "失敗也放掉佔位");
-        // 下一輪、再下一輪：仍是 not_installed 也不再裝。
         sweep(&watch, &fake, &hosts).await;
         assert!(auto_install(&watch, &fake, &hosts, &logged).await.is_empty());
         assert_eq!(fake.installs.lock().unwrap().len(), 2);
-        // 失敗記在快照裡給設定頁看。
         let snap = watch.snapshot();
         let grok = snap[0]["items"].as_array().unwrap().iter().find(|i| i["name"] == "grok").unwrap();
         assert_eq!(grok["auto_install"]["ok"], false);
@@ -745,16 +728,13 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
             other => panic!("要 409：{other:?}"),
         };
 
-        // 沒登入：409，原因寫在回應裡，什麼都沒跑。
         let v = conflict(install(&watch, &fake, "local", "grok", &who(&[])).await);
         assert_eq!(v["reason"], "not_installed");
         assert_eq!(v["logged_in"], false);
         assert!(v["message"].as_str().unwrap().contains("沒有登入"), "{v}");
-        // 別台登入不算這台。
         conflict(install(&watch, &fake, "local", "antigravity-cli", &who(&[("mac_builder", "agy")])).await);
         assert!(fake.installs.lock().unwrap().is_empty());
 
-        // 已登入：可以裝，回的是裝完重讀的實際狀態，也沿用同一把互斥。
         watch.installing.lock().unwrap().insert("local".to_string());
         let busy = conflict(install(&watch, &fake, "local", "grok", &who(&[("local", "grok")])).await);
         assert_eq!(busy["reason"], "install_in_progress");
@@ -783,7 +763,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         let fake = Fake::new("local", SAMPLE);
         let hosts = [("local".to_string(), true)];
         sweep(&watch, &fake, &hosts).await;
-        // 裝的當下成功，但接著的重讀失敗（ssh 逾時）：不能把舊的 not_installed 當成裝完的結果。
         fake.status.lock().unwrap().clear();
         let out = auto_install(&watch, &fake, &hosts, &who(&[("local", "grok")])).await;
         assert_eq!(out.len(), 1);
@@ -791,7 +770,6 @@ letta (experimental): not installed (/home/u/.letta/hooks/herdr-agent-session.sh
         let e = out[0].error.as_deref().unwrap();
         assert!(e.contains("重讀狀態失敗") && e.contains("ssh 逾時"), "{e}");
 
-        // 手動路徑一樣：200 但 state／integration 是 null，帶 reread_error。
         let watch = Watch::default();
         let fake = Fake::new("local", SAMPLE);
         sweep(&watch, &fake, &hosts).await;

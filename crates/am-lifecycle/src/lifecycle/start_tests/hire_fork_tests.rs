@@ -61,7 +61,6 @@ async fn the_first_start_forks_the_source_and_later_starts_resume_their_own_sess
     let last = first.last().expect("the first start launches the CLI");
     assert!(last.windows(2).any(|w| w == ["fork", "sid-src"]), "第一次啟動用 fork <來源 session>：{last:?}");
 
-    // 這顆有了自己的 session（啟動後 hook 回報）：之後不再分岔。
     sqlx::query("UPDATE runs SET ended_at = '2026-09-01T00:02:00Z', native_session_id = 'sid-own', state = 'stopped' WHERE bot_id = ?")
         .bind(&fresh.id)
         .execute(e.app.db())

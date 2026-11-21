@@ -41,7 +41,6 @@ pub async fn follow_with_fast(app: &(impl crate::capabilities::Db + crate::capab
     if model.is_none() && effort == EffortFollow::Keep && fast.is_none() {
         return Ok(());
     }
-    // `clear` 只在 Clear 時為 1：CASE 先判，才能把 NULL 寫進去（COALESCE 寫不進 NULL）。
     let r = sqlx::query(
         "UPDATE bots SET model = COALESCE(?, model),
                 effort = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, effort) END,
@@ -64,7 +63,6 @@ pub async fn follow_with_fast(app: &(impl crate::capabilities::Db + crate::capab
     .await?;
     if r.rows_affected() > 0 {
         tracing::info!(bot = bot_id, ?model, ?effort, "child settings follow a switch made in its TUI");
-        // `bot_status` 不帶設定；網頁收到 `bot_changed` 才重抓 bots，不然 runtime 跟設定一樣了還畫著 ⟳。
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
     }
     Ok(())

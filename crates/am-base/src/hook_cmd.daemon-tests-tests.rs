@@ -17,7 +17,6 @@
         assert_eq!(data_dir_from(Some("/tmp/am-iso".into())), PathBuf::from("/tmp/am-iso"));
         assert_eq!(data_dir_from(Some("".into())), data_dir_from(None), "空字串當沒設");
 
-        // argv 贏過 env：daemon 重啟前就開著的 pane 換不掉 env，但 hook.sh 每次啟動都重寫。
         assert_eq!(resolve_data_dir("/tmp/am-iso"), PathBuf::from("/tmp/am-iso"));
         assert_eq!(resolve_data_dir("  "), data_dir_from(std::env::var_os("AM_DATA_DIR")), "沒給才看 env");
         let _ = std::fs::remove_dir_all(&dir);
@@ -50,7 +49,6 @@
 
     #[test]
     fn empty_token_reads_env_or_stays_empty() {
-        // Env-dependent, so only the empty branch is asserted deterministically.
         let from_env = std::env::var("AM_HOOK_TOKEN").unwrap_or_default();
         assert_eq!(hook_token(""), from_env);
     }
@@ -85,7 +83,7 @@
 
     #[test]
     fn truncation_respects_char_boundaries() {
-        let s = "aa\u{4f60}\u{597d}"; // 2 + 3 + 3 bytes
+        let s = "aa\u{4f60}\u{597d}";
         assert_eq!(truncate_utf8(s, 4), "aa");
         assert_eq!(truncate_utf8(s, 5), "aa\u{4f60}");
         assert_eq!(truncate_utf8(s, 99), s);
@@ -112,13 +110,11 @@
         assert_eq!(p["lastUserMessage"], "say OK");
         assert_eq!(p["lastInputTokens"], 11824, "context 大小＝最後一筆回覆讀進去的 token 數");
 
-        // 其他事件只補事件名，不碰 transcript。
         let mut p = serde_json::json!({"conversationId": "c-1", "transcriptPath": t});
         enrich_agy_payload(&mut p, "PreInvocation");
         assert_eq!(p["hookEventName"], "PreInvocation");
         assert!(p.get("lastAssistantMessage").is_none());
 
-        // 讀不到（路徑是占位、不是 .jsonl）：事件照樣送，只是沒有回覆文字。
         let mut p = serde_json::json!({"transcriptPath": "/no/such/transcript_full.jsonl"});
         enrich_agy_payload(&mut p, "Stop");
         assert_eq!(p["hookEventName"], "Stop");
@@ -126,11 +122,9 @@
         let mut p = serde_json::json!({"transcriptPath": "/etc/passwd"});
         enrich_agy_payload(&mut p, "Stop");
         assert!(p.get("lastAssistantMessage").is_none(), "只讀 .jsonl");
-        // 非物件 payload（`{"raw": …}` 以外的怪東西）不會 panic。
         let mut p = serde_json::json!([1, 2]);
         enrich_agy_payload(&mut p, "Stop");
 
-        // issue #1950: agy 1.4.7 hook stdin JSON 帶 lastUserInput（實機 stdin 原文 fixture：有欄位／缺欄位／型別錯）
         let raw_pre_fixture = r#"{"artifactDirectoryPath":"/tmp/d/.gemini/antigravity-cli/brain/c-1","conversationId":"d721abb5-bb6b-48ad-a655-24bc51e375a4","initialNumSteps":1,"invocationNum":0,"lastUserInput":"test_last_user_input_ping","modelName":"gemini-3.8-flash-low","transcriptPath":"/tmp/d/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl","workspacePaths":["/tmp/d"]}"#;
         let mut from_fixture = parse_payload(raw_pre_fixture);
         enrich_agy_payload(&mut from_fixture, "PreInvocation");
@@ -147,7 +141,6 @@
         assert_eq!(wrong_type["hookEventName"], "PreInvocation");
         assert_eq!(wrong_type["lastUserInput"], 12345);
 
-        // issue #2094: agy 1.5.4 hook 輸入 JSON 新增 hookEventName、cwd、toolCall.id，支援 payload 自動推導與可選欄位保留
         let mut from_payload_event = serde_json::json!({
             "hookEventName": "PreInvocation",
             "cwd": "/path/to/workdir",
@@ -158,7 +151,6 @@
         assert_eq!(from_payload_event["cwd"], "/path/to/workdir");
         assert_eq!(from_payload_event["toolCall"]["id"], "call_abc");
 
-        // issue #2099: agy 1.5.6 Stop hook 新增 continuation_active
         let mut stop_with_continuation = serde_json::json!({
             "hookEventName": "Stop",
             "continuation_active": true
@@ -167,7 +159,6 @@
         assert_eq!(stop_with_continuation["hookEventName"], "Stop");
         assert_eq!(stop_with_continuation["continuation_active"], true);
 
-        // issue #2111: agy 1.5.8 BOM 支援
         let bom_payload = "\u{feff}{\"conversationId\":\"c-bom\",\"hookEventName\":\"PreInvocation\"}";
         let parsed_bom = parse_payload(bom_payload);
         assert_eq!(parsed_bom["conversationId"], "c-bom");
@@ -262,7 +253,7 @@
             provider: "agy".into(),
             bot: "b1".into(),
             token: "t".into(),
-            port: 1, // 連不上：若真的去 POST 會留下 spool／log
+            port: 1,
             data_dir: data.to_string_lossy().into_owned(),
             event: "PreToolUse".into(),
             payload_arg: Some(serde_json::json!({"toolCall": {"args": {"CommandLine": command}}}).to_string()),
@@ -290,7 +281,6 @@
     #[test]
     fn macos_local_codex_stop_stdin_over_the_single_argument_limit_is_spooled_intact() {
         let data = fresh_data_dir("codex-stdin");
-        // Reserve a non-listening port: connection is refused without racing another listener.
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let port = socket.local_addr().unwrap().port();
@@ -305,7 +295,6 @@
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &format!("{}::codex_stop_stdin_process_helper", module_path!().split_once("::").unwrap().1), "--nocapture"])
             .env("CODEX_STOP_TEST_DATA", &data).env("CODEX_STOP_TEST_PORT", port.to_string())
-            // Only this fixture child; it must exercise the parent-hook stdin transport.
             .env_remove("AM_CHILD_OF")
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()).spawn().unwrap();

@@ -94,15 +94,12 @@ async fn progress_reports_follow_the_claude_cadence_and_include_tool_argument_st
     assert!(result.is_ok(), "the scripted turn completes: {result:?}");
 
     let reports = reports.lock().unwrap().clone();
-    // 節奏：兩段 1.1 秒後的 chunk 各觸發一次；同一秒內的 chunk（參數第二段、完成）不再報。
     assert_eq!(reports.len(), 2, "one report per elapsed interval, not per chunk: {:?}", reports.iter().map(|(_, p)| p.other_bytes).collect::<Vec<_>>());
     assert!(reports[0].0.duration_since(start) >= Duration::from_secs(1), "the first report waits a full interval");
     let gap = reports[1].0.duration_since(reports[0].0);
     assert!(gap >= Duration::from_secs(1), "consecutive reports are at least one interval apart: {gap:?}");
-    // 第一次報告：工具參數串流中（文字還沒有），也要報。
     assert!(reports[0].1.other_bytes > 0, "tool-argument bytes count as progress");
     assert_eq!(reports[0].1.generated_chars, 0, "no text yet at the first report");
-    // 第二次報告：文字 3000 字，尾端只留 TAIL_CHARS。
     assert_eq!(reports[1].1.generated_chars, 3000);
     assert_eq!(reports[1].1.text_tail.chars().count(), TAIL_CHARS, "tail is capped like Claude's");
 }

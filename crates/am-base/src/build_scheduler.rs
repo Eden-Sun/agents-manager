@@ -29,7 +29,6 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::time::Duration;
 
-
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS build_slots (
@@ -176,22 +175,17 @@ pub async fn acquire(app: &(impl crate::build_scheduler::BuildSlotLock + crate::
         .bind(holder)
         .fetch_optional(app.db())
         .await?;
-    // `holder` comes from the caller, so it cannot establish identity by itself. Otherwise any
-    // authenticated bot can repeat another bot's holder and recover its live lease token, or
-    // overwrite its queued row. UI-token callers are the explicit manual/admin bypass.
     if let (Some(caller_bot_id), Some(row)) = (bot_id, existing.as_ref()) {
         if row.bot_id.as_deref() != Some(caller_bot_id) {
             return Ok(Acquired::HolderOwnedByAnotherBot);
         }
     }
-    // 新的 holder 才算數：已經有的列（重 poll、重問）照舊，不會被自己的上限擋在門外。
     if let (Some(bot), None) = (bot_id, existing.as_ref()) {
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE bot_id = ?").bind(bot).fetch_one(app.db()).await?;
         if rows as usize >= MAX_ROWS_PER_BOT {
             return Ok(Acquired::TooManyForBot);
         }
     }
-    // 已經握著且沒過期：把同一份憑證還回去，重call（例如逾時後重問一次）安全。FIFO 不擋自己已經有的名額。
     if let Some(row) = &existing {
         if row.status == "held" {
             if let Some(exp) = &row.expires_at {
@@ -203,13 +197,9 @@ pub async fn acquire(app: &(impl crate::build_scheduler::BuildSlotLock + crate::
     }
 
     let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE status = 'held'").fetch_one(app.db()).await?;
-    // 排隊起點：已經在等的人保留原本的 `since`（重試不該讓排隊起點歸零），第一次來的人以「現在」當自己的號碼牌。
     let my_since = existing.as_ref().filter(|r| r.status == "waiting").map(|r| r.since.clone()).unwrap_or_else(|| now.clone());
 
     if (held as usize) < max {
-        // 名額空著，但要先看看排在自己前面的人（排除自己那一列）——有更早的號碼牌就不能插隊，
-        // 即使這一刻剛好是自己在問、名額也剛好空著。
-        // 只算最近還在 poll 的等待者（#1445）：停止 poll 的隊首不擋後面的人，它的列留到 `STALE_WAITING` 才收。
         let live_cutoff = cutoff_before(FIFO_LIVE_WAITER);
         let ahead: Option<(String, String)> =
             sqlx::query_as("SELECT since, holder FROM build_slots WHERE status = 'waiting' AND holder != ? AND last_seen > ? ORDER BY since, holder LIMIT 1")
@@ -373,8 +363,6 @@ pub async fn status(app: &(impl crate::build_scheduler::BuildSlotLock + crate::c
 /// `remote_reachable` 是**上一次真的嘗試**的結論（`remote_health`），`null`＝沒開或還沒有人試過——
 /// 「不知道」跟「連不上」不能混成同一個值，否則剛開機就會亮一個假的紅燈。
 fn remote_json(remote: &crate::config::BuildRemoteCfg, data_dir: &std::path::Path) -> Value {
-    // 每台一格（#1956）：`hosts` 照設定順序；頂層欄位維持第一台，舊的讀法不用改。
-    // 上一次嘗試連的不是這台＝對這台還一無所知，不能拿別台的結論來講（remote_health::Health::target，#1373）。
     let hosts: Vec<Value> = if remote.enabled { remote.targets() } else { Vec::new() }
         .iter()
         .map(|h| {
@@ -400,8 +388,6 @@ fn remote_json(remote: &crate::config::BuildRemoteCfg, data_dir: &std::path::Pat
         "hosts": hosts,
     })
 }
-
-// ---------------------------------------------------------------- HTTP API
 
 #[derive(Deserialize)]
 pub struct AcquireIn {
@@ -460,7 +446,6 @@ pub async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilit
         }
         match crate::db::bot(app.db(), id).await.map_err(up)? {
             Some(b) if b.deleted_at.is_none() && crate::agent_relay::ct_eq(token, &b.hook_token) => {
-                // 分享用的受限 bot 的 token 只能打自己的 hook（SPEC「分享 bot」）。
                 if crate::db::refuses_bot_principal(app.db(), id).await {
                     return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "restricted_bot"})));
                 }
@@ -475,8 +460,6 @@ pub async fn authenticate(app: &(impl crate::capabilities::Db + crate::capabilit
     }
     Err(LcError::Forbidden(json!({"error": "unauthorized", "message": "need a matching X-AM-Bot-Token+bot_id, or X-AM-Token"})))
 }
-
-
 
 /// build 名額的序列化鎖。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait BuildSlotLock: Send + Sync {

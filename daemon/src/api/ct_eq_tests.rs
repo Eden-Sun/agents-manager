@@ -23,13 +23,11 @@ async fn post_order_with_primary_writes_positions_and_state_reports_them() {
     let bots = state["projects"][0]["bots"].as_array().unwrap().clone();
     let pos = |id: &str| bots.iter().find(|x| x["id"] == id).unwrap()["primary_position"].as_i64().unwrap();
     assert_eq!((pos(&b), pos(&a)), (1, 2));
-    // 未知 bot → 400，而且什麼都沒寫。
     let err = set_order(State(e.app.clone()), Json(order(&[&a, "ghost"]))).await.unwrap_err();
     assert!(matches!(err, LcError::Bad(_)));
     let state = state_json(&e.app).await.unwrap();
     let bots = state["projects"][0]["bots"].as_array().unwrap().clone();
     assert_eq!(bots.iter().find(|x| x["id"] == a.as_str()).unwrap()["primary_position"], 2);
-    // 三個欄位都沒有仍是 400。
     let none = SetOrder { projects: None, bots: None, primary: None };
     assert!(matches!(set_order(State(e.app.clone()), Json(none)).await.unwrap_err(), LcError::Bad(_)));
 }
@@ -40,7 +38,6 @@ async fn post_order_rolls_back_if_a_named_bot_disappears_during_the_write() {
     let e = crate::testing::env().await;
     let a = crate::testing::claude_bot(&e.app, &e.project_id, "a").await.id;
     let b = crate::testing::claude_bot(&e.app, &e.project_id, "b").await.id;
-    // 模擬 validate 之後、第二筆 UPDATE 之前另一個請求刪掉 b。
     let trigger = format!(
         "CREATE TRIGGER delete_order_bot_after_first_update AFTER UPDATE OF primary_position ON bots WHEN NEW.id = '{a}' BEGIN UPDATE bots SET deleted_at = 'triggered' WHERE id = '{b}'; END"
     );

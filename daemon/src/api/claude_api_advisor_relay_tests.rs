@@ -31,12 +31,10 @@ async fn claude_api_advisor_refuses_attachments_and_non_expect_result() {
     headers.insert("X-AM-Bot-Id", manager.parse().unwrap());
     headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
 
-    // Without expect_result: should reject
     let body: PromptIn = serde_json::from_value(json!({"text":"consult","client_request_id":"c1"})).unwrap();
     let err = prompt_bot(State(env.app.clone()), Path(advisor.clone()), headers.clone(), Extension(RequestPrincipal::Bot(manager.clone())), Json(body)).await.unwrap_err();
     assert!(matches!(err, LcError::Bad(ref s) if s.contains("api_native_prompt_unsupported")));
 
-    // With attachments: should reject
     let body: PromptIn = serde_json::from_value(json!({"text":"consult","client_request_id":"c2","expect_result":true,"attachments":["att-1"]})).unwrap();
     let err = prompt_bot(State(env.app.clone()), Path(advisor), headers, Extension(RequestPrincipal::Bot(manager)), Json(body)).await.unwrap_err();
     assert!(matches!(err, LcError::Bad(ref s) if s.contains("api_native_prompt_unsupported")));
@@ -48,14 +46,12 @@ async fn claude_api_advisor_total_cap_error_fails_relay_request() {
     let adv_run = crate::testing::fake_run(&env.app, &advisor).await;
     sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(adv_run).execute(&env.app.db).await.unwrap();
 
-    // Configure a total spend cap that is already exceeded
     env.app.cfg.update(move |cfg| {
         cfg.claude_api.api_bot.total_cap_usd = Some(1.0);
         cfg.claude_api.api_bot.total_cap_since = Some("2026-11-01T00:00:00Z".into());
         Ok(())
     }).await.unwrap();
 
-    // Record usage in api_bot_attempts higher than cap ($1.0 = 1,000,000 micro-usd)
     sqlx::query("INSERT INTO api_bot_attempts (id, bot_id, generation, ordinal, request_hash, requested_speed, state, estimated_microusd, reserved_microusd, pricing_version, created_at) VALUES (?, ?, 1, 0, 'h', 'standard', 'recorded', 1500000, 1500000, 'v1', ?)")
         .bind(db::ulid()).bind(&advisor).bind("2026-11-02T00:00:00Z")
         .execute(&env.app.db).await.unwrap();
@@ -81,7 +77,6 @@ async fn claude_api_advisor_busy_queues_and_reconciles_when_idle() {
     let adv_run = crate::testing::fake_run(&env.app, &advisor).await;
     sqlx::query("UPDATE runs SET state='running', agent_status='idle' WHERE id=?").bind(&adv_run).execute(&env.app.db).await.unwrap();
 
-    // Mark advisor as busy with an in-flight turn
     let conv = db::conversation_id(&env.app.db, &advisor).await.unwrap();
     let in_flight_turn = db::ulid();
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
@@ -102,7 +97,6 @@ async fn claude_api_advisor_busy_queues_and_reconciles_when_idle() {
         .bind(req_id).fetch_one(&env.app.db).await.unwrap();
     assert_eq!(state, "pending");
 
-    // Complete the in-flight turn to make advisor idle
     sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
         .bind(db::now()).bind(&in_flight_turn).execute(&env.app.db).await.unwrap();
 }
@@ -110,8 +104,6 @@ async fn claude_api_advisor_busy_queues_and_reconciles_when_idle() {
 #[tokio::test]
 async fn claude_api_advisor_stopped_auto_starts_or_fails_request_on_start_error() {
     let (env, manager, advisor) = expert_fixture().await;
-    // Advisor has no active run (stopped)
-    // Without enabling api_bot in config, ApiBotPort::api_native_start refuses with "api_bot_disabled"
     let mut headers = HeaderMap::new();
     headers.insert("X-AM-Bot-Id", manager.parse().unwrap());
     headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
@@ -156,7 +148,6 @@ async fn parent_child_top_level_bots_can_consult_an_api_bot() {
     let err = send(child.id.clone(), "c1").await;
     assert!(matches!(&err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable"), "child still refused: {err:?}");
 
-    // expert 專案沒有角色的 API bot 照舊不可請教。
     sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
     let err = send(parent.id.clone(), "p2").await;
     assert!(matches!(&err, LcError::Forbidden(v) if v["error"] == "member_not_dispatchable"), "expert keeps advisor-only: {err:?}");

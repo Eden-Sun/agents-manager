@@ -38,7 +38,6 @@ async fn compact_is_unsupported_for_an_openai_api_bot_both_as_a_prompt_and_as_th
     crate::testing::fake_run(&env.app, &bot).await;
     let err = compact_bot(State(env.app.clone()), Path(bot.clone())).await.unwrap_err();
     assert!(matches!(&err, LcError::BadValue(v) if v["error"] == "compact_unsupported"), "{err:?}");
-    // kind 層面就沒有這個指令（不映射成別的）。
     assert!(!crate::lifecycle::slash::compact_slash_command("openai-api").is_some());
 }
 
@@ -57,13 +56,10 @@ async fn the_openai_api_model_list_is_the_locally_approved_one() {
     assert_eq!(list[1]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]), "sol 不收 none");
     assert_eq!(list[2]["efforts"], json!(["none", "low", "medium", "high", "xhigh", "max"]), "luna 仍收 none");
     assert!(list.iter().all(|m| m["service_tiers"] == json!([])));
-    // claude-api 的清單不變。
     let q = ModelsQuery { kind: "claude-api".into(), host: None, refresh: None, identity: None };
     let Json(claude) = get_models(State(env.app.clone()), Extension(RequestPrincipal::User), Query(q)).await.unwrap();
     assert_eq!(claude["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect::<Vec<_>>(), ["claude-opus-5-5", "claude-fable-5-2"]);
 }
-
-// ───────────────────────────── 顧問派工（D2b-4） ─────────────────────────────
 
 /// 專家模式專案：一個管理者（假 run）、一個 openai-api 顧問、一個 claude-api 顧問。
 async fn advisors() -> (crate::testing::Env, String, String, String) {
@@ -119,7 +115,6 @@ async fn the_pre_dispatch_total_cap_is_per_provider_and_one_does_not_block_the_o
         cfg.claude_api.api_bot.total_cap_since = Some("2026-11-01T00:00:00Z".into());
         Ok(())
     }).await.unwrap();
-    // 只有 OpenAI 超過上限。
     spend(&env, &openai, "openai", 1_500_000).await;
     let blocked = consult(&env, &manager, &openai, json!({"text": "q", "client_request_id": "cap-1", "expect_result": true})).await.unwrap();
     assert_eq!(blocked["delivery"], "failed");
@@ -129,7 +124,6 @@ async fn the_pre_dispatch_total_cap_is_per_provider_and_one_does_not_block_the_o
     let through = consult(&env, &manager, &claude, json!({"text": "q", "client_request_id": "cap-2", "expect_result": true})).await.unwrap();
     assert_eq!(through["error"], "start_failed:api_bot_disabled", "Claude 沒被 OpenAI 的上限擋，走到了啟動檢查：{through}");
 
-    // 反過來：OpenAI 的帳清掉、換 Claude 超過。
     sqlx::query("DELETE FROM api_bot_attempts").execute(&env.app.db).await.unwrap();
     spend(&env, &claude, "anthropic", 1_500_000).await;
     let blocked = consult(&env, &manager, &claude, json!({"text": "q", "client_request_id": "cap-3", "expect_result": true})).await.unwrap();
@@ -191,7 +185,6 @@ async fn api_usage_reads_openai_cache_fields_in_the_same_terms_as_claude() {
     let turns = crate::api_bot_turn_cost::recent_turns(&env.app.db, &bot).await.unwrap();
     assert_eq!((turns[0]["input_tokens"].clone(), turns[0]["cache_read_tokens"].clone(), turns[0]["cache_write_tokens"].clone()), (json!(300), json!(600), json!(100)), "{}", turns[0]);
 
-    // reasoning tokens 帶進回合費用（只供顯示，已含在 output 裡、不另計價）：同一回合的多次請求加總；沒收到回應的不算。
     assert_eq!(turns[0]["reasoning_tokens"], 20, "{}", turns[0]);
     let more = json!({"input_tokens": 10, "cached_tokens": 0, "cache_write_tokens": 0, "output_tokens": 40, "reasoning_tokens": 15});
     for (ordinal, state) in [(1, "recorded"), (2, "unknown")] {
@@ -203,7 +196,6 @@ async fn api_usage_reads_openai_cache_fields_in_the_same_terms_as_claude() {
     let Json(via_api) = api_bot_usage(State(env.app.clone()), Path(bot.clone()), Extension(RequestPrincipal::User)).await.unwrap();
     assert_eq!(via_api["turns"][0]["reasoning_tokens"], 35);
 
-    // Claude 的列：欄位原樣。
     let claude = crate::testing::claude_bot(&env.app, &env.project_id, "ca-usage").await.id;
     sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&claude).execute(&env.app.db).await.unwrap();
     let t2 = turn(&env, &claude).await;

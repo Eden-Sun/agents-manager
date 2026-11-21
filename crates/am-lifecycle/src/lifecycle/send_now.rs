@@ -163,15 +163,12 @@ pub async fn deliver(
     let typed = match app.type_delivery_text(client, run, bot, text, ready).await {
         Ok(Typing::Ready(t)) => t,
         Ok(Typing::Done(not @ Delivered::NotAttempted { .. })) => return Outcome::NotAttempted(not),
-        // 證據在按送出鍵之前就長出來了：不是我們按的鍵送的，舊回合怎樣了不知道。
         Ok(Typing::Done(Delivered::Submitted)) => return unknown(bot, run, interrupted, None, "submitted_before_key"),
-        // 打完框是空的或讀不到：送出鍵沒按。
         Ok(Typing::Done(_)) => return Outcome::NotSent("typed_but_not_in_box"),
         Err(e) if crate::herdr::never_applied(&e) => {
             tracing::warn!(bot = %bot.name, error = %e, "插隊送出：herdr 拒收打字，一個字都沒進去");
             return Outcome::NotAttempted(Delivered::NotAttempted { reason: "pane_send_refused", retry: true });
         }
-        // 前幾段已經在框裡（#647）：不是 NotAttempted。送出鍵沒按，字留在框裡，跟「打字沒回應」同一條。
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "插隊送出：打字沒有回應，不按送出鍵");
             return Outcome::NotSent("typing_unanswered");
@@ -197,7 +194,6 @@ pub async fn deliver(
             },
         }
     };
-    // 送出鍵生效了：從這一刻起舊回合才算被插隊打斷。
     let committed = super::interruption::send_now_interrupted(app, &bot.id, &run.id, &interrupted.id, new_turn).await;
     let delivered = match proven {
         Some(d) => Ok(d),
@@ -206,9 +202,6 @@ pub async fn deliver(
     match committed {
         Ok(()) => Outcome::Interrupted(delivered),
         Err(e) => {
-            // 送達結果先記在帳上，補的時候跟掛上 run 一起寫。DB 一時寫不進去多半已經好了：當場再補一次。
-            // 確認送出本身出錯也要記（#157）：鍵已經生效，證不出來就是 `unknown`（同 prompt 那一頭對 `Err` 的處理）——
-            // 沒記的話補收尾時沒東西可寫，那一則停在 pending 直到重啟。送達時間是此刻，不是補寫的時候。
             let seen = delivered.as_ref().ok().copied().unwrap_or(Delivered::Unproven("send_now_unconfirmed"));
             super::interruption::owe_delivery(&bot.id, new_turn, seen.record(), db::now());
             #[cfg(all(test, feature = "daemon-test-harness"))]

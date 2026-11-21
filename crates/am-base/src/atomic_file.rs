@@ -21,7 +21,6 @@ pub enum Mode {
 
 /// 把 `data` 原子地寫成 `path`。目錄必須已經存在。
 pub fn write(path: &Path, data: &[u8], mode: Mode) -> std::io::Result<()> {
-    // 同一個行程裡並行的兩次寫入不能共用暫存檔：pid 之外再加遞增號。
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path
         .parent()
@@ -51,7 +50,6 @@ pub fn write(path: &Path, data: &[u8], mode: Mode) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    // 目錄項目的更動也要落盤；有些檔案系統不支援對目錄 fsync，那就算了（檔案本身已經 sync 過）。
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
@@ -120,7 +118,6 @@ mod tests {
         let dir = scratch("mode");
         let path = dir.join("f.txt");
 
-        // 觀察者：寫的過程中出現在目錄裡的其他檔案（暫存檔）都不能有 group／other 權限。
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = {
             let (dir, stop) = (dir.clone(), stop.clone());
@@ -140,8 +137,6 @@ mod tests {
                 loose
             })
         };
-        // 結果要 0600 的寫入：暫存檔從建立到 rename 都不能比 0600 寬（`Exact(0o644)` 的暫存檔在寫完內容、rename 之前
-        // 本來就會變 0644，那是它最後要的權限，不在這裡觀察）。
         let big = vec![b'x'; 4_000_000];
         for _ in 0..20 {
             write(&path, &big, Mode::Exact(0o600)).unwrap();
@@ -153,16 +148,13 @@ mod tests {
         write(&path, b"first", Mode::Exact(0o644)).unwrap();
         assert_eq!(mode_of(&path), 0o644);
 
-        // Preserve：沿用原檔（0640），不被放寬成 0644／收窄成 0600。
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         write(&path, b"second", Mode::Preserve).unwrap();
         assert_eq!(mode_of(&path), 0o640);
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
-        // Preserve + 原檔不存在 → 0600。
         let fresh = dir.join("fresh.txt");
         write(&fresh, b"x", Mode::Preserve).unwrap();
         assert_eq!(mode_of(&fresh), 0o600);
-        // Exact 蓋過原檔的權限。
         write(&path, b"third", Mode::Exact(0o600)).unwrap();
         assert_eq!(mode_of(&path), 0o600);
         std::fs::remove_dir_all(&dir).ok();
@@ -176,7 +168,6 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         assert!(write(&target, b"data", Mode::Exact(0o644)).is_err());
         assert_eq!(leftovers(&dir, "target"), Vec::<String>::new());
-        // 目錄不存在：開不了暫存檔，也不該留東西。
         assert!(write(&dir.join("no-such-dir").join("f"), b"data", Mode::Preserve).is_err());
         assert_eq!(leftovers(&dir, "target"), Vec::<String>::new());
         std::fs::remove_dir_all(&dir).ok();

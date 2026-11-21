@@ -46,7 +46,6 @@ pub fn spawn_poller<H: HostsAccess + HostInstance + crate::capabilities::BgTasks
 async fn run_once(app: &(impl HostsAccess + HostInstance), host: &str) {
     match tighten(app, host).await {
         Ok(r) if r.failed > 0 => {
-            // 有掃到、但有些 chmod 不成功：欠著下一輪再來。
             owed().lock().unwrap().insert(host.to_string());
             tracing::warn!(host, tightened = r.tightened, failed = r.failed, "some remote bot directories could not be tightened; will retry");
         }
@@ -58,7 +57,6 @@ async fn run_once(app: &(impl HostsAccess + HostInstance), host: &str) {
         }
         Err(e) => {
             owed().lock().unwrap().insert(host.to_string());
-            // warn 而不是 debug：沒收成代表那台機器上的 prompt／回覆還是全機可讀（#501），不是無關緊要的雜訊。
             tracing::warn!(host, error = ?e, "could not tighten remote bot directories; will retry");
         }
     }
@@ -243,7 +241,6 @@ mod tests {
         run_once(&env.app, &host).await;
         assert!(!owed().lock().unwrap().contains(&host), "收好了就不再欠");
 
-        // 有掃到但有 chmod 失敗：一樣欠著，下一輪再試。
         crate::hosts::set_ssh_fake(&host, |_| Ok("AM_TIGHTENED\nAM_TIGHTEN_FAILED\n".into()));
         run_once(&env.app, &host).await;
         assert!(owed().lock().unwrap().contains(&host), "有一顆沒收成就還沒完");

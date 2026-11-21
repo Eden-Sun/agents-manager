@@ -149,9 +149,6 @@ pub async fn save_bytes(app: &(impl crate::capabilities::DataDir + crate::capabi
         .await
         .ok_or_else(|| anyhow::anyhow!("host `{}` is not configured", project.host))?;
 
-    // The daemon can always read `local_path`; on a remote host that is its own copy. Computed
-    // before any I/O so the staging row below already names the exact path(s) a crash needs to
-    // clean up — nothing here can fail (no I/O, no fallible parsing).
     let local_path = if host.is_local() { agent_path.clone() } else { local_copy_dir(app, bot_id)?.join(&file).to_string_lossy().into_owned() };
 
     sqlx::query(
@@ -175,9 +172,6 @@ pub async fn save_bytes(app: &(impl crate::capabilities::DataDir + crate::capabi
         let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ?").bind(&id).execute(app.db()).await;
         return Err(e);
     }
-    // Bytes are down; the row still says 'staging' until this commits. A crash or DB error right
-    // here leaves exactly that — `reconcile_orphans` picks it up next startup and cleans the files
-    // it just wrote, since nothing else can ever know they belong to a message.
     sqlx::query("UPDATE attachments SET state = 'ready' WHERE id = ?").bind(&id).execute(app.db()).await?;
 
     Ok(Attachment { id, name: name.to_string(), mime: mime.to_string(), size: data.len() as i64, path: agent_path })
@@ -188,14 +182,11 @@ pub async fn save_bytes(app: &(impl crate::capabilities::DataDir + crate::capabi
 /// DB row here) stays separate from the row bookkeeping.
 #[allow(clippy::too_many_arguments)]
 async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, dir: &str, file: &str, agent_path: &str, local_path: &str, data: &Bytes) -> Result<()> {
-    // 最多 50 MiB 的同步寫檔放到 blocking pool：在 tokio worker 上做會卡住同一條 worker 上的其他請求。
     if host.is_local() {
         let (project_dir, dir, file, agent_path, data) = (project_dir.to_string(), dir.to_string(), file.to_string(), agent_path.to_string(), data.clone());
         tokio::task::spawn_blocking(move || -> Result<()> {
-            // 專案目錄是 agent 寫得到的地方：`.agents-manager`／`attachments` 被換成連結時不能跟進去（讀取側同一個界線）。
             let comps = [std::ffi::OsStr::new(".agents-manager"), std::ffi::OsStr::new("attachments")];
             let dir_fd = crate::trusted_open::create_bound_dirs(Path::new(&project_dir), &comps).with_context(|| format!("create {dir}"))?;
-            // `.gitignore` 只在還沒有時寫；已經有（含被換成連結）就不動。
             let _ = crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(".gitignore"), b"*\n");
             crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(&file), &data).with_context(|| format!("write {agent_path}"))?;
             #[cfg(any(test, feature = "test-hooks"))]
@@ -212,7 +203,6 @@ async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, d
             Ok(())
         })
         .await??;
-        // 先準備目錄與 .gitignore（連結就整個失敗），再寫附件本身；失敗由 save() 的 best_effort_cleanup 收。
         host.ssh_exec(&remote_attachment_prepare_script(dir)).await.with_context(|| format!("prepare {dir} on {host_name}"))?;
         host.ssh_put(agent_path, data).await.with_context(|| format!("copy attachment to {host_name}:{agent_path}"))?;
     }
@@ -275,7 +265,6 @@ async fn best_effort_cleanup(host: &Arc<HostConn>, local_path: &str, agent_path:
 /// clean up the file(s) and drop the row. Idempotent: nothing to do once already cleaned.
 /// 遠端主機的列開機不 ssh（#1414）：只轉成 `failed`，交給 [`sweep_unreferenced`] 的 stuck 迴圈在背景刪。
 pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess)) -> usize {
-    // 遠端主機的 staging／failed 列開機不 ssh（#1414）；本機的列照舊。
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT id, local_path, agent_path, host FROM attachments WHERE state IN ('staging','failed')",
     )
@@ -290,13 +279,10 @@ pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::host
     };
     let mut cleaned = 0;
     for (id, local_path, agent_path, host_name) in rows {
-        // 開機不 ssh（#1414）：API 這時還在 503，遠端每列等一次 ssh 逾時會把開機拖住好幾分鐘。遠端的 staging 轉成 failed，
-        // 交給背景清掃（它的 stuck 迴圈收所有 failed 列）；已經是 failed 的列本來就在那裡。
         if is_remote(app, &host_name).await {
             let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ? AND state = 'staging'").bind(&id).execute(app.db()).await;
             continue;
         }
-        // 檔案還刪不掉（本機刪不掉）就留著這一列：沒有檔的紀錄，檔案就永遠沒有人指得到了（#1368）。下一次開機再試。
         if !remove_files(app, &local_path, &agent_path, &host_name, &mut Default::default()).await {
             tracing::warn!(id = %id, host = %host_name, "orphaned attachment's files are not gone yet; keeping its row for the next startup");
             continue;
@@ -330,8 +316,6 @@ async fn remove_files(
 ) -> bool {
     let local_gone = match std::fs::remove_file(local_path) {
         Ok(()) => true,
-        // 「不在」包含父層不是目錄（ENOTDIR）這種路徑上根本不可能有檔案的情況；其他錯誤（權限等）只有在路徑上確實還有東西時才算刪不掉。
-        // 路徑上已經沒有這個檔：NotFound，或父層不是目錄（ENOTDIR，Linux 與 macOS 都是 20）。其他錯誤（權限等）才是刪不掉。
         Err(e) => e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20),
     };
     let remote_gone = match app.hosts().get(host_name).await {
@@ -402,10 +386,7 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
     if let Some((id, _, _, _)) = rows.first() {
         crate::race_point::hit("attachment_sweep_after_candidates", id).await;
     }
-    // 兩階段（#1368）：先把列標成 `failed`（bind 只認 `ready`，所以跟它搶的那一方現在一定輸）、再刪檔，檔刪乾淨才刪列。
-    // 刪不掉的（遠端連不上）就留在 `failed`，下一輪最前面補做。`failed` 的列 resolve／讀取都看不到。
     let mut swept = 0;
-    // 同一輪同一台遠端只 ssh 一次（#1414）：stuck 與 rows 兩個迴圈共用。
     let mut unreachable = std::collections::HashSet::new();
     let stuck: Vec<(String, String, String, String)> = match sqlx::query_as("SELECT id, local_path, agent_path, host FROM attachments WHERE state = 'failed'")
         .fetch_all(app.db())
@@ -440,7 +421,7 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
                     tracing::warn!(id = %id, host = %host_name, "unreferenced attachment's files are not gone yet; keeping its row (failed) for the next sweep");
                 }
             }
-            Ok(_) => {} // 剛好被 bind 搶走：它現在有訊息引用了。
+            Ok(_) => {}
             Err(e) => tracing::warn!(id = %id, error = %e, "could not mark an unreferenced attachment row"),
         }
     }
@@ -460,7 +441,6 @@ where
     });
 }
 
-
 /// Restricted to the recipient's **project**: an unrelated chat's id must not become a path here.
 /// Project (not bot) scope lets one group send share an upload with every recipient.
 pub async fn resolve(app: &impl crate::capabilities::Db, bot_id: &str, ids: &[String]) -> Result<Vec<Attachment>> {
@@ -468,8 +448,6 @@ pub async fn resolve(app: &impl crate::capabilities::Db, bot_id: &str, ids: &[St
         return Ok(Vec::new());
     }
     let bot = db::bot(app.db(), bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
-    // Serialize lookup+refresh against the orphan sweeper. If the sweep wins first, the row is
-    // gone before this lookup; if resolve wins, refreshing created_at fences its stale candidate.
     let mut tx = db::begin_write(app.db()).await?;
     let mut out = Vec::new();
     for id in ids {
@@ -484,8 +462,6 @@ pub async fn resolve(app: &impl crate::capabilities::Db, bot_id: &str, ids: &[St
         .await?;
         match row {
             Some((id, name, mime, size, path)) => {
-                // 正要被用了：重新算「沒人用」的時間，resolve 到 bind 之間輪到清理也不會把三天前上傳的它當孤兒刪掉
-                // （`created_at` 除了清理沒有別的讀者，所以它就是「最後一次被用到」）。
                 let _ = sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ? AND message_id IS NULL")
                     .bind(db::now())
                     .bind(&id)
@@ -530,8 +506,6 @@ pub async fn bind_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, message_id: &
         bail!("message `{message_id}` does not exist");
     }
     for a in items {
-        // `state = 'ready'`: binding a staging/failed row would let a message point at bytes that
-        // may never exist.
         let res = sqlx::query("UPDATE attachments SET message_id = ? WHERE id = ? AND state = 'ready'")
             .bind(message_id)
             .bind(&a.id)
@@ -569,7 +543,6 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
     if !s.is_empty() {
         s.push_str("\n\n");
     }
-    // 全是圖片就照舊說「圖片」——那是最常見的情況，講得具體一點；混到別的檔案就講「檔案」。
     let images_only = items.iter().all(|a| is_image(&a.mime));
     let kind = if images_only { "圖片" } else { "檔案" };
     let one = items.len() == 1;
@@ -596,9 +569,6 @@ pub async fn read(app: &(impl crate::capabilities::DataDir + crate::capabilities
     let Some((mime, path, bot_id)) = row else { bail!("unknown attachment") };
     let data = match read_contained(app.data_dir(), Path::new(&path)).await {
         Ok(d) => d,
-        // 刪 bot 會把 `attachments/<id>/` 搬進 `bots-trash`（#465），但已刪 bot 的對話仍讀得到
-        // （API.md §10.4），前端照樣會來抓縮圖——原地讀不到就去回收區裡那一份找同一個檔名。
-        // 只有遠端 bot 的 `local_path` 在資料目錄底下；本機 bot 指的是專案裡那份，不受影響。
         Err(e) => match trashed_copy(app, &bot_id, &path) {
             Some(alt) => read_contained(app.data_dir(), &alt).await.with_context(|| format!("read {} (trashed)", alt.display()))?,
             None => return Err(e).with_context(|| format!("read {path}")),
@@ -661,11 +631,6 @@ pub fn served_mime(mime: &str) -> &'static str {
         "image/jpeg" => "image/jpeg",
         "image/gif" => "image/gif",
         "image/webp" => "image/webp",
-        // svg 留在名單裡而且照舊 inline：拿掉它會讓現有的 svg 縮圖**變破圖**——前端是
-        // `<img src={blobUrl}>`，而瀏覽器對 SVG 不做內容嗅探，型別不是 `image/svg+xml` 就不算繪。
-        // 為了修一個目前打不穿的硬化缺口而製造看得見的回歸不划算；改成靠回應本身的標頭擋：
-        // `nosniff` ＋ `Content-Security-Policy: sandbox`（見 `get_attachment`）。`<img>` 裡的 SVG
-        // 本來就不會跑腳本，真的被導航到時 sandbox 讓它拿不到這個 origin。
         "image/svg+xml" => "image/svg+xml",
         "application/pdf" => "application/pdf",
         "text/plain" => "text/plain; charset=utf-8",

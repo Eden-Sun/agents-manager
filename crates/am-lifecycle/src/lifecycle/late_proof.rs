@@ -288,7 +288,6 @@ pub async fn recover_at_startup_at(app: &(impl LcHost + Clone + 'static), now: &
                 continue;
             }
         };
-        // session 已換：這份基準不再對得上這個 run，不恢復也不再留著（SPEC：pane 與 session 都相符才恢復）。
         if matches!(same_session(app, &run_id, &proof).await, SessionMatch::Changed) {
             tracing::info!(run = %run_id, turn = %turn_id, "discarding durable late proof: the session changed before restart");
             delete_durable_or_log(app.db(), &run_id, &turn_id).await;
@@ -429,7 +428,6 @@ mod registry_tests {
 
     #[test]
     fn owed_take_refuses_a_pending_bound_to_another_turn() {
-        // 欠帳的 T1 結清時，run 的登記已被 T2 的 Pending 取代：不能把 T2 的基準認領到 T1 上（#1483 複查）。
         let base = Instant::now();
         let mut registry = PendingRegistry::default();
         registry.insert_at("run-1".into(), pending(base), base);
@@ -442,7 +440,6 @@ mod registry_tests {
 
     #[test]
     fn owed_take_refuses_an_unbound_pending() {
-        // 沒有綁到任何回合（持久化失敗）時寧可不認領：fail closed，回合留給 Stop hook／stuck_turns。
         let base = Instant::now();
         let mut registry = PendingRegistry::default();
         registry.insert_at("run-1".into(), pending(base), base);
@@ -452,7 +449,6 @@ mod registry_tests {
 
     #[test]
     fn issue_1670_registry_is_private_to_each_test_thread() {
-        // 別的測試（另一條執行緒）留下的條目，不能被這條測試的清掃算進去（#1670：全進程共用 static 會互踩）。
         std::thread::spawn(|| note("run-left-by-another-test", pending(Instant::now()))).join().unwrap();
         assert_eq!(pending_count(), 0, "別的測試留下的 prompt 不屬於這條測試的 registry");
     }
@@ -503,7 +499,6 @@ pub async fn look(app: &impl LcHost, bot_id: &str, turn_id: &str, p: &Pending) -
         Ok(_) => {}
         Err(_) => return Look::Wait,
     }
-    // 沒有證據時只看「框空了＋agent 在忙」：框裡還有字（字還沒送出去）或畫面讀不準，都不算。
     if box_state_within(&p.kind, &screen, typed_tail(&p.text)) != BoxState::Empty {
         return Look::Wait;
     }
@@ -541,8 +536,6 @@ pub async fn promote(app: &impl LcHost, turn_id: &str, how: Delivered) -> anyhow
 /// 一輪一輪看到有結論或看完為止。回升級成什麼（沒升級＝`None`）。`checks`／`every` 給測試用。
 pub async fn watch(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str, p: &Pending, checks: u32, every: Duration) -> Option<Delivered> {
     let result = watch_loop(app, run_id, bot_id, turn_id, p, checks, every).await;
-    // A successful proof needs no recovery row. If the bounded watch ends without a conclusion,
-    // retain the baseline until its durable TTL so a later daemon restart can retry it.
     if result.is_some() {
         delete_durable_for_turn(app.db(), turn_id).await.ok();
     }
@@ -562,7 +555,6 @@ async fn watch_loop(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &str
             Ok(true) => {
                 tracing::info!(run = %run_id, turn = %turn_id, how = ?how, "送達狀態未知的回合背景補到了證據：升成 ok、解鎖");
                 emit_turn(app, turn_id).await;
-                // 跟一般 ok／unverified 的送達同一套看門狗（`prompt.rs` 寫完送達結果之後做的事）。
                 super::poller::arm_stall(app, run_id, bot_id, turn_id).await;
                 super::poller::arm_progress(app, run_id, bot_id, turn_id).await;
                 return Some(how);

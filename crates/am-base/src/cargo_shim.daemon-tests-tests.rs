@@ -40,7 +40,6 @@
 
     impl Drop for Sandbox {
         fn drop(&mut self) {
-            // 修正前的 shim 不會停掉它們：別讓失敗的測試留下五分鐘的孤兒 sleep。
             for f in ["cargo.pid", "rustc.pid"] {
                 if let Some(pid) = self.pid(f) {
                     self.kill_if_ours(pid);
@@ -64,8 +63,6 @@
             super::install_local(&dir).unwrap();
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
-            // Echoes argv and the env vars a test cares about, one per line, so assertions don't need a
-            // real compiler. `$AM_TEST_FAKE_CARGO_LOG` records that the real cargo actually ran.
             write_exec(
                 &fake.join("cargo"),
                 "#!/bin/sh\n\
@@ -73,7 +70,6 @@
                    >> \"${AM_TEST_FAKE_CARGO_LOG:-/dev/null}\"\n\
                  exit \"${AM_TEST_FAKE_CARGO_EXIT:-0}\"\n",
             );
-            // shim 自己也是剛寫好的腳本：用一個沒有副作用的呼叫（輕量子指令、真 cargo 換成 /usr/bin/true）exec 到成功為止。
             let probe = output_retrying(
                 Command::new(dir.join("bin/cargo"))
                     .arg("--version")
@@ -118,16 +114,11 @@
                     cmd.env_remove(key);
                 }
             }
-            // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
             cmd.env("HOME", self.dir.join("fake-home"));
-            // 所有 shim 呼叫都縮短停頓（見 [`SHIM_PAUSE`]）；需要不同值的測試自己在 env 列表裡覆寫。
             cmd.env("AM_SHIM_PAUSE", SHIM_PAUSE).env("AM_SHIM_SCHEDULER_PAUSE", SHIM_PAUSE);
-            // 這支測試本身就在 `cargo test` 底下跑（repo 的 `.cargo/config.toml [env]` 或外層 shim 給的值，issue #813）：
-            // 漏進來就變成「呼叫端自己設了」，shim 不會再注入。需要的測試自己設。
             cmd.env_remove("RUST_TEST_THREADS");
             cmd
         }
-
 
         /// 假 cargo 把自己與它的「rustc」子行程的 pid 寫在沙盒裡，跑到 `secs` 秒才寫 `cargo.done` 並正常結束。
         /// 子行程是一顆獨立的 `sleep 300`：cargo 死了它也不會自己結束，正好用來抓「留下孤兒編譯器」。
@@ -196,7 +187,6 @@ esac"#
             let files = [
                 (
                     "sleep",
-                    // 等假 cargo 發出 ready 才撥時鐘：不然守衛在 cargo 還沒起來時就先判完了，殺樹的測試會空過。
                     format!(
                         "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > \"{d}/clock.$$\" && mv -f \"{d}/clock.$$\" '{d}/clock'\nexec /bin/sleep 0.05\n"
                     ),
@@ -409,8 +399,6 @@ esac"#
 
         /// 同上；失敗訊息多帶 `note`（shim 是怎麼結束的：被訊號殺掉跟自己退出，原因完全不同）與那一組的完整 `ps`。
         fn assert_group_gone_noting(&self, pgid: i32, note: &str) {
-            // 正常情況下一兩個 50ms 就空了；上限放寬到 40 秒是因為本機常常同時有很多人在編譯（行程表塞滿時 fork 都會失敗），
-            // 只有真的留下行程的失敗路徑才會等滿（壓測 40 個並行 shim，最慢的要 7 秒才起來）。
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
             loop {
                 let left = group_members(pgid);
@@ -533,7 +521,6 @@ esac"#
     #[test]
     fn a_light_subcommand_skips_the_scheduler_entirely() {
         let s = Sandbox::new();
-        // 沒有安裝假 curl：如果 shim 誤判去呼叫排程器，這裡會因為找不到 curl 或連不上而看得出來。
         let log = s.dir.join("cargo.log");
         let (_, err, rc) = s.run(&[("AM_TEST_FAKE_CARGO_LOG", log.to_str().unwrap())], &["--version"]);
         assert_eq!(rc, 0, "{err}");
@@ -558,7 +545,6 @@ esac"#
     /// 有限次重試之後 fail closed（exit 75，可重試），cargo 一次都沒起來，stderr 講明怎麼明確繞過。每一種 shell 都驗（含 macOS 的 bash 3.2）。
     #[test]
     fn a_managed_bot_never_gets_an_unscheduled_cargo_when_the_scheduler_cannot_be_asked() {
-        // (label, 假 curl 的本體)：連不上、空回應、HTML、5xx 的 JSON、看不懂的 JSON。
         let cases: [(&str, &str); 5] = [
             ("連不上", "exit 7\n"),
             ("空回應", "printf ''\n"),
@@ -572,7 +558,7 @@ esac"#
                 s.install_fake_curl(curl);
                 let log = s.dir.join("cargo.log");
                 let mut env = lease_env(&s);
-                env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "1".into())); // 不必真的等 120 秒
+                env.push(("AM_BUILD_SCHEDULER_WAIT_SECS", "1".into()));
                 env.push(("AM_TEST_FAKE_CARGO_LOG", log.display().to_string()));
                 let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["test", "-p", "agents-managerd"]);
                 let why = format!("{sh} {label}: {err}");
@@ -678,7 +664,6 @@ esac"#
     /// 也是「排程器用不了」，一樣 fail closed（拿到的名額要放回去）；人工 shell 才直接跑。
     #[test]
     fn a_managed_bot_that_cannot_hold_or_ask_for_a_slot_is_stopped_too() {
-        // 建不出暫存目錄：TMPDIR 指到不存在的地方；排程器本身是好的（granted），所以名額要放回去。
         let s = Sandbox::new();
         let d = s.dir.display();
         s.install_fake_curl(&format!(
@@ -694,7 +679,6 @@ esac"#
         assert!(!log.exists(), "cargo 不能在沒有守衛的情況下跑：{err}");
         assert!(std::fs::read_to_string(s.dir.join("curl.log")).unwrap().contains("/release"), "拿到的名額要放回去");
 
-        // 沒有 curl：PATH 只放 shim 需要的那幾個工具（不含 curl）。
         let s = Sandbox::new();
         let tools = s.dir.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
@@ -756,7 +740,6 @@ esac"#
                     assert_eq!(rc, 0, "{why}");
                     let asked_now = std::fs::read_to_string(s.dir.join("curl.log")).unwrap_or_default().contains("/acquire");
                     assert_eq!(asked_now, asked, "{}問排程器：{why}", if asked { "該" } else { "不該" });
-                    // 真的 cargo 收到的參數要原樣（`CARGO_BUILD_JOBS=` 那行之後一行一個）。
                     let ran: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().skip(1).map(str::to_string).collect();
                     assert_eq!(ran, args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), "{why}");
                 }
@@ -796,7 +779,6 @@ esac"#
     #[test]
     fn a_manual_shell_keeps_the_documented_default_port_and_a_set_am_port_wins() {
         let s = Sandbox::new();
-        // 標頭走 stdin（`curl -K -`，#926）：把 stdin 攤平接在 argv 後面記，這樣「請求長什麼樣」還是一行。
         s.install_fake_curl(&format!(
             "in=$(cat | tr '\\n' ' ')\necho \"$* $in\" >> '{d}/curl.log'\nprintf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30}}'\n",
             d = s.dir.display()
@@ -908,11 +890,9 @@ esac
             env.extend_from_slice(extra);
             env
         }
-        // 一個真的能執行的假 helper（回 125＝退回本機；不能用 `/bin/true`——macOS 沒有這個路徑）。
         let helper = s.dir.join("fake-helper");
         write_exec(&helper, "#!/bin/sh\nexit 125\n");
         let helper_path = helper.to_str().unwrap();
-        // 什麼都沒有：一次講清楚缺哪兩個。
         let (_, err, rc) = s.run(&base(log, &[]), &["check", "-p", "agents-managerd"]);
         assert_eq!(rc, 0, "{err}");
         assert!(err.contains("外部編譯沒有啟用"), "{err}");
@@ -921,16 +901,12 @@ esac
         }
         assert!(!err.contains("AM_DATA_DIR"), "AM_DATA_DIR 不是前提（#417）：{err}");
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "照樣在本機跑");
-        // 只缺一個：只點那一個。
         let (_, err, _) = s.run(&base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_DATA_DIR", "/tmp")]), &["clippy"]);
         assert!(err.contains("AM_CONFIG_PATH") && !err.contains("AM_DAEMON_EXE") && !err.contains("AM_DATA_DIR"), "{err}");
-        // helper 路徑在、但不能執行（binary 被換掉／搬走）：也算缺。
         let (_, err, _) = s.run(&base(log, &[("AM_DAEMON_EXE", "/nonexistent/agents-managerd"), ("AM_CONFIG_PATH", "/tmp/c.toml"), ("AM_DATA_DIR", "/tmp")]), &["test"]);
         assert!(err.contains("AM_DAEMON_EXE"), "{err}");
-        // build／run 本來就不 offload：不吵。
         let (_, err, _) = s.run(&base(log, &[]), &["build", "--release"]);
         assert!(!err.contains("外部編譯"), "{err}");
-        // 兩個都齊：不提示（helper 會自己決定要不要轉；這裡假 helper 回 125＝退回本機）。
         let (_, err, rc) = s.run(&base(log, &[("AM_DAEMON_EXE", helper_path), ("AM_CONFIG_PATH", "/tmp/c.toml")]), &["check"]);
         assert_eq!(rc, 0, "{err}");
         assert!(!err.contains("外部編譯沒有啟用"), "齊全就不提示：{err}");
@@ -945,7 +921,6 @@ esac
     /// 的 cargo）都看不到 `AM_DATA_DIR`——隔離那一半也釘住，免得有人用「刪掉 `-u AM_DATA_DIR`」來修。
     #[test]
     fn the_check_script_env_still_offloads_without_leaking_the_data_dir() {
-        // 執行期讀，不 include_str!：那會讓 check.sh 變成 binary 的建置輸入（`persona::BUILD_INPUTS` 的測試會擋）。
         let check_sh = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/check.sh")).expect("讀 scripts/check.sh");
         let env_line = check_sh
             .lines()
@@ -958,7 +933,6 @@ esac
         let s = Sandbox::new();
         s.install_fake_curl(r#"printf '{"granted":true,"token":"tok-1","cargo_jobs":2,"lease_ttl_secs":30}'"#);
         let cargo_log = s.dir.join("cargo.log");
-        // helper 記下自己看到的 AM_DATA_DIR 後回 125（退回本機），順便驗本機那顆 cargo 也看不到。
         let helper_env = s.install_fake_helper(&format!("echo \"data_dir=${{AM_DATA_DIR-unset}}\" >> '{}/helper.log'\nexit 125", s.dir.display()));
         let pane: Vec<(&str, &str)> = helper_env
             .iter()
@@ -986,7 +960,6 @@ esac
         assert!(helper.contains("data_dir=unset"), "helper 看不到正式資料目錄：{helper}");
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "helper 回 125 就在本機跑");
 
-        // 有 AM_DATA_DIR（一般 pane 直接跑 cargo）照舊帶 --data-dir。
         let (_, err, rc) = s.run(&pane, &["clippy"]);
         assert_eq!(rc, 0, "{err}");
         assert!(std::fs::read_to_string(s.dir.join("helper.log")).unwrap().contains("--data-dir /tmp --cwd"));
@@ -1188,7 +1161,6 @@ esac
         let extra: Vec<(&str, String)> = remote.iter().map(|(k, v)| (*k, v.clone())).collect();
         let shims = start_shims(&s, port, N, &extra);
 
-        // 四個 helper 同時在跑。
         let started = || std::fs::read_dir(&s.dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("started.")).count();
         let up = Instant::now();
         while started() < N && up.elapsed() < Duration::from_secs(15) {
@@ -1339,7 +1311,6 @@ esac
         let cases: [(&str, &[(&str, &str)], &str, &str); 7] = [
             (r#","test_threads":4"#, &[], "test", "test RUST_TEST_THREADS=4"),
             (r#","test_threads":4"#, &[], "t", "t RUST_TEST_THREADS=4"),
-            // #1441：呼叫端設的值超過名額就夾成名額的上限；沒超過的照呼叫端的。
             (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "16")], "test", "test RUST_TEST_THREADS=4"),
             (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "2")], "test", "test RUST_TEST_THREADS=2"),
             (r#","test_threads":4"#, &[], "check", "check RUST_TEST_THREADS=unset"),
@@ -1369,7 +1340,6 @@ esac
         let d = s.dir.display();
         write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"$*\" >> '{d}/argv.log'\n"));
         let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-        // (名額回應的 test_threads 欄位, 呼叫端的參數, 額外環境, 是不是受管, 期望記到的參數)
         let cases: [(&str, &[&str], &[(&str, &str)], bool, &str); 9] = [
             ("4", &["test", "-p", "agents-managerd", "--", "--test-threads=128"], &[], true, "test -p agents-managerd -- --test-threads=4"),
             ("4", &["test", "-p", "agents-managerd", "--", "--test-threads", "128"], &[], true, "test -p agents-managerd -- --test-threads 4"),
@@ -1404,7 +1374,6 @@ esac
         let d = s.dir.display();
         write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"JOBS=${{CARGO_BUILD_JOBS-}} ARGS=$*\" >> '{d}/jobs.log'\n"));
         let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
-        // (是不是受管, 呼叫端的參數, 期望記到的 ARGS；受管時 JOBS 一律是名額的 2)
         let cases: [(bool, &[&str], &str); 9] = [
             (true, &["build", "-j", "32"], "build -j 2"),
             (true, &["build", "-j32"], "build -j2"),
@@ -1444,7 +1413,6 @@ esac
              *) printf '{{}}' ;;\n\
              esac"
         ));
-        // 假 cargo 一起來就寫 ready（假 sleep 等它，不真的睡）、結束碼 3：要看的是 shim 的結束碼跟放名額的次數。
         write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\ntouch '{d}/cargo.ready'\nexit 3\n"));
         s.install_virtual_clock();
     }
@@ -1520,21 +1488,17 @@ esac
         .execute(&env.app.db)
         .await
         .unwrap();
-        // 佔住一個埠、不 listen：這段時間沒有人在聽，連線被拒（curl 7），別人也拿不走這個埠（#1271）。
         let reserved = reserve_port();
         let port = reserved.port;
 
         let s = Sandbox::new();
         s.install_counting_cargo();
-        // outage 只有 5 秒：重試預算（`wait / 3` 次 × 停頓）要覆蓋它，所以等待上限放大、每次停頓放寬到 0.25 秒（預算約 25 秒）。
         let extra: Vec<(&str, String)> = vec![("AM_BOT_ID", bot_id.clone()), ("AM_HOOK_TOKEN", "tok-128".into()), ("AM_BUILD_SCHEDULER_WAIT_SECS", "300".into()), ("AM_SHIM_SCHEDULER_PAUSE", "0.25".into())];
         let shims = start_shims(&s, port, 2, &extra);
 
-        // outage 期間（兩顆都至少重試過一輪）：沒有任何 cargo 起來。
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         assert!(!s.dir.join("peak.log").exists(), "排程器沒開、沒有名額：不能有 cargo 在跑：{:?}", std::fs::read_to_string(s.dir.join("peak.log")));
 
-        // 排程器回來：照常排隊，一次一顆。
         let (_, server) = serve_router_with(env.app.clone(), reserved.listen());
         let results = finish_shims(&s, shims).await;
         server.abort();
@@ -1551,7 +1515,6 @@ esac
     #[test]
     fn a_reserved_port_refuses_connections_and_cannot_be_taken_until_it_listens() {
         let r = reserve_port();
-        // Linux 對 bind 未 listen 的 port 回 RST（ConnectionRefused）；macOS 不回、SYN 等到逾時（TimedOut）。兩者都是「連不上」。
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], r.port));
         let refused = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).unwrap_err();
         let expected: &[std::io::ErrorKind] = if cfg!(target_os = "macos") {
@@ -1755,7 +1718,7 @@ esac
         s.install_virtual_clock();
         s.install_lease_curl(180);
         s.install_cargo_until_virtual(3 * 180 + 60);
-        s.fail_date_call(2); // acquire 時間可讀，第一次續約送出前的時間讀取失敗。
+        s.fail_date_call(2);
         s.set_renew_mode("success_then_fail_until_170");
         let env = lease_env(&s);
         let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
@@ -1822,8 +1785,6 @@ esac
     #[test]
     fn a_shim_whose_caller_is_gone_stops_waiting_for_a_slot() {
         let s = Sandbox::new();
-        // 每一輪 acquire 記一行：判定「shim 有沒有發現呼叫端不在了」用**輪數**，不用牆鐘時間（整套平行跑時機器忙，同樣的一輪可以慢十倍）。
-        // release 也記下來：放棄等待要把號碼牌退掉（空 token 的 release，issue #913）。
         s.install_fake_curl(&format!(
             r#"case "$*" in
   *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":0}}' ;;
@@ -1834,7 +1795,6 @@ esac"#,
             s.dir.join("release.log").display()
         ));
         let env = lease_env(&s);
-        // 外層是 `sh -c`（不是 shim 本身），所以不走 `s.command()`——但同樣清掉呼叫端所有的 `AM_*`。
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(format!("'{}' build & echo $! > '{}'", s.dir.join("bin/cargo").display(), s.dir.join("shim.pid").display()))
@@ -1849,7 +1809,6 @@ esac"#,
         for (k, v) in &env {
             cmd.env(k, v);
         }
-        // 外層 `sh -c` 起完 shim 就結束：shim 的 `$PPID` 指到一個已經不在的行程。
         let (mut outer, _, err_path) = s.start_group(&mut cmd, false);
         let group = outer.id() as i32;
         assert!(outer.wait().unwrap().success());
@@ -1881,7 +1840,6 @@ esac"#,
         assert!(stdin.contains("header = \"X-AM-Bot-Token: bot-secret-9\""), "acquire 的標頭走 stdin：{stdin}");
         assert!(stdin.contains("data-urlencode = \"token=lease-secret-1\""), "release 的 lease token 走 stdin：{stdin}");
 
-        // 人工 shell 退回的共用 UI token 也一樣。
         let home = s.dir.join("fake-home/.config/agents-manager");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("ui-token"), "ui-secret-7").unwrap();
@@ -1947,7 +1905,6 @@ esac"#,
         for (k, v) in &env {
             cmd.env(k, v);
         }
-        // 測試行程若是 nohup 起的，SIGHUP 是忽略；這條要測的是「shim 接 HUP」，所以子行程明確設回預設（#1464）。
         set_child_hup(&mut cmd, libc::SIG_DFL);
         let (mut shim, _, _) = s.start_group(&mut cmd, false);
         let group = shim.id() as i32;
@@ -1998,7 +1955,6 @@ esac"#,
         }
         let before_hup = rounds();
         unsafe { libc::kill(shim.id() as i32, libc::SIGHUP) };
-        // 事件驅動：HUP 之後 shim 還活著、又問了一輪 acquire，才代表它沒有因為 HUP 退出。
         while rounds() == before_hup {
             assert!(shim.try_wait().unwrap().is_none(), "忽略 HUP 的 shim 不該因為 HUP 退出");
             assert!(up.elapsed() < std::time::Duration::from_secs(60), "HUP 之後 shim 沒有再問 acquire（卡住）");
@@ -2027,7 +1983,6 @@ esac"#,
 esac"#
         ));
         write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\ntouch '{d}/cargo.ran'\n"));
-        // 假 mktemp：拿到名額之後的第一次呼叫（建守衛的暫存目錄）先留記號、等放行檔出現才真的建。
         write_exec(
             s.dir.join("real/mktemp"),
             format!(
@@ -2057,9 +2012,6 @@ esac"#
 
     /// 呼叫端不在之後，shim 最多再問 `MAX_ROUNDS_AFTER_GONE` 輪 acquire 就要自己講一句並退出。
     fn assert_shim_gives_up_once_caller_is_gone(s: &Sandbox, group: i32, err_path: &std::path::Path) {
-        // 從這一刻起 shim 只要再問一輪 acquire 就該發現呼叫端不在了：
-        // 判準是「之後又問了幾輪」（事件驅動、跟機器忙不忙無關），不是「等了幾秒」。牆鐘只留一個給真正卡死的後盾：
-        // 這麼久**一輪都沒有進展**、也沒退出，才算卡住。
         let rounds = || std::fs::read_to_string(s.dir.join("acquire.log")).map(|t| t.lines().count()).unwrap_or(0);
         const MAX_ROUNDS_AFTER_GONE: usize = 25;
         let at_gone = rounds();
@@ -2083,7 +2035,6 @@ esac"#
         s.kill_group_if_ours(group);
         let said = std::fs::read_to_string(err_path).unwrap_or_default();
         assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額（{}）：{left:?}\n{said}", verdict.unwrap_or_default());
-        // 光看「行程消失了」不夠（機器上可能有別的東西在清孤兒）：shim 要**自己**講一句並退出，才是它自己發現的。
         assert!(said.contains("呼叫端已經結束"), "shim 要自己發現呼叫端不在了，而不是被別人殺掉：{said}");
     }
 
@@ -2104,11 +2055,8 @@ esac"#,
             s.dir.join("acquire.log").display()
         ));
         let env = lease_env(&s);
-        // 子 shell 先睡一下再 exec 成 shim：外層 sh 一定已經走了，shim 啟動時的 `$PPID` **必定**是收養者（不靠時序運氣）。
         let inner = format!("( sleep 0.3; exec '{}' build ) & echo $! > '{}'", s.dir.join("bin/cargo").display(), s.dir.join("shim.pid").display());
         let marker = s.dir.join("inner.done");
-        // PR_SET_CHILD_SUBREAPER=36、PR_SET_NAME=15（comm 就是 ps -o comm= 看到的名字）。收養來的 shim 結束後由這裡收屍，
-        // 沒有子行程了（ChildProcessError）就結束；最多撐 300 秒，測試失敗時也不會留下它。
         let py = r#"import ctypes, os, subprocess, sys, time
 libc = ctypes.CDLL(None, use_errno=True)
 assert libc.prctl(36, 1, 0, 0, 0) == 0, "PR_SET_CHILD_SUBREAPER"
@@ -2141,7 +2089,6 @@ while time.time() < end:
         }
         let (outer, _, err_path) = s.start_group(&mut cmd, false);
         let group = outer.id() as i32;
-        // 等外層的 `sh -c` 結束（shim 從這一刻起是孤兒、被那顆「systemd」收養）。
         let t0 = std::time::Instant::now();
         while !marker.exists() {
             assert!(t0.elapsed() < std::time::Duration::from_secs(60), "外層的 sh -c 60 秒內沒結束");
@@ -2172,12 +2119,10 @@ while time.time() < end:
             assert!(up.elapsed() < std::time::Duration::from_secs(30), "cargo 沒起來");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        // shim 被 SIGKILL：續約迴圈與 cargo 都成了孤兒。
         unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
         let _ = shim.wait();
         let renews = || std::fs::read_to_string(s.dir.join("curl.log")).unwrap().matches("/renew").count();
         let before = renews();
-        // 等下一次續約這個**事件**（守衛一秒一秒睡，虛擬時鐘下一次續約要幾秒真時間）；30 秒只是放棄的上限。
         let up = std::time::Instant::now();
         while renews() <= before && up.elapsed() < std::time::Duration::from_secs(30) {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2185,7 +2130,6 @@ while time.time() < end:
         assert!(renews() > before, "cargo 還活著：續約要繼續（它還在用容量）");
         assert!(!group_members(group).is_empty(), "續約迴圈還在");
 
-        // cargo 也沒了（連它前景那顆 `sleep 120` 一起收掉）：迴圈放掉名額、收掉狀態目錄、自己結束。
         for f in ["cargo.pid", "rustc.pid"] {
             if let Some(p) = s.pid(f) {
                 s.kill_if_ours(p);
@@ -2224,11 +2168,9 @@ while time.time() < end:
                     let (mut shim, _, _) = s.start_group(&mut cmd, false);
                     let group = shim.id() as i32;
                     s.wait_cargo_ready();
-                    // shim 被 SIGKILL：守衛與 cargo 成了孤兒；租約這時還有效，cargo 照跑。
                     unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
                     let _ = shim.wait();
                     assert!(s.alive("cargo.pid"), "{sh}: 租約還有效，cargo 不該停");
-                    // daemon 現在收回名額：守衛下一次續約會被明確拒絕。
                     s.set_renew_mode("notfound");
                     let up = std::time::Instant::now();
                     while (s.alive("cargo.pid") || s.alive("rustc.pid")) && up.elapsed() < std::time::Duration::from_secs(20) {
@@ -2237,7 +2179,6 @@ while time.time() < end:
                     assert!(!s.alive("cargo.pid"), "{sh}: 租約失效了，孤兒 cargo 還在編（突破 max_concurrent）");
                     assert!(!s.alive("rustc.pid"), "{sh}: cargo 底下的編譯器還活著（孤兒）");
                     assert!(!s.dir.join("cargo.done").exists(), "{sh}: cargo 不能跑完");
-                    // 守衛自己也要收工：整組沒有行程、名額放掉、狀態目錄清掉。
                     s.assert_group_gone(group);
                     let calls = std::fs::read_to_string(s.dir.join("curl.log")).unwrap();
                     assert!(calls.contains("/release"), "{sh}: 名額要放掉：{calls}");
@@ -2264,7 +2205,6 @@ while time.time() < end:
         unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
         let _ = shim.wait();
         s.set_renew_mode("notfound");
-        // 守衛判定失效、（不）動手之後會把狀態目錄收掉；等到它收完才能斷言路人還活著。
         let up = std::time::Instant::now();
         while !s.lease_dirs().is_empty() && up.elapsed() < std::time::Duration::from_secs(20) {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2287,10 +2227,9 @@ while time.time() < end:
                 for _ in 0..4 {
                     scope.spawn(move || {
                         let s = Sandbox::new();
-                        s.install_lease_curl(180); // renew 間隔 60 秒：守衛的 `sleep 60`
+                        s.install_lease_curl(180);
                         let env = lease_env(&s);
                         for i in 0..guard_iterations() {
-                            // 預設的假 cargo 立刻退 0：租約才剛拿到、守衛才剛起來。
                             let (_, err, rc) = s.run_in(Some(sh), &as_refs(&env), &["check"]);
                             assert_eq!(rc, 0, "{sh} 第 {i} 次：{err}");
                         }
@@ -2331,7 +2270,6 @@ while time.time() < end:
         s.install_slow_cargo(120);
         let (mut shim, group) = start_slow_shim(&s);
         assert_eq!(s.lease_dirs().len(), 1, "跑到一半應該有一個租約狀態目錄：{:?}", s.lease_dirs());
-        // 整個 pane 被關：shim、續約守衛、cargo 都沒機會收尾。
         s.kill_group(group);
         let _ = shim.wait();
         s.assert_group_gone(group);
@@ -2347,8 +2285,6 @@ while time.time() < end:
     fn a_lease_directory_in_use_is_left_alone_by_another_shims_sweep() {
         let s = Sandbox::new();
         s.install_lease_curl(180);
-        // A 的 cargo 要等到測試明說放行才結束（不是等真實秒數）：固定秒數會在機器忙的時候比「下一顆 shim」先跑完，
-        // A 自己收尾把目錄清掉，斷言就紅——跟目錄清理的邏輯無關。上限 60 秒只是防止測試掛住。
         let d = s.dir.display();
         write_exec(
             s.dir.join("real/cargo"),
@@ -2379,7 +2315,6 @@ while time.time() < end:
         let (mut shim, group) = start_slow_shim(&s);
         let mine = s.lease_dirs();
         assert_eq!(mine.len(), 1, "{mine:?}");
-        // 只殺 shim 本人：守衛（背景）與 cargo 成了孤兒、還在跑。
         unsafe { libc::kill(shim.id() as i32, libc::SIGKILL) };
         let _ = shim.wait();
         assert!(!group_members(group).is_empty(), "守衛與 cargo 還活著");
@@ -2387,7 +2322,6 @@ while time.time() < end:
         run_the_next_shim(&s);
         assert_eq!(s.lease_dirs(), mine, "cargo 還在用這個目錄，不能清");
 
-        // 整組都沒了：沒人在用了，下一次呼叫才收得掉。
         s.kill_group(group);
         s.assert_group_gone(group);
         run_the_next_shim(&s);
@@ -2418,11 +2352,9 @@ while time.time() < end:
                 assert!(std::process::Command::new("touch").args(["-t", "202001010000"]).arg(&d).status().unwrap().success());
             }
         };
-        // 該收的：擁有者（名字裡的 pid）已死；舊格式、放很久、裡面記的 pid 也死了／沒有。
         mkdir(&format!("am-cargo-lease.{dead_pid}.aaaaaa"), None, false);
         mkdir("am-cargo-lease.OldDead", Some(dead_pid), true);
         mkdir("am-cargo-lease.OldNoPid", None, true);
-        // 不該收的：擁有者還活著；舊格式但裡面記的 pid 還活著；舊格式很年輕（可能正在建）；不是目錄；符號連結；別的東西。
         mkdir(&format!("am-cargo-lease.{live_pid}.bbbbbb"), None, false);
         mkdir("am-cargo-lease.OldLive", Some(live_pid), true);
         mkdir("am-cargo-lease.Young1", None, false);
@@ -2430,7 +2362,6 @@ while time.time() < end:
         let elsewhere = s.dir.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::write(elsewhere.join("keep"), "x").unwrap();
-        // 名字是「擁有者已死」的格式：不是符號連結的話這個會被收掉，所以「還在」證明的是符號連結被放過。
         let link_name = format!("am-cargo-lease.{dead_pid}.cccccc");
         std::os::unix::fs::symlink(&elsewhere, tmp.join(&link_name)).unwrap();
         mkdir("unrelated-dir", None, true);
@@ -2503,7 +2434,6 @@ while time.time() < end:
         };
         let server = serve(env.app.clone(), listener);
 
-        // 沙盒：真的 shim、假 cargo（25 秒，會生一顆 300 秒的「rustc」）、真的 curl（PATH 上 /usr/bin/curl）。
         let s = Sandbox::new();
         s.install_slow_cargo(25);
         let home = s.dir.join("fake-home/.config/agents-manager");
@@ -2517,7 +2447,6 @@ while time.time() < end:
         let (mut a, _, shim_err) = s.start_group(&mut cmd, false);
         let a_group = a.id() as i32;
 
-        // A 拿到名額、cargo 真的起來了。
         let up = Instant::now();
         while crate::build_scheduler::status(&env.app).await.unwrap()["active"] != 1 || s.pid("rustc.pid").is_none() {
             assert!(up.elapsed() < Duration::from_secs(30), "A 沒拿到名額：{}", std::fs::read_to_string(&shim_err).unwrap_or_default());
@@ -2525,7 +2454,6 @@ while time.time() < end:
         }
         assert!(s.alive("cargo.pid") && s.alive("rustc.pid"));
 
-        // daemon 中斷（server 整個關掉）。B 從這一刻起每 100ms 問一次名額，直到拿到。
         let outage = Instant::now();
         server.abort();
         let mut a_dead_at: Option<Duration> = None;
@@ -2545,7 +2473,6 @@ while time.time() < end:
         assert!(!s.dir.join("cargo.done").exists(), "A 不能跑完");
         s.assert_group_gone(a_group);
 
-        // daemon 回來（新的 App 開同一個資料庫）：B 持有的名額正常，名額表沒有卡死。
         let app2 = crate::testing::restart_app(&env).await;
         let server2 = serve(app2.clone(), bind_on(port));
         let st = crate::build_scheduler::status(&app2).await.unwrap();
@@ -2598,7 +2525,6 @@ while time.time() < end:
             let rc = unsafe { libc::getsockname(fd, &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr, &mut len) };
             assert_eq!(rc, 0, "佔位的 getsockname");
             bound_tx.send(u16::from_be(addr.sin_port)).unwrap();
-            // 等對方確認過「現在綁不上」才開始倒數放手：確認那一步不跟這 300ms 賽跑。
             let _ = release_rx.recv();
             std::thread::sleep(std::time::Duration::from_millis(300));
             unsafe { libc::close(fd) };
@@ -2618,7 +2544,6 @@ while time.time() < end:
     #[test]
     fn another_bots_shim_on_path_is_not_mistaken_for_the_real_cargo() {
         let s = Sandbox::new();
-        // 另一顆 bot 的 bin 目錄，插在自己的 bin 與真 cargo 之間。
         let other = s.dir.join("other-bot");
         super::install_local(&other).unwrap();
         let call_log = s.dir.join("curl-calls.log");
@@ -2643,7 +2568,6 @@ esac
         cmd.args(["check", "-p", "agents-managerd"]);
         let (_, err, rc) = s.run_group(cmd, None);
         assert_eq!(rc, 0, "{err}");
-        // 真 cargo 真的跑到了（不是卡在等名額），而且整趟只拿一個名額。
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "{err}");
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
@@ -2658,7 +2582,6 @@ esac
         std::fs::create_dir_all(&home_bin).unwrap();
         let log = s.dir.join("cargo.log");
         write_exec(home_bin.join("cargo"), format!("#!/bin/sh\necho home \"$@\" >> '{}'\n", log.display()));
-        // PATH 上沒有 `real`（假 cargo 的目錄）：跟 bot pane 一樣，第一個 cargo 就是 shim 自己。
         let path = format!("{}:/usr/bin:/bin", s.dir.join("bin").display());
         let mut cmd = s.command(&path);
         cmd.env_remove("CARGO_HOME").arg("--version");
@@ -2666,7 +2589,6 @@ esac
         assert_eq!(rc, 0, "{err}");
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "home --version\n", "{err}");
 
-        // `$CARGO_HOME` 先於 `$HOME/.cargo`。
         let cargo_home = s.dir.join("cargo-home");
         std::fs::create_dir_all(cargo_home.join("bin")).unwrap();
         write_exec(cargo_home.join("bin/cargo"), format!("#!/bin/sh\necho cargo-home \"$@\" >> '{}'\n", log.display()));
@@ -2689,7 +2611,6 @@ esac
         assert_eq!(rc, 127, "{err}");
         assert_eq!(err, "agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n");
 
-        // 退回的位置一樣要過「是不是 shim」的防呆：`$CARGO_HOME/bin` 是另一顆 bot 的 shim 目錄時跳過，不能遞迴進去。
         let other = s.dir.join("bots/OTHER");
         super::install_local(&other).unwrap();
         let mut cmd = s.command(&path);
@@ -2707,13 +2628,10 @@ esac
     #[test]
     fn two_layers_of_shims_with_only_two_slots_do_not_deadlock() {
         let s = Sandbox::new();
-        // 第二層：別顆 bot 的 bin，而且是**舊版** shim（沒有 marker），只認得出檔頭的話會漏掉它。
         let other = s.dir.join("bots").join("OTHER").join("bin");
         std::fs::create_dir_all(&other).unwrap();
         let old_shim = super::SHIM_SH.replace("AM_SHIM_MARKER", "(舊版沒有這一行)");
         write_exec(other.join("cargo"), &old_shim);
-        // 名額上限 2，而且拿滿就不再給——真的死鎖時這個測試會停在這裡（fake curl 不會 sleep，
-        // shim 的 retry_after_secs=0，所以是一個忙等的迴圈，不是 10 分鐘的假等待）。
         let call_log = s.dir.join("curl-calls.log");
         s.install_fake_curl(&format!(
             r#"echo "$@" >> '{log}'
@@ -2858,7 +2776,6 @@ esac
         assert!(!log.exists(), "熱池名額全滿：本機 cargo 不該起來");
         assert!(std::fs::read_to_string(&err).unwrap().contains("排隊"), "要印排隊訊息");
 
-        // 放掉一顆：只有這一顆空出來，shim 拿到它之後照常跑完。
         let freed = holders.remove(0);
         let mut freed = freed;
         let _ = freed.kill();

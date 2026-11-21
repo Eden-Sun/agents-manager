@@ -24,7 +24,6 @@ async fn health_loop(app: Arc<App>) {
         let mut previous = String::new();
         let mut debounce = core::Debounce::default();
         let mut detector = crate::supervisor::incidents::Detector::default();
-        // 處理完的 inbox 列的大 payload 每小時收一次（第一次在開機後的第一拍）：見 `store::compact_handled_payloads`。
         let mut last_compact: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
@@ -44,18 +43,13 @@ async fn health_loop(app: Arc<App>) {
                     Ok(n) => tracing::info!(compacted = n, "compacted old handled inbox payloads"),
                     Err(e) => tracing::warn!(error = ?e, "could not compact old handled inbox payloads"),
                 }
-                // 小的流水帳事件不會被壓縮，表只增不減：處理完放了 60 天的整列刪掉（只限不靠 event_key 去重的種類）。
                 match crate::supervisor::store::prune_handled_events(&app.db, crate::supervisor::store::PRUNE_HANDLED_AFTER_SECS).await {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(pruned = n, "pruned old handled log events from the inbox"),
                     Err(e) => tracing::warn!(error = ?e, "could not prune old handled inbox events"),
                 }
             }
-            // #427 第 2 項：先看兩顆角色 bot 的畫面（巡檢也看），結論放記憶體。
-            // 要排在 `sweep` **之前**——incident 與同一拍的 health 讀數要講同一件事，理由同下一行。
             crate::supervisor::role_faults::refresh(&app).await;
-            // Incidents first: the snapshot below reports what this pass decided, so a fault
-            // and the health reading that mentions it never disagree by one tick.
             crate::supervisor::incidents::sweep(&app, &mut detector).await;
             let Ok(snapshot) = core::snapshot(&app).await else { continue };
             let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown").to_string();
@@ -75,9 +69,6 @@ async fn health_loop(app: Arc<App>) {
                 previous = fingerprint;
                 let _ = app.emit("supervisor_health", snapshot.clone()).await;
             }
-            // Keyed on the manager's and the responder's halves. System faults have their own
-            // durable incidents with their own one-event-per-transition rule; letting them move this
-            // key too would tell the manager the same thing twice.
             let severity = core::inbox_severity(&snapshot);
             core::queue_health_change(&app.db, &mut debounce, &snapshot, &severity, &sup_status).await;
         }

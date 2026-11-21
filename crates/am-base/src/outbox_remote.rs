@@ -107,14 +107,11 @@ pub(crate) async fn target(app: &impl OutboxRemoteEnv, bot_id: &str) -> Result<O
         return Ok(None);
     }
     let conn = app.host_conn(&project.host).await.ok_or_else(|| unreachable(&project.host))?;
-    // 已知連不上（睡著、tailscale 斷線）就直接說連不上：不去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
-    // 網頁每開一次也不會多養一條卡住的 ssh 行程。
     if !conn.is_connected() {
         return Err(unreachable(&project.host));
     }
     let home = conn.home().await.map_err(|_| unreachable(&project.host))?;
     let dir = remote_dir(&home, app.instance().as_deref(), bot_id).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    // 讀不到是不是分享用 bot 就當是（寧可少刪：多留一個檔只是佔點空間，錯刪是拿不回來的）。
     let keep = !matches!(crate::db::is_share_bot(app.db_pool(), bot_id).await, Ok(false));
     Ok(Some(Target { conn, dir, keep }))
 }
@@ -228,7 +225,6 @@ pub fn list_script_race_with_lsof(dir: &str, before_open: &str, after_open: &str
 }
 
 fn list_script_inner(dir: &str, before_open: &str, after_open: &str, lsof_path: &str, keep: bool) -> String {
-    // 一般 bot：順手刪掉超過 1 小時的檔（遠端沒有 AGM 的 outbox-gc）；分享用 bot：不刪。
     let gc = if keep {
         String::new()
     } else {
@@ -316,7 +312,6 @@ fn parse_list_with(out: &str, now: u64, keep: bool) -> Option<Vec<serde_json::Va
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
         let mut meta = meta.split_whitespace();
         let (Some(Ok(size)), Some(Ok(modified))) = (meta.next().map(str::parse::<u64>), meta.next().map(str::parse::<u64>)) else { continue };
-        // 第三欄 ctime＝搬進來的時間；舊格式沒有這一欄就只看 mtime。
         let changed = meta.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
         if name.is_empty()
             || name.chars().any(char::is_control)
@@ -350,10 +345,7 @@ fn parse_list_with(out: &str, now: u64, keep: bool) -> Option<Vec<serde_json::Va
 }
 
 pub async fn list(t: Target, now: u64) -> Result<Response, LcError> {
-    // 分享用 bot 沒有 1 小時的承諾：`ttl_secs:null`、`kept:true`、`keep_days`（同本機分享 bot 的列表）。
     let ttl = if t.keep { json!(null) } else { json!(TTL_SECS) };
-    // `target()` and I/O are separate awaits. The supervisor can mark this connection down
-    // between them, so don't start a new SSH process after that state is already known.
     if !t.conn.is_connected() {
         return Ok((StatusCode::OK, axum::Json({
             let mut body = unreachable_body(&t.conn.name);
@@ -478,7 +470,6 @@ pub async fn file(t: Target, requested: &str, inline: bool) -> Result<Response, 
     }
     let not_found = || LcError::NotFound("file".into());
     let name = safe_name(&t.dir, requested).ok_or_else(not_found)?;
-    // 名額在逾時之前拿：排隊的時間不算進 FILE_TIMEOUT。
     let _permit = file_slot(&t.conn.name).acquire_owned().await.ok();
     let out = t
         .conn

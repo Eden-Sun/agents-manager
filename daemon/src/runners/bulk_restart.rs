@@ -10,7 +10,6 @@ use std::time::Duration;
 
 async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result<Cand> {
     let notice = run.update_notice.as_deref().unwrap_or("");
-    // 只對「真的可能被重啟」的現場讀畫面（閒置、有待套用的更新、不是子 agent／default session）：其餘的理由先擋了，不必多一趟 herdr。
     let may_restart = run.agent_status == "idle"
         && !notice.trim().is_empty()
         && bot.managed_by != "child"
@@ -162,7 +161,6 @@ impl Drop for BatchSlot {
         };
         let app = self.app.clone();
         rt.spawn(async move {
-            // 全域的先開：它涵蓋所有範圍批次的目標，後面的範圍批次到時要嘛被它涵蓋、要嘛照舊排在它後面。
             if all {
                 match spawn_scoped_request(&app, None).await {
                     Ok(plan) => tracing::info!(status = %plan["restart_status"], batch = %plan["batch_id"], "deferred unscoped restart started"),
@@ -273,8 +271,6 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
         };
         let Some(request) = &request else {
             if running_is_scoped {
-                // 正在跑的是範圍批次（cli-update 開的，只有那台那個 kind）：接回它看進度不等於這次要的都排進去了。
-                // 還有不在那一批裡的等著套用的 bot 就排在它後面，放掉那一格時自己接著開一批全域的。
                 let cands = candidates(app, None).await?;
                 let (go, _) = plan(&cands);
                 let wanted: Vec<serde_json::Value> = go.iter().map(|c| json!({"bot_id": c.bot_id, "name": c.name})).collect();
@@ -286,7 +282,6 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
                                      "restart_status": "deferred", "behind_batch_id": r.batch_id, "deferred": wanted}));
                 }
             }
-            // 不限範圍的再按一次＝接回那一批看進度（#492）；這裡不宣稱涵蓋了什麼，所以不帶 `restart_status`。
             return Ok(json!({"batch_id": existing, "total": 0, "planned": [], "skipped": [], "already_running": true}));
         };
         let cands = candidates(app, Some(&request.scope)).await?;
@@ -297,10 +292,7 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
         let (go, _) = plan(&cands);
         let wanted: Vec<serde_json::Value> = go.iter().map(|c| json!({"bot_id": c.bot_id, "name": c.name})).collect();
         let mut running = running_batches().lock().unwrap();
-        // 挑候選的期間那一批結束了：那一格空出來，重來一次（這次多半自己開）。
         let Some(r) = running.get_mut(&slot_key) else { continue };
-        // A fence-bound request can only join a batch whose targets were selected under that same authority.
-        // Keep the historical #566 coverage rule unchanged for name-only callers.
         let coverage_authority_matches = request.fence.is_none()
             || r.request.as_ref().is_some_and(|running| same_authority(running, request));
         if coverage_authority_matches && !go.is_empty() && go.iter().all(|c| r.remaining.contains(&c.bot_id)) {
@@ -359,7 +351,6 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
         });
     } else {
         drop(slot);
-        // 空批次也送 done，前端不必另外處理「什麼都沒發生」。
         app.emit(
             "bots_restart_done",
             json!({"batch_id": batch_id, "ok": [], "failed": [], "skipped": skipped_json}),
@@ -402,10 +393,7 @@ async fn run_batch_with_authority(
     let mut skipped = skipped;
     for (i, (bot_id, name)) in targets.into_iter().enumerate() {
         let index = i + 1;
-        // 輪到它就不再算「還排著」：之後到的範圍批次不能拿這顆當成已經涵蓋（它正在／已經被動過了，#566）。
         mark_reached(app, batch_id, &bot_id);
-        // 計畫是按下去那一刻的快照，一顆 `stop_bot` 最久十秒，排在後面的要等上一兩分鐘；這段時間裡 AGM 派了工、
-        // 使用者打了字，它就在回合中了。硬重啟會把回合連同 in-flight turn 一起砍掉（review 2026-09-16）。
         let skip_now = |why: Skip| {
             let row = json!({"bot_id": bot_id, "name": name, "reason": why.code(), "reason_label": why.label()});
             let ev = json!({"batch_id": batch_id, "index": index, "total": total, "bot_id": bot_id, "name": name,
@@ -454,8 +442,6 @@ async fn run_batch_with_authority(
         }
         let res = restart_resuming_with_authority(app, &bot_id, authority.as_ref()).await;
         match res {
-            // recheck 之後、拿到 bot 鎖之前它忙起來了：跟上面一樣是跳過，不是失敗——不推 bot_restart_failed、
-            // 也不做失敗收尾（它的 run 沒被動過）。
             Restarted::Busy(why) => {
                 if why == Skip::HostSuperseded {
                     tracing::warn!(bot = %name, reason = why.code(), "skipped under the bot lock because the scoped host authority changed");
@@ -480,7 +466,6 @@ async fn run_batch_with_authority(
                 let msg = format!("{e:#}");
                 tracing::warn!(bot = %name, error = %msg, "restart for the claude update failed");
                 settle_failed_restart(app, &bot_id).await;
-                // Own kind, not `health_changed`, so the supervisor can tell it from background noise.
                 let _ = crate::supervisor_inbox::push_inbox(
                     &app.db,
                     &format!("bot_restart_failed:{batch_id}:{bot_id}"),
@@ -560,8 +545,6 @@ async fn restart_resuming_with_authority(
     bot_id: &str,
     authority: Option<&crate::hosts::HostFence>,
 ) -> Restarted {
-    // 走哪一條是破壞性的決定（一般路徑會把 pane 關掉），所以要由一次**讀得到**的 bot 決定：讀不到就這顆失敗、什麼都不動，
-    // 絕不猜成一般 bot（#188）。`restart_bot_with` 自己也會拒絕 child，這裡是第一道、那裡是最後一道。
     #[cfg(test)]
     crate::lifecycle::race_point::hit("bulk_restart_before_lookup", bot_id).await;
     let lookup = db::bot(&app.db, bot_id).await;
@@ -569,7 +552,6 @@ async fn restart_resuming_with_authority(
     crate::lifecycle::race_point::hit("bulk_restart_after_lookup", bot_id).await;
     match lookup {
         Ok(Some(bot)) if bot.managed_by == "child" || bot.parent_bot_id.as_deref().is_some_and(|p| !p.is_empty()) => {
-            // 輪到它時再看一次（計畫之後才被認領成 child 的也擋）：子 agent 一律不由 daemon 重啟（SPEC §6.5a）。
             return Restarted::Busy(Skip::Child);
         }
         Ok(Some(_)) => {}
@@ -581,7 +563,6 @@ async fn restart_resuming_with_authority(
             return Restarted::Busy(Skip::HostSuperseded);
         }
     }
-    // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
     let opts = StartOpts { resume_native: true, require_idle: true, refuse_background_jobs: true, ..Default::default() };
     let res = match authority {
         Some(fence) => lifecycle::restart_bot_with_host_fence(app, bot_id, opts, fence).await,
@@ -639,7 +620,6 @@ async fn settle_failed_restart(app: &Arc<App>, bot_id: &str) {
     let (run, bot) = match (db::active_run(&app.db, bot_id).await, db::bot(&app.db, bot_id).await) {
         (Ok(Some(run)), Ok(Some(bot))) => (run, bot),
         (Ok(_), Ok(_)) => return,
-        // 讀不到就不能判斷 pane 還在不在，不動它（reconcile 每一輪會收留下來的 run）；但要留一行，不能靜默。
         (run, bot) => {
             let why = run.err().or_else(|| bot.err());
             tracing::warn!(bot = bot_id, error = ?why, "could not read the run after a failed restart; leaving it for reconcile");
@@ -663,7 +643,6 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
     while waited < window {
         tokio::time::sleep(poll).await;
         waited += poll;
-        // 等待期間使用者明確停了它、或總管改指別顆：這個延遲任務不再有立場動它（#351）。
         if !supervisor_still_wanted(&app, &bot_id).await {
             tracing::info!(bot = %name, "supervisor restart verification dropped: the supervisor is no longer wanted running (user stop or re-setup)");
             return;
@@ -675,8 +654,6 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
     }
     tracing::warn!(bot = %name, "supervisor did not come back within 60s of the update restart; starting it once more");
     settle_failed_restart(&app, &bot_id).await;
-    // 補啟動之前在 supervisor 鎖裡再讀一次權威意圖（#351）：使用者的停止（`post_stop`）也在這把鎖裡先寫 `desired_running=0`
-    // 再停機，所以這裡要嘛看到停止（不啟動），要嘛在它之前啟動、之後被它停掉——不會有「停完又被拉起來」。
     let _g = crate::runners::app_ports_p11::supervisor_lock().await;
     if !supervisor_still_wanted(&app, &bot_id).await {
         tracing::info!(bot = %name, "supervisor restart retry cancelled: the supervisor is no longer wanted running");
@@ -814,7 +791,6 @@ mod tests {
     #[test]
     fn non_candidates_are_not_reported_at_all() {
         let cands = vec![
-            // grok 沒有 update_notice 這條巡邏，就算硬塞 has_update 也不算候選（跟寫入端假設對齊）。
             cand("gk", "grok", "running", "working", true, false),
             cand("cl-no-update", "claude", "running", "idle", false, false),
             cand("cl-yes", "claude", "running", "idle", true, false),
@@ -890,7 +866,6 @@ mod tests {
         assert_eq!(skip[0].1, Skip::BackgroundJobs(2));
         assert_eq!(skip[0].1.code(), "background_jobs");
         assert_eq!(skip[0].1.label(), "背景執行中（2）");
-        // 比它更該先處理的理由排在前面：正在跑的先說「正在跑」。
         let working = Cand { background_jobs: Some(1), ..cand("w", "claude", "running", "working", true, false) };
         assert_eq!(skip_reason(&working), Some(Skip::Working));
     }
@@ -902,7 +877,6 @@ mod tests {
         let app = env.app.clone();
         let (busy, busy_run) = pending_bot(&env, "bg", "claude", "Update installed · Restart to update").await;
         let (fresh, _) = pending_bot(&env, "fresh", "claude", "Update installed · Restart to update").await;
-        // 計畫時現場讀畫面（不靠巡邏的帳）：busy 的畫面底部標著 1 個背景 shell。
         env.herdr.set_screen(&format!("pane-{busy}"), &background_screen());
         let _ = busy_run;
         let plan = spawn(&app).await.unwrap();
@@ -925,7 +899,6 @@ mod tests {
         let release = hold_batch_at(&first);
         let plan = spawn(&app).await.unwrap();
         assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == late), "計畫時它還是乾淨的：{plan}");
-        // 計畫之後它才丟出背景工作：輪到它時現場讀畫面看得到。
         env.herdr.set_screen(&format!("pane-{late}"), &background_screen());
         release.send(()).unwrap();
         assert!(
@@ -1040,7 +1013,6 @@ mod tests {
         let (unseen, _) = pending_bot(&env, "unseen", "claude", "Update installed · Restart to update").await;
         let (clean, clean_run) = pending_bot(&env, "clean", "claude", "Update installed · Restart to update").await;
         let quiet = std::fs::read_to_string(format!("{}/../crates/am-lifecycle/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        // 巡邏上一輪看過「乾淨」，之後才丟出背景工作；另一顆巡邏還沒輪到。
         crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &stale_run, 0);
         crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &clean_run, 0);
         env.herdr.set_screen(&format!("pane-{stale}"), &screen);
@@ -1087,7 +1059,6 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = db::ulid();
-        // An identity this host does not know: `start` refuses before spawning anything.
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, identity, created_at)
              VALUES (?,?,'alfa','claude','[]',0,1,'tok','nope',?)",
@@ -1099,7 +1070,6 @@ mod tests {
         .await
         .unwrap();
         let run = crate::testing::fake_run(&app, &bot).await;
-        // 真的候選才會被排進批次：帶著更新通知、閒置（輪到它時會再看一次）。
         sqlx::query("UPDATE runs SET update_notice='Update installed · Restart to update' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
 
         run_batch(&app, "batch-1", vec![(bot.clone(), "alfa".into())], vec![], None).await;
@@ -1137,7 +1107,6 @@ mod tests {
         let done = done.expect("done 一定會送");
         assert_eq!(done["ok"].as_array().unwrap().len(), 0);
         assert_eq!(done["skipped"][0]["reason"], "working", "{done}");
-        // 更新已經套用過（沒有 update_notice）的也不重啟。
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::Working));
         sqlx::query("UPDATE runs SET update_notice=NULL, agent_status='idle' WHERE bot_id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         assert_eq!(recheck(&app, &bot.id).await, Some(Skip::NoLongerPending));
@@ -1240,7 +1209,6 @@ mod tests {
         assert_eq!(busy_skip(&conflict("turn_in_flight")), Some(Skip::TurnInFlight));
         assert_eq!(busy_skip(&conflict("not_running")), Some(Skip::NotRunning));
         assert_eq!(busy_skip(&conflict("???")), Some(Skip::UnknownStatus));
-        // 其他 409 與其他錯誤照舊是失敗。
         assert_eq!(busy_skip(&LcError::conflict("default_session", json!({}))), None);
         assert_eq!(busy_skip(&LcError::Upstream("herdr down".into())), None);
     }
@@ -1293,7 +1261,6 @@ mod tests {
             Restarted::Busy(_) => panic!("讀不到分類是失敗，不是跳過"),
         }
         crate::lifecycle::restart_kind_tests::assert_child_untouched(&env, &kid).await;
-        // 對照：DB 好了，同一顆以 child 跳過（不是一般路徑）。
         assert!(matches!(restart_resuming(&app, &kid.id).await, Restarted::Busy(Skip::Child)));
     }
 
@@ -1304,7 +1271,6 @@ mod tests {
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
         let since = env.herdr.methods().len();
-        // 子 agent：輪到它時跳過（Skip::Child），一個 herdr 呼叫都沒有、run 不動、bot 不被軟刪（2026-09-22 rollout 的事故）。
         match restart_resuming(&app, &kid.id).await {
             Restarted::Busy(Skip::Child) => {}
             Restarted::Busy(w) => panic!("子 agent 必須以 child 跳過，不是 {}", w.code()),
@@ -1316,7 +1282,6 @@ mod tests {
         assert!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().deleted_at.is_none());
         assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id));
 
-        // 一般 bot：stop + start（這裡身份不存在，start 一定失敗，證明走的是 restart_bot_with 那一條）。
         let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
         sqlx::query("UPDATE bots SET identity='nope-not-on-this-host' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
         crate::testing::fake_run(&app, &bot.id).await;
@@ -1324,10 +1289,8 @@ mod tests {
             Restarted::Failed(e) => assert!(format!("{e:#}").contains("identity is not known"), "{e:#}"),
             _ => panic!("一般 bot 走 stop + start，身份不存在時 start 失敗"),
         }
-        // 不存在的 bot：排到它時已經不用重啟，是跳過。
         assert!(matches!(restart_resuming(&app, "no-such-bot").await, Restarted::Busy(Skip::NoLongerPending)));
     }
-
 
     /// herdr 回 agent_name_taken（舊 agent 還掛在原 pane）：不能留成「沒有 active run」讓 reconcile 退役軟刪（2026-09-22）。
     #[tokio::test]
@@ -1347,7 +1310,6 @@ mod tests {
         assert_eq!(run.state, "running");
         assert!(env.herdr.tab(&kid.tab_id).unwrap().panes.contains(&kid.pane_id), "pane 沒被關");
 
-        // Expire the temporary restart hand-off guard so this specifically exercises the permanent name-taken hold.
         sqlx::query("UPDATE supervisor_notes SET body='2000-01-01T00:00:00.000Z' WHERE supervisor_id=? AND kind='child_retirement_grace'")
             .bind(&kid.id)
             .execute(&app.db)
@@ -1369,7 +1331,6 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "rh").await;
-        // The explicit parent relationship alone is enough to make it a child, even if managed_by drifted.
         sqlx::query("UPDATE bots SET managed_by='user' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
         mark_update_pending(&app, &kid.run_id).await;
         let mut events = app.subscribe();
@@ -1395,7 +1356,6 @@ mod tests {
         let app = env.app.clone();
         let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "ui").await;
         mark_update_pending(&app, &kid.run_id).await;
-        // 後面那顆：身份不存在，start 一定失敗（跟上面 a_failed_restart… 同一個做法）。
         let other = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, identity, created_at)
@@ -1421,8 +1381,6 @@ mod tests {
             }
         }
         let done = done.expect("done 一定會送");
-        // 2026-09-22 起輪到它時先重讀狀態：讀不到就是「這次沒動它」（state_unreadable），讀到了就是 child——
-        // 兩種都在 skipped、都不動它；後面那顆照跑、照列在 failed。
         let failed = done["failed"].as_array().unwrap();
         assert_eq!(failed.len(), 1, "{done}");
         assert_eq!(failed[0]["bot_id"], other.as_str(), "後面那顆照跑、照列");
@@ -1505,7 +1463,6 @@ mod tests {
         let bot = supervisor_fixture(&env, "agm-a").await;
         let verifier = tokio::spawn(verify_supervisor_back_with(app.clone(), bot.clone(), "agm-a".into(), "batch-1".into(), Duration::from_millis(400), Duration::from_millis(50)));
         tokio::time::sleep(Duration::from_millis(120)).await;
-        // 使用者按了停止：意圖先寫進 DB（`stop_requested` 的第一步）。
         crate::runners::app_ports_p11::test_helpers::supervisor_store_set_desired_running(&app.db, false).await.unwrap();
         verifier.await.unwrap();
         assert_eq!(starts(&env), 0, "使用者明確停掉之後，舊批次的驗證任務不能把它拉回來");
@@ -1576,14 +1533,12 @@ mod tests {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let (cl, _) = pending_bot(&env, "cl", "claude", "Update installed · Restart to update").await;
-        // 第一批定清單時 codex 還沒裝好（「需安裝」＝跳過，不在清單裡）。
         let (cx, cx_run) = pending_bot(&env, "cx", "codex", "codex 有新版 0.157.0（這個 run 跑的是 0.155.1），需安裝").await;
         let events = collect_restart_events(&app);
         let release = hold_batch_at(&cl);
 
         let first = spawn(&app).await.unwrap();
         assert_eq!(first["planned"].as_array().unwrap().len(), 1, "第一批只有 claude：{first}");
-        // 裝好了：`mark_installed` 把通知換成「已安裝」，接著開那台 codex 的範圍批次。
         sqlx::query("UPDATE runs SET update_notice='codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用' WHERE id=?")
             .bind(&cx_run)
             .execute(&app.db)
@@ -1681,14 +1636,11 @@ mod tests {
 
         let scoped = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "local".into() })).await.unwrap();
         assert!(scoped["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == cx2), "{scoped}");
-        // 先等批次真的卡在 cx（recheck 之後、`restarting` 推出之後才是 hold 點）：沒等就清它的 notice，批次的 recheck 還沒跑的話
-        // 會看到「不用重啟了」直接跳過 cx、往下輪到 cx2，cx2 就不算還排著（recheck 變慢時偶發紅）。
         assert!(
             crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == cx && d["status"] == "restarting")),
             "{:?}",
             events.lock().unwrap()
         );
-        // 卡住的那顆（已經輪到、不算「還排著」）更新套完了：現在等著的只剩還排在那一批裡的 cx2。
         sqlx::query("UPDATE runs SET update_notice=NULL WHERE id=?").bind(&cx_run).execute(&app.db).await.unwrap();
         let all = spawn(&app).await.unwrap();
         assert_eq!(all["already_running"], true, "{all}");

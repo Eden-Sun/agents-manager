@@ -42,7 +42,6 @@ pub fn spawn(app: Arc<App>) {
                     tokio::spawn(async move { pretranslate(&app, &id).await });
                 }
                 Ok(_) => {}
-                // 落後的事件丟掉：網頁開頁時仍會自動翻（有快取就不扣費），不會漏翻到無法補救。
                 Err(RecvError::Lagged(_)) => continue,
                 Err(_) => break,
             }
@@ -82,13 +81,11 @@ pub(crate) async fn pretranslate(app: &App, id: &str) {
         return;
     }
     let Ok(_permit) = SLOTS.acquire().await else { return };
-    // 排隊期間可能已經失敗過或設定被關掉：拿到名額後再看一次。
     if cooling_down() || !mt::auto_on(app).await {
         return;
     }
     match mt::translate(app, id, &content).await {
         Ok(_) => {}
-        // 這則品質檢查沒過（已寫負面標記）：服務是好的，不冷卻，後面的訊息照翻。
         Err(e) if mt::is_quality_rejection(&e) => {
             let check = match &e { crate::lifecycle::LcError::Unprocessable(v) => v["reason"].as_str().unwrap_or("unknown").to_string(), _ => String::new() };
             tracing::info!(message = %id, check = %check, "message pretranslate rejected by quality check; not cooling down");
@@ -212,7 +209,6 @@ mod tests {
         insert(&env, &bot_id, "m-pre-1", "assistant", EN, 0, false, "transcript").await;
         pretranslate(&env.app, "m-pre-1").await;
         assert_eq!(f.calls.load(Ordering::SeqCst), 1, "落地就翻一次");
-        // 網頁之後開頁、手動按：命中快取，不再扣費。
         let shown = mt::translate(&env.app, "m-pre-1", EN).await.unwrap();
         assert_eq!((shown["cached"].clone(), shown["translation"].clone()), (serde_json::json!(true), serde_json::json!("你好世界")));
         assert_eq!(f.calls.load(Ordering::SeqCst), 1);
@@ -273,7 +269,6 @@ mod tests {
     async fn quality_rejection_does_not_cool_down_but_a_500_does() {
         let _g = TEST_LOCK.lock().await;
         let (env, bot_id, f) = setup(true, 0).await;
-        // 模型回英文原文＝品質沒過（重試後仍英文）。
         *f.text.lock().unwrap() = Some(EN.to_string());
         insert(&env, &bot_id, "m-q1", "assistant", EN, 0, false, "transcript").await;
         let en2 = "Rolled back the migration because the schema check reported a mismatch in two tables.";
@@ -283,7 +278,6 @@ mod tests {
         let before = f.calls.load(Ordering::SeqCst);
         pretranslate(&env.app, "m-q2").await;
         assert!(f.calls.load(Ordering::SeqCst) > before, "後面的訊息照翻");
-        // 真的失敗（500）才冷卻。
         *f.text.lock().unwrap() = None;
         f.fail.store(true, Ordering::SeqCst);
         insert(&env, &bot_id, "m-q3", "assistant", "Merged the branch and then deleted the stale worktrees that were left behind.", 0, false, "transcript").await;

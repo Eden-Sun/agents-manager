@@ -11,7 +11,6 @@ impl Capture for ClaudeCapture {
             let zone = status_zone_start(&lines, cut);
             return lines[zone..cut].iter().any(|l| is_zone_busy(l.trim()));
         }
-        // 沒有輸入框（測試給的單行 spinner）：只認活動列形狀。`·`／`*` 要有 `(… tokens)` 那種形狀才算。
         lines.iter().any(|l| {
             let s = l.trim();
             is_live_spinner(s) || is_legacy_spinner(s)
@@ -20,7 +19,6 @@ impl Capture for ClaudeCapture {
 
     fn awaits_input(&self, screen: &str) -> bool {
         screen.lines().rev().take(12).any(|l| {
-            // claude 2.1.285 的空框是 `❯` 接 U+00A0（2026-10-01 cf-ox-2）：空白一律 `is_whitespace`，不只空格與 tab。
             let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━".contains(*c));
             chars.next() == Some('❯') && chars.next().is_none()
         })
@@ -35,22 +33,15 @@ impl Capture for ClaudeCapture {
             + lines[after_echo..]
                 .iter()
                 .rposition(|l| l.trim_start().starts_with(marker))?;
-        // 回合結束時畫面最底的 `⏺` 常是工具呼叫（issue #753）：回覆是它上面最後一段文字，而且收在下一個工具呼叫之前。
-        // 整回合只有工具呼叫（被中斷）就沒有更好的可取，照舊取最後一個 `⏺`。
         let last_text = (after_echo..=last_marker).rfind(|&i| lines[i].trim_start().starts_with(marker) && !is_tool_call_row(&lines, i));
         let start = last_text.unwrap_or(last_marker);
         let mut out: Vec<String> = Vec::new();
-        // 回覆收到輸入框上緣為止。框的位置用真畫面：規則線夾著 `❯`（`claude-2.1.281-feedback-survey.txt`）。
-        // 緊貼上緣的那幾行是狀態列（spinner／done），不是回覆。框以上的 `│`、`---`、⚠ 都是內容。
         let found_cut = composer_top(&lines).filter(|i| *i > start);
-        // 打 slash 指令時框上緣貼著建議清單（2.1.290 起選中列是 `  ❯ /cmd  說明`，#875）：不是回覆，跟狀態列一樣切掉。
         let cut = found_cut.map_or(lines.len(), |c| suggestion_list_top(&lines, c).max(start + 1));
         let keep_until = status_zone_start(&lines, cut);
         for (i, line) in lines.iter().enumerate().take(keep_until).skip(start) {
             let t = line.trim_end();
             let s = t.trim_start();
-            // 找不到輸入框（舊的圓角框 UI）時，框的上緣 `╭` 是回覆的終點。找得到就一路收到狀態列：助手自己畫的
-            // 圓角方框圖（`╭──╮`／`╰──╯`）是內容，不能在第一個 `╭` 截掉（codex 那條同一個理由，`codex_reply_keeps_mermaid_box_drawing_lines`）。
             if found_cut.is_none() && (s.starts_with('╭') || s.starts_with('╰') || s.starts_with('▔')) {
                 break;
             }
@@ -87,7 +78,6 @@ impl Capture for ClaudeCapture {
             let Some(first) = s.chars().next() else {
                 continue;
             };
-            // `·` 字頭的提示行（`· Run in another terminal: …`）沒有 `…`，不是活動列；`*` 的規則見 spinner_led。
             let rest = if spinner_led(s) && (first != '·' || s.contains('…')) {
                 s[first.len_utf8()..].trim()
             } else if super::is_activity_shape(s) {
@@ -232,9 +222,6 @@ fn suggestion_list_top(lines: &[&str], cut: usize) -> usize {
 /// 緊貼輸入框上緣、中間沒有空行的狀態列。空行以上是回覆，不掃。
 fn status_zone_start(lines: &[&str], cut: usize) -> usize {
     let mut zone = cut;
-    // 真畫面的活動列／完成行跟輸入框上緣之間隔著空行（接在長對話後面是一行，短對話輸入框釘在畫面底、中間是一整段空白：
-    // `claude-2.1.287-linux-working.txt`、`claude-2.1.281-background-shell.txt`）：這一段空白只容許一次，而且它上面要真的是狀態列；
-    // 再往上的空行還是回覆的界線。
     let mut spacer_used = false;
     while zone > 0 {
         let s = lines[zone - 1].trim();

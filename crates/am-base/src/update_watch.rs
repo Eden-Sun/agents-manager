@@ -42,9 +42,6 @@ pub fn version_notice(disk: &str, running: &str) -> Option<String> {
     (d > r).then(|| format!("磁碟上已是 {disk}（這個 run 跑的是 {running}）· 重啟套用"))
 }
 
-// 行程級（static）的 per-run／per-bot 記憶體帳：run 或 bot 結束後沒人會再回頭清它們，長跑的 daemon 裡只增不減。
-// 這一輪的 active run 名單已經在手，順手把不在名單上的帶走。測試版不呼叫：帳是全域的，平行的測試會互相清掉對方剛記的東西
-// （每個模組的 `retain_*` 本身各有單元測試）。
 /// 軟刪（含 child 退役）之後 per-bot 行程帳多留多久：退役的 child 常是 herdr 重啟後 reconcile 暫時收掉的，父 bot 會用 herdr 重開、
 /// 復原（SPEC §6.5a）；這段時間帳清掉的話，復原後還停在同一個 blocked 問題會被再通知父 bot 一次。
 pub const RETIRED_KEEP_SECS: i64 = 30 * 60;

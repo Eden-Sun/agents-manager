@@ -127,7 +127,6 @@ pub fn asks_from_transcript(log: &str) -> Vec<AskRecord> {
     let mut out = Vec::new();
     for line in log.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
-        // claude 2.1.300 的 `api-request-blob` 也帶 `message.content`（請求裡的訊息副本），不是對話；只認 user／assistant（issue #1771）。
         if entry.get("type").and_then(Value::as_str).is_some_and(|t| t != "assistant" && t != "user") {
             continue;
         }
@@ -220,7 +219,6 @@ async fn record_on_turn(
     if records.is_empty() {
         return Ok(0);
     }
-    // 兩台機器的時鐘只比到秒：留一點餘裕，寧可多收到剛好壓線的一筆（冪等會擋重複）。
     let floor = chrono::DateTime::parse_from_rfc3339(turn_started).ok().map(|t| t.timestamp() - 2);
     let mut added = 0;
     for rec in records {

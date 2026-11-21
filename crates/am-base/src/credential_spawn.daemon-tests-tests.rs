@@ -86,7 +86,6 @@
         .await;
         assert_eq!(st, StatusCode::OK, "pane 開好了、finish 要登記成功：{v}");
 
-        // 沒帶 timeout（split／tab create、舊 shim）維持 60 秒。
         let quick = begin_with("").await;
         app.credential_spawn_gate.lock().unwrap().age_permit(&bot.id, &quick, PERMIT_TTL + Duration::from_secs(1));
         assert!(RotationFence::begin(&app, &bot.id).is_ok(), "沒帶 timeout 的 permit 過 60 秒就不擋輪替");

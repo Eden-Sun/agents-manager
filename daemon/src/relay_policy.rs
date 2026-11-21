@@ -30,24 +30,18 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
     let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bots WHERE id=? AND deleted_at IS NULL) AND EXISTS(SELECT 1 FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=? AND b.deleted_at IS NULL AND p.deleted_at IS NULL AND p.handed_off_to IS NULL)")
         .bind(from_bot_id).bind(to_bot_id).fetch_one(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
     if !live { return Err(RelayDenied::Denied("relay participant or project unavailable".into())); }
-    // 改派給副管理者的請求：原本送管理者時已通過 NewRequest，送達時不重驗副管理者（跨專案送件者本來進不了它）。
     if kind == Admission::Deliver && crate::runners::relay_deputy::redirected_open(app, from_bot_id, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Ok(None); }
     let from = crate::db::bot(&app.db, from_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("source_missing".into()))?;
     let to = crate::db::bot(&app.db, to_bot_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("target_missing".into()))?;
     let project = crate::db::project(&app.db, &from.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
     let target_project = crate::db::project(&app.db, &to.project_id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.ok_or_else(|| RelayDenied::Denied("project_missing".into()))?;
-    // 分享助理（shared_bots）是給外部使用者用的對話助理，不是執行者：任何 bot（含管理者、AGM）都不能派工給它。
-    // 使用者本人從網頁對它說話、分享使用者的對話不經 relay，不受影響。
     if is_shared_bot(&app.db, &to.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))? { return Err(RelayDenied::Denied(SHARED_BOT_NOT_DISPATCHABLE.into())); }
-    // AGM 角色（巡檢／協調者）是跨專案的協調者：不受 expert 專案的跨專案與角色限制（使用者 2026-10-31）。
     let is_agm = crate::supervisor::roles::role_of_bot(&app.db, &from.id).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?.is_some();
     if !is_agm && matches!(to.role.as_deref(), Some("executor" | "advisor" | "specialist")) && to.manager_use == 0 {
         return Err(RelayDenied::MemberDisabled(format!("{} 已被使用者停用（側欄『停用』鈕／manager_use=false），管理者無法派工；請使用者在 AG Man 側欄重新啟用", to.name)));
     }
     if is_agm { return Ok(None); }
     if to.role.as_deref() == Some("scheduler") { return Err(RelayDenied::Denied("schedule_bot_not_dispatchable".into())); }
-    // 跨專案（使用者 2026-10-31／11-02）：目標在 expert 專案 → 只准送到它的頂層 manager（對外窗口），送件者若在 expert 專案也必須是 manager；
-    // 目標在一般專案 → 寄件者是一般專案的 bot，或 expert 專案的頂層 manager（前台要能回覆外部 bot）。expert 的非管理者不能出專案。
     let from_is_front = from.role.as_deref() == Some("manager") && from.parent_bot_id.is_none();
     if from.project_id != to.project_id && (project.mode == "expert" || target_project.mode == "expert") {
         let to_front_desk = to.role.as_deref() == Some("manager") && to.parent_bot_id.is_none();
@@ -62,7 +56,6 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
             if run.as_ref().and_then(|r| r.runtime_role_policy.as_deref()) != Some(expected.as_str()) { return Err(RelayDenied::Denied("role_not_applied".into())); }
         }
         let base_allowed = direct_family || matches!(to.role.as_deref(), Some("manager" | "advisor")) || from.role.as_deref() == Some("manager");
-        // 記下**所有**成立的依據（逗號分隔）：送達時任一仍成立就放行。同時靠開關又在代班的專家，關掉開關仍可代班派工（Astra review5 #1）。
         if !base_allowed {
             let mut bases = Vec::new();
             if specialist_dispatch_allows(&project, &from, &to) { bases.push(format!("specialist:{}", project.id)); }
@@ -73,7 +66,6 @@ pub async fn relay_prompt_basis(app: &Arc<App>, from_bot_id: &str, to_bot_id: &s
             let manager: Option<String> = sqlx::query_scalar("SELECT name FROM bots WHERE project_id=? AND role='manager' AND managed_by='user' AND deleted_at IS NULL LIMIT 1").bind(&project.id).fetch_optional(&app.db).await.map_err(|e| RelayDenied::Unavailable(e.to_string()))?;
             let manager = manager.as_deref().unwrap_or("（未指定）");
             let target_role = to.role.as_deref().unwrap_or("沒有角色的成員");
-            // 開關只讓專家派工給執行者：其他組合提示開關沒有意義。
             let hint = if from.role.as_deref() == Some("specialist") && to.role.as_deref() == Some("executor") {
                 format!("本專案的「專家可直接派工給執行者」開關已關閉，請改送給管理者 {manager}")
             } else {
@@ -131,7 +123,6 @@ mod tests {
             let r = relay_prompt_allowed(&env.app, &from.id, &shared.id, kind).await;
             assert!(matches!(r, Err(RelayDenied::Denied(ref m)) if m == SHARED_BOT_NOT_DISPATCHABLE), "{kind:?}: {r:?}");
         }
-        // 分享助理自己當寄件者／回結果通知不受影響。
         assert!(relay_prompt_allowed(&env.app, &shared.id, &from.id, Admission::ResultNotice).await.is_ok());
     }
 
@@ -212,18 +203,14 @@ mod agm_cross_project_tests {
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::Deliver).await.is_ok());
 
-        // manager_use=0 (member_disabled)
         sqlx::query("UPDATE bots SET manager_use=0 WHERE id=?").bind(&worker.id).execute(&env.app.db).await.unwrap();
-        // Plain bot / manager to disabled worker -> member_disabled
         for kind in [Admission::NewRequest, Admission::Deliver] {
             let Err(RelayDenied::MemberDisabled(message)) = relay_prompt_allowed(&env.app, &manager.id, &worker.id, kind).await else { panic!("disabled member must be denied") };
             let body = member_disabled_body(&message);
             assert_eq!(body["reason"], "member_disabled");
             assert_eq!(body["message"], format!("{} 已被使用者停用（側欄『停用』鈕／manager_use=false），管理者無法派工；請使用者在 AG Man 側欄重新啟用", worker.name));
         }
-        // ResultNotice is unaffected
         assert!(relay_prompt_allowed(&env.app, &manager.id, &worker.id, Admission::ResultNotice).await.is_ok());
-        // AGM is unaffected
         assert!(relay_prompt_allowed(&env.app, &agm.id, &worker.id, Admission::NewRequest).await.is_ok());
     }
 }

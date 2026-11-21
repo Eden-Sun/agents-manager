@@ -44,8 +44,6 @@ fn thirty_lines() -> String {
     (0..30).map(|i| format!("multi line {i} of the thirty line prompt")).collect::<Vec<_>>().join("\n") + "\nReply with just OK."
 }
 
-// ───────────── 讀實機畫面 ─────────────
-
 #[test]
 fn the_real_menu_is_read_with_its_cursor() {
     let m = parse_menu(MENU_CURRENT).expect("選單");
@@ -107,7 +105,6 @@ fn a_truncated_confirm_page_matches_by_prefix_only_when_it_is_long_enough() {
     assert!(confirm_matches(&c.quoted, &thirty_lines()));
     let c = parse_confirm(CONFIRM_LONG).expect("確認頁");
     assert!(confirm_matches(&c.quoted, &long_words()), "折行不算差異");
-    // 只有兩行卻只對到前綴：不是被截斷，是另一則。
     let short = vec!["multi line 0 of the thirty line prompt".to_string(), "multi line 1 of the thirty line prompt".to_string()];
     assert!(!confirm_matches(&short, &thirty_lines()));
 }
@@ -125,7 +122,6 @@ fn a_confirm_page_whose_options_are_cut_off_is_still_read() {
 fn the_refilled_composer_is_seen_and_cleared() {
     assert!(lifecycle::composer_text("claude", REFILLED).is_some_and(|t| squash(THIRD).contains(&squash(&t))));
     assert_eq!(lifecycle::composer_text("claude", CLEARED), None);
-    // 長的只看得到尾巴幾行：是目標的連續一段。
     assert!(lifecycle::composer_text("claude", REFILLED_TAIL).is_some_and(|t| squash(&thirty_lines()).contains(&squash(&t))));
     assert!(!in_rewind_ui(REFILLED_TAIL));
 }
@@ -167,7 +163,6 @@ fn attachment_confirm_requires_identity_when_paths_are_hidden() {
             let markers = if paths.len() == 1 { "[Image #1]" } else { "[Image #1][Image #12]" };
             assert!(!confirm_matches(&quoted(&format!("{markers}{body}\n\n{header}")), &target));
             assert!(confirm_matches(&quoted(&format!("{markers}{target}")), &target));
-            // TUI wrapping is immaterial, but every body character still matters.
             assert!(!confirm_matches(&quoted(&format!("{markers}{}\n{header}", body.replace(' ', "\n"))), &target));
             for wrong in [format!("{markers}{body} extra\n\n{header}"), format!("{markers}{}\n\n{header}", body.chars().take(4).collect::<String>()), format!("{markers}{body}\n\n{header}\n/other.png")] {
                 assert!(!confirm_matches(&quoted(&wrong), &target), "{wrong}");
@@ -210,8 +205,6 @@ fn composer_cas_only_normalizes_crlf_line_endings() {
     assert!(!same_composer("a  b", "a b"));
     assert!(!same_composer("look [Image #1]", "look"));
 }
-
-// ───────────── 假 TUI ─────────────
 
 #[derive(Debug, Clone, PartialEq)]
 enum Ui {
@@ -336,7 +329,6 @@ impl FakeTui {
             Ui::Menu { cursor } => {
                 s.push_str(&"▔".repeat(40));
                 s.push_str("\n   Rewind\n\n   Restore the code and/or conversation to the point before…\n\n");
-                // 跟實機一樣只看得到游標與它上面一則。
                 let top = cursor.saturating_sub(1);
                 if top > 0 {
                     s.push_str(&format!("    ↑ {top} more above\n\n"));
@@ -416,7 +408,6 @@ impl Pane for FakeTui {
         Box::pin(async move {
             let plain = self.render();
             let Some(hint) = self.faults.styled_hint.clone() else { return Ok(plain) };
-            // 跟實機一樣：空的輸入列是 `❯` NBSP 再接 dim 的建議句；其他列前後包樣式碼。
             Ok(plain
                 .lines()
                 .map(|l| {
@@ -467,8 +458,6 @@ async fn the_fake_tui_renders_what_the_real_parsers_read() {
     let c = parse_confirm(&tui.render()).unwrap();
     assert!(confirm_matches(&c.quoted, SECOND));
 }
-
-// ───────────── 狀態機 ─────────────
 
 /// 正常路徑：打 `/rewind` → 選單 → 往上兩格到 SECOND → 確認頁字對上 → Restore → 清掉 pane 輸入列。
 #[tokio::test]
@@ -679,8 +668,6 @@ async fn a_restore_that_does_not_leave_the_ui_is_unconfirmed() {
     assert_eq!(drive(tui.as_ref(), SECOND, 0).await.unwrap_err(), Fail::Unconfirmed);
 }
 
-// ───────────── 端點 ─────────────
-
 struct Rig {
     e: tt::Env,
     bot: String,
@@ -787,7 +774,6 @@ async fn same_body_with_different_images_does_not_restore_without_path_identity(
     assert_eq!(reason(call(&r, &ids[1], &tui).await.unwrap_err()), "text_mismatch");
     assert_eq!(tui.restored(), None);
     assert!(!tui.log().iter().any(|k| k == "1"));
-    // Ambiguous body is safe when the complete attachment path proves identity.
     let tui = FakeTui::new(&[A, SECOND, C, &older, &target], Faults::default());
     assert!(call(&r, &ids[1], &tui).await.is_ok());
     assert_eq!(tui.restored(), Some(4));
@@ -801,8 +787,6 @@ async fn an_interrupted_attachment_cannot_shift_skip_to_an_older_different_image
     let dropped = attachment_prompt("same body", &["/project/c.png"]);
     let ids = insert_msgs(&r.e.app, &r.bot, &[("user", &older), ("user", &target), ("user", &dropped)]).await;
     turn_for(&r, &ids[2], "failed").await;
-    // The delivered-but-interrupted last message is absent in the CLI. skip=1
-    // therefore selects `older`, whose hidden-path confirmation looks identical.
     let tui = FakeTui::new(&[A, SECOND, C, &older, &target], Faults {
         confirm_text: Some("[Image #1]same body\n\n附加圖片（請讀取這個檔案來查看）：".into()),
         ..Default::default()
@@ -967,7 +951,6 @@ async fn a_prompt_interrupted_before_any_output_rewinds_by_clearing_its_refill()
     let r = rig().await;
     let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl")]).await;
     turn_for(&r, &ids[0], "failed").await;
-    // 輸入列裡是 claude 放回來的原文（2.1.284 實機）。
     let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some("pl".into()), ..Default::default() });
     let out = call(&r, &ids[0], &tui).await.unwrap();
     assert_eq!((out["text"].as_str(), out["hidden"].as_i64(), out["pane_cleared"].as_bool()), (Some("pl"), Some(1), Some(true)));
@@ -975,7 +958,6 @@ async fn a_prompt_interrupted_before_any_output_rewinds_by_clearing_its_refill()
     assert_eq!(tui.restored(), None, "沒按 Restore");
     assert_eq!(rewound(&r).await, vec![false; 6], "之前的都不動");
 
-    // 輸入列已經是空的（console-rpa 那次）：選單找不到，一樣算倒回。
     let r = rig().await;
     let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl")]).await;
     turn_for(&r, &ids[0], "failed").await;
@@ -1001,7 +983,7 @@ async fn a_dropped_prompt_followed_by_real_ones_rewinds_to_the_next_real_one() {
 #[tokio::test]
 async fn a_prompt_with_a_reply_missing_from_the_menu_still_fails() {
     let r = rig().await;
-    let turn = turn_for(&r, &r.ids[2], "failed").await; // 有 assistant 回覆，只是回合失敗
+    let turn = turn_for(&r, &r.ids[2], "failed").await;
     sqlx::query("UPDATE messages SET turn_id = ? WHERE id = ?").bind(&turn).bind(&r.ids[3]).execute(&r.e.app.db).await.unwrap();
     let tui = FakeTui::new(&[A, C], Faults::default());
     assert_eq!(reason(call(&r, &r.ids[2], &tui).await.unwrap_err()), "not_in_menu");
@@ -1059,8 +1041,6 @@ async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
     assert_eq!(rewound(&r).await, vec![false, false, true, true, true, true]);
 }
 
-// ───────────── review：#736／#737 的對抗式驗證 ─────────────
-
 fn conflict_body(e: LcError) -> Value {
     match e {
         LcError::Conflict(v) => v,
@@ -1080,13 +1060,11 @@ async fn a_draft_with_a_blank_row_is_shown_and_compared_whole() {
     assert_eq!(body["reason"], "composer_busy");
     assert_eq!(body["draft"], draft, "409 的 draft 要是整段，不是讀到第一個空白列就停");
 
-    // 只認得前半段的同意不能用來清整段。
     let partial = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("first paragraph".into())).await.unwrap_err();
     assert_eq!(reason(partial), "composer_changed");
     assert_eq!(tui.composer(), draft, "CAS 不符就不動");
     assert!(tui.log().is_empty(), "不能送 ctrl+c：{:?}", tui.log());
 
-    // 整段對得上才清。
     let out = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some(draft.into())).await.unwrap();
     assert_eq!(out["text"], SECOND);
     assert_eq!(out["pane_cleared"], true);
@@ -1142,8 +1120,6 @@ async fn a_foreign_draft_met_while_clearing_a_dropped_refill_never_reaches_the_l
     }
 }
 
-// ───────────── 重啟後接到倒回點（`anchor`） ─────────────
-
 /// rig 那三則的 transcript：u1(A) → a1 → u2(SECOND) → a2 → u3(C) → a3，最後是 CLI 自己補的 last-prompt。
 fn transcript_of_rig(sid: &str) -> String {
     let user = |u: &str, p: Option<&str>, text: &str| {
@@ -1197,7 +1173,6 @@ async fn the_next_resume_after_a_rewind_starts_from_the_rewind_point() {
     assert_eq!(row, (r.bot.clone(), Some("a1".to_string()), transcript_of_rig(sid).len() as i64));
     assert!(anchors_in(&path).is_empty(), "CLI 還開著：寫了也會被它結束時那行舊 leaf 蓋掉，先不寫");
 
-    // CLI 結束時補的那行（舊分支的尾巴）。
     std::fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -1206,7 +1181,6 @@ async fn the_next_resume_after_a_rewind_starts_from_the_rewind_point() {
     let bot = db::bot(&r.e.app.db, &r.bot).await.unwrap().unwrap();
     let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, true, None).await.unwrap();
     assert!(anchors_in(&path).is_empty(), "重啟前的檢查不寫");
-    // 停掉了（CLI 已經結束），接著開回來。
     sqlx::query("UPDATE runs SET state = 'stopped', ended_at = ? WHERE id = ?").bind(db::now()).bind(&r.run).execute(&r.e.app.db).await.unwrap();
     let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap();
     assert_eq!(anchors_in(&path), vec![anchor::line(sid, &Some("a1".into()))]);
@@ -1214,7 +1188,6 @@ async fn the_next_resume_after_a_rewind_starts_from_the_rewind_point() {
     let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap();
     assert_eq!(anchors_in(&path).len(), 1, "補過就不再補");
 
-    // 接回之後有了新回合：CLI 從倒回點長出新分支，錨點作廢、紀錄刪掉，之後的 resume 不再碰檔案。
     std::fs::OpenOptions::new()
         .append(true)
         .open(&path)

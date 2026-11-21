@@ -48,7 +48,6 @@ async fn each_provider_reads_only_its_own_key_file_and_failures_say_nothing() {
     assert_eq!(claude.expose_for_test(), CLAUDE_SENTINEL);
     assert_eq!(openai.expose_for_test(), SENTINEL, "openai 讀自己的 key 檔，不是 Claude 的");
 
-    // 沒開、檔案不見、權限太鬆：一律 Err(())——型別本身就裝不下路徑或 key。
     configure(&env.app, &claude_path, &openai_path, false).await;
     assert!(OpenAiConfigKeySource(weak.clone()).snapshot().await.is_err(), "openai 沒開就沒有 key");
     assert!(ConfigKeySource(weak.clone()).snapshot().await.is_ok(), "Claude 的不受影響");
@@ -60,7 +59,6 @@ async fn each_provider_reads_only_its_own_key_file_and_failures_say_nothing() {
     }
     configure(&env.app, &claude_path, &openai_path, true).await;
     assert!(OpenAiConfigKeySource(weak.clone()).snapshot().await.is_err(), "world-readable 的 key 檔不用");
-    // key_file 自己的錯誤文字也不含 key。
     let status = am_base::key_file::key_status(&openai_path).unwrap_err();
     assert!(!status.contains(SENTINEL) && !format!("{status:?}").contains(SENTINEL));
 }
@@ -87,11 +85,9 @@ async fn the_sentinel_key_appears_in_no_log_event_config_dump_or_database_row() 
         .await
         .unwrap();
 
-    // 1. key 來源（成功與失敗）。
     let source = OpenAiConfigKeySource(Arc::downgrade(&app));
     assert!(source.snapshot().await.is_ok());
 
-    // 2. 一次 openai 預留 ＋ 結算（走 cap::reserve 的 provider 範圍），含「usage 裡夾帶 key」被拒。
     let bot = crate::testing::claude_bot(&app, &env.project_id, "oai-sentinel").await;
     sqlx::query("UPDATE bots SET kind='claude-api' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
     let run = crate::testing::fake_run(&app, &bot.id).await;
@@ -116,11 +112,9 @@ async fn the_sentinel_key_appears_in_no_log_event_config_dump_or_database_row() 
     let clean = Receipt { state: "recorded", actual_speed: None, usage: Some(&clean_usage), estimated_microusd: Some(3) };
     db_api::record(&app.db, &f1, "oai-attempt", &clean, &chk(false)).await.unwrap();
 
-    // 3. 設定的 Debug／序列化只有路徑，沒有 key。
     let dump = format!("{:?}\n{}", cfg.openai_api, toml::to_string_pretty(&cfg.openai_api).unwrap());
     assert!(!dump.contains(SENTINEL) && !dump.contains(CLAUDE_SENTINEL), "{dump}");
 
-    // 4. 整個 api_bot 帳本與 receipt、messages 的所有文字欄位。
     let mut db_text = String::new();
     for table in ["api_bot_sessions", "api_bot_attempts", "api_bot_join_receipts", "api_bot_rejected_responses", "messages", "turns"] {
         let rows = sqlx::query(&format!("SELECT * FROM {table}")).fetch_all(&app.db).await.unwrap();
@@ -136,7 +130,6 @@ async fn the_sentinel_key_appears_in_no_log_event_config_dump_or_database_row() 
     }
     assert!(!db_text.contains(SENTINEL) && !db_text.contains(CLAUDE_SENTINEL), "DB 裡找到 key");
 
-    // 5. WS 事件與 log。
     let mut events = String::new();
     while let Ok(ev) = ws.try_recv() {
         events.push_str(&format!("{} {}\n", ev.kind, ev.data));

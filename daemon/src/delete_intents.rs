@@ -26,11 +26,9 @@ const DELETE_INTENT_TTL_SECS: i64 = 60 * 60;
 /// 寫不進去＝什麼都還沒動，呼叫端不能繼續（fail closed）。
 pub async fn begin(app: &(impl crate::capabilities::BootId + crate::capabilities::Db), kind: &str, subject: &str, host: &str, payload: &Value) -> Result<String, crate::lifecycle::LcError> {
     let id = match intents::insert(app.db(), kind, subject, host, payload, DELETE_INTENT_TTL_SECS).await {
-        // 已經有一件開著：上一個行程留下的（我們持著鎖、這次自己來做），沿用它。
         Ok(Inserted::New(i)) | Ok(Inserted::AlreadyOpen(i)) => i.id,
         Err(e) => return Err(crate::lifecycle::LcError::Upstream(format!("cannot record the {kind} intent: {e:#}"))),
     };
-    // 認領失敗（讀不到）不擋刪除：intent 已經在，最壞是開機時由 recovery 驗證世界後收掉。
     if let Err(e) = intents::claim(app.db(), &id, app.boot_id()).await {
         tracing::warn!(intent = %id, error = %e, "could not claim the delete intent");
     }
@@ -55,7 +53,7 @@ pub async fn complete(app: &impl crate::capabilities::Db, id: &str) {
 pub fn spawn_retry(app: Arc<App>, id: String, why: String) {
     tokio::spawn(async move {
         match intents::record_failure(&app.db, &id, &why).await {
-            Ok(true) => return, // 已放棄並通知
+            Ok(true) => return,
             Ok(false) => {}
             Err(e) => {
                 tracing::warn!(intent = %id, error = %e, "could not record the delete failure; retrying anyway");
@@ -101,8 +99,6 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
         Ok(false) => match intents::get(&app.db, id).await {
-            // 這顆 boot 自己留下的 running（上一輪記不下失敗、或 handler 沒收尾）：不經 claim 直接續做（#1059）。
-            // 安全性靠 resume_*：先拿齊 bot 鎖、再重驗；活著的 handler 做完之後這裡看到的就不是 running。
             Ok(Some(i)) if i.status == "running" && i.owner_boot.as_deref() == Some(app.boot_id.as_str()) => {
                 tracing::warn!(intent = id, "delete intent was left running by this boot; resuming it");
             }
@@ -135,7 +131,6 @@ async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
         }
         Ok(false) => Outcome::Retry(why),
         Err(e) => {
-            // 記不下失敗：intent 會停在 `running`。再試一次只把「自己擁有的 running」翻回 pending，下一輪 `claim` 才拿得到（#1059，同 restart_intents）。
             match intents::record_failure_on_owned(&app.db, id, &app.boot_id, &why).await {
                 Ok(_) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}）")),
                 Err(e2) => Outcome::Retry(format!("{why}（且記不下失敗：{e:#}；改寫回 pending 也失敗：{e2:#}）")),
@@ -176,7 +171,6 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     }
     let db_err = |e: anyhow::Error| format!("db: {e:#}");
     match db::bot(&app.db, &parent).await.map_err(db_err)? {
-        // 母 bot 從來沒刪成：定案沒發生，世界沒變。（user bot 的 config 已寫、DB 投影還沒跟上＝稍後重試。）
         Some(b) if b.deleted_at.is_none() => {
             if b.managed_by != "child" && !in_config_bot(app, &parent).await {
                 return Err("the bot is gone from config.toml but its soft delete is not projected yet".into());
@@ -187,12 +181,10 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         _ => {}
     }
     crate::api_bot::schedule_retention_after_delete(app);
-    // 已定案：輸入框草稿跟著 bot 走，定案之後死掉時補上清草稿（#1063；清除冪等，失敗只記 log）。
     let draft_keys: Vec<String> = std::iter::once(&parent).chain(children.iter().map(|(id, _)| id)).map(|b| format!("bot:{b}")).collect();
     crate::drafts::clear_keys(app, &draft_keys).await;
     ports::revoke_bot_share(app, &parent).await.map_err(|e| format!("cannot revoke bot share {parent}: {e}"))?;
     let host = intent.host.clone();
-    // 快照裡的 child（深的先）：停、軟刪、清目錄。
     for (cid, _) in &children {
         ports::revoke_bot_share(app, cid).await.map_err(|e| format!("cannot revoke child share {cid}: {e}"))?;
         let Some(c) = db::bot(&app.db, cid).await.map_err(db_err)? else { continue };
@@ -233,7 +225,6 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         _ => {}
     }
     crate::api_bot::schedule_retention_after_delete(app);
-    // 已定案：輸入框草稿跟著專案與它的 bot 走（#1063）。
     let draft_keys: Vec<String> = std::iter::once(format!("group:{project_id}")).chain(bots.iter().map(|(id, _)| format!("bot:{id}"))).collect();
     crate::drafts::clear_keys(app, &draft_keys).await;
     ports::revoke_project_shares(app, &project_id).await.map_err(|e| format!("cannot revoke project shares: {e}"))?;
@@ -246,7 +237,6 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
             }
             soft_delete_child(app, bid).await.map_err(|e| format!("cannot soft-delete child {bid}: {e}"))?;
         }
-        // 目錄清不掉不算補不成：本機留給開機清掃、遠端有 `remote_purge` 的帳。
         ports::purge_bot_dir(app, bid, &host).await;
     }
     app.emit("project_changed", json!({"project_id": project_id})).await;

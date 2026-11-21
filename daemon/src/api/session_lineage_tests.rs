@@ -66,12 +66,10 @@ async fn manager_registers_advances_and_retires_and_everyone_in_the_project_read
     let Json(moved) = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "session_id": "sess-2"}))).await.unwrap();
     assert_eq!((moved["session"]["state"].as_str(), moved["retired"]["session_id"].as_str(), moved["retired"]["state"].as_str()), (Some("checkpoint"), Some("sess-1"), Some("retired")));
 
-    // 別條線的 session 不能拿來當這條線的檢查點。
     advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "quota", "session_id": "q-1", "role": "thinker"}))).await.unwrap();
     let cross_line = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "session_id": "q-1"}))).await.unwrap_err();
     assert!(matches!(cross_line, LcError::Conflict(_)) && reason(&cross_line) == "lineage_line_mismatch", "{cross_line:?}");
 
-    // 執行者、child 都讀得到；`line`／`state` 可篩。
     let all = listed(&c, &pid, bot(&c.executor), ListQuery::default()).await.unwrap();
     assert_eq!(all, vec![row("quota", "q-1", "checkpoint"), row("web", "sess-2", "checkpoint"), row("web", "sess-1", "retired")]);
     let child = crate::testing::claude_bot(&app, &pid, "lin-child").await;
@@ -115,7 +113,6 @@ async fn only_manager_agm_role_or_user_may_write() {
     let service = create(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::Service("daemon-swap".into())), body(json!({"line": "web", "session_id": "s"}))).await.unwrap_err();
     assert!(matches!(service, LcError::Forbidden(_)), "{service:?}");
 
-    // 登記成 AGM 角色（巡檢）後可寫。
     crate::supervisor::store::get_or_init(&app.db).await.unwrap();
     crate::supervisor::store::set_env(&app.db, &agm.id, &pid, "/tmp").await.unwrap();
     advance(State(app.clone()), Path(pid.clone()), bot(&agm), body(json!({"line": "web", "session_id": "s"}))).await.map_err(|e| format!("{e:?}")).unwrap();
@@ -133,7 +130,6 @@ async fn in_a_parent_child_project_any_top_level_bot_writes_and_children_only_re
     let child = crate::testing::claude_bot(&app, &pid, "lin-pc-child").await;
     sqlx::query("UPDATE bots SET managed_by='child',parent_bot_id=? WHERE id=?").bind(&parent.id).bind(&child.id).execute(&app.db).await.unwrap();
 
-    // 頂層 bot（沒有角色）：add／advance／retire 都可以；不必是登記那顆 session 的 bot。
     let Json(added) = create(State(app.clone()), Path(pid.clone()), bot(&parent), body(json!({"line": "web", "session_id": "pc-1"}))).await.map_err(|e| format!("{e:?}")).unwrap();
     assert_eq!(added["session"]["state"], "active");
     let Json(moved) = advance(State(app.clone()), Path(pid.clone()), bot(&c.executor), body(json!({"line": "web", "session_id": "pc-1"}))).await.map_err(|e| format!("{e:?}")).unwrap();
@@ -142,7 +138,6 @@ async fn in_a_parent_child_project_any_top_level_bot_writes_and_children_only_re
     let Json(gone) = retire(State(app.clone()), Path(pid.clone()), bot(&c.manager), Json(RetireBody { session_id: "pc-1".into() })).await.map_err(|e| format!("{e:?}")).unwrap();
     assert_eq!(gone["session"]["state"], "retired");
 
-    // child：不論用 child 憑證還是 bot 憑證，都只能讀。
     let as_child = || Extension(RequestPrincipal::Child { child_id: child.id.clone(), parent_bot_id: parent.id.clone() });
     for (what, who) in [("child credential", as_child()), ("child presenting as a bot", bot(&child))] {
         let e = create(State(app.clone()), Path(pid.clone()), who.clone(), body(json!({"line": "web", "session_id": "kid"}))).await.unwrap_err();
@@ -153,16 +148,13 @@ async fn in_a_parent_child_project_any_top_level_bot_writes_and_children_only_re
         assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "retire by {what}: {e:?}");
         assert_eq!(listed(&c, &pid, who, ListQuery::default()).await.unwrap(), vec![row("web", "pc-2", "checkpoint"), row("web", "pc-1", "retired")], "{what} reads");
     }
-    // parent 欄位還在、只是 managed_by 沒標成 child 的 bot 也不算頂層。
     sqlx::query("UPDATE bots SET managed_by='user' WHERE id=?").bind(&child.id).execute(&app.db).await.unwrap();
     let e = retire(State(app.clone()), Path(pid.clone()), bot(&child), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
     assert!(reason(&e) == "role_required", "{e:?}");
-    // 被刪的頂層 bot 不行。
     sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&c.executor.id).execute(&app.db).await.unwrap();
     let e = retire(State(app.clone()), Path(pid.clone()), bot(&c.executor), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
     assert!(matches!(e, LcError::Forbidden(_)), "{e:?}");
 
-    // 跨專案：別的（同為母子模式的）專案的頂層 bot 寫不進來，路由層與 handler 都擋；反向亦然。
     for (method, tail) in [("GET", ""), ("POST", ""), ("POST", "/advance"), ("POST", "/retire")] {
         assert!(matches!(authorize_bot_path(&app, &c.outsider_manager.id, method, &format!("/api/projects/{pid}/lineage{tail}")).await, Err(LcError::Forbidden(_))), "{method} {tail}");
         assert!(matches!(authorize_bot_path(&app, &parent.id, method, &format!("/api/projects/{other}/lineage{tail}")).await, Err(LcError::Forbidden(_))), "{method} {tail}");
@@ -176,7 +168,6 @@ async fn in_a_parent_child_project_any_top_level_bot_writes_and_children_only_re
     assert_eq!(listed(&c, &pid, Extension(RequestPrincipal::User), ListQuery::default()).await.unwrap(), vec![row("web", "pc-2", "checkpoint"), row("web", "pc-1", "retired")]);
     assert!(listed(&c, &other, Extension(RequestPrincipal::User), ListQuery::default()).await.unwrap().is_empty());
 
-    // 切回 expert：沒有角色的頂層 bot 不再能寫（expert 維持原規則）。
     sqlx::query("UPDATE projects SET mode='expert' WHERE id=?").bind(&pid).execute(&app.db).await.unwrap();
     let e = retire(State(app.clone()), Path(pid.clone()), bot(&parent), Json(RetireBody { session_id: "pc-2".into() })).await.unwrap_err();
     assert!(reason(&e) == "role_required", "{e:?}");
@@ -189,7 +180,6 @@ async fn a_bot_cannot_read_or_write_another_projects_lineage() {
     advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "session_id": "mine"}))).await.unwrap();
     advance(State(app.clone()), Path(other.clone()), bot(&c.outsider_manager), body(json!({"line": "web", "session_id": "theirs"}))).await.unwrap();
 
-    // 路由層：別的專案的路徑一律 403（AGM 角色也一樣，專案範圍不因角色放寬）。
     crate::supervisor::store::get_or_init(&app.db).await.unwrap();
     crate::supervisor::store::set_env(&app.db, &c.executor.id, &pid, "/tmp").await.unwrap();
     for caller in [&c.manager, &c.executor] {
@@ -199,7 +189,6 @@ async fn a_bot_cannot_read_or_write_another_projects_lineage() {
             assert!(authorize_bot_path(&app, &caller.id, method, &format!("/api/projects/{pid}/lineage{tail}")).await.is_ok(), "own project {method} {tail}");
         }
     }
-    // handler 自己也核專案，不靠路由層。
     let who = bot(&c.manager);
     let e = listed(&c, &other, who.clone(), ListQuery::default()).await.unwrap_err();
     assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "cross_project", "{e:?}");
@@ -209,7 +198,6 @@ async fn a_bot_cannot_read_or_write_another_projects_lineage() {
     assert!(reason(&e) == "cross_project", "{e:?}");
     let e = retire(State(app.clone()), Path(other.clone()), who, Json(RetireBody { session_id: "theirs".into() })).await.unwrap_err();
     assert!(reason(&e) == "cross_project", "{e:?}");
-    // 自己專案裡退役不到別的專案的同名 session。
     let e = retire(State(app.clone()), Path(pid.clone()), bot(&c.manager), Json(RetireBody { session_id: "theirs".into() })).await.unwrap_err();
     assert!(matches!(e, LcError::NotFoundValue(_)), "{e:?}");
     assert_eq!(listed(&c, &other, bot(&c.outsider_manager), ListQuery::default()).await.unwrap(), vec![row("web", "theirs", "checkpoint")]);
@@ -306,32 +294,27 @@ async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissi
     let (app, pid, other) = (c.env.app.clone(), c.env.project_id.clone(), c.other_project.clone());
     let claim_body = |v: Value| Json(serde_json::from_value::<ClaimBody>(v).unwrap());
 
-    // 沒有檢查點不能認領。
     let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
     assert!(matches!(e, LcError::NotFoundValue(_)) && reason(&e) == "lineage_checkpoint_not_found", "{e:?}");
 
     advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "session_id": "s1", "head_sha": "aaaaaaa"}))).await.unwrap();
 
-    // 權限：executor 只讀，不能 claim／abandon；outsider 跨專案被擋。
     let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.executor), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
     assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "role_required", "{e:?}");
     let e = claim(State(app.clone()), Path(pid.clone()), bot(&c.outsider_manager), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
     assert!(matches!(e, LcError::Forbidden(_)) && reason(&e) == "cross_project", "{e:?}");
 
-    // 單寫者 resume 認領；第二筆 409 lineage_line_busy（回傳佔用中的 claim）。
     let Json(c1) = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "resume", "backup_session_id": "bak-1"}))).await.unwrap();
     let c1_id = c1["claim"]["id"].as_str().unwrap().to_string();
     assert_eq!((c1["claim"]["holder_bot_id"].as_str(), c1["checkpoint"]["session_id"].as_str()), (Some(c.manager.id.as_str()), Some("s1")));
     let busy = claim(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), claim_body(json!({"line": "web", "mode": "resume"}))).await.unwrap_err();
     assert!(matches!(&busy, LcError::Conflict(v) if v["reason"] == "lineage_line_busy" && v["claim"]["id"] == c1_id), "{busy:?}");
 
-    // fork 認領可多筆並存。
     let Json(f1) = claim(State(app.clone()), Path(pid.clone()), bot(&c.manager), claim_body(json!({"line": "web", "mode": "fork", "work_session_id": "w1"}))).await.unwrap();
     let Json(f2) = claim(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), claim_body(json!({"line": "web", "mode": "fork", "work_session_id": "w2"}))).await.unwrap();
     let f1_id = f1["claim"]["id"].as_str().unwrap().to_string();
     let f2_id = f2["claim"]["id"].as_str().unwrap().to_string();
 
-    // executor 不能 abandon；跨專案不能 abandon；正確 abandon 回傳 backup_session_id 且可再認領。
     let e = abandon(State(app.clone()), Path((pid.clone(), c1_id.clone())), bot(&c.executor)).await.unwrap_err();
     assert!(reason(&e) == "role_required", "{e:?}");
     let e = abandon(State(app.clone()), Path((other, c1_id.clone())), bot(&c.outsider_manager)).await.unwrap_err();
@@ -343,7 +326,6 @@ async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissi
     assert!(c2["claim"]["holder_bot_id"].is_null());
     let c2_id = c2["claim"]["id"].as_str().unwrap().to_string();
 
-    // 帶 claim_id 前移：resume 模式前移 base session 本身（可省略 session_id）；fork 模式前移 work_session_id。
     let Json(adv_res) = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "claim_id": c2_id, "head_sha": "bbbbbbb"}))).await.unwrap();
     assert_eq!((adv_res["session"]["session_id"].as_str(), adv_res["claim"]["state"].as_str()), (Some("s1"), Some("advanced")));
     assert!(adv_res["retired"].is_null());
@@ -351,7 +333,6 @@ async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissi
     let Json(adv_f1) = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap();
     assert_eq!((adv_f1["session"]["session_id"].as_str(), adv_f1["retired"]["session_id"].as_str()), (Some("w1"), Some("s1")));
 
-    // 過期 claim 已在檢查點移走時自動標成 abandoned，再前移被拒（409 lineage_claim_closed）且什麼都沒改。
     let stale = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "claim_id": f2_id}))).await.unwrap_err();
     assert!(matches!(&stale, LcError::Conflict(v) if v["reason"] == "lineage_claim_closed" && v["claim"]["state"] == "abandoned"), "{stale:?}");
     let closed = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap_err();

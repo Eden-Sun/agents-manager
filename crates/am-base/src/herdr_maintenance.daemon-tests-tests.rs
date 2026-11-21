@@ -71,7 +71,6 @@
         let app = env.app.clone();
         let err = open(State(app.clone()), HeaderMap::new(), open_in(10)).await.unwrap_err();
         assert!(matches!(err, LcError::Forbidden(ref v) if v["reason"] == "herdr_maintenance_forbidden"), "{err:?}");
-        // 帶了 id 但 token 對不上也不行。
         let mut forged = agm_headers(&app).await;
         forged.insert("X-AM-Bot-Token", "guess".parse().unwrap());
         assert!(matches!(open(State(app.clone()), forged, open_in(10)).await.unwrap_err(), LcError::Forbidden(_)));
@@ -101,7 +100,7 @@
         let env = tt::env().await;
         let app = env.app.clone();
         let h = agm_headers(&app).await;
-        let before = child_with_ended_run(&env, "2020-01-01T00:00:00.000Z").await; // 維護前就結束的：不是這次的事
+        let before = child_with_ended_run(&env, "2020-01-01T00:00:00.000Z").await;
         let _ = open(State(app.clone()), h.clone(), open_in(10)).await.unwrap();
         let lost = child_with_ended_run(&env, &crate::db::now()).await;
         let back = child_with_ended_run(&env, &crate::db::now()).await;
@@ -193,9 +192,6 @@
         assert!(!deleted(&app, &lost).await, "讀不到：還沒接手");
 
         sqlx::query("ALTER TABLE herdr_maintenance_unreadable RENAME TO herdr_maintenance").execute(&app.db).await.unwrap();
-        // 等的是 `close()` 的**最後一步**（寫 note），不是中間那步（退休子 agent）：`close()` 的順序是
-        // 退休沒接回的子 agent → （同一交易）刪窗口＋寫 note，兩者之間有 await。只等「子 agent 被退休」的話，慢的
-        // runner 上會在寫 note 之前就去數 note，數到 0（#274，跟 #255 同一族）。
         let _ = crate::testing::eventually!(notes(&app, "herdr_maintenance_expired").await == 1);
         assert!(deleted(&app, &lost).await, "讀得到之後自己接手：過期的窗口收尾、沒接回的子 agent 退休");
         assert_eq!(notes(&app, "herdr_maintenance_expired").await, 1);

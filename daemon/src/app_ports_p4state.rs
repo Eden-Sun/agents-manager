@@ -10,21 +10,14 @@
 use std::sync::Arc;
 use crate::state::App;
 
-// ============================================================================
-// Narrow External Domain Adapters
-// ============================================================================
-
-// 1. Reconcile
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> anyhow::Result<()> {
     crate::runners::reconcile::reconcile_host(app, host).await.map(|_| ())
 }
 
-// 2. Lifecycle finish_stop
 pub async fn finish_stop(app: &Arc<App>, run_id: &str) {
     crate::lifecycle::finish_stop(app, run_id).await;
 }
 
-// 3. Quota operations
 pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Option<String> {
     crate::quota::running_model(app, bot).await
 }
@@ -71,7 +64,6 @@ pub async fn host_target(app: &impl crate::hosts::HostsAccess, host: &str) -> Op
     Some(format!("{}:{}/{}", cfg.ssh, cfg.ssh_port, cfg.herdr_session))
 }
 
-// 4. Deferred Live / Live Apply
 pub async fn apply_live_setting_with_revision(
     app: &Arc<App>,
     bot_id: &str,
@@ -82,13 +74,10 @@ pub async fn apply_live_setting_with_revision(
     crate::lifecycle::apply_live_setting_with_revision(app, bot_id, fields, baseline_rev, target_rev).await
 }
 
-// 5. Live Apply Debt / Launch Rev
 pub async fn stamp_live_revision(pool: &sqlx::SqlitePool, run_id: &str) -> Result<bool, sqlx::Error> {
     crate::launch_rev::stamp_live_revision(pool, run_id).await
 }
 
-// 6. Turn Controller & Message insertion
-// 7. Transcript & Codex History
 pub async fn codex_home(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {
     crate::lifecycle::codex_home(app, bot).await
 }
@@ -102,14 +91,10 @@ pub async fn codex_interrupted_after(
     crate::codex_history::interrupted_after(app, bot, run, sent).await
 }
 
-// 8. Herdr client for run
-// 9. Stuck Turns helpers
-// 10. Intents & Owner
 pub async fn open_restart_intents(pool: &sqlx::SqlitePool) -> anyhow::Result<Vec<crate::intents::Intent>> {
     crate::intents::open(pool).await
 }
 
-// 11. Resume nudge helpers
 #[allow(clippy::too_many_arguments)]
 pub async fn queue_for_next_turn(
     app: &Arc<App>,

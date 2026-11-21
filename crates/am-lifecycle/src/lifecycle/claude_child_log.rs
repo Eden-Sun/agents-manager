@@ -89,13 +89,9 @@ pub(crate) fn is_human_prompt_row(v: &Value) -> Option<String> {
 
 pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
     let mut out: Vec<Exchange> = Vec::new();
-    // `tail -c` 會從一行中間切開。切剩的半行解析失敗後，後面的 assistant 仍是那一問的，
-    // 不能接到上一問把回覆蓋掉。下一個完整的 user 才重新接上。
     let mut gap = false;
-    // 同一則 assistant 訊息的每個 text 區塊各一行（同一個 message.id）：依序接起來、中間一個換行（#1977）。
     let mut block_msg: Option<String> = None;
     let mut blocks: Vec<String> = Vec::new();
-    // 同一行重送（同一個 uuid）只接一次。
     let mut seen_rows: std::collections::HashSet<String> = Default::default();
     for line in text.lines() {
         if line.trim().is_empty() {
@@ -114,11 +110,9 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
                     continue;
                 }
                 let content = v.get("message").and_then(|m| m.get("content"));
-                // 工具結果是同一回合中途的 user 行：不動。
                 if content.and_then(Value::as_array).is_some_and(|ps| ps.iter().any(|p| p.get("type").and_then(Value::as_str) == Some("tool_result"))) {
                     continue;
                 }
-                // compact 摘要、帶圖片等非純文字的行不是一問，但它們把上一問截斷了：後面的 assistant 不能再接到上一問的回覆上（#910）。
                 if is_cli_written_row(&v) || content.is_some_and(|c| parts_text(c).is_none()) {
                     if let Some(prev) = out.last_mut() {
                         prev.closed = true;
@@ -149,7 +143,6 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
                 }
                 let Some(cur) = out.last_mut() else { continue };
                 let Some(msg) = v.get("message") else { continue };
-                // 停在 `tool_use` 的是旁白（後面還有工具要跑）；沒有 stop_reason 的是還在串流的半行。
                 let terminal = msg.get("stop_reason").and_then(Value::as_str).is_some_and(|s| s != "tool_use");
                 if !terminal {
                     continue;
@@ -167,7 +160,6 @@ pub fn parse_exchanges(text: &str) -> Vec<Exchange> {
                         blocks.clear();
                         block_msg = id;
                     }
-                    // 同一則裡一模一樣的區塊只接一次。
                     if !blocks.iter().any(|b| b == reply) {
                         blocks.push(reply.to_string());
                     }
@@ -210,7 +202,6 @@ pub(crate) fn parse_runtime(text: &str) -> RuntimeSeen {
         if seen.model.is_some() && seen.effort.is_some() {
             break;
         }
-        // `tail -c` 切開的半行、非 assistant 行都解析不出或被略過。
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v.get("type").and_then(Value::as_str) != Some("assistant") || v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
@@ -223,7 +214,6 @@ pub(crate) fn parse_runtime(text: &str) -> RuntimeSeen {
                 .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphabetic()));
         }
         if seen.model.is_none() {
-            // `<synthetic>` 是 CLI 自己寫的訊息（中斷、錯誤），不是模型。
             seen.model = v
                 .pointer("/message/model")
                 .and_then(Value::as_str)
@@ -267,7 +257,6 @@ pub(crate) async fn record_runtime(
     if model.is_none() && effort.is_none() {
         return;
     }
-    // 先寫設定：寫不進去就連 runtime 都不寫，下一輪仍不同才會再試（不然 runtime 收斂了、設定永遠落後，#743）。
     if bot.managed_by == "child" {
         if let Err(e) = crate::child_runtime::follow(app, &bot.id, model.as_deref(), effort.as_deref()).await {
             tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not follow the claude transcript switch in the child's settings, retrying next read");
@@ -295,7 +284,6 @@ pub(crate) async fn record_runtime(
 fn read_script_tail_with_recorded(roots: &[String], sid: &str, max: u64, recorded: Option<&str>) -> String {
     let list = roots.iter().map(|r| sh_quote(r)).collect::<Vec<_>>().join(" ");
     let recorded = sh_quote(recorded.unwrap_or(""));
-    // No unsafe shell fallback when Python is absent: callers use the screen instead.
     format!(
         "python3 -I -c {} {} {max} {} {recorded} {list} 2>/dev/null; :",
         sh_quote(include_str!("claude_child_tail.py")),
@@ -314,7 +302,6 @@ fn split_output(out: &str) -> Option<(String, String)> {
 /// `Some((session id, 對話檔尾巴))`；找不到 session、讀不到檔＝`None`（照舊看畫面）。
 /// herdr 與身份目錄的事實由 `GrokTranscriptServices` 提供（`runners/claude_child_log.rs` 接 `App`）。
 pub async fn load(app: &impl GrokTranscriptContext, bot: &db::Bot, run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
-    // herdr 綁的優先（claude `/clear`、`--resume` 會換 session），沒有就用記過的。
     let known = run.native_session_id.clone().filter(|s| super::grok_transcript::valid_session_id(s));
     let Some(sid) = app.claude_herdr_session(run).await.or(known) else { return Ok(None) };
     let roots = app.claude_config_roots(bot, run, host).await;

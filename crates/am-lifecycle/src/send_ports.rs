@@ -249,7 +249,6 @@ mod tests {
         "codex_history::prompt_landed(",
         "dangerous_rm::notify_once(",
         "primary_keep_warm::note_prompt(",
-        // 事件、bot 鎖走 am-ports 合約的 adapter。
         "emit_turn(",
         "app.emit(",
         "app.emit_bot_status(",

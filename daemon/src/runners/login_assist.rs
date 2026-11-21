@@ -187,19 +187,16 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
     if !screen.awaiting_code {
         return Err(not_awaiting(if screen.url.is_some() { "提示已經不在畫面最後一行" } else { "畫面上還沒有等 code 的提示" }));
     }
-    // 前景程序還是 claude：讀畫面到打字之間 CLI 結束的話，字會落進 shell。問不到就不送。
     let claude_pids = foreground_claude_pids(app, host, pane_id).await?;
     if claude_pids.is_empty() {
         return Err(not_awaiting("claude 已經不在這個終端裡跑了"));
     }
     claim_code_send(app, host, pane_id)?;
-    // 先只打字、不按 Enter：herdr 沒有條件式送字，Enter 前再複查一次同一顆 claude 還在（見函式上方註解）。
     shell::send_text(app, host, pane_id, code, false).await?;
     #[cfg(test)]
     crate::race_point::hit("login_code_typed", pane_id).await;
     let still_there = foreground_claude_pids(app, host, pane_id).await.map(|now| now.iter().any(|p| claude_pids.contains(p))).unwrap_or(false);
     if !still_there {
-        // 字已經進過 pane，`code_sent` 維持 true（同一組 code 不能再送一次）；清掉 shell 命令列上的字，不按 Enter。
         if let Err(e) = shell::send_keys(app, host, pane_id, &["ctrl+u".to_string()]).await {
             tracing::warn!(host, pane_id, error = ?e, "could not clear the login code typed into the shell");
         }
@@ -207,7 +204,6 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
     }
     shell::send_keys(app, host, pane_id, &["enter".to_string()]).await?;
     tracing::info!(host, pane_id, identity = %t.identity, "a login code was typed into the login pane");
-    // 等 CLI 的反應：`Login failed` 要在 pane 被收掉之前讀走。
     let deadline = Instant::now() + OUTCOME_WAIT;
     loop {
         tokio::time::sleep(OUTCOME_POLL).await;

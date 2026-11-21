@@ -18,7 +18,6 @@
 //! 「這一拍不判斷」。把核准從一顆其實健康的協調者手上搬走，比晚 5 分鐘糟得多——兩個角色都以為
 //! 對方在處理，就沒有人在處理。
 
-
 use serde_json::{json, Value};
 
 use sqlx::SqlitePool;
@@ -80,7 +79,6 @@ pub fn should_reassign(age_secs: i64, owner: &str, unavailable: Option<&str>) ->
 pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), unavailable: Option<&'static str>) -> usize {
     let reason = unavailable;
     let now = crate::db::now();
-    // 查詢只縮小範圍，不判門檻（見 `should_reassign`）：開著的核准一次本來就一兩則。
     let open = match sqlx::query_as::<_, store::InboxEvent>(
         "SELECT * FROM supervisor_inbox
           WHERE supervisor_id=? AND kind=? AND state!='handled'
@@ -92,7 +90,6 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
     .await
     {
         Ok(v) => v,
-        // 讀不到就不動。下一拍再看。
         Err(e) => {
             tracing::warn!(error = %e, "could not look for approvals to reassign");
             return 0;
@@ -100,7 +97,6 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
     };
     let mut moved = 0usize;
     for e in &open {
-        // 那筆核准已經不用裁示了（被裁示、取代、過期）：改派過去只會叫醒巡檢去處理一筆作廢的申請。直接收掉這則（#881、#1120）。
         match approval_needs_no_decision(app.db(), e, &now).await {
             Ok(true) => {
                 match sqlx::query("UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=? WHERE id=? AND state!='handled'")
@@ -115,14 +111,12 @@ pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crat
                 continue;
             }
             Ok(false) => {}
-            // 讀不到就不動這一則，下一拍再看。
             Err(err) => {
                 tracing::warn!(event = %e.id, error = %err, "could not read the approval behind an inbox event");
                 continue;
             }
         }
         let Some(reason) = reason else { continue };
-        // 門檻在這裡判，不在 SQL。`owner` 走 `roles::owner_or_default`，跟查詢的 `roles::OWNER` 同一個定義。
         let owner = roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
         if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
             continue;
@@ -163,12 +157,8 @@ async fn reassign_one(db: &SqlitePool, e: &store::InboxEvent, reason: &str, now:
         o.insert("reassigned_from".into(), json!(Role::Responder.as_str()));
         o.insert("reassigned_reason".into(), json!(reason));
         o.insert("reassigned_at".into(), json!(now));
-        // 路由表讀這個欄位，所以重新分類（或 payload 被別的地方重讀）時答案一樣是巡檢。
         o.insert("to_role".into(), json!(Role::Patrol.as_str()));
     }
-    // `notify_*` 一起歸零：那些次數是協調者送不出去累積的，留著會吃掉巡檢的補送額度
-    // （`roles::due_for` 對巡檢有 `notify_attempts < max` 的上限），等於改派過去就已經用完了。
-    // `claimed_by` 清掉、`state` 回 pending：巡檢還沒被告知過這一則。
     let n = sqlx::query(&format!(
         "UPDATE supervisor_inbox
             SET role='patrol', claimed_by=NULL, wake=1, state='pending', payload_json=?,
@@ -201,7 +191,6 @@ pub async fn stalled_approvals(db: &SqlitePool, after_secs: i64) -> anyhow::Resu
     let now = crate::db::now();
     let mut out = vec![];
     for (id, created_at, wait_since, requester, expires_at) in rows {
-        // 已過有效期的 pending 沒有人需要裁示（核准不能再用）：不算卡住。秒格式舊值靠 `cmp_ts` 正規化，不用字串比。
         if expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le()) {
             continue;
         }

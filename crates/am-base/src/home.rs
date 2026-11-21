@@ -12,13 +12,11 @@ pub const TEST_BUILD: bool = cfg!(any(test, feature = "test-hooks"));
 pub fn dir() -> Option<PathBuf> {
     #[cfg(any(test, feature = "test-hooks"))]
     {
-        // HOME 已經被 daemon 的 `test_home` 切到暫存目錄就沿用它；否則（am-lifecycle 的測試行程 HOME 仍是真的）用暫存的假目錄，絕不回真的 HOME。
         let home = dirs::home_dir().filter(|h| under_temp(h));
         Some(home.unwrap_or_else(|| std::env::temp_dir().join(format!("am-base-test-home-{}", std::process::id())))) // scratch-guard: allow 測試建置的假 HOME，不能在這裡建或登記
     }
     #[cfg(not(any(test, feature = "test-hooks")))]
     {
-        // As a daemon test dependency, `test_home` has already redirected HOME before test threads start.
         dirs::home_dir()
     }
 }
@@ -31,7 +29,6 @@ pub fn under_temp(p: &Path) -> bool {
 
 /// `p` 在 `root` 底下嗎；兩邊都換成最長的已存在祖先的 canonical 路徑再接回尾段，路徑還不存在也比得對。
 pub fn under(p: &Path, root: &Path) -> bool {
-    // `..` 還不能靠 canonicalize 解掉（路徑可能還不存在）：`<temp>/nope/../../home` 不能因為前綴是暫存目錄就判在底下。
     if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return false;
     }
@@ -126,7 +123,6 @@ mod under_temp_tests {
         assert!(under(&real.join("folders/x"), &link), "canonical 的路徑在 symlink 的 root 底下");
         assert!(under(&link.join("folders/not-yet/y"), &real), "symlink 的路徑（還不存在）在 canonical root 底下");
         assert!(!under(&base.join("elsewhere"), &link), "root 外的不算");
-        // 反例：還不存在、帶 `..` 的路徑會被 canonical_prefix 退回原字串，前綴卻是暫存目錄；必須判在外面。
         assert!(!under(&base.join("nope/../../home/user"), &base), "帶 .. 的路徑不能靠字串前綴繞過守門");
         let _ = std::fs::remove_dir_all(&base);
     }

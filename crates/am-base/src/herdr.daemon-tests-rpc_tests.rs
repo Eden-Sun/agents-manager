@@ -14,7 +14,6 @@
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
         let handle = tokio::spawn(async move {
-            // 接了就把連線握在手上，永遠不寫 ack。
             let mut held = Vec::new();
             while let Ok((conn, _)) = listener.accept().await {
                 held.push(conn);
@@ -34,7 +33,6 @@
         let err = client.subscribe(vec![json!({"type": "pane.exited"})]).await.expect_err("不能成功");
         let msg = format!("{err:#}");
         assert!(msg.contains("握手逾時"), "要說是握手逾時：{msg}");
-        // `start_paused` 下時鐘由 tokio 推進：真的等到門檻才逾時，不是立刻失敗。
         assert!(started.elapsed() >= HerdrClient::SUBSCRIBE_HANDSHAKE_TIMEOUT, "{:?}", started.elapsed());
         server.abort();
         std::fs::remove_dir_all(sock.parent().unwrap()).ok();
@@ -356,6 +354,5 @@
         let cut = snippet("pane.get", &long);
         assert_eq!(cut.chars().count(), SNIPPET_CHARS + 1, "砍到 {SNIPPET_CHARS} 字再加一個省略號");
         assert!(cut.ends_with('…'));
-        // 短的原樣保留（診斷還是要看得到東西）。
         assert_eq!(snippet("pane.get", "{\"oops\":1}"), "{\"oops\":1}");
     }

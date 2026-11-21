@@ -24,8 +24,6 @@ use crate::state::App;
 /// 帳本留最近這麼多筆；累計 token 不受這個上限影響。
 const LEDGER_CAP: usize = 200;
 
-// ───────────── 共用 client（原 changelog_translate 的那一份） ─────────────
-
 /// 正式 client 與測試假貨的接縫。測試先 `set_client`，生產路徑才會打到網路。
 pub trait MessagesClient: Send + Sync {
     fn complete<'a>(
@@ -121,7 +119,6 @@ impl MessagesClient for AnthropicHttpClient {
         Box::pin(complete_http(req))
     }
 }
-
 
 fn complete_http(
     req: &MessagesRequest,
@@ -244,8 +241,6 @@ pub(crate) fn test_endpoint_is_loopback(endpoint: &str) -> bool {
     let host = host.trim_matches(|c: char| c == '[' || c == ']');
     host == "127.0.0.1" || host == "::1"
 }
-
-// ───────────── 用途層：開關、保險絲、帳本 ─────────────
 
 /// 一個用途的一次呼叫。模型與 effort 由設定決定，呼叫端不指定。
 pub struct ClaudeRequest {
@@ -396,24 +391,20 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
     if !state.enabled || (!legacy && !cfg.claude_api.enabled) {
         return Err(ClaudeError::Disabled);
     }
-    // 手改設定檔也擋得住：這個用途所屬的組設定不合法就不送。
     if let Some(def) = CLAUDE_API_USES.iter().find(|d| d.id == req.use_case) {
         if let Some(problem) = cfg.claude_api.groups.get(def.group).and_then(|g| claude_api_group_problem(def.group, g)) {
             return Err(ClaudeError::BadConfig(problem));
         }
     }
-    // 供應商跟著實際送的模型走（品質沒過的重試可以跨到另一家）；沒有覆寫就照組的設定。
     let model = model_override.map_or_else(|| state.model.clone(), str::to_string);
     let openai = api_provider_of_model(&model) == API_PROVIDER_OPENAI;
     if openai {
-        // OpenAI 只給允許的用途（用途與所屬的組都要允許，v1 只有翻譯）。
         let group = CLAUDE_API_USES.iter().find(|d| d.id == req.use_case).map(|d| d.group).unwrap_or_default();
         if !(claude_api_use_allows_openai(req.use_case) && claude_api_group_allows_openai(group)) {
             return Err(ClaudeError::BadConfig(format!("model `{model}` is an OpenAI model; `{}` may not use OpenAI", req.use_case)));
         }
     }
     let (endpoint, key, client) = if openai {
-        // 沒開或沒有 key：回具名錯誤，不退回 Claude。
         if !cfg.openai_api.enabled {
             return Err(ClaudeError::OpenAiNotConfigured("[openai_api] enabled 沒有開".into()));
         }
@@ -426,7 +417,6 @@ async fn complete_with_timeout_model(cfg: &ConfigFile, api: &ClaudeApi, req: Cla
     if !api.reserve(req.use_case, state.max_per_hour) {
         return Err(ClaudeError::Budget);
     }
-    // OpenAI 才有的 effort（`none`）送到 Claude 會被拒：改用 Claude 的預設 low。
     let mut effort = effort_override.map_or_else(|| state.effort.clone(), str::to_string);
     if !openai && !CLAUDE_API_EFFORTS.contains(&effort.as_str()) {
         effort = "low".into();
@@ -495,8 +485,6 @@ pub async fn complete_recorded(
     result
 }
 
-// ───────────── 計價與花費明細 ─────────────
-
 const SPEND_FILE: &str = "spend.jsonl";
 /// 檔超過這麼大就在寫入時裁成最近 90 天。
 const SPEND_TRIM_BYTES: u64 = 512 * 1024;
@@ -518,7 +506,6 @@ pub(crate) fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
     } else if m.starts_with("claude-opus-5-5") {
         Some((4.0, 20.0))
     } else if m.starts_with("claude-fable-5-2") {
-        // Fable 5.2 官方牌價 $8/$40（fable 5／5.1 仍是 $10/$50）。
         Some((8.0, 40.0))
     } else if m.starts_with("claude-fable-5") {
         Some((10.0, 50.0))
@@ -542,13 +529,11 @@ pub(crate) fn cache_read_multiplier(model: &str) -> f64 {
 
 /// 這次請求的微美元成本（四捨五入）；模型價格不明回 None。
 pub(crate) fn cost_microusd(model: &str, u: &Usage) -> Option<i64> {
-    // OpenAI 的模型用 OpenAI 的價表（整數運算、含長文價）；其餘是 Claude 的牌價。
     if api_provider_of_model(model) == API_PROVIDER_OPENAI {
         return crate::openai_text::cost_microusd(model.trim(), u);
     }
     let (inp, out) = price_per_mtok(model)?;
     let n = |v: Option<i64>| v.unwrap_or(0).max(0) as f64;
-    // 每百萬 token 的美元 ＝ 每 token 的微美元，所以不必再除。
     let total = n(u.input_tokens) * inp + n(u.output_tokens) * out + n(u.cache_creation_input_tokens) * inp * 1.25 + n(u.cache_read_input_tokens) * inp * cache_read_multiplier(model);
     Some(total.round() as i64)
 }
@@ -642,7 +627,6 @@ impl ClaudeApi {
     fn record_spend(&self, use_case: &str, model: &str, usage: Option<&Usage>) {
         let (Some(path), Some(u)) = (&self.spend_file, usage) else { return };
         let Some(microusd) = cost_microusd(model, u) else { return };
-        // `provider`：舊的行沒有這個欄位，一律是 anthropic。
         if let Err(e) = append_spend(path, &json!({"at": crate::db::now(), "use_case": use_case, "model": model, "provider": api_provider_of_model(model), "microusd": microusd})) {
             tracing::warn!(error = %e, "claude api spend log write failed");
         }
@@ -697,8 +681,6 @@ impl Default for ClaudeApi {
         Self::new()
     }
 }
-
-// ───────────── 帳本 ─────────────
 
 /// 一次呼叫的記錄（不含 prompt 與回覆內容）。
 #[derive(Clone, Debug)]
@@ -818,8 +800,6 @@ impl Ledger {
     }
 }
 
-// ───────────── 設定與帳本的 HTTP 端點 ─────────────
-
 fn settings_json(cfg: &ConfigFile) -> Value {
     let key = key_status(&cfg.claude_api.key_file);
     let uses: Vec<Value> = CLAUDE_API_USES
@@ -851,10 +831,8 @@ fn settings_json(cfg: &ConfigFile) -> Value {
         "key_error": key.err(),
         "models": CLAUDE_API_MODELS,
         "efforts": CLAUDE_API_EFFORTS,
-        // 可選的供應商。OpenAI 沒開或 key 不能用時仍列出，但 `available=false` 並附原因（設定頁顯示成停用的選項）。
         "openai": openai_status(cfg),
         "groups": groups,
-        // 舊欄位（相容讀取）：每個用途一列，值是它所屬組的生效值。
         "uses": uses,
     })
 }
@@ -911,14 +889,12 @@ fn validate(body: &SettingsBody) -> Result<(), LcError> {
     for (id, u) in body.uses.iter().flatten() {
         let Some(d) = CLAUDE_API_USES.iter().find(|d| d.id == id) else { return Err(LcError::Bad(format!("unknown use: {id}"))) };
         let has_auto = CLAUDE_API_GROUPS.iter().find(|g| g.id == d.group).is_some_and(|g| g.auto_default.is_some());
-        // 0＝不上限（#1948；所有用途與組共用）；上限 1000。
         validate_body(id, u, has_auto && d.auto_default.is_some(), 0)?;
     }
     Ok(())
 }
 
 fn validate_body(id: &str, u: &UseBody, has_auto: bool, floor: u32) -> Result<(), LcError> {
-    // model／effort／retry_model／provider 的合法性要看套用之後的供應商：由 `validate_applied` 對整組的結果檢查。
     if u.auto.is_some() && !has_auto {
         return Err(LcError::Bad(format!("{id} has no auto switch")));
     }
@@ -947,11 +923,9 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
     if let Some(enabled) = body.enabled {
         cfg.claude_api.enabled = enabled;
     }
-    // 舊的逐用途 PUT 先映射到組，再讓 `groups` 蓋在後面。
     let mut patches: Vec<(&'static str, &UseBody)> = Vec::new();
     for (id, u) in body.uses.iter().flatten() {
         if let Some(d) = CLAUDE_API_USES.iter().find(|d| d.id == id) {
-            // 「自動」只屬於 message_translate；其他成員帶 auto 不處理（validate 已擋）。
             patches.push((d.group, u));
         }
     }
@@ -962,7 +936,6 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
     }
     for (gid, u) in patches {
         let Some(mut st) = cfg.claude_group_state(gid) else { continue };
-        // 供應商：照 body 原樣記下（合法性由 `validate_applied` 檢查）。換了供應商，舊供應商的模型／effort／重試模型不帶過去。
         let current = cfg.claude_api.groups.get(gid).map(|g| g.provider.trim().to_string()).unwrap_or_default();
         let provider = u.provider.as_deref().map(|p| p.trim().to_string()).unwrap_or(current.clone());
         let normalized = |p: &str| crate::config::api_provider_of(p).unwrap_or("?");
@@ -991,11 +964,8 @@ fn apply(cfg: &mut ConfigFile, body: &SettingsBody) {
         if let Some(v) = u.retry_model.as_deref() {
             st.retry_model = v.trim().to_string();
         }
-        // 預設（Claude）不寫 `provider` 欄位：沒用到這個功能的設定檔長相不變。
         let written_provider = if normalized(&provider) == API_PROVIDER_ANTHROPIC { String::new() } else { provider.clone() };
         cfg.claude_api.groups.insert(gid.to_string(), crate::config::ClaudeApiUseCfg { enabled: Some(st.enabled), model: st.model.clone(), effort: st.effort.clone(), max_per_hour: Some(st.max_per_hour), auto: st.auto, retry_model: Some(st.retry_model.clone()), provider: written_provider });
-        // 更新框翻譯的功能本身讀 `[changelog_translate]`：把共用的開關／模型／effort 同步過去（每小時上限它自己管，不動）。
-        // 翻譯組改用 OpenAI 時更新框翻譯留在 Claude：只同步開關，它的模型／effort 不動（不把 OpenAI 的模型寫進去）。
         if gid == "translate" {
             let t = &mut cfg.changelog_translate;
             t.enabled = st.enabled;
@@ -1019,7 +989,6 @@ pub(crate) async fn put_settings(State(app): State<Arc<App>>, Json(body): Json<S
         Some(token) => Some(stage_key(&key_file, token).map_err(|e| LcError::Bad(e.to_string()))?),
         None => None,
     };
-    // 任何一層要從「關」變成「開」，key 就必須可用（新貼的算數）。
     let mut next = prev.clone();
     apply(&mut next, &body);
     validate_applied(&next, &body)?;
@@ -1107,14 +1076,12 @@ pub fn routes() -> axum::Router<Arc<App>> {
     use axum::routing::get;
     axum::Router::new()
         .route("/claude-api/settings", get(get_settings).put(put_settings))
-        // 環境設定的「OpenAI API」區（使用者 2026-11-18）：處理函式在 openai_api_settings.rs，路由跟 Claude 的設定放同一支 router。
         .route("/openai-api/settings", get(crate::openai_api_settings::get_settings).put(crate::openai_api_settings::put_settings))
         .route("/claude-api/ledger", get(get_ledger))
         .route("/claude-api/balance", get(get_balance))
         .route("/claude-api/balance-anchor", axum::routing::put(put_balance_anchor))
         .route("/claude-api/cap", get(get_cap).put(put_cap))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1159,8 +1126,8 @@ mod tests {
     fn microusd_pricing_and_bad_spend_lines_are_skipped() {
         let u = Usage { input_tokens: Some(1_000_000), output_tokens: Some(1_000_000), cache_creation_input_tokens: Some(1_000_000), cache_read_input_tokens: Some(1_000_000) };
         assert_eq!(cost_microusd("claude-haiku-5-5", &u), Some(735_000));
-        assert_eq!(cost_microusd("claude-opus-5-5", &u), Some(29_200_000)); // 4＋20＋5（寫）＋0.2（讀，0.05×）
-        assert_eq!(cost_microusd("claude-fable-5-1", &u), Some(72_750_000)); // 10＋50＋12.5＋0.25（讀，0.025×）
+        assert_eq!(cost_microusd("claude-opus-5-5", &u), Some(29_200_000));
+        assert_eq!(cost_microusd("claude-fable-5-1", &u), Some(72_750_000));
         assert_eq!(cost_microusd("gpt-x", &u), None);
 
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-spend-{}", crate::db::ulid())));
@@ -1255,7 +1222,6 @@ mod tests {
         assert_eq!(errs[1], ClaudeError::RateLimited { retry_after_secs: Some(7) });
         assert_eq!(fake.calls.load(Ordering::SeqCst), 4, "一個失敗只送一次");
         assert_eq!(fake.seen.lock().unwrap()[0]["model"], "claude-haiku-5-5");
-        // 名額用完（max_per_hour = 4）：不送、不記帳本。
         assert_eq!(complete(&app, req("changelog_review")).await.unwrap_err(), ClaudeError::Budget);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 4);
         let snap = app.claude_api.ledger.snapshot(10);
@@ -1302,7 +1268,6 @@ mod tests {
         assert_eq!(cfg.claude_api.groups["translate"].model, "claude-sonnet-5-5");
         let t = saved["uses"].as_array().unwrap().iter().find(|u| u["id"] == "changelog_translate").unwrap().clone();
         assert_eq!((t["enabled"].clone(), t["model"].clone(), t["legacy_section"].clone()), (json!(true), json!("claude-sonnet-5-5"), json!("changelog_translate")));
-        // 兩條路讀同一個 key 檔。
         assert_eq!(cfg.changelog_translate_key_file(), cfg.claude_api.key_file);
         let fake = Fake::new(vec![ok("{}", 1, 1)]);
         app.claude_api.set_client(fake);
@@ -1358,7 +1323,6 @@ mod tests {
         let a = group(&first, "changelog_analysis");
         assert_eq!((a["model"].clone(), a["effort"].clone(), a["uses"].clone()), (json!("claude-opus-5-5"), json!("low"), json!(["changelog_review", "release_triage"])));
         assert_eq!(group(&first, "translate")["model"], json!("claude-haiku-5-5"));
-        // 以組寫：兩個用途一起變；帳本仍按用途（用途 id 不變）。
         let saved = put(&app, json!({"token": "sk-ant-test-0007", "enabled": true, "groups": {"changelog_analysis": {"enabled": true, "model": "claude-sonnet-5-5", "effort": "high", "max_per_hour": 9}}})).await.unwrap().0;
         let g = group(&saved, "changelog_analysis");
         assert_eq!((g["enabled"].clone(), g["model"].clone(), g["effort"].clone(), g["max_per_hour"].clone()), (json!(true), json!("claude-sonnet-5-5"), json!("high"), json!(9)));
@@ -1368,22 +1332,18 @@ mod tests {
             assert_eq!((s.enabled, s.model.as_str(), s.effort.as_str(), s.max_per_hour), (true, "claude-sonnet-5-5", "high", 9), "{u}");
         }
         assert!(saved["uses"].as_array().unwrap().iter().any(|u| u["id"] == "release_triage" && u["group"] == "changelog_analysis" && u["model"] == "claude-sonnet-5-5"), "舊 uses[] 欄位仍回、值是所屬組的");
-        // 舊寫法（逐用途）對應到所屬組，且不動到別組。
         let old = put(&app, json!({"uses": {"release_triage": {"effort": "medium"}}})).await.unwrap().0;
         assert_eq!(group(&old, "changelog_analysis")["effort"], json!("medium"));
         assert_eq!(app.cfg.get().await.claude_use_state("changelog_review").unwrap().effort, "medium");
         assert_eq!(group(&old, "translate")["model"], json!("claude-haiku-5-5"));
-        // 翻譯組的開關／模型同步到更新框翻譯那一段，不動它的上限。
         put(&app, json!({"groups": {"translate": {"model": "claude-sonnet-5-5"}}})).await.unwrap();
         let cfg = app.cfg.get().await;
         assert_eq!(cfg.changelog_translate.model, "claude-sonnet-5-5");
         assert_eq!(cfg.changelog_translate.max_per_hour, 0);
-        // 驗證：不認得的組、auto 只屬於翻譯組、上限範圍。
         assert!(matches!(put(&app, json!({"groups": {"nope": {"enabled": true}}})).await, Err(LcError::Bad(_))));
         assert!(matches!(put(&app, json!({"groups": {"changelog_analysis": {"auto": true}}})).await, Err(LcError::Bad(_))));
         assert!(matches!(put(&app, json!({"groups": {"translate": {"max_per_hour": 5000}}})).await, Err(LcError::Bad(_))));
         assert!(put(&app, json!({"groups": {"translate": {"auto": false}}})).await.is_ok());
-        // 呼叫端仍用原用途 id，帳本照用途分。
         let fake = Fake::new(vec![ok("a", 1, 1), ok("b", 1, 1)]);
         app.claude_api.set_client(fake);
         complete(&app, req("changelog_review")).await.unwrap();
@@ -1415,9 +1375,7 @@ mod tests {
         ] {
             assert!(matches!(put(&app, bad).await, Err(LcError::Bad(_))));
         }
-        // 0＝不限是合法值（#翻譯不限）。
         assert!(put(&app, json!({"uses": {"changelog_review": {"max_per_hour": 0}}})).await.is_ok());
-        // 只關開關：key 還在。
         let off = put(&app, json!({"enabled": false, "token": "  "})).await.unwrap().0;
         assert_eq!((off["enabled"].clone(), off["key_present"].clone()), (json!(false), json!(true)));
         std::fs::remove_dir_all(&dir).ok();
@@ -1450,15 +1408,12 @@ mod tests {
         put(&app, json!({"groups": {"translate": {"max_per_hour": 0}}})).await.unwrap();
         assert_eq!(app.cfg.claude_fresh().await.claude_group_state("translate").unwrap().max_per_hour, 0);
         assert!(matches!(put(&app, json!({"groups": {"translate": {"max_per_hour": 1001}}})).await, Err(LcError::Bad(_))));
-        // 不限：連續送超過一般上限也照放（reserve 不擋）。
         let api = ClaudeApi::new();
         for _ in 0..300 {
             assert!(api.reserve("message_translate", 0));
         }
-        // 對照：有上限的用途照擋。
         assert!(api.reserve("schedule_outcome", 2) && api.reserve("schedule_outcome", 2));
         assert!(!api.reserve("schedule_outcome", 2));
-        // 預設：翻譯組與訊息翻譯預設不限。
         let defaults: ConfigFile = toml::from_str("").unwrap();
         assert_eq!(defaults.claude_use_state("message_translate").unwrap().max_per_hour, 0);
         std::fs::remove_dir_all(&dir).ok();

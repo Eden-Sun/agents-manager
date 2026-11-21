@@ -134,8 +134,6 @@ pub const SHIM_STALE_KIND: &str = "bot_shim_stale";
 
 pub const REMOTE_RETRY_WAITS: [u64; 4] = [0, 300, 900, 3600];
 
-// ───────────────────────────── 遠端（issue #124）─────────────────────────────
-
 /// 遠端一台 host 上的同步結果。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RemoteSync {
@@ -165,7 +163,6 @@ pub fn remote_sync_script(bot_dirs: &[String], names: &[&str], create_missing: b
     for (name, content) in &wanted {
         debug_assert!(content.ends_with('\n'), "heredoc 要求結尾換行：{name}");
         s.push_str(&format!("cat > \"$T/{name}\" <<'AM_SHIM_EOF_{name}'\n{content}AM_SHIM_EOF_{name}\n"));
-        // 收到的位元組數對不上（傳輸被截斷）就整個放棄，不複製任何東西。
         s.push_str(&format!(
             "[ \"$(wc -c < \"$T/{name}\" | tr -d ' ')\" = {len} ] || {{ echo AM_SHIM_SYNC_FAILED truncated {name}; exit 1; }}\n",
             len = content.len()
@@ -240,8 +237,6 @@ pub async fn sync_remote(
 pub fn bin_dir(bot_dir: &Path) -> PathBuf {
     bot_dir.join("bin")
 }
-
-
 
 /// 遠端 shim 過期的主機帳。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait RemoteShimStale: Send + Sync {

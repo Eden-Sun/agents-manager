@@ -26,7 +26,6 @@
         bin(&bindir, "claude", "#!/bin/sh\necho 'claude 2.1.0'\n");
         bin(&bindir, "codex", "#!/bin/sh\necho 'codex-cli 0.120.0'\n");
         bin(&bindir, "herdr", "#!/bin/sh\necho 'herdr 0.9.1'\n");
-        // `$2` is the `command -v <name>` string the probe passes to `sh -lic`.
         bin(
             &root,
             "login-sh",
@@ -57,7 +56,6 @@
         let herdr = sh(HERDR_CLI_SH, &shell, &path);
         assert!(herdr.contains("AM_HERDR herdr 0.9.1"), "{herdr}");
 
-        // 登入 shell 給 alias、PATH 上也沒有：要空，不能把 alias 字串留著。
         let bare = crate::testing::track(std::env::temp_dir().join(format!("am-alias-bare-{}", crate::db::ulid())));
         std::fs::create_dir_all(&bare).unwrap();
         let out = sh(PROBE_SH, &shell, "/usr/bin:/bin");

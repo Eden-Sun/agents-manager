@@ -42,10 +42,8 @@ fn the_merge_replaces_only_our_entry_and_keeps_everything_the_user_added() {
     assert_eq!(commands(&merged, "Stop"), ["/data/grok-hook.sh"]);
     assert_eq!(commands(&merged, "PreToolUse"), ["/home/u/guard.sh"], "別的事件原封不動");
     assert_eq!(merged["note"], "user key outside hooks", "hooks 以外的鍵也留著");
-    // 冪等：再合併一次不會長出第二項。
     let again: Value = serde_json::from_str(&hooks_json_merged(Some(&merged.to_string()), "/data/grok-hook.sh")).unwrap();
     assert_eq!(again, merged);
-    // 一個群組裡無法證明的舊路徑和使用者的混在一起：舊路徑留著，本 dispatcher 另加。
     let mixed = json!({"hooks": {"Stop": [{"hooks": [
         {"type": "command", "command": "/old/dir/grok-hook.sh", "timeout": 5},
         {"type": "command", "command": "/home/u/after-stop.sh"}
@@ -111,7 +109,6 @@ async fn starting_a_grok_bot_keeps_unknown_same_named_hooks_and_adds_its_own() {
     let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
     assert_eq!(leftovers.len(), 1, "原子寫入不留暫存檔：{leftovers:?}");
 
-    // 原檔別人寫得進去（0666）：換檔時收回到 0600，不能把一個能被改寫就會執行的檔案留著。
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
     std::fs::write(&path, stale.to_string()).unwrap();
     install_local(&e.app, &json!({"GROK_HOME": grok_home.to_string_lossy()})).unwrap();
@@ -227,7 +224,6 @@ async fn daemon_start_repairs_a_wrong_hook_file_but_never_creates_or_touches_a_g
     assert!(!heal_at_startup(&e.app, Some(&home)).unwrap(), "本來就對：不碰");
     assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
 
-    // 指到的腳本被刪掉了（路徑還是這顆 daemon 的）：腳本補回來。
     std::fs::remove_file(&dispatcher).unwrap();
     assert!(heal_at_startup(&e.app, Some(&home)).unwrap());
     assert!(Path::new(&dispatcher).is_file());
@@ -238,7 +234,6 @@ async fn daemon_start_repairs_a_wrong_hook_file_but_never_creates_or_touches_a_g
 async fn tests_never_write_the_real_home() {
     let e = tt::env().await;
     let fake = crate::home::dir().expect("fake home");
-    // `test_home` 在行程開始前就把 `$HOME` 換成拋棄式目錄，所以 `dirs::home_dir()` 也指向它；這裡驗它確實是那個拋棄式目錄。
     assert_eq!(fake.as_path(), crate::test_home::dir(), "home::dir() 與換掉的 $HOME 是同一處");
     assert!(fake.to_string_lossy().contains("am-test-home-"), "測試的 HOME 不是真的 HOME：{}", fake.display());
     install_local(&e.app, &json!({})).unwrap();
@@ -253,7 +248,6 @@ fn local_grok_hooks_get_a_pre_tool_use_kill_guard_and_remote_ones_do_not() {
     assert_eq!(commands(&local, "Stop"), ["/data/grok-hook.sh"]);
     let remote: Value = serde_json::from_str(&hooks_json_merged(None, "/data/grok-hook.sh")).unwrap();
     assert!(remote["hooks"].get("PreToolUse").is_none());
-    // 使用者自己的 PreToolUse 原樣保留，我們那一項不重複。
     let existing = json!({"hooks": {"PreToolUse": [user_hook("/home/u/guard.sh")]}}).to_string();
     let m: Value = serde_json::from_str(&hooks_json_merged_local(Some(&existing), "/data/grok-hook.sh")).unwrap();
     assert_eq!(commands(&m, "PreToolUse"), ["/home/u/guard.sh", "/data/grok-hook.sh"]);

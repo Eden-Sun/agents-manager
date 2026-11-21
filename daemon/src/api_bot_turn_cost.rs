@@ -24,16 +24,12 @@ pub(crate) async fn recent_turns(db: &SqlitePool, bot_id: &str) -> Result<Vec<Va
     )
     .bind(bot_id).fetch_all(db).await?;
     Ok(rows.into_iter().map(|r| {
-        // OpenAI 的 reasoning tokens（usage 的 `output_tokens_details.reasoning_tokens`，存成 `reasoning_tokens`）：**已含在輸出裡**，
-        // 只供顯示、不另計價。usage 沒有這個欄位的回合（Claude）不帶這個 key。
         let reasoning = r.13;
         let mut turn = json!({
         "turn_id": r.0, "requests": r.1,
         "cost_usd": r.2 as f64 / 1e6, "reserved_usd": r.3 as f64 / 1e6, "in_flight": r.4 > 0,
         "input_tokens": r.5, "output_tokens": r.6, "cache_read_tokens": r.7, "cache_write_tokens": r.8,
-        // 這個 turn 送出請求用的速度（`standard`／`fast`）：每回合開始讀一次 bots.fast、整回合固定，改設定要下一回合才生效。
         "speed": r.9,
-        // 回合第一個請求送出的時間：網頁進行中的回合用它算「已進行多久」。
         "started_at": r.10,
         "effort": r.11,
         "auto_lowered_effort": r.12.map(|v| v != 0).unwrap_or(false),
@@ -59,7 +55,6 @@ mod context_tests {
 
     #[test]
     fn context_is_the_last_iteration_after_compaction_and_top_level_otherwise() {
-        // 2026-11-15 pt-hub 實際回應：壓縮後的請求只有 25k，不是壓縮前的 130k。
         let real = json!({"cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533,
             "iterations": [{"type": "compaction", "cache_creation_input_tokens": 130581, "input_tokens": 38, "output_tokens": 8192},
                            {"type": "message", "cache_creation_input_tokens": 4332, "cache_read_input_tokens": 20653, "input_tokens": 2, "output_tokens": 533}]});
@@ -78,8 +73,6 @@ pub(crate) async fn cache_info(db: &SqlitePool, bot_id: &str) -> Result<Value, s
          WHERE a.bot_id=? AND a.state='recorded' AND a.finished_at IS NOT NULL ORDER BY a.finished_at DESC, a.ordinal DESC LIMIT 1",
     ).bind(bot_id).fetch_optional(db).await?;
     let working: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_bot_attempts WHERE bot_id=? AND state='reserved')").bind(bot_id).fetch_one(db).await?;
-    // 5 分鐘／1 小時的倒數是 Claude prompt cache 的規則：只有 claude-api 有。openai-api 的快取只從 usage 的 cached／cache_write 看，
-    // 沒有可倒數的 TTL（`ttl_secs`／`expires_at` 給 null）。
     let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bots WHERE id=?").bind(bot_id).fetch_optional(db).await?;
     if kind.as_deref().is_some_and(|k| k != crate::config::CLAUDE_API_KIND) {
         return Ok(json!({"last_request_at": last.map(|l| l.0), "ttl_secs": null, "expires_at": null, "working": working}));
@@ -102,7 +95,6 @@ mod cache_tests {
     fn cache_expiry_is_last_request_plus_the_turns_ttl() {
         let v = cache_json(Some(("2026-11-15T03:00:00.000Z".into(), Some(3600))), false);
         assert_eq!((v["ttl_secs"].as_i64(), v["expires_at"].as_str()), (Some(3600), Some("2026-11-15T04:00:00.000Z")));
-        // 沒記 TTL（舊回合）或不是 3600：5 分鐘。
         let d = cache_json(Some(("2026-11-15T03:00:00.000Z".into(), None)), true);
         assert_eq!((d["ttl_secs"].as_i64(), d["expires_at"].as_str(), d["working"].as_bool()), (Some(300), Some("2026-11-15T03:05:00.000Z"), Some(true)));
         assert!(cache_json(None, false)["expires_at"].is_null());

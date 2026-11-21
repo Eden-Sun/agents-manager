@@ -28,7 +28,6 @@ pub async fn on_stop(app: &Arc<App>, run: &db::Run, payload: &Value) {
         app.emit_bot_status(&run.bot_id).await;
     }
     if had_shells {
-        // 常駐服務要看行程樹（本機 ps、遠端 ssh，最多 10 秒）：不卡住 hook 的處理，查到再回頭修正數字。
         let (app, run) = (app.clone(), run.clone());
         tokio::spawn(async move { refine_services(&app, &run, at).await });
     }
@@ -40,7 +39,6 @@ async fn refine_services(app: &(impl crate::background_hook::HookSnapshots + cra
     let services = crate::background_jobs::services(app, run, &client, pane).await;
     let n = {
         let mut hook = app.background_hook().lock().unwrap_or_else(|e| e.into_inner());
-        // 這段時間裡來了新的 Stop（或被丟掉）：這份查詢結果不屬於它了。
         let Some(snap) = hook.get_mut(&run.id).filter(|s| s.at == at) else { return };
         snap.services = Some(services);
         snap.jobs()

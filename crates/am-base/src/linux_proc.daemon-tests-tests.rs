@@ -9,7 +9,6 @@
         std::fs::create_dir_all(root.join("net")).unwrap();
         let hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
         let le = cfg!(target_endian = "little");
-        // 127.0.0.1:5173 LISTEN、0.0.0.0:8080 LISTEN、127.0.0.1:9999 ESTABLISHED（不算）。
         let lo = if le { "0100007F" } else { "7F000001" };
         std::fs::write(
             root.join("net/tcp"),
@@ -20,7 +19,6 @@
             ),
         )
         .unwrap();
-        // [::1]:3000 LISTEN、[::]:4000 LISTEN。
         let one = if le { "01000000" } else { "00000001" };
         std::fs::write(
             root.join("net/tcp6"),
@@ -55,7 +53,6 @@
         assert_eq!(by_pid[&10], vec![5173]);
         assert_eq!(by_pid[&20], vec![3000, 8080]);
         assert!(!by_pid.contains_key(&40));
-        // 預覽的綁定判斷：`*` 跟 `[::1]` 要分得出對外與 loopback。
         let l = crate::preview_bind::parse_listeners(&listen_fpn_in(&root, Some(&[20])));
         assert_eq!(l, vec![("*".to_string(), 8080), ("[::1]".to_string(), 3000)]);
         assert_eq!(crate::preview_bind::exposed_addr(&l), Some("*"));
@@ -100,7 +97,6 @@
         };
         let l = crate::preview_bind::parse_listeners(&out);
         assert!(l.contains(&("127.0.0.1".to_string(), port)), "{out}");
-        // 之後幾趟讀不到：Linux 算錯、macOS 照樣略過那一項。
         let read = |o: Option<String>, what: &str| {
             assert!(o.is_some() || !cfg!(target_os = "linux"), "Linux 的 /proc 讀不到：{what}");
             o

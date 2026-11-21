@@ -255,8 +255,6 @@ CREATE TABLE IF NOT EXISTS supervisor_notes (
 
 /// Called from `db::migrate` on the same single-connection pool as the rest of the schema.
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    // 先補欄位再跑 DDL：DDL 裡的唯一索引會用到 `client_request_id`，舊庫沒有那一欄就會整段失敗。
-    // 表還不存在時 `has_column` 回 false，ALTER 也會失敗——所以只在表已經在的時候補。
     if table_exists(pool, "supervisor_approvals").await? && !has_column(pool, "supervisor_approvals", "client_request_id").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN client_request_id TEXT").execute(pool).await?;
     }
@@ -270,61 +268,34 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(pool).await?;
     }
-    // Assignment 狀態轉移的單一權威（issue #71，跟 issue #68 的 `turns_status_transition` 同一個
-    // 理由）：合法邊只定義在 `assignment_state::allowed`，trigger 由它生成。既有那幾支各自帶
-    // `WHERE status IN (…)` guard 的函式照舊，這是它們的下限；未來新寫的路徑繞不過去。
     assignment_state::install_guard(pool).await?;
-    // 換 commit 接續的等待起點（見 `Approval::wait_since`）。表由上面的 DDL 保證存在。
     if !has_column(pool, "supervisor_approvals", "wait_since").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN wait_since TEXT").execute(pool).await?;
     }
-    // 申請理由（2026-09-19）：舊庫沒有這一欄。
     if !has_column(pool, "supervisor_approvals", "request_reason").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN request_reason TEXT").execute(pool).await?;
     }
-    // issue #436：申請人是不是驗過的。既有的列都是自稱的年代寫的，所以補上去時一律 1。
     if !has_column(pool, "supervisor_approvals", "requester_unverified").await? {
         sqlx::query("ALTER TABLE supervisor_approvals ADD COLUMN requester_unverified INTEGER NOT NULL DEFAULT 1")
             .execute(pool)
             .await?;
     }
-    // Additive columns for databases created before they existed (same pattern as `db::migrate`).
-    // Keep `desired_running` in its existing position: the fresh-schema fingerprint includes column order.
     for (col, ddl) in [
-        // 1 once the user has started the manager, 0 after `supervisor-stop`. The watchdog only
-        // brings back a manager that is *supposed* to be running: a fresh `setup` stays down
-        // until a human starts it once, and an explicit stop stays stopped.
         ("desired_running", "ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0"),
-        // Consecutive automatic starts that did not bring the manager back, and when the next
-        // one is due. Shared through the row so a second controller loop sees the same count.
         ("watchdog_attempts", "ALTER TABLE supervisors ADD COLUMN watchdog_attempts INTEGER NOT NULL DEFAULT 0"),
         ("watchdog_next_at", "ALTER TABLE supervisors ADD COLUMN watchdog_next_at TEXT"),
-        // When the manager was last woken with its inbox. The notify throttle reads it, so it
-        // has to survive a restart: a reboot must not turn into an extra wake-up.
         ("last_notify_at", "ALTER TABLE supervisors ADD COLUMN last_notify_at TEXT"),
-        // The persona the manager actually runs on. Authoritative: `setup` seeds this when it
-        // is empty and never writes over it afterwards, so an older binary running `setup`
-        // cannot roll a newly updated persona back to whatever it happens to have compiled in.
         ("persona_text", "ALTER TABLE supervisors ADD COLUMN persona_text TEXT"),
         ("persona_version", "ALTER TABLE supervisors ADD COLUMN persona_version INTEGER NOT NULL DEFAULT 0"),
         ("persona_hash", "ALTER TABLE supervisors ADD COLUMN persona_hash TEXT"),
-        // `embedded` (seeded from the binary) | `api` (somebody set it explicitly).
         ("persona_source", "ALTER TABLE supervisors ADD COLUMN persona_source TEXT"),
         ("persona_updated_at", "ALTER TABLE supervisors ADD COLUMN persona_updated_at TEXT"),
-        // The embedded hash this was seeded from / last migrated to. Comparing it with the
-        // running binary's is how "there is a newer embedded version" is distinguished from
-        // "somebody deliberately customised this".
         ("persona_seed_hash", "ALTER TABLE supervisors ADD COLUMN persona_seed_hash TEXT"),
-        // 舊的 remote-entry 觀測欄（#1477 起不讀不寫，欄位保留，見 CREATE TABLE 的註解）。
         ("remote_source", "ALTER TABLE supervisors ADD COLUMN remote_source TEXT"),
         ("remote_observed_at", "ALTER TABLE supervisors ADD COLUMN remote_observed_at TEXT"),
-        // The run the observation was made against: a restart invalidates it.
         ("remote_session_id", "ALTER TABLE supervisors ADD COLUMN remote_session_id TEXT"),
         ("remote_actor", "ALTER TABLE supervisors ADD COLUMN remote_actor TEXT"),
         ("remote_evidence", "ALTER TABLE supervisors ADD COLUMN remote_evidence TEXT"),
-        // When the watchdog stopped trying, and why. Persisted so the report happens exactly
-        // once: before this, giving up was a state nobody was told about and every later tick
-        // silently re-derived it (review #31).
         ("watchdog_gave_up_at", "ALTER TABLE supervisors ADD COLUMN watchdog_gave_up_at TEXT"),
         ("watchdog_last_error", "ALTER TABLE supervisors ADD COLUMN watchdog_last_error TEXT"),
     ] {
@@ -343,45 +314,24 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
-    // These backfills stay next to their original ALTERs. In particular, moving `legacy_closed`
-    // changes SQLite's column order and makes fresh databases disagree with existing v38 ones.
     for (col, ddl) in [
-        // The turn's own last word, kept apart from the lifecycle status: `completed`,
-        // `completed_fallback`, `failed`, `dispatch_failed`. Losing it was how "the turn
-        // ended" turned into "the job is done".
         ("turn_status", "ALTER TABLE supervisor_assignments ADD COLUMN turn_status TEXT"),
-        // 0 when the result was scraped off the terminal instead of reported by a hook. An
-        // assignment is never accepted automatically, and least of all on this evidence.
         ("evidence_complete", "ALTER TABLE supervisor_assignments ADD COLUMN evidence_complete INTEGER"),
         ("reviewed_at", "ALTER TABLE supervisor_assignments ADD COLUMN reviewed_at TEXT"),
         ("reviewed_by", "ALTER TABLE supervisor_assignments ADD COLUMN reviewed_by TEXT"),
         ("review_decision", "ALTER TABLE supervisor_assignments ADD COLUMN review_decision TEXT"),
         ("review_reason", "ALTER TABLE supervisor_assignments ADD COLUMN review_reason TEXT"),
-        // The assignment that carries this one's unfinished part forward, and the pointer back.
         ("followup_assignment_id", "ALTER TABLE supervisor_assignments ADD COLUMN followup_assignment_id TEXT"),
         ("follow_up_of", "ALTER TABLE supervisor_assignments ADD COLUMN follow_up_of TEXT"),
-        // Closed under the pre-review semantics: the turn ended and the row was called
-        // `completed` without anyone accepting it. Kept closed (a backfill must not re-open a
-        // month of work) but never presented as an acceptance. See docs/SPEC.md §18.
         ("legacy_closed", "ALTER TABLE supervisor_assignments ADD COLUMN legacy_closed INTEGER NOT NULL DEFAULT 0"),
-        // Files / modules this assignment was handed, so an overlap with another open
-        // assignment can at least be reported to AGM (§18.4).
         ("ownership_json", "ALTER TABLE supervisor_assignments ADD COLUMN ownership_json TEXT"),
-        // 通知型交辦（見 SCHEMA 的欄位註解）。舊資料一律 1＝照原本的規則等 AGM 驗收。
         ("expects_review", "ALTER TABLE supervisor_assignments ADD COLUMN expects_review INTEGER NOT NULL DEFAULT 1"),
         ("resume_at", "ALTER TABLE supervisor_assignments ADD COLUMN resume_at TEXT"),
         ("quota_retries", "ALTER TABLE supervisor_assignments ADD COLUMN quota_retries INTEGER NOT NULL DEFAULT 0"),
-        // 舊版群組任務的欄位保留以維持資料庫相容；程式不再讀寫。
         ("mission_id", "ALTER TABLE supervisor_assignments ADD COLUMN mission_id TEXT"),
         ("mission_role", "ALTER TABLE supervisor_assignments ADD COLUMN mission_role TEXT"),
-        // 回合結束時 run 上記的 `turn_error`（撞限、API 錯誤、斷線…）。`turn_status` 只有
-        // completed/failed 這種粗分類，換手要看的是「為什麼」。
         ("turn_error", "ALTER TABLE supervisor_assignments ADD COLUMN turn_error TEXT"),
-        // 這一輪「一直 409 送不進去」從什麼時候開始（第一次撞 409 寫下）。409 保險絲從這裡計時，
-        // 不是 `created_at`：在 quota_blocked 或 restart 窗口 hold 裡合法等待的時間不算「送不進去」。
         ("conflict_since", "ALTER TABLE supervisor_assignments ADD COLUMN conflict_since TEXT"),
-        // 排不進去幾輪（見 SCHEMA 的欄位註解）。舊列從 0 開始：它們的 409 歷史本來就記在
-        // `attempts` 裡分不出來，硬猜只會讓保險絲一升級就燒掉。
         ("busy_rounds", "ALTER TABLE supervisor_assignments ADD COLUMN busy_rounds INTEGER NOT NULL DEFAULT 0"),
     ] {
         if col == "turn_status" {
@@ -411,8 +361,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
     }
     for (col, ddl) in [
-        // Durable notify bookkeeping: what the transport said, how many times we tried, when
-        // the next attempt is due and why the last one did not stick.
         ("notify_delivery", "ALTER TABLE supervisor_inbox ADD COLUMN notify_delivery TEXT"),
         ("notify_attempts", "ALTER TABLE supervisor_inbox ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0"),
         ("notify_next_at", "ALTER TABLE supervisor_inbox ADD COLUMN notify_next_at TEXT"),
@@ -423,9 +371,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             sqlx::query(ddl).execute(pool).await?;
         }
     }
-    // issue #459：`responder_needs_login` 改名成 `role_unavailable`。舊 kind 的列再也不會被觀測到
-    // （`observe` 只出新名），所以還開著的那些會變成永遠關不掉的孤兒——resource 是角色名的直接改寫
-    // 過來（同一件事、同一把唯一索引 key），其餘（#420 時代 resource 是 bot_id 的）就地關掉。
     sqlx::query(
         "UPDATE supervisor_incidents SET kind=? WHERE kind=? AND resource IN ('patrol','responder')
            AND NOT EXISTS (SELECT 1 FROM supervisor_incidents b
@@ -442,7 +387,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         .bind(super::incidents::ROLE_UNAVAILABLE_KIND_LEGACY)
         .execute(pool)
         .await?;
-    // 雙角色（巡檢／協調）的欄位與表，見 roles.rs。
     super::roles::migrate(pool).await?;
     Ok(())
 }
@@ -515,8 +459,6 @@ impl Supervisor {
     }
 }
 
-
-
 /// Mirrors the row: `FromRow` needs every column, and not all of them have a
 /// reader yet (the front end reads several straight out of the JSON).
 #[allow(dead_code)]
@@ -564,9 +506,6 @@ impl InboxEvent {
             "kind": self.kind,
             "payload": serde_json::from_str::<Value>(&self.payload_json).unwrap_or_else(|_| json!({})),
             "state": self.state,
-            // How the wake-up that carried this event went. `unknown` is its own answer: the
-            // prompt may or may not have reached the manager, so the next attempt reconciles
-            // against `notify_turn_id` instead of sending a second copy.
             "notify": {
                 "turn_id": self.notify_turn_id,
                 "delivery": self.notify_delivery,
@@ -585,8 +524,6 @@ impl InboxEvent {
         })
     }
 }
-
-// ---------------------------------------------------------------- supervisor row
 
 /// Read the one supervisor row, creating the "nothing set up yet" default on first call.
 pub async fn get_or_init(pool: &SqlitePool) -> Result<Supervisor> {
@@ -670,9 +607,6 @@ pub async fn set_desired_running(pool: &SqlitePool, wanted: bool) -> Result<()> 
 }
 
 pub async fn set_watchdog(pool: &SqlitePool, attempts: i64, next_at: Option<&str>) -> Result<()> {
-    // Resetting the streak (the manager answered again, or a human decided) also clears the
-    // "gave up" record, so a later outage is reported as a new one instead of being swallowed
-    // by a marker left over from the last one.
     let clear = attempts == 0;
     sqlx::query(
         "UPDATE supervisors SET watchdog_attempts=?, watchdog_next_at=?,
@@ -873,8 +807,6 @@ pub async fn set_summary(pool: &SqlitePool, summary: &str) -> Result<i64> {
     Ok(version)
 }
 
-// ---------------------------------------------------------------- requests
-
 /// Record the user's words behind an assignment. Returns the existing row when the same
 /// `source_key` comes back (a replayed phone message must not become a second request).
 pub async fn upsert_request(pool: &SqlitePool, source: &str, source_key: Option<&str>, text: &str) -> Result<String> {
@@ -922,8 +854,6 @@ pub async fn requests(pool: &SqlitePool, limit: i64) -> Result<Vec<Value>> {
         })
         .collect())
 }
-
-// ---------------------------------------------------------------- assignments
 
 /// Write the assignment down *before* anything is sent. A crash between here and the prompt
 /// leaves a `queued` row the controller picks up again with the same client_request_id.
@@ -1054,8 +984,6 @@ impl<'a> StatusFilter<'a> {
         match raw.trim() {
             "" => Some(Self::All),
             "open" => Some(Self::Open),
-            // 狀態清單只准有一份：`assignment_state::ALL` 是那一份（`sources_for` 也掃它）。
-            // 在這裡抄第四份，改表的時候就會有人抄不走鐘。
             s => super::assignment_state::ALL.iter().find(|k| **k == s).map(|k| Self::One(k)),
         }
     }
@@ -1087,8 +1015,6 @@ pub async fn open_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
     .await?)
 }
 
-
-
 /// Work that has never reached anybody: still `queued`, first created before `cutoff`.
 ///
 /// This needs its own query because [`assignments_idle_since`] cannot see it. Every retry calls
@@ -1111,9 +1037,6 @@ pub async fn assignments_undelivered_since(pool: &SqlitePool, cutoff: &str) -> R
 /// stalled-work probe behind the `assignment_stalled` incident.
 pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
-        // 兩種「不動」不是卡住：通知本來就沒人要驗收（它也不會停在 awaiting_review），
-        // 被額度擋下的那種是**在等一個已知的時間點**，controller 自己會重送。把它們報成
-        // incident 只會讓 AGM 每兩小時被叫醒一次去看一件沒有人需要做的事。清單見 STALLED_STATES。
         &format!(
             "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
                AND status IN ({})
@@ -1137,8 +1060,6 @@ pub async fn assignments_idle_since(pool: &SqlitePool, cutoff: &str) -> Result<V
 /// 合法的來源只有在途那三個（[`assignment_state::IN_FLIGHT`]）——`delivered`／`unknown` 也算，
 /// 因為同一個 crid 重派本來就是冪等的，會再記一次。
 pub async fn mark_delivered(pool: &SqlitePool, id: &str, turn_id: &str, delivery: &str) -> Result<bool> {
-    // `unknown` delivery is its own state: the prompt may or may not have landed, so the
-    // controller reconciles it against the turn instead of sending the work a second time.
     let status = if delivery == "unknown" { "unknown" } else { "delivered" };
     let from = sql_list(&assignment_state::sources_for(status));
     Ok(sqlx::query(&format!(
@@ -1248,7 +1169,6 @@ pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str, event_ke
             .bind(id)
             .execute(&mut *tx)
             .await?;
-        // 通知同一個交易（#283）：寫不進去就整組不成立，下一輪重來，不留下沒人知道的 blocked。
         let bot: String = sqlx::query_scalar("SELECT target_bot_id FROM supervisor_assignments WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
         push_inbox_tx(&mut tx, event_key, "assignment_undeliverable", Some(id), Some(&bot), None, payload).await?;
     }
@@ -1308,13 +1228,8 @@ pub async fn settle_and_notify_on(
     payload: &Value,
 ) -> Result<Settled> {
     let now = crate::db::now();
-    // 通知（`expects_review=0`）而且回合是正常結束的：沒有東西要驗收，當場結案。
-    // 這是 2026-09-12 兩件 `assignment_stalled` incident 的根因——AGM 說一句「收到」也要
-    // 它自己回頭 review，沒 review 就被當成卡住的工作。
     let ok_turn = turn_status == "completed" || turn_status == "completed_fallback";
     let land_on = if ok_turn { "CASE WHEN expects_review=0 THEN 'completed' ELSE 'awaiting_review' END" } else { "'awaiting_review'" };
-    // 守衛從轉移表算出來，不再自己抄一份 `('queued','delivered','unknown')`（issue #71）。
-    // `completed` 那一支（通知當場結案）的來源跟 `awaiting_review` 相同，用同一份即可。
     let from = sql_list(&assignment_state::sources_for("awaiting_review"));
     let moved = sqlx::query(&format!(
         "UPDATE supervisor_assignments
@@ -1333,18 +1248,12 @@ pub async fn settle_and_notify_on(
     .await?
     .rows_affected()
         > 0;
-    // `moved=false`：guard 沒讓這次真的轉移（例如這一列已經被 AGM cancel 掉，或別的呼叫已經
-    // settle 過）。這次呼叫沒有造成任何新事實，不該無條件排一則「請驗收」的通知——已經關掉的
-    // 交辦不能讓 AGM 收到「這件做完了、請驗收」的訊息（issue #99）。這一列現在合不合法一律問
-    // `assignment_state`（上面 `from` 那句已經問過），這裡不另外設一套判斷。
     let event_new = if moved {
         let (bot_id, turn_id, expects_review, status): (String, Option<String>, i64, String) =
             sqlx::query_as("SELECT target_bot_id, turn_id, expects_review, status FROM supervisor_assignments WHERE id=?")
                 .bind(id)
                 .fetch_one(&mut **tx)
                 .await?;
-        // 通知結案了就不要再叫 AGM 來看：inbox 事件改成 `assignment_noticed`，digest 與
-        // `needs_review` 都不會把它算成待辦。失敗的通知照舊走原本那條（它真的需要有人看）。
         let kind = if expects_review == 0 && status == "completed" { "assignment_noticed" } else { kind };
         let payload = if expects_review == 0 && status == "completed" {
             let mut p = payload.clone();
@@ -1432,8 +1341,6 @@ pub async fn park_quota_blocked(
     .await?
     .rows_affected()
         > 0;
-    // guard 擋下（這一列已經被裁示掉、或別的路徑先 park 過）就沒有新事實：不推「在等額度」的通知
-    // （issue #110，跟 `settle_and_notify`／`resume_quota_blocked` 同一條規則）。
     if !moved {
         tx.commit().await?;
         return Ok(Settled { moved, event_new: false });
@@ -1599,8 +1506,6 @@ pub async fn review(
     if !assignment_state::allowed(&before.status, to_status) {
         return Ok(None);
     }
-    // 表已經說這一步合法，字串一定解得回去這兩個 enum——但用 `let...else` 不 panic：壞資料
-    // 不該把整個請求打死，而是照「沒有這個轉移」處理。
     let (Some(from), Some(to)) = (assignment_state::AssignmentState::parse(&before.status), assignment_state::AssignmentState::parse(to_status)) else {
         return Ok(None);
     };
@@ -1714,7 +1619,6 @@ pub async fn review_with_followup(
     let now = crate::db::now();
     let mut tx = pool.begin().await?;
 
-    // The guard. Everything below only happens if the assignment is still where we left it.
     let moved = sqlx::query(
         "UPDATE supervisor_assignments
             SET status=?, review_decision=?, reviewed_by=?, reviewed_at=?, review_reason=?, updated_at=?
@@ -1733,14 +1637,11 @@ pub async fn review_with_followup(
     .rows_affected()
         > 0;
     if !moved {
-        // Nothing written; the caller re-reads to find out who decided and how.
         return Ok(None);
     }
 
     let mut created: Option<String> = None;
     if let Some(f) = followup {
-        // A byte-identical retry of the same continuation is the same continuation. Any other
-        // row already holding this id is a different piece of work and must not be adopted.
         let existing: Option<(String, Option<String>, String, String)> =
             sqlx::query_as("SELECT id, follow_up_of, target_bot_id, text FROM supervisor_assignments WHERE supervisor_id=? AND client_request_id=?")
                 .bind(SUPERVISOR_ID)
@@ -1756,8 +1657,6 @@ pub async fn review_with_followup(
             }
             None => {
                 let new_id = crate::db::ulid();
-                // `expects_review` 抄父交辦：通知（`--notice`）送不出去再 followup 重送，仍然是通知——
-                // 以前這裡用欄位預設 1，續作變回要驗收的工單，兩小時後開 `assignment_stalled`（review 2026-09-16 c1 L6）。
                 sqlx::query(
                     "INSERT INTO supervisor_assignments
                        (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status, attempts,
@@ -1778,7 +1677,6 @@ pub async fn review_with_followup(
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-                // Preserve the review role for the follow-up.
                 sqlx::query(
                     "UPDATE supervisor_assignments
                         SET review_role = (SELECT review_role FROM supervisor_assignments WHERE id = ?)
@@ -1876,8 +1774,6 @@ pub async fn link_followup(pool: &SqlitePool, id: &str, followup_id: &str) -> Re
         .await?;
     Ok(())
 }
-
-// ---------------------------------------------------------------- inbox
 
 /// 處理完（`handled`）多久之後，過大的 payload 才被換成標記。
 pub const COMPACT_HANDLED_AFTER_SECS: i64 = 24 * 3600;
@@ -2006,7 +1902,6 @@ pub async fn pending_count(pool: &SqlitePool) -> Result<i64> {
     Ok(open_assignment_count(pool).await? + open_inbox_count(pool).await?)
 }
 
-// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
 #[cfg(any(test, feature = "test-hooks"))]
 /// Prompted, not yet confirmed. Deliberately *not* `handled`: only the manager acking it —
 /// or the UI acking on its behalf — closes the event, so a failed notify keeps it queued.
@@ -2018,10 +1913,6 @@ pub async fn mark_delivered_inbox(
 ) -> Result<()> {
     let now = crate::db::now();
     for id in ids {
-        // `AND state!='handled'`: the manager can ack the digest before this write lands (it
-        // reads the events out of the prompt, not out of this row). Without the guard that ack
-        // is undone and the same event is pushed at it again — an acknowledgement must never
-        // go backwards.
         sqlx::query(
             "UPDATE supervisor_inbox
                 SET state='delivered', notify_turn_id=?, notify_delivery=?, delivered_at=?,
@@ -2117,7 +2008,6 @@ pub async fn delivered_inbox(pool: &SqlitePool) -> Result<Vec<InboxEvent>> {
     .await?)
 }
 
-// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
 #[cfg(any(test, feature = "test-hooks"))]
 /// Pending events whose backoff has not run out yet are skipped; everything else is due.
 pub async fn due_inbox(pool: &SqlitePool, now: &str, max_attempts: i64) -> Result<Vec<InboxEvent>> {
@@ -2195,8 +2085,6 @@ pub async fn responder_undelivered(pool: &SqlitePool, min_attempts: i64) -> Resu
     .fetch_all(pool)
     .await?)
 }
-
-// ---------------------------------------------------------------- approvals & leases
 
 /// Mirrors the row; several fields are read straight out of `to_json`.
 #[allow(dead_code)]
@@ -2290,8 +2178,6 @@ impl Approval {
         if self.purpose != resource {
             return Some("approval_purpose_mismatch");
         }
-        // An approval is for a tree, not for a permission in general. Rebuilding a different
-        // commit under yesterday's yes is exactly the drift this table exists to stop.
         match (self.target_commit.as_deref(), commit) {
             (Some(a), Some(b)) if a != b => Some("approval_commit_mismatch"),
             (Some(_), None) => Some("approval_commit_required"),
@@ -2357,7 +2243,6 @@ pub async fn create_approval_superseding(
     supersedes: Option<&str>,
     request_reason: Option<&str>,
 ) -> Result<ApprovalOutcome> {
-    // 沒有 HTTP 身份可驗（測試與舊呼叫端）：照 issue #436 的預設當成自稱。
     create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, true, false, None).await
 }
 
@@ -2397,7 +2282,6 @@ pub async fn create_approval_notifying(
     request_id: Option<&str>,
     supersedes: Option<&str>,
     request_reason: Option<&str>,
-    // `requester` 驗過了沒（issue #436）：`true`＝只是自稱的。
     requester_unverified: bool,
 ) -> Result<ApprovalOutcome> {
     create_approval_inner(pool, requester, purpose, scope, target_commit, expires_at, request_id, supersedes, request_reason, requester_unverified, true, None).await
@@ -2413,9 +2297,7 @@ async fn create_approval_inner(
     expires_at: Option<&str>,
     request_id: Option<&str>,
     supersedes: Option<&str>,
-    // 申請者寫的理由（`approval request --reason`）。AGM 裁示時看的就是這段。
     request_reason: Option<&str>,
-    // `requester` 只是自稱的（issue #436）：建立時沒有驗過那顆 bot 的身份。
     requester_unverified: bool,
     notify: bool,
     principal: Option<&ApprovalPrincipal>,
@@ -2424,28 +2306,18 @@ async fn create_approval_inner(
     let request_reason = request_reason.map(str::trim).filter(|s| !s.is_empty());
     if let Some(rid) = request_id {
         if let Some(existing) = approval_by_request(pool, rid).await? {
-            // 已經被裁示的也回它本人：重送的人要看到的是「這件事已經有裁示了」，不是再開一筆。
             return same_request(existing, rid, requester, purpose, scope, target_commit)
                 .map(|a| ApprovalOutcome { approval: a, created: false, superseded: None });
         }
     }
     let id = crate::db::ulid();
     let now = crate::db::now();
-    // 先找要取代的那一筆再寫：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，申請整個被拒（#831）。
-    // 寫鎖從頭拿著，兩個同時的申請也排成先後，不會兩邊都讀到「沒有 pending」。
     let mut tx = crate::db::begin_write(pool).await?;
     let mut wait_since: Option<String> = None;
     let mut superseded = None;
-    // issue #421：沒帶 `supersedes` 時 daemon 自己找「同一個申請者、同一種用途、還 **pending**」的那一筆。
-    // kick 每個整點重試，而記住舊 id 的本機狀態檔掉了（換機器、檔案被清、daemon 換版）時，以前每一輪都開
-    // 一筆新的 pending：AGM 收到四則 `approval_requested`、被叫醒四次，而它們講的是同一件事。
-    // **只自動取代 pending**：`approved` 是人做過的裁示，不能因為排程又跑了一輪就無聲消失。
     let auto_supersedes = match supersedes.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) => None,
         None => sqlx::query_scalar::<_, String>(
-            // 挑最新用**插入序**（`rowid`）：`created_at` 只到毫秒，平手時比 `id`，而 ULID 同一毫秒內
-            // 只有隨機那段在變、不保證遞增——同毫秒兩筆 pending 時「最新那筆」會變成擲硬幣，
-            // 取代到比較舊的那筆，最新的留著，AGM 照樣被同一件事叫醒兩次（issue #446，同 #443）。
             "SELECT id FROM supervisor_approvals
               WHERE supervisor_id=? AND requester=? AND purpose=? AND status='pending'
               ORDER BY rowid DESC LIMIT 1",
@@ -2458,7 +2330,6 @@ async fn create_approval_inner(
     };
     #[cfg(any(test, feature = "test-hooks"))]
     crate::race_point::hit("approval_after_supersede_read", requester).await;
-    // 自動挑的那一筆不會讓整筆申請失敗：對不上（剛被裁示、剛過期）就只是不取代。
     let auto = auto_supersedes.is_some();
     if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()).or(auto_supersedes.as_deref()) {
         let old = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
@@ -2475,8 +2346,6 @@ async fn create_approval_inner(
         };
         let expired = |o: &Approval| o.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le());
         let live = old.as_ref().is_some_and(|o| matches!(o.status.as_str(), "pending" | "approved") && !expired(o));
-        // 自動找到的同申請者、同用途 pending 即使已過期也要收掉（#881）：過期的 pending 沒有人會再裁示，
-        // 留著會讓 `approval_stalled` 關不掉、重申請又疊第二筆。明確帶 `supersedes` 的路徑不變。
         let stale_pending = auto && old.as_ref().is_some_and(|o| o.status == "pending" && expired(o));
         if let (true, Some(old)) = (live || stale_pending, old) {
             sqlx::query("UPDATE supervisor_approvals SET status='superseded', updated_at=? WHERE id=? AND status=?")
@@ -2485,8 +2354,6 @@ async fn create_approval_inner(
                 .bind(&old.status)
                 .execute(&mut *tx)
                 .await?;
-            // 還沒核准的舊申請沒有等待可接（等的是 AGM，不是安全窗口）；它自己接過來的照樣往下傳。
-            // 過期的舊申請沒有在等：不接續它的等待起點。
             wait_since = if !live {
                 None
             } else if old.status == "approved" {
@@ -2504,7 +2371,6 @@ async fn create_approval_inner(
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-            // 那則 `approval_requested`（不論送出去了沒）一起收掉：不要叫它醒來、也不要補送一筆已經作廢的申請。
             sqlx::query(
                 "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=?
                   WHERE supervisor_id=? AND event_key=? AND state!='handled'",
@@ -2551,7 +2417,6 @@ async fn create_approval_inner(
             tx.commit().await?;
             Ok(ApprovalOutcome { approval: approval(pool, &id).await?.expect("just inserted"), created: true, superseded })
         }
-        // 兩個呼叫同時進來時，先到的那筆已經寫進去了（唯一鍵擋下第二筆）：回先到的那一筆，這次什麼都不取代。
         Err(e) => {
             tx.rollback().await?;
             let Some(rid) = request_id else { return Err(e.into()) };
@@ -2581,7 +2446,6 @@ fn same_request(
             new,
         })
     };
-    // 申請者也要對得上：兩顆 bot 撞同一個自然 id 時，第二顆不能拿回第一顆的核准（acquire 也驗 owner）。
     if existing.requester != requester {
         return Err(mismatch("requester", existing.requester.clone(), requester.to_string()));
     }
@@ -2627,7 +2491,6 @@ pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
 pub const APPROVAL_MAX_AGE_SECS: i64 = 24 * 60 * 60;
 
 pub async fn oldest_live_window_approval(pool: &SqlitePool, now: &str) -> Result<Option<Approval>> {
-    // `expires_at` 可能是舊版寫的秒格式：正規化成毫秒再比（issue #101）。
     let expires_at = crate::db::ts_sql("expires_at");
     let decided = crate::db::ts_sql("decided_at");
     Ok(sqlx::query_as::<_, Approval>(&format!(
@@ -2739,8 +2602,6 @@ pub async fn decide_approval_from(
         .bind(&now)
         .execute(&mut *tx)
         .await?;
-    // 還 pending 就被裁示：叫 AGM 裁示的那則 `approval_requested` 跟著收掉（跟被取代那條路同一個道理）。
-    // 不收的話，它會繼續被補送、叫醒 AGM 去裁示一筆已經有結果的申請，協調者不可用時 failover 還會把它改派給巡檢。
     if from_status == "pending" {
         sqlx::query(
             "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=?
@@ -2760,14 +2621,11 @@ pub async fn decide_approval_from(
     Ok(Some((row, note_id)))
 }
 
-
 pub use crate::supervisor_inbox::add_note;
 
 /// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
 pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
-        // 同一毫秒寫進去的兩筆（核准後馬上撤銷）靠 `rowid` 排：`id` 是 ULID，同一毫秒內的亂數段不保證遞增，
-        // 以前用 `id ASC` 當第二鍵，歷程偶爾會倒過來（review 2026-09-16）。
         "SELECT body, created_at FROM supervisor_notes WHERE supervisor_id=? AND kind='approval_decision' ORDER BY created_at ASC, rowid ASC",
     )
     .bind(SUPERVISOR_ID)
@@ -2866,8 +2724,6 @@ pub async fn leases(pool: &SqlitePool) -> Result<Vec<Lease>> {
 ///
 /// 安全檢查（`maintenance::safety`）、`acquire_lease` 的條件式寫入與入場閘門都讀這一份，
 /// 才不會養出兩套會漂移的規則（issue #86）。用的別名固定是 `t`（turns）與 `c`（conversations）。
-// claude-api（#1944）沒有 pane、回合在 daemon 內跑：只有 run 真的在 running、而且回合還在合理時間內（15 分，> turn_timeout）
-// 才算送達臨界區。2026-11-01 一則卡在 stopping run 裡的 in_flight 回合讓換版窗口等了兩個多小時（死結：修正要換版才上線）。
 pub const DELIVERY_CRITICAL_PREDICATE: &str = concat!("(t.status='queued' AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = c.bot_id
                        AND r.state IN ('starting','running','stopping') AND r.agent_status NOT IN ('blocked','working')))
       OR (t.status='in_flight' AND t.delivery='pending' AND NOT EXISTS (SELECT 1 FROM bots b WHERE b.id=c.bot_id AND b.kind IN ", crate::config::api_kinds_sql!(), "))
@@ -2938,10 +2794,6 @@ pub async fn acquire_lease(
         .bind(&now)
         .execute(pool)
         .await?;
-    // 前一個持有者**過期**而不是 release（腳本掛了、child 被殺）時，沒有人走過 release，
-    // 它背後的核准因此還是 `approved`——同一張「可以」可以在有效期內開好幾個窗口，
-    // 而決定歷程上一筆紀錄都沒有（review 2026-09-16）。接手前先把它消耗掉。
-    // 租約的 `expires_at` 可能是舊版寫的秒格式：正規化成毫秒再比（issue #101）。
     let expires_sql = crate::db::ts_sql("expires_at");
     let stale_approval = sqlx::query_scalar::<_, Option<String>>(&format!(
         "SELECT approval_id FROM supervisor_leases
@@ -2953,8 +2805,6 @@ pub async fn acquire_lease(
     .await?
     .flatten();
     let token = crate::supervisor::new_token();
-    // 排除那顆 bot 時走帶 bind 的變體；`exclude_bot` 是呼叫端驗過的 requester 自己那顆
-    // （`maintenance::acquire`），不是隨便一個 id。
     let quiet = match (quiet_delivery, exclude_bot) {
         (false, _) => String::new(),
         (true, Some(_)) => format!(" AND NOT EXISTS ({})", delivery_critical_except_sql()),
@@ -2986,9 +2836,6 @@ pub async fn acquire_lease(
         return Ok(None);
     }
     if let Some(stale) = stale_approval.filter(|a| Some(a.as_str()) != approval_id) {
-        // `decide_approval_from` 只在它還是 `approved` 時才動，而且**會寫進 supervisor_notes**
-        // （`decide_approval` 是無條件 UPDATE，還會把 `decided_at` 覆寫成消耗時間，
-        // 升級判定的計時就是從那個欄位算的）。
         let _ = decide_approval_from(pool, &stale, "approved", "consumed", "daemon", Some("lease expired"), None).await;
     }
     lease(pool, resource).await
@@ -3013,11 +2860,9 @@ impl LeaseProof<'_> {
     pub fn allows(&self, stored: Option<&str>) -> bool {
         match (self, stored) {
             (LeaseProof::Forced, _) => true,
-            // 升級前的舊租約：沒有 token 可以對，放行（一次性的過渡，見 SPEC §18.10）。
             (_, None) => true,
             (LeaseProof::Absent, Some(_)) => false,
             (LeaseProof::Token(given), Some(want)) => {
-                // 長度先比，再逐位元組比：不要因為比對提早結束而洩漏前綴。
                 given.len() == want.len() && given.bytes().zip(want.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
             }
         }
@@ -3084,8 +2929,6 @@ pub async fn force_release_lease(pool: &SqlitePool, resource: &str, fence: i64) 
         .rows_affected()
         > 0)
 }
-
-// ---------------------------------------------------------------- incidents
 
 /// Mirrors the row: `FromRow` needs every column, and the JSON readers take several of them
 /// straight out of `to_json`.
@@ -3203,7 +3046,6 @@ pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> 
 
 /// [`resolve_incident`]；`notify` 時同一個交易推 `incident_resolved`（#319），理由同 [`open_incident_notifying`]。
 pub async fn resolve_incident_notifying(pool: &SqlitePool, kind: &str, resource: &str, notify: bool) -> Result<Option<Incident>> {
-    // 先讀開著的那一筆再改：deferred 的話讀完之後別的 writer 一 commit 就 517，收不掉、這一輪的通知也沒了（#831）。
     let mut tx = crate::db::begin_write(pool).await?;
     let row = sqlx::query_as::<_, Incident>(
         "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
@@ -3252,7 +3094,6 @@ pub async fn incidents(pool: &SqlitePool, limit: i64) -> Result<Vec<Incident>> {
     .await?)
 }
 
-// 單角色時代的讀寫，現在由 roles.rs 的角色版本取代；留給既有測試釘住同一組守衛。
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn ack_inbox(pool: &SqlitePool, id: &str) -> Result<bool> {
     let res = sqlx::query("UPDATE supervisor_inbox SET state='handled', updated_at=? WHERE supervisor_id=? AND id=?")

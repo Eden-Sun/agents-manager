@@ -81,9 +81,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
     }
     for stmt in [
-        // worker 每次都問「還有誰沒處理」，這是它的索引。
         "CREATE INDEX IF NOT EXISTS hook_events_pending ON hook_events(processed_at, next_attempt_at)",
-        // 去重靠它：同一顆 bot 的同一把鑰匙只留一列。`dedupe_key IS NULL` 的不參加。
         "CREATE UNIQUE INDEX IF NOT EXISTS hook_events_dedupe
            ON hook_events(bot_id, dedupe_key) WHERE dedupe_key IS NOT NULL",
     ] {
@@ -117,7 +115,6 @@ fn string_field(payload: &serde_json::Value, keys: &[&str]) -> String {
 fn legacy_dedupe_key(body: &HookBody) -> Option<String> {
     let p = &body.payload;
     let received = body.received_at.as_deref().unwrap_or("");
-    // 認不出時間的 body（手寫、舊版）一律收下：寧可多一列，也不要把兩則不同的事件併成一則。
     if received.is_empty() {
         return None;
     }
@@ -174,8 +171,6 @@ fn event_discriminator(body: &HookBody) -> Option<String> {
     if !id.is_empty() {
         return Some(format!("{label}:{id}"));
     }
-    // Some older hook versions omit the event ID. A stable digest still separates distinct payloads
-    // while exact replays of the same body remain deduped.
     let payload = serde_json::to_vec(p).ok()?;
     Some(format!("payload-sha256:{:x}", Sha256::digest(payload)))
 }
@@ -212,9 +207,6 @@ impl Accepted {
 /// 因為那則事件的確已經在收件匣裡。
 pub async fn accept(pool: &SqlitePool, body: &HookBody, source: Source) -> Result<Accepted> {
     let key = dedupe_key(body);
-    // Before this key format, all same-second same-turn PostToolUse/Subagent events shared one key.
-    // Compare that legacy row's stored body before accepting the new scoped key: exact redeliveries
-    // remain duplicates, but a different event that collided with the old coarse key is kept.
     if let (Some(legacy_key), Some(discriminator)) = (legacy_dedupe_key(body), event_discriminator(body)) {
         let old_body: Option<String> = sqlx::query_scalar(
             "SELECT body_json FROM hook_events WHERE bot_id = ? AND dedupe_key = ?",
@@ -415,7 +407,6 @@ mod tests {
         let b = body("p1", "2026-09-17T12:00:00.000Z");
         assert_eq!(accept(&p, &b, Source::Http).await.unwrap(), Accepted::Stored);
         assert_eq!(accept(&p, &b, Source::Http).await.unwrap(), Accepted::Duplicate, "重送");
-        // 來源不同也一樣：HTTP 收過的那則，spool 重放回來還是同一則。
         assert_eq!(accept(&p, &b, Source::Spool).await.unwrap(), Accepted::Duplicate);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
         assert_eq!(n, 1);
@@ -425,10 +416,8 @@ mod tests {
     #[tokio::test]
     async fn two_different_events_are_both_stored() {
         let p = pool().await;
-        // 同一毫秒、不同回合。
         accept(&p, &body("p1", "2026-09-17T12:00:00.000Z"), Source::Http).await.unwrap();
         accept(&p, &body("p2", "2026-09-17T12:00:00.000Z"), Source::Http).await.unwrap();
-        // 同一回合 id、不同時間（重繪類事件）。
         accept(&p, &body("p1", "2026-09-17T12:00:01.000Z"), Source::Http).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
         assert_eq!(n, 3);
@@ -576,9 +565,7 @@ mod tests {
         let row = pending(&p, &db::now(), 10).await.unwrap().pop().unwrap();
         mark_failed(&p, &row.id, 1, "boom").await.unwrap();
 
-        // 退避還沒到：這一刻不會被挑出來。
         assert!(pending(&p, &db::now(), 10).await.unwrap().is_empty(), "退避中");
-        // 但列還在，而且還是 pending（processed_at 仍是 NULL）。
         let (processed, attempts, err): (Option<String>, i64, Option<String>) =
             sqlx::query_as("SELECT processed_at, attempts, last_error FROM hook_events WHERE id = ?")
                 .bind(&row.id)
@@ -588,7 +575,6 @@ mod tests {
         assert!(processed.is_none(), "沒有被當成處理完");
         assert_eq!(attempts, 1);
         assert_eq!(err.as_deref(), Some("boom"));
-        // 退避到了就再挑得到。
         let later = "2099-01-01T00:00:00.000Z";
         assert_eq!(pending(&p, later, 10).await.unwrap().len(), 1, "退避過了要再試");
     }
@@ -749,18 +735,15 @@ mod tests {
             run_id: None,
         };
 
-        // 兩者產生的 dedupe_key 必須完全相同
         let key1 = dedupe_key(&legacy_notify);
         let key2 = dedupe_key(&new_stop);
         assert!(key1.is_some());
         assert_eq!(key1, key2, "notify 與 Stop 應產生相同 canonical dedupe_key");
         assert_eq!(key1.unwrap(), format!("codex|completed|{}:{session}:{}:{turn}", session.len(), turn.len()));
 
-        // 順序 1: 舊 notify 先到，新 Stop 後到
         assert_eq!(accept(&p, &legacy_notify, Source::Http).await.unwrap(), Accepted::Stored);
         assert_eq!(accept(&p, &new_stop, Source::Http).await.unwrap(), Accepted::Duplicate, "同 turn 的 Stop 應被去重");
 
-        // 異 native turn 必須正常獨立入列
         let next_turn_stop = HookBody {
             bot_id: "b1".into(),
             provider: "codex".into(),
@@ -777,12 +760,10 @@ mod tests {
         };
         assert_eq!(accept(&p, &next_turn_stop, Source::Http).await.unwrap(), Accepted::Stored, "不同 turn 應獨立收下");
 
-        // 順序 2: 在新 pool 中驗證新 Stop 先到，舊 notify 後到
         let p2 = pool().await;
         assert_eq!(accept(&p2, &new_stop, Source::Http).await.unwrap(), Accepted::Stored);
         assert_eq!(accept(&p2, &legacy_notify, Source::Http).await.unwrap(), Accepted::Duplicate, "notify 後到應被去重");
 
-        // active stop 不佔用完成 key
         let active_stop = HookBody {
             bot_id: "b1".into(),
             provider: "codex".into(),
@@ -799,7 +780,6 @@ mod tests {
         let active_key = dedupe_key(&active_stop).unwrap();
         assert_ne!(active_key, format!("codex|completed|{}:{session}:7:turn-44", session.len()), "active stop 不應使用 canonical completed key");
 
-        // 缺 ID 時退回 legacy
         let missing_turn = HookBody {
             bot_id: "b1".into(),
             provider: "codex".into(),
@@ -818,7 +798,6 @@ mod tests {
     #[tokio::test]
     async fn codex_canonical_key_does_not_collide_with_delimiter_in_ids() {
         let p = pool().await;
-        // 兩個故意交錯包含 '|' 與不同長度的 session/turn ID
         let b1 = HookBody {
             bot_id: "b1".into(),
             provider: "codex".into(),
@@ -851,7 +830,6 @@ mod tests {
         let key2 = dedupe_key(&b2).unwrap();
         assert_ne!(key1, key2, "含 '|' 分隔符的 native ID 絕不能碰撞");
 
-        // 兩者都能成功存入，不被視為 Duplicate
         assert_eq!(accept(&p, &b1, Source::Http).await.unwrap(), Accepted::Stored);
         assert_eq!(accept(&p, &b2, Source::Http).await.unwrap(), Accepted::Stored);
     }

@@ -379,8 +379,6 @@ async fn d3b2_one_mib_stack_recovers_true_join_pending_and_active_orphan() {
         .api_bot_runtime
         .startup_cursor_for_test(&identity.bot_id)
         .is_none());
-    // Only after the previous boot consumed the genuine join and retired the run, expire its
-    // Applied historical session and verify the next boot may prune it without reinserting text.
     sqlx::query("UPDATE api_bot_sessions SET expires_at=? WHERE id=?").bind(crate::db::iso_in(-60)).bind(&identity.session_id).execute(&app.db).await.unwrap();
     app.db.close().await;
     let again = crate::testing::restart_app(&env).await;

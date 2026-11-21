@@ -20,10 +20,8 @@ fn the_official_manifest_shape_is_accepted_and_anything_else_is_not() {
     assert_eq!(parse_manifest(&manifest_json("1.3.0", URL_OK, &SHA_OK.to_uppercase())).unwrap().sha512, SHA_OK, "sha512 一律小寫比對");
 
     let bad = |version: &str, url: &str, sha: &str| parse_manifest(&manifest_json(version, url, sha)).unwrap_err();
-    // 不在官方儲存桶：不能叫主機去抓別處。
     assert!(bad("1.3.0", "https://evil.example/agy.tar.gz", SHA_OK).contains("url"));
     assert!(bad("1.3.0", "http://storage.googleapis.com/antigravity-public/antigravity-cli/x.tgz", SHA_OK).contains("url"));
-    // 拼進單引號的欄位不收引號、空白、分號、$()。
     for evil in ["x'; rm -rf ~; '", "x y", "x;y", "x$(id)", "x`id`", "x\ny"] {
         assert!(bad("1.3.0", &format!("{DOWNLOAD_PREFIX}{evil}"), SHA_OK).contains("url"), "{evil:?}");
         assert!(bad(evil, URL_OK, SHA_OK).contains("version"), "{evil:?}");
@@ -67,8 +65,6 @@ fn the_install_body_never_runs_the_official_installer_and_checks_the_hash_before
     assert!(body.contains("AGY_CLI_DISABLE_AUTO_UPDATE=true"), "驗版本也關自動更新");
     assert!(body.contains(&format!("'{URL_OK}'")) && body.contains(&format!("'{SHA_OK}'")), "url／hash 是單引號內的資料");
 }
-
-// ── 真的跑那段 sh（假 HOME、file:// 來源）──────────────────────────────────────────────────────────
 
 struct Fixture {
     home: PathBuf,
@@ -144,7 +140,6 @@ fn macos_local_a_good_tarball_is_installed_executable_with_auto_update_off_and_n
     let seen = std::fs::read_to_string(f.tgz.parent().unwrap().join("seen")).unwrap();
     assert!(seen.lines().next() == Some("true"), "裝之前的驗版本就帶 AGY_CLI_DISABLE_AUTO_UPDATE：{seen:?}");
     assert!(leftovers(&f.home).is_empty(), "暫存目錄與 .agy.new 都要清掉：{:?}", leftovers(&f.home));
-    // 沒有動到 shell profile（官方 `agy install` 會做的事）。
     for rc in [".zshrc", ".bashrc", ".profile", ".zprofile", ".bash_profile"] {
         assert!(!f.home.join(rc).exists(), "{rc}");
     }
@@ -195,7 +190,6 @@ fn macos_local_a_tarball_without_the_binary_or_an_unreachable_url_fails_cleanly(
 fn macos_local_a_copy_that_fails_halfway_leaves_no_partial_binary_behind() {
     let f = fixture("1.3.0", "antigravity");
     seed_old_agy(&f.home);
-    // 假的 cp：寫出半顆檔案後失敗。只影響這支腳本的 PATH。
     let fakebin = f.home.join("fakebin");
     std::fs::create_dir_all(&fakebin).unwrap();
     let cp = fakebin.join("cp");
@@ -218,19 +212,15 @@ fn macos_local_the_locked_wrapper_runs_the_body_under_the_agy_lock_and_releases_
     assert!(!f.home.join(".agents-manager-agy-install.lock").exists(), "鎖要放掉");
     assert!(!f.home.join(".agents-manager-codex-install.lock").exists(), "不用 codex 的鎖");
 
-    // 鎖被活著的人拿著：不裝、印 LOCKED 標記。
     let holder = std::process::Command::new("sleep").arg("30").spawn();
     let mut holder = holder.unwrap();
     let pid = holder.id();
-    // 一個不是 process group 的 owner 無法驗明身份，會被當過期回收；這裡只驗「沒有 owner 資料的舊鎖會被回收而不是卡死」。
     std::os::unix::fs::symlink(pid.to_string(), f.home.join(".agents-manager-agy-install.lock")).unwrap();
     let (code, out) = run_sh(&f.home, &script);
     let _ = holder.kill();
     let _ = holder.wait();
     assert_eq!(code, 0, "舊式沒有 nonce 的鎖視為過期：{out}");
 }
-
-// ── 整條流程（假的 Env 與假 ssh）────────────────────────────────────────────────────────────────
 
 struct FakeEnv {
     probe: String,
@@ -384,18 +374,15 @@ async fn failures_name_their_reason_and_never_claim_success() {
         other => panic!("expected a failure, got {other:?}"),
     };
 
-    // 安裝腳本失敗（sha512 對不上）：訊息帶腳本的錯誤、不重新偵測、不寫 tools。
     let env = FakeEnv::new(Err("exit status: 73：AM_AGY_SHA512_MISMATCH want=a got=b".into()));
     let (r, m) = reason(install_with(&e.app, &host, &env).await);
     assert_eq!(r, "install_failed");
     assert!(m.contains("AM_AGY_SHA512_MISMATCH") && m.contains(&host), "{m}");
     assert!(agy_tool(&e.app, &host).await.is_none(), "沒裝成就不能把 agy 寫成已安裝");
 
-    // 腳本回了成功但沒有標記：不信。
     let env = FakeEnv::new(Ok("all good\n".into()));
     assert_eq!(reason(install_with(&e.app, &host, &env).await).0, "install_failed");
 
-    // 官方 manifest 壞掉／被換成別處的 url：不執行安裝。
     let mut env = FakeEnv::new(ok_marker());
     env.manifest = Ok(manifest_json("1.3.0", "https://evil.example/a.tgz", SHA_OK));
     assert_eq!(reason(install_with(&e.app, &host, &env).await).0, "manifest_invalid");
@@ -403,13 +390,11 @@ async fn failures_name_their_reason_and_never_claim_success() {
     env.manifest = Err("官方 manifest 回 503".into());
     assert_eq!(reason(install_with(&e.app, &host, &env).await).0, "manifest_unavailable");
 
-    // 沒有官方安裝包的平台。
     let mut env = FakeEnv::new(ok_marker());
     env.probe = "AM_UNAME Linux riscv64\nAM_MUSL 0\n".into();
     assert_eq!(reason(install_with(&e.app, &host, &env).await).0, "unsupported_platform");
     assert!(env.manifests.lock().unwrap().is_empty());
 
-    // 寫進去了，但那台的 PATH 看不到：講清楚原因，不算成功。
     let host2 = remote(&e, DETECT_WITHOUT_AGY).await;
     let env = FakeEnv::new(ok_marker());
     let (r, m) = reason(install_with(&e.app, &host2, &env).await);
@@ -422,14 +407,12 @@ async fn a_busy_host_refuses_a_second_install_and_a_locked_host_reports_busy() {
     let e = tt::env().await;
     let host = remote(&e, DETECT_WITH_AGY).await;
 
-    // 本行程已經有一個在跑：不開第二個、不碰主機。
     let slot = Slot::take(&host).unwrap();
     let env = FakeEnv::new(ok_marker());
     assert!(matches!(install_with(&e.app, &host, &env).await, Err(InstallError::Busy(_))));
     assert!(env.ran().is_empty());
     drop(slot);
 
-    // 主機端的鎖被別人（隔離實例、上次沒結束的安裝）拿著：腳本印 LOCKED 標記就是 Busy，不是失敗。
     let env = FakeEnv::new(Err(format!("exit status: 75：{} pid=123", crate::cli_update::LOCKED_MARK)));
     assert!(matches!(install_with(&e.app, &host, &env).await, Err(InstallError::Busy(_))));
     assert!(Slot::take(&host).is_some(), "結束後名額要放掉");
@@ -446,8 +429,6 @@ async fn unknown_and_disconnected_hosts_are_refused_before_any_command() {
     assert!(env.ran().is_empty());
 }
 
-// ── 遠端登入偵測（mac_builder 這類遠端：憑證檔出現後 watcher 翻成已登入並探測額度）─────────────────────────
-
 #[tokio::test]
 async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_the_quota() {
     let e = tt::env().await;
@@ -461,7 +442,6 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
         {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.9, "reset_time": "2026-10-11T00:00:00Z"},
         {"id": "gemini-5h", "window": "five_hour", "remaining_fraction": 0.5, "reset_time": "2026-10-06T20:00:00Z"}]}]}}})
     .to_string();
-    // 額度探測在 pane 裡跑（畫面是 agy 的 JSON 夾在標記中間）；ssh 只剩「憑證在不在」那個小問題。
     herdr.set_screen("*", &format!("{}\n{usage}\n{}0\n", crate::quota_agy::PANE_BEGIN, crate::quota_agy::PANE_DONE));
     crate::hosts::set_ssh_fake(&host, move |script| {
         s2.lock().unwrap().push(script.to_string());
@@ -486,8 +466,6 @@ async fn a_remote_watcher_flips_to_logged_in_when_the_token_shows_up_and_probes_
     assert!(e.app.quotas.lock().await.contains_key(&format!("{host}/agy")), "遠端的讀數記在 <host>/agy");
 }
 
-// ── 上游巡邏用的「官方最新版」（issue #1908）────────────────────────────────────────────────
-
 /// 每個平台各自的 manifest 回覆；`run` 不該被碰到（只讀版本，不動任何主機）。
 struct PerPlatform(std::collections::HashMap<&'static str, Result<String, String>>);
 
@@ -508,7 +486,6 @@ fn manifest_at(version: &str) -> Result<String, String> {
 async fn the_latest_version_is_the_lowest_published_on_the_reference_platforms() {
     let both = PerPlatform([("linux_amd64", manifest_at("1.4.5")), ("darwin_arm64", manifest_at("1.4.5"))].into());
     assert_eq!(latest_version(&both).await.unwrap(), "1.4.5");
-    // 一個平台還沒跟上：取較小的，另一個平台升到較大的版本之後也不會永遠「落後」。數值比較，不是字串（1.4.10 > 1.4.9）。
     let lagging = PerPlatform([("linux_amd64", manifest_at("1.4.10")), ("darwin_arm64", manifest_at("1.4.9"))].into());
     assert_eq!(latest_version(&lagging).await.unwrap(), "1.4.9");
 }

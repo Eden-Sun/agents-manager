@@ -3,7 +3,6 @@
 
 mod tests {
     use crate::lifecycle_tests::prelude::*;
-    // parent-uses
     use crate::lifecycle::*;
     use crate::db;
     use crate::lifecycle::fence::*;
@@ -27,7 +26,6 @@ mod tests {
         .await
         .unwrap();
 
-        // 故意反過來：先寫進去的（真正的上一代）用一個字典序**比較大**的假 ULID。
         let old_run_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ";
         let new_run_id = "01AAAAAAAAAAAAAAAAAAAAAAAA";
         sqlx::query(
