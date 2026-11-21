@@ -13,6 +13,7 @@ mod expert_peers;
 pub mod expert_cluster;
 mod expert_member;
 mod session_lineage;
+mod ledger_api;
 pub mod relay_policy;
 mod specialist_dispatch;
 mod pane_authority;

@@ -159,6 +159,9 @@ async fn prompt_body_inner(
             .bind(&turn).bind(&run).bind(crid).bind(bot).bind(&message).bind(text).fetch_one(&app.db).await;
         return Err(E::Unconfirmed);
     }
+    if let Err(e) = am_base::ledger::ingest_if_management_message(&app.db, bot, &message, Some(&turn), text).await {
+        tracing::warn!(bot = %bot, error = %e, "帳本收件失敗（訊息已經收下）");
+    }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     crate::lifecycle::race_point::hit("api_native_prompt_after_pending_commit", crid).await;
     if !matches!(app.window_held().await, Ok(None)) || app.shutdown.is_cancelled() { return Err(E::Unconfirmed); }

@@ -160,6 +160,11 @@ pub(super) async fn queue_awaiting_idle(
         .map_err(up)?;
 
     tx.commit().await.map_err(up)?;
+    if relay.from.is_none() {
+        if let Err(e) = am_base::ledger::ingest_if_management_message(app.db(), bot_id, &message_id, Some(&turn_id), text).await {
+            tracing::warn!(bot = %bot_id, error = %e, "帳本收件失敗（訊息已經收下）");
+        }
+    }
     app.prompt_message_added(bot_id, &message_id).await;
     app.turn_changed(&turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "使用者 prompt 已持久排入忙碌 bot 的佇列");

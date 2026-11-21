@@ -173,6 +173,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects/{id}/lineage", get(crate::session_lineage::list).post(crate::session_lineage::create))
         .route("/projects/{id}/lineage/advance", post(crate::session_lineage::advance))
         .route("/projects/{id}/lineage/retire", post(crate::session_lineage::retire))
+        .route("/projects/{id}/ledger", get(crate::ledger_api::list).post(crate::ledger_api::create))
+        .route("/projects/{id}/ledger/{item_id}", patch(crate::ledger_api::patch))
         .route("/spawn-authority", get(crate::expert_peers::spawn_authority))
         .route("/model-mode", get(crate::model_mode::get).put(crate::model_mode::put))
         .route("/settings/time-zone", get(crate::user_settings::get).put(crate::user_settings::put))
@@ -7418,6 +7420,9 @@ async fn get_messages_with_relay_names(
     let Json(mut body) = get_messages(State(app.clone()), Path(id), Query(q)).await?;
     if principal == RequestPrincipal::User {
         add_relay_names(&app, &mut body).await?;
+        if let Some(msgs) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            crate::ledger_api::attach_ledger_items_to_messages(&app.db, msgs).await?;
+        }
     }
     Ok(Json(body))
 }

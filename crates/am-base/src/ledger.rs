@@ -245,6 +245,22 @@ pub async fn ingest_user_message(
     Ok(Some(item))
 }
 
+/// 使用者訊息落地後的收件入口（四個 `INSERT INTO messages` 的呼叫端共用）。只收「這顆 bot 是專案管理入口」的人打的字；
+/// 保溫（`KEEP_WARM_TEXT`）與 `/compact` 不是承諾，不入帳。轉發（relay）由呼叫端先篩掉。回傳 `None` 代表沒入帳（不是管理入口、已存在、或系統字）。
+pub async fn ingest_if_management_message(pool: &SqlitePool, bot_id: &str, message_id: &str, turn_id: Option<&str>, text: &str) -> Result<Option<LedgerItem>, LedgerError> {
+    let trimmed = text.trim();
+    if trimmed == crate::primary_keep_warm::KEEP_WARM_TEXT || trimmed.starts_with("/compact") {
+        return Ok(None);
+    }
+    let Some(project_id): Option<String> = sqlx::query_scalar("SELECT project_id FROM bots WHERE id = ? AND deleted_at IS NULL").bind(bot_id).fetch_optional(pool).await? else {
+        return Ok(None);
+    };
+    if !is_project_management_actor(pool, &project_id, bot_id).await? {
+        return Ok(None);
+    }
+    ingest_user_message(pool, &project_id, bot_id, message_id, turn_id, text).await
+}
+
 /// 把一則已收件的訊息拆成 `items.len()` 項：第 1 項更新原本的 `ordinal = 0`，其餘插入 `ordinal = 1..`。
 /// 同一則訊息只能拆一次（已有 `ordinal > 0` 就拒絕）。回傳這則訊息的全部事項（依 `ordinal`）。
 pub async fn split_message(

@@ -206,6 +206,11 @@ async fn accept_locked(
     // 附件跟訊息同一個交易：要嘛整則（含附件）都收下，要嘛什麼都沒有，不會有一則指著沒綁上的附件在排隊。
     tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
     tx.commit().await.map_err(up)?;
+    if relay.from.is_none() {
+        if let Err(e) = am_base::ledger::ingest_if_management_message(app.db(), bot_id, &msg_id, Some(&turn_id), text).await {
+            tracing::warn!(bot = %bot_id, error = %e, "帳本收件失敗（訊息已經收下）");
+        }
+    }
     super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, run = ?run.as_ref().map(|r| &r.id), "bot 沒在跑：先收下這一則，再替它啟動");

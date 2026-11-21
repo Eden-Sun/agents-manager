@@ -151,6 +151,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | GET | `/api/projects/{id}/lineage` | User 或同專案 Bot（含 child）；跨專案 403；codex session 血統（見「Session 血統」） |
+| GET | `/api/projects/{id}/ledger` | User 或同專案 Bot（含 child）；跨專案 403；承諾帳本（#1862 第 1 階段）。`?status=open\|all\|a,b&owner=<bot_id>\|unassigned&source_message_id=`；回 `{items, counts}`，每項帶 `code`（`L<code_no>`） |
+| HEAD | `/api/projects/{id}/ledger` | 同 GET |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
 | POST | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
 | POST | `/api/push/test` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -344,6 +346,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/projects/{id}/lineage` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；登記一顆 active session |
 | POST | `/api/projects/{id}/lineage/advance` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；前移檢查點 |
 | POST | `/api/projects/{id}/lineage/retire` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；退役 |
+| POST | `/api/projects/{id}/ledger` | User 或專案管理入口（expert 的頂層 manager、代班副管理者、parent_child 的頂層 Bot）；其他 Bot 與 child 403 `role_required`；跨專案 403。新增後續承諾；帶 `source_message_id`＋`items` 則把該訊息拆項（同一交易）。`source_message_id` 不屬於這個專案 400 |
+| PATCH | `/api/projects/{id}/ledger/{item_id}` | 同上寫入權限。`item_id` 可用 id 或 `L<code_no>`；`op`＝`update`（預設）／`claim`／`handback`／`merge`／`cancel`，必帶 `expected_version`。版本不符 `409 {"error":"ledger_version_conflict","current_version","current_owner_bot_id"}`，什麼都不寫 |
 | GET | `/api/bots/{id}/base-snapshot` | codex bot 的基準快照：`{locked:false}` 或 `{locked:true, session_id, locked_at, locked_by}`。User 與該 bot 所在 expert 專案的 manager 可用；其他 Bot（含 bot 自己）與 AGM role 均 → 403 `user_only`（handler 內再驗：非 manager → 403 `manager_role_scope`） |
 | PUT | `/api/bots/{id}/base-snapshot` | 把 bot 目前最近的 codex native session（`runs.native_session_id`，同 `fork_from`）鎖成基準，連同 rollout 位置與時間；已有就換成現在這個。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`）。非 codex → 400 `base_snapshot_not_codex`；還沒有 session → 409 `base_snapshot_no_session` |
 | DELETE | `/api/bots/{id}/base-snapshot` | 清除基準（沒有也回 `{locked:false}`）。仍勾 `from_base` 的排程之後的執行會 failed（`base_snapshot_missing`）。權限同 GET（其他 Bot 與 AGM role 均 → 403 `user_only`） |
@@ -1098,6 +1102,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `turn_progress` | 即時輸出，見「WS `turn_progress`」 |
 | `project_changed` | `{"project_id"}`（或 `{}`） |
 | `bot_changed` | `{"bot_id"}` |
+| `ledger_updated` | `{"project_id", "source_message_id"?, "item_id"}`：承諾帳本的新增、拆項或異動（REST 寫入成功後送出）。網頁據此重抓該則訊息的進度列 |
 | `pending_question_hint` | `{"bot_id","run_id","tool_use_id"}`：Jev 對這顆 bot 正在等的 `AskUserQuestion` 的選項建議答案落帳了（issue #1475）；網頁收到就重讀 `GET /api/bots/{id}/pending-question` 的 `jev_options`。只在答案可用時發（含分數接近、偏低而 `suggested:null`）；問失敗、沒開、沒問不發 |
 | `composer_draft` | `{"bot_id","run_id","present"}`：閒置 bot 的輸入框卡著一段沒送出的字（`present:true`；claude「Session paused」選了「Edit prompt and retry」後 CLI 放回上一則最常見）或那段不見了（`present:false`：回合開始、或之後的探測讀到空框）。daemon 只在 idle 邊（herdr 事件、Session paused 選單還原）之後讀幾次畫面才推，**不輪詢、不按任何鍵、事件不帶草稿內容**；網頁收到 `true` 才呼叫 `GET /api/bots/{id}/composer-draft` 取完整草稿並顯示草稿列。見「輸入框卡著草稿」 |
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
