@@ -3448,7 +3448,7 @@ button.model-tag:hover:not(:disabled) {
   /* 底部三樣都要避開 home indicator。 */
 
   .composer {
-    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
 
   /* 打字時 `--vvh` 只剩三百多 px，200px 上限加暫存區會切掉游標行：上限改畫面三分之一。 */
@@ -3783,7 +3783,7 @@ button.model-tag:hover:not(:disabled) {
   /* Bot 執行中只需一條緊湊工具列；完整錯誤原因仍沿用上面的換行規則。 */
 
   .bot-composer {
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    padding: 6px 8px max(6px, env(safe-area-inset-bottom));
     min-height: 0;
   }
 
