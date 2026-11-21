@@ -207,9 +207,7 @@ async fn accept_locked(
     tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
     tx.commit().await.map_err(up)?;
     super::prompt::publish_prompt_message(app, bot_id, &msg_id).await;
-    if relay.from.is_none() {
-        super::ledger_ingest::ingest_user_prompt(app, bot_id, &msg_id, &turn_id, text).await;
-    }
+    super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
     crate::lifecycle::s6_ports::QueueServices::turn_changed(app, &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, run = ?run.as_ref().map(|r| &r.id), "bot 沒在跑：先收下這一則，再替它啟動");
     let out = PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None };

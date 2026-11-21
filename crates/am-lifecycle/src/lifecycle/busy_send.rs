@@ -161,9 +161,7 @@ pub(super) async fn queue_awaiting_idle(
 
     tx.commit().await.map_err(up)?;
     app.prompt_message_added(bot_id, &message_id).await;
-    if relay.from.is_none() {
-        super::ledger_ingest::ingest_user_prompt(app, bot_id, &message_id, &turn_id, text).await;
-    }
+    super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &message_id, &turn_id, text).await;
     app.turn_changed(&turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "使用者 prompt 已持久排入忙碌 bot 的佇列");
     Ok(prompt::PromptOut {

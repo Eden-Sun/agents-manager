@@ -956,6 +956,21 @@ mod prompt_tests {
         assert_eq!(notes, vec![UNRETRACTED_NOTE.to_string()]);
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 0, "一個字都沒打");
     }
+    /// daemon 自己排的回合（提醒＝DaemonNotice、保溫探測＝`prompt_expect_run`）不是人打的字：不入帳，也不推 `ledger_updated`。
+    #[tokio::test]
+    async fn daemon_turns_are_never_ingested_as_user_commitments() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        let notice = "承諾帳本提醒（系統排的，不是使用者訊息）：以下事項需要你處理";
+        crate::lifecycle::prompt_relayed_queueable(&app, &f.bot_id, notice, "daemon-notice-1", None, crate::lifecycle::QueueClass::DaemonNotice).await.unwrap();
+        let keep_warm = crate::lifecycle::prompt_expect_run(&app, &f.bot_id, "any updates", "keep-warm-1", &f.run_id).await;
+        let _ = keep_warm;
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM ledger_items WHERE project_id = ?").bind(&f.env.project_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0, "daemon 自己的回合不能變成承諾");
+        let (msgs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE content LIKE '承諾帳本提醒%'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(msgs, 1, "提醒訊息本身照常寫入");
+    }
+
     /// 管理入口收到使用者的一句：入帳，並推 `ledger_updated`（網頁不用重整就看得到「待分流」）。
     #[tokio::test]
     async fn a_user_prompt_to_the_management_bot_is_ingested_and_announced() {

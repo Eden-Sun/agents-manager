@@ -432,19 +432,26 @@ pub struct RelaySrc<'a> {
     pub auth: Option<&'a str>,
     /// claude-api 這一回合送出時選的快取保留秒數（300／3600）；`None`＝預設 5 分鐘。其他 kind 忽略。
     pub cache_ttl_secs: Option<i64>,
+    /// daemon 自己產生的回合（保溫、控制面握手、提醒…）：不是人打的字，帳本收件一律不收（#1862 修正）。
+    pub daemon: bool,
 }
 
 impl<'a> RelaySrc<'a> {
     pub fn trusted(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User }, auth: None, cache_ttl_secs: None }
+        Self { from, unverified: false, queue_class: if from.is_some() { QueueClass::Relay } else { QueueClass::User }, auth: None, cache_ttl_secs: None, daemon: false }
     }
 
     pub fn user(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::User, auth: None, cache_ttl_secs: None }
+        Self { from, unverified: false, queue_class: QueueClass::User, auth: None, cache_ttl_secs: None, daemon: false }
     }
 
     pub fn daemon_notice(from: Option<&'a str>) -> Self {
-        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice, auth: None, cache_ttl_secs: None }
+        Self { from, unverified: false, queue_class: QueueClass::DaemonNotice, auth: None, cache_ttl_secs: None, daemon: true }
+    }
+
+    /// daemon 自己排的、走 User lane 的回合（主力保溫送 `/compact` 前的探測、控制面握手）。lane 不變，只標記來源。
+    pub fn daemon_system() -> Self {
+        Self { from: None, unverified: false, queue_class: QueueClass::User, auth: None, cache_ttl_secs: None, daemon: true }
     }
 
     /// 帶上 claude-api 這一回合的快取保留秒數（見 [`RelaySrc::cache_ttl_secs`]）。
@@ -566,7 +573,7 @@ pub async fn prompt_relayed_queueable(
         text,
         client_request_id,
         &[],
-        RelaySrc { from: relay_from, unverified: false, queue_class, auth: None, cache_ttl_secs: None },
+        RelaySrc { from: relay_from, unverified: false, queue_class, auth: None, cache_ttl_secs: None, daemon: false },
         true,
         false,
         Admission::Gated,
@@ -969,7 +976,7 @@ pub async fn prompt_expect_run(
     client_request_id: &str,
     expected_run_id: &str,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc::trusted(None), false, false, Admission::Gated, false, None, None, Some(expected_run_id)).await
+    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc::daemon_system(), false, false, Admission::Gated, false, None, None, Some(expected_run_id)).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -999,7 +1006,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None, None).await
+    prompt_inner(app, bot_id, text, client_request_id, &[], RelaySrc { from: relay_from, daemon: true, ..RelaySrc::trusted(relay_from) }, false, false, Admission::ControlPlane, false, None, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1032,7 +1039,7 @@ async fn prompt_inner(
             return Err(LcError::Bad("api_native_prompt_unsupported".into()));
         }
         if text.trim().is_empty() || client_request_id.trim().is_empty() { return Err(LcError::Bad("api_native_prompt_invalid".into())); }
-        return crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt_ttl(app, bot_id, text, client_request_id, relay.cache_ttl_secs.unwrap_or(300), attachment_ids)
+        let out = crate::lifecycle::api_bot_port::ApiBotPort::api_native_prompt_ttl(app, bot_id, text, client_request_id, relay.cache_ttl_secs.unwrap_or(300), attachment_ids)
             .await.map_err(|error| match error {
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Unconfirmed => LcError::Upstream("api_native_prompt_unconfirmed".into()),
                 crate::lifecycle::api_bot_port::ApiNativePromptError::Refused(reason) => LcError::conflict(reason, json!({"reason": reason})),
@@ -1041,7 +1048,9 @@ async fn prompt_inner(
                     "checkpoint_model": from,
                     "current_model": to,
                 })),
-            });
+            })?;
+        super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &out.message_id, &out.turn_id, text).await;
+        return Ok(out);
     }
     #[cfg(all(test, feature = "daemon-test-harness"))]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
@@ -1435,9 +1444,7 @@ async fn prompt_commit_and_deliver_body(
     tx.commit().await.map_err(up)?;
     if let Err(e) = app.bind_attachments(&msg_id, &files).await {
         publish_prompt_message(app, bot_id, &msg_id).await;
-        if relay.from.is_none() {
-            super::ledger_ingest::ingest_user_prompt(app, bot_id, &msg_id, &turn_id, text).await;
-        }
+        super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
         // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
         // DB 還是 in_flight＋pending 時不回普通的 `failed`。
         let note = format!("delivery failed: attachment binding failed: {e}");
@@ -1464,9 +1471,7 @@ async fn prompt_commit_and_deliver_body(
     }
 
     // 這一則確定留下來（沒有被撤回）才入帳；撤回的訊息不會留下指向它的承諾項。
-    if relay.from.is_none() {
-        super::ledger_ingest::ingest_user_prompt(app, bot_id, &msg_id, &turn_id, text).await;
-    }
+    super::ledger_ingest::ingest_user_prompt(app, relay, bot_id, &msg_id, &turn_id, text).await;
 
     // 打第一個字之前的那一瞬：人在終端裡打字、CLI 跳出新框，都不受 bot 鎖管（#120 測試插在這裡）。
     #[cfg(all(test, feature = "daemon-test-harness"))]
