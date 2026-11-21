@@ -3431,6 +3431,7 @@ WS 事件（耐久、只帶 id，網頁自己重抓）：
 - `agm lineage since <line>`
 - `agm lineage dispatch (--paths <path>… | --line <line>) --prompt-file <file> (--bot <id> | --child <name> [--pane <id>] [--identity <id>]) [--fork] [--request-id <id>] [--repo <dir>] [--lines-file <toml>]`：依規則自動走 `resume`（先跑無 prompt `codex exec fork --json <checkpoint>` 留備份再認領與接回）或 `fork`（`--fork`、跨線 `--paths`＋`--line`、或 `409 lineage_line_busy` 自動改走持久 fork 並登記 `work_session_id`），並在 prompt 前加上 `since` 的 `prompt_prefix`；任一步失敗自動 `abandon` 回滾並以非 0 輸出錯誤 JSON。輸出：`{line, mode, claim_id, base_session_id, backup_session_id, work_session_id, worker}`。
 - `agm lineage finish <claim_id> (--merged [--head <sha>] [--summary …] [--line <line>] [--session <sid>] | --abandon)`：`--merged` 帶 `claim_id` 前移檢查點；`--abandon` 放棄認領並回傳要接手的 `backup_session_id`。遇到 409 `lineage_checkpoint_moved`／`lineage_claim_closed` 原樣回報，不重試也不改用無 claim 的 advance。
+- `agm consult [--line lead] [--model <id>] [--effort xhigh] [--host local] [--exec-timeout 900] (--prompt-file <file> | "<問題>")`：對 thinker 檢查點（預設 `lead`）執行唯讀 `codex exec -s read-only --json --ephemeral fork <sid> -`，預設從 `GET /api/models?kind=codex&host=<host>` 解析最新 `sol` 模型＋`xhigh`、前面注入 `agm lineage since` 前綴，不登記、不 claim、不前移；輸出 `{line, checkpoint_session, model, effort, answer, usage:{input, cached, output}}`。
 
 ### Codex Stop hook 信任（#1989 phase 3）
 

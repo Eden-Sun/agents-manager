@@ -1944,6 +1944,99 @@ else:
         self.assertEqual(FakeDaemon.seen[-1]["path"], "/api/bots/b1/start?resume=fork&session=sess-1")
         self.assertNotEqual(self.run_cli("bot", "restart", "b1", "--resume", "fork")[0], 0)
 
+    def test_consult_ephemeral_fork_and_model_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, _ = self._setup_lineage_repo(root)
+            lines_file.write_text("[lines.lead]\nrole = \"thinker\"\npaths = []\n\n[lines.web]\npaths = [\"web/**\"]\n", encoding="utf-8")
+            argv_log = root / "codex_argv.json"
+            stdin_log = root / "codex_stdin.txt"
+            fake_codex = self._write_fake_bin(
+                root / "fake-codex",
+                f"""#!/usr/bin/env python3
+import json, sys
+open({str(argv_log)!r}, 'w').write(json.dumps(sys.argv[1:]))
+open({str(stdin_log)!r}, 'w').write(sys.stdin.read())
+print(json.dumps({{'type': 'thread.started', 'thread_id': 'eph-1'}}))
+print(json.dumps({{'type': 'item.completed', 'item': {{'id': 'i1', 'type': 'agent_message', 'text': '請拆成小步重構，先驗單元測試。'}}}}))
+print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 145000, 'cached_input_tokens': 144000, 'output_tokens': 320}}}}))
+""",
+            )
+            cp = {"line": "lead", "session_id": "lead-chk-1", "role": "thinker", "state": "checkpoint", "head_sha": chk_sha}
+            FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+            FakeDaemon.routes["GET /api/models"] = (200, {
+                "kind": "codex",
+                "host": "local",
+                "models": [
+                    {"id": "gpt-6.1-sol"},
+                    {"id": "gpt-6.2-sol"},
+                    {"id": "gpt-6.3-terra"},
+                ],
+            })
+
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(fake_codex),
+            }
+            with patch.dict(os.environ, env):
+                out = self.ok("consult", "這張票怎麼拆？", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(out["line"], "lead")
+                self.assertEqual(out["checkpoint_session"], "lead-chk-1")
+                self.assertEqual(out["model"], "gpt-6.2-sol")
+                self.assertEqual(out["effort"], "xhigh")
+                self.assertEqual(out["answer"], "請拆成小步重構，先驗單元測試。")
+                self.assertEqual(out["usage"], {"input": 145000, "cached": 144000, "output": 320})
+                argv = json.loads(argv_log.read_text(encoding="utf-8"))
+                self.assertEqual(argv, ["exec", "-s", "read-only", "-m", "gpt-6.2-sol", "-c", "model_reasoning_effort=xhigh", "--json", "--ephemeral", "fork", "lead-chk-1", "-"])
+                prompt_text = stdin_log.read_text(encoding="utf-8")
+                self.assertIn("唯讀諮詢：禁止修改任何檔案", prompt_text)
+                self.assertIn(f"上次之後這條線動過的檔案（{chk_sha}..HEAD）：", prompt_text)
+                self.assertIn("這張票怎麼拆？", prompt_text)
+                # 確認沒有登記/claim/advance
+                self.assertFalse(any(r["method"] == "POST" for r in FakeDaemon.seen))
+
+                # --prompt-file 與 --model / --effort 覆寫
+                qfile = root / "q.txt"
+                qfile.write_text("幫我看這個 diff", encoding="utf-8")
+                out2 = self.ok("consult", "--prompt-file", str(qfile), "--model", "custom-sol", "--effort", "high", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(out2["model"], "custom-sol")
+                self.assertEqual(out2["effort"], "high")
+
+    def test_consult_error_cases_no_checkpoint_timeout_and_no_sol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines_file, chk_sha, _ = self._setup_lineage_repo(root)
+            lines_file.write_text("[lines.lead]\nrole = \"thinker\"\npaths = []\n", encoding="utf-8")
+            slow_codex = self._write_fake_bin(
+                root / "slow-codex",
+                "#!/usr/bin/env python3\nimport time\ntime.sleep(3)\n",
+            )
+            env = {
+                "AM_BOT_ID": "bot-mgr", "AM_BOT_TOKEN": "bot-secret", "AM_PROJECT_ID": "p1",
+                "AM_DAEMON_URL": f"http://127.0.0.1:{self.port}", "AGM_RUNTIME_DIR": "/nonexistent",
+                "AGM_CODEX_BIN": str(slow_codex),
+            }
+            with patch.dict(os.environ, env):
+                # 1. 無 thinker 檢查點 → 提示如何種下
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": []})
+                err = self.bad("consult", "hello", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err["error"], "no_thinker_checkpoint")
+                self.assertIn("agm lineage advance lead", err["message"])
+                self.assertIn("--role thinker", err["message"])
+
+                # 2. /api/models 無 sol 模型
+                cp = {"line": "lead", "session_id": "lead-chk-1", "role": "thinker", "state": "checkpoint", "head_sha": chk_sha}
+                FakeDaemon.routes["GET /api/projects/p1/lineage"] = (200, {"project_id": "p1", "sessions": [cp]})
+                FakeDaemon.routes["GET /api/models"] = (200, {"kind": "codex", "host": "local", "models": [{"id": "gpt-6.3-terra"}]})
+                err2 = self.bad("consult", "hello", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err2["error"], "no_sol_model")
+
+                # 3. 逾時清楚回報
+                FakeDaemon.routes["GET /api/models"] = (200, {"kind": "codex", "host": "local", "models": [{"id": "gpt-6.2-sol"}]})
+                err3 = self.bad("consult", "hello", "--exec-timeout", "0.2", "--repo", str(root), "--lines-file", str(lines_file))
+                self.assertEqual(err3["error"], "consult_timeout")
+
     def test_peers_and_requests_use_only_bot_proof_without_runtime(self):
         FakeDaemon.routes["GET /api/projects/p1/peers"] = (200, {"peers": []})
         FakeDaemon.routes["GET /api/projects/p1/peers?for=ticket-1"] = (200, {"candidates": []})

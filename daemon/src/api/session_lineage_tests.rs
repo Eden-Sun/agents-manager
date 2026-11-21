@@ -351,9 +351,9 @@ async fn claim_abandon_and_versioned_advance_enforces_single_writer_and_permissi
     let Json(adv_f1) = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap();
     assert_eq!((adv_f1["session"]["session_id"].as_str(), adv_f1["retired"]["session_id"].as_str()), (Some("w1"), Some("s1")));
 
-    // 過期 claim 前移被拒（409 lineage_checkpoint_moved，回傳目前檢查點 w1）且什麼都沒改；關閉後也不能再前移。
+    // 過期 claim 已在檢查點移走時自動標成 abandoned，再前移被拒（409 lineage_claim_closed）且什麼都沒改。
     let stale = advance(State(app.clone()), Path(pid.clone()), Extension(RequestPrincipal::User), body(json!({"line": "web", "claim_id": f2_id}))).await.unwrap_err();
-    assert!(matches!(&stale, LcError::Conflict(v) if v["reason"] == "lineage_checkpoint_moved" && v["checkpoint"]["session_id"] == "w1"), "{stale:?}");
+    assert!(matches!(&stale, LcError::Conflict(v) if v["reason"] == "lineage_claim_closed" && v["claim"]["state"] == "abandoned"), "{stale:?}");
     let closed = advance(State(app.clone()), Path(pid.clone()), bot(&c.manager), body(json!({"line": "web", "claim_id": f1_id}))).await.unwrap_err();
     assert!(matches!(&closed, LcError::Conflict(v) if v["reason"] == "lineage_claim_closed"), "{closed:?}");
     assert_eq!(listed(&c, &pid, bot(&c.executor), ListQuery { line: Some("web".into()), state: Some("checkpoint".into()) }).await.unwrap(), vec![row("web", "w1", "checkpoint")]);

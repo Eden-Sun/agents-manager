@@ -5,6 +5,10 @@
 # 每條線定義其涵蓋的檔案路徑 glob（支援 * 不跨目錄、** 跨目錄）。
 # 線名限制：1–64 個字元，由 [A-Za-z0-9._-] 組成，且必須以英數開頭。
 
+[lines.lead]
+role = "thinker"
+paths = []
+
 [lines.web]
 paths = [
     "web/**",

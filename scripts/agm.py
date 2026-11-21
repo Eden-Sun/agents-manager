@@ -2390,6 +2390,169 @@ def cmd_lineage_finish(client: Client, cfg: dict, args) -> object:
     return client.post(_lineage_path(f"/claim/{path_segment(args.claim_id)}/abandon"), {})
 
 
+def _sol_version_key(model_id: str) -> tuple[int, ...]:
+    """從模型 ID 抽數字版本組做比較（例如 gpt-6.2-sol -> (6, 2)），不寫死版號。"""
+    nums = [int(x) for x in re.findall(r"\d+", model_id)]
+    return tuple(nums)
+
+
+def _resolve_latest_sol_model(client: Client, host: str) -> str:
+    resp = client.get("/api/models", {"kind": "codex", "host": host})
+    models = resp.get("models") if isinstance(resp, dict) else None
+    if not isinstance(models, list):
+        raise AgmError("models_unavailable", f"GET /api/models (kind=codex, host={host}) 回傳格式錯誤", 1, host=host)
+    sols: list[tuple[tuple[int, ...], int, str]] = []
+    for idx, entry in enumerate(models):
+        if not isinstance(entry, dict):
+            continue
+        mid = entry.get("id")
+        if not isinstance(mid, str) or not mid.strip():
+            continue
+        mid = mid.strip()
+        if re.search(r"(?:^|[-_])sol(?:$|[-_])", mid, re.IGNORECASE):
+            sols.append((_sol_version_key(mid), -idx, mid))
+    if not sols:
+        raise AgmError(
+            "no_sol_model",
+            f"GET /api/models (kind=codex, host={host}) 找不到任何 sol 模型；可用 --model 手動指定",
+            1,
+            host=host,
+        )
+    sols.sort(reverse=True)
+    return sols[0][2]
+
+
+def _parse_codex_exec_json(stdout: str) -> tuple[str | None, dict[str, int], str | None]:
+    answer: str | None = None
+    usage = {"input": 0, "cached": 0, "output": 0}
+    err_msg: str | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        ev_type = ev.get("type")
+        if ev_type == "item.completed":
+            item = ev.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                txt = item.get("text")
+                if isinstance(txt, str) and txt.strip():
+                    answer = txt.strip()
+        elif ev_type == "turn.completed":
+            u = ev.get("usage")
+            if isinstance(u, dict):
+                usage = {
+                    "input": int(u.get("input_tokens") or 0),
+                    "cached": int(u.get("cached_input_tokens") or 0),
+                    "output": int(u.get("output_tokens") or 0),
+                }
+        elif ev_type in ("turn.failed", "error"):
+            err = ev.get("error")
+            if isinstance(err, dict) and isinstance(err.get("message"), str):
+                err_msg = err["message"].strip()
+            elif isinstance(ev.get("message"), str):
+                err_msg = ev["message"].strip()
+    return answer, usage, err_msg
+
+
+def cmd_consult(client: Client, cfg: dict, args) -> object:
+    """唯讀諮詢 thinker 血統（#1943 C）：ephemeral fork 問一題，不登記、不 claim、不前移。"""
+    q_arg = getattr(args, "question", None)
+    f_arg = getattr(args, "prompt_file", None)
+    if bool(q_arg) == bool(f_arg):
+        raise AgmError("bad_args", "consult 必須擇一提供問題文字或 --prompt-file", 2)
+    if f_arg:
+        p = Path(f_arg).expanduser()
+        try:
+            question = p.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise AgmError("bad_args", f"讀不到 --prompt-file（{p}）：{e.strerror or e}", 2)
+    else:
+        question = str(q_arg).strip()
+    if not question:
+        raise AgmError("bad_args", "諮詢問題不可為空", 2)
+
+    line = (getattr(args, "line", None) or "lead").strip()
+    if not _valid_line(line):
+        raise AgmError("invalid_line", f"模組線名稱不合規則：{line}", 2, line=line)
+
+    repo = _resolve_repo(getattr(args, "repo", None))
+    since_ns = argparse.Namespace(line=line, lines_file=getattr(args, "lines_file", None), repo=str(repo))
+    try:
+        since = cmd_lineage_since(client, cfg, since_ns)
+    except AgmError as e:
+        if e.kind == "no_checkpoint":
+            raise AgmError(
+                "no_thinker_checkpoint",
+                f"模組線 `{line}` 目前沒有 thinker 檢查點；請先種一顆：agm lineage advance {line} <session_id> --role thinker --head <sha>",
+                1,
+                line=line,
+            ) from e
+        raise
+
+    checkpoint_session = str(since["checkpoint_session"])
+    host = (getattr(args, "host", None) or os.environ.get("AM_HOST") or "local").strip()
+    model = (getattr(args, "model", None) or "").strip() or _resolve_latest_sol_model(client, host)
+    effort = (getattr(args, "effort", None) or "xhigh").strip()
+    exec_timeout = float(getattr(args, "exec_timeout", None) or 900.0)
+
+    full_prompt = (
+        "[唯讀諮詢：禁止修改任何檔案、禁止執行寫入指令、禁止開啟子 agent。只回答以下問題。]\n\n"
+        f"{since['prompt_prefix']}\n\n{question}"
+    )
+
+    codex_bin = os.environ.get("AGM_CODEX_BIN") or "codex"
+    cmd = [
+        codex_bin,
+        "exec",
+        "-s",
+        "read-only",
+        "-m",
+        model,
+        "-c",
+        f"model_reasoning_effort={effort}",
+        "--json",
+        "--ephemeral",
+        "fork",
+        checkpoint_session,
+        "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, input=full_prompt, cwd=str(repo), capture_output=True, text=True, timeout=exec_timeout)
+    except FileNotFoundError:
+        raise AgmError("codex_not_found", f"找不到 codex 執行檔：{codex_bin}", 1, line=line)
+    except subprocess.TimeoutExpired:
+        raise AgmError(
+            "consult_timeout",
+            f"codex exec --ephemeral fork 逾時（{exec_timeout:g}s）",
+            5,
+            line=line,
+            checkpoint_session=checkpoint_session,
+        )
+
+    answer, usage, ev_err = _parse_codex_exec_json(proc.stdout)
+    if proc.returncode != 0:
+        msg = ev_err or proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise AgmError("consult_failed", f"codex exec 失敗：{msg}", 1, line=line, checkpoint_session=checkpoint_session)
+    if not answer:
+        msg = ev_err or "codex exec 未回傳 agent_message"
+        raise AgmError("consult_no_answer", msg, 1, line=line, checkpoint_session=checkpoint_session)
+
+    return {
+        "line": line,
+        "checkpoint_session": checkpoint_session,
+        "model": model,
+        "effort": effort,
+        "answer": answer,
+        "usage": usage,
+    }
+
+
 def cmd_role(client: Client, cfg: dict, args) -> object:
     """專家模式：管理者替同專案的頂層 bot 設執行者／顧問角色（none 清掉）。"""
     role = None if args.role == "none" else args.role
@@ -3559,6 +3722,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="delete：確定要刪 AGM 的 bot（總管專案裡的、總管的 child）；沒帶會 409 supervisor_owned")
     s.set_defaults(func=cmd_bot)
 
+    s = sub.add_parser("consult", help="唯讀諮詢 thinker 血統檢查點（#1943 C：ephemeral fork，不登記不前移）")
+    s.add_argument("question", nargs="?", help="要問 thinker 的問題（與 --prompt-file 擇一）")
+    s.add_argument("--prompt-file", dest="prompt_file", help="問題檔案路徑（與位置參數擇一）")
+    s.add_argument("--line", default="lead", help="thinker 血統線名（預設 lead）")
+    s.add_argument("--model", help="覆寫模型（預設從 /api/models 取最新 sol）")
+    s.add_argument("--effort", default="xhigh", help="推理強度（預設 xhigh）")
+    s.add_argument("--host", help="查詢 /api/models 用的主機名（預設 local）")
+    s.add_argument("--exec-timeout", dest="exec_timeout", type=_timeout_arg, default=900.0, help="codex exec 逾時秒數（預設 900）")
+    s.add_argument("--config", "--lines-file", dest="lines_file", help="指定 lines.toml 路徑（預設 docs/notes/lines.toml）")
+    s.add_argument("--repo", help="指定 git repo 路徑")
+    s.set_defaults(func=cmd_consult)
+
     return p
 
 
@@ -3582,7 +3757,7 @@ def main(argv: list[str] | None = None) -> int:
         client = None
         if getattr(args, "needs_client", True):
             timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
+            if (args.cmd in ("peers", "requests", "role", "hire", "member", "lineage", "consult") or (args.cmd == "bot" and getattr(args, "op", "") in ("start", "restart", "stop", "restore", "delete", "set") and os.environ.get("AM_DAEMON_URL") and (os.environ.get("AM_PROJECT_MODE") == "expert" or not os.environ.get("AM_PORT")))) and os.environ.get("AM_BOT_ID"):
                 headers = bot_auth_headers({})
                 if not (headers.get("X-AM-Bot-Token") or (headers.get("X-AM-Child-Spawn-Id") and headers.get("X-AM-Child-Token"))):
                     raise AgmError("no_bot_token", "缺少 bot 憑證", 2)

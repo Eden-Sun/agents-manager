@@ -258,6 +258,18 @@ async fn advance_in_tx(
         Some(prev) => by_session(tx, project_id, &prev.session_id).await?,
         None => None,
     };
+    // 檢查點移走後，舊檢查點上仍 open 的 claim（resume 或 fork）永遠無法再前移；
+    // 同一交易內一併標成 abandoned，避免永久掛著 open。
+    sqlx::query(
+        "UPDATE lineage_claims SET state = 'abandoned', updated_at = ? \
+         WHERE project_id = ? AND line = ? AND state = 'open' AND base_session_id <> ?",
+    )
+    .bind(now)
+    .bind(project_id)
+    .bind(line)
+    .bind(session_id)
+    .execute(&mut *tx)
+    .await?;
     Ok((session, retired))
 }
 
@@ -657,9 +669,9 @@ mod tests {
         assert_eq!(adv_f1.retired.as_ref().map(|r| r.session_id.as_str()), Some("s1"));
         assert_eq!(adv_f1.claim.as_ref().unwrap().state, "advanced");
 
-        // 過期的 fork claim（base=s1，但檢查點已經移到 w1）：被拒且什麼都沒改。
+        // 過期的 fork claim（base=s1，但檢查點已經移到 w1）：前移時已自動標為 abandoned，再前移被拒（ClaimClosed）且什麼都沒改。
         let stale = advance_with_claim(&pool, "p1", "web", &c_f2.claim.id, None, Fields::default()).await.unwrap_err();
-        assert!(matches!(stale, LineageError::CheckpointMoved { checkpoint: Some(ref cp) } if cp.session_id == "w1"), "{stale:?}");
+        assert!(matches!(stale, LineageError::ClaimClosed(ref c) if c.state == "abandoned"), "{stale:?}");
         assert_eq!(checkpoint(&pool, "p1", "web").await.unwrap().unwrap().session_id, "w1");
         assert!(by_session(&mut *pool.acquire().await.unwrap(), "p1", "w2").await.unwrap().is_none());
 
@@ -687,5 +699,20 @@ mod tests {
         assert_eq!(adv.session.session_id, "w-new");
         assert_eq!(adv.session.line, "web");
         assert!(matches!(set_claim_work_session(&pool, "p1", &c_fork.claim.id, "w-late").await, Err(LineageError::ClaimClosed(_))));
+    }
+
+    #[tokio::test]
+    async fn stale_open_fork_claims_are_abandoned_when_checkpoint_advances() {
+        let pool = pool().await;
+        advance(&pool, "p1", "web", "s1", Fields::default()).await.unwrap();
+        let f1 = claim(&pool, "p1", "web", "fork", None, None, Some("w1")).await.unwrap().claim;
+        let f2 = claim(&pool, "p1", "web", "fork", None, None, Some("w2")).await.unwrap().claim;
+        advance_with_claim(&pool, "p1", "web", &f1.id, None, Fields::default()).await.unwrap();
+        let stale: LineageClaim = sqlx::query_as("SELECT * FROM lineage_claims WHERE id = ?").bind(&f2.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(stale.state, "abandoned", "舊檢查點上 open 的 fork claim 應隨前移自動標為 abandoned");
+        assert!(matches!(
+            advance_with_claim(&pool, "p1", "web", &f2.id, None, Fields::default()).await,
+            Err(LineageError::ClaimClosed(ref c)) if c.state == "abandoned"
+        ));
     }
 }

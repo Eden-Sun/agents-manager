@@ -12,6 +12,14 @@
   - `agm lineage since <line>`：取該線目前檢查點的 HEAD SHA，比對自檢查點以來該線路徑的 `git diff --stat`，並產生可直接注入派工 prompt 前綴的中文說明。
   - `agm lineage dispatch`：把血統派工串成單一指令（`pick → since → claim → 啟動 worker → 前綴注入 → 派送 prompt`）。
   - `agm lineage finish`：結束認領（`--merged` 帶 `claim_id` 前移檢查點；`--abandon` 放棄並回傳要接手的備份 session）。
+  - `agm consult`：對 `role=thinker` 的檢查點（預設 `lead`）做唯讀 ephemeral fork 問一題（`-s read-only`、最新 `sol`＋`xhigh`），不登記、不 claim、不前移。
+
+## Thinker 與 OB 的分工（C）
+
+- **OB（`scripts/ob.py`）**：外部 ChatGPT 網頁，看不到本機 repo、單一共用 worker、走瀏覽器、無法接進派工 → 適合「跨出 repo、純問一題給第二意見」。
+- **Thinker（`lead` 線＋`agm consult`）**：本機 repo 的唯讀 lead 血統（在 `docs/notes/lines.toml` 定義 `[lines.lead]`、`role = "thinker"`、`paths = []`，讓 `since` 比對整個 repo），以 `codex exec -s read-only --json --ephemeral fork <checkpoint> -` 命中父 session 快取、不落 rollout、不改檔、不開子 agent；適合需要完整 SPEC／決策史／各線筆記脈絡的任務拆解（plan 與驗收條件）、diff review、或重種前整理模組筆記。
+- **種下 thinker 檢查點**：`agm lineage advance lead <session_id> --role thinker --head <sha>`。
+- **使用範例**：`agm consult "這張票該拆成哪幾條線？"` 或 `agm consult --prompt-file plan_q.md`（可用 `--model`／`--effort`／`--line` 覆寫）。
 
 ## 血統派工與收尾流程（B3）
 
