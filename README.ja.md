@@ -154,14 +154,14 @@ AG Man は 2 つのカテゴリの bot をサポートしています：
 - **CLI bot**（`claude`、`codex`、`grok`、`agy`）：[herdr](https://herdr.dev) の端末 pane 内で hook を注入して動作します。シェルコマンドの実行、ファイルの編集、完全な agent ループを実行できます。
 - **API bot**（`claude-api`、`openai-api`）：CLI や端末 pane を介さず、API キーを使って daemon から直接プロバイダー API を呼び出します。厳密に**顧問（Advisor）**として動作し（相談やセカンドオピニオン）、ターンごとのコスト上限設定（または無制限）をサポートします。
 
-> **注意**：daemon は各 CLI および API プロバイダーから最新のモデル一覧を動的に取得します。以下の表はリリース／執筆時点（2026-11-20）のスナップショットです。
+> **注意**：daemon は各 CLI および API プロバイダーから最新のモデル一覧を動的に取得します。以下の表はリリース／執筆時点（2026-11-21）のスナップショットです。
 
 | kind | 種類 | 説明 | 現在のモデル（ファミリー／価格順） | effort の範囲 |
 |---|---|---|---|---|
 | `claude` | CLI | herdr pane で動作する Anthropic Claude Code | `opus`、`sonnet`（既定）、`haiku`、`fable` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `codex` | CLI | herdr pane で動作する OpenAI Codex CLI | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol`（既定） < `gpt-6-astra` < `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max`、`ultra`（luna は `max` まで） |
 | `grok` | CLI | herdr pane で動作する xAI Grok CLI | `grok-4.7`（既定） | `low`、`medium`、`high`、`xhigh` |
-| `agy` | CLI | herdr pane で動作する Google Antigravity | `Gemini 3.8 Flash`（low、medium [既定]、high） < `Gemini 4 Hydrogen`（low..xhigh） < `Gemini 4 Argon`（low..high） < `Gemini 4 Neon`（low..xhigh） | モデル名にあらかじめプリセット |
+| `agy` | CLI | herdr pane で動作する Google Antigravity | アカウント別：既定アカウント ag0、その他 identity ag1…；アカウントごとに利用可能なモデルが異なる（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：3.8 Flash のみ）、ホスト＋アカウント別にモデルメニューを表示；context ウィンドウ 1,048,576；12 分 cache カウントダウン、保温なし | モデル名にあらかじめプリセット |
 | `claude-api` | API | Anthropic API 直接通信（Advisor 専用） | `claude-opus-5-5`（既定）、`claude-fable-5-2` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `openai-api` | API | OpenAI API 直接通信（Advisor 専用） | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra`（既定） | `none`（luna）、`low`、`medium`、`high`、`xhigh`、`max` |
 
@@ -169,9 +169,9 @@ AG Man は 2 つのカテゴリの bot をサポートしています：
 - **Web UI**：プロジェクトの「＋」メニューから **Add Bot**（「新增 Bot」）を選び、kind、モデル、effort レベルを選択します（エキスパートモードでは role を選択可能。API bot は advisor のみ）。
 - **CLI（エキスパートモード）**：
   ```bash
-  agm hire <名前> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>]
+  agm hire <名前> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>] [--identity <identity>]
   ```
-  *（例：`agm hire worker-1 --kind codex --model gpt-6.2-sol --effort high` または `agm hire advisor-1 --kind openai-api --model gpt-6.2-astra --role advisor`）*
+  *（注：`agm hire` は執行者 `executor` [既定] または専門家 `specialist` [`--track` 必須] のみ雇用できます。顧問 [advisor] はユーザーが Web UI で作成します。執行者の命名規則は `<アカウント>-<モデル略称>-<連番>` です。例：`agm hire cc0-hk-1 --kind claude --model haiku --effort medium`、`agm hire ag0-ne-1 --kind agy --model gemini-4-neon-medium`、または identity 指定：`agm hire cc1-hk-1 --kind claude --model haiku --effort medium --identity cc1`）*
 
 ### 対応する agent CLI と hook の仕組み
 
@@ -182,7 +182,7 @@ AG Man は 2 つのカテゴリの bot をサポートしています：
 | `claude` | `--settings` の hook（`SessionStart`／`Stop`／`StopFailure`） | 複数 identity に対応。モデルと effort はその場で切り替えられます |
 | `codex` | 標準入力の `Stop` hook および `notify` hook | モデル、effort、Fast をその場で切り替えられます |
 | `grok` | `GROK_HOME` 内の hook ファイル | モデルはその場で切り替えられます。effort は再起動が必要です。[SPEC §12](docs/SPEC.md) を参照 |
-| `agy` | Antigravity CLI 設定の名前付き hook | ヘッダーに更新通知を表示。複数 identity に対応。[SPEC §12a](docs/SPEC.md) を参照 |
+| `agy` | Antigravity CLI 設定の名前付き hook | ヘッダーに更新通知を表示。複数 identity（既定アカウント ag0、その他 identity ag1…）；context ウィンドウ 1,048,576；12 分 cache カウントダウン、保温なし；[SPEC §12a](docs/SPEC.md) を参照 |
 | `claude-api` | Anthropic API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、prompt cache カウントダウン |
 | `openai-api` | OpenAI Responses API 直接ストリーミング（SSE） | Advisor 専用。ターンごとのコスト上限、reasoning tokens 表示 |
 

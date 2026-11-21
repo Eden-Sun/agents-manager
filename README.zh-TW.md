@@ -154,14 +154,14 @@ AG Man 支援兩類 bot：
 - **CLI bot**（`claude`、`codex`、`grok`、`agy`）：跑在 [herdr](https://herdr.dev) 終端 pane 內並注入 hook。可執行 shell 指令、編輯檔案並完整執行 agent 迴圈。
 - **API bot**（`claude-api`、`openai-api`）：由 daemon 透過 API key 直接呼叫模型供應商 API，不需 CLI 或終端 pane。嚴格作為**顧問（Advisor）**運作（提供諮詢與第二意見），支援每回合成本上限（或無上限）。
 
-> **注意**：daemon 會從各 CLI 與 API 供應商動態取得最新模型清單。下表為發布／撰寫時的快照（2026-11-20）。
+> **注意**：daemon 會從各 CLI 與 API 供應商動態取得最新模型清單。下表為發布／撰寫時的快照（2026-11-21）。
 
 | kind | 類型 | 說明 | 目前模型（依家族／等級） | effort 範圍 |
 |---|---|---|---|---|
 | `claude` | CLI | 跑在 herdr pane 的 Anthropic Claude Code | `opus`、`sonnet`（預設）、`haiku`、`fable` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `codex` | CLI | 跑在 herdr pane 的 OpenAI Codex CLI | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol`（預設） < `gpt-6-astra` < `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max`、`ultra`（luna 上限為 `max`） |
 | `grok` | CLI | 跑在 herdr pane 的 xAI Grok CLI | `grok-4.7`（預設） | `low`、`medium`、`high`、`xhigh` |
-| `agy` | CLI | 跑在 herdr pane 的 Google Antigravity | `Gemini 3.8 Flash`（low、medium [預設]、high） < `Gemini 4 Hydrogen`（low..xhigh） < `Gemini 4 Argon`（low..high） < `Gemini 4 Neon`（low..xhigh） | 預設嵌在模型名稱內 |
+| `agy` | CLI | 跑在 herdr pane 的 Google Antigravity | 依帳號：預設帳號 ag0、其他身份 ag1…；各帳號可用模型不同（例 ag0：Gemini 3.8 Flash＋Gemini 4 Neon／Argon／Hydrogen；ag1：只有 3.8 Flash），模型選單依主機＋帳號列出；context 視窗 1,048,576；有 12 分 cache 倒數、不保溫 | 預設嵌在模型名稱內 |
 | `claude-api` | API | 直連 Anthropic API（僅限 Advisor） | `claude-opus-5-5`（預設）、`claude-fable-5-2` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `openai-api` | API | 直連 OpenAI API（僅限 Advisor） | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra`（預設） | `none`（luna）、`low`、`medium`、`high`、`xhigh`、`max` |
 
@@ -169,9 +169,9 @@ AG Man 支援兩類 bot：
 - **網頁介面**：在專案的「＋」選單中選擇**新增 Bot**，選擇 kind、模型與 effort 等級（在專家模式下可選擇角色 role；API bot 只能為顧問 advisor）。
 - **CLI（專家模式）**：
   ```bash
-  agm hire <名稱> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>]
+  agm hire <名稱> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>] [--identity <identity>]
   ```
-  *（範例：`agm hire worker-1 --kind codex --model gpt-6.2-sol --effort high` 或 `agm hire advisor-1 --kind openai-api --model gpt-6.2-astra --role advisor`）*
+  *（註：`agm hire` 只能聘執行者 `executor` [預設] 或專家 `specialist` [須附 `--track`]；顧問由使用者在網頁建立。執行者命名照規則 `<帳號>-<模型簡寫>-<序號>`。範例：`agm hire cc0-hk-1 --kind claude --model haiku --effort medium`、`agm hire ag0-ne-1 --kind agy --model gemini-4-neon-medium`，或指定身份 `agm hire cc1-hk-1 --kind claude --model haiku --effort medium --identity cc1`）*
 
 ### 支援的 agent CLI 與 hook 機制
 
@@ -182,7 +182,7 @@ AG Man 支援兩類 bot：
 | `claude` | `--settings` 的 hook（`SessionStart`／`Stop`／`StopFailure`） | 多身份；模型與 effort 可即時切換 |
 | `codex` | Stdin `Stop` hook 與 `notify` hook | 模型、effort、Fast 可即時切換 |
 | `grok` | `GROK_HOME` 內的 hook 檔 | 模型可即時切換；effort 需重啟；見 [SPEC §12](docs/SPEC.md) |
-| `agy` | Antigravity CLI 設定中的具名 hook | 標題列顯示更新提示；多身份；見 [SPEC §12a](docs/SPEC.md) |
+| `agy` | Antigravity CLI 設定中的具名 hook | 標題列顯示更新提示；多身份（預設帳號 ag0、其他身份 ag1…）；context 視窗 1,048,576；有 12 分 cache 倒數、不保溫；見 [SPEC §12a](docs/SPEC.md) |
 | `claude-api` | 直連 Anthropic API 串流（SSE） | 僅限 Advisor；每回合成本上限、prompt cache 倒數 |
 | `openai-api` | 直連 OpenAI Responses API 串流（SSE） | 僅限 Advisor；每回合成本上限、reasoning tokens 顯示 |
 

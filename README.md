@@ -154,14 +154,14 @@ AG Man supports two categories of bots:
 - **CLI bots** (`claude`, `codex`, `grok`, `agy`): run inside [herdr](https://herdr.dev) terminal panes with hooks attached. Can execute shell commands, edit files, and run full agent loops.
 - **API bots** (`claude-api`, `openai-api`): talk directly to provider APIs from the daemon using API keys without needing CLIs or terminal panes. They act strictly as **advisors** (consultation and second opinions), with configurable per-turn cost ceilings (or unlimited).
 
-> **Note**: The daemon fetches the active model list dynamically from each CLI and API provider. The table below is a snapshot at release / writing time (2026-11-20).
+> **Note**: The daemon fetches the active model list dynamically from each CLI and API provider. The table below is a snapshot at release / writing time (2026-11-21).
 
 | Kind | Type | Description | Current Models (by family/tier) | Effort Range |
 |---|---|---|---|---|
 | `claude` | CLI | Anthropic Claude Code in herdr pane | `opus`, `sonnet` (default), `haiku`, `fable` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `codex` | CLI | OpenAI Codex CLI in herdr pane | `gpt-6-luna` < `gpt-6.1-terra` < `gpt-6.1-sol` < `gpt-6.2-sol` (default) < `gpt-6-astra` < `gpt-6.2-astra` | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (luna up to `max`) |
 | `grok` | CLI | xAI Grok CLI in herdr pane | `grok-4.7` (default) | `low`, `medium`, `high`, `xhigh` |
-| `agy` | CLI | Google Antigravity in herdr pane | `Gemini 3.8 Flash` (low, medium [default], high) < `Gemini 4 Hydrogen` (low..xhigh) < `Gemini 4 Argon` (low..high) < `Gemini 4 Neon` (low..xhigh) | Preset in model name |
+| `agy` | CLI | Google Antigravity in herdr pane | Per account: default account ag0, other identities ag1...; available models vary by account (e.g. ag0: Gemini 3.8 Flash + Gemini 4 Neon / Argon / Hydrogen; ag1: only 3.8 Flash), model menu listed by host + account; context window 1,048,576; 12-min cache countdown, no keep-warm | Preset in model name |
 | `claude-api` | API | Anthropic API direct (Advisor only) | `claude-opus-5-5` (default), `claude-fable-5-2` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `openai-api` | API | OpenAI API direct (Advisor only) | `gpt-6-luna` < `gpt-6.2-sol` < `gpt-6.2-astra` (default) | `none` (luna), `low`, `medium`, `high`, `xhigh`, `max` |
 
@@ -169,9 +169,9 @@ AG Man supports two categories of bots:
 - **Web UI**: In the project's "+" menu, choose **Add Bot** ("新增 Bot"), select the kind, model, and effort level (in Expert mode, select the role; API bots can only be advisors).
 - **CLI (Expert mode)**:
   ```bash
-  agm hire <name> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>]
+  agm hire <name> --kind <kind> --model <model> --effort <effort> [--role <role>] [--track <track>] [--identity <identity>]
   ```
-  *(Example: `agm hire worker-1 --kind codex --model gpt-6.2-sol --effort high` or `agm hire advisor-1 --kind openai-api --model gpt-6.2-astra --role advisor`)*
+  *(Note: `agm hire` can only hire `executor` [default] or `specialist` [requires `--track`]; advisors are created by the user in the Web UI. Executor names follow `<account>-<model_short>-<index>`. Examples: `agm hire cc0-hk-1 --kind claude --model haiku --effort medium`, `agm hire ag0-ne-1 --kind agy --model gemini-4-neon-medium`, or with identity: `agm hire cc1-hk-1 --kind claude --model haiku --effort medium --identity cc1`)*
 
 ### Supported agent CLIs and hook mechanisms
 
@@ -182,7 +182,7 @@ Each CLI gets a hook injected at launch, so replies arrive as structured events 
 | `claude` | `--settings` hooks (`SessionStart`／`Stop`／`StopFailure`) | Multi-identities; model and effort can be switched live |
 | `codex` | Stdin `Stop` hook and `notify` hook | Model, effort and Fast can be switched live |
 | `grok` | Hook file in `GROK_HOME` | Model can be switched live; effort needs a restart; see [SPEC §12](docs/SPEC.md) |
-| `agy` | Named hooks in Antigravity CLI settings | Update prompt shown in header; multi-identities; see [SPEC §12a](docs/SPEC.md) |
+| `agy` | Named hooks in Antigravity CLI settings | Update prompt shown in header; multi-identities (default account ag0, other identities ag1...); context window 1,048,576; 12-min cache countdown, no keep-warm; see [SPEC §12a](docs/SPEC.md) |
 | `claude-api` | Direct Anthropic API streaming (SSE) | Advisor only; per-turn cost ceiling, prompt cache countdown |
 | `openai-api` | Direct OpenAI Responses API streaming (SSE) | Advisor only; per-turn cost ceiling, reasoning tokens display |
 
