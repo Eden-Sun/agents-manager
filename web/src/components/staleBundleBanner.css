@@ -1,0 +1,53 @@
+/* 換版橫幅：固定在頂部（含手機瀏海安全區），蓋在一般浮層之上，只能按「重新載入」或收起。 */
+.stale-bundle-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 14px 8px;
+  background: var(--warn-bg, #fff4d6);
+  color: var(--warn-fg, #5a4300);
+  border-bottom: 1px solid var(--warn-border, #e8c76a);
+  font-size: 14px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+}
+
+.stale-bundle-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.stale-bundle-reload {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.stale-bundle-dismiss {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .stale-bundle-banner {
+    background: #3a2f10;
+    color: #ffe9a8;
+    border-bottom-color: #6b5520;
+  }
+}

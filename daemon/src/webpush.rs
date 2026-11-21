@@ -1170,7 +1170,7 @@ fn model_of_bucket(bucket: &str) -> Option<&'static str> {
     }
 }
 
-/// daemon 換版：記下上次啟動的 build，不同就是剛換版（第一次沒有紀錄不推）。
+/// daemon 換版：記下上次啟動的 build，不同就是剛換版（第一次沒有紀錄回 false）。不推播。
 pub(crate) fn build_changed(dir: &Path, sha: &str) -> bool {
     let path = dir.join("push-last-build");
     let prev = std::fs::read_to_string(&path).ok().map(|t| t.trim().to_string());
@@ -1260,16 +1260,9 @@ pub(crate) async fn scan_reset_credits(app: &Arc<App>, snap: &Value, now: chrono
 pub fn spawn_extra_notifiers(app: Arc<App>) {
     let observed = app.clone();
     crate::supervisor_inbox::set_inbox_observer(Box::new(move |_key, kind, payload| spawn_system_alert(&observed, kind, payload)));
-    if setting_enabled(&app.data_dir, "updates") && build_changed(&app.data_dir, crate::build_info::BUILD_SHA) {
-        let app2 = app.clone();
-        tokio::spawn(async move {
-            // 等訂閱與事件流起來再送。
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            send_plain(&app2, plain_payload("已更新", &format!("AG Man 已更新到 {}", crate::build_info::BUILD_SHA), "updated:agm", "/")).await;
-        });
-    } else {
-        let _ = build_changed(&app.data_dir, crate::build_info::BUILD_SHA);
-    }
+    // AG Man 自己換版不再推播（2026-11-21）：開著的手機分頁會自己偵測到新前端，跳「請重新開啟」橫幅。
+    // 仍記下這次的 build，之後才判斷得出換版（`build_changed`）。
+    let _ = build_changed(&app.data_dir, crate::build_info::BUILD_SHA);
     crate::background_loop::spawn_periodic(&app, "new model scan", crate::runners::new_models::SCAN_EVERY, crate::runners::new_models::SCAN_FIRST, |app| async move {
         crate::runners::new_models::run(&app).await;
     });
@@ -2770,9 +2763,9 @@ pub(crate) mod tests {
         assert_eq!(update_notice("cli_update_done", &done).unwrap().1["body"], "claude CLI 已更新到 2.1.300");
         assert!(update_notice("cli_update_done", &json!({"ok": false, "kind": "claude", "target_version": "2"})).is_none());
         let dir = crate::testing::scratch_dir("am-webpush-build");
-        assert!(!build_changed(&dir, "aaa1111"), "第一次沒有紀錄不推");
-        assert!(!build_changed(&dir, "aaa1111"), "沒換版不推");
-        assert!(build_changed(&dir, "bbb2222"), "換版要推");
+        assert!(!build_changed(&dir, "aaa1111"), "第一次沒有紀錄");
+        assert!(!build_changed(&dir, "aaa1111"), "沒換版");
+        assert!(build_changed(&dir, "bbb2222"), "換版要偵測到（但 AG Man 自己換版不推播）");
         assert!(!build_changed(&dir, "bbb2222"));
         let _ = std::fs::remove_dir_all(&dir);
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z").unwrap().with_timezone(&chrono::Utc);

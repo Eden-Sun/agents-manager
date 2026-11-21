@@ -458,4 +458,7 @@ export default {
   '現在換版': 'Swap now',
   '沒能送出：{reason}': 'Could not send: {reason}',
   'herdr 更新沒開始：{reason}': 'herdr update did not start: {reason}',
+  'AG Man 已更新，請關閉後重新開啟': 'AG Man has been updated. Close and reopen it.',
+  '重新載入': 'Reload',
+  '收起': 'Dismiss',
 } satisfies Dict

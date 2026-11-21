@@ -31,6 +31,7 @@ import { useT } from './lib/i18n'
 import { installPresenceReporter, installPushClickBridge, parseResetOfferUrl } from './lib/pushNotify'
 import { reopenResetCreditOffer } from './store/resetCreditOffer'
 import { drawerShouldClose } from './lib/drawerNav'
+import { StaleBundleBanner } from './components/StaleBundleBanner'
 
 /** 掛 `(N)` 前的原始標題；先剝掉既有 `(N)`，HMR／同址導覽下才不會疊成 `(1) (2) …`。 */
 const BASE_TITLE = (typeof document === 'undefined' ? 'Agents Manager' : document.title)
@@ -292,6 +293,7 @@ export default function App() {
       <MobilePreview />
       <PreviewColumn />
       <Notices />
+      <StaleBundleBanner />
       <AgmDeleteConfirm />
       <ResetCreditOffer />
     </div>
