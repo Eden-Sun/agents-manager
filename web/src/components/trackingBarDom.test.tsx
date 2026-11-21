@@ -69,7 +69,7 @@ test('沒有未結事項：整列不出現', async () => {
   assert.equal(el.querySelector('.track-bar'), null)
 })
 
-test('摘要：追蹤中 N 項；有需要你回覆才加上「需要你回覆 M」', async () => {
+test('摘要：追蹤中 N 項；有待驗收／需要你回覆才加上對應數字', async () => {
   setup()
   const el = await mount(<TrackingBar botId="b1" onJump={() => true} />)
   assert.equal(el.querySelector('.track-summary')?.textContent?.trim(), '📋 追蹤中 3 項・需要你回覆 1')
@@ -138,4 +138,18 @@ test('ledger_updated（任何變動）到達就重抓 status=open', async () => 
   await act(() => useStore.setState((s) => ({ ledgerAnyRev: s.ledgerAnyRev + 1 })) as never)
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(requests.filter((r) => r.method === 'GET').length, before + 1)
+})
+
+test('待驗收（answered）排最前面，並有完成／還沒好按鈕；摘要列出待你驗收數', async () => {
+  const requests = setup([...OPEN, item({ id: 'lA', code: 'L9', code_no: 9, status: 'answered', title: '已交件的事', deliverable: '改好了 CI', source_message_id: 'msg_1' })])
+  const el = await mount(<TrackingBar botId="b1" onJump={() => true} />)
+  assert.equal(el.querySelector('.track-summary')?.textContent?.trim(), '📋 追蹤中 4 項・待你驗收 1・需要你回覆 1')
+  await click(el.querySelector('.track-summary')!)
+  const rows = [...el.querySelectorAll<HTMLElement>('.ledger-row')]
+  assert.equal(rows[0].querySelector('.ledger-code')?.textContent, 'L9')
+  assert.match(rows[0].textContent ?? '', /改好了 CI/)
+  await click(btn(rows[0], '完成'))
+  const patch = requests.find((r) => r.method === 'PATCH')!
+  assert.match(patch.path, /\/ledger\/lA$/)
+  assert.deepEqual(patch.body, { op: 'update', expected_version: 1, status: 'done' })
 })

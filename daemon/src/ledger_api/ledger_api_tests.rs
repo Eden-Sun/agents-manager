@@ -126,3 +126,21 @@ async fn only_management_writes_and_other_projects_and_children_only_read() {
     let v = list_items(&c, Extension(RequestPrincipal::User), ListQuery { status: Some("open".into()), owner: Some("unassigned".into()), ..Default::default() }).await.unwrap();
     assert_eq!(v["items"].as_array().unwrap().len(), 1, "a commitment with no owner is in the unassigned queue");
 }
+
+#[tokio::test]
+async fn awaiting_review_is_visible_to_the_user_but_not_a_manager_todo() {
+    let c = cast().await;
+    let m1 = user_message(&c.app, &c.manager.id, "請改 CI").await;
+    ingest_if_management_message(&c.app.db, &c.manager.id, &m1, None, "請改 CI").await.unwrap();
+    let user = Extension(RequestPrincipal::User);
+    let Json(done) = patch(State(c.app.clone()), Path((c.pid.clone(), "L1".into())), bot(&c.manager), Json(PatchIn { op: Some("update".into()), expected_version: 1, status: Some("answered".into()), deliverable: Some("CI 已修好".into()), ..Default::default() })).await.unwrap();
+    assert_eq!((done["status"].as_str(), done["deliverable"].as_str()), (Some("answered"), Some("CI 已修好")));
+    // 使用者的「未結」清單包含待驗收；管理者的待辦（查詢用的摘要集合）不包含。
+    let open = list_items(&c, user.clone(), ListQuery { status: Some("open".into()), ..Default::default() }).await.unwrap();
+    assert_eq!(open["items"].as_array().unwrap().len(), 1);
+    assert_eq!(open["items"][0]["status"].as_str(), Some("answered"));
+    assert!(!am_base::ledger::OPEN_STATUSES.contains(&"answered"));
+    // 使用者驗收：完成
+    let Json(closed) = patch(State(c.app.clone()), Path((c.pid.clone(), "L1".into())), user, Json(PatchIn { op: Some("update".into()), expected_version: 2, status: Some("done".into()), ..Default::default() })).await.unwrap();
+    assert_eq!(closed["status"].as_str(), Some("done"));
+}

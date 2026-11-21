@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
-import { fetchProjectLedger, patchLedgerItem } from '../api/ledger'
+import { completeLedgerItem, fetchProjectLedger, patchLedgerItem, reopenLedgerItem } from '../api/ledger'
 import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { AwaitingActions } from './AwaitingActions'
 import './messageLedgerBar.css'
 import './trackingBar.css'
 
 const COLLAPSE_KEY = 'am-tracking-collapsed'
 /** 面板裡的排序：需要你回覆最先，其次已加入追蹤，最後進行中。 */
-const RANK: Partial<Record<LedgerItemStatus, number>> = { clarifying: 0, untriaged: 1, following: 2 }
+const RANK: Partial<Record<LedgerItemStatus, number>> = { answered: 0, clarifying: 1, untriaged: 2, following: 3 }
 
 function readCollapsed(): boolean {
   try {
@@ -73,7 +74,14 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
 
   const sorted = [...items].sort((a, b) => (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9) || (a.updated_at < b.updated_at ? 1 : -1))
   const needReply = items.filter((it) => it.status === 'clarifying').length
-  const summary = [t('追蹤中 {n} 項', { n: items.length }), needReply > 0 ? t('需要你回覆 {m}', { m: needReply }) : null].filter(Boolean).join('・')
+  const awaiting = items.filter((it) => it.status === 'answered').length
+  const summary = [
+    t('追蹤中 {n} 項', { n: items.length }),
+    awaiting > 0 ? t('待你驗收 {a}', { a: awaiting }) : null,
+    needReply > 0 ? t('需要你回覆 {m}', { m: needReply }) : null,
+  ]
+    .filter(Boolean)
+    .join('・')
 
   const toggleCollapsed = (v: boolean) => {
     setCollapsed(v)
@@ -155,6 +163,7 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
                         <span className="ledger-code">{it.code}</span> <span className="ledger-row-title">{it.title}</span>
                       </button>
                       <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
+                      {it.status === 'answered' ? null : (
                       <button
                         type="button"
                         className="ledger-more"
@@ -166,7 +175,16 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
                       >
                         ⋯
                       </button>
+                      )}
                     </div>
+                    {it.status === 'answered' && it.deliverable ? <div className="ledger-row-meta"><span className="ledger-row-note">{t('交件內容')}：{it.deliverable}</span></div> : null}
+                    {it.status === 'answered' ? (
+                      <AwaitingActions
+                        busy={busy}
+                        onDone={() => void run(() => completeLedgerItem(projectId, it))}
+                        onNotYet={(reason) => void run(() => reopenLedgerItem(projectId, it, reason))}
+                      />
+                    ) : null}
                     <div className="ledger-row-meta">
                       {it.next_step ? <span className="ledger-row-note">{t('下一步')}：{it.next_step}</span> : null}
                       {at ? <span className="ledger-row-owner">{t('訊息時間')}：{at}</span> : null}
@@ -212,7 +230,7 @@ function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
     case 'following':
       return t('進行中')
     case 'answered':
-      return t('已回答')
+      return t('待驗收')
     case 'done':
       return t('已完成')
     case 'cancelled':

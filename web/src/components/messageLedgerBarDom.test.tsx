@@ -75,8 +75,12 @@ const btn = (root: ParentNode, text: string) => [...root.querySelectorAll<HTMLBu
 test('摘要：白話的三種狀態，不講帳本術語；不列已取消與已併入', async () => {
   setup()
   const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
-  assert.equal(el.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 3 項：進行中 1・需要你回覆 1・已回答 1')
+  assert.equal(el.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 3 項：待你驗收 1・需要你回覆 1・進行中 1')
   const done = [item({ id: 'd1', status: 'done' }), item({ id: 'd2', code: 'L2', code_no: 2, status: 'cancelled' }), item({ id: 'd3', code: 'L3', code_no: 3, status: 'merged' })]
+  // 待驗收不算結案：還有 answered 就不是「追蹤完成」。
+  const awaiting = [item({ id: 'a1', status: 'done' }), item({ id: 'a2', code: 'L2', code_no: 2, status: 'answered' })]
+  const el3 = await mount(<MessageLedgerBar msg={msg(awaiting)} />)
+  assert.equal(el3.querySelector('.ledger-bar-summary')?.textContent?.trim(), '📋 追蹤 2 項：待你驗收 1・已完成 1')
   const el2 = await mount(<MessageLedgerBar msg={msg(done)} />)
   assert.equal(el2.querySelector('.ledger-bar-summary')?.textContent?.trim(), '✓ 追蹤完成')
 })
@@ -185,4 +189,22 @@ test('標題：只取第一行、最多 80 字', async () => {
   await click(btn(el, '加入追蹤'))
   const post = requests.find((r) => r.method === 'POST')!
   assert.equal((post.body as { title: string }).title, '一'.repeat(80))
+})
+
+test('待驗收：完成／還沒好按鈕；還沒好可附一句原因（PATCH status=following、wait_for）', async () => {
+  const requests = setup()
+  const el = await mount(<MessageLedgerBar msg={msg(THREE)} />)
+  await click(el.querySelector('.ledger-bar-summary')!)
+  const row = el.querySelectorAll<HTMLElement>('.ledger-row')[0]
+  assert.equal(row.querySelector('.ledger-more'), null, '待驗收沒有 ⋯')
+  assert.ok(row.querySelector('.ledger-awaiting'))
+  await click(btn(row, '完成'))
+  const done = requests.find((r) => r.method === 'PATCH')!
+  assert.deepEqual(done.body, { op: 'update', expected_version: 3, status: 'done' })
+  await click(btn(row, '還沒好'))
+  const input = row.querySelector<HTMLInputElement>('.ledger-awaiting-reason input')!
+  await act(() => setInput(input, '測試還沒過'))
+  await click(btn(row, '送出'))
+  const notYet = requests.filter((r) => r.method === 'PATCH')[1]
+  assert.deepEqual(notYet.body, { op: 'update', expected_version: 3, status: 'following', wait_for: '測試還沒過' })
 })

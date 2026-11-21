@@ -224,3 +224,45 @@
   z-index: 20;
   min-width: 150px;
 }
+
+/* 待驗收（answered）：完成／還沒好兩顆並排，手機上換行不擠。 */
+.ledger-awaiting {
+  margin-top: 6px;
+}
+.ledger-awaiting-btns {
+  display: flex;
+  gap: 8px;
+}
+.ledger-awaiting-btns button {
+  flex: 1 1 0;
+  min-height: 40px;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line, #d0d7de);
+  background: var(--surface, #fff);
+  color: inherit;
+}
+.ledger-awaiting-done {
+  border-color: #1a7f37 !important;
+  color: #1a7f37 !important;
+  font-weight: 600;
+}
+.ledger-awaiting-reason {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ledger-awaiting-reason input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+  padding: 4px 8px;
+  font: inherit;
+}
+.ledger-awaiting-reason button {
+  min-height: 36px;
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+}

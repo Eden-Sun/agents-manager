@@ -151,7 +151,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/peers` | User 或同專案 Bot；跨專案 403 |
 | GET | `/api/projects/{id}/lineage` | User 或同專案 Bot（含 child）；跨專案 403；codex session 血統（見「Session 血統」） |
-| GET | `/api/projects/{id}/ledger` | User 或同專案 Bot（含 child）；跨專案 403；承諾帳本（#1862 第 1 階段）。`?status=open\|all\|a,b&owner=<bot_id>\|unassigned&source_message_id=`；回 `{items, counts}`，每項帶 `code`（`L<code_no>`） |
+| GET | `/api/projects/{id}/ledger` | User 或同專案 Bot（含 child）；跨專案 403；承諾帳本（#1862 第 1 階段）。`?status=open\|all\|a,b&owner=<bot_id>\|unassigned&source_message_id=`；`open` 包含 `answered`（待驗收）；回 `{items, counts}`，每項帶 `code`（`L<code_no>`） |
 | HEAD | `/api/projects/{id}/ledger` | 同 GET |
 | POST | `/api/pane-authorize` | 僅限 Bot，按 daemon 登錄與 herdr 狀態核對 pane 寫入權限 |
 | POST | `/api/push/subscriptions` | User-only；Bot 與 AGM role 均 403 `user_only` |
@@ -347,7 +347,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/projects/{id}/lineage/advance` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；前移檢查點 |
 | POST | `/api/projects/{id}/lineage/retire` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；退役 |
 | POST | `/api/projects/{id}/ledger` | User 或專案管理入口（expert 的頂層 manager、代班副管理者、parent_child 的頂層 Bot）；其他 Bot 與 child 403 `role_required`；跨專案 403。新增後續承諾；帶 `source_message_id`＋`items` 則把該訊息拆項（同一交易）。`source_message_id` 不屬於這個專案 400 |
-| PATCH | `/api/projects/{id}/ledger/{item_id}` | 同上寫入權限。`item_id` 可用 id 或 `L<code_no>`；`op`＝`update`（預設）／`claim`／`handback`／`merge`／`cancel`，必帶 `expected_version`。版本不符 `409 {"error":"ledger_version_conflict","current_version","current_owner_bot_id"}`，什麼都不寫 |
+| PATCH | `/api/projects/{id}/ledger/{item_id}` | 同上寫入權限。`item_id` 可用 id 或 `L<code_no>`；`op`＝`update`（預設）／`claim`／`handback`／`merge`／`cancel`，必帶 `expected_version`。狀態 `answered`＝**待驗收**（管理者交件，等使用者驗收）：不算管理者待辦、提醒器不催；使用者可以 `update` 成 `done`（完成）或 `following`（還沒好，`wait_for` 寫原因）。管理者交件時建議同時填 `deliverable`（交了什麼）。版本不符 `409 {"error":"ledger_version_conflict","current_version","current_owner_bot_id"}`，什麼都不寫 |
 | POST | `/api/projects/{id}/lineage/claim` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；認領血統線（`resume` 單寫者獨佔、`fork` 可並存） |
 | PATCH | `/api/projects/{id}/lineage/claim/{claim_id}` | 同上；補記 `fork` 認領的 `work_session_id` |
 | POST | `/api/projects/{id}/lineage/claim/{claim_id}/abandon` | User、同專案的 AGM role Bot、expert 專案的 manager（含代班中的副管理者）、母子模式專案的頂層 Bot；其他同專案 Bot 與 child 403 `role_required`；跨專案 403；放棄認領 |

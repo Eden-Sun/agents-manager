@@ -30,11 +30,26 @@ export async function createLedgerItems(
 
 /** 單項操作：`update`（改狀態／內容）、`merge`（併入另一項）、`cancel`。一律帶 `expected_version`。 */
 export type LedgerPatch =
-  | { op?: 'update'; expected_version: number; status?: string; title?: string }
+  | { op?: 'update'; expected_version: number; status?: string; title?: string; wait_for?: string }
   | { op: 'merge'; expected_version: number; merged_into_id: string }
   | { op: 'cancel'; expected_version: number; close_reason?: string }
 
 export async function patchLedgerItem(projectId: string, itemId: string, body: LedgerPatch): Promise<LedgerItem | null> {
   const raw = await rawTransport.request('PATCH', `/projects/${encodeURIComponent(projectId)}/ledger/${encodeURIComponent(itemId)}`, body)
   return toLedgerItem(raw)
+}
+
+/** 使用者驗收：`完成` → done。 */
+export async function completeLedgerItem(projectId: string, item: LedgerItem): Promise<LedgerItem | null> {
+  return patchLedgerItem(projectId, item.id, { op: 'update', expected_version: item.version, status: 'done' })
+}
+
+/** 使用者驗收：`還沒好` → following；`reason` 有值就寫進 `wait_for`（還在等什麼），沒填就只改狀態。 */
+export async function reopenLedgerItem(projectId: string, item: LedgerItem, reason: string): Promise<LedgerItem | null> {
+  return patchLedgerItem(projectId, item.id, {
+    op: 'update',
+    expected_version: item.version,
+    status: 'following',
+    ...(reason ? { wait_for: reason } : {}),
+  })
 }

@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { createLedgerItems, fetchProjectLedger, patchLedgerItem } from '../api/ledger'
+import { completeLedgerItem, createLedgerItems, fetchProjectLedger, patchLedgerItem, reopenLedgerItem } from '../api/ledger'
 import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
+import { AwaitingActions } from './AwaitingActions'
 import './messageLedgerBar.css'
 
 /** 使用者看到的白話狀態：不講「待跟進／已答」這類帳本術語。`merged`、`cancelled` 不列在摘要裡。 */
-const SUMMARY_ORDER: LedgerItemStatus[] = ['untriaged', 'following', 'clarifying', 'answered', 'done']
+const SUMMARY_ORDER: LedgerItemStatus[] = ['answered', 'clarifying', 'untriaged', 'following', 'done']
 /** 還可以按「⋯」操作的狀態（已完成、已回答的項目不再有操作）。 */
 const ACTIONABLE: LedgerItemStatus[] = ['untriaged', 'following', 'clarifying']
 
@@ -53,11 +54,11 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
   const all = items ?? []
   const live = all.filter((it) => it.status !== 'merged' && it.status !== 'cancelled')
   const allUntriaged = live.every((it) => it.status === 'untriaged')
-  const allClosed = live.every((it) => it.status === 'done' || it.status === 'answered')
+  const allClosed = live.every((it) => it.status === 'done')
 
   const counts: Partial<Record<LedgerItemStatus, number>> = {}
   for (const it of live) counts[it.status] = (counts[it.status] ?? 0) + 1
-  const parts = SUMMARY_ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => `${statusLabel(s, t)} ${counts[s]}`)
+  const parts = SUMMARY_ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => `${s === 'answered' ? t('待你驗收') : statusLabel(s, t)} ${counts[s]}`)
 
   const applyItem = (next: LedgerItem) => setItems((cur) => (cur ?? []).map((it) => (it.id === next.id ? next : it)))
   const runPatch = async (fn: () => Promise<LedgerItem | null>) => {
@@ -79,7 +80,8 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
     }
   }
 
-  const markDone = (item: LedgerItem) => runPatch(() => patchLedgerItem(projectId, item.id, { op: 'update', expected_version: item.version, status: 'done' }))
+  const markDone = (item: LedgerItem) => runPatch(() => completeLedgerItem(projectId, item))
+  const notYet = (item: LedgerItem, reason: string) => runPatch(() => reopenLedgerItem(projectId, item, reason))
   const dismiss = (item: LedgerItem) =>
     runPatch(() => patchLedgerItem(projectId, item.id, { op: 'cancel', expected_version: item.version, close_reason: 'cancelled by user' }))
   // 「這則不用追蹤」：尚未整理時，把這則底下所有待整理的項目一起取消。
@@ -181,8 +183,12 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
                         </button>
                       ) : null}
                     </div>
+                    {it.status === 'answered' && it.deliverable ? <div className="ledger-row-note">{t('交件內容')}：{it.deliverable}</div> : null}
                     {it.next_step ? <div className="ledger-row-note">{t('下一步')}：{it.next_step}</div> : null}
                     {it.owner_bot_id ? <div className="ledger-row-owner">{t('承辦')}：{botName(it.owner_bot_id)}</div> : null}
+                    {it.status === 'answered' ? (
+                      <AwaitingActions busy={busy} onDone={() => void markDone(it)} onNotYet={(reason) => void notYet(it, reason)} />
+                    ) : null}
                     {menuFor === it.id ? (
                       <div className="ledger-menu" role="menu">
                         <button type="button" role="menuitem" disabled={busy} onClick={() => void dismiss(it)}>
@@ -250,7 +256,7 @@ function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
     case 'clarifying':
       return t('需要你回覆')
     case 'answered':
-      return t('已回答')
+      return t('待驗收')
     case 'done':
       return t('已完成')
     case 'cancelled':

@@ -205,7 +205,7 @@ pub(crate) async fn list(
     let filter_status: Option<Vec<String>> = match opt(q.status) {
         None => None,
         Some(s) if s == "all" => None,
-        Some(s) if s == "open" => Some(ledger::OPEN_STATUSES.iter().map(|x| x.to_string()).collect()),
+        Some(s) if s == "open" => Some(ledger::VISIBLE_OPEN_STATUSES.iter().map(|x| x.to_string()).collect()),
         Some(s) => {
             let list: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
             if list.iter().any(|x| !ledger::STATUSES.contains(&x.as_str())) {

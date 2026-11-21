@@ -11,8 +11,10 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 /// 合法狀態（與表上的 CHECK 相同；先在 Rust 端擋，錯誤訊息比 SQLite 的好讀）。
 pub const STATUSES: [&str; 7] = ["untriaged", "answered", "following", "clarifying", "done", "cancelled", "merged"];
-/// 仍需人處理的狀態：會被注入摘要、會被孤兒回收。
+/// 管理者的待辦（未結）：注入摘要、孤兒回收、提醒、計數都用這一組。`answered` 不在內——那是「交件、待使用者驗收」，不是管理者要做的事。
 pub const OPEN_STATUSES: [&str; 3] = ["untriaged", "following", "clarifying"];
+/// 使用者看得到的未結（網頁的「追蹤中」列與面板、`GET ?status=open`）：管理者待辦加上「待你驗收」（`answered`）。
+pub const VISIBLE_OPEN_STATUSES: [&str; 4] = ["untriaged", "following", "clarifying", "answered"];
 /// 承諾事項的問責角色（單一承辦人＋管理者問責，見規格 §1.1）。
 pub const ACCOUNTABLE_ROLE: &str = "manager";
 
@@ -140,8 +142,10 @@ impl std::fmt::Display for LedgerError {
     }
 }
 
-/// `open` 條件的 SQL 片段（與 [`OPEN_STATUSES`] 同步）。
+/// 管理者待辦的 SQL 片段（與 [`OPEN_STATUSES`] 同步）。
 const OPEN_SQL: &str = "('untriaged','following','clarifying')";
+/// 使用者可見未結的 SQL 片段（與 [`VISIBLE_OPEN_STATUSES`] 同步）。
+pub const VISIBLE_OPEN_SQL: &str = "('untriaged','following','clarifying','answered')";
 
 /// 這則使用者訊息的標題：首行、去頭尾空白、最多 80 字（字元，不是位元組）。
 fn title_from(raw_text: &str) -> String {
@@ -1187,4 +1191,18 @@ mod tests {
         assert_eq!(n, 1, "冪等：不重複建項");
     }
 
+    #[tokio::test]
+    async fn answered_waits_for_the_user_and_is_not_the_managers_to_do() {
+        let pool = pool().await;
+        let item = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "交件".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("已更新 CI 腳本，見 PR #12".into()), next_step: None, wait_for: None, due_at: Some("2000-01-01T00:00:00Z".into()), owner_bot_id: None, close_reason: None }).await.unwrap();
+        assert_eq!(answered.deliverable, "已更新 CI 腳本，見 PR #12");
+        let later = chrono::Utc::now() + chrono::Duration::hours(3);
+        assert!(due_reminders(&pool, later).await.unwrap().iter().all(|r| r.item_id != item.id), "the manager is not nagged about a delivered item");
+        let (mgr, _) = query_actionable_for_actor(&pool, "p1", "b1", None, 10).await.unwrap();
+        assert!(mgr.iter().all(|i| i.id != item.id), "not in the manager's actionable list");
+        assert!(VISIBLE_OPEN_STATUSES.contains(&"answered") && !OPEN_STATUSES.contains(&"answered"));
+        let visible: Vec<(String,)> = sqlx::query_as(&format!("SELECT id FROM ledger_items WHERE project_id = 'p1' AND status IN {VISIBLE_OPEN_SQL}")).fetch_all(&pool).await.unwrap();
+        assert_eq!(visible.len(), 1, "the user still sees it in the open list");
+    }
 }
