@@ -157,13 +157,18 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: 
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
   const fable = remaining(q?.fable)
-  if (five === null && seven === null && fable === null) parts.push(loggedOut ? t('這台主機偵測不到登入，額度尚未取得') : t('額度尚未取得'))
+  const argon = entry.kind === 'agy' ? remaining(q?.argon_weekly) : null
+  if (five === null && seven === null && fable === null && argon === null) parts.push(loggedOut ? t('這台主機偵測不到登入，額度尚未取得') : t('額度尚未取得'))
   const hit = Boolean(q?.limit_hit)
   if (five !== null) parts.push(t('5 小時剩餘 {pct}%', { pct: fmtPct(five, hit) }))
   if (seven !== null) {
     parts.push(weeklyOnlyKind(entry.kind) ? t('每週剩餘 {pct}%', { pct: fmtPct(seven, hit) }) : t('7 天剩餘 {pct}%', { pct: fmtPct(seven, hit) }))
   }
   if (fable !== null) parts.push(t('Fable 每週剩餘 {pct}%', { pct: fmtPct(fable, hit) }))
+  if (argon !== null) {
+    parts.push(t('Argon 每週剩餘 {pct}%', { pct: fmtPct(argon, hit) }))
+    parts.push(t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制'))
+  }
   if (q?.five_hour?.resets_at) parts.push(t('5 小時 {time} 重置', { time: fmtTime(q.five_hour.resets_at) }))
   if (noFiveHourCap(entry.kind, q)) parts.push(t('5 小時無上限'))
   if (q?.seven_day?.resets_at) {
@@ -174,8 +179,9 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut: boolean, now: 
     )
   }
   if (q?.fable?.resets_at) parts.push(t('Fable {time} 重置', { time: fmtTime(q.fable.resets_at) }))
+  if (q?.argon_weekly?.resets_at) parts.push(t('Argon {time} 重置', { time: fmtTime(q.argon_weekly.resets_at) }))
   // 沿用上一份的那幾桶要點名（#540）：整筆的 `stale`講的是另一件事（開機從快取回填）。
-  for (const [name, w] of [[t('5 小時'), q?.five_hour], [weekLabel(entry.kind) === '週' ? t('每週') : t('7 天'), q?.seven_day], ['Fable', q?.fable]] as const) { // i18n-ignore: 內部窗口名
+  for (const [name, w] of [[t('5 小時'), q?.five_hour], [weekLabel(entry.kind) === '週' ? t('每週') : t('7 天'), q?.seven_day], ['Fable', q?.fable], ['Argon', q?.argon_weekly]] as const) { // i18n-ignore: 內部窗口名
     const at = carriedOverAt(w, q?.updated_at)
     if (!at) continue
     const age = staleAge(at, now, t)
@@ -483,12 +489,17 @@ function Gauge({
     if (fable !== null && (q?.fable?.low || q?.fable?.critical)) {
       rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
+    // Ar 比照 F：只在 low／critical 且比 7d 更急時取代；上下邊框量表不加 Ar。
+    if (argon !== null && (q?.argon_weekly?.low || q?.argon_weekly?.critical)) {
+      rivals.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
+    }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (compact && seven === null && (five !== null || fable !== null)) {
+  } else if (compact && seven === null && (five !== null || fable !== null || argon !== null)) {
     // 7d 沒有值時手機仍只寫一個窗口：從 5h／F 取最急的那個（#1179：只有 Fable 有值時不能畫成「5h —」）。
     const cands: WindowBar[] = []
     if (five !== null) cands.push(windowBar('5h', five, q?.five_hour, q?.updated_at))
     if (fable !== null) cands.push(windowBar('F', fable, q?.fable, q?.updated_at))
+    if (argon !== null) cands.push(windowBar('Ar', argon, q?.argon_weekly, q?.updated_at))
     windows = [cands.reduce((best, w) => (moreUrgent(w, best) ? w : best))]
   } else if (five === null && seven === null && fable === null && argon === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)] // i18n-ignore
@@ -938,6 +949,12 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
           <>
             <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} hit={Boolean(q?.limit_hit)} />
             <PopWindow icon="📅" name="7d" win="7d" w={q?.seven_day} now={now} hit={Boolean(q?.limit_hit)} />
+            {q?.argon_weekly ? (
+              <>
+                <PopWindow icon="✦" name="Ar" win="Ar" w={q.argon_weekly} now={now} hit={Boolean(q?.limit_hit)} />
+                <p className="quota-pop-note">{t('Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制')}</p>
+              </>
+            ) : null}
             <PopLimitHit hit={q?.limit_hit} />
           </>
         ) : (

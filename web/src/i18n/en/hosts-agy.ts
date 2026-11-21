@@ -127,6 +127,8 @@ const dict: Dict = {
   '每週剩餘 {pct}%': 'Weekly remaining {pct}%',
   '7 天剩餘 {pct}%': '7-day remaining {pct}%',
   'Fable 每週剩餘 {pct}%': 'Fable weekly remaining {pct}%',
+  'Argon 每週剩餘 {pct}%': 'Argon weekly remaining {pct}%',
+  'Argon {time} 重置': 'Argon resets {time}',
   '5 小時 {time} 重置': '5-hour resets at {time}',
   '5 小時無上限': '5-hour no limit',
   '每週 {time} 重置': 'Weekly resets at {time}',

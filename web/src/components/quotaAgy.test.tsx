@@ -146,3 +146,54 @@ test('agy 手機視圖沿用 claude 的緊縮規則並保留 5h／7d 邊框提�
     window.matchMedia = original
   }
 })
+
+/** 手機視圖（max-width 640）；跑完還原 matchMedia。 */
+async function withPhone(run: () => Promise<void>) {
+  const original = window.matchMedia
+  window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 640px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  try {
+    await run()
+  } finally {
+    window.matchMedia = original
+  }
+}
+
+test('agy 手機：Ar 不 low 時照舊只顯示 7d', { timeout: 30_000 }, async () => {
+  await withPhone(async () => {
+    await mountAgyWith({ five_hour: quotaWindow(90, 4), argon_weekly: quotaWindow(88, 100) })
+    const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+    assert.deepEqual([...cell.querySelectorAll('.quota-compact-win .quota-window-name')].map((n) => n.textContent), ['7d'], 'Ar 不 low 不取代')
+  })
+})
+
+test('agy 手機：Ar critical 時取代顯示成 Ar（比照 Fable），上下邊框量表不加 Ar', { timeout: 30_000 }, async () => {
+  await withPhone(async () => {
+    await mountAgyWith({ five_hour: quotaWindow(90, 4), argon_weekly: quotaWindow(3, 100) })
+    const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+    assert.deepEqual([...cell.querySelectorAll('.quota-compact-win .quota-window-name')].map((n) => n.textContent), ['Ar'], 'Ar critical 被選為顯示')
+    assert.equal(cell.querySelectorAll('.quota-border-meter').length, 2, '上下邊框量表不加 Ar')
+  })
+})
+
+test('agy 的 Argon 列在 tooltip 與點開的面板都有，並帶「獨立週額度」說明；桌機三條照舊', { timeout: 30_000 }, async () => {
+  await mountAgyWith({ argon_weekly: quotaWindow(88, 100) })
+  const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+  assert.match(cell.getAttribute('title') ?? '', /Argon 每週剩餘 88%/)
+  assert.match(cell.getAttribute('title') ?? '', /Gemini 4 Argon 獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/)
+  assert.deepEqual([...cell.querySelectorAll('.quota-window-name')].map((n) => n.textContent), ['5h', '7d', 'Ar'], '桌機三條')
+  await click(cell.querySelector('.quota-bars-open')!)
+  await until(() => document.querySelector('.quota-pop') !== null, 'popover 開啟')
+  const pop = document.querySelector<HTMLElement>('.quota-pop')!
+  assert.match(pop.textContent ?? '', /Ar/)
+  const notes = [...pop.querySelectorAll('.quota-pop-note')].map((n) => n.textContent ?? '')
+  assert.ok(notes.some((n) => /獨立週額度，不扣 Gemini 額度，沒有 5 小時限制/.test(n)), notes.join(' | '))
+})
+
+test('agy 沒有 Argon 組（ag1）：手機與面板都不出現 Ar', { timeout: 30_000 }, async () => {
+  await withPhone(async () => {
+    await mountAgyWith({})
+    const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+    assert.doesNotMatch(cell.innerHTML, /Ar</)
+    assert.doesNotMatch(cell.getAttribute('title') ?? '', /Argon/)
+  })
+})
