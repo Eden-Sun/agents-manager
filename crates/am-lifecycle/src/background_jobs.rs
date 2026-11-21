@@ -101,6 +101,7 @@ pub fn parse(kind: &str, screen: &str) -> u32 {
     match kind {
         "claude" => bottom.iter().rev().find_map(|l| claude_shells(l)).unwrap_or(0),
         "codex" => bottom.iter().rev().find_map(|l| codex_terminals(l)).unwrap_or(0),
+        "agy" => bottom.iter().rev().find_map(|l| claude_shells(l)).unwrap_or(0),
         _ => 0,
     }
 }
@@ -565,6 +566,17 @@ mod stuck_notice_tests {
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod claude_2_1_329_footer_background_tests {
     use super::*;
+
+    #[test]
+    fn agy_counts_the_tasks_on_its_bottom_status_line() {
+        let running = "● [16:16:01] cd … && scripts/check.sh changed running\n\nGemini 4 Hydrogen · medium · 1 task(s) · /tasks";
+        assert_eq!(parse("agy", running), 1);
+        assert_eq!(parse("agy", "Gemini 4 Hydrogen · medium · 3 tasks · /tasks"), 3);
+        assert_eq!(parse("agy", "Gemini 4 Hydrogen · medium · 1 task · /tasks"), 1);
+        assert_eq!(parse("agy", "Gemini 4 Hydrogen · medium · 0 task(s) · /tasks"), 0);
+        assert_eq!(parse("agy", "Gemini 4 Hydrogen · medium · /tasks"), 0, "/tasks 本身不算");
+        assert_eq!(parse("agy", "● [16:16:01] cd … && scripts/check.sh changed running"), 0, "沒有計數的行不算");
+    }
 
     #[test]
     fn parses_combined_footer_background_counts() {

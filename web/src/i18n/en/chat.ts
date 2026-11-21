@@ -601,6 +601,7 @@ export default {
   '使用者不確定是否完成：請複查完成度並附驗證證據（commit、測試、截圖或實測結果）後再交件': 'Not sure it is done: recheck completion and attach evidence (commit, tests, screenshot, or a live check) before handing it back.',
   '交件內容': 'Delivered',
   '訊息動作': 'Message actions',
+  '回合已經結束，背景還有 {n} 個工作在跑。跑完它會自己接著回報；現在也可以照常送訊息。': 'The turn has ended; {n} background tasks are still running. It will report back when they finish; you can keep sending messages.',
   '加入追蹤': 'Add to tracking',
   '已在追蹤': 'Already tracking',
   '已加入追蹤，交管理者整理': 'Added to tracking; the manager will sort it',

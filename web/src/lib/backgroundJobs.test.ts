@@ -30,6 +30,7 @@ test('字面依 kind 說 shell 或背景終端', () => {
   assert.equal(backgroundShortLabel(2), '背景 2')
   assert.match(backgroundDetail('claude', 1), /背景還有 1 個 shell 在跑/)
   assert.match(backgroundDetail('codex', 2), /背景還有 2 個終端在跑/)
+  assert.match(backgroundDetail('agy', 1), /背景還有 1 個工作在跑/)
 })
 
 test('claude 的 Stop hook 報的明細：最多三行，用描述（沒有就用命令），其餘折成「另有 N 個」', () => {

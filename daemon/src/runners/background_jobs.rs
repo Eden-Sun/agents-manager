@@ -31,7 +31,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, cl
 /// 那幾秒，帳上是「沒看過」或上一輪的 0，不能拿來當乾淨的證據。讀不到（沒有 pane、主機沒連、herdr 讀失敗）就維持原帳——
 /// 沒有新證據不改舊證據。
 pub async fn refresh(app: &Arc<App>, run: &db::Run, kind: &str) {
-    if run.state != "running" || !matches!(kind, "claude" | "codex") {
+    if run.state != "running" || !matches!(kind, "claude" | "codex" | "agy") {
         return;
     }
     let Some(pane) = run.pane_id.as_deref() else { return };

@@ -43,9 +43,9 @@ export function backgroundStuckLabel(n: number): string {
 }
 
 export function backgroundDetail(kind: string, n: number): string {
-  return kind === 'codex'
-    ? t('回合已經結束，背景還有 {n} 個終端在跑。跑完它會自己接著回報；現在也可以照常送訊息。', { n })
-    : t('回合已經結束，背景還有 {n} 個 shell 在跑。跑完它會自己接著回報；現在也可以照常送訊息。', { n })
+  if (kind === 'codex') return t('回合已經結束，背景還有 {n} 個終端在跑。跑完它會自己接著回報；現在也可以照常送訊息。', { n })
+  if (kind === 'agy') return t('回合已經結束，背景還有 {n} 個工作在跑。跑完它會自己接著回報；現在也可以照常送訊息。', { n })
+  return t('回合已經結束，背景還有 {n} 個 shell 在跑。跑完它會自己接著回報；現在也可以照常送訊息。', { n })
 }
 
 /** hook 報的背景工作明細（最多三行，其餘折成「另有 N 個」）；沒有明細（畫面判斷的數字）是空陣列。 */
