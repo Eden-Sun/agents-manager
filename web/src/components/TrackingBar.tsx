@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { completeLedgerItem, fetchProjectLedger, notSureLedgerItem, patchLedgerItem } from '../api/ledger'
 import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
@@ -144,7 +145,7 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
           ▴
         </button>
       </div>
-      {sheet ? (
+      {sheet ? sheetLayer(
         <>
           <div className="ledger-backdrop" aria-hidden="true" onClick={() => setSheet(false)} />
           <div className="ledger-panel track-panel" role="dialog" aria-label={t('本專案的追蹤任務')} onKeyDown={(e) => e.key === 'Escape' && setSheet(false)}>
@@ -217,10 +218,15 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
               })}
             </ul>
           </div>
-        </>
+        </>,
       ) : null}
     </div>
   )
+}
+
+function sheetLayer(node: ReactNode) {
+  const phone = typeof window !== 'undefined' && window.matchMedia?.('(max-width: 600px)').matches
+  return phone ? createPortal(node, document.body) : node
 }
 
 function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
