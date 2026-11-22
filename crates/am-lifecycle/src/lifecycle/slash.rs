@@ -110,7 +110,7 @@ pub(super) async fn insert_supplement(app: &(impl crate::capabilities::Db + crat
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
     match (kind, field) {
         ("grok", "effort") => None,
-        ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
+        ("claude" | "agy", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
         ("grok", "model") => {
             let mut line = format!("/model {value}");
             if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
@@ -119,7 +119,7 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
             }
             Some(line)
         }
-        ("claude", "model") => Some(format!("/model {value}")),
+        ("claude" | "agy", "model") => Some(format!("/model {value}")),
         _ => None,
     }
 }
@@ -342,6 +342,17 @@ async fn apply_live_setting_inner(
     let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(format!("{field}_cleared_to_default"));
     };
+    if bot.kind == "agy" && *field == "model" {
+        if !crate::models::agy_model_allowed(value) {
+            return Err("agy_model_disallowed".into());
+        }
+        let host = db::bot_host(app.db(), &bot.id)
+            .await
+            .unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
+        if super::start::agy_model_unlisted(app, &bot, &host, value).await.is_some() {
+            return Err("agy_model_not_in_account_list".into());
+        }
+    }
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
         return Err(format!("no_slash_command_for_{field}"));
     };
@@ -388,13 +399,35 @@ async fn apply_live_setting_inner(
             return Err("grok_effort_readback_mismatch".into());
         }
     }
+    let mut agy_effort_model = None;
+    if bot.kind == "agy" {
+        if *field == "model" {
+            let want = crate::models::canonical_model("agy", value);
+            if !agy_model_matches_screen(&settled_screen, want) {
+                return Err("agy_model_readback_mismatch".into());
+            }
+        } else if *field == "effort" {
+            let want = value.to_ascii_lowercase();
+            let Some(seen) = agy_effort_matches_screen(&settled_screen, &want) else {
+                return Err("agy_effort_readback_mismatch".into());
+            };
+            agy_effort_model = Some(seen);
+        }
+    }
     let mut snapshot = RuntimeSnapshot {
         model: run.runtime_model.clone(),
         effort: run.runtime_effort.clone(),
         fast: run.runtime_fast,
     };
     match *field {
-        "effort" => snapshot.effort = Some(value.to_string()),
+        "effort" => {
+            snapshot.effort = Some(value.to_string());
+            if let Some(seen) = agy_effort_model {
+                if snapshot.model.is_some() {
+                    snapshot.model = Some(seen);
+                }
+            }
+        }
         "model" => snapshot.model = Some(value.to_string()),
         _ => return Err("not_a_single_field".into()),
     }
@@ -700,6 +733,60 @@ fn grok_model_from_screen(screen: &str) -> Option<String> {
     crate::models::grok_title_model_effort(&crate::models::grok_composer_fragment(screen)?).0
 }
 
+fn agy_last_slash_output(screen: &str) -> Option<&str> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
+    let bottom_rule = lines[..end].iter().rposition(|l| {
+        let t = l.trim();
+        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    })?;
+    let top_rule = lines[..bottom_rule].iter().rposition(|l| {
+        let t = l.trim();
+        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    })?;
+    let above = &lines[..top_rule];
+    let cmd_at = above.iter().rposition(|l| {
+        let t = l.trim();
+        t.starts_with("> /model") || t.starts_with("> /effort")
+    })?;
+    above[cmd_at + 1..]
+        .iter()
+        .find_map(|l| l.split_once('⎿').map(|(_, rest)| rest.trim()))
+}
+
+fn agy_last_slash_failed(screen: &str) -> bool {
+    agy_last_slash_output(screen).is_some_and(|out| {
+        out.starts_with("Invalid model ")
+            || out.starts_with("Invalid effort ")
+            || out.starts_with("Effort isn't adjustable")
+            || out.contains(" has no \"")
+    })
+}
+
+fn agy_model_matches_screen(screen: &str, want: &str) -> bool {
+    if agy_last_slash_failed(screen) {
+        return false;
+    }
+    if crate::models::agy_is_orchestrator(want) {
+        if !crate::models::agy_footer_is_orchestrator(screen) {
+            return false;
+        }
+        if let Some(display) = agy_last_slash_output(screen).and_then(|o| o.strip_prefix("Model set to ")) {
+            return crate::models::agy_display_name_to_slug(display).as_deref() == Some(want);
+        }
+        return true;
+    }
+    crate::models::agy_footer_model(screen).as_deref() == Some(want)
+}
+
+fn agy_effort_matches_screen(screen: &str, want_effort: &str) -> Option<String> {
+    if agy_last_slash_failed(screen) {
+        return None;
+    }
+    let suffix = format!("-{want_effort}");
+    crate::models::agy_footer_model(screen).filter(|m| m.ends_with(&suffix))
+}
+
 /// 純函式：這一次讀到的畫面是空輸入列，而且跟上一次讀到的一樣。
 fn composer_settled(kind: &str, prev: Option<&str>, screen: &str) -> bool {
     pane_awaits_input(kind, screen) && prev == Some(screen)
@@ -867,7 +954,7 @@ mod compact_tests {
 
 #[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod live_slash_tests {
-    use super::{composer_settled, grok_model_from_screen, live_slash_command};
+    use super::{agy_effort_matches_screen, agy_model_matches_screen, composer_settled, grok_model_from_screen, live_slash_command};
     /// 窄 pane 把現在的框底拆成兩行時，不能退回對話裡引用的完整舊框。
     #[test]
     fn grok_model_readback_uses_the_wrapped_composer_not_a_quoted_footer() {
@@ -935,8 +1022,34 @@ mod live_slash_tests {
             live_slash_command("claude", "effort", "MAX", None).as_deref(),
             Some("/effort max")
         );
+        assert_eq!(
+            live_slash_command("agy", "model", "gemini-3.8-flash-high", None).as_deref(),
+            Some("/model gemini-3.8-flash-high")
+        );
+        assert_eq!(
+            live_slash_command("agy", "effort", "LOW", None).as_deref(),
+            Some("/effort low")
+        );
         assert_eq!(live_slash_command("codex", "model", "gpt-5.5", None), None);
         assert_eq!(live_slash_command("codex", "effort", "high", None), None);
+    }
+    #[test]
+    fn agy_screen_readback_handles_standard_and_orchestrator_footers() {
+        let rule = "───────────────────────────────────────────────────────────────";
+        let flash = format!("> /model\n  ⎿  Model set to Gemini 3.8 Flash (High)\n{rule}\n>\n{rule}\n? for shortcuts      Gemini 3.8 Flash · high\n");
+        assert!(agy_model_matches_screen(&flash, "gemini-3.8-flash-high"));
+        assert!(!agy_model_matches_screen(&flash, "gemini-3.8-flash-low"));
+        assert_eq!(agy_effort_matches_screen(&flash, "high").as_deref(), Some("gemini-3.8-flash-high"));
+        assert_eq!(agy_effort_matches_screen(&flash, "low"), None);
+
+        let orch = format!("> /model\n  ⎿  Model set to Orchestrator (Argon)\n{rule}\n>\n{rule}\n  auto · Orchestrator · Gemini 4 Neon · xhigh\n");
+        assert!(agy_model_matches_screen(&orch, "gemini-pro-orchestrator-g1-pro"));
+        assert!(!agy_model_matches_screen(&orch, "gemini-pro-orchestrator-neon"));
+        assert!(!agy_model_matches_screen(&orch, "gemini-4-neon-xhigh"));
+        assert_eq!(agy_effort_matches_screen(&orch, "xhigh"), None);
+
+        let invalid = format!("> /model\n  ⎿  Invalid model \"gemini-pro-orchestrator-bogus\" (available: gemini-3.8-flash-high)\n{rule}\n>\n{rule}\n  auto · Orchestrator · Gemini 4 Neon · xhigh\n");
+        assert!(!agy_model_matches_screen(&invalid, "gemini-pro-orchestrator-neon"));
     }
 }
 

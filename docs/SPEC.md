@@ -1085,6 +1085,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 | claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>`；有對話紀錄時 `/model` 跳「Switch model?」確認框，daemon 回讀畫面按 `1`，關不掉就 Esc 並回 `needs_restart` |
 | grok | model 可以；effort 要重啟 | `/model <id>`。不送 `/effort`：grok 1.0.46 會把該指令寫成 `[models] default_reasoning_effort`，使用者自己開的 grok 也跟著變。等級只在下次啟動的 `--reasoning-effort` |
 | codex | 可以 | 0.164.0 起一行 `/model <id> --reasoning=… --speed=…`；更舊的版本 `/model` 兩層選單 + `/fast` 開關，見下 |
+| agy | 可以 | 送前先過 `agy_model_guard`（不在該身份新鮮 `agy-cli` 清單就不送、退回重啟）；閒置時送 `/model <id>`、`/effort <level>`，回讀框底狀態列（Orchestrator 框底不誤判為其規劃者模型）與命令回應確認，失敗退回 `needs_restart` |
 
 **PATCH／live apply 的提交狀態機（#598、#602、#603、#604）**：
 

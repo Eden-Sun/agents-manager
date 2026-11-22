@@ -286,6 +286,12 @@
         assert_eq!(model_slug_from_statusline(&orch).as_deref(), Some("gemini-pro-orchestrator-g1-pro"));
         let neon = json!({"model": {"id": "gemini-pro-orchestrator-neon", "effort": "xhigh"}});
         assert_eq!(model_slug_from_statusline(&neon).as_deref(), Some("gemini-pro-orchestrator-neon"));
+        let display_flash = json!({"model": {"id": "Gemini 3.8 Flash (High)", "display_name": "Gemini 3.8 Flash (High)", "effort": "high"}});
+        assert_eq!(model_slug_from_statusline(&display_flash).as_deref(), Some("gemini-3.8-flash-high"));
+        let display_orch_argon = json!({"model": {"id": "Orchestrator (Argon)", "display_name": "Orchestrator (Argon)"}});
+        assert_eq!(model_slug_from_statusline(&display_orch_argon).as_deref(), Some("gemini-pro-orchestrator-g1-pro"));
+        let display_orch_neon = json!({"model": {"id": "Orchestrator (Neon)", "display_name": "Orchestrator (Neon)"}});
+        assert_eq!(model_slug_from_statusline(&display_orch_neon).as_deref(), Some("gemini-pro-orchestrator-neon"));
         let raw = status_json_from_statusline(&payload, None, Some("gemini-3.8-flash-medium"), 400_000).expect("status_json");
         assert!(has_statusline(Some(&raw)));
         let v: Value = serde_json::from_str(&raw).unwrap();

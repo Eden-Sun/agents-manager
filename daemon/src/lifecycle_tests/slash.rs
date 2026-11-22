@@ -90,6 +90,150 @@ mod live_slash_tests {
             Some("/compact")
         );
     }
+    #[tokio::test]
+    async fn agy_live_model_and_effort_verify_footer_guard_account_list_and_protect_orchestrator() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "agy-live-switch").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET pane_id=?, runtime_model='gemini-3.8-flash-medium' WHERE id=?")
+            .bind(&pane)
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let screen = |above: &str, footer: &str| {
+            format!(
+                "Antigravity CLI 1.5.14\n{above}────────────────────────────────────────\n>\n────────────────────────────────────────\n{footer}\n"
+            )
+        };
+
+        let listed = serde_json::json!({
+            "kind": "agy",
+            "host": "local",
+            "source": "agy-cli",
+            "models": [
+                {"id": "gemini-3.8-flash-medium", "is_default": true},
+                {"id": "gemini-3.8-flash-high", "is_default": false},
+                {"id": "gemini-3.8-flash-low", "is_default": false},
+                {"id": "gemini-pro-orchestrator-g1-pro", "is_default": false}
+            ]
+        });
+        app.models_cache
+            .lock()
+            .await
+            .insert("local/agy/".into(), (std::time::Instant::now(), listed));
+
+        sqlx::query("UPDATE bots SET model='gemini-4-neon-medium' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(&pane, &screen("", "  Gemini 3.8 Flash · medium"));
+        assert_eq!(
+            crate::lifecycle::slash::apply_live_setting(&app, &bot.id, &["model"]).await.as_deref(),
+            Some("agy_model_not_in_account_list")
+        );
+        assert!(env.herdr.calls_to("pane.send_text").is_empty());
+
+        sqlx::query("UPDATE bots SET model='gemini-3.8-flash-high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(
+            &pane,
+            &screen("> /model\n  ⎿  Model set to Gemini 3.8 Flash (High)\n", "  Gemini 3.8 Flash · high"),
+        );
+        assert_eq!(
+            crate::lifecycle::slash::apply_live_setting(&app, &bot.id, &["model"]).await,
+            None
+        );
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").last().and_then(|v| v["text"].as_str()),
+            Some("/model gemini-3.8-flash-high")
+        );
+        let rt_model: Option<String> = sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+            .bind(&run_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rt_model.as_deref(), Some("gemini-3.8-flash-high"));
+
+        sqlx::query("UPDATE bots SET effort='low' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(
+            &pane,
+            &screen("> /effort\n  ⎿  Effort set to low\n", "  Gemini 3.8 Flash · low"),
+        );
+        assert_eq!(
+            crate::lifecycle::slash::apply_live_setting(&app, &bot.id, &["effort"]).await,
+            None
+        );
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").last().and_then(|v| v["text"].as_str()),
+            Some("/effort low")
+        );
+        let (rt_model, rt_effort): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT runtime_model, runtime_effort FROM runs WHERE id=?")
+                .bind(&run_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(rt_model.as_deref(), Some("gemini-3.8-flash-low"));
+        assert_eq!(rt_effort.as_deref(), Some("low"));
+
+        sqlx::query("UPDATE bots SET model='gemini-pro-orchestrator-g1-pro' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(
+            &pane,
+            &screen("> /model\n  ⎿  Model set to Orchestrator (Argon)\n", "  auto · Orchestrator · Gemini 4 Neon · xhigh"),
+        );
+        assert_eq!(
+            crate::lifecycle::slash::apply_live_setting(&app, &bot.id, &["model"]).await,
+            None
+        );
+        let rt_model: Option<String> = sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+            .bind(&run_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rt_model.as_deref(), Some("gemini-pro-orchestrator-g1-pro"));
+
+        app.models_cache.lock().await.clear();
+        sqlx::query("UPDATE bots SET model='gemini-4-neon-xhigh' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(
+            &pane,
+            &screen("", "  auto · Orchestrator · Gemini 4 Neon · xhigh"),
+        );
+        assert_eq!(
+            crate::lifecycle::slash::apply_live_setting(&app, &bot.id, &["model"]).await.as_deref(),
+            Some("agy_model_readback_mismatch")
+        );
+        let rt_model: Option<String> = sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+            .bind(&run_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(rt_model.as_deref(), Some("gemini-pro-orchestrator-g1-pro"));
+    }
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
     async fn model_apply_fixture(
         env: &tt::Env,

@@ -289,6 +289,9 @@ pub fn model_slug_from_statusline(payload: &Value) -> Option<String> {
     if crate::models::agy_is_orchestrator(&id_lower) {
         return Some(id_lower);
     }
+    if let Some(slug) = crate::models::agy_display_name_to_slug(id) {
+        return Some(slug);
+    }
     let effort = model
         .get("effort")
         .and_then(Value::as_str)

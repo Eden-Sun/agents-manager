@@ -1254,17 +1254,21 @@ async fn launch_model_bot(app: &impl StartContext, bot: &db::Bot, host: &str) ->
 /// （agy 的互動模式遇到不認得的 `--model` 只警告、退回它自己的預設，畫面仍顯示設定的值，2026-11-20）。
 /// 改用該身份清單的預設啟動，並在對話裡留一則系統訊息；`bots.model` 不動，不一致由既有的「設定與實際不同」標記顯示。
 /// 只在新鮮、本機抓到的清單（`agy-cli`）上判斷；借來的、寫死的清單不拿來說這個帳號不支援。
+pub(super) async fn agy_model_unlisted(app: &impl StartContext, bot: &db::Bot, host: &str, model: &str) -> Option<String> {
+    if bot.kind != "agy" {
+        return None;
+    }
+    let list = app.models_list(host, "agy", bot.identity.as_deref(), false).await.ok()?;
+    if list["source"] != "agy-cli" || list["stale"].as_bool() == Some(true) {
+        return None;
+    }
+    let models = list["models"].as_array()?;
+    crate::models::agy_model_fallback(models, model)
+}
+
 async fn agy_model_guard(app: &impl StartContext, bot: &db::Bot, host: &str) -> db::Bot {
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else { return bot.clone() };
-    if bot.kind != "agy" {
-        return bot.clone();
-    }
-    let Ok(list) = app.models_list(host, "agy", bot.identity.as_deref(), false).await else { return bot.clone() };
-    if list["source"] != "agy-cli" || list["stale"].as_bool() == Some(true) {
-        return bot.clone();
-    }
-    let Some(models) = list["models"].as_array() else { return bot.clone() };
-    let Some(fallback) = crate::models::agy_model_fallback(models, model) else { return bot.clone() };
+    let Some(fallback) = agy_model_unlisted(app, bot, host, model).await else { return bot.clone() };
     let who = match bot.identity.as_deref().filter(|s| !s.is_empty()) {
         Some(name) => format!("身份 {name}"),
         None => "預設帳號".to_string(),

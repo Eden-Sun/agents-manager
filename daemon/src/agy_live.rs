@@ -19,36 +19,8 @@
 use crate::db;
 use crate::herdr::HerdrClient;
 
-/// 最後一條分隔線底下最多幾行算框底（再多就是選單之類蓋住了）。
-const FOOTER_LINES: usize = 3;
-
-fn is_rule(line: &str) -> bool {
-    let t = line.trim();
-    t.chars().count() >= 10 && t.chars().all(|c| c == '─')
-}
-
-/// 框底的 `Gemini 3.8 Flash · high` → `gemini-3.8-flash-high`。讀不到、或不是 [`crate::models::agy_model_allowed`] 收的就是 `None`。
 pub fn parse_footer(screen: &str) -> Option<String> {
-    let lines: Vec<&str> = screen.lines().collect();
-    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
-    let rule = lines[..end].iter().rposition(|l| is_rule(l))?;
-    let tail = &lines[rule + 1..end];
-    if tail.is_empty() || tail.len() > FOOTER_LINES {
-        return None;
-    }
-    if tail.iter().any(|l| l.contains("Orchestrator")) {
-        return None;
-    }
-    tail.iter().rev().find_map(|line| {
-        let at = line.rfind("Gemini ")?;
-        let (name, effort) = line[at..].trim_end().split_once(" · ")?;
-        let effort = effort.trim();
-        if effort.is_empty() || !effort.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return None;
-        }
-        let slug = format!("{}-{}", name.split_whitespace().collect::<Vec<_>>().join("-"), effort).to_ascii_lowercase();
-        crate::models::agy_model_allowed(&slug).then_some(slug)
-    })
+    crate::models::agy_footer_model(screen)
 }
 
 /// 啟動橫幅最多往回讀幾行捲動紀錄（窄 pane 一行字會折成好幾行）。
@@ -196,6 +168,7 @@ pub async fn sync_runtime(app: &(impl crate::capabilities::BotLocks + crate::cap
 mod tests {
     use super::*;
 
+    const FOOTER_LINES: usize = 3;
     const RULE: &str = "───────────────────────────────────────────────────────────────";
 
     fn screen(footer: &str) -> String {

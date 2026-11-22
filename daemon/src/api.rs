@@ -3474,8 +3474,8 @@ async fn patch_bot(
             .collect(),
         "grok" if b.model.is_some() && !extras(&["model", "effort"]) => vec!["model"],
         "grok" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
-        "claude" if b.model.is_some() && !extras(&["model"]) => vec!["model"],
-        "claude" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
+        "claude" | "agy" if b.model.is_some() && !extras(&["model"]) => vec!["model"],
+        "claude" | "agy" if b.effort.is_some() && !extras(&["effort"]) => vec!["effort"],
         _ => Vec::new(),
     };
     let mut live_revisions = None;

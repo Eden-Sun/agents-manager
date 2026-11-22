@@ -2086,6 +2086,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
   - claude `model` → `/model <alias>`；有對話紀錄時的「Switch model?」框 daemon 會按 `1` 確認，關不掉就 Esc 並回 `true`（不會把框留在畫面上）。
   - claude `effort` → `/effort <level>`（副作用：claude 存成該帳號新 session 的預設）。
   - codex `model` / `effort` / `fast` → 操作 `/model` 兩層選單與 `/fast` 開關（可一起改，只改 `fast` 也走這條），回讀狀態列確認，`run.runtime_*` 存讀回的值（副作用：寫進 `~/.codex/config.toml`）。
+  - agy `model` / `effort` → 送前先經 `agy_model_guard` 核對帳號可用清單，閒置時送 `/model <id>`、`/effort <level>` 並回讀框底狀態列確認（Orchestrator 框底不誤判為規劃者模型），失敗回 `needs_restart: true`。
 - `identity` 不存在 404；kind 不符 400。
 
 ### API bot fresh target 與 start（#1944）

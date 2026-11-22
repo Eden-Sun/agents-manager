@@ -129,6 +129,64 @@ pub fn agy_is_orchestrator(slug: &str) -> bool {
         .is_some_and(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
 }
 
+const AGY_FOOTER_LINES: usize = 3;
+
+fn is_agy_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+}
+
+fn agy_footer_tail<'a>(lines: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let end = lines.iter().rposition(|l| !l.trim().is_empty())? + 1;
+    let rule = lines[..end].iter().rposition(|l| is_agy_rule(l))?;
+    let tail = &lines[rule + 1..end];
+    (!tail.is_empty() && tail.len() <= AGY_FOOTER_LINES).then_some(tail)
+}
+
+pub fn agy_footer_is_orchestrator(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    agy_footer_tail(&lines).is_some_and(|tail| tail.iter().any(|l| l.contains("Orchestrator")))
+}
+
+pub fn agy_footer_model(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let tail = agy_footer_tail(&lines)?;
+    if tail.iter().any(|l| l.contains("Orchestrator")) {
+        return None;
+    }
+    tail.iter().rev().find_map(|line| {
+        let at = line.rfind("Gemini ")?;
+        let (name, rest) = line[at..].trim_end().split_once(" · ")?;
+        let effort = rest.split(" · ").next()?.trim();
+        if effort.is_empty() || !effort.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let slug = format!("{}-{}", name.split_whitespace().collect::<Vec<_>>().join("-"), effort).to_ascii_lowercase();
+        agy_model_allowed(&slug).then_some(slug)
+    })
+}
+
+pub fn agy_display_name_to_slug(display: &str) -> Option<String> {
+    let trimmed = display.trim();
+    let without_close = trimmed.strip_suffix(')')?;
+    let (head, paren) = without_close.rsplit_once('(')?;
+    let head = head.trim();
+    let paren = paren.trim().to_ascii_lowercase();
+    if head.eq_ignore_ascii_case("Orchestrator") {
+        let family = match paren.as_str() {
+            "argon" => "g1-pro",
+            other => other,
+        };
+        let slug = format!("gemini-pro-orchestrator-{family}");
+        return agy_is_orchestrator(&slug).then_some(slug);
+    }
+    if !head.to_ascii_lowercase().starts_with("gemini ") || paren.is_empty() || !paren.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let slug = format!("{}-{paren}", head.split_whitespace().collect::<Vec<_>>().join("-")).to_ascii_lowercase();
+    agy_model_allowed(&slug).then_some(slug)
+}
+
 /// 解析 `agy models` 的輸出（每行 `slug<TAB>顯示名`，純文字）：只留 [`agy_model_allowed`] 的，預設排第一。
 /// 未登入時的訊息沒有 tab、slug 也不是 `gemini-` 開頭，會被過濾掉，結果為空，呼叫端就退回 [`agy_static_models`]。
 pub fn agy_models_from_text(text: &str) -> Vec<Value> {
