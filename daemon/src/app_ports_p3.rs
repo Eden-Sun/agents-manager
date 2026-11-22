@@ -28,10 +28,12 @@ impl HostHooks for App {
         async move { crate::shared_host::is_shared(&app, &host).await }
     }
 
-    fn baseline_detected(app: &Arc<Self>, host: &str) -> impl Future<Output = ()> + Send {
+    fn baseline_detected(app: &Arc<Self>, host: &str, fence: &HostFence, checked_at: &str) -> impl Future<Output = ()> + Send {
         let app = app.clone();
         let host = host.to_string();
-        async move { crate::host_baseline_auto::after_detect(app, host).await }
+        let fence = fence.clone();
+        let checked_at = checked_at.to_string();
+        async move { crate::host_baseline_auto::after_detect(app, host, fence, checked_at).await }
     }
 
     fn host_changed(app: &Arc<Self>, fence: &HostFence) -> impl Future<Output = ()> + Send {

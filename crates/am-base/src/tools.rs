@@ -1141,6 +1141,10 @@ pub async fn detect<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Result<HostTools> 
 
 /// Run detection and retain the authority token so its caller can publish the matching snapshot.
 pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &crate::hosts::HostFence) -> Result<HostTools> {
+    detect_with_fence_checked(app, host, fence).await.map(|(ht, _)| ht)
+}
+
+async fn detect_with_fence_checked<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &crate::hosts::HostFence) -> Result<(HostTools, String)> {
     if fence.conn().name != host {
         anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
     }
@@ -1181,7 +1185,7 @@ pub async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &cr
         identities = ?ht.identities.values().map(|i| (i.name.clone(), i.source, i.logged_in)).collect::<Vec<_>>(),
         "tools detected"
     );
-    Ok(ht)
+    Ok((ht, baseline.checked_at))
 }
 
 /// 偵測開始後主機已重連／改設定／被移除，或有更新的偵測先寫了：結果作廢，沒有動任何狀態。
@@ -1231,10 +1235,10 @@ pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
     let tracker = crate::capabilities::BgTasks::background_tasks(&*app).clone();
     crate::background_loop::spawn_named(&tracker, "tools detect", async move {
         let Some(fence) = app.hosts().fence(&host).await else { return };
-        match detect_with_fence(&app, &host, &fence).await {
-            Ok(_) => {
+        match detect_with_fence_checked(&app, &host, &fence).await {
+            Ok((_, checked_at)) => {
                 H::host_changed(&app, &fence).await;
-                H::baseline_detected(&app, &host).await;
+                H::baseline_detected(&app, &host, &fence, &checked_at).await;
             }
             Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),

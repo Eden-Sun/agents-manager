@@ -1,9 +1,10 @@
+use super::apply::ApplyRun;
 use super::plan::Plan;
 use crate::config::HostBaselineSyncMode;
 use std::time::{Duration, Instant};
 
 pub const MAX_FAILURES: u32 = 3;
-const BACKOFF: [Duration; 3] = [Duration::from_secs(300), Duration::from_secs(1800), Duration::from_secs(7200)];
+const BACKOFF: [Duration; 2] = [Duration::from_secs(300), Duration::from_secs(1800)];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoState {
@@ -41,7 +42,11 @@ pub fn gate(mode: HostBaselineSyncMode, plan: &Plan, state: &AutoState, now: Ins
     Gate::Apply
 }
 
-pub fn record(state: &mut AutoState, plan_rev: &str, ok: bool, now: Instant) {
+pub fn all_applied(run: &ApplyRun) -> bool {
+    run.error.is_none() && !run.outcomes.is_empty() && run.outcomes.iter().all(|o| matches!(o.result, "applied" | "present"))
+}
+
+pub fn record(state: &mut AutoState, plan_rev: &str, ok: bool, now: Instant) -> Option<Duration> {
     if state.plan_rev != plan_rev {
         *state = AutoState { plan_rev: plan_rev.to_string(), ..Default::default() };
     }
@@ -49,10 +54,12 @@ pub fn record(state: &mut AutoState, plan_rev: &str, ok: bool, now: Instant) {
         state.done = true;
         state.failures = 0;
         state.retry_after = None;
-    } else {
-        state.failures += 1;
-        state.retry_after = BACKOFF.get(state.failures as usize - 1).map(|d| now + *d);
+        return None;
     }
+    state.failures += 1;
+    let delay = BACKOFF.get(state.failures as usize - 1).copied();
+    state.retry_after = delay.map(|d| now + d);
+    delay
 }
 
 #[cfg(test)]
@@ -101,17 +108,28 @@ mod tests {
         let p = plan_with_fix();
         let t0 = Instant::now();
         let mut s = AutoState::default();
-        record(&mut s, &p.plan_rev, false, t0);
+        assert_eq!(record(&mut s, &p.plan_rev, false, t0), Some(Duration::from_secs(300)), "a retry is scheduled, not only waited for");
         assert_eq!(s.failures, 1);
         assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, t0), Gate::Skip("backoff"));
         assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, t0 + Duration::from_secs(301)), Gate::Apply);
-        record(&mut s, &p.plan_rev, false, t0 + Duration::from_secs(301));
-        record(&mut s, &p.plan_rev, false, t0 + Duration::from_secs(9999));
+        assert_eq!(record(&mut s, &p.plan_rev, false, t0 + Duration::from_secs(301)), Some(Duration::from_secs(1800)));
+        assert_eq!(record(&mut s, &p.plan_rev, false, t0 + Duration::from_secs(2101)), None, "the third failure stops for good");
         assert_eq!(s.failures, 3);
         assert_eq!(gate(HostBaselineSyncMode::Auto, &p, &s, t0 + Duration::from_secs(99999)), Gate::Skip("gave_up"));
         let mut other = p.clone();
         other.plan_rev = "other-rev".into();
         assert_eq!(gate(HostBaselineSyncMode::Auto, &other, &s, t0 + Duration::from_secs(99999)), Gate::Apply);
+    }
+
+    #[test]
+    fn partial_or_skipped_outcomes_are_not_a_success() {
+        use crate::host_baseline::apply::Outcome;
+        let o = |result: &'static str| Outcome { id: "x".into(), result, reason: None };
+        let run = |outcomes: Vec<Outcome>, error: Option<String>| ApplyRun { outcomes, backup_written: true, error };
+        assert!(all_applied(&run(vec![o("applied"), o("present")], None)));
+        assert!(!all_applied(&run(vec![o("applied"), o("skipped")], None)), "a skipped key must be retried, not marked done");
+        assert!(!all_applied(&run(vec![o("applied")], Some("backup_failed".into()))));
+        assert!(!all_applied(&run(vec![], None)));
     }
 
     struct Home(std::path::PathBuf);

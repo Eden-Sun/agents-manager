@@ -312,3 +312,39 @@ async fn a_manual_apply_waits_its_turn_behind_the_host_sync_lock() {
     let (st, _) = apply(&e.app, host, RequestPrincipal::User, &rev).await;
     assert_eq!(st, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn a_detect_fence_from_before_a_reconnect_never_writes_to_the_new_connection() {
+    let e = crate::testing::env().await;
+    let host = "bl3-stale";
+    let (home, calls) = remote_host(&e.app, host).await;
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let orig = "approval_policy = \"never\"\n";
+    std::fs::write(home.join(".codex/config.toml"), orig).unwrap();
+    e.app.host_baseline.lock().await.insert(host.into(), hooks_report());
+    let checked_at = e.app.host_baseline.lock().await.get(host).unwrap().checked_at.clone();
+    set_sync(&e.app, host, "auto").await;
+    let old = e.app.hosts.fence(host).await.unwrap();
+    e.app.hosts.bump_generation_for_test(host).await;
+    let before = calls.load(Ordering::SeqCst);
+    crate::host_baseline_auto::after_detect(e.app.clone(), host.into(), old, checked_at).await;
+    assert_eq!(calls.load(Ordering::SeqCst), before, "a superseded fence reaches the host");
+    assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), orig);
+}
+
+#[tokio::test]
+async fn a_report_replaced_after_its_detect_is_not_applied() {
+    let e = crate::testing::env().await;
+    let host = "bl3-replaced";
+    let (home, calls) = remote_host(&e.app, host).await;
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let orig = "approval_policy = \"never\"\n";
+    std::fs::write(home.join(".codex/config.toml"), orig).unwrap();
+    e.app.host_baseline.lock().await.insert(host.into(), hooks_report());
+    set_sync(&e.app, host, "auto").await;
+    let fence = e.app.hosts.fence(host).await.unwrap();
+    let before = calls.load(Ordering::SeqCst);
+    crate::host_baseline_auto::after_detect(e.app.clone(), host.into(), fence, "1999-01-01T00:00:00Z".into()).await;
+    assert_eq!(calls.load(Ordering::SeqCst), before, "a report from another detect must not be applied");
+    assert_eq!(std::fs::read_to_string(home.join(".codex/config.toml")).unwrap(), orig);
+}
