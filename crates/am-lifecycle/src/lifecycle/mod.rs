@@ -41,6 +41,13 @@ pub(crate) fn pane_settle(d: Duration) -> Duration {
     d
 }
 
+macro_rules! test_visible_struct {
+    ($(#[$sm:meta])* $sv:vis struct $name:ident { $($(#[$fm:meta])* $fv:vis $f:ident : $t:ty),* $(,)? }) => {
+        $(#[$sm])* #[cfg(any(test, feature = "test-hooks"))] pub struct $name { $($(#[$fm])* pub $f: $t,)* }
+        $(#[$sm])* #[cfg(not(any(test, feature = "test-hooks")))] $sv struct $name { $($(#[$fm])* $fv $f: $t,)* }
+    };
+}
+
 pub mod messages;
 pub mod relay_watch;
 pub mod dead_panes;

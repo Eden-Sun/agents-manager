@@ -239,3 +239,7 @@ EOF
 
 if [ "$fail" = 0 ]; then echo "ci-daemon-filters: OK"; fi
 exit "$fail"
+check "lifecycle_tests::relay_watch:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/relay_watch.rs"
+check "lifecycle_tests::stuck_turns:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/stuck_turns.rs"
+check "lifecycle_tests::quota_hold:: testing::scratch_leak_guard:: timestamp_compat_tests::" "daemon/src/lifecycle_tests/quota_hold.rs"
+check "lifecycle:: lifecycle_tests::relay_watch::" "crates/am-lifecycle/src/lifecycle/relay_watch.rs"
