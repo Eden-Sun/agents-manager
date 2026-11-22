@@ -565,6 +565,8 @@ export default {
   '這一項已被別人更新，已重新載入，請再操作一次': 'This item was updated by someone else. It has been reloaded; please try again.',
   '帳本操作失敗': 'Ledger action failed',
   '待驗收': 'Awaiting your review',
+  '等待部署': 'Awaiting deploy',
+  '已部署待驗收': 'Deployed, awaiting your review',
   '待你驗收': 'Awaiting your review',
   '待你驗收 {a}': 'Awaiting your review {a}',
   '完成': 'Done',

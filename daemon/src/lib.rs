@@ -233,6 +233,7 @@ mod bot_state;
 mod intents;
 mod delete_intents;
 mod deploy_now;
+mod ledger_deploy;
 mod deploy_wait;
 mod drafts;
 mod promote_intents;

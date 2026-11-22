@@ -712,6 +712,7 @@ pub const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (102, "ff718b0b270a7fc9"),
     // codex session 血統 token 含父歷史標記（issue #1943 子票 D2，2026-11-21）：`lineage_sessions.tokens_include_parent`。
     (103, "e3ed0454395c06d0"),
+    (104, "636d5dd624cfe7ab"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -946,6 +947,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("projects", "executor_grants_json", "ALTER TABLE projects ADD COLUMN executor_grants_json TEXT NOT NULL DEFAULT '[]'"),
         ("messages", "relay_auth", "ALTER TABLE messages ADD COLUMN relay_auth TEXT"),
         ("projects", "specialist_dispatch", "ALTER TABLE projects ADD COLUMN specialist_dispatch INTEGER NOT NULL DEFAULT 1"),
+        ("ledger_items", "deploy_sha", "ALTER TABLE ledger_items ADD COLUMN deploy_sha TEXT"),
         // codex session 血統快取統計（issue #1943 子票 D，2026-11-21）：lineage_sessions.input_tokens / cached_input_tokens / output_tokens
         ("lineage_sessions", "input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"),
         ("lineage_sessions", "cached_input_tokens", "ALTER TABLE lineage_sessions ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0"),

@@ -499,6 +499,8 @@ export interface Attachment {
 
 export type LedgerItemStatus = 'untriaged' | 'answered' | 'following' | 'clarifying' | 'done' | 'cancelled' | 'merged'
 
+export type LedgerDeployState = 'pending' | 'live'
+
 export interface LedgerItem {
   id: string
   code: string
@@ -515,6 +517,8 @@ export interface LedgerItem {
   due_at: string | null
   merged_into_id: string | null
   close_reason: string | null
+  deploy_sha?: string | null
+  deploy_state?: LedgerDeployState | null
   version: number
   updated_at: string
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { completeLedgerItem, createLedgerItems, fetchProjectLedger, notSureLedgerItem, patchLedgerItem } from '../api/ledger'
-import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
+import type { LedgerDeployState, LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -163,7 +163,7 @@ export function MessageLedgerBar({ msg }: { msg: Message }) {
                     <div className="ledger-body-col">
                       <div className="ledger-row-main">
                         <span className="ledger-row-title">{it.title}</span>
-                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
+                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t, it.deploy_state)}</span>
                         {ACTIONABLE.includes(it.status) ? (
                           <button
                             type="button"
@@ -242,8 +242,8 @@ function trackingTitle(content: string): string {
   return Array.from(first).slice(0, 80).join('')
 }
 
-function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
-  switch (s) {
+function statusLabel(status: LedgerItemStatus, t: ReturnType<typeof useT>, deploy?: LedgerDeployState | null): string {
+  switch (status) {
     case 'untriaged':
       return t('待整理')
     case 'following':
@@ -251,7 +251,7 @@ function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
     case 'clarifying':
       return t('需要你回覆')
     case 'answered':
-      return t('待驗收')
+      return deploy === 'pending' ? t('等待部署') : deploy === 'live' ? t('已部署待驗收') : t('待驗收')
     case 'done':
       return t('已完成')
     case 'cancelled':

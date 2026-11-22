@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { completeLedgerItem, fetchProjectLedger, notSureLedgerItem, patchLedgerItem } from '../api/ledger'
-import type { LedgerItem, LedgerItemStatus, Message } from '../api/types'
+import type { LedgerDeployState, LedgerItem, LedgerItemStatus, Message } from '../api/types'
 import { ApiError } from '../api/types'
 import { useT } from '../lib/i18n'
 import { useStore } from '../store/store'
@@ -161,7 +161,7 @@ export function TrackingBar({ botId, onJump }: { botId: string; onJump: (message
                         <button type="button" className="track-jump" disabled={!it.source_message_id} onClick={() => jump(it)}>
                           <span className="ledger-row-title">{it.title}</span>
                         </button>
-                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t)}</span>
+                        <span className={`ledger-chip status-${it.status}`}>{statusLabel(it.status, t, it.deploy_state)}</span>
                         {it.status === 'answered' ? null : (
                         <button
                           type="button"
@@ -226,8 +226,8 @@ function sheetLayer(node: ReactNode) {
   return phone ? createPortal(node, document.body) : node
 }
 
-function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
-  switch (s) {
+function statusLabel(status: LedgerItemStatus, t: ReturnType<typeof useT>, deploy?: LedgerDeployState | null): string {
+  switch (status) {
     case 'clarifying':
       return t('需要你回覆')
     case 'untriaged':
@@ -235,7 +235,7 @@ function statusLabel(s: LedgerItemStatus, t: ReturnType<typeof useT>): string {
     case 'following':
       return t('進行中')
     case 'answered':
-      return t('待驗收')
+      return deploy === 'pending' ? t('等待部署') : deploy === 'live' ? t('已部署待驗收') : t('待驗收')
     case 'done':
       return t('已完成')
     case 'cancelled':

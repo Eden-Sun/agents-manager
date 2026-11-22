@@ -448,7 +448,7 @@ mod tests {
         let (l1, owner1): (String, Option<String>) = sqlx::query_as("SELECT id, owner_bot_id FROM ledger_items WHERE project_id=? AND relay_request_id=?").bind(&pid).bind(&id).fetch_one(&app.db).await.unwrap();
         assert_eq!(owner1.as_deref(), Some(f.deputy.as_str()), "綁定事項直接由副手承辦");
         let dep_actor = format!("bot:{}", f.deputy);
-        let answered = am_base::ledger::patch_item_cas(&app.db, &pid, &l1, 1, &dep_actor, am_base::ledger::LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let answered = am_base::ledger::patch_item_cas(&app.db, &pid, &l1, 1, &dep_actor, am_base::ledger::LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "副仍在做的事".into(), status: Some("following".into()), owner_bot_id: Some(f.deputy.clone()), ..Default::default() }).await.unwrap();
         am_base::ledger::commit_item(&app.db, &pid, &dep_actor, None, &am_base::ledger::LedgerSplitInput { title: "要主接手的事".into(), status: Some("following".into()), ..Default::default() }).await.unwrap();
         sqlx::query("UPDATE relay_requests SET state='answered' WHERE id=?").bind(&id).execute(&app.db).await.unwrap();

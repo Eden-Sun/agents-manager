@@ -39,6 +39,7 @@ pub struct LedgerItem {
     pub due_at: Option<String>,
     pub merged_into_id: Option<String>,
     pub close_reason: Option<String>,
+    pub deploy_sha: Option<String>,
     pub version: i64,
     pub last_reminded_version: Option<i64>,
     pub last_reminded_stage: Option<String>,
@@ -90,6 +91,8 @@ pub enum LedgerPatchOp {
         owner_bot_id: Option<String>,
         /// 結案／取消的原因（`done` 時帶上，`None` 不動）。
         close_reason: Option<String>,
+        /// 部署核對用的 commit（7–40 位 hex）；`Some("")` 清掉，`None` 不動。
+        deploy_sha: Option<String>,
     },
     /// 認領：承辦人設為 `owner_bot_id`（action=`claim`）。
     Claim { owner_bot_id: String },
@@ -432,6 +435,30 @@ async fn check_owner(pool: &SqlitePool, project_id: &str, owner: Option<&str>) -
     Ok(())
 }
 
+pub fn normalize_deploy_sha(raw: &str) -> Result<Option<String>, LedgerError> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if (7..=40).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(Some(t.to_ascii_lowercase()));
+    }
+    Err(LedgerError::Invalid("deploy_sha 必須是 7–40 位 hex（空字串＝清掉）".into()))
+}
+
+pub fn deliverable_shas(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if (7..=40).contains(&tok.len()) && tok.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let low = tok.to_ascii_lowercase();
+            if !out.contains(&low) {
+                out.push(low);
+            }
+        }
+    }
+    out
+}
+
 fn check_status(status: &str) -> Result<(), LedgerError> {
     if STATUSES.contains(&status) {
         Ok(())
@@ -482,7 +509,7 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str,
     }
     let mut next = cur.clone();
     match &op {
-        LedgerPatchOp::Update { title, status, deliverable, next_step, wait_for, due_at, owner_bot_id, close_reason } => {
+        LedgerPatchOp::Update { title, status, deliverable, next_step, wait_for, due_at, owner_bot_id, close_reason, deploy_sha } => {
             if let Some(s) = status {
                 check_status(s)?;
                 next.status = s.clone();
@@ -509,6 +536,9 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str,
             if close_reason.is_some() {
                 next.close_reason = close_reason.clone();
             }
+            if let Some(sha) = deploy_sha {
+                next.deploy_sha = normalize_deploy_sha(sha)?;
+            }
         }
         LedgerPatchOp::Claim { owner_bot_id } => next.owner_bot_id = Some(owner_bot_id.clone()),
         LedgerPatchOp::Handback { to } => next.owner_bot_id = to.clone(),
@@ -532,7 +562,7 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str,
     let version = cur.version + 1;
     let now = db::now();
     let res = sqlx::query(
-        "UPDATE ledger_items SET title = ?, status = ?, owner_bot_id = ?, deliverable = ?, next_step = ?, wait_for = ?, due_at = ?, merged_into_id = ?, close_reason = ?, version = ?, updated_at = ?
+        "UPDATE ledger_items SET title = ?, status = ?, owner_bot_id = ?, deliverable = ?, next_step = ?, wait_for = ?, due_at = ?, merged_into_id = ?, close_reason = ?, deploy_sha = ?, version = ?, updated_at = ?
          WHERE id = ? AND version = ?",
     )
     .bind(&next.title)
@@ -544,6 +574,7 @@ pub async fn patch_item_cas(pool: &SqlitePool, project_id: &str, item_ref: &str,
     .bind(&next.due_at)
     .bind(&next.merged_into_id)
     .bind(&next.close_reason)
+    .bind(&next.deploy_sha)
     .bind(version)
     .bind(&now)
     .bind(&item_id)
@@ -955,7 +986,7 @@ mod tests {
         let all = split_message(&pool, "p1", "bot:b1", "m1", &[input("A"), input("B"), input("C")]).await.unwrap();
         assert_eq!(all.iter().map(|i| i.code_no).collect::<Vec<_>>(), vec![1, 2, 3]);
         let a = all[0].clone();
-        let answered = patch_item_cas(&pool, "p1", &a.id, a.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &a.id, a.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         assert_eq!(answered.status, "answered");
         let (open, counts) = query_actionable_for_actor(&pool, "p1", "b1", Some("m1"), 10).await.unwrap();
         assert_eq!(open.iter().map(|i| i.code_no).collect::<Vec<_>>(), vec![2, 3], "only the unanswered two stay open");
@@ -1028,14 +1059,14 @@ mod tests {
             "l1",
             first.version,
             "user",
-            LedgerPatchOp::Update { title: None, status: Some("done".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: Some("已確認".into()) },
+            LedgerPatchOp::Update { title: None, status: Some("done".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: Some("已確認".into()), deploy_sha: None },
         )
         .await
         .unwrap();
         assert_eq!((done.status.as_str(), done.close_reason.as_deref()), ("done", Some("已確認")));
         let actions: Vec<(String,)> = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at, rowid").bind(&first.id).fetch_all(&pool).await.unwrap();
         assert_eq!(actions.iter().map(|a| a.0.as_str()).collect::<Vec<_>>(), vec!["ingest", "triage"]);
-        let reopened = patch_item_cas(&pool, "p1", &first.id, done.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let reopened = patch_item_cas(&pool, "p1", &first.id, done.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         let last: (String,) = sqlx::query_as("SELECT action FROM ledger_events WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(&first.id).fetch_one(&pool).await.unwrap();
         assert_eq!((last.0.as_str(), reopened.status.as_str()), ("status", "following"));
         assert!(patch_item_cas(&pool, "p1", "L1", done.version, "bot:b1", LedgerPatchOp::Merge { into_id: "L1".into() }).await.is_err(), "cannot merge into itself");
@@ -1076,7 +1107,7 @@ mod tests {
         assert_eq!(handed.owner_bot_id.as_deref(), Some("b3"), "副手可以承辦");
         let to_exec = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Handback { to: Some("b2".into()) }).await;
         assert!(matches!(to_exec, Err(LedgerError::Invalid(_))), "交回給執行者也不行：{to_exec:?}");
-        let upd = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: Some("b2".into()), close_reason: None }).await;
+        let upd = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: Some("b2".into()), close_reason: None, deploy_sha: None }).await;
         assert!(matches!(upd, Err(LedgerError::Invalid(_))), "Update 指定執行者也不行：{upd:?}");
         let back = patch_item_cas(&pool, "p1", &item.id, handed.version, "user", LedgerPatchOp::Handback { to: Some("b1".into()) }).await.unwrap();
         assert_eq!(back.owner_bot_id.as_deref(), Some("b1"));
@@ -1118,7 +1149,7 @@ mod tests {
         with_management(&pool).await;
         let mk = |t: &str, o: Option<&str>| LedgerSplitInput { title: t.into(), owner_bot_id: o.map(str::to_string), ..Default::default() };
         let done = commit_item(&pool, "p1", "user", None, &mk("已回", Some("b3"))).await.unwrap();
-        patch_item_cas(&pool, "p1", &done.id, 1, "user", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        patch_item_cas(&pool, "p1", &done.id, 1, "user", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         commit_item(&pool, "p1", "user", None, &mk("還在做", Some("b3"))).await.unwrap();
         commit_item(&pool, "p1", "user", None, &mk("交回的", None)).await.unwrap();
         let g = digest_groups(&pool, "p1", "b3").await.unwrap();
@@ -1190,7 +1221,7 @@ mod tests {
     async fn answered_waits_for_the_user_and_is_not_the_managers_to_do() {
         let pool = pool().await;
         let item = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "交件".into(), owner_bot_id: Some("b1".into()), ..Default::default() }).await.unwrap();
-        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("已更新 CI 腳本，見 PR #12".into()), next_step: None, wait_for: None, due_at: Some("2000-01-01T00:00:00Z".into()), owner_bot_id: None, close_reason: None }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("已更新 CI 腳本，見 PR #12".into()), next_step: None, wait_for: None, due_at: Some("2000-01-01T00:00:00Z".into()), owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         assert_eq!(answered.deliverable, "已更新 CI 腳本，見 PR #12");
         let later = chrono::Utc::now() + chrono::Duration::hours(3);
         assert!(due_reminders(&pool, later).await.unwrap().iter().all(|r| r.item_id != item.id), "the manager is not nagged about a delivered item");
@@ -1205,14 +1236,43 @@ mod tests {
     async fn not_sure_rechecks_the_item_through_the_reminder_with_its_next_step() {
         let pool = pool().await;
         let item = commit_item(&pool, "p1", "bot:b1", None, &LedgerSplitInput { title: "交件".into(), owner_bot_id: Some("b1".into()), wait_for: Some("等 CI".into()), ..Default::default() }).await.unwrap();
-        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("改好了".into()), next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None }).await.unwrap();
+        let answered = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: Some("answered".into()), deliverable: Some("改好了".into()), next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         let note = "使用者不確定是否完成：請複查完成度並附驗證證據（commit、測試、截圖或實測結果）後再交件";
         let now = db::now();
         // 「不知道」：回到進行中、換成複查的下一步、清掉等待條件、到期時間設為現在（下一輪巡檢就會提醒）。
-        let again = patch_item_cas(&pool, "p1", &item.id, answered.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: Some(note.into()), wait_for: Some(String::new()), due_at: Some(now.clone()), owner_bot_id: None, close_reason: None }).await.unwrap();
+        let again = patch_item_cas(&pool, "p1", &item.id, answered.version, "user", LedgerPatchOp::Update { title: None, status: Some("following".into()), deliverable: None, next_step: Some(note.into()), wait_for: Some(String::new()), due_at: Some(now.clone()), owner_bot_id: None, close_reason: None, deploy_sha: None }).await.unwrap();
         assert_eq!((again.status.as_str(), again.next_step.as_str(), again.wait_for.clone()), ("following", note, None));
         let reminders = due_reminders(&pool, chrono::Utc::now() + chrono::Duration::minutes(1)).await.unwrap();
         let r = reminders.iter().find(|r| r.item_id == item.id).expect("a not-sure item is reminded");
         assert_eq!((r.stage, r.next_step.as_str()), ("due", note));
+    }
+
+    #[test]
+    fn deploy_sha_is_hex_of_seven_to_forty_and_empty_clears() {
+        assert_eq!(normalize_deploy_sha("ABCDEF1").unwrap().as_deref(), Some("abcdef1"));
+        assert_eq!(normalize_deploy_sha(&"a".repeat(40)).unwrap().as_deref(), Some("a".repeat(40).as_str()));
+        assert_eq!(normalize_deploy_sha("  ").unwrap(), None);
+        assert!(normalize_deploy_sha("abc12").is_err(), "too short");
+        assert!(normalize_deploy_sha(&"a".repeat(41)).is_err(), "too long");
+        assert!(normalize_deploy_sha("ghijklm").is_err(), "not hex");
+    }
+
+    #[test]
+    fn deliverable_shas_take_only_hex_tokens_of_seven_to_forty() {
+        assert_eq!(deliverable_shas("已推 3f352a446，見 PR #12 與 ABCDEF1。"), vec!["3f352a446".to_string(), "abcdef1".to_string()]);
+        assert!(deliverable_shas("改好了 CI 腳本 2026 abc").is_empty());
+        assert_eq!(deliverable_shas("3f352a446 3f352a446"), vec!["3f352a446".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn patch_sets_and_clears_deploy_sha_and_rejects_bad_values() {
+        let pool = pool().await;
+        let item = ingest_user_message(&pool, "p1", "b1", "m1", None, "x").await.unwrap().unwrap();
+        let set = patch_item_cas(&pool, "p1", &item.id, item.version, "bot:b1", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: Some("ABCDEF1".into()) }).await.unwrap();
+        assert_eq!(set.deploy_sha.as_deref(), Some("abcdef1"));
+        let bad = patch_item_cas(&pool, "p1", &item.id, set.version, "bot:b1", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: Some("zz".into()) }).await;
+        assert!(bad.is_err());
+        let cleared = patch_item_cas(&pool, "p1", &item.id, set.version, "bot:b1", LedgerPatchOp::Update { title: None, status: None, deliverable: None, next_step: None, wait_for: None, due_at: None, owner_bot_id: None, close_reason: None, deploy_sha: Some(String::new()) }).await.unwrap();
+        assert_eq!(cleared.deploy_sha, None);
     }
 }

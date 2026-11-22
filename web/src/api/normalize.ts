@@ -615,6 +615,8 @@ export function toLedgerItem(v: unknown): LedgerItem | null {
     due_at: optStr(pick(v, 'due_at')),
     merged_into_id: optStr(pick(v, 'merged_into_id')),
     close_reason: optStr(pick(v, 'close_reason')),
+    deploy_sha: optStr(pick(v, 'deploy_sha')),
+    deploy_state: pick(v, 'deploy_state') === 'pending' || pick(v, 'deploy_state') === 'live' ? (pick(v, 'deploy_state') as 'pending' | 'live') : null,
     version: num(pick(v, 'version')),
     updated_at: str(pick(v, 'updated_at')),
   }

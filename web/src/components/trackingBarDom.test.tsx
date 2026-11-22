@@ -149,3 +149,15 @@ test('待驗收（answered）排最前面，並有完成／不知道按鈕；摘
   assert.match(patch.path, /\/ledger\/lA$/)
   assert.deepEqual(patch.body, { op: 'update', expected_version: 1, status: 'done' })
 })
+
+test('待驗收依部署狀態分兩種標籤：pending 等待部署、live 已部署待驗收', async () => {
+  setup([
+    item({ id: 'lP', code: 'L8', code_no: 8, status: 'answered', title: '已推未部署', deliverable: 'abc1234', deploy_state: 'pending' }),
+    item({ id: 'lL', code: 'L7', code_no: 7, status: 'answered', title: '已部署', deliverable: 'def5678', deploy_state: 'live' }),
+  ])
+  const el = await mount(<TrackingBar botId="b1" onJump={() => true} />)
+  await click(el.querySelector('.track-summary')!)
+  const chips = [...el.querySelectorAll<HTMLElement>('.ledger-chip')].map((c) => c.textContent ?? '')
+  assert.ok(chips.includes('等待部署'), JSON.stringify(chips))
+  assert.ok(chips.includes('已部署待驗收'), JSON.stringify(chips))
+})

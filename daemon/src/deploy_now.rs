@@ -128,7 +128,7 @@ pub fn repo_dir(app: &impl crate::capabilities::ExePath) -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("project/agents-manager")
 }
 
-async fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+pub(crate) async fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C").arg(repo).args(args).kill_on_drop(true);
     cmd.env("GIT_TERMINAL_PROMPT", "0");

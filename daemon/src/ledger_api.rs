@@ -70,6 +70,7 @@ pub(crate) struct PatchIn {
     pub due_at: Option<String>,
     pub merged_into_id: Option<String>,
     pub close_reason: Option<String>,
+    pub deploy_sha: Option<String>,
 }
 
 const MAX_TITLE_CHARS: usize = 200;
@@ -132,6 +133,13 @@ fn out(item: &LedgerItem) -> Value {
     let mut v = serde_json::to_value(item).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut v {
         map.insert("code".into(), json!(format!("L{}", item.code_no)));
+    }
+    v
+}
+
+fn with_deploy_state(mut v: Value, state: Option<&'static str>) -> Value {
+    if let (Value::Object(map), Some(s)) = (&mut v, state) {
+        map.insert("deploy_state".into(), json!(s));
     }
     v
 }
@@ -199,7 +207,7 @@ pub(crate) async fn list(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     caller_in_project(&app, &principal, &project_id).await?;
-    live_project(&app, &project_id).await?;
+    let project = live_project(&app, &project_id).await?;
     let all: Vec<LedgerItem> = sqlx::query_as("SELECT * FROM ledger_items WHERE project_id = ? ORDER BY code_no").bind(&project_id).fetch_all(&app.db).await.map_err(up)?;
 
     let filter_status: Option<Vec<String>> = match opt(q.status) {
@@ -237,8 +245,13 @@ pub(crate) async fn list(
             *counts.entry("orphaned").or_default() += 1;
         }
     }
+    let mut rendered = Vec::with_capacity(items.len());
+    for i in &items {
+        let state = crate::ledger_deploy::state_for_app(&app, &project.path, i).await;
+        rendered.push(with_deploy_state(out(i), state));
+    }
     Ok(Json(json!({
-        "items": items.iter().map(|i| out(i)).collect::<Vec<_>>(),
+        "items": rendered,
         "counts": counts,
     })))
 }
@@ -293,7 +306,7 @@ pub(crate) async fn patch(
     Extension(principal): Extension<RequestPrincipal>,
     Json(body): Json<PatchIn>,
 ) -> Result<Json<Value>, LcError> {
-    live_project(&app, &project_id).await?;
+    let project = live_project(&app, &project_id).await?;
     let actor = require_writer(&app, &principal, &project_id).await?;
     let caller_bot = match &principal {
         RequestPrincipal::Bot(id) => Some(id.clone()),
@@ -310,6 +323,7 @@ pub(crate) async fn patch(
             due_at: opt(body.due_at.clone()),
             owner_bot_id: opt(body.owner_bot_id.clone()),
             close_reason: opt(body.close_reason.clone()),
+            deploy_sha: body.deploy_sha.clone(),
         },
         "claim" => {
             let owner = opt(body.owner_bot_id.clone()).or(caller_bot).ok_or_else(|| bad("owner_bot_id", "required for claim"))?;
@@ -322,7 +336,8 @@ pub(crate) async fn patch(
     };
     let item = ledger::patch_item_cas(&app.db, &project_id, &item_ref, body.expected_version, &actor, op).await.map_err(ledger_err)?;
     notify(&app, &project_id, item.source_message_id.as_deref(), std::slice::from_ref(&item.id)).await;
-    Ok(Json(out(&item)))
+    let state = crate::ledger_deploy::state_for_app(&app, &project.path, &item).await;
+    Ok(Json(with_deploy_state(out(&item), state)))
 }
 
 /// 批次把承諾項附在訊息上：每則 `messages[i]` 的 `ledger_items`（依 `ordinal`）。沒有項目的訊息不加這個欄位。

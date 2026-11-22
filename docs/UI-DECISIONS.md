@@ -1851,3 +1851,4 @@ bot 其實還在正常回合（codex 7d 寫 0、codex-sol 還在回）。
   - `autoTranslateDom.test.tsx`：自動完成純淡入無旋轉、選取文字與往上捲動時保留原文並顯示「譯文已就緒」、點擊後切換且偏好不被竄改。
   - `useScrollTailAnchorDom.test.tsx`：手動切換展開高度變化時，未貼底標頭錨定偏差 ≤ 2px，原本貼底仍保持貼底。
 
+- **待驗收分兩種（2026-11-22）**：AG Man 自己的專案，`answered` 且有部署 sha 時，還沒上線顯示「等待部署」，上線後顯示「已部署待驗收」（`deploy_state`，見 API PATCH 列）；其他專案與沒有 sha 的仍是「待驗收」。兩個標籤都仍是 `answered`，「完成」鈕兩種都可按。
