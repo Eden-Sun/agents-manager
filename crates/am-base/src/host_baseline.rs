@@ -138,7 +138,6 @@ pub fn render_baseline_sh(m: &manifest::Manifest) -> String {
                 format!("{check}:{}", k.key)
             })),
         )
-        .replace("__AM_GROK_FILES__", &sh_words(names(&m.grok_files)))
         .replace("__AM_HERDR_FILES__", &sh_words(names(&m.herdr_files)))
 }
 
@@ -245,9 +244,6 @@ for bl_k in __AM_CODEX_KEYS__; do
     *) continue ;;
   esac
   printf 'AM_BL codex-key %s %s\n' "${bl_k#*:}" "$bl_v"
-done
-for f in __AM_GROK_FILES__; do
-  printf 'AM_BL grok-file %s %s\n' "$f" "$(bl_has "${GROK_HOME:-$HOME/.grok}/$f")"
 done
 for f in __AM_HERDR_FILES__; do
   printf 'AM_BL herdr-file %s %s\n' "$f" "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/$f")"
@@ -435,11 +431,10 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                     ));
                 }
             }
-            "grok-file" | "herdr-file" if f.len() >= 4 => {
+            "herdr-file" if f.len() >= 4 => {
                 if !present(f.get(3)) {
-                    let who = f[1].trim_end_matches("-file");
-                    let table = if who == "grok" { &m.grok_files } else { &m.herdr_files };
-                    issues.push(issue(format!("{who}.{}", f[2]), severity_of(table, f[2]), format!("{who}：缺 {}", f[2])));
+                    let table = &m.herdr_files;
+                    issues.push(issue(format!("herdr.{}", f[2]), severity_of(table, f[2]), format!("herdr：缺 {}", f[2])));
                 }
             }
             "gitconfig-token" if f.len() >= 3

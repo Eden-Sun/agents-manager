@@ -28,7 +28,6 @@ AM_BL claude-key default permissions 1
 AM_BL codex-file config.toml 1
 AM_BL codex-file hooks.json 1
 AM_BL codex-key approval_policy 1
-AM_BL grok-file config.toml 1
 AM_BL herdr-file config.toml 1
 AM_BL gitconfig-token 0
 AM_BL end
@@ -148,12 +147,11 @@ fn codex_gaps_and_a_token_in_gitconfig_are_warnings() {
     let out = GOOD
         .replace("codex-key approval_policy 1", "codex-key approval_policy 0")
         .replace("codex-file hooks.json 1", "codex-file hooks.json 0")
-        .replace("grok-file config.toml 1", "grok-file config.toml 0")
         .replace("herdr-file config.toml 1", "herdr-file config.toml 0")
         .replace("gitconfig-token 0", "gitconfig-token 1");
     assert_eq!(
         ids(&out),
-        vec!["codex.hooks.json", "codex.config.toml:approval_policy", "grok.config.toml", "herdr.config.toml", "gitconfig.token"]
+        vec!["codex.hooks.json", "codex.config.toml:approval_policy", "herdr.config.toml", "gitconfig.token"]
     );
     for id in ids(&out) {
         assert_eq!(sev(&out, &id), WARN, "{id}");
@@ -552,6 +550,15 @@ fn report(issues: Option<Vec<BaselineIssue>>) -> BaselineReport {
 
 fn bi(id: &str, severity: &'static str) -> BaselineIssue {
     BaselineIssue { id: id.into(), severity, message: format!("{id} message"), note: None }
+}
+
+#[test]
+fn a_recheck_of_the_same_difference_keeps_its_key() {
+    let mut first = report(Some(vec![bi("tool.rtk", CRITICAL)]));
+    first.checked_at = "2026-10-25T06:00:00Z".into();
+    let mut later = report(Some(vec![bi("tool.rtk", CRITICAL)]));
+    later.checked_at = "2026-10-26T06:00:00Z".into();
+    assert_eq!(alert_for("ubuntu", &first).unwrap().0, alert_for("ubuntu", &later).unwrap().0, "a re-check is not a new alert");
 }
 
 #[test]

@@ -119,11 +119,6 @@ check = "true"
 severity = "warn"
 value = true
 
-# grok（`$GROK_HOME`，預設 `~/.grok`）。
-[[grok.files]]
-path = "config.toml"
-severity = "warn"
-
 # herdr（`$XDG_CONFIG_HOME/herdr`，預設 `~/.config/herdr`）。
 [[herdr.files]]
 path = "config.toml"

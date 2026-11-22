@@ -109,7 +109,7 @@ fn action_for(m: &Manifest, values: &Values, ids: &std::collections::HashSet<&st
             None => manual(id, sev, target, Some(key.into()), NO_VALUE),
         });
     }
-    for (cli, files) in [("codex", &m.codex_files), ("grok", &m.grok_files), ("herdr", &m.herdr_files)] {
+    for (cli, files) in [("codex", &m.codex_files), ("herdr", &m.herdr_files)] {
         if let Some(file) = id.strip_prefix(cli).and_then(|r| r.strip_prefix('.')) {
             let reason = if files.iter().any(|f| f.name == file) { NO_TEMPLATE } else { UNKNOWN };
             return Some(manual(id, sev, format!("{cli}/{file}"), None, reason));
@@ -182,7 +182,6 @@ mod tests {
             issue("codex.config.toml:features.hooks", WARN),
             issue("codex.config.toml:approval_policy", WARN),
             issue("codex.hooks.json", WARN),
-            issue("grok.config.toml", WARN),
             issue("herdr.config.toml", WARN),
             issue("gitconfig.token", WARN),
             issue("something.new", WARN),
@@ -200,7 +199,6 @@ mod tests {
             ("claude.default.plugin:imessage", NO_VALUE, "claude:default/settings.json"),
             ("codex.config.toml:approval_policy", NO_VALUE, "codex/config.toml"),
             ("codex.hooks.json", NO_TEMPLATE, "codex/hooks.json"),
-            ("grok.config.toml", NO_TEMPLATE, "grok/config.toml"),
             ("herdr.config.toml", NO_TEMPLATE, "herdr/config.toml"),
             ("gitconfig.token", SECRET, "git/.gitconfig"),
             ("something.new", UNKNOWN, ""),

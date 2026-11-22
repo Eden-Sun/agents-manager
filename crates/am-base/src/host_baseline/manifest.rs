@@ -57,7 +57,6 @@ pub struct Manifest {
     pub mac_only_plugins: Vec<String>,
     pub codex_files: Vec<Item>,
     pub codex_keys: Vec<CodexKey>,
-    pub grok_files: Vec<Item>,
     pub herdr_files: Vec<Item>,
 }
 
@@ -71,8 +70,6 @@ struct Raw {
     claude: RawClaude,
     #[serde(default)]
     codex: RawCodex,
-    #[serde(default)]
-    grok: RawFiles,
     #[serde(default)]
     herdr: RawFiles,
 }
@@ -331,7 +328,6 @@ impl Manifest {
         if let Some(f) = claude_files.iter().find(|f| f.only_if_tool.as_ref().is_some_and(|t| !tools.iter().any(|x| &x.name == t))) {
             return Err(format!("claude.files: `{}` only_if_tool names a tool that is not in tools", f.name));
         }
-        let grok_files = files(raw.grok.files, "grok.files")?;
         let herdr_files = files(raw.herdr.files, "herdr.files")?;
         if !claude_keys.is_empty() {
             if !tools.iter().any(|t| t.name == "jq") {
@@ -344,7 +340,7 @@ impl Manifest {
         if !codex_keys.is_empty() && !codex_files.iter().any(|f| f.name == "config.toml") {
             return Err("codex.keys needs `config.toml` in codex.files".into());
         }
-        Ok((Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, grok_files, herdr_files }, values))
+        Ok((Manifest { tools, claude_files, claude_keys, mac_only_plugins, codex_files, codex_keys, herdr_files }, values))
     }
 }
 
@@ -396,7 +392,6 @@ mod tests {
             m.codex_keys.iter().map(|k| (k.key.as_str(), k.check, k.severity)).collect::<Vec<_>>(),
             vec![("approval_policy", CodexCheck::Present, w), ("features.hooks", CodexCheck::True, w)]
         );
-        assert_eq!(pairs(&m.grok_files), own(&[("config.toml", w)]));
         assert_eq!(pairs(&m.herdr_files), own(&[("config.toml", w)]));
     }
 
@@ -445,10 +440,10 @@ mod tests {
     #[test]
     fn paths_must_stay_relative_and_shell_safe() {
         for p in ["/Users/me/.claude/settings.json", "../x", "a/../b", "$HOME/x", "~/x", "a b", "a;rm", "", "a//b", "./x", "-rf"] {
-            let e = err(&format!("[[grok.files]]\npath = \"{p}\"\nseverity = \"warn\"\n"));
+            let e = err(&format!("[[herdr.files]]\npath = \"{p}\"\nseverity = \"warn\"\n"));
             assert!(e.contains("relative path"), "{p}: {e}");
         }
-        Manifest::parse(&format!("{MIN}[[grok.files]]\npath = \"sub/config.toml\"\nseverity = \"warn\"\n")).unwrap();
+        Manifest::parse(&format!("{MIN}[[herdr.files]]\npath = \"sub/config.toml\"\nseverity = \"warn\"\n")).unwrap();
     }
 
     #[test]
@@ -461,8 +456,8 @@ mod tests {
 
     #[test]
     fn severity_and_unknown_fields_are_checked() {
-        assert!(err("[[grok.files]]\npath = \"x\"\nseverity = \"fatal\"\n").contains("severity"));
-        assert!(err("[[grok.files]]\npath = \"x\"\nseverity = \"warn\"\ncontent = \"y\"\n").contains("unknown field"));
+        assert!(err("[[herdr.files]]\npath = \"x\"\nseverity = \"fatal\"\n").contains("severity"));
+        assert!(err("[[herdr.files]]\npath = \"x\"\nseverity = \"warn\"\ncontent = \"y\"\n").contains("unknown field"));
         assert!(Manifest::parse("version = 2\n").unwrap_err().contains("version"));
     }
 
@@ -543,7 +538,6 @@ mod tests {
             mac_only_plugins: vec![bad("PL")],
             codex_files: vec![item("XF")],
             codex_keys: vec![CodexKey { key: bad("XK"), check: CodexCheck::Present, severity: super::super::WARN }],
-            grok_files: vec![item("GF")],
             herdr_files: vec![item("HF")],
         };
         let script = super::super::render_baseline_sh(&m);
@@ -665,7 +659,6 @@ else
   printf 'AM_BL codex-key approval_policy 0\n'
 fi
 printf 'AM_BL codex-key features.hooks %s\n' "$(bl_features_hooks "$CX/config.toml")"
-printf 'AM_BL grok-file config.toml %s\n' "$(bl_has "${GROK_HOME:-$HOME/.grok}/config.toml")"
 printf 'AM_BL herdr-file config.toml %s\n' "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml")"
 if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://([^/@[:space:]]+:[^/@[:space:]]+|(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]+)@' "$HOME/.gitconfig" 2>/dev/null; then
   printf 'AM_BL gitconfig-token 1\n'
@@ -769,7 +762,6 @@ printf 'AM_BL end\n'
             }
             if i % 3 == 0 {
                 write(&h.join(".codex/hooks.json"), "{}");
-                write(&h.join(".grok/config.toml"), "");
                 write(&h.join(".config/herdr/config.toml"), "");
                 write(&h.join(".gitconfig"), "[url \"https://ghp_abc123@github.com/\"]\n");
             }

@@ -27,7 +27,6 @@ test('warn 項有說明；沒列到的 id 回 null', () => {
   assert.match(baselineWarnWhy('codex.config.toml') ?? '', /內建預設/)
   assert.match(baselineWarnWhy('codex.hooks.json') ?? '', /hook/)
   assert.match(baselineWarnWhy('codex.config.toml:features.hooks') ?? '', /features.hooks/)
-  assert.match(baselineWarnWhy('grok.config.toml') ?? '', /Grok/)
   assert.match(baselineWarnWhy('herdr.config.toml') ?? '', /herdr/)
   assert.equal(baselineWarnWhy('claude.hooks'), null)
 })
