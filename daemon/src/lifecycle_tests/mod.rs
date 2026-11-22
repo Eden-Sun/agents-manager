@@ -37,6 +37,7 @@ mod resume_nudge;
 mod screen;
 mod setup;
 mod slash;
+mod stop;
 mod start_send;
 mod suggestion;
 mod tui_prompts;

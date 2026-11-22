@@ -127,7 +127,7 @@ mod tests {
             ("lifecycle/screen.rs", include_str!("screen.rs")),
             ("lifecycle/slash.rs", include_str!("slash.rs")),
             ("lifecycle/start.rs", include_str!("start.rs")),
-            ("lifecycle/stop.rs", include_str!("stop.rs")),
+            ("lifecycle/stop.rs", include_str!("../../../../daemon/src/lifecycle_tests/stop.rs")),
             ("lifecycle/stuck_turns.rs", include_str!("stuck_turns.rs")),
         ];
         for (name, src) in sources {
