@@ -1,22 +1,17 @@
 //! #193：終端側的安全網讀 DB 一時失敗，不能當成「回合沒了」就收手。故障用改表名／trigger 注入；poller 的輪詢只對
 //! 這幾個 run 調快（[`fast`]），每一輪讀 DB 之前的 `progress_poll` 注入點讓故障確定落在某一輪、下一輪恢復。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::lifecycle::race_point;
 use crate::testing as tt;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-fn intervals() -> &'static Mutex<HashMap<String, Duration>> {
-    static M: OnceLock<Mutex<HashMap<String, Duration>>> = OnceLock::new();
-    M.get_or_init(Default::default)
-}
-
-pub(super) fn interval(run_id: &str) -> Option<Duration> {
-    intervals().lock().ok()?.get(run_id).copied()
-}
-
 fn fast(run_id: &str) {
-    intervals().lock().unwrap().insert(run_id.to_string(), Duration::from_millis(10));
+    set_progress_interval(run_id, Duration::from_millis(10));
 }
 
 const PONG: &str = "❯ Reply with PONG\n⏺ PONG\n✻ Worked for 5s · done 1:07 AM\n──────\n❯\n";

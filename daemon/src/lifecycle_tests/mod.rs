@@ -24,6 +24,7 @@ pub mod judge;
 mod owed_delivery;
 mod pane_text;
 mod paste_check;
+mod poller;
 mod prelude;
 mod prompt;
 mod queue;

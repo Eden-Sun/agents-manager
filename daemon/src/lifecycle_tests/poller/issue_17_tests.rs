@@ -1,4 +1,8 @@
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::testing as tt;
 
 struct Fixture {
@@ -172,7 +176,7 @@ async fn issue_1483_delivery_retries_after_a_transient_session_read_error() {
     db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
     let (run, bot) = run_and_bot(&f).await;
     let client = client_for_run(&app, &run).await.unwrap();
-    super::super::delivery::fail_next_session_read_for_test(&f.run_id);
+    crate::lifecycle::delivery::fail_next_session_read_for_test(&f.run_id);
 
     assert_eq!(deliver_prompt(&app, &client, &run, &bot, "第一行\n第二行", false, false).await.unwrap(), Delivered::Submitted);
 }
@@ -545,7 +549,7 @@ async fn a_draft_identical_to_the_placeholder_is_left_alone() {
 /// #789：AGM inbox 也收到一則 `ops_alert`（帶 bot id、名稱、原因與處理方式），跟對話通知同樣去重。
 #[tokio::test]
 async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
-    let screen = include_str!("../fixtures/codex-0.159.3-security-setup-banner.ansi");
+    let screen = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.159.3-security-setup-banner.ansi");
     let f = fixture("codex", screen).await;
     let app = f.env.app.clone();
     db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
@@ -1432,7 +1436,7 @@ async fn an_echo_row_padded_to_the_pane_width_is_still_proven() {
 
 #[tokio::test]
 async fn a_long_codex_dispatch_retries_the_submit_key_without_retyping() {
-    use super::super::delivery::{execute_delivery, Plan, Submit};
+    use crate::lifecycle::delivery::{execute_delivery, Plan, Submit};
     for swallow in [false, true] {
         let f = fixture("codex", "").await;
         let rows: Vec<String> = (0..48).map(|i| if i == 17 { String::new() } else { format!("dispatch task step {i}") }).collect();
@@ -1549,12 +1553,12 @@ async fn issue_b_text_still_in_the_box_with_more_typed_after_it_is_not_left_for_
     let text = "Reply with PONG please";
 
     assert_eq!(deliver_prompt(&app, &client, &run, &bot, text, false, false).await.unwrap(), Delivered::Unproven("composer_changed_or_unreadable"));
-    super::super::late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
-    let armed = super::super::late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == f.turn_id);
+    crate::lifecycle::late_proof::arm(&app, &f.run_id, &f.bot_id, &f.turn_id);
+    let armed = crate::lifecycle::late_proof::armed_in_tests().lock().unwrap().iter().any(|(t, _)| *t == f.turn_id);
     assert!(!armed, "字還在框裡：不記 Pending");
 }
 
-use super::super::late_proof::{self, Look};
+use crate::lifecycle::late_proof::{self, Look};
 
 /// 打字送出、框空了、回音列看不到（`hide_echo`）：同步窗口判不出，照呼叫端把 turn 寫成 unknown，再認領背景這一筆。
 async fn unproven_and_armed(f: &Fixture, pane: crate::testing::LivePane, text: &str) -> late_proof::Pending {
@@ -1588,7 +1592,7 @@ async fn issue_1483_late_proof_retries_after_a_transient_session_read_error() {
     sqlx::query("UPDATE turns SET delivery='unknown', delivery_verified=0 WHERE id=?").bind(&f.turn_id).execute(&app.db).await.unwrap();
     let proof = Proof::Transcript { format: LogFormat::Claude, path, session_id: "sess-1".into() };
     let p = late_proof::Pending::new("claude", "pane-17", &proof, 0, 0, text, db::now());
-    super::super::delivery::fail_next_session_read_for_test(&f.run_id);
+    crate::lifecycle::delivery::fail_next_session_read_for_test(&f.run_id);
 
     assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Wait, "暫時讀取錯誤不能終止 watcher");
     assert_eq!(late_proof::look(&app, &f.bot_id, &f.turn_id, &p).await, Look::Submitted, "讀取恢復後補到證據");
@@ -1615,7 +1619,7 @@ async fn issue_1483_late_proof_retries_after_a_transient_transcript_read_error()
 /// #1493：daemon 重啟會清掉進程內 registry；持久化的 proof 基準仍能恢復 unknown turn，並以 CAS 補證而不重送。
 #[tokio::test]
 async fn issue_1493_startup_restores_a_persisted_late_proof_without_resending() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let f = fixture("claude", "").await;
     let path = with_transcript(&f, quiet()).await;
@@ -1665,7 +1669,7 @@ async fn issue_1493_startup_restores_a_persisted_late_proof_without_resending() 
 /// #1494：durable prompt 只保留到 TTL；run 已結束時下一輪 sweep 就清掉，不等到期。
 #[tokio::test]
 async fn issue_1494_sweeps_expired_unknown_write_and_gone_run_rows() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
     use std::time::Instant;
 
     let expired = fixture("claude", "").await;
@@ -1707,7 +1711,7 @@ async fn issue_1494_sweeps_expired_unknown_write_and_gone_run_rows() {
 /// 重送中的回合 delivery 仍是 `ok`（寫 unknown 的那一步還沒成功），欠帳期間的清掃不能把補證基準刪掉。
 #[tokio::test]
 async fn owed_resend_keeps_its_late_proof_through_a_sweep() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
     use std::time::Instant;
 
     let f = fixture("claude", "").await;
@@ -1739,7 +1743,7 @@ async fn owed_resend_keeps_its_late_proof_through_a_sweep() {
 /// 開機恢復只接回 session 仍相符的基準（SPEC：pane 與 session 都相符才恢復）；session 已換，就不為它開 watcher。
 #[tokio::test]
 async fn startup_does_not_restore_a_baseline_whose_session_changed() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let f = fixture("claude", "").await;
     let path = with_transcript(&f, quiet()).await;
@@ -1804,7 +1808,7 @@ fn late_proof_armed(turn_id: &str) -> bool {
 /// #1654：開機恢復的篩選（pane 不符、run 已停、回合已不在飛、delivery 已不是 unknown、已過 10 分鐘 TTL）各自都不接回；對照組仍接回。
 #[tokio::test]
 async fn issue_1654_startup_skips_durable_rows_that_no_longer_match() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let now = "2026-10-12T12:00:00.000Z";
     let cases: [(&str, &str, &str, usize); 6] = [
@@ -1836,7 +1840,7 @@ async fn issue_1654_startup_skips_durable_rows_that_no_longer_match() {
 /// #1654：durable 登錄最多 256 筆（剛好 256 不刪；第 257 筆進來才刪掉最舊的那一筆）。
 #[tokio::test]
 async fn issue_1654_durable_registry_keeps_256_rows_and_drops_only_the_oldest() {
-    use super::super::delivery::Proof;
+    use crate::lifecycle::delivery::Proof;
 
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();
@@ -1862,7 +1866,7 @@ async fn issue_1654_durable_registry_keeps_256_rows_and_drops_only_the_oldest() 
 /// #1654：欠帳補寫成 unknown 後，記憶體登錄已經沒有這一筆時，改從 durable 列接回同一回合的基準；寫回前不接。
 #[tokio::test]
 async fn issue_1654_owed_unknown_write_restores_its_baseline_from_durable_storage() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();
@@ -1884,7 +1888,7 @@ async fn issue_1654_owed_unknown_write_restores_its_baseline_from_durable_storag
 /// #1654：開機恢復時一筆清理失敗（DELETE 出錯）只影響它自己；同一批其餘的基準仍要接回。
 #[tokio::test]
 async fn issue_1654_one_failed_cleanup_does_not_stop_the_startup_restore() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();
@@ -1918,7 +1922,7 @@ async fn issue_1654_one_failed_cleanup_does_not_stop_the_startup_restore() {
 /// #1654：補證 watcher 要登記在關機屏障內：關機時要能取消，不能活到 60 次觀察跑完。
 #[tokio::test]
 async fn issue_1654_late_proof_watcher_is_tracked_and_stops_at_shutdown() {
-    use super::super::delivery::{LogFormat, Proof};
+    use crate::lifecycle::delivery::{LogFormat, Proof};
 
     let f = fixture("claude", "").await;
     let app = f.env.app.clone();

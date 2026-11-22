@@ -17,9 +17,13 @@ module_has_tests() {
     return 1
 }
 
-LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook "
+LIFECYCLE_MOVED=" agent_md agy_session agy_tests blocked_reason claude_resume_menu codex_history codex_model_migration daemon_notice dangerous_rm default_session events pane_text paste_check screen setup prompt delivery slash owed_delivery resume_nudge start_send fence busy_send send_now resume_gate composer_draft unsent_draft suggestion queue tui_prompts turn_error judge child_alerts handoff background_jobs claude_child_log grok_transcript grok_hook poller observed_status codex_session_refresh "
 emit_lifecycle_moved() {
-    case "$1" in crates/am-lifecycle/src/judge/*.rs) printf 'lifecycle_tests::judge::%s::\n' "$(basename "${1%.rs}")"; return 0 ;; esac
+    case "$1" in
+        crates/am-lifecycle/src/judge/*.rs) printf 'lifecycle_tests::judge::%s::\n' "$(basename "${1%.rs}")"; return 0 ;;
+        crates/am-lifecycle/src/lifecycle/observed_status.rs | crates/am-lifecycle/src/lifecycle/codex_session_refresh.rs)
+            printf 'lifecycle_tests::poller::%s::\n' "$(basename "${1%.rs}")"; return 0 ;;
+    esac
     local n
     n="$(basename "${1%.rs}")"
     case "$LIFECYCLE_MOVED" in *" $n "*) printf 'lifecycle_tests::%s::\n' "$n"; return 0 ;; esac
@@ -123,6 +127,10 @@ while IFS= read -r f; do
             mod="${mod%_tests.rs}"
             printf '%s::tests::\n' "${mod//\//::}"
             emit_lifecycle_moved "$f"
+            ;;
+        crates/am-lifecycle/src/lifecycle/poller_tests/*.rs)
+            mod="${f##*/}"
+            printf 'lifecycle_tests::poller::%s::\n' "${mod%.rs}"
             ;;
         crates/am-lifecycle/src/lifecycle/*_tests/*.rs)
             mod="${f##*/}"

@@ -1,10 +1,14 @@
 //! #207：codex 0.155.1 真畫面（見 `screen.rs` 的 `codex_0155_screen_tests`）。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::testing as tt;
 
-const WORKING: &str = include_str!("../fixtures/codex-0.155-working.txt");
-const WORKING_SUMMARY: &str = include_str!("../fixtures/codex-0.155-working-summary.txt");
-const FINISHED: &str = include_str!("../fixtures/codex-0.155-finished.txt");
+const WORKING: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-working.txt");
+const WORKING_SUMMARY: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-working-summary.txt");
+const FINISHED: &str = include_str!("../../../../crates/am-lifecycle/src/lifecycle/fixtures/codex-0.155-finished.txt");
 
 async fn codex_turn(screen: &str, prompt: &str) -> (tt::Env, String, String) {
     let env = tt::env().await;

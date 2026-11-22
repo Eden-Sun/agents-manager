@@ -1,6 +1,10 @@
 //! 對話 for a hookless child run (`managed_by='child'`): scraped off a mock herdr pane via
 //! `capture_hookless_turn_locked`.
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::testing as tt;
 
 /// A finished claude exchange as `recent_unwrapped` renders it.

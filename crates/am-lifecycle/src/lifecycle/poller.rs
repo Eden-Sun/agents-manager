@@ -8,6 +8,10 @@
 use crate::state::App;
 use super::*;
 
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "observed_status.rs"]
+pub mod observed_status;
+#[cfg(not(any(test, feature = "test-hooks")))]
 #[path = "observed_status.rs"]
 mod observed_status;
 
@@ -35,6 +39,10 @@ pub async fn reblock_if_prompt(app: &impl LcHost, run: &db::Run) -> anyhow::Resu
     observed_status::reblock_if_prompt(app, run).await
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
+#[path = "codex_session_refresh.rs"]
+pub mod codex_session_refresh;
+#[cfg(not(any(test, feature = "test-hooks")))]
 #[path = "codex_session_refresh.rs"]
 mod codex_session_refresh;
 
@@ -97,7 +105,18 @@ fn progress_interval(_run_id: &str) -> Duration {
 /// 測試可以把單一 run 的輪詢調快（[`progress_poll_tests`]），別的測試的 poller 照舊。
 #[cfg(all(test, feature = "daemon-test-harness"))]
 fn progress_interval(run_id: &str) -> Duration {
-    progress_poll_tests::interval(run_id).unwrap_or(PROGRESS_INTERVAL)
+    progress_interval_override(run_id).unwrap_or(PROGRESS_INTERVAL)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn progress_interval_overrides() -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Duration>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn progress_interval_override(run_id: &str) -> Option<Duration> {
+    progress_interval_overrides().lock().ok()?.get(run_id).copied()
 }
 
 /// 這一輪還是不是這一回合的 poller：讀到了、確定不是（回合收掉或換了一筆、run 或 bot 沒了）回 `Ok(None)`；
@@ -718,7 +737,7 @@ pub fn live_alert(kind: &str, text: &str) -> Option<String> {
     Some(cut)
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/nbsp_composer_tests.rs"]
 mod nbsp_composer_tests;
 
@@ -845,7 +864,7 @@ fn folded_codex_chars(box_text: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/folded_paste_tests.rs"]
 pub(crate) mod folded_paste_tests;
 
@@ -928,8 +947,10 @@ pub fn prompt_never_reached_screen(kind: &str, screen: &str, sent: &[String]) ->
 }
 
 /// What a resend attempt came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Resend {
+macro_rules! resend_type {
+    ($vis:vis) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        $vis enum Resend {
     /// Re-delivered.
     Sent,
     /// Nothing to do (guards, the prompt is on screen after all, budget spent, the send failed).
@@ -946,7 +967,13 @@ enum Resend {
     Unreadable,
     /// 一個字都沒打，但退款寫不進去；下輪先補退款再認領。
     RefundOwed,
+        }
+    };
 }
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+resend_type!(pub);
+#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+resend_type!(pub(self));
 
 fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
     tracing::warn!(turn = %turn_id, error = %e, "cannot tell whether a lost prompt should be re-delivered; not failing the turn on it");
@@ -954,8 +981,8 @@ fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
 }
 
 impl Resend {
-    #[cfg(all(test, feature = "daemon-test-harness"))]
-    fn sent(self) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn sent(self) -> bool {
         self == Resend::Sent
     }
 }
@@ -1163,26 +1190,30 @@ pub async fn arm_stall(app: &impl LcHost, run_id: &str, bot_id: &str, turn_id: &
 }
 
 /// stall watchdog 一輪一輪之間要記得的事。
-#[derive(Debug, Default)]
-struct Stall {
-    /// 送了什麼（[`turn_echo_texts`]）：讀到一次就留著，讀不到下一步再讀（#193）。
-    sent: Option<Vec<String>>,
-    nudged: bool,
-    resent: bool,
-    blocked: Option<&'static str>,
-    /// 重送打過字、`delivery='unknown'` 卻寫不進去（[`Resend::UnprovenOwed`]）：每一輪先補，補上之前不判失敗。
-    owed_unproven: Option<&'static str>,
-    owed_refund: bool,
-}
+macro_rules! stall_types {
+    ($vis:vis) => {
+        #[derive(Debug, Default)]
+        $vis struct Stall {
+            pub sent: Option<Vec<String>>,
+            pub nudged: bool,
+            pub resent: bool,
+            pub blocked: Option<&'static str>,
+            pub owed_unproven: Option<&'static str>,
+            pub owed_refund: bool,
+        }
 
-#[derive(Debug, PartialEq, Eq)]
-enum StallRound {
-    /// 計時器被換掉（新的回合、取消）：停手，什麼都不動。
-    Replaced,
-    /// 有一步讀寫失敗、判斷不了（#193、#1487）：不判失敗，隔 [`STALL_RECHECK`] 整輪再看。
-    Unsure,
-    Done,
+        #[derive(Debug, PartialEq, Eq)]
+        $vis enum StallRound {
+            Replaced,
+            Unsure,
+            Done,
+        }
+    };
 }
+#[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+stall_types!(pub);
+#[cfg(not(any(feature = "test-hooks", all(test, feature = "daemon-test-harness"))))]
+stall_types!(pub(self));
 
 fn stall_unsure(turn_id: &str, e: &anyhow::Error) -> bool {
     tracing::warn!(turn = %turn_id, error = %e, "stall watchdog cannot tell whether the prompt can still be saved; not failing the turn yet");
@@ -2142,54 +2173,27 @@ fn truncate_hookless_reply(reply: String) -> String {
     cut
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/abandon_tests.rs"]
-mod abandon_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/hookless_capture_tests.rs"]
-mod hookless_capture_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/issue_17_tests.rs"]
-mod issue_17_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/progress_poll_tests.rs"]
-mod progress_poll_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/codex_limit_fallback_tests.rs"]
-mod codex_limit_fallback_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/codex_0155_fallback_tests.rs"]
-mod codex_0155_fallback_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/menu_fallback_tests.rs"]
-mod menu_fallback_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/progress_rate_tests.rs"]
 mod progress_rate_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/lost_prompt_tests.rs"]
 mod lost_prompt_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/fallback_binding_tests.rs"]
-mod fallback_binding_tests;
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/agy_not_idle_tests.rs"]
-mod agy_not_idle_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/grok_limit_screen_tests.rs"]
 mod grok_limit_screen_tests;
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 #[path = "poller_tests/codex_limit_quote_tests.rs"]
 mod codex_limit_quote_tests;
 
@@ -2214,11 +2218,8 @@ pub trait FallbackTimers: Send + Sync {
     fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
 }
 
-#[cfg(all(test, feature = "daemon-test-harness"))]
-#[path = "poller_tests/reply_window_tests.rs"]
-mod reply_window_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "daemon-test-harness")))]
 mod no_reply_notice_tests {
     use super::*;
 
@@ -2240,4 +2241,86 @@ pub mod test_seams {
     pub async fn sync_idle_transcript_locked(app: &impl LcHost, run_id: &str) -> anyhow::Result<bool> { super::sync_idle_transcript_locked(app, run_id).await }
     use super::*;
     pub async fn try_fallback(app: &impl LcHost, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> { super::try_fallback(app, run_id, expected_turn).await }
+    pub fn is_no_reply_notice(text: &str) -> bool { super::is_no_reply_notice(text) }
+    pub const HOOKLESS_REPLY_MAX: usize = super::HOOKLESS_REPLY_MAX;
+    pub const STALL_SECS: u64 = super::STALL_SECS;
+    #[cfg(any(feature = "test-hooks", all(test, feature = "daemon-test-harness")))]
+    pub use super::{Resend, Stall, StallRound};
+    pub async fn arm_fallback_after(app: &impl LcHost, run_id: &str, bot_id: &str, delay: Duration) {
+        super::arm_fallback_after(app, run_id, bot_id, delay).await
+    }
+    pub async fn capture_hookless_turn_locked(app: &impl LcHost, run_id: &str, seed: bool) -> anyhow::Result<bool> {
+        super::capture_hookless_turn_locked(app, run_id, seed).await
+    }
+    pub async fn fail_stalled_turn(
+        app: &impl LcHost,
+        run_id: &str,
+        bot_id: &str,
+        turn_id: &str,
+        nudged: bool,
+        resent: bool,
+        resend_blocked: Option<&str>,
+    ) -> anyhow::Result<()> {
+        super::fail_stalled_turn(app, run_id, bot_id, turn_id, nudged, resent, resend_blocked).await
+    }
+    pub async fn nudge_unsent_prompt(
+        app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
+        run_id: &str,
+        turn_id: &str,
+        sent: &[String],
+    ) -> anyhow::Result<bool> {
+        super::nudge_unsent_prompt(app, run_id, turn_id, sent).await
+    }
+    pub async fn pane_columns(
+        app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
+        run: &db::Run,
+    ) -> Option<u32> {
+        super::pane_columns(app, run).await
+    }
+    pub async fn resend_lost_prompt(app: &impl LcHost, run_id: &str, turn_id: &str, sent: &[String]) -> super::Resend {
+        super::resend_lost_prompt(app, run_id, turn_id, sent).await
+    }
+    pub async fn resend_with_retry(
+        app: &impl LcHost,
+        run_id: &str,
+        bot_id: &str,
+        turn_id: &str,
+        sent: &[String],
+        generation: u64,
+        retry_after: Duration,
+    ) -> Option<(super::Resend, Option<&'static str>)> {
+        super::resend_with_retry(app, run_id, bot_id, turn_id, sent, generation, retry_after).await
+    }
+    pub async fn stall_round(
+        app: &impl LcHost,
+        run_id: &str,
+        bot_id: &str,
+        turn_id: &str,
+        generation: u64,
+        st: &mut super::Stall,
+        grace: Duration,
+    ) -> super::StallRound {
+        super::stall_round(app, run_id, bot_id, turn_id, generation, st, grace).await
+    }
+    pub fn truncate_hookless_reply(reply: String) -> String {
+        super::truncate_hookless_reply(reply)
+    }
+    pub fn set_progress_interval(run_id: &str, dur: Duration) {
+        super::progress_interval_overrides().lock().unwrap().insert(run_id.to_string(), dur);
+    }
+
+    pub const CODEX_FOLDED_PASTE_SCREEN: &str = r#"  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+
+› [Pasted Content 1752 chars]
+
+  GPT-6.1-Sol default · /tmp/tmp.7VTjHKz1x1
+                                                                                                                                                                                         ⚠ 1 warning · f2 to view"#;
+    pub fn codex_paste_text() -> String {
+        (1..=30).map(|i| format!("fixture line {i}: 這是摺疊貼上的測試第 {i} 行，用來確認 codex 會把長段貼上摺起來，不要送出\n")).collect()
+    }
 }

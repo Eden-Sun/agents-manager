@@ -1,6 +1,10 @@
 //! 2026-09-25 cf-ox-fork-fork：claude 2.1.281 停在「Session paused」選單、herdr 判 idle，備援把
 //! `2. Edit prompt and retry with …` 當成回覆存下來、回合收掉。停在等人選的選單上不能收。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::testing as tt;
 use crate::tui_prompts::screens::SESSION_PAUSED;
 

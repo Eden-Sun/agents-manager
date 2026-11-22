@@ -1,6 +1,10 @@
 //! #2146：agy 的 Stop 帶 `fullyIdle:false`、herdr 報 idle 時，5 秒終端備援不能把還在工作的回合收掉
 //! （2026-11-17 agi1：前景 `○ Running (wait-log.py …)`＋背景 task 還在跑，被收成 completed_fallback）。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::hookrecv::{process, HookBody};
 use crate::lifecycle::run_state::{a_turn, turn_status};
 use crate::testing as tt;

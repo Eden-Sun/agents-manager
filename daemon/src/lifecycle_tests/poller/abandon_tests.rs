@@ -1,4 +1,8 @@
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::testing as tt;
 
 async fn completed_turn(status: &str) -> (tt::Env, String, String) {

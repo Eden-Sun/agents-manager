@@ -1,6 +1,10 @@
 //! issue #216：§4.3 備援計時器綁定排定當下的回合。全部依序真的呼叫（`arm_fallback_after` 排計時、真的開新回合、
 //! 真的等計時到點走完 `try_fallback`），不靠 trigger 或注入點插窄窗——現況（計時到點抓「當下在飛的」）第一條就紅。
-use super::*;
+use crate::lifecycle_tests::prelude::*;
+use crate::lifecycle::*;
+use crate::lifecycle::poller::*;
+use crate::lifecycle::poller::test_seams::*;
+
 use crate::lifecycle::run_state::{a_turn, turn_status};
 use crate::testing as tt;
 
@@ -26,8 +30,8 @@ async fn fixture() -> F {
 
 /// Stop hook 收掉一回合（`hookrecv` 做的事：in_flight -> completed）。
 async fn stop_hook_closes(f: &F, turn: &str) {
-    let done = super::super::turn_controller::set_status(&f.env.app.db, turn, "in_flight", "completed", "test：Stop hook").await.unwrap();
-    assert_eq!(done, super::super::turn_controller::Outcome::Applied);
+    let done = crate::lifecycle::turn_controller::set_status(&f.env.app.db, turn, "in_flight", "completed", "test：Stop hook").await.unwrap();
+    assert_eq!(done, crate::lifecycle::turn_controller::Outcome::Applied);
 }
 
 async fn assistant_messages(f: &F) -> Vec<(Option<String>, String)> {

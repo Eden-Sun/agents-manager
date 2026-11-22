@@ -96,7 +96,7 @@ Accessing workspace:\n/home/user/project\n\n\
     /// 標籤是字元數：`codex_paste_text()` 含中文，1752 字、3552 位元組，寫成位元組數就對不上。
     #[test]
     fn a_codex_fold_of_our_text_still_counts_as_in_the_composer() {
-        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        use crate::lifecycle::poller::test_seams::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
         assert!(composer_still_holds("codex", CODEX_FOLDED_PASTE_SCREEN, &codex_paste_text()), "多位元組，字元數");
         let as_bytes = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "3552");
         assert!(!composer_still_holds("codex", &as_bytes, &codex_paste_text()), "3552 是位元組數，不是 codex 的數字");
@@ -106,7 +106,7 @@ Accessing workspace:\n/home/user/project\n\n\
     /// #1984 A：late proof 的「字還在框裡」也認得摺起來的我們那一則（與補按共用同一個 helper）。
     #[test]
     fn a_codex_fold_of_our_text_counts_as_still_in_the_box_for_the_late_proof_too() {
-        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        use crate::lifecycle::poller::test_seams::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
         assert!(text_still_in_box("codex", CODEX_FOLDED_PASTE_SCREEN, &codex_paste_text()));
         let other = CODEX_FOLDED_PASTE_SCREEN.replace("1752", "999");
         assert!(!text_still_in_box("codex", &other, &codex_paste_text()), "別人的摺疊、字數不同");
@@ -114,7 +114,7 @@ Accessing workspace:\n/home/user/project\n\n\
     /// #1915 ①：補按的上限照舊（`pressed_again` 只有一次）。補按之後標籤還在也不會再按，之後交給 unsent_draft。
     #[test]
     fn a_codex_fold_that_stays_after_the_enter_gets_exactly_one_more() {
-        use crate::lifecycle::poller::folded_paste_tests::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
+        use crate::lifecycle::poller::test_seams::{codex_paste_text, CODEX_FOLDED_PASTE_SCREEN};
         let text = codex_paste_text();
         let mut pressed_again = false;
         let mut presses = 0;
